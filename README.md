@@ -2,7 +2,6 @@
 
 `UeAgentInterface` 是一个 Unreal Engine Editor 插件，用于在编辑器内启动本地自动化服务，让外部工具可以通过结构化命令驱动 UE 资产制作、检查和调试。
 
-本仓库是 `GptProjectTest` 项目中的独立插件仓库，外层项目通过 submodule/gitlink 引用它。
 
 ## 代码来源说明
 
