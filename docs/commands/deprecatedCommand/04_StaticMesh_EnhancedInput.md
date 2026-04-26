@@ -1,0 +1,19 @@
+# 废弃指令：StaticMesh / EnhancedInput
+
+> 本文件从 `../04_StaticMesh_EnhancedInput.md` 抽出，保留原分册章节结构。主分册只保留 JSON / 结构化 JSON 主流程、读取、导出/应用、编译和诊断命令。
+
+## StaticMesh
+
+| 指令 | 作用 | 关键参数 | 典型用法 |
+|---|---|---|---|
+| `static_mesh_set_property` | **Deprecated for authoring**：设置网格资产属性 | `asset_path`、`property_name`、`value_text` | 能由 `asset_apply_property_json` 表达时优先走 JSON |
+
+## EnhancedInput
+
+| 指令 | 作用 | 关键参数 | 典型用法 |
+|---|---|---|---|
+| `enhanced_input_set_action_property` | **Deprecated for authoring**：修改 `InputAction` 属性 | `asset_path`、`property_name`、`value_text` | 优先编辑单文件 JSON 后 `enhanced_input_apply_action_json` |
+| `enhanced_input_set_mapping_context_property` | **Deprecated for authoring**：修改 `MappingContext` 属性 | `asset_path`、`property_name`、`value_text` | 优先编辑单文件 JSON 后 apply |
+| `enhanced_input_add_mapping` | **Deprecated for authoring**：添加 `Action-Key` 映射 | `mapping_context_path`、`action_path`、`key`、`modifier_classes`、`trigger_classes` | 优先编辑 `mappings[]` 后 apply |
+| `enhanced_input_remove_mapping` | **Deprecated for authoring**：删除某条映射 | `mapping_context_path`、`action_path`、`key` | 优先编辑 `mappings[]` 后 apply |
+| `enhanced_input_clear_mappings` | **Deprecated for authoring**：清空全部映射 | `mapping_context_path` | 优先用 JSON 全量替换 |
