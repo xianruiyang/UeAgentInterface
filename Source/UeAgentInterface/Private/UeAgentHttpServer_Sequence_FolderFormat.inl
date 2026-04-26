@@ -1267,13 +1267,13 @@ namespace UeAgentSequenceFolderOps
 		double G = 255.0;
 		double B = 255.0;
 		double A = 255.0;
-		if (!ColorObj->TryGetNumberField(TEXT("r"), R)
-			|| !ColorObj->TryGetNumberField(TEXT("g"), G)
-			|| !ColorObj->TryGetNumberField(TEXT("b"), B))
+		if (!UeAgentJsonDiagnostics::TryReadNumberFieldByAliases(ColorObj, { TEXT("r"), TEXT("R"), TEXT("red"), TEXT("Red") }, R)
+			|| !UeAgentJsonDiagnostics::TryReadNumberFieldByAliases(ColorObj, { TEXT("g"), TEXT("G"), TEXT("green"), TEXT("Green") }, G)
+			|| !UeAgentJsonDiagnostics::TryReadNumberFieldByAliases(ColorObj, { TEXT("b"), TEXT("B"), TEXT("blue"), TEXT("Blue") }, B))
 		{
 			return false;
 		}
-		ColorObj->TryGetNumberField(TEXT("a"), A);
+		UeAgentJsonDiagnostics::TryReadNumberFieldByAliases(ColorObj, { TEXT("a"), TEXT("A"), TEXT("alpha"), TEXT("Alpha") }, A);
 		OutColor = FColor(
 			static_cast<uint8>(FMath::Clamp(FMath::RoundToInt(R), 0, 255)),
 			static_cast<uint8>(FMath::Clamp(FMath::RoundToInt(G), 0, 255)),

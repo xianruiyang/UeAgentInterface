@@ -150,12 +150,15 @@ NMS_FillArray/
 - UObject / UStruct 字段同时进入 `raw_properties`，保留 `property_name`、`cpp_type`、`value_text`、`property_flags`、`can_apply_generic`。
 - `raw_properties` 回写解析 `property_name` 时先做精确字段名 / authored name 匹配，再把 `bFoo` 与 `Foo` 作为布尔别名兜底，避免 `FixedBounds` 这类字段误写到 `bFixedBounds`。
 - `raw_properties` 和 `custom_hlsl` 回写会记录解析/读回异常：缺少 `property_name`、缺少 `value_text`、属性不存在、`ImportText` 失败、写后读回不同都会进入 `warnings`。warning 消息会包含请求值、读回值、`cpp_type` 和底层错误；`strict=true` 时会使 apply 失败。
+- Stage / Module / Module Input JSON 现在接入统一字段诊断：未知字段会返回 `json_unknown_field`，类型不匹配会返回 `json_field_type_mismatch`，必填字段缺失会返回 `json_missing_required_field`，数组元素不是 object 会返回 `json_array_item_type_mismatch`。这些 warning 会带完整 JSON path，例如 `stages/00_ParticleSpawnScript_default.json.modules[0].inputs[3].override_default_value`；`strict=true` 时会使 apply 失败。
 - User 参数回写按 `parameter_type -> type_path -> type_internal -> type` 解析，并支持 `NiagaraFloat` / `/Script/Niagara.NiagaraFloat` 等 UE 内部类型别名。
 - Stage apply 会重建 stage 基础图、按导出顺序恢复 module stack、恢复 module enabled 状态和 input default 值。
 - Stage module 顺序以 `module_index` 为准；apply 会按目标索引插入，export 会按 ParameterMap 链路回读执行顺序，避免节点坐标排序导致 `Collision` / `GenerateCollisionEvent` 等更新模块顺序漂移。
 - Module input default 回写会区分 FunctionCall 可见输入 pin 与隐藏 stack override input：可见枚举/静态输入直接写入 FunctionCall pin，隐藏输入才创建 aliased override pin。
 - Module input default 回写会按 Niagara 类型规范化 `override_default_value`：`Vector/Position` 写为 `(X=...,Y=...,Z=...)`，`LinearColor` 写为 `(R=...,G=...,B=...,A=...)`，`Vector2/Vector4/Quat` 写为对应结构字段；`NaN/Inf` 会作为 warning 记录并跳过该输入，避免 folder apply 后 UI 落成黑色或零向量。
 - Module input default 回写后会校验 `OverridePin.DefaultValue`。若 UE 接受了写入但存储文本没有落成预期 import text，会产生 `module_input_default_apply_verification_failed` warning；`strict=true` 时该 warning 会让 apply 失败。
+- Module input 若 `has_override=true` 但缺少或写错 `override_default_value`，会返回 `module_input_missing_override_default_value`；若 input 当前不在 Niagara Stack 的可见有效分支，会返回 `module_input_hidden_or_inactive_branch`，提示先设置控制该分支的 mode/static switch 后重新导出再写分支值。
+- 枚举型 Module Input 导出会附带 `enum_type`、`enum_value_name`、`enum_value_display_name`、`enum_value_int`、`enum_options[]`，避免只看到 `NewEnumerator3` 这类内部名而误判 UI 当前显示值。
 - Event Handler apply 会按 `script_usage_id` / `source_event_name` 匹配或创建 handler，并初始化可编译的基础 output stage。
 - Stage apply 会把 `SetVariables` / `UNiagaraNodeAssignment` 模块重建为目标 Emitter 本地 assignment 节点；不要把 System 内嵌 emitter 导出的私有 inline NiagaraScript 路径直接复用到 standalone Emitter，否则会形成跨 package 私有对象引用并导致保存失败。
 - Custom HLSL 会从 `UNiagaraNodeCustomHlsl` 的 reflected `CustomHlsl` 字段导出/回写。

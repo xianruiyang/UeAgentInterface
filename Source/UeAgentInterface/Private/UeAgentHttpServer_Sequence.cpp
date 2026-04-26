@@ -2,6 +2,8 @@
 
 #include "UeAgentHttpServer_Sequence.h"
 
+#include "UeAgentJsonDiagnostics.h"
+
 #include "Animation/AnimSequenceBase.h"
 #include "Animation/MovieScene2DTransformSection.h"
 #include "Animation/MovieScene2DTransformTrack.h"

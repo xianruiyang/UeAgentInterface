@@ -754,8 +754,9 @@
   - `property_name`
   - `value_text`
 - 返回包含 `property_results[]`。每个结果会记录 `requested_value_text`、`applied_value_text`、`property_import_status`、`property_import_verified`、`value_text_exact_match`、`value_text_changed_after_import`、`cpp_type`。
+- 如果 `properties[]` 条目有 JSON 结构问题，例如数组元素不是 object、字段拼写错误、`property_name/value_text` 缺失或类型不对，对应结果会带 `json_issues[]`，每项包含 `severity/code/path/message`。
 - 如果某项 `ImportText` 解析失败，命令失败，`property_results[]` 会保留已处理项和失败项，失败项的 `property_import_status=import_failed`，错误字符串会包含 `property_name` 和请求值。
-- 如果 `properties[]` 中某项不是 JSON object，命令失败，`property_results[]` 会包含 `property_import_status=invalid_property_entry`，避免坏条目被静默跳过。
+- 如果 `properties[]` 中某项不是 JSON object，命令失败，`property_results[]` 会包含 `property_import_status=invalid_property_entry` 和 `json_issues[]`，避免坏条目被静默跳过。
 - 当前会复用对象子属性路径解析，因此像 `CharacterMovement.*` 这类对象链属性也能沿同一套机制继续扩展到资产侧。
 - 这条命令适合做“导出 JSON -> 手工或脚本改 `value_text` -> 回写资产”的轻量结构化工作流，不等于完整 folder profile。
 

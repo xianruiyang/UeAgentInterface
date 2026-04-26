@@ -259,39 +259,17 @@ namespace UeAgentNiagaraFolderOps
 
 	static bool LoadJsonFile(const FString& FilePath, TSharedPtr<FJsonObject>& OutObj, FString& OutError)
 	{
-		FString JsonText;
-		if (!FFileHelper::LoadFileToString(JsonText, *FilePath))
-		{
-			OutError = FString::Printf(TEXT("json_file_not_found:%s"), *FilePath);
-			return false;
-		}
-
-		const TSharedRef<TJsonReader<TCHAR>> Reader = TJsonReaderFactory<TCHAR>::Create(JsonText);
-		if (!FJsonSerializer::Deserialize(Reader, OutObj) || !OutObj.IsValid())
-		{
-			OutError = FString::Printf(TEXT("json_parse_failed:%s"), *FilePath);
-			return false;
-		}
-		return true;
+		return UeAgentJsonDiagnostics::LoadJsonObjectFile(FilePath, OutObj, nullptr, OutError, false);
 	}
 
 	static bool LoadJsonFileOptional(const FString& FilePath, TSharedPtr<FJsonObject>& OutObj, FString& OutError)
 	{
-		if (!FPaths::FileExists(FilePath))
-		{
-			OutObj.Reset();
-			return true;
-		}
-		return LoadJsonFile(FilePath, OutObj, OutError);
+		return UeAgentJsonDiagnostics::LoadJsonObjectFile(FilePath, OutObj, nullptr, OutError, true);
 	}
 
 	static void AddWarning(TArray<TSharedPtr<FJsonValue>>& Warnings, const FString& Code, const FString& Path, const FString& Message)
 	{
-		TSharedPtr<FJsonObject> WarningObj = MakeShared<FJsonObject>();
-		WarningObj->SetStringField(TEXT("code"), Code);
-		WarningObj->SetStringField(TEXT("path"), Path);
-		WarningObj->SetStringField(TEXT("message"), Message);
-		Warnings.Add(MakeShared<FJsonValueObject>(WarningObj));
+		UeAgentJsonDiagnostics::AddIssue(Warnings, TEXT("warning"), Code, Path, Message);
 	}
 
 	static void AddCoverageArea(
@@ -923,11 +901,107 @@ namespace UeAgentNiagaraFolderOps
 		TArray<TSharedPtr<FJsonValue>> EventGeneratorsJson;
 		if (EmitterData)
 		{
-			auto AppendEventGenerators = [&EventGeneratorsJson, Emitter](const FString& OwnerScript, const TArray<FNiagaraEventGeneratorProperties>& EventGenerators)
+			auto ResolveOwnerUsage = [](const FString& OwnerScript, ENiagaraScriptUsage& OutUsage) -> bool
+			{
+				if (OwnerScript.Equals(TEXT("emitter_spawn"), ESearchCase::IgnoreCase))
+				{
+					OutUsage = ENiagaraScriptUsage::EmitterSpawnScript;
+					return true;
+				}
+				if (OwnerScript.Equals(TEXT("emitter_update"), ESearchCase::IgnoreCase))
+				{
+					OutUsage = ENiagaraScriptUsage::EmitterUpdateScript;
+					return true;
+				}
+				if (OwnerScript.Equals(TEXT("particle_spawn"), ESearchCase::IgnoreCase))
+				{
+					OutUsage = ENiagaraScriptUsage::ParticleSpawnScript;
+					return true;
+				}
+				if (OwnerScript.Equals(TEXT("particle_update"), ESearchCase::IgnoreCase))
+				{
+					OutUsage = ENiagaraScriptUsage::ParticleUpdateScript;
+					return true;
+				}
+				return false;
+			};
+
+			auto StageContainsModule = [EmitterData, &ResolveOwnerUsage](const FString& OwnerScript, const FString& RequiredModuleName) -> bool
+			{
+				if (!EmitterData || RequiredModuleName.IsEmpty())
+				{
+					return true;
+				}
+
+				ENiagaraScriptUsage RequiredUsage = ENiagaraScriptUsage::Function;
+				if (!ResolveOwnerUsage(OwnerScript, RequiredUsage))
+				{
+					return true;
+				}
+
+				UNiagaraScriptSource* ScriptSource = Cast<UNiagaraScriptSource>(EmitterData->GraphSource);
+				UNiagaraGraph* Graph = ScriptSource ? ScriptSource->NodeGraph : nullptr;
+				if (!Graph)
+				{
+					return true;
+				}
+
+				TArray<UNiagaraNodeOutput*> OutputNodes;
+				UeAgentNiagaraOps::GetOutputNodesFromGraph(*Graph, OutputNodes);
+				for (UNiagaraNodeOutput* OutputNode : OutputNodes)
+				{
+					if (!OutputNode || OutputNode->GetUsage() != RequiredUsage)
+					{
+						continue;
+					}
+
+					TArray<UNiagaraNodeFunctionCall*> ModuleNodes;
+					UeAgentNiagaraOps::GetStageModuleNodes(*OutputNode, ModuleNodes);
+					for (UNiagaraNodeFunctionCall* ModuleNode : ModuleNodes)
+					{
+						if (!ModuleNode)
+						{
+							continue;
+						}
+
+						const FString ModuleName = ModuleNode->GetFunctionName();
+						const FString ModuleScriptPath = UeAgentNiagaraOps::GetModuleScriptPath(*ModuleNode);
+						if (ModuleName.Equals(RequiredModuleName, ESearchCase::IgnoreCase) || ModuleScriptPath.Contains(RequiredModuleName, ESearchCase::IgnoreCase))
+						{
+							return true;
+						}
+					}
+					return false;
+				}
+
+				return true;
+			};
+
+			auto ShouldSkipOrphanBuiltInGenerator = [&StageContainsModule](const FString& OwnerScript, const FString& GeneratorId) -> bool
+			{
+				FString RequiredModuleName;
+				if (GeneratorId.Equals(TEXT("CollisionEvent"), ESearchCase::IgnoreCase))
+				{
+					RequiredModuleName = TEXT("GenerateCollisionEvent");
+				}
+				else if (GeneratorId.Equals(TEXT("DeathEvent"), ESearchCase::IgnoreCase))
+				{
+					RequiredModuleName = TEXT("GenerateDeathEvent");
+				}
+
+				return !RequiredModuleName.IsEmpty() && !StageContainsModule(OwnerScript, RequiredModuleName);
+			};
+
+			auto AppendEventGenerators = [&EventGeneratorsJson, Emitter, &ShouldSkipOrphanBuiltInGenerator](const FString& OwnerScript, const TArray<FNiagaraEventGeneratorProperties>& EventGenerators)
 			{
 				for (int32 GeneratorIndex = 0; GeneratorIndex < EventGenerators.Num(); ++GeneratorIndex)
 				{
 					FNiagaraEventGeneratorProperties& Generator = const_cast<FNiagaraEventGeneratorProperties&>(EventGenerators[GeneratorIndex]);
+					if (ShouldSkipOrphanBuiltInGenerator(OwnerScript, Generator.ID.ToString()))
+					{
+						continue;
+					}
+
 					TSharedPtr<FJsonObject> GeneratorObj = MakeShared<FJsonObject>();
 					GeneratorObj->SetStringField(TEXT("owner_script"), OwnerScript);
 					GeneratorObj->SetNumberField(TEXT("generator_index"), GeneratorIndex);
@@ -2374,25 +2448,102 @@ namespace UeAgentNiagaraFolderOps
 		return FNiagaraStackGraphUtilities::AddParameterModuleToStack(AssignmentVariables, OutputNode, TargetIndex, AssignmentDefaults);
 	}
 
-	static bool ApplyModuleInputDefault(UNiagaraGraph& Graph, UNiagaraNodeFunctionCall& ModuleNode, const TSharedPtr<FJsonObject>& InputObj, TArray<TSharedPtr<FJsonValue>>& Warnings)
+	static bool ApplyModuleInputDefault(UNiagaraGraph& Graph, UNiagaraNodeFunctionCall& ModuleNode, const TSharedPtr<FJsonObject>& InputObj, const FString& ContextPath, TArray<TSharedPtr<FJsonValue>>& Warnings)
 	{
+		UeAgentJsonDiagnostics::WarnUnknownFields(
+			InputObj,
+			ContextPath,
+			{
+				TEXT("input_name"),
+				TEXT("input_short_name"),
+				TEXT("input_type"),
+				TEXT("has_override"),
+				TEXT("has_links"),
+				TEXT("override_default_value"),
+				TEXT("autogenerated_default_value"),
+				TEXT("has_visible_pin"),
+				TEXT("enum_type"),
+				TEXT("enum_value_name"),
+				TEXT("enum_value_display_name"),
+				TEXT("enum_value_int"),
+				TEXT("override_enum_value_name"),
+				TEXT("override_enum_value_display_name"),
+				TEXT("override_enum_value_int"),
+				TEXT("autogenerated_enum_value_name"),
+				TEXT("autogenerated_enum_value_display_name"),
+				TEXT("autogenerated_enum_value_int"),
+				TEXT("enum_options")
+			},
+			Warnings);
+
 		bool bHasOverride = false;
-		InputObj->TryGetBoolField(TEXT("has_override"), bHasOverride);
-		if (!bHasOverride || !InputObj->HasField(TEXT("override_default_value")))
+		const bool bReadHasOverride = UeAgentJsonDiagnostics::ReadBoolField(
+			InputObj,
+			TEXT("has_override"),
+			ContextPath + TEXT(".has_override"),
+			bHasOverride,
+			Warnings,
+			false);
+
+		FString ValueText;
+		const bool bReadOverrideDefaultValue = UeAgentJsonDiagnostics::ReadStringField(
+			InputObj,
+			TEXT("override_default_value"),
+			ContextPath + TEXT(".override_default_value"),
+			ValueText,
+			Warnings,
+			false);
+
+		if (!bReadHasOverride && bReadOverrideDefaultValue && !ValueText.TrimStartAndEnd().IsEmpty())
+		{
+			bHasOverride = true;
+			AddWarning(
+				Warnings,
+				TEXT("module_input_has_override_missing_assumed_from_value"),
+				ContextPath,
+				TEXT("has_override is missing, but override_default_value is present and non-empty; applying it as an override."));
+		}
+
+		if (!bHasOverride)
 		{
 			return true;
 		}
 
+		if (!bReadOverrideDefaultValue)
+		{
+			AddWarning(
+				Warnings,
+				TEXT("module_input_missing_override_default_value"),
+				ContextPath + TEXT(".override_default_value"),
+				TEXT("has_override is true, but override_default_value is missing or not a string; the module input override was skipped."));
+			return true;
+		}
+
 		bool bHasLinks = false;
-		InputObj->TryGetBoolField(TEXT("has_links"), bHasLinks);
+		UeAgentJsonDiagnostics::ReadBoolField(
+			InputObj,
+			TEXT("has_links"),
+			ContextPath + TEXT(".has_links"),
+			bHasLinks,
+			Warnings,
+			false);
 		if (bHasLinks)
 		{
 			return true;
 		}
 
-		const FString InputName = GetStringFieldAny(InputObj, { TEXT("input_name"), TEXT("input_short_name") });
+		FString InputName;
+		if (!UeAgentJsonDiagnostics::ReadStringField(InputObj, TEXT("input_name"), ContextPath + TEXT(".input_name"), InputName, Warnings, false))
+		{
+			UeAgentJsonDiagnostics::ReadStringField(InputObj, TEXT("input_short_name"), ContextPath + TEXT(".input_short_name"), InputName, Warnings, false);
+		}
 		if (InputName.IsEmpty())
 		{
+			AddWarning(
+				Warnings,
+				TEXT("module_input_missing_input_name"),
+				ContextPath,
+				TEXT("Module input has override data but no input_name/input_short_name; the override was skipped."));
 			return true;
 		}
 
@@ -2403,8 +2554,35 @@ namespace UeAgentNiagaraFolderOps
 			UeAgentNiagaraOps::ResolveModuleInputByName(ModuleInputs, InputName, ResolvedInputName);
 		if (!ResolvedInput || !ResolvedInput->InputVariable.IsValid())
 		{
-			AddWarning(Warnings, TEXT("module_input_not_found"), InputName, TEXT("Module input listed in folder could not be resolved on the target module."));
+			AddWarning(Warnings, TEXT("module_input_not_found"), ContextPath + TEXT(".input_name"), FString::Printf(TEXT("Module input '%s' listed in folder could not be resolved on the target module."), *InputName));
 			return true;
+		}
+
+		bool bFolderSaidVisible = false;
+		const bool bReadHasVisiblePin = UeAgentJsonDiagnostics::ReadBoolField(
+			InputObj,
+			TEXT("has_visible_pin"),
+			ContextPath + TEXT(".has_visible_pin"),
+			bFolderSaidVisible,
+			Warnings,
+			false);
+		if (!ResolvedInput->VisiblePin)
+		{
+			AddWarning(
+				Warnings,
+				TEXT("module_input_hidden_or_inactive_branch"),
+				ContextPath,
+				FString::Printf(
+					TEXT("Module input '%s' is not visible in the active Niagara stack branch while applying. The override may be stored on a hidden/static-switch branch and ignored by the UI/effective module state; set the controlling mode input first, re-export, then apply the branch value."),
+					*ResolvedInputName));
+		}
+		else if (bReadHasVisiblePin && !bFolderSaidVisible)
+		{
+			AddWarning(
+				Warnings,
+				TEXT("module_input_visibility_changed_since_export"),
+				ContextPath,
+				FString::Printf(TEXT("Module input '%s' was exported as hidden but is currently visible; verify the controlling enum/static-switch value before trusting the imported default."), *ResolvedInputName));
 		}
 
 		const FNiagaraParameterHandle ModuleInputHandle(ResolvedInput->InputVariable.GetName());
@@ -2428,7 +2606,7 @@ namespace UeAgentNiagaraFolderOps
 				OverridePin,
 				OverridePinError) || !OverridePin)
 			{
-				AddWarning(Warnings, TEXT("module_input_override_unavailable"), InputName, OverridePinError);
+				AddWarning(Warnings, TEXT("module_input_override_unavailable"), ContextPath, FString::Printf(TEXT("%s: %s"), *ResolvedInputName, *OverridePinError));
 				return true;
 			}
 		}
@@ -2438,12 +2616,15 @@ namespace UeAgentNiagaraFolderOps
 			OverridePin->BreakAllPinLinks();
 		}
 
-		const FString ValueText = InputObj->GetStringField(TEXT("override_default_value"));
 		FString ValueTextForApply = ValueText;
 		FString NormalizeError;
 		if (!UeAgentNiagaraOps::NormalizeNiagaraValueTextForPinDefault(ResolvedInput->InputVariable.GetType(), ValueText, ValueTextForApply, NormalizeError))
 		{
-			AddWarning(Warnings, TEXT("module_input_invalid_value_text"), InputName, NormalizeError);
+			AddWarning(
+				Warnings,
+				TEXT("module_input_invalid_value_text"),
+				ContextPath + TEXT(".override_default_value"),
+				FString::Printf(TEXT("%s: %s; requested=%s"), *ResolvedInputName, *NormalizeError, *ValueText));
 			return true;
 		}
 		if (const UEdGraphSchema_Niagara* NiagaraSchema = GetDefault<UEdGraphSchema_Niagara>())
@@ -2462,14 +2643,29 @@ namespace UeAgentNiagaraFolderOps
 			AddWarning(
 				Warnings,
 				TEXT("module_input_default_apply_verification_failed"),
-				InputName,
+				ContextPath + TEXT(".override_default_value"),
 				FString::Printf(
-					TEXT("%s; requested=%s; applied=%s; stored=%s"),
+					TEXT("%s: %s; requested=%s; applied=%s; stored=%s"),
+					*ResolvedInputName,
 					*ApplyVerificationError,
 					*ValueText,
 					*ValueTextForApply,
 					*OverridePin->DefaultValue));
 			return true;
+		}
+
+		TArray<UeAgentNiagaraOps::FResolvedNiagaraModuleInput> ModuleInputsAfter;
+		UeAgentNiagaraOps::BuildResolvedModuleInputs(ModuleNode, ModuleInputsAfter);
+		FString ResolvedInputNameAfter;
+		const UeAgentNiagaraOps::FResolvedNiagaraModuleInput* ResolvedInputAfter =
+			UeAgentNiagaraOps::ResolveModuleInputByName(ModuleInputsAfter, ResolvedInputName, ResolvedInputNameAfter);
+		if (!ResolvedInputAfter || !ResolvedInputAfter->InputVariable.IsValid())
+		{
+			AddWarning(
+				Warnings,
+				TEXT("module_input_readback_missing_after_apply"),
+				ContextPath,
+				FString::Printf(TEXT("Module input '%s' could not be resolved after applying its override."), *ResolvedInputName));
 		}
 		return true;
 	}
@@ -2495,23 +2691,27 @@ namespace UeAgentNiagaraFolderOps
 		}
 
 		const TArray<TSharedPtr<FJsonValue>>* Stages = nullptr;
-		if (!TryGetArrayField(StagesIndexObj, TEXT("stages"), Stages))
+		if (!UeAgentJsonDiagnostics::ReadArrayField(StagesIndexObj, TEXT("stages"), TEXT("stages/index.json.stages"), Stages, Warnings, false))
 		{
 			return 0;
 		}
 
 		int32 Applied = 0;
+		int32 StageIndex = 0;
 		for (const TSharedPtr<FJsonValue>& StageIndexValue : *Stages)
 		{
-			const TSharedPtr<FJsonObject>* StageIndexObjPtr = nullptr;
-			if (!StageIndexValue.IsValid() || !StageIndexValue->TryGetObject(StageIndexObjPtr) || !StageIndexObjPtr || !StageIndexObjPtr->IsValid())
+			TSharedPtr<FJsonObject> StageIndexObj;
+			const FString StageIndexPath = FString::Printf(TEXT("stages/index.json.stages[%d]"), StageIndex);
+			++StageIndex;
+			if (!UeAgentJsonDiagnostics::ReadObjectFromValue(StageIndexValue, StageIndexPath, StageIndexObj, Warnings))
 			{
 				continue;
 			}
 
 			FString StageFile;
-			if (!(*StageIndexObjPtr)->TryGetStringField(TEXT("file"), StageFile) || StageFile.IsEmpty())
+			if (!UeAgentJsonDiagnostics::ReadStringField(StageIndexObj, TEXT("file"), StageIndexPath + TEXT(".file"), StageFile, Warnings, true) || StageFile.IsEmpty())
 			{
+				AddWarning(Warnings, TEXT("stage_index_missing_file"), StageIndexPath, TEXT("Stage index entry has no file; it was skipped."));
 				continue;
 			}
 
@@ -2520,6 +2720,36 @@ namespace UeAgentNiagaraFolderOps
 			{
 				return INDEX_NONE;
 			}
+			const FString StagePath = FString::Printf(TEXT("stages/%s"), *StageFile);
+			UeAgentJsonDiagnostics::WarnUnknownFields(
+				StageObj,
+				StagePath,
+				{
+					TEXT("stage_node_index"),
+					TEXT("stage_key"),
+					TEXT("stage_type"),
+					TEXT("script_usage"),
+					TEXT("script_usage_id"),
+					TEXT("node_guid"),
+					TEXT("node_class"),
+					TEXT("node_title"),
+					TEXT("node_pos_x"),
+					TEXT("node_pos_y"),
+					TEXT("is_output_node"),
+					TEXT("is_module_node"),
+					TEXT("module_name"),
+					TEXT("module_script_path"),
+					TEXT("module_kind"),
+					TEXT("module_has_enabled_state"),
+					TEXT("module_enabled"),
+					TEXT("input_count"),
+					TEXT("inputs"),
+					TEXT("modules"),
+					TEXT("module_count"),
+					TEXT("simulation_stage_raw_properties"),
+					TEXT("event_handler_raw_properties")
+				},
+				Warnings);
 
 			ENiagaraScriptUsage Usage = ENiagaraScriptUsage::Function;
 			FGuid UsageId;
@@ -2595,7 +2825,7 @@ namespace UeAgentNiagaraFolderOps
 			}
 
 			const TArray<TSharedPtr<FJsonValue>>* Modules = nullptr;
-			if (TryGetArrayField(StageObj, TEXT("modules"), Modules))
+			if (UeAgentJsonDiagnostics::ReadArrayField(StageObj, TEXT("modules"), StagePath + TEXT(".modules"), Modules, Warnings, false))
 			{
 				TArray<TSharedPtr<FJsonValue>> SortedModules = *Modules;
 				SortedModules.Sort([](const TSharedPtr<FJsonValue>& A, const TSharedPtr<FJsonValue>& B)
@@ -2616,15 +2846,34 @@ namespace UeAgentNiagaraFolderOps
 				});
 
 				int32 TargetModuleIndex = 0;
+				int32 SourceModuleIndex = 0;
 				for (const TSharedPtr<FJsonValue>& ModuleValue : SortedModules)
 				{
-					const TSharedPtr<FJsonObject>* ModuleObjPtr = nullptr;
-					if (!ModuleValue.IsValid() || !ModuleValue->TryGetObject(ModuleObjPtr) || !ModuleObjPtr || !ModuleObjPtr->IsValid())
+					TSharedPtr<FJsonObject> ModuleObj;
+					const FString ModulePath = FString::Printf(TEXT("stages/%s.modules[%d]"), *StageFile, SourceModuleIndex);
+					++SourceModuleIndex;
+					if (!UeAgentJsonDiagnostics::ReadObjectFromValue(ModuleValue, ModulePath, ModuleObj, Warnings))
 					{
 						continue;
 					}
 
-					const TSharedPtr<FJsonObject>& ModuleObj = *ModuleObjPtr;
+					UeAgentJsonDiagnostics::WarnUnknownFields(
+						ModuleObj,
+						ModulePath,
+						{
+							TEXT("module_index"),
+							TEXT("module_node_guid"),
+							TEXT("module_name"),
+							TEXT("module_script_path"),
+							TEXT("module_script_asset_path"),
+							TEXT("module_kind"),
+							TEXT("module_has_enabled_state"),
+							TEXT("module_enabled"),
+							TEXT("inputs"),
+							TEXT("input_count")
+						},
+						Warnings);
+
 					const FString ModuleScriptPath = GetStringFieldAny(ModuleObj, { TEXT("module_script_path"), TEXT("module_script_asset_path") });
 					UNiagaraNodeFunctionCall* AddedModule = nullptr;
 					if (IsAssignmentModuleFolderObject(ModuleObj))
@@ -2635,6 +2884,7 @@ namespace UeAgentNiagaraFolderOps
 					{
 						if (ModuleScriptPath.IsEmpty())
 						{
+							AddWarning(Warnings, TEXT("module_missing_script_path"), ModulePath, TEXT("Script module entry has no module_script_path/module_script_asset_path; it was skipped."));
 							continue;
 						}
 						if (IsPrivateInlineNiagaraScriptPath(ModuleScriptPath))
@@ -2672,14 +2922,17 @@ namespace UeAgentNiagaraFolderOps
 					}
 
 					const TArray<TSharedPtr<FJsonValue>>* Inputs = nullptr;
-					if (TryGetArrayField(ModuleObj, TEXT("inputs"), Inputs))
+					if (UeAgentJsonDiagnostics::ReadArrayField(ModuleObj, TEXT("inputs"), ModulePath + TEXT(".inputs"), Inputs, Warnings, false))
 					{
+						int32 InputIndex = 0;
 						for (const TSharedPtr<FJsonValue>& InputValue : *Inputs)
 						{
-							const TSharedPtr<FJsonObject>* InputObjPtr = nullptr;
-							if (InputValue.IsValid() && InputValue->TryGetObject(InputObjPtr) && InputObjPtr && InputObjPtr->IsValid())
+							TSharedPtr<FJsonObject> InputObj;
+							const FString InputPath = FString::Printf(TEXT("%s.inputs[%d]"), *ModulePath, InputIndex);
+							++InputIndex;
+							if (UeAgentJsonDiagnostics::ReadObjectFromValue(InputValue, InputPath, InputObj, Warnings))
 							{
-								ApplyModuleInputDefault(*Graph, *AddedModule, *InputObjPtr, Warnings);
+								ApplyModuleInputDefault(*Graph, *AddedModule, InputObj, InputPath, Warnings);
 							}
 						}
 					}

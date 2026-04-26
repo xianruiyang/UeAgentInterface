@@ -29,11 +29,13 @@
 
 | 指令 | 作用 | 关键参数 |
 |---|---|---|
-| `blueprint_add_variable` | **Deprecated for authoring**：新增变量定义 | `asset_path`、`variable_name`、`pin_category`、`pin_subcategory`、`pin_subcategory_object`、`container_type`、`default_value`、`instance_editable`、`compile_after_add`、`save_after_add` |
+| `blueprint_add_variable` | **Deprecated for authoring**：新增变量定义；保留给 bootstrap / smoke / 局部补修 | `asset_path`、`variable_name`、`pin_category`、`pin_subcategory`、`pin_subcategory_object`、`container_type`、`value_type`（map 必填）、`default_value`、`instance_editable`、`compile_after_add`、`save_after_add` |
 | `blueprint_remove_variable` | **Deprecated for authoring**：删除变量定义 | `asset_path`、`variable_name`、`compile_after_remove`、`save_after_remove` |
 | `blueprint_add_function_graph` | **Deprecated for authoring**：新增函数图 | `asset_path`、`function_name`、`compile_after_add`、`save_after_add` |
 | `blueprint_add_macro_graph` | **Deprecated for authoring**：新增宏图 | `asset_path`、`macro_name`、`compile_after_add`、`save_after_add` |
 | `blueprint_add_event_dispatcher` | **Deprecated for authoring**：新增事件分发器（委托） | `asset_path`、`dispatcher_name`、`compile_after_add`、`save_after_add` |
+
+> 变量类型解析与结构化 JSON 共用同一套实现；常用和中频结构体、枚举、对象/类别名见 `../02_Blueprint.md`。
 
 ## 类级操作
 

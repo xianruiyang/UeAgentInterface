@@ -186,6 +186,23 @@ namespace UeAgentWidgetBlueprintFolderOps
 		{
 			TypeObj->SetStringField(TEXT("container_type"), ContainerType);
 		}
+		if (PinType.ContainerType == EPinContainerType::Map && !PinType.PinValueType.TerminalCategory.IsNone())
+		{
+			TSharedPtr<FJsonObject> ValueTypeObj = MakeShared<FJsonObject>();
+			ValueTypeObj->SetStringField(TEXT("pin_category"), PinType.PinValueType.TerminalCategory.ToString());
+			if (!PinType.PinValueType.TerminalSubCategory.IsNone())
+			{
+				ValueTypeObj->SetStringField(TEXT("pin_subcategory"), PinType.PinValueType.TerminalSubCategory.ToString());
+			}
+			if (PinType.PinValueType.TerminalSubCategoryObject.IsValid())
+			{
+				if (const UObject* Obj = PinType.PinValueType.TerminalSubCategoryObject.Get())
+				{
+					ValueTypeObj->SetStringField(TEXT("pin_subcategory_object"), Obj->GetPathName());
+				}
+			}
+			TypeObj->SetObjectField(TEXT("value_type"), ValueTypeObj);
+		}
 		return TypeObj;
 	}
 

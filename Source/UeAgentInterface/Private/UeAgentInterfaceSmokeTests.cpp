@@ -1,6 +1,7 @@
 #if WITH_DEV_AUTOMATION_TESTS
 
 #include "UeAgentHttpServer.h"
+#include "UeAgentJsonDiagnostics.h"
 #include "UeAgentInterfaceSettings.h"
 
 #include "ActorFactories/ActorFactory.h"
@@ -322,6 +323,109 @@ bool FUeAgentInterfaceJsonParseVisibilitySmokeTest::RunTest(const FString& Param
 	TestTrue(TEXT("Invalid property JSON item response parses"), ParseJson(InvalidPropertyResult.Body, InvalidPropertyJson));
 	TestTrue(TEXT("Invalid property JSON item root ok=false"), InvalidPropertyJson.IsValid() && !InvalidPropertyJson->GetBoolField(TEXT("ok")));
 
+	return !HasAnyErrors();
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(
+	FUeAgentInterfaceJsonDiagnosticsHelperSmokeTest,
+	"GptProjectTest.UeAgentInterface.Smoke.JsonDiagnosticsHelpers",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::ProductFilter)
+
+bool FUeAgentInterfaceJsonDiagnosticsHelperSmokeTest::RunTest(const FString& Parameters)
+{
+	TSharedPtr<FJsonObject> Obj = MakeShared<FJsonObject>();
+	Obj->SetStringField(TEXT("has_ovverride"), TEXT("true"));
+	Obj->SetObjectField(TEXT("has_override"), MakeShared<FJsonObject>());
+	Obj->SetStringField(TEXT("display_name"), TEXT("Sample"));
+	TSharedPtr<FJsonObject> UpperVectorObj = MakeShared<FJsonObject>();
+	UpperVectorObj->SetNumberField(TEXT("X"), 1.0);
+	UpperVectorObj->SetNumberField(TEXT("Y"), 2.0);
+	UpperVectorObj->SetNumberField(TEXT("Z"), 3.0);
+	Obj->SetObjectField(TEXT("upper_vector"), UpperVectorObj);
+	TSharedPtr<FJsonObject> LowerRotatorObj = MakeShared<FJsonObject>();
+	LowerRotatorObj->SetNumberField(TEXT("pitch"), 10.0);
+	LowerRotatorObj->SetNumberField(TEXT("yaw"), 20.0);
+	LowerRotatorObj->SetNumberField(TEXT("roll"), 30.0);
+	Obj->SetObjectField(TEXT("lower_rotator"), LowerRotatorObj);
+	TArray<TSharedPtr<FJsonValue>> VectorArray;
+	VectorArray.Add(MakeShared<FJsonValueNumber>(4.0));
+	VectorArray.Add(MakeShared<FJsonValueNumber>(5.0));
+	VectorArray.Add(MakeShared<FJsonValueNumber>(6.0));
+	Obj->SetArrayField(TEXT("array_vector"), VectorArray);
+
+	TArray<TSharedPtr<FJsonValue>> Issues;
+	UeAgentJsonDiagnostics::WarnUnknownFields(
+		Obj,
+		TEXT("root"),
+		{ TEXT("has_override"), TEXT("display_name"), TEXT("items"), TEXT("upper_vector"), TEXT("lower_rotator"), TEXT("array_vector") },
+		Issues);
+
+	bool bHasOverride = false;
+	TestFalse(
+		TEXT("JSON diagnostics bool type mismatch returns false"),
+		UeAgentJsonDiagnostics::ReadBoolField(Obj, TEXT("has_override"), TEXT("root.has_override"), bHasOverride, Issues, true));
+
+	FString MissingValue;
+	TestFalse(
+		TEXT("JSON diagnostics missing required field returns false"),
+		UeAgentJsonDiagnostics::ReadStringField(Obj, TEXT("missing_required"), TEXT("root.missing_required"), MissingValue, Issues, true));
+
+	FVector ParsedUpperVector = FVector::ZeroVector;
+	TestTrue(
+		TEXT("JSON diagnostics reads UE-style uppercase vector"),
+		UeAgentJsonDiagnostics::ReadVectorField(Obj, TEXT("upper_vector"), TEXT("root.upper_vector"), ParsedUpperVector, Issues, true));
+	TestEqual(TEXT("Uppercase vector X"), ParsedUpperVector.X, 1.0);
+	TestEqual(TEXT("Uppercase vector Y"), ParsedUpperVector.Y, 2.0);
+	TestEqual(TEXT("Uppercase vector Z"), ParsedUpperVector.Z, 3.0);
+
+	FVector ParsedArrayVector = FVector::ZeroVector;
+	TestTrue(
+		TEXT("JSON diagnostics reads array vector"),
+		UeAgentJsonDiagnostics::ReadVectorField(Obj, TEXT("array_vector"), TEXT("root.array_vector"), ParsedArrayVector, Issues, true));
+	TestEqual(TEXT("Array vector X"), ParsedArrayVector.X, 4.0);
+	TestEqual(TEXT("Array vector Y"), ParsedArrayVector.Y, 5.0);
+	TestEqual(TEXT("Array vector Z"), ParsedArrayVector.Z, 6.0);
+
+	FRotator ParsedLowerRotator = FRotator::ZeroRotator;
+	TestTrue(
+		TEXT("JSON diagnostics reads lowercase rotator"),
+		UeAgentJsonDiagnostics::ReadRotatorField(Obj, TEXT("lower_rotator"), TEXT("root.lower_rotator"), ParsedLowerRotator, Issues, true));
+	TestEqual(TEXT("Lowercase rotator Pitch"), ParsedLowerRotator.Pitch, 10.0);
+	TestEqual(TEXT("Lowercase rotator Yaw"), ParsedLowerRotator.Yaw, 20.0);
+	TestEqual(TEXT("Lowercase rotator Roll"), ParsedLowerRotator.Roll, 30.0);
+
+	TSharedPtr<FJsonValue> BadArrayItem = MakeShared<FJsonValueString>(TEXT("not-an-object"));
+	TSharedPtr<FJsonObject> ParsedArrayObject;
+	TestFalse(
+		TEXT("JSON diagnostics array object type mismatch returns false"),
+		UeAgentJsonDiagnostics::ReadObjectFromValue(BadArrayItem, TEXT("root.items[0]"), ParsedArrayObject, Issues));
+
+	bool bFoundUnknownField = false;
+	bool bFoundTypeMismatch = false;
+	bool bFoundMissingRequired = false;
+	bool bFoundArrayItemMismatch = false;
+	for (const TSharedPtr<FJsonValue>& IssueValue : Issues)
+	{
+		const TSharedPtr<FJsonObject>* IssueObj = nullptr;
+		if (!IssueValue.IsValid() || !IssueValue->TryGetObject(IssueObj) || !IssueObj || !IssueObj->IsValid())
+		{
+			continue;
+		}
+
+		const FString Code = (*IssueObj)->GetStringField(TEXT("code"));
+		bFoundUnknownField |= Code == TEXT("json_unknown_field");
+		bFoundTypeMismatch |= Code == TEXT("json_field_type_mismatch");
+		bFoundMissingRequired |= Code == TEXT("json_missing_required_field");
+		bFoundArrayItemMismatch |= Code == TEXT("json_array_item_type_mismatch");
+		TestTrue(TEXT("JSON diagnostics issue has severity"), (*IssueObj)->HasField(TEXT("severity")));
+		TestTrue(TEXT("JSON diagnostics issue has path"), (*IssueObj)->HasField(TEXT("path")));
+		TestTrue(TEXT("JSON diagnostics issue has message"), (*IssueObj)->HasField(TEXT("message")));
+	}
+
+	TestTrue(TEXT("JSON diagnostics reports unknown fields"), bFoundUnknownField);
+	TestTrue(TEXT("JSON diagnostics reports type mismatch"), bFoundTypeMismatch);
+	TestTrue(TEXT("JSON diagnostics reports missing required fields"), bFoundMissingRequired);
+	TestTrue(TEXT("JSON diagnostics reports array item mismatch"), bFoundArrayItemMismatch);
 	return !HasAnyErrors();
 }
 
@@ -2785,6 +2889,55 @@ bool FUeAgentInterfaceBlueprintSmokeTest::RunTest(const FString& Parameters)
 		TestFalse(TEXT("Blueprint add_variable not saved"), (*AddVariableData)->GetBoolField(TEXT("saved")));
 	}
 
+	auto AddVariableByJsonTail = [this, &ServerScope, &BlueprintAssetPath](
+		const FString& RequestId,
+		const FString& InVariableName,
+		const FString& JsonTail) -> bool
+	{
+		const FString Body = MakeExecRequestBody(
+			RequestId,
+			TEXT("blueprint_add_variable"),
+			FString::Printf(
+				TEXT("{\"asset_path\":\"%s\",\"variable_name\":\"%s\",%s,\"compile_after_add\":false,\"save_after_add\":false}"),
+				*BlueprintAssetPath,
+				*InVariableName,
+				*JsonTail));
+		FHttpSmokeResult Result;
+		const bool bRequestOk = ExecuteHttpJsonRequest(TEXT("POST"), ServerScope.BaseUrl + TEXT("/api/exec"), ServerScope.Token, Body, Result);
+		TestTrue(FString::Printf(TEXT("Blueprint add_variable %s request succeeded"), *InVariableName), bRequestOk);
+		TestEqual(FString::Printf(TEXT("Blueprint add_variable %s status code"), *InVariableName), Result.StatusCode, 200);
+
+		TSharedPtr<FJsonObject> Json;
+		TestTrue(FString::Printf(TEXT("Blueprint add_variable %s response parses"), *InVariableName), ParseJson(Result.Body, Json));
+		TestTrue(FString::Printf(TEXT("Blueprint add_variable %s root ok=true"), *InVariableName), Json.IsValid() && Json->GetBoolField(TEXT("ok")));
+		return bRequestOk && Result.StatusCode == 200 && Json.IsValid() && Json->GetBoolField(TEXT("ok"));
+	};
+
+	TestTrue(TEXT("Blueprint add vector alias variable"), AddVariableByJsonTail(
+		TEXT("smoke-blueprint-add-vector-variable-001"),
+		TEXT("SmokeVector"),
+		TEXT("\"pin_category\":\"vector\",\"default_value\":\"(X=1.000000,Y=2.000000,Z=3.000000)\"")));
+	TestTrue(TEXT("Blueprint add rotator alias variable"), AddVariableByJsonTail(
+		TEXT("smoke-blueprint-add-rotator-variable-001"),
+		TEXT("SmokeRotator"),
+		TEXT("\"pin_category\":\"rotator\",\"default_value\":\"(Pitch=10.000000,Yaw=20.000000,Roll=30.000000)\"")));
+	TestTrue(TEXT("Blueprint add linear color alias variable"), AddVariableByJsonTail(
+		TEXT("smoke-blueprint-add-linear-color-variable-001"),
+		TEXT("SmokeTint"),
+		TEXT("\"pin_category\":\"linearcolor\",\"default_value\":\"(R=0.100000,G=0.200000,B=0.300000,A=1.000000)\"")));
+	TestTrue(TEXT("Blueprint add object typed variable"), AddVariableByJsonTail(
+		TEXT("smoke-blueprint-add-object-variable-001"),
+		TEXT("SmokeActorRef"),
+		TEXT("\"pin_category\":\"object\",\"pin_subcategory_object\":\"/Script/Engine.Actor\"")));
+	TestTrue(TEXT("Blueprint add int array variable"), AddVariableByJsonTail(
+		TEXT("smoke-blueprint-add-int-array-variable-001"),
+		TEXT("SmokeInts"),
+		TEXT("\"pin_category\":\"int\",\"container_type\":\"array\"")));
+	TestTrue(TEXT("Blueprint add string-int map variable"), AddVariableByJsonTail(
+		TEXT("smoke-blueprint-add-map-variable-001"),
+		TEXT("SmokeScores"),
+		TEXT("\"pin_category\":\"string\",\"container_type\":\"map\",\"value_type\":{\"pin_category\":\"int\"}")));
+
 	const FString GetInfoAfterBody = MakeExecRequestBody(
 		TEXT("smoke-blueprint-info-after-001"),
 		TEXT("blueprint_get_info"),
@@ -2824,6 +2977,213 @@ bool FUeAgentInterfaceBlueprintSmokeTest::RunTest(const FString& Parameters)
 	{
 		TestFalse(TEXT("Blueprint compile reports no error"), (*CompileData)->GetBoolField(TEXT("has_error")));
 		TestTrue(TEXT("Blueprint compile error count is zero"), static_cast<int32>((*CompileData)->GetIntegerField(TEXT("error_count"))) == 0);
+	}
+
+	return !HasAnyErrors();
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(
+	FUeAgentInterfaceBlueprintVariableTypeMatrixSmokeTest,
+	"GptProjectTest.UeAgentInterface.Smoke.BlueprintVariableTypeMatrixWorkflow",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::ProductFilter)
+
+bool FUeAgentInterfaceBlueprintVariableTypeMatrixSmokeTest::RunTest(const FString& Parameters)
+{
+	FScopedUeAgentHttpServer ServerScope;
+	FString InitError;
+	if (!ServerScope.Initialize(InitError))
+	{
+		AddError(FString::Printf(TEXT("Initialize failed: %s"), *InitError));
+		return false;
+	}
+
+	const FString BlueprintAssetPath = MakeAutomationAssetPath(TEXT("BPVarTypes"));
+
+	const FString CreateBody = MakeExecRequestBody(
+		TEXT("smoke-blueprint-var-matrix-create-001"),
+		TEXT("blueprint_create"),
+		FString::Printf(
+			TEXT("{\"asset_path\":\"%s\",\"parent_class\":\"/Script/Engine.Actor\",\"compile_after_create\":false,\"open_editor\":false,\"save_after_create\":false}"),
+			*BlueprintAssetPath));
+	FHttpSmokeResult CreateResult;
+	TestTrue(TEXT("Blueprint variable matrix create request succeeded"), ExecuteHttpJsonRequest(TEXT("POST"), ServerScope.BaseUrl + TEXT("/api/exec"), ServerScope.Token, CreateBody, CreateResult));
+	TestEqual(TEXT("Blueprint variable matrix create status code"), CreateResult.StatusCode, 200);
+
+	struct FVariableTypeCase
+	{
+		const TCHAR* Name;
+		const TCHAR* JsonTail;
+	};
+
+	const FVariableTypeCase Cases[] = {
+		{ TEXT("VarBool"), TEXT("\"pin_category\":\"bool\",\"default_value\":\"false\"") },
+		{ TEXT("VarByte"), TEXT("\"pin_category\":\"byte\",\"default_value\":\"1\"") },
+		{ TEXT("VarInt"), TEXT("\"pin_category\":\"int\",\"default_value\":\"42\"") },
+		{ TEXT("VarInt64"), TEXT("\"pin_category\":\"int64\",\"default_value\":\"42000000000\"") },
+		{ TEXT("VarFloat"), TEXT("\"pin_category\":\"float\",\"default_value\":\"3.5\"") },
+		{ TEXT("VarDouble"), TEXT("\"pin_category\":\"double\",\"default_value\":\"6.25\"") },
+		{ TEXT("VarName"), TEXT("\"pin_category\":\"name\",\"default_value\":\"SmokeName\"") },
+		{ TEXT("VarString"), TEXT("\"pin_category\":\"string\",\"default_value\":\"SmokeString\"") },
+		{ TEXT("VarText"), TEXT("\"pin_category\":\"text\"") },
+		{ TEXT("VarVector"), TEXT("\"pin_category\":\"vector\"") },
+		{ TEXT("VarVector2D"), TEXT("\"pin_category\":\"vector2d\"") },
+		{ TEXT("VarVector4"), TEXT("\"pin_category\":\"vector4\"") },
+		{ TEXT("VarRotator"), TEXT("\"pin_category\":\"rotator\"") },
+		{ TEXT("VarTransform"), TEXT("\"pin_category\":\"transform\"") },
+		{ TEXT("VarLinearColor"), TEXT("\"pin_category\":\"linearcolor\"") },
+		{ TEXT("VarColor"), TEXT("\"pin_category\":\"color\"") },
+		{ TEXT("VarQuat"), TEXT("\"pin_category\":\"quat\"") },
+		{ TEXT("VarIntPoint"), TEXT("\"pin_category\":\"intpoint\"") },
+		{ TEXT("VarIntVector"), TEXT("\"pin_category\":\"intvector\"") },
+		{ TEXT("VarInt64Vector2"), TEXT("\"pin_category\":\"int64vector2\"") },
+		{ TEXT("VarIntVector4"), TEXT("\"pin_category\":\"intvector4\"") },
+		{ TEXT("VarRandomStream"), TEXT("\"pin_category\":\"randomstream\"") },
+		{ TEXT("VarGuid"), TEXT("\"pin_category\":\"guid\"") },
+		{ TEXT("VarDateTime"), TEXT("\"pin_category\":\"datetime\"") },
+		{ TEXT("VarTimespan"), TEXT("\"pin_category\":\"timespan\"") },
+		{ TEXT("VarFrameNumber"), TEXT("\"pin_category\":\"framenumber\"") },
+		{ TEXT("VarFrameTime"), TEXT("\"pin_category\":\"frametime\"") },
+		{ TEXT("VarFrameRate"), TEXT("\"pin_category\":\"framerate\"") },
+		{ TEXT("VarSoftObjectPath"), TEXT("\"pin_category\":\"softobjectpath\"") },
+		{ TEXT("VarSoftClassPath"), TEXT("\"pin_category\":\"softclasspath\"") },
+		{ TEXT("VarPrimaryAssetType"), TEXT("\"pin_category\":\"primaryassettype\"") },
+		{ TEXT("VarPrimaryAssetId"), TEXT("\"pin_category\":\"primaryassetid\"") },
+		{ TEXT("VarTopLevelAssetPath"), TEXT("\"pin_category\":\"toplevelassetpath\"") },
+		{ TEXT("VarBox"), TEXT("\"pin_category\":\"box\"") },
+		{ TEXT("VarBox2D"), TEXT("\"pin_category\":\"box2d\"") },
+		{ TEXT("VarBoxSphereBounds"), TEXT("\"pin_category\":\"boxspherebounds\"") },
+		{ TEXT("VarTwoVectors"), TEXT("\"pin_category\":\"twovectors\"") },
+		{ TEXT("VarHitResult"), TEXT("\"pin_category\":\"hitresult\"") },
+		{ TEXT("VarTimerHandle"), TEXT("\"pin_category\":\"timerhandle\"") },
+		{ TEXT("VarDataTableRowHandle"), TEXT("\"pin_category\":\"datatablerowhandle\"") },
+		{ TEXT("VarCurveTableRowHandle"), TEXT("\"pin_category\":\"curvetablerowhandle\"") },
+		{ TEXT("VarVectorNetQuantize"), TEXT("\"pin_category\":\"vectornetquantize\"") },
+		{ TEXT("VarVectorNetQuantize10"), TEXT("\"pin_category\":\"vectornetquantize10\"") },
+		{ TEXT("VarVectorNetQuantize100"), TEXT("\"pin_category\":\"vectornetquantize100\"") },
+		{ TEXT("VarVectorNetQuantizeNormal"), TEXT("\"pin_category\":\"vectornetquantizenormal\"") },
+		{ TEXT("VarKey"), TEXT("\"pin_category\":\"key\"") },
+		{ TEXT("VarInputChord"), TEXT("\"pin_category\":\"inputchord\"") },
+		{ TEXT("VarGameplayTag"), TEXT("\"pin_category\":\"gameplaytag\"") },
+		{ TEXT("VarGameplayTagContainer"), TEXT("\"pin_category\":\"gameplaytagcontainer\"") },
+		{ TEXT("VarGameplayTagQuery"), TEXT("\"pin_category\":\"gameplaytagquery\"") },
+		{ TEXT("VarMargin"), TEXT("\"pin_category\":\"margin\"") },
+		{ TEXT("VarSlateColor"), TEXT("\"pin_category\":\"slatecolor\"") },
+		{ TEXT("VarSlateBrush"), TEXT("\"pin_category\":\"slatebrush\"") },
+		{ TEXT("VarSlateFontInfo"), TEXT("\"pin_category\":\"slatefontinfo\"") },
+		{ TEXT("VarWidgetTransform"), TEXT("\"pin_category\":\"widgettransform\"") },
+		{ TEXT("VarAnchors"), TEXT("\"pin_category\":\"anchors\"") },
+		{ TEXT("VarAnchorData"), TEXT("\"pin_category\":\"anchordata\"") },
+		{ TEXT("VarCollisionChannel"), TEXT("\"pin_category\":\"collisionchannel\"") },
+		{ TEXT("VarObjectTypeQuery"), TEXT("\"pin_category\":\"objecttypequery\"") },
+		{ TEXT("VarTraceTypeQuery"), TEXT("\"pin_category\":\"tracetypequery\"") },
+		{ TEXT("VarInputEvent"), TEXT("\"pin_category\":\"enum\",\"pin_subcategory_object\":\"inputevent\"") },
+		{ TEXT("VarControllerHand"), TEXT("\"pin_category\":\"enum\",\"pin_subcategory_object\":\"controllerhand\"") },
+		{ TEXT("VarTouchIndex"), TEXT("\"pin_category\":\"enum\",\"pin_subcategory_object\":\"touchindex\"") },
+		{ TEXT("VarPhysicalSurface"), TEXT("\"pin_category\":\"enum\",\"pin_subcategory_object\":\"physicalsurface\"") },
+		{ TEXT("VarGenericObject"), TEXT("\"pin_category\":\"object\"") },
+		{ TEXT("VarActorObject"), TEXT("\"pin_category\":\"object\",\"pin_subcategory_object\":\"actor\"") },
+		{ TEXT("VarPawnObject"), TEXT("\"pin_category\":\"object\",\"pin_subcategory_object\":\"pawn\"") },
+		{ TEXT("VarCharacterObject"), TEXT("\"pin_category\":\"object\",\"pin_subcategory_object\":\"character\"") },
+		{ TEXT("VarControllerObject"), TEXT("\"pin_category\":\"object\",\"pin_subcategory_object\":\"controller\"") },
+		{ TEXT("VarPlayerControllerObject"), TEXT("\"pin_category\":\"object\",\"pin_subcategory_object\":\"playercontroller\"") },
+		{ TEXT("VarGameModeBaseObject"), TEXT("\"pin_category\":\"object\",\"pin_subcategory_object\":\"gamemodebase\"") },
+		{ TEXT("VarGameStateBaseObject"), TEXT("\"pin_category\":\"object\",\"pin_subcategory_object\":\"gamestatebase\"") },
+		{ TEXT("VarPlayerStateObject"), TEXT("\"pin_category\":\"object\",\"pin_subcategory_object\":\"playerstate\"") },
+		{ TEXT("VarHudObject"), TEXT("\"pin_category\":\"object\",\"pin_subcategory_object\":\"hud\"") },
+		{ TEXT("VarSaveGameObject"), TEXT("\"pin_category\":\"object\",\"pin_subcategory_object\":\"savegame\"") },
+		{ TEXT("VarActorComponentObject"), TEXT("\"pin_category\":\"object\",\"pin_subcategory_object\":\"actorcomponent\"") },
+		{ TEXT("VarSceneComponentObject"), TEXT("\"pin_category\":\"object\",\"pin_subcategory_object\":\"scenecomponent\"") },
+		{ TEXT("VarPrimitiveComponentObject"), TEXT("\"pin_category\":\"object\",\"pin_subcategory_object\":\"primitivecomponent\"") },
+		{ TEXT("VarStaticMeshComponentObject"), TEXT("\"pin_category\":\"object\",\"pin_subcategory_object\":\"staticmeshcomponent\"") },
+		{ TEXT("VarSkeletalMeshComponentObject"), TEXT("\"pin_category\":\"object\",\"pin_subcategory_object\":\"skeletalmeshcomponent\"") },
+		{ TEXT("VarCameraComponentObject"), TEXT("\"pin_category\":\"object\",\"pin_subcategory_object\":\"cameracomponent\"") },
+		{ TEXT("VarSpringArmComponentObject"), TEXT("\"pin_category\":\"object\",\"pin_subcategory_object\":\"springarmcomponent\"") },
+		{ TEXT("VarNiagaraComponentObject"), TEXT("\"pin_category\":\"object\",\"pin_subcategory_object\":\"niagaracomponent\"") },
+		{ TEXT("VarStaticMeshObject"), TEXT("\"pin_category\":\"object\",\"pin_subcategory_object\":\"staticmesh\"") },
+		{ TEXT("VarSkeletalMeshObject"), TEXT("\"pin_category\":\"object\",\"pin_subcategory_object\":\"skeletalmesh\"") },
+		{ TEXT("VarMaterialInterfaceObject"), TEXT("\"pin_category\":\"object\",\"pin_subcategory_object\":\"materialinterface\"") },
+		{ TEXT("VarMaterialObject"), TEXT("\"pin_category\":\"object\",\"pin_subcategory_object\":\"material\"") },
+		{ TEXT("VarTexture2DObject"), TEXT("\"pin_category\":\"object\",\"pin_subcategory_object\":\"texture2d\"") },
+		{ TEXT("VarTextureRenderTarget2DObject"), TEXT("\"pin_category\":\"object\",\"pin_subcategory_object\":\"texturerendertarget2d\"") },
+		{ TEXT("VarSoundBaseObject"), TEXT("\"pin_category\":\"object\",\"pin_subcategory_object\":\"soundbase\"") },
+		{ TEXT("VarAnimSequenceObject"), TEXT("\"pin_category\":\"object\",\"pin_subcategory_object\":\"animsequence\"") },
+		{ TEXT("VarAnimMontageObject"), TEXT("\"pin_category\":\"object\",\"pin_subcategory_object\":\"animmontage\"") },
+		{ TEXT("VarSkeletonObject"), TEXT("\"pin_category\":\"object\",\"pin_subcategory_object\":\"skeleton\"") },
+		{ TEXT("VarDataTableObject"), TEXT("\"pin_category\":\"object\",\"pin_subcategory_object\":\"datatable\"") },
+		{ TEXT("VarDataAssetObject"), TEXT("\"pin_category\":\"object\",\"pin_subcategory_object\":\"dataasset\"") },
+		{ TEXT("VarCurveFloatObject"), TEXT("\"pin_category\":\"object\",\"pin_subcategory_object\":\"curvefloat\"") },
+		{ TEXT("VarLevelSequenceObject"), TEXT("\"pin_category\":\"object\",\"pin_subcategory_object\":\"levelsequence\"") },
+		{ TEXT("VarNiagaraSystemObject"), TEXT("\"pin_category\":\"object\",\"pin_subcategory_object\":\"niagarasystem\"") },
+		{ TEXT("VarNiagaraEmitterObject"), TEXT("\"pin_category\":\"object\",\"pin_subcategory_object\":\"niagaraemitter\"") },
+		{ TEXT("VarUserWidgetObject"), TEXT("\"pin_category\":\"object\",\"pin_subcategory_object\":\"userwidget\"") },
+		{ TEXT("VarInputActionObject"), TEXT("\"pin_category\":\"object\",\"pin_subcategory_object\":\"inputaction\"") },
+		{ TEXT("VarInputMappingContextObject"), TEXT("\"pin_category\":\"object\",\"pin_subcategory_object\":\"inputmappingcontext\"") },
+		{ TEXT("VarActorClass"), TEXT("\"pin_category\":\"class\",\"pin_subcategory_object\":\"actor\"") },
+		{ TEXT("VarPawnClass"), TEXT("\"pin_category\":\"class\",\"pin_subcategory_object\":\"pawn\"") },
+		{ TEXT("VarUserWidgetClass"), TEXT("\"pin_category\":\"class\",\"pin_subcategory_object\":\"userwidget\"") },
+		{ TEXT("VarStaticMeshSoftObject"), TEXT("\"pin_category\":\"softobject\",\"pin_subcategory_object\":\"staticmesh\"") },
+		{ TEXT("VarNiagaraSystemSoftObject"), TEXT("\"pin_category\":\"softobject\",\"pin_subcategory_object\":\"niagarasystem\"") },
+		{ TEXT("VarActorSoftClass"), TEXT("\"pin_category\":\"softclass\",\"pin_subcategory_object\":\"actor\"") },
+		{ TEXT("VarUserWidgetSoftClass"), TEXT("\"pin_category\":\"softclass\",\"pin_subcategory_object\":\"userwidget\"") },
+		{ TEXT("VarIntArray"), TEXT("\"pin_category\":\"int\",\"container_type\":\"array\"") },
+		{ TEXT("VarNameSet"), TEXT("\"pin_category\":\"name\",\"container_type\":\"set\"") },
+		{ TEXT("VarStringIntMap"), TEXT("\"pin_category\":\"string\",\"container_type\":\"map\",\"value_type\":{\"pin_category\":\"int\"}") },
+		{ TEXT("VarNameVectorMap"), TEXT("\"pin_category\":\"name\",\"container_type\":\"map\",\"value_type\":{\"pin_category\":\"vector\"}") },
+		{ TEXT("VarStringActorMap"), TEXT("\"pin_category\":\"string\",\"container_type\":\"map\",\"value_type\":{\"pin_category\":\"object\",\"pin_subcategory_object\":\"actor\"}") }
+	};
+
+	for (const FVariableTypeCase& Case : Cases)
+	{
+		const FString RequestId = FString::Printf(TEXT("smoke-blueprint-var-matrix-add-%s"), Case.Name);
+		const FString Body = MakeExecRequestBody(
+			RequestId,
+			TEXT("blueprint_add_variable"),
+			FString::Printf(
+				TEXT("{\"asset_path\":\"%s\",\"variable_name\":\"%s\",%s,\"compile_after_add\":false,\"save_after_add\":false}"),
+				*BlueprintAssetPath,
+				Case.Name,
+				Case.JsonTail));
+
+		FHttpSmokeResult Result;
+		const bool bRequestOk = ExecuteHttpJsonRequest(TEXT("POST"), ServerScope.BaseUrl + TEXT("/api/exec"), ServerScope.Token, Body, Result);
+		TestTrue(FString::Printf(TEXT("Blueprint variable matrix %s request succeeded"), Case.Name), bRequestOk);
+		if (Result.StatusCode != 200)
+		{
+			AddError(FString::Printf(TEXT("Blueprint variable matrix %s status %d body: %s"), Case.Name, Result.StatusCode, *Result.Body));
+		}
+		TestEqual(FString::Printf(TEXT("Blueprint variable matrix %s status code"), Case.Name), Result.StatusCode, 200);
+
+		TSharedPtr<FJsonObject> Json;
+		const bool bJsonOk = ParseJson(Result.Body, Json);
+		TestTrue(FString::Printf(TEXT("Blueprint variable matrix %s response parses"), Case.Name), bJsonOk);
+		const bool bOk = Json.IsValid() && Json->GetBoolField(TEXT("ok"));
+		if (!bOk)
+		{
+			AddError(FString::Printf(TEXT("Blueprint variable matrix %s response body: %s"), Case.Name, *Result.Body));
+		}
+		TestTrue(FString::Printf(TEXT("Blueprint variable matrix %s root ok=true"), Case.Name), bOk);
+	}
+
+	const FString CompileBody = MakeExecRequestBody(
+		TEXT("smoke-blueprint-var-matrix-compile-001"),
+		TEXT("blueprint_compile"),
+		FString::Printf(TEXT("{\"asset_path\":\"%s\",\"include_messages\":true,\"max_messages\":32,\"save_after_compile\":false}"), *BlueprintAssetPath));
+	FHttpSmokeResult CompileResult;
+	TestTrue(TEXT("Blueprint variable matrix compile request succeeded"), ExecuteHttpJsonRequest(TEXT("POST"), ServerScope.BaseUrl + TEXT("/api/exec"), ServerScope.Token, CompileBody, CompileResult));
+	if (CompileResult.StatusCode != 200)
+	{
+		AddError(FString::Printf(TEXT("Blueprint variable matrix compile status %d body: %s"), CompileResult.StatusCode, *CompileResult.Body));
+	}
+	TestEqual(TEXT("Blueprint variable matrix compile status code"), CompileResult.StatusCode, 200);
+
+	TSharedPtr<FJsonObject> CompileJson;
+	TestTrue(TEXT("Blueprint variable matrix compile response parses"), ParseJson(CompileResult.Body, CompileJson));
+	const TSharedPtr<FJsonObject>* CompileData = nullptr;
+	TestTrue(TEXT("Blueprint variable matrix compile contains data"), CompileJson.IsValid() && CompileJson->TryGetObjectField(TEXT("data"), CompileData) && CompileData && CompileData->IsValid());
+	if (CompileData && CompileData->IsValid())
+	{
+		TestFalse(TEXT("Blueprint variable matrix compile reports no error"), (*CompileData)->GetBoolField(TEXT("has_error")));
+		TestTrue(TEXT("Blueprint variable matrix compile error count is zero"), static_cast<int32>((*CompileData)->GetIntegerField(TEXT("error_count"))) == 0);
 	}
 
 	return !HasAnyErrors();
@@ -6737,7 +7097,7 @@ bool FUeAgentInterfaceBlueprintFolderSmokeTest::RunTest(const FString& Parameter
 
 	if (!SaveUtf8Json(
 		FPaths::Combine(FolderPath, TEXT("members"), TEXT("variables.json")),
-		TEXT("{\n  \"variables\": [\n    {\n      \"name\": \"SmokeFlag\",\n      \"type\": { \"pin_category\": \"bool\" },\n      \"default_value\": \"false\",\n      \"instance_editable\": true\n    }\n  ]\n}\n")))
+		TEXT("{\n  \"variables\": [\n    {\n      \"name\": \"SmokeFlag\",\n      \"type\": { \"pin_category\": \"bool\" },\n      \"default_value\": \"false\",\n      \"instance_editable\": true\n    },\n    {\n      \"name\": \"SmokeVector\",\n      \"type\": { \"pin_category\": \"vector\" },\n      \"default_value\": \"(X=1.000000,Y=2.000000,Z=3.000000)\",\n      \"instance_editable\": true\n    },\n    {\n      \"name\": \"SmokeRotator\",\n      \"type\": { \"pin_category\": \"rotator\" },\n      \"default_value\": \"(Pitch=10.000000,Yaw=20.000000,Roll=30.000000)\",\n      \"instance_editable\": false\n    },\n    {\n      \"name\": \"SmokeInts\",\n      \"type\": { \"pin_category\": \"int\", \"container_type\": \"array\" },\n      \"default_value\": \"\",\n      \"instance_editable\": false\n    },\n    {\n      \"name\": \"SmokeScores\",\n      \"type\": { \"pin_category\": \"string\", \"container_type\": \"map\", \"value_type\": { \"pin_category\": \"int\" } },\n      \"default_value\": \"\",\n      \"instance_editable\": false\n    }\n  ]\n}\n")))
 	{
 		return false;
 	}
@@ -6862,6 +7222,9 @@ bool FUeAgentInterfaceBlueprintFolderSmokeTest::RunTest(const FString& Parameter
 			if (Variables)
 			{
 				bool bFoundSmokeFlag = false;
+				bool bFoundSmokeVector = false;
+				bool bFoundSmokeRotator = false;
+				bool bFoundSmokeScoresMapValue = false;
 				for (const TSharedPtr<FJsonValue>& VariableValue : *Variables)
 				{
 					const TSharedPtr<FJsonObject>* VariableObj = nullptr;
@@ -6869,13 +7232,37 @@ bool FUeAgentInterfaceBlueprintFolderSmokeTest::RunTest(const FString& Parameter
 					{
 						continue;
 					}
-					if ((*VariableObj)->GetStringField(TEXT("name")) == TEXT("SmokeFlag"))
+					const FString ExportedVariableName = (*VariableObj)->GetStringField(TEXT("name"));
+					if (ExportedVariableName == TEXT("SmokeFlag"))
 					{
 						bFoundSmokeFlag = true;
-						break;
+					}
+					else if (ExportedVariableName == TEXT("SmokeVector"))
+					{
+						bFoundSmokeVector = true;
+					}
+					else if (ExportedVariableName == TEXT("SmokeRotator"))
+					{
+						bFoundSmokeRotator = true;
+					}
+					else if (ExportedVariableName == TEXT("SmokeScores"))
+					{
+						const TSharedPtr<FJsonObject>* TypeObj = nullptr;
+						if ((*VariableObj)->TryGetObjectField(TEXT("type"), TypeObj) && TypeObj && TypeObj->IsValid())
+						{
+							const TSharedPtr<FJsonObject>* ValueTypeObj = nullptr;
+							bFoundSmokeScoresMapValue = (*TypeObj)->GetStringField(TEXT("container_type")) == TEXT("map")
+								&& (*TypeObj)->TryGetObjectField(TEXT("value_type"), ValueTypeObj)
+								&& ValueTypeObj
+								&& ValueTypeObj->IsValid()
+								&& (*ValueTypeObj)->GetStringField(TEXT("pin_category")) == TEXT("int");
+						}
 					}
 				}
 				TestTrue(TEXT("Blueprint folder exported SmokeFlag variable"), bFoundSmokeFlag);
+				TestTrue(TEXT("Blueprint folder exported SmokeVector variable"), bFoundSmokeVector);
+				TestTrue(TEXT("Blueprint folder exported SmokeRotator variable"), bFoundSmokeRotator);
+				TestTrue(TEXT("Blueprint folder exported map value type"), bFoundSmokeScoresMapValue);
 			}
 		}
 	}

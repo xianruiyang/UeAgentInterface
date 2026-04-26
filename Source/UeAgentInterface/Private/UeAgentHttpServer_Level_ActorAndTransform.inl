@@ -1216,7 +1216,9 @@ bool FUeAgentHttpServer::CmdLevelGenerateProbes(const FUeAgentRequestContext& Ct
 			}
 			FVector P = FVector::ZeroVector;
 			double X = 0.0, Y = 0.0, Z = 0.0;
-			if (!Obj->TryGetNumberField(TEXT("x"), X) || !Obj->TryGetNumberField(TEXT("y"), Y) || !Obj->TryGetNumberField(TEXT("z"), Z))
+			if (!UeAgentJsonDiagnostics::TryReadNumberFieldByAliases(Obj, { TEXT("x"), TEXT("X") }, X)
+				|| !UeAgentJsonDiagnostics::TryReadNumberFieldByAliases(Obj, { TEXT("y"), TEXT("Y") }, Y)
+				|| !UeAgentJsonDiagnostics::TryReadNumberFieldByAliases(Obj, { TEXT("z"), TEXT("Z") }, Z))
 			{
 				OutError = TEXT("points_invalid_vector");
 				return false;
@@ -1939,12 +1941,14 @@ bool FUeAgentHttpServer::CmdLevelSetActorTransform(const FUeAgentRequestContext&
 					{
 						return false;
 					}
-					if (Obj->HasField(TEXT("x")) && Obj->HasField(TEXT("y")) && Obj->HasField(TEXT("z")))
+					if (Obj->HasField(TEXT("x")) || Obj->HasField(TEXT("X")))
 					{
 						double X = 0.0;
 						double Y = 0.0;
 						double Z = 0.0;
-						if (!Obj->TryGetNumberField(TEXT("x"), X) || !Obj->TryGetNumberField(TEXT("y"), Y) || !Obj->TryGetNumberField(TEXT("z"), Z))
+						if (!UeAgentJsonDiagnostics::TryReadNumberFieldByAliases(Obj, { TEXT("x"), TEXT("X") }, X)
+							|| !UeAgentJsonDiagnostics::TryReadNumberFieldByAliases(Obj, { TEXT("y"), TEXT("Y") }, Y)
+							|| !UeAgentJsonDiagnostics::TryReadNumberFieldByAliases(Obj, { TEXT("z"), TEXT("Z") }, Z))
 						{
 							return false;
 						}
@@ -1958,7 +1962,9 @@ bool FUeAgentHttpServer::CmdLevelSetActorTransform(const FUeAgentRequestContext&
 						double X = 0.0;
 						double Y = 0.0;
 						double Z = 0.0;
-						if (!(*OffsetObjPtr)->TryGetNumberField(TEXT("x"), X) || !(*OffsetObjPtr)->TryGetNumberField(TEXT("y"), Y) || !(*OffsetObjPtr)->TryGetNumberField(TEXT("z"), Z))
+						if (!UeAgentJsonDiagnostics::TryReadNumberFieldByAliases(*OffsetObjPtr, { TEXT("x"), TEXT("X") }, X)
+							|| !UeAgentJsonDiagnostics::TryReadNumberFieldByAliases(*OffsetObjPtr, { TEXT("y"), TEXT("Y") }, Y)
+							|| !UeAgentJsonDiagnostics::TryReadNumberFieldByAliases(*OffsetObjPtr, { TEXT("z"), TEXT("Z") }, Z))
 						{
 							return false;
 						}

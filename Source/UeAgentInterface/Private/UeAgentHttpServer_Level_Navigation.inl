@@ -366,7 +366,9 @@ bool FUeAgentHttpServer::CmdLevelValidateConnectivity(const FUeAgentRequestConte
 			return false;
 		}
 		double X = 0.0, Y = 0.0, Z = 0.0;
-		if (!Obj->TryGetNumberField(TEXT("x"), X) || !Obj->TryGetNumberField(TEXT("y"), Y) || !Obj->TryGetNumberField(TEXT("z"), Z))
+		if (!UeAgentJsonDiagnostics::TryReadNumberFieldByAliases(Obj, { TEXT("x"), TEXT("X") }, X)
+			|| !UeAgentJsonDiagnostics::TryReadNumberFieldByAliases(Obj, { TEXT("y"), TEXT("Y") }, Y)
+			|| !UeAgentJsonDiagnostics::TryReadNumberFieldByAliases(Obj, { TEXT("z"), TEXT("Z") }, Z))
 		{
 			return false;
 		}

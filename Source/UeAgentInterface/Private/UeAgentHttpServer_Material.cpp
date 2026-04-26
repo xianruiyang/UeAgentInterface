@@ -2,6 +2,8 @@
 
 #include "UeAgentHttpServer_Material.h"
 
+#include "UeAgentJsonDiagnostics.h"
+
 #include "AssetRegistry/AssetRegistryModule.h"
 #include "Editor.h"
 #include "Engine/Texture.h"
@@ -385,15 +387,16 @@ namespace UeAgentMaterialOps
 		double B = 0.0;
 		double A = 1.0;
 
-		const bool bHasRgb = (ColorObj->TryGetNumberField(TEXT("r"), R) || ColorObj->TryGetNumberField(TEXT("x"), R))
-			&& (ColorObj->TryGetNumberField(TEXT("g"), G) || ColorObj->TryGetNumberField(TEXT("y"), G))
-			&& (ColorObj->TryGetNumberField(TEXT("b"), B) || ColorObj->TryGetNumberField(TEXT("z"), B));
+		const bool bHasRgb =
+			UeAgentJsonDiagnostics::TryReadNumberFieldByAliases(ColorObj, { TEXT("r"), TEXT("R"), TEXT("red"), TEXT("Red"), TEXT("x"), TEXT("X") }, R)
+			&& UeAgentJsonDiagnostics::TryReadNumberFieldByAliases(ColorObj, { TEXT("g"), TEXT("G"), TEXT("green"), TEXT("Green"), TEXT("y"), TEXT("Y") }, G)
+			&& UeAgentJsonDiagnostics::TryReadNumberFieldByAliases(ColorObj, { TEXT("b"), TEXT("B"), TEXT("blue"), TEXT("Blue"), TEXT("z"), TEXT("Z") }, B);
 		if (!bHasRgb)
 		{
 			return false;
 		}
 
-		ColorObj->TryGetNumberField(TEXT("a"), A) || ColorObj->TryGetNumberField(TEXT("w"), A);
+		UeAgentJsonDiagnostics::TryReadNumberFieldByAliases(ColorObj, { TEXT("a"), TEXT("A"), TEXT("alpha"), TEXT("Alpha"), TEXT("w"), TEXT("W") }, A);
 		OutColor = FLinearColor((float)R, (float)G, (float)B, (float)A);
 		return true;
 	}

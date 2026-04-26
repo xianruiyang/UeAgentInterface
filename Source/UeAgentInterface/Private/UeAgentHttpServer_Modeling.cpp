@@ -2,6 +2,7 @@
 
 #include "UeAgentHttpServer_Modeling.h"
 
+#include "UeAgentJsonDiagnostics.h"
 #include "UeAgentInterfaceLogger.h"
 
 #include "Components/PrimitiveComponent.h"
@@ -810,16 +811,16 @@ namespace UeAgentModelingOps
 
 		double OriginX = 0.0, OriginY = 0.0, OriginZ = 0.0;
 		double DirX = 0.0, DirY = 0.0, DirZ = 0.0;
-		if (!(*OriginObj)->TryGetNumberField(TEXT("x"), OriginX) ||
-			!(*OriginObj)->TryGetNumberField(TEXT("y"), OriginY) ||
-			!(*OriginObj)->TryGetNumberField(TEXT("z"), OriginZ))
+		if (!UeAgentJsonDiagnostics::TryReadNumberFieldByAliases(*OriginObj, { TEXT("x"), TEXT("X") }, OriginX)
+			|| !UeAgentJsonDiagnostics::TryReadNumberFieldByAliases(*OriginObj, { TEXT("y"), TEXT("Y") }, OriginY)
+			|| !UeAgentJsonDiagnostics::TryReadNumberFieldByAliases(*OriginObj, { TEXT("z"), TEXT("Z") }, OriginZ))
 		{
 			OutError = TEXT("invalid_world_origin");
 			return false;
 		}
-		if (!(*DirectionObj)->TryGetNumberField(TEXT("x"), DirX) ||
-			!(*DirectionObj)->TryGetNumberField(TEXT("y"), DirY) ||
-			!(*DirectionObj)->TryGetNumberField(TEXT("z"), DirZ))
+		if (!UeAgentJsonDiagnostics::TryReadNumberFieldByAliases(*DirectionObj, { TEXT("x"), TEXT("X") }, DirX)
+			|| !UeAgentJsonDiagnostics::TryReadNumberFieldByAliases(*DirectionObj, { TEXT("y"), TEXT("Y") }, DirY)
+			|| !UeAgentJsonDiagnostics::TryReadNumberFieldByAliases(*DirectionObj, { TEXT("z"), TEXT("Z") }, DirZ))
 		{
 			OutError = TEXT("invalid_world_direction");
 			return false;

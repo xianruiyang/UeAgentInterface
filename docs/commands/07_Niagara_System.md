@@ -12,6 +12,7 @@
 | `niagara_delete_asset` | 删除 Niagara 资产 | `asset_path`、`force_delete`、`use_unchecked_delete` | 清理 AutoTests 临时资产 |
 | `niagara_duplicate_asset` | 复制 Niagara 资产 | `source_asset_path`、`target_asset_path` | 基于模板快速变体 |
 | `niagara_open_editor` | 打开 Niagara 资产编辑器 | `asset_path` | 进入编辑上下文 |
+| `niagara_preview_advance` | 连续推进 Niagara 编辑器预览并暂停 | `asset_path`、`target_frame`、`tick_delta_seconds` | 从 0 连续 tick 到指定帧，供后续 probe / screenshot 只读采样 |
 | `niagara_screenshot` | 截取 Niagara 资产编辑器界面 | `asset_path`、`target`、`format`、`max_size` | 调试 Niagara 编辑器预览/栈面板是否真实写入 |
 | `niagara_system_runtime_probe` | 读取 System 预览组件运行统计 | `asset_path`、`tick_count`、`advance_mode` | 不开 PIE 地验证 System 是否实际产生活粒子 |
 | `niagara_get_info` | 读取 Niagara 资产概况 | `asset_path` | 查看 System/Emitter 结构 |
@@ -33,6 +34,48 @@
 
 返回字段包含 `deleted_asset_path`、`deleted_object_path`、`asset_kind`、`force_delete`、`package_exists_on_disk`、`use_unchecked_delete`、`delete_strategy`、`found_residual_object_after_delete`、`detached_residual_object_after_delete`。
 
+### `niagara_preview_advance`
+
+用于控制 Niagara System 编辑器预览组件从指定起点连续推进到目标帧，并在目标帧暂停。该命令只操作 Niagara 编辑器预览组件，不启动 PIE / game 窗口。对 Collision Event / Death Event / Event Handler 效果，推荐先用本命令连续 tick 到目标帧，再用 `niagara_system_runtime_probe(sample_mode=current_preview)` 和 `niagara_screenshot(capture_mode=current_preview)` 只读同一暂停状态。
+
+关键参数：
+
+- `asset_path`：必填，Niagara System 资产路径。
+- `open_editor_if_needed`：可选，默认 `true`；为 `false` 时只复用已打开的 Niagara 编辑器。
+- `reset_preview`：可选，默认 `true`；为 `true` 时从 0 帧开始连续推进。
+- `start_frame`：可选，默认 `0`；`reset_preview=true` 时必须为 `0`。
+- `target_frame` / `frame` / `advance_frames` / `preview_advance_frames`：可选其一，目标帧。若未提供，可用 `target_time_seconds` / `preview_advance_seconds` 按 `tick_delta_seconds` 换算。
+- `tick_delta_seconds` / `preview_tick_delta_seconds`：可选，默认约 `1/60`。
+- `advance_mode` / `preview_advance_mode`：可选，默认 `tick_component`；也支持 `advance_simulation`，但事件/碰撞类效果优先使用 `tick_component`。
+- `pause_after_advance` / `pause_preview_after_advance`：可选，默认 `true`。
+
+返回字段包含：
+
+- `preview_state_token`：本次暂停状态的令牌。后续只读 probe / screenshot 应传入 `expected_preview_state_token`，防止读到另一套预览状态。
+- `target_frame`、`advanced_frame_count`、`tick_delta_seconds`、`system_age`、`current_frame_estimate`。
+- `advance_semantics`：`continuous_from_zero` 或 `continuous_from_current`。
+- `used_seek=false`：确认没有使用 seek / 直接跳时间轴。
+- `stats`：目标帧暂停后的当前组件统计。
+
+45 帧截图和 probe 的推荐流程：
+
+```json
+{
+  "command": "niagara_preview_advance",
+  "params": {
+    "asset_path": "/Game/Niagara/NS_UAI_Rain_HighQuality",
+    "open_editor_if_needed": true,
+    "reset_preview": true,
+    "target_frame": 45,
+    "tick_delta_seconds": 0.016667,
+    "advance_mode": "tick_component",
+    "pause_after_advance": true
+  }
+}
+```
+
+记录返回的 `preview_state_token` 后，再调用只读 probe 和截图。
+
 ### `niagara_screenshot`
 
 用于打开或复用 Niagara System / Emitter / Script 编辑器，并把编辑器界面截图写入 UAI artifacts `Shots` 目录。该命令只截图编辑器 UI，不运行 PIE / game。
@@ -49,8 +92,29 @@
 - `offscreen` / `use_offscreen_renderer`：可选，使用 Slate 离屏绘制路径，避免依赖真实窗口 backbuffer；窗口最小化或不可安全读取 backbuffer 时会自动使用离屏路径。
 - `reset_preview`：可选；只有 `true` 或设置 `preview_advance_seconds > 0` 时才会准备 Niagara 预览组件。显式传 `false` 不会触发预览重置或真实窗口 redraw。
 - `preview_advance_seconds` / `preview_tick_delta_seconds` / `preview_advance_mode`：可选，用于截图前推进 Niagara 编辑器预览；不需要推进时不要传。
+- `capture_mode=current_preview`：只截图当前已暂停的 preview 状态，不 reset、不 activate、不 tick。应配合 `expected_preview_state_token` 和 `expected_frame` 使用。
+- `expected_preview_state_token`：可选，必须与 `niagara_preview_advance` 返回值一致，否则返回 `preview_state_token_mismatch`。
+- `expected_frame` / `target_frame`：可选，按 `preview_tick_delta_seconds` 估算当前帧，不匹配时返回 `preview_frame_mismatch`。
+- `require_paused`：可选，`current_preview` 默认 `true`；当前预览未暂停时返回 `preview_component_not_paused`。
 
 返回字段包含 `file_path`、`width`、`height`、`bytes`、`target`、`capture_mode`、`preview_prepare_requested`、`pre_preview_redraw_performed`、`capture_redraw_performed`。离屏截图路径不会强制 redraw 真实 Slate 窗口。
+
+只读第 45 帧截图示例：
+
+```json
+{
+  "command": "niagara_screenshot",
+  "params": {
+    "asset_path": "/Game/Niagara/NS_UAI_Rain_HighQuality",
+    "target": "preview",
+    "capture_mode": "current_preview",
+    "expected_frame": 45,
+    "expected_preview_state_token": "<niagara_preview_advance 返回的 preview_state_token>",
+    "offscreen": true,
+    "file_path": "Saved/UeAgentScreenshots/rain_frame_45.png"
+  }
+}
+```
 
 ### `niagara_system_runtime_probe`
 
@@ -65,13 +129,43 @@
 - `tick_delta_seconds`：可选，默认约 `1/60`。
 - `advance_mode`：可选，`advance_simulation` 或普通 tick。
 - `include_script_runtime_stats`：可选，返回 System / Emitter 脚本运行摘要。
-- `include_snapshots`：可选，返回各阶段快照。
+- `include_snapshots`：可选，默认 `true`；为 `false` 时仍会采样并返回 `initial_stats`、`final_stats` 和 `summary`，但不展开每一帧 `snapshots[]`，避免报告过大。
+- `sample_mode=current_preview`：只读当前已暂停的 preview 状态，不 reset、不 activate、不 tick、不修改时间。应配合 `expected_preview_state_token` 和 `expected_frame` 使用。
+- `expected_preview_state_token`：可选，必须与 `niagara_preview_advance` 返回值一致，否则返回 `preview_state_token_mismatch`。
+- `expected_frame` / `target_frame`：可选，按 `tick_delta_seconds` 估算当前帧，不匹配时返回 `preview_frame_mismatch`。
+- `require_paused`：可选，`current_preview` 默认 `true`；当前预览未暂停时返回 `preview_component_not_paused`。
 
-返回字段包含 `snapshots[]`；最终快照通常读取 `stats.system_execution_state`、`stats.system_complete`、`stats.total_particle_count`、`stats.total_spawned_particles` 和 `stats.emitters[]`。
+返回字段包含：
+
+- `initial_stats` / `final_stats`：本次探针首尾统计。
+- `summary.emitter_peaks[]`：每个 emitter 在本次探针采样期间的峰值统计，包括 `max_particle_count`、`max_total_spawned_particles`、`max_spawn_info_total_count` 及对应 snapshot label。
+- `snapshots[]`：当 `include_snapshots=true` 时返回各阶段快照。
+
+读取结果时不要只看最终快照。对 Collision Event、Death Event、短 lifetime 水花/火花这类瞬时粒子，最终帧可能已经归零，应优先看 `summary.emitter_peaks[]`。
 
 注意：
 
 - `open_editor_if_needed=true` 会按需打开 Niagara 编辑器；打开编辑器本身可能触发 UE 异步编译。需要稳定 runtime 数字时，推荐同一批次先 `niagara_open_editor`，再 `niagara_compile_system(force_compile=true, wait_for_complete=true)`，最后用 `niagara_system_runtime_probe(open_editor_if_needed=false)` 推进预览组件。
+- 推荐新流程是 `niagara_preview_advance` 推进一次并暂停，然后用 `sample_mode=current_preview` 只读；不要让 screenshot 和 probe 分别重复推进同一帧。
+- `reset_preview=true` 的 probe 会重建并推进预览仿真，适合验证从 0 开始的发射；它不等价于当前已暂停的编辑器画面。读取当前画面必须使用 `sample_mode=current_preview`。
+- `reset_preview=false` 只表示不主动重置，但 legacy simulate 路径仍会配置和激活组件；不要再把 `reset_preview=false,tick_count=0` 当作严格只读采样。
+- Ray Trace Collision / Event Handler 场景依赖预览世界和碰撞上下文。若重置后的 probe 与界面观察不一致，先对比 `component_source`、`component_world`、`reset_preview`、`advance_mode`，再判断资产是否有问题。
+
+只读第 45 帧 probe 示例：
+
+```json
+{
+  "command": "niagara_system_runtime_probe",
+  "params": {
+    "asset_path": "/Game/Niagara/NS_UAI_Rain_HighQuality",
+    "sample_mode": "current_preview",
+    "expected_frame": 45,
+    "tick_delta_seconds": 0.016667,
+    "expected_preview_state_token": "<niagara_preview_advance 返回的 preview_state_token>",
+    "include_snapshots": true
+  }
+}
+```
 
 ### `niagara_get_stack_issues`
 

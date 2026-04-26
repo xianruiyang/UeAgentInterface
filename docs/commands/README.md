@@ -38,10 +38,13 @@
   - `value_text_exact_match` / `value_text_changed_after_import`：请求值与读回值是否完全一致
   - `cpp_type`：目标属性 C++ 类型
 - `value_text_changed_after_import=true` 不一定等于失败；UE 可能会规范化大小写、对象路径或浮点格式。但对向量、颜色、枚举等结构化值，它是排查“命令成功但值被回退/归零”的关键依据。
+- JSON 结构错误不能静默吞掉。通用返回字段为 `warnings[]` 或结果项内的 `json_issues[]`，每项包含 `severity/code/path/message`。`asset_apply_property_json` 的坏条目和字段错误会进入对应 `property_results[].json_issues[]`。
+- Blueprint / UMG / AnimBlueprint 变量类型统一使用 `pin_category/pin_subcategory/pin_subcategory_object/container_type/value_type`。常见和中频 UE 结构体、枚举、对象/类资产可写别名，例如 `vector/rotator/transform/linearcolor/hitresult/gameplaytag/key/slatebrush/collisionchannel/actor/staticmesh/niagarasystem/userwidget`；`map` 必须写 `value_type`。
 - JSON / 结构化 JSON apply 的解析失败必须可见：
   - 单文件 `json_file` 读取或语法解析失败会直接失败返回 `json_file_not_found / load_json_file_failed / json_parse_failed`。
   - 文件夹式 workflow 中，可选 JSON 文件只有不存在时可跳过；如果文件存在但读取或语法解析失败，会失败返回并带文件路径。
   - 可恢复的坏条目，例如数组元素不是 object、缺 `name/id/property_name/value_text` 等，会写入 `warnings[] / warning_count` 或 `property_results[]`，不应静默丢弃。
+  - 新增或维护 JSON/结构化 JSON apply 时必须优先接入统一诊断工具，至少覆盖未知字段、字段类型不匹配、必填字段缺失、数组元素类型错误，并在 warning/error 中保留完整 JSON path。
 - 以 `UeAgentInterface_Usage.md` 为完整字段定义来源，本目录只保留高频说明
 
 ## 资产编辑优先级
@@ -386,7 +389,10 @@
   - 用途：在 UAI 写入 Niagara System / Emitter / Stage / Module 后刷新 overview、emitter execution order、cached traversal data 和 Niagara ViewModel；用于处理“手动新增/删除 emitter 后 System 才恢复运行”的缓存/执行图过期问题。`niagara_compile_system` 对 System 默认会先执行同类刷新。
 - `niagara_system_runtime_probe`
   - 分册：`07_Niagara_System.md`
-  - 用途：推进 Niagara 编辑器预览组件并返回 System / Emitter 执行状态、粒子数和生成数；不启动 PIE / game 窗口。
+  - 用途：默认推进 Niagara 编辑器预览组件并返回 System / Emitter 执行状态、粒子数和生成数；`sample_mode=current_preview` 可只读当前暂停预览状态；不启动 PIE / game 窗口。
+- `niagara_preview_advance`
+  - 分册：`07_Niagara_System.md`
+  - 用途：从 0 或当前预览状态连续 tick 到目标帧并暂停，返回 `preview_state_token`；后续 `niagara_system_runtime_probe(sample_mode=current_preview)` 与 `niagara_screenshot(capture_mode=current_preview)` 使用该 token 只读同一状态。
 
 ## 2026-04-21 增量补齐的索引命令
 

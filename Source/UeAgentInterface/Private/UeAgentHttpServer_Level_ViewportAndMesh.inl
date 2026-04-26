@@ -357,7 +357,9 @@ bool FUeAgentHttpServer::CmdViewportFrameActor(const FUeAgentRequestContext& Ctx
 			double X = 0.0;
 			double Y = 0.0;
 			double Z = 0.0;
-			if (!Obj->TryGetNumberField(TEXT("x"), X) || !Obj->TryGetNumberField(TEXT("y"), Y) || !Obj->TryGetNumberField(TEXT("z"), Z))
+			if (!UeAgentJsonDiagnostics::TryReadNumberFieldByAliases(Obj, { TEXT("x"), TEXT("X") }, X)
+				|| !UeAgentJsonDiagnostics::TryReadNumberFieldByAliases(Obj, { TEXT("y"), TEXT("Y") }, Y)
+				|| !UeAgentJsonDiagnostics::TryReadNumberFieldByAliases(Obj, { TEXT("z"), TEXT("Z") }, Z))
 			{
 				return false;
 			}
@@ -724,7 +726,9 @@ bool FUeAgentHttpServer::CmdViewportFrameActors(const FUeAgentRequestContext& Ct
 			double X = 0.0;
 			double Y = 0.0;
 			double Z = 0.0;
-			if (!Obj->TryGetNumberField(TEXT("x"), X) || !Obj->TryGetNumberField(TEXT("y"), Y) || !Obj->TryGetNumberField(TEXT("z"), Z))
+			if (!UeAgentJsonDiagnostics::TryReadNumberFieldByAliases(Obj, { TEXT("x"), TEXT("X") }, X)
+				|| !UeAgentJsonDiagnostics::TryReadNumberFieldByAliases(Obj, { TEXT("y"), TEXT("Y") }, Y)
+				|| !UeAgentJsonDiagnostics::TryReadNumberFieldByAliases(Obj, { TEXT("z"), TEXT("Z") }, Z))
 			{
 				return false;
 			}
@@ -996,7 +1000,9 @@ bool FUeAgentHttpServer::CmdViewportFrameFolder(const FUeAgentRequestContext& Ct
 			double X = 0.0;
 			double Y = 0.0;
 			double Z = 0.0;
-			if (!Obj->TryGetNumberField(TEXT("x"), X) || !Obj->TryGetNumberField(TEXT("y"), Y) || !Obj->TryGetNumberField(TEXT("z"), Z))
+			if (!UeAgentJsonDiagnostics::TryReadNumberFieldByAliases(Obj, { TEXT("x"), TEXT("X") }, X)
+				|| !UeAgentJsonDiagnostics::TryReadNumberFieldByAliases(Obj, { TEXT("y"), TEXT("Y") }, Y)
+				|| !UeAgentJsonDiagnostics::TryReadNumberFieldByAliases(Obj, { TEXT("z"), TEXT("Z") }, Z))
 			{
 				return false;
 			}
@@ -2754,7 +2760,9 @@ bool FUeAgentHttpServer::CmdLevelSweepCapsulePath(const FUeAgentRequestContext& 
 			return false;
 		}
 		double X = 0.0, Y = 0.0, Z = 0.0;
-		if (!Obj->TryGetNumberField(TEXT("x"), X) || !Obj->TryGetNumberField(TEXT("y"), Y) || !Obj->TryGetNumberField(TEXT("z"), Z))
+		if (!UeAgentJsonDiagnostics::TryReadNumberFieldByAliases(Obj, { TEXT("x"), TEXT("X") }, X)
+			|| !UeAgentJsonDiagnostics::TryReadNumberFieldByAliases(Obj, { TEXT("y"), TEXT("Y") }, Y)
+			|| !UeAgentJsonDiagnostics::TryReadNumberFieldByAliases(Obj, { TEXT("z"), TEXT("Z") }, Z))
 		{
 			return false;
 		}

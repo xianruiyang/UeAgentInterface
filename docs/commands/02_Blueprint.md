@@ -47,9 +47,15 @@
 > 废弃写入命令已迁移到 `deprecatedCommand/02_Blueprint.md` 的对应章节。
 
 - `blueprint_add_variable` 的常用高级类型参数：
-  - `pin_subcategory`：主要用于 `PC_Real` 的 `float/double` 区分。
-  - `pin_subcategory_object`：对象、类、结构体等需要附带类型对象时使用。
-  - `container_type`：支持 `array/set/map`。
+  - `pin_category`：支持 `bool/int/int64/byte/enum/float/double/name/string/text/object/class/softobject/softclass/interface/struct`。
+  - 常见 UE 结构体可以直接写在 `pin_category`：`vector/vector2d/vector4/rotator/transform/linearcolor/color/quat/intpoint/intvector/int64vector2/intvector4/randomstream/guid/datetime/timespan/framenumber/frametime/framerate/softobjectpath/softclasspath/primaryassettype/primaryassetid/toplevelassetpath/box/box2d/boxspherebounds/twovectors`。
+  - 中频引擎/输入/UI 结构体别名：`hitresult/timerhandle/datatablerowhandle/curvetablerowhandle/vectornetquantize/vectornetquantize10/vectornetquantize100/vectornetquantizenormal/key/inputchord/gameplaytag/gameplaytagcontainer/gameplaytagquery/margin/slatecolor/slatebrush/slatefontinfo/widgettransform/anchors/anchordata`。
+  - 常用枚举别名可直接作为 `pin_category`，或写在 `pin_subcategory_object`：`collisionchannel/objecttypequery/tracetypequery/inputevent/controllerhand/touchindex/physicalsurface`。枚举最终按 UE 变量习惯落为 `byte + UEnum`。
+  - `pin_subcategory`：主要用于 `PC_Real` 的 `float/double` 区分；结构体和枚举也可用这里写别名。
+  - `pin_subcategory_object`：对象、类、枚举、结构体等需要附带类型对象时使用；接受完整 `/Script/...` 路径、资产路径，也接受常用别名。
+  - 常用对象/类/软引用别名：`object/actor/pawn/character/controller/playercontroller/gamemodebase/gamestatebase/playerstate/hud/playercameramanager/gameinstance/savegame/world/level/worldsubsystem/gameinstancesubsystem/enginesubsystem/actorcomponent/scenecomponent/primitivecomponent/staticmeshcomponent/skeletalmeshcomponent/cameracomponent/scenecapturecomponent2d/springarmcomponent/audiocomponent/timelinecomponent/particlesystemcomponent/widgetcomponent/niagaracomponent/staticmesh/skeletalmesh/materialinterface/material/materialinstance/materialinstanceconstant/texture/texture2d/texturerendertarget2d/soundbase/soundwave/soundcue/particlesystem/animsequence/animmontage/blendspace/animblueprint/animinstance/skeleton/physicsasset/datatable/dataasset/primarydataasset/curvefloat/curvevector/curvelinearcolor/blueprint/font/slatebrushasset/userwidget/widget/levelsequence/niagarasystem/niagaraemitter/inputaction/inputmappingcontext`。
+  - `container_type`：支持 `array/set/map`；`map` 必须提供 `value_type`，其格式与外层 `type` 一致但不能再嵌套容器。
+  - `default_value`：使用 UE `ImportText` 字符串，例如 `Vector` 用 `(X=1.000000,Y=2.000000,Z=3.000000)`，`Rotator` 用 `(Pitch=0.000000,Yaw=90.000000,Roll=0.000000)`。
   - `instance_editable=true`：把变量改成实例可编辑。
 - `WidgetBlueprint` 本质上也是 `Blueprint`，因此 UI 变量、事件图逻辑仍然可以走 `blueprint_add_variable`、`blueprint_add_custom_event_node` 等命令。
 
@@ -100,6 +106,33 @@
 `blueprint_set_component_property`、`blueprint_set_cdo_property` 以及 `blueprint_apply_folder` 中的组件/节点属性回写，都会暴露写入观测信息。原子命令返回 `requested_value_text`、`applied_value_text`、`property_import_status`、`property_import_verified`、`value_text_exact_match`、`value_text_changed_after_import`、`cpp_type`；文件夹式回写会把缺少 `property_name` / `value_text`、`ImportText` 失败、写后读回不一致等情况写入 `warning_count / warnings`。
 
 `blueprint_apply_folder` 的可选文件（例如 `members/variables.json`、`members/delegates.json`、`components/tree.json`、`members/defaults.json`）只有不存在时才会跳过；如果文件存在但读取失败或 JSON 语法解析失败，会直接失败返回并带文件路径。数组条目不是 object 或缺 `name/property_name/value_text` 等关键字段时会进入 `warning_count / warnings[]`。
+
+`members/variables.json` 的变量类型推荐写在 `type` 内：
+
+```json
+{
+  "variables": [
+    {
+      "name": "MoveOffset",
+      "type": { "pin_category": "vector" },
+      "default_value": "(X=0.000000,Y=0.000000,Z=100.000000)",
+      "instance_editable": true
+    },
+    {
+      "name": "Scores",
+      "type": {
+        "pin_category": "string",
+        "container_type": "map",
+        "value_type": { "pin_category": "int" }
+      },
+      "default_value": "",
+      "instance_editable": false
+    }
+  ]
+}
+```
+
+导出时会保留 `pin_category/pin_subcategory/pin_subcategory_object/container_type/value_type/default_value`，其中 `default_value` 来自 UE 属性系统读回，不依赖请求字符串。
 
 ## 常见流程
 

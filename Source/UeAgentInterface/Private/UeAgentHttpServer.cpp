@@ -2,6 +2,7 @@
 
 #include "UeAgentHttpServer.h"
 
+#include "UeAgentJsonDiagnostics.h"
 #include "UeAgentInterfaceLogger.h"
 #include "UeAgentInterfaceSettings.h"
 
@@ -936,7 +937,7 @@ bool FUeAgentHttpServer::JsonTryGetString(const TSharedPtr<FJsonObject>& Obj, co
 
 bool FUeAgentHttpServer::JsonTryGetNumber(const TSharedPtr<FJsonObject>& Obj, const FString& Key, double& OutValue)
 {
-	return Obj.IsValid() && Obj->TryGetNumberField(Key, OutValue);
+	return UeAgentJsonDiagnostics::TryReadNumberFieldByAliases(Obj, { Key }, OutValue);
 }
 
 bool FUeAgentHttpServer::JsonTryGetBool(const TSharedPtr<FJsonObject>& Obj, const FString& Key, bool& OutValue)
@@ -946,24 +947,14 @@ bool FUeAgentHttpServer::JsonTryGetBool(const TSharedPtr<FJsonObject>& Obj, cons
 
 bool FUeAgentHttpServer::JsonTryGetVector(const TSharedPtr<FJsonObject>& Obj, const FString& Key, FVector& OutValue)
 {
-	TSharedPtr<FJsonObject> V;
-	if (!JsonTryGetObject(Obj, Key, V))
-	{
-		return false;
-	}
-	double X = 0, Y = 0, Z = 0;
-	return JsonTryGetNumber(V, TEXT("x"), X) && JsonTryGetNumber(V, TEXT("y"), Y) && JsonTryGetNumber(V, TEXT("z"), Z) && (OutValue = FVector(X, Y, Z), true);
+	const TSharedPtr<FJsonValue>* FieldValue = UeAgentJsonDiagnostics::FindFieldValue(Obj, Key);
+	return FieldValue && UeAgentJsonDiagnostics::TryReadVectorValue(*FieldValue, OutValue);
 }
 
 bool FUeAgentHttpServer::JsonTryGetRotator(const TSharedPtr<FJsonObject>& Obj, const FString& Key, FRotator& OutValue)
 {
-	TSharedPtr<FJsonObject> R;
-	if (!JsonTryGetObject(Obj, Key, R))
-	{
-		return false;
-	}
-	double Pitch = 0, Yaw = 0, Roll = 0;
-	return JsonTryGetNumber(R, TEXT("pitch"), Pitch) && JsonTryGetNumber(R, TEXT("yaw"), Yaw) && JsonTryGetNumber(R, TEXT("roll"), Roll) && (OutValue = FRotator(Pitch, Yaw, Roll), true);
+	const TSharedPtr<FJsonValue>* FieldValue = UeAgentJsonDiagnostics::FindFieldValue(Obj, Key);
+	return FieldValue && UeAgentJsonDiagnostics::TryReadRotatorValue(*FieldValue, OutValue);
 }
 
 TSharedPtr<FJsonObject> FUeAgentHttpServer::VecToJson(const FVector& V)

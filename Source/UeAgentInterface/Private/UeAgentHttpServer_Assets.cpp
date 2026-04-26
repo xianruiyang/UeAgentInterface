@@ -1,6 +1,7 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "UeAgentHttpServer_Assets.h"
+#include "UeAgentJsonDiagnostics.h"
 #include "UeAgentInterfaceLogger.h"
 
 #include "AssetToolsModule.h"
@@ -1696,29 +1697,49 @@ bool FUeAgentHttpServer::CmdAssetApplyPropertyJson(const FUeAgentRequestContext&
 	int32 AppliedPropertyCount = 0;
 	TArray<TSharedPtr<FJsonValue>> PropertyResultsJson;
 	Asset->Modify();
+	int32 PropertyIndex = 0;
 	for (const TSharedPtr<FJsonValue>& PropertyValue : *PropertiesArray)
 	{
-		const TSharedPtr<FJsonObject>* PropertyObjPtr = nullptr;
-		if (!PropertyValue.IsValid() || !PropertyValue->TryGetObject(PropertyObjPtr) || !PropertyObjPtr || !PropertyObjPtr->IsValid())
+		const FString PropertyPath = FString::Printf(TEXT("properties[%d]"), PropertyIndex++);
+		TArray<TSharedPtr<FJsonValue>> PropertyJsonIssues;
+		TSharedPtr<FJsonObject> PropertyObj;
+		if (!UeAgentJsonDiagnostics::ReadObjectFromValue(PropertyValue, PropertyPath, PropertyObj, PropertyJsonIssues))
 		{
-			PropertyResultsJson.Add(MakeShared<FJsonValueObject>(FUeAgentHttpServer::MakePropertyImportResultJson(TEXT(""), nullptr, TEXT(""), TEXT(""), TEXT("invalid_property_entry"))));
+			TSharedPtr<FJsonObject> ResultObj = FUeAgentHttpServer::MakePropertyImportResultJson(TEXT(""), nullptr, TEXT(""), TEXT(""), TEXT("invalid_property_entry"));
+			ResultObj->SetArrayField(TEXT("json_issues"), PropertyJsonIssues);
+			PropertyResultsJson.Add(MakeShared<FJsonValueObject>(ResultObj));
 			OutData->SetArrayField(TEXT("property_results"), PropertyResultsJson);
 			OutError = TEXT("invalid_property_entry");
 			return false;
 		}
 
+		UeAgentJsonDiagnostics::WarnUnknownFields(
+			PropertyObj,
+			PropertyPath,
+			{ TEXT("property_name"), TEXT("value_text"), TEXT("cpp_type") },
+			PropertyJsonIssues);
+
 		FString PropertyName;
 		FString ValueText;
-		if (!(*PropertyObjPtr)->TryGetStringField(TEXT("property_name"), PropertyName) || PropertyName.IsEmpty())
+		if (!UeAgentJsonDiagnostics::ReadStringField(PropertyObj, TEXT("property_name"), PropertyPath + TEXT(".property_name"), PropertyName, PropertyJsonIssues, true)
+			|| PropertyName.IsEmpty())
 		{
-			PropertyResultsJson.Add(MakeShared<FJsonValueObject>(FUeAgentHttpServer::MakePropertyImportResultJson(TEXT(""), nullptr, TEXT(""), TEXT(""), TEXT("missing_property_name"))));
+			if (PropertyName.IsEmpty())
+			{
+				UeAgentJsonDiagnostics::AddIssue(PropertyJsonIssues, TEXT("warning"), TEXT("json_missing_required_field"), PropertyPath + TEXT(".property_name"), TEXT("Required string field is empty."));
+			}
+			TSharedPtr<FJsonObject> ResultObj = FUeAgentHttpServer::MakePropertyImportResultJson(TEXT(""), nullptr, TEXT(""), TEXT(""), TEXT("missing_property_name"));
+			ResultObj->SetArrayField(TEXT("json_issues"), PropertyJsonIssues);
+			PropertyResultsJson.Add(MakeShared<FJsonValueObject>(ResultObj));
 			OutData->SetArrayField(TEXT("property_results"), PropertyResultsJson);
 			OutError = TEXT("missing_property_name");
 			return false;
 		}
-		if (!(*PropertyObjPtr)->TryGetStringField(TEXT("value_text"), ValueText))
+		if (!UeAgentJsonDiagnostics::ReadStringField(PropertyObj, TEXT("value_text"), PropertyPath + TEXT(".value_text"), ValueText, PropertyJsonIssues, true))
 		{
-			PropertyResultsJson.Add(MakeShared<FJsonValueObject>(FUeAgentHttpServer::MakePropertyImportResultJson(PropertyName, nullptr, TEXT(""), TEXT(""), TEXT("missing_value_text"))));
+			TSharedPtr<FJsonObject> ResultObj = FUeAgentHttpServer::MakePropertyImportResultJson(PropertyName, nullptr, TEXT(""), TEXT(""), TEXT("missing_value_text"));
+			ResultObj->SetArrayField(TEXT("json_issues"), PropertyJsonIssues);
+			PropertyResultsJson.Add(MakeShared<FJsonValueObject>(ResultObj));
 			OutData->SetArrayField(TEXT("property_results"), PropertyResultsJson);
 			OutError = TEXT("missing_value_text");
 			return false;
@@ -1732,6 +1753,10 @@ bool FUeAgentHttpServer::CmdAssetApplyPropertyJson(const FUeAgentRequestContext&
 			const FString ImportStatus = ImportError.Equals(TEXT("property_not_found"), ESearchCase::CaseSensitive) ? TEXT("property_not_found") : TEXT("import_failed");
 			TSharedPtr<FJsonObject> ResultObj = FUeAgentHttpServer::MakePropertyImportResultJson(PropertyName, nullptr, ValueText, TEXT(""), ImportStatus, ImportError);
 			ResultObj->SetStringField(TEXT("cpp_type"), CppType);
+			if (PropertyJsonIssues.Num() > 0)
+			{
+				ResultObj->SetArrayField(TEXT("json_issues"), PropertyJsonIssues);
+			}
 			PropertyResultsJson.Add(MakeShared<FJsonValueObject>(ResultObj));
 			OutData->SetArrayField(TEXT("property_results"), PropertyResultsJson);
 			OutError = ImportError.IsEmpty() ? FString::Printf(TEXT("asset_property_apply_failed:%s:%s"), *PropertyName, *ValueText) : ImportError;
@@ -1740,6 +1765,10 @@ bool FUeAgentHttpServer::CmdAssetApplyPropertyJson(const FUeAgentRequestContext&
 
 		TSharedPtr<FJsonObject> ResultObj = FUeAgentHttpServer::MakePropertyImportResultJson(PropertyName, nullptr, ValueText, AppliedValueText, TEXT("imported_and_read_back"));
 		ResultObj->SetStringField(TEXT("cpp_type"), CppType);
+		if (PropertyJsonIssues.Num() > 0)
+		{
+			ResultObj->SetArrayField(TEXT("json_issues"), PropertyJsonIssues);
+		}
 		PropertyResultsJson.Add(MakeShared<FJsonValueObject>(ResultObj));
 		++AppliedPropertyCount;
 	}

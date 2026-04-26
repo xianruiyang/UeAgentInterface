@@ -52,6 +52,8 @@ public class UeAgentInterface : ModuleRules
 				"EnhancedInput",
 				"InputBlueprintNodes",
 				"InputCore",
+				"GameplayTags",
+				"PhysicsCore",
 				"MaterialEditor",
 				"LevelSequence",
 				"MovieScene",

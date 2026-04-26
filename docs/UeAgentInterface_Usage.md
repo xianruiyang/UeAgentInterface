@@ -139,7 +139,7 @@ Niagara 相关批次默认启用护栏（自动 preflight + 编译日志 + emitt
 
 - 单文件 JSON：
   - `json_file` 缺失、文件不存在、文件读取失败、JSON 语法解析失败都会直接失败返回，错误码为 `missing_json_file`、`json_file_not_found`、`load_json_file_failed` 或 `json_parse_failed`。
-  - `asset_apply_property_json` 的 `properties[]` 条目不是对象、缺 `property_name`、缺 `value_text` 或 `ImportText` 失败时，都会在 `property_results[]` 中保留失败项。
+- `asset_apply_property_json` 的 `properties[]` 条目不是对象、缺 `property_name`、缺 `value_text`、字段拼写错误或 `ImportText` 失败时，都会在 `property_results[]` 中保留失败项；JSON 结构问题会写入对应结果的 `json_issues[]`。
 - 文件夹式结构化 JSON：
   - 必需 JSON 文件解析失败直接失败返回。
   - 可选 JSON 文件仅在“不存在”时跳过；只要文件存在但读取失败或 JSON 语法解析失败，就会失败返回，并把具体文件路径拼进错误字符串。
@@ -208,7 +208,7 @@ Niagara 相关批次默认启用护栏（自动 preflight + 编译日志 + emitt
 - 向量：`{"x":0,"y":0,"z":0}`
 - 旋转：`{"pitch":0,"yaw":0,"roll":0}`
 - 复杂属性写入：`value_text`（UE ImportText 格式）
-- 任何走 `value_text` / 单文件 JSON / 文件夹式结构化 JSON 的属性回写，都应返回或记录解析与写回观测信息：`requested_value_text`、`applied_value_text`、`property_value_read_back`、`property_import_status`、`property_import_verified`、`property_import_error`、`value_text_exact_match`、`value_text_changed_after_import`、`cpp_type`。批量/文件夹式 apply 会把缺字段、属性不存在、`ImportText` 失败、写后读回不一致写入 `warnings` 或 `property_results[]`。
+- 任何走 `value_text` / 单文件 JSON / 文件夹式结构化 JSON 的属性回写，都应返回或记录解析与写回观测信息：`requested_value_text`、`applied_value_text`、`property_value_read_back`、`property_import_status`、`property_import_verified`、`property_import_error`、`value_text_exact_match`、`value_text_changed_after_import`、`cpp_type`。批量/文件夹式 apply 会把缺字段、字段类型不对、属性不存在、`ImportText` 失败、写后读回不一致写入 `warnings`、`json_issues[]` 或 `property_results[]`。
 - `value_text_changed_after_import=true` 不是自动失败；UE 可能会规范化导入文本。但对向量、颜色、枚举和对象引用，它是发现“命令成功但实际值没有按请求落下”的关键返回字段。
 
 ## 4. 指令总览
@@ -894,15 +894,19 @@ Modeling 补充：
   - 返回：若目标路径存在已删除但尚未 GC 的内存残影，会返回 `found_stale_target_object_before_duplicate` / `detached_stale_target_object_before_duplicate`
 - `niagara_open_editor`
   - 关键参数：`asset_path`
+- `niagara_preview_advance`
+    - 关键参数：`asset_path`，可选：`open_editor_if_needed`、`reset_preview`、`target_frame/frame/advance_frames/preview_advance_frames`、`target_time_seconds/preview_advance_seconds`、`tick_delta_seconds/preview_tick_delta_seconds`、`advance_mode`、`pause_after_advance`
+    - 返回：`preview_state_token`、`target_frame`、`advanced_frame_count`、`system_age`、`current_frame_estimate`、`advance_semantics`、`used_seek=false`、目标帧 `stats`
+    - 说明：从 0 或当前预览状态连续 tick 到目标帧并暂停，不启动 PIE / game。Collision Event / Death Event / Event Handler 类效果推荐先用该命令推进一次，再用 current-preview 的 probe 和 screenshot 只读同一状态
 - `niagara_screenshot`
-    - 关键参数：`asset_path`，可选：`target=window|viewport`、`open_editor_if_needed`、`offscreen/use_offscreen_renderer`、`reset_preview`、`preview_advance_seconds`、`format`、`quality`、`max_size`、`file_path`
-    - 返回：截图 `file_path`、尺寸、字节数、`capture_mode`、`preview_prepare_requested`、`pre_preview_redraw_performed`、`capture_redraw_performed`
-    - 说明：用于调试 Niagara 编辑器界面是否真实写入；只截图编辑器 UI，不运行 PIE / game。`reset_preview=false` 不触发预览准备；离屏截图不会强制 redraw 真实 Slate 窗口
+    - 关键参数：`asset_path`，可选：`target=window|viewport`、`open_editor_if_needed`、`offscreen/use_offscreen_renderer`、`capture_mode=current_preview`、`expected_preview_state_token`、`expected_frame`、`reset_preview`、`preview_advance_seconds`、`format`、`quality`、`max_size`、`file_path`
+    - 返回：截图 `file_path`、尺寸、字节数、`capture_mode`、`preview_prepare_requested`、`current_preview_validation`、`pre_preview_redraw_performed`、`capture_redraw_performed`
+    - 说明：用于调试 Niagara 编辑器界面是否真实写入；只截图编辑器 UI，不运行 PIE / game。`capture_mode=current_preview` 为严格只读当前暂停预览，不 reset、不 activate、不 tick，建议配合 `niagara_preview_advance` 返回的 `preview_state_token`
 - `niagara_system_runtime_probe`
     - 关键参数：`asset_path`
-    - 可选参数：`open_editor_if_needed`、`reset_preview`、`tick_count`、`tick_delta_seconds`、`advance_mode`、`include_script_runtime_stats`、`include_snapshots`
-    - 返回：预览组件快照、System / Emitter 执行状态、粒子数和生成数
-    - 说明：不启动 PIE / game 窗口，只推进 Niagara 编辑器预览组件，用于验证 System 是否实际产生粒子
+    - 可选参数：`open_editor_if_needed`、`sample_mode=current_preview`、`expected_preview_state_token`、`expected_frame`、`reset_preview`、`tick_count`、`tick_delta_seconds`、`advance_mode`、`include_script_runtime_stats`、`include_snapshots`
+    - 返回：`initial_stats`、`final_stats`、`summary.emitter_peaks[]`、`current_preview_validation`、可选 `snapshots[]`、System / Emitter 执行状态、粒子数和生成数
+    - 说明：不启动 PIE / game 窗口。默认 simulate 模式会推进 Niagara 编辑器预览组件；`sample_mode=current_preview` 为严格只读当前暂停预览，不 reset、不 activate、不 tick。Collision Event / Death Event / 短 lifetime 粒子推荐流程：`niagara_preview_advance` 连续推进并暂停，再用 current-preview probe 读取同一状态
 - `niagara_get_info`
     - 关键参数：`asset_path`
 - `niagara_get_stack_issues`

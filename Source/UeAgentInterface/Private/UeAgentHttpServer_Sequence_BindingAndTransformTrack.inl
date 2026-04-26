@@ -1689,10 +1689,10 @@ bool FUeAgentHttpServer::CmdSequenceAddPropertyKey(const FUeAgentRequestContext&
 			double Y = 0.0;
 			double Z = 0.0;
 			double W = 0.0;
-			const bool bHasX = (*VectorObject)->TryGetNumberField(TEXT("x"), X);
-			const bool bHasY = (*VectorObject)->TryGetNumberField(TEXT("y"), Y);
-			const bool bHasZ = (*VectorObject)->TryGetNumberField(TEXT("z"), Z);
-			const bool bHasW = (*VectorObject)->TryGetNumberField(TEXT("w"), W);
+			const bool bHasX = UeAgentJsonDiagnostics::TryReadNumberFieldByAliases(*VectorObject, { TEXT("x"), TEXT("X") }, X);
+			const bool bHasY = UeAgentJsonDiagnostics::TryReadNumberFieldByAliases(*VectorObject, { TEXT("y"), TEXT("Y") }, Y);
+			const bool bHasZ = UeAgentJsonDiagnostics::TryReadNumberFieldByAliases(*VectorObject, { TEXT("z"), TEXT("Z") }, Z);
+			const bool bHasW = UeAgentJsonDiagnostics::TryReadNumberFieldByAliases(*VectorObject, { TEXT("w"), TEXT("W") }, W);
 			if (!bHasX || !bHasY)
 			{
 				return false;
@@ -1717,10 +1717,10 @@ bool FUeAgentHttpServer::CmdSequenceAddPropertyKey(const FUeAgentRequestContext&
 			double Y = 0.0;
 			double Z = 0.0;
 			double W = 0.0;
-			const bool bHasX = JsonTryGetNumber(Obj, TEXT("x"), X);
-			const bool bHasY = JsonTryGetNumber(Obj, TEXT("y"), Y);
-			const bool bHasZ = JsonTryGetNumber(Obj, TEXT("z"), Z);
-			const bool bHasW = JsonTryGetNumber(Obj, TEXT("w"), W);
+			const bool bHasX = UeAgentJsonDiagnostics::TryReadNumberFieldByAliases(Obj, { TEXT("x"), TEXT("X") }, X);
+			const bool bHasY = UeAgentJsonDiagnostics::TryReadNumberFieldByAliases(Obj, { TEXT("y"), TEXT("Y") }, Y);
+			const bool bHasZ = UeAgentJsonDiagnostics::TryReadNumberFieldByAliases(Obj, { TEXT("z"), TEXT("Z") }, Z);
+			const bool bHasW = UeAgentJsonDiagnostics::TryReadNumberFieldByAliases(Obj, { TEXT("w"), TEXT("W") }, W);
 			if (!bHasX || !bHasY)
 			{
 				return false;
@@ -2111,9 +2111,9 @@ bool FUeAgentHttpServer::CmdSequenceAddPropertyKey(const FUeAgentRequestContext&
 				return false;
 			}
 
-			const bool bHasPitch = (*RotatorObject)->TryGetNumberField(TEXT("pitch"), OutValue.Pitch);
-			const bool bHasYaw = (*RotatorObject)->TryGetNumberField(TEXT("yaw"), OutValue.Yaw);
-			const bool bHasRoll = (*RotatorObject)->TryGetNumberField(TEXT("roll"), OutValue.Roll);
+			const bool bHasPitch = UeAgentJsonDiagnostics::TryReadNumberFieldByAliases(*RotatorObject, { TEXT("pitch"), TEXT("Pitch") }, OutValue.Pitch);
+			const bool bHasYaw = UeAgentJsonDiagnostics::TryReadNumberFieldByAliases(*RotatorObject, { TEXT("yaw"), TEXT("Yaw") }, OutValue.Yaw);
+			const bool bHasRoll = UeAgentJsonDiagnostics::TryReadNumberFieldByAliases(*RotatorObject, { TEXT("roll"), TEXT("Roll") }, OutValue.Roll);
 			return bHasPitch && bHasYaw && bHasRoll;
 		};
 
@@ -2124,9 +2124,9 @@ bool FUeAgentHttpServer::CmdSequenceAddPropertyKey(const FUeAgentRequestContext&
 				return false;
 			}
 
-			const bool bHasPitch = JsonTryGetNumber(Obj, TEXT("pitch"), OutValue.Pitch);
-			const bool bHasYaw = JsonTryGetNumber(Obj, TEXT("yaw"), OutValue.Yaw);
-			const bool bHasRoll = JsonTryGetNumber(Obj, TEXT("roll"), OutValue.Roll);
+			const bool bHasPitch = UeAgentJsonDiagnostics::TryReadNumberFieldByAliases(Obj, { TEXT("pitch"), TEXT("Pitch") }, OutValue.Pitch);
+			const bool bHasYaw = UeAgentJsonDiagnostics::TryReadNumberFieldByAliases(Obj, { TEXT("yaw"), TEXT("Yaw") }, OutValue.Yaw);
+			const bool bHasRoll = UeAgentJsonDiagnostics::TryReadNumberFieldByAliases(Obj, { TEXT("roll"), TEXT("Roll") }, OutValue.Roll);
 			return bHasPitch && bHasYaw && bHasRoll;
 		};
 
@@ -2683,10 +2683,10 @@ bool FUeAgentHttpServer::CmdSequenceAddPropertyKey(const FUeAgentRequestContext&
 		double Green = 0.0;
 		double Blue = 0.0;
 		double Alpha = 1.0;
-		const bool bHasRed = (*ColorObject)->TryGetNumberField(TEXT("r"), Red) || (*ColorObject)->TryGetNumberField(TEXT("red"), Red);
-		const bool bHasGreen = (*ColorObject)->TryGetNumberField(TEXT("g"), Green) || (*ColorObject)->TryGetNumberField(TEXT("green"), Green);
-		const bool bHasBlue = (*ColorObject)->TryGetNumberField(TEXT("b"), Blue) || (*ColorObject)->TryGetNumberField(TEXT("blue"), Blue);
-		(*ColorObject)->TryGetNumberField(TEXT("a"), Alpha) || (*ColorObject)->TryGetNumberField(TEXT("alpha"), Alpha);
+		const bool bHasRed = UeAgentJsonDiagnostics::TryReadNumberFieldByAliases(*ColorObject, { TEXT("r"), TEXT("R"), TEXT("red"), TEXT("Red") }, Red);
+		const bool bHasGreen = UeAgentJsonDiagnostics::TryReadNumberFieldByAliases(*ColorObject, { TEXT("g"), TEXT("G"), TEXT("green"), TEXT("Green") }, Green);
+		const bool bHasBlue = UeAgentJsonDiagnostics::TryReadNumberFieldByAliases(*ColorObject, { TEXT("b"), TEXT("B"), TEXT("blue"), TEXT("Blue") }, Blue);
+		UeAgentJsonDiagnostics::TryReadNumberFieldByAliases(*ColorObject, { TEXT("a"), TEXT("A"), TEXT("alpha"), TEXT("Alpha") }, Alpha);
 		if (!bHasRed || !bHasGreen || !bHasBlue)
 		{
 			return false;
@@ -2703,10 +2703,10 @@ bool FUeAgentHttpServer::CmdSequenceAddPropertyKey(const FUeAgentRequestContext&
 		double Green = 0.0;
 		double Blue = 0.0;
 		double Alpha = 1.0;
-		const bool bHasRed = JsonTryGetNumber(Ctx.Params, TEXT("red"), Red);
-		const bool bHasGreen = JsonTryGetNumber(Ctx.Params, TEXT("green"), Green);
-		const bool bHasBlue = JsonTryGetNumber(Ctx.Params, TEXT("blue"), Blue);
-		JsonTryGetNumber(Ctx.Params, TEXT("alpha"), Alpha);
+		const bool bHasRed = UeAgentJsonDiagnostics::TryReadNumberFieldByAliases(Ctx.Params, { TEXT("r"), TEXT("R"), TEXT("red"), TEXT("Red") }, Red);
+		const bool bHasGreen = UeAgentJsonDiagnostics::TryReadNumberFieldByAliases(Ctx.Params, { TEXT("g"), TEXT("G"), TEXT("green"), TEXT("Green") }, Green);
+		const bool bHasBlue = UeAgentJsonDiagnostics::TryReadNumberFieldByAliases(Ctx.Params, { TEXT("b"), TEXT("B"), TEXT("blue"), TEXT("Blue") }, Blue);
+		UeAgentJsonDiagnostics::TryReadNumberFieldByAliases(Ctx.Params, { TEXT("a"), TEXT("A"), TEXT("alpha"), TEXT("Alpha") }, Alpha);
 		if (!bHasRed || !bHasGreen || !bHasBlue)
 		{
 			OutError = TEXT("missing_or_invalid_color_value");

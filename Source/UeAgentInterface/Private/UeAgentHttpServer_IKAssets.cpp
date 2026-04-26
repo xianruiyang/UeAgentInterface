@@ -2,6 +2,8 @@
 
 #include "UeAgentHttpServer_IKAssets.h"
 
+#include "UeAgentJsonDiagnostics.h"
+
 #include "Animation/Skeleton.h"
 #include "AssetRegistry/AssetRegistryModule.h"
 #include "AssetToolsModule.h"
@@ -185,7 +187,9 @@ namespace UeAgentIKAssetOps
 		double X = 0.0;
 		double Y = 0.0;
 		double Z = 0.0;
-		if (!(*ValueObject)->TryGetNumberField(TEXT("x"), X) || !(*ValueObject)->TryGetNumberField(TEXT("y"), Y) || !(*ValueObject)->TryGetNumberField(TEXT("z"), Z))
+		if (!UeAgentJsonDiagnostics::TryReadNumberFieldByAliases(*ValueObject, { TEXT("x"), TEXT("X") }, X)
+			|| !UeAgentJsonDiagnostics::TryReadNumberFieldByAliases(*ValueObject, { TEXT("y"), TEXT("Y") }, Y)
+			|| !UeAgentJsonDiagnostics::TryReadNumberFieldByAliases(*ValueObject, { TEXT("z"), TEXT("Z") }, Z))
 		{
 			return false;
 		}
@@ -210,7 +214,9 @@ namespace UeAgentIKAssetOps
 		double Pitch = 0.0;
 		double Yaw = 0.0;
 		double Roll = 0.0;
-		if (!(*ValueObject)->TryGetNumberField(TEXT("pitch"), Pitch) || !(*ValueObject)->TryGetNumberField(TEXT("yaw"), Yaw) || !(*ValueObject)->TryGetNumberField(TEXT("roll"), Roll))
+		if (!UeAgentJsonDiagnostics::TryReadNumberFieldByAliases(*ValueObject, { TEXT("pitch"), TEXT("Pitch") }, Pitch)
+			|| !UeAgentJsonDiagnostics::TryReadNumberFieldByAliases(*ValueObject, { TEXT("yaw"), TEXT("Yaw") }, Yaw)
+			|| !UeAgentJsonDiagnostics::TryReadNumberFieldByAliases(*ValueObject, { TEXT("roll"), TEXT("Roll") }, Roll))
 		{
 			return false;
 		}
@@ -2739,9 +2745,9 @@ bool FUeAgentHttpServer::CmdIKRetargeterSetPose(const FUeAgentRequestContext& Ct
 				if (!bHasRotation)
 				{
 					RotationOffset = FRotator::ZeroRotator;
-					const bool bHasPitch = (*BoneObject)->TryGetNumberField(TEXT("pitch"), RotationOffset.Pitch);
-					const bool bHasYaw = (*BoneObject)->TryGetNumberField(TEXT("yaw"), RotationOffset.Yaw);
-					const bool bHasRoll = (*BoneObject)->TryGetNumberField(TEXT("roll"), RotationOffset.Roll);
+					const bool bHasPitch = UeAgentJsonDiagnostics::TryReadNumberFieldByAliases(*BoneObject, { TEXT("pitch"), TEXT("Pitch") }, RotationOffset.Pitch);
+					const bool bHasYaw = UeAgentJsonDiagnostics::TryReadNumberFieldByAliases(*BoneObject, { TEXT("yaw"), TEXT("Yaw") }, RotationOffset.Yaw);
+					const bool bHasRoll = UeAgentJsonDiagnostics::TryReadNumberFieldByAliases(*BoneObject, { TEXT("roll"), TEXT("Roll") }, RotationOffset.Roll);
 					bHasRotation = bHasPitch || bHasYaw || bHasRoll;
 				}
 				if (!bHasRotation)

@@ -22,7 +22,7 @@
 | `anim_blueprint_disconnect_pins` | **Deprecated for authoring**：断开指定连线或某个引脚上的全部连线 | `asset_path`、`graph_name`、`from_node_guid`、`from_pin`、可选 `to_node_guid` / `to_pin`、`compile_after_disconnect`、`save_after_disconnect` |
 | `anim_blueprint_set_pin_default_value` | **Deprecated for authoring**：设置引脚默认值 | `asset_path`、`graph_name`、`node_guid`、`pin_name`、`default_value`、`compile_after_set`、`save_after_set` |
 | `anim_blueprint_remove_node` | **Deprecated for authoring**：删除图节点 | `asset_path`、`graph_name`、`node_guid`、`compile_after_remove`、`save_after_remove` |
-| `anim_blueprint_add_variable` | **Deprecated for authoring**：新增变量定义 | `asset_path`、`variable_name`、`pin_category`、`pin_subcategory`、`pin_subcategory_object`、`container_type`、`default_value`、`instance_editable`、`compile_after_add`、`save_after_add` |
+| `anim_blueprint_add_variable` | **Deprecated for authoring**：新增变量定义；保留给 bootstrap / smoke / 局部补修 | `asset_path`、`variable_name`、`pin_category`、`pin_subcategory`、`pin_subcategory_object`、`container_type`、`value_type`（map 必填）、`default_value`、`instance_editable`、`compile_after_add`、`save_after_add` |
 | `anim_blueprint_remove_variable` | **Deprecated for authoring**：删除变量定义 | `asset_path`、`variable_name`、`compile_after_remove`、`save_after_remove` |
 | `anim_blueprint_add_function_graph` | **Deprecated for authoring**：新增逻辑函数图 | `asset_path`、`function_name`、`compile_after_add`、`save_after_add` |
 | `anim_blueprint_add_macro_graph` | **Deprecated for authoring**：新增宏图 | `asset_path`、`macro_name`、`compile_after_add`、`save_after_add` |

@@ -1,6 +1,7 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "UeAgentHttpServer_Niagara.h"
+#include "UeAgentJsonDiagnostics.h"
 #include "UeAgentInterfaceLogger.h"
 
 #include "AssetRegistry/AssetRegistryModule.h"
@@ -1008,6 +1009,190 @@ namespace UeAgentNiagaraOps
 				WorldManager->FlushComputeAndDeferredQueues(false);
 			}
 		}
+	}
+
+	static constexpr const TCHAR* UeAgentNiagaraPreviewStateTagPrefix = TEXT("UAI_NiagaraPreviewState=");
+
+	static bool ResolveNiagaraSystemPreviewComponent(UNiagaraSystem* NiagaraSystem, const bool bOpenEditorIfNeeded, UNiagaraComponent*& OutPreviewComponent, TSharedPtr<FNiagaraSystemViewModel>& OutSystemViewModel, FString& OutError)
+	{
+		OutPreviewComponent = nullptr;
+		OutSystemViewModel.Reset();
+
+		if (!NiagaraSystem)
+		{
+			OutError = TEXT("asset_is_not_niagara_system");
+			return false;
+		}
+
+		UObject* Asset = NiagaraSystem;
+		IAssetEditorInstance* AssetEditor = GetNiagaraAssetEditor(Asset, bOpenEditorIfNeeded, OutError);
+		if (!AssetEditor)
+		{
+			return false;
+		}
+
+		FNiagaraEditorModule* NiagaraEditorModule = FModuleManager::GetModulePtr<FNiagaraEditorModule>(TEXT("NiagaraEditor"));
+		if (!NiagaraEditorModule)
+		{
+			OutError = TEXT("niagara_editor_module_not_loaded");
+			return false;
+		}
+
+		OutSystemViewModel = NiagaraEditorModule->GetExistingViewModelForSystem(NiagaraSystem);
+		if (!OutSystemViewModel.IsValid())
+		{
+			OutError = TEXT("niagara_system_view_model_not_found");
+			return false;
+		}
+
+		OutPreviewComponent = OutSystemViewModel->GetPreviewComponent();
+		if (!OutPreviewComponent)
+		{
+			OutError = TEXT("niagara_preview_component_not_found");
+			return false;
+		}
+		return true;
+	}
+
+	static void SetNiagaraPreviewStateToken(UNiagaraComponent* PreviewComponent, const FString& Token)
+	{
+		if (!PreviewComponent)
+		{
+			return;
+		}
+
+		for (int32 Index = PreviewComponent->ComponentTags.Num() - 1; Index >= 0; --Index)
+		{
+			if (PreviewComponent->ComponentTags[Index].ToString().StartsWith(UeAgentNiagaraPreviewStateTagPrefix))
+			{
+				PreviewComponent->ComponentTags.RemoveAt(Index);
+			}
+		}
+
+		if (!Token.IsEmpty())
+		{
+			PreviewComponent->ComponentTags.AddUnique(FName(*(FString(UeAgentNiagaraPreviewStateTagPrefix) + Token)));
+		}
+	}
+
+	static FString GetNiagaraPreviewStateToken(const UNiagaraComponent* PreviewComponent)
+	{
+		if (!PreviewComponent)
+		{
+			return FString();
+		}
+
+		for (const FName& TagName : PreviewComponent->ComponentTags)
+		{
+			const FString Tag = TagName.ToString();
+			if (Tag.StartsWith(UeAgentNiagaraPreviewStateTagPrefix))
+			{
+				return Tag.RightChop(FCString::Strlen(UeAgentNiagaraPreviewStateTagPrefix));
+			}
+		}
+		return FString();
+	}
+
+	static FString MakeNiagaraPreviewStateToken(const UNiagaraSystem* NiagaraSystem, const UNiagaraComponent* PreviewComponent, const int32 FrameIndex, const float TickDeltaSeconds, const FString& AdvanceMode)
+	{
+		const FString AssetPath = NiagaraSystem ? NiagaraSystem->GetOutermost()->GetName() : FString();
+		const FString ComponentPath = PreviewComponent ? PreviewComponent->GetPathName() : FString();
+		const FString WorldPath = (PreviewComponent && PreviewComponent->GetWorld()) ? PreviewComponent->GetWorld()->GetPathName() : FString();
+		return FString::Printf(
+			TEXT("asset=%s;component=%s;world=%s;frame=%d;dt=%.9f;mode=%s;semantics=continuous_from_zero;nonce=%s"),
+			*AssetPath,
+			*ComponentPath,
+			*WorldPath,
+			FrameIndex,
+			TickDeltaSeconds,
+			*AdvanceMode,
+			*FGuid::NewGuid().ToString(EGuidFormats::Digits));
+	}
+
+	static bool GetNiagaraComponentRuntimePosition(UNiagaraComponent* PreviewComponent, const float TickDeltaSeconds, double& OutSystemAge, int32& OutSystemTickCount, int32& OutFrameEstimate)
+	{
+		OutSystemAge = -1.0;
+		OutSystemTickCount = INDEX_NONE;
+		OutFrameEstimate = INDEX_NONE;
+		if (!PreviewComponent)
+		{
+			return false;
+		}
+
+PRAGMA_DISABLE_DEPRECATION_WARNINGS
+		FNiagaraSystemInstance* SystemInstance = PreviewComponent->GetSystemInstance();
+PRAGMA_ENABLE_DEPRECATION_WARNINGS
+		if (!SystemInstance)
+		{
+			return false;
+		}
+
+		OutSystemAge = SystemInstance->GetAge();
+		OutSystemTickCount = SystemInstance->GetTickCount();
+		OutFrameEstimate = TickDeltaSeconds > SMALL_NUMBER ? FMath::RoundToInt(static_cast<float>(OutSystemAge) / TickDeltaSeconds) : INDEX_NONE;
+		return true;
+	}
+
+	static bool ValidateNiagaraPreviewStateRequest(const TSharedPtr<FJsonObject>& Params, UNiagaraComponent* PreviewComponent, const float TickDeltaSeconds, TSharedPtr<FJsonObject>& OutData, FString& OutError)
+	{
+		if (!OutData.IsValid())
+		{
+			OutData = MakeShared<FJsonObject>();
+		}
+
+		const FString CurrentToken = GetNiagaraPreviewStateToken(PreviewComponent);
+		OutData->SetStringField(TEXT("preview_state_token"), CurrentToken);
+
+		FString ExpectedToken;
+		if (Params.IsValid() && Params->TryGetStringField(TEXT("expected_preview_state_token"), ExpectedToken) && !ExpectedToken.IsEmpty())
+		{
+			const bool bTokenMatched = CurrentToken == ExpectedToken;
+			OutData->SetStringField(TEXT("expected_preview_state_token"), ExpectedToken);
+			OutData->SetBoolField(TEXT("preview_state_token_matched"), bTokenMatched);
+			if (!bTokenMatched)
+			{
+				OutError = TEXT("preview_state_token_mismatch");
+				return false;
+			}
+		}
+
+		double SystemAge = -1.0;
+		int32 SystemTickCount = INDEX_NONE;
+		int32 FrameEstimate = INDEX_NONE;
+		const bool bHasRuntimePosition = GetNiagaraComponentRuntimePosition(PreviewComponent, TickDeltaSeconds, SystemAge, SystemTickCount, FrameEstimate);
+		OutData->SetBoolField(TEXT("has_runtime_position"), bHasRuntimePosition);
+		OutData->SetNumberField(TEXT("current_system_age"), SystemAge);
+		OutData->SetNumberField(TEXT("current_system_tick_count"), SystemTickCount);
+		OutData->SetNumberField(TEXT("current_frame_estimate"), FrameEstimate);
+		OutData->SetNumberField(TEXT("frame_tick_delta_seconds"), TickDeltaSeconds);
+		OutData->SetBoolField(TEXT("component_paused"), PreviewComponent ? PreviewComponent->IsPaused() : false);
+
+		bool bRequirePaused = true;
+		if (Params.IsValid())
+		{
+			Params->TryGetBoolField(TEXT("require_paused"), bRequirePaused);
+		}
+		OutData->SetBoolField(TEXT("require_paused"), bRequirePaused);
+		if (bRequirePaused && PreviewComponent && !PreviewComponent->IsPaused())
+		{
+			OutError = TEXT("preview_component_not_paused");
+			return false;
+		}
+
+		double ExpectedFrameNumber = 0.0;
+		if (Params.IsValid() && (Params->TryGetNumberField(TEXT("expected_frame"), ExpectedFrameNumber) || Params->TryGetNumberField(TEXT("target_frame"), ExpectedFrameNumber)))
+		{
+			const int32 ExpectedFrame = FMath::RoundToInt(ExpectedFrameNumber);
+			OutData->SetNumberField(TEXT("expected_frame"), ExpectedFrame);
+			OutData->SetBoolField(TEXT("expected_frame_matched"), FrameEstimate == ExpectedFrame);
+			if (!bHasRuntimePosition || FrameEstimate != ExpectedFrame)
+			{
+				OutError = TEXT("preview_frame_mismatch");
+				return false;
+			}
+		}
+
+		return true;
 	}
 
 	static TSharedPtr<FJsonObject> BuildNiagaraScriptRuntimeStats(UNiagaraScript* Script, const ENiagaraSimTarget SimTarget)
@@ -4995,6 +5180,68 @@ PRAGMA_ENABLE_DEPRECATION_WARNINGS
 		InputObj->SetStringField(TEXT("override_default_value"), OverrideDefaultValue);
 		InputObj->SetStringField(TEXT("autogenerated_default_value"), AutogeneratedDefaultValue);
 		InputObj->SetBoolField(TEXT("has_visible_pin"), InputData.VisiblePin != nullptr);
+		if (InputType.IsEnum())
+		{
+			if (UEnum* EnumType = InputType.GetEnum())
+			{
+				InputObj->SetStringField(TEXT("enum_type"), EnumType->GetPathName());
+
+				auto AppendEnumValueFields = [EnumType](const TSharedPtr<FJsonObject>& TargetObj, const FString& Prefix, const FString& ValueText) -> bool
+				{
+					int64 EnumValue = 0;
+					if (ValueText.TrimStartAndEnd().IsEmpty() || !TryResolveNiagaraEnumValueFromText(*EnumType, ValueText, EnumValue))
+					{
+						return false;
+					}
+
+					TargetObj->SetStringField(Prefix + TEXT("enum_value_name"), EnumType->GetNameStringByValue(EnumValue));
+					TargetObj->SetStringField(Prefix + TEXT("enum_value_display_name"), EnumType->GetDisplayNameTextByValue(EnumValue).ToString());
+					TargetObj->SetNumberField(Prefix + TEXT("enum_value_int"), static_cast<double>(EnumValue));
+					return true;
+				};
+
+				const bool bWroteOverrideEnumFields = AppendEnumValueFields(InputObj, TEXT("override_"), OverrideDefaultValue);
+				AppendEnumValueFields(InputObj, TEXT("autogenerated_"), AutogeneratedDefaultValue);
+				if (bWroteOverrideEnumFields)
+				{
+					int64 EnumValue = 0;
+					if (TryResolveNiagaraEnumValueFromText(*EnumType, OverrideDefaultValue, EnumValue))
+					{
+						InputObj->SetStringField(TEXT("enum_value_name"), EnumType->GetNameStringByValue(EnumValue));
+						InputObj->SetStringField(TEXT("enum_value_display_name"), EnumType->GetDisplayNameTextByValue(EnumValue).ToString());
+						InputObj->SetNumberField(TEXT("enum_value_int"), static_cast<double>(EnumValue));
+					}
+				}
+				else
+				{
+					int64 EnumValue = 0;
+					if (TryResolveNiagaraEnumValueFromText(*EnumType, AutogeneratedDefaultValue, EnumValue))
+					{
+						InputObj->SetStringField(TEXT("enum_value_name"), EnumType->GetNameStringByValue(EnumValue));
+						InputObj->SetStringField(TEXT("enum_value_display_name"), EnumType->GetDisplayNameTextByValue(EnumValue).ToString());
+						InputObj->SetNumberField(TEXT("enum_value_int"), static_cast<double>(EnumValue));
+					}
+				}
+
+				TArray<TSharedPtr<FJsonValue>> OptionsJson;
+				for (int32 EnumIndex = 0; EnumIndex < EnumType->NumEnums(); ++EnumIndex)
+				{
+					if (EnumType->HasMetaData(TEXT("Hidden"), EnumIndex))
+					{
+						continue;
+					}
+
+					const int64 EnumValue = EnumType->GetValueByIndex(EnumIndex);
+					TSharedPtr<FJsonObject> OptionObj = MakeShared<FJsonObject>();
+					OptionObj->SetNumberField(TEXT("index"), EnumIndex);
+					OptionObj->SetNumberField(TEXT("value"), static_cast<double>(EnumValue));
+					OptionObj->SetStringField(TEXT("name"), EnumType->GetNameStringByIndex(EnumIndex));
+					OptionObj->SetStringField(TEXT("display_name"), EnumType->GetDisplayNameTextByIndex(EnumIndex).ToString());
+					OptionsJson.Add(MakeShared<FJsonValueObject>(OptionObj));
+				}
+				InputObj->SetArrayField(TEXT("enum_options"), OptionsJson);
+			}
+		}
 		return InputObj;
 	}
 

@@ -16,6 +16,7 @@ namespace
 		{ TEXT("niagara_delete_asset"), &FUeAgentHttpServer::CmdNiagaraDeleteAsset },
 		{ TEXT("niagara_duplicate_asset"), &FUeAgentHttpServer::CmdNiagaraDuplicateAsset },
 		{ TEXT("niagara_open_editor"), &FUeAgentHttpServer::CmdNiagaraOpenEditor },
+		{ TEXT("niagara_preview_advance"), &FUeAgentHttpServer::CmdNiagaraPreviewAdvance },
 		{ TEXT("niagara_screenshot"), &FUeAgentHttpServer::CmdNiagaraScreenshot },
 		{ TEXT("niagara_system_runtime_probe"), &FUeAgentHttpServer::CmdNiagaraSystemRuntimeProbe },
 		{ TEXT("niagara_get_stack_issues"), &FUeAgentHttpServer::CmdNiagaraGetStackIssues },

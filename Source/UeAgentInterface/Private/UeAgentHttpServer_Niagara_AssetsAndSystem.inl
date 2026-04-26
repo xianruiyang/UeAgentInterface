@@ -606,6 +606,259 @@ bool FUeAgentHttpServer::CmdNiagaraOpenEditor(const FUeAgentRequestContext& Ctx,
 	return true;
 }
 
+bool FUeAgentHttpServer::CmdNiagaraPreviewAdvance(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+{
+	if (!OutData.IsValid())
+	{
+		OutData = MakeShared<FJsonObject>();
+	}
+
+	FString AssetPathInput;
+	if (!JsonTryGetString(Ctx.Params, TEXT("asset_path"), AssetPathInput) || AssetPathInput.IsEmpty())
+	{
+		OutError = TEXT("missing_asset_path");
+		return false;
+	}
+
+	UObject* Asset = UeAgentNiagaraOps::LoadAssetObject(AssetPathInput);
+	UNiagaraSystem* NiagaraSystem = Cast<UNiagaraSystem>(Asset);
+	if (!NiagaraSystem)
+	{
+		OutError = TEXT("asset_is_not_niagara_system");
+		return false;
+	}
+
+	bool bOpenEditorIfNeeded = true;
+	JsonTryGetBool(Ctx.Params, TEXT("open_editor_if_needed"), bOpenEditorIfNeeded);
+
+	if (NiagaraSystem->HasOutstandingCompilationRequests(true))
+	{
+		NiagaraSystem->WaitForCompilationComplete(true, false);
+		NiagaraSystem->PollForCompilationComplete(true);
+	}
+	NiagaraSystem->CacheFromCompiledData();
+
+	UPackage* NiagaraSystemPackage = NiagaraSystem->GetOutermost();
+	const bool bWasPackageDirtyBeforeAdvance = NiagaraSystemPackage ? NiagaraSystemPackage->IsDirty() : false;
+
+	TSharedPtr<FNiagaraSystemViewModel> SystemViewModel;
+	UNiagaraComponent* PreviewComponent = nullptr;
+	if (!UeAgentNiagaraOps::ResolveNiagaraSystemPreviewComponent(NiagaraSystem, bOpenEditorIfNeeded, PreviewComponent, SystemViewModel, OutError))
+	{
+		return false;
+	}
+	if (NiagaraSystem->HasOutstandingCompilationRequests(true))
+	{
+		NiagaraSystem->WaitForCompilationComplete(true, false);
+		NiagaraSystem->PollForCompilationComplete(true);
+	}
+	NiagaraSystem->CacheFromCompiledData();
+
+	bool bResetPreview = true;
+	JsonTryGetBool(Ctx.Params, TEXT("reset_preview"), bResetPreview);
+
+	bool bDeactivateBeforeReset = true;
+	JsonTryGetBool(Ctx.Params, TEXT("deactivate_before_reset"), bDeactivateBeforeReset);
+
+	bool bPauseAfterAdvance = true;
+	JsonTryGetBool(Ctx.Params, TEXT("pause_after_advance"), bPauseAfterAdvance);
+	JsonTryGetBool(Ctx.Params, TEXT("pause_preview_after_advance"), bPauseAfterAdvance);
+
+	double TickDeltaNumber = 1.0 / 60.0;
+	JsonTryGetNumber(Ctx.Params, TEXT("tick_delta_seconds"), TickDeltaNumber);
+	JsonTryGetNumber(Ctx.Params, TEXT("preview_tick_delta_seconds"), TickDeltaNumber);
+	const float TickDeltaSeconds = FMath::Clamp(static_cast<float>(TickDeltaNumber), 1.0f / 240.0f, 1.0f / 5.0f);
+
+	double TargetFrameNumber = -1.0;
+	const bool bHasTargetFrame =
+		JsonTryGetNumber(Ctx.Params, TEXT("target_frame"), TargetFrameNumber) ||
+		JsonTryGetNumber(Ctx.Params, TEXT("frame"), TargetFrameNumber) ||
+		JsonTryGetNumber(Ctx.Params, TEXT("advance_frames"), TargetFrameNumber) ||
+		JsonTryGetNumber(Ctx.Params, TEXT("preview_advance_frames"), TargetFrameNumber);
+
+	if (!bHasTargetFrame)
+	{
+		double TargetTimeSeconds = -1.0;
+		if (JsonTryGetNumber(Ctx.Params, TEXT("target_time_seconds"), TargetTimeSeconds) ||
+			JsonTryGetNumber(Ctx.Params, TEXT("preview_advance_seconds"), TargetTimeSeconds))
+		{
+			TargetFrameNumber = TargetTimeSeconds / TickDeltaSeconds;
+		}
+	}
+
+	if (TargetFrameNumber < -KINDA_SMALL_NUMBER)
+	{
+		OutError = TEXT("missing_target_frame");
+		return false;
+	}
+
+	const int32 TargetFrame = FMath::Clamp(FMath::RoundToInt(TargetFrameNumber), 0, 14400);
+
+	double StartFrameNumber = 0.0;
+	JsonTryGetNumber(Ctx.Params, TEXT("start_frame"), StartFrameNumber);
+	const int32 StartFrame = FMath::Max(0, FMath::RoundToInt(StartFrameNumber));
+	if (bResetPreview && StartFrame != 0)
+	{
+		OutError = TEXT("reset_preview_requires_start_frame_zero");
+		OutData->SetNumberField(TEXT("start_frame"), StartFrame);
+		return false;
+	}
+	if (StartFrame > TargetFrame)
+	{
+		OutError = TEXT("start_frame_after_target_frame");
+		OutData->SetNumberField(TEXT("start_frame"), StartFrame);
+		OutData->SetNumberField(TEXT("target_frame"), TargetFrame);
+		return false;
+	}
+	const int32 FramesToAdvance = bResetPreview ? TargetFrame : (TargetFrame - StartFrame);
+
+	FString AdvanceMode = TEXT("tick_component");
+	JsonTryGetString(Ctx.Params, TEXT("advance_mode"), AdvanceMode);
+	JsonTryGetString(Ctx.Params, TEXT("preview_advance_mode"), AdvanceMode);
+	AdvanceMode.TrimStartAndEndInline();
+	if (AdvanceMode.IsEmpty())
+	{
+		AdvanceMode = TEXT("tick_component");
+	}
+	const FString NormalizedAdvanceMode = AdvanceMode.ToLower();
+	const bool bUseAdvanceSimulation =
+		NormalizedAdvanceMode == TEXT("advance") ||
+		NormalizedAdvanceMode == TEXT("advance_simulation") ||
+		NormalizedAdvanceMode == TEXT("advance_simulation_by_time");
+	const bool bUseTickComponent =
+		NormalizedAdvanceMode == TEXT("tick") ||
+		NormalizedAdvanceMode == TEXT("tick_component") ||
+		NormalizedAdvanceMode == TEXT("tick_delta") ||
+		NormalizedAdvanceMode == TEXT("tick_delta_time");
+	if (!bUseAdvanceSimulation && !bUseTickComponent)
+	{
+		OutError = TEXT("unsupported_continuous_advance_mode");
+		OutData->SetStringField(TEXT("advance_mode"), AdvanceMode);
+		return false;
+	}
+
+	auto ConfigurePreviewComponent = [TickDeltaSeconds, NiagaraSystem](UNiagaraComponent* Component)
+	{
+		if (!Component)
+		{
+			return;
+		}
+		Component->SetAsset(NiagaraSystem, false);
+		Component->SetForceSolo(true);
+		Component->SetAgeUpdateMode(ENiagaraAgeUpdateMode::TickDeltaTime);
+		Component->SetSeekDelta(TickDeltaSeconds);
+		Component->SetLockDesiredAgeDeltaTimeToSeekDelta(true);
+		Component->SetCanRenderWhileSeeking(true);
+		Component->SetAllowScalability(false);
+		Component->SetRenderingEnabled(true);
+	};
+
+	UeAgentNiagaraOps::SetNiagaraPreviewStateToken(PreviewComponent, FString());
+	ConfigurePreviewComponent(PreviewComponent);
+
+	if (bResetPreview)
+	{
+		if (bDeactivateBeforeReset)
+		{
+			PreviewComponent->DeactivateImmediate();
+			UeAgentNiagaraOps::FlushNiagaraPreviewWorld(PreviewComponent);
+		}
+
+		PreviewComponent->SetDesiredAge(0.0f);
+		PreviewComponent->ReinitializeSystem();
+		PreviewComponent = SystemViewModel->GetPreviewComponent();
+		if (!PreviewComponent)
+		{
+			OutError = TEXT("niagara_preview_component_missing_after_reset");
+			return false;
+		}
+		ConfigurePreviewComponent(PreviewComponent);
+		UeAgentNiagaraOps::FlushNiagaraPreviewWorld(PreviewComponent);
+	}
+
+	const bool bWasActiveBeforeActivation = PreviewComponent->IsActive();
+	PreviewComponent->SetPaused(false);
+	PreviewComponent->Activate(false);
+	UeAgentNiagaraOps::FlushNiagaraPreviewWorld(PreviewComponent);
+
+	for (int32 FrameIndex = 0; FrameIndex < FramesToAdvance; ++FrameIndex)
+	{
+		if (bUseAdvanceSimulation)
+		{
+			PreviewComponent->AdvanceSimulation(1, TickDeltaSeconds);
+		}
+		else
+		{
+			PreviewComponent->TickComponent(TickDeltaSeconds, ELevelTick::LEVELTICK_All, nullptr);
+		}
+		UeAgentNiagaraOps::FlushNiagaraPreviewWorld(PreviewComponent);
+	}
+
+	if (bPauseAfterAdvance)
+	{
+		PreviewComponent->SetPaused(true);
+	}
+	PreviewComponent->MarkRenderStateDirty();
+
+	double SystemAge = -1.0;
+	int32 SystemTickCount = INDEX_NONE;
+	int32 FrameEstimate = INDEX_NONE;
+	const bool bHasRuntimePosition = UeAgentNiagaraOps::GetNiagaraComponentRuntimePosition(PreviewComponent, TickDeltaSeconds, SystemAge, SystemTickCount, FrameEstimate);
+
+	const FString EffectiveAdvanceMode = bUseAdvanceSimulation ? TEXT("advance_simulation") : TEXT("tick_component");
+	const FString AdvanceSemantics = bResetPreview ? TEXT("continuous_from_zero") : TEXT("continuous_from_current");
+	const FString PreviewStateToken = UeAgentNiagaraOps::MakeNiagaraPreviewStateToken(NiagaraSystem, PreviewComponent, TargetFrame, TickDeltaSeconds, EffectiveAdvanceMode);
+	UeAgentNiagaraOps::SetNiagaraPreviewStateToken(PreviewComponent, PreviewStateToken);
+
+	bool bRestoredDirtyState = false;
+	if (NiagaraSystemPackage && !bWasPackageDirtyBeforeAdvance && NiagaraSystemPackage->IsDirty())
+	{
+		NiagaraSystemPackage->SetDirtyFlag(false);
+		bRestoredDirtyState = true;
+	}
+
+	FString StatsError;
+	TSharedPtr<FJsonObject> Stats = UeAgentNiagaraOps::CollectNiagaraComponentStats(NiagaraSystem, PreviewComponent, StatsError);
+
+	OutData->SetStringField(TEXT("asset_path"), NiagaraSystem->GetOutermost()->GetName());
+	OutData->SetStringField(TEXT("object_path"), NiagaraSystem->GetPathName());
+	OutData->SetStringField(TEXT("component_source"), TEXT("editor_preview_component"));
+	OutData->SetStringField(TEXT("component_name"), PreviewComponent->GetName());
+	OutData->SetStringField(TEXT("component_path"), PreviewComponent->GetPathName());
+	OutData->SetStringField(TEXT("component_world"), PreviewComponent->GetWorld() ? PreviewComponent->GetWorld()->GetPathName() : FString());
+	OutData->SetNumberField(TEXT("start_frame"), StartFrame);
+	OutData->SetNumberField(TEXT("target_frame"), TargetFrame);
+	OutData->SetNumberField(TEXT("advanced_frame_count"), FramesToAdvance);
+	OutData->SetNumberField(TEXT("tick_delta_seconds"), TickDeltaSeconds);
+	OutData->SetStringField(TEXT("advance_mode"), EffectiveAdvanceMode);
+	OutData->SetStringField(TEXT("advance_semantics"), AdvanceSemantics);
+	OutData->SetBoolField(TEXT("used_seek"), false);
+	OutData->SetBoolField(TEXT("reset_preview"), bResetPreview);
+	OutData->SetBoolField(TEXT("deactivate_before_reset"), bDeactivateBeforeReset);
+	OutData->SetBoolField(TEXT("pause_after_advance"), bPauseAfterAdvance);
+	OutData->SetBoolField(TEXT("component_active_before_activation"), bWasActiveBeforeActivation);
+	OutData->SetBoolField(TEXT("component_paused"), PreviewComponent->IsPaused());
+	OutData->SetNumberField(TEXT("system_age"), SystemAge);
+	OutData->SetNumberField(TEXT("system_tick_count"), SystemTickCount);
+	OutData->SetNumberField(TEXT("current_frame_estimate"), FrameEstimate);
+	OutData->SetBoolField(TEXT("has_runtime_position"), bHasRuntimePosition);
+	OutData->SetStringField(TEXT("preview_state_token"), PreviewStateToken);
+	OutData->SetBoolField(TEXT("mutated_preview_component"), true);
+	OutData->SetBoolField(TEXT("was_package_dirty_before_advance"), bWasPackageDirtyBeforeAdvance);
+	OutData->SetBoolField(TEXT("restored_dirty_state"), bRestoredDirtyState);
+	OutData->SetStringField(TEXT("stats_error"), StatsError);
+	if (Stats.IsValid())
+	{
+		OutData->SetObjectField(TEXT("stats"), Stats);
+	}
+	if (!bHasRuntimePosition)
+	{
+		OutError = TEXT("preview_advance_no_system_instance");
+		return false;
+	}
+	return true;
+}
+
 bool FUeAgentHttpServer::CmdNiagaraScreenshot(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	if (!OutData.IsValid())
@@ -660,6 +913,15 @@ bool FUeAgentHttpServer::CmdNiagaraScreenshot(const FUeAgentRequestContext& Ctx,
 	JsonTryGetString(Ctx.Params, TEXT("target"), Target);
 	Target = Target.TrimStartAndEnd().ToLower();
 
+	FString RequestedCaptureMode;
+	JsonTryGetString(Ctx.Params, TEXT("capture_mode"), RequestedCaptureMode);
+	RequestedCaptureMode.TrimStartAndEndInline();
+	const FString NormalizedRequestedCaptureMode = RequestedCaptureMode.ToLower();
+	const bool bCaptureCurrentPreview =
+		NormalizedRequestedCaptureMode == TEXT("current_preview") ||
+		NormalizedRequestedCaptureMode == TEXT("current_preview_readonly") ||
+		NormalizedRequestedCaptureMode == TEXT("readonly_current_preview");
+
 	FString Format = TEXT("png");
 	int32 Quality = 95;
 	int32 MaxSize = 2048;
@@ -695,11 +957,16 @@ bool FUeAgentHttpServer::CmdNiagaraScreenshot(const FUeAgentRequestContext& Ctx,
 
 	bool bResetPreview = PreviewAdvanceSeconds > 0.0;
 	JsonTryGetBool(Ctx.Params, TEXT("reset_preview"), bResetPreview);
+	if (bCaptureCurrentPreview)
+	{
+		PreviewAdvanceSeconds = 0.0;
+		bResetPreview = false;
+	}
 
 	bool bPausePreviewAfterAdvance = true;
 	JsonTryGetBool(Ctx.Params, TEXT("pause_preview_after_advance"), bPausePreviewAfterAdvance);
 
-	const bool bPreviewPrepareRequested = PreviewAdvanceSeconds > 0.0 || bResetPreview;
+	const bool bPreviewPrepareRequested = !bCaptureCurrentPreview && (PreviewAdvanceSeconds > 0.0 || bResetPreview);
 	bool bUseOffscreenRenderer = false;
 	const bool bUseOffscreenRendererSpecified =
 		JsonTryGetBool(Ctx.Params, TEXT("offscreen"), bUseOffscreenRenderer) ||
@@ -783,6 +1050,41 @@ bool FUeAgentHttpServer::CmdNiagaraScreenshot(const FUeAgentRequestContext& Ctx,
 		bPreviewPrepared = UeAgentNiagaraOps::PrepareNiagaraPreviewForCapture(Asset, bResetPreview, PreviewAdvanceSeconds, PreviewTickDeltaSeconds, PreviewAdvanceMode, bPausePreviewAfterAdvance, PreviewPrepareError);
 	}
 
+	TSharedPtr<FJsonObject> CurrentPreviewValidation;
+	bool bCurrentPreviewValidated = false;
+	if (bCaptureCurrentPreview)
+	{
+		UNiagaraSystem* NiagaraSystem = Cast<UNiagaraSystem>(Asset);
+		if (!NiagaraSystem)
+		{
+			OutError = TEXT("current_preview_capture_requires_niagara_system");
+			return false;
+		}
+
+		TSharedPtr<FNiagaraSystemViewModel> SystemViewModel;
+		UNiagaraComponent* PreviewComponent = nullptr;
+		if (!UeAgentNiagaraOps::ResolveNiagaraSystemPreviewComponent(NiagaraSystem, bOpenEditorIfNeeded, PreviewComponent, SystemViewModel, OutError))
+		{
+			return false;
+		}
+		if (NiagaraSystem->HasOutstandingCompilationRequests(true))
+		{
+			NiagaraSystem->WaitForCompilationComplete(true, false);
+			NiagaraSystem->PollForCompilationComplete(true);
+		}
+		NiagaraSystem->CacheFromCompiledData();
+
+		CurrentPreviewValidation = MakeShared<FJsonObject>();
+		if (!UeAgentNiagaraOps::ValidateNiagaraPreviewStateRequest(Ctx.Params, PreviewComponent, static_cast<float>(PreviewTickDeltaSeconds), CurrentPreviewValidation, OutError))
+		{
+			OutData->SetStringField(TEXT("sample_mode"), TEXT("current_preview"));
+			OutData->SetBoolField(TEXT("mutated_preview_component"), false);
+			OutData->SetObjectField(TEXT("current_preview_validation"), CurrentPreviewValidation);
+			return false;
+		}
+		bCurrentPreviewValidated = true;
+	}
+
 	bool bCaptureRedrawPerformed = false;
 	FString CaptureRedrawSkipReason;
 	if (!bUseOffscreenRenderer)
@@ -798,7 +1100,7 @@ bool FUeAgentHttpServer::CmdNiagaraScreenshot(const FUeAgentRequestContext& Ctx,
 	FVector2D OffscreenDrawSize(0.0, 0.0);
 	if (bUseOffscreenRenderer)
 	{
-		CaptureMode = TEXT("slate_widget_offscreen");
+		CaptureMode = bCaptureCurrentPreview ? TEXT("current_preview_slate_widget_offscreen") : TEXT("slate_widget_offscreen");
 		OffscreenDrawSize = UeAgentNiagaraOps::ResolveOffscreenDrawSize(WidgetToShot.ToSharedRef(), EffectiveTarget, Ctx.Params, MaxSize);
 		if (!UeAgentNiagaraOps::ScreenshotSlateWidgetOffscreen(WidgetToShot.ToSharedRef(), OffscreenDrawSize, Pixels, ShotSize, OutError))
 		{
@@ -810,6 +1112,10 @@ bool FUeAgentHttpServer::CmdNiagaraScreenshot(const FUeAgentRequestContext& Ctx,
 	{
 		FUeAgentInterfaceLogger::Log(TEXT("CmdNiagaraScreenshot failed target=%s asset=%s error=%s"), *EffectiveTarget, *Asset->GetOutermost()->GetName(), *OutError);
 		return false;
+	}
+	else if (bCaptureCurrentPreview)
+	{
+		CaptureMode = TEXT("current_preview_slate_widget");
 	}
 
 	TArray<FColor> ResizedPixels;
@@ -832,6 +1138,7 @@ bool FUeAgentHttpServer::CmdNiagaraScreenshot(const FUeAgentRequestContext& Ctx,
 	OutData->SetStringField(TEXT("file_path"), OutPath);
 	OutData->SetStringField(TEXT("target"), EffectiveTarget);
 	OutData->SetStringField(TEXT("capture_mode"), CaptureMode);
+	OutData->SetStringField(TEXT("requested_capture_mode"), bCaptureCurrentPreview ? TEXT("current_preview") : RequestedCaptureMode);
 	OutData->SetStringField(TEXT("format"), Format);
 	OutData->SetNumberField(TEXT("width"), ResizedSize.X);
 	OutData->SetNumberField(TEXT("height"), ResizedSize.Y);
@@ -852,12 +1159,19 @@ bool FUeAgentHttpServer::CmdNiagaraScreenshot(const FUeAgentRequestContext& Ctx,
 	OutData->SetBoolField(TEXT("preview_prepare_requested"), bPreviewPrepareRequested);
 	OutData->SetBoolField(TEXT("preview_prepared"), bPreviewPrepared);
 	OutData->SetStringField(TEXT("preview_prepare_error"), PreviewPrepareError);
+	OutData->SetStringField(TEXT("sample_mode"), bCaptureCurrentPreview ? TEXT("current_preview") : TEXT("capture_after_optional_prepare"));
+	OutData->SetBoolField(TEXT("current_preview_validated"), bCurrentPreviewValidated);
+	OutData->SetBoolField(TEXT("mutated_preview_component"), bPreviewPrepareRequested);
 	OutData->SetBoolField(TEXT("preview_reset"), bResetPreview);
 	OutData->SetNumberField(TEXT("preview_advance_seconds"), PreviewAdvanceSeconds);
 	OutData->SetNumberField(TEXT("preview_tick_delta_seconds"), PreviewTickDeltaSeconds);
 	OutData->SetStringField(TEXT("preview_advance_mode"), PreviewAdvanceMode);
 	OutData->SetBoolField(TEXT("preview_paused_after_advance"), bPausePreviewAfterAdvance);
 	OutData->SetStringField(TEXT("preview_stats_error"), PreviewStatsError);
+	if (CurrentPreviewValidation.IsValid())
+	{
+		OutData->SetObjectField(TEXT("current_preview_validation"), CurrentPreviewValidation);
+	}
 	if (PreviewStats.IsValid())
 	{
 		OutData->SetObjectField(TEXT("preview_stats"), PreviewStats);
@@ -896,12 +1210,33 @@ bool FUeAgentHttpServer::CmdNiagaraSystemRuntimeProbe(const FUeAgentRequestConte
 		NiagaraSystem->PollForCompilationComplete(true);
 	}
 	NiagaraSystem->CacheFromCompiledData();
+	UPackage* NiagaraSystemPackage = NiagaraSystem->GetOutermost();
+	const bool bWasPackageDirtyBeforeProbe = NiagaraSystemPackage ? NiagaraSystemPackage->IsDirty() : false;
+
+	FString SampleMode = TEXT("simulate");
+	JsonTryGetString(Ctx.Params, TEXT("sample_mode"), SampleMode);
+	JsonTryGetString(Ctx.Params, TEXT("probe_mode"), SampleMode);
+	SampleMode.TrimStartAndEndInline();
+	if (SampleMode.IsEmpty())
+	{
+		SampleMode = TEXT("simulate");
+	}
+	const FString NormalizedSampleMode = SampleMode.ToLower();
+	const bool bSampleCurrentPreview =
+		NormalizedSampleMode == TEXT("current_preview") ||
+		NormalizedSampleMode == TEXT("current_preview_readonly") ||
+		NormalizedSampleMode == TEXT("readonly_current_preview");
 
 	bool bUseTransientComponent = false;
 	JsonTryGetBool(Ctx.Params, TEXT("use_transient_component"), bUseTransientComponent);
 	if (!bUseTransientComponent)
 	{
 		JsonTryGetBool(Ctx.Params, TEXT("use_transient_preview_component"), bUseTransientComponent);
+	}
+	if (bSampleCurrentPreview && bUseTransientComponent)
+	{
+		OutError = TEXT("current_preview_sample_does_not_support_transient_component");
+		return false;
 	}
 
 	TSharedPtr<FNiagaraSystemViewModel> SystemViewModel;
@@ -960,15 +1295,28 @@ bool FUeAgentHttpServer::CmdNiagaraSystemRuntimeProbe(const FUeAgentRequestConte
 			return false;
 		}
 	}
+	if (NiagaraSystem->HasOutstandingCompilationRequests(true))
+	{
+		NiagaraSystem->WaitForCompilationComplete(true, false);
+		NiagaraSystem->PollForCompilationComplete(true);
+	}
+	NiagaraSystem->CacheFromCompiledData();
 
 	bool bResetPreview = true;
 	JsonTryGetBool(Ctx.Params, TEXT("reset_preview"), bResetPreview);
+	if (bSampleCurrentPreview)
+	{
+		bResetPreview = false;
+	}
 
 	bool bDeactivateBeforeReset = true;
 	JsonTryGetBool(Ctx.Params, TEXT("deactivate_before_reset"), bDeactivateBeforeReset);
 
 	bool bIncludeEachTick = true;
 	JsonTryGetBool(Ctx.Params, TEXT("include_each_tick"), bIncludeEachTick);
+
+	bool bIncludeSnapshots = true;
+	JsonTryGetBool(Ctx.Params, TEXT("include_snapshots"), bIncludeSnapshots);
 
 	bool bPauseAfterProbe = false;
 	JsonTryGetBool(Ctx.Params, TEXT("pause_after_probe"), bPauseAfterProbe);
@@ -1015,8 +1363,84 @@ bool FUeAgentHttpServer::CmdNiagaraSystemRuntimeProbe(const FUeAgentRequestConte
 		Component->SetRenderingEnabled(true);
 	};
 
+	struct FEmitterProbePeak
+	{
+		int32 MaxParticleCount = 0;
+		int32 MaxTotalSpawnedParticles = 0;
+		int32 MaxSpawnInfoTotalCount = 0;
+		FString MaxParticleCountLabel;
+		FString MaxTotalSpawnedParticlesLabel;
+		FString MaxSpawnInfoTotalCountLabel;
+	};
+
 	TArray<TSharedPtr<FJsonValue>> Snapshots;
-	auto AddSnapshot = [&Snapshots, NiagaraSystem, &PreviewComponent](const FString& Label)
+	TMap<FString, FEmitterProbePeak> EmitterPeaks;
+	int32 CollectedSnapshotCount = 0;
+	FString FirstSnapshotLabel;
+	FString FinalSnapshotLabel;
+	TSharedPtr<FJsonObject> InitialStats;
+	TSharedPtr<FJsonObject> FinalStats;
+
+	auto UpdateEmitterPeaks = [&EmitterPeaks](const FString& Label, const TSharedPtr<FJsonObject>& Stats)
+	{
+		if (!Stats.IsValid())
+		{
+			return;
+		}
+
+		const TArray<TSharedPtr<FJsonValue>>* Emitters = nullptr;
+		if (!Stats->TryGetArrayField(TEXT("emitters"), Emitters) || !Emitters)
+		{
+			return;
+		}
+
+		for (const TSharedPtr<FJsonValue>& EmitterValue : *Emitters)
+		{
+			const TSharedPtr<FJsonObject> EmitterObj = EmitterValue.IsValid() ? EmitterValue->AsObject() : nullptr;
+			if (!EmitterObj.IsValid())
+			{
+				continue;
+			}
+
+			FString EmitterName;
+			if (!EmitterObj->TryGetStringField(TEXT("name"), EmitterName) || EmitterName.IsEmpty())
+			{
+				continue;
+			}
+
+			FEmitterProbePeak& Peak = EmitterPeaks.FindOrAdd(EmitterName);
+			double NumberValue = 0.0;
+			if (EmitterObj->TryGetNumberField(TEXT("particle_count"), NumberValue))
+			{
+				const int32 ParticleCount = FMath::RoundToInt(NumberValue);
+				if (ParticleCount > Peak.MaxParticleCount)
+				{
+					Peak.MaxParticleCount = ParticleCount;
+					Peak.MaxParticleCountLabel = Label;
+				}
+			}
+			if (EmitterObj->TryGetNumberField(TEXT("total_spawned_particles"), NumberValue))
+			{
+				const int32 TotalSpawnedParticles = FMath::RoundToInt(NumberValue);
+				if (TotalSpawnedParticles > Peak.MaxTotalSpawnedParticles)
+				{
+					Peak.MaxTotalSpawnedParticles = TotalSpawnedParticles;
+					Peak.MaxTotalSpawnedParticlesLabel = Label;
+				}
+			}
+			if (EmitterObj->TryGetNumberField(TEXT("spawn_info_total_count"), NumberValue))
+			{
+				const int32 SpawnInfoTotalCount = FMath::RoundToInt(NumberValue);
+				if (SpawnInfoTotalCount > Peak.MaxSpawnInfoTotalCount)
+				{
+					Peak.MaxSpawnInfoTotalCount = SpawnInfoTotalCount;
+					Peak.MaxSpawnInfoTotalCountLabel = Label;
+				}
+			}
+		}
+	};
+
+	auto AddSnapshot = [&Snapshots, &EmitterPeaks, &CollectedSnapshotCount, &FirstSnapshotLabel, &FinalSnapshotLabel, &InitialStats, &FinalStats, &UpdateEmitterPeaks, bIncludeSnapshots, NiagaraSystem, &PreviewComponent](const FString& Label)
 	{
 		FString StatsError;
 		TSharedPtr<FJsonObject> Snapshot = MakeShared<FJsonObject>();
@@ -1026,10 +1450,118 @@ bool FUeAgentHttpServer::CmdNiagaraSystemRuntimeProbe(const FUeAgentRequestConte
 		if (Stats.IsValid())
 		{
 			Snapshot->SetObjectField(TEXT("stats"), Stats);
+			UpdateEmitterPeaks(Label, Stats);
+			if (!InitialStats.IsValid())
+			{
+				InitialStats = Stats;
+			}
+			FinalStats = Stats;
 		}
-		Snapshots.Add(MakeShared<FJsonValueObject>(Snapshot));
+		++CollectedSnapshotCount;
+		if (FirstSnapshotLabel.IsEmpty())
+		{
+			FirstSnapshotLabel = Label;
+		}
+		FinalSnapshotLabel = Label;
+		if (bIncludeSnapshots)
+		{
+			Snapshots.Add(MakeShared<FJsonValueObject>(Snapshot));
+		}
 	};
 
+	if (bSampleCurrentPreview)
+	{
+		TSharedPtr<FJsonObject> CurrentPreviewValidation = MakeShared<FJsonObject>();
+		if (!UeAgentNiagaraOps::ValidateNiagaraPreviewStateRequest(Ctx.Params, PreviewComponent, TickDeltaSeconds, CurrentPreviewValidation, OutError))
+		{
+			OutData->SetStringField(TEXT("asset_path"), NiagaraSystem->GetOutermost()->GetName());
+			OutData->SetStringField(TEXT("object_path"), NiagaraSystem->GetPathName());
+			OutData->SetStringField(TEXT("sample_mode"), TEXT("current_preview"));
+			OutData->SetStringField(TEXT("component_source"), TEXT("editor_preview_component"));
+			OutData->SetBoolField(TEXT("mutated_preview_component"), false);
+			OutData->SetBoolField(TEXT("used_seek"), false);
+			OutData->SetObjectField(TEXT("current_preview_validation"), CurrentPreviewValidation);
+			return false;
+		}
+
+		FString StatsError;
+		TSharedPtr<FJsonObject> Stats = UeAgentNiagaraOps::CollectNiagaraComponentStats(NiagaraSystem, PreviewComponent, StatsError);
+		if (Stats.IsValid())
+		{
+			UpdateEmitterPeaks(TEXT("current_preview"), Stats);
+			InitialStats = Stats;
+			FinalStats = Stats;
+			++CollectedSnapshotCount;
+			FirstSnapshotLabel = TEXT("current_preview");
+			FinalSnapshotLabel = TEXT("current_preview");
+			if (bIncludeSnapshots)
+			{
+				TSharedPtr<FJsonObject> Snapshot = MakeShared<FJsonObject>();
+				Snapshot->SetStringField(TEXT("label"), TEXT("current_preview"));
+				Snapshot->SetStringField(TEXT("stats_error"), StatsError);
+				Snapshot->SetObjectField(TEXT("stats"), Stats);
+				Snapshots.Add(MakeShared<FJsonValueObject>(Snapshot));
+			}
+		}
+
+		TArray<TSharedPtr<FJsonValue>> EmitterPeakJson;
+		for (const TPair<FString, FEmitterProbePeak>& Pair : EmitterPeaks)
+		{
+			TSharedPtr<FJsonObject> PeakObj = MakeShared<FJsonObject>();
+			PeakObj->SetStringField(TEXT("name"), Pair.Key);
+			PeakObj->SetNumberField(TEXT("max_particle_count"), Pair.Value.MaxParticleCount);
+			PeakObj->SetStringField(TEXT("max_particle_count_label"), Pair.Value.MaxParticleCountLabel);
+			PeakObj->SetNumberField(TEXT("max_total_spawned_particles"), Pair.Value.MaxTotalSpawnedParticles);
+			PeakObj->SetStringField(TEXT("max_total_spawned_particles_label"), Pair.Value.MaxTotalSpawnedParticlesLabel);
+			PeakObj->SetNumberField(TEXT("max_spawn_info_total_count"), Pair.Value.MaxSpawnInfoTotalCount);
+			PeakObj->SetStringField(TEXT("max_spawn_info_total_count_label"), Pair.Value.MaxSpawnInfoTotalCountLabel);
+			EmitterPeakJson.Add(MakeShared<FJsonValueObject>(PeakObj));
+		}
+
+		TSharedPtr<FJsonObject> Summary = MakeShared<FJsonObject>();
+		Summary->SetNumberField(TEXT("collected_snapshot_count"), CollectedSnapshotCount);
+		Summary->SetNumberField(TEXT("emitted_snapshot_count"), Snapshots.Num());
+		Summary->SetStringField(TEXT("first_snapshot_label"), FirstSnapshotLabel);
+		Summary->SetStringField(TEXT("final_snapshot_label"), FinalSnapshotLabel);
+		Summary->SetArrayField(TEXT("emitter_peaks"), EmitterPeakJson);
+
+		OutData->SetStringField(TEXT("asset_path"), NiagaraSystem->GetOutermost()->GetName());
+		OutData->SetStringField(TEXT("object_path"), NiagaraSystem->GetPathName());
+		OutData->SetStringField(TEXT("sample_mode"), TEXT("current_preview"));
+		OutData->SetStringField(TEXT("component_source"), TEXT("editor_preview_component"));
+		OutData->SetStringField(TEXT("component_name"), PreviewComponent->GetName());
+		OutData->SetStringField(TEXT("component_path"), PreviewComponent->GetPathName());
+		OutData->SetStringField(TEXT("component_world"), PreviewComponent->GetWorld() ? PreviewComponent->GetWorld()->GetPathName() : FString());
+		OutData->SetStringField(TEXT("advance_mode"), TEXT("none"));
+		OutData->SetStringField(TEXT("advance_semantics"), TEXT("readonly_current_preview"));
+		OutData->SetNumberField(TEXT("tick_count"), 0);
+		OutData->SetNumberField(TEXT("tick_delta_seconds"), TickDeltaSeconds);
+		OutData->SetBoolField(TEXT("reset_preview"), false);
+		OutData->SetBoolField(TEXT("include_snapshots"), bIncludeSnapshots);
+		OutData->SetBoolField(TEXT("mutated_preview_component"), false);
+		OutData->SetBoolField(TEXT("used_seek"), false);
+		OutData->SetStringField(TEXT("stats_error"), StatsError);
+		OutData->SetObjectField(TEXT("current_preview_validation"), CurrentPreviewValidation);
+		if (InitialStats.IsValid())
+		{
+			OutData->SetObjectField(TEXT("initial_stats"), InitialStats);
+		}
+		if (FinalStats.IsValid())
+		{
+			OutData->SetObjectField(TEXT("final_stats"), FinalStats);
+		}
+		OutData->SetObjectField(TEXT("summary"), Summary);
+		OutData->SetArrayField(TEXT("snapshots"), Snapshots);
+		OutData->SetNumberField(TEXT("snapshot_count"), CollectedSnapshotCount);
+		OutData->SetNumberField(TEXT("snapshots_emitted_count"), Snapshots.Num());
+		if (!Stats.IsValid())
+		{
+			OutError = StatsError.IsEmpty() ? TEXT("collect_current_preview_stats_failed") : StatsError;
+		}
+		return Stats.IsValid();
+	}
+
+	UeAgentNiagaraOps::SetNiagaraPreviewStateToken(PreviewComponent, FString());
 	ConfigurePreviewComponent(PreviewComponent);
 	AddSnapshot(TEXT("after_configure_before_reset"));
 
@@ -1058,8 +1590,9 @@ bool FUeAgentHttpServer::CmdNiagaraSystemRuntimeProbe(const FUeAgentRequestConte
 		AddSnapshot(TEXT("after_reinitialize"));
 	}
 
+	const bool bWasActiveBeforeActivation = PreviewComponent->IsActive();
 	PreviewComponent->SetPaused(false);
-	PreviewComponent->Activate(true);
+	PreviewComponent->Activate(false);
 	UeAgentNiagaraOps::FlushNiagaraPreviewWorld(PreviewComponent);
 	AddSnapshot(TEXT("after_activate_before_tick"));
 
@@ -1085,18 +1618,64 @@ bool FUeAgentHttpServer::CmdNiagaraSystemRuntimeProbe(const FUeAgentRequestConte
 		PreviewComponent->SetPaused(true);
 	}
 	PreviewComponent->MarkRenderStateDirty();
+	bool bRestoredDirtyState = false;
+	if (NiagaraSystemPackage && !bWasPackageDirtyBeforeProbe && NiagaraSystemPackage->IsDirty())
+	{
+		NiagaraSystemPackage->SetDirtyFlag(false);
+		bRestoredDirtyState = true;
+	}
+
+	TArray<TSharedPtr<FJsonValue>> EmitterPeakJson;
+	for (const TPair<FString, FEmitterProbePeak>& Pair : EmitterPeaks)
+	{
+		TSharedPtr<FJsonObject> PeakObj = MakeShared<FJsonObject>();
+		PeakObj->SetStringField(TEXT("name"), Pair.Key);
+		PeakObj->SetNumberField(TEXT("max_particle_count"), Pair.Value.MaxParticleCount);
+		PeakObj->SetStringField(TEXT("max_particle_count_label"), Pair.Value.MaxParticleCountLabel);
+		PeakObj->SetNumberField(TEXT("max_total_spawned_particles"), Pair.Value.MaxTotalSpawnedParticles);
+		PeakObj->SetStringField(TEXT("max_total_spawned_particles_label"), Pair.Value.MaxTotalSpawnedParticlesLabel);
+		PeakObj->SetNumberField(TEXT("max_spawn_info_total_count"), Pair.Value.MaxSpawnInfoTotalCount);
+		PeakObj->SetStringField(TEXT("max_spawn_info_total_count_label"), Pair.Value.MaxSpawnInfoTotalCountLabel);
+		EmitterPeakJson.Add(MakeShared<FJsonValueObject>(PeakObj));
+	}
+
+	TSharedPtr<FJsonObject> Summary = MakeShared<FJsonObject>();
+	Summary->SetNumberField(TEXT("collected_snapshot_count"), CollectedSnapshotCount);
+	Summary->SetNumberField(TEXT("emitted_snapshot_count"), Snapshots.Num());
+	Summary->SetStringField(TEXT("first_snapshot_label"), FirstSnapshotLabel);
+	Summary->SetStringField(TEXT("final_snapshot_label"), FinalSnapshotLabel);
+	Summary->SetArrayField(TEXT("emitter_peaks"), EmitterPeakJson);
 
 	OutData->SetStringField(TEXT("asset_path"), NiagaraSystem->GetOutermost()->GetName());
 	OutData->SetStringField(TEXT("object_path"), NiagaraSystem->GetPathName());
+	OutData->SetStringField(TEXT("sample_mode"), TEXT("simulate"));
 	OutData->SetStringField(TEXT("component_source"), bUseTransientComponent ? TEXT("transient_component") : TEXT("editor_preview_component"));
 	OutData->SetNumberField(TEXT("tick_count"), TickCount);
 	OutData->SetNumberField(TEXT("tick_delta_seconds"), TickDeltaSeconds);
 	OutData->SetStringField(TEXT("advance_mode"), bUseAdvanceSimulation ? TEXT("advance_simulation") : (bUseTickComponent ? TEXT("tick_component") : NormalizedAdvanceMode));
+	OutData->SetStringField(TEXT("advance_semantics"), bResetPreview ? TEXT("continuous_from_zero") : TEXT("continuous_from_current"));
+	OutData->SetBoolField(TEXT("mutated_preview_component"), true);
+	OutData->SetBoolField(TEXT("used_seek"), false);
 	OutData->SetBoolField(TEXT("reset_preview"), bResetPreview);
 	OutData->SetBoolField(TEXT("deactivate_before_reset"), bDeactivateBeforeReset);
+	OutData->SetBoolField(TEXT("include_snapshots"), bIncludeSnapshots);
 	OutData->SetBoolField(TEXT("pause_after_probe"), bPauseAfterProbe);
+	OutData->SetBoolField(TEXT("component_active_before_activation"), bWasActiveBeforeActivation);
+	OutData->SetBoolField(TEXT("activate_reset"), false);
+	OutData->SetBoolField(TEXT("was_package_dirty_before_probe"), bWasPackageDirtyBeforeProbe);
+	OutData->SetBoolField(TEXT("restored_dirty_state"), bRestoredDirtyState);
+	if (InitialStats.IsValid())
+	{
+		OutData->SetObjectField(TEXT("initial_stats"), InitialStats);
+	}
+	if (FinalStats.IsValid())
+	{
+		OutData->SetObjectField(TEXT("final_stats"), FinalStats);
+	}
+	OutData->SetObjectField(TEXT("summary"), Summary);
 	OutData->SetArrayField(TEXT("snapshots"), Snapshots);
-	OutData->SetNumberField(TEXT("snapshot_count"), Snapshots.Num());
+	OutData->SetNumberField(TEXT("snapshot_count"), CollectedSnapshotCount);
+	OutData->SetNumberField(TEXT("snapshots_emitted_count"), Snapshots.Num());
 	if (bUseTransientComponent && PreviewComponent)
 	{
 		PreviewComponent->DeactivateImmediate();

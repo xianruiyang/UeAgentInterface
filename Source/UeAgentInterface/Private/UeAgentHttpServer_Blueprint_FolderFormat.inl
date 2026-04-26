@@ -312,6 +312,19 @@ namespace UeAgentBlueprintFolderOps
 		return FString();
 	}
 
+	static FString ExportTerminalSubcategoryObjectPath(const FEdGraphTerminalType& TerminalType)
+	{
+		if (!TerminalType.TerminalSubCategoryObject.IsValid())
+		{
+			return FString();
+		}
+		if (const UObject* Obj = TerminalType.TerminalSubCategoryObject.Get())
+		{
+			return Obj->GetPathName();
+		}
+		return FString();
+	}
+
 	static FString ExportBlueprintVariableDefaultValue(UBlueprint* Blueprint, const FBPVariableDescription& VarDesc)
 	{
 		if (Blueprint && Blueprint->GeneratedClass)
@@ -379,6 +392,21 @@ namespace UeAgentBlueprintFolderOps
 			if (!ContainerType.IsEmpty())
 			{
 				TypeObj->SetStringField(TEXT("container_type"), ContainerType);
+			}
+			if (VarDesc.VarType.ContainerType == EPinContainerType::Map && !VarDesc.VarType.PinValueType.TerminalCategory.IsNone())
+			{
+				TSharedPtr<FJsonObject> ValueTypeObj = MakeShared<FJsonObject>();
+				ValueTypeObj->SetStringField(TEXT("pin_category"), VarDesc.VarType.PinValueType.TerminalCategory.ToString());
+				if (!VarDesc.VarType.PinValueType.TerminalSubCategory.IsNone())
+				{
+					ValueTypeObj->SetStringField(TEXT("pin_subcategory"), VarDesc.VarType.PinValueType.TerminalSubCategory.ToString());
+				}
+				const FString ValueSubCategoryObjectPath = ExportTerminalSubcategoryObjectPath(VarDesc.VarType.PinValueType);
+				if (!ValueSubCategoryObjectPath.IsEmpty())
+				{
+					ValueTypeObj->SetStringField(TEXT("pin_subcategory_object"), ValueSubCategoryObjectPath);
+				}
+				TypeObj->SetObjectField(TEXT("value_type"), ValueTypeObj);
 			}
 
 			TSharedPtr<FJsonObject> VarObj = MakeShared<FJsonObject>();
@@ -791,69 +819,22 @@ namespace UeAgentBlueprintFolderOps
 
 	static bool BuildPinTypeFromJson(const TSharedPtr<FJsonObject>& TypeObj, FEdGraphPinType& OutPinType, FString& OutError)
 	{
-		FString PinCategoryText;
-		if (!TryGetString(TypeObj, TEXT("pin_category"), PinCategoryText) || PinCategoryText.IsEmpty())
-		{
-			OutError = TEXT("missing_pin_category");
-			return false;
-		}
-
-		OutPinType = FEdGraphPinType();
-		OutPinType.PinCategory = UeAgentBlueprintOps::NormalizePinCategoryName(PinCategoryText);
-		if (OutPinType.PinCategory.IsNone())
-		{
-			OutError = TEXT("invalid_pin_category");
-			return false;
-		}
-
-		FString PinSubCategoryText;
-		if (TryGetString(TypeObj, TEXT("pin_subcategory"), PinSubCategoryText) && !PinSubCategoryText.IsEmpty())
-		{
-			OutPinType.PinSubCategory = UeAgentBlueprintOps::NormalizeRealPinSubCategoryName(PinSubCategoryText);
-		}
-
-		FString PinSubCategoryObjectPath;
-		if (TryGetString(TypeObj, TEXT("pin_subcategory_object"), PinSubCategoryObjectPath) && !PinSubCategoryObjectPath.IsEmpty())
-		{
-			UObject* SubCategoryObject = UeAgentBlueprintOps::ResolvePinSubCategoryObject(PinSubCategoryObjectPath);
-			if (!SubCategoryObject)
-			{
-				OutError = TEXT("invalid_pin_subcategory_object");
-				return false;
-			}
-			OutPinType.PinSubCategoryObject = SubCategoryObject;
-		}
-
-		FString ContainerTypeText;
-		if (TryGetString(TypeObj, TEXT("container_type"), ContainerTypeText) && !ContainerTypeText.IsEmpty())
-		{
-			OutPinType.ContainerType = UeAgentBlueprintOps::ParsePinContainerType(ContainerTypeText);
-		}
-
-		if (OutPinType.PinCategory == UEdGraphSchema_K2::PC_Real)
-		{
-			if (OutPinType.PinSubCategory.IsNone())
-			{
-				OutPinType.PinSubCategory = UEdGraphSchema_K2::PC_Float;
-			}
-			if (OutPinType.PinSubCategory != UEdGraphSchema_K2::PC_Float && OutPinType.PinSubCategory != UEdGraphSchema_K2::PC_Double)
-			{
-				OutError = TEXT("invalid_real_pin_subcategory");
-				return false;
-			}
-		}
-
-		return true;
+		return UeAgentBlueprintOps::BuildPinTypeFromJsonObject(TypeObj, OutPinType, OutError);
 	}
 
 	static bool PinTypesEqual(const FEdGraphPinType& A, const FEdGraphPinType& B)
 	{
 		const UObject* ASubObj = A.PinSubCategoryObject.Get();
 		const UObject* BSubObj = B.PinSubCategoryObject.Get();
+		const UObject* AValueSubObj = A.PinValueType.TerminalSubCategoryObject.Get();
+		const UObject* BValueSubObj = B.PinValueType.TerminalSubCategoryObject.Get();
 		return A.PinCategory == B.PinCategory
 			&& A.PinSubCategory == B.PinSubCategory
 			&& A.ContainerType == B.ContainerType
-			&& ASubObj == BSubObj;
+			&& ASubObj == BSubObj
+			&& A.PinValueType.TerminalCategory == B.PinValueType.TerminalCategory
+			&& A.PinValueType.TerminalSubCategory == B.PinValueType.TerminalSubCategory
+			&& AValueSubObj == BValueSubObj;
 	}
 
 	static bool SetBlueprintVariableInstanceEditable(UBlueprint* Blueprint, const FName VariableName, const bool bInstanceEditable)
@@ -1217,6 +1198,20 @@ bool FUeAgentHttpServer::CmdBlueprintApplyFolder(const FUeAgentRequestContext& C
 					if (!ContainerTypeText.IsEmpty())
 					{
 						AddParams->SetStringField(TEXT("container_type"), ContainerTypeText);
+					}
+					if (DesiredPinType.ContainerType == EPinContainerType::Map && !DesiredPinType.PinValueType.TerminalCategory.IsNone())
+					{
+						TSharedPtr<FJsonObject> ValueTypeObj = MakeShared<FJsonObject>();
+						ValueTypeObj->SetStringField(TEXT("pin_category"), DesiredPinType.PinValueType.TerminalCategory.ToString());
+						if (!DesiredPinType.PinValueType.TerminalSubCategory.IsNone())
+						{
+							ValueTypeObj->SetStringField(TEXT("pin_subcategory"), DesiredPinType.PinValueType.TerminalSubCategory.ToString());
+						}
+						if (const UObject* ValueSubCategoryObj = DesiredPinType.PinValueType.TerminalSubCategoryObject.Get())
+						{
+							ValueTypeObj->SetStringField(TEXT("pin_subcategory_object"), ValueSubCategoryObj->GetPathName());
+						}
+						AddParams->SetObjectField(TEXT("value_type"), ValueTypeObj);
 					}
 					AddParams->SetStringField(TEXT("default_value"), DefaultValue);
 					AddParams->SetBoolField(TEXT("instance_editable"), bInstanceEditable);

@@ -2,6 +2,8 @@
 
 #include "UeAgentHttpServer_Montage.h"
 
+#include "UeAgentJsonDiagnostics.h"
+
 #include "Animation/AnimMontage.h"
 #include "Animation/AnimNotifies/AnimNotify.h"
 #include "Animation/AnimNotifies/AnimNotifyState.h"
@@ -112,10 +114,10 @@ namespace UeAgentMontageOps
 		double G = 0.0;
 		double B = 0.0;
 		double A = 1.0;
-		const bool bHasR = (*ColorObject)->TryGetNumberField(TEXT("r"), R) || (*ColorObject)->TryGetNumberField(TEXT("red"), R);
-		const bool bHasG = (*ColorObject)->TryGetNumberField(TEXT("g"), G) || (*ColorObject)->TryGetNumberField(TEXT("green"), G);
-		const bool bHasB = (*ColorObject)->TryGetNumberField(TEXT("b"), B) || (*ColorObject)->TryGetNumberField(TEXT("blue"), B);
-		(*ColorObject)->TryGetNumberField(TEXT("a"), A) || (*ColorObject)->TryGetNumberField(TEXT("alpha"), A);
+		const bool bHasR = UeAgentJsonDiagnostics::TryReadNumberFieldByAliases(*ColorObject, { TEXT("r"), TEXT("R"), TEXT("red"), TEXT("Red") }, R);
+		const bool bHasG = UeAgentJsonDiagnostics::TryReadNumberFieldByAliases(*ColorObject, { TEXT("g"), TEXT("G"), TEXT("green"), TEXT("Green") }, G);
+		const bool bHasB = UeAgentJsonDiagnostics::TryReadNumberFieldByAliases(*ColorObject, { TEXT("b"), TEXT("B"), TEXT("blue"), TEXT("Blue") }, B);
+		UeAgentJsonDiagnostics::TryReadNumberFieldByAliases(*ColorObject, { TEXT("a"), TEXT("A"), TEXT("alpha"), TEXT("Alpha") }, A);
 		if (!bHasR || !bHasG || !bHasB)
 		{
 			return false;

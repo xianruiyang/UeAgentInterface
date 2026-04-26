@@ -2,6 +2,7 @@
 
 #include "UeAgentHttpServer_Level.h"
 
+#include "UeAgentJsonDiagnostics.h"
 #include "UeAgentInterfaceLogger.h"
 #include "UeAgentInterfaceSettings.h"
 
