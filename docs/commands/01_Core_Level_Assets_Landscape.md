@@ -15,10 +15,13 @@
 | `open_asset_editor` | 打开指定资产编辑器 | `asset_path` | 打开 Blueprint / Material / Niagara |
 | `save_asset` | 保存指定资产 | `asset_path`、`only_if_dirty` | 保存关键资产修改 |
 | `asset_duplicate` | 复制资产到指定路径 | `source_asset_path`、`destination_asset_path`、`save_after_duplicate` | 先复制测试资产，再在副本上做安全修改 |
+| `asset_import_texture` | 导入外部贴图为 Texture2D | `source_filename`、`destination_path`，可选 `destination_name/srgb/compression_settings/mip_gen_settings/lod_group` | 把外部 PNG/TGA/JPG/EXR/HDR 等贴图纳入 UE 资产链路 |
 | `asset_import_fbx_skeletal_mesh` | 导入 FBX 为 Skeletal Mesh | `source_filename`、`destination_path`，可选 `skeleton_path/import_materials/import_textures/create_physics_asset/import_animations` | 把外部角色模型/骨骼导入到项目 |
 | `asset_import_fbx_animation` | 导入 FBX 为 AnimSequence | `source_filename`、`destination_path`，以及 `skeleton_path` 或 `skeletal_mesh_path` | 批量导入第三方动作到现有骨骼 |
 | `asset_export_property_json` | 导出资产属性为 JSON | `asset_path`；可选 `property_names[]`、`output_file` | 把 AnimSequence / Texture / Mesh 的常用属性拉成可编辑 JSON |
 | `asset_apply_property_json` | 从 JSON 回写资产属性 | `asset_path` 或 `json_file`；可选 `properties[]`、`save_after_apply` | 按 JSON 批量回写 AnimSequence / Texture / Mesh 的属性 |
+| `curve_export_json` | 导出 Curve 资产为结构化 JSON | `asset_path`；可选 `output_file` | 读取 CurveFloat / CurveVector / CurveLinearColor / CurveTable |
+| `curve_apply_json` | 创建或回写 Curve 资产结构化 JSON | `asset_path`；可选 `curve`、`json_file`、`create_if_missing`、`curve_kind`、`save_after_apply` | 用统一 JSON 编辑曲线 key、插值、外推和表格行 |
 | `editor_list_dirty_resources` | 列出当前所有待处理的脏资源 | 无 | 退出前先枚举未保存关卡/资产 |
 | `editor_resolve_dirty_resources` | 按路径或整批保存/丢弃脏资源 | `save_resource_paths`、`discard_resource_paths`、`save_all_dirty`、`discard_all_dirty` | 先处理脏资源，再决定是否关闭编辑器 |
 | `editor_close` | 关闭编辑器；若仍有未处理脏资源则失败并返回清单 | `request_exit`、`close_all_asset_editors` | 自动化结束时安全退出 |
@@ -649,6 +652,35 @@
   - 普通资产
 - 返回项包含 `resource_path`、`object_path`、`kind`、`is_current_level`、`is_open_in_editor` 等字段。
 
+### `asset_import_texture`
+
+- `source_filename`：必填，外部贴图文件绝对路径或项目相对路径；当前显式允许 `png/jpg/jpeg/tga/bmp/exr/hdr/dds/psd/tif/tiff`，最终还会调用 UE `TextureFactory::FactoryCanImport` 做二次判断。
+- `destination_path`：必填，目标内容目录（如 `/Game/VFX/Textures`）。
+- `destination_name`：可选，目标资产名；若使用的 UE 导入管线忽略该字段，仍以源文件名为准，因此推荐把源文件也命名成目标资产名。
+- `replace_existing`：可选，默认 `true`。
+- `replace_existing_settings`：可选，默认 `true`。
+- `save_after_import`：可选，默认 `true`。
+- `open_editor`：可选，默认 `false`。
+- `srgb`：可选，布尔值；用于颜色贴图时通常为 `true`，遮罩/数据贴图通常为 `false`。
+- `compression_settings`：可选，UE 枚举名或数值，如 `TC_Default`、`TC_EditorIcon`。
+- `mip_gen_settings`：可选，UE 枚举名或数值，如 `TMGS_FromTextureGroup`、`TMGS_NoMipmaps`。
+- `lod_group`：可选，UE 枚举名或数值，如 `TEXTUREGROUP_Effects`、`TEXTUREGROUP_UI`。
+- `no_compression` / `no_alpha` / `defer_compression` / `create_material`：可选，透传给 `UTextureFactory` 的导入选项。
+
+返回字段：
+
+- `texture_asset_path`、`texture_object_path`
+- `texture_size_x`、`texture_size_y`、`texture_num_mips`
+- `texture_has_alpha`
+- `srgb`、`compression_settings`、`mip_gen_settings`、`lod_group`
+- `texture_asset_paths[]`、`texture_object_paths[]`
+- 通用导入字段：`imported_object_count`、`imported_objects[]`、`primary_asset_path` 等。
+
+行为说明：
+
+- 该命令只负责把外部贴图正式导入为 UE Texture2D，并在导入后回读关键属性；材质图、Niagara Renderer、SubUV 行列数等仍走对应资产的 JSON / folder workflow。
+- 枚举字段解析失败、布尔字段类型错误、扩展名不支持、UE 工厂拒绝导入都会返回硬错误，不会静默忽略。
+
 ### `asset_import_fbx_skeletal_mesh`
 
 - `source_filename`：必填，外部 FBX 文件绝对路径。
@@ -730,6 +762,7 @@
   - `property_name`
   - `value_text`
   - `cpp_type`
+  - `value_json` / `curve_json`：当属性是 `FRuntimeFloatCurve`、`FRuntimeVectorCurve`、`FRuntimeCurveLinearColor`、`FCurveTableRowHandle` 或曲线资产引用时返回。
 - 如果某个默认属性在当前资产上不存在，会落到 `missing_properties[]`，不会中断整条导出。
 
 ### `asset_apply_property_json`
@@ -753,12 +786,81 @@
 - `properties[]` 每项格式：
   - `property_name`
   - `value_text`
+  - `curve_json` 或 `value_json`：可选；存在时优先按结构化曲线 JSON 写入，不再要求 `value_text`。两者同时存在时，以更明确的 `curve_json` 为准，`value_json` 只作为兼容旧导出的别名。
 - 返回包含 `property_results[]`。每个结果会记录 `requested_value_text`、`applied_value_text`、`property_import_status`、`property_import_verified`、`value_text_exact_match`、`value_text_changed_after_import`、`cpp_type`。
 - 如果 `properties[]` 条目有 JSON 结构问题，例如数组元素不是 object、字段拼写错误、`property_name/value_text` 缺失或类型不对，对应结果会带 `json_issues[]`，每项包含 `severity/code/path/message`。
+- 曲线结构化 JSON 写入失败时，失败项会返回 `property_import_status=curve_json_apply_failed` 和 `json_issues[]`；未知字段、字段拼写相近、缺 key 值、重复 key 时间、非法插值/外推模式都会显式返回。
+- 曲线属性写入会先在临时曲线上完整解析；失败时不会改写目标曲线，也不会把目标资产标脏。多通道曲线任一 channel 失败时，已解析成功的其它 channel 也不会被部分写入。
 - 如果某项 `ImportText` 解析失败，命令失败，`property_results[]` 会保留已处理项和失败项，失败项的 `property_import_status=import_failed`，错误字符串会包含 `property_name` 和请求值。
 - 如果 `properties[]` 中某项不是 JSON object，命令失败，`property_results[]` 会包含 `property_import_status=invalid_property_entry` 和 `json_issues[]`，避免坏条目被静默跳过。
 - 当前会复用对象子属性路径解析，因此像 `CharacterMovement.*` 这类对象链属性也能沿同一套机制继续扩展到资产侧。
 - 这条命令适合做“导出 JSON -> 手工或脚本改 `value_text` -> 回写资产”的轻量结构化工作流，不等于完整 folder profile。
+
+### `curve_export_json`
+
+- `asset_path`：必填，支持 `/Game/...` 或对象路径。
+- `output_file`：可选。相对路径按项目根目录解析，返回绝对路径。
+
+当前覆盖：
+
+- `UCurveFloat`
+- `UCurveVector`
+- `UCurveLinearColor`
+- `UCurveTable`，支持 rich/simple row 的导出。
+
+返回结构固定包含：
+
+- `schema=ue_agent_interface.curve.v1`
+- `curve_kind`
+- `storage`
+- `carrier_cpp_type`
+- `time_domain`
+- `channels`
+- `keys[]`
+- `asset_path / object_path / asset_class`
+
+### `curve_apply_json`
+
+- `asset_path`：必填。
+- `curve`：可选，内联曲线 JSON。
+- `json_file`：可选，读取单文件曲线 JSON；若文件内有顶层 `curve` 对象，会优先使用该对象。
+- `create_if_missing`：可选，默认 `false`。为 `true` 时按 `curve_kind` 创建缺失曲线资产。
+- `curve_kind`：创建时必需或从曲线 JSON 读取；支持 `float`、`vector`、`linear_color`、`curve_table`。
+- `save_after_apply`：可选，默认 `false`。
+- `output_file`：可选，保存 apply 后的 readback JSON；相对路径按项目根目录解析。
+
+诊断与回读：
+
+- 成功返回 `curve_read_back` 和 `json_issues[]`。
+- 失败返回 `curve_json_apply_failed`，并在 `data.json_issues[]` 中给出完整路径。
+- 未知字段会返回 `json_unknown_field`，并尽量给出“Did you mean”提示。
+- key 缺 `value`、重复时间、非法 `interp_mode/tangent_mode/tangent_weight_mode/pre_infinity_extrap/post_infinity_extrap` 都会失败。
+- 失败 apply 不会把目标资产标脏；Vector / LinearColor / CurveTable 等多通道或多行曲线采用临时对象整体验证，避免部分 channel/row 先写入。
+
+最小示例：
+
+```json
+{
+  "asset_path": "/Game/Curves/C_Test",
+  "create_if_missing": true,
+  "curve_kind": "float",
+  "save_after_apply": true,
+  "curve": {
+    "schema": "ue_agent_interface.curve.v1",
+    "curve_kind": "float",
+    "storage": "curve_asset",
+    "carrier_cpp_type": "UCurveFloat",
+    "channels": {
+      "value": {
+        "keys": [
+          { "time": 0.0, "value": 0.0, "interp_mode": "Linear" },
+          { "time": 1.0, "value": 1.0, "interp_mode": "Cubic", "tangent_mode": "Auto" }
+        ]
+      }
+    }
+  }
+}
+```
 
 ### 通用属性写入返回
 

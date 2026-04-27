@@ -37,8 +37,6 @@
 
 ### `niagara_emitter_set_module_input`
 
-### `niagara_emitter_set_module_input`
-
 该指令会先用 `niagara_emitter_list_module_inputs` 相同的解析逻辑定位输入：
 
 - 如果输入是模块 FunctionCall 上的可见 pin（例如 Niagara 模块里的 `Velocity Mode`、`Cone Angle Mode` 这类枚举/静态开关输入），会直接写入该可见 pin。
@@ -48,6 +46,19 @@
 - 返回值包含 `requested_value_text`、`applied_value_text`、`value_text_normalized`，用于区分调用方传入值和真正写入 UE pin 的结构化文本。
 - 设置默认值后会做写后校验。成功返回包含 `default_value_apply_verified=true` 和 `default_value_apply_status`；如果 UE 接受了字符串但 `OverridePin.DefaultValue` 没有落成预期文本，命令会失败并返回 `pin_default_apply_verification_failed:<input>:<detail>`。这类失败通常表示 Niagara pin default 的文本解析/导入格式不匹配。
 - 设置后应使用 `niagara_emitter_list_module_inputs` 回读同一 `module_node_guid`，确认 `override_default_value` 和 `has_override`。
+
+动态输入与曲线属性：
+
+> Deprecated for authoring and normal repair：Dynamic Input 与曲线写入已经并入 Niagara folder JSON。新工作流必须编辑 `stages/*.json -> modules[].inputs[].dynamic_input.data_interfaces[].raw_properties[].curve_json`，再用 `niagara_apply_folder` / `niagara_emitter_apply_folder` 回写。本节参数只保留旧脚本兼容和极端故障恢复。
+
+- `dynamic_input_script_asset_path`：可选；给目标输入创建动态输入脚本，例如 `/Niagara/DynamicInputs/FloatFromCurve.FloatFromCurve`。兼容别名：`dynamic_input_script_path`、`dynamic_input`。
+- `dynamic_input_name` / `suggested_dynamic_input_name`：可选；指定新动态输入节点名，便于后续在导出 JSON 中精确定位。
+- `curve_json` / `value_json`：可选；当动态输入内部包含曲线 Data Interface 时，按 `ue_agent_interface.curve.v1` 写入曲线。两者同时存在时以 `curve_json` 为准。
+- `dynamic_input_curve_input_name`：可选；默认 `FloatCurve`，用于指定动态输入内部要写入的曲线输入名。
+- 返回值会包含 `is_dynamic_input`、`dynamic_input_node_guid`、`dynamic_input_script_asset_path`、`dynamic_input_inputs_initialized`、`dynamic_input_initialization_source`、`curve_json_applied`、`curve_input_node_guid`、`curve_data_interface_object_path` 和 `json_issues[]`。
+- 曲线动态输入必须把 `dynamic_input_inputs_initialized=true`、`curve_json_applied=true`、`json_issues[]` 为空作为成功条件。`curve_data_interface_object_path` 应指向本次新建动态输入下的 Data Interface；如果落到旧的同名 `FloatCurve` 节点，视为错误。
+- 返回值包含 `dynamic_input_extension_deprecated=true` 和 `dynamic_input_extension_replacement`，用于提示调用方迁移到 folder JSON。
+- 该能力只用于旧脚本兼容和极端故障恢复。完整 Niagara 制作和普通修补必须走 `niagara_export_folder -> 修改结构化 JSON -> niagara_apply_folder -> 再导出验证`。
 
 调试建议：
 

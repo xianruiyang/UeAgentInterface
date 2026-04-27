@@ -11,6 +11,8 @@
   - 当前已新增轻量资产属性 JSON 工作流：
     - `asset_export_property_json`
     - `asset_apply_property_json`
+    - `curve_export_json`
+    - `curve_apply_json`
   - 第一版默认覆盖 `AnimSequence / Texture / StaticMesh / SkeletalMesh` 的常用属性
 - Landscape
 - Blueprint

@@ -1,6 +1,7 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "UeAgentHttpServer_Niagara.h"
+#include "UeAgentCurveJson.h"
 #include "UeAgentJsonDiagnostics.h"
 #include "UeAgentInterfaceLogger.h"
 
@@ -2845,6 +2846,13 @@ PRAGMA_ENABLE_DEPRECATION_WARNINGS
 		FString ValueText;
 		Property.ExportTextItem_Direct(ValueText, ValuePtr, nullptr, &Target, PPF_None);
 		PropertyObj->SetStringField(TEXT("value_text"), ValueText);
+		TSharedPtr<FJsonObject> CurveJson;
+		if (UeAgentCurveJson::TryBuildPropertyCurveJson(&Property, ValuePtr, CurveJson) && CurveJson.IsValid())
+		{
+			PropertyObj->SetObjectField(TEXT("value_json"), CurveJson);
+			PropertyObj->SetObjectField(TEXT("curve_json"), CurveJson);
+			PropertyObj->SetStringField(TEXT("value_json_schema"), UeAgentCurveJson::SchemaName);
+		}
 		return PropertyObj;
 	}
 
@@ -4989,6 +4997,18 @@ PRAGMA_ENABLE_DEPRECATION_WARNINGS
 		return OutText;
 	}
 
+	static bool IsNiagaraParameterMapSetNode(const UEdGraphNode* Node)
+	{
+		for (const UClass* Class = Node ? Node->GetClass() : nullptr; Class; Class = Class->GetSuperClass())
+		{
+			if (Class->GetName().Equals(TEXT("NiagaraNodeParameterMapSet"), ESearchCase::CaseSensitive))
+			{
+				return true;
+			}
+		}
+		return false;
+	}
+
 	static UEdGraphPin* FindOverridePinByAliasedInputName(UNiagaraGraph* Graph, const FName AliasedInputName)
 	{
 		if (!Graph || AliasedInputName.IsNone())
@@ -5010,6 +5030,10 @@ PRAGMA_ENABLE_DEPRECATION_WARNINGS
 					continue;
 				}
 				if (Pin->Direction != EGPD_Input)
+				{
+					continue;
+				}
+				if (!IsNiagaraParameterMapSetNode(Pin->GetOwningNode()))
 				{
 					continue;
 				}
@@ -5141,7 +5165,245 @@ PRAGMA_ENABLE_DEPRECATION_WARNINGS
 		return ShortMatch;
 	}
 
-	static TSharedPtr<FJsonObject> BuildModuleInputJson(UNiagaraNodeFunctionCall& ModuleNode, const FResolvedNiagaraModuleInput& InputData)
+	static bool InitializeDynamicInputStackInputs(
+		UNiagaraEmitter* Emitter,
+		const FGuid& VersionGuid,
+		UNiagaraGraph* Graph,
+		UNiagaraNodeFunctionCall& ModuleNode,
+		UNiagaraNodeFunctionCall& DynamicInputNode,
+		FString& OutInitializationSource)
+	{
+		OutInitializationSource.Reset();
+		if (!Graph)
+		{
+			OutInitializationSource = TEXT("invalid_graph_context");
+			return false;
+		}
+
+		TArray<FResolvedNiagaraModuleInput> DynamicInputInputs;
+		BuildResolvedModuleInputs(DynamicInputNode, DynamicInputInputs);
+
+		int32 DataInterfaceInputCount = 0;
+		int32 InitializedInputCount = 0;
+		TArray<FString> Errors;
+		for (const FResolvedNiagaraModuleInput& DynamicInput : DynamicInputInputs)
+		{
+			if (!DynamicInput.InputVariable.IsValid())
+			{
+				continue;
+			}
+
+			const FNiagaraTypeDefinition InputType = DynamicInput.InputVariable.GetType();
+			UClass* InputClass = InputType.GetClass();
+			if (!InputType.IsDataInterface() || !InputClass || !InputClass->IsChildOf(UNiagaraDataInterface::StaticClass()))
+			{
+				continue;
+			}
+
+			++DataInterfaceInputCount;
+			const FNiagaraParameterHandle InputHandle(DynamicInput.InputVariable.GetName());
+			const FNiagaraParameterHandle AliasedInputHandle = FNiagaraParameterHandle::CreateAliasedModuleParameterHandle(InputHandle, &DynamicInputNode);
+
+			UEdGraphPin* DynamicInputParameterMapPin = FindParameterMapInputPin(DynamicInputNode);
+			if (!DynamicInputParameterMapPin || DynamicInputParameterMapPin->LinkedTo.Num() != 1)
+			{
+				Errors.Add(FString::Printf(
+					TEXT("%s:dynamic_input_parameter_map_input_link_count:%d"),
+					*DynamicInput.FullInputName,
+					DynamicInputParameterMapPin ? DynamicInputParameterMapPin->LinkedTo.Num() : 0));
+				continue;
+			}
+
+			UEdGraphPin* OverridePin = &FNiagaraStackGraphUtilities::GetOrCreateStackFunctionInputOverridePin(
+				DynamicInputNode,
+				AliasedInputHandle,
+				InputType,
+				DynamicInput.InputScriptVariableGuid,
+				FGuid());
+			if (!IsNiagaraParameterMapSetNode(OverridePin->GetOwningNode()))
+			{
+				Errors.Add(FString::Printf(TEXT("%s:override_pin_owner_not_parameter_map_set"), *DynamicInput.FullInputName));
+				continue;
+			}
+
+			if (OverridePin->LinkedTo.Num() > 0)
+			{
+				++InitializedInputCount;
+				continue;
+			}
+
+			const FString InputNodeInputName = FString::Printf(TEXT("%s.%s"), *DynamicInputNode.GetFunctionName(), *DynamicInput.ShortInputName);
+			UNiagaraDataInterface* DataInterface = nullptr;
+			FNiagaraStackGraphUtilities::SetDataInterfaceValueForFunctionInput(
+				*OverridePin,
+				InputClass,
+				InputNodeInputName,
+				DataInterface);
+			if (DataInterface)
+			{
+				++InitializedInputCount;
+			}
+			else
+			{
+				Errors.Add(FString::Printf(TEXT("%s:data_interface_create_failed"), *DynamicInput.FullInputName));
+			}
+		}
+
+		if (Graph)
+		{
+			Graph->NotifyGraphChanged();
+		}
+
+		OutInitializationSource = FString::Printf(
+			TEXT("data_interface_inputs:%d;initialized:%d"),
+			DataInterfaceInputCount,
+			InitializedInputCount);
+		if (Errors.Num() > 0)
+		{
+			OutInitializationSource += FString::Printf(TEXT(";errors:%s"), *FString::Join(Errors, TEXT("|")));
+		}
+		return DataInterfaceInputCount == InitializedInputCount;
+	}
+
+	static UNiagaraNodeFunctionCall* FindLinkedDynamicInputNode(const UEdGraphPin* OverridePin)
+	{
+		if (!OverridePin)
+		{
+			return nullptr;
+		}
+
+		for (UEdGraphPin* LinkedPin : OverridePin->LinkedTo)
+		{
+			if (!LinkedPin)
+			{
+				continue;
+			}
+			if (UNiagaraNodeFunctionCall* LinkedFunctionCall = Cast<UNiagaraNodeFunctionCall>(LinkedPin->GetOwningNode()))
+			{
+				return LinkedFunctionCall;
+			}
+		}
+		return nullptr;
+	}
+
+	static bool ResolveDataInterfaceFromInputNode(UNiagaraNodeInput* InputNode, UNiagaraDataInterface*& OutDataInterface)
+	{
+		OutDataInterface = nullptr;
+		if (!InputNode)
+		{
+			return false;
+		}
+
+		FProperty* DataInterfaceProperty = nullptr;
+		void* DataInterfaceValuePtr = nullptr;
+		if (!ResolvePropertyPath(InputNode, TEXT("DataInterface"), DataInterfaceProperty, DataInterfaceValuePtr))
+		{
+			return false;
+		}
+
+		FObjectPropertyBase* ObjectProperty = CastField<FObjectPropertyBase>(DataInterfaceProperty);
+		OutDataInterface = ObjectProperty
+			? Cast<UNiagaraDataInterface>(ObjectProperty->GetObjectPropertyValue(DataInterfaceValuePtr))
+			: nullptr;
+		return OutDataInterface != nullptr;
+	}
+
+	static TArray<TSharedPtr<FJsonValue>> BuildObjectPropertiesJsonForUObject(UObject* Object)
+	{
+		TArray<TSharedPtr<FJsonValue>> PropertiesJson;
+		if (!Object)
+		{
+			return PropertiesJson;
+		}
+
+		for (TFieldIterator<FProperty> It(Object->GetClass(), EFieldIterationFlags::IncludeSuper); It; ++It)
+		{
+			FProperty* Property = *It;
+			if (!Property)
+			{
+				continue;
+			}
+			void* ValuePtr = Property->ContainerPtrToValuePtr<void>(Object);
+			PropertiesJson.Add(MakeShared<FJsonValueObject>(BuildPropertyValueJson(*Object, *Property, ValuePtr)));
+		}
+		return PropertiesJson;
+	}
+
+	static TSharedPtr<FJsonObject> BuildDataInterfaceNodeJson(UNiagaraNodeInput& InputNode)
+	{
+		UNiagaraDataInterface* DataInterface = nullptr;
+		if (!ResolveDataInterfaceFromInputNode(&InputNode, DataInterface) || !DataInterface)
+		{
+			return nullptr;
+		}
+
+		TArray<TSharedPtr<FJsonValue>> RawProperties = BuildObjectPropertiesJsonForUObject(DataInterface);
+		TSharedPtr<FJsonObject> DataInterfaceObj = MakeShared<FJsonObject>();
+		DataInterfaceObj->SetStringField(TEXT("node_guid"), InputNode.NodeGuid.ToString(EGuidFormats::DigitsWithHyphensLower));
+		DataInterfaceObj->SetStringField(TEXT("input_name"), InputNode.Input.GetName().ToString());
+		DataInterfaceObj->SetStringField(TEXT("input_type"), InputNode.Input.GetType().GetNameText().ToString());
+		DataInterfaceObj->SetStringField(TEXT("data_interface_class"), DataInterface->GetClass()->GetPathName());
+		DataInterfaceObj->SetStringField(TEXT("data_interface_object_path"), DataInterface->GetPathName());
+		DataInterfaceObj->SetArrayField(TEXT("raw_properties"), RawProperties);
+		DataInterfaceObj->SetNumberField(TEXT("raw_properties_count"), RawProperties.Num());
+		return DataInterfaceObj;
+	}
+
+	static void CollectLinkedDataInterfaceInputNodesForDynamicInput(UNiagaraNodeFunctionCall& DynamicInputNode, TArray<UNiagaraNodeInput*>& OutInputNodes)
+	{
+		OutInputNodes.Reset();
+		TSet<UNiagaraNodeInput*> SeenInputNodes;
+
+		auto AddInputNodeIfDataInterface = [&SeenInputNodes, &OutInputNodes](UNiagaraNodeInput* InputNode)
+		{
+			UNiagaraDataInterface* DataInterface = nullptr;
+			if (!InputNode || SeenInputNodes.Contains(InputNode) || !ResolveDataInterfaceFromInputNode(InputNode, DataInterface))
+			{
+				return;
+			}
+			SeenInputNodes.Add(InputNode);
+			OutInputNodes.Add(InputNode);
+		};
+
+		for (UEdGraphPin* Pin : DynamicInputNode.Pins)
+		{
+			if (!Pin || Pin->Direction != EGPD_Input || IsParameterMapPin(Pin))
+			{
+				continue;
+			}
+
+			for (UEdGraphPin* LinkedPin : Pin->LinkedTo)
+			{
+				UNiagaraNodeInput* InputNode = LinkedPin ? Cast<UNiagaraNodeInput>(LinkedPin->GetOwningNode()) : nullptr;
+				AddInputNodeIfDataInterface(InputNode);
+			}
+		}
+
+		UNiagaraGraph* Graph = Cast<UNiagaraGraph>(DynamicInputNode.GetGraph());
+		const FString DynamicInputFunctionName = DynamicInputNode.GetFunctionName();
+		if (!Graph || DynamicInputFunctionName.IsEmpty())
+		{
+			return;
+		}
+
+		const FString DynamicInputPrefix = DynamicInputFunctionName + TEXT(".");
+		for (UEdGraphNode* Node : Graph->Nodes)
+		{
+			UNiagaraNodeInput* InputNode = Cast<UNiagaraNodeInput>(Node);
+			if (!InputNode)
+			{
+				continue;
+			}
+
+			const FString InputName = InputNode->Input.GetName().ToString();
+			if (InputName.StartsWith(DynamicInputPrefix, ESearchCase::CaseSensitive))
+			{
+				AddInputNodeIfDataInterface(InputNode);
+			}
+		}
+	}
+
+	static TSharedPtr<FJsonObject> BuildModuleInputJson(UNiagaraNodeFunctionCall& ModuleNode, const FResolvedNiagaraModuleInput& InputData, const int32 RecursionDepth = 0)
 	{
 		TSharedPtr<FJsonObject> InputObj = MakeShared<FJsonObject>();
 		const FNiagaraTypeDefinition InputType = InputData.InputVariable.GetType();
@@ -5149,9 +5411,11 @@ PRAGMA_ENABLE_DEPRECATION_WARNINGS
 		bool bHasDefaultOverride = false;
 		FString OverrideDefaultValue;
 		FString AutogeneratedDefaultValue;
+		UEdGraphPin* EffectiveInputPin = nullptr;
 
 		if (InputData.VisiblePin)
 		{
+			EffectiveInputPin = InputData.VisiblePin;
 			bHasLinks = InputData.VisiblePin->LinkedTo.Num() > 0;
 			bHasDefaultOverride = InputData.VisiblePin->DefaultValue != InputData.VisiblePin->AutogeneratedDefaultValue;
 			OverrideDefaultValue = InputData.VisiblePin->DefaultValue;
@@ -5164,6 +5428,7 @@ PRAGMA_ENABLE_DEPRECATION_WARNINGS
 			UNiagaraGraph* Graph = Cast<UNiagaraGraph>(ModuleNode.GetGraph());
 			if (UEdGraphPin* OverridePin = FindOverridePinByAliasedInputName(Graph, AliasedHandle.GetParameterHandleString()))
 			{
+				EffectiveInputPin = OverridePin;
 				bHasLinks = OverridePin->LinkedTo.Num() > 0;
 				bHasDefaultOverride = !OverridePin->DefaultValue.IsEmpty() ||
 					OverridePin->DefaultValue != OverridePin->AutogeneratedDefaultValue;
@@ -5240,6 +5505,46 @@ PRAGMA_ENABLE_DEPRECATION_WARNINGS
 					OptionsJson.Add(MakeShared<FJsonValueObject>(OptionObj));
 				}
 				InputObj->SetArrayField(TEXT("enum_options"), OptionsJson);
+			}
+		}
+
+		if (bHasLinks && EffectiveInputPin && RecursionDepth < 4)
+		{
+			if (UNiagaraNodeFunctionCall* DynamicInputNode = FindLinkedDynamicInputNode(EffectiveInputPin))
+			{
+				TSharedPtr<FJsonObject> DynamicInputObj = MakeShared<FJsonObject>();
+				DynamicInputObj->SetStringField(TEXT("node_guid"), DynamicInputNode->NodeGuid.ToString(EGuidFormats::DigitsWithHyphensLower));
+				DynamicInputObj->SetStringField(TEXT("node_name"), DynamicInputNode->GetFunctionName());
+				DynamicInputObj->SetStringField(TEXT("script_asset_path"), GetModuleScriptPath(*DynamicInputNode));
+
+				TArray<FResolvedNiagaraModuleInput> DynamicInputs;
+				BuildResolvedModuleInputs(*DynamicInputNode, DynamicInputs);
+				TArray<TSharedPtr<FJsonValue>> DynamicInputsJson;
+				DynamicInputsJson.Reserve(DynamicInputs.Num());
+				for (const FResolvedNiagaraModuleInput& DynamicInput : DynamicInputs)
+				{
+					DynamicInputsJson.Add(MakeShared<FJsonValueObject>(BuildModuleInputJson(*DynamicInputNode, DynamicInput, RecursionDepth + 1)));
+				}
+				DynamicInputObj->SetArrayField(TEXT("inputs"), DynamicInputsJson);
+				DynamicInputObj->SetNumberField(TEXT("input_count"), DynamicInputsJson.Num());
+
+				TArray<UNiagaraNodeInput*> DataInterfaceInputNodes;
+				CollectLinkedDataInterfaceInputNodesForDynamicInput(*DynamicInputNode, DataInterfaceInputNodes);
+				TArray<TSharedPtr<FJsonValue>> DataInterfacesJson;
+				DataInterfacesJson.Reserve(DataInterfaceInputNodes.Num());
+				for (UNiagaraNodeInput* DataInterfaceInputNode : DataInterfaceInputNodes)
+				{
+					TSharedPtr<FJsonObject> DataInterfaceObj = DataInterfaceInputNode ? BuildDataInterfaceNodeJson(*DataInterfaceInputNode) : nullptr;
+					if (DataInterfaceObj.IsValid())
+					{
+						DataInterfacesJson.Add(MakeShared<FJsonValueObject>(DataInterfaceObj));
+					}
+				}
+				DynamicInputObj->SetArrayField(TEXT("data_interfaces"), DataInterfacesJson);
+				DynamicInputObj->SetNumberField(TEXT("data_interface_count"), DataInterfacesJson.Num());
+
+				InputObj->SetStringField(TEXT("link_kind"), TEXT("dynamic_input"));
+				InputObj->SetObjectField(TEXT("dynamic_input"), DynamicInputObj);
 			}
 		}
 		return InputObj;

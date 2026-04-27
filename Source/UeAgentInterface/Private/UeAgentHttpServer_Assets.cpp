@@ -1,6 +1,7 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "UeAgentHttpServer_Assets.h"
+#include "UeAgentCurveJson.h"
 #include "UeAgentJsonDiagnostics.h"
 #include "UeAgentInterfaceLogger.h"
 
@@ -13,10 +14,12 @@
 #include "Containers/Ticker.h"
 #include "Engine/SkeletalMesh.h"
 #include "Engine/Texture.h"
+#include "Engine/Texture2D.h"
 #include "Factories/FbxAnimSequenceImportData.h"
 #include "Factories/FbxFactory.h"
 #include "Factories/FbxImportUI.h"
 #include "Factories/FbxSkeletalMeshImportData.h"
+#include "Factories/TextureFactory.h"
 #include "FileHelpers.h"
 #include "Misc/FileHelper.h"
 #include "Misc/PackageName.h"
@@ -26,6 +29,7 @@
 #include "Serialization/JsonSerializer.h"
 #include "Subsystems/AssetEditorSubsystem.h"
 #include "UObject/Package.h"
+#include "UObject/UnrealType.h"
 #include "UObject/UObjectIterator.h"
 
 namespace UeAgentAssetOps
@@ -149,7 +153,7 @@ namespace UeAgentAssetOps
 			return false;
 		}
 
-		OutputPath = FPaths::ConvertRelativePathToFull(OutputPath);
+		OutputPath = UeAgentJsonDiagnostics::ResolveProjectRelativeFilePath(OutputPath);
 		const FString OutputDir = FPaths::GetPath(OutputPath);
 		if (!OutputDir.IsEmpty() && !IFileManager::Get().DirectoryExists(*OutputDir))
 		{
@@ -188,7 +192,7 @@ namespace UeAgentAssetOps
 			return false;
 		}
 
-		InputPath = FPaths::ConvertRelativePathToFull(InputPath);
+		InputPath = UeAgentJsonDiagnostics::ResolveProjectRelativeFilePath(InputPath);
 		if (!FPaths::FileExists(InputPath))
 		{
 			OutError = TEXT("json_file_not_found");
@@ -666,7 +670,12 @@ namespace UeAgentAssetOps
 		}
 	}
 
-	static bool ResolveImportSourceFilename(const FString& InFilename, FString& OutAbsoluteFilename, FString& OutError)
+	static bool ResolveImportSourceFilenameWithExtensions(
+		const FString& InFilename,
+		const TSet<FString>& AllowedExtensions,
+		const TCHAR* ExtensionError,
+		FString& OutAbsoluteFilename,
+		FString& OutError)
 	{
 		OutAbsoluteFilename = InFilename;
 		OutAbsoluteFilename.TrimStartAndEndInline();
@@ -676,7 +685,14 @@ namespace UeAgentAssetOps
 			return false;
 		}
 
-		OutAbsoluteFilename = FPaths::ConvertRelativePathToFull(OutAbsoluteFilename);
+		if (FPaths::IsRelative(OutAbsoluteFilename))
+		{
+			OutAbsoluteFilename = UeAgentJsonDiagnostics::ResolveProjectRelativeFilePath(OutAbsoluteFilename);
+		}
+		else
+		{
+			OutAbsoluteFilename = FPaths::ConvertRelativePathToFull(OutAbsoluteFilename);
+		}
 		FPaths::NormalizeFilename(OutAbsoluteFilename);
 		if (!FPaths::FileExists(OutAbsoluteFilename))
 		{
@@ -684,12 +700,84 @@ namespace UeAgentAssetOps
 			return false;
 		}
 
-		if (!FPaths::GetExtension(OutAbsoluteFilename).Equals(TEXT("fbx"), ESearchCase::IgnoreCase))
+		const FString Extension = FPaths::GetExtension(OutAbsoluteFilename).ToLower();
+		if (AllowedExtensions.Num() > 0 && !AllowedExtensions.Contains(Extension))
 		{
-			OutError = TEXT("source_file_is_not_fbx");
+			OutError = ExtensionError ? ExtensionError : TEXT("source_file_extension_not_allowed");
 			return false;
 		}
 
+		return true;
+	}
+
+	static bool ResolveImportSourceFilename(const FString& InFilename, FString& OutAbsoluteFilename, FString& OutError)
+	{
+		const TSet<FString> FbxExtensions = { TEXT("fbx") };
+		return ResolveImportSourceFilenameWithExtensions(
+			InFilename,
+			FbxExtensions,
+			TEXT("source_file_is_not_fbx"),
+			OutAbsoluteFilename,
+			OutError);
+	}
+
+	template<typename TEnum>
+	static FString EnumValueToString(TEnum Value)
+	{
+		if (const UEnum* Enum = StaticEnum<TEnum>())
+		{
+			return Enum->GetNameStringByValue(static_cast<int64>(Value));
+		}
+		return FString::Printf(TEXT("%d"), static_cast<int32>(Value));
+	}
+
+	template<typename TEnum>
+	static bool TryParseEnumValue(const FString& InText, const TCHAR* FieldName, TEnum& OutValue, FString& OutError)
+	{
+		FString Text = InText;
+		Text.TrimStartAndEndInline();
+		if (Text.IsEmpty())
+		{
+			OutError = FString::Printf(TEXT("empty_enum_value:%s"), FieldName ? FieldName : TEXT("enum"));
+			return false;
+		}
+
+		const UEnum* Enum = StaticEnum<TEnum>();
+		if (!Enum)
+		{
+			OutError = FString::Printf(TEXT("enum_type_not_found:%s"), FieldName ? FieldName : TEXT("enum"));
+			return false;
+		}
+
+		int64 Value = Enum->GetValueByNameString(Text, EGetByNameFlags::CheckAuthoredName);
+		if (Value == INDEX_NONE)
+		{
+			Value = Enum->GetValueByNameString(Text, EGetByNameFlags::None);
+		}
+		if (Value == INDEX_NONE && !Text.Contains(TEXT("::")))
+		{
+			const FString QualifiedText = FString::Printf(TEXT("%s::%s"), *Enum->GetName(), *Text);
+			Value = Enum->GetValueByNameString(QualifiedText, EGetByNameFlags::CheckAuthoredName);
+			if (Value == INDEX_NONE)
+			{
+				Value = Enum->GetValueByNameString(QualifiedText, EGetByNameFlags::None);
+			}
+		}
+		if (Value == INDEX_NONE)
+		{
+			int64 NumericValue = 0;
+			if (LexTryParseString(NumericValue, *Text) && Enum->IsValidEnumValue(NumericValue))
+			{
+				Value = NumericValue;
+			}
+		}
+		if (Value == INDEX_NONE)
+		{
+			OutError = FString::Printf(TEXT("invalid_enum_value:%s:%s"), FieldName ? FieldName : TEXT("enum"), *Text);
+			return false;
+		}
+
+		OutValue = static_cast<TEnum>(Value);
 		return true;
 	}
 
@@ -1180,6 +1268,352 @@ bool FUeAgentHttpServer::CmdAssetDuplicate(const FUeAgentRequestContext& Ctx, TS
 	return true;
 }
 
+bool FUeAgentHttpServer::CmdAssetImportTexture(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+{
+	FString SourceFilenameInput;
+	if (!JsonTryGetString(Ctx.Params, TEXT("source_filename"), SourceFilenameInput) || SourceFilenameInput.IsEmpty())
+	{
+		OutError = TEXT("missing_source_filename");
+		return false;
+	}
+
+	FString DestinationPathInput;
+	if (!JsonTryGetString(Ctx.Params, TEXT("destination_path"), DestinationPathInput) || DestinationPathInput.IsEmpty())
+	{
+		OutError = TEXT("missing_destination_path");
+		return false;
+	}
+
+	const TSet<FString> TextureExtensions = {
+		TEXT("png"), TEXT("jpg"), TEXT("jpeg"), TEXT("tga"), TEXT("bmp"),
+		TEXT("exr"), TEXT("hdr"), TEXT("dds"), TEXT("psd"), TEXT("tif"), TEXT("tiff")
+	};
+
+	FString SourceFilename;
+	if (!UeAgentAssetOps::ResolveImportSourceFilenameWithExtensions(
+		SourceFilenameInput,
+		TextureExtensions,
+		TEXT("source_file_is_not_supported_texture_extension"),
+		SourceFilename,
+		OutError))
+	{
+		return false;
+	}
+
+	FString DestinationPath;
+	if (!UeAgentAssetOps::ResolveImportDestinationPath(DestinationPathInput, DestinationPath, OutError))
+	{
+		return false;
+	}
+
+	FString DestinationName;
+	JsonTryGetString(Ctx.Params, TEXT("destination_name"), DestinationName);
+	DestinationName.TrimStartAndEndInline();
+	if (!DestinationName.IsEmpty())
+	{
+		const FString DestinationAssetPath = DestinationPath / DestinationName;
+		if (!FPackageName::IsValidLongPackageName(DestinationAssetPath))
+		{
+			OutError = TEXT("invalid_destination_name");
+			return false;
+		}
+	}
+
+	bool bReplaceExisting = true;
+	if (Ctx.Params.IsValid() && Ctx.Params->HasField(TEXT("replace_existing")) && !JsonTryGetBool(Ctx.Params, TEXT("replace_existing"), bReplaceExisting))
+	{
+		OutError = TEXT("invalid_replace_existing");
+		return false;
+	}
+
+	bool bReplaceExistingSettings = true;
+	if (Ctx.Params.IsValid() && Ctx.Params->HasField(TEXT("replace_existing_settings")) && !JsonTryGetBool(Ctx.Params, TEXT("replace_existing_settings"), bReplaceExistingSettings))
+	{
+		OutError = TEXT("invalid_replace_existing_settings");
+		return false;
+	}
+
+	bool bSaveAfterImport = true;
+	if (Ctx.Params.IsValid() && Ctx.Params->HasField(TEXT("save_after_import")) && !JsonTryGetBool(Ctx.Params, TEXT("save_after_import"), bSaveAfterImport))
+	{
+		OutError = TEXT("invalid_save_after_import");
+		return false;
+	}
+
+	bool bOpenEditor = false;
+	if (Ctx.Params.IsValid() && Ctx.Params->HasField(TEXT("open_editor")) && !JsonTryGetBool(Ctx.Params, TEXT("open_editor"), bOpenEditor))
+	{
+		OutError = TEXT("invalid_open_editor");
+		return false;
+	}
+
+	UTextureFactory* TextureFactory = NewObject<UTextureFactory>();
+	UAutomatedAssetImportData* ImportData = NewObject<UAutomatedAssetImportData>();
+	if (!TextureFactory || !ImportData)
+	{
+		OutError = TEXT("create_texture_import_task_failed");
+		return false;
+	}
+
+	TextureFactory->AddToRoot();
+	ImportData->AddToRoot();
+
+	bool bHasSRGB = false;
+	bool bSRGB = true;
+	if (Ctx.Params.IsValid() && Ctx.Params->HasField(TEXT("srgb")))
+	{
+		bHasSRGB = true;
+		if (!JsonTryGetBool(Ctx.Params, TEXT("srgb"), bSRGB))
+		{
+			ImportData->RemoveFromRoot();
+			TextureFactory->RemoveFromRoot();
+			OutError = TEXT("invalid_srgb");
+			return false;
+		}
+		TextureFactory->ColorSpaceMode = bSRGB ? ETextureSourceColorSpace::SRGB : ETextureSourceColorSpace::Linear;
+	}
+
+	auto ReadOptionalBool = [&](const TCHAR* FieldName, bool& InOutValue) -> bool
+	{
+		if (!Ctx.Params.IsValid() || !Ctx.Params->HasField(FieldName))
+		{
+			return true;
+		}
+		if (!JsonTryGetBool(Ctx.Params, FieldName, InOutValue))
+		{
+			OutError = FString::Printf(TEXT("invalid_%s"), FieldName);
+			return false;
+		}
+		return true;
+	};
+
+	bool bNoCompression = false;
+	if (!ReadOptionalBool(TEXT("no_compression"), bNoCompression))
+	{
+		ImportData->RemoveFromRoot();
+		TextureFactory->RemoveFromRoot();
+		return false;
+	}
+	TextureFactory->NoCompression = bNoCompression;
+
+	bool bNoAlpha = false;
+	if (!ReadOptionalBool(TEXT("no_alpha"), bNoAlpha))
+	{
+		ImportData->RemoveFromRoot();
+		TextureFactory->RemoveFromRoot();
+		return false;
+	}
+	TextureFactory->NoAlpha = bNoAlpha;
+
+	bool bDeferCompression = false;
+	if (!ReadOptionalBool(TEXT("defer_compression"), bDeferCompression))
+	{
+		ImportData->RemoveFromRoot();
+		TextureFactory->RemoveFromRoot();
+		return false;
+	}
+	TextureFactory->bDeferCompression = bDeferCompression;
+
+	bool bCreateMaterial = false;
+	if (!ReadOptionalBool(TEXT("create_material"), bCreateMaterial))
+	{
+		ImportData->RemoveFromRoot();
+		TextureFactory->RemoveFromRoot();
+		return false;
+	}
+	TextureFactory->bCreateMaterial = bCreateMaterial;
+
+	bool bHasCompressionSettings = false;
+	TextureCompressionSettings CompressionSettings = TC_Default;
+	if (Ctx.Params.IsValid() && Ctx.Params->HasField(TEXT("compression_settings")))
+	{
+		FString CompressionSettingsText;
+		if (!JsonTryGetString(Ctx.Params, TEXT("compression_settings"), CompressionSettingsText)
+			|| !UeAgentAssetOps::TryParseEnumValue<TextureCompressionSettings>(CompressionSettingsText, TEXT("compression_settings"), CompressionSettings, OutError))
+		{
+			ImportData->RemoveFromRoot();
+			TextureFactory->RemoveFromRoot();
+			return false;
+		}
+		bHasCompressionSettings = true;
+		TextureFactory->CompressionSettings = CompressionSettings;
+	}
+
+	bool bHasMipGenSettings = false;
+	TextureMipGenSettings MipGenSettings = TMGS_FromTextureGroup;
+	if (Ctx.Params.IsValid() && Ctx.Params->HasField(TEXT("mip_gen_settings")))
+	{
+		FString MipGenSettingsText;
+		if (!JsonTryGetString(Ctx.Params, TEXT("mip_gen_settings"), MipGenSettingsText)
+			|| !UeAgentAssetOps::TryParseEnumValue<TextureMipGenSettings>(MipGenSettingsText, TEXT("mip_gen_settings"), MipGenSettings, OutError))
+		{
+			ImportData->RemoveFromRoot();
+			TextureFactory->RemoveFromRoot();
+			return false;
+		}
+		bHasMipGenSettings = true;
+		TextureFactory->MipGenSettings = MipGenSettings;
+	}
+
+	bool bHasLODGroup = false;
+	TextureGroup LODGroup = TEXTUREGROUP_World;
+	if (Ctx.Params.IsValid() && Ctx.Params->HasField(TEXT("lod_group")))
+	{
+		FString LODGroupText;
+		if (!JsonTryGetString(Ctx.Params, TEXT("lod_group"), LODGroupText)
+			|| !UeAgentAssetOps::TryParseEnumValue<TextureGroup>(LODGroupText, TEXT("lod_group"), LODGroup, OutError))
+		{
+			ImportData->RemoveFromRoot();
+			TextureFactory->RemoveFromRoot();
+			return false;
+		}
+		bHasLODGroup = true;
+		TextureFactory->LODGroup = LODGroup;
+	}
+
+	if (!TextureFactory->FactoryCanImport(SourceFilename))
+	{
+		ImportData->RemoveFromRoot();
+		TextureFactory->RemoveFromRoot();
+		OutError = TEXT("source_file_not_supported_by_texture_factory");
+		return false;
+	}
+
+	UTextureFactory::SuppressImportOverwriteDialog(bReplaceExistingSettings);
+	ImportData->Filenames = { SourceFilename };
+	ImportData->DestinationPath = DestinationPath;
+	ImportData->FactoryName = TextureFactory->GetClass()->GetName();
+	ImportData->bReplaceExisting = bReplaceExisting;
+	ImportData->Factory = TextureFactory;
+
+	FAssetToolsModule& AssetToolsModule = FModuleManager::LoadModuleChecked<FAssetToolsModule>(TEXT("AssetTools"));
+	TArray<UObject*> ImportedObjects = AssetToolsModule.Get().ImportAssetsAutomated(ImportData);
+
+	TArray<UTexture2D*> ImportedTextures;
+	for (UObject* ImportedObject : ImportedObjects)
+	{
+		if (UTexture2D* Texture = Cast<UTexture2D>(ImportedObject))
+		{
+			ImportedTextures.AddUnique(Texture);
+		}
+	}
+
+	if (ImportedTextures.Num() <= 0)
+	{
+		UeAgentAssetOps::FillImportedObjectsResponse(ImportedObjects, OutData);
+		OutData->SetStringField(TEXT("source_filename"), SourceFilename);
+		OutData->SetStringField(TEXT("destination_path"), DestinationPath);
+		OutData->SetStringField(TEXT("destination_name"), DestinationName);
+		ImportData->RemoveFromRoot();
+		TextureFactory->RemoveFromRoot();
+		OutError = TEXT("texture_import_created_no_texture2d");
+		return false;
+	}
+
+	for (UTexture2D* Texture : ImportedTextures)
+	{
+		if (!Texture)
+		{
+			continue;
+		}
+		if (bHasSRGB)
+		{
+			Texture->SRGB = bSRGB;
+		}
+		if (bHasCompressionSettings)
+		{
+			Texture->CompressionSettings = CompressionSettings;
+		}
+		if (bHasMipGenSettings)
+		{
+			Texture->MipGenSettings = MipGenSettings;
+		}
+		if (bHasLODGroup)
+		{
+			Texture->LODGroup = LODGroup;
+		}
+		Texture->PostEditChange();
+		Texture->MarkPackageDirty();
+	}
+
+	if (bSaveAfterImport)
+	{
+		TArray<UPackage*> PackagesToSave;
+		for (UObject* ImportedObject : ImportedObjects)
+		{
+			if (ImportedObject && ImportedObject->GetOutermost())
+			{
+				PackagesToSave.AddUnique(ImportedObject->GetOutermost());
+			}
+		}
+		for (UTexture2D* Texture : ImportedTextures)
+		{
+			if (Texture && Texture->GetOutermost())
+			{
+				PackagesToSave.AddUnique(Texture->GetOutermost());
+			}
+		}
+		if (PackagesToSave.Num() > 0 && !UEditorLoadingAndSavingUtils::SavePackages(PackagesToSave, true))
+		{
+			ImportData->RemoveFromRoot();
+			TextureFactory->RemoveFromRoot();
+			OutError = TEXT("save_asset_failed");
+			return false;
+		}
+	}
+
+	UeAgentAssetOps::FillImportedObjectsResponse(ImportedObjects, OutData);
+	OutData->SetStringField(TEXT("source_filename"), SourceFilename);
+	OutData->SetStringField(TEXT("destination_path"), DestinationPath);
+	OutData->SetStringField(TEXT("destination_name"), DestinationName);
+	OutData->SetBoolField(TEXT("replace_existing"), bReplaceExisting);
+	OutData->SetBoolField(TEXT("replace_existing_settings"), bReplaceExistingSettings);
+	OutData->SetBoolField(TEXT("save_after_import"), bSaveAfterImport);
+	OutData->SetBoolField(TEXT("factory_can_import"), true);
+	OutData->SetStringField(TEXT("factory_class"), TextureFactory->GetClass()->GetPathName());
+
+	TArray<TSharedPtr<FJsonValue>> TextureAssetPathsJson;
+	TArray<TSharedPtr<FJsonValue>> TextureObjectPathsJson;
+	for (UTexture2D* Texture : ImportedTextures)
+	{
+		if (!Texture)
+		{
+			continue;
+		}
+		TextureAssetPathsJson.Add(MakeShared<FJsonValueString>(Texture->GetOutermost() ? Texture->GetOutermost()->GetName() : FString()));
+		TextureObjectPathsJson.Add(MakeShared<FJsonValueString>(Texture->GetPathName()));
+	}
+	OutData->SetNumberField(TEXT("texture_count"), ImportedTextures.Num());
+	OutData->SetArrayField(TEXT("texture_asset_paths"), TextureAssetPathsJson);
+	OutData->SetArrayField(TEXT("texture_object_paths"), TextureObjectPathsJson);
+
+	if (UTexture2D* PrimaryTexture = ImportedTextures[0])
+	{
+		OutData->SetStringField(TEXT("texture_asset_path"), PrimaryTexture->GetOutermost() ? PrimaryTexture->GetOutermost()->GetName() : FString());
+		OutData->SetStringField(TEXT("texture_object_path"), PrimaryTexture->GetPathName());
+		OutData->SetNumberField(TEXT("texture_size_x"), PrimaryTexture->GetSizeX());
+		OutData->SetNumberField(TEXT("texture_size_y"), PrimaryTexture->GetSizeY());
+		OutData->SetNumberField(TEXT("texture_num_mips"), PrimaryTexture->GetNumMips());
+		OutData->SetBoolField(TEXT("texture_has_alpha"), PrimaryTexture->HasAlphaChannel());
+		OutData->SetBoolField(TEXT("srgb"), PrimaryTexture->SRGB != 0);
+		OutData->SetStringField(TEXT("compression_settings"), UeAgentAssetOps::EnumValueToString<TextureCompressionSettings>(static_cast<TextureCompressionSettings>(PrimaryTexture->CompressionSettings.GetValue())));
+		OutData->SetStringField(TEXT("mip_gen_settings"), UeAgentAssetOps::EnumValueToString<TextureMipGenSettings>(static_cast<TextureMipGenSettings>(PrimaryTexture->MipGenSettings.GetValue())));
+		OutData->SetStringField(TEXT("lod_group"), UeAgentAssetOps::EnumValueToString<TextureGroup>(static_cast<TextureGroup>(PrimaryTexture->LODGroup.GetValue())));
+	}
+
+	if (bOpenEditor)
+	{
+		if (UAssetEditorSubsystem* AssetEditorSubsystem = GEditor ? GEditor->GetEditorSubsystem<UAssetEditorSubsystem>() : nullptr)
+		{
+			AssetEditorSubsystem->OpenEditorForAsset(ImportedTextures[0]);
+		}
+	}
+
+	ImportData->RemoveFromRoot();
+	TextureFactory->RemoveFromRoot();
+	return true;
+}
+
 bool FUeAgentHttpServer::CmdAssetImportFbxSkeletalMesh(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	FString SourceFilenameInput;
@@ -1597,6 +2031,18 @@ bool FUeAgentHttpServer::CmdAssetExportPropertyJson(const FUeAgentRequestContext
 		{
 			PropertyObj->SetStringField(TEXT("cpp_type"), CppType);
 		}
+		FProperty* Property = nullptr;
+		void* ValuePtr = nullptr;
+		if (UeAgentAssetOps::ResolvePropertyPath(Asset, PropertyPath, Property, ValuePtr) && Property && ValuePtr)
+		{
+			TSharedPtr<FJsonObject> CurveJson;
+			if (UeAgentCurveJson::TryBuildPropertyCurveJson(Property, ValuePtr, CurveJson) && CurveJson.IsValid())
+			{
+				PropertyObj->SetObjectField(TEXT("value_json"), CurveJson);
+				PropertyObj->SetObjectField(TEXT("curve_json"), CurveJson);
+				PropertyObj->SetStringField(TEXT("value_json_schema"), UeAgentCurveJson::SchemaName);
+			}
+		}
 		PropertiesJson.Add(MakeShared<FJsonValueObject>(PropertyObj));
 		++ExportedPropertyCount;
 	}
@@ -1696,7 +2142,6 @@ bool FUeAgentHttpServer::CmdAssetApplyPropertyJson(const FUeAgentRequestContext&
 
 	int32 AppliedPropertyCount = 0;
 	TArray<TSharedPtr<FJsonValue>> PropertyResultsJson;
-	Asset->Modify();
 	int32 PropertyIndex = 0;
 	for (const TSharedPtr<FJsonValue>& PropertyValue : *PropertiesArray)
 	{
@@ -1716,7 +2161,7 @@ bool FUeAgentHttpServer::CmdAssetApplyPropertyJson(const FUeAgentRequestContext&
 		UeAgentJsonDiagnostics::WarnUnknownFields(
 			PropertyObj,
 			PropertyPath,
-			{ TEXT("property_name"), TEXT("value_text"), TEXT("cpp_type") },
+			{ TEXT("property_name"), TEXT("value_text"), TEXT("cpp_type"), TEXT("value_json"), TEXT("curve_json"), TEXT("value_json_schema") },
 			PropertyJsonIssues);
 
 		FString PropertyName;
@@ -1735,7 +2180,25 @@ bool FUeAgentHttpServer::CmdAssetApplyPropertyJson(const FUeAgentRequestContext&
 			OutError = TEXT("missing_property_name");
 			return false;
 		}
-		if (!UeAgentJsonDiagnostics::ReadStringField(PropertyObj, TEXT("value_text"), PropertyPath + TEXT(".value_text"), ValueText, PropertyJsonIssues, true))
+
+		TSharedPtr<FJsonObject> TypedCurveJson;
+		bool bHasTypedCurveJson = false;
+		const TSharedPtr<FJsonObject>* CurveJsonPtr = nullptr;
+		FString TypedCurveJsonFieldName;
+		if (PropertyObj->TryGetObjectField(TEXT("curve_json"), CurveJsonPtr) && CurveJsonPtr && CurveJsonPtr->IsValid())
+		{
+			TypedCurveJson = *CurveJsonPtr;
+			bHasTypedCurveJson = true;
+			TypedCurveJsonFieldName = TEXT("curve_json");
+		}
+		else if (PropertyObj->TryGetObjectField(TEXT("value_json"), CurveJsonPtr) && CurveJsonPtr && CurveJsonPtr->IsValid())
+		{
+			TypedCurveJson = *CurveJsonPtr;
+			bHasTypedCurveJson = true;
+			TypedCurveJsonFieldName = TEXT("value_json");
+		}
+
+		if (!bHasTypedCurveJson && !UeAgentJsonDiagnostics::ReadStringField(PropertyObj, TEXT("value_text"), PropertyPath + TEXT(".value_text"), ValueText, PropertyJsonIssues, true))
 		{
 			TSharedPtr<FJsonObject> ResultObj = FUeAgentHttpServer::MakePropertyImportResultJson(PropertyName, nullptr, TEXT(""), TEXT(""), TEXT("missing_value_text"));
 			ResultObj->SetArrayField(TEXT("json_issues"), PropertyJsonIssues);
@@ -1748,6 +2211,46 @@ bool FUeAgentHttpServer::CmdAssetApplyPropertyJson(const FUeAgentRequestContext&
 		FString AppliedValueText;
 		FString CppType;
 		FString ImportError;
+		if (bHasTypedCurveJson)
+		{
+			FProperty* Property = nullptr;
+			void* ValuePtr = nullptr;
+			if (!UeAgentAssetOps::ResolvePropertyPath(Asset, PropertyName, Property, ValuePtr) || !Property || !ValuePtr)
+			{
+				TSharedPtr<FJsonObject> ResultObj = FUeAgentHttpServer::MakePropertyImportResultJson(PropertyName, nullptr, TEXT(""), TEXT(""), TEXT("property_not_found"), TEXT("property_not_found"));
+				ResultObj->SetArrayField(TEXT("json_issues"), PropertyJsonIssues);
+				PropertyResultsJson.Add(MakeShared<FJsonValueObject>(ResultObj));
+				OutData->SetArrayField(TEXT("property_results"), PropertyResultsJson);
+				OutError = TEXT("property_not_found");
+				return false;
+			}
+
+			if (!UeAgentCurveJson::TryApplyPropertyCurveJson(Property, ValuePtr, TypedCurveJson, PropertyPath + TEXT(".") + TypedCurveJsonFieldName, PropertyJsonIssues))
+			{
+				TSharedPtr<FJsonObject> ResultObj = FUeAgentHttpServer::MakePropertyImportResultJson(PropertyName, Property, TEXT("<curve_json>"), TEXT(""), TEXT("curve_json_apply_failed"), TEXT("curve_json_apply_failed"));
+				ResultObj->SetArrayField(TEXT("json_issues"), PropertyJsonIssues);
+				PropertyResultsJson.Add(MakeShared<FJsonValueObject>(ResultObj));
+				OutData->SetArrayField(TEXT("property_results"), PropertyResultsJson);
+				OutError = TEXT("curve_json_apply_failed");
+				return false;
+			}
+
+			Property->ExportTextItem_Direct(AppliedValueText, ValuePtr, nullptr, Asset, PPF_None);
+			TSharedPtr<FJsonObject> ResultObj = FUeAgentHttpServer::MakePropertyImportResultJson(PropertyName, Property, TEXT("<curve_json>"), AppliedValueText, TEXT("curve_json_applied_and_read_back"));
+			TSharedPtr<FJsonObject> ReadbackCurveJson;
+			if (UeAgentCurveJson::TryBuildPropertyCurveJson(Property, ValuePtr, ReadbackCurveJson) && ReadbackCurveJson.IsValid())
+			{
+				ResultObj->SetObjectField(TEXT("value_json_read_back"), ReadbackCurveJson);
+			}
+			if (PropertyJsonIssues.Num() > 0)
+			{
+				ResultObj->SetArrayField(TEXT("json_issues"), PropertyJsonIssues);
+			}
+			PropertyResultsJson.Add(MakeShared<FJsonValueObject>(ResultObj));
+			++AppliedPropertyCount;
+			continue;
+		}
+
 		if (!UeAgentAssetOps::SetObjectPropertyText(Asset, PropertyName, ValueText, &AppliedValueText, &CppType, &ImportError))
 		{
 			const FString ImportStatus = ImportError.Equals(TEXT("property_not_found"), ESearchCase::CaseSensitive) ? TEXT("property_not_found") : TEXT("import_failed");
@@ -1773,6 +2276,10 @@ bool FUeAgentHttpServer::CmdAssetApplyPropertyJson(const FUeAgentRequestContext&
 		++AppliedPropertyCount;
 	}
 
+	if (AppliedPropertyCount > 0)
+	{
+		Asset->Modify();
+	}
 	Asset->MarkPackageDirty();
 	Asset->PostEditChange();
 
@@ -1792,6 +2299,176 @@ bool FUeAgentHttpServer::CmdAssetApplyPropertyJson(const FUeAgentRequestContext&
 	if (!ResolvedJsonFile.IsEmpty())
 	{
 		OutData->SetStringField(TEXT("json_file"), ResolvedJsonFile);
+	}
+	return true;
+}
+
+bool FUeAgentHttpServer::CmdCurveExportJson(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+{
+	FString AssetPathInput;
+	if (!JsonTryGetString(Ctx.Params, TEXT("asset_path"), AssetPathInput) || AssetPathInput.TrimStartAndEnd().IsEmpty())
+	{
+		OutError = TEXT("missing_asset_path");
+		return false;
+	}
+
+	UObject* Asset = UeAgentAssetOps::LoadAssetObject(AssetPathInput);
+	if (!Asset)
+	{
+		OutError = TEXT("curve_asset_not_found");
+		return false;
+	}
+
+	TSharedPtr<FJsonObject> CurveJson = UeAgentCurveJson::BuildCurveAssetJson(Asset);
+	if (!CurveJson.IsValid())
+	{
+		OutError = TEXT("unsupported_curve_asset");
+		return false;
+	}
+
+	FString OutputFile;
+	JsonTryGetString(Ctx.Params, TEXT("output_file"), OutputFile);
+	OutputFile.TrimStartAndEndInline();
+	FString SavedOutputFile;
+	if (!OutputFile.IsEmpty() && !UeAgentAssetOps::SaveJsonFile(OutputFile, CurveJson, SavedOutputFile, OutError))
+	{
+		return false;
+	}
+
+	OutData->SetStringField(TEXT("asset_path"), UeAgentCurveJson::NormalizeAssetPath(Asset->GetOutermost()->GetName()));
+	OutData->SetStringField(TEXT("object_path"), Asset->GetPathName());
+	OutData->SetStringField(TEXT("asset_class"), Asset->GetClass() ? Asset->GetClass()->GetPathName() : TEXT(""));
+	OutData->SetObjectField(TEXT("curve"), CurveJson);
+	if (!SavedOutputFile.IsEmpty())
+	{
+		OutData->SetStringField(TEXT("output_file"), SavedOutputFile);
+	}
+	return true;
+}
+
+bool FUeAgentHttpServer::CmdCurveApplyJson(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+{
+	TSharedPtr<FJsonObject> JsonRoot;
+	FString JsonFile;
+	FString ResolvedJsonFile;
+	JsonTryGetString(Ctx.Params, TEXT("json_file"), JsonFile);
+	JsonFile.TrimStartAndEndInline();
+	if (!JsonFile.IsEmpty())
+	{
+		if (!UeAgentAssetOps::LoadJsonFile(JsonFile, JsonRoot, ResolvedJsonFile, OutError))
+		{
+			return false;
+		}
+	}
+
+	TSharedPtr<FJsonObject> CurveJson;
+	const TSharedPtr<FJsonObject>* CurveObjPtr = nullptr;
+	if (Ctx.Params->TryGetObjectField(TEXT("curve"), CurveObjPtr) && CurveObjPtr && CurveObjPtr->IsValid())
+	{
+		CurveJson = *CurveObjPtr;
+	}
+	else if (JsonRoot.IsValid() && JsonRoot->TryGetObjectField(TEXT("curve"), CurveObjPtr) && CurveObjPtr && CurveObjPtr->IsValid())
+	{
+		CurveJson = *CurveObjPtr;
+	}
+	else if (JsonRoot.IsValid())
+	{
+		CurveJson = JsonRoot;
+	}
+	else
+	{
+		CurveJson = Ctx.Params;
+	}
+
+	FString AssetPathInput;
+	JsonTryGetString(Ctx.Params, TEXT("asset_path"), AssetPathInput);
+	AssetPathInput.TrimStartAndEndInline();
+	if (AssetPathInput.IsEmpty() && CurveJson.IsValid())
+	{
+		CurveJson->TryGetStringField(TEXT("asset_path"), AssetPathInput);
+		AssetPathInput.TrimStartAndEndInline();
+	}
+	if (AssetPathInput.IsEmpty())
+	{
+		OutError = TEXT("missing_asset_path");
+		return false;
+	}
+
+	UObject* Asset = UeAgentAssetOps::LoadAssetObject(AssetPathInput);
+	bool bCreatedAsset = false;
+	bool bCreateIfMissing = false;
+	JsonTryGetBool(Ctx.Params, TEXT("create_if_missing"), bCreateIfMissing);
+	if (!Asset && bCreateIfMissing)
+	{
+		FString CurveKind;
+		JsonTryGetString(Ctx.Params, TEXT("curve_kind"), CurveKind);
+		if (CurveKind.TrimStartAndEnd().IsEmpty() && CurveJson.IsValid())
+		{
+			CurveJson->TryGetStringField(TEXT("curve_kind"), CurveKind);
+		}
+		Asset = UeAgentCurveJson::CreateCurveAsset(AssetPathInput, CurveKind, OutError);
+		bCreatedAsset = Asset != nullptr;
+	}
+	if (!Asset)
+	{
+		OutError = TEXT("curve_asset_not_found");
+		return false;
+	}
+
+	TArray<TSharedPtr<FJsonValue>> JsonIssues;
+	if (!UeAgentCurveJson::ApplyCurveAssetJson(Asset, CurveJson, TEXT("curve"), JsonIssues))
+	{
+		OutData->SetStringField(TEXT("asset_path"), UeAgentCurveJson::NormalizeAssetPath(Asset->GetOutermost()->GetName()));
+		OutData->SetStringField(TEXT("object_path"), Asset->GetPathName());
+		OutData->SetStringField(TEXT("asset_class"), Asset->GetClass() ? Asset->GetClass()->GetPathName() : TEXT(""));
+		OutData->SetArrayField(TEXT("json_issues"), JsonIssues);
+		if (!ResolvedJsonFile.IsEmpty())
+		{
+			OutData->SetStringField(TEXT("json_file"), ResolvedJsonFile);
+		}
+		OutError = TEXT("curve_json_apply_failed");
+		return false;
+	}
+
+	Asset->Modify();
+	Asset->MarkPackageDirty();
+	Asset->PostEditChange();
+
+	TSharedPtr<FJsonObject> ReadbackCurveJson = UeAgentCurveJson::BuildCurveAssetJson(Asset);
+	if (ReadbackCurveJson.IsValid())
+	{
+		OutData->SetObjectField(TEXT("curve_read_back"), ReadbackCurveJson);
+	}
+
+	bool bSaveAfterApply = false;
+	JsonTryGetBool(Ctx.Params, TEXT("save_after_apply"), bSaveAfterApply);
+	if (bSaveAfterApply && !UeAgentAssetOps::SaveAssetPackage(Asset, OutError))
+	{
+		return false;
+	}
+
+	FString OutputFile;
+	JsonTryGetString(Ctx.Params, TEXT("output_file"), OutputFile);
+	OutputFile.TrimStartAndEndInline();
+	FString SavedOutputFile;
+	if (!OutputFile.IsEmpty() && ReadbackCurveJson.IsValid() && !UeAgentAssetOps::SaveJsonFile(OutputFile, ReadbackCurveJson, SavedOutputFile, OutError))
+	{
+		return false;
+	}
+
+	OutData->SetStringField(TEXT("asset_path"), UeAgentCurveJson::NormalizeAssetPath(Asset->GetOutermost()->GetName()));
+	OutData->SetStringField(TEXT("object_path"), Asset->GetPathName());
+	OutData->SetStringField(TEXT("asset_class"), Asset->GetClass() ? Asset->GetClass()->GetPathName() : TEXT(""));
+	OutData->SetBoolField(TEXT("created"), bCreatedAsset);
+	OutData->SetBoolField(TEXT("saved"), bSaveAfterApply);
+	OutData->SetArrayField(TEXT("json_issues"), JsonIssues);
+	if (!ResolvedJsonFile.IsEmpty())
+	{
+		OutData->SetStringField(TEXT("json_file"), ResolvedJsonFile);
+	}
+	if (!SavedOutputFile.IsEmpty())
+	{
+		OutData->SetStringField(TEXT("output_file"), SavedOutputFile);
 	}
 	return true;
 }

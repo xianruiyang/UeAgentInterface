@@ -39,6 +39,7 @@
   - `cpp_type`：目标属性 C++ 类型
 - `value_text_changed_after_import=true` 不一定等于失败；UE 可能会规范化大小写、对象路径或浮点格式。但对向量、颜色、枚举等结构化值，它是排查“命令成功但值被回退/归零”的关键依据。
 - JSON 结构错误不能静默吞掉。通用返回字段为 `warnings[]` 或结果项内的 `json_issues[]`，每项包含 `severity/code/path/message`。`asset_apply_property_json` 的坏条目和字段错误会进入对应 `property_results[].json_issues[]`。
+- 曲线类字段不要再猜 `value_text`。`curve_export_json / curve_apply_json` 使用 `ue_agent_interface.curve.v1`，覆盖 `UCurveFloat / UCurveVector / UCurveLinearColor / UCurveTable`；`asset_export_property_json / asset_apply_property_json` 对 `FRuntimeFloatCurve / FRuntimeVectorCurve / FRuntimeCurveLinearColor / FCurveTableRowHandle / Curve asset reference` 会读写 `value_json` 或 `curve_json`。
 - Blueprint / UMG / AnimBlueprint 变量类型统一使用 `pin_category/pin_subcategory/pin_subcategory_object/container_type/value_type`。常见和中频 UE 结构体、枚举、对象/类资产可写别名，例如 `vector/rotator/transform/linearcolor/hitresult/gameplaytag/key/slatebrush/collisionchannel/actor/staticmesh/niagarasystem/userwidget`；`map` 必须写 `value_type`。
 - JSON / 结构化 JSON apply 的解析失败必须可见：
   - 单文件 `json_file` 读取或语法解析失败会直接失败返回 `json_file_not_found / load_json_file_failed / json_parse_failed`。
@@ -54,6 +55,7 @@
 1. 单文件 JSON：
    - 适合小型、浅层资产
    - 典型：`asset_export_property_json / asset_apply_property_json`
+   - 典型：`curve_export_json / curve_apply_json`
    - 典型：`enhanced_input_export_*_json / enhanced_input_apply_*_json`
    - 典型：`montage_export_json / montage_apply_json`
 2. 文件夹式结构化 JSON：
@@ -190,10 +192,13 @@
 - `open_asset_editor`
 - `save_asset`
 - `asset_duplicate`
+- `asset_import_texture`
 - `asset_import_fbx_skeletal_mesh`
 - `asset_import_fbx_animation`
 - `asset_export_property_json`
 - `asset_apply_property_json`
+- `curve_export_json`
+- `curve_apply_json`
 - `editor_list_dirty_resources`
 - `editor_resolve_dirty_resources`
 - `editor_close`

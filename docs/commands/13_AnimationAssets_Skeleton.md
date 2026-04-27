@@ -8,7 +8,7 @@
 |---|---|---|
 | `anim_sequence_get_info` | 读取 AnimSequence 资产摘要 | `asset_path`；可选 `include_curve_keys` |
 | `anim_sequence_screenshot` | 按帧或时间截取 AnimSequence 预览图 | `asset_path`；可选 `skeletal_mesh_path`、`frame_index` 或 `time_seconds`、`format`、`quality`、`max_size`、`target=viewport` |
-| `anim_sequence_set_curve` | 统一管理 AnimSequence 曲线与 key | `asset_path`、`curve_name`；可选 `curve_type=float`、`keys[]`、`time_seconds/value`、`clear_existing_keys`、`remove`、`meta_data_curve`、`remove_name_from_skeleton`、`save_after_set` |
+| `anim_sequence_set_curve` | 统一管理 AnimSequence 曲线与 key | `asset_path`、`curve_name`；可选 `curve_type=float`、`curve_json`、`keys[]`、`time_seconds/value`、`clear_existing_keys`、`remove`、`meta_data_curve`、`remove_name_from_skeleton`、`save_after_set` |
 | `anim_sequence_set_bones` | 统一管理骨骼动画轨删除 | `asset_path`；可选 `remove_bone_names[]`、`include_children`、`children_excluded[]`、`exclude_children_recursively`、`remove_all_bone_animation`、`remove_virtual_bone_names[]`、`finalize_after_set`、`save_after_set` |
 | `anim_sequence_set_metadata` | 统一管理 AnimSequence metadata 生命周期 | `asset_path`；可选 `metadata_class_path`、`metadata_values`、`remove`、`clear_all`、`save_after_set` |
 | `anim_sequence_set_notify_track` | 新增 / 更新 / 删除 notify track | `asset_path`、`track_name`；可选 `track_color`、`remove`、`save_after_set` |
@@ -81,6 +81,7 @@
 说明：
 - 这是当前曲线管理的统一入口，避免继续拆 `add_float_curve / remove_curve / add_curve_key` 多条命令。
 - 当前稳定开放 `curve_type=float`。
+- 推荐优先使用 `curve_json`，格式为 `ue_agent_interface.curve.v1` 的 float 曲线结构；写入前会校验未知字段、缺 key 值、重复时间、非法插值/切线/外推模式，并在 `json_issues[]` 返回。
 - 单 key 写入可直接传顶层 `time_seconds` + `value`。
 - 多 key 写入走 `keys[]`。
 - `clear_existing_keys=true` 会先清掉该曲线现有 key，再重建当前输入。
@@ -92,11 +93,20 @@
   "asset_path": "/Game/Anim/A_Idle_Copy",
   "curve_name": "StageCurve",
   "curve_type": "float",
-  "clear_existing_keys": true,
-  "keys": [
-    { "time_seconds": 0.10, "value": 1.0 },
-    { "time_seconds": 0.20, "value": 2.0 }
-  ],
+  "curve_json": {
+    "schema": "ue_agent_interface.curve.v1",
+    "curve_kind": "float",
+    "storage": "animation_raw_curve",
+    "carrier_cpp_type": "FRichCurve",
+    "channels": {
+      "value": {
+        "keys": [
+          { "time": 0.10, "value": 1.0 },
+          { "time": 0.20, "value": 2.0 }
+        ]
+      }
+    }
+  },
   "save_after_set": false
 }
 ```

@@ -57,6 +57,7 @@ Niagara 相关批次默认启用护栏（自动 preflight + 编译日志 + emitt
    - 优先单文件 JSON
    - 典型命令：
      - `asset_export_property_json / asset_apply_property_json`
+     - `curve_export_json / curve_apply_json`
      - `enhanced_input_export_action_json / enhanced_input_apply_action_json`
      - `enhanced_input_export_mapping_context_json / enhanced_input_apply_mapping_context_json`
 2. 图类、树类、结构较复杂的资产：
@@ -352,10 +353,13 @@ Level / viewport / 顶点对齐补充：
 - `open_asset_editor`
 - `save_asset`
 - `asset_duplicate`
+- `asset_import_texture`
 - `asset_import_fbx_skeletal_mesh`
 - `asset_import_fbx_animation`
 - `asset_export_property_json`
 - `asset_apply_property_json`
+- `curve_export_json`
+- `curve_apply_json`
 - `editor_list_dirty_resources`
 - `editor_resolve_dirty_resources`
 - `editor_close`
@@ -503,7 +507,8 @@ Blueprint 视图与截图补充：
   - 说明：当前用于动画选帧审查，内部使用临时预览角色、受控补光和背景板，不依赖当前关卡相机
 - `anim_sequence_set_curve`
   - 关键参数：`asset_path`、`curve_name`
-  - 可选：`curve_type=float`、`keys[]`、`time_seconds/value`、`clear_existing_keys`、`remove`
+  - 可选：`curve_type=float`、`curve_json`、`keys[]`、`time_seconds/value`、`clear_existing_keys`、`remove`
+  - 说明：推荐用 `curve_json` 走 `ue_agent_interface.curve.v1`，写入前会返回未知字段、缺值、重复时间和非法插值模式等 `json_issues[]`
 - `anim_sequence_set_bones`
   - 关键参数：`asset_path`
   - 可选：`remove_bone_names[]`、`include_children`、`children_excluded[]`、`exclude_children_recursively`、`remove_all_bone_animation`、`remove_virtual_bone_names[]`、`finalize_after_set`
@@ -546,7 +551,7 @@ Blueprint 视图与截图补充：
 
 - 这组命令当前已经覆盖 AnimSequence 的资产级设置、选帧截图、压缩 / 剥帧设置、float 曲线、骨骼轨删除、metadata 生命周期、普通 notify、notify track、sync marker，以及 Skeleton 的 compatible skeleton / preview mesh / socket / virtual bone 管理。
 - 仍未扩到自定义 notify payload 属性编辑，也没有扩到完整 skeleton retarget profile 细粒度参数。
-- UE 5.6 官方还有 `vector / transform` 曲线相关 API，但基于当前数据模型实测不够稳定，因此当前命令面只把 `float curve` 作为正式稳定能力暴露。
+- AnimSequence 曲线当前稳定开放 `float curve`；通用曲线资产请使用 `curve_export_json / curve_apply_json`，已覆盖 `UCurveFloat / UCurveVector / UCurveLinearColor / UCurveTable`。
 
 ### 4.14 IK Rig / IK Retargeter
 
@@ -927,7 +932,7 @@ Modeling 补充：
     - 关键参数：`folder_path` 或 `asset_path`
     - 可选参数：`create_if_missing`、`apply_referenced_emitters`、`compile_after_apply`、`wait_for_complete`、`save_after_apply`、`collect_stack_issues_after_apply`、`stack_issue_severity_filter`、`prefer_existing_stack_view_model`、`open_editor_for_stack_issues`、`compile_before_stack_issue_read`、`fail_on_stack_errors`、`strict`
     - 返回：System 属性、User 参数、Emitter Handle、Emitter 属性的回写数量，coverage warnings，以及 `stack_issue_report`、`stack_issues`、`stack_scopes`、`stack_error_count`、`stack_warning_count`
-    - 说明：支持结构化与通用属性回写；内嵌 emitter 没有 standalone 源资产时会生成模板 handle 后应用文件夹数据；Emitter Stage/Module/Event/Renderer/Script 引用会按文件夹内容回写。默认 apply 后读取 Niagara Stack 感叹号内容；`strict=true` 可把运行时 warning 或 Stack error 视为失败
+    - 说明：支持结构化与通用属性回写；内嵌 emitter 没有 standalone 源资产时会生成模板 handle 后应用文件夹数据；Emitter Stage/Module/Event/Renderer/Script 引用会按文件夹内容回写。Data Interface 的曲线 `raw_properties` 使用 `ue_agent_interface.curve.v1`，System 总刷新后再回写，返回 `post_refresh_data_interfaces_applied`。默认 apply 后读取 Niagara Stack 感叹号内容；`strict=true` 可把运行时 warning 或 Stack error 视为失败
 - `niagara_emitter_export_folder`
     - 关键参数：`emitter_asset_path`（或 `asset_path`）
     - 可选参数：`folder_path`、`clean_output_dir`
@@ -937,7 +942,7 @@ Modeling 补充：
     - 关键参数：`folder_path` 或 `emitter_asset_path`
     - 可选参数：`create_if_missing`、`add_default_modules_and_renderers`、`save_after_apply`、`collect_stack_issues_after_apply`、`stack_issue_severity_filter`、`prefer_existing_stack_view_model`、`open_editor_for_stack_issues`、`compile_before_stack_issue_read`、`fail_on_stack_errors`、`strict`
     - 返回：Emitter 属性回写数量、coverage warnings，以及 `stack_issue_report`、`stack_issues`、`stack_scopes`、`stack_error_count`、`stack_warning_count`
-    - 说明：支持 standalone Emitter version data、graph 参数、rapid iteration 参数、Renderer、Event Generator、Event Handler、Simulation Stage、Module Stack、Module Input default、Data Interface 引用与 `raw_properties` 回写。默认 apply 后读取 Emitter Stack 感叹号内容；`strict=true` 遇到 Stack error 会返回 `strict_apply_has_stack_errors`
+    - 说明：支持 standalone Emitter version data、graph 参数、rapid iteration 参数、Renderer、Event Generator、Event Handler、Simulation Stage、Module Stack、Module Input default、Data Interface 引用与 `raw_properties` 回写。曲线 raw property 优先使用 `curve_json`，`value_json` 仅作兼容别名。默认 apply 后读取 Emitter Stack 感叹号内容；`strict=true` 遇到 Stack error 会返回 `strict_apply_has_stack_errors`
 - `niagara_script_export_folder`
     - 关键参数：`script_asset_path`（或 `asset_path`）
     - 可选参数：`folder_path`、`clean_output_dir`

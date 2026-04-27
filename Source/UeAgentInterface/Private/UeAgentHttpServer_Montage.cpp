@@ -246,7 +246,7 @@ namespace UeAgentMontageOps
 			return false;
 		}
 
-		OutputPath = FPaths::ConvertRelativePathToFull(OutputPath);
+		OutputPath = UeAgentJsonDiagnostics::ResolveProjectRelativeFilePath(OutputPath);
 		const FString OutputDir = FPaths::GetPath(OutputPath);
 		if (!OutputDir.IsEmpty() && !IFileManager::Get().DirectoryExists(*OutputDir))
 		{
@@ -285,7 +285,7 @@ namespace UeAgentMontageOps
 			return false;
 		}
 
-		InputPath = FPaths::ConvertRelativePathToFull(InputPath);
+		InputPath = UeAgentJsonDiagnostics::ResolveProjectRelativeFilePath(InputPath);
 		if (!FPaths::FileExists(InputPath))
 		{
 			OutError = TEXT("json_file_not_found");

@@ -304,7 +304,7 @@ namespace UeAgentNiagaraFolderOps
 		Coverage->SetStringField(TEXT("implementation_status"), TEXT("complete_folder_profile"));
 		Coverage->SetBoolField(TEXT("is_complete_target_schema"), true);
 		Coverage->SetBoolField(TEXT("is_lossless_roundtrip"), Warnings.Num() == 0);
-		Coverage->SetStringField(TEXT("completion_note"), TEXT("NiagaraSystem folder export/apply covers system properties, user parameters, emitter handles, standalone emitters, script assets, event handlers, simulation stages, module stacks, module input defaults, renderers, event generators and raw UObject/UStruct extension fields."));
+		Coverage->SetStringField(TEXT("completion_note"), TEXT("NiagaraSystem folder export/apply covers system properties, user parameters, emitter handles, standalone emitters, script assets, event handlers, simulation stages, module stacks, module input defaults, module input dynamic inputs, renderers, event generators and raw UObject/UStruct extension fields."));
 
 		TArray<TSharedPtr<FJsonValue>> ImplementedProfiles;
 		ImplementedProfiles.Add(MakeShared<FJsonValueString>(TEXT("niagara_system")));
@@ -332,11 +332,11 @@ namespace UeAgentNiagaraFolderOps
 		AddCoverageArea(Areas, TEXT("User parameters"), TEXT("structured"), TEXT("structured"), TEXT("User parameter add/set is supported for Niagara value types accepted by existing atomic commands."));
 		AddCoverageArea(Areas, TEXT("Emitter handles"), TEXT("structured"), TEXT("structured"), TEXT("System -> FNiagaraEmitterHandle -> FVersionedNiagaraEmitter is preserved; handle GUIDs are exported and stable logical matching is name/folder based on apply."));
 		AddCoverageArea(Areas, TEXT("UNiagaraEmitter version data"), TEXT("raw_properties"), TEXT("generic_struct_import"), TEXT("FVersionedNiagaraEmitterData properties are exported with property_name/value_text."));
-		AddCoverageArea(Areas, TEXT("Stages and modules"), TEXT("structured"), TEXT("structured"), TEXT("Stage/module stack order, module script references, module enabled state and module input defaults are exported and applied."));
+		AddCoverageArea(Areas, TEXT("Stages and modules"), TEXT("structured"), TEXT("structured"), TEXT("Stage/module stack order, module script references, module enabled state, module input defaults and module input dynamic inputs are exported and applied."));
 		AddCoverageArea(Areas, TEXT("Renderers"), TEXT("structured_raw"), TEXT("structured_raw"), TEXT("Renderer class/index and UObject properties are exported; missing renderers can be added when class is resolvable."));
 		AddCoverageArea(Areas, TEXT("Event handlers"), TEXT("structured_raw"), TEXT("structured_raw"), TEXT("Event handler scripts, output stages and raw FNiagaraEventScriptProperties fields are exported and applied."));
 		AddCoverageArea(Areas, TEXT("Event generators"), TEXT("structured_raw"), TEXT("structured_raw"), TEXT("Spawn/update script event generator arrays are exported explicitly and retained by raw script property import."));
-		AddCoverageArea(Areas, TEXT("Data interfaces"), TEXT("structured_raw"), TEXT("structured_raw"), TEXT("Data interface references are exported through graph nodes, module inputs and raw properties; UObject import preserves supported reflected fields."));
+		AddCoverageArea(Areas, TEXT("Data interfaces"), TEXT("structured_raw"), TEXT("structured_raw"), TEXT("Data interface references are exported through graph nodes, module inputs, dynamic inputs and raw properties; UObject import preserves supported reflected fields and curve_json."));
 		AddCoverageArea(Areas, TEXT("Custom Niagara Script / Scratch Pad / Custom HLSL"), TEXT("structured_raw"), TEXT("structured_raw"), TEXT("Standalone NiagaraScript assets are supported; CustomHlsl nodes are exported with raw node properties and HLSL text where present."));
 		AddCoverageArea(Areas, TEXT("External assets"), TEXT("reference"), TEXT("reference"), TEXT("External assets remain references and are not copied into the Niagara folder."));
 		Coverage->SetArrayField(TEXT("coverage_areas"), Areas);
@@ -361,7 +361,7 @@ namespace UeAgentNiagaraFolderOps
 		Coverage->SetStringField(TEXT("implementation_status"), TEXT("complete_folder_profile"));
 		Coverage->SetBoolField(TEXT("is_complete_target_schema"), true);
 		Coverage->SetBoolField(TEXT("is_lossless_roundtrip"), Warnings.Num() == 0);
-		Coverage->SetStringField(TEXT("completion_note"), TEXT("Standalone NiagaraEmitter folder export/apply covers emitter metadata, version data, parameters, renderers, event handlers, event generators, simulation stages, module stacks, module input defaults, script references and raw reflected fields."));
+		Coverage->SetStringField(TEXT("completion_note"), TEXT("Standalone NiagaraEmitter folder export/apply covers emitter metadata, version data, parameters, renderers, event handlers, event generators, simulation stages, module stacks, module input defaults, module input dynamic inputs, script references and raw reflected fields."));
 
 		TArray<TSharedPtr<FJsonValue>> ImplementedProfiles;
 		ImplementedProfiles.Add(MakeShared<FJsonValueString>(TEXT("niagara_system")));
@@ -386,11 +386,11 @@ namespace UeAgentNiagaraFolderOps
 		AddCoverageArea(Areas, TEXT("UNiagaraEmitter asset metadata"), TEXT("structured"), TEXT("structured"), TEXT("asset.json and emitter.json"));
 		AddCoverageArea(Areas, TEXT("UNiagaraEmitter version data"), TEXT("raw_properties"), TEXT("generic_struct_import"), TEXT("FVersionedNiagaraEmitterData properties are exported with property_name/value_text."));
 		AddCoverageArea(Areas, TEXT("Emitter parameters"), TEXT("structured"), TEXT("structured"), TEXT("Graph parameters and scalar default values are exported and applied."));
-		AddCoverageArea(Areas, TEXT("Stages and modules"), TEXT("structured"), TEXT("structured"), TEXT("Stage/module stack order, module script references, module enabled state and module input defaults are exported and applied."));
+		AddCoverageArea(Areas, TEXT("Stages and modules"), TEXT("structured"), TEXT("structured"), TEXT("Stage/module stack order, module script references, module enabled state, module input defaults and module input dynamic inputs are exported and applied."));
 		AddCoverageArea(Areas, TEXT("Renderers"), TEXT("structured_raw"), TEXT("structured_raw"), TEXT("Renderer class/index and UObject properties are exported; missing renderers can be added when class is resolvable."));
 		AddCoverageArea(Areas, TEXT("Event handlers"), TEXT("structured_raw"), TEXT("structured_raw"), TEXT("Event handler scripts, output stages and raw FNiagaraEventScriptProperties fields are exported and applied."));
 		AddCoverageArea(Areas, TEXT("Event generators"), TEXT("structured_raw"), TEXT("structured_raw"), TEXT("Spawn/update script event generator arrays are exported explicitly and retained by raw script property import."));
-		AddCoverageArea(Areas, TEXT("Data interfaces"), TEXT("structured_raw"), TEXT("structured_raw"), TEXT("Data interface references are exported through graph nodes, module inputs and raw properties; UObject import preserves supported reflected fields."));
+		AddCoverageArea(Areas, TEXT("Data interfaces"), TEXT("structured_raw"), TEXT("structured_raw"), TEXT("Data interface references are exported through graph nodes, module inputs, dynamic inputs and raw properties; UObject import preserves supported reflected fields and curve_json."));
 		AddCoverageArea(Areas, TEXT("Custom Niagara Script / Scratch Pad / Custom HLSL"), TEXT("structured_raw"), TEXT("structured_raw"), TEXT("Standalone NiagaraScript assets are supported; CustomHlsl nodes are exported with raw node properties and HLSL text where present."));
 		Coverage->SetArrayField(TEXT("coverage_areas"), Areas);
 		Coverage->SetArrayField(TEXT("warnings"), Warnings);
@@ -465,6 +465,13 @@ namespace UeAgentNiagaraFolderOps
 		PropertyObj->SetStringField(TEXT("authored_name"), Property->GetAuthoredName());
 		PropertyObj->SetStringField(TEXT("cpp_type"), Property->GetCPPType());
 		PropertyObj->SetStringField(TEXT("value_text"), ValueText);
+		TSharedPtr<FJsonObject> CurveJson;
+		if (UeAgentCurveJson::TryBuildPropertyCurveJson(Property, ValuePtr, CurveJson) && CurveJson.IsValid())
+		{
+			PropertyObj->SetObjectField(TEXT("value_json"), CurveJson);
+			PropertyObj->SetObjectField(TEXT("curve_json"), CurveJson);
+			PropertyObj->SetStringField(TEXT("value_json_schema"), UeAgentCurveJson::SchemaName);
+		}
 		const bool bCanApplyGeneric = ShouldApplyProperty(Property) && !Property->GetName().Equals(TEXT("NodeGuid"), ESearchCase::CaseSensitive);
 		PropertyObj->SetBoolField(TEXT("can_apply_generic"), bCanApplyGeneric);
 		PropertyObj->SetStringField(TEXT("property_flags"), FString::Printf(TEXT("0x%016llx"), static_cast<unsigned long long>(Property->PropertyFlags)));
@@ -1133,7 +1140,10 @@ namespace UeAgentNiagaraFolderOps
 		return true;
 	}
 
-	static TSharedPtr<FJsonObject> BuildSystemStageJson(UNiagaraScript* Script, const FString& StageName)
+	static TSharedPtr<FJsonObject> BuildSystemStageJson(
+		UNiagaraScript* Script,
+		const FString& StageName,
+		TMap<FString, TSharedPtr<FJsonObject>>& ScriptRefs)
 	{
 		TSharedPtr<FJsonObject> StageObj = MakeShared<FJsonObject>();
 		StageObj->SetStringField(TEXT("stage_name"), StageName);
@@ -1141,12 +1151,31 @@ namespace UeAgentNiagaraFolderOps
 		if (Script)
 		{
 			StageObj->SetObjectField(TEXT("script"), BuildScriptReferenceJson(Script, TEXT("system_stage"), StageName));
+			UNiagaraScriptSource* ScriptSource = Cast<UNiagaraScriptSource>(Script->GetLatestSource());
+			UNiagaraGraph* Graph = ScriptSource ? ScriptSource->NodeGraph : nullptr;
+			if (Graph)
+			{
+				TArray<UNiagaraNodeOutput*> OutputNodes;
+				UeAgentNiagaraOps::GetOutputNodesFromGraph(*Graph, OutputNodes);
+				for (int32 OutputIndex = 0; OutputIndex < OutputNodes.Num(); ++OutputIndex)
+				{
+					UNiagaraNodeOutput* OutputNode = OutputNodes[OutputIndex];
+					if (OutputNode && OutputNode->GetUsage() == Script->GetUsage())
+					{
+						StageObj = BuildStageFolderJson(*OutputNode, OutputIndex, nullptr, ScriptRefs);
+						StageObj->SetStringField(TEXT("stage_name"), StageName);
+						StageObj->SetStringField(TEXT("stage_type"), TEXT("system_stage"));
+						StageObj->SetObjectField(TEXT("script"), BuildScriptReferenceJson(Script, TEXT("system_stage"), StageName));
+						break;
+					}
+				}
+			}
 		}
 		else
 		{
 			StageObj->SetObjectField(TEXT("script"), MakeShared<FJsonObject>());
 		}
-		StageObj->SetStringField(TEXT("coverage_note"), TEXT("System stage script reference and raw script properties are exported; standalone NiagaraScript folder commands can export/apply the script asset graph."));
+		StageObj->SetStringField(TEXT("coverage_note"), TEXT("System stage script reference, modules and module inputs are exported; apply reconstructs the System Spawn / System Update stage from modules[]."));
 		return StageObj;
 	}
 
@@ -1187,13 +1216,46 @@ namespace UeAgentNiagaraFolderOps
 				AddWarning(Warnings, TEXT("object_property_missing_name"), ContextPath, TEXT("Skipped UObject property entry with no property_name/path."));
 				continue;
 			}
+			if (Target->IsA<UEdGraphNode>() && PropertyName.Equals(TEXT("NodeGuid"), ESearchCase::CaseSensitive))
+			{
+				continue;
+			}
+
+			const TSharedPtr<FJsonObject>* CurveJsonObjPtr = nullptr;
+			FString CurveJsonFieldName;
+			if (PropertyObj->TryGetObjectField(TEXT("curve_json"), CurveJsonObjPtr) && CurveJsonObjPtr && CurveJsonObjPtr->IsValid())
+			{
+				CurveJsonFieldName = TEXT("curve_json");
+			}
+			else if (PropertyObj->TryGetObjectField(TEXT("value_json"), CurveJsonObjPtr) && CurveJsonObjPtr && CurveJsonObjPtr->IsValid())
+			{
+				CurveJsonFieldName = TEXT("value_json");
+			}
+			if (!CurveJsonFieldName.IsEmpty())
+			{
+				FProperty* Property = nullptr;
+				void* ValuePtr = nullptr;
+				if (!UeAgentNiagaraOps::ResolvePropertyPath(Target, PropertyName, Property, ValuePtr))
+				{
+					UeAgentCurveJson::AddCurveIssue(
+						Warnings,
+						TEXT("error"),
+						TEXT("object_property_curve_path_not_found"),
+						ContextPath + TEXT(".") + PropertyName,
+						TEXT("Skipped curve_json because the target UObject property could not be resolved."));
+					continue;
+				}
+
+				if (UeAgentCurveJson::TryApplyPropertyCurveJson(Property, ValuePtr, *CurveJsonObjPtr, ContextPath + TEXT(".") + PropertyName + TEXT(".") + CurveJsonFieldName, Warnings))
+				{
+					++Applied;
+				}
+				continue;
+			}
+
 			if (!PropertyObj->HasField(TEXT("value_text")))
 			{
 				AddWarning(Warnings, TEXT("object_property_missing_value_text"), ContextPath + TEXT(".") + PropertyName, TEXT("Skipped UObject property entry with no value_text."));
-				continue;
-			}
-			if (Target->IsA<UEdGraphNode>() && PropertyName.Equals(TEXT("NodeGuid"), ESearchCase::CaseSensitive))
-			{
 				continue;
 			}
 
@@ -1261,6 +1323,39 @@ namespace UeAgentNiagaraFolderOps
 				AddWarning(Warnings, TEXT("struct_property_missing_name"), ContextPath, TEXT("Skipped UStruct property entry with no property_name/path."));
 				continue;
 			}
+
+			const TSharedPtr<FJsonObject>* CurveJsonObjPtr = nullptr;
+			FString CurveJsonFieldName;
+			if (PropertyObj->TryGetObjectField(TEXT("curve_json"), CurveJsonObjPtr) && CurveJsonObjPtr && CurveJsonObjPtr->IsValid())
+			{
+				CurveJsonFieldName = TEXT("curve_json");
+			}
+			else if (PropertyObj->TryGetObjectField(TEXT("value_json"), CurveJsonObjPtr) && CurveJsonObjPtr && CurveJsonObjPtr->IsValid())
+			{
+				CurveJsonFieldName = TEXT("value_json");
+			}
+			if (!CurveJsonFieldName.IsEmpty())
+			{
+				FProperty* Property = nullptr;
+				void* ValuePtr = nullptr;
+				if (!UeAgentNiagaraOps::ResolveStructPropertyPath(StructType, StructData, PropertyName, Property, ValuePtr))
+				{
+					UeAgentCurveJson::AddCurveIssue(
+						Warnings,
+						TEXT("error"),
+						TEXT("struct_property_curve_path_not_found"),
+						ContextPath + TEXT(".") + PropertyName,
+						TEXT("Skipped curve_json because the target UStruct property could not be resolved."));
+					continue;
+				}
+
+				if (UeAgentCurveJson::TryApplyPropertyCurveJson(Property, ValuePtr, *CurveJsonObjPtr, ContextPath + TEXT(".") + PropertyName + TEXT(".") + CurveJsonFieldName, Warnings))
+				{
+					++Applied;
+				}
+				continue;
+			}
+
 			if (!PropertyObj->HasField(TEXT("value_text")))
 			{
 				AddWarning(Warnings, TEXT("struct_property_missing_value_text"), ContextPath + TEXT(".") + PropertyName, TEXT("Skipped UStruct property entry with no value_text."));
@@ -2245,6 +2340,172 @@ namespace UeAgentNiagaraFolderOps
 		return Applied;
 	}
 
+	static int32 ApplyDataInterfacesFromFolder(UNiagaraEmitter& Emitter, FVersionedNiagaraEmitterData& EmitterData, const FString& EmitterFolder, TArray<TSharedPtr<FJsonValue>>& Warnings, FString& OutError)
+	{
+		UNiagaraScriptSource* ScriptSource = Cast<UNiagaraScriptSource>(EmitterData.GraphSource);
+		UNiagaraGraph* Graph = ScriptSource ? ScriptSource->NodeGraph : nullptr;
+		if (!Graph)
+		{
+			AddWarning(Warnings, TEXT("data_interfaces_missing_graph"), EmitterFolder, TEXT("Emitter graph source is missing; data interfaces cannot be applied."));
+			return 0;
+		}
+
+		TSharedPtr<FJsonObject> DataInterfacesObj;
+		if (!LoadJsonFileOptional(FPaths::Combine(EmitterFolder, TEXT("data_interfaces.json")), DataInterfacesObj, OutError))
+		{
+			return INDEX_NONE;
+		}
+		if (!DataInterfacesObj.IsValid())
+		{
+			return 0;
+		}
+
+		const TArray<TSharedPtr<FJsonValue>>* DataInterfaces = nullptr;
+		if (!TryGetArrayField(DataInterfacesObj, TEXT("data_interfaces"), DataInterfaces))
+		{
+			return 0;
+		}
+
+		int32 Applied = 0;
+		for (int32 DataInterfaceIndex = 0; DataInterfaceIndex < DataInterfaces->Num(); ++DataInterfaceIndex)
+		{
+			const FString DataInterfacePath = FString::Printf(TEXT("%s/data_interfaces.json.data_interfaces[%d]"), *EmitterFolder, DataInterfaceIndex);
+			TSharedPtr<FJsonObject> DataInterfaceObj;
+			if (!UeAgentJsonDiagnostics::ReadObjectFromValue((*DataInterfaces)[DataInterfaceIndex], DataInterfacePath, DataInterfaceObj, Warnings))
+			{
+				continue;
+			}
+
+			UeAgentJsonDiagnostics::WarnUnknownFields(
+				DataInterfaceObj,
+				DataInterfacePath,
+				{
+					TEXT("node_guid"),
+					TEXT("input_name"),
+					TEXT("input_type"),
+					TEXT("data_interface_class"),
+					TEXT("data_interface_object_path"),
+					TEXT("raw_properties"),
+					TEXT("raw_properties_count")
+				},
+				Warnings);
+
+			FString NodeGuidText;
+			FString InputNameText;
+			FString DataInterfaceClassText;
+			DataInterfaceObj->TryGetStringField(TEXT("node_guid"), NodeGuidText);
+			DataInterfaceObj->TryGetStringField(TEXT("input_name"), InputNameText);
+			DataInterfaceObj->TryGetStringField(TEXT("data_interface_class"), DataInterfaceClassText);
+
+			FGuid NodeGuid;
+			FGuid::Parse(NodeGuidText, NodeGuid);
+			UNiagaraNodeInput* TargetInputNode = nullptr;
+			for (UEdGraphNode* Node : Graph->Nodes)
+			{
+				UNiagaraNodeInput* InputNode = Cast<UNiagaraNodeInput>(Node);
+				if (!InputNode)
+				{
+					continue;
+				}
+				if ((NodeGuid.IsValid() && InputNode->NodeGuid == NodeGuid)
+					|| (!InputNameText.IsEmpty() && InputNode->Input.GetName().ToString().Equals(InputNameText, ESearchCase::IgnoreCase)))
+				{
+					TargetInputNode = InputNode;
+					break;
+				}
+			}
+
+			if (!TargetInputNode && !DataInterfaceClassText.IsEmpty())
+			{
+				TArray<UNiagaraNodeInput*> ClassMatchedInputNodes;
+				for (UEdGraphNode* Node : Graph->Nodes)
+				{
+					UNiagaraNodeInput* InputNode = Cast<UNiagaraNodeInput>(Node);
+					if (!InputNode)
+					{
+						continue;
+					}
+
+					FProperty* CandidateDataInterfaceProperty = nullptr;
+					void* CandidateDataInterfaceValuePtr = nullptr;
+					if (!UeAgentNiagaraOps::ResolvePropertyPath(InputNode, TEXT("DataInterface"), CandidateDataInterfaceProperty, CandidateDataInterfaceValuePtr))
+					{
+						continue;
+					}
+
+					FObjectPropertyBase* CandidateObjectProperty = CastField<FObjectPropertyBase>(CandidateDataInterfaceProperty);
+					UNiagaraDataInterface* CandidateDataInterface = CandidateObjectProperty
+						? Cast<UNiagaraDataInterface>(CandidateObjectProperty->GetObjectPropertyValue(CandidateDataInterfaceValuePtr))
+						: nullptr;
+					if (CandidateDataInterface
+						&& CandidateDataInterface->GetClass()
+						&& CandidateDataInterface->GetClass()->GetPathName().Equals(DataInterfaceClassText, ESearchCase::IgnoreCase))
+					{
+						ClassMatchedInputNodes.Add(InputNode);
+					}
+				}
+
+				if (ClassMatchedInputNodes.Num() == 1)
+				{
+					TargetInputNode = ClassMatchedInputNodes[0];
+				}
+				else if (ClassMatchedInputNodes.Num() > 1)
+				{
+					AddWarning(
+						Warnings,
+						TEXT("data_interface_class_match_ambiguous"),
+						DataInterfacePath,
+						FString::Printf(TEXT("Found %d data interface input nodes for class '%s'; node_guid/input_name did not disambiguate."), ClassMatchedInputNodes.Num(), *DataInterfaceClassText));
+				}
+			}
+
+			if (!TargetInputNode)
+			{
+				AddWarning(Warnings, TEXT("data_interface_input_node_not_found"), DataInterfacePath, FString::Printf(TEXT("No UNiagaraNodeInput matched node_guid='%s' input_name='%s'."), *NodeGuidText, *InputNameText));
+				continue;
+			}
+
+			FProperty* DataInterfaceProperty = nullptr;
+			void* DataInterfaceValuePtr = nullptr;
+			if (!UeAgentNiagaraOps::ResolvePropertyPath(TargetInputNode, TEXT("DataInterface"), DataInterfaceProperty, DataInterfaceValuePtr))
+			{
+				AddWarning(Warnings, TEXT("data_interface_property_not_found"), DataInterfacePath, TEXT("UNiagaraNodeInput.DataInterface property could not be resolved."));
+				continue;
+			}
+
+			FObjectPropertyBase* DataInterfaceObjectProperty = CastField<FObjectPropertyBase>(DataInterfaceProperty);
+			if (!DataInterfaceObjectProperty)
+			{
+				AddWarning(Warnings, TEXT("data_interface_property_not_object"), DataInterfacePath, TEXT("UNiagaraNodeInput.DataInterface is not an object property."));
+				continue;
+			}
+
+			UNiagaraDataInterface* DataInterface = Cast<UNiagaraDataInterface>(DataInterfaceObjectProperty->GetObjectPropertyValue(DataInterfaceValuePtr));
+			if (!DataInterface && !DataInterfaceClassText.IsEmpty())
+			{
+				UClass* DataInterfaceClass = LoadObject<UClass>(nullptr, *DataInterfaceClassText);
+				if (DataInterfaceClass && DataInterfaceClass->IsChildOf(UNiagaraDataInterface::StaticClass()))
+				{
+					TargetInputNode->Modify();
+					DataInterface = NewObject<UNiagaraDataInterface>(TargetInputNode, DataInterfaceClass, NAME_None, RF_Transactional);
+					DataInterfaceObjectProperty->SetObjectPropertyValue(DataInterfaceValuePtr, DataInterface);
+				}
+			}
+
+			if (!DataInterface)
+			{
+				AddWarning(Warnings, TEXT("data_interface_instance_missing"), DataInterfacePath, FString::Printf(TEXT("Data interface instance could not be resolved or created for class '%s'."), *DataInterfaceClassText));
+				continue;
+			}
+
+			DataInterface->Modify();
+			Applied += ApplyObjectPropertyArray(DataInterface, DataInterfaceObj, TEXT("raw_properties"), Warnings, DataInterface->GetPathName());
+			++Applied;
+		}
+
+		return Applied;
+	}
+
 	static UNiagaraSimulationStageBase* EnsureSimulationStageForFolder(UNiagaraEmitter& Emitter, FVersionedNiagaraEmitterData& EmitterData, UNiagaraGraph& Graph, const TSharedPtr<FJsonObject>& StageObj, TArray<TSharedPtr<FJsonValue>>& Warnings, FString& OutError)
 	{
 		FString UsageIdText;
@@ -2448,6 +2709,303 @@ namespace UeAgentNiagaraFolderOps
 		return FNiagaraStackGraphUtilities::AddParameterModuleToStack(AssignmentVariables, OutputNode, TargetIndex, AssignmentDefaults);
 	}
 
+	static bool ApplyModuleInputDefault(UNiagaraGraph& Graph, UNiagaraNodeFunctionCall& ModuleNode, const TSharedPtr<FJsonObject>& InputObj, const FString& ContextPath, TArray<TSharedPtr<FJsonValue>>& Warnings);
+
+	static UNiagaraNodeInput* FindDynamicInputDataInterfaceNode(
+		UNiagaraGraph& Graph,
+		UNiagaraNodeFunctionCall& DynamicInputNode,
+		const TSharedPtr<FJsonObject>& DataInterfaceObj,
+		const FString& ContextPath,
+		TArray<TSharedPtr<FJsonValue>>& Warnings)
+	{
+		FString NodeGuidText;
+		FString InputNameText;
+		FString DataInterfaceClassText;
+		DataInterfaceObj->TryGetStringField(TEXT("node_guid"), NodeGuidText);
+		DataInterfaceObj->TryGetStringField(TEXT("input_name"), InputNameText);
+		DataInterfaceObj->TryGetStringField(TEXT("data_interface_class"), DataInterfaceClassText);
+
+		FGuid NodeGuid;
+		FGuid::Parse(NodeGuidText, NodeGuid);
+		if (NodeGuid.IsValid())
+		{
+			for (UEdGraphNode* Node : Graph.Nodes)
+			{
+				UNiagaraNodeInput* InputNode = Cast<UNiagaraNodeInput>(Node);
+				if (InputNode && InputNode->NodeGuid == NodeGuid)
+				{
+					return InputNode;
+				}
+			}
+		}
+
+		if (!InputNameText.IsEmpty())
+		{
+			for (UEdGraphNode* Node : Graph.Nodes)
+			{
+				UNiagaraNodeInput* InputNode = Cast<UNiagaraNodeInput>(Node);
+				if (InputNode && InputNode->Input.GetName().ToString().Equals(InputNameText, ESearchCase::IgnoreCase))
+				{
+					return InputNode;
+				}
+			}
+		}
+
+		TArray<UNiagaraNodeInput*> LinkedDataInterfaceInputs;
+		UeAgentNiagaraOps::CollectLinkedDataInterfaceInputNodesForDynamicInput(DynamicInputNode, LinkedDataInterfaceInputs);
+		if (!DataInterfaceClassText.IsEmpty() || !InputNameText.IsEmpty())
+		{
+			TArray<UNiagaraNodeInput*> Candidates;
+			const FString InputNameLower = UeAgentNiagaraOps::MakeLowerTrimmed(InputNameText);
+			for (UNiagaraNodeInput* InputNode : LinkedDataInterfaceInputs)
+			{
+				if (!InputNode)
+				{
+					continue;
+				}
+
+				bool bMatchesInputName = InputNameLower.IsEmpty();
+				const FString CandidateInputNameLower = UeAgentNiagaraOps::MakeLowerTrimmed(InputNode->Input.GetName().ToString());
+				if (!InputNameLower.IsEmpty())
+				{
+					bMatchesInputName = CandidateInputNameLower == InputNameLower ||
+						CandidateInputNameLower.EndsWith(TEXT(".") + InputNameLower) ||
+						InputNameLower.EndsWith(TEXT(".") + CandidateInputNameLower);
+				}
+
+				bool bMatchesClass = DataInterfaceClassText.IsEmpty();
+				if (!bMatchesClass)
+				{
+					FProperty* CandidateDataInterfaceProperty = nullptr;
+					void* CandidateDataInterfaceValuePtr = nullptr;
+					if (UeAgentNiagaraOps::ResolvePropertyPath(InputNode, TEXT("DataInterface"), CandidateDataInterfaceProperty, CandidateDataInterfaceValuePtr))
+					{
+						FObjectPropertyBase* CandidateObjectProperty = CastField<FObjectPropertyBase>(CandidateDataInterfaceProperty);
+						UNiagaraDataInterface* CandidateDataInterface = CandidateObjectProperty
+							? Cast<UNiagaraDataInterface>(CandidateObjectProperty->GetObjectPropertyValue(CandidateDataInterfaceValuePtr))
+							: nullptr;
+						bMatchesClass = CandidateDataInterface
+							&& CandidateDataInterface->GetClass()
+							&& CandidateDataInterface->GetClass()->GetPathName().Equals(DataInterfaceClassText, ESearchCase::IgnoreCase);
+					}
+				}
+
+				if (bMatchesInputName && bMatchesClass)
+				{
+					Candidates.Add(InputNode);
+				}
+			}
+
+			if (Candidates.Num() == 1)
+			{
+				return Candidates[0];
+			}
+			if (Candidates.Num() > 1)
+			{
+				AddWarning(
+					Warnings,
+					TEXT("dynamic_input_data_interface_match_ambiguous"),
+					ContextPath,
+					FString::Printf(TEXT("Found %d linked data interface input nodes for input_name='%s' class='%s'."), Candidates.Num(), *InputNameText, *DataInterfaceClassText));
+				return nullptr;
+			}
+		}
+
+		AddWarning(
+			Warnings,
+			TEXT("dynamic_input_data_interface_input_node_not_found"),
+			ContextPath,
+			FString::Printf(TEXT("No linked data interface input node matched node_guid='%s' input_name='%s'."), *NodeGuidText, *InputNameText));
+		return nullptr;
+	}
+
+	static int32 ApplyDynamicInputDataInterfacesFromJson(
+		UNiagaraGraph& Graph,
+		UNiagaraNodeFunctionCall& DynamicInputNode,
+		const TSharedPtr<FJsonObject>& DynamicInputObj,
+		const FString& ContextPath,
+		TArray<TSharedPtr<FJsonValue>>& Warnings)
+	{
+		const TArray<TSharedPtr<FJsonValue>>* DataInterfaces = nullptr;
+		if (!UeAgentJsonDiagnostics::ReadArrayField(DynamicInputObj, TEXT("data_interfaces"), ContextPath + TEXT(".data_interfaces"), DataInterfaces, Warnings, false))
+		{
+			return 0;
+		}
+
+		int32 Applied = 0;
+		for (int32 DataInterfaceIndex = 0; DataInterfaceIndex < DataInterfaces->Num(); ++DataInterfaceIndex)
+		{
+			const FString DataInterfacePath = FString::Printf(TEXT("%s.data_interfaces[%d]"), *ContextPath, DataInterfaceIndex);
+			TSharedPtr<FJsonObject> DataInterfaceObj;
+			if (!UeAgentJsonDiagnostics::ReadObjectFromValue((*DataInterfaces)[DataInterfaceIndex], DataInterfacePath, DataInterfaceObj, Warnings))
+			{
+				continue;
+			}
+
+			UeAgentJsonDiagnostics::WarnUnknownFields(
+				DataInterfaceObj,
+				DataInterfacePath,
+				{
+					TEXT("node_guid"),
+					TEXT("input_name"),
+					TEXT("input_type"),
+					TEXT("data_interface_class"),
+					TEXT("data_interface_object_path"),
+					TEXT("raw_properties"),
+					TEXT("raw_properties_count")
+				},
+				Warnings);
+
+			UNiagaraNodeInput* TargetInputNode = FindDynamicInputDataInterfaceNode(Graph, DynamicInputNode, DataInterfaceObj, DataInterfacePath, Warnings);
+			if (!TargetInputNode)
+			{
+				continue;
+			}
+
+			FString DataInterfaceClassText;
+			DataInterfaceObj->TryGetStringField(TEXT("data_interface_class"), DataInterfaceClassText);
+
+			FProperty* DataInterfaceProperty = nullptr;
+			void* DataInterfaceValuePtr = nullptr;
+			if (!UeAgentNiagaraOps::ResolvePropertyPath(TargetInputNode, TEXT("DataInterface"), DataInterfaceProperty, DataInterfaceValuePtr))
+			{
+				AddWarning(Warnings, TEXT("dynamic_input_data_interface_property_not_found"), DataInterfacePath, TEXT("UNiagaraNodeInput.DataInterface property could not be resolved."));
+				continue;
+			}
+
+			FObjectPropertyBase* DataInterfaceObjectProperty = CastField<FObjectPropertyBase>(DataInterfaceProperty);
+			if (!DataInterfaceObjectProperty)
+			{
+				AddWarning(Warnings, TEXT("dynamic_input_data_interface_property_not_object"), DataInterfacePath, TEXT("UNiagaraNodeInput.DataInterface is not an object property."));
+				continue;
+			}
+
+			UNiagaraDataInterface* DataInterface = Cast<UNiagaraDataInterface>(DataInterfaceObjectProperty->GetObjectPropertyValue(DataInterfaceValuePtr));
+			if (!DataInterface && !DataInterfaceClassText.IsEmpty())
+			{
+				UClass* DataInterfaceClass = LoadObject<UClass>(nullptr, *DataInterfaceClassText);
+				if (DataInterfaceClass && DataInterfaceClass->IsChildOf(UNiagaraDataInterface::StaticClass()))
+				{
+					TargetInputNode->Modify();
+					DataInterface = NewObject<UNiagaraDataInterface>(TargetInputNode, DataInterfaceClass, NAME_None, RF_Transactional);
+					DataInterfaceObjectProperty->SetObjectPropertyValue(DataInterfaceValuePtr, DataInterface);
+				}
+			}
+
+			if (!DataInterface)
+			{
+				AddWarning(Warnings, TEXT("dynamic_input_data_interface_instance_missing"), DataInterfacePath, FString::Printf(TEXT("Data interface instance could not be resolved or created for class '%s'."), *DataInterfaceClassText));
+				continue;
+			}
+
+			DataInterface->Modify();
+			Applied += ApplyObjectPropertyArray(DataInterface, DataInterfaceObj, TEXT("raw_properties"), Warnings, DataInterface->GetPathName());
+			++Applied;
+		}
+		return Applied;
+	}
+
+	static bool ApplyModuleInputDynamicInput(
+		UNiagaraGraph& Graph,
+		UNiagaraNodeFunctionCall& ModuleNode,
+		UEdGraphPin& OverridePin,
+		const TSharedPtr<FJsonObject>& DynamicInputObj,
+		const FString& ContextPath,
+		TArray<TSharedPtr<FJsonValue>>& Warnings)
+	{
+		UeAgentJsonDiagnostics::WarnUnknownFields(
+			DynamicInputObj,
+			ContextPath,
+			{
+				TEXT("node_guid"),
+				TEXT("node_name"),
+				TEXT("dynamic_input_name"),
+				TEXT("script_asset_path"),
+				TEXT("dynamic_input_script_asset_path"),
+				TEXT("module_script_path"),
+				TEXT("inputs"),
+				TEXT("input_count"),
+				TEXT("data_interfaces"),
+				TEXT("data_interface_count")
+			},
+			Warnings);
+
+		const FString DynamicInputScriptPath = GetStringFieldAny(DynamicInputObj, {
+			TEXT("script_asset_path"),
+			TEXT("dynamic_input_script_asset_path"),
+			TEXT("module_script_path")
+		});
+		if (DynamicInputScriptPath.IsEmpty())
+		{
+			AddWarning(Warnings, TEXT("dynamic_input_missing_script_asset_path"), ContextPath, TEXT("dynamic_input has no script_asset_path; the dynamic input was skipped."));
+			return true;
+		}
+
+		UNiagaraScript* DynamicInputScript = Cast<UNiagaraScript>(UeAgentNiagaraOps::LoadAssetObject(DynamicInputScriptPath));
+		if (!DynamicInputScript)
+		{
+			AddWarning(Warnings, TEXT("dynamic_input_script_not_found"), ContextPath + TEXT(".script_asset_path"), DynamicInputScriptPath);
+			return true;
+		}
+
+		if (OverridePin.LinkedTo.Num() > 0)
+		{
+			OverridePin.BreakAllPinLinks();
+		}
+
+		FString DynamicInputSuggestedName = GetStringFieldAny(DynamicInputObj, { TEXT("node_name"), TEXT("dynamic_input_name") });
+		DynamicInputSuggestedName.TrimStartAndEndInline();
+
+		UNiagaraNodeFunctionCall* DynamicInputNode = nullptr;
+		FNiagaraStackGraphUtilities::SetDynamicInputForFunctionInput(
+			OverridePin,
+			DynamicInputScript,
+			DynamicInputNode,
+			FGuid(),
+			DynamicInputSuggestedName,
+			DynamicInputScript->GetExposedVersion().VersionGuid);
+		if (!DynamicInputNode)
+		{
+			AddWarning(Warnings, TEXT("dynamic_input_create_failed"), ContextPath, DynamicInputScriptPath);
+			return true;
+		}
+
+		FString DynamicInputInitializationSource;
+		const bool bDynamicInputInputsInitialized = UeAgentNiagaraOps::InitializeDynamicInputStackInputs(
+			nullptr,
+			FGuid(),
+			&Graph,
+			ModuleNode,
+			*DynamicInputNode,
+			DynamicInputInitializationSource);
+		if (!bDynamicInputInputsInitialized)
+		{
+			AddWarning(
+				Warnings,
+				TEXT("dynamic_input_inputs_initialization_incomplete"),
+				ContextPath,
+				DynamicInputInitializationSource);
+		}
+
+		const TArray<TSharedPtr<FJsonValue>>* Inputs = nullptr;
+		if (UeAgentJsonDiagnostics::ReadArrayField(DynamicInputObj, TEXT("inputs"), ContextPath + TEXT(".inputs"), Inputs, Warnings, false))
+		{
+			for (int32 InputIndex = 0; InputIndex < Inputs->Num(); ++InputIndex)
+			{
+				TSharedPtr<FJsonObject> NestedInputObj;
+				const FString NestedInputPath = FString::Printf(TEXT("%s.inputs[%d]"), *ContextPath, InputIndex);
+				if (UeAgentJsonDiagnostics::ReadObjectFromValue((*Inputs)[InputIndex], NestedInputPath, NestedInputObj, Warnings))
+				{
+					ApplyModuleInputDefault(Graph, *DynamicInputNode, NestedInputObj, NestedInputPath, Warnings);
+				}
+			}
+		}
+
+		ApplyDynamicInputDataInterfacesFromJson(Graph, *DynamicInputNode, DynamicInputObj, ContextPath, Warnings);
+		Graph.NotifyGraphChanged();
+		return true;
+	}
+
 	static bool ApplyModuleInputDefault(UNiagaraGraph& Graph, UNiagaraNodeFunctionCall& ModuleNode, const TSharedPtr<FJsonObject>& InputObj, const FString& ContextPath, TArray<TSharedPtr<FJsonValue>>& Warnings)
 	{
 		UeAgentJsonDiagnostics::WarnUnknownFields(
@@ -2472,9 +3030,14 @@ namespace UeAgentNiagaraFolderOps
 				TEXT("autogenerated_enum_value_name"),
 				TEXT("autogenerated_enum_value_display_name"),
 				TEXT("autogenerated_enum_value_int"),
-				TEXT("enum_options")
+				TEXT("enum_options"),
+				TEXT("link_kind"),
+				TEXT("dynamic_input")
 			},
 			Warnings);
+
+		TSharedPtr<FJsonObject> DynamicInputObj;
+		const bool bHasDynamicInput = GetObjectField(InputObj, TEXT("dynamic_input"), DynamicInputObj);
 
 		bool bHasOverride = false;
 		const bool bReadHasOverride = UeAgentJsonDiagnostics::ReadBoolField(
@@ -2494,14 +3057,17 @@ namespace UeAgentNiagaraFolderOps
 			Warnings,
 			false);
 
-		if (!bReadHasOverride && bReadOverrideDefaultValue && !ValueText.TrimStartAndEnd().IsEmpty())
+		if (!bReadHasOverride && (bHasDynamicInput || (bReadOverrideDefaultValue && !ValueText.TrimStartAndEnd().IsEmpty())))
 		{
 			bHasOverride = true;
-			AddWarning(
-				Warnings,
-				TEXT("module_input_has_override_missing_assumed_from_value"),
-				ContextPath,
-				TEXT("has_override is missing, but override_default_value is present and non-empty; applying it as an override."));
+			if (!bHasDynamicInput)
+			{
+				AddWarning(
+					Warnings,
+					TEXT("module_input_has_override_missing_assumed_from_value"),
+					ContextPath,
+					TEXT("has_override is missing, but override_default_value is present and non-empty; applying it as an override."));
+			}
 		}
 
 		if (!bHasOverride)
@@ -2509,7 +3075,7 @@ namespace UeAgentNiagaraFolderOps
 			return true;
 		}
 
-		if (!bReadOverrideDefaultValue)
+		if (!bReadOverrideDefaultValue && !bHasDynamicInput)
 		{
 			AddWarning(
 				Warnings,
@@ -2527,7 +3093,7 @@ namespace UeAgentNiagaraFolderOps
 			bHasLinks,
 			Warnings,
 			false);
-		if (bHasLinks)
+		if (bHasLinks && !bHasDynamicInput)
 		{
 			return true;
 		}
@@ -2609,6 +3175,11 @@ namespace UeAgentNiagaraFolderOps
 				AddWarning(Warnings, TEXT("module_input_override_unavailable"), ContextPath, FString::Printf(TEXT("%s: %s"), *ResolvedInputName, *OverridePinError));
 				return true;
 			}
+		}
+
+		if (bHasDynamicInput)
+		{
+			return ApplyModuleInputDynamicInput(Graph, ModuleNode, *OverridePin, DynamicInputObj, ContextPath + TEXT(".dynamic_input"), Warnings);
 		}
 
 		if (OverridePin->LinkedTo.Num() > 0)
@@ -2725,11 +3296,14 @@ namespace UeAgentNiagaraFolderOps
 				StageObj,
 				StagePath,
 				{
+					TEXT("file"),
+					TEXT("stage_index"),
 					TEXT("stage_node_index"),
 					TEXT("stage_key"),
 					TEXT("stage_type"),
 					TEXT("script_usage"),
 					TEXT("script_usage_id"),
+					TEXT("output_node_guid"),
 					TEXT("node_guid"),
 					TEXT("node_class"),
 					TEXT("node_title"),
@@ -2746,6 +3320,12 @@ namespace UeAgentNiagaraFolderOps
 					TEXT("inputs"),
 					TEXT("modules"),
 					TEXT("module_count"),
+					TEXT("graph_nodes"),
+					TEXT("graph_node_count"),
+					TEXT("graph_links"),
+					TEXT("graph_link_count"),
+					TEXT("custom_hlsl_nodes"),
+					TEXT("custom_hlsl_node_count"),
 					TEXT("simulation_stage_raw_properties"),
 					TEXT("event_handler_raw_properties")
 				},
@@ -2946,7 +3526,7 @@ namespace UeAgentNiagaraFolderOps
 		return Applied;
 	}
 
-	static int32 ApplyEmitterFolder(UNiagaraEmitter& Emitter, const FGuid& VersionGuid, const FString& EmitterFolder, TArray<TSharedPtr<FJsonValue>>& Warnings, FString& OutError)
+	static int32 ApplyEmitterFolder(UNiagaraEmitter& Emitter, const FGuid& VersionGuid, const FString& EmitterFolder, TArray<TSharedPtr<FJsonValue>>& Warnings, FString& OutError, const bool bApplyDataInterfacesAfterLocalRefresh = true)
 	{
 		FVersionedNiagaraEmitterData* EmitterData = VersionGuid.IsValid() ? Emitter.GetEmitterData(VersionGuid) : Emitter.GetLatestEmitterData();
 		if (!EmitterData)
@@ -3072,7 +3652,366 @@ namespace UeAgentNiagaraFolderOps
 			EmitterData->GraphSource->MarkNotSynchronized(TEXT("Niagara folder apply"));
 		}
 		Emitter.UpdateEmitterAfterLoad();
+
+		if (bApplyDataInterfacesAfterLocalRefresh)
+		{
+			const int32 DataInterfacesApplied = ApplyDataInterfacesFromFolder(Emitter, *EmitterData, EmitterFolder, Warnings, OutError);
+			if (DataInterfacesApplied == INDEX_NONE)
+			{
+				return INDEX_NONE;
+			}
+			Applied += DataInterfacesApplied;
+		}
 		Emitter.MarkPackageDirty();
+		return Applied;
+	}
+
+	static int32 ApplySystemDataInterfacesFromFolder(UNiagaraSystem& NiagaraSystem, const FString& FolderPath, const TSharedPtr<FJsonObject>& EmittersIndexObj, TArray<TSharedPtr<FJsonValue>>& Warnings, FString& OutError)
+	{
+		if (!EmittersIndexObj.IsValid())
+		{
+			return 0;
+		}
+
+		const TArray<TSharedPtr<FJsonValue>>* Emitters = nullptr;
+		if (!TryGetArrayField(EmittersIndexObj, TEXT("emitters"), Emitters))
+		{
+			return 0;
+		}
+
+		int32 Applied = 0;
+		for (int32 EmitterIndex = 0; EmitterIndex < Emitters->Num(); ++EmitterIndex)
+		{
+			const FString EmitterPath = FString::Printf(TEXT("%s/emitters/index.json.emitters[%d]"), *FolderPath, EmitterIndex);
+			TSharedPtr<FJsonObject> EmitterObj;
+			if (!UeAgentJsonDiagnostics::ReadObjectFromValue((*Emitters)[EmitterIndex], EmitterPath, EmitterObj, Warnings))
+			{
+				continue;
+			}
+
+			const FString EmitterName = GetStringFieldAny(EmitterObj, { TEXT("emitter_name"), TEXT("name") }, FString::Printf(TEXT("Emitter_%d"), EmitterIndex));
+			FString EmitterFolderRelative;
+			EmitterObj->TryGetStringField(TEXT("folder"), EmitterFolderRelative);
+			if (EmitterName.IsEmpty() || EmitterFolderRelative.IsEmpty())
+			{
+				continue;
+			}
+
+			FNiagaraEmitterHandle* ExistingHandle = nullptr;
+			for (FNiagaraEmitterHandle& Handle : NiagaraSystem.GetEmitterHandles())
+			{
+				if (Handle.GetName().ToString().Equals(EmitterName, ESearchCase::IgnoreCase))
+				{
+					ExistingHandle = &Handle;
+					break;
+				}
+			}
+			if (!ExistingHandle)
+			{
+				AddWarning(Warnings, TEXT("data_interface_emitter_handle_not_found"), EmitterPath, FString::Printf(TEXT("Emitter handle '%s' was not found while applying post-refresh data interfaces."), *EmitterName));
+				continue;
+			}
+
+			FVersionedNiagaraEmitter VersionedEmitter = ExistingHandle->GetInstance();
+			if (!VersionedEmitter.Emitter)
+			{
+				AddWarning(Warnings, TEXT("data_interface_emitter_instance_missing"), EmitterPath, FString::Printf(TEXT("Emitter handle '%s' has no emitter instance while applying post-refresh data interfaces."), *EmitterName));
+				continue;
+			}
+
+			FVersionedNiagaraEmitterData* EmitterData = VersionedEmitter.Version.IsValid()
+				? VersionedEmitter.Emitter->GetEmitterData(VersionedEmitter.Version)
+				: VersionedEmitter.Emitter->GetLatestEmitterData();
+			if (!EmitterData)
+			{
+				AddWarning(Warnings, TEXT("data_interface_emitter_data_missing"), EmitterPath, FString::Printf(TEXT("Emitter handle '%s' has no version data while applying post-refresh data interfaces."), *EmitterName));
+				continue;
+			}
+
+			const FString EmitterFolder = FPaths::Combine(FolderPath, TEXT("emitters"), EmitterFolderRelative);
+			const int32 DataInterfacesApplied = ApplyDataInterfacesFromFolder(*VersionedEmitter.Emitter, *EmitterData, EmitterFolder, Warnings, OutError);
+			if (DataInterfacesApplied == INDEX_NONE)
+			{
+				return INDEX_NONE;
+			}
+			Applied += DataInterfacesApplied;
+			if (DataInterfacesApplied > 0)
+			{
+				VersionedEmitter.Emitter->MarkPackageDirty();
+			}
+		}
+
+		return Applied;
+	}
+
+	static bool ResolveSystemStageUsageFromJson(const TSharedPtr<FJsonObject>& StageObj, const FString& StageName, ENiagaraScriptUsage& OutUsage, FGuid& OutUsageId)
+	{
+		OutUsage = ENiagaraScriptUsage::Function;
+		OutUsageId.Invalidate();
+
+		if (StageObj.IsValid())
+		{
+			FString StageKey;
+			if (StageObj->TryGetStringField(TEXT("stage_key"), StageKey) && !StageKey.IsEmpty())
+			{
+				UeAgentNiagaraOps::TryParseStageKey(StageKey, OutUsage, OutUsageId);
+			}
+			if (!UeAgentNiagaraOps::IsSystemStageUsage(OutUsage))
+			{
+				FString UsageText;
+				if (StageObj->TryGetStringField(TEXT("script_usage"), UsageText))
+				{
+					UeAgentNiagaraOps::TryParseScriptUsage(UsageText, OutUsage);
+				}
+				FString UsageIdText;
+				if (StageObj->TryGetStringField(TEXT("script_usage_id"), UsageIdText))
+				{
+					FGuid::Parse(UsageIdText, OutUsageId);
+				}
+			}
+		}
+
+		if (!UeAgentNiagaraOps::IsSystemStageUsage(OutUsage))
+		{
+			if (StageName.Equals(TEXT("SystemSpawn"), ESearchCase::IgnoreCase))
+			{
+				OutUsage = ENiagaraScriptUsage::SystemSpawnScript;
+			}
+			else if (StageName.Equals(TEXT("SystemUpdate"), ESearchCase::IgnoreCase))
+			{
+				OutUsage = ENiagaraScriptUsage::SystemUpdateScript;
+			}
+		}
+
+		if (!OutUsageId.IsValid())
+		{
+			OutUsageId = FGuid();
+		}
+		return UeAgentNiagaraOps::IsSystemStageUsage(OutUsage);
+	}
+
+	static int32 ApplySystemStageJsonToGraph(UNiagaraGraph& Graph, const TSharedPtr<FJsonObject>& StageObj, const FString& StageName, const FString& ContextPath, TArray<TSharedPtr<FJsonValue>>& Warnings)
+	{
+		if (!StageObj.IsValid())
+		{
+			return 0;
+		}
+
+		UeAgentJsonDiagnostics::WarnUnknownFields(
+			StageObj,
+			ContextPath,
+			{
+				TEXT("stage_name"),
+				TEXT("stage_index"),
+				TEXT("stage_key"),
+				TEXT("stage_type"),
+				TEXT("script_usage"),
+				TEXT("script_usage_id"),
+				TEXT("output_node_guid"),
+				TEXT("script"),
+				TEXT("node_guid"),
+				TEXT("node_class"),
+				TEXT("node_title"),
+				TEXT("node_pos_x"),
+				TEXT("node_pos_y"),
+				TEXT("is_output_node"),
+				TEXT("is_module_node"),
+				TEXT("module_name"),
+				TEXT("module_script_path"),
+				TEXT("module_kind"),
+				TEXT("module_has_enabled_state"),
+				TEXT("module_enabled"),
+				TEXT("input_count"),
+				TEXT("inputs"),
+				TEXT("modules"),
+				TEXT("module_count"),
+				TEXT("graph_nodes"),
+				TEXT("graph_node_count"),
+				TEXT("graph_links"),
+				TEXT("graph_link_count"),
+				TEXT("custom_hlsl_nodes"),
+				TEXT("custom_hlsl_node_count"),
+				TEXT("coverage_note")
+			},
+			Warnings);
+
+		const TArray<TSharedPtr<FJsonValue>>* Modules = nullptr;
+		if (!UeAgentJsonDiagnostics::ReadArrayField(StageObj, TEXT("modules"), ContextPath + TEXT(".modules"), Modules, Warnings, false))
+		{
+			return 0;
+		}
+
+		ENiagaraScriptUsage Usage = ENiagaraScriptUsage::Function;
+		FGuid UsageId;
+		if (!ResolveSystemStageUsageFromJson(StageObj, StageName, Usage, UsageId))
+		{
+			AddWarning(Warnings, TEXT("system_stage_usage_unresolved"), ContextPath, TEXT("System stage usage could not be resolved; stage was skipped."));
+			return 0;
+		}
+
+		UeAgentNiagaraOps::DestroyGraphNodesForStage(Graph, Usage, UsageId);
+		UNiagaraNodeOutput* OutputNode = UeAgentNiagaraOps::EnsureStageInputOutputBridge(Graph, Usage, UsageId);
+		if (!OutputNode)
+		{
+			AddWarning(Warnings, TEXT("system_stage_output_bridge_failed"), ContextPath, TEXT("System stage output bridge could not be initialized."));
+			return 0;
+		}
+
+		TArray<TSharedPtr<FJsonValue>> SortedModules = *Modules;
+		SortedModules.Sort([](const TSharedPtr<FJsonValue>& A, const TSharedPtr<FJsonValue>& B)
+		{
+			const TSharedPtr<FJsonObject>* AObj = nullptr;
+			const TSharedPtr<FJsonObject>* BObj = nullptr;
+			double AIndex = 0.0;
+			double BIndex = 0.0;
+			if (A.IsValid() && A->TryGetObject(AObj) && AObj && AObj->IsValid())
+			{
+				(*AObj)->TryGetNumberField(TEXT("module_index"), AIndex);
+			}
+			if (B.IsValid() && B->TryGetObject(BObj) && BObj && BObj->IsValid())
+			{
+				(*BObj)->TryGetNumberField(TEXT("module_index"), BIndex);
+			}
+			return AIndex < BIndex;
+		});
+
+		int32 Applied = 0;
+		int32 TargetModuleIndex = 0;
+		int32 SourceModuleIndex = 0;
+		for (const TSharedPtr<FJsonValue>& ModuleValue : SortedModules)
+		{
+			TSharedPtr<FJsonObject> ModuleObj;
+			const FString ModulePath = FString::Printf(TEXT("%s.modules[%d]"), *ContextPath, SourceModuleIndex);
+			++SourceModuleIndex;
+			if (!UeAgentJsonDiagnostics::ReadObjectFromValue(ModuleValue, ModulePath, ModuleObj, Warnings))
+			{
+				continue;
+			}
+
+			UeAgentJsonDiagnostics::WarnUnknownFields(
+				ModuleObj,
+				ModulePath,
+				{
+					TEXT("module_index"),
+					TEXT("module_node_guid"),
+					TEXT("module_name"),
+					TEXT("module_script_path"),
+					TEXT("module_script_asset_path"),
+					TEXT("module_kind"),
+					TEXT("module_has_enabled_state"),
+					TEXT("module_enabled"),
+					TEXT("inputs"),
+					TEXT("input_count")
+				},
+				Warnings);
+
+			const FString ModuleScriptPath = GetStringFieldAny(ModuleObj, { TEXT("module_script_path"), TEXT("module_script_asset_path") });
+			UNiagaraNodeFunctionCall* AddedModule = nullptr;
+			if (IsAssignmentModuleFolderObject(ModuleObj))
+			{
+				AddedModule = AddAssignmentModuleFromFolder(*OutputNode, TargetModuleIndex, ModuleObj, Warnings);
+			}
+			else
+			{
+				if (ModuleScriptPath.IsEmpty())
+				{
+					AddWarning(Warnings, TEXT("system_stage_module_missing_script_path"), ModulePath, TEXT("Script module entry has no module_script_path/module_script_asset_path; it was skipped."));
+					continue;
+				}
+				if (IsPrivateInlineNiagaraScriptPath(ModuleScriptPath))
+				{
+					AddWarning(Warnings, TEXT("system_stage_private_inline_module_script_skipped"), ModuleScriptPath, TEXT("Private inline module scripts cannot be reused safely in a system stage folder apply."));
+					continue;
+				}
+
+				UNiagaraScript* ModuleScript = Cast<UNiagaraScript>(UeAgentNiagaraOps::LoadAssetObject(ModuleScriptPath));
+				if (!ModuleScript)
+				{
+					AddWarning(Warnings, TEXT("system_stage_module_script_not_found"), ModuleScriptPath, TEXT("System stage module could not be reconstructed because the referenced script asset was not found."));
+					continue;
+				}
+
+				FString SuggestedName;
+				ModuleObj->TryGetStringField(TEXT("module_name"), SuggestedName);
+				AddedModule = FNiagaraStackGraphUtilities::AddScriptModuleToStack(
+					ModuleScript,
+					*OutputNode,
+					TargetModuleIndex,
+					SuggestedName,
+					ModuleScript->GetExposedVersion().VersionGuid);
+			}
+
+			if (!AddedModule)
+			{
+				AddWarning(Warnings, TEXT("system_stage_module_recreate_failed"), ModuleScriptPath, TEXT("System stage module reconstruction returned null."));
+				continue;
+			}
+
+			bool bModuleEnabled = true;
+			if (ModuleObj->TryGetBoolField(TEXT("module_enabled"), bModuleEnabled))
+			{
+				FNiagaraStackGraphUtilities::SetModuleIsEnabled(*AddedModule, bModuleEnabled);
+			}
+
+			const TArray<TSharedPtr<FJsonValue>>* Inputs = nullptr;
+			if (UeAgentJsonDiagnostics::ReadArrayField(ModuleObj, TEXT("inputs"), ModulePath + TEXT(".inputs"), Inputs, Warnings, false))
+			{
+				int32 InputIndex = 0;
+				for (const TSharedPtr<FJsonValue>& InputValue : *Inputs)
+				{
+					TSharedPtr<FJsonObject> InputObj;
+					const FString InputPath = FString::Printf(TEXT("%s.inputs[%d]"), *ModulePath, InputIndex);
+					++InputIndex;
+					if (UeAgentJsonDiagnostics::ReadObjectFromValue(InputValue, InputPath, InputObj, Warnings))
+					{
+						ApplyModuleInputDefault(Graph, *AddedModule, InputObj, InputPath, Warnings);
+					}
+				}
+			}
+
+			++Applied;
+			++TargetModuleIndex;
+		}
+
+		Graph.NotifyGraphChanged();
+		return Applied;
+	}
+
+	static int32 ApplySystemStagesFromFolder(UNiagaraSystem& NiagaraSystem, const FString& FolderPath, TArray<TSharedPtr<FJsonValue>>& Warnings, FString& OutError)
+	{
+		UNiagaraScript* SystemSpawnScript = NiagaraSystem.GetSystemSpawnScript();
+		UNiagaraScriptSource* ScriptSource = SystemSpawnScript ? Cast<UNiagaraScriptSource>(SystemSpawnScript->GetLatestSource()) : nullptr;
+		UNiagaraGraph* Graph = ScriptSource ? ScriptSource->NodeGraph : nullptr;
+		if (!Graph)
+		{
+			AddWarning(Warnings, TEXT("system_stages_missing_graph"), FolderPath, TEXT("System graph source is missing; system stages cannot be applied."));
+			return 0;
+		}
+
+		int32 Applied = 0;
+		const TArray<TPair<FString, FString>> StageFiles = {
+			TPair<FString, FString>(TEXT("SystemSpawn"), TEXT("SystemSpawn.json")),
+			TPair<FString, FString>(TEXT("SystemUpdate"), TEXT("SystemUpdate.json"))
+		};
+		for (const TPair<FString, FString>& StageFile : StageFiles)
+		{
+			TSharedPtr<FJsonObject> StageObj;
+			const FString StageFilePath = FPaths::Combine(FolderPath, TEXT("system_stages"), StageFile.Value);
+			if (!LoadJsonFileOptional(StageFilePath, StageObj, OutError))
+			{
+				return INDEX_NONE;
+			}
+			if (!StageObj.IsValid())
+			{
+				continue;
+			}
+			Applied += ApplySystemStageJsonToGraph(*Graph, StageObj, StageFile.Key, FString::Printf(TEXT("system_stages/%s"), *StageFile.Value), Warnings);
+		}
+
+		if (Applied > 0)
+		{
+			NiagaraSystem.MarkPackageDirty();
+		}
 		return Applied;
 	}
 }
@@ -3205,12 +4144,12 @@ bool FUeAgentHttpServer::CmdNiagaraExportFolder(const FUeAgentRequestContext& Ct
 
 	UeAgentNiagaraFolderOps::AddUniqueScriptReference(ScriptRefs, NiagaraSystem->GetSystemSpawnScript(), TEXT("system_stage"), TEXT("SystemSpawn"));
 	UeAgentNiagaraFolderOps::AddUniqueScriptReference(ScriptRefs, NiagaraSystem->GetSystemUpdateScript(), TEXT("system_stage"), TEXT("SystemUpdate"));
-	if (!UeAgentNiagaraFolderOps::SaveJsonFile(FPaths::Combine(FolderPath, TEXT("system_stages"), TEXT("SystemSpawn.json")), UeAgentNiagaraFolderOps::BuildSystemStageJson(NiagaraSystem->GetSystemSpawnScript(), TEXT("SystemSpawn")), &WrittenFiles))
+	if (!UeAgentNiagaraFolderOps::SaveJsonFile(FPaths::Combine(FolderPath, TEXT("system_stages"), TEXT("SystemSpawn.json")), UeAgentNiagaraFolderOps::BuildSystemStageJson(NiagaraSystem->GetSystemSpawnScript(), TEXT("SystemSpawn"), ScriptRefs), &WrittenFiles))
 	{
 		OutError = TEXT("save_system_spawn_failed");
 		return false;
 	}
-	if (!UeAgentNiagaraFolderOps::SaveJsonFile(FPaths::Combine(FolderPath, TEXT("system_stages"), TEXT("SystemUpdate.json")), UeAgentNiagaraFolderOps::BuildSystemStageJson(NiagaraSystem->GetSystemUpdateScript(), TEXT("SystemUpdate")), &WrittenFiles))
+	if (!UeAgentNiagaraFolderOps::SaveJsonFile(FPaths::Combine(FolderPath, TEXT("system_stages"), TEXT("SystemUpdate.json")), UeAgentNiagaraFolderOps::BuildSystemStageJson(NiagaraSystem->GetSystemUpdateScript(), TEXT("SystemUpdate"), ScriptRefs), &WrittenFiles))
 	{
 		OutError = TEXT("save_system_update_failed");
 		return false;
@@ -4106,8 +5045,10 @@ bool FUeAgentHttpServer::CmdNiagaraApplyFolder(const FUeAgentRequestContext& Ctx
 	TMap<FString, int32> Stats;
 	int32 AppliedSystemPropertyCount = 0;
 	int32 AppliedUserParameterCount = 0;
+	int32 AppliedSystemStageCount = 0;
 	int32 AppliedEmitterHandleCount = 0;
 	int32 AppliedEmitterPropertyCount = 0;
+	int32 AppliedPostRefreshDataInterfaceCount = 0;
 
 	NiagaraSystem->Modify();
 
@@ -4242,7 +5183,7 @@ bool FUeAgentHttpServer::CmdNiagaraApplyFolder(const FUeAgentRequestContext& Ctx
 					if (VersionedEmitterForApply.Emitter)
 					{
 						const FString EmitterFolder = FPaths::Combine(FolderPath, TEXT("emitters"), EmitterFolderRelative);
-						const int32 EmitterApplied = UeAgentNiagaraFolderOps::ApplyEmitterFolder(*VersionedEmitterForApply.Emitter, VersionedEmitterForApply.Version, EmitterFolder, Warnings, OutError);
+						const int32 EmitterApplied = UeAgentNiagaraFolderOps::ApplyEmitterFolder(*VersionedEmitterForApply.Emitter, VersionedEmitterForApply.Version, EmitterFolder, Warnings, OutError, false);
 						if (EmitterApplied == INDEX_NONE)
 						{
 							return false;
@@ -4254,8 +5195,29 @@ bool FUeAgentHttpServer::CmdNiagaraApplyFolder(const FUeAgentRequestContext& Ctx
 		}
 	}
 
-	const UeAgentNiagaraOps::FNiagaraSystemRefreshResult RefreshResult =
+	const int32 SystemStagesApplied = UeAgentNiagaraFolderOps::ApplySystemStagesFromFolder(*NiagaraSystem, FolderPath, Warnings, OutError);
+	if (SystemStagesApplied == INDEX_NONE)
+	{
+		return false;
+	}
+	AppliedSystemStageCount = SystemStagesApplied;
+
+	UeAgentNiagaraOps::FNiagaraSystemRefreshResult RefreshResult =
 		UeAgentNiagaraOps::RefreshNiagaraSystemAfterStructuralEdit(*NiagaraSystem, true, true);
+	if (EmittersIndexObj.IsValid())
+	{
+		const int32 PostRefreshDataInterfacesApplied = UeAgentNiagaraFolderOps::ApplySystemDataInterfacesFromFolder(*NiagaraSystem, FolderPath, EmittersIndexObj, Warnings, OutError);
+		if (PostRefreshDataInterfacesApplied == INDEX_NONE)
+		{
+			return false;
+		}
+		AppliedPostRefreshDataInterfaceCount = PostRefreshDataInterfacesApplied;
+		if (AppliedPostRefreshDataInterfaceCount > 0)
+		{
+			NiagaraSystem->MarkPackageDirty();
+			RefreshResult = UeAgentNiagaraOps::RefreshNiagaraSystemAfterStructuralEdit(*NiagaraSystem, true, true);
+		}
+	}
 
 	bool bCompileAfterApply = false;
 	JsonTryGetBool(Ctx.Params, TEXT("compile_after_apply"), bCompileAfterApply);
@@ -4287,8 +5249,10 @@ bool FUeAgentHttpServer::CmdNiagaraApplyFolder(const FUeAgentRequestContext& Ctx
 
 	Stats.Add(TEXT("system_properties_applied"), AppliedSystemPropertyCount);
 	Stats.Add(TEXT("user_parameters_applied"), AppliedUserParameterCount);
+	Stats.Add(TEXT("system_stages_applied"), AppliedSystemStageCount);
 	Stats.Add(TEXT("emitter_handles_applied"), AppliedEmitterHandleCount);
 	Stats.Add(TEXT("emitter_properties_applied"), AppliedEmitterPropertyCount);
+	Stats.Add(TEXT("post_refresh_data_interfaces_applied"), AppliedPostRefreshDataInterfaceCount);
 	Stats.Add(TEXT("overview_node_count_before"), RefreshResult.OverviewNodeCountBefore);
 	Stats.Add(TEXT("overview_node_count_after"), RefreshResult.OverviewNodeCountAfter);
 	Stats.Add(TEXT("stack_total_issue_count"), StackIssueReport.TotalIssueCount);
@@ -4303,8 +5267,10 @@ bool FUeAgentHttpServer::CmdNiagaraApplyFolder(const FUeAgentRequestContext& Ctx
 	OutData->SetBoolField(TEXT("created"), bCreated);
 	OutData->SetNumberField(TEXT("system_properties_applied"), AppliedSystemPropertyCount);
 	OutData->SetNumberField(TEXT("user_parameters_applied"), AppliedUserParameterCount);
+	OutData->SetNumberField(TEXT("system_stages_applied"), AppliedSystemStageCount);
 	OutData->SetNumberField(TEXT("emitter_handles_applied"), AppliedEmitterHandleCount);
 	OutData->SetNumberField(TEXT("emitter_properties_applied"), AppliedEmitterPropertyCount);
+	OutData->SetNumberField(TEXT("post_refresh_data_interfaces_applied"), AppliedPostRefreshDataInterfaceCount);
 	OutData->SetBoolField(TEXT("synchronized_overview_graph"), RefreshResult.bSynchronizedOverviewGraph);
 	OutData->SetObjectField(TEXT("system_refresh"), UeAgentNiagaraOps::BuildNiagaraSystemRefreshJson(RefreshResult));
 	OutData->SetNumberField(TEXT("overview_node_count_before"), RefreshResult.OverviewNodeCountBefore);

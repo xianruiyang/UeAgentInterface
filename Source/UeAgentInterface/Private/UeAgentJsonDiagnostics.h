@@ -13,6 +13,21 @@
 
 namespace UeAgentJsonDiagnostics
 {
+	static FString ResolveProjectRelativeFilePath(const FString& FilePathInput)
+	{
+		FString FilePath = FilePathInput;
+		FilePath.TrimStartAndEndInline();
+		if (FilePath.IsEmpty())
+		{
+			return FilePath;
+		}
+		if (FPaths::IsRelative(FilePath))
+		{
+			return FPaths::ConvertRelativePathToFull(FPaths::Combine(FPaths::ProjectDir(), FilePath));
+		}
+		return FPaths::ConvertRelativePathToFull(FilePath);
+	}
+
 	static FString JsonValueTypeToString(const TSharedPtr<FJsonValue>& Value)
 	{
 		if (!Value.IsValid())
@@ -458,18 +473,19 @@ namespace UeAgentJsonDiagnostics
 		const bool bOptional)
 	{
 		OutObj.Reset();
-		if (bOptional && !FPaths::FileExists(FilePath))
+		const FString ResolvedFilePath = ResolveProjectRelativeFilePath(FilePath);
+		if (bOptional && !FPaths::FileExists(ResolvedFilePath))
 		{
 			return true;
 		}
 
 		FString JsonText;
-		if (!FFileHelper::LoadFileToString(JsonText, *FilePath))
+		if (!FFileHelper::LoadFileToString(JsonText, *ResolvedFilePath))
 		{
-			OutError = FString::Printf(TEXT("json_file_not_found:%s"), *FilePath);
+			OutError = FString::Printf(TEXT("json_file_not_found:%s"), *ResolvedFilePath);
 			if (OutIssues)
 			{
-				AddIssue(*OutIssues, TEXT("error"), TEXT("json_file_not_found"), FilePath, TEXT("JSON file does not exist or cannot be read."));
+				AddIssue(*OutIssues, TEXT("error"), TEXT("json_file_not_found"), ResolvedFilePath, TEXT("JSON file does not exist or cannot be read."));
 			}
 			return false;
 		}
@@ -477,10 +493,10 @@ namespace UeAgentJsonDiagnostics
 		const TSharedRef<TJsonReader<TCHAR>> Reader = TJsonReaderFactory<TCHAR>::Create(JsonText);
 		if (!FJsonSerializer::Deserialize(Reader, OutObj) || !OutObj.IsValid())
 		{
-			OutError = FString::Printf(TEXT("json_parse_failed:%s"), *FilePath);
+			OutError = FString::Printf(TEXT("json_parse_failed:%s"), *ResolvedFilePath);
 			if (OutIssues)
 			{
-				AddIssue(*OutIssues, TEXT("error"), TEXT("json_parse_failed"), FilePath, TEXT("JSON syntax parse failed."));
+				AddIssue(*OutIssues, TEXT("error"), TEXT("json_parse_failed"), ResolvedFilePath, TEXT("JSON syntax parse failed."));
 			}
 			return false;
 		}

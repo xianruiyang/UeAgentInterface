@@ -1287,6 +1287,15 @@ bool FUeAgentHttpServer::CmdNiagaraEmitterSetModuleInput(const FUeAgentRequestCo
 
 	FString ValueText;
 	const bool bHasValueText = JsonTryGetString(Ctx.Params, TEXT("value_text"), ValueText);
+	FString DynamicInputScriptPath;
+	if (!JsonTryGetString(Ctx.Params, TEXT("dynamic_input_script_asset_path"), DynamicInputScriptPath))
+	{
+		if (!JsonTryGetString(Ctx.Params, TEXT("dynamic_input_script_path"), DynamicInputScriptPath))
+		{
+			JsonTryGetString(Ctx.Params, TEXT("dynamic_input"), DynamicInputScriptPath);
+		}
+	}
+	DynamicInputScriptPath.TrimStartAndEndInline();
 
 	UNiagaraNodeFunctionCall* ModuleNode = UeAgentNiagaraOps::FindModuleNodeByGuid(EditContext.Graph, ModuleNodeGuid);
 	if (!ModuleNode)
@@ -1359,6 +1368,244 @@ bool FUeAgentHttpServer::CmdNiagaraEmitterSetModuleInput(const FUeAgentRequestCo
 		}
 	}
 	UEdGraphPin& OverridePin = *OverridePinPtr;
+
+	if (!DynamicInputScriptPath.IsEmpty())
+	{
+		if (OverridePin.LinkedTo.Num() > 0 && bBreakInputLinks)
+		{
+			OverridePin.BreakAllPinLinks();
+		}
+
+		UNiagaraScript* DynamicInputScript = Cast<UNiagaraScript>(UeAgentNiagaraOps::LoadAssetObject(DynamicInputScriptPath));
+		if (!DynamicInputScript)
+		{
+			return CancelAndFail(TEXT("dynamic_input_script_not_found"));
+		}
+
+		FString DynamicInputSuggestedName;
+		if (!JsonTryGetString(Ctx.Params, TEXT("dynamic_input_name"), DynamicInputSuggestedName))
+		{
+			JsonTryGetString(Ctx.Params, TEXT("suggested_dynamic_input_name"), DynamicInputSuggestedName);
+		}
+
+		UNiagaraNodeFunctionCall* DynamicInputNode = nullptr;
+		FNiagaraStackGraphUtilities::SetDynamicInputForFunctionInput(
+			OverridePin,
+			DynamicInputScript,
+			DynamicInputNode,
+			FGuid(),
+			DynamicInputSuggestedName,
+			DynamicInputScript->GetExposedVersion().VersionGuid);
+		if (!DynamicInputNode)
+		{
+			return CancelAndFail(TEXT("set_dynamic_input_failed"));
+		}
+
+		FString DynamicInputInitializationSource;
+		const bool bDynamicInputInputsInitialized = UeAgentNiagaraOps::InitializeDynamicInputStackInputs(
+			EditContext.Emitter,
+			EditContext.VersionGuid,
+			EditContext.Graph,
+			*ModuleNode,
+			*DynamicInputNode,
+			DynamicInputInitializationSource);
+
+		bool bCurveJsonApplied = false;
+		FString CurveInputNodeGuidText;
+		FString CurveDataInterfaceObjectPath;
+		TArray<TSharedPtr<FJsonValue>> CurveJsonIssues;
+		const TSharedPtr<FJsonObject>* CurveJsonPtr = nullptr;
+		const bool bHasCurveJson =
+			(Ctx.Params->TryGetObjectField(TEXT("curve_json"), CurveJsonPtr) && CurveJsonPtr && CurveJsonPtr->IsValid()) ||
+			(Ctx.Params->TryGetObjectField(TEXT("value_json"), CurveJsonPtr) && CurveJsonPtr && CurveJsonPtr->IsValid());
+		if (bHasCurveJson)
+		{
+			FString CurveInputNameFilter;
+			if (!JsonTryGetString(Ctx.Params, TEXT("dynamic_input_curve_input_name"), CurveInputNameFilter))
+			{
+				CurveInputNameFilter = TEXT("FloatCurve");
+			}
+			CurveInputNameFilter.TrimStartAndEndInline();
+
+			UNiagaraNodeInput* CurveInputNode = nullptr;
+			UNiagaraDataInterface* CurveDataInterface = nullptr;
+			auto TryUseInputNode = [&CurveInputNode, &CurveDataInterface](UNiagaraNodeInput* InputNode) -> bool
+			{
+				if (!InputNode)
+				{
+					return false;
+				}
+				FProperty* DataInterfaceProperty = nullptr;
+				void* DataInterfaceValuePtr = nullptr;
+				if (!UeAgentNiagaraOps::ResolvePropertyPath(InputNode, TEXT("DataInterface"), DataInterfaceProperty, DataInterfaceValuePtr))
+				{
+					return false;
+				}
+				FObjectPropertyBase* ObjectProperty = CastField<FObjectPropertyBase>(DataInterfaceProperty);
+				if (!ObjectProperty)
+				{
+					return false;
+				}
+				UNiagaraDataInterface* CandidateDataInterface = Cast<UNiagaraDataInterface>(ObjectProperty->GetObjectPropertyValue(DataInterfaceValuePtr));
+				if (!CandidateDataInterface)
+				{
+					return false;
+				}
+				FProperty* CurveProperty = nullptr;
+				void* CurveValuePtr = nullptr;
+				if (!UeAgentNiagaraOps::ResolvePropertyPath(CandidateDataInterface, TEXT("Curve"), CurveProperty, CurveValuePtr))
+				{
+					return false;
+				}
+				CurveInputNode = InputNode;
+				CurveDataInterface = CandidateDataInterface;
+				return true;
+			};
+
+			const FString CurveFilterLower = UeAgentNiagaraOps::MakeLowerTrimmed(CurveInputNameFilter);
+			for (UEdGraphPin* Pin : DynamicInputNode->Pins)
+			{
+				if (CurveDataInterface || !Pin || Pin->Direction != EGPD_Input)
+				{
+					continue;
+				}
+				const FString PinNameLower = UeAgentNiagaraOps::MakeLowerTrimmed(Pin->PinName.ToString());
+				if (!CurveFilterLower.IsEmpty() && !PinNameLower.Contains(CurveFilterLower))
+				{
+					continue;
+				}
+				for (UEdGraphPin* LinkedPin : Pin->LinkedTo)
+				{
+					UNiagaraNodeInput* InputNode = LinkedPin ? Cast<UNiagaraNodeInput>(LinkedPin->GetOwningNode()) : nullptr;
+					if (TryUseInputNode(InputNode))
+					{
+						break;
+					}
+				}
+			}
+
+			if (!CurveDataInterface && EditContext.Graph)
+			{
+				const FString DynamicInputNameLower = UeAgentNiagaraOps::MakeLowerTrimmed(DynamicInputNode->GetFunctionName());
+				for (UEdGraphNode* Node : EditContext.Graph->Nodes)
+				{
+					UNiagaraNodeInput* InputNode = Cast<UNiagaraNodeInput>(Node);
+					if (!InputNode)
+					{
+						continue;
+					}
+					const FString InputNameLower = UeAgentNiagaraOps::MakeLowerTrimmed(InputNode->Input.GetName().ToString());
+					if (!DynamicInputNameLower.IsEmpty() && !InputNameLower.Contains(DynamicInputNameLower))
+					{
+						continue;
+					}
+					if (!CurveFilterLower.IsEmpty() && !InputNameLower.Contains(CurveFilterLower))
+					{
+						continue;
+					}
+					if (TryUseInputNode(InputNode))
+					{
+						break;
+					}
+				}
+			}
+
+			if (!CurveDataInterface && EditContext.Graph)
+			{
+				for (UEdGraphNode* Node : EditContext.Graph->Nodes)
+				{
+					UNiagaraNodeInput* InputNode = Cast<UNiagaraNodeInput>(Node);
+					if (!InputNode)
+					{
+						continue;
+					}
+					const FString InputNameLower = UeAgentNiagaraOps::MakeLowerTrimmed(InputNode->Input.GetName().ToString());
+					if (!CurveFilterLower.IsEmpty() && !InputNameLower.Contains(CurveFilterLower))
+					{
+						continue;
+					}
+					if (TryUseInputNode(InputNode))
+					{
+						break;
+					}
+				}
+			}
+
+			if (!CurveDataInterface)
+			{
+				return CancelAndFail(TEXT("dynamic_input_curve_data_interface_not_found"));
+			}
+
+			FProperty* CurveProperty = nullptr;
+			void* CurveValuePtr = nullptr;
+			if (!UeAgentNiagaraOps::ResolvePropertyPath(CurveDataInterface, TEXT("Curve"), CurveProperty, CurveValuePtr))
+			{
+				return CancelAndFail(TEXT("dynamic_input_curve_property_not_found"));
+			}
+
+			CurveDataInterface->Modify();
+			if (!UeAgentCurveJson::TryApplyPropertyCurveJson(CurveProperty, CurveValuePtr, *CurveJsonPtr, TEXT("curve_json"), CurveJsonIssues) ||
+				UeAgentCurveJson::HasError(CurveJsonIssues))
+			{
+				OutData->SetArrayField(TEXT("json_issues"), CurveJsonIssues);
+				return CancelAndFail(TEXT("dynamic_input_curve_json_apply_failed"));
+			}
+			FPropertyChangedEvent CurveChangedEvent(CurveProperty);
+			CurveDataInterface->PostEditChangeProperty(CurveChangedEvent);
+			CurveDataInterface->MarkPackageDirty();
+			bCurveJsonApplied = true;
+			if (CurveInputNode)
+			{
+				CurveInputNodeGuidText = CurveInputNode->NodeGuid.ToString(EGuidFormats::DigitsWithHyphensLower);
+			}
+			CurveDataInterfaceObjectPath = CurveDataInterface->GetPathName();
+		}
+
+		UeAgentNiagaraOps::MarkEmitterGraphEdited(EditContext);
+
+		bool bSaveAfterSet = false;
+		JsonTryGetBool(Ctx.Params, TEXT("save_after_set"), bSaveAfterSet);
+		if (bSaveAfterSet)
+		{
+			if (!UeAgentNiagaraOps::SaveAssetPackage(EditContext.Emitter, OutError))
+			{
+				return false;
+			}
+		}
+
+		OutData->SetStringField(TEXT("asset_path"), EditContext.Emitter->GetOutermost()->GetName());
+		OutData->SetStringField(TEXT("module_node_guid"), ModuleNodeGuid.ToString(EGuidFormats::DigitsWithHyphensLower));
+		OutData->SetStringField(TEXT("module_name"), ModuleNode->GetFunctionName());
+		OutData->SetStringField(TEXT("input_name"), ResolvedInputName);
+		OutData->SetStringField(TEXT("input_type"), ResolvedInput->InputVariable.GetType().GetNameText().ToString());
+		OutData->SetStringField(TEXT("requested_dynamic_input_script_asset_path"), DynamicInputScriptPath);
+		OutData->SetStringField(TEXT("dynamic_input_node_guid"), DynamicInputNode->NodeGuid.ToString(EGuidFormats::DigitsWithHyphensLower));
+		OutData->SetStringField(TEXT("dynamic_input_node_name"), DynamicInputNode->GetFunctionName());
+		OutData->SetStringField(TEXT("dynamic_input_script_asset_path"), UeAgentNiagaraOps::GetModuleScriptPath(*DynamicInputNode));
+		OutData->SetBoolField(TEXT("is_dynamic_input"), true);
+		OutData->SetBoolField(TEXT("dynamic_input_extension_deprecated"), true);
+		OutData->SetStringField(TEXT("dynamic_input_extension_replacement"), TEXT("Use niagara_export_folder / niagara_apply_folder and edit inputs[].dynamic_input plus dynamic_input.data_interfaces[].raw_properties[].curve_json."));
+		OutData->SetBoolField(TEXT("dynamic_input_inputs_initialized"), bDynamicInputInputsInitialized);
+		if (!DynamicInputInitializationSource.IsEmpty())
+		{
+			OutData->SetStringField(TEXT("dynamic_input_initialization_source"), DynamicInputInitializationSource);
+		}
+		OutData->SetBoolField(TEXT("curve_json_applied"), bCurveJsonApplied);
+		if (!CurveInputNodeGuidText.IsEmpty())
+		{
+			OutData->SetStringField(TEXT("curve_input_node_guid"), CurveInputNodeGuidText);
+		}
+		if (!CurveDataInterfaceObjectPath.IsEmpty())
+		{
+			OutData->SetStringField(TEXT("curve_data_interface_object_path"), CurveDataInterfaceObjectPath);
+		}
+		if (CurveJsonIssues.Num() > 0)
+		{
+			OutData->SetArrayField(TEXT("json_issues"), CurveJsonIssues);
+		}
+		OutData->SetBoolField(TEXT("saved"), bSaveAfterSet);
+		return true;
+	}
 
 	FString LinkedParameterName;
 	FString ApplyVerificationStatus = TEXT("not_run");

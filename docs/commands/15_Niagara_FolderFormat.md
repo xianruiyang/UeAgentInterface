@@ -20,7 +20,7 @@ Saved/UeAssetFolders/NiagaraScript
 
 - 使用真实 UE 关系建模：`UNiagaraSystem -> FNiagaraEmitterHandle -> FVersionedNiagaraEmitter -> UNiagaraEmitter`。
 - `NiagaraSystem` 导出/回写覆盖 System 属性、User 参数、Emitter Handle、Emitter 文件夹内容、脚本引用、System/Emitter stage 摘要、验证报告。
-- `NiagaraEmitter` 导出/回写覆盖 version data、graph 参数、rapid iteration 参数、renderer、event generator、event handler、simulation stage、module stack、module input default、data interface 引用与 raw reflected fields。
+- `NiagaraEmitter` 导出/回写覆盖 version data、graph 参数、rapid iteration 参数、renderer、event generator、event handler、simulation stage、module stack、module input default、module input dynamic input、data interface 引用与 raw reflected fields。
 - `NiagaraScript` 导出/回写覆盖脚本元数据、raw reflected fields、graph nodes、graph links、Custom HLSL 节点文本。
 - 不把外部资产内容复制进 Niagara 文件夹；Material、Mesh、Parameter Collection、Effect Type、Data Channel 等仍以引用和依赖记录保存。
 - `validation/coverage_report.json` 现在以 `implementation_status=complete_folder_profile`、`is_complete_target_schema=true`、空 `pending_profiles`、空 `blocking_gaps` 作为完成口径。实际资产缺失、坏引用、UE `ImportText` 无法导入的字段仍会进入 `warnings`；`strict=true` 会把这些运行时 warning 转为失败。
@@ -146,13 +146,16 @@ NMS_FillArray/
 - `emitters/index.json` 的 `source.ownership` 区分 `standalone_asset` 与 `system_instance`：
   - `standalone_asset` 表示 `source.emitter_asset_path` 可作为外部模板资产加载；
   - `system_instance` 表示 Emitter 已是 System 内的 handle instance，`source_system_asset_path` 只记录所属 System。
-- 常用结构以结构化字段导出，例如 User 参数、Emitter Handle、Renderer、Event Handler、Event Generator、Stage、Module、Module Input、Graph Node、Graph Link。
+- 常用结构以结构化字段导出，例如 User 参数、System Stage、Emitter Handle、Renderer、Event Handler、Event Generator、Stage、Module、Module Input、Graph Node、Graph Link。
 - UObject / UStruct 字段同时进入 `raw_properties`，保留 `property_name`、`cpp_type`、`value_text`、`property_flags`、`can_apply_generic`。
 - `raw_properties` 回写解析 `property_name` 时先做精确字段名 / authored name 匹配，再把 `bFoo` 与 `Foo` 作为布尔别名兜底，避免 `FixedBounds` 这类字段误写到 `bFixedBounds`。
 - `raw_properties` 和 `custom_hlsl` 回写会记录解析/读回异常：缺少 `property_name`、缺少 `value_text`、属性不存在、`ImportText` 失败、写后读回不同都会进入 `warnings`。warning 消息会包含请求值、读回值、`cpp_type` 和底层错误；`strict=true` 时会使 apply 失败。
+- 曲线类 `raw_properties` 会导出 `curve_json` / `value_json`，使用统一的 `ue_agent_interface.curve.v1`。回写时 `curve_json` 优先，`value_json` 仅作为兼容别名；未知字段、拼写相近字段、缺 key 值、重复时间或非法插值/外推模式都会进入 `warnings[]`，`strict=true` 时失败。
+- Data Interface 曲线属性在 System folder apply 中会等 System overview / emitter graph 总刷新后再回写，避免写入旧 `UNiagaraNodeInput.DataInterface` 后被刷新覆盖。返回字段 `post_refresh_data_interfaces_applied` 表示这一步实际应用的 Data Interface 属性数量。
+- Module Input 若连接到 Dynamic Input，导出时会在该 input 下写入 `dynamic_input` 子对象，包含 `script_asset_path`、`node_name`、嵌套 `inputs[]` 和 `data_interfaces[]`。回写时 apply 会先重建 Dynamic Input，再按 `dynamic_input.data_interfaces[].raw_properties[].curve_json` 写入曲线 Data Interface。因此 `FloatFromCurve`、`VectorFromCurve`、`ColorFromCurve` 等动态输入曲线必须在 folder JSON 中编辑，不再通过 `niagara_emitter_set_module_input` 的扩展参数制作。
 - Stage / Module / Module Input JSON 现在接入统一字段诊断：未知字段会返回 `json_unknown_field`，类型不匹配会返回 `json_field_type_mismatch`，必填字段缺失会返回 `json_missing_required_field`，数组元素不是 object 会返回 `json_array_item_type_mismatch`。这些 warning 会带完整 JSON path，例如 `stages/00_ParticleSpawnScript_default.json.modules[0].inputs[3].override_default_value`；`strict=true` 时会使 apply 失败。
 - User 参数回写按 `parameter_type -> type_path -> type_internal -> type` 解析，并支持 `NiagaraFloat` / `/Script/Niagara.NiagaraFloat` 等 UE 内部类型别名。
-- Stage apply 会重建 stage 基础图、按导出顺序恢复 module stack、恢复 module enabled 状态和 input default 值。
+- System Stage 与 Emitter Stage apply 都会重建 stage 基础图、按导出顺序恢复 module stack、恢复 module enabled 状态和 input default 值；新建 System 时必须通过 `system_stages/SystemUpdate.json` 恢复 `SystemState`，否则 Stack 会报缺少必需模块。
 - Stage module 顺序以 `module_index` 为准；apply 会按目标索引插入，export 会按 ParameterMap 链路回读执行顺序，避免节点坐标排序导致 `Collision` / `GenerateCollisionEvent` 等更新模块顺序漂移。
 - Module input default 回写会区分 FunctionCall 可见输入 pin 与隐藏 stack override input：可见枚举/静态输入直接写入 FunctionCall pin，隐藏输入才创建 aliased override pin。
 - Module input default 回写会按 Niagara 类型规范化 `override_default_value`：`Vector/Position` 写为 `(X=...,Y=...,Z=...)`，`LinearColor` 写为 `(R=...,G=...,B=...,A=...)`，`Vector2/Vector4/Quat` 写为对应结构字段；`NaN/Inf` 会作为 warning 记录并跳过该输入，避免 folder apply 后 UI 落成黑色或零向量。
@@ -164,13 +167,62 @@ NMS_FillArray/
 - Custom HLSL 会从 `UNiagaraNodeCustomHlsl` 的 reflected `CustomHlsl` 字段导出/回写。
 - 外部资产只记录引用，不复制 Material、Mesh、Data Channel、Parameter Collection 等外部内容。
 
+## Dynamic Input 曲线 JSON
+
+Dynamic Input 是 Module Input 的子结构。导出后应在 stage 文件的 `modules[].inputs[]` 里编辑，不再使用原子命令补写。
+
+最小结构如下：
+
+```json
+{
+  "input_name": "Module.Scale Alpha",
+  "has_override": true,
+  "has_links": true,
+  "link_kind": "dynamic_input",
+  "dynamic_input": {
+    "node_name": "FloatFromCurve001",
+    "script_asset_path": "/Niagara/DynamicInputs/FloatFromCurve.FloatFromCurve",
+    "data_interfaces": [
+      {
+        "input_name": "FloatFromCurve001.FloatCurve",
+        "data_interface_class": "/Script/Niagara.NiagaraDataInterfaceCurve",
+        "raw_properties": [
+          {
+            "property_name": "Curve",
+            "curve_json": {
+              "schema": "ue_agent_interface.curve.v1",
+              "curve_kind": "float",
+              "storage": "rich_curve_property",
+              "channels": {
+                "value": {
+                  "keys": [
+                    { "time": 0.0, "value": 1.0, "interp_mode": "Linear" },
+                    { "time": 1.0, "value": 0.0, "interp_mode": "Linear" }
+                  ]
+                }
+              }
+            }
+          }
+        ]
+      }
+    ]
+  }
+}
+```
+
+验收要求：
+
+- apply 返回不得有 `dynamic_input_*`、`curve_json_*`、`json_unknown_field`、`json_field_type_mismatch` 相关 warning；`strict=true` 时这些 warning 会导致失败。
+- apply 后必须再 `niagara_export_folder`，确认同一 input 仍有 `link_kind=dynamic_input`，且 `dynamic_input.data_interfaces[].raw_properties[].curve_json` 读回了目标曲线。
+- 不要只看顶层 `data_interfaces.json`；Dynamic Input 的曲线归属应优先从该 input 的 `dynamic_input.data_interfaces[]` 检查。
+
 ## 覆盖矩阵
 
 | 领域 | Export | Apply | 当前状态 |
 |---|---|---|---|
 | `UNiagaraSystem` asset metadata | structured | structured | 已实现 |
 | `UNiagaraSystem` UObject properties | `raw_properties` | generic property import | 已实现，受 UE `ImportText` 支持范围约束 |
-| System Spawn / System Update | script reference + raw script properties | structured/raw | 已实现 |
+| System Spawn / System Update | `system_stages/*.json` 的 stage/module/module input 结构化导出与回写 | structured/raw | 已实现 |
 | User parameters | structured | structured | 已实现 |
 | Emitter handles | structured | structured | 已实现 handle 合并/新增、启用、顺序；GUID 由 UE 重新分配 |
 | System 内嵌 Emitter instance | structured | template handle fallback + folder data | 已实现 |
@@ -182,8 +234,8 @@ NMS_FillArray/
 | Event handlers | structured + raw properties | structured + raw properties | 已实现，缺失 handler 可创建 |
 | Event generators | structured + raw properties | structured + raw properties | 已实现 |
 | Stages / Simulation Stages | structured graph snapshot | structured graph rebuild | 已实现 |
-| Modules / Module Inputs | structured | structured | 已实现 module stack、enabled、input default 回写 |
-| Data interfaces | structured + raw properties | structured + raw properties | 已实现引用和 reflected 字段保真 |
+| Modules / Module Inputs | structured | structured | 已实现 module stack、enabled、input default、dynamic input 与 dynamic input DataInterface 曲线回写 |
+| Data interfaces | structured + raw properties + `curve_json` | post-refresh structured/raw apply | 已实现引用、reflected 字段和曲线 DataInterface 保真 |
 | standalone `UNiagaraScript` root profile | structured folder | structured folder | 已实现 |
 | Custom Niagara Script / Scratch Pad / Custom HLSL | reference + raw properties + node snapshot | structured/raw | 已实现 |
 | External assets | reference | reference | 引用保留，不复制外部资产 |
@@ -234,7 +286,7 @@ NMS_FillArray/
 
 返回：
 
-- 常规 apply 字段：`*_applied`、`system_refresh`、`warnings`、`warning_count`。
+- 常规 apply 字段：`system_properties_applied`、`user_parameters_applied`、`system_stages_applied`、`emitter_handles_applied`、`emitter_properties_applied`、`post_refresh_data_interfaces_applied`、`system_refresh`、`warnings`、`warning_count`。
 - Stack 诊断字段：`stack_issue_report`、`stack_issues`、`stack_scopes`、`stack_total_issue_count`、`stack_error_count`、`stack_warning_count`、`stack_info_count`、`has_stack_errors`、`stack_issue_view_model_source`。
 - 当 `strict=true` 且 Stack error 非空时，命令失败返回 `strict_apply_has_stack_errors`，同时返回具体 `stack_issues[] / stack_scopes[]`。
 

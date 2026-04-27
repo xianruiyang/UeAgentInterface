@@ -2,6 +2,7 @@
 
 #include "UeAgentHttpServer_AnimationAssets.h"
 
+#include "UeAgentCurveJson.h"
 #include "UeAgentJsonDiagnostics.h"
 
 #include "Animation/AnimationAsset.h"
@@ -643,8 +644,12 @@ namespace UeAgentAnimationAssetOps
 			TArray<float> Times;
 			TArray<float> Values;
 			UAnimationBlueprintLibrary::GetFloatKeys(Sequence, CurveName, Times, Values);
+			TArray<FRichCurveKey> RichKeys;
 			for (int32 Index = 0; Index < Times.Num() && Index < Values.Num(); ++Index)
 			{
+				FRichCurveKey RichKey(Times[Index], Values[Index]);
+				RichKey.InterpMode = RCIM_Linear;
+				RichKeys.Add(RichKey);
 				if (!bIncludeKeys)
 				{
 					continue;
@@ -655,6 +660,12 @@ namespace UeAgentAnimationAssetOps
 				Keys.Add(MakeShared<FJsonValueObject>(KeyObject));
 			}
 			Item->SetNumberField(TEXT("key_count"), FMath::Min(Times.Num(), Values.Num()));
+			if (bIncludeKeys)
+			{
+				FRichCurve RichCurve;
+				RichCurve.SetKeys(RichKeys);
+				Item->SetObjectField(TEXT("curve_json"), UeAgentCurveJson::BuildFloatCurveJson(RichCurve, TEXT("animation_raw_curve"), TEXT("FRichCurve")));
+			}
 			break;
 		}
 		}
@@ -2442,6 +2453,50 @@ bool FUeAgentHttpServer::CmdAnimSequenceSetCurve(const FUeAgentRequestContext& C
 	JsonTryGetBool(Ctx.Params, TEXT("clear_existing_keys"), bClearExistingKeys);
 	JsonTryGetBool(Ctx.Params, TEXT("remove_name_from_skeleton"), bRemoveNameFromSkeleton);
 
+	TSharedPtr<FJsonObject> TypedCurveJson;
+	const TSharedPtr<FJsonObject>* CurveJsonPtr = nullptr;
+	bool bHasTypedCurveJson = false;
+	if (Ctx.Params->TryGetObjectField(TEXT("curve_json"), CurveJsonPtr) && CurveJsonPtr && CurveJsonPtr->IsValid())
+	{
+		TypedCurveJson = *CurveJsonPtr;
+		bHasTypedCurveJson = true;
+	}
+	else if (Ctx.Params->TryGetObjectField(TEXT("curve"), CurveJsonPtr) && CurveJsonPtr && CurveJsonPtr->IsValid())
+	{
+		TypedCurveJson = *CurveJsonPtr;
+		bHasTypedCurveJson = true;
+	}
+
+	FRichCurve TypedRichCurve;
+	TArray<TSharedPtr<FJsonValue>> CurveJsonIssues;
+	if (!bRemove && bHasTypedCurveJson)
+	{
+		UeAgentCurveJson::WarnUnknownCurveFields(TypedCurveJson, TEXT("curve_json"), CurveJsonIssues);
+		if (CurveType != ERawCurveTrackTypes::RCT_Float)
+		{
+			UeAgentCurveJson::AddCurveIssue(CurveJsonIssues, TEXT("error"), TEXT("curve_unsupported_carrier"), TEXT("curve_type"), TEXT("AnimSequence typed curve JSON currently supports curve_type=float."));
+		}
+		if (!UeAgentCurveJson::ApplyChannelJsonToRichCurve(TypedCurveJson, TEXT("value"), TypedRichCurve, TEXT("curve_json"), CurveJsonIssues))
+		{
+			OutData->SetArrayField(TEXT("json_issues"), CurveJsonIssues);
+			OutError = TEXT("curve_json_apply_failed");
+			return false;
+		}
+		for (const FRichCurveKey& Key : TypedRichCurve.GetConstRefOfKeys())
+		{
+			if (Key.Time < 0.0f || Key.Time > Sequence->GetPlayLength() + KINDA_SMALL_NUMBER)
+			{
+				UeAgentCurveJson::AddCurveIssue(CurveJsonIssues, TEXT("error"), TEXT("curve_key_time_out_of_range"), TEXT("curve_json.channels.value.keys"), FString::Printf(TEXT("Curve key time %.6f is outside AnimSequence range 0..%.6f."), Key.Time, Sequence->GetPlayLength()));
+			}
+		}
+		if (UeAgentCurveJson::HasError(CurveJsonIssues))
+		{
+			OutData->SetArrayField(TEXT("json_issues"), CurveJsonIssues);
+			OutError = TEXT("curve_json_apply_failed");
+			return false;
+		}
+	}
+
 	Sequence->Modify();
 
 	if (bRemove)
@@ -2450,7 +2505,7 @@ bool FUeAgentHttpServer::CmdAnimSequenceSetCurve(const FUeAgentRequestContext& C
 	}
 	else
 	{
-		if (bClearExistingKeys && UAnimationBlueprintLibrary::DoesCurveExist(Sequence, CurveName, CurveType))
+		if ((bClearExistingKeys || bHasTypedCurveJson) && UAnimationBlueprintLibrary::DoesCurveExist(Sequence, CurveName, CurveType))
 		{
 			UAnimationBlueprintLibrary::RemoveCurve(Sequence, CurveName, false);
 		}
@@ -2491,7 +2546,14 @@ bool FUeAgentHttpServer::CmdAnimSequenceSetCurve(const FUeAgentRequestContext& C
 			}
 		};
 
-		if (Ctx.Params->HasTypedField<EJson::Array>(TEXT("keys")))
+		if (bHasTypedCurveJson)
+		{
+			for (const FRichCurveKey& Key : TypedRichCurve.GetConstRefOfKeys())
+			{
+				UAnimationBlueprintLibrary::AddFloatCurveKey(Sequence, CurveName, Key.Time, Key.Value);
+			}
+		}
+		else if (Ctx.Params->HasTypedField<EJson::Array>(TEXT("keys")))
 		{
 			const TArray<TSharedPtr<FJsonValue>>* Keys = nullptr;
 			if (Ctx.Params->TryGetArrayField(TEXT("keys"), Keys) && Keys)
@@ -2534,6 +2596,10 @@ bool FUeAgentHttpServer::CmdAnimSequenceSetCurve(const FUeAgentRequestContext& C
 	OutData->SetBoolField(TEXT("removed"), bRemove);
 	OutData->SetBoolField(TEXT("curve_exists"), !bRemove);
 	OutData->SetBoolField(TEXT("saved"), bSaveAfterSet);
+	if (CurveJsonIssues.Num() > 0)
+	{
+		OutData->SetArrayField(TEXT("json_issues"), CurveJsonIssues);
+	}
 	if (!bRemove)
 	{
 		OutData->SetObjectField(TEXT("curve"), UeAgentAnimationAssetOps::BuildCurveJson(Sequence, CurveName, CurveType, true));
