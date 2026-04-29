@@ -72,6 +72,135 @@ namespace UeAgentJsonDiagnostics
 		Issues.Add(MakeShared<FJsonValueObject>(MakeIssue(Severity, Code, Path, Message)));
 	}
 
+	static int32 CountIssuesBySeverity(
+		const TArray<TSharedPtr<FJsonValue>>& Issues,
+		const FString& Severity)
+	{
+		int32 Count = 0;
+		for (const TSharedPtr<FJsonValue>& IssueValue : Issues)
+		{
+			const TSharedPtr<FJsonObject>* IssueObj = nullptr;
+			FString IssueSeverity;
+			if (IssueValue.IsValid()
+				&& IssueValue->TryGetObject(IssueObj)
+				&& IssueObj
+				&& IssueObj->IsValid()
+				&& (*IssueObj)->TryGetStringField(TEXT("severity"), IssueSeverity)
+				&& IssueSeverity.Equals(Severity, ESearchCase::IgnoreCase))
+			{
+				++Count;
+			}
+		}
+		return Count;
+	}
+
+	static bool HasIssueWithSeverity(
+		const TArray<TSharedPtr<FJsonValue>>& Issues,
+		const FString& Severity)
+	{
+		return CountIssuesBySeverity(Issues, Severity) > 0;
+	}
+
+	static bool HasErrorIssue(const TArray<TSharedPtr<FJsonValue>>& Issues)
+	{
+		return HasIssueWithSeverity(Issues, TEXT("error"));
+	}
+
+	static bool JsonValueHasExplicitWriteIntent(const TSharedPtr<FJsonValue>& Value);
+
+	static bool JsonObjectHasExplicitWriteIntent(const TSharedPtr<FJsonObject>& Obj)
+	{
+		if (!Obj.IsValid())
+		{
+			return false;
+		}
+
+		for (const TPair<FString, TSharedPtr<FJsonValue>>& Pair : Obj->Values)
+		{
+			const FString KeyLower = Pair.Key.ToLower();
+			if (KeyLower == TEXT("apply")
+				|| KeyLower == TEXT("remove")
+				|| KeyLower == TEXT("delete")
+				|| KeyLower == TEXT("set_default_profile")
+				|| KeyLower == TEXT("write_intent"))
+			{
+				bool bValue = false;
+				if (Pair.Value.IsValid() && Pair.Value->TryGetBool(bValue) && bValue)
+				{
+					return true;
+				}
+			}
+			if (KeyLower == TEXT("rename")
+				|| KeyLower == TEXT("rename_to")
+				|| KeyLower == TEXT("operation"))
+			{
+				FString StringValue;
+				if (Pair.Value.IsValid() && Pair.Value->TryGetString(StringValue) && !StringValue.TrimStartAndEnd().IsEmpty())
+				{
+					return true;
+				}
+			}
+			if (KeyLower == TEXT("operations")
+				|| KeyLower == TEXT("mutations")
+				|| KeyLower == TEXT("write_operations")
+				|| KeyLower == TEXT("import_profile"))
+			{
+				const TArray<TSharedPtr<FJsonValue>>* ArrayValue = nullptr;
+				if (Pair.Value.IsValid() && Pair.Value->TryGetArray(ArrayValue) && ArrayValue && ArrayValue->Num() > 0)
+				{
+					return true;
+				}
+			}
+			if (JsonValueHasExplicitWriteIntent(Pair.Value))
+			{
+				return true;
+			}
+		}
+		return false;
+	}
+
+	static bool JsonValueHasExplicitWriteIntent(const TSharedPtr<FJsonValue>& Value)
+	{
+		if (!Value.IsValid())
+		{
+			return false;
+		}
+		const TSharedPtr<FJsonObject>* ObjectValue = nullptr;
+		if (Value->TryGetObject(ObjectValue) && ObjectValue && ObjectValue->IsValid())
+		{
+			return JsonObjectHasExplicitWriteIntent(*ObjectValue);
+		}
+		const TArray<TSharedPtr<FJsonValue>>* ArrayValue = nullptr;
+		if (Value->TryGetArray(ArrayValue) && ArrayValue)
+		{
+			for (const TSharedPtr<FJsonValue>& Item : *ArrayValue)
+			{
+				if (JsonValueHasExplicitWriteIntent(Item))
+				{
+					return true;
+				}
+			}
+		}
+		return false;
+	}
+
+	static void AddUnsupportedApplyIssueIfWriteIntent(
+		const TSharedPtr<FJsonObject>& Obj,
+		const FString& Path,
+		const FString& ProfileName,
+		TArray<TSharedPtr<FJsonValue>>& Issues)
+	{
+		if (JsonObjectHasExplicitWriteIntent(Obj))
+		{
+			AddIssue(
+				Issues,
+				TEXT("error"),
+				TEXT("unsupported_apply_profile"),
+				Path,
+				FString::Printf(TEXT("%s is read-only or summary-only in this folder workflow. Use the documented safe JSON file or explicit command for this write."), *ProfileName));
+		}
+	}
+
 	static int32 EditDistance(const FString& AInput, const FString& BInput)
 	{
 		const FString A = AInput.ToLower();

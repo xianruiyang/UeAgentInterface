@@ -7,6 +7,8 @@
 
 #include "AssetToolsModule.h"
 #include "Animation/AnimSequence.h"
+#include "Animation/MorphTarget.h"
+#include "Animation/SkinWeightProfile.h"
 #include "Animation/Skeleton.h"
 #include "AssetRegistry/AssetRegistryModule.h"
 #include "AutomatedAssetImportData.h"
@@ -25,6 +27,7 @@
 #include "Misc/PackageName.h"
 #include "Misc/Paths.h"
 #include "PhysicsEngine/PhysicsAsset.h"
+#include "Rendering/SkeletalMeshModel.h"
 #include "Serialization/JsonReader.h"
 #include "Serialization/JsonSerializer.h"
 #include "Subsystems/AssetEditorSubsystem.h"
@@ -1670,6 +1673,62 @@ bool FUeAgentHttpServer::CmdAssetImportFbxSkeletalMesh(const FUeAgentRequestCont
 	bool bImportAnimations = false;
 	JsonTryGetBool(Ctx.Params, TEXT("import_animations"), bImportAnimations);
 
+	bool bImportMorphTargets = false;
+	JsonTryGetBool(Ctx.Params, TEXT("import_morph_targets"), bImportMorphTargets);
+
+	bool bImportSkinWeightProfiles = false;
+	JsonTryGetBool(Ctx.Params, TEXT("import_skin_weight_profiles"), bImportSkinWeightProfiles);
+
+	bool bUpdateSkeletonReferencePose = false;
+	JsonTryGetBool(Ctx.Params, TEXT("update_skeleton_reference_pose"), bUpdateSkeletonReferencePose);
+
+	bool bPreserveExistingMorphTargets = true;
+	JsonTryGetBool(Ctx.Params, TEXT("preserve_existing_morph_targets"), bPreserveExistingMorphTargets);
+
+	bool bValidateAfterImport = true;
+	JsonTryGetBool(Ctx.Params, TEXT("validate_after_import"), bValidateAfterImport);
+
+	int32 ExpectedLodCount = INDEX_NONE;
+	double ExpectedLodCountNumber = 0.0;
+	if (JsonTryGetNumber(Ctx.Params, TEXT("expected_lod_count"), ExpectedLodCountNumber))
+	{
+		ExpectedLodCount = static_cast<int32>(ExpectedLodCountNumber);
+	}
+
+	TSet<FString> ExpectedMorphTargets;
+	if (const TArray<TSharedPtr<FJsonValue>>* ExpectedMorphArray = nullptr; Ctx.Params->TryGetArrayField(TEXT("expected_morph_targets"), ExpectedMorphArray) && ExpectedMorphArray)
+	{
+		for (const TSharedPtr<FJsonValue>& Value : *ExpectedMorphArray)
+		{
+			if (Value.IsValid())
+			{
+				FString Name = Value->AsString();
+				Name.TrimStartAndEndInline();
+				if (!Name.IsEmpty())
+				{
+					ExpectedMorphTargets.Add(Name);
+				}
+			}
+		}
+	}
+
+	TSet<FString> ExpectedMaterialSlots;
+	if (const TArray<TSharedPtr<FJsonValue>>* ExpectedMaterialArray = nullptr; Ctx.Params->TryGetArrayField(TEXT("expected_material_slots"), ExpectedMaterialArray) && ExpectedMaterialArray)
+	{
+		for (const TSharedPtr<FJsonValue>& Value : *ExpectedMaterialArray)
+		{
+			if (Value.IsValid())
+			{
+				FString Name = Value->AsString();
+				Name.TrimStartAndEndInline();
+				if (!Name.IsEmpty())
+				{
+					ExpectedMaterialSlots.Add(Name);
+				}
+			}
+		}
+	}
+
 	FString SkeletonPath;
 	JsonTryGetString(Ctx.Params, TEXT("skeleton_path"), SkeletonPath);
 	SkeletonPath.TrimStartAndEndInline();
@@ -1717,8 +1776,8 @@ bool FUeAgentHttpServer::CmdAssetImportFbxSkeletalMesh(const FUeAgentRequestCont
 	if (FbxFactory->ImportUI->SkeletalMeshImportData)
 	{
 		FbxFactory->ImportUI->SkeletalMeshImportData->bImportMeshLODs = false;
-		FbxFactory->ImportUI->SkeletalMeshImportData->bImportMorphTargets = false;
-		FbxFactory->ImportUI->SkeletalMeshImportData->bUpdateSkeletonReferencePose = false;
+		FbxFactory->ImportUI->SkeletalMeshImportData->bImportMorphTargets = bImportMorphTargets;
+		FbxFactory->ImportUI->SkeletalMeshImportData->bUpdateSkeletonReferencePose = bUpdateSkeletonReferencePose;
 		FbxFactory->ImportUI->SkeletalMeshImportData->ImportContentType = EFBXImportContentType::FBXICT_All;
 	}
 
@@ -1757,6 +1816,127 @@ bool FUeAgentHttpServer::CmdAssetImportFbxSkeletalMesh(const FUeAgentRequestCont
 	OutData->SetBoolField(TEXT("replace_existing_settings"), bReplaceExistingSettings);
 	OutData->SetBoolField(TEXT("replace_existing"), bReplaceExisting);
 	OutData->SetBoolField(TEXT("save_after_import"), bSaveAfterImport);
+	OutData->SetBoolField(TEXT("import_morph_targets"), bImportMorphTargets);
+	OutData->SetBoolField(TEXT("import_skin_weight_profiles"), bImportSkinWeightProfiles);
+	OutData->SetBoolField(TEXT("update_skeleton_reference_pose"), bUpdateSkeletonReferencePose);
+	OutData->SetBoolField(TEXT("preserve_existing_morph_targets"), bPreserveExistingMorphTargets);
+	OutData->SetBoolField(TEXT("validate_after_import"), bValidateAfterImport);
+
+	TArray<TSharedPtr<FJsonValue>> ValidationIssues;
+	TArray<TSharedPtr<FJsonValue>> ImportedSkinWeightProfilesJson;
+	TArray<UObject*> ImportedObjectsUnique;
+	UeAgentAssetOps::GatherImportedObjects(ImportedObjects, ImportedObjectsUnique);
+	USkeletalMesh* ImportedSkeletalMesh = nullptr;
+	for (UObject* ImportedObject : ImportedObjectsUnique)
+	{
+		if (USkeletalMesh* CandidateMesh = Cast<USkeletalMesh>(ImportedObject))
+		{
+			ImportedSkeletalMesh = CandidateMesh;
+			break;
+		}
+	}
+
+	if (bImportSkinWeightProfiles)
+	{
+		TSharedPtr<FJsonObject> Issue = MakeShared<FJsonObject>();
+		Issue->SetStringField(TEXT("severity"), TEXT("warning"));
+		Issue->SetStringField(TEXT("code"), TEXT("skin_weight_profiles_use_explicit_command"));
+		Issue->SetStringField(TEXT("field"), TEXT("import_skin_weight_profiles"));
+		Issue->SetStringField(TEXT("message"), TEXT("FBX skeletal mesh import does not implicitly import skin weight profiles. Use skeletal_mesh_import_skin_weight_profile after mesh import."));
+		ValidationIssues.Add(MakeShared<FJsonValueObject>(Issue));
+	}
+
+	if (!bPreserveExistingMorphTargets)
+	{
+		TSharedPtr<FJsonObject> Issue = MakeShared<FJsonObject>();
+		Issue->SetStringField(TEXT("severity"), TEXT("warning"));
+		Issue->SetStringField(TEXT("code"), TEXT("preserve_existing_morph_targets_not_supported_by_new_import"));
+		Issue->SetStringField(TEXT("field"), TEXT("preserve_existing_morph_targets"));
+		Issue->SetStringField(TEXT("message"), TEXT("This parameter is reported for design compatibility. New FBX import has no existing morph targets to preserve; reimport-specific preservation needs a dedicated reimport path."));
+		ValidationIssues.Add(MakeShared<FJsonValueObject>(Issue));
+	}
+
+	if (bValidateAfterImport && ImportedSkeletalMesh)
+	{
+		OutData->SetStringField(TEXT("skeletal_mesh_asset_path"), ImportedSkeletalMesh->GetOutermost() ? ImportedSkeletalMesh->GetOutermost()->GetName() : FString());
+		OutData->SetNumberField(TEXT("lod_count"), ImportedSkeletalMesh->GetLODNum());
+		OutData->SetNumberField(TEXT("material_slot_count"), ImportedSkeletalMesh->GetMaterials().Num());
+		OutData->SetNumberField(TEXT("morph_target_count"), ImportedSkeletalMesh->GetMorphTargets().Num());
+		OutData->SetNumberField(TEXT("skin_weight_profile_count"), ImportedSkeletalMesh->GetNumSkinWeightProfiles());
+		int32 SectionCount = 0;
+		if (const FSkeletalMeshModel* ImportedModel = ImportedSkeletalMesh->GetImportedModel())
+		{
+			for (const FSkeletalMeshLODModel& LodModel : ImportedModel->LODModels)
+			{
+				SectionCount += LodModel.Sections.Num();
+			}
+		}
+		OutData->SetNumberField(TEXT("section_count"), SectionCount);
+
+		for (const FSkinWeightProfileInfo& ProfileInfo : ImportedSkeletalMesh->GetSkinWeightProfiles())
+		{
+			ImportedSkinWeightProfilesJson.Add(MakeShared<FJsonValueString>(ProfileInfo.Name.ToString()));
+		}
+		OutData->SetArrayField(TEXT("skin_weight_profiles_imported"), ImportedSkinWeightProfilesJson);
+
+		TSet<FString> ImportedMorphNames;
+		TArray<TSharedPtr<FJsonValue>> ImportedMorphNamesJson;
+		for (const TObjectPtr<UMorphTarget>& MorphTarget : ImportedSkeletalMesh->GetMorphTargets())
+		{
+			if (MorphTarget)
+			{
+				ImportedMorphNames.Add(MorphTarget->GetName());
+				ImportedMorphNamesJson.Add(MakeShared<FJsonValueString>(MorphTarget->GetName()));
+			}
+		}
+		OutData->SetArrayField(TEXT("morph_targets_imported"), ImportedMorphNamesJson);
+
+		TSet<FString> ImportedMaterialSlotNames;
+		TArray<TSharedPtr<FJsonValue>> ImportedMaterialSlotNamesJson;
+		for (const FSkeletalMaterial& Material : ImportedSkeletalMesh->GetMaterials())
+		{
+			const FString SlotName = Material.MaterialSlotName.ToString();
+			ImportedMaterialSlotNames.Add(SlotName);
+			ImportedMaterialSlotNamesJson.Add(MakeShared<FJsonValueString>(SlotName));
+		}
+		OutData->SetArrayField(TEXT("material_slots_imported"), ImportedMaterialSlotNamesJson);
+
+		if (ExpectedLodCount != INDEX_NONE && ImportedSkeletalMesh->GetLODNum() != ExpectedLodCount)
+		{
+			TSharedPtr<FJsonObject> Issue = MakeShared<FJsonObject>();
+			Issue->SetStringField(TEXT("severity"), TEXT("error"));
+			Issue->SetStringField(TEXT("code"), TEXT("expected_lod_count_mismatch"));
+			Issue->SetStringField(TEXT("field"), TEXT("expected_lod_count"));
+			Issue->SetStringField(TEXT("message"), FString::Printf(TEXT("Expected %d LODs but imported %d."), ExpectedLodCount, ImportedSkeletalMesh->GetLODNum()));
+			ValidationIssues.Add(MakeShared<FJsonValueObject>(Issue));
+		}
+
+		for (const FString& ExpectedMorph : ExpectedMorphTargets)
+		{
+			if (!ImportedMorphNames.Contains(ExpectedMorph))
+			{
+				TSharedPtr<FJsonObject> Issue = MakeShared<FJsonObject>();
+				Issue->SetStringField(TEXT("severity"), TEXT("error"));
+				Issue->SetStringField(TEXT("code"), TEXT("expected_morph_target_missing"));
+				Issue->SetStringField(TEXT("field"), TEXT("expected_morph_targets"));
+				Issue->SetStringField(TEXT("message"), ExpectedMorph);
+				ValidationIssues.Add(MakeShared<FJsonValueObject>(Issue));
+			}
+		}
+
+		for (const FString& ExpectedSlot : ExpectedMaterialSlots)
+		{
+			if (!ImportedMaterialSlotNames.Contains(ExpectedSlot))
+			{
+				TSharedPtr<FJsonObject> Issue = MakeShared<FJsonObject>();
+				Issue->SetStringField(TEXT("severity"), TEXT("error"));
+				Issue->SetStringField(TEXT("code"), TEXT("expected_material_slot_missing"));
+				Issue->SetStringField(TEXT("field"), TEXT("expected_material_slots"));
+				Issue->SetStringField(TEXT("message"), ExpectedSlot);
+				ValidationIssues.Add(MakeShared<FJsonValueObject>(Issue));
+			}
+		}
+	}
 
 	if (OutData->GetIntegerField(TEXT("imported_object_count")) <= 0)
 	{
@@ -1766,10 +1946,44 @@ bool FUeAgentHttpServer::CmdAssetImportFbxSkeletalMesh(const FUeAgentRequestCont
 		return false;
 	}
 
+	int32 ValidationErrorCount = 0;
+	for (const TSharedPtr<FJsonValue>& IssueValue : ValidationIssues)
+	{
+		const TSharedPtr<FJsonObject> IssueObj = IssueValue.IsValid() ? IssueValue->AsObject() : nullptr;
+		FString Severity;
+		if (IssueObj.IsValid() && IssueObj->TryGetStringField(TEXT("severity"), Severity) && Severity.Equals(TEXT("error"), ESearchCase::IgnoreCase))
+		{
+			++ValidationErrorCount;
+		}
+	}
+	OutData->SetArrayField(TEXT("validation_issues"), ValidationIssues);
+	OutData->SetNumberField(TEXT("validation_issue_count"), ValidationIssues.Num());
+	OutData->SetNumberField(TEXT("validation_error_count"), ValidationErrorCount);
+	OutData->SetBoolField(TEXT("validation_passed"), ValidationErrorCount == 0);
+	if (!OutData->HasField(TEXT("skin_weight_profiles_imported")))
+	{
+		OutData->SetArrayField(TEXT("skin_weight_profiles_imported"), ImportedSkinWeightProfilesJson);
+	}
+	TSharedPtr<FJsonObject> ValidationReport = MakeShared<FJsonObject>();
+	ValidationReport->SetBoolField(TEXT("validate_after_import"), bValidateAfterImport);
+	ValidationReport->SetNumberField(TEXT("validation_issue_count"), ValidationIssues.Num());
+	ValidationReport->SetNumberField(TEXT("validation_error_count"), ValidationErrorCount);
+	ValidationReport->SetBoolField(TEXT("validation_passed"), ValidationErrorCount == 0);
+	ValidationReport->SetArrayField(TEXT("issues"), ValidationIssues);
+	ValidationReport->SetNumberField(TEXT("imported_object_count"), OutData->GetIntegerField(TEXT("imported_object_count")));
+	ValidationReport->SetNumberField(TEXT("skin_weight_profile_count"), ImportedSkeletalMesh ? ImportedSkeletalMesh->GetNumSkinWeightProfiles() : 0);
+	ValidationReport->SetNumberField(TEXT("section_count"), ImportedSkeletalMesh && OutData->HasField(TEXT("section_count")) ? OutData->GetIntegerField(TEXT("section_count")) : 0);
+	OutData->SetObjectField(TEXT("validation_report"), ValidationReport);
+	if (ValidationErrorCount > 0)
+	{
+		ImportData->RemoveFromRoot();
+		FbxFactory->RemoveFromRoot();
+		OutError = TEXT("fbx_skeletal_mesh_import_validation_failed");
+		return false;
+	}
+
 	if (bOpenEditor)
 	{
-		TArray<UObject*> ImportedObjectsUnique;
-		UeAgentAssetOps::GatherImportedObjects(ImportedObjects, ImportedObjectsUnique);
 		for (UObject* ImportedObject : ImportedObjectsUnique)
 		{
 			if (ImportedObject && ImportedObject->IsA<USkeletalMesh>())

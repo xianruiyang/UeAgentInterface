@@ -18,6 +18,9 @@
 - `08_Niagara_Emitter.md`
 - `09_Niagara_StageGraph.md`
 - `15_Niagara_FolderFormat.md`
+- `16_SkeletalMesh_FolderFormat.md`
+- `17_ControlRig_FolderFormat.md`
+- `18_Deformer_MLDeformer_GeometryCache.md`
 - `deprecatedCommand/README.md`
 - `10_Modeling.md`
 - `11_AnimBlueprint.md`
@@ -65,6 +68,14 @@
    - 当前已新增：`niagara_export_folder / niagara_apply_folder`
    - 当前已新增：`niagara_emitter_export_folder / niagara_emitter_apply_folder`
    - 当前已新增：`niagara_script_export_folder / niagara_script_apply_folder`
+   - 当前已新增：`skeleton_export_folder / skeleton_apply_folder`
+   - 当前已新增：`skeletal_mesh_export_folder / skeletal_mesh_apply_folder`
+   - 当前已新增：`ik_rig_export_folder / ik_rig_apply_folder`
+   - 当前已新增：`ik_retargeter_export_folder / ik_retargeter_apply_folder`
+   - 当前已新增：`control_rig_export_folder / control_rig_apply_folder`
+   - 当前已新增：`control_rig_shape_library_export_json / control_rig_shape_library_apply_json`
+   - 当前已新增：`static_mesh_export_folder / static_mesh_apply_folder`
+   - 当前已新增：`deformer_graph_export_folder / deformer_graph_apply_folder`
    - Niagara 当前已覆盖 `NiagaraSystem / NiagaraEmitter / NiagaraScript` 三个完整 folder profile；System / Emitter apply 会随返回携带 Stack 感叹号信息，严格验收以 `warnings`、`stack_error_count` 和 `validation/coverage_report.json` 为依据
 3. 原子命令：
    - 当同一资产字段或结构已经能被单文件 JSON / 文件夹式结构化 JSON 表达时，对应写入型原子命令统一标记为 **Deprecated for authoring**
@@ -75,7 +86,7 @@
 - 文档中的资产编辑不再默认推荐“逐条命令手搓”，而是优先推荐 `JSON / 结构化 JSON` 工作流。
 - 已有 JSON / 结构化 JSON 主流程覆盖的零散写入命令保留但 deprecated for authoring；完整 authoring 必须走“创建最小骨架 -> 导出 -> 写基础结构 -> apply -> 再导出补全 -> 修改参数 -> 再 apply”的 JSON 工作流。
 - 读取、创建最小资产、打开编辑器、编译、截图、导出、应用、dirty 处理和诊断命令不属于这类废弃写入命令。
-- 暂无 JSON / 结构化 JSON profile 的领域不强行标废弃，例如 Modeling、IK Rig / IK Retargeter、Level Actor 放置、NavMesh、普通视口控制等。
+- 暂无 JSON / 结构化 JSON profile 的领域不强行标废弃，例如 Modeling、Level Actor 放置、NavMesh、普通视口控制等。IK Rig / IK Retargeter / Skeleton / SkeletalMesh / Control Rig 已进入 JSON / 文件夹式结构化 JSON 主流程。
 
 废弃写入命令明细已抽到 `deprecatedCommand/`，覆盖面包括：
 
@@ -88,6 +99,8 @@
 - Montage：播放/混合/sync、slot、segment、section、notify、Skeleton slot/group 等可进入 `montage_apply_json` 的写入命令。
 - AnimBlueprint：成员、逻辑图、Anim Layer、Layer Interface、State Machine、State/Transition、预览配置等可进入 `anim_blueprint_apply_folder` 的写入命令。
 - Niagara：System、Emitter、Renderer、Event、Parameter、Stage、Module、Node、ModuleInput 等可进入 Niagara folder workflow 的写入命令。
+- IK Rig / IK Retargeter：preview/root/goal/chain/solver、rigs/preview/settings/mapping/pose 等可进入 IK folder workflow 的写入命令。
+- StaticMesh / SkeletalMesh / Deformer：完整 authoring 主流程走 folder / JSON workflow；材质、socket、collision、morph 删除、deformer 属性等局部命令仅保留 bootstrap、探针和故障修复用途。
 
 ## 通用方法论
 
@@ -147,6 +160,7 @@
 - `level_set_actor_property`
 - `component_set_property`
 - `level_set_component_property`
+- `level_set_skeletal_mesh_morph_target`
 - `level_get_selection`
 - `level_set_selection`
 - `level_set_actor_folder`
@@ -342,19 +356,22 @@
 - `skeleton_set_virtual_bone`
 - `ik_rig_create`
 - `ik_rig_get_info`
-- `ik_rig_set_preview_mesh`
-- `ik_rig_set_goal`
-- `ik_rig_set_retarget_root`
-- `ik_rig_set_retarget_chain`
+- `ik_rig_export_folder`
+- `ik_rig_validate_folder`
+- `ik_rig_apply_folder`
 - `ik_rig_apply_auto_retarget_definition`
+- `ik_rig_preview_solve`
 - `ik_retargeter_create`
 - `ik_retargeter_get_info`
-- `ik_retargeter_set_ik_rig`
-- `ik_retargeter_set_settings`
-- `ik_retargeter_set_pose`
-- `ik_retargeter_set_preview_mesh`
+- `ik_retargeter_export_folder`
+- `ik_retargeter_validate_folder`
+- `ik_retargeter_apply_folder`
 - `ik_retargeter_auto_map_chains`
+- `ik_retargeter_auto_align_pose`
 - `ik_retargeter_duplicate_and_retarget`
+- `retarget_batch_export_json`
+- `retarget_batch_validate_json`
+- `retarget_batch_apply_json`
 - `montage_list_montages`
 - `montage_create`
 - `montage_open_editor`
@@ -459,6 +476,14 @@
 
 - `static_mesh_open_editor`
 - `static_mesh_get_info`
+- `static_mesh_export_folder`
+- `static_mesh_validate_folder`
+- `static_mesh_apply_folder`
+- `static_mesh_validate_geometry`
+- `static_mesh_validate_uvs`
+- `static_mesh_reimport`
+- `static_mesh_build`
+- `static_mesh_preview_collision`
 - `static_mesh_set_preview_view`
 - `static_mesh_set_property`
 - `enhanced_input_create_action`
@@ -540,9 +565,31 @@
 - `sequence_add_umg_widget_opacity_key`
 - `sequence_add_umg_widget_color_key`
 
-### IK Rig
+### Control Rig / Shape Library
 
-- `ik_rig_set_solver`
+- `control_rig_create`
+- `control_rig_get_info`
+- `control_rig_export_folder`
+- `control_rig_validate_folder`
+- `control_rig_apply_folder`
+- `control_rig_compile`
+- `control_rig_get_compile_log`
+- `control_rig_open_editor`
+- `control_rig_graph_get_view`
+- `control_rig_graph_set_view`
+- `control_rig_viewport_get_camera`
+- `control_rig_viewport_set_camera`
+- `control_rig_screenshot`
+- `control_rig_runtime_probe`
+- `control_rig_bake_to_animation`
+- `control_rig_bake_to_control_rig`
+- `control_rig_shape_library_create`
+- `control_rig_shape_library_get_info`
+- `control_rig_shape_library_export_json`
+- `control_rig_shape_library_validate_json`
+- `control_rig_shape_library_apply_json`
+
+Control Rig authoring 优先走 `control_rig_export_folder / control_rig_apply_folder`。当前可回写 preview、Shape Library 引用、hierarchy bones/nulls/controls/curves、`variables/variables.json` 和 `graphs/graphs.json`；AnimBlueprint / Sequencer 接入属于对应资产 folder workflow，bake 使用显式 `control_rig_bake_*` 命令。未支持回写的 functions、modular、raw/readonly 等 profile 有实际内容时会返回 `unsupported_apply_profile`。
 
 ## 当前白盒迭代建议
 
@@ -555,6 +602,6 @@
 - 想查关卡、视口、对齐、事务：看 `01_Core_Level_Assets_Landscape.md`
 - 想查 Blueprint / AnimBlueprint / UMG / Montage：看 `02_Blueprint.md`、`11_AnimBlueprint.md`、`03_UMG.md`、`12_Montage.md`
 - 想查 StaticMesh / EnhancedInput：看 `04_StaticMesh_EnhancedInput.md`
-- 想查材质、Sequencer、Niagara：看对应编号分册
+- 想查材质、Sequencer、Niagara、Control Rig：看对应编号分册
 - 想查 Modeling Mode：看 `10_Modeling.md`
 

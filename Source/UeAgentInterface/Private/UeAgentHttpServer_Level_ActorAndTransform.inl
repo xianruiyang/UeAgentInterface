@@ -438,6 +438,24 @@ bool FUeAgentHttpServer::CmdComponentSetProperty(const FUeAgentRequestContext& C
 
 	Component->PostEditChange();
 	Component->MarkRenderStateDirty();
+
+	bool bPrimitiveCollisionStateRefreshed = false;
+	if (UPrimitiveComponent* PrimitiveComponent = Cast<UPrimitiveComponent>(Component))
+	{
+		const FString NormalizedPropertyName = PropertyName.TrimStartAndEnd();
+		const bool bTouchesCollisionState =
+			NormalizedPropertyName.StartsWith(TEXT("BodyInstance."), ESearchCase::IgnoreCase)
+			|| NormalizedPropertyName.Contains(TEXT("Collision"), ESearchCase::IgnoreCase)
+			|| NormalizedPropertyName.Equals(TEXT("CanCharacterStepUpOn"), ESearchCase::IgnoreCase);
+		if (bTouchesCollisionState)
+		{
+			PrimitiveComponent->RecreatePhysicsState();
+			PrimitiveComponent->UpdateBounds();
+			PrimitiveComponent->MarkRenderStateDirty();
+			bPrimitiveCollisionStateRefreshed = true;
+		}
+	}
+
 	if (UNiagaraComponent* NiagaraComponent = Cast<UNiagaraComponent>(Component))
 	{
 		NiagaraComponent->ReinitializeSystem();
@@ -460,6 +478,323 @@ bool FUeAgentHttpServer::CmdComponentSetProperty(const FUeAgentRequestContext& C
 	OutData->SetStringField(TEXT("value_text"), ValueText);
 	OutData->SetStringField(TEXT("applied_value_text"), ExportedValue);
 	SetPropertyImportResultFields(OutData, Property, ValueText, ExportedValue, TEXT("imported_and_read_back"));
+	if (bPrimitiveCollisionStateRefreshed)
+	{
+		OutData->SetBoolField(TEXT("primitive_collision_state_refreshed"), true);
+	}
+	return true;
+}
+
+namespace
+{
+	static TMap<FString, FTSTicker::FDelegateHandle> GLevelMorphTargetPulseTickers;
+
+	static FString MakeLevelMorphTargetPulseKey(const USkeletalMeshComponent* Component, const FString& MorphName)
+	{
+		return Component ? FString::Printf(TEXT("%s::%s"), *Component->GetPathName(), *MorphName) : FString();
+	}
+
+	static bool StopLevelMorphTargetPulse(const FString& Key)
+	{
+		if (Key.IsEmpty())
+		{
+			return false;
+		}
+
+		if (FTSTicker::FDelegateHandle* ExistingHandle = GLevelMorphTargetPulseTickers.Find(Key))
+		{
+			FTSTicker::GetCoreTicker().RemoveTicker(*ExistingHandle);
+			GLevelMorphTargetPulseTickers.Remove(Key);
+			return true;
+		}
+		return false;
+	}
+
+	static float EvaluateLevelMorphTargetPulseWeight(const double ElapsedSeconds, const double CycleSeconds, const float MinWeight, const float MaxWeight)
+	{
+		const double SafeCycleSeconds = FMath::Max(CycleSeconds, 0.001);
+		const double Phase = FMath::Fmod(FMath::Max(ElapsedSeconds, 0.0), SafeCycleSeconds) / SafeCycleSeconds;
+		const double Triangle = Phase < 0.5 ? Phase * 2.0 : (1.0 - Phase) * 2.0;
+		const double Smooth = 0.5 - (0.5 * FMath::Cos(PI * Triangle));
+		return static_cast<float>(FMath::Lerp(static_cast<double>(MinWeight), static_cast<double>(MaxWeight), Smooth));
+	}
+
+	static void ApplyLevelMorphTargetPulseWeight(USkeletalMeshComponent* Component, const FName MorphTargetName, const float Weight)
+	{
+		if (!Component)
+		{
+			return;
+		}
+
+		Component->SetMorphTarget(MorphTargetName, Weight);
+		Component->RefreshBoneTransforms();
+		Component->UpdateBounds();
+		Component->MarkRenderDynamicDataDirty();
+	}
+}
+
+bool FUeAgentHttpServer::CmdLevelSetSkeletalMeshMorphTarget(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+{
+	UWorld* World = GetEditorWorld(OutError);
+	if (!World)
+	{
+		return false;
+	}
+
+	FString Id;
+	if (!JsonTryGetString(Ctx.Params, TEXT("id"), Id) || Id.IsEmpty())
+	{
+		OutError = TEXT("missing_id");
+		return false;
+	}
+
+	FString ComponentId;
+	JsonTryGetString(Ctx.Params, TEXT("component"), ComponentId);
+	if (ComponentId.IsEmpty())
+	{
+		JsonTryGetString(Ctx.Params, TEXT("component_id"), ComponentId);
+	}
+
+	FString MorphName;
+	if (!JsonTryGetString(Ctx.Params, TEXT("morph_target"), MorphName) || MorphName.TrimStartAndEnd().IsEmpty())
+	{
+		if (!JsonTryGetString(Ctx.Params, TEXT("morph_target_name"), MorphName) || MorphName.TrimStartAndEnd().IsEmpty())
+		{
+			JsonTryGetString(Ctx.Params, TEXT("name"), MorphName);
+		}
+	}
+	MorphName = MorphName.TrimStartAndEnd();
+	if (MorphName.IsEmpty())
+	{
+		OutError = TEXT("missing_morph_target");
+		return false;
+	}
+
+	TSharedPtr<FJsonObject> PulseObj;
+	const bool bHasPulseObject = JsonTryGetObject(Ctx.Params, TEXT("pulse"), PulseObj);
+	bool bStartPulse = bHasPulseObject;
+	JsonTryGetBool(Ctx.Params, TEXT("pulse"), bStartPulse);
+	JsonTryGetBool(Ctx.Params, TEXT("start_pulse"), bStartPulse);
+	JsonTryGetBool(Ctx.Params, TEXT("animate"), bStartPulse);
+
+	bool bStopPulse = false;
+	JsonTryGetBool(Ctx.Params, TEXT("stop_pulse"), bStopPulse);
+	JsonTryGetBool(Ctx.Params, TEXT("stop_animation"), bStopPulse);
+
+	auto TryGetPulseNumber = [&](const TCHAR* Key, double& InOutValue) -> bool
+	{
+		double Value = 0.0;
+		if (PulseObj.IsValid() && PulseObj->TryGetNumberField(Key, Value))
+		{
+			InOutValue = Value;
+			return true;
+		}
+		if (Ctx.Params.IsValid() && Ctx.Params->TryGetNumberField(Key, Value))
+		{
+			InOutValue = Value;
+			return true;
+		}
+		return false;
+	};
+
+	auto TryGetPulseBool = [&](const TCHAR* Key, bool& InOutValue) -> bool
+	{
+		bool Value = false;
+		if (PulseObj.IsValid() && PulseObj->TryGetBoolField(Key, Value))
+		{
+			InOutValue = Value;
+			return true;
+		}
+		if (Ctx.Params.IsValid() && Ctx.Params->TryGetBoolField(Key, Value))
+		{
+			InOutValue = Value;
+			return true;
+		}
+		return false;
+	};
+
+	double MinWeightNumber = 0.0;
+	double MaxWeightNumber = 1.0;
+	double CycleSecondsNumber = 4.8;
+	double DurationSecondsNumber = -1.0;
+	double TickerIntervalSecondsNumber = 0.0;
+	bool bLoopPulse = true;
+	TryGetPulseNumber(TEXT("min_weight"), MinWeightNumber);
+	TryGetPulseNumber(TEXT("max_weight"), MaxWeightNumber);
+	TryGetPulseNumber(TEXT("cycle_seconds"), CycleSecondsNumber);
+	TryGetPulseNumber(TEXT("duration_seconds"), DurationSecondsNumber);
+	TryGetPulseNumber(TEXT("tick_interval_seconds"), TickerIntervalSecondsNumber);
+	TryGetPulseBool(TEXT("loop"), bLoopPulse);
+
+	const bool bHasExplicitWeight = Ctx.Params.IsValid() && Ctx.Params->HasField(TEXT("weight"));
+	double WeightNumber = (bStartPulse && !bHasExplicitWeight) ? MinWeightNumber : 1.0;
+	if (bStopPulse && !bHasExplicitWeight)
+	{
+		WeightNumber = MinWeightNumber;
+	}
+	JsonTryGetNumber(Ctx.Params, TEXT("weight"), WeightNumber);
+	const float Weight = (float)WeightNumber;
+
+	AActor* Actor = FindActorByNameOrLabel(World, Id);
+	if (!Actor)
+	{
+		OutError = TEXT("actor_not_found");
+		return false;
+	}
+
+	USkeletalMeshComponent* SkeletalComponent = nullptr;
+	if (!ComponentId.TrimStartAndEnd().IsEmpty())
+	{
+		SkeletalComponent = Cast<USkeletalMeshComponent>(UeAgentLevelOps::FindComponentByNameOrPath(Actor, ComponentId));
+		if (!SkeletalComponent)
+		{
+			OutError = TEXT("skeletal_mesh_component_not_found");
+			return false;
+		}
+	}
+	else
+	{
+		SkeletalComponent = Actor->FindComponentByClass<USkeletalMeshComponent>();
+		if (!SkeletalComponent)
+		{
+			OutError = TEXT("actor_has_no_skeletal_mesh_component");
+			return false;
+		}
+	}
+
+	Actor->Modify();
+	SkeletalComponent->Modify();
+
+	FString SkeletalMeshPath;
+	USkeletalMesh* Mesh = SkeletalComponent->GetSkeletalMeshAsset();
+	if (JsonTryGetString(Ctx.Params, TEXT("skeletal_mesh"), SkeletalMeshPath) && !SkeletalMeshPath.TrimStartAndEnd().IsEmpty())
+	{
+		SkeletalMeshPath = SkeletalMeshPath.TrimStartAndEnd();
+		Mesh = LoadObject<USkeletalMesh>(nullptr, *SkeletalMeshPath);
+		if (!Mesh)
+		{
+			OutError = FString::Printf(TEXT("failed_to_load_skeletal_mesh: %s"), *SkeletalMeshPath);
+			return false;
+		}
+		SkeletalComponent->SetSkeletalMesh(Mesh, true);
+	}
+
+	if (!Mesh)
+	{
+		OutError = TEXT("skeletal_mesh_component_has_no_mesh");
+		return false;
+	}
+
+	UMorphTarget* FoundMorph = nullptr;
+	for (const TObjectPtr<UMorphTarget>& MorphTarget : Mesh->GetMorphTargets())
+	{
+		if (MorphTarget && MorphTarget->GetName().Equals(MorphName, ESearchCase::IgnoreCase))
+		{
+			FoundMorph = MorphTarget.Get();
+			MorphName = FoundMorph->GetName();
+			break;
+		}
+	}
+	if (!FoundMorph)
+	{
+		OutError = TEXT("morph_target_not_found");
+		return false;
+	}
+
+	bool bClearExisting = false;
+	JsonTryGetBool(Ctx.Params, TEXT("clear_existing"), bClearExisting);
+	if (bClearExisting)
+	{
+		SkeletalComponent->ClearMorphTargets();
+	}
+
+	const FString PulseKey = MakeLevelMorphTargetPulseKey(SkeletalComponent, MorphName);
+	bool bStoppedExistingPulse = false;
+	if (bStartPulse || bStopPulse)
+	{
+		bStoppedExistingPulse = StopLevelMorphTargetPulse(PulseKey);
+	}
+
+	const FName MorphTargetFName(*MorphName);
+	SkeletalComponent->SetMorphTarget(MorphTargetFName, Weight);
+	SkeletalComponent->RefreshBoneTransforms();
+	SkeletalComponent->UpdateBounds();
+	SkeletalComponent->MarkRenderStateDirty();
+	SkeletalComponent->PostEditChange();
+	Actor->MarkPackageDirty();
+
+	bool bPulseStarted = false;
+	if (bStartPulse)
+	{
+		TWeakObjectPtr<USkeletalMeshComponent> WeakComponent(SkeletalComponent);
+		const FString CapturedPulseKey = PulseKey;
+		const FName CapturedMorphTargetName = MorphTargetFName;
+		const float MinWeight = static_cast<float>(MinWeightNumber);
+		const float MaxWeight = static_cast<float>(MaxWeightNumber);
+		const double CycleSeconds = FMath::Max(CycleSecondsNumber, 0.001);
+		const double DurationSeconds = DurationSecondsNumber;
+		const bool bLoop = bLoopPulse;
+		const double StartSeconds = FPlatformTime::Seconds();
+
+		const FTSTicker::FDelegateHandle PulseTickerHandle = FTSTicker::GetCoreTicker().AddTicker(
+			FTickerDelegate::CreateLambda(
+				[WeakComponent, CapturedPulseKey, CapturedMorphTargetName, MinWeight, MaxWeight, CycleSeconds, DurationSeconds, bLoop, StartSeconds](float)
+				{
+					USkeletalMeshComponent* LiveComponent = WeakComponent.Get();
+					if (!LiveComponent)
+					{
+						GLevelMorphTargetPulseTickers.Remove(CapturedPulseKey);
+						return false;
+					}
+
+					const double ElapsedSeconds = FPlatformTime::Seconds() - StartSeconds;
+					if (DurationSeconds > 0.0 && ElapsedSeconds >= DurationSeconds)
+					{
+						ApplyLevelMorphTargetPulseWeight(LiveComponent, CapturedMorphTargetName, MinWeight);
+						GLevelMorphTargetPulseTickers.Remove(CapturedPulseKey);
+						return false;
+					}
+					if (!bLoop && ElapsedSeconds >= CycleSeconds)
+					{
+						ApplyLevelMorphTargetPulseWeight(LiveComponent, CapturedMorphTargetName, MinWeight);
+						GLevelMorphTargetPulseTickers.Remove(CapturedPulseKey);
+						return false;
+					}
+
+					const float PulseWeight = EvaluateLevelMorphTargetPulseWeight(ElapsedSeconds, CycleSeconds, MinWeight, MaxWeight);
+					ApplyLevelMorphTargetPulseWeight(LiveComponent, CapturedMorphTargetName, PulseWeight);
+					return true;
+				}),
+			static_cast<float>(FMath::Max(TickerIntervalSecondsNumber, 0.0)));
+
+		GLevelMorphTargetPulseTickers.Add(PulseKey, PulseTickerHandle);
+		bPulseStarted = true;
+	}
+
+	OutData = MakeShared<FJsonObject>();
+	OutData->SetStringField(TEXT("actor_name"), Actor->GetName());
+	OutData->SetStringField(TEXT("actor_label"), Actor->GetActorLabel());
+	OutData->SetStringField(TEXT("component_name"), SkeletalComponent->GetName());
+	OutData->SetStringField(TEXT("component_path"), SkeletalComponent->GetPathName());
+	OutData->SetStringField(TEXT("skeletal_mesh"), Mesh->GetPathName());
+	OutData->SetStringField(TEXT("morph_target"), MorphName);
+	OutData->SetNumberField(TEXT("requested_weight"), Weight);
+	OutData->SetNumberField(TEXT("applied_weight"), SkeletalComponent->GetMorphTarget(FName(*MorphName)));
+	OutData->SetBoolField(TEXT("clear_existing"), bClearExisting);
+	OutData->SetBoolField(TEXT("pulse_started"), bPulseStarted);
+	OutData->SetBoolField(TEXT("pulse_stopped"), bStopPulse || bStoppedExistingPulse);
+	OutData->SetBoolField(TEXT("stopped_existing_pulse"), bStoppedExistingPulse);
+	OutData->SetStringField(TEXT("pulse_key"), PulseKey);
+	if (bPulseStarted)
+	{
+		OutData->SetNumberField(TEXT("pulse_min_weight"), MinWeightNumber);
+		OutData->SetNumberField(TEXT("pulse_max_weight"), MaxWeightNumber);
+		OutData->SetNumberField(TEXT("pulse_cycle_seconds"), CycleSecondsNumber);
+		OutData->SetNumberField(TEXT("pulse_duration_seconds"), DurationSecondsNumber);
+		OutData->SetBoolField(TEXT("pulse_loop"), bLoopPulse);
+		OutData->SetNumberField(TEXT("pulse_tick_interval_seconds"), TickerIntervalSecondsNumber);
+	}
+	OutData->SetStringField(TEXT("display_status"), bPulseStarted ? TEXT("scene_component_morph_pulse_started") : TEXT("scene_component_morph_set"));
 	return true;
 }
 

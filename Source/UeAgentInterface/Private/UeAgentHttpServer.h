@@ -69,7 +69,10 @@ public:
 #include "UeAgentHttpServer_MaterialMembers.h"
 #include "UeAgentHttpServer_SequenceMembers.h"
 #include "UeAgentHttpServer_AnimationAssetsMembers.h"
+#include "UeAgentHttpServer_SkeletalMeshMembers.h"
 #include "UeAgentHttpServer_IKAssetsMembers.h"
+#include "UeAgentHttpServer_ControlRigMembers.h"
+#include "UeAgentHttpServer_DeformerMembers.h"
 #include "UeAgentHttpServer_NiagaraMembers.h"
 #include "UeAgentHttpServer_ModelingMembers.h"
 #undef UEAGENT_HTTP_SERVER_MEMBER_DECL

@@ -14,6 +14,10 @@
 #include "Animation/AnimNotifies/AnimNotifyState.h"
 #include "Animation/AnimSequence.h"
 #include "Animation/AnimSequenceBase.h"
+#include "Animation/BlendSpace.h"
+#include "Animation/BlendSpace1D.h"
+#include "Animation/AimOffsetBlendSpace.h"
+#include "Animation/AimOffsetBlendSpace1D.h"
 #include "Animation/SkeletalMeshActor.h"
 #include "Animation/AnimEnums.h"
 #include "Animation/AnimTypes.h"
@@ -37,6 +41,7 @@
 #include "Engine/TextureRenderTarget2D.h"
 #include "Engine/SkeletalMeshSocket.h"
 #include "FileHelpers.h"
+#include "Misc/FileHelper.h"
 #include "Framework/Application/SlateApplication.h"
 #include "IAnimationEditor.h"
 #include "IPersonaPreviewScene.h"
@@ -115,6 +120,11 @@ namespace UeAgentAnimationAssetOps
 		return Cast<UAnimationAsset>(LoadAssetObject(InPath));
 	}
 
+	static UBlendSpace* LoadBlendSpace(const FString& InPath)
+	{
+		return Cast<UBlendSpace>(LoadAssetObject(InPath));
+	}
+
 	static USkeleton* LoadSkeleton(const FString& InPath)
 	{
 		return Cast<USkeleton>(LoadAssetObject(InPath));
@@ -123,6 +133,185 @@ namespace UeAgentAnimationAssetOps
 	static USkeletalMesh* LoadSkeletalMesh(const FString& InPath)
 	{
 		return Cast<USkeletalMesh>(LoadAssetObject(InPath));
+	}
+
+	static bool SaveJsonFile(const FString& FilePathInput, const TSharedPtr<FJsonObject>& Obj, FString& OutResolvedPath, FString& OutError)
+	{
+		OutResolvedPath.Reset();
+		if (!Obj.IsValid())
+		{
+			OutError = TEXT("json_root_invalid");
+			return false;
+		}
+		FString FilePath = UeAgentJsonDiagnostics::ResolveProjectRelativeFilePath(FilePathInput);
+		if (FilePath.TrimStartAndEnd().IsEmpty())
+		{
+			OutError = TEXT("missing_json_file");
+			return false;
+		}
+		IFileManager::Get().MakeDirectory(*FPaths::GetPath(FilePath), true);
+		FString JsonText;
+		const TSharedRef<TJsonWriter<TCHAR, TPrettyJsonPrintPolicy<TCHAR>>> Writer =
+			TJsonWriterFactory<TCHAR, TPrettyJsonPrintPolicy<TCHAR>>::Create(&JsonText);
+		FJsonSerializer::Serialize(Obj.ToSharedRef(), Writer);
+		if (!FFileHelper::SaveStringToFile(JsonText, *FilePath, FFileHelper::EEncodingOptions::ForceUTF8WithoutBOM))
+		{
+			OutError = TEXT("save_json_failed");
+			return false;
+		}
+		OutResolvedPath = FilePath;
+		return true;
+	}
+
+	static UClass* ResolveBlendSpaceClass(const FString& Kind)
+	{
+		if (Kind.Equals(TEXT("blendspace_1d"), ESearchCase::IgnoreCase))
+		{
+			return UBlendSpace1D::StaticClass();
+		}
+		if (Kind.Equals(TEXT("aim_offset"), ESearchCase::IgnoreCase))
+		{
+			return UAimOffsetBlendSpace::StaticClass();
+		}
+		if (Kind.Equals(TEXT("aim_offset_1d"), ESearchCase::IgnoreCase))
+		{
+			return UAimOffsetBlendSpace1D::StaticClass();
+		}
+		return UBlendSpace::StaticClass();
+	}
+
+	static FString GetBlendSpaceKind(const UBlendSpace* BlendSpace)
+	{
+		if (!BlendSpace)
+		{
+			return TEXT("");
+		}
+		if (BlendSpace->IsA<UAimOffsetBlendSpace1D>())
+		{
+			return TEXT("aim_offset_1d");
+		}
+		if (BlendSpace->IsA<UAimOffsetBlendSpace>())
+		{
+			return TEXT("aim_offset");
+		}
+		if (BlendSpace->IsA<UBlendSpace1D>())
+		{
+			return TEXT("blendspace_1d");
+		}
+		return TEXT("blendspace_2d");
+	}
+
+	static TSharedPtr<FJsonObject> BlendParameterToJson(const FBlendParameter& Parameter, const int32 AxisIndex)
+	{
+		TSharedPtr<FJsonObject> Obj = MakeShared<FJsonObject>();
+		Obj->SetNumberField(TEXT("axis_index"), AxisIndex);
+		Obj->SetStringField(TEXT("name"), Parameter.DisplayName);
+		Obj->SetNumberField(TEXT("min"), Parameter.Min);
+		Obj->SetNumberField(TEXT("max"), Parameter.Max);
+		Obj->SetNumberField(TEXT("grid_num"), Parameter.GridNum);
+		Obj->SetBoolField(TEXT("snap_to_grid"), Parameter.bSnapToGrid);
+		Obj->SetBoolField(TEXT("wrap_input"), Parameter.bWrapInput);
+		return Obj;
+	}
+
+	static TSharedPtr<FJsonObject> BuildVectorJsonForBlendSpace(const FVector& Value)
+	{
+		TSharedPtr<FJsonObject> Obj = MakeShared<FJsonObject>();
+		Obj->SetNumberField(TEXT("x"), Value.X);
+		Obj->SetNumberField(TEXT("y"), Value.Y);
+		Obj->SetNumberField(TEXT("z"), Value.Z);
+		return Obj;
+	}
+
+	static bool ApplyBlendParameterFromJson(UBlendSpace* BlendSpace, const int32 AxisIndex, const TSharedPtr<FJsonObject>& AxisObj, TArray<TSharedPtr<FJsonValue>>& Issues)
+	{
+		if (!BlendSpace || !AxisObj.IsValid() || AxisIndex < 0 || AxisIndex > 2)
+		{
+			return false;
+		}
+		FStructProperty* BlendParametersProperty = FindFProperty<FStructProperty>(BlendSpace->GetClass(), TEXT("BlendParameters"));
+		if (!BlendParametersProperty || BlendParametersProperty->Struct != FBlendParameter::StaticStruct() || BlendParametersProperty->ArrayDim < AxisIndex + 1)
+		{
+			UeAgentJsonDiagnostics::AddIssue(Issues, TEXT("error"), TEXT("blendspace_axis_property_not_found"), TEXT("axes"), TEXT("BlendParameters property is not accessible."));
+			return false;
+		}
+		FBlendParameter* Parameter = BlendParametersProperty->ContainerPtrToValuePtr<FBlendParameter>(BlendSpace, AxisIndex);
+		if (!Parameter)
+		{
+			return false;
+		}
+		FString Name;
+		if (AxisObj->TryGetStringField(TEXT("name"), Name))
+		{
+			Parameter->DisplayName = Name;
+		}
+		double NumberValue = 0.0;
+		if (AxisObj->TryGetNumberField(TEXT("min"), NumberValue))
+		{
+			Parameter->Min = static_cast<float>(NumberValue);
+		}
+		if (AxisObj->TryGetNumberField(TEXT("max"), NumberValue))
+		{
+			Parameter->Max = static_cast<float>(NumberValue);
+		}
+		if (AxisObj->TryGetNumberField(TEXT("grid_num"), NumberValue))
+		{
+			Parameter->GridNum = FMath::Max(1, static_cast<int32>(NumberValue));
+		}
+		bool bBoolValue = false;
+		if (AxisObj->TryGetBoolField(TEXT("snap_to_grid"), bBoolValue))
+		{
+			Parameter->bSnapToGrid = bBoolValue;
+		}
+		if (AxisObj->TryGetBoolField(TEXT("wrap_input"), bBoolValue))
+		{
+			Parameter->bWrapInput = bBoolValue;
+		}
+		return true;
+	}
+
+	static TArray<FBlendSample>* GetMutableBlendSamples(UBlendSpace* BlendSpace)
+	{
+		FArrayProperty* SampleDataProperty = BlendSpace ? FindFProperty<FArrayProperty>(BlendSpace->GetClass(), TEXT("SampleData")) : nullptr;
+		return SampleDataProperty ? SampleDataProperty->ContainerPtrToValuePtr<TArray<FBlendSample>>(BlendSpace) : nullptr;
+	}
+
+	static TSharedPtr<FJsonObject> BuildBlendSpaceJson(UBlendSpace* BlendSpace)
+	{
+		TSharedPtr<FJsonObject> Obj = MakeShared<FJsonObject>();
+		Obj->SetStringField(TEXT("schema"), TEXT("ue_agent_interface.blendspace.v1"));
+		Obj->SetStringField(TEXT("asset_path"), BlendSpace ? NormalizeAssetPath(BlendSpace->GetOutermost()->GetName()) : TEXT(""));
+		Obj->SetStringField(TEXT("object_path"), BlendSpace ? BlendSpace->GetPathName() : TEXT(""));
+		Obj->SetStringField(TEXT("blendspace_kind"), GetBlendSpaceKind(BlendSpace));
+		Obj->SetStringField(TEXT("skeleton"), BlendSpace && BlendSpace->GetSkeleton() ? BlendSpace->GetSkeleton()->GetPathName() : TEXT(""));
+		TArray<TSharedPtr<FJsonValue>> Axes;
+		if (BlendSpace)
+		{
+			const int32 AxisCount = BlendSpace->IsA<UBlendSpace1D>() ? 1 : 2;
+			for (int32 AxisIndex = 0; AxisIndex < AxisCount; ++AxisIndex)
+			{
+				Axes.Add(MakeShared<FJsonValueObject>(BlendParameterToJson(BlendSpace->GetBlendParameter(AxisIndex), AxisIndex)));
+			}
+		}
+		Obj->SetArrayField(TEXT("axes"), Axes);
+
+		TArray<TSharedPtr<FJsonValue>> Samples;
+		if (BlendSpace)
+		{
+			const TArray<FBlendSample>& BlendSamples = BlendSpace->GetBlendSamples();
+			for (int32 SampleIndex = 0; SampleIndex < BlendSamples.Num(); ++SampleIndex)
+			{
+				const FBlendSample& Sample = BlendSamples[SampleIndex];
+				TSharedPtr<FJsonObject> SampleObj = MakeShared<FJsonObject>();
+				SampleObj->SetNumberField(TEXT("sample_index"), SampleIndex);
+				SampleObj->SetStringField(TEXT("animation"), Sample.Animation ? Sample.Animation->GetPathName() : TEXT(""));
+				SampleObj->SetObjectField(TEXT("position"), BuildVectorJsonForBlendSpace(Sample.SampleValue));
+				SampleObj->SetNumberField(TEXT("rate_scale"), Sample.RateScale);
+				Samples.Add(MakeShared<FJsonValueObject>(SampleObj));
+			}
+		}
+		Obj->SetArrayField(TEXT("samples"), Samples);
+		return Obj;
 	}
 
 	static UAnimBoneCompressionSettings* LoadBoneCompressionSettings(const FString& InPath)
@@ -1521,10 +1710,26 @@ bool FUeAgentHttpServer::ExecuteAnimSequenceCommand(const FString& CommandLower,
 	return false;
 }
 
+bool FUeAgentHttpServer::ExecuteBlendSpaceCommand(const FString& CommandLower, const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+{
+	if (CommandLower == TEXT("blendspace_create")) return CmdBlendSpaceCreate(Ctx, OutData, OutError);
+	if (CommandLower == TEXT("blendspace_get_info")) return CmdBlendSpaceGetInfo(Ctx, OutData, OutError);
+	if (CommandLower == TEXT("blendspace_export_json")) return CmdBlendSpaceExportJson(Ctx, OutData, OutError);
+	if (CommandLower == TEXT("blendspace_validate_json")) return CmdBlendSpaceValidateJson(Ctx, OutData, OutError);
+	if (CommandLower == TEXT("blendspace_apply_json")) return CmdBlendSpaceApplyJson(Ctx, OutData, OutError);
+	if (CommandLower == TEXT("blendspace_preview_sample")) return CmdBlendSpacePreviewSample(Ctx, OutData, OutError);
+
+	OutError = TEXT("unknown_blendspace_command");
+	return false;
+}
+
 bool FUeAgentHttpServer::ExecuteSkeletonCommand(const FString& CommandLower, const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	if (CommandLower == TEXT("skeleton_get_info")) return CmdSkeletonGetInfo(Ctx, OutData, OutError);
 	if (CommandLower == TEXT("skeleton_list_bones")) return CmdSkeletonListBones(Ctx, OutData, OutError);
+	if (CommandLower == TEXT("skeleton_export_folder")) return CmdSkeletonExportFolder(Ctx, OutData, OutError);
+	if (CommandLower == TEXT("skeleton_apply_folder")) return CmdSkeletonApplyFolder(Ctx, OutData, OutError);
+	if (CommandLower == TEXT("skeleton_validate_folder")) return CmdSkeletonValidateFolder(Ctx, OutData, OutError);
 	if (CommandLower == TEXT("skeleton_set_compatible_skeletons")) return CmdSkeletonSetCompatibleSkeletons(Ctx, OutData, OutError);
 	if (CommandLower == TEXT("skeleton_set_preview_mesh")) return CmdSkeletonSetPreviewMesh(Ctx, OutData, OutError);
 	if (CommandLower == TEXT("skeleton_set_socket")) return CmdSkeletonSetSocket(Ctx, OutData, OutError);
@@ -1532,6 +1737,326 @@ bool FUeAgentHttpServer::ExecuteSkeletonCommand(const FString& CommandLower, con
 
 	OutError = TEXT("unknown_skeleton_command");
 	return false;
+}
+
+bool FUeAgentHttpServer::CmdBlendSpaceCreate(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+{
+	FString AssetPath;
+	if (!JsonTryGetString(Ctx.Params, TEXT("asset_path"), AssetPath) || AssetPath.TrimStartAndEnd().IsEmpty())
+	{
+		OutError = TEXT("missing_asset_path");
+		return false;
+	}
+	FString SkeletonPath;
+	if (!JsonTryGetString(Ctx.Params, TEXT("skeleton"), SkeletonPath) || SkeletonPath.TrimStartAndEnd().IsEmpty())
+	{
+		OutError = TEXT("missing_skeleton");
+		return false;
+	}
+	USkeleton* Skeleton = UeAgentAnimationAssetOps::LoadSkeleton(SkeletonPath);
+	if (!Skeleton)
+	{
+		OutError = TEXT("skeleton_not_found");
+		return false;
+	}
+
+	const FString PackageName = UeAgentAnimationAssetOps::NormalizeAssetPath(AssetPath);
+	if (!FPackageName::IsValidLongPackageName(PackageName))
+	{
+		OutError = TEXT("invalid_asset_path");
+		return false;
+	}
+	if (UeAgentAnimationAssetOps::LoadBlendSpace(PackageName))
+	{
+		OutError = TEXT("blendspace_already_exists");
+		return false;
+	}
+
+	FString Kind = TEXT("blendspace_2d");
+	JsonTryGetString(Ctx.Params, TEXT("blendspace_kind"), Kind);
+	UClass* BlendSpaceClass = UeAgentAnimationAssetOps::ResolveBlendSpaceClass(Kind);
+	UPackage* Package = CreatePackage(*PackageName);
+	const FString AssetName = FPackageName::GetLongPackageAssetName(PackageName);
+	UBlendSpace* BlendSpace = NewObject<UBlendSpace>(Package, BlendSpaceClass, FName(*AssetName), RF_Public | RF_Standalone | RF_Transactional);
+	if (!BlendSpace)
+	{
+		OutError = TEXT("create_blendspace_failed");
+		return false;
+	}
+	BlendSpace->SetSkeleton(Skeleton);
+	BlendSpace->MarkPackageDirty();
+	FAssetRegistryModule::AssetCreated(BlendSpace);
+
+	TSharedPtr<FJsonObject> JsonObj = MakeShared<FJsonObject>();
+	for (const TPair<FString, TSharedPtr<FJsonValue>>& Pair : Ctx.Params->Values)
+	{
+		JsonObj->SetField(Pair.Key, Pair.Value);
+	}
+	JsonObj->SetStringField(TEXT("asset_path"), PackageName);
+	JsonObj->SetStringField(TEXT("skeleton"), Skeleton->GetPathName());
+	JsonObj->SetStringField(TEXT("blendspace_kind"), UeAgentAnimationAssetOps::GetBlendSpaceKind(BlendSpace));
+	TSharedPtr<FJsonObject> ApplyParams = MakeShared<FJsonObject>();
+	ApplyParams->SetObjectField(TEXT("json"), JsonObj);
+	ApplyParams->SetBoolField(TEXT("save_after_apply"), false);
+	TSharedPtr<FJsonObject> ApplyData = MakeShared<FJsonObject>();
+	FString ApplyError;
+	CmdBlendSpaceApplyJson(FUeAgentRequestContext{ TEXT("blendspace_create_apply"), TEXT("blendspace_apply_json"), ApplyParams }, ApplyData, ApplyError);
+
+	bool bSaveAfterCreate = false;
+	JsonTryGetBool(Ctx.Params, TEXT("save_after_create"), bSaveAfterCreate);
+	if (bSaveAfterCreate && !UeAgentAnimationAssetOps::SaveAssetPackage(BlendSpace, OutError))
+	{
+		return false;
+	}
+	OutData = UeAgentAnimationAssetOps::BuildBlendSpaceJson(BlendSpace);
+	OutData->SetBoolField(TEXT("created"), true);
+	OutData->SetBoolField(TEXT("saved"), bSaveAfterCreate);
+	OutData->SetObjectField(TEXT("apply_result"), ApplyData);
+	return true;
+}
+
+bool FUeAgentHttpServer::CmdBlendSpaceGetInfo(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+{
+	FString AssetPath;
+	if (!JsonTryGetString(Ctx.Params, TEXT("asset_path"), AssetPath) || AssetPath.TrimStartAndEnd().IsEmpty())
+	{
+		OutError = TEXT("missing_asset_path");
+		return false;
+	}
+	UBlendSpace* BlendSpace = UeAgentAnimationAssetOps::LoadBlendSpace(AssetPath);
+	if (!BlendSpace)
+	{
+		OutError = TEXT("blendspace_not_found");
+		return false;
+	}
+	OutData = UeAgentAnimationAssetOps::BuildBlendSpaceJson(BlendSpace);
+	OutData->SetBoolField(TEXT("dirty"), BlendSpace->GetOutermost()->IsDirty());
+	return true;
+}
+
+bool FUeAgentHttpServer::CmdBlendSpaceExportJson(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+{
+	if (!CmdBlendSpaceGetInfo(Ctx, OutData, OutError))
+	{
+		return false;
+	}
+	FString OutputFile;
+	if (JsonTryGetString(Ctx.Params, TEXT("output_file"), OutputFile) && !OutputFile.TrimStartAndEnd().IsEmpty())
+	{
+		FString ResolvedPath;
+		if (!UeAgentAnimationAssetOps::SaveJsonFile(OutputFile, OutData, ResolvedPath, OutError))
+		{
+			return false;
+		}
+		OutData->SetStringField(TEXT("output_file"), ResolvedPath);
+	}
+	return true;
+}
+
+bool FUeAgentHttpServer::CmdBlendSpaceValidateJson(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+{
+	TSharedPtr<FJsonObject> Params = MakeShared<FJsonObject>();
+	for (const TPair<FString, TSharedPtr<FJsonValue>>& Pair : Ctx.Params->Values)
+	{
+		Params->SetField(Pair.Key, Pair.Value);
+	}
+	Params->SetBoolField(TEXT("validate_only"), true);
+	Params->SetBoolField(TEXT("dry_run"), true);
+	FUeAgentRequestContext SubCtx;
+	SubCtx.RequestId = TEXT("blendspace_json_validate");
+	SubCtx.Command = TEXT("blendspace_apply_json");
+	SubCtx.Params = Params;
+	return CmdBlendSpaceApplyJson(SubCtx, OutData, OutError);
+}
+
+bool FUeAgentHttpServer::CmdBlendSpaceApplyJson(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+{
+	TSharedPtr<FJsonObject> JsonObj;
+	TArray<TSharedPtr<FJsonValue>> Issues;
+	if (Ctx.Params.IsValid())
+	{
+		const TSharedPtr<FJsonObject>* InlineJson = nullptr;
+		if (Ctx.Params->TryGetObjectField(TEXT("json"), InlineJson) && InlineJson && InlineJson->IsValid())
+		{
+			JsonObj = *InlineJson;
+		}
+	}
+	if (!JsonObj.IsValid())
+	{
+		FString JsonFile;
+		if (!JsonTryGetString(Ctx.Params, TEXT("json_file"), JsonFile) || JsonFile.TrimStartAndEnd().IsEmpty())
+		{
+			OutError = TEXT("missing_json_or_json_file");
+			return false;
+		}
+		if (!UeAgentJsonDiagnostics::LoadJsonObjectFile(JsonFile, JsonObj, &Issues, OutError, false))
+		{
+			OutData->SetArrayField(TEXT("json_issues"), Issues);
+			OutData->SetNumberField(TEXT("json_issue_count"), Issues.Num());
+			return false;
+		}
+	}
+	UeAgentJsonDiagnostics::WarnUnknownFields(JsonObj, TEXT("blendspace"), { TEXT("schema"), TEXT("asset_path"), TEXT("object_path"), TEXT("blendspace_kind"), TEXT("skeleton"), TEXT("preview_skeletal_mesh"), TEXT("axes"), TEXT("samples"), TEXT("settings") }, Issues);
+
+	FString AssetPath;
+	JsonTryGetString(Ctx.Params, TEXT("asset_path"), AssetPath);
+	if (AssetPath.TrimStartAndEnd().IsEmpty())
+	{
+		JsonObj->TryGetStringField(TEXT("asset_path"), AssetPath);
+	}
+	UBlendSpace* BlendSpace = UeAgentAnimationAssetOps::LoadBlendSpace(AssetPath);
+	if (!BlendSpace)
+	{
+		OutError = TEXT("blendspace_not_found");
+		OutData->SetArrayField(TEXT("json_issues"), Issues);
+		OutData->SetNumberField(TEXT("json_issue_count"), Issues.Num());
+		return false;
+	}
+
+	bool bDryRun = false;
+	bool bValidateOnly = false;
+	JsonTryGetBool(Ctx.Params, TEXT("dry_run"), bDryRun);
+	JsonTryGetBool(Ctx.Params, TEXT("validate_only"), bValidateOnly);
+
+	int32 AppliedAxes = 0;
+	int32 AppliedSamples = 0;
+	const TArray<TSharedPtr<FJsonValue>>* Axes = nullptr;
+	if (JsonObj->TryGetArrayField(TEXT("axes"), Axes) && Axes)
+	{
+		for (int32 Index = 0; Index < Axes->Num(); ++Index)
+		{
+			TSharedPtr<FJsonObject> AxisObj;
+			if (!UeAgentJsonDiagnostics::ReadObjectFromValue((*Axes)[Index], FString::Printf(TEXT("axes[%d]"), Index), AxisObj, Issues))
+			{
+				continue;
+			}
+			UeAgentJsonDiagnostics::WarnUnknownFields(AxisObj, FString::Printf(TEXT("axes[%d]"), Index), { TEXT("axis_index"), TEXT("name"), TEXT("min"), TEXT("max"), TEXT("grid_num"), TEXT("snap_to_grid"), TEXT("wrap_input") }, Issues);
+			double AxisIndexValue = Index;
+			AxisObj->TryGetNumberField(TEXT("axis_index"), AxisIndexValue);
+			if (!bDryRun && !bValidateOnly && UeAgentAnimationAssetOps::ApplyBlendParameterFromJson(BlendSpace, static_cast<int32>(AxisIndexValue), AxisObj, Issues))
+			{
+				++AppliedAxes;
+			}
+		}
+	}
+
+	const TArray<TSharedPtr<FJsonValue>>* Samples = nullptr;
+	if (JsonObj->TryGetArrayField(TEXT("samples"), Samples) && Samples)
+	{
+		TArray<TSharedPtr<FJsonValue>> SampleIssues;
+		if (!bDryRun && !bValidateOnly)
+		{
+			BlendSpace->Modify();
+			while (BlendSpace->GetNumberOfBlendSamples() > 0)
+			{
+				BlendSpace->DeleteSample(0);
+			}
+		}
+		for (int32 Index = 0; Index < Samples->Num(); ++Index)
+		{
+			TSharedPtr<FJsonObject> SampleObj;
+			if (!UeAgentJsonDiagnostics::ReadObjectFromValue((*Samples)[Index], FString::Printf(TEXT("samples[%d]"), Index), SampleObj, Issues))
+			{
+				continue;
+			}
+			UeAgentJsonDiagnostics::WarnUnknownFields(SampleObj, FString::Printf(TEXT("samples[%d]"), Index), { TEXT("sample_index"), TEXT("animation"), TEXT("position"), TEXT("rate_scale") }, Issues);
+			FString AnimPath;
+			if (!SampleObj->TryGetStringField(TEXT("animation"), AnimPath) || AnimPath.TrimStartAndEnd().IsEmpty())
+			{
+				UeAgentJsonDiagnostics::AddIssue(Issues, TEXT("error"), TEXT("json_missing_required_field"), FString::Printf(TEXT("samples[%d].animation"), Index), TEXT("animation is required."));
+				continue;
+			}
+			UAnimSequence* AnimSequence = UeAgentAnimationAssetOps::LoadAnimSequence(AnimPath);
+			if (!AnimSequence)
+			{
+				UeAgentJsonDiagnostics::AddIssue(Issues, TEXT("error"), TEXT("anim_sequence_not_found"), FString::Printf(TEXT("samples[%d].animation"), Index), AnimPath);
+				continue;
+			}
+			if (!BlendSpace->IsAnimationCompatibleWithSkeleton(AnimSequence))
+			{
+				UeAgentJsonDiagnostics::AddIssue(Issues, TEXT("error"), TEXT("blendspace_sample_skeleton_incompatible"), FString::Printf(TEXT("samples[%d].animation"), Index), AnimPath);
+				continue;
+			}
+			FVector Position = FVector::ZeroVector;
+			UeAgentJsonDiagnostics::ReadVectorField(SampleObj, TEXT("position"), FString::Printf(TEXT("samples[%d].position"), Index), Position, Issues, true);
+			if (!bDryRun && !bValidateOnly)
+			{
+				const int32 NewSampleIndex = BlendSpace->AddSample(AnimSequence, Position);
+				if (TArray<FBlendSample>* MutableSamples = UeAgentAnimationAssetOps::GetMutableBlendSamples(BlendSpace))
+				{
+					if (MutableSamples->IsValidIndex(NewSampleIndex))
+					{
+						double RateScale = (*MutableSamples)[NewSampleIndex].RateScale;
+						if (SampleObj->TryGetNumberField(TEXT("rate_scale"), RateScale))
+						{
+							(*MutableSamples)[NewSampleIndex].RateScale = FMath::Max(0.01f, static_cast<float>(RateScale));
+						}
+					}
+				}
+				++AppliedSamples;
+			}
+		}
+		if (!bDryRun && !bValidateOnly)
+		{
+			BlendSpace->ValidateSampleData();
+			BlendSpace->ResampleData();
+		}
+	}
+
+	if (!bDryRun && !bValidateOnly)
+	{
+		BlendSpace->MarkPackageDirty();
+		bool bSaveAfterApply = false;
+		JsonTryGetBool(Ctx.Params, TEXT("save_after_apply"), bSaveAfterApply);
+		if (bSaveAfterApply && !UeAgentAnimationAssetOps::SaveAssetPackage(BlendSpace, OutError))
+		{
+			return false;
+		}
+	}
+
+	OutData = UeAgentAnimationAssetOps::BuildBlendSpaceJson(BlendSpace);
+	OutData->SetBoolField(TEXT("applied"), !(bDryRun || bValidateOnly));
+	OutData->SetNumberField(TEXT("applied_axes"), AppliedAxes);
+	OutData->SetNumberField(TEXT("applied_samples"), AppliedSamples);
+	OutData->SetArrayField(TEXT("json_issues"), Issues);
+	OutData->SetNumberField(TEXT("json_issue_count"), Issues.Num());
+	return true;
+}
+
+bool FUeAgentHttpServer::CmdBlendSpacePreviewSample(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+{
+	FString AssetPath;
+	if (!JsonTryGetString(Ctx.Params, TEXT("asset_path"), AssetPath) || AssetPath.TrimStartAndEnd().IsEmpty())
+	{
+		OutError = TEXT("missing_asset_path");
+		return false;
+	}
+	UBlendSpace* BlendSpace = UeAgentAnimationAssetOps::LoadBlendSpace(AssetPath);
+	if (!BlendSpace)
+	{
+		OutError = TEXT("blendspace_not_found");
+		return false;
+	}
+	FVector Position = FVector::ZeroVector;
+	TArray<TSharedPtr<FJsonValue>> Issues;
+	UeAgentJsonDiagnostics::ReadVectorField(Ctx.Params, TEXT("position"), TEXT("position"), Position, Issues, false);
+	JsonTryGetVector(Ctx.Params, TEXT("position"), Position);
+	TArray<FBlendSampleData> SampleData;
+	int32 CachedIndex = INDEX_NONE;
+	const bool bHasSamples = BlendSpace->GetSamplesFromBlendInput(Position, SampleData, CachedIndex, true);
+	TArray<TSharedPtr<FJsonValue>> Samples;
+	for (const FBlendSampleData& Sample : SampleData)
+	{
+		TSharedPtr<FJsonObject> Item = MakeShared<FJsonObject>();
+		Item->SetNumberField(TEXT("sample_data_index"), Sample.SampleDataIndex);
+		Item->SetNumberField(TEXT("total_weight"), Sample.TotalWeight);
+		Samples.Add(MakeShared<FJsonValueObject>(Item));
+	}
+	OutData->SetStringField(TEXT("asset_path"), BlendSpace->GetOutermost()->GetName());
+	OutData->SetObjectField(TEXT("position"), UeAgentAnimationAssetOps::BuildVectorJson(Position));
+	OutData->SetBoolField(TEXT("has_samples"), bHasSamples);
+	OutData->SetArrayField(TEXT("sample_weights"), Samples);
+	return true;
 }
 
 bool FUeAgentHttpServer::CmdAnimSequenceGetInfo(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
@@ -3877,3 +4402,5 @@ bool FUeAgentHttpServer::CmdSkeletonSetVirtualBone(const FUeAgentRequestContext&
 	OutData->SetBoolField(TEXT("saved"), bSaveAfterSet);
 	return true;
 }
+
+#include "UeAgentHttpServer_AnimationAssets_FolderFormat.inl"

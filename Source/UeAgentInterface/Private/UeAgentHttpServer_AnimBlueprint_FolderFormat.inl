@@ -1,5 +1,6 @@
 #include "AnimGraphNode_BlendSpaceBase.h"
 #include "AnimGraphNode_BlendSpacePlayer.h"
+#include "AnimGraphNode_ControlRig.h"
 #include "AnimGraphNode_LinkedInputPose.h"
 #include "AnimGraphNode_RotationOffsetBlendSpace.h"
 #include "AnimGraphNode_Root.h"
@@ -526,6 +527,25 @@ namespace UeAgentAnimBlueprintFolderOps
 		if (Node->IsA<UAnimGraphNode_SequencePlayer>() || Node->IsA<UAnimGraphNode_SequenceEvaluator>())
 		{
 			PropertyPaths.Add(TEXT("Node.Sequence"));
+		}
+
+		if (Node->IsA<UAnimGraphNode_ControlRig>())
+		{
+			PropertyPaths.Add(TEXT("Node.ControlRigClass"));
+			PropertyPaths.Add(TEXT("Node.DefaultControlRigClass"));
+			PropertyPaths.Add(TEXT("Node.bExecute"));
+			PropertyPaths.Add(TEXT("Node.InputSettings"));
+			PropertyPaths.Add(TEXT("Node.InputSettings.bUpdatePose"));
+			PropertyPaths.Add(TEXT("Node.InputSettings.bUpdateCurves"));
+			PropertyPaths.Add(TEXT("Node.OutputSettings"));
+			PropertyPaths.Add(TEXT("Node.OutputSettings.bUpdatePose"));
+			PropertyPaths.Add(TEXT("Node.OutputSettings.bUpdateCurves"));
+			PropertyPaths.Add(TEXT("Node.Alpha"));
+			PropertyPaths.Add(TEXT("Node.AlphaInputType"));
+			PropertyPaths.Add(TEXT("Node.bAlphaBoolEnabled"));
+			PropertyPaths.Add(TEXT("Node.bSetRefPoseFromSkeleton"));
+			PropertyPaths.Add(TEXT("Node.AlphaCurveName"));
+			PropertyPaths.Add(TEXT("Node.LODThreshold"));
 		}
 
 		return PropertyPaths;

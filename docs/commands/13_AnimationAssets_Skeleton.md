@@ -15,6 +15,47 @@
 | `anim_sequence_set_notify` | 新增 / 更新 / 删除单条 notify | `asset_path`；新增时传 `time_seconds`，更新/删除时传 `notify_index`；可选 `track_name`、`notify_name`、`notify_class`、`notify_state_class`、`duration_seconds`、`tick_type`、`trigger_weight_threshold`、`notify_trigger_chance`、`notify_filter_type`、`notify_filter_lod`、`can_be_filtered_via_request`、`trigger_on_dedicated_server`、`trigger_on_follower`、`notify_color`、`remove`、`save_after_set` |
 | `anim_sequence_set_sync_markers` | 批量新增 / 删除 / 清空 sync marker | `asset_path`；可选 `add_markers[]`、`remove_marker_names[]`、`remove_notify_track_names[]`、`clear_all`、`save_after_set` |
 
+## BlendSpace
+
+BlendSpace 使用单文件 JSON 工作流，不推荐长期用散装属性命令 authoring。
+
+推荐流程：
+
+`blendspace_create -> blendspace_export_json -> 修改 JSON -> blendspace_validate_json -> blendspace_apply_json -> blendspace_export_json 读回`
+
+| 指令 | 作用 | 关键参数 |
+|---|---|---|
+| `blendspace_create` | 创建 BlendSpace / BlendSpace1D / AimOffset / AimOffset1D | `asset_path`、`skeleton`；可选 `blendspace_kind=blendspace_2d|blendspace_1d|aim_offset|aim_offset_1d`、`axes[]`、`samples[]`、`save_after_create` |
+| `blendspace_get_info` | 读取 BlendSpace 摘要 | `asset_path` |
+| `blendspace_export_json` | 导出 BlendSpace 单文件 JSON | `asset_path`；可选 `output_file` |
+| `blendspace_validate_json` | 只读校验 BlendSpace JSON | `json_file` 或 `json`；可选 `asset_path` |
+| `blendspace_apply_json` | 回写轴、样本和设置 | `json_file` 或 `json`；可选 `asset_path`、`dry_run`、`validate_only`、`save_after_apply` |
+| `blendspace_preview_sample` | 在指定输入位置采样权重 | `asset_path`、`position` |
+
+JSON 关键字段：
+
+- `blendspace_kind`：资产类型。`blendspace_1d` 只使用 X 轴；2D 使用 X/Y。
+- `skeleton`：目标 Skeleton。样本动画必须兼容该 Skeleton。
+- `axes[]`：`axis_index`、`name`、`min`、`max`、`grid_num`、`snap_to_grid`、`wrap_input`。
+- `samples[]`：`animation`、`position`、`rate_scale`。apply 时会清空并按 JSON 重建样本列表。
+
+示例：
+
+```json
+{
+  "asset_path": "/Game/Animation/BS_Locomotion",
+  "skeleton": "/Game/Characters/Hero/SK_Hero_Skeleton.SK_Hero_Skeleton",
+  "blendspace_kind": "blendspace_1d",
+  "axes": [
+    { "axis_index": 0, "name": "Speed", "min": 0.0, "max": 600.0, "grid_num": 6 }
+  ],
+  "samples": [
+    { "animation": "/Game/Animation/A_Idle.A_Idle", "position": { "x": 0.0, "y": 0.0, "z": 0.0 } },
+    { "animation": "/Game/Animation/A_Run.A_Run", "position": { "x": 600.0, "y": 0.0, "z": 0.0 } }
+  ]
+}
+```
+
 ### `anim_sequence_get_info`
 
 当前返回：
@@ -85,6 +126,8 @@
 - 单 key 写入可直接传顶层 `time_seconds` + `value`。
 - 多 key 写入走 `keys[]`。
 - `clear_existing_keys=true` 会先清掉该曲线现有 key，再重建当前输入。
+- 曲线用于 IK 权重、脚锁定、手部贴合或步态阶段时，apply 后必须用 `anim_sequence_get_info(include_curve_keys=true)` 或重新导出曲线确认 key 数、时间、最大值和插值。只看到曲线名存在，不代表运行时权重有效。
+- 移动动画的 IK 曲线通常需要支撑期高、摆动期低的过渡；全程 1.0 容易锁脚卡顿，全程 0.0 会让 Control Rig 看起来无效。
 
 推荐参数形式：
 
@@ -207,10 +250,57 @@
 |---|---|---|
 | `skeleton_get_info` | 读取 Skeleton 摘要 | `asset_path` |
 | `skeleton_list_bones` | 列出 Reference Skeleton 骨骼层级 | `asset_path` |
-| `skeleton_set_compatible_skeletons` | 批量管理 compatible skeleton 与相关开关 | `asset_path`；可选 `set_compatible_skeleton_paths[]`、`add_compatible_skeleton_paths[]`、`remove_compatible_skeleton_paths[]`、`clear_all`、`use_retarget_modes_from_compatible_skeleton`、`save_after_set` |
-| `skeleton_set_preview_mesh` | 设置或清空 Skeleton 预览网格 | `asset_path`、`skeletal_mesh_path` 或 `clear_preview_mesh`、`save_after_set` |
-| `skeleton_set_socket` | 新增 / 更新 / 删除 socket | `asset_path`、`socket_name`；新增/更新时可传 `bone_name`、`relative_location/rotation/scale`；删除时传 `remove=true` |
-| `skeleton_set_virtual_bone` | 新增 / 删除 virtual bone | `asset_path`；新增时传 `source_bone_name/target_bone_name`、可选 `virtual_bone_name`；删除时传 `virtual_bone_name` 和 `remove=true` |
+| `skeleton_export_folder` | 导出 Skeleton 文件夹式结构化 JSON | `asset_path`；可选 `folder_path` |
+| `skeleton_validate_folder` | 只读校验 Skeleton 文件夹 JSON | `folder_path`；可选 `asset_path`、`strict` |
+| `skeleton_apply_folder` | 应用 Skeleton 文件夹 JSON | `folder_path`；可选 `asset_path`、`dry_run`、`validate_only`、`strict`、`save_after_apply` |
+| `skeleton_set_compatible_skeletons` | 批量管理 compatible skeleton 与相关开关；Deprecated for authoring | `asset_path`；可选 `set_compatible_skeleton_paths[]`、`add_compatible_skeleton_paths[]`、`remove_compatible_skeleton_paths[]`、`clear_all`、`use_retarget_modes_from_compatible_skeleton`、`save_after_set` |
+| `skeleton_set_preview_mesh` | 设置或清空 Skeleton 预览网格；Deprecated for authoring | `asset_path`、`skeletal_mesh_path` 或 `clear_preview_mesh`、`save_after_set` |
+| `skeleton_set_socket` | 新增 / 更新 / 删除 socket；Deprecated for authoring | `asset_path`、`socket_name`；新增/更新时可传 `bone_name`、`relative_location/rotation/scale`；删除时传 `remove=true` |
+| `skeleton_set_virtual_bone` | 新增 / 删除 virtual bone；Deprecated for authoring | `asset_path`；新增时传 `source_bone_name/target_bone_name`、可选 `virtual_bone_name`；删除时传 `virtual_bone_name` 和 `remove=true` |
+
+### Skeleton 文件夹式 JSON 主流程
+
+推荐流程：
+
+1. 用最小命令或现有资产准备 Skeleton。
+2. `skeleton_export_folder` 导出真实结构。
+3. 修改导出的 JSON 文件。
+4. `skeleton_validate_folder` 做只读校验。
+5. `skeleton_apply_folder` 回写，再 `skeleton_export_folder` 做读回 diff。
+
+导出文件：
+
+- `asset.json` / `skeleton.json`：资产身份、schema、class、engine version。
+- `reference_skeleton.json`：Reference Skeleton 摘要，包含 bone index、parent、reference transform 和 retargeting 摘要。
+- `retargeting.json`：`bone_translation_retargeting[]` 与 `use_retarget_modes_from_compatible_skeleton`。只导出 raw bones；virtual bone 没有独立 translation retarget mode，旧 JSON 中如果出现会被 warning 跳过，避免 UE 越界断言。
+- `sockets.json`：Skeleton socket 新增、更新、删除。
+- `virtual_bones.json`：virtual bone 新增、删除。
+- `slots.json`、`blend_profiles.json`、`smart_names.json`、`animation_metadata.json`：结构占位与摘要。
+- `compatible_skeletons.json`：compatible skeleton 列表与开关。
+- `preview.json`：preview skeletal mesh。
+- `dependencies.json`：preview mesh 等引用摘要。
+- `validation/coverage_report.json`、`validation/readback_diff.json`、`validation/diagnostics.json`：覆盖状态、读回 diff 和 JSON 诊断。
+
+`skeleton_apply_folder` 返回：
+
+- `applied` / `dry_run`
+- `structured_fields_applied`
+- `raw_properties_applied`
+- `operations_executed`
+- `json_issues[]` / `json_issue_count`
+- `property_results[]`
+- `readback`
+- `validation_report`
+
+示例：
+
+```json
+{
+  "folder_path": "D:/Project/Saved/UeAssetFolders/Skeleton/Game/Characters/Hero/SK_Hero_Skeleton",
+  "strict": true,
+  "save_after_apply": false
+}
+```
 
 ### `skeleton_get_info`
 

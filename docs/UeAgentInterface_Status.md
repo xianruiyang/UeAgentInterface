@@ -144,7 +144,8 @@
   - 当前采用“成员/逻辑图复用 Blueprint proxy，AnimLayer/StateMachine 结构重建后再回填动画图”的 apply 策略
   - 当前已额外补齐一批 AnimGraph 资产引用节点的属性真源回写，第一版稳定覆盖 `Node.BlendSpace / Node.Sequence`，足以支撑 `BlendSpace Player / RotationOffsetBlendSpace / Sequence Player / Sequence Evaluator` 的文件夹式 round-trip
   - 已补通用 K2 / 普通 AnimGraph 节点按类创建，以及通用删除 / 连线 / 断线
-  - 仍缺会附带子图的结构型 AnimGraph 节点原语，以及 `BlendSpace` 资产本体的独立 authoring 命令面
+  - `BlendSpace` 资产本体已补单文件 JSON authoring：`blendspace_create / get_info / export_json / validate_json / apply_json / preview_sample`
+  - 仍缺会附带子图的结构型 AnimGraph 节点原语
 - Montage
   - 当前主编辑路径已补到 `montage_export_json / montage_apply_json`
   - 当前覆盖资产、slot/segment/section、notify/notify state、notify/track 颜色、常见触发/过滤设置、skeleton slot/group、marker sync
@@ -152,10 +153,21 @@
 - Animation Assets / Skeleton
   - 当前覆盖 `AnimSequence` 的资产级设置、选帧截图、压缩 / 剥帧设置、float 曲线、骨骼轨删除、metadata 生命周期、preview mesh、普通 notify、notify track、sync marker 与摘要回读
   - 当前覆盖 `Skeleton` 的骨骼层级回读、compatible skeleton、preview mesh、socket、virtual bone 与槽组/通知名摘要
+- StaticMesh / SkeletalMesh / Deformer
+  - `StaticMesh` 已补 `static_mesh_export_folder / static_mesh_validate_folder / static_mesh_apply_folder`，覆盖材质、socket、simple collision、lightmap、Nanite 安全字段；`static_mesh_reimport` 和 `static_mesh_preview_collision` 覆盖重导入与 headless 碰撞预览；raw geometry / UV / Nanite 内部数据只做摘要和验证
+  - `SkeletalMesh` 已补 Morph Target 列表/校验/预览/删除、Skin Weight Profile 导入/删除/预览、skin weight/profile/cloth/deformer 摘要；raw skin weight、Morph delta 和 cloth simulation data 不通过普通 JSON 手写
+  - `Geometry Cache` 已补导入、信息读取和与 SkeletalMesh 的引用验证入口；逐帧顶点缓存不编辑
+  - `Deformer Graph` 已补创建、信息读取、folder export/validate/apply、compile/log 状态入口；folder apply 通过 `raw_properties.json` 中显式 `apply=true` 的属性项复用 `asset_apply_property_json`
+  - `Deformer Source Library / Mesh Deformer Collection / ML Deformer` 已补单文件 JSON export/validate/apply；ML apply 不启动训练，训练输入校验和训练日志读取为显式命令
 - IK Rig / IK Retargeter
   - 当前覆盖 IK Rig 资产创建、preview mesh、goal、retarget root、retarget chain、solver 结构操作、有限的 solver 细粒度设置，以及 auto retarget definition
   - 当前覆盖 IK Retargeter 资产创建、source/target rig、preview mesh、retarget pose 生命周期与偏移数据、`global/root settings`、auto map chains 与 batch duplicate-and-retarget
   - 仍未覆盖全 solver 细粒度参数、完整 op 级编辑，以及稳定的单链显式 mapping 编辑
+- Control Rig / Shape Library
+  - 当前覆盖 Control Rig 资产创建、folder export/validate/apply、preview、Shape Library 引用、hierarchy bones/nulls/controls/curves、`variables/variables.json`、RigVM graph node/link/pin default、compile report、runtime probe、editor view/camera/screenshot wrapper
+  - 当前覆盖 Control Rig Shape Library 的 create/get/export/validate/apply 单文件 JSON workflow
+  - Sequencer bake 使用 `control_rig_bake_to_animation / control_rig_bake_to_control_rig` 显式动作命令；包含 binding/SkeletalMesh 前置诊断，Bake To Animation 使用无打开 Sequencer 的导出路径，Bake To Control Rig 会拒绝非 FK 且不支持 Inverse event 的 rig
+  - `functions`、`modular`、`raw_properties`、`readonly_properties` 等暂不安全回写面如果包含实际内容，会返回 `unsupported_apply_profile`，不静默忽略
 
 ### 2.3 Modeling
 

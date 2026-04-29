@@ -29,6 +29,18 @@
     {
       "Name": "IKRig",
       "Enabled": true
+    },
+    {
+      "Name": "GeometryCache",
+      "Enabled": true
+    },
+    {
+      "Name": "ComputeFramework",
+      "Enabled": true
+    },
+    {
+      "Name": "DeformerGraph",
+      "Enabled": true
     }
   ],
   "Modules": [
