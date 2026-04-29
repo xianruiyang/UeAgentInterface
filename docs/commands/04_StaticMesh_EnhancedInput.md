@@ -4,6 +4,46 @@
 
 ## StaticMesh
 
+### StaticMesh 文件夹式 JSON 主流程
+
+StaticMesh 的长期 authoring 主流程是：
+
+`static_mesh_export_folder -> 修改导出的 JSON -> static_mesh_validate_folder -> static_mesh_apply_folder -> 再导出读回`
+
+不要用普通 JSON 手写 vertex/index/UV/Nanite 内部数据。raw geometry、UV channel、Nanite cluster、distance field 等只导出摘要、统计和校验报告；真正重建走 FBX/建模/Geometry Script 或 UE 专用构建 API。
+
+| 指令 | 作用 | 关键参数 | 典型用法 |
+|---|---|---|---|
+| `static_mesh_export_folder` | 导出 StaticMesh 文件夹式 JSON | `asset_path`；可选 `folder_path` | 生成真实结构模板 |
+| `static_mesh_validate_folder` | 只读校验导出的文件夹 JSON | `folder_path`；可选 `asset_path`、`dry_run` | apply 前检查坏 JSON、未知字段和越界值 |
+| `static_mesh_apply_folder` | 应用文件夹 JSON 中的安全字段 | `folder_path`；可选 `asset_path`、`dry_run`、`validate_only`、`build_after_apply`、`save_after_apply` | 回写材质、socket、simple collision、lightmap、Nanite 安全设置 |
+| `static_mesh_validate_geometry` | 读取 raw geometry 摘要和 section 校验 | `asset_path` | 检查顶点/三角/section 统计，不修改资产 |
+| `static_mesh_validate_uvs` | 读取 UV/lightmap 摘要 | `asset_path` | 检查 lightmap 坐标、UV channel 数 |
+| `static_mesh_reimport` | 自动化重导入 StaticMesh | `asset_path`；可选 `source_filename`、`save_after_reimport`、`show_notification` | 使用 UE reimport handler 从源文件重建资产 |
+| `static_mesh_build` | 显式触发 StaticMesh build | `asset_path` | 修改 Nanite/build settings 后显式构建 |
+| `static_mesh_preview_collision` | 无 UI 读取碰撞预览数据 | `asset_path` | 返回 simple collision、bounds 和建议 trace/sweep/overlap 验证命令 |
+
+导出结构：
+
+- `asset.json`：资产身份、class、engine version。
+- `mesh.json`：LOD/material/socket/collision/lightmap/Nanite 总览，可安全回写 `allow_cpu_access`、`lightmap_resolution`、`lightmap_coordinate_index`。
+- `materials.json`：材质槽、slot name、material 引用；可回写材质和 slot name。
+- `lods/index.json`、`sections.json`：LOD 与 section 摘要，raw mesh 不回写。
+- `collision.json`：`boxes[] / spheres[] / capsules[]` 与 `collision_complexity`；可回写简单碰撞。
+- `sockets.json`：创建、更新、删除 socket。
+- `lightmap_uv.json`、`nanite.json`、`build_settings.json`：外围设置与摘要。
+- `import_data.json`：导入源文件追踪，包含 `first_filename`、`source_files[]`、`source_filenames[]`、`source_file_count`、`can_reimport`，用于 reimport 前验证。
+- `raw_mesh_summary.json`、`readonly_properties.json`：只读摘要。
+- `validation/*.json`：coverage、geometry、collision、UV、lightmap、Nanite、diagnostics 与 readback diff。
+
+`static_mesh_apply_folder` 返回 `json_issues[]`、`property_results[]`、`readback` 和 `validation_report`。文件存在但 JSON 解析失败会直接失败；数组坏项、未知字段、缺必填字段会带完整 JSON path。
+
+`static_mesh_validate_folder` 和 `static_mesh_apply_folder` 都会先解析文件夹内所有已存在的可选 JSON 文件；只有文件不存在才会按可选文件跳过。只要出现 error 级 `json_issues[]`，命令就返回失败，不会继续静默写入。`lods/index.json`、`sections.json`、`lightmap_uv.json`、`build_settings.json`、`import_data.json`、`raw_mesh_summary.json`、`raw_properties.json`、`readonly_properties.json` 和 `validation/*.json` 在 StaticMesh folder workflow 中属于摘要、只读或非主 authoring 入口；如果这些文件里出现 `apply/remove/delete/operations` 等明确写意图，会返回 `unsupported_apply_profile`。需要改通用 UObject 属性时，走 `asset_export_property_json -> asset_apply_property_json`，不要把写意图塞进 StaticMesh folder 的摘要文件里。
+
+`static_mesh_reimport` 不弹文件选择框；如果传 `source_filename`，该文件必须存在，并作为强制新源文件。返回 `can_reimport`、`source_filenames[]`、`reimport_status`、`readback`。失败时不会把 `cannot_reimport` 或 `source_file_not_found` 静默吞掉。
+
+`static_mesh_preview_collision` 是 headless 预览命令，不负责打开 StaticMesh 编辑器截图。它用于把 collision 数据结构化返回；真实场景行为仍应再用 `level_trace_world_ray`、`level_sweep_capsule` 或 `level_check_overlaps` 验证。
+
 | 指令 | 作用 | 关键参数 | 典型用法 |
 |---|---|---|---|
 | `static_mesh_open_editor` | 打开静态网格编辑器 | `asset_path` | 进入网格编辑上下文 |
@@ -18,6 +58,8 @@
 | `static_mesh_add_socket` | 新增 Socket | `asset_path`、`socket_name`、`location`、`rotation`、`scale` | 武器挂点、特效挂点 |
 | `static_mesh_update_socket` | 修改 Socket | `asset_path`、`socket_name`、`new_socket_name` | 调整挂点位置 |
 | `static_mesh_remove_socket` | 删除 Socket | `asset_path`、`socket_name` | 清理无效挂点 |
+
+上述 `set_material_slot / set_collision_* / add_socket / update_socket / remove_socket` 已被 `static_mesh_apply_folder` 覆盖，作为完整 authoring 主流程时视为 **Deprecated for authoring**。它们保留给 bootstrap、迁移脚本、局部探针和失败后的定点修补。
 
 `static_mesh_set_property` 返回 `requested_value_text`、`applied_value_text`、`property_import_status`、`property_import_verified`、`value_text_exact_match`、`value_text_changed_after_import`、`cpp_type`。如果 `ImportText` 失败，返回数据会保留失败的 `property_name` 和请求值。
 

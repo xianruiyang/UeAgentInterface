@@ -16,8 +16,9 @@
 | `save_asset` | 保存指定资产 | `asset_path`、`only_if_dirty` | 保存关键资产修改 |
 | `asset_duplicate` | 复制资产到指定路径 | `source_asset_path`、`destination_asset_path`、`save_after_duplicate` | 先复制测试资产，再在副本上做安全修改 |
 | `asset_import_texture` | 导入外部贴图为 Texture2D | `source_filename`、`destination_path`，可选 `destination_name/srgb/compression_settings/mip_gen_settings/lod_group` | 把外部 PNG/TGA/JPG/EXR/HDR 等贴图纳入 UE 资产链路 |
-| `asset_import_fbx_skeletal_mesh` | 导入 FBX 为 Skeletal Mesh | `source_filename`、`destination_path`，可选 `skeleton_path/import_materials/import_textures/create_physics_asset/import_animations` | 把外部角色模型/骨骼导入到项目 |
+| `asset_import_fbx_skeletal_mesh` | 导入 FBX 为 Skeletal Mesh | `source_filename`、`destination_path`，可选 `skeleton_path/import_materials/import_textures/create_physics_asset/import_animations/import_morph_targets/update_skeleton_reference_pose/validate_after_import/expected_*` | 把外部角色模型/骨骼导入到项目，并可验证 Morph/LOD/材质槽 |
 | `asset_import_fbx_animation` | 导入 FBX 为 AnimSequence | `source_filename`、`destination_path`，以及 `skeleton_path` 或 `skeletal_mesh_path` | 批量导入第三方动作到现有骨骼 |
+| `asset_import_geometry_cache` | 导入 Geometry Cache / Alembic | `source_file`、`destination_path` | 为 ML Deformer / 高质量变形验证导入缓存 |
 | `asset_export_property_json` | 导出资产属性为 JSON | `asset_path`；可选 `property_names[]`、`output_file` | 把 AnimSequence / Texture / Mesh 的常用属性拉成可编辑 JSON |
 | `asset_apply_property_json` | 从 JSON 回写资产属性 | `asset_path` 或 `json_file`；可选 `properties[]`、`save_after_apply` | 按 JSON 批量回写 AnimSequence / Texture / Mesh 的属性 |
 | `curve_export_json` | 导出 Curve 资产为结构化 JSON | `asset_path`；可选 `output_file` | 读取 CurveFloat / CurveVector / CurveLinearColor / CurveTable |
@@ -26,6 +27,16 @@
 | `editor_resolve_dirty_resources` | 按路径或整批保存/丢弃脏资源 | `save_resource_paths`、`discard_resource_paths`、`save_all_dirty`、`discard_all_dirty` | 先处理脏资源，再决定是否关闭编辑器 |
 | `editor_close` | 关闭编辑器；若仍有未处理脏资源则失败并返回清单 | `request_exit`、`close_all_asset_editors` | 自动化结束时安全退出 |
 | `editor_prepare_exit` | 退出前按策略保存/丢弃并请求关闭编辑器 | `save_asset_paths`、`discard_asset_paths`、`discard_all_dirty`、`request_exit` | 自动化结束时避免恢复弹窗 |
+
+### `asset_import_fbx_skeletal_mesh` 角色变形相关参数
+
+- `import_morph_targets`：写入 `UFbxSkeletalMeshImportData::bImportMorphTargets`。
+- `update_skeleton_reference_pose`：写入 `UFbxSkeletalMeshImportData::bUpdateSkeletonReferencePose`。
+- `import_skin_weight_profiles`：不会在 FBX 主导入里隐式执行；返回 warning，后续应使用 `skeletal_mesh_import_skin_weight_profile` 显式导入。
+- `preserve_existing_morph_targets`：当前新导入路径只报告该兼容字段；reimport 场景需走专用 reimport 流程。
+- `validate_after_import`：默认开启，导入后回读 SkeletalMesh 的 `lod_count`、`material_slot_count`、`morph_target_count`、`skin_weight_profile_count`。
+- `expected_morph_targets[]`、`expected_lod_count`、`expected_material_slots[]`：导入后做硬校验；缺失或数量不符返回 `fbx_skeletal_mesh_import_validation_failed`，并在 `validation_issues[] / validation_report.issues[]` 中返回 `expected_morph_target_missing`、`expected_lod_count_mismatch` 或 `expected_material_slot_missing`。
+- Morph Target 导入验收不要只看 `ok=true`。必须检查 `import_morph_targets=true`、`morph_target_count>0`、`morph_targets_imported[]` 包含预期名称，再调用 `skeletal_mesh_get_morph_targets`、`skeletal_mesh_validate_morph_targets` 和 `skeletal_mesh_preview_morph_target` 做读回与 transient component 设置验证。
 
 ## Level / Actor / Component
 
@@ -46,6 +57,7 @@
 | `level_set_actor_property` | `actor_set_property` 的同义命令 | 同上 | 统一走 `level_*` 前缀 |
 | `component_set_property` | 设置组件属性 | `id`、`component`（或 `component_id`）、`property_name`、`value_text` | 修改组件模板值 |
 | `level_set_component_property` | `component_set_property` 的同义命令 | 同上 | 统一走 `level_*` 前缀 |
+| `level_set_skeletal_mesh_morph_target` | 设置场景 Actor 上 SkeletalMeshComponent 的 Morph Target 权重，可选启动平滑 pulse | `id`、`morph_target`、`weight`，可选 `component/component_id`、`skeletal_mesh`、`clear_existing`、`pulse`、`stop_pulse` | 把导入的 Morph Target 实际接入关卡实例并截图/预览 |
 | `level_get_actor_transform` | 读取 Actor 实例变换 | `id` | 精确读取 `location / rotation / scale` |
 | `level_set_actor_transform` | 一次性写入实例变换（可选碰撞感知放置） | `id`，可选 `location`、`rotation`、`scale`、`collision_aware`、`collision{...}` | 原子修改实例变换，减少穿插/卡住 |
 | `level_set_actor_location` | 仅写位置 | `id`、`location` | 快速重排对象 |
@@ -69,6 +81,35 @@
 | `level_sweep_capsule` | 胶囊 Sweep 通行性检测 | `start`、`end`、`radius_cm`、`half_height_cm`、`trace_channel` | 检查门洞/走廊/电梯轨迹净空 |
 | `level_sweep_capsule_path` | 折线路径胶囊 Sweep（路径净空） | `points[]`、`radius_cm`、`half_height_cm`、`step_cm` | 检查楼梯/走廊/电梯轨迹中途阻挡与净空不足 |
 | `level_check_overlaps` | Overlap 检测（碰撞穿插） | `shape`、`center`、形状参数、`trace_channel` | 发现“摆放穿插/互相卡住/门墙不贴合”等问题 |
+
+### 组件碰撞属性写入
+
+- `component_set_property` / `level_set_component_property` 写入 `BodyInstance.*`、`Collision*` 或 `CanCharacterStepUpOn` 时，会刷新 `UPrimitiveComponent` 的物理状态，使后续 Trace / Sweep / Overlap 使用新碰撞配置。
+- 返回中若出现 `primitive_collision_state_refreshed=true`，表示本次写入已经触发碰撞状态刷新。
+- 写入后仍应优先用 `level_get_component_property` 读回目标属性，再用 `level_sweep_capsule_path` 或 `level_check_overlaps` 验证实际查询结果；不要只凭 `value_text` 判断碰撞已经进入物理场景。
+- 角色胶囊通行、IK 地面 Trace、视觉几何可以使用不同碰撞语义，但必须明确区分。例如胶囊可走简化 ramp 以保证移动顺滑，足部 Trace 可命中台阶面或专用脚底辅助面；辅助面若不该影响角色移动，应确保它不阻挡 Pawn。
+- 调试楼梯、斜坡或足底贴地时，至少用一次 `level_sweep_capsule_path` 验证胶囊路径，再用 `level_trace_world_ray` 或对应 Control Rig probe 验证足底 Trace 命中点。只验证其中一层容易误判。
+
+### `level_set_skeletal_mesh_morph_target`
+
+对当前关卡中的 Actor 查找 `USkeletalMeshComponent`，可选先设置 `skeletal_mesh`，再调用组件级 `SetMorphTarget`。适合把 FBX 导入得到的 Morph Target 放到真实场景实例中做展示、截图或回归验证。
+
+- `id`：Actor 名称或 Label。
+- `component` / `component_id`：可选，指定 SkeletalMeshComponent；不填时使用 Actor 上第一个 `USkeletalMeshComponent`。
+- `skeletal_mesh`：可选，SkeletalMesh object path；填写时会先设置到组件。
+- `morph_target` / `morph_target_name` / `name`：Morph Target 名称。
+- `weight`：Morph Target 权重，默认 `1.0`。
+- `clear_existing`：可选，设置前是否清空组件已有 Morph Target 权重。
+- `pulse` / `start_pulse` / `animate`：可选，启动 Editor ticker 持续按平滑曲线写入同一 Morph Target；`pulse` 可为 bool，也可为对象。
+- `pulse.min_weight` / `min_weight`：循环最小权重，默认 `0.0`。
+- `pulse.max_weight` / `max_weight`：循环最大权重，默认 `1.0`。
+- `pulse.cycle_seconds` / `cycle_seconds`：一次 `min -> max -> min` 循环秒数，默认 `4.8`。
+- `pulse.duration_seconds` / `duration_seconds`：可选，pulse 自动停止秒数；默认 `-1` 表示持续运行到显式停止或组件失效。
+- `pulse.tick_interval_seconds` / `tick_interval_seconds`：ticker 间隔秒数，默认 `0.0` 表示每帧更新。
+- `pulse.loop` / `loop`：是否循环，默认 `true`。
+- `stop_pulse` / `stop_animation`：停止该 Actor/Component/Morph Target 上已有 ticker；未传 `weight` 时会回到 `min_weight`。
+
+同一 Actor/Component/Morph Target 再次启动 `pulse` 会先移除旧 ticker，再注册新的 ticker，避免重复驱动。返回 `applied_weight`、`component_path`、`skeletal_mesh`、`morph_target`、`pulse_started / pulse_stopped`、`pulse_key` 和 `display_status`。普通单次写入返回 `display_status=scene_component_morph_set`；启动循环返回 `display_status=scene_component_morph_pulse_started`。验收时不要只看命令 `ok=true`；应确认 `applied_weight` 与目标权重一致，并通过视口截图或 buffer 截图确认关卡实例可见。循环展示还应做间隔截图或肉眼视口复核，确认轮廓在连续变化。
 
 ### 实例变换相关建议
 
@@ -686,18 +727,79 @@
 - `source_filename`：必填，外部 FBX 文件绝对路径。
 - `destination_path`：必填，目标内容路径（如 `/Game/Characters/Paladin/Mesh`）。
 - `skeleton_path`：可选，已有 Skeleton；不填时按 FBX 内容导入新 Skeleton。
-- `replace_existing` / `replace_existing_settings`：可选，默认 `false`。
+- `destination_name`：可选；当前导入管线会记录该字段，但 FBX factory 仍可能按源文件或内部对象名生成资产名，导入后以 `primary_asset_path / skeletal_mesh_asset_path / skeletal_mesh_asset_paths[]` 为准。
+- `replace_existing` / `replace_existing_settings`：可选，默认 `true`。测试导入时建议使用独立目标目录，避免误覆盖业务资产。
 - `save_after_import`：可选，默认 `true`。
 - `open_editor`：可选，默认 `false`。
 - `import_materials` / `import_textures`：可选，默认 `false`。
-- `create_physics_asset`：可选，默认 `true`。
+- `create_physics_asset`：可选，默认 `false`。
 - `import_animations`：可选，默认 `false`。
+- `import_morph_targets`：可选，导入 FBX Morph Target。
+- `import_skin_weight_profiles`：可选；主 FBX 导入不会隐式导入 Skin Weight Profile，会在 `validation_issues[]` 和 `validation_report` 中提示使用 `skeletal_mesh_import_skin_weight_profile`。
+- `update_skeleton_reference_pose`：可选，默认 `false`。
+- `preserve_existing_morph_targets`：可选，默认 `true`；当前新导入路径只返回兼容 warning，reimport 保留 Morph Target 需要单独 reimport 能力。
+- `validate_after_import`：可选，默认 `true`。启用时读回 LOD、Morph、材质槽和 Skin Weight Profile 摘要。
+- `expected_morph_targets[]` / `expected_material_slots[]` / `expected_lod_count`：可选，用于导入后硬校验。
 
 行为说明：
 
 - 通过 FBX 工厂自动导入 Skeletal Mesh。
-- 返回 `imported_object_paths`，并按类型拆出 `imported_skeletal_mesh_paths / imported_skeleton_paths / imported_physics_asset_paths`。
+- 返回 `imported_object_paths`，并按类型拆出 `skeletal_mesh_asset_paths / skeleton_asset_paths / physics_asset_paths`；`primary_asset_path` 是本次导入的代表资产。
+- 返回角色变形相关字段：`skeletal_mesh_asset_path`、`morph_targets_imported[]`、`skin_weight_profiles_imported[]`、`lod_count`、`material_slot_count`、`section_count`、`morph_target_count`、`skin_weight_profile_count`、`validation_issues[]`、`validation_error_count`、`validation_passed`、`validation_report`。
+- 如果 `validate_after_import=true` 且 `expected_morph_targets[]` 中任何名称未导入，命令返回失败，错误为 `fbx_skeletal_mesh_import_validation_failed`，不会把“导入了 mesh 但没有 Morph Target”伪装成成功。
+- 如果源文件不是 `.fbx`，返回 `source_file_is_not_fbx`；文件不存在返回 `source_file_not_found`；`destination_path` 不是合法 `/Game/...` 包路径时返回 `invalid_destination_path`。
 - 适合先导入角色网格，再把动作批量导入到同一 Skeleton。
+
+Morph Target 推荐验证顺序：
+
+```json
+{
+  "source_filename": "D:/Temp/MorphSource.fbx",
+  "destination_path": "/Game/__UeAgentInterfaceSmoke/MorphImport",
+  "import_morph_targets": true,
+  "validate_after_import": true,
+  "expected_morph_targets": ["Smile"],
+  "save_after_import": false,
+  "open_editor": false
+}
+```
+
+第一步用上面的参数执行：
+
+```powershell
+UeAgentInterfaceCMD/dist/uai-cli.exe exec --cmd asset_import_fbx_skeletal_mesh --params-file tmp/morph_import.json --json-output
+```
+
+然后读取 report 里的 `data.skeletal_mesh_asset_path`，把真实资产路径写入后续只读验证参数：
+
+```json
+{
+  "asset_path": "/Game/__UeAgentInterfaceSmoke/MorphImport/MorphSource"
+}
+```
+
+依次执行：
+
+```powershell
+UeAgentInterfaceCMD/dist/uai-cli.exe exec --cmd skeletal_mesh_get_morph_targets --params-file tmp/morph_get.json --json-output
+UeAgentInterfaceCMD/dist/uai-cli.exe exec --cmd skeletal_mesh_validate_morph_targets --params-file tmp/morph_get.json --json-output
+```
+
+预览校验需要补目标名和权重：
+
+```json
+{
+  "asset_path": "/Game/__UeAgentInterfaceSmoke/MorphImport/MorphSource",
+  "morph_target": "Smile",
+  "weight": 1.0
+}
+```
+
+```powershell
+UeAgentInterfaceCMD/dist/uai-cli.exe exec --cmd skeletal_mesh_preview_morph_target --params-file tmp/morph_preview.json --json-output
+```
+
+测试资产不需要保留时，优先使用 `save_after_import=false`，验证结束后通过 dirty resource 流程丢弃未保存导入包；若已保存到 Content，应显式清理测试目录，不要把 `/Game/__UeAgentInterfaceSmoke` 留在项目里。
 
 ### `asset_import_fbx_animation`
 
@@ -713,6 +815,17 @@
 
 - 导入结果是 `AnimSequence` 资产。
 - 返回 `skeleton_path` 与 `imported_animation_paths`，便于后续直接接 `AnimBlueprint` / Montage / 结构化动画工作流。
+
+### `asset_import_geometry_cache`
+
+- `source_file`：必填，外部 Geometry Cache / Alembic 文件路径。相对路径按项目根目录解析。
+- `destination_path`：必填，目标内容路径（如 `/Game/Deformers/GeometryCache`）。
+
+行为说明：
+
+- 通过 UE 自动导入管线导入缓存资产。
+- 返回 `imported_assets[]`、`imported_asset_count` 和 `plugin_status`。
+- Geometry Cache 内部逐帧顶点数据不通过 JSON 编辑；导入后使用 `geometry_cache_get_info` 与 `geometry_cache_validate_against_skeletal_mesh` 做验证。详见 `18_Deformer_MLDeformer_GeometryCache.md`。
 
 ### `asset_export_property_json`
 

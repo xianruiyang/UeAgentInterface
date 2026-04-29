@@ -1,21 +1,54 @@
 # 指令详解：IK Rig / IK Retargeter
 
+本分册只保留当前推荐主流程：创建最小资产、读取信息、导出文件夹式 JSON、校验、回写、批量重定向动作。
+
+已能被 `ik_rig_apply_folder` 或 `ik_retargeter_apply_folder` 覆盖的零散写入命令已移动到 `deprecatedCommand/14_IKRig_IKRetargeter.md`，仍保留兼容，但不再作为 authoring 主入口。
+
 ## IK Rig
 
 | 指令 | 作用 | 关键参数 |
 |---|---|---|
-| `ik_rig_create` | 创建 IK Rig 资产 | `asset_path`；可选 `preview_skeletal_mesh`、`apply_auto_retarget_definition`、`save_after_create` |
+| `ik_rig_create` | 创建 IK Rig 最小资产 | `asset_path`；可选 `preview_skeletal_mesh`、`apply_auto_retarget_definition`、`save_after_create` |
 | `ik_rig_get_info` | 读取 IK Rig 摘要 | `asset_path` |
-| `ik_rig_set_solver` | 新增 / 更新 / 删除 solver | `asset_path`；新增时传 `solver_type`，更新/删除时传 `solver_index`；可选 `enabled`、`start_bone_name`、`end_bone_name`、`move_to_index`、`connect_goal_names[]`、`disconnect_goal_names[]`、`settings{...}`、`goal_settings[]`、`bone_settings[]`、`remove`、`save_after_set` |
-| `ik_rig_set_preview_mesh` | 设置或清空 IK Rig preview mesh | `asset_path`、`skeletal_mesh_path` 或 `clear_preview_mesh`、`save_after_set` |
-| `ik_rig_set_goal` | 新增 / 更新 / 删除 goal | `asset_path`、`goal_name`；新增/更新时传 `bone_name`；可选 `new_goal_name`、`position_alpha`、`rotation_alpha`、`position`、`rotation`、`current_transform{location/rotation/scale}`、`remove`、`save_after_set` |
-| `ik_rig_set_retarget_root` | 设置 retarget root | `asset_path`、`root_bone_name`、`save_after_set` |
-| `ik_rig_set_retarget_chain` | 新增 / 更新 / 删除 retarget chain | `asset_path`、`chain_name`；可选 `start_bone_name`、`end_bone_name`、`goal_name`、`new_chain_name`、`remove` |
+| `ik_rig_export_folder` | 导出 IK Rig 文件夹式结构化 JSON | `asset_path`；可选 `folder_path` |
+| `ik_rig_validate_folder` | 只读校验 IK Rig 文件夹 JSON | `folder_path`；可选 `asset_path`、`create_if_missing` |
+| `ik_rig_apply_folder` | 应用 IK Rig 文件夹 JSON | `folder_path`；可选 `asset_path`、`dry_run`、`validate_only`、`create_if_missing`、`save_after_apply` |
 | `ik_rig_apply_auto_retarget_definition` | 对匹配模板的骨架自动生成 retarget definition | `asset_path`、`save_after_set` |
+| `ik_rig_preview_solve` | 不进 PIE 的 IK Rig 预览求解探针 | `asset_path`；可选 `skeletal_mesh_path`、`goals[]`、`sample_bones[]`、`include_all_bones`、`max_output_bones` |
+
+### IK Rig 文件夹式 JSON 主流程
+
+推荐流程：
+
+1. `ik_rig_create` 创建最小资产，或使用现有 IK Rig。
+2. `ik_rig_export_folder` 导出真实结构。
+3. 修改导出的 JSON。
+4. `ik_rig_validate_folder` 校验。
+5. `ik_rig_apply_folder` 回写，再导出确认读回。
+
+导出文件：
+
+- `asset.json`
+- `preview.json`
+- `hierarchy.json`
+- `goals.json`
+- `retarget_definition.json`
+- `solvers.json`
+- `excluded_bones.json`
+- `raw_properties.json`
+- `readonly_properties.json`
+- `validation/coverage_report.json`
+- `validation/readback_diff.json`
+- `validation/diagnostics.json`
+
+当前可回写：preview mesh、retarget root、goals、retarget chains、solver 基础结构，以及已开放的 BodyMover / FBIK solver settings、goal settings、bone settings。
+
+`ik_rig_apply_auto_retarget_definition` 是显式动作命令，不放进普通 folder apply 隐式执行。
 
 ### `ik_rig_get_info`
 
 当前返回：
+
 - `asset_path`
 - `object_path`
 - `preview_skeletal_mesh`
@@ -27,253 +60,130 @@
 - `solver_count`
 - `solvers[]`
 
-说明：
-- 这一层当前重点是 IK Rig 资产结构、goal 和 retarget definition 管理，不是完整 solver 参数编辑器替代。
-- `solvers[]` 当前除了基础结构，还会按 solver 类型回读：
-  - `solver_kind`
-  - `settings`
-  - `goal_setting_count / goal_settings[]`
-  - `bone_setting_count / bone_settings[]`（当前主要是 `FBIK`）
+`solvers[]` 会按 solver 类型回读 `solver_kind`、`settings`、`goal_settings[]`、`bone_settings[]`。
 
-### `ik_rig_set_solver`
+### `ik_rig_preview_solve`
 
-说明：
-- 这是当前 solver 层的统一入口，避免继续拆 `add_solver / remove_solver / set_solver_enabled / set_solver_start_bone` 多条命令。
-- 新增 solver 时传 `solver_type`，例如：
-  - `/Script/IKRig.IKRigBodyMoverSolver`
-  - `/Script/IKRig.IKRigFullBodyIKSolver`
-- 当前优先支持：
-  - 新增 solver
-  - 删除 solver
-  - 启用/禁用
-  - `start_bone_name`
-  - `end_bone_name`
-  - 简单重排 `move_to_index`
-  - `connect_goal_names[] / disconnect_goal_names[]`
-- 当前已稳定开放的细粒度能力面：
-  - `BodyMover`
-    - `settings{...}`
-    - `goal_settings[]{ influence_multiplier }`
-  - `FBIK`
-    - `settings{ iterations / sub_iterations / mass_multiplier / allow_stretch / root_behavior / global_pull_chain_alpha / max_angle / over_relaxation }`
-    - `goal_settings[]{ chain_depth / strength_alpha / pull_chain_alpha / pin_rotation }`
-    - `bone_settings[]{ rotation_stiffness / position_stiffness / use_preferred_angles / preferred_angles }`
-- 其它 solver 仍未继续开放通用 settings struct 编辑。
+用途：在编辑器服务内用 `FIKRigProcessor` 对 IK Rig 执行一次 ref pose 输入的预览求解，不打开游戏、不全屏、不写资产。用于检查 solver 是否能初始化、goal override 是否生效、输出骨骼全局姿态是否合理。
 
-### `ik_rig_set_goal`
+关键参数：
+- `asset_path`：IK Rig 资产。
+- `skeletal_mesh_path`：可选；不传时使用 IK Rig 的 preview mesh。
+- `goals[]`：可选 goal 覆盖。每项支持 `goal_name/name`、`bone_name`、`position`、`rotation`、`position_alpha`、`rotation_alpha`、`position_space`、`rotation_space`、`enabled`。
+- `sample_bones[]`：可选，指定回读哪些骨骼。
+- `include_all_bones` / `max_output_bones`：控制输出姿态采样规模，`max_output_bones` 默认 64，最多 512。
 
-说明：
-- 这是 goal 生命周期与当前 goal 数据的统一入口。
-- 新增/更新时 `bone_name` 仍是必填；如需改名可同时传 `new_goal_name`。
-- 当前已稳定支持：
-  - `position_alpha`
-  - `rotation_alpha`
-  - 顶层 `position / rotation`
-  - `current_transform{location/rotation/scale}`
-- `current_transform` 当前按“即时写入 + 即时回读 + `get_info` 摘要可见”验收，不承诺后续 rig 重初始化后的绝对值恒定不变。
+返回重点：
+- `initialized`、`solved`
+- `errors/warnings/messages` 与 `errors_after_solve/warnings_after_solve/messages_after_solve`
+- `goals[]`，包含 `final_blended_position/final_blended_rotation`
+- `output_pose_sample[]` 与 `missing_sample_bones[]`
+
+如果 `initialized=false`，命令失败并返回 `ik_rig_preview_solve_initialize_failed`，同时 `data` 里保留 IK Rig logger 诊断。
 
 ## IK Retargeter
 
 | 指令 | 作用 | 关键参数 |
 |---|---|---|
-| `ik_retargeter_create` | 创建 IK Retargeter 资产 | `asset_path`；可选 `source_ik_rig`、`target_ik_rig`、`source_preview_mesh`、`target_preview_mesh`、`add_default_ops`、`save_after_create` |
+| `ik_retargeter_create` | 创建 IK Retargeter 最小资产 | `asset_path`；可选 `source_ik_rig`、`target_ik_rig`、`source_preview_mesh`、`target_preview_mesh`、`add_default_ops`、`save_after_create` |
 | `ik_retargeter_get_info` | 读取 IK Retargeter 摘要 | `asset_path` |
-| `ik_retargeter_set_ik_rig` | 设置 source / target IK Rig | `asset_path`、`source_or_target`、`ik_rig_path`；可选 `clear_ik_rig`、`save_after_set` |
-| `ik_retargeter_set_settings` | 统一设置 retargeter global / root / chain settings | `asset_path`；可选 `global_settings{...}`、`root_settings{...}`、`target_chain_name`、`chain_settings{...}`、`reset_chain_to_default`、`save_after_set` |
-| `ik_retargeter_set_pose` | 统一管理 retarget pose 生命周期与当前 pose 数据 | `asset_path`、`source_or_target`；可选 `pose_name`、`create_if_missing`、`set_current`、`duplicate_from_pose`、`rename_from_pose`、`remove`、`reset_all`、`reset_bones[]`、`root_offset`、`bone_rotation_offsets[]`、`auto_align_all`、`auto_align_bones[]`、`auto_align_method`、`snap_bone_to_ground`、`save_after_set` |
-| `ik_retargeter_set_preview_mesh` | 设置 source / target preview mesh | `asset_path`、`source_or_target`、`skeletal_mesh_path`；可选 `clear_preview_mesh`、`save_after_set` |
+| `ik_retargeter_export_folder` | 导出 IK Retargeter 文件夹式结构化 JSON | `asset_path`；可选 `folder_path` |
+| `ik_retargeter_validate_folder` | 只读校验 IK Retargeter 文件夹 JSON | `folder_path`；可选 `asset_path`、`create_if_missing` |
+| `ik_retargeter_apply_folder` | 应用 IK Retargeter 文件夹 JSON | `folder_path`；可选 `asset_path`、`dry_run`、`validate_only`、`create_if_missing`、`save_after_apply` |
 | `ik_retargeter_auto_map_chains` | 对 retargeter op stack 自动做链映射 | `asset_path`；可选 `auto_map_type=exact/fuzzy/clear`、`force_remap`、`op_name`、`save_after_set` |
+| `ik_retargeter_auto_align_pose` | 对当前或指定 retarget pose 执行自动姿势对齐 | `asset_path`、`source_or_target`；可选 `pose_name`、`create_if_missing`、`set_current`、`auto_align_method`、`auto_align_all`、`auto_align_bones[]/bones[]`、`snap_bone_to_ground`、`reset_*`、`save_after_set` |
 | `ik_retargeter_duplicate_and_retarget` | 批量复制并重定向动画资产 | `asset_path`、`asset_paths[]`、`output_folder`；可选 `source_mesh_path`、`target_mesh_path`、`prefix`、`suffix`、`search`、`replace`、`include_referenced_assets` |
+| `retarget_batch_export_json` | 生成批量重定向单文件 JSON | `retargeter`、`asset_paths[]`、`output_folder`；可选 `output_file`、`source_mesh`、`target_mesh`、`prefix/suffix/search/replace` |
+| `retarget_batch_validate_json` | 校验批量重定向 JSON | `json_file` |
+| `retarget_batch_apply_json` | 执行批量重定向 JSON | `json_file` |
 
-### `ik_retargeter_create`
+### IK Retargeter 文件夹式 JSON 主流程
 
-说明：
-- 默认会补 `default ops`，这是为了让 `auto_map_chains` 和后续 retarget 流程有稳定落点。
-- 如果只想建一个空 retargeter，可传 `add_default_ops=false`。
+推荐流程：
 
-### `ik_retargeter_get_info`
+1. 用 `ik_retargeter_create` 创建最小资产，并设置 source / target rig。
+2. `ik_retargeter_export_folder` 导出真实结构。
+3. 修改 `rigs.json`、`preview_meshes.json`、`global_settings.json`、`root_settings.json`、`chain_mappings.json`、`chain_settings.json`、`poses/*/Default.json`。
+4. `ik_retargeter_validate_folder` 校验。
+5. `ik_retargeter_apply_folder` 回写，再执行 retarget smoke。
 
-当前返回：
-- `source_ik_rig`
-- `target_ik_rig`
-- `source_preview_mesh`
-- `target_preview_mesh`
-- `source_retarget_pose`
-- `target_retarget_pose`
-- `source_pose_names[]`
-- `target_pose_names[]`
-- `current_source_pose`
-- `current_target_pose`
-- `retarget_op_count`
-- `root_settings`
-- `global_settings`
-- `chain_mapping_ready`
-- `chain_mapping_count`
-- `chain_mappings[]`
-- `chain_settings_count`
-- `chain_settings[]`
+导出文件：
 
-说明：
-- 由于 UE 5.6 的 chain mapping 依附 op stack，`chain_mappings[]` 当前按可解析到的 op 聚合输出，主要用于调试与结构确认。
-- 在默认 op 配置下，`chain_mappings[]` 更适合作“最佳努力的诊断字段”，不应把它当成 retarget 是否可执行的唯一依据；真正的可执行性应结合 `duplicate_and_retarget` 结果验证。
-- `root_settings / global_settings` 当前已经进入稳定能力面；`chain_settings[]` 已接入摘要回读，但仍更适合作诊断字段。
+- `asset.json`
+- `rigs.json`
+- `preview_meshes.json`
+- `op_stack.json`
+- `global_settings.json`
+- `root_settings.json`
+- `chain_mappings.json`
+- `chain_settings.json`
+- `poses/source/Default.json`
+- `poses/target/Default.json`
+- `batch_profiles.json`
+- `raw_properties.json`
+- `readonly_properties.json`
+- `validation/coverage_report.json`
+- `validation/chain_mapping_report.json`
+- `validation/pose_diff_report.json`
+- `validation/retarget_smoke_report.json`
+- `validation/readback_diff.json`
+- `validation/diagnostics.json`
 
-### `ik_retargeter_set_settings`
+当前可回写：source / target IK Rig、source / target preview mesh、global / root / chain settings、chain mapping、默认 source / target pose。
 
-说明：
-- 这是当前 retargeter settings 的统一入口，避免继续拆 `set_global_settings / set_root_settings / set_chain_settings / reset_chain_settings` 多条命令。
-- `global_settings{...}` 与 `root_settings{...}` 当前是稳定能力面。
-- `chain_settings{...}` 与 `reset_chain_to_default` 需要同时提供 `target_chain_name`。
-- 当前实现完成后会直接回落到 `ik_retargeter_get_info` 的摘要返回，便于立即核对设置结果。
+`ik_retargeter_auto_align_pose / ik_retargeter_auto_map_chains / duplicate-and-retarget` 是动作语义，保留为命令或批处理 JSON，不隐式塞进普通 folder apply。
 
-### `ik_retargeter_set_pose`
+### `ik_retargeter_auto_align_pose`
 
-说明：
-- 这是 retarget pose 的统一入口，避免继续拆 `create_pose / duplicate_pose / rename_pose / set_current_pose / set_pose_root_offset / set_pose_bone_rotation` 多条命令。
-- 推荐工作流：
-  1. `pose_name + create_if_missing=true` 创建或确保 pose 存在
-  2. `set_current=true` 切到目标 pose
-  3. 再写 `root_offset`、`bone_rotation_offsets[]`、`auto_align_*`
-- `duplicate_from_pose` 和 `rename_from_pose` 都是对 `pose_name` 的写入型操作。
-- `reset_all` 和 `reset_bones[]` 走的是 controller 的 pose reset 流程。
-- `root_offset` 当前回读的是 retarget pose 上的 root translation delta；是否对运行时结果可见，还要结合具体 rig/op 配置验证。
+用途：把自动姿势对齐从旧的 `ik_retargeter_set_pose` 零散写入语义中抽出，作为明确动作命令使用。它仍复用 UE controller 的 `AutoAlignAllBones`、`AutoAlignBones`、`SnapBoneToGround`、`ResetRetargetPose` 能力。
 
-推荐参数形式：
+关键参数：
+- `asset_path`
+- `source_or_target`: `source` 或 `target`
+- `auto_align_method`: `chain_to_chain`、`mesh_to_mesh`、`local_rotation_axes`、`global_rotation_axes`，默认 `chain_to_chain`
+- `auto_align_all`: 可选；未传 `auto_align_bones/bones/snap/reset/root_offset` 时默认执行全骨骼自动对齐
+- `auto_align_bones[]` 或别名 `bones[]`
+- `pose_name`、`create_if_missing`、`set_current`：可选，用于指定并切换姿势
+- `snap_bone_to_ground`、`reset_all`、`reset_bones[]`、`root_offset`：可选的姿势修正动作
+
+返回重点：
+- `action=auto_align_pose`
+- `auto_align_method`
+- `used_auto_align_all`
+- `used_auto_align_bones_count`
+- `current_pose` 与 `current_pose_data`
+
+### Retarget Batch JSON
+
+批量重定向使用单文件 JSON，因为它是一次性动作，不是 retargeter 资产状态。
+
+JSON 字段：
+
+- `schema`: `ue_agent_interface.retarget_batch.v1`
+- `retargeter`
+- `source_assets[]` 或 `asset_paths[]`
+- `source_mesh` 或 `source_mesh_path`
+- `target_mesh` 或 `target_mesh_path`
+- `output_folder`
+- `prefix` / `suffix` / `search` / `replace`
+
+示例：
 
 ```json
 {
-  "asset_path": "/Game/IK/RTG_PlayerToEnemy",
-  "source_or_target": "target",
-  "pose_name": "EnemyPoseA",
-  "create_if_missing": true,
-  "set_current": true,
-  "bone_rotation_offsets": [
-    {
-      "bone_name": "pelvis",
-      "rotation_offset": { "pitch": 5.0, "yaw": 10.0, "roll": 15.0 }
-    }
-  ],
-  "save_after_set": false
+  "schema": "ue_agent_interface.retarget_batch.v1",
+  "retargeter": "/Game/IK/RTG_PlayerToEnemy",
+  "source_assets": ["/Game/Anim/A_Run"],
+  "source_mesh": "/Game/Characters/Player/SK_Player",
+  "target_mesh": "/Game/Characters/Enemy/SK_Enemy",
+  "output_folder": "/Game/Anim/Retargeted",
+  "prefix": "RTG_"
 }
 ```
-
-### `ik_retargeter_duplicate_and_retarget`
-
-推荐参数形式：
-
-```json
-{
-  "asset_path": "/Game/IK/RTG_PlayerToEnemy",
-  "asset_paths": [
-    "/Engine/Tutorial/SubEditors/TutorialAssets/Character/Tutorial_Idle"
-  ],
-  "source_mesh_path": "/Engine/Tutorial/SubEditors/TutorialAssets/Character/TutorialTPP",
-  "target_mesh_path": "/Game/Test/TutorialTPP_Target",
-  "output_folder": "/Game/Test/Retargeted",
-  "prefix": "RTG_",
-  "include_referenced_assets": false
-}
-```
-
-说明：
-- 这条命令当前走 UE 5.6 的 batch retarget 流程，适合“复制一批动画资产并落到目标目录”。
-- `output_folder` 必填，便于稳定追踪这次 retarget 的新资产。
-- `source_mesh_path / target_mesh_path` 不传时，会回退到 retargeter 里当前的 source / target preview mesh。
 
 ## 当前边界
 
-- `IK Rig` 当前已经支持 `BodyMover / FBIK` 的一部分 solver 细粒度属性、goal settings 和 bone settings，但还不是全 solver / 全约束编辑器替代。
-- `IK Retargeter` 当前已经覆盖主流程、pose 生命周期与 pose 偏移数据管理，但不继续扩到完整 op 级细节编辑。
-- 对 op 级 chain settings / 单链显式 mapping / 每个 op 的专用 settings，当前仍以稳定性优先；`global_settings/root_settings` 已稳定，`chain_settings[]` 仍主要作为诊断层能力。
-
-## 2026-04-21 增量更新
-
-新增命令：
-
-- `ik_retargeter_set_settings`
-
-当前统一入口支持：
-
-- `global_settings{...}`
-- `root_settings{...}`
-- `target_chain_name + chain_settings{...}`
-- `reset_chain_to_default`
-
-`ik_retargeter_get_info` 新增回读：
-
-- `root_settings`
-- `global_settings`
-- `chain_settings_count`
-- `chain_settings[]`
-
-当前稳定结论：
-
-- `global_settings/root_settings` 已完成 smoke 与 live 验证。
-- `chain_settings[]` 已接入摘要回读，但在 UE 5.6 当前最小 retargeter 资产流实测里经常是空数组，暂不应视为当前稳定能力面。
-
-## 2026-04-21 增量更新（Stage29）
-
-- `ik_rig_set_solver` 现在支持：
-  - `connect_goal_names[]`
-  - `disconnect_goal_names[]`
-  - `settings{...}`
-  - `goal_settings[]`
-- `ik_rig_get_info.solvers[]` 现在会回读：
-  - `solver_kind`
-  - `settings`
-  - `goal_setting_count`
-  - `goal_settings[]`
-
-当前已稳定验收的 solver 细粒度能力面：
-
-- `BodyMover` solver settings
-- `BodyMover` goal 连接
-- `BodyMover` `InfluenceMultiplier`
-
-当前仍未扩到其他 solver 的细粒度 settings。
-
-## 2026-04-21 增量更新（Stage30）
-
-- `ik_rig_set_goal` 现在支持：
-  - `position_alpha`
-  - `rotation_alpha`
-- 返回已补：
-  - `bone_name`
-  - `position_alpha`
-  - `rotation_alpha`
-
-当前已稳定验收：
-
-- `goal` 的目标骨骼写入
-- `goal` 的 `PositionAlpha`
-- `goal` 的 `RotationAlpha`
-
-## 2026-04-21 增量更新（Stage31）
-
-- `ik_rig_set_goal` 现在支持：
-  - `position`
-  - `rotation`
-  - `current_transform{location/rotation/scale}`
-- 返回已补：
-  - `current_location`
-  - `current_rotation`
-  - `current_scale`
-  - `current_transform`
-
-当前稳定验收口径：
-
-- `current transform` 的立即回读
-- `ik_rig_get_info.goals[]` 摘要字段存在
-
-说明：
-
-- 这层当前不按“后续所有 rig 重初始化之后仍保持绝对值不变”来验收。
-- 当前更合理的稳定口径是“命令即时写入 + 即时回读 + `get_info` 摘要可见”。
-
-## 2026-04-21 增量更新（Stage32）
-
-- `ik_rig_set_solver` 现在也稳定支持 `FBIK` 的基础细粒度设置：
-  - `settings{ iterations / sub_iterations / mass_multiplier / allow_stretch / root_behavior / global_pull_chain_alpha / max_angle / over_relaxation }`
-  - `goal_settings[]{ chain_depth / strength_alpha / pull_chain_alpha / pin_rotation }`
-  - `bone_settings[]{ rotation_stiffness / position_stiffness / use_preferred_angles / preferred_angles }`
-- `ik_rig_get_info.solvers[]` 已补 `FBIK` 的 `settings / goal_settings / bone_settings` 摘要回读。
+- `IK Rig` folder workflow 覆盖 preview mesh、retarget root、goal、retarget chain、solver 基础结构与已开放的 BodyMover/FBIK 设置；未开放的 solver 专用 struct 仍以 UE controller 稳定支持为准。
+- `IK Retargeter` folder workflow 覆盖 rigs、preview meshes、global/root/chain settings、chain mapping、默认 pose 数据；完整 op 专用 settings 仍以 UE controller 可稳定回写的字段为准。
+- `Retarget Batch` 使用单文件 JSON，因为它是“复制并重定向一批动画”的动作，不是 retargeter 资产状态。
+- 可由 folder JSON 覆盖的原子写入命令只用于 bootstrap、迁移、schema 边界和故障恢复，归档见 `deprecatedCommand/14_IKRig_IKRetargeter.md`。

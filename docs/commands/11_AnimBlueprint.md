@@ -115,7 +115,28 @@
 - 文件夹式工作流当前已额外保留一小批 AnimGraph 节点属性真源，第一版明确覆盖：
   - `Node.BlendSpace`
   - `Node.Sequence`
+  - `Node.ControlRigClass`
+  - `Node.DefaultControlRigClass`
+  - `Node.bExecute`
+  - `Node.InputSettings` / `Node.InputSettings.bUpdatePose` / `Node.InputSettings.bUpdateCurves`
+  - `Node.OutputSettings` / `Node.OutputSettings.bUpdatePose` / `Node.OutputSettings.bUpdateCurves`
+  - `Node.Alpha` / `Node.AlphaInputType` / `Node.bAlphaBoolEnabled`
+  - `Node.bSetRefPoseFromSkeleton` / `Node.AlphaCurveName` / `Node.LODThreshold`
   这意味着 `BlendSpace Player / RotationOffsetBlendSpace / Sequence Player / Sequence Evaluator` 这类资产引用节点，已经能在 `export_folder / apply_folder` 里稳定 round-trip 资产引用。
+  `AnimGraphNode_ControlRig` 也已经能稳定 round-trip Control Rig class、执行开关、输入/输出姿态同步设置和基础 Alpha/LOD 设置；完整 exposed variable mapping 仍按后续 profile 扩展处理。
+
+### Control Rig 节点接入验证
+
+Control Rig 资产能独立编译，不代表它已经在角色动画蓝图中执行。通过 `anim_blueprint_apply_folder` 接入或修改 Control Rig 节点后，必须编译并重新 export 或 inspect 节点，确认以下字段实际写入：
+
+- `Node.ControlRigClass`
+- `Node.DefaultControlRigClass`
+- `Node.bExecute`
+- `Node.InputSettings.bUpdatePose`
+- `Node.OutputSettings.bUpdatePose`
+- `Node.Alpha / Node.AlphaInputType / Node.AlphaCurveName / Node.LODThreshold`
+
+如果 Control Rig probe 有效果但运行时角色无效果，优先排查节点类为空、`bExecute=false`、输入/输出 Pose 未同步、Alpha 为 0、LOD 被屏蔽、或 `AlphaCurveName` 指向的 AnimSequence 曲线没有有效权重。
 
 ## Layer Interface / Anim Layer
 
@@ -234,7 +255,9 @@
 补充说明：
 
 - 当前已经能通过 `AnimGraph` 节点属性真源保留 `BlendSpace 1D/2D` 节点上的 `BlendSpace` 资产引用。
+- 当前已经能通过 `AnimGraph` 节点属性真源保留 `Control Rig` 节点上的 `DefaultControlRigClass / ControlRigClass` 和基础 Alpha/LOD 设置。
 - 但这不等于已经支持 `BlendSpace` 资产本体 authoring；当前仍没有单独的 `blendspace_*` 命令面。
+- `Control Rig` 节点的 exposed variable mapping、input/output property binding 还不是完整独立 profile；需要时先 export 真实节点，再按导出的 `properties[] / pin_defaults[] / edges[]` 做结构化修改。
 
 ## 推荐流程
 

@@ -21,6 +21,7 @@
 #include "Retargeter/RetargetOps/StrideWarpingOp.h"
 #include "Retargeter/IKRetargeter.h"
 #include "Rig/IKRigDefinition.h"
+#include "Rig/IKRigProcessor.h"
 #include "Rig/Solvers/IKRigBodyMoverSolver.h"
 #include "Rig/Solvers/IKRigFullBodyIK.h"
 #include "RigEditor/IKRigController.h"
@@ -171,6 +172,35 @@ namespace UeAgentIKAssetOps
 		return Obj;
 	}
 
+	static TSharedPtr<FJsonObject> BuildTransformJson(const FTransform& Value)
+	{
+		TSharedPtr<FJsonObject> Obj = MakeShared<FJsonObject>();
+		Obj->SetObjectField(TEXT("location"), BuildVectorJson(Value.GetLocation()));
+		Obj->SetObjectField(TEXT("rotation"), BuildRotatorJson(Value.Rotator()));
+		Obj->SetObjectField(TEXT("scale"), BuildVectorJson(Value.GetScale3D()));
+		return Obj;
+	}
+
+	static TArray<TSharedPtr<FJsonValue>> TextArrayToJson(const TArray<FText>& Texts)
+	{
+		TArray<TSharedPtr<FJsonValue>> Values;
+		for (const FText& Text : Texts)
+		{
+			Values.Add(MakeShared<FJsonValueString>(Text.ToString()));
+		}
+		return Values;
+	}
+
+	static TArray<TSharedPtr<FJsonValue>> StringArrayToJson(const TArray<FString>& Strings)
+	{
+		TArray<TSharedPtr<FJsonValue>> Values;
+		for (const FString& String : Strings)
+		{
+			Values.Add(MakeShared<FJsonValueString>(String));
+		}
+		return Values;
+	}
+
 	static bool TryGetVectorObject(const TSharedPtr<FJsonObject>& Obj, const FString& Key, FVector& OutValue)
 	{
 		if (!Obj.IsValid())
@@ -300,6 +330,44 @@ namespace UeAgentIKAssetOps
 			return true;
 		}
 		return false;
+	}
+
+	static bool ParseIKRigGoalSpace(const FString& InValue, EIKRigGoalSpace& OutValue)
+	{
+		FString Normalized = InValue.TrimStartAndEnd().ToLower();
+		Normalized.ReplaceInline(TEXT("_"), TEXT(""));
+		Normalized.ReplaceInline(TEXT("-"), TEXT(""));
+		Normalized.ReplaceInline(TEXT(" "), TEXT(""));
+		if (Normalized.IsEmpty() || Normalized == TEXT("additive"))
+		{
+			OutValue = EIKRigGoalSpace::Additive;
+			return true;
+		}
+		if (Normalized == TEXT("component") || Normalized == TEXT("componentspace"))
+		{
+			OutValue = EIKRigGoalSpace::Component;
+			return true;
+		}
+		if (Normalized == TEXT("world") || Normalized == TEXT("worldspace"))
+		{
+			OutValue = EIKRigGoalSpace::World;
+			return true;
+		}
+		return false;
+	}
+
+	static FString IKRigGoalSpaceToString(const EIKRigGoalSpace Value)
+	{
+		switch (Value)
+		{
+		case EIKRigGoalSpace::Component:
+			return TEXT("component");
+		case EIKRigGoalSpace::World:
+			return TEXT("world");
+		case EIKRigGoalSpace::Additive:
+		default:
+			return TEXT("additive");
+		}
 	}
 
 	static FString AutoAlignMethodToString(const ERetargetAutoAlignMethod InValue)
@@ -1123,12 +1191,16 @@ bool FUeAgentHttpServer::ExecuteIKRigCommand(const FString& CommandLower, const 
 {
 	if (CommandLower == TEXT("ik_rig_create")) return CmdIKRigCreate(Ctx, OutData, OutError);
 	if (CommandLower == TEXT("ik_rig_get_info")) return CmdIKRigGetInfo(Ctx, OutData, OutError);
+	if (CommandLower == TEXT("ik_rig_export_folder")) return CmdIKRigExportFolder(Ctx, OutData, OutError);
+	if (CommandLower == TEXT("ik_rig_apply_folder")) return CmdIKRigApplyFolder(Ctx, OutData, OutError);
+	if (CommandLower == TEXT("ik_rig_validate_folder")) return CmdIKRigValidateFolder(Ctx, OutData, OutError);
 	if (CommandLower == TEXT("ik_rig_set_solver")) return CmdIKRigSetSolver(Ctx, OutData, OutError);
 	if (CommandLower == TEXT("ik_rig_set_preview_mesh")) return CmdIKRigSetPreviewMesh(Ctx, OutData, OutError);
 	if (CommandLower == TEXT("ik_rig_set_goal")) return CmdIKRigSetGoal(Ctx, OutData, OutError);
 	if (CommandLower == TEXT("ik_rig_set_retarget_root")) return CmdIKRigSetRetargetRoot(Ctx, OutData, OutError);
 	if (CommandLower == TEXT("ik_rig_set_retarget_chain")) return CmdIKRigSetRetargetChain(Ctx, OutData, OutError);
 	if (CommandLower == TEXT("ik_rig_apply_auto_retarget_definition")) return CmdIKRigApplyAutoRetargetDefinition(Ctx, OutData, OutError);
+	if (CommandLower == TEXT("ik_rig_preview_solve")) return CmdIKRigPreviewSolve(Ctx, OutData, OutError);
 
 	OutError = TEXT("unknown_ik_rig_command");
 	return false;
@@ -1138,14 +1210,28 @@ bool FUeAgentHttpServer::ExecuteIKRetargeterCommand(const FString& CommandLower,
 {
 	if (CommandLower == TEXT("ik_retargeter_create")) return CmdIKRetargeterCreate(Ctx, OutData, OutError);
 	if (CommandLower == TEXT("ik_retargeter_get_info")) return CmdIKRetargeterGetInfo(Ctx, OutData, OutError);
+	if (CommandLower == TEXT("ik_retargeter_export_folder")) return CmdIKRetargeterExportFolder(Ctx, OutData, OutError);
+	if (CommandLower == TEXT("ik_retargeter_apply_folder")) return CmdIKRetargeterApplyFolder(Ctx, OutData, OutError);
+	if (CommandLower == TEXT("ik_retargeter_validate_folder")) return CmdIKRetargeterValidateFolder(Ctx, OutData, OutError);
 	if (CommandLower == TEXT("ik_retargeter_set_ik_rig")) return CmdIKRetargeterSetIKRig(Ctx, OutData, OutError);
 	if (CommandLower == TEXT("ik_retargeter_set_settings")) return CmdIKRetargeterSetSettings(Ctx, OutData, OutError);
 	if (CommandLower == TEXT("ik_retargeter_set_pose")) return CmdIKRetargeterSetPose(Ctx, OutData, OutError);
 	if (CommandLower == TEXT("ik_retargeter_set_preview_mesh")) return CmdIKRetargeterSetPreviewMesh(Ctx, OutData, OutError);
 	if (CommandLower == TEXT("ik_retargeter_auto_map_chains")) return CmdIKRetargeterAutoMapChains(Ctx, OutData, OutError);
+	if (CommandLower == TEXT("ik_retargeter_auto_align_pose")) return CmdIKRetargeterAutoAlignPose(Ctx, OutData, OutError);
 	if (CommandLower == TEXT("ik_retargeter_duplicate_and_retarget")) return CmdIKRetargeterDuplicateAndRetarget(Ctx, OutData, OutError);
 
 	OutError = TEXT("unknown_ik_retargeter_command");
+	return false;
+}
+
+bool FUeAgentHttpServer::ExecuteRetargetBatchCommand(const FString& CommandLower, const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+{
+	if (CommandLower == TEXT("retarget_batch_export_json")) return CmdRetargetBatchExportJson(Ctx, OutData, OutError);
+	if (CommandLower == TEXT("retarget_batch_apply_json")) return CmdRetargetBatchApplyJson(Ctx, OutData, OutError);
+	if (CommandLower == TEXT("retarget_batch_validate_json")) return CmdRetargetBatchValidateJson(Ctx, OutData, OutError);
+
+	OutError = TEXT("unknown_retarget_batch_command");
 	return false;
 }
 
@@ -2129,6 +2215,254 @@ bool FUeAgentHttpServer::CmdIKRigApplyAutoRetargetDefinition(const FUeAgentReque
 	return true;
 }
 
+bool FUeAgentHttpServer::CmdIKRigPreviewSolve(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+{
+	FString AssetPath;
+	if (!JsonTryGetString(Ctx.Params, TEXT("asset_path"), AssetPath) || AssetPath.IsEmpty())
+	{
+		OutError = TEXT("missing_asset_path");
+		return false;
+	}
+
+	UIKRigDefinition* IKRig = UeAgentIKAssetOps::LoadIKRig(AssetPath);
+	if (!IKRig)
+	{
+		OutError = TEXT("ik_rig_not_found");
+		return false;
+	}
+
+	UIKRigController* Controller = UIKRigController::GetController(IKRig);
+	if (!Controller)
+	{
+		OutError = TEXT("ik_rig_controller_not_available");
+		return false;
+	}
+
+	FString SkeletalMeshPath;
+	JsonTryGetString(Ctx.Params, TEXT("skeletal_mesh_path"), SkeletalMeshPath);
+	USkeletalMesh* SkeletalMesh = SkeletalMeshPath.TrimStartAndEnd().IsEmpty()
+		? IKRig->GetPreviewMesh()
+		: UeAgentIKAssetOps::LoadSkeletalMesh(SkeletalMeshPath);
+	if (!SkeletalMesh)
+	{
+		OutError = SkeletalMeshPath.TrimStartAndEnd().IsEmpty() ? TEXT("missing_preview_skeletal_mesh") : TEXT("skeletal_mesh_not_found");
+		return false;
+	}
+
+	FIKRigGoalContainer OptionalGoals;
+	const TArray<TSharedPtr<FJsonValue>>* GoalOverrides = nullptr;
+	const bool bHasGoalOverrides = Ctx.Params->TryGetArrayField(TEXT("goals"), GoalOverrides) && GoalOverrides;
+	if (bHasGoalOverrides)
+	{
+		OptionalGoals.FillWithGoalArray(Controller->GetAllGoals());
+		for (const TSharedPtr<FJsonValue>& Value : *GoalOverrides)
+		{
+			const TSharedPtr<FJsonObject>* GoalObject = nullptr;
+			if (!Value.IsValid() || !Value->TryGetObject(GoalObject) || !GoalObject || !GoalObject->IsValid())
+			{
+				OutError = TEXT("invalid_goal_entry");
+				return false;
+			}
+
+			FString GoalNameText;
+			if (!(*GoalObject)->TryGetStringField(TEXT("goal_name"), GoalNameText))
+			{
+				(*GoalObject)->TryGetStringField(TEXT("name"), GoalNameText);
+			}
+			GoalNameText = GoalNameText.TrimStartAndEnd();
+			if (GoalNameText.IsEmpty())
+			{
+				OutError = TEXT("missing_goal_name");
+				return false;
+			}
+
+			const FName GoalName(*GoalNameText);
+			const FIKRigGoal* ExistingGoal = OptionalGoals.FindGoalByName(GoalName);
+			FIKRigGoal Goal = ExistingGoal ? *ExistingGoal : FIKRigGoal();
+			Goal.Name = GoalName;
+
+			FString BoneNameText;
+			if ((*GoalObject)->TryGetStringField(TEXT("bone_name"), BoneNameText))
+			{
+				BoneNameText = BoneNameText.TrimStartAndEnd();
+				if (!BoneNameText.IsEmpty())
+				{
+					Goal.BoneName = FName(*BoneNameText);
+				}
+			}
+			if (Goal.BoneName.IsNone())
+			{
+				OutError = TEXT("missing_goal_bone_name");
+				return false;
+			}
+
+			JsonTryGetVector(*GoalObject, TEXT("position"), Goal.Position);
+			JsonTryGetRotator(*GoalObject, TEXT("rotation"), Goal.Rotation);
+
+			double AlphaValue = Goal.PositionAlpha;
+			if (UeAgentJsonDiagnostics::TryReadNumberFieldByAliases(*GoalObject, { TEXT("position_alpha"), TEXT("PositionAlpha") }, AlphaValue))
+			{
+				Goal.PositionAlpha = static_cast<float>(AlphaValue);
+			}
+			AlphaValue = Goal.RotationAlpha;
+			if (UeAgentJsonDiagnostics::TryReadNumberFieldByAliases(*GoalObject, { TEXT("rotation_alpha"), TEXT("RotationAlpha") }, AlphaValue))
+			{
+				Goal.RotationAlpha = static_cast<float>(AlphaValue);
+			}
+
+			bool bEnabled = Goal.bEnabled;
+			if ((*GoalObject)->TryGetBoolField(TEXT("enabled"), bEnabled))
+			{
+				Goal.bEnabled = bEnabled;
+			}
+
+			FString SpaceText;
+			if ((*GoalObject)->TryGetStringField(TEXT("position_space"), SpaceText))
+			{
+				EIKRigGoalSpace Space = Goal.PositionSpace;
+				if (!UeAgentIKAssetOps::ParseIKRigGoalSpace(SpaceText, Space))
+				{
+					OutError = TEXT("invalid_position_space");
+					return false;
+				}
+				Goal.PositionSpace = Space;
+			}
+			if ((*GoalObject)->TryGetStringField(TEXT("rotation_space"), SpaceText))
+			{
+				EIKRigGoalSpace Space = Goal.RotationSpace;
+				if (!UeAgentIKAssetOps::ParseIKRigGoalSpace(SpaceText, Space))
+				{
+					OutError = TEXT("invalid_rotation_space");
+					return false;
+				}
+				Goal.RotationSpace = Space;
+			}
+
+			OptionalGoals.SetIKGoal(Goal);
+		}
+	}
+
+	FIKRigProcessor Processor;
+	Processor.Log.SetLogTarget(IKRig);
+	Processor.Log.Clear();
+	Processor.Initialize(IKRig, SkeletalMesh, OptionalGoals);
+
+	OutData->SetStringField(TEXT("asset_path"), UeAgentIKAssetOps::NormalizeAssetPath(IKRig->GetOutermost()->GetName()));
+	OutData->SetStringField(TEXT("object_path"), IKRig->GetPathName());
+	OutData->SetStringField(TEXT("skeletal_mesh"), SkeletalMesh->GetPathName());
+	OutData->SetNumberField(TEXT("solver_count"), IKRig->GetSolverStructs().Num());
+	OutData->SetBoolField(TEXT("used_goal_overrides"), bHasGoalOverrides);
+	OutData->SetArrayField(TEXT("errors"), UeAgentIKAssetOps::TextArrayToJson(Processor.Log.GetErrors()));
+	OutData->SetArrayField(TEXT("warnings"), UeAgentIKAssetOps::TextArrayToJson(Processor.Log.GetWarnings()));
+	OutData->SetArrayField(TEXT("messages"), UeAgentIKAssetOps::TextArrayToJson(Processor.Log.GetMessages()));
+	OutData->SetBoolField(TEXT("initialized"), Processor.IsInitialized());
+
+	if (!Processor.IsInitialized())
+	{
+		OutError = TEXT("ik_rig_preview_solve_initialize_failed");
+		return false;
+	}
+
+	Processor.SetInputPoseToRefPose();
+	Processor.Solve();
+
+	TArray<FTransform> OutputPoseGlobal;
+	Processor.GetOutputPoseGlobal(OutputPoseGlobal);
+
+	const FIKRigGoalContainer& SolvedGoals = Processor.GetGoalContainer();
+	TArray<TSharedPtr<FJsonValue>> GoalResults;
+	for (const FIKRigGoal& Goal : SolvedGoals.GetGoalArray())
+	{
+		TSharedPtr<FJsonObject> GoalObject = MakeShared<FJsonObject>();
+		GoalObject->SetStringField(TEXT("goal_name"), Goal.Name.ToString());
+		GoalObject->SetStringField(TEXT("bone_name"), Goal.BoneName.ToString());
+		GoalObject->SetBoolField(TEXT("enabled"), Goal.bEnabled);
+		GoalObject->SetObjectField(TEXT("position"), UeAgentIKAssetOps::BuildVectorJson(Goal.Position));
+		GoalObject->SetObjectField(TEXT("rotation"), UeAgentIKAssetOps::BuildRotatorJson(Goal.Rotation));
+		GoalObject->SetNumberField(TEXT("position_alpha"), Goal.PositionAlpha);
+		GoalObject->SetNumberField(TEXT("rotation_alpha"), Goal.RotationAlpha);
+		GoalObject->SetStringField(TEXT("position_space"), UeAgentIKAssetOps::IKRigGoalSpaceToString(Goal.PositionSpace));
+		GoalObject->SetStringField(TEXT("rotation_space"), UeAgentIKAssetOps::IKRigGoalSpaceToString(Goal.RotationSpace));
+		GoalObject->SetObjectField(TEXT("final_blended_position"), UeAgentIKAssetOps::BuildVectorJson(Goal.FinalBlendedPosition));
+		GoalObject->SetObjectField(TEXT("final_blended_rotation"), UeAgentIKAssetOps::BuildRotatorJson(Goal.FinalBlendedRotation.Rotator()));
+		GoalResults.Add(MakeShared<FJsonValueObject>(GoalObject));
+	}
+
+	bool bIncludeAllBones = false;
+	JsonTryGetBool(Ctx.Params, TEXT("include_all_bones"), bIncludeAllBones);
+
+	double MaxOutputBoneValue = 64.0;
+	JsonTryGetNumber(Ctx.Params, TEXT("max_output_bones"), MaxOutputBoneValue);
+	const int32 MaxOutputBones = FMath::Clamp(static_cast<int32>(MaxOutputBoneValue), 1, 512);
+
+	TArray<int32> SampleBoneIndices;
+	TArray<FString> MissingSampleBones;
+	const FReferenceSkeleton& RefSkeleton = SkeletalMesh->GetRefSkeleton();
+	const TArray<TSharedPtr<FJsonValue>>* SampleBones = nullptr;
+	if (Ctx.Params->TryGetArrayField(TEXT("sample_bones"), SampleBones) && SampleBones && SampleBones->Num() > 0)
+	{
+		for (const TSharedPtr<FJsonValue>& Value : *SampleBones)
+		{
+			if (!Value.IsValid())
+			{
+				continue;
+			}
+			const FString BoneNameText = Value->AsString().TrimStartAndEnd();
+			if (BoneNameText.IsEmpty())
+			{
+				continue;
+			}
+			const int32 BoneIndex = RefSkeleton.FindBoneIndex(FName(*BoneNameText));
+			if (BoneIndex == INDEX_NONE || !OutputPoseGlobal.IsValidIndex(BoneIndex))
+			{
+				MissingSampleBones.Add(BoneNameText);
+				continue;
+			}
+			SampleBoneIndices.Add(BoneIndex);
+		}
+	}
+	else
+	{
+		const int32 Limit = bIncludeAllBones ? OutputPoseGlobal.Num() : FMath::Min(OutputPoseGlobal.Num(), MaxOutputBones);
+		for (int32 BoneIndex = 0; BoneIndex < Limit; ++BoneIndex)
+		{
+			SampleBoneIndices.Add(BoneIndex);
+		}
+	}
+
+	if (bIncludeAllBones && SampleBoneIndices.Num() > MaxOutputBones)
+	{
+		SampleBoneIndices.SetNum(MaxOutputBones);
+	}
+
+	TArray<TSharedPtr<FJsonValue>> OutputPoseSample;
+	for (const int32 BoneIndex : SampleBoneIndices)
+	{
+		if (!OutputPoseGlobal.IsValidIndex(BoneIndex))
+		{
+			continue;
+		}
+
+		TSharedPtr<FJsonObject> BoneObject = MakeShared<FJsonObject>();
+		BoneObject->SetNumberField(TEXT("bone_index"), BoneIndex);
+		BoneObject->SetStringField(TEXT("bone_name"), RefSkeleton.GetBoneName(BoneIndex).ToString());
+		BoneObject->SetObjectField(TEXT("global_transform"), UeAgentIKAssetOps::BuildTransformJson(OutputPoseGlobal[BoneIndex]));
+		OutputPoseSample.Add(MakeShared<FJsonValueObject>(BoneObject));
+	}
+
+	OutData->SetBoolField(TEXT("solved"), true);
+	OutData->SetNumberField(TEXT("goal_count"), GoalResults.Num());
+	OutData->SetArrayField(TEXT("goals"), GoalResults);
+	OutData->SetNumberField(TEXT("output_bone_count"), OutputPoseGlobal.Num());
+	OutData->SetNumberField(TEXT("output_pose_sample_count"), OutputPoseSample.Num());
+	OutData->SetArrayField(TEXT("output_pose_sample"), OutputPoseSample);
+	OutData->SetArrayField(TEXT("missing_sample_bones"), UeAgentIKAssetOps::StringArrayToJson(MissingSampleBones));
+	OutData->SetArrayField(TEXT("errors_after_solve"), UeAgentIKAssetOps::TextArrayToJson(Processor.Log.GetErrors()));
+	OutData->SetArrayField(TEXT("warnings_after_solve"), UeAgentIKAssetOps::TextArrayToJson(Processor.Log.GetWarnings()));
+	OutData->SetArrayField(TEXT("messages_after_solve"), UeAgentIKAssetOps::TextArrayToJson(Processor.Log.GetMessages()));
+	return true;
+}
+
 bool FUeAgentHttpServer::CmdIKRetargeterCreate(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	FString AssetPath;
@@ -2834,6 +3168,83 @@ bool FUeAgentHttpServer::CmdIKRetargeterSetPose(const FUeAgentRequestContext& Ct
 	return true;
 }
 
+bool FUeAgentHttpServer::CmdIKRetargeterAutoAlignPose(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+{
+	FString AssetPath;
+	if (!JsonTryGetString(Ctx.Params, TEXT("asset_path"), AssetPath) || AssetPath.IsEmpty())
+	{
+		OutError = TEXT("missing_asset_path");
+		return false;
+	}
+
+	FString SideText;
+	if (!JsonTryGetString(Ctx.Params, TEXT("source_or_target"), SideText) || SideText.TrimStartAndEnd().IsEmpty())
+	{
+		OutError = TEXT("missing_source_or_target");
+		return false;
+	}
+
+	FString AutoAlignMethodText;
+	JsonTryGetString(Ctx.Params, TEXT("auto_align_method"), AutoAlignMethodText);
+	ERetargetAutoAlignMethod AutoAlignMethod = ERetargetAutoAlignMethod::ChainToChain;
+	if (!UeAgentIKAssetOps::ParseAutoAlignMethod(AutoAlignMethodText, AutoAlignMethod))
+	{
+		OutError = TEXT("invalid_auto_align_method");
+		return false;
+	}
+
+	TSharedPtr<FJsonObject> Params = MakeShared<FJsonObject>();
+	for (const TPair<FString, TSharedPtr<FJsonValue>>& Pair : Ctx.Params->Values)
+	{
+		Params->SetField(Pair.Key, Pair.Value);
+	}
+
+	const TSharedPtr<FJsonValue>* BonesValue = Ctx.Params->Values.Find(TEXT("bones"));
+	if (BonesValue && BonesValue->IsValid() && !Params->HasField(TEXT("auto_align_bones")))
+	{
+		Params->SetField(TEXT("auto_align_bones"), *BonesValue);
+	}
+
+	const bool bHasAutoAlignBones = Params->HasTypedField<EJson::Array>(TEXT("auto_align_bones"));
+	const bool bHasExplicitAction =
+		Params->HasField(TEXT("auto_align_all")) ||
+		bHasAutoAlignBones ||
+		Params->HasField(TEXT("snap_bone_to_ground")) ||
+		Params->HasField(TEXT("reset_all")) ||
+		Params->HasField(TEXT("reset_bones")) ||
+		Params->HasField(TEXT("root_offset"));
+	if (!bHasExplicitAction)
+	{
+		Params->SetBoolField(TEXT("auto_align_all"), true);
+	}
+
+	FUeAgentRequestContext SubCtx = Ctx;
+	SubCtx.Command = TEXT("ik_retargeter_set_pose");
+	SubCtx.Params = Params;
+	const bool bOk = CmdIKRetargeterSetPose(SubCtx, OutData, OutError);
+	if (!bOk)
+	{
+		return false;
+	}
+
+	int32 AutoAlignBoneCount = 0;
+	const TArray<TSharedPtr<FJsonValue>>* AutoAlignBones = nullptr;
+	if (Params->TryGetArrayField(TEXT("auto_align_bones"), AutoAlignBones) && AutoAlignBones)
+	{
+		AutoAlignBoneCount = AutoAlignBones->Num();
+	}
+
+	bool bAutoAlignAll = false;
+	JsonTryGetBool(Params, TEXT("auto_align_all"), bAutoAlignAll);
+
+	OutData->SetStringField(TEXT("action"), TEXT("auto_align_pose"));
+	OutData->SetStringField(TEXT("auto_align_method"), UeAgentIKAssetOps::AutoAlignMethodToString(AutoAlignMethod));
+	OutData->SetBoolField(TEXT("used_auto_align_all"), bAutoAlignAll);
+	OutData->SetNumberField(TEXT("used_auto_align_bones_count"), AutoAlignBoneCount);
+	OutData->SetBoolField(TEXT("used_bones_alias"), BonesValue != nullptr);
+	return true;
+}
+
 bool FUeAgentHttpServer::CmdIKRetargeterSetPreviewMesh(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	FString AssetPath;
@@ -3121,3 +3532,5 @@ bool FUeAgentHttpServer::CmdIKRetargeterDuplicateAndRetarget(const FUeAgentReque
 	OutData->SetArrayField(TEXT("created_assets"), CreatedAssets);
 	return true;
 }
+
+#include "UeAgentHttpServer_IKAssets_FolderFormat.inl"

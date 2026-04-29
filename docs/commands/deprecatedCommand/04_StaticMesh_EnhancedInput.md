@@ -7,6 +7,13 @@
 | 指令 | 作用 | 关键参数 | 典型用法 |
 |---|---|---|---|
 | `static_mesh_set_property` | **Deprecated for authoring**：设置网格资产属性 | `asset_path`、`property_name`、`value_text` | 能由 `asset_apply_property_json` 表达时优先走 JSON |
+| `static_mesh_set_material_slot` | **Deprecated for authoring**：设置默认材质槽材质 | `asset_path`、`slot_index` 或 `slot_name`、`material_path` | 主流程优先改 `materials.json` 后 `static_mesh_apply_folder` |
+| `static_mesh_set_collision_boxes` | **Deprecated for authoring**：设置简单碰撞 Box 列表 | `asset_path`、`boxes[]`、`clear_other_shapes` | 主流程优先改 `collision.json` |
+| `static_mesh_set_collision_spheres` | **Deprecated for authoring**：设置简单碰撞 Sphere 列表 | `asset_path`、`spheres[]`、`clear_other_shapes` | 主流程优先改 `collision.json` |
+| `static_mesh_set_collision_capsules` | **Deprecated for authoring**：设置简单碰撞 Capsule 列表 | `asset_path`、`capsules[]`、`clear_other_shapes` | 主流程优先改 `collision.json` |
+| `static_mesh_add_socket` | **Deprecated for authoring**：新增 Socket | `asset_path`、`socket_name`、`location`、`rotation`、`scale` | 主流程优先改 `sockets.json` |
+| `static_mesh_update_socket` | **Deprecated for authoring**：修改 Socket | `asset_path`、`socket_name`、`new_socket_name` | 主流程优先改 `sockets.json` |
+| `static_mesh_remove_socket` | **Deprecated for authoring**：删除 Socket | `asset_path`、`socket_name` | 主流程优先改 `sockets.json` 中 `remove=true` |
 
 ## EnhancedInput
 

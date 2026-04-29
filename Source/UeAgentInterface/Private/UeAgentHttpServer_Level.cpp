@@ -14,6 +14,7 @@
 #include "Components/PrimitiveComponent.h"
 #include "Components/SceneComponent.h"
 #include "Components/SceneCaptureComponent2D.h"
+#include "Components/SkeletalMeshComponent.h"
 #include "Components/StaticMeshComponent.h"
 #include "Containers/Ticker.h"
 #include "EditorActorFolders.h"
@@ -23,6 +24,7 @@
 #include "Engine/CollisionProfile.h"
 #include "Engine/OverlapResult.h"
 #include "Engine/SceneCapture2D.h"
+#include "Engine/SkeletalMesh.h"
 #include "Engine/StaticMesh.h"
 #include "Engine/StaticMeshActor.h"
 #include "Engine/TargetPoint.h"
@@ -46,6 +48,7 @@
 #include "ScopedTransaction.h"
 #include "SceneView.h"
 #include "StaticMeshAttributes.h"
+#include "Animation/MorphTarget.h"
 #include "Subsystems/EditorActorSubsystem.h"
 #include <atomic>
 

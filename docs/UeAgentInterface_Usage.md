@@ -22,6 +22,9 @@
 - `Plugins/UeAgentInterface/docs/commands/08_Niagara_Emitter.md`
 - `Plugins/UeAgentInterface/docs/commands/09_Niagara_StageGraph.md`
 - `Plugins/UeAgentInterface/docs/commands/15_Niagara_FolderFormat.md`
+- `Plugins/UeAgentInterface/docs/commands/16_SkeletalMesh_FolderFormat.md`
+- `Plugins/UeAgentInterface/docs/commands/17_ControlRig_FolderFormat.md`
+- `Plugins/UeAgentInterface/docs/commands/18_Deformer_MLDeformer_GeometryCache.md`
 - `Plugins/UeAgentInterface/docs/commands/10_Modeling.md`
 
 ### 0.1 外置 CLI 推荐用法（UeAgentInterfaceCMD）
@@ -72,6 +75,9 @@ Niagara 相关批次默认启用护栏（自动 preflight + 编译日志 + emitt
      - `niagara_export_folder / niagara_apply_folder`
      - `niagara_emitter_export_folder / niagara_emitter_apply_folder`
      - `niagara_script_export_folder / niagara_script_apply_folder`
+     - `static_mesh_export_folder / static_mesh_apply_folder`
+     - `skeletal_mesh_export_folder / skeletal_mesh_apply_folder`
+     - `deformer_graph_export_folder / deformer_graph_apply_folder`
 3. 原子命令：
    - 主要用于以下场景：
      - bootstrap 或补创建某个最小局部结构
@@ -85,7 +91,7 @@ Niagara 相关批次默认启用护栏（自动 preflight + 编译日志 + emitt
 - 能走 JSON / 结构化 JSON 的资产编辑，不要退回逐条原子命令手搓完整 authoring。
 - 被 JSON / 结构化 JSON 覆盖的写入型原子命令保留兼容，但统一视为 deprecated for authoring；只用于 bootstrap、诊断、迁移、schema 边界和紧急局部修补。
 - 读取、创建最小资产、打开编辑器、编译、截图、导出、应用、dirty 处理和诊断命令不属于这类废弃写入命令。
-- 暂无 JSON / 结构化 JSON profile 的领域不强行标废弃，例如 Modeling、IK Rig / IK Retargeter、Level Actor 放置、NavMesh、普通视口控制等。
+- 暂无 JSON / 结构化 JSON profile 的领域不强行标废弃，例如 Modeling、Level Actor 放置、NavMesh、普通视口控制等。IK Rig / IK Retargeter / Skeleton / SkeletalMesh / Control Rig / StaticMesh / Deformer Graph 已进入 JSON 或文件夹式结构化 JSON 主流程。
 
 废弃命令明细已抽到 `commands/deprecatedCommand/`，覆盖面按主流程分组：
 
@@ -98,6 +104,9 @@ Niagara 相关批次默认启用护栏（自动 preflight + 编译日志 + emitt
 - `montage_apply_json` 覆盖的 Montage 写入：blend/sync、preview、slot track、segment、section、notify、Skeleton slot/group。
 - `anim_blueprint_apply_folder` 覆盖的 AnimBlueprint 写入：成员、逻辑图、Anim Layer、Layer Interface、State Machine、State/Conduit/Alias/Transition、预览配置。
 - `niagara*_apply_folder` 覆盖的 Niagara 写入：System、Emitter、Script、Renderer、Event、Parameter、Stage、Module、Node、ModuleInput。
+- `static_mesh_apply_folder` 覆盖的 StaticMesh authoring 写入：材质、socket、simple collision、lightmap、Nanite 安全字段。
+- `skeletal_mesh_apply_folder` 覆盖的 SkeletalMesh authoring 写入：材质、mesh-only socket、physics、post process AnimBP、Morph 删除；Skin Weight Profile 导入/删除/预览和 Morph 预览使用显式动作命令，不隐式混进 folder apply。
+- `deformer_graph_apply_folder` 与 Deformer/ML 单文件 JSON 覆盖的写入：显式 `apply=true` 的 UObject 属性项。
 
 ### 0.4 通用编辑方法论
 
@@ -562,50 +571,45 @@ Blueprint 视图与截图补充：
   - 关键参数：`asset_path`
   - 返回：`preview_skeletal_mesh`、`retarget_root`、`goals[]`、`retarget_chains[]`、`solvers[]`
   - 说明：`solvers[]` 当前已稳定补充 `BodyMover` 的 `settings` 与 `goal_settings[]` 摘要
-- `ik_rig_set_solver`
-  - 关键参数：`asset_path`
-  - 新增时：`solver_type`
-  - 更新/删除时：`solver_index`
-  - 可选：`enabled`、`start_bone_name`、`end_bone_name`、`move_to_index`、`connect_goal_names[]`、`disconnect_goal_names[]`、`settings{...}`、`goal_settings[]`、`remove`、`save_after_set`
-- `ik_rig_set_preview_mesh`
-- `ik_rig_set_goal`
-  - 关键参数：`asset_path`、`goal_name`
-  - 可选：`bone_name`、`position_alpha`、`rotation_alpha`、`position`、`rotation`、`current_transform{location/rotation/scale}`、`remove`、`save_after_set`
-  - 返回：`bone_name`、`position_alpha`、`rotation_alpha`、`current_location`、`current_rotation`
-- `ik_rig_set_retarget_root`
-- `ik_rig_set_retarget_chain`
+- `ik_rig_export_folder`
+- `ik_rig_validate_folder`
+- `ik_rig_apply_folder`
+  - 结构化文件：`preview.json`、`goals.json`、`retarget_definition.json`、`solvers.json`、`raw_properties.json`、`validation/*.json`
+  - 覆盖：preview mesh、retarget root、goals、retarget chains、solver 基础结构，以及 BodyMover / FBIK 已开放设置
 - `ik_rig_apply_auto_retarget_definition`
+- `ik_rig_preview_solve`
+  - 关键参数：`asset_path`
+  - 可选：`skeletal_mesh_path`、`goals[]`、`sample_bones[]`、`include_all_bones`、`max_output_bones`
+  - 返回：`initialized`、`solved`、`errors/warnings/messages`、`goals[]`、`output_pose_sample[]`
 - `ik_retargeter_create`
   - 关键参数：`asset_path`
   - 可选：`source_ik_rig`、`target_ik_rig`、`source_preview_mesh`、`target_preview_mesh`、`add_default_ops`
 - `ik_retargeter_get_info`
   - 关键参数：`asset_path`
   - 返回：`source_ik_rig`、`target_ik_rig`、`source_preview_mesh`、`target_preview_mesh`、`source_pose_names[]`、`target_pose_names[]`、`current_source_pose`、`current_target_pose`、`root_settings`、`global_settings`、`chain_settings[]`、`retarget_op_count`
-- `ik_retargeter_set_ik_rig`
-- `ik_retargeter_set_settings`
-  - 关键参数：`asset_path`
-  - 可选：`global_settings{...}`、`root_settings{...}`、`target_chain_name`、`chain_settings{...}`、`reset_chain_to_default`
-  - 返回：当前 retargeter 摘要；已稳定验证 `global_settings/root_settings` 写入与回读
-- `ik_retargeter_set_pose`
-  - 关键参数：`asset_path`、`source_or_target`
-  - 可选：`pose_name`、`create_if_missing`、`set_current`、`duplicate_from_pose`、`rename_from_pose`、`remove`、`reset_all`、`reset_bones[]`、`root_offset`、`bone_rotation_offsets[]`、`auto_align_*`、`snap_bone_to_ground`
-- `ik_retargeter_set_preview_mesh`
+- `ik_retargeter_export_folder`
+- `ik_retargeter_validate_folder`
+- `ik_retargeter_apply_folder`
+  - 结构化文件：`rigs.json`、`preview_meshes.json`、`global_settings.json`、`root_settings.json`、`chain_mappings.json`、`chain_settings.json`、`poses/*/*.json`、`validation/*.json`
+  - 覆盖：source / target IK Rig、source / target preview mesh、global / root / chain settings、chain mapping、默认 source / target pose
 - `ik_retargeter_auto_map_chains`
   - 可选：`auto_map_type=exact/fuzzy/clear`、`force_remap`、`op_name`
+- `ik_retargeter_auto_align_pose`
+  - 关键参数：`asset_path`、`source_or_target`
+  - 可选：`pose_name`、`create_if_missing`、`set_current`、`auto_align_method`、`auto_align_all`、`auto_align_bones[]/bones[]`、`snap_bone_to_ground`、`reset_all`、`reset_bones[]`、`root_offset`
 - `ik_retargeter_duplicate_and_retarget`
   - 关键参数：`asset_path`、`asset_paths[]`、`output_folder`
   - 可选：`source_mesh_path`、`target_mesh_path`、`prefix/suffix/search/replace`、`include_referenced_assets`
+- `retarget_batch_export_json`
+- `retarget_batch_validate_json`
+- `retarget_batch_apply_json`
+  - 批量重定向是动作型 JSON，不属于普通 IK Retargeter 资产状态
 
 说明：
 
-- 当前优先保证 IK / Retarget 的主流程：创建资产、设置 source/target rig、配置 preview mesh、管理 retarget pose、配置 global/root settings、自动链映射、批量复制并重定向。
-- `ik_rig_set_goal` 当前已稳定支持 `bone_name + position_alpha + rotation_alpha` 资产级写入与回读。
-- `ik_rig_set_goal` 当前已稳定支持 `bone_name + position_alpha + rotation_alpha + current transform` 的资产级写入；其中 `current transform` 以“立即回读 + 摘要字段存在”为验收口径。
-- `ik_rig_set_solver` 当前已稳定扩展到 `BodyMover` 的 solver settings、goal 连接与 `InfluenceMultiplier`。
-- `ik_rig_set_solver` 当前也已稳定扩展到 `FBIK` 的基础 solver settings、goal settings、bone settings。
-- `ik_retargeter_set_settings` 当前稳定面是 `global_settings/root_settings`。
-- `chain_settings[]` 已接入摘要回读，但在 UE 5.6 当前最小 retargeter 资产流实测里经常是空数组，不能把它当成当前稳定能力面。
-- 没有继续扩到全部 solver 细粒度属性和 op 级全量编辑。
+- 当前优先保证 IK / Retarget 的主流程：创建资产、导出 folder JSON、修改真实结构、校验、回写、读回。
+- 已能被 `ik_rig_apply_folder` / `ik_retargeter_apply_folder` 覆盖的旧 `set_*` 写入命令已移动到 `commands/deprecatedCommand/14_IKRig_IKRetargeter.md`，只用于 bootstrap、迁移、schema 边界、局部补修和故障恢复。
+- `ik_rig_preview_solve`、`ik_retargeter_auto_align_pose`、`ik_retargeter_auto_map_chains`、`ik_retargeter_duplicate_and_retarget` 与 `retarget_batch_*` 是动作语义，仍保留在主流程中，但不隐式塞进普通 folder apply。
 
 ### 4.6 StaticMesh
 
@@ -621,6 +625,9 @@ Blueprint 视图与截图补充：
 - `static_mesh_add_socket`
 - `static_mesh_update_socket`
 - `static_mesh_remove_socket`
+- `static_mesh_reimport`
+- `static_mesh_build`
+- `static_mesh_preview_collision`
 
 StaticMesh 补充：
 - `static_mesh_get_info`：原本已经返回 bounds；现在补了两个更明确的拆分命令，便于脚本直接取几何信息。
@@ -629,6 +636,8 @@ StaticMesh 补充：
 - `static_mesh_get_local_corners`：读取静态网格局部包围盒 8 个角点；参数 `asset_path`。
 - `static_mesh_set_material_slot`：设置默认材质槽材质；参数 `asset_path`、`material_path`，以及 `slot_index` 或 `slot_name`。
 - `static_mesh_set_collision_boxes / spheres / capsules`：分别重设三类简单碰撞形状数组；都支持 `clear_other_shapes`。
+- `static_mesh_reimport`：使用 UE reimport handler 自动化重导入；参数 `asset_path`，可选 `source_filename/save_after_reimport/show_notification`。
+- `static_mesh_preview_collision`：无 UI 返回 simple collision 与 bounds 摘要，后续用 `level_trace_world_ray / level_sweep_capsule / level_check_overlaps` 做场景验证。
 
 ### 4.7 EnhancedInput
 
@@ -1094,6 +1103,72 @@ Modeling 补充：
   - 关键参数：`emitter_asset_path`（或 `asset_path`）+ `stage_key`（或 `script_usage` + `script_usage_id`）+ `from_node_guid`、`from_pin`、`to_node_guid`、`to_pin`；可选：`emitter_version`、`break_input_links`、`save_after_set`
 - `niagara_emitter_disconnect_stage_nodes`
   - 关键参数：`emitter_asset_path`（或 `asset_path`）+ `stage_key`（或 `script_usage` + `script_usage_id`）+ `from_node_guid`、`from_pin`；可选：`to_node_guid`、`to_pin`、`emitter_version`、`save_after_set`
+
+### 4.15 Control Rig / Control Rig Shape Library
+
+Control Rig authoring 主流程使用文件夹式结构化 JSON。Shape Library 是独立资产，使用单文件 JSON；AnimBlueprint / Sequencer 接入和 bake 是跨资产动作，不由 `control_rig_apply_folder` 隐式完成。
+
+- `control_rig_create`
+  - 关键参数：`asset_path`
+  - 可选参数：`control_rig_type=independent_rig|rig_module|modular_rig`、`preview_skeletal_mesh`、`import_hierarchy_from_preview`、`save_after_create`
+- `control_rig_get_info`
+  - 关键参数：`asset_path`
+  - 返回：`control_rig_class`、`preview_skeletal_mesh`、`shape_libraries[]`、`hierarchy`、`graphs[]`、`variables`
+- `control_rig_export_folder`
+  - 关键参数：`asset_path`
+  - 可选参数：`folder_path`、`clean_output_dir`
+  - 说明：导出 `asset/settings/shape_libraries/hierarchy/variables/graphs/modular/validation` 文件夹结构，并写入 `validation/coverage_report.json`
+- `control_rig_validate_folder`
+  - 关键参数：`folder_path`
+  - 可选参数：`asset_path`、`create_if_missing`
+  - 返回：`valid`、`json_issue_count`、`error_count`、`warning_count`、`issues[]`、`coverage`
+- `control_rig_apply_folder`
+  - 关键参数：`folder_path`
+  - 可选参数：`asset_path`、`dry_run`、`validate_only`、`create_if_missing`、`compile_after_apply`、`save_after_apply`
+  - 返回：`valid`、`issues[]`、`applied.variables_added`、`compile_report`、`readback`
+  - 说明：当前稳定回写 preview、Shape Library 引用、hierarchy bones/nulls/controls/curves、`variables/variables.json` 和 `graphs/graphs.json`。`functions`、`modular`、`raw_properties`、`readonly_properties` 等 profile 如果包含实际写入内容，会失败并返回 `unsupported_apply_profile`，不静默忽略
+- `control_rig_compile`
+  - 关键参数：`asset_path`
+- `control_rig_get_compile_log`
+  - 关键参数：`asset_path`
+- `control_rig_open_editor`
+  - 关键参数：`asset_path`
+  - 说明：只用于调试辅助，必须遵守最小化/不抢焦点规则
+- `control_rig_graph_get_view / control_rig_graph_set_view`
+  - 关键参数：`asset_path`
+  - 可选参数：`graph_name_or_path`
+- `control_rig_viewport_get_camera / control_rig_viewport_set_camera`
+  - 关键参数：`asset_path`
+- `control_rig_screenshot`
+  - 关键参数：`asset_path`、`target=graph|viewport|window`
+  - 可选参数：`graph_name_or_path`
+- `control_rig_runtime_probe`
+  - 关键参数：`asset_path`
+  - 可选参数：`frames`、`event_name`、`execute_construction`、`variables`、`variable_inputs[]`、`sample_bones[]`、`sample_controls[]`、`sample_variables[]`
+  - 返回：`supported_events`、`construction_*`、`execution_*`、`compile_report`、`issues[]`、`bones[]`、`controls[]`、`variables[]`
+- `control_rig_bake_to_animation`
+  - 关键参数：`sequence_path`、`binding_id` 或 `binding_guid`、`output_anim_sequence`
+  - 新建 AnimSequence 时优先从 binding 上的 SkeletalMesh 推断 skeleton，也可显式传 `target_skeleton` 或 `preview_skeletal_mesh`
+  - 返回：`binding_preflight`、`export_api`、`created`、`exported`
+- `control_rig_bake_to_control_rig`
+  - 关键参数：`sequence_path`、`binding_id` 或 `binding_guid`、`control_rig_class`
+  - 目标类必须是 `UFKControlRig` 或支持 Inverse event；否则返回 `control_rig_bake_requires_fk_or_inverse_event`
+  - 返回：`binding_preflight`、`is_fk_control_rig`、`supports_inverse_event`、`baked`
+- `control_rig_shape_library_create`
+  - 关键参数：`asset_path`
+- `control_rig_shape_library_get_info`
+  - 关键参数：`asset_path`
+- `control_rig_shape_library_export_json`
+  - 关键参数：`asset_path`
+  - 可选参数：`output_file`
+- `control_rig_shape_library_validate_json`
+  - 关键参数：`json_file`
+  - 可选参数：`asset_path`
+- `control_rig_shape_library_apply_json`
+  - 关键参数：`json_file`
+  - 可选参数：`asset_path`、`create_if_missing`、`save_after_apply`
+
+推荐验收：`control_rig_validate_folder` 必须 `json_issue_count=0`；`control_rig_apply_folder` 必须 `compile_report.error_count=0`；变量或 graph 写入必须在 `readback` 中读到；运行逻辑用 `control_rig_runtime_probe` 验证输入变量和采样结果。完整字段见 `commands/17_ControlRig_FolderFormat.md`。
 
 ## 5. PowerShell 模板
 

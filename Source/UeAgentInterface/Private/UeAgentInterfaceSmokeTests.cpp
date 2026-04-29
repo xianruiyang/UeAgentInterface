@@ -110,6 +110,47 @@ namespace
 		Test->TestTrue(FString::Printf(TEXT("%s color a matches"), ContextLabel), FMath::IsNearlyEqual(static_cast<float>(A), ExpectedColor.A, 0.01f));
 		return true;
 	}
+
+	static FString MakeSmokeAssetFolderPath(const FString& Profile, const FString& AssetPath)
+	{
+		FString RelativeFolder = AssetPath;
+		while (RelativeFolder.StartsWith(TEXT("/")))
+		{
+			RelativeFolder.RightChopInline(1, EAllowShrinking::No);
+		}
+
+		return FPaths::ConvertRelativePathToFull(
+			FPaths::Combine(FPaths::ProjectSavedDir(), TEXT("UeAssetFolders"), Profile, RelativeFolder));
+	}
+
+	static FString ToSmokeJsonPath(const FString& FilePath)
+	{
+		return FilePath.Replace(TEXT("\\"), TEXT("/"));
+	}
+
+	static bool LoadSmokeJsonFile(FAutomationTestBase* Test, const FString& FilePath, TSharedPtr<FJsonObject>& OutObj, const TCHAR* ContextLabel)
+	{
+		FString JsonText;
+		if (!FFileHelper::LoadFileToString(JsonText, *FilePath))
+		{
+			if (Test)
+			{
+				Test->AddError(FString::Printf(TEXT("%s load failed: %s"), ContextLabel, *FilePath));
+			}
+			return false;
+		}
+
+		const TSharedRef<TJsonReader<TCHAR>> Reader = TJsonReaderFactory<TCHAR>::Create(JsonText);
+		if (!FJsonSerializer::Deserialize(Reader, OutObj) || !OutObj.IsValid())
+		{
+			if (Test)
+			{
+				Test->AddError(FString::Printf(TEXT("%s parse failed: %s"), ContextLabel, *FilePath));
+			}
+			return false;
+		}
+		return true;
+	}
 }
 
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(
@@ -4319,6 +4360,458 @@ bool FUeAgentInterfaceStaticMeshSmokeTest::RunTest(const FString& Parameters)
 		}
 	}
 	TestFalse(TEXT("StaticMesh removed socket no longer present"), bFoundRemovedSocket);
+
+	return !HasAnyErrors();
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(
+	FUeAgentInterfaceMeshDeformerJsonSmokeTest,
+	"GptProjectTest.UeAgentInterface.Smoke.MeshDeformerJsonWorkflow",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::ProductFilter)
+
+bool FUeAgentInterfaceMeshDeformerJsonSmokeTest::RunTest(const FString& Parameters)
+{
+	FScopedUeAgentHttpServer ServerScope;
+	FString InitError;
+	if (!ServerScope.Initialize(InitError))
+	{
+		AddError(FString::Printf(TEXT("Initialize failed: %s"), *InitError));
+		return false;
+	}
+
+	auto ExecCommand = [this, &ServerScope](const FString& RequestId, const FString& Command, const FString& ParamsJson, FHttpSmokeResult& OutResult, TSharedPtr<FJsonObject>& OutJson) -> bool
+	{
+		const FString Body = MakeExecRequestBody(RequestId, Command, ParamsJson);
+		const bool bCompleted = ExecuteHttpJsonRequest(TEXT("POST"), ServerScope.BaseUrl + TEXT("/api/exec"), ServerScope.Token, Body, OutResult);
+		TestTrue(FString::Printf(TEXT("%s request completed"), *RequestId), bCompleted);
+		TestTrue(FString::Printf(TEXT("%s response parses"), *RequestId), ParseJson(OutResult.Body, OutJson));
+		return bCompleted && OutJson.IsValid();
+	};
+
+	const FString StaticMeshAssetPath = TEXT("/Engine/BasicShapes/Cube.Cube");
+	const FString StaticFolderPath = FPaths::ConvertRelativePathToFull(
+		FPaths::Combine(FPaths::ProjectSavedDir(), TEXT("UeAssetFolders"), TEXT("StaticMesh"), TEXT("SmokeFolderProfile")));
+	IFileManager::Get().DeleteDirectory(*StaticFolderPath, false, true);
+
+	FHttpSmokeResult StaticExportResult;
+	TSharedPtr<FJsonObject> StaticExportJson;
+	TestTrue(
+		TEXT("StaticMesh folder export succeeds"),
+		ExecCommand(
+			TEXT("smoke-staticmesh-folder-export-001"),
+			TEXT("static_mesh_export_folder"),
+			FString::Printf(TEXT("{\"asset_path\":\"%s\",\"folder_path\":\"%s\"}"), *StaticMeshAssetPath, *ToSmokeJsonPath(StaticFolderPath)),
+			StaticExportResult,
+			StaticExportJson));
+	TestEqual(TEXT("StaticMesh folder export status code"), StaticExportResult.StatusCode, 200);
+	TestTrue(TEXT("StaticMesh folder export ok=true"), StaticExportJson.IsValid() && StaticExportJson->GetBoolField(TEXT("ok")));
+	TestTrue(TEXT("StaticMesh mesh.json exists"), FPaths::FileExists(FPaths::Combine(StaticFolderPath, TEXT("mesh.json"))));
+	TestTrue(TEXT("StaticMesh import_data.json exists"), FPaths::FileExists(FPaths::Combine(StaticFolderPath, TEXT("import_data.json"))));
+	TestTrue(TEXT("StaticMesh raw_mesh_summary.json exists"), FPaths::FileExists(FPaths::Combine(StaticFolderPath, TEXT("raw_mesh_summary.json"))));
+
+	FHttpSmokeResult StaticValidateResult;
+	TSharedPtr<FJsonObject> StaticValidateJson;
+	TestTrue(
+		TEXT("StaticMesh folder validate succeeds"),
+		ExecCommand(
+			TEXT("smoke-staticmesh-folder-validate-001"),
+			TEXT("static_mesh_validate_folder"),
+			FString::Printf(TEXT("{\"folder_path\":\"%s\",\"dry_run\":true}"), *ToSmokeJsonPath(StaticFolderPath)),
+			StaticValidateResult,
+			StaticValidateJson));
+	TestEqual(TEXT("StaticMesh folder validate status code"), StaticValidateResult.StatusCode, 200);
+	TestTrue(TEXT("StaticMesh folder validate ok=true"), StaticValidateJson.IsValid() && StaticValidateJson->GetBoolField(TEXT("ok")));
+
+	const FString StaticUnsupportedJsonPath = FPaths::Combine(StaticFolderPath, TEXT("raw_mesh_summary.json"));
+	TestTrue(
+		TEXT("StaticMesh unsupported write-intent json saves"),
+		FFileHelper::SaveStringToFile(
+			TEXT("{\"schema\":\"ue_agent_interface.static_mesh.raw_mesh_summary.v1\",\"operations\":[{\"apply\":true}]}\n"),
+			*StaticUnsupportedJsonPath,
+			FFileHelper::EEncodingOptions::ForceUTF8WithoutBOM));
+	FHttpSmokeResult StaticUnsupportedValidateResult;
+	TSharedPtr<FJsonObject> StaticUnsupportedValidateJson;
+	TestTrue(
+		TEXT("StaticMesh unsupported summary write-intent validate completes"),
+		ExecCommand(
+			TEXT("smoke-staticmesh-unsupported-summary-validate-001"),
+			TEXT("static_mesh_validate_folder"),
+			FString::Printf(TEXT("{\"folder_path\":\"%s\",\"dry_run\":true}"), *ToSmokeJsonPath(StaticFolderPath)),
+			StaticUnsupportedValidateResult,
+			StaticUnsupportedValidateJson));
+	TestEqual(TEXT("StaticMesh unsupported summary validate status code"), StaticUnsupportedValidateResult.StatusCode, 400);
+	TestTrue(TEXT("StaticMesh unsupported summary validate ok=false"), StaticUnsupportedValidateJson.IsValid() && !StaticUnsupportedValidateJson->GetBoolField(TEXT("ok")));
+	TestTrue(TEXT("StaticMesh unsupported summary validate reports unsupported_apply_profile"), StaticUnsupportedValidateResult.Body.Contains(TEXT("unsupported_apply_profile")));
+
+	FHttpSmokeResult StaticCollisionPreviewResult;
+	TSharedPtr<FJsonObject> StaticCollisionPreviewJson;
+	TestTrue(
+		TEXT("StaticMesh collision preview succeeds"),
+		ExecCommand(
+			TEXT("smoke-staticmesh-collision-preview-001"),
+			TEXT("static_mesh_preview_collision"),
+			FString::Printf(TEXT("{\"asset_path\":\"%s\"}"), *StaticMeshAssetPath),
+			StaticCollisionPreviewResult,
+			StaticCollisionPreviewJson));
+	TestEqual(TEXT("StaticMesh collision preview status code"), StaticCollisionPreviewResult.StatusCode, 200);
+	TestTrue(TEXT("StaticMesh collision preview ok=true"), StaticCollisionPreviewJson.IsValid() && StaticCollisionPreviewJson->GetBoolField(TEXT("ok")));
+	TestTrue(TEXT("StaticMesh collision preview includes collision"), StaticCollisionPreviewResult.Body.Contains(TEXT("collision")));
+
+	const FString SkeletalMeshAssetPath = TEXT("/Engine/Tutorial/SubEditors/TutorialAssets/Character/TutorialTPP.TutorialTPP");
+	const FString SkeletalFolderPath = FPaths::ConvertRelativePathToFull(
+		FPaths::Combine(FPaths::ProjectSavedDir(), TEXT("UeAssetFolders"), TEXT("SkeletalMesh"), TEXT("SmokeFolderProfile")));
+	IFileManager::Get().DeleteDirectory(*SkeletalFolderPath, false, true);
+
+	FHttpSmokeResult SkeletalExportResult;
+	TSharedPtr<FJsonObject> SkeletalExportJson;
+	TestTrue(
+		TEXT("SkeletalMesh folder export succeeds"),
+		ExecCommand(
+			TEXT("smoke-skeletalmesh-folder-export-001"),
+			TEXT("skeletal_mesh_export_folder"),
+			FString::Printf(TEXT("{\"asset_path\":\"%s\",\"folder_path\":\"%s\"}"), *SkeletalMeshAssetPath, *ToSmokeJsonPath(SkeletalFolderPath)),
+			SkeletalExportResult,
+			SkeletalExportJson));
+	TestEqual(TEXT("SkeletalMesh folder export status code"), SkeletalExportResult.StatusCode, 200);
+	TestTrue(TEXT("SkeletalMesh folder export ok=true"), SkeletalExportJson.IsValid() && SkeletalExportJson->GetBoolField(TEXT("ok")));
+	TestTrue(TEXT("SkeletalMesh morph_targets.json exists"), FPaths::FileExists(FPaths::Combine(SkeletalFolderPath, TEXT("morph_targets.json"))));
+	TestTrue(TEXT("SkeletalMesh skin_weights.json exists"), FPaths::FileExists(FPaths::Combine(SkeletalFolderPath, TEXT("skin_weights.json"))));
+	TestTrue(TEXT("SkeletalMesh cloth.json exists"), FPaths::FileExists(FPaths::Combine(SkeletalFolderPath, TEXT("cloth.json"))));
+	TestTrue(TEXT("SkeletalMesh clothing.json compatibility alias exists"), FPaths::FileExists(FPaths::Combine(SkeletalFolderPath, TEXT("clothing.json"))));
+	TestTrue(TEXT("SkeletalMesh import_data.json exists"), FPaths::FileExists(FPaths::Combine(SkeletalFolderPath, TEXT("import_data.json"))));
+
+	FHttpSmokeResult SkeletalValidateResult;
+	TSharedPtr<FJsonObject> SkeletalValidateJson;
+	TestTrue(
+		TEXT("SkeletalMesh folder validate succeeds"),
+		ExecCommand(
+			TEXT("smoke-skeletalmesh-folder-validate-001"),
+			TEXT("skeletal_mesh_validate_folder"),
+			FString::Printf(TEXT("{\"folder_path\":\"%s\",\"dry_run\":true}"), *ToSmokeJsonPath(SkeletalFolderPath)),
+			SkeletalValidateResult,
+			SkeletalValidateJson));
+	TestEqual(TEXT("SkeletalMesh folder validate status code"), SkeletalValidateResult.StatusCode, 200);
+	TestTrue(TEXT("SkeletalMesh folder validate ok=true"), SkeletalValidateJson.IsValid() && SkeletalValidateJson->GetBoolField(TEXT("ok")));
+
+	const FString SkeletalUnsupportedJsonPath = FPaths::Combine(SkeletalFolderPath, TEXT("skin_weights.json"));
+	TestTrue(
+		TEXT("SkeletalMesh unsupported write-intent json saves"),
+		FFileHelper::SaveStringToFile(
+			TEXT("{\"schema\":\"ue_agent_interface.skeletal_mesh.skin_weights.v1\",\"operations\":[{\"apply\":true}]}\n"),
+			*SkeletalUnsupportedJsonPath,
+			FFileHelper::EEncodingOptions::ForceUTF8WithoutBOM));
+	FHttpSmokeResult SkeletalUnsupportedValidateResult;
+	TSharedPtr<FJsonObject> SkeletalUnsupportedValidateJson;
+	TestTrue(
+		TEXT("SkeletalMesh unsupported summary write-intent validate completes"),
+		ExecCommand(
+			TEXT("smoke-skeletalmesh-unsupported-summary-validate-001"),
+			TEXT("skeletal_mesh_validate_folder"),
+			FString::Printf(TEXT("{\"folder_path\":\"%s\",\"dry_run\":true}"), *ToSmokeJsonPath(SkeletalFolderPath)),
+			SkeletalUnsupportedValidateResult,
+			SkeletalUnsupportedValidateJson));
+	TestEqual(TEXT("SkeletalMesh unsupported summary validate status code"), SkeletalUnsupportedValidateResult.StatusCode, 400);
+	TestTrue(TEXT("SkeletalMesh unsupported summary validate ok=false"), SkeletalUnsupportedValidateJson.IsValid() && !SkeletalUnsupportedValidateJson->GetBoolField(TEXT("ok")));
+	TestTrue(TEXT("SkeletalMesh unsupported summary validate reports unsupported_apply_profile"), SkeletalUnsupportedValidateResult.Body.Contains(TEXT("unsupported_apply_profile")));
+
+	FHttpSmokeResult MorphValidateResult;
+	TSharedPtr<FJsonObject> MorphValidateJson;
+	TestTrue(
+		TEXT("SkeletalMesh morph validate succeeds"),
+		ExecCommand(
+			TEXT("smoke-skeletalmesh-morph-validate-001"),
+			TEXT("skeletal_mesh_validate_morph_targets"),
+			FString::Printf(TEXT("{\"asset_path\":\"%s\"}"), *SkeletalMeshAssetPath),
+			MorphValidateResult,
+			MorphValidateJson));
+	TestEqual(TEXT("SkeletalMesh morph validate status code"), MorphValidateResult.StatusCode, 200);
+	TestTrue(TEXT("SkeletalMesh morph validate ok=true"), MorphValidateJson.IsValid() && MorphValidateJson->GetBoolField(TEXT("ok")));
+
+	FHttpSmokeResult MorphPreviewMissingResult;
+	TSharedPtr<FJsonObject> MorphPreviewMissingJson;
+	TestTrue(
+		TEXT("SkeletalMesh missing morph preview reports structured failure"),
+		ExecCommand(
+			TEXT("smoke-skeletalmesh-morph-preview-missing-001"),
+			TEXT("skeletal_mesh_preview_morph_target"),
+			FString::Printf(TEXT("{\"asset_path\":\"%s\",\"morph_target\":\"__MissingMorphForSmoke__\",\"weight\":1.0}"), *SkeletalMeshAssetPath),
+			MorphPreviewMissingResult,
+			MorphPreviewMissingJson));
+	TestEqual(TEXT("SkeletalMesh missing morph preview status code"), MorphPreviewMissingResult.StatusCode, 400);
+	TestTrue(TEXT("SkeletalMesh missing morph preview ok=false"), MorphPreviewMissingJson.IsValid() && !MorphPreviewMissingJson->GetBoolField(TEXT("ok")));
+	TestTrue(TEXT("SkeletalMesh missing morph preview error"), MorphPreviewMissingResult.Body.Contains(TEXT("morph_target_not_found")));
+
+	FHttpSmokeResult SkinProfilePreviewMissingResult;
+	TSharedPtr<FJsonObject> SkinProfilePreviewMissingJson;
+	TestTrue(
+		TEXT("SkeletalMesh missing skin profile preview reports structured failure"),
+		ExecCommand(
+			TEXT("smoke-skeletalmesh-skin-profile-preview-missing-001"),
+			TEXT("skeletal_mesh_preview_skin_weight_profile"),
+			FString::Printf(TEXT("{\"asset_path\":\"%s\",\"profile_name\":\"__MissingProfileForSmoke__\"}"), *SkeletalMeshAssetPath),
+			SkinProfilePreviewMissingResult,
+			SkinProfilePreviewMissingJson));
+	TestEqual(TEXT("SkeletalMesh missing skin profile preview status code"), SkinProfilePreviewMissingResult.StatusCode, 400);
+	TestTrue(TEXT("SkeletalMesh missing skin profile preview ok=false"), SkinProfilePreviewMissingJson.IsValid() && !SkinProfilePreviewMissingJson->GetBoolField(TEXT("ok")));
+	TestTrue(TEXT("SkeletalMesh missing skin profile preview error"), SkinProfilePreviewMissingResult.Body.Contains(TEXT("skin_weight_profile_not_found")));
+
+	FHttpSmokeResult SkinProfileImportMissingResult;
+	TSharedPtr<FJsonObject> SkinProfileImportMissingJson;
+	TestTrue(
+		TEXT("SkeletalMesh missing skin profile import source reports structured failure"),
+		ExecCommand(
+			TEXT("smoke-skeletalmesh-skin-profile-import-missing-source-001"),
+			TEXT("skeletal_mesh_import_skin_weight_profile"),
+			FString::Printf(TEXT("{\"asset_path\":\"%s\",\"source_filename\":\"D:/__MissingSkinWeightProfileSmoke__.fbx\",\"profile_name\":\"SmokeProfile\",\"lod_index\":0}"), *SkeletalMeshAssetPath),
+			SkinProfileImportMissingResult,
+			SkinProfileImportMissingJson));
+	TestEqual(TEXT("SkeletalMesh missing skin profile import source status code"), SkinProfileImportMissingResult.StatusCode, 400);
+	TestTrue(TEXT("SkeletalMesh missing skin profile import source ok=false"), SkinProfileImportMissingJson.IsValid() && !SkinProfileImportMissingJson->GetBoolField(TEXT("ok")));
+	TestTrue(TEXT("SkeletalMesh missing skin profile import source error"), SkinProfileImportMissingResult.Body.Contains(TEXT("source_file_not_found")));
+
+	const FString SkeletonObjectPath = TEXT("/Engine/Tutorial/SubEditors/TutorialAssets/Character/TutorialTPP_Skeleton.TutorialTPP_Skeleton");
+	const FString BlendSpaceAssetPath = MakeAutomationAssetPath(TEXT("BSJson"));
+	const FString BlendSpaceJsonPath = FPaths::ConvertRelativePathToFull(
+		FPaths::Combine(FPaths::ProjectSavedDir(), TEXT("UeAssetFolders"), TEXT("BlendSpace"), TEXT("SmokeBlendSpace.json")));
+
+	FHttpSmokeResult BlendSpaceCreateResult;
+	TSharedPtr<FJsonObject> BlendSpaceCreateJson;
+	TestTrue(
+		TEXT("BlendSpace create succeeds"),
+		ExecCommand(
+			TEXT("smoke-blendspace-create-001"),
+			TEXT("blendspace_create"),
+			FString::Printf(TEXT("{\"asset_path\":\"%s\",\"skeleton\":\"%s\",\"blendspace_kind\":\"blendspace_1d\",\"axes\":[{\"axis_index\":0,\"name\":\"Speed\",\"min\":0.0,\"max\":600.0,\"grid_num\":4}],\"save_after_create\":false}"), *BlendSpaceAssetPath, *SkeletonObjectPath),
+			BlendSpaceCreateResult,
+			BlendSpaceCreateJson));
+	TestEqual(TEXT("BlendSpace create status code"), BlendSpaceCreateResult.StatusCode, 200);
+	TestTrue(TEXT("BlendSpace create ok=true"), BlendSpaceCreateJson.IsValid() && BlendSpaceCreateJson->GetBoolField(TEXT("ok")));
+
+	FHttpSmokeResult BlendSpaceExportResult;
+	TSharedPtr<FJsonObject> BlendSpaceExportJson;
+	TestTrue(
+		TEXT("BlendSpace export succeeds"),
+		ExecCommand(
+			TEXT("smoke-blendspace-export-001"),
+			TEXT("blendspace_export_json"),
+			FString::Printf(TEXT("{\"asset_path\":\"%s\",\"output_file\":\"%s\"}"), *BlendSpaceAssetPath, *ToSmokeJsonPath(BlendSpaceJsonPath)),
+			BlendSpaceExportResult,
+			BlendSpaceExportJson));
+	TestEqual(TEXT("BlendSpace export status code"), BlendSpaceExportResult.StatusCode, 200);
+	TestTrue(TEXT("BlendSpace export file exists"), FPaths::FileExists(BlendSpaceJsonPath));
+
+	FHttpSmokeResult BlendSpaceValidateResult;
+	TSharedPtr<FJsonObject> BlendSpaceValidateJson;
+	TestTrue(
+		TEXT("BlendSpace validate succeeds"),
+		ExecCommand(
+			TEXT("smoke-blendspace-validate-001"),
+			TEXT("blendspace_validate_json"),
+			FString::Printf(TEXT("{\"json_file\":\"%s\"}"), *ToSmokeJsonPath(BlendSpaceJsonPath)),
+			BlendSpaceValidateResult,
+			BlendSpaceValidateJson));
+	TestEqual(TEXT("BlendSpace validate status code"), BlendSpaceValidateResult.StatusCode, 200);
+	TestTrue(TEXT("BlendSpace validate ok=true"), BlendSpaceValidateJson.IsValid() && BlendSpaceValidateJson->GetBoolField(TEXT("ok")));
+
+	const FString DeformerGraphAssetPath = MakeAutomationAssetPath(TEXT("DGJson"));
+	const FString DeformerGraphFolderPath = FPaths::ConvertRelativePathToFull(
+		FPaths::Combine(FPaths::ProjectSavedDir(), TEXT("UeAssetFolders"), TEXT("DeformerGraph"), TEXT("SmokeFolderProfile")));
+	IFileManager::Get().DeleteDirectory(*DeformerGraphFolderPath, false, true);
+
+	FHttpSmokeResult DeformerGraphCreateResult;
+	TSharedPtr<FJsonObject> DeformerGraphCreateJson;
+	TestTrue(
+		TEXT("DeformerGraph create succeeds"),
+		ExecCommand(
+			TEXT("smoke-deformergraph-create-001"),
+			TEXT("deformer_graph_create"),
+			FString::Printf(TEXT("{\"asset_path\":\"%s\",\"save_after_create\":false}"), *DeformerGraphAssetPath),
+			DeformerGraphCreateResult,
+			DeformerGraphCreateJson));
+	TestEqual(TEXT("DeformerGraph create status code"), DeformerGraphCreateResult.StatusCode, 200);
+	TestTrue(TEXT("DeformerGraph create ok=true"), DeformerGraphCreateJson.IsValid() && DeformerGraphCreateJson->GetBoolField(TEXT("ok")));
+
+	FHttpSmokeResult DeformerGraphExportResult;
+	TSharedPtr<FJsonObject> DeformerGraphExportJson;
+	TestTrue(
+		TEXT("DeformerGraph folder export succeeds"),
+		ExecCommand(
+			TEXT("smoke-deformergraph-folder-export-001"),
+			TEXT("deformer_graph_export_folder"),
+			FString::Printf(TEXT("{\"asset_path\":\"%s\",\"folder_path\":\"%s\"}"), *DeformerGraphAssetPath, *ToSmokeJsonPath(DeformerGraphFolderPath)),
+			DeformerGraphExportResult,
+			DeformerGraphExportJson));
+	TestEqual(TEXT("DeformerGraph folder export status code"), DeformerGraphExportResult.StatusCode, 200);
+	TestTrue(TEXT("DeformerGraph folder export ok=true"), DeformerGraphExportJson.IsValid() && DeformerGraphExportJson->GetBoolField(TEXT("ok")));
+	TestTrue(TEXT("DeformerGraph settings.json exists"), FPaths::FileExists(FPaths::Combine(DeformerGraphFolderPath, TEXT("settings.json"))));
+	TestTrue(TEXT("DeformerGraph graphs.json exists"), FPaths::FileExists(FPaths::Combine(DeformerGraphFolderPath, TEXT("graphs.json"))));
+	TestTrue(TEXT("DeformerGraph kernels.json exists"), FPaths::FileExists(FPaths::Combine(DeformerGraphFolderPath, TEXT("kernels.json"))));
+
+	TSharedPtr<FJsonObject> DeformerGraphSettingsJson;
+	TestTrue(TEXT("DeformerGraph settings parses"), LoadSmokeJsonFile(this, FPaths::Combine(DeformerGraphFolderPath, TEXT("settings.json")), DeformerGraphSettingsJson, TEXT("DeformerGraph settings.json")));
+	if (DeformerGraphSettingsJson.IsValid())
+	{
+		TestEqual(TEXT("DeformerGraph settings schema"), DeformerGraphSettingsJson->GetStringField(TEXT("schema")), FString(TEXT("ue_agent_interface.deformer_settings.v1")));
+		TestTrue(TEXT("DeformerGraph settings identifies Optimus"), DeformerGraphSettingsJson->GetBoolField(TEXT("is_optimus_deformer")));
+	}
+
+	TSharedPtr<FJsonObject> DeformerGraphGraphsJson;
+	TestTrue(TEXT("DeformerGraph graphs parses"), LoadSmokeJsonFile(this, FPaths::Combine(DeformerGraphFolderPath, TEXT("graphs.json")), DeformerGraphGraphsJson, TEXT("DeformerGraph graphs.json")));
+	if (DeformerGraphGraphsJson.IsValid())
+	{
+		TestEqual(TEXT("DeformerGraph graphs schema"), DeformerGraphGraphsJson->GetStringField(TEXT("schema")), FString(TEXT("ue_agent_interface.deformer_graphs.v1")));
+		TestTrue(TEXT("DeformerGraph graphs has items field"), DeformerGraphGraphsJson->HasTypedField<EJson::Array>(TEXT("items")));
+	}
+
+	TSharedPtr<FJsonObject> DeformerGraphCoverageJson;
+	TestTrue(TEXT("DeformerGraph coverage parses"), LoadSmokeJsonFile(this, FPaths::Combine(DeformerGraphFolderPath, TEXT("validation"), TEXT("coverage_report.json")), DeformerGraphCoverageJson, TEXT("DeformerGraph coverage_report.json")));
+	if (DeformerGraphCoverageJson.IsValid())
+	{
+		TestTrue(TEXT("DeformerGraph coverage marked complete schema"), DeformerGraphCoverageJson->GetBoolField(TEXT("is_complete_target_schema")));
+		TestTrue(TEXT("DeformerGraph coverage exposes adapter boundaries"), DeformerGraphCoverageJson->HasTypedField<EJson::Array>(TEXT("adapter_boundaries")));
+		TestTrue(TEXT("DeformerGraph coverage has empty blocking gaps"), DeformerGraphCoverageJson->HasTypedField<EJson::Array>(TEXT("blocking_gaps")));
+	}
+
+	FHttpSmokeResult DeformerGraphValidateResult;
+	TSharedPtr<FJsonObject> DeformerGraphValidateJson;
+	TestTrue(
+		TEXT("DeformerGraph folder validate succeeds"),
+		ExecCommand(
+			TEXT("smoke-deformergraph-folder-validate-001"),
+			TEXT("deformer_graph_validate_folder"),
+			FString::Printf(TEXT("{\"folder_path\":\"%s\"}"), *ToSmokeJsonPath(DeformerGraphFolderPath)),
+			DeformerGraphValidateResult,
+			DeformerGraphValidateJson));
+	TestEqual(TEXT("DeformerGraph folder validate status code"), DeformerGraphValidateResult.StatusCode, 200);
+	TestTrue(TEXT("DeformerGraph folder validate ok=true"), DeformerGraphValidateJson.IsValid() && DeformerGraphValidateJson->GetBoolField(TEXT("ok")));
+
+	const FString DeformerGraphUnsupportedJsonPath = FPaths::Combine(DeformerGraphFolderPath, TEXT("graphs.json"));
+	TestTrue(
+		TEXT("DeformerGraph unsupported write-intent json saves"),
+		FFileHelper::SaveStringToFile(
+			TEXT("{\"schema\":\"ue_agent_interface.deformer_graphs.v1\",\"operations\":[{\"apply\":true}]}\n"),
+			*DeformerGraphUnsupportedJsonPath,
+			FFileHelper::EEncodingOptions::ForceUTF8WithoutBOM));
+	FHttpSmokeResult DeformerGraphUnsupportedValidateResult;
+	TSharedPtr<FJsonObject> DeformerGraphUnsupportedValidateJson;
+	TestTrue(
+		TEXT("DeformerGraph unsupported summary write-intent validate completes"),
+		ExecCommand(
+			TEXT("smoke-deformergraph-unsupported-summary-validate-001"),
+			TEXT("deformer_graph_validate_folder"),
+			FString::Printf(TEXT("{\"folder_path\":\"%s\"}"), *ToSmokeJsonPath(DeformerGraphFolderPath)),
+			DeformerGraphUnsupportedValidateResult,
+			DeformerGraphUnsupportedValidateJson));
+	TestEqual(TEXT("DeformerGraph unsupported summary validate status code"), DeformerGraphUnsupportedValidateResult.StatusCode, 400);
+	TestTrue(TEXT("DeformerGraph unsupported summary validate ok=false"), DeformerGraphUnsupportedValidateJson.IsValid() && !DeformerGraphUnsupportedValidateJson->GetBoolField(TEXT("ok")));
+	TestTrue(TEXT("DeformerGraph unsupported summary validate reports unsupported_apply_profile"), DeformerGraphUnsupportedValidateResult.Body.Contains(TEXT("unsupported_apply_profile")));
+
+	FHttpSmokeResult DeformerBadResult;
+	TSharedPtr<FJsonObject> DeformerBadJson;
+	TestTrue(
+		TEXT("Deformer bad property request completes"),
+		ExecCommand(
+			TEXT("smoke-deformer-property-bad-001"),
+			TEXT("deformer_source_library_apply_json"),
+			FString::Printf(TEXT("{\"asset_path\":\"%s\",\"properties\":[{\"value_text\":\"False\",\"apply\":true}],\"dry_run\":true,\"save_after_apply\":false}"), *StaticMeshAssetPath),
+			DeformerBadResult,
+			DeformerBadJson));
+	TestEqual(TEXT("Deformer bad property status code"), DeformerBadResult.StatusCode, 400);
+	TestTrue(TEXT("Deformer bad property ok=false"), DeformerBadJson.IsValid() && !DeformerBadJson->GetBoolField(TEXT("ok")));
+	TestTrue(TEXT("Deformer bad property reports required profile"), DeformerBadResult.Body.Contains(TEXT("json_missing_required_field")) && DeformerBadResult.Body.Contains(TEXT("profile")));
+
+	FHttpSmokeResult MeshCollectionBadProfileResult;
+	TSharedPtr<FJsonObject> MeshCollectionBadProfileJson;
+	TestTrue(
+		TEXT("MeshDeformerCollection wrong profile validation completes"),
+		ExecCommand(
+			TEXT("smoke-meshdeformercollection-wrong-profile-001"),
+			TEXT("mesh_deformer_collection_validate_json"),
+			FString::Printf(TEXT("{\"profile\":\"deformer_source_library\",\"asset_class\":\"/Script/Engine.StaticMesh\",\"asset_path\":\"%s\",\"properties\":[]}"), *StaticMeshAssetPath),
+			MeshCollectionBadProfileResult,
+			MeshCollectionBadProfileJson));
+	TestEqual(TEXT("MeshDeformerCollection wrong profile status code"), MeshCollectionBadProfileResult.StatusCode, 400);
+	TestTrue(TEXT("MeshDeformerCollection wrong profile ok=false"), MeshCollectionBadProfileJson.IsValid() && !MeshCollectionBadProfileJson->GetBoolField(TEXT("ok")));
+	TestTrue(TEXT("MeshDeformerCollection wrong profile reports mismatch"), MeshCollectionBadProfileResult.Body.Contains(TEXT("json_profile_mismatch")));
+
+	FHttpSmokeResult GeometryCacheWrongTypeResult;
+	TSharedPtr<FJsonObject> GeometryCacheWrongTypeJson;
+	TestTrue(
+		TEXT("GeometryCache get_info rejects wrong asset type"),
+		ExecCommand(
+			TEXT("smoke-geometrycache-wrong-type-001"),
+			TEXT("geometry_cache_get_info"),
+			FString::Printf(TEXT("{\"asset_path\":\"%s\"}"), *StaticMeshAssetPath),
+			GeometryCacheWrongTypeResult,
+			GeometryCacheWrongTypeJson));
+	TestEqual(TEXT("GeometryCache wrong type status code"), GeometryCacheWrongTypeResult.StatusCode, 400);
+	TestTrue(TEXT("GeometryCache wrong type ok=false"), GeometryCacheWrongTypeJson.IsValid() && !GeometryCacheWrongTypeJson->GetBoolField(TEXT("ok")));
+	TestTrue(TEXT("GeometryCache wrong type error"), GeometryCacheWrongTypeResult.Body.Contains(TEXT("asset_is_not_geometry_cache")));
+
+	FHttpSmokeResult GeometryCacheFrameWrongTypeResult;
+	TSharedPtr<FJsonObject> GeometryCacheFrameWrongTypeJson;
+	TestTrue(
+		TEXT("GeometryCache frame sample rejects wrong asset type"),
+		ExecCommand(
+			TEXT("smoke-geometrycache-frame-wrong-type-001"),
+			TEXT("geometry_cache_screenshot_frame"),
+			FString::Printf(TEXT("{\"asset_path\":\"%s\",\"frame_index\":0}"), *StaticMeshAssetPath),
+			GeometryCacheFrameWrongTypeResult,
+			GeometryCacheFrameWrongTypeJson));
+	TestEqual(TEXT("GeometryCache frame wrong type status code"), GeometryCacheFrameWrongTypeResult.StatusCode, 400);
+	TestTrue(TEXT("GeometryCache frame wrong type ok=false"), GeometryCacheFrameWrongTypeJson.IsValid() && !GeometryCacheFrameWrongTypeJson->GetBoolField(TEXT("ok")));
+	TestTrue(TEXT("GeometryCache frame wrong type error"), GeometryCacheFrameWrongTypeResult.Body.Contains(TEXT("asset_is_not_geometry_cache")));
+
+	FHttpSmokeResult MLInputsResult;
+	TSharedPtr<FJsonObject> MLInputsJson;
+	TestTrue(
+		TEXT("ML Deformer training inputs validation succeeds"),
+		ExecCommand(
+			TEXT("smoke-mldeformer-inputs-001"),
+			TEXT("ml_deformer_validate_training_inputs"),
+			TEXT("{}"),
+			MLInputsResult,
+			MLInputsJson));
+	TestEqual(TEXT("ML Deformer training inputs status code"), MLInputsResult.StatusCode, 200);
+	TestTrue(TEXT("ML Deformer training inputs ok=true"), MLInputsJson.IsValid() && MLInputsJson->GetBoolField(TEXT("ok")));
+	TestTrue(TEXT("ML Deformer training inputs include plugin status"), MLInputsResult.Body.Contains(TEXT("plugin_status")));
+	const TSharedPtr<FJsonObject>* MLInputsData = nullptr;
+	TestTrue(TEXT("ML Deformer training inputs contains data"), MLInputsJson.IsValid() && MLInputsJson->TryGetObjectField(TEXT("data"), MLInputsData) && MLInputsData && MLInputsData->IsValid());
+	if (MLInputsJson.IsValid() && MLInputsJson->TryGetObjectField(TEXT("data"), MLInputsData) && MLInputsData && MLInputsData->IsValid())
+	{
+		TestFalse(TEXT("ML Deformer empty inputs validation_passed=false"), (*MLInputsData)->GetBoolField(TEXT("validation_passed")));
+		TestTrue(TEXT("ML Deformer empty inputs has validation issues"), static_cast<int32>((*MLInputsData)->GetIntegerField(TEXT("validation_issue_count"))) >= 3);
+		TestTrue(TEXT("ML Deformer empty inputs has topology_check"), (*MLInputsData)->HasTypedField<EJson::Object>(TEXT("topology_check")));
+		TestTrue(TEXT("ML Deformer empty inputs has timing_check"), (*MLInputsData)->HasTypedField<EJson::Object>(TEXT("timing_check")));
+	}
+
+	FHttpSmokeResult MLTrainResult;
+	TSharedPtr<FJsonObject> MLTrainJson;
+	TestTrue(
+		TEXT("ML Deformer train boundary reports adapter status"),
+		ExecCommand(
+			TEXT("smoke-mldeformer-train-boundary-001"),
+			TEXT("ml_deformer_train"),
+			TEXT("{\"confirm_long_running_training\":false}"),
+			MLTrainResult,
+			MLTrainJson));
+	TestEqual(TEXT("ML Deformer train boundary status code"), MLTrainResult.StatusCode, 200);
+	TestTrue(TEXT("ML Deformer train boundary ok=true"), MLTrainJson.IsValid() && MLTrainJson->GetBoolField(TEXT("ok")));
+	TestTrue(TEXT("ML Deformer train boundary status included"), MLTrainResult.Body.Contains(TEXT("training_adapter_not_available")));
+
+	FHttpSmokeResult MLPreviewResult;
+	TSharedPtr<FJsonObject> MLPreviewJson;
+	TestTrue(
+		TEXT("ML Deformer preview boundary reports adapter status"),
+		ExecCommand(
+			TEXT("smoke-mldeformer-preview-boundary-001"),
+			TEXT("ml_deformer_preview"),
+			TEXT("{}"),
+			MLPreviewResult,
+			MLPreviewJson));
+	TestEqual(TEXT("ML Deformer preview boundary status code"), MLPreviewResult.StatusCode, 200);
+	TestTrue(TEXT("ML Deformer preview boundary ok=true"), MLPreviewJson.IsValid() && MLPreviewJson->GetBoolField(TEXT("ok")));
+	TestTrue(TEXT("ML Deformer preview boundary status included"), MLPreviewResult.Body.Contains(TEXT("preview_adapter_not_available")));
 
 	return !HasAnyErrors();
 }
@@ -14168,6 +14661,69 @@ bool FUeAgentInterfaceAnimationAssetsSmokeTest::RunTest(const FString& Parameter
 		TestTrue(TEXT("Animation assets skeleton use compatible retarget modes enabled"), (*SkeletonInfoData)->GetBoolField(TEXT("use_retarget_modes_from_compatible_skeleton")));
 	}
 
+	const FString SkeletonFolderPath = MakeSmokeAssetFolderPath(TEXT("Skeleton"), SkeletonAssetPath);
+	IFileManager::Get().DeleteDirectory(*SkeletonFolderPath, false, true);
+	const FString SkeletonFolderJsonPath = ToSmokeJsonPath(SkeletonFolderPath);
+
+	const FString SkeletonExportFolderBody = MakeExecRequestBody(
+		TEXT("smoke-anim-assets-skeleton-folder-export-001"),
+		TEXT("skeleton_export_folder"),
+		FString::Printf(TEXT("{\"asset_path\":\"%s\"}"), *SkeletonAssetPath));
+	FHttpSmokeResult SkeletonExportFolderResult;
+	TestTrue(TEXT("Animation assets skeleton_export_folder request succeeded"), ExecuteHttpJsonRequest(TEXT("POST"), ServerScope.BaseUrl + TEXT("/api/exec"), ServerScope.Token, SkeletonExportFolderBody, SkeletonExportFolderResult));
+	TestEqual(TEXT("Animation assets skeleton_export_folder status code"), SkeletonExportFolderResult.StatusCode, 200);
+
+	TSharedPtr<FJsonObject> SkeletonExportFolderJson;
+	TestTrue(TEXT("Animation assets skeleton_export_folder parses JSON"), ParseJson(SkeletonExportFolderResult.Body, SkeletonExportFolderJson));
+	const TSharedPtr<FJsonObject>* SkeletonExportFolderData = nullptr;
+	TestTrue(TEXT("Animation assets skeleton_export_folder contains data object"), SkeletonExportFolderJson.IsValid() && SkeletonExportFolderJson->TryGetObjectField(TEXT("data"), SkeletonExportFolderData) && SkeletonExportFolderData && SkeletonExportFolderData->IsValid());
+	if (SkeletonExportFolderData && SkeletonExportFolderData->IsValid())
+	{
+		TestTrue(TEXT("Animation assets skeleton folder export marked complete"), (*SkeletonExportFolderData)->GetBoolField(TEXT("is_complete_target_schema")));
+		TestTrue(TEXT("Animation assets skeleton folder export wrote files"), static_cast<int32>((*SkeletonExportFolderData)->GetIntegerField(TEXT("file_count"))) >= 10);
+	}
+
+	TSharedPtr<FJsonObject> SkeletonAssetFolderJson;
+	TestTrue(TEXT("Animation assets skeleton folder asset.json exists"), LoadSmokeJsonFile(this, FPaths::Combine(SkeletonFolderPath, TEXT("asset.json")), SkeletonAssetFolderJson, TEXT("Skeleton folder asset.json")));
+	TSharedPtr<FJsonObject> SkeletonCoverageJson;
+	TestTrue(TEXT("Animation assets skeleton folder coverage exists"), LoadSmokeJsonFile(this, FPaths::Combine(SkeletonFolderPath, TEXT("validation"), TEXT("coverage_report.json")), SkeletonCoverageJson, TEXT("Skeleton folder coverage_report.json")));
+
+	const FString SkeletonValidateFolderBody = MakeExecRequestBody(
+		TEXT("smoke-anim-assets-skeleton-folder-validate-001"),
+		TEXT("skeleton_validate_folder"),
+		FString::Printf(TEXT("{\"folder_path\":\"%s\"}"), *SkeletonFolderJsonPath));
+	FHttpSmokeResult SkeletonValidateFolderResult;
+	TestTrue(TEXT("Animation assets skeleton_validate_folder request succeeded"), ExecuteHttpJsonRequest(TEXT("POST"), ServerScope.BaseUrl + TEXT("/api/exec"), ServerScope.Token, SkeletonValidateFolderBody, SkeletonValidateFolderResult));
+	TestEqual(TEXT("Animation assets skeleton_validate_folder status code"), SkeletonValidateFolderResult.StatusCode, 200);
+
+	TSharedPtr<FJsonObject> SkeletonValidateFolderJson;
+	TestTrue(TEXT("Animation assets skeleton_validate_folder parses JSON"), ParseJson(SkeletonValidateFolderResult.Body, SkeletonValidateFolderJson));
+	const TSharedPtr<FJsonObject>* SkeletonValidateFolderData = nullptr;
+	TestTrue(TEXT("Animation assets skeleton_validate_folder contains data object"), SkeletonValidateFolderJson.IsValid() && SkeletonValidateFolderJson->TryGetObjectField(TEXT("data"), SkeletonValidateFolderData) && SkeletonValidateFolderData && SkeletonValidateFolderData->IsValid());
+	if (SkeletonValidateFolderData && SkeletonValidateFolderData->IsValid())
+	{
+		TestTrue(TEXT("Animation assets skeleton_validate_folder is dry run"), (*SkeletonValidateFolderData)->GetBoolField(TEXT("dry_run")));
+		TestEqual(TEXT("Animation assets skeleton_validate_folder has no JSON issues"), static_cast<int32>((*SkeletonValidateFolderData)->GetIntegerField(TEXT("json_issue_count"))), 0);
+	}
+
+	const FString SkeletonApplyFolderBody = MakeExecRequestBody(
+		TEXT("smoke-anim-assets-skeleton-folder-apply-001"),
+		TEXT("skeleton_apply_folder"),
+		FString::Printf(TEXT("{\"folder_path\":\"%s\",\"save_after_apply\":false}"), *SkeletonFolderJsonPath));
+	FHttpSmokeResult SkeletonApplyFolderResult;
+	TestTrue(TEXT("Animation assets skeleton_apply_folder request succeeded"), ExecuteHttpJsonRequest(TEXT("POST"), ServerScope.BaseUrl + TEXT("/api/exec"), ServerScope.Token, SkeletonApplyFolderBody, SkeletonApplyFolderResult));
+	TestEqual(TEXT("Animation assets skeleton_apply_folder status code"), SkeletonApplyFolderResult.StatusCode, 200);
+
+	TSharedPtr<FJsonObject> SkeletonApplyFolderJson;
+	TestTrue(TEXT("Animation assets skeleton_apply_folder parses JSON"), ParseJson(SkeletonApplyFolderResult.Body, SkeletonApplyFolderJson));
+	const TSharedPtr<FJsonObject>* SkeletonApplyFolderData = nullptr;
+	TestTrue(TEXT("Animation assets skeleton_apply_folder contains data object"), SkeletonApplyFolderJson.IsValid() && SkeletonApplyFolderJson->TryGetObjectField(TEXT("data"), SkeletonApplyFolderData) && SkeletonApplyFolderData && SkeletonApplyFolderData->IsValid());
+	if (SkeletonApplyFolderData && SkeletonApplyFolderData->IsValid())
+	{
+		TestTrue(TEXT("Animation assets skeleton_apply_folder applied"), (*SkeletonApplyFolderData)->GetBoolField(TEXT("applied")));
+		TestEqual(TEXT("Animation assets skeleton_apply_folder has no JSON issues"), static_cast<int32>((*SkeletonApplyFolderData)->GetIntegerField(TEXT("json_issue_count"))), 0);
+	}
+
 	return !HasAnyErrors();
 }
 
@@ -14249,6 +14805,87 @@ bool FUeAgentInterfaceIKAssetsSmokeTest::RunTest(const FString& Parameters)
 	FHttpSmokeResult DuplicateTargetMeshResult;
 	TestTrue(TEXT("IK assets duplicate target mesh request succeeded"), ExecuteHttpJsonRequest(TEXT("POST"), ServerScope.BaseUrl + TEXT("/api/exec"), ServerScope.Token, DuplicateTargetMeshBody, DuplicateTargetMeshResult));
 	TestEqual(TEXT("IK assets duplicate target mesh status code"), DuplicateTargetMeshResult.StatusCode, 200);
+
+	const FString SkeletalMeshInfoBody = MakeExecRequestBody(
+		TEXT("smoke-ik-assets-skelmesh-info-001"),
+		TEXT("skeletal_mesh_get_info"),
+		FString::Printf(TEXT("{\"asset_path\":\"%s\"}"), *TargetMeshAssetPath));
+	FHttpSmokeResult SkeletalMeshInfoResult;
+	TestTrue(TEXT("IK assets skeletal_mesh_get_info request succeeded"), ExecuteHttpJsonRequest(TEXT("POST"), ServerScope.BaseUrl + TEXT("/api/exec"), ServerScope.Token, SkeletalMeshInfoBody, SkeletalMeshInfoResult));
+	TestEqual(TEXT("IK assets skeletal_mesh_get_info status code"), SkeletalMeshInfoResult.StatusCode, 200);
+
+	TSharedPtr<FJsonObject> SkeletalMeshInfoJson;
+	TestTrue(TEXT("IK assets skeletal_mesh_get_info parses JSON"), ParseJson(SkeletalMeshInfoResult.Body, SkeletalMeshInfoJson));
+	const TSharedPtr<FJsonObject>* SkeletalMeshInfoData = nullptr;
+	TestTrue(TEXT("IK assets skeletal_mesh_get_info contains data object"), SkeletalMeshInfoJson.IsValid() && SkeletalMeshInfoJson->TryGetObjectField(TEXT("data"), SkeletalMeshInfoData) && SkeletalMeshInfoData && SkeletalMeshInfoData->IsValid());
+	if (SkeletalMeshInfoData && SkeletalMeshInfoData->IsValid())
+	{
+		TestTrue(TEXT("IK assets skeletal mesh has materials"), static_cast<int32>((*SkeletalMeshInfoData)->GetIntegerField(TEXT("material_slot_count"))) >= 1);
+		TestTrue(TEXT("IK assets skeletal mesh has lods"), static_cast<int32>((*SkeletalMeshInfoData)->GetIntegerField(TEXT("lod_count"))) >= 1);
+	}
+
+	const FString SkeletalMeshFolderPath = MakeSmokeAssetFolderPath(TEXT("SkeletalMesh"), TargetMeshAssetPath);
+	IFileManager::Get().DeleteDirectory(*SkeletalMeshFolderPath, false, true);
+	const FString SkeletalMeshFolderJsonPath = ToSmokeJsonPath(SkeletalMeshFolderPath);
+
+	const FString SkeletalMeshExportFolderBody = MakeExecRequestBody(
+		TEXT("smoke-ik-assets-skelmesh-folder-export-001"),
+		TEXT("skeletal_mesh_export_folder"),
+		FString::Printf(TEXT("{\"asset_path\":\"%s\"}"), *TargetMeshAssetPath));
+	FHttpSmokeResult SkeletalMeshExportFolderResult;
+	TestTrue(TEXT("IK assets skeletal_mesh_export_folder request succeeded"), ExecuteHttpJsonRequest(TEXT("POST"), ServerScope.BaseUrl + TEXT("/api/exec"), ServerScope.Token, SkeletalMeshExportFolderBody, SkeletalMeshExportFolderResult));
+	TestEqual(TEXT("IK assets skeletal_mesh_export_folder status code"), SkeletalMeshExportFolderResult.StatusCode, 200);
+
+	TSharedPtr<FJsonObject> SkeletalMeshExportFolderJson;
+	TestTrue(TEXT("IK assets skeletal_mesh_export_folder parses JSON"), ParseJson(SkeletalMeshExportFolderResult.Body, SkeletalMeshExportFolderJson));
+	const TSharedPtr<FJsonObject>* SkeletalMeshExportFolderData = nullptr;
+	TestTrue(TEXT("IK assets skeletal_mesh_export_folder contains data object"), SkeletalMeshExportFolderJson.IsValid() && SkeletalMeshExportFolderJson->TryGetObjectField(TEXT("data"), SkeletalMeshExportFolderData) && SkeletalMeshExportFolderData && SkeletalMeshExportFolderData->IsValid());
+	if (SkeletalMeshExportFolderData && SkeletalMeshExportFolderData->IsValid())
+	{
+		TestTrue(TEXT("IK assets skeletal mesh folder export marked complete"), (*SkeletalMeshExportFolderData)->GetBoolField(TEXT("is_complete_target_schema")));
+		TestTrue(TEXT("IK assets skeletal mesh folder export wrote files"), static_cast<int32>((*SkeletalMeshExportFolderData)->GetIntegerField(TEXT("file_count"))) >= 10);
+	}
+
+	TSharedPtr<FJsonObject> SkeletalMeshAssetFolderJson;
+	TestTrue(TEXT("IK assets skeletal mesh folder asset.json exists"), LoadSmokeJsonFile(this, FPaths::Combine(SkeletalMeshFolderPath, TEXT("asset.json")), SkeletalMeshAssetFolderJson, TEXT("SkeletalMesh folder asset.json")));
+	TSharedPtr<FJsonObject> SkeletalMeshCoverageJson;
+	TestTrue(TEXT("IK assets skeletal mesh folder coverage exists"), LoadSmokeJsonFile(this, FPaths::Combine(SkeletalMeshFolderPath, TEXT("validation"), TEXT("coverage_report.json")), SkeletalMeshCoverageJson, TEXT("SkeletalMesh folder coverage_report.json")));
+
+	const FString SkeletalMeshValidateFolderBody = MakeExecRequestBody(
+		TEXT("smoke-ik-assets-skelmesh-folder-validate-001"),
+		TEXT("skeletal_mesh_validate_folder"),
+		FString::Printf(TEXT("{\"folder_path\":\"%s\"}"), *SkeletalMeshFolderJsonPath));
+	FHttpSmokeResult SkeletalMeshValidateFolderResult;
+	TestTrue(TEXT("IK assets skeletal_mesh_validate_folder request succeeded"), ExecuteHttpJsonRequest(TEXT("POST"), ServerScope.BaseUrl + TEXT("/api/exec"), ServerScope.Token, SkeletalMeshValidateFolderBody, SkeletalMeshValidateFolderResult));
+	TestEqual(TEXT("IK assets skeletal_mesh_validate_folder status code"), SkeletalMeshValidateFolderResult.StatusCode, 200);
+
+	TSharedPtr<FJsonObject> SkeletalMeshValidateFolderJson;
+	TestTrue(TEXT("IK assets skeletal_mesh_validate_folder parses JSON"), ParseJson(SkeletalMeshValidateFolderResult.Body, SkeletalMeshValidateFolderJson));
+	const TSharedPtr<FJsonObject>* SkeletalMeshValidateFolderData = nullptr;
+	TestTrue(TEXT("IK assets skeletal_mesh_validate_folder contains data object"), SkeletalMeshValidateFolderJson.IsValid() && SkeletalMeshValidateFolderJson->TryGetObjectField(TEXT("data"), SkeletalMeshValidateFolderData) && SkeletalMeshValidateFolderData && SkeletalMeshValidateFolderData->IsValid());
+	if (SkeletalMeshValidateFolderData && SkeletalMeshValidateFolderData->IsValid())
+	{
+		TestTrue(TEXT("IK assets skeletal_mesh_validate_folder is dry run"), (*SkeletalMeshValidateFolderData)->GetBoolField(TEXT("dry_run")));
+		TestEqual(TEXT("IK assets skeletal_mesh_validate_folder has no JSON issues"), static_cast<int32>((*SkeletalMeshValidateFolderData)->GetIntegerField(TEXT("json_issue_count"))), 0);
+	}
+
+	const FString SkeletalMeshApplyFolderBody = MakeExecRequestBody(
+		TEXT("smoke-ik-assets-skelmesh-folder-apply-001"),
+		TEXT("skeletal_mesh_apply_folder"),
+		FString::Printf(TEXT("{\"folder_path\":\"%s\",\"save_after_apply\":false}"), *SkeletalMeshFolderJsonPath));
+	FHttpSmokeResult SkeletalMeshApplyFolderResult;
+	TestTrue(TEXT("IK assets skeletal_mesh_apply_folder request succeeded"), ExecuteHttpJsonRequest(TEXT("POST"), ServerScope.BaseUrl + TEXT("/api/exec"), ServerScope.Token, SkeletalMeshApplyFolderBody, SkeletalMeshApplyFolderResult));
+	TestEqual(TEXT("IK assets skeletal_mesh_apply_folder status code"), SkeletalMeshApplyFolderResult.StatusCode, 200);
+
+	TSharedPtr<FJsonObject> SkeletalMeshApplyFolderJson;
+	TestTrue(TEXT("IK assets skeletal_mesh_apply_folder parses JSON"), ParseJson(SkeletalMeshApplyFolderResult.Body, SkeletalMeshApplyFolderJson));
+	const TSharedPtr<FJsonObject>* SkeletalMeshApplyFolderData = nullptr;
+	TestTrue(TEXT("IK assets skeletal_mesh_apply_folder contains data object"), SkeletalMeshApplyFolderJson.IsValid() && SkeletalMeshApplyFolderJson->TryGetObjectField(TEXT("data"), SkeletalMeshApplyFolderData) && SkeletalMeshApplyFolderData && SkeletalMeshApplyFolderData->IsValid());
+	if (SkeletalMeshApplyFolderData && SkeletalMeshApplyFolderData->IsValid())
+	{
+		TestTrue(TEXT("IK assets skeletal_mesh_apply_folder applied"), (*SkeletalMeshApplyFolderData)->GetBoolField(TEXT("applied")));
+		TestEqual(TEXT("IK assets skeletal_mesh_apply_folder has no JSON issues"), static_cast<int32>((*SkeletalMeshApplyFolderData)->GetIntegerField(TEXT("json_issue_count"))), 0);
+	}
 
 	const FString CreateAutoIKRigBody = MakeExecRequestBody(
 		TEXT("smoke-ik-assets-create-auto-rig-001"),
@@ -14513,6 +15150,69 @@ bool FUeAgentInterfaceIKAssetsSmokeTest::RunTest(const FString& Parameters)
 		}
 	}
 
+	const FString IKRigFolderPath = MakeSmokeAssetFolderPath(TEXT("IKRig"), SourceIKRigAssetPath);
+	IFileManager::Get().DeleteDirectory(*IKRigFolderPath, false, true);
+	const FString IKRigFolderJsonPath = ToSmokeJsonPath(IKRigFolderPath);
+
+	const FString IKRigExportFolderBody = MakeExecRequestBody(
+		TEXT("smoke-ik-assets-rig-folder-export-001"),
+		TEXT("ik_rig_export_folder"),
+		FString::Printf(TEXT("{\"asset_path\":\"%s\"}"), *SourceIKRigAssetPath));
+	FHttpSmokeResult IKRigExportFolderResult;
+	TestTrue(TEXT("IK assets ik_rig_export_folder request succeeded"), ExecuteHttpJsonRequest(TEXT("POST"), ServerScope.BaseUrl + TEXT("/api/exec"), ServerScope.Token, IKRigExportFolderBody, IKRigExportFolderResult));
+	TestEqual(TEXT("IK assets ik_rig_export_folder status code"), IKRigExportFolderResult.StatusCode, 200);
+
+	TSharedPtr<FJsonObject> IKRigExportFolderJson;
+	TestTrue(TEXT("IK assets ik_rig_export_folder parses JSON"), ParseJson(IKRigExportFolderResult.Body, IKRigExportFolderJson));
+	const TSharedPtr<FJsonObject>* IKRigExportFolderData = nullptr;
+	TestTrue(TEXT("IK assets ik_rig_export_folder contains data object"), IKRigExportFolderJson.IsValid() && IKRigExportFolderJson->TryGetObjectField(TEXT("data"), IKRigExportFolderData) && IKRigExportFolderData && IKRigExportFolderData->IsValid());
+	if (IKRigExportFolderData && IKRigExportFolderData->IsValid())
+	{
+		TestTrue(TEXT("IK assets ik rig folder export marked complete"), (*IKRigExportFolderData)->GetBoolField(TEXT("is_complete_target_schema")));
+		TestTrue(TEXT("IK assets ik rig folder export wrote files"), static_cast<int32>((*IKRigExportFolderData)->GetIntegerField(TEXT("file_count"))) >= 8);
+	}
+
+	TSharedPtr<FJsonObject> IKRigAssetFolderJson;
+	TestTrue(TEXT("IK assets ik rig folder asset.json exists"), LoadSmokeJsonFile(this, FPaths::Combine(IKRigFolderPath, TEXT("asset.json")), IKRigAssetFolderJson, TEXT("IKRig folder asset.json")));
+	TSharedPtr<FJsonObject> IKRigCoverageJson;
+	TestTrue(TEXT("IK assets ik rig folder coverage exists"), LoadSmokeJsonFile(this, FPaths::Combine(IKRigFolderPath, TEXT("validation"), TEXT("coverage_report.json")), IKRigCoverageJson, TEXT("IKRig folder coverage_report.json")));
+
+	const FString IKRigValidateFolderBody = MakeExecRequestBody(
+		TEXT("smoke-ik-assets-rig-folder-validate-001"),
+		TEXT("ik_rig_validate_folder"),
+		FString::Printf(TEXT("{\"folder_path\":\"%s\"}"), *IKRigFolderJsonPath));
+	FHttpSmokeResult IKRigValidateFolderResult;
+	TestTrue(TEXT("IK assets ik_rig_validate_folder request succeeded"), ExecuteHttpJsonRequest(TEXT("POST"), ServerScope.BaseUrl + TEXT("/api/exec"), ServerScope.Token, IKRigValidateFolderBody, IKRigValidateFolderResult));
+	TestEqual(TEXT("IK assets ik_rig_validate_folder status code"), IKRigValidateFolderResult.StatusCode, 200);
+
+	TSharedPtr<FJsonObject> IKRigValidateFolderJson;
+	TestTrue(TEXT("IK assets ik_rig_validate_folder parses JSON"), ParseJson(IKRigValidateFolderResult.Body, IKRigValidateFolderJson));
+	const TSharedPtr<FJsonObject>* IKRigValidateFolderData = nullptr;
+	TestTrue(TEXT("IK assets ik_rig_validate_folder contains data object"), IKRigValidateFolderJson.IsValid() && IKRigValidateFolderJson->TryGetObjectField(TEXT("data"), IKRigValidateFolderData) && IKRigValidateFolderData && IKRigValidateFolderData->IsValid());
+	if (IKRigValidateFolderData && IKRigValidateFolderData->IsValid())
+	{
+		TestTrue(TEXT("IK assets ik_rig_validate_folder is dry run"), (*IKRigValidateFolderData)->GetBoolField(TEXT("dry_run")));
+		TestEqual(TEXT("IK assets ik_rig_validate_folder has no JSON issues"), static_cast<int32>((*IKRigValidateFolderData)->GetIntegerField(TEXT("json_issue_count"))), 0);
+	}
+
+	const FString IKRigApplyFolderBody = MakeExecRequestBody(
+		TEXT("smoke-ik-assets-rig-folder-apply-001"),
+		TEXT("ik_rig_apply_folder"),
+		FString::Printf(TEXT("{\"folder_path\":\"%s\",\"save_after_apply\":false}"), *IKRigFolderJsonPath));
+	FHttpSmokeResult IKRigApplyFolderResult;
+	TestTrue(TEXT("IK assets ik_rig_apply_folder request succeeded"), ExecuteHttpJsonRequest(TEXT("POST"), ServerScope.BaseUrl + TEXT("/api/exec"), ServerScope.Token, IKRigApplyFolderBody, IKRigApplyFolderResult));
+	TestEqual(TEXT("IK assets ik_rig_apply_folder status code"), IKRigApplyFolderResult.StatusCode, 200);
+
+	TSharedPtr<FJsonObject> IKRigApplyFolderJson;
+	TestTrue(TEXT("IK assets ik_rig_apply_folder parses JSON"), ParseJson(IKRigApplyFolderResult.Body, IKRigApplyFolderJson));
+	const TSharedPtr<FJsonObject>* IKRigApplyFolderData = nullptr;
+	TestTrue(TEXT("IK assets ik_rig_apply_folder contains data object"), IKRigApplyFolderJson.IsValid() && IKRigApplyFolderJson->TryGetObjectField(TEXT("data"), IKRigApplyFolderData) && IKRigApplyFolderData && IKRigApplyFolderData->IsValid());
+	if (IKRigApplyFolderData && IKRigApplyFolderData->IsValid())
+	{
+		TestTrue(TEXT("IK assets ik_rig_apply_folder applied"), (*IKRigApplyFolderData)->GetBoolField(TEXT("applied")));
+		TestEqual(TEXT("IK assets ik_rig_apply_folder has no JSON issues"), static_cast<int32>((*IKRigApplyFolderData)->GetIntegerField(TEXT("json_issue_count"))), 0);
+	}
+
 	const FString CreateRetargeterBody = MakeExecRequestBody(
 		TEXT("smoke-ik-assets-create-rtg-001"),
 		TEXT("ik_retargeter_create"),
@@ -14689,6 +15389,69 @@ bool FUeAgentInterfaceIKAssetsSmokeTest::RunTest(const FString& Parameters)
 		}
 	}
 
+	const FString IKRetargeterFolderPath = MakeSmokeAssetFolderPath(TEXT("IKRetargeter"), RetargeterAssetPath);
+	IFileManager::Get().DeleteDirectory(*IKRetargeterFolderPath, false, true);
+	const FString IKRetargeterFolderJsonPath = ToSmokeJsonPath(IKRetargeterFolderPath);
+
+	const FString IKRetargeterExportFolderBody = MakeExecRequestBody(
+		TEXT("smoke-ik-assets-rtg-folder-export-001"),
+		TEXT("ik_retargeter_export_folder"),
+		FString::Printf(TEXT("{\"asset_path\":\"%s\"}"), *RetargeterAssetPath));
+	FHttpSmokeResult IKRetargeterExportFolderResult;
+	TestTrue(TEXT("IK assets ik_retargeter_export_folder request succeeded"), ExecuteHttpJsonRequest(TEXT("POST"), ServerScope.BaseUrl + TEXT("/api/exec"), ServerScope.Token, IKRetargeterExportFolderBody, IKRetargeterExportFolderResult));
+	TestEqual(TEXT("IK assets ik_retargeter_export_folder status code"), IKRetargeterExportFolderResult.StatusCode, 200);
+
+	TSharedPtr<FJsonObject> IKRetargeterExportFolderJson;
+	TestTrue(TEXT("IK assets ik_retargeter_export_folder parses JSON"), ParseJson(IKRetargeterExportFolderResult.Body, IKRetargeterExportFolderJson));
+	const TSharedPtr<FJsonObject>* IKRetargeterExportFolderData = nullptr;
+	TestTrue(TEXT("IK assets ik_retargeter_export_folder contains data object"), IKRetargeterExportFolderJson.IsValid() && IKRetargeterExportFolderJson->TryGetObjectField(TEXT("data"), IKRetargeterExportFolderData) && IKRetargeterExportFolderData && IKRetargeterExportFolderData->IsValid());
+	if (IKRetargeterExportFolderData && IKRetargeterExportFolderData->IsValid())
+	{
+		TestTrue(TEXT("IK assets ik retargeter folder export marked complete"), (*IKRetargeterExportFolderData)->GetBoolField(TEXT("is_complete_target_schema")));
+		TestTrue(TEXT("IK assets ik retargeter folder export wrote files"), static_cast<int32>((*IKRetargeterExportFolderData)->GetIntegerField(TEXT("file_count"))) >= 12);
+	}
+
+	TSharedPtr<FJsonObject> IKRetargeterAssetFolderJson;
+	TestTrue(TEXT("IK assets ik retargeter folder asset.json exists"), LoadSmokeJsonFile(this, FPaths::Combine(IKRetargeterFolderPath, TEXT("asset.json")), IKRetargeterAssetFolderJson, TEXT("IKRetargeter folder asset.json")));
+	TSharedPtr<FJsonObject> IKRetargeterCoverageJson;
+	TestTrue(TEXT("IK assets ik retargeter folder coverage exists"), LoadSmokeJsonFile(this, FPaths::Combine(IKRetargeterFolderPath, TEXT("validation"), TEXT("coverage_report.json")), IKRetargeterCoverageJson, TEXT("IKRetargeter folder coverage_report.json")));
+
+	const FString IKRetargeterValidateFolderBody = MakeExecRequestBody(
+		TEXT("smoke-ik-assets-rtg-folder-validate-001"),
+		TEXT("ik_retargeter_validate_folder"),
+		FString::Printf(TEXT("{\"folder_path\":\"%s\"}"), *IKRetargeterFolderJsonPath));
+	FHttpSmokeResult IKRetargeterValidateFolderResult;
+	TestTrue(TEXT("IK assets ik_retargeter_validate_folder request succeeded"), ExecuteHttpJsonRequest(TEXT("POST"), ServerScope.BaseUrl + TEXT("/api/exec"), ServerScope.Token, IKRetargeterValidateFolderBody, IKRetargeterValidateFolderResult));
+	TestEqual(TEXT("IK assets ik_retargeter_validate_folder status code"), IKRetargeterValidateFolderResult.StatusCode, 200);
+
+	TSharedPtr<FJsonObject> IKRetargeterValidateFolderJson;
+	TestTrue(TEXT("IK assets ik_retargeter_validate_folder parses JSON"), ParseJson(IKRetargeterValidateFolderResult.Body, IKRetargeterValidateFolderJson));
+	const TSharedPtr<FJsonObject>* IKRetargeterValidateFolderData = nullptr;
+	TestTrue(TEXT("IK assets ik_retargeter_validate_folder contains data object"), IKRetargeterValidateFolderJson.IsValid() && IKRetargeterValidateFolderJson->TryGetObjectField(TEXT("data"), IKRetargeterValidateFolderData) && IKRetargeterValidateFolderData && IKRetargeterValidateFolderData->IsValid());
+	if (IKRetargeterValidateFolderData && IKRetargeterValidateFolderData->IsValid())
+	{
+		TestTrue(TEXT("IK assets ik_retargeter_validate_folder is dry run"), (*IKRetargeterValidateFolderData)->GetBoolField(TEXT("dry_run")));
+		TestEqual(TEXT("IK assets ik_retargeter_validate_folder has no JSON issues"), static_cast<int32>((*IKRetargeterValidateFolderData)->GetIntegerField(TEXT("json_issue_count"))), 0);
+	}
+
+	const FString IKRetargeterApplyFolderBody = MakeExecRequestBody(
+		TEXT("smoke-ik-assets-rtg-folder-apply-001"),
+		TEXT("ik_retargeter_apply_folder"),
+		FString::Printf(TEXT("{\"folder_path\":\"%s\",\"save_after_apply\":false}"), *IKRetargeterFolderJsonPath));
+	FHttpSmokeResult IKRetargeterApplyFolderResult;
+	TestTrue(TEXT("IK assets ik_retargeter_apply_folder request succeeded"), ExecuteHttpJsonRequest(TEXT("POST"), ServerScope.BaseUrl + TEXT("/api/exec"), ServerScope.Token, IKRetargeterApplyFolderBody, IKRetargeterApplyFolderResult));
+	TestEqual(TEXT("IK assets ik_retargeter_apply_folder status code"), IKRetargeterApplyFolderResult.StatusCode, 200);
+
+	TSharedPtr<FJsonObject> IKRetargeterApplyFolderJson;
+	TestTrue(TEXT("IK assets ik_retargeter_apply_folder parses JSON"), ParseJson(IKRetargeterApplyFolderResult.Body, IKRetargeterApplyFolderJson));
+	const TSharedPtr<FJsonObject>* IKRetargeterApplyFolderData = nullptr;
+	TestTrue(TEXT("IK assets ik_retargeter_apply_folder contains data object"), IKRetargeterApplyFolderJson.IsValid() && IKRetargeterApplyFolderJson->TryGetObjectField(TEXT("data"), IKRetargeterApplyFolderData) && IKRetargeterApplyFolderData && IKRetargeterApplyFolderData->IsValid());
+	if (IKRetargeterApplyFolderData && IKRetargeterApplyFolderData->IsValid())
+	{
+		TestTrue(TEXT("IK assets ik_retargeter_apply_folder applied"), (*IKRetargeterApplyFolderData)->GetBoolField(TEXT("applied")));
+		TestEqual(TEXT("IK assets ik_retargeter_apply_folder has no JSON issues"), static_cast<int32>((*IKRetargeterApplyFolderData)->GetIntegerField(TEXT("json_issue_count"))), 0);
+	}
+
 	const FString DuplicateAndRetargetBody = MakeExecRequestBody(
 		TEXT("smoke-ik-assets-retarget-001"),
 		TEXT("ik_retargeter_duplicate_and_retarget"),
@@ -14704,6 +15467,64 @@ bool FUeAgentInterfaceIKAssetsSmokeTest::RunTest(const FString& Parameters)
 	if (DuplicateAndRetargetData && DuplicateAndRetargetData->IsValid())
 	{
 		TestTrue(TEXT("IK assets duplicate_and_retarget created assets"), static_cast<int32>((*DuplicateAndRetargetData)->GetIntegerField(TEXT("created_asset_count"))) >= 1);
+	}
+
+	const FString RetargetBatchOutputFolder = FString::Printf(TEXT("/Game/__UeAgentInterfaceSmoke/RetargetBatch_%s"), *FGuid::NewGuid().ToString(EGuidFormats::Digits));
+	const FString RetargetBatchJsonFile = ToSmokeJsonPath(FPaths::ConvertRelativePathToFull(
+		FPaths::Combine(FPaths::ProjectSavedDir(), TEXT("UeAssetFolders"), TEXT("RetargetBatch"), FString::Printf(TEXT("Batch_%s.json"), *FGuid::NewGuid().ToString(EGuidFormats::Digits)))));
+
+	const FString RetargetBatchExportJsonBody = MakeExecRequestBody(
+		TEXT("smoke-ik-assets-retarget-batch-export-001"),
+		TEXT("retarget_batch_export_json"),
+		FString::Printf(
+			TEXT("{\"output_file\":\"%s\",\"retargeter\":\"%s\",\"asset_paths\":[\"%s\"],\"source_mesh\":\"%s\",\"target_mesh\":\"%s\",\"output_folder\":\"%s\",\"prefix\":\"RTGBatch_\"}"),
+			*RetargetBatchJsonFile,
+			*RetargeterAssetPath,
+			*SourceAnimationAssetPath,
+			*SourceSkeletalMeshPath,
+			*TargetMeshAssetPath,
+			*RetargetBatchOutputFolder));
+	FHttpSmokeResult RetargetBatchExportJsonResult;
+	TestTrue(TEXT("IK assets retarget_batch_export_json request succeeded"), ExecuteHttpJsonRequest(TEXT("POST"), ServerScope.BaseUrl + TEXT("/api/exec"), ServerScope.Token, RetargetBatchExportJsonBody, RetargetBatchExportJsonResult));
+	TestEqual(TEXT("IK assets retarget_batch_export_json status code"), RetargetBatchExportJsonResult.StatusCode, 200);
+
+	TSharedPtr<FJsonObject> RetargetBatchFileJson;
+	TestTrue(TEXT("IK assets retarget batch file exists"), LoadSmokeJsonFile(this, RetargetBatchJsonFile, RetargetBatchFileJson, TEXT("Retarget batch json")));
+
+	const FString RetargetBatchValidateJsonBody = MakeExecRequestBody(
+		TEXT("smoke-ik-assets-retarget-batch-validate-001"),
+		TEXT("retarget_batch_validate_json"),
+		FString::Printf(TEXT("{\"json_file\":\"%s\"}"), *RetargetBatchJsonFile));
+	FHttpSmokeResult RetargetBatchValidateJsonResult;
+	TestTrue(TEXT("IK assets retarget_batch_validate_json request succeeded"), ExecuteHttpJsonRequest(TEXT("POST"), ServerScope.BaseUrl + TEXT("/api/exec"), ServerScope.Token, RetargetBatchValidateJsonBody, RetargetBatchValidateJsonResult));
+	TestEqual(TEXT("IK assets retarget_batch_validate_json status code"), RetargetBatchValidateJsonResult.StatusCode, 200);
+
+	TSharedPtr<FJsonObject> RetargetBatchValidateJson;
+	TestTrue(TEXT("IK assets retarget_batch_validate_json parses JSON"), ParseJson(RetargetBatchValidateJsonResult.Body, RetargetBatchValidateJson));
+	const TSharedPtr<FJsonObject>* RetargetBatchValidateData = nullptr;
+	TestTrue(TEXT("IK assets retarget_batch_validate_json contains data object"), RetargetBatchValidateJson.IsValid() && RetargetBatchValidateJson->TryGetObjectField(TEXT("data"), RetargetBatchValidateData) && RetargetBatchValidateData && RetargetBatchValidateData->IsValid());
+	if (RetargetBatchValidateData && RetargetBatchValidateData->IsValid())
+	{
+		TestTrue(TEXT("IK assets retarget_batch_validate_json valid"), (*RetargetBatchValidateData)->GetBoolField(TEXT("valid")));
+		TestEqual(TEXT("IK assets retarget_batch_validate_json has no JSON issues"), static_cast<int32>((*RetargetBatchValidateData)->GetIntegerField(TEXT("json_issue_count"))), 0);
+	}
+
+	const FString RetargetBatchApplyJsonBody = MakeExecRequestBody(
+		TEXT("smoke-ik-assets-retarget-batch-apply-001"),
+		TEXT("retarget_batch_apply_json"),
+		FString::Printf(TEXT("{\"json_file\":\"%s\"}"), *RetargetBatchJsonFile));
+	FHttpSmokeResult RetargetBatchApplyJsonResult;
+	TestTrue(TEXT("IK assets retarget_batch_apply_json request succeeded"), ExecuteHttpJsonRequest(TEXT("POST"), ServerScope.BaseUrl + TEXT("/api/exec"), ServerScope.Token, RetargetBatchApplyJsonBody, RetargetBatchApplyJsonResult));
+	TestEqual(TEXT("IK assets retarget_batch_apply_json status code"), RetargetBatchApplyJsonResult.StatusCode, 200);
+
+	TSharedPtr<FJsonObject> RetargetBatchApplyJson;
+	TestTrue(TEXT("IK assets retarget_batch_apply_json parses JSON"), ParseJson(RetargetBatchApplyJsonResult.Body, RetargetBatchApplyJson));
+	const TSharedPtr<FJsonObject>* RetargetBatchApplyData = nullptr;
+	TestTrue(TEXT("IK assets retarget_batch_apply_json contains data object"), RetargetBatchApplyJson.IsValid() && RetargetBatchApplyJson->TryGetObjectField(TEXT("data"), RetargetBatchApplyData) && RetargetBatchApplyData && RetargetBatchApplyData->IsValid());
+	if (RetargetBatchApplyData && RetargetBatchApplyData->IsValid())
+	{
+		TestTrue(TEXT("IK assets retarget_batch_apply_json created assets"), static_cast<int32>((*RetargetBatchApplyData)->GetIntegerField(TEXT("created_asset_count"))) >= 1);
+		TestEqual(TEXT("IK assets retarget_batch_apply_json has no JSON issues"), static_cast<int32>((*RetargetBatchApplyData)->GetIntegerField(TEXT("json_issue_count"))), 0);
 	}
 
 	return !HasAnyErrors();
