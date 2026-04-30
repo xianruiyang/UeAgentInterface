@@ -967,10 +967,11 @@ bool FUeAgentHttpServer::CmdNiagaraScreenshot(const FUeAgentRequestContext& Ctx,
 	JsonTryGetBool(Ctx.Params, TEXT("pause_preview_after_advance"), bPausePreviewAfterAdvance);
 
 	const bool bPreviewPrepareRequested = !bCaptureCurrentPreview && (PreviewAdvanceSeconds > 0.0 || bResetPreview);
-	bool bUseOffscreenRenderer = false;
+	bool bRequestedOffscreenRenderer = true;
 	const bool bUseOffscreenRendererSpecified =
-		JsonTryGetBool(Ctx.Params, TEXT("offscreen"), bUseOffscreenRenderer) ||
-		JsonTryGetBool(Ctx.Params, TEXT("use_offscreen_renderer"), bUseOffscreenRenderer);
+		JsonTryGetBool(Ctx.Params, TEXT("offscreen"), bRequestedOffscreenRenderer) ||
+		JsonTryGetBool(Ctx.Params, TEXT("use_offscreen_renderer"), bRequestedOffscreenRenderer);
+	const bool bUseOffscreenRenderer = true;
 
 	Format = Format.ToLower();
 	if (Format == TEXT("jpeg"))
@@ -1027,15 +1028,6 @@ bool FUeAgentHttpServer::CmdNiagaraScreenshot(const FUeAgentRequestContext& Ctx,
 
 	FString WindowBackbufferUnsafeReason;
 	const bool bWindowBackbufferSafe = UeAgentNiagaraOps::IsSlateWindowSafeForBackbufferCapture(NiagaraWindow, WindowBackbufferUnsafeReason);
-	if (!bUseOffscreenRendererSpecified && !bWindowBackbufferSafe)
-	{
-		bUseOffscreenRenderer = true;
-	}
-	if (!bWindowBackbufferSafe && !bUseOffscreenRenderer)
-	{
-		OutError = FString::Printf(TEXT("window_backbuffer_capture_unsafe:%s"), *WindowBackbufferUnsafeReason);
-		return false;
-	}
 
 	if (bPreviewPrepareRequested)
 	{
@@ -1138,6 +1130,7 @@ bool FUeAgentHttpServer::CmdNiagaraScreenshot(const FUeAgentRequestContext& Ctx,
 	OutData->SetStringField(TEXT("file_path"), OutPath);
 	OutData->SetStringField(TEXT("target"), EffectiveTarget);
 	OutData->SetStringField(TEXT("capture_mode"), CaptureMode);
+	OutData->SetStringField(TEXT("legacy_backbuffer_capture"), TEXT("disabled"));
 	OutData->SetStringField(TEXT("requested_capture_mode"), bCaptureCurrentPreview ? TEXT("current_preview") : RequestedCaptureMode);
 	OutData->SetStringField(TEXT("format"), Format);
 	OutData->SetNumberField(TEXT("width"), ResizedSize.X);
@@ -1148,6 +1141,8 @@ bool FUeAgentHttpServer::CmdNiagaraScreenshot(const FUeAgentRequestContext& Ctx,
 	OutData->SetNumberField(TEXT("overview_node_count_before"), OverviewNodeCountBefore);
 	OutData->SetNumberField(TEXT("overview_node_count_after"), OverviewNodeCountAfter);
 	OutData->SetBoolField(TEXT("offscreen_renderer"), bUseOffscreenRenderer);
+	OutData->SetBoolField(TEXT("requested_offscreen_renderer"), bRequestedOffscreenRenderer);
+	OutData->SetBoolField(TEXT("requested_offscreen_renderer_specified"), bUseOffscreenRendererSpecified);
 	OutData->SetNumberField(TEXT("offscreen_draw_width"), OffscreenDrawSize.X);
 	OutData->SetNumberField(TEXT("offscreen_draw_height"), OffscreenDrawSize.Y);
 	OutData->SetBoolField(TEXT("window_backbuffer_safe"), bWindowBackbufferSafe);

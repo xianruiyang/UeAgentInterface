@@ -75,6 +75,7 @@ public:
 #include "UeAgentHttpServer_DeformerMembers.h"
 #include "UeAgentHttpServer_NiagaraMembers.h"
 #include "UeAgentHttpServer_ModelingMembers.h"
+#include "UeAgentHttpServer_AIMembers.h"
 #undef UEAGENT_HTTP_SERVER_MEMBER_DECL
 
 private:

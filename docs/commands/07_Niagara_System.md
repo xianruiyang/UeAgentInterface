@@ -89,7 +89,7 @@
 - `quality`：可选，`jpg` / `webp` 压缩质量，范围 `1..100`。
 - `max_size`：可选，最长边，默认 `2048`。
 - `file_path` / `out_file_path`：可选，自定义输出路径；相对路径按项目根目录解析。
-- `offscreen` / `use_offscreen_renderer`：可选，使用 Slate 离屏绘制路径，避免依赖真实窗口 backbuffer；窗口最小化或不可安全读取 backbuffer 时会自动使用离屏路径。
+- `offscreen` / `use_offscreen_renderer`：兼容参数；当前截图始终使用 Slate 离屏绘制路径，避免依赖真实窗口 backbuffer。
 - `reset_preview`：可选；只有 `true` 或设置 `preview_advance_seconds > 0` 时才会准备 Niagara 预览组件。显式传 `false` 不会触发预览重置或真实窗口 redraw。
 - `preview_advance_seconds` / `preview_tick_delta_seconds` / `preview_advance_mode`：可选，用于截图前推进 Niagara 编辑器预览；不需要推进时不要传。
 - `capture_mode=current_preview`：只截图当前已暂停的 preview 状态，不 reset、不 activate、不 tick。应配合 `expected_preview_state_token` 和 `expected_frame` 使用。
@@ -97,7 +97,7 @@
 - `expected_frame` / `target_frame`：可选，按 `preview_tick_delta_seconds` 估算当前帧，不匹配时返回 `preview_frame_mismatch`。
 - `require_paused`：可选，`current_preview` 默认 `true`；当前预览未暂停时返回 `preview_component_not_paused`。
 
-返回字段包含 `file_path`、`width`、`height`、`bytes`、`target`、`capture_mode`、`preview_prepare_requested`、`pre_preview_redraw_performed`、`capture_redraw_performed`。离屏截图路径不会强制 redraw 真实 Slate 窗口。
+返回字段包含 `file_path`、`width`、`height`、`bytes`、`target`、`capture_mode`、`legacy_backbuffer_capture=disabled`、`preview_prepare_requested`、`pre_preview_redraw_performed`、`capture_redraw_performed`。截图路径不会调用 `FSlateApplication::TakeScreenshot`，也不会强制 redraw 真实 Slate 窗口；`window_backbuffer_safe` 只作为诊断字段保留。
 
 只读第 45 帧截图示例：
 

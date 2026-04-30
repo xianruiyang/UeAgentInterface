@@ -2,6 +2,8 @@
 
 #include "UeAgentHttpServer_StaticMesh.h"
 
+#include "UeAgentJsonDiagnostics.h"
+
 #include "Editor.h"
 #include "EditorReimportHandler.h"
 #include "EditorViewportClient.h"

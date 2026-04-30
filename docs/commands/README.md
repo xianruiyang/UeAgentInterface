@@ -21,6 +21,7 @@
 - `16_SkeletalMesh_FolderFormat.md`
 - `17_ControlRig_FolderFormat.md`
 - `18_Deformer_MLDeformer_GeometryCache.md`
+- `19_AI_Behavior_Blackboard_StateTree_EQS_Navigation_SmartObject.md`
 - `deprecatedCommand/README.md`
 - `10_Modeling.md`
 - `11_AnimBlueprint.md`
@@ -76,6 +77,11 @@
    - 当前已新增：`control_rig_shape_library_export_json / control_rig_shape_library_apply_json`
    - 当前已新增：`static_mesh_export_folder / static_mesh_apply_folder`
    - 当前已新增：`deformer_graph_export_folder / deformer_graph_apply_folder`
+   - 当前已新增：`blackboard_export_json / blackboard_apply_json`
+   - 当前已新增：`behavior_tree_export_folder / behavior_tree_apply_folder`
+   - 当前已新增：`state_tree_export_folder / state_tree_apply_folder`
+   - 当前已新增：`eqs_export_folder / eqs_apply_folder`
+   - 当前已新增：`smart_object_definition_export_json / smart_object_definition_apply_json`
    - Niagara 当前已覆盖 `NiagaraSystem / NiagaraEmitter / NiagaraScript` 三个完整 folder profile；System / Emitter apply 会随返回携带 Stack 感叹号信息，严格验收以 `warnings`、`stack_error_count` 和 `validation/coverage_report.json` 为依据
 3. 原子命令：
    - 当同一资产字段或结构已经能被单文件 JSON / 文件夹式结构化 JSON 表达时，对应写入型原子命令统一标记为 **Deprecated for authoring**
@@ -401,6 +407,23 @@
 - `montage_rename_skeleton_slot`
 - `montage_remove_skeleton_slot`
 
+## 2026-04-30 增量补齐的 AI 行为栈命令
+
+分册：`19_AI_Behavior_Blackboard_StateTree_EQS_Navigation_SmartObject.md`
+
+- Blackboard：`blackboard_create`、`blackboard_get_info`、`blackboard_export_json`、`blackboard_validate_json`、`blackboard_apply_json`
+- Behavior Tree：`behavior_tree_create`、`behavior_tree_get_info`、`behavior_tree_export_folder`、`behavior_tree_validate_folder`、`behavior_tree_apply_folder`、`behavior_tree_open_editor`、`behavior_tree_graph_get_view`、`behavior_tree_graph_set_view`、`behavior_tree_screenshot`、`behavior_tree_runtime_snapshot`
+- BT 节点 Blueprint 摘要：`bt_node_blueprint_get_info`
+- StateTree：`state_tree_create`、`state_tree_get_info`、`state_tree_export_folder`、`state_tree_validate_folder`、`state_tree_apply_folder`、`state_tree_open_editor`、`state_tree_screenshot`、`state_tree_runtime_snapshot`
+- StateTree 节点 Blueprint 摘要：`state_tree_node_blueprint_get_info`
+- EQS：`eqs_create`、`eqs_get_info`、`eqs_export_folder`、`eqs_validate_folder`、`eqs_apply_folder`、`eqs_run_query`、`eqs_debug_snapshot`
+- AI Perception：`ai_perception_get_component_info`、`ai_perception_validate_setup`、`ai_perception_runtime_snapshot`、`ai_perception_runtime_probe`
+- Navigation：`navigation_get_info`、`navigation_export_config_json`、`navigation_validate_level`、`navigation_path_probe`、`navigation_area_cost_probe`、`navigation_runtime_snapshot`
+- Smart Object：`smart_object_definition_create`、`smart_object_definition_get_info`、`smart_object_definition_export_json`、`smart_object_definition_validate_json`、`smart_object_definition_apply_json`、`smart_object_validate_setup`、`smart_object_find`、`smart_object_claim`、`smart_object_release`、`smart_object_runtime_snapshot`、`smart_object_runtime_probe`
+- AI Behavior Stack：`ai_behavior_stack_export_folder`、`ai_behavior_stack_validate_folder`、`ai_behavior_stack_runtime_probe`
+
+测试状态：`GptProjectTest.UeAgentInterface.Smoke.AIBehaviorStackCommands` 覆盖所有 headless 命令；GUI 批处理覆盖 BT/StateTree editor open 与 screenshot，并校验 `appears_non_black=true`。
+
 ## 2026-04-24 增量补齐的 Niagara 诊断命令
 
 - `niagara_get_stack_issues`
@@ -603,5 +626,6 @@ Control Rig authoring 优先走 `control_rig_export_folder / control_rig_apply_f
 - 想查 Blueprint / AnimBlueprint / UMG / Montage：看 `02_Blueprint.md`、`11_AnimBlueprint.md`、`03_UMG.md`、`12_Montage.md`
 - 想查 StaticMesh / EnhancedInput：看 `04_StaticMesh_EnhancedInput.md`
 - 想查材质、Sequencer、Niagara、Control Rig：看对应编号分册
+- 想查 AI 行为树、黑板、StateTree、EQS、感知、导航和 Smart Object：看 `19_AI_Behavior_Blackboard_StateTree_EQS_Navigation_SmartObject.md`
 - 想查 Modeling Mode：看 `10_Modeling.md`
 

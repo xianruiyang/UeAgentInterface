@@ -25,6 +25,7 @@
 - `Plugins/UeAgentInterface/docs/commands/16_SkeletalMesh_FolderFormat.md`
 - `Plugins/UeAgentInterface/docs/commands/17_ControlRig_FolderFormat.md`
 - `Plugins/UeAgentInterface/docs/commands/18_Deformer_MLDeformer_GeometryCache.md`
+- `Plugins/UeAgentInterface/docs/commands/19_AI_Behavior_Blackboard_StateTree_EQS_Navigation_SmartObject.md`
 - `Plugins/UeAgentInterface/docs/commands/10_Modeling.md`
 
 ### 0.1 外置 CLI 推荐用法（UeAgentInterfaceCMD）
@@ -78,6 +79,11 @@ Niagara 相关批次默认启用护栏（自动 preflight + 编译日志 + emitt
      - `static_mesh_export_folder / static_mesh_apply_folder`
      - `skeletal_mesh_export_folder / skeletal_mesh_apply_folder`
      - `deformer_graph_export_folder / deformer_graph_apply_folder`
+     - `blackboard_export_json / blackboard_apply_json`
+     - `behavior_tree_export_folder / behavior_tree_apply_folder`
+     - `state_tree_export_folder / state_tree_apply_folder`
+     - `eqs_export_folder / eqs_apply_folder`
+     - `smart_object_definition_export_json / smart_object_definition_apply_json`
 3. 原子命令：
    - 主要用于以下场景：
      - bootstrap 或补创建某个最小局部结构
@@ -91,7 +97,7 @@ Niagara 相关批次默认启用护栏（自动 preflight + 编译日志 + emitt
 - 能走 JSON / 结构化 JSON 的资产编辑，不要退回逐条原子命令手搓完整 authoring。
 - 被 JSON / 结构化 JSON 覆盖的写入型原子命令保留兼容，但统一视为 deprecated for authoring；只用于 bootstrap、诊断、迁移、schema 边界和紧急局部修补。
 - 读取、创建最小资产、打开编辑器、编译、截图、导出、应用、dirty 处理和诊断命令不属于这类废弃写入命令。
-- 暂无 JSON / 结构化 JSON profile 的领域不强行标废弃，例如 Modeling、Level Actor 放置、NavMesh、普通视口控制等。IK Rig / IK Retargeter / Skeleton / SkeletalMesh / Control Rig / StaticMesh / Deformer Graph 已进入 JSON 或文件夹式结构化 JSON 主流程。
+- 暂无 JSON / 结构化 JSON profile 的领域不强行标废弃，例如 Modeling、Level Actor 放置、NavMesh、普通视口控制等。IK Rig / IK Retargeter / Skeleton / SkeletalMesh / Control Rig / StaticMesh / Deformer Graph，以及 Blackboard / Behavior Tree / StateTree / EQS / Smart Object Definition 已进入 JSON 或文件夹式结构化 JSON 主流程。
 
 废弃命令明细已抽到 `commands/deprecatedCommand/`，覆盖面按主流程分组：
 
@@ -107,6 +113,7 @@ Niagara 相关批次默认启用护栏（自动 preflight + 编译日志 + emitt
 - `static_mesh_apply_folder` 覆盖的 StaticMesh authoring 写入：材质、socket、simple collision、lightmap、Nanite 安全字段。
 - `skeletal_mesh_apply_folder` 覆盖的 SkeletalMesh authoring 写入：材质、mesh-only socket、physics、post process AnimBP、Morph 删除；Skin Weight Profile 导入/删除/预览和 Morph 预览使用显式动作命令，不隐式混进 folder apply。
 - `deformer_graph_apply_folder` 与 Deformer/ML 单文件 JSON 覆盖的写入：显式 `apply=true` 的 UObject 属性项。
+- `blackboard_apply_json`、`behavior_tree_apply_folder`、`state_tree_apply_folder`、`eqs_apply_folder`、`smart_object_definition_apply_json` 覆盖 AI 决策资产本体写入；AI Perception Component、Smart Object Component、AIController/Pawn Blueprint 和节点 Blueprint 内部图继续走既有 Blueprint / Actor / Component workflow。
 
 ### 0.4 通用编辑方法论
 
@@ -403,7 +410,8 @@ Blueprint 视图与截图补充：
   - `target` 支持 `viewport` / `graph` / `event_graph` / `window`
   - `target=viewport` 优先截 Blueprint 预览区内部真实 `SViewport` 区域，而不是外层编辑器容器
   - 当预览视口相机仍处于未初始化状态（典型特征：位置/旋转全 0）时，会先自动聚焦到预览 Actor 包围盒，再截图
-  - 返回 `capture_mode`，用于区分截图来源：`viewport_window_crop`、`viewport_readpixels_fallback`、`window_fallback`、`slate_widget`
+  - 返回 `capture_mode`，用于区分截图来源：`viewport_window_crop_offscreen`、`viewport_readpixels_fallback`、`window_offscreen_fallback`、`slate_widget_offscreen`
+  - 返回 `legacy_backbuffer_capture=disabled`；Slate UI 截图不再调用 `FSlateApplication::TakeScreenshot` 或强制 redraw 真实窗口
   - 详细调试信息会写入 `Saved/Logs/ueagentinterface_%COMPUTERNAME%.log`
 - `blueprint_export_folder` / `blueprint_apply_folder`：
   - 当前这是 `Actor Blueprint` 的主编辑路径
@@ -914,8 +922,8 @@ Modeling 补充：
     - 说明：从 0 或当前预览状态连续 tick 到目标帧并暂停，不启动 PIE / game。Collision Event / Death Event / Event Handler 类效果推荐先用该命令推进一次，再用 current-preview 的 probe 和 screenshot 只读同一状态
 - `niagara_screenshot`
     - 关键参数：`asset_path`，可选：`target=window|viewport`、`open_editor_if_needed`、`offscreen/use_offscreen_renderer`、`capture_mode=current_preview`、`expected_preview_state_token`、`expected_frame`、`reset_preview`、`preview_advance_seconds`、`format`、`quality`、`max_size`、`file_path`
-    - 返回：截图 `file_path`、尺寸、字节数、`capture_mode`、`preview_prepare_requested`、`current_preview_validation`、`pre_preview_redraw_performed`、`capture_redraw_performed`
-    - 说明：用于调试 Niagara 编辑器界面是否真实写入；只截图编辑器 UI，不运行 PIE / game。`capture_mode=current_preview` 为严格只读当前暂停预览，不 reset、不 activate、不 tick，建议配合 `niagara_preview_advance` 返回的 `preview_state_token`
+    - 返回：截图 `file_path`、尺寸、字节数、`capture_mode`、`legacy_backbuffer_capture=disabled`、`preview_prepare_requested`、`current_preview_validation`、`pre_preview_redraw_performed`、`capture_redraw_performed`
+    - 说明：用于调试 Niagara 编辑器界面是否真实写入；只截图编辑器 UI，不运行 PIE / game。截图始终走 Slate 离屏 WidgetRenderer，`capture_mode=current_preview` 为严格只读当前暂停预览，不 reset、不 activate、不 tick，建议配合 `niagara_preview_advance` 返回的 `preview_state_token`
 - `niagara_system_runtime_probe`
     - 关键参数：`asset_path`
     - 可选参数：`open_editor_if_needed`、`sample_mode=current_preview`、`expected_preview_state_token`、`expected_frame`、`reset_preview`、`tick_count`、`tick_delta_seconds`、`advance_mode`、`include_script_runtime_stats`、`include_snapshots`
@@ -1142,6 +1150,7 @@ Control Rig authoring 主流程使用文件夹式结构化 JSON。Shape Library 
 - `control_rig_screenshot`
   - 关键参数：`asset_path`、`target=graph|viewport|window`
   - 可选参数：`graph_name_or_path`
+  - 复用 Blueprint 截图实现，返回 `legacy_backbuffer_capture=disabled`
 - `control_rig_runtime_probe`
   - 关键参数：`asset_path`
   - 可选参数：`frames`、`event_name`、`execute_construction`、`variables`、`variable_inputs[]`、`sample_bones[]`、`sample_controls[]`、`sample_variables[]`
@@ -1169,6 +1178,20 @@ Control Rig authoring 主流程使用文件夹式结构化 JSON。Shape Library 
   - 可选参数：`asset_path`、`create_if_missing`、`save_after_apply`
 
 推荐验收：`control_rig_validate_folder` 必须 `json_issue_count=0`；`control_rig_apply_folder` 必须 `compile_report.error_count=0`；变量或 graph 写入必须在 `readback` 中读到；运行逻辑用 `control_rig_runtime_probe` 验证输入变量和采样结果。完整字段见 `commands/17_ControlRig_FolderFormat.md`。
+
+### 4.16 AI Behavior / Blackboard / StateTree / EQS / Navigation / Smart Object
+
+完整字段定义见 `commands/19_AI_Behavior_Blackboard_StateTree_EQS_Navigation_SmartObject.md`。
+
+- Blackboard 主流程：`blackboard_create`、`blackboard_get_info`、`blackboard_export_json`、`blackboard_validate_json`、`blackboard_apply_json`
+- Behavior Tree 主流程：`behavior_tree_create`、`behavior_tree_get_info`、`behavior_tree_export_folder`、`behavior_tree_validate_folder`、`behavior_tree_apply_folder`、`behavior_tree_open_editor`、`behavior_tree_graph_get_view`、`behavior_tree_graph_set_view`、`behavior_tree_screenshot`、`behavior_tree_runtime_snapshot`
+- StateTree 主流程：`state_tree_create`、`state_tree_get_info`、`state_tree_export_folder`、`state_tree_validate_folder`、`state_tree_apply_folder`、`state_tree_open_editor`、`state_tree_screenshot`、`state_tree_runtime_snapshot`
+- EQS 主流程：`eqs_create`、`eqs_get_info`、`eqs_export_folder`、`eqs_validate_folder`、`eqs_apply_folder`、`eqs_run_query`、`eqs_debug_snapshot`
+- AI Perception 验证/探针：`ai_perception_get_component_info`、`ai_perception_validate_setup`、`ai_perception_runtime_snapshot`、`ai_perception_runtime_probe`
+- Navigation 聚合/探针：`navigation_get_info`、`navigation_export_config_json`、`navigation_validate_level`、`navigation_path_probe`、`navigation_area_cost_probe`、`navigation_runtime_snapshot`
+- Smart Object 主流程：`smart_object_definition_create`、`smart_object_definition_get_info`、`smart_object_definition_export_json`、`smart_object_definition_validate_json`、`smart_object_definition_apply_json`、`smart_object_validate_setup`、`smart_object_find`、`smart_object_claim`、`smart_object_release`、`smart_object_runtime_snapshot`、`smart_object_runtime_probe`
+- AI Behavior Stack：`ai_behavior_stack_export_folder`、`ai_behavior_stack_validate_folder`、`ai_behavior_stack_runtime_probe`
+- 节点 Blueprint 只新增语义摘要：`bt_node_blueprint_get_info`、`state_tree_node_blueprint_get_info`；创建、变量、函数、事件图和编译继续复用 Blueprint workflow。
 
 ## 5. PowerShell 模板
 

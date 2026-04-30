@@ -92,10 +92,11 @@
 
 返回字段补充：
 - `capture_mode`：截图来源模式。常见值：
-  - `viewport_window_crop`：直接从 Blueprint 窗口裁切预览视口区域；
+  - `viewport_window_crop_offscreen`：用离屏 WidgetRenderer 绘制 Blueprint 窗口后裁切预览视口区域；
   - `viewport_readpixels_fallback`：窗口裁切失败后，退回到视口像素读取；
-  - `window_fallback`：视口相关截图失败后，退回到蓝图窗口截图；
-  - `slate_widget`：普通 Slate Widget 截图（如 graph/window 目标）。
+  - `window_offscreen_fallback`：视口相关截图失败后，退回到离屏窗口截图；
+  - `slate_widget_offscreen`：普通 Slate Widget 离屏截图（如 graph/window 目标）。
+- `legacy_backbuffer_capture=disabled`：不再调用 `FSlateApplication::TakeScreenshot` 或强制 redraw 真实 Slate 窗口，避免 D3D12/Slate swapchain backbuffer 截图路径导致编辑器崩溃。
 
 ## 类级操作
 
