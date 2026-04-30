@@ -282,6 +282,16 @@ namespace
 				{ TEXT("ml_deformer_"), &InvokePrefixed<&FUeAgentHttpServer::ExecuteMLDeformerCommand> },
 				{ TEXT("niagara_"), &InvokePrefixed<&FUeAgentHttpServer::ExecuteNiagaraCommand> },
 				{ TEXT("modeling_"), &InvokePrefixed<&FUeAgentHttpServer::ExecuteModelingCommand> },
+				{ TEXT("blackboard_"), &InvokePrefixed<&FUeAgentHttpServer::ExecuteAICommand> },
+				{ TEXT("behavior_tree_"), &InvokePrefixed<&FUeAgentHttpServer::ExecuteAICommand> },
+				{ TEXT("bt_node_blueprint_"), &InvokePrefixed<&FUeAgentHttpServer::ExecuteAICommand> },
+				{ TEXT("state_tree_"), &InvokePrefixed<&FUeAgentHttpServer::ExecuteAICommand> },
+				{ TEXT("eqs_"), &InvokePrefixed<&FUeAgentHttpServer::ExecuteAICommand> },
+				{ TEXT("ai_perception_"), &InvokePrefixed<&FUeAgentHttpServer::ExecuteAICommand> },
+				{ TEXT("navigation_"), &InvokePrefixed<&FUeAgentHttpServer::ExecuteAICommand> },
+				{ TEXT("smart_object_definition_"), &InvokePrefixed<&FUeAgentHttpServer::ExecuteAICommand> },
+				{ TEXT("smart_object_"), &InvokePrefixed<&FUeAgentHttpServer::ExecuteAICommand> },
+				{ TEXT("ai_behavior_stack_"), &InvokePrefixed<&FUeAgentHttpServer::ExecuteAICommand> },
 			};
 
 			for (const FPrefixedCommandEntry& Entry : GPrefixedCommandEntries)

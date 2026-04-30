@@ -51,9 +51,11 @@
 #include "RenderingThread.h"
 #include "SEditorViewport.h"
 #include "Slate/SceneViewport.h"
+#include "Slate/WidgetRenderer.h"
 #include "Subsystems/AssetEditorSubsystem.h"
 #include "UeAgentInterfaceLogger.h"
 #include "UeAgentInterfaceSettings.h"
+#include "UObject/GarbageCollection.h"
 #include "UObject/UnrealType.h"
 #include "Widgets/Docking/SDockTab.h"
 #include "Widgets/SWindow.h"
@@ -1266,10 +1268,41 @@ namespace UeAgentAnimationEditorOps
 			return;
 		}
 
+		FSlateApplication::Get().PumpMessages();
 		const float WindowScale = FSlateApplication::Get().GetApplicationScale() * Window->GetDPIScaleFactor();
 		Window->SlatePrepass(WindowScale);
 		FSlateApplication::Get().InvalidateAllViewports();
-		FSlateApplication::Get().ForceRedrawWindow(Window.ToSharedRef());
+	}
+
+	static FVector2D ResolveOffscreenWidgetDrawSize(const TSharedRef<SWidget>& Widget)
+	{
+		FVector2D DrawSize = Widget->GetTickSpaceGeometry().GetLocalSize();
+		if (DrawSize.X <= 1.0 || DrawSize.Y <= 1.0)
+		{
+			DrawSize = Widget->GetTickSpaceGeometry().GetAbsoluteSize();
+		}
+		if (DrawSize.X <= 1.0 || DrawSize.Y <= 1.0)
+		{
+			DrawSize = Widget->GetCachedGeometry().GetLocalSize();
+		}
+		if (DrawSize.X <= 1.0 || DrawSize.Y <= 1.0)
+		{
+			DrawSize = Widget->GetDesiredSize();
+		}
+		if (DrawSize.X <= 1.0 || DrawSize.Y <= 1.0)
+		{
+			DrawSize = FVector2D(1440.0, 900.0);
+		}
+
+		const double MaxDimension = 8192.0;
+		if (DrawSize.X > MaxDimension || DrawSize.Y > MaxDimension)
+		{
+			const double Scale = FMath::Min(MaxDimension / DrawSize.X, MaxDimension / DrawSize.Y);
+			DrawSize *= Scale;
+		}
+		DrawSize.X = FMath::Clamp(FMath::RoundToDouble(DrawSize.X), 64.0, MaxDimension);
+		DrawSize.Y = FMath::Clamp(FMath::RoundToDouble(DrawSize.Y), 64.0, MaxDimension);
+		return DrawSize;
 	}
 
 	static bool ScreenshotSlateWidget(const TSharedRef<SWidget>& Widget, TArray<FColor>& OutPixels, FIntPoint& OutSize, FString& OutError)
@@ -1280,19 +1313,53 @@ namespace UeAgentAnimationEditorOps
 			return false;
 		}
 
-		FIntVector ShotSize(0, 0, 0);
-		if (!FSlateApplication::Get().TakeScreenshot(Widget, OutPixels, ShotSize))
+		FSlateApplication::Get().PumpMessages();
+		const float WidgetScale = FSlateApplication::Get().GetApplicationScale();
+		Widget->SlatePrepass(WidgetScale);
+		FSlateApplication::Get().InvalidateAllViewports();
+
+		const FVector2D DrawSize = ResolveOffscreenWidgetDrawSize(Widget);
+		FWidgetRenderer* WidgetRenderer = new FWidgetRenderer(true, true);
+		if (!WidgetRenderer)
 		{
-			OutError = TEXT("widget_screenshot_failed");
-			return false;
-		}
-		if (ShotSize.X <= 0 || ShotSize.Y <= 0 || OutPixels.Num() <= 0)
-		{
-			OutError = TEXT("widget_screenshot_empty");
+			OutError = TEXT("widget_renderer_create_failed");
 			return false;
 		}
 
-		OutSize = FIntPoint(ShotSize.X, ShotSize.Y);
+		UTextureRenderTarget2D* RenderTarget = FWidgetRenderer::CreateTargetFor(DrawSize, TF_Bilinear, true);
+		if (!RenderTarget)
+		{
+			BeginCleanup(WidgetRenderer);
+			OutError = TEXT("offscreen_render_target_create_failed");
+			return false;
+		}
+
+		WidgetRenderer->DrawWidget(RenderTarget, Widget, 1.0f, DrawSize, 0.0f, false);
+		FlushRenderingCommands();
+		BeginCleanup(WidgetRenderer);
+
+		FRenderTarget* RenderTargetResource = RenderTarget->GameThread_GetRenderTargetResource();
+		if (!RenderTargetResource)
+		{
+			OutError = TEXT("offscreen_render_target_resource_missing");
+			return false;
+		}
+
+		FReadSurfaceDataFlags ReadFlags(RCM_UNorm);
+		ReadFlags.SetLinearToGamma(false);
+		OutPixels.Reset();
+		if (!RenderTargetResource->ReadPixels(OutPixels, ReadFlags) || OutPixels.Num() <= 0)
+		{
+			OutError = TEXT("offscreen_read_pixels_failed");
+			return false;
+		}
+
+		OutSize = FIntPoint(RenderTarget->SizeX, RenderTarget->SizeY);
+		if (OutSize.X <= 0 || OutSize.Y <= 0 || OutPixels.Num() < OutSize.X * OutSize.Y)
+		{
+			OutError = TEXT("offscreen_screenshot_empty");
+			return false;
+		}
 		return true;
 	}
 

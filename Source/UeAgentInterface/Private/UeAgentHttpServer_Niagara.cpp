@@ -83,6 +83,8 @@ namespace UeAgentNiagaraOps
 	static UEdGraphPin* FindOverridePinByAliasedInputName(UNiagaraGraph* Graph, const FName AliasedInputName);
 	static bool EnsureGraphNodeGuid(UEdGraphNode* Node, TSet<FGuid>* ExistingGuids = nullptr);
 	static int32 NormalizeGraphNodeGuids(UEdGraph* Graph);
+	static FVector2D ResolveOffscreenDrawSize(const TSharedRef<SWidget>& Widget, const FString& Target, const TSharedPtr<FJsonObject>& Params, const int32 MaxSize);
+	static bool ScreenshotSlateWidgetOffscreen(const TSharedRef<SWidget>& Widget, const FVector2D& DrawSize, TArray<FColor>& OutPixels, FIntPoint& OutSize, FString& OutError);
 
 	template<typename TEnum>
 	static FString NiagaraEnumToString(const TEnum Value)
@@ -430,44 +432,18 @@ namespace UeAgentNiagaraOps
 			return false;
 		}
 
+		FSlateApplication::Get().PumpMessages();
 		const float WindowScale = FSlateApplication::Get().GetApplicationScale() * Window->GetDPIScaleFactor();
 		Window->SlatePrepass(WindowScale);
 		FSlateApplication::Get().InvalidateAllViewports();
-
-		FString UnsafeReason;
-		if (!IsSlateWindowSafeForBackbufferCapture(Window, UnsafeReason))
-		{
-			OutRedrawSkipReason = UnsafeReason;
-			return false;
-		}
-
-		FSlateApplication::Get().ForceRedrawWindow(Window.ToSharedRef());
-		OutRedrawSkipReason.Reset();
-		return true;
+		OutRedrawSkipReason = TEXT("legacy_backbuffer_redraw_disabled");
+		return false;
 	}
 
 	static bool ScreenshotSlateWidget(const TSharedRef<SWidget>& Widget, TArray<FColor>& OutPixels, FIntPoint& OutSize, FString& OutError)
 	{
-		if (!FSlateApplication::IsInitialized())
-		{
-			OutError = TEXT("slate_not_initialized");
-			return false;
-		}
-
-		FIntVector ShotSize(0, 0, 0);
-		if (!FSlateApplication::Get().TakeScreenshot(Widget, OutPixels, ShotSize))
-		{
-			OutError = TEXT("widget_screenshot_failed");
-			return false;
-		}
-		if (ShotSize.X <= 0 || ShotSize.Y <= 0 || OutPixels.Num() <= 0)
-		{
-			OutError = TEXT("widget_screenshot_empty");
-			return false;
-		}
-
-		OutSize = FIntPoint(ShotSize.X, ShotSize.Y);
-		return true;
+		const FVector2D DrawSize = ResolveOffscreenDrawSize(Widget, TEXT("window"), nullptr, 8192);
+		return ScreenshotSlateWidgetOffscreen(Widget, DrawSize, OutPixels, OutSize, OutError);
 	}
 
 	static FVector2D ResolveOffscreenDrawSize(const TSharedRef<SWidget>& Widget, const FString& Target, const TSharedPtr<FJsonObject>& Params, const int32 MaxSize)

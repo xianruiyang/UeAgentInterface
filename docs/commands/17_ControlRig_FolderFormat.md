@@ -40,6 +40,8 @@ Control Rig 使用文件夹式结构化 JSON 作为主 authoring 流程。Contro
 
 ### `control_rig_create`
 
+`control_rig_screenshot` 复用 Blueprint 截图实现；Slate UI 截图默认走离屏 WidgetRenderer，返回 `legacy_backbuffer_capture=disabled`，不再使用真实窗口 backbuffer 截图。
+
 参数：
 
 - `asset_path`：必填，长包名，例如 `/Game/ControlRig/CR_Player`。

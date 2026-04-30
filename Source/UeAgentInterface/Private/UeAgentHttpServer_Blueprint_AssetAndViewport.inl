@@ -724,7 +724,7 @@ bool FUeAgentHttpServer::CmdBlueprintScreenshot(const FUeAgentRequestContext& Ct
 	TArray<FColor> Pixels;
 	FIntPoint ShotSize(0, 0);
 	bool bShotOk = false;
-	FString CaptureMode = TEXT("slate_widget");
+	FString CaptureMode = TEXT("slate_widget_offscreen");
 	if (EffectiveTarget == TEXT("viewport") && ViewportWidgetForShot.IsValid())
 	{
 		UeAgentBlueprintOps::PrepareBlueprintViewportForCapture(BlueprintEditor, Blueprint, ViewportWidgetForShot);
@@ -773,7 +773,7 @@ bool FUeAgentHttpServer::CmdBlueprintScreenshot(const FUeAgentRequestContext& Ct
 			else if (UeAgentBlueprintOps::ScreenshotBlueprintWindow(BlueprintEditor, Pixels, ShotSize, FallbackError))
 			{
 				bShotOk = true;
-				CaptureMode = TEXT("window_fallback");
+				CaptureMode = TEXT("window_offscreen_fallback");
 				OutError.Reset();
 			}
 			else
@@ -783,7 +783,7 @@ bool FUeAgentHttpServer::CmdBlueprintScreenshot(const FUeAgentRequestContext& Ct
 		}
 		else
 		{
-			CaptureMode = TEXT("viewport_window_crop");
+			CaptureMode = TEXT("viewport_window_crop_offscreen");
 		}
 	}
 	else
@@ -816,6 +816,7 @@ bool FUeAgentHttpServer::CmdBlueprintScreenshot(const FUeAgentRequestContext& Ct
 	OutData->SetStringField(TEXT("target"), EffectiveTarget);
 	OutData->SetStringField(TEXT("graph_name"), EffectiveTarget == TEXT("graph") ? GraphName : TEXT(""));
 	OutData->SetStringField(TEXT("capture_mode"), CaptureMode);
+	OutData->SetStringField(TEXT("legacy_backbuffer_capture"), TEXT("disabled"));
 	OutData->SetStringField(TEXT("format"), Format);
 	OutData->SetNumberField(TEXT("width"), ResizedSize.X);
 	OutData->SetNumberField(TEXT("height"), ResizedSize.Y);
