@@ -57,11 +57,36 @@
     {
       "Name": "GameplayBehaviorSmartObjects",
       "Enabled": true
+    },
+    {
+      "Name": "Paper2D",
+      "Enabled": true
+    },
+    {
+      "Name": "TextureGraph",
+      "Enabled": true
+    },
+    {
+      "Name": "InterchangeOpenVDB",
+      "Enabled": true
+    },
+    {
+      "Name": "WmfMedia",
+      "Enabled": true
+    },
+    {
+      "Name": "Metasound",
+      "Enabled": true
     }
   ],
   "Modules": [
     {
       "Name": "UeAgentInterface",
+      "Type": "Editor",
+      "LoadingPhase": "Default"
+    },
+    {
+      "Name": "UeAgentInterfaceTests",
       "Type": "Editor",
       "LoadingPhase": "Default"
     }

@@ -22,6 +22,8 @@
 - `17_ControlRig_FolderFormat.md`
 - `18_Deformer_MLDeformer_GeometryCache.md`
 - `19_AI_Behavior_Blackboard_StateTree_EQS_Navigation_SmartObject.md`
+- `20_Audio.md`
+- `21_Texture_RenderTarget_Media.md`
 - `deprecatedCommand/README.md`
 - `10_Modeling.md`
 - `11_AnimBlueprint.md`
@@ -82,6 +84,30 @@
    - 当前已新增：`state_tree_export_folder / state_tree_apply_folder`
    - 当前已新增：`eqs_export_folder / eqs_apply_folder`
    - 当前已新增：`smart_object_definition_export_json / smart_object_definition_apply_json`
+   - 当前已新增：`sound_cue_export_folder / sound_cue_apply_folder`
+   - 当前已新增：`metasound_export_folder / metasound_apply_folder`
+   - 当前已新增：`sound_attenuation_export_json / sound_attenuation_apply_json`
+   - 当前已新增：`sound_concurrency_export_json / sound_concurrency_apply_json`
+   - 当前已新增：`sound_class_export_json / sound_class_apply_json`
+   - 当前已新增：`sound_mix_export_json / sound_mix_apply_json`
+   - 当前已新增：`sound_submix_export_folder / sound_submix_apply_folder`
+   - 当前已新增：`audio_effect_preset_export_json / audio_effect_preset_apply_json`
+   - 当前已新增：`runtime_virtual_texture_export_json / runtime_virtual_texture_apply_json`
+   - 当前已新增：`texture_array_export_folder / texture_array_apply_folder`
+   - 当前已新增：`texture_cube_export_folder / texture_cube_apply_folder`
+   - 当前已新增：`texture_cube_array_export_folder / texture_cube_array_apply_folder`
+   - 当前已新增：`volume_texture_export_folder / volume_texture_apply_folder`
+   - 当前已新增：`render_target_export_json / render_target_apply_json`
+   - 当前已新增：`media_source_export_json / media_source_apply_json`
+   - 当前已新增：`media_player_export_json / media_player_apply_json`
+   - 当前已新增：`media_texture_export_json / media_texture_apply_json`
+   - 当前已新增：`texture_graph_export_folder / texture_graph_apply_folder`
+   - 当前已新增：`subuv_animation_export_json / subuv_animation_apply_json`
+   - 当前已新增：`paper_sprite_export_json / paper_sprite_apply_json`
+   - 当前已新增：`paper_flipbook_export_json / paper_flipbook_apply_json`
+   - 当前已新增：`paper_tileset_export_folder / paper_tileset_apply_folder`
+   - 当前已新增：`paper_tilemap_export_folder / paper_tilemap_apply_folder`
+   - 当前已新增：`texture_collection_export_json / texture_collection_apply_json`
    - Niagara 当前已覆盖 `NiagaraSystem / NiagaraEmitter / NiagaraScript` 三个完整 folder profile；System / Emitter apply 会随返回携带 Stack 感叹号信息，严格验收以 `warnings`、`stack_error_count` 和 `validation/coverage_report.json` 为依据
 3. 原子命令：
    - 当同一资产字段或结构已经能被单文件 JSON / 文件夹式结构化 JSON 表达时，对应写入型原子命令统一标记为 **Deprecated for authoring**

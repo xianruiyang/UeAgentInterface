@@ -7,6 +7,7 @@ public class UeAgentInterface : ModuleRules
 	public UeAgentInterface(ReadOnlyTargetRules Target) : base(Target)
 	{
 		PCHUsage = PCHUsageMode.UseExplicitOrSharedPCHs;
+		bUseUnity = false;
 
 		PublicDependencyModuleNames.AddRange(
 			new string[]
@@ -32,6 +33,7 @@ public class UeAgentInterface : ModuleRules
 				"Sockets",
 				"Json",
 				"JsonUtilities",
+				"ImageCore",
 				"AIModule",
 				"GameplayTasks",
 				"RenderCore",
@@ -88,6 +90,15 @@ public class UeAgentInterface : ModuleRules
 				"GeometryCore",
 				"MeshDescription",
 				"StaticMeshDescription",
+				"MediaAssets",
+				"Paper2D",
+				"TextureGraph",
+				"TextureGraphEngine",
+				"AudioEditor",
+				"AudioMixer",
+				"MetasoundEngine",
+				"MetasoundEditor",
+				"MetasoundFrontend",
 			}
 		);
 	}

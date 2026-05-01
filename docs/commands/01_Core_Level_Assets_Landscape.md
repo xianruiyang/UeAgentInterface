@@ -24,7 +24,7 @@
 | `curve_export_json` | 导出 Curve 资产为结构化 JSON | `asset_path`；可选 `output_file` | 读取 CurveFloat / CurveVector / CurveLinearColor / CurveTable |
 | `curve_apply_json` | 创建或回写 Curve 资产结构化 JSON | `asset_path`；可选 `curve`、`json_file`、`create_if_missing`、`curve_kind`、`save_after_apply` | 用统一 JSON 编辑曲线 key、插值、外推和表格行 |
 | `editor_list_dirty_resources` | 列出当前所有待处理的脏资源 | 无 | 退出前先枚举未保存关卡/资产 |
-| `editor_resolve_dirty_resources` | 按路径或整批保存/丢弃脏资源 | `save_resource_paths`、`discard_resource_paths`、`save_all_dirty`、`discard_all_dirty` | 先处理脏资源，再决定是否关闭编辑器 |
+| `editor_resolve_dirty_resources` | 按路径或整批保存/丢弃脏资源 | `save_resource_paths`、`discard_resource_paths`、`save_all_dirty`、`discard_all_dirty`、`close_all_asset_editors`、`only_save_dirty` | 先处理脏资源，再决定是否关闭编辑器 |
 | `editor_close` | 关闭编辑器；若仍有未处理脏资源则失败并返回清单 | `request_exit`、`close_all_asset_editors` | 自动化结束时安全退出 |
 | `editor_prepare_exit` | 退出前按策略保存/丢弃并请求关闭编辑器 | `save_asset_paths`、`discard_asset_paths`、`discard_all_dirty`、`request_exit` | 自动化结束时避免恢复弹窗 |
 
