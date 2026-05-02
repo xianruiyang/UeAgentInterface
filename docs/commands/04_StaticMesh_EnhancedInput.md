@@ -185,3 +185,18 @@ StaticMesh 的长期 authoring 主流程是：
   }
 }
 ```
+
+<!-- UAI_FORMAL_COMMAND_INDEX_BEGIN -->
+## 原子/兼容命令正式索引
+>
+> 以下命令已有真实 dispatch 实现并纳入 smoke 覆盖；对完整资产制作仍应优先使用本分册中的结构化 JSON / folder workflow，原子命令仅用于 bootstrap、迁移、probe 或局部修复。
+
+| Command | 作用 | 关键参数 | 关键返回 |
+| --- | --- | --- | --- |
+| `enhanced_input_add_mapping` | **原子/兼容**：添加 `Action-Key` 映射 | `mapping_context_path`、`action_path`、`key`、`modifier_classes`、`trigger_classes` | 优先编辑 `mappings[]` 后 apply |
+| `enhanced_input_clear_mappings` | **原子/兼容**：清空全部映射 | `mapping_context_path` | 优先用 JSON 全量替换 |
+| `enhanced_input_remove_mapping` | **原子/兼容**：删除某条映射 | `mapping_context_path`、`action_path`、`key` | 优先编辑 `mappings[]` 后 apply |
+| `enhanced_input_set_action_property` | **原子/兼容**：修改 `InputAction` 属性 | `asset_path`、`property_name`、`value_text` | 优先编辑单文件 JSON 后 `enhanced_input_apply_action_json` |
+| `enhanced_input_set_mapping_context_property` | **原子/兼容**：修改 `MappingContext` 属性 | `asset_path`、`property_name`、`value_text` | 优先编辑单文件 JSON 后 apply |
+| `static_mesh_set_property` | **原子/兼容**：设置网格资产属性 | `asset_path`、`property_name`、`value_text` | 能由 `asset_apply_property_json` 表达时优先走 JSON |
+<!-- UAI_FORMAL_COMMAND_INDEX_END -->

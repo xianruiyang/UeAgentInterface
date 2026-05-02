@@ -324,3 +324,34 @@
 - 复杂空间与可达关系必须先回到：
   - [../../../docs/levelDesignDocs/core/自动化关卡设计.md](../../../docs/levelDesignDocs/core/自动化关卡设计.md)
   - [../../../docs/levelDesignDocs/modeling/Modeling辅助搭建.md](../../../docs/levelDesignDocs/modeling/Modeling辅助搭建.md)
+
+<!-- UAI_FORMAL_COMMAND_INDEX_BEGIN -->
+## 原子/兼容命令正式索引
+>
+> 以下命令已有真实 dispatch 实现并纳入 smoke 覆盖；对完整资产制作仍应优先使用本分册中的结构化 JSON / folder workflow，原子命令仅用于 bootstrap、迁移、probe 或局部修复。
+
+| Command | 作用 | 关键参数 | 关键返回 |
+| --- | --- | --- | --- |
+| `modeling_accept_tool` | **原子/兼容**：控制 Modeling Mode 工具、选择或网格编辑动作 | `target_actor`、`asset_path`、`tool_name`、`selection`、`properties` | `success`、`warnings`、`errors` |
+| `modeling_activate_mode` | **原子/兼容**：控制 Modeling Mode 工具、选择或网格编辑动作 | `target_actor`、`asset_path`、`tool_name`、`selection`、`properties` | `success`、`warnings`、`errors` |
+| `modeling_bevel_edges` | **原子/兼容**：控制 Modeling Mode 工具、选择或网格编辑动作 | `target_actor`、`asset_path`、`tool_name`、`selection`、`properties` | `success`、`warnings`、`errors` |
+| `modeling_cancel_tool` | **原子/兼容**：控制 Modeling Mode 工具、选择或网格编辑动作 | `target_actor`、`asset_path`、`tool_name`、`selection`、`properties` | `success`、`warnings`、`errors` |
+| `modeling_clear_mesh_selection` | **原子/兼容**：控制 Modeling Mode 工具、选择或网格编辑动作 | `target_actor`、`asset_path`、`tool_name`、`selection`、`properties` | `success`、`warnings`、`errors` |
+| `modeling_duplicate_faces` | **原子/兼容**：控制 Modeling Mode 工具、选择或网格编辑动作 | `target_actor`、`asset_path`、`tool_name`、`selection`、`properties` | `success`、`warnings`、`errors` |
+| `modeling_get_active_tool` | **原子/兼容**：控制 Modeling Mode 工具、选择或网格编辑动作 | `target_actor`、`asset_path`、`tool_name`、`selection`、`properties` | `success`、`warnings`、`errors` |
+| `modeling_get_active_tool_properties` | **原子/兼容**：控制 Modeling Mode 工具、选择或网格编辑动作 | `target_actor`、`asset_path`、`tool_name`、`selection`、`properties` | `success`、`warnings`、`errors` |
+| `modeling_get_mesh_selection_info` | **原子/兼容**：控制 Modeling Mode 工具、选择或网格编辑动作 | `target_actor`、`asset_path`、`tool_name`、`selection`、`properties` | `success`、`warnings`、`errors` |
+| `modeling_get_selection` | **原子/兼容**：控制 Modeling Mode 工具、选择或网格编辑动作 | `target_actor`、`asset_path`、`tool_name`、`selection`、`properties` | `success`、`warnings`、`errors` |
+| `modeling_inset_faces` | **原子/兼容**：控制 Modeling Mode 工具、选择或网格编辑动作 | `target_actor`、`asset_path`、`tool_name`、`selection`、`properties` | `success`、`warnings`、`errors` |
+| `modeling_invoke_active_tool_action` | **原子/兼容**：控制 Modeling Mode 工具、选择或网格编辑动作 | `target_actor`、`asset_path`、`tool_name`、`selection`、`properties` | `success`、`warnings`、`errors` |
+| `modeling_push_pull` | **原子/兼容**：控制 Modeling Mode 工具、选择或网格编辑动作 | `target_actor`、`asset_path`、`tool_name`、`selection`、`properties` | `success`、`warnings`、`errors` |
+| `modeling_replace_actor_mesh` | **原子/兼容**：控制 Modeling Mode 工具、选择或网格编辑动作 | `target_actor`、`asset_path`、`tool_name`、`selection`、`properties` | `success`、`warnings`、`errors` |
+| `modeling_save_mesh_asset` | **原子/兼容**：控制 Modeling Mode 工具、选择或网格编辑动作 | `target_actor`、`asset_path`、`tool_name`、`selection`、`properties` | `success`、`warnings`、`errors` |
+| `modeling_select_mesh_elements_via_screen` | **原子/兼容**：控制 Modeling Mode 工具、选择或网格编辑动作 | `target_actor`、`asset_path`、`tool_name`、`selection`、`properties` | `success`、`warnings`、`errors` |
+| `modeling_select_mesh_elements_via_world_ray` | **原子/兼容**：控制 Modeling Mode 工具、选择或网格编辑动作 | `target_actor`、`asset_path`、`tool_name`、`selection`、`properties` | `success`、`warnings`、`errors` |
+| `modeling_set_active_tool_property` | **原子/兼容**：控制 Modeling Mode 工具、选择或网格编辑动作 | `target_actor`、`asset_path`、`tool_name`、`selection`、`properties` | `success`、`warnings`、`errors` |
+| `modeling_set_mesh_selection_mode` | **原子/兼容**：控制 Modeling Mode 工具、选择或网格编辑动作 | `target_actor`、`asset_path`、`tool_name`、`selection`、`properties` | `success`、`warnings`、`errors` |
+| `modeling_set_selection` | **原子/兼容**：控制 Modeling Mode 工具、选择或网格编辑动作 | `target_actor`、`asset_path`、`tool_name`、`selection`、`properties` | `success`、`warnings`、`errors` |
+| `modeling_snap_to_ground` | **原子/兼容**：控制 Modeling Mode 工具、选择或网格编辑动作 | `target_actor`、`asset_path`、`tool_name`、`selection`、`properties` | `success`、`warnings`、`errors` |
+| `modeling_start_tool` | **原子/兼容**：控制 Modeling Mode 工具、选择或网格编辑动作 | `target_actor`、`asset_path`、`tool_name`、`selection`、`properties` | `success`、`warnings`、`errors` |
+<!-- UAI_FORMAL_COMMAND_INDEX_END -->

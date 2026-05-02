@@ -77,3 +77,24 @@
   }
 }
 ```
+
+<!-- UAI_FORMAL_COMMAND_INDEX_BEGIN -->
+## 原子/兼容命令正式索引
+>
+> 以下命令已有真实 dispatch 实现并纳入 smoke 覆盖；对完整资产制作仍应优先使用本分册中的结构化 JSON / folder workflow，原子命令仅用于 bootstrap、迁移、probe 或局部修复。
+
+| Command | 作用 | 关键参数 | 关键返回 |
+| --- | --- | --- | --- |
+| `niagara_emitter_add_event_handler` | **原子/兼容**：新增事件处理器 | `emitter_asset_path`、`source_emitter_id`、`source_event_name`、`execution_mode` | 仅用于修补 |
+| `niagara_emitter_add_renderer` | **原子/兼容**：添加渲染器 | `emitter_asset_path`、`renderer_class` 或 `renderer_type` | 仅用于 bootstrap/修补 |
+| `niagara_emitter_clear_parent` | **原子/兼容**：清除 Emitter parent/merge 残留 | `emitter_asset_path`（或 `asset_path`）、`clear_merge_message` | 仅用于修复父 emitter merge error 或隐藏 parent 残留 |
+| `niagara_emitter_move_renderer` | **原子/兼容**：编辑 Niagara System/Emitter 的 emitter、renderer、event handler、parameter 或属性 | `asset_path`、`emitter_name`、`module_name`、`input_name`、`value_text` | `success`、`warnings`、`errors` |
+| `niagara_emitter_parameter_add` | **原子/兼容**：新增 Emitter 参数 | `emitter_asset_path`、`parameter_name`、`parameter_type`、`default_value_text`、`is_static_switch` | 仅用于修补 |
+| `niagara_emitter_parameter_remove` | **原子/兼容**：删除 Emitter 参数 | `emitter_asset_path`、`parameter_name` | 仅用于修补 |
+| `niagara_emitter_parameter_set` | **原子/兼容**：设置/重命名/改类型 | `emitter_asset_path`、`parameter_name`、`value_text` 或 `new_parameter_name` 或 `parameter_type` | 仅用于局部修补 |
+| `niagara_emitter_remove_event_handler` | **原子/兼容**：删除事件处理器 | `emitter_asset_path` + (`event_index`/`script_usage_id`/`source_event_name`) | 仅用于修补 |
+| `niagara_emitter_remove_renderer` | **原子/兼容**：删除渲染器 | `emitter_asset_path` + (`renderer_index`/`renderer_name`/`renderer_class`) | 仅用于修补 |
+| `niagara_emitter_set_event_handler_property` | **原子/兼容**：设置事件处理器属性 | `emitter_asset_path` + 事件标识 + `property_name` + `value_text` | 仅用于局部修补 |
+| `niagara_emitter_set_property` | **原子/兼容**：设置 Emitter 版本属性 | `emitter_asset_path`（或 `asset_path`）、`property_name`、`value_text` | 仅用于局部修补 |
+| `niagara_emitter_set_renderer_property` | **原子/兼容**：设置渲染器属性 | `emitter_asset_path` + renderer 标识 + `property_name` + `value_text` | 仅用于局部修补 |
+<!-- UAI_FORMAL_COMMAND_INDEX_END -->

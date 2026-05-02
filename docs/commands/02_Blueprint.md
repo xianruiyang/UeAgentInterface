@@ -208,3 +208,36 @@
   - `enhanced_input_get_local_player_subsystem`
   - `enhanced_input_add_mapping_context`
 - `blueprint_set_cdo_property` 现可沿对象子属性路径继续解析，因此可直接写入 `CharacterMovement.*` 默认值。
+
+<!-- UAI_FORMAL_COMMAND_INDEX_BEGIN -->
+## 原子/兼容命令正式索引
+>
+> 以下命令已有真实 dispatch 实现并纳入 smoke 覆盖；对完整资产制作仍应优先使用本分册中的结构化 JSON / folder workflow，原子命令仅用于 bootstrap、迁移、probe 或局部修复。
+
+| Command | 作用 | 关键参数 | 关键返回 |
+| --- | --- | --- | --- |
+| `blueprint_add_call_function_node` | **原子/兼容**：新增函数调用节点 | `asset_path`、`graph_name`、`function_owner_class`、`function_name`、`pos_x`、`pos_y`、`compile_after_add`、`save_after_add` | `success`、`warnings`、`errors` |
+| `blueprint_add_component` | **原子/兼容**：添加组件模板 | `asset_path`、`component_class`、`component_name`、`compile_after_add`、`save_after_add` | `success`、`warnings`、`errors` |
+| `blueprint_add_component_bound_event` | **原子/兼容**：新增组件绑定事件节点 | `asset_path`、`component_name`、`delegate_owner_class`、`delegate_property_name`、`compile_after_add`、`save_after_add` | `success`、`warnings`、`errors` |
+| `blueprint_add_custom_event_node` | **原子/兼容**：新增自定义事件节点 | `asset_path`、`graph_name`、`event_name`、`pos_x`、`pos_y`、`compile_after_add`、`save_after_add` | `success`、`warnings`、`errors` |
+| `blueprint_add_dynamic_cast_node` | **原子/兼容**：在 Blueprint 图中新增或配置指定节点/组件，适合 bootstrap、迁移和局部修复 | `asset_path`、`graph_name`、`target_class`、`pos_x`、`pos_y` | `success`、`warnings`、`errors` |
+| `blueprint_add_enhanced_input_action_event` | **原子/兼容**：在 Blueprint 图中接入 Enhanced Input 节点链，适合输入 bootstrap 或迁移 | `asset_path`、`graph_name`、`input_action`、`pos_x`、`pos_y` | `success`、`warnings`、`errors` |
+| `blueprint_add_enhanced_input_add_mapping_context_node` | **原子/兼容**：在 Blueprint 图中接入 Enhanced Input 节点链，适合输入 bootstrap 或迁移 | `asset_path`、`graph_name`、`mapping_context`、`priority`、`pos_x`、`pos_y` | `success`、`warnings`、`errors` |
+| `blueprint_add_enhanced_input_local_player_subsystem_node` | **原子/兼容**：在 Blueprint 图中接入 Enhanced Input 节点链，适合输入 bootstrap 或迁移 | `asset_path`、`graph_name`、`pos_x`、`pos_y` | `success`、`warnings`、`errors` |
+| `blueprint_add_event_dispatcher` | **原子/兼容**：新增事件分发器（委托） | `asset_path`、`dispatcher_name`、`compile_after_add`、`save_after_add` | `success`、`warnings`、`errors` |
+| `blueprint_add_event_node` | **原子/兼容**：新增标准事件节点 | `asset_path`、`graph_name`、`event_class`、`event_name`、`pos_x`、`pos_y`、`compile_after_add`、`save_after_add` | `success`、`warnings`、`errors` |
+| `blueprint_add_function_graph` | **原子/兼容**：新增函数图 | `asset_path`、`function_name`、`compile_after_add`、`save_after_add` | `success`、`warnings`、`errors` |
+| `blueprint_add_macro_graph` | **原子/兼容**：新增宏图 | `asset_path`、`macro_name`、`compile_after_add`、`save_after_add` | `success`、`warnings`、`errors` |
+| `blueprint_add_node_by_class` | **原子/兼容**：按类新增通用图节点 | `asset_path`、`graph_name` 或 `graph_path`、`node_class`、`pos_x`、`pos_y`、`compile_after_add`、`save_after_add` | `success`、`warnings`、`errors` |
+| `blueprint_add_variable` | **原子/兼容**：新增变量定义；保留给 bootstrap / smoke / 局部补修 | `asset_path`、`variable_name`、`pin_category`、`pin_subcategory`、`pin_subcategory_object`、`container_type`、`value_type`（map 必填）、`default_value`、`instance_editable`、`compile_after_add`、`save_after_add` | `success`、`warnings`、`errors` |
+| `blueprint_add_variable_node` | **原子/兼容**：新增变量 Get/Set 节点 | `asset_path`、`graph_name`、`variable_name`、`node_type`、`pos_x`、`pos_y`、`compile_after_add`、`save_after_add` | `success`、`warnings`、`errors` |
+| `blueprint_connect_pins` | **原子/兼容**：连接节点引脚 | `asset_path`、`graph_name`、`from_node_guid`、`from_pin`、`to_node_guid`、`to_pin`、`compile_after_connect`、`save_after_connect` | `success`、`warnings`、`errors` |
+| `blueprint_disconnect_pins` | **原子/兼容**：断开指定连线或某个引脚上的全部连线 | `asset_path`、`graph_name`、`from_node_guid`、`from_pin`、可选 `to_node_guid` / `to_pin`、`compile_after_disconnect`、`save_after_disconnect` | `success`、`warnings`、`errors` |
+| `blueprint_remove_component` | **原子/兼容**：删除组件模板 | `asset_path`、`component_name`、`compile_after_remove`、`save_after_remove` | `success`、`warnings`、`errors` |
+| `blueprint_remove_node` | **原子/兼容**：删除节点 | `asset_path`、`graph_name`、`node_guid`、`compile_after_remove`、`save_after_remove` | `success`、`warnings`、`errors` |
+| `blueprint_remove_variable` | **原子/兼容**：删除变量定义 | `asset_path`、`variable_name`、`compile_after_remove`、`save_after_remove` | `success`、`warnings`、`errors` |
+| `blueprint_reparent` | **原子/兼容**：修改 Blueprint 父类 | `asset_path`、`parent_class` | `success`、`warnings`、`errors` |
+| `blueprint_set_cdo_property` | **原子/兼容**：设置 CDO 默认属性 | `asset_path`、`property_name`、`value_text` | `success`、`warnings`、`errors` |
+| `blueprint_set_component_property` | **原子/兼容**：设置组件模板属性 | `asset_path`、`component_name`、`property_name`、`value_text`、`compile_after_set`、`save_after_set` | `success`、`warnings`、`errors` |
+| `blueprint_set_pin_default_value` | **原子/兼容**：设置引脚默认值 | `asset_path`、`graph_name`、`node_guid`、`pin_name`、`default_value`、`compile_after_set`、`save_after_set` | `success`、`warnings`、`errors` |
+<!-- UAI_FORMAL_COMMAND_INDEX_END -->

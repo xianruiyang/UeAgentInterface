@@ -28,6 +28,7 @@
 - `Plugins/UeAgentInterface/docs/commands/19_AI_Behavior_Blackboard_StateTree_EQS_Navigation_SmartObject.md`
 - `Plugins/UeAgentInterface/docs/commands/20_Audio.md`
 - `Plugins/UeAgentInterface/docs/commands/21_Texture_RenderTarget_Media.md`
+- `Plugins/UeAgentInterface/docs/commands/22_ProjectSettings_Config.md`
 - `Plugins/UeAgentInterface/docs/commands/10_Modeling.md`
 
 ### 0.1 外置 CLI 推荐用法（UeAgentInterfaceCMD）
@@ -110,6 +111,8 @@ Niagara 相关批次默认启用护栏（自动 preflight + 编译日志 + emitt
      - `paper_tileset_export_folder / paper_tileset_apply_folder`
      - `paper_tilemap_export_folder / paper_tilemap_apply_folder`
      - `texture_collection_export_json / texture_collection_apply_json`
+     - `project_settings_export_index / project_settings_export_page / project_settings_validate_page / project_settings_diff_page / project_settings_apply_page`
+     - `config_export_section / config_apply_section`
 3. 原子命令：
    - 主要用于以下场景：
      - bootstrap 或补创建某个最小局部结构
@@ -123,7 +126,7 @@ Niagara 相关批次默认启用护栏（自动 preflight + 编译日志 + emitt
 - 能走 JSON / 结构化 JSON 的资产编辑，不要退回逐条原子命令手搓完整 authoring。
 - 被 JSON / 结构化 JSON 覆盖的写入型原子命令保留兼容，但统一视为 deprecated for authoring；只用于 bootstrap、诊断、迁移、schema 边界和紧急局部修补。
 - 读取、创建最小资产、打开编辑器、编译、截图、导出、应用、dirty 处理和诊断命令不属于这类废弃写入命令。
-- 暂无 JSON / 结构化 JSON profile 的领域不强行标废弃，例如 Modeling、Level Actor 放置、NavMesh、普通视口控制等。IK Rig / IK Retargeter / Skeleton / SkeletalMesh / Control Rig / StaticMesh / Deformer Graph，以及 Blackboard / Behavior Tree / StateTree / EQS / Smart Object Definition / Audio 已进入 JSON 或文件夹式结构化 JSON 主流程。
+- 暂无 JSON / 结构化 JSON profile 的领域不强行标废弃，例如 Modeling、Level Actor 放置、NavMesh、普通视口控制等。IK Rig / IK Retargeter / Skeleton / SkeletalMesh / Control Rig / StaticMesh / Deformer Graph，以及 Blackboard / Behavior Tree / StateTree / EQS / Smart Object Definition / Audio / Project Settings 已进入 JSON 或文件夹式结构化 JSON 主流程。
 
 废弃命令明细已抽到 `commands/deprecatedCommand/`，覆盖面按主流程分组：
 

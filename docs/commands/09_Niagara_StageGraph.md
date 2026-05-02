@@ -60,3 +60,30 @@
   }
 }
 ```
+
+<!-- UAI_FORMAL_COMMAND_INDEX_BEGIN -->
+## 原子/兼容命令正式索引
+>
+> 以下命令已有真实 dispatch 实现并纳入 smoke 覆盖；对完整资产制作仍应优先使用本分册中的结构化 JSON / folder workflow，原子命令仅用于 bootstrap、迁移、probe 或局部修复。
+
+| Command | 作用 | 关键参数 | 关键返回 |
+| --- | --- | --- | --- |
+| `niagara_emitter_add_simulation_stage` | **原子/兼容**：新增 Simulation Stage | `emitter_asset_path`、`stage_class`、`stage_name`、`target_index` | 仅用于修补 |
+| `niagara_emitter_add_stage_module` | **原子/兼容**：向 Stage 添加模块 | `emitter_asset_path` + Stage 标识 + `module_script_asset_path` | 仅用于修补 |
+| `niagara_emitter_add_stage_node` | **原子/兼容**：添加 Stage 节点（模块/特定节点） | `emitter_asset_path` + Stage 标识 + (`module_script_asset_path` 或 `node_class`) | 仅用于修补 |
+| `niagara_emitter_clear_module_input` | **原子/兼容**：清除输入覆盖，回退默认 | `emitter_asset_path`、`module_node_guid`、`input_name` | 仅用于修补 |
+| `niagara_emitter_connect_stage_nodes` | **原子/兼容**：连接节点引脚 | `emitter_asset_path` + Stage 标识 + `from_node_guid/from_pin/to_node_guid/to_pin` | 仅用于修补 |
+| `niagara_emitter_disconnect_stage_nodes` | **原子/兼容**：断开节点连线 | `emitter_asset_path` + Stage 标识 + `from_node_guid/from_pin` | 仅用于修补 |
+| `niagara_emitter_move_stage_module` | **原子/兼容**：编辑 Niagara Stage Graph/Module Input 的节点、连线、排序或输入 | `asset_path`、`emitter_name`、`module_name`、`input_name`、`value_text` | `success`、`warnings`、`errors` |
+| `niagara_emitter_remove_stage` | **原子/兼容**：删除 Stage | `emitter_asset_path` + (`stage_key` 或 `script_usage`+`script_usage_id`) | 仅用于修补 |
+| `niagara_emitter_remove_stage_module` | **原子/兼容**：移除 Stage 模块（当前为软删除） | `emitter_asset_path` + (`module_node_guid` 或 `module_index/module_name`) | 仅用于修补 |
+| `niagara_emitter_remove_stage_node` | **原子/兼容**：删除节点（模块节点优先软删除） | `emitter_asset_path` + Stage 标识 + `node_guid` | 仅用于修补 |
+| `niagara_emitter_set_module_input` | **原子/兼容**：设置模块输入值或绑定参数 | `emitter_asset_path`、`module_node_guid`、`input_name`、`value_text`（或 `link_parameter_name`） | 仅用于局部修补 |
+| `niagara_emitter_set_stage_module_enabled` | **原子/兼容**：启用/禁用模块 | `emitter_asset_path`、`module_node_guid`、`enabled` | 仅用于诊断/修补 |
+| `niagara_emitter_set_stage_node_property` | **原子/兼容**：设置节点属性 | `emitter_asset_path` + Stage 标识 + `node_guid` + `property_name` + `value_text` | 仅用于局部修补 |
+| `niagara_emitter_set_stage_property` | **原子/兼容**：设置 Stage 属性 | `emitter_asset_path` + Stage 标识 + `property_name` + `value_text` | 仅用于局部修补 |
+| `niagara_list_module_library` | **原子/兼容**：编辑 Niagara Stage Graph/Module Input 的节点、连线、排序或输入 | `asset_path`、`emitter_name`、`module_name`、`input_name`、`value_text` | `success`、`warnings`、`errors` |
+| `niagara_system_list_module_inputs` | **原子/兼容**：编辑 Niagara Stage Graph/Module Input 的节点、连线、排序或输入 | `asset_path`、`emitter_name`、`module_name`、`input_name`、`value_text` | `success`、`warnings`、`errors` |
+| `niagara_system_list_stage_modules` | **原子/兼容**：编辑 Niagara Stage Graph/Module Input 的节点、连线、排序或输入 | `asset_path`、`emitter_name`、`module_name`、`input_name`、`value_text` | `success`、`warnings`、`errors` |
+| `niagara_system_set_module_input` | **原子/兼容**：编辑 Niagara Stage Graph/Module Input 的节点、连线、排序或输入 | `asset_path`、`emitter_name`、`module_name`、`input_name`、`value_text` | `success`、`warnings`、`errors` |
+<!-- UAI_FORMAL_COMMAND_INDEX_END -->

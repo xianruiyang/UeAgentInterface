@@ -24,6 +24,7 @@
 - `19_AI_Behavior_Blackboard_StateTree_EQS_Navigation_SmartObject.md`
 - `20_Audio.md`
 - `21_Texture_RenderTarget_Media.md`
+- `22_ProjectSettings_Config.md`
 - `deprecatedCommand/README.md`
 - `10_Modeling.md`
 - `11_AnimBlueprint.md`
@@ -108,6 +109,7 @@
    - 当前已新增：`paper_tileset_export_folder / paper_tileset_apply_folder`
    - 当前已新增：`paper_tilemap_export_folder / paper_tilemap_apply_folder`
    - 当前已新增：`texture_collection_export_json / texture_collection_apply_json`
+   - 当前已新增：`project_settings_export_index / project_settings_export_page / project_settings_validate_page / project_settings_diff_page / project_settings_apply_page`
    - Niagara 当前已覆盖 `NiagaraSystem / NiagaraEmitter / NiagaraScript` 三个完整 folder profile；System / Emitter apply 会随返回携带 Stack 感叹号信息，严格验收以 `warnings`、`stack_error_count` 和 `validation/coverage_report.json` 为依据
 3. 原子命令：
    - 当同一资产字段或结构已经能被单文件 JSON / 文件夹式结构化 JSON 表达时，对应写入型原子命令统一标记为 **Deprecated for authoring**

@@ -187,3 +187,21 @@ JSON 字段：
 - `IK Retargeter` folder workflow 覆盖 rigs、preview meshes、global/root/chain settings、chain mapping、默认 pose 数据；完整 op 专用 settings 仍以 UE controller 可稳定回写的字段为准。
 - `Retarget Batch` 使用单文件 JSON，因为它是“复制并重定向一批动画”的动作，不是 retargeter 资产状态。
 - 可由 folder JSON 覆盖的原子写入命令只用于 bootstrap、迁移、schema 边界和故障恢复，归档见 `deprecatedCommand/14_IKRig_IKRetargeter.md`。
+
+<!-- UAI_FORMAL_COMMAND_INDEX_BEGIN -->
+## 原子/兼容命令正式索引
+>
+> 以下命令已有真实 dispatch 实现并纳入 smoke 覆盖；对完整资产制作仍应优先使用本分册中的结构化 JSON / folder workflow，原子命令仅用于 bootstrap、迁移、probe 或局部修复。
+
+| Command | 作用 | 关键参数 | 关键返回 |
+| --- | --- | --- | --- |
+| `ik_retargeter_set_ik_rig` | 设置 source / target IK Rig | 编辑 `rigs.json` 后 `ik_retargeter_apply_folder` | `success`、`warnings`、`errors` |
+| `ik_retargeter_set_pose` | 管理 retarget pose 生命周期与 pose 数据 | 编辑 `poses/source/*.json`、`poses/target/*.json` 后 `ik_retargeter_apply_folder` | `success`、`warnings`、`errors` |
+| `ik_retargeter_set_preview_mesh` | 设置 source / target preview mesh | 编辑 `preview_meshes.json` 后 `ik_retargeter_apply_folder` | `success`、`warnings`、`errors` |
+| `ik_retargeter_set_settings` | 设置 global / root / chain settings | 编辑 `global_settings.json`、`root_settings.json`、`chain_settings.json` 后 `ik_retargeter_apply_folder` | `success`、`warnings`、`errors` |
+| `ik_rig_set_goal` | 新增 / 更新 / 删除 goal | 编辑 `goals.json` 后 `ik_rig_apply_folder` | `success`、`warnings`、`errors` |
+| `ik_rig_set_preview_mesh` | 设置或清空 preview mesh | 编辑 `preview.json` 后 `ik_rig_apply_folder` | `success`、`warnings`、`errors` |
+| `ik_rig_set_retarget_chain` | 新增 / 更新 / 删除 retarget chain | 编辑 `retarget_definition.json` 后 `ik_rig_apply_folder` | `success`、`warnings`、`errors` |
+| `ik_rig_set_retarget_root` | 设置 retarget root | 编辑 `retarget_definition.json` 后 `ik_rig_apply_folder` | `success`、`warnings`、`errors` |
+| `ik_rig_set_solver` | 新增 / 更新 / 删除 solver | 编辑 `solvers.json` 后 `ik_rig_apply_folder` | `success`、`warnings`、`errors` |
+<!-- UAI_FORMAL_COMMAND_INDEX_END -->

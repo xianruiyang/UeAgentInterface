@@ -276,3 +276,50 @@ Control Rig 资产能独立编译，不代表它已经在角色动画蓝图中�
    - `anim_blueprint_graph_get_view / set_view`
    - `anim_blueprint_viewport_get_camera / set_camera`
    - `anim_blueprint_screenshot`
+
+<!-- UAI_FORMAL_COMMAND_INDEX_BEGIN -->
+## 原子/兼容命令正式索引
+>
+> 以下命令已有真实 dispatch 实现并纳入 smoke 覆盖；对完整资产制作仍应优先使用本分册中的结构化 JSON / folder workflow，原子命令仅用于 bootstrap、迁移、probe 或局部修复。
+
+| Command | 作用 | 关键参数 | 关键返回 |
+| --- | --- | --- | --- |
+| `anim_blueprint_add_anim_layer` | **原子/兼容**：新增本地 Anim Layer graph | `asset_path`、`layer_name`、`compile_after_add`、`save_after_add` | `success`、`warnings`、`errors` |
+| `anim_blueprint_add_call_function_node` | **原子/兼容**：新增函数调用节点 | `asset_path`、`graph_name`、`function_owner_class`、`function_name`、`pos_x`、`pos_y`、`compile_after_add`、`save_after_add` | `success`、`warnings`、`errors` |
+| `anim_blueprint_add_conduit` | **原子/兼容**：新增 Conduit | `asset_path`、`state_machine_name`、`conduit_name`、`pos_x`、`pos_y`、`compile_after_add`、`save_after_add` | `success`、`warnings`、`errors` |
+| `anim_blueprint_add_custom_event_node` | **原子/兼容**：新增自定义事件节点 | `asset_path`、`graph_name`、`event_name`、`pos_x`、`pos_y`、`compile_after_add`、`save_after_add` | `success`、`warnings`、`errors` |
+| `anim_blueprint_add_event_dispatcher` | **原子/兼容**：新增事件分发器 | `asset_path`、`dispatcher_name`、`compile_after_add`、`save_after_add` | `success`、`warnings`、`errors` |
+| `anim_blueprint_add_event_node` | **原子/兼容**：新增标准事件节点 | `asset_path`、`graph_name`、`event_class`、`event_name`、`pos_x`、`pos_y`、`compile_after_add`、`save_after_add` | `success`、`warnings`、`errors` |
+| `anim_blueprint_add_function_graph` | **原子/兼容**：新增逻辑函数图 | `asset_path`、`function_name`、`compile_after_add`、`save_after_add` | `success`、`warnings`、`errors` |
+| `anim_blueprint_add_macro_graph` | **原子/兼容**：新增宏图 | `asset_path`、`macro_name`、`compile_after_add`、`save_after_add` | `success`、`warnings`、`errors` |
+| `anim_blueprint_add_node_by_class` | **原子/兼容**：按类新增通用 K2 / AnimGraph 节点 | `asset_path`、`graph_name` 或 `graph_path`、`node_class`、`pos_x`、`pos_y`、`compile_after_add`、`save_after_add` | `success`、`warnings`、`errors` |
+| `anim_blueprint_add_state` | **原子/兼容**：新增 State | `asset_path`、`state_machine_name`、`state_name`、`pos_x`、`pos_y`、`state_type`、`always_reset_on_entry`、`compile_after_add`、`save_after_add` | `success`、`warnings`、`errors` |
+| `anim_blueprint_add_state_alias` | **原子/兼容**：新增 State Alias | `asset_path`、`state_machine_name`、`alias_name`、`pos_x`、`pos_y`、`global_alias`、`alias_target_states`、`compile_after_add`、`save_after_add` | `success`、`warnings`、`errors` |
+| `anim_blueprint_add_state_machine` | **原子/兼容**：在指定 AnimGraph 中新增状态机 | `asset_path`、`state_machine_name`、`anim_graph_name`、`pos_x`、`pos_y`、`compile_after_add`、`save_after_add` | `success`、`warnings`、`errors` |
+| `anim_blueprint_add_transition` | **原子/兼容**：新增 Transition | `asset_path`、`state_machine_name`、`source_state_name`、`target_state_name`、`pos_x`、`pos_y`、`priority_order`、`crossfade_duration`、`bidirectional`、`disabled`、`automatic_rule`、`compile_after_add`、`save_after_add` | `success`、`warnings`、`errors` |
+| `anim_blueprint_add_variable` | **原子/兼容**：新增变量定义；保留给 bootstrap / smoke / 局部补修 | `asset_path`、`variable_name`、`pin_category`、`pin_subcategory`、`pin_subcategory_object`、`container_type`、`value_type`（map 必填）、`default_value`、`instance_editable`、`compile_after_add`、`save_after_add` | `success`、`warnings`、`errors` |
+| `anim_blueprint_add_variable_node` | **原子/兼容**：新增变量 Get/Set 节点 | `asset_path`、`graph_name`、`variable_name`、`node_type`、`pos_x`、`pos_y`、`compile_after_add`、`save_after_add` | `success`、`warnings`、`errors` |
+| `anim_blueprint_clear_entry_state` | **原子/兼容**：清空 Entry 当前连线 | `asset_path`、`state_machine_name`、`compile_after_clear`、`save_after_clear` | `success`、`warnings`、`errors` |
+| `anim_blueprint_connect_pins` | **原子/兼容**：连接节点引脚 | `asset_path`、`graph_name`、`from_node_guid`、`from_pin`、`to_node_guid`、`to_pin`、`compile_after_connect`、`save_after_connect` | `success`、`warnings`、`errors` |
+| `anim_blueprint_disconnect_pins` | **原子/兼容**：断开指定连线或某个引脚上的全部连线 | `asset_path`、`graph_name`、`from_node_guid`、`from_pin`、可选 `to_node_guid` / `to_pin`、`compile_after_disconnect`、`save_after_disconnect` | `success`、`warnings`、`errors` |
+| `anim_blueprint_implement_layer_interface` | **原子/兼容**：为 AnimBlueprint 实现一个 Layer Interface | `asset_path`、`interface_class`、`compile_after_add`、`save_after_add` | `success`、`warnings`、`errors` |
+| `anim_blueprint_remove_anim_layer` | **原子/兼容**：删除本地 Anim Layer graph | `asset_path`、`layer_name`、`compile_after_remove`、`save_after_remove` | `success`、`warnings`、`errors` |
+| `anim_blueprint_remove_layer_interface` | **原子/兼容**：移除已实现的 Layer Interface | `asset_path`、`interface_class`、`preserve_functions`、`compile_after_remove`、`save_after_remove` | `success`、`warnings`、`errors` |
+| `anim_blueprint_remove_node` | **原子/兼容**：删除图节点 | `asset_path`、`graph_name`、`node_guid`、`compile_after_remove`、`save_after_remove` | `success`、`warnings`、`errors` |
+| `anim_blueprint_remove_state_machine` | **原子/兼容**：删除状态机 | `asset_path`、`state_machine_name`、`save_after_remove` | `success`、`warnings`、`errors` |
+| `anim_blueprint_remove_state_node` | **原子/兼容**：删除 State / Conduit / Alias | `asset_path`、`state_machine_name`、`state_name` 或 `node_guid`、`save_after_remove` | `success`、`warnings`、`errors` |
+| `anim_blueprint_remove_transition` | **原子/兼容**：删除 Transition | `asset_path`、`state_machine_name`、`source_state_name/target_state_name` 或 `node_guid`、`save_after_remove` | `success`、`warnings`、`errors` |
+| `anim_blueprint_remove_variable` | **原子/兼容**：删除变量定义 | `asset_path`、`variable_name`、`compile_after_remove`、`save_after_remove` | `success`、`warnings`、`errors` |
+| `anim_blueprint_rename_anim_layer` | **原子/兼容**：重命名本地 Anim Layer graph | `asset_path`、`layer_name`、`new_layer_name`、`compile_after_rename`、`save_after_rename` | `success`、`warnings`、`errors` |
+| `anim_blueprint_rename_state_machine` | **原子/兼容**：重命名状态机 | `asset_path`、`state_machine_name`、`new_state_machine_name`、`compile_after_rename`、`save_after_rename` | `success`、`warnings`、`errors` |
+| `anim_blueprint_rename_state_node` | **原子/兼容**：重命名 State / Conduit / Alias | `asset_path`、`state_machine_name`、`state_name` 或 `node_guid`、`new_state_name`、`compile_after_rename`、`save_after_rename` | `success`、`warnings`、`errors` |
+| `anim_blueprint_reparent` | **原子/兼容**：修改父类 | `asset_path`、`parent_class`、`compile_after_reparent`、`save_after_reparent` | `success`、`warnings`、`errors` |
+| `anim_blueprint_set_cdo_property` | **原子/兼容**：写默认对象属性 | `asset_path`、`property_name`、`value_text`、`compile_after_set`、`save_after_set` | `success`、`warnings`、`errors` |
+| `anim_blueprint_set_entry_state` | **原子/兼容**：把 Entry 连接到指定 State / Alias / Conduit | `asset_path`、`state_machine_name`、`state_name` 或 `node_guid`、`compile_after_set`、`save_after_set` | `success`、`warnings`、`errors` |
+| `anim_blueprint_set_pin_default_value` | **原子/兼容**：设置引脚默认值 | `asset_path`、`graph_name`、`node_guid`、`pin_name`、`default_value`、`compile_after_set`、`save_after_set` | `success`、`warnings`、`errors` |
+| `anim_blueprint_set_preview_animation_blueprint` | **原子/兼容**：设置或清空预览 AnimBlueprint overlay / linked graph 配置 | `asset_path`、`preview_anim_blueprint_path`、`clear_preview_animation_blueprint`、`preview_application_method`、`preview_animation_blueprint_tag`、`save_after_set` | `success`、`warnings`、`errors` |
+| `anim_blueprint_set_preview_mesh` | **原子/兼容**：设置或清空预览 SkeletalMesh | `asset_path`、`skeletal_mesh_path`、`clear_preview_mesh`、`save_after_set` | `success`、`warnings`、`errors` |
+| `anim_blueprint_set_state_alias_targets` | **原子/兼容**：修改 Alias 的目标状态集 | `asset_path`、`state_machine_name`、`alias_name` 或 `node_guid`、`alias_target_states`、`global_alias`、`compile_after_set`、`save_after_set` | `success`、`warnings`、`errors` |
+| `anim_blueprint_set_state_properties` | **原子/兼容**：修改 State 的位置和基础属性 | `asset_path`、`state_machine_name`、`state_name` 或 `node_guid`、可选 `pos_x` / `pos_y` / `state_type` / `always_reset_on_entry`、`compile_after_set`、`save_after_set` | `success`、`warnings`、`errors` |
+| `anim_blueprint_set_transition_properties` | **原子/兼容**：修改 Transition 的位置和基础属性 | `asset_path`、`state_machine_name`、`source_state_name/target_state_name` 或 `node_guid`、可选 `pos_x` / `pos_y` / `priority_order` / `crossfade_duration` / `bidirectional` / `disabled` / `automatic_rule`、`compile_after_set`、`save_after_set` | `success`、`warnings`、`errors` |
+<!-- UAI_FORMAL_COMMAND_INDEX_END -->

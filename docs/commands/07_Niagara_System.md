@@ -307,3 +307,21 @@
   }
 }
 ```
+
+<!-- UAI_FORMAL_COMMAND_INDEX_BEGIN -->
+## 原子/兼容命令正式索引
+>
+> 以下命令已有真实 dispatch 实现并纳入 smoke 覆盖；对完整资产制作仍应优先使用本分册中的结构化 JSON / folder workflow，原子命令仅用于 bootstrap、迁移、probe 或局部修复。
+
+| Command | 作用 | 关键参数 | 关键返回 |
+| --- | --- | --- | --- |
+| `niagara_set_property` | **原子/兼容**：设置 System 可反射属性 | `asset_path`、`property_name`、`value_text` | 仅用于局部修补 |
+| `niagara_system_add_emitter` | **原子/兼容**：向 System 添加 Emitter | `system_asset_path`、`emitter_asset_path`、`emitter_name` | 仅用于 bootstrap/修补 |
+| `niagara_system_move_emitter` | **原子/兼容**：调整 Emitter 顺序 | `system_asset_path` + emitter 标识 + `target_index` | 仅用于修补 |
+| `niagara_system_remove_emitter` | **原子/兼容**：从 System 移除 Emitter | `system_asset_path` + (`emitter_id`/`emitter_name`/`emitter_index`) | 仅用于修补 |
+| `niagara_system_set_emitter_enabled` | **原子/兼容**：启用/禁用某 Emitter | `system_asset_path` + emitter 标识 + `enabled` | 仅用于诊断/修补 |
+| `niagara_system_set_emitter_version` | **原子/兼容**：切换 Emitter 版本 | `system_asset_path` + emitter 标识 + `emitter_version` | 仅用于修补 |
+| `niagara_user_parameter_add` | **原子/兼容**：新增 User 参数 | `asset_path`、`parameter_name`、`parameter_type`、`default_value_text` | 仅用于局部修补 |
+| `niagara_user_parameter_remove` | **原子/兼容**：删除 User 参数 | `asset_path`、`parameter_name` | 仅用于局部修补 |
+| `niagara_user_parameter_set` | **原子/兼容**：设置 User 参数值 | `asset_path`、`parameter_name`、`value_text` | 仅用于局部修补 |
+<!-- UAI_FORMAL_COMMAND_INDEX_END -->

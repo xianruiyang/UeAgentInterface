@@ -380,3 +380,14 @@ JSON 关键字段：
 
 - 属性名匹配会忽略大小写、下划线、连字符和空格差异。
 - 当前不扩到嵌套 struct / array / object reference。
+
+<!-- UAI_FORMAL_COMMAND_INDEX_BEGIN -->
+## 原子/兼容命令正式索引
+>
+> 以下命令已有真实 dispatch 实现并纳入 smoke 覆盖；对完整资产制作仍应优先使用本分册中的结构化 JSON / folder workflow，原子命令仅用于 bootstrap、迁移、probe 或局部修复。
+
+| Command | 作用 | 关键参数 | 关键返回 |
+| --- | --- | --- | --- |
+| `anim_sequence_set_preview_mesh` | **原子/兼容**：设置或清空 AnimSequence 预览网格 | `asset_path`、`skeletal_mesh_path` 或 `clear_preview_mesh`、`save_after_set` | `success`、`warnings`、`errors` |
+| `anim_sequence_set_settings` | **原子/兼容**：批量设置 AnimSequence 常用属性 | `asset_path`；可选 `rate_scale`、`enable_root_motion`、`force_root_lock`、`root_motion_lock_type`、`interpolation_type`、`additive_animation_type`、`additive_base_pose_type`、`base_pose_sequence_path`、`clear_base_pose_sequence`、`base_pose_frame_index`、`retarget_source`、`retarget_source_asset_path`、`clear_retarget_source_asset`、`bone_compression_settings_path`、`curve_compression_settings_path`、`variable_frame_stripping_settings_path`、`save_after_set` | `success`、`warnings`、`errors` |
+<!-- UAI_FORMAL_COMMAND_INDEX_END -->

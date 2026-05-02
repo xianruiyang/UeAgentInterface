@@ -28,6 +28,8 @@ public class UeAgentInterface : ModuleRules
 				"SlateCore",
 				"ToolMenus",
 				"Projects",
+				"Settings",
+				"EngineSettings",
 				"HTTPServer",
 				"HTTP",
 				"Sockets",

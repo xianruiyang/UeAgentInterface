@@ -156,3 +156,24 @@
 - `material_function_apply_folder` 第一版：
   - 先删除现有表达式，再按文件夹描述重建
   - 完成后调用 `UpdateMaterialFunction`
+
+<!-- UAI_FORMAL_COMMAND_INDEX_BEGIN -->
+## 原子/兼容命令正式索引
+>
+> 以下命令已有真实 dispatch 实现并纳入 smoke 覆盖；对完整资产制作仍应优先使用本分册中的结构化 JSON / folder workflow，原子命令仅用于 bootstrap、迁移、probe 或局部修复。
+
+| Command | 作用 | 关键参数 | 关键返回 |
+| --- | --- | --- | --- |
+| `material_add_expression` | **原子/兼容**：添加表达式节点 | `asset_path`、`expression_class` | 优先写 `graphs/*.json` |
+| `material_connect_expression_to_property` | **原子/兼容**：连接节点到材质属性 | `asset_path`、`expression*`、`material_property` | 优先写 `graphs/*.json` |
+| `material_connect_expressions` | **原子/兼容**：连接节点到节点 | `asset_path`、`from_expression*`、`to_expression*` | 优先写 `graphs/*.json` |
+| `material_delete_expression` | **原子/兼容**：删除表达式节点 | `asset_path`、`expression_guid`/`expression_name` | 优先写 `graphs/*.json` |
+| `material_set_expression_property` | **原子/兼容**：设置节点属性 | `asset_path`、`expression_guid`/`expression_name`、`property_name`、`value_text` | 优先写 `graphs/*.json` |
+| `material_set_instance_parent` | **原子/兼容**：修改实例父材质 | `asset_path`、`parent_material_path` | 优先写 `parent.json` |
+| `material_set_parameter` | **原子/兼容**：统一设置实例参数 | `asset_path`、`parameter_type`、`parameter_name` | 优先写 `parameters/overrides.json` |
+| `material_set_property` | **原子/兼容**：设置材质或实例属性 | `asset_path`、`property_name`、`value_text` | 优先写 `settings/material.json` 或对应 folder JSON |
+| `material_set_scalar_parameter` | **原子/兼容**：设置标量参数 | `asset_path`、`parameter_name`、`value` | 兼容旧入口 |
+| `material_set_static_switch_parameter` | **原子/兼容**：设置静态开关参数 | `asset_path`、`parameter_name`、`value` | 兼容旧入口 |
+| `material_set_texture_parameter` | **原子/兼容**：设置纹理参数 | `asset_path`、`parameter_name`、`texture_path` | 兼容旧入口 |
+| `material_set_vector_parameter` | **原子/兼容**：设置向量参数 | `asset_path`、`parameter_name`、`value`/`value_text` | 兼容旧入口 |
+<!-- UAI_FORMAL_COMMAND_INDEX_END -->

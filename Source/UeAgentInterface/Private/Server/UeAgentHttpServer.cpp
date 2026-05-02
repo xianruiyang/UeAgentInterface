@@ -243,6 +243,13 @@ namespace
 				{ TEXT("editor_prepare_exit"), &InvokeExactWithCtx<&FUeAgentHttpServer::CmdEditorPrepareExit> },
 				{ TEXT("landscape_create"), &InvokeExactWithCtx<&FUeAgentHttpServer::CmdLandscapeCreate> },
 				{ TEXT("landscape_raise_circle"), &InvokeExactWithCtx<&FUeAgentHttpServer::CmdLandscapeRaiseCircle> },
+				{ TEXT("project_settings_export_index"), &InvokeExactWithCtx<&FUeAgentHttpServer::CmdProjectSettingsExportIndex> },
+				{ TEXT("project_settings_export_page"), &InvokeExactWithCtx<&FUeAgentHttpServer::CmdProjectSettingsExportPage> },
+				{ TEXT("project_settings_validate_page"), &InvokeExactWithCtx<&FUeAgentHttpServer::CmdProjectSettingsValidatePage> },
+				{ TEXT("project_settings_apply_page"), &InvokeExactWithCtx<&FUeAgentHttpServer::CmdProjectSettingsApplyPage> },
+				{ TEXT("project_settings_diff_page"), &InvokeExactWithCtx<&FUeAgentHttpServer::CmdProjectSettingsDiffPage> },
+				{ TEXT("config_export_section"), &InvokeExactWithCtx<&FUeAgentHttpServer::CmdConfigExportSection> },
+				{ TEXT("config_apply_section"), &InvokeExactWithCtx<&FUeAgentHttpServer::CmdConfigApplySection> },
 			};
 
 			for (const FExactCommandEntry& Entry : GExactCommandEntries)

@@ -78,6 +78,7 @@ public:
 #include "Commands/AI/UeAgentHttpServer_AIMembers.h"
 #include "Commands/TextureRenderTarget/UeAgentHttpServer_TextureRenderTargetMembers.h"
 #include "Commands/Audio/UeAgentHttpServer_AudioMembers.h"
+#include "Commands/ProjectSettings/UeAgentHttpServer_ProjectSettingsMembers.h"
 #undef UEAGENT_HTTP_SERVER_MEMBER_DECL
 
 private:
