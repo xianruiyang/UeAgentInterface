@@ -29,8 +29,8 @@ StaticMesh 的长期 authoring 主流程是：
 - `mesh.json`：LOD/material/socket/collision/lightmap/Nanite 总览，可安全回写 `allow_cpu_access`、`lightmap_resolution`、`lightmap_coordinate_index`。
 - `materials.json`：材质槽、slot name、material 引用；可回写材质和 slot name。
 - `lods/index.json`、`sections.json`：LOD 与 section 摘要，raw mesh 不回写。
-- `collision.json`：`boxes[] / spheres[] / capsules[]` 与 `collision_complexity`；可回写简单碰撞。
-- `sockets.json`：创建、更新、删除 socket。
+- `collision.json`：`boxes[] / spheres[] / capsules[]` 与 `collision_complexity`；可回写简单碰撞。`convex_hulls: []` 或 `clear_convex_hulls=true` 用于清理已有凸包碰撞；非空 `convex_hulls[]` 创建凸包仍属于不支持的几何重建入口，会在 validate/apply 前返回 `unsupported_apply_profile`。
+- `sockets.json`：创建、更新、删除 socket；默认 `replace_all=true`，即 JSON 中的非删除 socket 列表代表最终状态，apply 会移除未列出的旧 socket。需要局部 patch 时可显式写 `replace_all=false`。
 - `lightmap_uv.json`、`nanite.json`、`build_settings.json`：外围设置与摘要。
 - `import_data.json`：导入源文件追踪，包含 `first_filename`、`source_files[]`、`source_filenames[]`、`source_file_count`、`can_reimport`，用于 reimport 前验证。
 - `raw_mesh_summary.json`、`readonly_properties.json`：只读摘要。
@@ -39,6 +39,10 @@ StaticMesh 的长期 authoring 主流程是：
 `static_mesh_apply_folder` 返回 `json_issues[]`、`property_results[]`、`readback` 和 `validation_report`。文件存在但 JSON 解析失败会直接失败；数组坏项、未知字段、缺必填字段会带完整 JSON path。
 
 `static_mesh_validate_folder` 和 `static_mesh_apply_folder` 都会先解析文件夹内所有已存在的可选 JSON 文件；只有文件不存在才会按可选文件跳过。只要出现 error 级 `json_issues[]`，命令就返回失败，不会继续静默写入。`lods/index.json`、`sections.json`、`lightmap_uv.json`、`build_settings.json`、`import_data.json`、`raw_mesh_summary.json`、`raw_properties.json`、`readonly_properties.json` 和 `validation/*.json` 在 StaticMesh folder workflow 中属于摘要、只读或非主 authoring 入口；如果这些文件里出现 `apply/remove/delete/operations` 等明确写意图，会返回 `unsupported_apply_profile`。需要改通用 UObject 属性时，走 `asset_export_property_json -> asset_apply_property_json`，不要把写意图塞进 StaticMesh folder 的摘要文件里。
+
+`static_mesh_apply_folder` 写入 `collision.json` 时会同时对 `UStaticMesh` 和 `UBodySetup` 调用事务修改并刷新碰撞数据，因此可以替代旧的 `static_mesh_set_collision_*` 指令在编辑器 dirty、撤销和读回上的副作用。
+
+`static_mesh_apply_folder` 写入 `sockets.json` 时会对 `UStaticMesh` 和已有 `UStaticMeshSocket` 调用事务修改。默认全量替换 socket 集合，以保证 `export_folder -> apply_folder` 可以恢复到导出时的 socket 状态；如果只想做增量创建/更新/删除，显式设置 `replace_all=false`。
 
 `static_mesh_reimport` 不弹文件选择框；如果传 `source_filename`，该文件必须存在，并作为强制新源文件。返回 `can_reimport`、`source_filenames[]`、`reimport_status`、`readback`。失败时不会把 `cannot_reimport` 或 `source_file_not_found` 静默吞掉。
 
@@ -97,6 +101,7 @@ StaticMesh 的长期 authoring 主流程是：
 ### 简单碰撞补充
 
 - `static_mesh_set_collision_boxes / spheres / capsules` 都是“重设该形状数组”的语义，不是追加。
+- `static_mesh_apply_folder` 中的 `boxes[] / spheres[] / capsules[]` 也是全量替换各自数组；需要等价旧指令 `clear_other_shapes=true` 的凸包清理时，在 `collision.json` 中写 `convex_hulls: []` 或 `clear_convex_hulls=true`。
 - `clear_other_shapes=true` 时，会一并清掉其它简单碰撞形状和现有 convex。
 - `static_mesh_set_collision_capsules` 的 `length` 是胶囊中间圆柱段长度，不含两端半球。
 

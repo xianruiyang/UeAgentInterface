@@ -1,659 +1,124 @@
-﻿# UeAgentInterface 指令分册
+# UeAgentInterface 指令文档索引
 
-本目录是 `Plugins/UeAgentInterface/docs/UeAgentInterface_Usage.md` 的分册版。
-用途是按模块快速查某条指令的作用、关键参数和适用场景。
+本目录是 UeAgentInterface 的正式命令分册入口。当前覆盖矩阵来自 `uai-cli release coverage`：
 
-## 分册列表
+- 命令总数：`867`
+- 缺正式文档：`0`
+- 缺实现：`0`
+- 缺 smoke：`0`
+- actionable smoke debt：`0`
+- 最近覆盖矩阵：`../generated/command_coverage_matrix.md`
+- smoke 债务报告：`../generated/smoke_coverage_debt.md`
 
-- `01_Core_Level_Assets_Landscape.md`
-- `02_Blueprint.md`
-- `03_UMG.md`
-- `04_StaticMesh_EnhancedInput.md`
-- `05_Material.md`
-- `06_Sequence.md`
-- `13_AnimationAssets_Skeleton.md`
-- `14_IKRig_IKRetargeter.md`
-- `12_Montage.md`
-- `07_Niagara_System.md`
-- `08_Niagara_Emitter.md`
-- `09_Niagara_StageGraph.md`
-- `15_Niagara_FolderFormat.md`
-- `16_SkeletalMesh_FolderFormat.md`
-- `17_ControlRig_FolderFormat.md`
-- `18_Deformer_MLDeformer_GeometryCache.md`
-- `19_AI_Behavior_Blackboard_StateTree_EQS_Navigation_SmartObject.md`
-- `20_Audio.md`
-- `21_Texture_RenderTarget_Media.md`
-- `22_ProjectSettings_Config.md`
-- `deprecatedCommand/README.md`
-- `10_Modeling.md`
-- `11_AnimBlueprint.md`
-- `../UeAgentInterface_Status.md`
+## 查阅顺序
 
-## 使用约定
+1. 先看本文，确定应该使用哪个分册和哪类工作流。
+2. 再打开具体分册，查看命令参数、返回字段、错误码和边界。
+3. 需要确认是否仍有覆盖债时，看 `../generated/command_coverage_matrix.md`。
+4. 看到 `Deprecated for authoring` 的写入命令时，默认改用对应 JSON / folder workflow。
 
-- 插件底层协议仍是 `POST /api/exec`
-- 日常自动化调用优先使用 `UeAgentInterfaceCMD/dist/uai-cli.exe`
-- 批量任务优先使用 `run` 或 `batch`
-- 复杂属性写入统一使用 UE `ImportText` 风格的 `value_text`
-- 所有走 `value_text` / JSON / 结构化 JSON 的属性回写都应返回解析与读回状态：
-  - `requested_value_text`：请求写入的原始字符串
-  - `applied_value_text`：UE 导入后再读回的实际字符串
-  - `property_import_status`：`imported_and_read_back`、`property_not_found`、`import_failed` 或专用状态
-  - `property_import_verified`：是否已完成写入后的读回
-  - `property_import_error`：失败时的具体错误，如 `property_not_found` 或 `property_import_failed:<property>:<value>`
-  - `value_text_exact_match` / `value_text_changed_after_import`：请求值与读回值是否完全一致
-  - `cpp_type`：目标属性 C++ 类型
-- `value_text_changed_after_import=true` 不一定等于失败；UE 可能会规范化大小写、对象路径或浮点格式。但对向量、颜色、枚举等结构化值，它是排查“命令成功但值被回退/归零”的关键依据。
-- JSON 结构错误不能静默吞掉。通用返回字段为 `warnings[]` 或结果项内的 `json_issues[]`，每项包含 `severity/code/path/message`。`asset_apply_property_json` 的坏条目和字段错误会进入对应 `property_results[].json_issues[]`。
-- 曲线类字段不要再猜 `value_text`。`curve_export_json / curve_apply_json` 使用 `ue_agent_interface.curve.v1`，覆盖 `UCurveFloat / UCurveVector / UCurveLinearColor / UCurveTable`；`asset_export_property_json / asset_apply_property_json` 对 `FRuntimeFloatCurve / FRuntimeVectorCurve / FRuntimeCurveLinearColor / FCurveTableRowHandle / Curve asset reference` 会读写 `value_json` 或 `curve_json`。
-- Blueprint / UMG / AnimBlueprint 变量类型统一使用 `pin_category/pin_subcategory/pin_subcategory_object/container_type/value_type`。常见和中频 UE 结构体、枚举、对象/类资产可写别名，例如 `vector/rotator/transform/linearcolor/hitresult/gameplaytag/key/slatebrush/collisionchannel/actor/staticmesh/niagarasystem/userwidget`；`map` 必须写 `value_type`。
-- JSON / 结构化 JSON apply 的解析失败必须可见：
-  - 单文件 `json_file` 读取或语法解析失败会直接失败返回 `json_file_not_found / load_json_file_failed / json_parse_failed`。
-  - 文件夹式 workflow 中，可选 JSON 文件只有不存在时可跳过；如果文件存在但读取或语法解析失败，会失败返回并带文件路径。
-  - 可恢复的坏条目，例如数组元素不是 object、缺 `name/id/property_name/value_text` 等，会写入 `warnings[] / warning_count` 或 `property_results[]`，不应静默丢弃。
-  - 新增或维护 JSON/结构化 JSON apply 时必须优先接入统一诊断工具，至少覆盖未知字段、字段类型不匹配、必填字段缺失、数组元素类型错误，并在 warning/error 中保留完整 JSON path。
-- 以 `UeAgentInterface_Usage.md` 为完整字段定义来源，本目录只保留高频说明
+## 工作流优先级
 
-## 资产编辑优先级
+| 优先级 | 工作流 | 适用对象 | 典型命令 |
+| --- | --- | --- | --- |
+| 1 | 单文件 JSON | 小型资产、表格、配置、浅层数据 | `asset_*_property_json`, `curve_*_json`, `data_asset_*_json`, `data_table_*_json`, `render_target_*_json` |
+| 2 | 文件夹式 JSON | 图、树、复合资产、复杂编辑面 | `blueprint_*_folder`, `umg_*_folder`, `material_*_folder`, `niagara_*_folder`, `control_rig_*_folder` |
+| 3 | 场景/拓扑 JSON | Level Actor 实例、Component、Streaming、DataLayer、HLOD | `level_content_*_json`, `level_topology_*_json` |
+| 4 | 动作 / probe / build | 编译、截图、运行时探针、导入、构建、长任务 | `*_compile`, `*_screenshot`, `*_runtime_probe`, `packaging_*`, `*_build` |
+| 5 | 原子写入命令 | bootstrap、迁移、局部补修、故障恢复 | 详见 `deprecatedCommand/README.md` |
 
-当前资产编辑默认遵循这条优先级：
+通用节奏：
 
-1. 单文件 JSON：
-   - 适合小型、浅层资产
-   - 典型：`asset_export_property_json / asset_apply_property_json`
-   - 典型：`curve_export_json / curve_apply_json`
-   - 典型：`enhanced_input_export_*_json / enhanced_input_apply_*_json`
-   - 典型：`montage_export_json / montage_apply_json`
-2. 文件夹式结构化 JSON：
-   - 适合 Blueprint / UMG / AnimBlueprint / Material 这类图或树结构资产
-   - 典型：`*_export_folder / *_apply_folder`
-   - 当前已新增：`sequence_export_folder / sequence_apply_folder`
-   - 当前已新增：`niagara_export_folder / niagara_apply_folder`
-   - 当前已新增：`niagara_emitter_export_folder / niagara_emitter_apply_folder`
-   - 当前已新增：`niagara_script_export_folder / niagara_script_apply_folder`
-   - 当前已新增：`skeleton_export_folder / skeleton_apply_folder`
-   - 当前已新增：`skeletal_mesh_export_folder / skeletal_mesh_apply_folder`
-   - 当前已新增：`ik_rig_export_folder / ik_rig_apply_folder`
-   - 当前已新增：`ik_retargeter_export_folder / ik_retargeter_apply_folder`
-   - 当前已新增：`control_rig_export_folder / control_rig_apply_folder`
-   - 当前已新增：`control_rig_shape_library_export_json / control_rig_shape_library_apply_json`
-   - 当前已新增：`static_mesh_export_folder / static_mesh_apply_folder`
-   - 当前已新增：`deformer_graph_export_folder / deformer_graph_apply_folder`
-   - 当前已新增：`blackboard_export_json / blackboard_apply_json`
-   - 当前已新增：`behavior_tree_export_folder / behavior_tree_apply_folder`
-   - 当前已新增：`state_tree_export_folder / state_tree_apply_folder`
-   - 当前已新增：`eqs_export_folder / eqs_apply_folder`
-   - 当前已新增：`smart_object_definition_export_json / smart_object_definition_apply_json`
-   - 当前已新增：`sound_cue_export_folder / sound_cue_apply_folder`
-   - 当前已新增：`metasound_export_folder / metasound_apply_folder`
-   - 当前已新增：`sound_attenuation_export_json / sound_attenuation_apply_json`
-   - 当前已新增：`sound_concurrency_export_json / sound_concurrency_apply_json`
-   - 当前已新增：`sound_class_export_json / sound_class_apply_json`
-   - 当前已新增：`sound_mix_export_json / sound_mix_apply_json`
-   - 当前已新增：`sound_submix_export_folder / sound_submix_apply_folder`
-   - 当前已新增：`audio_effect_preset_export_json / audio_effect_preset_apply_json`
-   - 当前已新增：`runtime_virtual_texture_export_json / runtime_virtual_texture_apply_json`
-   - 当前已新增：`texture_array_export_folder / texture_array_apply_folder`
-   - 当前已新增：`texture_cube_export_folder / texture_cube_apply_folder`
-   - 当前已新增：`texture_cube_array_export_folder / texture_cube_array_apply_folder`
-   - 当前已新增：`volume_texture_export_folder / volume_texture_apply_folder`
-   - 当前已新增：`render_target_export_json / render_target_apply_json`
-   - 当前已新增：`media_source_export_json / media_source_apply_json`
-   - 当前已新增：`media_player_export_json / media_player_apply_json`
-   - 当前已新增：`media_texture_export_json / media_texture_apply_json`
-   - 当前已新增：`texture_graph_export_folder / texture_graph_apply_folder`
-   - 当前已新增：`subuv_animation_export_json / subuv_animation_apply_json`
-   - 当前已新增：`paper_sprite_export_json / paper_sprite_apply_json`
-   - 当前已新增：`paper_flipbook_export_json / paper_flipbook_apply_json`
-   - 当前已新增：`paper_tileset_export_folder / paper_tileset_apply_folder`
-   - 当前已新增：`paper_tilemap_export_folder / paper_tilemap_apply_folder`
-   - 当前已新增：`texture_collection_export_json / texture_collection_apply_json`
-   - 当前已新增：`project_settings_export_index / project_settings_export_page / project_settings_validate_page / project_settings_diff_page / project_settings_apply_page`
-   - Niagara 当前已覆盖 `NiagaraSystem / NiagaraEmitter / NiagaraScript` 三个完整 folder profile；System / Emitter apply 会随返回携带 Stack 感叹号信息，严格验收以 `warnings`、`stack_error_count` 和 `validation/coverage_report.json` 为依据
-3. 原子命令：
-   - 当同一资产字段或结构已经能被单文件 JSON / 文件夹式结构化 JSON 表达时，对应写入型原子命令统一标记为 **Deprecated for authoring**
-   - 保留用途只包括 bootstrap、读取/探针验证、迁移脚本、schema 边界字段和失败后的定点补修
+```text
+bootstrap -> export -> refine -> validate -> apply -> export/readback -> smoke/probe
+```
 
-结论：
+不要凭记忆猜 `property_name`、`value_text`、Pin 类型或 UE 对象路径。能导出真实模板时，先导出，再在模板上改。
 
-- 文档中的资产编辑不再默认推荐“逐条命令手搓”，而是优先推荐 `JSON / 结构化 JSON` 工作流。
-- 已有 JSON / 结构化 JSON 主流程覆盖的零散写入命令保留但 deprecated for authoring；完整 authoring 必须走“创建最小骨架 -> 导出 -> 写基础结构 -> apply -> 再导出补全 -> 修改参数 -> 再 apply”的 JSON 工作流。
-- 读取、创建最小资产、打开编辑器、编译、截图、导出、应用、dirty 处理和诊断命令不属于这类废弃写入命令。
-- 暂无 JSON / 结构化 JSON profile 的领域不强行标废弃，例如 Modeling、Level Actor 放置、NavMesh、普通视口控制等。IK Rig / IK Retargeter / Skeleton / SkeletalMesh / Control Rig 已进入 JSON / 文件夹式结构化 JSON 主流程。
+## 分册索引
 
-废弃写入命令明细已抽到 `deprecatedCommand/`，覆盖面包括：
+| 分册 | 命令数 | 主要范围 | 何时优先使用 |
+| --- | ---: | --- | --- |
+| `01_Core_Level_Assets_Landscape.md` | 86 | Core、Level 原子能力、Viewport、Asset、Landscape、Navigation、Trace、Screenshot | 读世界状态、基础 Actor/Component 查询、视口和低层诊断 |
+| `02_Blueprint.md` | 38 | Blueprint 创建、编译、folder workflow、图和变量 | 普通 Blueprint authoring |
+| `03_UMG.md` | 12 | WidgetBlueprint、WidgetTree、Slot、UMG 动画基础 | UI / WidgetBlueprint authoring |
+| `04_StaticMesh_EnhancedInput.md` | 34 | StaticMesh folder workflow、collision、socket、EnhancedInput JSON | StaticMesh 和输入资产 |
+| `05_Material.md` | 25 | Material、Material Instance、Material Function folder workflow | 材质图和参数 |
+| `06_Sequence.md` | 38 | Level Sequence、Binding、Track、UMG Animation、Sequencer folder workflow | 过场、镜头、属性轨 |
+| `07_Niagara_System.md` | 27 | Niagara System、编译、截图、Stack issue、runtime probe | Niagara System 级操作和验证 |
+| `08_Niagara_Emitter.md` | 20 | Niagara Emitter、Renderer、Event、参数 | Emitter 和渲染/事件结构 |
+| `09_Niagara_StageGraph.md` | 23 | Niagara Stage、Graph、Node、Module Input | Niagara 图和模块输入 |
+| `10_Modeling.md` | 22 | Modeling Mode、选择、工具 wrapper、primitive、mesh edit | 建模模式和白盒几何 |
+| `11_AnimBlueprint.md` | 56 | AnimBlueprint folder workflow、State Machine、Anim Layer、图节点 | 动画蓝图 |
+| `12_Montage.md` | 30 | Montage JSON、slot、segment、section、notify、Skeleton slot/group | 动画 Montage |
+| `13_AnimationAssets_Skeleton.md` | 25 | AnimSequence、BlendSpace、Skeleton | 动画资产和骨架 |
+| `14_IKRig_IKRetargeter.md` | 27 | IK Rig、IK Retargeter、retarget batch | IK 和重定向 |
+| `15_Niagara_FolderFormat.md` | 6 | Niagara System / Emitter / Script folder schema | Niagara 结构化 JSON 细节 |
+| `16_SkeletalMesh_FolderFormat.md` | 11 | SkeletalMesh folder workflow、Morph、Skin Weight Profile | 骨骼网格资产 |
+| `17_ControlRig_FolderFormat.md` | 21 | Control Rig、Shape Library、compile/probe/bake | Control Rig authoring |
+| `18_Deformer_MLDeformer_GeometryCache.md` | 28 | Deformer Graph、ML Deformer、Geometry Cache | 变形器和几何缓存 |
+| `19_AI_Behavior_Blackboard_StateTree_EQS_Navigation_SmartObject.md` | 56 | Blackboard、BehaviorTree、StateTree、EQS、AI Perception、Navigation、Smart Object | AI 行为栈 |
+| `20_Audio.md` | 60 | SoundWave、SoundCue、MetaSound、SoundClass/Mix/Submix、probe/record | 音频资产和音频运行诊断 |
+| `21_Texture_RenderTarget_Media.md` | 95 | Texture、RenderTarget、RVT、Media、TextureGraph、Paper2D | 贴图、RT、媒体和 2D 贴图资产 |
+| `22_ProjectSettings_Config.md` | 7 | Project Settings 实时反射、受限 Config fallback | 编辑项目设置和安全 ini section |
+| `23_LevelContent_JSON.md` | 14 | Level Actor / Component 增删查改 JSON、snapshot、merge、repair | 场景 Actor 持久内容 authoring |
+| `24_DataDriven_DataAsset_DataTable.md` | 13 | DataAsset、PrimaryAsset、DataTable JSON | 数据驱动资产 |
+| `25_LevelTopology_Streaming_WorldPartition_DataLayer_HLOD.md` | 39 | Level Streaming、World Partition、DataLayer、HLOD | 关卡拓扑和构建任务 |
+| `26_Physics_Baseline.md` | 14 | 基础 Physics、PhysicalMaterial、Constraint、PhysicsAsset、runtime probe | 不依赖额外插件的物理基础 |
+| `27_Localization_Packaging_PlatformProfiles.md` | 40 | Localization、StringTable、Packaging、TargetPlatform、DeviceProfile、Scalability | 本地化、打包和平台 profile |
+| `deprecatedCommand/README.md` | - | 已被 JSON / folder workflow 覆盖的旧写入命令 | 兼容旧脚本、迁移和局部补修 |
 
-- Actor Blueprint：组件树、成员、图节点/连线、pin 默认值、CDO 默认值、reparent 等可进入 `blueprint_apply_folder` 的写入命令。
-- WidgetBlueprint / UMG：控件树、Widget/Slot 属性、属性绑定，以及可进入 `umg_apply_folder` 的 UMG 动画写入命令。
-- EnhancedInput：`InputAction / InputMappingContext` 的属性、映射增删和清空命令，主流程改用 `enhanced_input_apply_*_json`。
-- StaticMesh / Animation Asset 通用属性：能由 `asset_apply_property_json` 表达的纯属性写入命令，例如 `static_mesh_set_property`、`anim_sequence_set_settings`。
-- Material / Material Instance / Material Function：属性、参数、表达式图节点和连线写入命令，主流程改用对应 folder workflow。
-- Level Sequence：播放设置、binding、track、key、section 等可进入 `sequence_apply_folder` 的写入命令。
-- Montage：播放/混合/sync、slot、segment、section、notify、Skeleton slot/group 等可进入 `montage_apply_json` 的写入命令。
-- AnimBlueprint：成员、逻辑图、Anim Layer、Layer Interface、State Machine、State/Transition、预览配置等可进入 `anim_blueprint_apply_folder` 的写入命令。
-- Niagara：System、Emitter、Renderer、Event、Parameter、Stage、Module、Node、ModuleInput 等可进入 Niagara folder workflow 的写入命令。
-- IK Rig / IK Retargeter：preview/root/goal/chain/solver、rigs/preview/settings/mapping/pose 等可进入 IK folder workflow 的写入命令。
-- StaticMesh / SkeletalMesh / Deformer：完整 authoring 主流程走 folder / JSON workflow；材质、socket、collision、morph 删除、deformer 属性等局部命令仅保留 bootstrap、探针和故障修复用途。
+## 按任务路由
 
-## 通用方法论
+| 任务 | 首选入口 | 不应优先使用 |
+| --- | --- | --- |
+| 在场景里创建、修改、删除 Actor / Component | `23_LevelContent_JSON.md` | `spawn_actor`、逐条 transform/property 原子命令 |
+| 关卡流送、DataLayer、World Partition、HLOD | `25_LevelTopology_Streaming_WorldPartition_DataLayer_HLOD.md` | 把拓扑系统硬塞进普通 Actor CRUD |
+| 普通 Blueprint / UMG / AnimBlueprint | `02_Blueprint.md`, `03_UMG.md`, `11_AnimBlueprint.md` | 大量节点/属性原子命令手搓完整资产 |
+| 材质、Sequencer、Niagara、Control Rig | 对应 folder workflow 分册 | 单条节点写入作为主 authoring |
+| StaticMesh / SkeletalMesh / Deformer | `04`, `16`, `18` 分册 | 直接写 raw vertex / raw skin weight / raw render data |
+| AI 行为、寻路、EQS、感知、Smart Object | `19_AI_Behavior_Blackboard_StateTree_EQS_Navigation_SmartObject.md` | 仅靠 Actor/Component 属性写入表达完整 AI 行为 |
+| Audio、Texture、RenderTarget、Media | `20_Audio.md`, `21_Texture_RenderTarget_Media.md` | 通用资产属性命令作为完整 authoring 主流程 |
+| Project Settings 或 `.ini` | `22_ProjectSettings_Config.md` | 各业务分册重复编辑普通设置字段 |
+| DataAsset、PrimaryAsset、DataTable | `24_DataDriven_DataAsset_DataTable.md` | 把 DataTable 当普通 DataAsset 或 StringTable |
+| Packaging、Localization、Platform Profile | `27_Localization_Packaging_PlatformProfiles.md` | UAI release pipeline 或普通 Project Settings 镜像 |
 
-对于“属性面很大、很难一开始就写全”的对象，当前推荐统一采用：
+## 通用返回和诊断约定
 
-`bootstrap -> export -> refine -> apply`
+写入类命令必须让失败可定位：
 
-即：
+- `issues[]` / `warnings[]` 使用 `severity/code/path/message`。
+- `json_file` 读取失败或解析失败必须直接失败，不得静默回退。
+- `property_results[]` 应保留逐项写入状态。
+- `requested_value_text`、`applied_value_text`、`property_value_read_back`、`property_import_status`、`property_import_verified`、`property_import_error`、`value_text_exact_match`、`value_text_changed_after_import`、`cpp_type` 是属性写入诊断核心字段。
+- `value_text_changed_after_import=true` 需要人工复核，可能只是 UE 规范化，也可能表示写入分支不生效。
+- 长任务返回 `task_id/status/command_line/log_file/report_file/exit_code/phase/last_log_lines[]`，真实执行必须有显式许可参数。
 
-1. 先建最小骨架
-2. 先让 UE 生成真实对象
-3. 再导出 JSON / 结构化 JSON
-4. 在导出模板上补全高价值属性
-5. 再回写
+## 废弃命令规则
 
-这样做的目的：
+`deprecatedCommand/` 内命令仍保留兼容，但不作为默认 authoring 入口。允许用途：
 
-- 不靠记忆硬猜属性名和 `value_text`
-- 让后续编辑建立在 UE 已经确认可用的真实模板上
-- 减少“第一次就想把所有属性写完”导致的返工
+- 创建最小骨架
+- 迁移旧脚本
+- 探针验证
+- schema 边界字段补修
+- JSON / folder workflow 失败后的定点故障恢复
 
-按对象复杂度选格式：
+不允许用途：
 
-- 小对象：单文件 JSON
-- 大对象：文件夹式结构化 JSON
+- 用一长串原子命令替代已有完整 JSON / folder workflow
+- 绕过 validate/diff/readback
+- 静默忽略解析失败、属性不存在或 import 失败
 
-## 当前同步状态（2026-04-23，已按实现复核）
+## 维护规则
 
-本轮已按命令路由实现做过代码审计：
+新增或修改命令时必须同步：
 
-- 命令名层面，分册文档与实现当前无缺项。
-- 若某条命令近期有增量扩展，优先以对应分册中的主表和“增量更新”说明为准。
+1. 命令实现和路由。
+2. 对应正式分册中的命令表、参数、返回字段、错误码和边界。
+3. UE automation smoke 或 source audit 覆盖。
+4. `uai-cli release coverage` 生成的 `../generated/command_coverage_matrix.*`。
+5. 如果改动进入发布包，同步 `UeAgentInterfacePak/UeAgentInterface/docs/commands/`。
+6. 如改动影响 Codex skill 的阅读路由，同步 Pak skill 和本机 installed skill。
 
-以下指令已同步到分册文档：
-
-- `get_world_state`
-- `exec_batch`
-- `begin_transaction`
-- `end_transaction`
-- `undo`
-- `redo`
-- `save_current_level`
-- `level_get_actor_transform`
-- `level_set_actor_transform`
-- `level_set_actor_location`
-- `level_set_actor_rotation`
-- `level_set_actor_scale`
-- `list_actors`
-- `spawn_actor`
-- `destroy_actor`
-- `level_duplicate_actor`
-- `actor_list_components`
-- `level_list_actor_components`
-- `level_get_actor_property`
-- `level_get_component_property`
-- `actor_set_property`
-- `level_set_actor_property`
-- `component_set_property`
-- `level_set_component_property`
-- `level_set_skeletal_mesh_morph_target`
-- `level_get_selection`
-- `level_set_selection`
-- `level_set_actor_folder`
-- `level_add_actor_tag`
-- `level_spawn_wall_with_opening`
-- `level_mark_probe`
-- `level_generate_probes`
-- `viewport_get_camera`
-- `viewport_set_camera`
-- `viewport_set_realtime`
-- `viewport_set_game_view`
-- `viewport_focus_actor`
-- `viewport_frame_selection`
-- `viewport_frame_actors`
-- `viewport_frame_actor`
-- `viewport_frame_folder`
-- `viewport_focus_actor_safe`
-- `viewport_deproject_screen_to_world`
-- `viewport_trace_screen_point`
-- `navmesh_build`
-- `navmesh_project_point`
-- `navmesh_find_path`
-- `navmesh_spawn_bounds_volume`
-- `level_validate_connectivity`
-- `level_trace_world_ray`
-- `level_sweep_capsule`
-- `level_sweep_capsule_path`
-- `level_check_overlaps`
-- `level_snap_to_surface`
-- `screenshot_viewport`
-- `screenshot_viewport_buffer`
-- `mesh_get_closest_vertex`
-- `mesh_get_vertex_world_position`
-- `level_destroy_folder_actors`
-- `level_cleanup_empty_folders`
-- `level_align_actor_vertex_to_vertex`
-- `level_align_actor_by_bounds`
-- `level_align_face_to_face`
-- `viewport_pick_actor_at_screen`
-- `viewport_select_actor_at_screen`
-- `level_get_nearby_actor_obbs`
-- `editor_get_open_assets`
-- `open_asset_editor`
-- `save_asset`
-- `asset_duplicate`
-- `asset_import_texture`
-- `asset_import_fbx_skeletal_mesh`
-- `asset_import_fbx_animation`
-- `asset_export_property_json`
-- `asset_apply_property_json`
-- `curve_export_json`
-- `curve_apply_json`
-- `editor_list_dirty_resources`
-- `editor_resolve_dirty_resources`
-- `editor_close`
-- `editor_prepare_exit`
-- `static_mesh_get_bounds`
-- `static_mesh_get_local_corners`
-- `static_mesh_set_material_slot`
-- `static_mesh_set_collision_boxes`
-- `static_mesh_set_collision_spheres`
-- `static_mesh_set_collision_capsules`
-- `static_mesh_add_socket`
-- `static_mesh_update_socket`
-- `static_mesh_remove_socket`
-- `modeling_activate_mode`
-- `modeling_get_selection`
-- `modeling_set_selection`
-- `modeling_set_mesh_selection_mode`
-- `modeling_get_mesh_selection_info`
-- `modeling_clear_mesh_selection`
-- `modeling_select_mesh_elements_via_screen`
-- `modeling_select_mesh_elements_via_world_ray`
-- `modeling_start_tool`
-- `modeling_get_active_tool`
-- `modeling_get_active_tool_properties`
-- `modeling_set_active_tool_property`
-- `modeling_invoke_active_tool_action`
-- `modeling_accept_tool`
-- `modeling_cancel_tool`
-- `modeling_save_mesh_asset`
-- `modeling_replace_actor_mesh`
-- `modeling_snap_to_ground`
-- `modeling_convert_actor_to_dynamic_mesh`
-- `modeling_duplicate_to_new_static_mesh`
-- `modeling_create_box`
-- `modeling_create_cylinder`
-- `modeling_create_sphere`
-- `modeling_create_plane`
-- `modeling_create_stairs`
-- `modeling_create_ramp`
-- `modeling_create_ramp_corner`
-- `modeling_extrude_faces`
-- `modeling_inset_faces`
-- `modeling_bevel_edges`
-- `modeling_offset`
-- `modeling_push_pull`
-- `modeling_mirror`
-- `modeling_duplicate_faces`
-- `modeling_boolean`
-- `modeling_trim`
-- `modeling_plane_cut`
-- `modeling_mesh_cut`
-- `modeling_voxel_boolean`
-- `modeling_remesh`
-- `modeling_simplify`
-- `modeling_subdivide`
-- `modeling_weld_edges`
-- `modeling_fill_holes`
-- `modeling_recompute_normals`
-- `modeling_set_pivot`
-- `modeling_bake_transform`
-- `modeling_align_to_world`
-- `modeling_auto_uv`
-- `modeling_project_uv`
-- `modeling_set_material_slot`
-- `modeling_add_material_slot`
-- `modeling_remove_material_slot`
-- `modeling_generate_simple_collision`
-- `modeling_generate_convex_collision`
-- `material_set_parameter`
-- `anim_blueprint_create`
-- `anim_blueprint_create_layer_interface`
-- `anim_blueprint_open_editor`
-- `anim_blueprint_compile`
-- `anim_blueprint_get_compile_log`
-- `anim_blueprint_export_folder`
-- `anim_blueprint_apply_folder`
-- `anim_blueprint_get_info`
-- `anim_blueprint_list_graphs`
-- `anim_blueprint_list_state_machines`
-- `anim_blueprint_list_anim_layers`
-- `anim_blueprint_list_layer_interfaces`
-- `anim_blueprint_implement_layer_interface`
-- `anim_blueprint_remove_layer_interface`
-- `anim_blueprint_add_anim_layer`
-- `anim_blueprint_rename_anim_layer`
-- `anim_blueprint_remove_anim_layer`
-- `anim_blueprint_add_state_machine`
-- `anim_blueprint_rename_state_machine`
-- `anim_blueprint_remove_state_machine`
-- `anim_blueprint_set_entry_state`
-- `anim_blueprint_clear_entry_state`
-- `anim_blueprint_add_state`
-- `anim_blueprint_set_state_properties`
-- `anim_blueprint_add_conduit`
-- `anim_blueprint_add_state_alias`
-- `anim_blueprint_rename_state_node`
-- `anim_blueprint_remove_state_node`
-- `anim_blueprint_set_state_alias_targets`
-- `anim_blueprint_add_transition`
-- `anim_blueprint_set_transition_properties`
-- `anim_blueprint_remove_transition`
-- `anim_blueprint_inspect_nodes`
-- `anim_blueprint_add_event_node`
-- `anim_blueprint_add_custom_event_node`
-- `anim_blueprint_add_node_by_class`
-- `anim_blueprint_add_call_function_node`
-- `anim_blueprint_add_variable_node`
-- `anim_blueprint_connect_pins`
-- `anim_blueprint_disconnect_pins`
-- `anim_blueprint_set_pin_default_value`
-- `anim_blueprint_remove_node`
-- `anim_blueprint_add_variable`
-- `anim_blueprint_remove_variable`
-- `anim_blueprint_add_function_graph`
-- `anim_blueprint_add_macro_graph`
-- `anim_blueprint_add_event_dispatcher`
-- `anim_blueprint_graph_get_view`
-- `anim_blueprint_graph_set_view`
-- `anim_blueprint_viewport_get_camera`
-- `anim_blueprint_viewport_set_camera`
-- `anim_blueprint_screenshot`
-- `anim_blueprint_set_preview_mesh`
-- `anim_blueprint_set_preview_animation_blueprint`
-- `anim_blueprint_reparent`
-- `anim_blueprint_set_cdo_property`
-- `anim_sequence_get_info`
-- `anim_sequence_screenshot`
-- `anim_sequence_set_settings`
-- `anim_sequence_set_preview_mesh`
-- `anim_sequence_set_curve`
-- `anim_sequence_set_bones`
-- `anim_sequence_set_metadata`
-- `anim_sequence_set_notify`
-- `anim_sequence_set_notify_track`
-- `anim_sequence_set_sync_markers`
-- `skeleton_get_info`
-- `skeleton_list_bones`
-- `skeleton_set_compatible_skeletons`
-- `skeleton_set_preview_mesh`
-- `skeleton_set_socket`
-- `skeleton_set_virtual_bone`
-- `ik_rig_create`
-- `ik_rig_get_info`
-- `ik_rig_export_folder`
-- `ik_rig_validate_folder`
-- `ik_rig_apply_folder`
-- `ik_rig_apply_auto_retarget_definition`
-- `ik_rig_preview_solve`
-- `ik_retargeter_create`
-- `ik_retargeter_get_info`
-- `ik_retargeter_export_folder`
-- `ik_retargeter_validate_folder`
-- `ik_retargeter_apply_folder`
-- `ik_retargeter_auto_map_chains`
-- `ik_retargeter_auto_align_pose`
-- `ik_retargeter_duplicate_and_retarget`
-- `retarget_batch_export_json`
-- `retarget_batch_validate_json`
-- `retarget_batch_apply_json`
-- `montage_list_montages`
-- `montage_create`
-- `montage_open_editor`
-- `montage_get_info`
-- `montage_set_preview_mesh`
-- `montage_set_blend_options`
-- `montage_set_sync_group`
-- `montage_add_slot_track`
-- `montage_rename_slot_track`
-- `montage_remove_slot_track`
-- `montage_add_segment`
-- `montage_update_segment`
-- `montage_remove_segment`
-- `montage_add_section`
-- `montage_rename_section`
-- `montage_set_section_time`
-- `montage_remove_section`
-- `montage_set_next_section`
-- `montage_add_notify_track`
-- `montage_remove_notify_track`
-- `montage_add_notify`
-- `montage_add_notify_state`
-- `montage_update_notify`
-- `montage_remove_notify`
-- `montage_list_skeleton_slots`
-- `montage_set_skeleton_slot_group`
-- `montage_rename_skeleton_slot`
-- `montage_remove_skeleton_slot`
-
-## 2026-04-30 增量补齐的 AI 行为栈命令
-
-分册：`19_AI_Behavior_Blackboard_StateTree_EQS_Navigation_SmartObject.md`
-
-- Blackboard：`blackboard_create`、`blackboard_get_info`、`blackboard_export_json`、`blackboard_validate_json`、`blackboard_apply_json`
-- Behavior Tree：`behavior_tree_create`、`behavior_tree_get_info`、`behavior_tree_export_folder`、`behavior_tree_validate_folder`、`behavior_tree_apply_folder`、`behavior_tree_open_editor`、`behavior_tree_graph_get_view`、`behavior_tree_graph_set_view`、`behavior_tree_screenshot`、`behavior_tree_runtime_snapshot`
-- BT 节点 Blueprint 摘要：`bt_node_blueprint_get_info`
-- StateTree：`state_tree_create`、`state_tree_get_info`、`state_tree_export_folder`、`state_tree_validate_folder`、`state_tree_apply_folder`、`state_tree_open_editor`、`state_tree_screenshot`、`state_tree_runtime_snapshot`
-- StateTree 节点 Blueprint 摘要：`state_tree_node_blueprint_get_info`
-- EQS：`eqs_create`、`eqs_get_info`、`eqs_export_folder`、`eqs_validate_folder`、`eqs_apply_folder`、`eqs_run_query`、`eqs_debug_snapshot`
-- AI Perception：`ai_perception_get_component_info`、`ai_perception_validate_setup`、`ai_perception_runtime_snapshot`、`ai_perception_runtime_probe`
-- Navigation：`navigation_get_info`、`navigation_export_config_json`、`navigation_validate_level`、`navigation_path_probe`、`navigation_area_cost_probe`、`navigation_runtime_snapshot`
-- Smart Object：`smart_object_definition_create`、`smart_object_definition_get_info`、`smart_object_definition_export_json`、`smart_object_definition_validate_json`、`smart_object_definition_apply_json`、`smart_object_validate_setup`、`smart_object_find`、`smart_object_claim`、`smart_object_release`、`smart_object_runtime_snapshot`、`smart_object_runtime_probe`
-- AI Behavior Stack：`ai_behavior_stack_export_folder`、`ai_behavior_stack_validate_folder`、`ai_behavior_stack_runtime_probe`
-
-测试状态：`GptProjectTest.UeAgentInterface.Smoke.AIBehaviorStackCommands` 覆盖所有 headless 命令；GUI 批处理覆盖 BT/StateTree editor open 与 screenshot，并校验 `appears_non_black=true`。
-
-## 2026-04-24 增量补齐的 Niagara 诊断命令
-
-- `niagara_get_stack_issues`
-  - 分册：`07_Niagara_System.md`、`08_Niagara_Emitter.md`
-  - 用途：读取 Niagara Stack 面板里的红色错误、黄色警告和信息提示；返回 `stack_issue_icon_kind`、`stack_issue_tooltip_summary` 和 emitter 编译/状态提示字段。对 UI 红色感叹号，优先使用 `prefer_existing_view_model=true` 与 `open_editor_if_needed=true`
-- `niagara_refresh_system`
-  - 分册：`07_Niagara_System.md`
-  - 用途：在 UAI 写入 Niagara System / Emitter / Stage / Module 后刷新 overview、emitter execution order、cached traversal data 和 Niagara ViewModel；用于处理“手动新增/删除 emitter 后 System 才恢复运行”的缓存/执行图过期问题。`niagara_compile_system` 对 System 默认会先执行同类刷新。
-- `niagara_system_runtime_probe`
-  - 分册：`07_Niagara_System.md`
-  - 用途：默认推进 Niagara 编辑器预览组件并返回 System / Emitter 执行状态、粒子数和生成数；`sample_mode=current_preview` 可只读当前暂停预览状态；不启动 PIE / game 窗口。
-- `niagara_preview_advance`
-  - 分册：`07_Niagara_System.md`
-  - 用途：从 0 或当前预览状态连续 tick 到目标帧并暂停，返回 `preview_state_token`；后续 `niagara_system_runtime_probe(sample_mode=current_preview)` 与 `niagara_screenshot(capture_mode=current_preview)` 使用该 token 只读同一状态。
-
-## 2026-04-21 增量补齐的索引命令
-
-以下命令已经在实现与分册中存在，但此前未同步到本索引：
-
-### Blueprint
-
-- `blueprint_create`
-- `blueprint_compile`
-- `blueprint_get_compile_log`
-- `blueprint_get_info`
-- `blueprint_list_graphs`
-- `blueprint_export_folder`
-- `blueprint_apply_folder`
-- `blueprint_inspect_components`
-- `blueprint_inspect_nodes`
-- `blueprint_add_component`
-- `blueprint_set_component_property`
-- `blueprint_add_event_node`
-- `blueprint_add_custom_event_node`
-- `blueprint_add_node_by_class`
-- `blueprint_add_call_function_node`
-- `blueprint_connect_pins`
-- `blueprint_disconnect_pins`
-- `blueprint_set_pin_default_value`
-- `blueprint_remove_node`
-- `blueprint_add_variable`
-- `blueprint_remove_variable`
-- `blueprint_add_variable_node`
-- `blueprint_add_component_bound_event`
-- `blueprint_add_function_graph`
-- `blueprint_add_macro_graph`
-- `blueprint_add_event_dispatcher`
-- `blueprint_graph_get_view`
-- `blueprint_graph_set_view`
-- `blueprint_viewport_get_camera`
-- `blueprint_viewport_set_camera`
-- `blueprint_screenshot`
-- `blueprint_reparent`
-- `blueprint_remove_component`
-- `blueprint_set_cdo_property`
-
-### UMG
-
-- `umg_create_widget_blueprint`
-- `umg_compile`
-- `umg_get_compile_log`
-- `umg_get_info`
-- `umg_export_folder`
-- `umg_apply_folder`
-- `umg_add_widget`
-- `umg_remove_widget`
-- `umg_set_widget_property`
-- `umg_set_slot_property`
-- `umg_rename_widget`
-- `umg_bind_widget_property_to_variable`
-
-### StaticMesh / EnhancedInput
-
-- `static_mesh_open_editor`
-- `static_mesh_get_info`
-- `static_mesh_export_folder`
-- `static_mesh_validate_folder`
-- `static_mesh_apply_folder`
-- `static_mesh_validate_geometry`
-- `static_mesh_validate_uvs`
-- `static_mesh_reimport`
-- `static_mesh_build`
-- `static_mesh_preview_collision`
-- `static_mesh_set_preview_view`
-- `static_mesh_set_property`
-- `enhanced_input_create_action`
-- `enhanced_input_set_action_property`
-- `enhanced_input_get_action_info`
-- `enhanced_input_export_action_json`
-- `enhanced_input_apply_action_json`
-- `enhanced_input_create_mapping_context`
-- `enhanced_input_set_mapping_context_property`
-- `enhanced_input_get_mapping_context_info`
-- `enhanced_input_add_mapping`
-- `enhanced_input_remove_mapping`
-- `enhanced_input_clear_mappings`
-- `enhanced_input_export_mapping_context_json`
-- `enhanced_input_apply_mapping_context_json`
-
-### Material
-
-- `material_create`
-- `material_open_editor`
-- `material_get_info`
-- `material_set_property`
-- `material_compile`
-- `material_get_compile_log`
-- `material_export_folder`
-- `material_apply_folder`
-- `material_instance_export_folder`
-- `material_instance_apply_folder`
-- `material_function_export_folder`
-- `material_function_apply_folder`
-- `material_add_expression`
-- `material_delete_expression`
-- `material_list_expressions`
-- `material_connect_expressions`
-- `material_connect_expression_to_property`
-- `material_set_expression_property`
-- `material_instance_create`
-- `material_set_instance_parent`
-- `material_set_scalar_parameter`
-- `material_set_vector_parameter`
-- `material_set_texture_parameter`
-- `material_set_static_switch_parameter`
-
-### Sequence
-
-- `sequence_list_level_sequences`
-- `sequence_create_level_sequence`
-- `sequence_open_level_sequence`
-- `sequence_get_level_sequence_info`
-- `sequence_set_level_sequence_playback_range`
-- `sequence_set_level_sequence_display_rate`
-- `sequence_add_actor_binding`
-- `sequence_remove_actor_binding`
-- `sequence_add_property_track`
-- `sequence_add_property_key`
-- `sequence_add_visibility_track`
-- `sequence_add_visibility_key`
-- `sequence_add_bool_property_track`
-- `sequence_add_bool_property_key`
-- `sequence_add_float_property_track`
-- `sequence_add_float_property_key`
-- `sequence_add_integer_property_track`
-- `sequence_add_integer_property_key`
-- `sequence_add_transform_track`
-- `sequence_add_transform_key`
-- `sequence_add_skeletal_animation_track`
-- `sequence_add_skeletal_animation_section`
-- `sequence_update_skeletal_animation_section`
-- `sequence_remove_skeletal_animation_section`
-- `sequence_list_umg_animations`
-- `sequence_get_umg_animation_info`
-- `sequence_create_umg_animation`
-- `sequence_rename_umg_animation`
-- `sequence_remove_umg_animation`
-- `sequence_set_umg_animation_playback_range`
-- `sequence_set_umg_animation_display_rate`
-- `sequence_add_umg_widget_transform_key`
-- `sequence_add_umg_widget_translation_key`
-- `sequence_add_umg_widget_opacity_key`
-- `sequence_add_umg_widget_color_key`
-
-### Control Rig / Shape Library
-
-- `control_rig_create`
-- `control_rig_get_info`
-- `control_rig_export_folder`
-- `control_rig_validate_folder`
-- `control_rig_apply_folder`
-- `control_rig_compile`
-- `control_rig_get_compile_log`
-- `control_rig_open_editor`
-- `control_rig_graph_get_view`
-- `control_rig_graph_set_view`
-- `control_rig_viewport_get_camera`
-- `control_rig_viewport_set_camera`
-- `control_rig_screenshot`
-- `control_rig_runtime_probe`
-- `control_rig_bake_to_animation`
-- `control_rig_bake_to_control_rig`
-- `control_rig_shape_library_create`
-- `control_rig_shape_library_get_info`
-- `control_rig_shape_library_export_json`
-- `control_rig_shape_library_validate_json`
-- `control_rig_shape_library_apply_json`
-
-Control Rig authoring 优先走 `control_rig_export_folder / control_rig_apply_folder`。当前可回写 preview、Shape Library 引用、hierarchy bones/nulls/controls/curves、`variables/variables.json` 和 `graphs/graphs.json`；AnimBlueprint / Sequencer 接入属于对应资产 folder workflow，bake 使用显式 `control_rig_bake_*` 命令。未支持回写的 functions、modular、raw/readonly 等 profile 有实际内容时会返回 `unsupported_apply_profile`。
-
-## 当前白盒迭代建议
-
-- 白盒重建前，优先按 `folder_path` 调用 `level_destroy_folder_actors` 清空上一轮生成物，而不是依赖脚本侧保留的 actor 列表逐个删除。
-- 批量创建 `modeling_create_box / cylinder / sphere / plane / stairs` 时，优先在创建参数里直接提供 `folder_path`，减少额外 `level_set_actor_folder` 往返。
-- 大量白盒构建优先使用 `batch`，避免几十次到上百次独立 `exec` 带来的进程与 HTTP 往返开销。
-
-## 推荐查阅顺序
-
-- 想查关卡、视口、对齐、事务：看 `01_Core_Level_Assets_Landscape.md`
-- 想查 Blueprint / AnimBlueprint / UMG / Montage：看 `02_Blueprint.md`、`11_AnimBlueprint.md`、`03_UMG.md`、`12_Montage.md`
-- 想查 StaticMesh / EnhancedInput：看 `04_StaticMesh_EnhancedInput.md`
-- 想查材质、Sequencer、Niagara、Control Rig：看对应编号分册
-- 想查 AI 行为树、黑板、StateTree、EQS、感知、导航和 Smart Object：看 `19_AI_Behavior_Blackboard_StateTree_EQS_Navigation_SmartObject.md`
-- 想查 Modeling Mode：看 `10_Modeling.md`
-
+当前本文档不再维护历史“增量补齐命令长列表”。命令存在性以 coverage matrix 和各正式分册为准。

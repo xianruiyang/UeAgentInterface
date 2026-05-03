@@ -1,264 +1,101 @@
 # UeAgentInterface 当前能力与边界
 
-本文档只描述**当前已经完成并可文档化的能力**。  
-未完成项不会写成“已支持”。
+本文只记录当前已经实现、文档化并纳入覆盖矩阵的能力快照。具体命令参数以 `docs/commands/` 分册为准。
 
-## 1. 已完成模块
+## 覆盖状态
 
-- Level / Actor / Component
-- Viewport / Screen Trace / Screenshot
-- Asset Editor / Save / Exit
-  - 当前已新增轻量资产属性 JSON 工作流：
-    - `asset_export_property_json`
-    - `asset_apply_property_json`
-    - `curve_export_json`
-    - `curve_apply_json`
-  - 第一版默认覆盖 `AnimSequence / Texture / StaticMesh / SkeletalMesh` 的常用属性
-- Landscape
-- Blueprint
-- AnimBlueprint
-- Montage
-- Montage
-  - 当前已新增单文件 JSON 工作流：
-    - `montage_export_json`
-    - `montage_apply_json`
-  - `AnimMontage` 当前明确采用“单资产 = 单 JSON”模式
-- UMG
-  - 当前已新增 `WidgetBlueprint` 文件夹式工作流：
-    - `umg_export_folder`
-    - `umg_apply_folder`
-  - 第一版固定根目录：`Saved/UeAssetFolders/WidgetBlueprint`
-  - 当前聚焦 `WidgetTree + Blueprint 变量 + 常见绑定 + 常见 UMG 动画轨`
-- StaticMesh
-- EnhancedInput
-  - 当前已新增单文件 JSON 工作流：
-    - `enhanced_input_export_action_json`
-    - `enhanced_input_apply_action_json`
-    - `enhanced_input_export_mapping_context_json`
-    - `enhanced_input_apply_mapping_context_json`
-  - `InputAction / InputMappingContext` 当前明确采用“单资产 = 单 JSON”模式，不再另做文件夹式真源
-- Material
-  - 当前除 `UMaterial` 表达式图与实例参数命令外，已新增 `Material Instance` 文件夹式工作流：
-    - `material_instance_export_folder`
-    - `material_instance_apply_folder`
-  - 第一版固定根目录：`Saved/UeAssetFolders/MaterialInstance`
-  - 当前聚焦 `UMaterialInstanceConstant` 的“父材质 + 参数 overrides”
-  - 已新增 `Material Function` 文件夹式工作流：
-    - `material_function_export_folder`
-    - `material_function_apply_folder`
-  - 第一版固定根目录：`Saved/UeAssetFolders/MaterialFunction`
-  - 当前聚焦 `UMaterialFunction` 的“函数级属性 + 表达式图”
-- Sequence
-- Sequence
-  - 当前已新增文件夹式工作流：
-    - `sequence_export_folder`
-    - `sequence_apply_folder`
-  - 第一版固定根目录：`Saved/UeAssetFolders/LevelSequence`
-  - 当前聚焦“已有 binding 的结构化回写”，不是 Sequencer 全覆盖
-- Niagara
-  - 当前已新增文件夹式工作流：
-    - `niagara_export_folder`
-    - `niagara_apply_folder`
-    - `niagara_emitter_export_folder`
-    - `niagara_emitter_apply_folder`
-    - `niagara_script_export_folder`
-    - `niagara_script_apply_folder`
-    - 固定根目录：`Saved/UeAssetFolders/NiagaraSystem`
-    - Emitter 独立根目录：`Saved/UeAssetFolders/NiagaraEmitter`
-    - Script 独立根目录：`Saved/UeAssetFolders/NiagaraScript`
-    - 当前按 `UNiagaraSystem -> FNiagaraEmitterHandle -> FVersionedNiagaraEmitter -> UNiagaraEmitter` 建模
-    - 导出覆盖 System/Emitter/User 参数/Renderer/Event Handler/Stage/Module/Module Input/Graph Node/Graph Link/Script 引用与 `raw_properties`，并区分 standalone emitter asset 与 system 内嵌 emitter instance
-    - 回写支持 System 通用属性、User 参数、Emitter Handle、引用/内嵌 Emitter 的版本数据、Renderer、Event Generator、Event Handler、Simulation Stage、Module Stack、Module Input default、Data Interface 引用与 `raw_properties`
-    - Script profile 支持创建或更新 `UNiagaraScript`，回写脚本元数据、raw reflected fields、graph nodes 与 Custom HLSL 文本
-    - 调试辅助：`niagara_screenshot` 可截取 Niagara 编辑器 `window` 或 `viewport`，用于确认编辑器界面是否真实呈现写入结果；`niagara_get_stack_issues` 可读取 Stack 面板红/黄/信息提示，包含依赖校验、模块路径、模块 GUID 和可用修复项；`niagara_refresh_system` 可在结构化/原子写入后刷新 overview、emitter execution order、cached traversal data 和 Niagara ViewModel，避免必须手动新增/删除 emitter 才让 System 运行图恢复
-    - 完成度：`NiagaraSystem / NiagaraEmitter / NiagaraScript` 三个 folder profile 已完整落地；`coverage_report.json` 输出 `implementation_status=complete_folder_profile`、`is_complete_target_schema=true`、空 `pending_profiles`、空 `blocking_gaps`
-- Modeling
-- Animation Assets / Skeleton
-- IK Rig / IK Retargeter
+最近一次 `uai-cli release coverage`：
 
-## 2. 当前能力边界
+- 命令总数：`867`
+- 缺正式文档：`0`
+- 缺实现：`0`
+- 缺 smoke：`0`
+- actionable smoke debt：`0`
+- 所有命令均有 direct smoke/source-audit 覆盖记录
 
-### 2.1 Level
+生成文件：
 
-当前稳定可用：
-- Actor 生成、删除、复制、附加、文件夹与 Tag 管理
-- Actor / Component 实例属性读写
-- Selection、Transform、Bounds 对齐、Vertex 对齐
-- Viewport 相机、屏幕点 Trace、截图
-- NavMesh 构建、投影、查路、连通性验收
-- 世界碰撞查询与贴地辅助
+- `docs/generated/command_coverage_matrix.json`
+- `docs/generated/command_coverage_matrix.md`
+- `docs/generated/smoke_coverage_debt.md`
 
-当前未完成：
-- Data Layer / Level Instance
-- PIE 控制
-- 更完整的批量筛选与统计
+## 已完成能力
 
-### 2.2 Blueprint / UMG / Material / Sequence / Animation
+| 领域 | 当前能力 | 主要分册 |
+| --- | --- | --- |
+| Core / Editor lifecycle | world state、transaction、undo/redo、dirty resource、open/save/close、batch 基础能力 | `01`, `UeAgentInterface_Usage.md` |
+| Level / Actor / Component | Actor/Component 查询、transform、属性、选择、folder/tag、trace/sweep/overlap、NavMesh 基础、截图和 viewport 控制 | `01` |
+| Level Content JSON | 场景 Actor/Component 内容的 query/validate/plan/apply/diff/snapshot/delete/merge/repair | `23` |
+| Level Topology | Level Streaming、World Partition、DataLayer、HLOD 操作和构建任务 | `25` |
+| Blueprint | Blueprint folder workflow、变量、组件、图节点、Pin、编译、截图、CDO、reparent | `02` |
+| UMG | WidgetBlueprint folder workflow、WidgetTree、Slot、属性、绑定、UMG 动画基础 | `03` |
+| StaticMesh / EnhancedInput | StaticMesh folder workflow、collision、socket、lightmap/Nanite 安全字段、InputAction/InputMappingContext JSON | `04` |
+| Modeling | Modeling Mode、selection、active tool、primitive wrapper、mesh edit wrapper、UV/material/collision helper | `10` |
+| Material | Material、Material Instance、Material Function folder workflow 和图/参数读写 | `05` |
+| Sequence | Level Sequence folder workflow、binding、track、key、camera cut、spawnable、subsequence、UMG animation | `06` |
+| Niagara | System、Emitter、Script folder workflow、Stack issue、refresh、compile log、preview advance、runtime probe、screenshot | `07`, `08`, `09`, `15` |
+| AnimBlueprint | AnimBlueprint folder workflow、Layer Interface、Anim Layer、State Machine、Transition、图节点、预览、CDO | `11` |
+| Montage | Montage 单文件 JSON、slot、segment、section、notify、notify state、Skeleton slot/group | `12` |
+| Animation / Skeleton | AnimSequence、BlendSpace、Skeleton、socket、virtual bone、metadata、notify、sync marker | `13` |
+| IK Rig / Retargeter | IK Rig / IK Retargeter folder workflow、preview solve、auto map/align、batch retarget | `14` |
+| SkeletalMesh | SkeletalMesh folder workflow、Morph Target、Skin Weight Profile、socket、physics/deformer 引用摘要 | `16` |
+| Control Rig | Control Rig folder workflow、Shape Library JSON、compile/log、runtime probe、screenshot、Sequencer bake | `17` |
+| Deformer / Geometry Cache | Geometry Cache import/info/validate、Deformer Graph folder workflow、ML Deformer/Data collection JSON | `18` |
+| AI | Blackboard、BehaviorTree、StateTree、EQS、AI Perception、Navigation、Smart Object、AI stack export/validate/probe | `19` |
+| Audio | SoundWave、SoundCue、MetaSound、Attenuation、Concurrency、SoundClass/Mix/Submix、EffectPreset、runtime probe/record/meter | `20` |
+| Texture / RenderTarget / Media | Texture import/reimport/stat/export、RVT、TextureArray/Cube/Volume、RenderTarget、Media、TextureGraph、SubUV、Paper2D | `21` |
+| Project Settings / Config | ISettingsModule 实时反射导出/校验/diff/apply；受限 config section fallback | `22` |
+| Data Driven | DataAsset、PrimaryAsset、DataTable JSON workflow、scan/query/sample、all-or-nothing DataTable apply | `24` |
+| Physics 基础 | Capabilities、Primitive physics query/validate/patch plan、PhysicalMaterial、PhysicsConstraint、PhysicsAsset、runtime probe | `26` |
+| Production Pipeline | Localization、StringTable、PO/report/culture preview、Packaging UAT plan/run/status/log/artifact/clean、Platform/Profile/SDK/DeviceProfile/Scalability | `27` |
 
-- Blueprint
-  - `Actor Blueprint` 当前主编辑路径是 `blueprint_export_folder / blueprint_apply_folder`
-  - 原子命令主要用于资产创建、变量/组件初始化、live 探针读取和尾部补修
-  - `graphs/*.json` 当前稳定覆盖 `event / custom_event / call_function / variable_node / component_bound_event / node_by_class`，并额外支持部分 EnhancedInput 专用节点
-  - 已补按类创建的通用节点原语，以及通用删除 / 连线 / 断线
-  - 当前仍缺会附带子图的结构型节点原语，以及更高层的 graph diff apply
-- UMG
-  - `WidgetBlueprint` 当前主编辑路径是 `umg_export_folder / umg_apply_folder`
-  - 原子 `umg_*` 命令主要用于初始化、探针验证和边界补修
-  - 逻辑图仍主要复用 `blueprint_*`
-  - 当前已支持文件夹式导出/回写；第一版采用“优先复用匹配根控件、重建其余子树”的 apply，不是节点级 diff
-  - 当前动画轨稳定覆盖 `RenderOpacity / ColorAndOpacity / BackgroundColor / RenderTransform`，并已补通用 `float_property / color_property`
-- Material
-  - `UMaterial / MaterialInstance / MaterialFunction` 当前主编辑路径都已收口到各自的 `*_export_folder / *_apply_folder`
-  - 原子 `material_*` 命令主要用于初始化、探针验证与局部补修
-  - `MaterialInstance` 当前支持 `scalar / vector / texture / static_switch / static_component_mask`
-  - 当前有统一入口 `material_set_parameter`
-- Sequence
-  - `Level Sequence` 当前主编辑路径已补到 `sequence_export_folder / sequence_apply_folder`
-  - 已收口到统一 `sequence_add_property_track / sequence_add_property_key`
-  - 当前支持 `bool / byte / double / float / integer / color / rotator / vector / actor_reference / object / string`
-  - 仍保留 `visibility / transform / skeletal animation / UMG animation` 这类高价值专用命令
-  - 当前 `apply_folder` 已能按 `binding.json` 自动恢复常见 `Actor / ActorComponent / Actor spawnable` 绑定
-  - 当前 `spawn` 轨已纳入结构化导出/回写
-  - 统一属性轨现已并入文件夹式 workflow：`float / double / bool / integer / color / byte / string / vector / rotator / actor_reference / object`
-  - 当前 `outliner/folders.json` 已稳定支持 folder 树、常见 binding 归属、当前稳定 binding 内 track 归属与稳定 master track 归属
-  - `master_tracks/index.json` 当前已导出真实摘要，并已稳定回写 `camera_cut / sub_sequence / cinematic_shot`
-  - 还不是通用 Sequencer 全覆盖
-  - Niagara
-    - `Niagara System` 当前主编辑路径已补到 `niagara_export_folder / niagara_apply_folder`
-    - standalone `Niagara Emitter` 当前主编辑路径已补到 `niagara_emitter_export_folder / niagara_emitter_apply_folder`
-    - standalone `Niagara Script` 当前主编辑路径已补到 `niagara_script_export_folder / niagara_script_apply_folder`
-    - 文件夹导出包含 `asset.json`、`settings/`、`parameters/`、`system_stages/`、`emitters/`、`scripts/`、`validation/coverage_report.json`
-    - `coverage_report.json` 明确列出 System/Emitter/Stage/Renderer/Event/Script/Data Interface 的 export/apply 支持状态，并包含 `implementation_status`、`is_complete_target_schema`、`is_lossless_roundtrip`、`pending_profiles`、`blocking_gaps`
-    - 当前 apply 已覆盖结构化与通用属性回写，并已处理 system 内嵌 emitter instance 的无 standalone 源资产场景；Stage/Module stack、自定义 Script 资产、Custom HLSL 和 Data Interface 引用都纳入 folder profile
-    - 当前诊断面已补 `niagara_get_stack_issues`：可读取 live Niagara Stack ViewModel 的 `FStackIssue`，用于获取 UI 红色感叹号内容；未打开编辑器时会退回 data-processing ViewModel，但可能漏掉 UI-only / live Stack 状态
-    - 当前刷新面已补 `niagara_refresh_system`，且 `niagara_compile_system` 对 System 默认 `refresh_before_compile=true`；用于处理 UAI 写入后 System compiled data / execution graph / editor ViewModel 没有完全刷新的情况
-    - 结论：Niagara 当前实现与完整目标 schema 已对齐；用 `strict=true` 可把实际资产 warning 转为 apply 失败
-- AnimBlueprint
-  - `AnimBlueprint` 当前主编辑路径是 `anim_blueprint_export_folder / anim_blueprint_apply_folder`
-  - 原子 `anim_blueprint_*` 图命令主要用于局部初始化、探针验证和 schema 边界补修
-  - 当前覆盖资产级、Layer Interface、Anim Layer、State Machine、预览与部分图施工
-  - 当前已新增文件夹式导出/回写：
-    - `anim_blueprint_export_folder`
-    - `anim_blueprint_apply_folder`
-  - 第一版固定根目录：`Saved/UeAssetFolders/AnimBlueprint`
-  - 当前采用“成员/逻辑图复用 Blueprint proxy，AnimLayer/StateMachine 结构重建后再回填动画图”的 apply 策略
-  - 当前已额外补齐一批 AnimGraph 资产引用节点的属性真源回写，第一版稳定覆盖 `Node.BlendSpace / Node.Sequence`，足以支撑 `BlendSpace Player / RotationOffsetBlendSpace / Sequence Player / Sequence Evaluator` 的文件夹式 round-trip
-  - 已补通用 K2 / 普通 AnimGraph 节点按类创建，以及通用删除 / 连线 / 断线
-  - `BlendSpace` 资产本体已补单文件 JSON authoring：`blendspace_create / get_info / export_json / validate_json / apply_json / preview_sample`
-  - 仍缺会附带子图的结构型 AnimGraph 节点原语
-- Montage
-  - 当前主编辑路径已补到 `montage_export_json / montage_apply_json`
-  - 当前覆盖资产、slot/segment/section、notify/notify state、notify/track 颜色、常见触发/过滤设置、skeleton slot/group、marker sync
-  - 更细的 notify payload / 曲线 / metadata 仍未完全覆盖
-- Animation Assets / Skeleton
-  - 当前覆盖 `AnimSequence` 的资产级设置、选帧截图、压缩 / 剥帧设置、float 曲线、骨骼轨删除、metadata 生命周期、preview mesh、普通 notify、notify track、sync marker 与摘要回读
-  - 当前覆盖 `Skeleton` 的骨骼层级回读、compatible skeleton、preview mesh、socket、virtual bone 与槽组/通知名摘要
-- StaticMesh / SkeletalMesh / Deformer
-  - `StaticMesh` 已补 `static_mesh_export_folder / static_mesh_validate_folder / static_mesh_apply_folder`，覆盖材质、socket、simple collision、lightmap、Nanite 安全字段；`static_mesh_reimport` 和 `static_mesh_preview_collision` 覆盖重导入与 headless 碰撞预览；raw geometry / UV / Nanite 内部数据只做摘要和验证
-  - `SkeletalMesh` 已补 Morph Target 列表/校验/预览/删除、Skin Weight Profile 导入/删除/预览、skin weight/profile/cloth/deformer 摘要；raw skin weight、Morph delta 和 cloth simulation data 不通过普通 JSON 手写
-  - `Geometry Cache` 已补导入、信息读取和与 SkeletalMesh 的引用验证入口；逐帧顶点缓存不编辑
-  - `Deformer Graph` 已补创建、信息读取、folder export/validate/apply、compile/log 状态入口；folder apply 通过 `raw_properties.json` 中显式 `apply=true` 的属性项复用 `asset_apply_property_json`
-  - `Deformer Source Library / Mesh Deformer Collection / ML Deformer` 已补单文件 JSON export/validate/apply；ML apply 不启动训练，训练输入校验和训练日志读取为显式命令
-- IK Rig / IK Retargeter
-  - 当前覆盖 IK Rig 资产创建、preview mesh、goal、retarget root、retarget chain、solver 结构操作、有限的 solver 细粒度设置，以及 auto retarget definition
-  - 当前覆盖 IK Retargeter 资产创建、source/target rig、preview mesh、retarget pose 生命周期与偏移数据、`global/root settings`、auto map chains 与 batch duplicate-and-retarget
-  - 仍未覆盖全 solver 细粒度参数、完整 op 级编辑，以及稳定的单链显式 mapping 编辑
-- Control Rig / Shape Library
-  - 当前覆盖 Control Rig 资产创建、folder export/validate/apply、preview、Shape Library 引用、hierarchy bones/nulls/controls/curves、`variables/variables.json`、RigVM graph node/link/pin default、compile report、runtime probe、editor view/camera/screenshot wrapper
-  - 当前覆盖 Control Rig Shape Library 的 create/get/export/validate/apply 单文件 JSON workflow
-  - Sequencer bake 使用 `control_rig_bake_to_animation / control_rig_bake_to_control_rig` 显式动作命令；包含 binding/SkeletalMesh 前置诊断，Bake To Animation 使用无打开 Sequencer 的导出路径，Bake To Control Rig 会拒绝非 FK 且不支持 Inverse event 的 rig
-  - `functions`、`modular`、`raw_properties`、`readonly_properties` 等暂不安全回写面如果包含实际内容，会返回 `unsupported_apply_profile`，不静默忽略
+## 重要边界
 
-### 2.3 Modeling
+- Project Settings 普通字段统一走 `project_settings_*`，业务分册不重复实现普通设置页字段编辑。
+- 普通 `.ini` section 裸写只走受限 `config_*` fallback；平台 config、DeviceProfile、Localization target 等必须走专用 schema。
+- Level Actor 持久内容 authoring 优先走 `level_content_*_json`；旧 Actor 原子写入命令只保留兼容、bootstrap、探针和局部补修。
+- 关卡拓扑系统优先走 `level_topology_*`、`level_streaming_*`、`data_layer_*`、`world_partition_*`、`hlod_*`；不要把拓扑关系硬塞进普通 Actor CRUD。
+- 复杂资产 authoring 优先走 JSON / folder JSON，不推荐通过原子写入命令完整手搓。
+- Raw render resource、raw vertex/index/skin weight/morph delta/cloth simulation data、shader 内部缓存和 cook 内部依赖图不作为普通 JSON 手写面。
+- 需要额外启用插件的能力不并入基础承诺；命令应先检查 feature/plugin availability，再返回 `feature_unavailable` 或等价诊断。
+- PIE 操控不是当前主承诺。当前主要依赖 editor-safe runtime probe、trace、readback、compile log、screenshot 和 automation smoke。
 
-当前稳定可用：
-- Mode 激活
-- Selection 与 mesh element 选择
-- 通用 `start_tool / set_property / invoke_action / accept / cancel`
-- 一批常用 wrapper
+## 可选插件与未承诺范围
 
-当前边界：
-- 依赖 viewport、tool context、selection state
-- 强交互工具不等于完全 headless 自动化
+以下能力可能已有部分读取、验证或 guard，但不作为“无需插件即可稳定完整 authoring”的基础能力：
 
-## 3. 推荐工作流
+- GAS / Gameplay Ability System
+- PCG 深度图 authoring
+- Chaos Vehicles
+- Geometry Collection / Destruction
+- Field System
+- Chaos Cloth / Flesh / PhysicsControl
+- Gameplay Debugger
+- Networking/Replication 深度运行时调试
+- Editor Utility 深度 UI workflow
 
-推荐使用：
-- `UeAgentInterfaceCMD/dist/uai-cli.exe`
+这些模块如果要纳入正式命令集，应先单独做设计文档、冗余复查、插件可用性 guard、实现和 smoke。
 
-推荐顺序：
-1. `doctor`
-2. `run --plan ... --vars ...`
-3. 必要时 `batch --file ...`
-4. 查看 `dist/reports/*.json`
+## 质量门禁
 
-资产编辑默认优先级：
+每次新增或修改命令后应通过：
 
-1. 单文件 JSON
-   - 适合小型浅层资产
-   - 例如：
-     - `asset_export_property_json / asset_apply_property_json`
-     - `enhanced_input_export_*_json / enhanced_input_apply_*_json`
-2. 文件夹式结构化 JSON
-   - 适合图类、树类、复合结构资产
-   - 例如：
-     - `blueprint_export_folder / blueprint_apply_folder`
-     - `umg_export_folder / umg_apply_folder`
-     - `anim_blueprint_export_folder / anim_blueprint_apply_folder`
-     - `material_*_export_folder / material_*_apply_folder`
-3. 原子命令只做辅助
-   - 用于初始化、探针验证、schema 暂未覆盖的尾部字段，或回写失败后的定点修补
+1. UBT build。
+2. 对应 UE automation smoke。
+3. `uai-cli release coverage`，确认 doc/implementation/smoke/actionable debt 为 0。
+4. CLI release/source audit。
+5. Dev/Pak 目标文件 hash 检查。
+6. skill sync check，如修改 skill 路由。
+7. touched files strict UTF-8 检查。
+8. 无残留 `UnrealEditor`、`UnrealEditor-Cmd`、`CrashReportClient`。
 
-通用推荐方法：
+UE 启动阶段可能存在非目标 warning/error 文本；判断结果以目标 automation result、report JSON、crash folder 和日志上下文为准。
 
-1. 先最小创建对象骨架
-2. 先让 UE 生成真实对象
-3. 再 export 当前真实 JSON / 结构化 JSON
-4. 以导出结果为模板补全高价值属性
-5. 再 apply
+## 当前维护重点
 
-这条方法尤其适合：
+当前最大短板不是普通命令覆盖，而是工程化维护：
 
-- Blueprint component
-- UMG widget / slot
-- Material expression / instance override
-- AnimBlueprint 图和结构对象
-- 各类字段很多的小型资产 JSON 工作流
-
-不推荐：
-- 日常直接手写 HTTP
-- 在命令行内联长 JSON
-
-## 4. 使用原则
-
-- 先确认服务可用，再执行写操作
-- 多步骤任务优先 `run` 或 `batch`
-- 默认遇错中断
-- Niagara / Modeling 优先小步验证
-- 关闭编辑器前优先：
-  1. `editor_list_dirty_resources`
-  2. `editor_resolve_dirty_resources`
-  3. `editor_close`
-
-## 2026-04-22 增量说明
-
-- `AnimBlueprint`
-  - 第一版文件夹式工作流已落地：`anim_blueprint_export_folder / anim_blueprint_apply_folder`
-  - 当前目录分层：`settings / members / layer_interfaces / anim_layers / state_machines / graphs / validation`
-  - 已验证命令路由在新编辑器会话中可见；完整构建已通过
-- `Animation Assets / Skeleton`
-  - `anim_sequence_set_metadata` 已从“生命周期管理”扩展到“生命周期 + 简单属性编辑”。
-  - 当前稳定属性面：`FName/FString/FText/bool/数值`。
-  - `anim_sequence_get_info.metadata[]` 已补 `properties` 回读。
-- `IK Rig / IK Retargeter`
-  - 新增统一入口 `ik_retargeter_set_settings`。
-  - 当前稳定覆盖 `global_settings/root_settings` 写入与回读。
-  - `ik_retargeter_get_info` 已补 `root_settings/global_settings/chain_settings[]` 摘要。
-  - 基于 UE 5.6 当前最小 retargeter 资产流实测，`chain_settings[]` 经常为空，当前不把它计为稳定能力面。
-
-## 2026-04-21 增量说明
-
-- `2026-04-21` 增量：`IK Rig` 当前已稳定补齐 `BodyMover` solver settings、goal 连接与 `InfluenceMultiplier`；其他 solver 的细粒度 settings 仍未计入稳定能力面。
-- `2026-04-21` 增量：`IK Rig` 当前已稳定补齐 `goal` 的 `PositionAlpha / RotationAlpha` 资产级写入与回读；完整 goal transform/source/space 仍未计入稳定能力面。
-- `2026-04-21` 增量：`IK Rig` 当前已稳定补齐 `goal current transform` 的即时写入与回读，以及 `ik_rig_get_info.goals[]` 的摘要字段回读；这层按“立即回读 + 摘要字段存在”验收，不承诺后续所有 rig 重初始化后绝对值恒定不变。
-- `2026-04-21` 增量：`IK Rig` 当前已稳定补齐 `FBIK` 的基础 solver settings、goal settings、bone settings；这层不含 limit enum / 角度约束的完整细粒度配置。
+- 整理仓库 dirty/untracked/deleted 状态。
+- 固化 CI / 发布门禁。
+- 增加更真实的端到端 workflow 回归。
+- 继续把用户任务导向 cookbook 和分册参数表分离维护。

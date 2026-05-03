@@ -4243,6 +4243,30 @@ bool FUeAgentInterfaceIKAssetsSmokeTest::RunTest(const FString& Parameters)
 		TestEqual(TEXT("IK assets retarget_batch_validate_json has no JSON issues"), static_cast<int32>((*RetargetBatchValidateData)->GetIntegerField(TEXT("json_issue_count"))), 0);
 	}
 
+	const FString EmptyRetargetBatchJsonFile = ToSmokeJsonPath(FPaths::ConvertRelativePathToFull(
+		FPaths::Combine(FPaths::ProjectSavedDir(), TEXT("UeAssetFolders"), TEXT("RetargetBatch"), FString::Printf(TEXT("BatchEmpty_%s.json"), *FGuid::NewGuid().ToString(EGuidFormats::Digits)))));
+	IFileManager::Get().MakeDirectory(*FPaths::GetPath(EmptyRetargetBatchJsonFile), true);
+	TestTrue(TEXT("IK assets empty retarget batch json saved"), FFileHelper::SaveStringToFile(
+		FString::Printf(TEXT("{\"schema\":\"ue_agent_interface.retarget_batch.v1\",\"retargeter\":\"%s\",\"source_assets\":[],\"output_folder\":\"%s\"}"), *RetargeterAssetPath, *RetargetBatchOutputFolder),
+		*EmptyRetargetBatchJsonFile,
+		FFileHelper::EEncodingOptions::ForceUTF8WithoutBOM));
+	const FString EmptyRetargetBatchValidateBody = MakeExecRequestBody(
+		TEXT("smoke-ik-assets-retarget-batch-empty-validate-001"),
+		TEXT("retarget_batch_validate_json"),
+		FString::Printf(TEXT("{\"json_file\":\"%s\"}"), *EmptyRetargetBatchJsonFile));
+	FHttpSmokeResult EmptyRetargetBatchValidateResult;
+	TestTrue(TEXT("IK assets empty retarget_batch_validate_json request completed"), ExecuteHttpJsonRequest(TEXT("POST"), ServerScope.BaseUrl + TEXT("/api/exec"), ServerScope.Token, EmptyRetargetBatchValidateBody, EmptyRetargetBatchValidateResult));
+	TestTrue(TEXT("IK assets empty retarget_batch_validate_json returns command failure"), EmptyRetargetBatchValidateResult.StatusCode == 200 || EmptyRetargetBatchValidateResult.StatusCode == 400);
+	TSharedPtr<FJsonObject> EmptyRetargetBatchValidateJson;
+	TestTrue(TEXT("IK assets empty retarget_batch_validate_json parses JSON"), ParseJson(EmptyRetargetBatchValidateResult.Body, EmptyRetargetBatchValidateJson));
+	if (EmptyRetargetBatchValidateJson.IsValid())
+	{
+		bool bEmptyBatchOk = true;
+		EmptyRetargetBatchValidateJson->TryGetBoolField(TEXT("ok"), bEmptyBatchOk);
+		TestFalse(TEXT("IK assets empty retarget_batch_validate_json ok=false"), bEmptyBatchOk);
+		TestTrue(TEXT("IK assets empty retarget_batch_validate_json reports empty source assets"), EmptyRetargetBatchValidateResult.Body.Contains(TEXT("json_empty_required_field")));
+	}
+
 	const FString RetargetBatchApplyJsonBody = MakeExecRequestBody(
 		TEXT("smoke-ik-assets-retarget-batch-apply-001"),
 		TEXT("retarget_batch_apply_json"),

@@ -2,6 +2,8 @@
 
 #include "UeAgentSmokeTestSharedIncludes.inl"
 
+#include "Components/DirectionalLightComponent.h"
+
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(
 	FUeAgentInterfaceLevelReadonlySmokeTest,
 	"GptProjectTest.UeAgentInterface.Smoke.LevelReadonlyQueries",
@@ -53,6 +55,172 @@ bool FUeAgentInterfaceLevelReadonlySmokeTest::RunTest(const FString& Parameters)
 		TestTrue(TEXT("Viewport camera contains fov"), (*ViewportData)->HasTypedField<EJson::Number>(TEXT("fov")));
 		TestTrue(TEXT("Viewport camera contains realtime"), (*ViewportData)->HasTypedField<EJson::Boolean>(TEXT("realtime")));
 	}
+
+	return !HasAnyErrors();
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(
+	FUeAgentInterfaceViewportWarningsSmokeTest,
+	"GptProjectTest.UeAgentInterface.Smoke.ViewportWarnings",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::ProductFilter)
+
+bool FUeAgentInterfaceViewportWarningsSmokeTest::RunTest(const FString& Parameters)
+{
+	FScopedUeAgentHttpServer ServerScope;
+	FString InitError;
+	if (!ServerScope.Initialize(InitError))
+	{
+		AddError(FString::Printf(TEXT("Initialize failed: %s"), *InitError));
+		return false;
+	}
+
+	const FString FolderPath = FString::Printf(TEXT("UAI/Smoke/ViewportWarnings/%s"), *FGuid::NewGuid().ToString(EGuidFormats::Digits));
+	auto ExecJson = [this, &ServerScope](const FString& RequestId, const FString& Command, const FString& ParamsJson, FHttpSmokeResult& OutResult, double TimeoutSeconds = 5.0) -> bool
+	{
+		const FString Body = MakeExecRequestBody(RequestId, Command, ParamsJson);
+		const bool bCompleted = ExecuteHttpJsonRequest(TEXT("POST"), ServerScope.BaseUrl + TEXT("/api/exec"), ServerScope.Token, Body, OutResult, TimeoutSeconds);
+		TestTrue(FString::Printf(TEXT("%s request completed"), *Command), bCompleted);
+		return bCompleted;
+	};
+
+	FHttpSmokeResult CleanupBeforeResult;
+	ExecJson(
+		TEXT("smoke-viewport-warnings-clean-before-001"),
+		TEXT("level_destroy_folder_actors"),
+		FString::Printf(TEXT("{\"folder_path\":\"%s\",\"include_child_folders\":true}"), *FolderPath),
+		CleanupBeforeResult);
+
+	auto SpawnActor = [this, &ExecJson, &FolderPath](const FString& RequestId, const FString& ClassPath, const FString& Label, const FVector& Location) -> bool
+	{
+		FHttpSmokeResult SpawnResult;
+		if (!ExecJson(
+			RequestId,
+			TEXT("spawn_actor"),
+			FString::Printf(
+				TEXT("{\"class_path\":\"%s\",\"label\":\"%s\",\"folder_path\":\"%s\",\"tags\":[\"UAI.Smoke.ViewportWarnings\"],\"location\":{\"x\":%.3f,\"y\":%.3f,\"z\":%.3f}}"),
+				*ClassPath,
+				*Label,
+				*FolderPath,
+				Location.X,
+				Location.Y,
+				Location.Z),
+			SpawnResult,
+			10.0))
+		{
+			return false;
+		}
+		TestEqual(FString::Printf(TEXT("%s spawn status code"), *Label), SpawnResult.StatusCode, 200);
+
+		TSharedPtr<FJsonObject> SpawnJson;
+		TestTrue(FString::Printf(TEXT("%s spawn parses"), *Label), ParseJson(SpawnResult.Body, SpawnJson));
+		TestTrue(FString::Printf(TEXT("%s spawn ok"), *Label), SpawnJson.IsValid() && SpawnJson->GetBoolField(TEXT("ok")));
+		return SpawnJson.IsValid() && SpawnJson->GetBoolField(TEXT("ok"));
+	};
+
+	const FString PlanarLabel = TEXT("UAI_Smoke_ViewportWarnings_PlanarReflection");
+	const FString DirALabel = TEXT("UAI_Smoke_ViewportWarnings_DirectionalA");
+	const FString DirBLabel = TEXT("UAI_Smoke_ViewportWarnings_DirectionalB");
+	SpawnActor(TEXT("smoke-viewport-warnings-planar-001"), TEXT("/Script/Engine.PlanarReflection"), PlanarLabel, FVector(90000.0, 90000.0, 250.0));
+	SpawnActor(TEXT("smoke-viewport-warnings-dir-a-001"), TEXT("/Script/Engine.DirectionalLight"), DirALabel, FVector(90200.0, 90000.0, 350.0));
+	SpawnActor(TEXT("smoke-viewport-warnings-dir-b-001"), TEXT("/Script/Engine.DirectionalLight"), DirBLabel, FVector(90400.0, 90000.0, 350.0));
+
+	auto SetDirectionalPriority = [this](const FString& ActorLabel, int32 Priority) -> bool
+	{
+		if (!GEditor)
+		{
+			AddError(TEXT("Viewport warning smoke missing GEditor"));
+			return false;
+		}
+		UWorld* EditorWorld = GEditor->GetEditorWorldContext().World();
+		if (!EditorWorld)
+		{
+			AddError(TEXT("Viewport warning smoke missing editor world"));
+			return false;
+		}
+		for (TActorIterator<AActor> It(EditorWorld); It; ++It)
+		{
+			AActor* Actor = *It;
+			if (!Actor || !Actor->GetActorLabel().Equals(ActorLabel, ESearchCase::IgnoreCase))
+			{
+				continue;
+			}
+			UDirectionalLightComponent* Component = Actor->FindComponentByClass<UDirectionalLightComponent>();
+			if (!Component)
+			{
+				AddError(FString::Printf(TEXT("Directional light component missing: %s"), *ActorLabel));
+				return false;
+			}
+			Actor->Modify();
+			Component->Modify();
+			Component->SetForwardShadingPriority(Priority);
+			Component->MarkRenderStateDirty();
+			Actor->MarkPackageDirty();
+			return true;
+		}
+		AddError(FString::Printf(TEXT("Directional actor not found: %s"), *ActorLabel));
+		return false;
+	};
+
+	TestTrue(TEXT("Directional A priority set"), SetDirectionalPriority(DirALabel, 999));
+	TestTrue(TEXT("Directional B priority set"), SetDirectionalPriority(DirBLabel, 999));
+
+	FHttpSmokeResult WarningsResult;
+	ExecJson(
+		TEXT("smoke-viewport-warnings-read-001"),
+		TEXT("viewport_get_warnings"),
+		TEXT("{\"include_suppressed\":true}"),
+		WarningsResult,
+		10.0);
+	TestEqual(TEXT("Viewport warnings status code"), WarningsResult.StatusCode, 200);
+
+	TSharedPtr<FJsonObject> WarningsJson;
+	TestTrue(TEXT("Viewport warnings parses"), ParseJson(WarningsResult.Body, WarningsJson));
+	TestTrue(TEXT("Viewport warnings ok"), WarningsJson.IsValid() && WarningsJson->GetBoolField(TEXT("ok")));
+
+	const TSharedPtr<FJsonObject>* WarningsData = nullptr;
+	TestTrue(TEXT("Viewport warnings data exists"), WarningsJson.IsValid() && WarningsJson->TryGetObjectField(TEXT("data"), WarningsData) && WarningsData && WarningsData->IsValid());
+	if (WarningsData && WarningsData->IsValid())
+	{
+		const TArray<TSharedPtr<FJsonValue>>* WarningValues = nullptr;
+		TestTrue(TEXT("Viewport warnings array exists"), (*WarningsData)->TryGetArrayField(TEXT("warnings"), WarningValues) && WarningValues);
+		bool bFoundForwardWarning = false;
+		bool bFoundPlanarWarning = false;
+		if (WarningValues)
+		{
+			for (const TSharedPtr<FJsonValue>& WarningValue : *WarningValues)
+			{
+				const TSharedPtr<FJsonObject>* WarningObj = nullptr;
+				if (!WarningValue.IsValid() || !WarningValue->TryGetObject(WarningObj) || !WarningObj || !WarningObj->IsValid())
+				{
+					continue;
+				}
+				const FString Code = (*WarningObj)->GetStringField(TEXT("code"));
+				const FString Text = (*WarningObj)->GetStringField(TEXT("text"));
+				bFoundForwardWarning |= Code == TEXT("renderer.multiple_directional_lights_forward_shading") && Text.Contains(TEXT("ForwardShadingPriority"));
+				bFoundPlanarWarning |= Code == TEXT("renderer.no_global_clip_plane");
+			}
+		}
+		TestTrue(TEXT("Viewport warnings include directional conflict"), bFoundForwardWarning);
+
+		const TSharedPtr<FJsonObject>* RendererProbe = nullptr;
+		if ((*WarningsData)->TryGetObjectField(TEXT("renderer_probe"), RendererProbe) && RendererProbe && RendererProbe->IsValid())
+		{
+			const int32 ClipPlaneValue = (*RendererProbe)->GetIntegerField(TEXT("r.AllowGlobalClipPlane"));
+			if (ClipPlaneValue == 0)
+			{
+				TestTrue(TEXT("Viewport warnings include planar clip plane warning when cvar disabled"), bFoundPlanarWarning);
+			}
+		}
+	}
+
+	FHttpSmokeResult CleanupAfterResult;
+	ExecJson(
+		TEXT("smoke-viewport-warnings-clean-after-001"),
+		TEXT("level_destroy_folder_actors"),
+		FString::Printf(TEXT("{\"folder_path\":\"%s\",\"include_child_folders\":true}"), *FolderPath),
+		CleanupAfterResult,
+		10.0);
+	TestEqual(TEXT("Viewport warnings cleanup status code"), CleanupAfterResult.StatusCode, 200);
 
 	return !HasAnyErrors();
 }

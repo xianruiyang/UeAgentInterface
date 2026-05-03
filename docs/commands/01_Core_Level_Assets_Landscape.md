@@ -40,41 +40,47 @@
 
 ## Level / Actor / Component
 
+### Level Content authoring 优先级
+
+当前 Level 中持久 Actor / Component 最终态的批量 authoring 默认使用 `23_LevelContent_JSON.md` 的 `level_content_*_json` / `level_actor_*_json` 工作流。2026-05-02 已在打开的 UE 编辑器中实测旧原子流程与 Level Content JSON 流程：普通 Actor 创建/删除/克隆、TargetPoint probe、普通 transform、attach/detach、folder、tag、Actor 属性、普通组件属性读回和托管清理均可由 Level Content 表达，旧写入命令已归档到 `deprecatedCommand/01_Core_Level_Assets_Landscape.md` 作为 **Deprecated for Level Content authoring**。
+
+不要把这个结论扩大到所有 Level 命令：只读诊断、视口/截图、空间 trace/sweep/overlap、几何对齐、`level_spawn_wall_with_opening`、Landscape、morph 展示、Navigation build/query 仍是专用能力。`navmesh_spawn_bounds_volume` 和 `component_set_property` / `level_set_component_property` 的普通场景实例 authoring 已被 Level Content JSON 接管；旧命令保留为兼容旧脚本、bootstrap、探针验证和故障补修入口。
+
 | 指令 | 作用 | 关键参数 | 典型用途 |
 |---|---|---|---|
 | `list_actors` | 列出当前关卡 Actor | `limit` | 读取场景现有对象 |
-| `spawn_actor` | 生成 Actor | `class_path`、可选 `label/location/rotation/scale/static_mesh/folder_path/tags[]/snap_to_ground` | 白盒搭建、生成测试对象 |
+| `spawn_actor` | **Deprecated for Level Content authoring**；详见 `deprecatedCommand/01_Core_Level_Assets_Landscape.md` | `class_path`、可选 `label/location/rotation/scale/static_mesh/folder_path/tags[]/snap_to_ground` | 兼容旧脚本、bootstrap、单步故障恢复 |
 | `level_spawn_wall_with_opening` | 生成“带开口的墙”（自动拆成多段网格） | `plane`、`wall_size`、`opening_center/opening_size`、`label_prefix` | 门洞/窗洞/通道口：避免手工拆墙造成接口不连通 |
-| `destroy_actor` | 删除 Actor | `id` | 清理测试对象 |
-| `level_mark_probe` | 创建验收探针（TargetPoint） | `location`、可选 `label/folder_path/tags` | 固化关键连接处验收点位 |
-| `level_generate_probes` | 批量创建验收探针（TargetPoint） | `points[]` 或 `probes[]`、可选 `label_prefix/folder_path/tags` | 一次生成多组 probe 便于回归 |
-| `level_duplicate_actor` | 复制关卡 Actor | `id`、`offset` | 快速铺设模块化建筑件 |
+| `destroy_actor` | **Deprecated for Level Content authoring**；详见 `deprecatedCommand/01_Core_Level_Assets_Landscape.md` | `id` | 兼容旧脚本、单步故障恢复 |
+| `level_mark_probe` | **Deprecated for Level Content authoring**；TargetPoint probe 可由 Level Content resource 表达 | `location`、可选 `label/folder_path/tags` | 快速单点 probe |
+| `level_generate_probes` | **Deprecated for Level Content authoring**；批量 probe 可由多个 Level Content resource 表达 | `points[]` 或 `probes[]`、可选 `label_prefix/folder_path/tags` | 快速批量 probe |
+| `level_duplicate_actor` | **Deprecated for Level Content authoring**；详见 `deprecatedCommand/01_Core_Level_Assets_Landscape.md` | `id`、`offset` | 兼容旧脚本、单步故障恢复 |
 | `actor_list_components` | 列出 Actor 组件 | `id`、`include_non_scene` | 修改组件前定位组件名 |
 | `level_list_actor_components` | `actor_list_components` 的同义命令 | 同上 | 统一走 `level_*` 前缀 |
 | `level_get_actor_property` | 读取 Actor 属性 | `id`、`property_name` | 调试实例状态 |
 | `level_get_component_property` | 读取组件属性 | `id`、`component`（或 `component_id`）、`property_name` | 查询 Mesh / Collision / Material 槽 |
-| `actor_set_property` | 设置 Actor 属性 | `id`、`property_name`、`value_text` | 修改显示、碰撞、行为参数 |
-| `level_set_actor_property` | `actor_set_property` 的同义命令 | 同上 | 统一走 `level_*` 前缀 |
-| `component_set_property` | 设置组件属性 | `id`、`component`（或 `component_id`）、`property_name`、`value_text` | 修改组件模板值 |
-| `level_set_component_property` | `component_set_property` 的同义命令 | 同上 | 统一走 `level_*` 前缀 |
+| `actor_set_property` | **Deprecated for Level Content authoring**；Actor 属性最终态优先写入 `resources[].properties` | `id`、`property_name`、`value_text` | 兼容旧脚本、局部补修 |
+| `level_set_actor_property` | **Deprecated for Level Content authoring**；同 `actor_set_property` | 同上 | 兼容旧脚本、局部补修 |
+| `component_set_property` | **Deprecated for Level Content authoring**；组件属性最终态优先写入 `resources[].properties` 或 `components[].properties` | `id`、`component`（或 `component_id`）、`property_name`、`value_text` | 兼容旧脚本、bootstrap、局部补修 |
+| `level_set_component_property` | **Deprecated for Level Content authoring**；同 `component_set_property` | 同上 | 兼容旧脚本、局部补修 |
 | `level_set_skeletal_mesh_morph_target` | 设置场景 Actor 上 SkeletalMeshComponent 的 Morph Target 权重，可选启动平滑 pulse | `id`、`morph_target`、`weight`，可选 `component/component_id`、`skeletal_mesh`、`clear_existing`、`pulse`、`stop_pulse` | 把导入的 Morph Target 实际接入关卡实例并截图/预览 |
 | `level_get_actor_transform` | 读取 Actor 实例变换 | `id` | 精确读取 `location / rotation / scale` |
-| `level_set_actor_transform` | 一次性写入实例变换（可选碰撞感知放置） | `id`，可选 `location`、`rotation`、`scale`、`collision_aware`、`collision{...}` | 原子修改实例变换，减少穿插/卡住 |
-| `level_set_actor_location` | 仅写位置 | `id`、`location` | 快速重排对象 |
-| `level_set_actor_rotation` | 仅写旋转 | `id`、`rotation` | 统一朝向 |
-| `level_set_actor_scale` | 仅写缩放 | `id`、`scale` | 微调模块尺寸 |
-| `level_attach_actor` | 把子 Actor 附加到父 Actor | `child_id`、`parent_id` | 建立层级关系 |
-| `level_detach_actor` | 分离 Actor | `id` | 拆开层级 |
-| `level_set_actor_folder` | 设置 Outliner 文件夹 | `id`、`folder_path` | 整理关卡层级 |
-| `level_destroy_folder_actors` | 按 Outliner 文件夹批量删除 Actor | `folder_path`、`include_child_folders` | 迭代白盒前原子清空整组结构，避免残留重叠 |
-| `level_cleanup_empty_folders` | 清理未被任何 Actor 使用的空 folder | `folder_path_prefix`、`dry_run` | 清场后清理残留空文件夹，保持 Outliner 整洁 |
-| `level_add_actor_tag` | 增加 Actor Tag | `id`、`tag` | 供后续脚本筛选和标记 |
+| `level_set_actor_transform` | **Deprecated for ordinary Level Content authoring**；普通 transform 优先写 `resources[].transform`，`collision_aware` 定点修复仍保留专用用途 | `id`，可选 `location`、`rotation`、`scale`、`collision_aware`、`collision{...}` | 碰撞感知局部补修 |
+| `level_set_actor_location` | **Deprecated for Level Content authoring** | `id`、`location` | 兼容旧脚本、局部补修 |
+| `level_set_actor_rotation` | **Deprecated for Level Content authoring** | `id`、`rotation` | 兼容旧脚本、局部补修 |
+| `level_set_actor_scale` | **Deprecated for Level Content authoring** | `id`、`scale` | 兼容旧脚本、局部补修 |
+| `level_attach_actor` | **Deprecated for Level Content authoring** | `child_id`、`parent_id` | 兼容旧脚本、局部补修 |
+| `level_detach_actor` | **Deprecated for Level Content authoring** | `id` | 兼容旧脚本、局部补修 |
+| `level_set_actor_folder` | **Deprecated for Level Content authoring** | `id`、`folder_path` | 兼容旧脚本、局部补修 |
+| `level_destroy_folder_actors` | **Deprecated for managed Level Content cleanup**；托管删除优先 `level_content_delete_scope` | `folder_path`、`include_child_folders` | 手工清场兜底 |
+| `level_cleanup_empty_folders` | **Deprecated for managed Level Content cleanup**；托管流程优先 `level_content_repair_json` / cleanup task | `folder_path_prefix`、`dry_run` | 手工 Outliner 维护兜底 |
+| `level_add_actor_tag` | **Deprecated for Level Content authoring** | `id`、`tag` | 兼容旧脚本、局部补修 |
 | `level_get_selection` | 读取当前选择集 | 无 | 获取当前选中对象 |
 | `level_set_selection` | 设置选择集 | `actor_ids`、`mode` | 后续聚焦、批量操作 |
 | `navmesh_build` | 构建/刷新 NavMesh | `wait_for_finish`、`timeout_seconds` | 白盒验收前生成可查询导航数据 |
 | `navmesh_project_point` | 单点投影到 NavMesh（只投影不查路） | `point`（或 `location`）、`project_query_extent` | 查路前先确认“投影落点是否在期望层面” |
 | `navmesh_find_path` | NavMesh 两点查路 | `start`、`end`、`allow_partial`、`project_to_nav` | 批量判定关键节点连通性 |
-| `navmesh_spawn_bounds_volume` | 创建 NavMeshBoundsVolume（带有效 Brush Bounds） | `bounds`、可选 `rotation/label/folder_path` | 自动化白盒：确保 NavMesh 可构建、可投影、可查路 |
+| `navmesh_spawn_bounds_volume` | **Deprecated for Level Content authoring**；NavMeshBoundsVolume 最终态优先写 `kind=nav_mesh_bounds_volume` + `bounds` | `bounds`、可选 `rotation/label/folder_path` | 兼容旧脚本、bootstrap、导航故障补修 |
 | `level_validate_connectivity` | 多点连通性验收（walk + 显式边） | `points[]` 或 `probe_actor_ids[]`、可选 `pairs[].edge_type`、`graph_root_index` | 把“断路点/断回环”结构化输出为逐对+图报告 |
 | `level_trace_world_ray` | 世界射线 Trace（不依赖 viewport） | `start`、`direction`、`trace_distance`、`trace_channel` | 查地面、查遮挡、查通道是否堵住 |
 | `level_snap_to_surface` | 沿射线吸附 Actor 到命中面 | `id`、可选 `start/direction/offset_cm` | 快速贴合地面/墙面，减少悬空与缝隙 |
@@ -84,8 +90,8 @@
 
 ### 组件碰撞属性写入
 
-- `component_set_property` / `level_set_component_property` 写入 `BodyInstance.*`、`Collision*` 或 `CanCharacterStepUpOn` 时，会刷新 `UPrimitiveComponent` 的物理状态，使后续 Trace / Sweep / Overlap 使用新碰撞配置。
-- 返回中若出现 `primitive_collision_state_refreshed=true`，表示本次写入已经触发碰撞状态刷新。
+- Level Content JSON 的 `resources[].properties` / `components[].properties` 和旧 `component_set_property` / `level_set_component_property` 写入 `BodyInstance.*`、`Collision*` 或 `CanCharacterStepUpOn` 时，都会刷新 `UPrimitiveComponent` 的物理状态，使后续 Trace / Sweep / Overlap 使用新碰撞配置。
+- 返回中若出现 `primitive_collision_state_refreshed=true`，表示本次写入已经触发碰撞状态刷新；写入 `BodyInstance.CollisionProfileName` 时若出现 `collision_profile_setter_applied=true`，表示已调用 `SetCollisionProfileName`，不是只做 ImportText。
 - 写入后仍应优先用 `level_get_component_property` 读回目标属性，再用 `level_sweep_capsule_path` 或 `level_check_overlaps` 验证实际查询结果；不要只凭 `value_text` 判断碰撞已经进入物理场景。
 - 角色胶囊通行、IK 地面 Trace、视觉几何可以使用不同碰撞语义，但必须明确区分。例如胶囊可走简化 ramp 以保证移动顺滑，足部 Trace 可命中台阶面或专用脚底辅助面；辅助面若不该影响角色移动，应确保它不阻挡 Pawn。
 - 调试楼梯、斜坡或足底贴地时，至少用一次 `level_sweep_capsule_path` 验证胶囊路径，再用 `level_trace_world_ray` 或对应 Control Rig probe 验证足底 Trace 命中点。只验证其中一层容易误判。
@@ -229,6 +235,7 @@
 | 指令 | 作用 | 关键参数 | 典型用途 |
 |---|---|---|---|
 | `viewport_get_camera` | 读取当前视口相机 | 无 | 保存当前构图 |
+| `viewport_get_warnings` | 读取当前视口可显示的 renderer warning 文本 | 可选 `include_suppressed` | 结构化读取红字 overlay，例如平面反射全局剪切平面、多个定向光 ForwardShadingPriority 冲突 |
 | `viewport_set_camera` | 设置视口相机 | `location`、`rotation`、`fov` | 快速移动到目标区域 |
 | `viewport_set_realtime` | 开关实时渲染 | `realtime`、`store_current_value` | Niagara / 动画检查前开启实时 |
 | `viewport_set_game_view` | 开关 Game View | `game_view` | 截图前隐藏编辑器辅助元素 |
@@ -250,6 +257,17 @@
 | `level_align_actor_vertex_to_vertex` | 顶点到顶点实例对齐 | `source_actor_id`、`target_actor_id`、源/目标顶点索引或世界点 | 模块拼装、几何校验 |
 | `level_align_actor_by_bounds` | 按包围盒锚点对齐 | `source_actor_id`、`target_actor_id`、`axis`、`source_anchor`、`target_anchor`、`offset` | 建筑模块、平台、楼板拼装 |
 | `level_align_face_to_face` | 面对面贴合（基于 bounds） | `source_actor_id/target_actor_id`、`source_face/target_face`、可选 `axis/offset_cm` | 门/墙贴合、地面/电梯贴合、补齐缝隙 |
+
+### `viewport_get_warnings`
+
+读取当前编辑器 world 中会在 Level Viewport 顶部以红/橙色文字显示的 renderer warning，并返回本地化后的 `text`。这类文字不是普通 `Saved/Logs`，也不是 `GEngine->AddOnScreenDebugMessage`，因此不能只查日志或 on-screen debug 容器。
+
+- `include_suppressed`：默认 `false`。当 screen messages 被全局关闭或 `GEngine->bSuppressMapWarnings=true` 时，默认只在 `suppressed_warning_count` 中计数；传 `true` 时也会把这些条目放入 `warnings[]`，且 `display_expected=false`。
+- 返回 `display_gates`：包含 `screen_messages_enabled`、`map_warnings_suppressed`、`display_gate_open`。
+- 返回 `renderer_probe`：包含检测条件，例如 `r.AllowGlobalClipPlane`、`planar_reflection_count`、`active_directional_light_count`、`highest_forward_shading_priority`。
+- 当前覆盖：
+  - `renderer.no_global_clip_plane`：场景中存在 `PlanarReflection` 且 `r.AllowGlobalClipPlane=0`。
+  - `renderer.multiple_directional_lights_forward_shading`：多个可见且影响世界的 DirectionalLight 处于相同最高 `ForwardShadingPriority`。
 
 ### `level_align_actor_by_bounds`
 
@@ -486,6 +504,8 @@
 - 注意：NavMesh/查路只覆盖“沿可行走面连续移动”的连通（walkable connectivity）。跳跃/电梯/滑索等连通需要额外建模为显式边（建议见 `Plugins/UeAgentInterface/docs/Proposed_WhiteboxValidation_Commands.md`）。
 
 ### `navmesh_spawn_bounds_volume`
+
+该命令保留兼容，但新建或维护关卡中的 NavMeshBoundsVolume 默认使用 `23_LevelContent_JSON.md`：`resources[]` 写 `kind=nav_mesh_bounds_volume`，并提供 `bounds.center/extent` 或 `bounds.min/max`。Level Content adapter 会创建 Brush Bounds 并返回 `nav_bounds_updated`。
 
 - `bounds`：必填对象。
   - `bounds.center`：必填，世界坐标中心点。

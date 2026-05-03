@@ -1223,6 +1223,21 @@ bool FUeAgentHttpServer::CmdRetargetBatchValidateJson(const FUeAgentRequestConte
 	{
 		UeAgentJsonDiagnostics::AddIssue(Issues, TEXT("error"), TEXT("json_missing_required_field"), TEXT("batch.json.source_assets"), TEXT("source_assets or asset_paths is required."));
 	}
+	else if (!SourceAssets || SourceAssets->Num() <= 0)
+	{
+		UeAgentJsonDiagnostics::AddIssue(Issues, TEXT("error"), TEXT("json_empty_required_field"), TEXT("batch.json.source_assets"), TEXT("source_assets or asset_paths must contain at least one asset path."));
+	}
+	else
+	{
+		for (int32 Index = 0; Index < SourceAssets->Num(); ++Index)
+		{
+			const TSharedPtr<FJsonValue>& AssetValue = (*SourceAssets)[Index];
+			if (!AssetValue.IsValid() || AssetValue->Type != EJson::String || AssetValue->AsString().TrimStartAndEnd().IsEmpty())
+			{
+				UeAgentJsonDiagnostics::AddIssue(Issues, TEXT("error"), TEXT("json_array_item_type_mismatch"), FString::Printf(TEXT("batch.json.source_assets[%d]"), Index), TEXT("source asset paths must be non-empty strings."));
+			}
+		}
+	}
 	FString OutputFolder;
 	if (!BatchJson->TryGetStringField(TEXT("output_folder"), OutputFolder) || !FPackageName::IsValidLongPackageName(OutputFolder))
 	{

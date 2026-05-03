@@ -13,6 +13,37 @@
 
 namespace UeAgentJsonDiagnostics
 {
+	static FString NormalizeResolvedFilePath(FString FilePath)
+	{
+		FPaths::NormalizeFilename(FilePath);
+		FPaths::CollapseRelativeDirectories(FilePath);
+		if (FilePath.Len() >= 3 && FilePath[1] == TEXT(':') && FilePath[2] == TEXT('/'))
+		{
+			const FString Prefix = FilePath.Left(3);
+			TArray<FString> Parts;
+			FilePath.RightChop(3).ParseIntoArray(Parts, TEXT("/"), true);
+			TArray<FString> CollapsedParts;
+			for (const FString& Part : Parts)
+			{
+				if (Part == TEXT("."))
+				{
+					continue;
+				}
+				if (Part == TEXT(".."))
+				{
+					if (CollapsedParts.Num() > 0)
+					{
+						CollapsedParts.Pop(EAllowShrinking::No);
+					}
+					continue;
+				}
+				CollapsedParts.Add(Part);
+			}
+			FilePath = Prefix + FString::Join(CollapsedParts, TEXT("/"));
+		}
+		return FilePath;
+	}
+
 	static FString ResolveProjectRelativeFilePath(const FString& FilePathInput)
 	{
 		FString FilePath = FilePathInput;
@@ -21,11 +52,19 @@ namespace UeAgentJsonDiagnostics
 		{
 			return FilePath;
 		}
+		FString ResolvedPath;
 		if (FPaths::IsRelative(FilePath))
 		{
-			return FPaths::ConvertRelativePathToFull(FPaths::Combine(FPaths::ProjectDir(), FilePath));
+			FString ProjectDir = FPaths::ConvertRelativePathToFull(FPaths::ProjectDir());
+			FPaths::NormalizeDirectoryName(ProjectDir);
+			FPaths::CollapseRelativeDirectories(ProjectDir);
+			ResolvedPath = FPaths::ConvertRelativePathToFull(FPaths::Combine(ProjectDir, FilePath));
 		}
-		return FPaths::ConvertRelativePathToFull(FilePath);
+		else
+		{
+			ResolvedPath = FPaths::ConvertRelativePathToFull(FilePath);
+		}
+		return NormalizeResolvedFilePath(ResolvedPath);
 	}
 
 	static FString JsonValueTypeToString(const TSharedPtr<FJsonValue>& Value)

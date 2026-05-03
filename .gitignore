@@ -13,6 +13,14 @@ DerivedDataCache/
 *.VC.opendb
 
 # Local logs and temporary files
+runtimeLogs/
 *.log
 *.tmp
 *.cache
+
+# Test/cache outputs
+__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
+.coverage

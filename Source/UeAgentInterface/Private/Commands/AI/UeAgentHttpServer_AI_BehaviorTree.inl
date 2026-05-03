@@ -145,11 +145,112 @@ namespace UeAgentAIOps
 		return Obj;
 	}
 
-	static bool ValidateBTFolderJson(const TSharedPtr<FJsonObject>& AssetJson, const TSharedPtr<FJsonObject>& NodesJson, TArray<TSharedPtr<FJsonValue>>& Issues)
+	static void ValidateBTBlackboardKeyReferences(const TSharedPtr<FJsonObject>& AssetJson, const TSharedPtr<FJsonObject>& NodesJson, TArray<TSharedPtr<FJsonValue>>& Issues)
+	{
+		FString BlackboardPath;
+		if (!AssetJson.IsValid() || !AssetJson->TryGetStringField(TEXT("blackboard_asset"), BlackboardPath) || BlackboardPath.TrimStartAndEnd().IsEmpty())
+		{
+			AddIssue(Issues, TEXT("blackboard_asset_missing"), TEXT("Missing blackboard_asset for blackboard key validation."), TEXT("asset.json.blackboard_asset"));
+			return;
+		}
+
+		UBlackboardData* BlackboardData = LoadAsset<UBlackboardData>(BlackboardPath);
+		if (!BlackboardData)
+		{
+			AddIssue(Issues, TEXT("blackboard_not_found"), FString::Printf(TEXT("Blackboard asset '%s' could not be loaded."), *BlackboardPath), TEXT("asset.json.blackboard_asset"));
+			return;
+		}
+
+		auto IsKnownKey = [BlackboardData](const FString& InKeyName) -> bool
+		{
+			const FString KeyName = InKeyName.TrimStartAndEnd();
+			if (KeyName.IsEmpty() || KeyName.Equals(TEXT("None"), ESearchCase::IgnoreCase))
+			{
+				return true;
+			}
+			return BlackboardData->GetKeyID(FName(*KeyName)) != FBlackboard::InvalidKey;
+		};
+
+		auto ValidateKeyText = [&Issues, &IsKnownKey](const FString& KeyText, const FString& JsonPath)
+		{
+			if (!IsKnownKey(KeyText))
+			{
+				AddIssue(Issues, TEXT("blackboard_key_not_found"), FString::Printf(TEXT("Blackboard key '%s' is not defined."), *KeyText), JsonPath);
+			}
+		};
+
+		const TArray<TSharedPtr<FJsonValue>>* Nodes = nullptr;
+		if (!NodesJson.IsValid() || !NodesJson->TryGetArrayField(TEXT("nodes"), Nodes) || !Nodes)
+		{
+			return;
+		}
+		for (int32 NodeIndex = 0; NodeIndex < Nodes->Num(); ++NodeIndex)
+		{
+			const TSharedPtr<FJsonObject>* NodeObjPtr = nullptr;
+			if (!(*Nodes)[NodeIndex].IsValid() || !(*Nodes)[NodeIndex]->TryGetObject(NodeObjPtr) || !NodeObjPtr || !NodeObjPtr->IsValid())
+			{
+				continue;
+			}
+			const TArray<TSharedPtr<FJsonValue>>* Properties = nullptr;
+			if (!(*NodeObjPtr)->TryGetArrayField(TEXT("properties"), Properties) || !Properties)
+			{
+				continue;
+			}
+			for (int32 PropIndex = 0; PropIndex < Properties->Num(); ++PropIndex)
+			{
+				const TSharedPtr<FJsonObject>* PropObjPtr = nullptr;
+				if (!(*Properties)[PropIndex].IsValid() || !(*Properties)[PropIndex]->TryGetObject(PropObjPtr) || !PropObjPtr || !PropObjPtr->IsValid())
+				{
+					continue;
+				}
+				const FString PropPath = FString::Printf(TEXT("nodes.json.nodes[%d].properties[%d]"), NodeIndex, PropIndex);
+				FString PropertyName;
+				if (!(*PropObjPtr)->TryGetStringField(TEXT("property_name"), PropertyName))
+				{
+					(*PropObjPtr)->TryGetStringField(TEXT("name"), PropertyName);
+				}
+				const bool bLooksLikeBlackboardKey =
+					PropertyName.Contains(TEXT("BlackboardKey"), ESearchCase::IgnoreCase) ||
+					PropertyName.Contains(TEXT("SelectedKeyName"), ESearchCase::IgnoreCase);
+
+				FString KeyText;
+				if ((*PropObjPtr)->TryGetStringField(TEXT("selected_key_name"), KeyText) || (*PropObjPtr)->TryGetStringField(TEXT("key_name"), KeyText))
+				{
+					ValidateKeyText(KeyText, PropPath);
+					continue;
+				}
+
+				const TSharedPtr<FJsonObject>* ValueObject = nullptr;
+				if ((*PropObjPtr)->TryGetObjectField(TEXT("value"), ValueObject) && ValueObject && ValueObject->IsValid())
+				{
+					if ((*ValueObject)->TryGetStringField(TEXT("selected_key_name"), KeyText) || (*ValueObject)->TryGetStringField(TEXT("key_name"), KeyText))
+					{
+						ValidateKeyText(KeyText, PropPath + TEXT(".value"));
+					}
+					continue;
+				}
+
+				if (bLooksLikeBlackboardKey && ((*PropObjPtr)->TryGetStringField(TEXT("value_text"), KeyText) || (*PropObjPtr)->TryGetStringField(TEXT("value"), KeyText)))
+				{
+					ValidateKeyText(KeyText, PropPath);
+				}
+			}
+		}
+	}
+
+	static bool ValidateBTFolderJson(const TSharedPtr<FJsonObject>& AssetJson, const TSharedPtr<FJsonObject>& NodesJson, TArray<TSharedPtr<FJsonValue>>& Issues, const bool bStrict = false, const bool bValidateBlackboardKeys = false)
 	{
 		if (!AssetJson.IsValid())
 		{
 			AddIssue(Issues, TEXT("missing_required_file"), TEXT("Missing asset.json."), TEXT("asset.json"));
+		}
+		else if (bStrict)
+		{
+			StrictCheckFields(AssetJson, { TEXT("profile"), TEXT("schema_version"), TEXT("asset_path"), TEXT("object_path"), TEXT("blackboard_asset"), TEXT("root_id"), TEXT("dirty"), TEXT("valid") }, TEXT("asset.json"), Issues);
+		}
+		if (NodesJson.IsValid() && bStrict)
+		{
+			StrictCheckFields(NodesJson, { TEXT("root_id"), TEXT("nodes"), TEXT("edges"), TEXT("node_count"), TEXT("edge_count") }, TEXT("nodes.json"), Issues);
 		}
 		const TArray<TSharedPtr<FJsonValue>>* Nodes = nullptr;
 		if (!NodesJson.IsValid() || !NodesJson->TryGetArrayField(TEXT("nodes"), Nodes) || !Nodes)
@@ -166,6 +267,10 @@ namespace UeAgentAIOps
 			{
 				AddIssue(Issues, TEXT("invalid_node_item"), TEXT("Node item must be an object."), FString::Printf(TEXT("nodes.json.nodes[%d]"), Index));
 				continue;
+			}
+			if (bStrict)
+			{
+				StrictCheckFields(*NodeObjPtr, { TEXT("id"), TEXT("kind"), TEXT("class"), TEXT("name"), TEXT("static_description"), TEXT("properties") }, FString::Printf(TEXT("nodes.json.nodes[%d]"), Index), Issues);
 			}
 			FString Id;
 			FString Kind;
@@ -191,6 +296,10 @@ namespace UeAgentAIOps
 			{
 				AddIssue(Issues, TEXT("bt_node_class_not_found"), FString::Printf(TEXT("Invalid BT node class '%s'."), *ClassPath), FString::Printf(TEXT("nodes.json.nodes[%d].class"), Index));
 			}
+		}
+		if (bValidateBlackboardKeys)
+		{
+			ValidateBTBlackboardKeyReferences(AssetJson, NodesJson, Issues);
 		}
 		return Issues.Num() == 0;
 	}
@@ -358,9 +467,39 @@ bool FUeAgentHttpServer::CmdBehaviorTreeValidateFolder(const FUeAgentRequestCont
 	if (!UeAgentAIOps::LoadFolderJson(FolderPath, TEXT("asset.json"), AssetJson, OutError)) return false;
 	if (!UeAgentAIOps::LoadFolderJson(FolderPath, TEXT("nodes.json"), NodesJson, OutError)) return false;
 	TArray<TSharedPtr<FJsonValue>> Issues;
-	const bool bValid = UeAgentAIOps::ValidateBTFolderJson(AssetJson, NodesJson, Issues);
+	TSharedPtr<FJsonObject> EffectiveAssetJson = AssetJson;
+	if (!AssetPath.TrimStartAndEnd().IsEmpty())
+	{
+		const FString NormalizedAssetPath = UeAgentAIOps::NormalizeAssetPath(AssetPath);
+		if (!FPackageName::IsValidLongPackageName(NormalizedAssetPath))
+		{
+			UeAgentAIOps::AddIssue(Issues, TEXT("invalid_asset_path"), FString::Printf(TEXT("Invalid asset_path '%s'."), *AssetPath), TEXT("$.asset_path"));
+		}
+		EffectiveAssetJson = MakeShared<FJsonObject>();
+		if (AssetJson.IsValid())
+		{
+			for (const TPair<FString, TSharedPtr<FJsonValue>>& Pair : AssetJson->Values)
+			{
+				EffectiveAssetJson->SetField(Pair.Key, Pair.Value);
+			}
+		}
+		EffectiveAssetJson->SetStringField(TEXT("asset_path"), NormalizedAssetPath);
+		AssetPath = NormalizedAssetPath;
+	}
+	else if (AssetJson.IsValid())
+	{
+		AssetJson->TryGetStringField(TEXT("asset_path"), AssetPath);
+	}
+	bool bStrict = false;
+	bool bValidateBlackboardKeys = false;
+	JsonTryGetBool(Ctx.Params, TEXT("strict"), bStrict);
+	JsonTryGetBool(Ctx.Params, TEXT("validate_blackboard_keys"), bValidateBlackboardKeys);
+	const bool bValid = UeAgentAIOps::ValidateBTFolderJson(EffectiveAssetJson, NodesJson, Issues, bStrict, bValidateBlackboardKeys);
 	OutData->SetStringField(TEXT("profile"), UeAgentAIOps::BehaviorTreeProfile);
 	OutData->SetStringField(TEXT("folder_path"), FolderPath);
+	OutData->SetStringField(TEXT("asset_path"), AssetPath);
+	OutData->SetBoolField(TEXT("strict"), bStrict);
+	OutData->SetBoolField(TEXT("validate_blackboard_keys"), bValidateBlackboardKeys);
 	OutData->SetBoolField(TEXT("valid"), bValid);
 	OutData->SetStringField(TEXT("status"), bValid ? TEXT("ok") : TEXT("validate_failed"));
 	UeAgentAIOps::SetDiagnostics(OutData, Issues);

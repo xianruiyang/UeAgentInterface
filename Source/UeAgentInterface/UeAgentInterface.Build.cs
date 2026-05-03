@@ -101,6 +101,9 @@ public class UeAgentInterface : ModuleRules
 				"MetasoundEngine",
 				"MetasoundEditor",
 				"MetasoundFrontend",
+				"DataLayerEditor",
+				"WorldPartitionEditor",
+				"TargetPlatform",
 			}
 		);
 	}

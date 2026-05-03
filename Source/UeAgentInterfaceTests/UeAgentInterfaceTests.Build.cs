@@ -94,6 +94,9 @@ public class UeAgentInterfaceTests : ModuleRules
 				"MetasoundEngine",
 				"MetasoundEditor",
 				"MetasoundFrontend",
+				"DataLayerEditor",
+				"WorldPartitionEditor",
+				"TargetPlatform",
 			}
 		);
 	}

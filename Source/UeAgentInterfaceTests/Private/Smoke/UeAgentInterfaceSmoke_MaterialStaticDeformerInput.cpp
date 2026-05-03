@@ -831,6 +831,129 @@ bool FUeAgentInterfaceMeshDeformerJsonSmokeTest::RunTest(const FString& Paramete
 	TestEqual(TEXT("StaticMesh folder validate status code"), StaticValidateResult.StatusCode, 200);
 	TestTrue(TEXT("StaticMesh folder validate ok=true"), StaticValidateJson.IsValid() && StaticValidateJson->GetBoolField(TEXT("ok")));
 
+	const FString StaticCollisionJsonPath = FPaths::Combine(StaticFolderPath, TEXT("collision.json"));
+	const FString StaticSocketsJsonPath = FPaths::Combine(StaticFolderPath, TEXT("sockets.json"));
+	FString OriginalStaticCollisionJson;
+	FString OriginalStaticSocketsJson;
+	if (!TestTrue(TEXT("StaticMesh original collision.json loads"), FFileHelper::LoadFileToString(OriginalStaticCollisionJson, *StaticCollisionJsonPath)))
+	{
+		return false;
+	}
+	if (!TestTrue(TEXT("StaticMesh original sockets.json loads"), FFileHelper::LoadFileToString(OriginalStaticSocketsJson, *StaticSocketsJsonPath)))
+	{
+		return false;
+	}
+
+	const FString FolderSocketName = FString::Printf(TEXT("FolderSmokeSocket_%s"), *FGuid::NewGuid().ToString(EGuidFormats::Digits).Left(8));
+	TestTrue(
+		TEXT("StaticMesh folder replacement collision json saves"),
+		FFileHelper::SaveStringToFile(
+			TEXT("{\"collision_complexity\":0,\"boxes\":[{\"center\":{\"x\":0,\"y\":0,\"z\":0},\"rotation\":{\"pitch\":0,\"yaw\":0,\"roll\":0},\"x\":32,\"y\":34,\"z\":36}],\"spheres\":[{\"center\":{\"x\":1,\"y\":2,\"z\":3},\"radius\":18}],\"capsules\":[{\"center\":{\"x\":4,\"y\":5,\"z\":6},\"rotation\":{\"pitch\":0,\"yaw\":90,\"roll\":0},\"radius\":9,\"length\":28}],\"convex_hulls\":[],\"edit_policy\":\"simple_collision_safe\"}\n"),
+			*StaticCollisionJsonPath,
+			FFileHelper::EEncodingOptions::ForceUTF8WithoutBOM));
+	TestTrue(
+		TEXT("StaticMesh folder replacement sockets json saves"),
+		FFileHelper::SaveStringToFile(
+			FString::Printf(
+				TEXT("{\"sockets\":[{\"socket_name\":\"%s\",\"relative_location\":{\"x\":7,\"y\":8,\"z\":9},\"relative_rotation\":{\"pitch\":0,\"yaw\":25,\"roll\":0},\"relative_scale\":{\"x\":1,\"y\":1,\"z\":1},\"tag\":\"folder_smoke\"}]}\n"),
+				*FolderSocketName),
+			*StaticSocketsJsonPath,
+			FFileHelper::EEncodingOptions::ForceUTF8WithoutBOM));
+
+	FHttpSmokeResult StaticApplyResult;
+	TSharedPtr<FJsonObject> StaticApplyJson;
+	TestTrue(
+		TEXT("StaticMesh folder apply succeeds"),
+		ExecCommand(
+			TEXT("smoke-staticmesh-folder-apply-001"),
+			TEXT("static_mesh_apply_folder"),
+			FString::Printf(TEXT("{\"folder_path\":\"%s\",\"dry_run\":false,\"save_after_apply\":false,\"build_after_apply\":false}"), *ToSmokeJsonPath(StaticFolderPath)),
+			StaticApplyResult,
+			StaticApplyJson));
+	TestEqual(TEXT("StaticMesh folder apply status code"), StaticApplyResult.StatusCode, 200);
+	TestTrue(TEXT("StaticMesh folder apply ok=true"), StaticApplyJson.IsValid() && StaticApplyJson->GetBoolField(TEXT("ok")));
+	TestTrue(TEXT("StaticMesh folder apply reports BodySetup Modify"), StaticApplyResult.Body.Contains(TEXT("collision.json.body_setup_modify")));
+
+	const TSharedPtr<FJsonObject>* StaticApplyData = nullptr;
+	const TSharedPtr<FJsonObject>* StaticApplyReadback = nullptr;
+	TestTrue(
+		TEXT("StaticMesh folder apply contains readback"),
+		StaticApplyJson.IsValid()
+		&& StaticApplyJson->TryGetObjectField(TEXT("data"), StaticApplyData)
+		&& StaticApplyData
+		&& StaticApplyData->IsValid()
+		&& (*StaticApplyData)->TryGetObjectField(TEXT("readback"), StaticApplyReadback)
+		&& StaticApplyReadback
+		&& StaticApplyReadback->IsValid());
+	if (StaticApplyReadback && StaticApplyReadback->IsValid())
+	{
+		const TSharedPtr<FJsonObject>* CollisionObj = nullptr;
+		TestTrue(TEXT("StaticMesh folder apply readback has collision"), (*StaticApplyReadback)->TryGetObjectField(TEXT("collision"), CollisionObj) && CollisionObj && CollisionObj->IsValid());
+		if (CollisionObj && CollisionObj->IsValid())
+		{
+			TestEqual(TEXT("StaticMesh folder apply replaces box count"), static_cast<int32>((*CollisionObj)->GetIntegerField(TEXT("box_count"))), 1);
+			TestEqual(TEXT("StaticMesh folder apply replaces sphere count"), static_cast<int32>((*CollisionObj)->GetIntegerField(TEXT("sphere_count"))), 1);
+			TestEqual(TEXT("StaticMesh folder apply replaces capsule count"), static_cast<int32>((*CollisionObj)->GetIntegerField(TEXT("capsule_count"))), 1);
+			TestEqual(TEXT("StaticMesh folder apply clears convex hulls"), static_cast<int32>((*CollisionObj)->GetIntegerField(TEXT("convex_count"))), 0);
+		}
+
+		bool bFoundFolderSocket = false;
+		const TArray<TSharedPtr<FJsonValue>>* Sockets = nullptr;
+		TestTrue(TEXT("StaticMesh folder apply readback contains sockets"), (*StaticApplyReadback)->TryGetArrayField(TEXT("sockets"), Sockets) && Sockets);
+		if (Sockets)
+		{
+			for (const TSharedPtr<FJsonValue>& SocketValue : *Sockets)
+			{
+				const TSharedPtr<FJsonObject>* SocketObject = nullptr;
+				if (SocketValue.IsValid() && SocketValue->TryGetObject(SocketObject) && SocketObject && SocketObject->IsValid())
+				{
+					bFoundFolderSocket |= ((*SocketObject)->GetStringField(TEXT("socket_name")) == FolderSocketName);
+				}
+			}
+		}
+		TestTrue(TEXT("StaticMesh folder apply creates replacement socket"), bFoundFolderSocket);
+	}
+
+	TestTrue(
+		TEXT("StaticMesh folder unsupported convex hull json saves"),
+		FFileHelper::SaveStringToFile(
+			TEXT("{\"convex_hulls\":[{\"vertices\":[{\"x\":0,\"y\":0,\"z\":0}]}]}\n"),
+			*StaticCollisionJsonPath,
+			FFileHelper::EEncodingOptions::ForceUTF8WithoutBOM));
+	FHttpSmokeResult StaticUnsupportedCollisionValidateResult;
+	TSharedPtr<FJsonObject> StaticUnsupportedCollisionValidateJson;
+	TestTrue(
+		TEXT("StaticMesh unsupported convex hull validate completes"),
+		ExecCommand(
+			TEXT("smoke-staticmesh-unsupported-convex-validate-001"),
+			TEXT("static_mesh_validate_folder"),
+			FString::Printf(TEXT("{\"folder_path\":\"%s\",\"dry_run\":true}"), *ToSmokeJsonPath(StaticFolderPath)),
+			StaticUnsupportedCollisionValidateResult,
+			StaticUnsupportedCollisionValidateJson));
+	TestEqual(TEXT("StaticMesh unsupported convex validate status code"), StaticUnsupportedCollisionValidateResult.StatusCode, 400);
+	TestTrue(TEXT("StaticMesh unsupported convex validate ok=false"), StaticUnsupportedCollisionValidateJson.IsValid() && !StaticUnsupportedCollisionValidateJson->GetBoolField(TEXT("ok")));
+	TestTrue(TEXT("StaticMesh unsupported convex validate reports unsupported_apply_profile"), StaticUnsupportedCollisionValidateResult.Body.Contains(TEXT("unsupported_apply_profile")));
+
+	TestTrue(
+		TEXT("StaticMesh folder collision json restores"),
+		FFileHelper::SaveStringToFile(OriginalStaticCollisionJson, *StaticCollisionJsonPath, FFileHelper::EEncodingOptions::ForceUTF8WithoutBOM));
+	TestTrue(
+		TEXT("StaticMesh folder sockets json restores"),
+		FFileHelper::SaveStringToFile(OriginalStaticSocketsJson, *StaticSocketsJsonPath, FFileHelper::EEncodingOptions::ForceUTF8WithoutBOM));
+	FHttpSmokeResult StaticRestoreResult;
+	TSharedPtr<FJsonObject> StaticRestoreJson;
+	TestTrue(
+		TEXT("StaticMesh folder restore apply succeeds"),
+		ExecCommand(
+			TEXT("smoke-staticmesh-folder-restore-001"),
+			TEXT("static_mesh_apply_folder"),
+			FString::Printf(TEXT("{\"folder_path\":\"%s\",\"dry_run\":false,\"save_after_apply\":false,\"build_after_apply\":false}"), *ToSmokeJsonPath(StaticFolderPath)),
+			StaticRestoreResult,
+			StaticRestoreJson));
+	TestEqual(TEXT("StaticMesh folder restore status code"), StaticRestoreResult.StatusCode, 200);
+	TestTrue(TEXT("StaticMesh folder restore ok=true"), StaticRestoreJson.IsValid() && StaticRestoreJson->GetBoolField(TEXT("ok")));
+	TestFalse(TEXT("StaticMesh folder restore removes smoke socket"), StaticRestoreResult.Body.Contains(*FolderSocketName));
+
 	const FString StaticUnsupportedJsonPath = FPaths::Combine(StaticFolderPath, TEXT("raw_mesh_summary.json"));
 	TestTrue(
 		TEXT("StaticMesh unsupported write-intent json saves"),

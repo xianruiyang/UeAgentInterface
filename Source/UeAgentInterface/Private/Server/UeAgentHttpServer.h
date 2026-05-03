@@ -58,6 +58,7 @@ public:
 	// Command categories (declarations split by domain).
 #define UEAGENT_HTTP_SERVER_MEMBER_DECL 1
 #include "Commands/Level/UeAgentHttpServer_LevelMembers.h"
+#include "Commands/LevelTopology/UeAgentHttpServer_LevelTopologyMembers.h"
 #include "Commands/Assets/UeAgentHttpServer_AssetsMembers.h"
 #include "Commands/Landscape/UeAgentHttpServer_LandscapeMembers.h"
 #include "Commands/StaticMesh/UeAgentHttpServer_StaticMeshMembers.h"
@@ -79,6 +80,9 @@ public:
 #include "Commands/TextureRenderTarget/UeAgentHttpServer_TextureRenderTargetMembers.h"
 #include "Commands/Audio/UeAgentHttpServer_AudioMembers.h"
 #include "Commands/ProjectSettings/UeAgentHttpServer_ProjectSettingsMembers.h"
+#include "Commands/DataDriven/UeAgentHttpServer_DataDrivenMembers.h"
+#include "Commands/Physics/UeAgentHttpServer_PhysicsMembers.h"
+#include "Commands/ProductionPipeline/UeAgentHttpServer_ProductionPipelineMembers.h"
 #undef UEAGENT_HTTP_SERVER_MEMBER_DECL
 
 private:

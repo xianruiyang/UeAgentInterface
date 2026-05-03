@@ -227,7 +227,6 @@ namespace
 		{ TEXT("skeletal_mesh_remove_skin_weight_profile"), TEXT("AnimationIKNiagara"), TEXT("indirect_workflow_candidate"), TEXT("P2") },
 		{ TEXT("state_tree_open_editor"), TEXT("AIBehaviorStack"), TEXT("needs_ui_smoke"), TEXT("P1") },
 		{ TEXT("state_tree_screenshot"), TEXT("AIBehaviorStack"), TEXT("needs_ui_smoke"), TEXT("P1") },
-		{ TEXT("static_mesh_apply_folder"), TEXT("MaterialStaticDeformerInput"), TEXT("needs_direct_smoke"), TEXT("P0") },
 		{ TEXT("static_mesh_build"), TEXT("MaterialStaticDeformerInput"), TEXT("needs_direct_smoke"), TEXT("P1") },
 		{ TEXT("static_mesh_get_bounds"), TEXT("MaterialStaticDeformerInput"), TEXT("needs_readonly_smoke"), TEXT("P2") },
 		{ TEXT("static_mesh_get_local_corners"), TEXT("MaterialStaticDeformerInput"), TEXT("needs_readonly_smoke"), TEXT("P2") },

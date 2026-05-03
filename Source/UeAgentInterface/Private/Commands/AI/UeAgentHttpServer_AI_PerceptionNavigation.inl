@@ -402,9 +402,20 @@ bool FUeAgentHttpServer::CmdNavigationExportConfigJson(const FUeAgentRequestCont
 bool FUeAgentHttpServer::CmdNavigationValidateLevel(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	const TArray<TSharedPtr<FJsonValue>>* SamplePoints = nullptr;
-	if (Ctx.Params->TryGetArrayField(TEXT("nodes"), SamplePoints) || Ctx.Params->TryGetArrayField(TEXT("sample_points"), SamplePoints))
+	if (Ctx.Params->TryGetArrayField(TEXT("points"), SamplePoints) || Ctx.Params->TryGetArrayField(TEXT("nodes"), SamplePoints) || Ctx.Params->TryGetArrayField(TEXT("sample_points"), SamplePoints))
 	{
-		return CmdLevelValidateConnectivity(Ctx, OutData, OutError);
+		TSharedPtr<FJsonObject> ConnectivityParams = MakeShared<FJsonObject>();
+		for (const TPair<FString, TSharedPtr<FJsonValue>>& Pair : Ctx.Params->Values)
+		{
+			ConnectivityParams->SetField(Pair.Key, Pair.Value);
+		}
+		if (!ConnectivityParams->HasField(TEXT("points")) && SamplePoints)
+		{
+			ConnectivityParams->SetArrayField(TEXT("points"), *SamplePoints);
+		}
+		FUeAgentRequestContext ConnectivityCtx = Ctx;
+		ConnectivityCtx.Params = ConnectivityParams;
+		return CmdLevelValidateConnectivity(ConnectivityCtx, OutData, OutError);
 	}
 	if (!CmdNavigationGetInfo(Ctx, OutData, OutError))
 	{

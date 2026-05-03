@@ -813,7 +813,7 @@ namespace UeAgentStaticMeshOps
 		Obj->SetStringField(TEXT("profile"), TEXT("static_mesh"));
 		Obj->SetStringField(TEXT("implementation_status"), TEXT("folder_profile_with_safe_settings"));
 		Obj->SetBoolField(TEXT("is_complete_target_schema"), true);
-		Obj->SetNumberField(TEXT("structured_field_count"), 10);
+		Obj->SetNumberField(TEXT("structured_field_count"), 12);
 		Obj->SetNumberField(TEXT("raw_property_count"), 0);
 		Obj->SetNumberField(TEXT("readonly_property_count"), 4);
 		Obj->SetArrayField(TEXT("raw_geometry_policy"), { MakeShared<FJsonValueString>(TEXT("raw vertex/index/uv buffers are summary-only; rebuild via import/modeling commands")) });
@@ -1834,6 +1834,19 @@ bool FUeAgentHttpServer::CmdStaticMeshApplyFolder(const FUeAgentRequestContext& 
 		{
 			UeAgentJsonDiagnostics::AddUnsupportedApplyIssueIfWriteIntent(LoadedJson, JsonFile, TEXT("StaticMesh summary profile"), Issues);
 		}
+		if (JsonFile == TEXT("collision.json") && LoadedJson.IsValid())
+		{
+			const TArray<TSharedPtr<FJsonValue>>* ConvexHulls = nullptr;
+			if (LoadedJson->TryGetArrayField(TEXT("convex_hulls"), ConvexHulls) && ConvexHulls && ConvexHulls->Num() > 0)
+			{
+				UeAgentJsonDiagnostics::AddIssue(
+					Issues,
+					TEXT("error"),
+					TEXT("unsupported_apply_profile"),
+					TEXT("collision.json.convex_hulls"),
+					TEXT("Convex hull creation is not supported by static_mesh_apply_folder; pass [] or clear_convex_hulls=true to clear existing convex hulls."));
+			}
+		}
 	}
 	if (UeAgentJsonDiagnostics::HasErrorIssue(Issues))
 	{
@@ -1943,16 +1956,25 @@ bool FUeAgentHttpServer::CmdStaticMeshApplyFolder(const FUeAgentRequestContext& 
 		if (!UeAgentStaticMeshOps::LoadJsonFileWithIssues(FPaths::Combine(FolderPath, TEXT("collision.json")), CollisionJson, Issues, OutError, true)) return false;
 		if (CollisionJson.IsValid())
 		{
-			UeAgentJsonDiagnostics::WarnUnknownFields(CollisionJson, TEXT("collision.json"), { TEXT("collision_complexity"), TEXT("simple_collision"), TEXT("boxes"), TEXT("spheres"), TEXT("capsules"), TEXT("convex_hulls"), TEXT("convex_hull_count"), TEXT("edit_policy") }, Issues);
+			UeAgentJsonDiagnostics::WarnUnknownFields(CollisionJson, TEXT("collision.json"), { TEXT("collision_complexity"), TEXT("simple_collision"), TEXT("boxes"), TEXT("spheres"), TEXT("capsules"), TEXT("convex_hulls"), TEXT("convex_hull_count"), TEXT("clear_convex_hulls"), TEXT("edit_policy") }, Issues);
 			Mesh->CreateBodySetup();
 			UBodySetup* BodySetup = Mesh->GetBodySetup();
 			if (BodySetup)
 			{
+				bool bCollisionModifyPrepared = false;
+				auto PrepareCollisionModify = [&Mesh, BodySetup, &bCollisionModifyPrepared]()
+				{
+					if (!bCollisionModifyPrepared)
+					{
+						Mesh->Modify();
+						BodySetup->Modify();
+						bCollisionModifyPrepared = true;
+					}
+				};
 				double TraceFlagValue = 0.0;
 				if (CollisionJson->TryGetNumberField(TEXT("collision_complexity"), TraceFlagValue))
 				{
-					Mesh->Modify();
-					BodySetup->Modify();
+					PrepareCollisionModify();
 					BodySetup->CollisionTraceFlag = static_cast<ECollisionTraceFlag>(static_cast<int32>(TraceFlagValue));
 					++StructuredApplied;
 					AddPropertyResult(TEXT("collision.json.collision_complexity"), TEXT("applied"), FString::FromInt(static_cast<int32>(TraceFlagValue)));
@@ -1961,6 +1983,7 @@ bool FUeAgentHttpServer::CmdStaticMeshApplyFolder(const FUeAgentRequestContext& 
 				const TArray<TSharedPtr<FJsonValue>>* Boxes = nullptr;
 				if (CollisionJson->TryGetArrayField(TEXT("boxes"), Boxes) && Boxes)
 				{
+					PrepareCollisionModify();
 					BodySetup->AggGeom.BoxElems.Reset();
 					for (int32 Index = 0; Index < Boxes->Num(); ++Index)
 					{
@@ -1987,6 +2010,7 @@ bool FUeAgentHttpServer::CmdStaticMeshApplyFolder(const FUeAgentRequestContext& 
 				const TArray<TSharedPtr<FJsonValue>>* Spheres = nullptr;
 				if (CollisionJson->TryGetArrayField(TEXT("spheres"), Spheres) && Spheres)
 				{
+					PrepareCollisionModify();
 					BodySetup->AggGeom.SphereElems.Reset();
 					for (int32 Index = 0; Index < Spheres->Num(); ++Index)
 					{
@@ -2014,6 +2038,7 @@ bool FUeAgentHttpServer::CmdStaticMeshApplyFolder(const FUeAgentRequestContext& 
 				const TArray<TSharedPtr<FJsonValue>>* Capsules = nullptr;
 				if (CollisionJson->TryGetArrayField(TEXT("capsules"), Capsules) && Capsules)
 				{
+					PrepareCollisionModify();
 					BodySetup->AggGeom.SphylElems.Reset();
 					for (int32 Index = 0; Index < Capsules->Num(); ++Index)
 					{
@@ -2040,6 +2065,44 @@ bool FUeAgentHttpServer::CmdStaticMeshApplyFolder(const FUeAgentRequestContext& 
 					bTouchedCollision = true;
 					AddPropertyResult(TEXT("collision.json.capsules"), TEXT("applied"), FString::FromInt(Capsules->Num()));
 				}
+				const TArray<TSharedPtr<FJsonValue>>* ConvexHulls = nullptr;
+				bool bClearConvexHulls = false;
+				CollisionJson->TryGetBoolField(TEXT("clear_convex_hulls"), bClearConvexHulls);
+				if (CollisionJson->TryGetArrayField(TEXT("convex_hulls"), ConvexHulls) && ConvexHulls)
+				{
+					if (ConvexHulls->Num() == 0)
+					{
+						bClearConvexHulls = true;
+					}
+					else
+					{
+						UeAgentJsonDiagnostics::AddIssue(
+							Issues,
+							TEXT("error"),
+							TEXT("unsupported_apply_profile"),
+							TEXT("collision.json.convex_hulls"),
+							TEXT("Convex hull creation is not supported by static_mesh_apply_folder; pass [] or clear_convex_hulls=true to clear existing convex hulls."));
+					}
+				}
+				double ConvexHullCountValue = 0.0;
+				if (!bClearConvexHulls
+					&& CollisionJson->TryGetNumberField(TEXT("convex_hull_count"), ConvexHullCountValue)
+					&& static_cast<int32>(ConvexHullCountValue) == 0
+					&& BodySetup->AggGeom.ConvexElems.Num() > 0)
+				{
+					bClearConvexHulls = true;
+				}
+				if (bClearConvexHulls)
+				{
+					PrepareCollisionModify();
+					BodySetup->AggGeom.ConvexElems.Reset();
+					bTouchedCollision = true;
+					AddPropertyResult(TEXT("collision.json.convex_hulls"), TEXT("applied"), TEXT("cleared"));
+				}
+				if (bCollisionModifyPrepared)
+				{
+					AddPropertyResult(TEXT("collision.json.body_setup_modify"), TEXT("applied"), TEXT("transactional BodySetup modify prepared"));
+				}
 				if (bTouchedCollision)
 				{
 					++StructuredApplied;
@@ -2052,10 +2115,75 @@ bool FUeAgentHttpServer::CmdStaticMeshApplyFolder(const FUeAgentRequestContext& 
 		if (!UeAgentStaticMeshOps::LoadJsonFileWithIssues(FPaths::Combine(FolderPath, TEXT("sockets.json")), SocketsJson, Issues, OutError, true)) return false;
 		if (SocketsJson.IsValid())
 		{
-			UeAgentJsonDiagnostics::WarnUnknownFields(SocketsJson, TEXT("sockets.json"), { TEXT("sockets") }, Issues);
+			UeAgentJsonDiagnostics::WarnUnknownFields(SocketsJson, TEXT("sockets.json"), { TEXT("sockets"), TEXT("replace_all") }, Issues);
 			const TArray<TSharedPtr<FJsonValue>>* Sockets = nullptr;
 			if (SocketsJson->TryGetArrayField(TEXT("sockets"), Sockets) && Sockets)
 			{
+				bool bReplaceAllSockets = true;
+				SocketsJson->TryGetBoolField(TEXT("replace_all"), bReplaceAllSockets);
+
+				bool bSocketModifyPrepared = false;
+				auto PrepareSocketModify = [&Mesh, &bSocketModifyPrepared]()
+				{
+					if (!bSocketModifyPrepared)
+					{
+						Mesh->Modify();
+						bSocketModifyPrepared = true;
+					}
+				};
+
+				if (bReplaceAllSockets)
+				{
+					TSet<FName> DesiredSocketNames;
+					bool bCanReplaceAllSockets = true;
+					for (int32 Index = 0; Index < Sockets->Num(); ++Index)
+					{
+						const TSharedPtr<FJsonValue>& SocketValue = (*Sockets)[Index];
+						const TSharedPtr<FJsonObject>* SocketObj = nullptr;
+						if (!SocketValue.IsValid() || !SocketValue->TryGetObject(SocketObj) || !SocketObj || !SocketObj->IsValid())
+						{
+							bCanReplaceAllSockets = false;
+							break;
+						}
+
+						FString SocketName;
+						(*SocketObj)->TryGetStringField(TEXT("socket_name"), SocketName);
+						SocketName.TrimStartAndEndInline();
+						if (SocketName.IsEmpty())
+						{
+							bCanReplaceAllSockets = false;
+							break;
+						}
+
+						bool bRemove = false;
+						(*SocketObj)->TryGetBoolField(TEXT("remove"), bRemove);
+						if (!bRemove)
+						{
+							DesiredSocketNames.Add(FName(*SocketName));
+						}
+					}
+
+					if (bCanReplaceAllSockets)
+					{
+						int32 RemovedSocketCount = 0;
+						for (int32 ExistingIndex = Mesh->Sockets.Num() - 1; ExistingIndex >= 0; --ExistingIndex)
+						{
+							UStaticMeshSocket* ExistingSocket = Mesh->Sockets[ExistingIndex];
+							if (ExistingSocket && !DesiredSocketNames.Contains(ExistingSocket->SocketName))
+							{
+								PrepareSocketModify();
+								Mesh->RemoveSocket(ExistingSocket);
+								++RemovedSocketCount;
+							}
+						}
+						if (RemovedSocketCount > 0)
+						{
+							StructuredApplied += RemovedSocketCount;
+							AddPropertyResult(TEXT("sockets.json.replace_all"), TEXT("applied"), FString::Printf(TEXT("removed:%d"), RemovedSocketCount));
+						}
+					}
+				}
+
 				for (int32 Index = 0; Index < Sockets->Num(); ++Index)
 				{
 					TSharedPtr<FJsonObject> SocketObj;
@@ -2073,11 +2201,11 @@ bool FUeAgentHttpServer::CmdStaticMeshApplyFolder(const FUeAgentRequestContext& 
 					bool bRemove = false;
 					SocketObj->TryGetBoolField(TEXT("remove"), bRemove);
 					UStaticMeshSocket* Socket = Mesh->FindSocket(FName(*SocketName.TrimStartAndEnd()));
-					Mesh->Modify();
 					if (bRemove)
 					{
 						if (Socket)
 						{
+							PrepareSocketModify();
 							Mesh->RemoveSocket(Socket);
 							++StructuredApplied;
 						}
@@ -2085,9 +2213,15 @@ bool FUeAgentHttpServer::CmdStaticMeshApplyFolder(const FUeAgentRequestContext& 
 					}
 					if (!Socket)
 					{
+						PrepareSocketModify();
 						Socket = NewObject<UStaticMeshSocket>(Mesh, NAME_None, RF_Transactional);
 						Socket->SocketName = FName(*SocketName.TrimStartAndEnd());
 						Mesh->AddSocket(Socket);
+					}
+					else
+					{
+						PrepareSocketModify();
+						Socket->Modify();
 					}
 					if (Socket)
 					{
