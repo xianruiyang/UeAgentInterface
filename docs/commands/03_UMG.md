@@ -13,7 +13,7 @@
 | `umg_export_folder` | 导出 WidgetBlueprint 文件夹结构 | `asset_path`；可选 `clean_output_dir`、`include_validation` | 导出到固定目录做结构化审查与编辑 |
 | `umg_apply_folder` | 从文件夹结构回写 WidgetBlueprint | `asset_path`；可选 `create_if_missing`、`compile_after_apply`、`save_after_apply` | 读取固定目录并按“根控件复用 + 子树重建”策略应用 |
 
-- `umg_create_widget_blueprint` 成功后会返回 `root_widget`；若后续 `umg_add_widget` 不显式传 `parent_widget`，通常就以这个 root 作为默认父容器。
+- `umg_create_widget_blueprint` 成功后会返回 `root_widget`；后续控件树应通过 `widget_tree/tree.json` 表达父子关系和 slot 属性。
 
 ## 文件夹式工作流
 
@@ -60,16 +60,14 @@
 
 属性写入返回：
 
-- `umg_set_widget_property` / `umg_set_slot_property` 返回 `requested_value_text`、`applied_value_text`、`property_import_status`、`property_import_verified`、`value_text_exact_match`、`value_text_changed_after_import`、`cpp_type`。
-- `property_import_status=import_failed` 时，返回数据会包含失败的 `widget_name`、`property_name` 和请求值，便于定位 JSON/结构化 JSON 中的坏字段。
+- `umg_apply_folder` 会在控件、slot、绑定和动画属性回写时返回写入观测信息。
+- 属性导入失败时，返回数据会包含失败的 `widget_name`、`property_name` 和请求值，便于定位 JSON/结构化 JSON 中的坏字段。
 - `umg_apply_folder` 的可选文件（`settings/widget_blueprint.json`、`bindings/property_bindings.json`、`animations/animations.json`）只有不存在时才会跳过；文件存在但读取失败或 JSON 语法解析失败会直接失败返回并带文件路径。
 - 控件、绑定、动画数组中不是 object 或缺 `id/widget_name/property_name/name` 的条目会进入 `warning_count / warnings[]`，不再静默忽略。
 
-- `umg_add_widget` 的几个高频行为：
-  - `make_variable` 默认会把新控件标记成变量。
-  - `insert_index` 可用于插入到 `PanelWidget` 的指定子序。
-  - 若未传 `parent_widget`，而根节点本身是 `PanelWidget`，则默认挂到根节点下。
-- `umg_bind_widget_property_to_variable` 里的 `source_variable_name` 必须已经存在于 `WidgetBlueprint` 上；常见做法是先用 `blueprint_add_variable` 添加蓝图变量，再回来做绑定。
+- `widget_tree/tree.json` 中的 `make_variable`、`parent_widget`、`insert_index` 和 slot 属性共同决定控件变量、父子关系和布局顺序。
+- TextBlock 的常用视觉属性已纳入 folder round-trip：`Text`、`ColorAndOpacity`、`Font.Size`、`Justification`、`AutoWrapText`、`MinDesiredWidth`、`ShadowOffset`、`ShadowColorAndOpacity`。标题、菜单等 UMG 字号不要绕开结构化源单独手改，否则下一次导出/回写难以复现。
+- `bindings/property_bindings.json` 中的 `source_variable_name` 必须已经存在于 `WidgetBlueprint` 上；常见做法是在 `members/variables.json` 中先声明变量，再绑定控件属性。
 
 ## 跨域配合
 
@@ -114,17 +112,6 @@
   - `color_property`
   - `transform`
 
-<!-- UAI_FORMAL_COMMAND_INDEX_BEGIN -->
-## 原子/兼容命令正式索引
->
-> 以下命令已有真实 dispatch 实现并纳入 smoke 覆盖；对完整资产制作仍应优先使用本分册中的结构化 JSON / folder workflow，原子命令仅用于 bootstrap、迁移、probe 或局部修复。
+## 废弃命令
 
-| Command | 作用 | 关键参数 | 关键返回 |
-| --- | --- | --- | --- |
-| `umg_add_widget` | **原子/兼容**：新增控件到 WidgetTree | `asset_path`、`widget_class`、`widget_name`、`parent_widget`、`make_variable`、`insert_index`、`compile_after_add`、`save_after_add` | 仅用于 bootstrap/修补 |
-| `umg_bind_widget_property_to_variable` | **原子/兼容**：绑定控件属性到蓝图变量 | `asset_path`、`widget_name`、`property_name`、`source_variable_name`、`compile_after_bind`、`save_after_bind` | 仅用于局部修补 |
-| `umg_remove_widget` | **原子/兼容**：删除控件 | `asset_path`、`widget_name`、`compile_after_remove`、`save_after_remove` | 仅用于修补 |
-| `umg_rename_widget` | **原子/兼容**：重命名控件 | `asset_path`、`widget_name`、`new_widget_name`、`compile_after_rename`、`save_after_rename` | 仅用于修补 |
-| `umg_set_slot_property` | **原子/兼容**：设置 Slot 属性 | `asset_path`、`widget_name`、`property_name`、`value_text`、`compile_after_set`、`save_after_set` | 仅用于局部修补 |
-| `umg_set_widget_property` | **原子/兼容**：设置控件属性 | `asset_path`、`widget_name`、`property_name`、`value_text`、`compile_after_set`、`save_after_set` | 仅用于局部修补 |
-<!-- UAI_FORMAL_COMMAND_INDEX_END -->
+本分册不再列出已废弃写入命令；这些命令仅保留在 `deprecatedCommand/03_UMG.md`，供旧脚本兼容、bootstrap、迁移和故障补修查阅。

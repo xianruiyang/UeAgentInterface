@@ -20,29 +20,47 @@
 
 void FUeAgentInterfaceModule::StartupModule()
 {
+	FUeAgentInterfaceLogger::Log(TEXT("StartupModule begin command_line=%s"), FCommandLine::Get());
+
 	Server = MakeUnique<FUeAgentHttpServer>();
+	FUeAgentInterfaceLogger::Log(TEXT("StartupModule: server instance created"));
+
 	FUeAgentModelingToolCommands::Register();
+	FUeAgentInterfaceLogger::Log(TEXT("StartupModule: modeling tool commands registered"));
+
 	IModularFeatures::Get().RegisterModularFeature(IModelingModeToolExtension::GetModularFeatureName(), this);
+	FUeAgentInterfaceLogger::Log(TEXT("StartupModule: modeling modular feature registered"));
 
 	RegisterConsoleCommands();
+	FUeAgentInterfaceLogger::Log(TEXT("StartupModule: console commands registered"));
 
 	UToolMenus::RegisterStartupCallback(
 		FSimpleMulticastDelegate::FDelegate::CreateRaw(this, &FUeAgentInterfaceModule::RegisterMenus));
+	FUeAgentInterfaceLogger::Log(TEXT("StartupModule: menu startup callback registered"));
 
 	if (FParse::Param(FCommandLine::Get(), TEXT("UeAgentInterfaceAutoStart")))
 	{
+		FUeAgentInterfaceLogger::Log(TEXT("StartupModule: AutoStart requested"));
 		const bool bOk = StartServerInternal();
 		FUeAgentInterfaceLogger::Log(TEXT("AutoStart from command line: ok=%s"), bOk ? TEXT("true") : TEXT("false"));
 	}
+	else
+	{
+		FUeAgentInterfaceLogger::Log(TEXT("StartupModule: AutoStart not requested"));
+	}
+
+	FUeAgentInterfaceLogger::Log(TEXT("StartupModule end"));
 }
 
 void FUeAgentInterfaceModule::ShutdownModule()
 {
+	FUeAgentInterfaceLogger::Log(TEXT("ShutdownModule begin"));
 	IModularFeatures::Get().UnregisterModularFeature(IModelingModeToolExtension::GetModularFeatureName(), this);
 	FUeAgentModelingToolCommands::Unregister();
 	UnregisterMenus();
 	UnregisterConsoleCommands();
 	Server.Reset();
+	FUeAgentInterfaceLogger::Log(TEXT("ShutdownModule end"));
 }
 
 FText FUeAgentInterfaceModule::GetExtensionName()
@@ -195,8 +213,18 @@ bool FUeAgentInterfaceModule::EnsureAuthToken() const
 
 bool FUeAgentInterfaceModule::StartServerInternal()
 {
-	EnsureAuthToken();
-	return Server ? Server->Start() : false;
+	FUeAgentInterfaceLogger::Log(TEXT("StartServerInternal begin server_valid=%s"), Server ? TEXT("true") : TEXT("false"));
+
+	const bool bHasToken = EnsureAuthToken();
+	FUeAgentInterfaceLogger::Log(TEXT("StartServerInternal: EnsureAuthToken ok=%s"), bHasToken ? TEXT("true") : TEXT("false"));
+	if (!bHasToken)
+	{
+		return false;
+	}
+
+	const bool bOk = Server ? Server->Start() : false;
+	FUeAgentInterfaceLogger::Log(TEXT("StartServerInternal end ok=%s"), bOk ? TEXT("true") : TEXT("false"));
+	return bOk;
 }
 
 void FUeAgentInterfaceModule::StopServerInternal()

@@ -449,10 +449,84 @@ namespace UeAgentBlueprintFolderOps
 		return Root;
 	}
 
-	static TSharedPtr<FJsonObject> ExportDefaultsJson()
+	static bool ShouldExportCDODefaultProperty(const FProperty* Property)
 	{
+		if (!Property)
+		{
+			return false;
+		}
+		if (!Property->HasAnyPropertyFlags(CPF_Edit))
+		{
+			return false;
+		}
+		if (Property->HasAnyPropertyFlags(CPF_Transient | CPF_Deprecated | CPF_DuplicateTransient | CPF_NonPIEDuplicateTransient))
+		{
+			return false;
+		}
+		if (const FObjectPropertyBase* ObjectProperty = CastField<FObjectPropertyBase>(Property))
+		{
+			if (ObjectProperty->PropertyClass && ObjectProperty->PropertyClass->IsChildOf(UActorComponent::StaticClass()))
+			{
+				return false;
+			}
+		}
+		return true;
+	}
+
+	static TSharedPtr<FJsonObject> ExportDefaultsJson(UBlueprint* Blueprint)
+	{
+		TArray<TSharedPtr<FJsonValue>> Defaults;
+		if (Blueprint && Blueprint->GeneratedClass)
+		{
+			UObject* CDO = Blueprint->GeneratedClass->GetDefaultObject();
+			if (CDO)
+			{
+				for (TFieldIterator<FProperty> It(Blueprint->GeneratedClass, EFieldIteratorFlags::IncludeSuper); It; ++It)
+				{
+					FProperty* Property = *It;
+					if (!ShouldExportCDODefaultProperty(Property))
+					{
+						continue;
+					}
+
+					void* ValuePtr = Property->ContainerPtrToValuePtr<void>(CDO);
+					if (!ValuePtr)
+					{
+						continue;
+					}
+
+					FString ExportedValue;
+					Property->ExportTextItem_Direct(ExportedValue, ValuePtr, ValuePtr, CDO, PPF_None);
+
+					TSharedPtr<FJsonObject> DefaultObj = MakeShared<FJsonObject>();
+					DefaultObj->SetStringField(TEXT("property_name"), Property->GetName());
+					DefaultObj->SetStringField(TEXT("value_text"), ExportedValue);
+					DefaultObj->SetStringField(TEXT("cpp_type"), Property->GetCPPType());
+					if (const UClass* OwnerClass = Property->GetOwnerClass())
+					{
+						DefaultObj->SetStringField(TEXT("declaring_class"), OwnerClass->GetPathName());
+					}
+					const FString Category = Property->GetMetaData(TEXT("Category"));
+					if (!Category.IsEmpty())
+					{
+						DefaultObj->SetStringField(TEXT("category"), Category);
+					}
+					Defaults.Add(MakeShared<FJsonValueObject>(DefaultObj));
+				}
+			}
+		}
+
+		Defaults.Sort([](const TSharedPtr<FJsonValue>& A, const TSharedPtr<FJsonValue>& B)
+		{
+			const TSharedPtr<FJsonObject>* AObj = nullptr;
+			const TSharedPtr<FJsonObject>* BObj = nullptr;
+			const FString AName = A.IsValid() && A->TryGetObject(AObj) && AObj && AObj->IsValid() ? (*AObj)->GetStringField(TEXT("property_name")) : FString();
+			const FString BName = B.IsValid() && B->TryGetObject(BObj) && BObj && BObj->IsValid() ? (*BObj)->GetStringField(TEXT("property_name")) : FString();
+			return AName < BName;
+		});
+
 		TSharedPtr<FJsonObject> Root = MakeShared<FJsonObject>();
-		Root->SetArrayField(TEXT("defaults"), {});
+		Root->SetArrayField(TEXT("defaults"), Defaults);
 		return Root;
 	}
 
@@ -469,10 +543,240 @@ namespace UeAgentBlueprintFolderOps
 		}
 	}
 
+	static void AddExportedComponentProperty(TArray<TSharedPtr<FJsonValue>>& Properties, UObject* Template, const FString& PropertyPath, const bool bIncludeNone = false)
+	{
+		if (!Template)
+		{
+			return;
+		}
+
+		FString ExportedValue;
+		if (!ExportPropertyText(Template, PropertyPath, ExportedValue))
+		{
+			return;
+		}
+		if (!bIncludeNone && (ExportedValue.IsEmpty() || ExportedValue == TEXT("None")))
+		{
+			return;
+		}
+
+		TSharedPtr<FJsonObject> PropertyObj = MakeShared<FJsonObject>();
+		PropertyObj->SetStringField(TEXT("property_name"), PropertyPath);
+		PropertyObj->SetStringField(TEXT("value_text"), ExportedValue);
+		Properties.Add(MakeShared<FJsonValueObject>(PropertyObj));
+	}
+
+	static TArray<TSharedPtr<FJsonValue>> ExportComponentProperties(UActorComponent* Template)
+	{
+		TArray<TSharedPtr<FJsonValue>> Properties;
+		if (!Template)
+		{
+			return Properties;
+		}
+
+		static const TArray<FString> CommonProperties = {
+			TEXT("RelativeLocation"),
+			TEXT("RelativeRotation"),
+			TEXT("RelativeScale3D")
+		};
+		for (const FString& PropertyPath : CommonProperties)
+		{
+			AddExportedComponentProperty(Properties, Template, PropertyPath, true);
+		}
+
+		if (Template->IsA<UStaticMeshComponent>())
+		{
+			AddExportedComponentProperty(Properties, Template, TEXT("StaticMesh"), false);
+		}
+
+		if (Template->IsA<USkeletalMeshComponent>())
+		{
+			AddExportedComponentProperty(Properties, Template, TEXT("SkeletalMeshAsset"), true);
+			AddExportedComponentProperty(Properties, Template, TEXT("AnimClass"), true);
+			AddExportedComponentProperty(Properties, Template, TEXT("AnimationMode"), true);
+		}
+
+		return Properties;
+	}
+
+	static TSharedPtr<FJsonObject> ExportComponentTemplateJson(
+		const FString& ComponentName,
+		UClass* ComponentClass,
+		const FString& ParentName,
+		UActorComponent* Template,
+		const FString& Source,
+		const bool bInherited)
+	{
+		TSharedPtr<FJsonObject> ComponentObj = MakeShared<FJsonObject>();
+		ComponentObj->SetStringField(TEXT("name"), ComponentName);
+		ComponentObj->SetStringField(TEXT("class"), ComponentClass ? ComponentClass->GetPathName() : TEXT(""));
+		ComponentObj->SetStringField(TEXT("parent"), ParentName);
+		if (!Source.IsEmpty())
+		{
+			ComponentObj->SetStringField(TEXT("source"), Source);
+		}
+		if (bInherited)
+		{
+			ComponentObj->SetBoolField(TEXT("inherited"), true);
+		}
+		if (Template)
+		{
+			ComponentObj->SetStringField(TEXT("template_name"), Template->GetName());
+		}
+		ComponentObj->SetArrayField(TEXT("properties"), ExportComponentProperties(Template));
+		return ComponentObj;
+	}
+
+	static void CollectBlueprintCDOComponents(
+		UBlueprint* Blueprint,
+		const TSet<FString>& ExcludedNames,
+		TMap<UActorComponent*, FString>& OutNameByComponent)
+	{
+		OutNameByComponent.Reset();
+		if (!Blueprint || !Blueprint->GeneratedClass)
+		{
+			return;
+		}
+
+		UObject* CDO = Blueprint->GeneratedClass->GetDefaultObject();
+		if (!CDO)
+		{
+			return;
+		}
+
+		for (TFieldIterator<FObjectPropertyBase> It(Blueprint->GeneratedClass, EFieldIteratorFlags::IncludeSuper); It; ++It)
+		{
+			FObjectPropertyBase* ObjectProperty = *It;
+			if (!ObjectProperty || !ObjectProperty->PropertyClass || !ObjectProperty->PropertyClass->IsChildOf(UActorComponent::StaticClass()))
+			{
+				continue;
+			}
+
+			const FString PropertyName = ObjectProperty->GetName();
+			if (ExcludedNames.Contains(PropertyName))
+			{
+				continue;
+			}
+
+			if (UActorComponent* Component = Cast<UActorComponent>(ObjectProperty->GetObjectPropertyValue_InContainer(CDO)))
+			{
+				OutNameByComponent.FindOrAdd(Component) = PropertyName;
+			}
+		}
+
+		if (AActor* ActorCDO = Cast<AActor>(CDO))
+		{
+			TInlineComponentArray<UActorComponent*> Components(ActorCDO);
+			for (UActorComponent* Component : Components)
+			{
+				if (!Component)
+				{
+					continue;
+				}
+				const FString ObjectName = Component->GetName();
+				if (ExcludedNames.Contains(ObjectName))
+				{
+					continue;
+				}
+				OutNameByComponent.FindOrAdd(Component) = ObjectName;
+			}
+		}
+	}
+
+	static UActorComponent* ResolveBlueprintComponentTemplate(UBlueprint* Blueprint, const FString& ComponentName, FString* OutSource = nullptr)
+	{
+		if (OutSource)
+		{
+			OutSource->Reset();
+		}
+		if (!Blueprint)
+		{
+			return nullptr;
+		}
+
+		if (USCS_Node* Node = UeAgentBlueprintOps::FindSCSNodeByAnyName(Blueprint->SimpleConstructionScript, ComponentName))
+		{
+			if (OutSource)
+			{
+				*OutSource = TEXT("scs");
+			}
+			return Node->ComponentTemplate;
+		}
+
+		if (!Blueprint->GeneratedClass)
+		{
+			return nullptr;
+		}
+		UObject* CDO = Blueprint->GeneratedClass->GetDefaultObject();
+		if (!CDO)
+		{
+			return nullptr;
+		}
+
+		for (TFieldIterator<FObjectPropertyBase> It(Blueprint->GeneratedClass, EFieldIteratorFlags::IncludeSuper); It; ++It)
+		{
+			FObjectPropertyBase* ObjectProperty = *It;
+			if (!ObjectProperty || !ObjectProperty->PropertyClass || !ObjectProperty->PropertyClass->IsChildOf(UActorComponent::StaticClass()))
+			{
+				continue;
+			}
+			if (!ObjectProperty->GetName().Equals(ComponentName, ESearchCase::IgnoreCase))
+			{
+				continue;
+			}
+			if (UActorComponent* Component = Cast<UActorComponent>(ObjectProperty->GetObjectPropertyValue_InContainer(CDO)))
+			{
+				if (OutSource)
+				{
+					*OutSource = TEXT("cdo_property");
+				}
+				return Component;
+			}
+		}
+
+		if (AActor* ActorCDO = Cast<AActor>(CDO))
+		{
+			TInlineComponentArray<UActorComponent*> Components(ActorCDO);
+			for (UActorComponent* Component : Components)
+			{
+				if (Component && Component->GetName().Equals(ComponentName, ESearchCase::IgnoreCase))
+				{
+					if (OutSource)
+					{
+						*OutSource = TEXT("cdo_component");
+					}
+					return Component;
+				}
+			}
+		}
+
+		return nullptr;
+	}
+
+	static bool IsInheritedComponentSpec(const TSharedPtr<FJsonObject>& ComponentObj)
+	{
+		bool bInherited = false;
+		if (TryGetBool(ComponentObj, TEXT("inherited"), bInherited) && bInherited)
+		{
+			return true;
+		}
+
+		FString Source;
+		if (TryGetString(ComponentObj, TEXT("source"), Source))
+		{
+			return Source.Equals(TEXT("inherited"), ESearchCase::IgnoreCase)
+				|| Source.Equals(TEXT("native"), ESearchCase::IgnoreCase)
+				|| Source.StartsWith(TEXT("cdo"), ESearchCase::IgnoreCase);
+		}
+
+		return false;
+	}
+
 	static TSharedPtr<FJsonObject> ExportComponentsJson(UBlueprint* Blueprint)
 	{
 		TArray<TSharedPtr<FJsonValue>> Components;
 		USimpleConstructionScript* SCS = Blueprint ? Blueprint->SimpleConstructionScript : nullptr;
+		TSet<FString> SCSComponentNames;
 		if (SCS)
 		{
 			TMap<const USCS_Node*, FString> ParentMap;
@@ -493,47 +797,60 @@ namespace UeAgentBlueprintFolderOps
 				{
 					continue;
 				}
-				TSharedPtr<FJsonObject> ComponentObj = MakeShared<FJsonObject>();
-				ComponentObj->SetStringField(TEXT("name"), Node->GetVariableName().ToString());
-				ComponentObj->SetStringField(TEXT("class"), Node->ComponentClass ? Node->ComponentClass->GetPathName() : TEXT(""));
-				ComponentObj->SetStringField(TEXT("parent"), ParentMap.FindRef(Node));
+				const FString ComponentName = Node->GetVariableName().ToString();
+				SCSComponentNames.Add(ComponentName);
+				Components.Add(MakeShared<FJsonValueObject>(
+					ExportComponentTemplateJson(
+						ComponentName,
+						Node->ComponentClass,
+						ParentMap.FindRef(Node),
+						Node->ComponentTemplate,
+						TEXT("scs"),
+						false)));
+			}
+		}
 
-				TArray<TSharedPtr<FJsonValue>> Properties;
-				if (UActorComponent* Template = Node->ComponentTemplate)
+		TMap<UActorComponent*, FString> CDOComponentNames;
+		CollectBlueprintCDOComponents(Blueprint, SCSComponentNames, CDOComponentNames);
+		TArray<UActorComponent*> CDOComponents;
+		CDOComponentNames.GenerateKeyArray(CDOComponents);
+		CDOComponents.Sort([&CDOComponentNames](const UActorComponent& A, const UActorComponent& B)
+		{
+			return CDOComponentNames.FindRef(&A) < CDOComponentNames.FindRef(&B);
+		});
+
+		for (UActorComponent* Component : CDOComponents)
+		{
+			if (!Component)
+			{
+				continue;
+			}
+
+			const FString ComponentName = CDOComponentNames.FindRef(Component);
+			FString ParentName;
+			if (const USceneComponent* SceneComponent = Cast<USceneComponent>(Component))
+			{
+				if (const USceneComponent* AttachParent = SceneComponent->GetAttachParent())
 				{
-					static const TArray<FString> CommonProperties = {
-						TEXT("RelativeLocation"),
-						TEXT("RelativeRotation"),
-						TEXT("RelativeScale3D")
-					};
-					for (const FString& PropertyPath : CommonProperties)
+					if (const FString* FoundParentName = CDOComponentNames.Find(AttachParent))
 					{
-						FString ExportedValue;
-						if (ExportPropertyText(Template, PropertyPath, ExportedValue))
-						{
-							TSharedPtr<FJsonObject> PropertyObj = MakeShared<FJsonObject>();
-							PropertyObj->SetStringField(TEXT("property_name"), PropertyPath);
-							PropertyObj->SetStringField(TEXT("value_text"), ExportedValue);
-							Properties.Add(MakeShared<FJsonValueObject>(PropertyObj));
-						}
+						ParentName = *FoundParentName;
 					}
-
-					if (Template->IsA<UStaticMeshComponent>())
+					else
 					{
-						FString ExportedValue;
-						if (ExportPropertyText(Template, TEXT("StaticMesh"), ExportedValue) && !ExportedValue.IsEmpty() && ExportedValue != TEXT("None"))
-						{
-							TSharedPtr<FJsonObject> PropertyObj = MakeShared<FJsonObject>();
-							PropertyObj->SetStringField(TEXT("property_name"), TEXT("StaticMesh"));
-							PropertyObj->SetStringField(TEXT("value_text"), ExportedValue);
-							Properties.Add(MakeShared<FJsonValueObject>(PropertyObj));
-						}
+						ParentName = AttachParent->GetName();
 					}
 				}
-
-				ComponentObj->SetArrayField(TEXT("properties"), Properties);
-				Components.Add(MakeShared<FJsonValueObject>(ComponentObj));
 			}
+
+			Components.Add(MakeShared<FJsonValueObject>(
+				ExportComponentTemplateJson(
+					ComponentName,
+					Component->GetClass(),
+					ParentName,
+					Component,
+					TEXT("cdo"),
+					true)));
 		}
 
 		TSharedPtr<FJsonObject> Root = MakeShared<FJsonObject>();
@@ -917,7 +1234,7 @@ bool FUeAgentHttpServer::CmdBlueprintExportFolder(const FUeAgentRequestContext& 
 	if (!SaveRequiredJson(FPaths::Combine(FolderPath, TEXT("asset.json")), AssetJson)) return false;
 	if (!SaveRequiredJson(FPaths::Combine(MembersDir, TEXT("variables.json")), UeAgentBlueprintFolderOps::ExportVariablesJson(Blueprint))) return false;
 	if (!SaveRequiredJson(FPaths::Combine(MembersDir, TEXT("delegates.json")), UeAgentBlueprintFolderOps::ExportDelegatesJson(Blueprint))) return false;
-	if (!SaveRequiredJson(FPaths::Combine(MembersDir, TEXT("defaults.json")), UeAgentBlueprintFolderOps::ExportDefaultsJson())) return false;
+	if (!SaveRequiredJson(FPaths::Combine(MembersDir, TEXT("defaults.json")), UeAgentBlueprintFolderOps::ExportDefaultsJson(Blueprint))) return false;
 	if (!SaveRequiredJson(FPaths::Combine(ComponentsDir, TEXT("tree.json")), UeAgentBlueprintFolderOps::ExportComponentsJson(Blueprint))) return false;
 
 	auto ExportGraphsByKind = [this, &FileCount, &OutError, &GraphsDir, Blueprint](const TArray<UEdGraph*>& InGraphs, const FString& GraphKind) -> bool
@@ -1451,9 +1768,14 @@ bool FUeAgentHttpServer::CmdBlueprintApplyFolder(const FUeAgentRequestContext& C
 						UeAgentBlueprintFolderOps::TryGetString(*ComponentObjPtr, TEXT("parent"), ParentComponentName);
 						if (!ParentComponentName.IsEmpty() && !ProcessedComponents.Contains(ParentComponentName) && !UeAgentBlueprintOps::FindSCSNodeByAnyName(SCS, ParentComponentName))
 						{
-							continue;
+							FString ParentSource;
+							if (!UeAgentBlueprintFolderOps::ResolveBlueprintComponentTemplate(Blueprint, ParentComponentName, &ParentSource))
+							{
+								continue;
+							}
 						}
 
+						const bool bInheritedSpec = UeAgentBlueprintFolderOps::IsInheritedComponentSpec(*ComponentObjPtr);
 						FString DesiredComponentClassPath;
 						if (!UeAgentBlueprintFolderOps::TryGetString(*ComponentObjPtr, TEXT("class"), DesiredComponentClassPath) || DesiredComponentClassPath.IsEmpty())
 						{
@@ -1462,8 +1784,35 @@ bool FUeAgentHttpServer::CmdBlueprintApplyFolder(const FUeAgentRequestContext& C
 						}
 
 						USCS_Node* ExistingNode = UeAgentBlueprintOps::FindSCSNodeByAnyName(SCS, ComponentName);
-						const FString ExistingClassPath = (ExistingNode && ExistingNode->ComponentClass) ? ExistingNode->ComponentClass->GetPathName() : FString();
+						FString ExistingTemplateSource;
+						UActorComponent* ExistingTemplate = UeAgentBlueprintFolderOps::ResolveBlueprintComponentTemplate(Blueprint, ComponentName, &ExistingTemplateSource);
+						const FString ExistingClassPath = ExistingNode && ExistingNode->ComponentClass
+							? ExistingNode->ComponentClass->GetPathName()
+							: (ExistingTemplate ? ExistingTemplate->GetClass()->GetPathName() : FString());
 						const FString ExistingParentName = ExistingNode ? CurrentParentMap.FindRef(ExistingNode) : FString();
+
+						if (bInheritedSpec)
+						{
+							if (!ExistingTemplate)
+							{
+								OutError = FString::Printf(TEXT("inherited_component_not_found:%s"), *ComponentName);
+								return false;
+							}
+							if (!ExistingClassPath.Equals(DesiredComponentClassPath, ESearchCase::IgnoreCase))
+							{
+								AddWarning(
+									TEXT("inherited_component_class_mismatch"),
+									FString::Printf(TEXT("Inherited component '%s' class differs. requested='%s' actual='%s' source='%s'."),
+										*ComponentName,
+										*DesiredComponentClassPath,
+										*ExistingClassPath,
+										*ExistingTemplateSource));
+							}
+							ProcessedComponents.Add(ComponentName);
+							--RemainingComponents;
+							bMadeProgress = true;
+							continue;
+						}
 
 						const bool bNeedsRecreate = ExistingNode
 							&& (!ExistingClassPath.Equals(DesiredComponentClassPath, ESearchCase::IgnoreCase)
@@ -1554,10 +1903,17 @@ bool FUeAgentHttpServer::CmdBlueprintApplyFolder(const FUeAgentRequestContext& C
 							continue;
 						}
 
-						USCS_Node* TargetNode = UeAgentBlueprintOps::FindSCSNodeByAnyName(Blueprint->SimpleConstructionScript, ComponentName);
-						if (TargetNode && TargetNode->ComponentTemplate && PropertyName.Equals(TEXT("StaticMesh"), ESearchCase::IgnoreCase))
+						FString TargetTemplateSource;
+						UActorComponent* TargetTemplate = UeAgentBlueprintFolderOps::ResolveBlueprintComponentTemplate(Blueprint, ComponentName, &TargetTemplateSource);
+						if (!TargetTemplate)
 						{
-							if (UStaticMeshComponent* StaticMeshComponent = Cast<UStaticMeshComponent>(TargetNode->ComponentTemplate))
+							OutError = FString::Printf(TEXT("component_template_not_found:%s"), *ComponentName);
+							return false;
+						}
+
+						if (PropertyName.Equals(TEXT("StaticMesh"), ESearchCase::IgnoreCase))
+						{
+							if (UStaticMeshComponent* StaticMeshComponent = Cast<UStaticMeshComponent>(TargetTemplate))
 							{
 								const FString ObjectPath = UeAgentBlueprintFolderOps::ExtractObjectPathFromImportText(ValueText);
 								UStaticMesh* StaticMesh = LoadObject<UStaticMesh>(nullptr, *ObjectPath);
@@ -1575,32 +1931,36 @@ bool FUeAgentHttpServer::CmdBlueprintApplyFolder(const FUeAgentRequestContext& C
 							}
 						}
 
-						TSharedPtr<FJsonObject> SetParams = MakeShared<FJsonObject>();
-						SetParams->SetStringField(TEXT("asset_path"), AssetPath);
-						SetParams->SetStringField(TEXT("component_name"), ComponentName);
-						SetParams->SetStringField(TEXT("property_name"), PropertyName);
-						SetParams->SetStringField(TEXT("value_text"), ValueText);
-						SetParams->SetBoolField(TEXT("compile_after_set"), false);
-						SetParams->SetBoolField(TEXT("save_after_set"), false);
-						TSharedPtr<FJsonObject> SetData;
-						if (!InvokeBlueprintSubCommand(TEXT("blueprint_set_component_property"), SetParams, SetData, OutError))
+						FProperty* Property = nullptr;
+						void* ValuePtr = nullptr;
+						if (!UeAgentBlueprintOps::ResolvePropertyPath(TargetTemplate, PropertyName, Property, ValuePtr) || !Property || !ValuePtr)
 						{
+							OutError = FString::Printf(TEXT("component_property_not_found:%s:%s"), *ComponentName, *PropertyName);
 							return false;
 						}
-						if (SetData.IsValid() && SetData->HasTypedField<EJson::Boolean>(TEXT("value_text_changed_after_import")) && SetData->GetBoolField(TEXT("value_text_changed_after_import")))
+
+						Blueprint->Modify();
+						TargetTemplate->Modify();
+						if (!Property->ImportText_Direct(*ValueText, ValuePtr, TargetTemplate, PPF_None))
 						{
-							FString AppliedValueText;
-							FString CppType;
-							SetData->TryGetStringField(TEXT("applied_value_text"), AppliedValueText);
-							SetData->TryGetStringField(TEXT("cpp_type"), CppType);
+							OutError = FString::Printf(TEXT("component_property_import_failed:%s:%s:%s"), *ComponentName, *PropertyName, *ValueText);
+							return false;
+						}
+
+						FBlueprintEditorUtils::MarkBlueprintAsModified(Blueprint);
+
+						FString AppliedValueText;
+						Property->ExportTextItem_Direct(AppliedValueText, ValuePtr, ValuePtr, TargetTemplate, PPF_None);
+						if (AppliedValueText != ValueText)
+						{
 							AddWarning(
 								TEXT("component_property_value_changed_after_import"),
-								FString::Printf(TEXT("Component property '%s' on '%s' read back a different value. requested='%s' applied='%s' cpp_type='%s'."),
+								FString::Printf(TEXT("Component property '%s' on '%s' read back a different value. requested='%s' applied='%s' source='%s'."),
 									*PropertyName,
 									*ComponentName,
 									*ValueText,
 									*AppliedValueText,
-									*CppType));
+									*TargetTemplateSource));
 						}
 						++ComponentPropertiesApplied;
 					}

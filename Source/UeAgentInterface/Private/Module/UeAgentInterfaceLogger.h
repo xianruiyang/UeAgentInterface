@@ -4,6 +4,8 @@
 
 #include "CoreMinimal.h"
 
+DECLARE_LOG_CATEGORY_EXTERN(LogUeAgentInterface, Log, All);
+
 class FUeAgentInterfaceLogger
 {
 public:
@@ -20,4 +22,3 @@ private:
 	static FString LogFilePath;
 	static FString VersionTag;
 };
-

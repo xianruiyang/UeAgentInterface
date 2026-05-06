@@ -7,7 +7,7 @@
 | 指令 | 作用 | 关键参数 |
 |---|---|---|
 | `anim_sequence_get_info` | 读取 AnimSequence 资产摘要 | `asset_path`；可选 `include_curve_keys` |
-| `anim_sequence_screenshot` | 按帧或时间截取 AnimSequence 预览图 | `asset_path`；可选 `skeletal_mesh_path`、`frame_index` 或 `time_seconds`、`format`、`quality`、`max_size`、`target=viewport` |
+| `anim_sequence_screenshot` | 按帧/时间截取 AnimSequence 预览图，也可批量输出连续序列帧 | `asset_path`；可选 `skeletal_mesh_path`、`frame_index` 或 `time_seconds`；批量可传 `start_time_seconds`、`count`、`interval_seconds` 或 `start_frame_index`、`count`、`frame_interval`；`format`、`quality`、`max_size`、`target` |
 | `anim_sequence_set_curve` | 统一管理 AnimSequence 曲线与 key | `asset_path`、`curve_name`；可选 `curve_type=float`、`curve_json`、`keys[]`、`time_seconds/value`、`clear_existing_keys`、`remove`、`meta_data_curve`、`remove_name_from_skeleton`、`save_after_set` |
 | `anim_sequence_set_bones` | 统一管理骨骼动画轨删除 | `asset_path`；可选 `remove_bone_names[]`、`include_children`、`children_excluded[]`、`exclude_children_recursively`、`remove_all_bone_animation`、`remove_virtual_bone_names[]`、`finalize_after_set`、`save_after_set` |
 | `anim_sequence_set_metadata` | 统一管理 AnimSequence metadata 生命周期 | `asset_path`；可选 `metadata_class_path`、`metadata_values`、`remove`、`clear_all`、`save_after_set` |
@@ -99,10 +99,12 @@ JSON 关键字段：
 
 说明：
 - 用于动画选帧审查，按 `frame_index` 或 `time_seconds` 把指定 `AnimSequence` 固定到目标帧并输出图片。
+- 批量审查动作阶段时，使用 `start_time_seconds + count + interval_seconds`，或 `start_frame_index + count + frame_interval` 一次输出连续序列帧。该模式适合 Montage section 划分、攻击起手/命中/收招检查和跳跃关键姿势审查。
 - 如果动画资产没有设置预览网格，建议显式传 `skeletal_mesh_path`；命令会检查 Skeleton 兼容性。
 - 当前 `target` 只稳定开放 `viewport`，实现内部使用临时预览 Actor + SceneCapture，不依赖当前关卡相机。
 - 当前会创建临时补光和背景板，并只把预览角色/背景板纳入捕获，避免当前关卡地面、水面、墙体或背光污染选帧截图。
-- 返回字段包含 `file_path`、`capture_mode`、`frame_index`、`time_seconds`、`num_frames`、`preview_skeletal_mesh`。
+- 返回字段包含 `file_path`、`capture_mode`、`frame_index`、`time_seconds`、`num_frames`、`preview_skeletal_mesh`。批量模式额外返回 `frame_count` 与 `frames[]`，其中每个元素包含 `sequence_index`、`file_path`、`width`、`height`、`bytes`、`frame_index`、`time_seconds`。为兼容旧流程，顶层 `file_path/frame_index/time_seconds` 始终指向第一张图。
+- 批量模式上限为 120 张；若请求时间或帧区间超过动画长度，会失败并返回 `preview_time_range_exceeds_sequence` 或 `preview_frame_range_exceeds_sequence`，避免尾帧重复误导判断。
 
 示例：
 
@@ -113,6 +115,21 @@ JSON 关键字段：
   "frame_index": 24,
   "format": "png",
   "max_size": 1280,
+  "target": "viewport"
+}
+```
+
+批量示例：
+
+```json
+{
+  "asset_path": "/Game/Characters/PaladinRootMotion/Animations/sword_and_shield_slash__2__RM",
+  "skeletal_mesh_path": "/Game/Characters/PaladinRootMotion/Mesh/Paladin_WProp_J_Nordstrom_RM",
+  "start_time_seconds": 0.8,
+  "count": 8,
+  "interval_seconds": 0.1,
+  "format": "png",
+  "max_size": 1024,
   "target": "viewport"
 }
 ```
@@ -253,10 +270,7 @@ JSON 关键字段：
 | `skeleton_export_folder` | 导出 Skeleton 文件夹式结构化 JSON | `asset_path`；可选 `folder_path` |
 | `skeleton_validate_folder` | 只读校验 Skeleton 文件夹 JSON | `folder_path`；可选 `asset_path`、`strict` |
 | `skeleton_apply_folder` | 应用 Skeleton 文件夹 JSON | `folder_path`；可选 `asset_path`、`dry_run`、`validate_only`、`strict`、`save_after_apply` |
-| `skeleton_set_compatible_skeletons` | 批量管理 compatible skeleton 与相关开关；Deprecated for authoring | `asset_path`；可选 `set_compatible_skeleton_paths[]`、`add_compatible_skeleton_paths[]`、`remove_compatible_skeleton_paths[]`、`clear_all`、`use_retarget_modes_from_compatible_skeleton`、`save_after_set` |
-| `skeleton_set_preview_mesh` | 设置或清空 Skeleton 预览网格；Deprecated for authoring | `asset_path`、`skeletal_mesh_path` 或 `clear_preview_mesh`、`save_after_set` |
-| `skeleton_set_socket` | 新增 / 更新 / 删除 socket；Deprecated for authoring | `asset_path`、`socket_name`；新增/更新时可传 `bone_name`、`relative_location/rotation/scale`；删除时传 `remove=true` |
-| `skeleton_set_virtual_bone` | 新增 / 删除 virtual bone；Deprecated for authoring | `asset_path`；新增时传 `source_bone_name/target_bone_name`、可选 `virtual_bone_name`；删除时传 `virtual_bone_name` 和 `remove=true` |
+| `skeleton_set_preview_mesh` | 设置或清空 Skeleton preview mesh | `asset_path`、`skeletal_mesh_path` 或 `clear_preview_mesh`、`save_after_set` |
 
 ### Skeleton 文件夹式 JSON 主流程
 
@@ -381,13 +395,6 @@ JSON 关键字段：
 - 属性名匹配会忽略大小写、下划线、连字符和空格差异。
 - 当前不扩到嵌套 struct / array / object reference。
 
-<!-- UAI_FORMAL_COMMAND_INDEX_BEGIN -->
-## 原子/兼容命令正式索引
->
-> 以下命令已有真实 dispatch 实现并纳入 smoke 覆盖；对完整资产制作仍应优先使用本分册中的结构化 JSON / folder workflow，原子命令仅用于 bootstrap、迁移、probe 或局部修复。
+## 废弃命令
 
-| Command | 作用 | 关键参数 | 关键返回 |
-| --- | --- | --- | --- |
-| `anim_sequence_set_preview_mesh` | **原子/兼容**：设置或清空 AnimSequence 预览网格 | `asset_path`、`skeletal_mesh_path` 或 `clear_preview_mesh`、`save_after_set` | `success`、`warnings`、`errors` |
-| `anim_sequence_set_settings` | **原子/兼容**：批量设置 AnimSequence 常用属性 | `asset_path`；可选 `rate_scale`、`enable_root_motion`、`force_root_lock`、`root_motion_lock_type`、`interpolation_type`、`additive_animation_type`、`additive_base_pose_type`、`base_pose_sequence_path`、`clear_base_pose_sequence`、`base_pose_frame_index`、`retarget_source`、`retarget_source_asset_path`、`clear_retarget_source_asset`、`bone_compression_settings_path`、`curve_compression_settings_path`、`variable_frame_stripping_settings_path`、`save_after_set` | `success`、`warnings`、`errors` |
-<!-- UAI_FORMAL_COMMAND_INDEX_END -->
+本分册不再列出已废弃写入命令；这些命令仅保留在 `deprecatedCommand/13_AnimationAssets_Skeleton.md`，供旧脚本兼容、bootstrap、迁移和故障补修查阅。

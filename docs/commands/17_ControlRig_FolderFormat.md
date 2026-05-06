@@ -30,7 +30,7 @@ Control Rig 使用文件夹式结构化 JSON 作为主 authoring 流程。Contro
 | `control_rig_get_compile_log` | 编译并返回 compile report | `asset_path` |
 | `control_rig_open_editor` | 打开 Control Rig 编辑器 | `asset_path`，遵守最小化/不抢焦点规则 |
 | `control_rig_graph_get_view` | 读取 RigVM/蓝图图视图 | `asset_path`；可选 `graph_name_or_path` |
-| `control_rig_graph_set_view` | 设置图视图 | `asset_path`；可选 `graph_name_or_path`、缩放/位置参数 |
+| `control_rig_graph_set_view` | 设置图视图 | `asset_path`；可选 `graph_name_or_path`、`view_x`、`view_y`、`zoom`、`snap_to_pixel_grid`、`update_document_view_state`、`save_after_set` |
 | `control_rig_viewport_get_camera` | 读取预览视口相机 | `asset_path` |
 | `control_rig_viewport_set_camera` | 设置预览视口相机 | `asset_path`、相机参数 |
 | `control_rig_screenshot` | 截图图/视口/窗口 | `asset_path`、`target=graph|viewport|window`；可选 `graph_name_or_path` |
@@ -41,6 +41,7 @@ Control Rig 使用文件夹式结构化 JSON 作为主 authoring 流程。Contro
 ### `control_rig_create`
 
 `control_rig_screenshot` 复用 Blueprint 截图实现；Slate UI 截图默认走离屏 WidgetRenderer，返回 `legacy_backbuffer_capture=disabled`，不再使用真实窗口 backbuffer 截图。
+`control_rig_graph_set_view` 复用 Blueprint 图视图入口；`snap_to_pixel_grid` 默认 `true`，会按 `round(view * zoom) / zoom` 对齐屏幕像素，避免非 1 缩放下图面文字和线缆发糊。`update_document_view_state` 默认同步 UE 下次打开图时使用的文档视图状态，`save_after_set=true` 时把该状态写入资产包。
 
 参数：
 

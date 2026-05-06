@@ -16,7 +16,7 @@
 
 ## Stage 节点管理
 
-> `niagara_emitter_set_stage_property` 和 `niagara_emitter_set_stage_node_property` 返回通用属性观测字段：`requested_value_text`、`applied_value_text`、`property_value_read_back`、`property_import_status`、`property_import_error`、`value_text_changed_after_import`、`cpp_type`。属性不存在会返回 `property_not_found`，UE `ImportText` 解析失败会返回 `property_import_failed:<property>:<value>`。
+> Stage、Stage node 和 Module Input 的属性回写应通过 folder JSON 表达，并返回通用属性观测字段：`requested_value_text`、`applied_value_text`、`property_value_read_back`、`property_import_status`、`property_import_error`、`value_text_changed_after_import`、`cpp_type`。属性不存在会返回 `property_not_found`，UE `ImportText` 解析失败会返回 `property_import_failed:<property>:<value>`。
 
 | 指令 | 作用 | 关键参数 | 典型用法 |
 |---|---|---|---|
@@ -29,13 +29,13 @@
 |---|---|---|---|
 | `niagara_emitter_list_module_inputs` | 列出模块输入（含隐藏输入） | `emitter_asset_path`、`module_node_guid` | 查询可写输入名 |
 
-> 废弃写入命令已迁移到 `deprecatedCommand/09_Niagara_StageGraph.md` 的对应章节。Dynamic Input 与曲线写入已并入 `15_Niagara_FolderFormat.md` 的 folder JSON 主流程，不再通过 `niagara_emitter_set_module_input` 扩展参数制作。
+> 废弃写入命令已迁移到 `deprecatedCommand/09_Niagara_StageGraph.md` 的对应章节。Dynamic Input 与曲线写入已并入 `15_Niagara_FolderFormat.md` 的 folder JSON 主流程。
 ## 防崩与限制（必须了解）
 
-- `niagara_emitter_remove_stage_module`：默认软删除（禁用模块），避免直接破坏 Stack 图。
-- `niagara_emitter_remove_stage_node`：模块节点走软删除，非模块节点才物理删除。
-- `niagara_emitter_add_stage_node`：对 `ParticleEventScript` 的危险加模块场景有保护拦截。
-- `niagara_emitter_set_module_input`：Static Switch 输入不支持参数链接，需改默认值方式。其 Dynamic Input / `curve_json` 扩展只保留兼容，不作为 authoring 或修补首选；改用 folder JSON 的 `inputs[].dynamic_input.data_interfaces[].raw_properties[].curve_json`。
+- Stage module 删除默认应表现为软删除（禁用模块），避免直接破坏 Stack 图。
+- 模块节点删除走软删除，非模块节点才物理删除。
+- 对 `ParticleEventScript` 的危险加模块场景有保护拦截。
+- Static Switch 输入不支持参数链接，需改默认值方式。Dynamic Input / `curve_json` 应改用 folder JSON 的 `inputs[].dynamic_input.data_interfaces[].raw_properties[].curve_json`。
 
 ## 推荐执行顺序
 
@@ -51,39 +51,31 @@
 ```json
 {
   "request_id": "nsg-001",
-  "command": "niagara_emitter_set_module_input",
+  "command": "niagara_emitter_apply_folder",
   "params": {
     "emitter_asset_path": "/Game/AutoTests/Niagara/NE_Leader",
-    "module_node_guid": "xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx",
-    "input_name": "Kill",
-    "link_parameter_name": "Particles.HasCollided"
+    "folder_path": "Saved/UeAssetFolders/NiagaraEmitter/Game/AutoTests/Niagara/NE_Leader",
+    "strict": true
   }
 }
 ```
 
 <!-- UAI_FORMAL_COMMAND_INDEX_BEGIN -->
-## 原子/兼容命令正式索引
+
+## 补充命令正式索引
 >
-> 以下命令已有真实 dispatch 实现并纳入 smoke 覆盖；对完整资产制作仍应优先使用本分册中的结构化 JSON / folder workflow，原子命令仅用于 bootstrap、迁移、probe 或局部修复。
+> 以下命令仍属于本正式分册；已废弃写入命令不在正式分册列出，仅保留在 `deprecatedCommand/09_Niagara_StageGraph.md`。
 
 | Command | 作用 | 关键参数 | 关键返回 |
 | --- | --- | --- | --- |
-| `niagara_emitter_add_simulation_stage` | **原子/兼容**：新增 Simulation Stage | `emitter_asset_path`、`stage_class`、`stage_name`、`target_index` | 仅用于修补 |
-| `niagara_emitter_add_stage_module` | **原子/兼容**：向 Stage 添加模块 | `emitter_asset_path` + Stage 标识 + `module_script_asset_path` | 仅用于修补 |
-| `niagara_emitter_add_stage_node` | **原子/兼容**：添加 Stage 节点（模块/特定节点） | `emitter_asset_path` + Stage 标识 + (`module_script_asset_path` 或 `node_class`) | 仅用于修补 |
-| `niagara_emitter_clear_module_input` | **原子/兼容**：清除输入覆盖，回退默认 | `emitter_asset_path`、`module_node_guid`、`input_name` | 仅用于修补 |
-| `niagara_emitter_connect_stage_nodes` | **原子/兼容**：连接节点引脚 | `emitter_asset_path` + Stage 标识 + `from_node_guid/from_pin/to_node_guid/to_pin` | 仅用于修补 |
-| `niagara_emitter_disconnect_stage_nodes` | **原子/兼容**：断开节点连线 | `emitter_asset_path` + Stage 标识 + `from_node_guid/from_pin` | 仅用于修补 |
 | `niagara_emitter_move_stage_module` | **原子/兼容**：编辑 Niagara Stage Graph/Module Input 的节点、连线、排序或输入 | `asset_path`、`emitter_name`、`module_name`、`input_name`、`value_text` | `success`、`warnings`、`errors` |
-| `niagara_emitter_remove_stage` | **原子/兼容**：删除 Stage | `emitter_asset_path` + (`stage_key` 或 `script_usage`+`script_usage_id`) | 仅用于修补 |
-| `niagara_emitter_remove_stage_module` | **原子/兼容**：移除 Stage 模块（当前为软删除） | `emitter_asset_path` + (`module_node_guid` 或 `module_index/module_name`) | 仅用于修补 |
-| `niagara_emitter_remove_stage_node` | **原子/兼容**：删除节点（模块节点优先软删除） | `emitter_asset_path` + Stage 标识 + `node_guid` | 仅用于修补 |
-| `niagara_emitter_set_module_input` | **原子/兼容**：设置模块输入值或绑定参数 | `emitter_asset_path`、`module_node_guid`、`input_name`、`value_text`（或 `link_parameter_name`） | 仅用于局部修补 |
-| `niagara_emitter_set_stage_module_enabled` | **原子/兼容**：启用/禁用模块 | `emitter_asset_path`、`module_node_guid`、`enabled` | 仅用于诊断/修补 |
-| `niagara_emitter_set_stage_node_property` | **原子/兼容**：设置节点属性 | `emitter_asset_path` + Stage 标识 + `node_guid` + `property_name` + `value_text` | 仅用于局部修补 |
-| `niagara_emitter_set_stage_property` | **原子/兼容**：设置 Stage 属性 | `emitter_asset_path` + Stage 标识 + `property_name` + `value_text` | 仅用于局部修补 |
 | `niagara_list_module_library` | **原子/兼容**：编辑 Niagara Stage Graph/Module Input 的节点、连线、排序或输入 | `asset_path`、`emitter_name`、`module_name`、`input_name`、`value_text` | `success`、`warnings`、`errors` |
 | `niagara_system_list_module_inputs` | **原子/兼容**：编辑 Niagara Stage Graph/Module Input 的节点、连线、排序或输入 | `asset_path`、`emitter_name`、`module_name`、`input_name`、`value_text` | `success`、`warnings`、`errors` |
 | `niagara_system_list_stage_modules` | **原子/兼容**：编辑 Niagara Stage Graph/Module Input 的节点、连线、排序或输入 | `asset_path`、`emitter_name`、`module_name`、`input_name`、`value_text` | `success`、`warnings`、`errors` |
 | `niagara_system_set_module_input` | **原子/兼容**：编辑 Niagara Stage Graph/Module Input 的节点、连线、排序或输入 | `asset_path`、`emitter_name`、`module_name`、`input_name`、`value_text` | `success`、`warnings`、`errors` |
+
 <!-- UAI_FORMAL_COMMAND_INDEX_END -->
+
+## 废弃命令
+
+本分册不再列出已废弃写入命令；这些命令仅保留在 `deprecatedCommand/09_Niagara_StageGraph.md`，供旧脚本兼容、bootstrap、迁移和故障补修查阅。

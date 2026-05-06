@@ -15,7 +15,7 @@
 1. 先看本文，确定应该使用哪个分册和哪类工作流。
 2. 再打开具体分册，查看命令参数、返回字段、错误码和边界。
 3. 需要确认是否仍有覆盖债时，看 `../generated/command_coverage_matrix.md`。
-4. 看到 `Deprecated for authoring` 的写入命令时，默认改用对应 JSON / folder workflow。
+4. 正式分册不再列出已废弃写入命令；需要旧脚本兼容、迁移或局部补修时再查 `deprecatedCommand/README.md`。
 
 ## 工作流优先级
 
@@ -25,7 +25,7 @@
 | 2 | 文件夹式 JSON | 图、树、复合资产、复杂编辑面 | `blueprint_*_folder`, `umg_*_folder`, `material_*_folder`, `niagara_*_folder`, `control_rig_*_folder` |
 | 3 | 场景/拓扑 JSON | Level Actor 实例、Component、Streaming、DataLayer、HLOD | `level_content_*_json`, `level_topology_*_json` |
 | 4 | 动作 / probe / build | 编译、截图、运行时探针、导入、构建、长任务 | `*_compile`, `*_screenshot`, `*_runtime_probe`, `packaging_*`, `*_build` |
-| 5 | 原子写入命令 | bootstrap、迁移、局部补修、故障恢复 | 详见 `deprecatedCommand/README.md` |
+| 5 | 废弃/兼容写入命令 | 旧脚本兼容、bootstrap、迁移、局部补修、故障恢复 | 仅见 `deprecatedCommand/README.md` |
 
 通用节奏：
 
@@ -72,7 +72,7 @@ bootstrap -> export -> refine -> validate -> apply -> export/readback -> smoke/p
 
 | 任务 | 首选入口 | 不应优先使用 |
 | --- | --- | --- |
-| 在场景里创建、修改、删除 Actor / Component | `23_LevelContent_JSON.md` | `spawn_actor`、逐条 transform/property 原子命令 |
+| 在场景里创建、修改、删除 Actor / Component | `23_LevelContent_JSON.md` | 旧单步 Actor 创建和逐条 transform/property 原子命令 |
 | 关卡流送、DataLayer、World Partition、HLOD | `25_LevelTopology_Streaming_WorldPartition_DataLayer_HLOD.md` | 把拓扑系统硬塞进普通 Actor CRUD |
 | 普通 Blueprint / UMG / AnimBlueprint | `02_Blueprint.md`, `03_UMG.md`, `11_AnimBlueprint.md` | 大量节点/属性原子命令手搓完整资产 |
 | 材质、Sequencer、Niagara、Control Rig | 对应 folder workflow 分册 | 单条节点写入作为主 authoring |

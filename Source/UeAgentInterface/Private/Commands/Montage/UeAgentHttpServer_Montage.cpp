@@ -920,6 +920,15 @@ bool FUeAgentHttpServer::CmdMontageListMontages(const FUeAgentRequestContext& Ct
 
 bool FUeAgentHttpServer::CmdMontageCreate(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
+	if (!OutData.IsValid())
+	{
+		OutData = MakeShared<FJsonObject>();
+	}
+	else
+	{
+		OutData->Values.Reset();
+	}
+
 	FString AssetPathInput;
 	if (!JsonTryGetString(Ctx.Params, TEXT("asset_path"), AssetPathInput) || AssetPathInput.IsEmpty())
 	{
@@ -1770,15 +1779,24 @@ bool FUeAgentHttpServer::CmdMontageApplyJson(const FUeAgentRequestContext& Ctx, 
 
 		if (!bDefaultSectionConfigured)
 		{
-			TSharedPtr<FJsonObject> DefaultTimeParams = MakeShared<FJsonObject>();
-			DefaultTimeParams->SetStringField(TEXT("asset_path"), AssetPath);
-			DefaultTimeParams->SetStringField(TEXT("section_name"), TEXT("Default"));
-			DefaultTimeParams->SetNumberField(TEXT("time_seconds"), 0.0);
-			DefaultTimeParams->SetBoolField(TEXT("save_after_set"), false);
-			TSharedPtr<FJsonObject> DefaultTimeData;
-			if (!InvokeMontageSubCommand(TEXT("montage_set_section_time"), DefaultTimeParams, DefaultTimeData, OutError))
+			Montage = UeAgentMontageOps::LoadMontage(AssetPath);
+			if (!Montage)
 			{
+				OutError = TEXT("montage_reload_failed");
 				return false;
+			}
+			if (UeAgentMontageOps::FindSectionIndexByName(Montage, TEXT("Default")) != INDEX_NONE)
+			{
+				TSharedPtr<FJsonObject> DefaultTimeParams = MakeShared<FJsonObject>();
+				DefaultTimeParams->SetStringField(TEXT("asset_path"), AssetPath);
+				DefaultTimeParams->SetStringField(TEXT("section_name"), TEXT("Default"));
+				DefaultTimeParams->SetNumberField(TEXT("time_seconds"), 0.0);
+				DefaultTimeParams->SetBoolField(TEXT("save_after_set"), false);
+				TSharedPtr<FJsonObject> DefaultTimeData;
+				if (!InvokeMontageSubCommand(TEXT("montage_set_section_time"), DefaultTimeParams, DefaultTimeData, OutError))
+				{
+					return false;
+				}
 			}
 		}
 

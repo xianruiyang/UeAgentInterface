@@ -915,6 +915,7 @@ bool FUeAgentHttpServer::ExecuteAnimBlueprintCommand(const FString& CommandLower
 	if (CommandLower == TEXT("anim_blueprint_add_function_graph")) return CmdBlueprintAddFunctionGraph(Ctx, OutData, OutError);
 	if (CommandLower == TEXT("anim_blueprint_add_macro_graph")) return CmdBlueprintAddMacroGraph(Ctx, OutData, OutError);
 	if (CommandLower == TEXT("anim_blueprint_add_event_dispatcher")) return CmdBlueprintAddEventDispatcher(Ctx, OutData, OutError);
+	if (CommandLower == TEXT("anim_blueprint_layout_graph")) return CmdBlueprintLayoutGraph(Ctx, OutData, OutError);
 	if (CommandLower == TEXT("anim_blueprint_graph_get_view")) return CmdBlueprintGraphGetView(Ctx, OutData, OutError);
 	if (CommandLower == TEXT("anim_blueprint_graph_set_view")) return CmdBlueprintGraphSetView(Ctx, OutData, OutError);
 	if (CommandLower == TEXT("anim_blueprint_viewport_get_camera")) return CmdBlueprintViewportGetCamera(Ctx, OutData, OutError);

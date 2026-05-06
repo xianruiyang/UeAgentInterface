@@ -23,14 +23,14 @@
 
 > `niagara_emitter_apply_folder` 默认返回 `stack_issue_report`、`stack_issues`、`stack_scopes`、`stack_error_count`、`stack_warning_count` 和 `stack_issue_view_model_source`。apply 后默认会先编译并打开/复用 Niagara 编辑器 ViewModel 读取感叹号内容；自动化场景可显式传 `open_editor_for_stack_issues=false` 或 `compile_before_stack_issue_read=false`。`strict=true` 时如 Stack error 非空，会失败返回 `strict_apply_has_stack_errors`，但仍带具体感叹号内容。
 
-> `niagara_emitter_set_property` 针对部分会触发 UE 联动逻辑的版本属性做了命令侧同步处理。当前 `InterpolatedSpawnMode` 会同时更新 `SpawnScriptProps.Script->Usage`，并把 GraphSource 标记为未同步；返回字段包含 `side_effect_handled`、`updated_spawn_script_usage`、`old_spawn_script_usage`、`new_spawn_script_usage`。否则会出现属性回读为 `NoInterpolation`，但编译日志仍显示 `ParticleSpawnScriptInterpolated` 的错位状态。
+> Emitter 版本属性应通过 folder JSON 回写；针对会触发 UE 联动逻辑的属性，apply 会同步相关派生字段并返回 `side_effect_handled` 等诊断，避免属性回读和编译脚本状态错位。
 
 > `niagara_get_stack_issues` 同时支持 System 与 standalone Emitter。读取 Emitter 时传 `asset_path` 为 Emitter 资产路径；如需尽量匹配 Niagara UI 中红色感叹号悬停文本，传 `prefer_existing_view_model=true` 和 `open_editor_if_needed=true`。返回的 `scopes[]` 会给出 `stack_issue_icon_kind`、`stack_issue_tooltip_summary`，并在 Emitter scope 上补充 `emitter_latest_compile_status`、`emitter_handle_error_text`、`emitter_handle_error_visibility`，用于区分 Stack issue 图标与 emitter 编译/状态提示。命令也会合并 Niagara `FNiagaraMessageStore` 中显示到 Stack 的资产消息；这类 issue 会在 `issues[]` 里标记 `issue_origin=message_store`，并包含 `message_key`、`message_topic`、`message_source_path`。
 
-> `niagara_emitter_clear_parent` 会清除 `Parent` / `ParentAtLastMerge`，并可清除父 emitter merge MessageStore 残留；当目标 emitter 是 System 内嵌 emitter 时，会同时刷新 owning System 的 overview、execution order、cached traversal data 和 ViewModel。常用参数：`clear_merge_message=true`、`compile_after_apply=true`、`save_after_apply=true`。
+> 清除 parent / merge 残留的兼容入口已移入废弃分册；正式 authoring 中应通过 Emitter folder JSON 和 System refresh 读回验证 owning System 的 overview、execution order、cached traversal data 和 ViewModel。
 
-> `niagara_emitter_set_property`、`niagara_emitter_set_renderer_property`、`niagara_emitter_set_event_handler_property` 和 `niagara_emitter_add_renderer` 的初始属性写入都会返回通用属性观测字段：`requested_value_text`、`applied_value_text`、`property_value_read_back`、`property_import_status`、`property_import_error`、`value_text_changed_after_import`、`cpp_type`。属性不存在会返回 `property_not_found`，UE `ImportText` 解析失败会返回 `property_import_failed:<property>:<value>`。
-> `niagara_emitter_add_renderer` 如果在创建后应用初始 `property_name/value_text` 失败，会移除刚创建的 renderer，并返回 `renderer_removed_after_property_failure=true`，避免命令失败后留下半成品 renderer。
+> Emitter、Renderer 和 Event Handler 属性回写都会返回通用属性观测字段：`requested_value_text`、`applied_value_text`、`property_value_read_back`、`property_import_status`、`property_import_error`、`value_text_changed_after_import`、`cpp_type`。属性不存在会返回 `property_not_found`，UE `ImportText` 解析失败会返回 `property_import_failed:<property>:<value>`。
+> Renderer 创建或重建阶段如果初始属性导入失败，apply 必须回滚半成品 renderer，并返回对应清理诊断。
 ## Renderer 管理
 
 | 指令 | 作用 | 关键参数 | 典型用法 |
@@ -68,33 +68,23 @@
 ```json
 {
   "request_id": "ne-001",
-  "command": "niagara_emitter_set_event_handler_property",
+  "command": "niagara_emitter_apply_folder",
   "params": {
     "emitter_asset_path": "/Game/AutoTests/Niagara/NE_Follower",
-    "event_index": 0,
-    "property_name": "SourceEmitterID",
-    "value_text": "0e637b92-cdb2-4a45-bf47-f7efa7874e89"
+    "folder_path": "Saved/UeAssetFolders/NiagaraEmitter/Game/AutoTests/Niagara/NE_Follower",
+    "strict": true
   }
 }
 ```
 
 <!-- UAI_FORMAL_COMMAND_INDEX_BEGIN -->
-## 原子/兼容命令正式索引
+
+## 补充命令正式索引
 >
-> 以下命令已有真实 dispatch 实现并纳入 smoke 覆盖；对完整资产制作仍应优先使用本分册中的结构化 JSON / folder workflow，原子命令仅用于 bootstrap、迁移、probe 或局部修复。
+> 以下命令仍属于本正式分册；已废弃写入命令不在正式分册列出，仅保留在 `deprecatedCommand/08_Niagara_Emitter.md`。
 
 | Command | 作用 | 关键参数 | 关键返回 |
 | --- | --- | --- | --- |
-| `niagara_emitter_add_event_handler` | **原子/兼容**：新增事件处理器 | `emitter_asset_path`、`source_emitter_id`、`source_event_name`、`execution_mode` | 仅用于修补 |
-| `niagara_emitter_add_renderer` | **原子/兼容**：添加渲染器 | `emitter_asset_path`、`renderer_class` 或 `renderer_type` | 仅用于 bootstrap/修补 |
-| `niagara_emitter_clear_parent` | **原子/兼容**：清除 Emitter parent/merge 残留 | `emitter_asset_path`（或 `asset_path`）、`clear_merge_message` | 仅用于修复父 emitter merge error 或隐藏 parent 残留 |
 | `niagara_emitter_move_renderer` | **原子/兼容**：编辑 Niagara System/Emitter 的 emitter、renderer、event handler、parameter 或属性 | `asset_path`、`emitter_name`、`module_name`、`input_name`、`value_text` | `success`、`warnings`、`errors` |
-| `niagara_emitter_parameter_add` | **原子/兼容**：新增 Emitter 参数 | `emitter_asset_path`、`parameter_name`、`parameter_type`、`default_value_text`、`is_static_switch` | 仅用于修补 |
-| `niagara_emitter_parameter_remove` | **原子/兼容**：删除 Emitter 参数 | `emitter_asset_path`、`parameter_name` | 仅用于修补 |
-| `niagara_emitter_parameter_set` | **原子/兼容**：设置/重命名/改类型 | `emitter_asset_path`、`parameter_name`、`value_text` 或 `new_parameter_name` 或 `parameter_type` | 仅用于局部修补 |
-| `niagara_emitter_remove_event_handler` | **原子/兼容**：删除事件处理器 | `emitter_asset_path` + (`event_index`/`script_usage_id`/`source_event_name`) | 仅用于修补 |
-| `niagara_emitter_remove_renderer` | **原子/兼容**：删除渲染器 | `emitter_asset_path` + (`renderer_index`/`renderer_name`/`renderer_class`) | 仅用于修补 |
-| `niagara_emitter_set_event_handler_property` | **原子/兼容**：设置事件处理器属性 | `emitter_asset_path` + 事件标识 + `property_name` + `value_text` | 仅用于局部修补 |
-| `niagara_emitter_set_property` | **原子/兼容**：设置 Emitter 版本属性 | `emitter_asset_path`（或 `asset_path`）、`property_name`、`value_text` | 仅用于局部修补 |
-| `niagara_emitter_set_renderer_property` | **原子/兼容**：设置渲染器属性 | `emitter_asset_path` + renderer 标识 + `property_name` + `value_text` | 仅用于局部修补 |
+
 <!-- UAI_FORMAL_COMMAND_INDEX_END -->

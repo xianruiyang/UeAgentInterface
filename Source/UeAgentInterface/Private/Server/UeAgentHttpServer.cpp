@@ -13,6 +13,8 @@
 #include "Misc/Guid.h"
 #include "Serialization/JsonReader.h"
 #include "Serialization/JsonSerializer.h"
+#include "SocketSubsystem.h"
+#include "Sockets.h"
 
 namespace UeAgentHttpServer
 {
@@ -80,6 +82,57 @@ namespace UeAgentHttpServer
 			return TEXT("********");
 		}
 		return Token.Left(4) + TEXT("...") + Token.Right(4);
+	}
+
+	static bool CanBindTcpPort(const FString& ListenAddress, int32 Port, FString& OutError)
+	{
+		if (Port <= 0 || Port > 65535)
+		{
+			OutError = FString::Printf(TEXT("invalid_port:%d"), Port);
+			return false;
+		}
+
+		ISocketSubsystem* SocketSubsystem = ISocketSubsystem::Get(PLATFORM_SOCKETSUBSYSTEM);
+		if (!SocketSubsystem)
+		{
+			OutError = TEXT("socket_subsystem_unavailable");
+			return false;
+		}
+
+		FString AddressText = ListenAddress;
+		if (AddressText.IsEmpty() || AddressText.Equals(TEXT("localhost"), ESearchCase::IgnoreCase))
+		{
+			AddressText = TEXT("127.0.0.1");
+		}
+
+		bool bIsValidAddress = false;
+		TSharedRef<FInternetAddr> Address = SocketSubsystem->CreateInternetAddr();
+		Address->SetIp(*AddressText, bIsValidAddress);
+		if (!bIsValidAddress)
+		{
+			OutError = FString::Printf(TEXT("invalid_listen_address:%s"), *ListenAddress);
+			return false;
+		}
+		Address->SetPort(Port);
+
+		FSocket* ProbeSocket = SocketSubsystem->CreateSocket(NAME_Stream, TEXT("UeAgentInterfacePortProbe"), false);
+		if (!ProbeSocket)
+		{
+			OutError = TEXT("create_probe_socket_failed");
+			return false;
+		}
+
+		ProbeSocket->SetReuseAddr(false);
+		const bool bCanBind = ProbeSocket->Bind(*Address);
+		SocketSubsystem->DestroySocket(ProbeSocket);
+
+		if (!bCanBind)
+		{
+			OutError = FString::Printf(TEXT("port_unavailable listen=%s port=%d"), *AddressText, Port);
+			return false;
+		}
+
+		return true;
 	}
 
 	static FString GetHeaderFirst(const TMap<FString, TArray<FString>>& Headers, const FString& KeyLower)
@@ -244,6 +297,9 @@ namespace
 				{ TEXT("open_asset_editor"), &InvokeExactWithCtx<&FUeAgentHttpServer::CmdOpenAssetEditor> },
 				{ TEXT("save_asset"), &InvokeExactWithCtx<&FUeAgentHttpServer::CmdSaveAsset> },
 				{ TEXT("asset_duplicate"), &InvokeExactWithCtx<&FUeAgentHttpServer::CmdAssetDuplicate> },
+				{ TEXT("asset_move"), &InvokeExactWithCtx<&FUeAgentHttpServer::CmdAssetMove> },
+				{ TEXT("asset_fixup_redirectors"), &InvokeExactWithCtx<&FUeAgentHttpServer::CmdAssetFixupRedirectors> },
+				{ TEXT("asset_reference_graph"), &InvokeExactWithCtx<&FUeAgentHttpServer::CmdAssetReferenceGraph> },
 				{ TEXT("asset_import_texture"), &InvokeExactWithCtx<&FUeAgentHttpServer::CmdAssetImportTexture> },
 				{ TEXT("asset_import_fbx_skeletal_mesh"), &InvokeExactWithCtx<&FUeAgentHttpServer::CmdAssetImportFbxSkeletalMesh> },
 				{ TEXT("asset_import_fbx_animation"), &InvokeExactWithCtx<&FUeAgentHttpServer::CmdAssetImportFbxAnimation> },
@@ -400,17 +456,32 @@ bool FUeAgentHttpServer::Start()
 {
 	if (bRunning)
 	{
+		FUeAgentInterfaceLogger::Log(TEXT("Start: already running."));
 		return true;
 	}
 
-	FUeAgentInterfaceLogger::Init();
+	FUeAgentInterfaceLogger::Log(TEXT("Start: begin."));
 
 	const UUeAgentInterfaceSettings* Settings = UUeAgentInterfaceSettings::Get();
 	if (!Settings)
 	{
+		FUeAgentInterfaceLogger::Log(TEXT("Start: settings object unavailable."));
 		return false;
 	}
 
+	FUeAgentInterfaceLogger::Log(TEXT("Start: settings listen=%s port=%d token=%s"),
+		*Settings->ListenAddress,
+		Settings->Port,
+		*UeAgentHttpServer::MaskToken(Settings->AuthToken));
+
+	FString PortPreflightError;
+	if (!UeAgentHttpServer::CanBindTcpPort(Settings->ListenAddress, Settings->Port, PortPreflightError))
+	{
+		FUeAgentInterfaceLogger::Log(TEXT("Start: port preflight failed: %s"), *PortPreflightError);
+		return false;
+	}
+
+	FUeAgentInterfaceLogger::Log(TEXT("Start: acquiring HTTP router port=%d."), Settings->Port);
 	Router = FHttpServerModule::Get().GetHttpRouter((uint32)Settings->Port, /*bFailOnBindFailure*/ true);
 	if (!Router.IsValid())
 	{
@@ -418,13 +489,17 @@ bool FUeAgentHttpServer::Start()
 		return false;
 	}
 
+	FUeAgentInterfaceLogger::Log(TEXT("Start: HTTP router acquired."));
+	FUeAgentInterfaceLogger::Log(TEXT("Start: binding routes."));
 	if (!BindRoutes())
 	{
+		FUeAgentInterfaceLogger::Log(TEXT("Start: route binding failed."));
 		UnbindRoutes();
 		Router.Reset();
 		return false;
 	}
 
+	FUeAgentInterfaceLogger::Log(TEXT("Start: routes bound, starting HTTP listeners."));
 	FHttpServerModule::Get().StartAllListeners();
 	bRunning = true;
 

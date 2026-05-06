@@ -90,6 +90,212 @@ bool FUeAgentInterfaceAuthorizationSmokeTest::RunTest(const FString& Parameters)
 }
 
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(
+	FUeAgentInterfaceAssetReferenceGraphSmokeTest,
+	"GptProjectTest.UeAgentInterface.Smoke.AssetReferenceGraph",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::ProductFilter)
+
+bool FUeAgentInterfaceAssetReferenceGraphSmokeTest::RunTest(const FString& Parameters)
+{
+	FScopedUeAgentHttpServer ServerScope;
+	FString InitError;
+	if (!ServerScope.Initialize(InitError))
+	{
+		AddError(FString::Printf(TEXT("Initialize failed: %s"), *InitError));
+		return false;
+	}
+
+	auto JsonQuote = [](const FString& Text) -> FString
+	{
+		FString Out = Text;
+		Out.ReplaceInline(TEXT("\\"), TEXT("\\\\"));
+		Out.ReplaceInline(TEXT("\""), TEXT("\\\""));
+		Out.ReplaceInline(TEXT("\n"), TEXT("\\n"));
+		Out.ReplaceInline(TEXT("\r"), TEXT("\\r"));
+		Out.ReplaceInline(TEXT("\t"), TEXT("\\t"));
+		return FString::Printf(TEXT("\"%s\""), *Out);
+	};
+
+	auto ExecCommand = [this, &ServerScope](const FString& RequestId, const FString& Command, const FString& ParamsJson, TSharedPtr<FJsonObject>& OutData, const int32 ExpectedStatus = 200) -> bool
+	{
+		FHttpSmokeResult Result;
+		const FString Body = MakeExecRequestBody(RequestId, Command, ParamsJson);
+		if (!TestTrue(Command + TEXT(" request completed"), ExecuteHttpJsonRequest(TEXT("POST"), ServerScope.BaseUrl + TEXT("/api/exec"), ServerScope.Token, Body, Result, 20.0)))
+		{
+			return false;
+		}
+		TestEqual(Command + TEXT(" status"), Result.StatusCode, ExpectedStatus);
+
+		TSharedPtr<FJsonObject> Root;
+		if (!TestTrue(Command + TEXT(" response parses"), ParseJson(Result.Body, Root)) || !Root.IsValid())
+		{
+			return false;
+		}
+
+		const bool bOk = Root->GetBoolField(TEXT("ok"));
+		TestEqual(Command + TEXT(" ok state"), bOk, ExpectedStatus == 200);
+		if (ExpectedStatus != 200)
+		{
+			return true;
+		}
+
+		const TSharedPtr<FJsonObject>* DataObj = nullptr;
+		if (!TestTrue(Command + TEXT(" contains data"), Root->TryGetObjectField(TEXT("data"), DataObj) && DataObj && DataObj->IsValid()))
+		{
+			return false;
+		}
+		OutData = *DataObj;
+		return true;
+	};
+
+	const FString MeshPath = MakeAutomationAssetPath(TEXT("SMReferenceGraphCube"));
+	TSharedPtr<FJsonObject> Data;
+	TestTrue(TEXT("asset_duplicate setup"), ExecCommand(
+		TEXT("smoke-refgraph-duplicate"),
+		TEXT("asset_duplicate"),
+		FString::Printf(TEXT("{\"source_asset_path\":\"/Engine/BasicShapes/Cube\",\"destination_asset_path\":%s,\"save_after_duplicate\":true}"), *JsonQuote(MeshPath)),
+		Data));
+
+	const FString MoveSourcePath = MakeAutomationAssetPath(TEXT("SMAssetMoveSourceCube"));
+	const FString MoveTargetPath = MakeAutomationAssetPath(TEXT("SMAssetMoveMovedCube"));
+	TestTrue(TEXT("asset_move duplicate setup"), ExecCommand(
+		TEXT("smoke-asset-move-duplicate"),
+		TEXT("asset_duplicate"),
+		FString::Printf(TEXT("{\"source_asset_path\":\"/Engine/BasicShapes/Cube\",\"destination_asset_path\":%s,\"save_after_duplicate\":true}"), *JsonQuote(MoveSourcePath)),
+		Data));
+
+	TSharedPtr<FJsonObject> MoveData;
+	TestTrue(TEXT("asset_move moves asset"), ExecCommand(
+		TEXT("smoke-asset-move"),
+		TEXT("asset_move"),
+		FString::Printf(TEXT("{\"source_asset_path\":%s,\"destination_asset_path\":%s,\"save_after_move\":true}"), *JsonQuote(MoveSourcePath), *JsonQuote(MoveTargetPath)),
+		MoveData));
+	TestEqual(TEXT("asset_move target path"), MoveData.IsValid() ? MoveData->GetStringField(TEXT("asset_path")) : FString(), MoveTargetPath);
+	TestTrue(TEXT("asset_move reports changed"), MoveData.IsValid() && MoveData->GetBoolField(TEXT("changed")));
+	TestTrue(TEXT("asset_move reports saved"), MoveData.IsValid() && MoveData->GetBoolField(TEXT("saved")));
+
+	TSharedPtr<FJsonObject> MoveRefData;
+	TestTrue(TEXT("asset_move moved asset is queryable"), ExecCommand(
+		TEXT("smoke-asset-move-refgraph"),
+		TEXT("asset_reference_graph"),
+		FString::Printf(TEXT("{\"asset_path\":%s,\"direction\":\"dependencies\",\"recursive\":false,\"include_searchable_names\":false,\"force_scan\":true}"), *JsonQuote(MoveTargetPath)),
+		MoveRefData));
+	TestTrue(TEXT("asset_move moved asset found"), MoveRefData.IsValid() && MoveRefData->GetBoolField(TEXT("asset_found")));
+
+	TSharedPtr<FJsonObject> FixupData;
+	TestTrue(TEXT("asset_fixup_redirectors deletes source redirector"), ExecCommand(
+		TEXT("smoke-asset-fixup-redirectors"),
+		TEXT("asset_fixup_redirectors"),
+		FString::Printf(TEXT("{\"asset_path\":%s,\"dry_run\":false}"), *JsonQuote(MoveSourcePath)),
+		FixupData));
+	TestEqual(TEXT("asset_fixup_redirectors saw redirector"), FixupData.IsValid() ? FixupData->GetIntegerField(TEXT("redirector_count")) : 0, 1);
+	TestEqual(TEXT("asset_fixup_redirectors removed package"), FixupData.IsValid() ? FixupData->GetIntegerField(TEXT("remaining_package_count")) : 1, 0);
+
+	TSharedPtr<FJsonObject> MoveSourceAfterFixupData;
+	TestTrue(TEXT("asset_fixup_redirectors source path is gone"), ExecCommand(
+		TEXT("smoke-asset-fixup-source-refgraph"),
+		TEXT("asset_reference_graph"),
+		FString::Printf(TEXT("{\"asset_path\":%s,\"allow_missing\":true,\"direction\":\"both\",\"recursive\":false,\"force_scan\":true}"), *JsonQuote(MoveSourcePath)),
+		MoveSourceAfterFixupData));
+	TestFalse(TEXT("asset_fixup_redirectors source redirector not found"), MoveSourceAfterFixupData.IsValid() && MoveSourceAfterFixupData->GetBoolField(TEXT("asset_found")));
+
+	TestTrue(TEXT("asset_reference_graph dependencies"), ExecCommand(
+		TEXT("smoke-refgraph-deps"),
+		TEXT("asset_reference_graph"),
+		FString::Printf(TEXT("{\"asset_path\":%s,\"direction\":\"dependencies\",\"recursive\":false,\"include_searchable_names\":false,\"force_scan\":true}"), *JsonQuote(MeshPath)),
+		Data));
+	TestTrue(TEXT("reference graph asset_found"), Data.IsValid() && Data->GetBoolField(TEXT("asset_found")));
+	TestTrue(TEXT("reference graph has dependencies"), Data.IsValid() && Data->GetIntegerField(TEXT("dependency_count")) > 0);
+	TestTrue(TEXT("reference graph has edges"), Data.IsValid() && Data->GetIntegerField(TEXT("edge_count")) > 0);
+	TestTrue(TEXT("reference graph has nodes"), Data.IsValid() && Data->GetIntegerField(TEXT("node_count")) >= 2);
+
+	const FString MeshObjectPath = FString::Printf(TEXT("%s.%s"), *MeshPath, *FPackageName::GetLongPackageAssetName(MeshPath));
+	TSharedPtr<FJsonObject> BothData;
+	TestTrue(TEXT("asset_reference_graph object path both query"), ExecCommand(
+		TEXT("smoke-refgraph-objectpath-both"),
+		TEXT("asset_reference_graph"),
+		FString::Printf(TEXT("{\"object_path\":%s,\"direction\":\"both\",\"recursive\":true,\"max_depth\":2,\"max_nodes\":1,\"include_path_string_hits\":true,\"max_path_string_hits\":1,\"force_scan\":true}"), *JsonQuote(MeshObjectPath)),
+		BothData));
+	TestEqual(TEXT("object path normalizes to package"), BothData.IsValid() ? BothData->GetStringField(TEXT("package_name")) : FString(), MeshPath);
+	TestTrue(TEXT("max_nodes truncates graph"), BothData.IsValid() && BothData->GetBoolField(TEXT("truncated")));
+	TestTrue(TEXT("path string hit count exists"), BothData.IsValid() && BothData->HasTypedField<EJson::Number>(TEXT("path_string_hit_count")));
+
+	FString FirstDependencyPackage;
+	const TArray<TSharedPtr<FJsonValue>>* Dependencies = nullptr;
+	if (Data.IsValid() && Data->TryGetArrayField(TEXT("dependencies"), Dependencies) && Dependencies)
+	{
+		for (const TSharedPtr<FJsonValue>& EdgeValue : *Dependencies)
+		{
+			const TSharedPtr<FJsonObject>* EdgeObj = nullptr;
+			if (!EdgeValue.IsValid() || !EdgeValue->TryGetObject(EdgeObj) || !EdgeObj || !EdgeObj->IsValid())
+			{
+				continue;
+			}
+			const FString Candidate = (*EdgeObj)->GetStringField(TEXT("target_package"));
+			if (!Candidate.IsEmpty() && !Candidate.StartsWith(TEXT("/Script/")))
+			{
+				FirstDependencyPackage = Candidate;
+				break;
+			}
+			if (FirstDependencyPackage.IsEmpty())
+			{
+				FirstDependencyPackage = Candidate;
+			}
+		}
+	}
+	TestTrue(TEXT("reference graph exposes dependency target"), !FirstDependencyPackage.IsEmpty());
+
+	if (!FirstDependencyPackage.IsEmpty())
+	{
+		TSharedPtr<FJsonObject> RefData;
+		TestTrue(TEXT("asset_reference_graph referencers"), ExecCommand(
+			TEXT("smoke-refgraph-refs"),
+			TEXT("asset_reference_graph"),
+			FString::Printf(TEXT("{\"asset_path\":%s,\"direction\":\"referencers\",\"recursive\":false,\"include_searchable_names\":false,\"force_scan\":true}"), *JsonQuote(FirstDependencyPackage)),
+			RefData));
+
+		bool bFoundMeshAsReferencer = false;
+		const TArray<TSharedPtr<FJsonValue>>* Referencers = nullptr;
+		if (RefData.IsValid() && RefData->TryGetArrayField(TEXT("referencers"), Referencers) && Referencers)
+		{
+			for (const TSharedPtr<FJsonValue>& EdgeValue : *Referencers)
+			{
+				const TSharedPtr<FJsonObject>* EdgeObj = nullptr;
+				if (!EdgeValue.IsValid() || !EdgeValue->TryGetObject(EdgeObj) || !EdgeObj || !EdgeObj->IsValid())
+				{
+					continue;
+				}
+				bFoundMeshAsReferencer |= (*EdgeObj)->GetStringField(TEXT("source_package")) == MeshPath;
+			}
+		}
+		TestTrue(TEXT("referencer graph links back to duplicated mesh"), bFoundMeshAsReferencer);
+	}
+
+	TSharedPtr<FJsonObject> MissingData;
+	TestTrue(TEXT("asset_reference_graph missing asset fails"), ExecCommand(
+		TEXT("smoke-refgraph-missing-fail"),
+		TEXT("asset_reference_graph"),
+		TEXT("{\"asset_path\":\"/Game/__UeAgentInterfaceSmoke/DefinitelyMissingAsset\"}"),
+		MissingData,
+		400));
+
+	TestTrue(TEXT("asset_reference_graph invalid direction fails"), ExecCommand(
+		TEXT("smoke-refgraph-invalid-direction"),
+		TEXT("asset_reference_graph"),
+		TEXT("{\"asset_path\":\"/Game/__UeAgentInterfaceSmoke/DefinitelyMissingAsset\",\"allow_missing\":true,\"direction\":\"sideways\"}"),
+		MissingData,
+		400));
+
+	TestTrue(TEXT("asset_reference_graph allow_missing succeeds"), ExecCommand(
+		TEXT("smoke-refgraph-missing-allow"),
+		TEXT("asset_reference_graph"),
+		TEXT("{\"asset_path\":\"/Game/__UeAgentInterfaceSmoke/DefinitelyMissingAsset\",\"allow_missing\":true}"),
+		MissingData));
+	TestFalse(TEXT("allow_missing reports asset_found=false"), MissingData.IsValid() && MissingData->GetBoolField(TEXT("asset_found")));
+
+	return !HasAnyErrors();
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(
 	FUeAgentInterfaceJsonParseVisibilitySmokeTest,
 	"GptProjectTest.UeAgentInterface.Smoke.JsonParseVisibilityWorkflow",
 	EAutomationTestFlags::EditorContext | EAutomationTestFlags::ProductFilter)

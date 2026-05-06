@@ -617,6 +617,8 @@ bool FUeAgentInterfaceMontageJsonSmokeTest::RunTest(const FString& Parameters)
 	const FString SyncGroupName = TEXT("JsonSyncGroup");
 	const FString JsonDir = FPaths::Combine(FPaths::ProjectSavedDir(), TEXT("Automation"), TEXT("MontageJson"));
 	const FString JsonPath = FPaths::Combine(JsonDir, TEXT("Montage.json"));
+	const FString CreateIfMissingJsonPath = FPaths::Combine(JsonDir, TEXT("MontageCreateIfMissing.json"));
+	const FString CreateIfMissingAssetPath = MakeAutomationAssetPath(TEXT("MNTJSON_CREATE"));
 
 	auto LoadJsonFile = [this](const FString& FilePath, TSharedPtr<FJsonObject>& OutObj) -> bool
 	{
@@ -673,6 +675,29 @@ bool FUeAgentInterfaceMontageJsonSmokeTest::RunTest(const FString& Parameters)
 
 	TSharedPtr<FJsonObject> MontageJson;
 	TestTrue(TEXT("Montage json file loads"), LoadJsonFile(JsonPath, MontageJson));
+	if (MontageJson.IsValid())
+	{
+		TSharedPtr<FJsonObject> CreateIfMissingJson = MakeShared<FJsonObject>(*MontageJson);
+		CreateIfMissingJson->SetStringField(TEXT("asset_path"), CreateIfMissingAssetPath);
+		CreateIfMissingJson->SetStringField(TEXT("asset_name"), FPackageName::GetLongPackageAssetName(CreateIfMissingAssetPath));
+		TestTrue(TEXT("Montage create-if-missing json file saves"), SaveJsonFile(CreateIfMissingJsonPath, CreateIfMissingJson));
+
+		const FString CreateIfMissingApplyBody = MakeExecRequestBody(
+			TEXT("smoke-montage-json-create-if-missing-apply-001"),
+			TEXT("montage_apply_json"),
+			FString::Printf(TEXT("{\"json_file\":\"%s\",\"create_if_missing\":true,\"save_after_apply\":false}"), *CreateIfMissingJsonPath.Replace(TEXT("\\"), TEXT("/"))));
+		FHttpSmokeResult CreateIfMissingApplyResult;
+		TestTrue(TEXT("Montage json create-if-missing apply request succeeded"), ExecuteHttpJsonRequest(TEXT("POST"), ServerScope.BaseUrl + TEXT("/api/exec"), ServerScope.Token, CreateIfMissingApplyBody, CreateIfMissingApplyResult));
+		TestEqual(TEXT("Montage json create-if-missing apply status code"), CreateIfMissingApplyResult.StatusCode, 200);
+
+		const FString CreateIfMissingInfoBody = MakeExecRequestBody(
+			TEXT("smoke-montage-json-create-if-missing-info-001"),
+			TEXT("montage_get_info"),
+			FString::Printf(TEXT("{\"asset_path\":\"%s\"}"), *CreateIfMissingAssetPath));
+		FHttpSmokeResult CreateIfMissingInfoResult;
+		TestTrue(TEXT("Montage json create-if-missing get info request succeeded"), ExecuteHttpJsonRequest(TEXT("POST"), ServerScope.BaseUrl + TEXT("/api/exec"), ServerScope.Token, CreateIfMissingInfoBody, CreateIfMissingInfoResult));
+		TestEqual(TEXT("Montage json create-if-missing get info status code"), CreateIfMissingInfoResult.StatusCode, 200);
+	}
 	if (MontageJson.IsValid())
 	{
 		MontageJson->SetArrayField(TEXT("skeleton_slots"), TArray<TSharedPtr<FJsonValue>>());
@@ -841,6 +866,32 @@ bool FUeAgentInterfaceMontageJsonSmokeTest::RunTest(const FString& Parameters)
 		}
 		TestTrue(TEXT("Montage json notify exists"), bFoundNotify);
 	}
+
+	const FString NoDefaultFirstSectionName = TEXT("Combo_NoDefault");
+	const FString NoDefaultJsonPath = FPaths::Combine(JsonDir, TEXT("montage_no_default_roundtrip.json"));
+	const FString RenameDefaultBody = MakeExecRequestBody(
+		TEXT("smoke-montage-json-no-default-rename-001"),
+		TEXT("montage_rename_section"),
+		FString::Printf(TEXT("{\"asset_path\":\"%s\",\"section_name\":\"Default\",\"new_section_name\":\"%s\",\"save_after_rename\":false}"), *MontageAssetPath, *NoDefaultFirstSectionName));
+	FHttpSmokeResult RenameDefaultResult;
+	TestTrue(TEXT("Montage no-default section rename request succeeded"), ExecuteHttpJsonRequest(TEXT("POST"), ServerScope.BaseUrl + TEXT("/api/exec"), ServerScope.Token, RenameDefaultBody, RenameDefaultResult));
+	TestEqual(TEXT("Montage no-default section rename status code"), RenameDefaultResult.StatusCode, 200);
+
+	const FString NoDefaultExportBody = MakeExecRequestBody(
+		TEXT("smoke-montage-json-no-default-export-001"),
+		TEXT("montage_export_json"),
+		FString::Printf(TEXT("{\"asset_path\":\"%s\",\"output_file\":\"%s\"}"), *MontageAssetPath, *NoDefaultJsonPath.Replace(TEXT("\\"), TEXT("/"))));
+	FHttpSmokeResult NoDefaultExportResult;
+	TestTrue(TEXT("Montage no-default json export request succeeded"), ExecuteHttpJsonRequest(TEXT("POST"), ServerScope.BaseUrl + TEXT("/api/exec"), ServerScope.Token, NoDefaultExportBody, NoDefaultExportResult));
+	TestEqual(TEXT("Montage no-default json export status code"), NoDefaultExportResult.StatusCode, 200);
+
+	const FString NoDefaultApplyBody = MakeExecRequestBody(
+		TEXT("smoke-montage-json-no-default-apply-001"),
+		TEXT("montage_apply_json"),
+		FString::Printf(TEXT("{\"json_file\":\"%s\",\"save_after_apply\":false}"), *NoDefaultJsonPath.Replace(TEXT("\\"), TEXT("/"))));
+	FHttpSmokeResult NoDefaultApplyResult;
+	TestTrue(TEXT("Montage no-default json apply request succeeded"), ExecuteHttpJsonRequest(TEXT("POST"), ServerScope.BaseUrl + TEXT("/api/exec"), ServerScope.Token, NoDefaultApplyBody, NoDefaultApplyResult));
+	TestEqual(TEXT("Montage no-default json apply status code"), NoDefaultApplyResult.StatusCode, 200);
 
 	return !HasAnyErrors();
 }
@@ -1111,6 +1162,27 @@ bool FUeAgentInterfaceAnimBlueprintSmokeTest::RunTest(const FString& Parameters)
 		TestTrue(TEXT("AnimBlueprint generic node guid non-empty"), !GenericAnimNodeGuid.IsEmpty());
 		TestEqual(TEXT("AnimBlueprint generic node graph name"), (*AddGenericAnimNodeData)->GetStringField(TEXT("graph_name")), FString(TEXT("AnimGraph")));
 		TestTrue(TEXT("AnimBlueprint generic node graph path non-empty"), !(*AddGenericAnimNodeData)->GetStringField(TEXT("graph_path")).IsEmpty());
+	}
+
+	const FString LayoutAnimGraphBody = MakeExecRequestBody(
+		TEXT("smoke-animbp-layout-anim-001"),
+		TEXT("anim_blueprint_layout_graph"),
+		FString::Printf(TEXT("{\"asset_path\":\"%s\",\"graph_name\":\"AnimGraph\",\"horizontal_spacing\":360,\"vertical_spacing\":96,\"node_padding\":16,\"compile_after_layout\":false,\"save_after_layout\":false}"), *AnimBlueprintAssetPath));
+	FHttpSmokeResult LayoutAnimGraphResult;
+	TestTrue(TEXT("AnimBlueprint layout_graph request succeeded"), ExecuteHttpJsonRequest(TEXT("POST"), ServerScope.BaseUrl + TEXT("/api/exec"), ServerScope.Token, LayoutAnimGraphBody, LayoutAnimGraphResult));
+	TestEqual(TEXT("AnimBlueprint layout_graph status code"), LayoutAnimGraphResult.StatusCode, 200);
+
+	TSharedPtr<FJsonObject> LayoutAnimGraphJson;
+	TestTrue(TEXT("AnimBlueprint layout_graph parses JSON"), ParseJson(LayoutAnimGraphResult.Body, LayoutAnimGraphJson));
+	TestTrue(TEXT("AnimBlueprint layout_graph root ok=true"), LayoutAnimGraphJson.IsValid() && LayoutAnimGraphJson->GetBoolField(TEXT("ok")));
+
+	const TSharedPtr<FJsonObject>* LayoutAnimGraphData = nullptr;
+	TestTrue(TEXT("AnimBlueprint layout_graph contains data object"), LayoutAnimGraphJson.IsValid() && LayoutAnimGraphJson->TryGetObjectField(TEXT("data"), LayoutAnimGraphData) && LayoutAnimGraphData && LayoutAnimGraphData->IsValid());
+	if (LayoutAnimGraphData && LayoutAnimGraphData->IsValid())
+	{
+		TestTrue(TEXT("AnimBlueprint layout_graph covers anim graph nodes"), static_cast<int32>((*LayoutAnimGraphData)->GetIntegerField(TEXT("node_count"))) >= 2);
+		TestEqual(TEXT("AnimBlueprint layout_graph removes estimated node overlaps"), static_cast<int32>((*LayoutAnimGraphData)->GetIntegerField(TEXT("overlap_count_after"))), 0);
+		TestTrue(TEXT("AnimBlueprint layout_graph returns node list"), (*LayoutAnimGraphData)->HasField(TEXT("nodes")));
 	}
 
 	const FString InspectAnimGraphBody = MakeExecRequestBody(

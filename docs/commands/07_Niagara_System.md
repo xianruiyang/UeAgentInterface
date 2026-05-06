@@ -241,7 +241,7 @@
 | `niagara_compile_system` | 触发编译 | `asset_path`、`force_compile`、`wait_for_complete`、`mark_dirty_after_compile` | 修改后立即校验 |
 | `niagara_get_compile_log` | 读取编译日志与事件 | `asset_path`、`severity_filter`、`include_events`、`max_events_per_script` | 定位 Unknown/编译失败原因 |
 
-`niagara_set_property` 返回通用属性写入观测字段：`requested_value_text`、`applied_value_text`、`property_value_read_back`、`property_import_status`、`property_import_verified`、`property_import_error`、`value_text_exact_match`、`value_text_changed_after_import`、`cpp_type`。这和 Niagara Module Input 的 `requested_value_text` / `applied_value_text` 契约一致，用于发现属性不存在、`ImportText` 解析失败或写后读回被 UE 规范化/回退。
+System 属性写入应通过 Niagara folder JSON 主流程表达；apply 结果会返回 `requested_value_text`、`applied_value_text`、`property_value_read_back`、`property_import_status`、`property_import_verified`、`property_import_error`、`value_text_exact_match`、`value_text_changed_after_import`、`cpp_type` 等观测字段，用于发现属性不存在、`ImportText` 解析失败或写后读回被 UE 规范化/回退。
 
 ### `niagara_refresh_system`
 
@@ -279,9 +279,9 @@
 |---|---|---|---|
 | `niagara_system_list_emitters` | 列出 System 中发射器 | `asset_path` | 获取 emitter_id / index |
 
-> 结构编辑安全：`niagara_system_add_emitter`、`niagara_system_remove_emitter`、`niagara_system_move_emitter`、`niagara_system_set_emitter_enabled`、`niagara_system_set_emitter_version` 默认会在改动前关闭该 System 已打开的 Niagara 编辑器页，返回 `closed_open_editor_before_structural_edit` 和 `closed_editor_count`。这是为了避免 live Niagara Overview/Stack 在 emitter handle 变动时继续刷新旧选择对象导致 UE 崩溃。确实需要保留编辑器页时可传 `close_open_editor_before_structural_edit=false`，但自动化测试不建议这样做。
+> 结构化写入涉及 emitter handle 变动时，apply 默认会在改动前关闭该 System 已打开的 Niagara 编辑器页，返回 `closed_open_editor_before_structural_edit` 和 `closed_editor_count`。这是为了避免 live Niagara Overview/Stack 在 emitter handle 变动时继续刷新旧选择对象导致 UE 崩溃。确实需要保留编辑器页时可传 `close_open_editor_before_structural_edit=false`，但自动化测试不建议这样做。
 
-> `niagara_system_add_emitter` 默认会执行完整 System refresh 和强制编译，并在返回中包含 `system_refresh`。成功结果应重点检查 `system_refresh.rebuilt_emitter_nodes=true`、`compiled_emitter_data_count` 与 `emitter_ready_to_run`；如果只看到 System handle 但 runtime probe 无粒子，优先检查这几个字段，而不是通过手动新增空 emitter 触发编辑器刷新。
+> System 结构化 apply 默认会执行完整 refresh 和强制编译，并在返回中包含 `system_refresh`。成功结果应重点检查 `system_refresh.rebuilt_emitter_nodes=true`、`compiled_emitter_data_count` 与 `emitter_ready_to_run`；如果只看到 System handle 但 runtime probe 无粒子，优先检查这几个字段，而不是通过手动新增空 emitter 触发编辑器刷新。
 
 ## 组合流程建议
 
@@ -308,20 +308,6 @@
 }
 ```
 
-<!-- UAI_FORMAL_COMMAND_INDEX_BEGIN -->
-## 原子/兼容命令正式索引
->
-> 以下命令已有真实 dispatch 实现并纳入 smoke 覆盖；对完整资产制作仍应优先使用本分册中的结构化 JSON / folder workflow，原子命令仅用于 bootstrap、迁移、probe 或局部修复。
+## 废弃命令
 
-| Command | 作用 | 关键参数 | 关键返回 |
-| --- | --- | --- | --- |
-| `niagara_set_property` | **原子/兼容**：设置 System 可反射属性 | `asset_path`、`property_name`、`value_text` | 仅用于局部修补 |
-| `niagara_system_add_emitter` | **原子/兼容**：向 System 添加 Emitter | `system_asset_path`、`emitter_asset_path`、`emitter_name` | 仅用于 bootstrap/修补 |
-| `niagara_system_move_emitter` | **原子/兼容**：调整 Emitter 顺序 | `system_asset_path` + emitter 标识 + `target_index` | 仅用于修补 |
-| `niagara_system_remove_emitter` | **原子/兼容**：从 System 移除 Emitter | `system_asset_path` + (`emitter_id`/`emitter_name`/`emitter_index`) | 仅用于修补 |
-| `niagara_system_set_emitter_enabled` | **原子/兼容**：启用/禁用某 Emitter | `system_asset_path` + emitter 标识 + `enabled` | 仅用于诊断/修补 |
-| `niagara_system_set_emitter_version` | **原子/兼容**：切换 Emitter 版本 | `system_asset_path` + emitter 标识 + `emitter_version` | 仅用于修补 |
-| `niagara_user_parameter_add` | **原子/兼容**：新增 User 参数 | `asset_path`、`parameter_name`、`parameter_type`、`default_value_text` | 仅用于局部修补 |
-| `niagara_user_parameter_remove` | **原子/兼容**：删除 User 参数 | `asset_path`、`parameter_name` | 仅用于局部修补 |
-| `niagara_user_parameter_set` | **原子/兼容**：设置 User 参数值 | `asset_path`、`parameter_name`、`value_text` | 仅用于局部修补 |
-<!-- UAI_FORMAL_COMMAND_INDEX_END -->
+本分册不再列出已废弃写入命令；这些命令仅保留在 `deprecatedCommand/07_Niagara_System.md`，供旧脚本兼容、bootstrap、迁移和故障补修查阅。

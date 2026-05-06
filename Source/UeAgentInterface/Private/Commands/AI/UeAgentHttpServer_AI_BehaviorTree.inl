@@ -755,9 +755,20 @@ bool FUeAgentHttpServer::CmdBehaviorTreeGraphSetView(const FUeAgentRequestContex
 	JsonTryGetNumber(Ctx.Params, TEXT("view_x"), X);
 	JsonTryGetNumber(Ctx.Params, TEXT("view_y"), Y);
 	JsonTryGetNumber(Ctx.Params, TEXT("zoom"), Zoom);
-	OutData->SetNumberField(TEXT("view_x"), X);
-	OutData->SetNumberField(TEXT("view_y"), Y);
-	OutData->SetNumberField(TEXT("zoom"), Zoom);
+	bool bSnapToPixelGrid = true;
+	JsonTryGetBool(Ctx.Params, TEXT("snap_to_pixel_grid"), bSnapToPixelGrid);
+	const float ClampedZoom = (float)FMath::Clamp(Zoom, 0.05, 64.0);
+	FVector2f ViewLocation((float)X, (float)Y);
+	if (bSnapToPixelGrid)
+	{
+		ViewLocation = UeAgentGraphViewUtils::SnapViewLocationToPixelGrid(ViewLocation, ClampedZoom);
+	}
+	OutData->SetNumberField(TEXT("view_x"), ViewLocation.X);
+	OutData->SetNumberField(TEXT("view_y"), ViewLocation.Y);
+	OutData->SetNumberField(TEXT("zoom"), ClampedZoom);
+	OutData->SetBoolField(TEXT("snap_to_pixel_grid"), bSnapToPixelGrid);
+	OutData->SetNumberField(TEXT("screen_pixel_x"), ViewLocation.X * ClampedZoom);
+	OutData->SetNumberField(TEXT("screen_pixel_y"), ViewLocation.Y * ClampedZoom);
 	OutData->SetBoolField(TEXT("view_requested"), true);
 	return true;
 }

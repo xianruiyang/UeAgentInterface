@@ -41,11 +41,12 @@ Profile：`ue_agent_interface.behavior_tree.v1`。Folder workflow 默认文件�
 | `behavior_tree_apply_folder` | 回写 BT | `folder_path`、`asset_path`、`create_if_missing`、`dry_run`、`validate_only`、`save_after_apply`、`allow_destructive` | `changed`、`created_asset`、`saved`、`coverage_report` |
 | `behavior_tree_open_editor` | 打开编辑器 | `asset_path`、`bring_to_front` | `opened` |
 | `behavior_tree_graph_get_view` | 读取图视图摘要 | `asset_path`、`open_editor_if_needed` | BT 摘要 |
-| `behavior_tree_graph_set_view` | 请求图视图位置 | `asset_path`、`view_x`、`view_y`、`zoom`、`open_editor_if_needed` | `view_requested`、`view_x/y/zoom` |
+| `behavior_tree_graph_set_view` | 请求图视图位置 | `asset_path`、`view_x`、`view_y`、`zoom`、`snap_to_pixel_grid`、`open_editor_if_needed` | `view_requested`、`view_x/y/zoom`、`snap_to_pixel_grid` |
 | `behavior_tree_screenshot` | 截取 BT 编辑器 | `asset_path`、`format`、`max_size`、`open_editor_if_needed`、`require_non_black` | `file_path`、`width`、`height`、`capture_mode=offscreen_widget_renderer`、`legacy_backbuffer_capture=disabled`、`non_black_pixel_count`、`appears_non_black` |
 | `behavior_tree_runtime_snapshot` | 读取运行中 BT / Blackboard | `controller` 或 `pawn`、`include_blackboard`、`include_active_path`、`include_service_status` | controller、BT component、Blackboard 摘要、保守 `active_path[] / running_task / service_status[]` 字段 |
 
 BT apply 只修改 `UBehaviorTree` 本体，不隐式修改 BT Task Blueprint、AIController、Pawn、AnimBlueprint 或 StateTree。
+`behavior_tree_graph_set_view` 当前只记录/回传请求，不直接驱动真实 BT 图面；为保持所有图视图入口一致，`snap_to_pixel_grid` 默认 `true`，返回前会按 `round(view * zoom) / zoom` 对齐屏幕像素。
 
 ## BT Node Blueprint 摘要
 

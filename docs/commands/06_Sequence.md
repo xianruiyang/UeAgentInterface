@@ -144,12 +144,10 @@
   - 可选 `component_name/socket_name`
   - 前置值也支持 `value_before_key_component_name/socket_name`
 - `object`
-  - `sequence_add_property_track`
-    - 需要 `property_class_path`
-  - `sequence_add_property_key`
-    - `value_path`
-    - 可选 `value_before_key_path`
-    - 为了稳定，仍建议显式传 `property_class_path`
+  - 需要 `property_class_path`
+  - key 值使用 `value_path`
+  - 可选 `value_before_key_path`
+  - 为了稳定，仍建议显式传 `property_class_path`
 - `string`
   - `value`
   - 可选 `value_before_key`
@@ -172,8 +170,6 @@
 - `string`
   - 例如 `StaticMeshComponent.StaticMesh`
   - 其它 `UObject*` / 资源引用属性
-
-## 专用兼容轨道命令
 
 ## `sequence_get_level_sequence_info`
 
@@ -225,12 +221,9 @@
 
 说明：
 
-- `sequence_add_umg_widget_float_key`
-  - 可显式传 `property_name / property_path`
-  - 不传时默认写 `RenderOpacity`
-- `sequence_add_umg_widget_color_key`
-  - 除 `ColorAndOpacity` 外，也可用于 `BackgroundColor` 等颜色轨
-  - 建议显式传 `property_name / property_path`
+- UMG 动画的正式 authoring 应通过 `animations/animations.json` 表达轨道和 key。
+- float 轨道可显式传 `property_name / property_path`；不传时常见默认目标是 `RenderOpacity`。
+- color 轨道除 `ColorAndOpacity` 外，也可用于 `BackgroundColor` 等颜色属性；建议显式传 `property_name / property_path`。
 
 ## 当前边界
 
@@ -250,41 +243,6 @@
 - `property_type=string` 当前适合常见 `FString` 属性，支持 `value_before_key` 作为首个关键帧前置值。
 - `UMG Animation` 当前重点是 `RenderTransform / RenderOpacity / ColorAndOpacity / BackgroundColor` 以及通用 `float_property / color_property`；还没有 padding / slot 布局类轨道。
 
-<!-- UAI_FORMAL_COMMAND_INDEX_BEGIN -->
-## 原子/兼容命令正式索引
->
-> 以下命令已有真实 dispatch 实现并纳入 smoke 覆盖；对完整资产制作仍应优先使用本分册中的结构化 JSON / folder workflow，原子命令仅用于 bootstrap、迁移、probe 或局部修复。
+## 废弃命令
 
-| Command | 作用 | 关键参数 | 关键返回 |
-| --- | --- | --- | --- |
-| `sequence_add_actor_binding` | **原子/兼容**：添加 Actor 绑定 | `asset_path`、`actor_id` | 优先写 `bindings/*.json` |
-| `sequence_add_bool_property_key` | **原子/兼容**：编辑 Level Sequence 的强类型 property track/key | `asset_path`、`binding_id`、`track_name`、`time_seconds`、`value` | `success`、`warnings`、`errors` |
-| `sequence_add_bool_property_track` | **原子/兼容**：编辑 Level Sequence 的强类型 property track/key | `asset_path`、`binding_id`、`track_name`、`time_seconds`、`value` | `success`、`warnings`、`errors` |
-| `sequence_add_float_property_key` | **原子/兼容**：编辑 Level Sequence 的强类型 property track/key | `asset_path`、`binding_id`、`track_name`、`time_seconds`、`value` | `success`、`warnings`、`errors` |
-| `sequence_add_float_property_track` | **原子/兼容**：编辑 Level Sequence 的强类型 property track/key | `asset_path`、`binding_id`、`track_name`、`time_seconds`、`value` | `success`、`warnings`、`errors` |
-| `sequence_add_integer_property_key` | **原子/兼容**：编辑 Level Sequence 的强类型 property track/key | `asset_path`、`binding_id`、`track_name`、`time_seconds`、`value` | `success`、`warnings`、`errors` |
-| `sequence_add_integer_property_track` | **原子/兼容**：编辑 Level Sequence 的强类型 property track/key | `asset_path`、`binding_id`、`track_name`、`time_seconds`、`value` | `success`、`warnings`、`errors` |
-| `sequence_add_property_key` | **原子/兼容**：统一写入属性关键帧 | `asset_path`、`binding_guid`、`property_type`、`property_name`、`time_seconds` | 优先写 `bindings/<Binding>/tracks/*.json` |
-| `sequence_add_property_track` | **原子/兼容**：统一创建属性轨道 | `asset_path`、`binding_guid`、`property_type`、`property_name` | 优先写 `bindings/<Binding>/tracks/*.json` |
-| `sequence_add_skeletal_animation_section` | **原子/兼容**：编辑 Level Sequence 中的 Skeletal Animation track/section | `asset_path`、`binding_id`、`track_name`、`time_seconds`、`value` | `success`、`warnings`、`errors` |
-| `sequence_add_skeletal_animation_track` | **原子/兼容**：编辑 Level Sequence 中的 Skeletal Animation track/section | `asset_path`、`binding_id`、`track_name`、`time_seconds`、`value` | `success`、`warnings`、`errors` |
-| `sequence_add_transform_key` | **原子/兼容**：编辑 Level Sequence 的 Transform track/key | `asset_path`、`binding_id`、`track_name`、`time_seconds`、`value` | `success`、`warnings`、`errors` |
-| `sequence_add_transform_track` | **原子/兼容**：编辑 Level Sequence 的 Transform track/key | `asset_path`、`binding_id`、`track_name`、`time_seconds`、`value` | `success`、`warnings`、`errors` |
-| `sequence_add_umg_widget_color_key` | **原子/兼容**：写 ColorAndOpacity 关键帧 | `asset_path`、`animation_name`、`widget_name`、`time_seconds` | 优先写 `animations/animations.json` |
-| `sequence_add_umg_widget_float_key` | **原子/兼容**：写任意 float 属性关键帧 | `asset_path`、`animation_name`、`widget_name`、`time_seconds`、`value` | 优先写 `animations/animations.json` |
-| `sequence_add_umg_widget_opacity_key` | **原子/兼容**：写 RenderOpacity 关键帧 | `asset_path`、`animation_name`、`widget_name`、`time_seconds`、`opacity` | 优先写 `animations/animations.json` |
-| `sequence_add_umg_widget_transform_key` | **原子/兼容**：写 RenderTransform 关键帧 | `asset_path`、`animation_name`、`widget_name`、`time_seconds` | 优先写 `animations/animations.json` |
-| `sequence_add_umg_widget_translation_key` | **原子/兼容**：写平移关键帧 | `asset_path`、`animation_name`、`widget_name`、`time_seconds` | 兼容旧入口 |
-| `sequence_add_visibility_key` | **原子/兼容**：编辑 Level Sequence 的 Visibility track/key | `asset_path`、`binding_id`、`track_name`、`time_seconds`、`value` | `success`、`warnings`、`errors` |
-| `sequence_add_visibility_track` | **原子/兼容**：编辑 Level Sequence 的 Visibility track/key | `asset_path`、`binding_id`、`track_name`、`time_seconds`、`value` | `success`、`warnings`、`errors` |
-| `sequence_create_umg_animation` | **原子/兼容**：创建动画 | `asset_path`、`animation_name` | 优先写 `animations/animations.json` |
-| `sequence_remove_actor_binding` | **原子/兼容**：删除 Actor 绑定 | `asset_path`、`binding_guid` | 优先写 `bindings/index.json` |
-| `sequence_remove_skeletal_animation_section` | **原子/兼容**：编辑 Level Sequence 中的 Skeletal Animation track/section | `asset_path`、`binding_id`、`track_name`、`time_seconds`、`value` | `success`、`warnings`、`errors` |
-| `sequence_remove_umg_animation` | **原子/兼容**：删除动画 | `asset_path`、`animation_name` | 优先写 `animations/animations.json` |
-| `sequence_rename_umg_animation` | **原子/兼容**：重命名动画 | `asset_path`、`animation_name`、`new_animation_name` | 优先写 `animations/animations.json` |
-| `sequence_set_level_sequence_display_rate` | **原子/兼容**：设置显示帧率 | `asset_path`、`display_rate_num/den` | 优先写 `settings/sequence.json` |
-| `sequence_set_level_sequence_playback_range` | **原子/兼容**：设置播放范围 | `asset_path`、`start_seconds`、`duration_seconds` | 优先写 `settings/sequence.json` |
-| `sequence_set_umg_animation_display_rate` | **原子/兼容**：设置帧率 | `asset_path`、`animation_name`、`display_rate_num/den` | 优先写 `animations/animations.json` |
-| `sequence_set_umg_animation_playback_range` | **原子/兼容**：设置范围 | `asset_path`、`animation_name`、`start_seconds`、`duration_seconds` | 优先写 `animations/animations.json` |
-| `sequence_update_skeletal_animation_section` | **原子/兼容**：编辑 Level Sequence 中的 Skeletal Animation track/section | `asset_path`、`binding_id`、`track_name`、`time_seconds`、`value` | `success`、`warnings`、`errors` |
-<!-- UAI_FORMAL_COMMAND_INDEX_END -->
+本分册不再列出已废弃写入命令；这些命令仅保留在 `deprecatedCommand/06_Sequence.md`，供旧脚本兼容、bootstrap、迁移和故障补修查阅。

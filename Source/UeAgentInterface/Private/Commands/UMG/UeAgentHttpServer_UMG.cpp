@@ -2,6 +2,7 @@
 
 #include "UeAgentHttpServer_UMG.h"
 
+#include "Animation/WidgetAnimation.h"
 #include "AssetRegistry/AssetRegistryModule.h"
 #include "Blueprint/UserWidget.h"
 #include "Blueprint/WidgetBlueprintGeneratedClass.h"
@@ -100,6 +101,72 @@ namespace UeAgentUmgOps
 	static UWidgetBlueprint* LoadWidgetBlueprint(const FString& InPath)
 	{
 		return Cast<UWidgetBlueprint>(LoadAssetObject(InPath));
+	}
+
+	static int32 SyncWidgetVariableGuidMap(UWidgetBlueprint* WidgetBlueprint)
+	{
+		if (!WidgetBlueprint)
+		{
+			return 0;
+		}
+
+		int32 FixupCount = 0;
+		TSet<FName> SourceVariableNames;
+		auto EnsureGuidForName = [&WidgetBlueprint, &FixupCount, &SourceVariableNames](const FName VariableName)
+		{
+			if (VariableName.IsNone())
+			{
+				return;
+			}
+			SourceVariableNames.Add(VariableName);
+			FGuid* ExistingGuid = WidgetBlueprint->WidgetVariableNameToGuidMap.Find(VariableName);
+			if (!ExistingGuid || !ExistingGuid->IsValid())
+			{
+				WidgetBlueprint->WidgetVariableNameToGuidMap.Add(VariableName, FGuid::NewGuid());
+				++FixupCount;
+			}
+		};
+
+		WidgetBlueprint->ForEachSourceWidget([&EnsureGuidForName](UWidget* Widget)
+		{
+			if (Widget)
+			{
+				EnsureGuidForName(Widget->GetFName());
+			}
+		});
+
+		for (UWidgetAnimation* Animation : WidgetBlueprint->Animations)
+		{
+			if (Animation)
+			{
+				EnsureGuidForName(Animation->GetFName());
+			}
+		}
+
+		TSet<FGuid> SeenGuids;
+		for (auto It = WidgetBlueprint->WidgetVariableNameToGuidMap.CreateIterator(); It; ++It)
+		{
+			if (!SourceVariableNames.Contains(It.Key()))
+			{
+				It.RemoveCurrent();
+				++FixupCount;
+				continue;
+			}
+
+			if (!It.Value().IsValid() || SeenGuids.Contains(It.Value()))
+			{
+				It.Value() = FGuid::NewGuid();
+				++FixupCount;
+			}
+			SeenGuids.Add(It.Value());
+		}
+
+		if (FixupCount > 0)
+		{
+			WidgetBlueprint->Modify();
+			WidgetBlueprint->MarkPackageDirty();
+		}
+		return FixupCount;
 	}
 
 	static UClass* ResolveClassByPath(const FString& InClassPath)
@@ -484,6 +551,7 @@ bool FUeAgentHttpServer::CmdUmgCreateWidgetBlueprint(const FUeAgentRequestContex
 		if (RootCanvas)
 		{
 			WidgetBlueprint->WidgetTree->RootWidget = RootCanvas;
+			UeAgentUmgOps::SyncWidgetVariableGuidMap(WidgetBlueprint);
 			FBlueprintEditorUtils::MarkBlueprintAsStructurallyModified(WidgetBlueprint);
 		}
 	}
@@ -496,6 +564,7 @@ bool FUeAgentHttpServer::CmdUmgCreateWidgetBlueprint(const FUeAgentRequestContex
 	JsonTryGetBool(Ctx.Params, TEXT("compile_after_create"), bCompileAfterCreate);
 	if (bCompileAfterCreate)
 	{
+		UeAgentUmgOps::SyncWidgetVariableGuidMap(WidgetBlueprint);
 		FKismetEditorUtilities::CompileBlueprint(WidgetBlueprint);
 	}
 
@@ -541,6 +610,8 @@ bool FUeAgentHttpServer::CmdUmgCompile(const FUeAgentRequestContext& Ctx, TShare
 		return false;
 	}
 
+	const int32 WidgetVariableGuidFixups = UeAgentUmgOps::SyncWidgetVariableGuidMap(WidgetBlueprint);
+
 	FCompilerResultsLog CompilerLog;
 	FKismetEditorUtilities::CompileBlueprint(WidgetBlueprint, EBlueprintCompileOptions::None, &CompilerLog);
 
@@ -577,6 +648,7 @@ bool FUeAgentHttpServer::CmdUmgCompile(const FUeAgentRequestContext& Ctx, TShare
 	OutData->SetNumberField(TEXT("error_count"), CompilerLog.NumErrors);
 	OutData->SetNumberField(TEXT("warning_count"), CompilerLog.NumWarnings);
 	OutData->SetNumberField(TEXT("message_total_count"), CompilerLog.Messages.Num());
+	OutData->SetNumberField(TEXT("widget_variable_guid_fixups"), WidgetVariableGuidFixups);
 	OutData->SetBoolField(TEXT("has_error"), CompilerLog.NumErrors > 0 || WidgetBlueprint->Status == BS_Error);
 
 	if (bIncludeMessages)
@@ -633,6 +705,8 @@ bool FUeAgentHttpServer::CmdUmgGetCompileLog(const FUeAgentRequestContext& Ctx, 
 	bool bSaveAfterCompile = false;
 	JsonTryGetBool(Ctx.Params, TEXT("save_after_compile"), bSaveAfterCompile);
 
+	const int32 WidgetVariableGuidFixups = UeAgentUmgOps::SyncWidgetVariableGuidMap(WidgetBlueprint);
+
 	FCompilerResultsLog CompilerLog;
 	FKismetEditorUtilities::CompileBlueprint(WidgetBlueprint, EBlueprintCompileOptions::None, &CompilerLog);
 
@@ -653,6 +727,7 @@ bool FUeAgentHttpServer::CmdUmgGetCompileLog(const FUeAgentRequestContext& Ctx, 
 	OutData->SetStringField(TEXT("severity_filter"), SeverityFilterText);
 	OutData->SetNumberField(TEXT("max_messages"), MaxMessages);
 	OutData->SetNumberField(TEXT("message_total_count"), CompilerLog.Messages.Num());
+	OutData->SetNumberField(TEXT("widget_variable_guid_fixups"), WidgetVariableGuidFixups);
 	OutData->SetNumberField(TEXT("filtered_error_count"), FilteredErrorCount);
 	OutData->SetNumberField(TEXT("filtered_warning_count"), FilteredWarningCount);
 	OutData->SetNumberField(TEXT("filtered_info_count"), FilteredInfoCount);
@@ -842,12 +917,14 @@ bool FUeAgentHttpServer::CmdUmgAddWidget(const FUeAgentRequestContext& Ctx, TSha
 		WidgetBlueprint->OnVariableAdded(NewWidget->GetFName());
 	}
 
+	const int32 WidgetVariableGuidFixups = UeAgentUmgOps::SyncWidgetVariableGuidMap(WidgetBlueprint);
 	FBlueprintEditorUtils::MarkBlueprintAsStructurallyModified(WidgetBlueprint);
 
 	bool bCompileAfterAdd = true;
 	JsonTryGetBool(Ctx.Params, TEXT("compile_after_add"), bCompileAfterAdd);
 	if (bCompileAfterAdd)
 	{
+		UeAgentUmgOps::SyncWidgetVariableGuidMap(WidgetBlueprint);
 		FKismetEditorUtilities::CompileBlueprint(WidgetBlueprint);
 	}
 	bool bSaveAfterAdd = false;
@@ -862,6 +939,7 @@ bool FUeAgentHttpServer::CmdUmgAddWidget(const FUeAgentRequestContext& Ctx, TSha
 	OutData->SetStringField(TEXT("widget_class"), WidgetClass->GetPathName());
 	OutData->SetStringField(TEXT("parent_widget"), ParentPanel ? ParentPanel->GetName() : TEXT(""));
 	OutData->SetStringField(TEXT("slot_class"), Slot ? Slot->GetClass()->GetPathName() : TEXT(""));
+	OutData->SetNumberField(TEXT("widget_variable_guid_fixups"), WidgetVariableGuidFixups);
 	OutData->SetBoolField(TEXT("saved"), bSaveAfterAdd);
 	return true;
 }
@@ -930,12 +1008,14 @@ bool FUeAgentHttpServer::CmdUmgRemoveWidget(const FUeAgentRequestContext& Ctx, T
 		WidgetBlueprint->OnVariableRemoved(RemovedWidgetFName);
 	}
 
+	const int32 WidgetVariableGuidFixups = UeAgentUmgOps::SyncWidgetVariableGuidMap(WidgetBlueprint);
 	FBlueprintEditorUtils::MarkBlueprintAsStructurallyModified(WidgetBlueprint);
 
 	bool bCompileAfterRemove = true;
 	JsonTryGetBool(Ctx.Params, TEXT("compile_after_remove"), bCompileAfterRemove);
 	if (bCompileAfterRemove)
 	{
+		UeAgentUmgOps::SyncWidgetVariableGuidMap(WidgetBlueprint);
 		FKismetEditorUtilities::CompileBlueprint(WidgetBlueprint);
 	}
 	bool bSaveAfterRemove = false;
@@ -947,6 +1027,7 @@ bool FUeAgentHttpServer::CmdUmgRemoveWidget(const FUeAgentRequestContext& Ctx, T
 
 	OutData->SetStringField(TEXT("asset_path"), WidgetBlueprint->GetOutermost()->GetName());
 	OutData->SetStringField(TEXT("removed_widget"), RemovedName);
+	OutData->SetNumberField(TEXT("widget_variable_guid_fixups"), WidgetVariableGuidFixups);
 	OutData->SetBoolField(TEXT("saved"), bSaveAfterRemove);
 	return true;
 }
@@ -1018,6 +1099,7 @@ bool FUeAgentHttpServer::CmdUmgSetWidgetProperty(const FUeAgentRequestContext& C
 	JsonTryGetBool(Ctx.Params, TEXT("compile_after_set"), bCompileAfterSet);
 	if (bCompileAfterSet)
 	{
+		UeAgentUmgOps::SyncWidgetVariableGuidMap(WidgetBlueprint);
 		FKismetEditorUtilities::CompileBlueprint(WidgetBlueprint);
 	}
 	bool bSaveAfterSet = false;
@@ -1111,6 +1193,7 @@ bool FUeAgentHttpServer::CmdUmgSetSlotProperty(const FUeAgentRequestContext& Ctx
 	JsonTryGetBool(Ctx.Params, TEXT("compile_after_set"), bCompileAfterSet);
 	if (bCompileAfterSet)
 	{
+		UeAgentUmgOps::SyncWidgetVariableGuidMap(WidgetBlueprint);
 		FKismetEditorUtilities::CompileBlueprint(WidgetBlueprint);
 	}
 	bool bSaveAfterSet = false;
@@ -1197,12 +1280,14 @@ bool FUeAgentHttpServer::CmdUmgRenameWidget(const FUeAgentRequestContext& Ctx, T
 	{
 		WidgetBlueprint->OnVariableRenamed(OldWidgetFName, Widget->GetFName());
 	}
+	const int32 WidgetVariableGuidFixups = UeAgentUmgOps::SyncWidgetVariableGuidMap(WidgetBlueprint);
 	FBlueprintEditorUtils::MarkBlueprintAsStructurallyModified(WidgetBlueprint);
 
 	bool bCompileAfterRename = true;
 	JsonTryGetBool(Ctx.Params, TEXT("compile_after_rename"), bCompileAfterRename);
 	if (bCompileAfterRename)
 	{
+		UeAgentUmgOps::SyncWidgetVariableGuidMap(WidgetBlueprint);
 		FKismetEditorUtilities::CompileBlueprint(WidgetBlueprint);
 	}
 	bool bSaveAfterRename = false;
@@ -1215,6 +1300,7 @@ bool FUeAgentHttpServer::CmdUmgRenameWidget(const FUeAgentRequestContext& Ctx, T
 	OutData->SetStringField(TEXT("asset_path"), WidgetBlueprint->GetOutermost()->GetName());
 	OutData->SetStringField(TEXT("widget_name"), WidgetName);
 	OutData->SetStringField(TEXT("new_widget_name"), Widget->GetName());
+	OutData->SetNumberField(TEXT("widget_variable_guid_fixups"), WidgetVariableGuidFixups);
 	OutData->SetBoolField(TEXT("changed"), true);
 	OutData->SetBoolField(TEXT("saved"), bSaveAfterRename);
 	return true;
@@ -1255,6 +1341,7 @@ bool FUeAgentHttpServer::CmdUmgBindWidgetPropertyToVariable(const FUeAgentReques
 	}
 	if (!WidgetBlueprint->SkeletonGeneratedClass)
 	{
+		UeAgentUmgOps::SyncWidgetVariableGuidMap(WidgetBlueprint);
 		FKismetEditorUtilities::CompileBlueprint(WidgetBlueprint);
 	}
 	if (!WidgetBlueprint->SkeletonGeneratedClass)
@@ -1316,6 +1403,7 @@ bool FUeAgentHttpServer::CmdUmgBindWidgetPropertyToVariable(const FUeAgentReques
 	JsonTryGetBool(Ctx.Params, TEXT("compile_after_bind"), bCompileAfterBind);
 	if (bCompileAfterBind)
 	{
+		UeAgentUmgOps::SyncWidgetVariableGuidMap(WidgetBlueprint);
 		FKismetEditorUtilities::CompileBlueprint(WidgetBlueprint);
 	}
 	bool bSaveAfterBind = false;

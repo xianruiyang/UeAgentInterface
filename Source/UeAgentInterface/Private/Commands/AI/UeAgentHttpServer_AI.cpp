@@ -2,6 +2,7 @@
 
 #include "Server/UeAgentHttpServer.h"
 
+#include "Commands/UeAgentGraphViewUtils.h"
 #include "Utilities/UeAgentJsonDiagnostics.h"
 #include "Module/UeAgentInterfaceLogger.h"
 

@@ -118,6 +118,7 @@
     - `skeleton_slots`
   - `apply_json` 当前会按“先补缺口、再删多余、最后重建内容”的顺序处理 slot track / notify track，避免因为 UE 不允许删除最后一个 slot track 或 notify track 而中途失败。
   - `json_file` 文件缺失、读取失败或 JSON 语法解析失败会直接失败返回 `json_file_not_found / load_json_file_failed / json_parse_failed`。
+  - `sections[]` 不要求一定存在 `Default` section；对已经重命名首段的 Montage，导出 JSON 再回写应保持命名 section 链路并成功 round-trip。
   - 返回包含 `warning_count / warnings`；`skeleton_slots / slot_tracks / segments / sections / notify_tracks / notifies` 中不是 object 或缺关键字段的可恢复条目会写入 warnings，不再静默跳过。
   - 推荐方法：
     1. `montage_create`
@@ -131,7 +132,7 @@
 
 说明：
 - UE 5.6 的 Montage marker sync 不是在 Montage 上直接手写 markers；Montage 只配置 `SyncGroup / SyncSlotIndex`，实际 marker 数据来自底层 `AnimSequence` 并汇总到 `MarkerData`。
-- `montage_set_sync_group` 的 `sync_group_name` 传空字符串时，会清空当前 Montage 的 sync group。
+- `sync_group_name` 传空字符串时，会清空当前 Montage 的 sync group。
 - `sync_slot_name` 和 `sync_slot_index` 二选一即可；都不传时会复用当前 Montage 的 `SyncSlotIndex`，若当前无效则退回 `0` 号 slot。
 - `montage_get_info` 返回的 `sync_markers[]` 是 Montage 当前汇总后的 marker 结果，不是 Skeleton slot 配置。
 
@@ -140,8 +141,8 @@
 > 废弃写入命令已迁移到 `deprecatedCommand/12_Montage.md` 的对应章节。
 
 说明：
-- `montage_add_notify` 传 `notify_name` 时会走命名 notify；传 `notify_class` 时会创建 class-based notify。
-- `montage_add_notify_state` 目前要求 `notify_state_class` 是可实例化的具体类。
+- Notify JSON 传 `notify_name` 时会走命名 notify；传 `notify_class` 时会创建 class-based notify。
+- Notify State JSON 目前要求 `notify_state_class` 是可实例化的具体类。
 - `tick_type` 支持 `queued / branching_point`；如果同时传了 `branching_point`，优先以 `tick_type` 为准。
 - `branching_point=true` 是 `tick_type=branching_point` 的兼容写法。
 - `track_color / notify_color` 推荐传 `{r,g,b,a}`；支持 `0..1` 浮点，也兼容 `0..255` 数值输入。
@@ -181,7 +182,7 @@
 
 说明：
 - 当前不允许删除最后一个 section。
-- `montage_set_next_section` 传 `clear_next_section=true` 时会清空下一段。
+- `clear_next_section=true` 时会清空下一段。
 
 ## 推荐流程
 
@@ -194,16 +195,7 @@
 5. `montage_get_info`
 6. `save_asset`
 
-1. `montage_create`
-2. `montage_add_slot_track`
-3. `montage_add_segment`
-4. `montage_add_section`
-5. `montage_set_next_section`
-6. 需要通知时：`montage_add_notify_track` -> `montage_add_notify / montage_add_notify_state`
-7. 需要 marker sync 时：`montage_set_sync_group`
-8. `montage_set_blend_options`
-9. `montage_get_info`
-10. `save_asset`
+所有 slot track、segment、section、notify 和 sync 配置都应写入单文件 JSON 后通过 `montage_apply_json` 回写；旧逐条写入流程仅保留在废弃分册。
 
 ## 当前边界
 
@@ -214,34 +206,6 @@
 - 当前还没有 slot track 中段级重排、section 批量重排、曲线与 metadata 编辑命令。
 - 当前重点是“资产级 + 结构级 + 基础播放配置”，不是 Persona 全量替代。
 
-<!-- UAI_FORMAL_COMMAND_INDEX_BEGIN -->
-## 原子/兼容命令正式索引
->
-> 以下命令已有真实 dispatch 实现并纳入 smoke 覆盖；对完整资产制作仍应优先使用本分册中的结构化 JSON / folder workflow，原子命令仅用于 bootstrap、迁移、probe 或局部修复。
+## 废弃命令
 
-| Command | 作用 | 关键参数 | 关键返回 |
-| --- | --- | --- | --- |
-| `montage_add_notify` | **原子/兼容**：新增普通 Notify 或命名 Notify | `asset_path`、`time_seconds`，以及 `notify_name` 或 `notify_class`；可选 `track_name`、`tick_type/branching_point`、`notify_color`、`trigger_weight_threshold`、`notify_trigger_chance`、`notify_filter_type`、`notify_filter_lod`、`can_be_filtered_via_request`、`trigger_on_dedicated_server`、`trigger_on_follower`、`save_after_add` | `success`、`warnings`、`errors` |
-| `montage_add_notify_state` | **原子/兼容**：新增 Notify State | `asset_path`、`notify_state_class`、`time_seconds`、`duration_seconds`；可选 `track_name`、`tick_type/branching_point`、`notify_color`、`trigger_weight_threshold`、`notify_trigger_chance`、`notify_filter_type`、`notify_filter_lod`、`can_be_filtered_via_request`、`trigger_on_dedicated_server`、`trigger_on_follower`、`save_after_add` | `success`、`warnings`、`errors` |
-| `montage_add_notify_track` | **原子/兼容**：新增或更新 Notify Track | `asset_path`、`track_name`；可选 `track_color`、`save_after_add` | `success`、`warnings`、`errors` |
-| `montage_add_section` | **原子/兼容**：新增 Section | `asset_path`、`section_name`、`time_seconds`、`save_after_add` | `success`、`warnings`、`errors` |
-| `montage_add_segment` | **原子/兼容**：给指定 Slot Track 追加或插入动画段 | `asset_path`、`slot_name`、`animation_asset`，可选 `start_pos`、`anim_start_time`、`anim_end_time`、`play_rate`、`loop_count`、`save_after_add` | `success`、`warnings`、`errors` |
-| `montage_add_slot_track` | **原子/兼容**：新增 Slot Track | `asset_path`、`slot_name`、`save_after_add` | `success`、`warnings`、`errors` |
-| `montage_remove_notify` | **原子/兼容**：删除 Notify | `asset_path`、`notify_index`、`save_after_remove` | `success`、`warnings`、`errors` |
-| `montage_remove_notify_track` | **原子/兼容**：删除空 Notify Track | `asset_path`、`track_name`、`save_after_remove` | `success`、`warnings`、`errors` |
-| `montage_remove_section` | **原子/兼容**：删除 Section | `asset_path`、`section_name`、`save_after_remove` | `success`、`warnings`、`errors` |
-| `montage_remove_segment` | **原子/兼容**：删除动画段 | `asset_path`、`slot_name`、`segment_index`、`save_after_remove` | `success`、`warnings`、`errors` |
-| `montage_remove_skeleton_slot` | **Deprecated for Montage authoring**：从 Skeleton 删除 slot | `slot_name`、`skeleton_path` 或 `asset_path`、`save_skeleton` | Montage JSON 中优先写 `skeleton_slots` |
-| `montage_remove_slot_track` | **原子/兼容**：删除空 Slot Track | `asset_path`、`slot_name`、`save_after_remove` | `success`、`warnings`、`errors` |
-| `montage_rename_section` | **原子/兼容**：重命名 Section | `asset_path`、`section_name`、`new_section_name`、`save_after_rename` | `success`、`warnings`、`errors` |
-| `montage_rename_skeleton_slot` | **Deprecated for Montage authoring**：重命名 Skeleton slot | `slot_name`、`new_slot_name`、`skeleton_path` 或 `asset_path`、`save_skeleton` | Montage JSON 中优先写 `skeleton_slots` |
-| `montage_rename_slot_track` | **原子/兼容**：重命名 Slot Track | `asset_path`、`slot_name`、`new_slot_name`、`save_after_rename` | `success`、`warnings`、`errors` |
-| `montage_set_blend_options` | **原子/兼容**：设置 Blend 和 AutoBlendOut | `asset_path`、可选 `blend_in_time`、`blend_out_time`、`blend_out_trigger_time`、`enable_auto_blend_out`、`blend_mode_in/out`、`save_after_set` | 优先写 `settings` |
-| `montage_set_next_section` | **原子/兼容**：设置或清空 NextSectionName | `asset_path`、`section_name`、`next_section_name` 或 `clear_next_section`、`save_after_set` | `success`、`warnings`、`errors` |
-| `montage_set_preview_mesh` | **原子/兼容**：设置或清空预览 SkeletalMesh | `asset_path`、`skeletal_mesh_path` 或 `clear_preview_mesh`、`save_after_set` | 优先写 JSON |
-| `montage_set_section_time` | **原子/兼容**：修改 Section 时间 | `asset_path`、`section_name`、`time_seconds`、`save_after_set` | `success`、`warnings`、`errors` |
-| `montage_set_skeleton_slot_group` | **Deprecated for Montage authoring**：注册 Slot 并设置到指定 Group | `slot_name`、`group_name`、`skeleton_path` 或 `asset_path`、`save_skeleton` | Montage JSON 中优先写 `skeleton_slots` |
-| `montage_set_sync_group` | **原子/兼容**：设置或清空 Marker Sync 的 Group/Slot | `asset_path`、可选 `sync_group_name`、`sync_slot_name` 或 `sync_slot_index`、`save_after_set` | 优先写 `sync` |
-| `montage_update_notify` | **原子/兼容**：修改已有 Notify | `asset_path`、`notify_index`；可选 `time_seconds`、`duration_seconds`、`track_name`、`notify_name`、`tick_type/branching_point`、`notify_color`、`trigger_weight_threshold`、`notify_trigger_chance`、`notify_filter_type`、`notify_filter_lod`、`can_be_filtered_via_request`、`trigger_on_dedicated_server`、`trigger_on_follower`、`save_after_set` | `success`、`warnings`、`errors` |
-| `montage_update_segment` | **原子/兼容**：修改已有动画段 | `asset_path`、`slot_name`、`segment_index`，可选 `animation_asset`、`start_pos`、`anim_start_time`、`anim_end_time`、`play_rate`、`loop_count`、`save_after_set` | `success`、`warnings`、`errors` |
-<!-- UAI_FORMAL_COMMAND_INDEX_END -->
+本分册不再列出已废弃写入命令；这些命令仅保留在 `deprecatedCommand/12_Montage.md`，供旧脚本兼容、bootstrap、迁移和故障补修查阅。

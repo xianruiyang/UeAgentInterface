@@ -1,4 +1,4 @@
-﻿# 指令详解：Core / Level / Assets / Landscape
+# 指令详解：Core / Level / Assets / Landscape
 
 ## Core / Session
 
@@ -15,6 +15,9 @@
 | `open_asset_editor` | 打开指定资产编辑器 | `asset_path` | 打开 Blueprint / Material / Niagara |
 | `save_asset` | 保存指定资产 | `asset_path`、`only_if_dirty` | 保存关键资产修改 |
 | `asset_duplicate` | 复制资产到指定路径 | `source_asset_path`、`destination_asset_path`、`save_after_duplicate` | 先复制测试资产，再在副本上做安全修改 |
+| `asset_move` | 通过 UE AssetTools 移动或重命名资产 | `source_asset_path` 或 `asset_path`、`destination_asset_path` 或 `destination_folder`、可选 `destination_name/dry_run/save_after_move` | 把旧资产归档到 Deprecated 目录，同时让 UE 处理重命名、引用更新和保存 |
+| `asset_fixup_redirectors` | 删除资产移动后已无引用的 `ObjectRedirector` | `asset_path`/`asset_paths` 或 `folder_path`/`folder_paths`、可选 `recursive/dry_run/fail_on_blocked` | 批量移动后清理旧路径 redirector；仍有 referencer 时返回 `redirector_still_referenced`，先改引用再删除 |
+| `asset_reference_graph` | 查询任意资产的 AssetRegistry 引用关系 | `asset_path`，可选 `direction/recursive/max_depth/include_*` | 在改 AnimBP、Montage、Level、清理旧资源前建立依赖/反向引用图 |
 | `asset_import_texture` | 导入外部贴图为 Texture2D | `source_filename`、`destination_path`，可选 `destination_name/srgb/compression_settings/mip_gen_settings/lod_group` | 把外部 PNG/TGA/JPG/EXR/HDR 等贴图纳入 UE 资产链路 |
 | `asset_import_fbx_skeletal_mesh` | 导入 FBX 为 Skeletal Mesh | `source_filename`、`destination_path`，可选 `skeleton_path/import_materials/import_textures/create_physics_asset/import_animations/import_morph_targets/update_skeleton_reference_pose/validate_after_import/expected_*` | 把外部角色模型/骨骼导入到项目，并可验证 Morph/LOD/材质槽 |
 | `asset_import_fbx_animation` | 导入 FBX 为 AnimSequence | `source_filename`、`destination_path`，以及 `skeleton_path` 或 `skeletal_mesh_path` | 批量导入第三方动作到现有骨骼 |
@@ -27,6 +30,52 @@
 | `editor_resolve_dirty_resources` | 按路径或整批保存/丢弃脏资源 | `save_resource_paths`、`discard_resource_paths`、`save_all_dirty`、`discard_all_dirty`、`close_all_asset_editors`、`only_save_dirty` | 先处理脏资源，再决定是否关闭编辑器 |
 | `editor_close` | 关闭编辑器；若仍有未处理脏资源则失败并返回清单 | `request_exit`、`close_all_asset_editors` | 自动化结束时安全退出 |
 | `editor_prepare_exit` | 退出前按策略保存/丢弃并请求关闭编辑器 | `save_asset_paths`、`discard_asset_paths`、`discard_all_dirty`、`request_exit` | 自动化结束时避免恢复弹窗 |
+
+### `asset_reference_graph`
+
+用途：对任意资产建立 AssetRegistry 级引用关系图。凡是要替换角色、重建 AnimBP/Montage、清理旧资源、判断某个资产能否删除，都应先用此指令确认“它引用了谁”和“谁引用了它”，不要只靠单个蓝图导出或二进制字符串扫描。
+
+关键参数：
+
+- `asset_path`：必填，资产 package path、object path 或 UE 文本对象引用均可，例如 `/Game/Foo/Bar`、`/Game/Foo/Bar.Bar`、`/Script/Engine.BlueprintGeneratedClass'/Game/Foo/BP.BP_C'`。
+- `direction`：可选，`dependencies` / `referencers` / `both`，默认 `both`。
+- `recursive`：可选，是否递归展开引用图，默认 `false`。
+- `max_depth`：可选，递归深度，默认非递归为 `1`，递归为 `3`，上限 `16`。
+- `max_nodes`：可选，最大节点数，默认 `1024`，超过会返回 `truncated=true`。
+- `include_hard` / `include_soft`：可选，是否包含 hard / soft package dependency，默认都为 `true`。
+- `include_manage`：可选，是否包含 Asset Manager manage dependency，默认 `true`。
+- `include_searchable_names`：可选，是否包含 searchable name dependency，默认 `true`。
+- `force_scan`：可选，先同步 `SearchAllAssets(true)` 再查，默认 `false`。
+- `allow_missing`：可选，资产不存在时仍按 package name 查询引用图，默认 `false`。
+- `include_path_string_hits`：可选，额外扫描项目 `Content/**/*.uasset|*.umap` 中的原始 package path 字符串，默认 `false`。这不是 AssetRegistry 正式引用，只用于发现旧软路径、地图残留字符串或可疑 stale reference。
+- `max_path_string_hits`：可选，路径字符串扫描最大命中数，默认 `200`。
+
+返回字段：
+
+- `asset_found`、`root_asset_data_count`：目标资产是否在 AssetRegistry 中存在。
+- `dependencies[]`：目标资产直接引用的边，`source=目标资产`，`target=被引用资产`。
+- `referencers[]`：直接引用目标资产的边，`source=引用者`，`target=目标资产`。
+- `nodes[]`：图中节点，包含 `package_name/object_path/asset_class/asset_found/is_redirector/depth/role`。
+- `edges[]`：图中边，包含 `source/target/query_direction/category/category_flags/property_flags/relation_kind/properties/hard/soft/game/build/direct_manage/indirect_manage/depth`。
+- `dependency_count`、`referencer_count`、`node_count`、`edge_count`、`truncated`：统计和截断状态。
+- `path_string_hits[]`：仅 `include_path_string_hits=true` 时返回，表示哪些包文件原始字节里包含目标 package path。
+
+示例：
+
+```json
+{
+  "command": "asset_reference_graph",
+  "params": {
+    "asset_path": "/Game/Characters/PaladinRootMotion/ABP_Paladin_Player_RM",
+    "direction": "both",
+    "recursive": true,
+    "max_depth": 3,
+    "include_path_string_hits": true
+  }
+}
+```
+
+注意：`asset_reference_graph` 的主结果来自 UE AssetRegistry。若 `path_string_hits` 命中但 AssetRegistry 没有边，通常表示旧软路径字符串、未重新保存的包、redirector 残留或不可解析的自定义序列化字段，需要进一步用对应资产的结构化导出或属性 JSON 验证。
 
 ### `asset_import_fbx_skeletal_mesh` 角色变形相关参数
 
@@ -42,55 +91,52 @@
 
 ### Level Content authoring 优先级
 
-当前 Level 中持久 Actor / Component 最终态的批量 authoring 默认使用 `23_LevelContent_JSON.md` 的 `level_content_*_json` / `level_actor_*_json` 工作流。2026-05-02 已在打开的 UE 编辑器中实测旧原子流程与 Level Content JSON 流程：普通 Actor 创建/删除/克隆、TargetPoint probe、普通 transform、attach/detach、folder、tag、Actor 属性、普通组件属性读回和托管清理均可由 Level Content 表达，旧写入命令已归档到 `deprecatedCommand/01_Core_Level_Assets_Landscape.md` 作为 **Deprecated for Level Content authoring**。
+当前 Level 中持久 Actor / Component 最终态的批量 authoring 默认使用 `23_LevelContent_JSON.md` 的 `level_content_*_json` / `level_actor_*_json` 工作流。2026-05-02 已在打开的 UE 编辑器中实测旧原子流程与 Level Content JSON 流程：普通 Actor 创建/删除/克隆、TargetPoint probe、普通 transform、attach/detach、folder、tag、Actor 属性、普通组件属性读回和托管清理均可由 Level Content 表达，已替代的旧写入命令只保留在 `deprecatedCommand/01_Core_Level_Assets_Landscape.md`。
 
-不要把这个结论扩大到所有 Level 命令：只读诊断、视口/截图、空间 trace/sweep/overlap、几何对齐、`level_spawn_wall_with_opening`、Landscape、morph 展示、Navigation build/query 仍是专用能力。`navmesh_spawn_bounds_volume` 和 `component_set_property` / `level_set_component_property` 的普通场景实例 authoring 已被 Level Content JSON 接管；旧命令保留为兼容旧脚本、bootstrap、探针验证和故障补修入口。
+不要把这个结论扩大到所有 Level 命令：只读诊断、视口/截图、空间 trace/sweep/overlap、几何对齐、`level_spawn_wall_with_opening`、Landscape、morph 展示、Navigation build/query 仍是专用能力。Navigation Bounds Volume 创建和普通场景实例组件属性写入的最终态已被 Level Content JSON 接管；旧入口只作为兼容、bootstrap、探针验证和故障补修能力记录在废弃分册。
 
 | 指令 | 作用 | 关键参数 | 典型用途 |
 |---|---|---|---|
 | `list_actors` | 列出当前关卡 Actor | `limit` | 读取场景现有对象 |
-| `spawn_actor` | **Deprecated for Level Content authoring**；详见 `deprecatedCommand/01_Core_Level_Assets_Landscape.md` | `class_path`、可选 `label/location/rotation/scale/static_mesh/folder_path/tags[]/snap_to_ground` | 兼容旧脚本、bootstrap、单步故障恢复 |
 | `level_spawn_wall_with_opening` | 生成“带开口的墙”（自动拆成多段网格） | `plane`、`wall_size`、`opening_center/opening_size`、`label_prefix` | 门洞/窗洞/通道口：避免手工拆墙造成接口不连通 |
-| `destroy_actor` | **Deprecated for Level Content authoring**；详见 `deprecatedCommand/01_Core_Level_Assets_Landscape.md` | `id` | 兼容旧脚本、单步故障恢复 |
-| `level_mark_probe` | **Deprecated for Level Content authoring**；TargetPoint probe 可由 Level Content resource 表达 | `location`、可选 `label/folder_path/tags` | 快速单点 probe |
-| `level_generate_probes` | **Deprecated for Level Content authoring**；批量 probe 可由多个 Level Content resource 表达 | `points[]` 或 `probes[]`、可选 `label_prefix/folder_path/tags` | 快速批量 probe |
-| `level_duplicate_actor` | **Deprecated for Level Content authoring**；详见 `deprecatedCommand/01_Core_Level_Assets_Landscape.md` | `id`、`offset` | 兼容旧脚本、单步故障恢复 |
 | `actor_list_components` | 列出 Actor 组件 | `id`、`include_non_scene` | 修改组件前定位组件名 |
 | `level_list_actor_components` | `actor_list_components` 的同义命令 | 同上 | 统一走 `level_*` 前缀 |
 | `level_get_actor_property` | 读取 Actor 属性 | `id`、`property_name` | 调试实例状态 |
 | `level_get_component_property` | 读取组件属性 | `id`、`component`（或 `component_id`）、`property_name` | 查询 Mesh / Collision / Material 槽 |
-| `actor_set_property` | **Deprecated for Level Content authoring**；Actor 属性最终态优先写入 `resources[].properties` | `id`、`property_name`、`value_text` | 兼容旧脚本、局部补修 |
-| `level_set_actor_property` | **Deprecated for Level Content authoring**；同 `actor_set_property` | 同上 | 兼容旧脚本、局部补修 |
-| `component_set_property` | **Deprecated for Level Content authoring**；组件属性最终态优先写入 `resources[].properties` 或 `components[].properties` | `id`、`component`（或 `component_id`）、`property_name`、`value_text` | 兼容旧脚本、bootstrap、局部补修 |
-| `level_set_component_property` | **Deprecated for Level Content authoring**；同 `component_set_property` | 同上 | 兼容旧脚本、局部补修 |
 | `level_set_skeletal_mesh_morph_target` | 设置场景 Actor 上 SkeletalMeshComponent 的 Morph Target 权重，可选启动平滑 pulse | `id`、`morph_target`、`weight`，可选 `component/component_id`、`skeletal_mesh`、`clear_existing`、`pulse`、`stop_pulse` | 把导入的 Morph Target 实际接入关卡实例并截图/预览 |
 | `level_get_actor_transform` | 读取 Actor 实例变换 | `id` | 精确读取 `location / rotation / scale` |
-| `level_set_actor_transform` | **Deprecated for ordinary Level Content authoring**；普通 transform 优先写 `resources[].transform`，`collision_aware` 定点修复仍保留专用用途 | `id`，可选 `location`、`rotation`、`scale`、`collision_aware`、`collision{...}` | 碰撞感知局部补修 |
-| `level_set_actor_location` | **Deprecated for Level Content authoring** | `id`、`location` | 兼容旧脚本、局部补修 |
-| `level_set_actor_rotation` | **Deprecated for Level Content authoring** | `id`、`rotation` | 兼容旧脚本、局部补修 |
-| `level_set_actor_scale` | **Deprecated for Level Content authoring** | `id`、`scale` | 兼容旧脚本、局部补修 |
-| `level_attach_actor` | **Deprecated for Level Content authoring** | `child_id`、`parent_id` | 兼容旧脚本、局部补修 |
-| `level_detach_actor` | **Deprecated for Level Content authoring** | `id` | 兼容旧脚本、局部补修 |
-| `level_set_actor_folder` | **Deprecated for Level Content authoring** | `id`、`folder_path` | 兼容旧脚本、局部补修 |
-| `level_destroy_folder_actors` | **Deprecated for managed Level Content cleanup**；托管删除优先 `level_content_delete_scope` | `folder_path`、`include_child_folders` | 手工清场兜底 |
-| `level_cleanup_empty_folders` | **Deprecated for managed Level Content cleanup**；托管流程优先 `level_content_repair_json` / cleanup task | `folder_path_prefix`、`dry_run` | 手工 Outliner 维护兜底 |
-| `level_add_actor_tag` | **Deprecated for Level Content authoring** | `id`、`tag` | 兼容旧脚本、局部补修 |
 | `level_get_selection` | 读取当前选择集 | 无 | 获取当前选中对象 |
 | `level_set_selection` | 设置选择集 | `actor_ids`、`mode` | 后续聚焦、批量操作 |
 | `navmesh_build` | 构建/刷新 NavMesh | `wait_for_finish`、`timeout_seconds` | 白盒验收前生成可查询导航数据 |
 | `navmesh_project_point` | 单点投影到 NavMesh（只投影不查路） | `point`（或 `location`）、`project_query_extent` | 查路前先确认“投影落点是否在期望层面” |
 | `navmesh_find_path` | NavMesh 两点查路 | `start`、`end`、`allow_partial`、`project_to_nav` | 批量判定关键节点连通性 |
-| `navmesh_spawn_bounds_volume` | **Deprecated for Level Content authoring**；NavMeshBoundsVolume 最终态优先写 `kind=nav_mesh_bounds_volume` + `bounds` | `bounds`、可选 `rotation/label/folder_path` | 兼容旧脚本、bootstrap、导航故障补修 |
 | `level_validate_connectivity` | 多点连通性验收（walk + 显式边） | `points[]` 或 `probe_actor_ids[]`、可选 `pairs[].edge_type`、`graph_root_index` | 把“断路点/断回环”结构化输出为逐对+图报告 |
 | `level_trace_world_ray` | 世界射线 Trace（不依赖 viewport） | `start`、`direction`、`trace_distance`、`trace_channel` | 查地面、查遮挡、查通道是否堵住 |
 | `level_snap_to_surface` | 沿射线吸附 Actor 到命中面 | `id`、可选 `start/direction/offset_cm` | 快速贴合地面/墙面，减少悬空与缝隙 |
 | `level_sweep_capsule` | 胶囊 Sweep 通行性检测 | `start`、`end`、`radius_cm`、`half_height_cm`、`trace_channel` | 检查门洞/走廊/电梯轨迹净空 |
 | `level_sweep_capsule_path` | 折线路径胶囊 Sweep（路径净空） | `points[]`、`radius_cm`、`half_height_cm`、`step_cm` | 检查楼梯/走廊/电梯轨迹中途阻挡与净空不足 |
 | `level_check_overlaps` | Overlap 检测（碰撞穿插） | `shape`、`center`、形状参数、`trace_channel` | 发现“摆放穿插/互相卡住/门墙不贴合”等问题 |
+| `level_align_actor_vertex_to_vertex` | 按网格顶点把 Actor 对齐到目标顶点 | `source_actor_id`、`target_actor_id`、顶点选择参数 | 白盒模块拼接时做精确顶点对齐 |
+| `mesh_get_closest_vertex` | 查询 Actor 网格中最接近世界点的顶点 | `id`、`world_position` | 对齐前定位候选顶点 |
+| `mesh_get_vertex_world_position` | 读取 Actor 网格指定顶点的世界坐标 | `id`、`vertex_index` | 顶点对齐、几何诊断和留证 |
+| `screenshot_viewport` | 抓取当前 Level Viewport 普通截图 | 可选 `format/quality/max_size` | 视觉验收和问题留证 |
+| `screenshot_viewport_buffer` | 抓取深度/法线/底色等调试 buffer | `buffer`、可选 `format/quality/max_size` | 更稳定地检查遮挡、悬空、穿插和深度问题 |
+| `viewport_get_camera` | 读取当前 Level Viewport 相机 | 无 | 保存当前取景状态 |
+| `viewport_set_camera` | 设置当前 Level Viewport 相机 | `location`、`rotation`、可选 `fov` | 复现固定视角并截图 |
+| `viewport_focus_actor` | 聚焦单个 Actor | `id`、可选 `padding` | 快速定位目标 Actor |
+| `viewport_focus_actor_safe` | 防卡墙的稳健 Actor 聚焦 | `id`、可选 `collision_aware/look_at/auto_fallback` | 室内或遮挡复杂场景的取景 |
+| `viewport_frame_actor` | 按 Actor bounds 计算并写入视口相机 | `id`、可选 `padding/collision_aware/look_at` | 精确 framing 并返回相机读回 |
+| `viewport_frame_actors` | 按多个 Actor 聚合 bounds 取景 | `actor_ids[]`、可选 `padding` | 批量对象截图 |
+| `viewport_frame_folder` | 按 Outliner folder 聚合 bounds 取景 | `folder_path`、可选 `include_child_folders/padding/collision_aware` | 白盒区域或托管资源整组留证 |
+| `viewport_frame_selection` | 按当前选择集聚合 bounds 取景 | 可选 `padding` | 人工选择后自动留证 |
+| `viewport_set_game_view` | 切换 Game View | `enabled` | 截图前隐藏或恢复编辑器辅助显示 |
+| `viewport_set_realtime` | 切换视口实时刷新 | `enabled` | 需要 Niagara/动画预览或稳定截图时控制实时性 |
+| `viewport_deproject_screen_to_world` | 屏幕坐标反投影到世界射线 | `screen_x`、`screen_y` | 视口拾取和屏幕点诊断 |
+| `viewport_trace_screen_point` | 从屏幕点发起世界 Trace | `screen_x`、`screen_y`、可选 `trace_channel/trace_distance` | 根据截图坐标定位命中 Actor |
 
 ### 组件碰撞属性写入
 
-- Level Content JSON 的 `resources[].properties` / `components[].properties` 和旧 `component_set_property` / `level_set_component_property` 写入 `BodyInstance.*`、`Collision*` 或 `CanCharacterStepUpOn` 时，都会刷新 `UPrimitiveComponent` 的物理状态，使后续 Trace / Sweep / Overlap 使用新碰撞配置。
+- Level Content JSON 的 `resources[].properties` / `components[].properties` 写入 `BodyInstance.*`、`Collision*` 或 `CanCharacterStepUpOn` 时，都会刷新 `UPrimitiveComponent` 的物理状态，使后续 Trace / Sweep / Overlap 使用新碰撞配置。
 - 返回中若出现 `primitive_collision_state_refreshed=true`，表示本次写入已经触发碰撞状态刷新；写入 `BodyInstance.CollisionProfileName` 时若出现 `collision_profile_setter_applied=true`，表示已调用 `SetCollisionProfileName`，不是只做 ImportText。
 - 写入后仍应优先用 `level_get_component_property` 读回目标属性，再用 `level_sweep_capsule_path` 或 `level_check_overlaps` 验证实际查询结果；不要只凭 `value_text` 判断碰撞已经进入物理场景。
 - 角色胶囊通行、IK 地面 Trace、视觉几何可以使用不同碰撞语义，但必须明确区分。例如胶囊可走简化 ramp 以保证移动顺滑，足部 Trace 可命中台阶面或专用脚底辅助面；辅助面若不该影响角色移动，应确保它不阻挡 Pawn。
@@ -116,44 +162,6 @@
 - `stop_pulse` / `stop_animation`：停止该 Actor/Component/Morph Target 上已有 ticker；未传 `weight` 时会回到 `min_weight`。
 
 同一 Actor/Component/Morph Target 再次启动 `pulse` 会先移除旧 ticker，再注册新的 ticker，避免重复驱动。返回 `applied_weight`、`component_path`、`skeletal_mesh`、`morph_target`、`pulse_started / pulse_stopped`、`pulse_key` 和 `display_status`。普通单次写入返回 `display_status=scene_component_morph_set`；启动循环返回 `display_status=scene_component_morph_pulse_started`。验收时不要只看命令 `ok=true`；应确认 `applied_weight` 与目标权重一致，并通过视口截图或 buffer 截图确认关卡实例可见。循环展示还应做间隔截图或肉眼视口复核，确认轮廓在连续变化。
-
-### 实例变换相关建议
-
-- 批量脚本中，优先使用 `level_get_actor_transform` / `level_set_actor_transform`
-- 不建议再绕用通用 `property_name=RelativeLocation` 之类写法做实例位姿编辑
-- 需要单独改某一维度时再用 `level_set_actor_location / rotation / scale`
-- 生成/对齐后容易出现“穿插/卡住/留缝”时：优先用 `level_set_actor_transform(collision_aware=true)` 做放置前的 Overlap 检测（必要时开启 `collision.auto_fallback` 多候选偏移），再配合 `level_check_overlaps` 做局部复核。
-
-### `level_set_actor_transform`
-
-一次性写入 Actor 实例变换；在白盒迭代中常用来做“局部精准修复”。
-
-- 必填：`id`
-- 可选：`location`、`rotation`、`scale`
-- 可选：`collision_aware`（默认 `false`）
-  - 仅在本次写入包含 `location` 时生效
-  - 为 `true` 时会在写入前做一次（或多次候选）Overlap 检测，找到满足条件的位置后再落地写入；若所有候选都失败，会返回 `ok=false` 且 `error=collision_aware_no_valid_location`，同时仍会回传 `collision_result.attempts[]` 便于诊断
-
-`collision{...}`（可选，仅 `collision_aware=true` 时读取）：
-
-- `trace_channel`：可选，默认 `Visibility`
-- `trace_complex`：可选，默认 `false`
-- `max_allowed_overlaps`：可选，默认 `0`
-- `shape`：可选，`box/sphere/capsule`
-  - 不填时默认使用 Actor 当前 bounds 的 world AABB 作为 box（`shape_derived_from_bounds=true`）
-  - `shape=box`：必填 `box_extent`
-  - `shape=sphere`：必填 `radius_cm`
-  - `shape=capsule`：必填 `radius_cm`、`half_height_cm`，可选 `rotation`
-  - `bounds_padding_cm` / `padding_cm`：仅在“从 bounds 派生 shape”时生效；对派生 box 的 extent 做等量扩/缩（cm，可为负）
-- `ignore_actor_ids[]`：可选，忽略的 Actor 名称/标签数组（会自动忽略目标 Actor 自身）
-- `ignore_folder_path_prefix` / `ignore_tags[]` / `ignore_class_substrings[]`：可选，忽略过滤器（同 `level_trace_world_ray`），用于屏蔽噪声对象
-- `include_overlaps`：可选，默认 `false`；为 `true` 时返回每次尝试的 overlaps 列表（受 `overlap_limit` 限制）
-- `overlap_limit`：可选，默认 `10`
-- `auto_fallback`：可选，默认 `true`；在目标位置重叠时尝试偏移候选
-- `fallback_step_cm`：可选，默认 `10`
-- `fallback_offsets_cm[]`：可选，显式候选偏移（每项为向量 `{"x","y","z"}` 或对象 `{"offset_cm":{...}}`）；提供后将按列表顺序尝试
-
-返回：除 `location/rotation/scale/transform` 外，还会包含 `collision_result`（记录请求位置、最终位置、候选尝试与重叠统计）。
 
 ### `level_spawn_wall_with_opening`
 
@@ -203,60 +211,6 @@
   }
 }
 ```
-
-### `level_mark_probe`
-
-创建一个 `TargetPoint` 作为“验收探针/锚点”（建议把探针语义固定为 **脚底点/落脚点**，便于后续 Trace/Sweep/连通性验收复用）。
-
-- `location`：必填，世界坐标。
-- `rotation`：可选，默认 `0,0,0`。
-- `label`：可选，Actor Label。
-- `folder_path`：可选，Outliner folder（推荐统一放 `.../Probes`）。
-- `tags[]`：可选，Actor Tags。
-
-返回：`probe`（完整 actor_info）以及 `location/rotation`。
-
-### `level_generate_probes`
-
-批量创建 `TargetPoint` 探针（用于回归、批量连通性验收、关键落脚点固化）。
-
-- `points[]`：vector 列表（每个元素是 `{x,y,z}`），或
-- `probes[]`：对象列表（每个元素至少包含 `location`），二选一必填
-- 可选：
-  - `label_prefix`（默认 `Probe`，会自动生成 `Probe_01/02/...`）
-  - `folder_path`
-  - `rotation`
-  - `tags[]`
-
-返回：`count` 与 `probes[]`（actor_info 列表）。
-
-## Viewport / 屏幕点 / 对齐
-
-| 指令 | 作用 | 关键参数 | 典型用途 |
-|---|---|---|---|
-| `viewport_get_camera` | 读取当前视口相机 | 无 | 保存当前构图 |
-| `viewport_get_warnings` | 读取当前视口可显示的 renderer warning 文本 | 可选 `include_suppressed` | 结构化读取红字 overlay，例如平面反射全局剪切平面、多个定向光 ForwardShadingPriority 冲突 |
-| `viewport_set_camera` | 设置视口相机 | `location`、`rotation`、`fov` | 快速移动到目标区域 |
-| `viewport_set_realtime` | 开关实时渲染 | `realtime`、`store_current_value` | Niagara / 动画检查前开启实时 |
-| `viewport_set_game_view` | 开关 Game View | `game_view` | 截图前隐藏编辑器辅助元素 |
-| `viewport_focus_actor` | 聚焦指定 Actor | `id` | 快速定位对象 |
-| `viewport_focus_actor_safe` | 更稳的聚焦：默认防卡墙 + 自动看向目标 | `id`，可选透传 `padding/collision_aware/look_at/...` | 室内白盒验收取景，减少相机卡墙/朝向不对 |
-| `viewport_frame_actor` | 按单个 Actor bounds 仅平移相机入画 | `id`、`padding` | 保持当前旋转和 FOV，快速查看单个对象 |
-| `viewport_frame_selection` | 聚焦当前选择集 | `instant` | 验收当前选中结果 |
-| `viewport_frame_actors` | 聚焦指定 Actor 列表 | `actor_ids`、`instant` | 从脚本直接构图 |
-| `viewport_frame_folder` | 按 folder 聚合 Actor bounds 并仅平移相机入画 | `folder_path`、`include_child_folders`、`padding` | 保持当前旋转和 FOV，快速查看整组结构 |
-| `viewport_deproject_screen_to_world` | 屏幕点反投影 | `screen_x`、`screen_y` | 从像素点得到世界射线 |
-| `viewport_trace_screen_point` | 从屏幕点发起 Trace | `screen_x`、`screen_y`、`trace_distance`、`trace_channel`、`trace_complex` | 获取命中位置和法线 |
-| `viewport_pick_actor_at_screen` | 从屏幕点拾取命中的 Actor 并返回 Actor 信息 | `screen_x`、`screen_y`、`trace_distance`、`trace_channel`、`trace_complex` | 点击式检查场景对象 |
-| `viewport_select_actor_at_screen` | 从屏幕点拾取并设置当前选择，同时返回完整 Actor 信息 | `screen_x`、`screen_y`、`selection_mode`、`trace_distance` | 点击式选择并检查对象 |
-| `level_get_nearby_actor_obbs` | 读取某个 Actor 周围球形范围内 Actor 的 OBB 信息 | `id`、`radius`、`include_self` | 白盒空间检查、碰撞邻近审计 |
-| `screenshot_viewport` | 抓取当前视口截图 | `format`、`quality`、`max_size` | 自动化留证 |
-| `screenshot_viewport_buffer` | 抓取当前视口深度/法线/底色等 buffer 截图（默认 SceneDepth） | `buffer`、`format`、`quality`、`max_size` | 用深度图等调试视图定位空间错误 |
-| `mesh_get_closest_vertex` | 查询最近顶点 | `id`，可选 `component`、`world_point` | 顶点辅助对齐 |
-| `mesh_get_vertex_world_position` | 读取顶点世界坐标 | `id`，可选 `component`、`vertex_index` | 复核顶点位置 |
-| `level_align_actor_vertex_to_vertex` | 顶点到顶点实例对齐 | `source_actor_id`、`target_actor_id`、源/目标顶点索引或世界点 | 模块拼装、几何校验 |
-| `level_align_actor_by_bounds` | 按包围盒锚点对齐 | `source_actor_id`、`target_actor_id`、`axis`、`source_anchor`、`target_anchor`、`offset` | 建筑模块、平台、楼板拼装 |
-| `level_align_face_to_face` | 面对面贴合（基于 bounds） | `source_actor_id/target_actor_id`、`source_face/target_face`、可选 `axis/offset_cm` | 门/墙贴合、地面/电梯贴合、补齐缝隙 |
 
 ### `viewport_get_warnings`
 
@@ -349,30 +303,6 @@
 - **回退 Buffer Visualization（实验）**：临时切换当前 Level Viewport 到 `Buffer Visualization` 模式并设置 `<buffer>`；截图完成后恢复原 view mode 与原 Buffer Visualization Mode。
 - 返回字段会带 `buffer` 与 `method`（`scene_capture` / `buffer_visualization`），便于批量留证与回归对比。
 - 目标 viewport 选择：优先当前正在编辑的 Level Viewport；若无法获取“当前”，则选择面积最大的透视视口（避免抓到隐藏/未渲染视口导致纯黑截图）。
-
-### `level_destroy_folder_actors`
-
-- `folder_path`：目标 Outliner folder 路径。
-- `include_child_folders`：是否递归包含子 folder，默认 `true`。
-
-行为说明：
-
-- 会遍历 folder 下 Actor，并按当前世界里的真实 folder 状态聚合目标。
-- 目标集合为空时仍返回成功，`deleted_count=0`，适合做幂等清理。
-- 内部会一次性调用编辑器批量删除，而不是要求调用方先枚举再逐个 `destroy_actor`。
-- 适合在批量白盒重建前先清空上一次生成的整组对象，避免因 summary 漏项导致残留重叠。
-
-### `level_cleanup_empty_folders`
-
-- `folder_path_prefix`：可选，只清理该前缀下的空 folder（例如 `WB03_TowerStep`）。
-- `dry_run`：可选，默认 `false`；为 `true` 时只返回将要删除的 folder 列表，不实际删除。
-
-行为说明：
-
-- 会枚举当前世界里的 Outliner folders（包括历史残留的空 folder）。
-- 通过扫描当前世界里所有 Actor 的 `FolderPath`，推导“正在被使用的 folder 集合”（含父级路径）。
-- 对未被任何 Actor 使用的 folder 调用删除（按深度从深到浅排序，避免父级先删导致失败）。
-- 典型用法：先 `level_destroy_folder_actors` 清场，再 `level_cleanup_empty_folders` 清理残留空 folder。
 
 ### `viewport_frame_actor`
 
@@ -502,24 +432,6 @@
   - `start_projected_ok/end_projected_ok`、`*_projected_distance_cm`
   - `projection_failed_reason`（仅当 `allow_projection_failure=true` 且投影失败时）
 - 注意：NavMesh/查路只覆盖“沿可行走面连续移动”的连通（walkable connectivity）。跳跃/电梯/滑索等连通需要额外建模为显式边（建议见 `Plugins/UeAgentInterface/docs/Proposed_WhiteboxValidation_Commands.md`）。
-
-### `navmesh_spawn_bounds_volume`
-
-该命令保留兼容，但新建或维护关卡中的 NavMeshBoundsVolume 默认使用 `23_LevelContent_JSON.md`：`resources[]` 写 `kind=nav_mesh_bounds_volume`，并提供 `bounds.center/extent` 或 `bounds.min/max`。Level Content adapter 会创建 Brush Bounds 并返回 `nav_bounds_updated`。
-
-- `bounds`：必填对象。
-  - `bounds.center`：必填，世界坐标中心点。
-  - `bounds.extent`：必填，世界坐标半尺寸（cm），三轴必须为正。
-- `rotation`：可选，默认 `0,0,0`。
-- `label`：可选，Actor Label。
-- `folder_path`：可选，Outliner folder。
-- `update_navigation_bounds`：可选，是否调用 `UNavigationSystemV1::OnNavigationBoundsUpdated`，默认 `true`。
-
-行为说明：
-
-- 生成 `ANavMeshBoundsVolume` 并创建对应 Brush（否则 bounds 可能为 0，NavMesh 构建/投影/查路都会失败）。
-- 返回 `created_actor` 与最终 `bounds`（便于脚本侧复核“体积是否真的生效”）。
-- 推荐做法：把 NavBounds 放在独立 folder（例如 `.../Nav`），截图/构图时用 `viewport_frame_folder` 聚焦 `.../Geo`，避免 NavBounds 把整体 bounds 拉大导致缩得太远。
 
 ### `level_validate_connectivity`
 
@@ -994,15 +906,6 @@ UeAgentInterfaceCMD/dist/uai-cli.exe exec --cmd skeletal_mesh_preview_morph_targ
   }
 }
 ```
-
-### 通用属性写入返回
-
-以下原子属性命令在成功和解析失败时都会返回属性写入观测字段：
-
-- `actor_set_property` / `level_set_actor_property`
-- `component_set_property` / `level_set_component_property`
-
-字段包含 `requested_value_text`、`applied_value_text`、`property_import_status`、`property_import_verified`、`value_text_exact_match`、`value_text_changed_after_import`、`cpp_type`。`value_text_changed_after_import=true` 表示 UE 读回值与请求字符串不完全一致，需要结合属性类型判断是正常规范化还是值被回退。
 
 ### `editor_resolve_dirty_resources`
 

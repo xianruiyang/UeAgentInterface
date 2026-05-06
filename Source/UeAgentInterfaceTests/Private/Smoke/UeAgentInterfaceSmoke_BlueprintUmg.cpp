@@ -1743,6 +1743,79 @@ bool FUeAgentInterfaceBlueprintGraphSmokeTest::RunTest(const FString& Parameters
 	TestTrue(TEXT("Blueprint graph set_pin_default_value request succeeded"), ExecuteHttpJsonRequest(TEXT("POST"), ServerScope.BaseUrl + TEXT("/api/exec"), ServerScope.Token, SetPinDefaultBody, SetPinDefaultResult));
 	TestEqual(TEXT("Blueprint graph set_pin_default_value status code"), SetPinDefaultResult.StatusCode, 200);
 
+	const FString LayoutGraphBody = MakeExecRequestBody(
+		TEXT("smoke-blueprint-graph-layout-001"),
+		TEXT("blueprint_layout_graph"),
+		FString::Printf(TEXT("{\"asset_path\":\"%s\",\"graph_name\":\"EventGraph\",\"horizontal_spacing\":360,\"vertical_spacing\":96,\"node_padding\":16,\"compile_after_layout\":false,\"save_after_layout\":false}"), *BlueprintAssetPath));
+	FHttpSmokeResult LayoutGraphResult;
+	TestTrue(TEXT("Blueprint graph layout request succeeded"), ExecuteHttpJsonRequest(TEXT("POST"), ServerScope.BaseUrl + TEXT("/api/exec"), ServerScope.Token, LayoutGraphBody, LayoutGraphResult));
+	TestEqual(TEXT("Blueprint graph layout status code"), LayoutGraphResult.StatusCode, 200);
+
+	TSharedPtr<FJsonObject> LayoutGraphJson;
+	TestTrue(TEXT("Blueprint graph layout response parses as JSON"), ParseJson(LayoutGraphResult.Body, LayoutGraphJson));
+	TestTrue(TEXT("Blueprint graph layout root ok=true"), LayoutGraphJson.IsValid() && LayoutGraphJson->GetBoolField(TEXT("ok")));
+
+	const TSharedPtr<FJsonObject>* LayoutGraphData = nullptr;
+	TestTrue(TEXT("Blueprint graph layout contains data object"), LayoutGraphJson.IsValid() && LayoutGraphJson->TryGetObjectField(TEXT("data"), LayoutGraphData) && LayoutGraphData && LayoutGraphData->IsValid());
+	if (LayoutGraphData && LayoutGraphData->IsValid())
+	{
+		TestTrue(TEXT("Blueprint graph layout covers created nodes"), static_cast<int32>((*LayoutGraphData)->GetIntegerField(TEXT("node_count"))) >= 3);
+		TestTrue(TEXT("Blueprint graph layout sees connected edge"), static_cast<int32>((*LayoutGraphData)->GetIntegerField(TEXT("edge_count"))) >= 1);
+		TestTrue(TEXT("Blueprint graph layout reports connected components"), static_cast<int32>((*LayoutGraphData)->GetIntegerField(TEXT("component_count"))) >= 1);
+		TestTrue(TEXT("Blueprint graph layout reports rule-driven port constraint strategy"), (*LayoutGraphData)->GetStringField(TEXT("layout_strategy")).Contains(TEXT("port_constraint")));
+		TestEqual(TEXT("Blueprint graph layout selects the new single layout engine"), (*LayoutGraphData)->GetStringField(TEXT("selected_candidate")), FString(TEXT("port_constraint_layered_layout")));
+		TestTrue(TEXT("Blueprint graph layout moved nodes"), static_cast<int32>((*LayoutGraphData)->GetIntegerField(TEXT("moved_node_count"))) >= 2);
+		TestEqual(TEXT("Blueprint graph layout removes estimated node overlaps"), static_cast<int32>((*LayoutGraphData)->GetIntegerField(TEXT("overlap_count_after"))), 0);
+		TestEqual(TEXT("Blueprint graph layout avoids estimated wire-node intersections"), static_cast<int32>((*LayoutGraphData)->GetIntegerField(TEXT("edge_node_intersection_count_after"))), 0);
+		TestTrue(TEXT("Blueprint graph layout reports changed"), (*LayoutGraphData)->GetBoolField(TEXT("changed")));
+		TestTrue(TEXT("Blueprint graph layout reports exec-dominant metrics"), (*LayoutGraphData)->HasField(TEXT("metrics_exec_dominant_candidate")));
+		TestTrue(TEXT("Blueprint graph layout reports exec-dominant centered metrics"), (*LayoutGraphData)->HasField(TEXT("metrics_exec_dominant_centered_candidate")));
+		TestTrue(TEXT("Blueprint graph layout reports dependency-dominant metrics"), (*LayoutGraphData)->HasField(TEXT("metrics_dependency_dominant_candidate")));
+		TestTrue(TEXT("Blueprint graph layout reports dependency-dominant refined metrics"), (*LayoutGraphData)->HasField(TEXT("metrics_dependency_dominant_refined_candidate")));
+		TestTrue(TEXT("Blueprint graph layout reports dependency-dominant centered metrics"), (*LayoutGraphData)->HasField(TEXT("metrics_dependency_dominant_centered_candidate")));
+		TestTrue(TEXT("Blueprint graph layout reports existing-refined metrics"), (*LayoutGraphData)->HasField(TEXT("metrics_existing_refined_candidate")));
+		TestTrue(TEXT("Blueprint graph layout reports existing semantic port constraint metrics"), (*LayoutGraphData)->HasField(TEXT("metrics_existing_semantic_port_constraint_candidate")));
+		TestTrue(TEXT("Blueprint graph layout reports semantic port constraint metrics"), (*LayoutGraphData)->HasField(TEXT("metrics_semantic_port_constraint_candidate")));
+		TestTrue(TEXT("Blueprint graph layout reports exec-dominant score"), (*LayoutGraphData)->HasField(TEXT("score_exec_dominant_candidate")));
+		TestTrue(TEXT("Blueprint graph layout reports exec-dominant centered score"), (*LayoutGraphData)->HasField(TEXT("score_exec_dominant_centered_candidate")));
+		TestTrue(TEXT("Blueprint graph layout reports dependency-dominant score"), (*LayoutGraphData)->HasField(TEXT("score_dependency_dominant_candidate")));
+		TestTrue(TEXT("Blueprint graph layout reports dependency-dominant refined score"), (*LayoutGraphData)->HasField(TEXT("score_dependency_dominant_refined_candidate")));
+		TestTrue(TEXT("Blueprint graph layout reports dependency-dominant centered score"), (*LayoutGraphData)->HasField(TEXT("score_dependency_dominant_centered_candidate")));
+		TestTrue(TEXT("Blueprint graph layout reports existing-refined score"), (*LayoutGraphData)->HasField(TEXT("score_existing_refined_candidate")));
+		TestTrue(TEXT("Blueprint graph layout reports existing semantic port constraint score"), (*LayoutGraphData)->HasField(TEXT("score_existing_semantic_port_constraint_candidate")));
+		TestTrue(TEXT("Blueprint graph layout reports semantic port constraint score"), (*LayoutGraphData)->HasField(TEXT("score_semantic_port_constraint_candidate")));
+		TestTrue(TEXT("Blueprint graph layout reports backward edge diagnostics"), (*LayoutGraphData)->HasField(TEXT("backward_edges_after")));
+		TestTrue(TEXT("Blueprint graph layout reports pin order diagnostics"), (*LayoutGraphData)->HasField(TEXT("pin_order_violations_after")));
+		TestTrue(TEXT("Blueprint graph layout reports raw edge count"), (*LayoutGraphData)->HasField(TEXT("raw_edge_count")));
+		TestTrue(TEXT("Blueprint graph layout reports reroute plan"), (*LayoutGraphData)->HasField(TEXT("reroute_plan")));
+		TestTrue(TEXT("Blueprint graph layout reports reroute plan count"), (*LayoutGraphData)->HasField(TEXT("reroute_plan_count")));
+		TestTrue(TEXT("Blueprint graph layout reports inserted reroute count"), (*LayoutGraphData)->HasField(TEXT("reroute_inserted_edge_count")));
+
+		const TArray<TSharedPtr<FJsonValue>>* LayoutNodes = nullptr;
+		TestTrue(TEXT("Blueprint graph layout returns node entries"), (*LayoutGraphData)->TryGetArrayField(TEXT("nodes"), LayoutNodes) && LayoutNodes && LayoutNodes->Num() >= 3);
+		if (LayoutNodes && LayoutNodes->Num() > 0)
+		{
+			const TSharedPtr<FJsonObject> FirstLayoutNode = (*LayoutNodes)[0]->AsObject();
+			TestTrue(TEXT("Blueprint graph layout node reports component"), FirstLayoutNode.IsValid() && FirstLayoutNode->HasField(TEXT("component")));
+			TestTrue(TEXT("Blueprint graph layout node reports input pin count"), FirstLayoutNode.IsValid() && FirstLayoutNode->HasField(TEXT("input_pin_count")));
+			TestTrue(TEXT("Blueprint graph layout node reports output pin count"), FirstLayoutNode.IsValid() && FirstLayoutNode->HasField(TEXT("output_pin_count")));
+			TestTrue(TEXT("Blueprint graph layout node reports exec pin classification"), FirstLayoutNode.IsValid() && FirstLayoutNode->HasField(TEXT("has_exec_pin")));
+			TestTrue(TEXT("Blueprint graph layout node reports reroute classification"), FirstLayoutNode.IsValid() && FirstLayoutNode->HasField(TEXT("is_reroute_node")));
+		}
+
+		const TSharedPtr<FJsonObject>* MetricsAfter = nullptr;
+		TestTrue(TEXT("Blueprint graph layout reports final metrics object"), (*LayoutGraphData)->TryGetObjectField(TEXT("metrics_after"), MetricsAfter) && MetricsAfter && MetricsAfter->IsValid());
+		if (MetricsAfter && MetricsAfter->IsValid())
+		{
+			TestTrue(TEXT("Blueprint graph layout final metrics include backward edge count"), (*MetricsAfter)->HasField(TEXT("backward_edge_count")));
+			TestTrue(TEXT("Blueprint graph layout final metrics include backward wire length"), (*MetricsAfter)->HasField(TEXT("backward_wire_manhattan_length")));
+			TestTrue(TEXT("Blueprint graph layout final metrics include pin order violation count"), (*MetricsAfter)->HasField(TEXT("pin_order_violation_count")));
+			TestTrue(TEXT("Blueprint graph layout final metrics include layout area"), (*MetricsAfter)->HasField(TEXT("layout_area")));
+			TestTrue(TEXT("Blueprint graph layout final metrics include backward data edge count"), (*MetricsAfter)->HasField(TEXT("backward_data_edge_count")));
+			TestTrue(TEXT("Blueprint graph layout final metrics include aspect ratio"), (*MetricsAfter)->HasField(TEXT("layout_aspect_ratio")));
+		}
+	}
+
 	const FString CompileBody = MakeExecRequestBody(
 		TEXT("smoke-blueprint-graph-compile-001"),
 		TEXT("blueprint_compile"),
@@ -2175,6 +2248,14 @@ bool FUeAgentInterfaceUmgFolderSmokeTest::RunTest(const FString& Parameters)
 	TestTrue(TEXT("UMG folder set widget property request succeeded"), ExecuteHttpJsonRequest(TEXT("POST"), ServerScope.BaseUrl + TEXT("/api/exec"), ServerScope.Token, SetWidgetPropertyBody, SetWidgetPropertyResult));
 	TestEqual(TEXT("UMG folder set widget property status code"), SetWidgetPropertyResult.StatusCode, 200);
 
+	const FString SetFontSizeBody = MakeExecRequestBody(
+		TEXT("smoke-umg-folder-set-font-size-001"),
+		TEXT("umg_set_widget_property"),
+		FString::Printf(TEXT("{\"asset_path\":\"%s\",\"widget_name\":\"%s\",\"property_name\":\"Font.Size\",\"value_text\":\"32\",\"compile_after_set\":false,\"save_after_set\":false}"), *WidgetBlueprintAssetPath, *WidgetName));
+	FHttpSmokeResult SetFontSizeResult;
+	TestTrue(TEXT("UMG folder set font size request succeeded"), ExecuteHttpJsonRequest(TEXT("POST"), ServerScope.BaseUrl + TEXT("/api/exec"), ServerScope.Token, SetFontSizeBody, SetFontSizeResult));
+	TestEqual(TEXT("UMG folder set font size status code"), SetFontSizeResult.StatusCode, 200);
+
 	const FString SetSlotPropertyBody = MakeExecRequestBody(
 		TEXT("smoke-umg-folder-set-slot-001"),
 		TEXT("umg_set_slot_property"),
@@ -2276,6 +2357,8 @@ bool FUeAgentInterfaceUmgFolderSmokeTest::RunTest(const FString& Parameters)
 	TestTrue(TEXT("UMG folder tree load"), LoadJsonFile(TreePath, TreeJson));
 	const TArray<TSharedPtr<FJsonValue>>* WidgetsArray = nullptr;
 	TestTrue(TEXT("UMG folder widgets array exists"), TreeJson->TryGetArrayField(TEXT("widgets"), WidgetsArray) && WidgetsArray != nullptr);
+	bool bFoundExportedFontSize = false;
+	bool bUpdatedFontSize = false;
 	if (WidgetsArray)
 	{
 		for (const TSharedPtr<FJsonValue>& WidgetValue : *WidgetsArray)
@@ -2304,6 +2387,12 @@ bool FUeAgentInterfaceUmgFolderSmokeTest::RunTest(const FString& Parameters)
 					{
 						(*PropertyObj)->SetStringField(TEXT("value_text"), TEXT("0.750000"));
 					}
+					if ((*PropertyObj)->GetStringField(TEXT("property_name")) == TEXT("Font.Size"))
+					{
+						bFoundExportedFontSize = (*PropertyObj)->GetStringField(TEXT("value_text")).Contains(TEXT("32"));
+						(*PropertyObj)->SetStringField(TEXT("value_text"), TEXT("36"));
+						bUpdatedFontSize = true;
+					}
 				}
 			}
 
@@ -2329,6 +2418,8 @@ bool FUeAgentInterfaceUmgFolderSmokeTest::RunTest(const FString& Parameters)
 			}
 		}
 	}
+	TestTrue(TEXT("UMG folder exported text font size"), bFoundExportedFontSize);
+	TestTrue(TEXT("UMG folder updated text font size in folder JSON"), bUpdatedFontSize);
 	TestTrue(TEXT("UMG folder tree save"), SaveJsonFile(TreePath, TreeJson));
 
 	TSharedPtr<FJsonObject> AnimationsJson;
@@ -2429,6 +2520,7 @@ bool FUeAgentInterfaceUmgFolderSmokeTest::RunTest(const FString& Parameters)
 	const TArray<TSharedPtr<FJsonValue>>* VerifyWidgetsArray = nullptr;
 	TestTrue(TEXT("UMG folder verify widgets array exists"), VerifyTreeJson->TryGetArrayField(TEXT("widgets"), VerifyWidgetsArray) && VerifyWidgetsArray != nullptr);
 	bool bVerifiedWidgetProperty = false;
+	bool bVerifiedFontSize = false;
 	bool bVerifiedSlotProperty = false;
 	if (VerifyWidgetsArray)
 	{
@@ -2459,6 +2551,11 @@ bool FUeAgentInterfaceUmgFolderSmokeTest::RunTest(const FString& Parameters)
 					{
 						bVerifiedWidgetProperty = true;
 					}
+					if ((*PropertyObj)->GetStringField(TEXT("property_name")) == TEXT("Font.Size") &&
+						(*PropertyObj)->GetStringField(TEXT("value_text")).Contains(TEXT("36")))
+					{
+						bVerifiedFontSize = true;
+					}
 				}
 			}
 
@@ -2486,6 +2583,7 @@ bool FUeAgentInterfaceUmgFolderSmokeTest::RunTest(const FString& Parameters)
 		}
 	}
 	TestTrue(TEXT("UMG folder verify widget property applied"), bVerifiedWidgetProperty);
+	TestTrue(TEXT("UMG folder verify font size applied"), bVerifiedFontSize);
 	TestTrue(TEXT("UMG folder verify slot property applied"), bVerifiedSlotProperty);
 
 	const FString ListAnimationsBody = MakeExecRequestBody(

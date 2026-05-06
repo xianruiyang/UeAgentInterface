@@ -280,7 +280,13 @@ namespace UeAgentWidgetBlueprintFolderOps
 		{
 			Paths.Append({
 				TEXT("Text"),
-				TEXT("ColorAndOpacity")
+				TEXT("ColorAndOpacity"),
+				TEXT("Font.Size"),
+				TEXT("Justification"),
+				TEXT("AutoWrapText"),
+				TEXT("MinDesiredWidth"),
+				TEXT("ShadowOffset"),
+				TEXT("ShadowColorAndOpacity")
 			});
 		}
 		else if (Widget->IsA<UButton>())
@@ -1547,6 +1553,7 @@ bool FUeAgentHttpServer::CmdUmgApplyFolder(const FUeAgentRequestContext& Ctx, TS
 		}
 		if (!WidgetBlueprint->SkeletonGeneratedClass)
 		{
+			UeAgentUmgOps::SyncWidgetVariableGuidMap(WidgetBlueprint);
 			FKismetEditorUtilities::CompileBlueprint(WidgetBlueprint);
 		}
 

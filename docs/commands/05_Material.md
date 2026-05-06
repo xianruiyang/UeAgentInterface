@@ -23,7 +23,7 @@
 
 > 废弃写入命令已迁移到 `deprecatedCommand/05_Material.md` 的对应章节。
 
-`material_set_property` 返回通用属性写入观测字段：`requested_value_text`、`applied_value_text`、`property_import_status`、`property_import_verified`、`value_text_exact_match`、`value_text_changed_after_import`、`cpp_type`。
+材质根属性和实例参数的正式 authoring 应通过对应 folder JSON 回写；apply 结果会返回写入观测字段和 `warning_count / warnings`。
 
 ## 表达式图编辑
 
@@ -31,7 +31,7 @@
 |---|---|---|---|
 | `material_list_expressions` | 列出表达式节点 | `asset_path` | 返回名称、类、GUID、位置 |
 
-`material_set_expression_property` 返回通用属性写入观测字段。`MaterialFunction` 这类专用对象引用写入会使用 `property_import_status=assigned_object_reference`，其余属性使用 `ImportText` 并读回实际值。
+表达式节点属性应通过 `graphs/*.json` 回写。`MaterialFunction` 这类专用对象引用写入会在 folder apply 中返回对象引用赋值诊断，其余属性使用 `ImportText` 并读回实际值。
 
 ## 文件夹式编辑流程（新增）
 
@@ -120,12 +120,9 @@
 - 对 `UMaterial`，返回父材质默认值。
 - 对 `UMaterialInstanceConstant`，优先返回实例静态参数覆盖；若实例未覆盖，则回落到父材质默认值。
 
-> 废弃写入命令已迁移到 `deprecatedCommand/05_Material.md` 的对应章节。
 ## 当前边界
 
-- `material_set_parameter` 当前统一的是实例参数写入，不覆盖材质图表达式编辑。
 - `static_component_mask` 目前走实例静态参数覆盖路径，适合 `MIC` 自动化，不是通用材质图 authoring 替代。
-- `material_set_parameter` 与旧的 `material_set_scalar/vector/texture/static_switch_parameter` 均保留为兼容入口，完整 authoring 优先走 `material_instance_export_folder / material_instance_apply_folder`。
 - `material_export_folder / material_apply_folder` 当前只覆盖 `UMaterial`，不覆盖 `UMaterialInstanceConstant` 和 `UMaterialFunction`。
 - `material_instance_export_folder / material_instance_apply_folder` 当前只覆盖 `UMaterialInstanceConstant`，不覆盖 `UMaterialFunction` / `MaterialFunctionInstance`。
 - `material_function_export_folder / material_function_apply_folder` 当前只覆盖 `UMaterialFunction`，不覆盖 `MaterialFunctionInstance / Material Layer / Material Layer Blend`。
@@ -157,23 +154,6 @@
   - 先删除现有表达式，再按文件夹描述重建
   - 完成后调用 `UpdateMaterialFunction`
 
-<!-- UAI_FORMAL_COMMAND_INDEX_BEGIN -->
-## 原子/兼容命令正式索引
->
-> 以下命令已有真实 dispatch 实现并纳入 smoke 覆盖；对完整资产制作仍应优先使用本分册中的结构化 JSON / folder workflow，原子命令仅用于 bootstrap、迁移、probe 或局部修复。
+## 废弃命令
 
-| Command | 作用 | 关键参数 | 关键返回 |
-| --- | --- | --- | --- |
-| `material_add_expression` | **原子/兼容**：添加表达式节点 | `asset_path`、`expression_class` | 优先写 `graphs/*.json` |
-| `material_connect_expression_to_property` | **原子/兼容**：连接节点到材质属性 | `asset_path`、`expression*`、`material_property` | 优先写 `graphs/*.json` |
-| `material_connect_expressions` | **原子/兼容**：连接节点到节点 | `asset_path`、`from_expression*`、`to_expression*` | 优先写 `graphs/*.json` |
-| `material_delete_expression` | **原子/兼容**：删除表达式节点 | `asset_path`、`expression_guid`/`expression_name` | 优先写 `graphs/*.json` |
-| `material_set_expression_property` | **原子/兼容**：设置节点属性 | `asset_path`、`expression_guid`/`expression_name`、`property_name`、`value_text` | 优先写 `graphs/*.json` |
-| `material_set_instance_parent` | **原子/兼容**：修改实例父材质 | `asset_path`、`parent_material_path` | 优先写 `parent.json` |
-| `material_set_parameter` | **原子/兼容**：统一设置实例参数 | `asset_path`、`parameter_type`、`parameter_name` | 优先写 `parameters/overrides.json` |
-| `material_set_property` | **原子/兼容**：设置材质或实例属性 | `asset_path`、`property_name`、`value_text` | 优先写 `settings/material.json` 或对应 folder JSON |
-| `material_set_scalar_parameter` | **原子/兼容**：设置标量参数 | `asset_path`、`parameter_name`、`value` | 兼容旧入口 |
-| `material_set_static_switch_parameter` | **原子/兼容**：设置静态开关参数 | `asset_path`、`parameter_name`、`value` | 兼容旧入口 |
-| `material_set_texture_parameter` | **原子/兼容**：设置纹理参数 | `asset_path`、`parameter_name`、`texture_path` | 兼容旧入口 |
-| `material_set_vector_parameter` | **原子/兼容**：设置向量参数 | `asset_path`、`parameter_name`、`value`/`value_text` | 兼容旧入口 |
-<!-- UAI_FORMAL_COMMAND_INDEX_END -->
+本分册不再列出已废弃写入命令；这些命令仅保留在 `deprecatedCommand/05_Material.md`，供旧脚本兼容、bootstrap、迁移和故障补修查阅。

@@ -1608,6 +1608,136 @@ namespace UeAgentAnimationEditorOps
 		return true;
 	}
 
+	struct FPreviewFrameRequest
+	{
+		int32 FrameIndex = 0;
+		float TimeSeconds = 0.0f;
+	};
+
+	static bool JsonTryGetNumberAnyField(const TSharedPtr<FJsonObject>& Obj, const TArray<FString>& Keys, double& OutValue)
+	{
+		if (!Obj.IsValid())
+		{
+			return false;
+		}
+		for (const FString& Key : Keys)
+		{
+			if (Obj->TryGetNumberField(Key, OutValue))
+			{
+				return true;
+			}
+		}
+		return false;
+	}
+
+	static bool ResolvePreviewFrameSequence(UAnimSequence* Sequence, const TSharedPtr<FJsonObject>& Params, TArray<FPreviewFrameRequest>& OutFrames, FString& OutError)
+	{
+		OutFrames.Reset();
+		if (!Sequence || !Params.IsValid())
+		{
+			OutError = TEXT("invalid_anim_sequence");
+			return false;
+		}
+
+		const int32 MaxFrameIndex = FMath::Max(0, Sequence->GetNumberOfSampledKeys() - 1);
+		const float SequenceLength = Sequence->GetPlayLength();
+		const FFrameRate SamplingFrameRate = Sequence->GetSamplingFrameRate();
+		const double SecondsPerFrame =
+			SamplingFrameRate.IsValid() && SamplingFrameRate.AsDecimal() > KINDA_SMALL_NUMBER
+				? 1.0 / SamplingFrameRate.AsDecimal()
+				: 1.0 / 30.0;
+
+		double CountValue = 1.0;
+		JsonTryGetNumberAnyField(Params, { TEXT("count"), TEXT("frame_count"), TEXT("sample_count") }, CountValue);
+		const int32 RequestedCount = FMath::RoundToInt(CountValue);
+		if (RequestedCount < 1 || RequestedCount > 120)
+		{
+			OutError = TEXT("invalid_frame_count");
+			return false;
+		}
+
+		auto AddFrameFromFrameIndex = [&](const int32 InFrameIndex) -> bool
+		{
+			if (InFrameIndex < 0 || InFrameIndex > MaxFrameIndex)
+			{
+				OutError = TEXT("preview_frame_range_exceeds_sequence");
+				return false;
+			}
+			FPreviewFrameRequest Request;
+			Request.FrameIndex = InFrameIndex;
+			Request.TimeSeconds = static_cast<float>(SamplingFrameRate.AsSeconds(FFrameNumber(Request.FrameIndex)));
+			OutFrames.Add(Request);
+			return true;
+		};
+
+		auto AddFrameFromTime = [&](const double InTimeSeconds) -> bool
+		{
+			if (InTimeSeconds < -KINDA_SMALL_NUMBER || InTimeSeconds > static_cast<double>(SequenceLength) + KINDA_SMALL_NUMBER)
+			{
+				OutError = TEXT("preview_time_range_exceeds_sequence");
+				return false;
+			}
+			const float ClampedTime = FMath::Clamp(static_cast<float>(InTimeSeconds), 0.0f, SequenceLength);
+			const int32 FrameIndex = FMath::Clamp(SamplingFrameRate.AsFrameTime(ClampedTime).RoundToFrame().Value, 0, MaxFrameIndex);
+			return AddFrameFromFrameIndex(FrameIndex);
+		};
+
+		double StartTimeSeconds = 0.0;
+		const bool bHasStartTime = JsonTryGetNumberAnyField(Params, { TEXT("start_time_seconds"), TEXT("first_time_seconds"), TEXT("time_seconds") }, StartTimeSeconds);
+
+		double IntervalSeconds = SecondsPerFrame;
+		const bool bHasIntervalSeconds = JsonTryGetNumberAnyField(Params, { TEXT("interval_seconds"), TEXT("time_interval_seconds") }, IntervalSeconds);
+
+		double StartFrameValue = 0.0;
+		const bool bHasStartFrame = JsonTryGetNumberAnyField(Params, { TEXT("start_frame_index"), TEXT("first_frame_index"), TEXT("frame_index"), TEXT("frame") }, StartFrameValue);
+
+		double FrameIntervalValue = 1.0;
+		const bool bHasFrameInterval = JsonTryGetNumberAnyField(Params, { TEXT("frame_interval"), TEXT("frame_stride") }, FrameIntervalValue);
+
+		if (bHasStartTime || bHasIntervalSeconds)
+		{
+			if (!bHasIntervalSeconds && bHasFrameInterval)
+			{
+				IntervalSeconds = FrameIntervalValue * SecondsPerFrame;
+			}
+			if (IntervalSeconds < 0.0)
+			{
+				OutError = TEXT("invalid_interval_seconds");
+				return false;
+			}
+			for (int32 Index = 0; Index < RequestedCount; ++Index)
+			{
+				if (!AddFrameFromTime(StartTimeSeconds + IntervalSeconds * static_cast<double>(Index)))
+				{
+					return false;
+				}
+			}
+			return true;
+		}
+
+		if (FrameIntervalValue < 0.0)
+		{
+			OutError = TEXT("invalid_frame_interval");
+			return false;
+		}
+
+		const int32 StartFrameIndex = static_cast<int32>(StartFrameValue);
+		const int32 FrameInterval = FMath::Max(0, FMath::RoundToInt(FrameIntervalValue));
+		for (int32 Index = 0; Index < RequestedCount; ++Index)
+		{
+			const int32 FrameIndex = StartFrameIndex + FrameInterval * Index;
+			if (!AddFrameFromFrameIndex(FrameIndex))
+			{
+				if (RequestedCount == 1)
+				{
+					OutError = TEXT("invalid_frame_index");
+				}
+				return false;
+			}
+		}
+		return true;
+	}
+
 	static bool PrepareAnimationPreviewAtFrame(
 		IAnimationEditor* AnimationEditor,
 		UAnimSequence* Sequence,
@@ -2316,12 +2446,18 @@ bool FUeAgentHttpServer::CmdAnimSequenceScreenshot(const FUeAgentRequestContext&
 		}
 	}
 
-	int32 FrameIndex = 0;
-	float TimeSeconds = 0.0f;
-	if (!UeAgentAnimationEditorOps::ResolvePreviewFrame(Sequence, Ctx.Params, FrameIndex, TimeSeconds, OutError))
+	TArray<UeAgentAnimationEditorOps::FPreviewFrameRequest> FrameRequests;
+	if (!UeAgentAnimationEditorOps::ResolvePreviewFrameSequence(Sequence, Ctx.Params, FrameRequests, OutError))
 	{
 		return false;
 	}
+	if (FrameRequests.Num() <= 0)
+	{
+		OutError = TEXT("preview_frame_sequence_empty");
+		return false;
+	}
+	const int32 FrameIndex = FrameRequests[0].FrameIndex;
+	float TimeSeconds = FrameRequests[0].TimeSeconds;
 
 	USkeletalMesh* EffectivePreviewMesh = OverridePreviewMesh ? OverridePreviewMesh : Sequence->GetPreviewMesh();
 	if (!EffectivePreviewMesh && Sequence->GetSkeleton())
@@ -2628,65 +2764,118 @@ bool FUeAgentHttpServer::CmdAnimSequenceScreenshot(const FUeAgentRequestContext&
 	CaptureComp->ShowFlags.SetScreenSpaceReflections(false);
 	CaptureComp->bCaptureEveryFrame = false;
 	CaptureComp->bCaptureOnMovement = false;
-	CaptureComp->CaptureScene();
-	FlushRenderingCommands();
-
-	FRenderTarget* RenderTarget = Cleanup.RenderTarget->GameThread_GetRenderTargetResource();
-	if (!RenderTarget)
-	{
-		OutError = TEXT("render_target_resource_missing");
-		return false;
-	}
-
-	TArray<FColor> Pixels;
-	FIntPoint ShotSize(CaptureWidth, CaptureHeight);
-	if (!RenderTarget->ReadPixels(Pixels))
-	{
-		OutError = TEXT("read_render_target_failed");
-		FUeAgentInterfaceLogger::Log(TEXT("CmdAnimSequenceScreenshot failed asset=%s error=%s"), *Sequence->GetOutermost()->GetName(), *OutError);
-		return false;
-	}
-	for (FColor& Pixel : Pixels)
-	{
-		if (Pixel.A < 255)
-		{
-			const float Alpha = static_cast<float>(Pixel.A) / 255.0f;
-			Pixel.R = static_cast<uint8>(FMath::Clamp(FMath::RoundToInt(static_cast<float>(Pixel.R) * Alpha + static_cast<float>(BackgroundColor.R) * (1.0f - Alpha)), 0, 255));
-			Pixel.G = static_cast<uint8>(FMath::Clamp(FMath::RoundToInt(static_cast<float>(Pixel.G) * Alpha + static_cast<float>(BackgroundColor.G) * (1.0f - Alpha)), 0, 255));
-			Pixel.B = static_cast<uint8>(FMath::Clamp(FMath::RoundToInt(static_cast<float>(Pixel.B) * Alpha + static_cast<float>(BackgroundColor.B) * (1.0f - Alpha)), 0, 255));
-		}
-		Pixel.A = 255;
-	}
 	const FString CaptureMode = TEXT("scene_capture_temp_actor");
+	TArray<TSharedPtr<FJsonValue>> CapturedFrames;
+	TSharedPtr<FJsonObject> FirstFrameObject;
 
-	TArray<FColor> ResizedPixels;
-	FIntPoint ResizedSize(0, 0);
-	if (!ResizePixelsMaxSize(Pixels, ShotSize, MaxSize, ResizedPixels, ResizedSize, OutError))
+	auto CaptureRequestedFrame = [&](const UeAgentAnimationEditorOps::FPreviewFrameRequest& Request, const int32 SequenceIndex, TSharedPtr<FJsonObject>& OutFrameObject) -> bool
 	{
-		return false;
+		PreviewMeshComponent->bPauseAnims = false;
+		PreviewMeshComponent->SetComponentTickEnabled(true);
+		PreviewMeshComponent->SetPosition(Request.TimeSeconds, false);
+		PreviewMeshComponent->TickAnimation(0.0f, false);
+		PreviewMeshComponent->RefreshBoneTransforms(nullptr);
+		PreviewMeshComponent->RefreshFollowerComponents();
+		Cleanup.PreviewActor->SetActorLocationAndRotation(FVector::ZeroVector, FRotator::ZeroRotator, false, nullptr, ETeleportType::TeleportPhysics);
+		PreviewMeshComponent->SetRelativeLocation(FVector::ZeroVector);
+		PreviewMeshComponent->SetRelativeRotation(FRotator::ZeroRotator);
+		PreviewMeshComponent->UpdateComponentToWorld();
+		World->Tick(LEVELTICK_All, TickDeltaSeconds);
+		PreviewMeshComponent->bPauseAnims = true;
+		PreviewMeshComponent->SetComponentTickEnabled(false);
+		PreviewMeshComponent->MarkRenderStateDirty();
+		FlushRenderingCommands();
+
+		CaptureComp->CaptureScene();
+		FlushRenderingCommands();
+
+		FRenderTarget* RenderTarget = Cleanup.RenderTarget->GameThread_GetRenderTargetResource();
+		if (!RenderTarget)
+		{
+			OutError = TEXT("render_target_resource_missing");
+			return false;
+		}
+
+		TArray<FColor> Pixels;
+		FIntPoint ShotSize(CaptureWidth, CaptureHeight);
+		if (!RenderTarget->ReadPixels(Pixels))
+		{
+			OutError = TEXT("read_render_target_failed");
+			FUeAgentInterfaceLogger::Log(TEXT("CmdAnimSequenceScreenshot failed asset=%s error=%s"), *Sequence->GetOutermost()->GetName(), *OutError);
+			return false;
+		}
+		for (FColor& Pixel : Pixels)
+		{
+			if (Pixel.A < 255)
+			{
+				const float Alpha = static_cast<float>(Pixel.A) / 255.0f;
+				Pixel.R = static_cast<uint8>(FMath::Clamp(FMath::RoundToInt(static_cast<float>(Pixel.R) * Alpha + static_cast<float>(BackgroundColor.R) * (1.0f - Alpha)), 0, 255));
+				Pixel.G = static_cast<uint8>(FMath::Clamp(FMath::RoundToInt(static_cast<float>(Pixel.G) * Alpha + static_cast<float>(BackgroundColor.G) * (1.0f - Alpha)), 0, 255));
+				Pixel.B = static_cast<uint8>(FMath::Clamp(FMath::RoundToInt(static_cast<float>(Pixel.B) * Alpha + static_cast<float>(BackgroundColor.B) * (1.0f - Alpha)), 0, 255));
+			}
+			Pixel.A = 255;
+		}
+
+		TArray<FColor> ResizedPixels;
+		FIntPoint ResizedSize(0, 0);
+		if (!ResizePixelsMaxSize(Pixels, ShotSize, MaxSize, ResizedPixels, ResizedSize, OutError))
+		{
+			return false;
+		}
+
+		const FString OutPath = MakeShotPath(Format);
+		if (!WriteCompressedImage(ResizedPixels, ResizedSize, Format, Quality, OutPath, OutError))
+		{
+			return false;
+		}
+
+		const int64 Bytes = IFileManager::Get().FileSize(*OutPath);
+		OutFrameObject = MakeShared<FJsonObject>();
+		OutFrameObject->SetNumberField(TEXT("sequence_index"), SequenceIndex);
+		OutFrameObject->SetStringField(TEXT("file_path"), OutPath);
+		OutFrameObject->SetNumberField(TEXT("width"), ResizedSize.X);
+		OutFrameObject->SetNumberField(TEXT("height"), ResizedSize.Y);
+		OutFrameObject->SetNumberField(TEXT("bytes"), static_cast<double>(Bytes));
+		OutFrameObject->SetNumberField(TEXT("frame_index"), Request.FrameIndex);
+		OutFrameObject->SetNumberField(TEXT("time_seconds"), Request.TimeSeconds);
+		return true;
+	};
+
+	for (int32 RequestIndex = 0; RequestIndex < FrameRequests.Num(); ++RequestIndex)
+	{
+		TSharedPtr<FJsonObject> FrameObject;
+		if (!CaptureRequestedFrame(FrameRequests[RequestIndex], RequestIndex, FrameObject))
+		{
+			return false;
+		}
+		if (RequestIndex == 0)
+		{
+			FirstFrameObject = FrameObject;
+		}
+		CapturedFrames.Add(MakeShared<FJsonValueObject>(FrameObject));
 	}
 
-	const FString OutPath = MakeShotPath(Format);
-	if (!WriteCompressedImage(ResizedPixels, ResizedSize, Format, Quality, OutPath, OutError))
+	if (!FirstFrameObject.IsValid())
 	{
+		OutError = TEXT("preview_frame_capture_empty");
 		return false;
 	}
-
-	const int64 Bytes = IFileManager::Get().FileSize(*OutPath);
 	const int32 MaxFrameIndex = FMath::Max(0, Sequence->GetNumberOfSampledKeys() - 1);
 
 	OutData->SetStringField(TEXT("asset_path"), UeAgentAnimationAssetOps::NormalizeAssetPath(Sequence->GetOutermost()->GetName()));
 	OutData->SetStringField(TEXT("object_path"), Sequence->GetPathName());
-	OutData->SetStringField(TEXT("file_path"), OutPath);
+	OutData->SetStringField(TEXT("file_path"), FirstFrameObject->GetStringField(TEXT("file_path")));
 	OutData->SetStringField(TEXT("target"), Target);
 	OutData->SetStringField(TEXT("capture_mode"), CaptureMode);
 	OutData->SetStringField(TEXT("format"), Format);
-	OutData->SetNumberField(TEXT("width"), ResizedSize.X);
-	OutData->SetNumberField(TEXT("height"), ResizedSize.Y);
-	OutData->SetNumberField(TEXT("bytes"), static_cast<double>(Bytes));
+	OutData->SetNumberField(TEXT("width"), FirstFrameObject->GetNumberField(TEXT("width")));
+	OutData->SetNumberField(TEXT("height"), FirstFrameObject->GetNumberField(TEXT("height")));
+	OutData->SetNumberField(TEXT("bytes"), FirstFrameObject->GetNumberField(TEXT("bytes")));
 	OutData->SetNumberField(TEXT("frame_index"), FrameIndex);
 	OutData->SetNumberField(TEXT("time_seconds"), TimeSeconds);
 	OutData->SetNumberField(TEXT("num_frames"), MaxFrameIndex);
+	OutData->SetNumberField(TEXT("frame_count"), FrameRequests.Num());
+	OutData->SetArrayField(TEXT("frames"), CapturedFrames);
 	OutData->SetNumberField(TEXT("sampling_frame_rate_numerator"), SamplingFrameRate.Numerator);
 	OutData->SetNumberField(TEXT("sampling_frame_rate_denominator"), SamplingFrameRate.Denominator);
 	OutData->SetStringField(TEXT("preview_skeletal_mesh"), EffectivePreviewMeshPath);

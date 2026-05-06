@@ -7,6 +7,8 @@
 #include "Misc/FileHelper.h"
 #include "Misc/Paths.h"
 
+DEFINE_LOG_CATEGORY(LogUeAgentInterface);
+
 FCriticalSection FUeAgentInterfaceLogger::Mutex;
 bool FUeAgentInterfaceLogger::bInitialized = false;
 FString FUeAgentInterfaceLogger::LogFilePath;
@@ -68,6 +70,8 @@ void FUeAgentInterfaceLogger::Log(const TCHAR* Format, ...)
 	va_end(Args);
 
 	const FString Line = FString::Printf(TEXT("[%s] %s\n"), *FDateTime::Now().ToString(TEXT("%H:%M:%S.%s")), Buffer);
+
+	UE_LOG(LogUeAgentInterface, Display, TEXT("%s"), Buffer);
 
 	FScopeLock Lock(&Mutex);
 	FFileHelper::SaveStringToFile(Line, *LogFilePath, FFileHelper::EEncodingOptions::ForceUTF8WithoutBOM, &IFileManager::Get(), FILEWRITE_Append);

@@ -189,9 +189,10 @@ JSON 字段：
 - 可由 folder JSON 覆盖的原子写入命令只用于 bootstrap、迁移、schema 边界和故障恢复，归档见 `deprecatedCommand/14_IKRig_IKRetargeter.md`。
 
 <!-- UAI_FORMAL_COMMAND_INDEX_BEGIN -->
-## 原子/兼容命令正式索引
+
+## 补充命令正式索引
 >
-> 以下命令已有真实 dispatch 实现并纳入 smoke 覆盖；对完整资产制作仍应优先使用本分册中的结构化 JSON / folder workflow，原子命令仅用于 bootstrap、迁移、probe 或局部修复。
+> 以下命令仍属于本正式分册；已废弃写入命令不在正式分册列出，仅保留在 `deprecatedCommand/14_IKRig_IKRetargeter.md`。
 
 | Command | 作用 | 关键参数 | 关键返回 |
 | --- | --- | --- | --- |
@@ -204,4 +205,5 @@ JSON 字段：
 | `ik_rig_set_retarget_chain` | 新增 / 更新 / 删除 retarget chain | 编辑 `retarget_definition.json` 后 `ik_rig_apply_folder` | `success`、`warnings`、`errors` |
 | `ik_rig_set_retarget_root` | 设置 retarget root | 编辑 `retarget_definition.json` 后 `ik_rig_apply_folder` | `success`、`warnings`、`errors` |
 | `ik_rig_set_solver` | 新增 / 更新 / 删除 solver | 编辑 `solvers.json` 后 `ik_rig_apply_folder` | `success`、`warnings`、`errors` |
+
 <!-- UAI_FORMAL_COMMAND_INDEX_END -->

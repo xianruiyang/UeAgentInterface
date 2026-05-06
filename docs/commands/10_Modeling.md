@@ -326,9 +326,10 @@
   - [../../../docs/levelDesignDocs/modeling/Modeling辅助搭建.md](../../../docs/levelDesignDocs/modeling/Modeling辅助搭建.md)
 
 <!-- UAI_FORMAL_COMMAND_INDEX_BEGIN -->
-## 原子/兼容命令正式索引
+
+## 补充命令正式索引
 >
-> 以下命令已有真实 dispatch 实现并纳入 smoke 覆盖；对完整资产制作仍应优先使用本分册中的结构化 JSON / folder workflow，原子命令仅用于 bootstrap、迁移、probe 或局部修复。
+> 以下命令仍属于本正式分册；已废弃写入命令不在正式分册列出，仅保留在 `deprecatedCommand/10_Modeling.md`。
 
 | Command | 作用 | 关键参数 | 关键返回 |
 | --- | --- | --- | --- |
@@ -354,4 +355,5 @@
 | `modeling_set_selection` | **原子/兼容**：控制 Modeling Mode 工具、选择或网格编辑动作 | `target_actor`、`asset_path`、`tool_name`、`selection`、`properties` | `success`、`warnings`、`errors` |
 | `modeling_snap_to_ground` | **原子/兼容**：控制 Modeling Mode 工具、选择或网格编辑动作 | `target_actor`、`asset_path`、`tool_name`、`selection`、`properties` | `success`、`warnings`、`errors` |
 | `modeling_start_tool` | **原子/兼容**：控制 Modeling Mode 工具、选择或网格编辑动作 | `target_actor`、`asset_path`、`tool_name`、`selection`、`properties` | `success`、`warnings`、`errors` |
+
 <!-- UAI_FORMAL_COMMAND_INDEX_END -->

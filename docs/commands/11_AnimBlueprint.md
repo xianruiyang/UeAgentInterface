@@ -48,7 +48,7 @@
 ### `anim_blueprint_create_layer_interface`
 
 - 这条命令创建的是 Animation Layer Interface 资产，不是普通 AnimBlueprint
-- 创建后可继续用 `anim_blueprint_add_anim_layer` 为它补 layer graph
+- 创建后可继续通过 folder JSON 为它补 layer graph。
 
 ### `anim_blueprint_export_folder`
 
@@ -106,15 +106,18 @@
 | 指令 | 作用 | 关键参数 |
 |---|---|---|
 | `anim_blueprint_inspect_nodes` | 列出指定图里的节点与引脚 | `asset_path`、`graph_name`、`limit_per_graph`、`include_pins` |
+| `anim_blueprint_layout_graph` | 自动排版指定 AnimBlueprint 图节点 | `asset_path`、`graph_name`、`horizontal_spacing`、`vertical_spacing`、`node_padding`、`dry_run`、`compile_after_layout`、`save_after_layout` |
 
 说明：
 
-- `anim_blueprint_add_node_by_class` 现在支持对普通 K2 节点和普通 AnimGraph 节点做按类创建，`graph_name` 也支持直接传 `graph_path`。
-- 它仍然不负责创建会附带子图或额外结构初始化的节点；例如 `StateMachine` 这类结构节点继续走 `anim_blueprint_add_state_machine`。
+- 普通 K2 节点和普通 AnimGraph 节点应通过 folder JSON 的图节点描述创建，`graph_name` 也支持直接传 `graph_path`。
+- 结构化图写入仍然不负责创建会附带子图或额外结构初始化的节点；例如 `StateMachine` 这类结构节点应走 AnimBlueprint folder workflow 中的状态机描述。
 - 这一层主要处理 EventGraph / 逻辑函数图 / 宏图 / TransitionGraph，以及不带附属结构的 AnimGraph 节点施工。
+- `anim_blueprint_layout_graph` 是 `blueprint_layout_graph` 的 AnimBlueprint 前缀包装；它只移动图节点坐标，不改状态机结构、AnimGraph 资产引用、transition rule 或业务逻辑。复杂状态机子图建议传 `graph_path`，避免重名。
 - 文件夹式工作流当前已额外保留一小批 AnimGraph 节点属性真源，第一版明确覆盖：
   - `Node.BlendSpace`
   - `Node.Sequence`
+  - `Node.bLoopAnimation`
   - `Node.ControlRigClass`
   - `Node.DefaultControlRigClass`
   - `Node.bExecute`
@@ -122,7 +125,7 @@
   - `Node.OutputSettings` / `Node.OutputSettings.bUpdatePose` / `Node.OutputSettings.bUpdateCurves`
   - `Node.Alpha` / `Node.AlphaInputType` / `Node.bAlphaBoolEnabled`
   - `Node.bSetRefPoseFromSkeleton` / `Node.AlphaCurveName` / `Node.LODThreshold`
-  这意味着 `BlendSpace Player / RotationOffsetBlendSpace / Sequence Player / Sequence Evaluator` 这类资产引用节点，已经能在 `export_folder / apply_folder` 里稳定 round-trip 资产引用。
+  这意味着 `BlendSpace Player / RotationOffsetBlendSpace / Sequence Player / Sequence Evaluator` 这类资产引用节点，已经能在 `export_folder / apply_folder` 里稳定 round-trip 资产引用；`Sequence Player` 还会保留是否循环播放，避免 Jump/Attack 这类一次性状态在结构化导出后丢失 `Node.bLoopAnimation`。
   `AnimGraphNode_ControlRig` 也已经能稳定 round-trip Control Rig class、执行开关、输入/输出姿态同步设置和基础 Alpha/LOD 设置；完整 exposed variable mapping 仍按后续 profile 扩展处理。
 
 ### Control Rig 节点接入验证
@@ -224,7 +227,7 @@ Control Rig 资产能独立编译，不代表它已经在角色动画蓝图中�
 | 指令 | 作用 | 关键参数 |
 |---|---|---|
 | `anim_blueprint_graph_get_view` | 读取指定图的平移/缩放 | `asset_path`、`graph_name`、`open_editor_if_needed` |
-| `anim_blueprint_graph_set_view` | 设置指定图的平移/缩放 | `asset_path`、`graph_name`、`view_x`、`view_y`、`zoom`、`open_editor_if_needed` |
+| `anim_blueprint_graph_set_view` | 设置指定图的平移/缩放 | `asset_path`、`graph_name`、`view_x`、`view_y`、`zoom`、`snap_to_pixel_grid`、`update_document_view_state`、`save_after_set`、`open_editor_if_needed` |
 | `anim_blueprint_viewport_get_camera` | 读取 AnimBlueprint 预览视口相机 | `asset_path`、`open_editor_if_needed` |
 | `anim_blueprint_viewport_set_camera` | 设置 AnimBlueprint 预览视口相机 | `asset_path`、`location`、`rotation`、`fov`、`open_editor_if_needed` |
 | `anim_blueprint_screenshot` | 对图面板 / 预览视口 / 窗口截图 | `asset_path`、`target`、`graph_name`、`format`、`quality`、`max_size`、`open_editor_if_needed` |
@@ -233,6 +236,7 @@ Control Rig 资产能独立编译，不代表它已经在角色动画蓝图中�
 
 - `graph_name` 现在支持顶层图名、子图名，也支持直接传 `graph_path`
 - 对 `State` Bound Graph、`Transition` Rule Graph 这类容易重名的子图，优先建议传 `graph_path`
+- `anim_blueprint_graph_set_view` 复用 Blueprint 图视图入口；`snap_to_pixel_grid` 默认 `true`，会按 `round(view * zoom) / zoom` 对齐屏幕像素，避免非 1 缩放下图面文字和线缆发糊。`update_document_view_state` 默认同步 UE 下次打开图时使用的 `LastEditedDocuments`，`save_after_set=true` 时把该状态写入资产包。
 - `viewport_*` 和 `screenshot target=viewport` 建议在真实 Editor 会话下验证；`NullRHI` 自动化不适合拿它们做稳定回归
 - `anim_blueprint_screenshot` 复用 `blueprint_screenshot`，Slate UI 截图默认走离屏 WidgetRenderer；返回 `legacy_backbuffer_capture=disabled`，不再使用真实窗口 backbuffer 截图。
 
@@ -277,49 +281,6 @@ Control Rig 资产能独立编译，不代表它已经在角色动画蓝图中�
    - `anim_blueprint_viewport_get_camera / set_camera`
    - `anim_blueprint_screenshot`
 
-<!-- UAI_FORMAL_COMMAND_INDEX_BEGIN -->
-## 原子/兼容命令正式索引
->
-> 以下命令已有真实 dispatch 实现并纳入 smoke 覆盖；对完整资产制作仍应优先使用本分册中的结构化 JSON / folder workflow，原子命令仅用于 bootstrap、迁移、probe 或局部修复。
+## 废弃命令
 
-| Command | 作用 | 关键参数 | 关键返回 |
-| --- | --- | --- | --- |
-| `anim_blueprint_add_anim_layer` | **原子/兼容**：新增本地 Anim Layer graph | `asset_path`、`layer_name`、`compile_after_add`、`save_after_add` | `success`、`warnings`、`errors` |
-| `anim_blueprint_add_call_function_node` | **原子/兼容**：新增函数调用节点 | `asset_path`、`graph_name`、`function_owner_class`、`function_name`、`pos_x`、`pos_y`、`compile_after_add`、`save_after_add` | `success`、`warnings`、`errors` |
-| `anim_blueprint_add_conduit` | **原子/兼容**：新增 Conduit | `asset_path`、`state_machine_name`、`conduit_name`、`pos_x`、`pos_y`、`compile_after_add`、`save_after_add` | `success`、`warnings`、`errors` |
-| `anim_blueprint_add_custom_event_node` | **原子/兼容**：新增自定义事件节点 | `asset_path`、`graph_name`、`event_name`、`pos_x`、`pos_y`、`compile_after_add`、`save_after_add` | `success`、`warnings`、`errors` |
-| `anim_blueprint_add_event_dispatcher` | **原子/兼容**：新增事件分发器 | `asset_path`、`dispatcher_name`、`compile_after_add`、`save_after_add` | `success`、`warnings`、`errors` |
-| `anim_blueprint_add_event_node` | **原子/兼容**：新增标准事件节点 | `asset_path`、`graph_name`、`event_class`、`event_name`、`pos_x`、`pos_y`、`compile_after_add`、`save_after_add` | `success`、`warnings`、`errors` |
-| `anim_blueprint_add_function_graph` | **原子/兼容**：新增逻辑函数图 | `asset_path`、`function_name`、`compile_after_add`、`save_after_add` | `success`、`warnings`、`errors` |
-| `anim_blueprint_add_macro_graph` | **原子/兼容**：新增宏图 | `asset_path`、`macro_name`、`compile_after_add`、`save_after_add` | `success`、`warnings`、`errors` |
-| `anim_blueprint_add_node_by_class` | **原子/兼容**：按类新增通用 K2 / AnimGraph 节点 | `asset_path`、`graph_name` 或 `graph_path`、`node_class`、`pos_x`、`pos_y`、`compile_after_add`、`save_after_add` | `success`、`warnings`、`errors` |
-| `anim_blueprint_add_state` | **原子/兼容**：新增 State | `asset_path`、`state_machine_name`、`state_name`、`pos_x`、`pos_y`、`state_type`、`always_reset_on_entry`、`compile_after_add`、`save_after_add` | `success`、`warnings`、`errors` |
-| `anim_blueprint_add_state_alias` | **原子/兼容**：新增 State Alias | `asset_path`、`state_machine_name`、`alias_name`、`pos_x`、`pos_y`、`global_alias`、`alias_target_states`、`compile_after_add`、`save_after_add` | `success`、`warnings`、`errors` |
-| `anim_blueprint_add_state_machine` | **原子/兼容**：在指定 AnimGraph 中新增状态机 | `asset_path`、`state_machine_name`、`anim_graph_name`、`pos_x`、`pos_y`、`compile_after_add`、`save_after_add` | `success`、`warnings`、`errors` |
-| `anim_blueprint_add_transition` | **原子/兼容**：新增 Transition | `asset_path`、`state_machine_name`、`source_state_name`、`target_state_name`、`pos_x`、`pos_y`、`priority_order`、`crossfade_duration`、`bidirectional`、`disabled`、`automatic_rule`、`compile_after_add`、`save_after_add` | `success`、`warnings`、`errors` |
-| `anim_blueprint_add_variable` | **原子/兼容**：新增变量定义；保留给 bootstrap / smoke / 局部补修 | `asset_path`、`variable_name`、`pin_category`、`pin_subcategory`、`pin_subcategory_object`、`container_type`、`value_type`（map 必填）、`default_value`、`instance_editable`、`compile_after_add`、`save_after_add` | `success`、`warnings`、`errors` |
-| `anim_blueprint_add_variable_node` | **原子/兼容**：新增变量 Get/Set 节点 | `asset_path`、`graph_name`、`variable_name`、`node_type`、`pos_x`、`pos_y`、`compile_after_add`、`save_after_add` | `success`、`warnings`、`errors` |
-| `anim_blueprint_clear_entry_state` | **原子/兼容**：清空 Entry 当前连线 | `asset_path`、`state_machine_name`、`compile_after_clear`、`save_after_clear` | `success`、`warnings`、`errors` |
-| `anim_blueprint_connect_pins` | **原子/兼容**：连接节点引脚 | `asset_path`、`graph_name`、`from_node_guid`、`from_pin`、`to_node_guid`、`to_pin`、`compile_after_connect`、`save_after_connect` | `success`、`warnings`、`errors` |
-| `anim_blueprint_disconnect_pins` | **原子/兼容**：断开指定连线或某个引脚上的全部连线 | `asset_path`、`graph_name`、`from_node_guid`、`from_pin`、可选 `to_node_guid` / `to_pin`、`compile_after_disconnect`、`save_after_disconnect` | `success`、`warnings`、`errors` |
-| `anim_blueprint_implement_layer_interface` | **原子/兼容**：为 AnimBlueprint 实现一个 Layer Interface | `asset_path`、`interface_class`、`compile_after_add`、`save_after_add` | `success`、`warnings`、`errors` |
-| `anim_blueprint_remove_anim_layer` | **原子/兼容**：删除本地 Anim Layer graph | `asset_path`、`layer_name`、`compile_after_remove`、`save_after_remove` | `success`、`warnings`、`errors` |
-| `anim_blueprint_remove_layer_interface` | **原子/兼容**：移除已实现的 Layer Interface | `asset_path`、`interface_class`、`preserve_functions`、`compile_after_remove`、`save_after_remove` | `success`、`warnings`、`errors` |
-| `anim_blueprint_remove_node` | **原子/兼容**：删除图节点 | `asset_path`、`graph_name`、`node_guid`、`compile_after_remove`、`save_after_remove` | `success`、`warnings`、`errors` |
-| `anim_blueprint_remove_state_machine` | **原子/兼容**：删除状态机 | `asset_path`、`state_machine_name`、`save_after_remove` | `success`、`warnings`、`errors` |
-| `anim_blueprint_remove_state_node` | **原子/兼容**：删除 State / Conduit / Alias | `asset_path`、`state_machine_name`、`state_name` 或 `node_guid`、`save_after_remove` | `success`、`warnings`、`errors` |
-| `anim_blueprint_remove_transition` | **原子/兼容**：删除 Transition | `asset_path`、`state_machine_name`、`source_state_name/target_state_name` 或 `node_guid`、`save_after_remove` | `success`、`warnings`、`errors` |
-| `anim_blueprint_remove_variable` | **原子/兼容**：删除变量定义 | `asset_path`、`variable_name`、`compile_after_remove`、`save_after_remove` | `success`、`warnings`、`errors` |
-| `anim_blueprint_rename_anim_layer` | **原子/兼容**：重命名本地 Anim Layer graph | `asset_path`、`layer_name`、`new_layer_name`、`compile_after_rename`、`save_after_rename` | `success`、`warnings`、`errors` |
-| `anim_blueprint_rename_state_machine` | **原子/兼容**：重命名状态机 | `asset_path`、`state_machine_name`、`new_state_machine_name`、`compile_after_rename`、`save_after_rename` | `success`、`warnings`、`errors` |
-| `anim_blueprint_rename_state_node` | **原子/兼容**：重命名 State / Conduit / Alias | `asset_path`、`state_machine_name`、`state_name` 或 `node_guid`、`new_state_name`、`compile_after_rename`、`save_after_rename` | `success`、`warnings`、`errors` |
-| `anim_blueprint_reparent` | **原子/兼容**：修改父类 | `asset_path`、`parent_class`、`compile_after_reparent`、`save_after_reparent` | `success`、`warnings`、`errors` |
-| `anim_blueprint_set_cdo_property` | **原子/兼容**：写默认对象属性 | `asset_path`、`property_name`、`value_text`、`compile_after_set`、`save_after_set` | `success`、`warnings`、`errors` |
-| `anim_blueprint_set_entry_state` | **原子/兼容**：把 Entry 连接到指定 State / Alias / Conduit | `asset_path`、`state_machine_name`、`state_name` 或 `node_guid`、`compile_after_set`、`save_after_set` | `success`、`warnings`、`errors` |
-| `anim_blueprint_set_pin_default_value` | **原子/兼容**：设置引脚默认值 | `asset_path`、`graph_name`、`node_guid`、`pin_name`、`default_value`、`compile_after_set`、`save_after_set` | `success`、`warnings`、`errors` |
-| `anim_blueprint_set_preview_animation_blueprint` | **原子/兼容**：设置或清空预览 AnimBlueprint overlay / linked graph 配置 | `asset_path`、`preview_anim_blueprint_path`、`clear_preview_animation_blueprint`、`preview_application_method`、`preview_animation_blueprint_tag`、`save_after_set` | `success`、`warnings`、`errors` |
-| `anim_blueprint_set_preview_mesh` | **原子/兼容**：设置或清空预览 SkeletalMesh | `asset_path`、`skeletal_mesh_path`、`clear_preview_mesh`、`save_after_set` | `success`、`warnings`、`errors` |
-| `anim_blueprint_set_state_alias_targets` | **原子/兼容**：修改 Alias 的目标状态集 | `asset_path`、`state_machine_name`、`alias_name` 或 `node_guid`、`alias_target_states`、`global_alias`、`compile_after_set`、`save_after_set` | `success`、`warnings`、`errors` |
-| `anim_blueprint_set_state_properties` | **原子/兼容**：修改 State 的位置和基础属性 | `asset_path`、`state_machine_name`、`state_name` 或 `node_guid`、可选 `pos_x` / `pos_y` / `state_type` / `always_reset_on_entry`、`compile_after_set`、`save_after_set` | `success`、`warnings`、`errors` |
-| `anim_blueprint_set_transition_properties` | **原子/兼容**：修改 Transition 的位置和基础属性 | `asset_path`、`state_machine_name`、`source_state_name/target_state_name` 或 `node_guid`、可选 `pos_x` / `pos_y` / `priority_order` / `crossfade_duration` / `bidirectional` / `disabled` / `automatic_rule`、`compile_after_set`、`save_after_set` | `success`、`warnings`、`errors` |
-<!-- UAI_FORMAL_COMMAND_INDEX_END -->
+本分册不再列出已废弃写入命令；这些命令仅保留在 `deprecatedCommand/11_AnimBlueprint.md`，供旧脚本兼容、bootstrap、迁移和故障补修查阅。

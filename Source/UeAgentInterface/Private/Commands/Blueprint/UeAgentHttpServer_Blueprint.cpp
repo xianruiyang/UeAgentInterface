@@ -2,17 +2,20 @@
 
 #include "UeAgentHttpServer_Blueprint.h"
 
+#include "Commands/UeAgentGraphViewUtils.h"
 #include "AnimGraphNode_StateMachineBase.h"
 #include "AssetRegistry/AssetRegistryModule.h"
 #include "BlueprintEditorLibrary.h"
 #include "BlueprintEditor.h"
 #include "BlueprintEditorTabs.h"
 #include "Components/StaticMeshComponent.h"
+#include "Components/SkeletalMeshComponent.h"
 #include "Components/ActorComponent.h"
 #include "EdGraph/EdGraph.h"
 #include "EdGraph/EdGraphNode.h"
 #include "EdGraph/EdGraphPin.h"
 #include "EdGraphSchema_K2.h"
+#include "Engine/Blueprint.h"
 #include "EditorViewportClient.h"
 #include "Editor.h"
 #include "FileHelpers.h"
@@ -22,6 +25,7 @@
 #include "K2Node_CallFunction.h"
 #include "K2Node_FunctionEntry.h"
 #include "K2Node_FunctionResult.h"
+#include "K2Node_Knot.h"
 #include "K2Node_ComponentBoundEvent.h"
 #include "K2Node_CustomEvent.h"
 #include "K2Node_DynamicCast.h"
@@ -38,6 +42,7 @@
 #include "Engine/SCS_Node.h"
 #include "Engine/SimpleConstructionScript.h"
 #include "Engine/TextureRenderTarget2D.h"
+#include "GameFramework/Actor.h"
 #include "Misc/Guid.h"
 #include "Misc/PackageName.h"
 #include "Misc/Paths.h"
@@ -57,6 +62,9 @@
 #include "InputAction.h"
 #include "EnhancedInputSubsystems.h"
 #include "InputMappingContext.h"
+#include "SGraphNode.h"
+#include "SGraphPanel.h"
+#include "SGraphPin.h"
 
 namespace UeAgentBlueprintOps
 {
@@ -390,6 +398,38 @@ namespace UeAgentBlueprintOps
 		return true;
 	}
 
+	static bool PersistBlueprintGraphDocumentViewState(
+		UBlueprint* Blueprint,
+		UEdGraph* Graph,
+		const FVector2f& ViewLocation,
+		float ZoomAmount,
+		int32* OutRemovedExistingEntryCount = nullptr)
+	{
+		if (OutRemovedExistingEntryCount)
+		{
+			*OutRemovedExistingEntryCount = 0;
+		}
+		if (!Blueprint || !Graph)
+		{
+			return false;
+		}
+
+		const FSoftObjectPath GraphPath(Graph);
+		const int32 BeforeCount = Blueprint->LastEditedDocuments.Num();
+		Blueprint->LastEditedDocuments.RemoveAll(
+			[&GraphPath](const FEditedDocumentInfo& Info)
+			{
+				return Info.EditedObjectPath == GraphPath;
+			});
+		if (OutRemovedExistingEntryCount)
+		{
+			*OutRemovedExistingEntryCount = BeforeCount - Blueprint->LastEditedDocuments.Num();
+		}
+
+		Blueprint->LastEditedDocuments.Add(FEditedDocumentInfo(Graph, ViewLocation, ZoomAmount));
+		return true;
+	}
+
 	static TSharedPtr<IBlueprintEditor> GetBlueprintEditor(UBlueprint* Blueprint, bool bOpenIfNeeded, FString& OutError)
 	{
 		if (!Blueprint)
@@ -659,17 +699,61 @@ namespace UeAgentBlueprintOps
 		}
 	}
 
-	static void PrepareSlateWindowForCapture(const TSharedPtr<SWindow>& Window)
+	static bool EnsureSlateWindowRenderableForCapture(const TSharedPtr<SWindow>& Window, FString& OutError)
 	{
 		if (!Window.IsValid() || !FSlateApplication::IsInitialized())
+		{
+			OutError = TEXT("slate_window_not_available");
+			return false;
+		}
+
+		if (Window->IsWindowMinimized())
+		{
+			Window->Restore();
+			FSlateApplication::Get().PumpMessages();
+		}
+		Window->ShowWindow();
+		Window->BringToFront(false);
+		FSlateApplication::Get().PumpMessages();
+
+		if (!Window->IsVisible() || Window->IsWindowMinimized())
+		{
+			OutError = TEXT("slate_window_not_renderable");
+			return false;
+		}
+		return true;
+	}
+
+	static void PumpAndTickSlateForCapture()
+	{
+		if (!FSlateApplication::IsInitialized())
 		{
 			return;
 		}
 
-		FSlateApplication::Get().PumpMessages();
-		const float WindowScale = FSlateApplication::Get().GetApplicationScale() * Window->GetDPIScaleFactor();
-		Window->SlatePrepass(WindowScale);
-		FSlateApplication::Get().InvalidateAllViewports();
+		FSlateApplication& SlateApp = FSlateApplication::Get();
+		SlateApp.PumpMessages();
+		if (!SlateApp.IsTicking())
+		{
+			SlateApp.Tick(ESlateTickType::All);
+		}
+	}
+
+	static bool PrepareSlateWindowForCapture(const TSharedPtr<SWindow>& Window, FString& OutError)
+	{
+		if (!EnsureSlateWindowRenderableForCapture(Window, OutError))
+		{
+			return false;
+		}
+		for (int32 FrameIndex = 0; FrameIndex < 3; ++FrameIndex)
+		{
+			PumpAndTickSlateForCapture();
+			const float WindowScale = FSlateApplication::Get().GetApplicationScale() * Window->GetDPIScaleFactor();
+			Window->SlatePrepass(WindowScale);
+			FSlateApplication::Get().ForceRedrawWindow(Window.ToSharedRef());
+		}
+		PumpAndTickSlateForCapture();
+		return true;
 	}
 
 	static FVector2D ResolveOffscreenWidgetDrawSize(const TSharedRef<SWidget>& Widget)
@@ -714,7 +798,6 @@ namespace UeAgentBlueprintOps
 		FSlateApplication::Get().PumpMessages();
 		const float WidgetScale = FSlateApplication::Get().GetApplicationScale();
 		Widget->SlatePrepass(WidgetScale);
-		FSlateApplication::Get().InvalidateAllViewports();
 
 		const FVector2D DrawSize = ResolveOffscreenWidgetDrawSize(Widget);
 		FWidgetRenderer* WidgetRenderer = new FWidgetRenderer(true, true);
@@ -830,7 +913,10 @@ namespace UeAgentBlueprintOps
 		{
 			return false;
 		}
-		PrepareSlateWindowForCapture(BlueprintWindow);
+		if (!PrepareSlateWindowForCapture(BlueprintWindow, OutError))
+		{
+			return false;
+		}
 		return ScreenshotSlateWidget(BlueprintWindow.ToSharedRef(), OutPixels, OutSize, OutError);
 	}
 
@@ -949,7 +1035,10 @@ namespace UeAgentBlueprintOps
 			return false;
 		}
 
-		PrepareSlateWindowForCapture(BlueprintWindow);
+		if (!PrepareSlateWindowForCapture(BlueprintWindow, OutError))
+		{
+			return false;
+		}
 
 		TArray<FColor> WindowPixels;
 		FIntPoint WindowSize(0, 0);
@@ -963,7 +1052,10 @@ namespace UeAgentBlueprintOps
 			WindowSize.X,
 			WindowSize.Y);
 
-		PrepareSlateWindowForCapture(BlueprintWindow);
+		if (!PrepareSlateWindowForCapture(BlueprintWindow, OutError))
+		{
+			return false;
+		}
 		if (!ScreenshotSlateWidget(BlueprintWindow.ToSharedRef(), WindowPixels, WindowSize, OutError))
 		{
 			return false;
@@ -982,5 +1074,6 @@ namespace UeAgentBlueprintOps
 
 #include "UeAgentHttpServer_Blueprint_AssetAndViewport.inl"
 #include "UeAgentHttpServer_Blueprint_Components.inl"
+#include "UeAgentHttpServer_Blueprint_GraphLayout.inl"
 #include "UeAgentHttpServer_Blueprint_GraphEditing.inl"
 #include "UeAgentHttpServer_Blueprint_FolderFormat.inl"

@@ -22,6 +22,7 @@ public class UeAgentInterface : ModuleRules
 			new string[]
 			{
 				"UnrealEd",
+				"GraphEditor",
 				"LevelEditor",
 				"ApplicationCore",
 				"Slate",

@@ -528,6 +528,10 @@ namespace UeAgentAnimBlueprintFolderOps
 		{
 			PropertyPaths.Add(TEXT("Node.Sequence"));
 		}
+		if (Node->IsA<UAnimGraphNode_SequencePlayer>())
+		{
+			PropertyPaths.Add(TEXT("Node.bLoopAnimation"));
+		}
 
 		if (Node->IsA<UAnimGraphNode_ControlRig>())
 		{

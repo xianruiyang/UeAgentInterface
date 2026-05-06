@@ -40,7 +40,7 @@ StaticMesh 的长期 authoring 主流程是：
 
 `static_mesh_validate_folder` 和 `static_mesh_apply_folder` 都会先解析文件夹内所有已存在的可选 JSON 文件；只有文件不存在才会按可选文件跳过。只要出现 error 级 `json_issues[]`，命令就返回失败，不会继续静默写入。`lods/index.json`、`sections.json`、`lightmap_uv.json`、`build_settings.json`、`import_data.json`、`raw_mesh_summary.json`、`raw_properties.json`、`readonly_properties.json` 和 `validation/*.json` 在 StaticMesh folder workflow 中属于摘要、只读或非主 authoring 入口；如果这些文件里出现 `apply/remove/delete/operations` 等明确写意图，会返回 `unsupported_apply_profile`。需要改通用 UObject 属性时，走 `asset_export_property_json -> asset_apply_property_json`，不要把写意图塞进 StaticMesh folder 的摘要文件里。
 
-`static_mesh_apply_folder` 写入 `collision.json` 时会同时对 `UStaticMesh` 和 `UBodySetup` 调用事务修改并刷新碰撞数据，因此可以替代旧的 `static_mesh_set_collision_*` 指令在编辑器 dirty、撤销和读回上的副作用。
+`static_mesh_apply_folder` 写入 `collision.json` 时会同时对 `UStaticMesh` 和 `UBodySetup` 调用事务修改并刷新碰撞数据，因此可以替代旧 simple collision 原子写入入口在编辑器 dirty、撤销和读回上的副作用。
 
 `static_mesh_apply_folder` 写入 `sockets.json` 时会对 `UStaticMesh` 和已有 `UStaticMeshSocket` 调用事务修改。默认全量替换 socket 集合，以保证 `export_folder -> apply_folder` 可以恢复到导出时的 socket 状态；如果只想做增量创建/更新/删除，显式设置 `replace_all=false`。
 
@@ -55,17 +55,6 @@ StaticMesh 的长期 authoring 主流程是：
 | `static_mesh_get_bounds` | 只读取静态网格 bounds | `asset_path` | 供脚本直接拿宽高深与中心 |
 | `static_mesh_get_local_corners` | 读取局部包围盒 8 个角点 | `asset_path` | 做拼装、特征点对齐、预估占地 |
 | `static_mesh_set_preview_view` | 设置网格编辑器预览相机 | `asset_path`、`yaw`、`pitch`、`distance`、`fov` | 多角度检查模型 |
-| `static_mesh_set_material_slot` | 设置默认材质槽材质 | `asset_path`、`slot_index` 或 `slot_name`、`material_path` | 调整网格默认材质 |
-| `static_mesh_set_collision_boxes` | 设置简单碰撞 Box 列表 | `asset_path`、`boxes[]`、`clear_other_shapes` | 重建简单碰撞体 |
-| `static_mesh_set_collision_spheres` | 设置简单碰撞 Sphere 列表 | `asset_path`、`spheres[]`、`clear_other_shapes` | 补球形触发体或球形包络 |
-| `static_mesh_set_collision_capsules` | 设置简单碰撞 Capsule 列表 | `asset_path`、`capsules[]`、`clear_other_shapes` | 补柱体/角色近似碰撞 |
-| `static_mesh_add_socket` | 新增 Socket | `asset_path`、`socket_name`、`location`、`rotation`、`scale` | 武器挂点、特效挂点 |
-| `static_mesh_update_socket` | 修改 Socket | `asset_path`、`socket_name`、`new_socket_name` | 调整挂点位置 |
-| `static_mesh_remove_socket` | 删除 Socket | `asset_path`、`socket_name` | 清理无效挂点 |
-
-上述 `set_material_slot / set_collision_* / add_socket / update_socket / remove_socket` 已被 `static_mesh_apply_folder` 覆盖，作为完整 authoring 主流程时视为 **Deprecated for authoring**。它们保留给 bootstrap、迁移脚本、局部探针和失败后的定点修补。
-
-`static_mesh_set_property` 返回 `requested_value_text`、`applied_value_text`、`property_import_status`、`property_import_verified`、`value_text_exact_match`、`value_text_changed_after_import`、`cpp_type`。如果 `ImportText` 失败，返回数据会保留失败的 `property_name` 和请求值。
 
 ### `static_mesh_get_bounds` 与 `static_mesh_get_local_corners`
 
@@ -92,18 +81,11 @@ StaticMesh 的长期 authoring 主流程是：
 - `collision.spheres[]`
 - `collision.capsules[]`
 
-### `static_mesh_set_material_slot`
-
-- `slot_index` 和 `slot_name` 二选一。
-- `slot_name` 会同时匹配 `MaterialSlotName` 和 `ImportedMaterialSlotName`。
-- 当前只处理默认材质槽，不处理实例级 `StaticMeshComponent` 覆盖材质；实例覆盖仍应走 `level_set_component_property`。
-
 ### 简单碰撞补充
 
-- `static_mesh_set_collision_boxes / spheres / capsules` 都是“重设该形状数组”的语义，不是追加。
-- `static_mesh_apply_folder` 中的 `boxes[] / spheres[] / capsules[]` 也是全量替换各自数组；需要等价旧指令 `clear_other_shapes=true` 的凸包清理时，在 `collision.json` 中写 `convex_hulls: []` 或 `clear_convex_hulls=true`。
-- `clear_other_shapes=true` 时，会一并清掉其它简单碰撞形状和现有 convex。
-- `static_mesh_set_collision_capsules` 的 `length` 是胶囊中间圆柱段长度，不含两端半球。
+- `static_mesh_apply_folder` 中的 `boxes[] / spheres[] / capsules[]` 是全量替换各自数组，不是追加。
+- 需要清理凸包时，在 `collision.json` 中写 `convex_hulls: []` 或 `clear_convex_hulls=true`。
+- `capsules[].length` 是胶囊中间圆柱段长度，不含两端半球。
 
 ## EnhancedInput
 
@@ -118,7 +100,7 @@ StaticMesh 的长期 authoring 主流程是：
 | `enhanced_input_export_mapping_context_json` | 导出 `InputMappingContext` 单文件 JSON | `asset_path`；可选 `output_file` | 把整套映射关系导出成单个真源 JSON |
 | `enhanced_input_apply_mapping_context_json` | 从单文件 JSON 回写 `InputMappingContext` | `json_file`；可选 `asset_path`、`create_if_missing` | 以 JSON 真源重建 mappings[] |
 
-`enhanced_input_set_action_property` / `enhanced_input_set_mapping_context_property` 返回通用属性写入观测字段：`requested_value_text`、`applied_value_text`、`property_import_status`、`property_import_verified`、`value_text_exact_match`、`value_text_changed_after_import`、`cpp_type`。
+逐条修改 InputAction / MappingContext 的 setter/add/remove 入口已归档到废弃分册。正式 authoring 应通过 `enhanced_input_export_*_json -> enhanced_input_apply_*_json` 做单文件 JSON round-trip，并检查 apply 返回的写入观测字段。
 
 ### EnhancedInput JSON 工作流
 
@@ -191,17 +173,6 @@ StaticMesh 的长期 authoring 主流程是：
 }
 ```
 
-<!-- UAI_FORMAL_COMMAND_INDEX_BEGIN -->
-## 原子/兼容命令正式索引
->
-> 以下命令已有真实 dispatch 实现并纳入 smoke 覆盖；对完整资产制作仍应优先使用本分册中的结构化 JSON / folder workflow，原子命令仅用于 bootstrap、迁移、probe 或局部修复。
+## 废弃命令
 
-| Command | 作用 | 关键参数 | 关键返回 |
-| --- | --- | --- | --- |
-| `enhanced_input_add_mapping` | **原子/兼容**：添加 `Action-Key` 映射 | `mapping_context_path`、`action_path`、`key`、`modifier_classes`、`trigger_classes` | 优先编辑 `mappings[]` 后 apply |
-| `enhanced_input_clear_mappings` | **原子/兼容**：清空全部映射 | `mapping_context_path` | 优先用 JSON 全量替换 |
-| `enhanced_input_remove_mapping` | **原子/兼容**：删除某条映射 | `mapping_context_path`、`action_path`、`key` | 优先编辑 `mappings[]` 后 apply |
-| `enhanced_input_set_action_property` | **原子/兼容**：修改 `InputAction` 属性 | `asset_path`、`property_name`、`value_text` | 优先编辑单文件 JSON 后 `enhanced_input_apply_action_json` |
-| `enhanced_input_set_mapping_context_property` | **原子/兼容**：修改 `MappingContext` 属性 | `asset_path`、`property_name`、`value_text` | 优先编辑单文件 JSON 后 apply |
-| `static_mesh_set_property` | **原子/兼容**：设置网格资产属性 | `asset_path`、`property_name`、`value_text` | 能由 `asset_apply_property_json` 表达时优先走 JSON |
-<!-- UAI_FORMAL_COMMAND_INDEX_END -->
+本分册不再列出已废弃写入命令；这些命令仅保留在 `deprecatedCommand/04_StaticMesh_EnhancedInput.md`，供旧脚本兼容、bootstrap、迁移和故障补修查阅。

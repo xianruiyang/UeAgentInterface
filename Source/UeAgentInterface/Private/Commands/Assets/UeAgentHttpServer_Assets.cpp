@@ -26,11 +26,14 @@
 #include "Misc/FileHelper.h"
 #include "Misc/PackageName.h"
 #include "Misc/Paths.h"
+#include "ObjectTools.h"
 #include "PhysicsEngine/PhysicsAsset.h"
 #include "Rendering/SkeletalMeshModel.h"
 #include "Serialization/JsonReader.h"
 #include "Serialization/JsonSerializer.h"
 #include "Subsystems/AssetEditorSubsystem.h"
+#include "Templates/UnrealTemplate.h"
+#include "UObject/ObjectRedirector.h"
 #include "UObject/Package.h"
 #include "UObject/UnrealType.h"
 #include "UObject/UObjectIterator.h"
@@ -84,6 +87,270 @@ namespace UeAgentAssetOps
 			return Existing;
 		}
 		return LoadObject<UObject>(nullptr, *ObjectPath);
+	}
+
+	static FString NormalizeReferenceInputToPackageName(const FString& InPath)
+	{
+		FString Path = InPath;
+		Path.TrimStartAndEndInline();
+		if (Path.IsEmpty())
+		{
+			return FString();
+		}
+
+		int32 FirstQuote = INDEX_NONE;
+		int32 LastQuote = INDEX_NONE;
+		if (Path.FindChar(TEXT('\''), FirstQuote) && Path.FindLastChar(TEXT('\''), LastQuote) && LastQuote > FirstQuote)
+		{
+			Path = Path.Mid(FirstQuote + 1, LastQuote - FirstQuote - 1);
+			Path.TrimStartAndEndInline();
+		}
+
+		if (Path.StartsWith(TEXT("\"")) && Path.EndsWith(TEXT("\"")) && Path.Len() >= 2)
+		{
+			Path = Path.Mid(1, Path.Len() - 2);
+			Path.TrimStartAndEndInline();
+		}
+
+		return NormalizeAssetPath(Path);
+	}
+
+	static FString DependencyCategoryToString(UE::AssetRegistry::EDependencyCategory Category)
+	{
+		using UE::AssetRegistry::EDependencyCategory;
+		if (EnumHasAnyFlags(Category, EDependencyCategory::Package))
+		{
+			return TEXT("package");
+		}
+		if (EnumHasAnyFlags(Category, EDependencyCategory::Manage))
+		{
+			return TEXT("manage");
+		}
+		if (EnumHasAnyFlags(Category, EDependencyCategory::SearchableName))
+		{
+			return TEXT("searchable_name");
+		}
+		return TEXT("none");
+	}
+
+	static TArray<TSharedPtr<FJsonValue>> DependencyPropertyNames(UE::AssetRegistry::EDependencyCategory Category, UE::AssetRegistry::EDependencyProperty Properties)
+	{
+		using UE::AssetRegistry::EDependencyCategory;
+		using UE::AssetRegistry::EDependencyProperty;
+
+		TArray<TSharedPtr<FJsonValue>> Names;
+		if (EnumHasAnyFlags(Category, EDependencyCategory::Package))
+		{
+			Names.Add(MakeShared<FJsonValueString>(EnumHasAnyFlags(Properties, EDependencyProperty::Hard) ? TEXT("hard") : TEXT("soft")));
+			if (EnumHasAnyFlags(Properties, EDependencyProperty::Game))
+			{
+				Names.Add(MakeShared<FJsonValueString>(TEXT("game")));
+			}
+			else
+			{
+				Names.Add(MakeShared<FJsonValueString>(TEXT("editor_only")));
+			}
+			if (EnumHasAnyFlags(Properties, EDependencyProperty::Build))
+			{
+				Names.Add(MakeShared<FJsonValueString>(TEXT("build")));
+			}
+		}
+		if (EnumHasAnyFlags(Category, EDependencyCategory::Manage))
+		{
+			Names.Add(MakeShared<FJsonValueString>(EnumHasAnyFlags(Properties, EDependencyProperty::Direct) ? TEXT("direct") : TEXT("indirect")));
+		}
+		if (EnumHasAnyFlags(Category, EDependencyCategory::SearchableName))
+		{
+			Names.Add(MakeShared<FJsonValueString>(TEXT("searchable_name")));
+		}
+		return Names;
+	}
+
+	static FString DependencyRelationKind(UE::AssetRegistry::EDependencyCategory Category, UE::AssetRegistry::EDependencyProperty Properties)
+	{
+		using UE::AssetRegistry::EDependencyCategory;
+		using UE::AssetRegistry::EDependencyProperty;
+		if (EnumHasAnyFlags(Category, EDependencyCategory::Package))
+		{
+			return EnumHasAnyFlags(Properties, EDependencyProperty::Hard) ? TEXT("hard_package") : TEXT("soft_package");
+		}
+		if (EnumHasAnyFlags(Category, EDependencyCategory::Manage))
+		{
+			return EnumHasAnyFlags(Properties, EDependencyProperty::Direct) ? TEXT("direct_manage") : TEXT("indirect_manage");
+		}
+		if (EnumHasAnyFlags(Category, EDependencyCategory::SearchableName))
+		{
+			return TEXT("searchable_name");
+		}
+		return TEXT("unknown");
+	}
+
+	static bool ShouldIncludeDependencyEdge(
+		UE::AssetRegistry::EDependencyCategory Category,
+		UE::AssetRegistry::EDependencyProperty Properties,
+		bool bIncludeHard,
+		bool bIncludeSoft,
+		bool bIncludeManage,
+		bool bIncludeSearchableNames)
+	{
+		using UE::AssetRegistry::EDependencyCategory;
+		using UE::AssetRegistry::EDependencyProperty;
+		if (EnumHasAnyFlags(Category, EDependencyCategory::Package))
+		{
+			const bool bHard = EnumHasAnyFlags(Properties, EDependencyProperty::Hard);
+			return bHard ? bIncludeHard : bIncludeSoft;
+		}
+		if (EnumHasAnyFlags(Category, EDependencyCategory::Manage))
+		{
+			return bIncludeManage;
+		}
+		if (EnumHasAnyFlags(Category, EDependencyCategory::SearchableName))
+		{
+			return bIncludeSearchableNames;
+		}
+		return false;
+	}
+
+	static FString AssetIdentifierPackageName(const FAssetIdentifier& Identifier)
+	{
+		return Identifier.PackageName.IsNone() ? FString() : Identifier.PackageName.ToString();
+	}
+
+	static FString AssetDataClassPathString(const FAssetData& AssetData)
+	{
+		return AssetData.AssetClassPath.IsValid() ? AssetData.AssetClassPath.ToString() : FString();
+	}
+
+	static TSharedPtr<FJsonObject> MakeAssetRegistryNodeJson(IAssetRegistry& AssetRegistry, const FAssetIdentifier& Identifier, const int32 Depth, const FString& Role)
+	{
+		TSharedPtr<FJsonObject> Node = MakeShared<FJsonObject>();
+		const FString IdentifierString = Identifier.ToString();
+		const FString PackageName = AssetIdentifierPackageName(Identifier);
+		Node->SetStringField(TEXT("id"), IdentifierString);
+		Node->SetStringField(TEXT("identifier"), IdentifierString);
+		Node->SetStringField(TEXT("package_name"), PackageName);
+		Node->SetStringField(TEXT("primary_asset_id"), Identifier.GetPrimaryAssetId().ToString());
+		Node->SetStringField(TEXT("object_name"), Identifier.ObjectName.ToString());
+		Node->SetStringField(TEXT("value_name"), Identifier.ValueName.ToString());
+		Node->SetBoolField(TEXT("is_package_identifier"), Identifier.IsPackage());
+		Node->SetBoolField(TEXT("is_object_identifier"), Identifier.IsObject());
+		Node->SetBoolField(TEXT("is_value_identifier"), Identifier.IsValue());
+		Node->SetNumberField(TEXT("depth"), Depth);
+		Node->SetStringField(TEXT("role"), Role);
+
+		TArray<FAssetData> Assets;
+		if (!PackageName.IsEmpty())
+		{
+			AssetRegistry.GetAssetsByPackageName(FName(*PackageName), Assets, false);
+		}
+
+		Node->SetBoolField(TEXT("asset_found"), Assets.Num() > 0);
+		Node->SetNumberField(TEXT("asset_data_count"), Assets.Num());
+		TArray<TSharedPtr<FJsonValue>> AssetDataJson;
+		for (const FAssetData& AssetData : Assets)
+		{
+			TSharedPtr<FJsonObject> Item = MakeShared<FJsonObject>();
+			Item->SetStringField(TEXT("asset_name"), AssetData.AssetName.ToString());
+			Item->SetStringField(TEXT("package_name"), AssetData.PackageName.ToString());
+			Item->SetStringField(TEXT("package_path"), AssetData.PackagePath.ToString());
+			Item->SetStringField(TEXT("object_path"), AssetData.GetSoftObjectPath().ToString());
+			Item->SetStringField(TEXT("asset_class"), AssetDataClassPathString(AssetData));
+			Item->SetBoolField(TEXT("is_redirector"), AssetDataClassPathString(AssetData).EndsWith(TEXT("ObjectRedirector")));
+			AssetDataJson.Add(MakeShared<FJsonValueObject>(Item));
+		}
+		Node->SetArrayField(TEXT("asset_data"), AssetDataJson);
+		if (Assets.Num() > 0)
+		{
+			const FAssetData& PrimaryAssetData = Assets[0];
+			Node->SetStringField(TEXT("asset_name"), PrimaryAssetData.AssetName.ToString());
+			Node->SetStringField(TEXT("object_path"), PrimaryAssetData.GetSoftObjectPath().ToString());
+			Node->SetStringField(TEXT("asset_class"), AssetDataClassPathString(PrimaryAssetData));
+			Node->SetBoolField(TEXT("is_redirector"), AssetDataClassPathString(PrimaryAssetData).EndsWith(TEXT("ObjectRedirector")));
+		}
+		else
+		{
+			Node->SetStringField(TEXT("asset_name"), FPackageName::GetLongPackageAssetName(PackageName));
+			Node->SetStringField(TEXT("object_path"), PackageName.IsEmpty() ? FString() : ToObjectPath(PackageName));
+			Node->SetStringField(TEXT("asset_class"), FString());
+			Node->SetBoolField(TEXT("is_redirector"), false);
+		}
+		return Node;
+	}
+
+	static TSharedPtr<FJsonObject> MakeAssetRegistryEdgeJson(
+		const FAssetIdentifier& Source,
+		const FAssetIdentifier& Target,
+		const FString& QueryDirection,
+		const int32 Depth,
+		UE::AssetRegistry::EDependencyCategory Category,
+		UE::AssetRegistry::EDependencyProperty Properties)
+	{
+		using UE::AssetRegistry::EDependencyCategory;
+		using UE::AssetRegistry::EDependencyProperty;
+
+		TSharedPtr<FJsonObject> Edge = MakeShared<FJsonObject>();
+		Edge->SetStringField(TEXT("source"), Source.ToString());
+		Edge->SetStringField(TEXT("source_package"), AssetIdentifierPackageName(Source));
+		Edge->SetStringField(TEXT("target"), Target.ToString());
+		Edge->SetStringField(TEXT("target_package"), AssetIdentifierPackageName(Target));
+		Edge->SetStringField(TEXT("query_direction"), QueryDirection);
+		Edge->SetNumberField(TEXT("depth"), Depth);
+		Edge->SetNumberField(TEXT("category_flags"), static_cast<int64>(Category));
+		Edge->SetNumberField(TEXT("property_flags"), static_cast<int64>(Properties));
+		Edge->SetStringField(TEXT("category"), DependencyCategoryToString(Category));
+		Edge->SetStringField(TEXT("relation_kind"), DependencyRelationKind(Category, Properties));
+		Edge->SetArrayField(TEXT("properties"), DependencyPropertyNames(Category, Properties));
+		Edge->SetBoolField(TEXT("hard"), EnumHasAnyFlags(Category, EDependencyCategory::Package) && EnumHasAnyFlags(Properties, EDependencyProperty::Hard));
+		Edge->SetBoolField(TEXT("soft"), EnumHasAnyFlags(Category, EDependencyCategory::Package) && !EnumHasAnyFlags(Properties, EDependencyProperty::Hard));
+		Edge->SetBoolField(TEXT("game"), EnumHasAnyFlags(Category, EDependencyCategory::Package) && EnumHasAnyFlags(Properties, EDependencyProperty::Game));
+		Edge->SetBoolField(TEXT("build"), EnumHasAnyFlags(Category, EDependencyCategory::Package) && EnumHasAnyFlags(Properties, EDependencyProperty::Build));
+		Edge->SetBoolField(TEXT("direct_manage"), EnumHasAnyFlags(Category, EDependencyCategory::Manage) && EnumHasAnyFlags(Properties, EDependencyProperty::Direct));
+		Edge->SetBoolField(TEXT("indirect_manage"), EnumHasAnyFlags(Category, EDependencyCategory::Manage) && !EnumHasAnyFlags(Properties, EDependencyProperty::Direct));
+		return Edge;
+	}
+
+	static void AddOrUpdateGraphNode(
+		IAssetRegistry& AssetRegistry,
+		TMap<FString, TSharedPtr<FJsonObject>>& NodesById,
+		const FAssetIdentifier& Identifier,
+		const int32 Depth,
+		const FString& Role)
+	{
+		const FString Id = Identifier.ToString();
+		if (TSharedPtr<FJsonObject>* Existing = NodesById.Find(Id))
+		{
+			const int32 ExistingDepth = (*Existing)->HasTypedField<EJson::Number>(TEXT("depth")) ? static_cast<int32>((*Existing)->GetIntegerField(TEXT("depth"))) : Depth;
+			if (Depth < ExistingDepth)
+			{
+				(*Existing)->SetNumberField(TEXT("depth"), Depth);
+			}
+			if (!Role.IsEmpty())
+			{
+				const FString ExistingRole = (*Existing)->GetStringField(TEXT("role"));
+				if (!ExistingRole.Contains(Role))
+				{
+					(*Existing)->SetStringField(TEXT("role"), ExistingRole.IsEmpty() ? Role : ExistingRole + TEXT(",") + Role);
+				}
+			}
+			return;
+		}
+		NodesById.Add(Id, MakeAssetRegistryNodeJson(AssetRegistry, Identifier, Depth, Role));
+	}
+
+	static TArray<TSharedPtr<FJsonValue>> SortedNodeValues(const TMap<FString, TSharedPtr<FJsonObject>>& NodesById)
+	{
+		TArray<FString> Keys;
+		NodesById.GetKeys(Keys);
+		Keys.Sort();
+		TArray<TSharedPtr<FJsonValue>> Values;
+		for (const FString& Key : Keys)
+		{
+			if (const TSharedPtr<FJsonObject>* Node = NodesById.Find(Key))
+			{
+				Values.Add(MakeShared<FJsonValueObject>(*Node));
+			}
+		}
+		return Values;
 	}
 
 	static UPackage* ResolvePackageByAssetPath(const FString& InPath)
@@ -1239,6 +1506,7 @@ bool FUeAgentHttpServer::CmdAssetDuplicate(const FUeAgentRequestContext& Ctx, TS
 		OutError = TEXT("duplicate_asset_failed");
 		return false;
 	}
+	FAssetRegistryModule::AssetCreated(DuplicatedAsset);
 
 	bool bOpenEditor = false;
 	JsonTryGetBool(Ctx.Params, TEXT("open_editor"), bOpenEditor);
@@ -1268,6 +1536,706 @@ bool FUeAgentHttpServer::CmdAssetDuplicate(const FUeAgentRequestContext& Ctx, TS
 	OutData->SetStringField(TEXT("object_path"), DuplicatedAsset->GetPathName());
 	OutData->SetStringField(TEXT("class"), DuplicatedAsset->GetClass()->GetPathName());
 	OutData->SetBoolField(TEXT("saved"), bSaveAfterDuplicate);
+	return true;
+}
+
+bool FUeAgentHttpServer::CmdAssetMove(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+{
+	FString SourceAssetPath;
+	if (!JsonTryGetString(Ctx.Params, TEXT("source_asset_path"), SourceAssetPath) || SourceAssetPath.IsEmpty())
+	{
+		JsonTryGetString(Ctx.Params, TEXT("asset_path"), SourceAssetPath);
+	}
+	if (SourceAssetPath.IsEmpty())
+	{
+		OutError = TEXT("missing_source_asset_path");
+		return false;
+	}
+
+	UObject* SourceAsset = UeAgentAssetOps::LoadAssetObject(SourceAssetPath);
+	if (!SourceAsset)
+	{
+		OutError = TEXT("source_asset_not_found");
+		return false;
+	}
+
+	const FString SourcePackageName = UeAgentAssetOps::NormalizeAssetPath(SourceAsset->GetOutermost()->GetName());
+	const FString SourceAssetName = SourceAsset->GetName();
+
+	FString DestinationAssetPath;
+	JsonTryGetString(Ctx.Params, TEXT("destination_asset_path"), DestinationAssetPath);
+	DestinationAssetPath.TrimStartAndEndInline();
+
+	FString DestinationFolder;
+	JsonTryGetString(Ctx.Params, TEXT("destination_folder"), DestinationFolder);
+	DestinationFolder.TrimStartAndEndInline();
+
+	FString DestinationName;
+	JsonTryGetString(Ctx.Params, TEXT("destination_name"), DestinationName);
+	DestinationName.TrimStartAndEndInline();
+
+	if (DestinationAssetPath.IsEmpty())
+	{
+		if (DestinationFolder.IsEmpty())
+		{
+			OutError = TEXT("missing_destination_asset_path_or_folder");
+			return false;
+		}
+		FString NormalizedFolder = UeAgentAssetOps::NormalizeAssetPath(DestinationFolder);
+		if (NormalizedFolder.EndsWith(TEXT("/")))
+		{
+			NormalizedFolder.LeftChopInline(1);
+		}
+		DestinationAssetPath = NormalizedFolder / (DestinationName.IsEmpty() ? SourceAssetName : DestinationName);
+	}
+
+	const FString NormalizedDestinationAssetPath = UeAgentAssetOps::NormalizeAssetPath(DestinationAssetPath);
+	if (!FPackageName::IsValidLongPackageName(NormalizedDestinationAssetPath))
+	{
+		OutError = TEXT("invalid_destination_asset_path");
+		return false;
+	}
+
+	const FString DestinationAssetName = FPackageName::GetLongPackageAssetName(NormalizedDestinationAssetPath);
+	const FString DestinationPackagePath = FPackageName::GetLongPackagePath(NormalizedDestinationAssetPath);
+	if (DestinationAssetName.IsEmpty() || DestinationPackagePath.IsEmpty())
+	{
+		OutError = TEXT("invalid_destination_asset_path");
+		return false;
+	}
+
+	if (SourcePackageName.Equals(NormalizedDestinationAssetPath, ESearchCase::IgnoreCase))
+	{
+		OutData->SetStringField(TEXT("source_asset_path"), SourcePackageName);
+		OutData->SetStringField(TEXT("asset_path"), NormalizedDestinationAssetPath);
+		OutData->SetStringField(TEXT("object_path"), SourceAsset->GetPathName());
+		OutData->SetBoolField(TEXT("changed"), false);
+		OutData->SetBoolField(TEXT("saved"), false);
+		return true;
+	}
+
+	bool bOverwriteExisting = false;
+	JsonTryGetBool(Ctx.Params, TEXT("overwrite_existing"), bOverwriteExisting);
+	if (!bOverwriteExisting && UeAgentAssetOps::LoadAssetObject(NormalizedDestinationAssetPath))
+	{
+		OutError = TEXT("destination_asset_already_exists");
+		return false;
+	}
+
+	bool bDryRun = false;
+	JsonTryGetBool(Ctx.Params, TEXT("dry_run"), bDryRun);
+	if (bDryRun)
+	{
+		OutData->SetStringField(TEXT("source_asset_path"), SourcePackageName);
+		OutData->SetStringField(TEXT("asset_path"), NormalizedDestinationAssetPath);
+		OutData->SetStringField(TEXT("destination_folder"), DestinationPackagePath);
+		OutData->SetStringField(TEXT("destination_name"), DestinationAssetName);
+		OutData->SetBoolField(TEXT("changed"), false);
+		OutData->SetBoolField(TEXT("dry_run"), true);
+		return true;
+	}
+
+	if (UAssetEditorSubsystem* AssetEditorSubsystem = GEditor ? GEditor->GetEditorSubsystem<UAssetEditorSubsystem>() : nullptr)
+	{
+		if (AssetEditorSubsystem->FindEditorForAsset(SourceAsset, false))
+		{
+			AssetEditorSubsystem->CloseAllEditorsForAsset(SourceAsset);
+		}
+	}
+
+	FAssetToolsModule& AssetToolsModule = FModuleManager::LoadModuleChecked<FAssetToolsModule>(TEXT("AssetTools"));
+	TArray<FAssetRenameData> RenameData;
+	RenameData.Emplace(SourceAsset, DestinationPackagePath, DestinationAssetName);
+	{
+		TGuardValue<bool> UnattendedScriptGuard(GIsRunningUnattendedScript, true);
+		if (!AssetToolsModule.Get().RenameAssets(RenameData))
+		{
+			OutError = TEXT("rename_asset_failed");
+			return false;
+		}
+	}
+
+	UObject* MovedAsset = UeAgentAssetOps::LoadAssetObject(NormalizedDestinationAssetPath);
+	if (!MovedAsset)
+	{
+		OutError = TEXT("moved_asset_not_found_after_rename");
+		return false;
+	}
+
+	bool bSaveAfterMove = true;
+	JsonTryGetBool(Ctx.Params, TEXT("save_after_move"), bSaveAfterMove);
+	if (bSaveAfterMove && !UeAgentAssetOps::SaveAssetPackage(MovedAsset, OutError))
+	{
+		return false;
+	}
+
+	OutData->SetStringField(TEXT("source_asset_path"), SourcePackageName);
+	OutData->SetStringField(TEXT("asset_path"), NormalizedDestinationAssetPath);
+	OutData->SetStringField(TEXT("object_path"), MovedAsset->GetPathName());
+	OutData->SetStringField(TEXT("destination_folder"), DestinationPackagePath);
+	OutData->SetStringField(TEXT("destination_name"), DestinationAssetName);
+	OutData->SetStringField(TEXT("class"), MovedAsset->GetClass()->GetPathName());
+	OutData->SetBoolField(TEXT("changed"), true);
+	OutData->SetBoolField(TEXT("saved"), bSaveAfterMove);
+	return true;
+}
+
+bool FUeAgentHttpServer::CmdAssetFixupRedirectors(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+{
+	TArray<FString> RequestedAssetPaths;
+	auto AddStringField = [&Ctx, &RequestedAssetPaths](const TCHAR* Key)
+	{
+		FString Value;
+		if (JsonTryGetString(Ctx.Params, Key, Value))
+		{
+			Value.TrimStartAndEndInline();
+			if (!Value.IsEmpty())
+			{
+				RequestedAssetPaths.Add(Value);
+			}
+		}
+	};
+	auto AddStringArrayField = [&Ctx, &RequestedAssetPaths](const TCHAR* Key)
+	{
+		const TArray<TSharedPtr<FJsonValue>>* Values = nullptr;
+		if (!Ctx.Params.IsValid() || !Ctx.Params->TryGetArrayField(Key, Values) || !Values)
+		{
+			return;
+		}
+		for (const TSharedPtr<FJsonValue>& Value : *Values)
+		{
+			if (!Value.IsValid())
+			{
+				continue;
+			}
+			FString Text;
+			if (Value->TryGetString(Text))
+			{
+				Text.TrimStartAndEndInline();
+				if (!Text.IsEmpty())
+				{
+					RequestedAssetPaths.Add(Text);
+				}
+			}
+		}
+	};
+	AddStringField(TEXT("asset_path"));
+	AddStringField(TEXT("redirector_path"));
+	AddStringArrayField(TEXT("asset_paths"));
+	AddStringArrayField(TEXT("redirector_paths"));
+
+	TArray<FString> RequestedFolderPaths;
+	auto AddFolderField = [&Ctx, &RequestedFolderPaths](const TCHAR* Key)
+	{
+		FString Value;
+		if (JsonTryGetString(Ctx.Params, Key, Value))
+		{
+			Value.TrimStartAndEndInline();
+			if (!Value.IsEmpty())
+			{
+				RequestedFolderPaths.Add(Value);
+			}
+		}
+	};
+	auto AddFolderArrayField = [&Ctx, &RequestedFolderPaths](const TCHAR* Key)
+	{
+		const TArray<TSharedPtr<FJsonValue>>* Values = nullptr;
+		if (!Ctx.Params.IsValid() || !Ctx.Params->TryGetArrayField(Key, Values) || !Values)
+		{
+			return;
+		}
+		for (const TSharedPtr<FJsonValue>& Value : *Values)
+		{
+			if (!Value.IsValid())
+			{
+				continue;
+			}
+			FString Text;
+			if (Value->TryGetString(Text))
+			{
+				Text.TrimStartAndEndInline();
+				if (!Text.IsEmpty())
+				{
+					RequestedFolderPaths.Add(Text);
+				}
+			}
+		}
+	};
+	AddFolderField(TEXT("folder_path"));
+	AddFolderField(TEXT("redirector_folder"));
+	AddFolderArrayField(TEXT("folder_paths"));
+	AddFolderArrayField(TEXT("redirector_folders"));
+
+	if (RequestedAssetPaths.IsEmpty() && RequestedFolderPaths.IsEmpty())
+	{
+		OutError = TEXT("missing_asset_path_or_folder_path");
+		return false;
+	}
+
+	bool bRecursive = true;
+	JsonTryGetBool(Ctx.Params, TEXT("recursive"), bRecursive);
+
+	TMap<FString, UObjectRedirector*> RedirectorByPackage;
+	TArray<TSharedPtr<FJsonValue>> Skipped;
+	auto AddSkipped = [&Skipped](const FString& Path, const FString& Reason)
+	{
+		TSharedPtr<FJsonObject> Entry = MakeShared<FJsonObject>();
+		Entry->SetStringField(TEXT("path"), Path);
+		Entry->SetStringField(TEXT("reason"), Reason);
+		Skipped.Add(MakeShared<FJsonValueObject>(Entry));
+	};
+
+	for (const FString& RequestedPath : RequestedAssetPaths)
+	{
+		const FString PackageName = UeAgentAssetOps::NormalizeAssetPath(RequestedPath);
+		UObject* LoadedObject = UeAgentAssetOps::LoadAssetObject(PackageName);
+		UObjectRedirector* Redirector = Cast<UObjectRedirector>(LoadedObject);
+		if (!Redirector)
+		{
+			AddSkipped(PackageName, LoadedObject ? TEXT("not_redirector") : TEXT("asset_not_found"));
+			continue;
+		}
+		RedirectorByPackage.Add(PackageName, Redirector);
+	}
+
+	if (!RequestedFolderPaths.IsEmpty())
+	{
+		FAssetRegistryModule& AssetRegistryModule = FModuleManager::LoadModuleChecked<FAssetRegistryModule>(TEXT("AssetRegistry"));
+		IAssetRegistry& AssetRegistry = AssetRegistryModule.Get();
+		for (FString FolderPath : RequestedFolderPaths)
+		{
+			FolderPath.TrimStartAndEndInline();
+			FolderPath.RemoveFromEnd(TEXT("/"));
+			if (FolderPath.IsEmpty())
+			{
+				continue;
+			}
+
+			FARFilter Filter;
+			Filter.PackagePaths.Add(*FolderPath);
+			Filter.ClassPaths.Add(UObjectRedirector::StaticClass()->GetClassPathName());
+			Filter.bRecursivePaths = bRecursive;
+
+			TArray<FAssetData> RedirectorAssets;
+			AssetRegistry.GetAssets(Filter, RedirectorAssets);
+			for (const FAssetData& RedirectorAsset : RedirectorAssets)
+			{
+				UObjectRedirector* Redirector = Cast<UObjectRedirector>(RedirectorAsset.GetAsset());
+				if (Redirector)
+				{
+					RedirectorByPackage.Add(RedirectorAsset.PackageName.ToString(), Redirector);
+				}
+			}
+		}
+	}
+
+	TArray<UObjectRedirector*> Redirectors;
+	RedirectorByPackage.GenerateValueArray(Redirectors);
+
+	TArray<TSharedPtr<FJsonValue>> RedirectorReports;
+	for (const TPair<FString, UObjectRedirector*>& Pair : RedirectorByPackage)
+	{
+		TSharedPtr<FJsonObject> Entry = MakeShared<FJsonObject>();
+		Entry->SetStringField(TEXT("asset_path"), Pair.Key);
+		Entry->SetStringField(TEXT("object_path"), Pair.Value ? Pair.Value->GetPathName() : FString());
+		if (Pair.Value && Pair.Value->DestinationObject)
+		{
+			Entry->SetStringField(TEXT("destination_object_path"), Pair.Value->DestinationObject->GetPathName());
+			Entry->SetStringField(TEXT("destination_asset_path"), UeAgentAssetOps::NormalizeAssetPath(Pair.Value->DestinationObject->GetOutermost()->GetName()));
+		}
+		RedirectorReports.Add(MakeShared<FJsonValueObject>(Entry));
+	}
+
+	bool bDryRun = false;
+	JsonTryGetBool(Ctx.Params, TEXT("dry_run"), bDryRun);
+	FAssetRegistryModule& AssetRegistryModule = FModuleManager::LoadModuleChecked<FAssetRegistryModule>(TEXT("AssetRegistry"));
+	IAssetRegistry& AssetRegistry = AssetRegistryModule.Get();
+
+	TArray<TSharedPtr<FJsonValue>> Blocked;
+	TArray<UObject*> RedirectorsToDelete;
+	for (UObjectRedirector* Redirector : Redirectors)
+	{
+		if (!Redirector)
+		{
+			continue;
+		}
+
+		const FString PackageName = UeAgentAssetOps::NormalizeAssetPath(Redirector->GetOutermost()->GetName());
+		TArray<FName> ReferencerNames;
+		AssetRegistry.GetReferencers(*PackageName, ReferencerNames);
+		if (!ReferencerNames.IsEmpty())
+		{
+			TSharedPtr<FJsonObject> Entry = MakeShared<FJsonObject>();
+			Entry->SetStringField(TEXT("asset_path"), PackageName);
+			TArray<TSharedPtr<FJsonValue>> ReferencerValues;
+			for (const FName& ReferencerName : ReferencerNames)
+			{
+				ReferencerValues.Add(MakeShared<FJsonValueString>(ReferencerName.ToString()));
+			}
+			Entry->SetArrayField(TEXT("referencers"), ReferencerValues);
+			Entry->SetNumberField(TEXT("referencer_count"), ReferencerNames.Num());
+			Entry->SetStringField(TEXT("reason"), TEXT("redirector_still_referenced"));
+			Blocked.Add(MakeShared<FJsonValueObject>(Entry));
+			continue;
+		}
+
+		RedirectorsToDelete.Add(Redirector);
+	}
+
+	bool bFailOnBlocked = true;
+	JsonTryGetBool(Ctx.Params, TEXT("fail_on_blocked"), bFailOnBlocked);
+	if (!Blocked.IsEmpty() && bFailOnBlocked)
+	{
+		OutData->SetNumberField(TEXT("redirector_count"), Redirectors.Num());
+		OutData->SetNumberField(TEXT("deletable_redirector_count"), RedirectorsToDelete.Num());
+		OutData->SetNumberField(TEXT("blocked_redirector_count"), Blocked.Num());
+		OutData->SetBoolField(TEXT("dry_run"), bDryRun);
+		OutData->SetArrayField(TEXT("redirectors"), RedirectorReports);
+		OutData->SetArrayField(TEXT("blocked"), Blocked);
+		OutData->SetArrayField(TEXT("skipped"), Skipped);
+		OutError = TEXT("redirector_still_referenced");
+		return false;
+	}
+
+	int32 DeletedCount = 0;
+	if (!bDryRun && !RedirectorsToDelete.IsEmpty())
+	{
+		TGuardValue<bool> UnattendedScriptGuard(GIsRunningUnattendedScript, true);
+		DeletedCount = ObjectTools::DeleteObjectsUnchecked(RedirectorsToDelete);
+	}
+
+	int32 RemainingPackageCount = 0;
+	TArray<TSharedPtr<FJsonValue>> RemainingPackages;
+	for (const TPair<FString, UObjectRedirector*>& Pair : RedirectorByPackage)
+	{
+		FString ExistingPackageFilename;
+		if (FPackageName::DoesPackageExist(Pair.Key, &ExistingPackageFilename))
+		{
+			++RemainingPackageCount;
+			TSharedPtr<FJsonObject> Entry = MakeShared<FJsonObject>();
+			Entry->SetStringField(TEXT("asset_path"), Pair.Key);
+			Entry->SetStringField(TEXT("filename"), ExistingPackageFilename);
+			RemainingPackages.Add(MakeShared<FJsonValueObject>(Entry));
+		}
+	}
+
+	OutData->SetNumberField(TEXT("redirector_count"), Redirectors.Num());
+	OutData->SetNumberField(TEXT("deletable_redirector_count"), RedirectorsToDelete.Num());
+	OutData->SetNumberField(TEXT("blocked_redirector_count"), Blocked.Num());
+	OutData->SetNumberField(TEXT("deleted_redirector_count"), bDryRun ? 0 : DeletedCount);
+	OutData->SetNumberField(TEXT("remaining_package_count"), RemainingPackageCount);
+	OutData->SetBoolField(TEXT("dry_run"), bDryRun);
+	OutData->SetBoolField(TEXT("recursive"), bRecursive);
+	OutData->SetArrayField(TEXT("redirectors"), RedirectorReports);
+	OutData->SetArrayField(TEXT("blocked"), Blocked);
+	OutData->SetArrayField(TEXT("skipped"), Skipped);
+	OutData->SetArrayField(TEXT("remaining_packages"), RemainingPackages);
+	return true;
+}
+
+bool FUeAgentHttpServer::CmdAssetReferenceGraph(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+{
+	using namespace UeAgentAssetOps;
+	using UE::AssetRegistry::EDependencyCategory;
+
+	FString AssetPathInput;
+	if (!JsonTryGetString(Ctx.Params, TEXT("asset_path"), AssetPathInput) || AssetPathInput.TrimStartAndEnd().IsEmpty())
+	{
+		if (!JsonTryGetString(Ctx.Params, TEXT("package_name"), AssetPathInput) || AssetPathInput.TrimStartAndEnd().IsEmpty())
+		{
+			JsonTryGetString(Ctx.Params, TEXT("object_path"), AssetPathInput);
+		}
+	}
+	AssetPathInput.TrimStartAndEndInline();
+	if (AssetPathInput.IsEmpty())
+	{
+		OutError = TEXT("missing_asset_path");
+		return false;
+	}
+
+	const FString PackageName = NormalizeReferenceInputToPackageName(AssetPathInput);
+	if (PackageName.IsEmpty())
+	{
+		OutError = TEXT("invalid_asset_path");
+		return false;
+	}
+
+	FString Direction = TEXT("both");
+	JsonTryGetString(Ctx.Params, TEXT("direction"), Direction);
+	Direction.TrimStartAndEndInline();
+	Direction = Direction.ToLower();
+	if (Direction.IsEmpty())
+	{
+		Direction = TEXT("both");
+	}
+	const bool bQueryDependencies = Direction == TEXT("both") || Direction == TEXT("dependencies") || Direction == TEXT("dependency") || Direction == TEXT("downstream");
+	const bool bQueryReferencers = Direction == TEXT("both") || Direction == TEXT("referencers") || Direction == TEXT("referencer") || Direction == TEXT("upstream");
+	if (!bQueryDependencies && !bQueryReferencers)
+	{
+		OutError = TEXT("invalid_direction");
+		return false;
+	}
+
+	bool bRecursive = false;
+	JsonTryGetBool(Ctx.Params, TEXT("recursive"), bRecursive);
+
+	double MaxDepthNumber = bRecursive ? 3.0 : 1.0;
+	JsonTryGetNumber(Ctx.Params, TEXT("max_depth"), MaxDepthNumber);
+	const int32 MaxDepth = FMath::Clamp(static_cast<int32>(MaxDepthNumber), 1, 16);
+
+	double MaxNodesNumber = 1024.0;
+	JsonTryGetNumber(Ctx.Params, TEXT("max_nodes"), MaxNodesNumber);
+	const int32 MaxNodes = FMath::Clamp(static_cast<int32>(MaxNodesNumber), 1, 20000);
+
+	bool bIncludeHard = true;
+	bool bIncludeSoft = true;
+	bool bIncludeManage = true;
+	bool bIncludeSearchableNames = true;
+	JsonTryGetBool(Ctx.Params, TEXT("include_hard"), bIncludeHard);
+	JsonTryGetBool(Ctx.Params, TEXT("include_soft"), bIncludeSoft);
+	JsonTryGetBool(Ctx.Params, TEXT("include_manage"), bIncludeManage);
+	JsonTryGetBool(Ctx.Params, TEXT("include_searchable_names"), bIncludeSearchableNames);
+
+	bool bForceScan = false;
+	JsonTryGetBool(Ctx.Params, TEXT("force_scan"), bForceScan);
+
+	bool bAllowMissing = false;
+	JsonTryGetBool(Ctx.Params, TEXT("allow_missing"), bAllowMissing);
+
+	bool bIncludePathStringHits = false;
+	JsonTryGetBool(Ctx.Params, TEXT("include_path_string_hits"), bIncludePathStringHits);
+
+	FAssetRegistryModule& AssetRegistryModule = FModuleManager::LoadModuleChecked<FAssetRegistryModule>(TEXT("AssetRegistry"));
+	IAssetRegistry& AssetRegistry = AssetRegistryModule.Get();
+	if (bForceScan)
+	{
+		AssetRegistry.SearchAllAssets(true);
+		FString PackageFilename;
+		if (FPackageName::TryConvertLongPackageNameToFilename(PackageName, PackageFilename, FPackageName::GetAssetPackageExtension()) && FPaths::FileExists(PackageFilename))
+		{
+			AssetRegistry.ScanFilesSynchronous({ PackageFilename }, true);
+		}
+		else if (FPackageName::TryConvertLongPackageNameToFilename(PackageName, PackageFilename, FPackageName::GetMapPackageExtension()) && FPaths::FileExists(PackageFilename))
+		{
+			AssetRegistry.ScanFilesSynchronous({ PackageFilename }, true);
+		}
+		AssetRegistry.WaitForCompletion();
+	}
+
+	const FAssetIdentifier RootIdentifier{ FName(*PackageName) };
+	TArray<FAssetData> RootAssetData;
+	AssetRegistry.GetAssetsByPackageName(FName(*PackageName), RootAssetData, false);
+	if (RootAssetData.Num() == 0 && !bAllowMissing)
+	{
+		OutError = TEXT("asset_not_found");
+		return false;
+	}
+
+	EDependencyCategory CategoryMask = EDependencyCategory::None;
+	if (bIncludeHard || bIncludeSoft)
+	{
+		CategoryMask |= EDependencyCategory::Package;
+	}
+	if (bIncludeManage)
+	{
+		CategoryMask |= EDependencyCategory::Manage;
+	}
+	if (bIncludeSearchableNames)
+	{
+		CategoryMask |= EDependencyCategory::SearchableName;
+	}
+
+	struct FQueuedReferenceNode
+	{
+		FAssetIdentifier Identifier;
+		int32 Depth = 0;
+		FString QueryDirection;
+	};
+
+	TMap<FString, TSharedPtr<FJsonObject>> NodesById;
+	TArray<TSharedPtr<FJsonValue>> EdgesJson;
+	TArray<TSharedPtr<FJsonValue>> DirectDependenciesJson;
+	TArray<TSharedPtr<FJsonValue>> DirectReferencersJson;
+	TSet<FString> VisitedDependencyNodes;
+	TSet<FString> VisitedReferencerNodes;
+	TSet<FString> EdgeKeys;
+	TArray<FQueuedReferenceNode> Queue;
+	bool bTruncated = false;
+
+	AddOrUpdateGraphNode(AssetRegistry, NodesById, RootIdentifier, 0, TEXT("root"));
+	if (bQueryDependencies)
+	{
+		VisitedDependencyNodes.Add(RootIdentifier.ToString());
+		Queue.Add({ RootIdentifier, 0, TEXT("dependencies") });
+	}
+	if (bQueryReferencers)
+	{
+		VisitedReferencerNodes.Add(RootIdentifier.ToString());
+		Queue.Add({ RootIdentifier, 0, TEXT("referencers") });
+	}
+
+	for (int32 QueueIndex = 0; QueueIndex < Queue.Num(); ++QueueIndex)
+	{
+		if (NodesById.Num() >= MaxNodes)
+		{
+			bTruncated = true;
+			break;
+		}
+
+		const FQueuedReferenceNode Current = Queue[QueueIndex];
+		if (Current.Depth >= MaxDepth)
+		{
+			continue;
+		}
+
+		TArray<FAssetDependency> FoundEdges;
+		const bool bIsDependencyQuery = Current.QueryDirection == TEXT("dependencies");
+		const bool bQueryOk = bIsDependencyQuery
+			? AssetRegistry.GetDependencies(Current.Identifier, FoundEdges, CategoryMask)
+			: AssetRegistry.GetReferencers(Current.Identifier, FoundEdges, CategoryMask);
+		if (!bQueryOk)
+		{
+			continue;
+		}
+
+		for (const FAssetDependency& FoundEdge : FoundEdges)
+		{
+			if (!ShouldIncludeDependencyEdge(FoundEdge.Category, FoundEdge.Properties, bIncludeHard, bIncludeSoft, bIncludeManage, bIncludeSearchableNames))
+			{
+				continue;
+			}
+
+			const FAssetIdentifier SourceIdentifier = bIsDependencyQuery ? Current.Identifier : FoundEdge.AssetId;
+			const FAssetIdentifier TargetIdentifier = bIsDependencyQuery ? FoundEdge.AssetId : Current.Identifier;
+			const FAssetIdentifier OtherIdentifier = bIsDependencyQuery ? TargetIdentifier : SourceIdentifier;
+			const int32 EdgeDepth = Current.Depth + 1;
+
+			AddOrUpdateGraphNode(AssetRegistry, NodesById, SourceIdentifier, bIsDependencyQuery ? Current.Depth : EdgeDepth, bIsDependencyQuery ? TEXT("source") : TEXT("referencer"));
+			AddOrUpdateGraphNode(AssetRegistry, NodesById, TargetIdentifier, bIsDependencyQuery ? EdgeDepth : Current.Depth, bIsDependencyQuery ? TEXT("dependency") : TEXT("target"));
+
+			const FString EdgeKey = SourceIdentifier.ToString()
+				+ TEXT("->") + TargetIdentifier.ToString()
+				+ TEXT("|") + LexToString(static_cast<int64>(FoundEdge.Category))
+				+ TEXT("|") + LexToString(static_cast<int64>(FoundEdge.Properties));
+			if (!EdgeKeys.Contains(EdgeKey))
+			{
+				EdgeKeys.Add(EdgeKey);
+				TSharedPtr<FJsonObject> EdgeJson = MakeAssetRegistryEdgeJson(SourceIdentifier, TargetIdentifier, Current.QueryDirection, EdgeDepth, FoundEdge.Category, FoundEdge.Properties);
+				EdgesJson.Add(MakeShared<FJsonValueObject>(EdgeJson));
+				if (Current.Identifier == RootIdentifier && bIsDependencyQuery)
+				{
+					DirectDependenciesJson.Add(MakeShared<FJsonValueObject>(EdgeJson));
+				}
+				if (Current.Identifier == RootIdentifier && !bIsDependencyQuery)
+				{
+					DirectReferencersJson.Add(MakeShared<FJsonValueObject>(EdgeJson));
+				}
+			}
+
+			if (bRecursive && EdgeDepth < MaxDepth && NodesById.Num() < MaxNodes)
+			{
+				TSet<FString>& VisitedSet = bIsDependencyQuery ? VisitedDependencyNodes : VisitedReferencerNodes;
+				const FString OtherKey = OtherIdentifier.ToString();
+				if (!VisitedSet.Contains(OtherKey))
+				{
+					VisitedSet.Add(OtherKey);
+					Queue.Add({ OtherIdentifier, EdgeDepth, Current.QueryDirection });
+				}
+			}
+			else if (NodesById.Num() >= MaxNodes)
+			{
+				bTruncated = true;
+				break;
+			}
+		}
+	}
+
+	OutData = MakeShared<FJsonObject>();
+	OutData->SetStringField(TEXT("asset_path"), PackageName);
+	OutData->SetStringField(TEXT("package_name"), PackageName);
+	OutData->SetStringField(TEXT("input_asset_path"), AssetPathInput);
+	OutData->SetStringField(TEXT("direction"), Direction);
+	OutData->SetBoolField(TEXT("recursive"), bRecursive);
+	OutData->SetNumberField(TEXT("max_depth"), MaxDepth);
+	OutData->SetNumberField(TEXT("max_nodes"), MaxNodes);
+	OutData->SetBoolField(TEXT("asset_found"), RootAssetData.Num() > 0);
+	OutData->SetNumberField(TEXT("root_asset_data_count"), RootAssetData.Num());
+	OutData->SetBoolField(TEXT("truncated"), bTruncated);
+	OutData->SetNumberField(TEXT("dependency_count"), DirectDependenciesJson.Num());
+	OutData->SetNumberField(TEXT("referencer_count"), DirectReferencersJson.Num());
+	OutData->SetNumberField(TEXT("edge_count"), EdgesJson.Num());
+	OutData->SetNumberField(TEXT("node_count"), NodesById.Num());
+	OutData->SetArrayField(TEXT("dependencies"), DirectDependenciesJson);
+	OutData->SetArrayField(TEXT("referencers"), DirectReferencersJson);
+	OutData->SetArrayField(TEXT("edges"), EdgesJson);
+	OutData->SetArrayField(TEXT("nodes"), SortedNodeValues(NodesById));
+
+	TSharedPtr<FJsonObject> OptionsJson = MakeShared<FJsonObject>();
+	OptionsJson->SetBoolField(TEXT("include_hard"), bIncludeHard);
+	OptionsJson->SetBoolField(TEXT("include_soft"), bIncludeSoft);
+	OptionsJson->SetBoolField(TEXT("include_manage"), bIncludeManage);
+	OptionsJson->SetBoolField(TEXT("include_searchable_names"), bIncludeSearchableNames);
+	OptionsJson->SetBoolField(TEXT("force_scan"), bForceScan);
+	OptionsJson->SetBoolField(TEXT("allow_missing"), bAllowMissing);
+	OptionsJson->SetBoolField(TEXT("include_path_string_hits"), bIncludePathStringHits);
+	OutData->SetObjectField(TEXT("options"), OptionsJson);
+
+	if (bIncludePathStringHits)
+	{
+		double MaxHitsNumber = 200.0;
+		JsonTryGetNumber(Ctx.Params, TEXT("max_path_string_hits"), MaxHitsNumber);
+		const int32 MaxHits = FMath::Clamp(static_cast<int32>(MaxHitsNumber), 1, 5000);
+
+		TArray<FString> PackageFiles;
+		IFileManager::Get().FindFilesRecursive(PackageFiles, *FPaths::ProjectContentDir(), TEXT("*.uasset"), true, false);
+		IFileManager::Get().FindFilesRecursive(PackageFiles, *FPaths::ProjectContentDir(), TEXT("*.umap"), true, false);
+		PackageFiles.Sort();
+
+		TArray<TSharedPtr<FJsonValue>> HitsJson;
+		const FTCHARToUTF8 SearchBytes(*PackageName);
+		const TArrayView<const uint8> SearchView(reinterpret_cast<const uint8*>(SearchBytes.Get()), SearchBytes.Length());
+		for (const FString& Filename : PackageFiles)
+		{
+			if (HitsJson.Num() >= MaxHits)
+			{
+				bTruncated = true;
+				break;
+			}
+
+			TArray<uint8> FileBytes;
+			if (!FFileHelper::LoadFileToArray(FileBytes, *Filename) || FileBytes.Num() < SearchView.Num())
+			{
+				continue;
+			}
+
+			bool bFound = false;
+			for (int32 Index = 0; Index <= FileBytes.Num() - SearchView.Num(); ++Index)
+			{
+				if (FMemory::Memcmp(FileBytes.GetData() + Index, SearchView.GetData(), SearchView.Num()) == 0)
+				{
+					bFound = true;
+					break;
+				}
+			}
+			if (!bFound)
+			{
+				continue;
+			}
+
+			FString HitPackageName;
+			FPackageName::TryConvertFilenameToLongPackageName(Filename, HitPackageName);
+			TSharedPtr<FJsonObject> Hit = MakeShared<FJsonObject>();
+			Hit->SetStringField(TEXT("package_name"), HitPackageName);
+			Hit->SetStringField(TEXT("filename"), Filename);
+			Hit->SetBoolField(TEXT("self_hit"), HitPackageName == PackageName);
+			HitsJson.Add(MakeShared<FJsonValueObject>(Hit));
+		}
+
+		OutData->SetArrayField(TEXT("path_string_hits"), HitsJson);
+		OutData->SetNumberField(TEXT("path_string_hit_count"), HitsJson.Num());
+		OutData->SetBoolField(TEXT("truncated"), bTruncated);
+	}
+
 	return true;
 }
 
@@ -1789,15 +2757,27 @@ bool FUeAgentHttpServer::CmdAssetImportFbxSkeletalMesh(const FUeAgentRequestCont
 
 	FAssetToolsModule& AssetToolsModule = FModuleManager::LoadModuleChecked<FAssetToolsModule>(TEXT("AssetTools"));
 	TArray<UObject*> ImportedObjects = AssetToolsModule.Get().ImportAssetsAutomated(ImportData);
+	TArray<UObject*> ImportedObjectsUnique;
+	UeAgentAssetOps::GatherImportedObjects(ImportedObjects, ImportedObjectsUnique);
 
 	if (bSaveAfterImport && ImportedObjects.Num() > 0)
 	{
 		TArray<UPackage*> PackagesToSave;
-		for (UObject* ImportedObject : ImportedObjects)
+		for (UObject* ImportedObject : ImportedObjectsUnique)
 		{
 			if (ImportedObject && ImportedObject->GetOutermost())
 			{
 				PackagesToSave.AddUnique(ImportedObject->GetOutermost());
+			}
+			if (USkeletalMesh* ImportedMesh = Cast<USkeletalMesh>(ImportedObject))
+			{
+				if (USkeleton* ImportedSkeleton = ImportedMesh->GetSkeleton())
+				{
+					if (ImportedSkeleton->GetOutermost())
+					{
+						PackagesToSave.AddUnique(ImportedSkeleton->GetOutermost());
+					}
+				}
 			}
 		}
 		if (PackagesToSave.Num() > 0 && !UEditorLoadingAndSavingUtils::SavePackages(PackagesToSave, true))
@@ -1824,8 +2804,6 @@ bool FUeAgentHttpServer::CmdAssetImportFbxSkeletalMesh(const FUeAgentRequestCont
 
 	TArray<TSharedPtr<FJsonValue>> ValidationIssues;
 	TArray<TSharedPtr<FJsonValue>> ImportedSkinWeightProfilesJson;
-	TArray<UObject*> ImportedObjectsUnique;
-	UeAgentAssetOps::GatherImportedObjects(ImportedObjects, ImportedObjectsUnique);
 	USkeletalMesh* ImportedSkeletalMesh = nullptr;
 	for (UObject* ImportedObject : ImportedObjectsUnique)
 	{
@@ -1863,6 +2841,19 @@ bool FUeAgentHttpServer::CmdAssetImportFbxSkeletalMesh(const FUeAgentRequestCont
 		OutData->SetNumberField(TEXT("material_slot_count"), ImportedSkeletalMesh->GetMaterials().Num());
 		OutData->SetNumberField(TEXT("morph_target_count"), ImportedSkeletalMesh->GetMorphTargets().Num());
 		OutData->SetNumberField(TEXT("skin_weight_profile_count"), ImportedSkeletalMesh->GetNumSkinWeightProfiles());
+		if (USkeleton* ImportedSkeleton = ImportedSkeletalMesh->GetSkeleton())
+		{
+			OutData->SetStringField(TEXT("skeleton_asset_path"), ImportedSkeleton->GetOutermost() ? ImportedSkeleton->GetOutermost()->GetName() : FString());
+		}
+		else
+		{
+			TSharedPtr<FJsonObject> Issue = MakeShared<FJsonObject>();
+			Issue->SetStringField(TEXT("severity"), TEXT("error"));
+			Issue->SetStringField(TEXT("code"), TEXT("imported_skeletal_mesh_missing_skeleton"));
+			Issue->SetStringField(TEXT("field"), TEXT("skeleton"));
+			Issue->SetStringField(TEXT("message"), TEXT("Imported skeletal mesh has no USkeleton reference; animation authoring assets cannot use it."));
+			ValidationIssues.Add(MakeShared<FJsonValueObject>(Issue));
+		}
 		int32 SectionCount = 0;
 		if (const FSkeletalMeshModel* ImportedModel = ImportedSkeletalMesh->GetImportedModel())
 		{
