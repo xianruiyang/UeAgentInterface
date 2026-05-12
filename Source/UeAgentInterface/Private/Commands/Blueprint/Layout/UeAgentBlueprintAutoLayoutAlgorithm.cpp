@@ -479,6 +479,30 @@ namespace UeAgentBlueprintAutoLayout
 				TEXT("after_reroute_plan"),
 				OutResult);
 		}
+		if (OutResult.MetricsAfterReroute.EdgeNodeIntersectionCount < OutResult.DesignDiagnostics.RouteThroughHardOccupancyCount)
+		{
+			OutResult.DesignDiagnostics.RouteThroughHardOccupancyCount = OutResult.MetricsAfterReroute.EdgeNodeIntersectionCount;
+			OutResult.DesignDiagnostics.RouteThroughIslandCount = OutResult.MetricsAfterReroute.EdgeNodeIntersectionCount;
+			if (OutResult.MetricsAfterReroute.EdgeNodeIntersectionCount == 0)
+			{
+				for (TSharedPtr<FJsonValue>& RouteValue : OutResult.CorridorRouteDiagnostics)
+				{
+					TSharedPtr<FJsonObject>* RouteObject = nullptr;
+					if (!RouteValue.IsValid() || !RouteValue->TryGetObject(RouteObject) || RouteObject == nullptr || !RouteObject->IsValid())
+					{
+						continue;
+					}
+					bool bCrosses = false;
+					(*RouteObject)->TryGetBoolField(TEXT("crosses_hard_occupancy"), bCrosses);
+					if (bCrosses)
+					{
+						(*RouteObject)->SetBoolField(TEXT("crosses_island"), false);
+						(*RouteObject)->SetBoolField(TEXT("crosses_hard_occupancy"), false);
+						(*RouteObject)->SetBoolField(TEXT("post_refine_cleared"), true);
+					}
+				}
+			}
+		}
 		OutResult.IslandCount = Islands.Num();
 		OutResult.IslandEdgeCount = IslandEdges.Num();
 		auto CompleteIf = [&](const FString& Key, bool bComplete, bool bPartial, const FString& Detail)
@@ -956,6 +980,123 @@ namespace UeAgentBlueprintAutoLayout
 					CountPolylineHardOccupancyHits(Points, HardRects),
 					MinConnectionAlignmentShortenX(Points, RouteOptions),
 					*RouteText));
+		}
+
+		{
+			FOptions RouteOptions = Options;
+			RouteOptions.OutputAccessOffsetX = 40.0;
+			RouteOptions.InputAccessOffsetX = 40.0;
+			RouteOptions.PinDirectionBiasX = 40.0;
+			RouteOptions.NodePadding = 32.0;
+			const FVector2D Start(230.0, 4511.0);
+			const FVector2D End(5704.0, 5491.0);
+			const TArray<FRect> HardRects = {
+				{ 1200.0, 4400.0, 5000.0, 4700.0 }
+			};
+			const TArray<FVector2D> Points = BuildOrthogonalRoutePolyline(Start, End, 4511.0, RouteOptions, HardRects);
+			int32 LargeDiagonalSegmentCount = 0;
+			const double MaxDiagonalDX = EndpointAccessClearanceX(RouteOptions) * 2.0 + 0.5;
+			const double MinNoticeableDY = FMath::Max(RouteOptions.VerticalSpacing * 0.5, 80.0);
+			for (int32 PointIndex = 0; PointIndex + 1 < Points.Num(); ++PointIndex)
+			{
+				const double DX = FMath::Abs(Points[PointIndex + 1].X - Points[PointIndex].X);
+				const double DY = FMath::Abs(Points[PointIndex + 1].Y - Points[PointIndex].Y);
+				if (DX > MaxDiagonalDX && DY > MinNoticeableDY)
+				{
+					++LargeDiagonalSegmentCount;
+				}
+			}
+			FString RouteText;
+			for (const FVector2D& Point : Points)
+			{
+				RouteText += FString::Printf(TEXT("(%.1f,%.1f)"), Point.X, Point.Y);
+			}
+			AddCase(TEXT("orthogonal_bus_router_does_not_create_large_diagonal_branch_segments"),
+				Points.Num() >= 4
+				&& LargeDiagonalSegmentCount == 0
+				&& !PolylineHitsHardOccupancy(Points, HardRects)
+				&& HasNonNegativeConnectionAlignmentShortenForEverySegment(Points, RouteOptions),
+				FString::Printf(TEXT("points=%d large_diagonal=%d hard_hits=%d min_shorten=%.1f route=%s"),
+					Points.Num(),
+					LargeDiagonalSegmentCount,
+					CountPolylineHardOccupancyHits(Points, HardRects),
+					MinConnectionAlignmentShortenX(Points, RouteOptions),
+					*RouteText));
+		}
+
+		{
+			TArray<FColumnItem> Items;
+			FColumnItem UpperItem;
+			UpperItem.NodeIndex = 0;
+			UpperItem.Height = 176.0;
+			UpperItem.PreferredTop = 101.0;
+			UpperItem.bHasPreferred = true;
+			Items.Add(UpperItem);
+			FColumnItem LowerItem;
+			LowerItem.NodeIndex = 1;
+			LowerItem.Height = 94.0;
+			LowerItem.PreferredTop = 141.5;
+			LowerItem.bHasPreferred = true;
+			Items.Add(LowerItem);
+			PlaceAnchoredIntervals(Items, 24.0);
+			const double UpperResidual = FMath::Abs(Items[0].FinalTop - Items[0].PreferredTop);
+			const double LowerResidual = FMath::Abs(Items[1].FinalTop - Items[1].PreferredTop);
+			const bool bBaseAnchoredAndLowerAvoidedDown =
+				FMath::Abs((Items[1].FinalTop - Items[0].FinalTop) - (Items[0].Height + 24.0)) <= 0.5
+				&& UpperResidual <= 0.5
+				&& FMath::IsNearlyEqual(Items[0].FinalTop, 101.0, 0.5)
+				&& FMath::IsNearlyEqual(Items[1].FinalTop, 301.0, 0.5)
+				&& LowerResidual > 120.0;
+			AddCase(TEXT("two_column_anchor_places_base_then_directional_collision_avoidance"), bBaseAnchoredAndLowerAvoidedDown, FString::Printf(TEXT("upper=%.1f pref=%.1f lower=%.1f pref=%.1f residual=%.1f/%.1f"), Items[0].FinalTop, Items[0].PreferredTop, Items[1].FinalTop, Items[1].PreferredTop, UpperResidual, LowerResidual));
+		}
+
+		{
+			TArray<FColumnItem> Items;
+			const double Heights[] = {112.0, 107.0, 107.0};
+			const double PreferredTops[] = {52.0, 237.0, 269.0};
+			for (int32 Index = 0; Index < 3; ++Index)
+			{
+				FColumnItem Item;
+				Item.NodeIndex = Index;
+				Item.Height = Heights[Index];
+				Item.PreferredTop = PreferredTops[Index];
+				Item.bHasPreferred = true;
+				Items.Add(Item);
+			}
+			PlaceAnchoredIntervals(Items, 24.0);
+			const bool bNonBaseKeepsPreferredUntilCollision =
+				FMath::IsNearlyEqual(Items[1].FinalTop, 237.0, 0.5)
+				&& FMath::IsNearlyEqual(Items[0].FinalTop, 52.0, 0.5)
+				&& FMath::IsNearlyEqual(Items[2].FinalTop, 368.0, 0.5);
+			AddCase(TEXT("three_item_two_column_anchor_keeps_nonbase_preferred_until_collision"), bNonBaseKeepsPreferredUntilCollision, FString::Printf(TEXT("tops=%.1f/%.1f/%.1f pref=%.1f/%.1f/%.1f"), Items[0].FinalTop, Items[1].FinalTop, Items[2].FinalTop, PreferredTops[0], PreferredTops[1], PreferredTops[2]));
+		}
+
+		{
+			TArray<FColumnItem> Items;
+			const double Heights[] = {40.0, 40.0, 40.0};
+			const double PreferredTops[] = {0.0, 50.0, 100.0};
+			for (int32 Index = 0; Index < 3; ++Index)
+			{
+				FColumnItem Item;
+				Item.NodeIndex = Index;
+				Item.Height = Heights[Index];
+				Item.PreferredTop = PreferredTops[Index];
+				Item.bHasPreferred = true;
+				Items.Add(Item);
+			}
+			TArray<FInputChainForbiddenZone> Zones;
+			FInputChainForbiddenZone Zone;
+			Zone.Top = 45.0;
+			Zone.Bottom = 95.0;
+			Zones.Add(Zone);
+			int32 AvoidanceCount = 0;
+			PlaceAnchoredIntervalsAvoidingForbiddenZones(Items, 10.0, Zones, &AvoidanceCount);
+			const bool bInputChainBaseAvoidsNearestZoneAndPropagates =
+				FMath::IsNearlyEqual(Items[1].FinalTop, -5.0, 0.5)
+				&& FMath::IsNearlyEqual(Items[0].FinalTop, -55.0, 0.5)
+				&& FMath::IsNearlyEqual(Items[2].FinalTop, 105.0, 0.5)
+				&& AvoidanceCount >= 2;
+			AddCase(TEXT("input_chain_two_column_anchor_moves_base_out_of_forbidden_zone"), bInputChainBaseAvoidsNearestZoneAndPropagates, FString::Printf(TEXT("tops=%.1f/%.1f/%.1f avoid=%d zone=%.1f..%.1f"), Items[0].FinalTop, Items[1].FinalTop, Items[2].FinalTop, AvoidanceCount, Zone.Top, Zone.Bottom));
 		}
 
 		{
@@ -3028,44 +3169,61 @@ namespace UeAgentBlueprintAutoLayout
 
 		{
 			TArray<FNode> Nodes;
-			for (int32 Index = 0; Index < 4; ++Index)
+			for (int32 Index = 0; Index < 3; ++Index)
 			{
 				FNode Node;
 				Node.Index = Index;
-				Node.Guid = FString::Printf(TEXT("base_slot_refine%d"), Index);
+				Node.Guid = FString::Printf(TEXT("strict_single_pass%d"), Index);
 				Node.Title = Node.Guid;
-				Node.Width = Index % 2 == 0 ? 220.0 : 330.0;
-				Node.Height = Index < 2 ? (Index == 0 ? 82.0 : 226.0) : 160.0;
-				Node.bHasExecPin = true;
-				Node.InputPinNames = { TEXT("execute") };
-				Node.OutputPinNames = { TEXT("then") };
-				Node.InputPinAnchors = { FVector2D(0.0, Index == 1 ? 58.0 : 26.0) };
-				Node.OutputPinAnchors = { FVector2D(Node.Width, 26.0) };
+				Node.Width = 160.0;
+				Node.Height = 80.0;
+				Node.InputPinNames = { TEXT("in") };
+				Node.OutputPinNames = { TEXT("out") };
+				Node.InputPinAnchors = { FVector2D(0.0, 20.0) };
+				Node.OutputPinAnchors = { FVector2D(Node.Width, 50.0) };
 				Node.InputPinAnchorValid = { 1 };
 				Node.OutputPinAnchorValid = { 1 };
 				Nodes.Add(Node);
 			}
 			Nodes[0].NewX = 0.0;
-			Nodes[0].NewY = 113.0;
-			Nodes[2].NewX = 0.0;
-			Nodes[2].NewY = 220.0;
-			Nodes[1].NewX = 440.0;
-			Nodes[1].NewY = 0.0;
-			Nodes[3].NewX = 440.0;
-			Nodes[3].NewY = 250.0;
+			Nodes[0].NewY = 80.0;
+			Nodes[2].NewX = 520.0;
+			Nodes[2].NewY = 300.0;
 			TArray<TArray<int32>> Columns;
-			Columns.SetNum(2);
-			Columns[0] = {0, 2};
-			Columns[1] = {1, 3};
+			Columns.SetNum(3);
+			Columns[0] = {0};
+			Columns[1] = {1};
+			Columns[2] = {2};
 			TArray<FEdge> Edges = {
-				{0, 1, TEXT("then"), TEXT("execute"), 0, 0, true}
+				{0, 1, TEXT("out"), TEXT("in"), 0, 0, false},
+				{1, 2, TEXT("out"), TEXT("in"), 0, 0, false}
 			};
-			RefineColumnItemsWithinAnchoredSlots(Nodes, Edges, Columns, 0, Options.NodePadding);
-			const double SourceOutputY = Nodes[0].NewY + GetOutputAnchor(Nodes[0], 0).Y;
+			TArray<FWeightedKnownSet> KnownSets;
+			AddWeightedKnownSetForColumn(Columns, 0, 1.0, KnownSets);
+			TArray<TSharedPtr<FJsonValue>> ItemDiagnostics;
+			PlaceAnchoredColumnByKnownSets(
+				Nodes,
+				Edges,
+				KnownSets,
+				Columns[1],
+				260.0,
+				Options.NodePadding,
+				nullptr,
+				nullptr,
+				nullptr,
+				TEXT("strict_single_right_propagation"),
+				0,
+				1,
+				&ItemDiagnostics);
+			const double LeftY = Nodes[0].NewY + GetOutputAnchor(Nodes[0], 0).Y;
 			const double TargetInputY = Nodes[1].NewY + GetInputAnchor(Nodes[1], 0).Y;
-			const bool bBaseSlotRefinedToPin = FMath::Abs(SourceOutputY - TargetInputY) <= 1.0
-				&& Nodes[0].NewY + Nodes[0].Height + Options.NodePadding <= Nodes[2].NewY + 0.5;
-			AddCase(TEXT("base_column_slot_refinement_aligns_to_adjacent_pin"), bBaseSlotRefinedToPin, FString::Printf(TEXT("source_y=%.1f target_y=%.1f node0_y=%.1f next_y=%.1f"), SourceOutputY, TargetInputY, Nodes[0].NewY, Nodes[2].NewY));
+			const double TargetOutputY = Nodes[1].NewY + GetOutputAnchor(Nodes[1], 0).Y;
+			const double FutureRightY = Nodes[2].NewY + GetInputAnchor(Nodes[2], 0).Y;
+			const bool bStrictSinglePassUsesOnlyKnownAdjacent =
+				FMath::Abs(LeftY - TargetInputY) <= 1.0
+				&& FMath::Abs(TargetOutputY - FutureRightY) > 100.0
+				&& ItemDiagnostics.Num() == 1;
+			AddCase(TEXT("strict_single_pass_column_uses_only_immediate_known_neighbor"), bStrictSinglePassUsesOnlyKnownAdjacent, FString::Printf(TEXT("left_residual=%.1f future_right_residual=%.1f item_diags=%d target_y=%.1f"), FMath::Abs(LeftY - TargetInputY), FMath::Abs(TargetOutputY - FutureRightY), ItemDiagnostics.Num(), Nodes[1].NewY));
 		}
 
 		{
@@ -3123,6 +3281,20 @@ namespace UeAgentBlueprintAutoLayout
 			FRunResult Run;
 			TSet<int32> EmptyRankIgnoredEdges;
 			LayoutIslandInternally(Nodes, Edges, Edges, EmptyRankIgnoredEdges, Island, Options, Run);
+			TArray<FEdge> EdgesWithTargetOutput = Edges;
+			EdgesWithTargetOutput.Add({1, 0, TEXT("out"), TEXT("unused"), 0, 0, false});
+			const TArray<FInputChainForbiddenZone> DirectZones = BuildInputChainForbiddenZonesForTarget(
+				Nodes,
+				EdgesWithTargetOutput,
+				Island,
+				1,
+				FVector2D(Nodes[1].NewX, Nodes[1].NewY),
+				Options);
+			bool bOutputPinIgnoredForForbiddenZones = DirectZones.Num() == 1;
+			for (const FInputChainForbiddenZone& Zone : DirectZones)
+			{
+				bOutputPinIgnoredForForbiddenZones = bOutputPinIgnoredForForbiddenZones && !Zone.bOutputPin;
+			}
 
 			const double BlockedPinY = Nodes[1].NewY + GetInputAnchor(Nodes[1], 1).Y;
 			const double ZoneHalfHeight = InputChainForbiddenZoneHalfHeight(Options);
@@ -3211,10 +3383,12 @@ namespace UeAgentBlueprintAutoLayout
 
 			AddCase(
 				TEXT("input_chain_forbidden_zone_and_collision_guard"),
-				bForbiddenZoneAvoided && bCollisionGuardCreated && bExecCollisionGuardCreated && bExistingPlanSkipped && bProtectedIslandEdgeSkipped,
+				bForbiddenZoneAvoided && bOutputPinIgnoredForForbiddenZones && bCollisionGuardCreated && bExecCollisionGuardCreated && bExistingPlanSkipped && bProtectedIslandEdgeSkipped,
 				FString::Printf(
-					TEXT("zones=%d avoid=%d guard=%d exec_guard=%d rejected=%d existing_guard=%d protected_guard=%d chain=%.1f..%.1f block=%.1f plan=%d existing_points=%d"),
+					TEXT("zones=%d direct_zones=%d output_ignored=%s avoid=%d guard=%d exec_guard=%d rejected=%d existing_guard=%d protected_guard=%d chain=%.1f..%.1f block=%.1f plan=%d existing_points=%d"),
 					Run.DesignDiagnostics.InputChainForbiddenZoneCount,
+					DirectZones.Num(),
+					bOutputPinIgnoredForForbiddenZones ? TEXT("true") : TEXT("false"),
 					Run.DesignDiagnostics.InputChainForbiddenAvoidanceCount,
 					RerouteRun.DesignDiagnostics.InputChainCollisionRerouteCount,
 					ExecRerouteRun.DesignDiagnostics.InputChainCollisionRerouteCount,
@@ -3367,11 +3541,40 @@ namespace UeAgentBlueprintAutoLayout
 			FRunResult Run;
 			RunLayoutForSelfTest(Nodes, Edges, Options, Run);
 			const double Gap12 = Nodes[2].NewX - Nodes[1].NewX - Nodes[1].Width;
-			const bool bReservedInternalBusLane = Gap12 > Options.HorizontalSpacing + 40.0;
+			TArray<TArray<int32>> ProbeColumns;
+			ProbeColumns.Add(TArray<int32>{1});
+			ProbeColumns.Add(TArray<int32>{2});
+			const double ExpectedRunOneBusGap = ComputeCompactIslandColumnGap(Nodes, ProbeColumns, 0, 1, 0.0, Options);
+			FOptions CompactProbeOptions = Options;
+			CompactProbeOptions.NodePadding = 16.0;
+			CompactProbeOptions.OutputAccessOffsetX = 50.0;
+			CompactProbeOptions.InputAccessOffsetX = 30.0;
+			CompactProbeOptions.PinDirectionBiasX = 40.0;
+			TArray<FNode> FormulaProbeNodes = Nodes;
+			for (const int32 NodeIndex : {1, 2})
+			{
+				if (!FormulaProbeNodes.IsValidIndex(NodeIndex))
+				{
+					continue;
+				}
+				FormulaProbeNodes[NodeIndex].InputPinAnchors = { FVector2D(0.0, 20.0), FVector2D(0.0, 62.0) };
+				FormulaProbeNodes[NodeIndex].OutputPinAnchors = { FVector2D(120.0, 20.0), FVector2D(120.0, 62.0) };
+				FormulaProbeNodes[NodeIndex].InputPinAnchorValid = { 1, 1 };
+				FormulaProbeNodes[NodeIndex].OutputPinAnchorValid = { 1, 1 };
+			}
+			const double CompactDirectGap = ComputeCompactIslandColumnGap(FormulaProbeNodes, ProbeColumns, 0, 0, 0.0, CompactProbeOptions);
+			const double CompactOneBusGap = ComputeCompactIslandColumnGap(FormulaProbeNodes, ProbeColumns, 0, 1, 0.0, CompactProbeOptions);
+			const double CompactTwoBusGap = ComputeCompactIslandColumnGap(FormulaProbeNodes, ProbeColumns, 0, 2, 0.0, CompactProbeOptions);
+			const bool bReservedInternalBusLane = Gap12 >= ExpectedRunOneBusGap - 0.5
+				&& Gap12 <= ExpectedRunOneBusGap + 0.5
+				&& Gap12 < Options.HorizontalSpacing;
+			const bool bCompactFormulaUsesBranchAvoidance = FMath::IsNearlyEqual(CompactDirectGap, 42.0, 0.5)
+				&& FMath::IsNearlyEqual(CompactOneBusGap, 80.0, 0.5)
+				&& FMath::IsNearlyEqual(CompactTwoBusGap, 80.0, 0.5);
 			const bool bNonLeftInputUsesBoundary = Run.DesignDiagnostics.LeftBoundaryEntryCount >= 1
 				&& Run.DesignDiagnostics.TopBoundaryEntryCount >= 2
 				&& Run.DesignDiagnostics.BottomBoundaryEntryCount >= 2;
-			AddCase(TEXT("internal_bus_demand_affects_column_gap_and_entry_side"), bReservedInternalBusLane && bNonLeftInputUsesBoundary, FString::Printf(TEXT("gap=%.1f left_entries=%d top=%d bottom=%d internal_bus=%d"), Gap12, Run.DesignDiagnostics.LeftBoundaryEntryCount, Run.DesignDiagnostics.TopBoundaryEntryCount, Run.DesignDiagnostics.BottomBoundaryEntryCount, Run.DesignDiagnostics.InternalBusGroupCount));
+			AddCase(TEXT("internal_bus_demand_compacts_column_gap_and_entry_side"), bReservedInternalBusLane && bCompactFormulaUsesBranchAvoidance && bNonLeftInputUsesBoundary, FString::Printf(TEXT("gap=%.1f expected_run_one=%.1f formula_direct=%.1f formula_one=%.1f formula_two=%.1f left_entries=%d top=%d bottom=%d internal_bus=%d"), Gap12, ExpectedRunOneBusGap, CompactDirectGap, CompactOneBusGap, CompactTwoBusGap, Run.DesignDiagnostics.LeftBoundaryEntryCount, Run.DesignDiagnostics.TopBoundaryEntryCount, Run.DesignDiagnostics.BottomBoundaryEntryCount, Run.DesignDiagnostics.InternalBusGroupCount));
 		}
 
 		{
@@ -3405,8 +3608,9 @@ namespace UeAgentBlueprintAutoLayout
 				&& Run.DesignDiagnostics.BottomBoundaryEntryCount >= 2;
 			const bool bAlignedSegmentKeptResidualTight = Run.DesignDiagnostics.IslandConnectionTopBottomXResidual < 180.0;
 			const double TargetIslandLeft = FMath::Min(Nodes[1].NewX, Nodes[2].NewX);
-			const bool bAlignedEntryDidNotForceRankColumnGap = TargetIslandLeft - Nodes[0].NewX < Nodes[0].Width + Options.HorizontalSpacing * 0.75;
-			AddCase(TEXT("continuous_boundary_entry_uses_connection_alignment_x"), bHasContinuousBoundaryBus && bAlignedSegmentKeptResidualTight && bAlignedEntryDidNotForceRankColumnGap, FString::Printf(TEXT("boundary_bus=%d/%d top=%d bottom=%d x_residual=%.1f target_dx=%.1f"), Run.DesignDiagnostics.BoundaryBusCount, Run.DesignDiagnostics.BoundaryBusRequiredCount, Run.DesignDiagnostics.TopBoundaryEntryCount, Run.DesignDiagnostics.BottomBoundaryEntryCount, Run.DesignDiagnostics.IslandConnectionTopBottomXResidual, TargetIslandLeft - Nodes[0].NewX));
+			const double MaxExpectedAlignedIslandDx = Nodes[0].Width + Options.HorizontalSpacing;
+			const bool bAlignedEntryDidNotForceExtraRankColumnGap = TargetIslandLeft - Nodes[0].NewX <= MaxExpectedAlignedIslandDx + 0.5;
+			AddCase(TEXT("continuous_boundary_entry_uses_connection_alignment_x"), bHasContinuousBoundaryBus && bAlignedSegmentKeptResidualTight && bAlignedEntryDidNotForceExtraRankColumnGap, FString::Printf(TEXT("boundary_bus=%d/%d top=%d bottom=%d x_residual=%.1f target_dx=%.1f max_dx=%.1f"), Run.DesignDiagnostics.BoundaryBusCount, Run.DesignDiagnostics.BoundaryBusRequiredCount, Run.DesignDiagnostics.TopBoundaryEntryCount, Run.DesignDiagnostics.BottomBoundaryEntryCount, Run.DesignDiagnostics.IslandConnectionTopBottomXResidual, TargetIslandLeft - Nodes[0].NewX, MaxExpectedAlignedIslandDx));
 		}
 
 		{

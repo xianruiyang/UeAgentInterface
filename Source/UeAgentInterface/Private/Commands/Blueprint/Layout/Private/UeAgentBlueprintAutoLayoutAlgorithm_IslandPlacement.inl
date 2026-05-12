@@ -56,26 +56,6 @@
 			}
 		}
 
-		static double SnapTopNotAbove(const double PreferredTop, const double TightTop)
-		{
-			double Candidate = SnapGraphCoordinate(PreferredTop);
-			if (Candidate > TightTop)
-			{
-				Candidate = FMath::FloorToDouble(TightTop);
-			}
-			return Candidate;
-		}
-
-		static double SnapTopNotBelow(const double PreferredTop, const double TightTop)
-		{
-			double Candidate = SnapGraphCoordinate(PreferredTop);
-			if (Candidate < TightTop)
-			{
-				Candidate = FMath::CeilToDouble(TightTop);
-			}
-			return Candidate;
-		}
-
 		static void PlaceAnchoredIntervals(TArray<FColumnItem>& Items, const double Padding)
 		{
 			if (Items.Num() == 0)
@@ -115,16 +95,33 @@
 
 			for (int32 Index = BaseIndex - 1; Index >= 0; --Index)
 			{
-				const double TightTop = Items[Index + 1].FinalTop - Padding - Items[Index].Height;
-				const double PreferredTop = Items[Index].bHasPreferred ? Items[Index].PreferredTop : TightTop;
-				Items[Index].FinalTop = SnapTopNotAbove(PreferredTop, TightTop);
+				const double MaxAllowedTop = Items[Index + 1].FinalTop - Padding - Items[Index].Height;
+				double CandidateTop = Items[Index].bHasPreferred
+					? SnapGraphCoordinate(Items[Index].PreferredTop)
+					: FMath::FloorToDouble(MaxAllowedTop);
+				if (CandidateTop > MaxAllowedTop)
+				{
+					CandidateTop = FMath::FloorToDouble(MaxAllowedTop);
+				}
+				Items[Index].FinalTop = CandidateTop;
 			}
 			for (int32 Index = BaseIndex + 1; Index < Items.Num(); ++Index)
 			{
-				const double TightTop = Items[Index - 1].FinalTop + Items[Index - 1].Height + Padding;
-				const double PreferredTop = Items[Index].bHasPreferred ? Items[Index].PreferredTop : TightTop;
-				Items[Index].FinalTop = SnapTopNotBelow(PreferredTop, TightTop);
+				const double MinAllowedTop = Items[Index - 1].FinalTop + Items[Index - 1].Height + Padding;
+				double CandidateTop = Items[Index].bHasPreferred
+					? SnapGraphCoordinate(Items[Index].PreferredTop)
+					: FMath::CeilToDouble(MinAllowedTop);
+				if (CandidateTop < MinAllowedTop)
+				{
+					CandidateTop = FMath::CeilToDouble(MinAllowedTop);
+				}
+				Items[Index].FinalTop = CandidateTop;
 			}
+		}
+
+		static void PlaceInputChainAnchoredIntervals(TArray<FColumnItem>& Items, const double Padding)
+		{
+			PlaceAnchoredIntervals(Items, Padding);
 		}
 
 		static double InputChainForbiddenZoneHalfHeight(const FOptions& Options)
@@ -151,6 +148,22 @@
 			for (const FInputChainForbiddenZone& Zone : Zones)
 			{
 				if (IntervalOverlapsForbiddenZone(Top, Height, Zone, Padding))
+				{
+					return true;
+				}
+			}
+			return false;
+		}
+
+		static bool AnchoredItemsOverlapForbiddenZones(
+			const TArray<FColumnItem>& Items,
+			const TArray<double>& Tops,
+			const TArray<FInputChainForbiddenZone>& Zones,
+			const double Padding)
+		{
+			for (int32 Index = 0; Index < Items.Num(); ++Index)
+			{
+				if (!Tops.IsValidIndex(Index) || IntervalOverlapsAnyForbiddenZone(Tops[Index], Items[Index].Height, Zones, Padding))
 				{
 					return true;
 				}
@@ -217,7 +230,7 @@
 			TArray<FInputChainForbiddenZone> Zones,
 			int32* OutAvoidanceCount = nullptr)
 		{
-			PlaceAnchoredIntervals(Items, Padding);
+			PlaceInputChainAnchoredIntervals(Items, Padding);
 			if (Items.Num() == 0 || Zones.Num() == 0)
 			{
 				return;
@@ -239,6 +252,11 @@
 				OriginalTops.Add(Item.FinalTop);
 			}
 
+			if (!AnchoredItemsOverlapForbiddenZones(Items, OriginalTops, Zones, Padding))
+			{
+				return;
+			}
+
 			double CompactHeight = 0.0;
 			for (int32 Index = 0; Index < Items.Num(); ++Index)
 			{
@@ -249,6 +267,7 @@
 					CompactHeight += Padding;
 				}
 			}
+
 			const double Center = CompactHeight * 0.5;
 			int32 BaseIndex = 0;
 			double BestDistance = TNumericLimits<double>::Max();
@@ -262,39 +281,101 @@
 					BaseIndex = Index;
 				}
 			}
-
-			if (IntervalOverlapsAnyForbiddenZone(Items[BaseIndex].FinalTop, Items[BaseIndex].Height, Zones, Padding))
+			if (!Items[BaseIndex].bHasPreferred)
 			{
-				const double DownTop = MoveIntervalDownOutOfForbiddenZones(Items[BaseIndex].FinalTop, Items[BaseIndex].Height, Zones, Padding);
-				const double UpTop = MoveIntervalUpOutOfForbiddenZones(Items[BaseIndex].FinalTop, Items[BaseIndex].Height, Zones, Padding);
-				Items[BaseIndex].FinalTop = FMath::Abs(DownTop - Items[BaseIndex].FinalTop) <= FMath::Abs(UpTop - Items[BaseIndex].FinalTop)
-					? DownTop
-					: UpTop;
+				Items[BaseIndex].PreferredTop = Items[BaseIndex].TempTop - Center;
 			}
+
+			TArray<double> CandidateTops;
+			CandidateTops.SetNum(Items.Num());
+			double BaseTop = SnapGraphCoordinate(Items[BaseIndex].PreferredTop);
+			if (IntervalOverlapsAnyForbiddenZone(BaseTop, Items[BaseIndex].Height, Zones, Padding))
+			{
+				const double UpTop = MoveIntervalUpOutOfForbiddenZones(BaseTop, Items[BaseIndex].Height, Zones, Padding);
+				const double DownTop = MoveIntervalDownOutOfForbiddenZones(BaseTop, Items[BaseIndex].Height, Zones, Padding);
+				BaseTop = FMath::Abs(UpTop - BaseTop) <= FMath::Abs(DownTop - BaseTop) ? UpTop : DownTop;
+			}
+			CandidateTops[BaseIndex] = BaseTop;
 
 			for (int32 Index = BaseIndex - 1; Index >= 0; --Index)
 			{
-				const double TightTop = Items[Index + 1].FinalTop - Padding - Items[Index].Height;
-				const double PreferredTop = Items[Index].bHasPreferred ? Items[Index].PreferredTop : TightTop;
-				double Candidate = SnapTopNotAbove(PreferredTop, TightTop);
-				Candidate = MoveIntervalUpOutOfForbiddenZones(Candidate, Items[Index].Height, Zones, Padding);
-				if (Candidate > TightTop)
+				const double MaxAllowedTop = CandidateTops[Index + 1] - Padding - Items[Index].Height;
+				double CandidateTop = Items[Index].bHasPreferred
+					? SnapGraphCoordinate(Items[Index].PreferredTop)
+					: FMath::FloorToDouble(MaxAllowedTop);
+				if (CandidateTop > MaxAllowedTop)
 				{
-					Candidate = MoveIntervalUpOutOfForbiddenZones(TightTop, Items[Index].Height, Zones, Padding);
+					CandidateTop = FMath::FloorToDouble(MaxAllowedTop);
 				}
-				Items[Index].FinalTop = Candidate;
+				CandidateTop = MoveIntervalUpOutOfForbiddenZones(CandidateTop, Items[Index].Height, Zones, Padding);
+				if (CandidateTop > MaxAllowedTop)
+				{
+					CandidateTop = MoveIntervalUpOutOfForbiddenZones(FMath::FloorToDouble(MaxAllowedTop), Items[Index].Height, Zones, Padding);
+				}
+				CandidateTops[Index] = CandidateTop;
 			}
 			for (int32 Index = BaseIndex + 1; Index < Items.Num(); ++Index)
 			{
-				const double TightTop = Items[Index - 1].FinalTop + Items[Index - 1].Height + Padding;
-				const double PreferredTop = Items[Index].bHasPreferred ? Items[Index].PreferredTop : TightTop;
-				double Candidate = SnapTopNotBelow(PreferredTop, TightTop);
-				Candidate = MoveIntervalDownOutOfForbiddenZones(Candidate, Items[Index].Height, Zones, Padding);
-				if (Candidate < TightTop)
+				const double MinAllowedTop = CandidateTops[Index - 1] + Items[Index - 1].Height + Padding;
+				double CandidateTop = Items[Index].bHasPreferred
+					? SnapGraphCoordinate(Items[Index].PreferredTop)
+					: FMath::CeilToDouble(MinAllowedTop);
+				if (CandidateTop < MinAllowedTop)
 				{
-					Candidate = MoveIntervalDownOutOfForbiddenZones(TightTop, Items[Index].Height, Zones, Padding);
+					CandidateTop = FMath::CeilToDouble(MinAllowedTop);
 				}
-				Items[Index].FinalTop = Candidate;
+				CandidateTop = MoveIntervalDownOutOfForbiddenZones(CandidateTop, Items[Index].Height, Zones, Padding);
+				if (CandidateTop < MinAllowedTop)
+				{
+					CandidateTop = MoveIntervalDownOutOfForbiddenZones(FMath::CeilToDouble(MinAllowedTop), Items[Index].Height, Zones, Padding);
+				}
+				CandidateTops[Index] = CandidateTop;
+			}
+
+			const bool bCandidateValid = [&]()
+			{
+				if (AnchoredItemsOverlapForbiddenZones(Items, CandidateTops, Zones, Padding))
+				{
+					return false;
+				}
+				for (int32 Index = 1; Index < Items.Num(); ++Index)
+				{
+					if (CandidateTops[Index] < CandidateTops[Index - 1] + Items[Index - 1].Height + Padding - 0.5)
+					{
+						return false;
+					}
+				}
+				return true;
+			}();
+
+			if (bCandidateValid)
+			{
+				for (int32 Index = 0; Index < Items.Num(); ++Index)
+				{
+					Items[Index].FinalTop = CandidateTops[Index];
+				}
+				if (OutAvoidanceCount)
+				{
+					for (int32 Index = 0; Index < Items.Num(); ++Index)
+					{
+						if (OriginalTops.IsValidIndex(Index) && !FMath::IsNearlyEqual(OriginalTops[Index], Items[Index].FinalTop, 0.5))
+						{
+							++(*OutAvoidanceCount);
+						}
+					}
+				}
+				return;
+			}
+
+			// Degenerate fallback: keep the direction rule and push down only if the local constraints are impossible.
+			for (int32 Index = 0; Index < Items.Num(); ++Index)
+			{
+				double CandidateTop = OriginalTops[Index];
+				if (Index > 0)
+				{
+					CandidateTop = FMath::Max(CandidateTop, Items[Index - 1].FinalTop + Items[Index - 1].Height + Padding);
+				}
+				Items[Index].FinalTop = MoveIntervalDownOutOfForbiddenZones(CandidateTop, Items[Index].Height, Zones, Padding);
 			}
 
 			if (OutAvoidanceCount)
@@ -315,7 +396,8 @@
 			const TSet<int32>& KnownSet,
 			const int32 NodeIndex,
 			const TArray<double>* NodeSlotTopOffsets,
-			double& OutPreferredTop)
+			double& OutPreferredTop,
+			int32* OutConnectionCount = nullptr)
 		{
 			if (!Nodes.IsValidIndex(NodeIndex))
 			{
@@ -338,6 +420,10 @@
 					SelfOffsets.Add(SlotTopOffset + GetOutputAnchor(Nodes[NodeIndex], Edge.SourcePinIndex).Y);
 				}
 			}
+			if (OutConnectionCount)
+			{
+				*OutConnectionCount = KnownYs.Num();
+			}
 			if (KnownYs.Num() == 0 || SelfOffsets.Num() == 0)
 			{
 				return false;
@@ -348,6 +434,98 @@
 			const double KnownAnchor = (KnownYs[0] + KnownYs.Last()) * 0.5;
 			const double SelfAnchorOffset = (SelfOffsets[0] + SelfOffsets.Last()) * 0.5;
 			OutPreferredTop = KnownAnchor - SelfAnchorOffset;
+			return FMath::IsFinite(OutPreferredTop);
+		}
+
+		struct FWeightedKnownSet
+		{
+			int32 ColumnIndex = INDEX_NONE;
+			double Weight = 1.0;
+			TSet<int32> Nodes;
+		};
+
+		static void AddWeightedKnownSetForColumn(
+			const TArray<TArray<int32>>& Columns,
+			const int32 ColumnIndex,
+			const double Weight,
+			TArray<FWeightedKnownSet>& OutKnownSets)
+		{
+			if (!Columns.IsValidIndex(ColumnIndex))
+			{
+				return;
+			}
+			FWeightedKnownSet KnownSet;
+			KnownSet.ColumnIndex = ColumnIndex;
+			KnownSet.Weight = FMath::Max(0.0, Weight);
+			for (const int32 NodeIndex : Columns[ColumnIndex])
+			{
+				KnownSet.Nodes.Add(NodeIndex);
+			}
+			if (KnownSet.Nodes.Num() > 0 && KnownSet.Weight > 0.0)
+			{
+				OutKnownSets.Add(MoveTemp(KnownSet));
+			}
+		}
+
+		static TArray<TSharedPtr<FJsonValue>> WeightedKnownSetColumnsToJson(const TArray<FWeightedKnownSet>& KnownSets)
+		{
+			TArray<TSharedPtr<FJsonValue>> Values;
+			for (const FWeightedKnownSet& KnownSet : KnownSets)
+			{
+				TSharedPtr<FJsonObject> Obj = MakeShared<FJsonObject>();
+				Obj->SetNumberField(TEXT("column_index"), KnownSet.ColumnIndex);
+				Obj->SetNumberField(TEXT("weight"), KnownSet.Weight);
+				Obj->SetNumberField(TEXT("node_count"), KnownSet.Nodes.Num());
+				Values.Add(MakeShared<FJsonValueObject>(Obj));
+			}
+			return Values;
+		}
+
+		static bool ComputeWeightedAnchoredPreferredSlotTopForNode(
+			const TArray<FNode>& Nodes,
+			const TArray<FEdge>& Edges,
+			const TArray<FWeightedKnownSet>& KnownSets,
+			const int32 NodeIndex,
+			const TArray<double>* NodeSlotTopOffsets,
+			double& OutPreferredTop,
+			int32* OutKnownGroupCount = nullptr,
+			int32* OutConnectionCount = nullptr)
+		{
+			double WeightedTopSum = 0.0;
+			double WeightSum = 0.0;
+			int32 KnownGroupCount = 0;
+			int32 ConnectionCount = 0;
+			for (const FWeightedKnownSet& KnownSet : KnownSets)
+			{
+				double GroupPreferredTop = 0.0;
+				int32 GroupConnectionCount = 0;
+				if (!ComputeAnchoredPreferredSlotTopForNode(Nodes, Edges, KnownSet.Nodes, NodeIndex, NodeSlotTopOffsets, GroupPreferredTop, &GroupConnectionCount))
+				{
+					continue;
+				}
+				const double Weight = FMath::Max(0.0, KnownSet.Weight);
+				if (Weight <= 0.0)
+				{
+					continue;
+				}
+				WeightedTopSum += GroupPreferredTop * Weight;
+				WeightSum += Weight;
+				++KnownGroupCount;
+				ConnectionCount += GroupConnectionCount;
+			}
+			if (OutKnownGroupCount)
+			{
+				*OutKnownGroupCount = KnownGroupCount;
+			}
+			if (OutConnectionCount)
+			{
+				*OutConnectionCount = ConnectionCount;
+			}
+			if (WeightSum <= 0.0)
+			{
+				return false;
+			}
+			OutPreferredTop = WeightedTopSum / WeightSum;
 			return FMath::IsFinite(OutPreferredTop);
 		}
 
@@ -459,23 +637,6 @@
 					Zone.EdgeIndex = EdgeIndex;
 					Zone.PinIndex = Edge.TargetPinIndex;
 					Zone.bOutputPin = false;
-					Zones.Add(Zone);
-				}
-				else if (Edge.Source == TargetNode)
-				{
-					const FString PinKey = FString::Printf(TEXT("O:%d"), Edge.SourcePinIndex);
-					if (UsedPinKeys.Contains(PinKey))
-					{
-						continue;
-					}
-					UsedPinKeys.Add(PinKey);
-					const double PinY = TargetPosition.Y + GetOutputAnchor(Nodes[TargetNode], Edge.SourcePinIndex).Y;
-					FInputChainForbiddenZone Zone;
-					Zone.Top = PinY - HalfHeight;
-					Zone.Bottom = PinY + HalfHeight;
-					Zone.EdgeIndex = EdgeIndex;
-					Zone.PinIndex = Edge.SourcePinIndex;
-					Zone.bOutputPin = true;
 					Zones.Add(Zone);
 				}
 			}
@@ -647,27 +808,59 @@
 			return Bounds;
 		}
 
-		static void PlaceAnchoredColumn(
+		static void AppendAnchoredColumnItemDiagnostic(
+			TArray<TSharedPtr<FJsonValue>>* OutDiagnostics,
+			const FString& Stage,
+			const int32 IslandId,
+			const int32 TargetColumnIndex,
+			const TArray<FWeightedKnownSet>& KnownSets,
+			const FColumnItem& Item,
+			const TArray<FNode>& Nodes,
+			const int32 KnownGroupCount,
+			const int32 ConnectionCount)
+		{
+			if (!OutDiagnostics || !Nodes.IsValidIndex(Item.NodeIndex))
+			{
+				return;
+			}
+			TSharedPtr<FJsonObject> Obj = MakeShared<FJsonObject>();
+			Obj->SetStringField(TEXT("stage"), Stage);
+			Obj->SetNumberField(TEXT("island_id"), IslandId);
+			Obj->SetNumberField(TEXT("target_column"), TargetColumnIndex);
+			Obj->SetNumberField(TEXT("node_index"), Item.NodeIndex);
+			Obj->SetStringField(TEXT("node_title"), Nodes[Item.NodeIndex].Title);
+			Obj->SetBoolField(TEXT("has_preferred"), Item.bHasPreferred);
+			Obj->SetNumberField(TEXT("preferred_top"), Item.PreferredTop);
+			Obj->SetNumberField(TEXT("final_top"), Item.FinalTop);
+			Obj->SetNumberField(TEXT("residual"), Item.bHasPreferred ? FMath::Abs(Item.FinalTop - Item.PreferredTop) : 0.0);
+			Obj->SetNumberField(TEXT("known_group_count"), KnownGroupCount);
+			Obj->SetNumberField(TEXT("known_connection_count"), ConnectionCount);
+			Obj->SetArrayField(TEXT("known_columns"), WeightedKnownSetColumnsToJson(KnownSets));
+			OutDiagnostics->Add(MakeShared<FJsonValueObject>(Obj));
+		}
+
+		static void PlaceAnchoredColumnByKnownSets(
 			TArray<FNode>& Nodes,
 			const TArray<FEdge>& Edges,
-			const TArray<int32>& KnownColumn,
+			const TArray<FWeightedKnownSet>& KnownSets,
 			const TArray<int32>& TargetColumn,
 			double X,
 			double Padding,
 			FDesignDiagnostics* Diagnostics,
 			const TArray<double>* NodeSlotHeights = nullptr,
-			const TArray<double>* NodeSlotTopOffsets = nullptr)
+			const TArray<double>* NodeSlotTopOffsets = nullptr,
+			const FString& Stage = TEXT("initial"),
+			const int32 IslandId = INDEX_NONE,
+			const int32 TargetColumnIndex = INDEX_NONE,
+			TArray<TSharedPtr<FJsonValue>>* OutItemDiagnostics = nullptr)
 		{
 			if (TargetColumn.Num() == 0)
 			{
 				return;
 			}
-			TSet<int32> KnownSet;
-			for (const int32 NodeIndex : KnownColumn)
-			{
-				KnownSet.Add(NodeIndex);
-			}
 			TArray<FColumnItem> Items;
+			TArray<int32> KnownGroupCounts;
+			TArray<int32> ConnectionCounts;
 			double Temp = 0.0;
 			for (const int32 NodeIndex : TargetColumn)
 			{
@@ -676,7 +869,9 @@
 				Item.TempTop = Temp;
 				Item.Height = GetNodeSlotHeight(Nodes, NodeSlotHeights, NodeIndex);
 				Temp += Item.Height + Padding;
-				if (ComputeAnchoredPreferredSlotTopForNode(Nodes, Edges, KnownSet, NodeIndex, NodeSlotTopOffsets, Item.PreferredTop))
+				int32 KnownGroupCount = 0;
+				int32 ConnectionCount = 0;
+				if (ComputeWeightedAnchoredPreferredSlotTopForNode(Nodes, Edges, KnownSets, NodeIndex, NodeSlotTopOffsets, Item.PreferredTop, &KnownGroupCount, &ConnectionCount))
 				{
 					Item.bHasPreferred = true;
 				}
@@ -685,17 +880,30 @@
 					++Diagnostics->AnchoredColumnUnconnectedItemCount;
 				}
 				Items.Add(Item);
+				KnownGroupCounts.Add(KnownGroupCount);
+				ConnectionCounts.Add(ConnectionCount);
 			}
 
 			PlaceAnchoredIntervals(Items, Padding);
-			for (const FColumnItem& Item : Items)
+			for (int32 ItemIndex = 0; ItemIndex < Items.Num(); ++ItemIndex)
 			{
+				const FColumnItem& Item = Items[ItemIndex];
 				if (!Nodes.IsValidIndex(Item.NodeIndex))
 				{
 					continue;
 				}
 				Nodes[Item.NodeIndex].NewX = X;
 				Nodes[Item.NodeIndex].NewY = Item.FinalTop + GetNodeSlotTopOffset(NodeSlotTopOffsets, Item.NodeIndex);
+				AppendAnchoredColumnItemDiagnostic(
+					OutItemDiagnostics,
+					Stage,
+					IslandId,
+					TargetColumnIndex,
+					KnownSets,
+					Item,
+					Nodes,
+					KnownGroupCounts.IsValidIndex(ItemIndex) ? KnownGroupCounts[ItemIndex] : 0,
+					ConnectionCounts.IsValidIndex(ItemIndex) ? ConnectionCounts[ItemIndex] : 0);
 			}
 			if (Diagnostics)
 			{
@@ -715,97 +923,81 @@
 			}
 		}
 
-		static void RefineColumnItemsWithinAnchoredSlots(
+		static void PlaceAnchoredColumn(
 			TArray<FNode>& Nodes,
 			const TArray<FEdge>& Edges,
-			const TArray<TArray<int32>>& Columns,
-			const int32 ColumnIndex,
-			const double Padding,
+			const TArray<int32>& KnownColumn,
+			const TArray<int32>& TargetColumn,
+			double X,
+			double Padding,
+			FDesignDiagnostics* Diagnostics,
 			const TArray<double>* NodeSlotHeights = nullptr,
 			const TArray<double>* NodeSlotTopOffsets = nullptr)
 		{
-			if (!Columns.IsValidIndex(ColumnIndex) || Columns[ColumnIndex].Num() == 0)
+			TArray<FWeightedKnownSet> KnownSets;
+			FWeightedKnownSet KnownSet;
+			KnownSet.ColumnIndex = INDEX_NONE;
+			KnownSet.Weight = 1.0;
+			for (const int32 NodeIndex : KnownColumn)
 			{
-				return;
+				KnownSet.Nodes.Add(NodeIndex);
 			}
+			if (KnownSet.Nodes.Num() > 0)
+			{
+				KnownSets.Add(MoveTemp(KnownSet));
+			}
+			PlaceAnchoredColumnByKnownSets(Nodes, Edges, KnownSets, TargetColumn, X, Padding, Diagnostics, NodeSlotHeights, NodeSlotTopOffsets);
+		}
 
-			TSet<int32> KnownSet;
-			if (Columns.IsValidIndex(ColumnIndex - 1))
+		static double EstimateInterfaceRowSpacingForColumnCorridor(
+			const TArray<FNode>& Nodes,
+			const TArray<TArray<int32>>& Columns,
+			const int32 CorridorIndex,
+			const FOptions& Options)
+		{
+			TArray<int32> CorridorNodes;
+			if (Columns.IsValidIndex(CorridorIndex))
 			{
-				for (const int32 NodeIndex : Columns[ColumnIndex - 1])
-				{
-					KnownSet.Add(NodeIndex);
-				}
+				CorridorNodes.Append(Columns[CorridorIndex]);
 			}
-			if (Columns.IsValidIndex(ColumnIndex + 1))
+			if (Columns.IsValidIndex(CorridorIndex + 1))
 			{
-				for (const int32 NodeIndex : Columns[ColumnIndex + 1])
-				{
-					KnownSet.Add(NodeIndex);
-				}
+				CorridorNodes.Append(Columns[CorridorIndex + 1]);
 			}
-			if (KnownSet.Num() == 0)
-			{
-				return;
-			}
+			return EstimateInterfaceRowSpacingForNodes(Nodes, CorridorNodes, Options);
+		}
 
-			const TArray<int32>& Column = Columns[ColumnIndex];
-			TArray<double> SlotTops;
-			TArray<double> SlotHeights;
-			SlotTops.Reserve(Column.Num());
-			SlotHeights.Reserve(Column.Num());
-			for (const int32 NodeIndex : Column)
+		static double ComputeCompactIslandColumnGap(
+			const TArray<FNode>& Nodes,
+			const TArray<TArray<int32>>& Columns,
+			const int32 CorridorIndex,
+			const int32 BusLaneDemand,
+			const double InputChainWidthDemand,
+			const FOptions& Options,
+			double* OutBaseGap = nullptr,
+			double* OutBusLanePitch = nullptr,
+			double* OutBusGapDemand = nullptr)
+		{
+			const double EndpointClearance = SnapGraphCoordinate(EndpointAccessClearanceX(Options));
+			const double BranchXAvoidanceDistance = SnapGraphCoordinate(FMath::Max(
+				EstimateInterfaceRowSpacingForColumnCorridor(Nodes, Columns, CorridorIndex, Options),
+				EndpointClearance * 0.5));
+			const double BusGapDemand = SnapGraphCoordinate(FMath::Min(
+				EndpointClearance,
+				BranchXAvoidanceDistance * (1.0 + static_cast<double>(FMath::Max(0, BusLaneDemand)))));
+			if (OutBaseGap)
 			{
-				if (!Nodes.IsValidIndex(NodeIndex))
-				{
-					SlotTops.Add(0.0);
-					SlotHeights.Add(0.0);
-					continue;
-				}
-				SlotTops.Add(Nodes[NodeIndex].NewY - GetNodeSlotTopOffset(NodeSlotTopOffsets, NodeIndex));
-				SlotHeights.Add(GetNodeSlotHeight(Nodes, NodeSlotHeights, NodeIndex));
+				*OutBaseGap = EndpointClearance;
 			}
-
-			for (int32 ItemIndex = 0; ItemIndex < Column.Num(); ++ItemIndex)
+			if (OutBusLanePitch)
 			{
-				const int32 NodeIndex = Column[ItemIndex];
-				double PreferredTop = 0.0;
-				if (!Nodes.IsValidIndex(NodeIndex)
-					|| !ComputeAnchoredPreferredSlotTopForNode(Nodes, Edges, KnownSet, NodeIndex, NodeSlotTopOffsets, PreferredTop))
-				{
-					continue;
-				}
-
-				double MinTop = -TNumericLimits<double>::Max();
-				double MaxTop = TNumericLimits<double>::Max();
-				if (ItemIndex > 0)
-				{
-					MinTop = SlotTops[ItemIndex - 1] + SlotHeights[ItemIndex - 1] + Padding;
-				}
-				if (ItemIndex + 1 < Column.Num())
-				{
-					MaxTop = SlotTops[ItemIndex + 1] - Padding - SlotHeights[ItemIndex];
-				}
-				if (MinTop > MaxTop)
-				{
-					continue;
-				}
-
-				double RefinedSlotTop = SnapGraphCoordinate(PreferredTop);
-				if (ItemIndex > 0)
-				{
-					RefinedSlotTop = FMath::Max(RefinedSlotTop, FMath::CeilToDouble(MinTop));
-				}
-				if (ItemIndex + 1 < Column.Num())
-				{
-					RefinedSlotTop = FMath::Min(RefinedSlotTop, FMath::FloorToDouble(MaxTop));
-				}
-				if (!FMath::IsNearlyEqual(RefinedSlotTop, SlotTops[ItemIndex], 0.5))
-				{
-					SlotTops[ItemIndex] = RefinedSlotTop;
-					Nodes[NodeIndex].NewY = RefinedSlotTop + GetNodeSlotTopOffset(NodeSlotTopOffsets, NodeIndex);
-				}
+				*OutBusLanePitch = BranchXAvoidanceDistance;
 			}
+			if (OutBusGapDemand)
+			{
+				*OutBusGapDemand = BusGapDemand;
+			}
+			return SnapGraphCoordinate(FMath::Max(BusGapDemand, InputChainWidthDemand));
 		}
 
 		static FRect BoundsForInputChainSubtree(
@@ -1291,6 +1483,14 @@
 					continue;
 				}
 
+				const double MinAlignedGuardX = ComputeInputXAlignedToOutput(SourcePoint.X, Options);
+				const double MaxAlignedGuardX = ComputeOutputXAlignedToInput(TargetPoint.X, Options);
+				GuardX = SnapGraphCoordinate(FMath::Max(GuardX, MinAlignedGuardX));
+				if (GuardX > MaxAlignedGuardX + 0.5)
+				{
+					++Result.DesignDiagnostics.InputChainCollisionRerouteRejectedCount;
+					continue;
+				}
 				const FVector2D GuardPoint(GuardX, TargetPoint.Y);
 				if (!HasNonNegativeConnectionAlignmentShorten(SourcePoint, GuardPoint, Options)
 					|| !HasNonNegativeConnectionAlignmentShorten(GuardPoint, TargetPoint, Options))
@@ -1405,7 +1605,25 @@
 			Island.ColumnGaps.SetNum(FMath::Max(0, Columns.Num() - 1));
 			TArray<double> InputChainWidthDemand;
 			InputChainWidthDemand.SetNum(Island.ColumnGaps.Num());
+			TArray<double> ColumnGapBaseDemand;
+			ColumnGapBaseDemand.SetNum(Island.ColumnGaps.Num());
+			TArray<double> ColumnGapBusLanePitch;
+			ColumnGapBusLanePitch.SetNum(Island.ColumnGaps.Num());
+			TArray<double> ColumnGapBusDemand;
+			ColumnGapBusDemand.SetNum(Island.ColumnGaps.Num());
 			for (double& Demand : InputChainWidthDemand)
+			{
+				Demand = 0.0;
+			}
+			for (double& Demand : ColumnGapBaseDemand)
+			{
+				Demand = 0.0;
+			}
+			for (double& Demand : ColumnGapBusLanePitch)
+			{
+				Demand = 0.0;
+			}
+			for (double& Demand : ColumnGapBusDemand)
 			{
 				Demand = 0.0;
 			}
@@ -1499,13 +1717,34 @@
 				const int32 BusLaneDemand = Island.ColumnInternalBusLaneDemand.IsValidIndex(ColumnIndex - 1)
 					? Island.ColumnInternalBusLaneDemand[ColumnIndex - 1]
 					: 0;
-				const double BusReservedGap = BusLaneDemand > 0
-					? static_cast<double>(BusLaneDemand) * 48.0 + 36.0
-					: 0.0;
 				const double ChainReservedGap = InputChainWidthDemand.IsValidIndex(ColumnIndex - 1)
 					? InputChainWidthDemand[ColumnIndex - 1]
 					: 0.0;
-				Island.ColumnGaps[ColumnIndex - 1] = FMath::Max(Options.HorizontalSpacing + BusReservedGap, ChainReservedGap);
+				double BaseGap = 0.0;
+				double BusLanePitch = 0.0;
+				double BusGapDemand = 0.0;
+				Island.ColumnGaps[ColumnIndex - 1] = ComputeCompactIslandColumnGap(
+					Nodes,
+					Columns,
+					ColumnIndex - 1,
+					BusLaneDemand,
+					ChainReservedGap,
+					Options,
+					&BaseGap,
+					&BusLanePitch,
+					&BusGapDemand);
+				if (ColumnGapBaseDemand.IsValidIndex(ColumnIndex - 1))
+				{
+					ColumnGapBaseDemand[ColumnIndex - 1] = BaseGap;
+				}
+				if (ColumnGapBusLanePitch.IsValidIndex(ColumnIndex - 1))
+				{
+					ColumnGapBusLanePitch[ColumnIndex - 1] = BusLanePitch;
+				}
+				if (ColumnGapBusDemand.IsValidIndex(ColumnIndex - 1))
+				{
+					ColumnGapBusDemand[ColumnIndex - 1] = BusGapDemand;
+				}
 				ColumnX[ColumnIndex] = ColumnX[ColumnIndex - 1] + Island.ColumnWidths[ColumnIndex - 1] + Island.ColumnGaps[ColumnIndex - 1];
 			}
 
@@ -1522,15 +1761,45 @@
 			}
 			Island.BaseColumn = BaseColumn;
 			PlaceDenseColumn(Nodes, Columns[BaseColumn], ColumnX[BaseColumn], 0.0, Options.NodePadding, &NodeSlotHeights, &NodeSlotTopOffsets);
-			for (int32 ColumnIndex = BaseColumn - 1; ColumnIndex >= 0; --ColumnIndex)
-			{
-				PlaceAnchoredColumn(Nodes, ExplicitEdges, Columns[ColumnIndex + 1], Columns[ColumnIndex], ColumnX[ColumnIndex], Options.NodePadding, &Result.DesignDiagnostics, &NodeSlotHeights, &NodeSlotTopOffsets);
-			}
+			TArray<TSharedPtr<FJsonValue>> AnchoredItemDiagnostics;
 			for (int32 ColumnIndex = BaseColumn + 1; ColumnIndex < Columns.Num(); ++ColumnIndex)
 			{
-				PlaceAnchoredColumn(Nodes, ExplicitEdges, Columns[ColumnIndex - 1], Columns[ColumnIndex], ColumnX[ColumnIndex], Options.NodePadding, &Result.DesignDiagnostics, &NodeSlotHeights, &NodeSlotTopOffsets);
+				TArray<FWeightedKnownSet> KnownSets;
+				AddWeightedKnownSetForColumn(Columns, ColumnIndex - 1, 1.0, KnownSets);
+				PlaceAnchoredColumnByKnownSets(
+					Nodes,
+					ExplicitEdges,
+					KnownSets,
+					Columns[ColumnIndex],
+					ColumnX[ColumnIndex],
+					Options.NodePadding,
+					&Result.DesignDiagnostics,
+					&NodeSlotHeights,
+					&NodeSlotTopOffsets,
+					TEXT("initial_right_propagation"),
+					Island.Id,
+					ColumnIndex,
+					&AnchoredItemDiagnostics);
 			}
-			RefineColumnItemsWithinAnchoredSlots(Nodes, ExplicitEdges, Columns, BaseColumn, Options.NodePadding, &NodeSlotHeights, &NodeSlotTopOffsets);
+			for (int32 ColumnIndex = BaseColumn - 1; ColumnIndex >= 0; --ColumnIndex)
+			{
+				TArray<FWeightedKnownSet> KnownSets;
+				AddWeightedKnownSetForColumn(Columns, ColumnIndex + 1, 1.0, KnownSets);
+				PlaceAnchoredColumnByKnownSets(
+					Nodes,
+					ExplicitEdges,
+					KnownSets,
+					Columns[ColumnIndex],
+					ColumnX[ColumnIndex],
+					Options.NodePadding,
+					&Result.DesignDiagnostics,
+					&NodeSlotHeights,
+					&NodeSlotTopOffsets,
+					TEXT("initial_left_propagation"),
+					Island.Id,
+					ColumnIndex,
+					&AnchoredItemDiagnostics);
+			}
 			PlaceInputChains(Nodes, AllEdges, Island, Options, NodeSlotHeights, Result);
 			++Result.DesignDiagnostics.IslandInternalPlacementCount;
 
@@ -1542,6 +1811,7 @@
 			ColumnObj->SetNumberField(TEXT("base_column"), BaseColumn);
 			ColumnObj->SetNumberField(TEXT("height"), Island.LocalBounds.Height());
 			ColumnObj->SetNumberField(TEXT("anchored_column_placement_count"), FMath::Max(0, Columns.Num() - 1));
+			ColumnObj->SetArrayField(TEXT("anchored_column_item_diagnostics"), AnchoredItemDiagnostics);
 			TArray<TSharedPtr<FJsonValue>> Widths;
 			for (const double Width : Island.ColumnWidths)
 			{
@@ -1554,6 +1824,30 @@
 				Gaps.Add(MakeShared<FJsonValueNumber>(Gap));
 			}
 			ColumnObj->SetArrayField(TEXT("column_gaps"), Gaps);
+			TArray<TSharedPtr<FJsonValue>> BaseGapValues;
+			for (const double Gap : ColumnGapBaseDemand)
+			{
+				BaseGapValues.Add(MakeShared<FJsonValueNumber>(Gap));
+			}
+			ColumnObj->SetArrayField(TEXT("column_gap_base_demands"), BaseGapValues);
+			TArray<TSharedPtr<FJsonValue>> BusLanePitchValues;
+			for (const double Pitch : ColumnGapBusLanePitch)
+			{
+				BusLanePitchValues.Add(MakeShared<FJsonValueNumber>(Pitch));
+			}
+			ColumnObj->SetArrayField(TEXT("column_gap_bus_lane_pitches"), BusLanePitchValues);
+			TArray<TSharedPtr<FJsonValue>> BusGapDemandValues;
+			for (const double Demand : ColumnGapBusDemand)
+			{
+				BusGapDemandValues.Add(MakeShared<FJsonValueNumber>(Demand));
+			}
+			ColumnObj->SetArrayField(TEXT("column_gap_bus_demands"), BusGapDemandValues);
+			TArray<TSharedPtr<FJsonValue>> InputChainWidthDemandValues;
+			for (const double Demand : InputChainWidthDemand)
+			{
+				InputChainWidthDemandValues.Add(MakeShared<FJsonValueNumber>(Demand));
+			}
+			ColumnObj->SetArrayField(TEXT("input_chain_width_demands"), InputChainWidthDemandValues);
 			ColumnObj->SetArrayField(TEXT("internal_bus_lane_demands"), IntArrayToJson(Island.ColumnInternalBusLaneDemand));
 			ColumnObj->SetNumberField(TEXT("input_chain_count"), Island.InputChains.Num());
 			ColumnObj->SetNumberField(TEXT("input_chain_node_count"), Island.InputChainNodeSet.Num());

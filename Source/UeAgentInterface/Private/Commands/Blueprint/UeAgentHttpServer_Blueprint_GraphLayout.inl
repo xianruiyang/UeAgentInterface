@@ -1710,7 +1710,7 @@ bool FUeAgentHttpServer::CmdBlueprintLayoutGraphSelfTest(const FUeAgentRequestCo
 	(void)Ctx;
 	UeAgentBlueprintAutoLayout::FSelfTestResult Result = UeAgentBlueprintAutoLayout::RunSelfTest();
 	OutData = MakeShared<FJsonObject>();
-	OutData->SetStringField(TEXT("layout_self_test_version"), TEXT("exec_region_island_corridor_v2_real_pin_required_20260510"));
+	OutData->SetStringField(TEXT("layout_self_test_version"), TEXT("exec_region_island_corridor_v2_preferred_then_directional_avoid_two_column_anchor_20260512"));
 	OutData->SetNumberField(TEXT("case_count"), Result.CaseCount);
 	OutData->SetNumberField(TEXT("passed_count"), Result.PassedCount);
 	OutData->SetNumberField(TEXT("failed_count"), Result.FailedCount);

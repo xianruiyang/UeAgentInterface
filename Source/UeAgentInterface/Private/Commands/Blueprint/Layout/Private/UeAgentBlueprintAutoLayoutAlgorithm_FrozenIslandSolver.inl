@@ -1171,6 +1171,19 @@
 				{
 					MidPoints.Add(FVector2D(EntryX, BusY));
 				}
+				if (!FMath::IsNearlyEqual(BusY, End.Y, 0.5)
+					&& ExitX - ClampedBranchX >= EndpointAccessClearanceX(Options) - 0.5)
+				{
+					const double DoglegX = FMath::Clamp(
+						ClampedBranchX + EndpointAccessClearanceX(Options),
+						ClampedBranchX,
+						ExitX);
+					if (DoglegX - ClampedBranchX >= EndpointAccessClearanceX(Options) - 0.5)
+					{
+						MidPoints.Add(FVector2D(DoglegX, End.Y));
+					}
+					MidPoints.Add(FVector2D(ExitX, End.Y));
+				}
 				return Compact(MakeRoute(MidPoints));
 			};
 			auto AddCandidate = [](TArray<double>& Values, const double Value)
@@ -1373,6 +1386,15 @@
 					if (FirstX - MidPoints.Last().X >= MinSegmentX)
 					{
 						AddMidPoint(FVector2D(FirstX, FirstY));
+					}
+					if (!FMath::IsNearlyEqual(MidPoints.Last().Y, SecondY, 0.5))
+					{
+						const double TransitionX = MidPoints.Last().X + MinSegmentX;
+						if (TransitionX > SecondX + 0.5)
+						{
+							return TArray<FVector2D>();
+						}
+						AddMidPoint(FVector2D(TransitionX, SecondY));
 					}
 					if (SecondX - MidPoints.Last().X < MinSegmentX)
 					{
@@ -1666,6 +1688,83 @@
 				const FVector2D Start = FVector2D(SourceIsland.X, SourceIsland.Y) + GetSourcePort(Nodes[Edge.Source], Edge, true);
 				const FVector2D End = FVector2D(TargetIsland.X, TargetIsland.Y) + GetTargetPort(Nodes[Edge.Target], Edge, true);
 				const TArray<FRect> RouteHardRects = BuildRouteHardOccupancyRects(Nodes, Islands, Options, Edge);
+				TArray<FRect> ExistingBusReservationRects;
+				const FString CurrentSourceParamId = MakeSourceParamId(Edge);
+				for (const FReroutePlan& ExistingPlan : InOutPlans)
+				{
+					if (!Edges.IsValidIndex(ExistingPlan.EdgeIndex) || ExistingPlan.EdgeIndex == EdgeIndex)
+					{
+						continue;
+					}
+					const FEdge& ExistingEdge = Edges[ExistingPlan.EdgeIndex];
+					if (MakeSourceParamId(ExistingEdge) == CurrentSourceParamId)
+					{
+						continue;
+					}
+					const int32* ExistingSourceIslandPtr = IslandByNode.Find(ExistingEdge.Source);
+					const int32* ExistingTargetIslandPtr = IslandByNode.Find(ExistingEdge.Target);
+					if (!ExistingSourceIslandPtr || !ExistingTargetIslandPtr
+						|| !Islands.IsValidIndex(*ExistingSourceIslandPtr)
+						|| !Islands.IsValidIndex(*ExistingTargetIslandPtr)
+						|| !IsValidNodeIndex(Nodes, ExistingEdge.Source)
+						|| !IsValidNodeIndex(Nodes, ExistingEdge.Target))
+					{
+						continue;
+					}
+
+					const FVector2D ExistingStart =
+						FVector2D(Islands[*ExistingSourceIslandPtr].X, Islands[*ExistingSourceIslandPtr].Y)
+						+ GetSourcePort(Nodes[ExistingEdge.Source], ExistingEdge, true);
+					const FVector2D ExistingEnd =
+						FVector2D(Islands[*ExistingTargetIslandPtr].X, Islands[*ExistingTargetIslandPtr].Y)
+						+ GetTargetPort(Nodes[ExistingEdge.Target], ExistingEdge, true);
+					TArray<FVector2D> ExistingRoute;
+					ExistingRoute.Reserve(ExistingPlan.Points.Num() + 2);
+					ExistingRoute.Add(ExistingStart);
+					for (const FVector2D& Point : ExistingPlan.Points)
+					{
+						ExistingRoute.Add(Point);
+					}
+					ExistingRoute.Add(ExistingEnd);
+
+					const double LaneSpacing = EstimateInterfaceRowSpacingForNodes(
+						Nodes,
+						TArray<int32>{ Edge.Source, Edge.Target, ExistingEdge.Source, ExistingEdge.Target },
+						Options);
+					const double HalfLane = FMath::Max(12.0, LaneSpacing * 0.5);
+					const double AlongPad = FMath::Max(8.0, EndpointAccessClearanceX(Options) * 0.25);
+					for (int32 SegmentIndex = 0; SegmentIndex + 1 < ExistingRoute.Num(); ++SegmentIndex)
+					{
+						const FVector2D A = ExistingRoute[SegmentIndex];
+						const FVector2D B = ExistingRoute[SegmentIndex + 1];
+						const double DX = FMath::Abs(B.X - A.X);
+						const double DY = FMath::Abs(B.Y - A.Y);
+						if (DX <= 0.5 && DY <= 0.5)
+						{
+							continue;
+						}
+						if (DY <= 0.5 && DX >= HalfLane)
+						{
+							ExistingBusReservationRects.Add({
+								FMath::Min(A.X, B.X) - AlongPad,
+								A.Y - HalfLane,
+								FMath::Max(A.X, B.X) + AlongPad,
+								A.Y + HalfLane
+							});
+						}
+						else if (DY >= HalfLane && DX <= EndpointAccessClearanceX(Options) * 2.0)
+						{
+							ExistingBusReservationRects.Add({
+								FMath::Min(A.X, B.X) - HalfLane,
+								FMath::Min(A.Y, B.Y) - AlongPad,
+								FMath::Max(A.X, B.X) + HalfLane,
+								FMath::Max(A.Y, B.Y) + AlongPad
+							});
+						}
+					}
+				}
+				TArray<FRect> RoutePlanningRects = RouteHardRects;
+				RoutePlanningRects.Append(ExistingBusReservationRects);
 				const TArray<FVector2D> DirectPolyline = BuildDirectSplinePolyline(Start, End);
 				const int32 DirectHitCount = CountPolylineHardOccupancyHits(DirectPolyline, RouteHardRects);
 				const bool bDirectBlocked = DirectHitCount > 0;
@@ -1676,20 +1775,45 @@
 				}
 
 				const double IdealBusY = SelectDirectConnectionTrunkY(Start, End, bDirectBlocked, Options);
-				TArray<FVector2D> Route = BuildOrthogonalRoutePolyline(Start, End, IdealBusY, Options, RouteHardRects);
-				if (Route.Num() < 4 || !HasNonNegativeConnectionAlignmentShortenForEverySegment(Route, Options))
+				auto IsUsableOrthogonalRoute = [&Options](const TArray<FVector2D>& Candidate)
 				{
-					TSharedPtr<FJsonObject> Obj = MakeShared<FJsonObject>();
-					Obj->SetStringField(TEXT("kind"), TEXT("direct_obstacle_route_rejected"));
-					Obj->SetNumberField(TEXT("edge_index"), EdgeIndex);
-					Obj->SetNumberField(TEXT("direct_hit_count"), DirectHitCount);
-					Obj->SetBoolField(TEXT("long_direct"), bDirectTooLongForReadableSpline);
-					Obj->SetStringField(TEXT("reason"), TEXT("no_forward_aligned_route"));
-					Result.RejectionDiagnostics.Add(MakeShared<FJsonValueObject>(Obj));
-					continue;
+					return Candidate.Num() >= 4 && HasNonNegativeConnectionAlignmentShortenForEverySegment(Candidate, Options);
+				};
+				TArray<FVector2D> Route = BuildOrthogonalRoutePolyline(Start, End, IdealBusY, Options, RoutePlanningRects);
+				int32 RouteHitCount = IsUsableOrthogonalRoute(Route)
+					? CountPolylineHardOccupancyHits(Route, RouteHardRects)
+					: TNumericLimits<int32>::Max();
+				int32 RouteReservationHitCount = IsUsableOrthogonalRoute(Route)
+					? CountPolylineHardOccupancyHits(Route, ExistingBusReservationRects)
+					: TNumericLimits<int32>::Max();
+				bool bAcceptedWithSoftLaneConflict = false;
+				if (!IsUsableOrthogonalRoute(Route) || RouteHitCount > 0)
+				{
+					TArray<FVector2D> HardOnlyRoute = BuildOrthogonalRoutePolyline(Start, End, IdealBusY, Options, RouteHardRects);
+					const int32 HardOnlyHitCount = IsUsableOrthogonalRoute(HardOnlyRoute)
+						? CountPolylineHardOccupancyHits(HardOnlyRoute, RouteHardRects)
+						: TNumericLimits<int32>::Max();
+					if (IsUsableOrthogonalRoute(HardOnlyRoute) && HardOnlyHitCount == 0)
+					{
+						Route = MoveTemp(HardOnlyRoute);
+						RouteHitCount = 0;
+						RouteReservationHitCount = CountPolylineHardOccupancyHits(Route, ExistingBusReservationRects);
+						bAcceptedWithSoftLaneConflict = RouteReservationHitCount > 0;
+					}
+					else
+					{
+						TSharedPtr<FJsonObject> Obj = MakeShared<FJsonObject>();
+						Obj->SetStringField(TEXT("kind"), TEXT("direct_obstacle_route_rejected"));
+						Obj->SetNumberField(TEXT("edge_index"), EdgeIndex);
+						Obj->SetNumberField(TEXT("direct_hit_count"), DirectHitCount);
+						Obj->SetBoolField(TEXT("long_direct"), bDirectTooLongForReadableSpline);
+						Obj->SetNumberField(TEXT("existing_bus_reservation_rect_count"), ExistingBusReservationRects.Num());
+						Obj->SetStringField(TEXT("reason"), TEXT("no_forward_aligned_route"));
+						Result.RejectionDiagnostics.Add(MakeShared<FJsonValueObject>(Obj));
+						continue;
+					}
 				}
 
-				const int32 RouteHitCount = CountPolylineHardOccupancyHits(Route, RouteHardRects);
 				if (RouteHitCount > 0)
 				{
 					TSharedPtr<FJsonObject> Obj = MakeShared<FJsonObject>();
@@ -1697,10 +1821,21 @@
 					Obj->SetNumberField(TEXT("edge_index"), EdgeIndex);
 					Obj->SetNumberField(TEXT("direct_hit_count"), DirectHitCount);
 					Obj->SetNumberField(TEXT("route_hit_count"), RouteHitCount);
+					Obj->SetNumberField(TEXT("route_reservation_hit_count"), RouteReservationHitCount);
 					Obj->SetBoolField(TEXT("long_direct"), bDirectTooLongForReadableSpline);
 					Obj->SetStringField(TEXT("reason"), TEXT("candidate_still_hits_hard_occupancy"));
 					Result.RejectionDiagnostics.Add(MakeShared<FJsonValueObject>(Obj));
 					continue;
+				}
+				if (bAcceptedWithSoftLaneConflict || RouteReservationHitCount > 0)
+				{
+					TSharedPtr<FJsonObject> Obj = MakeShared<FJsonObject>();
+					Obj->SetStringField(TEXT("kind"), TEXT("direct_obstacle_route_soft_lane_conflict_accepted"));
+					Obj->SetNumberField(TEXT("edge_index"), EdgeIndex);
+					Obj->SetNumberField(TEXT("direct_hit_count"), DirectHitCount);
+					Obj->SetNumberField(TEXT("route_reservation_hit_count"), RouteReservationHitCount);
+					Obj->SetBoolField(TEXT("long_direct"), bDirectTooLongForReadableSpline);
+					Result.RejectionDiagnostics.Add(MakeShared<FJsonValueObject>(Obj));
 				}
 
 				FReroutePlan Plan;
@@ -2473,11 +2608,6 @@
 			return CompactVisiblePolyline(Points);
 		}
 
-		static double GetFallbackInterfaceRowSpacing(const FOptions& Options)
-		{
-			return FMath::Max(Options.NodePadding * 1.5, 36.0);
-		}
-
 		static TArray<FVector2D> BuildSharedSourceBusRoutePolylineAvoidingHardRects(
 			const FVector2D& Start,
 			const FVector2D& End,
@@ -2761,44 +2891,11 @@
 			double RoughXMax = 0.0;
 		};
 
-		static double GetCrossBusBranchLaneSpacing(const FOptions& Options)
-		{
-			return FMath::Max(Options.NodePadding * 1.5, 36.0);
-		}
-
 		static double GetCrossBusBranchSetbackLimitX(const FOptions& Options)
 		{
 			return FMath::Max(
 				Options.HorizontalSpacing,
 				EndpointAccessClearanceX(Options) + GetCrossBusBranchLaneSpacing(Options));
-		}
-
-		static void AddInterfaceRowSpacingCandidate(TArray<double>& Spacings, const double Spacing)
-		{
-			if (FMath::IsFinite(Spacing) && Spacing >= 8.0 && Spacing <= 160.0)
-			{
-				Spacings.Add(Spacing);
-			}
-		}
-
-		static void AddAdjacentInterfaceRowSpacings(
-			const TArray<FVector2D>& Anchors,
-			const TArray<uint8>& AnchorValid,
-			TArray<double>& Spacings)
-		{
-			TArray<double> Ys;
-			for (int32 Index = 0; Index < Anchors.Num(); ++Index)
-			{
-				if (AnchorValid.IsValidIndex(Index) && AnchorValid[Index] != 0)
-				{
-					Ys.Add(Anchors[Index].Y);
-				}
-			}
-			Ys.Sort();
-			for (int32 Index = 1; Index < Ys.Num(); ++Index)
-			{
-				AddInterfaceRowSpacingCandidate(Spacings, Ys[Index] - Ys[Index - 1]);
-			}
 		}
 
 		static double EstimateInterfaceRowSpacingForBusGroup(

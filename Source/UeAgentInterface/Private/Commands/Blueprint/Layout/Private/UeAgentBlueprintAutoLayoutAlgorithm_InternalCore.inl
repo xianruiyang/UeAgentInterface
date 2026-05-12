@@ -499,6 +499,68 @@
 			return Options.OutputAccessOffsetX + Options.InputAccessOffsetX;
 		}
 
+		static double GetFallbackInterfaceRowSpacing(const FOptions& Options)
+		{
+			return FMath::Max(Options.NodePadding * 1.5, 36.0);
+		}
+
+		static double GetCrossBusBranchLaneSpacing(const FOptions& Options)
+		{
+			return GetFallbackInterfaceRowSpacing(Options);
+		}
+
+		static void AddInterfaceRowSpacingCandidate(TArray<double>& Spacings, const double Spacing)
+		{
+			if (FMath::IsFinite(Spacing) && Spacing >= 8.0 && Spacing <= 160.0)
+			{
+				Spacings.Add(Spacing);
+			}
+		}
+
+		static void AddAdjacentInterfaceRowSpacings(
+			const TArray<FVector2D>& Anchors,
+			const TArray<uint8>& AnchorValid,
+			TArray<double>& Spacings)
+		{
+			TArray<double> Ys;
+			for (int32 Index = 0; Index < Anchors.Num(); ++Index)
+			{
+				if (AnchorValid.IsValidIndex(Index) && AnchorValid[Index] != 0)
+				{
+					Ys.Add(Anchors[Index].Y);
+				}
+			}
+			Ys.Sort();
+			for (int32 Index = 1; Index < Ys.Num(); ++Index)
+			{
+				AddInterfaceRowSpacingCandidate(Spacings, Ys[Index] - Ys[Index - 1]);
+			}
+		}
+
+		static double EstimateInterfaceRowSpacingForNodes(
+			const TArray<FNode>& Nodes,
+			const TArray<int32>& NodeIndices,
+			const FOptions& Options)
+		{
+			TArray<double> Spacings;
+			for (const int32 NodeIndex : NodeIndices)
+			{
+				if (!Nodes.IsValidIndex(NodeIndex))
+				{
+					continue;
+				}
+				const FNode& Node = Nodes[NodeIndex];
+				AddAdjacentInterfaceRowSpacings(Node.InputPinAnchors, Node.InputPinAnchorValid, Spacings);
+				AddAdjacentInterfaceRowSpacings(Node.OutputPinAnchors, Node.OutputPinAnchorValid, Spacings);
+			}
+			if (Spacings.Num() == 0)
+			{
+				return GetFallbackInterfaceRowSpacing(Options);
+			}
+			Spacings.Sort();
+			return FMath::Max(GetFallbackInterfaceRowSpacing(Options), Spacings[Spacings.Num() / 2]);
+		}
+
 		static double ComputeConnectionAlignmentShortenX(
 			const FVector2D& OutputPoint,
 			const FVector2D& InputPoint,
