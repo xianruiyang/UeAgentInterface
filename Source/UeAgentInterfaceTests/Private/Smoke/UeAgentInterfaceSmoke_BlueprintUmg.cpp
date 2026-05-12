@@ -1743,6 +1743,26 @@ bool FUeAgentInterfaceBlueprintGraphSmokeTest::RunTest(const FString& Parameters
 	TestTrue(TEXT("Blueprint graph set_pin_default_value request succeeded"), ExecuteHttpJsonRequest(TEXT("POST"), ServerScope.BaseUrl + TEXT("/api/exec"), ServerScope.Token, SetPinDefaultBody, SetPinDefaultResult));
 	TestEqual(TEXT("Blueprint graph set_pin_default_value status code"), SetPinDefaultResult.StatusCode, 200);
 
+	const FString LayoutSelfTestBody = MakeExecRequestBody(
+		TEXT("smoke-blueprint-graph-layout-self-test-001"),
+		TEXT("blueprint_layout_graph_self_test"),
+		TEXT("{}"));
+	FHttpSmokeResult LayoutSelfTestResult;
+	TestTrue(TEXT("Blueprint graph layout self-test request succeeded"), ExecuteHttpJsonRequest(TEXT("POST"), ServerScope.BaseUrl + TEXT("/api/exec"), ServerScope.Token, LayoutSelfTestBody, LayoutSelfTestResult));
+	TestEqual(TEXT("Blueprint graph layout self-test status code"), LayoutSelfTestResult.StatusCode, 200);
+
+	TSharedPtr<FJsonObject> LayoutSelfTestJson;
+	TestTrue(TEXT("Blueprint graph layout self-test response parses as JSON"), ParseJson(LayoutSelfTestResult.Body, LayoutSelfTestJson));
+	TestTrue(TEXT("Blueprint graph layout self-test root ok=true"), LayoutSelfTestJson.IsValid() && LayoutSelfTestJson->GetBoolField(TEXT("ok")));
+	const TSharedPtr<FJsonObject>* LayoutSelfTestData = nullptr;
+	TestTrue(TEXT("Blueprint graph layout self-test contains data object"), LayoutSelfTestJson.IsValid() && LayoutSelfTestJson->TryGetObjectField(TEXT("data"), LayoutSelfTestData) && LayoutSelfTestData && LayoutSelfTestData->IsValid());
+	if (LayoutSelfTestData && LayoutSelfTestData->IsValid())
+	{
+		TestTrue(TEXT("Blueprint graph layout self-test all passed"), (*LayoutSelfTestData)->GetBoolField(TEXT("all_passed")));
+		TestEqual(TEXT("Blueprint graph layout self-test failed count is zero"), static_cast<int32>((*LayoutSelfTestData)->GetIntegerField(TEXT("failed_count"))), 0);
+		TestTrue(TEXT("Blueprint graph layout self-test covers subalgorithms"), static_cast<int32>((*LayoutSelfTestData)->GetIntegerField(TEXT("case_count"))) >= 6);
+	}
+
 	const FString LayoutGraphBody = MakeExecRequestBody(
 		TEXT("smoke-blueprint-graph-layout-001"),
 		TEXT("blueprint_layout_graph"),
@@ -1762,8 +1782,9 @@ bool FUeAgentInterfaceBlueprintGraphSmokeTest::RunTest(const FString& Parameters
 		TestTrue(TEXT("Blueprint graph layout covers created nodes"), static_cast<int32>((*LayoutGraphData)->GetIntegerField(TEXT("node_count"))) >= 3);
 		TestTrue(TEXT("Blueprint graph layout sees connected edge"), static_cast<int32>((*LayoutGraphData)->GetIntegerField(TEXT("edge_count"))) >= 1);
 		TestTrue(TEXT("Blueprint graph layout reports connected components"), static_cast<int32>((*LayoutGraphData)->GetIntegerField(TEXT("component_count"))) >= 1);
-		TestTrue(TEXT("Blueprint graph layout reports rule-driven port constraint strategy"), (*LayoutGraphData)->GetStringField(TEXT("layout_strategy")).Contains(TEXT("port_constraint")));
-		TestEqual(TEXT("Blueprint graph layout selects the new single layout engine"), (*LayoutGraphData)->GetStringField(TEXT("selected_candidate")), FString(TEXT("port_constraint_layered_layout")));
+		TestEqual(TEXT("Blueprint graph layout reports semantic island strategy"), (*LayoutGraphData)->GetStringField(TEXT("layout_strategy")), FString(TEXT("semantic_island_multiport_bus_layout_v2")));
+		TestEqual(TEXT("Blueprint graph layout selects semantic island engine"), (*LayoutGraphData)->GetStringField(TEXT("selected_candidate")), FString(TEXT("semantic_island_multiport_bus_layout")));
+		TestTrue(TEXT("Blueprint graph layout design coverage is complete"), (*LayoutGraphData)->GetBoolField(TEXT("layout_design_complete")));
 		TestTrue(TEXT("Blueprint graph layout moved nodes"), static_cast<int32>((*LayoutGraphData)->GetIntegerField(TEXT("moved_node_count"))) >= 2);
 		TestEqual(TEXT("Blueprint graph layout removes estimated node overlaps"), static_cast<int32>((*LayoutGraphData)->GetIntegerField(TEXT("overlap_count_after"))), 0);
 		TestEqual(TEXT("Blueprint graph layout avoids estimated wire-node intersections"), static_cast<int32>((*LayoutGraphData)->GetIntegerField(TEXT("edge_node_intersection_count_after"))), 0);

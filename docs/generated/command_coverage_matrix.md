@@ -1,7 +1,7 @@
 # UAI Command Coverage Matrix
 
-- generated_at: `20260505_001628_974312`
-- command_count: `872`
+- generated_at: `20260507_164455_523552`
+- command_count: `873`
 - missing_doc: `0`
 - missing_implementation: `0`
 - missing_smoke: `0`
@@ -17,7 +17,7 @@
 
 | Status | Count |
 | --- | --- |
-| `direct` | 872 |
+| `direct` | 873 |
 
 ## Commands
 
@@ -174,6 +174,7 @@
 | `blueprint_inspect_components` | `docs/commands/02_Blueprint.md` | True | True | `direct` | `covered` |
 | `blueprint_inspect_nodes` | `docs/commands/02_Blueprint.md` | True | True | `direct` | `covered` |
 | `blueprint_layout_graph` | `docs/commands/02_Blueprint.md` | True | True | `direct` | `covered` |
+| `blueprint_layout_graph_self_test` | `docs/commands/02_Blueprint.md` | True | True | `direct` | `covered` |
 | `blueprint_list_graphs` | `docs/commands/02_Blueprint.md` | True | True | `direct` | `covered` |
 | `blueprint_remove_component` | `docs/commands/deprecatedCommand/02_Blueprint.md` | True | True | `direct` | `covered` |
 | `blueprint_remove_node` | `docs/commands/deprecatedCommand/02_Blueprint.md` | True | True | `direct` | `covered` |

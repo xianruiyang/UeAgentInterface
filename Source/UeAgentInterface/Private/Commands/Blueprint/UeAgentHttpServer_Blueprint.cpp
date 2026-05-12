@@ -14,6 +14,7 @@
 #include "EdGraph/EdGraph.h"
 #include "EdGraph/EdGraphNode.h"
 #include "EdGraph/EdGraphPin.h"
+#include "EdGraphNode_Comment.h"
 #include "EdGraphSchema_K2.h"
 #include "Engine/Blueprint.h"
 #include "EditorViewportClient.h"
@@ -22,6 +23,7 @@
 #include "Framework/Application/SlateApplication.h"
 #include "Framework/Docking/TabManager.h"
 #include "GraphEditor.h"
+#include "GraphEditorSettings.h"
 #include "K2Node_CallFunction.h"
 #include "K2Node_FunctionEntry.h"
 #include "K2Node_FunctionResult.h"
@@ -51,6 +53,7 @@
 #include "Serialization/JsonSerializer.h"
 #include "Slate/SceneViewport.h"
 #include "Slate/WidgetRenderer.h"
+#include "Styling/AppStyle.h"
 #include "Subsystems/AssetEditorSubsystem.h"
 #include "Subsystems/SubsystemBlueprintLibrary.h"
 #include "Module/UeAgentInterfaceLogger.h"
@@ -426,7 +429,74 @@ namespace UeAgentBlueprintOps
 			*OutRemovedExistingEntryCount = BeforeCount - Blueprint->LastEditedDocuments.Num();
 		}
 
-		Blueprint->LastEditedDocuments.Add(FEditedDocumentInfo(Graph, ViewLocation, ZoomAmount));
+		const FVector2f SnappedViewLocation = UeAgentGraphViewUtils::SnapViewLocationToPixelGrid(ViewLocation, ZoomAmount);
+		Blueprint->LastEditedDocuments.Add(FEditedDocumentInfo(Graph, SnappedViewLocation, ZoomAmount));
+		return true;
+	}
+
+	static bool TryGetBlueprintGraphDocumentViewState(
+		const UBlueprint* Blueprint,
+		const UEdGraph* Graph,
+		FVector2f& OutViewLocation,
+		float& OutZoomAmount)
+	{
+		if (!Blueprint || !Graph)
+		{
+			return false;
+		}
+
+		const FSoftObjectPath GraphPath(Graph);
+		for (int32 Index = Blueprint->LastEditedDocuments.Num() - 1; Index >= 0; --Index)
+		{
+			const FEditedDocumentInfo& Info = Blueprint->LastEditedDocuments[Index];
+			if (Info.EditedObjectPath == GraphPath)
+			{
+				OutViewLocation = UeAgentGraphViewUtils::SnapViewLocationToPixelGrid(Info.SavedViewOffset, Info.SavedZoomAmount);
+				OutZoomAmount = UeAgentGraphViewUtils::SafeGraphZoomAmount(Info.SavedZoomAmount);
+				return true;
+			}
+		}
+		return false;
+	}
+
+	static bool RestoreBlueprintGraphEditorToDocumentViewState(
+		UBlueprint* Blueprint,
+		UEdGraph* Graph,
+		const TSharedPtr<SGraphEditor>& GraphEditor,
+		FVector2f* OutRestoredViewLocation = nullptr,
+		float* OutRestoredZoomAmount = nullptr)
+	{
+		if (!Blueprint || !Graph || !GraphEditor.IsValid())
+		{
+			return false;
+		}
+
+		FVector2f RestoreViewLocation(0.0f, 0.0f);
+		float RestoreZoomAmount = 1.0f;
+		if (!TryGetBlueprintGraphDocumentViewState(Blueprint, Graph, RestoreViewLocation, RestoreZoomAmount))
+		{
+			GraphEditor->GetViewLocation(RestoreViewLocation, RestoreZoomAmount);
+			RestoreZoomAmount = UeAgentGraphViewUtils::SafeGraphZoomAmount(RestoreZoomAmount);
+			RestoreViewLocation = UeAgentGraphViewUtils::SnapViewLocationToPixelGrid(RestoreViewLocation, RestoreZoomAmount);
+		}
+
+		GraphEditor->SetViewLocation(RestoreViewLocation, RestoreZoomAmount);
+		GraphEditor->GetViewLocation(RestoreViewLocation, RestoreZoomAmount);
+		RestoreZoomAmount = UeAgentGraphViewUtils::SafeGraphZoomAmount(RestoreZoomAmount);
+		if (!UeAgentGraphViewUtils::IsViewLocationPixelAligned(RestoreViewLocation, RestoreZoomAmount))
+		{
+			RestoreViewLocation = UeAgentGraphViewUtils::SnapViewLocationToPixelGrid(RestoreViewLocation, RestoreZoomAmount);
+			GraphEditor->SetViewLocation(RestoreViewLocation, RestoreZoomAmount);
+			GraphEditor->GetViewLocation(RestoreViewLocation, RestoreZoomAmount);
+		}
+		if (OutRestoredViewLocation)
+		{
+			*OutRestoredViewLocation = RestoreViewLocation;
+		}
+		if (OutRestoredZoomAmount)
+		{
+			*OutRestoredZoomAmount = RestoreZoomAmount;
+		}
 		return true;
 	}
 
@@ -699,28 +769,65 @@ namespace UeAgentBlueprintOps
 		}
 	}
 
-	static bool EnsureSlateWindowRenderableForCapture(const TSharedPtr<SWindow>& Window, FString& OutError)
+	static bool EnsureSlateWindowRenderableForCapture(
+		const TSharedPtr<SWindow>& Window,
+		FString& OutError,
+		const bool bAllowWindowMutation = true,
+		bool* OutWindowMutated = nullptr)
 	{
+		bool bWindowMutated = false;
+		auto Finish = [&]()
+		{
+			if (OutWindowMutated)
+			{
+				*OutWindowMutated = bWindowMutated;
+			}
+		};
+
 		if (!Window.IsValid() || !FSlateApplication::IsInitialized())
 		{
 			OutError = TEXT("slate_window_not_available");
+			Finish();
 			return false;
 		}
 
 		if (Window->IsWindowMinimized())
 		{
+			if (!bAllowWindowMutation)
+			{
+				OutError = TEXT("slate_window_minimized_ui_mutation_disabled");
+				Finish();
+				return false;
+			}
 			Window->Restore();
+			bWindowMutated = true;
 			FSlateApplication::Get().PumpMessages();
 		}
-		Window->ShowWindow();
-		Window->BringToFront(false);
-		FSlateApplication::Get().PumpMessages();
+		if (!Window->IsVisible())
+		{
+			if (!bAllowWindowMutation)
+			{
+				OutError = TEXT("slate_window_hidden_ui_mutation_disabled");
+				Finish();
+				return false;
+			}
+			Window->ShowWindow();
+			bWindowMutated = true;
+		}
+		if (bAllowWindowMutation)
+		{
+			Window->BringToFront(true);
+			bWindowMutated = true;
+			FSlateApplication::Get().PumpMessages();
+		}
 
 		if (!Window->IsVisible() || Window->IsWindowMinimized())
 		{
 			OutError = TEXT("slate_window_not_renderable");
+			Finish();
 			return false;
 		}
+		Finish();
 		return true;
 	}
 
@@ -739,11 +846,28 @@ namespace UeAgentBlueprintOps
 		}
 	}
 
-	static bool PrepareSlateWindowForCapture(const TSharedPtr<SWindow>& Window, FString& OutError)
+	static bool PrepareSlateWindowForCapture(
+		const TSharedPtr<SWindow>& Window,
+		FString& OutError,
+		const bool bAllowWindowMutation = true,
+		bool* OutWindowMutated = nullptr)
 	{
-		if (!EnsureSlateWindowRenderableForCapture(Window, OutError))
+		bool bWindowMutated = false;
+		if (!EnsureSlateWindowRenderableForCapture(Window, OutError, bAllowWindowMutation, &bWindowMutated))
 		{
+			if (OutWindowMutated)
+			{
+				*OutWindowMutated = bWindowMutated;
+			}
 			return false;
+		}
+		if (!bAllowWindowMutation)
+		{
+			if (OutWindowMutated)
+			{
+				*OutWindowMutated = bWindowMutated;
+			}
+			return true;
 		}
 		for (int32 FrameIndex = 0; FrameIndex < 3; ++FrameIndex)
 		{
@@ -753,10 +877,18 @@ namespace UeAgentBlueprintOps
 			FSlateApplication::Get().ForceRedrawWindow(Window.ToSharedRef());
 		}
 		PumpAndTickSlateForCapture();
+		if (OutWindowMutated)
+		{
+			*OutWindowMutated = true;
+		}
 		return true;
 	}
 
-	static FVector2D ResolveOffscreenWidgetDrawSize(const TSharedRef<SWidget>& Widget)
+	static bool TryResolveOffscreenWidgetDrawSize(
+		const TSharedRef<SWidget>& Widget,
+		const bool bAllowFallbackSize,
+		FVector2D& OutDrawSize,
+		FString& OutError)
 	{
 		FVector2D DrawSize = Widget->GetTickSpaceGeometry().GetLocalSize();
 		if (DrawSize.X <= 1.0 || DrawSize.Y <= 1.0)
@@ -773,6 +905,11 @@ namespace UeAgentBlueprintOps
 		}
 		if (DrawSize.X <= 1.0 || DrawSize.Y <= 1.0)
 		{
+			if (!bAllowFallbackSize)
+			{
+				OutError = TEXT("widget_geometry_unavailable_for_noninvasive_screenshot");
+				return false;
+			}
 			DrawSize = FVector2D(1440.0, 900.0);
 		}
 
@@ -784,22 +921,25 @@ namespace UeAgentBlueprintOps
 		}
 		DrawSize.X = FMath::Clamp(FMath::RoundToDouble(DrawSize.X), 64.0, MaxDimension);
 		DrawSize.Y = FMath::Clamp(FMath::RoundToDouble(DrawSize.Y), 64.0, MaxDimension);
+		OutDrawSize = DrawSize;
+		return true;
+	}
+
+	static FVector2D ResolveOffscreenWidgetDrawSize(const TSharedRef<SWidget>& Widget)
+	{
+		FVector2D DrawSize(1440.0, 900.0);
+		FString Error;
+		TryResolveOffscreenWidgetDrawSize(Widget, true, DrawSize, Error);
 		return DrawSize;
 	}
 
-	static bool ScreenshotSlateWidget(const TSharedRef<SWidget>& Widget, TArray<FColor>& OutPixels, FIntPoint& OutSize, FString& OutError)
+	static bool ScreenshotSlateWidgetWithDrawSize(
+		const TSharedRef<SWidget>& Widget,
+		const FVector2D& DrawSize,
+		TArray<FColor>& OutPixels,
+		FIntPoint& OutSize,
+		FString& OutError)
 	{
-		if (!FSlateApplication::IsInitialized())
-		{
-			OutError = TEXT("slate_not_initialized");
-			return false;
-		}
-
-		FSlateApplication::Get().PumpMessages();
-		const float WidgetScale = FSlateApplication::Get().GetApplicationScale();
-		Widget->SlatePrepass(WidgetScale);
-
-		const FVector2D DrawSize = ResolveOffscreenWidgetDrawSize(Widget);
 		FWidgetRenderer* WidgetRenderer = new FWidgetRenderer(true, true);
 		if (!WidgetRenderer)
 		{
@@ -842,6 +982,47 @@ namespace UeAgentBlueprintOps
 			return false;
 		}
 		return true;
+	}
+
+	static bool ScreenshotSlateWidget(const TSharedRef<SWidget>& Widget, TArray<FColor>& OutPixels, FIntPoint& OutSize, FString& OutError)
+	{
+		if (!FSlateApplication::IsInitialized())
+		{
+			OutError = TEXT("slate_not_initialized");
+			return false;
+		}
+
+		FSlateApplication::Get().PumpMessages();
+		const float WidgetScale = FSlateApplication::Get().GetApplicationScale();
+		Widget->SlatePrepass(WidgetScale);
+
+		const FVector2D DrawSize = ResolveOffscreenWidgetDrawSize(Widget);
+		return ScreenshotSlateWidgetWithDrawSize(Widget, DrawSize, OutPixels, OutSize, OutError);
+	}
+
+	static bool ScreenshotSlateWidgetNonInvasive(const TSharedRef<SWidget>& Widget, TArray<FColor>& OutPixels, FIntPoint& OutSize, FString& OutError)
+	{
+		if (!FSlateApplication::IsInitialized())
+		{
+			OutError = TEXT("slate_not_initialized");
+			return false;
+		}
+
+		FVector2D DrawSize(0.0, 0.0);
+		if (!TryResolveOffscreenWidgetDrawSize(Widget, false, DrawSize, OutError))
+		{
+			OutError.Reset();
+			if (!TryResolveOffscreenWidgetDrawSize(Widget, true, DrawSize, OutError))
+			{
+				return false;
+			}
+			FUeAgentInterfaceLogger::Log(
+				TEXT("ScreenshotSlateWidgetNonInvasive using fallback draw size for widget=%s size=(%.0f,%.0f)"),
+				*Widget->GetTypeAsString(),
+				DrawSize.X,
+				DrawSize.Y);
+		}
+		return ScreenshotSlateWidgetWithDrawSize(Widget, DrawSize, OutPixels, OutSize, OutError);
 	}
 
 	static bool ScreenshotEditorViewportPixels(const TSharedRef<SEditorViewport>& ViewportWidget, TArray<FColor>& OutPixels, FIntPoint& OutSize, FString& OutError)
@@ -906,14 +1087,20 @@ namespace UeAgentBlueprintOps
 		return true;
 	}
 
-	static bool ScreenshotBlueprintWindow(const TSharedPtr<IBlueprintEditor>& BlueprintEditor, TArray<FColor>& OutPixels, FIntPoint& OutSize, FString& OutError)
+	static bool ScreenshotBlueprintWindow(
+		const TSharedPtr<IBlueprintEditor>& BlueprintEditor,
+		TArray<FColor>& OutPixels,
+		FIntPoint& OutSize,
+		FString& OutError,
+		const bool bAllowWindowMutation = true,
+		bool* OutWindowMutated = nullptr)
 	{
 		const TSharedPtr<SWindow> BlueprintWindow = ResolveBlueprintEditorWindow(BlueprintEditor, OutError);
 		if (!BlueprintWindow.IsValid())
 		{
 			return false;
 		}
-		if (!PrepareSlateWindowForCapture(BlueprintWindow, OutError))
+		if (!PrepareSlateWindowForCapture(BlueprintWindow, OutError, bAllowWindowMutation, OutWindowMutated))
 		{
 			return false;
 		}
@@ -1027,7 +1214,9 @@ namespace UeAgentBlueprintOps
 		const TSharedRef<SWidget>& Widget,
 		TArray<FColor>& OutPixels,
 		FIntPoint& OutSize,
-		FString& OutError)
+		FString& OutError,
+		const bool bAllowWindowMutation = true,
+		bool* OutWindowMutated = nullptr)
 	{
 		const TSharedPtr<SWindow> BlueprintWindow = ResolveBlueprintEditorWindow(BlueprintEditor, OutError);
 		if (!BlueprintWindow.IsValid())
@@ -1035,15 +1224,26 @@ namespace UeAgentBlueprintOps
 			return false;
 		}
 
-		if (!PrepareSlateWindowForCapture(BlueprintWindow, OutError))
+		bool bAnyWindowMutated = false;
+		bool bWindowMutatedThisPass = false;
+		if (!PrepareSlateWindowForCapture(BlueprintWindow, OutError, bAllowWindowMutation, &bWindowMutatedThisPass))
 		{
+			if (OutWindowMutated)
+			{
+				*OutWindowMutated = bAnyWindowMutated || bWindowMutatedThisPass;
+			}
 			return false;
 		}
+		bAnyWindowMutated = bAnyWindowMutated || bWindowMutatedThisPass;
 
 		TArray<FColor> WindowPixels;
 		FIntPoint WindowSize(0, 0);
 		if (!ScreenshotSlateWidget(BlueprintWindow.ToSharedRef(), WindowPixels, WindowSize, OutError))
 		{
+			if (OutWindowMutated)
+			{
+				*OutWindowMutated = bAnyWindowMutated;
+			}
 			return false;
 		}
 
@@ -1052,21 +1252,39 @@ namespace UeAgentBlueprintOps
 			WindowSize.X,
 			WindowSize.Y);
 
-		if (!PrepareSlateWindowForCapture(BlueprintWindow, OutError))
+		bWindowMutatedThisPass = false;
+		if (!PrepareSlateWindowForCapture(BlueprintWindow, OutError, bAllowWindowMutation, &bWindowMutatedThisPass))
 		{
+			if (OutWindowMutated)
+			{
+				*OutWindowMutated = bAnyWindowMutated || bWindowMutatedThisPass;
+			}
 			return false;
 		}
+		bAnyWindowMutated = bAnyWindowMutated || bWindowMutatedThisPass;
 		if (!ScreenshotSlateWidget(BlueprintWindow.ToSharedRef(), WindowPixels, WindowSize, OutError))
 		{
+			if (OutWindowMutated)
+			{
+				*OutWindowMutated = bAnyWindowMutated;
+			}
 			return false;
 		}
 
 		FIntRect CropRect;
 		if (!BuildWidgetCropRectInWindowPixels(BlueprintWindow.ToSharedRef(), Widget, WindowSize, CropRect, OutError))
 		{
+			if (OutWindowMutated)
+			{
+				*OutWindowMutated = bAnyWindowMutated;
+			}
 			return false;
 		}
 
+		if (OutWindowMutated)
+		{
+			*OutWindowMutated = bAnyWindowMutated;
+		}
 		return CropPixelsRect(WindowPixels, WindowSize, CropRect, OutPixels, OutSize, OutError);
 	}
 }

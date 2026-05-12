@@ -30,6 +30,7 @@ bool FUeAgentHttpServer::ExecuteBlueprintCommand(const FString& CommandLower, co
 	if (CommandLower == TEXT("blueprint_add_function_graph")) return CmdBlueprintAddFunctionGraph(Ctx, OutData, OutError);
 	if (CommandLower == TEXT("blueprint_add_macro_graph")) return CmdBlueprintAddMacroGraph(Ctx, OutData, OutError);
 	if (CommandLower == TEXT("blueprint_add_event_dispatcher")) return CmdBlueprintAddEventDispatcher(Ctx, OutData, OutError);
+	if (CommandLower == TEXT("blueprint_layout_graph_self_test")) return CmdBlueprintLayoutGraphSelfTest(Ctx, OutData, OutError);
 	if (CommandLower == TEXT("blueprint_layout_graph")) return CmdBlueprintLayoutGraph(Ctx, OutData, OutError);
 	if (CommandLower == TEXT("blueprint_graph_get_view")) return CmdBlueprintGraphGetView(Ctx, OutData, OutError);
 	if (CommandLower == TEXT("blueprint_graph_set_view")) return CmdBlueprintGraphSetView(Ctx, OutData, OutError);
@@ -394,11 +395,41 @@ bool FUeAgentHttpServer::CmdBlueprintGraphGetView(const FUeAgentRequestContext& 
 	float ZoomAmount = 1.0f;
 	GraphEditor->GetViewLocation(ViewLocation, ZoomAmount);
 
+	FVector2f PersistedViewLocation(0.0f, 0.0f);
+	float PersistedZoomAmount = 1.0f;
+	const bool bHasPersistedViewState = UeAgentBlueprintOps::TryGetBlueprintGraphDocumentViewState(
+		Blueprint,
+		Graph,
+		PersistedViewLocation,
+		PersistedZoomAmount);
+	const FVector2f PersistedPixelResidual = UeAgentGraphViewUtils::ViewLocationPixelResidual(PersistedViewLocation, PersistedZoomAmount);
+	const bool bLiveDiffersFromPersisted =
+		bHasPersistedViewState
+		&& (!FMath::IsNearlyEqual(ViewLocation.X, PersistedViewLocation.X, 0.01f)
+			|| !FMath::IsNearlyEqual(ViewLocation.Y, PersistedViewLocation.Y, 0.01f)
+			|| !FMath::IsNearlyEqual(ZoomAmount, PersistedZoomAmount, 0.0001f));
+
 	OutData->SetStringField(TEXT("asset_path"), Blueprint->GetOutermost()->GetName());
 	OutData->SetStringField(TEXT("graph_name"), Graph->GetName());
 	OutData->SetNumberField(TEXT("view_x"), ViewLocation.X);
 	OutData->SetNumberField(TEXT("view_y"), ViewLocation.Y);
 	OutData->SetNumberField(TEXT("zoom"), ZoomAmount);
+	OutData->SetBoolField(TEXT("view_pixel_aligned"), UeAgentGraphViewUtils::IsViewLocationPixelAligned(ViewLocation, ZoomAmount));
+	const FVector2f PixelResidual = UeAgentGraphViewUtils::ViewLocationPixelResidual(ViewLocation, ZoomAmount);
+	OutData->SetNumberField(TEXT("screen_pixel_x"), ViewLocation.X * ZoomAmount);
+	OutData->SetNumberField(TEXT("screen_pixel_y"), ViewLocation.Y * ZoomAmount);
+	OutData->SetNumberField(TEXT("screen_pixel_residual_x"), PixelResidual.X);
+	OutData->SetNumberField(TEXT("screen_pixel_residual_y"), PixelResidual.Y);
+	OutData->SetBoolField(TEXT("persisted_view_found"), bHasPersistedViewState);
+	OutData->SetNumberField(TEXT("persisted_view_x"), PersistedViewLocation.X);
+	OutData->SetNumberField(TEXT("persisted_view_y"), PersistedViewLocation.Y);
+	OutData->SetNumberField(TEXT("persisted_zoom"), PersistedZoomAmount);
+	OutData->SetBoolField(TEXT("persisted_view_pixel_aligned"), bHasPersistedViewState && UeAgentGraphViewUtils::IsViewLocationPixelAligned(PersistedViewLocation, PersistedZoomAmount));
+	OutData->SetNumberField(TEXT("persisted_screen_pixel_x"), PersistedViewLocation.X * PersistedZoomAmount);
+	OutData->SetNumberField(TEXT("persisted_screen_pixel_y"), PersistedViewLocation.Y * PersistedZoomAmount);
+	OutData->SetNumberField(TEXT("persisted_screen_pixel_residual_x"), bHasPersistedViewState ? PersistedPixelResidual.X : 0.0f);
+	OutData->SetNumberField(TEXT("persisted_screen_pixel_residual_y"), bHasPersistedViewState ? PersistedPixelResidual.Y : 0.0f);
+	OutData->SetBoolField(TEXT("live_view_differs_from_persisted"), bLiveDiffersFromPersisted);
 	return true;
 }
 
@@ -472,6 +503,17 @@ bool FUeAgentHttpServer::CmdBlueprintGraphSetView(const FUeAgentRequestContext& 
 	}
 	GraphEditor->SetViewLocation(NewViewLocation, NewZoom);
 	GraphEditor->GetViewLocation(CurrentViewLocation, CurrentZoomAmount);
+	if (bSnapToPixelGrid && !UeAgentGraphViewUtils::IsViewLocationPixelAligned(CurrentViewLocation, CurrentZoomAmount))
+	{
+		CurrentViewLocation = UeAgentGraphViewUtils::SnapViewLocationToPixelGrid(CurrentViewLocation, CurrentZoomAmount);
+		GraphEditor->SetViewLocation(CurrentViewLocation, CurrentZoomAmount);
+		GraphEditor->GetViewLocation(CurrentViewLocation, CurrentZoomAmount);
+	}
+	FVector2f PersistedViewLocation = CurrentViewLocation;
+	if (bSnapToPixelGrid)
+	{
+		PersistedViewLocation = UeAgentGraphViewUtils::SnapViewLocationToPixelGrid(PersistedViewLocation, CurrentZoomAmount);
+	}
 
 	bool bUpdatedDocumentViewState = false;
 	int32 RemovedDocumentViewStateEntryCount = 0;
@@ -484,9 +526,26 @@ bool FUeAgentHttpServer::CmdBlueprintGraphSetView(const FUeAgentRequestContext& 
 		bUpdatedDocumentViewState = UeAgentBlueprintOps::PersistBlueprintGraphDocumentViewState(
 			Blueprint,
 			Graph,
-			CurrentViewLocation,
+			PersistedViewLocation,
 			CurrentZoomAmount,
 			&RemovedDocumentViewStateEntryCount);
+	}
+	FVector2f EffectivePersistedViewLocation(0.0f, 0.0f);
+	float EffectivePersistedZoomAmount = 1.0f;
+	bool bHasPersistedViewState = false;
+	if (bUpdatedDocumentViewState)
+	{
+		EffectivePersistedViewLocation = PersistedViewLocation;
+		EffectivePersistedZoomAmount = CurrentZoomAmount;
+		bHasPersistedViewState = true;
+	}
+	else
+	{
+		bHasPersistedViewState = UeAgentBlueprintOps::TryGetBlueprintGraphDocumentViewState(
+			Blueprint,
+			Graph,
+			EffectivePersistedViewLocation,
+			EffectivePersistedZoomAmount);
 	}
 	if (bSaveAfterSet && !UeAgentBlueprintOps::SaveBlueprintPackage(Blueprint, OutError))
 	{
@@ -498,13 +557,27 @@ bool FUeAgentHttpServer::CmdBlueprintGraphSetView(const FUeAgentRequestContext& 
 	OutData->SetNumberField(TEXT("view_x"), CurrentViewLocation.X);
 	OutData->SetNumberField(TEXT("view_y"), CurrentViewLocation.Y);
 	OutData->SetNumberField(TEXT("zoom"), CurrentZoomAmount);
+	OutData->SetBoolField(TEXT("persisted_view_found"), bHasPersistedViewState);
+	OutData->SetNumberField(TEXT("persisted_view_x"), EffectivePersistedViewLocation.X);
+	OutData->SetNumberField(TEXT("persisted_view_y"), EffectivePersistedViewLocation.Y);
+	OutData->SetNumberField(TEXT("persisted_zoom"), EffectivePersistedZoomAmount);
 	OutData->SetBoolField(TEXT("snap_to_pixel_grid"), bSnapToPixelGrid);
+	OutData->SetBoolField(TEXT("view_pixel_aligned"), UeAgentGraphViewUtils::IsViewLocationPixelAligned(CurrentViewLocation, CurrentZoomAmount));
+	OutData->SetBoolField(TEXT("persisted_view_pixel_aligned"), bHasPersistedViewState && UeAgentGraphViewUtils::IsViewLocationPixelAligned(EffectivePersistedViewLocation, EffectivePersistedZoomAmount));
 	OutData->SetBoolField(TEXT("update_document_view_state"), bUpdateDocumentViewState);
 	OutData->SetBoolField(TEXT("updated_document_view_state"), bUpdatedDocumentViewState);
 	OutData->SetNumberField(TEXT("removed_document_view_state_entry_count"), RemovedDocumentViewStateEntryCount);
 	OutData->SetBoolField(TEXT("saved"), bSaveAfterSet);
 	OutData->SetNumberField(TEXT("screen_pixel_x"), CurrentViewLocation.X * CurrentZoomAmount);
 	OutData->SetNumberField(TEXT("screen_pixel_y"), CurrentViewLocation.Y * CurrentZoomAmount);
+	const FVector2f PixelResidual = UeAgentGraphViewUtils::ViewLocationPixelResidual(CurrentViewLocation, CurrentZoomAmount);
+	const FVector2f PersistedPixelResidual = UeAgentGraphViewUtils::ViewLocationPixelResidual(EffectivePersistedViewLocation, EffectivePersistedZoomAmount);
+	OutData->SetNumberField(TEXT("screen_pixel_residual_x"), PixelResidual.X);
+	OutData->SetNumberField(TEXT("screen_pixel_residual_y"), PixelResidual.Y);
+	OutData->SetNumberField(TEXT("persisted_screen_pixel_x"), EffectivePersistedViewLocation.X * EffectivePersistedZoomAmount);
+	OutData->SetNumberField(TEXT("persisted_screen_pixel_y"), EffectivePersistedViewLocation.Y * EffectivePersistedZoomAmount);
+	OutData->SetNumberField(TEXT("persisted_screen_pixel_residual_x"), bHasPersistedViewState ? PersistedPixelResidual.X : 0.0f);
+	OutData->SetNumberField(TEXT("persisted_screen_pixel_residual_y"), bHasPersistedViewState ? PersistedPixelResidual.Y : 0.0f);
 	return true;
 }
 
@@ -641,20 +714,41 @@ bool FUeAgentHttpServer::CmdBlueprintScreenshot(const FUeAgentRequestContext& Ct
 		return false;
 	}
 
-	bool bOpenEditorIfNeeded = true;
+	FString Target = TEXT("viewport");
+	JsonTryGetString(Ctx.Params, TEXT("target"), Target);
+	Target = Target.TrimStartAndEnd().ToLower();
+	const bool bGraphTarget = Target == TEXT("eventgraph")
+		|| Target == TEXT("event_graph")
+		|| Target == TEXT("graph")
+		|| Target.StartsWith(TEXT("graph:"));
+
+	bool bAllowUiMutation = !bGraphTarget;
+	JsonTryGetBool(Ctx.Params, TEXT("allow_ui_mutation"), bAllowUiMutation);
+	bool bAllowWindowMutation = bAllowUiMutation;
+	JsonTryGetBool(Ctx.Params, TEXT("allow_window_mutation"), bAllowWindowMutation);
+	if (bAllowUiMutation)
+	{
+		bAllowWindowMutation = true;
+	}
+
+	bool bOpenEditorIfNeeded = bAllowUiMutation;
 	JsonTryGetBool(Ctx.Params, TEXT("open_editor_if_needed"), bOpenEditorIfNeeded);
+	if (bOpenEditorIfNeeded && !bAllowUiMutation)
+	{
+		OutError = TEXT("open_editor_if_needed_requires_allow_ui_mutation");
+		return false;
+	}
+
 	TSharedPtr<IBlueprintEditor> BlueprintEditor = UeAgentBlueprintOps::GetBlueprintEditor(Blueprint, bOpenEditorIfNeeded, OutError);
 	if (!BlueprintEditor.IsValid())
 	{
 		return false;
 	}
 
-	FString Target = TEXT("viewport");
-	JsonTryGetString(Ctx.Params, TEXT("target"), Target);
-	Target = Target.TrimStartAndEnd().ToLower();
-
 	FString GraphName = TEXT("EventGraph");
 	JsonTryGetString(Ctx.Params, TEXT("graph_name"), GraphName);
+	bool bRestoreGraphViewAfterCapture = true;
+	JsonTryGetBool(Ctx.Params, TEXT("restore_graph_view_after_capture"), bRestoreGraphViewAfterCapture);
 
 	FString Format = TEXT("jpg");
 	int32 Quality = 85;
@@ -685,6 +779,63 @@ bool FUeAgentHttpServer::CmdBlueprintScreenshot(const FUeAgentRequestContext& Ct
 	TSharedPtr<SEditorViewport> ViewportWidgetForShot;
 	TSharedPtr<SWidget> ViewportSceneWidgetForShot;
 	TSharedPtr<SWindow> BlueprintWindowForShot;
+	TSharedPtr<SGraphEditor> GraphEditorToRestore;
+	UEdGraph* GraphToRestore = nullptr;
+	bool bRestoredGraphViewAfterCapture = false;
+	bool bWindowMutatedForCapture = false;
+	bool bPreparedWindowForCapture = false;
+	FVector2f GraphViewBeforeCapture(0.0f, 0.0f);
+	float GraphZoomBeforeCapture = 1.0f;
+	FVector2f GraphViewAfterCapture(0.0f, 0.0f);
+	float GraphZoomAfterCapture = 1.0f;
+	bool bCapturedGraphViewBefore = false;
+	bool bCapturedGraphViewAfter = false;
+	FString GraphViewRestoreMode = TEXT("none");
+	auto RestoreGraphViewAfterCapture = [&]() -> bool
+	{
+		if (!bRestoreGraphViewAfterCapture || !GraphToRestore || !GraphEditorToRestore.IsValid())
+		{
+			return false;
+		}
+		if (!bAllowUiMutation && bCapturedGraphViewBefore)
+		{
+			float RestoreZoomAmount = UeAgentGraphViewUtils::SafeGraphZoomAmount(GraphZoomBeforeCapture);
+			FVector2f RestoreViewLocation = UeAgentGraphViewUtils::SnapViewLocationToPixelGrid(
+				GraphViewBeforeCapture,
+				RestoreZoomAmount);
+			GraphEditorToRestore->SetViewLocation(RestoreViewLocation, RestoreZoomAmount);
+			GraphEditorToRestore->GetViewLocation(RestoreViewLocation, RestoreZoomAmount);
+			GraphViewRestoreMode = TEXT("pre_capture");
+			FUeAgentInterfaceLogger::Log(
+				TEXT("CmdBlueprintScreenshot restored graph view to pre-capture state asset=%s graph=%s view=(%.3f,%.3f) zoom=%.6f"),
+				*Blueprint->GetOutermost()->GetName(),
+				*GraphToRestore->GetName(),
+				RestoreViewLocation.X,
+				RestoreViewLocation.Y,
+				RestoreZoomAmount);
+			return true;
+		}
+		FVector2f RestoredViewLocation(0.0f, 0.0f);
+		float RestoredZoomAmount = 1.0f;
+		const bool bRestored = UeAgentBlueprintOps::RestoreBlueprintGraphEditorToDocumentViewState(
+			Blueprint,
+			GraphToRestore,
+			GraphEditorToRestore,
+			&RestoredViewLocation,
+			&RestoredZoomAmount);
+		if (bRestored)
+		{
+			FUeAgentInterfaceLogger::Log(
+				TEXT("CmdBlueprintScreenshot restored graph view after capture asset=%s graph=%s view=(%.3f,%.3f) zoom=%.6f"),
+				*Blueprint->GetOutermost()->GetName(),
+				*GraphToRestore->GetName(),
+				RestoredViewLocation.X,
+				RestoredViewLocation.Y,
+				RestoredZoomAmount);
+			GraphViewRestoreMode = TEXT("document");
+		}
+		return bRestored;
+	};
 	FString EffectiveTarget = Target;
 	if (Target == TEXT("viewport") || Target == TEXT("components"))
 	{
@@ -705,18 +856,30 @@ bool FUeAgentHttpServer::CmdBlueprintScreenshot(const FUeAgentRequestContext& Ct
 			OutError = TEXT("graph_not_found");
 			return false;
 		}
-		TSharedPtr<SGraphEditor> GraphEditor = BlueprintEditor->OpenGraphAndBringToFront(Graph, true);
+		TSharedPtr<SGraphEditor> GraphEditor = BlueprintEditor->OpenGraphAndBringToFront(Graph, bAllowUiMutation);
 		if (!GraphEditor.IsValid())
 		{
 			OutError = TEXT("graph_editor_not_found");
 			return false;
 		}
+		GraphToRestore = Graph;
+		GraphEditorToRestore = GraphEditor;
+		GraphEditor->GetViewLocation(GraphViewBeforeCapture, GraphZoomBeforeCapture);
+		GraphZoomBeforeCapture = UeAgentGraphViewUtils::SafeGraphZoomAmount(GraphZoomBeforeCapture);
+		bCapturedGraphViewBefore = true;
 		FString WindowError;
 		BlueprintWindowForShot = UeAgentBlueprintOps::ResolveBlueprintEditorWindow(BlueprintEditor, WindowError);
-		if (BlueprintWindowForShot.IsValid()
-			&& !UeAgentBlueprintOps::PrepareSlateWindowForCapture(BlueprintWindowForShot, OutError))
+		if (BlueprintWindowForShot.IsValid() && bAllowWindowMutation)
 		{
-			return false;
+			bool bWindowMutatedThisPass = false;
+			bPreparedWindowForCapture = true;
+			if (!UeAgentBlueprintOps::PrepareSlateWindowForCapture(BlueprintWindowForShot, OutError, bAllowWindowMutation, &bWindowMutatedThisPass))
+			{
+				bWindowMutatedForCapture = bWindowMutatedForCapture || bWindowMutatedThisPass;
+				bRestoredGraphViewAfterCapture = RestoreGraphViewAfterCapture();
+				return false;
+			}
+			bWindowMutatedForCapture = bWindowMutatedForCapture || bWindowMutatedThisPass;
 		}
 		WidgetToShot = GraphEditor;
 		GraphName = Graph->GetName();
@@ -735,18 +898,30 @@ bool FUeAgentHttpServer::CmdBlueprintScreenshot(const FUeAgentRequestContext& Ct
 			OutError = TEXT("graph_not_found");
 			return false;
 		}
-		TSharedPtr<SGraphEditor> GraphEditor = BlueprintEditor->OpenGraphAndBringToFront(Graph, true);
+		TSharedPtr<SGraphEditor> GraphEditor = BlueprintEditor->OpenGraphAndBringToFront(Graph, bAllowUiMutation);
 		if (!GraphEditor.IsValid())
 		{
 			OutError = TEXT("graph_editor_not_found");
 			return false;
 		}
+		GraphToRestore = Graph;
+		GraphEditorToRestore = GraphEditor;
+		GraphEditor->GetViewLocation(GraphViewBeforeCapture, GraphZoomBeforeCapture);
+		GraphZoomBeforeCapture = UeAgentGraphViewUtils::SafeGraphZoomAmount(GraphZoomBeforeCapture);
+		bCapturedGraphViewBefore = true;
 		FString WindowError;
 		BlueprintWindowForShot = UeAgentBlueprintOps::ResolveBlueprintEditorWindow(BlueprintEditor, WindowError);
-		if (BlueprintWindowForShot.IsValid()
-			&& !UeAgentBlueprintOps::PrepareSlateWindowForCapture(BlueprintWindowForShot, OutError))
+		if (BlueprintWindowForShot.IsValid() && bAllowWindowMutation)
 		{
-			return false;
+			bool bWindowMutatedThisPass = false;
+			bPreparedWindowForCapture = true;
+			if (!UeAgentBlueprintOps::PrepareSlateWindowForCapture(BlueprintWindowForShot, OutError, bAllowWindowMutation, &bWindowMutatedThisPass))
+			{
+				bWindowMutatedForCapture = bWindowMutatedForCapture || bWindowMutatedThisPass;
+				bRestoredGraphViewAfterCapture = RestoreGraphViewAfterCapture();
+				return false;
+			}
+			bWindowMutatedForCapture = bWindowMutatedForCapture || bWindowMutatedThisPass;
 		}
 		WidgetToShot = GraphEditor;
 		GraphName = Graph->GetName();
@@ -761,10 +936,14 @@ bool FUeAgentHttpServer::CmdBlueprintScreenshot(const FUeAgentRequestContext& Ct
 		}
 		WidgetToShot = BlueprintWindowForShot;
 		EffectiveTarget = TEXT("window");
-		if (!UeAgentBlueprintOps::PrepareSlateWindowForCapture(BlueprintWindowForShot, OutError))
+		bool bWindowMutatedThisPass = false;
+		bPreparedWindowForCapture = true;
+		if (!UeAgentBlueprintOps::PrepareSlateWindowForCapture(BlueprintWindowForShot, OutError, bAllowWindowMutation, &bWindowMutatedThisPass))
 		{
+			bWindowMutatedForCapture = bWindowMutatedForCapture || bWindowMutatedThisPass;
 			return false;
 		}
+		bWindowMutatedForCapture = bWindowMutatedForCapture || bWindowMutatedThisPass;
 	}
 	else
 	{
@@ -798,10 +977,13 @@ bool FUeAgentHttpServer::CmdBlueprintScreenshot(const FUeAgentRequestContext& Ct
 		if (BlueprintWindowForShot.IsValid())
 		{
 			FString WindowPrepareError;
-			if (!UeAgentBlueprintOps::PrepareSlateWindowForCapture(BlueprintWindowForShot, WindowPrepareError))
+			bool bWindowMutatedThisPass = false;
+			bPreparedWindowForCapture = true;
+			if (!UeAgentBlueprintOps::PrepareSlateWindowForCapture(BlueprintWindowForShot, WindowPrepareError, bAllowWindowMutation, &bWindowMutatedThisPass))
 			{
 				FUeAgentInterfaceLogger::Log(TEXT("CmdBlueprintScreenshot viewport window not renderable before capture: %s"), *WindowPrepareError);
 			}
+			bWindowMutatedForCapture = bWindowMutatedForCapture || bWindowMutatedThisPass;
 		}
 
 		const TSharedRef<SWidget> CropWidget = ViewportSceneWidgetForShot.IsValid() ? ViewportSceneWidgetForShot.ToSharedRef() : WidgetToShot.ToSharedRef();
@@ -819,7 +1001,16 @@ bool FUeAgentHttpServer::CmdBlueprintScreenshot(const FUeAgentRequestContext& Ct
 			FUeAgentInterfaceLogger::Log(TEXT("CmdBlueprintScreenshot viewport crop_widget=fallback_editor_viewport"));
 		}
 
-		bShotOk = UeAgentBlueprintOps::ScreenshotBlueprintWindowCropWidget(BlueprintEditor, CropWidget, Pixels, ShotSize, OutError);
+		bool bWindowMutatedThisPass = false;
+		bShotOk = UeAgentBlueprintOps::ScreenshotBlueprintWindowCropWidget(
+			BlueprintEditor,
+			CropWidget,
+			Pixels,
+			ShotSize,
+			OutError,
+			bAllowWindowMutation,
+			&bWindowMutatedThisPass);
+		bWindowMutatedForCapture = bWindowMutatedForCapture || bWindowMutatedThisPass;
 		if (!bShotOk)
 		{
 			const FString CropError = OutError;
@@ -831,15 +1022,27 @@ bool FUeAgentHttpServer::CmdBlueprintScreenshot(const FUeAgentRequestContext& Ct
 				CaptureMode = TEXT("viewport_readpixels_fallback");
 				OutError.Reset();
 			}
-			else if (UeAgentBlueprintOps::ScreenshotBlueprintWindow(BlueprintEditor, Pixels, ShotSize, FallbackError))
-			{
-				bShotOk = true;
-				CaptureMode = TEXT("window_offscreen_fallback");
-				OutError.Reset();
-			}
 			else
 			{
-				OutError = FallbackError.IsEmpty() ? CropError : FallbackError;
+				bWindowMutatedThisPass = false;
+				if (UeAgentBlueprintOps::ScreenshotBlueprintWindow(
+					BlueprintEditor,
+					Pixels,
+					ShotSize,
+					FallbackError,
+					bAllowWindowMutation,
+					&bWindowMutatedThisPass))
+				{
+					bWindowMutatedForCapture = bWindowMutatedForCapture || bWindowMutatedThisPass;
+					bShotOk = true;
+					CaptureMode = TEXT("window_offscreen_fallback");
+					OutError.Reset();
+				}
+				else
+				{
+					bWindowMutatedForCapture = bWindowMutatedForCapture || bWindowMutatedThisPass;
+					OutError = FallbackError.IsEmpty() ? CropError : FallbackError;
+				}
 			}
 		}
 		else
@@ -849,7 +1052,26 @@ bool FUeAgentHttpServer::CmdBlueprintScreenshot(const FUeAgentRequestContext& Ct
 	}
 	else
 	{
-		bShotOk = UeAgentBlueprintOps::ScreenshotSlateWidget(WidgetToShot.ToSharedRef(), Pixels, ShotSize, OutError);
+		if (EffectiveTarget == TEXT("graph") && !bAllowUiMutation)
+		{
+			CaptureMode = TEXT("graph_widget_offscreen_noninvasive");
+			bShotOk = UeAgentBlueprintOps::ScreenshotSlateWidgetNonInvasive(WidgetToShot.ToSharedRef(), Pixels, ShotSize, OutError);
+		}
+		else
+		{
+			CaptureMode = EffectiveTarget == TEXT("graph") ? TEXT("graph_widget_offscreen_mutating") : TEXT("slate_widget_offscreen");
+			bShotOk = UeAgentBlueprintOps::ScreenshotSlateWidget(WidgetToShot.ToSharedRef(), Pixels, ShotSize, OutError);
+		}
+	}
+	if (EffectiveTarget == TEXT("graph"))
+	{
+		bRestoredGraphViewAfterCapture = RestoreGraphViewAfterCapture();
+		if (GraphEditorToRestore.IsValid())
+		{
+			GraphEditorToRestore->GetViewLocation(GraphViewAfterCapture, GraphZoomAfterCapture);
+			GraphZoomAfterCapture = UeAgentGraphViewUtils::SafeGraphZoomAmount(GraphZoomAfterCapture);
+			bCapturedGraphViewAfter = true;
+		}
 	}
 
 	if (!bShotOk)
@@ -878,6 +1100,46 @@ bool FUeAgentHttpServer::CmdBlueprintScreenshot(const FUeAgentRequestContext& Ct
 	OutData->SetStringField(TEXT("graph_name"), EffectiveTarget == TEXT("graph") ? GraphName : TEXT(""));
 	OutData->SetStringField(TEXT("capture_mode"), CaptureMode);
 	OutData->SetStringField(TEXT("legacy_backbuffer_capture"), TEXT("disabled"));
+	OutData->SetBoolField(TEXT("allow_ui_mutation"), bAllowUiMutation);
+	OutData->SetBoolField(TEXT("allow_window_mutation"), bAllowWindowMutation);
+	OutData->SetBoolField(TEXT("prepared_window_for_capture"), bPreparedWindowForCapture);
+	OutData->SetBoolField(TEXT("window_mutated_for_capture"), bWindowMutatedForCapture);
+	OutData->SetBoolField(TEXT("capture_window_resolved"), BlueprintWindowForShot.IsValid());
+	if (BlueprintWindowForShot.IsValid())
+	{
+		OutData->SetBoolField(TEXT("capture_window_visible_after"), BlueprintWindowForShot->IsVisible());
+		OutData->SetBoolField(TEXT("capture_window_minimized_after"), BlueprintWindowForShot->IsWindowMinimized());
+	}
+	OutData->SetBoolField(TEXT("restore_graph_view_after_capture"), bRestoreGraphViewAfterCapture);
+	OutData->SetBoolField(TEXT("restored_graph_view_after_capture"), bRestoredGraphViewAfterCapture);
+	OutData->SetStringField(TEXT("graph_view_restore_mode"), GraphViewRestoreMode);
+	if (EffectiveTarget == TEXT("graph"))
+	{
+		OutData->SetBoolField(TEXT("captured_graph_view_before"), bCapturedGraphViewBefore);
+		OutData->SetBoolField(TEXT("captured_graph_view_after"), bCapturedGraphViewAfter);
+		OutData->SetNumberField(TEXT("graph_view_before_x"), GraphViewBeforeCapture.X);
+		OutData->SetNumberField(TEXT("graph_view_before_y"), GraphViewBeforeCapture.Y);
+		OutData->SetNumberField(TEXT("graph_zoom_before"), GraphZoomBeforeCapture);
+		OutData->SetNumberField(TEXT("graph_view_after_x"), GraphViewAfterCapture.X);
+		OutData->SetNumberField(TEXT("graph_view_after_y"), GraphViewAfterCapture.Y);
+		OutData->SetNumberField(TEXT("graph_zoom_after"), GraphZoomAfterCapture);
+		const bool bGraphViewChangedAfterCapture = bCapturedGraphViewBefore
+			&& bCapturedGraphViewAfter
+			&& (!FMath::IsNearlyEqual(GraphViewBeforeCapture.X, GraphViewAfterCapture.X, 0.01f)
+				|| !FMath::IsNearlyEqual(GraphViewBeforeCapture.Y, GraphViewAfterCapture.Y, 0.01f)
+				|| !FMath::IsNearlyEqual(GraphZoomBeforeCapture, GraphZoomAfterCapture, 0.0001f));
+		OutData->SetBoolField(TEXT("graph_view_changed_after_capture"), bGraphViewChangedAfterCapture);
+		const FVector2f GraphViewBeforeResidual = UeAgentGraphViewUtils::ViewLocationPixelResidual(
+			GraphViewBeforeCapture,
+			GraphZoomBeforeCapture);
+		const FVector2f GraphViewAfterResidual = UeAgentGraphViewUtils::ViewLocationPixelResidual(
+			GraphViewAfterCapture,
+			GraphZoomAfterCapture);
+		OutData->SetNumberField(TEXT("graph_view_before_pixel_residual_x"), GraphViewBeforeResidual.X);
+		OutData->SetNumberField(TEXT("graph_view_before_pixel_residual_y"), GraphViewBeforeResidual.Y);
+		OutData->SetNumberField(TEXT("graph_view_after_pixel_residual_x"), GraphViewAfterResidual.X);
+		OutData->SetNumberField(TEXT("graph_view_after_pixel_residual_y"), GraphViewAfterResidual.Y);
+	}
 	OutData->SetStringField(TEXT("format"), Format);
 	OutData->SetNumberField(TEXT("width"), ResizedSize.X);
 	OutData->SetNumberField(TEXT("height"), ResizedSize.Y);
