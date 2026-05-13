@@ -140,6 +140,8 @@ namespace UeAgentBlueprintAutoLayout
 		int32 PlacementGraphEdgeCount = 0;
 		int32 RouteOnlyEdgeCount = 0;
 		int32 RouteOnlyCycleBreakEdgeCount = 0;
+		int32 PlacementOwnerEdgeCount = 0;
+		int32 PlacementNonOwnerEdgeCount = 0;
 		int32 RouteOnlyMiddleCorridorCount = 0;
 		int32 RouteOnlyOuterFallbackCount = 0;
 		int32 SourceOrderGroupCount = 0;

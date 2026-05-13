@@ -166,6 +166,7 @@
 			double PrimaryResidual = 0.0;
 			double MinTargetDeltaX = 0.0;
 			double SourcePortOrderKey = 0.0;
+			bool bPlacementOwner = false;
 		};
 
 		struct FPlacementProposal

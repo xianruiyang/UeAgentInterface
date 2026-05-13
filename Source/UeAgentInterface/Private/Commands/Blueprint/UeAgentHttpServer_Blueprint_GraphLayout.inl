@@ -1710,7 +1710,7 @@ bool FUeAgentHttpServer::CmdBlueprintLayoutGraphSelfTest(const FUeAgentRequestCo
 	(void)Ctx;
 	UeAgentBlueprintAutoLayout::FSelfTestResult Result = UeAgentBlueprintAutoLayout::RunSelfTest();
 	OutData = MakeShared<FJsonObject>();
-	OutData->SetStringField(TEXT("layout_self_test_version"), TEXT("exec_region_island_corridor_v2_preferred_then_directional_avoid_two_column_anchor_20260512"));
+	OutData->SetStringField(TEXT("layout_self_test_version"), TEXT("exec_region_island_corridor_v2_xy_compact_placement_20260513"));
 	OutData->SetNumberField(TEXT("case_count"), Result.CaseCount);
 	OutData->SetNumberField(TEXT("passed_count"), Result.PassedCount);
 	OutData->SetNumberField(TEXT("failed_count"), Result.FailedCount);
@@ -2064,6 +2064,8 @@ bool FUeAgentHttpServer::CmdBlueprintLayoutGraph(const FUeAgentRequestContext& C
 	OutData->SetNumberField(TEXT("placement_graph_edge_count"), RunResult.DesignDiagnostics.PlacementGraphEdgeCount);
 	OutData->SetNumberField(TEXT("route_only_edge_count"), RunResult.DesignDiagnostics.RouteOnlyEdgeCount);
 	OutData->SetNumberField(TEXT("route_only_cycle_break_edge_count"), RunResult.DesignDiagnostics.RouteOnlyCycleBreakEdgeCount);
+	OutData->SetNumberField(TEXT("placement_owner_edge_count"), RunResult.DesignDiagnostics.PlacementOwnerEdgeCount);
+	OutData->SetNumberField(TEXT("placement_non_owner_edge_count"), RunResult.DesignDiagnostics.PlacementNonOwnerEdgeCount);
 	OutData->SetNumberField(TEXT("route_only_middle_corridor_count"), RunResult.DesignDiagnostics.RouteOnlyMiddleCorridorCount);
 	OutData->SetNumberField(TEXT("route_only_outer_fallback_count"), RunResult.DesignDiagnostics.RouteOnlyOuterFallbackCount);
 	OutData->SetNumberField(TEXT("source_order_group_count"), RunResult.DesignDiagnostics.SourceOrderGroupCount);
