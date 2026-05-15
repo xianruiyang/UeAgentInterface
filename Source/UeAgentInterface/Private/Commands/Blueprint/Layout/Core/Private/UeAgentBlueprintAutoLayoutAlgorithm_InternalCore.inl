@@ -477,20 +477,18 @@
 			return Values[Values.Num() / 2];
 		}
 
-		static double PositiveOrFallback(double Value, double Fallback)
-		{
-			return Value > 0.0 ? Value : Fallback;
-		}
-
 		static FOptions NormalizeOptions(FOptions Options)
 		{
-			const double LegacyOffset = PositiveOrFallback(Options.PinDirectionBiasX, 24.0);
-			Options.OutputAccessOffsetX = PositiveOrFallback(Options.OutputAccessOffsetX, LegacyOffset);
-			Options.InputAccessOffsetX = PositiveOrFallback(Options.InputAccessOffsetX, LegacyOffset);
-			Options.PinDirectionBiasX = (Options.OutputAccessOffsetX + Options.InputAccessOffsetX) * 0.5;
+			Options.OutputAccessOffsetX = FMath::Max(0.0, Options.OutputAccessOffsetX);
+			Options.InputAccessOffsetX = FMath::Max(0.0, Options.InputAccessOffsetX);
+			Options.PinDirectionBiasX = FMath::Max(
+				0.0,
+				Options.PinDirectionBiasX > 0.0
+					? Options.PinDirectionBiasX
+					: (Options.OutputAccessOffsetX + Options.InputAccessOffsetX) * 0.5);
 			if (Options.AccessOffsetSource.IsEmpty())
 			{
-				Options.AccessOffsetSource = TEXT("normalized_access_offsets");
+				Options.AccessOffsetSource = TEXT("unset_access_offsets");
 			}
 			return Options;
 		}
@@ -505,9 +503,15 @@
 			return FMath::Max(Options.NodePadding * 1.5, 36.0);
 		}
 
+		static constexpr double GetBusTrunkLaneSpacing()
+		{
+			return 20.0;
+		}
+
 		static double GetCrossBusBranchLaneSpacing(const FOptions& Options)
 		{
-			return GetFallbackInterfaceRowSpacing(Options);
+			(void)Options;
+			return GetBusTrunkLaneSpacing();
 		}
 
 		static void AddInterfaceRowSpacingCandidate(TArray<double>& Spacings, const double Spacing)

@@ -32,6 +32,17 @@ bool FUeAgentHttpServer::ExecuteBlueprintCommand(const FString& CommandLower, co
 	if (CommandLower == TEXT("blueprint_add_event_dispatcher")) return CmdBlueprintAddEventDispatcher(Ctx, OutData, OutError);
 	if (CommandLower == TEXT("blueprint_layout_graph_self_test")) return CmdBlueprintLayoutGraphSelfTest(Ctx, OutData, OutError);
 	if (CommandLower == TEXT("blueprint_layout_graph")) return CmdBlueprintLayoutGraph(Ctx, OutData, OutError);
+	if (CommandLower == TEXT("blueprint_layout_all_graphs"))
+	{
+		return UeAgentBlueprintOps::ExecuteBlueprintLayoutAllGraphsCommand(
+			Ctx,
+			OutData,
+			OutError,
+			[this](const FUeAgentRequestContext& GraphCtx, TSharedPtr<FJsonObject>& GraphData, FString& GraphError)
+			{
+				return CmdBlueprintLayoutGraph(GraphCtx, GraphData, GraphError);
+			});
+	}
 	if (CommandLower == TEXT("blueprint_graph_get_view")) return CmdBlueprintGraphGetView(Ctx, OutData, OutError);
 	if (CommandLower == TEXT("blueprint_graph_set_view")) return CmdBlueprintGraphSetView(Ctx, OutData, OutError);
 	if (CommandLower == TEXT("blueprint_viewport_get_camera")) return CmdBlueprintViewportGetCamera(Ctx, OutData, OutError);

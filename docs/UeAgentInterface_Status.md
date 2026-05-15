@@ -6,7 +6,7 @@
 
 最近一次 `uai-cli release coverage`：
 
-- 命令总数：`867`
+- 命令总数：`876`
 - 缺正式文档：`0`
 - 缺实现：`0`
 - 缺 smoke：`0`
@@ -48,6 +48,7 @@
 | Data Driven | DataAsset、PrimaryAsset、DataTable JSON workflow、scan/query/sample、all-or-nothing DataTable apply | `24` |
 | Physics 基础 | Capabilities、Primitive physics query/validate/patch plan、PhysicalMaterial、PhysicsConstraint、PhysicsAsset、runtime probe | `26` |
 | Production Pipeline | Localization、StringTable、PO/report/culture preview、Packaging UAT plan/run/status/log/artifact/clean、Platform/Profile/SDK/DeviceProfile/Scalability | `27` |
+| Node Graph | 普通 Blueprint、UMG 逻辑图、AnimBlueprint pin 图、Material / MaterialFunction 表达式图和可枚举横向 EdGraph 的通用 list/layout 入口 | `28` |
 
 ## 重要边界
 

@@ -1,7 +1,7 @@
 # UAI Command Coverage Matrix
 
-- generated_at: `20260507_164455_523552`
-- command_count: `873`
+- generated_at: `20260514_002310_100509`
+- command_count: `876`
 - missing_doc: `0`
 - missing_implementation: `0`
 - missing_smoke: `0`
@@ -17,7 +17,7 @@
 
 | Status | Count |
 | --- | --- |
-| `direct` | 873 |
+| `direct` | 876 |
 
 ## Commands
 
@@ -173,6 +173,7 @@
 | `blueprint_graph_set_view` | `docs/commands/02_Blueprint.md` | True | True | `direct` | `covered` |
 | `blueprint_inspect_components` | `docs/commands/02_Blueprint.md` | True | True | `direct` | `covered` |
 | `blueprint_inspect_nodes` | `docs/commands/02_Blueprint.md` | True | True | `direct` | `covered` |
+| `blueprint_layout_all_graphs` | `docs/commands/02_Blueprint.md` | True | True | `direct` | `covered` |
 | `blueprint_layout_graph` | `docs/commands/02_Blueprint.md` | True | True | `direct` | `covered` |
 | `blueprint_layout_graph_self_test` | `docs/commands/02_Blueprint.md` | True | True | `direct` | `covered` |
 | `blueprint_list_graphs` | `docs/commands/02_Blueprint.md` | True | True | `direct` | `covered` |
@@ -588,6 +589,8 @@
 | `niagara_user_parameter_list` | `docs/commands/07_Niagara_System.md` | True | True | `direct` | `covered` |
 | `niagara_user_parameter_remove` | `docs/commands/deprecatedCommand/07_Niagara_System.md` | True | True | `direct` | `covered` |
 | `niagara_user_parameter_set` | `docs/commands/deprecatedCommand/07_Niagara_System.md` | True | True | `direct` | `covered` |
+| `node_graph_layout` | `docs/commands/28_NodeGraph.md` | True | True | `direct` | `covered` |
+| `node_graph_list` | `docs/commands/28_NodeGraph.md` | True | True | `direct` | `covered` |
 | `open_asset_editor` | `docs/commands/01_Core_Level_Assets_Landscape.md` | True | True | `direct` | `covered` |
 | `packaging_cancel_task` | `docs/commands/27_Localization_Packaging_PlatformProfiles.md` | True | True | `direct` | `covered` |
 | `packaging_clean_artifacts` | `docs/commands/27_Localization_Packaging_PlatformProfiles.md` | True | True | `direct` | `covered` |

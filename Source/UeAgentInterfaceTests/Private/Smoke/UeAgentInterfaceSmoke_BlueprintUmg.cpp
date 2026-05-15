@@ -1763,6 +1763,65 @@ bool FUeAgentInterfaceBlueprintGraphSmokeTest::RunTest(const FString& Parameters
 		TestTrue(TEXT("Blueprint graph layout self-test covers subalgorithms"), static_cast<int32>((*LayoutSelfTestData)->GetIntegerField(TEXT("case_count"))) >= 6);
 	}
 
+	const FString LayoutAllGraphsBody = MakeExecRequestBody(
+		TEXT("smoke-blueprint-layout-all-graphs-001"),
+		TEXT("blueprint_layout_all_graphs"),
+		FString::Printf(TEXT("{\"asset_path\":\"%s\",\"graph_names\":[\"EventGraph\"],\"dry_run\":true,\"compile_after_layout\":false,\"save_after_layout\":false,\"stop_on_error\":true}"), *BlueprintAssetPath));
+	FHttpSmokeResult LayoutAllGraphsResult;
+	TestTrue(TEXT("Blueprint layout_all_graphs request succeeded"), ExecuteHttpJsonRequest(TEXT("POST"), ServerScope.BaseUrl + TEXT("/api/exec"), ServerScope.Token, LayoutAllGraphsBody, LayoutAllGraphsResult));
+	TestEqual(TEXT("Blueprint layout_all_graphs status code"), LayoutAllGraphsResult.StatusCode, 200);
+
+	TSharedPtr<FJsonObject> LayoutAllGraphsJson;
+	TestTrue(TEXT("Blueprint layout_all_graphs response parses as JSON"), ParseJson(LayoutAllGraphsResult.Body, LayoutAllGraphsJson));
+	TestTrue(TEXT("Blueprint layout_all_graphs root ok=true"), LayoutAllGraphsJson.IsValid() && LayoutAllGraphsJson->GetBoolField(TEXT("ok")));
+	const TSharedPtr<FJsonObject>* LayoutAllGraphsData = nullptr;
+	TestTrue(TEXT("Blueprint layout_all_graphs contains data object"), LayoutAllGraphsJson.IsValid() && LayoutAllGraphsJson->TryGetObjectField(TEXT("data"), LayoutAllGraphsData) && LayoutAllGraphsData && LayoutAllGraphsData->IsValid());
+	if (LayoutAllGraphsData && LayoutAllGraphsData->IsValid())
+	{
+		TestEqual(TEXT("Blueprint layout_all_graphs has no failed graphs"), static_cast<int32>((*LayoutAllGraphsData)->GetIntegerField(TEXT("failed_graph_count"))), 0);
+		TestTrue(TEXT("Blueprint layout_all_graphs processed requested graph"), static_cast<int32>((*LayoutAllGraphsData)->GetIntegerField(TEXT("processed_graph_count"))) >= 1);
+		TestTrue(TEXT("Blueprint layout_all_graphs reports graph results"), (*LayoutAllGraphsData)->HasField(TEXT("graphs")));
+	}
+
+	const FString NodeGraphListBody = MakeExecRequestBody(
+		TEXT("smoke-node-graph-list-blueprint-001"),
+		TEXT("node_graph_list"),
+		FString::Printf(TEXT("{\"asset_path\":\"%s\",\"include_nested_graphs\":false}"), *BlueprintAssetPath));
+	FHttpSmokeResult NodeGraphListResult;
+	TestTrue(TEXT("Node graph list request succeeded"), ExecuteHttpJsonRequest(TEXT("POST"), ServerScope.BaseUrl + TEXT("/api/exec"), ServerScope.Token, NodeGraphListBody, NodeGraphListResult));
+	TestEqual(TEXT("Node graph list status code"), NodeGraphListResult.StatusCode, 200);
+
+	TSharedPtr<FJsonObject> NodeGraphListJson;
+	TestTrue(TEXT("Node graph list response parses as JSON"), ParseJson(NodeGraphListResult.Body, NodeGraphListJson));
+	TestTrue(TEXT("Node graph list root ok=true"), NodeGraphListJson.IsValid() && NodeGraphListJson->GetBoolField(TEXT("ok")));
+	const TSharedPtr<FJsonObject>* NodeGraphListData = nullptr;
+	TestTrue(TEXT("Node graph list contains data object"), NodeGraphListJson.IsValid() && NodeGraphListJson->TryGetObjectField(TEXT("data"), NodeGraphListData) && NodeGraphListData && NodeGraphListData->IsValid());
+	if (NodeGraphListData && NodeGraphListData->IsValid())
+	{
+		TestEqual(TEXT("Node graph list delegates blueprint adapter"), (*NodeGraphListData)->GetStringField(TEXT("adapter")), FString(TEXT("k2_blueprint")));
+		TestTrue(TEXT("Node graph list returns graphs"), static_cast<int32>((*NodeGraphListData)->GetIntegerField(TEXT("graph_count"))) >= 1);
+	}
+
+	const FString NodeGraphLayoutBody = MakeExecRequestBody(
+		TEXT("smoke-node-graph-layout-blueprint-001"),
+		TEXT("node_graph_layout"),
+		FString::Printf(TEXT("{\"asset_path\":\"%s\",\"graph_selector\":{\"mode\":\"single\",\"graph_name\":\"EventGraph\"},\"dry_run\":true,\"compile_after_layout\":false,\"save_after_layout\":false,\"stop_on_error\":true}"), *BlueprintAssetPath));
+	FHttpSmokeResult NodeGraphLayoutResult;
+	TestTrue(TEXT("Node graph layout request succeeded"), ExecuteHttpJsonRequest(TEXT("POST"), ServerScope.BaseUrl + TEXT("/api/exec"), ServerScope.Token, NodeGraphLayoutBody, NodeGraphLayoutResult));
+	TestEqual(TEXT("Node graph layout status code"), NodeGraphLayoutResult.StatusCode, 200);
+
+	TSharedPtr<FJsonObject> NodeGraphLayoutJson;
+	TestTrue(TEXT("Node graph layout response parses as JSON"), ParseJson(NodeGraphLayoutResult.Body, NodeGraphLayoutJson));
+	TestTrue(TEXT("Node graph layout root ok=true"), NodeGraphLayoutJson.IsValid() && NodeGraphLayoutJson->GetBoolField(TEXT("ok")));
+	const TSharedPtr<FJsonObject>* NodeGraphLayoutData = nullptr;
+	TestTrue(TEXT("Node graph layout contains data object"), NodeGraphLayoutJson.IsValid() && NodeGraphLayoutJson->TryGetObjectField(TEXT("data"), NodeGraphLayoutData) && NodeGraphLayoutData && NodeGraphLayoutData->IsValid());
+	if (NodeGraphLayoutData && NodeGraphLayoutData->IsValid())
+	{
+		TestEqual(TEXT("Node graph layout uses k2 adapter"), (*NodeGraphLayoutData)->GetStringField(TEXT("adapter")), FString(TEXT("k2_blueprint")));
+		TestEqual(TEXT("Node graph layout delegates to blueprint all graphs"), (*NodeGraphLayoutData)->GetStringField(TEXT("delegated_command")), FString(TEXT("blueprint_layout_all_graphs")));
+		TestEqual(TEXT("Node graph layout has no failed graphs"), static_cast<int32>((*NodeGraphLayoutData)->GetIntegerField(TEXT("failed_graph_count"))), 0);
+	}
+
 	const FString LayoutGraphBody = MakeExecRequestBody(
 		TEXT("smoke-blueprint-graph-layout-001"),
 		TEXT("blueprint_layout_graph"),

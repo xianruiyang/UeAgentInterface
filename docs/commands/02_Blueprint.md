@@ -38,7 +38,8 @@
 |---|---|---|
 | `blueprint_inspect_nodes` | 列出图节点与引脚 | `asset_path`、`graph_name`、`limit_per_graph`、`include_pins` |
 | `blueprint_layout_graph_self_test` | 运行 Blueprint 自动排版核心子算法自测 | 无 |
-| `blueprint_layout_graph` | 自动排版指定 Blueprint 图节点 | `asset_path`、`graph_name`、`horizontal_spacing`、`vertical_spacing`、`node_padding`、`output_access_offset_x`、`input_access_offset_x`、`pin_direction_bias_x`、`use_real_geometry`、`require_real_geometry`、`allow_geometry_view_capture`、`allow_focused_geometry_capture`、`allow_remove_all_reroute_nodes`、`layout_report_file`、`dry_run`、`insert_reroute_nodes`、`replace_existing_reroute_nodes`、`compile_after_layout`、`save_after_layout` |
+| `blueprint_layout_graph` | 自动排版指定 Blueprint 图节点 | `asset_path`、`graph_name`、`horizontal_spacing`、`vertical_spacing`、`node_padding`、`origin_x`、`origin_y`、`allow_geometry_view_capture`、`allow_focused_geometry_capture`、`allow_remove_all_reroute_nodes`、`layout_report_file`、`insert_reroute_nodes`、`replace_existing_reroute_nodes`、`compile_after_layout`、`save_after_layout` |
+| `blueprint_layout_all_graphs` | 自动排版一个 Blueprint 资产内的多个/全部图 | `asset_path`、`graph_name`、`graph_path`、`graph_names`、`graphs`、`include_ubergraphs`、`include_function_graphs`、`include_macro_graphs`、`include_delegate_graphs`、`include_nested_graphs`、`skip_empty_graphs`、`stop_on_error`、`include_graph_result_details`、`horizontal_spacing`、`vertical_spacing`、`node_padding`、`origin_x`、`origin_y`、`allow_geometry_view_capture`、`allow_focused_geometry_capture`、`allow_remove_all_reroute_nodes`、`layout_report_file`、`insert_reroute_nodes`、`replace_existing_reroute_nodes`、`compile_after_layout`、`save_after_layout` |
 
 - 当前节点创建能力集中在：标准事件、自定义事件、函数调用、变量节点，以及按类创建的通用非结构节点。
 - `graph_name` 现在既可以传图名，也可以直接传 `graph_path`；对子图、状态机子图、Transition Rule 图优先建议传 `graph_path`，避免重名歧义。
@@ -76,7 +77,7 @@
 
 当前算法主流程：
 
-1. 普通排版必须读取真实 Slate 几何：命令会打开或复用目标 GraphEditor 来构造 `SGraphNode` / `SGraphPin` widget，并在固定 `geometry_measurement_zoom=1.0` 的临时采样视图下读取真实节点尺寸和真实 pin anchor，采集后立即恢复图面 view。节点尺寸优先使用 `SGraphNode::GetDesiredSize()` 的 Slate 缓存结果，`GraphEditor->GetBoundsForNode()` 只作为尺寸读回兜底。已连接 pin anchor 不完整时命令直接失败，`dry_run` 也不再回退到估算 pin 行。
+1. 普通排版必须读取真实 Slate 几何：命令会打开或复用目标 GraphEditor 来构造 `SGraphNode` / `SGraphPin` widget，并在固定 `geometry_measurement_zoom=1.0` 的临时采样视图下读取真实节点尺寸和真实 pin anchor，采集后立即恢复图面 view。节点尺寸优先使用 `SGraphNode::GetDesiredSize()` 的 Slate 缓存结果，`GraphEditor->GetBoundsForNode()` 只作为 UE 真实尺寸读回兜底。已连接 pin anchor 或节点真实尺寸不完整时命令直接失败，不再回退到估算 pin 行、估算节点宽高或只返回不写入的预览结果。
 2. 收集非 reroute 节点、可见输入/输出 pin、语义边，并把旧 reroute 链折叠成源 pin 到目标 pin 的语义边。
 3. 计算 SCC，选择 SCC 内稳定的反馈边标记为 `RankIgnoredFeedbackEdge`。这类边只用于打断 rank / 列分配意义上的环，不参与岛内 rank、列排序、输入链抽离和 crossing minimization，但仍参与弱连通成岛。
 4. 在排除 `RankIgnoredFeedbackEdge` 后，按同一 source pin 的剩余出边寻找真正 fanout，并把这些边标记为 `IslandCutFanoutEdge`。只有 `IslandCutFanoutEdge` 会从弱连通成岛中移除并提升为 island graph 边；一个节点如果只是“一个正常输出 + 一个回边”，不会被误判成 fanout。
@@ -94,15 +95,14 @@
 - `horizontal_spacing`：节点列或岛列之间的基础 X 间距，默认 `300`。
 - `vertical_spacing`：岛列之间的基础 Y 间距，默认 `140`。
 - `node_padding`：节点避让和重叠检测额外留白，默认 `24`。
-- `output_access_offset_x` / `input_access_offset_x`：`ConnectionAlignmentShortenX` 使用的输出端向右切线距离和输入端向左切线距离。算法不再生成独立偏置点；这些值只作为真实输出点和真实输入点之间的对齐距离参与计算。默认从 UE `UGraphEditorSettings::ComputeSplineTangent()` 相关设置推导；显式传入时覆盖默认值。
-- `pin_direction_bias_x`：兼容旧参数。若传入，会同时设置 `output_access_offset_x` 与 `input_access_offset_x`；新调用优先使用上面两个角色化参数。
+- 输入输出访问偏置不再作为命令参数开放。命令入口必须从 UE `UGraphEditorSettings::ComputeSplineTangent()` 计算真实 GraphEditor 连线访问距离，并同时写入 `output_access_offset_x`、`input_access_offset_x` 和 `pin_direction_bias_x` 返回字段；传入旧 `output_access_offset_x`、`input_access_offset_x` 或 `pin_direction_bias_x` 不会覆盖真实值。
 - `use_real_geometry`：兼容参数。普通排版路径强制视为 `true`，因为算法不再支持估算 pin；`layout_report_file` 恢复路径不重新运行算法，因此不需要采集几何。普通真实几何采集会临时切到固定 `geometry_measurement_zoom=1.0`，避免节点尺寸和 pin anchor 随当前 GraphEditor zoom 漂移；只要 `allow_geometry_view_capture=false`，命令不会准备窗口、调整 overview、截图或强制窗口 redraw。pin anchor 优先通过 Slate `ArrangeChildren` 递归读取 `SGraphPin` arranged geometry，并按 UE `FConnectionDrawingPolicy::DrawSplineWithArrow(StartGeom, EndGeom)` 的实际连接端点计算：输出端取 `SGraphPin` 几何右侧中点并应用 `StartFudgeX=4`，输入端取左侧中点并应用 `ArrowRadius.X - EndFudgeX`。不再使用 pin image 中心作为排版 anchor；即使当前窗口最小化或 GraphPanel 没有可用 tick/cached geometry，也会使用合成 GraphPanel root geometry 完成布局计算。
 - `require_real_geometry`：兼容参数。普通排版路径强制视为 `true`；如果节点尺寸或已连接 pin anchor 不完整，命令失败而不是退回估算。
 - `allow_geometry_view_capture`：是否允许真实几何采集准备 Blueprint 编辑器窗口、调整图面 view、执行窗口 redraw，默认 `false`。该参数是高风险开关，只用于专门诊断或离线验收；它不是读取 pin arranged geometry 的必要条件。
 - `allow_focused_geometry_capture`：是否允许逐节点 focused 几何补采集，默认 `false`，并会隐式启用 `allow_geometry_view_capture=true`。该路径会大量移动 GraphEditor view 和刷新 Slate，是已知可能造成蓝图编辑器卡顿/临时模糊的高风险路径；普通 `use_real_geometry` / `require_real_geometry` 不会进入该路径。
-- `layout_report_file`：项目相对或绝对 report JSON 路径。传入后命令不重新运行自动排版算法，而是从该 report 中读取 `nodes[].guid/new_pos_x/new_pos_y` 和 `reroute_plan[]`，按当前图语义边重建节点位置和 `K2Node_Knot`。恢复 report 时 `knot_points` 优先作为可见中途点控制点坐标，旧 report 的 `point_roles=target_input/source_output` 只作兼容输入并会被归一化为 `Auto`，不会触发旧偏置点反投影；写回 `K2Node_Knot` 时仍统一套用 UE spacer 转换。该参数只用于恢复已验证布局或事故回滚；它会绕过真实几何采集，但仍保留 `dry_run`、`insert_reroute_nodes`、`replace_existing_reroute_nodes`、`compile_after_layout`、`save_after_layout` 的语义。
+- `layout_report_file`：项目相对或绝对 report JSON 路径。传入后命令不重新运行自动排版算法，而是从该 report 中读取 `nodes[].guid/new_pos_x/new_pos_y` 和 `reroute_plan[]`，按当前图语义边重建节点位置和 `K2Node_Knot`。恢复 report 时 `knot_points` 优先作为可见中途点控制点坐标，旧 report 的 `point_roles=target_input/source_output` 只作兼容输入并会被归一化为 `Auto`，不会触发旧偏置点反投影；写回 `K2Node_Knot` 时仍统一套用 UE spacer 转换。该参数只用于恢复已验证布局或事故回滚；它会绕过真实几何采集，但仍然必然写回资产，并保留 `insert_reroute_nodes`、`replace_existing_reroute_nodes`、`compile_after_layout`、`save_after_layout` 的语义。
 - `origin_x` / `origin_y`：最终图布局起点，默认 `0 / 0`。
-- `dry_run=true`：只返回位置、metrics 和 reroute 计划，不写入资产。
+- `dry_run` 已删除：布局命令只要调用成功就必须写回资产。所有写回都包在 UE undo transaction 中；命令执行失败时会取消本次事务，成功后需要回退则使用 UE Undo。
 - `insert_reroute_nodes=true`：按当前 reroute 计划写入新的 `K2Node_Knot`。
 - `replace_existing_reroute_nodes=true`：写入前删除图中已有 `K2Node_Knot`，再按当前计划重建。若 `insert_reroute_nodes=true`，当前实现会强制进入等价的替换模式，避免旧中途点和新中途点叠加成重复连线。
 - `allow_remove_all_reroute_nodes=false`：默认保护项。自动排版写回时，如果图中已有 reroute 节点、请求替换旧 reroute，但当前算法计划生成的 reroute knot 数为 0，命令会失败并返回 `reroute_delete_all_guard_blocked`，避免一次算法退化把已验证的输入链/总线中途点全部删除。只有明确要把整图所有 reroute 展平时才传 `true`。`layout_report_file` 恢复不受此保护阻断。
@@ -138,15 +138,40 @@
 - `input_chain_forbidden_zone_count` / `input_chain_forbidden_avoidance_count`：输入链目标节点上，非输入链数据输入接口形成的 Y 禁区数量，以及输入链复合元素为了避开这些禁区发生的移动次数。输出 pin 不参与输入链禁区生成；输出连线和执行线冲突交给后续 direct / local bus / external bus 路由处理，不能推开输入链对目标输入 pin 的对齐。若非输入链连接的端点 AABB 穿过输入链分段碰撞箱，会生成 `input_chain_collision_guard` 中途点；守卫点 X 以输入链分段左边界为理想值，但会按 `ConnectionAlignmentShortenX >= 0` 向右推到合法输入对齐位置。
 - `input_chain_collision_reroute_count` / `input_chain_collision_reroute_rejected_count`：非输入链连接端点 AABB 穿过输入链分段碰撞箱时生成的本地守卫中途点数量，以及因为 `ConnectionAlignmentShortenX < 0` 被拒绝的数量。
 - 列内密排、双列锚定和输入链 slot packing 使用 pixel-safe 高度与整数 top 约束：真实 Slate 高度含小数时会先按上取整后的 slot 参与避让，再写回整数 `NodePosX/Y`。这避免先用小数密排、最后四舍五入导致下一次 dry-run 继续出现 1px 位移或 padding overlap。
-- `island_local_frozen_node_count` / `island_local_membership_mutation_count` / `island_local_mutation_count` / `island_local_max_mutation`：岛内排布冻结契约诊断。岛内排布完成后会冻结每个 island 的成员顺序和节点局部坐标；后续岛间端口匹配、X/Y 求解、corridor routing 和 reroute 计划只能移动整岛或读取坐标。若成员或局部坐标被后续阶段修改，mutation count 会大于 0，`layout_design_complete=false`，非 `dry_run` 写回会以 `island_local_layout_mutation_blocked` 失败。
+- `island_local_frozen_node_count` / `island_local_membership_mutation_count` / `island_local_mutation_count` / `island_local_max_mutation`：岛内排布冻结契约诊断。岛内排布完成后会冻结每个 island 的成员顺序和节点局部坐标；后续岛间端口匹配、X/Y 求解、corridor routing 和 reroute 计划只能移动整岛或读取坐标。若成员或局部坐标被后续阶段修改，mutation count 会大于 0，`layout_design_complete=false`，写回前会以 `island_local_layout_mutation_blocked` 失败并取消事务。
 - `layout_design_feature_coverage[]` 中的 `scc_feedback_rank_ignored_edges` 表示回边只被 rank 忽略、不切岛；`comment_box_special_island` 表示注释框包围组已作为冻结特殊岛进入拆岛；`fanout_implicit_edges` 表示真正 fanout 已转为 island-cut；`weak_connected_node_islands` 表示只移除 island-cut 边后做弱连通成岛；`right_anchored_island_rank` 表示岛内核心节点已按右侧输出端从右向左计算 rank，使相连节点的 rank 差尽可能小；`input_chain_attachment` 表示单输入链抽离、附属和回插逻辑已启用。
 - `metrics_before` / `metrics_after` / `metrics_after_reroute_plan`：排版前、节点移动后、考虑 reroute 计划后的 metrics。
 - `nodes[]`：每个节点的 guid、标题、类名、rank、order、旧/新位置、真实宽高、是否移动、是否注释框节点和 `comment_depth`。
 - `reroute_plan[]`：每条计划的边索引、route kind、bus id、lane、合并组和可见中途点控制点坐标。
 - `layout_design_feature_coverage[]`：设计文档各子算法的真实覆盖状态，不再用固定常量伪造完成度。
-- `island_diagnostics[]` / `input_chains[]` / `island_edge_diagnostics[]` / `column_diagnostics[]` / `internal_bus_groups[]` / `boundary_entries[]` / `boundary_buses[]` / `island_local_mutations[]` / `island_port_candidates[]` / `ready_batches[]` / `selected_endpoint_candidates[]` / `bus_contracts[]` / `cross_bus_lanes[]` / `route_reservations[]` / `corridor_routes[]` / `lane_assignments[]` / `rejection_diagnostics[]`：新算法内部诊断。`input_chains[]` 会列出每条附属输入链的目标节点、目标 pin、链节点数、占用 corridor、禁区避让计数、分段碰撞箱和避让后的放置摘要。`island_local_mutations[]` 仅当冻结后的 island-local 成员或坐标被后续阶段改变时出现，用于定位 stage/island/node。`island_port_candidates[]` 中的 `target_local` 是岛边界虚拟入口，`actual_target_local` 是真实目标输入接口；`selected_endpoint_candidates[]` 记录最终被 Stable Frontier 选中的入口；`bus_contracts[]` 会记录 `branch_y_min/max`、`output_to_bus_bundle_y_distance`、`branch_lane_index` 和 `merged_branch_x`；`cross_bus_lanes[]` 会记录 Y 投影冲突 lane 的理想/最终 branch X、合法左右界、`branch_x_planned_at_generation` 和 `closer_output_prefers_right_branch_x`；`lane_assignments[]` 会记录标准 `lane_spacing`、实际用于选择的 `effective_lane_spacing`、`minimum_visible_lane_spacing`、`compact_trunk_lane_spacing_used`、`hard_hit_relaxed_for_lane_spacing` 和 `lane_conflict_fallback_used`。`minimum_visible_lane_spacing` 来自本冲突组真实相邻 pin Y 行距，取不到时为 `max(NodePadding * 1.5, 36)`；`compact_trunk_lane_spacing_used=true` 时仍必须满足这个可见接口行距，不能退化为几像素或明显小于接口行距的视觉贴合。`lane_conflict_fallback_used` 应为 `false`；如果 hard-free 窄通道不足，生成期会先设置 `hard_hit_relaxed_for_lane_spacing=true` 并继续保持可见 lane 分离，最后才允许 lane conflict fallback。紧凑 trunk lane 只表示该 corridor 硬空窗口过窄，生成期使用可见紧凑 lane 仍严格避让，并不代表后处理补救。后续 direct-obstacle 局部 bus 若必须放弃软 lane reservation 才能保证 hard-hit 为 0，会在 `rejection_diagnostics[]` 输出 `direct_obstacle_route_soft_lane_conflict_accepted`，这不是 hard collision 失败。branch X 搜索区间是源端前方下限到目标端对齐上限，候选包含少量目标侧 lane 候选和 hard rect 左右边界避让点；诊断中的 `branch_x` 若明显早于目标端，表示生成期为了避免穿岛主动提前分支，不是后处理补线。检查上下连接是否应用输入输出对齐时，应看 `actual_target_local`、`corridor_routes[].points` 中接近目标的分支点，以及对应 `ConnectionAlignmentShortenX` 是否接近 0。`reroute_plan[].points` 与 `reroute_plan[].knot_points` 都是可见中途点控制点位置，`point_roles[]` 只保留兼容旧报告，当前默认 `Auto`。
+- `island_diagnostics[]` / `input_chains[]` / `island_edge_diagnostics[]` / `column_diagnostics[]` / `internal_bus_groups[]` / `boundary_entries[]` / `boundary_buses[]` / `island_local_mutations[]` / `island_port_candidates[]` / `ready_batches[]` / `selected_endpoint_candidates[]` / `bus_contracts[]` / `cross_bus_lanes[]` / `route_reservations[]` / `corridor_routes[]` / `lane_assignments[]` / `rejection_diagnostics[]`：新算法内部诊断。`input_chains[]` 会列出每条附属输入链的目标节点、目标 pin、链节点数、占用 corridor、禁区避让计数、分段碰撞箱和避让后的放置摘要。`island_local_mutations[]` 仅当冻结后的 island-local 成员或坐标被后续阶段改变时出现，用于定位 stage/island/node。`island_port_candidates[]` 中的 `target_local` 是岛边界虚拟入口，`actual_target_local` 是真实目标输入接口；`selected_endpoint_candidates[]` 记录最终被 Stable Frontier 选中的入口；`bus_contracts[]` 会记录 `branch_y_min/max`、`output_to_bus_bundle_y_distance`、`branch_lane_index` 和 `merged_branch_x`；`cross_bus_lanes[]` 会记录 Y 投影冲突 lane 的理想/最终 branch X、合法左右界、`branch_x_planned_at_generation` 和 `closer_output_prefers_right_branch_x`；`lane_assignments[]` 会记录标准 `lane_spacing`、实际用于选择的 `effective_lane_spacing`、`minimum_visible_lane_spacing`、`compact_trunk_lane_spacing_used`、`hard_hit_relaxed_for_lane_spacing` 和 `lane_conflict_fallback_used`。横向 trunk 的 `lane_spacing` / `effective_lane_spacing` / `minimum_visible_lane_spacing` 均固定为 `20px`；它不再来自真实相邻 pin 行距、`NodePadding` 或旧的 standard/compact 下限。`lane_conflict_fallback_used` 应为 `false`；如果 hard-free 窄通道不足，生成期会先设置 `hard_hit_relaxed_for_lane_spacing=true` 并继续保持固定 `20px` trunk Y 分离，不能退回小于 `20px` 的视觉贴合。紧凑 trunk lane 只表示该 corridor 硬空窗口过窄时仍在同一候选集合内严格求解，并不代表后处理补救。后续 direct-obstacle 局部 bus 若必须放弃软 lane reservation 才能保证 hard-hit 为 0，会在 `rejection_diagnostics[]` 输出 `direct_obstacle_route_soft_lane_conflict_accepted`，这不是 hard collision 失败。branch X 搜索区间是源端前方下限到目标端对齐上限，候选包含少量目标侧 lane 候选和 hard rect 左右边界避让点；诊断中的 `branch_x` 若明显早于目标端，表示生成期为了避免穿岛主动提前分支，不是后处理补线。检查上下连接是否应用输入输出对齐时，应看 `actual_target_local`、`corridor_routes[].points` 中接近目标的分支点，以及对应 `ConnectionAlignmentShortenX` 是否接近 0。`reroute_plan[].points` 与 `reroute_plan[].knot_points` 都是可见中途点控制点位置，`point_roles[]` 只保留兼容旧报告，当前默认 `Auto`。
 - `corridor_routes[].post_refine_cleared=true` 表示该路线的初始 corridor 诊断曾穿 hard occupancy，但同一生成期的 segment refine 已经把最终 `reroute_plan` 修正为不穿节点；最终完成度以 `metrics_after_reroute_plan` 为准。
 - `column_diagnostics[]` 中的 `column_gap_base_demands`、`column_gap_bus_lane_pitches`、`column_gap_bus_demands`、`input_chain_width_demands` 用于拆解岛内列间距来源：`column_gap_base_demands` 表示输入/输出访问偏置总和，`column_gap_bus_lane_pitches` 表示该 corridor 采用的分支点 X 向避让距离，且不会小于半个输入输出访问距离，`column_gap_bus_demands` 表示 `min(输入输出偏置总和, X避让距离 * (1 + 内部总线数量))` 后的紧凑局部总线需求；最终 `column_gaps` 等于该紧凑局部总线需求和输入链 corridor 宽度需求的较大值，不再以全局 `HorizontalSpacing` 作为岛内相邻列的硬下限。
+
+### `blueprint_layout_all_graphs`
+
+用途：以 `blueprint_layout_graph` 为底层能力，对同一个 Blueprint 资产内的多个图执行同一套自动排版。该命令用于把当前稳定的 Blueprint 排布算法从“必须手动指定一个图”扩展到“任意 Blueprint 资产可直接批量排布”，不会实现第二套排布算法，也不会在批量层增加节点/连线特例。
+
+图选择规则：
+
+- 若传入 `graph_name` 或 `graph_path`，只排布该图。若传入 `graph_names` 或 `graphs`，按数组逐项解析；数组项可以是字符串，也可以是含 `graph_name` / `graph_path` / `name` 的对象。
+- 若没有显式图选择器，默认排布 `UbergraphPages`、`FunctionGraphs`、`MacroGraphs`；`DelegateSignatureGraphs` 默认不排布，可用 `include_delegate_graphs=true` 打开。
+- `include_nested_graphs=true` 时会额外调用 `UBlueprint::GetAllGraphs()` 补充 Blueprint 内的嵌套图，并用去重保护避免同一 `UEdGraph` 重复排布。
+- `skip_empty_graphs` 默认 `true`。只有旧 reroute 节点、没有语义节点的空图会作为 `skipped=true, skip_reason=empty_graph` 返回，不会打开图面做真实几何采集。
+
+执行规则：
+
+- 每个目标图都通过现有 `blueprint_layout_graph` 路径执行，因此真实 Slate 几何、固定测量 zoom、输入输出对齐、岛内冻结、总线规划、写回 reroute 等契约完全一致。
+- 批量层只负责图枚举、去重、空图跳过、逐图调用和汇总统计，不允许加入布局决策、后处理修线或节点名/pin 名特例。
+- `layout_report_file` 只允许在最终目标图数量为 1 时使用；多个图不能共用一个单图 layout report。
+- `stop_on_error` 默认 `true`，任一图失败立即失败并返回已完成图的摘要；设为 `false` 时继续尝试剩余图，最终以 `failed_graph_count` 和 `all_succeeded=false` 表示部分失败。
+
+返回字段：
+
+- `graph_count`、`processed_graph_count`、`skipped_graph_count`、`failed_graph_count`、`changed_graph_count`、`saved_graph_count`：批量执行汇总。
+- `layout_design_complete`：所有已处理图都成功且没有设计契约未完成时为 `true`。
+- `total_node_count`、`total_edge_count`、`total_moved_node_count`、`total_reroute_plan_count`、`total_created_reroute_node_count`、`total_route_through_island_count`、`total_route_through_hard_occupancy_count`：逐图核心指标汇总。
+- `graphs[]`：每个图的 `graph_name`、`graph_path`、`graph_type`、`ok`、`skipped`、`semantic_node_count` 和关键排版指标。传 `include_graph_result_details=true` 时，每项额外包含完整 `layout_result`，用于调试单图问题。
 
 约束：
 

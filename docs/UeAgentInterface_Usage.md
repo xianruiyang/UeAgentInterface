@@ -61,6 +61,7 @@ UeAgentInterfaceCMD/dist/uai-cli.exe
 | Level Topology / Streaming / World Partition / DataLayer / HLOD | `docs/commands/25_LevelTopology_Streaming_WorldPartition_DataLayer_HLOD.md` |
 | Physics / Chaos 基础 | `docs/commands/26_Physics_Baseline.md` |
 | Localization / Packaging / Platform Profiles | `docs/commands/27_Localization_Packaging_PlatformProfiles.md` |
+| Node Graph 通用排布 | `docs/commands/28_NodeGraph.md` |
 
 ## 调用格式
 

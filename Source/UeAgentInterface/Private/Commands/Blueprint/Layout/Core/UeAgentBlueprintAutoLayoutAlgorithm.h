@@ -130,6 +130,8 @@ namespace UeAgentBlueprintAutoLayout
 		double AnchoredColumnMaxPinResidual = 0.0;
 		int32 IslandInternalPlacementCount = 0;
 		int32 IslandInternalLeftBoundaryEntryCount = 0;
+		int32 IslandInternalMultiColumnBusCount = 0;
+		int32 IslandInternalSameColumnCollisionBusCount = 0;
 		double IslandInternalTotalPinResidual = 0.0;
 		double IslandInternalMaxPinResidual = 0.0;
 		int32 IslandLocalFrozenNodeCount = 0;
@@ -158,6 +160,10 @@ namespace UeAgentBlueprintAutoLayout
 		int32 BranchMergeGroupCount = 0;
 		int32 CrossBusTrunkLaneCount = 0;
 		int32 CrossBusLaneCount = 0;
+		int32 FinalVisibleBusLaneAdjustmentCount = 0;
+		int32 FinalVisibleBusLaneViolationCount = 0;
+		int32 FinalVisibleBranchXLaneAdjustmentCount = 0;
+		int32 FinalVisibleBranchXLaneViolationCount = 0;
 		int32 RouteThroughHardOccupancyCount = 0;
 		double IslandConnectionTotalLength = 0.0;
 		double TotalRouteLength = 0.0;
@@ -191,13 +197,14 @@ namespace UeAgentBlueprintAutoLayout
 		double HorizontalSpacing = 300.0;
 		double VerticalSpacing = 140.0;
 		double NodePadding = 24.0;
-		// Deprecated compatibility alias. Command entry maps it to both access offsets.
-		double PinDirectionBiasX = 24.0;
-		double OutputAccessOffsetX = 24.0;
-		double InputAccessOffsetX = 24.0;
-		FString AccessOffsetSource = TEXT("legacy_pin_direction_bias_x");
+		// Deprecated compatibility alias. Command entries must set real GraphEditor-derived access offsets.
+		double PinDirectionBiasX = 0.0;
+		double OutputAccessOffsetX = 0.0;
+		double InputAccessOffsetX = 0.0;
+		FString AccessOffsetSource;
 		bool bUseRealGeometry = false;
 		int32 MissingPinAnchorCount = 0;
+		int32 MissingMeasuredNodeGeometryCount = 0;
 	};
 
 	struct FRunResult

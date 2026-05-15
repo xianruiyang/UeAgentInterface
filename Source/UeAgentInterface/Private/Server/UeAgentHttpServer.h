@@ -63,6 +63,7 @@ public:
 #include "Commands/Landscape/UeAgentHttpServer_LandscapeMembers.h"
 #include "Commands/StaticMesh/UeAgentHttpServer_StaticMeshMembers.h"
 #include "Commands/Blueprint/UeAgentHttpServer_BlueprintMembers.h"
+#include "Commands/NodeGraph/UeAgentHttpServer_NodeGraphMembers.h"
 #include "Commands/AnimBlueprint/UeAgentHttpServer_AnimBlueprintMembers.h"
 #include "Commands/Montage/UeAgentHttpServer_MontageMembers.h"
 #include "Commands/UMG/UeAgentHttpServer_UMGMembers.h"

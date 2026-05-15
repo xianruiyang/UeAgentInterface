@@ -211,6 +211,8 @@ namespace
 		{
 			static const FExactCommandEntry GExactCommandEntries[] = {
 				{ TEXT("exec_batch"), &InvokeExactWithCtxArtifacts<&FUeAgentHttpServer::ExecuteBatchCommands> },
+				{ TEXT("node_graph_list"), &InvokeExactWithCtx<&FUeAgentHttpServer::CmdNodeGraphList> },
+				{ TEXT("node_graph_layout"), &InvokeExactWithCtx<&FUeAgentHttpServer::CmdNodeGraphLayout> },
 				{ TEXT("get_world_state"), &InvokeExactNoCtx<&FUeAgentHttpServer::CmdGetWorldState> },
 				{ TEXT("list_actors"), &InvokeExactWithCtx<&FUeAgentHttpServer::CmdListActors> },
 				{ TEXT("actor_list_components"), &InvokeExactWithCtx<&FUeAgentHttpServer::CmdActorListComponents> },

@@ -2,7 +2,7 @@
 
 本目录是 UeAgentInterface 的正式命令分册入口。当前覆盖矩阵来自 `uai-cli release coverage`：
 
-- 命令总数：`867`
+- 命令总数：`876`
 - 缺正式文档：`0`
 - 缺实现：`0`
 - 缺 smoke：`0`
@@ -66,6 +66,7 @@ bootstrap -> export -> refine -> validate -> apply -> export/readback -> smoke/p
 | `25_LevelTopology_Streaming_WorldPartition_DataLayer_HLOD.md` | 39 | Level Streaming、World Partition、DataLayer、HLOD | 关卡拓扑和构建任务 |
 | `26_Physics_Baseline.md` | 14 | 基础 Physics、PhysicalMaterial、Constraint、PhysicsAsset、runtime probe | 不依赖额外插件的物理基础 |
 | `27_Localization_Packaging_PlatformProfiles.md` | 40 | Localization、StringTable、Packaging、TargetPlatform、DeviceProfile、Scalability | 本地化、打包和平台 profile |
+| `28_NodeGraph.md` | 2 | 跨资产节点连线图 list/layout | 对 Blueprint、UMG、AnimBlueprint、Material 等节点连线图使用统一排布入口 |
 | `deprecatedCommand/README.md` | - | 已被 JSON / folder workflow 覆盖的旧写入命令 | 兼容旧脚本、迁移和局部补修 |
 
 ## 按任务路由
@@ -82,6 +83,7 @@ bootstrap -> export -> refine -> validate -> apply -> export/readback -> smoke/p
 | Project Settings 或 `.ini` | `22_ProjectSettings_Config.md` | 各业务分册重复编辑普通设置字段 |
 | DataAsset、PrimaryAsset、DataTable | `24_DataDriven_DataAsset_DataTable.md` | 把 DataTable 当普通 DataAsset 或 StringTable |
 | Packaging、Localization、Platform Profile | `27_Localization_Packaging_PlatformProfiles.md` | UAI release pipeline 或普通 Project Settings 镜像 |
+| 跨资产节点连线图排布 | `28_NodeGraph.md` | 针对每类资产手写不同 layout 调用 |
 
 ## 通用返回和诊断约定
 
