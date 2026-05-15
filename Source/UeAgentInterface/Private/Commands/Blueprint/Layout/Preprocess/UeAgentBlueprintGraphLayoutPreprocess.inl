@@ -30,6 +30,7 @@ namespace UeAgentBlueprintOps
 			bool bRealGeometryCaptureRequested = false;
 			bool bGeometryViewCaptureAllowed = false;
 			bool bFocusedGeometryCaptureAllowed = false;
+			bool bUsedOffscreenGraphEditor = false;
 			FVector2f RestoredViewLocation = FVector2f::ZeroVector;
 			float RestoredZoomAmount = 1.0f;
 			float GeometryMeasurementZoomAmount = 1.0f;
@@ -969,23 +970,46 @@ namespace UeAgentBlueprintOps
 				*Graph->GetName(),
 				Model.Nodes.Num(),
 				Model.Edges.Num());
-			TSharedPtr<IBlueprintEditor> BlueprintEditor = UeAgentBlueprintOps::GetBlueprintEditor(Blueprint, true, OutError);
-			if (!BlueprintEditor.IsValid())
+			TSharedPtr<IBlueprintEditor> BlueprintEditor;
+			TSharedPtr<SGraphEditor> OwnedGeometryGraphEditor;
+			TSharedPtr<SGraphEditor> GraphEditor;
+			const bool bUseLiveGraphEditorForGeometry = bAllowGeometryViewCapture || bAllowFocusedGeometryCapture;
+			if (bUseLiveGraphEditorForGeometry)
 			{
-				OutStats.Error = OutError;
-				return false;
+				BlueprintEditor = UeAgentBlueprintOps::GetBlueprintEditor(Blueprint, true, OutError);
+				if (!BlueprintEditor.IsValid())
+				{
+					OutStats.Error = OutError;
+					return false;
+				}
+				UE_LOG(LogUeAgentInterface, Display, TEXT("BlueprintLayoutGeometry editor_ready elapsed_ms=%.1f"),
+					(FPlatformTime::Seconds() - CaptureStartSeconds) * 1000.0);
+				GraphEditor = BlueprintEditor->OpenGraphAndBringToFront(Graph, true);
+				if (!GraphEditor.IsValid())
+				{
+					OutError = TEXT("graph_editor_not_found_for_real_geometry");
+					OutStats.Error = OutError;
+					return false;
+				}
+				UE_LOG(LogUeAgentInterface, Display, TEXT("BlueprintLayoutGeometry live_graph_editor_ready elapsed_ms=%.1f"),
+					(FPlatformTime::Seconds() - CaptureStartSeconds) * 1000.0);
 			}
-			UE_LOG(LogUeAgentInterface, Display, TEXT("BlueprintLayoutGeometry editor_ready elapsed_ms=%.1f"),
-				(FPlatformTime::Seconds() - CaptureStartSeconds) * 1000.0);
-			TSharedPtr<SGraphEditor> GraphEditor = BlueprintEditor->OpenGraphAndBringToFront(Graph, true);
-			if (!GraphEditor.IsValid())
+			else
 			{
-				OutError = TEXT("graph_editor_not_found_for_real_geometry");
-				OutStats.Error = OutError;
-				return false;
+				OwnedGeometryGraphEditor = UeAgentBlueprintOps::CreateOffscreenGraphEditorForCapture(
+					Graph,
+					TEXT("UAI real geometry probe"),
+					OutError);
+				if (!OwnedGeometryGraphEditor.IsValid())
+				{
+					OutStats.Error = OutError;
+					return false;
+				}
+				GraphEditor = OwnedGeometryGraphEditor;
+				OutStats.bUsedOffscreenGraphEditor = true;
+				UE_LOG(LogUeAgentInterface, Display, TEXT("BlueprintLayoutGeometry offscreen_graph_editor_ready elapsed_ms=%.1f"),
+					(FPlatformTime::Seconds() - CaptureStartSeconds) * 1000.0);
 			}
-			UE_LOG(LogUeAgentInterface, Display, TEXT("BlueprintLayoutGeometry graph_editor_ready elapsed_ms=%.1f"),
-				(FPlatformTime::Seconds() - CaptureStartSeconds) * 1000.0);
 			SGraphPanel* GraphPanel = GraphEditor->GetGraphPanel();
 			if (!GraphPanel)
 			{

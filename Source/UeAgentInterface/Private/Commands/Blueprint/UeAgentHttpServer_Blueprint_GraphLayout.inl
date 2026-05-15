@@ -263,6 +263,7 @@ bool FUeAgentHttpServer::CmdBlueprintLayoutGraph(const FUeAgentRequestContext& C
 	OutData->SetStringField(TEXT("geometry_source"), GeometryStats.GeometrySource);
 	OutData->SetBoolField(TEXT("used_real_geometry"), GeometryStats.bUsedRealGeometry);
 	OutData->SetBoolField(TEXT("geometry_window_prepared"), GeometryStats.bWindowPrepared);
+	OutData->SetBoolField(TEXT("geometry_used_offscreen_graph_editor"), GeometryStats.bUsedOffscreenGraphEditor);
 	OutData->SetNumberField(TEXT("measured_node_count"), GeometryStats.MeasuredNodeCount);
 	OutData->SetNumberField(TEXT("missing_measured_node_geometry_count"), FMath::Max(0, GeometryStats.NodeCount - GeometryStats.MeasuredNodeCount));
 	OutData->SetNumberField(TEXT("pin_widget_count"), GeometryStats.PinWidgetCount);

@@ -96,7 +96,7 @@
 - `vertical_spacing`：岛列之间的基础 Y 间距，默认 `140`。
 - `node_padding`：节点避让和重叠检测额外留白，默认 `24`。
 - 输入输出访问偏置不再作为命令参数开放。命令入口必须从 UE `UGraphEditorSettings::ComputeSplineTangent()` 计算真实 GraphEditor 连线访问距离，并同时写入 `output_access_offset_x`、`input_access_offset_x` 和 `pin_direction_bias_x` 返回字段；传入旧 `output_access_offset_x`、`input_access_offset_x` 或 `pin_direction_bias_x` 不会覆盖真实值。
-- `use_real_geometry`：兼容参数。普通排版路径强制视为 `true`，因为算法不再支持估算 pin；`layout_report_file` 恢复路径不重新运行算法，因此不需要采集几何。普通真实几何采集会临时切到固定 `geometry_measurement_zoom=1.0`，避免节点尺寸和 pin anchor 随当前 GraphEditor zoom 漂移；只要 `allow_geometry_view_capture=false`，命令不会准备窗口、调整 overview、截图或强制窗口 redraw。pin anchor 优先通过 Slate `ArrangeChildren` 递归读取 `SGraphPin` arranged geometry，并按 UE `FConnectionDrawingPolicy::DrawSplineWithArrow(StartGeom, EndGeom)` 的实际连接端点计算：输出端取 `SGraphPin` 几何右侧中点并应用 `StartFudgeX=4`，输入端取左侧中点并应用 `ArrowRadius.X - EndFudgeX`。不再使用 pin image 中心作为排版 anchor；即使当前窗口最小化或 GraphPanel 没有可用 tick/cached geometry，也会使用合成 GraphPanel root geometry 完成布局计算。
+- `use_real_geometry`：兼容参数。普通排版路径强制视为 `true`，因为算法不再支持估算 pin；`layout_report_file` 恢复路径不重新运行算法，因此不需要采集几何。普通真实几何采集使用临时离屏 `SGraphEditor`，并在临时图面上切到固定 `geometry_measurement_zoom=1.0`，避免节点尺寸和 pin anchor 随用户当前 GraphEditor zoom 漂移；只要 `allow_geometry_view_capture=false`，命令不会打开、拉前、恢复、重绘或移动用户正在看的真实图面。pin anchor 优先通过 Slate `ArrangeChildren` 递归读取 `SGraphPin` arranged geometry，并按 UE `FConnectionDrawingPolicy::DrawSplineWithArrow(StartGeom, EndGeom)` 的实际连接端点计算：输出端取 `SGraphPin` 几何右侧中点并应用 `StartFudgeX=4`，输入端取左侧中点并应用 `ArrowRadius.X - EndFudgeX`。不再使用 pin image 中心作为排版 anchor；即使当前窗口最小化或 GraphPanel 没有可用 tick/cached geometry，也会使用合成 GraphPanel root geometry 完成布局计算。
 - `require_real_geometry`：兼容参数。普通排版路径强制视为 `true`；如果节点尺寸或已连接 pin anchor 不完整，命令失败而不是退回估算。
 - `allow_geometry_view_capture`：是否允许真实几何采集准备 Blueprint 编辑器窗口、调整图面 view、执行窗口 redraw，默认 `false`。该参数是高风险开关，只用于专门诊断或离线验收；它不是读取 pin arranged geometry 的必要条件。
 - `allow_focused_geometry_capture`：是否允许逐节点 focused 几何补采集，默认 `false`，并会隐式启用 `allow_geometry_view_capture=true`。该路径会大量移动 GraphEditor view 和刷新 Slate，是已知可能造成蓝图编辑器卡顿/临时模糊的高风险路径；普通 `use_real_geometry` / `require_real_geometry` 不会进入该路径。
@@ -110,7 +110,7 @@
 
 当前实现边界：
 
-- 普通排版会打开或复用目标 GraphEditor 以构造 Slate widget，并会临时切到固定 `geometry_measurement_zoom=1.0` 做几何采样，结束前必须恢复 document view 或进入采集前的 snapped view。只有显式开启 `allow_geometry_view_capture` 或 `allow_focused_geometry_capture` 的诊断路径才允许准备窗口、全图 overview、focused 单节点补采集或强制 redraw；该高风险路径不得写入半像素 pan 或非预期缩放。
+- 普通排版只允许使用临时离屏 GraphEditor 构造 Slate widget，并只在这份临时 widget 上切到固定 `geometry_measurement_zoom=1.0` 做几何采样；它不得打开、复用、拉前、重绘或移动用户正在看的真实图面。只有显式开启 `allow_geometry_view_capture` 或 `allow_focused_geometry_capture` 的诊断路径才允许接触 live GraphEditor、准备窗口、focused 单节点补采集或强制 redraw；该高风险路径不得写入半像素 pan 或非预期缩放。
 - 真实几何采集即使失败，也必须恢复到 Blueprint document view 或进入采集前的 snapped view；document view 恢复失败时必须 fallback 到保存的 view/zoom，不能把 overview/focused capture 的临时低缩放 live view 留给用户。
 - 默认真实几何采集不依赖截图或窗口 pixel readback；它使用 GraphEditor widget 树、`SGraphNode::GetDesiredSize()` 和 `SGraphPin` arranged geometry，并在固定采样 zoom 下转换为 UE 实际连线端点。只有显式开启 `allow_geometry_view_capture` 时才允许窗口准备和全图诊断采集；只有显式开启 `allow_focused_geometry_capture` 时才允许有预算的单节点补采集。超过补采集预算时返回 `focused_geometry_budget_exhausted=true`；已连接 pin 缺 anchor 会直接失败，未连接可见 pin 的缺失只进入 `missing_visible_pin_anchor_count` 统计。
 - 实际写回路径会在几何采集前执行一次可选预编译，并返回 `precompiled_before_layout`；这样可把节点真实尺寸、pin anchor、后续写回和幂等 dry-run 锁定在同一份编译状态上。
@@ -123,6 +123,7 @@
 - `layout_framework`：当前为 `clean_semantic_island_multiport_layout`。
 - `layout_design_complete`：当设计覆盖无 missing/partial、节点 overlap 为 0、普通后向边为 0、非法岛边为 0，且 metrics/diagnostics 契约中的 `route_through_island_count=0` 时为 `true`；`RankIgnoredFeedbackEdge` 不再按普通后向边判失败。
 - `geometry_source` / `used_real_geometry`：真实几何来源和是否完整使用真实几何。完整时 `geometry_source=slate_graph_editor_bounds_and_arranged_pin_geometry`。
+- `geometry_used_offscreen_graph_editor`：普通排版应为 `true`，表示几何采样发生在临时离屏 GraphEditor 上，没有触碰用户当前真实图面。
 - `geometry_source=incomplete_slate_real_pin_geometry` 表示真实节点尺寸或已连接 pin anchor 不完整；普通排版会失败，不再继续生成估算 pin 布局。
 - `precompiled_before_layout`：实际写回且 `compile_after_layout=true` 时是否已在几何采集前预编译，用于追踪真实尺寸是否来自稳定编译状态。
 - `measured_node_count`、`pin_widget_count`、`pin_geometry_anchor_count`、`missing_pin_anchor_count`、`missing_visible_pin_anchor_count`、`focused_geometry_node_count`、`focused_geometry_budget_exhausted`、`geometry_measurement_zoom`：真实几何采集统计。`pin_geometry_anchor_count` 统计通过 arranged `SGraphPin` geometry 取得并转换为 UE 实际连线端点的 anchor，包含合成 GraphPanel root geometry 路径；`geometry_measurement_zoom` 当前固定为 `1.0`，用于确认采样不再依赖用户当前蓝图缩放；`geometry_window_prepared=false` 仍可与 `used_real_geometry=true` 同时成立。`missing_pin_anchor_count` 指已连接 pin 的缺失数，是普通排版的硬失败依据。
@@ -224,7 +225,7 @@
 
 | 指令 | 作用 | 关键参数 |
 |---|---|---|
-| `blueprint_screenshot` | 对蓝图编辑器窗口/视口/图面板截图 | `asset_path`、`target`、`graph_name`、`format`、`quality`、`max_size`、`restore_graph_view_after_capture`、`open_editor_if_needed`、`allow_ui_mutation`、`allow_window_mutation` |
+| `blueprint_screenshot` | 对蓝图编辑器窗口/视口/图面板截图 | `asset_path`、`target`、`graph_name`、`format`、`quality`、`max_size`、`capture_width`、`capture_height`、`restore_graph_view_after_capture`、`open_editor_if_needed`、`allow_ui_mutation`、`allow_window_mutation` |
 
 `target` 支持：
 - `viewport`：组件预览视口
@@ -237,13 +238,15 @@
   - `viewport_window_crop_offscreen`：用离屏 WidgetRenderer 绘制 Blueprint 窗口后裁切预览视口区域；
   - `viewport_readpixels_fallback`：窗口裁切失败后，退回到视口像素读取；
   - `window_offscreen_fallback`：视口相关截图失败后，退回到离屏窗口截图；
-  - `graph_widget_offscreen_noninvasive`：graph/event_graph 默认路径，只离屏绘制 `SGraphEditor`，不恢复、不置前、不强制重绘真实窗口；
+  - `graph_widget_offscreen_noninvasive`：graph/event_graph 默认路径，复制当前 live view 或 document view 到临时离屏 `SGraphEditor` 后截图，不把真实图面交给 `FWidgetRenderer`，不置前、不强制重绘真实窗口；
   - `graph_widget_offscreen_mutating`：显式允许 UI 变更时的 graph 截图路径；
   - `slate_widget_offscreen`：普通 Slate Widget 离屏截图。
 - `allow_ui_mutation`：是否允许截图命令打开/拉前图面、改变 GraphEditor 焦点或触发窗口准备流程。`graph/event_graph` 默认 `false`，`viewport/window` 默认 `true`。当 `allow_ui_mutation=false` 时，如同时传 `open_editor_if_needed=true` 会失败返回 `open_editor_if_needed_requires_allow_ui_mutation`。
 - `allow_window_mutation`：是否允许截图命令对真实编辑器窗口执行 `Restore()`、`ShowWindow()`、`BringToFront()` 和 `ForceRedrawWindow()`。`allow_ui_mutation=true` 会隐式允许窗口变更；graph 默认不允许窗口变更。
 - `legacy_backbuffer_capture=disabled`：不再调用 `FSlateApplication::TakeScreenshot`，offscreen widget 截图也不再对所有真实 Slate viewport 执行 `InvalidateAllViewports()`。窗口变更被禁用时，目标窗口不可渲染会返回显式错误，而不是自动恢复或拉前真实 UE 窗口。
-- `restore_graph_view_after_capture` 默认 `true`。当截图目标是 `graph/event_graph` 且未允许 UI 变更时，截图完成后会把 live `SGraphEditor` 恢复到截图前的 view/zoom，并返回 `graph_view_restore_mode=pre_capture`、`graph_view_changed_after_capture`、前后 pixel residual 字段；显式允许 UI 变更时仍按 document view 恢复，返回 `graph_view_restore_mode=document`。
+- `graph_capture_used_owned_editor` / `graph_capture_widget_source`：graph 默认非侵入截图必须返回 `graph_capture_used_owned_editor=true`，并说明临时图面的 view 来源是 live view、document view 还是默认 view。
+- `capture_width` / `capture_height`：仅 graph 非侵入截图使用的离屏画布尺寸，默认 `1440 x 900`；`max_size` 只控制最终输出缩放，不再用临时 `SGraphEditor` 的较小 desired size 决定截图范围。返回 `graph_capture_draw_width/height` 作为验收字段。
+- `restore_graph_view_after_capture` 默认 `true`。当截图目标是 `graph/event_graph` 且未允许 UI 变更时，截图不会修改 live `SGraphEditor`，因此返回 `graph_view_restore_mode=not_needed_offscreen_snapshot`；如果命令能读到 live 图面，会同时返回前后 view/zoom 和 `graph_view_changed_after_capture=false`。显式允许 UI 变更时仍按 document view 恢复，返回 `graph_view_restore_mode=document`。
 - `prepared_window_for_capture` / `window_mutated_for_capture`：用于确认本次截图是否实际走过窗口准备和窗口变更路径。排查蓝图截图后变卡、变糊时应优先检查这两个字段。
 
 ## 类级操作

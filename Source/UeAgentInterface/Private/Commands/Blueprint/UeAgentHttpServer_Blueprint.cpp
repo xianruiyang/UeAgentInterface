@@ -517,6 +517,30 @@ namespace UeAgentBlueprintOps
 		return BlueprintEditor;
 	}
 
+	static TSharedPtr<SGraphEditor> CreateOffscreenGraphEditorForCapture(UEdGraph* Graph, const FString& CornerText, FString& OutError)
+	{
+		if (!Graph)
+		{
+			OutError = TEXT("graph_not_found");
+			return nullptr;
+		}
+
+		FGraphAppearanceInfo AppearanceInfo;
+		AppearanceInfo.CornerText = FText::FromString(CornerText);
+		TSharedPtr<SGraphEditor> GraphEditor = SNew(SGraphEditor)
+			.IsEditable(false)
+			.DisplayAsReadOnly(true)
+			.ShowGraphStateOverlay(false)
+			.Appearance(AppearanceInfo)
+			.GraphToEdit(Graph);
+		if (!GraphEditor.IsValid())
+		{
+			OutError = TEXT("offscreen_graph_editor_create_failed");
+			return nullptr;
+		}
+		return GraphEditor;
+	}
+
 	static bool FindWidgetByTypeRecursive(const TSharedRef<SWidget>& RootWidget, const FName& TypeName, TSharedPtr<SWidget>& OutWidget)
 	{
 		if (RootWidget->GetType() == TypeName)
@@ -1023,6 +1047,57 @@ namespace UeAgentBlueprintOps
 				DrawSize.Y);
 		}
 		return ScreenshotSlateWidgetWithDrawSize(Widget, DrawSize, OutPixels, OutSize, OutError);
+	}
+
+	static bool ScreenshotSlateWidgetNonInvasive(
+		const TSharedRef<SWidget>& Widget,
+		const FVector2D& RequestedDrawSize,
+		TArray<FColor>& OutPixels,
+		FIntPoint& OutSize,
+		FString& OutError)
+	{
+		if (!FSlateApplication::IsInitialized())
+		{
+			OutError = TEXT("slate_not_initialized");
+			return false;
+		}
+
+		const double MaxDimension = 8192.0;
+		FVector2D DrawSize(
+			FMath::Clamp(FMath::RoundToDouble(RequestedDrawSize.X), 64.0, MaxDimension),
+			FMath::Clamp(FMath::RoundToDouble(RequestedDrawSize.Y), 64.0, MaxDimension));
+		return ScreenshotSlateWidgetWithDrawSize(Widget, DrawSize, OutPixels, OutSize, OutError);
+	}
+
+	static void PrepareOffscreenGraphEditorForCapture(
+		const TSharedPtr<SGraphEditor>& GraphEditor,
+		const FVector2f& ViewLocation,
+		const float ZoomAmount,
+		const int32 FrameCount = 2)
+	{
+		if (!GraphEditor.IsValid() || !FSlateApplication::IsInitialized())
+		{
+			return;
+		}
+
+		const float SafeZoom = UeAgentGraphViewUtils::SafeGraphZoomAmount(ZoomAmount);
+		const FVector2f SnappedViewLocation = UeAgentGraphViewUtils::SnapViewLocationToPixelGrid(ViewLocation, SafeZoom);
+		GraphEditor->SetViewLocation(SnappedViewLocation, SafeZoom);
+		SGraphPanel* GraphPanel = GraphEditor->GetGraphPanel();
+		for (int32 FrameIndex = 0; FrameIndex < FMath::Max(1, FrameCount); ++FrameIndex)
+		{
+			if (GraphPanel)
+			{
+				GraphPanel->Update();
+			}
+			PumpAndTickSlateForCapture();
+			const float WidgetScale = FSlateApplication::Get().GetApplicationScale();
+			GraphEditor->SlatePrepass(WidgetScale);
+			if (GraphPanel)
+			{
+				GraphPanel->SlatePrepass(WidgetScale);
+			}
+		}
 	}
 
 	static bool ScreenshotEditorViewportPixels(const TSharedRef<SEditorViewport>& ViewportWidget, TArray<FColor>& OutPixels, FIntPoint& OutSize, FString& OutError)

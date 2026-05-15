@@ -40,7 +40,7 @@ Control Rig 使用文件夹式结构化 JSON 作为主 authoring 流程。Contro
 
 ### `control_rig_create`
 
-`control_rig_screenshot` 复用 Blueprint 截图实现；Slate UI 截图默认走离屏 WidgetRenderer，返回 `legacy_backbuffer_capture=disabled`，不再使用真实窗口 backbuffer 截图。
+`control_rig_screenshot` 复用 Blueprint 截图实现；Slate UI 截图默认走离屏 WidgetRenderer，返回 `legacy_backbuffer_capture=disabled`，不再使用真实窗口 backbuffer 截图。`target=graph` 时可传 `capture_width/capture_height` 控制非侵入离屏画布尺寸，默认 `1440 x 900`。
 `control_rig_graph_set_view` 复用 Blueprint 图视图入口；`snap_to_pixel_grid` 默认 `true`，会按 `round(view * zoom) / zoom` 对齐屏幕像素，避免非 1 缩放下图面文字和线缆发糊。`update_document_view_state` 默认同步 UE 下次打开图时使用的文档视图状态，`save_after_set=true` 时把该状态写入资产包。
 
 参数：

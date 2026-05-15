@@ -82,6 +82,7 @@ namespace UeAgentNodeGraphOps
 		{
 			bool bUsedRealGeometry = false;
 			bool bOpenedEditorForGeometry = false;
+			bool bUsedOffscreenGraphEditor = false;
 			FString GeometrySource = TEXT("real_geometry_required");
 			FString Error;
 			int32 NodeCount = 0;
@@ -1123,6 +1124,7 @@ namespace UeAgentNodeGraphOps
 			OutData->SetBoolField(TEXT("used_real_geometry"), GeometryStats.bUsedRealGeometry);
 			OutData->SetStringField(TEXT("geometry_source"), GeometryStats.GeometrySource);
 			OutData->SetBoolField(TEXT("opened_editor_for_geometry"), GeometryStats.bOpenedEditorForGeometry);
+			OutData->SetBoolField(TEXT("geometry_used_offscreen_graph_editor"), GeometryStats.bUsedOffscreenGraphEditor);
 			OutData->SetNumberField(TEXT("geometry_node_count"), GeometryStats.NodeCount);
 			OutData->SetNumberField(TEXT("measured_node_count"), GeometryStats.MeasuredNodeCount);
 			OutData->SetNumberField(TEXT("missing_measured_node_geometry_count"), FMath::Max(0, GeometryStats.NodeCount - GeometryStats.MeasuredNodeCount));
@@ -2067,37 +2069,19 @@ namespace UeAgentNodeGraphOps
 				return false;
 			}
 
-			bool bOpenedEditor = false;
-			if (bOpenAssetEditorForGeometry)
-			{
-				OpenEditorForGeometryIfNeeded(Asset, bOpenedEditor);
-			}
-			else
-			{
-				PumpAndTickSlateForLayoutGeometry();
-			}
-			OutStats.bOpenedEditorForGeometry = bOpenedEditor;
-
-			TSharedPtr<SGraphEditor> GraphEditor = SGraphEditor::FindGraphEditorForGraph(Graph);
-			if (!GraphEditor.IsValid())
-			{
-				PumpAndTickSlateForLayoutGeometry();
-				GraphEditor = SGraphEditor::FindGraphEditorForGraph(Graph);
-			}
 			TSharedPtr<SGraphEditor> OwnedGeometryGraphEditor;
-			if (!GraphEditor.IsValid())
-			{
-				FGraphAppearanceInfo AppearanceInfo;
-				AppearanceInfo.CornerText = FText::FromString(TEXT("UAI real geometry probe"));
-				OwnedGeometryGraphEditor = SNew(SGraphEditor)
-					.IsEditable(false)
-					.DisplayAsReadOnly(true)
-					.ShowGraphStateOverlay(false)
-					.Appearance(AppearanceInfo)
-					.GraphToEdit(Graph);
-				GraphEditor = OwnedGeometryGraphEditor;
-				PumpAndTickSlateForLayoutGeometry();
-			}
+			FGraphAppearanceInfo AppearanceInfo;
+			AppearanceInfo.CornerText = FText::FromString(TEXT("UAI real geometry probe"));
+			OwnedGeometryGraphEditor = SNew(SGraphEditor)
+				.IsEditable(false)
+				.DisplayAsReadOnly(true)
+				.ShowGraphStateOverlay(false)
+				.Appearance(AppearanceInfo)
+				.GraphToEdit(Graph);
+			TSharedPtr<SGraphEditor> GraphEditor = OwnedGeometryGraphEditor;
+			OutStats.bOpenedEditorForGeometry = false;
+			OutStats.bUsedOffscreenGraphEditor = true;
+			PumpAndTickSlateForLayoutGeometry();
 			SGraphPanel* GraphPanel = GraphEditor->GetGraphPanel();
 			if (!GraphPanel)
 			{
