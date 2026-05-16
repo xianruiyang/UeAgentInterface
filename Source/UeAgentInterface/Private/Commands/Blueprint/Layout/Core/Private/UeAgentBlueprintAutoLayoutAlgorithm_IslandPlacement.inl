@@ -605,7 +605,9 @@
 			const FIsland& Island,
 			const int32 TargetNode,
 			const FVector2D& TargetPosition,
-			const FOptions& Options)
+			const FOptions& Options,
+			const TSet<int32>* ActiveInputChainCorridors = nullptr,
+			const bool bIncludeSourceNodeOccupancy = false)
 		{
 			TArray<FInputChainForbiddenZone> Zones;
 			if (!Nodes.IsValidIndex(TargetNode))
@@ -614,6 +616,7 @@
 			}
 			const TSet<int32> InputChainEdges = BuildInputChainEdgeSet(Island);
 			TSet<FString> UsedPinKeys;
+			TSet<int32> UsedSourceOccupancyNodes;
 			const double HalfHeight = InputChainForbiddenZoneHalfHeight(Options);
 			for (int32 EdgeIndex = 0; EdgeIndex < AllEdges.Num(); ++EdgeIndex)
 			{
@@ -638,6 +641,26 @@
 					Zone.PinIndex = Edge.TargetPinIndex;
 					Zone.bOutputPin = false;
 					Zones.Add(Zone);
+
+					if (bIncludeSourceNodeOccupancy
+						&& ActiveInputChainCorridors
+						&& Nodes.IsValidIndex(Edge.Source)
+						&& Island.NodeSet.Contains(Edge.Source)
+						&& !Island.InputChainNodeSet.Contains(Edge.Source)
+						&& !UsedSourceOccupancyNodes.Contains(Edge.Source)
+						&& ActiveInputChainCorridors->Contains(Nodes[Edge.Source].Rank))
+					{
+						UsedSourceOccupancyNodes.Add(Edge.Source);
+						const FNode& SourceNode = Nodes[Edge.Source];
+						FInputChainForbiddenZone SourceZone;
+						SourceZone.Top = SourceNode.NewY - Options.NodePadding;
+						SourceZone.Bottom = SourceNode.NewY + SourceNode.Height + Options.NodePadding;
+						SourceZone.EdgeIndex = EdgeIndex;
+						SourceZone.PinIndex = Edge.SourcePinIndex;
+						SourceZone.bOutputPin = true;
+						SourceZone.bSourceNodeOccupancy = true;
+						Zones.Add(SourceZone);
+					}
 				}
 			}
 			Zones.Sort([](const FInputChainForbiddenZone& A, const FInputChainForbiddenZone& B)
@@ -1256,13 +1279,28 @@
 					Item.bHasPreferred = true;
 					ChainItems.Add(Item);
 				}
+				TSet<int32> ActiveInputChainCorridors;
+				for (const int32 ChainIndex : ChainIndices)
+				{
+					if (!Island.InputChains.IsValidIndex(ChainIndex))
+					{
+						continue;
+					}
+					const int32 CorridorIndex = Island.InputChains[ChainIndex].CorridorIndex;
+					if (CorridorIndex != INDEX_NONE)
+					{
+						ActiveInputChainCorridors.Add(CorridorIndex);
+					}
+				}
 				const TArray<FInputChainForbiddenZone> Zones = BuildInputChainForbiddenZonesForTarget(
 					Nodes,
 					AllEdges,
 					Island,
 					TargetNode,
 					FVector2D(Nodes[TargetNode].NewX, Nodes[TargetNode].NewY),
-					Options);
+					Options,
+					&ActiveInputChainCorridors,
+					true);
 				int32 AvoidanceCount = 0;
 				PlaceAnchoredIntervalsAvoidingForbiddenZones(ChainItems, IntraTargetChainGap, Zones, &AvoidanceCount);
 				Result.DesignDiagnostics.InputChainForbiddenZoneCount += Zones.Num();
@@ -1318,27 +1356,6 @@
 				Obj->SetArrayField(TEXT("node_indices"), IntArrayToJson(Chain.Nodes));
 				Result.InputChainDiagnostics.Add(MakeShared<FJsonValueObject>(Obj));
 			}
-		}
-
-		static FRect BuildEndpointAabb(const FVector2D& A, const FVector2D& B)
-		{
-			FRect Bounds;
-			Bounds.Left = FMath::Min(A.X, B.X);
-			Bounds.Top = FMath::Min(A.Y, B.Y);
-			Bounds.Right = FMath::Max(A.X, B.X);
-			Bounds.Bottom = FMath::Max(A.Y, B.Y);
-			constexpr double LineTolerance = 0.5;
-			if (Bounds.Right - Bounds.Left < LineTolerance * 2.0)
-			{
-				Bounds.Left -= LineTolerance;
-				Bounds.Right += LineTolerance;
-			}
-			if (Bounds.Bottom - Bounds.Top < LineTolerance * 2.0)
-			{
-				Bounds.Top -= LineTolerance;
-				Bounds.Bottom += LineTolerance;
-			}
-			return Bounds;
 		}
 
 		static FRect OffsetRectXY(const FRect& Rect, const double DeltaX, const double DeltaY)
@@ -1475,7 +1492,13 @@
 				}
 				const FVector2D SourcePoint = GetSourcePort(Nodes[Edge.Source], Edge, true) + NodeIslandOffset(Edge.Source);
 				const FVector2D TargetPoint = GetTargetPort(Nodes[Edge.Target], Edge, true) + NodeIslandOffset(Edge.Target);
-				const FRect EndpointAabb = BuildEndpointAabb(SourcePoint, TargetPoint);
+				const FRect SourceRect = MakeNodeRectWithOffset(Nodes[Edge.Source], NodeIslandOffset(Edge.Source), true);
+				const FRect TargetRect = MakeNodeRectWithOffset(Nodes[Edge.Target], NodeIslandOffset(Edge.Target), true);
+				FRect EndpointAabb;
+				if (!TryBuildEscapedEndpointAabb(SourcePoint, &SourceRect, TargetPoint, &TargetRect, Options, EndpointAabb))
+				{
+					continue;
+				}
 
 				double GuardX = TNumericLimits<double>::Max();
 				if (!FindFirstIntersectingChainLeft(EndpointAabb, CollisionSegments, GuardX))

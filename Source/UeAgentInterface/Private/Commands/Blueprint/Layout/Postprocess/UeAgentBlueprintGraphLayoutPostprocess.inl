@@ -54,15 +54,29 @@ namespace UeAgentBlueprintOps
 		static int32 CountPlannedRerouteKnotNodes(const TArray<UeAgentBlueprintAutoLayout::FReroutePlan>& Plans)
 		{
 			int32 Count = 0;
+			TSet<FString> SharedKeys;
 			for (const UeAgentBlueprintAutoLayout::FReroutePlan& Plan : Plans)
 			{
-				if (Plan.EdgeIndex == INDEX_NONE || Plan.Points.Num() == 0)
+				const TArray<FVector2D>& WritePoints = UeAgentBlueprintAutoLayout::GetAuthoritativeReroutePoints(Plan);
+				if (Plan.EdgeIndex == INDEX_NONE || WritePoints.Num() == 0)
 				{
 					continue;
 				}
-				Count += Plan.KnotPoints.Num() == Plan.Points.Num()
-					? Plan.KnotPoints.Num()
-					: Plan.Points.Num();
+				for (const FVector2D& Point : WritePoints)
+				{
+					const FString SharedKey = UeAgentBlueprintAutoLayout::MakeRerouteAttachmentPointMergeKey(
+						Plan.AttachmentMergeGroup,
+						Point);
+					if (!SharedKey.IsEmpty())
+					{
+						if (SharedKeys.Contains(SharedKey))
+						{
+							continue;
+						}
+						SharedKeys.Add(SharedKey);
+					}
+					++Count;
+				}
 			}
 			return Count;
 		}
@@ -167,7 +181,8 @@ namespace UeAgentBlueprintOps
 			TMap<int32, const UeAgentBlueprintAutoLayout::FReroutePlan*> PlanByEdge;
 			for (const UeAgentBlueprintAutoLayout::FReroutePlan& Plan : Plans)
 			{
-				if (Plan.EdgeIndex != INDEX_NONE && Plan.Points.Num() > 0)
+				if (Plan.EdgeIndex != INDEX_NONE
+					&& UeAgentBlueprintAutoLayout::GetAuthoritativeReroutePoints(Plan).Num() > 0)
 				{
 					PlanByEdge.Add(Plan.EdgeIndex, &Plan);
 				}
@@ -195,21 +210,16 @@ namespace UeAgentBlueprintOps
 				{
 					UEdGraphPin* CurrentOutput = SourcePin;
 					bool bFailed = false;
-					const TArray<FVector2D>& KnotPoints = (*PlanPtr)->KnotPoints.Num() == (*PlanPtr)->Points.Num()
-						? (*PlanPtr)->KnotPoints
-						: (*PlanPtr)->Points;
+					const TArray<FVector2D>& KnotPoints = UeAgentBlueprintAutoLayout::GetAuthoritativeReroutePoints(**PlanPtr);
 					for (int32 PointIndex = 0; PointIndex < KnotPoints.Num(); ++PointIndex)
 					{
 						const FVector2D& Point = KnotPoints[PointIndex];
 						FString SharedKnotKey;
 						if ((*PlanPtr)->AttachmentMergeGroup != INDEX_NONE)
 						{
-							SharedKnotKey = FString::Printf(
-								TEXT("%d|%d|%d|%d"),
+							SharedKnotKey = UeAgentBlueprintAutoLayout::MakeRerouteAttachmentPointMergeKey(
 								(*PlanPtr)->AttachmentMergeGroup,
-								PointIndex,
-								FMath::RoundToInt(Point.X),
-								FMath::RoundToInt(Point.Y));
+								Point);
 						}
 
 						UK2Node_Knot* Knot = nullptr;
@@ -595,4 +605,3 @@ namespace UeAgentBlueprintOps
 
 	}
 }
-

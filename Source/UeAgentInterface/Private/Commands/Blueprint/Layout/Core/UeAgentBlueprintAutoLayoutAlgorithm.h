@@ -91,6 +91,26 @@ namespace UeAgentBlueprintAutoLayout
 		TArray<EReroutePointRole> PointRoles;
 	};
 
+	inline const TArray<FVector2D>& GetAuthoritativeReroutePoints(const FReroutePlan& Plan)
+	{
+		return Plan.Points.Num() > 0 || Plan.KnotPoints.Num() == 0
+			? Plan.Points
+			: Plan.KnotPoints;
+	}
+
+	inline FString MakeRerouteAttachmentPointMergeKey(const int32 AttachmentMergeGroup, const FVector2D& Point)
+	{
+		if (AttachmentMergeGroup == INDEX_NONE)
+		{
+			return FString();
+		}
+		return FString::Printf(
+			TEXT("%d|%d|%d"),
+			AttachmentMergeGroup,
+			FMath::RoundToInt(Point.X),
+			FMath::RoundToInt(Point.Y));
+	}
+
 	struct FDesignDiagnostics
 	{
 		int32 SccCountBeforeCut = 0;

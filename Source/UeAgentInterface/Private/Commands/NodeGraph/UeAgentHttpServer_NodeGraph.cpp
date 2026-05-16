@@ -1087,6 +1087,47 @@ namespace UeAgentNodeGraphOps
 			return EdgesJson;
 		}
 
+		static TArray<TSharedPtr<FJsonValue>> SharedReroutePlansToJson(const TArray<UeAgentBlueprintAutoLayout::FReroutePlan>& Plans)
+		{
+			TArray<TSharedPtr<FJsonValue>> Items;
+			for (const UeAgentBlueprintAutoLayout::FReroutePlan& Plan : Plans)
+			{
+				TSharedPtr<FJsonObject> Obj = MakeShared<FJsonObject>();
+				Obj->SetNumberField(TEXT("edge_index"), Plan.EdgeIndex);
+				Obj->SetStringField(TEXT("reason"), Plan.Reason);
+				Obj->SetStringField(TEXT("bus_id"), Plan.BusId);
+				Obj->SetNumberField(TEXT("bus_lane_index"), Plan.BusLaneIndex);
+				Obj->SetNumberField(TEXT("branch_lane_index"), Plan.BranchLaneIndex);
+				Obj->SetNumberField(TEXT("attachment_merge_group"), Plan.AttachmentMergeGroup);
+				TArray<TSharedPtr<FJsonValue>> Points;
+				for (const FVector2D& Point : Plan.Points)
+				{
+					TSharedPtr<FJsonObject> PointObj = MakeShared<FJsonObject>();
+					PointObj->SetNumberField(TEXT("x"), Point.X);
+					PointObj->SetNumberField(TEXT("y"), Point.Y);
+					Points.Add(MakeShared<FJsonValueObject>(PointObj));
+				}
+				Obj->SetArrayField(TEXT("points"), Points);
+				TArray<TSharedPtr<FJsonValue>> KnotPoints;
+				for (const FVector2D& Point : Plan.KnotPoints)
+				{
+					TSharedPtr<FJsonObject> PointObj = MakeShared<FJsonObject>();
+					PointObj->SetNumberField(TEXT("x"), Point.X);
+					PointObj->SetNumberField(TEXT("y"), Point.Y);
+					KnotPoints.Add(MakeShared<FJsonValueObject>(PointObj));
+				}
+				Obj->SetArrayField(TEXT("knot_points"), KnotPoints);
+				TArray<TSharedPtr<FJsonValue>> Roles;
+				for (const UeAgentBlueprintAutoLayout::EReroutePointRole Role : Plan.PointRoles)
+				{
+					Roles.Add(MakeShared<FJsonValueString>(UeAgentBlueprintAutoLayout::ReroutePointRoleToString(Role)));
+				}
+				Obj->SetArrayField(TEXT("point_roles"), Roles);
+				Items.Add(MakeShared<FJsonValueObject>(Obj));
+			}
+			return Items;
+		}
+
 		static void AddSharedLayoutRunFields(const TSharedPtr<FJsonObject>& OutData, const UeAgentBlueprintAutoLayout::FRunResult& RunResult)
 		{
 			OutData->SetStringField(TEXT("layout_strategy"), RunResult.Strategy);
@@ -1114,6 +1155,7 @@ namespace UeAgentNodeGraphOps
 			OutData->SetObjectField(TEXT("metrics_before"), UeAgentBlueprintAutoLayout::MetricsToJson(RunResult.MetricsBefore));
 			OutData->SetObjectField(TEXT("metrics_after"), UeAgentBlueprintAutoLayout::MetricsToJson(RunResult.MetricsAfter));
 			OutData->SetObjectField(TEXT("metrics_after_reroute_plan"), UeAgentBlueprintAutoLayout::MetricsToJson(RunResult.MetricsAfterReroute));
+			OutData->SetArrayField(TEXT("reroute_plan"), SharedReroutePlansToJson(RunResult.ReroutePlans));
 			OutData->SetArrayField(TEXT("lane_assignments"), RunResult.LaneAssignmentDiagnostics);
 			OutData->SetArrayField(TEXT("rejection_diagnostics"), RunResult.RejectionDiagnostics);
 		}
@@ -1397,16 +1439,63 @@ namespace UeAgentNodeGraphOps
 			}
 			int32 InputPinIndex = INDEX_NONE;
 			int32 OutputPinIndex = INDEX_NONE;
-			if (!Node->ShouldDrawNodeAsControlPointOnly(InputPinIndex, OutputPinIndex))
+			if (Node->ShouldDrawNodeAsControlPointOnly(InputPinIndex, OutputPinIndex))
+			{
+				if (!Node->Pins.IsValidIndex(InputPinIndex) || !Node->Pins.IsValidIndex(OutputPinIndex))
+				{
+					return false;
+				}
+				OutInputPin = Node->Pins[InputPinIndex];
+				OutOutputPin = Node->Pins[OutputPinIndex];
+				return OutInputPin && OutOutputPin;
+			}
+
+			const URigVMEdGraphNode* RigNode = Cast<URigVMEdGraphNode>(Node);
+			const FString NodeName = Node->GetName();
+			const FString Title = Node->GetNodeTitle(ENodeTitleType::ListView).ToString();
+			const FString ModelPath = RigNode ? RigNode->GetModelNodePath() : FString();
+			const bool bLooksLikeRigVMReroute =
+				NodeName.StartsWith(TEXT("RerouteNode_"))
+				|| Title.StartsWith(TEXT("RerouteNode_"))
+				|| ModelPath.StartsWith(TEXT("RerouteNode_"));
+			if (!bLooksLikeRigVMReroute)
 			{
 				return false;
 			}
-			if (!Node->Pins.IsValidIndex(InputPinIndex) || !Node->Pins.IsValidIndex(OutputPinIndex))
+
+			TArray<UEdGraphPin*> CandidateInputs;
+			TArray<UEdGraphPin*> CandidateOutputs;
+			for (UEdGraphPin* Pin : Node->Pins)
+			{
+				if (!Pin || Pin->ParentPin != nullptr)
+				{
+					continue;
+				}
+				if (Pin->Direction == EGPD_Input)
+				{
+					CandidateInputs.Add(Pin);
+				}
+				else if (Pin->Direction == EGPD_Output)
+				{
+					CandidateOutputs.Add(Pin);
+				}
+			}
+			if (CandidateInputs.Num() != 1 || CandidateOutputs.Num() != 1)
 			{
 				return false;
 			}
-			OutInputPin = Node->Pins[InputPinIndex];
-			OutOutputPin = Node->Pins[OutputPinIndex];
+			OutInputPin = CandidateInputs[0];
+			OutOutputPin = CandidateOutputs[0];
+			const bool bValuePassThrough =
+				OutInputPin->PinName == OutOutputPin->PinName
+				|| OutInputPin->PinName == TEXT("Value")
+				|| OutOutputPin->PinName == TEXT("Value");
+			if (!bValuePassThrough || (OutInputPin->LinkedTo.Num() == 0 && OutOutputPin->LinkedTo.Num() == 0))
+			{
+				OutInputPin = nullptr;
+				OutOutputPin = nullptr;
+				return false;
+			}
 			return OutInputPin && OutOutputPin;
 		}
 
@@ -2069,6 +2158,12 @@ namespace UeAgentNodeGraphOps
 				return false;
 			}
 
+			bool bOpenedAssetEditor = false;
+			if (bOpenAssetEditorForGeometry)
+			{
+				OpenEditorForGeometryIfNeeded(Asset, bOpenedAssetEditor);
+			}
+
 			TSharedPtr<SGraphEditor> OwnedGeometryGraphEditor;
 			FGraphAppearanceInfo AppearanceInfo;
 			AppearanceInfo.CornerText = FText::FromString(TEXT("UAI real geometry probe"));
@@ -2079,7 +2174,7 @@ namespace UeAgentNodeGraphOps
 				.Appearance(AppearanceInfo)
 				.GraphToEdit(Graph);
 			TSharedPtr<SGraphEditor> GraphEditor = OwnedGeometryGraphEditor;
-			OutStats.bOpenedEditorForGeometry = false;
+			OutStats.bOpenedEditorForGeometry = bOpenedAssetEditor;
 			OutStats.bUsedOffscreenGraphEditor = true;
 			PumpAndTickSlateForLayoutGeometry();
 			SGraphPanel* GraphPanel = GraphEditor->GetGraphPanel();
@@ -2339,19 +2434,62 @@ namespace UeAgentNodeGraphOps
 			OutStats.MissingPinAnchorCount = 0;
 			OutStats.VisibleMissingPinAnchorCount = 0;
 			int32 MissingNodeGeometryCount = 0;
-			for (const UeAgentBlueprintAutoLayout::FNode& Node : Model.Nodes)
+			TArray<FString> MissingNodeGeometrySamples;
+			TArray<FString> MissingUsedPinAnchorSamples;
+			for (int32 NodeIndex = 0; NodeIndex < Model.Nodes.Num(); ++NodeIndex)
 			{
+				const UeAgentBlueprintAutoLayout::FNode& Node = Model.Nodes[NodeIndex];
 				OutStats.VisibleMissingPinAnchorCount += Node.InputPinNames.Num() - CountMeasuredPinAnchors(Node, EGPD_Input);
 				OutStats.VisibleMissingPinAnchorCount += Node.OutputPinNames.Num() - CountMeasuredPinAnchors(Node, EGPD_Output);
 				if (!Node.bMeasuredGeometry)
 				{
 					++MissingNodeGeometryCount;
+					if (MissingNodeGeometrySamples.Num() < 8)
+					{
+						UEdGraphNode* GraphNode = Model.NodeRefs.IsValidIndex(NodeIndex) ? Model.NodeRefs[NodeIndex].GraphNode : nullptr;
+						const FString GraphNodeName = GraphNode ? GraphNode->GetName() : TEXT("<null>");
+						const FString ClassName = GraphNode ? GraphNode->GetClass()->GetName() : TEXT("<null>");
+						MissingNodeGeometrySamples.Add(FString::Printf(
+							TEXT("%d:%s:%s:%s"),
+							NodeIndex,
+							*Node.Title,
+							*ClassName,
+							*GraphNodeName));
+					}
 				}
 			}
 			for (int32 NodeIndex = 0; NodeIndex < Model.Nodes.Num(); ++NodeIndex)
 			{
 				OutStats.MissingPinAnchorCount += CountMissingUsedPinAnchors(NodeIndex, EGPD_Input);
 				OutStats.MissingPinAnchorCount += CountMissingUsedPinAnchors(NodeIndex, EGPD_Output);
+				const UeAgentBlueprintAutoLayout::FNode& Node = Model.Nodes[NodeIndex];
+				auto AddMissingUsedPinSamples = [&](const EEdGraphPinDirection Direction)
+				{
+					const TSet<int32>& UsedPins = Direction == EGPD_Input ? UsedInputPinIndices[NodeIndex] : UsedOutputPinIndices[NodeIndex];
+					const TArray<FString>& PinNames = Direction == EGPD_Input ? Node.InputPinNames : Node.OutputPinNames;
+					for (const int32 PinIndex : UsedPins)
+					{
+						FVector2D Anchor = FVector2D::ZeroVector;
+						if (TryGetMeasuredPinAnchor(Node, Direction, PinIndex, Anchor))
+						{
+							continue;
+						}
+						if (MissingUsedPinAnchorSamples.Num() >= 12)
+						{
+							return;
+						}
+						const FString PinName = PinNames.IsValidIndex(PinIndex) ? PinNames[PinIndex] : FString::Printf(TEXT("pin_%d"), PinIndex);
+						MissingUsedPinAnchorSamples.Add(FString::Printf(
+							TEXT("%d:%s:%s:%d:%s"),
+							NodeIndex,
+							*Node.Title,
+							Direction == EGPD_Input ? TEXT("input") : TEXT("output"),
+							PinIndex,
+							*PinName));
+					}
+				};
+				AddMissingUsedPinSamples(EGPD_Input);
+				AddMissingUsedPinSamples(EGPD_Output);
 			}
 			OutStats.bUsedRealGeometry = MissingNodeGeometryCount == 0 && OutStats.MissingPinAnchorCount == 0;
 			OutStats.GeometrySource = OutStats.bUsedRealGeometry
@@ -2371,6 +2509,14 @@ namespace UeAgentNodeGraphOps
 				if (OutStats.bFocusedGeometryBudgetExhausted)
 				{
 					OutError += FString::Printf(TEXT(" focused_capture_budget_exhausted focused_nodes=%d"), OutStats.FocusedGeometryNodeCount);
+				}
+				if (MissingNodeGeometrySamples.Num() > 0)
+				{
+					OutError += FString::Printf(TEXT(" missing_node_samples=[%s]"), *FString::Join(MissingNodeGeometrySamples, TEXT(";")));
+				}
+				if (MissingUsedPinAnchorSamples.Num() > 0)
+				{
+					OutError += FString::Printf(TEXT(" missing_used_pin_samples=[%s]"), *FString::Join(MissingUsedPinAnchorSamples, TEXT(";")));
 				}
 				OutStats.Error = OutError;
 			}
@@ -2552,6 +2698,382 @@ namespace UeAgentNodeGraphOps
 			return true;
 		}
 
+		static FVector2D GetRigVMRerouteNodeSpacerSize()
+		{
+			// Matches SGraphNodeKnot::NodeSpacerSize. Layout plans store the visible knot/control-point center.
+			return FVector2D(42.0, 24.0);
+		}
+
+		static FVector2D ConvertLayoutKnotControlPointToRigVMNodePosition(const FVector2D& ControlPoint)
+		{
+			return ControlPoint - GetRigVMRerouteNodeSpacerSize() * 0.5;
+		}
+
+		struct FRigVMRerouteControlPointAlignment
+		{
+			TWeakObjectPtr<URigVMRerouteNode> RerouteNode;
+			FVector2D DesiredControlPoint = FVector2D::ZeroVector;
+		};
+
+		static UEdGraphPin* FindRigVMRerouteVisibleGraphPin(URigVMEdGraphNode* EdNode)
+		{
+			if (!EdNode)
+			{
+				return nullptr;
+			}
+			int32 InputPinIndex = INDEX_NONE;
+			int32 OutputPinIndex = INDEX_NONE;
+			if (EdNode->ShouldDrawNodeAsControlPointOnly(InputPinIndex, OutputPinIndex)
+				&& EdNode->Pins.IsValidIndex(OutputPinIndex))
+			{
+				return EdNode->Pins[OutputPinIndex];
+			}
+			for (UEdGraphPin* Pin : EdNode->Pins)
+			{
+				if (Pin && Pin->Direction == EGPD_Output && Pin->ParentPin == nullptr)
+				{
+					return Pin;
+				}
+			}
+			return nullptr;
+		}
+
+		static bool TryGetPinImageCenterAnchor(
+			SGraphPanel& GraphPanel,
+			SGraphNode& GraphNodeWidget,
+			const TSharedRef<SGraphPin>& PinWidget,
+			FVector2D& OutAnchor)
+		{
+			FGeometry PanelGeometry;
+			if (!TryGetUsableWidgetGeometry(GraphPanel, PanelGeometry))
+			{
+				PanelGeometry = FGeometry::MakeRoot(FVector2f(4096.0f, 4096.0f), FSlateLayoutTransform(1.0f));
+			}
+
+			const float ZoomAmount = FMath::Max(GraphPanel.GetZoomAmount(), 0.01f);
+			const float WidgetScale = FSlateApplication::IsInitialized()
+				? FSlateApplication::Get().GetApplicationScale()
+				: 1.0f;
+			GraphNodeWidget.SlatePrepass(WidgetScale * ZoomAmount);
+
+			TSharedRef<SWidget> AnchorWidget = StaticCastSharedRef<SWidget>(PinWidget);
+			if (TSharedPtr<SWidget> PinImage = PinWidget->GetPinImageWidget())
+			{
+				AnchorWidget = PinImage.ToSharedRef();
+			}
+
+			TSet<TSharedRef<SWidget>> WidgetsToFind;
+			WidgetsToFind.Add(AnchorWidget);
+
+			TMap<TSharedRef<SWidget>, FArrangedWidget> ArrangedWidgets;
+			const auto ViewOffset = GraphPanel.GetViewOffset();
+			const FVector2f NodePanelOffset(
+				GraphNodeWidget.GetPosition2f().X - static_cast<float>(ViewOffset.X),
+				GraphNodeWidget.GetPosition2f().Y - static_cast<float>(ViewOffset.Y));
+			const FArrangedWidget ArrangedNode = PanelGeometry.MakeChild(
+				GraphNodeWidget.AsShared(),
+				NodePanelOffset,
+				GraphNodeWidget.GetDesiredSize(),
+				ZoomAmount);
+			FindArrangedDescendantGeometries(GraphNodeWidget, ArrangedNode.Geometry, WidgetsToFind, ArrangedWidgets);
+			if (ArrangedWidgets.Num() < WidgetsToFind.Num())
+			{
+				FindArrangedDescendantGeometries(GraphPanel, PanelGeometry, WidgetsToFind, ArrangedWidgets);
+			}
+
+			const FArrangedWidget* AnchorGeometry = ArrangedWidgets.Find(AnchorWidget);
+			FGeometry FallbackAnchorGeometry;
+			if (!AnchorGeometry && TryGetUsableWidgetGeometry(AnchorWidget.Get(), FallbackAnchorGeometry))
+			{
+				ArrangedWidgets.Add(AnchorWidget, FArrangedWidget(AnchorWidget, FallbackAnchorGeometry));
+				AnchorGeometry = ArrangedWidgets.Find(AnchorWidget);
+			}
+			if (!AnchorGeometry)
+			{
+				return false;
+			}
+
+			const FVector2f AnchorCenterAbsolute =
+				AnchorGeometry->Geometry.AbsolutePosition + AnchorGeometry->Geometry.GetDrawSize() * 0.5f;
+			const FVector2f NodeAbsolute = ArrangedNode.Geometry.GetAbsolutePosition();
+			const FVector2f LocalGraphOffset = (AnchorCenterAbsolute - NodeAbsolute) / ZoomAmount;
+			OutAnchor = FVector2D(static_cast<double>(LocalGraphOffset.X), static_cast<double>(LocalGraphOffset.Y));
+			return IsFiniteLayoutPoint(OutAnchor);
+		}
+
+		static bool TryMeasureRigVMRerouteControlPoint(
+			URigVMEdGraph* RigGraph,
+			SGraphPanel& GraphPanel,
+			URigVMRerouteNode* RerouteNode,
+			FVector2D& OutControlPoint)
+		{
+			if (!RigGraph || !RerouteNode)
+			{
+				return false;
+			}
+			URigVMEdGraphNode* EdNode = Cast<URigVMEdGraphNode>(
+				RigGraph->FindNodeForModelNodeName(RerouteNode->GetFName()));
+			if (!EdNode)
+			{
+				return false;
+			}
+			TSharedPtr<SGraphNode> GraphNodeWidget = GraphPanel.GetNodeWidgetFromGuid(EdNode->NodeGuid);
+			if (!GraphNodeWidget.IsValid())
+			{
+				GraphPanel.RefreshNode(*EdNode);
+				PumpAndTickSlateForLayoutGeometry();
+				GraphNodeWidget = GraphPanel.GetNodeWidgetFromGuid(EdNode->NodeGuid);
+			}
+			if (!GraphNodeWidget.IsValid())
+			{
+				return false;
+			}
+			UEdGraphPin* VisiblePin = FindRigVMRerouteVisibleGraphPin(EdNode);
+			if (!VisiblePin)
+			{
+				return false;
+			}
+			TSharedPtr<SGraphPin> PinWidget = GraphNodeWidget->FindWidgetForPin(VisiblePin);
+			if (!PinWidget.IsValid())
+			{
+				return false;
+			}
+			FVector2D Anchor = FVector2D::ZeroVector;
+			if (!TryGetPinImageCenterAnchor(GraphPanel, *GraphNodeWidget, PinWidget.ToSharedRef(), Anchor))
+			{
+				return false;
+			}
+			OutControlPoint = RerouteNode->GetPosition() + Anchor;
+			return IsFiniteLayoutPoint(OutControlPoint);
+		}
+
+		static bool AlignRigVMRerouteControlPointsToSlateGeometry(
+			URigVMEdGraph* RigGraph,
+			URigVMController* Controller,
+			const TArray<FRigVMRerouteControlPointAlignment>& Alignments,
+			FString& OutError)
+		{
+			if (Alignments.Num() == 0)
+			{
+				return true;
+			}
+			if (!RigGraph || !Controller)
+			{
+				OutError = TEXT("rigvm_reroute_alignment_graph_or_controller_unavailable");
+				return false;
+			}
+			if (!FSlateApplication::IsInitialized())
+			{
+				OutError = TEXT("rigvm_reroute_alignment_slate_not_initialized");
+				return false;
+			}
+
+			FGraphAppearanceInfo AppearanceInfo;
+			AppearanceInfo.CornerText = FText::FromString(TEXT("UAI RigVM reroute alignment probe"));
+			TSharedPtr<SGraphEditor> GraphEditor = SNew(SGraphEditor)
+				.IsEditable(false)
+				.DisplayAsReadOnly(true)
+				.ShowGraphStateOverlay(false)
+				.Appearance(AppearanceInfo)
+				.GraphToEdit(RigGraph);
+			PumpAndTickSlateForLayoutGeometry();
+			SGraphPanel* GraphPanel = GraphEditor.IsValid() ? GraphEditor->GetGraphPanel() : nullptr;
+			if (!GraphPanel)
+			{
+				OutError = TEXT("rigvm_reroute_alignment_graph_panel_unavailable");
+				return false;
+			}
+
+			auto RefreshLayout = [&]()
+			{
+				GraphPanel->Update();
+				PumpAndTickSlateForLayoutGeometry();
+				const float WidgetScale = FSlateApplication::Get().GetApplicationScale();
+				GraphEditor->SlatePrepass(WidgetScale);
+				GraphPanel->SlatePrepass(WidgetScale);
+			};
+
+			for (const FRigVMRerouteControlPointAlignment& Alignment : Alignments)
+			{
+				URigVMRerouteNode* RerouteNode = Alignment.RerouteNode.Get();
+				if (!RerouteNode)
+				{
+					OutError = TEXT("rigvm_reroute_alignment_node_lost");
+					return false;
+				}
+				if (!IsFiniteLayoutPoint(Alignment.DesiredControlPoint))
+				{
+					OutError = FString::Printf(TEXT("rigvm_reroute_alignment_invalid_target node=%s"), *RerouteNode->GetName());
+					return false;
+				}
+
+				URigVMEdGraphNode* EdNode = Cast<URigVMEdGraphNode>(
+					RigGraph->FindNodeForModelNodeName(RerouteNode->GetFName()));
+				if (!EdNode)
+				{
+					OutError = FString::Printf(TEXT("rigvm_reroute_alignment_ednode_not_found node=%s"), *RerouteNode->GetName());
+					return false;
+				}
+				const FVector2D CurrentPosition = RerouteNode->GetPosition();
+				GraphEditor->SetViewLocation(
+					SnapViewLocationToPixelGrid(
+						FVector2f(
+							FMath::RoundToFloat(static_cast<float>(CurrentPosition.X - 256.0)),
+							FMath::RoundToFloat(static_cast<float>(CurrentPosition.Y - 192.0))),
+						1.0f),
+					1.0f);
+				GraphPanel->RefreshNode(*EdNode);
+				RefreshLayout();
+				RefreshLayout();
+
+				FVector2D MeasuredControlPoint = FVector2D::ZeroVector;
+				if (!TryMeasureRigVMRerouteControlPoint(RigGraph, *GraphPanel, RerouteNode, MeasuredControlPoint))
+				{
+					OutError = FString::Printf(TEXT("rigvm_reroute_alignment_measure_failed node=%s"), *RerouteNode->GetName());
+					return false;
+				}
+				const FVector2D Delta = Alignment.DesiredControlPoint - MeasuredControlPoint;
+				if (FMath::Abs(Delta.X) > 0.01 || FMath::Abs(Delta.Y) > 0.01)
+				{
+					if (!Controller->SetNodePosition(RerouteNode, CurrentPosition + Delta, true, true, false))
+					{
+						OutError = FString::Printf(TEXT("rigvm_reroute_alignment_move_failed node=%s"), *RerouteNode->GetName());
+						return false;
+					}
+				}
+			}
+
+			double MaxResidual = 0.0;
+			FString MaxResidualNodeName;
+			FVector2D MaxResidualDesired = FVector2D::ZeroVector;
+			FVector2D MaxResidualMeasured = FVector2D::ZeroVector;
+			for (const FRigVMRerouteControlPointAlignment& Alignment : Alignments)
+			{
+				URigVMRerouteNode* RerouteNode = Alignment.RerouteNode.Get();
+				if (!RerouteNode)
+				{
+					OutError = TEXT("rigvm_reroute_alignment_verify_node_lost");
+					return false;
+				}
+				URigVMEdGraphNode* EdNode = Cast<URigVMEdGraphNode>(
+					RigGraph->FindNodeForModelNodeName(RerouteNode->GetFName()));
+				if (!EdNode)
+				{
+					OutError = FString::Printf(TEXT("rigvm_reroute_alignment_verify_ednode_not_found node=%s"), *RerouteNode->GetName());
+					return false;
+				}
+				const FVector2D CurrentPosition = RerouteNode->GetPosition();
+				GraphEditor->SetViewLocation(
+					SnapViewLocationToPixelGrid(
+						FVector2f(
+							FMath::RoundToFloat(static_cast<float>(CurrentPosition.X - 256.0)),
+							FMath::RoundToFloat(static_cast<float>(CurrentPosition.Y - 192.0))),
+						1.0f),
+					1.0f);
+				GraphPanel->RefreshNode(*EdNode);
+				RefreshLayout();
+
+				FVector2D MeasuredControlPoint = FVector2D::ZeroVector;
+				if (!TryMeasureRigVMRerouteControlPoint(RigGraph, *GraphPanel, RerouteNode, MeasuredControlPoint))
+				{
+					OutError = FString::Printf(TEXT("rigvm_reroute_alignment_verify_measure_failed node=%s"), *RerouteNode->GetName());
+					return false;
+				}
+				const double Residual = FVector2D::Distance(Alignment.DesiredControlPoint, MeasuredControlPoint);
+				if (Residual > MaxResidual)
+				{
+					MaxResidual = Residual;
+					MaxResidualNodeName = RerouteNode->GetName();
+					MaxResidualDesired = Alignment.DesiredControlPoint;
+					MaxResidualMeasured = MeasuredControlPoint;
+				}
+			}
+			if (MaxResidual > 0.5)
+			{
+				OutError = FString::Printf(
+					TEXT("rigvm_reroute_alignment_residual_too_large max_residual=%.3f node=%s desired=(%.3f,%.3f) measured=(%.3f,%.3f)"),
+					MaxResidual,
+					*MaxResidualNodeName,
+					MaxResidualDesired.X,
+					MaxResidualDesired.Y,
+					MaxResidualMeasured.X,
+					MaxResidualMeasured.Y);
+				return false;
+			}
+			return true;
+		}
+
+		struct FRigVMSharedReroutePoint
+		{
+			TWeakObjectPtr<URigVMRerouteNode> RerouteNode;
+			FString ValuePinPath;
+		};
+
+		static FString MakeRigVMSharedRerouteKey(
+			const UeAgentBlueprintAutoLayout::FReroutePlan& Plan,
+			const FVector2D& Point)
+		{
+			return UeAgentBlueprintAutoLayout::MakeRerouteAttachmentPointMergeKey(
+				Plan.AttachmentMergeGroup,
+				Point);
+		}
+
+		static bool EnsureRigVMLink(
+			URigVMGraph* ModelGraph,
+			URigVMController* Controller,
+			const FString& SourcePath,
+			const FString& TargetPath,
+			const TCHAR* Context,
+			FString& OutError)
+		{
+			if (!ModelGraph || !Controller || SourcePath.IsEmpty() || TargetPath.IsEmpty())
+			{
+				OutError = FString::Printf(TEXT("rigvm_%s_link_context_invalid"), Context ? Context : TEXT("ensure"));
+				return false;
+			}
+			if (ModelGraph->FindLink(MakeRigVMLinkPath(SourcePath, TargetPath)))
+			{
+				return true;
+			}
+			if (!Controller->AddLink(SourcePath, TargetPath, true, false))
+			{
+				OutError = FString::Printf(
+					TEXT("rigvm_%s_add_link_failed link=%s"),
+					Context ? Context : TEXT("ensure"),
+					*MakeRigVMLinkPath(SourcePath, TargetPath));
+				return false;
+			}
+			return true;
+		}
+
+		static bool BreakRigVMLinkIfPresent(
+			URigVMGraph* ModelGraph,
+			URigVMController* Controller,
+			const FString& SourcePath,
+			const FString& TargetPath,
+			const TCHAR* Context,
+			FString& OutError)
+		{
+			if (!ModelGraph || !Controller || SourcePath.IsEmpty() || TargetPath.IsEmpty())
+			{
+				OutError = FString::Printf(TEXT("rigvm_%s_link_context_invalid"), Context ? Context : TEXT("break"));
+				return false;
+			}
+			if (!ModelGraph->FindLink(MakeRigVMLinkPath(SourcePath, TargetPath)))
+			{
+				return true;
+			}
+			if (!Controller->BreakLink(SourcePath, TargetPath, true, false))
+			{
+				OutError = FString::Printf(
+					TEXT("rigvm_%s_break_link_failed link=%s"),
+					Context ? Context : TEXT("break"),
+					*MakeRigVMLinkPath(SourcePath, TargetPath));
+				return false;
+			}
+			return true;
+		}
+
 		static int32 ApplyRigVMReroutePlans(
 			URigVMEdGraph* RigGraph,
 			const FUniversalLayoutModel& Model,
@@ -2587,15 +3109,15 @@ namespace UeAgentNodeGraphOps
 			}
 
 			int32 CreatedCount = 0;
+			TArray<FRigVMRerouteControlPointAlignment> CreatedAlignments;
+			TMap<FString, FRigVMSharedReroutePoint> SharedRerouteByMergeKey;
 			for (const UeAgentBlueprintAutoLayout::FReroutePlan& Plan : Plans)
 			{
 				if (Plan.EdgeIndex == INDEX_NONE || !EdgePinPaths.IsValidIndex(Plan.EdgeIndex))
 				{
 					continue;
 				}
-				const TArray<FVector2D>& WritePoints = Plan.KnotPoints.Num() == Plan.Points.Num()
-					? Plan.KnotPoints
-					: Plan.Points;
+				const TArray<FVector2D>& WritePoints = UeAgentBlueprintAutoLayout::GetAuthoritativeReroutePoints(Plan);
 				if (WritePoints.Num() == 0)
 				{
 					continue;
@@ -2603,24 +3125,44 @@ namespace UeAgentNodeGraphOps
 
 				FString CurrentSourcePath = EdgePinPaths[Plan.EdgeIndex].Key;
 				const FString TargetPath = EdgePinPaths[Plan.EdgeIndex].Value;
-				if (!ModelGraph->FindLink(MakeRigVMLinkPath(CurrentSourcePath, TargetPath)))
+				if (!EnsureRigVMLink(ModelGraph, Controller, CurrentSourcePath, TargetPath, TEXT("restore_direct"), OutError))
 				{
-					if (!Controller->AddLink(CurrentSourcePath, TargetPath, true, false))
-					{
-						OutError = FString::Printf(TEXT("rigvm_restore_direct_link_failed link=%s"), *MakeRigVMLinkPath(CurrentSourcePath, TargetPath));
-						return CreatedCount;
-					}
+					return CreatedCount;
 				}
 
-				for (const FVector2D& Point : WritePoints)
+				for (int32 PointIndex = 0; PointIndex < WritePoints.Num(); ++PointIndex)
 				{
+					const FVector2D& Point = WritePoints[PointIndex];
+					const FString SharedKey = MakeRigVMSharedRerouteKey(Plan, Point);
+					if (!SharedKey.IsEmpty())
+					{
+						if (FRigVMSharedReroutePoint* ExistingSharedPoint = SharedRerouteByMergeKey.Find(SharedKey))
+						{
+							URigVMRerouteNode* ExistingRerouteNode = ExistingSharedPoint->RerouteNode.Get();
+							if (!ExistingRerouteNode || ExistingSharedPoint->ValuePinPath.IsEmpty())
+							{
+								OutError = FString::Printf(TEXT("rigvm_shared_reroute_lost key=%s"), *SharedKey);
+								return CreatedCount;
+							}
+							if (!BreakRigVMLinkIfPresent(ModelGraph, Controller, CurrentSourcePath, TargetPath, TEXT("shared_reroute_direct"), OutError)
+								|| !EnsureRigVMLink(ModelGraph, Controller, CurrentSourcePath, ExistingSharedPoint->ValuePinPath, TEXT("shared_reroute"), OutError)
+								|| !EnsureRigVMLink(ModelGraph, Controller, ExistingSharedPoint->ValuePinPath, TargetPath, TEXT("shared_reroute_tail"), OutError))
+							{
+								return CreatedCount;
+							}
+							CurrentSourcePath = ExistingSharedPoint->ValuePinPath;
+							continue;
+						}
+					}
+
 					URigVMLink* Link = ModelGraph->FindLink(MakeRigVMLinkPath(CurrentSourcePath, TargetPath));
 					if (!Link)
 					{
 						OutError = FString::Printf(TEXT("rigvm_reroute_link_not_found link=%s"), *MakeRigVMLinkPath(CurrentSourcePath, TargetPath));
 						return CreatedCount;
 					}
-					URigVMRerouteNode* RerouteNode = Controller->AddRerouteNodeOnLink(Link, Point, FString(), true, false);
+					const FVector2D RigVMNodePosition = ConvertLayoutKnotControlPointToRigVMNodePosition(Point);
+					URigVMRerouteNode* RerouteNode = Controller->AddRerouteNodeOnLink(Link, RigVMNodePosition, FString(), true, false);
 					if (!RerouteNode)
 					{
 						OutError = FString::Printf(TEXT("rigvm_add_reroute_failed link=%s"), *MakeRigVMLinkPath(CurrentSourcePath, TargetPath));
@@ -2632,9 +3174,28 @@ namespace UeAgentNodeGraphOps
 						OutError = FString::Printf(TEXT("rigvm_reroute_value_pin_missing node=%s"), *RerouteNode->GetName());
 						return CreatedCount;
 					}
+					FRigVMRerouteControlPointAlignment Alignment;
+					Alignment.RerouteNode = RerouteNode;
+					Alignment.DesiredControlPoint = Point;
+					CreatedAlignments.Add(Alignment);
 					CurrentSourcePath = ValuePin->GetPinPath();
+					if (!SharedKey.IsEmpty())
+					{
+						FRigVMSharedReroutePoint SharedPoint;
+						SharedPoint.RerouteNode = RerouteNode;
+						SharedPoint.ValuePinPath = CurrentSourcePath;
+						SharedRerouteByMergeKey.Add(SharedKey, SharedPoint);
+					}
 					++CreatedCount;
 				}
+				if (!EnsureRigVMLink(ModelGraph, Controller, CurrentSourcePath, TargetPath, TEXT("reroute_tail"), OutError))
+				{
+					return CreatedCount;
+				}
+			}
+			if (!AlignRigVMRerouteControlPointsToSlateGeometry(RigGraph, Controller, CreatedAlignments, OutError))
+			{
+				return CreatedCount;
 			}
 			return CreatedCount;
 		}
@@ -2642,12 +3203,23 @@ namespace UeAgentNodeGraphOps
 		static int32 CountSharedPlannedRerouteKnotNodes(const TArray<UeAgentBlueprintAutoLayout::FReroutePlan>& Plans)
 		{
 			int32 Count = 0;
+			TSet<FString> SharedKeys;
 			for (const UeAgentBlueprintAutoLayout::FReroutePlan& Plan : Plans)
 			{
-				const TArray<FVector2D>& WritePoints = Plan.KnotPoints.Num() == Plan.Points.Num()
-					? Plan.KnotPoints
-					: Plan.Points;
-				Count += WritePoints.Num();
+				const TArray<FVector2D>& WritePoints = UeAgentBlueprintAutoLayout::GetAuthoritativeReroutePoints(Plan);
+				for (int32 PointIndex = 0; PointIndex < WritePoints.Num(); ++PointIndex)
+				{
+					const FString SharedKey = MakeRigVMSharedRerouteKey(Plan, WritePoints[PointIndex]);
+					if (!SharedKey.IsEmpty())
+					{
+						if (SharedKeys.Contains(SharedKey))
+						{
+							continue;
+						}
+						SharedKeys.Add(SharedKey);
+					}
+					++Count;
+				}
 			}
 			return Count;
 		}

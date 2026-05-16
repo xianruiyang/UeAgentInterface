@@ -1045,6 +1045,40 @@
 			return ShiftCount;
 		}
 
+		static int32 FindIslandColumnForNode(const FIsland& Island, const int32 NodeIndex);
+
+		static void ShiftIslandColumnsFrom(
+			TArray<FNode>& Nodes,
+			FIsland& Island,
+			const int32 StartColumn,
+			const double DeltaX)
+		{
+			if (StartColumn == INDEX_NONE || DeltaX <= 0.5)
+			{
+				return;
+			}
+
+			TSet<int32> ShiftedNodes;
+			for (int32 ColumnIndex = StartColumn; ColumnIndex < Island.Columns.Num(); ++ColumnIndex)
+			{
+				for (const int32 NodeIndex : Island.Columns[ColumnIndex])
+				{
+					if (!Nodes.IsValidIndex(NodeIndex) || ShiftedNodes.Contains(NodeIndex))
+					{
+						continue;
+					}
+					Nodes[NodeIndex].NewX = SnapGraphCoordinate(Nodes[NodeIndex].NewX + DeltaX);
+					ShiftedNodes.Add(NodeIndex);
+				}
+			}
+
+			if (Island.ColumnGaps.IsValidIndex(StartColumn - 1))
+			{
+				Island.ColumnGaps[StartColumn - 1] = SnapGraphCoordinate(Island.ColumnGaps[StartColumn - 1] + DeltaX);
+			}
+			Island.LocalBounds = BoundsForNodes(Nodes, Island.Nodes);
+		}
+
 		static int32 EnforceNonFeedbackSemanticEdgeForwardX(
 			TArray<FNode>& Nodes,
 			const TArray<FEdge>& Edges,
@@ -1113,7 +1147,25 @@
 						{
 							continue;
 						}
-						Nodes[Edge.Target].NewX = SnapGraphCoordinate(Nodes[Edge.Target].NewX + Delta);
+						FIsland& Island = Islands[*SourceIslandPtr];
+						const int32 SourceColumn = FindIslandColumnForNode(Island, Edge.Source);
+						const int32 TargetColumn = FindIslandColumnForNode(Island, Edge.Target);
+						if (SourceColumn == INDEX_NONE || TargetColumn == INDEX_NONE)
+						{
+							// Compatibility for synthetic tests or non-column local islands. Real island-local
+							// layout owns columns; when the column model is absent there is no column edge to keep.
+							Nodes[Edge.Target].NewX = SnapGraphCoordinate(Nodes[Edge.Target].NewX + Delta);
+						}
+						else if (SourceColumn >= TargetColumn)
+						{
+							// Same-column or backward island-local edges must be routed by island-local buses.
+							// Moving only the target node breaks the column left edge that the island layout owns.
+							continue;
+						}
+						else
+						{
+							ShiftIslandColumnsFrom(Nodes, Island, TargetColumn, Delta);
+						}
 					}
 					else
 					{
@@ -2095,35 +2147,89 @@
 			return Planned;
 		}
 
-		static void CompactRoutePoints(FReroutePlan& Plan, const FVector2D& Start, const FVector2D& End, const FOptions& Options)
+		static void CompactRoutePoints(FReroutePlan& Plan, const FVector2D& Start, const FVector2D& End, const FOptions& Options, const FVector2D* ProtectedPoint = nullptr)
 		{
-			TArray<FVector2D> Compacted;
 			const double MinDistance = FMath::Max(10.0, Options.NodePadding * 0.35);
+			TArray<FVector2D> InteriorPoints;
+			InteriorPoints.Reserve(Plan.Points.Num());
 			for (const FVector2D& Point : Plan.Points)
 			{
-				if (FVector2D::Distance(Point, Start) < MinDistance || FVector2D::Distance(Point, End) < MinDistance)
+				const FVector2D SnappedPoint = SnapGraphPoint(Point);
+				const bool bProtectedPoint = ProtectedPoint
+					&& FVector2D::Distance(SnappedPoint, SnapGraphPoint(*ProtectedPoint)) <= 0.5;
+				if (!bProtectedPoint
+					&& (FVector2D::Distance(SnappedPoint, Start) < MinDistance || FVector2D::Distance(SnappedPoint, End) < MinDistance))
 				{
 					continue;
 				}
-				if (Compacted.Num() > 0 && FVector2D::Distance(Compacted.Last(), Point) < MinDistance)
+				if (!bProtectedPoint
+					&& InteriorPoints.Num() > 0
+					&& FVector2D::Distance(InteriorPoints.Last(), SnappedPoint) < MinDistance)
 				{
 					continue;
 				}
-				if (Compacted.Num() >= 2)
+				InteriorPoints.Add(SnappedPoint);
+			}
+
+			TArray<FVector2D> FullRoute;
+			FullRoute.Reserve(InteriorPoints.Num() + 2);
+			FullRoute.Add(SnapGraphPoint(Start));
+			for (const FVector2D& Point : InteriorPoints)
+			{
+				FullRoute.Add(Point);
+			}
+			FullRoute.Add(SnapGraphPoint(End));
+
+			bool bChanged = true;
+			while (bChanged)
+			{
+				bChanged = false;
+				for (int32 RouteIndex = 1; RouteIndex + 1 < FullRoute.Num(); ++RouteIndex)
 				{
-					const FVector2D A = Compacted[Compacted.Num() - 2];
-					const FVector2D B = Compacted.Last();
-					const bool bSameX = FMath::IsNearlyEqual(A.X, B.X, 0.5) && FMath::IsNearlyEqual(B.X, Point.X, 0.5);
-					const bool bSameY = FMath::IsNearlyEqual(A.Y, B.Y, 0.5) && FMath::IsNearlyEqual(B.Y, Point.Y, 0.5);
-					if (bSameX || bSameY)
+					const FVector2D A = FullRoute[RouteIndex - 1];
+					const FVector2D B = FullRoute[RouteIndex];
+					const FVector2D C = FullRoute[RouteIndex + 1];
+					const bool bProtectedPoint = ProtectedPoint
+						&& FVector2D::Distance(B, SnapGraphPoint(*ProtectedPoint)) <= 0.5;
+					if (bProtectedPoint)
 					{
-						Compacted.Last() = Point;
 						continue;
 					}
+					const bool bPrevProtectedPoint = ProtectedPoint
+						&& FVector2D::Distance(A, SnapGraphPoint(*ProtectedPoint)) <= 0.5;
+					const bool bNextProtectedPoint = ProtectedPoint
+						&& FVector2D::Distance(C, SnapGraphPoint(*ProtectedPoint)) <= 0.5;
+					const bool bProtectedTrunkNeighbor =
+						(bPrevProtectedPoint
+							&& FMath::IsNearlyEqual(A.Y, B.Y, 0.5)
+							&& FMath::Abs(B.X - A.X) >= MinDistance)
+						|| (bNextProtectedPoint
+							&& FMath::IsNearlyEqual(B.Y, C.Y, 0.5)
+							&& FMath::Abs(C.X - B.X) >= MinDistance);
+					if (bProtectedTrunkNeighbor)
+					{
+						continue;
+					}
+					const bool bCloseToNeighbor =
+						FVector2D::Distance(A, B) < MinDistance
+						|| FVector2D::Distance(B, C) < MinDistance;
+					const bool bSameX = FMath::IsNearlyEqual(A.X, B.X, 0.5) && FMath::IsNearlyEqual(B.X, C.X, 0.5);
+					const bool bSameY = FMath::IsNearlyEqual(A.Y, B.Y, 0.5) && FMath::IsNearlyEqual(B.Y, C.Y, 0.5);
+					if (bCloseToNeighbor || bSameX || bSameY)
+					{
+						FullRoute.RemoveAt(RouteIndex);
+						bChanged = true;
+						break;
+					}
 				}
-				Compacted.Add(Point);
 			}
-			Plan.Points = MoveTemp(Compacted);
+
+			Plan.Points.Reset();
+			Plan.Points.Reserve(FMath::Max(0, FullRoute.Num() - 2));
+			for (int32 RouteIndex = 1; RouteIndex + 1 < FullRoute.Num(); ++RouteIndex)
+			{
+				Plan.Points.Add(FullRoute[RouteIndex]);
+			}
 			FinalizeReroutePlanPoints(Plan, Options);
 		}
 
@@ -2160,6 +2266,7 @@
 			const int32 ColumnIndex,
 			const FOptions& Options)
 		{
+			(void)Options;
 			double LocalRight = -TNumericLimits<double>::Max();
 			if (Island.Columns.IsValidIndex(ColumnIndex))
 			{
@@ -2175,7 +2282,7 @@
 			{
 				LocalRight = Island.LocalBounds.Right;
 			}
-			return SnapGraphCoordinate(Island.X + LocalRight + FMath::Max(EndpointAccessClearanceX(Options), Options.NodePadding));
+			return SnapGraphCoordinate(Island.X + LocalRight);
 		}
 
 		static TArray<FRect> BuildSameColumnSiblingHardRects(
@@ -2186,12 +2293,12 @@
 			const int32 TargetNode,
 			const FOptions& Options)
 		{
+			(void)Options;
 			TArray<FRect> Rects;
 			if (!Island.Columns.IsValidIndex(ColumnIndex))
 			{
 				return Rects;
 			}
-			const double Padding = FMath::Max(4.0, Options.NodePadding * 0.25);
 			for (const int32 NodeIndex : Island.Columns[ColumnIndex])
 			{
 				if (NodeIndex == SourceNode || NodeIndex == TargetNode || !Nodes.IsValidIndex(NodeIndex))
@@ -2200,10 +2307,10 @@
 				}
 				const FNode& Node = Nodes[NodeIndex];
 				Rects.Add({
-					Island.X + Node.NewX - Padding,
-					Island.Y + Node.NewY - Padding,
-					Island.X + Node.NewX + Node.Width + Padding,
-					Island.Y + Node.NewY + Node.Height + Padding
+					Island.X + Node.NewX,
+					Island.Y + Node.NewY,
+					Island.X + Node.NewX + Node.Width,
+					Island.Y + Node.NewY + Node.Height
 				});
 			}
 			return Rects;
@@ -2224,34 +2331,80 @@
 			{
 				return CollisionColumns;
 			}
-			if (SourceColumn != TargetColumn)
+			if (DirectControlPoints.Num() < 2)
 			{
 				return CollisionColumns;
 			}
 
+			const FVector2D IslandOffset(Island.X, Island.Y);
+			const FRect SourceRect = MakeNodeRectWithOffset(Nodes[SourceNode], IslandOffset, true);
+			const FRect TargetRect = MakeNodeRectWithOffset(Nodes[TargetNode], IslandOffset, true);
+			FRect EndpointAabb;
+			if (!TryBuildEscapedEndpointAabb(
+				DirectControlPoints[0],
+				&SourceRect,
+				DirectControlPoints.Last(),
+				&TargetRect,
+				Options,
+				EndpointAabb))
+			{
+				return CollisionColumns;
+			}
 			const TArray<FRect> SiblingRects =
 				BuildSameColumnSiblingHardRects(Nodes, Island, SourceColumn, SourceNode, TargetNode, Options);
-			if (SiblingRects.Num() > 0 && ControlWireHitsHardOccupancy(DirectControlPoints, SiblingRects))
+			for (const FRect& Rect : SiblingRects)
 			{
-				CollisionColumns.Add(SourceColumn);
+				if (EndpointAabb.Intersects(Rect, 0.0))
+				{
+					CollisionColumns.Add(SourceColumn);
+					break;
+				}
 			}
 			return CollisionColumns;
 		}
 
-		static TArray<FVector2D> BuildSameColumnRightBoundaryRoute(
+		static TArray<FVector2D> BuildSourceColumnRightBoundaryRoute(
 			const FVector2D& Start,
 			const FVector2D& End,
-			const double ColumnRightX)
+			const double ColumnRightX,
+			const FOptions& Options)
 		{
+			(void)Options;
+			const double GuardX = SnapGraphCoordinate(ColumnRightX);
 			TArray<FVector2D> Route;
 			Route.Add(Start);
-			Route.Add(FVector2D(ColumnRightX, Start.Y));
-			if (!FMath::IsNearlyEqual(Start.Y, End.Y, 0.5))
-			{
-				Route.Add(FVector2D(ColumnRightX, End.Y));
-			}
+			Route.Add(FVector2D(GuardX, Start.Y));
 			Route.Add(End);
 			return Route;
+		}
+
+		static void InsertSourceColumnRightBoundaryPoint(
+			TArray<FVector2D>& Route,
+			const FVector2D& Start,
+			const double ColumnRightX,
+			const FOptions& Options)
+		{
+			(void)Options;
+			if (Route.Num() < 2)
+			{
+				return;
+			}
+			const double GuardX = SnapGraphCoordinate(ColumnRightX);
+			const FVector2D GuardPoint(GuardX, Start.Y);
+			if (FVector2D::Distance(GuardPoint, Start) < 0.5)
+			{
+				return;
+			}
+			if (Route.Num() > 1 && FVector2D::Distance(Route[1], GuardPoint) < 0.5)
+			{
+				return;
+			}
+			if (Route.Num() > 1 && Route[1].X < GuardPoint.X - 0.5)
+			{
+				Route[1] = GuardPoint;
+				return;
+			}
+			Route.Insert(GuardPoint, 1);
 		}
 
 		static FString MakeIslandInternalBusKey(const int32 IslandIndex, const FString& SourceParamId)
@@ -2673,6 +2826,12 @@
 					DirectControlPoints,
 					Options);
 				const bool bLocalColumnLineHitsSibling = LocalCollisionColumns.Num() > 0;
+				double SourceColumnRightBoundaryX = 0.0;
+				if (bLocalColumnLineHitsSibling)
+				{
+					SourceColumnRightBoundaryX =
+						ComputeIslandColumnRightBoundaryX(Nodes, Island, LocalCollisionColumns[0], Options);
+				}
 
 				if (!bCrossesMultipleColumns && !bLocalColumnLineHitsSibling)
 				{
@@ -2682,14 +2841,9 @@
 				TArray<FVector2D> Route;
 				FString Reason;
 				const TArray<FRect> RouteHardRects = BuildRouteHardOccupancyRects(Nodes, Islands, Options, Edge);
-				if (bLocalColumnLineHitsSibling)
+				if (bLocalColumnLineHitsSibling && !bCrossesMultipleColumns)
 				{
-					if (LocalCollisionColumns.Num() > 0)
-					{
-						const double CandidateRightX =
-							ComputeIslandColumnRightBoundaryX(Nodes, Island, LocalCollisionColumns[0], Options);
-						Route = BuildSameColumnRightBoundaryRoute(Start, End, CandidateRightX);
-					}
+					Route = BuildSourceColumnRightBoundaryRoute(Start, End, SourceColumnRightBoundaryX, Options);
 					Reason = TEXT("island_internal_same_column_right_boundary_bus");
 				}
 				else
@@ -2781,7 +2935,15 @@
 							Route = MoveTemp(CandidateRoute);
 						}
 					}
-					Reason = TEXT("island_internal_multi_column_bus");
+					if (bLocalColumnLineHitsSibling)
+					{
+						InsertSourceColumnRightBoundaryPoint(Route, Start, SourceColumnRightBoundaryX, Options);
+						Reason = TEXT("island_internal_multi_column_source_column_right_boundary_bus");
+					}
+					else
+					{
+						Reason = TEXT("island_internal_multi_column_bus");
+					}
 				}
 
 				if (Route.Num() < 3)
@@ -2816,7 +2978,7 @@
 				{
 					++Result.DesignDiagnostics.IslandInternalSameColumnCollisionBusCount;
 				}
-				else
+				if (bCrossesMultipleColumns)
 				{
 					++Result.DesignDiagnostics.IslandInternalMultiColumnBusCount;
 				}
@@ -3066,15 +3228,54 @@
 			return Route;
 		}
 
-		static void SetLeadingSharedBusTrunkY(TArray<FVector2D>& Points, const double SharedY)
+		static bool IsSourceColumnRightBoundaryReroutePlan(const FReroutePlan& Plan)
 		{
-			if (Points.Num() == 0)
+			return Plan.Reason.Contains(TEXT("same_column_right_boundary"))
+				|| Plan.Reason.Contains(TEXT("source_column_right_boundary"));
+		}
+
+		static bool IsLocalGuardReroutePlan(const FReroutePlan& Plan)
+		{
+			if (Plan.Reason.Equals(TEXT("island_internal_same_column_right_boundary_bus")))
+			{
+				return true;
+			}
+			// A pure input-chain guard is a local one-point detour owned by the input-chain placer.
+			// If a later hard-occupancy pass expands it into a multi-point bus, it must re-enter
+			// final visible lane planning so that its long horizontal trunk cannot overlap others.
+			return Plan.Reason.Equals(TEXT("input_chain_collision_guard")) && Plan.Points.Num() <= 1;
+		}
+
+		static bool IsFinalVisibleLaneManagedReroutePlan(const FReroutePlan& Plan)
+		{
+			return Plan.RouteKind != ERouteKind::Direct
+				&& Plan.Points.Num() > 0
+				&& !IsLocalGuardReroutePlan(Plan);
+		}
+
+		static int32 GetSharedBusTrunkStartPointIndex(const FReroutePlan& Plan)
+		{
+			if (Plan.Points.Num() == 0)
+			{
+				return INDEX_NONE;
+			}
+			if (IsSourceColumnRightBoundaryReroutePlan(Plan) && Plan.Points.Num() > 1)
+			{
+				return 1;
+			}
+			return 0;
+		}
+
+		static void SetLeadingSharedBusTrunkY(TArray<FVector2D>& Points, const double SharedY, const int32 StartPointIndex = 0)
+		{
+			if (!Points.IsValidIndex(StartPointIndex))
 			{
 				return;
 			}
-			const double OriginalY = Points[0].Y;
-			for (FVector2D& Point : Points)
+			const double OriginalY = Points[StartPointIndex].Y;
+			for (int32 PointIndex = StartPointIndex; PointIndex < Points.Num(); ++PointIndex)
 			{
+				FVector2D& Point = Points[PointIndex];
 				if (!FMath::IsNearlyEqual(Point.Y, OriginalY, 0.5))
 				{
 					break;
@@ -3111,6 +3312,67 @@
 			OutStart = FVector2D(Islands[*SourceIslandPtr].X, Islands[*SourceIslandPtr].Y) + GetSourcePort(Nodes[Edge.Source], Edge, true);
 			OutEnd = FVector2D(Islands[*TargetIslandPtr].X, Islands[*TargetIslandPtr].Y) + GetTargetPort(Nodes[Edge.Target], Edge, true);
 			return true;
+		}
+
+		static bool ReroutePlanSupportsEndpointAccessWindow(
+			const FVector2D& Start,
+			const FVector2D& End,
+			const FOptions& Options)
+		{
+			return ComputeInputXAlignedToOutput(Start.X, Options) <= ComputeOutputXAlignedToInput(End.X, Options) + 0.5;
+		}
+
+		static int32 RemoveEndpointAccessInvalidReroutePlans(
+			const TArray<FNode>& Nodes,
+			const TArray<FEdge>& Edges,
+			const TArray<FIsland>& Islands,
+			const TMap<int32, int32>& IslandByNode,
+			const FOptions& Options,
+			TArray<FReroutePlan>& InOutPlans,
+			FRunResult& Result)
+		{
+			if (InOutPlans.Num() == 0)
+			{
+				return 0;
+			}
+
+			TArray<FReroutePlan> KeptPlans;
+			KeptPlans.Reserve(InOutPlans.Num());
+			int32 RemovedCount = 0;
+			for (FReroutePlan& Plan : InOutPlans)
+			{
+				FVector2D Start;
+				FVector2D End;
+				if (Plan.RouteKind == ERouteKind::Direct
+					|| Plan.Points.Num() == 0
+					|| !TryGetRouteEndpointsForPlan(Nodes, Edges, Islands, IslandByNode, Plan, Start, End)
+					|| ReroutePlanSupportsEndpointAccessWindow(Start, End, Options))
+				{
+					KeptPlans.Add(MoveTemp(Plan));
+					continue;
+				}
+
+				++RemovedCount;
+				const FString SourceId = Edges.IsValidIndex(Plan.EdgeIndex)
+					? MakeSourceParamId(Edges[Plan.EdgeIndex])
+					: Plan.BusId;
+				TSharedPtr<FJsonObject> Obj = MakeShared<FJsonObject>();
+				Obj->SetStringField(TEXT("kind"), TEXT("reroute_plan_removed_endpoint_access_invalid"));
+				Obj->SetNumberField(TEXT("edge_index"), Plan.EdgeIndex);
+				Obj->SetStringField(TEXT("source_id"), SourceId);
+				Obj->SetNumberField(TEXT("source_x"), Start.X);
+				Obj->SetNumberField(TEXT("target_x"), End.X);
+				Obj->SetNumberField(TEXT("required_entry_x"), ComputeInputXAlignedToOutput(Start.X, Options));
+				Obj->SetNumberField(TEXT("allowed_exit_x"), ComputeOutputXAlignedToInput(End.X, Options));
+				Obj->SetStringField(TEXT("reason"), TEXT("reroute_bus_requires_input_output_access_window"));
+				Result.RejectionDiagnostics.Add(MakeShared<FJsonValueObject>(Obj));
+			}
+
+			if (RemovedCount > 0)
+			{
+				InOutPlans = MoveTemp(KeptPlans);
+			}
+			return RemovedCount;
 		}
 
 		static FString GetLaneReservationSourceIdForPlan(const TArray<FEdge>& Edges, const FReroutePlan& Plan)
@@ -3289,9 +3551,13 @@
 
 				for (const int32 PlanIndex : GroupPlanIndices)
 				{
-					if (InOutPlans.IsValidIndex(PlanIndex) && InOutPlans[PlanIndex].Points.Num() > 0)
+					if (InOutPlans.IsValidIndex(PlanIndex))
 					{
-						AddCandidateY(InOutPlans[PlanIndex].Points[0].Y);
+						const int32 TrunkStartPointIndex = GetSharedBusTrunkStartPointIndex(InOutPlans[PlanIndex]);
+						if (InOutPlans[PlanIndex].Points.IsValidIndex(TrunkStartPointIndex))
+						{
+							AddCandidateY(InOutPlans[PlanIndex].Points[TrunkStartPointIndex].Y);
+						}
 					}
 				}
 				if (CandidateYs.Num() <= 1)
@@ -3346,8 +3612,14 @@
 							break;
 						}
 
+						const int32 TrunkStartPointIndex = GetSharedBusTrunkStartPointIndex(Plan);
+						if (!Plan.Points.IsValidIndex(TrunkStartPointIndex))
+						{
+							bCandidateValid = false;
+							break;
+						}
 						TArray<FVector2D> CandidatePoints = Plan.Points;
-						SetLeadingSharedBusTrunkY(CandidatePoints, CandidateY);
+						SetLeadingSharedBusTrunkY(CandidatePoints, CandidateY, TrunkStartPointIndex);
 						TArray<FVector2D> CandidateRoute = BuildVisibleRouteFromReroutePoints(Start, CandidatePoints, End);
 						if (!HasNonNegativeConnectionAlignmentShortenForEverySegment(CandidateRoute, Options))
 						{
@@ -3360,7 +3632,7 @@
 						TotalReservationHitCount += CountPolylineHardOccupancyHits(CandidateRoute, LaneReservationRects);
 						TotalCost += PolylineManhattanLength(CandidateRoute)
 							+ static_cast<double>(TotalReservationHitCount) * 100000.0
-							+ FMath::Abs(CandidateY - Plan.Points[0].Y) * 0.05;
+							+ FMath::Abs(CandidateY - Plan.Points[TrunkStartPointIndex].Y) * 0.05;
 					}
 					if (!bCandidateValid)
 					{
@@ -3396,10 +3668,15 @@
 					{
 						continue;
 					}
-					const double OldY = InOutPlans[PlanIndex].Points[0].Y;
+					const int32 TrunkStartPointIndex = GetSharedBusTrunkStartPointIndex(InOutPlans[PlanIndex]);
+					if (!InOutPlans[PlanIndex].Points.IsValidIndex(TrunkStartPointIndex))
+					{
+						continue;
+					}
+					const double OldY = InOutPlans[PlanIndex].Points[TrunkStartPointIndex].Y;
 					if (!FMath::IsNearlyEqual(OldY, BestY, 0.5))
 					{
-						SetLeadingSharedBusTrunkY(InOutPlans[PlanIndex].Points, BestY);
+						SetLeadingSharedBusTrunkY(InOutPlans[PlanIndex].Points, BestY, TrunkStartPointIndex);
 						FinalizeReroutePlanPoints(InOutPlans[PlanIndex], Options);
 						++ChangedInGroup;
 					}
@@ -3417,6 +3694,29 @@
 				}
 			}
 			return NormalizedPlanCount;
+		}
+
+		static bool HasNonNegativeConnectionAlignmentShortenForSharedPrefixCandidate(
+			const TArray<FVector2D>& Route,
+			const int32 TrunkStartPointIndex,
+			const int32 LeadingTrunkPointCount,
+			const FOptions& Options)
+		{
+			for (int32 RouteIndex = 0; RouteIndex + 1 < Route.Num(); ++RouteIndex)
+			{
+				const bool bInternalSharedTrunkSegment =
+					RouteIndex >= TrunkStartPointIndex + 1
+					&& RouteIndex + 1 <= LeadingTrunkPointCount;
+				if (bInternalSharedTrunkSegment)
+				{
+					continue;
+				}
+				if (ComputeConnectionAlignmentShortenX(Route[RouteIndex], Route[RouteIndex + 1], Options) < -0.5)
+				{
+					return false;
+				}
+			}
+			return true;
 		}
 
 		static int32 NormalizeSharedBusTrunkPrefixAfterSegmentRefine(
@@ -3499,7 +3799,13 @@
 						break;
 					}
 
-					const double PlanTrunkY = Plan.Points[0].Y;
+					const int32 TrunkStartPointIndex = GetSharedBusTrunkStartPointIndex(Plan);
+					if (!Plan.Points.IsValidIndex(TrunkStartPointIndex))
+					{
+						bValidGroup = false;
+						break;
+					}
+					const double PlanTrunkY = Plan.Points[TrunkStartPointIndex].Y;
 					if (!bHaveTrunkY)
 					{
 						TrunkY = PlanTrunkY;
@@ -3511,14 +3817,14 @@
 						break;
 					}
 
-					int32 LeadingCount = 0;
+					int32 LeadingCount = TrunkStartPointIndex;
 					while (Plan.Points.IsValidIndex(LeadingCount)
 						&& FMath::IsNearlyEqual(Plan.Points[LeadingCount].Y, TrunkY, 0.5))
 					{
 						AddUniqueTrunkX(Plan.Points[LeadingCount].X);
 						++LeadingCount;
 					}
-					if (LeadingCount <= 0)
+					if (LeadingCount <= TrunkStartPointIndex)
 					{
 						bValidGroup = false;
 						break;
@@ -3556,6 +3862,11 @@
 					const FPlanPrefixInfo& Info = PrefixInfos[InfoIndex];
 					const FReroutePlan& Plan = InOutPlans[Info.PlanIndex];
 					TArray<FVector2D> CandidatePoints;
+					const int32 TrunkStartPointIndex = GetSharedBusTrunkStartPointIndex(Plan);
+					for (int32 PointIndex = 0; PointIndex < TrunkStartPointIndex && Plan.Points.IsValidIndex(PointIndex); ++PointIndex)
+					{
+						CandidatePoints.Add(Plan.Points[PointIndex]);
+					}
 					for (const double TrunkX : TrunkXs)
 					{
 						const bool bBeforeBranch = bAscending
@@ -3588,7 +3899,17 @@
 					}
 
 					TArray<FVector2D> CandidateRoute = BuildVisibleRouteFromReroutePoints(Info.Start, CandidatePoints, Info.End);
-					if (!HasNonNegativeConnectionAlignmentShortenForEverySegment(CandidateRoute, Options)
+					int32 CandidateLeadingCount = TrunkStartPointIndex;
+					while (CandidatePoints.IsValidIndex(CandidateLeadingCount)
+						&& FMath::IsNearlyEqual(CandidatePoints[CandidateLeadingCount].Y, Info.TrunkY, 0.5))
+					{
+						++CandidateLeadingCount;
+					}
+					if (!HasNonNegativeConnectionAlignmentShortenForSharedPrefixCandidate(
+							CandidateRoute,
+							TrunkStartPointIndex,
+							CandidateLeadingCount,
+							Options)
 						|| !Edges.IsValidIndex(Plan.EdgeIndex))
 					{
 						bAllRoutesValid = false;
@@ -3691,7 +4012,7 @@
 				return;
 			}
 			const FReroutePlan& Plan = Plans[PlanIndex];
-			if (Plan.RouteKind == ERouteKind::Direct || Plan.Points.Num() == 0 || !Edges.IsValidIndex(Plan.EdgeIndex))
+			if (!IsFinalVisibleLaneManagedReroutePlan(Plan) || !Edges.IsValidIndex(Plan.EdgeIndex))
 			{
 				return;
 			}
@@ -3702,14 +4023,24 @@
 			{
 				return;
 			}
+			if (!ReroutePlanSupportsEndpointAccessWindow(Start, End, Options))
+			{
+				return;
+			}
 
 			const TArray<FVector2D> Route = BuildVisibleRouteFromReroutePoints(Start, Plan.Points, End);
 			const double MinHorizontalSpan = FMath::Max(GetBusTrunkLaneSpacing(), EndpointAccessClearanceX(Options) * 0.5);
+			const int32 TrunkStartPointIndex = GetSharedBusTrunkStartPointIndex(Plan);
+			const int32 FirstManagedSegmentIndex = FMath::Max(0, TrunkStartPointIndex + 1);
 			const FString SourceId = GetLaneReservationSourceIdForPlan(Edges, Plan).IsEmpty()
 				? FString::Printf(TEXT("plan:%d"), PlanIndex)
 				: GetLaneReservationSourceIdForPlan(Edges, Plan);
 			for (int32 SegmentIndex = 0; SegmentIndex + 1 < Route.Num(); ++SegmentIndex)
 			{
+				if (SegmentIndex < FirstManagedSegmentIndex)
+				{
+					continue;
+				}
 				const FVector2D A = Route[SegmentIndex];
 				const FVector2D B = Route[SegmentIndex + 1];
 				const double DX = FMath::Abs(B.X - A.X);
@@ -3987,6 +4318,7 @@
 						PreferredBranchX = CurrentRoute[RouteIndex].X;
 					}
 				}
+				const bool bPreserveFinalBranchX = Plan.Reason.Contains(TEXT("final_branch_x_lane"));
 
 				const FEdge& Edge = Edges[Plan.EdgeIndex];
 				const TArray<FRect> RouteHardRects = BuildRouteHardOccupancyRects(Nodes, Islands, Options, Edge);
@@ -4010,23 +4342,26 @@
 					CandidateBranchXs.Add(ClampedValue);
 				};
 				AddCandidateBranchX(PreferredBranchX);
-				AddCandidateBranchX(ExitX);
-				AddCandidateBranchX((EntryX + ExitX) * 0.5);
-				AddCandidateBranchX(EntryX + EndpointAccessClearanceX(Options));
-				AddCandidateBranchX(ExitX - EndpointAccessClearanceX(Options));
-				const double BranchClearance = FMath::Max(Options.NodePadding * 1.5, 48.0);
-				for (const FRect& Rect : RouteHardRects)
+				if (!bPreserveFinalBranchX)
 				{
-					if (NewY < Rect.Top - 0.5 || NewY > Rect.Bottom + 0.5)
+					AddCandidateBranchX(ExitX);
+					AddCandidateBranchX((EntryX + ExitX) * 0.5);
+					AddCandidateBranchX(EntryX + EndpointAccessClearanceX(Options));
+					AddCandidateBranchX(ExitX - EndpointAccessClearanceX(Options));
+					const double BranchClearance = FMath::Max(Options.NodePadding * 1.5, 48.0);
+					for (const FRect& Rect : RouteHardRects)
 					{
-						continue;
+						if (NewY < Rect.Top - 0.5 || NewY > Rect.Bottom + 0.5)
+						{
+							continue;
+						}
+						if (!IntervalOverlaps(EntryX, ExitX, Rect.Left, Rect.Right, 0.5))
+						{
+							continue;
+						}
+						AddCandidateBranchX(Rect.Left - BranchClearance);
+						AddCandidateBranchX(Rect.Right + BranchClearance);
 					}
-					if (!IntervalOverlaps(EntryX, ExitX, Rect.Left, Rect.Right, 0.5))
-					{
-						continue;
-					}
-					AddCandidateBranchX(Rect.Left - BranchClearance);
-					AddCandidateBranchX(Rect.Right + BranchClearance);
 				}
 				CandidateBranchXs.Sort([PreferredBranchX, ExitX](const double A, const double B)
 				{
@@ -4241,16 +4576,11 @@
 			NewRoute.Add(FVector2D(NewBranchX, TrunkY));
 
 			const double ExitX = ComputeOutputXAlignedToInput(End.X, Options);
-			if (ShouldUseTargetDoglegForBusBranch(TrunkY, End.Y, Options)
-				&& ExitX - NewBranchX >= EndpointAccessClearanceX(Options) - 0.5)
+			if (ShouldUseTargetDoglegForBusBranch(TrunkY, End.Y, Options))
 			{
-				const double DoglegX = FMath::Clamp(
-					NewBranchX + EndpointAccessClearanceX(Options),
-					NewBranchX,
-					ExitX);
-				if (DoglegX - NewBranchX >= EndpointAccessClearanceX(Options) - 0.5)
+				if (!FMath::IsNearlyEqual(NewBranchX, ExitX, 0.5))
 				{
-					NewRoute.Add(FVector2D(DoglegX, End.Y));
+					NewRoute.Add(FVector2D(NewBranchX, End.Y));
 				}
 				NewRoute.Add(FVector2D(ExitX, End.Y));
 			}
@@ -4262,6 +4592,27 @@
 				NewPoints.Add(NewRoute[RouteIndex]);
 			}
 			return NewPoints;
+		}
+
+		static bool HasRouteEndpointConnectionAlignmentShorten(
+			const TArray<FVector2D>& Route,
+			const FOptions& Options,
+			const double Tolerance = 0.5)
+		{
+			if (Route.Num() < 2)
+			{
+				return true;
+			}
+			if (!HasNonNegativeConnectionAlignmentShorten(Route[0], Route[1], Options, Tolerance))
+			{
+				return false;
+			}
+			if (Route.Num() > 2
+				&& !HasNonNegativeConnectionAlignmentShorten(Route[Route.Num() - 2], Route.Last(), Options, Tolerance))
+			{
+				return false;
+			}
+			return true;
 		}
 
 		static bool TryBuildFinalVisibleBranchXRoute(
@@ -4298,9 +4649,17 @@
 			const FEdge& Edge = Edges[Item.EdgeIndex];
 			const TArray<FRect> RouteHardRects = BuildRouteHardOccupancyRects(Nodes, Islands, Options, Edge);
 			const double ClampedBranchX = FMath::Clamp(NewBranchX, Item.LeftBoundX, Item.RightBoundX);
+			TOptional<FVector2D> SourceTrunkAnchor;
+			for (int32 RouteIndex = 1; RouteIndex < BranchRouteIndex; ++RouteIndex)
+			{
+				if (FMath::IsNearlyEqual(CurrentRoute[RouteIndex].Y, Item.TrunkY, 0.5))
+				{
+					SourceTrunkAnchor = CurrentRoute[RouteIndex];
+				}
+			}
 			if (FMath::IsNearlyEqual(ClampedBranchX, Item.BranchX, 0.5))
 			{
-				if (!HasNonNegativeConnectionAlignmentShortenForEverySegment(CurrentRoute, Options))
+				if (!HasRouteEndpointConnectionAlignmentShorten(CurrentRoute, Options))
 				{
 					return false;
 				}
@@ -4323,9 +4682,61 @@
 				}
 				FReroutePlan CandidatePlan = Plan;
 				CandidatePlan.Points = MoveTemp(CandidatePoints);
-				CompactRoutePoints(CandidatePlan, Start, End, Options);
+				TOptional<FVector2D> ProtectedBranchPoint;
+				if (!FMath::IsNearlyEqual(ClampedBranchX, Item.BranchX, 0.5))
+				{
+					ProtectedBranchPoint = FVector2D(ClampedBranchX, Item.TrunkY);
+				}
+				CompactRoutePoints(
+					CandidatePlan,
+					Start,
+					End,
+					Options,
+					ProtectedBranchPoint.IsSet() ? &ProtectedBranchPoint.GetValue() : nullptr);
+				int32 ProtectedPointIndex = INDEX_NONE;
+				if (ProtectedBranchPoint.IsSet())
+				{
+					const FVector2D Protected = SnapGraphPoint(ProtectedBranchPoint.GetValue());
+					for (int32 PointIndex = 0; PointIndex < CandidatePlan.Points.Num(); ++PointIndex)
+					{
+						if (FVector2D::Distance(CandidatePlan.Points[PointIndex], Protected) <= 0.5)
+						{
+							ProtectedPointIndex = PointIndex;
+							break;
+						}
+					}
+					if (ProtectedPointIndex == INDEX_NONE)
+					{
+						return;
+					}
+				}
+				if (ProtectedBranchPoint.IsSet() && SourceTrunkAnchor.IsSet())
+				{
+					const FVector2D Protected = SnapGraphPoint(ProtectedBranchPoint.GetValue());
+					const FVector2D Anchor = SnapGraphPoint(SourceTrunkAnchor.GetValue());
+					if (Anchor.X < Protected.X - 0.5
+						&& FMath::IsNearlyEqual(Anchor.Y, Protected.Y, 0.5))
+					{
+						bool bHasSourceTrunkAnchor = false;
+						for (int32 PointIndex = 0; PointIndex < ProtectedPointIndex; ++PointIndex)
+						{
+							const FVector2D& Existing = CandidatePlan.Points[PointIndex];
+							if (FMath::IsNearlyEqual(Existing.Y, Protected.Y, 0.5)
+								&& Existing.X < Protected.X - 0.5)
+							{
+								bHasSourceTrunkAnchor = true;
+								break;
+							}
+						}
+						if (!bHasSourceTrunkAnchor)
+						{
+							CandidatePlan.Points.Insert(Anchor, ProtectedPointIndex);
+							FinalizeReroutePlanPoints(CandidatePlan, Options);
+						}
+					}
+				}
 				const TArray<FVector2D> CandidateRoute = BuildVisibleRouteFromReroutePoints(Start, CandidatePlan.Points, End);
-				if (!HasNonNegativeConnectionAlignmentShortenForEverySegment(CandidateRoute, Options))
+				if (!HasRouteEndpointConnectionAlignmentShorten(CandidateRoute, Options))
 				{
 					return;
 				}
@@ -4373,6 +4784,23 @@
 			if (!bHasBest)
 			{
 				return false;
+			}
+			if (!FMath::IsNearlyEqual(ClampedBranchX, Item.BranchX, 0.5))
+			{
+				bool bBestContainsRequestedBranch = false;
+				for (const FVector2D& Point : BestPoints)
+				{
+					if (FMath::IsNearlyEqual(Point.X, ClampedBranchX, 0.5)
+						&& FMath::IsNearlyEqual(Point.Y, Item.TrunkY, 0.5))
+					{
+						bBestContainsRequestedBranch = true;
+						break;
+					}
+				}
+				if (!bBestContainsRequestedBranch)
+				{
+					return false;
+				}
 			}
 			OutPoints = MoveTemp(BestPoints);
 			return true;
@@ -4498,6 +4926,8 @@
 		static bool FinalVisibleBranchXPairNeedsPlanning(
 			const FVisibleRerouteBranchXLaneItem& A,
 			const FVisibleRerouteBranchXLaneItem& B,
+			const double BranchXA,
+			const double BranchXB,
 			const double RequiredSpacing,
 			const FOptions& Options)
 		{
@@ -4505,23 +4935,43 @@
 			{
 				return false;
 			}
-			if (FMath::Abs(A.BranchX - B.BranchX) < RequiredSpacing - 0.5)
+			if (FMath::Abs(BranchXA - BranchXB) < RequiredSpacing - 0.5)
 			{
 				return true;
 			}
-			if (!CrossBusBranchOrderPreferenceApplies(A.BranchX, B.BranchX, Options))
+			if (!CrossBusBranchOrderPreferenceApplies(BranchXA, BranchXB, Options))
 			{
 				return false;
 			}
 			if (A.TargetToTrunkDistanceY + 0.5 < B.TargetToTrunkDistanceY)
 			{
-				return A.BranchX < B.BranchX + RequiredSpacing - 0.5;
+				return BranchXA < BranchXB + RequiredSpacing - 0.5;
 			}
 			if (B.TargetToTrunkDistanceY + 0.5 < A.TargetToTrunkDistanceY)
 			{
-				return B.BranchX < A.BranchX + RequiredSpacing - 0.5;
+				return BranchXB < BranchXA + RequiredSpacing - 0.5;
 			}
 			return false;
+		}
+
+		static bool FinalVisibleBranchXPairNeedsPlanning(
+			const FVisibleRerouteBranchXLaneItem& A,
+			const FVisibleRerouteBranchXLaneItem& B,
+			const double RequiredSpacing,
+			const FOptions& Options)
+		{
+			return FinalVisibleBranchXPairNeedsPlanning(A, B, A.BranchX, B.BranchX, RequiredSpacing, Options);
+		}
+
+		static bool FinalVisibleBranchXItemNeedsTargetSideCanonicalization(
+			const FVisibleRerouteBranchXLaneItem& Item,
+			const FOptions& Options)
+		{
+			const double TailX = Item.RightBoundX - Item.BranchX;
+			const double CanonicalizeThreshold = FMath::Max(
+				GetCrossBusBranchLaneSpacing(Options) * 2.0,
+				EndpointAccessClearanceX(Options) * 0.5);
+			return TailX > CanonicalizeThreshold + 0.5;
 		}
 
 		static int32 PlanFinalVisibleRerouteBranchXLanes(
@@ -4535,7 +4985,7 @@
 		{
 			TArray<FVisibleRerouteBranchXLaneItem> Items;
 			CollectVisibleRerouteBranchXLaneItems(Nodes, Edges, Islands, IslandByNode, Options, InOutPlans, Items);
-			if (Items.Num() <= 1)
+			if (Items.Num() == 0)
 			{
 				return 0;
 			}
@@ -4587,12 +5037,17 @@
 			for (TPair<int32, TArray<int32>>& Pair : GroupsByRoot)
 			{
 				TArray<int32>& Group = Pair.Value;
-				if (Group.Num() <= 1)
-				{
-					continue;
-				}
 
 				bool bNeedsPlanning = false;
+				for (const int32 ItemIndex : Group)
+				{
+					if (Items.IsValidIndex(ItemIndex)
+						&& FinalVisibleBranchXItemNeedsTargetSideCanonicalization(Items[ItemIndex], Options))
+					{
+						bNeedsPlanning = true;
+						break;
+					}
+				}
 				for (int32 AIndex = 0; AIndex < Group.Num(); ++AIndex)
 				{
 					for (int32 BIndex = AIndex + 1; BIndex < Group.Num(); ++BIndex)
@@ -4652,6 +5107,16 @@
 						}
 						const double PreviousBranchX = AssignedBranchXs[PrevLaneIndex];
 						if (!FMath::IsFinite(PreviousBranchX))
+						{
+							continue;
+						}
+						if (!FinalVisibleBranchXPairNeedsPlanning(
+							Item,
+							PreviousItem,
+							MaxBranchX,
+							PreviousBranchX,
+							RequiredSpacing,
+							Options))
 						{
 							continue;
 						}
@@ -4923,6 +5388,69 @@
 			return ViolationCount;
 		}
 
+		static int32 GetFinalVisibleLaneCandidateBudget(const int32 ComponentGroupCount)
+		{
+			return FMath::Clamp(ComponentGroupCount * 4 + 24, 64, 128);
+		}
+
+		static void SortAndTrimFinalVisibleLaneCandidateYs(
+			TArray<double>& CandidateYs,
+			const double PreferredY,
+			const int32 ComponentGroupCount)
+		{
+			CandidateYs.Sort([PreferredY](const double A, const double B)
+			{
+				const double CostA = FMath::Abs(A - PreferredY) + A * 0.001;
+				const double CostB = FMath::Abs(B - PreferredY) + B * 0.001;
+				if (!FMath::IsNearlyEqual(CostA, CostB, 0.5))
+				{
+					return CostA < CostB;
+				}
+				return A < B;
+			});
+
+			const int32 CandidateBudget = GetFinalVisibleLaneCandidateBudget(ComponentGroupCount);
+			if (CandidateYs.Num() > CandidateBudget)
+			{
+				CandidateYs.SetNum(CandidateBudget, EAllowShrinking::No);
+			}
+		}
+
+		static void AddFinalVisibleLaneHardRectEscapeCandidateYs(
+			const TArray<FNode>& Nodes,
+			const TArray<FEdge>& Edges,
+			const TArray<FIsland>& Islands,
+			const FOptions& Options,
+			const TArray<FReroutePlan>& Plans,
+			const FVisibleRerouteSourceLaneGroup& Group,
+			const double RequiredSpacing,
+			TFunctionRef<void(double)> AddCandidateY)
+		{
+			for (const int32 PlanIndex : Group.PlanIndices)
+			{
+				if (!Plans.IsValidIndex(PlanIndex) || !Edges.IsValidIndex(Plans[PlanIndex].EdgeIndex))
+				{
+					continue;
+				}
+				const TArray<FRect> RouteHardRects = BuildRouteHardOccupancyRects(
+					Nodes,
+					Islands,
+					Options,
+					Edges[Plans[PlanIndex].EdgeIndex]);
+				for (const FRect& Rect : RouteHardRects)
+				{
+					if (!IntervalOverlaps(Group.XMin, Group.XMax, Rect.Left, Rect.Right, 0.5))
+					{
+						continue;
+					}
+					AddCandidateY(Rect.Top - RequiredSpacing);
+					AddCandidateY(Rect.Bottom + RequiredSpacing);
+					AddCandidateY(Rect.Top - RequiredSpacing * 2.0);
+					AddCandidateY(Rect.Bottom + RequiredSpacing * 2.0);
+				}
+			}
+		}
+
 		static int32 PlanFinalVisibleRerouteTrunkLanes(
 			const TArray<FNode>& Nodes,
 			const TArray<FEdge>& Edges,
@@ -5188,6 +5716,16 @@
 							}
 						}
 					}
+					AddFinalVisibleLaneHardRectEscapeCandidateYs(
+						Nodes,
+						Edges,
+						Islands,
+						Options,
+						InOutPlans,
+						Groups[GroupIndex],
+						RequiredSpacing,
+						AddCandidateY);
+					SortAndTrimFinalVisibleLaneCandidateYs(CandidateYs, Groups[GroupIndex].OriginalY, Component.Num());
 
 					double BestGroupY = 0.0;
 					double BestGroupCost = TNumericLimits<double>::Max();
@@ -5249,35 +5787,39 @@
 
 					if (BestGroupHardHitCount == TNumericLimits<int32>::Max())
 					{
+						TSharedPtr<FJsonObject> Obj = MakeShared<FJsonObject>();
+						Obj->SetStringField(TEXT("kind"), TEXT("final_visible_bus_lane_group_candidate_rejected"));
+						Obj->SetNumberField(TEXT("component"), ComponentSerial);
+						Obj->SetStringField(TEXT("source_id"), Groups[GroupIndex].SourceId);
+						Obj->SetNumberField(TEXT("original_y"), Groups[GroupIndex].OriginalY);
+						Obj->SetNumberField(TEXT("x_min"), Groups[GroupIndex].XMin);
+						Obj->SetNumberField(TEXT("x_max"), Groups[GroupIndex].XMax);
+						Obj->SetNumberField(TEXT("plan_count"), Groups[GroupIndex].PlanIndices.Num());
+						Obj->SetNumberField(TEXT("candidate_y_count"), CandidateYs.Num());
+						Obj->SetStringField(TEXT("reason"), TEXT("no_candidate_satisfied_access_window_lane_spacing_and_route_shape"));
+						Result.RejectionDiagnostics.Add(MakeShared<FJsonValueObject>(Obj));
 						bComponentSolved = false;
 						break;
 					}
 
+					BestAssignedYByGroup.Add(GroupIndex, BestGroupY);
+					BestHardHitCount += BestGroupHardHitCount;
+					for (TPair<int32, TArray<FVector2D>>& Pair : BestGroupPointsByPlan)
+					{
+						BestPointsByPlan.Add(Pair.Key, MoveTemp(Pair.Value));
+					}
+
 					if (BestGroupHardHitCount > 0)
 					{
-						// This group cannot be safely moved without crossing hard occupancy. Keep its
-						// current trunk as a fixed lane constraint, then let the remaining groups move
-						// around it instead of rejecting the whole conflict component.
-						BestAssignedYByGroup.Add(GroupIndex, Groups[GroupIndex].OriginalY);
-						BestHardHitCount += BestGroupHardHitCount;
-						++FixedHardGroupCount;
-						FixedHardGroups.Add(GroupIndex);
 						TSharedPtr<FJsonObject> Obj = MakeShared<FJsonObject>();
-						Obj->SetStringField(TEXT("kind"), TEXT("final_visible_bus_lane_group_kept_fixed"));
+						Obj->SetStringField(TEXT("kind"), TEXT("final_visible_bus_lane_group_hard_relaxed"));
 						Obj->SetNumberField(TEXT("component"), ComponentSerial);
 						Obj->SetStringField(TEXT("source_id"), Groups[GroupIndex].SourceId);
 						Obj->SetNumberField(TEXT("original_y"), Groups[GroupIndex].OriginalY);
+						Obj->SetNumberField(TEXT("assigned_y"), BestGroupY);
 						Obj->SetNumberField(TEXT("best_hard_hit_count"), BestGroupHardHitCount);
-						Obj->SetStringField(TEXT("reason"), TEXT("no_hard_free_lane_for_group"));
+						Obj->SetStringField(TEXT("reason"), TEXT("lane_spacing_is_stricter_than_hard_free_preference"));
 						Result.RejectionDiagnostics.Add(MakeShared<FJsonValueObject>(Obj));
-					}
-					else
-					{
-						BestAssignedYByGroup.Add(GroupIndex, BestGroupY);
-						for (TPair<int32, TArray<FVector2D>>& Pair : BestGroupPointsByPlan)
-						{
-							BestPointsByPlan.Add(Pair.Key, MoveTemp(Pair.Value));
-						}
 					}
 				}
 
@@ -5349,6 +5891,15 @@
 								AddCandidateY(Groups[GroupIndex].OriginalY - static_cast<double>(Offset) * RequiredSpacing);
 								AddCandidateY(Groups[GroupIndex].OriginalY + static_cast<double>(Offset) * RequiredSpacing);
 							}
+							AddFinalVisibleLaneHardRectEscapeCandidateYs(
+								Nodes,
+								Edges,
+								Islands,
+								Options,
+								InOutPlans,
+								Groups[GroupIndex],
+								RequiredSpacing,
+								AddCandidateY);
 							CandidateYs.Sort([&Groups, GroupIndex](const double A, const double B)
 							{
 								const double CostA = FMath::Abs(A - Groups[GroupIndex].OriginalY) + A * 0.001;
@@ -5359,6 +5910,11 @@
 								}
 								return A < B;
 							});
+							const int32 ReassignBudget = GetFinalVisibleLaneCandidateBudget(Component.Num());
+							if (CandidateYs.Num() > ReassignBudget)
+							{
+								CandidateYs.SetNum(ReassignBudget, EAllowShrinking::No);
+							}
 
 							bool bReassigned = false;
 							double BestReassignCost = TNumericLimits<double>::Max();
@@ -5643,10 +6199,24 @@
 					MakeSourceParamId(Edge),
 					&ExcludedPlanIndices);
 				const double LaneSpacing = GetBusTrunkLaneSpacing();
+				const double RouteCandidateXMin = FMath::Min(Start.X, End.X) - EndpointAccessClearanceX(Options);
+				const double RouteCandidateXMax = FMath::Max(Start.X, End.X) + EndpointAccessClearanceX(Options);
+				AddLaneReservationEscapeYCandidates(
+					RouteHardRects,
+					RouteCandidateXMin,
+					RouteCandidateXMax,
+					LaneSpacing,
+					PreferredYs);
+				AddLaneReservationEscapeYCandidates(
+					RouteHardRects,
+					RouteCandidateXMin,
+					RouteCandidateXMax,
+					LaneSpacing * 2.0,
+					PreferredYs);
 				AddLaneReservationEscapeYCandidates(
 					LaneReservationRects,
-					FMath::Min(Start.X, End.X) - EndpointAccessClearanceX(Options),
-					FMath::Max(Start.X, End.X) + EndpointAccessClearanceX(Options),
+					RouteCandidateXMin,
+					RouteCandidateXMax,
 					LaneSpacing,
 					PreferredYs);
 

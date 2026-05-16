@@ -24,6 +24,7 @@
 			int32 EdgeIndex = INDEX_NONE;
 			int32 PinIndex = INDEX_NONE;
 			bool bOutputPin = false;
+			bool bSourceNodeOccupancy = false;
 		};
 
 		struct FIsland
@@ -591,6 +592,65 @@
 		static double ComputeOutputXAlignedToInput(const double InputX, const FOptions& Options)
 		{
 			return InputX - EndpointAccessClearanceX(Options);
+		}
+
+		static FRect OffsetGraphRect(const FRect& Rect, const FVector2D& Offset)
+		{
+			FRect Result = Rect;
+			Result.Left += Offset.X;
+			Result.Right += Offset.X;
+			Result.Top += Offset.Y;
+			Result.Bottom += Offset.Y;
+			return Result;
+		}
+
+		static FRect MakeNodeRectWithOffset(const FNode& Node, const FVector2D& Offset, const bool bUseNewPosition)
+		{
+			return OffsetGraphRect(MakeNodeRect(Node, bUseNewPosition), Offset);
+		}
+
+		static bool TryBuildEscapedEndpointAabb(
+			const FVector2D& OutputPoint,
+			const FRect* OutputNodeRect,
+			const FVector2D& InputPoint,
+			const FRect* InputNodeRect,
+			const FOptions& Options,
+			FRect& OutBounds)
+		{
+			FVector2D EscapedOutput(OutputPoint.X + Options.OutputAccessOffsetX, OutputPoint.Y);
+			FVector2D EscapedInput(InputPoint.X - Options.InputAccessOffsetX, InputPoint.Y);
+			constexpr double NodeEscapeEpsilon = 0.5;
+			if (OutputNodeRect)
+			{
+				EscapedOutput.X = FMath::Max(EscapedOutput.X, OutputNodeRect->Right + NodeEscapeEpsilon);
+			}
+			if (InputNodeRect)
+			{
+				EscapedInput.X = FMath::Min(EscapedInput.X, InputNodeRect->Left - NodeEscapeEpsilon);
+			}
+			if (!FMath::IsFinite(EscapedOutput.X)
+				|| !FMath::IsFinite(EscapedOutput.Y)
+				|| !FMath::IsFinite(EscapedInput.X)
+				|| !FMath::IsFinite(EscapedInput.Y))
+			{
+				return false;
+			}
+			OutBounds.Left = FMath::Min(EscapedOutput.X, EscapedInput.X);
+			OutBounds.Top = FMath::Min(EscapedOutput.Y, EscapedInput.Y);
+			OutBounds.Right = FMath::Max(EscapedOutput.X, EscapedInput.X);
+			OutBounds.Bottom = FMath::Max(EscapedOutput.Y, EscapedInput.Y);
+			constexpr double LineTolerance = 0.5;
+			if (OutBounds.Right - OutBounds.Left < LineTolerance * 2.0)
+			{
+				OutBounds.Left -= LineTolerance;
+				OutBounds.Right += LineTolerance;
+			}
+			if (OutBounds.Bottom - OutBounds.Top < LineTolerance * 2.0)
+			{
+				OutBounds.Top -= LineTolerance;
+				OutBounds.Bottom += LineTolerance;
+			}
+			return true;
 		}
 
 		static bool HasNonNegativeConnectionAlignmentShorten(
