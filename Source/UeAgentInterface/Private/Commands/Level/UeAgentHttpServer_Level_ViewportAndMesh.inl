@@ -486,6 +486,11 @@ bool FUeAgentHttpServer::CmdViewportFocusActorSafe(const FUeAgentRequestContext&
 
 bool FUeAgentHttpServer::CmdViewportFrameActor(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
+	if (!OutData.IsValid())
+	{
+		OutData = MakeShared<FJsonObject>();
+	}
+
 	UWorld* World = GetEditorWorld(OutError);
 	if (!World)
 	{

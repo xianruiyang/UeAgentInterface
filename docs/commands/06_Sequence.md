@@ -12,6 +12,7 @@
 | `sequence_create_level_sequence` | 创建关卡序列 | `asset_path`、`start_seconds`、`duration_seconds` | 可选 `display_rate_num/den`、`open_editor` |
 | `sequence_open_level_sequence` | 打开 Sequencer | `asset_path` | 进入编辑上下文 |
 | `sequence_get_level_sequence_info` | 读取序列摘要 | `asset_path` | 返回 binding / track / section 摘要 |
+| `sequence_screenshot` | 按帧/时间截取 Level Sequence 画面，也可批量输出连续序列帧总览图 | `asset_path`、`frame_index`、`time_seconds`、`start_frame_index`、`count`、`frame_interval`、`start_time_seconds`、`interval_seconds`、`format`、`quality`、`max_size`、`target`、`create_frame_sheet`、`write_individual_frames`、`frame_sheet_padding`、`frame_sheet_max_size`、`frame_sheet_label_scale` | 用临时 LevelSequencePlayer 求值，并通过临时 SceneCapture 输出；多帧默认只写一张带帧号标注的合成 sheet |
 | `sequence_export_folder` | 导出文件夹式真源 | `asset_path`；可选 `clean_output_dir`、`include_validation` | 当前推荐的 `Level Sequence` 主编辑路径 |
 | `sequence_apply_folder` | 从文件夹式真源回写 | `asset_path`；可选 `create_if_missing`、`save_after_apply` | 读取 `Saved/UeAssetFolders/LevelSequence` 下的结构化目录 |
 
@@ -207,6 +208,36 @@
 - `object` 会返回 `key_count`、`default_value_path`
 - `string` 会返回 `key_count`
 - `skeletal_animation` 会返回 `animation_asset`、`slot_name`、`play_rate`、`reverse` 等摘要
+
+## `sequence_screenshot`
+
+说明：
+
+- 用于 Level Sequence 选帧审查，按 `frame_index` 或 `time_seconds` 把指定序列求值到目标帧并输出图片。
+- 批量审查镜头阶段时，使用 `start_time_seconds + count + interval_seconds`，或 `start_frame_index + count + frame_interval` 一次输出连续序列帧。`frame_index` 使用序列 display rate，且相对 playback start 计算。
+- 命令会在编辑器世界中创建临时 `LevelSequencePlayer` 与临时 `SceneCapture2D`，不保存关卡，不启动 PIE。结束时停止 player、销毁临时 actor，并在原关卡干净时恢复 dirty flag。
+- 有 Camera Cut 时优先使用序列当前激活 camera；没有 Camera Cut 时默认回退到当前 Level Viewport 相机。可传 `fallback_to_viewport_camera=false` 强制要求序列相机。
+- 单帧模式返回单张帧图。多帧模式默认只写一张序列帧总览图，`file_path`、`frame_sheet_file_path` 与 `sequence_frame_image_path` 都指向该图；每个格子左上角标注 `F<frame_index>`。
+- `frames[]` 始终返回每个采样帧的 metadata，包括 `frame_index`、`time_seconds`、`frame_label`、相机来源和 tile 尺寸。默认不再给每帧写单独图片；如需兼容旧流程，可传 `write_individual_frames=true`。
+- 可传 `create_frame_sheet=false` 关闭总览图；若同时没有 `write_individual_frames=true`，命令会返回 `multi_frame_output_disabled`。总览图统一按最小正方形网格排布，即 `ceil(sqrt(frame_count)) x ceil(sqrt(frame_count))`，不足格子留空；`frame_sheet_padding` 控制间距；`frame_sheet_max_size` 控制总览图最长边；`frame_sheet_label_scale` 控制帧号字号。
+- 批量模式上限为 120 张；若请求帧超出 playback range，会失败并返回 `preview_frame_range_exceeds_sequence`，避免尾帧重复误导判断。
+
+示例：
+
+```json
+{
+  "command": "sequence_screenshot",
+  "params": {
+    "asset_path": "/Game/Cinematics/LS_Test",
+    "start_frame_index": 0,
+    "count": 8,
+      "frame_interval": 12,
+      "format": "png",
+      "max_size": 1280,
+      "target": "viewport"
+    }
+  }
+```
 
 若轨道是 `MovieSceneByteTrack`，摘要还会包含：
 

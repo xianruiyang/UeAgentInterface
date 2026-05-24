@@ -29,7 +29,7 @@ preprocess, core algorithm, and postprocess.
 - `Core/Private/UeAgentBlueprintAutoLayoutAlgorithm_InputModel.inl`
   - Target input entry candidates, internal bus groups, boundary entries, and island boundary bus model.
 - `Core/Private/UeAgentBlueprintAutoLayoutAlgorithm_FrozenIslandSolver.inl`
-  - Frozen-island endpoint selection, placement proposals, bus contracts, and final corridor route construction.
+  - Frozen-island endpoint selection, placement proposals, inter-island bus planning, and final route construction.
 
 ## Change Rules
 

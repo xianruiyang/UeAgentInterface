@@ -791,6 +791,7 @@
 			return A.bValid == B.bValid
 				&& A.GroupNode == B.GroupNode
 				&& A.Distance == B.Distance
+				&& FMath::IsNearlyEqual(A.Weight, B.Weight, 0.0001)
 				&& FMath::IsNearlyEqual(A.Value, B.Value, 0.0001);
 		}
 
@@ -798,6 +799,7 @@
 		{
 			FPortOrderDemand Result;
 			TMap<int32, double> SumByGroup;
+			TMap<int32, double> WeightByGroup;
 			TMap<int32, int32> CountByGroup;
 			TMap<int32, int32> MinDistanceByGroup;
 			for (const FPortOrderDemand& Candidate : Candidates)
@@ -806,7 +808,11 @@
 				{
 					continue;
 				}
-				SumByGroup.FindOrAdd(Candidate.GroupNode) += Candidate.Value;
+				const double Weight = Candidate.Weight > KINDA_SMALL_NUMBER
+					? Candidate.Weight
+					: ColumnDistanceInfluenceWeight(Candidate.Distance);
+				SumByGroup.FindOrAdd(Candidate.GroupNode) += Candidate.Value * Weight;
+				WeightByGroup.FindOrAdd(Candidate.GroupNode) += Weight;
 				CountByGroup.FindOrAdd(Candidate.GroupNode) += 1;
 				int32& MinDistance = MinDistanceByGroup.FindOrAdd(Candidate.GroupNode);
 				if (MinDistance == 0 || Candidate.Distance < MinDistance)
@@ -822,8 +828,13 @@
 			{
 				Result.bValid = Pair.Value > 0;
 				Result.GroupNode = Pair.Key;
-				Result.Value = Pair.Value > 0 ? SumByGroup.FindRef(Pair.Key) / static_cast<double>(Pair.Value) : 0.0;
+				Result.Value = WeightByGroup.FindRef(Pair.Key) > KINDA_SMALL_NUMBER
+					? SumByGroup.FindRef(Pair.Key) / WeightByGroup.FindRef(Pair.Key)
+					: 0.0;
 				Result.Distance = MinDistanceByGroup.FindRef(Pair.Key);
+				Result.Weight = WeightByGroup.FindRef(Pair.Key) > KINDA_SMALL_NUMBER
+					? WeightByGroup.FindRef(Pair.Key)
+					: ColumnDistanceInfluenceWeight(Result.Distance);
 				break;
 			}
 			return Result;
@@ -833,7 +844,8 @@
 		{
 			struct FGroupAccumulator
 			{
-				double Sum = 0.0;
+				double WeightedSum = 0.0;
+				double WeightSum = 0.0;
 				int32 Count = 0;
 				int32 MinDistance = MAX_int32;
 			};
@@ -846,7 +858,11 @@
 					continue;
 				}
 				FGroupAccumulator& Accumulator = Accumulators.FindOrAdd(Candidate.GroupNode);
-				Accumulator.Sum += Candidate.Value;
+				const double Weight = Candidate.Weight > KINDA_SMALL_NUMBER
+					? Candidate.Weight
+					: ColumnDistanceInfluenceWeight(Candidate.Distance);
+				Accumulator.WeightedSum += Candidate.Value * Weight;
+				Accumulator.WeightSum += Weight;
 				++Accumulator.Count;
 				Accumulator.MinDistance = FMath::Min(Accumulator.MinDistance, Candidate.Distance);
 			}
@@ -861,8 +877,13 @@
 				FPortOrderDemand Demand;
 				Demand.bValid = true;
 				Demand.GroupNode = Pair.Key;
-				Demand.Value = Pair.Value.Sum / static_cast<double>(Pair.Value.Count);
+				Demand.Value = Pair.Value.WeightSum > KINDA_SMALL_NUMBER
+					? Pair.Value.WeightedSum / Pair.Value.WeightSum
+					: 0.0;
 				Demand.Distance = Pair.Value.MinDistance == MAX_int32 ? 0 : Pair.Value.MinDistance;
+				Demand.Weight = Pair.Value.WeightSum > KINDA_SMALL_NUMBER
+					? Pair.Value.WeightSum
+					: ColumnDistanceInfluenceWeight(Demand.Distance);
 				Result.Demands.Add(Demand);
 			}
 			Result.Demands.Sort([](const FPortOrderDemand& A, const FPortOrderDemand& B)
@@ -961,6 +982,7 @@
 								Direct.GroupNode = Edge.Target;
 								Direct.Value = InputPortFraction(Nodes[Edge.Target], Edge.TargetPinIndex);
 								Direct.Distance = 1;
+								Direct.Weight = ColumnDistanceInfluenceWeight(Direct.Distance);
 								Candidates.Add(Direct);
 								bAdded = true;
 							}
@@ -969,6 +991,7 @@
 								for (FPortOrderDemand Propagated : Demands[Edge.Target].Demands)
 								{
 									Propagated.Distance += 1;
+									Propagated.Weight = ColumnDistanceInfluenceWeight(Propagated.Distance);
 									Candidates.Add(Propagated);
 									bAdded = true;
 								}
@@ -980,6 +1003,7 @@
 								Direct.GroupNode = Edge.Target;
 								Direct.Value = InputPortFraction(Nodes[Edge.Target], Edge.TargetPinIndex);
 								Direct.Distance = 1;
+								Direct.Weight = ColumnDistanceInfluenceWeight(Direct.Distance);
 								Candidates.Add(Direct);
 							}
 						}
@@ -1057,6 +1081,7 @@
 								Direct.GroupNode = Edge.Source;
 								Direct.Value = OutputPortFraction(Nodes[Edge.Source], Edge.SourcePinIndex);
 								Direct.Distance = 1;
+								Direct.Weight = ColumnDistanceInfluenceWeight(Direct.Distance);
 								Candidates.Add(Direct);
 								bAdded = true;
 							}
@@ -1065,6 +1090,7 @@
 								for (FPortOrderDemand Propagated : Demands[Edge.Source].Demands)
 								{
 									Propagated.Distance += 1;
+									Propagated.Weight = ColumnDistanceInfluenceWeight(Propagated.Distance);
 									Candidates.Add(Propagated);
 									bAdded = true;
 								}
@@ -1076,6 +1102,7 @@
 								Direct.GroupNode = Edge.Source;
 								Direct.Value = OutputPortFraction(Nodes[Edge.Source], Edge.SourcePinIndex);
 								Direct.Distance = 1;
+								Direct.Weight = ColumnDistanceInfluenceWeight(Direct.Distance);
 								Candidates.Add(Direct);
 							}
 						}
@@ -1131,6 +1158,98 @@
 			return Result;
 		}
 
+		static TArray<FPortOrderDemandSet> ComputeExternalSourcePortOrderDemandSets(
+			const TArray<FNode>& Nodes,
+			const TArray<FEdge>& AllEdges,
+			const TArray<FEdge>& ExplicitEdges,
+			const TArray<int32>& IslandNodes)
+		{
+			TArray<FPortOrderDemandSet> Demands;
+			Demands.SetNum(Nodes.Num());
+			TSet<int32> IslandSet;
+			int32 MaxRank = 0;
+			for (const int32 NodeIndex : IslandNodes)
+			{
+				IslandSet.Add(NodeIndex);
+				if (Nodes.IsValidIndex(NodeIndex))
+				{
+					MaxRank = FMath::Max(MaxRank, Nodes[NodeIndex].Rank);
+				}
+			}
+
+			TMap<int32, TArray<FPortOrderDemand>> DirectDemandsByTarget;
+			for (const FEdge& Edge : AllEdges)
+			{
+				if (!Nodes.IsValidIndex(Edge.Source) || !Nodes.IsValidIndex(Edge.Target))
+				{
+					continue;
+				}
+				if (IslandSet.Contains(Edge.Source) || !IslandSet.Contains(Edge.Target))
+				{
+					continue;
+				}
+
+				FPortOrderDemand Direct;
+				Direct.bValid = true;
+				Direct.GroupNode = Edge.Source;
+				Direct.Value = OutputPortFraction(Nodes[Edge.Source], Edge.SourcePinIndex);
+				Direct.Distance = 1;
+				Direct.Weight = ColumnDistanceInfluenceWeight(Direct.Distance);
+				DirectDemandsByTarget.FindOrAdd(Edge.Target).Add(Direct);
+			}
+
+			for (int32 Iter = 0; Iter < FMath::Max(1, MaxRank + 2); ++Iter)
+			{
+				bool bChanged = false;
+				for (int32 Rank = 0; Rank <= MaxRank; ++Rank)
+				{
+					for (const int32 NodeIndex : IslandNodes)
+					{
+						if (!Nodes.IsValidIndex(NodeIndex) || Nodes[NodeIndex].Rank != Rank)
+						{
+							continue;
+						}
+
+						TArray<FPortOrderDemand> Candidates;
+						if (const TArray<FPortOrderDemand>* DirectDemands = DirectDemandsByTarget.Find(NodeIndex))
+						{
+							Candidates.Append(*DirectDemands);
+						}
+
+						for (const FEdge& Edge : ExplicitEdges)
+						{
+							if (Edge.Target != NodeIndex || !IslandSet.Contains(Edge.Source) || !Nodes.IsValidIndex(Edge.Source))
+							{
+								continue;
+							}
+							if (!Demands.IsValidIndex(Edge.Source))
+							{
+								continue;
+							}
+							for (FPortOrderDemand Propagated : Demands[Edge.Source].Demands)
+							{
+								Propagated.Distance += 1;
+								Propagated.Weight = ColumnDistanceInfluenceWeight(Propagated.Distance);
+								Candidates.Add(Propagated);
+							}
+						}
+
+						const FPortOrderDemandSet NewDemand = MergePortOrderDemandCandidates(Candidates);
+						if (!DemandSetNearlyEqual(Demands[NodeIndex], NewDemand))
+						{
+							Demands[NodeIndex] = NewDemand;
+							bChanged = true;
+						}
+					}
+				}
+				if (!bChanged)
+				{
+					break;
+				}
+			}
+			return Demands;
+		}
+
 		static bool ComparePortOrderDemand(const FPortOrderDemand& A, const FPortOrderDemand& B, bool& bOutLess)
 		{
 			if (A.bValid && B.bValid && A.GroupNode == B.GroupNode && !FMath::IsNearlyEqual(A.Value, B.Value, 0.001))
@@ -1145,6 +1264,7 @@
 		{
 			const FPortOrderDemand* BestA = nullptr;
 			const FPortOrderDemand* BestB = nullptr;
+			double BestPairWeight = -1.0;
 			int32 BestMaxDistance = MAX_int32;
 			int32 BestTotalDistance = MAX_int32;
 			for (const FPortOrderDemand& DemandA : A.Demands)
@@ -1160,15 +1280,24 @@
 				}
 				const int32 MaxDistance = FMath::Max(DemandA.Distance, DemandB->Distance);
 				const int32 TotalDistance = DemandA.Distance + DemandB->Distance;
+				const double WeightA = DemandA.Weight > KINDA_SMALL_NUMBER
+					? DemandA.Weight
+					: ColumnDistanceInfluenceWeight(DemandA.Distance);
+				const double WeightB = DemandB->Weight > KINDA_SMALL_NUMBER
+					? DemandB->Weight
+					: ColumnDistanceInfluenceWeight(DemandB->Distance);
+				const double PairWeight = WeightA * WeightB;
 				const bool bBetter =
 					!BestA
-					|| MaxDistance < BestMaxDistance
-					|| (MaxDistance == BestMaxDistance && TotalDistance < BestTotalDistance)
-					|| (MaxDistance == BestMaxDistance && TotalDistance == BestTotalDistance && DemandA.GroupNode < BestA->GroupNode);
+					|| PairWeight > BestPairWeight + 0.0001
+					|| (FMath::IsNearlyEqual(PairWeight, BestPairWeight, 0.0001) && MaxDistance < BestMaxDistance)
+					|| (FMath::IsNearlyEqual(PairWeight, BestPairWeight, 0.0001) && MaxDistance == BestMaxDistance && TotalDistance < BestTotalDistance)
+					|| (FMath::IsNearlyEqual(PairWeight, BestPairWeight, 0.0001) && MaxDistance == BestMaxDistance && TotalDistance == BestTotalDistance && DemandA.GroupNode < BestA->GroupNode);
 				if (bBetter)
 				{
 					BestA = &DemandA;
 					BestB = DemandB;
+					BestPairWeight = PairWeight;
 					BestMaxDistance = MaxDistance;
 					BestTotalDistance = TotalDistance;
 				}
@@ -1186,6 +1315,7 @@
 			const TArray<FEdge>& Edges,
 			const TArray<FPortOrderDemandSet>& SourceDemands,
 			const TArray<FPortOrderDemandSet>& TargetDemands,
+			const TArray<FPortOrderDemandSet>* ExternalSourceDemands,
 			const TArray<int32>& KnownColumn,
 			TArray<int32>& TargetColumn,
 			bool bKnownIsLeft)
@@ -1206,6 +1336,10 @@
 				return bKnownIsLeft
 					? OutputPortFraction(KnownNode, Edge.SourcePinIndex)
 					: InputPortFraction(KnownNode, Edge.TargetPinIndex);
+			};
+			auto MakeRightTargetInputKey = [](const FEdge& Edge) -> FString
+			{
+				return FString::Printf(TEXT("%d|%d|%s"), Edge.Target, Edge.TargetPinIndex, *Edge.TargetPin);
 			};
 			TMap<int32, FColumnSortKey> KeyByTarget;
 			for (const int32 TargetNode : TargetColumn)
@@ -1242,6 +1376,22 @@
 				{
 					Key.TargetDemands = TargetDemands[TargetNode];
 				}
+				if (ExternalSourceDemands && ExternalSourceDemands->IsValidIndex(TargetNode))
+				{
+					Key.ExternalSourceDemands = (*ExternalSourceDemands)[TargetNode];
+				}
+				for (const FEdge& Edge : Edges)
+				{
+					if (Edge.Source != TargetNode || !Nodes.IsValidIndex(Edge.Target) || !Nodes.IsValidIndex(Edge.Source))
+					{
+						continue;
+					}
+					if (Nodes[Edge.Target].Rank <= Nodes[Edge.Source].Rank)
+					{
+						continue;
+					}
+					Key.RightTargetInputKeys.Add(MakeRightTargetInputKey(Edge));
+				}
 				KeyByTarget.Add(TargetNode, Key);
 			}
 			TargetColumn.Sort([&KeyByTarget, &Nodes](int32 A, int32 B)
@@ -1254,6 +1404,20 @@
 					return bDemandLess;
 				}
 				if (ComparePortOrderDemandSets(KeyA.TargetDemands, KeyB.TargetDemands, bDemandLess))
+				{
+					return bDemandLess;
+				}
+				bool bSharesRightTargetInput = false;
+				for (const FString& RightTargetInputKey : KeyA.RightTargetInputKeys)
+				{
+					if (KeyB.RightTargetInputKeys.Contains(RightTargetInputKey))
+					{
+						bSharesRightTargetInput = true;
+						break;
+					}
+				}
+				if (bSharesRightTargetInput
+					&& ComparePortOrderDemandSets(KeyA.ExternalSourceDemands, KeyB.ExternalSourceDemands, bDemandLess))
 				{
 					return bDemandLess;
 				}
@@ -1277,17 +1441,18 @@
 			const TArray<FEdge>& Edges,
 			const TArray<FPortOrderDemandSet>& SourceDemands,
 			const TArray<FPortOrderDemandSet>& TargetDemands,
+			const TArray<FPortOrderDemandSet>* ExternalSourceDemands,
 			TArray<TArray<int32>>& Columns)
 		{
 			for (int32 Pass = 0; Pass < 4; ++Pass)
 			{
 				for (int32 ColumnIndex = 1; ColumnIndex < Columns.Num(); ++ColumnIndex)
 				{
-					SortColumnByKnownNeighbor(Nodes, Edges, SourceDemands, TargetDemands, Columns[ColumnIndex - 1], Columns[ColumnIndex], true);
+					SortColumnByKnownNeighbor(Nodes, Edges, SourceDemands, TargetDemands, ExternalSourceDemands, Columns[ColumnIndex - 1], Columns[ColumnIndex], true);
 				}
 				for (int32 ColumnIndex = Columns.Num() - 2; ColumnIndex >= 0; --ColumnIndex)
 				{
-					SortColumnByKnownNeighbor(Nodes, Edges, SourceDemands, TargetDemands, Columns[ColumnIndex + 1], Columns[ColumnIndex], false);
+					SortColumnByKnownNeighbor(Nodes, Edges, SourceDemands, TargetDemands, ExternalSourceDemands, Columns[ColumnIndex + 1], Columns[ColumnIndex], false);
 				}
 			}
 			for (int32 ColumnIndex = 0; ColumnIndex < Columns.Num(); ++ColumnIndex)
@@ -1327,7 +1492,8 @@
 			Island.Columns = BuildColumns(Nodes, CoreNodes);
 			const TArray<FPortOrderDemandSet> SourceDemands = ComputeSourcePortOrderDemandSets(Nodes, ExplicitEdges, CoreNodes);
 			const TArray<FPortOrderDemandSet> TargetDemands = ComputeDownstreamPortOrderDemandSets(Nodes, ExplicitEdges, CoreNodes);
-			MinimizeColumnCrossings(Nodes, ExplicitEdges, SourceDemands, TargetDemands, Island.Columns);
+			const TArray<FPortOrderDemandSet> ExternalSourceDemands = ComputeExternalSourcePortOrderDemandSets(Nodes, AllEdges, ExplicitEdges, CoreNodes);
+			MinimizeColumnCrossings(Nodes, ExplicitEdges, SourceDemands, TargetDemands, &ExternalSourceDemands, Island.Columns);
 			Island.ColumnInternalBusLaneDemand.SetNum(FMath::Max(0, Island.Columns.Num() - 1));
 			for (int32& Demand : Island.ColumnInternalBusLaneDemand)
 			{

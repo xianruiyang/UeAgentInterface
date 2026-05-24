@@ -147,6 +147,57 @@ namespace
 			&& (*Extent)->GetNumberField(TEXT("z")) > MinZ;
 	}
 
+	static bool ResourceHasComponentWithSplinePointCount(const TArray<TSharedPtr<FJsonValue>>* Resources, const FString& ResourceId, const FString& ComponentName, int32 ExpectedPointCount)
+	{
+		const TSharedPtr<FJsonObject> Resource = FindJsonObjectByStringField(Resources, TEXT("id"), ResourceId);
+		if (!Resource.IsValid())
+		{
+			return false;
+		}
+
+		const TArray<TSharedPtr<FJsonValue>>* Components = nullptr;
+		if (!Resource->TryGetArrayField(TEXT("components"), Components) || !Components)
+		{
+			return false;
+		}
+
+		for (const TSharedPtr<FJsonValue>& Value : *Components)
+		{
+			const TSharedPtr<FJsonObject> Component = Value.IsValid() ? Value->AsObject() : nullptr;
+			FString ActualName;
+			if (Component.IsValid()
+				&& Component->TryGetStringField(TEXT("name"), ActualName)
+				&& ActualName.Equals(ComponentName, ESearchCase::IgnoreCase)
+				&& Component->GetIntegerField(TEXT("spline_point_count")) == ExpectedPointCount
+				&& Component->HasTypedField<EJson::Array>(TEXT("spline_points")))
+			{
+				return true;
+			}
+		}
+		return false;
+	}
+
+	static bool ResourceLocationMatches(const TArray<TSharedPtr<FJsonValue>>* Resources, const FString& ResourceId, double ExpectedX, double ExpectedY, double ExpectedZ, double Tolerance = 0.1)
+	{
+		const TSharedPtr<FJsonObject> Resource = FindJsonObjectByStringField(Resources, TEXT("id"), ResourceId);
+		if (!Resource.IsValid())
+		{
+			return false;
+		}
+
+		const TSharedPtr<FJsonObject>* Transform = nullptr;
+		const TSharedPtr<FJsonObject>* Location = nullptr;
+		if (!Resource->TryGetObjectField(TEXT("transform"), Transform) || !Transform || !Transform->IsValid() ||
+			!(*Transform)->TryGetObjectField(TEXT("location"), Location) || !Location || !Location->IsValid())
+		{
+			return false;
+		}
+
+		return FMath::Abs((*Location)->GetNumberField(TEXT("x")) - ExpectedX) <= Tolerance
+			&& FMath::Abs((*Location)->GetNumberField(TEXT("y")) - ExpectedY) <= Tolerance
+			&& FMath::Abs((*Location)->GetNumberField(TEXT("z")) - ExpectedZ) <= Tolerance;
+	}
+
 	static FString JsonObjectToCompactString(const TSharedPtr<FJsonObject>& Object)
 	{
 		if (!Object.IsValid())
@@ -260,14 +311,14 @@ bool FUeAgentInterfaceLevelContentJsonCrudSmokeTest::RunTest(const FString& Para
 		TEXT("\"scope\":{\"folder_root\":\"%s\",\"managed_tag\":\"UAI.Managed\",\"streaming\":{\"required_loaded_levels\":[]},\"world_partition\":{\"enabled\":\"auto\",\"allow_unloaded_actor_changes\":false}},")
 		TEXT("\"defaults\":{\"folder_path\":\"%s\",\"tags\":[\"UAI.Managed\",\"LCJ.Smoke\"]},")
 		TEXT("\"resources\":[")
-		TEXT("{\"id\":\"%s\",\"kind\":\"static_mesh\",\"label\":\"LCJ_Crate_%s\",\"tags\":[\"DataLayer:SmokeDataLayer\"],\"static_mesh\":\"/Engine/BasicShapes/Cube.Cube\",\"transform\":{\"location\":[61000,61000,5000],\"rotation\":[0,0,0],\"scale\":[1,1,1]},\"properties\":{\"bHidden\":false,\"StaticMeshComponent.BodyInstance.CollisionProfileName\":\"BlockAll\"},\"components\":[{\"id\":\"ExtraScene\",\"name\":\"ExtraScene\",\"class\":\"/Script/Engine.SceneComponent\",\"transform\":{\"relative_location\":[0,0,50]}}]},")
+		TEXT("{\"id\":\"%s\",\"kind\":\"static_mesh\",\"label\":\"LCJ_Crate_%s\",\"tags\":[\"DataLayer:SmokeDataLayer\"],\"static_mesh\":\"/Engine/BasicShapes/Cube.Cube\",\"transform\":{\"location\":[61000,61000,5000],\"rotation\":[0,0,0],\"scale\":[1,1,1]},\"properties\":{\"bHidden\":false,\"StaticMeshComponent.BodyInstance.CollisionProfileName\":\"BlockAll\"},\"components\":[{\"id\":\"ExtraScene\",\"name\":\"ExtraScene\",\"class\":\"/Script/Engine.SceneComponent\",\"transform\":{\"relative_location\":[0,0,50]}},{\"id\":\"FenceSpline\",\"name\":\"FenceSpline\",\"class\":\"/Script/Engine.SplineComponent\",\"spline_closed_loop\":false,\"spline_points\":[{\"location\":[0,0,0],\"type\":\"Linear\"},{\"location\":[250,0,0],\"type\":\"Linear\"},{\"location\":[350,120,0],\"type\":\"Linear\"}]}]},")
 		TEXT("{\"id\":\"%s\",\"kind\":\"point_light\",\"label\":\"LCJ_Light_%s\",\"transform\":{\"location\":[61200,61000,250],\"scale\":[1,1,1]},\"properties\":{\"PointLightComponent.Intensity\":1250.0}},")
 		TEXT("{\"id\":\"%s\",\"kind\":\"camera\",\"label\":\"LCJ_Camera_%s\",\"transform\":{\"location\":[61400,61000,240],\"rotation\":[0,180,0],\"scale\":[1,1,1]},\"properties\":{\"CameraComponent.FieldOfView\":62.0}},")
 		TEXT("{\"id\":\"%s\",\"kind\":\"ambient_sound\",\"label\":\"LCJ_Audio_%s\",\"transform\":{\"location\":[61600,61000,120],\"scale\":[1,1,1]}},")
 		TEXT("{\"id\":\"%s\",\"kind\":\"trigger_box\",\"label\":\"LCJ_Trigger_%s\",\"transform\":{\"location\":[61800,61000,120],\"scale\":[1,1,1]}},")
 		TEXT("{\"id\":\"%s\",\"kind\":\"nav_mesh_bounds_volume\",\"label\":\"LCJ_Nav_%s\",\"transform\":{\"location\":[62000,61000,120],\"scale\":[1,1,1]},\"bounds\":{\"center\":[62000,61000,120],\"extent\":[300,300,200]}},")
 		TEXT("{\"id\":\"%s\",\"kind\":\"probe\",\"label\":\"LCJ_Probe_%s\",\"transform\":{\"location\":[62200,61000,120],\"scale\":[1,1,1]}},")
-		TEXT("{\"id\":\"%s\",\"kind\":\"custom\",\"class_path\":\"/Script/Engine.TargetPoint\",\"label\":\"LCJ_Custom_%s\",\"transform\":{\"location\":[62400,61000,120],\"scale\":[1,1,1]}}")
+		TEXT("{\"id\":\"%s\",\"kind\":\"custom\",\"class_path\":\"/Script/Engine.Actor\",\"label\":\"LCJ_Custom_%s\",\"transform\":{\"location\":[62400,61000,120],\"scale\":[1,1,1]},\"components\":[{\"name\":\"CustomRoot\",\"class\":\"/Script/Engine.SceneComponent\"}]}")
 		TEXT("],")
 		TEXT("\"organization\":{\"hlod\":{\"assignments\":[{\"resource\":\"%s\",\"layer\":\"SmokeHLOD\"}]},\"data_layers\":[{\"name\":\"SmokeDataLayer\",\"resources\":[\"%s\"]}]},")
 		TEXT("\"tasks\":[{\"type\":\"navmesh_build\",\"timeout_seconds\":30},{\"type\":\"hlod_build\",\"required\":false}],")
@@ -323,6 +374,12 @@ bool FUeAgentInterfaceLevelContentJsonCrudSmokeTest::RunTest(const FString& Para
 	const TArray<TSharedPtr<FJsonValue>>* QueryResources = nullptr;
 	TestTrue(TEXT("query exposes resources"), QueryData->TryGetArrayField(TEXT("resources"), QueryResources));
 	TestTrue(TEXT("query reads back non-zero nav mesh bounds"), BoundsExtentExceeds(FindJsonObjectByStringField(QueryResources, TEXT("id"), NavId), 250.0, 250.0, 150.0));
+	TestTrue(TEXT("query reads back spline component points"), ResourceHasComponentWithSplinePointCount(QueryResources, CrateId, TEXT("FenceSpline"), 3));
+	TestTrue(TEXT("rootless custom actor keeps transform after root component creation"), ResourceLocationMatches(QueryResources, CustomId, 62400.0, 61000.0, 120.0));
+
+	TSharedPtr<FJsonObject> ExactLabelQueryData;
+	TestTrue(TEXT("level_content_query_json exact label filter succeeds"), ExecLevelContentSmokeCommand(this, ServerScope, TEXT("lcj-exact-label-query"), TEXT("level_content_query_json"), FString::Printf(TEXT("{\"selection\":{\"label\":\"LCJ_Crate_%s\"},\"projection\":{\"include_bounds\":true}}"), *Suffix), ExactLabelQueryData));
+	TestEqual(TEXT("exact label query returns one resource"), ExactLabelQueryData->GetIntegerField(TEXT("resource_count")), 1);
 
 	TSharedPtr<FJsonObject> FilteredQueryData;
 	TestTrue(TEXT("level_content_query_json supports label/bounds/data layer filters"), ExecLevelContentSmokeCommand(this, ServerScope, TEXT("lcj-filtered-query"), TEXT("level_content_query_json"), FString::Printf(TEXT("{\"selection\":{\"mode\":\"folder\",\"folder_path\":\"%s\",\"include_child_folders\":true,\"label_contains\":\"LCJ_Crate\",\"data_layers\":[\"SmokeDataLayer\"],\"bounds\":{\"center\":[61000,61000,5000],\"extent\":[200,200,200]}},\"projection\":{\"include_bounds\":true}}"), *FolderRoot), FilteredQueryData));

@@ -74,6 +74,8 @@ public class UeAgentInterfaceTests : ModuleRules
 				"RigVMDeveloper",
 				"Niagara",
 				"NiagaraEditor",
+				"PCG",
+				"PCGEditor",
 				"GeometryCache",
 				"ComputeFramework",
 				"OptimusCore",

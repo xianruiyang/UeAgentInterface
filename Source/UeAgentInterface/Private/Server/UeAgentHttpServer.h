@@ -76,6 +76,7 @@ public:
 #include "Commands/ControlRig/UeAgentHttpServer_ControlRigMembers.h"
 #include "Commands/Deformer/UeAgentHttpServer_DeformerMembers.h"
 #include "Commands/Niagara/UeAgentHttpServer_NiagaraMembers.h"
+#include "Commands/PCG/UeAgentHttpServer_PCGMembers.h"
 #include "Commands/Modeling/UeAgentHttpServer_ModelingMembers.h"
 #include "Commands/AI/UeAgentHttpServer_AIMembers.h"
 #include "Commands/TextureRenderTarget/UeAgentHttpServer_TextureRenderTargetMembers.h"

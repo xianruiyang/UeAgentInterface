@@ -922,6 +922,16 @@ bool FUeAgentHttpServer::CmdNiagaraScreenshot(const FUeAgentRequestContext& Ctx,
 		NormalizedRequestedCaptureMode == TEXT("current_preview_readonly") ||
 		NormalizedRequestedCaptureMode == TEXT("readonly_current_preview");
 
+	TArray<UeAgentNiagaraOps::FNiagaraScreenshotFrameRequest> FrameRequests;
+	bool bFrameSequenceRequested = false;
+	if (!bCaptureCurrentPreview)
+	{
+		if (!UeAgentNiagaraOps::ResolveNiagaraScreenshotFrameSequence(Ctx.Params, FrameRequests, bFrameSequenceRequested, OutError))
+		{
+			return false;
+		}
+	}
+
 	FString Format = TEXT("png");
 	int32 Quality = 95;
 	int32 MaxSize = 2048;
@@ -962,11 +972,16 @@ bool FUeAgentHttpServer::CmdNiagaraScreenshot(const FUeAgentRequestContext& Ctx,
 		PreviewAdvanceSeconds = 0.0;
 		bResetPreview = false;
 	}
+	if (bFrameSequenceRequested)
+	{
+		PreviewAdvanceSeconds = 0.0;
+		bResetPreview = false;
+	}
 
 	bool bPausePreviewAfterAdvance = true;
 	JsonTryGetBool(Ctx.Params, TEXT("pause_preview_after_advance"), bPausePreviewAfterAdvance);
 
-	const bool bPreviewPrepareRequested = !bCaptureCurrentPreview && (PreviewAdvanceSeconds > 0.0 || bResetPreview);
+	const bool bPreviewPrepareRequested = !bFrameSequenceRequested && !bCaptureCurrentPreview && (PreviewAdvanceSeconds > 0.0 || bResetPreview);
 	bool bRequestedOffscreenRenderer = true;
 	const bool bUseOffscreenRendererSpecified =
 		JsonTryGetBool(Ctx.Params, TEXT("offscreen"), bRequestedOffscreenRenderer) ||
@@ -1028,6 +1043,431 @@ bool FUeAgentHttpServer::CmdNiagaraScreenshot(const FUeAgentRequestContext& Ctx,
 
 	FString WindowBackbufferUnsafeReason;
 	const bool bWindowBackbufferSafe = UeAgentNiagaraOps::IsSlateWindowSafeForBackbufferCapture(NiagaraWindow, WindowBackbufferUnsafeReason);
+
+	if (bFrameSequenceRequested)
+	{
+		UNiagaraSystem* NiagaraSystem = Cast<UNiagaraSystem>(Asset);
+		if (!NiagaraSystem)
+		{
+			OutError = TEXT("frame_sequence_capture_requires_niagara_system");
+			return false;
+		}
+		if (FrameRequests.Num() <= 0)
+		{
+			OutError = TEXT("preview_frame_sequence_empty");
+			return false;
+		}
+
+		TSharedPtr<FNiagaraSystemViewModel> SystemViewModel;
+		UNiagaraComponent* PreviewComponent = nullptr;
+		if (!UeAgentNiagaraOps::ResolveNiagaraSystemPreviewComponent(NiagaraSystem, bOpenEditorIfNeeded, PreviewComponent, SystemViewModel, OutError))
+		{
+			return false;
+		}
+		if (NiagaraSystem->HasOutstandingCompilationRequests(true))
+		{
+			NiagaraSystem->WaitForCompilationComplete(true, false);
+			NiagaraSystem->PollForCompilationComplete(true);
+		}
+		NiagaraSystem->CacheFromCompiledData();
+
+		UPackage* NiagaraSystemPackage = NiagaraSystem->GetOutermost();
+		const bool bWasPackageDirtyBeforeFrameSequence = NiagaraSystemPackage ? NiagaraSystemPackage->IsDirty() : false;
+
+		FString FrameAdvanceMode = PreviewAdvanceMode;
+		JsonTryGetString(Ctx.Params, TEXT("advance_mode"), FrameAdvanceMode);
+		JsonTryGetString(Ctx.Params, TEXT("preview_advance_mode"), FrameAdvanceMode);
+		FrameAdvanceMode.TrimStartAndEndInline();
+		if (FrameAdvanceMode.IsEmpty() || FrameAdvanceMode.Equals(TEXT("desired_age"), ESearchCase::IgnoreCase))
+		{
+			FrameAdvanceMode = TEXT("tick_component");
+		}
+		const FString NormalizedFrameAdvanceMode = FrameAdvanceMode.ToLower();
+		const bool bUseAdvanceSimulation =
+			NormalizedFrameAdvanceMode == TEXT("advance") ||
+			NormalizedFrameAdvanceMode == TEXT("advance_simulation") ||
+			NormalizedFrameAdvanceMode == TEXT("advance_simulation_by_time");
+		const bool bUseTickComponent =
+			NormalizedFrameAdvanceMode == TEXT("tick") ||
+			NormalizedFrameAdvanceMode == TEXT("tick_component") ||
+			NormalizedFrameAdvanceMode == TEXT("tick_delta") ||
+			NormalizedFrameAdvanceMode == TEXT("tick_delta_time");
+		if (!bUseAdvanceSimulation && !bUseTickComponent)
+		{
+			OutError = TEXT("unsupported_continuous_advance_mode");
+			OutData->SetStringField(TEXT("advance_mode"), FrameAdvanceMode);
+			return false;
+		}
+		const FString EffectiveFrameAdvanceMode = bUseAdvanceSimulation ? TEXT("advance_simulation") : TEXT("tick_component");
+
+		auto ConfigurePreviewComponent = [PreviewTickDeltaSeconds, NiagaraSystem](UNiagaraComponent* Component)
+		{
+			if (!Component)
+			{
+				return;
+			}
+			const float SafeTickDelta = static_cast<float>(PreviewTickDeltaSeconds);
+			Component->SetAsset(NiagaraSystem, false);
+			Component->SetForceSolo(true);
+			Component->SetAgeUpdateMode(ENiagaraAgeUpdateMode::TickDeltaTime);
+			Component->SetSeekDelta(SafeTickDelta);
+			Component->SetLockDesiredAgeDeltaTimeToSeekDelta(true);
+			Component->SetCanRenderWhileSeeking(true);
+			Component->SetAllowScalability(false);
+			Component->SetRenderingEnabled(true);
+		};
+
+		UeAgentNiagaraOps::SetNiagaraPreviewStateToken(PreviewComponent, FString());
+		ConfigurePreviewComponent(PreviewComponent);
+		PreviewComponent->DeactivateImmediate();
+		UeAgentNiagaraOps::FlushNiagaraPreviewWorld(PreviewComponent);
+		PreviewComponent->SetDesiredAge(0.0f);
+		PreviewComponent->ReinitializeSystem();
+		PreviewComponent = SystemViewModel->GetPreviewComponent();
+		if (!PreviewComponent)
+		{
+			OutError = TEXT("niagara_preview_component_missing_after_reset");
+			return false;
+		}
+		ConfigurePreviewComponent(PreviewComponent);
+		PreviewComponent->SetPaused(false);
+		PreviewComponent->Activate(false);
+		UeAgentNiagaraOps::FlushNiagaraPreviewWorld(PreviewComponent);
+
+		const FVector2D FrameOffscreenDrawSize = UeAgentNiagaraOps::ResolveOffscreenDrawSize(WidgetToShot.ToSharedRef(), EffectiveTarget, Ctx.Params, MaxSize);
+		FString FrameCaptureRenderer = TEXT("preview_scene_capture");
+		JsonTryGetString(Ctx.Params, TEXT("frame_capture_renderer"), FrameCaptureRenderer) ||
+			JsonTryGetString(Ctx.Params, TEXT("capture_renderer"), FrameCaptureRenderer) ||
+			JsonTryGetString(Ctx.Params, TEXT("renderer"), FrameCaptureRenderer);
+		FrameCaptureRenderer.TrimStartAndEndInline();
+		FrameCaptureRenderer = FrameCaptureRenderer.ToLower();
+		if (FrameCaptureRenderer.IsEmpty())
+		{
+			FrameCaptureRenderer = TEXT("preview_scene_capture");
+		}
+		const bool bUsePreviewSceneCapture =
+			FrameCaptureRenderer == TEXT("preview_scene_capture") ||
+			FrameCaptureRenderer == TEXT("scene_capture") ||
+			FrameCaptureRenderer == TEXT("render_target");
+		const bool bUseSlateFrameCapture =
+			FrameCaptureRenderer == TEXT("slate") ||
+			FrameCaptureRenderer == TEXT("slate_widget") ||
+			FrameCaptureRenderer == TEXT("slate_widget_offscreen");
+		if (!bUsePreviewSceneCapture && !bUseSlateFrameCapture)
+		{
+			OutError = TEXT("unsupported_frame_capture_renderer");
+			OutData->SetStringField(TEXT("frame_capture_renderer"), FrameCaptureRenderer);
+			return false;
+		}
+
+		const FIntPoint FrameCaptureSize = UeAgentNiagaraOps::ResolveNiagaraPreviewSceneCaptureSize(FrameOffscreenDrawSize, Ctx.Params, MaxSize);
+		UeAgentNiagaraOps::FNiagaraPreviewSceneCaptureContext SceneCaptureContext;
+		TSharedPtr<FJsonObject> SceneCaptureCameraInfo;
+		if (bUsePreviewSceneCapture)
+		{
+			if (!UeAgentNiagaraOps::InitializeNiagaraPreviewSceneCapture(PreviewComponent, FrameCaptureSize, Ctx.Params, SceneCaptureContext, SceneCaptureCameraInfo, OutError))
+			{
+				return false;
+			}
+		}
+
+		TArray<TSharedPtr<FJsonValue>> CapturedFrames;
+		TSharedPtr<FJsonObject> FirstFrameObject;
+		TArray<TArray<FColor>> CapturedFramePixelsForSheet;
+		TArray<FString> CapturedFrameLabelsForSheet;
+		FIntPoint FrameSheetTileSize(0, 0);
+		TArray<FColor> PreviousResizedPixels;
+		FString PreviousPixelSignature;
+		TSharedPtr<FJsonObject> FirstFrameRenderDependencyWait;
+		int32 CurrentFrame = 0;
+
+		bool bCreateFrameSheet = FrameRequests.Num() > 1;
+		JsonTryGetBool(Ctx.Params, TEXT("create_frame_sheet"), bCreateFrameSheet) ||
+			JsonTryGetBool(Ctx.Params, TEXT("frame_sheet"), bCreateFrameSheet) ||
+			JsonTryGetBool(Ctx.Params, TEXT("sequence_frame_image"), bCreateFrameSheet);
+		bool bWriteIndividualFrames = FrameRequests.Num() == 1;
+		JsonTryGetBool(Ctx.Params, TEXT("write_individual_frames"), bWriteIndividualFrames) ||
+			JsonTryGetBool(Ctx.Params, TEXT("keep_individual_frames"), bWriteIndividualFrames) ||
+			JsonTryGetBool(Ctx.Params, TEXT("output_individual_frames"), bWriteIndividualFrames);
+		if (FrameRequests.Num() > 1 && !bCreateFrameSheet && !bWriteIndividualFrames)
+		{
+			OutError = TEXT("multi_frame_output_disabled");
+			return false;
+		}
+
+		auto TickPreviewOneFrame = [&]() -> void
+		{
+			if (bUseAdvanceSimulation)
+			{
+				PreviewComponent->AdvanceSimulation(1, static_cast<float>(PreviewTickDeltaSeconds));
+			}
+			else
+			{
+				PreviewComponent->TickComponent(static_cast<float>(PreviewTickDeltaSeconds), ELevelTick::LEVELTICK_All, nullptr);
+			}
+			++CurrentFrame;
+			UeAgentNiagaraOps::FlushNiagaraPreviewWorld(PreviewComponent);
+		};
+
+		auto CaptureCurrentPreviewFrame = [&](const UeAgentNiagaraOps::FNiagaraScreenshotFrameRequest& Request, const int32 SequenceIndex, TSharedPtr<FJsonObject>& OutFrameObject) -> bool
+		{
+			while (CurrentFrame < Request.FrameIndex)
+			{
+				TickPreviewOneFrame();
+			}
+
+			PreviewComponent->SetPaused(true);
+			PreviewComponent->MarkRenderStateDirty();
+			UeAgentNiagaraOps::FlushNiagaraPreviewWorld(PreviewComponent);
+
+			double SystemAge = -1.0;
+			int32 SystemTickCount = INDEX_NONE;
+			int32 FrameEstimate = INDEX_NONE;
+			const bool bHasRuntimePosition = UeAgentNiagaraOps::GetNiagaraComponentRuntimePosition(PreviewComponent, static_cast<float>(PreviewTickDeltaSeconds), SystemAge, SystemTickCount, FrameEstimate);
+			const FString PreviewStateToken = UeAgentNiagaraOps::MakeNiagaraPreviewStateToken(NiagaraSystem, PreviewComponent, Request.FrameIndex, static_cast<float>(PreviewTickDeltaSeconds), EffectiveFrameAdvanceMode);
+			UeAgentNiagaraOps::SetNiagaraPreviewStateToken(PreviewComponent, PreviewStateToken);
+
+			TArray<FColor> Pixels;
+			FIntPoint ShotSize(0, 0);
+			if (bUsePreviewSceneCapture)
+			{
+				if (SequenceIndex == 0)
+				{
+					if (!UeAgentNiagaraOps::WarmupNiagaraPreviewSceneCapture(SceneCaptureContext, PreviewComponent, Ctx.Params, FirstFrameRenderDependencyWait, OutError))
+					{
+						return false;
+					}
+				}
+				if (!UeAgentNiagaraOps::CaptureNiagaraPreviewSceneFrame(SceneCaptureContext, PreviewComponent, Pixels, ShotSize, OutError))
+				{
+					return false;
+				}
+			}
+			else if (bUseOffscreenRenderer)
+			{
+				if (!UeAgentNiagaraOps::ScreenshotSlateWidgetOffscreen(WidgetToShot.ToSharedRef(), FrameOffscreenDrawSize, Pixels, ShotSize, OutError))
+				{
+					return false;
+				}
+			}
+			else if (!UeAgentNiagaraOps::ScreenshotSlateWidget(WidgetToShot.ToSharedRef(), Pixels, ShotSize, OutError))
+			{
+				return false;
+			}
+
+			TArray<FColor> ResizedPixels;
+			FIntPoint ResizedSize(0, 0);
+			if (!ResizePixelsMaxSize(Pixels, ShotSize, MaxSize, ResizedPixels, ResizedSize, OutError))
+			{
+				return false;
+			}
+
+			const TSharedPtr<FJsonObject> PixelSignal = UeAgentNiagaraOps::BuildPixelSignalStats(ResizedPixels);
+			FString PixelSignature;
+			if (PixelSignal.IsValid())
+			{
+				PixelSignal->TryGetStringField(TEXT("pixel_signature"), PixelSignature);
+			}
+			const int32 ChangedPixelCountFromPrevious = PreviousResizedPixels.Num() > 0
+				? UeAgentNiagaraOps::CountPixelDifferences(PreviousResizedPixels, ResizedPixels)
+				: INDEX_NONE;
+			const bool bVisualDuplicateOfPrevious = SequenceIndex > 0 && !PixelSignature.IsEmpty() && PixelSignature == PreviousPixelSignature;
+
+			FString OutPath;
+			int64 Bytes = 0;
+			if (bWriteIndividualFrames)
+			{
+				OutPath = FrameRequests.Num() == 1 ? UeAgentNiagaraOps::ResolveOutputScreenshotPath(Ctx.Params, Format) : MakeShotPath(Format);
+				if (!WriteCompressedImage(ResizedPixels, ResizedSize, Format, Quality, OutPath, OutError))
+				{
+					return false;
+				}
+				Bytes = IFileManager::Get().FileSize(*OutPath);
+			}
+
+			if (FrameSheetTileSize.X <= 0 || FrameSheetTileSize.Y <= 0)
+			{
+				FrameSheetTileSize = ResizedSize;
+			}
+			if (ResizedSize == FrameSheetTileSize)
+			{
+				CapturedFramePixelsForSheet.Add(ResizedPixels);
+				CapturedFrameLabelsForSheet.Add(FString::Printf(TEXT("F%d"), Request.FrameIndex));
+			}
+
+			OutFrameObject = MakeShared<FJsonObject>();
+			OutFrameObject->SetNumberField(TEXT("sequence_index"), SequenceIndex);
+			if (!OutPath.IsEmpty())
+			{
+				OutFrameObject->SetStringField(TEXT("file_path"), OutPath);
+				OutFrameObject->SetNumberField(TEXT("bytes"), static_cast<double>(Bytes));
+			}
+			OutFrameObject->SetNumberField(TEXT("width"), ResizedSize.X);
+			OutFrameObject->SetNumberField(TEXT("height"), ResizedSize.Y);
+			OutFrameObject->SetNumberField(TEXT("frame_index"), Request.FrameIndex);
+			OutFrameObject->SetNumberField(TEXT("target_frame"), Request.FrameIndex);
+			OutFrameObject->SetStringField(TEXT("frame_label"), FString::Printf(TEXT("F%d"), Request.FrameIndex));
+			OutFrameObject->SetNumberField(TEXT("current_frame_estimate"), FrameEstimate);
+			OutFrameObject->SetBoolField(TEXT("has_runtime_position"), bHasRuntimePosition);
+			OutFrameObject->SetNumberField(TEXT("system_age"), SystemAge);
+			OutFrameObject->SetNumberField(TEXT("system_tick_count"), SystemTickCount);
+			OutFrameObject->SetStringField(TEXT("preview_state_token"), PreviewStateToken);
+			OutFrameObject->SetBoolField(TEXT("frame_estimate_matched"), FrameEstimate == Request.FrameIndex);
+			OutFrameObject->SetStringField(TEXT("frame_capture_renderer"), bUsePreviewSceneCapture ? TEXT("preview_scene_capture") : (bUseOffscreenRenderer ? TEXT("slate_widget_offscreen") : TEXT("slate_widget")));
+			OutFrameObject->SetStringField(TEXT("pixel_signature"), PixelSignature);
+			if (PixelSignal.IsValid())
+			{
+				OutFrameObject->SetObjectField(TEXT("pixel_signal"), PixelSignal);
+			}
+			if (SequenceIndex == 0 && FirstFrameRenderDependencyWait.IsValid())
+			{
+				OutFrameObject->SetObjectField(TEXT("render_dependency_wait"), FirstFrameRenderDependencyWait);
+			}
+			if (ChangedPixelCountFromPrevious != INDEX_NONE)
+			{
+				OutFrameObject->SetNumberField(TEXT("changed_pixel_count_from_previous"), ChangedPixelCountFromPrevious);
+				OutFrameObject->SetNumberField(TEXT("changed_pixel_fraction_from_previous"), ResizedPixels.Num() > 0 ? static_cast<double>(ChangedPixelCountFromPrevious) / static_cast<double>(ResizedPixels.Num()) : 0.0);
+			}
+			OutFrameObject->SetBoolField(TEXT("visual_duplicate_of_previous"), bVisualDuplicateOfPrevious);
+
+			PreviousResizedPixels = ResizedPixels;
+			PreviousPixelSignature = PixelSignature;
+			PreviewComponent->SetPaused(false);
+			return true;
+		};
+
+		for (int32 RequestIndex = 0; RequestIndex < FrameRequests.Num(); ++RequestIndex)
+		{
+			TSharedPtr<FJsonObject> FrameObject;
+			if (!CaptureCurrentPreviewFrame(FrameRequests[RequestIndex], RequestIndex, FrameObject))
+			{
+				return false;
+			}
+			if (RequestIndex == 0)
+			{
+				FirstFrameObject = FrameObject;
+			}
+			CapturedFrames.Add(MakeShared<FJsonValueObject>(FrameObject));
+		}
+
+		PreviewComponent->SetPaused(true);
+		PreviewComponent->MarkRenderStateDirty();
+
+		bool bRestoredDirtyState = false;
+		if (NiagaraSystemPackage && !bWasPackageDirtyBeforeFrameSequence && NiagaraSystemPackage->IsDirty())
+		{
+			NiagaraSystemPackage->SetDirtyFlag(false);
+			bRestoredDirtyState = true;
+		}
+
+		if (!FirstFrameObject.IsValid())
+		{
+			OutError = TEXT("preview_frame_capture_empty");
+			return false;
+		}
+
+		FString FrameSheetPath;
+		TSharedPtr<FJsonObject> FrameSheetData;
+		if (bCreateFrameSheet && FrameRequests.Num() > 1)
+		{
+			if (CapturedFramePixelsForSheet.Num() != FrameRequests.Num())
+			{
+				OutError = TEXT("frame_sheet_capture_size_mismatch");
+				return false;
+			}
+			if (!WriteFrameSequenceSheetImage(CapturedFramePixelsForSheet, CapturedFrameLabelsForSheet, FrameSheetTileSize, Ctx.Params, Format, Quality, FrameSheetPath, FrameSheetData, OutError))
+			{
+				return false;
+			}
+		}
+
+		FString PreviewStatsError;
+		TSharedPtr<FJsonObject> PreviewStats = UeAgentNiagaraOps::CollectNiagaraPreviewStats(Asset, PreviewStatsError);
+
+		const FString FrameSequenceCaptureMode = bUsePreviewSceneCapture
+			? TEXT("continuous_from_zero_preview_scene_capture")
+			: (bUseOffscreenRenderer ? TEXT("continuous_from_zero_slate_widget_offscreen") : TEXT("continuous_from_zero_slate_widget"));
+		OutData->SetStringField(TEXT("asset_path"), Asset->GetOutermost()->GetName());
+		OutData->SetStringField(TEXT("object_path"), Asset->GetPathName());
+		OutData->SetStringField(TEXT("asset_kind"), UeAgentNiagaraOps::GetNiagaraAssetKind(Asset));
+		if (FrameSheetData.IsValid())
+		{
+			OutData->SetStringField(TEXT("file_path"), FrameSheetPath);
+			OutData->SetNumberField(TEXT("width"), FrameSheetData->GetNumberField(TEXT("width")));
+			OutData->SetNumberField(TEXT("height"), FrameSheetData->GetNumberField(TEXT("height")));
+			OutData->SetNumberField(TEXT("bytes"), FrameSheetData->GetNumberField(TEXT("bytes")));
+		}
+		else
+		{
+			FString FirstFramePath;
+			FirstFrameObject->TryGetStringField(TEXT("file_path"), FirstFramePath);
+			OutData->SetStringField(TEXT("file_path"), FirstFramePath);
+			OutData->SetNumberField(TEXT("width"), FirstFrameObject->GetNumberField(TEXT("width")));
+			OutData->SetNumberField(TEXT("height"), FirstFrameObject->GetNumberField(TEXT("height")));
+			double FirstFrameBytes = 0.0;
+			FirstFrameObject->TryGetNumberField(TEXT("bytes"), FirstFrameBytes);
+			OutData->SetNumberField(TEXT("bytes"), FirstFrameBytes);
+		}
+		OutData->SetStringField(TEXT("target"), EffectiveTarget);
+		OutData->SetStringField(TEXT("capture_mode"), FrameSequenceCaptureMode);
+		OutData->SetStringField(TEXT("legacy_backbuffer_capture"), TEXT("disabled"));
+		OutData->SetStringField(TEXT("requested_capture_mode"), RequestedCaptureMode);
+		OutData->SetStringField(TEXT("format"), Format);
+		OutData->SetNumberField(TEXT("frame_index"), FirstFrameObject->GetNumberField(TEXT("frame_index")));
+		OutData->SetNumberField(TEXT("target_frame"), FirstFrameObject->GetNumberField(TEXT("target_frame")));
+		OutData->SetNumberField(TEXT("frame_count"), FrameRequests.Num());
+		OutData->SetArrayField(TEXT("frames"), CapturedFrames);
+		OutData->SetBoolField(TEXT("frame_sheet_created"), FrameSheetData.IsValid());
+		OutData->SetBoolField(TEXT("individual_frame_files_created"), bWriteIndividualFrames);
+		if (FrameSheetData.IsValid())
+		{
+			OutData->SetStringField(TEXT("frame_sheet_file_path"), FrameSheetPath);
+			OutData->SetStringField(TEXT("sequence_frame_image_path"), FrameSheetPath);
+			OutData->SetObjectField(TEXT("frame_sheet"), FrameSheetData);
+		}
+		OutData->SetStringField(TEXT("pixel_signature"), FirstFrameObject->GetStringField(TEXT("pixel_signature")));
+		OutData->SetStringField(TEXT("frame_capture_renderer"), bUsePreviewSceneCapture ? TEXT("preview_scene_capture") : (bUseOffscreenRenderer ? TEXT("slate_widget_offscreen") : TEXT("slate_widget")));
+		OutData->SetBoolField(TEXT("opened_editor_if_needed"), bOpenEditorIfNeeded);
+		OutData->SetBoolField(TEXT("synchronized_overview_graph"), bSynchronizedOverviewGraph);
+		OutData->SetNumberField(TEXT("overview_node_count_before"), OverviewNodeCountBefore);
+		OutData->SetNumberField(TEXT("overview_node_count_after"), OverviewNodeCountAfter);
+		OutData->SetBoolField(TEXT("offscreen_renderer"), bUseSlateFrameCapture && bUseOffscreenRenderer);
+		OutData->SetBoolField(TEXT("scene_capture_renderer"), bUsePreviewSceneCapture);
+		OutData->SetBoolField(TEXT("requested_offscreen_renderer"), bRequestedOffscreenRenderer);
+		OutData->SetBoolField(TEXT("requested_offscreen_renderer_specified"), bUseOffscreenRendererSpecified);
+		OutData->SetNumberField(TEXT("offscreen_draw_width"), FrameOffscreenDrawSize.X);
+		OutData->SetNumberField(TEXT("offscreen_draw_height"), FrameOffscreenDrawSize.Y);
+		OutData->SetNumberField(TEXT("capture_width"), FrameCaptureSize.X);
+		OutData->SetNumberField(TEXT("capture_height"), FrameCaptureSize.Y);
+		OutData->SetBoolField(TEXT("window_backbuffer_safe"), bWindowBackbufferSafe);
+		OutData->SetStringField(TEXT("window_backbuffer_unsafe_reason"), WindowBackbufferUnsafeReason);
+		OutData->SetBoolField(TEXT("preview_prepare_requested"), true);
+		OutData->SetBoolField(TEXT("preview_prepared"), true);
+		OutData->SetStringField(TEXT("sample_mode"), TEXT("frame_sequence"));
+		OutData->SetStringField(TEXT("advance_semantics"), TEXT("continuous_from_zero"));
+		OutData->SetStringField(TEXT("frame_sequence_capture_mode"), TEXT("continuous_from_zero_once"));
+		OutData->SetBoolField(TEXT("mutated_preview_component"), true);
+		OutData->SetBoolField(TEXT("preview_reset"), true);
+		OutData->SetNumberField(TEXT("preview_tick_delta_seconds"), PreviewTickDeltaSeconds);
+		OutData->SetStringField(TEXT("preview_advance_mode"), EffectiveFrameAdvanceMode);
+		OutData->SetBoolField(TEXT("preview_paused_after_advance"), true);
+		OutData->SetBoolField(TEXT("was_package_dirty_before_capture"), bWasPackageDirtyBeforeFrameSequence);
+		OutData->SetBoolField(TEXT("restored_dirty_state"), bRestoredDirtyState);
+		if (SceneCaptureCameraInfo.IsValid())
+		{
+			OutData->SetObjectField(TEXT("scene_capture_camera"), SceneCaptureCameraInfo);
+		}
+		if (FirstFrameRenderDependencyWait.IsValid())
+		{
+			OutData->SetObjectField(TEXT("render_dependency_wait"), FirstFrameRenderDependencyWait);
+		}
+		OutData->SetStringField(TEXT("preview_stats_error"), PreviewStatsError);
+		if (PreviewStats.IsValid())
+		{
+			OutData->SetObjectField(TEXT("preview_stats"), PreviewStats);
+		}
+		return true;
+	}
 
 	if (bPreviewPrepareRequested)
 	{

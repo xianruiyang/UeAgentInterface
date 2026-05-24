@@ -13,6 +13,7 @@ bool FUeAgentHttpServer::ExecuteSequenceCommand(const FString& CommandLower, con
 	if (CommandLower == TEXT("sequence_create_level_sequence")) return CmdSequenceCreateLevelSequence(Ctx, OutData, OutError);
 	if (CommandLower == TEXT("sequence_open_level_sequence")) return CmdSequenceOpenLevelSequence(Ctx, OutData, OutError);
 	if (CommandLower == TEXT("sequence_get_level_sequence_info")) return CmdSequenceGetLevelSequenceInfo(Ctx, OutData, OutError);
+	if (CommandLower == TEXT("sequence_screenshot")) return CmdSequenceScreenshot(Ctx, OutData, OutError);
 	if (CommandLower == TEXT("sequence_export_folder")) return CmdSequenceExportFolder(Ctx, OutData, OutError);
 	if (CommandLower == TEXT("sequence_apply_folder")) return CmdSequenceApplyFolder(Ctx, OutData, OutError);
 	if (CommandLower == TEXT("sequence_set_level_sequence_playback_range")) return CmdSequenceSetLevelSequencePlaybackRange(Ctx, OutData, OutError);
@@ -294,6 +295,453 @@ bool FUeAgentHttpServer::CmdSequenceGetLevelSequenceInfo(const FUeAgentRequestCo
 	}
 	OutData->SetArrayField(TEXT("master_tracks"), MasterTracksJson);
 	OutData->SetArrayField(TEXT("bindings"), BindingsJson);
+	return true;
+}
+
+bool FUeAgentHttpServer::CmdSequenceScreenshot(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+{
+	if (!OutData.IsValid())
+	{
+		OutData = MakeShared<FJsonObject>();
+	}
+
+	const UUeAgentInterfaceSettings* Settings = UUeAgentInterfaceSettings::Get();
+	if (!Settings || !Settings->bEnableScreenshots)
+	{
+		OutError = TEXT("screenshots_disabled");
+		return false;
+	}
+
+	FString AssetPath;
+	if (!JsonTryGetString(Ctx.Params, TEXT("asset_path"), AssetPath) || AssetPath.IsEmpty())
+	{
+		OutError = TEXT("missing_asset_path");
+		return false;
+	}
+
+	ULevelSequence* Sequence = UeAgentSequenceOps::LoadLevelSequence(AssetPath);
+	if (!Sequence)
+	{
+		OutError = TEXT("level_sequence_not_found");
+		return false;
+	}
+	UMovieScene* MovieScene = Sequence->GetMovieScene();
+	if (!MovieScene)
+	{
+		OutError = TEXT("movie_scene_not_found");
+		return false;
+	}
+
+	TArray<UeAgentSequenceOps::FLevelSequenceFrameRequest> FrameRequests;
+	if (!UeAgentSequenceOps::ResolveLevelSequenceFrameSequence(Sequence, Ctx.Params, FrameRequests, OutError))
+	{
+		return false;
+	}
+	if (FrameRequests.Num() <= 0)
+	{
+		OutError = TEXT("preview_frame_sequence_empty");
+		return false;
+	}
+
+	if (!GEditor)
+	{
+		OutError = TEXT("no_geditor");
+		return false;
+	}
+	UWorld* World = GEditor->GetEditorWorldContext().World();
+	if (!World)
+	{
+		OutError = TEXT("no_editor_world");
+		return false;
+	}
+
+	FString Target = TEXT("viewport");
+	JsonTryGetString(Ctx.Params, TEXT("target"), Target);
+	Target = Target.TrimStartAndEnd().ToLower();
+	if (Target != TEXT("viewport") && Target != TEXT("camera") && Target != TEXT("sequence_camera"))
+	{
+		OutError = TEXT("invalid_target");
+		return false;
+	}
+
+	FString Format = TEXT("png");
+	int32 Quality = 95;
+	int32 MaxSize = 1920;
+	JsonTryGetString(Ctx.Params, TEXT("format"), Format);
+	Format = Format.ToLower();
+	if (Format == TEXT("jpeg"))
+	{
+		Format = TEXT("jpg");
+	}
+	if (Format != TEXT("png") && Format != TEXT("jpg") && Format != TEXT("webp"))
+	{
+		OutError = TEXT("unsupported_format");
+		return false;
+	}
+
+	double QualityValue = Quality;
+	if (JsonTryGetNumber(Ctx.Params, TEXT("quality"), QualityValue))
+	{
+		Quality = FMath::Clamp(static_cast<int32>(QualityValue), 1, 100);
+	}
+
+	double MaxSizeValue = MaxSize;
+	if (JsonTryGetNumber(Ctx.Params, TEXT("max_size"), MaxSizeValue))
+	{
+		MaxSize = FMath::Clamp(static_cast<int32>(MaxSizeValue), 64, 8192);
+	}
+
+	FIntPoint BaseCaptureSize(1920, 1080);
+	double WidthValue = 0.0;
+	double HeightValue = 0.0;
+	const bool bHasExplicitWidth = JsonTryGetNumber(Ctx.Params, TEXT("width"), WidthValue);
+	const bool bHasExplicitHeight = JsonTryGetNumber(Ctx.Params, TEXT("height"), HeightValue);
+	if (bHasExplicitWidth && bHasExplicitHeight && WidthValue > 0.0 && HeightValue > 0.0)
+	{
+		BaseCaptureSize = FIntPoint(FMath::Clamp(FMath::RoundToInt(WidthValue), 64, 8192), FMath::Clamp(FMath::RoundToInt(HeightValue), 64, 8192));
+	}
+	else if (FLevelEditorViewportClient* ViewportClient = UeAgentSequenceOps::GetPreferredLevelViewportClient())
+	{
+		if (ViewportClient->Viewport)
+		{
+			const FIntPoint ViewportSize = ViewportClient->Viewport->GetSizeXY();
+			if (ViewportSize.X > 0 && ViewportSize.Y > 0)
+			{
+				BaseCaptureSize = ViewportSize;
+			}
+		}
+	}
+	const int32 MaxDim = FMath::Max(BaseCaptureSize.X, BaseCaptureSize.Y);
+	const float CaptureScale = (MaxDim > MaxSize) ? (static_cast<float>(MaxSize) / static_cast<float>(MaxDim)) : 1.0f;
+	const int32 CaptureWidth = FMath::Max(1, FMath::RoundToInt(static_cast<float>(BaseCaptureSize.X) * CaptureScale));
+	const int32 CaptureHeight = FMath::Max(1, FMath::RoundToInt(static_cast<float>(BaseCaptureSize.Y) * CaptureScale));
+
+	bool bFallbackToViewportCamera = true;
+	JsonTryGetBool(Ctx.Params, TEXT("fallback_to_viewport_camera"), bFallbackToViewportCamera);
+
+	struct FSequenceScreenshotCleanup
+	{
+		UWorld* World = nullptr;
+		UPackage* WorldPackage = nullptr;
+		bool bWorldPackageWasDirty = false;
+		ULevelSequencePlayer* Player = nullptr;
+		ALevelSequenceActor* SequenceActor = nullptr;
+		ASceneCapture2D* CaptureActor = nullptr;
+		UTextureRenderTarget2D* RenderTarget = nullptr;
+
+		~FSequenceScreenshotCleanup()
+		{
+			if (Player)
+			{
+				Player->Stop();
+			}
+			if (CaptureActor && IsValid(CaptureActor))
+			{
+				CaptureActor->Destroy();
+			}
+			if (World && SequenceActor && IsValid(SequenceActor))
+			{
+				World->DestroyActor(SequenceActor, false, false);
+			}
+			if (WorldPackage && !bWorldPackageWasDirty && WorldPackage->IsDirty())
+			{
+				WorldPackage->SetDirtyFlag(false);
+			}
+		}
+	};
+	FSequenceScreenshotCleanup Cleanup;
+	Cleanup.World = World;
+	Cleanup.WorldPackage = World->GetOutermost();
+	Cleanup.bWorldPackageWasDirty = Cleanup.WorldPackage ? Cleanup.WorldPackage->IsDirty() : false;
+
+	FMovieSceneSequencePlaybackSettings PlaybackSettings;
+	PlaybackSettings.bAutoPlay = false;
+	PlaybackSettings.FinishCompletionStateOverride = EMovieSceneCompletionModeOverride::ForceRestoreState;
+	Cleanup.Player = ULevelSequencePlayer::CreateLevelSequencePlayer(World, Sequence, PlaybackSettings, Cleanup.SequenceActor);
+	if (!Cleanup.Player)
+	{
+		OutError = TEXT("level_sequence_player_create_failed");
+		return false;
+	}
+	if (Cleanup.SequenceActor)
+	{
+		Cleanup.SequenceActor->SetFlags(RF_Transient | RF_TextExportTransient | RF_DuplicateTransient);
+		Cleanup.SequenceActor->SetActorEnableCollision(false);
+		Cleanup.SequenceActor->SetActorHiddenInGame(true);
+		Cleanup.SequenceActor->SetIsTemporarilyHiddenInEditor(true);
+	}
+
+	Cleanup.RenderTarget = NewObject<UTextureRenderTarget2D>(GetTransientPackage(), NAME_None, RF_Transient);
+	if (!Cleanup.RenderTarget)
+	{
+		OutError = TEXT("render_target_alloc_failed");
+		return false;
+	}
+	Cleanup.RenderTarget->ClearColor = FLinearColor::Black;
+	Cleanup.RenderTarget->InitCustomFormat(CaptureWidth, CaptureHeight, PF_B8G8R8A8, false);
+	Cleanup.RenderTarget->UpdateResourceImmediate(true);
+
+	FActorSpawnParameters CaptureSpawnParams;
+	CaptureSpawnParams.Name = MakeUniqueObjectName(World, ASceneCapture2D::StaticClass(), TEXT("UeAgentSequenceFrameCapture"));
+	CaptureSpawnParams.ObjectFlags = RF_Transient | RF_TextExportTransient | RF_DuplicateTransient;
+	CaptureSpawnParams.SpawnCollisionHandlingOverride = ESpawnActorCollisionHandlingMethod::AlwaysSpawn;
+	CaptureSpawnParams.bTemporaryEditorActor = true;
+	CaptureSpawnParams.bHideFromSceneOutliner = true;
+
+	Cleanup.CaptureActor = World->SpawnActor<ASceneCapture2D>(ASceneCapture2D::StaticClass(), FTransform::Identity, CaptureSpawnParams);
+	if (!Cleanup.CaptureActor)
+	{
+		OutError = TEXT("spawn_scene_capture_failed");
+		return false;
+	}
+	Cleanup.CaptureActor->SetActorEnableCollision(false);
+	Cleanup.CaptureActor->SetActorHiddenInGame(true);
+	Cleanup.CaptureActor->SetIsTemporarilyHiddenInEditor(true);
+
+	USceneCaptureComponent2D* CaptureComp = Cleanup.CaptureActor->GetCaptureComponent2D();
+	if (!CaptureComp)
+	{
+		OutError = TEXT("scene_capture_component_missing");
+		return false;
+	}
+	CaptureComp->TextureTarget = Cleanup.RenderTarget;
+	CaptureComp->CaptureSource = SCS_FinalColorLDR;
+	CaptureComp->FOVAngle = 60.0f;
+	CaptureComp->bCaptureEveryFrame = false;
+	CaptureComp->bCaptureOnMovement = false;
+	CaptureComp->ShowFlags.SetMotionBlur(false);
+
+	const FFrameRate DisplayRate = MovieScene->GetDisplayRate();
+	const float TickDeltaSeconds = DisplayRate.IsValid() && DisplayRate.AsDecimal() > KINDA_SMALL_NUMBER
+		? static_cast<float>(1.0 / DisplayRate.AsDecimal())
+		: (1.0f / 30.0f);
+
+	TArray<TSharedPtr<FJsonValue>> CapturedFrames;
+	TSharedPtr<FJsonObject> FirstFrameObject;
+	TArray<TArray<FColor>> CapturedFramePixelsForSheet;
+	TArray<FString> CapturedFrameLabelsForSheet;
+	FIntPoint FrameSheetTileSize(0, 0);
+	FString FirstCameraSource;
+	int32 SequenceCameraFrameCount = 0;
+	int32 ViewportFallbackFrameCount = 0;
+
+	bool bCreateFrameSheet = FrameRequests.Num() > 1;
+	JsonTryGetBool(Ctx.Params, TEXT("create_frame_sheet"), bCreateFrameSheet) ||
+		JsonTryGetBool(Ctx.Params, TEXT("frame_sheet"), bCreateFrameSheet) ||
+		JsonTryGetBool(Ctx.Params, TEXT("sequence_frame_image"), bCreateFrameSheet);
+	bool bWriteIndividualFrames = FrameRequests.Num() == 1;
+	JsonTryGetBool(Ctx.Params, TEXT("write_individual_frames"), bWriteIndividualFrames) ||
+		JsonTryGetBool(Ctx.Params, TEXT("keep_individual_frames"), bWriteIndividualFrames) ||
+		JsonTryGetBool(Ctx.Params, TEXT("output_individual_frames"), bWriteIndividualFrames);
+	if (FrameRequests.Num() > 1 && !bCreateFrameSheet && !bWriteIndividualFrames)
+	{
+		OutError = TEXT("multi_frame_output_disabled");
+		return false;
+	}
+
+	auto CaptureRequestedFrame = [&](const UeAgentSequenceOps::FLevelSequenceFrameRequest& Request, const int32 SequenceIndex, TSharedPtr<FJsonObject>& OutFrameObject) -> bool
+	{
+		Cleanup.Player->SetPlaybackPosition(FMovieSceneSequencePlaybackParams(FFrameTime(Request.EvaluationFrame), EUpdatePositionMethod::Jump));
+		World->Tick(LEVELTICK_All, TickDeltaSeconds);
+		World->SendAllEndOfFrameUpdates();
+		FlushRenderingCommands();
+
+		FString CameraSource = TEXT("sequence_camera");
+		FString CameraObjectPath;
+		FVector CaptureLocation = FVector::ZeroVector;
+		FRotator CaptureRotation = FRotator::ZeroRotator;
+		float CaptureFov = 60.0f;
+
+		if (UCameraComponent* ActiveCamera = Cleanup.Player->GetActiveCameraComponent())
+		{
+			CaptureLocation = ActiveCamera->GetComponentLocation();
+			CaptureRotation = ActiveCamera->GetComponentRotation();
+			CaptureFov = ActiveCamera->FieldOfView;
+			CameraObjectPath = ActiveCamera->GetPathName();
+			++SequenceCameraFrameCount;
+		}
+		else if (bFallbackToViewportCamera)
+		{
+			FLevelEditorViewportClient* ViewportClient = UeAgentSequenceOps::GetPreferredLevelViewportClient();
+			if (!ViewportClient)
+			{
+				OutError = TEXT("sequence_camera_not_found_and_no_viewport_fallback");
+				return false;
+			}
+			CameraSource = TEXT("viewport_fallback");
+			CaptureLocation = ViewportClient->GetViewLocation();
+			CaptureRotation = ViewportClient->GetViewRotation();
+			CaptureFov = ViewportClient->ViewFOV;
+			++ViewportFallbackFrameCount;
+		}
+		else
+		{
+			OutError = TEXT("sequence_camera_not_found");
+			return false;
+		}
+
+		Cleanup.CaptureActor->SetActorLocationAndRotation(CaptureLocation, CaptureRotation, false, nullptr, ETeleportType::TeleportPhysics);
+		CaptureComp->FOVAngle = FMath::Clamp(CaptureFov, 5.0f, 170.0f);
+		CaptureComp->CaptureScene();
+		FlushRenderingCommands();
+
+		FRenderTarget* RenderTarget = Cleanup.RenderTarget->GameThread_GetRenderTargetResource();
+		if (!RenderTarget)
+		{
+			OutError = TEXT("render_target_resource_missing");
+			return false;
+		}
+
+		TArray<FColor> Pixels;
+		const FIntPoint ShotSize(CaptureWidth, CaptureHeight);
+		if (!RenderTarget->ReadPixels(Pixels))
+		{
+			OutError = TEXT("read_render_target_failed");
+			return false;
+		}
+		for (FColor& Pixel : Pixels)
+		{
+			Pixel.A = 255;
+		}
+
+		TArray<FColor> ResizedPixels;
+		FIntPoint ResizedSize(0, 0);
+		if (!ResizePixelsMaxSize(Pixels, ShotSize, MaxSize, ResizedPixels, ResizedSize, OutError))
+		{
+			return false;
+		}
+
+		FString OutPath;
+		int64 Bytes = 0;
+		if (bWriteIndividualFrames)
+		{
+			OutPath = MakeShotPath(Format);
+			if (!WriteCompressedImage(ResizedPixels, ResizedSize, Format, Quality, OutPath, OutError))
+			{
+				return false;
+			}
+			Bytes = IFileManager::Get().FileSize(*OutPath);
+		}
+
+		if (FrameSheetTileSize.X <= 0 || FrameSheetTileSize.Y <= 0)
+		{
+			FrameSheetTileSize = ResizedSize;
+		}
+		if (ResizedSize == FrameSheetTileSize)
+		{
+			CapturedFramePixelsForSheet.Add(ResizedPixels);
+			CapturedFrameLabelsForSheet.Add(FString::Printf(TEXT("F%d"), Request.FrameIndex));
+		}
+
+		OutFrameObject = MakeShared<FJsonObject>();
+		OutFrameObject->SetNumberField(TEXT("sequence_index"), SequenceIndex);
+		if (!OutPath.IsEmpty())
+		{
+			OutFrameObject->SetStringField(TEXT("file_path"), OutPath);
+			OutFrameObject->SetNumberField(TEXT("bytes"), static_cast<double>(Bytes));
+		}
+		OutFrameObject->SetNumberField(TEXT("width"), ResizedSize.X);
+		OutFrameObject->SetNumberField(TEXT("height"), ResizedSize.Y);
+		OutFrameObject->SetNumberField(TEXT("frame_index"), Request.FrameIndex);
+		OutFrameObject->SetStringField(TEXT("frame_label"), FString::Printf(TEXT("F%d"), Request.FrameIndex));
+		OutFrameObject->SetNumberField(TEXT("time_seconds"), Request.TimeSeconds);
+		OutFrameObject->SetNumberField(TEXT("evaluation_frame"), Request.EvaluationFrame.Value);
+		OutFrameObject->SetStringField(TEXT("camera_source"), CameraSource);
+		OutFrameObject->SetStringField(TEXT("camera_object_path"), CameraObjectPath);
+		OutFrameObject->SetNumberField(TEXT("camera_fov"), CaptureFov);
+		if (SequenceIndex == 0)
+		{
+			FirstCameraSource = CameraSource;
+		}
+		return true;
+	};
+
+	for (int32 RequestIndex = 0; RequestIndex < FrameRequests.Num(); ++RequestIndex)
+	{
+		TSharedPtr<FJsonObject> FrameObject;
+		if (!CaptureRequestedFrame(FrameRequests[RequestIndex], RequestIndex, FrameObject))
+		{
+			return false;
+		}
+		if (RequestIndex == 0)
+		{
+			FirstFrameObject = FrameObject;
+		}
+		CapturedFrames.Add(MakeShared<FJsonValueObject>(FrameObject));
+	}
+
+	if (!FirstFrameObject.IsValid())
+	{
+		OutError = TEXT("preview_frame_capture_empty");
+		return false;
+	}
+
+	FString FrameSheetPath;
+	TSharedPtr<FJsonObject> FrameSheetData;
+	if (bCreateFrameSheet && FrameRequests.Num() > 1)
+	{
+		if (CapturedFramePixelsForSheet.Num() != FrameRequests.Num())
+		{
+			OutError = TEXT("frame_sheet_capture_size_mismatch");
+			return false;
+		}
+		if (!WriteFrameSequenceSheetImage(CapturedFramePixelsForSheet, CapturedFrameLabelsForSheet, FrameSheetTileSize, Ctx.Params, Format, Quality, FrameSheetPath, FrameSheetData, OutError))
+		{
+			return false;
+		}
+	}
+
+	Cleanup.Player->Stop();
+	if (Cleanup.WorldPackage && !Cleanup.bWorldPackageWasDirty && Cleanup.WorldPackage->IsDirty())
+	{
+		Cleanup.WorldPackage->SetDirtyFlag(false);
+	}
+
+	OutData->SetStringField(TEXT("asset_path"), Sequence->GetOutermost()->GetName());
+	OutData->SetStringField(TEXT("object_path"), Sequence->GetPathName());
+	if (FrameSheetData.IsValid())
+	{
+		OutData->SetStringField(TEXT("file_path"), FrameSheetPath);
+		OutData->SetNumberField(TEXT("width"), FrameSheetData->GetNumberField(TEXT("width")));
+		OutData->SetNumberField(TEXT("height"), FrameSheetData->GetNumberField(TEXT("height")));
+		OutData->SetNumberField(TEXT("bytes"), FrameSheetData->GetNumberField(TEXT("bytes")));
+	}
+	else
+	{
+		FString FirstFramePath;
+		FirstFrameObject->TryGetStringField(TEXT("file_path"), FirstFramePath);
+		OutData->SetStringField(TEXT("file_path"), FirstFramePath);
+		OutData->SetNumberField(TEXT("width"), FirstFrameObject->GetNumberField(TEXT("width")));
+		OutData->SetNumberField(TEXT("height"), FirstFrameObject->GetNumberField(TEXT("height")));
+		double FirstFrameBytes = 0.0;
+		FirstFrameObject->TryGetNumberField(TEXT("bytes"), FirstFrameBytes);
+		OutData->SetNumberField(TEXT("bytes"), FirstFrameBytes);
+	}
+	OutData->SetStringField(TEXT("target"), TEXT("viewport"));
+	OutData->SetStringField(TEXT("capture_mode"), TEXT("level_sequence_player_scene_capture"));
+	OutData->SetStringField(TEXT("format"), Format);
+	OutData->SetNumberField(TEXT("frame_index"), FirstFrameObject->GetNumberField(TEXT("frame_index")));
+	OutData->SetNumberField(TEXT("time_seconds"), FirstFrameObject->GetNumberField(TEXT("time_seconds")));
+	OutData->SetNumberField(TEXT("frame_count"), FrameRequests.Num());
+	OutData->SetArrayField(TEXT("frames"), CapturedFrames);
+	OutData->SetBoolField(TEXT("frame_sheet_created"), FrameSheetData.IsValid());
+	OutData->SetBoolField(TEXT("individual_frame_files_created"), bWriteIndividualFrames);
+	if (FrameSheetData.IsValid())
+	{
+		OutData->SetStringField(TEXT("frame_sheet_file_path"), FrameSheetPath);
+		OutData->SetStringField(TEXT("sequence_frame_image_path"), FrameSheetPath);
+		OutData->SetObjectField(TEXT("frame_sheet"), FrameSheetData);
+	}
+	OutData->SetNumberField(TEXT("display_rate_numerator"), DisplayRate.Numerator);
+	OutData->SetNumberField(TEXT("display_rate_denominator"), DisplayRate.Denominator);
+	OutData->SetNumberField(TEXT("tick_resolution_numerator"), MovieScene->GetTickResolution().Numerator);
+	OutData->SetNumberField(TEXT("tick_resolution_denominator"), MovieScene->GetTickResolution().Denominator);
+	OutData->SetStringField(TEXT("camera_source"), FirstCameraSource);
+	OutData->SetNumberField(TEXT("sequence_camera_frame_count"), SequenceCameraFrameCount);
+	OutData->SetNumberField(TEXT("viewport_fallback_frame_count"), ViewportFallbackFrameCount);
+	OutData->SetBoolField(TEXT("fallback_to_viewport_camera"), bFallbackToViewportCamera);
+	OutData->SetBoolField(TEXT("world_package_was_dirty_before_capture"), Cleanup.bWorldPackageWasDirty);
+	OutData->SetBoolField(TEXT("restored_world_dirty_state"), Cleanup.WorldPackage && !Cleanup.bWorldPackageWasDirty && !Cleanup.WorldPackage->IsDirty());
 	return true;
 }
 

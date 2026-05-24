@@ -10,7 +10,7 @@ bool FUeAgentHttpServer::CmdBlueprintLayoutGraphSelfTest(const FUeAgentRequestCo
 	(void)Ctx;
 	UeAgentBlueprintAutoLayout::FSelfTestResult Result = UeAgentBlueprintAutoLayout::RunSelfTest();
 	OutData = MakeShared<FJsonObject>();
-	OutData->SetStringField(TEXT("layout_self_test_version"), TEXT("exec_region_island_corridor_v2_xy_compact_placement_20260513"));
+	OutData->SetStringField(TEXT("layout_self_test_version"), TEXT("exec_region_deterministic_inter_island_bus_bundle_20260519"));
 	OutData->SetNumberField(TEXT("case_count"), Result.CaseCount);
 	OutData->SetNumberField(TEXT("passed_count"), Result.PassedCount);
 	OutData->SetNumberField(TEXT("failed_count"), Result.FailedCount);
@@ -55,7 +55,6 @@ bool FUeAgentHttpServer::CmdBlueprintLayoutGraph(const FUeAgentRequestContext& C
 		OutError = TEXT("graph_editor_access_offset_unavailable");
 		return false;
 	}
-	Options.PinDirectionBiasX = GraphEditorAccessOffsetX;
 	Options.OutputAccessOffsetX = GraphEditorAccessOffsetX;
 	Options.InputAccessOffsetX = GraphEditorAccessOffsetX;
 	Options.AccessOffsetSource = TEXT("graph_editor_settings_compute_spline_tangent");
@@ -156,10 +155,10 @@ bool FUeAgentHttpServer::CmdBlueprintLayoutGraph(const FUeAgentRequestContext& C
 			OutError = TEXT("layout_algorithm_failed");
 			return false;
 		}
-			UE_LOG(LogUeAgentInterface, Display, TEXT("BlueprintLayoutAlgorithm done elapsed_ms=%.1f reroutes=%d bus_contracts=%d route_through=%d hard=%d design_complete=%s"),
+			UE_LOG(LogUeAgentInterface, Display, TEXT("BlueprintLayoutAlgorithm done elapsed_ms=%.1f reroutes=%d inter_island_buses=%d route_through=%d hard=%d design_complete=%s"),
 				(FPlatformTime::Seconds() - LayoutStartSeconds) * 1000.0,
 				RunResult.ReroutePlans.Num(),
-				RunResult.BusContractDiagnostics.Num(),
+				RunResult.DesignDiagnostics.InterIslandBusCount,
 				RunResult.DesignDiagnostics.RouteThroughIslandCount,
 				RunResult.DesignDiagnostics.RouteThroughHardOccupancyCount,
 				RunResult.bDesignComplete ? TEXT("true") : TEXT("false"));
@@ -253,7 +252,6 @@ bool FUeAgentHttpServer::CmdBlueprintLayoutGraph(const FUeAgentRequestContext& C
 	OutData->SetBoolField(TEXT("layout_report_restore"), bUseLayoutReport);
 	OutData->SetNumberField(TEXT("output_access_offset_x"), Options.OutputAccessOffsetX);
 	OutData->SetNumberField(TEXT("input_access_offset_x"), Options.InputAccessOffsetX);
-	OutData->SetNumberField(TEXT("pin_direction_bias_x"), Options.PinDirectionBiasX);
 	OutData->SetStringField(TEXT("access_offset_source"), Options.AccessOffsetSource);
 	OutData->SetBoolField(TEXT("require_real_geometry"), bRequireRealGeometry);
 	OutData->SetBoolField(TEXT("use_real_geometry"), bUseRealGeometry);
@@ -366,18 +364,14 @@ bool FUeAgentHttpServer::CmdBlueprintLayoutGraph(const FUeAgentRequestContext& C
 	OutData->SetNumberField(TEXT("endpoint_candidate_count"), RunResult.DesignDiagnostics.EndpointCandidateCount);
 	OutData->SetNumberField(TEXT("placement_graph_edge_count"), RunResult.DesignDiagnostics.PlacementGraphEdgeCount);
 	OutData->SetNumberField(TEXT("route_only_edge_count"), RunResult.DesignDiagnostics.RouteOnlyEdgeCount);
-	OutData->SetNumberField(TEXT("route_only_cycle_break_edge_count"), RunResult.DesignDiagnostics.RouteOnlyCycleBreakEdgeCount);
 	OutData->SetNumberField(TEXT("placement_owner_edge_count"), RunResult.DesignDiagnostics.PlacementOwnerEdgeCount);
 	OutData->SetNumberField(TEXT("placement_non_owner_edge_count"), RunResult.DesignDiagnostics.PlacementNonOwnerEdgeCount);
-	OutData->SetNumberField(TEXT("route_only_middle_corridor_count"), RunResult.DesignDiagnostics.RouteOnlyMiddleCorridorCount);
-	OutData->SetNumberField(TEXT("route_only_outer_fallback_count"), RunResult.DesignDiagnostics.RouteOnlyOuterFallbackCount);
 	OutData->SetNumberField(TEXT("source_order_group_count"), RunResult.DesignDiagnostics.SourceOrderGroupCount);
 	OutData->SetNumberField(TEXT("fanout_intent_group_count"), RunResult.DesignDiagnostics.FanoutIntentGroupCount);
 	OutData->SetNumberField(TEXT("placement_proposal_count"), RunResult.DesignDiagnostics.PlacementProposalCount);
 	OutData->SetNumberField(TEXT("rejected_proposal_count"), RunResult.DesignDiagnostics.RejectedProposalCount);
 	OutData->SetNumberField(TEXT("source_port_order_violation_count"), RunResult.DesignDiagnostics.SourcePortOrderViolationCount);
 	OutData->SetNumberField(TEXT("invalid_forward_connection_count"), RunResult.DesignDiagnostics.InvalidForwardConnectionCount);
-	OutData->SetNumberField(TEXT("bus_contract_count"), RunResult.DesignDiagnostics.BusContractCount);
 	OutData->SetNumberField(TEXT("selected_endpoint_candidate_count"), RunResult.DesignDiagnostics.SelectedEndpointCandidateCount);
 	OutData->SetNumberField(TEXT("connection_group_count"), RunResult.DesignDiagnostics.ConnectionGroupCount);
 	OutData->SetNumberField(TEXT("route_group_count"), RunResult.DesignDiagnostics.RouteGroupCount);
@@ -385,10 +379,6 @@ bool FUeAgentHttpServer::CmdBlueprintLayoutGraph(const FUeAgentRequestContext& C
 	OutData->SetNumberField(TEXT("branch_merge_group_count"), RunResult.DesignDiagnostics.BranchMergeGroupCount);
 	OutData->SetNumberField(TEXT("cross_bus_trunk_lane_count"), RunResult.DesignDiagnostics.CrossBusTrunkLaneCount);
 	OutData->SetNumberField(TEXT("cross_bus_lane_count"), RunResult.DesignDiagnostics.CrossBusLaneCount);
-	OutData->SetNumberField(TEXT("final_visible_bus_lane_adjustment_count"), RunResult.DesignDiagnostics.FinalVisibleBusLaneAdjustmentCount);
-	OutData->SetNumberField(TEXT("final_visible_bus_lane_violation_count"), RunResult.DesignDiagnostics.FinalVisibleBusLaneViolationCount);
-	OutData->SetNumberField(TEXT("final_visible_branch_x_lane_adjustment_count"), RunResult.DesignDiagnostics.FinalVisibleBranchXLaneAdjustmentCount);
-	OutData->SetNumberField(TEXT("final_visible_branch_x_lane_violation_count"), RunResult.DesignDiagnostics.FinalVisibleBranchXLaneViolationCount);
 	OutData->SetNumberField(TEXT("route_through_hard_occupancy_count"), RunResult.DesignDiagnostics.RouteThroughHardOccupancyCount);
 	OutData->SetNumberField(TEXT("island_connection_total_length"), RunResult.DesignDiagnostics.IslandConnectionTotalLength);
 	OutData->SetNumberField(TEXT("total_route_length"), RunResult.DesignDiagnostics.TotalRouteLength);
@@ -399,6 +389,41 @@ bool FUeAgentHttpServer::CmdBlueprintLayoutGraph(const FUeAgentRequestContext& C
 	OutData->SetNumberField(TEXT("placement_component_count"), RunResult.DesignDiagnostics.PlacementComponentCount);
 	OutData->SetNumberField(TEXT("lane_coloring_lane_count"), RunResult.DesignDiagnostics.LaneColoringLaneCount);
 	OutData->SetNumberField(TEXT("route_through_island_count"), RunResult.DesignDiagnostics.RouteThroughIslandCount);
+	OutData->SetNumberField(TEXT("island_topological_order_count"), RunResult.DesignDiagnostics.IslandTopologicalOrderCount);
+	OutData->SetNumberField(TEXT("island_topological_residual_cycle_edge_count"), RunResult.DesignDiagnostics.IslandTopologicalResidualCycleEdgeCount);
+	OutData->SetNumberField(TEXT("root_island_count"), RunResult.DesignDiagnostics.RootIslandCount);
+	OutData->SetNumberField(TEXT("root_scoring_target_count"), RunResult.DesignDiagnostics.RootScoringTargetCount);
+	OutData->SetNumberField(TEXT("root_share_component_count"), RunResult.DesignDiagnostics.RootShareComponentCount);
+	OutData->SetNumberField(TEXT("root_equivalent_group_count"), RunResult.DesignDiagnostics.RootEquivalentGroupCount);
+	OutData->SetNumberField(TEXT("root_continuous_order_score"), RunResult.DesignDiagnostics.RootContinuousOrderScore);
+	OutData->SetNumberField(TEXT("root_continuous_order_inversion_score"), RunResult.DesignDiagnostics.RootContinuousOrderInversionScore);
+	OutData->SetNumberField(TEXT("root_continuous_order_pruned_state_count"), RunResult.DesignDiagnostics.RootContinuousOrderPrunedStateCount);
+	OutData->SetNumberField(TEXT("root_continuous_order_memo_hit_count"), RunResult.DesignDiagnostics.RootContinuousOrderMemoHitCount);
+	OutData->SetNumberField(TEXT("root_continuous_order_exact_limit_exceeded"), RunResult.DesignDiagnostics.RootContinuousOrderExactLimitExceeded);
+	OutData->SetNumberField(TEXT("root_compact_vertical_gap"), RunResult.DesignDiagnostics.RootCompactVerticalGap);
+	OutData->SetNumberField(TEXT("root_compact_total_height"), RunResult.DesignDiagnostics.RootCompactTotalHeight);
+	OutData->SetNumberField(TEXT("root_island_top_y_count"), RunResult.DesignDiagnostics.RootIslandTopYCount);
+	OutData->SetNumberField(TEXT("island_placement_order_count"), RunResult.DesignDiagnostics.IslandPlacementOrderCount);
+	OutData->SetNumberField(TEXT("island_leftward_reanchor_base_column"), RunResult.DesignDiagnostics.IslandLeftwardReanchorBaseColumn);
+	OutData->SetNumberField(TEXT("island_leftward_reanchor_column_count"), RunResult.DesignDiagnostics.IslandLeftwardReanchorColumnCount);
+	OutData->SetNumberField(TEXT("direct_island_connection_count"), RunResult.DesignDiagnostics.DirectIslandConnectionCount);
+	OutData->SetNumberField(TEXT("bus_island_connection_count"), RunResult.DesignDiagnostics.BusIslandConnectionCount);
+	OutData->SetNumberField(TEXT("inter_island_feedback_bus_connection_count"), RunResult.DesignDiagnostics.InterIslandFeedbackBusConnectionCount);
+	OutData->SetNumberField(TEXT("inter_island_bus_count"), RunResult.DesignDiagnostics.InterIslandBusCount);
+	OutData->SetNumberField(TEXT("inter_island_bus_duplicate_merge_count"), RunResult.DesignDiagnostics.InterIslandBusDuplicateMergeCount);
+	OutData->SetNumberField(TEXT("inter_island_bus_bundle_count"), RunResult.DesignDiagnostics.InterIslandBusBundleCount);
+	OutData->SetNumberField(TEXT("inter_island_bus_slot_assignment_count"), RunResult.DesignDiagnostics.InterIslandBusSlotAssignmentCount);
+	OutData->SetNumberField(TEXT("inter_island_bus_max_slot_count"), RunResult.DesignDiagnostics.InterIslandBusMaxSlotCount);
+	OutData->SetNumberField(TEXT("inter_island_bus_bundle_collision_box_count"), RunResult.DesignDiagnostics.InterIslandBusBundleCollisionBoxCount);
+	OutData->SetNumberField(TEXT("island_bus_collision_box_count"), RunResult.DesignDiagnostics.IslandBusCollisionBoxCount);
+	OutData->SetNumberField(TEXT("island_band_group_count"), RunResult.DesignDiagnostics.IslandBandGroupCount);
+	OutData->SetNumberField(TEXT("topology_column_horizontal_push_count"), RunResult.DesignDiagnostics.TopologyColumnHorizontalPushCount);
+	OutData->SetNumberField(TEXT("topology_column_bus_pull_count"), RunResult.DesignDiagnostics.TopologyColumnBusPullCount);
+	OutData->SetNumberField(TEXT("incoming_bus_branch_count"), RunResult.DesignDiagnostics.IncomingBusBranchCount);
+	OutData->SetNumberField(TEXT("inter_island_bus_branch_x_slot_count"), RunResult.DesignDiagnostics.InterIslandBusBranchXSlotCount);
+	OutData->SetNumberField(TEXT("island_bus_branch_right_shift_count"), RunResult.DesignDiagnostics.IslandBusBranchRightShiftCount);
+	OutData->SetNumberField(TEXT("inter_island_bus_branch_knot_count"), RunResult.DesignDiagnostics.InterIslandBusBranchKnotCount);
+	OutData->SetNumberField(TEXT("inter_island_bus_branch_knot_omitted_count"), RunResult.DesignDiagnostics.InterIslandBusBranchKnotOmittedCount);
 	OutData->SetObjectField(TEXT("metrics_before"), UeAgentBlueprintAutoLayout::MetricsToJson(RunResult.MetricsBefore));
 	OutData->SetObjectField(TEXT("metrics_after"), UeAgentBlueprintAutoLayout::MetricsToJson(RunResult.MetricsAfter));
 	OutData->SetObjectField(TEXT("metrics_after_reroute_plan"), UeAgentBlueprintAutoLayout::MetricsToJson(RunResult.MetricsAfterReroute));
@@ -409,6 +434,7 @@ bool FUeAgentHttpServer::CmdBlueprintLayoutGraph(const FUeAgentRequestContext& C
 	OutData->SetArrayField(TEXT("reroute_plan"), UeAgentBlueprintOps::ReroutePlansToJson(RunResult.ReroutePlans));
 	OutData->SetArrayField(TEXT("island_diagnostics"), RunResult.IslandDiagnostics);
 	OutData->SetArrayField(TEXT("island_edge_diagnostics"), RunResult.IslandEdgeDiagnostics);
+	OutData->SetArrayField(TEXT("island_partition_stages"), RunResult.IslandPartitionStageDiagnostics);
 	OutData->SetArrayField(TEXT("column_diagnostics"), RunResult.ColumnDiagnostics);
 	OutData->SetArrayField(TEXT("input_chains"), RunResult.InputChainDiagnostics);
 	OutData->SetArrayField(TEXT("internal_bus_groups"), RunResult.InternalBusGroupDiagnostics);
@@ -420,10 +446,13 @@ bool FUeAgentHttpServer::CmdBlueprintLayoutGraph(const FUeAgentRequestContext& C
 	OutData->SetArrayField(TEXT("source_order_groups"), RunResult.SourceOrderGroupDiagnostics);
 	OutData->SetArrayField(TEXT("fanout_intent_groups"), RunResult.FanoutIntentGroupDiagnostics);
 	OutData->SetArrayField(TEXT("selected_endpoint_candidates"), RunResult.SelectedEndpointCandidateDiagnostics);
-	OutData->SetArrayField(TEXT("bus_contracts"), RunResult.BusContractDiagnostics);
+	OutData->SetArrayField(TEXT("inter_island_bus_build_stages"), RunResult.InterIslandBusBuildDiagnostics);
+	OutData->SetArrayField(TEXT("inter_island_buses"), RunResult.InterIslandBusDiagnostics);
+	OutData->SetArrayField(TEXT("inter_island_bus_branch_visible_targets"), RunResult.InterIslandBusBranchVisibleTargetDiagnostics);
+	OutData->SetArrayField(TEXT("inter_island_bus_branch_target_modes"), RunResult.InterIslandBusBranchTargetModeDiagnostics);
 	OutData->SetArrayField(TEXT("branch_merge_groups"), RunResult.BranchMergeDiagnostics);
 	OutData->SetArrayField(TEXT("cross_bus_lanes"), RunResult.CrossBusLaneDiagnostics);
-	OutData->SetArrayField(TEXT("corridor_routes"), RunResult.CorridorRouteDiagnostics);
+	OutData->SetArrayField(TEXT("route_diagnostics"), RunResult.RouteDiagnostics);
 	OutData->SetArrayField(TEXT("lane_assignments"), RunResult.LaneAssignmentDiagnostics);
 	OutData->SetArrayField(TEXT("rejection_diagnostics"), RunResult.RejectionDiagnostics);
 	return true;

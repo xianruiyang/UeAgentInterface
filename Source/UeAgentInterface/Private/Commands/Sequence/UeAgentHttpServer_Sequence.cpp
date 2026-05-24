@@ -13,15 +13,25 @@
 #include "Channels/MovieSceneDoubleChannel.h"
 #include "Channels/MovieSceneFloatChannel.h"
 #include "Components/ActorComponent.h"
+#include "Components/SceneCaptureComponent2D.h"
 #include "Components/Widget.h"
 #include "Editor.h"
+#include "EditorViewportClient.h"
+#include "Engine/SceneCapture2D.h"
+#include "Engine/TextureRenderTarget2D.h"
 #include "EngineUtils.h"
 #include "FileHelpers.h"
 #include "GameFramework/Actor.h"
 #include "Blueprint/WidgetTree.h"
 #include "Kismet2/BlueprintEditorUtils.h"
 #include "Kismet2/KismetEditorUtilities.h"
+#include "HAL/FileManager.h"
 #include "LevelSequence.h"
+#include "LevelSequenceActor.h"
+#include "LevelSequencePlayer.h"
+#include "Camera/CameraComponent.h"
+#include "LevelEditorViewport.h"
+#include "RenderingThread.h"
 #include "Misc/FileHelper.h"
 #include "Misc/PackageName.h"
 #include "Misc/Paths.h"
@@ -33,6 +43,7 @@
 #include "MovieSceneSpawnable.h"
 #include "Serialization/JsonReader.h"
 #include "Serialization/JsonSerializer.h"
+#include "MovieSceneSequencePlayer.h"
 #include "Sections/MovieSceneCameraCutSection.h"
 #include "Sections/MovieSceneBoolSection.h"
 #include "Sections/MovieSceneByteSection.h"
@@ -71,6 +82,7 @@
 #include "Tracks/MovieSceneVisibilityTrack.h"
 #include "Tracks/MovieSceneSkeletalAnimationTrack.h"
 #include "Sections/MovieSceneSkeletalAnimationSection.h"
+#include "UeAgentInterfaceSettings.h"
 #include "WidgetBlueprint.h"
 
 namespace UeAgentSequenceOps
@@ -506,6 +518,247 @@ namespace UeAgentSequenceOps
 
 		MovieScene->SetPlaybackRange(TRange<FFrameNumber>(StartFrame, EndExclusiveFrame));
 		return true;
+	}
+
+	struct FLevelSequenceFrameRequest
+	{
+		int32 FrameIndex = 0;
+		double TimeSeconds = 0.0;
+		FFrameNumber EvaluationFrame;
+	};
+
+	static bool TryGetSequenceNumberAnyField(const TSharedPtr<FJsonObject>& Obj, const TArray<FString>& Keys, double& OutValue)
+	{
+		if (!Obj.IsValid())
+		{
+			return false;
+		}
+		for (const FString& Key : Keys)
+		{
+			if (Obj->TryGetNumberField(Key, OutValue))
+			{
+				return true;
+			}
+		}
+		return false;
+	}
+
+	static bool AddLevelSequenceFrameRequest(
+		UMovieScene* MovieScene,
+		const double RelativeTimeSeconds,
+		const int32 FrameIndex,
+		TArray<FLevelSequenceFrameRequest>& OutFrames,
+		FString& OutError)
+	{
+		if (!MovieScene)
+		{
+			OutError = TEXT("movie_scene_not_found");
+			return false;
+		}
+
+		const TRange<FFrameNumber> PlaybackRange = MovieScene->GetPlaybackRange();
+		const FFrameNumber StartTick = PlaybackRange.GetLowerBoundValue();
+		const FFrameNumber EndExclusiveTick = PlaybackRange.GetUpperBoundValue();
+		if (EndExclusiveTick.Value <= StartTick.Value)
+		{
+			OutError = TEXT("invalid_sequence_playback_range");
+			return false;
+		}
+
+		const FFrameRate TickResolution = MovieScene->GetTickResolution();
+		const double AbsoluteTimeSeconds = TickResolution.AsSeconds(StartTick) + RelativeTimeSeconds;
+		const FFrameNumber EvalTick = TickResolution.AsFrameTime(AbsoluteTimeSeconds).RoundToFrame();
+		if (EvalTick.Value < StartTick.Value || EvalTick.Value >= EndExclusiveTick.Value)
+		{
+			OutError = TEXT("preview_frame_range_exceeds_sequence");
+			return false;
+		}
+
+		FLevelSequenceFrameRequest Request;
+		Request.FrameIndex = FrameIndex;
+		Request.TimeSeconds = RelativeTimeSeconds;
+		Request.EvaluationFrame = EvalTick;
+		OutFrames.Add(Request);
+		return true;
+	}
+
+	static bool ResolveLevelSequenceFrameSequence(ULevelSequence* Sequence, const TSharedPtr<FJsonObject>& Params, TArray<FLevelSequenceFrameRequest>& OutFrames, FString& OutError)
+	{
+		OutFrames.Reset();
+		if (!Sequence || !Params.IsValid())
+		{
+			OutError = TEXT("level_sequence_not_found");
+			return false;
+		}
+
+		UMovieScene* MovieScene = Sequence->GetMovieScene();
+		if (!MovieScene)
+		{
+			OutError = TEXT("movie_scene_not_found");
+			return false;
+		}
+
+		const FFrameRate DisplayRate = MovieScene->GetDisplayRate();
+		const double FramesPerSecond = DisplayRate.IsValid() && DisplayRate.AsDecimal() > KINDA_SMALL_NUMBER
+			? DisplayRate.AsDecimal()
+			: 30.0;
+		const double SecondsPerFrame = 1.0 / FramesPerSecond;
+
+		const TArray<TSharedPtr<FJsonValue>>* ExplicitFrames = nullptr;
+		if (Params->TryGetArrayField(TEXT("frames"), ExplicitFrames) && ExplicitFrames)
+		{
+			if (ExplicitFrames->Num() < 1 || ExplicitFrames->Num() > 120)
+			{
+				OutError = TEXT("invalid_frame_count");
+				return false;
+			}
+
+			for (int32 Index = 0; Index < ExplicitFrames->Num(); ++Index)
+			{
+				double FrameValue = 0.0;
+				double TimeValue = 0.0;
+				bool bUseTime = false;
+				if ((*ExplicitFrames)[Index]->Type == EJson::Number)
+				{
+					FrameValue = (*ExplicitFrames)[Index]->AsNumber();
+				}
+				else if ((*ExplicitFrames)[Index]->Type == EJson::Object)
+				{
+					const TSharedPtr<FJsonObject> FrameObject = (*ExplicitFrames)[Index]->AsObject();
+					bUseTime = TryGetSequenceNumberAnyField(FrameObject, { TEXT("time_seconds"), TEXT("seconds") }, TimeValue);
+					if (!bUseTime && !TryGetSequenceNumberAnyField(FrameObject, { TEXT("frame_index"), TEXT("frame"), TEXT("display_frame") }, FrameValue))
+					{
+						OutError = TEXT("invalid_frame_entry");
+						return false;
+					}
+				}
+				else
+				{
+					OutError = TEXT("invalid_frame_entry");
+					return false;
+				}
+
+				const int32 FrameIndex = bUseTime ? FMath::RoundToInt(TimeValue / SecondsPerFrame) : FMath::RoundToInt(FrameValue);
+				const double RelativeTimeSeconds = bUseTime ? TimeValue : static_cast<double>(FrameIndex) * SecondsPerFrame;
+				if (RelativeTimeSeconds < -KINDA_SMALL_NUMBER)
+				{
+					OutError = TEXT("invalid_time_seconds");
+					return false;
+				}
+				if (!AddLevelSequenceFrameRequest(MovieScene, RelativeTimeSeconds, FrameIndex, OutFrames, OutError))
+				{
+					return false;
+				}
+			}
+			return true;
+		}
+
+		double CountValue = 1.0;
+		TryGetSequenceNumberAnyField(Params, { TEXT("count"), TEXT("frame_count"), TEXT("sample_count") }, CountValue);
+		const int32 RequestedCount = FMath::RoundToInt(CountValue);
+		if (RequestedCount < 1 || RequestedCount > 120)
+		{
+			OutError = TEXT("invalid_frame_count");
+			return false;
+		}
+
+		double StartTimeSeconds = 0.0;
+		const bool bHasStartTime = TryGetSequenceNumberAnyField(Params, { TEXT("start_time_seconds"), TEXT("first_time_seconds"), TEXT("time_seconds") }, StartTimeSeconds);
+
+		double IntervalSeconds = SecondsPerFrame;
+		const bool bHasIntervalSeconds = TryGetSequenceNumberAnyField(Params, { TEXT("interval_seconds"), TEXT("time_interval_seconds") }, IntervalSeconds);
+
+		double StartFrameValue = 0.0;
+		const bool bHasStartFrame = TryGetSequenceNumberAnyField(Params, { TEXT("start_frame_index"), TEXT("first_frame_index"), TEXT("frame_index"), TEXT("frame"), TEXT("display_frame") }, StartFrameValue);
+
+		double FrameIntervalValue = 1.0;
+		const bool bHasFrameInterval = TryGetSequenceNumberAnyField(Params, { TEXT("frame_interval"), TEXT("frame_stride") }, FrameIntervalValue);
+
+		if (bHasStartTime || bHasIntervalSeconds)
+		{
+			if (!bHasIntervalSeconds && bHasFrameInterval)
+			{
+				IntervalSeconds = FrameIntervalValue * SecondsPerFrame;
+			}
+			if (IntervalSeconds < 0.0)
+			{
+				OutError = TEXT("invalid_interval_seconds");
+				return false;
+			}
+			for (int32 Index = 0; Index < RequestedCount; ++Index)
+			{
+				const double TimeSeconds = StartTimeSeconds + IntervalSeconds * static_cast<double>(Index);
+				if (TimeSeconds < -KINDA_SMALL_NUMBER)
+				{
+					OutError = TEXT("invalid_time_seconds");
+					return false;
+				}
+				const int32 FrameIndex = FMath::RoundToInt(TimeSeconds / SecondsPerFrame);
+				if (!AddLevelSequenceFrameRequest(MovieScene, TimeSeconds, FrameIndex, OutFrames, OutError))
+				{
+					return false;
+				}
+			}
+			return true;
+		}
+
+		if (FrameIntervalValue < 0.0)
+		{
+			OutError = TEXT("invalid_frame_interval");
+			return false;
+		}
+
+		const int32 StartFrameIndex = bHasStartFrame ? FMath::RoundToInt(StartFrameValue) : 0;
+		const int32 FrameInterval = FMath::Max(0, FMath::RoundToInt(FrameIntervalValue));
+		for (int32 Index = 0; Index < RequestedCount; ++Index)
+		{
+			const int32 FrameIndex = StartFrameIndex + FrameInterval * Index;
+			if (FrameIndex < 0)
+			{
+				OutError = TEXT("invalid_frame_index");
+				return false;
+			}
+			const double TimeSeconds = static_cast<double>(FrameIndex) * SecondsPerFrame;
+			if (!AddLevelSequenceFrameRequest(MovieScene, TimeSeconds, FrameIndex, OutFrames, OutError))
+			{
+				return false;
+			}
+		}
+		return true;
+	}
+
+	static FLevelEditorViewportClient* GetPreferredLevelViewportClient()
+	{
+		if (GEditor)
+		{
+			if (FViewport* ActiveViewport = GEditor->GetActiveViewport())
+			{
+				for (FLevelEditorViewportClient* ViewportClient : GEditor->GetLevelViewportClients())
+				{
+					if (ViewportClient && ViewportClient->Viewport == ActiveViewport)
+					{
+						return ViewportClient;
+					}
+				}
+			}
+		}
+
+		if (GCurrentLevelEditingViewportClient && GCurrentLevelEditingViewportClient->Viewport)
+		{
+			return GCurrentLevelEditingViewportClient;
+		}
+
+		if (GEditor)
+		{
+			for (FLevelEditorViewportClient* ViewportClient : GEditor->GetLevelViewportClients())
+			{
+				if (ViewportClient && ViewportClient->Viewport)
+				{
+					return ViewportClient;
+				}
+			}
+		}
+		return nullptr;
 	}
 
 	static UWidgetAnimation* FindWidgetAnimationByAnyName(UWidgetBlueprint* WidgetBlueprint, const FString& InName)

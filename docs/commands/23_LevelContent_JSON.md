@@ -87,6 +87,12 @@
 - 写入 `BodyInstance.CollisionProfileName` 或 `CollisionProfileName` 时，会优先调用 `SetCollisionProfileName` 而不是先裸写 `BodyInstance`，避免 UE setter 因当前 FName 已被改成目标值而不重新加载 collision profile；`NoCollision` 会额外调用 `SetCollisionEnabled(NoCollision)`。
 - `property_results[]` 中出现 `property_assignment_method=collision_profile_setter`、`collision_profile_setter_applied=true`、`collision_enabled_no_collision_applied=true`、`primitive_collision_state_refreshed=true`、`render_state_refreshed=true` 表示已触发对应副作用；仍建议用 `level_trace_world_ray` / `level_sweep_capsule` / `level_check_overlaps` 验证实际碰撞行为。
 
+Spline 组件适配器：
+
+- `components[]` 支持 `/Script/Engine.SplineComponent`，可写入 `spline_points[]`、`spline_closed_loop`、`spline_coordinate_space` / `coordinate_space`。点支持 `location`、`arrive_tangent`、`leave_tangent` 和 `type`，常用 `type` 包括 `linear`、`curve`、`constant`、`curve_clamped`、`curve_custom_tangent`。
+- Query / Snapshot 在 `include_components=true` 时会返回 `spline_point_count`、`spline_closed_loop` 和 `spline_points[]`，用于 PCG Get Spline / Spline Sampler 类工作流的写后读回。
+- 对纯 `/Script/Engine.Actor` 创建后再补 root scene component 的资源，apply 会在组件处理后重新应用 Actor transform，避免 root 组件创建覆盖初始位置。`selection.label` / `actor_label` 可不带 `mode` 精确命中单个 Actor。
+
 ## 指令
 
 | 指令 | 作用 | 关键参数 | 关键返回 |

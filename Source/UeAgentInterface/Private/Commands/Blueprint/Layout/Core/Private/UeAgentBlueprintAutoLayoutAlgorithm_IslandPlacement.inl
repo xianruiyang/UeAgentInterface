@@ -296,6 +296,15 @@
 				BaseTop = FMath::Abs(UpTop - BaseTop) <= FMath::Abs(DownTop - BaseTop) ? UpTop : DownTop;
 			}
 			CandidateTops[BaseIndex] = BaseTop;
+			if (Items.Num() == 1)
+			{
+				Items[0].FinalTop = BaseTop;
+				if (OutAvoidanceCount && OriginalTops.IsValidIndex(0) && !FMath::IsNearlyEqual(OriginalTops[0], Items[0].FinalTop, 0.5))
+				{
+					++(*OutAvoidanceCount);
+				}
+				return;
+			}
 
 			for (int32 Index = BaseIndex - 1; Index >= 0; --Index)
 			{
@@ -367,27 +376,7 @@
 				return;
 			}
 
-			// Degenerate fallback: keep the direction rule and push down only if the local constraints are impossible.
-			for (int32 Index = 0; Index < Items.Num(); ++Index)
-			{
-				double CandidateTop = OriginalTops[Index];
-				if (Index > 0)
-				{
-					CandidateTop = FMath::Max(CandidateTop, Items[Index - 1].FinalTop + Items[Index - 1].Height + Padding);
-				}
-				Items[Index].FinalTop = MoveIntervalDownOutOfForbiddenZones(CandidateTop, Items[Index].Height, Zones, Padding);
-			}
-
-			if (OutAvoidanceCount)
-			{
-				for (int32 Index = 0; Index < Items.Num(); ++Index)
-				{
-					if (OriginalTops.IsValidIndex(Index) && !FMath::IsNearlyEqual(OriginalTops[Index], Items[Index].FinalTop, 0.5))
-					{
-						++(*OutAvoidanceCount);
-					}
-				}
-			}
+			return;
 		}
 
 		static bool ComputeAnchoredPreferredSlotTopForNode(
@@ -605,9 +594,7 @@
 			const FIsland& Island,
 			const int32 TargetNode,
 			const FVector2D& TargetPosition,
-			const FOptions& Options,
-			const TSet<int32>* ActiveInputChainCorridors = nullptr,
-			const bool bIncludeSourceNodeOccupancy = false)
+			const FOptions& Options)
 		{
 			TArray<FInputChainForbiddenZone> Zones;
 			if (!Nodes.IsValidIndex(TargetNode))
@@ -616,16 +603,15 @@
 			}
 			const TSet<int32> InputChainEdges = BuildInputChainEdgeSet(Island);
 			TSet<FString> UsedPinKeys;
-			TSet<int32> UsedSourceOccupancyNodes;
 			const double HalfHeight = InputChainForbiddenZoneHalfHeight(Options);
 			for (int32 EdgeIndex = 0; EdgeIndex < AllEdges.Num(); ++EdgeIndex)
 			{
-				if (InputChainEdges.Contains(EdgeIndex) || AllEdges[EdgeIndex].bExec)
+				if (InputChainEdges.Contains(EdgeIndex))
 				{
 					continue;
 				}
 				const FEdge& Edge = AllEdges[EdgeIndex];
-				if (Edge.Target == TargetNode)
+				if (Edge.Target == TargetNode && Edge.TargetPinIndex != INDEX_NONE)
 				{
 					const FString PinKey = FString::Printf(TEXT("I:%d"), Edge.TargetPinIndex);
 					if (UsedPinKeys.Contains(PinKey))
@@ -641,26 +627,6 @@
 					Zone.PinIndex = Edge.TargetPinIndex;
 					Zone.bOutputPin = false;
 					Zones.Add(Zone);
-
-					if (bIncludeSourceNodeOccupancy
-						&& ActiveInputChainCorridors
-						&& Nodes.IsValidIndex(Edge.Source)
-						&& Island.NodeSet.Contains(Edge.Source)
-						&& !Island.InputChainNodeSet.Contains(Edge.Source)
-						&& !UsedSourceOccupancyNodes.Contains(Edge.Source)
-						&& ActiveInputChainCorridors->Contains(Nodes[Edge.Source].Rank))
-					{
-						UsedSourceOccupancyNodes.Add(Edge.Source);
-						const FNode& SourceNode = Nodes[Edge.Source];
-						FInputChainForbiddenZone SourceZone;
-						SourceZone.Top = SourceNode.NewY - Options.NodePadding;
-						SourceZone.Bottom = SourceNode.NewY + SourceNode.Height + Options.NodePadding;
-						SourceZone.EdgeIndex = EdgeIndex;
-						SourceZone.PinIndex = Edge.SourcePinIndex;
-						SourceZone.bOutputPin = true;
-						SourceZone.bSourceNodeOccupancy = true;
-						Zones.Add(SourceZone);
-					}
 				}
 			}
 			Zones.Sort([](const FInputChainForbiddenZone& A, const FInputChainForbiddenZone& B)
@@ -1279,28 +1245,13 @@
 					Item.bHasPreferred = true;
 					ChainItems.Add(Item);
 				}
-				TSet<int32> ActiveInputChainCorridors;
-				for (const int32 ChainIndex : ChainIndices)
-				{
-					if (!Island.InputChains.IsValidIndex(ChainIndex))
-					{
-						continue;
-					}
-					const int32 CorridorIndex = Island.InputChains[ChainIndex].CorridorIndex;
-					if (CorridorIndex != INDEX_NONE)
-					{
-						ActiveInputChainCorridors.Add(CorridorIndex);
-					}
-				}
 				const TArray<FInputChainForbiddenZone> Zones = BuildInputChainForbiddenZonesForTarget(
 					Nodes,
 					AllEdges,
 					Island,
 					TargetNode,
 					FVector2D(Nodes[TargetNode].NewX, Nodes[TargetNode].NewY),
-					Options,
-					&ActiveInputChainCorridors,
-					true);
+					Options);
 				int32 AvoidanceCount = 0;
 				PlaceAnchoredIntervalsAvoidingForbiddenZones(ChainItems, IntraTargetChainGap, Zones, &AvoidanceCount);
 				Result.DesignDiagnostics.InputChainForbiddenZoneCount += Zones.Num();
@@ -1377,17 +1328,10 @@
 			FRunResult& Result,
 			const TSet<int32>* ProtectedEdgeIndices = nullptr)
 		{
-			struct FCollisionSegment
-			{
-				FRect Rect;
-				int32 IslandId = INDEX_NONE;
-				int32 ChainId = INDEX_NONE;
-			};
-
 			TArray<int32> NodeIsland;
 			NodeIsland.Init(INDEX_NONE, Nodes.Num());
 			TSet<int32> InputChainEdges;
-			TArray<FCollisionSegment> CollisionSegments;
+			TArray<FXStripCollisionBox> CollisionSegments;
 			for (const FIsland& Island : Islands)
 			{
 				for (const int32 NodeIndex : Island.Nodes)
@@ -1415,11 +1359,12 @@
 						{
 							continue;
 						}
-						FCollisionSegment CollisionSegment;
-						CollisionSegment.Rect = OffsetRectXY(Segment, Island.X, Island.Y);
-						CollisionSegment.IslandId = Island.Id;
-						CollisionSegment.ChainId = Chain.Id;
-						CollisionSegments.Add(CollisionSegment);
+						AddXStripCollisionBox(
+							CollisionSegments,
+							EXStripCollisionOwnerKind::InputChain,
+							Island.Id,
+							Chain.Id,
+							OffsetRectXY(Segment, Island.X, Island.Y));
 					}
 				}
 			}
@@ -1458,19 +1403,6 @@
 				return false;
 			};
 
-			auto FindFirstIntersectingChainLeft = [](const FRect& EndpointAabb, const TArray<FCollisionSegment>& Segments, double& OutGuardX) -> bool
-			{
-				OutGuardX = TNumericLimits<double>::Max();
-				for (const FCollisionSegment& Segment : Segments)
-				{
-					if (EndpointAabb.Intersects(Segment.Rect, 0.0))
-					{
-						OutGuardX = FMath::Min(OutGuardX, Segment.Rect.Left);
-					}
-				}
-				return OutGuardX != TNumericLimits<double>::Max();
-			};
-
 			for (int32 EdgeIndex = 0; EdgeIndex < Edges.Num(); ++EdgeIndex)
 			{
 				if (ProtectedEdgeIndices && ProtectedEdgeIndices->Contains(EdgeIndex))
@@ -1494,14 +1426,14 @@
 				const FVector2D TargetPoint = GetTargetPort(Nodes[Edge.Target], Edge, true) + NodeIslandOffset(Edge.Target);
 				const FRect SourceRect = MakeNodeRectWithOffset(Nodes[Edge.Source], NodeIslandOffset(Edge.Source), true);
 				const FRect TargetRect = MakeNodeRectWithOffset(Nodes[Edge.Target], NodeIslandOffset(Edge.Target), true);
-				FRect EndpointAabb;
-				if (!TryBuildEscapedEndpointAabb(SourcePoint, &SourceRect, TargetPoint, &TargetRect, Options, EndpointAabb))
+				TArray<TArray<FVector2D>> EndpointTriangles;
+				if (!TryBuildEndpointOffsetCollisionTriangles(SourcePoint, &SourceRect, TargetPoint, &TargetRect, Options, EndpointTriangles))
 				{
 					continue;
 				}
 
 				double GuardX = TNumericLimits<double>::Max();
-				if (!FindFirstIntersectingChainLeft(EndpointAabb, CollisionSegments, GuardX))
+				if (!FindLeftmostEndpointOffsetTrianglesIntersectingXStripLeft(EndpointTriangles, CollisionSegments, GuardX))
 				{
 					continue;
 				}

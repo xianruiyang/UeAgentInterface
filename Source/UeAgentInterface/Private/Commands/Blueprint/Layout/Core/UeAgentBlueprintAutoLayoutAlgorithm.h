@@ -161,18 +161,14 @@ namespace UeAgentBlueprintAutoLayout
 		int32 EndpointCandidateCount = 0;
 		int32 PlacementGraphEdgeCount = 0;
 		int32 RouteOnlyEdgeCount = 0;
-		int32 RouteOnlyCycleBreakEdgeCount = 0;
 		int32 PlacementOwnerEdgeCount = 0;
 		int32 PlacementNonOwnerEdgeCount = 0;
-		int32 RouteOnlyMiddleCorridorCount = 0;
-		int32 RouteOnlyOuterFallbackCount = 0;
 		int32 SourceOrderGroupCount = 0;
 		int32 FanoutIntentGroupCount = 0;
 		int32 PlacementProposalCount = 0;
 		int32 RejectedProposalCount = 0;
 		int32 SourcePortOrderViolationCount = 0;
 		int32 InvalidForwardConnectionCount = 0;
-		int32 BusContractCount = 0;
 		int32 SelectedEndpointCandidateCount = 0;
 		int32 ConnectionGroupCount = 0;
 		int32 RouteGroupCount = 0;
@@ -180,10 +176,6 @@ namespace UeAgentBlueprintAutoLayout
 		int32 BranchMergeGroupCount = 0;
 		int32 CrossBusTrunkLaneCount = 0;
 		int32 CrossBusLaneCount = 0;
-		int32 FinalVisibleBusLaneAdjustmentCount = 0;
-		int32 FinalVisibleBusLaneViolationCount = 0;
-		int32 FinalVisibleBranchXLaneAdjustmentCount = 0;
-		int32 FinalVisibleBranchXLaneViolationCount = 0;
 		int32 RouteThroughHardOccupancyCount = 0;
 		double IslandConnectionTotalLength = 0.0;
 		double TotalRouteLength = 0.0;
@@ -194,6 +186,41 @@ namespace UeAgentBlueprintAutoLayout
 		int32 PlacementComponentCount = 0;
 		int32 LaneColoringLaneCount = 0;
 		int32 RouteThroughIslandCount = 0;
+		int32 IslandTopologicalOrderCount = 0;
+		int32 IslandTopologicalResidualCycleEdgeCount = 0;
+		int32 RootIslandCount = 0;
+		int32 RootScoringTargetCount = 0;
+		int32 RootShareComponentCount = 0;
+		int32 RootEquivalentGroupCount = 0;
+		double RootContinuousOrderScore = 0.0;
+		double RootContinuousOrderInversionScore = 0.0;
+		int32 RootContinuousOrderPrunedStateCount = 0;
+		int32 RootContinuousOrderMemoHitCount = 0;
+		int32 RootContinuousOrderExactLimitExceeded = 0;
+		double RootCompactVerticalGap = 0.0;
+		double RootCompactTotalHeight = 0.0;
+		int32 RootIslandTopYCount = 0;
+		int32 IslandPlacementOrderCount = 0;
+		int32 IslandLeftwardReanchorBaseColumn = INDEX_NONE;
+		int32 IslandLeftwardReanchorColumnCount = 0;
+		int32 DirectIslandConnectionCount = 0;
+		int32 BusIslandConnectionCount = 0;
+		int32 InterIslandFeedbackBusConnectionCount = 0;
+		int32 InterIslandBusCount = 0;
+		int32 InterIslandBusDuplicateMergeCount = 0;
+		int32 InterIslandBusBundleCount = 0;
+		int32 InterIslandBusSlotAssignmentCount = 0;
+		int32 InterIslandBusMaxSlotCount = 0;
+		int32 InterIslandBusBundleCollisionBoxCount = 0;
+		int32 IslandBusCollisionBoxCount = 0;
+		int32 IslandBandGroupCount = 0;
+		int32 TopologyColumnHorizontalPushCount = 0;
+		int32 TopologyColumnBusPullCount = 0;
+		int32 IncomingBusBranchCount = 0;
+		int32 InterIslandBusBranchXSlotCount = 0;
+		int32 IslandBusBranchRightShiftCount = 0;
+		int32 InterIslandBusBranchKnotCount = 0;
+		int32 InterIslandBusBranchKnotOmittedCount = 0;
 	};
 
 	struct FMetrics
@@ -217,8 +244,6 @@ namespace UeAgentBlueprintAutoLayout
 		double HorizontalSpacing = 300.0;
 		double VerticalSpacing = 140.0;
 		double NodePadding = 24.0;
-		// Deprecated compatibility alias. Command entries must set real GraphEditor-derived access offsets.
-		double PinDirectionBiasX = 0.0;
 		double OutputAccessOffsetX = 0.0;
 		double InputAccessOffsetX = 0.0;
 		FString AccessOffsetSource;
@@ -229,7 +254,7 @@ namespace UeAgentBlueprintAutoLayout
 
 	struct FRunResult
 	{
-		FString Strategy = TEXT("exec_region_island_corridor_v2");
+		FString Strategy = TEXT("exec_region_deterministic_inter_island_bus_bundle");
 		bool bDesignComplete = false;
 		int32 NodeCount = 0;
 		int32 EdgeCount = 0;
@@ -254,6 +279,7 @@ namespace UeAgentBlueprintAutoLayout
 		TArray<TSharedPtr<FJsonValue>> DesignFeatureCoverage;
 		TArray<TSharedPtr<FJsonValue>> IslandDiagnostics;
 		TArray<TSharedPtr<FJsonValue>> IslandEdgeDiagnostics;
+		TArray<TSharedPtr<FJsonValue>> IslandPartitionStageDiagnostics;
 		TArray<TSharedPtr<FJsonValue>> ColumnDiagnostics;
 		TArray<TSharedPtr<FJsonValue>> InputChainDiagnostics;
 		TArray<TSharedPtr<FJsonValue>> InternalBusGroupDiagnostics;
@@ -265,10 +291,13 @@ namespace UeAgentBlueprintAutoLayout
 		TArray<TSharedPtr<FJsonValue>> SourceOrderGroupDiagnostics;
 		TArray<TSharedPtr<FJsonValue>> FanoutIntentGroupDiagnostics;
 		TArray<TSharedPtr<FJsonValue>> SelectedEndpointCandidateDiagnostics;
-		TArray<TSharedPtr<FJsonValue>> BusContractDiagnostics;
+		TArray<TSharedPtr<FJsonValue>> InterIslandBusBuildDiagnostics;
+		TArray<TSharedPtr<FJsonValue>> InterIslandBusDiagnostics;
+		TArray<TSharedPtr<FJsonValue>> InterIslandBusBranchVisibleTargetDiagnostics;
+		TArray<TSharedPtr<FJsonValue>> InterIslandBusBranchTargetModeDiagnostics;
 		TArray<TSharedPtr<FJsonValue>> BranchMergeDiagnostics;
 		TArray<TSharedPtr<FJsonValue>> CrossBusLaneDiagnostics;
-		TArray<TSharedPtr<FJsonValue>> CorridorRouteDiagnostics;
+		TArray<TSharedPtr<FJsonValue>> RouteDiagnostics;
 		TArray<TSharedPtr<FJsonValue>> LaneAssignmentDiagnostics;
 		TArray<TSharedPtr<FJsonValue>> RejectionDiagnostics;
 	};

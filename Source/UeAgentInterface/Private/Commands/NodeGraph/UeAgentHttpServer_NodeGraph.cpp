@@ -288,7 +288,6 @@ namespace UeAgentNodeGraphOps
 				OutError = TEXT("graph_editor_access_offset_unavailable");
 				return false;
 			}
-			Options.PinDirectionBiasX = GraphEditorAccessOffsetX;
 			Options.OutputAccessOffsetX = GraphEditorAccessOffsetX;
 			Options.InputAccessOffsetX = GraphEditorAccessOffsetX;
 			Options.AccessOffsetSource = TEXT("graph_editor_settings_compute_spline_tangent");
@@ -1142,10 +1141,6 @@ namespace UeAgentNodeGraphOps
 			OutData->SetNumberField(TEXT("reroute_plan_count"), RunResult.ReroutePlans.Num());
 			OutData->SetNumberField(TEXT("local_bus_edge_count"), RunResult.LocalBusEdgeCount);
 			OutData->SetNumberField(TEXT("external_bus_edge_count"), RunResult.ExternalBusEdgeCount);
-			OutData->SetNumberField(TEXT("final_visible_bus_lane_adjustment_count"), RunResult.DesignDiagnostics.FinalVisibleBusLaneAdjustmentCount);
-			OutData->SetNumberField(TEXT("final_visible_bus_lane_violation_count"), RunResult.DesignDiagnostics.FinalVisibleBusLaneViolationCount);
-			OutData->SetNumberField(TEXT("final_visible_branch_x_lane_adjustment_count"), RunResult.DesignDiagnostics.FinalVisibleBranchXLaneAdjustmentCount);
-			OutData->SetNumberField(TEXT("final_visible_branch_x_lane_violation_count"), RunResult.DesignDiagnostics.FinalVisibleBranchXLaneViolationCount);
 			OutData->SetNumberField(TEXT("route_through_island_count"), RunResult.DesignDiagnostics.RouteThroughIslandCount);
 			OutData->SetNumberField(TEXT("route_through_hard_occupancy_count"), RunResult.DesignDiagnostics.RouteThroughHardOccupancyCount);
 			OutData->SetNumberField(TEXT("input_chain_count"), RunResult.DesignDiagnostics.InputChainCount);
@@ -3018,6 +3013,245 @@ namespace UeAgentNodeGraphOps
 				Point);
 		}
 
+		struct FRigVMResolvedReroutePlan
+		{
+			const UeAgentBlueprintAutoLayout::FReroutePlan* Plan = nullptr;
+			int32 EdgeIndex = INDEX_NONE;
+			const UeAgentBlueprintAutoLayout::FEdge* Edge = nullptr;
+			FString SourcePath;
+			FString TargetPath;
+			FVector2D SourcePoint = FVector2D::ZeroVector;
+			FVector2D TargetPoint = FVector2D::ZeroVector;
+			TArray<FVector2D> Points;
+		};
+
+		struct FRigVMBusTopologyBranch
+		{
+			int32 EdgeIndex = INDEX_NONE;
+			FString TargetPath;
+			FVector2D BranchPoint = FVector2D::ZeroVector;
+			TArray<FVector2D> SuffixPoints;
+		};
+
+		struct FRigVMBusTopology
+		{
+			FString Key;
+			FString SourcePath;
+			double TrunkY = 0.0;
+			TArray<FVector2D> SourcePrefixPoints;
+			TArray<FVector2D> TrunkPoints;
+			TArray<FRigVMBusTopologyBranch> Branches;
+		};
+
+		static FString MakeRigVMVisiblePointKey(const FString& Scope, const FVector2D& Point)
+		{
+			return FString::Printf(TEXT("%s|%d|%d"), *Scope, FMath::RoundToInt(Point.X), FMath::RoundToInt(Point.Y));
+		}
+
+		static bool RigVMPointsNearlyEqual(const FVector2D& A, const FVector2D& B)
+		{
+			return FVector2D::Distance(A, B) <= 0.5;
+		}
+
+		static void AddUniqueRigVMVisiblePoint(TArray<FVector2D>& Points, const FVector2D& Point)
+		{
+			for (const FVector2D& Existing : Points)
+			{
+				if (RigVMPointsNearlyEqual(Existing, Point))
+				{
+					return;
+				}
+			}
+			Points.Add(FVector2D(FMath::RoundToDouble(Point.X), FMath::RoundToDouble(Point.Y)));
+		}
+
+		static TArray<FVector2D> BuildRigVMResolvedRoute(const FRigVMResolvedReroutePlan& Resolved)
+		{
+			TArray<FVector2D> Route;
+			Route.Reserve(Resolved.Points.Num() + 2);
+			Route.Add(Resolved.SourcePoint);
+			for (const FVector2D& Point : Resolved.Points)
+			{
+				Route.Add(Point);
+			}
+			Route.Add(Resolved.TargetPoint);
+			return Route;
+		}
+
+		static bool EstimateRigVMBusTrunkY(const TArray<FRigVMResolvedReroutePlan>& Plans, double& OutTrunkY)
+		{
+			TMap<int32, double> HorizontalLengthByY;
+			TMap<int32, double> WeightedYByKey;
+			for (const FRigVMResolvedReroutePlan& Resolved : Plans)
+			{
+				const TArray<FVector2D> Route = BuildRigVMResolvedRoute(Resolved);
+				for (int32 Index = 0; Index + 1 < Route.Num(); ++Index)
+				{
+					const FVector2D& A = Route[Index];
+					const FVector2D& B = Route[Index + 1];
+					if (!FMath::IsNearlyEqual(A.Y, B.Y, 0.5))
+					{
+						continue;
+					}
+					const double Length = FMath::Abs(B.X - A.X);
+					if (Length <= 0.5)
+					{
+						continue;
+					}
+					const double SegmentY = (A.Y + B.Y) * 0.5;
+					const int32 Key = FMath::RoundToInt(SegmentY);
+					HorizontalLengthByY.FindOrAdd(Key) += Length;
+					WeightedYByKey.FindOrAdd(Key) += SegmentY * Length;
+				}
+			}
+
+			int32 BestKey = INDEX_NONE;
+			double BestLength = -1.0;
+			for (const TPair<int32, double>& Pair : HorizontalLengthByY)
+			{
+				if (Pair.Value > BestLength + 0.5
+					|| (FMath::IsNearlyEqual(Pair.Value, BestLength, 0.5) && (BestKey == INDEX_NONE || Pair.Key < BestKey)))
+				{
+					BestKey = Pair.Key;
+					BestLength = Pair.Value;
+				}
+			}
+			if (BestKey == INDEX_NONE || BestLength <= 0.5)
+			{
+				return false;
+			}
+			OutTrunkY = WeightedYByKey.Contains(BestKey)
+				? WeightedYByKey[BestKey] / BestLength
+				: static_cast<double>(BestKey);
+			OutTrunkY = FMath::RoundToDouble(OutTrunkY);
+			return true;
+		}
+
+		static FString MakeRigVMBusTopologyKey(
+			const FUniversalLayoutModel& Model,
+			const UeAgentBlueprintAutoLayout::FReroutePlan& Plan)
+		{
+			if (!Model.Edges.IsValidIndex(Plan.EdgeIndex))
+			{
+				return FString();
+			}
+			const UeAgentBlueprintAutoLayout::FEdge& Edge = Model.Edges[Plan.EdgeIndex];
+			if (Plan.RouteKind == UeAgentBlueprintAutoLayout::ERouteKind::ExternalBus)
+			{
+				return FString::Printf(
+					TEXT("external_source=%d:%s:%d"),
+					Edge.Source,
+					*Edge.SourcePin,
+					Edge.SourcePinIndex);
+			}
+			return FString::Printf(
+				TEXT("%s|merge=%d|source=%d:%s:%d"),
+				*Plan.BusId,
+				Plan.AttachmentMergeGroup,
+				Edge.Source,
+				*Edge.SourcePin,
+				Edge.SourcePinIndex);
+		}
+
+		static bool BuildRigVMBusTopology(
+			const FString& TopologyKey,
+			const TArray<FRigVMResolvedReroutePlan>& Plans,
+			FRigVMBusTopology& OutTopology)
+		{
+			if (Plans.Num() == 0 || Plans[0].SourcePath.IsEmpty())
+			{
+				return false;
+			}
+			double TrunkY = 0.0;
+			if (!EstimateRigVMBusTrunkY(Plans, TrunkY))
+			{
+				return false;
+			}
+
+			OutTopology = FRigVMBusTopology();
+			OutTopology.Key = TopologyKey;
+			OutTopology.SourcePath = Plans[0].SourcePath;
+			OutTopology.TrunkY = TrunkY;
+
+			double BestPrefixFirstTrunkX = TNumericLimits<double>::Max();
+			TArray<FVector2D> BestSourcePrefix;
+			bool bAnyPlanMaterialized = false;
+
+			for (const FRigVMResolvedReroutePlan& Resolved : Plans)
+			{
+				if (!Resolved.Plan || Resolved.TargetPath.IsEmpty())
+				{
+					continue;
+				}
+				const TArray<FVector2D> Route = BuildRigVMResolvedRoute(Resolved);
+				int32 FirstTrunkIndex = INDEX_NONE;
+				int32 LastTrunkIndex = INDEX_NONE;
+				for (int32 Index = 1; Index + 1 < Route.Num(); ++Index)
+				{
+					if (FMath::IsNearlyEqual(Route[Index].Y, TrunkY, 0.5))
+					{
+						if (FirstTrunkIndex == INDEX_NONE)
+						{
+							FirstTrunkIndex = Index;
+						}
+						LastTrunkIndex = Index;
+					}
+				}
+				if (FirstTrunkIndex == INDEX_NONE || LastTrunkIndex == INDEX_NONE)
+				{
+					return false;
+				}
+
+				TArray<FVector2D> SourcePrefix;
+				for (int32 Index = 1; Index < FirstTrunkIndex; ++Index)
+				{
+					SourcePrefix.Add(Route[Index]);
+				}
+				if (Route[FirstTrunkIndex].X < BestPrefixFirstTrunkX)
+				{
+					BestPrefixFirstTrunkX = Route[FirstTrunkIndex].X;
+					BestSourcePrefix = SourcePrefix;
+				}
+
+				for (int32 Index = FirstTrunkIndex; Index <= LastTrunkIndex; ++Index)
+				{
+					if (FMath::IsNearlyEqual(Route[Index].Y, TrunkY, 0.5))
+					{
+						AddUniqueRigVMVisiblePoint(OutTopology.TrunkPoints, FVector2D(Route[Index].X, TrunkY));
+					}
+				}
+
+				FRigVMBusTopologyBranch Branch;
+				Branch.EdgeIndex = Resolved.EdgeIndex;
+				Branch.TargetPath = Resolved.TargetPath;
+				Branch.BranchPoint = FVector2D(Route[LastTrunkIndex].X, TrunkY);
+				for (int32 Index = LastTrunkIndex + 1; Index + 1 < Route.Num(); ++Index)
+				{
+					if (!RigVMPointsNearlyEqual(Route[Index], Branch.BranchPoint))
+					{
+						Branch.SuffixPoints.Add(Route[Index]);
+					}
+				}
+				OutTopology.Branches.Add(Branch);
+				bAnyPlanMaterialized = true;
+			}
+
+			if (!bAnyPlanMaterialized || OutTopology.TrunkPoints.Num() == 0 || OutTopology.Branches.Num() == 0)
+			{
+				return false;
+			}
+			OutTopology.SourcePrefixPoints = BestSourcePrefix;
+			OutTopology.TrunkPoints.Sort([](const FVector2D& A, const FVector2D& B)
+			{
+				if (!FMath::IsNearlyEqual(A.X, B.X, 0.5))
+				{
+					return A.X < B.X;
+				}
+				return A.Y < B.Y;
+			});
+			return true;
+		}
+
 		static bool EnsureRigVMLink(
 			URigVMGraph* ModelGraph,
 			URigVMController* Controller,
@@ -3074,6 +3308,191 @@ namespace UeAgentNodeGraphOps
 			return true;
 		}
 
+		static bool AddRigVMRerouteOnExistingLink(
+			URigVMGraph* ModelGraph,
+			URigVMController* Controller,
+			const FString& SourcePath,
+			const FString& TargetPath,
+			const FVector2D& ControlPoint,
+			const TCHAR* Context,
+			TArray<FRigVMRerouteControlPointAlignment>& CreatedAlignments,
+			FString& OutValuePinPath,
+			FString& OutError)
+		{
+			OutValuePinPath.Reset();
+			if (!EnsureRigVMLink(ModelGraph, Controller, SourcePath, TargetPath, Context, OutError))
+			{
+				return false;
+			}
+			URigVMLink* Link = ModelGraph->FindLink(MakeRigVMLinkPath(SourcePath, TargetPath));
+			if (!Link)
+			{
+				OutError = FString::Printf(TEXT("rigvm_%s_reroute_link_not_found link=%s"), Context ? Context : TEXT("add_reroute"), *MakeRigVMLinkPath(SourcePath, TargetPath));
+				return false;
+			}
+			const FVector2D RigVMNodePosition = ConvertLayoutKnotControlPointToRigVMNodePosition(ControlPoint);
+			URigVMRerouteNode* RerouteNode = Controller->AddRerouteNodeOnLink(Link, RigVMNodePosition, FString(), true, false);
+			if (!RerouteNode)
+			{
+				OutError = FString::Printf(TEXT("rigvm_%s_add_reroute_failed link=%s"), Context ? Context : TEXT("add_reroute"), *MakeRigVMLinkPath(SourcePath, TargetPath));
+				return false;
+			}
+			URigVMPin* ValuePin = RerouteNode->FindPin(TEXT("Value"));
+			if (!ValuePin)
+			{
+				OutError = FString::Printf(TEXT("rigvm_%s_reroute_value_pin_missing node=%s"), Context ? Context : TEXT("add_reroute"), *RerouteNode->GetName());
+				return false;
+			}
+			FRigVMRerouteControlPointAlignment Alignment;
+			Alignment.RerouteNode = RerouteNode;
+			Alignment.DesiredControlPoint = ControlPoint;
+			CreatedAlignments.Add(Alignment);
+			OutValuePinPath = ValuePin->GetPinPath();
+			return !OutValuePinPath.IsEmpty();
+		}
+
+		static bool ApplyRigVMLegacyReroutePlan(
+			URigVMGraph* ModelGraph,
+			URigVMController* Controller,
+			const UeAgentBlueprintAutoLayout::FReroutePlan& Plan,
+			const FString& SourcePath,
+			const FString& TargetPath,
+			TArray<FRigVMRerouteControlPointAlignment>& CreatedAlignments,
+			int32& CreatedCount,
+			FString& OutError)
+		{
+			FString CurrentSourcePath = SourcePath;
+			for (const FVector2D& Point : UeAgentBlueprintAutoLayout::GetAuthoritativeReroutePoints(Plan))
+			{
+				FString RerouteValuePinPath;
+				if (!AddRigVMRerouteOnExistingLink(
+					ModelGraph,
+					Controller,
+					CurrentSourcePath,
+					TargetPath,
+					Point,
+					TEXT("legacy"),
+					CreatedAlignments,
+					RerouteValuePinPath,
+					OutError))
+				{
+					return false;
+				}
+				CurrentSourcePath = RerouteValuePinPath;
+				++CreatedCount;
+			}
+			return EnsureRigVMLink(ModelGraph, Controller, CurrentSourcePath, TargetPath, TEXT("legacy_tail"), OutError);
+		}
+
+		static bool ApplyRigVMBusTopology(
+			URigVMGraph* ModelGraph,
+			URigVMController* Controller,
+			const FRigVMBusTopology& Topology,
+			TArray<FRigVMRerouteControlPointAlignment>& CreatedAlignments,
+			int32& CreatedCount,
+			FString& OutError)
+		{
+			if (!ModelGraph || !Controller || Topology.SourcePath.IsEmpty() || Topology.TrunkPoints.Num() == 0 || Topology.Branches.Num() == 0)
+			{
+				OutError = TEXT("rigvm_bus_topology_invalid");
+				return false;
+			}
+
+			const FString TemporaryTargetPath = Topology.Branches[0].TargetPath;
+			if (TemporaryTargetPath.IsEmpty())
+			{
+				OutError = TEXT("rigvm_bus_topology_temp_target_missing");
+				return false;
+			}
+
+			TMap<FString, FString> ValuePinPathByPoint;
+			FString CurrentSourcePath = Topology.SourcePath;
+
+			for (const FVector2D& PrefixPoint : Topology.SourcePrefixPoints)
+			{
+				FString RerouteValuePinPath;
+				if (!AddRigVMRerouteOnExistingLink(
+					ModelGraph,
+					Controller,
+					CurrentSourcePath,
+					TemporaryTargetPath,
+					PrefixPoint,
+					TEXT("bus_prefix"),
+					CreatedAlignments,
+					RerouteValuePinPath,
+					OutError))
+				{
+					return false;
+				}
+				CurrentSourcePath = RerouteValuePinPath;
+				++CreatedCount;
+			}
+
+			for (const FVector2D& TrunkPoint : Topology.TrunkPoints)
+			{
+				FString RerouteValuePinPath;
+				if (!AddRigVMRerouteOnExistingLink(
+					ModelGraph,
+					Controller,
+					CurrentSourcePath,
+					TemporaryTargetPath,
+					TrunkPoint,
+					TEXT("bus_trunk"),
+					CreatedAlignments,
+					RerouteValuePinPath,
+					OutError))
+				{
+					return false;
+				}
+				ValuePinPathByPoint.Add(MakeRigVMVisiblePointKey(Topology.Key, TrunkPoint), RerouteValuePinPath);
+				CurrentSourcePath = RerouteValuePinPath;
+				++CreatedCount;
+			}
+
+			if (!BreakRigVMLinkIfPresent(ModelGraph, Controller, CurrentSourcePath, TemporaryTargetPath, TEXT("bus_temp_tail"), OutError))
+			{
+				return false;
+			}
+
+			for (const FRigVMBusTopologyBranch& Branch : Topology.Branches)
+			{
+				if (Branch.TargetPath.IsEmpty())
+				{
+					continue;
+				}
+				FString BranchSourcePath = ValuePinPathByPoint.FindRef(MakeRigVMVisiblePointKey(Topology.Key, Branch.BranchPoint));
+				if (BranchSourcePath.IsEmpty())
+				{
+					OutError = FString::Printf(TEXT("rigvm_bus_branch_point_missing point=(%.3f,%.3f)"), Branch.BranchPoint.X, Branch.BranchPoint.Y);
+					return false;
+				}
+				for (const FVector2D& SuffixPoint : Branch.SuffixPoints)
+				{
+					FString RerouteValuePinPath;
+					if (!AddRigVMRerouteOnExistingLink(
+						ModelGraph,
+						Controller,
+						BranchSourcePath,
+						Branch.TargetPath,
+						SuffixPoint,
+						TEXT("bus_branch"),
+						CreatedAlignments,
+						RerouteValuePinPath,
+						OutError))
+					{
+						return false;
+					}
+					BranchSourcePath = RerouteValuePinPath;
+					++CreatedCount;
+				}
+				if (!EnsureRigVMLink(ModelGraph, Controller, BranchSourcePath, Branch.TargetPath, TEXT("bus_branch_tail"), OutError))
+				{
+					return false;
+				}
+			}
+			return true;
+		}
+
 		static int32 ApplyRigVMReroutePlans(
 			URigVMEdGraph* RigGraph,
 			const FUniversalLayoutModel& Model,
@@ -3110,89 +3529,99 @@ namespace UeAgentNodeGraphOps
 
 			int32 CreatedCount = 0;
 			TArray<FRigVMRerouteControlPointAlignment> CreatedAlignments;
-			TMap<FString, FRigVMSharedReroutePoint> SharedRerouteByMergeKey;
+			TMap<int32, const UeAgentBlueprintAutoLayout::FReroutePlan*> PlanByEdge;
+			TMap<FString, TArray<FRigVMResolvedReroutePlan>> BusPlansByTopologyKey;
+			TSet<int32> TopologyHandledEdges;
+
 			for (const UeAgentBlueprintAutoLayout::FReroutePlan& Plan : Plans)
 			{
-				if (Plan.EdgeIndex == INDEX_NONE || !EdgePinPaths.IsValidIndex(Plan.EdgeIndex))
+				if (Plan.EdgeIndex == INDEX_NONE
+					|| !EdgePinPaths.IsValidIndex(Plan.EdgeIndex)
+					|| UeAgentBlueprintAutoLayout::GetAuthoritativeReroutePoints(Plan).Num() == 0)
 				{
 					continue;
 				}
-				const TArray<FVector2D>& WritePoints = UeAgentBlueprintAutoLayout::GetAuthoritativeReroutePoints(Plan);
-				if (WritePoints.Num() == 0)
-				{
-					continue;
-				}
+				PlanByEdge.Add(Plan.EdgeIndex, &Plan);
+			}
 
-				FString CurrentSourcePath = EdgePinPaths[Plan.EdgeIndex].Key;
-				const FString TargetPath = EdgePinPaths[Plan.EdgeIndex].Value;
-				if (!EnsureRigVMLink(ModelGraph, Controller, CurrentSourcePath, TargetPath, TEXT("restore_direct"), OutError))
+			for (const TPair<int32, const UeAgentBlueprintAutoLayout::FReroutePlan*>& Pair : PlanByEdge)
+			{
+				if (!EdgePinPaths.IsValidIndex(Pair.Key) || !Pair.Value)
+				{
+					continue;
+				}
+				const FString& SourcePath = EdgePinPaths[Pair.Key].Key;
+				const FString& TargetPath = EdgePinPaths[Pair.Key].Value;
+				if (!EnsureRigVMLink(ModelGraph, Controller, SourcePath, TargetPath, TEXT("restore_planned_direct"), OutError)
+					|| !BreakRigVMLinkIfPresent(ModelGraph, Controller, SourcePath, TargetPath, TEXT("planned_direct"), OutError))
 				{
 					return CreatedCount;
 				}
 
-				for (int32 PointIndex = 0; PointIndex < WritePoints.Num(); ++PointIndex)
+				const UeAgentBlueprintAutoLayout::FReroutePlan& Plan = *Pair.Value;
+				if (Plan.AttachmentMergeGroup != INDEX_NONE
+					&& Plan.RouteKind != UeAgentBlueprintAutoLayout::ERouteKind::Direct
+					&& Model.Edges.IsValidIndex(Plan.EdgeIndex))
 				{
-					const FVector2D& Point = WritePoints[PointIndex];
-					const FString SharedKey = MakeRigVMSharedRerouteKey(Plan, Point);
-					if (!SharedKey.IsEmpty())
+					const UeAgentBlueprintAutoLayout::FEdge& Edge = Model.Edges[Plan.EdgeIndex];
+					FRigVMResolvedReroutePlan Resolved;
+					Resolved.Plan = &Plan;
+					Resolved.EdgeIndex = Plan.EdgeIndex;
+					Resolved.Edge = &Edge;
+					Resolved.SourcePath = SourcePath;
+					Resolved.TargetPath = TargetPath;
+					Resolved.SourcePoint = UeAgentBlueprintAutoLayout::GetSourcePort(Model.Nodes[Edge.Source], Edge, true);
+					Resolved.TargetPoint = UeAgentBlueprintAutoLayout::GetTargetPort(Model.Nodes[Edge.Target], Edge, true);
+					Resolved.Points = UeAgentBlueprintAutoLayout::GetAuthoritativeReroutePoints(Plan);
+					const FString TopologyKey = MakeRigVMBusTopologyKey(Model, Plan);
+					if (!TopologyKey.IsEmpty())
 					{
-						if (FRigVMSharedReroutePoint* ExistingSharedPoint = SharedRerouteByMergeKey.Find(SharedKey))
-						{
-							URigVMRerouteNode* ExistingRerouteNode = ExistingSharedPoint->RerouteNode.Get();
-							if (!ExistingRerouteNode || ExistingSharedPoint->ValuePinPath.IsEmpty())
-							{
-								OutError = FString::Printf(TEXT("rigvm_shared_reroute_lost key=%s"), *SharedKey);
-								return CreatedCount;
-							}
-							if (!BreakRigVMLinkIfPresent(ModelGraph, Controller, CurrentSourcePath, TargetPath, TEXT("shared_reroute_direct"), OutError)
-								|| !EnsureRigVMLink(ModelGraph, Controller, CurrentSourcePath, ExistingSharedPoint->ValuePinPath, TEXT("shared_reroute"), OutError)
-								|| !EnsureRigVMLink(ModelGraph, Controller, ExistingSharedPoint->ValuePinPath, TargetPath, TEXT("shared_reroute_tail"), OutError))
-							{
-								return CreatedCount;
-							}
-							CurrentSourcePath = ExistingSharedPoint->ValuePinPath;
-							continue;
-						}
+						BusPlansByTopologyKey.FindOrAdd(TopologyKey).Add(Resolved);
 					}
-
-					URigVMLink* Link = ModelGraph->FindLink(MakeRigVMLinkPath(CurrentSourcePath, TargetPath));
-					if (!Link)
-					{
-						OutError = FString::Printf(TEXT("rigvm_reroute_link_not_found link=%s"), *MakeRigVMLinkPath(CurrentSourcePath, TargetPath));
-						return CreatedCount;
-					}
-					const FVector2D RigVMNodePosition = ConvertLayoutKnotControlPointToRigVMNodePosition(Point);
-					URigVMRerouteNode* RerouteNode = Controller->AddRerouteNodeOnLink(Link, RigVMNodePosition, FString(), true, false);
-					if (!RerouteNode)
-					{
-						OutError = FString::Printf(TEXT("rigvm_add_reroute_failed link=%s"), *MakeRigVMLinkPath(CurrentSourcePath, TargetPath));
-						return CreatedCount;
-					}
-					URigVMPin* ValuePin = RerouteNode->FindPin(TEXT("Value"));
-					if (!ValuePin)
-					{
-						OutError = FString::Printf(TEXT("rigvm_reroute_value_pin_missing node=%s"), *RerouteNode->GetName());
-						return CreatedCount;
-					}
-					FRigVMRerouteControlPointAlignment Alignment;
-					Alignment.RerouteNode = RerouteNode;
-					Alignment.DesiredControlPoint = Point;
-					CreatedAlignments.Add(Alignment);
-					CurrentSourcePath = ValuePin->GetPinPath();
-					if (!SharedKey.IsEmpty())
-					{
-						FRigVMSharedReroutePoint SharedPoint;
-						SharedPoint.RerouteNode = RerouteNode;
-						SharedPoint.ValuePinPath = CurrentSourcePath;
-						SharedRerouteByMergeKey.Add(SharedKey, SharedPoint);
-					}
-					++CreatedCount;
 				}
-				if (!EnsureRigVMLink(ModelGraph, Controller, CurrentSourcePath, TargetPath, TEXT("reroute_tail"), OutError))
+			}
+
+			for (const TPair<FString, TArray<FRigVMResolvedReroutePlan>>& Pair : BusPlansByTopologyKey)
+			{
+				FRigVMBusTopology Topology;
+				if (!BuildRigVMBusTopology(Pair.Key, Pair.Value, Topology))
+				{
+					continue;
+				}
+				const int32 CreatedBefore = CreatedCount;
+				if (ApplyRigVMBusTopology(ModelGraph, Controller, Topology, CreatedAlignments, CreatedCount, OutError))
+				{
+					for (const FRigVMResolvedReroutePlan& Resolved : Pair.Value)
+					{
+						TopologyHandledEdges.Add(Resolved.EdgeIndex);
+					}
+				}
+				else
+				{
+					return FMath::Max(CreatedBefore, CreatedCount);
+				}
+			}
+
+			for (const TPair<int32, const UeAgentBlueprintAutoLayout::FReroutePlan*>& Pair : PlanByEdge)
+			{
+				if (TopologyHandledEdges.Contains(Pair.Key) || !Pair.Value || !EdgePinPaths.IsValidIndex(Pair.Key))
+				{
+					continue;
+				}
+				if (!ApplyRigVMLegacyReroutePlan(
+					ModelGraph,
+					Controller,
+					*Pair.Value,
+					EdgePinPaths[Pair.Key].Key,
+					EdgePinPaths[Pair.Key].Value,
+					CreatedAlignments,
+					CreatedCount,
+					OutError))
 				{
 					return CreatedCount;
 				}
 			}
+
 			if (!AlignRigVMRerouteControlPointsToSlateGeometry(RigGraph, Controller, CreatedAlignments, OutError))
 			{
 				return CreatedCount;

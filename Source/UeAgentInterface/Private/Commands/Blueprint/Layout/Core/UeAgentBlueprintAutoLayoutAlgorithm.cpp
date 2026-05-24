@@ -16,7 +16,7 @@ namespace UeAgentBlueprintAutoLayout
 	#include "Commands/Blueprint/Layout/Core/Private/UeAgentBlueprintAutoLayoutAlgorithm_IslandPlacement.inl"
 	// Target input entry candidates and island boundary bus model.
 	#include "Commands/Blueprint/Layout/Core/Private/UeAgentBlueprintAutoLayoutAlgorithm_InputModel.inl"
-	// Frozen island placement, endpoint candidates, bus contracts, and corridor routes.
+	// Frozen island placement, endpoint candidates, bus topology, and route diagnostics.
 	#include "Commands/Blueprint/Layout/Core/Private/UeAgentBlueprintAutoLayoutAlgorithm_FrozenIslandSolver.inl"
 	}
 
@@ -151,200 +151,152 @@ namespace UeAgentBlueprintAutoLayout
 		return ComponentByNode;
 	}
 
-	static bool HasComponentPath(
-		const int32 StartComponent,
-		const int32 TargetComponent,
-		const TArray<TArray<TPair<int32, int32>>>& ComponentAdjacency,
-		const int32 IgnoredEdgeIndex)
+	static TArray<int32> SortedIntSetValues(const TSet<int32>& Values)
 	{
-		if (StartComponent == TargetComponent)
+		TArray<int32> Out = Values.Array();
+		Out.Sort();
+		return Out;
+	}
+
+	static TArray<TSharedPtr<FJsonValue>> StringArrayToJson(const TArray<FString>& Values)
+	{
+		TArray<TSharedPtr<FJsonValue>> Out;
+		Out.Reserve(Values.Num());
+		for (const FString& Value : Values)
 		{
-			return true;
+			Out.Add(MakeShared<FJsonValueString>(Value));
 		}
-		TArray<int32> Stack;
-		TSet<int32> Visited;
-		Stack.Add(StartComponent);
-		Visited.Add(StartComponent);
-		while (Stack.Num() > 0)
+		return Out;
+	}
+
+	static TArray<TSharedPtr<FJsonValue>> EdgeSetToJson(
+		const TArray<FNode>& Nodes,
+		const TArray<FEdge>& Edges,
+		const TSet<int32>& EdgeIndices,
+		const TSet<int32>& RankIgnoredEdges,
+		const TSet<int32>& FeedbackEdges,
+		const TSet<int32>& FanoutEdges,
+		const TSet<int32>& IslandCutEdges)
+	{
+		TArray<TSharedPtr<FJsonValue>> Out;
+		for (const int32 EdgeIndex : SortedIntSetValues(EdgeIndices))
 		{
-			const int32 Component = Stack.Pop(EAllowShrinking::No);
-			if (!ComponentAdjacency.IsValidIndex(Component))
+			if (!Edges.IsValidIndex(EdgeIndex))
 			{
 				continue;
 			}
-			for (const TPair<int32, int32>& Next : ComponentAdjacency[Component])
-			{
-				if (Next.Value == IgnoredEdgeIndex)
-				{
-					continue;
-				}
-				if (Next.Key == TargetComponent)
-				{
-					return true;
-				}
-				if (!Visited.Contains(Next.Key))
-				{
-					Visited.Add(Next.Key);
-					Stack.Add(Next.Key);
-				}
-			}
+			const FEdge& Edge = Edges[EdgeIndex];
+			TSharedPtr<FJsonObject> Obj = MakeShared<FJsonObject>();
+			Obj->SetNumberField(TEXT("edge_index"), EdgeIndex);
+			Obj->SetNumberField(TEXT("source_node_index"), Edge.Source);
+			Obj->SetNumberField(TEXT("target_node_index"), Edge.Target);
+			Obj->SetStringField(TEXT("source_title"), Nodes.IsValidIndex(Edge.Source) ? Nodes[Edge.Source].Title : FString());
+			Obj->SetStringField(TEXT("target_title"), Nodes.IsValidIndex(Edge.Target) ? Nodes[Edge.Target].Title : FString());
+			Obj->SetStringField(TEXT("source_pin"), Edge.SourcePin);
+			Obj->SetStringField(TEXT("target_pin"), Edge.TargetPin);
+			Obj->SetStringField(TEXT("source_param_id"), MakeSourceParamId(Edge));
+			Obj->SetBoolField(TEXT("exec"), Edge.bExec);
+			Obj->SetBoolField(TEXT("rank_ignored"), RankIgnoredEdges.Contains(EdgeIndex));
+			Obj->SetBoolField(TEXT("feedback_cut"), FeedbackEdges.Contains(EdgeIndex));
+			Obj->SetBoolField(TEXT("fanout_cut"), FanoutEdges.Contains(EdgeIndex));
+			Obj->SetBoolField(TEXT("island_cut"), IslandCutEdges.Contains(EdgeIndex));
+			Out.Add(MakeShared<FJsonValueObject>(Obj));
 		}
-		return false;
+		return Out;
 	}
 
-	static int32 RestoreFanoutCutsThatCreateArtificialIslandCycles(
+	static void AppendIslandPartitionStageDiagnostics(
+		FRunResult& Result,
+		const FString& StageName,
 		const TArray<FNode>& Nodes,
 		const TArray<FEdge>& Edges,
-		const TArray<int32>& CommentGroupByNode,
+		const TSet<int32>& IslandCutEdges,
+		const TSet<int32>& RankIgnoredEdges,
 		const TSet<int32>& FeedbackEdges,
-		TSet<int32>& RankIgnoredEdges,
-		TSet<int32>& IslandCutEdges,
-		TSet<int32>& FanoutEdges)
+		const TSet<int32>& FanoutEdges,
+		const TArray<int32>* CommentGroupByNode)
 	{
-		int32 RestoredCount = 0;
-		for (int32 Safety = 0; Safety < Edges.Num() + 1; ++Safety)
+		const TArray<TArray<int32>> Groups = BuildWeakIslands(Nodes, Edges, IslandCutEdges, CommentGroupByNode);
+		TArray<int32> IslandByNode;
+		IslandByNode.Init(INDEX_NONE, Nodes.Num());
+		for (int32 IslandIndex = 0; IslandIndex < Groups.Num(); ++IslandIndex)
 		{
-			const TArray<int32> ComponentByNode = BuildNodeComponentMapFromIslandCuts(Nodes, Edges, IslandCutEdges, &CommentGroupByNode);
-			int32 ComponentCount = 0;
-			for (const int32 ComponentIndex : ComponentByNode)
+			for (const int32 NodeIndex : Groups[IslandIndex])
 			{
-				if (ComponentIndex != INDEX_NONE)
+				if (IslandByNode.IsValidIndex(NodeIndex))
 				{
-					ComponentCount = FMath::Max(ComponentCount, ComponentIndex + 1);
+					IslandByNode[NodeIndex] = IslandIndex;
 				}
-			}
-
-			TArray<int32> ComponentSizes;
-			ComponentSizes.Init(0, ComponentCount);
-			for (const int32 ComponentIndex : ComponentByNode)
-			{
-				if (ComponentSizes.IsValidIndex(ComponentIndex))
-				{
-					++ComponentSizes[ComponentIndex];
-				}
-			}
-
-			TArray<TArray<TPair<int32, int32>>> ComponentAdjacency;
-			ComponentAdjacency.SetNum(ComponentCount);
-			struct FCutCandidate
-			{
-				int32 EdgeIndex = INDEX_NONE;
-				int32 SourceComponent = INDEX_NONE;
-				int32 TargetComponent = INDEX_NONE;
-			};
-			TArray<FCutCandidate> Candidates;
-			for (const int32 EdgeIndex : FanoutEdges)
-			{
-				if (!Edges.IsValidIndex(EdgeIndex)
-					|| FeedbackEdges.Contains(EdgeIndex)
-					|| !IslandCutEdges.Contains(EdgeIndex)
-					|| !IsValidNodeIndex(Nodes, Edges[EdgeIndex].Source)
-					|| !IsValidNodeIndex(Nodes, Edges[EdgeIndex].Target))
-				{
-					continue;
-				}
-				const int32 SourceComponent = ComponentByNode.IsValidIndex(Edges[EdgeIndex].Source)
-					? ComponentByNode[Edges[EdgeIndex].Source]
-					: INDEX_NONE;
-				const int32 TargetComponent = ComponentByNode.IsValidIndex(Edges[EdgeIndex].Target)
-					? ComponentByNode[Edges[EdgeIndex].Target]
-					: INDEX_NONE;
-				if (SourceComponent == INDEX_NONE || TargetComponent == INDEX_NONE || SourceComponent == TargetComponent)
-				{
-					continue;
-				}
-				if (ComponentAdjacency.IsValidIndex(SourceComponent))
-				{
-					ComponentAdjacency[SourceComponent].Add(TPair<int32, int32>(TargetComponent, EdgeIndex));
-				}
-				Candidates.Add({ EdgeIndex, SourceComponent, TargetComponent });
-			}
-
-			int32 BestEdgeIndex = INDEX_NONE;
-			double BestScore = -TNumericLimits<double>::Max();
-			for (const FCutCandidate& Candidate : Candidates)
-			{
-				if (!HasComponentPath(Candidate.TargetComponent, Candidate.SourceComponent, ComponentAdjacency, Candidate.EdgeIndex))
-				{
-					continue;
-				}
-				const double SourceSize = ComponentSizes.IsValidIndex(Candidate.SourceComponent) ? ComponentSizes[Candidate.SourceComponent] : 0.0;
-				const double TargetSize = ComponentSizes.IsValidIndex(Candidate.TargetComponent) ? ComponentSizes[Candidate.TargetComponent] : 0.0;
-				const double Score = (TargetSize - SourceSize) * 1000.0 - static_cast<double>(Candidate.EdgeIndex) * 0.001;
-				if (BestEdgeIndex == INDEX_NONE || Score > BestScore)
-				{
-					BestEdgeIndex = Candidate.EdgeIndex;
-					BestScore = Score;
-				}
-			}
-			if (BestEdgeIndex == INDEX_NONE)
-			{
-				break;
-			}
-			RankIgnoredEdges.Remove(BestEdgeIndex);
-			IslandCutEdges.Remove(BestEdgeIndex);
-			FanoutEdges.Remove(BestEdgeIndex);
-			++RestoredCount;
-		}
-		return RestoredCount;
-	}
-
-	static int32 EnforceSameIslandNonFeedbackNodeForwardX(
-		TArray<FNode>& Nodes,
-		const TArray<FEdge>& Edges,
-		const TArray<FIsland>& Islands,
-		const TMap<int32, int32>& IslandByNode,
-		const TSet<int32>& ForwardExemptEdgeIndices,
-		const FOptions& Options)
-	{
-		int32 ShiftCount = 0;
-		for (int32 Iteration = 0; Iteration < Nodes.Num() + 1; ++Iteration)
-		{
-			bool bChanged = false;
-			for (int32 EdgeIndex = 0; EdgeIndex < Edges.Num(); ++EdgeIndex)
-			{
-				if (ForwardExemptEdgeIndices.Contains(EdgeIndex))
-				{
-					continue;
-				}
-				const FEdge& Edge = Edges[EdgeIndex];
-				if (!IsValidNodeIndex(Nodes, Edge.Source)
-					|| !IsValidNodeIndex(Nodes, Edge.Target)
-					|| Edge.Source == Edge.Target)
-				{
-					continue;
-				}
-
-				const int32* SourceIslandPtr = IslandByNode.Find(Edge.Source);
-				const int32* TargetIslandPtr = IslandByNode.Find(Edge.Target);
-				if (!SourceIslandPtr
-					|| !TargetIslandPtr
-					|| *SourceIslandPtr != *TargetIslandPtr
-					|| !Islands.IsValidIndex(*SourceIslandPtr)
-					|| Islands[*SourceIslandPtr].bCommentIsland)
-				{
-					continue;
-				}
-
-				const double RequiredTargetX =
-					Nodes[Edge.Source].NewX
-					+ ComputeTargetOriginDeltaXForAlignedConnection(
-						GetOutputAnchor(Nodes[Edge.Source], Edge.SourcePinIndex),
-						GetInputAnchor(Nodes[Edge.Target], Edge.TargetPinIndex),
-						Options);
-				if (RequiredTargetX > Nodes[Edge.Target].NewX + 0.5)
-				{
-					Nodes[Edge.Target].NewX = SnapGraphCoordinate(RequiredTargetX);
-					bChanged = true;
-					++ShiftCount;
-				}
-			}
-			if (!bChanged)
-			{
-				break;
 			}
 		}
-		return ShiftCount;
+
+		TSet<int32> CrossingCutEdges;
+		for (const int32 EdgeIndex : IslandCutEdges)
+		{
+			if (!Edges.IsValidIndex(EdgeIndex))
+			{
+				continue;
+			}
+			const FEdge& Edge = Edges[EdgeIndex];
+			const int32 SourceIsland = IslandByNode.IsValidIndex(Edge.Source) ? IslandByNode[Edge.Source] : INDEX_NONE;
+			const int32 TargetIsland = IslandByNode.IsValidIndex(Edge.Target) ? IslandByNode[Edge.Target] : INDEX_NONE;
+			if (SourceIsland != INDEX_NONE && TargetIsland != INDEX_NONE && SourceIsland != TargetIsland)
+			{
+				CrossingCutEdges.Add(EdgeIndex);
+			}
+		}
+
+		TSharedPtr<FJsonObject> StageObj = MakeShared<FJsonObject>();
+		StageObj->SetStringField(TEXT("stage"), StageName);
+		StageObj->SetNumberField(TEXT("island_count"), Groups.Num());
+		StageObj->SetNumberField(TEXT("island_cut_edge_count"), IslandCutEdges.Num());
+		StageObj->SetNumberField(TEXT("rank_ignored_edge_count"), RankIgnoredEdges.Num());
+		StageObj->SetNumberField(TEXT("feedback_edge_count"), FeedbackEdges.Num());
+		StageObj->SetNumberField(TEXT("fanout_edge_count"), FanoutEdges.Num());
+		StageObj->SetNumberField(TEXT("crossing_cut_edge_count"), CrossingCutEdges.Num());
+		StageObj->SetArrayField(TEXT("island_cut_edge_indices"), IntArrayToJson(SortedIntSetValues(IslandCutEdges)));
+		StageObj->SetArrayField(TEXT("rank_ignored_edge_indices"), IntArrayToJson(SortedIntSetValues(RankIgnoredEdges)));
+		StageObj->SetArrayField(TEXT("feedback_edge_indices"), IntArrayToJson(SortedIntSetValues(FeedbackEdges)));
+		StageObj->SetArrayField(TEXT("fanout_edge_indices"), IntArrayToJson(SortedIntSetValues(FanoutEdges)));
+		StageObj->SetArrayField(TEXT("crossing_cut_edges"), EdgeSetToJson(Nodes, Edges, CrossingCutEdges, RankIgnoredEdges, FeedbackEdges, FanoutEdges, IslandCutEdges));
+
+		TArray<TSharedPtr<FJsonValue>> IslandValues;
+		IslandValues.Reserve(Groups.Num());
+		for (int32 IslandIndex = 0; IslandIndex < Groups.Num(); ++IslandIndex)
+		{
+			const TArray<int32>& Group = Groups[IslandIndex];
+			TArray<FString> Titles;
+			Titles.Reserve(Group.Num());
+			bool bHasExec = false;
+			bool bCommentIsland = false;
+			int32 CommentGroup = INDEX_NONE;
+			for (const int32 NodeIndex : Group)
+			{
+				if (!Nodes.IsValidIndex(NodeIndex))
+				{
+					continue;
+				}
+				Titles.Add(Nodes[NodeIndex].Title);
+				bHasExec = bHasExec || Nodes[NodeIndex].bHasExecPin;
+				if (CommentGroupByNode && CommentGroupByNode->IsValidIndex(NodeIndex) && (*CommentGroupByNode)[NodeIndex] != INDEX_NONE)
+				{
+					bCommentIsland = true;
+					CommentGroup = (*CommentGroupByNode)[NodeIndex];
+				}
+			}
+
+			TSharedPtr<FJsonObject> IslandObj = MakeShared<FJsonObject>();
+			IslandObj->SetNumberField(TEXT("island_id"), IslandIndex);
+			IslandObj->SetNumberField(TEXT("node_count"), Group.Num());
+			IslandObj->SetBoolField(TEXT("has_exec_node"), bHasExec);
+			IslandObj->SetBoolField(TEXT("comment_island"), bCommentIsland);
+			IslandObj->SetNumberField(TEXT("comment_group"), CommentGroup);
+			IslandObj->SetArrayField(TEXT("node_indices"), IntArrayToJson(Group));
+			IslandObj->SetArrayField(TEXT("node_titles"), StringArrayToJson(Titles));
+			IslandValues.Add(MakeShared<FJsonValueObject>(IslandObj));
+		}
+		StageObj->SetArrayField(TEXT("islands"), IslandValues);
+		Result.IslandPartitionStageDiagnostics.Add(MakeShared<FJsonValueObject>(StageObj));
 	}
 
 	bool RunLayout(TArray<FNode>& Nodes, const TArray<FEdge>& Edges, const FOptions& InOptions, FRunResult& OutResult)
@@ -385,8 +337,26 @@ namespace UeAgentBlueprintAutoLayout
 		TSet<int32> FanoutEdges;
 		MarkFeedbackEdgesAsRankIgnored(Nodes, Edges, RankIgnoredEdges, FeedbackEdges, OutResult.DesignDiagnostics);
 		const TArray<int32> CommentGroupByNode = BuildCommentIslandGroupByNode(Nodes);
+		TSet<int32> FeedbackOnlyIslandCutEdges;
+		for (const int32 EdgeIndex : FeedbackEdges)
+		{
+			if (Edges.IsValidIndex(EdgeIndex))
+			{
+				FeedbackOnlyIslandCutEdges.Add(EdgeIndex);
+			}
+		}
+		AppendIslandPartitionStageDiagnostics(
+			OutResult,
+			TEXT("after_scc_feedback_cut"),
+			Nodes,
+			Edges,
+			FeedbackOnlyIslandCutEdges,
+			RankIgnoredEdges,
+			FeedbackEdges,
+			FanoutEdges,
+			&CommentGroupByNode);
 
-		TMap<FString, TArray<int32>> EdgesBySourceParam;
+		TMap<int32, TArray<int32>> EdgesBySourceNode;
 		for (int32 EdgeIndex = 0; EdgeIndex < Edges.Num(); ++EdgeIndex)
 		{
 			const FEdge& Edge = Edges[EdgeIndex];
@@ -398,10 +368,14 @@ namespace UeAgentBlueprintAutoLayout
 			{
 				continue;
 			}
-			EdgesBySourceParam.FindOrAdd(MakeSourceParamId(Edge)).Add(EdgeIndex);
+			if (IsSameCommentIslandGroup(CommentGroupByNode, Edge))
+			{
+				continue;
+			}
+			EdgesBySourceNode.FindOrAdd(Edge.Source).Add(EdgeIndex);
 		}
 		TSet<int32> FanoutNodes;
-		for (const TPair<FString, TArray<int32>>& Pair : EdgesBySourceParam)
+		for (const TPair<int32, TArray<int32>>& Pair : EdgesBySourceNode)
 		{
 			if (Pair.Value.Num() < 2)
 			{
@@ -413,16 +387,30 @@ namespace UeAgentBlueprintAutoLayout
 				{
 					continue;
 				}
-				if (IsSameCommentIslandGroup(CommentGroupByNode, Edges[EdgeIndex]))
-				{
-					continue;
-				}
 				RankIgnoredEdges.Add(EdgeIndex);
 				IslandCutEdges.Add(EdgeIndex);
 				FanoutEdges.Add(EdgeIndex);
 				FanoutNodes.Add(Edges[EdgeIndex].Source);
 			}
 		}
+		TSet<int32> FeedbackAndFanoutIslandCutEdges = IslandCutEdges;
+		for (const int32 EdgeIndex : FeedbackEdges)
+		{
+			if (Edges.IsValidIndex(EdgeIndex))
+			{
+				FeedbackAndFanoutIslandCutEdges.Add(EdgeIndex);
+			}
+		}
+		AppendIslandPartitionStageDiagnostics(
+			OutResult,
+			TEXT("after_fanout_cut_before_comment_boundary"),
+			Nodes,
+			Edges,
+			FeedbackAndFanoutIslandCutEdges,
+			RankIgnoredEdges,
+			FeedbackEdges,
+			FanoutEdges,
+			&CommentGroupByNode);
 		for (int32 EdgeIndex = 0; EdgeIndex < Edges.Num(); ++EdgeIndex)
 		{
 			const FEdge& Edge = Edges[EdgeIndex];
@@ -439,28 +427,23 @@ namespace UeAgentBlueprintAutoLayout
 				}
 			}
 		}
-		const int32 RestoredArtificialCycleFanoutCutCount =
-			RestoreFanoutCutsThatCreateArtificialIslandCycles(
-				Nodes,
-				Edges,
-				CommentGroupByNode,
-				FeedbackEdges,
-				RankIgnoredEdges,
-				IslandCutEdges,
-				FanoutEdges);
-		if (RestoredArtificialCycleFanoutCutCount > 0)
+		for (const int32 EdgeIndex : FeedbackEdges)
 		{
-			FanoutNodes.Reset();
-			for (const int32 EdgeIndex : FanoutEdges)
+			if (Edges.IsValidIndex(EdgeIndex))
 			{
-				if (Edges.IsValidIndex(EdgeIndex))
-				{
-					FanoutNodes.Add(Edges[EdgeIndex].Source);
-				}
+				IslandCutEdges.Add(EdgeIndex);
 			}
-			UE_LOG(LogUeAgentInterface, Display, TEXT("BlueprintLayoutCore restored_artificial_cycle_fanout_cuts=%d"),
-				RestoredArtificialCycleFanoutCutCount);
 		}
+		AppendIslandPartitionStageDiagnostics(
+			OutResult,
+			TEXT("after_all_island_cuts_before_final_islands"),
+			Nodes,
+			Edges,
+			IslandCutEdges,
+			RankIgnoredEdges,
+			FeedbackEdges,
+			FanoutEdges,
+			&CommentGroupByNode);
 		OutResult.DesignDiagnostics.FanoutNodeCount = FanoutNodes.Num();
 		OutResult.DesignDiagnostics.FanoutImplicitEdgeCount = FanoutEdges.Num();
 		OutResult.DesignDiagnostics.RankIgnoredEdgeCount = RankIgnoredEdges.Num();
@@ -477,6 +460,16 @@ namespace UeAgentBlueprintAutoLayout
 		}
 
 		const TArray<TArray<int32>> IslandGroups = BuildWeakIslands(Nodes, Edges, IslandCutEdges, &CommentGroupByNode);
+		AppendIslandPartitionStageDiagnostics(
+			OutResult,
+			TEXT("final_weak_connected_islands"),
+			Nodes,
+			Edges,
+			IslandCutEdges,
+			RankIgnoredEdges,
+			FeedbackEdges,
+			FanoutEdges,
+			&CommentGroupByNode);
 		TArray<FIsland> Islands;
 		TMap<int32, int32> IslandByNode;
 		for (int32 IslandIndex = 0; IslandIndex < IslandGroups.Num(); ++IslandIndex)
@@ -568,7 +561,8 @@ namespace UeAgentBlueprintAutoLayout
 			const FEdge& Edge = Edges[EdgeIndex];
 			const int32* SourceIslandPtr = IslandByNode.Find(Edge.Source);
 			const int32* TargetIslandPtr = IslandByNode.Find(Edge.Target);
-			if (!SourceIslandPtr || !TargetIslandPtr || *SourceIslandPtr == *TargetIslandPtr)
+			const bool bFeedbackEdge = FeedbackEdges.Contains(EdgeIndex);
+			if (!SourceIslandPtr || !TargetIslandPtr || (*SourceIslandPtr == *TargetIslandPtr && !bFeedbackEdge))
 			{
 				if (SourceIslandPtr && TargetIslandPtr && *SourceIslandPtr == *TargetIslandPtr)
 				{
@@ -581,7 +575,7 @@ namespace UeAgentBlueprintAutoLayout
 			IslandEdge.SourceIsland = *SourceIslandPtr;
 			IslandEdge.TargetIsland = *TargetIslandPtr;
 			IslandEdge.TargetSide = TEXT("left");
-			IslandEdge.bFeedback = FeedbackEdges.Contains(EdgeIndex);
+			IslandEdge.bFeedback = bFeedbackEdge;
 			IslandEdge.bFanout = FanoutEdges.Contains(EdgeIndex);
 			IslandEdge.bCommentBoundary = CrossesCommentIslandBoundary(CommentGroupByNode, Edge);
 			const int32 IslandEdgeIndex = IslandEdges.Num();
@@ -611,26 +605,6 @@ namespace UeAgentBlueprintAutoLayout
 			(FPlatformTime::Seconds() - LayoutTraceStartSeconds) * 1000.0,
 			OutResult.DesignDiagnostics.IslandInternalPlacementCount,
 			OutResult.DesignDiagnostics.InputChainCount);
-		const int32 SameIslandForwardShiftCount = EnforceNonFeedbackSemanticEdgeForwardX(
-			Nodes,
-			Edges,
-			Islands,
-			FeedbackEdges,
-			Options,
-			true,
-			false);
-		if (SameIslandForwardShiftCount > 0)
-		{
-			for (FIsland& Island : Islands)
-			{
-				if (!Island.bCommentIsland)
-				{
-					NormalizeIslandLocalLayoutToPixelGrid(Nodes, Island);
-				}
-			}
-			UE_LOG(LogUeAgentInterface, Display, TEXT("BlueprintLayoutCore same_island_forward_x_enforced shifts=%d"),
-				SameIslandForwardShiftCount);
-		}
 		const FIslandLocalLayoutSnapshot IslandLocalLayoutSnapshot = FreezeIslandLocalLayout(Nodes, Islands, OutResult);
 		for (FIslandEdge& IslandEdge : IslandEdges)
 		{
@@ -668,20 +642,27 @@ namespace UeAgentBlueprintAutoLayout
 			OutResult.DesignDiagnostics.InternalBusGroupCount,
 			OutResult.DesignDiagnostics.BoundaryEntryCount,
 			OutResult.DesignDiagnostics.EndpointCandidateCount);
-		UE_LOG(LogUeAgentInterface, Display, TEXT("BlueprintLayoutCore frozen_solver_start elapsed_ms=%.1f"),
+		UE_LOG(LogUeAgentInterface, Display, TEXT("BlueprintLayoutCore inter_island_solver_start elapsed_ms=%.1f"),
 			(FPlatformTime::Seconds() - LayoutTraceStartSeconds) * 1000.0);
-		OutResult.ReroutePlans = RunFrozenIslandCorridorSolver(
+		OutResult.ReroutePlans = RunDeterministicInterIslandSolver(
 			Nodes,
 			Edges,
 			Islands,
 			IslandEdges,
+			InternalBusGroups,
 			IslandPortCandidates,
 			Options,
 			OutResult);
-		UE_LOG(LogUeAgentInterface, Display, TEXT("BlueprintLayoutCore frozen_solver_done elapsed_ms=%.1f reroutes=%d bus_contracts=%d selected_endpoints=%d"),
+		if (OutResult.DesignDiagnostics.IslandTopologicalResidualCycleEdgeCount > 0)
+		{
+			UE_LOG(LogUeAgentInterface, Warning, TEXT("BlueprintLayoutCore failed residual island cycle count=%d"),
+				OutResult.DesignDiagnostics.IslandTopologicalResidualCycleEdgeCount);
+			return false;
+		}
+		UE_LOG(LogUeAgentInterface, Display, TEXT("BlueprintLayoutCore inter_island_solver_done elapsed_ms=%.1f reroutes=%d inter_island_buses=%d selected_endpoints=%d"),
 			(FPlatformTime::Seconds() - LayoutTraceStartSeconds) * 1000.0,
 			OutResult.ReroutePlans.Num(),
-			OutResult.BusContractDiagnostics.Num(),
+			OutResult.DesignDiagnostics.InterIslandBusCount,
 			OutResult.DesignDiagnostics.SelectedEndpointCandidateCount);
 		TSet<int32> IslandCutEdgeIndices;
 		for (const FIslandEdge& IslandEdge : IslandEdges)
@@ -716,113 +697,6 @@ namespace UeAgentBlueprintAutoLayout
 			OutResult.DesignDiagnostics.IslandInternalMultiColumnBusCount,
 			OutResult.DesignDiagnostics.IslandInternalSameColumnCollisionBusCount,
 			OutResult.ReroutePlans.Num());
-		AppendDirectConnectionObstacleReroutePlans(
-			Nodes,
-			Edges,
-			Islands,
-			IslandByNode,
-			Options,
-			OutResult.ReroutePlans,
-			OutResult,
-			&IslandCutEdgeIndices);
-		UE_LOG(LogUeAgentInterface, Display, TEXT("BlueprintLayoutCore direct_obstacle_routes_done elapsed_ms=%.1f reroutes=%d"),
-			(FPlatformTime::Seconds() - LayoutTraceStartSeconds) * 1000.0,
-			OutResult.ReroutePlans.Num());
-		const int32 EndpointAccessInvalidRerouteRemovedCount = RemoveEndpointAccessInvalidReroutePlans(
-			Nodes,
-			Edges,
-			Islands,
-			IslandByNode,
-			Options,
-			OutResult.ReroutePlans,
-			OutResult);
-		UE_LOG(LogUeAgentInterface, Display, TEXT("BlueprintLayoutCore endpoint_access_invalid_reroute_prune_done elapsed_ms=%.1f removed=%d reroutes=%d"),
-			(FPlatformTime::Seconds() - LayoutTraceStartSeconds) * 1000.0,
-			EndpointAccessInvalidRerouteRemovedCount,
-			OutResult.ReroutePlans.Num());
-		const int32 SegmentRefinedRouteCount = RefineReroutePlansAgainstHardOccupancySegments(
-			Nodes,
-			Edges,
-			Islands,
-			IslandByNode,
-			Options,
-			OutResult.ReroutePlans,
-			OutResult);
-		UE_LOG(LogUeAgentInterface, Display, TEXT("BlueprintLayoutCore segment_refine_done elapsed_ms=%.1f refined=%d reroutes=%d"),
-			(FPlatformTime::Seconds() - LayoutTraceStartSeconds) * 1000.0,
-			SegmentRefinedRouteCount,
-			OutResult.ReroutePlans.Num());
-		UE_LOG(LogUeAgentInterface, Display, TEXT("BlueprintLayoutCore final_visible_trunk_lane_start elapsed_ms=%.1f reroutes=%d"),
-			(FPlatformTime::Seconds() - LayoutTraceStartSeconds) * 1000.0,
-			OutResult.ReroutePlans.Num());
-		const int32 FinalVisibleLaneAdjustedCount = PlanFinalVisibleRerouteTrunkLanes(
-			Nodes,
-			Edges,
-			Islands,
-			IslandByNode,
-			Options,
-			OutResult.ReroutePlans,
-			OutResult);
-		UE_LOG(LogUeAgentInterface, Display, TEXT("BlueprintLayoutCore final_visible_branch_x_lane_start elapsed_ms=%.1f adjusted=%d reroutes=%d"),
-			(FPlatformTime::Seconds() - LayoutTraceStartSeconds) * 1000.0,
-			FinalVisibleLaneAdjustedCount,
-			OutResult.ReroutePlans.Num());
-		const int32 FinalVisibleBranchXAdjustedCount = PlanFinalVisibleRerouteBranchXLanes(
-			Nodes,
-			Edges,
-			Islands,
-			IslandByNode,
-			Options,
-			OutResult.ReroutePlans,
-			OutResult);
-		UE_LOG(LogUeAgentInterface, Display, TEXT("BlueprintLayoutCore final_visible_trunk_lane_after_branch_x_start elapsed_ms=%.1f branch_x_adjusted=%d reroutes=%d"),
-			(FPlatformTime::Seconds() - LayoutTraceStartSeconds) * 1000.0,
-			FinalVisibleBranchXAdjustedCount,
-			OutResult.ReroutePlans.Num());
-		const int32 FinalVisibleLaneAdjustedAfterBranchXCount = PlanFinalVisibleRerouteTrunkLanes(
-			Nodes,
-			Edges,
-			Islands,
-			IslandByNode,
-			Options,
-			OutResult.ReroutePlans,
-			OutResult);
-		const int32 FinalVisibleSharedTrunkPrefixNormalizedCount = NormalizeSharedBusTrunkPrefixAfterSegmentRefine(
-			Nodes,
-			Edges,
-			Islands,
-			IslandByNode,
-			Options,
-			OutResult.ReroutePlans,
-			OutResult);
-		const int32 FinalVisibleLaneViolationCount = ValidateFinalVisibleRerouteLaneSpacing(
-			Nodes,
-			Edges,
-			Islands,
-			IslandByNode,
-			Options,
-			OutResult.ReroutePlans,
-			&OutResult);
-		const int32 FinalVisibleBranchXViolationCount = ValidateFinalVisibleRerouteBranchXLanes(
-			Nodes,
-			Edges,
-			Islands,
-			IslandByNode,
-			Options,
-			OutResult.ReroutePlans,
-			&OutResult);
-		UE_LOG(LogUeAgentInterface, Display, TEXT("BlueprintLayoutCore final_visible_lane_done elapsed_ms=%.1f adjusted=%d branch_x_adjusted=%d violations=%d branch_x_violations=%d reroutes=%d"),
-			(FPlatformTime::Seconds() - LayoutTraceStartSeconds) * 1000.0,
-			FinalVisibleLaneAdjustedCount + FinalVisibleLaneAdjustedAfterBranchXCount,
-			FinalVisibleBranchXAdjustedCount,
-			FinalVisibleLaneViolationCount,
-			FinalVisibleBranchXViolationCount,
-			OutResult.ReroutePlans.Num());
-		if (FinalVisibleSharedTrunkPrefixNormalizedCount > 0)
-		{
-			UE_LOG(LogUeAgentInterface, Display, TEXT("BlueprintLayoutCore final_visible_shared_trunk_prefix_normalized count=%d"),
-				FinalVisibleSharedTrunkPrefixNormalizedCount);
-		}
 		SnapReroutePlansToPixelGrid(OutResult.ReroutePlans);
 		const bool bIslandLocalLayoutStableBeforeApply = ValidateIslandLocalLayout(
 			Nodes,
@@ -885,25 +759,6 @@ namespace UeAgentBlueprintAutoLayout
 		{
 			OutResult.DesignDiagnostics.RouteThroughHardOccupancyCount = OutResult.MetricsAfterReroute.EdgeNodeIntersectionCount;
 			OutResult.DesignDiagnostics.RouteThroughIslandCount = OutResult.MetricsAfterReroute.EdgeNodeIntersectionCount;
-			if (OutResult.MetricsAfterReroute.EdgeNodeIntersectionCount == 0)
-			{
-				for (TSharedPtr<FJsonValue>& RouteValue : OutResult.CorridorRouteDiagnostics)
-				{
-					TSharedPtr<FJsonObject>* RouteObject = nullptr;
-					if (!RouteValue.IsValid() || !RouteValue->TryGetObject(RouteObject) || RouteObject == nullptr || !RouteObject->IsValid())
-					{
-						continue;
-					}
-					bool bCrosses = false;
-					(*RouteObject)->TryGetBoolField(TEXT("crosses_hard_occupancy"), bCrosses);
-					if (bCrosses)
-					{
-						(*RouteObject)->SetBoolField(TEXT("crosses_island"), false);
-						(*RouteObject)->SetBoolField(TEXT("crosses_hard_occupancy"), false);
-						(*RouteObject)->SetBoolField(TEXT("post_refine_cleared"), true);
-					}
-				}
-			}
 		}
 		OutResult.IslandCount = Islands.Num();
 		OutResult.IslandEdgeCount = IslandEdges.Num();
@@ -929,29 +784,13 @@ namespace UeAgentBlueprintAutoLayout
 		CompleteIf(TEXT("island_internal_node_placement"), OutResult.DesignDiagnostics.IslandInternalPlacementCount == OutResult.DesignDiagnostics.NodeIslandCount && OutResult.MetricsAfter.OverlapCount == 0, OutResult.DesignDiagnostics.IslandInternalPlacementCount > 0, FString::Printf(TEXT("placements=%d overlap=%d"), OutResult.DesignDiagnostics.IslandInternalPlacementCount, OutResult.MetricsAfter.OverlapCount));
 		CompleteIf(TEXT("island_local_layout_freeze"), OutResult.DesignDiagnostics.IslandLocalFrozenNodeCount == OutResult.NodeCount && OutResult.DesignDiagnostics.IslandLocalMembershipMutationCount == 0 && OutResult.DesignDiagnostics.IslandLocalMutationCount == 0, OutResult.DesignDiagnostics.IslandLocalFrozenNodeCount > 0 && OutResult.DesignDiagnostics.IslandLocalMutationCount == 0, FString::Printf(TEXT("frozen_nodes=%d nodes=%d membership_mutations=%d local_mutations=%d max_delta=%.3f"), OutResult.DesignDiagnostics.IslandLocalFrozenNodeCount, OutResult.NodeCount, OutResult.DesignDiagnostics.IslandLocalMembershipMutationCount, OutResult.DesignDiagnostics.IslandLocalMutationCount, OutResult.DesignDiagnostics.IslandLocalMaxMutation));
 		CompleteIf(TEXT("frozen_endpoint_candidates"), OutResult.DesignDiagnostics.IslandEdgeCount == 0 || (OutResult.DesignDiagnostics.EndpointCandidateCount >= OutResult.DesignDiagnostics.IslandEdgeCount && OutResult.DesignDiagnostics.SelectedEndpointCandidateCount == OutResult.DesignDiagnostics.IslandEdgeCount), OutResult.DesignDiagnostics.EndpointCandidateCount > 0, FString::Printf(TEXT("candidates=%d selected=%d island_edges=%d"), OutResult.DesignDiagnostics.EndpointCandidateCount, OutResult.DesignDiagnostics.SelectedEndpointCandidateCount, OutResult.DesignDiagnostics.IslandEdgeCount));
-		CompleteIf(TEXT("placement_proposal_longest_path_x"), OutResult.DesignDiagnostics.IslandEdgeCount == 0 || (OutResult.DesignDiagnostics.PlacementProposalCount > 0 && OutResult.DesignDiagnostics.PlacementGraphEdgeCount + OutResult.DesignDiagnostics.RouteOnlyEdgeCount == OutResult.DesignDiagnostics.IslandEdgeCount && OutResult.DesignDiagnostics.PlacementOwnerEdgeCount + OutResult.DesignDiagnostics.PlacementNonOwnerEdgeCount >= OutResult.DesignDiagnostics.SelectedEndpointCandidateCount && OutResult.DesignDiagnostics.InvalidForwardConnectionCount == 0), OutResult.DesignDiagnostics.PlacementProposalCount > 0, FString::Printf(TEXT("proposals=%d placement_edges=%d route_only=%d owner=%d non_owner=%d invalid_forward=%d"), OutResult.DesignDiagnostics.PlacementProposalCount, OutResult.DesignDiagnostics.PlacementGraphEdgeCount, OutResult.DesignDiagnostics.RouteOnlyEdgeCount, OutResult.DesignDiagnostics.PlacementOwnerEdgeCount, OutResult.DesignDiagnostics.PlacementNonOwnerEdgeCount, OutResult.DesignDiagnostics.InvalidForwardConnectionCount));
+		CompleteIf(TEXT("inter_island_topological_x"), OutResult.DesignDiagnostics.IslandEdgeCount == 0 || (OutResult.DesignDiagnostics.PlacementGraphEdgeCount + OutResult.DesignDiagnostics.RouteOnlyEdgeCount == OutResult.DesignDiagnostics.IslandEdgeCount && OutResult.DesignDiagnostics.IslandTopologicalOrderCount == OutResult.DesignDiagnostics.NodeIslandCount && OutResult.DesignDiagnostics.InvalidForwardConnectionCount == 0), OutResult.DesignDiagnostics.IslandTopologicalOrderCount > 0, FString::Printf(TEXT("topo_order=%d islands=%d placement_edges=%d route_only=%d residual_cycles=%d invalid_forward=%d"), OutResult.DesignDiagnostics.IslandTopologicalOrderCount, OutResult.DesignDiagnostics.NodeIslandCount, OutResult.DesignDiagnostics.PlacementGraphEdgeCount, OutResult.DesignDiagnostics.RouteOnlyEdgeCount, OutResult.DesignDiagnostics.IslandTopologicalResidualCycleEdgeCount, OutResult.DesignDiagnostics.InvalidForwardConnectionCount));
+		CompleteIf(TEXT("root_continuous_y_order"), OutResult.DesignDiagnostics.RootIslandCount == 0 || (OutResult.DesignDiagnostics.RootIslandTopYCount == OutResult.DesignDiagnostics.RootIslandCount && OutResult.DesignDiagnostics.RootContinuousOrderExactLimitExceeded == 0), OutResult.DesignDiagnostics.RootIslandTopYCount > 0, FString::Printf(TEXT("roots=%d placed=%d components=%d score=%.1f inversion=%.1f exact_limit=%d"), OutResult.DesignDiagnostics.RootIslandCount, OutResult.DesignDiagnostics.RootIslandTopYCount, OutResult.DesignDiagnostics.RootShareComponentCount, OutResult.DesignDiagnostics.RootContinuousOrderScore, OutResult.DesignDiagnostics.RootContinuousOrderInversionScore, OutResult.DesignDiagnostics.RootContinuousOrderExactLimitExceeded));
+		CompleteIf(TEXT("remaining_island_topological_y"), OutResult.DesignDiagnostics.NodeIslandCount == 0 || OutResult.DesignDiagnostics.RootIslandTopYCount + OutResult.DesignDiagnostics.IslandPlacementOrderCount >= OutResult.DesignDiagnostics.NodeIslandCount, OutResult.DesignDiagnostics.IslandPlacementOrderCount > 0, FString::Printf(TEXT("root_placed=%d remaining_placed=%d islands=%d"), OutResult.DesignDiagnostics.RootIslandTopYCount, OutResult.DesignDiagnostics.IslandPlacementOrderCount, OutResult.DesignDiagnostics.NodeIslandCount));
+		CompleteIf(TEXT("inter_island_direct_bus_classification"), OutResult.DesignDiagnostics.IslandEdgeCount == 0 || OutResult.DesignDiagnostics.DirectIslandConnectionCount + OutResult.DesignDiagnostics.BusIslandConnectionCount + OutResult.DesignDiagnostics.InterIslandFeedbackBusConnectionCount >= OutResult.DesignDiagnostics.SelectedEndpointCandidateCount, OutResult.DesignDiagnostics.SelectedEndpointCandidateCount > 0, FString::Printf(TEXT("selected=%d direct=%d bus=%d feedback_bus=%d"), OutResult.DesignDiagnostics.SelectedEndpointCandidateCount, OutResult.DesignDiagnostics.DirectIslandConnectionCount, OutResult.DesignDiagnostics.BusIslandConnectionCount, OutResult.DesignDiagnostics.InterIslandFeedbackBusConnectionCount));
 		CompleteIf(TEXT("source_order_fanout_route_groups"), OutResult.DesignDiagnostics.IslandEdgeCount == 0 || (OutResult.DesignDiagnostics.SourceOrderGroupCount > 0 && OutResult.DesignDiagnostics.RouteGroupCount >= 0), OutResult.DesignDiagnostics.SourceOrderGroupCount > 0, FString::Printf(TEXT("source_order_groups=%d fanout_groups=%d route_groups=%d"), OutResult.DesignDiagnostics.SourceOrderGroupCount, OutResult.DesignDiagnostics.FanoutIntentGroupCount, OutResult.DesignDiagnostics.RouteGroupCount));
-		int32 SelectedCorridorRouteDiagnosticCount = 0;
-		for (const TSharedPtr<FJsonValue>& DiagnosticValue : OutResult.CorridorRouteDiagnostics)
-		{
-			const TSharedPtr<FJsonObject>* DiagnosticObject = nullptr;
-			if (!DiagnosticValue.IsValid() || !DiagnosticValue->TryGetObject(DiagnosticObject) || DiagnosticObject == nullptr || !DiagnosticObject->IsValid())
-			{
-				continue;
-			}
-			FString Side;
-			(*DiagnosticObject)->TryGetStringField(TEXT("side"), Side);
-			if (Side != TEXT("direct") && Side != TEXT("segment_refine"))
-			{
-				++SelectedCorridorRouteDiagnosticCount;
-			}
-		}
-		const bool bCorridorRoutingComplete = OutResult.DesignDiagnostics.SelectedEndpointCandidateCount == 0
-			|| (SelectedCorridorRouteDiagnosticCount >= OutResult.DesignDiagnostics.SelectedEndpointCandidateCount
-				&& OutResult.DesignDiagnostics.RouteThroughIslandCount == 0);
-		CompleteIf(TEXT("corridor_routing_lane_coloring"), bCorridorRoutingComplete, OutResult.CorridorRouteDiagnostics.Num() > 0, FString::Printf(TEXT("corridors=%d selected_routes=%d selected=%d extra=%d lanes=%d route_through_island=%d"), OutResult.CorridorRouteDiagnostics.Num(), SelectedCorridorRouteDiagnosticCount, OutResult.DesignDiagnostics.SelectedEndpointCandidateCount, OutResult.CorridorRouteDiagnostics.Num() - SelectedCorridorRouteDiagnosticCount, OutResult.DesignDiagnostics.LaneColoringLaneCount, OutResult.DesignDiagnostics.RouteThroughIslandCount));
-		CompleteIf(TEXT("final_visible_reroute_lane_spacing"), OutResult.DesignDiagnostics.FinalVisibleBusLaneViolationCount == 0, OutResult.LaneAssignmentDiagnostics.Num() > 0, FString::Printf(TEXT("spacing=20 adjusted=%d violations=%d assignments=%d"), OutResult.DesignDiagnostics.FinalVisibleBusLaneAdjustmentCount, OutResult.DesignDiagnostics.FinalVisibleBusLaneViolationCount, OutResult.LaneAssignmentDiagnostics.Num()));
-		CompleteIf(TEXT("final_visible_branch_x_lane_spacing"), OutResult.DesignDiagnostics.FinalVisibleBranchXLaneViolationCount == 0, OutResult.LaneAssignmentDiagnostics.Num() > 0, FString::Printf(TEXT("spacing=20 adjusted=%d violations=%d assignments=%d"), OutResult.DesignDiagnostics.FinalVisibleBranchXLaneAdjustmentCount, OutResult.DesignDiagnostics.FinalVisibleBranchXLaneViolationCount, OutResult.LaneAssignmentDiagnostics.Num()));
+		CompleteIf(TEXT("inter_island_bus_bundle_planning"), OutResult.DesignDiagnostics.InterIslandBusCount == 0 || (OutResult.DesignDiagnostics.InterIslandBusBundleCount > 0 && OutResult.DesignDiagnostics.InterIslandBusSlotAssignmentCount >= OutResult.DesignDiagnostics.InterIslandBusCount && OutResult.DesignDiagnostics.RouteThroughIslandCount == 0), OutResult.DesignDiagnostics.InterIslandBusCount > 0, FString::Printf(TEXT("buses=%d bundles=%d slots=%d max_slot=%d collision_boxes=%d island_boxes=%d route_through_island=%d"), OutResult.DesignDiagnostics.InterIslandBusCount, OutResult.DesignDiagnostics.InterIslandBusBundleCount, OutResult.DesignDiagnostics.InterIslandBusSlotAssignmentCount, OutResult.DesignDiagnostics.InterIslandBusMaxSlotCount, OutResult.DesignDiagnostics.InterIslandBusBundleCollisionBoxCount, OutResult.DesignDiagnostics.IslandBusCollisionBoxCount, OutResult.DesignDiagnostics.RouteThroughIslandCount));
+		CompleteIf(TEXT("inter_island_branch_slot_planning"), OutResult.DesignDiagnostics.IncomingBusBranchCount == 0 || (OutResult.DesignDiagnostics.InterIslandBusBranchXSlotCount > 0 && OutResult.DesignDiagnostics.InterIslandBusBranchKnotCount + OutResult.DesignDiagnostics.InterIslandBusBranchKnotOmittedCount >= OutResult.DesignDiagnostics.IncomingBusBranchCount), OutResult.DesignDiagnostics.IncomingBusBranchCount > 0, FString::Printf(TEXT("branches=%d x_slots=%d right_shift=%d knots=%d omitted=%d"), OutResult.DesignDiagnostics.IncomingBusBranchCount, OutResult.DesignDiagnostics.InterIslandBusBranchXSlotCount, OutResult.DesignDiagnostics.IslandBusBranchRightShiftCount, OutResult.DesignDiagnostics.InterIslandBusBranchKnotCount, OutResult.DesignDiagnostics.InterIslandBusBranchKnotOmittedCount));
 		bool bPixelSnappedNodes = true;
 		for (const FNode& Node : Nodes)
 		{
@@ -977,9 +816,7 @@ namespace UeAgentBlueprintAutoLayout
 			&& OutResult.MetricsAfter.OverlapCount == 0
 			&& OutResult.MetricsAfter.BackwardEdgeCount == 0
 			&& OutResult.InvalidIslandEdgeCount == 0
-			&& OutResult.DesignDiagnostics.RouteThroughIslandCount == 0
-			&& OutResult.DesignDiagnostics.FinalVisibleBusLaneViolationCount == 0
-			&& OutResult.DesignDiagnostics.FinalVisibleBranchXLaneViolationCount == 0;
+			&& OutResult.DesignDiagnostics.RouteThroughIslandCount == 0;
 
 		for (const FIsland& Island : Islands)
 		{
@@ -1059,427 +896,8 @@ namespace UeAgentBlueprintAutoLayout
 		}
 	}
 
-	static void RunFinalVisibleLaneRegressionSelfTests(FSelfTestResult& Result, const FOptions& Options)
-	{
-		{
-			TArray<FNode> Nodes;
-			for (int32 Index = 0; Index < 4; ++Index)
-			{
-				FNode Node;
-				Node.Index = Index;
-				Node.Guid = FString::Printf(TEXT("refinedguardlane%d"), Index);
-				Node.Title = Node.Guid;
-				Node.Width = 100.0;
-				Node.Height = 70.0;
-				Node.OutputPinNames = { TEXT("out") };
-				Node.InputPinNames = { TEXT("in") };
-				Node.OutputPinAnchors = { FVector2D(Node.Width, 35.0) };
-				Node.InputPinAnchors = { FVector2D(0.0, 35.0) };
-				Node.OutputPinAnchorValid = { 1 };
-				Node.InputPinAnchorValid = { 1 };
-				Nodes.Add(Node);
-			}
-			Nodes[0].NewX = 0.0;
-			Nodes[0].NewY = 0.0;
-			Nodes[1].NewX = 700.0;
-			Nodes[1].NewY = 0.0;
-			Nodes[2].NewX = 0.0;
-			Nodes[2].NewY = 140.0;
-			Nodes[3].NewX = 700.0;
-			Nodes[3].NewY = 140.0;
-			TArray<FEdge> Edges = {
-				{0, 1, TEXT("out"), TEXT("in"), 0, 0, false},
-				{2, 3, TEXT("out"), TEXT("in"), 0, 0, false}
-			};
-			FIsland Island;
-			Island.Id = 0;
-			Island.Nodes = {0, 1, 2, 3};
-			for (const int32 NodeIndex : Island.Nodes)
-			{
-				Island.NodeSet.Add(NodeIndex);
-			}
-			Island.LocalBounds = BoundsForNodes(Nodes, Island.Nodes);
-			TArray<FIsland> Islands = {Island};
-			TMap<int32, int32> IslandByNode;
-			for (const int32 NodeIndex : Island.Nodes)
-			{
-				IslandByNode.Add(NodeIndex, 0);
-			}
 
-			FReroutePlan PlanA;
-			PlanA.EdgeIndex = 0;
-			PlanA.Reason = TEXT("input_chain_collision_guard_segment_refined");
-			PlanA.BusId = MakeSourceParamId(Edges[0]);
-			PlanA.RouteKind = ERouteKind::LocalBus;
-			PlanA.Points = { FVector2D(180.0, 80.0), FVector2D(620.0, 80.0) };
-			FReroutePlan PlanB;
-			PlanB.EdgeIndex = 1;
-			PlanB.Reason = TEXT("input_chain_collision_guard_segment_refined");
-			PlanB.BusId = MakeSourceParamId(Edges[1]);
-			PlanB.RouteKind = ERouteKind::LocalBus;
-			PlanB.Points = { FVector2D(180.0, 81.0), FVector2D(620.0, 81.0) };
-			TArray<FReroutePlan> Plans = {PlanA, PlanB};
-
-			FRunResult Run;
-			const int32 InitialViolations = ValidateFinalVisibleRerouteLaneSpacing(Nodes, Edges, Islands, IslandByNode, Options, Plans, nullptr);
-			const int32 Adjusted = PlanFinalVisibleRerouteTrunkLanes(Nodes, Edges, Islands, IslandByNode, Options, Plans, Run);
-			const int32 FinalViolations = ValidateFinalVisibleRerouteLaneSpacing(Nodes, Edges, Islands, IslandByNode, Options, Plans, &Run);
-			const double DeltaY = Plans[0].Points.Num() > 0 && Plans[1].Points.Num() > 0
-				? FMath::Abs(Plans[0].Points[0].Y - Plans[1].Points[0].Y)
-				: 0.0;
-			AddSelfTestCase(Result,
-				TEXT("refined_input_chain_guards_reenter_final_visible_lane_planner"),
-				InitialViolations > 0 && Adjusted >= 1 && FinalViolations == 0 && DeltaY >= GetBusTrunkLaneSpacing() - 0.5,
-				FString::Printf(TEXT("initial=%d adjusted=%d final=%d delta=%.1f assignments=%d"),
-					InitialViolations,
-					Adjusted,
-					FinalViolations,
-					DeltaY,
-					Run.LaneAssignmentDiagnostics.Num()));
-		}
-
-		{
-			TArray<FNode> Nodes;
-			for (int32 Index = 0; Index < 2; ++Index)
-			{
-				FNode Node;
-				Node.Index = Index;
-				Node.Guid = FString::Printf(TEXT("longtargettail%d"), Index);
-				Node.Title = Node.Guid;
-				Node.Width = 100.0;
-				Node.Height = 70.0;
-				Node.OutputPinNames = { TEXT("out") };
-				Node.InputPinNames = { TEXT("in") };
-				Node.OutputPinAnchors = { FVector2D(Node.Width, 35.0) };
-				Node.InputPinAnchors = { FVector2D(0.0, 35.0) };
-				Node.OutputPinAnchorValid = { 1 };
-				Node.InputPinAnchorValid = { 1 };
-				Nodes.Add(Node);
-			}
-			Nodes[0].NewX = 0.0;
-			Nodes[0].NewY = 0.0;
-			Nodes[1].NewX = 3000.0;
-			Nodes[1].NewY = 10.0;
-			TArray<FEdge> Edges = {
-				{0, 1, TEXT("out"), TEXT("in"), 0, 0, false}
-			};
-			FIsland Island;
-			Island.Id = 0;
-			Island.Nodes = {0, 1};
-			for (const int32 NodeIndex : Island.Nodes)
-			{
-				Island.NodeSet.Add(NodeIndex);
-			}
-			Island.LocalBounds = BoundsForNodes(Nodes, Island.Nodes);
-			TArray<FIsland> Islands = {Island};
-			TMap<int32, int32> IslandByNode;
-			for (const int32 NodeIndex : Island.Nodes)
-			{
-				IslandByNode.Add(NodeIndex, 0);
-			}
-
-			const FVector2D Start(Nodes[0].NewX + Nodes[0].Width, Nodes[0].NewY + Nodes[0].OutputPinAnchors[0].Y);
-			const FVector2D End(Nodes[1].NewX, Nodes[1].NewY + Nodes[1].InputPinAnchors[0].Y);
-			const double EntryX = ComputeInputXAlignedToOutput(Start.X, Options);
-			const double ExpectedTargetBranchX = ComputeOutputXAlignedToInput(End.X, Options);
-			FReroutePlan Plan;
-			Plan.EdgeIndex = 0;
-			Plan.Reason = TEXT("direct_obstacle_local_bus");
-			Plan.BusId = MakeSourceParamId(Edges[0]);
-			Plan.RouteKind = ERouteKind::LocalBus;
-			Plan.Points = { FVector2D(EntryX, 60.0), FVector2D(EntryX + 80.0, 60.0) };
-			TArray<FReroutePlan> Plans = {Plan};
-
-			FRunResult Run;
-			const int32 Adjusted = PlanFinalVisibleRerouteBranchXLanes(Nodes, Edges, Islands, IslandByNode, Options, Plans, Run);
-			const int32 FinalViolations = ValidateFinalVisibleRerouteBranchXLanes(Nodes, Edges, Islands, IslandByNode, Options, Plans, &Run);
-			TArray<FVisibleRerouteBranchXLaneItem> FinalItems;
-			CollectVisibleRerouteBranchXLaneItems(Nodes, Edges, Islands, IslandByNode, Options, Plans, FinalItems);
-			const double FinalBranchX = FinalItems.Num() > 0 ? FinalItems[0].BranchX : 0.0;
-			const bool bTailShortened = FinalItems.Num() == 1
-				&& FMath::Abs(ExpectedTargetBranchX - FinalBranchX) <= 0.5;
-			AddSelfTestCase(Result,
-				TEXT("final_visible_branch_x_canonicalizes_single_long_target_tail"),
-				Adjusted >= 1 && FinalViolations == 0 && bTailShortened,
-				FString::Printf(TEXT("adjusted=%d final=%d branch=%.1f expected=%.1f assignments=%d points=%d"),
-					Adjusted,
-					FinalViolations,
-					FinalBranchX,
-					ExpectedTargetBranchX,
-					Run.LaneAssignmentDiagnostics.Num(),
-					Plans[0].Points.Num()));
-		}
-
-		{
-			FReroutePlan Plan;
-			Plan.EdgeIndex = 0;
-			Plan.Points = { FVector2D(3816.0, 377.0) };
-			Plan.KnotPoints = { FVector2D(1256.0, 377.0) };
-			const TArray<FVector2D>& WritePoints = GetAuthoritativeReroutePoints(Plan);
-			const bool bUsesFinalPoints = WritePoints.Num() == 1
-				&& FMath::IsNearlyEqual(WritePoints[0].X, 3816.0, 0.5)
-				&& FMath::IsNearlyEqual(WritePoints[0].Y, 377.0, 0.5);
-			AddSelfTestCase(Result,
-				TEXT("reroute_writeback_uses_authoritative_points_over_legacy_knot_mirror"),
-				bUsesFinalPoints,
-				FString::Printf(TEXT("write=(%.1f,%.1f) mirror=(%.1f,%.1f)"),
-					WritePoints.Num() > 0 ? WritePoints[0].X : -1.0,
-					WritePoints.Num() > 0 ? WritePoints[0].Y : -1.0,
-					Plan.KnotPoints.Num() > 0 ? Plan.KnotPoints[0].X : -1.0,
-					Plan.KnotPoints.Num() > 0 ? Plan.KnotPoints[0].Y : -1.0));
-		}
-
-		{
-			FOptions StressOptions = Options;
-			StressOptions.NodePadding = FMath::Max(StressOptions.NodePadding, 240.0);
-			TArray<FNode> Nodes;
-			for (int32 Index = 0; Index < 2; ++Index)
-			{
-				FNode Node;
-				Node.Index = Index;
-				Node.Guid = FString::Printf(TEXT("protectedfinalbranch%d"), Index);
-				Node.Title = Node.Guid;
-				Node.Width = 100.0;
-				Node.Height = 70.0;
-				Node.OutputPinNames = { TEXT("out") };
-				Node.InputPinNames = { TEXT("in") };
-				Node.OutputPinAnchors = { FVector2D(Node.Width, 35.0) };
-				Node.InputPinAnchors = { FVector2D(0.0, 35.0) };
-				Node.OutputPinAnchorValid = { 1 };
-				Node.InputPinAnchorValid = { 1 };
-				Nodes.Add(Node);
-			}
-			Nodes[0].NewX = 996.0;
-			Nodes[0].NewY = 327.0;
-			Nodes[1].NewX = 3896.0;
-			Nodes[1].NewY = 255.0;
-			TArray<FEdge> Edges = {
-				{0, 1, TEXT("out"), TEXT("in"), 0, 0, false}
-			};
-			FIsland Island;
-			Island.Id = 0;
-			Island.Nodes = {0, 1};
-			for (const int32 NodeIndex : Island.Nodes)
-			{
-				Island.NodeSet.Add(NodeIndex);
-			}
-			Island.LocalBounds = BoundsForNodes(Nodes, Island.Nodes);
-			TArray<FIsland> Islands = {Island};
-			TMap<int32, int32> IslandByNode;
-			IslandByNode.Add(0, 0);
-			IslandByNode.Add(1, 0);
-			const FVector2D Start(Nodes[0].NewX + Nodes[0].OutputPinAnchors[0].X, Nodes[0].NewY + Nodes[0].OutputPinAnchors[0].Y);
-			const FVector2D End(Nodes[1].NewX + Nodes[1].InputPinAnchors[0].X, Nodes[1].NewY + Nodes[1].InputPinAnchors[0].Y);
-			const double EntryX = ComputeInputXAlignedToOutput(Start.X, StressOptions);
-			const double ExpectedBranchX = ComputeOutputXAlignedToInput(End.X, StressOptions);
-			FReroutePlan Plan;
-			Plan.EdgeIndex = 0;
-			Plan.Reason = TEXT("island_internal_multi_column_bus_final_visible_lane");
-			Plan.BusId = MakeSourceParamId(Edges[0]);
-			Plan.RouteKind = ERouteKind::LocalBus;
-			Plan.Points = { FVector2D(EntryX, 313.0), FVector2D(EntryX + 80.0, 313.0) };
-			FinalizeReroutePlanPoints(Plan, StressOptions);
-			TArray<FReroutePlan> Plans = {Plan};
-			FRunResult Run;
-			const int32 Adjusted = PlanFinalVisibleRerouteBranchXLanes(Nodes, Edges, Islands, IslandByNode, StressOptions, Plans, Run);
-			const bool bProtectedBranchKept = Plans[0].Points.Num() >= 2
-				&& FMath::IsNearlyEqual(Plans[0].Points.Last().X, ExpectedBranchX, 0.5);
-			AddSelfTestCase(Result,
-				TEXT("final_visible_branch_x_preserves_target_side_branch_point_during_compaction"),
-				Adjusted >= 1 && bProtectedBranchKept,
-				FString::Printf(TEXT("adjusted=%d last_x=%.1f expected=%.1f point_count=%d"),
-					Adjusted,
-					Plans[0].Points.Num() > 0 ? Plans[0].Points.Last().X : -1.0,
-					ExpectedBranchX,
-					Plans[0].Points.Num()));
-		}
-
-		{
-			TArray<FNode> Nodes;
-			for (int32 Index = 0; Index < 4; ++Index)
-			{
-				FNode Node;
-				Node.Index = Index;
-				Node.Guid = FString::Printf(TEXT("branchaftertrunk%d"), Index);
-				Node.Title = Node.Guid;
-				Node.Width = 100.0;
-				Node.Height = 70.0;
-				Node.OutputPinNames = { TEXT("out") };
-				Node.InputPinNames = { TEXT("in") };
-				Node.OutputPinAnchors = { FVector2D(Node.Width, 35.0) };
-				Node.InputPinAnchors = { FVector2D(0.0, 35.0) };
-				Node.OutputPinAnchorValid = { 1 };
-				Node.InputPinAnchorValid = { 1 };
-				Nodes.Add(Node);
-			}
-			Nodes[0].NewX = 996.0;
-			Nodes[0].NewY = 199.0;
-			Nodes[1].NewX = 3896.0;
-			Nodes[1].NewY = 191.0;
-			Nodes[2].NewX = 996.0;
-			Nodes[2].NewY = 339.0;
-			Nodes[3].NewX = 3896.0;
-			Nodes[3].NewY = 331.0;
-			TArray<FEdge> Edges = {
-				{0, 1, TEXT("out_a"), TEXT("in_a"), 0, 0, false},
-				{2, 3, TEXT("out_b"), TEXT("in_b"), 0, 0, false}
-			};
-			FIsland Island;
-			Island.Id = 0;
-			Island.Nodes = {0, 1, 2, 3};
-			for (const int32 NodeIndex : Island.Nodes)
-			{
-				Island.NodeSet.Add(NodeIndex);
-			}
-			Island.LocalBounds = BoundsForNodes(Nodes, Island.Nodes);
-			TArray<FIsland> Islands = {Island};
-			TMap<int32, int32> IslandByNode;
-			for (const int32 NodeIndex : Island.Nodes)
-			{
-				IslandByNode.Add(NodeIndex, 0);
-			}
-			const FVector2D StartA(Nodes[0].NewX + Nodes[0].OutputPinAnchors[0].X, Nodes[0].NewY + Nodes[0].OutputPinAnchors[0].Y);
-			const FVector2D EndA(Nodes[1].NewX + Nodes[1].InputPinAnchors[0].X, Nodes[1].NewY + Nodes[1].InputPinAnchors[0].Y);
-			const FVector2D StartB(Nodes[2].NewX + Nodes[2].OutputPinAnchors[0].X, Nodes[2].NewY + Nodes[2].OutputPinAnchors[0].Y);
-			const FVector2D EndB(Nodes[3].NewX + Nodes[3].InputPinAnchors[0].X, Nodes[3].NewY + Nodes[3].InputPinAnchors[0].Y);
-			const double EntryXA = ComputeInputXAlignedToOutput(StartA.X, Options);
-			const double ExpectedBranchXA = ComputeOutputXAlignedToInput(EndA.X, Options);
-			const double EntryXB = ComputeInputXAlignedToOutput(StartB.X, Options);
-			const double ExitXB = ComputeOutputXAlignedToInput(EndB.X, Options);
-			FReroutePlan PlanA;
-			PlanA.EdgeIndex = 0;
-			PlanA.Reason = TEXT("island_internal_multi_column_bus_final_branch_x_lane");
-			PlanA.BusId = MakeSourceParamId(Edges[0]);
-			PlanA.RouteKind = ERouteKind::LocalBus;
-			PlanA.Points = {
-				FVector2D(EntryXA, 249.0),
-				FVector2D(ExpectedBranchXA, 249.0),
-				FVector2D(ExpectedBranchXA, EndA.Y)
-			};
-			FinalizeReroutePlanPoints(PlanA, Options);
-			FReroutePlan PlanB;
-			PlanB.EdgeIndex = 1;
-			PlanB.Reason = TEXT("direct_obstacle_local_bus");
-			PlanB.BusId = MakeSourceParamId(Edges[1]);
-			PlanB.RouteKind = ERouteKind::LocalBus;
-			PlanB.Points = { FVector2D(EntryXB, 250.0), FVector2D(ExitXB, 250.0) };
-			FinalizeReroutePlanPoints(PlanB, Options);
-			TArray<FReroutePlan> Plans = {PlanA, PlanB};
-			FRunResult Run;
-			const int32 InitialViolations = ValidateFinalVisibleRerouteLaneSpacing(Nodes, Edges, Islands, IslandByNode, Options, Plans, nullptr);
-			const int32 Adjusted = PlanFinalVisibleRerouteTrunkLanes(Nodes, Edges, Islands, IslandByNode, Options, Plans, Run);
-			bool bPreservedFinalBranchX = false;
-			for (const FVector2D& Point : Plans[0].Points)
-			{
-				if (FMath::IsNearlyEqual(Point.X, ExpectedBranchXA, 0.5))
-				{
-					bPreservedFinalBranchX = true;
-					break;
-				}
-			}
-			AddSelfTestCase(Result,
-				TEXT("final_visible_trunk_lane_preserves_preplanned_branch_x"),
-				InitialViolations > 0 && Adjusted >= 1 && bPreservedFinalBranchX,
-				FString::Printf(TEXT("initial=%d adjusted=%d preserved=%s expected_x=%.1f point_count=%d"),
-					InitialViolations,
-					Adjusted,
-					bPreservedFinalBranchX ? TEXT("true") : TEXT("false"),
-					ExpectedBranchXA,
-					Plans[0].Points.Num()));
-		}
-
-		{
-			TArray<FNode> Nodes;
-			for (int32 Index = 0; Index < 3; ++Index)
-			{
-				FNode Node;
-				Node.Index = Index;
-				Node.Guid = FString::Printf(TEXT("shared_prefix_after_branch_x_%d"), Index);
-				Node.Title = Node.Guid;
-				Node.Width = 120.0;
-				Node.Height = 60.0;
-				Node.OutputPinNames = { TEXT("out") };
-				Node.InputPinNames = { TEXT("in") };
-				Node.OutputPinAnchors = { FVector2D(Node.Width, 30.0) };
-				Node.InputPinAnchors = { FVector2D(0.0, 30.0) };
-				Node.OutputPinAnchorValid = { 1 };
-				Node.InputPinAnchorValid = { 1 };
-				Nodes.Add(Node);
-			}
-			Nodes[0].NewX = 0.0;
-			Nodes[0].NewY = 0.0;
-			Nodes[1].NewX = 620.0;
-			Nodes[1].NewY = 0.0;
-			Nodes[2].NewX = 860.0;
-			Nodes[2].NewY = 160.0;
-
-			TArray<FEdge> Edges = {
-				{0, 1, TEXT("out"), TEXT("in"), 0, 0, false},
-				{0, 2, TEXT("out"), TEXT("in"), 0, 0, false}
-			};
-
-			FIsland Island;
-			Island.Id = 0;
-			Island.Nodes = {0, 1, 2};
-			for (const int32 NodeIndex : Island.Nodes)
-			{
-				Island.NodeSet.Add(NodeIndex);
-			}
-			Island.LocalBounds = BoundsForNodes(Nodes, Island.Nodes);
-			TArray<FIsland> Islands = {Island};
-			TMap<int32, int32> IslandByNode;
-			for (const int32 NodeIndex : Island.Nodes)
-			{
-				IslandByNode.Add(NodeIndex, 0);
-			}
-
-			FReroutePlan NearPlan;
-			NearPlan.EdgeIndex = 0;
-			NearPlan.Reason = TEXT("fanout_local_bus_final_branch_x_lane");
-			NearPlan.BusId = TEXT("same_output_shared_prefix");
-			NearPlan.RouteKind = ERouteKind::LocalBus;
-			NearPlan.AttachmentMergeGroup = 99;
-			NearPlan.Points = { FVector2D(220.0, 100.0), FVector2D(420.0, 100.0) };
-
-			FReroutePlan FarPlan;
-			FarPlan.EdgeIndex = 1;
-			FarPlan.Reason = TEXT("fanout_local_bus_final_branch_x_lane");
-			FarPlan.BusId = TEXT("same_output_shared_prefix");
-			FarPlan.RouteKind = ERouteKind::LocalBus;
-			FarPlan.AttachmentMergeGroup = 99;
-			FarPlan.Points = { FVector2D(220.0, 100.0), FVector2D(560.0, 100.0) };
-
-			TArray<FReroutePlan> Plans = {NearPlan, FarPlan};
-			FRunResult Run;
-			const int32 PrefixNormalized = NormalizeSharedBusTrunkPrefixAfterSegmentRefine(Nodes, Edges, Islands, IslandByNode, Options, Plans, Run);
-			int32 NearBranchIndexInFar = INDEX_NONE;
-			int32 FarBranchIndex = INDEX_NONE;
-			for (int32 PointIndex = 0; PointIndex < Plans[1].Points.Num(); ++PointIndex)
-			{
-				if (FVector2D::Distance(Plans[1].Points[PointIndex], FVector2D(420.0, 100.0)) < 1.0)
-				{
-					NearBranchIndexInFar = PointIndex;
-				}
-				if (FVector2D::Distance(Plans[1].Points[PointIndex], FVector2D(560.0, 100.0)) < 1.0)
-				{
-					FarBranchIndex = PointIndex;
-				}
-			}
-			AddSelfTestCase(Result,
-				TEXT("same_output_shared_trunk_prefix_inserts_near_branch_before_far_branch"),
-				PrefixNormalized >= 1
-				&& NearBranchIndexInFar != INDEX_NONE
-				&& FarBranchIndex != INDEX_NONE
-				&& NearBranchIndexInFar < FarBranchIndex,
-				FString::Printf(TEXT("prefix=%d far_points=%d near_index=%d far_index=%d"),
-					PrefixNormalized,
-					Plans[1].Points.Num(),
-					NearBranchIndexInFar,
-					FarBranchIndex));
-		}
-	}
-
-	static void RunSourceColumnCollisionAabbSelfTests(FSelfTestResult& Result, const FOptions& Options)
+	static void RunSourceColumnCollisionSelfTests(FSelfTestResult& Result, const FOptions& Options)
 	{
 		auto MakeNode = [](const int32 Index, const TCHAR* Prefix, const double Width, const double Height, const int32 Rank, const double X, const double Y) -> FNode
 		{
@@ -1569,149 +987,232 @@ namespace UeAgentBlueprintAutoLayout
 
 		{
 			TArray<FNode> Nodes = {
-				MakeNode(0, TEXT("source_column_aabb"), 120.0, 72.0, 0, 0.0, 0.0),
-				MakeNode(1, TEXT("source_column_aabb"), 260.0, 120.0, 0, 0.0, 96.0),
-				MakeNode(2, TEXT("source_column_aabb"), 120.0, 72.0, 1, 360.0, 180.0)
+				MakeNode(0, TEXT("source_column_triangles"), 120.0, 72.0, 0, 0.0, 0.0),
+				MakeNode(1, TEXT("source_column_triangles"), 260.0, 120.0, 0, 0.0, 96.0),
+				MakeNode(2, TEXT("source_column_triangles"), 120.0, 72.0, 1, 360.0, 180.0)
 			};
 			TArray<TArray<int32>> Columns;
 			Columns.SetNum(2);
 			Columns[0] = {0, 1};
 			Columns[1] = {2};
-			RunCase(TEXT("source_column_output_aabb_collision_extends_to_column_right_boundary"), MoveTemp(Nodes), MoveTemp(Columns), 260.0, true);
+			RunCase(TEXT("source_column_output_triangle_collision_extends_to_column_right_boundary"), MoveTemp(Nodes), MoveTemp(Columns), 260.0, true);
 		}
 
 		{
 			TArray<FNode> Nodes = {
 				MakeNode(0, TEXT("source_column_access"), 260.0, 72.0, 0, 0.0, 0.0),
-				MakeNode(1, TEXT("source_column_access"), 340.0, 120.0, 0, 0.0, 96.0),
+				MakeNode(1, TEXT("source_column_access"), 340.0, 120.0, 0, 0.0, 78.0),
 				MakeNode(2, TEXT("source_column_access"), 120.0, 72.0, 1, 520.0, 180.0)
 			};
 			TArray<TArray<int32>> Columns;
 			Columns.SetNum(2);
 			Columns[0] = {0, 1};
 			Columns[1] = {2};
-			RunCase(TEXT("source_column_collision_guard_uses_raw_column_right_boundary"), MoveTemp(Nodes), MoveTemp(Columns), 340.0, true);
+			RunCase(TEXT("source_column_collision_guard_uses_column_right_boundary"), MoveTemp(Nodes), MoveTemp(Columns), 340.0, true);
 		}
 
 		{
 			TArray<FNode> Nodes = {
-				MakeNode(0, TEXT("source_column_escaped_aabb"), 260.0, 72.0, 0, 0.0, 0.0),
-				MakeNode(1, TEXT("source_column_escaped_aabb"), 260.0, 120.0, 0, 0.0, 96.0),
-				MakeNode(2, TEXT("source_column_escaped_aabb"), 120.0, 72.0, 1, 520.0, 180.0)
+				MakeNode(0, TEXT("source_column_endpoint_triangles"), 260.0, 72.0, 0, 0.0, 0.0),
+				MakeNode(1, TEXT("source_column_endpoint_triangles"), 260.0, 120.0, 0, 0.0, 96.0),
+				MakeNode(2, TEXT("source_column_endpoint_triangles"), 120.0, 72.0, 1, 520.0, 180.0)
 			};
 			TArray<TArray<int32>> Columns;
 			Columns.SetNum(2);
 			Columns[0] = {0, 1};
 			Columns[1] = {2};
-			RunCase(TEXT("source_column_collision_aabb_uses_escaped_endpoints"), MoveTemp(Nodes), MoveTemp(Columns), 260.0, false);
+			RunCase(TEXT("source_column_collision_uses_endpoint_offset_triangles"), MoveTemp(Nodes), MoveTemp(Columns), 260.0, false);
+		}
+	}
+	static void RunInterIslandBranchSlotSelfTests(FSelfTestResult& Result, const FOptions& Options)
+	{
+		TArray<FIsland> Islands;
+		Islands.SetNum(4);
+		for (int32 Index = 0; Index < Islands.Num(); ++Index)
+		{
+			Islands[Index].Id = Index;
+			Islands[Index].LocalBounds = {0.0, 0.0, 140.0, 120.0};
+		}
+		Islands[0].X = 0.0;
+		Islands[0].Y = 300.0;
+		Islands[1].X = 600.0;
+		Islands[1].Y = 0.0;
+		Islands[2].X = 0.0;
+		Islands[2].Y = 0.0;
+		Islands[3].X = 600.0;
+		Islands[3].Y = 240.0;
+
+		TArray<FIslandEdge> IslandEdges;
+		IslandEdges.SetNum(2);
+		IslandEdges[0].EdgeIndex = 0;
+		IslandEdges[0].SourceIsland = 0;
+		IslandEdges[0].TargetIsland = 1;
+		IslandEdges[0].SourceLocal = FVector2D(140.0, 100.0);
+		IslandEdges[0].TargetLocal = FVector2D(0.0, 130.0);
+		IslandEdges[1].EdgeIndex = 1;
+		IslandEdges[1].SourceIsland = 2;
+		IslandEdges[1].TargetIsland = 3;
+		IslandEdges[1].SourceLocal = FVector2D(140.0, 100.0);
+		IslandEdges[1].TargetLocal = FVector2D(0.0, 180.0);
+
+		TArray<FDeterministicInterIslandBus> Buses;
+		Buses.SetNum(2);
+		for (int32 BusIndex = 0; BusIndex < Buses.Num(); ++BusIndex)
+		{
+			Buses[BusIndex].Id = BusIndex;
+			Buses[BusIndex].Key = FString::Printf(TEXT("slot_order_bus_%d"), BusIndex);
+			Buses[BusIndex].FinalY = 100.0;
+			Buses[BusIndex].SlotIndex = BusIndex;
+			Buses[BusIndex].ConnectionIndices = {BusIndex};
+		}
+
+		TArray<FDeterministicIslandConnection> Connections;
+		Connections.SetNum(2);
+		for (int32 ConnectionIndex = 0; ConnectionIndex < Connections.Num(); ++ConnectionIndex)
+		{
+			const FIslandEdge& Edge = IslandEdges[ConnectionIndex];
+			Connections[ConnectionIndex].bBus = true;
+			Connections[ConnectionIndex].BusId = ConnectionIndex;
+			Connections[ConnectionIndex].Endpoint.EdgeIndex = Edge.EdgeIndex;
+			Connections[ConnectionIndex].Endpoint.SourceIsland = Edge.SourceIsland;
+			Connections[ConnectionIndex].Endpoint.TargetIsland = Edge.TargetIsland;
+			Connections[ConnectionIndex].Endpoint.SourceLocal = Edge.SourceLocal;
+			Connections[ConnectionIndex].Endpoint.EntryLocal = Edge.TargetLocal;
+			Connections[ConnectionIndex].Endpoint.ActualTargetLocal = Edge.TargetLocal;
+		}
+
+		TSet<int32> RouteOnlyIslandEdgeIndices;
+		const TArray<int32> TopoOrder = {0, 2, 1, 3};
+		FRunResult Run;
+		TArray<FNode> EmptyNodes;
+		TArray<FEdge> EmptyEdges;
+		TArray<FInternalBusGroup> EmptyInternalBusGroups;
+		TArray<FIslandPortCandidate> EmptyCandidates;
+		ResolveBusBranchSlotsAndRightShift(
+			EmptyNodes,
+			EmptyEdges,
+			EmptyInternalBusGroups,
+			Islands,
+			Connections,
+			EmptyCandidates,
+			Buses,
+			IslandEdges,
+			RouteOnlyIslandEdgeIndices,
+			TopoOrder,
+			Options,
+			Run,
+			true);
+
+		const bool bTargetNearBusGetsRightLane =
+			Connections[0].BranchSlotIndex == 0
+			&& Connections[1].BranchSlotIndex == 1
+			&& Run.DesignDiagnostics.InterIslandBusBranchXSlotCount >= 2;
+		AddSelfTestCase(Result,
+			TEXT("inter_island_branch_x_slot_prefers_target_endpoint_near_bus"),
+			bTargetNearBusGetsRightLane,
+			FString::Printf(TEXT("slot_near=%d slot_far=%d x_slots=%d incoming=%d"),
+				Connections[0].BranchSlotIndex,
+				Connections[1].BranchSlotIndex,
+				Run.DesignDiagnostics.InterIslandBusBranchXSlotCount,
+				Run.DesignDiagnostics.IncomingBusBranchCount));
+	}
+
+	static void RunInterIslandBusSlotBiasSelfTests(FSelfTestResult& Result)
+	{
+		{
+			TArray<FDeterministicIslandConnection> Connections;
+			Connections.SetNum(2);
+			for (int32 ConnectionIndex = 0; ConnectionIndex < Connections.Num(); ++ConnectionIndex)
+			{
+				Connections[ConnectionIndex].BusId = 0;
+				Connections[ConnectionIndex].SourcePoint = FVector2D(0.0, 20.0);
+				Connections[ConnectionIndex].ActualTargetPoint = FVector2D(400.0, 150.0 + ConnectionIndex * 20.0);
+				Connections[ConnectionIndex].EntryPoint = Connections[ConnectionIndex].ActualTargetPoint;
+			}
+
+			TArray<FDeterministicInterIslandBus> Buses;
+			Buses.SetNum(1);
+			Buses[0].Id = 0;
+			Buses[0].SourcePoint = FVector2D(0.0, 20.0);
+			Buses[0].PreferredY = 100.0;
+			Buses[0].ConnectionIndices = {0, 1};
+
+			ComputeInterIslandBusSlotBiases(Connections, Buses);
+			const bool bSourceInterfaceCountedOnce =
+				Buses[0].UpperAttachmentCount == 1
+				&& Buses[0].LowerAttachmentCount == 2
+				&& Buses[0].SlotBias == -1;
+			AddSelfTestCase(Result,
+				TEXT("inter_island_bus_slot_bias_deduplicates_source_interface"),
+				bSourceInterfaceCountedOnce,
+				FString::Printf(TEXT("upper=%d lower=%d bias=%d"),
+					Buses[0].UpperAttachmentCount,
+					Buses[0].LowerAttachmentCount,
+					Buses[0].SlotBias));
+		}
+
+		{
+			TArray<FDeterministicInterIslandBus> Buses;
+			Buses.SetNum(2);
+			for (int32 BusIndex = 0; BusIndex < Buses.Num(); ++BusIndex)
+			{
+				Buses[BusIndex].Id = BusIndex;
+				Buses[BusIndex].BundleId = 0;
+				Buses[BusIndex].XMin = 0.0;
+				Buses[BusIndex].XMax = 400.0;
+				Buses[BusIndex].PreferredY = 100.0;
+				Buses[BusIndex].SlotBias = BusIndex == 0 ? 2 : -2;
+			}
+
+			FDeterministicInterIslandBusBundle Bundle;
+			Bundle.Id = 0;
+			Bundle.BusIds = {0, 1};
+			FRunResult Run;
+			AssignInterIslandBusSlotsByBias(Buses, Bundle, Run, true);
+
+			const bool bUpperBiasGetsUpperSlot =
+				Bundle.MaxSlotIndex == 1
+				&& Buses[0].SignedSlotIndex < Buses[1].SignedSlotIndex
+				&& Buses[0].SlotIndex < Buses[1].SlotIndex
+				&& Run.DesignDiagnostics.InterIslandBusSlotAssignmentCount == 2;
+			AddSelfTestCase(Result,
+				TEXT("inter_island_bus_slot_bias_prefers_upper_and_lower_slots"),
+				bUpperBiasGetsUpperSlot,
+				FString::Printf(TEXT("signed=(%d,%d) slot=(%d,%d) max=%d assignments=%d"),
+					Buses[0].SignedSlotIndex,
+					Buses[1].SignedSlotIndex,
+					Buses[0].SlotIndex,
+					Buses[1].SlotIndex,
+					Bundle.MaxSlotIndex,
+					Run.DesignDiagnostics.InterIslandBusSlotAssignmentCount));
 		}
 	}
 
-	static void RunSameIslandForwardXColumnSelfTests(FSelfTestResult& Result, const FOptions& Options)
+	static void RunA49IslandOffsetMergeSelfTests(FSelfTestResult& Result)
 	{
-		auto MakeNode = [](const int32 Index, const TCHAR* Prefix, const double X, const double Y) -> FNode
-		{
-			FNode Node;
-			Node.Index = Index;
-			Node.Guid = FString::Printf(TEXT("%s_%d"), Prefix, Index);
-			Node.Title = Node.Guid;
-			Node.Width = 100.0;
-			Node.Height = 70.0;
-			Node.InputPinNames = { TEXT("in") };
-			Node.OutputPinNames = { TEXT("out") };
-			Node.InputPinAnchors = { FVector2D(0.0, 35.0) };
-			Node.OutputPinAnchors = { FVector2D(100.0, 35.0) };
-			Node.InputPinAnchorValid = { 1 };
-			Node.OutputPinAnchorValid = { 1 };
-			Node.bMeasuredGeometry = true;
-			Node.NewX = X;
-			Node.NewY = Y;
-			return Node;
-		};
-
-		{
-			TArray<FNode> Nodes = {
-				MakeNode(0, TEXT("same_island_forward_column"), 0.0, 0.0),
-				MakeNode(1, TEXT("same_island_forward_column"), 120.0, 0.0),
-				MakeNode(2, TEXT("same_island_forward_column"), 120.0, 100.0)
-			};
-			Nodes[0].Rank = 0;
-			Nodes[1].Rank = 1;
-			Nodes[2].Rank = 1;
-			TArray<FEdge> Edges = {
-				{0, 2, TEXT("out"), TEXT("in"), 0, 0, false}
-			};
-			FIsland Island;
-			Island.Id = 0;
-			Island.Nodes = {0, 1, 2};
-			for (const int32 NodeIndex : Island.Nodes)
-			{
-				Island.NodeSet.Add(NodeIndex);
-			}
-			Island.Columns.SetNum(2);
-			Island.Columns[0] = {0};
-			Island.Columns[1] = {1, 2};
-			Island.ColumnWidths = {100.0, 100.0};
-			Island.ColumnGaps = {20.0};
-			Island.LocalBounds = BoundsForNodes(Nodes, Island.Nodes);
-			TArray<FIsland> Islands = {Island};
-			TSet<int32> ForwardExemptEdges;
-			const int32 ShiftCount = EnforceNonFeedbackSemanticEdgeForwardX(Nodes, Edges, Islands, ForwardExemptEdges, Options, true, false);
-			const double ExpectedColumnX = SnapGraphCoordinate(ComputeInputXAlignedToOutput(100.0, Options));
-			const double ExpectedColumnGap = SnapGraphCoordinate(20.0 + (ExpectedColumnX - 120.0));
-			const bool bColumnShiftPreservesColumnLeft =
-				ShiftCount == 1
-				&& FMath::IsNearlyEqual(Nodes[1].NewX, ExpectedColumnX, 0.5)
-				&& FMath::IsNearlyEqual(Nodes[2].NewX, ExpectedColumnX, 0.5)
-				&& FMath::IsNearlyEqual(Islands[0].ColumnGaps[0], ExpectedColumnGap, 0.5);
-			AddSelfTestCase(Result,
-				TEXT("same_island_forward_x_shifts_target_column_not_single_node"),
-				bColumnShiftPreservesColumnLeft,
-				FString::Printf(TEXT("shift=%d x=%.1f/%.1f expected_x=%.1f gap=%.1f expected_gap=%.1f"),
-					ShiftCount,
-					Nodes[1].NewX,
-					Nodes[2].NewX,
-					ExpectedColumnX,
-					Islands[0].ColumnGaps[0],
-					ExpectedColumnGap));
-		}
-
-		{
-			TArray<FNode> Nodes = {
-				MakeNode(0, TEXT("same_island_same_column_forward"), 0.0, 0.0),
-				MakeNode(1, TEXT("same_island_same_column_forward"), 0.0, 100.0)
-			};
-			Nodes[0].Rank = 0;
-			Nodes[1].Rank = 0;
-			TArray<FEdge> Edges = {
-				{0, 1, TEXT("out"), TEXT("in"), 0, 0, false}
-			};
-			FIsland Island;
-			Island.Id = 0;
-			Island.Nodes = {0, 1};
-			for (const int32 NodeIndex : Island.Nodes)
-			{
-				Island.NodeSet.Add(NodeIndex);
-			}
-			Island.Columns.SetNum(1);
-			Island.Columns[0] = {0, 1};
-			Island.ColumnWidths = {100.0};
-			Island.LocalBounds = BoundsForNodes(Nodes, Island.Nodes);
-			TArray<FIsland> Islands = {Island};
-			TSet<int32> ForwardExemptEdges;
-			const int32 ShiftCount = EnforceNonFeedbackSemanticEdgeForwardX(Nodes, Edges, Islands, ForwardExemptEdges, Options, true, false);
-			const bool bSameColumnEdgeDoesNotShiftSingleNode =
-				ShiftCount == 0
-				&& FMath::IsNearlyEqual(Nodes[0].NewX, 0.0, 0.5)
-				&& FMath::IsNearlyEqual(Nodes[1].NewX, 0.0, 0.5);
-			AddSelfTestCase(Result,
-				TEXT("same_island_forward_x_same_column_edge_uses_local_routing_not_node_shift"),
-				bSameColumnEdgeDoesNotShiftSingleNode,
-				FString::Printf(TEXT("shift=%d x=%.1f/%.1f"),
-					ShiftCount,
-					Nodes[0].NewX,
-					Nodes[1].NewX));
-		}
+		const double DownOnce = MergeA49IslandDirectionalOffset(0.0, 120.0, 1);
+		const double DownMerged = MergeA49IslandDirectionalOffset(DownOnce, 300.0, 1);
+		const double DownSmallerIgnored = MergeA49IslandDirectionalOffset(DownMerged, 180.0, 1);
+		const double UpOnce = MergeA49IslandDirectionalOffset(0.0, -80.0, -1);
+		const double UpMerged = MergeA49IslandDirectionalOffset(UpOnce, -200.0, -1);
+		const double UpSmallerIgnored = MergeA49IslandDirectionalOffset(UpMerged, -120.0, -1);
+		const bool bDirectionalOffsetTakesExtremum =
+			FMath::IsNearlyEqual(DownOnce, 120.0, 0.001)
+			&& FMath::IsNearlyEqual(DownMerged, 300.0, 0.001)
+			&& FMath::IsNearlyEqual(DownSmallerIgnored, 300.0, 0.001)
+			&& FMath::IsNearlyEqual(UpOnce, -80.0, 0.001)
+			&& FMath::IsNearlyEqual(UpMerged, -200.0, 0.001)
+			&& FMath::IsNearlyEqual(UpSmallerIgnored, -200.0, 0.001);
+		AddSelfTestCase(Result,
+			TEXT("a49_island_directional_offset_merges_instead_of_accumulates"),
+			bDirectionalOffsetTakesExtremum,
+			FString::Printf(TEXT("down=%.1f/%.1f/%.1f up=%.1f/%.1f/%.1f"),
+				DownOnce,
+				DownMerged,
+				DownSmallerIgnored,
+				UpOnce,
+				UpMerged,
+				UpSmallerIgnored));
 	}
 
 	FSelfTestResult RunSelfTest()
@@ -1739,7 +1240,6 @@ namespace UeAgentBlueprintAutoLayout
 		Options.HorizontalSpacing = 260.0;
 		Options.VerticalSpacing = 120.0;
 		Options.NodePadding = 32.0;
-		Options.PinDirectionBiasX = 24.0;
 		Options.OutputAccessOffsetX = 24.0;
 		Options.InputAccessOffsetX = 24.0;
 		Options.AccessOffsetSource = TEXT("self_test");
@@ -1843,122 +1343,7 @@ namespace UeAgentBlueprintAutoLayout
 			return RunLayout(Nodes, Edges, LocalOptions, Run);
 		};
 
-		{
-			TArray<FIsland> Islands;
-			Islands.SetNum(2);
-			Islands[0].Id = 0;
-			Islands[0].X = 600.0;
-			Islands[1].Id = 1;
-			Islands[1].X = 0.0;
-			TArray<FIslandEdge> IslandEdges;
-			FIslandEdge Edge;
-			Edge.EdgeIndex = 0;
-			Edge.SourceIsland = 0;
-			Edge.TargetIsland = 1;
-			Edge.SourceLocal = FVector2D(160.0, 40.0);
-			Edge.TargetLocal = FVector2D(0.0, 40.0);
-			IslandEdges.Add(Edge);
-
-			TSet<int32> NoExemptEdges;
-			const int32 ShiftCount = EnforceNonFeedbackIslandEdgeActualPinForwardX(Islands, IslandEdges, NoExemptEdges, Options);
-			const FVector2D SourcePoint(Islands[0].X + Edge.SourceLocal.X, Edge.SourceLocal.Y);
-			const FVector2D TargetPoint(Islands[1].X + Edge.TargetLocal.X, Edge.TargetLocal.Y);
-			AddCase(
-				TEXT("non_feedback_island_edge_actual_pin_forward_invariant"),
-				ShiftCount > 0 && HasNonNegativeConnectionAlignmentShorten(SourcePoint, TargetPoint, Options),
-				FString::Printf(TEXT("shift_count=%d source_x=%.1f target_x=%.1f shorten=%.1f"),
-					ShiftCount,
-					SourcePoint.X,
-					TargetPoint.X,
-					ComputeConnectionAlignmentShortenX(SourcePoint, TargetPoint, Options)));
-		}
-
-		{
-			TArray<FNode> Nodes;
-			Nodes.SetNum(2);
-			for (int32 Index = 0; Index < Nodes.Num(); ++Index)
-			{
-				Nodes[Index].Index = Index;
-				Nodes[Index].Width = 160.0;
-				Nodes[Index].Height = 80.0;
-				Nodes[Index].bMeasuredGeometry = true;
-				Nodes[Index].OutputPinNames = { TEXT("out") };
-				Nodes[Index].InputPinNames = { TEXT("in") };
-				Nodes[Index].OutputPinAnchors = { FVector2D(160.0, 40.0) };
-				Nodes[Index].InputPinAnchors = { FVector2D(0.0, 40.0) };
-				Nodes[Index].OutputPinAnchorValid = { 1 };
-				Nodes[Index].InputPinAnchorValid = { 1 };
-			}
-			Nodes[0].NewX = 600.0;
-			Nodes[1].NewX = 0.0;
-			TArray<FEdge> Edges = {
-				{0, 1, TEXT("out"), TEXT("in"), 0, 0, false}
-			};
-			TArray<FIsland> Islands;
-			Islands.SetNum(1);
-			Islands[0].Id = 0;
-			Islands[0].Nodes = {0, 1};
-			Islands[0].NodeSet.Add(0);
-			Islands[0].NodeSet.Add(1);
-			TMap<int32, int32> IslandByNode;
-			IslandByNode.Add(0, 0);
-			IslandByNode.Add(1, 0);
-			TSet<int32> NoExemptEdges;
-			const int32 ShiftCount = EnforceSameIslandNonFeedbackNodeForwardX(Nodes, Edges, Islands, IslandByNode, NoExemptEdges, Options);
-			const FVector2D SourcePoint = GetSourcePort(Nodes[0], Edges[0], true);
-			const FVector2D TargetPoint = GetTargetPort(Nodes[1], Edges[0], true);
-			AddCase(
-				TEXT("same_island_non_feedback_edge_actual_pin_forward_invariant"),
-				ShiftCount > 0 && HasNonNegativeConnectionAlignmentShorten(SourcePoint, TargetPoint, Options),
-				FString::Printf(TEXT("shift_count=%d source_x=%.1f target_x=%.1f shorten=%.1f"),
-					ShiftCount,
-					SourcePoint.X,
-					TargetPoint.X,
-					ComputeConnectionAlignmentShortenX(SourcePoint, TargetPoint, Options)));
-		}
-
-		{
-			TArray<FNode> Nodes;
-			Nodes.SetNum(2);
-			for (int32 Index = 0; Index < Nodes.Num(); ++Index)
-			{
-				Nodes[Index].Index = Index;
-				Nodes[Index].Width = 160.0;
-				Nodes[Index].Height = 80.0;
-				Nodes[Index].bMeasuredGeometry = true;
-				Nodes[Index].OutputPinNames = { TEXT("out") };
-				Nodes[Index].InputPinNames = { TEXT("in") };
-				Nodes[Index].OutputPinAnchors = { FVector2D(160.0, 40.0) };
-				Nodes[Index].InputPinAnchors = { FVector2D(0.0, 40.0) };
-				Nodes[Index].OutputPinAnchorValid = { 1 };
-				Nodes[Index].InputPinAnchorValid = { 1 };
-			}
-			TArray<FEdge> Edges = {
-				{0, 1, TEXT("out"), TEXT("in"), 0, 0, false}
-			};
-			TArray<FIsland> Islands;
-			Islands.SetNum(2);
-			Islands[0].Id = 0;
-			Islands[0].X = 600.0;
-			Islands[0].Nodes = {0};
-			Islands[1].Id = 1;
-			Islands[1].X = 0.0;
-			Islands[1].Nodes = {1};
-			TSet<int32> NoExemptEdges;
-			const int32 ShiftCount = EnforceNonFeedbackCrossIslandSemanticEdgeForwardX(Nodes, Edges, Islands, NoExemptEdges, Options);
-			const FVector2D SourcePoint(Islands[0].X + GetSourcePort(Nodes[0], Edges[0], true).X, GetSourcePort(Nodes[0], Edges[0], true).Y);
-			const FVector2D TargetPoint(Islands[1].X + GetTargetPort(Nodes[1], Edges[0], true).X, GetTargetPort(Nodes[1], Edges[0], true).Y);
-			AddCase(
-				TEXT("cross_island_semantic_edge_forward_invariant_does_not_depend_on_island_edge_list"),
-				ShiftCount > 0 && HasNonNegativeConnectionAlignmentShorten(SourcePoint, TargetPoint, Options),
-				FString::Printf(TEXT("shift_count=%d source_x=%.1f target_x=%.1f shorten=%.1f"),
-					ShiftCount,
-					SourcePoint.X,
-					TargetPoint.X,
-					ComputeConnectionAlignmentShortenX(SourcePoint, TargetPoint, Options)));
-		}
-
-		{
+								{
 			TArray<FNode> Nodes;
 			Nodes.SetNum(4);
 			for (int32 Index = 0; Index < Nodes.Num(); ++Index)
@@ -2033,134 +1418,7 @@ namespace UeAgentBlueprintAutoLayout
 					Run.DesignDiagnostics.IslandInternalMultiColumnBusCount));
 		}
 
-		{
-			TArray<FNode> Nodes;
-			Nodes.SetNum(3);
-			for (int32 Index = 0; Index < Nodes.Num(); ++Index)
-			{
-				Nodes[Index].Index = Index;
-				Nodes[Index].Width = 160.0;
-				Nodes[Index].Height = 80.0;
-				Nodes[Index].bMeasuredGeometry = true;
-				Nodes[Index].OutputPinNames = { TEXT("out") };
-				Nodes[Index].InputPinNames = { TEXT("in") };
-				Nodes[Index].OutputPinAnchors = { FVector2D(160.0, 40.0) };
-				Nodes[Index].InputPinAnchors = { FVector2D(0.0, 40.0) };
-				Nodes[Index].OutputPinAnchorValid = { 1 };
-				Nodes[Index].InputPinAnchorValid = { 1 };
-			}
-			Nodes[0].NewX = 1800.0;
-			Nodes[1].NewX = 0.0;
-			Nodes[2].NewX = 0.0;
-			Nodes[2].NewY = 120.0;
-			TArray<FEdge> Edges = {
-				{0, 1, TEXT("out"), TEXT("in"), 0, 0, false},
-				{0, 2, TEXT("out"), TEXT("in"), 0, 0, false}
-			};
-			TArray<FIsland> Islands;
-			Islands.SetNum(1);
-			Islands[0].Id = 0;
-			Islands[0].Nodes = {0, 1, 2};
-			Islands[0].NodeSet.Add(0);
-			Islands[0].NodeSet.Add(1);
-			Islands[0].NodeSet.Add(2);
-			TSet<int32> NoExemptEdges;
-			const int32 ShiftCount = EnforceNonFeedbackSemanticEdgeForwardX(Nodes, Edges, Islands, NoExemptEdges, Options, true, false);
-			const bool bAllForward =
-				HasNonNegativeConnectionAlignmentShorten(GetSourcePort(Nodes[0], Edges[0], true), GetTargetPort(Nodes[1], Edges[0], true), Options)
-				&& HasNonNegativeConnectionAlignmentShorten(GetSourcePort(Nodes[0], Edges[1], true), GetTargetPort(Nodes[2], Edges[1], true), Options);
-			AddCase(
-				TEXT("semantic_forward_invariant_handles_same_island_fanout_edges"),
-				ShiftCount >= 2 && bAllForward,
-				FString::Printf(TEXT("shift_count=%d target_x=%.1f/%.1f source_x=%.1f"),
-					ShiftCount,
-					GetTargetPort(Nodes[1], Edges[0], true).X,
-					GetTargetPort(Nodes[2], Edges[1], true).X,
-					GetSourcePort(Nodes[0], Edges[0], true).X));
-		}
-
-		{
-			TArray<FNode> Nodes;
-			Nodes.SetNum(3);
-			for (int32 Index = 0; Index < Nodes.Num(); ++Index)
-			{
-				Nodes[Index].Index = Index;
-				Nodes[Index].Width = 160.0;
-				Nodes[Index].Height = 80.0;
-				Nodes[Index].bMeasuredGeometry = true;
-				Nodes[Index].OutputPinNames = { TEXT("out") };
-				Nodes[Index].InputPinNames = { TEXT("in") };
-				Nodes[Index].OutputPinAnchors = { FVector2D(160.0, 40.0) };
-				Nodes[Index].InputPinAnchors = { FVector2D(0.0, 40.0) };
-				Nodes[Index].OutputPinAnchorValid = { 1 };
-				Nodes[Index].InputPinAnchorValid = { 1 };
-			}
-			TArray<FEdge> Edges = {
-				{0, 1, TEXT("out"), TEXT("in"), 0, 0, false},
-				{0, 2, TEXT("out"), TEXT("in"), 0, 0, false}
-			};
-			TArray<FIsland> Islands;
-			Islands.SetNum(3);
-			for (int32 Index = 0; Index < Islands.Num(); ++Index)
-			{
-				Islands[Index].Id = Index;
-				Islands[Index].Nodes = {Index};
-				Islands[Index].NodeSet.Add(Index);
-			}
-			Islands[0].X = 1800.0;
-			Islands[1].X = 0.0;
-			Islands[2].X = 200.0;
-			TSet<int32> NoExemptEdges;
-			const int32 ShiftCount = EnforceNonFeedbackSemanticEdgeForwardX(Nodes, Edges, Islands, NoExemptEdges, Options, false, true);
-			const FVector2D Source0 = FVector2D(Islands[0].X, Islands[0].Y) + GetSourcePort(Nodes[0], Edges[0], true);
-			const FVector2D Target1 = FVector2D(Islands[1].X, Islands[1].Y) + GetTargetPort(Nodes[1], Edges[0], true);
-			const FVector2D Target2 = FVector2D(Islands[2].X, Islands[2].Y) + GetTargetPort(Nodes[2], Edges[1], true);
-			const bool bAllForward =
-				HasNonNegativeConnectionAlignmentShorten(Source0, Target1, Options)
-				&& HasNonNegativeConnectionAlignmentShorten(Source0, Target2, Options);
-			AddCase(
-				TEXT("semantic_forward_invariant_handles_cross_island_fanout_edges"),
-				ShiftCount >= 2 && bAllForward,
-				FString::Printf(TEXT("shift_count=%d target_x=%.1f/%.1f source_x=%.1f"),
-					ShiftCount,
-					Target1.X,
-					Target2.X,
-					Source0.X));
-		}
-
-		{
-			TArray<FIsland> Islands;
-			Islands.SetNum(2);
-			Islands[0].Id = 0;
-			Islands[0].X = 600.0;
-			Islands[1].Id = 1;
-			Islands[1].X = 0.0;
-			TArray<FIslandEdge> IslandEdges;
-			FIslandEdge Edge;
-			Edge.EdgeIndex = 0;
-			Edge.SourceIsland = 0;
-			Edge.TargetIsland = 1;
-			Edge.SourceLocal = FVector2D(160.0, 40.0);
-			Edge.TargetLocal = FVector2D(0.0, 40.0);
-			Edge.bFeedback = true;
-			IslandEdges.Add(Edge);
-
-			TSet<int32> ExemptEdges;
-			ExemptEdges.Add(0);
-			const int32 ShiftCount = EnforceNonFeedbackIslandEdgeActualPinForwardX(Islands, IslandEdges, ExemptEdges, Options);
-			const FVector2D SourcePoint(Islands[0].X + Edge.SourceLocal.X, Edge.SourceLocal.Y);
-			const FVector2D TargetPoint(Islands[1].X + Edge.TargetLocal.X, Edge.TargetLocal.Y);
-			AddCase(
-				TEXT("feedback_island_edge_is_forward_invariant_exempt"),
-				ShiftCount == 0 && !HasNonNegativeConnectionAlignmentShorten(SourcePoint, TargetPoint, Options),
-				FString::Printf(TEXT("shift_count=%d source_x=%.1f target_x=%.1f shorten=%.1f"),
-					ShiftCount,
-					SourcePoint.X,
-					TargetPoint.X,
-					ComputeConnectionAlignmentShortenX(SourcePoint, TargetPoint, Options)));
-		}
-
-		{
+								{
 			TArray<FNode> Nodes;
 			Nodes.SetNum(4);
 			for (int32 Index = 0; Index < Nodes.Num(); ++Index)
@@ -2345,13 +1603,129 @@ namespace UeAgentBlueprintAutoLayout
 		}
 
 		{
+			FOptions DirectEndpointKnotOptions = Options;
+			DirectEndpointKnotOptions.OutputAccessOffsetX = 40.0;
+			DirectEndpointKnotOptions.InputAccessOffsetX = 40.0;
+			const FVector2D SourcePoint(0.0, 0.0);
+			const FVector2D TargetPoint(200.0, 100.0);
+			const FRect BroadFalsePositiveRect{ 45.0, 80.0, 65.0, 95.0 };
+			const FRect RepairableRect{ 55.0, 25.0, 65.0, 35.0 };
+			TArray<FRect> RepairableRects;
+			RepairableRects.Add(RepairableRect);
+			FRect BroadAabb;
+			const bool bBroadAabbBuilt = TryBuildEscapedEndpointAabb(SourcePoint, nullptr, TargetPoint, nullptr, DirectEndpointKnotOptions, BroadAabb);
+			TArray<TArray<FVector2D>> EndpointTriangles;
+			const bool bEndpointTrianglesBuilt = TryBuildEndpointOffsetCollisionTriangles(
+				SourcePoint,
+				nullptr,
+				TargetPoint,
+				nullptr,
+				DirectEndpointKnotOptions,
+				EndpointTriangles);
+			TArray<FVector2D> ControlPoints;
+			TArray<FVector2D> InteriorPoints;
+			const bool bEndpointKnotsBuilt = TryBuildDirectEndpointKnotControlPoints(
+				SourcePoint,
+				TargetPoint,
+				DirectEndpointKnotOptions,
+				ControlPoints,
+				&InteriorPoints);
+			const bool bBroadAabbFalsePositive =
+				bBroadAabbBuilt
+				&& BroadAabb.Intersects(BroadFalsePositiveRect, 0.0)
+				&& bEndpointTrianglesBuilt
+				&& !EndpointOffsetTrianglesIntersectsRect(EndpointTriangles, BroadFalsePositiveRect);
+			const bool bEndpointTrianglesHitRepairableRect =
+				bEndpointTrianglesBuilt
+				&& EndpointOffsetTrianglesIntersectsRect(EndpointTriangles, RepairableRect);
+			const bool bEndpointKnotsClear = bEndpointKnotsBuilt && !ControlWireHitsHardOccupancy(ControlPoints, RepairableRects);
+			AddCase(
+				TEXT("final_direct_endpoint_knots_use_endpoint_offset_triangles"),
+				bBroadAabbFalsePositive
+					&& bEndpointTrianglesHitRepairableRect
+					&& bEndpointKnotsClear
+					&& InteriorPoints.Num() == 2
+					&& FMath::IsNearlyEqual(InteriorPoints[0].X, 40.0, 0.001)
+					&& FMath::IsNearlyEqual(InteriorPoints[1].X, 160.0, 0.001),
+				FString::Printf(
+					TEXT("broad_false_positive=%s triangle_repair_hit=%s endpoint_clear=%s interior=%d source_knot=(%.1f,%.1f) target_knot=(%.1f,%.1f)"),
+					bBroadAabbFalsePositive ? TEXT("true") : TEXT("false"),
+					bEndpointTrianglesHitRepairableRect ? TEXT("true") : TEXT("false"),
+					bEndpointKnotsClear ? TEXT("true") : TEXT("false"),
+					InteriorPoints.Num(),
+					InteriorPoints.Num() > 0 ? InteriorPoints[0].X : -1.0,
+					InteriorPoints.Num() > 0 ? InteriorPoints[0].Y : -1.0,
+					InteriorPoints.Num() > 1 ? InteriorPoints[1].X : -1.0,
+					InteriorPoints.Num() > 1 ? InteriorPoints[1].Y : -1.0));
+		}
+
+		{
+			FOptions BusPathOptions = Options;
+			BusPathOptions.OutputAccessOffsetX = 32.0;
+			BusPathOptions.InputAccessOffsetX = 18.0;
+			FDeterministicIslandConnection BusConnection;
+			BusConnection.BranchSlotIndex = 2;
+			const double DirectClearance = EndpointAccessClearanceX(BusPathOptions);
+			const double BusPathClearance = BusPathAccessClearanceX(BusPathOptions);
+			const double RequiredSpan = RequiredBusEntrySourceSpanX(
+				BusConnection,
+				TArray<FDeterministicInterIslandBus>(),
+				TArray<FIsland>(),
+				BusPathOptions);
+			const double ExpectedRequiredSpan = BusPathClearance + 2.0 * GetCrossBusBranchLaneSpacing(BusPathOptions);
+			const bool bBusPathUsesTwoEndpointPairs =
+				FMath::IsNearlyEqual(DirectClearance, 50.0, 0.001)
+				&& FMath::IsNearlyEqual(BusPathClearance, 100.0, 0.001)
+				&& FMath::IsNearlyEqual(RequiredSpan, ExpectedRequiredSpan, 0.001);
+			AddCase(
+				TEXT("inter_island_bus_path_uses_two_endpoint_access_clearances"),
+				bBusPathUsesTwoEndpointPairs,
+				FString::Printf(TEXT("direct=%.1f bus_path=%.1f required=%.1f expected=%.1f"), DirectClearance, BusPathClearance, RequiredSpan, ExpectedRequiredSpan));
+		}
+
+		{
+			FOptions EntryOptions = Options;
+			EntryOptions.OutputAccessOffsetX = 40.0;
+			EntryOptions.InputAccessOffsetX = 40.0;
+			FIslandPortCandidate Candidate;
+			Candidate.Side = TEXT("left");
+			Candidate.SourceLocal = FVector2D::ZeroVector;
+			Candidate.TargetLocal = FVector2D(-57.2, 120.0);
+			Candidate.ActualTargetLocal = FVector2D(286.0, 0.0);
+			Candidate.AllowedMinX = -57.2;
+			Candidate.AllowedMaxX = 206.0;
+			FIsland SourceIsland;
+			SourceIsland.X = -300.0;
+			FIsland TargetIsland;
+			TargetIsland.X = 0.0;
+			const FVector2D DirectEntry = ResolveEntryLocalAfterPlacement(
+				Candidate,
+				SourceIsland,
+				TargetIsland,
+				EntryOptions,
+				0.0);
+			const FVector2D BusEntry = ResolveEntryLocalAfterPlacement(
+				Candidate,
+				SourceIsland,
+				TargetIsland,
+				EntryOptions,
+				BusPathAccessClearanceX(EntryOptions));
+			const bool bBusEntryUsesRightmostFeasibleX =
+				FMath::IsNearlyEqual(DirectEntry.X, Candidate.TargetLocal.X, 0.001)
+				&& FMath::IsNearlyEqual(BusEntry.X, Candidate.AllowedMaxX, 0.001);
+			AddCase(
+				TEXT("bus_entry_resolution_uses_rightmost_feasible_candidate"),
+				bBusEntryUsesRightmostFeasibleX,
+				FString::Printf(TEXT("direct_entry=%.1f bus_entry=%.1f allowed_max=%.1f"), DirectEntry.X, BusEntry.X, Candidate.AllowedMaxX));
+		}
+
+		{
 			FOptions RouteOptions = Options;
 			RouteOptions.OutputAccessOffsetX = 40.0;
 			RouteOptions.InputAccessOffsetX = 40.0;
-			RouteOptions.PinDirectionBiasX = 40.0;
 			const FVector2D Start(100.0, 100.0);
 			const FVector2D End(360.0, 260.0);
-			const TArray<FVector2D> Points = BuildOrthogonalRoutePolyline(Start, End, 180.0, RouteOptions, TArray<FRect>());
+			const TArray<FVector2D> Points = BuildIslandInternalSharedBusRoute(Start, End, 180.0, RouteOptions);
 			double SourceShorten = -9999.0;
 			double TargetShorten = -9999.0;
 			const double MinSegmentShorten = MinConnectionAlignmentShortenX(Points, RouteOptions);
@@ -2380,117 +1754,51 @@ namespace UeAgentBlueprintAutoLayout
 		}
 
 		{
-			FOptions RouteOptions = Options;
-			RouteOptions.OutputAccessOffsetX = 40.0;
-			RouteOptions.InputAccessOffsetX = 40.0;
-			RouteOptions.PinDirectionBiasX = 40.0;
-			RouteOptions.NodePadding = 32.0;
-			const FVector2D Start(483.0, 4325.0);
-			const FVector2D End(2109.0, 5116.0);
-			const TArray<FRect> HardRects = {
-				{ 1746.0, 4641.0, 1908.0, 4695.0 },
-				{ 1950.0, 4573.0, 2185.0, 4694.0 }
-			};
-			const TArray<FVector2D> Points = BuildOrthogonalRoutePolyline(Start, End, 4667.0, RouteOptions, HardRects);
-			FString RouteText;
-			for (const FVector2D& Point : Points)
-			{
-				RouteText += FString::Printf(TEXT("(%.1f,%.1f)"), Point.X, Point.Y);
-			}
-			const bool bAvoidsSiblingHardOccupancy =
-				Points.Num() >= 3
-				&& !PolylineHitsHardOccupancy(Points, HardRects)
-				&& HasNonNegativeConnectionAlignmentShortenForEverySegment(Points, RouteOptions);
-			AddCase(TEXT("inter_island_bus_router_keeps_trunk_out_of_sibling_hard_occupancy"),
-				bAvoidsSiblingHardOccupancy,
-				FString::Printf(TEXT("points=%d hard_hits=%d min_shorten=%.1f route=%s"),
-					Points.Num(),
-					CountPolylineHardOccupancyHits(Points, HardRects),
-					MinConnectionAlignmentShortenX(Points, RouteOptions),
-					*RouteText));
-		}
-
-		{
-			FOptions RouteOptions = Options;
-			RouteOptions.OutputAccessOffsetX = 40.0;
-			RouteOptions.InputAccessOffsetX = 40.0;
-			RouteOptions.PinDirectionBiasX = 40.0;
-			RouteOptions.NodePadding = 32.0;
-			const FVector2D Start(230.0, 4511.0);
-			const FVector2D End(5704.0, 5491.0);
-			const TArray<FRect> HardRects = {
-				{ 1200.0, 4400.0, 5000.0, 4700.0 }
-			};
-			const TArray<FVector2D> Points = BuildOrthogonalRoutePolyline(Start, End, 4511.0, RouteOptions, HardRects);
-			int32 LargeDiagonalSegmentCount = 0;
-			const double MaxDiagonalDX = EndpointAccessClearanceX(RouteOptions) * 2.0 + 0.5;
-			const double MinNoticeableDY = FMath::Max(RouteOptions.VerticalSpacing * 0.5, 80.0);
-			for (int32 PointIndex = 0; PointIndex + 1 < Points.Num(); ++PointIndex)
-			{
-				const double DX = FMath::Abs(Points[PointIndex + 1].X - Points[PointIndex].X);
-				const double DY = FMath::Abs(Points[PointIndex + 1].Y - Points[PointIndex].Y);
-				if (DX > MaxDiagonalDX && DY > MinNoticeableDY)
-				{
-					++LargeDiagonalSegmentCount;
-				}
-			}
-			FString RouteText;
-			for (const FVector2D& Point : Points)
-			{
-				RouteText += FString::Printf(TEXT("(%.1f,%.1f)"), Point.X, Point.Y);
-			}
-			AddCase(TEXT("orthogonal_bus_router_does_not_create_large_diagonal_branch_segments"),
-				Points.Num() >= 4
-				&& LargeDiagonalSegmentCount == 0
-				&& !PolylineHitsHardOccupancy(Points, HardRects)
-				&& HasNonNegativeConnectionAlignmentShortenForEverySegment(Points, RouteOptions),
-				FString::Printf(TEXT("points=%d large_diagonal=%d hard_hits=%d min_shorten=%.1f route=%s"),
-					Points.Num(),
-					LargeDiagonalSegmentCount,
-					CountPolylineHardOccupancyHits(Points, HardRects),
-					MinConnectionAlignmentShortenX(Points, RouteOptions),
-					*RouteText));
-		}
-
-		{
-			FOptions RouteOptions = Options;
-			RouteOptions.OutputAccessOffsetX = 40.0;
-			RouteOptions.InputAccessOffsetX = 40.0;
-			RouteOptions.PinDirectionBiasX = 40.0;
-			RouteOptions.NodePadding = 32.0;
-			const FVector2D Start(230.0, 4511.0);
-			const FVector2D End(4016.0, 4932.0);
-			const double OriginalBranchX = 607.0;
-			const TArray<FRect> HardRects = {
-				{ 900.0, 4500.0, 3500.0, 4800.0 }
-			};
-			const TArray<FVector2D> Points = BuildOrthogonalRoutePolyline(
-				Start,
-				End,
-				4511.0,
-				RouteOptions,
-				HardRects,
-				OriginalBranchX,
-				SegmentRefineBranchPreferencePenaltyScale());
-			double SelectedBranchX = 0.0;
-			const bool bHasBranch = TryGetPreferredBranchXFromVisibleRoute(Points, SelectedBranchX);
-			FString RouteText;
-			for (const FVector2D& Point : Points)
-			{
-				RouteText += FString::Printf(TEXT("(%.1f,%.1f)"), Point.X, Point.Y);
-			}
-			AddCase(TEXT("segment_refine_orthogonal_route_preserves_existing_bus_branch_x"),
-				Points.Num() >= 4
-				&& bHasBranch
-				&& FMath::Abs(SelectedBranchX - OriginalBranchX) <= EndpointAccessClearanceX(RouteOptions) + 0.5
-				&& !PolylineHitsHardOccupancy(Points, HardRects)
-				&& HasNonNegativeConnectionAlignmentShortenForEverySegment(Points, RouteOptions),
-				FString::Printf(TEXT("branch=%.1f original=%.1f hard_hits=%d points=%d route=%s"),
-					SelectedBranchX,
-					OriginalBranchX,
-					CountPolylineHardOccupancyHits(Points, HardRects),
-					Points.Num(),
-					*RouteText));
+			TArray<FXStripCollisionBox> Boxes;
+			AddXStripCollisionBox(
+				Boxes,
+				EXStripCollisionOwnerKind::InterIslandBusBundle,
+				2,
+				INDEX_NONE,
+				{ 0.0, 100.0, 120.0, 140.0 },
+				118.0);
+			AddXStripCollisionBox(
+				Boxes,
+				EXStripCollisionOwnerKind::Island,
+				7,
+				INDEX_NONE,
+				{ 80.0, 130.0, 200.0, 190.0 });
+			AddXStripCollisionBox(
+				Boxes,
+				EXStripCollisionOwnerKind::InputChain,
+				3,
+				11,
+				{ 240.0, 100.0, 280.0, 130.0 });
+			double LeftmostHitX = TNumericLimits<double>::Max();
+			const bool bFoundLeftmost = FindLeftmostIntersectingXStripLeft(
+				{ 90.0, 120.0, 250.0, 150.0 },
+				Boxes,
+				LeftmostHitX);
+			const bool bXStripCollision =
+				Boxes.Num() == 3
+				&& Boxes[0].OwnerKind == EXStripCollisionOwnerKind::InterIslandBusBundle
+				&& Boxes[1].OwnerKind == EXStripCollisionOwnerKind::Island
+				&& Boxes[2].SecondaryOwnerId == 11
+				&& FMath::IsNearlyEqual(Boxes[0].CenterY(), 118.0, 0.5)
+				&& FMath::IsNearlyEqual(Boxes[1].CenterY(), 160.0, 0.5)
+				&& XStripIntersects(Boxes[0], Boxes[1], 0.0)
+				&& !XStripIntersects(Boxes[0], Boxes[2], 0.0)
+				&& XStripOverlapsXRange(Boxes[2], 250.0, 260.0)
+				&& bFoundLeftmost
+				&& FMath::IsNearlyEqual(LeftmostHitX, 0.0, 0.5);
+			AddCase(TEXT("x_strip_collision_box_unifies_bundle_island_input_chain_segments"),
+				bXStripCollision,
+				FString::Printf(TEXT("boxes=%d leftmost=%.1f kinds=%d/%d/%d"),
+					Boxes.Num(),
+					LeftmostHitX,
+					Boxes.Num() > 0 ? static_cast<int32>(Boxes[0].OwnerKind) : -1,
+					Boxes.Num() > 1 ? static_cast<int32>(Boxes[1].OwnerKind) : -1,
+					Boxes.Num() > 2 ? static_cast<int32>(Boxes[2].OwnerKind) : -1));
 		}
 
 		{
@@ -2541,6 +1849,21 @@ namespace UeAgentBlueprintAutoLayout
 		}
 
 		{
+			FInterfaceBundleAnchorAccumulator Anchor;
+			Anchor.Add(100.0, 10.0);
+			Anchor.Add(140.0, 30.0);
+			Anchor.Add(300.0, 70.0);
+			double PreferredOriginY = 0.0;
+			const bool bResolved = Anchor.ResolvePreferredOriginY(PreferredOriginY);
+			const double ExpectedMidpointOriginY = ((100.0 + 300.0) * 0.5) - ((10.0 + 70.0) * 0.5);
+			const double OldAverageOriginY = ((100.0 - 10.0) + (140.0 - 30.0) + (300.0 - 70.0)) / 3.0;
+			const bool bUsesMidpointNotAverage = bResolved
+				&& FMath::Abs(PreferredOriginY - ExpectedMidpointOriginY) <= 0.5
+				&& FMath::Abs(PreferredOriginY - OldAverageOriginY) > 0.5;
+			AddCase(TEXT("two_column_anchor_uses_interface_bundle_midpoint_not_average"), bUsesMidpointNotAverage, FString::Printf(TEXT("origin=%.1f midpoint=%.1f old_average=%.1f"), PreferredOriginY, ExpectedMidpointOriginY, OldAverageOriginY));
+		}
+
+		{
 			TArray<FColumnItem> Items;
 			const double Heights[] = {40.0, 40.0, 40.0};
 			const double PreferredTops[] = {0.0, 50.0, 100.0};
@@ -2566,6 +1889,96 @@ namespace UeAgentBlueprintAutoLayout
 				&& FMath::IsNearlyEqual(Items[2].FinalTop, 105.0, 0.5)
 				&& AvoidanceCount >= 2;
 			AddCase(TEXT("input_chain_two_column_anchor_moves_base_out_of_forbidden_zone"), bInputChainBaseAvoidsNearestZoneAndPropagates, FString::Printf(TEXT("tops=%.1f/%.1f/%.1f avoid=%d zone=%.1f..%.1f"), Items[0].FinalTop, Items[1].FinalTop, Items[2].FinalTop, AvoidanceCount, Zone.Top, Zone.Bottom));
+		}
+
+		{
+			TArray<FPortOrderDemand> WeightedCandidates;
+			FPortOrderDemand NearDemand;
+			NearDemand.bValid = true;
+			NearDemand.GroupNode = 42;
+			NearDemand.Value = 0.0;
+			NearDemand.Distance = 1;
+			NearDemand.Weight = ColumnDistanceInfluenceWeight(NearDemand.Distance);
+			WeightedCandidates.Add(NearDemand);
+			FPortOrderDemand FarDemand;
+			FarDemand.bValid = true;
+			FarDemand.GroupNode = 42;
+			FarDemand.Value = 1.0;
+			FarDemand.Distance = 3;
+			FarDemand.Weight = ColumnDistanceInfluenceWeight(FarDemand.Distance);
+			WeightedCandidates.Add(FarDemand);
+			const FPortOrderDemandSet WeightedDemandSet = MergePortOrderDemandCandidates(WeightedCandidates);
+			const FPortOrderDemand* MergedDemand = FindPortOrderDemandByGroup(WeightedDemandSet, 42);
+			const bool bDemandMergeUsesDistanceWeight =
+				MergedDemand
+				&& FMath::IsNearlyEqual(MergedDemand->Value, 0.2, 0.001)
+				&& FMath::IsNearlyEqual(MergedDemand->Weight, 1.25, 0.001);
+			AddCase(TEXT("column_port_order_demand_uses_distance_decay_weight"),
+				bDemandMergeUsesDistanceWeight,
+				FString::Printf(TEXT("value=%.3f weight=%.3f"),
+					MergedDemand ? MergedDemand->Value : -1.0,
+					MergedDemand ? MergedDemand->Weight : -1.0));
+		}
+
+		{
+			TArray<FNode> Nodes;
+			for (int32 Index = 0; Index < 4; ++Index)
+			{
+				FNode Node;
+				Node.Index = Index;
+				Node.Guid = FString::Printf(TEXT("external_source_tie%d"), Index);
+				Node.Title = Node.Guid;
+				Node.Width = 150.0;
+				Node.Height = 96.0;
+				Node.Rank = Index == 0 ? 0 : (Index == 3 ? 1 : 0);
+				Node.InputPinNames = { TEXT("in") };
+				Node.InputPinAnchors = { FVector2D(0.0, 48.0) };
+				Node.InputPinAnchorValid = { 1 };
+				Node.OutputPinNames = { TEXT("out") };
+				Node.OutputPinAnchors = { FVector2D(150.0, 48.0) };
+				Node.OutputPinAnchorValid = { 1 };
+				if (Index == 0)
+				{
+					Node.OutputPinNames = { TEXT("upper"), TEXT("lower") };
+					Node.OutputPinAnchors = { FVector2D(150.0, 28.0), FVector2D(150.0, 68.0) };
+					Node.OutputPinAnchorValid = { 1, 1 };
+				}
+				Nodes.Add(Node);
+			}
+			const TArray<FEdge> AllEdges = {
+				{0, 1, TEXT("lower"), TEXT("in"), 1, 0, true},
+				{0, 2, TEXT("upper"), TEXT("in"), 0, 0, true},
+				{1, 3, TEXT("out"), TEXT("in"), 0, 0, true},
+				{2, 3, TEXT("out"), TEXT("in"), 0, 0, true}
+			};
+			const TArray<FEdge> ExplicitEdges = {
+				{1, 3, TEXT("out"), TEXT("in"), 0, 0, true},
+				{2, 3, TEXT("out"), TEXT("in"), 0, 0, true}
+			};
+			const TArray<int32> IslandNodes = {1, 2, 3};
+			const TArray<FPortOrderDemandSet> SourceDemands = ComputeSourcePortOrderDemandSets(Nodes, ExplicitEdges, IslandNodes);
+			const TArray<FPortOrderDemandSet> TargetDemands = ComputeDownstreamPortOrderDemandSets(Nodes, ExplicitEdges, IslandNodes);
+			const TArray<FPortOrderDemandSet> ExternalSourceDemands = ComputeExternalSourcePortOrderDemandSets(Nodes, AllEdges, ExplicitEdges, IslandNodes);
+			TArray<TArray<int32>> Columns;
+			Columns.SetNum(2);
+			Columns[0] = {1, 2};
+			Columns[1] = {3};
+			MinimizeColumnCrossings(Nodes, ExplicitEdges, SourceDemands, TargetDemands, &ExternalSourceDemands, Columns);
+			const FPortOrderDemand* Demand1 = ExternalSourceDemands.IsValidIndex(1) ? FindPortOrderDemandByGroup(ExternalSourceDemands[1], 0) : nullptr;
+			const FPortOrderDemand* Demand2 = ExternalSourceDemands.IsValidIndex(2) ? FindPortOrderDemandByGroup(ExternalSourceDemands[2], 0) : nullptr;
+			const bool bExternalSourceTieBreak =
+				Demand1 && Demand2
+				&& Demand2->Value < Demand1->Value
+				&& Columns[0].Num() == 2
+				&& Columns[0][0] == 2
+				&& Columns[0][1] == 1;
+			AddCase(TEXT("external_source_order_tiebreaks_same_right_target_input"),
+				bExternalSourceTieBreak,
+				FString::Printf(TEXT("demand=%.3f/%.3f col0=%d,%d"),
+					Demand1 ? Demand1->Value : -1.0,
+					Demand2 ? Demand2->Value : -1.0,
+					Columns[0].Num() > 0 ? Columns[0][0] : -1,
+					Columns[0].Num() > 1 ? Columns[0][1] : -1));
 		}
 
 		{
@@ -2613,54 +2026,6 @@ namespace UeAgentBlueprintAutoLayout
 
 		{
 			TArray<FNode> Nodes;
-			for (int32 Index = 0; Index < 6; ++Index)
-			{
-				FNode Node;
-				Node.Index = Index;
-				Node.Guid = FString::Printf(TEXT("fanoutcycle%d"), Index);
-				Node.Title = Node.Guid;
-				Node.Width = 160.0;
-				Node.Height = 80.0;
-				Node.InputPinNames = { TEXT("in") };
-				Node.InputPinAnchors = { FVector2D(0.0, 40.0) };
-				Node.InputPinAnchorValid = { 1 };
-				Node.OutputPinNames = Index == 5 ? TArray<FString>{ TEXT("out_a"), TEXT("out_d") } : TArray<FString>{ TEXT("out") };
-				Node.OutputPinAnchors = Index == 5
-					? TArray<FVector2D>{ FVector2D(160.0, 32.0), FVector2D(160.0, 56.0) }
-					: TArray<FVector2D>{ FVector2D(160.0, 40.0) };
-				Node.OutputPinAnchorValid = Index == 5 ? TArray<uint8>{ 1, 1 } : TArray<uint8>{ 1 };
-				Nodes.Add(Node);
-			}
-			TArray<FEdge> Edges = {
-				{5, 0, TEXT("out_a"), TEXT("in"), 0, 0, false},
-				{5, 3, TEXT("out_d"), TEXT("in"), 1, 0, false},
-				{0, 1, TEXT("out"), TEXT("in"), 0, 0, false},
-				{0, 2, TEXT("out"), TEXT("in"), 0, 0, false},
-				{1, 3, TEXT("out"), TEXT("in"), 0, 0, false},
-				{1, 4, TEXT("out"), TEXT("in"), 0, 0, false}
-			};
-			FRunResult Run;
-			RunLayoutForSelfTest(Nodes, Edges, Options, Run);
-			const FVector2D AToBSource = GetSourcePort(Nodes[0], Edges[2], true);
-			const FVector2D AToBTarget = GetTargetPort(Nodes[1], Edges[2], true);
-			const FVector2D BToDSource = GetSourcePort(Nodes[1], Edges[4], true);
-			const FVector2D BToDTarget = GetTargetPort(Nodes[3], Edges[4], true);
-			const bool bArtificialFanoutCycleResolved =
-				Run.DesignDiagnostics.FanoutImplicitEdgeCount == 3
-				&& Run.MetricsAfter.BackwardEdgeCount == 0
-				&& HasNonNegativeConnectionAlignmentShorten(AToBSource, AToBTarget, Options)
-				&& HasNonNegativeConnectionAlignmentShorten(BToDSource, BToDTarget, Options);
-			AddCase(TEXT("fanout_cut_artificial_island_cycle_restores_primary_edge"),
-				bArtificialFanoutCycleResolved,
-				FString::Printf(TEXT("fanout=%d backward=%d ab_shorten=%.1f bd_shorten=%.1f"),
-					Run.DesignDiagnostics.FanoutImplicitEdgeCount,
-					Run.MetricsAfter.BackwardEdgeCount,
-					ComputeConnectionAlignmentShortenX(AToBSource, AToBTarget, Options),
-					ComputeConnectionAlignmentShortenX(BToDSource, BToDTarget, Options)));
-		}
-
-		{
-			TArray<FNode> Nodes;
 			for (int32 Index = 0; Index < 3; ++Index)
 			{
 				FNode Node;
@@ -2684,7 +2049,7 @@ namespace UeAgentBlueprintAutoLayout
 			FRunResult Run;
 			RunLayoutForSelfTest(Nodes, Edges, Options, Run);
 			bool bRouteEndpointUsesRealTarget = false;
-			for (const TSharedPtr<FJsonValue>& RouteValue : Run.CorridorRouteDiagnostics)
+			for (const TSharedPtr<FJsonValue>& RouteValue : Run.RouteDiagnostics)
 			{
 				const TSharedPtr<FJsonObject> RouteObj = RouteValue.IsValid() ? RouteValue->AsObject() : nullptr;
 				double EdgeIndex = -1.0;
@@ -2706,753 +2071,19 @@ namespace UeAgentBlueprintAutoLayout
 					}
 				}
 			}
-			AddCase(TEXT("corridor_route_endpoint_uses_real_target_pin"), bRouteEndpointUsesRealTarget, FString::Printf(TEXT("routes=%d selected=%d"), Run.CorridorRouteDiagnostics.Num(), Run.DesignDiagnostics.SelectedEndpointCandidateCount));
-		}
-
-		{
-			TArray<FNode> Nodes;
-			for (int32 Index = 0; Index < 3; ++Index)
-			{
-				FNode Node;
-				Node.Index = Index;
-				Node.Guid = FString::Printf(TEXT("left_long_clean_fanout%d"), Index);
-				Node.Title = Node.Guid;
-				Nodes.Add(Node);
-			}
-			TArray<FEdge> Edges = {
-				{0, 1, TEXT("ReturnValue"), TEXT("A"), 0, 0, false},
-				{0, 2, TEXT("ReturnValue"), TEXT("A"), 0, 0, false}
-			};
-			FRunResult Run;
-			RunLayoutForSelfTest(Nodes, Edges, Options, Run);
-			int32 LocalBusRouteCount = 0;
-			for (const TSharedPtr<FJsonValue>& RouteValue : Run.CorridorRouteDiagnostics)
-			{
-				const TSharedPtr<FJsonObject> RouteObj = RouteValue.IsValid() ? RouteValue->AsObject() : nullptr;
-				FString RouteKind;
-				if (RouteObj.IsValid() && RouteObj->TryGetStringField(TEXT("route_kind"), RouteKind) && RouteKind == TEXT("local_bus"))
-				{
-					++LocalBusRouteCount;
-				}
-			}
-			AddCase(TEXT("left_clean_fanout_stays_direct_when_batch_can_compact"),
-				Run.ReroutePlanCount == 0 && LocalBusRouteCount == 0 && Run.DesignDiagnostics.BusContractCount == 0,
-				FString::Printf(TEXT("plans=%d local_bus_routes=%d diagnostics=%d bus_contracts=%d"), Run.ReroutePlanCount, LocalBusRouteCount, Run.CorridorRouteDiagnostics.Num(), Run.DesignDiagnostics.BusContractCount));
-		}
-
-		{
-			TArray<FNode> Nodes;
-			for (int32 Index = 0; Index < 4; ++Index)
-			{
-				FNode Node;
-				Node.Index = Index;
-				Node.Guid = FString::Printf(TEXT("shared_bus_source_%d"), Index);
-				Node.Title = Node.Guid;
-				Node.Width = Index == 0 ? 120.0 : 220.0;
-				Node.Height = 90.0;
-				Node.OutputPinNames = { TEXT("ReturnValue") };
-				Node.InputPinNames = { TEXT("A") };
-				Node.OutputPinAnchors = { FVector2D(Node.Width, 35.0) };
-				Node.InputPinAnchors = { FVector2D(0.0, 45.0) };
-				Node.OutputPinAnchorValid = { 1 };
-				Node.InputPinAnchorValid = { 1 };
-				Nodes.Add(Node);
-			}
-			TArray<FEdge> Edges = {
-				{0, 1, TEXT("ReturnValue"), TEXT("A"), 0, 0, false},
-				{0, 2, TEXT("ReturnValue"), TEXT("A"), 0, 0, false},
-				{0, 3, TEXT("ReturnValue"), TEXT("A"), 0, 0, false}
-			};
-			TArray<FIsland> Islands;
-			for (int32 IslandIndex = 0; IslandIndex < 4; ++IslandIndex)
-			{
-				FIsland Island;
-				Island.Id = IslandIndex;
-				Island.Nodes = {IslandIndex};
-				Island.NodeSet.Add(IslandIndex);
-				Island.LocalBounds = {0.0, 0.0, Nodes[IslandIndex].Width, Nodes[IslandIndex].Height};
-				Island.X = IslandIndex == 0 ? 0.0 : Options.HorizontalSpacing * 8.0;
-				Island.Y = IslandIndex == 0 ? 100.0 : 100.0 + static_cast<double>(IslandIndex) * 180.0;
-				Islands.Add(Island);
-			}
-			TArray<FSelectedEndpointCandidate> SelectedEndpoints;
-			for (int32 EdgeIndex = 0; EdgeIndex < Edges.Num(); ++EdgeIndex)
-			{
-				FSelectedEndpointCandidate Selected;
-				Selected.EdgeIndex = EdgeIndex;
-				Selected.CandidateId = EdgeIndex;
-				Selected.SourceIsland = 0;
-				Selected.TargetIsland = EdgeIndex + 1;
-				Selected.Side = TEXT("left");
-				Selected.SourceLocal = FVector2D(Nodes[0].Width, 35.0);
-				Selected.EntryLocal = FVector2D(0.0, 45.0);
-				Selected.ActualTargetLocal = FVector2D(0.0, 45.0);
-				SelectedEndpoints.Add(Selected);
-			}
-			FRunResult Run;
-			const TArray<FReroutePlan> Plans = RouteDirectAndBusCorridors(Nodes, Edges, Islands, SelectedEndpoints, Options, Run);
-			TSet<int32> MergeGroups;
-			double SharedTrunkY = 0.0;
-			bool bAllPlansShareTrunkY = Plans.Num() == 3;
-			for (int32 PlanIndex = 0; PlanIndex < Plans.Num(); ++PlanIndex)
-			{
-				MergeGroups.Add(Plans[PlanIndex].AttachmentMergeGroup);
-				if (Plans[PlanIndex].Points.Num() == 0)
-				{
-					bAllPlansShareTrunkY = false;
-					continue;
-				}
-				if (PlanIndex == 0)
-				{
-					SharedTrunkY = Plans[PlanIndex].Points[0].Y;
-				}
-				else if (!FMath::IsNearlyEqual(SharedTrunkY, Plans[PlanIndex].Points[0].Y, 0.5))
-				{
-					bAllPlansShareTrunkY = false;
-				}
-			}
-			const bool bSameSourceFanoutUsesSingleBus =
-				Run.DesignDiagnostics.BusContractCount == 1
-				&& MergeGroups.Num() == 1
-				&& bAllPlansShareTrunkY
-				&& Run.DesignDiagnostics.RouteThroughHardOccupancyCount == 0;
-			AddCase(TEXT("same_source_inter_island_fanout_uses_single_bus_contract"),
-				bSameSourceFanoutUsesSingleBus,
-				FString::Printf(TEXT("plans=%d contracts=%d merge_groups=%d route_through=%d shared_trunk_y=%.1f"),
-					Plans.Num(),
-					Run.DesignDiagnostics.BusContractCount,
-					MergeGroups.Num(),
-					Run.DesignDiagnostics.RouteThroughHardOccupancyCount,
-					SharedTrunkY));
-		}
-
-		{
-			TArray<FPendingCorridorBusRoute> PendingRoutes;
-			TArray<FBusContract> BusContracts;
-			FBusContract Contract;
-			Contract.Id = 0;
-			Contract.SourceParamId = TEXT("same_bus_merge_source");
-			Contract.RouteKind = ERouteKind::LocalBus;
-			Contract.TrunkY = 240.0;
-			BusContracts.Add(Contract);
-
-			const FVector2D Start(100.0, 100.0);
-			const FVector2D End(1200.0, 280.0);
-			const double EntryX = ComputeInputXAlignedToOutput(Start.X, Options);
-			const double InitialBranchXs[] = {900.0, 928.0};
-			for (int32 Index = 0; Index < 2; ++Index)
-			{
-				FPlannedCorridorRoute Planned;
-				Planned.RouteKind = ERouteKind::LocalBus;
-				Planned.TrunkY = 240.0;
-				Planned.BranchX = InitialBranchXs[Index];
-				Planned.Polyline = { Start, FVector2D(EntryX, Planned.TrunkY), FVector2D(InitialBranchXs[Index], Planned.TrunkY), End };
-
-				FPendingCorridorBusRoute Pending;
-				Pending.ContractIndex = 0;
-				Pending.EdgeIndex = Index;
-				Pending.SourceParamId = Contract.SourceParamId;
-				Pending.Side = TEXT("top");
-				Pending.Planned = Planned;
-				Pending.Start = Start;
-				Pending.End = End;
-				Pending.ActualEnd = End;
-				PendingRoutes.Add(Pending);
-			}
-			RecomputeBusContractBoundsFromPendingRoutes(BusContracts[0], PendingRoutes);
-
-			const TArray<FNode> EmptyNodes;
-			const TArray<FEdge> EmptyEdges;
-			const TArray<FIsland> EmptyIslands;
-			FRunResult Run;
-			const int32 Merged = MergeCloseBranchPointsWithinSameBusAtGeneration(
-				PendingRoutes,
-				BusContracts,
-				EmptyNodes,
-				EmptyEdges,
-				EmptyIslands,
-				Options,
-				Run);
-
-			const double ExpectedMergedX = SnapGraphCoordinate((InitialBranchXs[0] + InitialBranchXs[1]) * 0.5);
-			const bool bMergedCloseBranches =
-				Merged == 1
-				&& PendingRoutes.Num() == 2
-				&& FMath::IsNearlyEqual(PendingRoutes[0].Planned.BranchX, ExpectedMergedX, 0.5)
-				&& FMath::IsNearlyEqual(PendingRoutes[1].Planned.BranchX, ExpectedMergedX, 0.5)
-				&& BusContracts.Num() == 1
-				&& BusContracts[0].BranchXs.Num() == 1;
-			AddCase(TEXT("same_bus_close_branch_points_merge_before_cross_bus_lanes"),
-				bMergedCloseBranches,
-				FString::Printf(TEXT("merged=%d branch=%.1f/%.1f expected=%.1f unique=%d diagnostics=%d"),
-					Merged,
-					PendingRoutes.IsValidIndex(0) ? PendingRoutes[0].Planned.BranchX : -1.0,
-					PendingRoutes.IsValidIndex(1) ? PendingRoutes[1].Planned.BranchX : -1.0,
-					ExpectedMergedX,
-					BusContracts.IsValidIndex(0) ? BusContracts[0].BranchXs.Num() : -1,
-					Run.RejectionDiagnostics.Num()));
-		}
-
-		{
-			TArray<FPendingCorridorBusRoute> PendingRoutes;
-			TArray<FBusContract> BusContracts;
-			TArray<FSelectedEndpointCandidate> SelectedEndpoints;
-			const double InitialBranchXs[] = { 900.0, 912.0 };
-			for (int32 Index = 0; Index < 2; ++Index)
-			{
-				FSelectedEndpointCandidate Selected;
-				Selected.EdgeIndex = Index;
-				Selected.CandidateId = Index;
-				Selected.ConnectionGroupId = Index;
-				Selected.SourcePortOrderKey = static_cast<double>(Index);
-				SelectedEndpoints.Add(Selected);
-
-				const FVector2D Start(100.0, 100.0 + static_cast<double>(Index) * 6.0);
-				const FVector2D End(1400.0, 360.0 + static_cast<double>(Index) * 8.0);
-				const double TrunkY = 240.0 + static_cast<double>(Index) * 2.0;
-				const double EntryX = ComputeInputXAlignedToOutput(Start.X, Options);
-
-				FPlannedCorridorRoute Planned;
-				Planned.RouteKind = ERouteKind::LocalBus;
-				Planned.TrunkY = TrunkY;
-				Planned.BranchX = InitialBranchXs[Index];
-				Planned.Polyline = { Start, FVector2D(EntryX, TrunkY), FVector2D(InitialBranchXs[Index], TrunkY), End };
-
-				FBusContract Contract;
-				Contract.Id = Index;
-				Contract.SourceParamId = FString::Printf(TEXT("branch_locality_source_%d"), Index);
-				Contract.RouteKind = ERouteKind::LocalBus;
-				Contract.TrunkY = TrunkY;
-				Contract.EdgeIndices.Add(Index);
-				Contract.BranchXs.Add(InitialBranchXs[Index]);
-				RecomputeBusContractBoundsFromRoute(Contract, Planned);
-				BusContracts.Add(Contract);
-
-				FPendingCorridorBusRoute Pending;
-				Pending.SelectedEndpointIndex = Index;
-				Pending.ContractIndex = Contract.Id;
-				Pending.EdgeIndex = Index;
-				Pending.SourceParamId = Contract.SourceParamId;
-				Pending.Planned = Planned;
-				Pending.Start = Start;
-				Pending.End = End;
-				PendingRoutes.Add(Pending);
-			}
-
-			FRunResult Run;
-			const TArray<FNode> EmptyNodes;
-			const TArray<FEdge> EmptyEdges;
-			const TArray<FIsland> EmptyIslands;
-			const int32 Applied = ApplyCrossBusBranchXLanesAtGeneration(
-				PendingRoutes,
-				BusContracts,
-				SelectedEndpoints,
-				EmptyNodes,
-				EmptyEdges,
-				EmptyIslands,
-				Options,
-				Run);
-			const double LaneSpacing = GetCrossBusBranchLaneSpacing(Options);
-			const bool bLanePlanningKeepsCloserTargetRight =
-				Applied >= 1
-				&& PendingRoutes.Num() == 2
-				&& FMath::Abs(PendingRoutes[1].Planned.BranchX - PendingRoutes[0].Planned.BranchX) >= LaneSpacing - 0.5
-				&& PendingRoutes[0].Planned.BranchX > PendingRoutes[1].Planned.BranchX + LaneSpacing - 0.5
-				&& HasNonNegativeConnectionAlignmentShortenForEverySegment(PendingRoutes[0].Planned.Polyline, Options)
-				&& HasNonNegativeConnectionAlignmentShortenForEverySegment(PendingRoutes[1].Planned.Polyline, Options);
-			AddCase(TEXT("cross_bus_branch_lane_places_closer_target_right_with_fixed_spacing"),
-				bLanePlanningKeepsCloserTargetRight,
-				FString::Printf(TEXT("applied=%d branch=%.1f/%.1f initial=%.1f/%.1f spacing=%.1f diagnostics=%d"),
-					Applied,
-					PendingRoutes.IsValidIndex(0) ? PendingRoutes[0].Planned.BranchX : -1.0,
-					PendingRoutes.IsValidIndex(1) ? PendingRoutes[1].Planned.BranchX : -1.0,
-					InitialBranchXs[0],
-					InitialBranchXs[1],
-					LaneSpacing,
-					Run.RejectionDiagnostics.Num()));
-		}
-
-		{
-			TArray<FPendingCorridorBusRoute> PendingRoutes;
-			TArray<FBusContract> BusContracts;
-			TArray<FSelectedEndpointCandidate> SelectedEndpoints;
-			for (int32 Index = 0; Index < 2; ++Index)
-			{
-				FSelectedEndpointCandidate Selected;
-				Selected.EdgeIndex = Index;
-				Selected.CandidateId = Index;
-				Selected.ConnectionGroupId = Index;
-				Selected.SourcePortOrderKey = static_cast<double>(Index);
-				Selected.Side = TEXT("left");
-				SelectedEndpoints.Add(Selected);
-
-				const FVector2D Start(100.0, Index == 0 ? 100.0 : 116.0);
-				const FVector2D End(1200.0, Index == 0 ? 360.0 : 376.0);
-				const double InitialTrunkY = 240.0;
-				const double EntryX = ComputeInputXAlignedToOutput(Start.X, Options);
-				const double BranchX = ComputeOutputXAlignedToInput(End.X, Options);
-
-				FPlannedCorridorRoute Planned;
-				Planned.RouteKind = ERouteKind::LocalBus;
-				Planned.TrunkY = InitialTrunkY;
-				Planned.BranchX = BranchX;
-				Planned.Polyline = { Start, FVector2D(EntryX, InitialTrunkY), FVector2D(BranchX, InitialTrunkY), End };
-
-				FBusContract Contract;
-				Contract.Id = Index;
-				Contract.SourceParamId = FString::Printf(TEXT("planned_lane_source_%d"), Index);
-				Contract.RouteKind = ERouteKind::LocalBus;
-				Contract.TrunkY = InitialTrunkY;
-				Contract.EdgeIndices.Add(Index);
-				Contract.BranchXs.Add(BranchX);
-				RecomputeBusContractBoundsFromRoute(Contract, Planned);
-				BusContracts.Add(Contract);
-
-				FPendingCorridorBusRoute Pending;
-				Pending.SelectedEndpointIndex = Index;
-				Pending.ContractIndex = Contract.Id;
-				Pending.EdgeIndex = Index;
-				Pending.SourceParamId = Contract.SourceParamId;
-				Pending.Side = TEXT("left");
-				Pending.Planned = Planned;
-				Pending.Start = Start;
-				Pending.End = End;
-				PendingRoutes.Add(Pending);
-			}
-
-			FRunResult Run;
-			const TArray<FNode> EmptyNodes;
-			const TArray<FEdge> EmptyEdges;
-			const TArray<FIsland> EmptyIslands;
-			PlanBusContractsAtGeneration(PendingRoutes, BusContracts, SelectedEndpoints, EmptyNodes, EmptyEdges, EmptyIslands, Options, Run);
-			const double LaneSpacing = GetBusTrunkLaneSpacing();
-			bool bLaneDiagnosticsUseFixedSpacing = Run.LaneAssignmentDiagnostics.Num() == 2;
-			for (const TSharedPtr<FJsonValue>& LaneValue : Run.LaneAssignmentDiagnostics)
-			{
-				const TSharedPtr<FJsonObject> LaneObj = LaneValue.IsValid() ? LaneValue->AsObject() : nullptr;
-				double ReportedLaneSpacing = 0.0;
-				double ReportedEffectiveLaneSpacing = 0.0;
-				double ReportedMinimumLaneSpacing = 0.0;
-				bLaneDiagnosticsUseFixedSpacing = bLaneDiagnosticsUseFixedSpacing
-					&& LaneObj.IsValid()
-					&& LaneObj->TryGetNumberField(TEXT("lane_spacing"), ReportedLaneSpacing)
-					&& LaneObj->TryGetNumberField(TEXT("effective_lane_spacing"), ReportedEffectiveLaneSpacing)
-					&& LaneObj->TryGetNumberField(TEXT("minimum_visible_lane_spacing"), ReportedMinimumLaneSpacing)
-					&& FMath::IsNearlyEqual(ReportedLaneSpacing, LaneSpacing, 0.01)
-					&& FMath::IsNearlyEqual(ReportedEffectiveLaneSpacing, LaneSpacing, 0.01)
-					&& FMath::IsNearlyEqual(ReportedMinimumLaneSpacing, LaneSpacing, 0.01);
-			}
-			const bool bGenerationSelectedSeparateY =
-				PendingRoutes.Num() == 2
-				&& FMath::Abs(PendingRoutes[0].Planned.TrunkY - PendingRoutes[1].Planned.TrunkY) >= LaneSpacing - 0.5
-				&& Run.DesignDiagnostics.RouteThroughHardOccupancyCount == 0
-				&& Run.DesignDiagnostics.CrossBusTrunkLaneCount == 1
-				&& Run.LaneAssignmentDiagnostics.Num() == 2
-				&& bLaneDiagnosticsUseFixedSpacing
-				&& HasNonNegativeConnectionAlignmentShortenForEverySegment(PendingRoutes[0].Planned.Polyline, Options)
-				&& HasNonNegativeConnectionAlignmentShortenForEverySegment(PendingRoutes[1].Planned.Polyline, Options);
-			AddCase(TEXT("bus_contract_generation_selects_y_lanes_before_reroute_writeback"),
-				bGenerationSelectedSeparateY,
-				FString::Printf(TEXT("y=%.1f/%.1f lane_spacing=%.1f fixed_diag=%d route_through=%d trunk_lanes=%d lane_diag=%d"),
-					PendingRoutes.IsValidIndex(0) ? PendingRoutes[0].Planned.TrunkY : 0.0,
-					PendingRoutes.IsValidIndex(1) ? PendingRoutes[1].Planned.TrunkY : 0.0,
-					LaneSpacing,
-					bLaneDiagnosticsUseFixedSpacing ? 1 : 0,
-					Run.DesignDiagnostics.RouteThroughHardOccupancyCount,
-					Run.DesignDiagnostics.CrossBusTrunkLaneCount,
-					Run.LaneAssignmentDiagnostics.Num()));
-		}
-
-		{
-			TArray<FPendingCorridorBusRoute> PendingRoutes;
-			TArray<FBusContract> BusContracts;
-			TArray<FSelectedEndpointCandidate> SelectedEndpoints;
-			for (int32 Index = 0; Index < 3; ++Index)
-			{
-				FSelectedEndpointCandidate Selected;
-				Selected.EdgeIndex = Index;
-				Selected.CandidateId = Index;
-				Selected.ConnectionGroupId = Index;
-				Selected.SourcePortOrderKey = static_cast<double>(Index);
-				SelectedEndpoints.Add(Selected);
-
-				const FVector2D Start(100.0, 100.0 + static_cast<double>(Index) * 6.0);
-				const FVector2D End(1100.0, 340.0 + static_cast<double>(Index) * 8.0);
-				const double TrunkY = 260.0 + static_cast<double>(Index) * 8.0;
-				const double EntryX = ComputeInputXAlignedToOutput(Start.X, Options);
-				const double BranchX = ComputeOutputXAlignedToInput(End.X, Options);
-
-				FPlannedCorridorRoute Planned;
-				Planned.RouteKind = ERouteKind::LocalBus;
-				Planned.TrunkY = TrunkY;
-				Planned.BranchX = BranchX;
-				Planned.Polyline = { Start, FVector2D(EntryX, TrunkY), FVector2D(BranchX, TrunkY), End };
-
-				FBusContract Contract;
-				Contract.Id = Index;
-				Contract.SourceParamId = FString::Printf(TEXT("trunk_source_%d"), Index);
-				Contract.RouteKind = ERouteKind::LocalBus;
-				Contract.TrunkY = TrunkY;
-				Contract.EdgeIndices.Add(Index);
-				Contract.BranchXs.Add(BranchX);
-				RecomputeBusContractBoundsFromRoute(Contract, Planned);
-				BusContracts.Add(Contract);
-
-				FPendingCorridorBusRoute Pending;
-				Pending.SelectedEndpointIndex = Index;
-				Pending.ContractIndex = Contract.Id;
-				Pending.EdgeIndex = Index;
-				Pending.SourceParamId = Contract.SourceParamId;
-				Pending.Side = TEXT("left");
-				Pending.Planned = Planned;
-				Pending.Start = Start;
-				Pending.End = End;
-				PendingRoutes.Add(Pending);
-			}
-
-			FRunResult Run;
-			const TArray<FNode> EmptyNodes;
-			const TArray<FEdge> EmptyEdges;
-			const TArray<FIsland> EmptyIslands;
-			PlanBusContractsAtGeneration(PendingRoutes, BusContracts, SelectedEndpoints, EmptyNodes, EmptyEdges, EmptyIslands, Options, Run);
-			const double LaneSpacing = GetBusTrunkLaneSpacing();
-			bool bTrunksSeparated = PendingRoutes.Num() == 3
-				&& Run.DesignDiagnostics.CrossBusTrunkLaneCount == 2
-				&& Run.LaneAssignmentDiagnostics.Num() == 3;
-			for (int32 Index = 1; Index < PendingRoutes.Num(); ++Index)
-			{
-				const double PrevY = PendingRoutes[Index - 1].Planned.TrunkY;
-				const double CurrentY = PendingRoutes[Index].Planned.TrunkY;
-				bTrunksSeparated = bTrunksSeparated
-					&& CurrentY >= PrevY + LaneSpacing - 0.5
-					&& BusContracts[Index].BusLaneIndex == Index
-					&& HasNonNegativeConnectionAlignmentShortenForEverySegment(PendingRoutes[Index].Planned.Polyline, Options);
-			}
-			AddCase(TEXT("cross_bus_horizontal_trunks_with_overlapping_x_get_separate_y_lanes"),
-				bTrunksSeparated,
-				FString::Printf(TEXT("y=%.1f/%.1f/%.1f spacing=%.1f trunk_lanes=%d diagnostics=%d lane_index=%d/%d/%d"),
-					PendingRoutes.IsValidIndex(0) ? PendingRoutes[0].Planned.TrunkY : 0.0,
-					PendingRoutes.IsValidIndex(1) ? PendingRoutes[1].Planned.TrunkY : 0.0,
-					PendingRoutes.IsValidIndex(2) ? PendingRoutes[2].Planned.TrunkY : 0.0,
-					LaneSpacing,
-					Run.DesignDiagnostics.CrossBusTrunkLaneCount,
-					Run.LaneAssignmentDiagnostics.Num(),
-					BusContracts.IsValidIndex(0) ? BusContracts[0].BusLaneIndex : INDEX_NONE,
-					BusContracts.IsValidIndex(1) ? BusContracts[1].BusLaneIndex : INDEX_NONE,
-					BusContracts.IsValidIndex(2) ? BusContracts[2].BusLaneIndex : INDEX_NONE));
-		}
-
-		{
-			TArray<FPendingCorridorBusRoute> PendingRoutes;
-			TArray<FBusContract> BusContracts;
-			TArray<FSelectedEndpointCandidate> SelectedEndpoints;
-			constexpr int32 ContractCount = 10;
-			for (int32 Index = 0; Index < ContractCount; ++Index)
-			{
-				FSelectedEndpointCandidate Selected;
-				Selected.EdgeIndex = Index;
-				Selected.CandidateId = Index;
-				Selected.ConnectionGroupId = Index;
-				Selected.SourcePortOrderKey = static_cast<double>(Index);
-				SelectedEndpoints.Add(Selected);
-
-				const FVector2D Start(120.0, 200.0 + static_cast<double>(Index) * 64.0);
-				const FVector2D End(1320.0, 320.0 + static_cast<double>(Index) * 64.0);
-				const double TrunkY = 320.0 + static_cast<double>(Index) * 2.0;
-				const double EntryX = ComputeInputXAlignedToOutput(Start.X, Options);
-				const double BranchX = ComputeOutputXAlignedToInput(End.X, Options);
-
-				FPlannedCorridorRoute Planned;
-				Planned.RouteKind = ERouteKind::LocalBus;
-				Planned.TrunkY = TrunkY;
-				Planned.BranchX = BranchX;
-				Planned.Polyline = { Start, FVector2D(EntryX, TrunkY), FVector2D(BranchX, TrunkY), End };
-
-				FBusContract Contract;
-				Contract.Id = Index;
-				Contract.SourceParamId = FString::Printf(TEXT("large_trunk_source_%d"), Index);
-				Contract.RouteKind = ERouteKind::LocalBus;
-				Contract.TrunkY = TrunkY;
-				Contract.EdgeIndices.Add(Index);
-				Contract.BranchXs.Add(BranchX);
-				RecomputeBusContractBoundsFromRoute(Contract, Planned);
-				BusContracts.Add(Contract);
-
-				FPendingCorridorBusRoute Pending;
-				Pending.SelectedEndpointIndex = Index;
-				Pending.ContractIndex = Contract.Id;
-				Pending.EdgeIndex = Index;
-				Pending.SourceParamId = Contract.SourceParamId;
-				Pending.Side = TEXT("left");
-				Pending.Planned = Planned;
-				Pending.Start = Start;
-				Pending.End = End;
-				PendingRoutes.Add(Pending);
-			}
-
-			FRunResult Run;
-			const TArray<FNode> EmptyNodes;
-			const TArray<FEdge> EmptyEdges;
-			const TArray<FIsland> EmptyIslands;
-			PlanBusContractsAtGeneration(PendingRoutes, BusContracts, SelectedEndpoints, EmptyNodes, EmptyEdges, EmptyIslands, Options, Run);
-			const double LaneSpacing = GetBusTrunkLaneSpacing();
-			bool bNoFallback = true;
-			for (const TSharedPtr<FJsonValue>& LaneValue : Run.LaneAssignmentDiagnostics)
-			{
-				const TSharedPtr<FJsonObject> LaneObj = LaneValue.IsValid() ? LaneValue->AsObject() : nullptr;
-				bool bFallback = false;
-				if (LaneObj.IsValid() && LaneObj->TryGetBoolField(TEXT("lane_conflict_fallback_used"), bFallback) && bFallback)
-				{
-					bNoFallback = false;
-				}
-			}
-			bool bLargeGroupSeparated = PendingRoutes.Num() == ContractCount
-				&& Run.DesignDiagnostics.CrossBusTrunkLaneCount == ContractCount - 1
-				&& Run.LaneAssignmentDiagnostics.Num() == ContractCount
-				&& bNoFallback;
-			for (int32 A = 0; A < PendingRoutes.Num(); ++A)
-			{
-				bLargeGroupSeparated = bLargeGroupSeparated
-					&& BusContracts.IsValidIndex(A)
-					&& BusContracts[A].BusLaneIndex != INDEX_NONE
-					&& HasNonNegativeConnectionAlignmentShortenForEverySegment(PendingRoutes[A].Planned.Polyline, Options);
-				for (int32 B = A + 1; B < PendingRoutes.Num(); ++B)
-				{
-					if (IntervalOverlaps(
-						FMath::Min(PendingRoutes[A].Start.X, PendingRoutes[A].End.X),
-						FMath::Max(PendingRoutes[A].Start.X, PendingRoutes[A].End.X),
-						FMath::Min(PendingRoutes[B].Start.X, PendingRoutes[B].End.X),
-						FMath::Max(PendingRoutes[B].Start.X, PendingRoutes[B].End.X)))
-					{
-						bLargeGroupSeparated = bLargeGroupSeparated
-							&& FMath::Abs(PendingRoutes[A].Planned.TrunkY - PendingRoutes[B].Planned.TrunkY) >= LaneSpacing - 0.5;
-					}
-				}
-			}
-			AddCase(TEXT("large_cross_bus_group_preplans_lane_free_trunks"),
-				bLargeGroupSeparated,
-				FString::Printf(TEXT("count=%d lane_spacing=%.1f trunk_lanes=%d diagnostics=%d fallback=%d y0=%.1f y9=%.1f"),
-					PendingRoutes.Num(),
-					LaneSpacing,
-					Run.DesignDiagnostics.CrossBusTrunkLaneCount,
-					Run.LaneAssignmentDiagnostics.Num(),
-					bNoFallback ? 0 : 1,
-					PendingRoutes.IsValidIndex(0) ? PendingRoutes[0].Planned.TrunkY : 0.0,
-					PendingRoutes.IsValidIndex(9) ? PendingRoutes[9].Planned.TrunkY : 0.0));
-		}
-
-		{
-			TArray<FNode> Nodes;
-			for (int32 Index = 0; Index < 3; ++Index)
-			{
-				FNode Node;
-				Node.Index = Index;
-				Node.Guid = FString::Printf(TEXT("planned_hard_free_%d"), Index);
-				Node.Title = Node.Guid;
-				Node.Width = Index == 1 ? 420.0 : 160.0;
-				Node.Height = Index == 1 ? 260.0 : 90.0;
-				Node.OutputPinNames = { TEXT("ReturnValue") };
-				Node.InputPinNames = { TEXT("A") };
-				Node.OutputPinAnchors = { FVector2D(Node.Width, 40.0) };
-				Node.InputPinAnchors = { FVector2D(0.0, 45.0) };
-				Node.OutputPinAnchorValid = { 1 };
-				Node.InputPinAnchorValid = { 1 };
-				Nodes.Add(Node);
-			}
-			TArray<FEdge> Edges = {
-				{0, 2, TEXT("ReturnValue"), TEXT("A"), 0, 0, false}
-			};
-			TArray<FIsland> Islands;
-			for (int32 IslandIndex = 0; IslandIndex < 3; ++IslandIndex)
-			{
-				FIsland Island;
-				Island.Id = IslandIndex;
-				Island.Nodes = {IslandIndex};
-				Island.NodeSet.Add(IslandIndex);
-				Island.LocalBounds = {0.0, 0.0, Nodes[IslandIndex].Width, Nodes[IslandIndex].Height};
-				Island.X = IslandIndex == 0 ? 0.0 : (IslandIndex == 1 ? 900.0 : Options.HorizontalSpacing * 8.0);
-				Island.Y = IslandIndex == 1 ? 40.0 : 100.0;
-				Islands.Add(Island);
-			}
-			TArray<FSelectedEndpointCandidate> SelectedEndpoints;
-			FSelectedEndpointCandidate Selected;
-			Selected.EdgeIndex = 0;
-			Selected.CandidateId = 0;
-			Selected.SourceIsland = 0;
-			Selected.TargetIsland = 2;
-			Selected.Side = TEXT("left");
-			Selected.SourceLocal = FVector2D(Nodes[0].Width, 40.0);
-			Selected.EntryLocal = FVector2D(0.0, 45.0);
-			Selected.ActualTargetLocal = FVector2D(0.0, 45.0);
-			SelectedEndpoints.Add(Selected);
-			FRunResult Run;
-			const TArray<FReroutePlan> Plans = RouteDirectAndBusCorridors(Nodes, Edges, Islands, SelectedEndpoints, Options, Run);
-			const TArray<FRect> HardRects = BuildRouteHardOccupancyRects(Nodes, Islands, Options, Edges[0]);
-			bool bPlanHitsHard = false;
-			for (const FReroutePlan& Plan : Plans)
-			{
-				if (Plan.EdgeIndex != 0)
-				{
-					continue;
-				}
-				TArray<FVector2D> Points;
-				Points.Add(FVector2D(Islands[0].X + Selected.SourceLocal.X, Islands[0].Y + Selected.SourceLocal.Y));
-				Points.Append(Plan.Points);
-				Points.Add(FVector2D(Islands[2].X + Selected.EntryLocal.X, Islands[2].Y + Selected.EntryLocal.Y));
-				bPlanHitsHard = PolylineHitsHardOccupancy(Points, HardRects);
-			}
-			AddCase(TEXT("bus_contract_generation_chooses_hard_free_route_candidate"),
-				Plans.Num() == 1 && !bPlanHitsHard && Run.DesignDiagnostics.RouteThroughHardOccupancyCount == 0,
-				FString::Printf(TEXT("plans=%d hit=%d route_through=%d contracts=%d"),
-					Plans.Num(),
-					bPlanHitsHard ? 1 : 0,
-					Run.DesignDiagnostics.RouteThroughHardOccupancyCount,
-					Run.DesignDiagnostics.BusContractCount));
-		}
-
-		{
-			TArray<FNode> Nodes;
-			for (int32 Index = 0; Index < 3; ++Index)
-			{
-				FNode Node;
-				Node.Index = Index;
-				Node.Guid = FString::Printf(TEXT("target_actual_wire_%d"), Index);
-				Node.Title = Node.Guid;
-				Node.Width = Index == 2 ? 210.0 : 180.0;
-				Node.Height = Index == 2 ? 160.0 : 90.0;
-				Node.OutputPinNames = { TEXT("ReturnValue") };
-				Node.InputPinNames = { TEXT("A") };
-				Node.OutputPinAnchors = { FVector2D(Node.Width, 50.0) };
-				Node.InputPinAnchors = { FVector2D(0.0, 45.0) };
-				Node.OutputPinAnchorValid = { 1 };
-				Node.InputPinAnchorValid = { 1 };
-				Nodes.Add(Node);
-			}
-			TArray<FEdge> Edges = {
-				{0, 1, TEXT("ReturnValue"), TEXT("A"), 0, 0, false}
-			};
-			TArray<FIsland> Islands;
-			FIsland SourceIsland;
-			SourceIsland.Id = 0;
-			SourceIsland.Nodes = {0};
-			SourceIsland.NodeSet.Add(0);
-			SourceIsland.LocalBounds = {0.0, 0.0, 180.0, 90.0};
-			SourceIsland.X = 0.0;
-			SourceIsland.Y = 0.0;
-			Islands.Add(SourceIsland);
-
-			FIsland TargetIsland;
-			TargetIsland.Id = 1;
-			TargetIsland.Nodes = {1, 2};
-			TargetIsland.NodeSet.Add(1);
-			TargetIsland.NodeSet.Add(2);
-			Nodes[1].NewX = 900.0;
-			Nodes[1].NewY = 40.0;
-			Nodes[2].NewX = 80.0;
-			Nodes[2].NewY = 210.0;
-			TargetIsland.LocalBounds = {0.0, 0.0, 1080.0, 370.0};
-			TargetIsland.X = 700.0;
-			TargetIsland.Y = 300.0;
-			Islands.Add(TargetIsland);
-
-			TArray<FSelectedEndpointCandidate> SelectedEndpoints;
-			FSelectedEndpointCandidate Selected;
-			Selected.EdgeIndex = 0;
-			Selected.CandidateId = 0;
-			Selected.SourceIsland = 0;
-			Selected.TargetIsland = 1;
-			Selected.Side = TEXT("left");
-			Selected.ConnectionGroupId = 0;
-			Selected.SourceLocal = FVector2D(180.0, 50.0);
-			Selected.EntryLocal = FVector2D(-80.0, 300.0);
-			Selected.ActualTargetLocal = FVector2D(900.0, 100.0);
-			SelectedEndpoints.Add(Selected);
-
-			FRunResult Run;
-			const TArray<FReroutePlan> Plans = RouteDirectAndBusCorridors(Nodes, Edges, Islands, SelectedEndpoints, Options, Run);
-			TArray<FVector2D> ControlPoints;
-			ControlPoints.Add(FVector2D(Islands[0].X + Selected.SourceLocal.X, Islands[0].Y + Selected.SourceLocal.Y));
-			for (const FReroutePlan& Plan : Plans)
-			{
-				if (Plan.EdgeIndex == 0)
-				{
-					ControlPoints.Append(Plan.Points);
-					break;
-				}
-			}
-			ControlPoints.Add(FVector2D(Islands[1].X + Selected.ActualTargetLocal.X, Islands[1].Y + Selected.ActualTargetLocal.Y));
-			const TArray<FRect> HardRects = BuildRouteHardOccupancyRects(Nodes, Islands, Options, Edges[0]);
-			const bool bControlWireHitsSibling = ControlWireHitsHardOccupancy(ControlPoints, HardRects);
-			bool bStillStopsAtBoundaryEntryOnly = false;
-			for (const FReroutePlan& Plan : Plans)
-			{
-				if (Plan.EdgeIndex != 0 || Plan.Points.Num() == 0)
-				{
-					continue;
-				}
-				const FVector2D LastPoint = Plan.Points.Last();
-				const FVector2D EntryAbs(Islands[1].X + Selected.EntryLocal.X, Islands[1].Y + Selected.EntryLocal.Y);
-				bStillStopsAtBoundaryEntryOnly = FVector2D::Distance(LastPoint, EntryAbs) < 0.5;
-			}
-			AddCase(TEXT("bus_target_actual_pin_segment_participates_in_generation_occupancy"),
-				Plans.Num() == 1
-					&& !bControlWireHitsSibling
-					&& !bStillStopsAtBoundaryEntryOnly
-					&& Run.DesignDiagnostics.RouteThroughHardOccupancyCount == 0
-					&& HasNonNegativeConnectionAlignmentShortenForEverySegment(ControlPoints, Options),
-				FString::Printf(TEXT("plans=%d wire_hit=%d boundary_stop=%d route_through=%d points=%d"),
-					Plans.Num(),
-					bControlWireHitsSibling ? 1 : 0,
-					bStillStopsAtBoundaryEntryOnly ? 1 : 0,
-					Run.DesignDiagnostics.RouteThroughHardOccupancyCount,
-					ControlPoints.Num()));
-		}
-
-		{
-			const FVector2D Start(431.0, 4079.0);
-			const FVector2D End(1191.0, 5527.0);
-			const double TrunkY = 4199.0;
-			const double InitialBranchX = 553.0;
-			TArray<FRect> HardRects;
-			HardRects.Add({564.0, 4738.0, 764.0, 4834.0});
-			HardRects.Add({625.0, 5326.0, 820.0, 5446.0});
-			const TArray<FVector2D> Route = BuildSharedSourceBusRoutePolylineAvoidingHardRects(
-				Start,
-				End,
-				TrunkY,
-				InitialBranchX,
-				HardRects,
-				Options,
-				true);
-			const int32 HitCount = CountControlWireHardOccupancyHits(Route, HardRects);
-			double MaxInteriorX = -TNumericLimits<double>::Max();
-			for (int32 PointIndex = 1; PointIndex + 1 < Route.Num(); ++PointIndex)
-			{
-				MaxInteriorX = FMath::Max(MaxInteriorX, Route[PointIndex].X);
-			}
-			AddCase(
-				TEXT("shared_source_bus_target_dogleg_avoids_target_island_nodes"),
-				HitCount == 0
-					&& Route.Num() >= 4
-					&& MaxInteriorX > 820.0
-					&& HasNonNegativeConnectionAlignmentShortenForEverySegment(Route, Options),
-				FString::Printf(TEXT("hits=%d points=%d max_inner_x=%.1f"),
-					HitCount,
-					Route.Num(),
-					MaxInteriorX));
+			AddCase(TEXT("route_diagnostic_endpoint_uses_real_target_pin"), bRouteEndpointUsesRealTarget, FString::Printf(TEXT("routes=%d selected=%d"), Run.RouteDiagnostics.Num(), Run.DesignDiagnostics.SelectedEndpointCandidateCount));
 		}
 
 		{
 			FOptions RouteOptions = Options;
 			RouteOptions.OutputAccessOffsetX = 40.0;
 			RouteOptions.InputAccessOffsetX = 40.0;
-			RouteOptions.PinDirectionBiasX = 40.0;
 			RouteOptions.NodePadding = 32.0;
 			const FVector2D Start(1404.0, 4557.0);
 			const FVector2D End(3516.0, 4633.0);
 			const double TrunkY = 4660.0;
 			const double BranchX = 1484.0;
-			const TArray<FVector2D> Route = BuildSharedSourceBusRoutePolylineWithTargetDogleg(
+			const TArray<FVector2D> Route = BuildSharedSourceBusRoutePolyline(
 				Start,
 				End,
 				TrunkY,
@@ -3476,99 +2107,7 @@ namespace UeAgentBlueprintAutoLayout
 					FMath::Abs(TrunkY - End.Y)));
 		}
 
-		{
-			TArray<FNode> Nodes;
-			for (int32 Index = 0; Index < 3; ++Index)
-			{
-				FNode Node;
-				Node.Index = Index;
-				Node.Guid = FString::Printf(TEXT("left_entry_actual_block_%d"), Index);
-				Node.Title = Node.Guid;
-				Node.Width = Index == 2 ? 300.0 : 160.0;
-				Node.Height = Index == 2 ? 120.0 : 90.0;
-				Node.OutputPinNames = { TEXT("ReturnValue") };
-				Node.InputPinNames = { TEXT("A") };
-				Node.OutputPinAnchors = { FVector2D(Node.Width, 40.0) };
-				Node.InputPinAnchors = { FVector2D(0.0, 50.0) };
-				Node.OutputPinAnchorValid = { 1 };
-				Node.InputPinAnchorValid = { 1 };
-				Nodes.Add(Node);
-			}
-			TArray<FEdge> Edges = {
-				{0, 1, TEXT("ReturnValue"), TEXT("A"), 0, 0, false}
-			};
-			TArray<FIsland> Islands;
-			FIsland SourceIsland;
-			SourceIsland.Id = 0;
-			SourceIsland.Nodes = {0};
-			SourceIsland.NodeSet.Add(0);
-			SourceIsland.LocalBounds = {0.0, 0.0, 160.0, 90.0};
-			SourceIsland.X = 0.0;
-			SourceIsland.Y = 0.0;
-			Islands.Add(SourceIsland);
-
-			FIsland TargetIsland;
-			TargetIsland.Id = 1;
-			TargetIsland.Nodes = {1, 2};
-			TargetIsland.NodeSet.Add(1);
-			TargetIsland.NodeSet.Add(2);
-			Nodes[1].NewX = 520.0;
-			Nodes[1].NewY = 250.0;
-			Nodes[2].NewX = 100.0;
-			Nodes[2].NewY = 240.0;
-			TargetIsland.LocalBounds = {0.0, 0.0, 680.0, 360.0};
-			TargetIsland.X = 300.0;
-			TargetIsland.Y = 0.0;
-			Islands.Add(TargetIsland);
-
-			TArray<FSelectedEndpointCandidate> SelectedEndpoints;
-			FSelectedEndpointCandidate Selected;
-			Selected.EdgeIndex = 0;
-			Selected.CandidateId = 0;
-			Selected.SourceIsland = 0;
-			Selected.TargetIsland = 1;
-			Selected.Side = TEXT("left");
-			Selected.ConnectionGroupId = 0;
-			Selected.SourceLocal = FVector2D(160.0, 40.0);
-			Selected.EntryLocal = FVector2D(-60.0, 300.0);
-			Selected.ActualTargetLocal = FVector2D(520.0, 300.0);
-			SelectedEndpoints.Add(Selected);
-
-			FRunResult Run;
-			const TArray<FReroutePlan> Plans = RouteDirectAndBusCorridors(Nodes, Edges, Islands, SelectedEndpoints, Options, Run);
-			TArray<FVector2D> ControlPoints;
-			ControlPoints.Add(FVector2D(Islands[0].X + Selected.SourceLocal.X, Islands[0].Y + Selected.SourceLocal.Y));
-			for (const FReroutePlan& Plan : Plans)
-			{
-				if (Plan.EdgeIndex == 0)
 				{
-					ControlPoints.Append(Plan.Points);
-					break;
-				}
-			}
-			ControlPoints.Add(FVector2D(Islands[1].X + Selected.ActualTargetLocal.X, Islands[1].Y + Selected.ActualTargetLocal.Y));
-			const TArray<FRect> HardRects = BuildRouteHardOccupancyRects(Nodes, Islands, Options, Edges[0]);
-			const bool bControlWireHitsSibling = ControlWireHitsHardOccupancy(ControlPoints, HardRects);
-			const bool bDirectStayedWithoutPlan = Plans.Num() == 0;
-			AddCase(TEXT("left_boundary_entry_to_actual_target_hit_forces_bus_route"),
-				Plans.Num() == 1
-					&& Run.DesignDiagnostics.BusContractCount == 1
-					&& Run.DesignDiagnostics.RouteKindUpgradeCount == 1
-					&& !bDirectStayedWithoutPlan
-					&& !bControlWireHitsSibling
-					&& Run.DesignDiagnostics.RouteThroughHardOccupancyCount == 0
-					&& HasNonNegativeConnectionAlignmentShortenForEverySegment(ControlPoints, Options),
-				FString::Printf(TEXT("plans=%d contracts=%d upgrades=%d direct=%d wire_hit=%d route_through=%d points=%d"),
-					Plans.Num(),
-					Run.DesignDiagnostics.BusContractCount,
-					Run.DesignDiagnostics.RouteKindUpgradeCount,
-					bDirectStayedWithoutPlan ? 1 : 0,
-					bControlWireHitsSibling ? 1 : 0,
-					Run.DesignDiagnostics.RouteThroughHardOccupancyCount,
-					ControlPoints.Num()));
-		}
-
-		{
 			TArray<FNode> Nodes;
 			for (int32 Index = 0; Index < 3; ++Index)
 			{
@@ -3593,7 +2132,7 @@ namespace UeAgentBlueprintAutoLayout
 			FRunResult Run;
 			RunLayoutForSelfTest(Nodes, Edges, Options, Run);
 			int32 LocalBusRouteCount = 0;
-			for (const TSharedPtr<FJsonValue>& RouteValue : Run.CorridorRouteDiagnostics)
+			for (const TSharedPtr<FJsonValue>& RouteValue : Run.RouteDiagnostics)
 			{
 				const TSharedPtr<FJsonObject> RouteObj = RouteValue.IsValid() ? RouteValue->AsObject() : nullptr;
 				FString RouteKind;
@@ -3604,7 +2143,7 @@ namespace UeAgentBlueprintAutoLayout
 			}
 			AddCase(TEXT("top_bottom_short_fanout_stays_direct_without_obstacle"),
 				LocalBusRouteCount == 0,
-				FString::Printf(TEXT("plans=%d local_bus_routes=%d diagnostics=%d"), Run.ReroutePlanCount, LocalBusRouteCount, Run.CorridorRouteDiagnostics.Num()));
+				FString::Printf(TEXT("plans=%d local_bus_routes=%d diagnostics=%d"), Run.ReroutePlanCount, LocalBusRouteCount, Run.RouteDiagnostics.Num()));
 		}
 
 		{
@@ -3647,395 +2186,12 @@ namespace UeAgentBlueprintAutoLayout
 					}
 				}
 			}
-			AddCase(TEXT("corridor_bus_target_branch_uses_connection_alignment_without_back_s_bend"),
+			AddCase(TEXT("bus_target_branch_uses_connection_alignment_without_back_s_bend"),
 				Run.ReroutePlanCount == 0 || bNoOldTargetSideSBendPoint,
 				FString::Printf(TEXT("plans=%d has_target_y_bend=%s points=%d"), Run.ReroutePlanCount, bHasOldTargetSideSBendPoint ? TEXT("true") : TEXT("false"), FirstPlan ? FirstPlan->Points.Num() : 0));
 		}
 
-		{
-			TArray<FPendingCorridorBusRoute> PendingRoutes;
-			TArray<FBusContract> BusContracts;
-			TArray<FSelectedEndpointCandidate> SelectedEndpoints;
-			for (int32 Index = 0; Index < 2; ++Index)
-			{
-				FSelectedEndpointCandidate Selected;
-				Selected.EdgeIndex = Index;
-				Selected.CandidateId = Index;
-				Selected.ConnectionGroupId = Index;
-				Selected.SourcePortOrderKey = static_cast<double>(Index);
-				SelectedEndpoints.Add(Selected);
-
-				const FVector2D Start(120.0, Index == 0 ? 100.0 : 250.0);
-				const FVector2D End(800.0, Index == 0 ? 500.0 : 520.0);
-				const double TrunkY = Index == 0 ? 260.0 : 310.0;
-				const double EntryX = ComputeInputXAlignedToOutput(Start.X, Options);
-				const double BranchX = ComputeOutputXAlignedToInput(End.X, Options);
-
-				FPlannedCorridorRoute Planned;
-				Planned.RouteKind = ERouteKind::LocalBus;
-				Planned.TrunkY = TrunkY;
-				Planned.BranchX = BranchX;
-				Planned.Polyline = { Start, FVector2D(EntryX, TrunkY), FVector2D(BranchX, TrunkY), End };
-
-				FBusContract Contract;
-				Contract.Id = Index;
-				Contract.SourceParamId = FString::Printf(TEXT("source_%d"), Index);
-				Contract.RouteKind = ERouteKind::LocalBus;
-				Contract.TrunkY = TrunkY;
-				Contract.EdgeIndices.Add(Index);
-				Contract.BranchXs.Add(BranchX);
-				RecomputeBusContractBoundsFromRoute(Contract, Planned);
-				BusContracts.Add(Contract);
-
-				FPendingCorridorBusRoute Pending;
-				Pending.SelectedEndpointIndex = Index;
-				Pending.ContractIndex = Index;
-				Pending.EdgeIndex = Index;
-				Pending.SourceParamId = Contract.SourceParamId;
-				Pending.Side = TEXT("left");
-				Pending.Planned = Planned;
-				Pending.Start = Start;
-				Pending.End = End;
-				PendingRoutes.Add(Pending);
-			}
-
-			FRunResult Run;
-			const TArray<FNode> EmptyNodes;
-			const TArray<FEdge> EmptyEdges;
-			const TArray<FIsland> EmptyIslands;
-			PlanBusContractsAtGeneration(PendingRoutes, BusContracts, SelectedEndpoints, EmptyNodes, EmptyEdges, EmptyIslands, Options, Run);
-			const double FarBranchX = PendingRoutes[0].Planned.Polyline[2].X;
-			const double CloseBranchX = PendingRoutes[1].Planned.Polyline[2].X;
-			const double ExpectedSpacing = GetCrossBusBranchLaneSpacing(Options);
-			const double ExpectedCloseBranchX = ComputeOutputXAlignedToInput(PendingRoutes[1].End.X, Options);
-			const bool bCloserTargetKeptRightLane =
-				CloseBranchX > FarBranchX + ExpectedSpacing - 0.5
-				&& FMath::IsNearlyEqual(CloseBranchX, ExpectedCloseBranchX, 0.5)
-				&& BusContracts[1].BranchLaneIndex == 0
-				&& BusContracts[0].BranchLaneIndex == 1
-				&& Run.DesignDiagnostics.CrossBusLaneCount == 1
-				&& HasNonNegativeConnectionAlignmentShortenForEverySegment(PendingRoutes[0].Planned.Polyline, Options)
-				&& HasNonNegativeConnectionAlignmentShortenForEverySegment(PendingRoutes[1].Planned.Polyline, Options);
-			AddCase(TEXT("cross_bus_branch_lane_uses_y_projection_and_closer_target_prefers_right_x"),
-				bCloserTargetKeptRightLane,
-				FString::Printf(TEXT("far_x=%.1f close_x=%.1f spacing=%.1f lanes=%d lane_index=%d/%d diagnostics=%d"),
-					FarBranchX,
-					CloseBranchX,
-					ExpectedSpacing,
-					Run.DesignDiagnostics.CrossBusLaneCount,
-					BusContracts[0].BranchLaneIndex,
-					BusContracts[1].BranchLaneIndex,
-					Run.CrossBusLaneDiagnostics.Num()));
-		}
-
-		{
-			TArray<FPendingCorridorBusRoute> PendingRoutes;
-			TArray<FBusContract> BusContracts;
-			TArray<FSelectedEndpointCandidate> SelectedEndpoints;
-			for (int32 Index = 0; Index < 2; ++Index)
-			{
-				const FVector2D Start(Index == 0 ? FVector2D(826.0, 4665.0) : FVector2D(230.4, 4571.0));
-				const FVector2D End(1906.0, Index == 0 ? 5116.0 : 5146.0);
-				const double TrunkY = Index == 0 ? 4665.0 : 4571.0;
-				const double EntryX = ComputeInputXAlignedToOutput(Start.X, Options);
-				const double BranchX = ComputeOutputXAlignedToInput(End.X, Options);
-
-				FSelectedEndpointCandidate Selected;
-				Selected.EdgeIndex = Index;
-				Selected.CandidateId = Index;
-				Selected.ConnectionGroupId = Index;
-				Selected.SourcePortOrderKey = Start.Y;
-				Selected.Side = TEXT("left");
-				SelectedEndpoints.Add(Selected);
-
-				FPlannedCorridorRoute Planned;
-				Planned.RouteKind = ERouteKind::LocalBus;
-				Planned.TrunkY = TrunkY;
-				Planned.BranchX = BranchX;
-				Planned.Polyline = { Start, FVector2D(EntryX, TrunkY), FVector2D(BranchX, TrunkY), End };
-
-				FBusContract Contract;
-				Contract.Id = Index;
-				Contract.SourceParamId = FString::Printf(TEXT("same_target_branch_source_%d"), Index);
-				Contract.RouteKind = ERouteKind::LocalBus;
-				Contract.TrunkY = TrunkY;
-				Contract.EdgeIndices.Add(Index);
-				Contract.BranchXs.Add(BranchX);
-				RecomputeBusContractBoundsFromRoute(Contract, Planned);
-				BusContracts.Add(Contract);
-
-				FPendingCorridorBusRoute Pending;
-				Pending.SelectedEndpointIndex = Index;
-				Pending.ContractIndex = Contract.Id;
-				Pending.EdgeIndex = Index;
-				Pending.SourceParamId = Contract.SourceParamId;
-				Pending.Side = TEXT("left");
-				Pending.Planned = Planned;
-				Pending.Start = Start;
-				Pending.End = End;
-				PendingRoutes.Add(Pending);
-			}
-
-			FRunResult Run;
-			const TArray<FNode> EmptyNodes;
-			const TArray<FEdge> EmptyEdges;
-			const TArray<FIsland> EmptyIslands;
-			const int32 Applied = ApplyCrossBusBranchXLanesAtGeneration(
-				PendingRoutes,
-				BusContracts,
-				SelectedEndpoints,
-				EmptyNodes,
-				EmptyEdges,
-				EmptyIslands,
-				Options,
-				Run);
-			const int32 BranchIndexA = PendingRoutes.IsValidIndex(0) ? GetTargetBranchPointIndex(PendingRoutes[0].Planned) : INDEX_NONE;
-			const int32 BranchIndexB = PendingRoutes.IsValidIndex(1) ? GetTargetBranchPointIndex(PendingRoutes[1].Planned) : INDEX_NONE;
-			const double BranchXA = PendingRoutes[0].Planned.Polyline.IsValidIndex(BranchIndexA) ? PendingRoutes[0].Planned.Polyline[BranchIndexA].X : 0.0;
-			const double BranchXB = PendingRoutes[1].Planned.Polyline.IsValidIndex(BranchIndexB) ? PendingRoutes[1].Planned.Polyline[BranchIndexB].X : 0.0;
-			const double BranchLaneSpacing = GetCrossBusBranchLaneSpacing(Options);
-			const bool bSelectedBranchesSeparatedBeforeWriteback =
-				Applied >= 1
-				&& FMath::Abs(BranchXA - BranchXB) >= BranchLaneSpacing - 0.5
-				&& HasNonNegativeConnectionAlignmentShortenForEverySegment(PendingRoutes[0].Planned.Polyline, Options)
-				&& HasNonNegativeConnectionAlignmentShortenForEverySegment(PendingRoutes[1].Planned.Polyline, Options);
-			AddCase(TEXT("selected_cross_bus_branch_x_lanes_are_finalized_before_writeback"),
-				bSelectedBranchesSeparatedBeforeWriteback,
-				FString::Printf(TEXT("applied=%d branch_x=%.1f/%.1f spacing=%.1f diagnostics=%d"),
-					Applied,
-					BranchXA,
-					BranchXB,
-					BranchLaneSpacing,
-					Run.RejectionDiagnostics.Num()));
-		}
-
-		{
-			TArray<FPendingCorridorBusRoute> PendingRoutes;
-			TArray<FBusContract> BusContracts;
-			TArray<FSelectedEndpointCandidate> SelectedEndpoints;
-
-			auto AddContractRoute = [&PendingRoutes, &BusContracts, &SelectedEndpoints, &Options](
-				const int32 ContractIndex,
-				const int32 EdgeIndex,
-				const FString& SourceParamId,
-				const FVector2D& Start,
-				const FVector2D& End,
-				const double InitialTrunkY)
-			{
-				if (!BusContracts.IsValidIndex(ContractIndex))
-				{
-					FBusContract Contract;
-					Contract.Id = ContractIndex;
-					Contract.SourceParamId = SourceParamId;
-					Contract.RouteKind = ERouteKind::LocalBus;
-					Contract.TrunkY = InitialTrunkY;
-					BusContracts.SetNum(ContractIndex + 1);
-					BusContracts[ContractIndex] = Contract;
-				}
-
-				FSelectedEndpointCandidate Selected;
-				Selected.EdgeIndex = EdgeIndex;
-				Selected.CandidateId = EdgeIndex;
-				Selected.ConnectionGroupId = ContractIndex;
-				Selected.SourcePortOrderKey = Start.Y;
-				Selected.Side = TEXT("left");
-				SelectedEndpoints.Add(Selected);
-
-				const double EntryX = ComputeInputXAlignedToOutput(Start.X, Options);
-				const double BranchX = ComputeOutputXAlignedToInput(End.X, Options);
-
-				FPlannedCorridorRoute Planned;
-				Planned.RouteKind = ERouteKind::LocalBus;
-				Planned.TrunkY = InitialTrunkY;
-				Planned.BranchX = BranchX;
-				Planned.Polyline = { Start, FVector2D(EntryX, InitialTrunkY), FVector2D(BranchX, InitialTrunkY), End };
-
-				BusContracts[ContractIndex].EdgeIndices.AddUnique(EdgeIndex);
-				BusContracts[ContractIndex].BranchXs.Add(BranchX);
-				RecomputeBusContractBoundsFromRoute(BusContracts[ContractIndex], Planned);
-
-				FPendingCorridorBusRoute Pending;
-				Pending.SelectedEndpointIndex = SelectedEndpoints.Num() - 1;
-				Pending.ContractIndex = ContractIndex;
-				Pending.EdgeIndex = EdgeIndex;
-				Pending.SourceParamId = SourceParamId;
-				Pending.Side = TEXT("left");
-				Pending.Planned = Planned;
-				Pending.Start = Start;
-				Pending.End = End;
-				PendingRoutes.Add(Pending);
-			};
-
-			AddContractRoute(0, 0, TEXT("source_a"), FVector2D(826.0, 4665.0), FVector2D(1906.0, 5116.0), 4606.0);
-			AddContractRoute(0, 1, TEXT("source_a"), FVector2D(826.0, 4665.0), FVector2D(5918.0, 5130.0), 4606.0);
-			AddContractRoute(1, 2, TEXT("source_b"), FVector2D(230.4, 4571.0), FVector2D(5918.0, 5100.0), 4607.0);
-			AddContractRoute(1, 3, TEXT("source_b"), FVector2D(230.4, 4571.0), FVector2D(1906.0, 5146.0), 4607.0);
-			AddContractRoute(2, 4, TEXT("source_c"), FVector2D(483.0, 4325.0), FVector2D(2712.0, 4756.0), 4517.75);
-
-			FRunResult Run;
-			const TArray<FNode> EmptyNodes;
-			const TArray<FEdge> EmptyEdges;
-			const TArray<FIsland> EmptyIslands;
-			PlanBusContractsAtGeneration(PendingRoutes, BusContracts, SelectedEndpoints, EmptyNodes, EmptyEdges, EmptyIslands, Options, Run);
-
-			const double TrunkLaneSpacing = GetBusTrunkLaneSpacing();
-			const double BranchLaneSpacing = GetCrossBusBranchLaneSpacing(Options);
-			double SourceAToSharedTargetBranchX = 0.0;
-			double SourceBToSharedTargetBranchX = 0.0;
-			for (const FPendingCorridorBusRoute& Pending : PendingRoutes)
-			{
-				const int32 BranchIndex = GetTargetBranchPointIndex(Pending.Planned);
-				if (!Pending.Planned.Polyline.IsValidIndex(BranchIndex))
-				{
-					continue;
-				}
-				if (Pending.EdgeIndex == 0)
-				{
-					SourceAToSharedTargetBranchX = Pending.Planned.Polyline[BranchIndex].X;
-				}
-				else if (Pending.EdgeIndex == 3)
-				{
-					SourceBToSharedTargetBranchX = Pending.Planned.Polyline[BranchIndex].X;
-				}
-			}
-
-			bool bNoLaneConflictFallback = true;
-			for (const TSharedPtr<FJsonValue>& LaneValue : Run.LaneAssignmentDiagnostics)
-			{
-				const TSharedPtr<FJsonObject> LaneObj = LaneValue.IsValid() ? LaneValue->AsObject() : nullptr;
-				bool bFallback = false;
-				if (LaneObj.IsValid() && LaneObj->TryGetBoolField(TEXT("lane_conflict_fallback_used"), bFallback) && bFallback)
-				{
-					bNoLaneConflictFallback = false;
-				}
-			}
-
-			const bool bDifferentInputsToSameTargetAvoid =
-				PendingRoutes.Num() == 5
-				&& FMath::Abs(PendingRoutes[0].Planned.TrunkY - PendingRoutes[2].Planned.TrunkY) >= TrunkLaneSpacing - 0.5
-				&& FMath::Abs(SourceAToSharedTargetBranchX - SourceBToSharedTargetBranchX) >= BranchLaneSpacing - 0.5
-				&& bNoLaneConflictFallback
-				&& Run.DesignDiagnostics.CrossBusTrunkLaneCount == 2
-				&& Run.DesignDiagnostics.CrossBusLaneCount >= 1
-				&& HasNonNegativeConnectionAlignmentShortenForEverySegment(PendingRoutes[0].Planned.Polyline, Options)
-				&& HasNonNegativeConnectionAlignmentShortenForEverySegment(PendingRoutes[3].Planned.Polyline, Options);
-			AddCase(TEXT("different_source_buses_to_same_target_inputs_plan_trunk_y_and_branch_x_lanes"),
-				bDifferentInputsToSameTargetAvoid,
-				FString::Printf(TEXT("trunk_y=%.1f/%.1f branch_x=%.1f/%.1f trunk_spacing=%.1f branch_spacing=%.1f fallback=%d trunk_lanes=%d branch_lanes=%d"),
-					PendingRoutes.IsValidIndex(0) ? PendingRoutes[0].Planned.TrunkY : 0.0,
-					PendingRoutes.IsValidIndex(2) ? PendingRoutes[2].Planned.TrunkY : 0.0,
-					SourceAToSharedTargetBranchX,
-					SourceBToSharedTargetBranchX,
-					TrunkLaneSpacing,
-					BranchLaneSpacing,
-					bNoLaneConflictFallback ? 0 : 1,
-					Run.DesignDiagnostics.CrossBusTrunkLaneCount,
-					Run.DesignDiagnostics.CrossBusLaneCount));
-		}
-
-		{
-			TArray<FNode> Nodes;
-			Nodes.SetNum(3);
-			for (int32 Index = 0; Index < Nodes.Num(); ++Index)
-			{
-				Nodes[Index].Index = Index;
-				Nodes[Index].Guid = FString::Printf(TEXT("branch_search_%d"), Index);
-				Nodes[Index].Title = Nodes[Index].Guid;
-				Nodes[Index].Width = 120.0;
-				Nodes[Index].Height = 80.0;
-				Nodes[Index].InputPinNames = { TEXT("In") };
-				Nodes[Index].OutputPinNames = { TEXT("Out") };
-				Nodes[Index].InputPinAnchors = { FVector2D(0.0, 40.0) };
-				Nodes[Index].OutputPinAnchors = { FVector2D(Nodes[Index].Width, 40.0) };
-				Nodes[Index].InputPinAnchorValid = { 1 };
-				Nodes[Index].OutputPinAnchorValid = { 1 };
-			}
-			Nodes[0].NewX = 0.0;
-			Nodes[0].NewY = 90.0;
-			Nodes[1].NewX = 450.0;
-			Nodes[1].NewY = 88.0;
-			Nodes[1].Width = 180.0;
-			Nodes[1].Height = 120.0;
-			Nodes[2].NewX = 950.0;
-			Nodes[2].NewY = 190.0;
-
-			TArray<FIsland> Islands;
-			Islands.SetNum(3);
-			for (int32 Index = 0; Index < Islands.Num(); ++Index)
-			{
-				Islands[Index].Id = Index;
-				Islands[Index].Nodes = { Index };
-				Islands[Index].NodeSet.Add(Index);
-				Islands[Index].LocalBounds = { Nodes[Index].NewX, Nodes[Index].NewY, Nodes[Index].NewX + Nodes[Index].Width, Nodes[Index].NewY + Nodes[Index].Height };
-			}
-			TArray<FEdge> Edges = {
-				{0, 2, TEXT("Out"), TEXT("In"), 0, 0, false}
-			};
-
-			const FVector2D Start(Nodes[0].NewX + Nodes[0].Width, Nodes[0].NewY + Nodes[0].OutputPinAnchors[0].Y);
-			const FVector2D End(Nodes[2].NewX, Nodes[2].NewY + Nodes[2].InputPinAnchors[0].Y);
-			const double EntryX = ComputeInputXAlignedToOutput(Start.X, Options);
-			const double ExitX = ComputeOutputXAlignedToInput(End.X, Options);
-
-			FPlannedCorridorRoute Planned;
-			Planned.RouteKind = ERouteKind::LocalBus;
-			Planned.TrunkY = Start.Y;
-			Planned.BranchX = ExitX;
-			Planned.Polyline = { Start, FVector2D(EntryX, Start.Y), FVector2D(ExitX, Start.Y), End };
-
-			TArray<FPendingCorridorBusRoute> PendingRoutes;
-			FPendingCorridorBusRoute Pending;
-			Pending.SelectedEndpointIndex = 0;
-			Pending.ContractIndex = 0;
-			Pending.EdgeIndex = 0;
-			Pending.SourceParamId = TEXT("hard_avoid_source");
-			Pending.Side = TEXT("left");
-			Pending.Planned = Planned;
-			Pending.Start = Start;
-			Pending.End = End;
-			PendingRoutes.Add(Pending);
-
-			TArray<FBusContract> BusContracts;
-			FBusContract Contract;
-			Contract.Id = 0;
-			Contract.SourceParamId = Pending.SourceParamId;
-			Contract.RouteKind = ERouteKind::LocalBus;
-			Contract.TrunkY = Planned.TrunkY;
-			Contract.EdgeIndices.Add(0);
-			Contract.BranchXs.Add(ExitX);
-			RecomputeBusContractBoundsFromRoute(Contract, Planned);
-			BusContracts.Add(Contract);
-
-			TArray<FSelectedEndpointCandidate> SelectedEndpoints;
-			FSelectedEndpointCandidate Selected;
-			Selected.EdgeIndex = 0;
-			Selected.CandidateId = 0;
-			Selected.ConnectionGroupId = 0;
-			Selected.SourcePortOrderKey = Start.Y;
-			Selected.Side = TEXT("left");
-			SelectedEndpoints.Add(Selected);
-
-			FRunResult Run;
-			PlanBusContractsAtGeneration(PendingRoutes, BusContracts, SelectedEndpoints, Nodes, Edges, Islands, Options, Run);
-			const TArray<FRect> RouteHardRects = BuildRouteHardOccupancyRects(Nodes, Islands, Options, Edges[0]);
-			const int32 HitCount = PendingRoutes.Num() > 0 ? CountControlWireHardOccupancyHits(PendingRoutes[0].Planned.Polyline, RouteHardRects) : INDEX_NONE;
-			const double BranchX = PendingRoutes.Num() > 0 ? PendingRoutes[0].Planned.BranchX : ExitX;
-			const bool bBranchSearchCanMoveBeforeHardBlocker =
-				PendingRoutes.Num() == 1
-				&& HitCount == 0
-				&& BranchX < ExitX - GetCrossBusBranchSetbackLimitX(Options) - 0.5
-				&& HasNonNegativeConnectionAlignmentShortenForEverySegment(PendingRoutes[0].Planned.Polyline, Options);
-			AddCase(TEXT("bus_branch_search_range_can_move_left_to_avoid_hard_occupancy"),
-				bBranchSearchCanMoveBeforeHardBlocker,
-				FString::Printf(TEXT("branch_x=%.1f exit_x=%.1f setback=%.1f hits=%d points=%d"),
-					BranchX,
-					ExitX,
-					GetCrossBusBranchSetbackLimitX(Options),
-					HitCount,
-					PendingRoutes.Num() > 0 ? PendingRoutes[0].Planned.Polyline.Num() : 0));
-		}
-
-		{
+										{
 			TArray<FNode> Nodes;
 			for (int32 Index = 0; Index < 4; ++Index)
 			{
@@ -4105,14 +2261,15 @@ namespace UeAgentBlueprintAutoLayout
 			};
 			FRunResult Run;
 			RunLayoutForSelfTest(Nodes, Edges, Options, Run);
-			const bool bFeedbackKeptInsideIsland =
+			const bool bFeedbackBecameRouteOnlyIslandEdge =
 				Run.DesignDiagnostics.SccFeedbackEdgeCount >= 1
 				&& Run.DesignDiagnostics.RankIgnoredEdgeCount >= Run.DesignDiagnostics.SccFeedbackEdgeCount
 				&& Run.DesignDiagnostics.FanoutImplicitEdgeCount == 0
-				&& Run.DesignDiagnostics.IslandCutEdgeCount == 0
+				&& Run.DesignDiagnostics.IslandCutEdgeCount >= Run.DesignDiagnostics.SccFeedbackEdgeCount
 				&& Run.IslandCount == 1
-				&& Run.IslandEdgeCount == 0;
-			AddCase(TEXT("scc_feedback_rank_ignored_edge_keeps_single_island"), bFeedbackKeptInsideIsland, FString::Printf(TEXT("scc_feedback=%d rank_ignored=%d fanout_edges=%d island_cut=%d islands=%d island_edges=%d"), Run.DesignDiagnostics.SccFeedbackEdgeCount, Run.DesignDiagnostics.RankIgnoredEdgeCount, Run.DesignDiagnostics.FanoutImplicitEdgeCount, Run.DesignDiagnostics.IslandCutEdgeCount, Run.IslandCount, Run.IslandEdgeCount));
+				&& Run.IslandEdgeCount >= Run.DesignDiagnostics.SccFeedbackEdgeCount
+				&& Run.DesignDiagnostics.RouteOnlyEdgeCount >= Run.DesignDiagnostics.SccFeedbackEdgeCount;
+			AddCase(TEXT("scc_feedback_becomes_route_only_island_edge"), bFeedbackBecameRouteOnlyIslandEdge, FString::Printf(TEXT("scc_feedback=%d rank_ignored=%d fanout_edges=%d island_cut=%d islands=%d island_edges=%d route_only=%d"), Run.DesignDiagnostics.SccFeedbackEdgeCount, Run.DesignDiagnostics.RankIgnoredEdgeCount, Run.DesignDiagnostics.FanoutImplicitEdgeCount, Run.DesignDiagnostics.IslandCutEdgeCount, Run.IslandCount, Run.IslandEdgeCount, Run.DesignDiagnostics.RouteOnlyEdgeCount));
 		}
 
 		{
@@ -4145,10 +2302,105 @@ namespace UeAgentBlueprintAutoLayout
 			const bool bFeedbackNotCountedAsFanout =
 				Run.DesignDiagnostics.SccFeedbackEdgeCount >= 1
 				&& Run.DesignDiagnostics.FanoutImplicitEdgeCount == 0
-				&& Run.DesignDiagnostics.IslandCutEdgeCount == 0
+				&& Run.DesignDiagnostics.IslandCutEdgeCount >= Run.DesignDiagnostics.SccFeedbackEdgeCount
 				&& Run.IslandCount == 1
-				&& Run.IslandEdgeCount == 0;
-			AddCase(TEXT("feedback_edge_not_counted_as_true_fanout"), bFeedbackNotCountedAsFanout, FString::Printf(TEXT("scc_feedback=%d fanout_edges=%d island_cut=%d islands=%d island_edges=%d backward=%d"), Run.DesignDiagnostics.SccFeedbackEdgeCount, Run.DesignDiagnostics.FanoutImplicitEdgeCount, Run.DesignDiagnostics.IslandCutEdgeCount, Run.IslandCount, Run.IslandEdgeCount, Run.MetricsAfter.BackwardEdgeCount));
+				&& Run.IslandEdgeCount >= Run.DesignDiagnostics.SccFeedbackEdgeCount
+				&& Run.DesignDiagnostics.RouteOnlyEdgeCount >= Run.DesignDiagnostics.SccFeedbackEdgeCount;
+			AddCase(TEXT("feedback_edge_not_counted_as_true_fanout"), bFeedbackNotCountedAsFanout, FString::Printf(TEXT("scc_feedback=%d fanout_edges=%d island_cut=%d islands=%d island_edges=%d route_only=%d backward=%d"), Run.DesignDiagnostics.SccFeedbackEdgeCount, Run.DesignDiagnostics.FanoutImplicitEdgeCount, Run.DesignDiagnostics.IslandCutEdgeCount, Run.IslandCount, Run.IslandEdgeCount, Run.DesignDiagnostics.RouteOnlyEdgeCount, Run.MetricsAfter.BackwardEdgeCount));
+		}
+
+		{
+			TArray<FIsland> TestIslands;
+			TestIslands.SetNum(2);
+			for (int32 Index = 0; Index < TestIslands.Num(); ++Index)
+			{
+				TestIslands[Index].Id = Index;
+				TestIslands[Index].Rank = Index;
+			}
+			TArray<FIslandEdge> TestIslandEdges;
+			FIslandEdge Edge01;
+			Edge01.EdgeIndex = 0;
+			Edge01.SourceIsland = 0;
+			Edge01.TargetIsland = 1;
+			TestIslandEdges.Add(Edge01);
+			FIslandEdge Edge10;
+			Edge10.EdgeIndex = 1;
+			Edge10.SourceIsland = 1;
+			Edge10.TargetIsland = 0;
+			TestIslandEdges.Add(Edge10);
+			TSet<int32> EmptyRouteOnly;
+			FRunResult CycleRun;
+			const TArray<int32> Order = BuildIslandTopoOrder(TestIslands, TestIslandEdges, EmptyRouteOnly, CycleRun);
+			const bool bResidualCycleIsDiagnosticOnly =
+				Order.Num() == TestIslands.Num()
+				&& CycleRun.DesignDiagnostics.IslandTopologicalResidualCycleEdgeCount > 0;
+			AddCase(TEXT("residual_island_cycle_is_diagnostic_not_route_only"), bResidualCycleIsDiagnosticOnly, FString::Printf(TEXT("order=%d residual=%d"), Order.Num(), CycleRun.DesignDiagnostics.IslandTopologicalResidualCycleEdgeCount));
+		}
+
+		{
+			TArray<FIsland> TestIslands;
+			TestIslands.SetNum(5);
+			for (int32 Index = 0; Index < TestIslands.Num(); ++Index)
+			{
+				TestIslands[Index].Id = Index;
+				TestIslands[Index].LocalBounds = {0.0, 0.0, 120.0, 80.0};
+				TestIslands[Index].Y = static_cast<double>(Index) * 100.0;
+			}
+			TestIslands[0].Y = 200.0;
+			TestIslands[1].Y = 0.0;
+
+			TArray<FIslandEdge> TestIslandEdges;
+			auto AddIslandEdge = [&TestIslandEdges](const int32 EdgeIndex, const int32 SourceIsland, const int32 TargetIsland, const double TargetY)
+			{
+				FIslandEdge Edge;
+				Edge.EdgeIndex = EdgeIndex;
+				Edge.SourceIsland = SourceIsland;
+				Edge.TargetIsland = TargetIsland;
+				Edge.SourceLocal = FVector2D(120.0, 40.0);
+				Edge.TargetLocal = FVector2D(0.0, TargetY);
+				TestIslandEdges.Add(Edge);
+			};
+			AddIslandEdge(0, 0, 2, 40.0);
+			AddIslandEdge(1, 1, 3, 40.0);
+			AddIslandEdge(2, 2, 4, 20.0);
+			AddIslandEdge(3, 3, 4, 80.0);
+
+			TSet<int32> EmptyRouteOnly;
+			TArray<FDeterministicIslandConnection> EmptyConnections;
+			const TArray<int32> TopoOrder = {0, 1, 2, 3, 4};
+			FRunResult RootRun;
+			const TArray<int32> Order = ComputeRootIslandContinuousOrder(
+				TestIslands,
+				TestIslandEdges,
+				EmptyConnections,
+				EmptyRouteOnly,
+				TopoOrder,
+				RootRun);
+			const bool bMultiLayerConvergenceOrdersByDownstreamInterface =
+				Order.Num() >= 2
+				&& Order[0] == 0
+				&& Order[1] == 1
+				&& RootRun.DesignDiagnostics.RootScoringTargetCount == 1
+				&& RootRun.DesignDiagnostics.RootShareComponentCount == 1
+				&& RootRun.DesignDiagnostics.RootContinuousOrderInversionScore == 0;
+			FString OrderText;
+			for (const int32 IslandId : Order)
+			{
+				if (!OrderText.IsEmpty())
+				{
+					OrderText += TEXT(",");
+				}
+				OrderText += FString::FromInt(IslandId);
+			}
+			AddCase(
+				TEXT("root_continuous_order_uses_multilayer_convergence_target"),
+				bMultiLayerConvergenceOrdersByDownstreamInterface,
+				FString::Printf(TEXT("order=%s scoring_targets=%d components=%d score=%.1f inversion=%.1f"),
+					*OrderText,
+					RootRun.DesignDiagnostics.RootScoringTargetCount,
+					RootRun.DesignDiagnostics.RootShareComponentCount,
+					RootRun.DesignDiagnostics.RootContinuousOrderScore,
+					RootRun.DesignDiagnostics.RootContinuousOrderInversionScore));
 		}
 
 		{
@@ -4179,8 +2431,12 @@ namespace UeAgentBlueprintAutoLayout
 				&& Run.DesignDiagnostics.BoundaryEntryCount >= 2
 				&& Run.DesignDiagnostics.EndpointCandidateCount >= 2
 				&& Run.DesignDiagnostics.SelectedEndpointCandidateCount == Run.IslandEdgeCount;
-			const bool bSimpleFanoutStayedDirect = Run.ReroutePlanCount == 0 && Run.DesignDiagnostics.LaneColoringLaneCount == 0;
-			AddCase(TEXT("simple_fanout_does_not_force_bus_reroutes"), Run.IslandCount == 3 && Run.IslandEdgeCount == 2 && bHasBusModel && bSimpleFanoutStayedDirect, FString::Printf(TEXT("islands=%d island_edges=%d internal_bus=%d boundary_entry=%d candidates=%d selected=%d reroutes=%d lanes=%d"), Run.IslandCount, Run.IslandEdgeCount, Run.DesignDiagnostics.InternalBusGroupCount, Run.DesignDiagnostics.BoundaryEntryCount, Run.DesignDiagnostics.EndpointCandidateCount, Run.DesignDiagnostics.SelectedEndpointCandidateCount, Run.ReroutePlanCount, Run.DesignDiagnostics.LaneColoringLaneCount));
+			const bool bSameOutputFanoutStayedBus =
+				Run.DesignDiagnostics.DirectIslandConnectionCount == 0
+				&& Run.DesignDiagnostics.BusIslandConnectionCount == 2
+				&& Run.ReroutePlanCount >= 2
+				&& Run.DesignDiagnostics.FanoutIntentGroupCount >= 1;
+			AddCase(TEXT("same_output_fanout_stays_bus_not_direct"), Run.IslandCount == 3 && Run.IslandEdgeCount == 2 && bHasBusModel && bSameOutputFanoutStayedBus, FString::Printf(TEXT("islands=%d island_edges=%d internal_bus=%d boundary_entry=%d candidates=%d selected=%d direct=%d bus=%d reroutes=%d fanout_groups=%d"), Run.IslandCount, Run.IslandEdgeCount, Run.DesignDiagnostics.InternalBusGroupCount, Run.DesignDiagnostics.BoundaryEntryCount, Run.DesignDiagnostics.EndpointCandidateCount, Run.DesignDiagnostics.SelectedEndpointCandidateCount, Run.DesignDiagnostics.DirectIslandConnectionCount, Run.DesignDiagnostics.BusIslandConnectionCount, Run.ReroutePlanCount, Run.DesignDiagnostics.FanoutIntentGroupCount));
 		}
 
 		{
@@ -4239,8 +2495,46 @@ namespace UeAgentBlueprintAutoLayout
 			};
 			FRunResult Run;
 			RunLayoutForSelfTest(Nodes, Edges, Options, Run);
-			const bool bDistantFanoutStayedDirectAfterCompaction = Run.ReroutePlanCount == 0 && Run.DesignDiagnostics.LaneColoringLaneCount == 0;
-			AddCase(TEXT("distant_safe_fanout_stays_direct_after_consumer_compaction"), bDistantFanoutStayedDirectAfterCompaction, FString::Printf(TEXT("reroutes=%d lanes=%d edge_crossing=%d"), Run.ReroutePlanCount, Run.DesignDiagnostics.LaneColoringLaneCount, Run.MetricsAfterReroute.EdgeCrossingCount));
+			const bool bDistantSameOutputFanoutStayedBus =
+				Run.DesignDiagnostics.DirectIslandConnectionCount == 0
+				&& Run.DesignDiagnostics.BusIslandConnectionCount == 2
+				&& Run.ReroutePlanCount >= 2
+				&& Run.DesignDiagnostics.FanoutIntentGroupCount >= 1;
+			AddCase(TEXT("distant_same_output_fanout_stays_bus_after_consumer_compaction"), bDistantSameOutputFanoutStayedBus, FString::Printf(TEXT("direct=%d bus=%d reroutes=%d lanes=%d edge_crossing=%d fanout_groups=%d"), Run.DesignDiagnostics.DirectIslandConnectionCount, Run.DesignDiagnostics.BusIslandConnectionCount, Run.ReroutePlanCount, Run.DesignDiagnostics.LaneColoringLaneCount, Run.MetricsAfterReroute.EdgeCrossingCount, Run.DesignDiagnostics.FanoutIntentGroupCount));
+		}
+
+		{
+			TMap<int32, TSet<int32>> OutputsByRoot;
+			OutputsByRoot.FindOrAdd(1).Add(100);
+			OutputsByRoot.FindOrAdd(1).Add(200);
+			OutputsByRoot.FindOrAdd(2).Add(100);
+			OutputsByRoot.FindOrAdd(2).Add(200);
+			TMap<FString, TArray<double>> InterfaceOrderByRootTarget;
+			InterfaceOrderByRootTarget.Add(MakeRootTargetKey(1, 100), {1.0});
+			InterfaceOrderByRootTarget.Add(MakeRootTargetKey(2, 100), {0.0});
+			InterfaceOrderByRootTarget.Add(MakeRootTargetKey(1, 200), {0.0});
+			InterfaceOrderByRootTarget.Add(MakeRootTargetKey(2, 200), {1.0});
+			TMap<FString, double> WeightByRootTarget;
+			WeightByRootTarget.Add(MakeRootTargetKey(1, 100), ColumnDistanceInfluenceWeight(1));
+			WeightByRootTarget.Add(MakeRootTargetKey(2, 100), ColumnDistanceInfluenceWeight(1));
+			WeightByRootTarget.Add(MakeRootTargetKey(1, 200), ColumnDistanceInfluenceWeight(2));
+			WeightByRootTarget.Add(MakeRootTargetKey(2, 200), ColumnDistanceInfluenceWeight(2));
+			double AdjacentFirstScore = 0.0;
+			double AdjacentFirstInversion = 0.0;
+			ScoreRootIslandOrder({2, 1}, OutputsByRoot, InterfaceOrderByRootTarget, WeightByRootTarget, AdjacentFirstScore, AdjacentFirstInversion);
+			double DistantFirstScore = 0.0;
+			double DistantFirstInversion = 0.0;
+			ScoreRootIslandOrder({1, 2}, OutputsByRoot, InterfaceOrderByRootTarget, WeightByRootTarget, DistantFirstScore, DistantFirstInversion);
+			const bool bAdjacentColumnDominatesDistantConflict =
+				FMath::IsNearlyEqual(AdjacentFirstScore, DistantFirstScore, 0.001)
+				&& AdjacentFirstInversion < DistantFirstInversion;
+			AddCase(TEXT("topology_column_order_weights_adjacent_over_distant_target"),
+				bAdjacentColumnDominatesDistantConflict,
+				FString::Printf(TEXT("adjacent_inv=%.3f distant_inv=%.3f score=%.3f/%.3f"),
+					AdjacentFirstInversion,
+					DistantFirstInversion,
+					AdjacentFirstScore,
+					DistantFirstScore));
 		}
 
 		{
@@ -4301,10 +2595,15 @@ namespace UeAgentBlueprintAutoLayout
 			};
 			FRunResult Run;
 			RunLayoutForSelfTest(Nodes, Edges, Options, Run);
-			const double CompactComponentSpan = Nodes[5].NewX - Nodes[3].NewX;
-			const bool bComponentLocalColumns = Run.DesignDiagnostics.PlacementComponentCount >= 2
-				&& CompactComponentSpan < 1200.0;
-			AddCase(TEXT("component_local_columns_ignore_unrelated_wide_island"), bComponentLocalColumns, FString::Printf(TEXT("components=%d compact_span=%.1f x=%.1f/%.1f/%.1f"), Run.DesignDiagnostics.PlacementComponentCount, CompactComponentSpan, Nodes[3].NewX, Nodes[4].NewX, Nodes[5].NewX));
+			const double WideSinkLeft = Nodes[1].NewX;
+			const double OtherSinkLeft = Nodes[2].NewX;
+			const double LeftResidual = FMath::Abs(WideSinkLeft - OtherSinkLeft);
+			const bool bReadySetNoOutputIslandsShareLeftEdge = Run.DesignDiagnostics.PlacementComponentCount >= 2
+				&& LeftResidual <= 0.5;
+			AddCase(TEXT("ready_set_no_output_islands_share_left_edge"), bReadySetNoOutputIslandsShareLeftEdge, FString::Printf(TEXT("components=%d left=%.1f/%.1f residual=%.1f x=%.1f/%.1f/%.1f"), Run.DesignDiagnostics.PlacementComponentCount, WideSinkLeft, OtherSinkLeft, LeftResidual, Nodes[1].NewX, Nodes[4].NewX, Nodes[5].NewX));
+			const bool bBidirectionalReanchorRanFromMiddleColumn = Run.DesignDiagnostics.IslandLeftwardReanchorBaseColumn == 1
+				&& Run.DesignDiagnostics.IslandLeftwardReanchorColumnCount >= 2;
+			AddCase(TEXT("ready_set_bidirectional_reanchor_runs_from_tallest_column"), bBidirectionalReanchorRanFromMiddleColumn, FString::Printf(TEXT("base_column=%d reanchor_columns=%d"), Run.DesignDiagnostics.IslandLeftwardReanchorBaseColumn, Run.DesignDiagnostics.IslandLeftwardReanchorColumnCount));
 		}
 
 		{
@@ -4332,13 +2631,12 @@ namespace UeAgentBlueprintAutoLayout
 			};
 			FRunResult Run;
 			RunLayoutForSelfTest(Nodes, Edges, Options, Run);
-			const bool bExecFanoutStayedInSkeleton = Run.IslandCount == 1
-				&& Run.IslandEdgeCount == 0
-				&& Run.DesignDiagnostics.FanoutImplicitEdgeCount == 0
-				&& Run.ReroutePlanCount == 0
+			const bool bExecFanoutSplitSourceIsland = Run.IslandCount == 3
+				&& Run.IslandEdgeCount == 2
+				&& Run.DesignDiagnostics.FanoutImplicitEdgeCount == 2
 				&& Nodes[0].NewX < Nodes[1].NewX
 				&& Nodes[0].NewX < Nodes[2].NewX;
-			AddCase(TEXT("exec_fanout_stays_in_skeleton_not_bus"), bExecFanoutStayedInSkeleton, FString::Printf(TEXT("islands=%d island_edges=%d fanout_edges=%d reroutes=%d x=%.1f/%.1f/%.1f"), Run.IslandCount, Run.IslandEdgeCount, Run.DesignDiagnostics.FanoutImplicitEdgeCount, Run.ReroutePlanCount, Nodes[0].NewX, Nodes[1].NewX, Nodes[2].NewX));
+			AddCase(TEXT("exec_total_output_fanout_splits_source_island"), bExecFanoutSplitSourceIsland, FString::Printf(TEXT("islands=%d island_edges=%d fanout_edges=%d reroutes=%d x=%.1f/%.1f/%.1f"), Run.IslandCount, Run.IslandEdgeCount, Run.DesignDiagnostics.FanoutImplicitEdgeCount, Run.ReroutePlanCount, Nodes[0].NewX, Nodes[1].NewX, Nodes[2].NewX));
 		}
 
 		{
@@ -4457,123 +2755,6 @@ namespace UeAgentBlueprintAutoLayout
 
 		{
 			TArray<FNode> Nodes;
-			for (int32 Index = 0; Index < 6; ++Index)
-			{
-				FNode Node;
-				Node.Index = Index;
-				Node.Guid = FString::Printf(TEXT("finalvisiblebranchxassigned%d"), Index);
-				Node.Title = Node.Guid;
-				Node.Width = 100.0;
-				Node.Height = 70.0;
-				Node.OutputPinNames = { TEXT("out") };
-				Node.InputPinNames = { TEXT("in") };
-				Node.OutputPinAnchors = { FVector2D(Node.Width, 35.0) };
-				Node.InputPinAnchors = { FVector2D(0.0, 35.0) };
-				Node.OutputPinAnchorValid = { 1 };
-				Node.InputPinAnchorValid = { 1 };
-				Nodes.Add(Node);
-			}
-			Nodes[0].NewX = 0.0;
-			Nodes[0].NewY = 0.0;
-			Nodes[1].NewX = 600.0;
-			Nodes[1].NewY = 0.0;
-			Nodes[2].NewX = 0.0;
-			Nodes[2].NewY = 160.0;
-			Nodes[3].NewX = 600.0;
-			Nodes[3].NewY = 300.0;
-			Nodes[4].NewX = 0.0;
-			Nodes[4].NewY = 320.0;
-			Nodes[5].NewX = 600.0;
-			Nodes[5].NewY = 140.0;
-			TArray<FEdge> Edges = {
-				{0, 1, TEXT("out"), TEXT("in"), 0, 0, false},
-				{2, 3, TEXT("out"), TEXT("in"), 0, 0, false},
-				{4, 5, TEXT("out"), TEXT("in"), 0, 0, false}
-			};
-			FIsland Island;
-			Island.Id = 0;
-			Island.Nodes = {0, 1, 2, 3, 4, 5};
-			for (const int32 NodeIndex : Island.Nodes)
-			{
-				Island.NodeSet.Add(NodeIndex);
-			}
-			Island.LocalBounds = BoundsForNodes(Nodes, Island.Nodes);
-			TArray<FIsland> Islands = {Island};
-			TMap<int32, int32> IslandByNode;
-			for (const int32 NodeIndex : Island.Nodes)
-			{
-				IslandByNode.Add(NodeIndex, 0);
-			}
-
-			const double TrunkY = 80.0;
-			const double EntryX = ComputeInputXAlignedToOutput(Nodes[0].NewX + Nodes[0].Width, Options);
-			const double OldCloseBranchX = EntryX + 80.0;
-			const double OldFarBranchX = EntryX + 180.0;
-			const double OldMidBranchX = OldCloseBranchX + 10.0;
-			FReroutePlan ClosePlan;
-			ClosePlan.EdgeIndex = 0;
-			ClosePlan.Reason = TEXT("direct_obstacle_local_bus");
-			ClosePlan.BusId = MakeSourceParamId(Edges[0]);
-			ClosePlan.RouteKind = ERouteKind::LocalBus;
-			ClosePlan.Points = { FVector2D(EntryX, TrunkY), FVector2D(OldCloseBranchX, TrunkY) };
-			FReroutePlan FarPlan;
-			FarPlan.EdgeIndex = 1;
-			FarPlan.Reason = TEXT("direct_obstacle_local_bus");
-			FarPlan.BusId = MakeSourceParamId(Edges[1]);
-			FarPlan.RouteKind = ERouteKind::LocalBus;
-			FarPlan.Points = { FVector2D(EntryX, TrunkY), FVector2D(OldFarBranchX, TrunkY) };
-			FReroutePlan MidPlan;
-			MidPlan.EdgeIndex = 2;
-			MidPlan.Reason = TEXT("direct_obstacle_local_bus");
-			MidPlan.BusId = MakeSourceParamId(Edges[2]);
-			MidPlan.RouteKind = ERouteKind::LocalBus;
-			MidPlan.Points = { FVector2D(EntryX, TrunkY), FVector2D(OldMidBranchX, TrunkY) };
-			TArray<FReroutePlan> Plans = {ClosePlan, FarPlan, MidPlan};
-			FRunResult Run;
-			const int32 InitialViolations = ValidateFinalVisibleRerouteBranchXLanes(Nodes, Edges, Islands, IslandByNode, Options, Plans, nullptr);
-			const int32 Adjusted = PlanFinalVisibleRerouteBranchXLanes(Nodes, Edges, Islands, IslandByNode, Options, Plans, Run);
-			const int32 FinalViolations = ValidateFinalVisibleRerouteBranchXLanes(Nodes, Edges, Islands, IslandByNode, Options, Plans, &Run);
-			double FinalCloseBranchX = 0.0;
-			double FinalFarBranchX = 0.0;
-			double FinalMidBranchX = 0.0;
-			TArray<FVisibleRerouteBranchXLaneItem> FinalItems;
-			CollectVisibleRerouteBranchXLaneItems(Nodes, Edges, Islands, IslandByNode, Options, Plans, FinalItems);
-			for (const FVisibleRerouteBranchXLaneItem& Item : FinalItems)
-			{
-				if (Item.EdgeIndex == 0)
-				{
-					FinalCloseBranchX = Item.BranchX;
-				}
-				else if (Item.EdgeIndex == 1)
-				{
-					FinalFarBranchX = Item.BranchX;
-				}
-				else if (Item.EdgeIndex == 2)
-				{
-					FinalMidBranchX = Item.BranchX;
-				}
-			}
-			AddCase(TEXT("final_visible_branch_x_lane_uses_assigned_previous_x_for_spacing"),
-				InitialViolations > 0
-				&& Adjusted >= 1
-				&& FinalViolations == 0
-				&& FinalCloseBranchX > FinalMidBranchX + GetCrossBusBranchLaneSpacing(Options) - 0.5
-				&& FinalMidBranchX > FinalFarBranchX + GetCrossBusBranchLaneSpacing(Options) - 0.5,
-				FString::Printf(TEXT("initial=%d adjusted=%d final=%d close=%.1f mid=%.1f far=%.1f old_close=%.1f old_mid=%.1f old_far=%.1f assignments=%d"),
-					InitialViolations,
-					Adjusted,
-					FinalViolations,
-					FinalCloseBranchX,
-					FinalMidBranchX,
-					FinalFarBranchX,
-					OldCloseBranchX,
-					OldMidBranchX,
-					OldFarBranchX,
-					Run.LaneAssignmentDiagnostics.Num()));
-		}
-
-		{
-			TArray<FNode> Nodes;
 			for (int32 Index = 0; Index < 5; ++Index)
 			{
 				FNode Node;
@@ -4614,7 +2795,7 @@ namespace UeAgentBlueprintAutoLayout
 			TArray<FEdge> NoAdjacentEdges;
 			TArray<FPortOrderDemandSet> EmptySourceDemands;
 			EmptySourceDemands.SetNum(Nodes.Num());
-			MinimizeColumnCrossings(Nodes, NoAdjacentEdges, EmptySourceDemands, DemandSets, Columns);
+			MinimizeColumnCrossings(Nodes, NoAdjacentEdges, EmptySourceDemands, DemandSets, nullptr, Columns);
 			const bool bDemandPropagated =
 				Demand0 && Demand1
 				&& Demand1->Value < Demand0->Value
@@ -4669,7 +2850,7 @@ namespace UeAgentBlueprintAutoLayout
 				{2, 4, TEXT("out"), TEXT("in"), 0, 0, true},
 				{1, 3, TEXT("out"), TEXT("in"), 0, 0, true}
 			};
-			MinimizeColumnCrossings(Nodes, AdjacentEdges, SourceDemands, EmptyTargetDemands, Columns);
+			MinimizeColumnCrossings(Nodes, AdjacentEdges, SourceDemands, EmptyTargetDemands, nullptr, Columns);
 			const bool bSourceDemandPropagated =
 				Demand3 && Demand4
 				&& Demand3->Value < Demand4->Value
@@ -4725,7 +2906,7 @@ namespace UeAgentBlueprintAutoLayout
 			const TArray<FEdge> AdjacentEdges = {
 				{1, 3, TEXT("out"), TEXT("in"), 0, 0, true}
 			};
-			MinimizeColumnCrossings(Nodes, AdjacentEdges, SourceDemands, EmptyTargetDemands, Columns);
+			MinimizeColumnCrossings(Nodes, AdjacentEdges, SourceDemands, EmptyTargetDemands, nullptr, Columns);
 			const bool bNestedSourceOrderSurvivesIntermediateBranch =
 				UpperPathDemand && LowerPathDemand
 				&& UpperPathDemand->Value < LowerPathDemand->Value
@@ -4739,105 +2920,6 @@ namespace UeAgentBlueprintAutoLayout
 					LowerPathDemand ? LowerPathDemand->Value : -1.0,
 					Columns[2].Num() > 0 ? Columns[2][0] : -1,
 					Columns[2].Num() > 1 ? Columns[2][1] : -1));
-		}
-
-		{
-			TArray<FIsland> Islands;
-			for (int32 Index = 0; Index < 3; ++Index)
-			{
-				FIsland Island;
-				Island.Id = Index;
-				Island.Rank = Index == 0 ? 0 : 1;
-				Island.X = Index == 0 ? 0.0 : 500.0;
-				Island.Y = 0.0;
-				Island.LocalBounds = {0.0, 0.0, Index == 0 ? 150.0 : 180.0, 90.0};
-				Islands.Add(Island);
-			}
-
-			TArray<FSelectedEndpointCandidate> SelectedEndpoints;
-			FSelectedEndpointCandidate LowerTarget;
-			LowerTarget.EdgeIndex = 0;
-			LowerTarget.SourceIsland = 0;
-			LowerTarget.TargetIsland = 1;
-			LowerTarget.Side = TEXT("left");
-			LowerTarget.SourceLocal = FVector2D(150.0, 90.0);
-			LowerTarget.EntryLocal = FVector2D(0.0, 90.0);
-			LowerTarget.ActualTargetLocal = FVector2D(0.0, 90.0);
-			LowerTarget.SourcePortOrderKey = LowerTarget.SourceLocal.Y;
-			LowerTarget.bPlacementOwner = true;
-			SelectedEndpoints.Add(LowerTarget);
-
-			FSelectedEndpointCandidate UpperTarget;
-			UpperTarget.EdgeIndex = 1;
-			UpperTarget.SourceIsland = 0;
-			UpperTarget.TargetIsland = 2;
-			UpperTarget.Side = TEXT("left");
-			UpperTarget.SourceLocal = FVector2D(150.0, 30.0);
-			UpperTarget.EntryLocal = FVector2D(0.0, -420.0);
-			UpperTarget.ActualTargetLocal = FVector2D(0.0, -420.0);
-			UpperTarget.SourcePortOrderKey = UpperTarget.SourceLocal.Y;
-			UpperTarget.bPlacementOwner = true;
-			SelectedEndpoints.Add(UpperTarget);
-
-			FPlacementOwnership Ownership;
-			Ownership.OwnerSourceByIsland.Init(INDEX_NONE, Islands.Num());
-			Ownership.OwnerSourceByIsland[1] = 0;
-			Ownership.OwnerSourceByIsland[2] = 0;
-			Ownership.OwnerEdgeIndices.Add(0);
-			Ownership.OwnerEdgeIndices.Add(1);
-			PlaceIslandsYByWeightedMedianAndPacking(TArray<FNode>(), Islands, SelectedEndpoints, Ownership, Options);
-			const TArray<FSourcePortOrderConstraint> Constraints = BuildSourcePortOrderConstraints(Islands, SelectedEndpoints, &Ownership.OwnerEdgeIndices);
-			const int32 Violations = CountSourcePortOrderViolations(Islands, Constraints);
-			const bool bIslandPlacementPreservesSourcePortOrder =
-				Constraints.Num() == 1
-				&& Violations == 0
-				&& Islands[2].Y + Islands[2].LocalBounds.Height() * 0.5 < Islands[1].Y + Islands[1].LocalBounds.Height() * 0.5;
-			AddCase(TEXT("island_y_placement_preserves_source_output_port_order"),
-				bIslandPlacementPreservesSourcePortOrder,
-				FString::Printf(TEXT("constraints=%d violations=%d upper_y=%.1f lower_y=%.1f"), Constraints.Num(), Violations, Islands[2].Y, Islands[1].Y));
-		}
-
-		{
-			TArray<FNode> Nodes;
-			FNode SparseNode;
-			SparseNode.Index = 0;
-			SparseNode.Guid = TEXT("sparse_node");
-			SparseNode.Title = SparseNode.Guid;
-			SparseNode.NewX = 0.0;
-			SparseNode.NewY = 260.0;
-			SparseNode.Width = 160.0;
-			SparseNode.Height = 80.0;
-			Nodes.Add(SparseNode);
-
-			FIsland SparseIsland;
-			SparseIsland.Id = 0;
-			SparseIsland.X = 0.0;
-			SparseIsland.Y = 0.0;
-			SparseIsland.LocalBounds = {0.0, 0.0, 820.0, 520.0};
-			SparseIsland.Nodes = {0};
-
-			const TArray<FRect> BlockingRects = {
-				FRect{0.0, 0.0, 300.0, 110.0}
-			};
-			double SelectedX = 0.0;
-			double SelectedY = 0.0;
-			const bool bFoundSparsePlacement = SelectNearestFeasibleIslandPlacement(
-				Nodes,
-				SparseIsland,
-				0.0,
-				BlockingRects,
-				Options,
-				-TNumericLimits<double>::Max(),
-				SelectedX,
-				SelectedY);
-			const bool bSparseAabbDoesNotForceRightEscape =
-				bFoundSparsePlacement
-				&& FMath::Abs(SelectedX) <= 0.5
-				&& FMath::Abs(SelectedY) <= 0.5;
-			AddCase(
-				TEXT("island_placement_uses_segmented_hard_occupancy_not_sparse_aabb"),
-				bSparseAabbDoesNotForceRightEscape,
-				FString::Printf(TEXT("found=%s selected=(%.1f,%.1f)"), bFoundSparsePlacement ? TEXT("true") : TEXT("false"), SelectedX, SelectedY));
 		}
 
 		{
@@ -4966,19 +3048,25 @@ namespace UeAgentBlueprintAutoLayout
 			RunLayoutForSelfTest(Nodes, Edges, Options, Run);
 			const double PureOutY = Nodes[2].NewY + GetOutputAnchor(Nodes[2], 0).Y;
 			const double BranchConditionY = Nodes[1].NewY + GetInputAnchor(Nodes[1], 1).Y;
+			const double BranchExecY = Nodes[1].NewY + GetInputAnchor(Nodes[1], 0).Y;
 			const double LeafAY = Nodes[3].NewY + GetOutputAnchor(Nodes[3], 0).Y;
 			const double PureAY = Nodes[2].NewY + GetInputAnchor(Nodes[2], 0).Y;
 			const double LeafBY = Nodes[4].NewY + GetOutputAnchor(Nodes[4], 0).Y;
 			const double PureBY = Nodes[2].NewY + GetInputAnchor(Nodes[2], 1).Y;
+			const double ZoneHalfHeight = InputChainForbiddenZoneHalfHeight(Options);
+			const bool bPureAvoidsBranchExecZone =
+				!(Nodes[2].NewY < BranchExecY + ZoneHalfHeight && Nodes[2].NewY + Nodes[2].Height > BranchExecY - ZoneHalfHeight);
 			const bool bCompoundInputChainAligned = Run.DesignDiagnostics.InputChainCount == 3
 				&& Run.DesignDiagnostics.InputChainNodeCount == 3
 				&& Nodes[3].NewX < Nodes[2].NewX
 				&& Nodes[4].NewX < Nodes[2].NewX
 				&& Nodes[2].NewX < Nodes[1].NewX
-				&& FMath::Abs(PureOutY - BranchConditionY) <= 1.0
+				&& bPureAvoidsBranchExecZone
+				&& Run.DesignDiagnostics.InputChainForbiddenZoneCount >= 1
+				&& Run.DesignDiagnostics.InputChainForbiddenAvoidanceCount >= 1
 				&& FMath::Abs(LeafAY - PureAY) <= InputChainTargetGroupGap(Options) + 1.0
 				&& FMath::Abs(LeafBY - PureBY) <= InputChainTargetGroupGap(Options) + 1.0;
-			AddCase(TEXT("compound_input_chain_uses_nested_two_column_anchor"), bCompoundInputChainAligned, FString::Printf(TEXT("chains=%d nodes=%d x=%.1f/%.1f/%.1f/%.1f residual=%.1f/%.1f/%.1f"), Run.DesignDiagnostics.InputChainCount, Run.DesignDiagnostics.InputChainNodeCount, Nodes[3].NewX, Nodes[4].NewX, Nodes[2].NewX, Nodes[1].NewX, FMath::Abs(PureOutY - BranchConditionY), FMath::Abs(LeafAY - PureAY), FMath::Abs(LeafBY - PureBY)));
+			AddCase(TEXT("compound_input_chain_uses_nested_two_column_anchor"), bCompoundInputChainAligned, FString::Printf(TEXT("chains=%d nodes=%d x=%.1f/%.1f/%.1f/%.1f residual=%.1f/%.1f/%.1f exec_avoided=%s"), Run.DesignDiagnostics.InputChainCount, Run.DesignDiagnostics.InputChainNodeCount, Nodes[3].NewX, Nodes[4].NewX, Nodes[2].NewX, Nodes[1].NewX, FMath::Abs(PureOutY - BranchConditionY), FMath::Abs(LeafAY - PureAY), FMath::Abs(LeafBY - PureBY), bPureAvoidsBranchExecZone ? TEXT("true") : TEXT("false")));
 		}
 
 		{
@@ -5336,17 +3424,25 @@ namespace UeAgentBlueprintAutoLayout
 			LayoutIslandInternally(Nodes, Edges, Edges, EmptyRankIgnoredEdges, Island, Options, Run);
 			TArray<FEdge> EdgesWithTargetOutput = Edges;
 			EdgesWithTargetOutput.Add({1, 0, TEXT("out"), TEXT("unused"), 0, 0, false});
+			FIsland BoundaryOnlyIsland = Island;
+			BoundaryOnlyIsland.Nodes = {1, 2};
+			BoundaryOnlyIsland.NodeSet.Reset();
+			BoundaryOnlyIsland.NodeSet.Add(1);
+			BoundaryOnlyIsland.NodeSet.Add(2);
 			const TArray<FInputChainForbiddenZone> DirectZones = BuildInputChainForbiddenZonesForTarget(
 				Nodes,
 				EdgesWithTargetOutput,
-				Island,
+				BoundaryOnlyIsland,
 				1,
 				FVector2D(Nodes[1].NewX, Nodes[1].NewY),
 				Options);
-			bool bOutputPinIgnoredForForbiddenZones = DirectZones.Num() == 1;
+			bool bOutputPinIgnoredForForbiddenZones = DirectZones.Num() == 2;
+			bool bExecAndExternalInputsIncludedForForbiddenZones = DirectZones.Num() == 2;
 			for (const FInputChainForbiddenZone& Zone : DirectZones)
 			{
 				bOutputPinIgnoredForForbiddenZones = bOutputPinIgnoredForForbiddenZones && !Zone.bOutputPin;
+				bExecAndExternalInputsIncludedForForbiddenZones =
+					bExecAndExternalInputsIncludedForForbiddenZones && (Zone.PinIndex == 0 || Zone.PinIndex == 1);
 			}
 
 			const double BlockedPinY = Nodes[1].NewY + GetInputAnchor(Nodes[1], 1).Y;
@@ -5436,12 +3532,13 @@ namespace UeAgentBlueprintAutoLayout
 
 			AddCase(
 				TEXT("input_chain_forbidden_zone_and_collision_guard"),
-				bForbiddenZoneAvoided && bOutputPinIgnoredForForbiddenZones && bCollisionGuardCreated && bExecCollisionGuardCreated && bExistingPlanSkipped && bProtectedIslandEdgeSkipped,
+				bForbiddenZoneAvoided && bOutputPinIgnoredForForbiddenZones && bExecAndExternalInputsIncludedForForbiddenZones && bCollisionGuardCreated && bExecCollisionGuardCreated && bExistingPlanSkipped && bProtectedIslandEdgeSkipped,
 				FString::Printf(
-					TEXT("zones=%d direct_zones=%d output_ignored=%s avoid=%d guard=%d exec_guard=%d rejected=%d existing_guard=%d protected_guard=%d chain=%.1f..%.1f block=%.1f plan=%d existing_points=%d"),
+					TEXT("zones=%d direct_zones=%d output_ignored=%s exec_external_inputs=%s avoid=%d guard=%d exec_guard=%d rejected=%d existing_guard=%d protected_guard=%d chain=%.1f..%.1f block=%.1f plan=%d existing_points=%d"),
 					Run.DesignDiagnostics.InputChainForbiddenZoneCount,
 					DirectZones.Num(),
 					bOutputPinIgnoredForForbiddenZones ? TEXT("true") : TEXT("false"),
+					bExecAndExternalInputsIncludedForForbiddenZones ? TEXT("true") : TEXT("false"),
 					Run.DesignDiagnostics.InputChainForbiddenAvoidanceCount,
 					RerouteRun.DesignDiagnostics.InputChainCollisionRerouteCount,
 					ExecRerouteRun.DesignDiagnostics.InputChainCollisionRerouteCount,
@@ -5453,99 +3550,6 @@ namespace UeAgentBlueprintAutoLayout
 					BlockedPinY,
 					Plans.Num(),
 					ExistingPlans.Num() > 0 ? ExistingPlans[0].Points.Num() : 0));
-		}
-
-		{
-			TArray<FNode> Nodes;
-			Nodes.SetNum(3);
-			for (int32 Index = 0; Index < Nodes.Num(); ++Index)
-			{
-				Nodes[Index].Index = Index;
-				Nodes[Index].Guid = FString::Printf(TEXT("input_chain_source_occupancy_%d"), Index);
-				Nodes[Index].Title = Nodes[Index].Guid;
-				Nodes[Index].Width = Index == 1 ? 220.0 : 140.0;
-				Nodes[Index].Height = Index == 1 ? 120.0 : (Index == 0 ? 90.0 : 64.0);
-				Nodes[Index].Rank = Index == 1 ? 1 : 0;
-				Nodes[Index].NewX = Index == 1 ? 320.0 : 0.0;
-				Nodes[Index].NewY = Index == 0 ? 10.0 : 0.0;
-				Nodes[Index].OutputPinNames = { TEXT("out") };
-				Nodes[Index].OutputPinAnchors = { FVector2D(Nodes[Index].Width, Index == 0 ? 45.0 : 32.0) };
-				Nodes[Index].OutputPinAnchorValid = { 1 };
-				if (Index == 1)
-				{
-					Nodes[Index].InputPinNames = { TEXT("A"), TEXT("B") };
-					Nodes[Index].InputPinAnchors = { FVector2D(0.0, 44.0), FVector2D(0.0, 48.0) };
-					Nodes[Index].InputPinAnchorValid = { 1, 1 };
-				}
-			}
-			TArray<FEdge> Edges = {
-				{0, 1, TEXT("out"), TEXT("A"), 0, 0, false},
-				{2, 1, TEXT("out"), TEXT("B"), 0, 1, false}
-			};
-			FIsland Island;
-			Island.Id = 0;
-			Island.Nodes = {0, 1, 2};
-			for (const int32 NodeIndex : Island.Nodes)
-			{
-				Island.NodeSet.Add(NodeIndex);
-			}
-			Island.Columns.SetNum(2);
-			Island.Columns[0] = {0};
-			Island.Columns[1] = {1};
-			FInputChain Chain;
-			Chain.Id = 0;
-			Chain.TargetNode = 1;
-			Chain.TargetPinIndex = 1;
-			Chain.TargetEdgeIndex = 1;
-			Chain.TargetRank = 1;
-			Chain.CorridorIndex = 0;
-			Chain.Nodes = {2};
-			Chain.EdgeIndices = {1};
-			Island.InputChains.Add(Chain);
-			Island.InputChainNodeSet.Add(2);
-
-			TSet<int32> ActiveCorridors;
-			ActiveCorridors.Add(0);
-			const TArray<FInputChainForbiddenZone> Zones = BuildInputChainForbiddenZonesForTarget(
-				Nodes,
-				Edges,
-				Island,
-				1,
-				FVector2D(Nodes[1].NewX, Nodes[1].NewY),
-				Options,
-				&ActiveCorridors,
-				true);
-			TArray<FColumnItem> Items;
-			FColumnItem Item;
-			Item.NodeIndex = 0;
-			Item.Height = Nodes[2].Height;
-			Item.PreferredTop = 20.0;
-			Item.bHasPreferred = true;
-			Items.Add(Item);
-			int32 AvoidanceCount = 0;
-			PlaceAnchoredIntervalsAvoidingForbiddenZones(Items, 24.0, Zones, &AvoidanceCount);
-			const FRect SourceRect = MakeNodeRectAt(Nodes[0], FVector2D(Nodes[0].NewX, Nodes[0].NewY));
-			const FRect ChainRect = {0.0, Items[0].FinalTop, Nodes[2].Width, Items[0].FinalTop + Nodes[2].Height};
-			bool bHasSourceOccupancyZone = false;
-			for (const FInputChainForbiddenZone& Zone : Zones)
-			{
-				bHasSourceOccupancyZone = bHasSourceOccupancyZone || Zone.bSourceNodeOccupancy;
-			}
-			const bool bSourceOccupancyAvoided =
-				bHasSourceOccupancyZone
-				&& AvoidanceCount > 0
-				&& !ChainRect.Intersects(SourceRect, 24.0);
-			AddCase(
-				TEXT("input_chain_avoids_same_corridor_source_node_occupancy"),
-				bSourceOccupancyAvoided,
-				FString::Printf(TEXT("zones=%d has_source_zone=%s avoidance=%d source=%.1f..%.1f chain=%.1f..%.1f"),
-					Zones.Num(),
-					bHasSourceOccupancyZone ? TEXT("true") : TEXT("false"),
-					AvoidanceCount,
-					SourceRect.Top,
-					SourceRect.Bottom,
-					ChainRect.Top,
-					ChainRect.Bottom));
 		}
 
 		{
@@ -5609,8 +3613,10 @@ namespace UeAgentBlueprintAutoLayout
 					Plans.Num() > 0 ? *Plans[0].Reason : TEXT("none")));
 		}
 
-		RunSourceColumnCollisionAabbSelfTests(Result, Options);
-		RunSameIslandForwardXColumnSelfTests(Result, Options);
+		RunSourceColumnCollisionSelfTests(Result, Options);
+		RunInterIslandBranchSlotSelfTests(Result, Options);
+		RunInterIslandBusSlotBiasSelfTests(Result);
+		RunA49IslandOffsetMergeSelfTests(Result);
 
 		{
 			FReroutePlan Plan;
@@ -5660,18 +3666,30 @@ namespace UeAgentBlueprintAutoLayout
 			FIslandPortCandidate Candidate;
 			Candidate.SourceLocal = FVector2D(431.0, 57.0);
 			Candidate.TargetLocal = FVector2D(-66.0, 554.0);
-			Candidate.ActualTargetLocal = FVector2D(3643.0, 554.0);
+			Candidate.ActualTargetLocal = FVector2D(540.0, 554.0);
 			Candidate.Side = TEXT("left");
+			Candidate.AllowedMinX = Candidate.TargetLocal.X;
+			Candidate.AllowedMaxX = ComputeOutputXAlignedToInput(Candidate.ActualTargetLocal.X, Options);
 			const double RequiredDelta = MinTargetDeltaXForCandidate(Candidate, Options);
-			const bool bLeftEntryRequiresForwardReachableTarget =
-				RequiredDelta >= Candidate.SourceLocal.X + EndpointAccessClearanceX(Options) - Candidate.TargetLocal.X - 0.5;
+			const double FixedLeftDelta = ComputeTargetOriginDeltaXForAlignedConnection(Candidate.SourceLocal, Candidate.TargetLocal, Options)
+				+ FMath::Max(0.0, Options.NodePadding);
+			const double ExpectedDelta = ComputeTargetOriginDeltaXForAlignedConnection(
+				Candidate.SourceLocal,
+				FVector2D(Candidate.AllowedMaxX, Candidate.TargetLocal.Y),
+				Options)
+				+ FMath::Max(0.0, Options.NodePadding);
+			const bool bLeftEntryUsesAllowedRightLimit =
+				FMath::IsNearlyEqual(RequiredDelta, ExpectedDelta, 0.5)
+				&& RequiredDelta + 0.5 < FixedLeftDelta;
 			AddCase(
-				TEXT("left_boundary_entry_requires_source_to_entry_forward_alignment"),
-				bLeftEntryRequiresForwardReachableTarget,
-				FString::Printf(TEXT("required_delta=%.1f source_x=%.1f entry_x=%.1f clearance=%.1f"),
+				TEXT("left_boundary_entry_uses_allowed_max_for_forward_alignment"),
+				bLeftEntryUsesAllowedRightLimit,
+				FString::Printf(TEXT("required_delta=%.1f expected=%.1f fixed_delta=%.1f allowed=%.1f..%.1f clearance=%.1f"),
 					RequiredDelta,
-					Candidate.SourceLocal.X,
-					Candidate.TargetLocal.X,
+					ExpectedDelta,
+					FixedLeftDelta,
+					Candidate.AllowedMinX,
+					Candidate.AllowedMaxX,
 					EndpointAccessClearanceX(Options)));
 		}
 
@@ -5701,7 +3719,6 @@ namespace UeAgentBlueprintAutoLayout
 			TopCandidate.ActualTargetLocal = FVector2D(650.0, 300.0);
 			TopCandidate.AllowedMinX = 0.0;
 			TopCandidate.AllowedMaxX = 560.0;
-			TopCandidate.bContinuousSegment = true;
 			Candidates.Add(TopCandidate);
 
 			const TSet<int32> RouteOnlyEdges;
@@ -5726,52 +3743,6 @@ namespace UeAgentBlueprintAutoLayout
 					Proposals[0].Score,
 					Proposals[1].RequiredTargetDeltaX,
 					Proposals[1].Score));
-		}
-
-		{
-			TArray<FIsland> Islands;
-			for (int32 IslandIndex = 0; IslandIndex < 3; ++IslandIndex)
-			{
-				FIsland Island;
-				Island.Id = IslandIndex;
-				Island.Rank = IslandIndex == 2 ? 1 : 0;
-				Island.X = 0.0;
-				Island.Y = 0.0;
-				Island.LocalBounds = IslandIndex == 1
-					? FRect{0.0, 0.0, 260.0, 360.0}
-					: (IslandIndex == 2 ? FRect{0.0, 0.0, 760.0, 170.0} : FRect{0.0, 0.0, 120.0, 100.0});
-				Islands.Add(Island);
-			}
-			FSelectedEndpointCandidate Selected;
-			Selected.EdgeIndex = 0;
-			Selected.SourceIsland = 0;
-			Selected.TargetIsland = 2;
-			Selected.Side = TEXT("left");
-			Selected.SourceLocal = FVector2D(120.0, 50.0);
-			Selected.EntryLocal = FVector2D(0.0, 50.0);
-			Selected.ActualTargetLocal = FVector2D(0.0, 50.0);
-			Selected.SourcePortOrderKey = 50.0;
-			TArray<FSelectedEndpointCandidate> SelectedEndpoints{Selected};
-			FPlacementOwnership Ownership;
-			Ownership.OwnerSourceByIsland.Init(INDEX_NONE, Islands.Num());
-			Ownership.OwnerSourceByIsland[2] = 0;
-			Ownership.OwnerEdgeIndices.Add(0);
-			PlaceIslandsYByWeightedMedianAndPacking(TArray<FNode>(), Islands, SelectedEndpoints, Ownership, Options);
-			const bool bShiftedXInsteadOfStretchingY =
-				Islands[2].X > 120.0
-				&& FMath::Abs(Islands[2].Y) <= Options.NodePadding
-				&& !IslandAabb(Islands[2]).Intersects(IslandAabb(Islands[0]), Options.NodePadding)
-				&& !IslandAabb(Islands[2]).Intersects(IslandAabb(Islands[1]), Options.NodePadding);
-			AddCase(
-				TEXT("island_y_placement_uses_x_shift_to_avoid_meaningless_vertical_stretch"),
-				bShiftedXInsteadOfStretchingY,
-				FString::Printf(
-					TEXT("target=(%.1f,%.1f) source_bottom=%.1f blocker=%.1f..%.1f"),
-					Islands[2].X,
-					Islands[2].Y,
-					IslandAabb(Islands[0]).Bottom,
-					IslandAabb(Islands[1]).Top,
-					IslandAabb(Islands[1]).Bottom));
 		}
 
 		{
@@ -5902,7 +3873,6 @@ namespace UeAgentBlueprintAutoLayout
 			CompactProbeOptions.NodePadding = 16.0;
 			CompactProbeOptions.OutputAccessOffsetX = 50.0;
 			CompactProbeOptions.InputAccessOffsetX = 30.0;
-			CompactProbeOptions.PinDirectionBiasX = 40.0;
 			TArray<FNode> FormulaProbeNodes = Nodes;
 			for (const int32 NodeIndex : {1, 2})
 			{
@@ -5925,8 +3895,10 @@ namespace UeAgentBlueprintAutoLayout
 				&& FMath::IsNearlyEqual(CompactOneBusGap, 80.0, 0.5)
 				&& FMath::IsNearlyEqual(CompactTwoBusGap, 80.0, 0.5);
 			const bool bNonLeftInputUsesBoundary = Run.DesignDiagnostics.LeftBoundaryEntryCount >= 1
-				&& Run.DesignDiagnostics.TopBoundaryEntryCount >= 2
-				&& Run.DesignDiagnostics.BottomBoundaryEntryCount >= 2;
+				&& Run.DesignDiagnostics.BoundaryBusRequiredCount >= 1
+				&& Run.DesignDiagnostics.BoundaryBusCount >= 1
+				&& Run.DesignDiagnostics.TopBoundaryEntryCount >= 1
+				&& Run.DesignDiagnostics.BottomBoundaryEntryCount >= 1;
 			AddCase(TEXT("internal_bus_demand_compacts_column_gap_and_entry_side"), bReservedInternalBusLane && bCompactFormulaUsesBranchAvoidance && bNonLeftInputUsesBoundary, FString::Printf(TEXT("gap=%.1f expected_run_one=%.1f formula_direct=%.1f formula_one=%.1f formula_two=%.1f left_entries=%d top=%d bottom=%d internal_bus=%d"), Gap12, ExpectedRunOneBusGap, CompactDirectGap, CompactOneBusGap, CompactTwoBusGap, Run.DesignDiagnostics.LeftBoundaryEntryCount, Run.DesignDiagnostics.TopBoundaryEntryCount, Run.DesignDiagnostics.BottomBoundaryEntryCount, Run.DesignDiagnostics.InternalBusGroupCount));
 		}
 
@@ -5955,1337 +3927,534 @@ namespace UeAgentBlueprintAutoLayout
 			};
 			FRunResult Run;
 			RunLayoutForSelfTest(Nodes, Edges, Options, Run);
-			const bool bHasContinuousBoundaryBus = Run.DesignDiagnostics.BoundaryBusRequiredCount == 1
+			const bool bHasBoundaryBusLeftCandidates = Run.DesignDiagnostics.BoundaryBusRequiredCount == 1
 				&& Run.DesignDiagnostics.BoundaryBusCount == 1
-				&& Run.DesignDiagnostics.TopBoundaryEntryCount >= 2
-				&& Run.DesignDiagnostics.BottomBoundaryEntryCount >= 2;
-			const bool bAlignedSegmentKeptResidualTight = Run.DesignDiagnostics.IslandConnectionTopBottomXResidual < 180.0;
-			const double TargetIslandLeft = FMath::Min(Nodes[1].NewX, Nodes[2].NewX);
-			const double MaxExpectedAlignedIslandDx = Nodes[0].Width + Options.HorizontalSpacing;
-			const bool bAlignedEntryDidNotForceExtraRankColumnGap = TargetIslandLeft - Nodes[0].NewX <= MaxExpectedAlignedIslandDx + 0.5;
-			AddCase(TEXT("continuous_boundary_entry_uses_connection_alignment_x"), bHasContinuousBoundaryBus && bAlignedSegmentKeptResidualTight && bAlignedEntryDidNotForceExtraRankColumnGap, FString::Printf(TEXT("boundary_bus=%d/%d top=%d bottom=%d x_residual=%.1f target_dx=%.1f max_dx=%.1f"), Run.DesignDiagnostics.BoundaryBusCount, Run.DesignDiagnostics.BoundaryBusRequiredCount, Run.DesignDiagnostics.TopBoundaryEntryCount, Run.DesignDiagnostics.BottomBoundaryEntryCount, Run.DesignDiagnostics.IslandConnectionTopBottomXResidual, TargetIslandLeft - Nodes[0].NewX, MaxExpectedAlignedIslandDx));
-		}
-
-		{
-			TArray<FNode> Nodes;
-			for (int32 Index = 0; Index < 3; ++Index)
+				&& Run.DesignDiagnostics.TopBoundaryEntryCount >= 1
+				&& Run.DesignDiagnostics.BottomBoundaryEntryCount >= 1;
+			const double ExpectedLeftX = -Options.HorizontalSpacing * 0.22;
+			int32 InvalidRangeEntryCount = 0;
+			int32 NonLeftEdgeEntryCount = 0;
+			int32 MovableEntryCount = 0;
+			for (const TSharedPtr<FJsonValue>& Value : Run.BoundaryEntryDiagnostics)
 			{
-				FNode Node;
-				Node.Index = Index;
-				Node.Guid = FString::Printf(TEXT("nearfanout%d"), Index);
-				Node.Title = Node.Guid;
-				Node.Width = 120.0;
-				Node.Height = 70.0;
-				Node.NewX = 0.0;
-				Node.NewY = 0.0;
-				Node.OutputPinNames = { TEXT("out") };
-				Node.InputPinNames = { TEXT("in") };
-				Node.OutputPinAnchors = { FVector2D(120.0, 35.0) };
-				Node.InputPinAnchors = { FVector2D(0.0, 35.0) };
-				Node.OutputPinAnchorValid = { 1 };
-				Node.InputPinAnchorValid = { 1 };
-				Nodes.Add(Node);
-			}
-			TArray<FEdge> Edges = {
-				{0, 1, TEXT("out"), TEXT("in"), 0, 0, false},
-				{0, 2, TEXT("out"), TEXT("in"), 0, 0, false}
-			};
-			TArray<FIsland> Islands;
-			for (int32 IslandIndex = 0; IslandIndex < 3; ++IslandIndex)
-			{
-				FIsland Island;
-				Island.Id = IslandIndex;
-				Island.Nodes = {IslandIndex};
-				Island.NodeSet.Add(IslandIndex);
-				Island.LocalBounds = {0.0, 0.0, 120.0, 70.0};
-				Island.X = IslandIndex == 0 ? 0.0 : (IslandIndex == 1 ? 260.0 : 920.0);
-				Island.Y = IslandIndex == 0 ? 0.0 : (IslandIndex == 1 ? 0.0 : 320.0);
-				Islands.Add(Island);
-			}
-			TArray<FSelectedEndpointCandidate> SelectedEndpoints;
-			for (int32 EdgeIndex = 0; EdgeIndex < Edges.Num(); ++EdgeIndex)
-			{
-				FSelectedEndpointCandidate Selected;
-				Selected.EdgeIndex = EdgeIndex;
-				Selected.CandidateId = EdgeIndex;
-				Selected.SourceIsland = 0;
-				Selected.TargetIsland = EdgeIndex + 1;
-				Selected.Side = TEXT("left");
-				Selected.SourceLocal = FVector2D(120.0, 35.0);
-				Selected.EntryLocal = FVector2D(0.0, 35.0);
-				Selected.ActualTargetLocal = FVector2D(0.0, 35.0);
-				Selected.bPlacementOwner = true;
-				SelectedEndpoints.Add(Selected);
-			}
-			FRunResult Run;
-			const TArray<FReroutePlan> Plans = RouteDirectAndBusCorridors(Nodes, Edges, Islands, SelectedEndpoints, Options, Run);
-			const bool bNearStaysDirectAndRemoteUsesBus = Plans.Num() == 1
-				&& Plans[0].EdgeIndex == 1
-				&& SelectedEndpoints[0].BusContractId == INDEX_NONE
-				&& SelectedEndpoints[1].BusContractId != INDEX_NONE;
-			AddCase(TEXT("near_consumer_not_absorbed_by_remote_fanout_bus"), bNearStaysDirectAndRemoteUsesBus, FString::Printf(TEXT("plans=%d near_bus=%d remote_bus=%d contracts=%d"), Plans.Num(), SelectedEndpoints[0].BusContractId, SelectedEndpoints[1].BusContractId, Run.DesignDiagnostics.BusContractCount));
-		}
-
-		{
-			TArray<FNode> Nodes;
-			for (int32 Index = 0; Index < 3; ++Index)
-			{
-				FNode Node;
-				Node.Index = Index;
-				Node.Guid = FString::Printf(TEXT("ownerbus%d"), Index);
-				Node.Title = Node.Guid;
-				Node.Width = 140.0;
-				Node.Height = 80.0;
-				Node.OutputPinNames = { TEXT("out") };
-				Node.InputPinNames = { TEXT("in") };
-				Node.OutputPinAnchors = { FVector2D(140.0, 40.0) };
-				Node.InputPinAnchors = { FVector2D(0.0, 40.0) };
-				Node.OutputPinAnchorValid = { 1 };
-				Node.InputPinAnchorValid = { 1 };
-				Nodes.Add(Node);
-			}
-			TArray<FEdge> Edges = {
-				{0, 2, TEXT("out"), TEXT("in"), 0, 0, false},
-				{1, 2, TEXT("then"), TEXT("execute"), 0, 0, true}
-			};
-			TArray<FIsland> Islands;
-			for (int32 IslandIndex = 0; IslandIndex < 3; ++IslandIndex)
-			{
-				FIsland Island;
-				Island.Id = IslandIndex;
-				Island.Nodes = {IslandIndex};
-				Island.NodeSet.Add(IslandIndex);
-				Island.LocalBounds = {0.0, 0.0, 140.0, 80.0};
-				Island.X = IslandIndex == 0 ? 0.0 : (IslandIndex == 1 ? 0.0 : 260.0);
-				Island.Y = IslandIndex == 0 ? 0.0 : (IslandIndex == 1 ? 120.0 : 120.0);
-				Islands.Add(Island);
-			}
-			TArray<FSelectedEndpointCandidate> SelectedEndpoints;
-			for (int32 EdgeIndex = 0; EdgeIndex < Edges.Num(); ++EdgeIndex)
-			{
-				FSelectedEndpointCandidate Selected;
-				Selected.EdgeIndex = EdgeIndex;
-				Selected.CandidateId = EdgeIndex;
-				Selected.SourceIsland = EdgeIndex;
-				Selected.TargetIsland = 2;
-				Selected.Side = TEXT("left");
-				Selected.SourceLocal = FVector2D(140.0, 40.0);
-				Selected.EntryLocal = FVector2D(0.0, 40.0);
-				Selected.ActualTargetLocal = FVector2D(0.0, 40.0);
-				Selected.SourcePortOrderKey = Selected.SourceLocal.Y;
-				SelectedEndpoints.Add(Selected);
-			}
-			FRunResult Run;
-			const TSet<int32> RouteOnlyEdgeIndices;
-			FPlacementOwnership Ownership = BuildPlacementOwnershipForest(Edges, Islands, SelectedEndpoints, RouteOnlyEdgeIndices, Run);
-			const TArray<FReroutePlan> Plans = RouteDirectAndBusCorridors(Nodes, Edges, Islands, SelectedEndpoints, Options, Run);
-			const bool bExecOwnerDirectAndDataNonOwnerBus =
-				Ownership.OwnerSourceByIsland.IsValidIndex(2)
-				&& Ownership.OwnerSourceByIsland[2] == 1
-				&& SelectedEndpoints[1].bPlacementOwner
-				&& !SelectedEndpoints[0].bPlacementOwner
-				&& SelectedEndpoints[1].BusContractId == INDEX_NONE
-				&& SelectedEndpoints[0].BusContractId != INDEX_NONE
-				&& Plans.Num() == 1
-				&& Plans[0].EdgeIndex == 0;
-			AddCase(TEXT("placement_owner_edge_direct_non_owner_edge_routes_via_bus"),
-				bExecOwnerDirectAndDataNonOwnerBus,
-				FString::Printf(TEXT("owner=%d owner_edges=%d non_owner_edges=%d plans=%d bus0=%d bus1=%d"),
-					Ownership.OwnerSourceByIsland.IsValidIndex(2) ? Ownership.OwnerSourceByIsland[2] : -1,
-					Run.DesignDiagnostics.PlacementOwnerEdgeCount,
-					Run.DesignDiagnostics.PlacementNonOwnerEdgeCount,
-					Plans.Num(),
-					SelectedEndpoints[0].BusContractId,
-					SelectedEndpoints[1].BusContractId));
-		}
-
-		{
-			TArray<FNode> Nodes;
-			for (int32 Index = 0; Index < 4; ++Index)
-			{
-				FNode Node;
-				Node.Index = Index;
-				Node.Guid = FString::Printf(TEXT("targetocc%d"), Index);
-				Node.Title = Node.Guid;
-				Node.Width = Index == 1 ? 220.0 : (Index == 3 ? 180.0 : 120.0);
-				Node.Height = Index == 1 ? 120.0 : (Index == 3 ? 160.0 : 70.0);
-				Node.OutputPinNames = { TEXT("out") };
-				Node.InputPinNames = { TEXT("in") };
-				Node.OutputPinAnchors = { FVector2D(Node.Width, 35.0) };
-				Node.InputPinAnchors = { FVector2D(0.0, 35.0) };
-				Node.OutputPinAnchorValid = { 1 };
-				Node.InputPinAnchorValid = { 1 };
-				Nodes.Add(Node);
-			}
-			Nodes[0].NewX = 0.0;
-			Nodes[0].NewY = 65.0;
-			Nodes[1].NewX = 260.0;
-			Nodes[1].NewY = 260.0;
-			Nodes[2].NewX = 300.0;
-			Nodes[2].NewY = 470.0;
-			Nodes[3].NewX = 0.0;
-			Nodes[3].NewY = 0.0;
-			TArray<FEdge> Edges = {
-				{0, 2, TEXT("out"), TEXT("in"), 0, 0, false}
-			};
-			TArray<FIsland> Islands;
-			FIsland SourceIsland;
-			SourceIsland.Id = 0;
-			SourceIsland.Nodes = {0};
-			SourceIsland.NodeSet.Add(0);
-			SourceIsland.LocalBounds = {0.0, 65.0, 120.0, 135.0};
-			SourceIsland.X = 0.0;
-			SourceIsland.Y = 0.0;
-			Islands.Add(SourceIsland);
-			FIsland TargetIsland;
-			TargetIsland.Id = 1;
-			TargetIsland.Nodes = {1, 2};
-			TargetIsland.NodeSet.Add(1);
-			TargetIsland.NodeSet.Add(2);
-			TargetIsland.LocalBounds = {250.0, 250.0, 500.0, 550.0};
-			TargetIsland.X = 500.0;
-			TargetIsland.Y = 0.0;
-			Islands.Add(TargetIsland);
-			FIsland ObstacleIsland;
-			ObstacleIsland.Id = 2;
-			ObstacleIsland.Nodes = {3};
-			ObstacleIsland.NodeSet.Add(3);
-			ObstacleIsland.LocalBounds = {0.0, 0.0, 180.0, 160.0};
-			ObstacleIsland.X = 360.0;
-			ObstacleIsland.Y = 220.0;
-			Islands.Add(ObstacleIsland);
-
-			TArray<FSelectedEndpointCandidate> SelectedEndpoints;
-			FSelectedEndpointCandidate Selected;
-			Selected.EdgeIndex = 0;
-			Selected.CandidateId = 0;
-			Selected.SourceIsland = 0;
-			Selected.TargetIsland = 1;
-			Selected.Side = TEXT("left");
-			Selected.SourceLocal = FVector2D(120.0, 100.0);
-			Selected.EntryLocal = FVector2D(-66.0, 505.0);
-			Selected.ActualTargetLocal = FVector2D(300.0, 505.0);
-			SelectedEndpoints.Add(Selected);
-
-			FRunResult Run;
-			const TArray<FReroutePlan> Plans = RouteDirectAndBusCorridors(Nodes, Edges, Islands, SelectedEndpoints, Options, Run);
-			const FPlannedCorridorRoute DebugPlanned = PlanCorridorRouteForSelectedEndpoint(
-				Nodes,
-				Edges,
-				Islands,
-				SelectedEndpoints[0],
-				1,
-				(Selected.SourceLocal.Y + Selected.EntryLocal.Y) * 0.5,
-				true,
-				Options);
-			const TArray<FRect> DebugHardRects = BuildRouteHardOccupancyRects(Nodes, Islands, Options, Edges[0]);
-			FString DebugPoints;
-			for (const FVector2D& Point : DebugPlanned.Polyline)
-			{
-				DebugPoints += FString::Printf(TEXT("(%.1f,%.1f)"), Point.X, Point.Y);
-			}
-			const FVector2D EntryAbs(Islands[1].X + Selected.EntryLocal.X, Islands[1].Y + Selected.EntryLocal.Y);
-			bool bPlanStopsAtBoundaryEntry = false;
-			TArray<FVector2D> ControlPoints;
-			ControlPoints.Add(FVector2D(Islands[0].X + Selected.SourceLocal.X, Islands[0].Y + Selected.SourceLocal.Y));
-			if (Plans.Num() == 1)
-			{
-				ControlPoints.Append(Plans[0].Points);
-				for (const FVector2D& Point : Plans[0].Points)
+				const TSharedPtr<FJsonObject> Obj = Value.IsValid() ? Value->AsObject() : nullptr;
+				if (!Obj.IsValid())
 				{
-					if (FVector2D::Distance(Point, EntryAbs) < 0.5)
-					{
-						bPlanStopsAtBoundaryEntry = true;
-						break;
-					}
-				}
-			}
-			ControlPoints.Add(FVector2D(Islands[1].X + Selected.ActualTargetLocal.X, Islands[1].Y + Selected.ActualTargetLocal.Y));
-			const bool bVisibleWireHitsSibling = ControlWireHitsHardOccupancy(ControlPoints, DebugHardRects);
-			const bool bTargetIslandSiblingBlocksRoute =
-				Plans.Num() == 1
-				&& SelectedEndpoints[0].BusContractId != INDEX_NONE
-				&& !bPlanStopsAtBoundaryEntry
-				&& !bVisibleWireHitsSibling
-				&& Run.DesignDiagnostics.RouteThroughHardOccupancyCount == 0
-				&& Run.DesignDiagnostics.RouteThroughIslandCount == 0;
-			AddCase(TEXT("inter_island_bus_avoids_target_island_sibling_hard_occupancy"), bTargetIslandSiblingBlocksRoute, FString::Printf(TEXT("plans=%d bus=%d boundary_stop=%d visible_hit=%d route_through=%d hard=%d debug_kind=%s debug_hits=%d debug_points=%s"), Plans.Num(), SelectedEndpoints[0].BusContractId, bPlanStopsAtBoundaryEntry ? 1 : 0, bVisibleWireHitsSibling ? 1 : 0, Run.DesignDiagnostics.RouteThroughIslandCount, Run.DesignDiagnostics.RouteThroughHardOccupancyCount, *RouteKindToString(DebugPlanned.RouteKind), CountPolylineHardOccupancyHits(DebugPlanned.Polyline, DebugHardRects), *DebugPoints));
-		}
-
-		{
-			TArray<FNode> Nodes;
-			for (int32 Index = 0; Index < 2; ++Index)
-			{
-				FNode Node;
-				Node.Index = Index;
-				Node.Guid = FString::Printf(TEXT("longdirectbus%d"), Index);
-				Node.Title = Node.Guid;
-				Node.Width = Index == 0 ? 120.0 : 220.0;
-				Node.Height = Index == 0 ? 70.0 : 110.0;
-				Node.NewX = 0.0;
-				Node.NewY = 0.0;
-				Node.OutputPinNames = { TEXT("out") };
-				Node.InputPinNames = { TEXT("in") };
-				Node.OutputPinAnchors = { FVector2D(Node.Width, 35.0) };
-				Node.InputPinAnchors = { FVector2D(0.0, 55.0) };
-				Node.OutputPinAnchorValid = { 1 };
-				Node.InputPinAnchorValid = { 1 };
-				Nodes.Add(Node);
-			}
-			TArray<FEdge> Edges = {
-				{0, 1, TEXT("out"), TEXT("in"), 0, 0, false}
-			};
-			TArray<FIsland> Islands;
-			for (int32 IslandIndex = 0; IslandIndex < 2; ++IslandIndex)
-			{
-				FIsland Island;
-				Island.Id = IslandIndex;
-				Island.Nodes = {IslandIndex};
-				Island.NodeSet.Add(IslandIndex);
-				Island.LocalBounds = {0.0, 0.0, Nodes[IslandIndex].Width, Nodes[IslandIndex].Height};
-				Island.X = IslandIndex == 0 ? 0.0 : Options.HorizontalSpacing * 8.0;
-				Island.Y = IslandIndex == 0 ? 100.0 : 280.0;
-				Islands.Add(Island);
-			}
-			FSelectedEndpointCandidate Selected;
-			Selected.EdgeIndex = 0;
-			Selected.SourceIsland = 0;
-			Selected.TargetIsland = 1;
-			Selected.Side = TEXT("left");
-			Selected.SourceLocal = FVector2D(Nodes[0].Width, 35.0);
-			Selected.EntryLocal = FVector2D(0.0, 55.0);
-			Selected.ActualTargetLocal = FVector2D(0.0, 55.0);
-			const double IdealBusY = (Islands[0].Y + Selected.SourceLocal.Y + Islands[1].Y + Selected.ActualTargetLocal.Y) * 0.5;
-			const FPlannedCorridorRoute Planned = PlanCorridorRouteForSelectedEndpoint(
-				Nodes,
-				Edges,
-				Islands,
-				Selected,
-				1,
-				IdealBusY,
-				true,
-				Options);
-			const TArray<FRect> RouteHardRects = BuildRouteHardOccupancyRects(Nodes, Islands, Options, Edges[0]);
-			const bool bOwnerDirectStaysDirect =
-				Planned.RouteKind == ERouteKind::Direct
-				&& Planned.Polyline.Num() >= 2
-				&& !PolylineHitsHardOccupancy(Planned.Polyline, RouteHardRects)
-				&& HasNonNegativeConnectionAlignmentShortenForEverySegment(Planned.Polyline, Options);
-			AddCase(TEXT("ownership_direct_inter_island_not_upgraded_by_distance_only"), bOwnerDirectStaysDirect, FString::Printf(TEXT("kind=%s points=%d trunk_y=%.1f hits=%d"),
-				*RouteKindToString(Planned.RouteKind),
-				Planned.Polyline.Num(),
-				Planned.TrunkY,
-				CountPolylineHardOccupancyHits(Planned.Polyline, RouteHardRects)));
-		}
-
-		{
-			TArray<FNode> Nodes;
-			for (int32 Index = 0; Index < 2; ++Index)
-			{
-				FNode Node;
-				Node.Index = Index;
-				Node.Guid = FString::Printf(TEXT("longexecbus%d"), Index);
-				Node.Title = Node.Guid;
-				Node.Width = 150.0;
-				Node.Height = 80.0;
-				Node.bHasExecPin = true;
-				Node.OutputPinNames = { TEXT("then") };
-				Node.InputPinNames = { TEXT("execute") };
-				Node.OutputPinAnchors = { FVector2D(Node.Width, 40.0) };
-				Node.InputPinAnchors = { FVector2D(0.0, 40.0) };
-				Node.OutputPinAnchorValid = { 1 };
-				Node.InputPinAnchorValid = { 1 };
-				Nodes.Add(Node);
-			}
-			TArray<FEdge> Edges = {
-				{0, 1, TEXT("then"), TEXT("execute"), 0, 0, true}
-			};
-			TArray<FIsland> Islands;
-			for (int32 IslandIndex = 0; IslandIndex < 2; ++IslandIndex)
-			{
-				FIsland Island;
-				Island.Id = IslandIndex;
-				Island.Nodes = {IslandIndex};
-				Island.NodeSet.Add(IslandIndex);
-				Island.LocalBounds = {0.0, 0.0, Nodes[IslandIndex].Width, Nodes[IslandIndex].Height};
-				Island.X = IslandIndex == 0 ? 0.0 : Options.HorizontalSpacing * 8.0;
-				Island.Y = IslandIndex == 0 ? 120.0 : 360.0;
-				Islands.Add(Island);
-			}
-			FSelectedEndpointCandidate Selected;
-			Selected.EdgeIndex = 0;
-			Selected.SourceIsland = 0;
-			Selected.TargetIsland = 1;
-			Selected.Side = TEXT("left");
-			Selected.SourceLocal = FVector2D(Nodes[0].Width, 40.0);
-			Selected.EntryLocal = FVector2D(0.0, 40.0);
-			Selected.ActualTargetLocal = FVector2D(0.0, 40.0);
-			const double IdealBusY = (Islands[0].Y + Selected.SourceLocal.Y + Islands[1].Y + Selected.ActualTargetLocal.Y) * 0.5;
-			const FPlannedCorridorRoute Planned = PlanCorridorRouteForSelectedEndpoint(
-				Nodes,
-				Edges,
-				Islands,
-				Selected,
-				1,
-				IdealBusY,
-				true,
-				Options);
-			const TArray<FRect> RouteHardRects = BuildRouteHardOccupancyRects(Nodes, Islands, Options, Edges[0]);
-			const bool bOwnerExecDirectStaysDirect =
-				Planned.RouteKind == ERouteKind::Direct
-				&& Planned.Polyline.Num() >= 2
-				&& !PolylineHitsHardOccupancy(Planned.Polyline, RouteHardRects)
-				&& HasNonNegativeConnectionAlignmentShortenForEverySegment(Planned.Polyline, Options);
-			AddCase(TEXT("ownership_exec_direct_not_upgraded_by_distance_only"), bOwnerExecDirectStaysDirect, FString::Printf(TEXT("kind=%s points=%d trunk_y=%.1f hits=%d"),
-				*RouteKindToString(Planned.RouteKind),
-				Planned.Polyline.Num(),
-				Planned.TrunkY,
-				CountPolylineHardOccupancyHits(Planned.Polyline, RouteHardRects)));
-		}
-
-		{
-			TArray<FNode> Nodes;
-			for (int32 Index = 0; Index < 2; ++Index)
-			{
-				FNode Node;
-				Node.Index = Index;
-				Node.Guid = FString::Printf(TEXT("internalexecdirect%d"), Index);
-				Node.Title = Node.Guid;
-				Node.Width = 150.0;
-				Node.Height = 80.0;
-				Node.bHasExecPin = true;
-				Node.OutputPinNames = { TEXT("then") };
-				Node.InputPinNames = { TEXT("execute") };
-				Node.OutputPinAnchors = { FVector2D(Node.Width, 40.0) };
-				Node.InputPinAnchors = { FVector2D(0.0, 40.0) };
-				Node.OutputPinAnchorValid = { 1 };
-				Node.InputPinAnchorValid = { 1 };
-				Node.NewX = Index == 0 ? 0.0 : Options.HorizontalSpacing * 7.0;
-				Node.NewY = Index == 0 ? 120.0 : 360.0;
-				Nodes.Add(Node);
-			}
-			TArray<FEdge> Edges = {
-				{0, 1, TEXT("then"), TEXT("execute"), 0, 0, true}
-			};
-			FIsland Island;
-			Island.Id = 0;
-			Island.Nodes = {0, 1};
-			Island.NodeSet.Add(0);
-			Island.NodeSet.Add(1);
-			Island.LocalBounds = {0.0, 120.0, Options.HorizontalSpacing * 7.0 + 150.0, 440.0};
-			Island.X = 0.0;
-			Island.Y = 0.0;
-			TArray<FIsland> Islands = {Island};
-			TMap<int32, int32> IslandByNode;
-			IslandByNode.Add(0, 0);
-			IslandByNode.Add(1, 0);
-			TArray<FReroutePlan> Plans;
-			FRunResult Run;
-			AppendDirectConnectionObstacleReroutePlans(Nodes, Edges, Islands, IslandByNode, Options, Plans, Run, nullptr);
-			const bool bInternalCleanDirectStaysDirect =
-				Plans.Num() == 0
-				&& Run.CorridorRouteDiagnostics.Num() == 0
-				&& Run.DesignDiagnostics.RouteKindUpgradeCount == 0;
-			AddCase(TEXT("internal_clean_direct_not_upgraded_by_distance_only"), bInternalCleanDirectStaysDirect, FString::Printf(TEXT("plans=%d points=%d upgrades=%d diagnostics=%d"),
-				Plans.Num(),
-				Plans.Num() > 0 ? Plans[0].Points.Num() : 0,
-				Run.DesignDiagnostics.RouteKindUpgradeCount,
-				Run.CorridorRouteDiagnostics.Num()));
-		}
-
-		{
-			TArray<FNode> Nodes;
-			for (int32 Index = 0; Index < 3; ++Index)
-			{
-				FNode Node;
-				Node.Index = Index;
-				Node.Guid = FString::Printf(TEXT("segment_refine%d"), Index);
-				Node.Title = Node.Guid;
-				Node.Width = Index == 2 ? 120.0 : 100.0;
-				Node.Height = Index == 2 ? 90.0 : 70.0;
-				Node.OutputPinNames = { TEXT("out") };
-				Node.InputPinNames = { TEXT("in") };
-				Node.OutputPinAnchors = { FVector2D(Node.Width, 35.0) };
-				Node.InputPinAnchors = { FVector2D(0.0, 35.0) };
-				Node.OutputPinAnchorValid = { 1 };
-				Node.InputPinAnchorValid = { 1 };
-				Nodes.Add(Node);
-			}
-			Nodes[0].NewX = 0.0;
-			Nodes[0].NewY = 20.0;
-			Nodes[1].NewX = 620.0;
-			Nodes[1].NewY = 230.0;
-			Nodes[2].NewX = 250.0;
-			Nodes[2].NewY = 115.0;
-			TArray<FEdge> Edges = {
-				{0, 1, TEXT("out"), TEXT("in"), 0, 0, false}
-			};
-			FIsland Island;
-			Island.Id = 0;
-			Island.Nodes = {0, 1, 2};
-			Island.NodeSet.Add(0);
-			Island.NodeSet.Add(1);
-			Island.NodeSet.Add(2);
-			Island.LocalBounds = BoundsForNodes(Nodes, Island.Nodes);
-			TArray<FIsland> Islands = {Island};
-			TMap<int32, int32> IslandByNode;
-			IslandByNode.Add(0, 0);
-			IslandByNode.Add(1, 0);
-			IslandByNode.Add(2, 0);
-			FReroutePlan Plan;
-			Plan.EdgeIndex = 0;
-			Plan.Reason = TEXT("input_chain_collision_guard");
-			Plan.RouteKind = ERouteKind::LocalBus;
-			Plan.Points.Add(FVector2D(330.0, 265.0));
-			TArray<FReroutePlan> Plans = {Plan};
-			FRunResult Run;
-			const int32 Refined = RefineReroutePlansAgainstHardOccupancySegments(Nodes, Edges, Islands, IslandByNode, Options, Plans, Run);
-			TArray<FVector2D> Route;
-			Route.Add(GetSourcePort(Nodes[0], Edges[0], true));
-			for (const FVector2D& Point : Plans[0].Points)
-			{
-				Route.Add(Point);
-			}
-			Route.Add(GetTargetPort(Nodes[1], Edges[0], true));
-			const int32 HitCount = CountPolylineSegmentHardOccupancyHits(Route, BuildRouteHardOccupancyRects(Nodes, Islands, Options, Edges[0]));
-			AddCase(TEXT("reroute_plan_segment_refine_removes_metric_node_hit"), Refined == 1 && HitCount == 0 && Plans[0].Points.Num() >= 2, FString::Printf(TEXT("refined=%d hits=%d points=%d diagnostics=%d"),
-				Refined,
-				HitCount,
-				Plans[0].Points.Num(),
-				Run.CorridorRouteDiagnostics.Num()));
-		}
-
-		{
-			TArray<FNode> Nodes;
-			for (int32 Index = 0; Index < 4; ++Index)
-			{
-				FNode Node;
-				Node.Index = Index;
-				Node.Guid = FString::Printf(TEXT("shared_segment_refine%d"), Index);
-				Node.Title = Node.Guid;
-				Node.Width = Index == 2 ? 120.0 : 100.0;
-				Node.Height = Index == 2 ? 90.0 : 70.0;
-				Node.OutputPinNames = { TEXT("out") };
-				Node.InputPinNames = { TEXT("in") };
-				Node.OutputPinAnchors = { FVector2D(Node.Width, 35.0) };
-				Node.InputPinAnchors = { FVector2D(0.0, 35.0) };
-				Node.OutputPinAnchorValid = { 1 };
-				Node.InputPinAnchorValid = { 1 };
-				Nodes.Add(Node);
-			}
-			Nodes[0].NewX = 0.0;
-			Nodes[0].NewY = 20.0;
-			Nodes[1].NewX = 620.0;
-			Nodes[1].NewY = 230.0;
-			Nodes[2].NewX = 250.0;
-			Nodes[2].NewY = 115.0;
-			Nodes[3].NewX = 760.0;
-			Nodes[3].NewY = 300.0;
-			TArray<FEdge> Edges = {
-				{0, 1, TEXT("out"), TEXT("in"), 0, 0, false},
-				{0, 3, TEXT("out"), TEXT("in"), 0, 0, false}
-			};
-			FIsland Island;
-			Island.Id = 0;
-			Island.Nodes = {0, 1, 2, 3};
-			Island.NodeSet.Add(0);
-			Island.NodeSet.Add(1);
-			Island.NodeSet.Add(2);
-			Island.NodeSet.Add(3);
-			Island.LocalBounds = BoundsForNodes(Nodes, Island.Nodes);
-			TArray<FIsland> Islands = {Island};
-			TMap<int32, int32> IslandByNode;
-			IslandByNode.Add(0, 0);
-			IslandByNode.Add(1, 0);
-			IslandByNode.Add(2, 0);
-			IslandByNode.Add(3, 0);
-			FReroutePlan PlanA;
-			PlanA.EdgeIndex = 0;
-			PlanA.Reason = TEXT("fanout_local_bus");
-			PlanA.BusId = TEXT("shared_source");
-			PlanA.RouteKind = ERouteKind::LocalBus;
-			PlanA.AttachmentMergeGroup = 9;
-			PlanA.Points.Add(FVector2D(330.0, 265.0));
-			FReroutePlan PlanB;
-			PlanB.EdgeIndex = 1;
-			PlanB.Reason = TEXT("fanout_local_bus");
-			PlanB.BusId = TEXT("shared_source");
-			PlanB.RouteKind = ERouteKind::LocalBus;
-			PlanB.AttachmentMergeGroup = 9;
-			PlanB.Points.Add(FVector2D(540.0, 55.0));
-			TArray<FReroutePlan> Plans = {PlanA, PlanB};
-			FRunResult Run;
-			const int32 Refined = RefineReroutePlansAgainstHardOccupancySegments(Nodes, Edges, Islands, IslandByNode, Options, Plans, Run);
-			if (Plans[0].Points.Num() > 0 && Plans[1].Points.Num() > 0 && FMath::IsNearlyEqual(Plans[0].Points[0].Y, Plans[1].Points[0].Y, 0.5))
-			{
-				Plans[1].Points[0].Y += 24.0;
-				FinalizeReroutePlanPoints(Plans[1], Options);
-			}
-			const int32 Normalized = NormalizeSharedBusTrunkYAfterSegmentRefine(Nodes, Edges, Islands, IslandByNode, Options, Plans, Run);
-			if (Plans[0].Points.Num() > 0 && Plans[1].Points.Num() > 0)
-			{
-				Plans[1].Points[0].X += 64.0;
-				FinalizeReroutePlanPoints(Plans[1], Options);
-			}
-			const int32 PrefixNormalized = NormalizeSharedBusTrunkPrefixAfterSegmentRefine(Nodes, Edges, Islands, IslandByNode, Options, Plans, Run);
-			int32 TotalHitCount = 0;
-			for (const FReroutePlan& Plan : Plans)
-			{
-				TArray<FVector2D> Route;
-				Route.Add(GetSourcePort(Nodes[Edges[Plan.EdgeIndex].Source], Edges[Plan.EdgeIndex], true));
-				for (const FVector2D& Point : Plan.Points)
-				{
-					Route.Add(Point);
-				}
-				Route.Add(GetTargetPort(Nodes[Edges[Plan.EdgeIndex].Target], Edges[Plan.EdgeIndex], true));
-				TotalHitCount += CountPolylineSegmentHardOccupancyHits(Route, BuildRouteHardOccupancyRects(Nodes, Islands, Options, Edges[Plan.EdgeIndex]));
-			}
-			bool bNormalizedDiagnostic = false;
-			for (const TSharedPtr<FJsonValue>& Diagnostic : Run.CorridorRouteDiagnostics)
-			{
-				const TSharedPtr<FJsonObject>* Obj = nullptr;
-				if (Diagnostic.IsValid() && Diagnostic->TryGetObject(Obj) && Obj != nullptr && Obj->IsValid())
-				{
-					FString Kind;
-					if ((*Obj)->TryGetStringField(TEXT("kind"), Kind) && Kind == TEXT("shared_bus_trunk_y_normalized"))
-					{
-						bNormalizedDiagnostic = true;
-						break;
-					}
-				}
-			}
-			const bool bSharedTrunkY = Plans[0].Points.Num() > 0
-				&& Plans[1].Points.Num() > 0
-				&& FMath::IsNearlyEqual(Plans[0].Points[0].Y, Plans[1].Points[0].Y, 0.5);
-			const bool bSharedTrunkPrefix = Plans[0].Points.Num() > 0
-				&& Plans[1].Points.Num() > 0
-				&& FVector2D::Distance(Plans[0].Points[0], Plans[1].Points[0]) < 1.0;
-			AddCase(TEXT("shared_bus_segment_refine_preserves_single_source_trunk"), Refined >= 1 && Normalized >= 1 && PrefixNormalized >= 1 && TotalHitCount == 0 && bSharedTrunkY && bSharedTrunkPrefix && bNormalizedDiagnostic, FString::Printf(TEXT("refined=%d normalized=%d prefix=%d hits=%d y=%.1f/%.1f prefix=%d normalized_diag=%d"),
-				Refined,
-				Normalized,
-				PrefixNormalized,
-				TotalHitCount,
-				Plans[0].Points.Num() > 0 ? Plans[0].Points[0].Y : -1.0,
-				Plans[1].Points.Num() > 0 ? Plans[1].Points[0].Y : -1.0,
-				bSharedTrunkPrefix ? 1 : 0,
-				bNormalizedDiagnostic ? 1 : 0));
-		}
-
-		{
-			TArray<FNode> Nodes;
-			for (int32 Index = 0; Index < 5; ++Index)
-			{
-				FNode Node;
-				Node.Index = Index;
-				Node.Guid = FString::Printf(TEXT("shared_lane_reservation%d"), Index);
-				Node.Title = Node.Guid;
-				Node.Width = 100.0;
-				Node.Height = 70.0;
-				Node.OutputPinNames = { TEXT("out") };
-				Node.InputPinNames = { TEXT("in") };
-				Node.OutputPinAnchors = { FVector2D(Node.Width, 35.0) };
-				Node.InputPinAnchors = { FVector2D(0.0, 35.0) };
-				Node.OutputPinAnchorValid = { 1 };
-				Node.InputPinAnchorValid = { 1 };
-				Nodes.Add(Node);
-			}
-			Nodes[0].NewX = 0.0;
-			Nodes[0].NewY = 115.0;
-			Nodes[1].NewX = 900.0;
-			Nodes[1].NewY = 115.0;
-			Nodes[2].NewX = 300.0;
-			Nodes[2].NewY = 115.0;
-			Nodes[3].NewX = 0.0;
-			Nodes[3].NewY = 265.0;
-			Nodes[4].NewX = 900.0;
-			Nodes[4].NewY = 265.0;
-			TArray<FEdge> Edges = {
-				{0, 1, TEXT("out"), TEXT("in"), 0, 0, false},
-				{0, 2, TEXT("out"), TEXT("in"), 0, 0, false},
-				{3, 4, TEXT("out"), TEXT("in"), 0, 0, false}
-			};
-			FIsland Island;
-			Island.Id = 0;
-			Island.Nodes = {0, 1, 2, 3, 4};
-			for (const int32 NodeIndex : Island.Nodes)
-			{
-				Island.NodeSet.Add(NodeIndex);
-			}
-			Island.LocalBounds = BoundsForNodes(Nodes, Island.Nodes);
-			TArray<FIsland> Islands = {Island};
-			TMap<int32, int32> IslandByNode;
-			for (const int32 NodeIndex : Island.Nodes)
-			{
-				IslandByNode.Add(NodeIndex, 0);
-			}
-			FReroutePlan PlanA;
-			PlanA.EdgeIndex = 0;
-			PlanA.Reason = TEXT("fanout_local_bus");
-			PlanA.BusId = TEXT("same_source");
-			PlanA.RouteKind = ERouteKind::LocalBus;
-			PlanA.AttachmentMergeGroup = 11;
-			PlanA.Points.Add(FVector2D(260.0, 100.0));
-			FReroutePlan PlanB;
-			PlanB.EdgeIndex = 1;
-			PlanB.Reason = TEXT("fanout_local_bus");
-			PlanB.BusId = TEXT("same_source");
-			PlanB.RouteKind = ERouteKind::LocalBus;
-			PlanB.AttachmentMergeGroup = 11;
-			PlanB.Points.Add(FVector2D(260.0, 150.0));
-			FReroutePlan ReservedPlan;
-			ReservedPlan.EdgeIndex = 2;
-			ReservedPlan.Reason = TEXT("fanout_local_bus");
-			ReservedPlan.BusId = TEXT("different_source");
-			ReservedPlan.RouteKind = ERouteKind::LocalBus;
-			ReservedPlan.AttachmentMergeGroup = 12;
-			ReservedPlan.Points.Add(FVector2D(500.0, 150.0));
-			ReservedPlan.Points.Add(FVector2D(760.0, 150.0));
-			TArray<FReroutePlan> Plans = {PlanA, PlanB, ReservedPlan};
-			FRunResult Run;
-			const int32 Normalized = NormalizeSharedBusTrunkYAfterSegmentRefine(Nodes, Edges, Islands, IslandByNode, Options, Plans, Run);
-
-			struct FHorizontalRouteSegment
-			{
-				FString SourceId;
-				double Y = 0.0;
-				double XMin = 0.0;
-				double XMax = 0.0;
-			};
-			TArray<FHorizontalRouteSegment> Segments;
-			for (const FReroutePlan& Plan : Plans)
-			{
-				FVector2D Start;
-				FVector2D End;
-				if (!TryGetRouteEndpointsForPlan(Nodes, Edges, Islands, IslandByNode, Plan, Start, End))
-				{
+					++InvalidRangeEntryCount;
+					++NonLeftEdgeEntryCount;
 					continue;
 				}
-				const TArray<FVector2D> Route = BuildVisibleRouteFromReroutePoints(Start, Plan.Points, End);
-				for (int32 PointIndex = 0; PointIndex + 1 < Route.Num(); ++PointIndex)
+				const double MinX = Obj->GetNumberField(TEXT("allowed_min_x"));
+				const double MaxX = Obj->GetNumberField(TEXT("allowed_max_x"));
+				if (MaxX + 0.5 < MinX)
 				{
-					const FVector2D A = Route[PointIndex];
-					const FVector2D B = Route[PointIndex + 1];
-					if (FMath::Abs(A.Y - B.Y) > 0.5 || FMath::Abs(A.X - B.X) < 20.0)
-					{
-						continue;
-					}
-					FHorizontalRouteSegment Segment;
-					Segment.SourceId = GetLaneReservationSourceIdForPlan(Edges, Plan);
-					Segment.Y = A.Y;
-					Segment.XMin = FMath::Min(A.X, B.X);
-					Segment.XMax = FMath::Max(A.X, B.X);
-					Segments.Add(Segment);
+					++InvalidRangeEntryCount;
+				}
+				if (MaxX > MinX + 0.5)
+				{
+					++MovableEntryCount;
+				}
+				const TSharedPtr<FJsonObject> LocalPoint = Obj->GetObjectField(TEXT("local_point"));
+				const double LocalX = LocalPoint.IsValid() ? LocalPoint->GetNumberField(TEXT("x")) : TNumericLimits<double>::Max();
+				if (!FMath::IsNearlyEqual(LocalX, ExpectedLeftX, 0.5) || !FMath::IsNearlyEqual(MinX, LocalX, 0.5))
+				{
+					++NonLeftEdgeEntryCount;
 				}
 			}
-			bool bHasCrossSourceOverlap = false;
-			for (int32 A = 0; A < Segments.Num(); ++A)
-			{
-				for (int32 B = A + 1; B < Segments.Num(); ++B)
-				{
-					if (Segments[A].SourceId == Segments[B].SourceId)
-					{
-						continue;
-					}
-					if (FMath::IsNearlyEqual(Segments[A].Y, Segments[B].Y, 0.5)
-						&& FMath::Min(Segments[A].XMax, Segments[B].XMax) - FMath::Max(Segments[A].XMin, Segments[B].XMin) > 20.0)
-					{
-						bHasCrossSourceOverlap = true;
-					}
-				}
-			}
-			AddCase(TEXT("shared_bus_trunk_normalize_respects_cross_source_lane_reservation"), !bHasCrossSourceOverlap && (Normalized >= 1 || Run.RejectionDiagnostics.Num() > 0), FString::Printf(TEXT("normalized=%d overlap=%d y=%.1f/%.1f/%.1f diagnostics=%d"),
-				Normalized,
-				bHasCrossSourceOverlap ? 1 : 0,
-				Plans[0].Points.Num() > 0 ? Plans[0].Points[0].Y : -1.0,
-				Plans[1].Points.Num() > 0 ? Plans[1].Points[0].Y : -1.0,
-				Plans[2].Points.Num() > 0 ? Plans[2].Points[0].Y : -1.0,
-				Run.RejectionDiagnostics.Num()));
+			const bool bBoundaryEntriesExposeRightLimit =
+				bHasBoundaryBusLeftCandidates
+				&& InvalidRangeEntryCount == 0
+				&& NonLeftEdgeEntryCount == 0
+				&& MovableEntryCount > 0;
+			AddCase(TEXT("boundary_entries_expose_left_edge_with_right_limit"), bBoundaryEntriesExposeRightLimit, FString::Printf(TEXT("boundary_bus=%d/%d top=%d bottom=%d invalid_range=%d non_left=%d movable=%d expected_left_x=%.1f"), Run.DesignDiagnostics.BoundaryBusCount, Run.DesignDiagnostics.BoundaryBusRequiredCount, Run.DesignDiagnostics.TopBoundaryEntryCount, Run.DesignDiagnostics.BottomBoundaryEntryCount, InvalidRangeEntryCount, NonLeftEdgeEntryCount, MovableEntryCount, ExpectedLeftX));
 		}
 
 		{
-			const FVector2D Start(100.0, 100.0);
-			const FVector2D End(210.0, 220.0);
 			TArray<FNode> Nodes;
-			for (int32 Index = 0; Index < 2; ++Index)
-			{
-				FNode Node;
-				Node.Index = Index;
-				Node.Guid = FString::Printf(TEXT("shortbus%d"), Index);
-				Node.Title = Node.Guid;
-				Node.Width = 120.0;
-				Node.Height = 70.0;
-				Node.OutputPinNames = { TEXT("out") };
-				Node.InputPinNames = { TEXT("in") };
-				Node.OutputPinAnchors = { FVector2D(120.0, 35.0) };
-				Node.InputPinAnchors = { FVector2D(0.0, 35.0) };
-				Node.OutputPinAnchorValid = { 1 };
-				Node.InputPinAnchorValid = { 1 };
-				Nodes.Add(Node);
-			}
+			Nodes.SetNum(3);
+			Nodes[0].Index = 0;
+			Nodes[0].Guid = TEXT("single_node_boundary_source");
+			Nodes[0].Title = Nodes[0].Guid;
+			Nodes[0].Width = 120.0;
+			Nodes[0].Height = 70.0;
+			Nodes[0].OutputPinNames = { TEXT("out") };
+			Nodes[0].OutputPinAnchors = { FVector2D(120.0, 40.0) };
+			Nodes[0].OutputPinAnchorValid = { 1 };
+			Nodes[1].Index = 1;
+			Nodes[1].Guid = TEXT("single_node_boundary_target");
+			Nodes[1].Title = Nodes[1].Guid;
+			Nodes[1].Width = 160.0;
+			Nodes[1].Height = 80.0;
+			Nodes[1].NewX = 180.0;
+			Nodes[1].InputPinNames = { TEXT("in") };
+			Nodes[1].InputPinAnchors = { FVector2D(20.0, 40.0) };
+			Nodes[1].InputPinAnchorValid = { 1 };
+			Nodes[2].Index = 2;
+			Nodes[2].Guid = TEXT("single_node_boundary_blocker");
+			Nodes[2].Title = Nodes[2].Guid;
+			Nodes[2].Width = 80.0;
+			Nodes[2].Height = 60.0;
+			Nodes[2].NewX = 40.0;
+			Nodes[2].NewY = 10.0;
 			TArray<FEdge> Edges = {
 				{0, 1, TEXT("out"), TEXT("in"), 0, 0, false}
 			};
 			TArray<FIsland> Islands;
-			for (int32 IslandIndex = 0; IslandIndex < 2; ++IslandIndex)
-			{
-				FIsland Island;
-				Island.Id = IslandIndex;
-				Island.Nodes = {IslandIndex};
-				Island.NodeSet.Add(IslandIndex);
-				Island.LocalBounds = {0.0, 0.0, 120.0, 70.0};
-				Island.X = IslandIndex == 0 ? Start.X - 120.0 : End.X;
-				Island.Y = IslandIndex == 0 ? Start.Y - 35.0 : End.Y - 35.0;
-				Islands.Add(Island);
-			}
-			TArray<FSelectedEndpointCandidate> SelectedEndpoints;
-			FSelectedEndpointCandidate Selected;
-			Selected.EdgeIndex = 0;
-			Selected.CandidateId = 0;
-			Selected.SourceIsland = 0;
-			Selected.TargetIsland = 1;
-			Selected.Side = TEXT("left");
-			Selected.SourceLocal = FVector2D(120.0, 35.0);
-			Selected.EntryLocal = FVector2D(0.0, 35.0);
-			Selected.ActualTargetLocal = FVector2D(0.0, 35.0);
-			Selected.bPlacementOwner = true;
-			SelectedEndpoints.Add(Selected);
+			Islands.SetNum(2);
+			Islands[0].Id = 0;
+			Islands[0].Nodes = {0};
+			Islands[0].NodeSet.Add(0);
+			Islands[0].LocalBounds = BoundsForNodes(Nodes, Islands[0].Nodes);
+			Islands[1].Id = 1;
+			Islands[1].Nodes = {1, 2};
+			Islands[1].NodeSet.Add(1);
+			Islands[1].NodeSet.Add(2);
+			Islands[1].LocalBounds = BoundsForNodes(Nodes, Islands[1].Nodes);
+			FIslandEdge IslandEdge;
+			IslandEdge.EdgeIndex = 0;
+			IslandEdge.SourceIsland = 0;
+			IslandEdge.TargetIsland = 1;
+			IslandEdge.SourceLocal = GetSourcePort(Nodes[0], Edges[0], true);
+			IslandEdge.TargetLocal = GetTargetPort(Nodes[1], Edges[0], true);
 			FRunResult Run;
-			const TArray<FReroutePlan> Plans = RouteDirectAndBusCorridors(Nodes, Edges, Islands, SelectedEndpoints, Options, Run);
-			const bool bShortForwardConnectionDoesNotBackwrap = Plans.Num() == 0 && SelectedEndpoints[0].BusContractId == INDEX_NONE;
-			AddCase(TEXT("short_connection_does_not_create_backwrap_bus"), bShortForwardConnectionDoesNotBackwrap, FString::Printf(TEXT("plans=%d bus=%d"), Plans.Num(), SelectedEndpoints[0].BusContractId));
-		}
-
-		{
-			TArray<FNode> Nodes;
-			for (int32 Index = 0; Index < 5; ++Index)
+			TArray<FInternalBusGroup> InternalBusGroups;
+			TArray<FBoundaryEntry> BoundaryEntries;
+			TArray<FBoundaryBus> BoundaryBuses;
+			TArray<FIslandPortCandidate> Candidates;
+			TArray<FIslandEdge> IslandEdges = { IslandEdge };
+			BuildInputEntryAndPortModel(Nodes, Edges, Islands, IslandEdges, Options, Run, InternalBusGroups, BoundaryEntries, BoundaryBuses, Candidates);
+			int32 SingleNodeEntries = 0;
+			int32 DirectLikeRightLimitEntries = 0;
+			for (const FBoundaryEntry& Entry : BoundaryEntries)
 			{
-				FNode Node;
-				Node.Index = Index;
-				Node.Guid = FString::Printf(TEXT("accessprune%d"), Index);
-				Node.Title = Node.Guid;
-				Node.Width = 100.0;
-				Node.Height = 70.0;
-				Node.OutputPinNames = { TEXT("out") };
-				Node.InputPinNames = { TEXT("in") };
-				Node.OutputPinAnchors = { FVector2D(Node.Width, 35.0) };
-				Node.InputPinAnchors = { FVector2D(0.0, 35.0) };
-				Node.OutputPinAnchorValid = { 1 };
-				Node.InputPinAnchorValid = { 1 };
-				Nodes.Add(Node);
-			}
-			Nodes[0].NewX = 0.0;
-			Nodes[0].NewY = 0.0;
-			Nodes[1].NewX = 700.0;
-			Nodes[1].NewY = 0.0;
-			Nodes[2].NewX = 130.0;
-			Nodes[2].NewY = 80.0;
-			Nodes[3].NewX = 0.0;
-			Nodes[3].NewY = 170.0;
-			Nodes[4].NewX = 700.0;
-			Nodes[4].NewY = 170.0;
-			TArray<FEdge> Edges = {
-				{0, 1, TEXT("out"), TEXT("in"), 0, 0, false},
-				{0, 2, TEXT("out"), TEXT("in"), 0, 0, false},
-				{3, 4, TEXT("out"), TEXT("in"), 0, 0, false}
-			};
-			FIsland Island;
-			Island.Id = 0;
-			Island.Nodes = {0, 1, 2, 3, 4};
-			for (const int32 NodeIndex : Island.Nodes)
-			{
-				Island.NodeSet.Add(NodeIndex);
-			}
-			Island.LocalBounds = BoundsForNodes(Nodes, Island.Nodes);
-			TArray<FIsland> Islands = {Island};
-			TMap<int32, int32> IslandByNode;
-			for (const int32 NodeIndex : Island.Nodes)
-			{
-				IslandByNode.Add(NodeIndex, 0);
-			}
-
-			const double EntryX = ComputeInputXAlignedToOutput(Nodes[0].NewX + Nodes[0].Width, Options);
-			const double LongExitX = ComputeOutputXAlignedToInput(Nodes[1].NewX, Options);
-			const double OtherEntryX = ComputeInputXAlignedToOutput(Nodes[3].NewX + Nodes[3].Width, Options);
-			const double OtherExitX = ComputeOutputXAlignedToInput(Nodes[4].NewX, Options);
-			FReroutePlan LongPlan;
-			LongPlan.EdgeIndex = 0;
-			LongPlan.Reason = TEXT("direct_obstacle_local_bus");
-			LongPlan.BusId = MakeSourceParamId(Edges[0]);
-			LongPlan.RouteKind = ERouteKind::LocalBus;
-			LongPlan.Points = { FVector2D(EntryX, 80.0), FVector2D(LongExitX, 80.0) };
-			FReroutePlan InvalidShortPlan;
-			InvalidShortPlan.EdgeIndex = 1;
-			InvalidShortPlan.Reason = TEXT("direct_obstacle_local_bus");
-			InvalidShortPlan.BusId = MakeSourceParamId(Edges[1]);
-			InvalidShortPlan.RouteKind = ERouteKind::LocalBus;
-			InvalidShortPlan.Points = { FVector2D(EntryX, 84.0), FVector2D(EntryX + 120.0, 84.0) };
-			FReroutePlan OtherPlan;
-			OtherPlan.EdgeIndex = 2;
-			OtherPlan.Reason = TEXT("direct_obstacle_local_bus");
-			OtherPlan.BusId = MakeSourceParamId(Edges[2]);
-			OtherPlan.RouteKind = ERouteKind::LocalBus;
-			OtherPlan.Points = { FVector2D(OtherEntryX, 84.0), FVector2D(OtherExitX, 84.0) };
-			TArray<FReroutePlan> Plans = {LongPlan, InvalidShortPlan, OtherPlan};
-			FRunResult Run;
-			const int32 Removed = RemoveEndpointAccessInvalidReroutePlans(Nodes, Edges, Islands, IslandByNode, Options, Plans, Run);
-			const int32 InitialViolations = ValidateFinalVisibleRerouteLaneSpacing(Nodes, Edges, Islands, IslandByNode, Options, Plans, nullptr);
-			const int32 Adjusted = PlanFinalVisibleRerouteTrunkLanes(Nodes, Edges, Islands, IslandByNode, Options, Plans, Run);
-			const int32 FinalViolations = ValidateFinalVisibleRerouteLaneSpacing(Nodes, Edges, Islands, IslandByNode, Options, Plans, &Run);
-			AddCase(TEXT("endpoint_access_invalid_reroute_does_not_block_lane_planner"),
-				Removed == 1 && Plans.Num() == 2 && InitialViolations > 0 && Adjusted >= 1 && FinalViolations == 0,
-				FString::Printf(TEXT("removed=%d plans=%d initial=%d adjusted=%d final=%d diagnostics=%d"),
-					Removed,
-					Plans.Num(),
-					InitialViolations,
-					Adjusted,
-					FinalViolations,
-					Run.RejectionDiagnostics.Num()));
-		}
-
-		RunFinalVisibleLaneRegressionSelfTests(Result, Options);
-
-		{
-			TArray<FNode> Nodes;
-			for (int32 Index = 0; Index < 4; ++Index)
-			{
-				FNode Node;
-				Node.Index = Index;
-				Node.Guid = FString::Printf(TEXT("finalvisiblelane%d"), Index);
-				Node.Title = Node.Guid;
-				Node.Width = 100.0;
-				Node.Height = 70.0;
-				Node.OutputPinNames = { TEXT("out") };
-				Node.InputPinNames = { TEXT("in") };
-				Node.OutputPinAnchors = { FVector2D(Node.Width, 35.0) };
-				Node.InputPinAnchors = { FVector2D(0.0, 35.0) };
-				Node.OutputPinAnchorValid = { 1 };
-				Node.InputPinAnchorValid = { 1 };
-				Nodes.Add(Node);
-			}
-			Nodes[0].NewX = 0.0;
-			Nodes[0].NewY = 0.0;
-			Nodes[1].NewX = 600.0;
-			Nodes[1].NewY = 0.0;
-			Nodes[2].NewX = 0.0;
-			Nodes[2].NewY = 140.0;
-			Nodes[3].NewX = 600.0;
-			Nodes[3].NewY = 140.0;
-			TArray<FEdge> Edges = {
-				{0, 1, TEXT("out"), TEXT("in"), 0, 0, false},
-				{2, 3, TEXT("out"), TEXT("in"), 0, 0, false}
-			};
-			FIsland Island;
-			Island.Id = 0;
-			Island.Nodes = {0, 1, 2, 3};
-			for (const int32 NodeIndex : Island.Nodes)
-			{
-				Island.NodeSet.Add(NodeIndex);
-			}
-			Island.LocalBounds = BoundsForNodes(Nodes, Island.Nodes);
-			TArray<FIsland> Islands = {Island};
-			TMap<int32, int32> IslandByNode;
-			for (const int32 NodeIndex : Island.Nodes)
-			{
-				IslandByNode.Add(NodeIndex, 0);
-			}
-
-			FReroutePlan PlanA;
-			PlanA.EdgeIndex = 0;
-			PlanA.Reason = TEXT("direct_obstacle_local_bus");
-			PlanA.BusId = MakeSourceParamId(Edges[0]);
-			PlanA.RouteKind = ERouteKind::LocalBus;
-			PlanA.Points.Add(FVector2D(180.0, 80.0));
-			PlanA.Points.Add(FVector2D(520.0, 80.0));
-			FReroutePlan PlanB;
-			PlanB.EdgeIndex = 1;
-			PlanB.Reason = TEXT("direct_obstacle_local_bus");
-			PlanB.BusId = MakeSourceParamId(Edges[1]);
-			PlanB.RouteKind = ERouteKind::LocalBus;
-			PlanB.Points.Add(FVector2D(180.0, 84.0));
-			PlanB.Points.Add(FVector2D(520.0, 84.0));
-			TArray<FReroutePlan> Plans = {PlanA, PlanB};
-			FRunResult Run;
-			const int32 InitialViolations = ValidateFinalVisibleRerouteLaneSpacing(Nodes, Edges, Islands, IslandByNode, Options, Plans, nullptr);
-			const int32 Adjusted = PlanFinalVisibleRerouteTrunkLanes(Nodes, Edges, Islands, IslandByNode, Options, Plans, Run);
-			const int32 FinalViolations = ValidateFinalVisibleRerouteLaneSpacing(Nodes, Edges, Islands, IslandByNode, Options, Plans, &Run);
-			const double DeltaY = Plans[0].Points.Num() > 0 && Plans[1].Points.Num() > 0
-				? FMath::Abs(Plans[0].Points[0].Y - Plans[1].Points[0].Y)
-				: 0.0;
-			AddCase(TEXT("final_visible_reroute_lane_planner_separates_post_added_buses"), InitialViolations > 0 && Adjusted >= 1 && FinalViolations == 0 && DeltaY >= GetBusTrunkLaneSpacing() - 0.5, FString::Printf(TEXT("initial=%d adjusted=%d final=%d delta=%.1f assignments=%d violations=%d"),
-				InitialViolations,
-				Adjusted,
-				FinalViolations,
-				DeltaY,
-				Run.LaneAssignmentDiagnostics.Num(),
-				Run.DesignDiagnostics.FinalVisibleBusLaneViolationCount));
-		}
-
-		{
-			TArray<FNode> Nodes;
-			for (int32 Index = 0; Index < 4; ++Index)
-			{
-				FNode Node;
-				Node.Index = Index;
-				Node.Guid = FString::Printf(TEXT("finalvisiblelongsegment%d"), Index);
-				Node.Title = Node.Guid;
-				Node.Width = 100.0;
-				Node.Height = 70.0;
-				Node.OutputPinNames = { TEXT("out") };
-				Node.InputPinNames = { TEXT("in") };
-				Node.OutputPinAnchors = { FVector2D(Node.Width, 35.0) };
-				Node.InputPinAnchors = { FVector2D(0.0, 35.0) };
-				Node.OutputPinAnchorValid = { 1 };
-				Node.InputPinAnchorValid = { 1 };
-				Nodes.Add(Node);
-			}
-			Nodes[0].NewX = 0.0;
-			Nodes[0].NewY = 0.0;
-			Nodes[1].NewX = 680.0;
-			Nodes[1].NewY = 0.0;
-			Nodes[2].NewX = 0.0;
-			Nodes[2].NewY = 150.0;
-			Nodes[3].NewX = 680.0;
-			Nodes[3].NewY = 150.0;
-			TArray<FEdge> Edges = {
-				{0, 1, TEXT("out"), TEXT("in"), 0, 0, false},
-				{2, 3, TEXT("out"), TEXT("in"), 0, 0, false}
-			};
-			FIsland Island;
-			Island.Id = 0;
-			Island.Nodes = {0, 1, 2, 3};
-			for (const int32 NodeIndex : Island.Nodes)
-			{
-				Island.NodeSet.Add(NodeIndex);
-			}
-			Island.LocalBounds = BoundsForNodes(Nodes, Island.Nodes);
-			TArray<FIsland> Islands = {Island};
-			TMap<int32, int32> IslandByNode;
-			for (const int32 NodeIndex : Island.Nodes)
-			{
-				IslandByNode.Add(NodeIndex, 0);
-			}
-
-			FReroutePlan PlanA;
-			PlanA.EdgeIndex = 0;
-			PlanA.Reason = TEXT("direct_obstacle_local_bus");
-			PlanA.BusId = MakeSourceParamId(Edges[0]);
-			PlanA.RouteKind = ERouteKind::LocalBus;
-			PlanA.Points.Add(FVector2D(180.0, 40.0));
-			PlanA.Points.Add(FVector2D(220.0, 40.0));
-			PlanA.Points.Add(FVector2D(260.0, 84.0));
-			PlanA.Points.Add(FVector2D(600.0, 84.0));
-			FReroutePlan PlanB;
-			PlanB.EdgeIndex = 1;
-			PlanB.Reason = TEXT("direct_obstacle_local_bus");
-			PlanB.BusId = MakeSourceParamId(Edges[1]);
-			PlanB.RouteKind = ERouteKind::LocalBus;
-			PlanB.Points.Add(FVector2D(180.0, 84.0));
-			PlanB.Points.Add(FVector2D(600.0, 84.0));
-			TArray<FReroutePlan> Plans = {PlanA, PlanB};
-			FRunResult Run;
-			const int32 InitialViolations = ValidateFinalVisibleRerouteLaneSpacing(Nodes, Edges, Islands, IslandByNode, Options, Plans, nullptr);
-			const int32 Adjusted = PlanFinalVisibleRerouteTrunkLanes(Nodes, Edges, Islands, IslandByNode, Options, Plans, Run);
-			const int32 FinalViolations = ValidateFinalVisibleRerouteLaneSpacing(Nodes, Edges, Islands, IslandByNode, Options, Plans, &Run);
-			TArray<FVisibleRerouteTrunkLaneItem> Items;
-			TArray<FVisibleRerouteSourceLaneGroup> Groups;
-			CollectVisibleRerouteSourceLaneGroups(Nodes, Edges, Islands, IslandByNode, Options, Plans, Items, Groups);
-			double LaneA = 0.0;
-			double LaneB = 0.0;
-			for (const FVisibleRerouteTrunkLaneItem& Item : Items)
-			{
-				if (Item.EdgeIndex == 0)
+				if (Entry.bSingleNodeBoundaryBus)
 				{
-					LaneA = Item.TrunkY;
-				}
-				else if (Item.EdgeIndex == 1)
-				{
-					LaneB = Item.TrunkY;
+					++SingleNodeEntries;
+					if (FMath::IsNearlyEqual(Entry.AllowedMaxX, IslandEdge.TargetLocal.X, 0.5))
+					{
+						++DirectLikeRightLimitEntries;
+					}
 				}
 			}
-			const double DeltaY = FMath::Abs(LaneA - LaneB);
-			AddCase(TEXT("final_visible_lane_planner_uses_longest_visible_horizontal_segment"), InitialViolations > 0 && Adjusted >= 1 && FinalViolations == 0 && DeltaY >= GetBusTrunkLaneSpacing() - 0.5, FString::Printf(TEXT("initial=%d adjusted=%d final=%d lane_a=%.1f lane_b=%.1f delta=%.1f assignments=%d"),
-				InitialViolations,
-				Adjusted,
-				FinalViolations,
-				LaneA,
-				LaneB,
-				DeltaY,
-				Run.LaneAssignmentDiagnostics.Num()));
+			const bool bSingleNodeBoundaryBusUsesDirectLikeRightLimit =
+				BoundaryBuses.Num() == 1
+				&& Run.DesignDiagnostics.TopBoundaryEntryCount == 1
+				&& Run.DesignDiagnostics.BottomBoundaryEntryCount == 1
+				&& SingleNodeEntries == 2
+				&& DirectLikeRightLimitEntries == 2;
+			AddCase(TEXT("single_node_boundary_bus_uses_direct_left_right_limit"), bSingleNodeBoundaryBusUsesDirectLikeRightLimit, FString::Printf(TEXT("buses=%d top=%d bottom=%d single_node_entries=%d direct_like=%d target_x=%.1f"),
+				BoundaryBuses.Num(),
+				Run.DesignDiagnostics.TopBoundaryEntryCount,
+				Run.DesignDiagnostics.BottomBoundaryEntryCount,
+				SingleNodeEntries,
+				DirectLikeRightLimitEntries,
+				IslandEdge.TargetLocal.X));
+		}
+
+		{
+			TArray<FIsland> Islands;
+			Islands.SetNum(2);
+			Islands[0].Id = 0;
+			Islands[0].X = 0.0;
+			Islands[0].Y = 520.0;
+			Islands[0].LocalBounds = { 0.0, 0.0, 120.0, 70.0 };
+			Islands[1].Id = 1;
+			Islands[1].X = 320.0;
+			Islands[1].Y = 100.0;
+			Islands[1].LocalBounds = { 0.0, 0.0, 220.0, 120.0 };
+
+			TArray<FIslandPortCandidate> Candidates;
+			FIslandPortCandidate TopCandidate;
+			TopCandidate.Id = 0;
+			TopCandidate.EdgeIndex = 0;
+			TopCandidate.SourceIsland = 0;
+			TopCandidate.TargetIsland = 1;
+			TopCandidate.BoundaryEntryId = 10;
+			TopCandidate.InternalBusGroupId = 3;
+			TopCandidate.Side = TEXT("top");
+			TopCandidate.SourceLocal = FVector2D(120.0, 35.0);
+			TopCandidate.TargetLocal = FVector2D(-66.0, -80.0);
+			TopCandidate.ActualTargetLocal = FVector2D(40.0, 70.0);
+			TopCandidate.AllowedMinX = TopCandidate.TargetLocal.X;
+			TopCandidate.AllowedMaxX = ComputeOutputXAlignedToInput(TopCandidate.ActualTargetLocal.X, Options);
+			Candidates.Add(TopCandidate);
+
+			FIslandPortCandidate BottomCandidate = TopCandidate;
+			BottomCandidate.Id = 1;
+			BottomCandidate.BoundaryEntryId = 11;
+			BottomCandidate.Side = TEXT("bottom");
+			BottomCandidate.TargetLocal = FVector2D(-66.0, 200.0);
+			BottomCandidate.AllowedMinX = BottomCandidate.TargetLocal.X;
+			Candidates.Add(BottomCandidate);
+
+			TArray<FDeterministicInterIslandBus> Buses;
+			FDeterministicInterIslandBus Bus;
+			Bus.Id = 0;
+			Bus.FinalY = Islands[1].Y + BottomCandidate.TargetLocal.Y;
+			Buses.Add(Bus);
+
+			TArray<FDeterministicIslandConnection> Connections;
+			FDeterministicIslandConnection Connection;
+			Connection.bBus = true;
+			Connection.BusId = 0;
+			Connection.Endpoint = MakeSelectedEndpointFromCandidate(TopCandidate, Options);
+			Connections.Add(Connection);
+
+			TArray<FNode> EmptyNodes;
+			TArray<FEdge> EmptyEdges;
+			ResolveBusConnectionEntriesForCurrentPlacement(EmptyNodes, EmptyEdges, Candidates, Islands, Buses, Options, Connections);
+			const bool bBoundaryBusSideTracksInterIslandBus =
+				Connections.Num() == 1
+				&& Connections[0].Endpoint.CandidateId == BottomCandidate.Id
+				&& Connections[0].Endpoint.BoundaryEntryId == BottomCandidate.BoundaryEntryId
+				&& Connections[0].Endpoint.Side == TEXT("bottom")
+				&& FMath::IsNearlyEqual(Connections[0].Endpoint.EntryLocal.Y, BottomCandidate.TargetLocal.Y, 0.5);
+			AddCase(TEXT("boundary_bus_side_tracks_inter_island_bus_side"), bBoundaryBusSideTracksInterIslandBus, FString::Printf(TEXT("side=%s candidate=%d entry_y=%.1f bus_y=%.1f"),
+				*Connections[0].Endpoint.Side,
+				Connections[0].Endpoint.CandidateId,
+				Connections[0].Endpoint.EntryLocal.Y,
+				Buses[0].FinalY));
 		}
 
 		{
 			TArray<FNode> Nodes;
-			for (int32 Index = 0; Index < 4; ++Index)
-			{
-				FNode Node;
-				Node.Index = Index;
-				Node.Guid = FString::Printf(TEXT("finalvisiblesplittrunk%d"), Index);
-				Node.Title = Node.Guid;
-				Node.Width = 100.0;
-				Node.Height = 70.0;
-				Node.OutputPinNames = { TEXT("out") };
-				Node.InputPinNames = { TEXT("in") };
-				Node.OutputPinAnchors = { FVector2D(Node.Width, 35.0) };
-				Node.InputPinAnchors = { FVector2D(0.0, 35.0) };
-				Node.OutputPinAnchorValid = { 1 };
-				Node.InputPinAnchorValid = { 1 };
-				Nodes.Add(Node);
-			}
-			Nodes[0].NewX = 0.0;
-			Nodes[0].NewY = 0.0;
-			Nodes[1].NewX = 760.0;
-			Nodes[1].NewY = 0.0;
-			Nodes[2].NewX = 0.0;
-			Nodes[2].NewY = 150.0;
-			Nodes[3].NewX = 760.0;
-			Nodes[3].NewY = 150.0;
+			Nodes.SetNum(2);
+			Nodes[0].Index = 0;
+			Nodes[0].Guid = TEXT("direct_left_source");
+			Nodes[0].Title = Nodes[0].Guid;
+			Nodes[0].Width = 120.0;
+			Nodes[0].Height = 70.0;
+			Nodes[0].OutputPinNames = { TEXT("out") };
+			Nodes[0].OutputPinAnchors = { FVector2D(120.0, 35.0) };
+			Nodes[0].OutputPinAnchorValid = { 1 };
+			Nodes[1].Index = 1;
+			Nodes[1].Guid = TEXT("direct_left_target");
+			Nodes[1].Title = Nodes[1].Guid;
+			Nodes[1].Width = 168.0;
+			Nodes[1].Height = 80.0;
+			Nodes[1].InputPinNames = { TEXT("in") };
+			Nodes[1].InputPinAnchors = { FVector2D(6.0, 40.0) };
+			Nodes[1].InputPinAnchorValid = { 1 };
+
 			TArray<FEdge> Edges = {
-				{0, 1, TEXT("out"), TEXT("in"), 0, 0, false},
-				{2, 3, TEXT("out"), TEXT("in"), 0, 0, false}
+				{0, 1, TEXT("out"), TEXT("in"), 0, 0, false}
 			};
-			FIsland Island;
-			Island.Id = 0;
-			Island.Nodes = {0, 1, 2, 3};
-			for (const int32 NodeIndex : Island.Nodes)
-			{
-				Island.NodeSet.Add(NodeIndex);
-			}
-			Island.LocalBounds = BoundsForNodes(Nodes, Island.Nodes);
-			TArray<FIsland> Islands = {Island};
-			TMap<int32, int32> IslandByNode;
-			for (const int32 NodeIndex : Island.Nodes)
-			{
-				IslandByNode.Add(NodeIndex, 0);
-			}
-
-			FReroutePlan PlanA;
-			PlanA.EdgeIndex = 0;
-			PlanA.Reason = TEXT("direct_obstacle_local_bus");
-			PlanA.BusId = MakeSourceParamId(Edges[0]);
-			PlanA.RouteKind = ERouteKind::LocalBus;
-			PlanA.Points.Add(FVector2D(180.0, 40.0));
-			PlanA.Points.Add(FVector2D(650.0, 40.0));
-			PlanA.Points.Add(FVector2D(260.0, 84.0));
-			PlanA.Points.Add(FVector2D(600.0, 84.0));
-			FReroutePlan PlanB;
-			PlanB.EdgeIndex = 1;
-			PlanB.Reason = TEXT("direct_obstacle_local_bus");
-			PlanB.BusId = MakeSourceParamId(Edges[1]);
-			PlanB.RouteKind = ERouteKind::LocalBus;
-			PlanB.Points.Add(FVector2D(180.0, 84.0));
-			PlanB.Points.Add(FVector2D(600.0, 84.0));
-			TArray<FReroutePlan> Plans = {PlanA, PlanB};
-
-			TArray<FVisibleRerouteTrunkLaneItem> InitialItems;
-			TArray<FVisibleRerouteSourceLaneGroup> InitialGroups;
-			CollectVisibleRerouteSourceLaneGroups(Nodes, Edges, Islands, IslandByNode, Options, Plans, InitialItems, InitialGroups);
+			TArray<FIsland> Islands;
+			Islands.SetNum(2);
+			Islands[0].Id = 0;
+			Islands[0].Nodes = {0};
+			Islands[0].NodeSet.Add(0);
+			Islands[0].LocalBounds = BoundsForNodes(Nodes, Islands[0].Nodes);
+			Islands[1].Id = 1;
+			Islands[1].Nodes = {1};
+			Islands[1].NodeSet.Add(1);
+			Islands[1].LocalBounds = BoundsForNodes(Nodes, Islands[1].Nodes);
+			FIslandEdge IslandEdge;
+			IslandEdge.EdgeIndex = 0;
+			IslandEdge.SourceIsland = 0;
+			IslandEdge.TargetIsland = 1;
+			IslandEdge.SourceLocal = GetSourcePort(Nodes[0], Edges[0], true);
+			IslandEdge.TargetLocal = GetTargetPort(Nodes[1], Edges[0], true);
+			TArray<FIslandEdge> IslandEdges = {IslandEdge};
 			FRunResult Run;
-			const int32 InitialViolations = ValidateFinalVisibleRerouteLaneSpacing(Nodes, Edges, Islands, IslandByNode, Options, Plans, nullptr);
-			const int32 Adjusted = PlanFinalVisibleRerouteTrunkLanes(Nodes, Edges, Islands, IslandByNode, Options, Plans, Run);
-			const int32 FinalViolations = ValidateFinalVisibleRerouteLaneSpacing(Nodes, Edges, Islands, IslandByNode, Options, Plans, &Run);
-			TArray<FVisibleRerouteTrunkLaneItem> FinalItems;
-			TArray<FVisibleRerouteSourceLaneGroup> FinalGroups;
-			CollectVisibleRerouteSourceLaneGroups(Nodes, Edges, Islands, IslandByNode, Options, Plans, FinalItems, FinalGroups);
-			AddCase(TEXT("final_visible_lane_planner_detects_and_normalizes_split_route_trunks"),
-				InitialItems.Num() >= 3 && InitialViolations > 0 && Adjusted >= 1 && FinalViolations == 0 && FinalItems.Num() <= 2,
-				FString::Printf(TEXT("initial_items=%d final_items=%d initial=%d adjusted=%d final=%d assignments=%d"),
-					InitialItems.Num(),
-					FinalItems.Num(),
-					InitialViolations,
-					Adjusted,
-					FinalViolations,
-					Run.LaneAssignmentDiagnostics.Num()));
+			TArray<FInternalBusGroup> InternalBusGroups;
+			TArray<FBoundaryEntry> BoundaryEntries;
+			TArray<FBoundaryBus> BoundaryBuses;
+			TArray<FIslandPortCandidate> Candidates;
+			BuildInputEntryAndPortModel(Nodes, Edges, Islands, IslandEdges, Options, Run, InternalBusGroups, BoundaryEntries, BoundaryBuses, Candidates);
+			Islands[0].X = -600.0;
+			Islands[1].X = 0.0;
+			const FVector2D ResolvedBusPathEntry = Candidates.Num() > 0
+				? ResolveEntryLocalAfterPlacement(Candidates[0], Islands[0], Islands[1], Options, BusPathAccessClearanceX(Options))
+				: FVector2D::ZeroVector;
+			const double ExpectedLeftX = -Options.HorizontalSpacing * 0.22;
+			const bool bSingleInterfaceUsesDirectLeft =
+				InternalBusGroups.Num() == 1
+				&& BoundaryEntries.Num() == 1
+				&& BoundaryBuses.Num() == 0
+				&& Candidates.Num() == 1
+				&& BoundaryEntries[0].Side == TEXT("left")
+				&& FMath::IsNearlyEqual(BoundaryEntries[0].LocalPoint.X, ExpectedLeftX, 0.5)
+				&& FMath::IsNearlyEqual(BoundaryEntries[0].LocalPoint.Y, IslandEdge.TargetLocal.Y, 0.5)
+				&& FMath::IsNearlyEqual(BoundaryEntries[0].AllowedMaxX, IslandEdge.TargetLocal.X, 0.5)
+				&& FMath::IsNearlyEqual(InternalBusGroups[0].EntryLocal.X, IslandEdge.TargetLocal.X, 0.5)
+				&& FMath::IsNearlyEqual(InternalBusGroups[0].EntryLocal.Y, IslandEdge.TargetLocal.Y, 0.5)
+				&& FMath::IsNearlyEqual(ResolvedBusPathEntry.X, ExpectedLeftX, 0.5)
+				&& FMath::IsNearlyEqual(ResolvedBusPathEntry.Y, IslandEdge.TargetLocal.Y, 0.5)
+				&& Run.DesignDiagnostics.LeftBoundaryEntryCount == 1
+				&& Run.DesignDiagnostics.TopBoundaryEntryCount == 0
+				&& Run.DesignDiagnostics.BottomBoundaryEntryCount == 0;
+			AddCase(TEXT("single_external_input_interface_uses_direct_left_when_clear"), bSingleInterfaceUsesDirectLeft, FString::Printf(TEXT("groups=%d entries=%d buses=%d candidates=%d left=%d top=%d bottom=%d entry=(%.1f,%.1f) target=(%.1f,%.1f) allowed_max=%.1f resolved=(%.1f,%.1f)"),
+				InternalBusGroups.Num(),
+				BoundaryEntries.Num(),
+				BoundaryBuses.Num(),
+				Candidates.Num(),
+				Run.DesignDiagnostics.LeftBoundaryEntryCount,
+				Run.DesignDiagnostics.TopBoundaryEntryCount,
+				Run.DesignDiagnostics.BottomBoundaryEntryCount,
+				BoundaryEntries.Num() > 0 ? BoundaryEntries[0].LocalPoint.X : 0.0,
+				BoundaryEntries.Num() > 0 ? BoundaryEntries[0].LocalPoint.Y : 0.0,
+				IslandEdge.TargetLocal.X,
+				IslandEdge.TargetLocal.Y,
+				BoundaryEntries.Num() > 0 ? BoundaryEntries[0].AllowedMaxX : 0.0,
+				ResolvedBusPathEntry.X,
+				ResolvedBusPathEntry.Y));
 		}
 
 		{
 			TArray<FNode> Nodes;
-			for (int32 Index = 0; Index < 4; ++Index)
-			{
-				FNode Node;
-				Node.Index = Index;
-				Node.Guid = FString::Printf(TEXT("finalvisiblebranchx%d"), Index);
-				Node.Title = Node.Guid;
-				Node.Width = 100.0;
-				Node.Height = 70.0;
-				Node.OutputPinNames = { TEXT("out") };
-				Node.InputPinNames = { TEXT("in") };
-				Node.OutputPinAnchors = { FVector2D(Node.Width, 35.0) };
-				Node.InputPinAnchors = { FVector2D(0.0, 35.0) };
-				Node.OutputPinAnchorValid = { 1 };
-				Node.InputPinAnchorValid = { 1 };
-				Nodes.Add(Node);
-			}
-			Nodes[0].NewX = 0.0;
-			Nodes[0].NewY = 0.0;
-			Nodes[1].NewX = 600.0;
-			Nodes[1].NewY = 160.0;
-			Nodes[2].NewX = 0.0;
-			Nodes[2].NewY = 160.0;
-			Nodes[3].NewX = 600.0;
-			Nodes[3].NewY = 20.0;
+			Nodes.SetNum(3);
+			Nodes[0].Index = 0;
+			Nodes[0].Guid = TEXT("same_row_merge_source");
+			Nodes[0].Title = Nodes[0].Guid;
+			Nodes[0].Width = 120.0;
+			Nodes[0].Height = 70.0;
+			Nodes[0].OutputPinNames = { TEXT("out") };
+			Nodes[0].OutputPinAnchors = { FVector2D(120.0, 35.0) };
+			Nodes[0].OutputPinAnchorValid = { 1 };
+			Nodes[1].Index = 1;
+			Nodes[1].Guid = TEXT("same_row_merge_target");
+			Nodes[1].Title = Nodes[1].Guid;
+			Nodes[1].Width = 160.0;
+			Nodes[1].Height = 80.0;
+			Nodes[1].InputPinNames = { TEXT("in") };
+			Nodes[1].InputPinAnchors = { FVector2D(100.0, 35.0) };
+			Nodes[1].InputPinAnchorValid = { 1 };
+			Nodes[2].Index = 2;
+			Nodes[2].Guid = TEXT("same_row_merge_extra");
+			Nodes[2].Title = Nodes[2].Guid;
+			Nodes[2].Width = 80.0;
+			Nodes[2].Height = 60.0;
+			Nodes[2].OldY = 220.0;
+			Nodes[2].NewY = 220.0;
 			TArray<FEdge> Edges = {
-				{0, 1, TEXT("out"), TEXT("in"), 0, 0, false},
-				{2, 3, TEXT("out"), TEXT("in"), 0, 0, false}
+				{0, 1, TEXT("out"), TEXT("in"), 0, 0, false}
 			};
-			FIsland Island;
-			Island.Id = 0;
-			Island.Nodes = {0, 1, 2, 3};
-			for (const int32 NodeIndex : Island.Nodes)
-			{
-				Island.NodeSet.Add(NodeIndex);
-			}
-			Island.LocalBounds = BoundsForNodes(Nodes, Island.Nodes);
-			TArray<FIsland> Islands = {Island};
-			TMap<int32, int32> IslandByNode;
-			for (const int32 NodeIndex : Island.Nodes)
-			{
-				IslandByNode.Add(NodeIndex, 0);
-			}
+			TArray<FIsland> Islands;
+			Islands.SetNum(2);
+			Islands[0].Id = 0;
+			Islands[0].X = -600.0;
+			Islands[0].Y = 0.0;
+			Islands[0].Nodes = {0};
+			Islands[0].NodeSet.Add(0);
+			Islands[0].LocalBounds = BoundsForNodes(Nodes, Islands[0].Nodes);
+			Islands[1].Id = 1;
+			Islands[1].X = 0.0;
+			Islands[1].Y = 0.0;
+			Islands[1].Nodes = {1, 2};
+			Islands[1].NodeSet.Add(1);
+			Islands[1].NodeSet.Add(2);
+			Islands[1].LocalBounds = BoundsForNodes(Nodes, Islands[1].Nodes);
 
-			const double TrunkY = 80.0;
-			const double EntryX = ComputeInputXAlignedToOutput(Nodes[0].NewX + Nodes[0].Width, Options);
-			const double BranchX = ComputeOutputXAlignedToInput(Nodes[1].NewX, Options);
-			FReroutePlan PlanA;
-			PlanA.EdgeIndex = 0;
-			PlanA.Reason = TEXT("direct_obstacle_local_bus");
-			PlanA.BusId = MakeSourceParamId(Edges[0]);
-			PlanA.RouteKind = ERouteKind::LocalBus;
-			PlanA.Points = { FVector2D(EntryX, TrunkY), FVector2D(BranchX, TrunkY), FVector2D(BranchX, Nodes[1].NewY + 35.0) };
-			FReroutePlan PlanB;
-			PlanB.EdgeIndex = 1;
-			PlanB.Reason = TEXT("direct_obstacle_local_bus");
-			PlanB.BusId = MakeSourceParamId(Edges[1]);
-			PlanB.RouteKind = ERouteKind::LocalBus;
-			PlanB.Points = { FVector2D(EntryX, TrunkY), FVector2D(BranchX, TrunkY), FVector2D(BranchX, Nodes[3].NewY + 35.0) };
-			TArray<FReroutePlan> Plans = {PlanA, PlanB};
-			FRunResult Run;
-			const int32 InitialViolations = ValidateFinalVisibleRerouteBranchXLanes(Nodes, Edges, Islands, IslandByNode, Options, Plans, nullptr);
-			const int32 Adjusted = PlanFinalVisibleRerouteBranchXLanes(Nodes, Edges, Islands, IslandByNode, Options, Plans, Run);
-			const int32 FinalViolations = ValidateFinalVisibleRerouteBranchXLanes(Nodes, Edges, Islands, IslandByNode, Options, Plans, &Run);
-			double FinalBranchXA = 0.0;
-			double FinalBranchXB = 0.0;
-			TArray<FVisibleRerouteBranchXLaneItem> FinalItems;
-			CollectVisibleRerouteBranchXLaneItems(Nodes, Edges, Islands, IslandByNode, Options, Plans, FinalItems);
-			for (const FVisibleRerouteBranchXLaneItem& Item : FinalItems)
-			{
-				if (Item.EdgeIndex == 0)
-				{
-					FinalBranchXA = Item.BranchX;
-				}
-				else if (Item.EdgeIndex == 1)
-				{
-					FinalBranchXB = Item.BranchX;
-				}
-			}
-			AddCase(TEXT("final_visible_branch_x_lane_planner_orders_closer_target_right"), InitialViolations > 0 && Adjusted >= 1 && FinalViolations == 0 && FinalBranchXB > FinalBranchXA + GetCrossBusBranchLaneSpacing(Options) - 0.5, FString::Printf(TEXT("initial=%d adjusted=%d final=%d branch_a=%.1f branch_b=%.1f assignments=%d branch_violations=%d"),
-				InitialViolations,
-				Adjusted,
-				FinalViolations,
-				FinalBranchXA,
-				FinalBranchXB,
-				Run.LaneAssignmentDiagnostics.Num(),
-				Run.DesignDiagnostics.FinalVisibleBranchXLaneViolationCount));
+			FSelectedEndpointCandidate Endpoint;
+			Endpoint.EdgeIndex = 0;
+			Endpoint.SourceIsland = 0;
+			Endpoint.TargetIsland = 1;
+			Endpoint.Side = TEXT("left");
+			Endpoint.SourceLocal = FVector2D(120.0, 35.0);
+			Endpoint.EntryLocal = FVector2D(96.0, 35.0);
+			Endpoint.ActualTargetLocal = FVector2D(100.0, 35.0);
+
+			FDeterministicIslandConnection Connection;
+			Connection.Endpoint = Endpoint;
+			Connection.bBus = true;
+			Connection.BusId = 0;
+			Connection.BusReason = TEXT("test");
+			FDeterministicInterIslandBus Bus;
+			Bus.Id = 0;
+			Bus.Key = TEXT("same_row_merge_bus");
+			Bus.SlotIndex = 0;
+			Bus.FinalY = 65.0;
+			TArray<FDeterministicInterIslandBus> TestBuses = {Bus};
+			TArray<FDeterministicIslandConnection> TestConnections = {Connection};
+			FRunResult RunNear;
+			const TArray<FReroutePlan> NearPlans = MaterializeInterIslandBusPlans(Nodes, Edges, Islands, TestConnections, TestBuses, Options, RunNear);
+			const bool bNearBranchTargetsActual =
+				NearPlans.Num() == 1
+				&& NearPlans[0].Points.Num() == 2
+				&& FMath::IsNearlyEqual(NearPlans[0].Points.Last().X, ComputeOutputXAlignedToInput(100.0, Options), 0.5)
+				&& FMath::IsNearlyEqual(NearPlans[0].Points.Last().Y, Bus.FinalY, 0.5);
+
+			Connection.Endpoint.EntryLocal = FVector2D(94.0, 35.0);
+			TestConnections[0] = Connection;
+			FRunResult RunFar;
+			const TArray<FReroutePlan> FarPlans = MaterializeInterIslandBusPlans(Nodes, Edges, Islands, TestConnections, TestBuses, Options, RunFar);
+			const bool bFarBranchTargetsActual =
+				FarPlans.Num() == 1
+				&& FarPlans[0].Points.Num() == 2
+				&& FMath::IsNearlyEqual(FarPlans[0].Points.Last().X, ComputeOutputXAlignedToInput(100.0, Options), 0.5)
+				&& FMath::IsNearlyEqual(FarPlans[0].Points.Last().Y, Bus.FinalY, 0.5)
+				&& RunFar.InterIslandBusBranchVisibleTargetDiagnostics.Num() == 1;
+			AddCase(TEXT("inter_island_bus_same_row_branch_targets_actual_pin"), bNearBranchTargetsActual && bFarBranchTargetsActual, FString::Printf(TEXT("near_plans=%d near_points=%d far_plans=%d far_points=%d visible_targets=%d"),
+				NearPlans.Num(),
+				NearPlans.Num() > 0 ? NearPlans[0].Points.Num() : 0,
+				FarPlans.Num(),
+				FarPlans.Num() > 0 ? FarPlans[0].Points.Num() : 0,
+				RunFar.InterIslandBusBranchVisibleTargetDiagnostics.Num()));
 		}
 
 		{
 			TArray<FNode> Nodes;
-			for (int32 Index = 0; Index < 6; ++Index)
-			{
-				FNode Node;
-				Node.Index = Index;
-				Node.Guid = FString::Printf(TEXT("finalvisiblebranchscope%d"), Index);
-				Node.Title = Node.Guid;
-				Node.Width = 100.0;
-				Node.Height = 70.0;
-				Node.OutputPinNames = { TEXT("out") };
-				Node.InputPinNames = { TEXT("in") };
-				Node.OutputPinAnchors = { FVector2D(Node.Width, 35.0) };
-				Node.InputPinAnchors = { FVector2D(0.0, 35.0) };
-				Node.OutputPinAnchorValid = { 1 };
-				Node.InputPinAnchorValid = { 1 };
-				Nodes.Add(Node);
-			}
-			Nodes[0].NewX = 0.0;
-			Nodes[0].NewY = 0.0;
-			Nodes[1].NewX = 600.0;
-			Nodes[1].NewY = 0.0;
-			Nodes[2].NewX = 0.0;
-			Nodes[2].NewY = 200.0;
-			Nodes[3].NewX = 260.0;
-			Nodes[3].NewY = 200.0;
-			Nodes[4].NewX = 0.0;
-			Nodes[4].NewY = 400.0;
-			Nodes[5].NewX = 600.0;
-			Nodes[5].NewY = 400.0;
+			Nodes.SetNum(2);
+			Nodes[0].Index = 0;
+			Nodes[0].Guid = TEXT("single_node_boundary_merge_source");
+			Nodes[0].Title = Nodes[0].Guid;
+			Nodes[0].Width = 120.0;
+			Nodes[0].Height = 70.0;
+			Nodes[0].OutputPinNames = { TEXT("out") };
+			Nodes[0].OutputPinAnchors = { FVector2D(120.0, 35.0) };
+			Nodes[0].OutputPinAnchorValid = { 1 };
+			Nodes[1].Index = 1;
+			Nodes[1].Guid = TEXT("single_node_boundary_merge_target");
+			Nodes[1].Title = Nodes[1].Guid;
+			Nodes[1].Width = 160.0;
+			Nodes[1].Height = 80.0;
+			Nodes[1].InputPinNames = { TEXT("in") };
+			Nodes[1].InputPinAnchors = { FVector2D(100.0, 35.0) };
+			Nodes[1].InputPinAnchorValid = { 1 };
 			TArray<FEdge> Edges = {
-				{0, 1, TEXT("out"), TEXT("in"), 0, 0, false},
-				{2, 3, TEXT("out"), TEXT("in"), 0, 0, false},
-				{4, 5, TEXT("out"), TEXT("in"), 0, 0, false}
+				{0, 1, TEXT("out"), TEXT("in"), 0, 0, false}
 			};
-			FIsland Island;
-			Island.Id = 0;
-			Island.Nodes = {0, 1, 2, 3, 4, 5};
-			for (const int32 NodeIndex : Island.Nodes)
-			{
-				Island.NodeSet.Add(NodeIndex);
-			}
-			Island.LocalBounds = BoundsForNodes(Nodes, Island.Nodes);
-			TArray<FIsland> Islands = {Island};
-			TMap<int32, int32> IslandByNode;
-			for (const int32 NodeIndex : Island.Nodes)
-			{
-				IslandByNode.Add(NodeIndex, 0);
-			}
+			TArray<FIsland> Islands;
+			Islands.SetNum(2);
+			Islands[0].Id = 0;
+			Islands[0].X = -600.0;
+			Islands[0].Y = 0.0;
+			Islands[0].Nodes = {0};
+			Islands[0].NodeSet.Add(0);
+			Islands[0].LocalBounds = BoundsForNodes(Nodes, Islands[0].Nodes);
+			Islands[1].Id = 1;
+			Islands[1].X = 0.0;
+			Islands[1].Y = 0.0;
+			Islands[1].Nodes = {1};
+			Islands[1].NodeSet.Add(1);
+			Islands[1].LocalBounds = BoundsForNodes(Nodes, Islands[1].Nodes);
 
-			const double EntryX = ComputeInputXAlignedToOutput(Nodes[0].NewX + Nodes[0].Width, Options);
-			const double TrunkY = -120.0;
-			FReroutePlan NearRightPlan;
-			NearRightPlan.EdgeIndex = 0;
-			NearRightPlan.Reason = TEXT("direct_obstacle_local_bus");
-			NearRightPlan.BusId = MakeSourceParamId(Edges[0]);
-			NearRightPlan.RouteKind = ERouteKind::LocalBus;
-			NearRightPlan.Points = { FVector2D(EntryX, TrunkY), FVector2D(520.0, TrunkY) };
-			FReroutePlan FarLeftPlan;
-			FarLeftPlan.EdgeIndex = 1;
-			FarLeftPlan.Reason = TEXT("direct_obstacle_local_bus");
-			FarLeftPlan.BusId = MakeSourceParamId(Edges[1]);
-			FarLeftPlan.RouteKind = ERouteKind::LocalBus;
-			FarLeftPlan.Points = { FVector2D(EntryX, TrunkY), FVector2D(ComputeOutputXAlignedToInput(Nodes[3].NewX, Options), TrunkY) };
-			FReroutePlan ScopedPlan;
-			ScopedPlan.EdgeIndex = 2;
-			ScopedPlan.Reason = TEXT("direct_obstacle_local_bus");
-			ScopedPlan.BusId = MakeSourceParamId(Edges[2]);
-			ScopedPlan.RouteKind = ERouteKind::LocalBus;
-			ScopedPlan.Points = { FVector2D(EntryX, TrunkY), FVector2D(500.0, TrunkY), FVector2D(518.0, TrunkY) };
-			TArray<FReroutePlan> Plans = {NearRightPlan, FarLeftPlan, ScopedPlan};
+			FSelectedEndpointCandidate Endpoint;
+			Endpoint.EdgeIndex = 0;
+			Endpoint.SourceIsland = 0;
+			Endpoint.TargetIsland = 1;
+			Endpoint.Side = TEXT("top");
+			Endpoint.SourceLocal = FVector2D(120.0, 35.0);
+			Endpoint.EntryLocal = FVector2D(96.0, -80.0);
+			Endpoint.ActualTargetLocal = FVector2D(100.0, 35.0);
+			Endpoint.bSingleNodeBoundaryBus = true;
+
+			FDeterministicIslandConnection Connection;
+			Connection.Endpoint = Endpoint;
+			Connection.bBus = true;
+			Connection.BusId = 0;
+			Connection.BranchSlotIndex = 0;
+			Connection.BusReason = TEXT("test");
+			FDeterministicInterIslandBus Bus;
+			Bus.Id = 0;
+			Bus.Key = TEXT("single_node_boundary_merge_bus");
+			Bus.SlotIndex = 0;
+			Bus.FinalY = -80.0;
+			const TArray<FDeterministicInterIslandBus> TestBuses = { Bus };
+			const TArray<FDeterministicIslandConnection> TestConnections = { Connection };
 			FRunResult Run;
-			const int32 InitialViolations = ValidateFinalVisibleRerouteBranchXLanes(Nodes, Edges, Islands, IslandByNode, Options, Plans, nullptr);
-			const int32 Adjusted = PlanFinalVisibleRerouteBranchXLanes(Nodes, Edges, Islands, IslandByNode, Options, Plans, Run);
-			const int32 FinalViolations = ValidateFinalVisibleRerouteBranchXLanes(Nodes, Edges, Islands, IslandByNode, Options, Plans, &Run);
-			TArray<FVisibleRerouteBranchXLaneItem> FinalItems;
-			CollectVisibleRerouteBranchXLaneItems(Nodes, Edges, Islands, IslandByNode, Options, Plans, FinalItems);
-			double ScopedBranchX = -1.0;
-			for (const FVisibleRerouteBranchXLaneItem& Item : FinalItems)
+			const TArray<FReroutePlan> Plans = MaterializeInterIslandBusPlans(Nodes, Edges, Islands, TestConnections, TestBuses, Options, Run);
+			bool bDiagMerged = false;
+			if (Run.InterIslandBusBranchVisibleTargetDiagnostics.Num() == 1)
 			{
-				if (Item.EdgeIndex == 2)
-				{
-					ScopedBranchX = Item.BranchX;
-				}
+				const TSharedPtr<FJsonObject> Obj = Run.InterIslandBusBranchVisibleTargetDiagnostics[0]->AsObject();
+				bDiagMerged = Obj.IsValid() && Obj->GetBoolField(TEXT("merged_with_actual_target"));
 			}
-			const double ExpectedScopedBranchX = ComputeOutputXAlignedToInput(Nodes[5].NewX, Options) - GetCrossBusBranchLaneSpacing(Options);
-			AddCase(TEXT("final_visible_branch_x_far_items_do_not_overconstrain_bundle_scope"),
-				InitialViolations > 0 && Adjusted >= 1 && FinalViolations == 0 && FMath::IsNearlyEqual(ScopedBranchX, ExpectedScopedBranchX, 0.5),
-				FString::Printf(TEXT("initial=%d adjusted=%d final=%d scoped_x=%.1f expected=%.1f assignments=%d branch_violations=%d"),
-					InitialViolations,
-					Adjusted,
-					FinalViolations,
-					ScopedBranchX,
-					ExpectedScopedBranchX,
-					Run.LaneAssignmentDiagnostics.Num(),
-					Run.DesignDiagnostics.FinalVisibleBranchXLaneViolationCount));
+			const bool bSingleNodeBoundaryBusMergesNearXVisibleTarget =
+				Plans.Num() == 1
+				&& Plans[0].Points.Num() == 2
+				&& bDiagMerged;
+			AddCase(TEXT("single_node_boundary_bus_merges_visible_target_by_x_tolerance"), bSingleNodeBoundaryBusMergesNearXVisibleTarget, FString::Printf(TEXT("plans=%d points=%d merged=%s"),
+				Plans.Num(),
+				Plans.Num() > 0 ? Plans[0].Points.Num() : 0,
+				bDiagMerged ? TEXT("true") : TEXT("false")));
 		}
 
 		{
+			TArray<FNode> Nodes;
+			Nodes.SetNum(2);
+			Nodes[0].Index = 0;
+			Nodes[0].Guid = TEXT("single_node_bus_source");
+			Nodes[0].Title = Nodes[0].Guid;
+			Nodes[0].Width = 120.0;
+			Nodes[0].Height = 70.0;
+			Nodes[0].OutputPinNames = { TEXT("out") };
+			Nodes[0].OutputPinAnchors = { FVector2D(120.0, 35.0) };
+			Nodes[0].OutputPinAnchorValid = { 1 };
+			Nodes[1].Index = 1;
+			Nodes[1].Guid = TEXT("single_node_bus_target");
+			Nodes[1].Title = Nodes[1].Guid;
+			Nodes[1].Width = 160.0;
+			Nodes[1].Height = 80.0;
+			Nodes[1].InputPinNames = { TEXT("in") };
+			Nodes[1].InputPinAnchors = { FVector2D(120.0, 35.0) };
+			Nodes[1].InputPinAnchorValid = { 1 };
+			TArray<FEdge> Edges = {
+				{0, 1, TEXT("out"), TEXT("in"), 0, 0, false}
+			};
+			TArray<FIsland> Islands;
+			Islands.SetNum(2);
+			Islands[0].Id = 0;
+			Islands[0].X = -600.0;
+			Islands[0].Y = 0.0;
+			Islands[0].Nodes = {0};
+			Islands[0].NodeSet.Add(0);
+			Islands[0].LocalBounds = BoundsForNodes(Nodes, Islands[0].Nodes);
+			Islands[1].Id = 1;
+			Islands[1].X = 0.0;
+			Islands[1].Y = 0.0;
+			Islands[1].Nodes = {1};
+			Islands[1].NodeSet.Add(1);
+			Islands[1].LocalBounds = BoundsForNodes(Nodes, Islands[1].Nodes);
+
+			FSelectedEndpointCandidate Endpoint;
+			Endpoint.EdgeIndex = 0;
+			Endpoint.SourceIsland = 0;
+			Endpoint.TargetIsland = 1;
+			Endpoint.Side = TEXT("left");
+			Endpoint.SourceLocal = FVector2D(120.0, 35.0);
+			Endpoint.EntryLocal = FVector2D(120.0, 35.0);
+			Endpoint.ActualTargetLocal = FVector2D(120.0, 35.0);
+
+			FDeterministicIslandConnection Connection;
+			Connection.Endpoint = Endpoint;
+			Connection.bBus = true;
+			Connection.BusId = 0;
+			Connection.BranchSlotIndex = 0;
+			Connection.BusReason = TEXT("test");
+			FDeterministicInterIslandBus Bus;
+			Bus.Id = 0;
+			Bus.Key = TEXT("single_node_bus");
+			Bus.SlotIndex = 0;
+			Bus.FinalY = 35.0;
+			const TArray<FDeterministicInterIslandBus> TestBuses = { Bus };
+			const TArray<FDeterministicIslandConnection> TestConnections = { Connection };
+			FRunResult Run;
+			const TArray<FReroutePlan> Plans = MaterializeInterIslandBusPlans(Nodes, Edges, Islands, TestConnections, TestBuses, Options, Run);
+			bool bDiagOmitted = false;
+			if (Run.InterIslandBusBranchVisibleTargetDiagnostics.Num() == 1)
+			{
+				const TSharedPtr<FJsonObject> Obj = Run.InterIslandBusBranchVisibleTargetDiagnostics[0]->AsObject();
+				bDiagOmitted = Obj.IsValid() && Obj->GetBoolField(TEXT("branch_knot_omitted"));
+			}
+			const bool bSingleNodeIslandOmitsBranchKnot =
+				Plans.Num() == 1
+				&& Plans[0].Points.Num() == 1
+				&& FMath::IsNearlyEqual(Plans[0].Points[0].X, ComputeInputXAlignedToOutput(-480.0, Options), 0.5)
+				&& FMath::IsNearlyEqual(Plans[0].Points[0].Y, Bus.FinalY, 0.5)
+				&& Run.DesignDiagnostics.InterIslandBusBranchKnotCount == 0
+				&& Run.DesignDiagnostics.InterIslandBusBranchKnotOmittedCount == 1
+				&& bDiagOmitted;
+			AddCase(TEXT("single_node_island_bus_branch_can_omit_external_knot"), bSingleNodeIslandOmitsBranchKnot, FString::Printf(TEXT("plans=%d points=%d knots=%d omitted=%d diag=%s"),
+				Plans.Num(),
+				Plans.Num() > 0 ? Plans[0].Points.Num() : 0,
+				Run.DesignDiagnostics.InterIslandBusBranchKnotCount,
+				Run.DesignDiagnostics.InterIslandBusBranchKnotOmittedCount,
+				bDiagOmitted ? TEXT("true") : TEXT("false")));
+		}
+
+																{
 			TArray<FNode> Nodes;
 			for (int32 Index = 0; Index < 5; ++Index)
 			{
@@ -7312,7 +4481,31 @@ namespace UeAgentBlueprintAutoLayout
 			FRunResult Run;
 			RunLayoutForSelfTest(Nodes, Edges, Options, Run);
 			const bool bCoverageComplete = Run.DesignFeatureMissingCount == 0 && Run.DesignFeaturePartialCount == 0;
-			AddCase(TEXT("design_feature_coverage_is_truthful"), bCoverageComplete && Run.DesignFeatureCompleteCount == Run.DesignFeatureCount, FString::Printf(TEXT("features=%d complete=%d partial=%d missing=%d design_complete=%s route_through=%d proposals=%d route_groups=%d boundary_bus=%d/%d"), Run.DesignFeatureCount, Run.DesignFeatureCompleteCount, Run.DesignFeaturePartialCount, Run.DesignFeatureMissingCount, Run.bDesignComplete ? TEXT("true") : TEXT("false"), Run.DesignDiagnostics.RouteThroughIslandCount, Run.DesignDiagnostics.PlacementProposalCount, Run.DesignDiagnostics.RouteGroupCount, Run.DesignDiagnostics.BoundaryBusCount, Run.DesignDiagnostics.BoundaryBusRequiredCount));
+			FString IncompleteFeatures;
+			for (const TSharedPtr<FJsonValue>& Value : Run.DesignFeatureCoverage)
+			{
+				const TSharedPtr<FJsonObject> Feature = Value.IsValid() ? Value->AsObject() : nullptr;
+				if (!Feature.IsValid())
+				{
+					continue;
+				}
+				const FString Status = Feature->GetStringField(TEXT("status"));
+				if (Status == TEXT("complete"))
+				{
+					continue;
+				}
+				if (!IncompleteFeatures.IsEmpty())
+				{
+					IncompleteFeatures += TEXT(";");
+				}
+				IncompleteFeatures += Feature->GetStringField(TEXT("key"));
+				IncompleteFeatures += TEXT("=");
+				IncompleteFeatures += Status;
+				IncompleteFeatures += TEXT("(");
+				IncompleteFeatures += Feature->GetStringField(TEXT("detail"));
+				IncompleteFeatures += TEXT(")");
+			}
+			AddCase(TEXT("design_feature_coverage_is_truthful"), bCoverageComplete && Run.DesignFeatureCompleteCount == Run.DesignFeatureCount, FString::Printf(TEXT("features=%d complete=%d partial=%d missing=%d design_complete=%s route_through=%d proposals=%d route_groups=%d boundary_bus=%d/%d incomplete=%s"), Run.DesignFeatureCount, Run.DesignFeatureCompleteCount, Run.DesignFeaturePartialCount, Run.DesignFeatureMissingCount, Run.bDesignComplete ? TEXT("true") : TEXT("false"), Run.DesignDiagnostics.RouteThroughIslandCount, Run.DesignDiagnostics.PlacementProposalCount, Run.DesignDiagnostics.RouteGroupCount, Run.DesignDiagnostics.BoundaryBusCount, Run.DesignDiagnostics.BoundaryBusRequiredCount, *IncompleteFeatures));
 		}
 
 		Result.bAllPassed = Result.FailedCount == 0;

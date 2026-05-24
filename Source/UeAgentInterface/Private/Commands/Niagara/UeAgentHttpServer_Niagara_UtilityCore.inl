@@ -482,6 +482,444 @@
 		return true;
 	}
 
+	struct FNiagaraPreviewSceneCaptureContext
+	{
+		UWorld* World = nullptr;
+		ASceneCapture2D* CaptureActor = nullptr;
+		UTextureRenderTarget2D* RenderTarget = nullptr;
+		FIntPoint CaptureSize = FIntPoint::ZeroValue;
+
+		~FNiagaraPreviewSceneCaptureContext()
+		{
+			if (CaptureActor && IsValid(CaptureActor))
+			{
+				CaptureActor->Destroy();
+			}
+			if (RenderTarget)
+			{
+				RenderTarget->RemoveFromRoot();
+			}
+		}
+	};
+
+	static int32 GetNiagaraShaderCompileJobCount()
+	{
+		return GShaderCompilingManager ? GShaderCompilingManager->GetNumRemainingJobs() : 0;
+	}
+
+	static bool IsNiagaraShaderCompiling()
+	{
+		return GShaderCompilingManager ? GShaderCompilingManager->IsCompiling() : false;
+	}
+
+	static TSharedPtr<FJsonObject> WaitForNiagaraPreviewRenderDependencies(UWorld* PreviewWorld, const TSharedPtr<FJsonObject>& Params)
+	{
+		bool bWaitForRenderDependencies = true;
+		if (Params.IsValid())
+		{
+			Params->TryGetBoolField(TEXT("wait_for_render_dependencies"), bWaitForRenderDependencies) ||
+				Params->TryGetBoolField(TEXT("wait_for_asset_compilation"), bWaitForRenderDependencies) ||
+				Params->TryGetBoolField(TEXT("wait_for_shader_compilation"), bWaitForRenderDependencies);
+		}
+
+		TSharedPtr<FJsonObject> WaitInfo = MakeShared<FJsonObject>();
+		WaitInfo->SetBoolField(TEXT("requested"), bWaitForRenderDependencies);
+		WaitInfo->SetNumberField(TEXT("asset_compiling_before"), FAssetCompilingManager::Get().GetNumRemainingAssets());
+		WaitInfo->SetNumberField(TEXT("shader_jobs_before"), GetNiagaraShaderCompileJobCount());
+		WaitInfo->SetBoolField(TEXT("shader_compiling_before"), IsNiagaraShaderCompiling());
+		WaitInfo->SetBoolField(TEXT("submitted_world_material_jobs"), false);
+		WaitInfo->SetBoolField(TEXT("finished_asset_compilation"), false);
+		WaitInfo->SetBoolField(TEXT("finished_shader_compilation"), false);
+
+		if (bWaitForRenderDependencies)
+		{
+			if (PreviewWorld)
+			{
+				UMaterialInterface::SubmitRemainingJobsForWorld(PreviewWorld);
+				WaitInfo->SetBoolField(TEXT("submitted_world_material_jobs"), true);
+			}
+			WaitInfo->SetNumberField(TEXT("asset_compiling_after_submit"), FAssetCompilingManager::Get().GetNumRemainingAssets());
+			WaitInfo->SetNumberField(TEXT("shader_jobs_after_submit"), GetNiagaraShaderCompileJobCount());
+
+			FAssetCompilingManager::Get().FinishAllCompilation();
+			WaitInfo->SetBoolField(TEXT("finished_asset_compilation"), true);
+
+			if (GShaderCompilingManager)
+			{
+				GShaderCompilingManager->FinishAllCompilation();
+				WaitInfo->SetBoolField(TEXT("finished_shader_compilation"), true);
+			}
+			FlushRenderingCommands();
+		}
+
+		WaitInfo->SetNumberField(TEXT("asset_compiling_after"), FAssetCompilingManager::Get().GetNumRemainingAssets());
+		WaitInfo->SetNumberField(TEXT("shader_jobs_after"), GetNiagaraShaderCompileJobCount());
+		WaitInfo->SetBoolField(TEXT("shader_compiling_after"), IsNiagaraShaderCompiling());
+		return WaitInfo;
+	}
+
+	static bool WarmupNiagaraPreviewSceneCapture(
+		FNiagaraPreviewSceneCaptureContext& Context,
+		UNiagaraComponent* PreviewComponent,
+		const TSharedPtr<FJsonObject>& Params,
+		TSharedPtr<FJsonObject>& OutWarmupInfo,
+		FString& OutError)
+	{
+		if (!Context.CaptureActor || !IsValid(Context.CaptureActor))
+		{
+			OutError = TEXT("niagara_scene_capture_not_initialized");
+			return false;
+		}
+		USceneCaptureComponent2D* CaptureComp = Context.CaptureActor->GetCaptureComponent2D();
+		if (!CaptureComp)
+		{
+			OutError = TEXT("niagara_scene_capture_component_missing");
+			return false;
+		}
+
+		double WarmupCaptureValue = 1.0;
+		if (Params.IsValid())
+		{
+			Params->TryGetNumberField(TEXT("scene_capture_warmup_captures"), WarmupCaptureValue) ||
+				Params->TryGetNumberField(TEXT("render_warmup_captures"), WarmupCaptureValue);
+		}
+		const int32 WarmupCaptureCount = FMath::Clamp(FMath::RoundToInt(WarmupCaptureValue), 0, 8);
+
+		OutWarmupInfo = MakeShared<FJsonObject>();
+		OutWarmupInfo->SetNumberField(TEXT("warmup_capture_count"), WarmupCaptureCount);
+		OutWarmupInfo->SetObjectField(TEXT("pre_wait"), WaitForNiagaraPreviewRenderDependencies(Context.World, Params));
+
+		TArray<TSharedPtr<FJsonValue>> WarmupWaits;
+		for (int32 WarmupIndex = 0; WarmupIndex < WarmupCaptureCount; ++WarmupIndex)
+		{
+			if (PreviewComponent)
+			{
+				PreviewComponent->MarkRenderStateDirty();
+				if (UWorld* PreviewWorld = PreviewComponent->GetWorld())
+				{
+					PreviewWorld->SendAllEndOfFrameUpdates();
+					if (FNiagaraWorldManager* WorldManager = FNiagaraWorldManager::Get(PreviewWorld))
+					{
+						WorldManager->FlushComputeAndDeferredQueues(false);
+					}
+				}
+			}
+			CaptureComp->CaptureScene();
+			FlushRenderingCommands();
+			WarmupWaits.Add(MakeShared<FJsonValueObject>(WaitForNiagaraPreviewRenderDependencies(Context.World, Params)));
+		}
+		OutWarmupInfo->SetArrayField(TEXT("post_warmup_waits"), WarmupWaits);
+		return true;
+	}
+
+	static FIntPoint ResolveNiagaraPreviewSceneCaptureSize(const FVector2D& PreferredSize, const TSharedPtr<FJsonObject>& Params, const int32 MaxSize)
+	{
+		double RequestedWidth = 0.0;
+		double RequestedHeight = 0.0;
+		if (Params.IsValid())
+		{
+			Params->TryGetNumberField(TEXT("width"), RequestedWidth) || Params->TryGetNumberField(TEXT("capture_width"), RequestedWidth) || Params->TryGetNumberField(TEXT("offscreen_width"), RequestedWidth);
+			Params->TryGetNumberField(TEXT("height"), RequestedHeight) || Params->TryGetNumberField(TEXT("capture_height"), RequestedHeight) || Params->TryGetNumberField(TEXT("offscreen_height"), RequestedHeight);
+		}
+
+		FVector2D CaptureSize = PreferredSize;
+		if (RequestedWidth > 0.0 && RequestedHeight > 0.0)
+		{
+			CaptureSize = FVector2D(RequestedWidth, RequestedHeight);
+		}
+		if (CaptureSize.X <= 0.0 || CaptureSize.Y <= 0.0)
+		{
+			CaptureSize = FVector2D(1280.0, 720.0);
+		}
+
+		const double MaxDimension = static_cast<double>(FMath::Clamp(MaxSize, 64, 8192));
+		if (CaptureSize.X > MaxDimension || CaptureSize.Y > MaxDimension)
+		{
+			const double Scale = FMath::Min(MaxDimension / CaptureSize.X, MaxDimension / CaptureSize.Y);
+			CaptureSize *= Scale;
+		}
+		return FIntPoint(
+			FMath::Clamp(FMath::RoundToInt(CaptureSize.X), 64, FMath::Clamp(MaxSize, 64, 8192)),
+			FMath::Clamp(FMath::RoundToInt(CaptureSize.Y), 64, FMath::Clamp(MaxSize, 64, 8192)));
+	}
+
+	static TSharedPtr<FJsonObject> ResolveNiagaraPreviewSceneCaptureCamera(
+		UNiagaraComponent* PreviewComponent,
+		const TSharedPtr<FJsonObject>& Params,
+		FVector& OutLocation,
+		FRotator& OutRotation,
+		float& OutFov)
+	{
+		TSharedPtr<FJsonObject> CameraInfo = MakeShared<FJsonObject>();
+
+		double FovValue = 45.0;
+		double DistanceValue = 0.0;
+		double DistanceScaleValue = 2.8;
+		double TargetZOffsetValue = 0.0;
+		double HeightOffsetValue = 0.0;
+		double SideOffsetValue = 0.0;
+		if (Params.IsValid())
+		{
+			Params->TryGetNumberField(TEXT("camera_fov"), FovValue) || Params->TryGetNumberField(TEXT("capture_fov"), FovValue);
+			Params->TryGetNumberField(TEXT("camera_distance"), DistanceValue) || Params->TryGetNumberField(TEXT("capture_distance"), DistanceValue);
+			Params->TryGetNumberField(TEXT("camera_distance_scale"), DistanceScaleValue) || Params->TryGetNumberField(TEXT("capture_distance_scale"), DistanceScaleValue);
+			Params->TryGetNumberField(TEXT("camera_target_z_offset"), TargetZOffsetValue);
+			Params->TryGetNumberField(TEXT("camera_height_offset"), HeightOffsetValue);
+			Params->TryGetNumberField(TEXT("camera_side_offset"), SideOffsetValue);
+		}
+
+		OutFov = FMath::Clamp(static_cast<float>(FovValue), 5.0f, 170.0f);
+		FVector BoundsOrigin = PreviewComponent ? PreviewComponent->GetComponentLocation() : FVector::ZeroVector;
+		double BoundsRadius = 180.0;
+		bool bUsedComponentBounds = false;
+		if (PreviewComponent)
+		{
+			PreviewComponent->UpdateComponentToWorld();
+			PreviewComponent->UpdateBounds();
+			const FBoxSphereBounds Bounds = PreviewComponent->Bounds;
+			if (Bounds.SphereRadius > KINDA_SMALL_NUMBER && Bounds.Origin.ContainsNaN() == false)
+			{
+				BoundsOrigin = Bounds.Origin;
+				BoundsRadius = FMath::Max(static_cast<double>(Bounds.SphereRadius), 180.0);
+				bUsedComponentBounds = true;
+			}
+		}
+
+		const double Distance = DistanceValue > 0.0 ? DistanceValue : FMath::Max(BoundsRadius * FMath::Max(DistanceScaleValue, 0.1), 320.0);
+		const FVector Target = BoundsOrigin + FVector(0.0, 0.0, TargetZOffsetValue);
+		const double HeightOffset = HeightOffsetValue != 0.0 ? HeightOffsetValue : BoundsRadius * 0.2;
+		const double SideOffset = SideOffsetValue != 0.0 ? SideOffsetValue : BoundsRadius * 0.12;
+		OutLocation = Target + FVector(-Distance, SideOffset, HeightOffset);
+		const FVector ViewDirection = (Target - OutLocation).GetSafeNormal(UE_SMALL_NUMBER, FVector::ForwardVector);
+		OutRotation = FRotationMatrix::MakeFromX(ViewDirection).Rotator();
+
+		CameraInfo->SetBoolField(TEXT("used_component_bounds"), bUsedComponentBounds);
+		CameraInfo->SetNumberField(TEXT("bounds_origin_x"), BoundsOrigin.X);
+		CameraInfo->SetNumberField(TEXT("bounds_origin_y"), BoundsOrigin.Y);
+		CameraInfo->SetNumberField(TEXT("bounds_origin_z"), BoundsOrigin.Z);
+		CameraInfo->SetNumberField(TEXT("bounds_radius"), BoundsRadius);
+		CameraInfo->SetNumberField(TEXT("camera_location_x"), OutLocation.X);
+		CameraInfo->SetNumberField(TEXT("camera_location_y"), OutLocation.Y);
+		CameraInfo->SetNumberField(TEXT("camera_location_z"), OutLocation.Z);
+		CameraInfo->SetNumberField(TEXT("camera_rotation_pitch"), OutRotation.Pitch);
+		CameraInfo->SetNumberField(TEXT("camera_rotation_yaw"), OutRotation.Yaw);
+		CameraInfo->SetNumberField(TEXT("camera_rotation_roll"), OutRotation.Roll);
+		CameraInfo->SetNumberField(TEXT("camera_fov"), OutFov);
+		CameraInfo->SetNumberField(TEXT("camera_distance"), Distance);
+		return CameraInfo;
+	}
+
+	static bool InitializeNiagaraPreviewSceneCapture(
+		UNiagaraComponent* PreviewComponent,
+		const FIntPoint& CaptureSize,
+		const TSharedPtr<FJsonObject>& Params,
+		FNiagaraPreviewSceneCaptureContext& InOutContext,
+		TSharedPtr<FJsonObject>& OutCameraInfo,
+		FString& OutError)
+	{
+		if (!PreviewComponent)
+		{
+			OutError = TEXT("niagara_preview_component_not_found");
+			return false;
+		}
+		UWorld* PreviewWorld = PreviewComponent->GetWorld();
+		if (!PreviewWorld)
+		{
+			OutError = TEXT("niagara_preview_world_not_found");
+			return false;
+		}
+		if (CaptureSize.X <= 0 || CaptureSize.Y <= 0)
+		{
+			OutError = TEXT("niagara_scene_capture_size_invalid");
+			return false;
+		}
+
+		InOutContext.World = PreviewWorld;
+		InOutContext.CaptureSize = CaptureSize;
+		InOutContext.RenderTarget = NewObject<UTextureRenderTarget2D>(GetTransientPackage(), NAME_None, RF_Transient);
+		if (!InOutContext.RenderTarget)
+		{
+			OutError = TEXT("niagara_scene_capture_render_target_alloc_failed");
+			return false;
+		}
+		InOutContext.RenderTarget->AddToRoot();
+		InOutContext.RenderTarget->ClearColor = FLinearColor::Black;
+		InOutContext.RenderTarget->InitCustomFormat(CaptureSize.X, CaptureSize.Y, PF_B8G8R8A8, false);
+		InOutContext.RenderTarget->UpdateResourceImmediate(true);
+
+		FVector CaptureLocation = FVector::ZeroVector;
+		FRotator CaptureRotation = FRotator::ZeroRotator;
+		float CaptureFov = 45.0f;
+		OutCameraInfo = ResolveNiagaraPreviewSceneCaptureCamera(PreviewComponent, Params, CaptureLocation, CaptureRotation, CaptureFov);
+
+		FActorSpawnParameters SpawnParams;
+		SpawnParams.Name = MakeUniqueObjectName(PreviewWorld, ASceneCapture2D::StaticClass(), TEXT("UeAgentNiagaraFrameCapture"));
+		SpawnParams.ObjectFlags = RF_Transient | RF_TextExportTransient | RF_DuplicateTransient;
+		SpawnParams.SpawnCollisionHandlingOverride = ESpawnActorCollisionHandlingMethod::AlwaysSpawn;
+		SpawnParams.bTemporaryEditorActor = true;
+		SpawnParams.bHideFromSceneOutliner = true;
+		InOutContext.CaptureActor = PreviewWorld->SpawnActor<ASceneCapture2D>(ASceneCapture2D::StaticClass(), CaptureLocation, CaptureRotation, SpawnParams);
+		if (!InOutContext.CaptureActor)
+		{
+			OutError = TEXT("niagara_scene_capture_spawn_failed");
+			return false;
+		}
+		InOutContext.CaptureActor->SetActorEnableCollision(false);
+		InOutContext.CaptureActor->SetActorHiddenInGame(true);
+		InOutContext.CaptureActor->SetIsTemporarilyHiddenInEditor(true);
+
+		USceneCaptureComponent2D* CaptureComp = InOutContext.CaptureActor->GetCaptureComponent2D();
+		if (!CaptureComp)
+		{
+			OutError = TEXT("niagara_scene_capture_component_missing");
+			return false;
+		}
+		CaptureComp->TextureTarget = InOutContext.RenderTarget;
+		CaptureComp->ProjectionType = ECameraProjectionMode::Perspective;
+		CaptureComp->CaptureSource = SCS_FinalColorLDR;
+		CaptureComp->FOVAngle = CaptureFov;
+		CaptureComp->bCaptureEveryFrame = false;
+		CaptureComp->bCaptureOnMovement = false;
+		CaptureComp->PrimitiveRenderMode = ESceneCapturePrimitiveRenderMode::PRM_UseShowOnlyList;
+		CaptureComp->ClearShowOnlyComponents();
+		CaptureComp->ShowOnlyComponent(PreviewComponent);
+		CaptureComp->ShowFlags.SetMotionBlur(false);
+		CaptureComp->ShowFlags.SetParticles(true);
+		CaptureComp->ShowFlags.SetNiagara(true);
+		return true;
+	}
+
+	static bool CaptureNiagaraPreviewSceneFrame(FNiagaraPreviewSceneCaptureContext& Context, UNiagaraComponent* PreviewComponent, TArray<FColor>& OutPixels, FIntPoint& OutSize, FString& OutError)
+	{
+		if (!Context.CaptureActor || !IsValid(Context.CaptureActor) || !Context.RenderTarget)
+		{
+			OutError = TEXT("niagara_scene_capture_not_initialized");
+			return false;
+		}
+		if (PreviewComponent)
+		{
+			PreviewComponent->MarkRenderStateDirty();
+			if (UWorld* PreviewWorld = PreviewComponent->GetWorld())
+			{
+				PreviewWorld->SendAllEndOfFrameUpdates();
+				if (FNiagaraWorldManager* WorldManager = FNiagaraWorldManager::Get(PreviewWorld))
+				{
+					WorldManager->FlushComputeAndDeferredQueues(false);
+				}
+			}
+		}
+
+		USceneCaptureComponent2D* CaptureComp = Context.CaptureActor->GetCaptureComponent2D();
+		if (!CaptureComp)
+		{
+			OutError = TEXT("niagara_scene_capture_component_missing");
+			return false;
+		}
+		CaptureComp->CaptureScene();
+		FlushRenderingCommands();
+
+		FRenderTarget* RenderTarget = Context.RenderTarget->GameThread_GetRenderTargetResource();
+		if (!RenderTarget)
+		{
+			OutError = TEXT("niagara_scene_capture_render_target_resource_missing");
+			return false;
+		}
+		FReadSurfaceDataFlags ReadFlags(RCM_UNorm);
+		ReadFlags.SetLinearToGamma(false);
+		if (!RenderTarget->ReadPixels(OutPixels, ReadFlags) || OutPixels.Num() <= 0)
+		{
+			OutError = TEXT("niagara_scene_capture_read_pixels_failed");
+			return false;
+		}
+		for (FColor& Pixel : OutPixels)
+		{
+			Pixel.A = 255;
+		}
+		OutSize = Context.CaptureSize;
+		return true;
+	}
+
+	static uint64 ComputePixelSignature(const TArray<FColor>& Pixels)
+	{
+		uint64 Hash = 1469598103934665603ull;
+		for (const FColor& Pixel : Pixels)
+		{
+			Hash ^= static_cast<uint64>(Pixel.R);
+			Hash *= 1099511628211ull;
+			Hash ^= static_cast<uint64>(Pixel.G);
+			Hash *= 1099511628211ull;
+			Hash ^= static_cast<uint64>(Pixel.B);
+			Hash *= 1099511628211ull;
+			Hash ^= static_cast<uint64>(Pixel.A);
+			Hash *= 1099511628211ull;
+		}
+		return Hash;
+	}
+
+	static int32 CountPixelDifferences(const TArray<FColor>& A, const TArray<FColor>& B)
+	{
+		if (A.Num() != B.Num())
+		{
+			return INDEX_NONE;
+		}
+		int32 DifferenceCount = 0;
+		for (int32 Index = 0; Index < A.Num(); ++Index)
+		{
+			if (A[Index] != B[Index])
+			{
+				++DifferenceCount;
+			}
+		}
+		return DifferenceCount;
+	}
+
+	static TSharedPtr<FJsonObject> BuildPixelSignalStats(const TArray<FColor>& Pixels)
+	{
+		TSharedPtr<FJsonObject> Stats = MakeShared<FJsonObject>();
+		const int32 PixelCount = Pixels.Num();
+		int32 NonBlackPixelCount = 0;
+		int32 BrightPixelCount = 0;
+		int32 ColoredPixelCount = 0;
+		int32 FireLikePixelCount = 0;
+		double LumaSum = 0.0;
+
+		for (const FColor& Pixel : Pixels)
+		{
+			const int32 R = Pixel.R;
+			const int32 G = Pixel.G;
+			const int32 B = Pixel.B;
+			const int32 MaxChannel = FMath::Max3(R, G, B);
+			const int32 MinChannel = FMath::Min3(R, G, B);
+			if (MaxChannel > 8)
+			{
+				++NonBlackPixelCount;
+			}
+			if (MaxChannel > 220)
+			{
+				++BrightPixelCount;
+			}
+			if (MaxChannel - MinChannel > 35)
+			{
+				++ColoredPixelCount;
+			}
+			if (R > 160 && G > 45 && B < 140 && R > B + 40)
+			{
+				++FireLikePixelCount;
+			}
+			LumaSum += 0.2126 * static_cast<double>(R) + 0.7152 * static_cast<double>(G) + 0.0722 * static_cast<double>(B);
+		}
+
+		const uint64 Signature = ComputePixelSignature(Pixels);
+		Stats->SetStringField(TEXT("pixel_signature"), FString::Printf(TEXT("%016llX"), static_cast<unsigned long long>(Signature)));
+		Stats->SetNumberField(TEXT("pixel_count"), PixelCount);
+		Stats->SetNumberField(TEXT("non_black_pixel_count"), NonBlackPixelCount);
+		Stats->SetNumberField(TEXT("bright_pixel_count"), BrightPixelCount);
+		Stats->SetNumberField(TEXT("colored_pixel_count"), ColoredPixelCount);
+		Stats->SetNumberField(TEXT("fire_like_pixel_count"), FireLikePixelCount);
+		Stats->SetNumberField(TEXT("average_luma"), PixelCount > 0 ? LumaSum / static_cast<double>(PixelCount) : 0.0);
+		return Stats;
+	}
+
 	static FString ResolveOutputScreenshotPath(const TSharedPtr<FJsonObject>& Params, const FString& Format)
 	{
 		FString OutPath;
@@ -1093,6 +1531,147 @@ PRAGMA_ENABLE_DEPRECATION_WARNINGS
 			}
 		}
 
+		return true;
+	}
+
+	struct FNiagaraScreenshotFrameRequest
+	{
+		int32 FrameIndex = 0;
+	};
+
+	static bool TryGetNiagaraNumberAnyField(const TSharedPtr<FJsonObject>& Obj, const TArray<FString>& Keys, double& OutValue)
+	{
+		if (!Obj.IsValid())
+		{
+			return false;
+		}
+		for (const FString& Key : Keys)
+		{
+			if (Obj->TryGetNumberField(Key, OutValue))
+			{
+				return true;
+			}
+		}
+		return false;
+	}
+
+	static bool ResolveNiagaraScreenshotFrameSequence(const TSharedPtr<FJsonObject>& Params, TArray<FNiagaraScreenshotFrameRequest>& OutFrames, bool& bOutFrameSequenceRequested, FString& OutError)
+	{
+		OutFrames.Reset();
+		bOutFrameSequenceRequested = false;
+		if (!Params.IsValid())
+		{
+			return true;
+		}
+
+		const bool bHasFrameSequenceSignals =
+			Params->HasField(TEXT("frames")) ||
+			Params->HasField(TEXT("count")) ||
+			Params->HasField(TEXT("frame_count")) ||
+			Params->HasField(TEXT("sample_count")) ||
+			Params->HasField(TEXT("start_frame")) ||
+			Params->HasField(TEXT("start_frame_index")) ||
+			Params->HasField(TEXT("first_frame_index")) ||
+			Params->HasField(TEXT("frame_interval")) ||
+			Params->HasField(TEXT("frame_stride")) ||
+			Params->HasField(TEXT("target_frame")) ||
+			Params->HasField(TEXT("frame_index")) ||
+			Params->HasField(TEXT("frame"));
+		if (!bHasFrameSequenceSignals)
+		{
+			return true;
+		}
+		bOutFrameSequenceRequested = true;
+
+		const TArray<TSharedPtr<FJsonValue>>* ExplicitFrames = nullptr;
+		if (Params->TryGetArrayField(TEXT("frames"), ExplicitFrames) && ExplicitFrames)
+		{
+			if (ExplicitFrames->Num() < 1 || ExplicitFrames->Num() > 120)
+			{
+				OutError = TEXT("invalid_frame_count");
+				return false;
+			}
+
+			int32 PreviousFrame = INDEX_NONE;
+			for (int32 Index = 0; Index < ExplicitFrames->Num(); ++Index)
+			{
+				double FrameValue = 0.0;
+				if ((*ExplicitFrames)[Index]->Type == EJson::Number)
+				{
+					FrameValue = (*ExplicitFrames)[Index]->AsNumber();
+				}
+				else if ((*ExplicitFrames)[Index]->Type == EJson::Object)
+				{
+					const TSharedPtr<FJsonObject> FrameObject = (*ExplicitFrames)[Index]->AsObject();
+					if (!TryGetNiagaraNumberAnyField(FrameObject, { TEXT("target_frame"), TEXT("frame_index"), TEXT("frame") }, FrameValue))
+					{
+						OutError = TEXT("invalid_frame_entry");
+						return false;
+					}
+				}
+				else
+				{
+					OutError = TEXT("invalid_frame_entry");
+					return false;
+				}
+
+				const int32 FrameIndex = FMath::RoundToInt(FrameValue);
+				if (FrameIndex < 0 || FrameIndex > 14400)
+				{
+					OutError = TEXT("invalid_frame_index");
+					return false;
+				}
+				if (PreviousFrame != INDEX_NONE && FrameIndex < PreviousFrame)
+				{
+					OutError = TEXT("niagara_frame_sequence_must_be_non_decreasing");
+					return false;
+				}
+				PreviousFrame = FrameIndex;
+
+				FNiagaraScreenshotFrameRequest Request;
+				Request.FrameIndex = FrameIndex;
+				OutFrames.Add(Request);
+			}
+			return true;
+		}
+
+		double CountValue = 1.0;
+		TryGetNiagaraNumberAnyField(Params, { TEXT("count"), TEXT("frame_count"), TEXT("sample_count") }, CountValue);
+		const int32 RequestedCount = FMath::RoundToInt(CountValue);
+		if (RequestedCount < 1 || RequestedCount > 120)
+		{
+			OutError = TEXT("invalid_frame_count");
+			return false;
+		}
+
+		double StartFrameValue = 0.0;
+		if (!TryGetNiagaraNumberAnyField(Params, { TEXT("start_frame"), TEXT("start_frame_index"), TEXT("first_frame_index"), TEXT("target_frame"), TEXT("frame_index"), TEXT("frame") }, StartFrameValue))
+		{
+			StartFrameValue = 0.0;
+		}
+
+		double FrameIntervalValue = 1.0;
+		TryGetNiagaraNumberAnyField(Params, { TEXT("frame_interval"), TEXT("frame_stride") }, FrameIntervalValue);
+		if (FrameIntervalValue < 0.0)
+		{
+			OutError = TEXT("invalid_frame_interval");
+			return false;
+		}
+
+		const int32 StartFrame = FMath::RoundToInt(StartFrameValue);
+		const int32 FrameInterval = FMath::Max(0, FMath::RoundToInt(FrameIntervalValue));
+		for (int32 Index = 0; Index < RequestedCount; ++Index)
+		{
+			const int32 FrameIndex = StartFrame + FrameInterval * Index;
+			if (FrameIndex < 0 || FrameIndex > 14400)
+			{
+				OutError = TEXT("invalid_frame_index");
+				return false;
+			}
+			FNiagaraScreenshotFrameRequest Request;
+			Request.FrameIndex = FrameIndex;
+			OutFrames.Add(Request);
+		}
 		return true;
 	}
 

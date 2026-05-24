@@ -291,7 +291,7 @@ bool FUeAgentHttpServer::CmdScreenshotViewport(const FUeAgentRequestContext& Ctx
 	FString Format = TEXT("jpg");
 	int32 Quality = 85;
 	int32 MaxSize = 1024;
-	JsonTryGetString(Ctx.Params, TEXT("format"), Format);
+	const bool bHasExplicitFormat = JsonTryGetString(Ctx.Params, TEXT("format"), Format);
 	double QD = (double)Quality;
 	if (JsonTryGetNumber(Ctx.Params, TEXT("quality"), QD))
 	{
@@ -308,6 +308,46 @@ bool FUeAgentHttpServer::CmdScreenshotViewport(const FUeAgentRequestContext& Ctx
 	{
 		Format = TEXT("jpg");
 	}
+
+	FString OutputFile;
+	FString ScreenshotOutPath;
+	if (JsonTryGetString(Ctx.Params, TEXT("output_file"), OutputFile) && !OutputFile.TrimStartAndEnd().IsEmpty())
+	{
+		ScreenshotOutPath = UeAgentJsonDiagnostics::ResolveProjectRelativeFilePath(OutputFile);
+		FString OutputExt = FPaths::GetExtension(ScreenshotOutPath).ToLower();
+		if (OutputExt == TEXT("jpeg"))
+		{
+			OutputExt = TEXT("jpg");
+		}
+		if (OutputExt == TEXT("png") || OutputExt == TEXT("jpg") || OutputExt == TEXT("webp"))
+		{
+			if (!bHasExplicitFormat)
+			{
+				Format = OutputExt;
+			}
+			else if (OutputExt != Format)
+			{
+				OutError = TEXT("output_file_extension_mismatch");
+				FUeAgentInterfaceLogger::Log(TEXT("CmdScreenshotViewport req=%s failed: %s output=%s format=%s"), *Ctx.RequestId, *OutError, *ScreenshotOutPath, *Format);
+				return false;
+			}
+		}
+		else if (OutputExt.IsEmpty())
+		{
+			ScreenshotOutPath += FString::Printf(TEXT(".%s"), *Format);
+		}
+		else
+		{
+			OutError = TEXT("unsupported_output_file_extension");
+			FUeAgentInterfaceLogger::Log(TEXT("CmdScreenshotViewport req=%s failed: %s output=%s"), *Ctx.RequestId, *OutError, *ScreenshotOutPath);
+			return false;
+		}
+	}
+	else
+	{
+		ScreenshotOutPath = MakeShotPath(Format);
+	}
+
 	if (Format != TEXT("png") && Format != TEXT("jpg") && Format != TEXT("webp"))
 	{
 		OutError = TEXT("unsupported_format");
@@ -333,16 +373,15 @@ bool FUeAgentHttpServer::CmdScreenshotViewport(const FUeAgentRequestContext& Ctx
 		return false;
 	}
 
-	const FString OutPath = MakeShotPath(Format);
-	if (!WriteCompressedImage(Resized, ResizedSize, Format, Quality, OutPath, OutError))
+	if (!WriteCompressedImage(Resized, ResizedSize, Format, Quality, ScreenshotOutPath, OutError))
 	{
 		FUeAgentInterfaceLogger::Log(TEXT("CmdScreenshotViewport req=%s failed: %s"), *Ctx.RequestId, *OutError);
 		return false;
 	}
 
-	const int64 Bytes = IFileManager::Get().FileSize(*OutPath);
+	const int64 Bytes = IFileManager::Get().FileSize(*ScreenshotOutPath);
 
-	OutData->SetStringField(TEXT("file_path"), OutPath);
+	OutData->SetStringField(TEXT("file_path"), ScreenshotOutPath);
 	OutData->SetNumberField(TEXT("width"), ResizedSize.X);
 	OutData->SetNumberField(TEXT("height"), ResizedSize.Y);
 	OutData->SetNumberField(TEXT("bytes"), (double)Bytes);
@@ -350,7 +389,7 @@ bool FUeAgentHttpServer::CmdScreenshotViewport(const FUeAgentRequestContext& Ctx
 
 	TSharedPtr<FJsonObject> Artifact = MakeShared<FJsonObject>();
 	Artifact->SetStringField(TEXT("kind"), TEXT("screenshot"));
-	Artifact->SetStringField(TEXT("file_path"), OutPath);
+	Artifact->SetStringField(TEXT("file_path"), ScreenshotOutPath);
 	Artifact->SetNumberField(TEXT("bytes"), (double)Bytes);
 	Artifact->SetStringField(TEXT("mime"), Format == TEXT("png") ? TEXT("image/png") : (Format == TEXT("webp") ? TEXT("image/webp") : TEXT("image/jpeg")));
 	Artifact->SetNumberField(TEXT("width"), ResizedSize.X);
@@ -359,7 +398,7 @@ bool FUeAgentHttpServer::CmdScreenshotViewport(const FUeAgentRequestContext& Ctx
 
 	FUeAgentInterfaceLogger::Log(TEXT("CmdScreenshotViewport req=%s ok path=%s size=%dx%d bytes=%lld"),
 		*Ctx.RequestId,
-		*OutPath,
+		*ScreenshotOutPath,
 		ResizedSize.X,
 		ResizedSize.Y,
 		(long long)Bytes);
@@ -425,6 +464,7 @@ bool FUeAgentHttpServer::CmdScreenshotViewportBuffer(const FUeAgentRequestContex
 	{
 		Format = TEXT("jpg");
 	}
+
 	if (Format != TEXT("png") && Format != TEXT("jpg") && Format != TEXT("webp"))
 	{
 		OutError = TEXT("unsupported_format");
@@ -1203,6 +1243,195 @@ bool FUeAgentHttpServer::WriteCompressedImage(const TArray<FColor>& Pixels, cons
 		OutError = TEXT("write_file_failed");
 		return false;
 	}
+	return true;
+}
+
+bool FUeAgentHttpServer::WriteFrameSequenceSheetImage(const TArray<TArray<FColor>>& FramePixels, const TArray<FString>& FrameLabels, const FIntPoint& FrameSize, const TSharedPtr<FJsonObject>& Params, const FString& Format, int32 Quality, FString& OutFilePath, TSharedPtr<FJsonObject>& OutSheetData, FString& OutError)
+{
+	if (FramePixels.Num() <= 0 || FrameSize.X <= 0 || FrameSize.Y <= 0)
+	{
+		OutError = TEXT("frame_sheet_empty");
+		return false;
+	}
+	for (int32 FrameIndex = 0; FrameIndex < FramePixels.Num(); ++FrameIndex)
+	{
+		if (FramePixels[FrameIndex].Num() != FrameSize.X * FrameSize.Y)
+		{
+			OutError = TEXT("frame_sheet_frame_size_mismatch");
+			return false;
+		}
+	}
+
+	const int32 GridSide = FMath::Max(1, FMath::CeilToInt(FMath::Sqrt(static_cast<float>(FramePixels.Num()))));
+	const int32 Columns = GridSide;
+	const int32 Rows = GridSide;
+
+	int32 Padding = 8;
+	double PaddingValue = static_cast<double>(Padding);
+	if (JsonTryGetNumber(Params, TEXT("frame_sheet_padding"), PaddingValue) ||
+		JsonTryGetNumber(Params, TEXT("sheet_padding"), PaddingValue))
+	{
+		Padding = FMath::Clamp(FMath::RoundToInt(PaddingValue), 0, 256);
+	}
+
+	int32 LabelScale = 3;
+	double LabelScaleValue = static_cast<double>(LabelScale);
+	if (JsonTryGetNumber(Params, TEXT("frame_sheet_label_scale"), LabelScaleValue) ||
+		JsonTryGetNumber(Params, TEXT("sheet_label_scale"), LabelScaleValue))
+	{
+		LabelScale = FMath::Clamp(FMath::RoundToInt(LabelScaleValue), 1, 6);
+	}
+	const int32 LabelMargin = FMath::Max(3, LabelScale * 2);
+
+	int32 SheetMaxSize = 8192;
+	double SheetMaxSizeValue = static_cast<double>(SheetMaxSize);
+	if (JsonTryGetNumber(Params, TEXT("frame_sheet_max_size"), SheetMaxSizeValue) ||
+		JsonTryGetNumber(Params, TEXT("sheet_max_size"), SheetMaxSizeValue))
+	{
+		SheetMaxSize = FMath::Clamp(FMath::RoundToInt(SheetMaxSizeValue), 64, 8192);
+	}
+
+	const int64 SheetWidth64 = static_cast<int64>(Columns) * FrameSize.X + static_cast<int64>(Columns + 1) * Padding;
+	const int64 SheetHeight64 = static_cast<int64>(Rows) * FrameSize.Y + static_cast<int64>(Rows + 1) * Padding;
+	if (SheetWidth64 <= 0 || SheetHeight64 <= 0 || SheetWidth64 > 32768 || SheetHeight64 > 32768 || SheetWidth64 * SheetHeight64 > 268435456LL)
+	{
+		OutError = TEXT("frame_sheet_too_large");
+		return false;
+	}
+
+	const FIntPoint RawSheetSize(static_cast<int32>(SheetWidth64), static_cast<int32>(SheetHeight64));
+	TArray<FColor> SheetPixels;
+	SheetPixels.Init(FColor(24, 24, 24, 255), RawSheetSize.X * RawSheetSize.Y);
+	for (int32 FrameIndex = 0; FrameIndex < FramePixels.Num(); ++FrameIndex)
+	{
+		const int32 Column = FrameIndex % Columns;
+		const int32 Row = FrameIndex / Columns;
+		const int32 DestX = Padding + Column * (FrameSize.X + Padding);
+		const int32 DestY = Padding + Row * (FrameSize.Y + Padding);
+		const TArray<FColor>& SourcePixels = FramePixels[FrameIndex];
+		for (int32 Y = 0; Y < FrameSize.Y; ++Y)
+		{
+			const FColor* SourceRow = SourcePixels.GetData() + Y * FrameSize.X;
+			FColor* DestRow = SheetPixels.GetData() + (DestY + Y) * RawSheetSize.X + DestX;
+			FMemory::Memcpy(DestRow, SourceRow, sizeof(FColor) * FrameSize.X);
+		}
+	}
+
+	auto GlyphRows = [](TCHAR Ch, const TCHAR*& R0, const TCHAR*& R1, const TCHAR*& R2, const TCHAR*& R3, const TCHAR*& R4, const TCHAR*& R5, const TCHAR*& R6) -> bool
+	{
+		switch (Ch)
+		{
+		case TCHAR('0'): R0 = TEXT("01110"); R1 = TEXT("10001"); R2 = TEXT("10011"); R3 = TEXT("10101"); R4 = TEXT("11001"); R5 = TEXT("10001"); R6 = TEXT("01110"); return true;
+		case TCHAR('1'): R0 = TEXT("00100"); R1 = TEXT("01100"); R2 = TEXT("00100"); R3 = TEXT("00100"); R4 = TEXT("00100"); R5 = TEXT("00100"); R6 = TEXT("01110"); return true;
+		case TCHAR('2'): R0 = TEXT("01110"); R1 = TEXT("10001"); R2 = TEXT("00001"); R3 = TEXT("00010"); R4 = TEXT("00100"); R5 = TEXT("01000"); R6 = TEXT("11111"); return true;
+		case TCHAR('3'): R0 = TEXT("11110"); R1 = TEXT("00001"); R2 = TEXT("00001"); R3 = TEXT("01110"); R4 = TEXT("00001"); R5 = TEXT("00001"); R6 = TEXT("11110"); return true;
+		case TCHAR('4'): R0 = TEXT("00010"); R1 = TEXT("00110"); R2 = TEXT("01010"); R3 = TEXT("10010"); R4 = TEXT("11111"); R5 = TEXT("00010"); R6 = TEXT("00010"); return true;
+		case TCHAR('5'): R0 = TEXT("11111"); R1 = TEXT("10000"); R2 = TEXT("10000"); R3 = TEXT("11110"); R4 = TEXT("00001"); R5 = TEXT("00001"); R6 = TEXT("11110"); return true;
+		case TCHAR('6'): R0 = TEXT("01110"); R1 = TEXT("10000"); R2 = TEXT("10000"); R3 = TEXT("11110"); R4 = TEXT("10001"); R5 = TEXT("10001"); R6 = TEXT("01110"); return true;
+		case TCHAR('7'): R0 = TEXT("11111"); R1 = TEXT("00001"); R2 = TEXT("00010"); R3 = TEXT("00100"); R4 = TEXT("01000"); R5 = TEXT("01000"); R6 = TEXT("01000"); return true;
+		case TCHAR('8'): R0 = TEXT("01110"); R1 = TEXT("10001"); R2 = TEXT("10001"); R3 = TEXT("01110"); R4 = TEXT("10001"); R5 = TEXT("10001"); R6 = TEXT("01110"); return true;
+		case TCHAR('9'): R0 = TEXT("01110"); R1 = TEXT("10001"); R2 = TEXT("10001"); R3 = TEXT("01111"); R4 = TEXT("00001"); R5 = TEXT("00001"); R6 = TEXT("01110"); return true;
+		case TCHAR('F'):
+		case TCHAR('f'): R0 = TEXT("11111"); R1 = TEXT("10000"); R2 = TEXT("10000"); R3 = TEXT("11110"); R4 = TEXT("10000"); R5 = TEXT("10000"); R6 = TEXT("10000"); return true;
+		case TCHAR('-'): R0 = TEXT("00000"); R1 = TEXT("00000"); R2 = TEXT("00000"); R3 = TEXT("11110"); R4 = TEXT("00000"); R5 = TEXT("00000"); R6 = TEXT("00000"); return true;
+		default: break;
+		}
+		R0 = R1 = R2 = R3 = R4 = R5 = R6 = TEXT("00000");
+		return Ch == TCHAR(' ');
+	};
+
+	auto DrawRect = [&](const int32 X, const int32 Y, const int32 W, const int32 H, const FColor Color)
+	{
+		const int32 MinX = FMath::Clamp(X, 0, RawSheetSize.X);
+		const int32 MinY = FMath::Clamp(Y, 0, RawSheetSize.Y);
+		const int32 MaxX = FMath::Clamp(X + W, 0, RawSheetSize.X);
+		const int32 MaxY = FMath::Clamp(Y + H, 0, RawSheetSize.Y);
+		for (int32 Py = MinY; Py < MaxY; ++Py)
+		{
+			for (int32 Px = MinX; Px < MaxX; ++Px)
+			{
+				SheetPixels[Py * RawSheetSize.X + Px] = Color;
+			}
+		}
+	};
+
+	auto DrawText = [&](const FString& Text, const int32 X, const int32 Y, const FColor Color)
+	{
+		int32 CursorX = X;
+		for (int32 CharIndex = 0; CharIndex < Text.Len(); ++CharIndex)
+		{
+			const TCHAR* Rows[7] = {};
+			if (!GlyphRows(Text[CharIndex], Rows[0], Rows[1], Rows[2], Rows[3], Rows[4], Rows[5], Rows[6]))
+			{
+				CursorX += LabelScale * 6;
+				continue;
+			}
+			for (int32 Gy = 0; Gy < 7; ++Gy)
+			{
+				for (int32 Gx = 0; Gx < 5; ++Gx)
+				{
+					if (Rows[Gy][Gx] != TCHAR('1'))
+					{
+						continue;
+					}
+					DrawRect(CursorX + Gx * LabelScale, Y + Gy * LabelScale, LabelScale, LabelScale, Color);
+				}
+			}
+			CursorX += LabelScale * 6;
+		}
+	};
+
+	for (int32 FrameIndex = 0; FrameIndex < FramePixels.Num(); ++FrameIndex)
+	{
+		const int32 Column = FrameIndex % Columns;
+		const int32 Row = FrameIndex / Columns;
+		const int32 DestX = Padding + Column * (FrameSize.X + Padding);
+		const int32 DestY = Padding + Row * (FrameSize.Y + Padding);
+		const FString Label = FrameLabels.IsValidIndex(FrameIndex) && !FrameLabels[FrameIndex].IsEmpty()
+			? FrameLabels[FrameIndex]
+			: FString::Printf(TEXT("F%d"), FrameIndex);
+		const int32 TextWidth = FMath::Max(1, Label.Len()) * LabelScale * 6;
+		const int32 TextHeight = LabelScale * 7;
+		const int32 LabelBgWidth = FMath::Min(FrameSize.X - LabelMargin * 2, TextWidth + LabelMargin * 2);
+		const int32 LabelBgHeight = FMath::Min(FrameSize.Y - LabelMargin * 2, TextHeight + LabelMargin * 2);
+		if (LabelBgWidth > 0 && LabelBgHeight > 0)
+		{
+			DrawRect(DestX + LabelMargin, DestY + LabelMargin, LabelBgWidth, LabelBgHeight, FColor(8, 8, 8, 255));
+			DrawText(Label, DestX + LabelMargin * 2, DestY + LabelMargin * 2, FColor(255, 230, 120, 255));
+		}
+	}
+
+	TArray<FColor> OutputPixels;
+	FIntPoint OutputSize(0, 0);
+	if (!ResizePixelsMaxSize(SheetPixels, RawSheetSize, SheetMaxSize, OutputPixels, OutputSize, OutError))
+	{
+		return false;
+	}
+
+	OutFilePath = MakeShotPath(Format);
+	if (!WriteCompressedImage(OutputPixels, OutputSize, Format, Quality, OutFilePath, OutError))
+	{
+		return false;
+	}
+
+	const int64 Bytes = IFileManager::Get().FileSize(*OutFilePath);
+	OutSheetData = MakeShared<FJsonObject>();
+	OutSheetData->SetBoolField(TEXT("created"), true);
+	OutSheetData->SetStringField(TEXT("file_path"), OutFilePath);
+	OutSheetData->SetNumberField(TEXT("width"), OutputSize.X);
+	OutSheetData->SetNumberField(TEXT("height"), OutputSize.Y);
+	OutSheetData->SetNumberField(TEXT("bytes"), static_cast<double>(Bytes));
+	OutSheetData->SetNumberField(TEXT("columns"), Columns);
+	OutSheetData->SetNumberField(TEXT("rows"), Rows);
+	OutSheetData->SetNumberField(TEXT("frame_count"), FramePixels.Num());
+	OutSheetData->SetNumberField(TEXT("tile_width"), FrameSize.X);
+	OutSheetData->SetNumberField(TEXT("tile_height"), FrameSize.Y);
+	OutSheetData->SetNumberField(TEXT("padding"), Padding);
+	OutSheetData->SetNumberField(TEXT("label_scale"), LabelScale);
+	OutSheetData->SetNumberField(TEXT("raw_width"), RawSheetSize.X);
+	OutSheetData->SetNumberField(TEXT("raw_height"), RawSheetSize.Y);
+	OutSheetData->SetNumberField(TEXT("max_size"), SheetMaxSize);
+	OutSheetData->SetNumberField(TEXT("scale"), RawSheetSize.X > 0 ? static_cast<double>(OutputSize.X) / static_cast<double>(RawSheetSize.X) : 1.0);
 	return true;
 }
 

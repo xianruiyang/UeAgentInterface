@@ -1,7 +1,7 @@
 # UAI Command Coverage Matrix
 
-- generated_at: `20260514_002310_100509`
-- command_count: `876`
+- generated_at: `20260524_213234_181512`
+- command_count: `916`
 - missing_doc: `0`
 - missing_implementation: `0`
 - missing_smoke: `0`
@@ -17,7 +17,7 @@
 
 | Status | Count |
 | --- | --- |
-| `direct` | 876 |
+| `direct` | 916 |
 
 ## Commands
 
@@ -614,6 +614,45 @@
 | `paper_tilemap_export_folder` | `docs/commands/21_Texture_RenderTarget_Media.md` | True | True | `direct` | `covered` |
 | `paper_tileset_apply_folder` | `docs/commands/21_Texture_RenderTarget_Media.md` | True | True | `direct` | `covered` |
 | `paper_tileset_export_folder` | `docs/commands/21_Texture_RenderTarget_Media.md` | True | True | `direct` | `covered` |
+| `pcg_asset_info` | `docs/commands/29_PCG.md` | True | True | `direct` | `covered` |
+| `pcg_cancel_generation` | `docs/commands/29_PCG.md` | True | True | `direct` | `covered` |
+| `pcg_capabilities_query` | `docs/commands/29_PCG.md` | True | True | `direct` | `covered` |
+| `pcg_cleanup` | `docs/commands/29_PCG.md` | True | True | `direct` | `covered` |
+| `pcg_component_apply_json` | `docs/commands/29_PCG.md` | True | True | `direct` | `covered` |
+| `pcg_component_query` | `docs/commands/29_PCG.md` | True | True | `direct` | `covered` |
+| `pcg_component_runtime_probe` | `docs/commands/29_PCG.md` | True | True | `direct` | `covered` |
+| `pcg_component_snapshot_json` | `docs/commands/29_PCG.md` | True | True | `direct` | `covered` |
+| `pcg_compute_graph_validate` | `docs/commands/29_PCG.md` | True | True | `direct` | `covered` |
+| `pcg_data_assert_json` | `docs/commands/29_PCG.md` | True | True | `direct` | `covered` |
+| `pcg_data_asset_apply_json` | `docs/commands/29_PCG.md` | True | True | `direct` | `covered` |
+| `pcg_data_asset_export_json` | `docs/commands/29_PCG.md` | True | True | `direct` | `covered` |
+| `pcg_data_export_json` | `docs/commands/29_PCG.md` | True | True | `direct` | `covered` |
+| `pcg_generate` | `docs/commands/29_PCG.md` | True | True | `direct` | `covered` |
+| `pcg_generation_status` | `docs/commands/29_PCG.md` | True | True | `direct` | `covered` |
+| `pcg_gpu_capabilities_query` | `docs/commands/29_PCG.md` | True | True | `direct` | `covered` |
+| `pcg_graph_apply_folder` | `docs/commands/29_PCG.md` | True | True | `direct` | `covered` |
+| `pcg_graph_compile` | `docs/commands/29_PCG.md` | True | True | `direct` | `covered` |
+| `pcg_graph_diff_folder` | `docs/commands/29_PCG.md` | True | True | `direct` | `covered` |
+| `pcg_graph_export_folder` | `docs/commands/29_PCG.md` | True | True | `direct` | `covered` |
+| `pcg_graph_instance_json` | `docs/commands/29_PCG.md` | True | True | `direct` | `covered` |
+| `pcg_graph_parameters_apply_json` | `docs/commands/29_PCG.md` | True | True | `direct` | `covered` |
+| `pcg_graph_parameters_query` | `docs/commands/29_PCG.md` | True | True | `direct` | `covered` |
+| `pcg_graph_plan_folder` | `docs/commands/29_PCG.md` | True | True | `direct` | `covered` |
+| `pcg_graph_snapshot` | `docs/commands/29_PCG.md` | True | True | `direct` | `covered` |
+| `pcg_graph_validate_folder` | `docs/commands/29_PCG.md` | True | True | `direct` | `covered` |
+| `pcg_hlsl_validate` | `docs/commands/29_PCG.md` | True | True | `direct` | `covered` |
+| `pcg_inspection_set` | `docs/commands/29_PCG.md` | True | True | `direct` | `covered` |
+| `pcg_level_to_asset_export` | `docs/commands/29_PCG.md` | True | True | `direct` | `covered` |
+| `pcg_node_catalog_export` | `docs/commands/29_PCG.md` | True | True | `direct` | `covered` |
+| `pcg_node_inspect` | `docs/commands/29_PCG.md` | True | True | `direct` | `covered` |
+| `pcg_partition_probe` | `docs/commands/29_PCG.md` | True | True | `direct` | `covered` |
+| `pcg_profile_report` | `docs/commands/29_PCG.md` | True | True | `direct` | `covered` |
+| `pcg_regenerate` | `docs/commands/29_PCG.md` | True | True | `direct` | `covered` |
+| `pcg_runtime_generation_probe` | `docs/commands/29_PCG.md` | True | True | `direct` | `covered` |
+| `pcg_screenshot` | `docs/commands/29_PCG.md` | True | True | `direct` | `covered` |
+| `pcg_wait` | `docs/commands/29_PCG.md` | True | True | `direct` | `covered` |
+| `pcg_world_actor_apply_json` | `docs/commands/29_PCG.md` | True | True | `direct` | `covered` |
+| `pcg_world_actor_query` | `docs/commands/29_PCG.md` | True | True | `direct` | `covered` |
 | `physical_material_apply_json` | `docs/commands/26_Physics_Baseline.md` | True | True | `direct` | `covered` |
 | `physical_material_export_json` | `docs/commands/26_Physics_Baseline.md` | True | True | `direct` | `covered` |
 | `physical_material_validate_json` | `docs/commands/26_Physics_Baseline.md` | True | True | `direct` | `covered` |
@@ -705,6 +744,7 @@
 | `sequence_remove_skeletal_animation_section` | `docs/commands/deprecatedCommand/06_Sequence.md` | True | True | `direct` | `covered` |
 | `sequence_remove_umg_animation` | `docs/commands/deprecatedCommand/03_UMG.md` | True | True | `direct` | `covered` |
 | `sequence_rename_umg_animation` | `docs/commands/deprecatedCommand/03_UMG.md` | True | True | `direct` | `covered` |
+| `sequence_screenshot` | `docs/commands/06_Sequence.md` | True | True | `direct` | `covered` |
 | `sequence_set_level_sequence_display_rate` | `docs/commands/deprecatedCommand/06_Sequence.md` | True | True | `direct` | `covered` |
 | `sequence_set_level_sequence_playback_range` | `docs/commands/deprecatedCommand/06_Sequence.md` | True | True | `direct` | `covered` |
 | `sequence_set_umg_animation_display_rate` | `docs/commands/deprecatedCommand/03_UMG.md` | True | True | `direct` | `covered` |

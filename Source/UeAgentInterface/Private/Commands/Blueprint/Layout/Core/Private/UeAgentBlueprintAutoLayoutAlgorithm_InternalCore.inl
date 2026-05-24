@@ -24,7 +24,6 @@
 			int32 EdgeIndex = INDEX_NONE;
 			int32 PinIndex = INDEX_NONE;
 			bool bOutputPin = false;
-			bool bSourceNodeOccupancy = false;
 		};
 
 		struct FIsland
@@ -53,6 +52,150 @@
 			TSet<int32> InputChainNodeSet;
 		};
 
+		enum class EXStripCollisionOwnerKind : uint8
+		{
+			Unknown,
+			InterIslandBusBundle,
+			Island,
+			InputChain
+		};
+
+		struct FXStripCollisionBox
+		{
+			EXStripCollisionOwnerKind OwnerKind = EXStripCollisionOwnerKind::Unknown;
+			int32 OwnerId = INDEX_NONE;
+			int32 SecondaryOwnerId = INDEX_NONE;
+			int32 SegmentIndex = INDEX_NONE;
+			bool bHasCenterYOverride = false;
+			double CenterYOverride = 0.0;
+			FRect Rect;
+
+			double CenterY() const
+			{
+				return bHasCenterYOverride ? CenterYOverride : Rect.CenterY();
+			}
+		};
+
+		static bool XStripRangeOverlaps(const double A0, const double A1, const double B0, const double B1, const double Tolerance = 0.0)
+		{
+			const double LeftA = FMath::Min(A0, A1);
+			const double RightA = FMath::Max(A0, A1);
+			const double LeftB = FMath::Min(B0, B1);
+			const double RightB = FMath::Max(B0, B1);
+			return RightA + Tolerance > LeftB + 0.5 && RightB + Tolerance > LeftA + 0.5;
+		}
+
+		static bool IsValidXStripCollisionBox(const FXStripCollisionBox& Box)
+		{
+			return Box.Rect.Width() > 0.5
+				&& Box.Rect.Height() > 0.5
+				&& FMath::IsFinite(Box.Rect.Left)
+				&& FMath::IsFinite(Box.Rect.Right)
+				&& FMath::IsFinite(Box.Rect.Top)
+				&& FMath::IsFinite(Box.Rect.Bottom)
+				&& (!Box.bHasCenterYOverride || FMath::IsFinite(Box.CenterYOverride));
+		}
+
+		static FXStripCollisionBox MakeXStripCollisionBox(
+			const EXStripCollisionOwnerKind OwnerKind,
+			const int32 OwnerId,
+			const int32 SecondaryOwnerId,
+			const int32 SegmentIndex,
+			const FRect& Rect)
+		{
+			FXStripCollisionBox Box;
+			Box.OwnerKind = OwnerKind;
+			Box.OwnerId = OwnerId;
+			Box.SecondaryOwnerId = SecondaryOwnerId;
+			Box.SegmentIndex = SegmentIndex;
+			Box.Rect = Rect;
+			return Box;
+		}
+
+		static FXStripCollisionBox MakeXStripCollisionBox(
+			const EXStripCollisionOwnerKind OwnerKind,
+			const int32 OwnerId,
+			const int32 SecondaryOwnerId,
+			const int32 SegmentIndex,
+			const FRect& Rect,
+			const double CenterY)
+		{
+			FXStripCollisionBox Box = MakeXStripCollisionBox(OwnerKind, OwnerId, SecondaryOwnerId, SegmentIndex, Rect);
+			Box.bHasCenterYOverride = true;
+			Box.CenterYOverride = CenterY;
+			return Box;
+		}
+
+		static bool AddXStripCollisionBox(
+			TArray<FXStripCollisionBox>& Boxes,
+			const EXStripCollisionOwnerKind OwnerKind,
+			const int32 OwnerId,
+			const int32 SecondaryOwnerId,
+			const FRect& Rect)
+		{
+			const FXStripCollisionBox Box = MakeXStripCollisionBox(OwnerKind, OwnerId, SecondaryOwnerId, Boxes.Num(), Rect);
+			if (!IsValidXStripCollisionBox(Box))
+			{
+				return false;
+			}
+			Boxes.Add(Box);
+			return true;
+		}
+
+		static bool AddXStripCollisionBox(
+			TArray<FXStripCollisionBox>& Boxes,
+			const EXStripCollisionOwnerKind OwnerKind,
+			const int32 OwnerId,
+			const int32 SecondaryOwnerId,
+			const FRect& Rect,
+			const double CenterY)
+		{
+			const FXStripCollisionBox Box = MakeXStripCollisionBox(OwnerKind, OwnerId, SecondaryOwnerId, Boxes.Num(), Rect, CenterY);
+			if (!IsValidXStripCollisionBox(Box))
+			{
+				return false;
+			}
+			Boxes.Add(Box);
+			return true;
+		}
+
+		static bool XStripOverlapsXRange(const FXStripCollisionBox& Box, const double X0, const double X1, const double Tolerance = 0.0)
+		{
+			return IsValidXStripCollisionBox(Box)
+				&& XStripRangeOverlaps(Box.Rect.Left, Box.Rect.Right, X0, X1, Tolerance);
+		}
+
+		static bool XStripIntersectsRect(const FXStripCollisionBox& Box, const FRect& Rect, const double Padding = 0.0)
+		{
+			return IsValidXStripCollisionBox(Box)
+				&& Rect.Width() > 0.5
+				&& Rect.Height() > 0.5
+				&& Box.Rect.Intersects(Rect, Padding);
+		}
+
+		static bool XStripIntersects(const FXStripCollisionBox& A, const FXStripCollisionBox& B, const double Padding = 0.0)
+		{
+			return IsValidXStripCollisionBox(A)
+				&& IsValidXStripCollisionBox(B)
+				&& A.Rect.Intersects(B.Rect, Padding);
+		}
+
+		static bool FindLeftmostIntersectingXStripLeft(
+			const FRect& Rect,
+			const TArray<FXStripCollisionBox>& Boxes,
+			double& OutLeft)
+		{
+			OutLeft = TNumericLimits<double>::Max();
+			for (const FXStripCollisionBox& Box : Boxes)
+			{
+				if (XStripIntersectsRect(Box, Rect, 0.0))
+				{
+					OutLeft = FMath::Min(OutLeft, Box.Rect.Left);
+				}
+			}
+			return OutLeft != TNumericLimits<double>::Max();
+		}
+
 		struct FIslandEdge
 		{
 			int32 EdgeIndex = INDEX_NONE;
@@ -76,12 +219,49 @@
 			double FinalTop = 0.0;
 		};
 
+		struct FInterfaceBundleAnchorAccumulator
+		{
+			bool bHasSample = false;
+			double FixedMinY = 0.0;
+			double FixedMaxY = 0.0;
+			double AnchorMinY = 0.0;
+			double AnchorMaxY = 0.0;
+
+			void Add(const double FixedInterfaceY, const double AnchorOffsetY)
+			{
+				if (!bHasSample)
+				{
+					FixedMinY = FixedMaxY = FixedInterfaceY;
+					AnchorMinY = AnchorMaxY = AnchorOffsetY;
+					bHasSample = true;
+					return;
+				}
+				FixedMinY = FMath::Min(FixedMinY, FixedInterfaceY);
+				FixedMaxY = FMath::Max(FixedMaxY, FixedInterfaceY);
+				AnchorMinY = FMath::Min(AnchorMinY, AnchorOffsetY);
+				AnchorMaxY = FMath::Max(AnchorMaxY, AnchorOffsetY);
+			}
+
+			bool ResolvePreferredOriginY(double& OutPreferredOriginY) const
+			{
+				if (!bHasSample)
+				{
+					return false;
+				}
+				const double FixedCenterY = (FixedMinY + FixedMaxY) * 0.5;
+				const double AnchorCenterY = (AnchorMinY + AnchorMaxY) * 0.5;
+				OutPreferredOriginY = FMath::RoundToDouble(FixedCenterY - AnchorCenterY);
+				return true;
+			}
+		};
+
 		struct FPortOrderDemand
 		{
 			bool bValid = false;
 			int32 GroupNode = INDEX_NONE;
 			double Value = 0.0;
 			int32 Distance = 0;
+			double Weight = 1.0;
 		};
 
 		struct FPortOrderDemandSet
@@ -96,8 +276,16 @@
 			double NeighborPortFraction = 0.0;
 			FPortOrderDemandSet SourceDemands;
 			FPortOrderDemandSet TargetDemands;
+			FPortOrderDemandSet ExternalSourceDemands;
+			TSet<FString> RightTargetInputKeys;
 			int32 StableIndex = 0;
 		};
+
+		static double ColumnDistanceInfluenceWeight(const int32 Distance)
+		{
+			const int32 ClampedDistance = FMath::Max(1, Distance);
+			return FMath::Pow(0.5, static_cast<double>(ClampedDistance - 1));
+		}
 
 		struct FInternalBusGroup
 		{
@@ -123,7 +311,7 @@
 			FVector2D LocalPoint = FVector2D::ZeroVector;
 			double AllowedMinX = 0.0;
 			double AllowedMaxX = 0.0;
-			bool bContinuousSegment = false;
+			bool bSingleNodeBoundaryBus = false;
 		};
 
 		struct FBoundaryBus
@@ -149,7 +337,7 @@
 			FVector2D ActualTargetLocal = FVector2D::ZeroVector;
 			double AllowedMinX = 0.0;
 			double AllowedMaxX = 0.0;
-			bool bContinuousSegment = false;
+			bool bSingleNodeBoundaryBus = false;
 		};
 
 		struct FSelectedEndpointCandidate
@@ -158,16 +346,19 @@
 			int32 CandidateId = INDEX_NONE;
 			int32 SourceIsland = INDEX_NONE;
 			int32 TargetIsland = INDEX_NONE;
+			int32 BoundaryEntryId = INDEX_NONE;
+			int32 InternalBusGroupId = INDEX_NONE;
 			FString Side = TEXT("left");
 			FVector2D SourceLocal = FVector2D::ZeroVector;
 			FVector2D EntryLocal = FVector2D::ZeroVector;
 			FVector2D ActualTargetLocal = FVector2D::ZeroVector;
 			int32 ConnectionGroupId = INDEX_NONE;
-			int32 BusContractId = INDEX_NONE;
+			int32 InterIslandBusId = INDEX_NONE;
 			double PrimaryResidual = 0.0;
 			double MinTargetDeltaX = 0.0;
 			double SourcePortOrderKey = 0.0;
 			bool bPlacementOwner = false;
+			bool bSingleNodeBoundaryBus = false;
 		};
 
 		struct FPlacementProposal
@@ -187,34 +378,6 @@
 			bool bRouteOnly = false;
 		};
 
-		struct FBusContract
-		{
-			int32 Id = INDEX_NONE;
-			FString SourceParamId;
-			ERouteKind RouteKind = ERouteKind::Direct;
-			double TrunkY = 0.0;
-			double XMin = 0.0;
-			double XMax = 0.0;
-			double BranchYMin = 0.0;
-			double BranchYMax = 0.0;
-			double OutputToTrunkDistanceY = 0.0;
-			int32 BusLaneIndex = 0;
-			int32 BranchLaneIndex = 0;
-			bool bSecondary = false;
-			TArray<int32> EdgeIndices;
-			TArray<double> BranchXs;
-		};
-
-		struct FRouteGroup
-		{
-			int32 Id = INDEX_NONE;
-			FString SourceParamId;
-			TArray<int32> SelectedEndpointIndices;
-			TArray<int32> EdgeIndices;
-			double IdealBusY = 0.0;
-			ERouteKind RouteKind = ERouteKind::Direct;
-		};
-
 		struct FIslandLocalLayoutSnapshot
 		{
 			TMap<int32, FVector2D> NodeLocalPositions;
@@ -232,24 +395,6 @@
 		{
 			return FVector2D(SnapGraphCoordinate(Point.X), SnapGraphCoordinate(Point.Y));
 		}
-
-		struct FCorridorRoute
-		{
-			int32 EdgeIndex = INDEX_NONE;
-			FString Side = TEXT("left");
-			FString RouteKind = TEXT("direct");
-			TArray<FVector2D> Points;
-			bool bExternalUpgrade = false;
-			bool bCrossesIsland = false;
-		};
-
-		struct FLaneAssignment
-		{
-			int32 EdgeIndex = INDEX_NONE;
-			FString Orientation = TEXT("horizontal");
-			int32 LaneIndex = 0;
-			FString CorridorId;
-		};
 
 		static TSharedPtr<FJsonObject> RectToJson(const FRect& Rect)
 		{
@@ -482,11 +627,6 @@
 		{
 			Options.OutputAccessOffsetX = FMath::Max(0.0, Options.OutputAccessOffsetX);
 			Options.InputAccessOffsetX = FMath::Max(0.0, Options.InputAccessOffsetX);
-			Options.PinDirectionBiasX = FMath::Max(
-				0.0,
-				Options.PinDirectionBiasX > 0.0
-					? Options.PinDirectionBiasX
-					: (Options.OutputAccessOffsetX + Options.InputAccessOffsetX) * 0.5);
 			if (Options.AccessOffsetSource.IsEmpty())
 			{
 				Options.AccessOffsetSource = TEXT("unset_access_offsets");
@@ -499,20 +639,37 @@
 			return Options.OutputAccessOffsetX + Options.InputAccessOffsetX;
 		}
 
+		static double BusPathAccessClearanceX(const FOptions& Options)
+		{
+			return EndpointAccessClearanceX(Options) * 2.0;
+		}
+
 		static double GetFallbackInterfaceRowSpacing(const FOptions& Options)
 		{
 			return FMath::Max(Options.NodePadding * 1.5, 36.0);
 		}
 
+		static constexpr double BusAvoidanceDistance = 20.0;
+
+		static constexpr double GetBusAvoidanceDistance()
+		{
+			return BusAvoidanceDistance;
+		}
+
 		static constexpr double GetBusTrunkLaneSpacing()
 		{
-			return 20.0;
+			return GetBusAvoidanceDistance();
 		}
 
 		static double GetCrossBusBranchLaneSpacing(const FOptions& Options)
 		{
 			(void)Options;
-			return GetBusTrunkLaneSpacing();
+			return GetBusAvoidanceDistance();
+		}
+
+		static double GetBusHalfThickness()
+		{
+			return FMath::Max(0.5, GetBusAvoidanceDistance() * 0.05);
 		}
 
 		static void AddInterfaceRowSpacingCandidate(TArray<double>& Spacings, const double Spacing)
@@ -650,6 +807,56 @@
 				OutBounds.Top -= LineTolerance;
 				OutBounds.Bottom += LineTolerance;
 			}
+			return true;
+		}
+
+		static bool TryBuildEndpointOffsetCollisionTriangles(
+			const FVector2D& OutputPoint,
+			const FRect* OutputNodeRect,
+			const FVector2D& InputPoint,
+			const FRect* InputNodeRect,
+			const FOptions& Options,
+			TArray<TArray<FVector2D>>& OutTriangles)
+		{
+			OutTriangles.Reset();
+			FVector2D EscapedOutput(OutputPoint.X + Options.OutputAccessOffsetX, OutputPoint.Y);
+			FVector2D EscapedInput(InputPoint.X - Options.InputAccessOffsetX, InputPoint.Y);
+			constexpr double NodeEscapeEpsilon = 0.5;
+			if (OutputNodeRect)
+			{
+				EscapedOutput.X = FMath::Max(EscapedOutput.X, OutputNodeRect->Right + NodeEscapeEpsilon);
+			}
+			if (InputNodeRect)
+			{
+				EscapedInput.X = FMath::Min(EscapedInput.X, InputNodeRect->Left - NodeEscapeEpsilon);
+			}
+			if (!FMath::IsFinite(OutputPoint.X)
+				|| !FMath::IsFinite(OutputPoint.Y)
+				|| !FMath::IsFinite(InputPoint.X)
+				|| !FMath::IsFinite(InputPoint.Y)
+				|| !FMath::IsFinite(EscapedOutput.X)
+				|| !FMath::IsFinite(EscapedOutput.Y)
+				|| !FMath::IsFinite(EscapedInput.X)
+				|| !FMath::IsFinite(EscapedInput.Y))
+			{
+				return false;
+			}
+			const FVector2D MidPoint =
+				OutputPoint * 0.125
+				+ EscapedOutput * 0.375
+				+ EscapedInput * 0.375
+				+ InputPoint * 0.125;
+			if (!FMath::IsFinite(MidPoint.X) || !FMath::IsFinite(MidPoint.Y))
+			{
+				return false;
+			}
+			OutTriangles.SetNum(2);
+			OutTriangles[0].Add(OutputPoint);
+			OutTriangles[0].Add(EscapedOutput);
+			OutTriangles[0].Add(MidPoint);
+			OutTriangles[1].Add(MidPoint);
+			OutTriangles[1].Add(EscapedInput);
+			OutTriangles[1].Add(InputPoint);
 			return true;
 		}
 
@@ -991,6 +1198,152 @@
 				|| Crosses(A, B, TopRight, BottomRight)
 				|| Crosses(A, B, BottomRight, BottomLeft)
 				|| Crosses(A, B, BottomLeft, TopLeft);
+		}
+
+		static bool PointOnSegment2D(const FVector2D& Point, const FVector2D& A, const FVector2D& B, const double Tolerance = 0.5)
+		{
+			const double Cross =
+				(Point.Y - A.Y) * (B.X - A.X)
+				- (Point.X - A.X) * (B.Y - A.Y);
+			if (FMath::Abs(Cross) > Tolerance)
+			{
+				return false;
+			}
+			return Point.X >= FMath::Min(A.X, B.X) - Tolerance
+				&& Point.X <= FMath::Max(A.X, B.X) + Tolerance
+				&& Point.Y >= FMath::Min(A.Y, B.Y) - Tolerance
+				&& Point.Y <= FMath::Max(A.Y, B.Y) + Tolerance;
+		}
+
+		static bool PointInPolygon2D(const FVector2D& Point, const TArray<FVector2D>& Polygon)
+		{
+			if (Polygon.Num() < 3)
+			{
+				return false;
+			}
+			bool bInside = false;
+			for (int32 Index = 0, PreviousIndex = Polygon.Num() - 1; Index < Polygon.Num(); PreviousIndex = Index++)
+			{
+				const FVector2D& A = Polygon[PreviousIndex];
+				const FVector2D& B = Polygon[Index];
+				if (PointOnSegment2D(Point, A, B))
+				{
+					return true;
+				}
+				const bool bCrossesScanline = (A.Y > Point.Y) != (B.Y > Point.Y);
+				if (!bCrossesScanline)
+				{
+					continue;
+				}
+				const double IntersectX = (B.X - A.X) * (Point.Y - A.Y) / (B.Y - A.Y) + A.X;
+				if (Point.X < IntersectX)
+				{
+					bInside = !bInside;
+				}
+			}
+			return bInside;
+		}
+
+		static FRect BoundsForPolygonPoints(const TArray<FVector2D>& Points)
+		{
+			FRect Bounds;
+			Bounds.Left = TNumericLimits<double>::Max();
+			Bounds.Top = TNumericLimits<double>::Max();
+			Bounds.Right = -TNumericLimits<double>::Max();
+			Bounds.Bottom = -TNumericLimits<double>::Max();
+			for (const FVector2D& Point : Points)
+			{
+				Bounds.Left = FMath::Min(Bounds.Left, Point.X);
+				Bounds.Top = FMath::Min(Bounds.Top, Point.Y);
+				Bounds.Right = FMath::Max(Bounds.Right, Point.X);
+				Bounds.Bottom = FMath::Max(Bounds.Bottom, Point.Y);
+			}
+			constexpr double LineTolerance = 0.5;
+			if (Bounds.Right - Bounds.Left < LineTolerance * 2.0)
+			{
+				Bounds.Left -= LineTolerance;
+				Bounds.Right += LineTolerance;
+			}
+			if (Bounds.Bottom - Bounds.Top < LineTolerance * 2.0)
+			{
+				Bounds.Top -= LineTolerance;
+				Bounds.Bottom += LineTolerance;
+			}
+			return Bounds;
+		}
+
+		static bool PolygonIntersectsRect(const TArray<FVector2D>& Polygon, const FRect& Rect)
+		{
+			if (Polygon.Num() < 3 || Rect.Width() <= 0.5 || Rect.Height() <= 0.5)
+			{
+				return false;
+			}
+			if (!BoundsForPolygonPoints(Polygon).Intersects(Rect, 0.0))
+			{
+				return false;
+			}
+			auto PointInRect = [&Rect](const FVector2D& Point)
+			{
+				return Point.X >= Rect.Left && Point.X <= Rect.Right && Point.Y >= Rect.Top && Point.Y <= Rect.Bottom;
+			};
+			for (const FVector2D& Point : Polygon)
+			{
+				if (PointInRect(Point))
+				{
+					return true;
+				}
+			}
+			const TArray<FVector2D> RectCorners = {
+				FVector2D(Rect.Left, Rect.Top),
+				FVector2D(Rect.Right, Rect.Top),
+				FVector2D(Rect.Right, Rect.Bottom),
+				FVector2D(Rect.Left, Rect.Bottom)
+			};
+			for (const FVector2D& Corner : RectCorners)
+			{
+				if (PointInPolygon2D(Corner, Polygon))
+				{
+					return true;
+				}
+			}
+			for (int32 Index = 0; Index < Polygon.Num(); ++Index)
+			{
+				const FVector2D& A = Polygon[Index];
+				const FVector2D& B = Polygon[(Index + 1) % Polygon.Num()];
+				if (SegmentIntersectsRect(A, B, Rect))
+				{
+					return true;
+				}
+			}
+			return false;
+		}
+
+		static bool EndpointOffsetTrianglesIntersectsRect(const TArray<TArray<FVector2D>>& Triangles, const FRect& Rect)
+		{
+			for (const TArray<FVector2D>& Triangle : Triangles)
+			{
+				if (PolygonIntersectsRect(Triangle, Rect))
+				{
+					return true;
+				}
+			}
+			return false;
+		}
+
+		static bool FindLeftmostEndpointOffsetTrianglesIntersectingXStripLeft(
+			const TArray<TArray<FVector2D>>& Triangles,
+			const TArray<FXStripCollisionBox>& Boxes,
+			double& OutLeft)
+		{
+			OutLeft = TNumericLimits<double>::Max();
+			for (const FXStripCollisionBox& Box : Boxes)
+			{
+				if (IsValidXStripCollisionBox(Box) && EndpointOffsetTrianglesIntersectsRect(Triangles, Box.Rect))
+				{
+					OutLeft = FMath::Min(OutLeft, Box.Rect.Left);
+				}
+			}
+			return OutLeft != TNumericLimits<double>::Max();
 		}
 
 		static TArray<FVector2D> BuildDirectSplinePolyline(const FVector2D& Start, const FVector2D& End)

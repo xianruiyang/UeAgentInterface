@@ -16,7 +16,7 @@
 | `save_asset` | 保存指定资产 | `asset_path`、`only_if_dirty` | 保存关键资产修改 |
 | `asset_duplicate` | 复制资产到指定路径 | `source_asset_path`、`destination_asset_path`、`save_after_duplicate` | 先复制测试资产，再在副本上做安全修改 |
 | `asset_move` | 通过 UE AssetTools 移动或重命名资产 | `source_asset_path` 或 `asset_path`、`destination_asset_path` 或 `destination_folder`、可选 `destination_name/dry_run/save_after_move` | 把旧资产归档到 Deprecated 目录，同时让 UE 处理重命名、引用更新和保存 |
-| `asset_fixup_redirectors` | 删除资产移动后已无引用的 `ObjectRedirector` | `asset_path`/`asset_paths` 或 `folder_path`/`folder_paths`、可选 `recursive/dry_run/fail_on_blocked` | 批量移动后清理旧路径 redirector；仍有 referencer 时返回 `redirector_still_referenced`，先改引用再删除 |
+| `asset_fixup_redirectors` | 删除资产移动后已无引用的 `ObjectRedirector` | `asset_path`、`asset_paths`、`folder_path`、`folder_paths`、`recursive`、`dry_run`、`fail_on_blocked` | 批量移动后清理旧路径 redirector；仍有 referencer 时返回 `redirector_still_referenced`，先改引用再删除 |
 | `asset_reference_graph` | 查询任意资产的 AssetRegistry 引用关系 | `asset_path`，可选 `direction/recursive/max_depth/include_*` | 在改 AnimBP、Montage、Level、清理旧资源前建立依赖/反向引用图 |
 | `asset_import_texture` | 导入外部贴图为 Texture2D | `source_filename`、`destination_path`，可选 `destination_name/srgb/compression_settings/mip_gen_settings/lod_group` | 把外部 PNG/TGA/JPG/EXR/HDR 等贴图纳入 UE 资产链路 |
 | `asset_import_fbx_skeletal_mesh` | 导入 FBX 为 Skeletal Mesh | `source_filename`、`destination_path`，可选 `skeleton_path/import_materials/import_textures/create_physics_asset/import_animations/import_morph_targets/update_skeleton_reference_pose/validate_after_import/expected_*` | 把外部角色模型/骨骼导入到项目，并可验证 Morph/LOD/材质槽 |
@@ -287,6 +287,7 @@
 - `format`：`png/jpg/webp`
 - `quality`：1~100（对 `png` 无效）
 - `max_size`：最大边长（会等比缩放）
+- `output_file`：可选；相对路径按项目根目录解析。若未显式传 `format`，会优先使用 `output_file` 的 `png/jpg/webp` 扩展名；若同时传了 `format`，扩展名必须一致。
 
 深度图附加参数（仅 `SceneDepth/DeviceDepth` 生效）：
 - `invert`：可选，默认 `true`；为 `true` 时“近亮远暗”（更像 UE 的深度调试观感）。

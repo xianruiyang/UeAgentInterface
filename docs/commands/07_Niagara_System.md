@@ -13,7 +13,7 @@
 | `niagara_duplicate_asset` | 复制 Niagara 资产 | `source_asset_path`、`target_asset_path` | 基于模板快速变体 |
 | `niagara_open_editor` | 打开 Niagara 资产编辑器 | `asset_path` | 进入编辑上下文 |
 | `niagara_preview_advance` | 连续推进 Niagara 编辑器预览并暂停 | `asset_path`、`target_frame`、`tick_delta_seconds` | 从 0 连续 tick 到指定帧，供后续 probe / screenshot 只读采样 |
-| `niagara_screenshot` | 截取 Niagara 资产编辑器界面 | `asset_path`、`target`、`format`、`max_size` | 调试 Niagara 编辑器预览/栈面板是否真实写入 |
+| `niagara_screenshot` | 截取 Niagara 资产编辑器界面，支持从 0 连续推进的序列帧总览图 | `asset_path`、`target`、`format`、`max_size`、`open_editor_if_needed`、`target_frame`、`start_frame_index`、`count`、`frame_interval`、`preview_tick_delta_seconds`、`frame_capture_renderer`、`camera_fov`、`camera_distance_scale`、`create_frame_sheet`、`write_individual_frames`、`frame_sheet_padding`、`frame_sheet_max_size`、`frame_sheet_label_scale` | 调试 Niagara 编辑器预览/栈面板是否真实写入 |
 | `niagara_system_runtime_probe` | 读取 System 预览组件运行统计 | `asset_path`、`tick_count`、`advance_mode` | 不开 PIE 地验证 System 是否实际产生活粒子 |
 | `niagara_get_info` | 读取 Niagara 资产概况 | `asset_path` | 查看 System/Emitter 结构 |
 | `niagara_get_stack_issues` | 读取 Niagara Stack 红/黄/信息提示 | `asset_path`、`severity_filter`、`open_editor_if_needed` | 获取 System 或 Emitter 栈面板感叹号内容 |
@@ -78,7 +78,9 @@
 
 ### `niagara_screenshot`
 
-用于打开或复用 Niagara System / Emitter / Script 编辑器，并把编辑器界面截图写入 UAI artifacts `Shots` 目录。该命令只截图编辑器 UI，不运行 PIE / game。
+用于打开或复用 Niagara System / Emitter / Script 编辑器，并把编辑器界面或预览画面截图写入 UAI artifacts `Shots` 目录。该命令不运行 PIE / game。
+
+当传入 `target_frame`、`frame_index`、`start_frame_index`、`count`、`frame_interval` 或 `frames[]` 时，`niagara_screenshot` 会进入序列帧模式。该模式仅支持 Niagara System：命令会重置预览到 0 帧，使用 `tick_component` 或 `advance_simulation` 从 0 连续推进，并在请求帧暂停截图。多帧请求在同一次连续推进中完成，避免外部脚本反复执行 `niagara_preview_advance + niagara_screenshot` 两条命令。序列帧默认使用 `preview_scene_capture`，直接拍摄同一预览组件所在 preview world，避免 Slate 离屏绘制只得到静态 UI 背景。多帧模式默认只输出一张序列帧总览图，方便像动画选帧图一样一次查看完整阶段；每个格子左上角标注 `F<frame_index>`。
 
 关键参数：
 
@@ -89,15 +91,26 @@
 - `quality`：可选，`jpg` / `webp` 压缩质量，范围 `1..100`。
 - `max_size`：可选，最长边，默认 `2048`。
 - `file_path` / `out_file_path`：可选，自定义输出路径；相对路径按项目根目录解析。
-- `offscreen` / `use_offscreen_renderer`：兼容参数；当前截图始终使用 Slate 离屏绘制路径，避免依赖真实窗口 backbuffer。
+- `offscreen` / `use_offscreen_renderer`：兼容参数；非序列帧 UI 截图使用 Slate 离屏绘制路径，避免依赖真实窗口 backbuffer。
+- `frame_capture_renderer` / `capture_renderer` / `renderer`：序列帧模式可选，默认 `preview_scene_capture`；可显式传 `slate_widget_offscreen` 走旧 Slate 兼容路径。
+- `create_frame_sheet` / `frame_sheet` / `sequence_frame_image`：多帧序列帧模式可选，默认 `true`；为 `false` 时不输出合成总览图。
+- `write_individual_frames` / `keep_individual_frames` / `output_individual_frames`：多帧序列帧模式可选，默认 `false`；为 `true` 时在总览图之外额外写出每帧单图，并在 `frames[].file_path` 返回路径。
+- `frame_sheet_padding` / `sheet_padding`：可选，总览图帧间距，默认 `8` 像素。
+- `frame_sheet_max_size` / `sheet_max_size`：可选，总览图最长边，默认 `8192`。
+- `frame_sheet_label_scale` / `sheet_label_scale`：可选，总览图帧号字号，默认 `3`。
+- `wait_for_render_dependencies` / `wait_for_asset_compilation` / `wait_for_shader_compilation`：序列帧 `preview_scene_capture` 可选，默认 `true`。第一帧真实截图前会提交当前预览 world 的材质剩余编译任务、等待资产/Shader 编译并做一次 SceneCapture warmup，避免刚重启编辑器或首次加载材质时把未编译完成的透明粒子截成黑图。
+- `scene_capture_warmup_captures` / `render_warmup_captures`：序列帧 `preview_scene_capture` 可选，默认 `1`，范围 `0..8`；只在第一帧正式截图前执行 warmup capture。
 - `reset_preview`：可选；只有 `true` 或设置 `preview_advance_seconds > 0` 时才会准备 Niagara 预览组件。显式传 `false` 不会触发预览重置或真实窗口 redraw。
 - `preview_advance_seconds` / `preview_tick_delta_seconds` / `preview_advance_mode`：可选，用于截图前推进 Niagara 编辑器预览；不需要推进时不要传。
+- `target_frame` / `frame_index` / `frame`：可选，序列帧模式的单帧目标；从 0 连续 tick 到该帧后截图。
+- `start_frame_index` / `count` / `frame_interval`：可选，序列帧模式的批量帧定义；最多 120 张。
+- `frames[]`：可选，显式帧列表。数组项可为数字，或 `{ "frame_index": 45 }` / `{ "target_frame": 45 }`。当前列表必须非递减，以便一次从 0 连续推进完成。
 - `capture_mode=current_preview`：只截图当前已暂停的 preview 状态，不 reset、不 activate、不 tick。应配合 `expected_preview_state_token` 和 `expected_frame` 使用。
 - `expected_preview_state_token`：可选，必须与 `niagara_preview_advance` 返回值一致，否则返回 `preview_state_token_mismatch`。
 - `expected_frame` / `target_frame`：可选，按 `preview_tick_delta_seconds` 估算当前帧，不匹配时返回 `preview_frame_mismatch`。
 - `require_paused`：可选，`current_preview` 默认 `true`；当前预览未暂停时返回 `preview_component_not_paused`。
 
-返回字段包含 `file_path`、`width`、`height`、`bytes`、`target`、`capture_mode`、`legacy_backbuffer_capture=disabled`、`preview_prepare_requested`、`pre_preview_redraw_performed`、`capture_redraw_performed`。截图路径不会调用 `FSlateApplication::TakeScreenshot`，也不会强制 redraw 真实 Slate 窗口；`window_backbuffer_safe` 只作为诊断字段保留。
+返回字段包含 `file_path`、`width`、`height`、`bytes`、`target`、`capture_mode`、`legacy_backbuffer_capture=disabled`、`preview_prepare_requested`、`pre_preview_redraw_performed`、`capture_redraw_performed`。序列帧模式额外返回 `frame_count`、`frames[]`、`advance_semantics=continuous_from_zero`、`frame_sequence_capture_mode=continuous_from_zero_once`、`frame_capture_renderer`、`pixel_signature`、`pixel_signal`、`changed_pixel_count_from_previous` 和 `visual_duplicate_of_previous`；`preview_scene_capture` 还会返回 `render_dependency_wait`，包含 warmup capture 次数、等待前后 asset/shader 剩余任务数。多帧默认 `file_path` 指向总览图，并返回 `frame_sheet_created`、`frame_sheet_file_path`、`sequence_frame_image_path`、`individual_frame_files_created=false` 和 `frame_sheet{file_path,width,height,columns,rows,tile_width,tile_height,padding,label_scale}`。`columns` 与 `rows` 固定为最小正方形网格边长，等于 `ceil(sqrt(frame_count))`，不足格子为空。截图路径不会调用 `FSlateApplication::TakeScreenshot`，也不会强制 redraw 真实 Slate 窗口；`window_backbuffer_safe` 只作为诊断字段保留。
 
 只读第 45 帧截图示例：
 
@@ -114,6 +127,24 @@
     "file_path": "Saved/UeAgentScreenshots/rain_frame_45.png"
   }
 }
+```
+
+从 0 连续推进并截图 8 张 Niagara 预览帧：
+
+```json
+{
+  "command": "niagara_screenshot",
+  "params": {
+    "asset_path": "/Game/Niagara/NS_UAI_HighQuality_Fire",
+    "target": "preview",
+    "start_frame_index": 0,
+    "count": 8,
+    "frame_interval": 12,
+      "preview_tick_delta_seconds": 0.016667,
+      "format": "png",
+      "max_size": 1280
+    }
+  }
 ```
 
 ### `niagara_system_runtime_probe`

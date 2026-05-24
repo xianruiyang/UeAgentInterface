@@ -120,13 +120,57 @@
 				Group.EntryLocal = FVector2D(EntryX, MedianY);
 			}
 
-			auto AddEntry = [&](FInternalBusGroup& Group, const FString& Side, const FVector2D& Point, bool bContinuousSegment)
+			TSet<int32> GroupsInSingleNodeBoundaryBus;
+			for (const TPair<FString, TArray<int32>>& Pair : GroupsByBoundaryBusKey)
+			{
+				TSet<int32> UniqueTargetNodes;
+				for (const int32 GroupIndex : Pair.Value)
+				{
+					if (!OutInternalBusGroups.IsValidIndex(GroupIndex))
+					{
+						continue;
+					}
+					for (const int32 TargetNodeIndex : OutInternalBusGroups[GroupIndex].TargetNodes)
+					{
+						UniqueTargetNodes.Add(TargetNodeIndex);
+					}
+				}
+				if (UniqueTargetNodes.Num() == 1)
+				{
+					for (const int32 GroupIndex : Pair.Value)
+					{
+						GroupsInSingleNodeBoundaryBus.Add(GroupIndex);
+					}
+				}
+			}
+
+			auto ComputeEntryAllowedMaxX = [&Options](const FInternalBusGroup& Group, const double DefaultX, const bool bUseDirectLikeRightLimit) -> double
+			{
+				double RightMostX = TNumericLimits<double>::Max();
+				for (const FVector2D& LocalPort : Group.TargetLocalPorts)
+				{
+					const bool bSameRowDirectLeft =
+						Group.TargetLocalPorts.Num() == 1
+						&& FMath::IsNearlyEqual(Group.EntryLocal.X, LocalPort.X, 0.5)
+						&& FMath::IsNearlyEqual(Group.EntryLocal.Y, LocalPort.Y, 0.5);
+					const double MaxEntryX = (bSameRowDirectLeft || bUseDirectLikeRightLimit)
+						? LocalPort.X
+						: ComputeOutputXAlignedToInput(LocalPort.X, Options);
+					RightMostX = FMath::Min(RightMostX, MaxEntryX);
+				}
+				if (RightMostX >= TNumericLimits<double>::Max() * 0.5)
+				{
+					return DefaultX;
+				}
+				return FMath::Max(DefaultX, RightMostX);
+			};
+
+			auto AddEntry = [&](FInternalBusGroup& Group, const FString& Side, const FVector2D& Point)
 			{
 				if (!Islands.IsValidIndex(Group.IslandId))
 				{
 					return;
 				}
-				const FIsland& Island = Islands[Group.IslandId];
 				FBoundaryEntry Entry;
 				Entry.Id = OutBoundaryEntries.Num();
 				Entry.IslandId = Group.IslandId;
@@ -134,26 +178,9 @@
 				Entry.SourceParamId = Group.SourceParamId;
 				Entry.Side = Side;
 				Entry.LocalPoint = Point;
-				Entry.bContinuousSegment = bContinuousSegment;
-				if (Side == TEXT("top") || Side == TEXT("bottom"))
-				{
-					if (bContinuousSegment)
-					{
-						Entry.AllowedMinX = 0.0;
-						Entry.AllowedMaxX = FMath::Clamp(Point.X, 0.0, FMath::Max(0.0, Island.LocalBounds.Width()));
-					}
-					else
-					{
-						Entry.AllowedMinX = FMath::Clamp(Point.X, 0.0, FMath::Max(0.0, Island.LocalBounds.Width()));
-						Entry.AllowedMaxX = Entry.AllowedMinX;
-					}
-					Entry.LocalPoint.X = Entry.AllowedMaxX;
-				}
-				else
-				{
-					Entry.AllowedMinX = Point.X;
-					Entry.AllowedMaxX = Point.X;
-				}
+				Entry.AllowedMinX = Point.X;
+				Entry.bSingleNodeBoundaryBus = Side != TEXT("left") && GroupsInSingleNodeBoundaryBus.Contains(Group.Id);
+				Entry.AllowedMaxX = ComputeEntryAllowedMaxX(Group, Point.X, Entry.bSingleNodeBoundaryBus);
 				OutBoundaryEntries.Add(Entry);
 				if (Side == TEXT("left"))
 				{
@@ -170,6 +197,61 @@
 				}
 			};
 
+			auto IslandLocalNodeRect = [&Nodes](const int32 NodeIndex) -> FRect
+			{
+				if (!Nodes.IsValidIndex(NodeIndex))
+				{
+					return {};
+				}
+				const FNode& Node = Nodes[NodeIndex];
+				return {
+					Node.NewX,
+					Node.NewY,
+					Node.NewX + Node.Width,
+					Node.NewY + Node.Height
+				};
+			};
+
+			auto DirectLeftEntryHitsIslandNode = [&](const FInternalBusGroup& Group, const FIsland& Island, const FVector2D& LeftPoint, const FVector2D& EntryPoint) -> bool
+			{
+				const double HalfThickness = GetBusHalfThickness();
+				FRect SegmentRect;
+				SegmentRect.Left = FMath::Min(LeftPoint.X, EntryPoint.X);
+				SegmentRect.Right = FMath::Max(LeftPoint.X, EntryPoint.X);
+				SegmentRect.Top = FMath::Min(LeftPoint.Y, EntryPoint.Y) - HalfThickness;
+				SegmentRect.Bottom = FMath::Max(LeftPoint.Y, EntryPoint.Y) + HalfThickness;
+				for (const int32 NodeIndex : Island.Nodes)
+				{
+					if (!Nodes.IsValidIndex(NodeIndex))
+					{
+						continue;
+					}
+					if (Group.TargetNodes.Contains(NodeIndex))
+					{
+						continue;
+					}
+					if (SegmentRect.Intersects(IslandLocalNodeRect(NodeIndex), 0.0))
+					{
+						return true;
+					}
+				}
+				return false;
+			};
+
+			auto CanUseDirectLeftEntry = [&](const FInternalBusGroup& Group, const FIsland& Island, const FVector2D& LeftPoint, const FVector2D& TargetInterfacePoint) -> bool
+			{
+				if (!FMath::IsNearlyEqual(LeftPoint.Y, TargetInterfacePoint.Y, 0.5))
+				{
+					return false;
+				}
+				if (LeftPoint.X > TargetInterfacePoint.X + 0.5)
+				{
+					return false;
+				}
+				return !DirectLeftEntryHitsIslandNode(Group, Island, LeftPoint, TargetInterfacePoint);
+			};
+
+			TSet<int32> GroupsRequiringBoundaryBus;
 			for (const TPair<FString, TArray<int32>>& Pair : GroupsByBoundaryBusKey)
 			{
 				const bool bMultipleInternalGroups = Pair.Value.Num() > 1;
@@ -185,92 +267,46 @@
 						continue;
 					}
 					const FIsland& Island = Islands[Group.IslandId];
-					const double LeadGap = Options.HorizontalSpacing * 0.20;
-					const double BoundaryX = bMultipleInternalGroups
-						? FMath::Clamp(Group.EntryLocal.X - LeadGap, 0.0, FMath::Max(0.0, Island.LocalBounds.Width()))
-						: FMath::Clamp(Group.EntryLocal.X, 0.0, FMath::Max(0.0, Island.LocalBounds.Width()));
-					const double LeftBoundaryX = FMath::Min(-Options.HorizontalSpacing * 0.22, Group.EntryLocal.X);
-					const FVector2D LeftBoundaryPoint(LeftBoundaryX, Group.EntryLocal.Y);
-					if (Group.bExec || (!bMultipleInternalGroups && Group.bOnlyLeftmostColumn))
+					const double LeftBoundaryX = -Options.HorizontalSpacing * 0.22;
+					const bool bSingleIslandInputInterface =
+						!bMultipleInternalGroups
+						&& Group.EdgeIndices.Num() == 1
+						&& Group.TargetLocalPorts.Num() == 1;
+					const FVector2D TargetInterfacePoint = bSingleIslandInputInterface
+						? Group.TargetLocalPorts[0]
+						: Group.EntryLocal;
+					const FVector2D LeftBoundaryPoint(LeftBoundaryX, TargetInterfacePoint.Y);
+					const bool bDirectLeftValid = !bMultipleInternalGroups
+						&& bSingleIslandInputInterface
+						&& CanUseDirectLeftEntry(Group, Island, LeftBoundaryPoint, TargetInterfacePoint);
+					if (bDirectLeftValid)
 					{
-						AddEntry(Group, TEXT("left"), LeftBoundaryPoint, false);
+						Group.EntryLocal = TargetInterfacePoint;
+						AddEntry(Group, TEXT("left"), LeftBoundaryPoint);
 					}
 					else
 					{
-						AddEntry(Group, TEXT("left"), LeftBoundaryPoint, false);
-						const FVector2D TopPoint(BoundaryX, -Options.VerticalSpacing * 0.30);
-						const FVector2D BottomPoint(BoundaryX, Island.LocalBounds.Height() + Options.VerticalSpacing * 0.30);
-						if (bMultipleInternalGroups)
-						{
-							AddEntry(Group, TEXT("top"), TopPoint, true);
-							AddEntry(Group, TEXT("bottom"), BottomPoint, true);
-						}
-						else
-						{
-							AddEntry(Group, TEXT("top"), TopPoint, false);
-							AddEntry(Group, TEXT("bottom"), BottomPoint, false);
-							AddEntry(Group, TEXT("top"), TopPoint, true);
-							AddEntry(Group, TEXT("bottom"), BottomPoint, true);
-						}
-					}
-				}
-			}
-
-			TMap<int32, TArray<int32>> LeftEntriesByIsland;
-			for (int32 EntryIndex = 0; EntryIndex < OutBoundaryEntries.Num(); ++EntryIndex)
-			{
-				if (OutBoundaryEntries[EntryIndex].Side == TEXT("left"))
-				{
-					LeftEntriesByIsland.FindOrAdd(OutBoundaryEntries[EntryIndex].IslandId).Add(EntryIndex);
-				}
-			}
-			for (TPair<int32, TArray<int32>>& Pair : LeftEntriesByIsland)
-			{
-				TArray<int32>& Entries = Pair.Value;
-				if (Entries.Num() <= 1)
-				{
-					continue;
-				}
-				double OriginalMinY = TNumericLimits<double>::Max();
-				double OriginalMaxY = -TNumericLimits<double>::Max();
-				for (const int32 EntryIndex : Entries)
-				{
-					OriginalMinY = FMath::Min(OriginalMinY, OutBoundaryEntries[EntryIndex].LocalPoint.Y);
-					OriginalMaxY = FMath::Max(OriginalMaxY, OutBoundaryEntries[EntryIndex].LocalPoint.Y);
-				}
-				Entries.Sort([&OutBoundaryEntries](int32 A, int32 B)
-				{
-					if (!FMath::IsNearlyEqual(OutBoundaryEntries[A].LocalPoint.Y, OutBoundaryEntries[B].LocalPoint.Y, 1.0))
-					{
-						return OutBoundaryEntries[A].LocalPoint.Y < OutBoundaryEntries[B].LocalPoint.Y;
-					}
-					return A < B;
-				});
-				double CursorY = -TNumericLimits<double>::Max();
-				const double MinEntryGap = FMath::Max(18.0, Options.NodePadding * 0.75);
-				for (const int32 EntryIndex : Entries)
-				{
-					FBoundaryEntry& Entry = OutBoundaryEntries[EntryIndex];
-					Entry.LocalPoint.Y = FMath::Max(Entry.LocalPoint.Y, CursorY + MinEntryGap);
-					CursorY = Entry.LocalPoint.Y;
-				}
-				const double NewCenter = (OutBoundaryEntries[Entries[0]].LocalPoint.Y + OutBoundaryEntries[Entries.Last()].LocalPoint.Y) * 0.5;
-				const double OldCenter = (OriginalMinY + OriginalMaxY) * 0.5;
-				const double Shift = OldCenter - NewCenter;
-				for (const int32 EntryIndex : Entries)
-				{
-					FBoundaryEntry& Entry = OutBoundaryEntries[EntryIndex];
-					Entry.LocalPoint.Y += Shift;
-					if (OutInternalBusGroups.IsValidIndex(Entry.InternalBusGroupId))
-					{
-						OutInternalBusGroups[Entry.InternalBusGroupId].EntryLocal = Entry.LocalPoint;
+						GroupsRequiringBoundaryBus.Add(Group.Id);
+						const FVector2D TopPoint(LeftBoundaryX, -Options.VerticalSpacing * 0.30);
+						const FVector2D BottomPoint(LeftBoundaryX, Island.LocalBounds.Height() + Options.VerticalSpacing * 0.30);
+						AddEntry(Group, TEXT("top"), TopPoint);
+						AddEntry(Group, TEXT("bottom"), BottomPoint);
 					}
 				}
 			}
 
 			for (const TPair<FString, TArray<int32>>& Pair : GroupsByBoundaryBusKey)
 			{
-				if (Pair.Value.Num() <= 1)
+				bool bBoundaryBusRequired = Pair.Value.Num() > 1;
+				for (const int32 GroupIndex : Pair.Value)
+				{
+					if (GroupsRequiringBoundaryBus.Contains(GroupIndex))
+					{
+						bBoundaryBusRequired = true;
+						break;
+					}
+				}
+				if (!bBoundaryBusRequired)
 				{
 					continue;
 				}
@@ -324,7 +360,7 @@
 				Obj->SetObjectField(TEXT("local_point"), PointToJson(Entry.LocalPoint));
 				Obj->SetNumberField(TEXT("allowed_min_x"), Entry.AllowedMinX);
 				Obj->SetNumberField(TEXT("allowed_max_x"), Entry.AllowedMaxX);
-				Obj->SetBoolField(TEXT("continuous_segment"), Entry.bContinuousSegment);
+				Obj->SetBoolField(TEXT("single_node_boundary_bus"), Entry.bSingleNodeBoundaryBus);
 				Result.BoundaryEntryDiagnostics.Add(MakeShared<FJsonValueObject>(Obj));
 			}
 			for (const FBoundaryBus& Bus : OutBoundaryBuses)
@@ -381,7 +417,7 @@
 					Candidate.ActualTargetLocal = IslandEdge.TargetLocal;
 					Candidate.AllowedMinX = Entry.AllowedMinX;
 					Candidate.AllowedMaxX = Entry.AllowedMaxX;
-					Candidate.bContinuousSegment = Entry.bContinuousSegment;
+					Candidate.bSingleNodeBoundaryBus = Entry.bSingleNodeBoundaryBus;
 					OutCandidates.Add(Candidate);
 
 					TSharedPtr<FJsonObject> Obj = MakeShared<FJsonObject>();
@@ -397,7 +433,7 @@
 					Obj->SetObjectField(TEXT("actual_target_local"), PointToJson(Candidate.ActualTargetLocal));
 					Obj->SetNumberField(TEXT("allowed_min_x"), Candidate.AllowedMinX);
 					Obj->SetNumberField(TEXT("allowed_max_x"), Candidate.AllowedMaxX);
-					Obj->SetBoolField(TEXT("continuous_segment"), Candidate.bContinuousSegment);
+					Obj->SetBoolField(TEXT("single_node_boundary_bus"), Candidate.bSingleNodeBoundaryBus);
 					Result.IslandPortCandidateDiagnostics.Add(MakeShared<FJsonValueObject>(Obj));
 				}
 			}

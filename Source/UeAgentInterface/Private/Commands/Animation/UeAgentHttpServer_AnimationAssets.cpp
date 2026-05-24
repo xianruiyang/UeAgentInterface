@@ -2767,6 +2767,23 @@ bool FUeAgentHttpServer::CmdAnimSequenceScreenshot(const FUeAgentRequestContext&
 	const FString CaptureMode = TEXT("scene_capture_temp_actor");
 	TArray<TSharedPtr<FJsonValue>> CapturedFrames;
 	TSharedPtr<FJsonObject> FirstFrameObject;
+	TArray<TArray<FColor>> CapturedFramePixelsForSheet;
+	TArray<FString> CapturedFrameLabelsForSheet;
+	FIntPoint FrameSheetTileSize(0, 0);
+
+	bool bCreateFrameSheet = FrameRequests.Num() > 1;
+	JsonTryGetBool(Ctx.Params, TEXT("create_frame_sheet"), bCreateFrameSheet) ||
+		JsonTryGetBool(Ctx.Params, TEXT("frame_sheet"), bCreateFrameSheet) ||
+		JsonTryGetBool(Ctx.Params, TEXT("sequence_frame_image"), bCreateFrameSheet);
+	bool bWriteIndividualFrames = FrameRequests.Num() == 1;
+	JsonTryGetBool(Ctx.Params, TEXT("write_individual_frames"), bWriteIndividualFrames) ||
+		JsonTryGetBool(Ctx.Params, TEXT("keep_individual_frames"), bWriteIndividualFrames) ||
+		JsonTryGetBool(Ctx.Params, TEXT("output_individual_frames"), bWriteIndividualFrames);
+	if (FrameRequests.Num() > 1 && !bCreateFrameSheet && !bWriteIndividualFrames)
+	{
+		OutError = TEXT("multi_frame_output_disabled");
+		return false;
+	}
 
 	auto CaptureRequestedFrame = [&](const UeAgentAnimationEditorOps::FPreviewFrameRequest& Request, const int32 SequenceIndex, TSharedPtr<FJsonObject>& OutFrameObject) -> bool
 	{
@@ -2823,20 +2840,39 @@ bool FUeAgentHttpServer::CmdAnimSequenceScreenshot(const FUeAgentRequestContext&
 			return false;
 		}
 
-		const FString OutPath = MakeShotPath(Format);
-		if (!WriteCompressedImage(ResizedPixels, ResizedSize, Format, Quality, OutPath, OutError))
+		FString OutPath;
+		int64 Bytes = 0;
+		if (bWriteIndividualFrames)
 		{
-			return false;
+			OutPath = MakeShotPath(Format);
+			if (!WriteCompressedImage(ResizedPixels, ResizedSize, Format, Quality, OutPath, OutError))
+			{
+				return false;
+			}
+			Bytes = IFileManager::Get().FileSize(*OutPath);
 		}
 
-		const int64 Bytes = IFileManager::Get().FileSize(*OutPath);
+		if (FrameSheetTileSize.X <= 0 || FrameSheetTileSize.Y <= 0)
+		{
+			FrameSheetTileSize = ResizedSize;
+		}
+		if (ResizedSize == FrameSheetTileSize)
+		{
+			CapturedFramePixelsForSheet.Add(ResizedPixels);
+			CapturedFrameLabelsForSheet.Add(FString::Printf(TEXT("F%d"), Request.FrameIndex));
+		}
+
 		OutFrameObject = MakeShared<FJsonObject>();
 		OutFrameObject->SetNumberField(TEXT("sequence_index"), SequenceIndex);
-		OutFrameObject->SetStringField(TEXT("file_path"), OutPath);
+		if (!OutPath.IsEmpty())
+		{
+			OutFrameObject->SetStringField(TEXT("file_path"), OutPath);
+			OutFrameObject->SetNumberField(TEXT("bytes"), static_cast<double>(Bytes));
+		}
 		OutFrameObject->SetNumberField(TEXT("width"), ResizedSize.X);
 		OutFrameObject->SetNumberField(TEXT("height"), ResizedSize.Y);
-		OutFrameObject->SetNumberField(TEXT("bytes"), static_cast<double>(Bytes));
 		OutFrameObject->SetNumberField(TEXT("frame_index"), Request.FrameIndex);
+		OutFrameObject->SetStringField(TEXT("frame_label"), FString::Printf(TEXT("F%d"), Request.FrameIndex));
 		OutFrameObject->SetNumberField(TEXT("time_seconds"), Request.TimeSeconds);
 		return true;
 	};
@@ -2862,20 +2898,57 @@ bool FUeAgentHttpServer::CmdAnimSequenceScreenshot(const FUeAgentRequestContext&
 	}
 	const int32 MaxFrameIndex = FMath::Max(0, Sequence->GetNumberOfSampledKeys() - 1);
 
+	FString FrameSheetPath;
+	TSharedPtr<FJsonObject> FrameSheetData;
+	if (bCreateFrameSheet && FrameRequests.Num() > 1)
+	{
+		if (CapturedFramePixelsForSheet.Num() != FrameRequests.Num())
+		{
+			OutError = TEXT("frame_sheet_capture_size_mismatch");
+			return false;
+		}
+		if (!WriteFrameSequenceSheetImage(CapturedFramePixelsForSheet, CapturedFrameLabelsForSheet, FrameSheetTileSize, Ctx.Params, Format, Quality, FrameSheetPath, FrameSheetData, OutError))
+		{
+			return false;
+		}
+	}
+
 	OutData->SetStringField(TEXT("asset_path"), UeAgentAnimationAssetOps::NormalizeAssetPath(Sequence->GetOutermost()->GetName()));
 	OutData->SetStringField(TEXT("object_path"), Sequence->GetPathName());
-	OutData->SetStringField(TEXT("file_path"), FirstFrameObject->GetStringField(TEXT("file_path")));
+	if (FrameSheetData.IsValid())
+	{
+		OutData->SetStringField(TEXT("file_path"), FrameSheetPath);
+		OutData->SetNumberField(TEXT("width"), FrameSheetData->GetNumberField(TEXT("width")));
+		OutData->SetNumberField(TEXT("height"), FrameSheetData->GetNumberField(TEXT("height")));
+		OutData->SetNumberField(TEXT("bytes"), FrameSheetData->GetNumberField(TEXT("bytes")));
+	}
+	else
+	{
+		FString FirstFramePath;
+		FirstFrameObject->TryGetStringField(TEXT("file_path"), FirstFramePath);
+		OutData->SetStringField(TEXT("file_path"), FirstFramePath);
+		OutData->SetNumberField(TEXT("width"), FirstFrameObject->GetNumberField(TEXT("width")));
+		OutData->SetNumberField(TEXT("height"), FirstFrameObject->GetNumberField(TEXT("height")));
+		double FirstFrameBytes = 0.0;
+		FirstFrameObject->TryGetNumberField(TEXT("bytes"), FirstFrameBytes);
+		OutData->SetNumberField(TEXT("bytes"), FirstFrameBytes);
+	}
 	OutData->SetStringField(TEXT("target"), Target);
 	OutData->SetStringField(TEXT("capture_mode"), CaptureMode);
 	OutData->SetStringField(TEXT("format"), Format);
-	OutData->SetNumberField(TEXT("width"), FirstFrameObject->GetNumberField(TEXT("width")));
-	OutData->SetNumberField(TEXT("height"), FirstFrameObject->GetNumberField(TEXT("height")));
-	OutData->SetNumberField(TEXT("bytes"), FirstFrameObject->GetNumberField(TEXT("bytes")));
 	OutData->SetNumberField(TEXT("frame_index"), FrameIndex);
 	OutData->SetNumberField(TEXT("time_seconds"), TimeSeconds);
 	OutData->SetNumberField(TEXT("num_frames"), MaxFrameIndex);
 	OutData->SetNumberField(TEXT("frame_count"), FrameRequests.Num());
 	OutData->SetArrayField(TEXT("frames"), CapturedFrames);
+	OutData->SetBoolField(TEXT("frame_sheet_created"), FrameSheetData.IsValid());
+	OutData->SetBoolField(TEXT("individual_frame_files_created"), bWriteIndividualFrames);
+	if (FrameSheetData.IsValid())
+	{
+		OutData->SetStringField(TEXT("frame_sheet_file_path"), FrameSheetPath);
+		OutData->SetStringField(TEXT("sequence_frame_image_path"), FrameSheetPath);
+		OutData->SetObjectField(TEXT("frame_sheet"), FrameSheetData);
+	}
 	OutData->SetNumberField(TEXT("sampling_frame_rate_numerator"), SamplingFrameRate.Numerator);
 	OutData->SetNumberField(TEXT("sampling_frame_rate_denominator"), SamplingFrameRate.Denominator);
 	OutData->SetStringField(TEXT("preview_skeletal_mesh"), EffectivePreviewMeshPath);

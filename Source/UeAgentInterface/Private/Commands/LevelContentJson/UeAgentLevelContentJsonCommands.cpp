@@ -8,6 +8,7 @@
 #include "Components/ActorComponent.h"
 #include "Components/PrimitiveComponent.h"
 #include "Components/SceneComponent.h"
+#include "Components/SplineComponent.h"
 #include "Components/StaticMeshComponent.h"
 #include "Dom/JsonObject.h"
 #include "Editor.h"
@@ -1744,13 +1745,12 @@ namespace UeAgentLevelContentJson
 		FString Mode;
 		TryGetStringAny(Selection, { TEXT("mode") }, Mode);
 		Mode = Mode.TrimStartAndEnd().ToLower();
-		if (Mode.IsEmpty() || Mode == TEXT("all_level"))
-		{
-			return true;
-		}
 		if (Mode == TEXT("selected"))
 		{
-			return Actor->IsSelected();
+			if (!Actor->IsSelected())
+			{
+				return false;
+			}
 		}
 
 		FString ExactText;
@@ -1912,6 +1912,25 @@ namespace UeAgentLevelContentJson
 			Obj->SetObjectField(TEXT("relative_rotation"), MakeRotatorJson(SceneComponent->GetRelativeRotation()));
 			Obj->SetObjectField(TEXT("relative_scale"), MakeVectorJson(SceneComponent->GetRelativeScale3D()));
 			Obj->SetStringField(TEXT("attach_parent"), SceneComponent->GetAttachParent() ? SceneComponent->GetAttachParent()->GetName() : FString());
+		}
+		if (USplineComponent* SplineComponent = Cast<USplineComponent>(Component))
+		{
+			const int32 PointCount = SplineComponent->GetNumberOfSplinePoints();
+			TArray<TSharedPtr<FJsonValue>> Points;
+			Points.Reserve(PointCount);
+			for (int32 PointIndex = 0; PointIndex < PointCount; ++PointIndex)
+			{
+				TSharedPtr<FJsonObject> Point = MakeShared<FJsonObject>();
+				Point->SetNumberField(TEXT("index"), PointIndex);
+				Point->SetObjectField(TEXT("location"), MakeVectorJson(SplineComponent->GetLocationAtSplinePoint(PointIndex, ESplineCoordinateSpace::Local)));
+				Point->SetObjectField(TEXT("arrive_tangent"), MakeVectorJson(SplineComponent->GetArriveTangentAtSplinePoint(PointIndex, ESplineCoordinateSpace::Local)));
+				Point->SetObjectField(TEXT("leave_tangent"), MakeVectorJson(SplineComponent->GetLeaveTangentAtSplinePoint(PointIndex, ESplineCoordinateSpace::Local)));
+				Point->SetStringField(TEXT("type"), UEnum::GetValueAsString(SplineComponent->GetSplinePointType(PointIndex)));
+				Points.Add(MakeShared<FJsonValueObject>(Point));
+			}
+			Obj->SetNumberField(TEXT("spline_point_count"), PointCount);
+			Obj->SetBoolField(TEXT("spline_closed_loop"), SplineComponent->IsClosedLoop());
+			Obj->SetArrayField(TEXT("spline_points"), Points);
 		}
 		return Obj;
 	}
@@ -2804,6 +2823,91 @@ namespace UeAgentLevelContentJson
 		return true;
 	}
 
+	static ESplinePointType::Type ParseSplinePointType(const FString& TypeText)
+	{
+		const FString Normalized = TypeText.TrimStartAndEnd().ToLower();
+		if (Normalized == TEXT("linear") || Normalized == TEXT("esplinepointtype::linear"))
+		{
+			return ESplinePointType::Linear;
+		}
+		if (Normalized == TEXT("constant") || Normalized == TEXT("esplinepointtype::constant"))
+		{
+			return ESplinePointType::Constant;
+		}
+		if (Normalized == TEXT("curveclamped") || Normalized == TEXT("curve_clamped") || Normalized == TEXT("esplinepointtype::curveclamped"))
+		{
+			return ESplinePointType::CurveClamped;
+		}
+		if (Normalized == TEXT("curvecustomtangent") || Normalized == TEXT("curve_custom_tangent") || Normalized == TEXT("esplinepointtype::curvecustomtangent"))
+		{
+			return ESplinePointType::CurveCustomTangent;
+		}
+		return ESplinePointType::Curve;
+	}
+
+	static bool ApplySplineComponentSpec(USplineComponent* SplineComponent, const TSharedPtr<FJsonObject>& ComponentSpec, TSharedPtr<FJsonObject>& OutResult, FString& OutError)
+	{
+		const TArray<TSharedPtr<FJsonValue>>* Points = nullptr;
+		if (!SplineComponent || !ComponentSpec.IsValid() || !TryGetArray(ComponentSpec, TEXT("spline_points"), Points) || !Points)
+		{
+			return true;
+		}
+
+		FString SpaceText = TEXT("local");
+		TryGetStringAny(ComponentSpec, { TEXT("spline_coordinate_space"), TEXT("coordinate_space") }, SpaceText);
+		const ESplineCoordinateSpace::Type CoordinateSpace = SpaceText.TrimStartAndEnd().Equals(TEXT("world"), ESearchCase::IgnoreCase)
+			? ESplineCoordinateSpace::World
+			: ESplineCoordinateSpace::Local;
+
+		bool bClosedLoop = SplineComponent->IsClosedLoop();
+		TryGetBoolAny(ComponentSpec, { TEXT("spline_closed_loop"), TEXT("closed_loop") }, bClosedLoop);
+
+		SplineComponent->Modify();
+		SplineComponent->ClearSplinePoints(false);
+		for (int32 PointIndex = 0; PointIndex < Points->Num(); ++PointIndex)
+		{
+			const TSharedPtr<FJsonObject> Point = (*Points)[PointIndex].IsValid() ? (*Points)[PointIndex]->AsObject() : nullptr;
+			if (!Point.IsValid())
+			{
+				OutError = TEXT("spline_point_not_object");
+				return false;
+			}
+
+			FVector Location = FVector::ZeroVector;
+			if (!TryGetVectorField(Point, TEXT("location"), Location) && !TryGetVectorField(Point, TEXT("position"), Location))
+			{
+				OutError = TEXT("spline_point_missing_location");
+				return false;
+			}
+
+			SplineComponent->AddSplinePoint(Location, CoordinateSpace, false);
+
+			FString TypeText;
+			if (TryGetStringAny(Point, { TEXT("type"), TEXT("point_type") }, TypeText))
+			{
+				SplineComponent->SetSplinePointType(PointIndex, ParseSplinePointType(TypeText), false);
+			}
+
+			FVector ArriveTangent = FVector::ZeroVector;
+			FVector LeaveTangent = FVector::ZeroVector;
+			const bool bHasArriveTangent = TryGetVectorField(Point, TEXT("arrive_tangent"), ArriveTangent);
+			const bool bHasLeaveTangent = TryGetVectorField(Point, TEXT("leave_tangent"), LeaveTangent);
+			if (bHasArriveTangent || bHasLeaveTangent)
+			{
+				SplineComponent->SetTangentsAtSplinePoint(PointIndex, ArriveTangent, LeaveTangent, CoordinateSpace, false);
+			}
+		}
+
+		SplineComponent->SetClosedLoop(bClosedLoop, false);
+		SplineComponent->UpdateSpline();
+		SplineComponent->MarkPackageDirty();
+
+		OutResult->SetBoolField(TEXT("spline_points_applied"), true);
+		OutResult->SetNumberField(TEXT("spline_point_count"), SplineComponent->GetNumberOfSplinePoints());
+		OutResult->SetBoolField(TEXT("spline_closed_loop"), SplineComponent->IsClosedLoop());
+		return true;
+	}
+
 	static bool ApplyComponentSpec(AActor* Actor, const TSharedPtr<FJsonObject>& ComponentSpec, UWorld* World, TSharedPtr<FJsonObject>& OutResult, FString& OutError)
 	{
 		OutResult = MakeShared<FJsonObject>();
@@ -2893,6 +2997,14 @@ namespace UeAgentLevelContentJson
 					SceneComponent->SetRelativeRotation(RelativeRotation);
 					SceneComponent->SetRelativeScale3D(RelativeScale);
 				}
+			}
+		}
+
+		if (USplineComponent* SplineComponent = Cast<USplineComponent>(Component))
+		{
+			if (!ApplySplineComponentSpec(SplineComponent, ComponentSpec, OutResult, OutError))
+			{
+				return false;
 			}
 		}
 
@@ -3137,6 +3249,7 @@ namespace UeAgentLevelContentJson
 				}
 				ComponentResults.Add(MakeShared<FJsonValueObject>(ComponentResult));
 			}
+			ApplyActorTransform(Actor, Resource, OutResult);
 		}
 
 		Actor->MarkPackageDirty();

@@ -361,6 +361,7 @@ namespace
 				{ TEXT("mesh_deformer_collection_"), &InvokePrefixed<&FUeAgentHttpServer::ExecuteMeshDeformerCollectionCommand> },
 				{ TEXT("ml_deformer_"), &InvokePrefixed<&FUeAgentHttpServer::ExecuteMLDeformerCommand> },
 				{ TEXT("niagara_"), &InvokePrefixed<&FUeAgentHttpServer::ExecuteNiagaraCommand> },
+				{ TEXT("pcg_"), &InvokePrefixed<&FUeAgentHttpServer::ExecutePCGCommand> },
 				{ TEXT("modeling_"), &InvokePrefixed<&FUeAgentHttpServer::ExecuteModelingCommand> },
 				{ TEXT("blackboard_"), &InvokePrefixed<&FUeAgentHttpServer::ExecuteAICommand> },
 				{ TEXT("behavior_tree_"), &InvokePrefixed<&FUeAgentHttpServer::ExecuteAICommand> },

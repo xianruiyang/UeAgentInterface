@@ -1,18 +1,18 @@
 {
   "schema": "ue_agent_interface.coverage_matrix.v2",
-  "generated_at": "20260514_002310_100509",
+  "generated_at": "20260524_213234_181512",
   "project_root": "D:\\program\\UE\\GptProjectTest",
-  "command_count": 876,
+  "command_count": 916,
   "missing_doc": [],
   "missing_implementation": [],
   "missing_smoke": [],
   "smoke_debt": [],
   "smoke_coverage": {
     "status_counts": {
-      "direct": 876
+      "direct": 916
     },
     "priority_counts": {
-      "covered": 876
+      "covered": 916
     },
     "actionable_missing": [],
     "p0_commands": [],
@@ -11266,6 +11266,747 @@
       "smoke_coverage_actionable": false
     },
     {
+      "command": "pcg_asset_info",
+      "doc_file": "docs/commands/29_PCG.md",
+      "doc_status": "explicit",
+      "deprecated": false,
+      "implemented": true,
+      "smoke_tested": true,
+      "implementation_files": [
+        "Source/UeAgentInterface/Private/Commands/PCG/UeAgentHttpServer_PCG.cpp"
+      ],
+      "smoke_files": [
+        "Source/UeAgentInterfaceTests/Private/Smoke/PCG/UeAgentInterfacePCGSmokeTests.cpp"
+      ],
+      "smoke_coverage_status": "direct",
+      "smoke_coverage_priority": "covered",
+      "smoke_coverage_reason": "command is directly referenced by an automation smoke test",
+      "smoke_coverage_recommended_action": "keep existing smoke coverage",
+      "smoke_coverage_actionable": false
+    },
+    {
+      "command": "pcg_cancel_generation",
+      "doc_file": "docs/commands/29_PCG.md",
+      "doc_status": "explicit",
+      "deprecated": false,
+      "implemented": true,
+      "smoke_tested": true,
+      "implementation_files": [
+        "Source/UeAgentInterface/Private/Commands/PCG/UeAgentHttpServer_PCG.cpp"
+      ],
+      "smoke_files": [
+        "Source/UeAgentInterfaceTests/Private/Smoke/PCG/UeAgentInterfacePCGSmokeTests.cpp"
+      ],
+      "smoke_coverage_status": "direct",
+      "smoke_coverage_priority": "covered",
+      "smoke_coverage_reason": "command is directly referenced by an automation smoke test",
+      "smoke_coverage_recommended_action": "keep existing smoke coverage",
+      "smoke_coverage_actionable": false
+    },
+    {
+      "command": "pcg_capabilities_query",
+      "doc_file": "docs/commands/29_PCG.md",
+      "doc_status": "explicit",
+      "deprecated": false,
+      "implemented": true,
+      "smoke_tested": true,
+      "implementation_files": [
+        "Source/UeAgentInterface/Private/Commands/PCG/UeAgentHttpServer_PCG.cpp"
+      ],
+      "smoke_files": [
+        "Source/UeAgentInterfaceTests/Private/Smoke/PCG/UeAgentInterfacePCGSmokeTests.cpp"
+      ],
+      "smoke_coverage_status": "direct",
+      "smoke_coverage_priority": "covered",
+      "smoke_coverage_reason": "command is directly referenced by an automation smoke test",
+      "smoke_coverage_recommended_action": "keep existing smoke coverage",
+      "smoke_coverage_actionable": false
+    },
+    {
+      "command": "pcg_cleanup",
+      "doc_file": "docs/commands/29_PCG.md",
+      "doc_status": "explicit",
+      "deprecated": false,
+      "implemented": true,
+      "smoke_tested": true,
+      "implementation_files": [
+        "Source/UeAgentInterface/Private/Commands/PCG/UeAgentHttpServer_PCG.cpp"
+      ],
+      "smoke_files": [
+        "Source/UeAgentInterfaceTests/Private/Smoke/PCG/UeAgentInterfacePCGSmokeTests.cpp"
+      ],
+      "smoke_coverage_status": "direct",
+      "smoke_coverage_priority": "covered",
+      "smoke_coverage_reason": "command is directly referenced by an automation smoke test",
+      "smoke_coverage_recommended_action": "keep existing smoke coverage",
+      "smoke_coverage_actionable": false
+    },
+    {
+      "command": "pcg_component_apply_json",
+      "doc_file": "docs/commands/29_PCG.md",
+      "doc_status": "explicit",
+      "deprecated": false,
+      "implemented": true,
+      "smoke_tested": true,
+      "implementation_files": [
+        "Source/UeAgentInterface/Private/Commands/PCG/UeAgentHttpServer_PCG.cpp"
+      ],
+      "smoke_files": [
+        "Source/UeAgentInterfaceTests/Private/Smoke/PCG/UeAgentInterfacePCGSmokeTests.cpp"
+      ],
+      "smoke_coverage_status": "direct",
+      "smoke_coverage_priority": "covered",
+      "smoke_coverage_reason": "command is directly referenced by an automation smoke test",
+      "smoke_coverage_recommended_action": "keep existing smoke coverage",
+      "smoke_coverage_actionable": false
+    },
+    {
+      "command": "pcg_component_query",
+      "doc_file": "docs/commands/29_PCG.md",
+      "doc_status": "explicit",
+      "deprecated": false,
+      "implemented": true,
+      "smoke_tested": true,
+      "implementation_files": [
+        "Source/UeAgentInterface/Private/Commands/PCG/UeAgentHttpServer_PCG.cpp"
+      ],
+      "smoke_files": [
+        "Source/UeAgentInterfaceTests/Private/Smoke/PCG/UeAgentInterfacePCGSmokeTests.cpp"
+      ],
+      "smoke_coverage_status": "direct",
+      "smoke_coverage_priority": "covered",
+      "smoke_coverage_reason": "command is directly referenced by an automation smoke test",
+      "smoke_coverage_recommended_action": "keep existing smoke coverage",
+      "smoke_coverage_actionable": false
+    },
+    {
+      "command": "pcg_component_runtime_probe",
+      "doc_file": "docs/commands/29_PCG.md",
+      "doc_status": "explicit",
+      "deprecated": false,
+      "implemented": true,
+      "smoke_tested": true,
+      "implementation_files": [
+        "Source/UeAgentInterface/Private/Commands/PCG/UeAgentHttpServer_PCG.cpp"
+      ],
+      "smoke_files": [
+        "Source/UeAgentInterfaceTests/Private/Smoke/PCG/UeAgentInterfacePCGSmokeTests.cpp"
+      ],
+      "smoke_coverage_status": "direct",
+      "smoke_coverage_priority": "covered",
+      "smoke_coverage_reason": "command is directly referenced by an automation smoke test",
+      "smoke_coverage_recommended_action": "keep existing smoke coverage",
+      "smoke_coverage_actionable": false
+    },
+    {
+      "command": "pcg_component_snapshot_json",
+      "doc_file": "docs/commands/29_PCG.md",
+      "doc_status": "explicit",
+      "deprecated": false,
+      "implemented": true,
+      "smoke_tested": true,
+      "implementation_files": [
+        "Source/UeAgentInterface/Private/Commands/PCG/UeAgentHttpServer_PCG.cpp"
+      ],
+      "smoke_files": [
+        "Source/UeAgentInterfaceTests/Private/Smoke/PCG/UeAgentInterfacePCGSmokeTests.cpp"
+      ],
+      "smoke_coverage_status": "direct",
+      "smoke_coverage_priority": "covered",
+      "smoke_coverage_reason": "command is directly referenced by an automation smoke test",
+      "smoke_coverage_recommended_action": "keep existing smoke coverage",
+      "smoke_coverage_actionable": false
+    },
+    {
+      "command": "pcg_compute_graph_validate",
+      "doc_file": "docs/commands/29_PCG.md",
+      "doc_status": "explicit",
+      "deprecated": false,
+      "implemented": true,
+      "smoke_tested": true,
+      "implementation_files": [
+        "Source/UeAgentInterface/Private/Commands/PCG/UeAgentHttpServer_PCG.cpp"
+      ],
+      "smoke_files": [
+        "Source/UeAgentInterfaceTests/Private/Smoke/PCG/UeAgentInterfacePCGSmokeTests.cpp"
+      ],
+      "smoke_coverage_status": "direct",
+      "smoke_coverage_priority": "covered",
+      "smoke_coverage_reason": "command is directly referenced by an automation smoke test",
+      "smoke_coverage_recommended_action": "keep existing smoke coverage",
+      "smoke_coverage_actionable": false
+    },
+    {
+      "command": "pcg_data_assert_json",
+      "doc_file": "docs/commands/29_PCG.md",
+      "doc_status": "explicit",
+      "deprecated": false,
+      "implemented": true,
+      "smoke_tested": true,
+      "implementation_files": [
+        "Source/UeAgentInterface/Private/Commands/PCG/UeAgentHttpServer_PCG.cpp"
+      ],
+      "smoke_files": [
+        "Source/UeAgentInterfaceTests/Private/Smoke/PCG/UeAgentInterfacePCGSmokeTests.cpp"
+      ],
+      "smoke_coverage_status": "direct",
+      "smoke_coverage_priority": "covered",
+      "smoke_coverage_reason": "command is directly referenced by an automation smoke test",
+      "smoke_coverage_recommended_action": "keep existing smoke coverage",
+      "smoke_coverage_actionable": false
+    },
+    {
+      "command": "pcg_data_asset_apply_json",
+      "doc_file": "docs/commands/29_PCG.md",
+      "doc_status": "explicit",
+      "deprecated": false,
+      "implemented": true,
+      "smoke_tested": true,
+      "implementation_files": [
+        "Source/UeAgentInterface/Private/Commands/PCG/UeAgentHttpServer_PCG.cpp"
+      ],
+      "smoke_files": [
+        "Source/UeAgentInterfaceTests/Private/Smoke/PCG/UeAgentInterfacePCGSmokeTests.cpp"
+      ],
+      "smoke_coverage_status": "direct",
+      "smoke_coverage_priority": "covered",
+      "smoke_coverage_reason": "command is directly referenced by an automation smoke test",
+      "smoke_coverage_recommended_action": "keep existing smoke coverage",
+      "smoke_coverage_actionable": false
+    },
+    {
+      "command": "pcg_data_asset_export_json",
+      "doc_file": "docs/commands/29_PCG.md",
+      "doc_status": "explicit",
+      "deprecated": false,
+      "implemented": true,
+      "smoke_tested": true,
+      "implementation_files": [
+        "Source/UeAgentInterface/Private/Commands/PCG/UeAgentHttpServer_PCG.cpp"
+      ],
+      "smoke_files": [
+        "Source/UeAgentInterfaceTests/Private/Smoke/PCG/UeAgentInterfacePCGSmokeTests.cpp"
+      ],
+      "smoke_coverage_status": "direct",
+      "smoke_coverage_priority": "covered",
+      "smoke_coverage_reason": "command is directly referenced by an automation smoke test",
+      "smoke_coverage_recommended_action": "keep existing smoke coverage",
+      "smoke_coverage_actionable": false
+    },
+    {
+      "command": "pcg_data_export_json",
+      "doc_file": "docs/commands/29_PCG.md",
+      "doc_status": "explicit",
+      "deprecated": false,
+      "implemented": true,
+      "smoke_tested": true,
+      "implementation_files": [
+        "Source/UeAgentInterface/Private/Commands/PCG/UeAgentHttpServer_PCG.cpp"
+      ],
+      "smoke_files": [
+        "Source/UeAgentInterfaceTests/Private/Smoke/PCG/UeAgentInterfacePCGSmokeTests.cpp"
+      ],
+      "smoke_coverage_status": "direct",
+      "smoke_coverage_priority": "covered",
+      "smoke_coverage_reason": "command is directly referenced by an automation smoke test",
+      "smoke_coverage_recommended_action": "keep existing smoke coverage",
+      "smoke_coverage_actionable": false
+    },
+    {
+      "command": "pcg_generate",
+      "doc_file": "docs/commands/29_PCG.md",
+      "doc_status": "explicit",
+      "deprecated": false,
+      "implemented": true,
+      "smoke_tested": true,
+      "implementation_files": [
+        "Source/UeAgentInterface/Private/Commands/PCG/UeAgentHttpServer_PCG.cpp"
+      ],
+      "smoke_files": [
+        "Source/UeAgentInterfaceTests/Private/Smoke/PCG/UeAgentInterfacePCGSmokeTests.cpp"
+      ],
+      "smoke_coverage_status": "direct",
+      "smoke_coverage_priority": "covered",
+      "smoke_coverage_reason": "command is directly referenced by an automation smoke test",
+      "smoke_coverage_recommended_action": "keep existing smoke coverage",
+      "smoke_coverage_actionable": false
+    },
+    {
+      "command": "pcg_generation_status",
+      "doc_file": "docs/commands/29_PCG.md",
+      "doc_status": "explicit",
+      "deprecated": false,
+      "implemented": true,
+      "smoke_tested": true,
+      "implementation_files": [
+        "Source/UeAgentInterface/Private/Commands/PCG/UeAgentHttpServer_PCG.cpp"
+      ],
+      "smoke_files": [
+        "Source/UeAgentInterfaceTests/Private/Smoke/PCG/UeAgentInterfacePCGSmokeTests.cpp"
+      ],
+      "smoke_coverage_status": "direct",
+      "smoke_coverage_priority": "covered",
+      "smoke_coverage_reason": "command is directly referenced by an automation smoke test",
+      "smoke_coverage_recommended_action": "keep existing smoke coverage",
+      "smoke_coverage_actionable": false
+    },
+    {
+      "command": "pcg_gpu_capabilities_query",
+      "doc_file": "docs/commands/29_PCG.md",
+      "doc_status": "explicit",
+      "deprecated": false,
+      "implemented": true,
+      "smoke_tested": true,
+      "implementation_files": [
+        "Source/UeAgentInterface/Private/Commands/PCG/UeAgentHttpServer_PCG.cpp"
+      ],
+      "smoke_files": [
+        "Source/UeAgentInterfaceTests/Private/Smoke/PCG/UeAgentInterfacePCGSmokeTests.cpp"
+      ],
+      "smoke_coverage_status": "direct",
+      "smoke_coverage_priority": "covered",
+      "smoke_coverage_reason": "command is directly referenced by an automation smoke test",
+      "smoke_coverage_recommended_action": "keep existing smoke coverage",
+      "smoke_coverage_actionable": false
+    },
+    {
+      "command": "pcg_graph_apply_folder",
+      "doc_file": "docs/commands/29_PCG.md",
+      "doc_status": "explicit",
+      "deprecated": false,
+      "implemented": true,
+      "smoke_tested": true,
+      "implementation_files": [
+        "Source/UeAgentInterface/Private/Commands/PCG/UeAgentHttpServer_PCG.cpp"
+      ],
+      "smoke_files": [
+        "Source/UeAgentInterfaceTests/Private/Smoke/PCG/UeAgentInterfacePCGSmokeTests.cpp"
+      ],
+      "smoke_coverage_status": "direct",
+      "smoke_coverage_priority": "covered",
+      "smoke_coverage_reason": "command is directly referenced by an automation smoke test",
+      "smoke_coverage_recommended_action": "keep existing smoke coverage",
+      "smoke_coverage_actionable": false
+    },
+    {
+      "command": "pcg_graph_compile",
+      "doc_file": "docs/commands/29_PCG.md",
+      "doc_status": "explicit",
+      "deprecated": false,
+      "implemented": true,
+      "smoke_tested": true,
+      "implementation_files": [
+        "Source/UeAgentInterface/Private/Commands/PCG/UeAgentHttpServer_PCG.cpp"
+      ],
+      "smoke_files": [
+        "Source/UeAgentInterfaceTests/Private/Smoke/PCG/UeAgentInterfacePCGSmokeTests.cpp"
+      ],
+      "smoke_coverage_status": "direct",
+      "smoke_coverage_priority": "covered",
+      "smoke_coverage_reason": "command is directly referenced by an automation smoke test",
+      "smoke_coverage_recommended_action": "keep existing smoke coverage",
+      "smoke_coverage_actionable": false
+    },
+    {
+      "command": "pcg_graph_diff_folder",
+      "doc_file": "docs/commands/29_PCG.md",
+      "doc_status": "explicit",
+      "deprecated": false,
+      "implemented": true,
+      "smoke_tested": true,
+      "implementation_files": [
+        "Source/UeAgentInterface/Private/Commands/PCG/UeAgentHttpServer_PCG.cpp"
+      ],
+      "smoke_files": [
+        "Source/UeAgentInterfaceTests/Private/Smoke/PCG/UeAgentInterfacePCGSmokeTests.cpp"
+      ],
+      "smoke_coverage_status": "direct",
+      "smoke_coverage_priority": "covered",
+      "smoke_coverage_reason": "command is directly referenced by an automation smoke test",
+      "smoke_coverage_recommended_action": "keep existing smoke coverage",
+      "smoke_coverage_actionable": false
+    },
+    {
+      "command": "pcg_graph_export_folder",
+      "doc_file": "docs/commands/29_PCG.md",
+      "doc_status": "explicit",
+      "deprecated": false,
+      "implemented": true,
+      "smoke_tested": true,
+      "implementation_files": [
+        "Source/UeAgentInterface/Private/Commands/PCG/UeAgentHttpServer_PCG.cpp"
+      ],
+      "smoke_files": [
+        "Source/UeAgentInterfaceTests/Private/Smoke/PCG/UeAgentInterfacePCGSmokeTests.cpp"
+      ],
+      "smoke_coverage_status": "direct",
+      "smoke_coverage_priority": "covered",
+      "smoke_coverage_reason": "command is directly referenced by an automation smoke test",
+      "smoke_coverage_recommended_action": "keep existing smoke coverage",
+      "smoke_coverage_actionable": false
+    },
+    {
+      "command": "pcg_graph_instance_json",
+      "doc_file": "docs/commands/29_PCG.md",
+      "doc_status": "explicit",
+      "deprecated": false,
+      "implemented": true,
+      "smoke_tested": true,
+      "implementation_files": [
+        "Source/UeAgentInterface/Private/Commands/PCG/UeAgentHttpServer_PCG.cpp"
+      ],
+      "smoke_files": [
+        "Source/UeAgentInterfaceTests/Private/Smoke/PCG/UeAgentInterfacePCGSmokeTests.cpp"
+      ],
+      "smoke_coverage_status": "direct",
+      "smoke_coverage_priority": "covered",
+      "smoke_coverage_reason": "command is directly referenced by an automation smoke test",
+      "smoke_coverage_recommended_action": "keep existing smoke coverage",
+      "smoke_coverage_actionable": false
+    },
+    {
+      "command": "pcg_graph_parameters_apply_json",
+      "doc_file": "docs/commands/29_PCG.md",
+      "doc_status": "explicit",
+      "deprecated": false,
+      "implemented": true,
+      "smoke_tested": true,
+      "implementation_files": [
+        "Source/UeAgentInterface/Private/Commands/PCG/UeAgentHttpServer_PCG.cpp"
+      ],
+      "smoke_files": [
+        "Source/UeAgentInterfaceTests/Private/Smoke/PCG/UeAgentInterfacePCGSmokeTests.cpp"
+      ],
+      "smoke_coverage_status": "direct",
+      "smoke_coverage_priority": "covered",
+      "smoke_coverage_reason": "command is directly referenced by an automation smoke test",
+      "smoke_coverage_recommended_action": "keep existing smoke coverage",
+      "smoke_coverage_actionable": false
+    },
+    {
+      "command": "pcg_graph_parameters_query",
+      "doc_file": "docs/commands/29_PCG.md",
+      "doc_status": "explicit",
+      "deprecated": false,
+      "implemented": true,
+      "smoke_tested": true,
+      "implementation_files": [
+        "Source/UeAgentInterface/Private/Commands/PCG/UeAgentHttpServer_PCG.cpp"
+      ],
+      "smoke_files": [
+        "Source/UeAgentInterfaceTests/Private/Smoke/PCG/UeAgentInterfacePCGSmokeTests.cpp"
+      ],
+      "smoke_coverage_status": "direct",
+      "smoke_coverage_priority": "covered",
+      "smoke_coverage_reason": "command is directly referenced by an automation smoke test",
+      "smoke_coverage_recommended_action": "keep existing smoke coverage",
+      "smoke_coverage_actionable": false
+    },
+    {
+      "command": "pcg_graph_plan_folder",
+      "doc_file": "docs/commands/29_PCG.md",
+      "doc_status": "explicit",
+      "deprecated": false,
+      "implemented": true,
+      "smoke_tested": true,
+      "implementation_files": [
+        "Source/UeAgentInterface/Private/Commands/PCG/UeAgentHttpServer_PCG.cpp"
+      ],
+      "smoke_files": [
+        "Source/UeAgentInterfaceTests/Private/Smoke/PCG/UeAgentInterfacePCGSmokeTests.cpp"
+      ],
+      "smoke_coverage_status": "direct",
+      "smoke_coverage_priority": "covered",
+      "smoke_coverage_reason": "command is directly referenced by an automation smoke test",
+      "smoke_coverage_recommended_action": "keep existing smoke coverage",
+      "smoke_coverage_actionable": false
+    },
+    {
+      "command": "pcg_graph_snapshot",
+      "doc_file": "docs/commands/29_PCG.md",
+      "doc_status": "explicit",
+      "deprecated": false,
+      "implemented": true,
+      "smoke_tested": true,
+      "implementation_files": [
+        "Source/UeAgentInterface/Private/Commands/PCG/UeAgentHttpServer_PCG.cpp"
+      ],
+      "smoke_files": [
+        "Source/UeAgentInterfaceTests/Private/Smoke/PCG/UeAgentInterfacePCGSmokeTests.cpp"
+      ],
+      "smoke_coverage_status": "direct",
+      "smoke_coverage_priority": "covered",
+      "smoke_coverage_reason": "command is directly referenced by an automation smoke test",
+      "smoke_coverage_recommended_action": "keep existing smoke coverage",
+      "smoke_coverage_actionable": false
+    },
+    {
+      "command": "pcg_graph_validate_folder",
+      "doc_file": "docs/commands/29_PCG.md",
+      "doc_status": "explicit",
+      "deprecated": false,
+      "implemented": true,
+      "smoke_tested": true,
+      "implementation_files": [
+        "Source/UeAgentInterface/Private/Commands/PCG/UeAgentHttpServer_PCG.cpp"
+      ],
+      "smoke_files": [
+        "Source/UeAgentInterfaceTests/Private/Smoke/PCG/UeAgentInterfacePCGSmokeTests.cpp"
+      ],
+      "smoke_coverage_status": "direct",
+      "smoke_coverage_priority": "covered",
+      "smoke_coverage_reason": "command is directly referenced by an automation smoke test",
+      "smoke_coverage_recommended_action": "keep existing smoke coverage",
+      "smoke_coverage_actionable": false
+    },
+    {
+      "command": "pcg_hlsl_validate",
+      "doc_file": "docs/commands/29_PCG.md",
+      "doc_status": "explicit",
+      "deprecated": false,
+      "implemented": true,
+      "smoke_tested": true,
+      "implementation_files": [
+        "Source/UeAgentInterface/Private/Commands/PCG/UeAgentHttpServer_PCG.cpp"
+      ],
+      "smoke_files": [
+        "Source/UeAgentInterfaceTests/Private/Smoke/PCG/UeAgentInterfacePCGSmokeTests.cpp"
+      ],
+      "smoke_coverage_status": "direct",
+      "smoke_coverage_priority": "covered",
+      "smoke_coverage_reason": "command is directly referenced by an automation smoke test",
+      "smoke_coverage_recommended_action": "keep existing smoke coverage",
+      "smoke_coverage_actionable": false
+    },
+    {
+      "command": "pcg_inspection_set",
+      "doc_file": "docs/commands/29_PCG.md",
+      "doc_status": "explicit",
+      "deprecated": false,
+      "implemented": true,
+      "smoke_tested": true,
+      "implementation_files": [
+        "Source/UeAgentInterface/Private/Commands/PCG/UeAgentHttpServer_PCG.cpp"
+      ],
+      "smoke_files": [
+        "Source/UeAgentInterfaceTests/Private/Smoke/PCG/UeAgentInterfacePCGSmokeTests.cpp"
+      ],
+      "smoke_coverage_status": "direct",
+      "smoke_coverage_priority": "covered",
+      "smoke_coverage_reason": "command is directly referenced by an automation smoke test",
+      "smoke_coverage_recommended_action": "keep existing smoke coverage",
+      "smoke_coverage_actionable": false
+    },
+    {
+      "command": "pcg_level_to_asset_export",
+      "doc_file": "docs/commands/29_PCG.md",
+      "doc_status": "explicit",
+      "deprecated": false,
+      "implemented": true,
+      "smoke_tested": true,
+      "implementation_files": [
+        "Source/UeAgentInterface/Private/Commands/PCG/UeAgentHttpServer_PCG.cpp"
+      ],
+      "smoke_files": [
+        "Source/UeAgentInterfaceTests/Private/Smoke/UeAgentInterfaceSmoke_Coverage.cpp"
+      ],
+      "smoke_coverage_status": "direct",
+      "smoke_coverage_priority": "covered",
+      "smoke_coverage_reason": "command is directly referenced by an automation smoke test",
+      "smoke_coverage_recommended_action": "keep existing smoke coverage",
+      "smoke_coverage_actionable": false
+    },
+    {
+      "command": "pcg_node_catalog_export",
+      "doc_file": "docs/commands/29_PCG.md",
+      "doc_status": "explicit",
+      "deprecated": false,
+      "implemented": true,
+      "smoke_tested": true,
+      "implementation_files": [
+        "Source/UeAgentInterface/Private/Commands/PCG/UeAgentHttpServer_PCG.cpp"
+      ],
+      "smoke_files": [
+        "Source/UeAgentInterfaceTests/Private/Smoke/PCG/UeAgentInterfacePCGSmokeTests.cpp"
+      ],
+      "smoke_coverage_status": "direct",
+      "smoke_coverage_priority": "covered",
+      "smoke_coverage_reason": "command is directly referenced by an automation smoke test",
+      "smoke_coverage_recommended_action": "keep existing smoke coverage",
+      "smoke_coverage_actionable": false
+    },
+    {
+      "command": "pcg_node_inspect",
+      "doc_file": "docs/commands/29_PCG.md",
+      "doc_status": "explicit",
+      "deprecated": false,
+      "implemented": true,
+      "smoke_tested": true,
+      "implementation_files": [
+        "Source/UeAgentInterface/Private/Commands/PCG/UeAgentHttpServer_PCG.cpp"
+      ],
+      "smoke_files": [
+        "Source/UeAgentInterfaceTests/Private/Smoke/PCG/UeAgentInterfacePCGSmokeTests.cpp"
+      ],
+      "smoke_coverage_status": "direct",
+      "smoke_coverage_priority": "covered",
+      "smoke_coverage_reason": "command is directly referenced by an automation smoke test",
+      "smoke_coverage_recommended_action": "keep existing smoke coverage",
+      "smoke_coverage_actionable": false
+    },
+    {
+      "command": "pcg_partition_probe",
+      "doc_file": "docs/commands/29_PCG.md",
+      "doc_status": "explicit",
+      "deprecated": false,
+      "implemented": true,
+      "smoke_tested": true,
+      "implementation_files": [
+        "Source/UeAgentInterface/Private/Commands/PCG/UeAgentHttpServer_PCG.cpp"
+      ],
+      "smoke_files": [
+        "Source/UeAgentInterfaceTests/Private/Smoke/PCG/UeAgentInterfacePCGSmokeTests.cpp"
+      ],
+      "smoke_coverage_status": "direct",
+      "smoke_coverage_priority": "covered",
+      "smoke_coverage_reason": "command is directly referenced by an automation smoke test",
+      "smoke_coverage_recommended_action": "keep existing smoke coverage",
+      "smoke_coverage_actionable": false
+    },
+    {
+      "command": "pcg_profile_report",
+      "doc_file": "docs/commands/29_PCG.md",
+      "doc_status": "explicit",
+      "deprecated": false,
+      "implemented": true,
+      "smoke_tested": true,
+      "implementation_files": [
+        "Source/UeAgentInterface/Private/Commands/PCG/UeAgentHttpServer_PCG.cpp"
+      ],
+      "smoke_files": [
+        "Source/UeAgentInterfaceTests/Private/Smoke/PCG/UeAgentInterfacePCGSmokeTests.cpp"
+      ],
+      "smoke_coverage_status": "direct",
+      "smoke_coverage_priority": "covered",
+      "smoke_coverage_reason": "command is directly referenced by an automation smoke test",
+      "smoke_coverage_recommended_action": "keep existing smoke coverage",
+      "smoke_coverage_actionable": false
+    },
+    {
+      "command": "pcg_regenerate",
+      "doc_file": "docs/commands/29_PCG.md",
+      "doc_status": "explicit",
+      "deprecated": false,
+      "implemented": true,
+      "smoke_tested": true,
+      "implementation_files": [
+        "Source/UeAgentInterface/Private/Commands/PCG/UeAgentHttpServer_PCG.cpp"
+      ],
+      "smoke_files": [
+        "Source/UeAgentInterfaceTests/Private/Smoke/PCG/UeAgentInterfacePCGSmokeTests.cpp"
+      ],
+      "smoke_coverage_status": "direct",
+      "smoke_coverage_priority": "covered",
+      "smoke_coverage_reason": "command is directly referenced by an automation smoke test",
+      "smoke_coverage_recommended_action": "keep existing smoke coverage",
+      "smoke_coverage_actionable": false
+    },
+    {
+      "command": "pcg_runtime_generation_probe",
+      "doc_file": "docs/commands/29_PCG.md",
+      "doc_status": "explicit",
+      "deprecated": false,
+      "implemented": true,
+      "smoke_tested": true,
+      "implementation_files": [
+        "Source/UeAgentInterface/Private/Commands/PCG/UeAgentHttpServer_PCG.cpp"
+      ],
+      "smoke_files": [
+        "Source/UeAgentInterfaceTests/Private/Smoke/PCG/UeAgentInterfacePCGSmokeTests.cpp"
+      ],
+      "smoke_coverage_status": "direct",
+      "smoke_coverage_priority": "covered",
+      "smoke_coverage_reason": "command is directly referenced by an automation smoke test",
+      "smoke_coverage_recommended_action": "keep existing smoke coverage",
+      "smoke_coverage_actionable": false
+    },
+    {
+      "command": "pcg_screenshot",
+      "doc_file": "docs/commands/29_PCG.md",
+      "doc_status": "explicit",
+      "deprecated": false,
+      "implemented": true,
+      "smoke_tested": true,
+      "implementation_files": [
+        "Source/UeAgentInterface/Private/Commands/PCG/UeAgentHttpServer_PCG.cpp"
+      ],
+      "smoke_files": [
+        "Source/UeAgentInterfaceTests/Private/Smoke/UeAgentInterfaceSmoke_Coverage.cpp"
+      ],
+      "smoke_coverage_status": "direct",
+      "smoke_coverage_priority": "covered",
+      "smoke_coverage_reason": "command is directly referenced by an automation smoke test",
+      "smoke_coverage_recommended_action": "keep existing smoke coverage",
+      "smoke_coverage_actionable": false
+    },
+    {
+      "command": "pcg_wait",
+      "doc_file": "docs/commands/29_PCG.md",
+      "doc_status": "explicit",
+      "deprecated": false,
+      "implemented": true,
+      "smoke_tested": true,
+      "implementation_files": [
+        "Source/UeAgentInterface/Private/Commands/PCG/UeAgentHttpServer_PCG.cpp"
+      ],
+      "smoke_files": [
+        "Source/UeAgentInterfaceTests/Private/Smoke/PCG/UeAgentInterfacePCGSmokeTests.cpp"
+      ],
+      "smoke_coverage_status": "direct",
+      "smoke_coverage_priority": "covered",
+      "smoke_coverage_reason": "command is directly referenced by an automation smoke test",
+      "smoke_coverage_recommended_action": "keep existing smoke coverage",
+      "smoke_coverage_actionable": false
+    },
+    {
+      "command": "pcg_world_actor_apply_json",
+      "doc_file": "docs/commands/29_PCG.md",
+      "doc_status": "explicit",
+      "deprecated": false,
+      "implemented": true,
+      "smoke_tested": true,
+      "implementation_files": [
+        "Source/UeAgentInterface/Private/Commands/PCG/UeAgentHttpServer_PCG.cpp"
+      ],
+      "smoke_files": [
+        "Source/UeAgentInterfaceTests/Private/Smoke/PCG/UeAgentInterfacePCGSmokeTests.cpp"
+      ],
+      "smoke_coverage_status": "direct",
+      "smoke_coverage_priority": "covered",
+      "smoke_coverage_reason": "command is directly referenced by an automation smoke test",
+      "smoke_coverage_recommended_action": "keep existing smoke coverage",
+      "smoke_coverage_actionable": false
+    },
+    {
+      "command": "pcg_world_actor_query",
+      "doc_file": "docs/commands/29_PCG.md",
+      "doc_status": "explicit",
+      "deprecated": false,
+      "implemented": true,
+      "smoke_tested": true,
+      "implementation_files": [
+        "Source/UeAgentInterface/Private/Commands/PCG/UeAgentHttpServer_PCG.cpp"
+      ],
+      "smoke_files": [
+        "Source/UeAgentInterfaceTests/Private/Smoke/PCG/UeAgentInterfacePCGSmokeTests.cpp"
+      ],
+      "smoke_coverage_status": "direct",
+      "smoke_coverage_priority": "covered",
+      "smoke_coverage_reason": "command is directly referenced by an automation smoke test",
+      "smoke_coverage_recommended_action": "keep existing smoke coverage",
+      "smoke_coverage_actionable": false
+    },
+    {
       "command": "physical_material_apply_json",
       "doc_file": "docs/commands/26_Physics_Baseline.md",
       "doc_status": "explicit",
@@ -12993,6 +13734,25 @@
       ],
       "smoke_files": [
         "Source/UeAgentInterfaceTests/Private/Smoke/UeAgentInterfaceSmoke_Sequence.cpp"
+      ],
+      "smoke_coverage_status": "direct",
+      "smoke_coverage_priority": "covered",
+      "smoke_coverage_reason": "command is directly referenced by an automation smoke test",
+      "smoke_coverage_recommended_action": "keep existing smoke coverage",
+      "smoke_coverage_actionable": false
+    },
+    {
+      "command": "sequence_screenshot",
+      "doc_file": "docs/commands/06_Sequence.md",
+      "doc_status": "explicit",
+      "deprecated": false,
+      "implemented": true,
+      "smoke_tested": true,
+      "implementation_files": [
+        "Source/UeAgentInterface/Private/Commands/Sequence/UeAgentHttpServer_Sequence_DispatchAndLevelSequence.inl"
+      ],
+      "smoke_files": [
+        "Source/UeAgentInterfaceTests/Private/Smoke/UeAgentInterfaceSmoke_Coverage.cpp"
       ],
       "smoke_coverage_status": "direct",
       "smoke_coverage_priority": "covered",
