@@ -2607,6 +2607,14 @@ namespace UeAgentLevelContentJson
 		FString MeshPath;
 		if (!TryGetStringAny(Resource, { TEXT("static_mesh"), TEXT("mesh") }, MeshPath) || MeshPath.TrimStartAndEnd().IsEmpty())
 		{
+			TSharedPtr<FJsonObject> Asset;
+			if (TryGetObject(Resource, TEXT("asset"), Asset))
+			{
+				TryGetStringAny(Asset, { TEXT("static_mesh"), TEXT("mesh") }, MeshPath);
+			}
+		}
+		if (MeshPath.TrimStartAndEnd().IsEmpty())
+		{
 			TSharedPtr<FJsonObject> Properties;
 			if (TryGetObject(Resource, TEXT("properties"), Properties))
 			{

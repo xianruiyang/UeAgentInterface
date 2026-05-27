@@ -1224,10 +1224,28 @@ bool FUeAgentHttpServer::ResizePixelsMaxSize(const TArray<FColor>& InPixels, con
 	return true;
 }
 
-bool FUeAgentHttpServer::WriteCompressedImage(const TArray<FColor>& Pixels, const FIntPoint& Size, const FString& Format, int32 Quality, const FString& OutFilePath, FString& OutError)
+bool FUeAgentHttpServer::WriteCompressedImage(const TArray<FColor>& Pixels, const FIntPoint& Size, const FString& Format, int32 Quality, const FString& OutFilePath, FString& OutError, bool bForceOpaqueAlpha)
 {
+	if (Size.X <= 0 || Size.Y <= 0 || Pixels.Num() != Size.X * Size.Y)
+	{
+		OutError = TEXT("invalid_pixels");
+		return false;
+	}
+
+	const TArray<FColor>* PixelsToWrite = &Pixels;
+	TArray<FColor> OpaquePixels;
+	if (bForceOpaqueAlpha)
+	{
+		OpaquePixels = Pixels;
+		for (FColor& Pixel : OpaquePixels)
+		{
+			Pixel.A = 255;
+		}
+		PixelsToWrite = &OpaquePixels;
+	}
+
 	TArray64<uint8> Compressed;
-	const FImageView Img((void*)Pixels.GetData(), Size.X, Size.Y, ERawImageFormat::BGRA8);
+	const FImageView Img((void*)PixelsToWrite->GetData(), Size.X, Size.Y, ERawImageFormat::BGRA8);
 	if (!FImageUtils::CompressImage(Compressed, *Format, Img, Quality))
 	{
 		OutError = TEXT("compress_failed");

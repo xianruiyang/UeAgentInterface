@@ -1,18 +1,18 @@
 {
   "schema": "ue_agent_interface.coverage_matrix.v2",
-  "generated_at": "20260524_213234_181512",
+  "generated_at": "20260527_172544_825068",
   "project_root": "D:\\program\\UE\\GptProjectTest",
-  "command_count": 916,
+  "command_count": 917,
   "missing_doc": [],
   "missing_implementation": [],
   "missing_smoke": [],
   "smoke_debt": [],
   "smoke_coverage": {
     "status_counts": {
-      "direct": 916
+      "direct": 917
     },
     "priority_counts": {
-      "covered": 916
+      "covered": 917
     },
     "actionable_missing": [],
     "p0_commands": [],
@@ -10801,6 +10801,7 @@
         "Source/UeAgentInterface/Private/Server/UeAgentHttpServer.cpp"
       ],
       "smoke_files": [
+        "Source/UeAgentInterfaceTests/Private/Smoke/PCG/UeAgentInterfacePCGSmokeTests.cpp",
         "Source/UeAgentInterfaceTests/Private/Smoke/UeAgentInterfaceSmoke_BlueprintUmg.cpp"
       ],
       "smoke_coverage_status": "direct",
@@ -11647,6 +11648,25 @@
     },
     {
       "command": "pcg_graph_instance_json",
+      "doc_file": "docs/commands/29_PCG.md",
+      "doc_status": "explicit",
+      "deprecated": false,
+      "implemented": true,
+      "smoke_tested": true,
+      "implementation_files": [
+        "Source/UeAgentInterface/Private/Commands/PCG/UeAgentHttpServer_PCG.cpp"
+      ],
+      "smoke_files": [
+        "Source/UeAgentInterfaceTests/Private/Smoke/PCG/UeAgentInterfacePCGSmokeTests.cpp"
+      ],
+      "smoke_coverage_status": "direct",
+      "smoke_coverage_priority": "covered",
+      "smoke_coverage_reason": "command is directly referenced by an automation smoke test",
+      "smoke_coverage_recommended_action": "keep existing smoke coverage",
+      "smoke_coverage_actionable": false
+    },
+    {
+      "command": "pcg_graph_layout",
       "doc_file": "docs/commands/29_PCG.md",
       "doc_status": "explicit",
       "deprecated": false,

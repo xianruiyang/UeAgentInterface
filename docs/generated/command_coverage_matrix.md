@@ -1,7 +1,7 @@
 # UAI Command Coverage Matrix
 
-- generated_at: `20260524_213234_181512`
-- command_count: `916`
+- generated_at: `20260527_172544_825068`
+- command_count: `917`
 - missing_doc: `0`
 - missing_implementation: `0`
 - missing_smoke: `0`
@@ -17,7 +17,7 @@
 
 | Status | Count |
 | --- | --- |
-| `direct` | 916 |
+| `direct` | 917 |
 
 ## Commands
 
@@ -635,6 +635,7 @@
 | `pcg_graph_diff_folder` | `docs/commands/29_PCG.md` | True | True | `direct` | `covered` |
 | `pcg_graph_export_folder` | `docs/commands/29_PCG.md` | True | True | `direct` | `covered` |
 | `pcg_graph_instance_json` | `docs/commands/29_PCG.md` | True | True | `direct` | `covered` |
+| `pcg_graph_layout` | `docs/commands/29_PCG.md` | True | True | `direct` | `covered` |
 | `pcg_graph_parameters_apply_json` | `docs/commands/29_PCG.md` | True | True | `direct` | `covered` |
 | `pcg_graph_parameters_query` | `docs/commands/29_PCG.md` | True | True | `direct` | `covered` |
 | `pcg_graph_plan_folder` | `docs/commands/29_PCG.md` | True | True | `direct` | `covered` |

@@ -2,6 +2,8 @@
 
 #include "../UeAgentSmokeTestSharedIncludes.inl"
 
+#include "Smoke/PCG/UeAgentInterfacePCGSmokeBlueprintElement.h"
+
 #include "Components/BoxComponent.h"
 #include "GameFramework/Actor.h"
 #include "Misc/PackageName.h"
@@ -118,6 +120,35 @@ namespace
 		return false;
 	}
 
+	static bool PCGSmokeNodeSettingPropertyContains(const TSharedPtr<FJsonObject>& Node, const FString& PropertyName, const FString& ExpectedValueText)
+	{
+		const TArray<TSharedPtr<FJsonValue>>* Properties = nullptr;
+		if (!Node.IsValid() || !Node->TryGetArrayField(TEXT("settings_properties"), Properties))
+		{
+			return false;
+		}
+
+		for (const TSharedPtr<FJsonValue>& PropertyValue : *Properties)
+		{
+			const TSharedPtr<FJsonObject>* PropertyObject = nullptr;
+			FString Name;
+			FString ValueText;
+			if (PropertyValue.IsValid() &&
+				PropertyValue->TryGetObject(PropertyObject) &&
+				PropertyObject &&
+				PropertyObject->IsValid() &&
+				(*PropertyObject)->TryGetStringField(TEXT("name"), Name) &&
+				Name == PropertyName &&
+				(*PropertyObject)->TryGetStringField(TEXT("value_text"), ValueText) &&
+				ValueText.Contains(ExpectedValueText))
+			{
+				return true;
+			}
+		}
+
+		return false;
+	}
+
 	static AActor* SpawnPCGSmokeActor(UWorld* World, const FString& Label)
 	{
 		if (!World)
@@ -181,13 +212,15 @@ bool FUeAgentInterfacePCGSmokeTest::RunTest(const FString& Parameters)
 		TEXT("\"output_pins\":[{\"label\":\"SmokeDensity\",\"allowed_types\":\"Param\"}]},")
 		TEXT("{\"id\":\"smoke_grid\",\"settings_class\":\"/Script/PCG.PCGCreatePointsGridSettings\",\"authored_title\":\"SmokeGrid\",\"pos_x\":100,\"pos_y\":0,")
 		TEXT("\"settings_properties\":[{\"name\":\"GridExtents\",\"value_text\":\"(X=100.000000,Y=100.000000,Z=50.000000)\"},{\"name\":\"CellSize\",\"value_text\":\"(X=100.000000,Y=100.000000,Z=100.000000)\"}]},")
+		TEXT("{\"id\":\"smoke_blueprint\",\"settings_class\":\"/Script/PCG.PCGBlueprintSettings\",\"authored_title\":\"SmokeBlueprint\",\"pos_x\":100,\"pos_y\":180,")
+		TEXT("\"settings_properties\":[{\"name\":\"BlueprintElementType\",\"value_text\":\"/Script/CoreUObject.Class'/Script/UeAgentInterfaceTests.UeAgentInterfacePCGSmokeBlueprintElement'\"}]},")
 		TEXT("{\"id\":\"smoke_add_tag\",\"settings_class\":\"/Script/PCG.PCGAddTagSettings\",\"authored_title\":\"SmokeAddTag\",\"pos_x\":400,\"pos_y\":0},")
 		TEXT("{\"id\":\"smoke_spawner\",\"settings_class\":\"/Script/PCG.PCGStaticMeshSpawnerSettings\",\"authored_title\":\"SmokeSpawner\",\"pos_x\":700,\"pos_y\":0,")
 		TEXT("\"settings_properties\":[{\"name\":\"MeshSelectorType\",\"value_text\":\"/Script/CoreUObject.Class'/Script/PCG.PCGMeshSelectorByAttribute'\"},")
 		TEXT("{\"name\":\"MeshSelectorParameters.AttributeName\",\"value_text\":\"SmokeMesh\"},")
 		TEXT("{\"name\":\"MeshSelectorParameters.bUseAttributeMaterialOverrides\",\"value_text\":\"False\"}]},")
 		TEXT("{\"id\":\"__output__\",\"role\":\"output\",\"settings_properties\":[{\"name\":\"Pins\",\"value_text\":\"((Label=\\\"SmokeOut\\\",AllowedTypes=Point))\"}]}],")
-		TEXT("\"edges\":[{\"from\":\"smoke_grid\",\"from_pin\":\"Out\",\"to\":\"smoke_add_tag\",\"to_pin\":\"In\"},{\"from\":\"smoke_add_tag\",\"from_pin\":\"Out\",\"to\":\"__output__\",\"to_pin\":\"SmokeOut\"}],\"node_count\":6,\"edge_count\":2}");
+		TEXT("\"edges\":[{\"from\":\"smoke_grid\",\"from_pin\":\"Out\",\"to\":\"smoke_add_tag\",\"to_pin\":\"In\"},{\"from\":\"smoke_add_tag\",\"from_pin\":\"Out\",\"to\":\"__output__\",\"to_pin\":\"SmokeOut\"}],\"node_count\":7,\"edge_count\":2}");
 	if (!WritePCGSmokeJsonFile(this, AssetJsonPath, AssetJson) ||
 		!WritePCGSmokeJsonFile(this, GraphJsonPath, GraphJson))
 	{
@@ -225,6 +258,7 @@ bool FUeAgentInterfacePCGSmokeTest::RunTest(const FString& Parameters)
 	TestTrue(TEXT("pcg_graph_apply_folder preserves input node pins"), PCGSmokeNodeHasPinLabel(FindPCGSmokeNodeById(Data, TEXT("__input__")), TEXT("input_pins"), TEXT("SplineIn")));
 	TestTrue(TEXT("pcg_graph_apply_folder restores Get Graph Parameter output pins from folder JSON"), PCGSmokeNodeHasPinLabel(FindPCGSmokeNodeById(Data, TEXT("SmokeParamGet")), TEXT("output_pins"), TEXT("SmokeDensity")));
 	TestTrue(TEXT("pcg_graph_apply_folder preserves output node pins"), PCGSmokeNodeHasPinLabel(FindPCGSmokeNodeById(Data, TEXT("__output__")), TEXT("input_pins"), TEXT("SmokeOut")));
+	TestTrue(TEXT("pcg_graph_apply_folder instantiates blueprint element types"), PCGSmokeNodeSettingPropertyContains(FindPCGSmokeNodeById(Data, TEXT("SmokeBlueprint")), TEXT("BlueprintElementInstance"), TEXT("UeAgentInterfacePCGSmokeBlueprintElement")));
 	const FString GraphLayoutParams = FString::Printf(
 		TEXT("{\"asset_path\":\"%s\",\"layout_options\":{\"horizontal_spacing\":360,\"vertical_spacing\":96,\"node_padding\":16,\"insert_reroute_nodes\":false,\"replace_existing_reroute_nodes\":false},\"save\":false}"),
 		*GraphPath);
@@ -241,7 +275,7 @@ bool FUeAgentInterfacePCGSmokeTest::RunTest(const FString& Parameters)
 	TestTrue(TEXT("pcg_asset_info succeeds"), ExecPCGSmokeCommand(this, ServerScope, TEXT("smoke-pcg-asset-info"), TEXT("pcg_asset_info"), FString::Printf(TEXT("{\"asset_path\":\"%s\"}"), *GraphPath), 200, Root, Data));
 	TestTrue(TEXT("pcg_graph_diff_folder succeeds"), ExecPCGSmokeCommand(this, ServerScope, TEXT("smoke-pcg-diff-folder"), TEXT("pcg_graph_diff_folder"), FolderParams, 200, Root, Data));
 	TestTrue(TEXT("pcg_graph_export_folder succeeds"), ExecPCGSmokeCommand(this, ServerScope, TEXT("smoke-pcg-export-folder"), TEXT("pcg_graph_export_folder"), FString::Printf(TEXT("{\"asset_path\":\"%s\",\"folder_path\":\"%s\"}"), *GraphPath, *ExportFolder), 200, Root, Data));
-	TestEqual(TEXT("pcg_graph_export_folder includes input/output nodes"), Data.IsValid() ? Data->GetIntegerField(TEXT("node_count")) : -1, 6);
+	TestEqual(TEXT("pcg_graph_export_folder includes input/output nodes"), Data.IsValid() ? Data->GetIntegerField(TEXT("node_count")) : -1, 7);
 	TestEqual(TEXT("pcg_graph_export_folder preserves edge to output"), Data.IsValid() ? Data->GetIntegerField(TEXT("edge_count")) : -1, 2);
 
 	TestTrue(TEXT("pcg_graph_parameters_query succeeds"), ExecPCGSmokeCommand(this, ServerScope, TEXT("smoke-pcg-params-query"), TEXT("pcg_graph_parameters_query"), FString::Printf(TEXT("{\"asset_path\":\"%s\"}"), *GraphPath), 200, Root, Data));

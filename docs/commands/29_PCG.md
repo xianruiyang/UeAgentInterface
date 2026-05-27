@@ -122,7 +122,7 @@ PCG 图常见 fanout 分支可能让通用 layout core 返回 `layout_design_com
 
 ## PCG 截图语义
 
-`pcg_screenshot` 是 `viewport_frame_actor` + `screenshot_viewport` 的组合入口。取景目标支持 `id`、`actor`、`actor_name`、`actor_label`；传入 `actor*` 字段时会映射为 viewport framing 需要的 `id`，再执行截图。截图结果仍走通用 viewport 截图返回结构，并可通过 `output_file` 持久化。
+`pcg_screenshot` 是 `viewport_frame_actor` + `screenshot_viewport` 的组合入口。取景目标支持 `id`、`actor`、`actor_name`、`actor_label`；传入 `actor*` 字段时会映射为 viewport framing 需要的 `id`，再执行截图。截图结果仍走通用 viewport 截图返回结构，并可通过 `output_file` 持久化。输出图片默认归一为不透明 alpha，避免 PNG 在深色 UI 或报告中被透明合成为黑图。
 
 ## 参数包格式
 

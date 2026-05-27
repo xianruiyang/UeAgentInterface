@@ -134,6 +134,8 @@
 | `viewport_deproject_screen_to_world` | 屏幕坐标反投影到世界射线 | `screen_x`、`screen_y` | 视口拾取和屏幕点诊断 |
 | `viewport_trace_screen_point` | 从屏幕点发起世界 Trace | `screen_x`、`screen_y`、可选 `trace_channel/trace_distance` | 根据截图坐标定位命中 Actor |
 
+`screenshot_viewport`、`screenshot_viewport_buffer` 以及复用该写图路径的命令在输出 `png/jpg/webp` 时默认写出不透明图片；即使底层 viewport readback 返回透明 alpha，最终文件也会把 alpha 归一为 `255`，避免在深色 UI 或报告里被合成为黑图。
+
 ### 组件碰撞属性写入
 
 - Level Content JSON 的 `resources[].properties` / `components[].properties` 写入 `BodyInstance.*`、`Collision*` 或 `CanCharacterStepUpOn` 时，都会刷新 `UPrimitiveComponent` 的物理状态，使后续 Trace / Sweep / Overlap 使用新碰撞配置。

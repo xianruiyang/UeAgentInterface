@@ -32,6 +32,7 @@
 #include "PCGSubsystem.h"
 #include "PCGWorldActor.h"
 #include "Data/PCGBasePointData.h"
+#include "Elements/PCGExecuteBlueprint.h"
 #include "Elements/PCGStaticMeshSpawner.h"
 #include "Elements/PCGUserParameterGet.h"
 #include "Grid/PCGPartitionActor.h"
@@ -506,6 +507,34 @@ namespace UeAgentPCG
 	static bool TryApplyPCGSpecialProperty(UObject* Object, const FString& PropertyName, const FString& ValueText, bool& bOutHandled, FString& OutError)
 	{
 		bOutHandled = false;
+		if (UPCGBlueprintSettings* BlueprintSettings = Cast<UPCGBlueprintSettings>(Object))
+		{
+			if (PropertyName == TEXT("BlueprintElementType"))
+			{
+				bOutHandled = true;
+				UClass* ElementClass = ResolveClassImportText(ValueText);
+				if (!ElementClass && !ValueText.TrimStartAndEnd().IsEmpty() && ValueText.TrimStartAndEnd() != TEXT("None"))
+				{
+					OutError = FString::Printf(TEXT("blueprint_element_class_not_found:%s"), *ValueText);
+					return false;
+				}
+				if (ElementClass && !ElementClass->IsChildOf(UPCGBlueprintElement::StaticClass()))
+				{
+					OutError = FString::Printf(TEXT("blueprint_element_class_invalid:%s"), *ValueText);
+					return false;
+				}
+
+				BlueprintSettings->Modify();
+				UPCGBlueprintElement* ElementInstance = nullptr;
+				BlueprintSettings->SetElementType(ElementClass, ElementInstance);
+				if (ElementClass && !ElementInstance)
+				{
+					OutError = FString::Printf(TEXT("blueprint_element_instance_not_created:%s"), *ValueText);
+					return false;
+				}
+				return true;
+			}
+		}
 		if (UPCGStaticMeshSpawnerSettings* StaticMeshSpawnerSettings = Cast<UPCGStaticMeshSpawnerSettings>(Object))
 		{
 			if (PropertyName == GET_MEMBER_NAME_STRING_CHECKED(UPCGStaticMeshSpawnerSettings, MeshSelectorType))
