@@ -1575,6 +1575,7 @@ namespace UeAgentLevelContentJson
 				OutResult->SetStringField(TEXT("property_assignment_method"), TEXT("collision_profile_setter"));
 				OutResult->SetBoolField(TEXT("collision_profile_setter_applied"), true);
 				RefreshObjectAfterPropertyImport(TargetObject, ResolvedPropertyPath, ImportText, OutResult);
+				Exported.Reset();
 				Property->ExportTextItem_Direct(Exported, ValuePtr, nullptr, TargetObject, PPF_None);
 				OutResult->SetStringField(TEXT("property_value_read_back"), Exported);
 				return true;
@@ -1594,6 +1595,7 @@ namespace UeAgentLevelContentJson
 		OutResult = MakePropertyResult(TargetObject->GetPathName(), PropertyPath, TEXT("imported_and_read_back"), ImportText, Exported, TEXT(""));
 		OutResult->SetStringField(TEXT("resolved_property_path"), ResolvedPropertyPath);
 		RefreshObjectAfterPropertyImport(TargetObject, ResolvedPropertyPath, ImportText, OutResult);
+		Exported.Reset();
 		Property->ExportTextItem_Direct(Exported, ValuePtr, nullptr, TargetObject, PPF_None);
 		OutResult->SetStringField(TEXT("property_value_read_back"), Exported);
 		return true;

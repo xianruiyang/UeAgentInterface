@@ -24,6 +24,7 @@
 #include "EditorViewportClient.h"
 #include "Engine/CollisionProfile.h"
 #include "Engine/DirectionalLight.h"
+#include "Engine/Level.h"
 #include "Engine/OverlapResult.h"
 #include "Engine/PlanarReflection.h"
 #include "Engine/SceneCapture2D.h"

@@ -1224,6 +1224,15 @@ bool FUeAgentInterfaceBlueprintFolderSmokeTest::RunTest(const FString& Parameter
 	IFileManager::Get().MakeDirectory(*FPaths::Combine(FolderPath, TEXT("graphs")), true);
 	IFileManager::Get().MakeDirectory(*FPaths::Combine(FolderPath, TEXT("validation")), true);
 
+	const FString SmokeSkeletalMeshPackage = TEXT("/Game/Characters/PaladinRootMotion/Mesh/Paladin_WProp_J_Nordstrom_RM");
+	const FString SmokeAnimBlueprintPackage = TEXT("/Game/Characters/PaladinRootMotion/ABP_Paladin_Player_RM");
+	const bool bHasProjectSkeletalAssets =
+		FPackageName::DoesPackageExist(SmokeSkeletalMeshPackage)
+		&& FPackageName::DoesPackageExist(SmokeAnimBlueprintPackage);
+	const FString SkeletalComponentTreeEntry = bHasProjectSkeletalAssets
+		? TEXT(",\n    {\n      \"name\": \"SmokeSkeletalMesh\",\n      \"class\": \"/Script/Engine.SkeletalMeshComponent\",\n      \"parent\": \"DefaultSceneRoot\",\n      \"properties\": [\n        { \"property_name\": \"RelativeLocation\", \"value_text\": \"(X=0.000000,Y=0.000000,Z=64.000000)\" },\n        { \"property_name\": \"RelativeRotation\", \"value_text\": \"(Pitch=0.000000,Yaw=-90.000000,Roll=0.000000)\" },\n        { \"property_name\": \"RelativeScale3D\", \"value_text\": \"(X=1.000000,Y=1.000000,Z=1.000000)\" },\n        { \"property_name\": \"SkeletalMeshAsset\", \"value_text\": \"SkeletalMesh'/Game/Characters/PaladinRootMotion/Mesh/Paladin_WProp_J_Nordstrom_RM.Paladin_WProp_J_Nordstrom_RM'\" },\n        { \"property_name\": \"AnimClass\", \"value_text\": \"AnimBlueprintGeneratedClass'/Game/Characters/PaladinRootMotion/ABP_Paladin_Player_RM.ABP_Paladin_Player_RM_C'\" },\n        { \"property_name\": \"AnimationMode\", \"value_text\": \"AnimationBlueprint\" }\n      ]\n    }")
+		: FString();
+
 	auto SaveUtf8Json = [this](const FString& FilePath, const FString& JsonText) -> bool
 	{
 		const bool bOk = FFileHelper::SaveStringToFile(JsonText, *FilePath, FFileHelper::EEncodingOptions::ForceUTF8WithoutBOM);
@@ -1264,14 +1273,17 @@ bool FUeAgentInterfaceBlueprintFolderSmokeTest::RunTest(const FString& Parameter
 
 	if (!SaveUtf8Json(
 		FPaths::Combine(FolderPath, TEXT("components"), TEXT("tree.json")),
-		TEXT("{\n  \"components\": [\n    {\n      \"name\": \"DefaultSceneRoot\",\n      \"class\": \"/Script/Engine.SceneComponent\",\n      \"parent\": \"\",\n      \"properties\": []\n    },\n    {\n      \"name\": \"SmokeMesh\",\n      \"class\": \"/Script/Engine.StaticMeshComponent\",\n      \"parent\": \"DefaultSceneRoot\",\n      \"properties\": [\n        { \"property_name\": \"RelativeLocation\", \"value_text\": \"(X=0.000000,Y=0.000000,Z=0.000000)\" },\n        { \"property_name\": \"RelativeRotation\", \"value_text\": \"(Pitch=0.000000,Yaw=0.000000,Roll=0.000000)\" },\n        { \"property_name\": \"RelativeScale3D\", \"value_text\": \"(X=1.000000,Y=0.250000,Z=2.000000)\" },\n        { \"property_name\": \"StaticMesh\", \"value_text\": \"StaticMesh'/Engine/BasicShapes/Cube.Cube'\" }\n      ]\n    }\n  ]\n}\n")))
+		FString::Printf(
+			TEXT("{\n  \"components\": [\n    {\n      \"name\": \"DefaultSceneRoot\",\n      \"class\": \"/Script/Engine.SceneComponent\",\n      \"parent\": \"\",\n      \"properties\": []\n    },\n    {\n      \"name\": \"SmokeMesh\",\n      \"class\": \"/Script/Engine.StaticMeshComponent\",\n      \"parent\": \"DefaultSceneRoot\",\n      \"properties\": [\n        { \"property_name\": \"RelativeLocation\", \"value_text\": \"(X=0.000000,Y=0.000000,Z=0.000000)\" },\n        { \"property_name\": \"RelativeRotation\", \"value_text\": \"(Pitch=0.000000,Yaw=0.000000,Roll=0.000000)\" },\n        { \"property_name\": \"RelativeScale3D\", \"value_text\": \"(X=1.000000,Y=0.250000,Z=2.000000)\" },\n        { \"property_name\": \"StaticMesh\", \"value_text\": \"StaticMesh'/Engine/BasicShapes/Cube.Cube'\" }\n      ]\n    }%s\n  ]\n}\n"),
+			*SkeletalComponentTreeEntry)))
 	{
 		return false;
 	}
 
+	const FString SafeEventGraphJson = TEXT("{\n  \"graph\": {\n    \"name\": \"EventGraph\",\n    \"graph_kind\": \"event_graph\"\n  },\n  \"nodes\": [\n    {\n      \"id\": \"event_begin_play\",\n      \"node_type\": \"event\",\n      \"event_name\": \"ReceiveBeginPlay\",\n      \"event_class\": \"/Script/Engine.Actor\",\n      \"pos\": { \"x\": 0, \"y\": 0 }\n    },\n    {\n      \"id\": \"call_print_string\",\n      \"node_type\": \"call_function\",\n      \"function_owner_class\": \"/Script/Engine.KismetSystemLibrary\",\n      \"function_name\": \"PrintString\",\n      \"pos\": { \"x\": 260, \"y\": 0 },\n      \"pin_defaults\": [\n        { \"pin_name\": \"InString\", \"default_value\": \"Folder workflow smoke\" }\n      ]\n    },\n    {\n      \"id\": \"custom_smoke_event\",\n      \"node_type\": \"custom_event\",\n      \"event_name\": \"SmokeCustomEvent\",\n      \"pos\": { \"x\": 0, \"y\": 180 }\n    }\n  ],\n  \"edges\": [\n    {\n      \"from\": { \"node\": \"event_begin_play\", \"pin\": \"then\" },\n      \"to\": { \"node\": \"call_print_string\", \"pin\": \"execute\" }\n    }\n  ]\n}\n");
 	if (!SaveUtf8Json(
 		FPaths::Combine(FolderPath, TEXT("graphs"), TEXT("EventGraph.json")),
-		TEXT("{\n  \"graph\": {\n    \"name\": \"EventGraph\",\n    \"graph_kind\": \"event_graph\"\n  },\n  \"nodes\": [\n    {\n      \"id\": \"event_begin_play\",\n      \"node_type\": \"event\",\n      \"event_name\": \"ReceiveBeginPlay\",\n      \"event_class\": \"/Script/Engine.Actor\",\n      \"pos\": { \"x\": 0, \"y\": 0 }\n    },\n    {\n      \"id\": \"call_print_string\",\n      \"node_type\": \"call_function\",\n      \"function_owner_class\": \"/Script/Engine.KismetSystemLibrary\",\n      \"function_name\": \"PrintString\",\n      \"pos\": { \"x\": 260, \"y\": 0 },\n      \"pin_defaults\": [\n        { \"pin_name\": \"InString\", \"default_value\": \"Folder workflow smoke\" }\n      ]\n    },\n    {\n      \"id\": \"custom_smoke_event\",\n      \"node_type\": \"custom_event\",\n      \"event_name\": \"SmokeCustomEvent\",\n      \"pos\": { \"x\": 0, \"y\": 180 }\n    }\n  ],\n  \"edges\": [\n    {\n      \"from\": { \"node\": \"event_begin_play\", \"pin\": \"then\" },\n      \"to\": { \"node\": \"call_print_string\", \"pin\": \"execute\" }\n    }\n  ]\n}\n")))
+		SafeEventGraphJson))
 	{
 		return false;
 	}
@@ -1300,6 +1312,7 @@ bool FUeAgentInterfaceBlueprintFolderSmokeTest::RunTest(const FString& Parameter
 	{
 		TestTrue(TEXT("Blueprint folder apply added variable"), (*ApplyData)->GetIntegerField(TEXT("variables_added")) >= 1);
 		TestTrue(TEXT("Blueprint folder apply added component"), (*ApplyData)->GetIntegerField(TEXT("components_added")) >= 1);
+		TestTrue(TEXT("Blueprint folder apply applied component properties"), (*ApplyData)->GetIntegerField(TEXT("component_properties_applied")) >= (bHasProjectSkeletalAssets ? 10 : 4));
 		TestTrue(TEXT("Blueprint folder apply rebuilt graph"), (*ApplyData)->GetIntegerField(TEXT("graphs_rebuilt")) >= 1);
 		TestTrue(TEXT("Blueprint folder apply created nodes"), (*ApplyData)->GetIntegerField(TEXT("nodes_created")) >= 3);
 		TestTrue(TEXT("Blueprint folder apply created edge"), (*ApplyData)->GetIntegerField(TEXT("edges_created")) >= 1);
@@ -1426,6 +1439,7 @@ bool FUeAgentInterfaceBlueprintFolderSmokeTest::RunTest(const FString& Parameter
 			if (Nodes)
 			{
 				bool bFoundCustomEvent = false;
+				bool bFoundGenericReceiveBeginPlayCall = false;
 				for (const TSharedPtr<FJsonValue>& NodeValue : *Nodes)
 				{
 					const TSharedPtr<FJsonObject>* NodeObj = nullptr;
@@ -1440,13 +1454,238 @@ bool FUeAgentInterfaceBlueprintFolderSmokeTest::RunTest(const FString& Parameter
 						&& (*NodeObj)->GetStringField(TEXT("event_name")) == TEXT("SmokeCustomEvent"))
 					{
 						bFoundCustomEvent = true;
-						break;
+					}
+					else if (NodeType.Equals(TEXT("call_function"), ESearchCase::IgnoreCase)
+						&& (*NodeObj)->GetStringField(TEXT("function_name")) == TEXT("ReceiveBeginPlay"))
+					{
+						bFoundGenericReceiveBeginPlayCall = true;
 					}
 				}
 				TestTrue(TEXT("Blueprint folder export preserves custom_event node"), bFoundCustomEvent);
+				TestFalse(TEXT("Blueprint folder export does not serialize ReceiveBeginPlay as call_function"), bFoundGenericReceiveBeginPlayCall);
 			}
 		}
 	}
+
+	TSharedPtr<FJsonObject> ExportedComponentsJson;
+	{
+		const FString ComponentsJsonPath = FPaths::Combine(FolderPath, TEXT("components"), TEXT("tree.json"));
+		FString ExportedComponentsText;
+		TestTrue(TEXT("Blueprint folder exported components/tree.json exists"), FFileHelper::LoadFileToString(ExportedComponentsText, *ComponentsJsonPath));
+		TestTrue(TEXT("Blueprint folder exported components/tree.json parses"), ParseJson(ExportedComponentsText, ExportedComponentsJson));
+		if (ExportedComponentsJson.IsValid())
+		{
+			const TArray<TSharedPtr<FJsonValue>>* Components = nullptr;
+			TestTrue(TEXT("Blueprint folder exported components array exists"), ExportedComponentsJson->TryGetArrayField(TEXT("components"), Components) && Components);
+			if (Components)
+			{
+				bool bFoundStaticMeshComponent = false;
+				bool bFoundSkeletalMeshComponent = false;
+				bool bFoundSkeletalMeshAsset = false;
+				bool bFoundAnimClass = false;
+				bool bFoundAnimationMode = false;
+
+				for (const TSharedPtr<FJsonValue>& ComponentValue : *Components)
+				{
+					const TSharedPtr<FJsonObject>* ComponentObj = nullptr;
+					if (!ComponentValue.IsValid() || !ComponentValue->TryGetObject(ComponentObj) || !ComponentObj || !ComponentObj->IsValid())
+					{
+						continue;
+					}
+
+					const FString ComponentName = (*ComponentObj)->GetStringField(TEXT("name"));
+					if (ComponentName == TEXT("SmokeMesh"))
+					{
+						bFoundStaticMeshComponent = true;
+					}
+
+					if (ComponentName != TEXT("SmokeSkeletalMesh"))
+					{
+						continue;
+					}
+
+					bFoundSkeletalMeshComponent = true;
+					const TArray<TSharedPtr<FJsonValue>>* Properties = nullptr;
+					if (!(*ComponentObj)->TryGetArrayField(TEXT("properties"), Properties) || !Properties)
+					{
+						continue;
+					}
+
+					for (const TSharedPtr<FJsonValue>& PropertyValue : *Properties)
+					{
+						const TSharedPtr<FJsonObject>* PropertyObj = nullptr;
+						if (!PropertyValue.IsValid() || !PropertyValue->TryGetObject(PropertyObj) || !PropertyObj || !PropertyObj->IsValid())
+						{
+							continue;
+						}
+
+						const FString PropertyName = (*PropertyObj)->GetStringField(TEXT("property_name"));
+						const FString ValueText = (*PropertyObj)->GetStringField(TEXT("value_text"));
+						if (PropertyName == TEXT("SkeletalMeshAsset"))
+						{
+							bFoundSkeletalMeshAsset = ValueText.Contains(TEXT("/Game/Characters/PaladinRootMotion/Mesh/Paladin_WProp_J_Nordstrom_RM"));
+						}
+						else if (PropertyName == TEXT("AnimClass"))
+						{
+							bFoundAnimClass = ValueText.Contains(TEXT("/Game/Characters/PaladinRootMotion/ABP_Paladin_Player_RM"));
+						}
+						else if (PropertyName == TEXT("AnimationMode"))
+						{
+							bFoundAnimationMode = ValueText == TEXT("AnimationBlueprint");
+						}
+					}
+				}
+
+				TestTrue(TEXT("Blueprint folder exported static mesh component"), bFoundStaticMeshComponent);
+				if (bHasProjectSkeletalAssets)
+				{
+					TestTrue(TEXT("Blueprint folder exported skeletal mesh component"), bFoundSkeletalMeshComponent);
+					TestTrue(TEXT("Blueprint folder exported skeletal mesh asset property"), bFoundSkeletalMeshAsset);
+					TestTrue(TEXT("Blueprint folder exported anim class property"), bFoundAnimClass);
+					TestTrue(TEXT("Blueprint folder exported animation mode property"), bFoundAnimationMode);
+				}
+			}
+		}
+	}
+
+	const FString EventGraphJsonPath = FPaths::Combine(FolderPath, TEXT("graphs"), TEXT("EventGraph.json"));
+	const FString ExplicitParentEventGraphJson = TEXT("{\n  \"graph\": {\n    \"name\": \"EventGraph\",\n    \"graph_kind\": \"event_graph\"\n  },\n  \"nodes\": [\n    {\n      \"id\": \"event_begin_play\",\n      \"node_type\": \"event\",\n      \"event_name\": \"ReceiveBeginPlay\",\n      \"event_class\": \"/Script/Engine.Actor\",\n      \"pos\": { \"x\": 0, \"y\": 0 }\n    },\n    {\n      \"id\": \"parent_begin_play\",\n      \"node_type\": \"call_parent_function\",\n      \"function_owner_class\": \"/Script/Engine.Actor\",\n      \"function_name\": \"ReceiveBeginPlay\",\n      \"pos\": { \"x\": 260, \"y\": 0 }\n    }\n  ],\n  \"edges\": []\n}\n");
+	if (!SaveUtf8Json(EventGraphJsonPath, ExplicitParentEventGraphJson))
+	{
+		return false;
+	}
+
+	const FString ParentApplyBody = MakeExecRequestBody(
+		TEXT("smoke-blueprint-folder-parent-call-apply-001"),
+		TEXT("blueprint_apply_folder"),
+		FString::Printf(TEXT("{\"asset_path\":\"%s\",\"compile_after_apply\":true,\"save_after_apply\":false}"), *BlueprintAssetPath));
+	FHttpSmokeResult ParentApplyResult;
+	TestTrue(TEXT("Blueprint folder explicit parent call apply request succeeded"), ExecuteHttpJsonRequest(TEXT("POST"), ServerScope.BaseUrl + TEXT("/api/exec"), ServerScope.Token, ParentApplyBody, ParentApplyResult, 15.0));
+	TestEqual(TEXT("Blueprint folder explicit parent call apply status code"), ParentApplyResult.StatusCode, 200);
+
+	const FString ParentExportBody = MakeExecRequestBody(
+		TEXT("smoke-blueprint-folder-parent-call-export-001"),
+		TEXT("blueprint_export_folder"),
+		FString::Printf(TEXT("{\"asset_path\":\"%s\",\"clean_output_dir\":true,\"include_validation\":true}"), *BlueprintAssetPath));
+	FHttpSmokeResult ParentExportResult;
+	TestTrue(TEXT("Blueprint folder explicit parent call export request succeeded"), ExecuteHttpJsonRequest(TEXT("POST"), ServerScope.BaseUrl + TEXT("/api/exec"), ServerScope.Token, ParentExportBody, ParentExportResult, 15.0));
+	TestEqual(TEXT("Blueprint folder explicit parent call export status code"), ParentExportResult.StatusCode, 200);
+	{
+		FString ParentEventGraphText;
+		TSharedPtr<FJsonObject> ParentEventGraphJson;
+		TestTrue(TEXT("Blueprint folder explicit parent call exported EventGraph.json exists"), FFileHelper::LoadFileToString(ParentEventGraphText, *EventGraphJsonPath));
+		TestTrue(TEXT("Blueprint folder explicit parent call exported EventGraph.json parses"), ParseJson(ParentEventGraphText, ParentEventGraphJson));
+		if (ParentEventGraphJson.IsValid())
+		{
+			const TArray<TSharedPtr<FJsonValue>>* Nodes = nullptr;
+			TestTrue(TEXT("Blueprint folder explicit parent call exported nodes array exists"), ParentEventGraphJson->TryGetArrayField(TEXT("nodes"), Nodes) && Nodes);
+			if (Nodes)
+			{
+				bool bFoundCallParentBeginPlay = false;
+				bool bFoundGenericReceiveBeginPlayCall = false;
+				for (const TSharedPtr<FJsonValue>& NodeValue : *Nodes)
+				{
+					const TSharedPtr<FJsonObject>* NodeObj = nullptr;
+					if (!NodeValue.IsValid() || !NodeValue->TryGetObject(NodeObj) || !NodeObj || !NodeObj->IsValid())
+					{
+						continue;
+					}
+
+					FString NodeType;
+					(*NodeObj)->TryGetStringField(TEXT("node_type"), NodeType);
+					FString FunctionName;
+					(*NodeObj)->TryGetStringField(TEXT("function_name"), FunctionName);
+					if (NodeType.Equals(TEXT("call_parent_function"), ESearchCase::IgnoreCase)
+						&& FunctionName == TEXT("ReceiveBeginPlay"))
+					{
+						bFoundCallParentBeginPlay = true;
+					}
+					else if (NodeType.Equals(TEXT("call_function"), ESearchCase::IgnoreCase)
+						&& FunctionName == TEXT("ReceiveBeginPlay"))
+					{
+						bFoundGenericReceiveBeginPlayCall = true;
+					}
+				}
+				TestTrue(TEXT("Blueprint folder export preserves explicit ReceiveBeginPlay call_parent_function"), bFoundCallParentBeginPlay);
+				TestFalse(TEXT("Blueprint folder explicit parent export does not downgrade to call_function"), bFoundGenericReceiveBeginPlayCall);
+			}
+		}
+	}
+
+	const FString UnsafeGenericEventGraphJson = TEXT("{\n  \"graph\": {\n    \"name\": \"EventGraph\",\n    \"graph_kind\": \"event_graph\"\n  },\n  \"nodes\": [\n    {\n      \"id\": \"generic_begin_play_call\",\n      \"node_type\": \"call_function\",\n      \"function_owner_class\": \"/Script/Engine.Actor\",\n      \"function_name\": \"ReceiveBeginPlay\",\n      \"pos\": { \"x\": 260, \"y\": 0 }\n    }\n  ],\n  \"edges\": []\n}\n");
+	if (!SaveUtf8Json(EventGraphJsonPath, UnsafeGenericEventGraphJson))
+	{
+		return false;
+	}
+
+	const FString UnsafeEventApplyBody = MakeExecRequestBody(
+		TEXT("smoke-blueprint-folder-unsafe-event-call-001"),
+		TEXT("blueprint_apply_folder"),
+		FString::Printf(TEXT("{\"asset_path\":\"%s\",\"compile_after_apply\":true,\"save_after_apply\":false}"), *BlueprintAssetPath));
+	FHttpSmokeResult UnsafeEventApplyResult;
+	TestTrue(TEXT("Blueprint folder generic ReceiveBeginPlay apply request reached server"), ExecuteHttpJsonRequest(TEXT("POST"), ServerScope.BaseUrl + TEXT("/api/exec"), ServerScope.Token, UnsafeEventApplyBody, UnsafeEventApplyResult, 15.0));
+	TestEqual(TEXT("Blueprint folder generic ReceiveBeginPlay apply is rejected"), UnsafeEventApplyResult.StatusCode, 400);
+
+	TSharedPtr<FJsonObject> UnsafeEventApplyJson;
+	TestTrue(TEXT("Blueprint folder generic ReceiveBeginPlay response parses JSON"), ParseJson(UnsafeEventApplyResult.Body, UnsafeEventApplyJson));
+	FString UnsafeEventApplyError;
+	if (UnsafeEventApplyJson.IsValid())
+	{
+		UnsafeEventApplyJson->TryGetStringField(TEXT("error"), UnsafeEventApplyError);
+	}
+	TestTrue(
+		TEXT("Blueprint folder generic ReceiveBeginPlay error is explicit"),
+		UnsafeEventApplyError.Contains(TEXT("event_function_call_requires_explicit_parent_node")));
+
+	const FString UnsafeDirectEventCallBody = MakeExecRequestBody(
+		TEXT("smoke-blueprint-direct-unsafe-event-call-001"),
+		TEXT("blueprint_add_call_function_node"),
+		FString::Printf(TEXT("{\"asset_path\":\"%s\",\"function_owner_class\":\"/Script/Engine.Actor\",\"function_name\":\"ReceiveBeginPlay\",\"compile_after_add\":false,\"save_after_add\":false}"), *BlueprintAssetPath));
+	FHttpSmokeResult UnsafeDirectEventCallResult;
+	TestTrue(TEXT("Blueprint direct generic ReceiveBeginPlay request reached server"), ExecuteHttpJsonRequest(TEXT("POST"), ServerScope.BaseUrl + TEXT("/api/exec"), ServerScope.Token, UnsafeDirectEventCallBody, UnsafeDirectEventCallResult, 10.0));
+	TestEqual(TEXT("Blueprint direct generic ReceiveBeginPlay is rejected"), UnsafeDirectEventCallResult.StatusCode, 400);
+
+	TSharedPtr<FJsonObject> UnsafeDirectEventCallJson;
+	TestTrue(TEXT("Blueprint direct generic ReceiveBeginPlay response parses JSON"), ParseJson(UnsafeDirectEventCallResult.Body, UnsafeDirectEventCallJson));
+	FString UnsafeDirectEventCallError;
+	if (UnsafeDirectEventCallJson.IsValid())
+	{
+		UnsafeDirectEventCallJson->TryGetStringField(TEXT("error"), UnsafeDirectEventCallError);
+	}
+	TestTrue(
+		TEXT("Blueprint direct generic ReceiveBeginPlay error is explicit"),
+		UnsafeDirectEventCallError.Contains(TEXT("event_function_call_requires_explicit_parent_node")));
+
+	if (!SaveUtf8Json(EventGraphJsonPath, SafeEventGraphJson))
+	{
+		return false;
+	}
+
+	if (!SaveUtf8Json(
+		FPaths::Combine(FolderPath, TEXT("graphs"), TEXT("Function_UserConstructionScript.json")),
+		TEXT("{\n  \"graph\": {\n    \"name\": \"UserConstructionScript\",\n    \"graph_kind\": \"function_graph\"\n  },\n  \"nodes\": [\n    {\n      \"id\": \"call_pcg_generate_local\",\n      \"node_type\": \"call_function\",\n      \"function_owner_class\": \"/Script/PCG.PCGComponent\",\n      \"function_name\": \"GenerateLocal\",\n      \"pos\": { \"x\": 260, \"y\": 0 }\n    }\n  ],\n  \"edges\": []\n}\n")))
+	{
+		return false;
+	}
+
+	const FString UnsafeApplyBody = MakeExecRequestBody(
+		TEXT("smoke-blueprint-folder-unsafe-ucs-pcg-001"),
+		TEXT("blueprint_apply_folder"),
+		FString::Printf(TEXT("{\"asset_path\":\"%s\",\"compile_after_apply\":true,\"save_after_apply\":false}"), *BlueprintAssetPath));
+	FHttpSmokeResult UnsafeApplyResult;
+	TestTrue(TEXT("Blueprint folder unsafe PCG construction script apply request reached server"), ExecuteHttpJsonRequest(TEXT("POST"), ServerScope.BaseUrl + TEXT("/api/exec"), ServerScope.Token, UnsafeApplyBody, UnsafeApplyResult, 15.0));
+	TestEqual(TEXT("Blueprint folder unsafe PCG construction script apply is rejected"), UnsafeApplyResult.StatusCode, 400);
+
+	TSharedPtr<FJsonObject> UnsafeApplyJson;
+	TestTrue(TEXT("Blueprint folder unsafe PCG construction script response parses JSON"), ParseJson(UnsafeApplyResult.Body, UnsafeApplyJson));
+	FString UnsafeApplyError;
+	if (UnsafeApplyJson.IsValid())
+	{
+		UnsafeApplyJson->TryGetStringField(TEXT("error"), UnsafeApplyError);
+	}
+	TestTrue(
+		TEXT("Blueprint folder unsafe PCG construction script error is explicit"),
+		UnsafeApplyError.Contains(TEXT("unsafe_construction_script_pcg_generation_blocked")));
 
 	return !HasAnyErrors();
 }

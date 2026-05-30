@@ -89,6 +89,166 @@ namespace UeAgentBlueprintFolderOps
 		return true;
 	}
 
+	static bool IsUserConstructionScriptFolderGraph(const FString& GraphFileName, const TSharedPtr<FJsonObject>& GraphRoot)
+	{
+		if (GraphFileName.Equals(TEXT("Function_UserConstructionScript.json"), ESearchCase::IgnoreCase))
+		{
+			return true;
+		}
+
+		const TSharedPtr<FJsonObject>* GraphObjPtr = nullptr;
+		if (!GraphRoot.IsValid()
+			|| !GraphRoot->TryGetObjectField(TEXT("graph"), GraphObjPtr)
+			|| !GraphObjPtr
+			|| !GraphObjPtr->IsValid())
+		{
+			return false;
+		}
+
+		FString GraphName;
+		FString GraphKind;
+		return (*GraphObjPtr)->TryGetStringField(TEXT("name"), GraphName)
+			&& (*GraphObjPtr)->TryGetStringField(TEXT("graph_kind"), GraphKind)
+			&& GraphName.Equals(TEXT("UserConstructionScript"), ESearchCase::IgnoreCase)
+			&& GraphKind.Equals(TEXT("function_graph"), ESearchCase::IgnoreCase);
+	}
+
+	static bool ValidateFolderConstructionScriptSafety(
+		const FString& FolderPath,
+		const bool bAllowUnsafeConstructionScriptPcgGeneration,
+		FString& OutError)
+	{
+		if (bAllowUnsafeConstructionScriptPcgGeneration)
+		{
+			return true;
+		}
+
+		const FString GraphsDir = FPaths::Combine(FolderPath, TEXT("graphs"));
+		TArray<FString> GraphFiles;
+		IFileManager::Get().FindFiles(GraphFiles, *(FPaths::Combine(GraphsDir, TEXT("*.json"))), true, false);
+		GraphFiles.Sort();
+
+		for (const FString& GraphFile : GraphFiles)
+		{
+			const FString GraphPath = FPaths::Combine(GraphsDir, GraphFile);
+			TSharedPtr<FJsonObject> GraphRoot;
+			FString GraphError;
+			if (!LoadJsonFile(GraphPath, GraphRoot, GraphError))
+			{
+				OutError = FString::Printf(TEXT("%s:%s"), *GraphError, *GraphPath);
+				return false;
+			}
+
+			if (!IsUserConstructionScriptFolderGraph(GraphFile, GraphRoot))
+			{
+				continue;
+			}
+
+			const TArray<TSharedPtr<FJsonValue>>* NodesArray = nullptr;
+			if (!GraphRoot->TryGetArrayField(TEXT("nodes"), NodesArray) || !NodesArray)
+			{
+				continue;
+			}
+
+			for (const TSharedPtr<FJsonValue>& NodeValue : *NodesArray)
+			{
+				const TSharedPtr<FJsonObject>* NodeObjPtr = nullptr;
+				if (!NodeValue.IsValid() || !NodeValue->TryGetObject(NodeObjPtr) || !NodeObjPtr || !NodeObjPtr->IsValid())
+				{
+					continue;
+				}
+
+				const TSharedPtr<FJsonObject>& NodeObj = *NodeObjPtr;
+				FString NodeType;
+				if (!NodeObj->TryGetStringField(TEXT("node_type"), NodeType)
+					|| !NodeType.Equals(TEXT("call_function"), ESearchCase::IgnoreCase))
+				{
+					continue;
+				}
+
+				FString FunctionOwnerClass;
+				FString FunctionName;
+				if (!NodeObj->TryGetStringField(TEXT("function_owner_class"), FunctionOwnerClass)
+					|| !NodeObj->TryGetStringField(TEXT("function_name"), FunctionName))
+				{
+					continue;
+				}
+
+				if (UeAgentBlueprintOps::IsUnsafeConstructionScriptPcgCall(FunctionOwnerClass, FunctionName))
+				{
+					FString NodeId;
+					NodeObj->TryGetStringField(TEXT("id"), NodeId);
+					OutError = FString::Printf(
+						TEXT("unsafe_construction_script_pcg_generation_blocked:%s:%s:%s.%s"),
+						*GraphFile,
+						NodeId.IsEmpty() ? TEXT("<unnamed_node>") : *NodeId,
+						*FunctionOwnerClass,
+						*FunctionName);
+					return false;
+				}
+			}
+		}
+
+		return true;
+	}
+
+	static bool ValidateFolderGenericEventFunctionCalls(const FString& FolderPath, FString& OutError)
+	{
+		const FString GraphsDir = FPaths::Combine(FolderPath, TEXT("graphs"));
+		TArray<FString> GraphFiles;
+		IFileManager::Get().FindFiles(GraphFiles, *(FPaths::Combine(GraphsDir, TEXT("*.json"))), true, false);
+		GraphFiles.Sort();
+
+		for (const FString& GraphFile : GraphFiles)
+		{
+			const FString GraphPath = FPaths::Combine(GraphsDir, GraphFile);
+			TSharedPtr<FJsonObject> GraphRoot;
+			FString GraphError;
+			if (!LoadJsonFile(GraphPath, GraphRoot, GraphError))
+			{
+				OutError = FString::Printf(TEXT("%s:%s"), *GraphError, *GraphPath);
+				return false;
+			}
+
+			const TArray<TSharedPtr<FJsonValue>>* NodesArray = nullptr;
+			if (!GraphRoot->TryGetArrayField(TEXT("nodes"), NodesArray) || !NodesArray)
+			{
+				continue;
+			}
+
+			for (const TSharedPtr<FJsonValue>& NodeValue : *NodesArray)
+			{
+				const TSharedPtr<FJsonObject>* NodeObjPtr = nullptr;
+				if (!NodeValue.IsValid() || !NodeValue->TryGetObject(NodeObjPtr) || !NodeObjPtr || !NodeObjPtr->IsValid())
+				{
+					continue;
+				}
+
+				const TSharedPtr<FJsonObject>& NodeObj = *NodeObjPtr;
+				FString NodeType;
+				FString FunctionName;
+				if (!NodeObj->TryGetStringField(TEXT("node_type"), NodeType)
+					|| !NodeType.Equals(TEXT("call_function"), ESearchCase::IgnoreCase)
+					|| !NodeObj->TryGetStringField(TEXT("function_name"), FunctionName)
+					|| !UeAgentBlueprintOps::RequiresExplicitParentOrEventNode(FunctionName))
+				{
+					continue;
+				}
+
+				FString NodeId;
+				NodeObj->TryGetStringField(TEXT("id"), NodeId);
+				OutError = FString::Printf(
+					TEXT("event_function_call_requires_explicit_parent_node:%s:%s:%s"),
+					*GraphFile,
+					NodeId.IsEmpty() ? TEXT("<unnamed_node>") : *NodeId,
+					*FunctionName);
+				return false;
+			}
+		}
+
+		return true;
+	}
+
 	static bool TryGetString(const TSharedPtr<FJsonObject>& Obj, const TCHAR* Key, FString& OutValue)
 	{
 		return Obj.IsValid() && Obj->TryGetStringField(Key, OutValue);
@@ -241,6 +401,15 @@ namespace UeAgentBlueprintFolderOps
 			const FString EventName = EventNode->EventReference.GetMemberName().ToString();
 			return FString::Printf(TEXT("event_%s"), *MakeSlug(EventName));
 		}
+		if (const UK2Node_CallParentFunction* ParentCallNode = Cast<UK2Node_CallParentFunction>(Node))
+		{
+			FString FunctionName = ParentCallNode->FunctionReference.GetMemberName().ToString();
+			if (const UFunction* Function = ParentCallNode->GetTargetFunction())
+			{
+				FunctionName = Function->GetName();
+			}
+			return FString::Printf(TEXT("parent_call_%s"), *MakeSlug(FunctionName));
+		}
 		if (const UK2Node_CallFunction* CallFunctionNode = Cast<UK2Node_CallFunction>(Node))
 		{
 			FString FunctionName = CallFunctionNode->FunctionReference.GetMemberName().ToString();
@@ -359,6 +528,96 @@ namespace UeAgentBlueprintFolderOps
 			}
 		}
 		return ValueText.TrimStartAndEnd();
+	}
+
+	static bool IsNoneImportText(const FString& ValueText)
+	{
+		FString Trimmed = ValueText;
+		Trimmed.TrimStartAndEndInline();
+		return Trimmed.IsEmpty() || Trimmed.Equals(TEXT("None"), ESearchCase::IgnoreCase);
+	}
+
+	static UClass* LoadClassFromImportText(const FString& ValueText)
+	{
+		if (IsNoneImportText(ValueText))
+		{
+			return nullptr;
+		}
+
+		const FString ObjectPath = ExtractObjectPathFromImportText(ValueText);
+		if (ObjectPath.IsEmpty())
+		{
+			return nullptr;
+		}
+
+		if (UClass* LoadedClass = LoadObject<UClass>(nullptr, *ObjectPath))
+		{
+			return LoadedClass;
+		}
+
+		if (UBlueprint* LoadedBlueprint = LoadObject<UBlueprint>(nullptr, *ObjectPath))
+		{
+			return LoadedBlueprint->GeneratedClass;
+		}
+
+		UObject* LoadedObject = LoadObject<UObject>(nullptr, *ObjectPath);
+		if (UClass* ObjectClass = Cast<UClass>(LoadedObject))
+		{
+			return ObjectClass;
+		}
+		if (UBlueprint* ObjectBlueprint = Cast<UBlueprint>(LoadedObject))
+		{
+			return ObjectBlueprint->GeneratedClass;
+		}
+		return nullptr;
+	}
+
+	static bool TryParseAnimationMode(const FString& ValueText, EAnimationMode::Type& OutMode)
+	{
+		FString Normalized = ValueText;
+		Normalized.TrimStartAndEndInline();
+		Normalized.RemoveFromStart(TEXT("EAnimationMode::"), ESearchCase::IgnoreCase);
+
+		if (Normalized.Equals(TEXT("AnimationBlueprint"), ESearchCase::IgnoreCase))
+		{
+			OutMode = EAnimationMode::AnimationBlueprint;
+			return true;
+		}
+		if (Normalized.Equals(TEXT("AnimationSingleNode"), ESearchCase::IgnoreCase))
+		{
+			OutMode = EAnimationMode::AnimationSingleNode;
+			return true;
+		}
+		if (Normalized.Equals(TEXT("AnimationCustomMode"), ESearchCase::IgnoreCase))
+		{
+			OutMode = EAnimationMode::AnimationCustomMode;
+			return true;
+		}
+
+		int64 NumericValue = 0;
+		if (LexTryParseString(NumericValue, *Normalized))
+		{
+			OutMode = static_cast<EAnimationMode::Type>(NumericValue);
+			return true;
+		}
+		return false;
+	}
+
+	static void NotifyComponentTemplatePropertyChanged(UBlueprint* Blueprint, UActorComponent* Template)
+	{
+		if (Template)
+		{
+			Template->PostEditChange();
+			if (UPrimitiveComponent* PrimitiveComponent = Cast<UPrimitiveComponent>(Template))
+			{
+				PrimitiveComponent->MarkRenderStateDirty();
+				PrimitiveComponent->UpdateBounds();
+			}
+		}
+		if (Blueprint)
+		{
+			FBlueprintEditorUtils::MarkBlueprintAsModified(Blueprint);
+		}
 	}
 
 	static TSharedPtr<FJsonObject> ExportVariablesJson(UBlueprint* Blueprint)
@@ -876,6 +1135,10 @@ namespace UeAgentBlueprintFolderOps
 			{
 				continue;
 			}
+			if (Node->IsAutomaticallyPlacedGhostNode())
+			{
+				continue;
+			}
 			if (IsBuiltinGraphNode(Node))
 			{
 				const FString BuiltinId = GetBuiltinNodeId(Node);
@@ -899,7 +1162,7 @@ namespace UeAgentBlueprintFolderOps
 		TArray<TSharedPtr<FJsonValue>> Nodes;
 		for (UEdGraphNode* Node : Graph->Nodes)
 		{
-			if (!Node || IsBuiltinGraphNode(Node))
+			if (!Node || Node->IsAutomaticallyPlacedGhostNode() || IsBuiltinGraphNode(Node))
 			{
 				continue;
 			}
@@ -952,6 +1215,23 @@ namespace UeAgentBlueprintFolderOps
 				if (UClass* EventClass = EventNode->EventReference.GetMemberParentClass(EventNode->GetBlueprintClassFromNode()))
 				{
 					NodeObj->SetStringField(TEXT("event_class"), EventClass->GetPathName());
+				}
+			}
+			else if (const UK2Node_CallParentFunction* ParentCallNode = Cast<UK2Node_CallParentFunction>(Node))
+			{
+				FString FunctionName = ParentCallNode->FunctionReference.GetMemberName().ToString();
+				UClass* FunctionOwnerClass = ParentCallNode->FunctionReference.GetMemberParentClass(ParentCallNode->GetBlueprintClassFromNode());
+				if (UFunction* Function = ParentCallNode->GetTargetFunction())
+				{
+					FunctionName = Function->GetName();
+					FunctionOwnerClass = Function->GetOwnerClass();
+				}
+
+				NodeObj->SetStringField(TEXT("node_type"), TEXT("call_parent_function"));
+				NodeObj->SetStringField(TEXT("function_name"), FunctionName);
+				if (FunctionOwnerClass)
+				{
+					NodeObj->SetStringField(TEXT("function_owner_class"), FunctionOwnerClass->GetPathName());
 				}
 			}
 			else if (const UK2Node_CallFunction* CallFunctionNode = Cast<UK2Node_CallFunction>(Node))
@@ -1320,6 +1600,33 @@ bool FUeAgentHttpServer::CmdBlueprintApplyFolder(const FUeAgentRequestContext& C
 	JsonTryGetBool(Ctx.Params, TEXT("save_after_apply"), bSaveAfterApply);
 	bool bCreateIfMissing = true;
 	JsonTryGetBool(Ctx.Params, TEXT("create_if_missing"), bCreateIfMissing);
+	bool bAllowUnsafeConstructionScriptPcgGeneration = false;
+	JsonTryGetBool(Ctx.Params, TEXT("allow_unsafe_construction_script_pcg_generation"), bAllowUnsafeConstructionScriptPcgGeneration);
+
+	if (!UeAgentBlueprintFolderOps::ValidateFolderConstructionScriptSafety(FolderPath, bAllowUnsafeConstructionScriptPcgGeneration, OutError))
+	{
+		if (!OutData.IsValid())
+		{
+			OutData = MakeShared<FJsonObject>();
+		}
+		OutData->SetStringField(TEXT("asset_path"), AssetPath);
+		OutData->SetStringField(TEXT("folder_path"), FolderPath);
+		OutData->SetStringField(TEXT("safety_check"), TEXT("construction_script_pcg_generation"));
+		OutData->SetBoolField(TEXT("allow_unsafe_construction_script_pcg_generation"), bAllowUnsafeConstructionScriptPcgGeneration);
+		return false;
+	}
+
+	if (!UeAgentBlueprintFolderOps::ValidateFolderGenericEventFunctionCalls(FolderPath, OutError))
+	{
+		if (!OutData.IsValid())
+		{
+			OutData = MakeShared<FJsonObject>();
+		}
+		OutData->SetStringField(TEXT("asset_path"), AssetPath);
+		OutData->SetStringField(TEXT("folder_path"), FolderPath);
+		OutData->SetStringField(TEXT("safety_check"), TEXT("generic_event_function_call"));
+		return false;
+	}
 
 	TArray<TSharedPtr<FJsonValue>> Warnings;
 	int32 VariablesAdded = 0;
@@ -1915,17 +2222,85 @@ bool FUeAgentHttpServer::CmdBlueprintApplyFolder(const FUeAgentRequestContext& C
 						{
 							if (UStaticMeshComponent* StaticMeshComponent = Cast<UStaticMeshComponent>(TargetTemplate))
 							{
-								const FString ObjectPath = UeAgentBlueprintFolderOps::ExtractObjectPathFromImportText(ValueText);
-								UStaticMesh* StaticMesh = LoadObject<UStaticMesh>(nullptr, *ObjectPath);
-								if (!StaticMesh)
+								UStaticMesh* StaticMesh = nullptr;
+								if (!UeAgentBlueprintFolderOps::IsNoneImportText(ValueText))
 								{
-									OutError = FString::Printf(TEXT("static_mesh_not_found:%s:%s"), *ComponentName, *ValueText);
-									return false;
+									const FString ObjectPath = UeAgentBlueprintFolderOps::ExtractObjectPathFromImportText(ValueText);
+									StaticMesh = LoadObject<UStaticMesh>(nullptr, *ObjectPath);
+									if (!StaticMesh)
+									{
+										OutError = FString::Printf(TEXT("static_mesh_not_found:%s:%s"), *ComponentName, *ValueText);
+										return false;
+									}
 								}
 								Blueprint->Modify();
 								StaticMeshComponent->Modify();
 								StaticMeshComponent->SetStaticMesh(StaticMesh);
-								FBlueprintEditorUtils::MarkBlueprintAsModified(Blueprint);
+								UeAgentBlueprintFolderOps::NotifyComponentTemplatePropertyChanged(Blueprint, StaticMeshComponent);
+								++ComponentPropertiesApplied;
+								continue;
+							}
+						}
+
+						if (USkeletalMeshComponent* SkeletalMeshComponent = Cast<USkeletalMeshComponent>(TargetTemplate))
+						{
+							if (PropertyName.Equals(TEXT("SkeletalMeshAsset"), ESearchCase::IgnoreCase))
+							{
+								USkeletalMesh* SkeletalMesh = nullptr;
+								if (!UeAgentBlueprintFolderOps::IsNoneImportText(ValueText))
+								{
+									const FString ObjectPath = UeAgentBlueprintFolderOps::ExtractObjectPathFromImportText(ValueText);
+									SkeletalMesh = LoadObject<USkeletalMesh>(nullptr, *ObjectPath);
+									if (!SkeletalMesh)
+									{
+										OutError = FString::Printf(TEXT("skeletal_mesh_not_found:%s:%s"), *ComponentName, *ValueText);
+										return false;
+									}
+								}
+								Blueprint->Modify();
+								SkeletalMeshComponent->Modify();
+								SkeletalMeshComponent->SetSkeletalMesh(SkeletalMesh, true);
+								UeAgentBlueprintFolderOps::NotifyComponentTemplatePropertyChanged(Blueprint, SkeletalMeshComponent);
+								++ComponentPropertiesApplied;
+								continue;
+							}
+
+							if (PropertyName.Equals(TEXT("AnimClass"), ESearchCase::IgnoreCase))
+							{
+								UClass* AnimClass = UeAgentBlueprintFolderOps::LoadClassFromImportText(ValueText);
+								if (!UeAgentBlueprintFolderOps::IsNoneImportText(ValueText))
+								{
+									if (!AnimClass)
+									{
+										OutError = FString::Printf(TEXT("anim_class_not_found:%s:%s"), *ComponentName, *ValueText);
+										return false;
+									}
+									if (!AnimClass->IsChildOf(UAnimInstance::StaticClass()))
+									{
+										OutError = FString::Printf(TEXT("anim_class_invalid:%s:%s"), *ComponentName, *ValueText);
+										return false;
+									}
+								}
+								Blueprint->Modify();
+								SkeletalMeshComponent->Modify();
+								SkeletalMeshComponent->SetAnimInstanceClass(AnimClass);
+								UeAgentBlueprintFolderOps::NotifyComponentTemplatePropertyChanged(Blueprint, SkeletalMeshComponent);
+								++ComponentPropertiesApplied;
+								continue;
+							}
+
+							if (PropertyName.Equals(TEXT("AnimationMode"), ESearchCase::IgnoreCase))
+							{
+								EAnimationMode::Type AnimationMode = EAnimationMode::AnimationBlueprint;
+								if (!UeAgentBlueprintFolderOps::TryParseAnimationMode(ValueText, AnimationMode))
+								{
+									OutError = FString::Printf(TEXT("animation_mode_import_failed:%s:%s"), *ComponentName, *ValueText);
+									return false;
+								}
+								Blueprint->Modify();
+								SkeletalMeshComponent->Modify();
+								SkeletalMeshComponent->SetAnimationMode(AnimationMode, true);
+								UeAgentBlueprintFolderOps::NotifyComponentTemplatePropertyChanged(Blueprint, SkeletalMeshComponent);
 								++ComponentPropertiesApplied;
 								continue;
 							}
@@ -2275,6 +2650,105 @@ bool FUeAgentHttpServer::CmdBlueprintApplyFolder(const FUeAgentRequestContext& C
 						return false;
 					}
 				}
+				else if (NodeType.Equals(TEXT("call_parent_function"), ESearchCase::IgnoreCase))
+				{
+					FString FunctionOwnerClass;
+					FString FunctionName;
+					UeAgentBlueprintFolderOps::TryGetString(NodeObj, TEXT("function_owner_class"), FunctionOwnerClass);
+					if (!UeAgentBlueprintFolderOps::TryGetString(NodeObj, TEXT("function_name"), FunctionName) || FunctionName.IsEmpty())
+					{
+						OutError = TEXT("missing_function_name");
+						return false;
+					}
+
+					UClass* OwnerClass = nullptr;
+					UFunction* Function = nullptr;
+					if (!FunctionOwnerClass.IsEmpty())
+					{
+						OwnerClass = UeAgentBlueprintOps::ResolveClassByPath(FunctionOwnerClass);
+						if (!OwnerClass)
+						{
+							OutError = TEXT("invalid_function_owner_class");
+							return false;
+						}
+						Function = OwnerClass->FindFunctionByName(FName(*FunctionName));
+					}
+					if (!Function && WorkingBlueprint && WorkingBlueprint->ParentClass)
+					{
+						Function = WorkingBlueprint->ParentClass->FindFunctionByName(FName(*FunctionName));
+						if (Function)
+						{
+							OwnerClass = Function->GetOwnerClass();
+						}
+					}
+					if (!Function)
+					{
+						OutError = TEXT("function_not_found");
+						return false;
+					}
+					if (!OwnerClass)
+					{
+						OwnerClass = Function->GetOwnerClass();
+					}
+
+					UK2Node_CallParentFunction* ParentCallNode = nullptr;
+					for (UEdGraphNode* CandidateNode : Graph->Nodes)
+					{
+						UK2Node_CallParentFunction* CandidateParentCall = Cast<UK2Node_CallParentFunction>(CandidateNode);
+						if (!CandidateParentCall)
+						{
+							continue;
+						}
+
+						FString CandidateFunctionName = CandidateParentCall->FunctionReference.GetMemberName().ToString();
+						if (const UFunction* CandidateFunction = CandidateParentCall->GetTargetFunction())
+						{
+							CandidateFunctionName = CandidateFunction->GetName();
+						}
+						if (!CandidateFunctionName.Equals(Function->GetName(), ESearchCase::CaseSensitive))
+						{
+							continue;
+						}
+
+						const FString CandidateGuid = CandidateParentCall->NodeGuid.ToString(EGuidFormats::DigitsWithHyphensLower);
+						if (NodeIdToGuid.FindKey(CandidateGuid))
+						{
+							continue;
+						}
+
+						ParentCallNode = CandidateParentCall;
+						break;
+					}
+
+					if (!ParentCallNode)
+					{
+						FGraphNodeCreator<UK2Node_CallParentFunction> NodeCreator(*Graph);
+						ParentCallNode = NodeCreator.CreateNode();
+						ParentCallNode->SetFlags(RF_Transactional);
+						ParentCallNode->SetFromFunction(Function);
+						ParentCallNode->NodePosX = (int32)PosX;
+						ParentCallNode->NodePosY = (int32)PosY;
+						UEdGraphSchema_K2::SetNodeMetaData(ParentCallNode, FNodeMetadata::DefaultGraphNode);
+						NodeCreator.Finalize();
+					}
+					else
+					{
+						const bool bWasGhostNode = ParentCallNode->IsAutomaticallyPlacedGhostNode();
+						ParentCallNode->NodePosX = (int32)PosX;
+						ParentCallNode->NodePosY = (int32)PosY;
+						ParentCallNode->SetEnabledState(ENodeEnabledState::Enabled, true);
+						if (bWasGhostNode)
+						{
+							ParentCallNode->NodeComment.Reset();
+						}
+					}
+
+					AddNodeData = MakeShared<FJsonObject>();
+					AddNodeData->SetStringField(TEXT("function_owner_class"), OwnerClass ? OwnerClass->GetPathName() : FString());
+					AddNodeData->SetStringField(TEXT("function_name"), Function->GetName());
+					AddNodeData->SetStringField(TEXT("node_guid"), ParentCallNode->NodeGuid.ToString(EGuidFormats::DigitsWithHyphensLower));
+					FBlueprintEditorUtils::MarkBlueprintAsModified(WorkingBlueprint);
+				}
 				else if (NodeType.Equals(TEXT("call_function"), ESearchCase::IgnoreCase))
 				{
 					FString FunctionOwnerClass;
@@ -2541,34 +3015,88 @@ bool FUeAgentHttpServer::CmdBlueprintApplyFolder(const FUeAgentRequestContext& C
 		return false;
 	}
 
+	FString CompileStatus = UeAgentBlueprintOps::BlueprintStatusToString(Blueprint->Status);
+	int32 CompileErrorCount = 0;
+	int32 CompileWarningCount = 0;
+	int32 CompileMessageTotalCount = 0;
+	int32 CompileFilteredErrorCount = 0;
+	int32 CompileFilteredWarningCount = 0;
+	int32 CompileFilteredInfoCount = 0;
+	bool bCompileHasError = false;
+	TArray<TSharedPtr<FJsonValue>> CompileMessages;
+
 	if (bCompileAfterApply)
 	{
-		FKismetEditorUtilities::CompileBlueprint(Blueprint);
+		FCompilerResultsLog CompilerLog;
+		FKismetEditorUtilities::CompileBlueprint(Blueprint, EBlueprintCompileOptions::None, &CompilerLog);
+		CompileStatus = UeAgentBlueprintOps::BlueprintStatusToString(Blueprint->Status);
+		CompileErrorCount = CompilerLog.NumErrors;
+		CompileWarningCount = CompilerLog.NumWarnings;
+		CompileMessageTotalCount = CompilerLog.Messages.Num();
+		bCompileHasError = CompileErrorCount > 0 || Blueprint->Status == BS_Error;
+		UeAgentBlueprintOps::BuildCompilerLogJson(
+			CompilerLog,
+			UeAgentBlueprintOps::ECompilerMessageSeverityFilter::WarningOrError,
+			64,
+			CompileMessages,
+			CompileFilteredErrorCount,
+			CompileFilteredWarningCount,
+			CompileFilteredInfoCount);
 	}
+
+	bool bSaved = false;
+	auto PopulateApplyFolderResult = [&]()
+	{
+		if (!OutData.IsValid())
+		{
+			OutData = MakeShared<FJsonObject>();
+		}
+		OutData->SetStringField(TEXT("asset_path"), AssetPath);
+		OutData->SetStringField(TEXT("folder_path"), FolderPath);
+		OutData->SetStringField(TEXT("root_path"), UeAgentBlueprintFolderOps::GetFolderRootAbsolute());
+		OutData->SetNumberField(TEXT("variables_added"), VariablesAdded);
+		OutData->SetNumberField(TEXT("variables_removed"), VariablesRemoved);
+		OutData->SetNumberField(TEXT("variable_defaults_updated"), VariableDefaultsUpdated);
+		OutData->SetNumberField(TEXT("delegates_added"), DelegatesAdded);
+		OutData->SetNumberField(TEXT("components_added"), ComponentsAdded);
+		OutData->SetNumberField(TEXT("components_removed"), ComponentsRemoved);
+		OutData->SetNumberField(TEXT("component_properties_applied"), ComponentPropertiesApplied);
+		OutData->SetNumberField(TEXT("graphs_created"), GraphsCreated);
+		OutData->SetNumberField(TEXT("graphs_rebuilt"), GraphsRebuilt);
+		OutData->SetNumberField(TEXT("nodes_created"), NodesCreated);
+		OutData->SetNumberField(TEXT("pin_defaults_applied"), PinDefaultsApplied);
+		OutData->SetNumberField(TEXT("edges_created"), EdgesCreated);
+		OutData->SetNumberField(TEXT("defaults_applied"), DefaultsApplied);
+		OutData->SetNumberField(TEXT("warning_count"), Warnings.Num());
+		OutData->SetArrayField(TEXT("warnings"), Warnings);
+		OutData->SetBoolField(TEXT("saved"), bSaved);
+		OutData->SetBoolField(TEXT("compiled"), bCompileAfterApply);
+		OutData->SetStringField(TEXT("compile_status"), CompileStatus);
+		OutData->SetNumberField(TEXT("compile_error_count"), CompileErrorCount);
+		OutData->SetNumberField(TEXT("compile_warning_count"), CompileWarningCount);
+		OutData->SetNumberField(TEXT("compile_message_total_count"), CompileMessageTotalCount);
+		OutData->SetNumberField(TEXT("compile_filtered_error_count"), CompileFilteredErrorCount);
+		OutData->SetNumberField(TEXT("compile_filtered_warning_count"), CompileFilteredWarningCount);
+		OutData->SetNumberField(TEXT("compile_filtered_info_count"), CompileFilteredInfoCount);
+		OutData->SetNumberField(TEXT("compile_filtered_message_count"), CompileFilteredErrorCount + CompileFilteredWarningCount + CompileFilteredInfoCount);
+		OutData->SetBoolField(TEXT("compile_has_error"), bCompileHasError);
+		OutData->SetArrayField(TEXT("compile_messages"), CompileMessages);
+		OutData->SetBoolField(TEXT("allow_unsafe_construction_script_pcg_generation"), bAllowUnsafeConstructionScriptPcgGeneration);
+	};
+
+	if (bCompileAfterApply && bCompileHasError)
+	{
+		PopulateApplyFolderResult();
+		OutError = TEXT("compile_failed_after_apply");
+		return false;
+	}
+
 	if (bSaveAfterApply && !UeAgentBlueprintOps::SaveBlueprintPackage(Blueprint, OutError))
 	{
 		return false;
 	}
+	bSaved = bSaveAfterApply;
 
-	OutData->SetStringField(TEXT("asset_path"), AssetPath);
-	OutData->SetStringField(TEXT("folder_path"), FolderPath);
-	OutData->SetStringField(TEXT("root_path"), UeAgentBlueprintFolderOps::GetFolderRootAbsolute());
-	OutData->SetNumberField(TEXT("variables_added"), VariablesAdded);
-	OutData->SetNumberField(TEXT("variables_removed"), VariablesRemoved);
-	OutData->SetNumberField(TEXT("variable_defaults_updated"), VariableDefaultsUpdated);
-	OutData->SetNumberField(TEXT("delegates_added"), DelegatesAdded);
-	OutData->SetNumberField(TEXT("components_added"), ComponentsAdded);
-	OutData->SetNumberField(TEXT("components_removed"), ComponentsRemoved);
-	OutData->SetNumberField(TEXT("component_properties_applied"), ComponentPropertiesApplied);
-	OutData->SetNumberField(TEXT("graphs_created"), GraphsCreated);
-	OutData->SetNumberField(TEXT("graphs_rebuilt"), GraphsRebuilt);
-	OutData->SetNumberField(TEXT("nodes_created"), NodesCreated);
-	OutData->SetNumberField(TEXT("pin_defaults_applied"), PinDefaultsApplied);
-	OutData->SetNumberField(TEXT("edges_created"), EdgesCreated);
-	OutData->SetNumberField(TEXT("defaults_applied"), DefaultsApplied);
-	OutData->SetNumberField(TEXT("warning_count"), Warnings.Num());
-	OutData->SetArrayField(TEXT("warnings"), Warnings);
-	OutData->SetBoolField(TEXT("saved"), bSaveAfterApply);
-	OutData->SetBoolField(TEXT("compiled"), bCompileAfterApply);
+	PopulateApplyFolderResult();
 	return true;
 }

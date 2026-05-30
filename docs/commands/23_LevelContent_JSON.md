@@ -374,3 +374,7 @@ Automation smoke：
 - evidence report 结构化结果
 - clone、align、attach、detach、set_folder、add_tag、remove_tag、convert/report-only、remap、repair operation
 - duplicate id、非 Actor alias 拒绝、protected delete 可控失败、merge conflict、repair 诊断
+
+## 2026-05-29 implementation note
+
+- `level_content_apply_json` refreshes component side effects after property import and then re-exports `property_value_read_back` from a reset string buffer. Readback values must represent the final property text once, not a concatenation of pre-refresh and post-refresh exports.

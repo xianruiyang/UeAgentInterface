@@ -4,10 +4,12 @@
 
 #include "Commands/UeAgentGraphViewUtils.h"
 #include "AnimGraphNode_StateMachineBase.h"
+#include "Animation/AnimInstance.h"
 #include "AssetRegistry/AssetRegistryModule.h"
 #include "BlueprintEditorLibrary.h"
 #include "BlueprintEditor.h"
 #include "BlueprintEditorTabs.h"
+#include "Components/PrimitiveComponent.h"
 #include "Components/StaticMeshComponent.h"
 #include "Components/SkeletalMeshComponent.h"
 #include "Components/ActorComponent.h"
@@ -17,6 +19,7 @@
 #include "EdGraphNode_Comment.h"
 #include "EdGraphSchema_K2.h"
 #include "Engine/Blueprint.h"
+#include "Engine/SkeletalMesh.h"
 #include "EditorViewportClient.h"
 #include "Editor.h"
 #include "FileHelpers.h"
@@ -25,6 +28,7 @@
 #include "GraphEditor.h"
 #include "GraphEditorSettings.h"
 #include "K2Node_CallFunction.h"
+#include "K2Node_CallParentFunction.h"
 #include "K2Node_FunctionEntry.h"
 #include "K2Node_FunctionResult.h"
 #include "K2Node_Knot.h"
@@ -382,6 +386,41 @@ namespace UeAgentBlueprintOps
 			}
 		}
 		return nullptr;
+	}
+
+	static bool IsUserConstructionScriptGraph(const UEdGraph* Graph)
+	{
+		return Graph && Graph->GetName().Equals(TEXT("UserConstructionScript"), ESearchCase::IgnoreCase);
+	}
+
+	static bool IsUnsafeConstructionScriptPcgCall(const FString& FunctionOwnerClass, const FString& FunctionName)
+	{
+		const bool bOwnerIsPcgComponent =
+			FunctionOwnerClass.Contains(TEXT("PCGComponent"), ESearchCase::IgnoreCase)
+			&& FunctionOwnerClass.Contains(TEXT("PCG"), ESearchCase::IgnoreCase);
+		if (bOwnerIsPcgComponent)
+		{
+			return FunctionName.Equals(TEXT("SetGraph"), ESearchCase::IgnoreCase)
+				|| FunctionName.Equals(TEXT("SetGraphInterface"), ESearchCase::IgnoreCase)
+				|| FunctionName.Equals(TEXT("Generate"), ESearchCase::IgnoreCase)
+				|| FunctionName.Equals(TEXT("GenerateGetTaskId"), ESearchCase::IgnoreCase)
+				|| FunctionName.Equals(TEXT("GenerateLocal"), ESearchCase::IgnoreCase)
+				|| FunctionName.Equals(TEXT("GenerateLocalGetTaskId"), ESearchCase::IgnoreCase)
+				|| FunctionName.Equals(TEXT("Cleanup"), ESearchCase::IgnoreCase)
+				|| FunctionName.Equals(TEXT("CleanupLocal"), ESearchCase::IgnoreCase)
+				|| FunctionName.Equals(TEXT("Refresh"), ESearchCase::IgnoreCase)
+				|| FunctionName.Equals(TEXT("RefreshAfterGraphChanged"), ESearchCase::IgnoreCase)
+				|| FunctionName.Equals(TEXT("NotifyPropertiesChangedFromBlueprint"), ESearchCase::IgnoreCase);
+		}
+
+		const bool bOwnerIsPcgGraphParametersHelpers =
+			FunctionOwnerClass.Contains(TEXT("PCGGraphParametersHelpers"), ESearchCase::IgnoreCase);
+		return bOwnerIsPcgGraphParametersHelpers && FunctionName.StartsWith(TEXT("Set"), ESearchCase::IgnoreCase);
+	}
+
+	static bool RequiresExplicitParentOrEventNode(const FString& FunctionName)
+	{
+		return FunctionName.Equals(TEXT("ReceiveBeginPlay"), ESearchCase::IgnoreCase);
 	}
 
 	static bool SaveBlueprintPackage(UBlueprint* Blueprint, FString& OutError)

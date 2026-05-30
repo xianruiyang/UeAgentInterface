@@ -24,6 +24,8 @@
 
 `level_spawn_wall_with_opening` 不进入废弃：它是带开口墙体的语义生成器，不只是放置一个 Actor。生成后的墙段可以由 Level Content 管理，但拆分算法仍属于专用命令。
 
+兼容说明：`spawn_actor` 仍可用于 bootstrap、探针验证和故障补修。若它运行在显式 `begin_transaction` / `end_transaction` 内，取消事务时会登记并清理本事务中新建的 Actor，`end_transaction(commit=false)` 会报告 `registered_spawned_actor_count` 和 `rolled_back_spawned_actor_count`。
+
 ## Transform / Attach / Folder / Tag
 
 | 指令 | 废弃说明 | 新流程 |

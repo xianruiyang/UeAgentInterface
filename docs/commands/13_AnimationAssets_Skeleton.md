@@ -7,6 +7,7 @@
 | 指令 | 作用 | 关键参数 |
 |---|---|---|
 | `anim_sequence_get_info` | 读取 AnimSequence 资产摘要 | `asset_path`；可选 `include_curve_keys` |
+| `anim_sequence_analyze_root_motion` | 采样 AnimSequence 的 root motion / root bone / 朝向骨骼轨道，输出转身角度、水平距离和建议曲线/marker | `asset_path`；可选 `sample_count`、`orientation_bone_name`、`include_samples`、`include_suggested_keys`、`meaningful_yaw_threshold_degrees`、`meaningful_translation_threshold_cm` |
 | `anim_sequence_screenshot` | 按帧/时间截取 AnimSequence 预览图，也可批量输出序列帧总览图 | `asset_path`；可选 `skeletal_mesh_path`、`frame_index` 或 `time_seconds`；批量可传 `start_time_seconds`、`count`、`interval_seconds` 或 `start_frame_index`、`count`、`frame_interval`；`format`、`quality`、`max_size`、`target`、`create_frame_sheet`、`write_individual_frames`、`frame_sheet_padding`、`frame_sheet_max_size`、`frame_sheet_label_scale` |
 | `anim_sequence_set_curve` | 统一管理 AnimSequence 曲线与 key | `asset_path`、`curve_name`；可选 `curve_type=float`、`curve_json`、`keys[]`、`time_seconds/value`、`clear_existing_keys`、`remove`、`meta_data_curve`、`remove_name_from_skeleton`、`save_after_set` |
 | `anim_sequence_set_bones` | 统一管理骨骼动画轨删除 | `asset_path`；可选 `remove_bone_names[]`、`include_children`、`children_excluded[]`、`exclude_children_recursively`、`remove_all_bone_animation`、`remove_virtual_bone_names[]`、`finalize_after_set`、`save_after_set` |
@@ -94,6 +95,42 @@ JSON 关键字段：
 - `metadata[]` 当前会回读 metadata 类与简单 `properties` 摘要。
 - `notify_tracks[]` 用于快速确认 notify 和 marker 依附在哪条轨上。
 - `sync_markers[]` 适合做 marker sync 自动化回读。
+
+### `anim_sequence_analyze_root_motion`
+
+说明：
+- 只读采样命令，用于判断动画是否真的包含 root 轨道运动，而不是只看 `root_motion_enabled` 开关。
+- 命令会同时读取 `ExtractRootMotionFromRange(0,time)` 的 root motion 结果、root bone 在采样点相对首帧的 raw delta，以及可选朝向骨骼相对首帧的 yaw delta，便于识别“资产有 root 轨道但 root 只位移，身体朝向转在 hips/pelvis 上”的情况。
+- 未传 `orientation_bone_name` 时会按 `hips -> pelvis -> spine -> root` 自动选择第一个存在的骨骼。
+- 适合给 Turn-In-Place、root-motion turn montage、pivot/turn 动作补 `TurnYaw`、`Distance`、`TurnStart`、`PivotCommit`、`TurnEnd` 等基础信号；`FootPlant` / `FootLock` 仍建议结合脚骨/视觉审核单独确认，不能只从 root 或 hips/pelvis 轨道推断。
+
+参数：
+- `asset_path`：目标 AnimSequence。
+- `sample_count`：采样点数，默认 `17`，范围 `2..121`。
+- `orientation_bone_name`：用于估计角色朝向变化的骨骼名；不传时自动选择 `hips/pelvis/spine/root`。
+- `include_samples`：是否返回每个采样点的 transform 和增量，默认 `true`。
+- `include_suggested_keys`：是否返回 `suggested_turn_yaw_keys` / `suggested_distance_keys`，默认 `true`。
+- `meaningful_yaw_threshold_degrees`：判定 root yaw 有意义的阈值，默认 `15`。
+- `meaningful_translation_threshold_cm`：判定水平位移有意义的阈值，默认 `2`。
+
+返回：
+- `root_motion_enabled`、`force_root_lock`、`has_root_bone_track`、`root_bone_name`、`orientation_bone_name`、`orientation_bone_index`。
+- `total_yaw_degrees`、`total_horizontal_distance_cm`、`total_root_motion_path_distance_cm`、`max_abs_root_motion_yaw_degrees`、`max_root_motion_horizontal_distance_cm`。
+- `max_abs_raw_root_delta_yaw_degrees`、`max_raw_root_delta_horizontal_distance_cm`、`total_orientation_bone_delta_yaw_degrees`、`max_abs_orientation_bone_delta_yaw_degrees`。
+- `has_meaningful_root_yaw`、`has_meaningful_raw_root_yaw`、`has_meaningful_orientation_bone_yaw`、`has_meaningful_root_translation`、`has_meaningful_raw_root_translation`。
+- `turn_classification`：`turn_positive_90`、`turn_negative_90`、`turn_positive_180`、`turn_negative_180`、`turn_positive_partial`、`turn_negative_partial` 或 `none`；`turn_classification_source` 说明来自 `root_motion` 还是 `orientation_bone`。
+- `suggested_markers[]`：默认包含 `TurnStart`、`PivotCommit`、`TurnEnd`。
+- `suggested_turn_yaw_source`、`suggested_root_motion_yaw_keys[]`、`suggested_orientation_yaw_keys[]`、`suggested_turn_yaw_keys[]` / `suggested_distance_keys[]`：可直接转换为 `anim_sequence_set_curve` 的 `keys[]`；`suggested_distance_keys[]` 使用累计 root motion 路径距离，保持单调递增。
+- `samples[]`：采样点明细；包含 root motion transform、累计 path distance、raw root transform 和 raw root delta。
+
+示例：
+```json
+{
+  "asset_path": "/Game/Characters/PaladinRootMotion/Animations/sword_and_shield_turn_RM",
+  "sample_count": 17,
+  "include_samples": true
+}
+```
 
 ### `anim_sequence_screenshot`
 

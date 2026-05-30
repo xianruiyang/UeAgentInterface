@@ -3139,6 +3139,28 @@ bool FUeAgentInterfaceAnimationAssetsSmokeTest::RunTest(const FString& Parameter
 		TestTrue(TEXT("Animation assets sequence frames > 0"), static_cast<int32>((*SequenceInfoBeforeData)->GetIntegerField(TEXT("num_frames"))) > 0);
 	}
 
+	const FString RootMotionAnalysisBody = MakeExecRequestBody(
+		TEXT("smoke-anim-assets-root-motion-analysis-001"),
+		TEXT("anim_sequence_analyze_root_motion"),
+		FString::Printf(TEXT("{\"asset_path\":\"%s\",\"sample_count\":5,\"include_samples\":false,\"include_suggested_keys\":true}"), *SequenceAssetPath));
+	FHttpSmokeResult RootMotionAnalysisResult;
+	TestTrue(TEXT("Animation assets anim_sequence_analyze_root_motion request succeeded"), ExecuteHttpJsonRequest(TEXT("POST"), ServerScope.BaseUrl + TEXT("/api/exec"), ServerScope.Token, RootMotionAnalysisBody, RootMotionAnalysisResult));
+	TestEqual(TEXT("Animation assets anim_sequence_analyze_root_motion status code"), RootMotionAnalysisResult.StatusCode, 200);
+
+	TSharedPtr<FJsonObject> RootMotionAnalysisJson;
+	TestTrue(TEXT("Animation assets anim_sequence_analyze_root_motion parses JSON"), ParseJson(RootMotionAnalysisResult.Body, RootMotionAnalysisJson));
+	const TSharedPtr<FJsonObject>* RootMotionAnalysisData = nullptr;
+	TestTrue(TEXT("Animation assets anim_sequence_analyze_root_motion contains data object"), RootMotionAnalysisJson.IsValid() && RootMotionAnalysisJson->TryGetObjectField(TEXT("data"), RootMotionAnalysisData) && RootMotionAnalysisData && RootMotionAnalysisData->IsValid());
+	if (RootMotionAnalysisData && RootMotionAnalysisData->IsValid())
+	{
+		TestTrue(TEXT("Animation assets root motion analysis length > 0"), (*RootMotionAnalysisData)->GetNumberField(TEXT("sequence_length")) > 0.0);
+		TestEqual(TEXT("Animation assets root motion analysis sample count"), static_cast<int32>((*RootMotionAnalysisData)->GetIntegerField(TEXT("sample_count"))), 5);
+		const TArray<TSharedPtr<FJsonValue>>* SuggestedMarkers = nullptr;
+		TestTrue(TEXT("Animation assets root motion analysis suggested markers exists"), (*RootMotionAnalysisData)->TryGetArrayField(TEXT("suggested_markers"), SuggestedMarkers) && SuggestedMarkers != nullptr && SuggestedMarkers->Num() == 3);
+		const TArray<TSharedPtr<FJsonValue>>* SuggestedTurnYawKeys = nullptr;
+		TestTrue(TEXT("Animation assets root motion analysis suggested yaw keys exist"), (*RootMotionAnalysisData)->TryGetArrayField(TEXT("suggested_turn_yaw_keys"), SuggestedTurnYawKeys) && SuggestedTurnYawKeys != nullptr && SuggestedTurnYawKeys->Num() == 5);
+	}
+
 	TArray<FString> InitialTrackNames;
 	TestTrue(TEXT("Animation assets initial track names exist"), GetTrackNames(SequenceInfoBeforeData, InitialTrackNames));
 	FString TrackToRemove;

@@ -1048,6 +1048,7 @@ bool FUeAgentHttpServer::CmdBeginTransaction(const FUeAgentRequestContext& Ctx, 
 	FString Label = TEXT("UeAgentInterface Transaction");
 	JsonTryGetString(Ctx.Params, TEXT("label"), Label);
 	ActiveTransactionIndex = GEditor->BeginTransaction(FText::FromString(Label));
+	ActiveTransactionSpawnedActors.Reset();
 	OutData->SetNumberField(TEXT("transaction_index"), ActiveTransactionIndex);
 	OutData->SetStringField(TEXT("label"), Label);
 	return true;
@@ -1065,6 +1066,8 @@ bool FUeAgentHttpServer::CmdEndTransaction(const FUeAgentRequestContext& Ctx, TS
 	bool bCommit = true;
 	JsonTryGetBool(Ctx.Params, TEXT("commit"), bCommit);
 
+	const int32 RegisteredSpawnedActorCount = ActiveTransactionSpawnedActors.Num();
+	int32 RolledBackSpawnedActorCount = 0;
 	if (bCommit)
 	{
 		GEditor->EndTransaction();
@@ -1074,9 +1077,35 @@ bool FUeAgentHttpServer::CmdEndTransaction(const FUeAgentRequestContext& Ctx, TS
 	{
 		GEditor->CancelTransaction(ActiveTransactionIndex);
 		OutData->SetBoolField(TEXT("committed"), false);
+		for (const FTransactionSpawnedActorRecord& Record : ActiveTransactionSpawnedActors)
+		{
+			AActor* Actor = Record.Actor.Get();
+			if (!Actor || Actor->IsActorBeingDestroyed())
+			{
+				continue;
+			}
+
+			Actor->Modify();
+			Actor->Destroy();
+			RolledBackSpawnedActorCount++;
+
+			UPackage* LevelPackage = Record.LevelPackage.Get();
+			if (LevelPackage && !Record.bLevelPackageWasDirtyBeforeSpawn)
+			{
+				LevelPackage->SetDirtyFlag(false);
+			}
+			UPackage* ActorPackage = Record.ActorPackage.Get();
+			if (ActorPackage && ActorPackage != LevelPackage && !Record.bActorPackageWasDirtyBeforeSpawn)
+			{
+				ActorPackage->SetDirtyFlag(false);
+			}
+		}
 	}
 
 	OutData->SetNumberField(TEXT("transaction_index"), ActiveTransactionIndex);
+	OutData->SetNumberField(TEXT("registered_spawned_actor_count"), RegisteredSpawnedActorCount);
+	OutData->SetNumberField(TEXT("rolled_back_spawned_actor_count"), RolledBackSpawnedActorCount);
+	ActiveTransactionSpawnedActors.Reset();
 	ActiveTransactionIndex = INDEX_NONE;
 	return true;
 }

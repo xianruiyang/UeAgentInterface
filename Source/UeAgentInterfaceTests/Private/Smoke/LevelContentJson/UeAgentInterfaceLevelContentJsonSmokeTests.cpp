@@ -124,6 +124,40 @@ namespace
 		return false;
 	}
 
+	static bool TryGetResourcePropertyResultStringField(
+		const TArray<TSharedPtr<FJsonValue>>* ResourceResults,
+		const FString& ResourceId,
+		const FString& PropertyPath,
+		const TCHAR* FieldName,
+		FString& OutValue)
+	{
+		const TSharedPtr<FJsonObject> ResourceResult = FindJsonObjectByStringField(ResourceResults, TEXT("id"), ResourceId);
+		if (!ResourceResult.IsValid())
+		{
+			return false;
+		}
+
+		const TArray<TSharedPtr<FJsonValue>>* PropertyResults = nullptr;
+		if (!ResourceResult->TryGetArrayField(TEXT("property_results"), PropertyResults) || !PropertyResults)
+		{
+			return false;
+		}
+
+		for (const TSharedPtr<FJsonValue>& Value : *PropertyResults)
+		{
+			const TSharedPtr<FJsonObject> PropertyResult = Value.IsValid() ? Value->AsObject() : nullptr;
+			FString ActualPath;
+			if (PropertyResult.IsValid()
+				&& PropertyResult->TryGetStringField(TEXT("property_path"), ActualPath)
+				&& ActualPath.Equals(PropertyPath, ESearchCase::IgnoreCase)
+				&& PropertyResult->TryGetStringField(FieldName, OutValue))
+			{
+				return true;
+			}
+		}
+		return false;
+	}
+
 	static bool BoundsExtentExceeds(const TSharedPtr<FJsonObject>& Resource, double MinX, double MinY, double MinZ)
 	{
 		if (!Resource.IsValid())
@@ -362,6 +396,13 @@ bool FUeAgentInterfaceLevelContentJsonCrudSmokeTest::RunTest(const FString& Para
 	TestTrue(TEXT("apply exposes resource results"), ApplyData->TryGetArrayField(TEXT("resource_results"), ApplyResourceResults));
 	TestTrue(TEXT("component collision profile setter is applied"), ResourcePropertyResultHasBoolFlag(ApplyResourceResults, CrateId, TEXT("StaticMeshComponent.BodyInstance.CollisionProfileName"), TEXT("collision_profile_setter_applied")));
 	TestTrue(TEXT("component collision state refresh is applied"), ResourcePropertyResultHasBoolFlag(ApplyResourceResults, CrateId, TEXT("StaticMeshComponent.BodyInstance.CollisionProfileName"), TEXT("primitive_collision_state_refreshed")));
+	FString LightIntensityReadBack;
+	TestTrue(TEXT("normal property readback is reported"), TryGetResourcePropertyResultStringField(ApplyResourceResults, LightId, TEXT("PointLightComponent.Intensity"), TEXT("property_value_read_back"), LightIntensityReadBack));
+	int32 FirstDot = INDEX_NONE;
+	int32 LastDot = INDEX_NONE;
+	const bool bHasDot = LightIntensityReadBack.FindChar(TEXT('.'), FirstDot);
+	LightIntensityReadBack.FindLastChar(TEXT('.'), LastDot);
+	TestTrue(TEXT("normal property readback is not concatenated"), LightIntensityReadBack.StartsWith(TEXT("1250")) && (!bHasDot || FirstDot == LastDot));
 	const TSharedPtr<FJsonObject> NavApplyResult = FindJsonObjectByStringField(ApplyResourceResults, TEXT("id"), NavId);
 	bool bNavBoundsUpdated = false;
 	TestTrue(TEXT("nav mesh bounds volume creates brush bounds and updates navigation"), NavApplyResult.IsValid() && NavApplyResult->TryGetBoolField(TEXT("nav_bounds_updated"), bNavBoundsUpdated) && bNavBoundsUpdated && BoundsExtentExceeds(NavApplyResult, 250.0, 250.0, 150.0));
@@ -429,6 +470,9 @@ bool FUeAgentInterfaceLevelContentJsonCrudSmokeTest::RunTest(const FString& Para
 	TestTrue(TEXT("collision patch exposes resource results"), NoCollisionPatchData->TryGetArrayField(TEXT("resource_results"), PatchResourceResults));
 	TestTrue(TEXT("collision patch uses profile setter"), ResourcePropertyResultHasBoolFlag(PatchResourceResults, CrateId, TEXT("StaticMeshComponent.BodyInstance.CollisionProfileName"), TEXT("collision_profile_setter_applied")));
 	TestTrue(TEXT("collision patch refreshes primitive physics state"), ResourcePropertyResultHasBoolFlag(PatchResourceResults, CrateId, TEXT("StaticMeshComponent.BodyInstance.CollisionProfileName"), TEXT("primitive_collision_state_refreshed")));
+	FString CollisionProfileReadBack;
+	TestTrue(TEXT("collision profile readback is reported"), TryGetResourcePropertyResultStringField(PatchResourceResults, CrateId, TEXT("StaticMeshComponent.BodyInstance.CollisionProfileName"), TEXT("property_value_read_back"), CollisionProfileReadBack));
+	TestEqual(TEXT("collision profile readback is not concatenated"), CollisionProfileReadBack, FString(TEXT("NoCollision")));
 
 	TSharedPtr<FJsonObject> NoCollisionTraceData;
 	TestTrue(TEXT("level_trace_world_ray after NoCollision patch succeeds"), ExecLevelContentSmokeCommand(this, ServerScope, TEXT("lcj-collision-trace"), TEXT("level_trace_world_ray"), TEXT("{\"start\":[61000,61000,4800],\"direction\":[0,0,1],\"trace_distance\":400,\"trace_channel\":\"Visibility\",\"trace_complex\":false,\"include_all_hits\":true,\"max_hits\":16,\"include_actor_folder_tags\":true}"), NoCollisionTraceData));

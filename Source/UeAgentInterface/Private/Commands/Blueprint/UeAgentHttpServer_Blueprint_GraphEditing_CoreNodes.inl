@@ -438,6 +438,64 @@ bool FUeAgentHttpServer::CmdBlueprintAddCallFunctionNode(const FUeAgentRequestCo
 
 	}
 
+	bool bAllowUnsafeConstructionScriptPcgGeneration = false;
+
+	JsonTryGetBool(Ctx.Params, TEXT("allow_unsafe_construction_script_pcg_generation"), bAllowUnsafeConstructionScriptPcgGeneration);
+
+	if (!bAllowUnsafeConstructionScriptPcgGeneration
+		&& UeAgentBlueprintOps::IsUserConstructionScriptGraph(Graph)
+		&& UeAgentBlueprintOps::IsUnsafeConstructionScriptPcgCall(OwnerClass->GetPathName(), Function->GetName()))
+
+	{
+
+		if (!OutData.IsValid())
+
+		{
+
+			OutData = MakeShared<FJsonObject>();
+
+		}
+
+		OutData->SetStringField(TEXT("asset_path"), Blueprint->GetOutermost()->GetName());
+
+		OutData->SetStringField(TEXT("graph_name"), Graph->GetName());
+
+		OutData->SetStringField(TEXT("function_owner_class"), OwnerClass->GetPathName());
+
+		OutData->SetStringField(TEXT("function_name"), Function->GetName());
+
+		OutData->SetBoolField(TEXT("allow_unsafe_construction_script_pcg_generation"), bAllowUnsafeConstructionScriptPcgGeneration);
+
+		OutError = FString::Printf(
+			TEXT("unsafe_construction_script_pcg_generation_blocked:%s:%s.%s"),
+			*Graph->GetName(),
+			*OwnerClass->GetPathName(),
+			*Function->GetName());
+
+		return false;
+
+	}
+
+	bool bAllowEventFunctionCall = false;
+	JsonTryGetBool(Ctx.Params, TEXT("allow_event_function_call"), bAllowEventFunctionCall);
+	if (!bAllowEventFunctionCall && UeAgentBlueprintOps::RequiresExplicitParentOrEventNode(Function->GetName()))
+	{
+		if (!OutData.IsValid())
+		{
+			OutData = MakeShared<FJsonObject>();
+		}
+		OutData->SetStringField(TEXT("asset_path"), Blueprint->GetOutermost()->GetName());
+		OutData->SetStringField(TEXT("graph_name"), Graph->GetName());
+		OutData->SetStringField(TEXT("function_owner_class"), OwnerClass->GetPathName());
+		OutData->SetStringField(TEXT("function_name"), Function->GetName());
+		OutData->SetBoolField(TEXT("allow_event_function_call"), bAllowEventFunctionCall);
+		OutError = FString::Printf(
+			TEXT("event_function_call_requires_explicit_parent_node:%s.%s"),
+			*OwnerClass->GetPathName(),
+			*Function->GetName());
+		return false;
+	}
+
 
 
 	double XNum = 0.0;

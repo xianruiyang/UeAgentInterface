@@ -869,6 +869,9 @@ bool FUeAgentHttpServer::CmdSpawnActor(const FUeAgentRequestContext& Ctx, TShare
 		FScopeLock Lock(&TransactionMutex);
 		return ActiveTransactionIndex == INDEX_NONE;
 	}();
+	UPackage* SpawnLevelPackage = (World->GetCurrentLevel() ? World->GetCurrentLevel()->GetOutermost() : World->GetOutermost());
+	const bool bSpawnLevelPackageWasDirty = SpawnLevelPackage ? SpawnLevelPackage->IsDirty() : false;
+
 	TOptional<FScopedTransaction> AutoTx;
 	if (bUseAutoTx)
 	{
@@ -884,6 +887,23 @@ bool FUeAgentHttpServer::CmdSpawnActor(const FUeAgentRequestContext& Ctx, TShare
 	{
 		OutError = TEXT("spawn_failed");
 		return false;
+	}
+	NewActor->Modify();
+
+	bool bRegisteredWithActiveTransaction = false;
+	{
+		FScopeLock Lock(&TransactionMutex);
+		if (ActiveTransactionIndex != INDEX_NONE)
+		{
+			FTransactionSpawnedActorRecord Record;
+			Record.Actor = NewActor;
+			Record.LevelPackage = SpawnLevelPackage;
+			Record.ActorPackage = NewActor->GetOutermost();
+			Record.bLevelPackageWasDirtyBeforeSpawn = bSpawnLevelPackageWasDirty;
+			Record.bActorPackageWasDirtyBeforeSpawn = (Record.ActorPackage == Record.LevelPackage) ? bSpawnLevelPackageWasDirty : false;
+			ActiveTransactionSpawnedActors.Add(Record);
+			bRegisteredWithActiveTransaction = true;
+		}
 	}
 
 	FString Label;
@@ -981,6 +1001,8 @@ bool FUeAgentHttpServer::CmdSpawnActor(const FUeAgentRequestContext& Ctx, TShare
 	OutData->SetBoolField(TEXT("snap_ground_hit"), bGroundHit);
 	OutData->SetBoolField(TEXT("snap_use_actor_bounds"), bSnapUseActorBounds);
 	OutData->SetNumberField(TEXT("ground_z"), GroundZ);
+	OutData->SetBoolField(TEXT("auto_transaction"), bUseAutoTx);
+	OutData->SetBoolField(TEXT("registered_with_active_transaction"), bRegisteredWithActiveTransaction);
 	return true;
 }
 

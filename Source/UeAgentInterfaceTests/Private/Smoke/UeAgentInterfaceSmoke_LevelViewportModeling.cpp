@@ -1938,6 +1938,8 @@ bool FUeAgentInterfaceLevelActorWorkflowSmokeTest::RunTest(const FString& Parame
 
 	const FString ActorLabel = FString::Printf(TEXT("SmokeActor_%s"), *FGuid::NewGuid().ToString(EGuidFormats::Digits).Left(8));
 	const FString TransactionLabel = FString::Printf(TEXT("SmokeTx_%s"), *FGuid::NewGuid().ToString(EGuidFormats::Digits).Left(8));
+	const FString RollbackActorLabel = FString::Printf(TEXT("SmokeRollbackActor_%s"), *FGuid::NewGuid().ToString(EGuidFormats::Digits).Left(8));
+	const FString RollbackTransactionLabel = FString::Printf(TEXT("SmokeRollbackTx_%s"), *FGuid::NewGuid().ToString(EGuidFormats::Digits).Left(8));
 	FString DuplicatedActorName;
 
 	auto GetVectorComponent = [this](const TSharedPtr<FJsonObject>* Object, const TCHAR* FieldName, const TCHAR* ComponentName, double ExpectedValue, double Tolerance, const TCHAR* AssertionLabel)
@@ -2180,6 +2182,50 @@ bool FUeAgentInterfaceLevelActorWorkflowSmokeTest::RunTest(const FString& Parame
 	TestTrue(TEXT("Level get_actor_transform after redo contains data object"), GetTransformRedoJson.IsValid() && GetTransformRedoJson->TryGetObjectField(TEXT("data"), GetTransformRedoData) && GetTransformRedoData && GetTransformRedoData->IsValid());
 	GetVectorComponent(GetTransformRedoData, TEXT("location"), TEXT("x"), 200.0, 0.1, TEXT("Level redo transform location.x"));
 	GetVectorComponent(GetTransformRedoData, TEXT("location"), TEXT("y"), 300.0, 0.1, TEXT("Level redo transform location.y"));
+
+	const FString BeginRollbackTransactionBody = MakeExecRequestBody(
+		TEXT("smoke-level-begin-rollback-transaction-001"),
+		TEXT("begin_transaction"),
+		FString::Printf(TEXT("{\"label\":\"%s\"}"), *RollbackTransactionLabel));
+	FHttpSmokeResult BeginRollbackTransactionResult;
+	TestTrue(TEXT("Level begin rollback transaction request succeeded"), ExecuteHttpJsonRequest(TEXT("POST"), ServerScope.BaseUrl + TEXT("/api/exec"), ServerScope.Token, BeginRollbackTransactionBody, BeginRollbackTransactionResult));
+	TestEqual(TEXT("Level begin rollback transaction status code"), BeginRollbackTransactionResult.StatusCode, 200);
+
+	const FString SpawnRollbackBody = MakeExecRequestBody(
+		TEXT("smoke-level-spawn-rollback-001"),
+		TEXT("spawn_actor"),
+		FString::Printf(
+			TEXT("{\"class_path\":\"/Script/Engine.StaticMeshActor\",\"label\":\"%s\",\"static_mesh\":\"/Engine/BasicShapes/Cube.Cube\",\"location\":{\"x\":320,\"y\":0,\"z\":128},\"scale\":{\"x\":0.5,\"y\":0.5,\"z\":0.5}}"),
+			*RollbackActorLabel));
+	FHttpSmokeResult SpawnRollbackResult;
+	TestTrue(TEXT("Level spawn rollback actor request succeeded"), ExecuteHttpJsonRequest(TEXT("POST"), ServerScope.BaseUrl + TEXT("/api/exec"), ServerScope.Token, SpawnRollbackBody, SpawnRollbackResult));
+	TestEqual(TEXT("Level spawn rollback actor status code"), SpawnRollbackResult.StatusCode, 200);
+
+	const FString EndRollbackTransactionBody = MakeExecRequestBody(
+		TEXT("smoke-level-end-rollback-transaction-001"),
+		TEXT("end_transaction"),
+		TEXT("{\"commit\":false}"));
+	FHttpSmokeResult EndRollbackTransactionResult;
+	TestTrue(TEXT("Level rollback transaction request succeeded"), ExecuteHttpJsonRequest(TEXT("POST"), ServerScope.BaseUrl + TEXT("/api/exec"), ServerScope.Token, EndRollbackTransactionBody, EndRollbackTransactionResult));
+	TestEqual(TEXT("Level rollback transaction status code"), EndRollbackTransactionResult.StatusCode, 200);
+
+	TSharedPtr<FJsonObject> EndRollbackTransactionJson;
+	TestTrue(TEXT("Level rollback transaction response parses as JSON"), ParseJson(EndRollbackTransactionResult.Body, EndRollbackTransactionJson));
+	TestTrue(TEXT("Level rollback transaction root ok=true"), EndRollbackTransactionJson.IsValid() && EndRollbackTransactionJson->GetBoolField(TEXT("ok")));
+
+	const TSharedPtr<FJsonObject>* EndRollbackTransactionData = nullptr;
+	TestTrue(TEXT("Level rollback transaction contains data object"), EndRollbackTransactionJson.IsValid() && EndRollbackTransactionJson->TryGetObjectField(TEXT("data"), EndRollbackTransactionData) && EndRollbackTransactionData && EndRollbackTransactionData->IsValid());
+	if (EndRollbackTransactionData && EndRollbackTransactionData->IsValid())
+	{
+		TestTrue(TEXT("Level rollback transaction registered spawned actor"), (*EndRollbackTransactionData)->GetNumberField(TEXT("registered_spawned_actor_count")) >= 1.0);
+		TestTrue(TEXT("Level rollback transaction removed spawned actor"), (*EndRollbackTransactionData)->GetNumberField(TEXT("rolled_back_spawned_actor_count")) >= 1.0);
+	}
+
+	bool bRollbackActorStillExists = true;
+	if (ActorExistsByLabel(RollbackActorLabel, bRollbackActorStillExists))
+	{
+		TestFalse(TEXT("Level rollback actor removed from world"), bRollbackActorStillExists);
+	}
 
 	const FString DuplicateBody = MakeExecRequestBody(
 		TEXT("smoke-level-duplicate-001"),

@@ -12,7 +12,7 @@
 | `blueprint_get_info` | 读取 Blueprint 基础信息 | `asset_path` |
 | `blueprint_list_graphs` | 列出 UberGraph / 函数图 / 宏图 / 委托图 | `asset_path` |
 | `blueprint_export_folder` | 导出 Actor Blueprint 到固定文件夹式 JSON 结构 | `asset_path`、可选 `clean_output_dir`、`include_validation` |
-| `blueprint_apply_folder` | 从固定文件夹式 JSON 结构回写 Actor Blueprint | `asset_path`、可选 `create_if_missing`、`compile_after_apply`、`save_after_apply` |
+| `blueprint_apply_folder` | 从固定文件夹式 JSON 结构回写 Actor Blueprint | `asset_path`、可选 `create_if_missing`、`compile_after_apply`、`save_after_apply`、`allow_unsafe_construction_script_pcg_generation` |
 
 - `blueprint_compile` 只有在 `include_messages=true` 时才会回传过滤后的编译消息数组。
 - `blueprint_list_graphs` 返回 `graphs[]` 和 `graph_count`，适合做“新增函数图/宏图/委托图后”的结构校验。
@@ -22,6 +22,8 @@
   - `/Game/Blueprints/BP_Door`
   - `Saved/UeAssetFolders/ActorBlueprint/Game/Blueprints/BP_Door`
 - `blueprint_apply_folder` 当前对支持的图采用“保留内建入口节点，重建其余节点”的方式应用。
+- `blueprint_apply_folder` 默认拒绝在 `Function_UserConstructionScript.json` / `UserConstructionScript` 中写入会触发 PCG 编辑器生成或 PCG 参数变更的 `call_function`，包括 `UPCGComponent::SetGraph`、`GenerateLocal`、`Generate`、`Cleanup*`、`Refresh*`、`NotifyPropertiesChangedFromBlueprint` 以及 `PCGGraphParametersHelpers::Set*`。这类调用可能在蓝图编译、重实例化或组件实例数据恢复阶段触发 PCG 生成链路并导致编辑器崩溃；确需导入历史资产时必须显式传 `allow_unsafe_construction_script_pcg_generation=true`，并只用于人工隔离/迁移。
+- 当 `compile_after_apply=true` 时，`blueprint_apply_folder` 会使用编译日志做强校验；如果编译产生 error 或 Blueprint 状态为 `BS_Error`，命令返回 400，`error=compile_failed_after_apply`，不会继续执行最终保存。返回数据包含 `compile_status`、`compile_error_count`、`compile_warning_count`、`compile_message_total_count`、`compile_has_error` 和最多 64 条 `compile_messages`（warning/error）。
 - `function_graph / macro_graph` 的边定义可引用保留节点 ID：
   - `__entry__`
   - `__result__`
@@ -42,6 +44,7 @@
 | `blueprint_layout_all_graphs` | 自动排版一个 Blueprint 资产内的多个/全部图 | `asset_path`、`graph_name`、`graph_path`、`graph_names`、`graphs`、`include_ubergraphs`、`include_function_graphs`、`include_macro_graphs`、`include_delegate_graphs`、`include_nested_graphs`、`skip_empty_graphs`、`stop_on_error`、`include_graph_result_details`、`horizontal_spacing`、`vertical_spacing`、`node_padding`、`origin_x`、`origin_y`、`allow_geometry_view_capture`、`allow_focused_geometry_capture`、`allow_remove_all_reroute_nodes`、`layout_report_file`、`insert_reroute_nodes`、`replace_existing_reroute_nodes`、`compile_after_layout`、`save_after_layout` |
 
 - 当前节点创建能力集中在：标准事件、自定义事件、函数调用、变量节点，以及按类创建的通用非结构节点。
+- `blueprint_add_call_function_node` 与 `blueprint_apply_folder` 使用同一套 Construction Script/PCG 安全门禁：默认不允许向 `UserConstructionScript` 添加会触发 PCG 生成或 PCG 参数变更的函数调用；确需导入旧内容时同样必须显式传 `allow_unsafe_construction_script_pcg_generation=true`。
 - `graph_name` 现在既可以传图名，也可以直接传 `graph_path`；对子图、状态机子图、Transition Rule 图优先建议传 `graph_path`，避免重名歧义。
 - 普通图节点、标准事件、自定义事件、变量节点和组件绑定事件都应通过 `graphs/*.json` 的结构化节点描述表达；旧原子图节点入口仅保留在废弃分册。
 
@@ -325,9 +328,24 @@
   - `event`
   - `custom_event`
   - `call_function`
+  - `call_parent_function`
   - `variable_node`
   - `component_bound_event`
   - `node_by_class`
+
+`call_parent_function` 只用于显式的“调用父类实现”节点，例如需要真实调用父类 `ReceiveBeginPlay` 时：
+
+```json
+{
+  "id": "parent_begin_play",
+  "node_type": "call_parent_function",
+  "function_owner_class": "/Script/Engine.Actor",
+  "function_name": "ReceiveBeginPlay",
+  "pos": { "x": 260, "y": 0 }
+}
+```
+
+不要用 `call_function` 表达 `ReceiveBeginPlay`。`blueprint_apply_folder` 和 `blueprint_add_call_function_node` 默认会拒绝这类泛化事件函数调用，返回 `event_function_call_requires_explicit_parent_node`。`blueprint_export_folder` 也会跳过 UE 自动放置的 disabled ghost node，避免把未使用的默认 BeginPlay/parent-call 节点固化进 folder JSON；历史资产里已经存在的残留普通 `ReceiveBeginPlay` 调用不会自动清理，需要人工确认后删除。
 
 `custom_event` 的最小结构示例：
 
@@ -357,6 +375,7 @@
 
 - `blueprint_export_folder / blueprint_apply_folder` 的 `graphs/*.json` 现已支持以下专用 `node_type`：
   - `custom_event`
+  - `call_parent_function`
   - `enhanced_input_action_event`
   - `dynamic_cast`
   - `enhanced_input_get_local_player_subsystem`
@@ -366,6 +385,8 @@
 ## CDO 默认值与继承组件
 
 `components/tree.json` 会导出 SCS 组件以及 Blueprint CDO 上继承/native 组件。继承组件会带 `source="cdo"`、`inherited=true`、`template_name`；回写时这类组件只允许修改模板属性，不会被新增、删除或重建。
+
+组件属性回写不能只依赖裸 `ImportText`。`StaticMesh` 会通过 `UStaticMeshComponent::SetStaticMesh` 应用；`SkeletalMeshComponent` 的 `SkeletalMeshAsset`、`AnimClass`、`AnimationMode` 会分别通过 `SetSkeletalMesh(..., true)`、`SetAnimInstanceClass`、`SetAnimationMode(..., true)` 应用，并触发模板 `PostEditChange`、render state/bounds 刷新和 Blueprint modified 标记。这样读回值、组件预览视口和运行时实例保持一致；如果同类对象属性读回正确但预览或实例未刷新，应优先修复 folder workflow 的 setter/刷新语义，而不是在业务蓝图里加 BeginPlay 补丁。
 
 `members/defaults.json` 会导出可编辑 CDO 默认值，例如 GameMode 的 `DefaultPawnClass`、角色 Blueprint 的输入/视觉默认引用。回写后仍需要 `blueprint_compile` 和读回确认，不要只看 `ok=true`。
 

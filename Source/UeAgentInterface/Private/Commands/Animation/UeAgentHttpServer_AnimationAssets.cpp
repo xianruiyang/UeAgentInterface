@@ -820,6 +820,14 @@ namespace UeAgentAnimationAssetOps
 		return Obj;
 	}
 
+	static TSharedPtr<FJsonObject> BuildSimpleKeyJson(const double TimeSeconds, const double Value)
+	{
+		TSharedPtr<FJsonObject> Obj = MakeShared<FJsonObject>();
+		Obj->SetNumberField(TEXT("time_seconds"), TimeSeconds);
+		Obj->SetNumberField(TEXT("value"), Value);
+		return Obj;
+	}
+
 	static TSharedPtr<FJsonObject> BuildCurveJson(UAnimSequenceBase* Sequence, const FName CurveName, const ERawCurveTrackTypes CurveType, const bool bIncludeKeys)
 	{
 		TSharedPtr<FJsonObject> Item = MakeShared<FJsonObject>();
@@ -1893,6 +1901,7 @@ namespace UeAgentAnimationViewportOps
 bool FUeAgentHttpServer::ExecuteAnimSequenceCommand(const FString& CommandLower, const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	if (CommandLower == TEXT("anim_sequence_get_info")) return CmdAnimSequenceGetInfo(Ctx, OutData, OutError);
+	if (CommandLower == TEXT("anim_sequence_analyze_root_motion")) return CmdAnimSequenceAnalyzeRootMotion(Ctx, OutData, OutError);
 	if (CommandLower == TEXT("anim_sequence_screenshot")) return CmdAnimSequenceScreenshot(Ctx, OutData, OutError);
 	if (CommandLower == TEXT("anim_sequence_set_settings")) return CmdAnimSequenceSetSettings(Ctx, OutData, OutError);
 	if (CommandLower == TEXT("anim_sequence_set_preview_mesh")) return CmdAnimSequenceSetPreviewMesh(Ctx, OutData, OutError);
@@ -2396,6 +2405,328 @@ bool FUeAgentHttpServer::CmdAnimSequenceGetInfo(const FUeAgentRequestContext& Ct
 	OutData->SetArrayField(TEXT("sync_markers"), SyncMarkers);
 	OutData->SetArrayField(TEXT("unique_marker_names"), UniqueMarkerNamesJson);
 	OutData->SetArrayField(TEXT("unique_notify_names"), UniqueNotifyNamesJson);
+	return true;
+}
+
+bool FUeAgentHttpServer::CmdAnimSequenceAnalyzeRootMotion(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+{
+	FString AssetPath;
+	if (!JsonTryGetString(Ctx.Params, TEXT("asset_path"), AssetPath) || AssetPath.IsEmpty())
+	{
+		OutError = TEXT("missing_asset_path");
+		return false;
+	}
+
+	UAnimSequence* Sequence = UeAgentAnimationAssetOps::LoadAnimSequence(AssetPath);
+	if (!Sequence)
+	{
+		OutError = TEXT("anim_sequence_not_found");
+		return false;
+	}
+
+	float SequenceLengthFloat = 0.0f;
+	int32 NumFrames = 0;
+	UAnimationBlueprintLibrary::GetSequenceLength(Sequence, SequenceLengthFloat);
+	UAnimationBlueprintLibrary::GetNumFrames(Sequence, NumFrames);
+	const double SequenceLength = static_cast<double>(SequenceLengthFloat);
+	if (SequenceLength <= 0.0)
+	{
+		OutError = TEXT("invalid_sequence_length");
+		return false;
+	}
+
+	double SampleCountNumber = 17.0;
+	JsonTryGetNumber(Ctx.Params, TEXT("sample_count"), SampleCountNumber);
+	const int32 SampleCount = FMath::Clamp(static_cast<int32>(FMath::RoundToInt(SampleCountNumber)), 2, 121);
+
+	bool bIncludeSamples = true;
+	JsonTryGetBool(Ctx.Params, TEXT("include_samples"), bIncludeSamples);
+	bool bIncludeSuggestedKeys = true;
+	JsonTryGetBool(Ctx.Params, TEXT("include_suggested_keys"), bIncludeSuggestedKeys);
+
+	double MeaningfulYawThresholdDegrees = 15.0;
+	JsonTryGetNumber(Ctx.Params, TEXT("meaningful_yaw_threshold_degrees"), MeaningfulYawThresholdDegrees);
+	MeaningfulYawThresholdDegrees = FMath::Max(0.0, MeaningfulYawThresholdDegrees);
+
+	double MeaningfulTranslationThresholdCm = 2.0;
+	JsonTryGetNumber(Ctx.Params, TEXT("meaningful_translation_threshold_cm"), MeaningfulTranslationThresholdCm);
+	MeaningfulTranslationThresholdCm = FMath::Max(0.0, MeaningfulTranslationThresholdCm);
+
+	const USkeleton* Skeleton = Sequence->GetSkeleton();
+	FString RootBoneName;
+	int32 OrientationBoneIndex = INDEX_NONE;
+	FString OrientationBoneName;
+	if (Skeleton)
+	{
+		const FReferenceSkeleton& RefSkeleton = Skeleton->GetReferenceSkeleton();
+		if (RefSkeleton.GetNum() > 0)
+		{
+			RootBoneName = RefSkeleton.GetBoneName(0).ToString();
+		}
+
+		FString RequestedOrientationBoneName;
+		JsonTryGetString(Ctx.Params, TEXT("orientation_bone_name"), RequestedOrientationBoneName);
+		RequestedOrientationBoneName.TrimStartAndEndInline();
+		if (!RequestedOrientationBoneName.IsEmpty())
+		{
+			OrientationBoneIndex = RefSkeleton.FindBoneIndex(FName(*RequestedOrientationBoneName));
+		}
+		else
+		{
+			const FString CandidateNames[] = { TEXT("hips"), TEXT("pelvis"), TEXT("spine"), TEXT("root") };
+			for (const FString& CandidateName : CandidateNames)
+			{
+				OrientationBoneIndex = RefSkeleton.FindBoneIndex(FName(*CandidateName));
+				if (OrientationBoneIndex != INDEX_NONE)
+				{
+					break;
+				}
+			}
+		}
+		if (OrientationBoneIndex != INDEX_NONE)
+		{
+			OrientationBoneName = RefSkeleton.GetBoneName(OrientationBoneIndex).ToString();
+		}
+	}
+
+	TArray<FName> TrackNames;
+	UAnimationBlueprintLibrary::GetAnimationTrackNames(Sequence, TrackNames);
+	bool bHasRootBoneTrack = false;
+	TArray<TSharedPtr<FJsonValue>> TrackNamesJson;
+	for (const FName TrackName : TrackNames)
+	{
+		const FString TrackNameText = TrackName.ToString();
+		TrackNamesJson.Add(MakeShared<FJsonValueString>(TrackNameText));
+		if (!RootBoneName.IsEmpty() && TrackNameText.Equals(RootBoneName, ESearchCase::IgnoreCase))
+		{
+			bHasRootBoneTrack = true;
+		}
+	}
+
+	const FTransform TotalRootMotion = Sequence->ExtractRootMotionFromRange(0.0, SequenceLength, FAnimExtractContext());
+	const FVector TotalLocation = TotalRootMotion.GetTranslation();
+	const double TotalHorizontalDistance = FVector(TotalLocation.X, TotalLocation.Y, 0.0).Size();
+	const double TotalYaw = TotalRootMotion.Rotator().Yaw;
+
+	FTransform InitialRawRoot = FTransform::Identity;
+	if (Skeleton && !RootBoneName.IsEmpty())
+	{
+		Sequence->GetBoneTransform(InitialRawRoot, FSkeletonPoseBoneIndex(0), FAnimExtractContext(0.0), false);
+	}
+	FTransform InitialOrientationBone = FTransform::Identity;
+	FTransform TotalOrientationBoneDelta = FTransform::Identity;
+	if (Skeleton && OrientationBoneIndex != INDEX_NONE)
+	{
+		Sequence->GetBoneTransform(InitialOrientationBone, FSkeletonPoseBoneIndex(OrientationBoneIndex), FAnimExtractContext(0.0), false);
+		FTransform FinalOrientationBone = FTransform::Identity;
+		Sequence->GetBoneTransform(FinalOrientationBone, FSkeletonPoseBoneIndex(OrientationBoneIndex), FAnimExtractContext(SequenceLength), false);
+		TotalOrientationBoneDelta = FinalOrientationBone.GetRelativeTransform(InitialOrientationBone);
+	}
+	const double TotalOrientationBoneDeltaYaw = TotalOrientationBoneDelta.Rotator().Yaw;
+
+	TArray<TSharedPtr<FJsonValue>> Samples;
+	TArray<TSharedPtr<FJsonValue>> SuggestedRootMotionYawKeys;
+	TArray<TSharedPtr<FJsonValue>> SuggestedOrientationYawKeys;
+	TArray<TSharedPtr<FJsonValue>> SuggestedDistanceKeys;
+	double MaxAbsRootMotionYaw = 0.0;
+	double MaxRootMotionHorizontalDistance = 0.0;
+	double MaxAbsRawRootDeltaYaw = 0.0;
+	double MaxRawRootDeltaHorizontalDistance = 0.0;
+	double MaxAbsOrientationBoneDeltaYaw = 0.0;
+	double RootMotionPathDistance = 0.0;
+	FVector PreviousRootMotionLocation = FVector::ZeroVector;
+	double PivotCommitTime = SequenceLength * 0.5;
+	bool bFoundPivotCommit = false;
+	const double PivotYawThreshold = FMath::Abs(TotalYaw) > KINDA_SMALL_NUMBER ? FMath::Abs(TotalYaw) * 0.5 : MeaningfulYawThresholdDegrees;
+	double OrientationPivotCommitTime = SequenceLength * 0.5;
+	bool bFoundOrientationPivotCommit = false;
+	const double OrientationPivotYawThreshold = FMath::Abs(TotalOrientationBoneDeltaYaw) > KINDA_SMALL_NUMBER ? FMath::Abs(TotalOrientationBoneDeltaYaw) * 0.5 : MeaningfulYawThresholdDegrees;
+
+	for (int32 SampleIndex = 0; SampleIndex < SampleCount; ++SampleIndex)
+	{
+		const double Alpha = SampleCount > 1 ? static_cast<double>(SampleIndex) / static_cast<double>(SampleCount - 1) : 0.0;
+		const double SampleTime = SequenceLength * Alpha;
+		const FTransform RootMotionAtTime = Sequence->ExtractRootMotionFromRange(0.0, SampleTime, FAnimExtractContext());
+		const FVector RootMotionLocation = RootMotionAtTime.GetTranslation();
+		const double RootMotionYaw = RootMotionAtTime.Rotator().Yaw;
+		const double RootMotionHorizontalDistance = FVector(RootMotionLocation.X, RootMotionLocation.Y, 0.0).Size();
+		if (SampleIndex > 0)
+		{
+			const FVector CurrentHorizontalLocation(RootMotionLocation.X, RootMotionLocation.Y, 0.0);
+			const FVector PreviousHorizontalLocation(PreviousRootMotionLocation.X, PreviousRootMotionLocation.Y, 0.0);
+			RootMotionPathDistance += FVector::Distance(PreviousHorizontalLocation, CurrentHorizontalLocation);
+		}
+		PreviousRootMotionLocation = RootMotionLocation;
+
+		FTransform RawRootAtTime = FTransform::Identity;
+		FTransform RawRootDelta = FTransform::Identity;
+		if (Skeleton && !RootBoneName.IsEmpty())
+		{
+			Sequence->GetBoneTransform(RawRootAtTime, FSkeletonPoseBoneIndex(0), FAnimExtractContext(SampleTime), false);
+			RawRootDelta = RawRootAtTime.GetRelativeTransform(InitialRawRoot);
+		}
+		const FVector RawRootDeltaLocation = RawRootDelta.GetTranslation();
+		const double RawRootDeltaYaw = RawRootDelta.Rotator().Yaw;
+		const double RawRootDeltaHorizontalDistance = FVector(RawRootDeltaLocation.X, RawRootDeltaLocation.Y, 0.0).Size();
+
+		FTransform OrientationBoneAtTime = FTransform::Identity;
+		FTransform OrientationBoneDelta = FTransform::Identity;
+		if (Skeleton && OrientationBoneIndex != INDEX_NONE)
+		{
+			Sequence->GetBoneTransform(OrientationBoneAtTime, FSkeletonPoseBoneIndex(OrientationBoneIndex), FAnimExtractContext(SampleTime), false);
+			OrientationBoneDelta = OrientationBoneAtTime.GetRelativeTransform(InitialOrientationBone);
+		}
+		const double OrientationBoneDeltaYaw = OrientationBoneDelta.Rotator().Yaw;
+
+		MaxAbsRootMotionYaw = FMath::Max(MaxAbsRootMotionYaw, FMath::Abs(RootMotionYaw));
+		MaxRootMotionHorizontalDistance = FMath::Max(MaxRootMotionHorizontalDistance, RootMotionHorizontalDistance);
+		MaxAbsRawRootDeltaYaw = FMath::Max(MaxAbsRawRootDeltaYaw, FMath::Abs(RawRootDeltaYaw));
+		MaxRawRootDeltaHorizontalDistance = FMath::Max(MaxRawRootDeltaHorizontalDistance, RawRootDeltaHorizontalDistance);
+		MaxAbsOrientationBoneDeltaYaw = FMath::Max(MaxAbsOrientationBoneDeltaYaw, FMath::Abs(OrientationBoneDeltaYaw));
+
+		if (!bFoundPivotCommit && PivotYawThreshold > KINDA_SMALL_NUMBER && FMath::Abs(RootMotionYaw) >= PivotYawThreshold)
+		{
+			PivotCommitTime = SampleTime;
+			bFoundPivotCommit = true;
+		}
+		if (!bFoundOrientationPivotCommit && OrientationPivotYawThreshold > KINDA_SMALL_NUMBER && FMath::Abs(OrientationBoneDeltaYaw) >= OrientationPivotYawThreshold)
+		{
+			OrientationPivotCommitTime = SampleTime;
+			bFoundOrientationPivotCommit = true;
+		}
+
+		if (bIncludeSamples)
+		{
+			TSharedPtr<FJsonObject> Sample = MakeShared<FJsonObject>();
+			Sample->SetNumberField(TEXT("sample_index"), SampleIndex);
+			Sample->SetNumberField(TEXT("time_seconds"), SampleTime);
+			Sample->SetNumberField(TEXT("normalized_time"), Alpha);
+			Sample->SetObjectField(TEXT("root_motion_transform"), UeAgentAnimationAssetOps::BuildTransformJson(RootMotionAtTime));
+			Sample->SetNumberField(TEXT("root_motion_yaw_degrees"), RootMotionYaw);
+			Sample->SetNumberField(TEXT("root_motion_horizontal_distance_cm"), RootMotionHorizontalDistance);
+			Sample->SetNumberField(TEXT("root_motion_path_distance_cm"), RootMotionPathDistance);
+			Sample->SetObjectField(TEXT("raw_root_transform"), UeAgentAnimationAssetOps::BuildTransformJson(RawRootAtTime));
+			Sample->SetObjectField(TEXT("raw_root_delta_transform"), UeAgentAnimationAssetOps::BuildTransformJson(RawRootDelta));
+			Sample->SetNumberField(TEXT("raw_root_delta_yaw_degrees"), RawRootDeltaYaw);
+			Sample->SetNumberField(TEXT("raw_root_delta_horizontal_distance_cm"), RawRootDeltaHorizontalDistance);
+			Sample->SetObjectField(TEXT("orientation_bone_transform"), UeAgentAnimationAssetOps::BuildTransformJson(OrientationBoneAtTime));
+			Sample->SetObjectField(TEXT("orientation_bone_delta_transform"), UeAgentAnimationAssetOps::BuildTransformJson(OrientationBoneDelta));
+			Sample->SetNumberField(TEXT("orientation_bone_delta_yaw_degrees"), OrientationBoneDeltaYaw);
+			Samples.Add(MakeShared<FJsonValueObject>(Sample));
+		}
+
+		if (bIncludeSuggestedKeys)
+		{
+			SuggestedRootMotionYawKeys.Add(MakeShared<FJsonValueObject>(UeAgentAnimationAssetOps::BuildSimpleKeyJson(SampleTime, RootMotionYaw)));
+			SuggestedOrientationYawKeys.Add(MakeShared<FJsonValueObject>(UeAgentAnimationAssetOps::BuildSimpleKeyJson(SampleTime, OrientationBoneDeltaYaw)));
+			SuggestedDistanceKeys.Add(MakeShared<FJsonValueObject>(UeAgentAnimationAssetOps::BuildSimpleKeyJson(SampleTime, RootMotionPathDistance)));
+		}
+	}
+
+	const bool bHasMeaningfulRootYaw = FMath::Max(FMath::Abs(TotalYaw), MaxAbsRootMotionYaw) >= MeaningfulYawThresholdDegrees;
+	const bool bHasMeaningfulRawRootYaw = MaxAbsRawRootDeltaYaw >= MeaningfulYawThresholdDegrees;
+	const bool bHasMeaningfulOrientationBoneYaw = FMath::Max(FMath::Abs(TotalOrientationBoneDeltaYaw), MaxAbsOrientationBoneDeltaYaw) >= MeaningfulYawThresholdDegrees;
+	const bool bHasMeaningfulRootTranslation = FMath::Max(TotalHorizontalDistance, MaxRootMotionHorizontalDistance) >= MeaningfulTranslationThresholdCm;
+	const bool bHasMeaningfulRawRootTranslation = MaxRawRootDeltaHorizontalDistance >= MeaningfulTranslationThresholdCm;
+
+	FString TurnClassification = TEXT("none");
+	FString TurnClassificationSource = TEXT("none");
+	double ClassificationYaw = 0.0;
+	if (bHasMeaningfulRootYaw)
+	{
+		ClassificationYaw = FMath::Abs(TotalYaw) >= MeaningfulYawThresholdDegrees ? TotalYaw : (TotalYaw >= 0.0 ? MaxAbsRootMotionYaw : -MaxAbsRootMotionYaw);
+		TurnClassificationSource = TEXT("root_motion");
+	}
+	else if (bHasMeaningfulOrientationBoneYaw)
+	{
+		ClassificationYaw = FMath::Abs(TotalOrientationBoneDeltaYaw) >= MeaningfulYawThresholdDegrees ? TotalOrientationBoneDeltaYaw : (TotalOrientationBoneDeltaYaw >= 0.0 ? MaxAbsOrientationBoneDeltaYaw : -MaxAbsOrientationBoneDeltaYaw);
+		TurnClassificationSource = TEXT("orientation_bone");
+	}
+	if (FMath::Abs(ClassificationYaw) >= 135.0)
+	{
+		TurnClassification = ClassificationYaw >= 0.0 ? TEXT("turn_positive_180") : TEXT("turn_negative_180");
+	}
+	else if (FMath::Abs(ClassificationYaw) >= 45.0)
+	{
+		TurnClassification = ClassificationYaw >= 0.0 ? TEXT("turn_positive_90") : TEXT("turn_negative_90");
+	}
+	else if (FMath::Abs(ClassificationYaw) >= MeaningfulYawThresholdDegrees)
+	{
+		TurnClassification = ClassificationYaw >= 0.0 ? TEXT("turn_positive_partial") : TEXT("turn_negative_partial");
+	}
+
+	const FString SuggestedTurnYawSource = bHasMeaningfulRootYaw ? TEXT("root_motion") : (bHasMeaningfulOrientationBoneYaw ? TEXT("orientation_bone") : TEXT("root_motion"));
+	const double SuggestedPivotCommitTime = bHasMeaningfulRootYaw ? PivotCommitTime : (bHasMeaningfulOrientationBoneYaw ? OrientationPivotCommitTime : SequenceLength * 0.5);
+	const TArray<TSharedPtr<FJsonValue>>& SuggestedTurnYawKeys = bHasMeaningfulRootYaw ? SuggestedRootMotionYawKeys : (bHasMeaningfulOrientationBoneYaw ? SuggestedOrientationYawKeys : SuggestedRootMotionYawKeys);
+
+	TArray<TSharedPtr<FJsonValue>> SuggestedMarkers;
+	{
+		TSharedPtr<FJsonObject> StartMarker = MakeShared<FJsonObject>();
+		StartMarker->SetStringField(TEXT("marker_name"), TEXT("TurnStart"));
+		StartMarker->SetNumberField(TEXT("time_seconds"), 0.0);
+		StartMarker->SetStringField(TEXT("notify_track_name"), TEXT("Turn"));
+		SuggestedMarkers.Add(MakeShared<FJsonValueObject>(StartMarker));
+
+		TSharedPtr<FJsonObject> PivotMarker = MakeShared<FJsonObject>();
+		PivotMarker->SetStringField(TEXT("marker_name"), TEXT("PivotCommit"));
+		PivotMarker->SetNumberField(TEXT("time_seconds"), FMath::Clamp(SuggestedPivotCommitTime, 0.0, SequenceLength));
+		PivotMarker->SetStringField(TEXT("notify_track_name"), TEXT("Turn"));
+		SuggestedMarkers.Add(MakeShared<FJsonValueObject>(PivotMarker));
+
+		TSharedPtr<FJsonObject> EndMarker = MakeShared<FJsonObject>();
+		EndMarker->SetStringField(TEXT("marker_name"), TEXT("TurnEnd"));
+		EndMarker->SetNumberField(TEXT("time_seconds"), SequenceLength);
+		EndMarker->SetStringField(TEXT("notify_track_name"), TEXT("Turn"));
+		SuggestedMarkers.Add(MakeShared<FJsonValueObject>(EndMarker));
+	}
+
+	OutData = MakeShared<FJsonObject>();
+	OutData->SetStringField(TEXT("asset_path"), UeAgentAnimationAssetOps::NormalizeAssetPath(Sequence->GetOutermost()->GetName()));
+	OutData->SetStringField(TEXT("object_path"), Sequence->GetPathName());
+	OutData->SetStringField(TEXT("skeleton"), Skeleton ? Skeleton->GetPathName() : TEXT(""));
+	OutData->SetStringField(TEXT("root_bone_name"), RootBoneName);
+	OutData->SetStringField(TEXT("orientation_bone_name"), OrientationBoneName);
+	OutData->SetNumberField(TEXT("orientation_bone_index"), OrientationBoneIndex);
+	OutData->SetNumberField(TEXT("sequence_length"), SequenceLength);
+	OutData->SetNumberField(TEXT("num_frames"), NumFrames);
+	OutData->SetNumberField(TEXT("sample_count"), SampleCount);
+	OutData->SetBoolField(TEXT("root_motion_enabled"), UAnimationBlueprintLibrary::IsRootMotionEnabled(Sequence));
+	OutData->SetBoolField(TEXT("force_root_lock"), UAnimationBlueprintLibrary::IsRootMotionLockForced(Sequence));
+	OutData->SetBoolField(TEXT("has_root_bone_track"), bHasRootBoneTrack);
+	OutData->SetNumberField(TEXT("track_count"), TrackNamesJson.Num());
+	OutData->SetArrayField(TEXT("track_names"), TrackNamesJson);
+	OutData->SetObjectField(TEXT("total_root_motion_transform"), UeAgentAnimationAssetOps::BuildTransformJson(TotalRootMotion));
+	OutData->SetNumberField(TEXT("total_yaw_degrees"), TotalYaw);
+	OutData->SetNumberField(TEXT("total_horizontal_distance_cm"), TotalHorizontalDistance);
+	OutData->SetNumberField(TEXT("total_root_motion_path_distance_cm"), RootMotionPathDistance);
+	OutData->SetNumberField(TEXT("max_abs_root_motion_yaw_degrees"), MaxAbsRootMotionYaw);
+	OutData->SetNumberField(TEXT("max_root_motion_horizontal_distance_cm"), MaxRootMotionHorizontalDistance);
+	OutData->SetNumberField(TEXT("max_abs_raw_root_delta_yaw_degrees"), MaxAbsRawRootDeltaYaw);
+	OutData->SetNumberField(TEXT("max_raw_root_delta_horizontal_distance_cm"), MaxRawRootDeltaHorizontalDistance);
+	OutData->SetNumberField(TEXT("total_orientation_bone_delta_yaw_degrees"), TotalOrientationBoneDeltaYaw);
+	OutData->SetNumberField(TEXT("max_abs_orientation_bone_delta_yaw_degrees"), MaxAbsOrientationBoneDeltaYaw);
+	OutData->SetBoolField(TEXT("has_meaningful_root_yaw"), bHasMeaningfulRootYaw);
+	OutData->SetBoolField(TEXT("has_meaningful_raw_root_yaw"), bHasMeaningfulRawRootYaw);
+	OutData->SetBoolField(TEXT("has_meaningful_orientation_bone_yaw"), bHasMeaningfulOrientationBoneYaw);
+	OutData->SetBoolField(TEXT("has_meaningful_root_translation"), bHasMeaningfulRootTranslation);
+	OutData->SetBoolField(TEXT("has_meaningful_raw_root_translation"), bHasMeaningfulRawRootTranslation);
+	OutData->SetStringField(TEXT("turn_classification"), TurnClassification);
+	OutData->SetStringField(TEXT("turn_classification_source"), TurnClassificationSource);
+	OutData->SetNumberField(TEXT("meaningful_yaw_threshold_degrees"), MeaningfulYawThresholdDegrees);
+	OutData->SetNumberField(TEXT("meaningful_translation_threshold_cm"), MeaningfulTranslationThresholdCm);
+	OutData->SetArrayField(TEXT("suggested_markers"), SuggestedMarkers);
+	if (bIncludeSuggestedKeys)
+	{
+		OutData->SetStringField(TEXT("suggested_turn_yaw_source"), SuggestedTurnYawSource);
+		OutData->SetArrayField(TEXT("suggested_root_motion_yaw_keys"), SuggestedRootMotionYawKeys);
+		OutData->SetArrayField(TEXT("suggested_orientation_yaw_keys"), SuggestedOrientationYawKeys);
+		OutData->SetArrayField(TEXT("suggested_turn_yaw_keys"), SuggestedTurnYawKeys);
+		OutData->SetArrayField(TEXT("suggested_distance_keys"), SuggestedDistanceKeys);
+	}
+	if (bIncludeSamples)
+	{
+		OutData->SetArrayField(TEXT("samples"), Samples);
+	}
 	return true;
 }
 

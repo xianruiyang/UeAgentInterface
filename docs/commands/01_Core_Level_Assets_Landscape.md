@@ -31,6 +31,8 @@
 | `editor_close` | 关闭编辑器；若仍有未处理脏资源则失败并返回清单 | `request_exit`、`close_all_asset_editors` | 自动化结束时安全退出 |
 | `editor_prepare_exit` | 退出前按策略保存/丢弃并请求关闭编辑器 | `save_asset_paths`、`discard_asset_paths`、`discard_all_dirty`、`request_exit` | 自动化结束时避免恢复弹窗 |
 
+`begin_transaction` / `end_transaction` 是多步写入的显式事务边界。显式事务中调用 `spawn_actor` 时，服务端会登记新建 Actor；`end_transaction` 传 `commit=false` 时，除调用 UE 事务取消外，还会清理这些新建 Actor，并返回 `registered_spawned_actor_count` / `rolled_back_spawned_actor_count`，避免验证探针或失败批处理在关卡里残留对象。
+
 ### `asset_reference_graph`
 
 用途：对任意资产建立 AssetRegistry 级引用关系图。凡是要替换角色、重建 AnimBP/Montage、清理旧资源、判断某个资产能否删除，都应先用此指令确认“它引用了谁”和“谁引用了它”，不要只靠单个蓝图导出或二进制字符串扫描。
@@ -129,7 +131,7 @@
 | `viewport_frame_actors` | 按多个 Actor 聚合 bounds 取景 | `actor_ids[]`、可选 `padding` | 批量对象截图 |
 | `viewport_frame_folder` | 按 Outliner folder 聚合 bounds 取景 | `folder_path`、可选 `include_child_folders/padding/collision_aware` | 白盒区域或托管资源整组留证 |
 | `viewport_frame_selection` | 按当前选择集聚合 bounds 取景 | 可选 `padding` | 人工选择后自动留证 |
-| `viewport_set_game_view` | 切换 Game View | `enabled` | 截图前隐藏或恢复编辑器辅助显示 |
+| `viewport_set_game_view` | 切换 Game View | `game_view` | 截图前隐藏或恢复编辑器辅助显示 |
 | `viewport_set_realtime` | 切换视口实时刷新 | `enabled` | 需要 Niagara/动画预览或稳定截图时控制实时性 |
 | `viewport_deproject_screen_to_world` | 屏幕坐标反投影到世界射线 | `screen_x`、`screen_y` | 视口拾取和屏幕点诊断 |
 | `viewport_trace_screen_point` | 从屏幕点发起世界 Trace | `screen_x`、`screen_y`、可选 `trace_channel/trace_distance` | 根据截图坐标定位命中 Actor |

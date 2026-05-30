@@ -120,6 +120,16 @@ private:
 	FDelegateHandle RequestLogPreprocessorHandle;
 	bool bRunning = false;
 
+	struct FTransactionSpawnedActorRecord
+	{
+		TWeakObjectPtr<class AActor> Actor;
+		TWeakObjectPtr<class UPackage> LevelPackage;
+		TWeakObjectPtr<class UPackage> ActorPackage;
+		bool bLevelPackageWasDirtyBeforeSpawn = false;
+		bool bActorPackageWasDirtyBeforeSpawn = false;
+	};
+
 	mutable FCriticalSection TransactionMutex;
 	int32 ActiveTransactionIndex = INDEX_NONE;
+	mutable TArray<FTransactionSpawnedActorRecord> ActiveTransactionSpawnedActors;
 };
