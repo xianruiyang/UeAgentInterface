@@ -239,6 +239,8 @@ bool FUeAgentHttpServer::CmdMaterialConnectExpressions(const FUeAgentRequestCont
 	FString ToInputName;
 	JsonTryGetString(Ctx.Params, TEXT("from_output_name"), FromOutputName);
 	JsonTryGetString(Ctx.Params, TEXT("to_input_name"), ToInputName);
+	FromOutputName = UeAgentMaterialOps::NormalizeExpressionPinName(FromOutputName);
+	ToInputName = UeAgentMaterialOps::NormalizeExpressionPinName(ToInputName);
 
 	const bool bConnected = UMaterialEditingLibrary::ConnectMaterialExpressions(FromExpression, FromOutputName, ToExpression, ToInputName);
 	if (!bConnected && !UeAgentMaterialOps::ManualConnectExpressions(FromExpression, FromOutputName, ToExpression, ToInputName))
@@ -312,6 +314,7 @@ bool FUeAgentHttpServer::CmdMaterialConnectExpressionToProperty(const FUeAgentRe
 
 	FString OutputName;
 	JsonTryGetString(Ctx.Params, TEXT("output_name"), OutputName);
+	OutputName = UeAgentMaterialOps::NormalizeExpressionPinName(OutputName);
 	const bool bConnected = UMaterialEditingLibrary::ConnectMaterialProperty(Expression, OutputName, MaterialProperty);
 	if (!bConnected)
 	{
@@ -371,6 +374,11 @@ bool FUeAgentHttpServer::CmdMaterialDeleteExpression(const FUeAgentRequestContex
 
 	const FString DeletedGuid = Expression->MaterialExpressionGuid.ToString(EGuidFormats::DigitsWithHyphensLower);
 	const FString DeletedName = Expression->GetName();
+	const bool bWasRootedBeforeDelete = Expression->IsRooted();
+	if (bWasRootedBeforeDelete)
+	{
+		Expression->RemoveFromRoot();
+	}
 	UMaterialEditingLibrary::DeleteMaterialExpression(Material, Expression);
 
 	Material->MarkPackageDirty();
@@ -393,6 +401,8 @@ bool FUeAgentHttpServer::CmdMaterialDeleteExpression(const FUeAgentRequestContex
 	OutData->SetStringField(TEXT("asset_path"), Material->GetOutermost()->GetName());
 	OutData->SetStringField(TEXT("deleted_expression_guid"), DeletedGuid);
 	OutData->SetStringField(TEXT("deleted_expression_name"), DeletedName);
+	OutData->SetBoolField(TEXT("was_rooted_before_delete"), bWasRootedBeforeDelete);
+	OutData->SetBoolField(TEXT("removed_root_before_delete"), bWasRootedBeforeDelete);
 	OutData->SetBoolField(TEXT("compiled"), bCompileAfterDelete);
 	OutData->SetBoolField(TEXT("saved"), bSaveAfterDelete);
 	return true;

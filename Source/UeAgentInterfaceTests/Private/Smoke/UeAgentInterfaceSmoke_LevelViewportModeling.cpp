@@ -54,6 +54,14 @@ bool FUeAgentInterfaceLevelReadonlySmokeTest::RunTest(const FString& Parameters)
 		TestTrue(TEXT("Viewport camera contains rotation"), (*ViewportData)->HasTypedField<EJson::Object>(TEXT("rotation")));
 		TestTrue(TEXT("Viewport camera contains fov"), (*ViewportData)->HasTypedField<EJson::Number>(TEXT("fov")));
 		TestTrue(TEXT("Viewport camera contains realtime"), (*ViewportData)->HasTypedField<EJson::Boolean>(TEXT("realtime")));
+		const TSharedPtr<FJsonObject>* ViewportInfo = nullptr;
+		TestTrue(TEXT("Viewport camera contains viewport info"), (*ViewportData)->TryGetObjectField(TEXT("viewport"), ViewportInfo) && ViewportInfo && ViewportInfo->IsValid());
+		if (ViewportInfo && ViewportInfo->IsValid())
+		{
+			TestTrue(TEXT("Viewport info contains selection reason"), (*ViewportInfo)->HasTypedField<EJson::String>(TEXT("selection_reason")));
+			TestTrue(TEXT("Viewport info contains client index"), (*ViewportInfo)->HasTypedField<EJson::Number>(TEXT("viewport_client_index")));
+			TestTrue(TEXT("Viewport info contains size"), (*ViewportInfo)->HasTypedField<EJson::Object>(TEXT("size")));
+		}
 	}
 
 	return !HasAnyErrors();

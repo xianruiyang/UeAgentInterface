@@ -215,8 +215,25 @@ bool FUeAgentHttpServer::CmdMaterialSetProperty(const FUeAgentRequestContext& Ct
 		return false;
 	}
 
+	if (UMaterial* Material = Cast<UMaterial>(Asset))
+	{
+		if (PropertyName.Equals(TEXT("ShadingModels"), ESearchCase::IgnoreCase))
+		{
+			const FMaterialShadingModelField ImportedShadingModels = Material->GetShadingModels();
+			if (ImportedShadingModels.IsValid() && ImportedShadingModels.CountShadingModels() == 1)
+			{
+				Material->SetShadingModel(ImportedShadingModels.GetFirstShadingModel());
+			}
+		}
+	}
+
 	Asset->MarkPackageDirty();
 	Asset->PostEditChange();
+	FString PostEditAppliedValueText;
+	if (UeAgentMaterialOps::ExportObjectPropertyText(Asset, PropertyName, PostEditAppliedValueText, &CppType, nullptr))
+	{
+		AppliedValueText = PostEditAppliedValueText;
+	}
 
 	bool bCompileAfterSet = Asset->IsA<UMaterial>();
 	JsonTryGetBool(Ctx.Params, TEXT("compile_after_set"), bCompileAfterSet);

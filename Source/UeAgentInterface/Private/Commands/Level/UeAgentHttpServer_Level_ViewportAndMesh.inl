@@ -222,7 +222,8 @@ bool FUeAgentHttpServer::CmdViewportGetWarnings(const FUeAgentRequestContext& Ct
 
 bool FUeAgentHttpServer::CmdViewportGetCamera(TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
-	FLevelEditorViewportClient* LVC = UeAgentLevelOps::GetPreferredLevelViewportClient();
+	FString SelectionReason;
+	FLevelEditorViewportClient* LVC = UeAgentLevelOps::GetPreferredLevelViewportClient(&SelectionReason);
 	if (!LVC)
 	{
 		OutError = TEXT("no_level_editor_viewport");
@@ -234,12 +235,14 @@ bool FUeAgentHttpServer::CmdViewportGetCamera(TSharedPtr<FJsonObject>& OutData, 
 	OutData->SetNumberField(TEXT("fov"), LVC->ViewFOV);
 	OutData->SetBoolField(TEXT("realtime"), LVC->IsRealtime());
 	OutData->SetBoolField(TEXT("game_view"), LVC->IsInGameView());
+	OutData->SetObjectField(TEXT("viewport"), UeAgentLevelOps::MakeViewportClientJson(LVC, SelectionReason));
 	return true;
 }
 
 bool FUeAgentHttpServer::CmdViewportSetCamera(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
-	FLevelEditorViewportClient* LVC = UeAgentLevelOps::GetPreferredLevelViewportClient();
+	FString SelectionReason;
+	FLevelEditorViewportClient* LVC = UeAgentLevelOps::GetPreferredLevelViewportClient(&SelectionReason);
 	if (!LVC)
 	{
 		OutError = TEXT("no_level_editor_viewport");
@@ -266,6 +269,7 @@ bool FUeAgentHttpServer::CmdViewportSetCamera(const FUeAgentRequestContext& Ctx,
 	OutData->SetNumberField(TEXT("fov"), LVC->ViewFOV);
 	OutData->SetBoolField(TEXT("realtime"), LVC->IsRealtime());
 	OutData->SetBoolField(TEXT("game_view"), LVC->IsInGameView());
+	OutData->SetObjectField(TEXT("viewport"), UeAgentLevelOps::MakeViewportClientJson(LVC, SelectionReason));
 	return true;
 }
 
@@ -279,7 +283,8 @@ bool FUeAgentHttpServer::CmdViewportSetRealtime(const FUeAgentRequestContext& Ct
 	}
 
 	bool bRealtime = true;
-	if (!JsonTryGetBool(Ctx.Params, TEXT("realtime"), bRealtime))
+	if (!JsonTryGetBool(Ctx.Params, TEXT("realtime"), bRealtime)
+		&& !JsonTryGetBool(Ctx.Params, TEXT("enabled"), bRealtime))
 	{
 		OutError = TEXT("missing_realtime");
 		return false;
@@ -511,7 +516,8 @@ bool FUeAgentHttpServer::CmdViewportFrameActor(const FUeAgentRequestContext& Ctx
 		return false;
 	}
 
-	FLevelEditorViewportClient* LVC = UeAgentLevelOps::GetPreferredLevelViewportClient();
+	FString SelectionReason;
+	FLevelEditorViewportClient* LVC = UeAgentLevelOps::GetPreferredLevelViewportClient(&SelectionReason);
 	if (!LVC)
 	{
 		OutError = TEXT("no_level_editor_viewport");
@@ -769,6 +775,7 @@ bool FUeAgentHttpServer::CmdViewportFrameActor(const FUeAgentRequestContext& Ctx
 	OutData->SetNumberField(TEXT("fov"), LVC->ViewFOV);
 	OutData->SetBoolField(TEXT("realtime"), LVC->IsRealtime());
 	OutData->SetBoolField(TEXT("game_view"), LVC->IsInGameView());
+	OutData->SetObjectField(TEXT("viewport"), UeAgentLevelOps::MakeViewportClientJson(LVC, SelectionReason));
 	return true;
 }
 
@@ -1137,7 +1144,8 @@ bool FUeAgentHttpServer::CmdViewportFrameFolder(const FUeAgentRequestContext& Ct
 		return false;
 	}
 
-	FLevelEditorViewportClient* LVC = UeAgentLevelOps::GetPreferredLevelViewportClient();
+	FString SelectionReason;
+	FLevelEditorViewportClient* LVC = UeAgentLevelOps::GetPreferredLevelViewportClient(&SelectionReason);
 	if (!LVC)
 	{
 		OutError = TEXT("no_level_editor_viewport");
@@ -1429,6 +1437,7 @@ bool FUeAgentHttpServer::CmdViewportFrameFolder(const FUeAgentRequestContext& Ct
 	OutData->SetNumberField(TEXT("fov"), LVC->ViewFOV);
 	OutData->SetBoolField(TEXT("realtime"), LVC->IsRealtime());
 	OutData->SetBoolField(TEXT("game_view"), LVC->IsInGameView());
+	OutData->SetObjectField(TEXT("viewport"), UeAgentLevelOps::MakeViewportClientJson(LVC, SelectionReason));
 	return true;
 }
 

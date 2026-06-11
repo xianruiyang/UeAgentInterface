@@ -103,6 +103,10 @@
 		}
 
 		Existing->ClearFlags(RF_Public | RF_Standalone);
+		if (Existing->IsRooted())
+		{
+			Existing->RemoveFromRoot();
+		}
 		const ERenameFlags RenameFlags = REN_DontCreateRedirectors | REN_NonTransactional | REN_DoNotDirty | REN_ForceNoResetLoaders;
 		const FName TrashName = MakeUniqueObjectName(GetTransientPackage(), Existing->GetClass(), Existing->GetFName());
 		const bool bRenamed = Existing->Rename(*TrashName.ToString(), GetTransientPackage(), RenameFlags);

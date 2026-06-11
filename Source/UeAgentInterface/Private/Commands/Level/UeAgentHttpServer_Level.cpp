@@ -86,8 +86,89 @@ namespace UeAgentLevelOps
 		return Obj;
 	}
 
-	static FLevelEditorViewportClient* GetPreferredLevelViewportClient()
+	static FString ViewportTypeToString(ELevelViewportType ViewportType)
 	{
+		switch (ViewportType)
+		{
+		case LVT_Perspective: return TEXT("Perspective");
+		case LVT_OrthoXY: return TEXT("OrthoXY");
+		case LVT_OrthoXZ: return TEXT("OrthoXZ");
+		case LVT_OrthoYZ: return TEXT("OrthoYZ");
+		default: return FString::Printf(TEXT("Unknown(%d)"), (int32)ViewportType);
+		}
+	}
+
+	static int32 GetLevelViewportClientIndex(FLevelEditorViewportClient* TargetClient)
+	{
+		if (!GEditor || !TargetClient)
+		{
+			return -1;
+		}
+
+		int32 Index = 0;
+		for (FLevelEditorViewportClient* ViewportClient : GEditor->GetLevelViewportClients())
+		{
+			if (ViewportClient == TargetClient)
+			{
+				return Index;
+			}
+			Index++;
+		}
+		return -1;
+	}
+
+	static TSharedPtr<FJsonObject> MakeViewportClientJson(FLevelEditorViewportClient* ViewportClient, const FString& SelectionReason)
+	{
+		TSharedPtr<FJsonObject> Obj = MakeShared<FJsonObject>();
+		Obj->SetStringField(TEXT("selection_reason"), SelectionReason);
+		Obj->SetNumberField(TEXT("viewport_client_index"), GetLevelViewportClientIndex(ViewportClient));
+
+		if (!ViewportClient)
+		{
+			Obj->SetBoolField(TEXT("valid"), false);
+			return Obj;
+		}
+
+		FViewport* ActiveViewport = GEditor ? GEditor->GetActiveViewport() : nullptr;
+		Obj->SetBoolField(TEXT("valid"), true);
+		Obj->SetBoolField(TEXT("is_active_viewport"), ActiveViewport && ViewportClient->Viewport == ActiveViewport);
+		Obj->SetBoolField(TEXT("is_current_level_editing_viewport"), ViewportClient == GCurrentLevelEditingViewportClient);
+		Obj->SetStringField(TEXT("viewport_type"), ViewportTypeToString(ViewportClient->ViewportType));
+		Obj->SetNumberField(TEXT("viewport_type_value"), (int32)ViewportClient->ViewportType);
+		Obj->SetStringField(TEXT("view_mode"), FString::Printf(TEXT("%d"), (int32)ViewportClient->GetViewMode()));
+		Obj->SetNumberField(TEXT("view_mode_value"), (int32)ViewportClient->GetViewMode());
+		Obj->SetObjectField(TEXT("location"), MakeVectorJson(ViewportClient->GetViewLocation()));
+		Obj->SetObjectField(TEXT("rotation"), MakeRotatorJson(ViewportClient->GetViewRotation()));
+		Obj->SetNumberField(TEXT("fov"), ViewportClient->ViewFOV);
+		Obj->SetBoolField(TEXT("realtime"), ViewportClient->IsRealtime());
+		Obj->SetBoolField(TEXT("game_view"), ViewportClient->IsInGameView());
+
+		TSharedPtr<FJsonObject> SizeObj = MakeShared<FJsonObject>();
+		if (ViewportClient->Viewport)
+		{
+			const FIntPoint Size = ViewportClient->Viewport->GetSizeXY();
+			SizeObj->SetNumberField(TEXT("width"), Size.X);
+			SizeObj->SetNumberField(TEXT("height"), Size.Y);
+		}
+		else
+		{
+			SizeObj->SetNumberField(TEXT("width"), 0);
+			SizeObj->SetNumberField(TEXT("height"), 0);
+		}
+		Obj->SetObjectField(TEXT("size"), SizeObj);
+		return Obj;
+	}
+
+	static FLevelEditorViewportClient* GetPreferredLevelViewportClient(FString* OutSelectionReason = nullptr)
+	{
+		auto SetReason = [OutSelectionReason](const TCHAR* Reason)
+		{
+			if (OutSelectionReason)
+			{
+				*OutSelectionReason = Reason;
+			}
+		};
+
 		if (GEditor)
 		{
 			if (FViewport* ActiveViewport = GEditor->GetActiveViewport())
@@ -96,6 +177,7 @@ namespace UeAgentLevelOps
 				{
 					if (ViewportClient && ViewportClient->Viewport == ActiveViewport)
 					{
+						SetReason(TEXT("active_viewport"));
 						return ViewportClient;
 					}
 				}
@@ -104,6 +186,7 @@ namespace UeAgentLevelOps
 
 		if (GCurrentLevelEditingViewportClient && GCurrentLevelEditingViewportClient->Viewport)
 		{
+			SetReason(TEXT("current_level_editing_viewport"));
 			return GCurrentLevelEditingViewportClient;
 		}
 
@@ -142,18 +225,22 @@ namespace UeAgentLevelOps
 			}
 			if (BestPerspectiveByArea)
 			{
+				SetReason(TEXT("largest_perspective_viewport"));
 				return BestPerspectiveByArea;
 			}
 			if (BestAnyByArea)
 			{
+				SetReason(TEXT("largest_any_viewport"));
 				return BestAnyByArea;
 			}
 			if (FirstValid)
 			{
+				SetReason(TEXT("first_valid_viewport"));
 				return FirstValid;
 			}
 		}
 
+		SetReason(TEXT("fallback_current_level_editing_viewport"));
 		return GCurrentLevelEditingViewportClient;
 	}
 

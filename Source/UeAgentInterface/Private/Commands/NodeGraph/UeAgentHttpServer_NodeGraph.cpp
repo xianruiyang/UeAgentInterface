@@ -702,7 +702,8 @@ namespace UeAgentNodeGraphOps
 				{ TEXT("AmbientOcclusion"), MP_AmbientOcclusion },
 				{ TEXT("Refraction"), MP_Refraction },
 				{ TEXT("PixelDepthOffset"), MP_PixelDepthOffset },
-				{ TEXT("Anisotropy"), MP_Anisotropy }
+				{ TEXT("Anisotropy"), MP_Anisotropy },
+				{ TEXT("FrontMaterial"), MP_FrontMaterial }
 			};
 			return Specs;
 		}

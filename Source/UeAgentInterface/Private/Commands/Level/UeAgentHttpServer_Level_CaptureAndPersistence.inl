@@ -302,6 +302,23 @@ bool FUeAgentHttpServer::CmdScreenshotViewport(const FUeAgentRequestContext& Ctx
 	{
 		MaxSize = FMath::Clamp((int32)MSD, 64, 8192);
 	}
+	int32 WarmupFrames = 2;
+	double WarmupFramesD = (double)WarmupFrames;
+	if (JsonTryGetNumber(Ctx.Params, TEXT("warmup_frames"), WarmupFramesD)
+		|| JsonTryGetNumber(Ctx.Params, TEXT("render_warmup_frames"), WarmupFramesD))
+	{
+		WarmupFrames = FMath::Clamp((int32)WarmupFramesD, 0, 8);
+	}
+	const int32 RequestedWarmupFrameCount = FMath::Clamp((int32)WarmupFramesD, 0, 240);
+	bool bTickEditorWorld = false;
+	JsonTryGetBool(Ctx.Params, TEXT("tick_editor_world"), bTickEditorWorld);
+	JsonTryGetBool(Ctx.Params, TEXT("tick_editor_world_during_warmup"), bTickEditorWorld);
+	double EditorWorldTickFramesD = (double)RequestedWarmupFrameCount;
+	JsonTryGetNumber(Ctx.Params, TEXT("editor_world_tick_frames"), EditorWorldTickFramesD);
+	const int32 EditorWorldTickFrames = bTickEditorWorld ? FMath::Clamp((int32)EditorWorldTickFramesD, 0, 240) : 0;
+	double EditorWorldTickDeltaD = 1.0 / 60.0;
+	JsonTryGetNumber(Ctx.Params, TEXT("editor_world_tick_delta_seconds"), EditorWorldTickDeltaD);
+	const float EditorWorldTickDeltaSeconds = FMath::Clamp(static_cast<float>(EditorWorldTickDeltaD), 1.0f / 240.0f, 1.0f / 5.0f);
 
 	Format = Format.ToLower();
 	if (Format == TEXT("jpeg"))
@@ -359,7 +376,8 @@ bool FUeAgentHttpServer::CmdScreenshotViewport(const FUeAgentRequestContext& Ctx
 
 	TArray<FColor> Pixels;
 	FIntPoint Size(0, 0);
-	if (!TakeActiveViewportScreenshot(Pixels, Size, OutError))
+	TSharedPtr<FJsonObject> CaptureInfo;
+	if (!TakeActiveViewportScreenshotWithOptions(WarmupFrames, bTickEditorWorld, EditorWorldTickFrames, EditorWorldTickDeltaSeconds, Pixels, Size, CaptureInfo, OutError))
 	{
 		FUeAgentInterfaceLogger::Log(TEXT("CmdScreenshotViewport req=%s failed: %s"), *Ctx.RequestId, *OutError);
 		return false;
@@ -386,6 +404,19 @@ bool FUeAgentHttpServer::CmdScreenshotViewport(const FUeAgentRequestContext& Ctx
 	OutData->SetNumberField(TEXT("height"), ResizedSize.Y);
 	OutData->SetNumberField(TEXT("bytes"), (double)Bytes);
 	OutData->SetStringField(TEXT("format"), Format);
+	OutData->SetStringField(TEXT("capture_mode"), TEXT("level_viewport_lit"));
+	OutData->SetBoolField(TEXT("final_lit_composition"), true);
+	OutData->SetBoolField(TEXT("scene_capture_buffer"), false);
+	OutData->SetNumberField(TEXT("warmup_frames_requested"), WarmupFrames);
+	if (CaptureInfo.IsValid())
+	{
+		OutData->SetObjectField(TEXT("capture"), CaptureInfo);
+		const TSharedPtr<FJsonObject>* ViewportInfo = nullptr;
+		if (CaptureInfo->TryGetObjectField(TEXT("viewport"), ViewportInfo) && ViewportInfo && ViewportInfo->IsValid())
+		{
+			OutData->SetObjectField(TEXT("viewport"), *ViewportInfo);
+		}
+	}
 
 	TSharedPtr<FJsonObject> Artifact = MakeShared<FJsonObject>();
 	Artifact->SetStringField(TEXT("kind"), TEXT("screenshot"));
@@ -394,6 +425,8 @@ bool FUeAgentHttpServer::CmdScreenshotViewport(const FUeAgentRequestContext& Ctx
 	Artifact->SetStringField(TEXT("mime"), Format == TEXT("png") ? TEXT("image/png") : (Format == TEXT("webp") ? TEXT("image/webp") : TEXT("image/jpeg")));
 	Artifact->SetNumberField(TEXT("width"), ResizedSize.X);
 	Artifact->SetNumberField(TEXT("height"), ResizedSize.Y);
+	Artifact->SetStringField(TEXT("capture_mode"), TEXT("level_viewport_lit"));
+	Artifact->SetBoolField(TEXT("final_lit_composition"), true);
 	OutArtifacts.Add(MakeShared<FJsonValueObject>(Artifact));
 
 	FUeAgentInterfaceLogger::Log(TEXT("CmdScreenshotViewport req=%s ok path=%s size=%dx%d bytes=%lld"),
@@ -421,13 +454,21 @@ bool FUeAgentHttpServer::CmdScreenshotViewportBuffer(const FUeAgentRequestContex
 		return false;
 	}
 
-	FLevelEditorViewportClient* LVC = UeAgentLevelOps::GetPreferredLevelViewportClient();
+	FString SelectionReason;
+	FLevelEditorViewportClient* LVC = UeAgentLevelOps::GetPreferredLevelViewportClient(&SelectionReason);
 	if (!LVC || !LVC->Viewport)
 	{
 		OutError = TEXT("no_level_editor_viewport");
 		FUeAgentInterfaceLogger::Log(TEXT("CmdScreenshotViewportBuffer req=%s failed: %s"), *Ctx.RequestId, *OutError);
 		return false;
 	}
+
+	OutData->SetStringField(TEXT("capture_mode"), TEXT("scene_capture_buffer"));
+	OutData->SetBoolField(TEXT("scene_capture_buffer"), true);
+	OutData->SetBoolField(TEXT("final_lit_composition"), false);
+	OutData->SetBoolField(TEXT("includes_lit_reflections"), false);
+	OutData->SetStringField(TEXT("validation_scope"), TEXT("debug_buffer_only"));
+	OutData->SetObjectField(TEXT("viewport"), UeAgentLevelOps::MakeViewportClientJson(LVC, SelectionReason));
 
 	FString Buffer = TEXT("SceneDepth");
 	JsonTryGetString(Ctx.Params, TEXT("buffer"), Buffer);
@@ -447,7 +488,7 @@ bool FUeAgentHttpServer::CmdScreenshotViewportBuffer(const FUeAgentRequestContex
 	FString Format = TEXT("jpg");
 	int32 Quality = 85;
 	int32 MaxSize = 1024;
-	JsonTryGetString(Ctx.Params, TEXT("format"), Format);
+	const bool bHasExplicitFormat = JsonTryGetString(Ctx.Params, TEXT("format"), Format);
 	double QD = (double)Quality;
 	if (JsonTryGetNumber(Ctx.Params, TEXT("quality"), QD))
 	{
@@ -463,6 +504,45 @@ bool FUeAgentHttpServer::CmdScreenshotViewportBuffer(const FUeAgentRequestContex
 	if (Format == TEXT("jpeg"))
 	{
 		Format = TEXT("jpg");
+	}
+
+	FString OutputFile;
+	FString ScreenshotOutPath;
+	if (JsonTryGetString(Ctx.Params, TEXT("output_file"), OutputFile) && !OutputFile.TrimStartAndEnd().IsEmpty())
+	{
+		ScreenshotOutPath = UeAgentJsonDiagnostics::ResolveProjectRelativeFilePath(OutputFile);
+		FString OutputExt = FPaths::GetExtension(ScreenshotOutPath).ToLower();
+		if (OutputExt == TEXT("jpeg"))
+		{
+			OutputExt = TEXT("jpg");
+		}
+		if (OutputExt == TEXT("png") || OutputExt == TEXT("jpg") || OutputExt == TEXT("webp"))
+		{
+			if (!bHasExplicitFormat)
+			{
+				Format = OutputExt;
+			}
+			else if (OutputExt != Format)
+			{
+				OutError = TEXT("output_file_extension_mismatch");
+				FUeAgentInterfaceLogger::Log(TEXT("CmdScreenshotViewportBuffer req=%s failed: %s output=%s format=%s"), *Ctx.RequestId, *OutError, *ScreenshotOutPath, *Format);
+				return false;
+			}
+		}
+		else if (OutputExt.IsEmpty())
+		{
+			ScreenshotOutPath += FString::Printf(TEXT(".%s"), *Format);
+		}
+		else
+		{
+			OutError = TEXT("unsupported_output_file_extension");
+			FUeAgentInterfaceLogger::Log(TEXT("CmdScreenshotViewportBuffer req=%s failed: %s output=%s"), *Ctx.RequestId, *OutError, *ScreenshotOutPath);
+			return false;
+		}
+	}
+	else
+	{
+		ScreenshotOutPath = MakeShotPath(Format);
 	}
 
 	if (Format != TEXT("png") && Format != TEXT("jpg") && Format != TEXT("webp"))
@@ -820,7 +900,7 @@ bool FUeAgentHttpServer::CmdScreenshotViewportBuffer(const FUeAgentRequestContex
 			return false;
 		}
 
-		const FString OutPath = MakeShotPath(Format);
+		const FString OutPath = ScreenshotOutPath;
 		if (!WriteCompressedImage(Captured, CapturedSize, Format, Quality, OutPath, OutError))
 		{
 			FUeAgentInterfaceLogger::Log(TEXT("CmdScreenshotViewportBuffer req=%s failed: %s"), *Ctx.RequestId, *OutError);
@@ -844,6 +924,8 @@ bool FUeAgentHttpServer::CmdScreenshotViewportBuffer(const FUeAgentRequestContex
 		Artifact->SetNumberField(TEXT("width"), CapturedSize.X);
 		Artifact->SetNumberField(TEXT("height"), CapturedSize.Y);
 		Artifact->SetStringField(TEXT("buffer"), Buffer);
+		Artifact->SetStringField(TEXT("capture_mode"), TEXT("scene_capture_buffer"));
+		Artifact->SetBoolField(TEXT("final_lit_composition"), false);
 		OutArtifacts.Add(MakeShared<FJsonValueObject>(Artifact));
 
 		FUeAgentInterfaceLogger::Log(TEXT("CmdScreenshotViewportBuffer req=%s ok(scene_capture) path=%s buffer=%s size=%dx%d bytes=%lld"),
@@ -963,7 +1045,7 @@ bool FUeAgentHttpServer::CmdScreenshotViewportBuffer(const FUeAgentRequestContex
 		return false;
 	}
 
-	const FString OutPath = MakeShotPath(Format);
+	const FString OutPath = ScreenshotOutPath;
 	if (!WriteCompressedImage(Resized, ResizedSize, Format, Quality, OutPath, OutError))
 	{
 		FUeAgentInterfaceLogger::Log(TEXT("CmdScreenshotViewportBuffer req=%s failed: %s"), *Ctx.RequestId, *OutError);
@@ -988,6 +1070,8 @@ bool FUeAgentHttpServer::CmdScreenshotViewportBuffer(const FUeAgentRequestContex
 	Artifact->SetNumberField(TEXT("width"), ResizedSize.X);
 	Artifact->SetNumberField(TEXT("height"), ResizedSize.Y);
 	Artifact->SetStringField(TEXT("buffer"), Buffer);
+	Artifact->SetStringField(TEXT("capture_mode"), TEXT("scene_capture_buffer"));
+	Artifact->SetBoolField(TEXT("final_lit_composition"), false);
 	OutArtifacts.Add(MakeShared<FJsonValueObject>(Artifact));
 
 	FUeAgentInterfaceLogger::Log(TEXT("CmdScreenshotViewportBuffer req=%s ok path=%s buffer=%s size=%dx%d bytes=%lld"),
@@ -1177,7 +1261,18 @@ AActor* FUeAgentHttpServer::FindActorByNameOrLabel(UWorld* World, const FString&
 
 bool FUeAgentHttpServer::TakeActiveViewportScreenshot(TArray<FColor>& OutPixels, FIntPoint& OutSize, FString& OutError)
 {
-	FLevelEditorViewportClient* LVC = UeAgentLevelOps::GetPreferredLevelViewportClient();
+	TSharedPtr<FJsonObject> CaptureInfo;
+	return TakeActiveViewportScreenshotWithOptions(0, false, 0, 1.0f / 60.0f, OutPixels, OutSize, CaptureInfo, OutError);
+}
+
+bool FUeAgentHttpServer::TakeActiveViewportScreenshotWithOptions(int32 WarmupFrames, bool bTickEditorWorld, int32 EditorWorldTickFrames, float EditorWorldTickDeltaSeconds, TArray<FColor>& OutPixels, FIntPoint& OutSize, TSharedPtr<FJsonObject>& OutCaptureInfo, FString& OutError)
+{
+	WarmupFrames = FMath::Clamp(WarmupFrames, 0, 8);
+	EditorWorldTickFrames = bTickEditorWorld ? FMath::Clamp(EditorWorldTickFrames, 0, 240) : 0;
+	EditorWorldTickDeltaSeconds = FMath::Clamp(EditorWorldTickDeltaSeconds, 1.0f / 240.0f, 1.0f / 5.0f);
+
+	FString SelectionReason;
+	FLevelEditorViewportClient* LVC = UeAgentLevelOps::GetPreferredLevelViewportClient(&SelectionReason);
 	if (!LVC || !LVC->Viewport)
 	{
 		OutError = TEXT("no_level_editor_viewport");
@@ -1185,6 +1280,7 @@ bool FUeAgentHttpServer::TakeActiveViewportScreenshot(TArray<FColor>& OutPixels,
 	}
 
 	FViewport* Viewport = LVC->Viewport;
+	const bool bRealtimeBefore = LVC->IsRealtime();
 	const FText ScreenshotRealtimeOverrideSystem = NSLOCTEXT("UeAgentInterface", "ScreenshotRealtimeOverrideSystem", "UeAgentInterfaceScreenshot");
 	const bool bNeedTemporaryRealtime = !LVC->IsRealtime();
 	if (bNeedTemporaryRealtime)
@@ -1196,10 +1292,41 @@ bool FUeAgentHttpServer::TakeActiveViewportScreenshot(TArray<FColor>& OutPixels,
 		LVC->AddRealtimeOverride(true, ScreenshotRealtimeOverrideSystem);
 	}
 
-	// Ensure the viewport has a chance to redraw with the latest camera/scene state before we read pixels.
+	int32 DrawsPerformed = 0;
+	int32 EditorWorldTicksPerformed = 0;
+	if (EditorWorldTickFrames > 0)
+	{
+		UWorld* EditorWorld = nullptr;
+		if (GEditor)
+		{
+			EditorWorld = GEditor->GetEditorWorldContext().World();
+		}
+		if (!EditorWorld)
+		{
+			OutError = TEXT("no_editor_world_for_warmup_tick");
+			return false;
+		}
+		for (int32 TickIndex = 0; TickIndex < EditorWorldTickFrames; ++TickIndex)
+		{
+			EditorWorld->Tick(LEVELTICK_All, EditorWorldTickDeltaSeconds);
+			++EditorWorldTicksPerformed;
+		}
+	}
+
+	for (int32 FrameIndex = 0; FrameIndex < WarmupFrames; ++FrameIndex)
+	{
+		LVC->Invalidate();
+		Viewport->Invalidate();
+		Viewport->Draw(/*bShouldPresent*/ true);
+		FlushRenderingCommands();
+		DrawsPerformed++;
+	}
+
+	LVC->Invalidate();
 	Viewport->Invalidate();
 	Viewport->Draw(/*bShouldPresent*/ true);
 	FlushRenderingCommands();
+	DrawsPerformed++;
 
 	if (bNeedTemporaryRealtime && LVC->HasRealtimeOverride(ScreenshotRealtimeOverrideSystem))
 	{
@@ -1223,6 +1350,20 @@ bool FUeAgentHttpServer::TakeActiveViewportScreenshot(TArray<FColor>& OutPixels,
 
 	OutPixels = MoveTemp(Pixels);
 	OutSize = Size;
+
+	OutCaptureInfo = MakeShared<FJsonObject>();
+	OutCaptureInfo->SetStringField(TEXT("schema"), TEXT("uai.viewport_capture.v1"));
+	OutCaptureInfo->SetStringField(TEXT("render_path"), TEXT("level_viewport_backbuffer"));
+	OutCaptureInfo->SetBoolField(TEXT("final_lit_composition"), true);
+	OutCaptureInfo->SetNumberField(TEXT("warmup_frames_requested"), WarmupFrames);
+	OutCaptureInfo->SetNumberField(TEXT("draws_performed"), DrawsPerformed);
+	OutCaptureInfo->SetBoolField(TEXT("editor_world_tick_requested"), bTickEditorWorld);
+	OutCaptureInfo->SetNumberField(TEXT("editor_world_tick_frames_requested"), EditorWorldTickFrames);
+	OutCaptureInfo->SetNumberField(TEXT("editor_world_ticks_performed"), EditorWorldTicksPerformed);
+	OutCaptureInfo->SetNumberField(TEXT("editor_world_tick_delta_seconds"), EditorWorldTickDeltaSeconds);
+	OutCaptureInfo->SetBoolField(TEXT("temporary_realtime_override"), bNeedTemporaryRealtime);
+	OutCaptureInfo->SetBoolField(TEXT("realtime_before_capture"), bRealtimeBefore);
+	OutCaptureInfo->SetObjectField(TEXT("viewport"), UeAgentLevelOps::MakeViewportClientJson(LVC, SelectionReason));
 	return true;
 }
 

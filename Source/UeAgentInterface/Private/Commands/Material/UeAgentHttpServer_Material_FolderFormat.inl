@@ -143,6 +143,7 @@ namespace UeAgentMaterialFolderOps
 		static const TArray<FMaterialSettingSpec> Specs = {
 			{ TEXT("material_domain"), TEXT("MaterialDomain") },
 			{ TEXT("blend_mode"), TEXT("BlendMode") },
+			{ TEXT("shading_model"), TEXT("ShadingModel") },
 			{ TEXT("shading_models"), TEXT("ShadingModels") },
 			{ TEXT("two_sided"), TEXT("TwoSided") },
 			{ TEXT("use_material_attributes"), TEXT("bUseMaterialAttributes") },
@@ -172,7 +173,8 @@ namespace UeAgentMaterialFolderOps
 			{ TEXT("AmbientOcclusion"), MP_AmbientOcclusion },
 			{ TEXT("Refraction"), MP_Refraction },
 			{ TEXT("PixelDepthOffset"), MP_PixelDepthOffset },
-			{ TEXT("Anisotropy"), MP_Anisotropy }
+			{ TEXT("Anisotropy"), MP_Anisotropy },
+			{ TEXT("FrontMaterial"), MP_FrontMaterial }
 		};
 		return Specs;
 	}
@@ -538,6 +540,17 @@ namespace UeAgentMaterialFolderOps
 			PosObj->SetNumberField(TEXT("y"), Expression->MaterialExpressionEditorY);
 			ExprObj->SetObjectField(TEXT("pos"), PosObj);
 			ExprObj->SetArrayField(TEXT("properties"), ExportExpressionProperties(Expression));
+			if (const UMaterialExpressionCustom* CustomExpression = Cast<UMaterialExpressionCustom>(Expression))
+			{
+				TArray<TSharedPtr<FJsonValue>> CustomInputsArray;
+				for (const FCustomInput& CustomInput : CustomExpression->Inputs)
+				{
+					TSharedPtr<FJsonObject> CustomInputObj = MakeShared<FJsonObject>();
+					CustomInputObj->SetStringField(TEXT("name"), CustomInput.InputName.IsNone() ? TEXT("") : CustomInput.InputName.ToString());
+					CustomInputsArray.Add(MakeShared<FJsonValueObject>(CustomInputObj));
+				}
+				ExprObj->SetArrayField(TEXT("custom_inputs"), CustomInputsArray);
+			}
 			ExpressionsArray.Add(MakeShared<FJsonValueObject>(ExprObj));
 		}
 
@@ -562,7 +575,7 @@ namespace UeAgentMaterialFolderOps
 				const TArray<FExpressionOutput>& Outputs = It->Expression->GetOutputs();
 				if (Outputs.IsValidIndex(It->OutputIndex))
 				{
-					OutputName = Outputs[It->OutputIndex].OutputName.ToString();
+					OutputName = Outputs[It->OutputIndex].OutputName.IsNone() ? TEXT("") : Outputs[It->OutputIndex].OutputName.ToString();
 				}
 
 				FString InputName;
@@ -613,7 +626,7 @@ namespace UeAgentMaterialFolderOps
 				const TArray<FExpressionOutput>& Outputs = Input->Expression->GetOutputs();
 				if (Outputs.IsValidIndex(Input->OutputIndex))
 				{
-					OutputName = Outputs[Input->OutputIndex].OutputName.ToString();
+					OutputName = Outputs[Input->OutputIndex].OutputName.IsNone() ? TEXT("") : Outputs[Input->OutputIndex].OutputName.ToString();
 				}
 
 				TSharedPtr<FJsonObject> RootInputObj = MakeShared<FJsonObject>();
@@ -985,6 +998,7 @@ bool FUeAgentHttpServer::CmdMaterialApplyFolder(const FUeAgentRequestContext& Ct
 	}
 
 	TMap<FString, FString> ExpressionIdToGuid;
+	TMap<FString, FString> ExpressionIdToClass;
 	const TArray<TSharedPtr<FJsonValue>>* ExpressionsArray = nullptr;
 	if (GraphJson->TryGetArrayField(TEXT("expressions"), ExpressionsArray) && ExpressionsArray)
 	{
@@ -1010,6 +1024,8 @@ bool FUeAgentHttpServer::CmdMaterialApplyFolder(const FUeAgentRequestContext& Ct
 				OutError = TEXT("missing_expression_class");
 				return false;
 			}
+
+			ExpressionIdToClass.Add(ExpressionId, ExpressionClass);
 
 			double PosX = 0.0;
 			double PosY = 0.0;
@@ -1156,6 +1172,141 @@ bool FUeAgentHttpServer::CmdMaterialApplyFolder(const FUeAgentRequestContext& Ct
 		}
 	}
 
+	TMap<FString, TArray<FString>> CustomInputNamesByExpressionId;
+	auto AddCustomInputName = [&CustomInputNamesByExpressionId](const FString& ExpressionId, const FString& InputName)
+	{
+		const FString NormalizedInputName = UeAgentMaterialOps::NormalizeExpressionPinName(InputName);
+		if (ExpressionId.IsEmpty() || NormalizedInputName.IsEmpty())
+		{
+			return;
+		}
+
+		TArray<FString>& Names = CustomInputNamesByExpressionId.FindOrAdd(ExpressionId);
+		if (!Names.ContainsByPredicate([&NormalizedInputName](const FString& ExistingName)
+			{
+				return ExistingName.Equals(NormalizedInputName, ESearchCase::IgnoreCase);
+			}))
+		{
+			Names.Add(NormalizedInputName);
+		}
+	};
+
+	if (ExpressionsArray)
+	{
+		for (const TSharedPtr<FJsonValue>& ExpressionValue : *ExpressionsArray)
+		{
+			const TSharedPtr<FJsonObject>* ExpressionObjPtr = nullptr;
+			if (!ExpressionValue.IsValid() || !ExpressionValue->TryGetObject(ExpressionObjPtr) || !ExpressionObjPtr || !ExpressionObjPtr->IsValid())
+			{
+				continue;
+			}
+			const TSharedPtr<FJsonObject>& ExpressionObj = *ExpressionObjPtr;
+
+			FString ExpressionId;
+			if (!UeAgentMaterialFolderOps::TryGetString(ExpressionObj, TEXT("id"), ExpressionId) || ExpressionId.IsEmpty())
+			{
+				continue;
+			}
+			const FString* ExpressionClass = ExpressionIdToClass.Find(ExpressionId);
+			if (!ExpressionClass || !ExpressionClass->EndsWith(TEXT("MaterialExpressionCustom")))
+			{
+				continue;
+			}
+
+			const TArray<TSharedPtr<FJsonValue>>* CustomInputsArray = nullptr;
+			if (!ExpressionObj->TryGetArrayField(TEXT("custom_inputs"), CustomInputsArray) || !CustomInputsArray)
+			{
+				continue;
+			}
+
+			for (const TSharedPtr<FJsonValue>& CustomInputValue : *CustomInputsArray)
+			{
+				if (!CustomInputValue.IsValid())
+				{
+					continue;
+				}
+
+				FString CustomInputName;
+				if (CustomInputValue->Type == EJson::String)
+				{
+					CustomInputName = CustomInputValue->AsString();
+				}
+				else
+				{
+					const TSharedPtr<FJsonObject>* CustomInputObjPtr = nullptr;
+					if (CustomInputValue->TryGetObject(CustomInputObjPtr) && CustomInputObjPtr && CustomInputObjPtr->IsValid())
+					{
+						if (!UeAgentMaterialFolderOps::TryGetString(*CustomInputObjPtr, TEXT("name"), CustomInputName))
+						{
+							UeAgentMaterialFolderOps::TryGetString(*CustomInputObjPtr, TEXT("input_name"), CustomInputName);
+						}
+					}
+				}
+				AddCustomInputName(ExpressionId, CustomInputName);
+			}
+		}
+	}
+
+	const TArray<TSharedPtr<FJsonValue>>* EdgesArrayForCustomInputs = nullptr;
+	if (GraphJson->TryGetArrayField(TEXT("edges"), EdgesArrayForCustomInputs) && EdgesArrayForCustomInputs)
+	{
+		for (const TSharedPtr<FJsonValue>& EdgeValue : *EdgesArrayForCustomInputs)
+		{
+			const TSharedPtr<FJsonObject>* EdgeObjPtr = nullptr;
+			if (!EdgeValue.IsValid() || !EdgeValue->TryGetObject(EdgeObjPtr) || !EdgeObjPtr || !EdgeObjPtr->IsValid())
+			{
+				continue;
+			}
+
+			TSharedPtr<FJsonObject> ToObj;
+			if (!UeAgentMaterialFolderOps::TryGetObjectField(*EdgeObjPtr, TEXT("to"), ToObj))
+			{
+				continue;
+			}
+
+			FString ToNodeId;
+			FString InputName;
+			UeAgentMaterialFolderOps::TryGetString(ToObj, TEXT("node"), ToNodeId);
+			UeAgentMaterialFolderOps::TryGetString(ToObj, TEXT("input"), InputName);
+			const FString* ToExpressionClass = ExpressionIdToClass.Find(ToNodeId);
+			if (ToExpressionClass && ToExpressionClass->EndsWith(TEXT("MaterialExpressionCustom")))
+			{
+				AddCustomInputName(ToNodeId, InputName);
+			}
+		}
+	}
+
+	for (const TPair<FString, TArray<FString>>& CustomInputPair : CustomInputNamesByExpressionId)
+	{
+		const FString* ExpressionGuid = ExpressionIdToGuid.Find(CustomInputPair.Key);
+		if (!ExpressionGuid)
+		{
+			OutError = TEXT("custom_input_expression_not_found");
+			return false;
+		}
+
+		TSharedPtr<FJsonObject> FindParams = MakeShared<FJsonObject>();
+		FindParams->SetStringField(TEXT("expression_guid"), *ExpressionGuid);
+		UMaterialExpressionCustom* CustomExpression = Cast<UMaterialExpressionCustom>(UeAgentMaterialOps::FindExpressionByParams(Material, FindParams));
+		if (!CustomExpression)
+		{
+			OutError = TEXT("custom_input_expression_not_custom");
+			return false;
+		}
+
+		CustomExpression->Modify();
+		CustomExpression->Inputs.Reset();
+		for (const FString& CustomInputName : CustomInputPair.Value)
+		{
+			FCustomInput NewInput;
+			NewInput.InputName = FName(*CustomInputName);
+			CustomExpression->Inputs.Add(NewInput);
+		}
+		CustomExpression->PostEditChange();
+		Material->MarkPackageDirty();
+		Material->PostEditChange();
+	}
+
 	TSharedPtr<FJsonObject> InterfaceJson;
 	FString InterfaceError;
 	if (!UeAgentMaterialFolderOps::LoadOptionalJsonFile(FPaths::Combine(FolderPath, TEXT("parameters"), TEXT("interface.json")), InterfaceJson, InterfaceError))
@@ -1255,8 +1406,9 @@ bool FUeAgentHttpServer::CmdMaterialApplyFolder(const FUeAgentRequestContext& Ct
 	const TArray<TSharedPtr<FJsonValue>>* EdgesArray = nullptr;
 	if (GraphJson->TryGetArrayField(TEXT("edges"), EdgesArray) && EdgesArray)
 	{
-		for (const TSharedPtr<FJsonValue>& EdgeValue : *EdgesArray)
+		for (int32 EdgeIndex = 0; EdgeIndex < EdgesArray->Num(); ++EdgeIndex)
 		{
+			const TSharedPtr<FJsonValue>& EdgeValue = (*EdgesArray)[EdgeIndex];
 			const TSharedPtr<FJsonObject>* EdgeObjPtr = nullptr;
 			if (!EdgeValue.IsValid() || !EdgeValue->TryGetObject(EdgeObjPtr) || !EdgeObjPtr || !EdgeObjPtr->IsValid())
 			{
@@ -1293,6 +1445,8 @@ bool FUeAgentHttpServer::CmdMaterialApplyFolder(const FUeAgentRequestContext& Ct
 			FString InputName;
 			UeAgentMaterialFolderOps::TryGetString(FromObj, TEXT("output"), OutputName);
 			UeAgentMaterialFolderOps::TryGetString(ToObj, TEXT("input"), InputName);
+			OutputName = UeAgentMaterialOps::NormalizeExpressionPinName(OutputName);
+			InputName = UeAgentMaterialOps::NormalizeExpressionPinName(InputName);
 
 			TSharedPtr<FJsonObject> ConnectParams = MakeShared<FJsonObject>();
 			ConnectParams->SetStringField(TEXT("asset_path"), AssetPath);
@@ -1311,6 +1465,14 @@ bool FUeAgentHttpServer::CmdMaterialApplyFolder(const FUeAgentRequestContext& Ct
 			TSharedPtr<FJsonObject> ConnectData;
 			if (!InvokeMaterialSubCommand(TEXT("material_connect_expressions"), ConnectParams, ConnectData, OutError))
 			{
+				OutError = FString::Printf(
+					TEXT("connect_expressions_failed edge_index=%d from='%s' output='%s' to='%s' input='%s' sub_error='%s'"),
+					EdgeIndex,
+					*FromNodeId,
+					*OutputName,
+					*ToNodeId,
+					*InputName,
+					*OutError);
 				return false;
 			}
 			++EdgesCreated;
@@ -1320,8 +1482,9 @@ bool FUeAgentHttpServer::CmdMaterialApplyFolder(const FUeAgentRequestContext& Ct
 	const TArray<TSharedPtr<FJsonValue>>* RootInputsArray = nullptr;
 	if (GraphJson->TryGetArrayField(TEXT("root_inputs"), RootInputsArray) && RootInputsArray)
 	{
-		for (const TSharedPtr<FJsonValue>& RootInputValue : *RootInputsArray)
+		for (int32 RootInputIndex = 0; RootInputIndex < RootInputsArray->Num(); ++RootInputIndex)
 		{
+			const TSharedPtr<FJsonValue>& RootInputValue = (*RootInputsArray)[RootInputIndex];
 			const TSharedPtr<FJsonObject>* RootInputObjPtr = nullptr;
 			if (!RootInputValue.IsValid() || !RootInputValue->TryGetObject(RootInputObjPtr) || !RootInputObjPtr || !RootInputObjPtr->IsValid())
 			{
@@ -1358,6 +1521,7 @@ bool FUeAgentHttpServer::CmdMaterialApplyFolder(const FUeAgentRequestContext& Ct
 
 			FString OutputName;
 			UeAgentMaterialFolderOps::TryGetString(FromObj, TEXT("output"), OutputName);
+			OutputName = UeAgentMaterialOps::NormalizeExpressionPinName(OutputName);
 
 			TSharedPtr<FJsonObject> ConnectParams = MakeShared<FJsonObject>();
 			ConnectParams->SetStringField(TEXT("asset_path"), AssetPath);
@@ -1372,6 +1536,13 @@ bool FUeAgentHttpServer::CmdMaterialApplyFolder(const FUeAgentRequestContext& Ct
 			TSharedPtr<FJsonObject> ConnectData;
 			if (!InvokeMaterialSubCommand(TEXT("material_connect_expression_to_property"), ConnectParams, ConnectData, OutError))
 			{
+				OutError = FString::Printf(
+					TEXT("connect_root_input_failed root_input_index=%d material_property='%s' from='%s' output='%s' sub_error='%s'"),
+					RootInputIndex,
+					*MaterialPropertyName,
+					*FromNodeId,
+					*OutputName,
+					*OutError);
 				return false;
 			}
 			++RootInputsConnected;
@@ -2084,7 +2255,7 @@ namespace UeAgentMaterialFunctionFolderOps
 				const TArray<FExpressionOutput>& Outputs = It->Expression->GetOutputs();
 				if (Outputs.IsValidIndex(It->OutputIndex))
 				{
-					OutputName = Outputs[It->OutputIndex].OutputName.ToString();
+					OutputName = Outputs[It->OutputIndex].OutputName.IsNone() ? TEXT("") : Outputs[It->OutputIndex].OutputName.ToString();
 				}
 
 				FString InputName;

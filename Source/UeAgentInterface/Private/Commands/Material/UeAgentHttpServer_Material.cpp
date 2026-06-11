@@ -11,6 +11,7 @@
 #include "MaterialEditingLibrary.h"
 #include "Materials/Material.h"
 #include "Materials/MaterialExpression.h"
+#include "Materials/MaterialExpressionCustom.h"
 #include "Materials/MaterialExpressionMaterialFunctionCall.h"
 #include "Materials/MaterialFunction.h"
 #include "Materials/MaterialFunctionInterface.h"
@@ -373,6 +374,41 @@ namespace UeAgentMaterialOps
 		return true;
 	}
 
+	static bool ExportObjectPropertyText(UObject* Target, const FString& PropertyPath, FString& OutValueText, FString* OutCppType = nullptr, FString* OutExportError = nullptr)
+	{
+		if (OutExportError)
+		{
+			OutExportError->Reset();
+		}
+
+		FProperty* Property = nullptr;
+		void* ValuePtr = nullptr;
+		if (!ResolvePropertyPath(Target, PropertyPath, Property, ValuePtr))
+		{
+			if (OutExportError)
+			{
+				*OutExportError = TEXT("property_not_found");
+			}
+			return false;
+		}
+
+		if (OutCppType)
+		{
+			*OutCppType = Property ? Property->GetCPPType() : TEXT("");
+		}
+		if (!Property || !ValuePtr)
+		{
+			if (OutExportError)
+			{
+				*OutExportError = TEXT("property_export_failed");
+			}
+			return false;
+		}
+
+		Property->ExportTextItem_Direct(OutValueText, ValuePtr, nullptr, Target, PPF_None);
+		return true;
+	}
+
 	static bool ParseLinearColor(const TSharedPtr<FJsonObject>& Params, const FString& Key, FLinearColor& OutColor)
 	{
 		const TSharedPtr<FJsonObject>* ColorObjPtr = nullptr;
@@ -475,6 +511,18 @@ namespace UeAgentMaterialOps
 		return InputName;
 	}
 
+	static FString NormalizeExpressionPinName(const FString& PinName)
+	{
+		const FString Trimmed = PinName.TrimStartAndEnd();
+		if (Trimmed.Equals(TEXT("None"), ESearchCase::IgnoreCase)
+			|| Trimmed.Equals(TEXT("NAME_None"), ESearchCase::IgnoreCase)
+			|| Trimmed.Equals(TEXT("null"), ESearchCase::IgnoreCase))
+		{
+			return FString();
+		}
+		return Trimmed;
+	}
+
 	static bool ResolveExpressionOutputIndex(UMaterialExpression* Expression, const FString& OutputName, int32& OutOutputIndex)
 	{
 		OutOutputIndex = INDEX_NONE;
@@ -489,7 +537,7 @@ namespace UeAgentMaterialOps
 			return false;
 		}
 
-		const FString TrimmedOutputName = OutputName.TrimStartAndEnd();
+		const FString TrimmedOutputName = NormalizeExpressionPinName(OutputName);
 		if (TrimmedOutputName.IsEmpty())
 		{
 			OutOutputIndex = 0;
@@ -517,7 +565,7 @@ namespace UeAgentMaterialOps
 			return false;
 		}
 
-		const FString TrimmedInputName = InputName.TrimStartAndEnd();
+		const FString TrimmedInputName = NormalizeExpressionPinName(InputName);
 		FExpressionInput* FirstInput = nullptr;
 		int32 InputCount = 0;
 		for (FExpressionInputIterator It{ Expression }; It; ++It)
@@ -544,7 +592,6 @@ namespace UeAgentMaterialOps
 
 		return false;
 	}
-
 	static bool ManualConnectExpressions(UMaterialExpression* FromExpression, const FString& FromOutputName, UMaterialExpression* ToExpression, const FString& ToInputName)
 	{
 		int32 OutputIndex = INDEX_NONE;
@@ -825,6 +872,7 @@ namespace UeAgentMaterialOps
 		if (Key == TEXT("refraction")) { OutProperty = MP_Refraction; return true; }
 		if (Key == TEXT("pixeldepthoffset") || Key == TEXT("pdo")) { OutProperty = MP_PixelDepthOffset; return true; }
 		if (Key == TEXT("anisotropy")) { OutProperty = MP_Anisotropy; return true; }
+		if (Key == TEXT("frontmaterial")) { OutProperty = MP_FrontMaterial; return true; }
 
 		return false;
 	}

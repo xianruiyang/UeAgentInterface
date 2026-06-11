@@ -2,6 +2,9 @@
 
 #include "UeAgentSmokeTestSharedIncludes.inl"
 
+#include "Materials/Material.h"
+#include "Materials/MaterialExpression.h"
+
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(
 	FUeAgentInterfaceMaterialSmokeTest,
 	"GptProjectTest.UeAgentInterface.Smoke.MaterialWorkflow",
@@ -1800,7 +1803,7 @@ bool FUeAgentInterfaceMaterialFolderSmokeTest::RunTest(const FString& Parameters
 
 	if (!SaveUtf8Json(
 		FPaths::Combine(FolderPath, TEXT("graphs"), TEXT("MaterialGraph.json")),
-		TEXT("{\n  \"graph\": {\n    \"name\": \"MaterialGraph\",\n    \"graph_kind\": \"material_graph\"\n  },\n  \"expressions\": [\n    {\n      \"id\": \"param_color_main\",\n      \"expression_class\": \"/Script/Engine.MaterialExpressionVectorParameter\",\n      \"expression_name\": \"SmokeColorParam\",\n      \"pos\": { \"x\": -280, \"y\": 0 },\n      \"properties\": [\n        { \"property_name\": \"ParameterName\", \"value_text\": \"Color_Main\" },\n        { \"property_name\": \"DefaultValue\", \"value_text\": \"(R=0.200000,G=0.400000,B=1.000000,A=1.000000)\" },\n        { \"property_name\": \"Group\", \"value_text\": \"Surface\" },\n        { \"property_name\": \"SortPriority\", \"value_text\": \"0\" }\n      ]\n    }\n  ],\n  \"edges\": [],\n  \"root_inputs\": [\n    {\n      \"material_property\": \"BaseColor\",\n      \"from\": { \"node\": \"param_color_main\", \"output\": \"\" }\n    }\n  ]\n}\n")))
+		TEXT("{\n  \"graph\": {\n    \"name\": \"MaterialGraph\",\n    \"graph_kind\": \"material_graph\"\n  },\n  \"expressions\": [\n    {\n      \"id\": \"param_color_main\",\n      \"expression_class\": \"/Script/Engine.MaterialExpressionVectorParameter\",\n      \"expression_name\": \"SmokeColorParam\",\n      \"pos\": { \"x\": -420, \"y\": 0 },\n      \"properties\": [\n        { \"property_name\": \"ParameterName\", \"value_text\": \"Color_Main\" },\n        { \"property_name\": \"DefaultValue\", \"value_text\": \"(R=0.200000,G=0.400000,B=1.000000,A=1.000000)\" },\n        { \"property_name\": \"Group\", \"value_text\": \"Surface\" },\n        { \"property_name\": \"SortPriority\", \"value_text\": \"0\" }\n      ]\n    },\n    {\n      \"id\": \"custom_passthrough\",\n      \"expression_class\": \"/Script/Engine.MaterialExpressionCustom\",\n      \"expression_name\": \"SmokeCustomPassthrough\",\n      \"pos\": { \"x\": -120, \"y\": 0 },\n      \"properties\": [\n        { \"property_name\": \"Code\", \"value_text\": \"return InputA;\" },\n        { \"property_name\": \"Description\", \"value_text\": \"SmokeCustomPassthrough\" },\n        { \"property_name\": \"OutputType\", \"value_text\": \"CMOT_Float3\" }\n      ]\n    }\n  ],\n  \"edges\": [\n    {\n      \"from\": { \"node\": \"param_color_main\", \"output\": \"None\" },\n      \"to\": { \"node\": \"custom_passthrough\", \"input\": \"InputA\" }\n    }\n  ],\n  \"root_inputs\": [\n    {\n      \"material_property\": \"BaseColor\",\n      \"from\": { \"node\": \"custom_passthrough\", \"output\": \"None\" }\n    }\n  ]\n}\n")))
 	{
 		return false;
 	}
@@ -1829,6 +1832,7 @@ bool FUeAgentInterfaceMaterialFolderSmokeTest::RunTest(const FString& Parameters
 	{
 		TestTrue(TEXT("Material folder apply applied settings"), (*ApplyData)->GetIntegerField(TEXT("settings_applied")) >= 3);
 		TestTrue(TEXT("Material folder apply created expressions"), (*ApplyData)->GetIntegerField(TEXT("expressions_created")) >= 1);
+		TestTrue(TEXT("Material folder apply connected expression edge with None output"), (*ApplyData)->GetIntegerField(TEXT("edges_created")) >= 1);
 		TestTrue(TEXT("Material folder apply connected root input"), (*ApplyData)->GetIntegerField(TEXT("root_inputs_connected")) >= 1);
 	}
 
@@ -2410,9 +2414,43 @@ bool FUeAgentInterfaceMaterialExpressionLifecycleSmokeTest::RunTest(const FStrin
 		TEXT("smoke-material-life-delete-001"),
 		TEXT("material_delete_expression"),
 		FString::Printf(TEXT("{\"asset_path\":\"%s\",\"expression_guid\":\"%s\",\"compile_after_delete\":false,\"save_after_delete\":false}"), *MaterialAssetPath, *ExpressionGuid));
+	const FString MaterialObjectPath = FString::Printf(TEXT("%s.%s"), *MaterialAssetPath, *FPackageName::GetShortName(MaterialAssetPath));
+	UMaterial* LifecycleMaterial = LoadObject<UMaterial>(nullptr, *MaterialObjectPath);
+	TestNotNull(TEXT("Material lifecycle material loaded for rooted delete regression"), LifecycleMaterial);
+	UMaterialExpression* ExpressionToRootBeforeDelete = nullptr;
+	if (LifecycleMaterial)
+	{
+		FGuid ParsedExpressionGuid;
+		FGuid::Parse(ExpressionGuid, ParsedExpressionGuid);
+		for (UMaterialExpression* Expression : LifecycleMaterial->GetExpressions())
+		{
+			if (Expression && Expression->MaterialExpressionGuid == ParsedExpressionGuid)
+			{
+				ExpressionToRootBeforeDelete = Expression;
+				break;
+			}
+		}
+	}
+	TestNotNull(TEXT("Material lifecycle expression found for rooted delete regression"), ExpressionToRootBeforeDelete);
+	if (ExpressionToRootBeforeDelete)
+	{
+		ExpressionToRootBeforeDelete->AddToRoot();
+		TestTrue(TEXT("Material lifecycle expression rooted before delete"), ExpressionToRootBeforeDelete->IsRooted());
+	}
+
 	FHttpSmokeResult DeleteExpressionResult;
 	TestTrue(TEXT("Material lifecycle delete_expression request succeeded"), ExecuteHttpJsonRequest(TEXT("POST"), ServerScope.BaseUrl + TEXT("/api/exec"), ServerScope.Token, DeleteExpressionBody, DeleteExpressionResult));
 	TestEqual(TEXT("Material lifecycle delete_expression status code"), DeleteExpressionResult.StatusCode, 200);
+	TSharedPtr<FJsonObject> DeleteExpressionJson;
+	TestTrue(TEXT("Material lifecycle delete_expression response parses as JSON"), ParseJson(DeleteExpressionResult.Body, DeleteExpressionJson));
+	TestTrue(TEXT("Material lifecycle delete_expression root ok=true"), DeleteExpressionJson.IsValid() && DeleteExpressionJson->GetBoolField(TEXT("ok")));
+	const TSharedPtr<FJsonObject>* DeleteExpressionData = nullptr;
+	TestTrue(TEXT("Material lifecycle delete_expression contains data object"), DeleteExpressionJson.IsValid() && DeleteExpressionJson->TryGetObjectField(TEXT("data"), DeleteExpressionData) && DeleteExpressionData && DeleteExpressionData->IsValid());
+	if (DeleteExpressionData && DeleteExpressionData->IsValid())
+	{
+		TestTrue(TEXT("Material lifecycle delete_expression saw rooted expression"), (*DeleteExpressionData)->GetBoolField(TEXT("was_rooted_before_delete")));
+		TestTrue(TEXT("Material lifecycle delete_expression removed root before delete"), (*DeleteExpressionData)->GetBoolField(TEXT("removed_root_before_delete")));
+	}
 
 	const FString ListExpressionsBody = MakeExecRequestBody(
 		TEXT("smoke-material-life-list-001"),
