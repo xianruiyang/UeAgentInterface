@@ -111,17 +111,7 @@ bool FUeAgentHttpServer::CmdNiagaraUserParameterAdd(const FUeAgentRequestContext
 
 	NiagaraSystem->MarkPackageDirty();
 
-	bool bCompileAfterSet = false;
-	JsonTryGetBool(Ctx.Params, TEXT("compile_after_set"), bCompileAfterSet);
-	bool bWaitForComplete = true;
-	JsonTryGetBool(Ctx.Params, TEXT("wait_for_complete"), bWaitForComplete);
-	bool bCompilationRequested = false;
-	bool bCompilationComplete = false;
-	if (bCompileAfterSet)
-	{
-		bCompilationRequested = NiagaraSystem->RequestCompile(false);
-		bCompilationComplete = bWaitForComplete ? NiagaraSystem->PollForCompilationComplete(true) : false;
-	}
+	const UeAgentNiagaraOps::FNiagaraCompileAfterSetResult CompileResult = UeAgentNiagaraOps::CompileSystemAfterSet(NiagaraSystem, Ctx.Params, false);
 
 	bool bSaveAfterSet = false;
 	JsonTryGetBool(Ctx.Params, TEXT("save_after_set"), bSaveAfterSet);
@@ -142,9 +132,7 @@ bool FUeAgentHttpServer::CmdNiagaraUserParameterAdd(const FUeAgentRequestContext
 
 	OutData->SetStringField(TEXT("asset_path"), NiagaraSystem->GetOutermost()->GetName());
 	OutData->SetObjectField(TEXT("parameter"), UeAgentNiagaraOps::BuildUserParameterJson(ExposedParameters, AddedParameter, true));
-	OutData->SetBoolField(TEXT("compile_after_set"), bCompileAfterSet);
-	OutData->SetBoolField(TEXT("compilation_requested"), bCompilationRequested);
-	OutData->SetBoolField(TEXT("compilation_complete"), bCompilationComplete);
+	UeAgentNiagaraOps::AppendCompileAfterSetFields(OutData, CompileResult);
 	OutData->SetBoolField(TEXT("saved"), bSaveAfterSet);
 	return true;
 }
@@ -192,17 +180,7 @@ bool FUeAgentHttpServer::CmdNiagaraUserParameterRemove(const FUeAgentRequestCont
 	}
 	NiagaraSystem->MarkPackageDirty();
 
-	bool bCompileAfterSet = false;
-	JsonTryGetBool(Ctx.Params, TEXT("compile_after_set"), bCompileAfterSet);
-	bool bWaitForComplete = true;
-	JsonTryGetBool(Ctx.Params, TEXT("wait_for_complete"), bWaitForComplete);
-	bool bCompilationRequested = false;
-	bool bCompilationComplete = false;
-	if (bCompileAfterSet)
-	{
-		bCompilationRequested = NiagaraSystem->RequestCompile(false);
-		bCompilationComplete = bWaitForComplete ? NiagaraSystem->PollForCompilationComplete(true) : false;
-	}
+	const UeAgentNiagaraOps::FNiagaraCompileAfterSetResult CompileResult = UeAgentNiagaraOps::CompileSystemAfterSet(NiagaraSystem, Ctx.Params, false);
 
 	bool bSaveAfterSet = false;
 	JsonTryGetBool(Ctx.Params, TEXT("save_after_set"), bSaveAfterSet);
@@ -217,9 +195,7 @@ bool FUeAgentHttpServer::CmdNiagaraUserParameterRemove(const FUeAgentRequestCont
 	OutData->SetStringField(TEXT("asset_path"), NiagaraSystem->GetOutermost()->GetName());
 	OutData->SetStringField(TEXT("removed_parameter_name"), RemovedName);
 	OutData->SetStringField(TEXT("removed_parameter_type"), RemovedType);
-	OutData->SetBoolField(TEXT("compile_after_set"), bCompileAfterSet);
-	OutData->SetBoolField(TEXT("compilation_requested"), bCompilationRequested);
-	OutData->SetBoolField(TEXT("compilation_complete"), bCompilationComplete);
+	UeAgentNiagaraOps::AppendCompileAfterSetFields(OutData, CompileResult);
 	OutData->SetBoolField(TEXT("saved"), bSaveAfterSet);
 	return true;
 }
@@ -309,17 +285,7 @@ bool FUeAgentHttpServer::CmdNiagaraUserParameterSet(const FUeAgentRequestContext
 	}
 	NiagaraSystem->MarkPackageDirty();
 
-	bool bCompileAfterSet = false;
-	JsonTryGetBool(Ctx.Params, TEXT("compile_after_set"), bCompileAfterSet);
-	bool bWaitForComplete = true;
-	JsonTryGetBool(Ctx.Params, TEXT("wait_for_complete"), bWaitForComplete);
-	bool bCompilationRequested = false;
-	bool bCompilationComplete = false;
-	if (bCompileAfterSet)
-	{
-		bCompilationRequested = NiagaraSystem->RequestCompile(false);
-		bCompilationComplete = bWaitForComplete ? NiagaraSystem->PollForCompilationComplete(true) : false;
-	}
+	const UeAgentNiagaraOps::FNiagaraCompileAfterSetResult CompileResult = UeAgentNiagaraOps::CompileSystemAfterSet(NiagaraSystem, Ctx.Params, false);
 
 	bool bSaveAfterSet = false;
 	JsonTryGetBool(Ctx.Params, TEXT("save_after_set"), bSaveAfterSet);
@@ -333,9 +299,7 @@ bool FUeAgentHttpServer::CmdNiagaraUserParameterSet(const FUeAgentRequestContext
 
 	OutData->SetStringField(TEXT("asset_path"), NiagaraSystem->GetOutermost()->GetName());
 	OutData->SetObjectField(TEXT("parameter"), UeAgentNiagaraOps::BuildUserParameterJson(ExposedParameters, UserParameter, true));
-	OutData->SetBoolField(TEXT("compile_after_set"), bCompileAfterSet);
-	OutData->SetBoolField(TEXT("compilation_requested"), bCompilationRequested);
-	OutData->SetBoolField(TEXT("compilation_complete"), bCompilationComplete);
+	UeAgentNiagaraOps::AppendCompileAfterSetFields(OutData, CompileResult);
 	OutData->SetBoolField(TEXT("saved"), bSaveAfterSet);
 	return true;
 }
@@ -785,25 +749,7 @@ bool FUeAgentHttpServer::CmdNiagaraSystemAddEmitter(const FUeAgentRequestContext
 	const UeAgentNiagaraOps::FNiagaraSystemRefreshResult RefreshResult =
 		UeAgentNiagaraOps::RefreshNiagaraSystemAfterStructuralEdit(*NiagaraSystem, true, true);
 
-	bool bCompileAfterSet = true;
-	JsonTryGetBool(Ctx.Params, TEXT("compile_after_set"), bCompileAfterSet);
-	bool bForceCompile = true;
-	JsonTryGetBool(Ctx.Params, TEXT("force_compile"), bForceCompile);
-	bool bWaitForComplete = true;
-	JsonTryGetBool(Ctx.Params, TEXT("wait_for_complete"), bWaitForComplete);
-	bool bCompilationRequested = false;
-	bool bCompilationComplete = false;
-	if (bCompileAfterSet)
-	{
-		bCompilationRequested = NiagaraSystem->RequestCompile(bForceCompile);
-		if (bWaitForComplete)
-		{
-			NiagaraSystem->WaitForCompilationComplete(true, false);
-			NiagaraSystem->PollForCompilationComplete(true);
-			NiagaraSystem->CacheFromCompiledData();
-			bCompilationComplete = !NiagaraSystem->HasOutstandingCompilationRequests(true);
-		}
-	}
+	const UeAgentNiagaraOps::FNiagaraCompileAfterSetResult CompileResult = UeAgentNiagaraOps::CompileSystemAfterSet(NiagaraSystem, Ctx.Params, true);
 
 	bool bSaveAfterSet = false;
 	JsonTryGetBool(Ctx.Params, TEXT("save_after_set"), bSaveAfterSet);
@@ -830,10 +776,7 @@ bool FUeAgentHttpServer::CmdNiagaraSystemAddEmitter(const FUeAgentRequestContext
 	OutData->SetStringField(TEXT("added_emitter_id"), NewHandle.GetId().ToString(EGuidFormats::DigitsWithHyphensLower));
 	OutData->SetStringField(TEXT("added_emitter_name"), NewHandle.GetName().ToString());
 	OutData->SetNumberField(TEXT("added_emitter_index"), HandleIndex);
-	OutData->SetBoolField(TEXT("compile_after_set"), bCompileAfterSet);
-	OutData->SetBoolField(TEXT("force_compile"), bForceCompile);
-	OutData->SetBoolField(TEXT("compilation_requested"), bCompilationRequested);
-	OutData->SetBoolField(TEXT("compilation_complete"), bCompilationComplete);
+	UeAgentNiagaraOps::AppendCompileAfterSetFields(OutData, CompileResult);
 	OutData->SetObjectField(TEXT("system_refresh"), UeAgentNiagaraOps::BuildNiagaraSystemRefreshJson(RefreshResult));
 	OutData->SetBoolField(TEXT("synchronized_overview_graph"), RefreshResult.bSynchronizedOverviewGraph);
 	OutData->SetNumberField(TEXT("overview_node_count_before"), RefreshResult.OverviewNodeCountBefore);
@@ -941,17 +884,7 @@ bool FUeAgentHttpServer::CmdNiagaraSystemRemoveEmitter(const FUeAgentRequestCont
 	const bool bSynchronizedOverviewGraph = UeAgentNiagaraOps::SynchronizeSystemEditorData(*NiagaraSystem, OverviewNodeCountBefore, OverviewNodeCountAfter);
 	NiagaraSystem->MarkPackageDirty();
 
-	bool bCompileAfterSet = true;
-	JsonTryGetBool(Ctx.Params, TEXT("compile_after_set"), bCompileAfterSet);
-	bool bWaitForComplete = true;
-	JsonTryGetBool(Ctx.Params, TEXT("wait_for_complete"), bWaitForComplete);
-	bool bCompilationRequested = false;
-	bool bCompilationComplete = false;
-	if (bCompileAfterSet)
-	{
-		bCompilationRequested = NiagaraSystem->RequestCompile(false);
-		bCompilationComplete = bWaitForComplete ? NiagaraSystem->PollForCompilationComplete(true) : false;
-	}
+	const UeAgentNiagaraOps::FNiagaraCompileAfterSetResult CompileResult = UeAgentNiagaraOps::CompileSystemAfterSet(NiagaraSystem, Ctx.Params, true);
 
 	bool bSaveAfterSet = false;
 	JsonTryGetBool(Ctx.Params, TEXT("save_after_set"), bSaveAfterSet);
@@ -967,9 +900,7 @@ bool FUeAgentHttpServer::CmdNiagaraSystemRemoveEmitter(const FUeAgentRequestCont
 	OutData->SetStringField(TEXT("removed_emitter_id"), RemovedId);
 	OutData->SetStringField(TEXT("removed_emitter_name"), RemovedName);
 	OutData->SetNumberField(TEXT("removed_emitter_index"), HandleIndex);
-	OutData->SetBoolField(TEXT("compile_after_set"), bCompileAfterSet);
-	OutData->SetBoolField(TEXT("compilation_requested"), bCompilationRequested);
-	OutData->SetBoolField(TEXT("compilation_complete"), bCompilationComplete);
+	UeAgentNiagaraOps::AppendCompileAfterSetFields(OutData, CompileResult);
 	OutData->SetBoolField(TEXT("synchronized_overview_graph"), bSynchronizedOverviewGraph);
 	OutData->SetNumberField(TEXT("overview_node_count_before"), OverviewNodeCountBefore);
 	OutData->SetNumberField(TEXT("overview_node_count_after"), OverviewNodeCountAfter);
@@ -1034,17 +965,7 @@ bool FUeAgentHttpServer::CmdNiagaraSystemMoveEmitter(const FUeAgentRequestContex
 		NiagaraSystem->MarkPackageDirty();
 	}
 
-	bool bCompileAfterSet = true;
-	JsonTryGetBool(Ctx.Params, TEXT("compile_after_set"), bCompileAfterSet);
-	bool bWaitForComplete = true;
-	JsonTryGetBool(Ctx.Params, TEXT("wait_for_complete"), bWaitForComplete);
-	bool bCompilationRequested = false;
-	bool bCompilationComplete = false;
-	if (bCompileAfterSet && bMoved)
-	{
-		bCompilationRequested = NiagaraSystem->RequestCompile(false);
-		bCompilationComplete = bWaitForComplete ? NiagaraSystem->PollForCompilationComplete(true) : false;
-	}
+	const UeAgentNiagaraOps::FNiagaraCompileAfterSetResult CompileResult = UeAgentNiagaraOps::CompileSystemAfterSet(NiagaraSystem, Ctx.Params, true, bMoved);
 
 	bool bSaveAfterSet = false;
 	JsonTryGetBool(Ctx.Params, TEXT("save_after_set"), bSaveAfterSet);
@@ -1062,9 +983,7 @@ bool FUeAgentHttpServer::CmdNiagaraSystemMoveEmitter(const FUeAgentRequestContex
 	OutData->SetNumberField(TEXT("source_index"), SourceIndex);
 	OutData->SetNumberField(TEXT("target_index"), TargetIndex);
 	OutData->SetBoolField(TEXT("moved"), bMoved);
-	OutData->SetBoolField(TEXT("compile_after_set"), bCompileAfterSet);
-	OutData->SetBoolField(TEXT("compilation_requested"), bCompilationRequested);
-	OutData->SetBoolField(TEXT("compilation_complete"), bCompilationComplete);
+	UeAgentNiagaraOps::AppendCompileAfterSetFields(OutData, CompileResult);
 	OutData->SetBoolField(TEXT("closed_open_editor_before_structural_edit"), bCloseOpenEditorBeforeStructuralEdit);
 	OutData->SetNumberField(TEXT("closed_editor_count"), ClosedEditorCount);
 	OutData->SetBoolField(TEXT("saved"), bSaveAfterSet);
@@ -1120,17 +1039,7 @@ bool FUeAgentHttpServer::CmdNiagaraSystemSetEmitterEnabled(const FUeAgentRequest
 		NiagaraSystem->MarkPackageDirty();
 	}
 
-	bool bCompileAfterSet = true;
-	JsonTryGetBool(Ctx.Params, TEXT("compile_after_set"), bCompileAfterSet);
-	bool bWaitForComplete = true;
-	JsonTryGetBool(Ctx.Params, TEXT("wait_for_complete"), bWaitForComplete);
-	bool bCompilationRequested = false;
-	bool bCompilationComplete = false;
-	if (bCompileAfterSet && bChanged)
-	{
-		bCompilationRequested = NiagaraSystem->RequestCompile(false);
-		bCompilationComplete = bWaitForComplete ? NiagaraSystem->PollForCompilationComplete(true) : false;
-	}
+	const UeAgentNiagaraOps::FNiagaraCompileAfterSetResult CompileResult = UeAgentNiagaraOps::CompileSystemAfterSet(NiagaraSystem, Ctx.Params, true, bChanged);
 
 	bool bSaveAfterSet = false;
 	JsonTryGetBool(Ctx.Params, TEXT("save_after_set"), bSaveAfterSet);
@@ -1149,9 +1058,7 @@ bool FUeAgentHttpServer::CmdNiagaraSystemSetEmitterEnabled(const FUeAgentRequest
 	OutData->SetBoolField(TEXT("enabled_before"), bOldEnabled);
 	OutData->SetBoolField(TEXT("enabled_after"), Handle->GetIsEnabled());
 	OutData->SetBoolField(TEXT("changed"), bChanged);
-	OutData->SetBoolField(TEXT("compile_after_set"), bCompileAfterSet);
-	OutData->SetBoolField(TEXT("compilation_requested"), bCompilationRequested);
-	OutData->SetBoolField(TEXT("compilation_complete"), bCompilationComplete);
+	UeAgentNiagaraOps::AppendCompileAfterSetFields(OutData, CompileResult);
 	OutData->SetBoolField(TEXT("closed_open_editor_before_structural_edit"), bCloseOpenEditorBeforeStructuralEdit);
 	OutData->SetNumberField(TEXT("closed_editor_count"), ClosedEditorCount);
 	OutData->SetBoolField(TEXT("saved"), bSaveAfterSet);
@@ -1233,17 +1140,7 @@ bool FUeAgentHttpServer::CmdNiagaraSystemSetEmitterVersion(const FUeAgentRequest
 		NiagaraSystem->MarkPackageDirty();
 	}
 
-	bool bCompileAfterSet = true;
-	JsonTryGetBool(Ctx.Params, TEXT("compile_after_set"), bCompileAfterSet);
-	bool bWaitForComplete = true;
-	JsonTryGetBool(Ctx.Params, TEXT("wait_for_complete"), bWaitForComplete);
-	bool bCompilationRequested = false;
-	bool bCompilationComplete = false;
-	if (bCompileAfterSet && bVersionChanged)
-	{
-		bCompilationRequested = NiagaraSystem->RequestCompile(false);
-		bCompilationComplete = bWaitForComplete ? NiagaraSystem->PollForCompilationComplete(true) : false;
-	}
+	const UeAgentNiagaraOps::FNiagaraCompileAfterSetResult CompileResult = UeAgentNiagaraOps::CompileSystemAfterSet(NiagaraSystem, Ctx.Params, true, bVersionChanged);
 
 	bool bSaveAfterSet = false;
 	JsonTryGetBool(Ctx.Params, TEXT("save_after_set"), bSaveAfterSet);
@@ -1268,9 +1165,7 @@ bool FUeAgentHttpServer::CmdNiagaraSystemSetEmitterVersion(const FUeAgentRequest
 	OutData->SetStringField(TEXT("previous_version"), PreviousVersion);
 	OutData->SetStringField(TEXT("current_version"), CurrentVersion);
 	OutData->SetBoolField(TEXT("changed"), bVersionChanged && bChanged);
-	OutData->SetBoolField(TEXT("compile_after_set"), bCompileAfterSet);
-	OutData->SetBoolField(TEXT("compilation_requested"), bCompilationRequested);
-	OutData->SetBoolField(TEXT("compilation_complete"), bCompilationComplete);
+	UeAgentNiagaraOps::AppendCompileAfterSetFields(OutData, CompileResult);
 	OutData->SetBoolField(TEXT("closed_open_editor_before_structural_edit"), bCloseOpenEditorBeforeStructuralEdit);
 	OutData->SetNumberField(TEXT("closed_editor_count"), ClosedEditorCount);
 	OutData->SetBoolField(TEXT("saved"), bSaveAfterSet);
@@ -1367,34 +1262,14 @@ bool FUeAgentHttpServer::CmdNiagaraEmitterSetProperty(const FUeAgentRequestConte
 		EditContext.Graph->NotifyGraphChanged();
 	}
 
-	bool bCompileAfterSet = true;
-	JsonTryGetBool(Ctx.Params, TEXT("compile_after_set"), bCompileAfterSet);
-	bool bWaitForComplete = true;
-	JsonTryGetBool(Ctx.Params, TEXT("wait_for_complete"), bWaitForComplete);
-	bool bCompilationRequested = false;
-	bool bCompilationComplete = false;
-	if (bCompileAfterSet)
+	UeAgentNiagaraOps::FNiagaraCompileAfterSetResult CompileResult;
+	if (UNiagaraSystem* OwnerSystem = Cast<UNiagaraSystem>(EditContext.Emitter->GetOuter()))
 	{
-		if (UNiagaraSystem* OwnerSystem = Cast<UNiagaraSystem>(EditContext.Emitter->GetOuter()))
-		{
-			bCompilationRequested = OwnerSystem->RequestCompile(false);
-			bCompilationComplete = bWaitForComplete ? OwnerSystem->PollForCompilationComplete(true) : false;
-		}
-		else
-		{
-			TArray<UNiagaraScript*> EmitterScripts;
-			EditContext.EmitterData->GetScripts(EmitterScripts, false, false);
-			for (UNiagaraScript* Script : EmitterScripts)
-			{
-				if (!Script)
-				{
-					continue;
-				}
-				Script->RequestCompile(Script->GetExposedVersion().VersionGuid, false);
-				bCompilationRequested = true;
-			}
-			bCompilationComplete = !bWaitForComplete;
-		}
+		CompileResult = UeAgentNiagaraOps::CompileSystemAfterSet(OwnerSystem, Ctx.Params, true);
+	}
+	else
+	{
+		CompileResult = UeAgentNiagaraOps::CompileEmitterScriptsAfterSet(EditContext.EmitterData, Ctx.Params, true);
 	}
 
 	bool bSaveAfterSet = false;
@@ -1423,9 +1298,7 @@ bool FUeAgentHttpServer::CmdNiagaraEmitterSetProperty(const FUeAgentRequestConte
 		OutData->SetStringField(TEXT("old_spawn_script_usage"), UeAgentNiagaraOps::ScriptUsageToString(SideEffects.OldSpawnScriptUsage));
 		OutData->SetStringField(TEXT("new_spawn_script_usage"), UeAgentNiagaraOps::ScriptUsageToString(SideEffects.NewSpawnScriptUsage));
 	}
-	OutData->SetBoolField(TEXT("compile_after_set"), bCompileAfterSet);
-	OutData->SetBoolField(TEXT("compilation_requested"), bCompilationRequested);
-	OutData->SetBoolField(TEXT("compilation_complete"), bCompilationComplete);
+	UeAgentNiagaraOps::AppendCompileAfterSetFields(OutData, CompileResult);
 	OutData->SetBoolField(TEXT("saved"), bSaveAfterSet);
 	return true;
 }

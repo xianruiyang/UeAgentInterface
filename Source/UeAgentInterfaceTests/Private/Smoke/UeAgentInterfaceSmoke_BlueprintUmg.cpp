@@ -865,6 +865,109 @@ bool FUeAgentInterfaceUmgSmokeTest::RunTest(const FString& Parameters)
 		TestTrue(TEXT("UMG compile after rename error count is zero"), static_cast<int32>((*CompileAfterRenameData)->GetIntegerField(TEXT("error_count"))) == 0);
 	}
 
+	const FString ListWidgetEventsBody = MakeExecRequestBody(
+		TEXT("smoke-umg-list-widget-events-001"),
+		TEXT("umg_list_widget_events"),
+		FString::Printf(
+			TEXT("{\"asset_path\":\"%s\",\"widget_name\":\"%s\",\"query\":\"OnClicked\",\"limit\":16,\"compile_before_query\":false}"),
+			*WidgetBlueprintAssetPath,
+			*RenamedWidgetName));
+	FHttpSmokeResult ListWidgetEventsResult;
+	TestTrue(TEXT("UMG list_widget_events request succeeded"), ExecuteHttpJsonRequest(TEXT("POST"), ServerScope.BaseUrl + TEXT("/api/exec"), ServerScope.Token, ListWidgetEventsBody, ListWidgetEventsResult));
+	TestEqual(TEXT("UMG list_widget_events status code"), ListWidgetEventsResult.StatusCode, 200);
+
+	TSharedPtr<FJsonObject> ListWidgetEventsJson;
+	TestTrue(TEXT("UMG list_widget_events response parses as JSON"), ParseJson(ListWidgetEventsResult.Body, ListWidgetEventsJson));
+	TestTrue(TEXT("UMG list_widget_events root ok=true"), ListWidgetEventsJson.IsValid() && ListWidgetEventsJson->GetBoolField(TEXT("ok")));
+
+	const TSharedPtr<FJsonObject>* ListWidgetEventsData = nullptr;
+	TestTrue(TEXT("UMG list_widget_events contains data object"), ListWidgetEventsJson.IsValid() && ListWidgetEventsJson->TryGetObjectField(TEXT("data"), ListWidgetEventsData) && ListWidgetEventsData && ListWidgetEventsData->IsValid());
+	if (ListWidgetEventsData && ListWidgetEventsData->IsValid())
+	{
+		TestEqual(TEXT("UMG list_widget_events widget name"), (*ListWidgetEventsData)->GetStringField(TEXT("widget_name")), RenamedWidgetName);
+		TestEqual(TEXT("UMG list_widget_events target class"), (*ListWidgetEventsData)->GetStringField(TEXT("target_class")), FString(TEXT("/Script/UMG.Button")));
+		TestTrue(TEXT("UMG list_widget_events can author"), (*ListWidgetEventsData)->GetBoolField(TEXT("can_author_component_bound_event")));
+		const TArray<TSharedPtr<FJsonValue>>* Events = nullptr;
+		TestTrue(TEXT("UMG list_widget_events has events array"), (*ListWidgetEventsData)->TryGetArrayField(TEXT("events"), Events) && Events != nullptr);
+		bool bFoundOnClicked = false;
+		if (Events)
+		{
+			for (const TSharedPtr<FJsonValue>& EventValue : *Events)
+			{
+				const TSharedPtr<FJsonObject>* EventObj = nullptr;
+				if (!EventValue.IsValid() || !EventValue->TryGetObject(EventObj) || !EventObj || !EventObj->IsValid())
+				{
+					continue;
+				}
+				if ((*EventObj)->GetStringField(TEXT("delegate_property_name")) == TEXT("OnClicked"))
+				{
+					bFoundOnClicked = true;
+					TestEqual(TEXT("UMG OnClicked delegate owner"), (*EventObj)->GetStringField(TEXT("delegate_owner_class")), FString(TEXT("/Script/UMG.Button")));
+					const TSharedPtr<FJsonObject>* AuthoringNode = nullptr;
+					TestTrue(TEXT("UMG OnClicked has authoring node"), (*EventObj)->TryGetObjectField(TEXT("authoring_node"), AuthoringNode) && AuthoringNode && AuthoringNode->IsValid());
+					if (AuthoringNode && AuthoringNode->IsValid())
+					{
+						TestEqual(TEXT("UMG authoring node type"), (*AuthoringNode)->GetStringField(TEXT("node_type")), FString(TEXT("component_bound_event")));
+						TestEqual(TEXT("UMG authoring component name"), (*AuthoringNode)->GetStringField(TEXT("component_name")), RenamedWidgetName);
+					}
+					break;
+				}
+			}
+		}
+		TestTrue(TEXT("UMG list_widget_events returns OnClicked"), bFoundOnClicked);
+	}
+
+	const FString ScreenshotAutoBody = MakeExecRequestBody(
+		TEXT("smoke-umg-screenshot-auto-001"),
+		TEXT("umg_screenshot"),
+		FString::Printf(
+			TEXT("{\"asset_path\":\"%s\",\"capture_width\":512,\"capture_height\":384,\"bounds_padding\":2,\"max_size\":512,\"format\":\"png\",\"compile_before_capture\":false}"),
+			*WidgetBlueprintAssetPath));
+	FHttpSmokeResult ScreenshotAutoResult;
+	TestTrue(TEXT("UMG screenshot auto request succeeded"), ExecuteHttpJsonRequest(TEXT("POST"), ServerScope.BaseUrl + TEXT("/api/exec"), ServerScope.Token, ScreenshotAutoBody, ScreenshotAutoResult));
+	TestEqual(TEXT("UMG screenshot auto status code"), ScreenshotAutoResult.StatusCode, 200);
+
+	TSharedPtr<FJsonObject> ScreenshotAutoJson;
+	TestTrue(TEXT("UMG screenshot auto response parses as JSON"), ParseJson(ScreenshotAutoResult.Body, ScreenshotAutoJson));
+	TestTrue(TEXT("UMG screenshot auto root ok=true"), ScreenshotAutoJson.IsValid() && ScreenshotAutoJson->GetBoolField(TEXT("ok")));
+
+	const TSharedPtr<FJsonObject>* ScreenshotAutoData = nullptr;
+	TestTrue(TEXT("UMG screenshot auto contains data object"), ScreenshotAutoJson.IsValid() && ScreenshotAutoJson->TryGetObjectField(TEXT("data"), ScreenshotAutoData) && ScreenshotAutoData && ScreenshotAutoData->IsValid());
+	if (ScreenshotAutoData && ScreenshotAutoData->IsValid())
+	{
+		const FString FilePath = (*ScreenshotAutoData)->GetStringField(TEXT("file_path"));
+		TestEqual(TEXT("UMG screenshot auto crop mode"), (*ScreenshotAutoData)->GetStringField(TEXT("crop_mode")), FString(TEXT("auto_bounds")));
+		TestEqual(TEXT("UMG screenshot capture mode"), (*ScreenshotAutoData)->GetStringField(TEXT("capture_mode")), FString(TEXT("umg_widget_offscreen")));
+		TestTrue(TEXT("UMG screenshot auto width positive"), static_cast<int32>((*ScreenshotAutoData)->GetIntegerField(TEXT("width"))) > 0);
+		TestTrue(TEXT("UMG screenshot auto height positive"), static_cast<int32>((*ScreenshotAutoData)->GetIntegerField(TEXT("height"))) > 0);
+		TestTrue(TEXT("UMG screenshot auto file exists"), IFileManager::Get().FileExists(*FilePath));
+	}
+
+	const FString ScreenshotRegionBody = MakeExecRequestBody(
+		TEXT("smoke-umg-screenshot-region-001"),
+		TEXT("umg_screenshot"),
+		FString::Printf(
+			TEXT("{\"asset_path\":\"%s\",\"capture_width\":512,\"capture_height\":384,\"crop_mode\":\"manual_region\",\"region\":{\"x\":0,\"y\":0,\"width\":256,\"height\":192},\"max_size\":512,\"format\":\"png\",\"compile_before_capture\":false}"),
+			*WidgetBlueprintAssetPath));
+	FHttpSmokeResult ScreenshotRegionResult;
+	TestTrue(TEXT("UMG screenshot region request succeeded"), ExecuteHttpJsonRequest(TEXT("POST"), ServerScope.BaseUrl + TEXT("/api/exec"), ServerScope.Token, ScreenshotRegionBody, ScreenshotRegionResult));
+	TestEqual(TEXT("UMG screenshot region status code"), ScreenshotRegionResult.StatusCode, 200);
+
+	TSharedPtr<FJsonObject> ScreenshotRegionJson;
+	TestTrue(TEXT("UMG screenshot region response parses as JSON"), ParseJson(ScreenshotRegionResult.Body, ScreenshotRegionJson));
+	TestTrue(TEXT("UMG screenshot region root ok=true"), ScreenshotRegionJson.IsValid() && ScreenshotRegionJson->GetBoolField(TEXT("ok")));
+
+	const TSharedPtr<FJsonObject>* ScreenshotRegionData = nullptr;
+	TestTrue(TEXT("UMG screenshot region contains data object"), ScreenshotRegionJson.IsValid() && ScreenshotRegionJson->TryGetObjectField(TEXT("data"), ScreenshotRegionData) && ScreenshotRegionData && ScreenshotRegionData->IsValid());
+	if (ScreenshotRegionData && ScreenshotRegionData->IsValid())
+	{
+		const FString FilePath = (*ScreenshotRegionData)->GetStringField(TEXT("file_path"));
+		TestEqual(TEXT("UMG screenshot region crop mode"), (*ScreenshotRegionData)->GetStringField(TEXT("crop_mode")), FString(TEXT("manual_region")));
+		TestEqual(TEXT("UMG screenshot region raw width"), static_cast<int32>((*ScreenshotRegionData)->GetIntegerField(TEXT("raw_width"))), 256);
+		TestEqual(TEXT("UMG screenshot region raw height"), static_cast<int32>((*ScreenshotRegionData)->GetIntegerField(TEXT("raw_height"))), 192);
+		TestTrue(TEXT("UMG screenshot region file exists"), IFileManager::Get().FileExists(*FilePath));
+	}
+
 	const FString RemoveWidgetBody = MakeExecRequestBody(
 		TEXT("smoke-umg-remove-widget-001"),
 		TEXT("umg_remove_widget"),
@@ -1108,6 +1211,57 @@ bool FUeAgentInterfaceBlueprintComponentSmokeTest::RunTest(const FString& Parame
 	{
 		TestFalse(TEXT("Blueprint compile after add reports no error"), (*CompileAfterAddData)->GetBoolField(TEXT("has_error")));
 		TestTrue(TEXT("Blueprint compile after add error count is zero"), static_cast<int32>((*CompileAfterAddData)->GetIntegerField(TEXT("error_count"))) == 0);
+	}
+
+	const FString ListComponentEventsBody = MakeExecRequestBody(
+		TEXT("smoke-blueprint-list-component-events-001"),
+		TEXT("blueprint_list_component_events"),
+		FString::Printf(
+			TEXT("{\"asset_path\":\"%s\",\"component_name\":\"%s\",\"query\":\"OnComponentBeginOverlap\",\"limit\":16,\"compile_before_query\":false}"),
+			*BlueprintAssetPath,
+			*ComponentName));
+	FHttpSmokeResult ListComponentEventsResult;
+	TestTrue(TEXT("Blueprint list_component_events request succeeded"), ExecuteHttpJsonRequest(TEXT("POST"), ServerScope.BaseUrl + TEXT("/api/exec"), ServerScope.Token, ListComponentEventsBody, ListComponentEventsResult));
+	TestEqual(TEXT("Blueprint list_component_events status code"), ListComponentEventsResult.StatusCode, 200);
+
+	TSharedPtr<FJsonObject> ListComponentEventsJson;
+	TestTrue(TEXT("Blueprint list_component_events response parses as JSON"), ParseJson(ListComponentEventsResult.Body, ListComponentEventsJson));
+	TestTrue(TEXT("Blueprint list_component_events root ok=true"), ListComponentEventsJson.IsValid() && ListComponentEventsJson->GetBoolField(TEXT("ok")));
+
+	const TSharedPtr<FJsonObject>* ListComponentEventsData = nullptr;
+	TestTrue(TEXT("Blueprint list_component_events contains data object"), ListComponentEventsJson.IsValid() && ListComponentEventsJson->TryGetObjectField(TEXT("data"), ListComponentEventsData) && ListComponentEventsData && ListComponentEventsData->IsValid());
+	if (ListComponentEventsData && ListComponentEventsData->IsValid())
+	{
+		TestEqual(TEXT("Blueprint list_component_events component name"), (*ListComponentEventsData)->GetStringField(TEXT("component_name")), ComponentName);
+		TestTrue(TEXT("Blueprint list_component_events can author"), (*ListComponentEventsData)->GetBoolField(TEXT("can_author_component_bound_event")));
+		const TArray<TSharedPtr<FJsonValue>>* Events = nullptr;
+		TestTrue(TEXT("Blueprint list_component_events has events array"), (*ListComponentEventsData)->TryGetArrayField(TEXT("events"), Events) && Events != nullptr);
+		bool bFoundBeginOverlap = false;
+		if (Events)
+		{
+			for (const TSharedPtr<FJsonValue>& EventValue : *Events)
+			{
+				const TSharedPtr<FJsonObject>* EventObj = nullptr;
+				if (!EventValue.IsValid() || !EventValue->TryGetObject(EventObj) || !EventObj || !EventObj->IsValid())
+				{
+					continue;
+				}
+				if ((*EventObj)->GetStringField(TEXT("delegate_property_name")) == TEXT("OnComponentBeginOverlap"))
+				{
+					bFoundBeginOverlap = true;
+					TestEqual(TEXT("Blueprint overlap delegate owner"), (*EventObj)->GetStringField(TEXT("delegate_owner_class")), FString(TEXT("/Script/Engine.PrimitiveComponent")));
+					const TSharedPtr<FJsonObject>* AuthoringNode = nullptr;
+					TestTrue(TEXT("Blueprint overlap has authoring node"), (*EventObj)->TryGetObjectField(TEXT("authoring_node"), AuthoringNode) && AuthoringNode && AuthoringNode->IsValid());
+					if (AuthoringNode && AuthoringNode->IsValid())
+					{
+						TestEqual(TEXT("Blueprint authoring node type"), (*AuthoringNode)->GetStringField(TEXT("node_type")), FString(TEXT("component_bound_event")));
+						TestEqual(TEXT("Blueprint authoring component name"), (*AuthoringNode)->GetStringField(TEXT("component_name")), ComponentName);
+					}
+					break;
+				}
+			}
+		}
+		TestTrue(TEXT("Blueprint list_component_events returns OnComponentBeginOverlap"), bFoundBeginOverlap);
 	}
 
 	const FString RemoveComponentBody = MakeExecRequestBody(

@@ -115,6 +115,23 @@ namespace UeAgentMaterialFolderOps
 		return Obj.IsValid() && Obj->TryGetNumberField(Key, OutValue);
 	}
 
+	static bool CompileDataHasError(const TSharedPtr<FJsonObject>& CompileData)
+	{
+		if (!CompileData.IsValid())
+		{
+			return false;
+		}
+
+		bool bHasError = false;
+		if (CompileData->TryGetBoolField(TEXT("has_error"), bHasError) && bHasError)
+		{
+			return true;
+		}
+
+		double ErrorCount = 0.0;
+		return CompileData->TryGetNumberField(TEXT("error_count"), ErrorCount) && ErrorCount > 0.0;
+	}
+
 	static bool TryGetObjectField(const TSharedPtr<FJsonObject>& Obj, const TCHAR* Key, TSharedPtr<FJsonObject>& OutValue)
 	{
 		const TSharedPtr<FJsonObject>* FoundObject = nullptr;
@@ -484,7 +501,6 @@ namespace UeAgentMaterialFolderOps
 		Root->SetNumberField(TEXT("format_version"), 1);
 		Root->SetStringField(TEXT("asset_kind"), TEXT("material_graph"));
 		Root->SetStringField(TEXT("asset_path"), AssetPath);
-		Root->SetStringField(TEXT("asset_name"), FPackageName::GetLongPackageAssetName(AssetPath));
 		Root->SetNumberField(TEXT("profile_version"), 1);
 		Root->SetStringField(TEXT("material_subkind"), TEXT("material"));
 		return Root;
@@ -503,8 +519,69 @@ namespace UeAgentMaterialFolderOps
 		return Root;
 	}
 
+	static void AppendExpressionGraphNodeReadback(const TSharedPtr<FJsonObject>& ExprObj, UMaterialExpression* Expression)
+	{
+		if (!ExprObj.IsValid() || !Expression || !Expression->GraphNode)
+		{
+			return;
+		}
+
+		UEdGraphNode* GraphNode = Expression->GraphNode;
+		ExprObj->SetStringField(TEXT("graph_node_guid"), GraphNode->NodeGuid.ToString(EGuidFormats::DigitsWithHyphensLower));
+		ExprObj->SetStringField(TEXT("graph_node_name"), GraphNode->GetName());
+		ExprObj->SetStringField(TEXT("graph_node_path"), GraphNode->GetPathName());
+
+		TArray<TSharedPtr<FJsonValue>> PinsArray;
+		for (int32 PinIndex = 0; PinIndex < GraphNode->Pins.Num(); ++PinIndex)
+		{
+			const UEdGraphPin* Pin = GraphNode->Pins[PinIndex];
+			if (!Pin)
+			{
+				continue;
+			}
+
+			TSharedPtr<FJsonObject> PinObj = MakeShared<FJsonObject>();
+			PinObj->SetNumberField(TEXT("index"), PinIndex);
+			PinObj->SetStringField(TEXT("pin_guid"), Pin->PinId.ToString(EGuidFormats::DigitsWithHyphensLower));
+			PinObj->SetStringField(TEXT("pin_name"), Pin->PinName.ToString());
+			PinObj->SetStringField(TEXT("display_name"), Pin->GetDisplayName().ToString());
+			PinObj->SetStringField(TEXT("direction"), Pin->Direction == EGPD_Output ? TEXT("output") : TEXT("input"));
+			PinObj->SetStringField(TEXT("pin_type_category"), Pin->PinType.PinCategory.ToString());
+			PinObj->SetStringField(TEXT("pin_type_sub_category"), Pin->PinType.PinSubCategory.ToString());
+			PinsArray.Add(MakeShared<FJsonValueObject>(PinObj));
+		}
+		ExprObj->SetArrayField(TEXT("pins"), PinsArray);
+	}
+
+	static void EnsureMaterialGraphForExport(UMaterial* Material)
+	{
+		if (!Material)
+		{
+			return;
+		}
+
+		if (!Material->MaterialGraph)
+		{
+			Material->MaterialGraph = CastChecked<UMaterialGraph>(
+				FBlueprintEditorUtils::CreateNewGraph(
+					Material,
+					NAME_None,
+					UMaterialGraph::StaticClass(),
+					UMaterialGraphSchema::StaticClass()));
+		}
+		if (Material->MaterialGraph)
+		{
+			Material->MaterialGraph->Material = Material;
+			Material->MaterialGraph->MaterialFunction = nullptr;
+			Material->MaterialGraph->OriginalMaterialFullName = Material->GetName();
+			Material->MaterialGraph->RebuildGraph();
+		}
+	}
+
 	static TSharedPtr<FJsonObject> ExportGraphJson(UMaterial* Material)
 	{
+		EnsureMaterialGraphForExport(Material);
+
 		TSharedPtr<FJsonObject> Root = MakeShared<FJsonObject>();
 		TSharedPtr<FJsonObject> GraphObj = MakeShared<FJsonObject>();
 		GraphObj->SetStringField(TEXT("name"), TEXT("MaterialGraph"));
@@ -530,6 +607,7 @@ namespace UeAgentMaterialFolderOps
 			ExprObj->SetStringField(TEXT("ue_expression_guid"), Expression->MaterialExpressionGuid.ToString(EGuidFormats::DigitsWithHyphensLower));
 			ExprObj->SetStringField(TEXT("expression_name"), Expression->GetName());
 			ExprObj->SetStringField(TEXT("expression_class"), Expression->GetClass()->GetPathName());
+			AppendExpressionGraphNodeReadback(ExprObj, Expression);
 			if (!Expression->Desc.IsEmpty())
 			{
 				ExprObj->SetStringField(TEXT("desc"), Expression->Desc);
@@ -1549,21 +1627,46 @@ bool FUeAgentHttpServer::CmdMaterialApplyFolder(const FUeAgentRequestContext& Ct
 		}
 	}
 
+	bool bSaved = false;
+	auto PopulateApplyResult = [&]()
+	{
+		OutData->SetStringField(TEXT("asset_path"), AssetPath);
+		OutData->SetStringField(TEXT("folder_path"), FolderPath);
+		OutData->SetNumberField(TEXT("settings_applied"), SettingsApplied);
+		OutData->SetNumberField(TEXT("expressions_deleted"), ExpressionsDeleted);
+		OutData->SetNumberField(TEXT("expressions_created"), ExpressionsCreated);
+		OutData->SetNumberField(TEXT("expression_properties_applied"), ExpressionPropertiesApplied);
+		OutData->SetNumberField(TEXT("parameter_interface_applied"), ParameterInterfaceApplied);
+		OutData->SetNumberField(TEXT("edges_created"), EdgesCreated);
+		OutData->SetNumberField(TEXT("root_inputs_connected"), RootInputsConnected);
+		OutData->SetNumberField(TEXT("warning_count"), Warnings.Num());
+		OutData->SetArrayField(TEXT("warnings"), Warnings);
+		OutData->SetBoolField(TEXT("compiled"), bCompileAfterApply);
+		OutData->SetBoolField(TEXT("saved"), bSaved);
+	};
+
 	if (bCompileAfterApply)
 	{
 		TSharedPtr<FJsonObject> CompileParams = MakeShared<FJsonObject>();
 		CompileParams->SetStringField(TEXT("asset_path"), AssetPath);
 		CompileParams->SetBoolField(TEXT("include_messages"), true);
 		CompileParams->SetNumberField(TEXT("max_messages"), 64);
-		CompileParams->SetBoolField(TEXT("save_after_compile"), bSaveAfterApply);
+		CompileParams->SetBoolField(TEXT("save_after_compile"), false);
 		TSharedPtr<FJsonObject> CompileData;
 		if (!InvokeMaterialSubCommand(TEXT("material_compile"), CompileParams, CompileData, OutError))
 		{
 			return false;
 		}
 		OutData->SetObjectField(TEXT("compile"), CompileData);
+		if (UeAgentMaterialFolderOps::CompileDataHasError(CompileData))
+		{
+			PopulateApplyResult();
+			OutError = TEXT("compile_failed_after_apply");
+			return false;
+		}
 	}
-	else if (bSaveAfterApply)
+
+	if (bSaveAfterApply)
 	{
 		FString SaveError;
 		if (!UeAgentMaterialOps::SaveAssetPackage(Material, SaveError))
@@ -1571,21 +1674,10 @@ bool FUeAgentHttpServer::CmdMaterialApplyFolder(const FUeAgentRequestContext& Ct
 			OutError = SaveError;
 			return false;
 		}
+		bSaved = true;
 	}
 
-	OutData->SetStringField(TEXT("asset_path"), AssetPath);
-	OutData->SetStringField(TEXT("folder_path"), FolderPath);
-	OutData->SetNumberField(TEXT("settings_applied"), SettingsApplied);
-	OutData->SetNumberField(TEXT("expressions_deleted"), ExpressionsDeleted);
-	OutData->SetNumberField(TEXT("expressions_created"), ExpressionsCreated);
-	OutData->SetNumberField(TEXT("expression_properties_applied"), ExpressionPropertiesApplied);
-	OutData->SetNumberField(TEXT("parameter_interface_applied"), ParameterInterfaceApplied);
-	OutData->SetNumberField(TEXT("edges_created"), EdgesCreated);
-	OutData->SetNumberField(TEXT("root_inputs_connected"), RootInputsConnected);
-	OutData->SetNumberField(TEXT("warning_count"), Warnings.Num());
-	OutData->SetArrayField(TEXT("warnings"), Warnings);
-	OutData->SetBoolField(TEXT("compiled"), bCompileAfterApply);
-	OutData->SetBoolField(TEXT("saved"), bSaveAfterApply);
+	PopulateApplyResult();
 	return true;
 }
 
@@ -1621,7 +1713,6 @@ namespace UeAgentMaterialInstanceFolderOps
 		Root->SetNumberField(TEXT("format_version"), 1);
 		Root->SetStringField(TEXT("asset_kind"), TEXT("material_instance"));
 		Root->SetStringField(TEXT("asset_path"), AssetPath);
-		Root->SetStringField(TEXT("asset_name"), FPackageName::GetLongPackageAssetName(AssetPath));
 		Root->SetNumberField(TEXT("profile_version"), 1);
 		Root->SetStringField(TEXT("instance_subkind"), TEXT("material_instance_constant"));
 		return Root;
@@ -2063,21 +2154,42 @@ bool FUeAgentHttpServer::CmdMaterialInstanceApplyFolder(const FUeAgentRequestCon
 		}
 	}
 
+	bool bSaved = false;
+	auto PopulateApplyResult = [&]()
+	{
+		OutData->SetStringField(TEXT("asset_path"), AssetPath);
+		OutData->SetStringField(TEXT("folder_path"), FolderPath);
+		OutData->SetNumberField(TEXT("parent_applied"), ParentApplied);
+		OutData->SetNumberField(TEXT("overrides_cleared"), OverridesCleared);
+		OutData->SetNumberField(TEXT("parameters_applied"), ParametersApplied);
+		OutData->SetNumberField(TEXT("warning_count"), Warnings.Num());
+		OutData->SetArrayField(TEXT("warnings"), Warnings);
+		OutData->SetBoolField(TEXT("compiled"), bCompileAfterApply);
+		OutData->SetBoolField(TEXT("saved"), bSaved);
+	};
+
 	if (bCompileAfterApply)
 	{
 		TSharedPtr<FJsonObject> CompileParams = MakeShared<FJsonObject>();
 		CompileParams->SetStringField(TEXT("asset_path"), AssetPath);
 		CompileParams->SetBoolField(TEXT("include_messages"), true);
 		CompileParams->SetNumberField(TEXT("max_messages"), 64);
-		CompileParams->SetBoolField(TEXT("save_after_compile"), bSaveAfterApply);
+		CompileParams->SetBoolField(TEXT("save_after_compile"), false);
 		TSharedPtr<FJsonObject> CompileData;
 		if (!InvokeMaterialSubCommand(TEXT("material_compile"), CompileParams, CompileData, OutError))
 		{
 			return false;
 		}
 		OutData->SetObjectField(TEXT("compile"), CompileData);
+		if (UeAgentMaterialFolderOps::CompileDataHasError(CompileData))
+		{
+			PopulateApplyResult();
+			OutError = TEXT("compile_failed_after_apply");
+			return false;
+		}
 	}
-	else if (bSaveAfterApply)
+
+	if (bSaveAfterApply)
 	{
 		FString SaveError;
 		if (!UeAgentMaterialOps::SaveAssetPackage(MaterialInstance, SaveError))
@@ -2085,17 +2197,10 @@ bool FUeAgentHttpServer::CmdMaterialInstanceApplyFolder(const FUeAgentRequestCon
 			OutError = SaveError;
 			return false;
 		}
+		bSaved = true;
 	}
 
-	OutData->SetStringField(TEXT("asset_path"), AssetPath);
-	OutData->SetStringField(TEXT("folder_path"), FolderPath);
-	OutData->SetNumberField(TEXT("parent_applied"), ParentApplied);
-	OutData->SetNumberField(TEXT("overrides_cleared"), OverridesCleared);
-	OutData->SetNumberField(TEXT("parameters_applied"), ParametersApplied);
-	OutData->SetNumberField(TEXT("warning_count"), Warnings.Num());
-	OutData->SetArrayField(TEXT("warnings"), Warnings);
-	OutData->SetBoolField(TEXT("compiled"), bCompileAfterApply);
-	OutData->SetBoolField(TEXT("saved"), bSaveAfterApply);
+	PopulateApplyResult();
 	return true;
 }
 
@@ -2131,7 +2236,6 @@ namespace UeAgentMaterialFunctionFolderOps
 		Root->SetNumberField(TEXT("format_version"), 1);
 		Root->SetStringField(TEXT("asset_kind"), TEXT("material_function"));
 		Root->SetStringField(TEXT("asset_path"), AssetPath);
-		Root->SetStringField(TEXT("asset_name"), FPackageName::GetLongPackageAssetName(AssetPath));
 		Root->SetNumberField(TEXT("profile_version"), 1);
 		Root->SetStringField(TEXT("function_subkind"), TEXT("material_function"));
 		return Root;
@@ -2221,6 +2325,7 @@ namespace UeAgentMaterialFunctionFolderOps
 			ExprObj->SetStringField(TEXT("ue_expression_guid"), Expression->MaterialExpressionGuid.ToString(EGuidFormats::DigitsWithHyphensLower));
 			ExprObj->SetStringField(TEXT("expression_name"), Expression->GetName());
 			ExprObj->SetStringField(TEXT("expression_class"), Expression->GetClass()->GetPathName());
+			UeAgentMaterialFolderOps::AppendExpressionGraphNodeReadback(ExprObj, Expression);
 			if (!Expression->Desc.IsEmpty())
 			{
 				ExprObj->SetStringField(TEXT("desc"), Expression->Desc);

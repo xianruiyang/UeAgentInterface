@@ -2,7 +2,7 @@
 
 本目录是 UeAgentInterface 的正式命令分册入口。当前覆盖矩阵来自 `uai-cli release coverage`：
 
-- 命令总数：`917`
+- 命令总数：`937`
 - 缺正式文档：`0`
 - 缺实现：`0`
 - 缺 smoke：`0`
@@ -66,9 +66,10 @@ bootstrap -> export -> refine -> validate -> apply -> export/readback -> smoke/p
 | `25_LevelTopology_Streaming_WorldPartition_DataLayer_HLOD.md` | 39 | Level Streaming、World Partition、DataLayer、HLOD | 关卡拓扑和构建任务 |
 | `26_Physics_Baseline.md` | 14 | 基础 Physics、PhysicalMaterial、Constraint、PhysicsAsset、runtime probe | 不依赖额外插件的物理基础 |
 | `27_Localization_Packaging_PlatformProfiles.md` | 40 | Localization、StringTable、Packaging、TargetPlatform、DeviceProfile、Scalability | 本地化、打包和平台 profile |
-| `28_NodeGraph.md` | 2 | 跨资产节点连线图 list/layout | 对 Blueprint、UMG、AnimBlueprint、Material 等节点连线图使用统一排布入口 |
+| `28_NodeGraph.md` | 5 | 跨资产节点连线图 list/layout、palette candidate search/categories 和 origin resolve | 对 Blueprint、UMG、AnimBlueprint、Material 等节点连线图使用统一排布入口；新增节点/模块前查真实候选，必要时解析源码/资产来源，并通过结构化 JSON apply/readback 验证 |
 | `29_PCG.md` | 40 | PCG Graph、GraphInstance、Component、WorldActor、Partition、生成、Inspection、数据和 GPU/HLSL 诊断 | Procedural Content Generation authoring 和验证 |
 | `30_PCG_FolderFormat.md` | 0 | PCG Graph folder schema、验证、preflight 和 apply 语义 | 需要审查或手写 PCG 文件夹式 JSON 时 |
+| `31_Probe.md` | 2 | 候选 transform / IK goal 探测、序列帧图和 frame sheet | 粗搜/细搜物品移动、旋转、缩放、IK 控制点和动画关键姿势候选 |
 | `deprecatedCommand/README.md` | - | 已被 JSON / folder workflow 覆盖的旧写入命令 | 兼容旧脚本、迁移和局部补修 |
 
 ## 按任务路由

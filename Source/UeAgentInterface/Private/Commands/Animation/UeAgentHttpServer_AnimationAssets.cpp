@@ -2,10 +2,14 @@
 
 #include "UeAgentHttpServer_AnimationAssets.h"
 
+#include "UeAgentHttpServer_AnimationAssetOps.h"
+
 #include "Utilities/UeAgentCurveJson.h"
 #include "Utilities/UeAgentJsonDiagnostics.h"
 
 #include "Animation/AnimationAsset.h"
+#include "Animation/AnimData/IAnimationDataController.h"
+#include "Animation/AnimData/IAnimationDataModel.h"
 #include "Animation/AnimLinkableElement.h"
 #include "Animation/AnimMetaData.h"
 #include "Animation/AnimBoneCompressionSettings.h"
@@ -25,6 +29,7 @@
 #include "Animation/Skeleton.h"
 #include "Animation/VariableFrameStrippingSettings.h"
 #include "AnimationBlueprintLibrary.h"
+#include "AnimPose.h"
 #include "AnimPreviewInstance.h"
 #include "AssetRegistry/AssetRegistryModule.h"
 #include "Editor.h"
@@ -63,7 +68,7 @@
 
 namespace UeAgentAnimationAssetOps
 {
-	static FString NormalizeAssetPath(const FString& InPath)
+	FString NormalizeAssetPath(const FString& InPath)
 	{
 		FString OutPath = InPath;
 		OutPath.TrimStartAndEndInline();
@@ -98,7 +103,7 @@ namespace UeAgentAnimationAssetOps
 		return FString::Printf(TEXT("%s.%s"), *AssetPath, *AssetName);
 	}
 
-	static UObject* LoadAssetObject(const FString& InPath)
+	UObject* LoadAssetObject(const FString& InPath)
 	{
 		const FString ObjectPath = ToObjectPath(InPath);
 		if (ObjectPath.IsEmpty())
@@ -112,9 +117,65 @@ namespace UeAgentAnimationAssetOps
 		return LoadObject<UObject>(nullptr, *ObjectPath);
 	}
 
-	static UAnimSequence* LoadAnimSequence(const FString& InPath)
+	UAnimSequence* LoadAnimSequence(const FString& InPath)
 	{
 		return Cast<UAnimSequence>(LoadAssetObject(InPath));
+	}
+
+	UAnimSequence* CreateAnimSequenceAsset(const FString& AssetPathInput, USkeleton* Skeleton, USkeletalMesh* PreviewMesh, FString& OutError)
+	{
+		const FString NormalizedPath = NormalizeAssetPath(AssetPathInput);
+		if (!FPackageName::IsValidLongPackageName(NormalizedPath))
+		{
+			OutError = TEXT("invalid_anim_sequence_path");
+			return nullptr;
+		}
+		if (!Skeleton)
+		{
+			OutError = TEXT("target_skeleton_required_for_new_anim_sequence");
+			return nullptr;
+		}
+
+		const FString AssetName = FPackageName::GetLongPackageAssetName(NormalizedPath);
+		if (AssetName.IsEmpty())
+		{
+			OutError = TEXT("invalid_anim_sequence_path");
+			return nullptr;
+		}
+
+		UPackage* Package = CreatePackage(*NormalizedPath);
+		if (!Package)
+		{
+			OutError = TEXT("create_anim_sequence_package_failed");
+			return nullptr;
+		}
+		Package->FullyLoad();
+
+		if (UObject* ExistingObject = FindObject<UObject>(Package, *AssetName))
+		{
+			OutError = ExistingObject->IsA<UAnimSequence>() ? TEXT("anim_sequence_already_exists") : TEXT("asset_exists_with_different_class");
+			return nullptr;
+		}
+
+		UAnimSequence* Sequence = NewObject<UAnimSequence>(Package, *AssetName, RF_Public | RF_Standalone | RF_Transactional);
+		if (!Sequence)
+		{
+			OutError = TEXT("create_anim_sequence_failed");
+			return nullptr;
+		}
+
+		Sequence->SetSkeleton(Skeleton);
+		IAnimationDataController& Controller = Sequence->GetController();
+		Controller.InitializeModel();
+		Controller.SetNumberOfFrames(FFrameNumber(1), false);
+		if (PreviewMesh)
+		{
+			Sequence->SetPreviewMesh(PreviewMesh, true);
+		}
+		Controller.NotifyPopulated();
+		FAssetRegistryModule::AssetCreated(Sequence);
+		Package->MarkPackageDirty();
+		return Sequence;
 	}
 
 	static UAnimationAsset* LoadAnimationAsset(const FString& InPath)
@@ -127,12 +188,12 @@ namespace UeAgentAnimationAssetOps
 		return Cast<UBlendSpace>(LoadAssetObject(InPath));
 	}
 
-	static USkeleton* LoadSkeleton(const FString& InPath)
+	USkeleton* LoadSkeleton(const FString& InPath)
 	{
 		return Cast<USkeleton>(LoadAssetObject(InPath));
 	}
 
-	static USkeletalMesh* LoadSkeletalMesh(const FString& InPath)
+	USkeletalMesh* LoadSkeletalMesh(const FString& InPath)
 	{
 		return Cast<USkeletalMesh>(LoadAssetObject(InPath));
 	}
@@ -316,22 +377,22 @@ namespace UeAgentAnimationAssetOps
 		return Obj;
 	}
 
-	static UAnimBoneCompressionSettings* LoadBoneCompressionSettings(const FString& InPath)
+	UAnimBoneCompressionSettings* LoadBoneCompressionSettings(const FString& InPath)
 	{
 		return Cast<UAnimBoneCompressionSettings>(LoadAssetObject(InPath));
 	}
 
-	static UAnimCurveCompressionSettings* LoadCurveCompressionSettings(const FString& InPath)
+	UAnimCurveCompressionSettings* LoadCurveCompressionSettings(const FString& InPath)
 	{
 		return Cast<UAnimCurveCompressionSettings>(LoadAssetObject(InPath));
 	}
 
-	static UVariableFrameStrippingSettings* LoadVariableFrameStrippingSettings(const FString& InPath)
+	UVariableFrameStrippingSettings* LoadVariableFrameStrippingSettings(const FString& InPath)
 	{
 		return Cast<UVariableFrameStrippingSettings>(LoadAssetObject(InPath));
 	}
 
-	static bool SaveAssetPackage(UObject* Asset, FString& OutError)
+	bool SaveAssetPackage(UObject* Asset, FString& OutError)
 	{
 		if (!Asset)
 		{
@@ -349,7 +410,7 @@ namespace UeAgentAnimationAssetOps
 		return true;
 	}
 
-	static TSharedPtr<FJsonObject> BuildVectorJson(const FVector& Value)
+	TSharedPtr<FJsonObject> BuildVectorJson(const FVector& Value)
 	{
 		TSharedPtr<FJsonObject> Obj = MakeShared<FJsonObject>();
 		Obj->SetNumberField(TEXT("x"), Value.X);
@@ -358,12 +419,22 @@ namespace UeAgentAnimationAssetOps
 		return Obj;
 	}
 
-	static TSharedPtr<FJsonObject> BuildRotatorJson(const FRotator& Value)
+	TSharedPtr<FJsonObject> BuildRotatorJson(const FRotator& Value)
 	{
 		TSharedPtr<FJsonObject> Obj = MakeShared<FJsonObject>();
 		Obj->SetNumberField(TEXT("pitch"), Value.Pitch);
 		Obj->SetNumberField(TEXT("yaw"), Value.Yaw);
 		Obj->SetNumberField(TEXT("roll"), Value.Roll);
+		return Obj;
+	}
+
+	static TSharedPtr<FJsonObject> BuildQuatJson(const FQuat& Value)
+	{
+		TSharedPtr<FJsonObject> Obj = MakeShared<FJsonObject>();
+		Obj->SetNumberField(TEXT("x"), Value.X);
+		Obj->SetNumberField(TEXT("y"), Value.Y);
+		Obj->SetNumberField(TEXT("z"), Value.Z);
+		Obj->SetNumberField(TEXT("w"), Value.W);
 		return Obj;
 	}
 
@@ -377,7 +448,7 @@ namespace UeAgentAnimationAssetOps
 		return Obj;
 	}
 
-	static bool TryParseLinearColorField(const TSharedPtr<FJsonObject>& Params, const FString& FieldName, FLinearColor& OutColor)
+	bool TryParseLinearColorField(const TSharedPtr<FJsonObject>& Params, const FString& FieldName, FLinearColor& OutColor)
 	{
 		const TSharedPtr<FJsonObject>* ColorObject = nullptr;
 		if (!Params.IsValid() || !Params->TryGetObjectField(FieldName, ColorObject) || !ColorObject || !ColorObject->IsValid())
@@ -410,7 +481,7 @@ namespace UeAgentAnimationAssetOps
 		return true;
 	}
 
-	static const TCHAR* InterpolationTypeToString(const EAnimInterpolationType Type)
+	const TCHAR* InterpolationTypeToString(const EAnimInterpolationType Type)
 	{
 		switch (Type)
 		{
@@ -422,7 +493,7 @@ namespace UeAgentAnimationAssetOps
 		}
 	}
 
-	static bool ParseInterpolationType(const FString& InValue, EAnimInterpolationType& OutType)
+	bool ParseInterpolationType(const FString& InValue, EAnimInterpolationType& OutType)
 	{
 		FString Normalized = InValue.TrimStartAndEnd().ToLower();
 		Normalized.ReplaceInline(TEXT("_"), TEXT(""));
@@ -441,7 +512,7 @@ namespace UeAgentAnimationAssetOps
 		return false;
 	}
 
-	static const TCHAR* CurveTypeToString(const ERawCurveTrackTypes Type)
+	const TCHAR* CurveTypeToString(const ERawCurveTrackTypes Type)
 	{
 		switch (Type)
 		{
@@ -451,7 +522,7 @@ namespace UeAgentAnimationAssetOps
 		}
 	}
 
-	static bool ParseCurveType(const FString& InValue, ERawCurveTrackTypes& OutType)
+	bool ParseCurveType(const FString& InValue, ERawCurveTrackTypes& OutType)
 	{
 		FString Normalized = InValue.TrimStartAndEnd().ToLower();
 		Normalized.ReplaceInline(TEXT("_"), TEXT(""));
@@ -465,7 +536,7 @@ namespace UeAgentAnimationAssetOps
 		return false;
 	}
 
-	static const TCHAR* AdditiveAnimationTypeToString(const EAdditiveAnimationType Type)
+	const TCHAR* AdditiveAnimationTypeToString(const EAdditiveAnimationType Type)
 	{
 		switch (Type)
 		{
@@ -479,7 +550,7 @@ namespace UeAgentAnimationAssetOps
 		}
 	}
 
-	static const TCHAR* AdditiveBasePoseTypeToString(const EAdditiveBasePoseType Type)
+	const TCHAR* AdditiveBasePoseTypeToString(const EAdditiveBasePoseType Type)
 	{
 		switch (Type)
 		{
@@ -495,7 +566,7 @@ namespace UeAgentAnimationAssetOps
 		}
 	}
 
-	static bool ParseAdditiveAnimationType(const FString& InValue, EAdditiveAnimationType& OutType)
+	bool ParseAdditiveAnimationType(const FString& InValue, EAdditiveAnimationType& OutType)
 	{
 		FString Normalized = InValue.TrimStartAndEnd().ToLower();
 		Normalized.ReplaceInline(TEXT("_"), TEXT(""));
@@ -519,7 +590,7 @@ namespace UeAgentAnimationAssetOps
 		return false;
 	}
 
-	static bool ParseAdditiveBasePoseType(const FString& InValue, EAdditiveBasePoseType& OutType)
+	bool ParseAdditiveBasePoseType(const FString& InValue, EAdditiveBasePoseType& OutType)
 	{
 		FString Normalized = InValue.TrimStartAndEnd().ToLower();
 		Normalized.ReplaceInline(TEXT("_"), TEXT(""));
@@ -548,7 +619,7 @@ namespace UeAgentAnimationAssetOps
 		return false;
 	}
 
-	static const TCHAR* RootMotionLockTypeToString(const ERootMotionRootLock::Type Type)
+	const TCHAR* RootMotionLockTypeToString(const ERootMotionRootLock::Type Type)
 	{
 		switch (Type)
 		{
@@ -562,7 +633,7 @@ namespace UeAgentAnimationAssetOps
 		}
 	}
 
-	static bool ParseRootMotionLockType(const FString& InValue, ERootMotionRootLock::Type& OutType)
+	bool ParseRootMotionLockType(const FString& InValue, ERootMotionRootLock::Type& OutType)
 	{
 		FString Normalized = InValue.TrimStartAndEnd().ToLower();
 		Normalized.ReplaceInline(TEXT("_"), TEXT(""));
@@ -641,7 +712,7 @@ namespace UeAgentAnimationAssetOps
 		return false;
 	}
 
-	static bool ApplyNotifyCommonSettings(const TSharedPtr<FJsonObject>& Params, FAnimNotifyEvent& Notify, FString& OutError)
+	bool ApplyNotifyCommonSettings(const TSharedPtr<FJsonObject>& Params, FAnimNotifyEvent& Notify, FString& OutError)
 	{
 		if (!Params.IsValid())
 		{
@@ -766,7 +837,7 @@ namespace UeAgentAnimationAssetOps
 		return Item;
 	}
 
-	static TSharedPtr<FJsonObject> BuildNotifyJson(const UAnimSequenceBase* Sequence, const FAnimNotifyEvent& Notify, const int32 NotifyIndex)
+	TSharedPtr<FJsonObject> BuildNotifyJson(const UAnimSequenceBase* Sequence, const FAnimNotifyEvent& Notify, const int32 NotifyIndex)
 	{
 		TSharedPtr<FJsonObject> Item = MakeShared<FJsonObject>();
 		Item->SetNumberField(TEXT("notify_index"), NotifyIndex);
@@ -797,7 +868,7 @@ namespace UeAgentAnimationAssetOps
 		return Item;
 	}
 
-	static TSharedPtr<FJsonObject> BuildSyncMarkerJson(const UAnimSequence* Sequence, const FAnimSyncMarker& Marker, const int32 MarkerIndex)
+	TSharedPtr<FJsonObject> BuildSyncMarkerJson(const UAnimSequence* Sequence, const FAnimSyncMarker& Marker, const int32 MarkerIndex)
 	{
 		TSharedPtr<FJsonObject> Item = MakeShared<FJsonObject>();
 		Item->SetNumberField(TEXT("marker_index"), MarkerIndex);
@@ -820,6 +891,69 @@ namespace UeAgentAnimationAssetOps
 		return Obj;
 	}
 
+	static TSharedPtr<FJsonObject> BuildTransformJsonWithQuaternion(const FTransform& Value)
+	{
+		TSharedPtr<FJsonObject> Obj = BuildTransformJson(Value);
+		Obj->SetObjectField(TEXT("quaternion"), BuildQuatJson(Value.GetRotation().GetNormalized()));
+		return Obj;
+	}
+
+	static bool ParseAnimDataEvalType(const FString& InText, EAnimDataEvalType& OutType)
+	{
+		const FString Text = InText.TrimStartAndEnd();
+		if (Text.IsEmpty() || Text.Equals(TEXT("raw"), ESearchCase::IgnoreCase))
+		{
+			OutType = EAnimDataEvalType::Raw;
+			return true;
+		}
+		if (Text.Equals(TEXT("source"), ESearchCase::IgnoreCase))
+		{
+			OutType = EAnimDataEvalType::Source;
+			return true;
+		}
+		if (Text.Equals(TEXT("compressed"), ESearchCase::IgnoreCase) || Text.Equals(TEXT("runtime"), ESearchCase::IgnoreCase))
+		{
+			OutType = EAnimDataEvalType::Compressed;
+			return true;
+		}
+		return false;
+	}
+
+	static FString AnimDataEvalTypeToString(const EAnimDataEvalType Type)
+	{
+		switch (Type)
+		{
+		case EAnimDataEvalType::Source:
+			return TEXT("source");
+		case EAnimDataEvalType::Compressed:
+			return TEXT("compressed");
+		case EAnimDataEvalType::Raw:
+		default:
+			return TEXT("raw");
+		}
+	}
+
+	static bool ParseAnimPoseSpace(const FString& InText, EAnimPoseSpaces& OutSpace)
+	{
+		const FString Text = InText.TrimStartAndEnd();
+		if (Text.IsEmpty() || Text.Equals(TEXT("local"), ESearchCase::IgnoreCase) || Text.Equals(TEXT("bone"), ESearchCase::IgnoreCase))
+		{
+			OutSpace = EAnimPoseSpaces::Local;
+			return true;
+		}
+		if (Text.Equals(TEXT("world"), ESearchCase::IgnoreCase) || Text.Equals(TEXT("component"), ESearchCase::IgnoreCase))
+		{
+			OutSpace = EAnimPoseSpaces::World;
+			return true;
+		}
+		return false;
+	}
+
+	static FString AnimPoseSpaceToString(const EAnimPoseSpaces Space)
+	{
+		return Space == EAnimPoseSpaces::World ? TEXT("world") : TEXT("local");
+	}
+
 	static TSharedPtr<FJsonObject> BuildSimpleKeyJson(const double TimeSeconds, const double Value)
 	{
 		TSharedPtr<FJsonObject> Obj = MakeShared<FJsonObject>();
@@ -828,7 +962,7 @@ namespace UeAgentAnimationAssetOps
 		return Obj;
 	}
 
-	static TSharedPtr<FJsonObject> BuildCurveJson(UAnimSequenceBase* Sequence, const FName CurveName, const ERawCurveTrackTypes CurveType, const bool bIncludeKeys)
+	TSharedPtr<FJsonObject> BuildCurveJson(UAnimSequenceBase* Sequence, const FName CurveName, const ERawCurveTrackTypes CurveType, const bool bIncludeKeys)
 	{
 		TSharedPtr<FJsonObject> Item = MakeShared<FJsonObject>();
 		Item->SetStringField(TEXT("curve_name"), CurveName.ToString());
@@ -876,7 +1010,7 @@ namespace UeAgentAnimationAssetOps
 		return Item;
 	}
 
-	static TSharedPtr<FJsonObject> BuildMetadataJson(const UAnimMetaData* MetaDataObject)
+	TSharedPtr<FJsonObject> BuildMetadataJson(const UAnimMetaData* MetaDataObject)
 	{
 		TSharedPtr<FJsonObject> Item = MakeShared<FJsonObject>();
 		Item->SetStringField(TEXT("class"), MetaDataObject ? MetaDataObject->GetClass()->GetPathName() : TEXT(""));
@@ -932,7 +1066,7 @@ namespace UeAgentAnimationAssetOps
 		return Normalized;
 	}
 
-	static FProperty* FindEditablePropertyByFlexibleName(UClass* Class, const FString& InName)
+	FProperty* FindEditablePropertyByFlexibleName(UClass* Class, const FString& InName)
 	{
 		if (!Class)
 		{
@@ -955,7 +1089,7 @@ namespace UeAgentAnimationAssetOps
 		return nullptr;
 	}
 
-	static bool ApplySimpleJsonValueToProperty(UObject* TargetObject, FProperty* Property, const TSharedPtr<FJsonValue>& JsonValue, FString& OutError)
+	bool ApplySimpleJsonValueToProperty(UObject* TargetObject, FProperty* Property, const TSharedPtr<FJsonValue>& JsonValue, FString& OutError)
 	{
 		if (!TargetObject || !Property || !JsonValue.IsValid())
 		{
@@ -1002,7 +1136,7 @@ namespace UeAgentAnimationAssetOps
 		return false;
 	}
 
-	static TSharedPtr<FJsonObject> BuildSocketJson(const USkeletalMeshSocket* Socket)
+	TSharedPtr<FJsonObject> BuildSocketJson(const USkeletalMeshSocket* Socket)
 	{
 		TSharedPtr<FJsonObject> Item = MakeShared<FJsonObject>();
 		Item->SetStringField(TEXT("socket_name"), Socket ? Socket->SocketName.ToString() : TEXT(""));
@@ -1013,7 +1147,7 @@ namespace UeAgentAnimationAssetOps
 		return Item;
 	}
 
-	static TSharedPtr<FJsonObject> BuildVirtualBoneJson(const FVirtualBone& VirtualBone)
+	TSharedPtr<FJsonObject> BuildVirtualBoneJson(const FVirtualBone& VirtualBone)
 	{
 		TSharedPtr<FJsonObject> Item = MakeShared<FJsonObject>();
 		Item->SetStringField(TEXT("source_bone_name"), VirtualBone.SourceBoneName.ToString());
@@ -1022,7 +1156,7 @@ namespace UeAgentAnimationAssetOps
 		return Item;
 	}
 
-	static USkeletalMeshSocket* FindSocketByName(USkeleton* Skeleton, const FName SocketName)
+	USkeletalMeshSocket* FindSocketByName(USkeleton* Skeleton, const FName SocketName)
 	{
 		if (!Skeleton)
 		{
@@ -1039,7 +1173,7 @@ namespace UeAgentAnimationAssetOps
 		return nullptr;
 	}
 
-	static const FVirtualBone* FindVirtualBoneByName(const USkeleton* Skeleton, const FName VirtualBoneName)
+	const FVirtualBone* FindVirtualBoneByName(const USkeleton* Skeleton, const FName VirtualBoneName)
 	{
 		if (!Skeleton)
 		{
@@ -1073,7 +1207,7 @@ namespace UeAgentAnimationAssetOps
 		return INDEX_NONE;
 	}
 
-	static bool EnsureNotifyTrack(UAnimSequenceBase* Sequence, const FName TrackName, int32& OutTrackIndex)
+	bool EnsureNotifyTrack(UAnimSequenceBase* Sequence, const FName TrackName, int32& OutTrackIndex)
 	{
 		OutTrackIndex = FindNotifyTrackIndexByName(Sequence, TrackName);
 		if (OutTrackIndex != INDEX_NONE)
@@ -1086,7 +1220,7 @@ namespace UeAgentAnimationAssetOps
 		return OutTrackIndex != INDEX_NONE;
 	}
 
-	static UClass* LoadClassByPath(const FString& InPath)
+	UClass* LoadClassByPath(const FString& InPath)
 	{
 		FString ClassPath = ToObjectPath(InPath);
 		if (ClassPath.IsEmpty())
@@ -1638,6 +1772,449 @@ namespace UeAgentAnimationEditorOps
 		return false;
 	}
 
+	static bool JsonTryGetStringAnyField(const TSharedPtr<FJsonObject>& Obj, const TArray<FString>& Keys, FString& OutValue)
+	{
+		if (!Obj.IsValid())
+		{
+			return false;
+		}
+		for (const FString& Key : Keys)
+		{
+			if (Obj->TryGetStringField(Key, OutValue))
+			{
+				return true;
+			}
+		}
+		return false;
+	}
+
+	static bool JsonTryGetFieldAny(const TSharedPtr<FJsonObject>& Obj, const TArray<FString>& Keys, TSharedPtr<FJsonValue>& OutValue)
+	{
+		if (!Obj.IsValid())
+		{
+			return false;
+		}
+		for (const FString& Key : Keys)
+		{
+			if (const TSharedPtr<FJsonValue>* FoundValue = Obj->Values.Find(Key))
+			{
+				if (FoundValue && FoundValue->IsValid())
+				{
+					OutValue = *FoundValue;
+					return true;
+				}
+			}
+		}
+		return false;
+	}
+
+	static bool JsonTryGetObjectAnyField(const TSharedPtr<FJsonObject>& Obj, const TArray<FString>& Keys, TSharedPtr<FJsonObject>& OutObject)
+	{
+		TSharedPtr<FJsonValue> Value;
+		if (!JsonTryGetFieldAny(Obj, Keys, Value) || !Value.IsValid() || Value->Type != EJson::Object)
+		{
+			return false;
+		}
+		OutObject = Value->AsObject();
+		return OutObject.IsValid();
+	}
+
+	static bool JsonTryGetArrayAnyField(const TSharedPtr<FJsonObject>& Obj, const TArray<FString>& Keys, const TArray<TSharedPtr<FJsonValue>>*& OutArray)
+	{
+		TSharedPtr<FJsonValue> Value;
+		if (!JsonTryGetFieldAny(Obj, Keys, Value) || !Value.IsValid() || Value->Type != EJson::Array)
+		{
+			return false;
+		}
+		OutArray = &Value->AsArray();
+		return true;
+	}
+
+	static bool TryReadVectorJsonValue(const TSharedPtr<FJsonValue>& Value, FVector& OutVector, FString& OutError)
+	{
+		if (!Value.IsValid())
+		{
+			OutError = TEXT("invalid_vector_value");
+			return false;
+		}
+
+		if (Value->Type == EJson::Array)
+		{
+			const TArray<TSharedPtr<FJsonValue>>& Values = Value->AsArray();
+			if (Values.Num() != 3)
+			{
+				OutError = TEXT("vector_array_requires_3_numbers");
+				return false;
+			}
+			double X = 0.0;
+			double Y = 0.0;
+			double Z = 0.0;
+			if (!Values[0].IsValid() || !Values[0]->TryGetNumber(X) ||
+				!Values[1].IsValid() || !Values[1]->TryGetNumber(Y) ||
+				!Values[2].IsValid() || !Values[2]->TryGetNumber(Z))
+			{
+				OutError = TEXT("vector_array_has_non_number");
+				return false;
+			}
+			OutVector = FVector(X, Y, Z);
+			return true;
+		}
+
+		if (Value->Type == EJson::Object)
+		{
+			const TSharedPtr<FJsonObject> Obj = Value->AsObject();
+			double X = 0.0;
+			double Y = 0.0;
+			double Z = 0.0;
+			const bool bHasX = JsonTryGetNumberAnyField(Obj, { TEXT("x"), TEXT("X") }, X);
+			const bool bHasY = JsonTryGetNumberAnyField(Obj, { TEXT("y"), TEXT("Y") }, Y);
+			const bool bHasZ = JsonTryGetNumberAnyField(Obj, { TEXT("z"), TEXT("Z") }, Z);
+			if (!bHasX || !bHasY || !bHasZ)
+			{
+				OutError = TEXT("vector_object_requires_xyz");
+				return false;
+			}
+			OutVector = FVector(X, Y, Z);
+			return true;
+		}
+
+		OutError = TEXT("vector_value_must_be_object_or_array");
+		return false;
+	}
+
+	static bool TryReadRotationJsonValue(const TSharedPtr<FJsonValue>& Value, FQuat& OutRotation, FString& OutError)
+	{
+		if (!Value.IsValid())
+		{
+			OutError = TEXT("invalid_rotation_value");
+			return false;
+		}
+
+		if (Value->Type == EJson::Array)
+		{
+			const TArray<TSharedPtr<FJsonValue>>& Values = Value->AsArray();
+			if (Values.Num() != 3 && Values.Num() != 4)
+			{
+				OutError = TEXT("rotation_array_requires_3_or_4_numbers");
+				return false;
+			}
+
+			double A = 0.0;
+			double B = 0.0;
+			double C = 0.0;
+			if (!Values[0].IsValid() || !Values[0]->TryGetNumber(A) ||
+				!Values[1].IsValid() || !Values[1]->TryGetNumber(B) ||
+				!Values[2].IsValid() || !Values[2]->TryGetNumber(C))
+			{
+				OutError = TEXT("rotation_array_has_non_number");
+				return false;
+			}
+			if (Values.Num() == 3)
+			{
+				OutRotation = FRotator(A, B, C).Quaternion();
+				return true;
+			}
+
+			double W = 1.0;
+			if (!Values[3].IsValid() || !Values[3]->TryGetNumber(W))
+			{
+				OutError = TEXT("rotation_array_has_non_number");
+				return false;
+			}
+			OutRotation = FQuat(A, B, C, W).GetNormalized();
+			return true;
+		}
+
+		if (Value->Type == EJson::Object)
+		{
+			const TSharedPtr<FJsonObject> Obj = Value->AsObject();
+			double W = 0.0;
+			if (JsonTryGetNumberAnyField(Obj, { TEXT("w"), TEXT("W") }, W))
+			{
+				double X = 0.0;
+				double Y = 0.0;
+				double Z = 0.0;
+				if (!JsonTryGetNumberAnyField(Obj, { TEXT("x"), TEXT("X") }, X) ||
+					!JsonTryGetNumberAnyField(Obj, { TEXT("y"), TEXT("Y") }, Y) ||
+					!JsonTryGetNumberAnyField(Obj, { TEXT("z"), TEXT("Z") }, Z))
+				{
+					OutError = TEXT("quat_object_requires_xyzw");
+					return false;
+				}
+				OutRotation = FQuat(X, Y, Z, W).GetNormalized();
+				return true;
+			}
+
+			double Pitch = 0.0;
+			double Yaw = 0.0;
+			double Roll = 0.0;
+			const bool bHasPitch = JsonTryGetNumberAnyField(Obj, { TEXT("pitch"), TEXT("Pitch") }, Pitch);
+			const bool bHasYaw = JsonTryGetNumberAnyField(Obj, { TEXT("yaw"), TEXT("Yaw") }, Yaw);
+			const bool bHasRoll = JsonTryGetNumberAnyField(Obj, { TEXT("roll"), TEXT("Roll") }, Roll);
+			if (!bHasPitch || !bHasYaw || !bHasRoll)
+			{
+				OutError = TEXT("rotator_object_requires_pitch_yaw_roll");
+				return false;
+			}
+			OutRotation = FRotator(Pitch, Yaw, Roll).Quaternion();
+			return true;
+		}
+
+		OutError = TEXT("rotation_value_must_be_object_or_array");
+		return false;
+	}
+
+	static bool TryReadTransformKeyJson(const TSharedPtr<FJsonObject>& KeyObj, const FTransform& ReferenceTransform, FVector& OutPosition, FQuat& OutRotation, FVector& OutScale, FString& OutError)
+	{
+		if (!KeyObj.IsValid())
+		{
+			OutError = TEXT("invalid_transform_key");
+			return false;
+		}
+
+		OutPosition = ReferenceTransform.GetTranslation();
+		OutRotation = ReferenceTransform.GetRotation();
+		OutScale = ReferenceTransform.GetScale3D();
+
+		TSharedPtr<FJsonValue> FieldValue;
+		if (JsonTryGetFieldAny(KeyObj, { TEXT("location"), TEXT("translation"), TEXT("position") }, FieldValue))
+		{
+			if (!TryReadVectorJsonValue(FieldValue, OutPosition, OutError))
+			{
+				OutError = FString::Printf(TEXT("invalid_location:%s"), *OutError);
+				return false;
+			}
+		}
+
+		if (JsonTryGetFieldAny(KeyObj, { TEXT("rotation"), TEXT("rotator"), TEXT("quat"), TEXT("quaternion") }, FieldValue))
+		{
+			if (!TryReadRotationJsonValue(FieldValue, OutRotation, OutError))
+			{
+				OutError = FString::Printf(TEXT("invalid_rotation:%s"), *OutError);
+				return false;
+			}
+		}
+		else if (JsonTryGetFieldAny(KeyObj, { TEXT("rotation_delta"), TEXT("rotator_delta"), TEXT("quat_delta"), TEXT("quaternion_delta"), TEXT("additive_rotation") }, FieldValue))
+		{
+			FQuat RotationDelta = FQuat::Identity;
+			if (!TryReadRotationJsonValue(FieldValue, RotationDelta, OutError))
+			{
+				OutError = FString::Printf(TEXT("invalid_rotation_delta:%s"), *OutError);
+				return false;
+			}
+			OutRotation = (ReferenceTransform.GetRotation() * RotationDelta).GetNormalized();
+		}
+		else if (JsonTryGetFieldAny(KeyObj, { TEXT("pre_rotation_delta"), TEXT("pre_rotator_delta"), TEXT("pre_quat_delta"), TEXT("pre_quaternion_delta") }, FieldValue))
+		{
+			FQuat RotationDelta = FQuat::Identity;
+			if (!TryReadRotationJsonValue(FieldValue, RotationDelta, OutError))
+			{
+				OutError = FString::Printf(TEXT("invalid_pre_rotation_delta:%s"), *OutError);
+				return false;
+			}
+			OutRotation = (RotationDelta * ReferenceTransform.GetRotation()).GetNormalized();
+		}
+
+		if (JsonTryGetFieldAny(KeyObj, { TEXT("scale"), TEXT("scale3d") }, FieldValue))
+		{
+			if (!TryReadVectorJsonValue(FieldValue, OutScale, OutError))
+			{
+				OutError = FString::Printf(TEXT("invalid_scale:%s"), *OutError);
+				return false;
+			}
+		}
+
+		return true;
+	}
+
+	static bool ResolveAnimFrameRate(const TSharedPtr<FJsonObject>& Params, const FFrameRate& Fallback, FFrameRate& OutFrameRate, FString& OutError)
+	{
+		int32 Numerator = Fallback.Numerator > 0 ? Fallback.Numerator : 30;
+		int32 Denominator = Fallback.Denominator > 0 ? Fallback.Denominator : 1;
+
+		TSharedPtr<FJsonObject> FrameRateObj;
+		if (JsonTryGetObjectAnyField(Params, { TEXT("frame_rate"), TEXT("sampling_frame_rate") }, FrameRateObj))
+		{
+			double NumValue = 0.0;
+			double DenValue = 1.0;
+			if (!JsonTryGetNumberAnyField(FrameRateObj, { TEXT("numerator"), TEXT("num") }, NumValue))
+			{
+				OutError = TEXT("frame_rate_missing_numerator");
+				return false;
+			}
+			JsonTryGetNumberAnyField(FrameRateObj, { TEXT("denominator"), TEXT("den") }, DenValue);
+			Numerator = FMath::RoundToInt(NumValue);
+			Denominator = FMath::RoundToInt(DenValue);
+		}
+		else
+		{
+			double FpsValue = 0.0;
+			if (JsonTryGetNumberAnyField(Params, { TEXT("fps"), TEXT("frame_rate") }, FpsValue))
+			{
+				Numerator = FMath::RoundToInt(FpsValue);
+				Denominator = 1;
+			}
+
+			double NumValue = 0.0;
+			double DenValue = 0.0;
+			if (JsonTryGetNumberAnyField(Params, { TEXT("frame_rate_numerator"), TEXT("sampling_frame_rate_numerator") }, NumValue))
+			{
+				Numerator = FMath::RoundToInt(NumValue);
+			}
+			if (JsonTryGetNumberAnyField(Params, { TEXT("frame_rate_denominator"), TEXT("sampling_frame_rate_denominator") }, DenValue))
+			{
+				Denominator = FMath::RoundToInt(DenValue);
+			}
+		}
+
+		if (Numerator <= 0 || Denominator <= 0)
+		{
+			OutError = TEXT("invalid_frame_rate");
+			return false;
+		}
+
+		OutFrameRate = FFrameRate(Numerator, Denominator);
+		return true;
+	}
+
+	struct FAnimSequenceBoneTrackInput
+	{
+		FName BoneName;
+		TArray<FVector> Positions;
+		TArray<FQuat> Rotations;
+		TArray<FVector> Scales;
+		int32 ProvidedKeyCount = 0;
+		bool bUsedExplicitFrames = false;
+	};
+
+	static bool TryResolveBoneKeyFrameIndex(const TSharedPtr<FJsonObject>& KeyObj, const FFrameRate& FrameRate, const int32 RequiredKeyCount, int32& OutFrameIndex, bool& bOutHasExplicitFrame, FString& OutError)
+	{
+		bOutHasExplicitFrame = false;
+		double FrameValue = 0.0;
+		if (JsonTryGetNumberAnyField(KeyObj, { TEXT("frame"), TEXT("frame_index"), TEXT("key_index") }, FrameValue))
+		{
+			bOutHasExplicitFrame = true;
+			OutFrameIndex = FMath::RoundToInt(FrameValue);
+		}
+		else
+		{
+			double TimeSeconds = 0.0;
+			if (!JsonTryGetNumberAnyField(KeyObj, { TEXT("time_seconds"), TEXT("time") }, TimeSeconds))
+			{
+				return true;
+			}
+			bOutHasExplicitFrame = true;
+			OutFrameIndex = FrameRate.AsFrameTime(TimeSeconds).RoundToFrame().Value;
+		}
+
+		if (OutFrameIndex < 0 || OutFrameIndex >= RequiredKeyCount)
+		{
+			OutError = TEXT("bone_track_key_frame_out_of_range");
+			return false;
+		}
+		return true;
+	}
+
+	static bool ParseAnimSequenceBoneTrackInput(
+		const TSharedPtr<FJsonObject>& TrackObj,
+		const FReferenceSkeleton& RefSkeleton,
+		const int32 RequiredKeyCount,
+		const FFrameRate& FrameRate,
+		FAnimSequenceBoneTrackInput& OutTrack,
+		FString& OutError)
+	{
+		if (!TrackObj.IsValid())
+		{
+			OutError = TEXT("invalid_bone_track_object");
+			return false;
+		}
+
+		FString BoneNameText;
+		if (!JsonTryGetStringAnyField(TrackObj, { TEXT("bone"), TEXT("bone_name"), TEXT("track_name") }, BoneNameText) || BoneNameText.TrimStartAndEnd().IsEmpty())
+		{
+			OutError = TEXT("bone_track_missing_bone_name");
+			return false;
+		}
+		BoneNameText = BoneNameText.TrimStartAndEnd();
+		const FName BoneName(*BoneNameText);
+		const int32 BoneIndex = RefSkeleton.FindBoneIndex(BoneName);
+		if (BoneIndex == INDEX_NONE)
+		{
+			OutError = FString::Printf(TEXT("bone_not_found:%s"), *BoneNameText);
+			return false;
+		}
+
+		const TArray<TSharedPtr<FJsonValue>>* Keys = nullptr;
+		if (!JsonTryGetArrayAnyField(TrackObj, { TEXT("keys"), TEXT("transforms") }, Keys) || !Keys || Keys->Num() == 0)
+		{
+			OutError = FString::Printf(TEXT("bone_track_missing_keys:%s"), *BoneNameText);
+			return false;
+		}
+
+		const FTransform ReferenceTransform = RefSkeleton.GetRefBonePose()[BoneIndex];
+		OutTrack.BoneName = BoneName;
+		OutTrack.Positions.Init(ReferenceTransform.GetTranslation(), RequiredKeyCount);
+		OutTrack.Rotations.Init(ReferenceTransform.GetRotation(), RequiredKeyCount);
+		OutTrack.Scales.Init(ReferenceTransform.GetScale3D(), RequiredKeyCount);
+		OutTrack.ProvidedKeyCount = Keys->Num();
+		OutTrack.bUsedExplicitFrames = false;
+
+		bool bAnyExplicitFrames = false;
+		for (const TSharedPtr<FJsonValue>& KeyValue : *Keys)
+		{
+			if (!KeyValue.IsValid() || KeyValue->Type != EJson::Object)
+			{
+				OutError = FString::Printf(TEXT("bone_track_key_must_be_object:%s"), *BoneNameText);
+				return false;
+			}
+			const TSharedPtr<FJsonObject> KeyObj = KeyValue->AsObject();
+			int32 FrameIndex = 0;
+			bool bHasExplicitFrame = false;
+			if (!TryResolveBoneKeyFrameIndex(KeyObj, FrameRate, RequiredKeyCount, FrameIndex, bHasExplicitFrame, OutError))
+			{
+				OutError = FString::Printf(TEXT("%s:%s"), *OutError, *BoneNameText);
+				return false;
+			}
+			bAnyExplicitFrames = bAnyExplicitFrames || bHasExplicitFrame;
+		}
+
+		if (!bAnyExplicitFrames && Keys->Num() != RequiredKeyCount)
+		{
+			OutError = FString::Printf(TEXT("bone_track_key_count_mismatch:%s:expected_%d_got_%d"), *BoneNameText, RequiredKeyCount, Keys->Num());
+			return false;
+		}
+		OutTrack.bUsedExplicitFrames = bAnyExplicitFrames;
+
+		for (int32 KeyIndex = 0; KeyIndex < Keys->Num(); ++KeyIndex)
+		{
+			const TSharedPtr<FJsonObject> KeyObj = (*Keys)[KeyIndex]->AsObject();
+			int32 FrameIndex = KeyIndex;
+			bool bHasExplicitFrame = false;
+			if (!TryResolveBoneKeyFrameIndex(KeyObj, FrameRate, RequiredKeyCount, FrameIndex, bHasExplicitFrame, OutError))
+			{
+				OutError = FString::Printf(TEXT("%s:%s"), *OutError, *BoneNameText);
+				return false;
+			}
+			if (!bAnyExplicitFrames)
+			{
+				FrameIndex = KeyIndex;
+			}
+
+			FVector Position;
+			FQuat Rotation;
+			FVector Scale;
+			if (!TryReadTransformKeyJson(KeyObj, ReferenceTransform, Position, Rotation, Scale, OutError))
+			{
+				OutError = FString::Printf(TEXT("invalid_bone_track_key:%s:%s"), *BoneNameText, *OutError);
+				return false;
+			}
+			OutTrack.Positions[FrameIndex] = Position;
+			OutTrack.Rotations[FrameIndex] = Rotation.GetNormalized();
+			OutTrack.Scales[FrameIndex] = Scale;
+		}
+		return true;
+	}
+
 	static bool ResolvePreviewFrameSequence(UAnimSequence* Sequence, const TSharedPtr<FJsonObject>& Params, TArray<FPreviewFrameRequest>& OutFrames, FString& OutError)
 	{
 		OutFrames.Reset();
@@ -1902,11 +2479,13 @@ bool FUeAgentHttpServer::ExecuteAnimSequenceCommand(const FString& CommandLower,
 {
 	if (CommandLower == TEXT("anim_sequence_get_info")) return CmdAnimSequenceGetInfo(Ctx, OutData, OutError);
 	if (CommandLower == TEXT("anim_sequence_analyze_root_motion")) return CmdAnimSequenceAnalyzeRootMotion(Ctx, OutData, OutError);
+	if (CommandLower == TEXT("anim_sequence_sample_pose")) return CmdAnimSequenceSamplePose(Ctx, OutData, OutError);
 	if (CommandLower == TEXT("anim_sequence_screenshot")) return CmdAnimSequenceScreenshot(Ctx, OutData, OutError);
 	if (CommandLower == TEXT("anim_sequence_set_settings")) return CmdAnimSequenceSetSettings(Ctx, OutData, OutError);
 	if (CommandLower == TEXT("anim_sequence_set_preview_mesh")) return CmdAnimSequenceSetPreviewMesh(Ctx, OutData, OutError);
 	if (CommandLower == TEXT("anim_sequence_set_curve")) return CmdAnimSequenceSetCurve(Ctx, OutData, OutError);
 	if (CommandLower == TEXT("anim_sequence_set_bones")) return CmdAnimSequenceSetBones(Ctx, OutData, OutError);
+	if (CommandLower == TEXT("anim_sequence_apply_bone_tracks")) return CmdAnimSequenceApplyBoneTracks(Ctx, OutData, OutError);
 	if (CommandLower == TEXT("anim_sequence_set_metadata")) return CmdAnimSequenceSetMetadata(Ctx, OutData, OutError);
 	if (CommandLower == TEXT("anim_sequence_set_notify")) return CmdAnimSequenceSetNotify(Ctx, OutData, OutError);
 	if (CommandLower == TEXT("anim_sequence_set_notify_track")) return CmdAnimSequenceSetNotifyTrack(Ctx, OutData, OutError);
@@ -2730,6 +3309,350 @@ bool FUeAgentHttpServer::CmdAnimSequenceAnalyzeRootMotion(const FUeAgentRequestC
 	return true;
 }
 
+bool FUeAgentHttpServer::CmdAnimSequenceSamplePose(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+{
+	FString AssetPath;
+	if (!JsonTryGetString(Ctx.Params, TEXT("asset_path"), AssetPath) || AssetPath.TrimStartAndEnd().IsEmpty())
+	{
+		OutError = TEXT("missing_asset_path");
+		return false;
+	}
+
+	UAnimSequence* Sequence = UeAgentAnimationAssetOps::LoadAnimSequence(AssetPath);
+	if (!Sequence)
+	{
+		OutError = TEXT("anim_sequence_not_found");
+		return false;
+	}
+
+	const int32 MaxFrameIndex = FMath::Max(0, Sequence->GetNumberOfSampledKeys() - 1);
+	float SequenceLengthFloat = 0.0f;
+	int32 NumFrames = 0;
+	UAnimationBlueprintLibrary::GetSequenceLength(Sequence, SequenceLengthFloat);
+	UAnimationBlueprintLibrary::GetNumFrames(Sequence, NumFrames);
+	const double SequenceLength = static_cast<double>(SequenceLengthFloat);
+	FFrameRate SamplingFrameRate = Sequence->GetSamplingFrameRate();
+	if (!SamplingFrameRate.IsValid() || SamplingFrameRate.AsDecimal() <= KINDA_SMALL_NUMBER)
+	{
+		SamplingFrameRate = FFrameRate(30, 1);
+	}
+
+	FString SpaceText = TEXT("local");
+	JsonTryGetString(Ctx.Params, TEXT("space"), SpaceText);
+	EAnimPoseSpaces PoseSpace = EAnimPoseSpaces::Local;
+	if (!UeAgentAnimationAssetOps::ParseAnimPoseSpace(SpaceText, PoseSpace))
+	{
+		OutError = TEXT("invalid_pose_space");
+		return false;
+	}
+
+	FString EvaluationTypeText = TEXT("raw");
+	UeAgentAnimationEditorOps::JsonTryGetStringAnyField(Ctx.Params, { TEXT("evaluation_type"), TEXT("eval_type") }, EvaluationTypeText);
+	EAnimDataEvalType EvaluationType = EAnimDataEvalType::Raw;
+	if (!UeAgentAnimationAssetOps::ParseAnimDataEvalType(EvaluationTypeText, EvaluationType))
+	{
+		OutError = TEXT("invalid_evaluation_type");
+		return false;
+	}
+
+	FAnimPoseEvaluationOptions EvaluationOptions;
+	EvaluationOptions.EvaluationType = EvaluationType;
+	EvaluationOptions.bShouldRetarget = false;
+	EvaluationOptions.bExtractRootMotion = false;
+	EvaluationOptions.bIncorporateRootMotionIntoPose = true;
+	EvaluationOptions.bRetrieveAdditiveAsFullPose = true;
+	EvaluationOptions.bEvaluateCurves = false;
+
+	bool bBoolOption = false;
+	if (JsonTryGetBool(Ctx.Params, TEXT("should_retarget"), bBoolOption))
+	{
+		EvaluationOptions.bShouldRetarget = bBoolOption;
+	}
+	if (JsonTryGetBool(Ctx.Params, TEXT("extract_root_motion"), bBoolOption))
+	{
+		EvaluationOptions.bExtractRootMotion = bBoolOption;
+	}
+	if (JsonTryGetBool(Ctx.Params, TEXT("incorporate_root_motion_into_pose"), bBoolOption))
+	{
+		EvaluationOptions.bIncorporateRootMotionIntoPose = bBoolOption;
+	}
+	if (JsonTryGetBool(Ctx.Params, TEXT("retrieve_additive_as_full_pose"), bBoolOption))
+	{
+		EvaluationOptions.bRetrieveAdditiveAsFullPose = bBoolOption;
+	}
+	if (JsonTryGetBool(Ctx.Params, TEXT("evaluate_curves"), bBoolOption))
+	{
+		EvaluationOptions.bEvaluateCurves = bBoolOption;
+	}
+
+	FString PreviewMeshPath;
+	UeAgentAnimationEditorOps::JsonTryGetStringAnyField(Ctx.Params, { TEXT("skeletal_mesh_path"), TEXT("preview_skeletal_mesh") }, PreviewMeshPath);
+	USkeletalMesh* PreviewMesh = nullptr;
+	if (!PreviewMeshPath.TrimStartAndEnd().IsEmpty())
+	{
+		PreviewMesh = UeAgentAnimationAssetOps::LoadSkeletalMesh(PreviewMeshPath);
+		if (!PreviewMesh)
+		{
+			OutError = TEXT("preview_skeletal_mesh_not_found");
+			return false;
+		}
+		if (Sequence->GetSkeleton() && PreviewMesh->GetSkeleton() && !Sequence->GetSkeleton()->IsCompatibleForEditor(PreviewMesh->GetSkeleton()))
+		{
+			OutError = TEXT("preview_skeletal_mesh_not_compatible_with_sequence_skeleton");
+			return false;
+		}
+		EvaluationOptions.OptionalSkeletalMesh = PreviewMesh;
+	}
+
+	struct FPoseSampleRequest
+	{
+		bool bUseFrameIndex = false;
+		int32 FrameIndex = 0;
+		double TimeSeconds = 0.0;
+	};
+
+	TArray<FPoseSampleRequest> SampleRequests;
+	auto AddFrameRequest = [&](const int32 RequestedFrameIndex) -> bool
+	{
+		if (RequestedFrameIndex < 0 || RequestedFrameIndex > MaxFrameIndex)
+		{
+			OutError = TEXT("pose_sample_frame_out_of_range");
+			return false;
+		}
+		FPoseSampleRequest Request;
+		Request.bUseFrameIndex = true;
+		Request.FrameIndex = RequestedFrameIndex;
+		Request.TimeSeconds = SamplingFrameRate.AsSeconds(FFrameNumber(RequestedFrameIndex));
+		SampleRequests.Add(Request);
+		return true;
+	};
+
+	auto AddTimeRequest = [&](const double RequestedTimeSeconds) -> bool
+	{
+		if (RequestedTimeSeconds < 0.0 || RequestedTimeSeconds > SequenceLength + KINDA_SMALL_NUMBER)
+		{
+			OutError = TEXT("pose_sample_time_out_of_range");
+			return false;
+		}
+		FPoseSampleRequest Request;
+		Request.bUseFrameIndex = false;
+		Request.TimeSeconds = FMath::Clamp(RequestedTimeSeconds, 0.0, SequenceLength);
+		Request.FrameIndex = FMath::Clamp(SamplingFrameRate.AsFrameTime(Request.TimeSeconds).RoundToFrame().Value, 0, MaxFrameIndex);
+		SampleRequests.Add(Request);
+		return true;
+	};
+
+	const TArray<TSharedPtr<FJsonValue>>* FrameValues = nullptr;
+	if (UeAgentAnimationEditorOps::JsonTryGetArrayAnyField(Ctx.Params, { TEXT("frame_indices"), TEXT("frames") }, FrameValues) && FrameValues)
+	{
+		for (const TSharedPtr<FJsonValue>& Value : *FrameValues)
+		{
+			double FrameValue = 0.0;
+			if (!Value.IsValid() || !Value->TryGetNumber(FrameValue))
+			{
+				OutError = TEXT("pose_sample_frame_must_be_number");
+				return false;
+			}
+			if (!AddFrameRequest(FMath::RoundToInt(FrameValue)))
+			{
+				return false;
+			}
+		}
+	}
+
+	const TArray<TSharedPtr<FJsonValue>>* TimeValues = nullptr;
+	if (UeAgentAnimationEditorOps::JsonTryGetArrayAnyField(Ctx.Params, { TEXT("time_seconds_list"), TEXT("times_seconds"), TEXT("times") }, TimeValues) && TimeValues)
+	{
+		for (const TSharedPtr<FJsonValue>& Value : *TimeValues)
+		{
+			double TimeValue = 0.0;
+			if (!Value.IsValid() || !Value->TryGetNumber(TimeValue))
+			{
+				OutError = TEXT("pose_sample_time_must_be_number");
+				return false;
+			}
+			if (!AddTimeRequest(TimeValue))
+			{
+				return false;
+			}
+		}
+	}
+
+	if (SampleRequests.Num() == 0)
+	{
+		double FrameIndexValue = 0.0;
+		if (UeAgentAnimationEditorOps::JsonTryGetNumberAnyField(Ctx.Params, { TEXT("frame_index"), TEXT("frame") }, FrameIndexValue))
+		{
+			if (!AddFrameRequest(FMath::RoundToInt(FrameIndexValue)))
+			{
+				return false;
+			}
+		}
+		else
+		{
+			double TimeValue = 0.0;
+			if (UeAgentAnimationEditorOps::JsonTryGetNumberAnyField(Ctx.Params, { TEXT("time_seconds"), TEXT("time") }, TimeValue))
+			{
+				if (!AddTimeRequest(TimeValue))
+				{
+					return false;
+				}
+			}
+			else if (!AddFrameRequest(0))
+			{
+				return false;
+			}
+		}
+	}
+
+	TArray<FName> RequestedBoneNames;
+	const TArray<TSharedPtr<FJsonValue>>* BoneValues = nullptr;
+	if (UeAgentAnimationEditorOps::JsonTryGetArrayAnyField(Ctx.Params, { TEXT("bone_names"), TEXT("bones"), TEXT("sample_bones") }, BoneValues) && BoneValues)
+	{
+		for (const TSharedPtr<FJsonValue>& Value : *BoneValues)
+		{
+			if (!Value.IsValid())
+			{
+				continue;
+			}
+			const FString BoneNameText = Value->AsString().TrimStartAndEnd();
+			if (!BoneNameText.IsEmpty())
+			{
+				RequestedBoneNames.Add(FName(*BoneNameText));
+			}
+		}
+	}
+	else
+	{
+		FString BoneNameText;
+		if (UeAgentAnimationEditorOps::JsonTryGetStringAnyField(Ctx.Params, { TEXT("bone_name"), TEXT("bone") }, BoneNameText) && !BoneNameText.TrimStartAndEnd().IsEmpty())
+		{
+			RequestedBoneNames.Add(FName(*BoneNameText.TrimStartAndEnd()));
+		}
+	}
+
+	bool bIncludeRefPose = false;
+	JsonTryGetBool(Ctx.Params, TEXT("include_ref_pose"), bIncludeRefPose);
+
+	double MaxBonesValue = 512.0;
+	JsonTryGetNumber(Ctx.Params, TEXT("max_bones"), MaxBonesValue);
+	const int32 MaxBones = FMath::Clamp(FMath::RoundToInt(MaxBonesValue), 1, 4096);
+
+	TArray<TSharedPtr<FJsonValue>> Samples;
+	TArray<TSharedPtr<FJsonValue>> MissingBonesSummary;
+	TArray<FString> MissingBoneNamesSeen;
+	bool bTruncatedBones = false;
+
+	for (int32 SampleIndex = 0; SampleIndex < SampleRequests.Num(); ++SampleIndex)
+	{
+		const FPoseSampleRequest& Request = SampleRequests[SampleIndex];
+
+		FAnimPose Pose;
+		if (Request.bUseFrameIndex)
+		{
+			UAnimPoseExtensions::GetAnimPoseAtFrame(Sequence, Request.FrameIndex, EvaluationOptions, Pose);
+		}
+		else
+		{
+			UAnimPoseExtensions::GetAnimPoseAtTime(Sequence, Request.TimeSeconds, EvaluationOptions, Pose);
+		}
+
+		if (!UAnimPoseExtensions::IsValid(Pose))
+		{
+			OutError = TEXT("anim_pose_evaluation_failed");
+			return false;
+		}
+
+		TArray<FName> PoseBoneNames;
+		UAnimPoseExtensions::GetBoneNames(Pose, PoseBoneNames);
+
+		TArray<FName> OutputBoneNames;
+		if (RequestedBoneNames.Num() > 0)
+		{
+			OutputBoneNames = RequestedBoneNames;
+		}
+		else
+		{
+			const int32 OutputCount = FMath::Min(PoseBoneNames.Num(), MaxBones);
+			OutputBoneNames.Reserve(OutputCount);
+			for (int32 BoneIndex = 0; BoneIndex < OutputCount; ++BoneIndex)
+			{
+				OutputBoneNames.Add(PoseBoneNames[BoneIndex]);
+			}
+			bTruncatedBones = PoseBoneNames.Num() > OutputCount;
+		}
+
+		TArray<TSharedPtr<FJsonValue>> BonesJson;
+		TArray<TSharedPtr<FJsonValue>> MissingBonesForSample;
+		for (const FName BoneName : OutputBoneNames)
+		{
+			const int32 PoseBoneIndex = PoseBoneNames.IndexOfByKey(BoneName);
+			if (PoseBoneIndex == INDEX_NONE)
+			{
+				const FString BoneNameText = BoneName.ToString();
+				MissingBonesForSample.Add(MakeShared<FJsonValueString>(BoneNameText));
+				if (!MissingBoneNamesSeen.Contains(BoneNameText))
+				{
+					MissingBoneNamesSeen.Add(BoneNameText);
+					MissingBonesSummary.Add(MakeShared<FJsonValueString>(BoneNameText));
+				}
+				continue;
+			}
+
+			const FTransform& BoneTransform = UAnimPoseExtensions::GetBonePose(Pose, BoneName, PoseSpace);
+			TSharedPtr<FJsonObject> BoneObj = MakeShared<FJsonObject>();
+			BoneObj->SetStringField(TEXT("bone_name"), BoneName.ToString());
+			BoneObj->SetNumberField(TEXT("bone_index"), PoseBoneIndex);
+			BoneObj->SetObjectField(TEXT("transform"), UeAgentAnimationAssetOps::BuildTransformJsonWithQuaternion(BoneTransform));
+			if (bIncludeRefPose)
+			{
+				const FTransform& RefBoneTransform = UAnimPoseExtensions::GetRefBonePose(Pose, BoneName, PoseSpace);
+				BoneObj->SetObjectField(TEXT("ref_transform"), UeAgentAnimationAssetOps::BuildTransformJsonWithQuaternion(RefBoneTransform));
+			}
+			BonesJson.Add(MakeShared<FJsonValueObject>(BoneObj));
+		}
+
+		TSharedPtr<FJsonObject> SampleObj = MakeShared<FJsonObject>();
+		SampleObj->SetNumberField(TEXT("sample_index"), SampleIndex);
+		SampleObj->SetNumberField(TEXT("frame_index"), Request.FrameIndex);
+		SampleObj->SetNumberField(TEXT("time_seconds"), Request.TimeSeconds);
+		SampleObj->SetNumberField(TEXT("normalized_time"), SequenceLength > KINDA_SMALL_NUMBER ? Request.TimeSeconds / SequenceLength : 0.0);
+		SampleObj->SetBoolField(TEXT("used_frame_index"), Request.bUseFrameIndex);
+		SampleObj->SetNumberField(TEXT("bone_count"), BonesJson.Num());
+		SampleObj->SetArrayField(TEXT("bones"), BonesJson);
+		SampleObj->SetArrayField(TEXT("missing_bones"), MissingBonesForSample);
+		Samples.Add(MakeShared<FJsonValueObject>(SampleObj));
+	}
+
+	TSharedPtr<FJsonObject> FrameRateJson = MakeShared<FJsonObject>();
+	FrameRateJson->SetNumberField(TEXT("numerator"), SamplingFrameRate.Numerator);
+	FrameRateJson->SetNumberField(TEXT("denominator"), SamplingFrameRate.Denominator);
+	FrameRateJson->SetNumberField(TEXT("decimal"), SamplingFrameRate.AsDecimal());
+
+	OutData = MakeShared<FJsonObject>();
+	OutData->SetStringField(TEXT("asset_path"), UeAgentAnimationAssetOps::NormalizeAssetPath(Sequence->GetOutermost()->GetName()));
+	OutData->SetStringField(TEXT("object_path"), Sequence->GetPathName());
+	OutData->SetStringField(TEXT("skeleton"), Sequence->GetSkeleton() ? Sequence->GetSkeleton()->GetPathName() : TEXT(""));
+	OutData->SetStringField(TEXT("preview_skeletal_mesh"), PreviewMesh ? PreviewMesh->GetPathName() : (Sequence->GetPreviewMesh() ? Sequence->GetPreviewMesh()->GetPathName() : TEXT("")));
+	OutData->SetStringField(TEXT("space"), UeAgentAnimationAssetOps::AnimPoseSpaceToString(PoseSpace));
+	OutData->SetStringField(TEXT("evaluation_type"), UeAgentAnimationAssetOps::AnimDataEvalTypeToString(EvaluationType));
+	OutData->SetBoolField(TEXT("should_retarget"), EvaluationOptions.bShouldRetarget);
+	OutData->SetBoolField(TEXT("extract_root_motion"), EvaluationOptions.bExtractRootMotion);
+	OutData->SetBoolField(TEXT("evaluate_curves"), EvaluationOptions.bEvaluateCurves);
+	OutData->SetNumberField(TEXT("sequence_length"), SequenceLength);
+	OutData->SetNumberField(TEXT("num_frames"), NumFrames);
+	OutData->SetNumberField(TEXT("max_frame_index"), MaxFrameIndex);
+	OutData->SetObjectField(TEXT("sampling_frame_rate"), FrameRateJson);
+	OutData->SetNumberField(TEXT("sample_count"), Samples.Num());
+	OutData->SetBoolField(TEXT("requested_all_bones"), RequestedBoneNames.Num() == 0);
+	OutData->SetNumberField(TEXT("requested_bone_count"), RequestedBoneNames.Num());
+	OutData->SetNumberField(TEXT("max_bones"), MaxBones);
+	OutData->SetBoolField(TEXT("truncated_bones"), bTruncatedBones);
+	OutData->SetArrayField(TEXT("missing_bones"), MissingBonesSummary);
+	OutData->SetArrayField(TEXT("samples"), Samples);
+	return true;
+}
+
 bool FUeAgentHttpServer::CmdAnimSequenceScreenshot(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	if (!OutData.IsValid())
@@ -3286,1781 +4209,269 @@ bool FUeAgentHttpServer::CmdAnimSequenceScreenshot(const FUeAgentRequestContext&
 	return true;
 }
 
-bool FUeAgentHttpServer::CmdAnimSequenceSetSettings(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentHttpServer::CmdAnimSequenceApplyBoneTracks(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	FString AssetPath;
-	if (!JsonTryGetString(Ctx.Params, TEXT("asset_path"), AssetPath) || AssetPath.IsEmpty())
+	if (!JsonTryGetString(Ctx.Params, TEXT("asset_path"), AssetPath) || AssetPath.TrimStartAndEnd().IsEmpty())
 	{
 		OutError = TEXT("missing_asset_path");
 		return false;
 	}
 
-	UAnimSequence* Sequence = UeAgentAnimationAssetOps::LoadAnimSequence(AssetPath);
-	if (!Sequence)
+	UObject* ExistingObject = UeAgentAnimationAssetOps::LoadAssetObject(AssetPath);
+	UAnimSequence* Sequence = Cast<UAnimSequence>(ExistingObject);
+	if (ExistingObject && !Sequence)
 	{
-		OutError = TEXT("anim_sequence_not_found");
+		OutError = TEXT("asset_exists_with_different_class");
 		return false;
 	}
 
-	Sequence->Modify();
-	int32 SequenceNumFrames = 0;
-	UAnimationBlueprintLibrary::GetNumFrames(Sequence, SequenceNumFrames);
-
-	double RateScaleValue = 0.0;
-	if (JsonTryGetNumber(Ctx.Params, TEXT("rate_scale"), RateScaleValue))
+	FString SkeletonPath;
+	UeAgentAnimationEditorOps::JsonTryGetStringAnyField(Ctx.Params, { TEXT("target_skeleton"), TEXT("skeleton") }, SkeletonPath);
+	USkeleton* RequestedSkeleton = nullptr;
+	if (!SkeletonPath.TrimStartAndEnd().IsEmpty())
 	{
-		UAnimationBlueprintLibrary::SetRateScale(Sequence, static_cast<float>(RateScaleValue));
-	}
-
-	bool bBoolValue = false;
-	if (JsonTryGetBool(Ctx.Params, TEXT("enable_root_motion"), bBoolValue))
-	{
-		UAnimationBlueprintLibrary::SetRootMotionEnabled(Sequence, bBoolValue);
-	}
-	if (JsonTryGetBool(Ctx.Params, TEXT("force_root_lock"), bBoolValue))
-	{
-		UAnimationBlueprintLibrary::SetIsRootMotionLockForced(Sequence, bBoolValue);
-	}
-
-	FString AdditiveAnimationTypeText;
-	if (JsonTryGetString(Ctx.Params, TEXT("additive_animation_type"), AdditiveAnimationTypeText) && !AdditiveAnimationTypeText.TrimStartAndEnd().IsEmpty())
-	{
-		EAdditiveAnimationType AdditiveAnimationType = AAT_None;
-		if (!UeAgentAnimationAssetOps::ParseAdditiveAnimationType(AdditiveAnimationTypeText, AdditiveAnimationType))
+		RequestedSkeleton = UeAgentAnimationAssetOps::LoadSkeleton(SkeletonPath);
+		if (!RequestedSkeleton)
 		{
-			OutError = TEXT("invalid_additive_animation_type");
+			OutError = TEXT("target_skeleton_not_found");
 			return false;
 		}
-		UAnimationBlueprintLibrary::SetAdditiveAnimationType(Sequence, AdditiveAnimationType);
 	}
-
-	FString AdditiveBasePoseTypeText;
-	if (JsonTryGetString(Ctx.Params, TEXT("additive_base_pose_type"), AdditiveBasePoseTypeText) && !AdditiveBasePoseTypeText.TrimStartAndEnd().IsEmpty())
-	{
-		EAdditiveBasePoseType AdditiveBasePoseType = ABPT_None;
-		if (!UeAgentAnimationAssetOps::ParseAdditiveBasePoseType(AdditiveBasePoseTypeText, AdditiveBasePoseType))
-		{
-			OutError = TEXT("invalid_additive_base_pose_type");
-			return false;
-		}
-		UAnimationBlueprintLibrary::SetAdditiveBasePoseType(Sequence, AdditiveBasePoseType);
-	}
-
-	FString RootMotionLockTypeText;
-	if (JsonTryGetString(Ctx.Params, TEXT("root_motion_lock_type"), RootMotionLockTypeText) && !RootMotionLockTypeText.TrimStartAndEnd().IsEmpty())
-	{
-		ERootMotionRootLock::Type RootMotionLockType = ERootMotionRootLock::RefPose;
-		if (!UeAgentAnimationAssetOps::ParseRootMotionLockType(RootMotionLockTypeText, RootMotionLockType))
-		{
-			OutError = TEXT("invalid_root_motion_lock_type");
-			return false;
-		}
-		UAnimationBlueprintLibrary::SetRootMotionLockType(Sequence, RootMotionLockType);
-	}
-
-	FString InterpolationTypeText;
-	if (JsonTryGetString(Ctx.Params, TEXT("interpolation_type"), InterpolationTypeText) && !InterpolationTypeText.TrimStartAndEnd().IsEmpty())
-	{
-		EAnimInterpolationType InterpolationType = EAnimInterpolationType::Linear;
-		if (!UeAgentAnimationAssetOps::ParseInterpolationType(InterpolationTypeText, InterpolationType))
-		{
-			OutError = TEXT("invalid_interpolation_type");
-			return false;
-		}
-		UAnimationBlueprintLibrary::SetAnimationInterpolationType(Sequence, InterpolationType);
-	}
-
-	FString BasePoseSequencePath;
-	if (JsonTryGetString(Ctx.Params, TEXT("base_pose_sequence_path"), BasePoseSequencePath) && !BasePoseSequencePath.TrimStartAndEnd().IsEmpty())
-	{
-		UAnimSequence* BasePoseSequence = UeAgentAnimationAssetOps::LoadAnimSequence(BasePoseSequencePath);
-		if (!BasePoseSequence)
-		{
-			OutError = TEXT("base_pose_sequence_not_found");
-			return false;
-		}
-		if (Sequence->GetSkeleton() && BasePoseSequence->GetSkeleton() && !Sequence->GetSkeleton()->IsCompatibleForEditor(BasePoseSequence->GetSkeleton()))
-		{
-			OutError = TEXT("base_pose_sequence_skeleton_incompatible");
-			return false;
-		}
-		Sequence->RefPoseSeq = BasePoseSequence;
-		Sequence->MarkPackageDirty();
-	}
-
-	bool bClearBasePoseSequence = false;
-	if (JsonTryGetBool(Ctx.Params, TEXT("clear_base_pose_sequence"), bClearBasePoseSequence) && bClearBasePoseSequence)
-	{
-		Sequence->RefPoseSeq = nullptr;
-		Sequence->MarkPackageDirty();
-	}
-
-	double BasePoseFrameIndexValue = 0.0;
-	if (JsonTryGetNumber(Ctx.Params, TEXT("base_pose_frame_index"), BasePoseFrameIndexValue))
-	{
-		const int32 BasePoseFrameIndex = static_cast<int32>(BasePoseFrameIndexValue);
-		if (BasePoseFrameIndex < 0 || BasePoseFrameIndex >= SequenceNumFrames)
-		{
-			OutError = TEXT("invalid_base_pose_frame_index");
-			return false;
-		}
-		Sequence->RefFrameIndex = BasePoseFrameIndex;
-		Sequence->MarkPackageDirty();
-	}
-
-	if (Ctx.Params->HasField(TEXT("retarget_source")))
-	{
-		FString RetargetSourceText;
-		JsonTryGetString(Ctx.Params, TEXT("retarget_source"), RetargetSourceText);
-		Sequence->RetargetSource = RetargetSourceText.TrimStartAndEnd().IsEmpty() ? NAME_None : FName(*RetargetSourceText.TrimStartAndEnd());
-		Sequence->MarkPackageDirty();
-	}
-
-	bool bClearRetargetSourceAsset = false;
-	if (JsonTryGetBool(Ctx.Params, TEXT("clear_retarget_source_asset"), bClearRetargetSourceAsset) && bClearRetargetSourceAsset)
-	{
-		Sequence->ClearRetargetSourceAsset();
-		Sequence->MarkPackageDirty();
-	}
-
-	FString RetargetSourceAssetPath;
-	if (JsonTryGetString(Ctx.Params, TEXT("retarget_source_asset_path"), RetargetSourceAssetPath) && !RetargetSourceAssetPath.TrimStartAndEnd().IsEmpty())
-	{
-		USkeletalMesh* RetargetSourceAsset = UeAgentAnimationAssetOps::LoadSkeletalMesh(RetargetSourceAssetPath);
-		if (!RetargetSourceAsset)
-		{
-			OutError = TEXT("retarget_source_asset_not_found");
-			return false;
-		}
-		if (Sequence->GetSkeleton() && RetargetSourceAsset->GetSkeleton() && !Sequence->GetSkeleton()->IsCompatibleForEditor(RetargetSourceAsset->GetSkeleton()))
-		{
-			OutError = TEXT("retarget_source_asset_skeleton_incompatible");
-			return false;
-		}
-		Sequence->SetRetargetSourceAsset(RetargetSourceAsset);
-		Sequence->MarkPackageDirty();
-	}
-
-	FString BoneCompressionSettingsPath;
-	if (JsonTryGetString(Ctx.Params, TEXT("bone_compression_settings_path"), BoneCompressionSettingsPath) && !BoneCompressionSettingsPath.TrimStartAndEnd().IsEmpty())
-	{
-		UAnimBoneCompressionSettings* BoneCompressionSettings = UeAgentAnimationAssetOps::LoadBoneCompressionSettings(BoneCompressionSettingsPath);
-		if (!BoneCompressionSettings)
-		{
-			OutError = TEXT("bone_compression_settings_not_found");
-			return false;
-		}
-		if (!BoneCompressionSettings->AreSettingsValid())
-		{
-			OutError = TEXT("invalid_bone_compression_settings");
-			return false;
-		}
-		UAnimationBlueprintLibrary::SetBoneCompressionSettings(Sequence, BoneCompressionSettings);
-		Sequence->MarkPackageDirty();
-	}
-
-	FString CurveCompressionSettingsPath;
-	if (JsonTryGetString(Ctx.Params, TEXT("curve_compression_settings_path"), CurveCompressionSettingsPath) && !CurveCompressionSettingsPath.TrimStartAndEnd().IsEmpty())
-	{
-		UAnimCurveCompressionSettings* CurveCompressionSettings = UeAgentAnimationAssetOps::LoadCurveCompressionSettings(CurveCompressionSettingsPath);
-		if (!CurveCompressionSettings)
-		{
-			OutError = TEXT("curve_compression_settings_not_found");
-			return false;
-		}
-		if (!CurveCompressionSettings->AreSettingsValid())
-		{
-			OutError = TEXT("invalid_curve_compression_settings");
-			return false;
-		}
-		UAnimationBlueprintLibrary::SetCurveCompressionSettings(Sequence, CurveCompressionSettings);
-		Sequence->MarkPackageDirty();
-	}
-
-	FString VariableFrameStrippingSettingsPath;
-	if (JsonTryGetString(Ctx.Params, TEXT("variable_frame_stripping_settings_path"), VariableFrameStrippingSettingsPath) && !VariableFrameStrippingSettingsPath.TrimStartAndEnd().IsEmpty())
-	{
-		UVariableFrameStrippingSettings* VariableFrameStrippingSettings = UeAgentAnimationAssetOps::LoadVariableFrameStrippingSettings(VariableFrameStrippingSettingsPath);
-		if (!VariableFrameStrippingSettings)
-		{
-			OutError = TEXT("variable_frame_stripping_settings_not_found");
-			return false;
-		}
-		UAnimationBlueprintLibrary::SetVariableFrameStrippingSettings(Sequence, VariableFrameStrippingSettings);
-		Sequence->MarkPackageDirty();
-	}
-
-	bool bSaveAfterSet = false;
-	JsonTryGetBool(Ctx.Params, TEXT("save_after_set"), bSaveAfterSet);
-	if (bSaveAfterSet && !UeAgentAnimationAssetOps::SaveAssetPackage(Sequence, OutError))
-	{
-		return false;
-	}
-
-	float SequenceLength = 0.0f;
-	float RateScale = 0.0f;
-	TEnumAsByte<EAdditiveAnimationType> AdditiveAnimationType = AAT_None;
-	TEnumAsByte<EAdditiveBasePoseType> AdditiveBasePoseType = ABPT_None;
-	TEnumAsByte<ERootMotionRootLock::Type> RootMotionLockType = ERootMotionRootLock::RefPose;
-	EAnimInterpolationType InterpolationType = EAnimInterpolationType::Linear;
-	UAnimBoneCompressionSettings* BoneCompressionSettings = nullptr;
-	UAnimCurveCompressionSettings* CurveCompressionSettings = nullptr;
-	UVariableFrameStrippingSettings* VariableFrameStrippingSettings = nullptr;
-	UAnimationBlueprintLibrary::GetSequenceLength(Sequence, SequenceLength);
-	UAnimationBlueprintLibrary::GetRateScale(Sequence, RateScale);
-	UAnimationBlueprintLibrary::GetAdditiveAnimationType(Sequence, AdditiveAnimationType);
-	UAnimationBlueprintLibrary::GetAdditiveBasePoseType(Sequence, AdditiveBasePoseType);
-	UAnimationBlueprintLibrary::GetRootMotionLockType(Sequence, RootMotionLockType);
-	UAnimationBlueprintLibrary::GetAnimationInterpolationType(Sequence, InterpolationType);
-	UAnimationBlueprintLibrary::GetBoneCompressionSettings(Sequence, BoneCompressionSettings);
-	UAnimationBlueprintLibrary::GetCurveCompressionSettings(Sequence, CurveCompressionSettings);
-	UAnimationBlueprintLibrary::GetVariableFrameStrippingSettings(Sequence, VariableFrameStrippingSettings);
-
-	OutData->SetStringField(TEXT("asset_path"), Sequence->GetPathName());
-	OutData->SetNumberField(TEXT("sequence_length"), SequenceLength);
-	OutData->SetNumberField(TEXT("rate_scale"), RateScale);
-	OutData->SetStringField(TEXT("interpolation_type"), UeAgentAnimationAssetOps::InterpolationTypeToString(InterpolationType));
-	OutData->SetStringField(TEXT("additive_animation_type"), UeAgentAnimationAssetOps::AdditiveAnimationTypeToString(AdditiveAnimationType));
-	OutData->SetStringField(TEXT("additive_base_pose_type"), UeAgentAnimationAssetOps::AdditiveBasePoseTypeToString(AdditiveBasePoseType));
-	OutData->SetStringField(TEXT("additive_base_pose_sequence"), Sequence->RefPoseSeq ? Sequence->RefPoseSeq->GetPathName() : TEXT(""));
-	OutData->SetNumberField(TEXT("additive_base_pose_frame_index"), Sequence->RefFrameIndex);
-	OutData->SetBoolField(TEXT("root_motion_enabled"), UAnimationBlueprintLibrary::IsRootMotionEnabled(Sequence));
-	OutData->SetBoolField(TEXT("force_root_lock"), UAnimationBlueprintLibrary::IsRootMotionLockForced(Sequence));
-	OutData->SetStringField(TEXT("root_motion_lock_type"), UeAgentAnimationAssetOps::RootMotionLockTypeToString(RootMotionLockType));
-	OutData->SetStringField(TEXT("retarget_source"), Sequence->RetargetSource.ToString());
-	OutData->SetStringField(TEXT("retarget_source_asset"), Sequence->GetRetargetSourceAsset().ToSoftObjectPath().ToString());
-	OutData->SetStringField(TEXT("bone_compression_settings"), BoneCompressionSettings ? BoneCompressionSettings->GetPathName() : TEXT(""));
-	OutData->SetStringField(TEXT("curve_compression_settings"), CurveCompressionSettings ? CurveCompressionSettings->GetPathName() : TEXT(""));
-	OutData->SetStringField(TEXT("variable_frame_stripping_settings"), VariableFrameStrippingSettings ? VariableFrameStrippingSettings->GetPathName() : TEXT(""));
-	OutData->SetBoolField(TEXT("saved"), bSaveAfterSet);
-	return true;
-}
-
-bool FUeAgentHttpServer::CmdAnimSequenceSetPreviewMesh(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
-{
-	FString AssetPath;
-	if (!JsonTryGetString(Ctx.Params, TEXT("asset_path"), AssetPath) || AssetPath.IsEmpty())
-	{
-		OutError = TEXT("missing_asset_path");
-		return false;
-	}
-
-	UAnimSequence* Sequence = UeAgentAnimationAssetOps::LoadAnimSequence(AssetPath);
-	if (!Sequence)
-	{
-		OutError = TEXT("anim_sequence_not_found");
-		return false;
-	}
-
-	bool bClearPreviewMesh = false;
-	JsonTryGetBool(Ctx.Params, TEXT("clear_preview_mesh"), bClearPreviewMesh);
 
 	FString PreviewMeshPath;
-	JsonTryGetString(Ctx.Params, TEXT("skeletal_mesh_path"), PreviewMeshPath);
-
+	UeAgentAnimationEditorOps::JsonTryGetStringAnyField(Ctx.Params, { TEXT("preview_skeletal_mesh"), TEXT("skeletal_mesh_path") }, PreviewMeshPath);
 	USkeletalMesh* PreviewMesh = nullptr;
-	if (!bClearPreviewMesh)
+	if (!PreviewMeshPath.TrimStartAndEnd().IsEmpty())
 	{
-		if (PreviewMeshPath.TrimStartAndEnd().IsEmpty())
-		{
-			OutError = TEXT("missing_skeletal_mesh_path");
-			return false;
-		}
-
 		PreviewMesh = UeAgentAnimationAssetOps::LoadSkeletalMesh(PreviewMeshPath);
 		if (!PreviewMesh)
 		{
-			OutError = TEXT("skeletal_mesh_not_found");
-			return false;
-		}
-		if (Sequence->GetSkeleton() && PreviewMesh->GetSkeleton() && !Sequence->GetSkeleton()->IsCompatibleForEditor(PreviewMesh->GetSkeleton()))
-		{
-			OutError = TEXT("preview_mesh_incompatible_with_sequence_skeleton");
+			OutError = TEXT("preview_skeletal_mesh_not_found");
 			return false;
 		}
 	}
 
-	Sequence->Modify();
-	Sequence->SetPreviewMesh(PreviewMesh, true);
-
-	bool bSaveAfterSet = false;
-	JsonTryGetBool(Ctx.Params, TEXT("save_after_set"), bSaveAfterSet);
-	if (bSaveAfterSet && !UeAgentAnimationAssetOps::SaveAssetPackage(Sequence, OutError))
+	USkeleton* TargetSkeleton = RequestedSkeleton;
+	if (!TargetSkeleton && Sequence)
 	{
+		TargetSkeleton = Sequence->GetSkeleton();
+	}
+	if (!TargetSkeleton && PreviewMesh)
+	{
+		TargetSkeleton = PreviewMesh->GetSkeleton();
+	}
+	if (Sequence && Sequence->GetSkeleton() && RequestedSkeleton && !Sequence->GetSkeleton()->IsCompatibleForEditor(RequestedSkeleton))
+	{
+		OutError = TEXT("target_skeleton_not_compatible_with_existing_sequence");
+		return false;
+	}
+	if (TargetSkeleton && PreviewMesh && PreviewMesh->GetSkeleton() && !TargetSkeleton->IsCompatibleForEditor(PreviewMesh->GetSkeleton()))
+	{
+		OutError = TEXT("preview_skeletal_mesh_not_compatible_with_target_skeleton");
 		return false;
 	}
 
-	OutData->SetStringField(TEXT("asset_path"), Sequence->GetPathName());
-	OutData->SetStringField(TEXT("preview_skeletal_mesh"), Sequence->GetPreviewMesh() ? Sequence->GetPreviewMesh()->GetPathName() : TEXT(""));
-	OutData->SetBoolField(TEXT("saved"), bSaveAfterSet);
-	return true;
-}
-
-bool FUeAgentHttpServer::CmdAnimSequenceSetCurve(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
-{
-	FString AssetPath;
-	if (!JsonTryGetString(Ctx.Params, TEXT("asset_path"), AssetPath) || AssetPath.IsEmpty())
-	{
-		OutError = TEXT("missing_asset_path");
-		return false;
-	}
-
-	FString CurveNameText;
-	if (!JsonTryGetString(Ctx.Params, TEXT("curve_name"), CurveNameText) || CurveNameText.TrimStartAndEnd().IsEmpty())
-	{
-		OutError = TEXT("missing_curve_name");
-		return false;
-	}
-	const FName CurveName(*CurveNameText.TrimStartAndEnd());
-
-	FString CurveTypeText = TEXT("float");
-	JsonTryGetString(Ctx.Params, TEXT("curve_type"), CurveTypeText);
-	ERawCurveTrackTypes CurveType = ERawCurveTrackTypes::RCT_Float;
-	if (!UeAgentAnimationAssetOps::ParseCurveType(CurveTypeText, CurveType))
-	{
-		OutError = TEXT("invalid_curve_type");
-		return false;
-	}
-
-	UAnimSequence* Sequence = UeAgentAnimationAssetOps::LoadAnimSequence(AssetPath);
+	bool bCreateIfMissing = false;
+	JsonTryGetBool(Ctx.Params, TEXT("create_if_missing"), bCreateIfMissing);
+	bool bCreated = false;
 	if (!Sequence)
 	{
-		OutError = TEXT("anim_sequence_not_found");
-		return false;
-	}
-
-	bool bRemove = false;
-	bool bMetaDataCurve = false;
-	bool bClearExistingKeys = false;
-	bool bRemoveNameFromSkeleton = false;
-	JsonTryGetBool(Ctx.Params, TEXT("remove"), bRemove);
-	JsonTryGetBool(Ctx.Params, TEXT("meta_data_curve"), bMetaDataCurve);
-	JsonTryGetBool(Ctx.Params, TEXT("clear_existing_keys"), bClearExistingKeys);
-	JsonTryGetBool(Ctx.Params, TEXT("remove_name_from_skeleton"), bRemoveNameFromSkeleton);
-
-	TSharedPtr<FJsonObject> TypedCurveJson;
-	const TSharedPtr<FJsonObject>* CurveJsonPtr = nullptr;
-	bool bHasTypedCurveJson = false;
-	if (Ctx.Params->TryGetObjectField(TEXT("curve_json"), CurveJsonPtr) && CurveJsonPtr && CurveJsonPtr->IsValid())
-	{
-		TypedCurveJson = *CurveJsonPtr;
-		bHasTypedCurveJson = true;
-	}
-	else if (Ctx.Params->TryGetObjectField(TEXT("curve"), CurveJsonPtr) && CurveJsonPtr && CurveJsonPtr->IsValid())
-	{
-		TypedCurveJson = *CurveJsonPtr;
-		bHasTypedCurveJson = true;
-	}
-
-	FRichCurve TypedRichCurve;
-	TArray<TSharedPtr<FJsonValue>> CurveJsonIssues;
-	if (!bRemove && bHasTypedCurveJson)
-	{
-		UeAgentCurveJson::WarnUnknownCurveFields(TypedCurveJson, TEXT("curve_json"), CurveJsonIssues);
-		if (CurveType != ERawCurveTrackTypes::RCT_Float)
+		if (!bCreateIfMissing)
 		{
-			UeAgentCurveJson::AddCurveIssue(CurveJsonIssues, TEXT("error"), TEXT("curve_unsupported_carrier"), TEXT("curve_type"), TEXT("AnimSequence typed curve JSON currently supports curve_type=float."));
-		}
-		if (!UeAgentCurveJson::ApplyChannelJsonToRichCurve(TypedCurveJson, TEXT("value"), TypedRichCurve, TEXT("curve_json"), CurveJsonIssues))
-		{
-			OutData->SetArrayField(TEXT("json_issues"), CurveJsonIssues);
-			OutError = TEXT("curve_json_apply_failed");
+			OutError = TEXT("anim_sequence_not_found");
 			return false;
 		}
-		for (const FRichCurveKey& Key : TypedRichCurve.GetConstRefOfKeys())
+		if (!TargetSkeleton)
 		{
-			if (Key.Time < 0.0f || Key.Time > Sequence->GetPlayLength() + KINDA_SMALL_NUMBER)
-			{
-				UeAgentCurveJson::AddCurveIssue(CurveJsonIssues, TEXT("error"), TEXT("curve_key_time_out_of_range"), TEXT("curve_json.channels.value.keys"), FString::Printf(TEXT("Curve key time %.6f is outside AnimSequence range 0..%.6f."), Key.Time, Sequence->GetPlayLength()));
-			}
-		}
-		if (UeAgentCurveJson::HasError(CurveJsonIssues))
-		{
-			OutData->SetArrayField(TEXT("json_issues"), CurveJsonIssues);
-			OutError = TEXT("curve_json_apply_failed");
+			OutError = TEXT("target_skeleton_required_for_new_anim_sequence");
 			return false;
 		}
-	}
-
-	Sequence->Modify();
-
-	if (bRemove)
-	{
-		UAnimationBlueprintLibrary::RemoveCurve(Sequence, CurveName, bRemoveNameFromSkeleton);
+		FString CreateError;
+		Sequence = UeAgentAnimationAssetOps::CreateAnimSequenceAsset(AssetPath, TargetSkeleton, PreviewMesh, CreateError);
+		if (!Sequence)
+		{
+			OutError = CreateError.IsEmpty() ? TEXT("create_anim_sequence_failed") : CreateError;
+			return false;
+		}
+		bCreated = true;
 	}
 	else
 	{
-		if ((bClearExistingKeys || bHasTypedCurveJson) && UAnimationBlueprintLibrary::DoesCurveExist(Sequence, CurveName, CurveType))
+		if (RequestedSkeleton && !Sequence->GetSkeleton())
 		{
-			UAnimationBlueprintLibrary::RemoveCurve(Sequence, CurveName, false);
+			Sequence->SetSkeleton(RequestedSkeleton);
+		}
+		if (PreviewMesh)
+		{
+			Sequence->SetPreviewMesh(PreviewMesh, true);
+		}
+	}
+
+	if (!Sequence->GetSkeleton())
+	{
+		OutError = TEXT("anim_sequence_missing_skeleton");
+		return false;
+	}
+
+	const TArray<TSharedPtr<FJsonValue>>* TracksArray = nullptr;
+	if (!UeAgentAnimationEditorOps::JsonTryGetArrayAnyField(Ctx.Params, { TEXT("tracks"), TEXT("bone_tracks") }, TracksArray) || !TracksArray || TracksArray->Num() == 0)
+	{
+		OutError = TEXT("missing_bone_tracks");
+		return false;
+	}
+
+	IAnimationDataModel* DataModel = Sequence->GetDataModel();
+	if (!DataModel)
+	{
+		OutError = TEXT("anim_sequence_data_model_not_found");
+		return false;
+	}
+
+	FFrameRate FallbackFrameRate = Sequence->GetSamplingFrameRate();
+	if (!FallbackFrameRate.IsValid() || FallbackFrameRate.AsDecimal() <= KINDA_SMALL_NUMBER)
+	{
+		FallbackFrameRate = FFrameRate(30, 1);
+	}
+	if (DataModel->GetFrameRate().IsValid() && DataModel->GetFrameRate().AsDecimal() > KINDA_SMALL_NUMBER)
+	{
+		FallbackFrameRate = DataModel->GetFrameRate();
+	}
+
+	FFrameRate FrameRate;
+	if (!UeAgentAnimationEditorOps::ResolveAnimFrameRate(Ctx.Params, FallbackFrameRate, FrameRate, OutError))
+	{
+		return false;
+	}
+
+	int32 NumFrames = FMath::Max(1, DataModel->GetNumberOfFrames());
+	double NumFramesValue = 0.0;
+	if (JsonTryGetNumber(Ctx.Params, TEXT("num_frames"), NumFramesValue))
+	{
+		NumFrames = FMath::RoundToInt(NumFramesValue);
+	}
+	else if (JsonTryGetNumber(Ctx.Params, TEXT("frame_count"), NumFramesValue))
+	{
+		NumFrames = FMath::RoundToInt(NumFramesValue);
+	}
+	if (NumFrames <= 0)
+	{
+		OutError = TEXT("invalid_num_frames");
+		return false;
+	}
+	const int32 RequiredKeyCount = NumFrames + 1;
+
+	const FReferenceSkeleton& RefSkeleton = Sequence->GetSkeleton()->GetReferenceSkeleton();
+	if (RefSkeleton.GetNum() <= 0)
+	{
+		OutError = TEXT("target_skeleton_has_no_bones");
+		return false;
+	}
+
+	TArray<UeAgentAnimationEditorOps::FAnimSequenceBoneTrackInput> ParsedTracks;
+	ParsedTracks.Reserve(TracksArray->Num());
+	for (const TSharedPtr<FJsonValue>& TrackValue : *TracksArray)
+	{
+		if (!TrackValue.IsValid() || TrackValue->Type != EJson::Object)
+		{
+			OutError = TEXT("bone_track_must_be_object");
+			return false;
+		}
+		UeAgentAnimationEditorOps::FAnimSequenceBoneTrackInput ParsedTrack;
+		if (!UeAgentAnimationEditorOps::ParseAnimSequenceBoneTrackInput(TrackValue->AsObject(), RefSkeleton, RequiredKeyCount, FrameRate, ParsedTrack, OutError))
+		{
+			return false;
+		}
+		ParsedTracks.Add(MoveTemp(ParsedTrack));
+	}
+
+	bool bReplaceExistingTracks = false;
+	JsonTryGetBool(Ctx.Params, TEXT("replace_existing_tracks"), bReplaceExistingTracks);
+
+	Sequence->Modify();
+	IAnimationDataController& Controller = Sequence->GetController();
+	{
+		IAnimationDataController::FScopedBracket ScopedBracket(Controller, FText::FromString(TEXT("UAI Apply AnimSequence Bone Tracks")), false);
+		Controller.SetFrameRate(FrameRate, false);
+		Controller.SetNumberOfFrames(FFrameNumber(NumFrames), false);
+		if (bReplaceExistingTracks)
+		{
+			Controller.RemoveAllBoneTracks(false);
 		}
 
-		if (!UAnimationBlueprintLibrary::DoesCurveExist(Sequence, CurveName, CurveType))
+		for (const UeAgentAnimationEditorOps::FAnimSequenceBoneTrackInput& ParsedTrack : ParsedTracks)
 		{
-			UAnimationBlueprintLibrary::AddCurve(Sequence, CurveName, CurveType, bMetaDataCurve);
-		}
-
-		auto AddSingleCurveKey = [&](const TSharedPtr<FJsonObject>& CurveObject) -> bool
-		{
-			if (!CurveObject.IsValid())
+			TArray<FName> CurrentTrackNames;
+			DataModel->GetBoneTrackNames(CurrentTrackNames);
+			if (!CurrentTrackNames.Contains(ParsedTrack.BoneName))
 			{
-				return true;
-			}
-
-			double TimeSeconds = 0.0;
-			if (!CurveObject->TryGetNumberField(TEXT("time_seconds"), TimeSeconds) || TimeSeconds < 0.0 || TimeSeconds > Sequence->GetPlayLength() + KINDA_SMALL_NUMBER)
-			{
-				OutError = TEXT("invalid_curve_time_seconds");
-				return false;
-			}
-
-			switch (CurveType)
-			{
-			case ERawCurveTrackTypes::RCT_Float:
-			default:
-			{
-				double FloatValue = 0.0;
-				if (!CurveObject->TryGetNumberField(TEXT("value"), FloatValue))
+				Controller.AddBoneCurve(ParsedTrack.BoneName, false);
+				CurrentTrackNames.Reset();
+				DataModel->GetBoneTrackNames(CurrentTrackNames);
+				if (!CurrentTrackNames.Contains(ParsedTrack.BoneName))
 				{
-					OutError = TEXT("missing_float_curve_value");
+					OutError = FString::Printf(TEXT("add_bone_track_failed:%s"), *ParsedTrack.BoneName.ToString());
 					return false;
 				}
-				UAnimationBlueprintLibrary::AddFloatCurveKey(Sequence, CurveName, static_cast<float>(TimeSeconds), static_cast<float>(FloatValue));
-				return true;
 			}
-			}
-		};
-
-		if (bHasTypedCurveJson)
-		{
-			for (const FRichCurveKey& Key : TypedRichCurve.GetConstRefOfKeys())
+			if (!Controller.SetBoneTrackKeys(ParsedTrack.BoneName, ParsedTrack.Positions, ParsedTrack.Rotations, ParsedTrack.Scales, false))
 			{
-				UAnimationBlueprintLibrary::AddFloatCurveKey(Sequence, CurveName, Key.Time, Key.Value);
-			}
-		}
-		else if (Ctx.Params->HasTypedField<EJson::Array>(TEXT("keys")))
-		{
-			const TArray<TSharedPtr<FJsonValue>>* Keys = nullptr;
-			if (Ctx.Params->TryGetArrayField(TEXT("keys"), Keys) && Keys)
-			{
-				for (const TSharedPtr<FJsonValue>& KeyValue : *Keys)
-				{
-					const TSharedPtr<FJsonObject>* KeyObject = nullptr;
-					if (!KeyValue.IsValid() || !KeyValue->TryGetObject(KeyObject) || !KeyObject || !KeyObject->IsValid())
-					{
-						continue;
-					}
-					if (!AddSingleCurveKey(*KeyObject))
-					{
-						return false;
-					}
-				}
-			}
-		}
-		else if (Ctx.Params->HasField(TEXT("time_seconds")))
-		{
-			if (!AddSingleCurveKey(Ctx.Params))
-			{
+				OutError = FString::Printf(TEXT("set_bone_track_keys_failed:%s"), *ParsedTrack.BoneName.ToString());
 				return false;
 			}
 		}
+		Controller.NotifyPopulated();
 	}
 
+	Sequence->RefreshCacheData();
 	Sequence->MarkPackageDirty();
 
-	bool bSaveAfterSet = false;
-	JsonTryGetBool(Ctx.Params, TEXT("save_after_set"), bSaveAfterSet);
-	if (bSaveAfterSet && !UeAgentAnimationAssetOps::SaveAssetPackage(Sequence, OutError))
-	{
-		return false;
-	}
-
-	OutData->SetStringField(TEXT("asset_path"), Sequence->GetPathName());
-	OutData->SetStringField(TEXT("curve_name"), CurveName.ToString());
-	OutData->SetStringField(TEXT("curve_type"), UeAgentAnimationAssetOps::CurveTypeToString(CurveType));
-	OutData->SetBoolField(TEXT("removed"), bRemove);
-	OutData->SetBoolField(TEXT("curve_exists"), !bRemove);
-	OutData->SetBoolField(TEXT("saved"), bSaveAfterSet);
-	if (CurveJsonIssues.Num() > 0)
-	{
-		OutData->SetArrayField(TEXT("json_issues"), CurveJsonIssues);
-	}
-	if (!bRemove)
-	{
-		OutData->SetObjectField(TEXT("curve"), UeAgentAnimationAssetOps::BuildCurveJson(Sequence, CurveName, CurveType, true));
-	}
-	return true;
-}
-
-bool FUeAgentHttpServer::CmdAnimSequenceSetBones(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
-{
-	FString AssetPath;
-	if (!JsonTryGetString(Ctx.Params, TEXT("asset_path"), AssetPath) || AssetPath.IsEmpty())
-	{
-		OutError = TEXT("missing_asset_path");
-		return false;
-	}
-
-	UAnimSequence* Sequence = UeAgentAnimationAssetOps::LoadAnimSequence(AssetPath);
-	if (!Sequence)
-	{
-		OutError = TEXT("anim_sequence_not_found");
-		return false;
-	}
-
-	bool bRemoveAllBoneAnimation = false;
-	bool bIncludeChildren = false;
-	bool bExcludeChildrenRecursively = false;
-	bool bFinalizeAfterSet = true;
-	JsonTryGetBool(Ctx.Params, TEXT("remove_all_bone_animation"), bRemoveAllBoneAnimation);
-	JsonTryGetBool(Ctx.Params, TEXT("include_children"), bIncludeChildren);
-	JsonTryGetBool(Ctx.Params, TEXT("exclude_children_recursively"), bExcludeChildrenRecursively);
-	JsonTryGetBool(Ctx.Params, TEXT("finalize_after_set"), bFinalizeAfterSet);
-
-	Sequence->Modify();
-
-	int32 RemovedBoneRequestCount = 0;
-	int32 RemovedVirtualBoneRequestCount = 0;
-
-	if (bRemoveAllBoneAnimation)
-	{
-		UAnimationBlueprintLibrary::RemoveAllBoneAnimation(Sequence);
-	}
-	else
-	{
-		const TArray<TSharedPtr<FJsonValue>>* RemoveBoneNames = nullptr;
-		const TArray<TSharedPtr<FJsonValue>>* ChildrenExcluded = nullptr;
-		Ctx.Params->TryGetArrayField(TEXT("remove_bone_names"), RemoveBoneNames);
-		Ctx.Params->TryGetArrayField(TEXT("children_excluded"), ChildrenExcluded);
-
-		TArray<FName> ExcludedChildrenNames;
-		if (ChildrenExcluded)
-		{
-			for (const TSharedPtr<FJsonValue>& Value : *ChildrenExcluded)
-			{
-				if (!Value.IsValid())
-				{
-					continue;
-				}
-				const FString BoneNameText = Value->AsString().TrimStartAndEnd();
-				if (!BoneNameText.IsEmpty())
-				{
-					ExcludedChildrenNames.Add(FName(*BoneNameText));
-				}
-			}
-		}
-
-		if (RemoveBoneNames)
-		{
-			TArray<FName> BoneNames;
-			for (const TSharedPtr<FJsonValue>& Value : *RemoveBoneNames)
-			{
-				if (!Value.IsValid())
-				{
-					continue;
-				}
-				const FString BoneNameText = Value->AsString().TrimStartAndEnd();
-				if (!BoneNameText.IsEmpty())
-				{
-					BoneNames.Add(FName(*BoneNameText));
-				}
-			}
-
-			RemovedBoneRequestCount = BoneNames.Num();
-			for (int32 Index = 0; Index < BoneNames.Num(); ++Index)
-			{
-				const bool bFinalizeThisRemoval = bFinalizeAfterSet && (Index == BoneNames.Num() - 1);
-				if (ExcludedChildrenNames.Num() > 0)
-				{
-					UAnimationBlueprintLibrary::RemoveBoneSelectiveAnimation(Sequence, BoneNames[Index], ExcludedChildrenNames, bIncludeChildren, bExcludeChildrenRecursively, bFinalizeThisRemoval);
-				}
-				else
-				{
-					UAnimationBlueprintLibrary::RemoveBoneAnimation(Sequence, BoneNames[Index], bIncludeChildren, bFinalizeThisRemoval);
-				}
-			}
-		}
-	}
-
-	const TArray<TSharedPtr<FJsonValue>>* RemoveVirtualBoneNames = nullptr;
-	if (Ctx.Params->TryGetArrayField(TEXT("remove_virtual_bone_names"), RemoveVirtualBoneNames) && RemoveVirtualBoneNames)
-	{
-		TArray<FName> VirtualBoneNames;
-		for (const TSharedPtr<FJsonValue>& Value : *RemoveVirtualBoneNames)
-		{
-			if (!Value.IsValid())
-			{
-				continue;
-			}
-			const FString BoneNameText = Value->AsString().TrimStartAndEnd();
-			if (!BoneNameText.IsEmpty())
-			{
-				VirtualBoneNames.Add(FName(*BoneNameText));
-			}
-		}
-
-		if (VirtualBoneNames.Num() > 0)
-		{
-			UAnimationBlueprintLibrary::RemoveVirtualBones(Sequence, VirtualBoneNames);
-			RemovedVirtualBoneRequestCount = VirtualBoneNames.Num();
-		}
-	}
-
-	Sequence->MarkPackageDirty();
-
-	bool bSaveAfterSet = false;
-	JsonTryGetBool(Ctx.Params, TEXT("save_after_set"), bSaveAfterSet);
-	if (bSaveAfterSet && !UeAgentAnimationAssetOps::SaveAssetPackage(Sequence, OutError))
+	bool bSaveAfterApply = false;
+	JsonTryGetBool(Ctx.Params, TEXT("save_after_apply"), bSaveAfterApply);
+	JsonTryGetBool(Ctx.Params, TEXT("save_after_set"), bSaveAfterApply);
+	if (bSaveAfterApply && !UeAgentAnimationAssetOps::SaveAssetPackage(Sequence, OutError))
 	{
 		return false;
 	}
 
 	TArray<FName> TrackNames;
-	UAnimationBlueprintLibrary::GetAnimationTrackNames(Sequence, TrackNames);
+	DataModel->GetBoneTrackNames(TrackNames);
 	TArray<TSharedPtr<FJsonValue>> TrackNamesJson;
 	for (const FName TrackName : TrackNames)
 	{
 		TrackNamesJson.Add(MakeShared<FJsonValueString>(TrackName.ToString()));
 	}
 
-	OutData->SetStringField(TEXT("asset_path"), Sequence->GetPathName());
-	OutData->SetBoolField(TEXT("removed_all_bone_animation"), bRemoveAllBoneAnimation);
-	OutData->SetNumberField(TEXT("removed_bone_request_count"), RemovedBoneRequestCount);
-	OutData->SetNumberField(TEXT("removed_virtual_bone_request_count"), RemovedVirtualBoneRequestCount);
+	TArray<TSharedPtr<FJsonValue>> AppliedTracksJson;
+	for (const UeAgentAnimationEditorOps::FAnimSequenceBoneTrackInput& ParsedTrack : ParsedTracks)
+	{
+		TSharedPtr<FJsonObject> TrackObj = MakeShared<FJsonObject>();
+		TrackObj->SetStringField(TEXT("bone"), ParsedTrack.BoneName.ToString());
+		TrackObj->SetNumberField(TEXT("provided_key_count"), ParsedTrack.ProvidedKeyCount);
+		TrackObj->SetNumberField(TEXT("written_key_count"), ParsedTrack.Positions.Num());
+		TrackObj->SetBoolField(TEXT("used_explicit_frames"), ParsedTrack.bUsedExplicitFrames);
+		AppliedTracksJson.Add(MakeShared<FJsonValueObject>(TrackObj));
+	}
+
+	TSharedPtr<FJsonObject> FrameRateJson = MakeShared<FJsonObject>();
+	FrameRateJson->SetNumberField(TEXT("numerator"), FrameRate.Numerator);
+	FrameRateJson->SetNumberField(TEXT("denominator"), FrameRate.Denominator);
+	FrameRateJson->SetNumberField(TEXT("decimal"), FrameRate.AsDecimal());
+
+	OutData = MakeShared<FJsonObject>();
+	OutData->SetStringField(TEXT("asset_path"), UeAgentAnimationAssetOps::NormalizeAssetPath(Sequence->GetOutermost()->GetName()));
+	OutData->SetStringField(TEXT("object_path"), Sequence->GetPathName());
+	OutData->SetStringField(TEXT("skeleton"), Sequence->GetSkeleton() ? Sequence->GetSkeleton()->GetPathName() : TEXT(""));
+	OutData->SetStringField(TEXT("preview_skeletal_mesh"), Sequence->GetPreviewMesh() ? Sequence->GetPreviewMesh()->GetPathName() : TEXT(""));
+	OutData->SetObjectField(TEXT("frame_rate"), FrameRateJson);
+	OutData->SetNumberField(TEXT("num_frames"), NumFrames);
+	OutData->SetNumberField(TEXT("sample_key_count"), RequiredKeyCount);
+	OutData->SetBoolField(TEXT("created"), bCreated);
+	OutData->SetBoolField(TEXT("replace_existing_tracks"), bReplaceExistingTracks);
+	OutData->SetNumberField(TEXT("applied_track_count"), ParsedTracks.Num());
+	OutData->SetArrayField(TEXT("applied_tracks"), AppliedTracksJson);
 	OutData->SetNumberField(TEXT("track_count"), TrackNamesJson.Num());
 	OutData->SetArrayField(TEXT("track_names"), TrackNamesJson);
-	OutData->SetBoolField(TEXT("saved"), bSaveAfterSet);
+	OutData->SetBoolField(TEXT("saved"), bSaveAfterApply);
 	return true;
 }
-
-bool FUeAgentHttpServer::CmdAnimSequenceSetMetadata(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
-{
-	FString AssetPath;
-	if (!JsonTryGetString(Ctx.Params, TEXT("asset_path"), AssetPath) || AssetPath.IsEmpty())
-	{
-		OutError = TEXT("missing_asset_path");
-		return false;
-	}
-
-	UAnimSequence* Sequence = UeAgentAnimationAssetOps::LoadAnimSequence(AssetPath);
-	if (!Sequence)
-	{
-		OutError = TEXT("anim_sequence_not_found");
-		return false;
-	}
-
-	bool bClearAll = false;
-	bool bRemove = false;
-	JsonTryGetBool(Ctx.Params, TEXT("clear_all"), bClearAll);
-	JsonTryGetBool(Ctx.Params, TEXT("remove"), bRemove);
-
-	Sequence->Modify();
-
-	if (bClearAll)
-	{
-		UAnimationBlueprintLibrary::RemoveAllMetaData(Sequence);
-	}
-	else
-	{
-		FString MetadataClassPath;
-		if (!JsonTryGetString(Ctx.Params, TEXT("metadata_class_path"), MetadataClassPath) || MetadataClassPath.TrimStartAndEnd().IsEmpty())
-		{
-			OutError = TEXT("missing_metadata_class_path");
-			return false;
-		}
-
-		UClass* MetadataClass = UeAgentAnimationAssetOps::LoadClassByPath(MetadataClassPath);
-		if (!MetadataClass || !MetadataClass->IsChildOf(UAnimMetaData::StaticClass()))
-		{
-			OutError = TEXT("invalid_metadata_class");
-			return false;
-		}
-
-		if (bRemove)
-		{
-			UAnimationBlueprintLibrary::RemoveMetaDataOfClass(Sequence, MetadataClass);
-		}
-		else
-		{
-			if (MetadataClass->HasAnyClassFlags(CLASS_Abstract))
-			{
-				OutError = TEXT("metadata_class_is_abstract");
-				return false;
-			}
-
-			UAnimMetaData* TargetMetaData = Sequence->FindMetaDataByClass<UAnimMetaData>();
-			TArray<UAnimMetaData*> MetaDataOfClass;
-			UAnimationBlueprintLibrary::GetMetaDataOfClass(Sequence, MetadataClass, MetaDataOfClass);
-			TargetMetaData = MetaDataOfClass.Num() > 0 ? MetaDataOfClass[0] : nullptr;
-
-			if (!TargetMetaData)
-			{
-				UAnimMetaData* CreatedMetaData = nullptr;
-				UAnimationBlueprintLibrary::AddMetaData(Sequence, MetadataClass, CreatedMetaData);
-				if (!CreatedMetaData)
-				{
-					OutError = TEXT("add_metadata_failed");
-					return false;
-				}
-				TargetMetaData = CreatedMetaData;
-			}
-
-			const TSharedPtr<FJsonObject>* MetadataValues = nullptr;
-			if (Ctx.Params->TryGetObjectField(TEXT("metadata_values"), MetadataValues) && MetadataValues && MetadataValues->IsValid())
-			{
-				for (const TPair<FString, TSharedPtr<FJsonValue>>& Pair : (*MetadataValues)->Values)
-				{
-					FProperty* Property = UeAgentAnimationAssetOps::FindEditablePropertyByFlexibleName(TargetMetaData->GetClass(), Pair.Key);
-					if (!Property)
-					{
-						OutError = TEXT("metadata_property_not_found");
-						return false;
-					}
-					if (!UeAgentAnimationAssetOps::ApplySimpleJsonValueToProperty(TargetMetaData, Property, Pair.Value, OutError))
-					{
-						return false;
-					}
-				}
-				TargetMetaData->MarkPackageDirty();
-			}
-		}
-	}
-
-	Sequence->MarkPackageDirty();
-
-	bool bSaveAfterSet = false;
-	JsonTryGetBool(Ctx.Params, TEXT("save_after_set"), bSaveAfterSet);
-	if (bSaveAfterSet && !UeAgentAnimationAssetOps::SaveAssetPackage(Sequence, OutError))
-	{
-		return false;
-	}
-
-	TArray<UAnimMetaData*> MetaDataObjects;
-	UAnimationBlueprintLibrary::GetMetaData(Sequence, MetaDataObjects);
-	TArray<TSharedPtr<FJsonValue>> MetaDataJson;
-	for (UAnimMetaData* MetaDataObject : MetaDataObjects)
-	{
-		if (MetaDataObject)
-		{
-			MetaDataJson.Add(MakeShared<FJsonValueObject>(UeAgentAnimationAssetOps::BuildMetadataJson(MetaDataObject)));
-		}
-	}
-
-	OutData->SetStringField(TEXT("asset_path"), Sequence->GetPathName());
-	OutData->SetBoolField(TEXT("cleared_all"), bClearAll);
-	OutData->SetBoolField(TEXT("removed"), bRemove);
-	OutData->SetNumberField(TEXT("metadata_count"), MetaDataJson.Num());
-	OutData->SetArrayField(TEXT("metadata"), MetaDataJson);
-	OutData->SetBoolField(TEXT("saved"), bSaveAfterSet);
-	return true;
-}
-
-bool FUeAgentHttpServer::CmdAnimSequenceSetNotify(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
-{
-	FString AssetPath;
-	if (!JsonTryGetString(Ctx.Params, TEXT("asset_path"), AssetPath) || AssetPath.IsEmpty())
-	{
-		OutError = TEXT("missing_asset_path");
-		return false;
-	}
-
-	UAnimSequence* Sequence = UeAgentAnimationAssetOps::LoadAnimSequence(AssetPath);
-	if (!Sequence)
-	{
-		OutError = TEXT("anim_sequence_not_found");
-		return false;
-	}
-
-	bool bRemove = false;
-	JsonTryGetBool(Ctx.Params, TEXT("remove"), bRemove);
-
-	double NotifyIndexValue = 0.0;
-	const bool bHasNotifyIndex = JsonTryGetNumber(Ctx.Params, TEXT("notify_index"), NotifyIndexValue);
-	const int32 NotifyIndex = bHasNotifyIndex ? static_cast<int32>(NotifyIndexValue) : INDEX_NONE;
-
-	Sequence->Modify();
-
-	if (bRemove)
-	{
-		if (NotifyIndex == INDEX_NONE)
-		{
-			OutError = TEXT("missing_notify_index");
-			return false;
-		}
-		if (!Sequence->Notifies.IsValidIndex(NotifyIndex))
-		{
-			OutError = TEXT("notify_not_found");
-			return false;
-		}
-
-		Sequence->Notifies.RemoveAt(NotifyIndex);
-		Sequence->SortNotifies();
-		Sequence->MarkPackageDirty();
-
-		bool bSaveAfterSet = false;
-		JsonTryGetBool(Ctx.Params, TEXT("save_after_set"), bSaveAfterSet);
-		if (bSaveAfterSet && !UeAgentAnimationAssetOps::SaveAssetPackage(Sequence, OutError))
-		{
-			return false;
-		}
-
-		OutData->SetStringField(TEXT("asset_path"), Sequence->GetPathName());
-		OutData->SetNumberField(TEXT("removed_notify_index"), NotifyIndex);
-		OutData->SetNumberField(TEXT("notify_count"), Sequence->Notifies.Num());
-		OutData->SetBoolField(TEXT("removed"), true);
-		OutData->SetBoolField(TEXT("saved"), bSaveAfterSet);
-		return true;
-	}
-
-	bool bAdded = false;
-	int32 UpdatedNotifyIndex = NotifyIndex;
-
-	if (UpdatedNotifyIndex == INDEX_NONE)
-	{
-		FString TrackNameText = TEXT("1");
-		JsonTryGetString(Ctx.Params, TEXT("track_name"), TrackNameText);
-		TrackNameText = TrackNameText.TrimStartAndEnd();
-		if (TrackNameText.IsEmpty())
-		{
-			TrackNameText = TEXT("1");
-		}
-
-		int32 TrackIndex = INDEX_NONE;
-		if (!UeAgentAnimationAssetOps::EnsureNotifyTrack(Sequence, FName(*TrackNameText), TrackIndex))
-		{
-			OutError = TEXT("ensure_notify_track_failed");
-			return false;
-		}
-
-		double TimeSeconds = 0.0;
-		if (!JsonTryGetNumber(Ctx.Params, TEXT("time_seconds"), TimeSeconds) || TimeSeconds < 0.0 || TimeSeconds > Sequence->GetPlayLength() + KINDA_SMALL_NUMBER)
-		{
-			OutError = TEXT("invalid_time_seconds");
-			return false;
-		}
-
-		FString NotifyStateClassPath;
-		FString NotifyClassPath;
-		JsonTryGetString(Ctx.Params, TEXT("notify_state_class"), NotifyStateClassPath);
-		JsonTryGetString(Ctx.Params, TEXT("notify_class"), NotifyClassPath);
-		NotifyStateClassPath = NotifyStateClassPath.TrimStartAndEnd();
-		NotifyClassPath = NotifyClassPath.TrimStartAndEnd();
-
-		if (!NotifyStateClassPath.IsEmpty())
-		{
-			UClass* NotifyStateClass = UeAgentAnimationAssetOps::LoadClassByPath(NotifyStateClassPath);
-			if (!NotifyStateClass || !NotifyStateClass->IsChildOf(UAnimNotifyState::StaticClass()))
-			{
-				OutError = TEXT("invalid_notify_state_class");
-				return false;
-			}
-
-			double DurationSeconds = 0.0;
-			if (!JsonTryGetNumber(Ctx.Params, TEXT("duration_seconds"), DurationSeconds) || DurationSeconds <= 0.0)
-			{
-				OutError = TEXT("missing_duration_seconds");
-				return false;
-			}
-
-			UAnimNotifyState* CreatedNotifyState = UAnimationBlueprintLibrary::AddAnimationNotifyStateEvent(Sequence, FName(*TrackNameText), static_cast<float>(TimeSeconds), static_cast<float>(DurationSeconds), NotifyStateClass);
-			if (!CreatedNotifyState)
-			{
-				OutError = TEXT("add_notify_state_failed");
-				return false;
-			}
-
-			for (int32 Index = 0; Index < Sequence->Notifies.Num(); ++Index)
-			{
-				if (Sequence->Notifies[Index].NotifyStateClass == CreatedNotifyState)
-				{
-					UpdatedNotifyIndex = Index;
-					break;
-				}
-			}
-		}
-		else
-		{
-			if (!NotifyClassPath.IsEmpty())
-			{
-				UClass* NotifyClass = UeAgentAnimationAssetOps::LoadClassByPath(NotifyClassPath);
-				if (!NotifyClass || !NotifyClass->IsChildOf(UAnimNotify::StaticClass()))
-				{
-					OutError = TEXT("invalid_notify_class");
-					return false;
-				}
-				UAnimNotify* CreatedNotify = UAnimationBlueprintLibrary::AddAnimationNotifyEvent(Sequence, FName(*TrackNameText), static_cast<float>(TimeSeconds), NotifyClass);
-				if (!CreatedNotify)
-				{
-					OutError = TEXT("add_notify_failed");
-					return false;
-				}
-
-				for (int32 Index = 0; Index < Sequence->Notifies.Num(); ++Index)
-				{
-					if (Sequence->Notifies[Index].Notify == CreatedNotify)
-					{
-						UpdatedNotifyIndex = Index;
-						break;
-					}
-				}
-			}
-			else
-			{
-				FAnimNotifyEvent NewEvent;
-				NewEvent.TrackIndex = TrackIndex;
-				NewEvent.Link(Sequence, static_cast<float>(TimeSeconds));
-				Sequence->Notifies.Add(NewEvent);
-				UpdatedNotifyIndex = Sequence->Notifies.Num() - 1;
-			}
-		}
-
-		if (!Sequence->Notifies.IsValidIndex(UpdatedNotifyIndex))
-		{
-			OutError = TEXT("resolve_created_notify_failed");
-			return false;
-		}
-		bAdded = true;
-	}
-	else if (!Sequence->Notifies.IsValidIndex(UpdatedNotifyIndex))
-	{
-		OutError = TEXT("notify_not_found");
-		return false;
-	}
-
-	FAnimNotifyEvent& Notify = Sequence->Notifies[UpdatedNotifyIndex];
-
-	FString TrackNameText;
-	if (JsonTryGetString(Ctx.Params, TEXT("track_name"), TrackNameText) && !TrackNameText.TrimStartAndEnd().IsEmpty())
-	{
-		int32 TrackIndex = INDEX_NONE;
-		if (!UeAgentAnimationAssetOps::EnsureNotifyTrack(Sequence, FName(*TrackNameText.TrimStartAndEnd()), TrackIndex))
-		{
-			OutError = TEXT("ensure_notify_track_failed");
-			return false;
-		}
-		Notify.TrackIndex = TrackIndex;
-	}
-
-	double TimeSeconds = Notify.GetTime();
-	if (JsonTryGetNumber(Ctx.Params, TEXT("time_seconds"), TimeSeconds))
-	{
-		if (TimeSeconds < 0.0 || TimeSeconds > Sequence->GetPlayLength() + KINDA_SMALL_NUMBER)
-		{
-			OutError = TEXT("invalid_time_seconds");
-			return false;
-		}
-		Notify.SetTime(static_cast<float>(TimeSeconds));
-	}
-
-	if (Notify.NotifyStateClass != nullptr)
-	{
-		double DurationSeconds = Notify.GetDuration();
-		if (JsonTryGetNumber(Ctx.Params, TEXT("duration_seconds"), DurationSeconds))
-		{
-			if (DurationSeconds <= 0.0)
-			{
-				OutError = TEXT("invalid_duration_seconds");
-				return false;
-			}
-			Notify.SetDuration(static_cast<float>(DurationSeconds));
-			Notify.EndLink.Link(Sequence, Notify.EndLink.GetTime());
-		}
-	}
-
-	if (!UeAgentAnimationAssetOps::ApplyNotifyCommonSettings(Ctx.Params, Notify, OutError))
-	{
-		return false;
-	}
-
-	FString NotifyNameText;
-	if (JsonTryGetString(Ctx.Params, TEXT("notify_name"), NotifyNameText) && !NotifyNameText.TrimStartAndEnd().IsEmpty())
-	{
-		Notify.NotifyName = FName(*NotifyNameText.TrimStartAndEnd());
-	}
-
-	FLinearColor NotifyColorLinear = FLinearColor(Notify.NotifyColor);
-	const bool bHasNotifyColor = UeAgentAnimationAssetOps::TryParseLinearColorField(Ctx.Params, TEXT("notify_color"), NotifyColorLinear);
-	if (bHasNotifyColor)
-	{
-		Notify.NotifyColor = NotifyColorLinear.ToFColor(true);
-		if (Notify.Notify)
-		{
-			Notify.Notify->NotifyColor = Notify.NotifyColor;
-		}
-		if (Notify.NotifyStateClass)
-		{
-			Notify.NotifyStateClass->NotifyColor = Notify.NotifyColor;
-		}
-	}
-
-	UAnimNotify* NotifyObject = Notify.Notify;
-	UAnimNotifyState* NotifyStateObject = Notify.NotifyStateClass;
-#if WITH_EDITORONLY_DATA
-	const FGuid NotifyGuid = Notify.Guid;
-#endif
-
-	Sequence->SortNotifies();
-	Sequence->MarkPackageDirty();
-
-	bool bSaveAfterSet = false;
-	JsonTryGetBool(Ctx.Params, TEXT("save_after_set"), bSaveAfterSet);
-	if (bSaveAfterSet && !UeAgentAnimationAssetOps::SaveAssetPackage(Sequence, OutError))
-	{
-		return false;
-	}
-
-	for (int32 Index = 0; Index < Sequence->Notifies.Num(); ++Index)
-	{
-		const FAnimNotifyEvent& Candidate = Sequence->Notifies[Index];
-#if WITH_EDITORONLY_DATA
-		if (NotifyGuid.IsValid() && Candidate.Guid == NotifyGuid)
-		{
-			UpdatedNotifyIndex = Index;
-			break;
-		}
-#endif
-		if (Candidate.Notify == NotifyObject && Candidate.NotifyStateClass == NotifyStateObject)
-		{
-			UpdatedNotifyIndex = Index;
-			break;
-		}
-	}
-
-	OutData->SetStringField(TEXT("asset_path"), Sequence->GetPathName());
-	OutData->SetBoolField(TEXT("added"), bAdded);
-	OutData->SetBoolField(TEXT("saved"), bSaveAfterSet);
-	OutData->SetNumberField(TEXT("notify_count"), Sequence->Notifies.Num());
-	OutData->SetObjectField(TEXT("notify"), UeAgentAnimationAssetOps::BuildNotifyJson(Sequence, Sequence->Notifies[UpdatedNotifyIndex], UpdatedNotifyIndex));
-	return true;
-}
-
-bool FUeAgentHttpServer::CmdAnimSequenceSetNotifyTrack(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
-{
-	FString AssetPath;
-	if (!JsonTryGetString(Ctx.Params, TEXT("asset_path"), AssetPath) || AssetPath.IsEmpty())
-	{
-		OutError = TEXT("missing_asset_path");
-		return false;
-	}
-
-	FString TrackNameText;
-	if (!JsonTryGetString(Ctx.Params, TEXT("track_name"), TrackNameText) || TrackNameText.TrimStartAndEnd().IsEmpty())
-	{
-		OutError = TEXT("missing_track_name");
-		return false;
-	}
-	const FName TrackName(*TrackNameText.TrimStartAndEnd());
-
-	UAnimSequence* Sequence = UeAgentAnimationAssetOps::LoadAnimSequence(AssetPath);
-	if (!Sequence)
-	{
-		OutError = TEXT("anim_sequence_not_found");
-		return false;
-	}
-
-	bool bRemove = false;
-	JsonTryGetBool(Ctx.Params, TEXT("remove"), bRemove);
-
-	FLinearColor TrackColor = FLinearColor::White;
-	const bool bHasTrackColor = UeAgentAnimationAssetOps::TryParseLinearColorField(Ctx.Params, TEXT("track_color"), TrackColor);
-
-	bool bTrackExists = false;
-#if WITH_EDITORONLY_DATA
-	int32 ExistingTrackIndex = INDEX_NONE;
-	for (int32 TrackIndex = 0; TrackIndex < Sequence->AnimNotifyTracks.Num(); ++TrackIndex)
-	{
-		if (Sequence->AnimNotifyTracks[TrackIndex].TrackName == TrackName)
-		{
-			ExistingTrackIndex = TrackIndex;
-			bTrackExists = true;
-			break;
-		}
-	}
-#endif
-
-	Sequence->Modify();
-	if (bRemove)
-	{
-		if (!bTrackExists)
-		{
-			OutError = TEXT("notify_track_not_found");
-			return false;
-		}
-		UAnimationBlueprintLibrary::RemoveAnimationNotifyTrack(Sequence, TrackName);
-	}
-	else
-	{
-		if (!bTrackExists)
-		{
-			UAnimationBlueprintLibrary::AddAnimationNotifyTrack(Sequence, TrackName, bHasTrackColor ? TrackColor : FLinearColor::White);
-		}
-#if WITH_EDITORONLY_DATA
-		else if (bHasTrackColor)
-		{
-			Sequence->AnimNotifyTracks[ExistingTrackIndex].TrackColor = TrackColor;
-			Sequence->MarkPackageDirty();
-		}
-#endif
-	}
-
-	bool bSaveAfterSet = false;
-	JsonTryGetBool(Ctx.Params, TEXT("save_after_set"), bSaveAfterSet);
-	if (bSaveAfterSet && !UeAgentAnimationAssetOps::SaveAssetPackage(Sequence, OutError))
-	{
-		return false;
-	}
-
-	OutData->SetStringField(TEXT("asset_path"), Sequence->GetPathName());
-	OutData->SetStringField(TEXT("track_name"), TrackName.ToString());
-	OutData->SetBoolField(TEXT("removed"), bRemove);
-	OutData->SetBoolField(TEXT("saved"), bSaveAfterSet);
-	return true;
-}
-
-bool FUeAgentHttpServer::CmdAnimSequenceSetSyncMarkers(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
-{
-	FString AssetPath;
-	if (!JsonTryGetString(Ctx.Params, TEXT("asset_path"), AssetPath) || AssetPath.IsEmpty())
-	{
-		OutError = TEXT("missing_asset_path");
-		return false;
-	}
-
-	UAnimSequence* Sequence = UeAgentAnimationAssetOps::LoadAnimSequence(AssetPath);
-	if (!Sequence)
-	{
-		OutError = TEXT("anim_sequence_not_found");
-		return false;
-	}
-
-	Sequence->Modify();
-
-	bool bClearAll = false;
-	JsonTryGetBool(Ctx.Params, TEXT("clear_all"), bClearAll);
-	int32 AddedCount = 0;
-	int32 RemovedCount = 0;
-
-	if (bClearAll)
-	{
-		RemovedCount += Sequence->AuthoredSyncMarkers.Num();
-		UAnimationBlueprintLibrary::RemoveAllAnimationSyncMarkers(Sequence);
-	}
-
-	const TArray<TSharedPtr<FJsonValue>>* RemoveMarkerNames = nullptr;
-	if (Ctx.Params->TryGetArrayField(TEXT("remove_marker_names"), RemoveMarkerNames) && RemoveMarkerNames)
-	{
-		for (const TSharedPtr<FJsonValue>& Value : *RemoveMarkerNames)
-		{
-			if (!Value.IsValid())
-			{
-				continue;
-			}
-			const FString MarkerName = Value->AsString().TrimStartAndEnd();
-			if (MarkerName.IsEmpty())
-			{
-				continue;
-			}
-			RemovedCount += UAnimationBlueprintLibrary::RemoveAnimationSyncMarkersByName(Sequence, FName(*MarkerName));
-		}
-	}
-
-	const TArray<TSharedPtr<FJsonValue>>* RemoveTrackNames = nullptr;
-	if (Ctx.Params->TryGetArrayField(TEXT("remove_notify_track_names"), RemoveTrackNames) && RemoveTrackNames)
-	{
-		for (const TSharedPtr<FJsonValue>& Value : *RemoveTrackNames)
-		{
-			if (!Value.IsValid())
-			{
-				continue;
-			}
-			const FString TrackName = Value->AsString().TrimStartAndEnd();
-			if (TrackName.IsEmpty())
-			{
-				continue;
-			}
-			RemovedCount += UAnimationBlueprintLibrary::RemoveAnimationSyncMarkersByTrack(Sequence, FName(*TrackName));
-		}
-	}
-
-	const TArray<TSharedPtr<FJsonValue>>* AddMarkers = nullptr;
-	if (Ctx.Params->TryGetArrayField(TEXT("add_markers"), AddMarkers) && AddMarkers)
-	{
-		for (const TSharedPtr<FJsonValue>& MarkerValue : *AddMarkers)
-		{
-			const TSharedPtr<FJsonObject>* MarkerObject = nullptr;
-			if (!MarkerValue.IsValid() || !MarkerValue->TryGetObject(MarkerObject) || !MarkerObject || !MarkerObject->IsValid())
-			{
-				continue;
-			}
-
-			FString MarkerName;
-			double TimeSeconds = 0.0;
-			if (!(*MarkerObject)->TryGetStringField(TEXT("marker_name"), MarkerName) || MarkerName.TrimStartAndEnd().IsEmpty() || !(*MarkerObject)->TryGetNumberField(TEXT("time_seconds"), TimeSeconds))
-			{
-				OutError = TEXT("invalid_add_marker_entry");
-				return false;
-			}
-			if (TimeSeconds < 0.0 || TimeSeconds > Sequence->GetPlayLength() + KINDA_SMALL_NUMBER)
-			{
-				OutError = TEXT("invalid_marker_time_seconds");
-				return false;
-			}
-
-			FString TrackName = TEXT("1");
-			(*MarkerObject)->TryGetStringField(TEXT("notify_track_name"), TrackName);
-			TrackName = TrackName.TrimStartAndEnd();
-			if (TrackName.IsEmpty())
-			{
-				TrackName = TEXT("1");
-			}
-
-			bool bTrackExists = false;
-#if WITH_EDITORONLY_DATA
-			for (const FAnimNotifyTrack& Track : Sequence->AnimNotifyTracks)
-			{
-				if (Track.TrackName.ToString().Equals(TrackName, ESearchCase::IgnoreCase))
-				{
-					bTrackExists = true;
-					break;
-				}
-			}
-#endif
-			if (!bTrackExists)
-			{
-				UAnimationBlueprintLibrary::AddAnimationNotifyTrack(Sequence, FName(*TrackName));
-			}
-
-			UAnimationBlueprintLibrary::AddAnimationSyncMarker(Sequence, FName(*MarkerName.TrimStartAndEnd()), static_cast<float>(TimeSeconds), FName(*TrackName));
-			++AddedCount;
-		}
-	}
-
-	bool bSaveAfterSet = false;
-	JsonTryGetBool(Ctx.Params, TEXT("save_after_set"), bSaveAfterSet);
-	if (bSaveAfterSet && !UeAgentAnimationAssetOps::SaveAssetPackage(Sequence, OutError))
-	{
-		return false;
-	}
-
-	TArray<TSharedPtr<FJsonValue>> SyncMarkers;
-	for (int32 MarkerIndex = 0; MarkerIndex < Sequence->AuthoredSyncMarkers.Num(); ++MarkerIndex)
-	{
-		SyncMarkers.Add(MakeShared<FJsonValueObject>(UeAgentAnimationAssetOps::BuildSyncMarkerJson(Sequence, Sequence->AuthoredSyncMarkers[MarkerIndex], MarkerIndex)));
-	}
-
-	OutData->SetStringField(TEXT("asset_path"), Sequence->GetPathName());
-	OutData->SetNumberField(TEXT("added_marker_count"), AddedCount);
-	OutData->SetNumberField(TEXT("removed_marker_count"), RemovedCount);
-	OutData->SetNumberField(TEXT("sync_marker_count"), SyncMarkers.Num());
-	OutData->SetArrayField(TEXT("sync_markers"), SyncMarkers);
-	OutData->SetBoolField(TEXT("saved"), bSaveAfterSet);
-	return true;
-}
-
-bool FUeAgentHttpServer::CmdSkeletonGetInfo(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
-{
-	FString AssetPath;
-	if (!JsonTryGetString(Ctx.Params, TEXT("asset_path"), AssetPath) || AssetPath.IsEmpty())
-	{
-		OutError = TEXT("missing_asset_path");
-		return false;
-	}
-
-	USkeleton* Skeleton = UeAgentAnimationAssetOps::LoadSkeleton(AssetPath);
-	if (!Skeleton)
-	{
-		OutError = TEXT("skeleton_not_found");
-		return false;
-	}
-
-	const FReferenceSkeleton& ReferenceSkeleton = Skeleton->GetReferenceSkeleton();
-
-	TArray<TSharedPtr<FJsonValue>> SlotGroups;
-	for (const FAnimSlotGroup& SlotGroup : Skeleton->GetSlotGroups())
-	{
-		TSharedPtr<FJsonObject> GroupObject = MakeShared<FJsonObject>();
-		GroupObject->SetStringField(TEXT("group_name"), SlotGroup.GroupName.ToString());
-
-		TArray<TSharedPtr<FJsonValue>> SlotNames;
-		for (const FName SlotName : SlotGroup.SlotNames)
-		{
-			SlotNames.Add(MakeShared<FJsonValueString>(SlotName.ToString()));
-		}
-		GroupObject->SetArrayField(TEXT("slot_names"), SlotNames);
-		SlotGroups.Add(MakeShared<FJsonValueObject>(GroupObject));
-	}
-
-	TArray<TSharedPtr<FJsonValue>> Sockets;
-	for (USkeletalMeshSocket* Socket : Skeleton->Sockets)
-	{
-		if (Socket)
-		{
-			Sockets.Add(MakeShared<FJsonValueObject>(UeAgentAnimationAssetOps::BuildSocketJson(Socket)));
-		}
-	}
-
-	TArray<TSharedPtr<FJsonValue>> VirtualBones;
-	for (const FVirtualBone& VirtualBone : Skeleton->GetVirtualBones())
-	{
-		VirtualBones.Add(MakeShared<FJsonValueObject>(UeAgentAnimationAssetOps::BuildVirtualBoneJson(VirtualBone)));
-	}
-
-	TArray<TSharedPtr<FJsonValue>> CompatibleSkeletons;
-	for (const TSoftObjectPtr<USkeleton>& CompatibleSkeleton : Skeleton->GetCompatibleSkeletons())
-	{
-		CompatibleSkeletons.Add(MakeShared<FJsonValueString>(CompatibleSkeleton.ToSoftObjectPath().ToString()));
-	}
-
-#if WITH_EDITOR
-	TArray<FName> AnimationNotifies;
-	Skeleton->CollectAnimationNotifies(AnimationNotifies);
-	TArray<TSharedPtr<FJsonValue>> AnimationNotifyNames;
-	for (const FName NotifyName : AnimationNotifies)
-	{
-		AnimationNotifyNames.Add(MakeShared<FJsonValueString>(NotifyName.ToString()));
-	}
-#endif
-
-	OutData->SetStringField(TEXT("asset_path"), UeAgentAnimationAssetOps::NormalizeAssetPath(Skeleton->GetOutermost()->GetName()));
-	OutData->SetStringField(TEXT("object_path"), Skeleton->GetPathName());
-	OutData->SetStringField(TEXT("preview_skeletal_mesh"), Skeleton->GetPreviewMesh() ? Skeleton->GetPreviewMesh()->GetPathName() : TEXT(""));
-	OutData->SetStringField(TEXT("root_bone_name"), ReferenceSkeleton.GetNum() > 0 ? ReferenceSkeleton.GetBoneName(0).ToString() : TEXT(""));
-	OutData->SetNumberField(TEXT("bone_count"), ReferenceSkeleton.GetNum());
-	OutData->SetNumberField(TEXT("socket_count"), Sockets.Num());
-	OutData->SetNumberField(TEXT("virtual_bone_count"), VirtualBones.Num());
-	OutData->SetNumberField(TEXT("slot_group_count"), SlotGroups.Num());
-	OutData->SetNumberField(TEXT("compatible_skeleton_count"), CompatibleSkeletons.Num());
-	OutData->SetArrayField(TEXT("slot_groups"), SlotGroups);
-	OutData->SetArrayField(TEXT("sockets"), Sockets);
-	OutData->SetArrayField(TEXT("virtual_bones"), VirtualBones);
-	OutData->SetArrayField(TEXT("compatible_skeletons"), CompatibleSkeletons);
-	OutData->SetBoolField(TEXT("use_retarget_modes_from_compatible_skeleton"), Skeleton->GetUseRetargetModesFromCompatibleSkeleton());
-#if WITH_EDITOR
-	OutData->SetNumberField(TEXT("animation_notify_name_count"), AnimationNotifyNames.Num());
-	OutData->SetArrayField(TEXT("animation_notify_names"), AnimationNotifyNames);
-#endif
-	return true;
-}
-
-bool FUeAgentHttpServer::CmdSkeletonListBones(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
-{
-	FString AssetPath;
-	if (!JsonTryGetString(Ctx.Params, TEXT("asset_path"), AssetPath) || AssetPath.IsEmpty())
-	{
-		OutError = TEXT("missing_asset_path");
-		return false;
-	}
-
-	USkeleton* Skeleton = UeAgentAnimationAssetOps::LoadSkeleton(AssetPath);
-	if (!Skeleton)
-	{
-		OutError = TEXT("skeleton_not_found");
-		return false;
-	}
-
-	const FReferenceSkeleton& ReferenceSkeleton = Skeleton->GetReferenceSkeleton();
-	TArray<TSharedPtr<FJsonValue>> Bones;
-	Bones.Reserve(ReferenceSkeleton.GetNum());
-
-	for (int32 BoneIndex = 0; BoneIndex < ReferenceSkeleton.GetNum(); ++BoneIndex)
-	{
-		const int32 ParentIndex = ReferenceSkeleton.GetParentIndex(BoneIndex);
-		TSharedPtr<FJsonObject> BoneObject = MakeShared<FJsonObject>();
-		BoneObject->SetNumberField(TEXT("bone_index"), BoneIndex);
-		BoneObject->SetStringField(TEXT("bone_name"), ReferenceSkeleton.GetBoneName(BoneIndex).ToString());
-		BoneObject->SetNumberField(TEXT("parent_index"), ParentIndex);
-		BoneObject->SetStringField(TEXT("parent_bone_name"), ParentIndex != INDEX_NONE ? ReferenceSkeleton.GetBoneName(ParentIndex).ToString() : TEXT(""));
-		Bones.Add(MakeShared<FJsonValueObject>(BoneObject));
-	}
-
-	OutData->SetStringField(TEXT("asset_path"), Skeleton->GetPathName());
-	OutData->SetNumberField(TEXT("bone_count"), Bones.Num());
-	OutData->SetArrayField(TEXT("bones"), Bones);
-	return true;
-}
-
-bool FUeAgentHttpServer::CmdSkeletonSetCompatibleSkeletons(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
-{
-	FString AssetPath;
-	if (!JsonTryGetString(Ctx.Params, TEXT("asset_path"), AssetPath) || AssetPath.IsEmpty())
-	{
-		OutError = TEXT("missing_asset_path");
-		return false;
-	}
-
-	USkeleton* Skeleton = UeAgentAnimationAssetOps::LoadSkeleton(AssetPath);
-	if (!Skeleton)
-	{
-		OutError = TEXT("skeleton_not_found");
-		return false;
-	}
-
-	auto ApplySkeletonList = [&](const TArray<TSharedPtr<FJsonValue>>* Paths, const bool bAdd) -> bool
-	{
-		if (!Paths)
-		{
-			return true;
-		}
-
-		for (const TSharedPtr<FJsonValue>& Value : *Paths)
-		{
-			if (!Value.IsValid())
-			{
-				continue;
-			}
-
-			const FString CompatibleSkeletonPath = Value->AsString().TrimStartAndEnd();
-			if (CompatibleSkeletonPath.IsEmpty())
-			{
-				continue;
-			}
-
-			USkeleton* CompatibleSkeleton = UeAgentAnimationAssetOps::LoadSkeleton(CompatibleSkeletonPath);
-			if (!CompatibleSkeleton)
-			{
-				OutError = TEXT("compatible_skeleton_not_found");
-				return false;
-			}
-			if (CompatibleSkeleton == Skeleton)
-			{
-				OutError = TEXT("compatible_skeleton_same_as_asset");
-				return false;
-			}
-
-			if (bAdd)
-			{
-				Skeleton->AddCompatibleSkeleton(CompatibleSkeleton);
-			}
-			else
-			{
-				Skeleton->RemoveCompatibleSkeleton(CompatibleSkeleton);
-			}
-		}
-		return true;
-	};
-
-	Skeleton->Modify();
-
-	bool bClearAll = false;
-	JsonTryGetBool(Ctx.Params, TEXT("clear_all"), bClearAll);
-	if (bClearAll)
-	{
-		TArray<TSoftObjectPtr<USkeleton>> ExistingCompatibleSkeletons = Skeleton->GetCompatibleSkeletons();
-		for (const TSoftObjectPtr<USkeleton>& CompatibleSkeleton : ExistingCompatibleSkeletons)
-		{
-			Skeleton->RemoveCompatibleSkeleton(CompatibleSkeleton);
-		}
-	}
-
-	const TArray<TSharedPtr<FJsonValue>>* SetCompatibleSkeletonPaths = nullptr;
-	if (Ctx.Params->TryGetArrayField(TEXT("set_compatible_skeleton_paths"), SetCompatibleSkeletonPaths) && SetCompatibleSkeletonPaths)
-	{
-		TArray<TSoftObjectPtr<USkeleton>> ExistingCompatibleSkeletons = Skeleton->GetCompatibleSkeletons();
-		for (const TSoftObjectPtr<USkeleton>& CompatibleSkeleton : ExistingCompatibleSkeletons)
-		{
-			Skeleton->RemoveCompatibleSkeleton(CompatibleSkeleton);
-		}
-		if (!ApplySkeletonList(SetCompatibleSkeletonPaths, true))
-		{
-			return false;
-		}
-	}
-
-	const TArray<TSharedPtr<FJsonValue>>* AddCompatibleSkeletonPaths = nullptr;
-	if (Ctx.Params->TryGetArrayField(TEXT("add_compatible_skeleton_paths"), AddCompatibleSkeletonPaths) && AddCompatibleSkeletonPaths)
-	{
-		if (!ApplySkeletonList(AddCompatibleSkeletonPaths, true))
-		{
-			return false;
-		}
-	}
-
-	const TArray<TSharedPtr<FJsonValue>>* RemoveCompatibleSkeletonPaths = nullptr;
-	if (Ctx.Params->TryGetArrayField(TEXT("remove_compatible_skeleton_paths"), RemoveCompatibleSkeletonPaths) && RemoveCompatibleSkeletonPaths)
-	{
-		if (!ApplySkeletonList(RemoveCompatibleSkeletonPaths, false))
-		{
-			return false;
-		}
-	}
-
-	if (Ctx.Params->HasField(TEXT("use_retarget_modes_from_compatible_skeleton")))
-	{
-		bool bUseRetargetModesFromCompatibleSkeleton = false;
-		JsonTryGetBool(Ctx.Params, TEXT("use_retarget_modes_from_compatible_skeleton"), bUseRetargetModesFromCompatibleSkeleton);
-		Skeleton->SetUseRetargetModesFromCompatibleSkeleton(bUseRetargetModesFromCompatibleSkeleton);
-	}
-
-	Skeleton->MarkPackageDirty();
-
-	bool bSaveAfterSet = false;
-	JsonTryGetBool(Ctx.Params, TEXT("save_after_set"), bSaveAfterSet);
-	if (bSaveAfterSet && !UeAgentAnimationAssetOps::SaveAssetPackage(Skeleton, OutError))
-	{
-		return false;
-	}
-
-	TArray<TSharedPtr<FJsonValue>> CompatibleSkeletons;
-	for (const TSoftObjectPtr<USkeleton>& CompatibleSkeleton : Skeleton->GetCompatibleSkeletons())
-	{
-		CompatibleSkeletons.Add(MakeShared<FJsonValueString>(CompatibleSkeleton.ToSoftObjectPath().ToString()));
-	}
-
-	OutData->SetStringField(TEXT("asset_path"), Skeleton->GetPathName());
-	OutData->SetNumberField(TEXT("compatible_skeleton_count"), CompatibleSkeletons.Num());
-	OutData->SetArrayField(TEXT("compatible_skeletons"), CompatibleSkeletons);
-	OutData->SetBoolField(TEXT("use_retarget_modes_from_compatible_skeleton"), Skeleton->GetUseRetargetModesFromCompatibleSkeleton());
-	OutData->SetBoolField(TEXT("saved"), bSaveAfterSet);
-	return true;
-}
-
-bool FUeAgentHttpServer::CmdSkeletonSetPreviewMesh(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
-{
-	FString AssetPath;
-	if (!JsonTryGetString(Ctx.Params, TEXT("asset_path"), AssetPath) || AssetPath.IsEmpty())
-	{
-		OutError = TEXT("missing_asset_path");
-		return false;
-	}
-
-	USkeleton* Skeleton = UeAgentAnimationAssetOps::LoadSkeleton(AssetPath);
-	if (!Skeleton)
-	{
-		OutError = TEXT("skeleton_not_found");
-		return false;
-	}
-
-	bool bClearPreviewMesh = false;
-	JsonTryGetBool(Ctx.Params, TEXT("clear_preview_mesh"), bClearPreviewMesh);
-
-	FString PreviewMeshPath;
-	JsonTryGetString(Ctx.Params, TEXT("skeletal_mesh_path"), PreviewMeshPath);
-
-	USkeletalMesh* PreviewMesh = nullptr;
-	if (!bClearPreviewMesh)
-	{
-		if (PreviewMeshPath.TrimStartAndEnd().IsEmpty())
-		{
-			OutError = TEXT("missing_skeletal_mesh_path");
-			return false;
-		}
-
-		PreviewMesh = UeAgentAnimationAssetOps::LoadSkeletalMesh(PreviewMeshPath);
-		if (!PreviewMesh)
-		{
-			OutError = TEXT("skeletal_mesh_not_found");
-			return false;
-		}
-	}
-
-	Skeleton->Modify();
-	Skeleton->SetPreviewMesh(PreviewMesh, true);
-
-	bool bSaveAfterSet = false;
-	JsonTryGetBool(Ctx.Params, TEXT("save_after_set"), bSaveAfterSet);
-	if (bSaveAfterSet && !UeAgentAnimationAssetOps::SaveAssetPackage(Skeleton, OutError))
-	{
-		return false;
-	}
-
-	OutData->SetStringField(TEXT("asset_path"), Skeleton->GetPathName());
-	OutData->SetStringField(TEXT("preview_skeletal_mesh"), Skeleton->GetPreviewMesh() ? Skeleton->GetPreviewMesh()->GetPathName() : TEXT(""));
-	OutData->SetBoolField(TEXT("saved"), bSaveAfterSet);
-	return true;
-}
-
-bool FUeAgentHttpServer::CmdSkeletonSetSocket(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
-{
-	FString AssetPath;
-	if (!JsonTryGetString(Ctx.Params, TEXT("asset_path"), AssetPath) || AssetPath.IsEmpty())
-	{
-		OutError = TEXT("missing_asset_path");
-		return false;
-	}
-
-	FString SocketNameText;
-	if (!JsonTryGetString(Ctx.Params, TEXT("socket_name"), SocketNameText) || SocketNameText.TrimStartAndEnd().IsEmpty())
-	{
-		OutError = TEXT("missing_socket_name");
-		return false;
-	}
-	const FName SocketName(*SocketNameText.TrimStartAndEnd());
-
-	USkeleton* Skeleton = UeAgentAnimationAssetOps::LoadSkeleton(AssetPath);
-	if (!Skeleton)
-	{
-		OutError = TEXT("skeleton_not_found");
-		return false;
-	}
-
-	bool bRemove = false;
-	JsonTryGetBool(Ctx.Params, TEXT("remove"), bRemove);
-
-	USkeletalMeshSocket* Socket = UeAgentAnimationAssetOps::FindSocketByName(Skeleton, SocketName);
-	Skeleton->Modify();
-
-	if (bRemove)
-	{
-		if (!Socket)
-		{
-			OutError = TEXT("socket_not_found");
-			return false;
-		}
-		Skeleton->Sockets.Remove(Socket);
-		Skeleton->MarkPackageDirty();
-	}
-	else
-	{
-		FString BoneNameText;
-		if (!JsonTryGetString(Ctx.Params, TEXT("bone_name"), BoneNameText) && !Socket)
-		{
-			OutError = TEXT("missing_bone_name");
-			return false;
-		}
-
-		if (!Socket)
-		{
-			Socket = NewObject<USkeletalMeshSocket>(Skeleton, NAME_None, RF_Transactional);
-			if (!Socket)
-			{
-				OutError = TEXT("create_socket_failed");
-				return false;
-			}
-			Skeleton->Sockets.Add(Socket);
-		}
-
-		if (!BoneNameText.TrimStartAndEnd().IsEmpty())
-		{
-			Socket->BoneName = FName(*BoneNameText.TrimStartAndEnd());
-		}
-		Socket->SocketName = SocketName;
-
-		FVector RelativeLocation = Socket->RelativeLocation;
-		FRotator RelativeRotation = Socket->RelativeRotation;
-		FVector RelativeScale = Socket->RelativeScale;
-		JsonTryGetVector(Ctx.Params, TEXT("relative_location"), RelativeLocation);
-		JsonTryGetRotator(Ctx.Params, TEXT("relative_rotation"), RelativeRotation);
-		JsonTryGetVector(Ctx.Params, TEXT("relative_scale"), RelativeScale);
-		Socket->RelativeLocation = RelativeLocation;
-		Socket->RelativeRotation = RelativeRotation;
-		Socket->RelativeScale = RelativeScale;
-		Skeleton->MarkPackageDirty();
-	}
-
-	bool bSaveAfterSet = false;
-	JsonTryGetBool(Ctx.Params, TEXT("save_after_set"), bSaveAfterSet);
-	if (bSaveAfterSet && !UeAgentAnimationAssetOps::SaveAssetPackage(Skeleton, OutError))
-	{
-		return false;
-	}
-
-	OutData->SetStringField(TEXT("asset_path"), Skeleton->GetPathName());
-	OutData->SetStringField(TEXT("socket_name"), SocketName.ToString());
-	OutData->SetBoolField(TEXT("removed"), bRemove);
-	if (!bRemove && Socket)
-	{
-		OutData->SetStringField(TEXT("bone_name"), Socket->BoneName.ToString());
-		OutData->SetObjectField(TEXT("relative_location"), UeAgentAnimationAssetOps::BuildVectorJson(Socket->RelativeLocation));
-		OutData->SetObjectField(TEXT("relative_rotation"), UeAgentAnimationAssetOps::BuildRotatorJson(Socket->RelativeRotation));
-		OutData->SetObjectField(TEXT("relative_scale"), UeAgentAnimationAssetOps::BuildVectorJson(Socket->RelativeScale));
-	}
-	OutData->SetBoolField(TEXT("saved"), bSaveAfterSet);
-	return true;
-}
-
-bool FUeAgentHttpServer::CmdSkeletonSetVirtualBone(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
-{
-	FString AssetPath;
-	if (!JsonTryGetString(Ctx.Params, TEXT("asset_path"), AssetPath) || AssetPath.IsEmpty())
-	{
-		OutError = TEXT("missing_asset_path");
-		return false;
-	}
-
-	USkeleton* Skeleton = UeAgentAnimationAssetOps::LoadSkeleton(AssetPath);
-	if (!Skeleton)
-	{
-		OutError = TEXT("skeleton_not_found");
-		return false;
-	}
-
-	bool bRemove = false;
-	JsonTryGetBool(Ctx.Params, TEXT("remove"), bRemove);
-
-	Skeleton->Modify();
-	FName VirtualBoneName = NAME_None;
-
-	if (bRemove)
-	{
-		FString VirtualBoneNameText;
-		if (!JsonTryGetString(Ctx.Params, TEXT("virtual_bone_name"), VirtualBoneNameText) || VirtualBoneNameText.TrimStartAndEnd().IsEmpty())
-		{
-			OutError = TEXT("missing_virtual_bone_name");
-			return false;
-		}
-
-		VirtualBoneName = FName(*VirtualBoneNameText.TrimStartAndEnd());
-		if (!UeAgentAnimationAssetOps::FindVirtualBoneByName(Skeleton, VirtualBoneName))
-		{
-			OutError = TEXT("virtual_bone_not_found");
-			return false;
-		}
-
-		TArray<FName> BonesToRemove;
-		BonesToRemove.Add(VirtualBoneName);
-		Skeleton->RemoveVirtualBones(BonesToRemove);
-		Skeleton->MarkPackageDirty();
-	}
-	else
-	{
-		FString SourceBoneNameText;
-		FString TargetBoneNameText;
-		JsonTryGetString(Ctx.Params, TEXT("source_bone_name"), SourceBoneNameText);
-		JsonTryGetString(Ctx.Params, TEXT("target_bone_name"), TargetBoneNameText);
-		SourceBoneNameText = SourceBoneNameText.TrimStartAndEnd();
-		TargetBoneNameText = TargetBoneNameText.TrimStartAndEnd();
-		if (SourceBoneNameText.IsEmpty() || TargetBoneNameText.IsEmpty())
-		{
-			OutError = TEXT("missing_source_or_target_bone_name");
-			return false;
-		}
-
-		FString VirtualBoneNameText;
-		JsonTryGetString(Ctx.Params, TEXT("virtual_bone_name"), VirtualBoneNameText);
-		VirtualBoneNameText = VirtualBoneNameText.TrimStartAndEnd();
-
-		if (VirtualBoneNameText.IsEmpty())
-		{
-			if (!Skeleton->AddNewVirtualBone(FName(*SourceBoneNameText), FName(*TargetBoneNameText), VirtualBoneName))
-			{
-				OutError = TEXT("add_virtual_bone_failed");
-				return false;
-			}
-		}
-		else
-		{
-			VirtualBoneName = FName(*VirtualBoneNameText);
-			if (!Skeleton->AddNewNamedVirtualBone(FName(*SourceBoneNameText), FName(*TargetBoneNameText), VirtualBoneName))
-			{
-				OutError = TEXT("add_virtual_bone_failed");
-				return false;
-			}
-		}
-		Skeleton->MarkPackageDirty();
-	}
-
-	bool bSaveAfterSet = false;
-	JsonTryGetBool(Ctx.Params, TEXT("save_after_set"), bSaveAfterSet);
-	if (bSaveAfterSet && !UeAgentAnimationAssetOps::SaveAssetPackage(Skeleton, OutError))
-	{
-		return false;
-	}
-
-	OutData->SetStringField(TEXT("asset_path"), Skeleton->GetPathName());
-	OutData->SetStringField(TEXT("virtual_bone_name"), VirtualBoneName.ToString());
-	OutData->SetBoolField(TEXT("removed"), bRemove);
-	OutData->SetBoolField(TEXT("saved"), bSaveAfterSet);
-	return true;
-}
-
-#include "UeAgentHttpServer_AnimationAssets_FolderFormat.inl"

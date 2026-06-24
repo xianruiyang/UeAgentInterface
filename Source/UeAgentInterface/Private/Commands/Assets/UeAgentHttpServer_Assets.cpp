@@ -1,6 +1,7 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "UeAgentHttpServer_Assets.h"
+#include "UeAgentHttpServer_AssetsOps.h"
 #include "Utilities/UeAgentCurveJson.h"
 #include "Utilities/UeAgentJsonDiagnostics.h"
 #include "Module/UeAgentInterfaceLogger.h"
@@ -12,8 +13,11 @@
 #include "Animation/Skeleton.h"
 #include "AssetRegistry/AssetRegistryModule.h"
 #include "AutomatedAssetImportData.h"
+#include "CoreGlobals.h"
 #include "Editor.h"
 #include "Containers/Ticker.h"
+#include "Engine/Engine.h"
+#include "Engine/LocalPlayer.h"
 #include "Engine/SkeletalMesh.h"
 #include "Engine/Texture.h"
 #include "Engine/Texture2D.h"
@@ -23,8 +27,13 @@
 #include "Factories/FbxSkeletalMeshImportData.h"
 #include "Factories/TextureFactory.h"
 #include "FileHelpers.h"
+#include "GameFramework/GameModeBase.h"
+#include "GameFramework/GameStateBase.h"
+#include "HAL/IConsoleManager.h"
 #include "Misc/FileHelper.h"
+#include "Misc/OutputDevice.h"
 #include "Misc/PackageName.h"
+#include "Misc/Parse.h"
 #include "Misc/Paths.h"
 #include "ObjectTools.h"
 #include "PhysicsEngine/PhysicsAsset.h"
@@ -40,7 +49,7 @@
 
 namespace UeAgentAssetOps
 {
-	static FString NormalizeAssetPath(const FString& InPath)
+	FString NormalizeAssetPath(const FString& InPath)
 	{
 		FString OutPath = InPath;
 		OutPath.TrimStartAndEndInline();
@@ -53,7 +62,7 @@ namespace UeAgentAssetOps
 		return OutPath;
 	}
 
-	static FString ToObjectPath(const FString& InPath)
+	FString ToObjectPath(const FString& InPath)
 	{
 		FString InObjectPath = InPath;
 		InObjectPath.TrimStartAndEndInline();
@@ -75,7 +84,7 @@ namespace UeAgentAssetOps
 		return FString::Printf(TEXT("%s.%s"), *AssetPath, *AssetName);
 	}
 
-	static UObject* LoadAssetObject(const FString& InPath)
+	UObject* LoadAssetObject(const FString& InPath)
 	{
 		const FString ObjectPath = ToObjectPath(InPath);
 		if (ObjectPath.IsEmpty())
@@ -89,7 +98,408 @@ namespace UeAgentAssetOps
 		return LoadObject<UObject>(nullptr, *ObjectPath);
 	}
 
-	static FString NormalizeReferenceInputToPackageName(const FString& InPath)
+	struct FConsoleExecOutputLine
+	{
+		FString Category;
+		FString Verbosity;
+		FString Message;
+	};
+
+	static FString LogVerbosityToString(const ELogVerbosity::Type Verbosity)
+	{
+		switch (Verbosity)
+		{
+		case ELogVerbosity::Fatal: return TEXT("fatal");
+		case ELogVerbosity::Error: return TEXT("error");
+		case ELogVerbosity::Warning: return TEXT("warning");
+		case ELogVerbosity::Display: return TEXT("display");
+		case ELogVerbosity::Log: return TEXT("log");
+		case ELogVerbosity::Verbose: return TEXT("verbose");
+		case ELogVerbosity::VeryVerbose: return TEXT("very_verbose");
+		default: return TEXT("unknown");
+		}
+	}
+
+	class FConsoleExecCaptureOutputDevice final : public FOutputDevice
+	{
+	public:
+		explicit FConsoleExecCaptureOutputDevice(const int32 InMaxOutputChars)
+			: MaxOutputChars(FMath::Max(0, InMaxOutputChars))
+		{
+		}
+
+		virtual void Serialize(const TCHAR* V, ELogVerbosity::Type Verbosity, const FName& Category) override
+		{
+			FConsoleExecOutputLine Line;
+			Line.Category = Category.ToString();
+			Line.Verbosity = LogVerbosityToString(Verbosity);
+			Line.Message = V ? FString(V) : FString();
+			Lines.Add(MoveTemp(Line));
+
+			if (MaxOutputChars <= 0)
+			{
+				bOutputTruncated = true;
+				return;
+			}
+
+			FString TextLine = FString::Printf(TEXT("[%s][%s] %s"), *Lines.Last().Category, *Lines.Last().Verbosity, *Lines.Last().Message);
+			if (!CombinedOutput.IsEmpty())
+			{
+				TextLine = FString(LINE_TERMINATOR) + TextLine;
+			}
+
+			const int32 RemainingChars = MaxOutputChars - CombinedOutput.Len();
+			if (RemainingChars <= 0)
+			{
+				bOutputTruncated = true;
+				return;
+			}
+
+			if (TextLine.Len() > RemainingChars)
+			{
+				CombinedOutput += TextLine.Left(RemainingChars);
+				bOutputTruncated = true;
+				return;
+			}
+
+			CombinedOutput += TextLine;
+		}
+
+		TArray<TSharedPtr<FJsonValue>> MakeLinesJson(const int32 MaxLineCount) const
+		{
+			TArray<TSharedPtr<FJsonValue>> Values;
+			const int32 ClampedMaxLineCount = MaxLineCount < 0 ? Lines.Num() : FMath::Max(0, MaxLineCount);
+			for (int32 Index = 0; Index < Lines.Num() && Index < ClampedMaxLineCount; ++Index)
+			{
+				TSharedPtr<FJsonObject> LineObj = MakeShared<FJsonObject>();
+				LineObj->SetStringField(TEXT("category"), Lines[Index].Category);
+				LineObj->SetStringField(TEXT("verbosity"), Lines[Index].Verbosity);
+				LineObj->SetStringField(TEXT("message"), Lines[Index].Message);
+				Values.Add(MakeShared<FJsonValueObject>(LineObj));
+			}
+			return Values;
+		}
+
+		const FString& GetCombinedOutput() const
+		{
+			return CombinedOutput;
+		}
+
+		bool IsOutputTruncated() const
+		{
+			return bOutputTruncated;
+		}
+
+		int32 GetLineCount() const
+		{
+			return Lines.Num();
+		}
+
+	private:
+		int32 MaxOutputChars = 0;
+		bool bOutputTruncated = false;
+		FString CombinedOutput;
+		TArray<FConsoleExecOutputLine> Lines;
+	};
+
+	static FString NormalizeConsoleExecToken(const FString& Token)
+	{
+		FString Normalized = Token;
+		Normalized.TrimStartAndEndInline();
+		Normalized.ToUpperInline();
+		return Normalized;
+	}
+
+	static TArray<FString> TokenizeConsoleExecCommand(const FString& Command)
+	{
+		TArray<FString> Tokens;
+		const TCHAR* Cursor = *Command;
+		FString Token;
+		while (FParse::Token(Cursor, Token, false))
+		{
+			Tokens.Add(NormalizeConsoleExecToken(Token));
+			Token.Reset();
+			if (Tokens.Num() >= 8)
+			{
+				break;
+			}
+		}
+		return Tokens;
+	}
+
+	static FString ConsoleExecHighRiskReason(const FString& Command)
+	{
+		const TArray<FString> Tokens = TokenizeConsoleExecCommand(Command);
+		if (Tokens.Num() == 0)
+		{
+			return FString();
+		}
+
+		const FString& First = Tokens[0];
+		const FString Second = Tokens.Num() > 1 ? Tokens[1] : FString();
+
+		if (First == TEXT("QUIT") || First == TEXT("QUIT_EDITOR") || First == TEXT("EXIT"))
+		{
+			return TEXT("editor_lifecycle_exit");
+		}
+		if (First == TEXT("CRASH") || First == TEXT("FATAL") || (First == TEXT("DEBUG") && (Second == TEXT("CRASH") || Second == TEXT("ASSERT"))))
+		{
+			return TEXT("intentional_crash_or_assert");
+		}
+		if (First == TEXT("PY") || First == TEXT("PYTHON") || First == TEXT("PYTHONSCRIPT"))
+		{
+			return TEXT("arbitrary_python_execution");
+		}
+		if (First == TEXT("OPEN") || First == TEXT("TRAVEL") || First == TEXT("SERVERTRAVEL") || First == TEXT("DISCONNECT") || First == TEXT("RECONNECT") || First == TEXT("RESTARTLEVEL"))
+		{
+			return TEXT("map_or_session_transition");
+		}
+		if (First == TEXT("OBJ"))
+		{
+			if (Second == TEXT("LIST") || Second == TEXT("REFS") || Second == TEXT("HASH") || Second == TEXT("CLASSES"))
+			{
+				return FString();
+			}
+			return TEXT("object_command_requires_explicit_allow");
+		}
+		if (First == TEXT("MAP"))
+		{
+			if (Second == TEXT("CHECK") || Second == TEXT("CHECKDEP"))
+			{
+				return FString();
+			}
+			return TEXT("map_command_requires_explicit_allow");
+		}
+		if (First == TEXT("DELETE") || First == TEXT("DELETESELECTED") || First == TEXT("DESTROY"))
+		{
+			return TEXT("delete_or_destroy_command");
+		}
+		if (First == TEXT("ACTOR") && (Second == TEXT("DELETE") || Second == TEXT("DESTROY") || Second == TEXT("DUPLICATE") || Second == TEXT("REPLACE")))
+		{
+			return TEXT("actor_mutation_command_requires_explicit_allow");
+		}
+		if (First == TEXT("SELECT") && Second == TEXT("DELETE"))
+		{
+			return TEXT("selection_delete_command");
+		}
+
+		for (const FString& Token : Tokens)
+		{
+			if (Token == TEXT("SAVEPACKAGE") || Token == TEXT("IMPORT") || Token == TEXT("IMPORTADD"))
+			{
+				return TEXT("package_or_import_command_requires_explicit_allow");
+			}
+		}
+
+		return FString();
+	}
+
+	static void AppendConsoleExecCommandLines(const FString& Input, TArray<FString>& OutCommands)
+	{
+		const int32 Len = Input.Len();
+		TArray<TCHAR> Buffer;
+		Buffer.AddZeroed(Len + 1);
+
+		const TCHAR* ParseCursor = *Input;
+		while (FParse::Line(&ParseCursor, Buffer.GetData(), Buffer.Num()))
+		{
+			FString Line(Buffer.GetData());
+			Line.TrimStartAndEndInline();
+			if (!Line.IsEmpty())
+			{
+				OutCommands.Add(Line);
+			}
+		}
+	}
+
+	static bool BuildConsoleExecCommandList(const TSharedPtr<FJsonObject>& Params, TArray<FString>& OutCommands, FString& OutError)
+	{
+		FString Command;
+		if (Params.IsValid() && Params->TryGetStringField(TEXT("command"), Command))
+		{
+			AppendConsoleExecCommandLines(Command, OutCommands);
+		}
+
+		const TArray<TSharedPtr<FJsonValue>>* CommandValues = nullptr;
+		if (Params.IsValid() && Params->TryGetArrayField(TEXT("commands"), CommandValues) && CommandValues)
+		{
+			for (int32 Index = 0; Index < CommandValues->Num(); ++Index)
+			{
+				FString Item;
+				if (!(*CommandValues)[Index].IsValid() || !(*CommandValues)[Index]->TryGetString(Item))
+				{
+					OutError = FString::Printf(TEXT("invalid_commands_item_%d"), Index);
+					return false;
+				}
+				AppendConsoleExecCommandLines(Item, OutCommands);
+			}
+		}
+
+		if (OutCommands.Num() == 0)
+		{
+			OutError = TEXT("missing_console_command");
+			return false;
+		}
+		return true;
+	}
+
+	static FString NormalizeConsoleWorldContext(FString WorldContext)
+	{
+		WorldContext.TrimStartAndEndInline();
+		if (WorldContext.IsEmpty())
+		{
+			return TEXT("auto");
+		}
+		WorldContext.ToLowerInline();
+		if (WorldContext == TEXT("cmd"))
+		{
+			return TEXT("auto");
+		}
+		return WorldContext;
+	}
+
+	static bool ExecuteConsoleCommandLikeStatusBarCmd(const FString& Command, const FString& RequestedWorldContext, FOutputDevice& Output, FString& OutWorldContextUsed, FString& OutRoute, FString& OutFailureReason)
+	{
+		const FString WorldContext = NormalizeConsoleWorldContext(RequestedWorldContext);
+		if (WorldContext != TEXT("auto") && WorldContext != TEXT("editor") && WorldContext != TEXT("pie"))
+		{
+			OutFailureReason = TEXT("invalid_world_context");
+			return false;
+		}
+
+		bool bWasHandled = false;
+		UWorld* World = nullptr;
+		UWorld* OldWorld = nullptr;
+
+		const bool bAllowPieWorld = WorldContext != TEXT("editor");
+		if (bAllowPieWorld && GIsEditor && GEditor && GEditor->PlayWorld && !GIsPlayInEditorWorld)
+		{
+			World = GEditor->PlayWorld;
+			OldWorld = SetPlayInEditorWorld(GEditor->PlayWorld);
+			OutWorldContextUsed = TEXT("pie");
+		}
+		else if (WorldContext == TEXT("pie"))
+		{
+			OutFailureReason = TEXT("pie_world_not_available");
+			return false;
+		}
+
+		ULocalPlayer* Player = (bAllowPieWorld && GEngine) ? GEngine->GetDebugLocalPlayer() : nullptr;
+		if (Player)
+		{
+			UWorld* PlayerWorld = Player->GetWorld();
+			if (!World)
+			{
+				World = PlayerWorld;
+				OutWorldContextUsed = TEXT("player");
+			}
+			bWasHandled = Player->Exec(PlayerWorld, *Command, Output);
+			if (bWasHandled)
+			{
+				OutRoute = TEXT("player_exec");
+			}
+		}
+
+		if (!World && GEditor)
+		{
+			World = GEditor->GetEditorWorldContext().World();
+			OutWorldContextUsed = TEXT("editor");
+		}
+
+		if (World)
+		{
+			if (!bWasHandled)
+			{
+				AGameModeBase* const GameMode = World->GetAuthGameMode();
+				AGameStateBase* const GameState = World->GetGameState();
+				if (GameMode && GameMode->ProcessConsoleExec(*Command, Output, nullptr))
+				{
+					bWasHandled = true;
+					OutRoute = TEXT("game_mode_process_console_exec");
+				}
+				else if (GameState && GameState->ProcessConsoleExec(*Command, Output, nullptr))
+				{
+					bWasHandled = true;
+					OutRoute = TEXT("game_state_process_console_exec");
+				}
+			}
+
+			if (!bWasHandled && !Player)
+			{
+				if (GIsEditor && GEditor)
+				{
+					bWasHandled = GEditor->Exec(World, *Command, Output);
+					OutRoute = bWasHandled ? TEXT("editor_exec") : TEXT("editor_exec_unhandled");
+				}
+				else if (GEngine)
+				{
+					bWasHandled = GEngine->Exec(World, *Command, Output);
+					OutRoute = bWasHandled ? TEXT("engine_exec") : TEXT("engine_exec_unhandled");
+				}
+			}
+		}
+		else
+		{
+			OutFailureReason = TEXT("world_not_available");
+		}
+
+		if (OldWorld)
+		{
+			RestoreEditorWorld(OldWorld);
+		}
+
+		if (OutRoute.IsEmpty())
+		{
+			OutRoute = bWasHandled ? TEXT("handled") : TEXT("unhandled");
+		}
+		return bWasHandled;
+	}
+
+	bool DetachStaleObjectAtPath(const FString& ObjectPath, bool* bOutFoundStaleObject)
+	{
+		if (bOutFoundStaleObject)
+		{
+			*bOutFoundStaleObject = false;
+		}
+		if (ObjectPath.IsEmpty())
+		{
+			return false;
+		}
+
+		UObject* Existing = FindObject<UObject>(nullptr, *ObjectPath);
+		if (!Existing)
+		{
+			return false;
+		}
+		if (bOutFoundStaleObject)
+		{
+			*bOutFoundStaleObject = true;
+		}
+		if (IsValid(Existing) && Existing->HasAnyFlags(RF_Public | RF_Standalone))
+		{
+			return false;
+		}
+
+		if (!IsValid(Existing))
+		{
+			CollectGarbage(GARBAGE_COLLECTION_KEEPFLAGS);
+			return false;
+		}
+
+		Existing->ClearFlags(RF_Public | RF_Standalone);
+		if (Existing->IsRooted())
+		{
+			Existing->RemoveFromRoot();
+		}
+		const ERenameFlags RenameFlags = REN_DontCreateRedirectors | REN_NonTransactional | REN_DoNotDirty | REN_ForceNoResetLoaders;
+		const FName TrashName = MakeUniqueObjectName(GetTransientPackage(), Existing->GetClass(), Existing->GetFName());
+		const bool bRenamed = Existing->Rename(*TrashName.ToString(), GetTransientPackage(), RenameFlags);
+		Existing->MarkAsGarbage();
+		CollectGarbage(GARBAGE_COLLECTION_KEEPFLAGS);
+		return bRenamed;
+	}
+
+	FString NormalizeReferenceInputToPackageName(const FString& InPath)
 	{
 		FString Path = InPath;
 		Path.TrimStartAndEndInline();
@@ -185,7 +595,7 @@ namespace UeAgentAssetOps
 		return TEXT("unknown");
 	}
 
-	static bool ShouldIncludeDependencyEdge(
+	bool ShouldIncludeDependencyEdge(
 		UE::AssetRegistry::EDependencyCategory Category,
 		UE::AssetRegistry::EDependencyProperty Properties,
 		bool bIncludeHard,
@@ -216,7 +626,7 @@ namespace UeAgentAssetOps
 		return Identifier.PackageName.IsNone() ? FString() : Identifier.PackageName.ToString();
 	}
 
-	static FString AssetDataClassPathString(const FAssetData& AssetData)
+	FString AssetDataClassPathString(const FAssetData& AssetData)
 	{
 		return AssetData.AssetClassPath.IsValid() ? AssetData.AssetClassPath.ToString() : FString();
 	}
@@ -277,7 +687,7 @@ namespace UeAgentAssetOps
 		return Node;
 	}
 
-	static TSharedPtr<FJsonObject> MakeAssetRegistryEdgeJson(
+	TSharedPtr<FJsonObject> MakeAssetRegistryEdgeJson(
 		const FAssetIdentifier& Source,
 		const FAssetIdentifier& Target,
 		const FString& QueryDirection,
@@ -353,6 +763,66 @@ namespace UeAgentAssetOps
 		return Values;
 	}
 
+	TArray<TSharedPtr<FJsonValue>> CollectPackagePathStringHits(
+		const FString& PackageName,
+		const int32 MaxHits,
+		bool& bOutTruncated)
+	{
+		bOutTruncated = false;
+
+		TArray<FString> PackageFiles;
+		IFileManager::Get().FindFilesRecursive(PackageFiles, *FPaths::ProjectContentDir(), TEXT("*.uasset"), true, false);
+		IFileManager::Get().FindFilesRecursive(PackageFiles, *FPaths::ProjectContentDir(), TEXT("*.umap"), true, false);
+		PackageFiles.Sort();
+
+		TArray<TSharedPtr<FJsonValue>> HitsJson;
+		const FTCHARToUTF8 SearchBytes(*PackageName);
+		const TArrayView<const uint8> SearchView(reinterpret_cast<const uint8*>(SearchBytes.Get()), SearchBytes.Length());
+		if (SearchView.Num() <= 0)
+		{
+			return HitsJson;
+		}
+
+		for (const FString& Filename : PackageFiles)
+		{
+			if (HitsJson.Num() >= MaxHits)
+			{
+				bOutTruncated = true;
+				break;
+			}
+
+			TArray<uint8> FileBytes;
+			if (!FFileHelper::LoadFileToArray(FileBytes, *Filename) || FileBytes.Num() < SearchView.Num())
+			{
+				continue;
+			}
+
+			bool bFound = false;
+			for (int32 Index = 0; Index <= FileBytes.Num() - SearchView.Num(); ++Index)
+			{
+				if (FMemory::Memcmp(FileBytes.GetData() + Index, SearchView.GetData(), SearchView.Num()) == 0)
+				{
+					bFound = true;
+					break;
+				}
+			}
+			if (!bFound)
+			{
+				continue;
+			}
+
+			FString HitPackageName;
+			FPackageName::TryConvertFilenameToLongPackageName(Filename, HitPackageName);
+			TSharedPtr<FJsonObject> Hit = MakeShared<FJsonObject>();
+			Hit->SetStringField(TEXT("package_name"), HitPackageName);
+			Hit->SetStringField(TEXT("filename"), Filename);
+			Hit->SetBoolField(TEXT("self_hit"), HitPackageName == PackageName);
+			HitsJson.Add(MakeShared<FJsonValueObject>(Hit));
+		}
+
+		return HitsJson;
+	}
+
 	static UPackage* ResolvePackageByAssetPath(const FString& InPath)
 	{
 		const FString NormalizedAssetPath = NormalizeAssetPath(InPath);
@@ -374,7 +844,7 @@ namespace UeAgentAssetOps
 		return nullptr;
 	}
 
-	static bool ReadStringArrayParam(const TSharedPtr<FJsonObject>& Params, const TCHAR* FieldName, TArray<FString>& OutValues)
+	bool ReadStringArrayParam(const TSharedPtr<FJsonObject>& Params, const TCHAR* FieldName, TArray<FString>& OutValues)
 	{
 		OutValues.Reset();
 		if (!Params.IsValid())
@@ -1348,197 +1818,6 @@ namespace UeAgentAssetOps
 	}
 }
 
-bool FUeAgentHttpServer::CmdEditorGetOpenAssets(TSharedPtr<FJsonObject>& OutData, FString& OutError) const
-{
-	UAssetEditorSubsystem* AssetEditorSubsystem = GEditor ? GEditor->GetEditorSubsystem<UAssetEditorSubsystem>() : nullptr;
-	if (!AssetEditorSubsystem)
-	{
-		OutError = TEXT("missing_asset_editor_subsystem");
-		return false;
-	}
-	const TArray<UObject*> OpenAssets = AssetEditorSubsystem->GetAllEditedAssets();
-	TArray<TSharedPtr<FJsonValue>> Assets;
-	for (UObject* Asset : OpenAssets)
-	{
-		if (!Asset)
-		{
-			continue;
-		}
-		TSharedPtr<FJsonObject> Item = MakeShared<FJsonObject>();
-		Item->SetStringField(TEXT("name"), Asset->GetName());
-		Item->SetStringField(TEXT("object_path"), Asset->GetPathName());
-		Item->SetStringField(TEXT("class"), Asset->GetClass() ? Asset->GetClass()->GetPathName() : TEXT(""));
-		Assets.Add(MakeShared<FJsonValueObject>(Item));
-	}
-	OutData->SetArrayField(TEXT("open_assets"), Assets);
-	OutData->SetNumberField(TEXT("count"), Assets.Num());
-	return true;
-}
-
-bool FUeAgentHttpServer::CmdOpenAssetEditor(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
-{
-	FString AssetPathInput;
-	if (!JsonTryGetString(Ctx.Params, TEXT("asset_path"), AssetPathInput) || AssetPathInput.IsEmpty())
-	{
-		OutError = TEXT("missing_asset_path");
-		return false;
-	}
-
-	UObject* Asset = UeAgentAssetOps::LoadAssetObject(AssetPathInput);
-	if (!Asset)
-	{
-		OutError = TEXT("asset_not_found");
-		return false;
-	}
-
-	UAssetEditorSubsystem* AssetEditorSubsystem = GEditor ? GEditor->GetEditorSubsystem<UAssetEditorSubsystem>() : nullptr;
-	if (!AssetEditorSubsystem)
-	{
-		OutError = TEXT("missing_asset_editor_subsystem");
-		return false;
-	}
-	AssetEditorSubsystem->OpenEditorForAsset(Asset);
-
-	OutData->SetStringField(TEXT("asset_path"), Asset->GetOutermost()->GetName());
-	OutData->SetStringField(TEXT("object_path"), Asset->GetPathName());
-	OutData->SetStringField(TEXT("class"), Asset->GetClass() ? Asset->GetClass()->GetPathName() : TEXT(""));
-	return true;
-}
-
-bool FUeAgentHttpServer::CmdSaveAsset(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
-{
-	FString AssetPathInput;
-	if (!JsonTryGetString(Ctx.Params, TEXT("asset_path"), AssetPathInput) || AssetPathInput.IsEmpty())
-	{
-		OutError = TEXT("missing_asset_path");
-		return false;
-	}
-
-	UObject* Asset = UeAgentAssetOps::LoadAssetObject(AssetPathInput);
-	if (!Asset)
-	{
-		OutError = TEXT("asset_not_found");
-		return false;
-	}
-
-	UPackage* Package = Asset->GetOutermost();
-	if (!Package)
-	{
-		OutError = TEXT("missing_package");
-		return false;
-	}
-
-	bool bOnlyIfDirty = true;
-	JsonTryGetBool(Ctx.Params, TEXT("only_if_dirty"), bOnlyIfDirty);
-	const bool bDirty = Package->IsDirty();
-	if (bOnlyIfDirty && !bDirty)
-	{
-		OutData->SetBoolField(TEXT("saved"), false);
-		OutData->SetStringField(TEXT("reason"), TEXT("not_dirty"));
-		OutData->SetStringField(TEXT("asset_path"), Package->GetName());
-		return true;
-	}
-
-	TArray<UPackage*> PackagesToSave;
-	PackagesToSave.Add(Package);
-	const bool bSaved = UEditorLoadingAndSavingUtils::SavePackages(PackagesToSave, false);
-	if (!bSaved)
-	{
-		OutError = TEXT("save_asset_failed");
-		return false;
-	}
-
-	OutData->SetBoolField(TEXT("saved"), true);
-	OutData->SetStringField(TEXT("asset_path"), Package->GetName());
-	OutData->SetStringField(TEXT("object_path"), Asset->GetPathName());
-	OutData->SetBoolField(TEXT("was_dirty"), bDirty);
-	return true;
-}
-
-bool FUeAgentHttpServer::CmdAssetDuplicate(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
-{
-	FString SourceAssetPath;
-	if (!JsonTryGetString(Ctx.Params, TEXT("source_asset_path"), SourceAssetPath) || SourceAssetPath.IsEmpty())
-	{
-		OutError = TEXT("missing_source_asset_path");
-		return false;
-	}
-
-	FString DestinationAssetPath;
-	if (!JsonTryGetString(Ctx.Params, TEXT("destination_asset_path"), DestinationAssetPath) || DestinationAssetPath.IsEmpty())
-	{
-		OutError = TEXT("missing_destination_asset_path");
-		return false;
-	}
-
-	UObject* SourceAsset = UeAgentAssetOps::LoadAssetObject(SourceAssetPath);
-	if (!SourceAsset)
-	{
-		OutError = TEXT("source_asset_not_found");
-		return false;
-	}
-
-	const FString NormalizedDestinationAssetPath = UeAgentAssetOps::NormalizeAssetPath(DestinationAssetPath);
-	if (!FPackageName::IsValidLongPackageName(NormalizedDestinationAssetPath))
-	{
-		OutError = TEXT("invalid_destination_asset_path");
-		return false;
-	}
-
-	const FString DestinationAssetName = FPackageName::GetLongPackageAssetName(NormalizedDestinationAssetPath);
-	const FString DestinationPackagePath = FPackageName::GetLongPackagePath(NormalizedDestinationAssetPath);
-	if (DestinationAssetName.IsEmpty() || DestinationPackagePath.IsEmpty())
-	{
-		OutError = TEXT("invalid_destination_asset_path");
-		return false;
-	}
-
-	if (UeAgentAssetOps::LoadAssetObject(NormalizedDestinationAssetPath))
-	{
-		OutError = TEXT("destination_asset_already_exists");
-		return false;
-	}
-
-	FAssetToolsModule& AssetToolsModule = FModuleManager::LoadModuleChecked<FAssetToolsModule>(TEXT("AssetTools"));
-	UObject* DuplicatedAsset = AssetToolsModule.Get().DuplicateAsset(DestinationAssetName, DestinationPackagePath, SourceAsset);
-	if (!DuplicatedAsset)
-	{
-		OutError = TEXT("duplicate_asset_failed");
-		return false;
-	}
-	FAssetRegistryModule::AssetCreated(DuplicatedAsset);
-
-	bool bOpenEditor = false;
-	JsonTryGetBool(Ctx.Params, TEXT("open_editor"), bOpenEditor);
-	if (bOpenEditor)
-	{
-		if (UAssetEditorSubsystem* AssetEditorSubsystem = GEditor ? GEditor->GetEditorSubsystem<UAssetEditorSubsystem>() : nullptr)
-		{
-			AssetEditorSubsystem->OpenEditorForAsset(DuplicatedAsset);
-		}
-	}
-
-	bool bSaveAfterDuplicate = false;
-	JsonTryGetBool(Ctx.Params, TEXT("save_after_duplicate"), bSaveAfterDuplicate);
-	if (bSaveAfterDuplicate)
-	{
-		TArray<UPackage*> PackagesToSave;
-		PackagesToSave.Add(DuplicatedAsset->GetOutermost());
-		if (!UEditorLoadingAndSavingUtils::SavePackages(PackagesToSave, false))
-		{
-			OutError = TEXT("save_asset_failed");
-			return false;
-		}
-	}
-
-	OutData->SetStringField(TEXT("source_asset_path"), UeAgentAssetOps::NormalizeAssetPath(SourceAsset->GetOutermost()->GetName()));
-	OutData->SetStringField(TEXT("asset_path"), NormalizedDestinationAssetPath);
-	OutData->SetStringField(TEXT("object_path"), DuplicatedAsset->GetPathName());
-	OutData->SetStringField(TEXT("class"), DuplicatedAsset->GetClass()->GetPathName());
-	OutData->SetBoolField(TEXT("saved"), bSaveAfterDuplicate);
-	return true;
-}
-
 bool FUeAgentHttpServer::CmdAssetMove(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	FString SourceAssetPath;
@@ -2186,50 +2465,9 @@ bool FUeAgentHttpServer::CmdAssetReferenceGraph(const FUeAgentRequestContext& Ct
 		JsonTryGetNumber(Ctx.Params, TEXT("max_path_string_hits"), MaxHitsNumber);
 		const int32 MaxHits = FMath::Clamp(static_cast<int32>(MaxHitsNumber), 1, 5000);
 
-		TArray<FString> PackageFiles;
-		IFileManager::Get().FindFilesRecursive(PackageFiles, *FPaths::ProjectContentDir(), TEXT("*.uasset"), true, false);
-		IFileManager::Get().FindFilesRecursive(PackageFiles, *FPaths::ProjectContentDir(), TEXT("*.umap"), true, false);
-		PackageFiles.Sort();
-
-		TArray<TSharedPtr<FJsonValue>> HitsJson;
-		const FTCHARToUTF8 SearchBytes(*PackageName);
-		const TArrayView<const uint8> SearchView(reinterpret_cast<const uint8*>(SearchBytes.Get()), SearchBytes.Length());
-		for (const FString& Filename : PackageFiles)
-		{
-			if (HitsJson.Num() >= MaxHits)
-			{
-				bTruncated = true;
-				break;
-			}
-
-			TArray<uint8> FileBytes;
-			if (!FFileHelper::LoadFileToArray(FileBytes, *Filename) || FileBytes.Num() < SearchView.Num())
-			{
-				continue;
-			}
-
-			bool bFound = false;
-			for (int32 Index = 0; Index <= FileBytes.Num() - SearchView.Num(); ++Index)
-			{
-				if (FMemory::Memcmp(FileBytes.GetData() + Index, SearchView.GetData(), SearchView.Num()) == 0)
-				{
-					bFound = true;
-					break;
-				}
-			}
-			if (!bFound)
-			{
-				continue;
-			}
-
-			FString HitPackageName;
-			FPackageName::TryConvertFilenameToLongPackageName(Filename, HitPackageName);
-			TSharedPtr<FJsonObject> Hit = MakeShared<FJsonObject>();
-			Hit->SetStringField(TEXT("package_name"), HitPackageName);
-			Hit->SetStringField(TEXT("filename"), Filename);
-			Hit->SetBoolField(TEXT("self_hit"), HitPackageName == PackageName);
-			HitsJson.Add(MakeShared<FJsonValueObject>(Hit));
-		}
+		bool bPathStringHitsTruncated = false;
+		TArray<TSharedPtr<FJsonValue>> HitsJson = CollectPackagePathStringHits(PackageName, MaxHits, bPathStringHitsTruncated);
+		bTruncated |= bPathStringHitsTruncated;
 
 		OutData->SetArrayField(TEXT("path_string_hits"), HitsJson);
 		OutData->SetNumberField(TEXT("path_string_hit_count"), HitsJson.Num());
@@ -3675,6 +3913,158 @@ bool FUeAgentHttpServer::CmdCurveApplyJson(const FUeAgentRequestContext& Ctx, TS
 	{
 		OutData->SetStringField(TEXT("output_file"), SavedOutputFile);
 	}
+	return true;
+}
+
+bool FUeAgentHttpServer::CmdEditorConsoleExec(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+{
+	OutData = MakeShared<FJsonObject>();
+
+	TArray<FString> Commands;
+	if (!UeAgentAssetOps::BuildConsoleExecCommandList(Ctx.Params, Commands, OutError))
+	{
+		return false;
+	}
+
+	bool bAllowHighRisk = false;
+	JsonTryGetBool(Ctx.Params, TEXT("allow_high_risk"), bAllowHighRisk);
+
+	bool bStopOnError = true;
+	JsonTryGetBool(Ctx.Params, TEXT("stop_on_error"), bStopOnError);
+
+	bool bFailOnUnhandled = true;
+	JsonTryGetBool(Ctx.Params, TEXT("fail_on_unhandled"), bFailOnUnhandled);
+
+	bool bAddToHistory = true;
+	JsonTryGetBool(Ctx.Params, TEXT("add_to_history"), bAddToHistory);
+
+	FString WorldContext = TEXT("auto");
+	JsonTryGetString(Ctx.Params, TEXT("world_context"), WorldContext);
+	WorldContext = UeAgentAssetOps::NormalizeConsoleWorldContext(WorldContext);
+
+	double MaxOutputCharsNumber = 65536.0;
+	JsonTryGetNumber(Ctx.Params, TEXT("max_output_chars"), MaxOutputCharsNumber);
+	const int32 MaxOutputChars = FMath::Clamp(FMath::RoundToInt(MaxOutputCharsNumber), 0, 1024 * 1024);
+
+	double MaxOutputLinesNumber = 128.0;
+	JsonTryGetNumber(Ctx.Params, TEXT("max_output_lines"), MaxOutputLinesNumber);
+	const int32 MaxOutputLines = FMath::Clamp(FMath::RoundToInt(MaxOutputLinesNumber), 0, 4096);
+
+	TArray<TSharedPtr<FJsonValue>> ResultValues;
+	int32 ExecutedCount = 0;
+	int32 HandledCount = 0;
+	int32 BlockedCount = 0;
+	int32 UnhandledCount = 0;
+	FString FirstFailure;
+	bool bStoppedEarly = false;
+
+	for (int32 Index = 0; Index < Commands.Num(); ++Index)
+	{
+		const FString& Command = Commands[Index];
+		TSharedPtr<FJsonObject> ResultObj = MakeShared<FJsonObject>();
+		ResultObj->SetNumberField(TEXT("index"), Index);
+		ResultObj->SetStringField(TEXT("command"), Command);
+
+		const FString HighRiskReason = UeAgentAssetOps::ConsoleExecHighRiskReason(Command);
+		const bool bHighRisk = !HighRiskReason.IsEmpty();
+		ResultObj->SetBoolField(TEXT("high_risk"), bHighRisk);
+		if (bHighRisk)
+		{
+			ResultObj->SetStringField(TEXT("high_risk_reason"), HighRiskReason);
+		}
+
+		if (bHighRisk && !bAllowHighRisk)
+		{
+			++BlockedCount;
+			ResultObj->SetBoolField(TEXT("blocked"), true);
+			ResultObj->SetBoolField(TEXT("handled"), false);
+			ResultObj->SetStringField(TEXT("error"), TEXT("high_risk_command_requires_allow_high_risk"));
+			ResultValues.Add(MakeShared<FJsonValueObject>(ResultObj));
+
+			if (FirstFailure.IsEmpty())
+			{
+				FirstFailure = TEXT("editor_console_command_blocked_high_risk");
+			}
+			if (bStopOnError)
+			{
+				bStoppedEarly = Index + 1 < Commands.Num();
+				break;
+			}
+			continue;
+		}
+
+		if (bAddToHistory)
+		{
+			IConsoleManager::Get().AddConsoleHistoryEntry(TEXT(""), *Command);
+		}
+
+		++ExecutedCount;
+		UeAgentAssetOps::FConsoleExecCaptureOutputDevice Capture(MaxOutputChars);
+		FString WorldContextUsed;
+		FString Route;
+		FString FailureReason;
+		const bool bHandled = UeAgentAssetOps::ExecuteConsoleCommandLikeStatusBarCmd(Command, WorldContext, Capture, WorldContextUsed, Route, FailureReason);
+
+		ResultObj->SetBoolField(TEXT("blocked"), false);
+		ResultObj->SetBoolField(TEXT("handled"), bHandled);
+		ResultObj->SetStringField(TEXT("route"), Route);
+		ResultObj->SetStringField(TEXT("world_context_used"), WorldContextUsed);
+		ResultObj->SetStringField(TEXT("output"), Capture.GetCombinedOutput());
+		ResultObj->SetBoolField(TEXT("output_truncated"), Capture.IsOutputTruncated());
+		ResultObj->SetNumberField(TEXT("output_line_count"), Capture.GetLineCount());
+		ResultObj->SetArrayField(TEXT("output_lines"), Capture.MakeLinesJson(MaxOutputLines));
+
+		if (bHandled)
+		{
+			++HandledCount;
+		}
+		else
+		{
+			++UnhandledCount;
+			if (!FailureReason.IsEmpty())
+			{
+				ResultObj->SetStringField(TEXT("failure_reason"), FailureReason);
+			}
+			if (FirstFailure.IsEmpty())
+			{
+				FirstFailure = FailureReason.IsEmpty() ? TEXT("editor_console_command_unhandled") : FailureReason;
+			}
+			if (bFailOnUnhandled && bStopOnError)
+			{
+				ResultValues.Add(MakeShared<FJsonValueObject>(ResultObj));
+				bStoppedEarly = Index + 1 < Commands.Num();
+				break;
+			}
+		}
+
+		ResultValues.Add(MakeShared<FJsonValueObject>(ResultObj));
+	}
+
+	OutData->SetStringField(TEXT("executor"), TEXT("Cmd"));
+	OutData->SetStringField(TEXT("world_context_requested"), WorldContext);
+	OutData->SetBoolField(TEXT("allow_high_risk"), bAllowHighRisk);
+	OutData->SetBoolField(TEXT("stop_on_error"), bStopOnError);
+	OutData->SetBoolField(TEXT("fail_on_unhandled"), bFailOnUnhandled);
+	OutData->SetBoolField(TEXT("add_to_history"), bAddToHistory);
+	OutData->SetNumberField(TEXT("command_count"), Commands.Num());
+	OutData->SetNumberField(TEXT("executed_count"), ExecutedCount);
+	OutData->SetNumberField(TEXT("handled_count"), HandledCount);
+	OutData->SetNumberField(TEXT("blocked_count"), BlockedCount);
+	OutData->SetNumberField(TEXT("unhandled_count"), UnhandledCount);
+	OutData->SetBoolField(TEXT("stopped_early"), bStoppedEarly);
+	OutData->SetArrayField(TEXT("results"), ResultValues);
+
+	if (BlockedCount > 0)
+	{
+		OutError = FirstFailure.IsEmpty() ? TEXT("editor_console_command_blocked_high_risk") : FirstFailure;
+		return false;
+	}
+	if (bFailOnUnhandled && UnhandledCount > 0)
+	{
+		OutError = FirstFailure.IsEmpty() ? TEXT("editor_console_command_unhandled") : FirstFailure;
+		return false;
+	}
+
 	return true;
 }
 

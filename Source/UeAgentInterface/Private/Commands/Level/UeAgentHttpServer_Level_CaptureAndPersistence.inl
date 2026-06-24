@@ -372,7 +372,69 @@ bool FUeAgentHttpServer::CmdScreenshotViewport(const FUeAgentRequestContext& Ctx
 		return false;
 	}
 
-	FUeAgentInterfaceLogger::Log(TEXT("CmdScreenshotViewport req=%s begin format=%s quality=%d max_size=%d"), *Ctx.RequestId, *Format, Quality, MaxSize);
+	bool bHasRequestedViewMode = false;
+	UeAgentLevelOps::FResolvedViewportViewMode RequestedViewMode;
+	if (!UeAgentLevelOps::TryResolveRequestedViewportViewMode(Ctx.Params, bHasRequestedViewMode, RequestedViewMode, OutError))
+	{
+		FUeAgentInterfaceLogger::Log(TEXT("CmdScreenshotViewport req=%s failed: %s"), *Ctx.RequestId, *OutError);
+		return false;
+	}
+
+	bool bRestoreViewMode = true;
+	JsonTryGetBool(Ctx.Params, TEXT("restore_view_mode"), bRestoreViewMode);
+	JsonTryGetBool(Ctx.Params, TEXT("restore_view_mode_after_capture"), bRestoreViewMode);
+
+	struct FScopedScreenshotViewModeRestore
+	{
+		FLevelEditorViewportClient* Client = nullptr;
+		UeAgentLevelOps::FViewportViewModeState PreviousState;
+		bool bNeedsRestore = false;
+
+		~FScopedScreenshotViewModeRestore()
+		{
+			RestoreNow();
+		}
+
+		void RestoreNow()
+		{
+			if (bNeedsRestore && Client)
+			{
+				UeAgentLevelOps::RestoreViewportViewModeState(Client, PreviousState);
+				bNeedsRestore = false;
+			}
+		}
+	};
+
+	FScopedScreenshotViewModeRestore ViewModeRestore;
+	FLevelEditorViewportClient* RequestedLVC = nullptr;
+	if (bHasRequestedViewMode)
+	{
+		FString SelectionReason;
+		RequestedLVC = UeAgentLevelOps::GetPreferredLevelViewportClient(&SelectionReason);
+		if (!RequestedLVC || !RequestedLVC->Viewport)
+		{
+			OutError = TEXT("no_level_editor_viewport");
+			FUeAgentInterfaceLogger::Log(TEXT("CmdScreenshotViewport req=%s failed: %s"), *Ctx.RequestId, *OutError);
+			return false;
+		}
+
+		OutData->SetObjectField(TEXT("requested_view_mode"), UeAgentLevelOps::MakeResolvedViewportViewModeJson(RequestedViewMode));
+		OutData->SetObjectField(TEXT("view_mode_before_capture"), UeAgentLevelOps::MakeCurrentViewportViewModeJson(RequestedLVC));
+		OutData->SetBoolField(TEXT("restore_view_mode"), bRestoreViewMode);
+
+		ViewModeRestore.Client = RequestedLVC;
+		ViewModeRestore.PreviousState = UeAgentLevelOps::CaptureViewportViewModeState(RequestedLVC);
+		ViewModeRestore.bNeedsRestore = bRestoreViewMode;
+		UeAgentLevelOps::ApplyResolvedViewportViewMode(RequestedLVC, RequestedViewMode);
+		OutData->SetObjectField(TEXT("view_mode_applied"), UeAgentLevelOps::MakeCurrentViewportViewModeJson(RequestedLVC));
+	}
+
+	FUeAgentInterfaceLogger::Log(TEXT("CmdScreenshotViewport req=%s begin format=%s quality=%d max_size=%d view_mode=%s"),
+		*Ctx.RequestId,
+		*Format,
+		Quality,
+		MaxSize,
+		bHasRequestedViewMode ? *RequestedViewMode.Key : TEXT("current"));
 
 	TArray<FColor> Pixels;
 	FIntPoint Size(0, 0);
@@ -398,14 +460,19 @@ bool FUeAgentHttpServer::CmdScreenshotViewport(const FUeAgentRequestContext& Ctx
 	}
 
 	const int64 Bytes = IFileManager::Get().FileSize(*ScreenshotOutPath);
+	bool bCaptureFinalLitComposition = bHasRequestedViewMode ? RequestedViewMode.bFinalLitComposition : true;
+	if (CaptureInfo.IsValid())
+	{
+		CaptureInfo->TryGetBoolField(TEXT("final_lit_composition"), bCaptureFinalLitComposition);
+	}
 
 	OutData->SetStringField(TEXT("file_path"), ScreenshotOutPath);
 	OutData->SetNumberField(TEXT("width"), ResizedSize.X);
 	OutData->SetNumberField(TEXT("height"), ResizedSize.Y);
 	OutData->SetNumberField(TEXT("bytes"), (double)Bytes);
 	OutData->SetStringField(TEXT("format"), Format);
-	OutData->SetStringField(TEXT("capture_mode"), TEXT("level_viewport_lit"));
-	OutData->SetBoolField(TEXT("final_lit_composition"), true);
+	OutData->SetStringField(TEXT("capture_mode"), bHasRequestedViewMode ? TEXT("level_viewport_view_mode") : TEXT("level_viewport_lit"));
+	OutData->SetBoolField(TEXT("final_lit_composition"), bCaptureFinalLitComposition);
 	OutData->SetBoolField(TEXT("scene_capture_buffer"), false);
 	OutData->SetNumberField(TEXT("warmup_frames_requested"), WarmupFrames);
 	if (CaptureInfo.IsValid())
@@ -425,9 +492,19 @@ bool FUeAgentHttpServer::CmdScreenshotViewport(const FUeAgentRequestContext& Ctx
 	Artifact->SetStringField(TEXT("mime"), Format == TEXT("png") ? TEXT("image/png") : (Format == TEXT("webp") ? TEXT("image/webp") : TEXT("image/jpeg")));
 	Artifact->SetNumberField(TEXT("width"), ResizedSize.X);
 	Artifact->SetNumberField(TEXT("height"), ResizedSize.Y);
-	Artifact->SetStringField(TEXT("capture_mode"), TEXT("level_viewport_lit"));
-	Artifact->SetBoolField(TEXT("final_lit_composition"), true);
+	Artifact->SetStringField(TEXT("capture_mode"), bHasRequestedViewMode ? TEXT("level_viewport_view_mode") : TEXT("level_viewport_lit"));
+	Artifact->SetBoolField(TEXT("final_lit_composition"), bCaptureFinalLitComposition);
 	OutArtifacts.Add(MakeShared<FJsonValueObject>(Artifact));
+
+	if (bHasRequestedViewMode && bRestoreViewMode && RequestedLVC)
+	{
+		ViewModeRestore.RestoreNow();
+		OutData->SetObjectField(TEXT("view_mode_after_restore"), UeAgentLevelOps::MakeCurrentViewportViewModeJson(RequestedLVC));
+	}
+	else if (bHasRequestedViewMode)
+	{
+		OutData->SetBoolField(TEXT("view_mode_left_applied"), true);
+	}
 
 	FUeAgentInterfaceLogger::Log(TEXT("CmdScreenshotViewport req=%s ok path=%s size=%dx%d bytes=%lld"),
 		*Ctx.RequestId,
@@ -1120,6 +1197,125 @@ bool FUeAgentHttpServer::CmdSaveCurrentLevel(const FUeAgentRequestContext& Ctx, 
 	return true;
 }
 
+bool FUeAgentHttpServer::CmdLevelCreateBlank(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+{
+	FString PackagePath;
+	if (!UeAgentLevelOps::TryGetLevelPackagePath(Ctx.Params, PackagePath))
+	{
+		OutError = TEXT("missing_level_path");
+		return false;
+	}
+
+	FString Filename;
+	if (!UeAgentLevelOps::TryLevelPackageToFilename(PackagePath, Filename, OutError))
+	{
+		return false;
+	}
+
+	FString OverwritePolicy = TEXT("fail");
+	JsonTryGetString(Ctx.Params, TEXT("overwrite_policy"), OverwritePolicy);
+	OverwritePolicy = OverwritePolicy.TrimStartAndEnd().ToLower();
+	if (OverwritePolicy.IsEmpty())
+	{
+		OverwritePolicy = TEXT("fail");
+	}
+	if (FPackageName::DoesPackageExist(PackagePath) && OverwritePolicy != TEXT("replace") && OverwritePolicy != TEXT("reuse"))
+	{
+		OutError = TEXT("level_asset_exists");
+		return false;
+	}
+
+	if (OverwritePolicy == TEXT("reuse") && FPackageName::DoesPackageExist(PackagePath))
+	{
+		UWorld* LoadedWorld = UEditorLoadingAndSavingUtils::LoadMap(Filename);
+		if (!LoadedWorld)
+		{
+			OutError = TEXT("level_open_failed");
+			return false;
+		}
+		OutData->SetStringField(TEXT("schema"), TEXT("uai.level.create_blank_result.v1"));
+		OutData->SetBoolField(TEXT("created"), false);
+		OutData->SetBoolField(TEXT("opened"), true);
+		OutData->SetBoolField(TEXT("saved"), false);
+		OutData->SetStringField(TEXT("asset_path"), PackagePath);
+		OutData->SetStringField(TEXT("filename"), Filename);
+		OutData->SetStringField(TEXT("world_path"), LoadedWorld->GetPathName());
+		OutData->SetStringField(TEXT("overwrite_policy"), OverwritePolicy);
+		return true;
+	}
+
+	bool bSaveExistingMap = true;
+	JsonTryGetBool(Ctx.Params, TEXT("save_existing_map"), bSaveExistingMap);
+	UWorld* NewWorld = UEditorLoadingAndSavingUtils::NewBlankMap(bSaveExistingMap);
+	if (!NewWorld)
+	{
+		OutError = TEXT("new_blank_map_failed");
+		return false;
+	}
+
+	const bool bSaved = UEditorLoadingAndSavingUtils::SaveMap(NewWorld, PackagePath);
+	if (!bSaved)
+	{
+		OutError = TEXT("level_save_failed");
+		return false;
+	}
+
+	OutData->SetStringField(TEXT("schema"), TEXT("uai.level.create_blank_result.v1"));
+	OutData->SetBoolField(TEXT("created"), true);
+	OutData->SetBoolField(TEXT("opened"), true);
+	OutData->SetBoolField(TEXT("saved"), true);
+	OutData->SetStringField(TEXT("asset_path"), PackagePath);
+	OutData->SetStringField(TEXT("filename"), Filename);
+	OutData->SetStringField(TEXT("world_path"), NewWorld->GetPathName());
+	OutData->SetStringField(TEXT("overwrite_policy"), OverwritePolicy);
+	OutData->SetBoolField(TEXT("save_existing_map"), bSaveExistingMap);
+	return true;
+}
+
+bool FUeAgentHttpServer::CmdLevelOpen(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+{
+	FString PackagePath;
+	if (!UeAgentLevelOps::TryGetLevelPackagePath(Ctx.Params, PackagePath))
+	{
+		OutError = TEXT("missing_level_path");
+		return false;
+	}
+
+	FString Filename;
+	if (!UeAgentLevelOps::TryLevelPackageToFilename(PackagePath, Filename, OutError))
+	{
+		return false;
+	}
+	if (!FPackageName::DoesPackageExist(PackagePath) && !FPaths::FileExists(Filename))
+	{
+		OutError = TEXT("level_asset_not_found");
+		return false;
+	}
+
+	bool bSaveExistingMap = true;
+	JsonTryGetBool(Ctx.Params, TEXT("save_existing_map"), bSaveExistingMap);
+	if (bSaveExistingMap && !UEditorLoadingAndSavingUtils::SaveDirtyPackages(true, false))
+	{
+		OutError = TEXT("save_existing_map_failed");
+		return false;
+	}
+
+	UWorld* LoadedWorld = UEditorLoadingAndSavingUtils::LoadMap(Filename);
+	if (!LoadedWorld)
+	{
+		OutError = TEXT("level_open_failed");
+		return false;
+	}
+
+	OutData->SetStringField(TEXT("schema"), TEXT("uai.level.open_result.v1"));
+	OutData->SetBoolField(TEXT("opened"), true);
+	OutData->SetStringField(TEXT("asset_path"), PackagePath);
+	OutData->SetStringField(TEXT("filename"), Filename);
+	OutData->SetStringField(TEXT("world_path"), LoadedWorld->GetPathName());
+	OutData->SetBoolField(TEXT("save_existing_map"), bSaveExistingMap);
+	return true;
+}
+
 bool FUeAgentHttpServer::CmdBeginTransaction(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError)
 {
 	FScopeLock Lock(&TransactionMutex);
@@ -1354,7 +1550,8 @@ bool FUeAgentHttpServer::TakeActiveViewportScreenshotWithOptions(int32 WarmupFra
 	OutCaptureInfo = MakeShared<FJsonObject>();
 	OutCaptureInfo->SetStringField(TEXT("schema"), TEXT("uai.viewport_capture.v1"));
 	OutCaptureInfo->SetStringField(TEXT("render_path"), TEXT("level_viewport_backbuffer"));
-	OutCaptureInfo->SetBoolField(TEXT("final_lit_composition"), true);
+	OutCaptureInfo->SetBoolField(TEXT("final_lit_composition"), UeAgentLevelOps::IsFinalLitCompositionViewMode(LVC->GetViewMode()));
+	OutCaptureInfo->SetStringField(TEXT("view_mode_name"), UeAgentLevelOps::ViewModeIndexToStableName(LVC->GetViewMode()));
 	OutCaptureInfo->SetNumberField(TEXT("warmup_frames_requested"), WarmupFrames);
 	OutCaptureInfo->SetNumberField(TEXT("draws_performed"), DrawsPerformed);
 	OutCaptureInfo->SetBoolField(TEXT("editor_world_tick_requested"), bTickEditorWorld);

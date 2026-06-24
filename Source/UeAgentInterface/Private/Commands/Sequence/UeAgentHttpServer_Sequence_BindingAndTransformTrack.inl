@@ -129,6 +129,7 @@ bool FUeAgentHttpServer::CmdSequenceRemoveActorBinding(const FUeAgentRequestCont
 	bool bRemoved = false;
 	if (MovieScene->FindPossessable(BindingGuid))
 	{
+		Sequence->UnbindPossessableObjects(BindingGuid);
 		MovieScene->RemovePossessable(BindingGuid);
 		bRemoved = true;
 	}
@@ -3936,10 +3937,28 @@ bool FUeAgentHttpServer::CmdSequenceAddSkeletalAnimationSection(const FUeAgentRe
 	JsonTryGetBool(Ctx.Params, TEXT("reverse"), bReverse);
 	NewSection->Params.bReverse = bReverse;
 
+	bool bSkipAnimNotifiers = false;
+	if (JsonTryGetBool(Ctx.Params, TEXT("skip_anim_notifiers"), bSkipAnimNotifiers))
+	{
+		NewSection->Params.bSkipAnimNotifiers = bSkipAnimNotifiers;
+	}
+
+	bool bForceCustomMode = false;
+	if (JsonTryGetBool(Ctx.Params, TEXT("force_custom_mode"), bForceCustomMode))
+	{
+		NewSection->Params.bForceCustomMode = bForceCustomMode;
+	}
+
 	FString SlotName;
 	if (JsonTryGetString(Ctx.Params, TEXT("slot_name"), SlotName) && !SlotName.TrimStartAndEnd().IsEmpty())
 	{
 		NewSection->Params.SlotName = FName(*SlotName.TrimStartAndEnd());
+	}
+
+	double RowIndexValue = static_cast<double>(NewSection->GetRowIndex());
+	if (JsonTryGetNumber(Ctx.Params, TEXT("row_index"), RowIndexValue))
+	{
+		NewSection->SetRowIndex(FMath::Max(0, FMath::RoundToInt(RowIndexValue)));
 	}
 
 	SkeletalAnimationTrack->AddSection(*NewSection);
@@ -3964,6 +3983,10 @@ bool FUeAgentHttpServer::CmdSequenceAddSkeletalAnimationSection(const FUeAgentRe
 	OutData->SetNumberField(TEXT("duration_seconds"), DurationSeconds);
 	OutData->SetNumberField(TEXT("play_rate"), PlayRateValue);
 	OutData->SetBoolField(TEXT("reverse"), bReverse);
+	OutData->SetStringField(TEXT("slot_name"), NewSection->Params.SlotName.ToString());
+	OutData->SetNumberField(TEXT("row_index"), NewSection->GetRowIndex());
+	OutData->SetBoolField(TEXT("skip_anim_notifiers"), NewSection->Params.bSkipAnimNotifiers);
+	OutData->SetBoolField(TEXT("force_custom_mode"), NewSection->Params.bForceCustomMode);
 	OutData->SetBoolField(TEXT("saved"), bSaveAfterSet);
 	return true;
 }

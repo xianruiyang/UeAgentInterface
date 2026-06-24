@@ -64,6 +64,8 @@ public:
 #include "Commands/StaticMesh/UeAgentHttpServer_StaticMeshMembers.h"
 #include "Commands/Blueprint/UeAgentHttpServer_BlueprintMembers.h"
 #include "Commands/NodeGraph/UeAgentHttpServer_NodeGraphMembers.h"
+#include "Commands/PaletteSearch/UeAgentHttpServer_PaletteSearchMembers.h"
+#include "Commands/OriginResolve/UeAgentHttpServer_OriginResolveMembers.h"
 #include "Commands/AnimBlueprint/UeAgentHttpServer_AnimBlueprintMembers.h"
 #include "Commands/Montage/UeAgentHttpServer_MontageMembers.h"
 #include "Commands/UMG/UeAgentHttpServer_UMGMembers.h"

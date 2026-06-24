@@ -1,18 +1,18 @@
 {
   "schema": "ue_agent_interface.coverage_matrix.v2",
-  "generated_at": "20260527_172544_825068",
+  "generated_at": "20260624_153308_459183",
   "project_root": "D:\\program\\UE\\GptProjectTest",
-  "command_count": 917,
+  "command_count": 939,
   "missing_doc": [],
   "missing_implementation": [],
   "missing_smoke": [],
   "smoke_debt": [],
   "smoke_coverage": {
     "status_counts": {
-      "direct": 917
+      "direct": 939
     },
     "priority_counts": {
-      "covered": 917
+      "covered": 939
     },
     "actionable_missing": [],
     "p0_commands": [],
@@ -22,7 +22,7 @@
     "p1_count": 0
   },
   "raw_generated_doc_count": 0,
-  "deprecated_doc_count": 201,
+  "deprecated_doc_count": 202,
   "rows": [
     {
       "command": "actor_list_components",
@@ -1298,6 +1298,44 @@
       "smoke_coverage_actionable": false
     },
     {
+      "command": "anim_sequence_analyze_root_motion",
+      "doc_file": "docs/commands/13_AnimationAssets_Skeleton.md",
+      "doc_status": "explicit",
+      "deprecated": false,
+      "implemented": true,
+      "smoke_tested": true,
+      "implementation_files": [
+        "Source/UeAgentInterface/Private/Commands/Animation/UeAgentHttpServer_AnimationAssets.cpp"
+      ],
+      "smoke_files": [
+        "Source/UeAgentInterfaceTests/Private/Smoke/UeAgentInterfaceSmoke_AnimationIKNiagara.cpp"
+      ],
+      "smoke_coverage_status": "direct",
+      "smoke_coverage_priority": "covered",
+      "smoke_coverage_reason": "command is directly referenced by an automation smoke test",
+      "smoke_coverage_recommended_action": "keep existing smoke coverage",
+      "smoke_coverage_actionable": false
+    },
+    {
+      "command": "anim_sequence_apply_bone_tracks",
+      "doc_file": "docs/commands/13_AnimationAssets_Skeleton.md",
+      "doc_status": "explicit",
+      "deprecated": false,
+      "implemented": true,
+      "smoke_tested": true,
+      "implementation_files": [
+        "Source/UeAgentInterface/Private/Commands/Animation/UeAgentHttpServer_AnimationAssets.cpp"
+      ],
+      "smoke_files": [
+        "Source/UeAgentInterfaceTests/Private/Smoke/UeAgentInterfaceSmoke_AnimationIKNiagara.cpp"
+      ],
+      "smoke_coverage_status": "direct",
+      "smoke_coverage_priority": "covered",
+      "smoke_coverage_reason": "command is directly referenced by an automation smoke test",
+      "smoke_coverage_recommended_action": "keep existing smoke coverage",
+      "smoke_coverage_actionable": false
+    },
+    {
       "command": "anim_sequence_get_info",
       "doc_file": "docs/commands/13_AnimationAssets_Skeleton.md",
       "doc_status": "explicit",
@@ -1309,6 +1347,25 @@
       ],
       "smoke_files": [
         "Source/UeAgentInterfaceTests/Private/Smoke/UeAgentInterfaceSmoke_AnimationIKNiagara.cpp"
+      ],
+      "smoke_coverage_status": "direct",
+      "smoke_coverage_priority": "covered",
+      "smoke_coverage_reason": "command is directly referenced by an automation smoke test",
+      "smoke_coverage_recommended_action": "keep existing smoke coverage",
+      "smoke_coverage_actionable": false
+    },
+    {
+      "command": "anim_sequence_sample_pose",
+      "doc_file": "docs/commands/13_AnimationAssets_Skeleton.md",
+      "doc_status": "explicit",
+      "deprecated": false,
+      "implemented": true,
+      "smoke_tested": true,
+      "implementation_files": [
+        "Source/UeAgentInterface/Private/Commands/Animation/UeAgentHttpServer_AnimationAssets.cpp"
+      ],
+      "smoke_files": [
+        "docs/smoke_coverage_ledger.json"
       ],
       "smoke_coverage_status": "direct",
       "smoke_coverage_priority": "covered",
@@ -1498,6 +1555,26 @@
         "Source/UeAgentInterface/Private/Server/UeAgentHttpServer.cpp"
       ],
       "smoke_files": [
+        "Source/UeAgentInterfaceTests/Private/Smoke/UeAgentInterfaceSmoke_Core.cpp"
+      ],
+      "smoke_coverage_status": "direct",
+      "smoke_coverage_priority": "covered",
+      "smoke_coverage_reason": "command is directly referenced by an automation smoke test",
+      "smoke_coverage_recommended_action": "keep existing smoke coverage",
+      "smoke_coverage_actionable": false
+    },
+    {
+      "command": "asset_delete",
+      "doc_file": "docs/commands/01_Core_Level_Assets_Landscape.md",
+      "doc_status": "explicit",
+      "deprecated": false,
+      "implemented": true,
+      "smoke_tested": true,
+      "implementation_files": [
+        "Source/UeAgentInterface/Private/Server/UeAgentHttpServer.cpp"
+      ],
+      "smoke_files": [
+        "Source/UeAgentInterfaceTests/Private/Smoke/UeAgentInterfaceSmoke_AnimationIKNiagara.cpp",
         "Source/UeAgentInterfaceTests/Private/Smoke/UeAgentInterfaceSmoke_Core.cpp"
       ],
       "smoke_coverage_status": "direct",
@@ -2919,6 +2996,25 @@
     },
     {
       "command": "blueprint_layout_graph_self_test",
+      "doc_file": "docs/commands/02_Blueprint.md",
+      "doc_status": "explicit",
+      "deprecated": false,
+      "implemented": true,
+      "smoke_tested": true,
+      "implementation_files": [
+        "Source/UeAgentInterface/Private/Commands/Blueprint/UeAgentHttpServer_Blueprint_AssetAndViewport.inl"
+      ],
+      "smoke_files": [
+        "Source/UeAgentInterfaceTests/Private/Smoke/UeAgentInterfaceSmoke_BlueprintUmg.cpp"
+      ],
+      "smoke_coverage_status": "direct",
+      "smoke_coverage_priority": "covered",
+      "smoke_coverage_reason": "command is directly referenced by an automation smoke test",
+      "smoke_coverage_recommended_action": "keep existing smoke coverage",
+      "smoke_coverage_actionable": false
+    },
+    {
+      "command": "blueprint_list_component_events",
       "doc_file": "docs/commands/02_Blueprint.md",
       "doc_status": "explicit",
       "deprecated": false,
@@ -4364,6 +4460,25 @@
     },
     {
       "command": "editor_close",
+      "doc_file": "docs/commands/01_Core_Level_Assets_Landscape.md",
+      "doc_status": "explicit",
+      "deprecated": false,
+      "implemented": true,
+      "smoke_tested": true,
+      "implementation_files": [
+        "Source/UeAgentInterface/Private/Server/UeAgentHttpServer.cpp"
+      ],
+      "smoke_files": [
+        "Source/UeAgentInterfaceTests/Private/Smoke/UeAgentInterfaceSmoke_Core.cpp"
+      ],
+      "smoke_coverage_status": "direct",
+      "smoke_coverage_priority": "covered",
+      "smoke_coverage_reason": "command is directly referenced by an automation smoke test",
+      "smoke_coverage_recommended_action": "keep existing smoke coverage",
+      "smoke_coverage_actionable": false
+    },
+    {
+      "command": "editor_console_exec",
       "doc_file": "docs/commands/01_Core_Level_Assets_Landscape.md",
       "doc_status": "explicit",
       "deprecated": false,
@@ -6001,6 +6116,25 @@
       "smoke_coverage_actionable": false
     },
     {
+      "command": "level_create_blank",
+      "doc_file": "docs/commands/01_Core_Level_Assets_Landscape.md",
+      "doc_status": "explicit",
+      "deprecated": false,
+      "implemented": true,
+      "smoke_tested": true,
+      "implementation_files": [
+        "Source/UeAgentInterface/Private/Server/UeAgentHttpServer.cpp"
+      ],
+      "smoke_files": [
+        "docs/smoke_coverage_ledger.json"
+      ],
+      "smoke_coverage_status": "direct",
+      "smoke_coverage_priority": "covered",
+      "smoke_coverage_reason": "command is directly referenced by an automation smoke test",
+      "smoke_coverage_recommended_action": "keep existing smoke coverage",
+      "smoke_coverage_actionable": false
+    },
+    {
       "command": "level_destroy_folder_actors",
       "doc_file": "docs/commands/deprecatedCommand/01_Core_Level_Assets_Landscape.md",
       "doc_status": "deprecated",
@@ -6210,6 +6344,25 @@
       "smoke_coverage_actionable": false
     },
     {
+      "command": "level_open",
+      "doc_file": "docs/commands/01_Core_Level_Assets_Landscape.md",
+      "doc_status": "explicit",
+      "deprecated": false,
+      "implemented": true,
+      "smoke_tested": true,
+      "implementation_files": [
+        "Source/UeAgentInterface/Private/Server/UeAgentHttpServer.cpp"
+      ],
+      "smoke_files": [
+        "docs/smoke_coverage_ledger.json"
+      ],
+      "smoke_coverage_status": "direct",
+      "smoke_coverage_priority": "covered",
+      "smoke_coverage_reason": "command is directly referenced by an automation smoke test",
+      "smoke_coverage_recommended_action": "keep existing smoke coverage",
+      "smoke_coverage_actionable": false
+    },
+    {
       "command": "level_set_actor_folder",
       "doc_file": "docs/commands/deprecatedCommand/01_Core_Level_Assets_Landscape.md",
       "doc_status": "deprecated",
@@ -6354,6 +6507,25 @@
       ],
       "smoke_files": [
         "Source/UeAgentInterfaceTests/Private/Smoke/UeAgentInterfaceSmoke_LevelViewportModeling.cpp"
+      ],
+      "smoke_coverage_status": "direct",
+      "smoke_coverage_priority": "covered",
+      "smoke_coverage_reason": "command is directly referenced by an automation smoke test",
+      "smoke_coverage_recommended_action": "keep existing smoke coverage",
+      "smoke_coverage_actionable": false
+    },
+    {
+      "command": "level_set_skeletal_animation_pose",
+      "doc_file": "docs/commands/01_Core_Level_Assets_Landscape.md",
+      "doc_status": "explicit",
+      "deprecated": false,
+      "implemented": true,
+      "smoke_tested": true,
+      "implementation_files": [
+        "Source/UeAgentInterface/Private/Server/UeAgentHttpServer.cpp"
+      ],
+      "smoke_files": [
+        "docs/smoke_coverage_ledger.json"
       ],
       "smoke_coverage_status": "direct",
       "smoke_coverage_priority": "covered",
@@ -7134,6 +7306,7 @@
         "Source/UeAgentInterface/Private/Commands/Material/UeAgentHttpServer_Material_DispatchAndAssetInfo.inl"
       ],
       "smoke_files": [
+        "Source/UeAgentInterfaceTests/Private/Smoke/UeAgentInterfaceSmoke_Core.cpp",
         "Source/UeAgentInterfaceTests/Private/Smoke/UeAgentInterfaceSmoke_MaterialStaticDeformerInput.cpp"
       ],
       "smoke_coverage_status": "direct",
@@ -7286,6 +7459,7 @@
         "Source/UeAgentInterface/Private/Commands/Material/UeAgentHttpServer_Material_DispatchAndAssetInfo.inl"
       ],
       "smoke_files": [
+        "Source/UeAgentInterfaceTests/Private/Smoke/UeAgentInterfaceSmoke_Core.cpp",
         "Source/UeAgentInterfaceTests/Private/Smoke/UeAgentInterfaceSmoke_MaterialStaticDeformerInput.cpp"
       ],
       "smoke_coverage_status": "direct",
@@ -9443,9 +9617,9 @@
     },
     {
       "command": "niagara_delete_asset",
-      "doc_file": "docs/commands/07_Niagara_System.md",
-      "doc_status": "explicit",
-      "deprecated": false,
+      "doc_file": "docs/commands/deprecatedCommand/07_Niagara_System.md",
+      "doc_status": "deprecated",
+      "deprecated": true,
       "implemented": true,
       "smoke_tested": true,
       "implementation_files": [
@@ -10791,6 +10965,46 @@
       "smoke_coverage_actionable": false
     },
     {
+      "command": "node_catalog_categories",
+      "doc_file": "docs/commands/28_NodeGraph.md",
+      "doc_status": "explicit",
+      "deprecated": false,
+      "implemented": true,
+      "smoke_tested": true,
+      "implementation_files": [
+        "Source/UeAgentInterface/Private/Server/UeAgentHttpServer.cpp"
+      ],
+      "smoke_files": [
+        "Source/UeAgentInterfaceTests/Private/Smoke/UeAgentInterfaceNodeCatalogOriginSmokeTests.cpp",
+        "docs/smoke_coverage_ledger.json"
+      ],
+      "smoke_coverage_status": "direct",
+      "smoke_coverage_priority": "covered",
+      "smoke_coverage_reason": "command is directly referenced by an automation smoke test",
+      "smoke_coverage_recommended_action": "keep existing smoke coverage",
+      "smoke_coverage_actionable": false
+    },
+    {
+      "command": "node_catalog_search",
+      "doc_file": "docs/commands/28_NodeGraph.md",
+      "doc_status": "explicit",
+      "deprecated": false,
+      "implemented": true,
+      "smoke_tested": true,
+      "implementation_files": [
+        "Source/UeAgentInterface/Private/Server/UeAgentHttpServer.cpp"
+      ],
+      "smoke_files": [
+        "Source/UeAgentInterfaceTests/Private/Smoke/UeAgentInterfaceNodeCatalogOriginSmokeTests.cpp",
+        "docs/smoke_coverage_ledger.json"
+      ],
+      "smoke_coverage_status": "direct",
+      "smoke_coverage_priority": "covered",
+      "smoke_coverage_reason": "command is directly referenced by an automation smoke test",
+      "smoke_coverage_recommended_action": "keep existing smoke coverage",
+      "smoke_coverage_actionable": false
+    },
+    {
       "command": "node_graph_layout",
       "doc_file": "docs/commands/28_NodeGraph.md",
       "doc_status": "explicit",
@@ -10822,6 +11036,25 @@
       ],
       "smoke_files": [
         "Source/UeAgentInterfaceTests/Private/Smoke/UeAgentInterfaceSmoke_BlueprintUmg.cpp"
+      ],
+      "smoke_coverage_status": "direct",
+      "smoke_coverage_priority": "covered",
+      "smoke_coverage_reason": "command is directly referenced by an automation smoke test",
+      "smoke_coverage_recommended_action": "keep existing smoke coverage",
+      "smoke_coverage_actionable": false
+    },
+    {
+      "command": "node_origin_resolve",
+      "doc_file": "docs/commands/28_NodeGraph.md",
+      "doc_status": "explicit",
+      "deprecated": false,
+      "implemented": true,
+      "smoke_tested": true,
+      "implementation_files": [
+        "Source/UeAgentInterface/Private/Server/UeAgentHttpServer.cpp"
+      ],
+      "smoke_files": [
+        "Source/UeAgentInterfaceTests/Private/Smoke/UeAgentInterfaceNodeCatalogOriginSmokeTests.cpp"
       ],
       "smoke_coverage_status": "direct",
       "smoke_coverage_priority": "covered",
@@ -12407,6 +12640,102 @@
       "smoke_coverage_actionable": false
     },
     {
+      "command": "probe_actor_transform_candidates",
+      "doc_file": "docs/commands/31_Probe.md",
+      "doc_status": "explicit",
+      "deprecated": false,
+      "implemented": true,
+      "smoke_tested": true,
+      "implementation_files": [
+        "Source/UeAgentInterface/Private/Server/UeAgentHttpServer.cpp"
+      ],
+      "smoke_files": [
+        "Source/UeAgentInterfaceTests/Private/Smoke/UeAgentInterfaceSmoke_LevelViewportModeling.cpp"
+      ],
+      "smoke_coverage_status": "direct",
+      "smoke_coverage_priority": "covered",
+      "smoke_coverage_reason": "command is directly referenced by an automation smoke test",
+      "smoke_coverage_recommended_action": "keep existing smoke coverage",
+      "smoke_coverage_actionable": false
+    },
+    {
+      "command": "probe_camera_pixel_scale",
+      "doc_file": "docs/commands/31_Probe.md",
+      "doc_status": "explicit",
+      "deprecated": false,
+      "implemented": true,
+      "smoke_tested": true,
+      "implementation_files": [
+        "Source/UeAgentInterface/Private/Server/UeAgentHttpServer.cpp"
+      ],
+      "smoke_files": [
+        "Source/UeAgentInterfaceTests/Private/Smoke/UeAgentInterfaceSmoke_LevelViewportModeling.cpp"
+      ],
+      "smoke_coverage_status": "direct",
+      "smoke_coverage_priority": "covered",
+      "smoke_coverage_reason": "command is directly referenced by an automation smoke test",
+      "smoke_coverage_recommended_action": "keep existing smoke coverage",
+      "smoke_coverage_actionable": false
+    },
+    {
+      "command": "probe_ik_goal_apply_candidate",
+      "doc_file": "docs/commands/31_Probe.md",
+      "doc_status": "explicit",
+      "deprecated": false,
+      "implemented": true,
+      "smoke_tested": true,
+      "implementation_files": [
+        "Source/UeAgentInterface/Private/Server/UeAgentHttpServer.cpp"
+      ],
+      "smoke_files": [
+        "Source/UeAgentInterfaceTests/Private/Smoke/UeAgentInterfaceSmoke_Sequence.cpp"
+      ],
+      "smoke_coverage_status": "direct",
+      "smoke_coverage_priority": "covered",
+      "smoke_coverage_reason": "command is directly referenced by an automation smoke test",
+      "smoke_coverage_recommended_action": "keep existing smoke coverage",
+      "smoke_coverage_actionable": false
+    },
+    {
+      "command": "probe_ik_goal_candidates",
+      "doc_file": "docs/commands/31_Probe.md",
+      "doc_status": "explicit",
+      "deprecated": false,
+      "implemented": true,
+      "smoke_tested": true,
+      "implementation_files": [
+        "Source/UeAgentInterface/Private/Server/UeAgentHttpServer.cpp"
+      ],
+      "smoke_files": [
+        "Source/UeAgentInterfaceTests/Private/Smoke/UeAgentInterfaceSmoke_AnimationIKNiagara.cpp",
+        "Source/UeAgentInterfaceTests/Private/Smoke/UeAgentInterfaceSmoke_Sequence.cpp"
+      ],
+      "smoke_coverage_status": "direct",
+      "smoke_coverage_priority": "covered",
+      "smoke_coverage_reason": "command is directly referenced by an automation smoke test",
+      "smoke_coverage_recommended_action": "keep existing smoke coverage",
+      "smoke_coverage_actionable": false
+    },
+    {
+      "command": "probe_ik_goal_review_frames",
+      "doc_file": "docs/commands/31_Probe.md",
+      "doc_status": "explicit",
+      "deprecated": false,
+      "implemented": true,
+      "smoke_tested": true,
+      "implementation_files": [
+        "Source/UeAgentInterface/Private/Server/UeAgentHttpServer.cpp"
+      ],
+      "smoke_files": [
+        "Source/UeAgentInterfaceTests/Private/Smoke/UeAgentInterfaceSmoke_Sequence.cpp"
+      ],
+      "smoke_coverage_status": "direct",
+      "smoke_coverage_priority": "covered",
+      "smoke_coverage_reason": "command is directly referenced by an automation smoke test",
+      "smoke_coverage_recommended_action": "keep existing smoke coverage",
+      "smoke_coverage_actionable": false
+    },
+    {
       "command": "project_settings_apply_page",
       "doc_file": "docs/commands/22_ProjectSettings_Config.md",
       "doc_status": "explicit",
@@ -13102,7 +13431,8 @@
         "Source/UeAgentInterface/Private/Server/UeAgentHttpServer.cpp"
       ],
       "smoke_files": [
-        "Source/UeAgentInterfaceTests/Private/Smoke/UeAgentInterfaceSmoke_Coverage.cpp"
+        "Source/UeAgentInterfaceTests/Private/Smoke/UeAgentInterfaceSmoke_Coverage.cpp",
+        "Source/UeAgentInterfaceTests/Private/Smoke/UeAgentInterfaceSmoke_LevelViewportModeling.cpp"
       ],
       "smoke_coverage_status": "direct",
       "smoke_coverage_priority": "covered",
@@ -13677,7 +14007,8 @@
         "Source/UeAgentInterface/Private/Commands/Sequence/UeAgentHttpServer_Sequence_DispatchAndLevelSequence.inl"
       ],
       "smoke_files": [
-        "Source/UeAgentInterfaceTests/Private/Smoke/UeAgentInterfaceSmoke_Coverage.cpp"
+        "Source/UeAgentInterfaceTests/Private/Smoke/UeAgentInterfaceSmoke_Coverage.cpp",
+        "Source/UeAgentInterfaceTests/Private/Smoke/UeAgentInterfaceSmoke_Sequence.cpp"
       ],
       "smoke_coverage_status": "direct",
       "smoke_coverage_priority": "covered",
@@ -16808,6 +17139,25 @@
       "smoke_coverage_actionable": false
     },
     {
+      "command": "umg_list_widget_events",
+      "doc_file": "docs/commands/03_UMG.md",
+      "doc_status": "explicit",
+      "deprecated": false,
+      "implemented": true,
+      "smoke_tested": true,
+      "implementation_files": [
+        "Source/UeAgentInterface/Private/Commands/UMG/UeAgentHttpServer_UMG.cpp"
+      ],
+      "smoke_files": [
+        "Source/UeAgentInterfaceTests/Private/Smoke/UeAgentInterfaceSmoke_BlueprintUmg.cpp"
+      ],
+      "smoke_coverage_status": "direct",
+      "smoke_coverage_priority": "covered",
+      "smoke_coverage_reason": "command is directly referenced by an automation smoke test",
+      "smoke_coverage_recommended_action": "keep existing smoke coverage",
+      "smoke_coverage_actionable": false
+    },
+    {
       "command": "umg_remove_widget",
       "doc_file": "docs/commands/deprecatedCommand/03_UMG.md",
       "doc_status": "deprecated",
@@ -16831,6 +17181,25 @@
       "doc_file": "docs/commands/deprecatedCommand/03_UMG.md",
       "doc_status": "deprecated",
       "deprecated": true,
+      "implemented": true,
+      "smoke_tested": true,
+      "implementation_files": [
+        "Source/UeAgentInterface/Private/Commands/UMG/UeAgentHttpServer_UMG.cpp"
+      ],
+      "smoke_files": [
+        "Source/UeAgentInterfaceTests/Private/Smoke/UeAgentInterfaceSmoke_BlueprintUmg.cpp"
+      ],
+      "smoke_coverage_status": "direct",
+      "smoke_coverage_priority": "covered",
+      "smoke_coverage_reason": "command is directly referenced by an automation smoke test",
+      "smoke_coverage_recommended_action": "keep existing smoke coverage",
+      "smoke_coverage_actionable": false
+    },
+    {
+      "command": "umg_screenshot",
+      "doc_file": "docs/commands/03_UMG.md",
+      "doc_status": "explicit",
+      "deprecated": false,
       "implemented": true,
       "smoke_tested": true,
       "implementation_files": [
@@ -17056,6 +17425,25 @@
       "smoke_coverage_actionable": false
     },
     {
+      "command": "viewport_get_editor_interaction_state",
+      "doc_file": "docs/commands/01_Core_Level_Assets_Landscape.md",
+      "doc_status": "explicit",
+      "deprecated": false,
+      "implemented": true,
+      "smoke_tested": true,
+      "implementation_files": [
+        "Source/UeAgentInterface/Private/Server/UeAgentHttpServer.cpp"
+      ],
+      "smoke_files": [
+        "Source/UeAgentInterfaceTests/Private/Smoke/UeAgentInterfaceSmoke_LevelViewportModeling.cpp"
+      ],
+      "smoke_coverage_status": "direct",
+      "smoke_coverage_priority": "covered",
+      "smoke_coverage_reason": "command is directly referenced by an automation smoke test",
+      "smoke_coverage_recommended_action": "keep existing smoke coverage",
+      "smoke_coverage_actionable": false
+    },
+    {
       "command": "viewport_get_warnings",
       "doc_file": "docs/commands/01_Core_Level_Assets_Landscape.md",
       "doc_status": "explicit",
@@ -17075,7 +17463,46 @@
       "smoke_coverage_actionable": false
     },
     {
+      "command": "viewport_list_view_modes",
+      "doc_file": "docs/commands/01_Core_Level_Assets_Landscape.md",
+      "doc_status": "explicit",
+      "deprecated": false,
+      "implemented": true,
+      "smoke_tested": true,
+      "implementation_files": [
+        "Source/UeAgentInterface/Private/Server/UeAgentHttpServer.cpp"
+      ],
+      "smoke_files": [
+        "Source/UeAgentInterfaceTests/Private/Smoke/UeAgentInterfaceSmoke_Coverage.cpp",
+        "Source/UeAgentInterfaceTests/Private/Smoke/UeAgentInterfaceSmoke_LevelViewportModeling.cpp"
+      ],
+      "smoke_coverage_status": "direct",
+      "smoke_coverage_priority": "covered",
+      "smoke_coverage_reason": "command is directly referenced by an automation smoke test",
+      "smoke_coverage_recommended_action": "keep existing smoke coverage",
+      "smoke_coverage_actionable": false
+    },
+    {
       "command": "viewport_pick_actor_at_screen",
+      "doc_file": "docs/commands/01_Core_Level_Assets_Landscape.md",
+      "doc_status": "explicit",
+      "deprecated": false,
+      "implemented": true,
+      "smoke_tested": true,
+      "implementation_files": [
+        "Source/UeAgentInterface/Private/Server/UeAgentHttpServer.cpp"
+      ],
+      "smoke_files": [
+        "Source/UeAgentInterfaceTests/Private/Smoke/UeAgentInterfaceSmoke_LevelViewportModeling.cpp"
+      ],
+      "smoke_coverage_status": "direct",
+      "smoke_coverage_priority": "covered",
+      "smoke_coverage_reason": "command is directly referenced by an automation smoke test",
+      "smoke_coverage_recommended_action": "keep existing smoke coverage",
+      "smoke_coverage_actionable": false
+    },
+    {
+      "command": "viewport_restore_editor_interaction_state",
       "doc_file": "docs/commands/01_Core_Level_Assets_Landscape.md",
       "doc_status": "explicit",
       "deprecated": false,
@@ -17142,7 +17569,8 @@
         "Source/UeAgentInterface/Private/Server/UeAgentHttpServer.cpp"
       ],
       "smoke_files": [
-        "Source/UeAgentInterfaceTests/Private/Smoke/UeAgentInterfaceSmoke_Coverage.cpp"
+        "Source/UeAgentInterfaceTests/Private/Smoke/UeAgentInterfaceSmoke_Coverage.cpp",
+        "Source/UeAgentInterfaceTests/Private/Smoke/UeAgentInterfaceSmoke_LevelViewportModeling.cpp"
       ],
       "smoke_coverage_status": "direct",
       "smoke_coverage_priority": "covered",
@@ -17474,6 +17902,6 @@
       "smoke_coverage_actionable": false
     }
   ],
-  "generated_catalog_file": "Plugins\\UeAgentInterface\\docs\\generated\\implemented_command_catalog.md",
-  "smoke_debt_file": "Plugins\\UeAgentInterface\\docs\\generated\\smoke_coverage_debt.md"
+  "generated_catalog_file": "D:\\program\\UE\\GptProjectTest\\Plugins\\UeAgentInterface\\docs\\generated\\implemented_command_catalog.md",
+  "smoke_debt_file": "D:\\program\\UE\\GptProjectTest\\Plugins\\UeAgentInterface\\docs\\generated\\smoke_coverage_debt.md"
 }

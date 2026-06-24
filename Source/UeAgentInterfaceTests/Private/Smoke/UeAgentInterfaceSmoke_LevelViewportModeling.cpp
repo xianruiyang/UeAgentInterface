@@ -3,6 +3,7 @@
 #include "UeAgentSmokeTestSharedIncludes.inl"
 
 #include "Components/DirectionalLightComponent.h"
+#include "Engine/StaticMeshActor.h"
 
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(
 	FUeAgentInterfaceLevelReadonlySmokeTest,
@@ -61,6 +62,251 @@ bool FUeAgentInterfaceLevelReadonlySmokeTest::RunTest(const FString& Parameters)
 			TestTrue(TEXT("Viewport info contains selection reason"), (*ViewportInfo)->HasTypedField<EJson::String>(TEXT("selection_reason")));
 			TestTrue(TEXT("Viewport info contains client index"), (*ViewportInfo)->HasTypedField<EJson::Number>(TEXT("viewport_client_index")));
 			TestTrue(TEXT("Viewport info contains size"), (*ViewportInfo)->HasTypedField<EJson::Object>(TEXT("size")));
+			TestTrue(TEXT("Viewport info contains widget mode"), (*ViewportInfo)->HasTypedField<EJson::String>(TEXT("widget_mode")));
+			TestTrue(TEXT("Viewport info contains show flags"), (*ViewportInfo)->HasTypedField<EJson::Object>(TEXT("show_flags")));
+			TestTrue(TEXT("Viewport info contains stable view mode name"), (*ViewportInfo)->HasTypedField<EJson::String>(TEXT("view_mode_name")));
+			TestTrue(TEXT("Viewport info contains view mode state"), (*ViewportInfo)->HasTypedField<EJson::Object>(TEXT("view_mode_state")));
+		}
+	}
+
+	FString OriginalViewModeName = TEXT("lit");
+	if (ViewportData && ViewportData->IsValid())
+	{
+		const TSharedPtr<FJsonObject>* ViewportInfo = nullptr;
+		if ((*ViewportData)->TryGetObjectField(TEXT("viewport"), ViewportInfo) && ViewportInfo && ViewportInfo->IsValid())
+		{
+			(*ViewportInfo)->TryGetStringField(TEXT("view_mode_name"), OriginalViewModeName);
+		}
+	}
+
+	const FString ViewModeCatalogBody = MakeExecRequestBody(TEXT("smoke-viewport-view-modes-list-001"), TEXT("viewport_list_view_modes"));
+	FHttpSmokeResult ViewModeCatalogResult;
+	TestTrue(TEXT("Viewport list view modes request succeeded"), ExecuteHttpJsonRequest(TEXT("POST"), ServerScope.BaseUrl + TEXT("/api/exec"), ServerScope.Token, ViewModeCatalogBody, ViewModeCatalogResult));
+	TestEqual(TEXT("Viewport list view modes status code"), ViewModeCatalogResult.StatusCode, 200);
+
+	TSharedPtr<FJsonObject> ViewModeCatalogJson;
+	TestTrue(TEXT("Viewport list view modes parses JSON"), ParseJson(ViewModeCatalogResult.Body, ViewModeCatalogJson));
+	TestTrue(TEXT("Viewport list view modes ok"), ViewModeCatalogJson.IsValid() && ViewModeCatalogJson->GetBoolField(TEXT("ok")));
+	const TSharedPtr<FJsonObject>* ViewModeCatalogData = nullptr;
+	TestTrue(TEXT("Viewport list view modes contains data object"), ViewModeCatalogJson.IsValid() && ViewModeCatalogJson->TryGetObjectField(TEXT("data"), ViewModeCatalogData) && ViewModeCatalogData && ViewModeCatalogData->IsValid());
+	if (ViewModeCatalogData && ViewModeCatalogData->IsValid())
+	{
+		TestTrue(TEXT("Viewport view modes catalog has mode count"), (*ViewModeCatalogData)->GetNumberField(TEXT("mode_count")) > 10.0);
+		const TArray<TSharedPtr<FJsonValue>>* ModeValues = nullptr;
+		TestTrue(TEXT("Viewport view modes catalog has modes array"), (*ViewModeCatalogData)->TryGetArrayField(TEXT("modes"), ModeValues) && ModeValues);
+		bool bFoundLumenOverview = false;
+		bool bFoundShaderComplexity = false;
+		if (ModeValues)
+		{
+			for (const TSharedPtr<FJsonValue>& ModeValue : *ModeValues)
+			{
+				const TSharedPtr<FJsonObject>* ModeObj = nullptr;
+				if (!ModeValue.IsValid() || !ModeValue->TryGetObject(ModeObj) || !ModeObj || !ModeObj->IsValid())
+				{
+					continue;
+				}
+				FString Key;
+				(*ModeObj)->TryGetStringField(TEXT("key"), Key);
+				FString Family;
+				(*ModeObj)->TryGetStringField(TEXT("visualization_family"), Family);
+				bFoundLumenOverview |= (Family == TEXT("lumen") && Key == TEXT("lumen_overview"));
+				bFoundShaderComplexity |= Key == TEXT("shader_complexity");
+			}
+		}
+		TestTrue(TEXT("Viewport view modes catalog includes shader complexity"), bFoundShaderComplexity);
+		TestTrue(TEXT("Viewport view modes catalog includes lumen overview"), bFoundLumenOverview);
+	}
+
+	const FString ViewModeScreenshotBody = MakeExecRequestBody(
+		TEXT("smoke-viewport-view-mode-shot-001"),
+		TEXT("screenshot_viewport"),
+		TEXT("{\"view_mode\":\"lumen:overview\",\"restore_view_mode\":true,\"format\":\"jpg\",\"max_size\":64,\"warmup_frames\":0}"));
+	FHttpSmokeResult ViewModeScreenshotResult;
+	TestTrue(TEXT("Viewport view mode screenshot request succeeded"), ExecuteHttpJsonRequest(TEXT("POST"), ServerScope.BaseUrl + TEXT("/api/exec"), ServerScope.Token, ViewModeScreenshotBody, ViewModeScreenshotResult, 30.0));
+	TestEqual(TEXT("Viewport view mode screenshot status code"), ViewModeScreenshotResult.StatusCode, 200);
+
+	TSharedPtr<FJsonObject> ViewModeScreenshotJson;
+	TestTrue(TEXT("Viewport view mode screenshot parses JSON"), ParseJson(ViewModeScreenshotResult.Body, ViewModeScreenshotJson));
+	TestTrue(TEXT("Viewport view mode screenshot ok"), ViewModeScreenshotJson.IsValid() && ViewModeScreenshotJson->GetBoolField(TEXT("ok")));
+	const TSharedPtr<FJsonObject>* ViewModeScreenshotData = nullptr;
+	TestTrue(TEXT("Viewport view mode screenshot contains data object"), ViewModeScreenshotJson.IsValid() && ViewModeScreenshotJson->TryGetObjectField(TEXT("data"), ViewModeScreenshotData) && ViewModeScreenshotData && ViewModeScreenshotData->IsValid());
+	if (ViewModeScreenshotData && ViewModeScreenshotData->IsValid())
+	{
+		const TSharedPtr<FJsonObject>* RequestedMode = nullptr;
+		TestTrue(TEXT("Viewport view mode screenshot contains requested mode"), (*ViewModeScreenshotData)->TryGetObjectField(TEXT("requested_view_mode"), RequestedMode) && RequestedMode && RequestedMode->IsValid());
+		if (RequestedMode && RequestedMode->IsValid())
+		{
+			TestEqual(TEXT("Viewport view mode screenshot requested lumen family"), (*RequestedMode)->GetStringField(TEXT("visualization_family")), FString(TEXT("lumen")));
+			TestEqual(TEXT("Viewport view mode screenshot requested overview mode"), (*RequestedMode)->GetStringField(TEXT("visualization_mode")), FString(TEXT("Overview")));
+		}
+
+		const TSharedPtr<FJsonObject>* AppliedMode = nullptr;
+		TestTrue(TEXT("Viewport view mode screenshot contains applied mode"), (*ViewModeScreenshotData)->TryGetObjectField(TEXT("view_mode_applied"), AppliedMode) && AppliedMode && AppliedMode->IsValid());
+		if (AppliedMode && AppliedMode->IsValid())
+		{
+			TestEqual(TEXT("Viewport view mode screenshot applied lumen mode"), (*AppliedMode)->GetStringField(TEXT("view_mode_name")), FString(TEXT("lumen_visualization")));
+		}
+
+		const TSharedPtr<FJsonObject>* RestoredMode = nullptr;
+		TestTrue(TEXT("Viewport view mode screenshot contains restored mode"), (*ViewModeScreenshotData)->TryGetObjectField(TEXT("view_mode_after_restore"), RestoredMode) && RestoredMode && RestoredMode->IsValid());
+		if (RestoredMode && RestoredMode->IsValid())
+		{
+			TestEqual(TEXT("Viewport view mode screenshot restores previous mode"), (*RestoredMode)->GetStringField(TEXT("view_mode_name")), OriginalViewModeName);
+		}
+	}
+
+	const FVector ProbeBaseLocation(24000.0f, 24000.0f, 80.0f);
+	const FString ProbeLabel = FString::Printf(TEXT("UAI_Smoke_ProbeTransform_%s"), *FGuid::NewGuid().ToString(EGuidFormats::Digits));
+	UWorld* EditorWorld = GEditor ? GEditor->GetEditorWorldContext().World() : nullptr;
+	AStaticMeshActor* ProbeActor = EditorWorld ? EditorWorld->SpawnActor<AStaticMeshActor>(ProbeBaseLocation, FRotator::ZeroRotator) : nullptr;
+	TestNotNull(TEXT("Probe transform smoke spawned actor"), ProbeActor);
+	if (ProbeActor)
+	{
+		ProbeActor->SetActorLabel(ProbeLabel);
+		ProbeActor->SetActorScale3D(FVector(0.35f, 0.35f, 0.35f));
+		if (UStaticMesh* CubeMesh = LoadObject<UStaticMesh>(nullptr, TEXT("/Engine/BasicShapes/Cube.Cube")))
+		{
+			ProbeActor->GetStaticMeshComponent()->SetStaticMesh(CubeMesh);
+		}
+	}
+
+	const FString ProbeCameraBody = MakeExecRequestBody(
+		TEXT("smoke-probe-transform-camera-001"),
+		TEXT("viewport_set_camera"),
+		TEXT("{\"location\":{\"x\":23720,\"y\":23640,\"z\":210},\"rotation\":{\"pitch\":-18,\"yaw\":52,\"roll\":0},\"fov\":35}"));
+	FHttpSmokeResult ProbeCameraResult;
+	TestTrue(TEXT("Probe transform viewport camera request succeeded"), ExecuteHttpJsonRequest(TEXT("POST"), ServerScope.BaseUrl + TEXT("/api/exec"), ServerScope.Token, ProbeCameraBody, ProbeCameraResult));
+	TestEqual(TEXT("Probe transform viewport camera status code"), ProbeCameraResult.StatusCode, 200);
+
+	const FString ProbeParams = FString::Printf(
+		TEXT("{\"id\":\"%s\",\"format\":\"png\",\"max_size\":64,\"warmup_frames\":0,\"write_individual_frames\":false,\"frame_sheet_max_size\":256,\"candidates\":[{\"label\":\"x25\",\"location\":{\"x\":%.3f,\"y\":%.3f,\"z\":%.3f}},{\"label\":\"rot45_scale\",\"rotation\":{\"pitch\":0,\"yaw\":45,\"roll\":0},\"scale\":{\"x\":0.5,\"y\":0.5,\"z\":0.5}}]}"),
+		*ProbeLabel,
+		ProbeBaseLocation.X + 25.0f,
+		ProbeBaseLocation.Y,
+		ProbeBaseLocation.Z);
+	const FString ProbeBody = MakeExecRequestBody(
+		TEXT("smoke-probe-transform-candidates-001"),
+		TEXT("probe_actor_transform_candidates"),
+		ProbeParams);
+	FHttpSmokeResult ProbeResult;
+	TestTrue(TEXT("Probe transform candidates request succeeded"), ExecuteHttpJsonRequest(TEXT("POST"), ServerScope.BaseUrl + TEXT("/api/exec"), ServerScope.Token, ProbeBody, ProbeResult, 30.0));
+	TestEqual(TEXT("Probe transform candidates status code"), ProbeResult.StatusCode, 200);
+
+	TSharedPtr<FJsonObject> ProbeJson;
+	TestTrue(TEXT("Probe transform candidates parses JSON"), ParseJson(ProbeResult.Body, ProbeJson));
+	TestTrue(TEXT("Probe transform candidates ok"), ProbeJson.IsValid() && ProbeJson->GetBoolField(TEXT("ok")));
+	const TSharedPtr<FJsonObject>* ProbeData = nullptr;
+	TestTrue(TEXT("Probe transform candidates contains data"), ProbeJson.IsValid() && ProbeJson->TryGetObjectField(TEXT("data"), ProbeData) && ProbeData && ProbeData->IsValid());
+	if (ProbeData && ProbeData->IsValid())
+	{
+		TestEqual(TEXT("Probe transform candidate_count"), static_cast<int32>(FMath::RoundToInt((*ProbeData)->GetNumberField(TEXT("candidate_count")))), 2);
+		TestEqual(TEXT("Probe transform frame_count includes original"), static_cast<int32>(FMath::RoundToInt((*ProbeData)->GetNumberField(TEXT("frame_count")))), 3);
+		TestTrue(TEXT("Probe transform restored flag"), (*ProbeData)->GetBoolField(TEXT("restored")));
+
+		const TSharedPtr<FJsonObject>* FinalTransform = nullptr;
+		TestTrue(TEXT("Probe transform final transform exists"), (*ProbeData)->TryGetObjectField(TEXT("final_transform"), FinalTransform) && FinalTransform && FinalTransform->IsValid());
+		if (FinalTransform && FinalTransform->IsValid())
+		{
+			const TSharedPtr<FJsonObject>* FinalLocation = nullptr;
+			TestTrue(TEXT("Probe transform final location exists"), (*FinalTransform)->TryGetObjectField(TEXT("location"), FinalLocation) && FinalLocation && FinalLocation->IsValid());
+			if (FinalLocation && FinalLocation->IsValid())
+			{
+				TestTrue(TEXT("Probe transform restored location x"), FMath::IsNearlyEqual(static_cast<float>((*FinalLocation)->GetNumberField(TEXT("x"))), ProbeBaseLocation.X, 0.1f));
+				TestTrue(TEXT("Probe transform restored location y"), FMath::IsNearlyEqual(static_cast<float>((*FinalLocation)->GetNumberField(TEXT("y"))), ProbeBaseLocation.Y, 0.1f));
+			}
+		}
+
+		const TSharedPtr<FJsonObject>* FrameSheet = nullptr;
+		TestTrue(TEXT("Probe transform frame sheet exists"), (*ProbeData)->TryGetObjectField(TEXT("frame_sheet"), FrameSheet) && FrameSheet && FrameSheet->IsValid());
+		if (FrameSheet && FrameSheet->IsValid())
+		{
+			FString SheetPath;
+			TestTrue(TEXT("Probe transform frame sheet has path"), (*FrameSheet)->TryGetStringField(TEXT("file_path"), SheetPath) && !SheetPath.IsEmpty());
+			TestTrue(TEXT("Probe transform frame sheet file exists"), !SheetPath.IsEmpty() && IFileManager::Get().FileExists(*SheetPath));
+		}
+	}
+
+	const FString PixelScaleParams = FString::Printf(
+		TEXT("{\"id\":\"%s\",\"target_point\":\"bounds_center\"}"),
+		*ProbeLabel);
+	const FString PixelScaleBody = MakeExecRequestBody(
+		TEXT("smoke-probe-camera-pixel-scale-001"),
+		TEXT("probe_camera_pixel_scale"),
+		PixelScaleParams);
+	FHttpSmokeResult PixelScaleResult;
+	TestTrue(TEXT("Probe camera pixel scale request succeeded"), ExecuteHttpJsonRequest(TEXT("POST"), ServerScope.BaseUrl + TEXT("/api/exec"), ServerScope.Token, PixelScaleBody, PixelScaleResult));
+	TestEqual(TEXT("Probe camera pixel scale status code"), PixelScaleResult.StatusCode, 200);
+
+	TSharedPtr<FJsonObject> PixelScaleJson;
+	TestTrue(TEXT("Probe camera pixel scale parses JSON"), ParseJson(PixelScaleResult.Body, PixelScaleJson));
+	TestTrue(TEXT("Probe camera pixel scale ok"), PixelScaleJson.IsValid() && PixelScaleJson->GetBoolField(TEXT("ok")));
+	const TSharedPtr<FJsonObject>* PixelScaleData = nullptr;
+	TestTrue(TEXT("Probe camera pixel scale contains data"), PixelScaleJson.IsValid() && PixelScaleJson->TryGetObjectField(TEXT("data"), PixelScaleData) && PixelScaleData && PixelScaleData->IsValid());
+	if (PixelScaleData && PixelScaleData->IsValid())
+	{
+		TestEqual(TEXT("Probe camera pixel scale schema"), (*PixelScaleData)->GetStringField(TEXT("schema")), FString(TEXT("uai.probe.camera_pixel_scale.v1")));
+		TestTrue(TEXT("Probe camera pixel scale target is in front alias"), (*PixelScaleData)->GetBoolField(TEXT("in_front")));
+		TestTrue(TEXT("Probe camera pixel scale target is in front"), (*PixelScaleData)->GetBoolField(TEXT("in_front_of_camera")));
+		TestTrue(TEXT("Probe camera pixel scale valid"), (*PixelScaleData)->GetBoolField(TEXT("pixel_scale_valid")));
+		TestTrue(TEXT("Probe camera pixel scale has camera-space location"), (*PixelScaleData)->HasTypedField<EJson::Object>(TEXT("camera_space_location")));
+
+		const TSharedPtr<FJsonObject>* Units = nullptr;
+		TestTrue(TEXT("Probe camera pixel scale has units"), (*PixelScaleData)->TryGetObjectField(TEXT("camera_space_units_per_pixel"), Units) && Units && Units->IsValid());
+		if (Units && Units->IsValid())
+		{
+			TestTrue(TEXT("Probe camera pixel scale x positive"), (*Units)->GetNumberField(TEXT("x")) > 0.0);
+			TestTrue(TEXT("Probe camera pixel scale y positive"), (*Units)->GetNumberField(TEXT("y")) > 0.0);
+		}
+	}
+	if (ProbeActor && !ProbeActor->IsActorBeingDestroyed())
+	{
+		ProbeActor->Destroy();
+	}
+
+	const FString InteractionStateBody = MakeExecRequestBody(TEXT("smoke-viewport-interaction-get-001"), TEXT("viewport_get_editor_interaction_state"));
+	FHttpSmokeResult InteractionStateResult;
+	TestTrue(TEXT("Viewport interaction state request succeeded"), ExecuteHttpJsonRequest(TEXT("POST"), ServerScope.BaseUrl + TEXT("/api/exec"), ServerScope.Token, InteractionStateBody, InteractionStateResult));
+	TestEqual(TEXT("Viewport interaction state status code"), InteractionStateResult.StatusCode, 200);
+
+	TSharedPtr<FJsonObject> InteractionStateJson;
+	TestTrue(TEXT("Viewport interaction state parses JSON"), ParseJson(InteractionStateResult.Body, InteractionStateJson));
+	const TSharedPtr<FJsonObject>* InteractionStateData = nullptr;
+	TestTrue(TEXT("Viewport interaction state contains data object"), InteractionStateJson.IsValid() && InteractionStateJson->TryGetObjectField(TEXT("data"), InteractionStateData) && InteractionStateData && InteractionStateData->IsValid());
+	if (InteractionStateData && InteractionStateData->IsValid())
+	{
+		TestTrue(TEXT("Viewport interaction state contains viewport"), (*InteractionStateData)->HasTypedField<EJson::Object>(TEXT("viewport")));
+		TestTrue(TEXT("Viewport interaction state contains viewports"), (*InteractionStateData)->HasTypedField<EJson::Array>(TEXT("viewports")));
+	}
+
+	const FString GameViewBody = MakeExecRequestBody(TEXT("smoke-viewport-interaction-game-001"), TEXT("viewport_set_game_view"), TEXT("{\"game_view\":true}"));
+	FHttpSmokeResult GameViewResult;
+	TestTrue(TEXT("Viewport game view enable request succeeded"), ExecuteHttpJsonRequest(TEXT("POST"), ServerScope.BaseUrl + TEXT("/api/exec"), ServerScope.Token, GameViewBody, GameViewResult));
+	TestEqual(TEXT("Viewport game view enable status code"), GameViewResult.StatusCode, 200);
+
+	const FString RestoreInteractionBody = MakeExecRequestBody(TEXT("smoke-viewport-interaction-restore-001"), TEXT("viewport_restore_editor_interaction_state"), TEXT("{\"all_viewports\":true,\"game_view\":false,\"mode_widgets\":true,\"selection\":true,\"pivot\":true,\"widget_mode\":\"translate_if_none\"}"));
+	FHttpSmokeResult RestoreInteractionResult;
+	TestTrue(TEXT("Viewport interaction restore request succeeded"), ExecuteHttpJsonRequest(TEXT("POST"), ServerScope.BaseUrl + TEXT("/api/exec"), ServerScope.Token, RestoreInteractionBody, RestoreInteractionResult));
+	TestEqual(TEXT("Viewport interaction restore status code"), RestoreInteractionResult.StatusCode, 200);
+
+	TSharedPtr<FJsonObject> RestoreInteractionJson;
+	TestTrue(TEXT("Viewport interaction restore parses JSON"), ParseJson(RestoreInteractionResult.Body, RestoreInteractionJson));
+	const TSharedPtr<FJsonObject>* RestoreInteractionData = nullptr;
+	TestTrue(TEXT("Viewport interaction restore contains data object"), RestoreInteractionJson.IsValid() && RestoreInteractionJson->TryGetObjectField(TEXT("data"), RestoreInteractionData) && RestoreInteractionData && RestoreInteractionData->IsValid());
+	if (RestoreInteractionData && RestoreInteractionData->IsValid())
+	{
+		const TSharedPtr<FJsonObject>* RestoredViewport = nullptr;
+		TestTrue(TEXT("Viewport interaction restore contains viewport"), (*RestoreInteractionData)->TryGetObjectField(TEXT("viewport"), RestoredViewport) && RestoredViewport && RestoredViewport->IsValid());
+		if (RestoredViewport && RestoredViewport->IsValid())
+		{
+			TestFalse(TEXT("Viewport interaction restore leaves game_view false"), (*RestoredViewport)->GetBoolField(TEXT("game_view")));
+			const TSharedPtr<FJsonObject>* ShowFlags = nullptr;
+			TestTrue(TEXT("Viewport interaction restore contains show flags"), (*RestoredViewport)->TryGetObjectField(TEXT("show_flags"), ShowFlags) && ShowFlags && ShowFlags->IsValid());
+			if (ShowFlags && ShowFlags->IsValid())
+			{
+				TestTrue(TEXT("Viewport interaction restore enables mode widgets"), (*ShowFlags)->GetBoolField(TEXT("mode_widgets")));
+				TestTrue(TEXT("Viewport interaction restore enables selection"), (*ShowFlags)->GetBoolField(TEXT("selection")));
+				TestTrue(TEXT("Viewport interaction restore enables pivot"), (*ShowFlags)->GetBoolField(TEXT("pivot")));
+			}
 		}
 	}
 

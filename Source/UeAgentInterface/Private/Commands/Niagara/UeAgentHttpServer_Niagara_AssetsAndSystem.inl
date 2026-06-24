@@ -663,6 +663,16 @@ bool FUeAgentHttpServer::CmdNiagaraPreviewAdvance(const FUeAgentRequestContext& 
 	bool bPauseAfterAdvance = true;
 	JsonTryGetBool(Ctx.Params, TEXT("pause_after_advance"), bPauseAfterAdvance);
 	JsonTryGetBool(Ctx.Params, TEXT("pause_preview_after_advance"), bPauseAfterAdvance);
+	bool bRestorePreviewAfterAdvance = false;
+	UeAgentNiagaraOps::TryGetBoolAnyField(
+		Ctx.Params,
+		{
+			TEXT("restore_preview_after_advance"),
+			TEXT("resume_preview_after_advance"),
+			TEXT("restore_interactive_preview"),
+			TEXT("resume_interactive_preview")
+		},
+		bRestorePreviewAfterAdvance);
 
 	double TickDeltaNumber = 1.0 / 60.0;
 	JsonTryGetNumber(Ctx.Params, TEXT("tick_delta_seconds"), TickDeltaNumber);
@@ -809,6 +819,11 @@ bool FUeAgentHttpServer::CmdNiagaraPreviewAdvance(const FUeAgentRequestContext& 
 	const FString AdvanceSemantics = bResetPreview ? TEXT("continuous_from_zero") : TEXT("continuous_from_current");
 	const FString PreviewStateToken = UeAgentNiagaraOps::MakeNiagaraPreviewStateToken(NiagaraSystem, PreviewComponent, TargetFrame, TickDeltaSeconds, EffectiveAdvanceMode);
 	UeAgentNiagaraOps::SetNiagaraPreviewStateToken(PreviewComponent, PreviewStateToken);
+	TSharedPtr<FJsonObject> PreviewRestoreReport;
+	if (bRestorePreviewAfterAdvance)
+	{
+		PreviewRestoreReport = UeAgentNiagaraOps::RestoreNiagaraPreviewForInteractiveEditing(NiagaraSystem, SystemViewModel);
+	}
 
 	bool bRestoredDirtyState = false;
 	if (NiagaraSystemPackage && !bWasPackageDirtyBeforeAdvance && NiagaraSystemPackage->IsDirty())
@@ -836,6 +851,7 @@ bool FUeAgentHttpServer::CmdNiagaraPreviewAdvance(const FUeAgentRequestContext& 
 	OutData->SetBoolField(TEXT("reset_preview"), bResetPreview);
 	OutData->SetBoolField(TEXT("deactivate_before_reset"), bDeactivateBeforeReset);
 	OutData->SetBoolField(TEXT("pause_after_advance"), bPauseAfterAdvance);
+	OutData->SetBoolField(TEXT("restore_preview_after_advance"), bRestorePreviewAfterAdvance);
 	OutData->SetBoolField(TEXT("component_active_before_activation"), bWasActiveBeforeActivation);
 	OutData->SetBoolField(TEXT("component_paused"), PreviewComponent->IsPaused());
 	OutData->SetNumberField(TEXT("system_age"), SystemAge);
@@ -843,6 +859,7 @@ bool FUeAgentHttpServer::CmdNiagaraPreviewAdvance(const FUeAgentRequestContext& 
 	OutData->SetNumberField(TEXT("current_frame_estimate"), FrameEstimate);
 	OutData->SetBoolField(TEXT("has_runtime_position"), bHasRuntimePosition);
 	OutData->SetStringField(TEXT("preview_state_token"), PreviewStateToken);
+	OutData->SetBoolField(TEXT("preview_state_token_invalidated_by_restore"), bRestorePreviewAfterAdvance);
 	OutData->SetBoolField(TEXT("mutated_preview_component"), true);
 	OutData->SetBoolField(TEXT("was_package_dirty_before_advance"), bWasPackageDirtyBeforeAdvance);
 	OutData->SetBoolField(TEXT("restored_dirty_state"), bRestoredDirtyState);
@@ -850,6 +867,10 @@ bool FUeAgentHttpServer::CmdNiagaraPreviewAdvance(const FUeAgentRequestContext& 
 	if (Stats.IsValid())
 	{
 		OutData->SetObjectField(TEXT("stats"), Stats);
+	}
+	if (PreviewRestoreReport.IsValid())
+	{
+		OutData->SetObjectField(TEXT("preview_restore"), PreviewRestoreReport);
 	}
 	if (!bHasRuntimePosition)
 	{
@@ -980,6 +1001,16 @@ bool FUeAgentHttpServer::CmdNiagaraScreenshot(const FUeAgentRequestContext& Ctx,
 
 	bool bPausePreviewAfterAdvance = true;
 	JsonTryGetBool(Ctx.Params, TEXT("pause_preview_after_advance"), bPausePreviewAfterAdvance);
+	bool bRestorePreviewAfterCapture = true;
+	UeAgentNiagaraOps::TryGetBoolAnyField(
+		Ctx.Params,
+		{
+			TEXT("restore_preview_after_capture"),
+			TEXT("resume_preview_after_capture"),
+			TEXT("restore_interactive_preview"),
+			TEXT("resume_interactive_preview")
+		},
+		bRestorePreviewAfterCapture);
 
 	const bool bPreviewPrepareRequested = !bFrameSequenceRequested && !bCaptureCurrentPreview && (PreviewAdvanceSeconds > 0.0 || bResetPreview);
 	bool bRequestedOffscreenRenderer = true;
@@ -1153,10 +1184,28 @@ bool FUeAgentHttpServer::CmdNiagaraScreenshot(const FUeAgentRequestContext& Ctx,
 			FrameCaptureRenderer == TEXT("slate") ||
 			FrameCaptureRenderer == TEXT("slate_widget") ||
 			FrameCaptureRenderer == TEXT("slate_widget_offscreen");
+
+		auto RestoreFrameSequencePreviewAfterFailure = [&]() -> void
+		{
+			if (!PreviewComponent)
+			{
+				return;
+			}
+			if (bRestorePreviewAfterCapture)
+			{
+				UeAgentNiagaraOps::RestoreNiagaraPreviewForInteractiveEditing(NiagaraSystem, SystemViewModel);
+				return;
+			}
+			PreviewComponent->SetPaused(false);
+			PreviewComponent->MarkRenderStateDirty();
+			UeAgentNiagaraOps::FlushNiagaraPreviewWorld(PreviewComponent);
+		};
+
 		if (!bUsePreviewSceneCapture && !bUseSlateFrameCapture)
 		{
 			OutError = TEXT("unsupported_frame_capture_renderer");
 			OutData->SetStringField(TEXT("frame_capture_renderer"), FrameCaptureRenderer);
+			RestoreFrameSequencePreviewAfterFailure();
 			return false;
 		}
 
@@ -1167,6 +1216,7 @@ bool FUeAgentHttpServer::CmdNiagaraScreenshot(const FUeAgentRequestContext& Ctx,
 		{
 			if (!UeAgentNiagaraOps::InitializeNiagaraPreviewSceneCapture(PreviewComponent, FrameCaptureSize, Ctx.Params, SceneCaptureContext, SceneCaptureCameraInfo, OutError))
 			{
+				RestoreFrameSequencePreviewAfterFailure();
 				return false;
 			}
 		}
@@ -1192,6 +1242,7 @@ bool FUeAgentHttpServer::CmdNiagaraScreenshot(const FUeAgentRequestContext& Ctx,
 		if (FrameRequests.Num() > 1 && !bCreateFrameSheet && !bWriteIndividualFrames)
 		{
 			OutError = TEXT("multi_frame_output_disabled");
+			RestoreFrameSequencePreviewAfterFailure();
 			return false;
 		}
 
@@ -1235,11 +1286,13 @@ bool FUeAgentHttpServer::CmdNiagaraScreenshot(const FUeAgentRequestContext& Ctx,
 				{
 					if (!UeAgentNiagaraOps::WarmupNiagaraPreviewSceneCapture(SceneCaptureContext, PreviewComponent, Ctx.Params, FirstFrameRenderDependencyWait, OutError))
 					{
+						RestoreFrameSequencePreviewAfterFailure();
 						return false;
 					}
 				}
 				if (!UeAgentNiagaraOps::CaptureNiagaraPreviewSceneFrame(SceneCaptureContext, PreviewComponent, Pixels, ShotSize, OutError))
 				{
+					RestoreFrameSequencePreviewAfterFailure();
 					return false;
 				}
 			}
@@ -1247,11 +1300,13 @@ bool FUeAgentHttpServer::CmdNiagaraScreenshot(const FUeAgentRequestContext& Ctx,
 			{
 				if (!UeAgentNiagaraOps::ScreenshotSlateWidgetOffscreen(WidgetToShot.ToSharedRef(), FrameOffscreenDrawSize, Pixels, ShotSize, OutError))
 				{
+					RestoreFrameSequencePreviewAfterFailure();
 					return false;
 				}
 			}
 			else if (!UeAgentNiagaraOps::ScreenshotSlateWidget(WidgetToShot.ToSharedRef(), Pixels, ShotSize, OutError))
 			{
+				RestoreFrameSequencePreviewAfterFailure();
 				return false;
 			}
 
@@ -1259,6 +1314,7 @@ bool FUeAgentHttpServer::CmdNiagaraScreenshot(const FUeAgentRequestContext& Ctx,
 			FIntPoint ResizedSize(0, 0);
 			if (!ResizePixelsMaxSize(Pixels, ShotSize, MaxSize, ResizedPixels, ResizedSize, OutError))
 			{
+				RestoreFrameSequencePreviewAfterFailure();
 				return false;
 			}
 
@@ -1280,6 +1336,7 @@ bool FUeAgentHttpServer::CmdNiagaraScreenshot(const FUeAgentRequestContext& Ctx,
 				OutPath = FrameRequests.Num() == 1 ? UeAgentNiagaraOps::ResolveOutputScreenshotPath(Ctx.Params, Format) : MakeShotPath(Format);
 				if (!WriteCompressedImage(ResizedPixels, ResizedSize, Format, Quality, OutPath, OutError))
 				{
+					RestoreFrameSequencePreviewAfterFailure();
 					return false;
 				}
 				Bytes = IFileManager::Get().FileSize(*OutPath);
@@ -1350,8 +1407,16 @@ bool FUeAgentHttpServer::CmdNiagaraScreenshot(const FUeAgentRequestContext& Ctx,
 			CapturedFrames.Add(MakeShared<FJsonValueObject>(FrameObject));
 		}
 
-		PreviewComponent->SetPaused(true);
-		PreviewComponent->MarkRenderStateDirty();
+		TSharedPtr<FJsonObject> PreviewRestoreReport;
+		if (bRestorePreviewAfterCapture)
+		{
+			PreviewRestoreReport = UeAgentNiagaraOps::RestoreNiagaraPreviewForInteractiveEditing(NiagaraSystem, SystemViewModel);
+		}
+		else
+		{
+			PreviewComponent->SetPaused(true);
+			PreviewComponent->MarkRenderStateDirty();
+		}
 
 		bool bRestoredDirtyState = false;
 		if (NiagaraSystemPackage && !bWasPackageDirtyBeforeFrameSequence && NiagaraSystemPackage->IsDirty())
@@ -1450,7 +1515,12 @@ bool FUeAgentHttpServer::CmdNiagaraScreenshot(const FUeAgentRequestContext& Ctx,
 		OutData->SetBoolField(TEXT("preview_reset"), true);
 		OutData->SetNumberField(TEXT("preview_tick_delta_seconds"), PreviewTickDeltaSeconds);
 		OutData->SetStringField(TEXT("preview_advance_mode"), EffectiveFrameAdvanceMode);
-		OutData->SetBoolField(TEXT("preview_paused_after_advance"), true);
+		OutData->SetBoolField(TEXT("restore_preview_after_capture"), bRestorePreviewAfterCapture);
+		OutData->SetBoolField(TEXT("preview_paused_after_advance"), !bRestorePreviewAfterCapture);
+		if (PreviewRestoreReport.IsValid())
+		{
+			OutData->SetObjectField(TEXT("preview_restore"), PreviewRestoreReport);
+		}
 		OutData->SetBoolField(TEXT("was_package_dirty_before_capture"), bWasPackageDirtyBeforeFrameSequence);
 		OutData->SetBoolField(TEXT("restored_dirty_state"), bRestoredDirtyState);
 		if (SceneCaptureCameraInfo.IsValid())
@@ -1517,6 +1587,17 @@ bool FUeAgentHttpServer::CmdNiagaraScreenshot(const FUeAgentRequestContext& Ctx,
 		bCurrentPreviewValidated = true;
 	}
 
+	auto RestorePreparedPreviewAfterFailure = [&]() -> void
+	{
+		if ((bPreviewPrepareRequested || bCaptureCurrentPreview) && bRestorePreviewAfterCapture)
+		{
+			if (UNiagaraSystem* NiagaraSystemForRestore = Cast<UNiagaraSystem>(Asset))
+			{
+				UeAgentNiagaraOps::RestoreNiagaraPreviewForInteractiveEditing(NiagaraSystemForRestore, TSharedPtr<FNiagaraSystemViewModel>());
+			}
+		}
+	};
+
 	bool bCaptureRedrawPerformed = false;
 	FString CaptureRedrawSkipReason;
 	if (!bUseOffscreenRenderer)
@@ -1537,12 +1618,14 @@ bool FUeAgentHttpServer::CmdNiagaraScreenshot(const FUeAgentRequestContext& Ctx,
 		if (!UeAgentNiagaraOps::ScreenshotSlateWidgetOffscreen(WidgetToShot.ToSharedRef(), OffscreenDrawSize, Pixels, ShotSize, OutError))
 		{
 			FUeAgentInterfaceLogger::Log(TEXT("CmdNiagaraScreenshot offscreen failed target=%s asset=%s error=%s"), *EffectiveTarget, *Asset->GetOutermost()->GetName(), *OutError);
+			RestorePreparedPreviewAfterFailure();
 			return false;
 		}
 	}
 	else if (!UeAgentNiagaraOps::ScreenshotSlateWidget(WidgetToShot.ToSharedRef(), Pixels, ShotSize, OutError))
 	{
 		FUeAgentInterfaceLogger::Log(TEXT("CmdNiagaraScreenshot failed target=%s asset=%s error=%s"), *EffectiveTarget, *Asset->GetOutermost()->GetName(), *OutError);
+		RestorePreparedPreviewAfterFailure();
 		return false;
 	}
 	else if (bCaptureCurrentPreview)
@@ -1554,12 +1637,14 @@ bool FUeAgentHttpServer::CmdNiagaraScreenshot(const FUeAgentRequestContext& Ctx,
 	FIntPoint ResizedSize(0, 0);
 	if (!ResizePixelsMaxSize(Pixels, ShotSize, MaxSize, ResizedPixels, ResizedSize, OutError))
 	{
+		RestorePreparedPreviewAfterFailure();
 		return false;
 	}
 
 	const FString OutPath = UeAgentNiagaraOps::ResolveOutputScreenshotPath(Ctx.Params, Format);
 	if (!WriteCompressedImage(ResizedPixels, ResizedSize, Format, Quality, OutPath, OutError))
 	{
+		RestorePreparedPreviewAfterFailure();
 		return false;
 	}
 
@@ -1611,6 +1696,15 @@ bool FUeAgentHttpServer::CmdNiagaraScreenshot(const FUeAgentRequestContext& Ctx,
 	{
 		OutData->SetObjectField(TEXT("preview_stats"), PreviewStats);
 	}
+	if ((bPreviewPrepareRequested || bCaptureCurrentPreview) && bRestorePreviewAfterCapture)
+	{
+		if (UNiagaraSystem* NiagaraSystem = Cast<UNiagaraSystem>(Asset))
+		{
+			TSharedPtr<FJsonObject> PreviewRestoreReport = UeAgentNiagaraOps::RestoreNiagaraPreviewForInteractiveEditing(NiagaraSystem, TSharedPtr<FNiagaraSystemViewModel>());
+			OutData->SetObjectField(TEXT("preview_restore"), PreviewRestoreReport);
+		}
+	}
+	OutData->SetBoolField(TEXT("restore_preview_after_capture"), bRestorePreviewAfterCapture);
 	return true;
 }
 
@@ -1755,6 +1849,16 @@ bool FUeAgentHttpServer::CmdNiagaraSystemRuntimeProbe(const FUeAgentRequestConte
 
 	bool bPauseAfterProbe = false;
 	JsonTryGetBool(Ctx.Params, TEXT("pause_after_probe"), bPauseAfterProbe);
+	bool bRestorePreviewAfterProbe = !bSampleCurrentPreview && !bPauseAfterProbe;
+	UeAgentNiagaraOps::TryGetBoolAnyField(
+		Ctx.Params,
+		{
+			TEXT("restore_preview_after_probe"),
+			TEXT("resume_preview_after_probe"),
+			TEXT("restore_interactive_preview"),
+			TEXT("resume_interactive_preview")
+		},
+		bRestorePreviewAfterProbe);
 
 	FString AdvanceMode = TEXT("advance_simulation");
 	JsonTryGetString(Ctx.Params, TEXT("advance_mode"), AdvanceMode);
@@ -1977,6 +2081,12 @@ bool FUeAgentHttpServer::CmdNiagaraSystemRuntimeProbe(const FUeAgentRequestConte
 		OutData->SetBoolField(TEXT("used_seek"), false);
 		OutData->SetStringField(TEXT("stats_error"), StatsError);
 		OutData->SetObjectField(TEXT("current_preview_validation"), CurrentPreviewValidation);
+		OutData->SetBoolField(TEXT("restore_preview_after_probe"), bRestorePreviewAfterProbe);
+		if (bRestorePreviewAfterProbe)
+		{
+			TSharedPtr<FJsonObject> PreviewRestoreReport = UeAgentNiagaraOps::RestoreNiagaraPreviewForInteractiveEditing(NiagaraSystem, SystemViewModel);
+			OutData->SetObjectField(TEXT("preview_restore"), PreviewRestoreReport);
+		}
 		if (InitialStats.IsValid())
 		{
 			OutData->SetObjectField(TEXT("initial_stats"), InitialStats);
@@ -2053,6 +2163,11 @@ bool FUeAgentHttpServer::CmdNiagaraSystemRuntimeProbe(const FUeAgentRequestConte
 		PreviewComponent->SetPaused(true);
 	}
 	PreviewComponent->MarkRenderStateDirty();
+	TSharedPtr<FJsonObject> PreviewRestoreReport;
+	if (!bUseTransientComponent && bRestorePreviewAfterProbe)
+	{
+		PreviewRestoreReport = UeAgentNiagaraOps::RestoreNiagaraPreviewForInteractiveEditing(NiagaraSystem, SystemViewModel);
+	}
 	bool bRestoredDirtyState = false;
 	if (NiagaraSystemPackage && !bWasPackageDirtyBeforeProbe && NiagaraSystemPackage->IsDirty())
 	{
@@ -2095,10 +2210,15 @@ bool FUeAgentHttpServer::CmdNiagaraSystemRuntimeProbe(const FUeAgentRequestConte
 	OutData->SetBoolField(TEXT("deactivate_before_reset"), bDeactivateBeforeReset);
 	OutData->SetBoolField(TEXT("include_snapshots"), bIncludeSnapshots);
 	OutData->SetBoolField(TEXT("pause_after_probe"), bPauseAfterProbe);
+	OutData->SetBoolField(TEXT("restore_preview_after_probe"), bRestorePreviewAfterProbe);
 	OutData->SetBoolField(TEXT("component_active_before_activation"), bWasActiveBeforeActivation);
 	OutData->SetBoolField(TEXT("activate_reset"), false);
 	OutData->SetBoolField(TEXT("was_package_dirty_before_probe"), bWasPackageDirtyBeforeProbe);
 	OutData->SetBoolField(TEXT("restored_dirty_state"), bRestoredDirtyState);
+	if (PreviewRestoreReport.IsValid())
+	{
+		OutData->SetObjectField(TEXT("preview_restore"), PreviewRestoreReport);
+	}
 	if (InitialStats.IsValid())
 	{
 		OutData->SetObjectField(TEXT("initial_stats"), InitialStats);
@@ -2148,6 +2268,10 @@ bool FUeAgentHttpServer::CmdNiagaraGetStackIssues(const FUeAgentRequestContext& 
 
 	bool bCompileBeforeRead = false;
 	JsonTryGetBool(Ctx.Params, TEXT("compile_before_read"), bCompileBeforeRead);
+	bool bForceCompile = true;
+	JsonTryGetBool(Ctx.Params, TEXT("force_compile"), bForceCompile);
+	bool bWaitForComplete = true;
+	JsonTryGetBool(Ctx.Params, TEXT("wait_for_complete"), bWaitForComplete);
 
 	bool bPreferExistingViewModel = true;
 	JsonTryGetBool(Ctx.Params, TEXT("prefer_existing_view_model"), bPreferExistingViewModel);
@@ -2184,18 +2308,11 @@ bool FUeAgentHttpServer::CmdNiagaraGetStackIssues(const FUeAgentRequestContext& 
 	UeAgentNiagaraOps::FNiagaraStackIssueCounts ReturnedIssueCounts;
 	FString AssetKind;
 	FString ViewModelSource;
+	UeAgentNiagaraOps::FNiagaraCompileAfterSetResult StackCompileResult;
 
 	if (UNiagaraSystem* NiagaraSystem = Cast<UNiagaraSystem>(Asset))
 	{
 		AssetKind = TEXT("system");
-		if (bCompileBeforeRead)
-		{
-			NiagaraSystem->RequestCompile(false);
-			NiagaraSystem->WaitForCompilationComplete(true, false);
-			NiagaraSystem->PollForCompilationComplete(true);
-			NiagaraSystem->CacheFromCompiledData();
-		}
-
 		TSharedPtr<FNiagaraSystemViewModel> TemporarySystemViewModel;
 		TSharedPtr<FNiagaraSystemViewModel> SystemViewModel;
 		if (bPreferExistingViewModel)
@@ -2228,6 +2345,15 @@ bool FUeAgentHttpServer::CmdNiagaraGetStackIssues(const FUeAgentRequestContext& 
 		{
 			OutError = TEXT("niagara_system_view_model_create_failed");
 			return false;
+		}
+
+		if (bCompileBeforeRead)
+		{
+			TSharedPtr<FJsonObject> CompileParams = MakeShared<FJsonObject>();
+			CompileParams->SetBoolField(TEXT("compile_after_set"), true);
+			CompileParams->SetBoolField(TEXT("force_compile"), bForceCompile);
+			CompileParams->SetBoolField(TEXT("wait_for_complete"), bWaitForComplete);
+			StackCompileResult = UeAgentNiagaraOps::CompileSystemAfterSet(NiagaraSystem, CompileParams, true);
 		}
 
 		if (bIncludeSystemScope)
@@ -2338,6 +2464,11 @@ bool FUeAgentHttpServer::CmdNiagaraGetStackIssues(const FUeAgentRequestContext& 
 	OutData->SetStringField(TEXT("view_model_source"), ViewModelSource);
 	OutData->SetStringField(TEXT("severity_filter"), SeverityFilter);
 	OutData->SetBoolField(TEXT("compile_before_read"), bCompileBeforeRead);
+	OutData->SetBoolField(TEXT("force_compile"), bForceCompile);
+	OutData->SetBoolField(TEXT("wait_for_complete"), bWaitForComplete);
+	OutData->SetBoolField(TEXT("compilation_requested"), StackCompileResult.bCompilationRequested);
+	OutData->SetBoolField(TEXT("compilation_complete"), StackCompileResult.bCompilationComplete);
+	OutData->SetBoolField(TEXT("has_outstanding_compilation_requests"), StackCompileResult.bHasOutstandingCompilationRequests);
 	OutData->SetBoolField(TEXT("prefer_existing_view_model"), bPreferExistingViewModel);
 	OutData->SetBoolField(TEXT("open_editor_if_needed"), bOpenEditorIfNeeded);
 	OutData->SetArrayField(TEXT("scopes"), ScopeJson);
@@ -2745,10 +2876,10 @@ bool FUeAgentHttpServer::CmdNiagaraApplyStackIssueFix(const FUeAgentRequestConte
 		}
 	}
 
-	bool bForceCompile = false;
+	bool bForceCompile = true;
 	JsonTryGetBool(Ctx.Params, TEXT("force_compile"), bForceCompile);
 
-	bool bCompileAfterApply = false;
+	bool bCompileAfterApply = true;
 	JsonTryGetBool(Ctx.Params, TEXT("compile_after_apply"), bCompileAfterApply);
 
 	bool bWaitForComplete = true;
@@ -2756,6 +2887,8 @@ bool FUeAgentHttpServer::CmdNiagaraApplyStackIssueFix(const FUeAgentRequestConte
 
 	bool bCompilationRequested = false;
 	bool bCompilationComplete = false;
+	bool bCompileHasError = false;
+	TSharedPtr<FJsonObject> CompileLogData;
 	if (bCompileAfterApply)
 	{
 		bCompilationRequested = NiagaraSystem->RequestCompile(bForceCompile);
@@ -2766,17 +2899,27 @@ bool FUeAgentHttpServer::CmdNiagaraApplyStackIssueFix(const FUeAgentRequestConte
 			NiagaraSystem->CacheFromCompiledData();
 			bCompilationComplete = !NiagaraSystem->HasOutstandingCompilationRequests(true);
 		}
+
+		FUeAgentRequestContext CompileLogCtx;
+		CompileLogCtx.RequestId = TEXT("niagara_apply_stack_issue_fix_compile_log");
+		CompileLogCtx.Command = TEXT("niagara_get_compile_log");
+		CompileLogCtx.Params = MakeShared<FJsonObject>();
+		CompileLogCtx.Params->SetStringField(TEXT("asset_path"), NiagaraSystem->GetOutermost()->GetName());
+		CompileLogCtx.Params->SetBoolField(TEXT("compile_before_read"), false);
+		CompileLogCtx.Params->SetBoolField(TEXT("include_events"), true);
+		CompileLogCtx.Params->SetStringField(TEXT("severity_filter"), TEXT("warning_or_error"));
+		CompileLogCtx.Params->SetNumberField(TEXT("max_events_per_script"), 64);
+		CompileLogData = MakeShared<FJsonObject>();
+		if (!CmdNiagaraGetCompileLog(CompileLogCtx, CompileLogData, OutError))
+		{
+			return false;
+		}
+		CompileLogData->TryGetBoolField(TEXT("has_error"), bCompileHasError);
 	}
 
 	bool bSaveAfterApply = false;
 	JsonTryGetBool(Ctx.Params, TEXT("save_after_apply"), bSaveAfterApply);
-	if (bSaveAfterApply)
-	{
-		if (!UeAgentNiagaraOps::SaveAssetPackage(NiagaraSystem, OutError))
-		{
-			return false;
-		}
-	}
+	bool bSaved = false;
 
 	OutData->SetObjectField(TEXT("applied_issue"), AppliedObj);
 	OutData->SetObjectField(TEXT("system_refresh"), UeAgentNiagaraOps::BuildNiagaraSystemRefreshJson(RefreshResult));
@@ -2787,7 +2930,31 @@ bool FUeAgentHttpServer::CmdNiagaraApplyStackIssueFix(const FUeAgentRequestConte
 	OutData->SetBoolField(TEXT("wait_for_complete"), bWaitForComplete);
 	OutData->SetBoolField(TEXT("compilation_complete"), bCompilationComplete);
 	OutData->SetBoolField(TEXT("has_outstanding_compilation_requests"), NiagaraSystem->HasOutstandingCompilationRequests(true));
-	OutData->SetBoolField(TEXT("saved"), bSaveAfterApply);
+	OutData->SetBoolField(TEXT("compile_has_error"), bCompileHasError);
+	if (CompileLogData.IsValid())
+	{
+		OutData->SetObjectField(TEXT("compile_log"), CompileLogData);
+	}
+	OutData->SetBoolField(TEXT("saved"), bSaved);
+	if (bCompileAfterApply && bWaitForComplete && NiagaraSystem->HasOutstandingCompilationRequests(true))
+	{
+		OutError = TEXT("compile_incomplete_after_apply");
+		return false;
+	}
+	if (bCompileAfterApply && bCompileHasError)
+	{
+		OutError = TEXT("compile_failed_after_apply");
+		return false;
+	}
+	if (bSaveAfterApply)
+	{
+		if (!UeAgentNiagaraOps::SaveAssetPackage(NiagaraSystem, OutError))
+		{
+			return false;
+		}
+		bSaved = true;
+		OutData->SetBoolField(TEXT("saved"), bSaved);
+	}
 	return true;
 }
 
@@ -2855,10 +3022,10 @@ bool FUeAgentHttpServer::CmdNiagaraEmitterClearParent(const FUeAgentRequestConte
 
 	UNiagaraSystem* OwningSystem = EditContext.Emitter->GetTypedOuter<UNiagaraSystem>();
 
-	bool bForceCompile = false;
+	bool bForceCompile = true;
 	JsonTryGetBool(Ctx.Params, TEXT("force_compile"), bForceCompile);
 
-	bool bCompileAfterApply = false;
+	bool bCompileAfterApply = true;
 	JsonTryGetBool(Ctx.Params, TEXT("compile_after_apply"), bCompileAfterApply);
 
 	bool bWaitForComplete = true;
@@ -2866,6 +3033,8 @@ bool FUeAgentHttpServer::CmdNiagaraEmitterClearParent(const FUeAgentRequestConte
 
 	bool bCompilationRequested = false;
 	bool bCompilationComplete = false;
+	bool bCompileHasError = false;
+	TSharedPtr<FJsonObject> CompileLogData;
 	if (bCompileAfterApply && OwningSystem)
 	{
 		bCompilationRequested = OwningSystem->RequestCompile(bForceCompile);
@@ -2877,17 +3046,36 @@ bool FUeAgentHttpServer::CmdNiagaraEmitterClearParent(const FUeAgentRequestConte
 			bCompilationComplete = !OwningSystem->HasOutstandingCompilationRequests(true);
 		}
 	}
-
-	bool bSaveAfterApply = false;
-	JsonTryGetBool(Ctx.Params, TEXT("save_after_apply"), bSaveAfterApply);
-	if (bSaveAfterApply)
+	if (bCompileAfterApply)
 	{
-		UObject* SaveTarget = OwningSystem ? static_cast<UObject*>(OwningSystem) : static_cast<UObject*>(EditContext.Emitter);
-		if (!UeAgentNiagaraOps::SaveAssetPackage(SaveTarget, OutError))
+		FUeAgentRequestContext CompileLogCtx;
+		CompileLogCtx.RequestId = TEXT("niagara_emitter_clear_parent_compile_log");
+		CompileLogCtx.Command = TEXT("niagara_get_compile_log");
+		CompileLogCtx.Params = MakeShared<FJsonObject>();
+		CompileLogCtx.Params->SetStringField(TEXT("asset_path"), OwningSystem ? OwningSystem->GetOutermost()->GetName() : EditContext.Emitter->GetOutermost()->GetName());
+		if (!OwningSystem)
+		{
+			CompileLogCtx.Params->SetStringField(TEXT("emitter_version"), EditContext.VersionGuid.ToString(EGuidFormats::DigitsWithHyphensLower));
+			CompileLogCtx.Params->SetBoolField(TEXT("compile_before_read"), true);
+		}
+		else
+		{
+			CompileLogCtx.Params->SetBoolField(TEXT("compile_before_read"), false);
+		}
+		CompileLogCtx.Params->SetBoolField(TEXT("include_events"), true);
+		CompileLogCtx.Params->SetStringField(TEXT("severity_filter"), TEXT("warning_or_error"));
+		CompileLogCtx.Params->SetNumberField(TEXT("max_events_per_script"), 64);
+		CompileLogData = MakeShared<FJsonObject>();
+		if (!CmdNiagaraGetCompileLog(CompileLogCtx, CompileLogData, OutError))
 		{
 			return false;
 		}
+		CompileLogData->TryGetBoolField(TEXT("has_error"), bCompileHasError);
 	}
+
+	bool bSaveAfterApply = false;
+	JsonTryGetBool(Ctx.Params, TEXT("save_after_apply"), bSaveAfterApply);
+	bool bSaved = false;
 
 	const FVersionedNiagaraEmitter ParentAfter = EditContext.EmitterData->GetParent();
 	const FVersionedNiagaraEmitter ParentAtLastMergeAfter = EditContext.EmitterData->GetParentAtLastMerge();
@@ -2912,7 +3100,36 @@ bool FUeAgentHttpServer::CmdNiagaraEmitterClearParent(const FUeAgentRequestConte
 	OutData->SetBoolField(TEXT("compilation_requested"), bCompilationRequested);
 	OutData->SetBoolField(TEXT("wait_for_complete"), bWaitForComplete);
 	OutData->SetBoolField(TEXT("compilation_complete"), bCompilationComplete);
-	OutData->SetBoolField(TEXT("saved"), bSaveAfterApply);
+	OutData->SetBoolField(TEXT("compile_has_error"), bCompileHasError);
+	if (OwningSystem)
+	{
+		OutData->SetBoolField(TEXT("has_outstanding_compilation_requests"), OwningSystem->HasOutstandingCompilationRequests(true));
+	}
+	if (CompileLogData.IsValid())
+	{
+		OutData->SetObjectField(TEXT("compile_log"), CompileLogData);
+	}
+	OutData->SetBoolField(TEXT("saved"), bSaved);
+	if (bCompileAfterApply && bWaitForComplete && OwningSystem && OwningSystem->HasOutstandingCompilationRequests(true))
+	{
+		OutError = TEXT("compile_incomplete_after_apply");
+		return false;
+	}
+	if (bCompileAfterApply && bCompileHasError)
+	{
+		OutError = TEXT("compile_failed_after_apply");
+		return false;
+	}
+	if (bSaveAfterApply)
+	{
+		UObject* SaveTarget = OwningSystem ? static_cast<UObject*>(OwningSystem) : static_cast<UObject*>(EditContext.Emitter);
+		if (!UeAgentNiagaraOps::SaveAssetPackage(SaveTarget, OutError))
+		{
+			return false;
+		}
+		bSaved = true;
+		OutData->SetBoolField(TEXT("saved"), bSaved);
+	}
 	return true;
 }
 
@@ -3214,7 +3431,7 @@ bool FUeAgentHttpServer::CmdNiagaraCompileSystem(const FUeAgentRequestContext& C
 	UPackage* AssetPackage = Asset->GetOutermost();
 	const bool bWasPackageDirtyBeforeCompile = AssetPackage ? AssetPackage->IsDirty() : false;
 
-	bool bForceCompile = false;
+	bool bForceCompile = true;
 	JsonTryGetBool(Ctx.Params, TEXT("force_compile"), bForceCompile);
 	bool bWaitForComplete = true;
 	JsonTryGetBool(Ctx.Params, TEXT("wait_for_complete"), bWaitForComplete);
@@ -3250,7 +3467,7 @@ bool FUeAgentHttpServer::CmdNiagaraCompileSystem(const FUeAgentRequestContext& C
 	{
 		NiagaraScript->RequestCompile(NiagaraScript->GetExposedVersion().VersionGuid, bForceCompile);
 		bCompilationRequested = true;
-		bCompilationComplete = !bWaitForComplete;
+		bCompilationComplete = true;
 		CompileTarget = TEXT("script");
 	}
 	else
@@ -3280,6 +3497,7 @@ bool FUeAgentHttpServer::CmdNiagaraCompileSystem(const FUeAgentRequestContext& C
 	OutData->SetStringField(TEXT("asset_path"), Asset->GetOutermost()->GetName());
 	OutData->SetStringField(TEXT("object_path"), Asset->GetPathName());
 	OutData->SetStringField(TEXT("compile_target"), CompileTarget);
+	OutData->SetBoolField(TEXT("force_compile"), bForceCompile);
 	OutData->SetBoolField(TEXT("compilation_requested"), bCompilationRequested);
 	OutData->SetBoolField(TEXT("wait_for_complete"), bWaitForComplete);
 	OutData->SetBoolField(TEXT("compilation_complete"), bCompilationComplete);
@@ -3326,7 +3544,7 @@ bool FUeAgentHttpServer::CmdNiagaraGetCompileLog(const FUeAgentRequestContext& C
 	bool bCompileBeforeRead = false;
 	JsonTryGetBool(Ctx.Params, TEXT("compile_before_read"), bCompileBeforeRead);
 
-	bool bForceCompile = false;
+	bool bForceCompile = true;
 	JsonTryGetBool(Ctx.Params, TEXT("force_compile"), bForceCompile);
 
 	bool bWaitForComplete = true;
@@ -3436,7 +3654,7 @@ bool FUeAgentHttpServer::CmdNiagaraGetCompileLog(const FUeAgentRequestContext& C
 		{
 			NiagaraScript->RequestCompile(NiagaraScript->GetExposedVersion().VersionGuid, bForceCompile);
 			bCompilationRequested = true;
-			bCompilationComplete = !bWaitForComplete;
+			bCompilationComplete = true;
 		}
 		else if (NiagaraEmitter)
 		{
@@ -3450,7 +3668,7 @@ bool FUeAgentHttpServer::CmdNiagaraGetCompileLog(const FUeAgentRequestContext& C
 				ScriptInfo.Script->RequestCompile(ScriptInfo.Script->GetExposedVersion().VersionGuid, bForceCompile);
 				bCompilationRequested = true;
 			}
-			bCompilationComplete = !bWaitForComplete;
+			bCompilationComplete = true;
 		}
 	}
 	bool bRestoredDirtyState = false;
@@ -3573,6 +3791,7 @@ bool FUeAgentHttpServer::CmdNiagaraGetCompileLog(const FUeAgentRequestContext& C
 	OutData->SetStringField(TEXT("object_path"), Asset->GetPathName());
 	OutData->SetStringField(TEXT("asset_kind"), UeAgentNiagaraOps::GetNiagaraAssetKind(Asset));
 	OutData->SetBoolField(TEXT("compile_before_read"), bCompileBeforeRead);
+	OutData->SetBoolField(TEXT("force_compile"), bForceCompile);
 	OutData->SetBoolField(TEXT("refresh_before_compile"), bRefreshBeforeCompile);
 	OutData->SetObjectField(TEXT("system_refresh"), UeAgentNiagaraOps::BuildNiagaraSystemRefreshJson(RefreshResult));
 	OutData->SetBoolField(TEXT("compilation_requested"), bCompilationRequested);

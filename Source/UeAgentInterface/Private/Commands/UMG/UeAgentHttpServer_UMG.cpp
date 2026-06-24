@@ -470,6 +470,8 @@ bool FUeAgentHttpServer::ExecuteUmgCommand(const FString& CommandLower, const FU
 	if (CommandLower == TEXT("umg_compile")) return CmdUmgCompile(Ctx, OutData, OutError);
 	if (CommandLower == TEXT("umg_get_compile_log")) return CmdUmgGetCompileLog(Ctx, OutData, OutError);
 	if (CommandLower == TEXT("umg_get_info")) return CmdUmgGetInfo(Ctx, OutData, OutError);
+	if (CommandLower == TEXT("umg_screenshot")) return CmdUmgScreenshot(Ctx, OutData, OutError);
+	if (CommandLower == TEXT("umg_list_widget_events")) return CmdUmgListWidgetEvents(Ctx, OutData, OutError);
 	if (CommandLower == TEXT("umg_add_widget")) return CmdUmgAddWidget(Ctx, OutData, OutError);
 	if (CommandLower == TEXT("umg_remove_widget")) return CmdUmgRemoveWidget(Ctx, OutData, OutError);
 	if (CommandLower == TEXT("umg_set_widget_property")) return CmdUmgSetWidgetProperty(Ctx, OutData, OutError);

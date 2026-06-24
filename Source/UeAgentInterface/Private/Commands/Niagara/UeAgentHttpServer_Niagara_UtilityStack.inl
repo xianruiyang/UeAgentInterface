@@ -622,42 +622,6 @@ PRAGMA_ENABLE_DEPRECATION_WARNINGS
 
 	static bool TryResolveNiagaraEnumValueFromText(const UEnum& EnumType, const FString& InValueText, int64& OutEnumValue)
 	{
-		auto IsUserSettableEnumValue = [&EnumType](int64 EnumValue) -> bool
-		{
-			if (!EnumType.IsValidEnumValue(EnumValue))
-			{
-				return false;
-			}
-
-			const int32 EnumIndex = EnumType.GetIndexByValue(EnumValue);
-			if (EnumIndex == INDEX_NONE)
-			{
-				return false;
-			}
-			if (EnumType.HasMetaData(TEXT("Hidden"), EnumIndex) ||
-				EnumType.HasMetaData(TEXT("HiddenByDefault"), EnumIndex) ||
-				EnumType.HasMetaData(TEXT("Spacer"), EnumIndex))
-			{
-				return false;
-			}
-
-			const FString EnumName = EnumType.GetNameStringByValue(EnumValue);
-			const FString EnumNameUpper = EnumName.ToUpper();
-			if (EnumNameUpper.Equals(TEXT("MAX")) ||
-				EnumNameUpper.EndsWith(TEXT("_MAX")) ||
-				EnumNameUpper.Contains(TEXT("INVALID")))
-			{
-				return false;
-			}
-
-			const FString FullEnumName = EnumType.GetNameByValue(EnumValue).ToString().ToUpper();
-			if (FullEnumName.EndsWith(TEXT("_MAX")))
-			{
-				return false;
-			}
-			return true;
-		};
-
 		FString ValueText = InValueText.TrimStartAndEnd();
 		if (ValueText.IsEmpty())
 		{
@@ -672,7 +636,7 @@ PRAGMA_ENABLE_DEPRECATION_WARNINGS
 		int64 ParsedIntValue = 0;
 		if (LexTryParseString(ParsedIntValue, *ValueText))
 		{
-			if (IsUserSettableEnumValue(ParsedIntValue))
+			if (IsUserSettableNiagaraEnumValue(EnumType, ParsedIntValue))
 			{
 				OutEnumValue = ParsedIntValue;
 				return true;
@@ -720,7 +684,7 @@ PRAGMA_ENABLE_DEPRECATION_WARNINGS
 		{
 			return false;
 		}
-		if (!IsUserSettableEnumValue(ParsedEnumValue))
+		if (!IsUserSettableNiagaraEnumValue(EnumType, ParsedEnumValue))
 		{
 			return false;
 		}

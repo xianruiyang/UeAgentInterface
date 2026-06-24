@@ -4,21 +4,27 @@
 
 ## 推荐入口
 
-日常自动化优先使用 CLI，不直接手写 HTTP：
+日常自动化优先使用已定位 `UeAgentInterfaceCMD` 仓库中的 Python `uai_core`，不直接手写 HTTP：
 
 ```text
-UeAgentInterfaceCMD/dist/uai-cli.exe
+<UaiCmdRoot>/cli/uai_core
+```
+
+`UaiCmdRoot` 通常是 `<ProjectRoot>/UeAgentInterfaceCMD`，但不保证在项目根目录下。找不到默认候选时，应先向用户确认是否已安装 UAICMD 以及安装路径；只有确认没有可用 UAICMD 或用户明确要求回退时，才使用 CLI。skill 场景的 CLI 回退入口固定为：
+
+```text
+<SkillDir>/tools/uai-cli.exe
 ```
 
 推荐流程：
 
-1. `doctor` 检查 UE Editor 服务连通性。
-2. 多步骤任务用 `run --plan <plan.json> --vars <vars.json>`。
-3. 一次性批处理用 `batch --file <batch.json>`。
-4. 读取 `UeAgentInterfaceCMD/reports/*.json` 定位失败命令、失败索引和返回数据。
+1. 定位 `UaiCmdRoot`，将 `<UaiCmdRoot>/cli` 加入 `sys.path`，导入 `UaiCore` 和 `uai_core.commands.*` wrapper。
+2. 用 `ue.doctor()` 检查 UE Editor 服务连通性。
+3. 单条命令优先用对应 wrapper；多步骤任务用 `ue.batch(..., stop_on_error=True)`。
+4. 读取 `CommandResult.response` 或 `BatchResult.response` 定位失败命令、失败索引和返回数据；如果回退 CLI，则读取 `<UserWorkDir>/runtimeLogs/` 下的 report JSON。
 5. 写入资产或配置后做 export/readback、compile、probe、screenshot、smoke 或 coverage 验证。
 
-不要在命令行里内联长 JSON；复杂参数写入 JSON 文件。
+不要在命令行里内联长 JSON；复杂参数写入 JSON 文件。CLI 仓库开发、发布验证和 CLI 自身行为仍以 `UeAgentInterfaceCMD/docs/USAGE.md` 为准。
 
 ## 文档阅读顺序
 

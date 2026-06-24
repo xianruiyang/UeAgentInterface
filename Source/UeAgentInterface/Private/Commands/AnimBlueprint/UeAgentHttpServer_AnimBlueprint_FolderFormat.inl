@@ -1319,7 +1319,6 @@ namespace UeAgentAnimBlueprintFolderOps
 		AssetJson->SetNumberField(TEXT("format_version"), 1);
 		AssetJson->SetStringField(TEXT("asset_kind"), TEXT("actor_blueprint"));
 		AssetJson->SetStringField(TEXT("asset_path"), AssetPath);
-		AssetJson->SetStringField(TEXT("asset_name"), FPackageName::GetLongPackageAssetName(AssetPath));
 		AssetJson->SetStringField(TEXT("parent_class"), ParentClassPath);
 		if (!SaveJsonFile(FPaths::Combine(OutProxyFolderPath, TEXT("asset.json")), AssetJson))
 		{
@@ -1546,7 +1545,6 @@ bool FUeAgentHttpServer::CmdAnimBlueprintExportFolder(const FUeAgentRequestConte
 	AssetJson->SetNumberField(TEXT("format_version"), 1);
 	AssetJson->SetStringField(TEXT("asset_kind"), TEXT("anim_blueprint"));
 	AssetJson->SetStringField(TEXT("asset_path"), AssetPath);
-	AssetJson->SetStringField(TEXT("asset_name"), FPackageName::GetLongPackageAssetName(AssetPath));
 	AssetJson->SetNumberField(TEXT("profile_version"), 1);
 	AssetJson->SetStringField(
 		TEXT("anim_blueprint_subkind"),
@@ -3587,37 +3585,86 @@ bool FUeAgentHttpServer::CmdAnimBlueprintApplyFolder(const FUeAgentRequestContex
 		return false;
 	}
 
+	FString CompileStatus = UeAgentAnimBlueprintOps::BlueprintStatusToString(AnimBlueprint->Status);
+	int32 CompileErrorCount = 0;
+	int32 CompileWarningCount = 0;
+	int32 CompileMessageTotalCount = 0;
+	int32 CompileFilteredErrorCount = 0;
+	int32 CompileFilteredWarningCount = 0;
+	int32 CompileFilteredInfoCount = 0;
+	bool bCompileHasError = false;
+	TArray<TSharedPtr<FJsonValue>> CompileMessages;
+
 	if (bCompileAfterApply)
 	{
-		FKismetEditorUtilities::CompileBlueprint(AnimBlueprint);
+		FCompilerResultsLog CompilerLog;
+		FKismetEditorUtilities::CompileBlueprint(AnimBlueprint, EBlueprintCompileOptions::None, &CompilerLog);
+		CompileStatus = UeAgentAnimBlueprintOps::BlueprintStatusToString(AnimBlueprint->Status);
+		CompileErrorCount = CompilerLog.NumErrors;
+		CompileWarningCount = CompilerLog.NumWarnings;
+		CompileMessageTotalCount = CompilerLog.Messages.Num();
+		bCompileHasError = CompileErrorCount > 0 || AnimBlueprint->Status == BS_Error;
+		UeAgentAnimBlueprintOps::BuildCompilerLogJson(
+			CompilerLog,
+			UeAgentAnimBlueprintOps::ECompilerMessageSeverityFilter::WarningOrError,
+			64,
+			CompileMessages,
+			CompileFilteredErrorCount,
+			CompileFilteredWarningCount,
+			CompileFilteredInfoCount);
 	}
+
+	bool bSaved = false;
+	auto PopulateApplyResult = [&]()
+	{
+		OutData->SetStringField(TEXT("asset_path"), AssetPath);
+		OutData->SetStringField(TEXT("folder_path"), FolderPath);
+		OutData->SetStringField(TEXT("root_path"), UeAgentAnimBlueprintFolderOps::GetFolderRootAbsolute());
+		OutData->SetNumberField(TEXT("variables_added"), VariablesAdded);
+		OutData->SetNumberField(TEXT("variables_removed"), VariablesRemoved);
+		OutData->SetNumberField(TEXT("variable_defaults_updated"), VariableDefaultsUpdated);
+		OutData->SetNumberField(TEXT("delegates_added"), DelegatesAdded);
+		OutData->SetNumberField(TEXT("logic_graphs_rebuilt"), LogicGraphsRebuilt);
+		OutData->SetNumberField(TEXT("anim_graphs_rebuilt"), AnimGraphsRebuilt);
+		OutData->SetNumberField(TEXT("layer_interfaces_added"), LayerInterfacesAdded);
+		OutData->SetNumberField(TEXT("layer_interfaces_removed"), LayerInterfacesRemoved);
+		OutData->SetNumberField(TEXT("local_layers_added"), LocalLayersAdded);
+		OutData->SetNumberField(TEXT("local_layers_removed"), LocalLayersRemoved);
+		OutData->SetNumberField(TEXT("state_machines_rebuilt"), StateMachinesRebuilt);
+		OutData->SetNumberField(TEXT("state_nodes_added"), StateNodesAdded);
+		OutData->SetNumberField(TEXT("transitions_added"), TransitionsAdded);
+		OutData->SetNumberField(TEXT("nodes_created"), NodesCreated);
+		OutData->SetNumberField(TEXT("edges_created"), EdgesCreated);
+		OutData->SetNumberField(TEXT("pin_defaults_applied"), PinDefaultsApplied);
+		OutData->SetNumberField(TEXT("warning_count"), Warnings.Num());
+		OutData->SetArrayField(TEXT("warnings"), Warnings);
+		OutData->SetBoolField(TEXT("saved"), bSaved);
+		OutData->SetBoolField(TEXT("compiled"), bCompileAfterApply);
+		OutData->SetStringField(TEXT("compile_status"), CompileStatus);
+		OutData->SetNumberField(TEXT("compile_error_count"), CompileErrorCount);
+		OutData->SetNumberField(TEXT("compile_warning_count"), CompileWarningCount);
+		OutData->SetNumberField(TEXT("compile_message_total_count"), CompileMessageTotalCount);
+		OutData->SetNumberField(TEXT("compile_filtered_error_count"), CompileFilteredErrorCount);
+		OutData->SetNumberField(TEXT("compile_filtered_warning_count"), CompileFilteredWarningCount);
+		OutData->SetNumberField(TEXT("compile_filtered_info_count"), CompileFilteredInfoCount);
+		OutData->SetNumberField(TEXT("compile_filtered_message_count"), CompileFilteredErrorCount + CompileFilteredWarningCount + CompileFilteredInfoCount);
+		OutData->SetBoolField(TEXT("compile_has_error"), bCompileHasError);
+		OutData->SetArrayField(TEXT("compile_messages"), CompileMessages);
+	};
+
+	if (bCompileAfterApply && bCompileHasError)
+	{
+		PopulateApplyResult();
+		OutError = TEXT("compile_failed_after_apply");
+		return false;
+	}
+
 	if (bSaveAfterApply && !UeAgentAnimBlueprintOps::SaveAnimBlueprintPackage(AnimBlueprint, OutError))
 	{
 		return false;
 	}
+	bSaved = bSaveAfterApply;
 
-	OutData->SetStringField(TEXT("asset_path"), AssetPath);
-	OutData->SetStringField(TEXT("folder_path"), FolderPath);
-	OutData->SetStringField(TEXT("root_path"), UeAgentAnimBlueprintFolderOps::GetFolderRootAbsolute());
-	OutData->SetNumberField(TEXT("variables_added"), VariablesAdded);
-	OutData->SetNumberField(TEXT("variables_removed"), VariablesRemoved);
-	OutData->SetNumberField(TEXT("variable_defaults_updated"), VariableDefaultsUpdated);
-	OutData->SetNumberField(TEXT("delegates_added"), DelegatesAdded);
-	OutData->SetNumberField(TEXT("logic_graphs_rebuilt"), LogicGraphsRebuilt);
-	OutData->SetNumberField(TEXT("anim_graphs_rebuilt"), AnimGraphsRebuilt);
-	OutData->SetNumberField(TEXT("layer_interfaces_added"), LayerInterfacesAdded);
-	OutData->SetNumberField(TEXT("layer_interfaces_removed"), LayerInterfacesRemoved);
-	OutData->SetNumberField(TEXT("local_layers_added"), LocalLayersAdded);
-	OutData->SetNumberField(TEXT("local_layers_removed"), LocalLayersRemoved);
-	OutData->SetNumberField(TEXT("state_machines_rebuilt"), StateMachinesRebuilt);
-	OutData->SetNumberField(TEXT("state_nodes_added"), StateNodesAdded);
-	OutData->SetNumberField(TEXT("transitions_added"), TransitionsAdded);
-	OutData->SetNumberField(TEXT("nodes_created"), NodesCreated);
-	OutData->SetNumberField(TEXT("edges_created"), EdgesCreated);
-	OutData->SetNumberField(TEXT("pin_defaults_applied"), PinDefaultsApplied);
-	OutData->SetNumberField(TEXT("warning_count"), Warnings.Num());
-	OutData->SetArrayField(TEXT("warnings"), Warnings);
-	OutData->SetBoolField(TEXT("saved"), bSaveAfterApply);
-	OutData->SetBoolField(TEXT("compiled"), bCompileAfterApply);
+	PopulateApplyResult();
 	return true;
 }

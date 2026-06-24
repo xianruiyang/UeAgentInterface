@@ -60,6 +60,16 @@ bool FUeAgentHttpServer::CmdNiagaraApplyFolder(const FUeAgentRequestContext& Ctx
 	JsonTryGetBool(Ctx.Params, TEXT("apply_referenced_emitters"), bApplyReferencedEmitters);
 	bool bStrict = false;
 	JsonTryGetBool(Ctx.Params, TEXT("strict"), bStrict);
+	bool bRestorePreviewAfterApply = true;
+	UeAgentNiagaraOps::TryGetBoolAnyField(
+		Ctx.Params,
+		{
+			TEXT("restore_preview_after_apply"),
+			TEXT("resume_preview_after_apply"),
+			TEXT("restore_interactive_preview"),
+			TEXT("resume_interactive_preview")
+		},
+		bRestorePreviewAfterApply);
 
 	TArray<TSharedPtr<FJsonValue>> Warnings;
 	TMap<FString, int32> Stats;
@@ -239,25 +249,49 @@ bool FUeAgentHttpServer::CmdNiagaraApplyFolder(const FUeAgentRequestContext& Ctx
 		}
 	}
 
-	bool bCompileAfterApply = false;
+	bool bCompileAfterApply = true;
 	JsonTryGetBool(Ctx.Params, TEXT("compile_after_apply"), bCompileAfterApply);
+	bool bForceCompile = true;
+	JsonTryGetBool(Ctx.Params, TEXT("force_compile"), bForceCompile);
 	bool bWaitForComplete = true;
 	JsonTryGetBool(Ctx.Params, TEXT("wait_for_complete"), bWaitForComplete);
 	bool bCompilationRequested = false;
 	bool bCompilationComplete = false;
+	bool bCompileHasError = false;
+	bool bCompileLogReadOk = true;
+	FString CompileLogReadError;
+	TSharedPtr<FJsonObject> CompileLogData;
 	if (bCompileAfterApply)
 	{
-		bCompilationRequested = NiagaraSystem->RequestCompile(false);
-		bCompilationComplete = bWaitForComplete ? NiagaraSystem->PollForCompilationComplete(true) : false;
-	}
-
-	bool bSaveAfterApply = false;
-	JsonTryGetBool(Ctx.Params, TEXT("save_after_apply"), bSaveAfterApply);
-	if (bSaveAfterApply)
-	{
-		if (!UeAgentNiagaraOps::SaveAssetPackage(NiagaraSystem, OutError))
+		bCompilationRequested = NiagaraSystem->RequestCompile(bForceCompile);
+		if (bWaitForComplete)
 		{
-			return false;
+			NiagaraSystem->WaitForCompilationComplete(true, false);
+			NiagaraSystem->PollForCompilationComplete(true);
+			NiagaraSystem->CacheFromCompiledData();
+			bCompilationComplete = !NiagaraSystem->HasOutstandingCompilationRequests(true);
+		}
+		FUeAgentRequestContext CompileLogCtx;
+		CompileLogCtx.RequestId = TEXT("niagara_apply_folder_compile_log");
+		CompileLogCtx.Command = TEXT("niagara_get_compile_log");
+		CompileLogCtx.Params = MakeShared<FJsonObject>();
+		CompileLogCtx.Params->SetStringField(TEXT("asset_path"), AssetPath);
+		CompileLogCtx.Params->SetBoolField(TEXT("compile_before_read"), false);
+		CompileLogCtx.Params->SetBoolField(TEXT("force_compile"), bForceCompile);
+		CompileLogCtx.Params->SetBoolField(TEXT("wait_for_complete"), bWaitForComplete);
+		CompileLogCtx.Params->SetBoolField(TEXT("include_events"), true);
+		CompileLogCtx.Params->SetStringField(TEXT("severity_filter"), TEXT("warning_or_error"));
+		CompileLogCtx.Params->SetNumberField(TEXT("max_events_per_script"), 64);
+		CompileLogData = MakeShared<FJsonObject>();
+		if (!CmdNiagaraGetCompileLog(CompileLogCtx, CompileLogData, CompileLogReadError))
+		{
+			bCompileLogReadOk = false;
+			CompileLogData->SetBoolField(TEXT("ok"), false);
+			CompileLogData->SetStringField(TEXT("error"), CompileLogReadError);
+		}
+		if (CompileLogData.IsValid())
+		{
+			CompileLogData->TryGetBoolField(TEXT("has_error"), bCompileHasError);
 		}
 	}
 
@@ -265,6 +299,53 @@ bool FUeAgentHttpServer::CmdNiagaraApplyFolder(const FUeAgentRequestContext& Ctx
 	if (!UeAgentNiagaraFolderOps::CollectPostApplyStackIssues(this, Ctx, NiagaraSystem->GetOutermost()->GetName(), bStrict, TEXT("system_apply_stack_issues"), StackIssueReport))
 	{
 		UeAgentNiagaraFolderOps::AddWarning(Warnings, TEXT("stack_issue_collection_failed"), NiagaraSystem->GetOutermost()->GetName(), StackIssueReport.CollectionError);
+	}
+	bool bOutstandingAfterStackIssueRead = false;
+	bool bPostStackCompilationRequested = false;
+	bool bPostStackCompilationComplete = false;
+	bool bFinalOutstandingCompilationRequests = bCompileAfterApply && bWaitForComplete
+		? NiagaraSystem->HasOutstandingCompilationRequests(true)
+		: false;
+	if (bCompileAfterApply && bWaitForComplete && bFinalOutstandingCompilationRequests)
+	{
+		bOutstandingAfterStackIssueRead = true;
+		TSharedPtr<FJsonObject> FinalCompileParams = MakeShared<FJsonObject>();
+		FinalCompileParams->SetBoolField(TEXT("compile_after_set"), true);
+		FinalCompileParams->SetBoolField(TEXT("force_compile"), bForceCompile);
+		FinalCompileParams->SetBoolField(TEXT("wait_for_complete"), bWaitForComplete);
+		const UeAgentNiagaraOps::FNiagaraCompileAfterSetResult FinalCompileResult =
+			UeAgentNiagaraOps::CompileSystemAfterSet(NiagaraSystem, FinalCompileParams, true);
+		bPostStackCompilationRequested = FinalCompileResult.bCompilationRequested;
+		bPostStackCompilationComplete = FinalCompileResult.bCompilationComplete;
+		bCompilationRequested = bCompilationRequested || FinalCompileResult.bCompilationRequested;
+		bCompilationComplete = FinalCompileResult.bCompilationComplete;
+		bFinalOutstandingCompilationRequests = FinalCompileResult.bHasOutstandingCompilationRequests;
+
+		CompileLogReadError.Reset();
+		bCompileLogReadOk = true;
+		CompileLogData = MakeShared<FJsonObject>();
+		FUeAgentRequestContext CompileLogCtx;
+		CompileLogCtx.RequestId = TEXT("niagara_apply_folder_post_stack_compile_log");
+		CompileLogCtx.Command = TEXT("niagara_get_compile_log");
+		CompileLogCtx.Params = MakeShared<FJsonObject>();
+		CompileLogCtx.Params->SetStringField(TEXT("asset_path"), AssetPath);
+		CompileLogCtx.Params->SetBoolField(TEXT("compile_before_read"), false);
+		CompileLogCtx.Params->SetBoolField(TEXT("force_compile"), bForceCompile);
+		CompileLogCtx.Params->SetBoolField(TEXT("wait_for_complete"), bWaitForComplete);
+		CompileLogCtx.Params->SetBoolField(TEXT("include_events"), true);
+		CompileLogCtx.Params->SetStringField(TEXT("severity_filter"), TEXT("warning_or_error"));
+		CompileLogCtx.Params->SetNumberField(TEXT("max_events_per_script"), 64);
+		if (!CmdNiagaraGetCompileLog(CompileLogCtx, CompileLogData, CompileLogReadError))
+		{
+			bCompileLogReadOk = false;
+			CompileLogData->SetBoolField(TEXT("ok"), false);
+			CompileLogData->SetStringField(TEXT("error"), CompileLogReadError);
+		}
+		bCompileHasError = false;
+		if (CompileLogData.IsValid())
+		{
+			CompileLogData->TryGetBoolField(TEXT("has_error"), bCompileHasError);
+		}
 	}
 
 	Stats.Add(TEXT("system_properties_applied"), AppliedSystemPropertyCount);
@@ -296,13 +377,50 @@ bool FUeAgentHttpServer::CmdNiagaraApplyFolder(const FUeAgentRequestContext& Ctx
 	OutData->SetNumberField(TEXT("overview_node_count_before"), RefreshResult.OverviewNodeCountBefore);
 	OutData->SetNumberField(TEXT("overview_node_count_after"), RefreshResult.OverviewNodeCountAfter);
 	OutData->SetBoolField(TEXT("compile_after_apply"), bCompileAfterApply);
+	OutData->SetBoolField(TEXT("force_compile"), bForceCompile);
 	OutData->SetBoolField(TEXT("compilation_requested"), bCompilationRequested);
+	OutData->SetBoolField(TEXT("wait_for_complete"), bWaitForComplete);
 	OutData->SetBoolField(TEXT("compilation_complete"), bCompilationComplete);
-	OutData->SetBoolField(TEXT("saved"), bSaveAfterApply);
+	OutData->SetBoolField(TEXT("has_outstanding_compilation_requests"), bFinalOutstandingCompilationRequests);
+	OutData->SetBoolField(TEXT("outstanding_after_stack_issue_read"), bOutstandingAfterStackIssueRead);
+	OutData->SetBoolField(TEXT("post_stack_compilation_requested"), bPostStackCompilationRequested);
+	OutData->SetBoolField(TEXT("post_stack_compilation_complete"), bPostStackCompilationComplete);
+	OutData->SetBoolField(TEXT("compile_log_read_ok"), bCompileLogReadOk);
+	OutData->SetStringField(TEXT("compile_log_read_error"), CompileLogReadError);
+	OutData->SetBoolField(TEXT("compile_has_error"), bCompileHasError);
+	if (CompileLogData.IsValid())
+	{
+		OutData->SetObjectField(TEXT("compile_log"), CompileLogData);
+	}
+	bool bSaveAfterApply = false;
+	JsonTryGetBool(Ctx.Params, TEXT("save_after_apply"), bSaveAfterApply);
+	bool bSaved = false;
+	OutData->SetBoolField(TEXT("saved"), bSaved);
 	OutData->SetNumberField(TEXT("warning_count"), Warnings.Num());
 	OutData->SetArrayField(TEXT("warnings"), Warnings);
 	UeAgentNiagaraFolderOps::AppendPostApplyStackIssueFields(OutData, StackIssueReport);
+	OutData->SetBoolField(TEXT("restore_preview_after_apply"), bRestorePreviewAfterApply);
+	if (bRestorePreviewAfterApply)
+	{
+		TSharedPtr<FJsonObject> PreviewRestoreReport = UeAgentNiagaraOps::RestoreNiagaraPreviewForInteractiveEditing(NiagaraSystem, TSharedPtr<FNiagaraSystemViewModel>());
+		OutData->SetObjectField(TEXT("preview_restore"), PreviewRestoreReport);
+	}
 
+	if (bCompileAfterApply && bWaitForComplete && bFinalOutstandingCompilationRequests)
+	{
+		OutError = TEXT("compile_incomplete_after_apply");
+		return false;
+	}
+	if (bCompileAfterApply && !bCompileLogReadOk)
+	{
+		OutError = TEXT("compile_log_read_failed_after_apply");
+		return false;
+	}
+	if (bCompileAfterApply && bCompileHasError)
+	{
+		OutError = TEXT("compile_failed_after_apply");
+		return false;
+	}
 	if (bStrict && StackIssueReport.bCollectAfterApply && !StackIssueReport.bCollectionOk)
 	{
 		OutError = TEXT("strict_apply_stack_issue_collection_failed");
@@ -317,6 +435,15 @@ bool FUeAgentHttpServer::CmdNiagaraApplyFolder(const FUeAgentRequestContext& Ctx
 	{
 		OutError = TEXT("strict_apply_has_warnings");
 		return false;
+	}
+	if (bSaveAfterApply)
+	{
+		if (!UeAgentNiagaraOps::SaveAssetPackage(NiagaraSystem, OutError))
+		{
+			return false;
+		}
+		bSaved = true;
+		OutData->SetBoolField(TEXT("saved"), bSaved);
 	}
 	return true;
 }

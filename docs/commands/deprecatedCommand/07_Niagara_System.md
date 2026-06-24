@@ -2,6 +2,18 @@
 
 > 本文件从 `../07_Niagara_System.md` 抽出，保留原分册章节结构。主分册只保留 JSON / 结构化 JSON 主流程、读取、导出/应用、编译和诊断命令。
 
+## 资产级操作
+
+| 指令 | 作用 | 关键参数 | 典型用法 |
+|---|---|---|---|
+| `niagara_delete_asset` | **Deprecated**：删除 Niagara System / Emitter / Script | `asset_path`、`force_delete`、`use_unchecked_delete` | 仅用于旧脚本兼容；新流程使用 `asset_delete` |
+
+### `niagara_delete_asset`
+
+已由通用 `asset_delete` 覆盖。新流程应先用 `asset_delete dry_run=true` 做引用和路径字符串 preflight，确认未被任何外部对象引用后再传 `dry_run=false` 删除。临时未保存 Niagara 资产需要显式传 `allow_dirty=true`。
+
+旧命令保留兼容语义：`force_delete=true` 会使用无确认删除路径；当目标包尚未落盘，或显式传 `use_unchecked_delete=true` 时，会走 `delete_objects_unchecked`，避免临时 NiagaraScript 等未保存资产在 UE 的递归引用替换路径中长时间阻塞 UAI 服务。删除返回成功后会清理同路径残留的非公开/非 standalone UObject，避免同一编辑器会话内立刻重建时报 `asset_already_exists`。
+
 ## System 属性与编译
 
 | 指令 | 作用 | 关键参数 | 典型用法 |

@@ -1664,6 +1664,15 @@ bool FUeAgentHttpServer::CmdNiagaraEmitterSetModuleInput(const FUeAgentRequestCo
 		TSet<FNiagaraVariableBase> KnownParameters;
 		const FNiagaraVariableBase LinkedParameter(ResolvedInput->InputVariable.GetType(), *LinkedParameterName);
 		FNiagaraStackGraphUtilities::SetLinkedParameterValueForFunctionInput(OverridePin, LinkedParameter, KnownParameters);
+		FString LinkedParameterReadback;
+		if (!UeAgentNiagaraOps::TryResolveLinkedInputParameterName(&OverridePin, LinkedParameterReadback)
+			|| !LinkedParameterReadback.Equals(LinkedParameterName, ESearchCase::IgnoreCase))
+		{
+			return CancelAndFail(FString::Printf(
+				TEXT("linked_parameter_apply_verification_failed:%s:readback=%s"),
+				*LinkedParameterName,
+				*LinkedParameterReadback));
+		}
 		FUeAgentInterfaceLogger::Log(
 			TEXT("Niagara SetModuleInput linked: emitter=%s module=%s input=%s link=%s"),
 			*EditContext.Emitter->GetPathName(),
@@ -1928,6 +1937,15 @@ bool FUeAgentHttpServer::CmdNiagaraSystemSetModuleInput(const FUeAgentRequestCon
 		TSet<FNiagaraVariableBase> KnownParameters;
 		const FNiagaraVariableBase LinkedParameter(ResolvedInput->InputVariable.GetType(), *LinkedParameterName);
 		FNiagaraStackGraphUtilities::SetLinkedParameterValueForFunctionInput(OverridePin, LinkedParameter, KnownParameters);
+		FString LinkedParameterReadback;
+		if (!UeAgentNiagaraOps::TryResolveLinkedInputParameterName(&OverridePin, LinkedParameterReadback)
+			|| !LinkedParameterReadback.Equals(LinkedParameterName, ESearchCase::IgnoreCase))
+		{
+			return CancelAndFail(FString::Printf(
+				TEXT("linked_parameter_apply_verification_failed:%s:readback=%s"),
+				*LinkedParameterName,
+				*LinkedParameterReadback));
+		}
 		FUeAgentInterfaceLogger::Log(
 			TEXT("Niagara System SetModuleInput linked: system=%s module=%s input=%s link=%s"),
 			*EditContext.System->GetPathName(),

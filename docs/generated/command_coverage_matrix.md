@@ -1,7 +1,7 @@
 # UAI Command Coverage Matrix
 
-- generated_at: `20260527_172544_825068`
-- command_count: `917`
+- generated_at: `20260624_153308_459183`
+- command_count: `939`
 - missing_doc: `0`
 - missing_implementation: `0`
 - missing_smoke: `0`
@@ -9,15 +9,15 @@
 - smoke_p0_count: `0`
 - smoke_p1_count: `0`
 - generated_doc_catalog_count: `0`
-- deprecated_doc_count: `201`
-- generated_catalog_file: `Plugins\UeAgentInterface\docs\generated\implemented_command_catalog.md`
-- smoke_debt_file: `Plugins\UeAgentInterface\docs\generated\smoke_coverage_debt.md`
+- deprecated_doc_count: `202`
+- generated_catalog_file: `D:\program\UE\GptProjectTest\Plugins\UeAgentInterface\docs\generated\implemented_command_catalog.md`
+- smoke_debt_file: `D:\program\UE\GptProjectTest\Plugins\UeAgentInterface\docs\generated\smoke_coverage_debt.md`
 
 ## Smoke Status Counts
 
 | Status | Count |
 | --- | --- |
-| `direct` | 917 |
+| `direct` | 939 |
 
 ## Commands
 
@@ -90,7 +90,10 @@
 | `anim_blueprint_set_transition_properties` | `docs/commands/deprecatedCommand/11_AnimBlueprint.md` | True | True | `direct` | `covered` |
 | `anim_blueprint_viewport_get_camera` | `docs/commands/11_AnimBlueprint.md` | True | True | `direct` | `covered` |
 | `anim_blueprint_viewport_set_camera` | `docs/commands/11_AnimBlueprint.md` | True | True | `direct` | `covered` |
+| `anim_sequence_analyze_root_motion` | `docs/commands/13_AnimationAssets_Skeleton.md` | True | True | `direct` | `covered` |
+| `anim_sequence_apply_bone_tracks` | `docs/commands/13_AnimationAssets_Skeleton.md` | True | True | `direct` | `covered` |
 | `anim_sequence_get_info` | `docs/commands/13_AnimationAssets_Skeleton.md` | True | True | `direct` | `covered` |
+| `anim_sequence_sample_pose` | `docs/commands/13_AnimationAssets_Skeleton.md` | True | True | `direct` | `covered` |
 | `anim_sequence_screenshot` | `docs/commands/13_AnimationAssets_Skeleton.md` | True | True | `direct` | `covered` |
 | `anim_sequence_set_bones` | `docs/commands/13_AnimationAssets_Skeleton.md` | True | True | `direct` | `covered` |
 | `anim_sequence_set_curve` | `docs/commands/13_AnimationAssets_Skeleton.md` | True | True | `direct` | `covered` |
@@ -101,6 +104,7 @@
 | `anim_sequence_set_settings` | `docs/commands/deprecatedCommand/13_AnimationAssets_Skeleton.md` | True | True | `direct` | `covered` |
 | `anim_sequence_set_sync_markers` | `docs/commands/13_AnimationAssets_Skeleton.md` | True | True | `direct` | `covered` |
 | `asset_apply_property_json` | `docs/commands/01_Core_Level_Assets_Landscape.md` | True | True | `direct` | `covered` |
+| `asset_delete` | `docs/commands/01_Core_Level_Assets_Landscape.md` | True | True | `direct` | `covered` |
 | `asset_duplicate` | `docs/commands/01_Core_Level_Assets_Landscape.md` | True | True | `direct` | `covered` |
 | `asset_export_property_json` | `docs/commands/01_Core_Level_Assets_Landscape.md` | True | True | `direct` | `covered` |
 | `asset_fixup_redirectors` | `docs/commands/01_Core_Level_Assets_Landscape.md` | True | True | `direct` | `covered` |
@@ -176,6 +180,7 @@
 | `blueprint_layout_all_graphs` | `docs/commands/02_Blueprint.md` | True | True | `direct` | `covered` |
 | `blueprint_layout_graph` | `docs/commands/02_Blueprint.md` | True | True | `direct` | `covered` |
 | `blueprint_layout_graph_self_test` | `docs/commands/02_Blueprint.md` | True | True | `direct` | `covered` |
+| `blueprint_list_component_events` | `docs/commands/02_Blueprint.md` | True | True | `direct` | `covered` |
 | `blueprint_list_graphs` | `docs/commands/02_Blueprint.md` | True | True | `direct` | `covered` |
 | `blueprint_remove_component` | `docs/commands/deprecatedCommand/02_Blueprint.md` | True | True | `direct` | `covered` |
 | `blueprint_remove_node` | `docs/commands/deprecatedCommand/02_Blueprint.md` | True | True | `direct` | `covered` |
@@ -252,6 +257,7 @@
 | `device_profile_resolve_cvars` | `docs/commands/27_Localization_Packaging_PlatformProfiles.md` | True | True | `direct` | `covered` |
 | `device_profile_validate_json` | `docs/commands/27_Localization_Packaging_PlatformProfiles.md` | True | True | `direct` | `covered` |
 | `editor_close` | `docs/commands/01_Core_Level_Assets_Landscape.md` | True | True | `direct` | `covered` |
+| `editor_console_exec` | `docs/commands/01_Core_Level_Assets_Landscape.md` | True | True | `direct` | `covered` |
 | `editor_get_open_assets` | `docs/commands/01_Core_Level_Assets_Landscape.md` | True | True | `direct` | `covered` |
 | `editor_list_dirty_resources` | `docs/commands/01_Core_Level_Assets_Landscape.md` | True | True | `direct` | `covered` |
 | `editor_prepare_exit` | `docs/commands/01_Core_Level_Assets_Landscape.md` | True | True | `direct` | `covered` |
@@ -337,6 +343,7 @@
 | `level_content_repair_json` | `docs/commands/23_LevelContent_JSON.md` | True | True | `direct` | `covered` |
 | `level_content_snapshot_json` | `docs/commands/23_LevelContent_JSON.md` | True | True | `direct` | `covered` |
 | `level_content_validate_json` | `docs/commands/23_LevelContent_JSON.md` | True | True | `direct` | `covered` |
+| `level_create_blank` | `docs/commands/01_Core_Level_Assets_Landscape.md` | True | True | `direct` | `covered` |
 | `level_destroy_folder_actors` | `docs/commands/deprecatedCommand/01_Core_Level_Assets_Landscape.md` | True | True | `direct` | `covered` |
 | `level_detach_actor` | `docs/commands/deprecatedCommand/01_Core_Level_Assets_Landscape.md` | True | True | `direct` | `covered` |
 | `level_duplicate_actor` | `docs/commands/deprecatedCommand/01_Core_Level_Assets_Landscape.md` | True | True | `direct` | `covered` |
@@ -348,6 +355,7 @@
 | `level_get_selection` | `docs/commands/01_Core_Level_Assets_Landscape.md` | True | True | `direct` | `covered` |
 | `level_list_actor_components` | `docs/commands/01_Core_Level_Assets_Landscape.md` | True | True | `direct` | `covered` |
 | `level_mark_probe` | `docs/commands/deprecatedCommand/01_Core_Level_Assets_Landscape.md` | True | True | `direct` | `covered` |
+| `level_open` | `docs/commands/01_Core_Level_Assets_Landscape.md` | True | True | `direct` | `covered` |
 | `level_set_actor_folder` | `docs/commands/deprecatedCommand/01_Core_Level_Assets_Landscape.md` | True | True | `direct` | `covered` |
 | `level_set_actor_location` | `docs/commands/deprecatedCommand/01_Core_Level_Assets_Landscape.md` | True | True | `direct` | `covered` |
 | `level_set_actor_property` | `docs/commands/deprecatedCommand/01_Core_Level_Assets_Landscape.md` | True | True | `direct` | `covered` |
@@ -356,6 +364,7 @@
 | `level_set_actor_transform` | `docs/commands/deprecatedCommand/01_Core_Level_Assets_Landscape.md` | True | True | `direct` | `covered` |
 | `level_set_component_property` | `docs/commands/deprecatedCommand/01_Core_Level_Assets_Landscape.md` | True | True | `direct` | `covered` |
 | `level_set_selection` | `docs/commands/01_Core_Level_Assets_Landscape.md` | True | True | `direct` | `covered` |
+| `level_set_skeletal_animation_pose` | `docs/commands/01_Core_Level_Assets_Landscape.md` | True | True | `direct` | `covered` |
 | `level_set_skeletal_mesh_morph_target` | `docs/commands/01_Core_Level_Assets_Landscape.md` | True | True | `direct` | `covered` |
 | `level_snap_to_surface` | `docs/commands/01_Core_Level_Assets_Landscape.md` | True | True | `direct` | `covered` |
 | `level_spawn_wall_with_opening` | `docs/commands/01_Core_Level_Assets_Landscape.md` | True | True | `direct` | `covered` |
@@ -518,7 +527,7 @@
 | `niagara_compile_system` | `docs/commands/07_Niagara_System.md` | True | True | `direct` | `covered` |
 | `niagara_create_emitter` | `docs/commands/07_Niagara_System.md` | True | True | `direct` | `covered` |
 | `niagara_create_system` | `docs/commands/07_Niagara_System.md` | True | True | `direct` | `covered` |
-| `niagara_delete_asset` | `docs/commands/07_Niagara_System.md` | True | True | `direct` | `covered` |
+| `niagara_delete_asset` | `docs/commands/deprecatedCommand/07_Niagara_System.md` | True | True | `direct` | `covered` |
 | `niagara_duplicate_asset` | `docs/commands/07_Niagara_System.md` | True | True | `direct` | `covered` |
 | `niagara_emitter_add_event_handler` | `docs/commands/deprecatedCommand/08_Niagara_Emitter.md` | True | True | `direct` | `covered` |
 | `niagara_emitter_add_renderer` | `docs/commands/deprecatedCommand/08_Niagara_Emitter.md` | True | True | `direct` | `covered` |
@@ -589,8 +598,11 @@
 | `niagara_user_parameter_list` | `docs/commands/07_Niagara_System.md` | True | True | `direct` | `covered` |
 | `niagara_user_parameter_remove` | `docs/commands/deprecatedCommand/07_Niagara_System.md` | True | True | `direct` | `covered` |
 | `niagara_user_parameter_set` | `docs/commands/deprecatedCommand/07_Niagara_System.md` | True | True | `direct` | `covered` |
+| `node_catalog_categories` | `docs/commands/28_NodeGraph.md` | True | True | `direct` | `covered` |
+| `node_catalog_search` | `docs/commands/28_NodeGraph.md` | True | True | `direct` | `covered` |
 | `node_graph_layout` | `docs/commands/28_NodeGraph.md` | True | True | `direct` | `covered` |
 | `node_graph_list` | `docs/commands/28_NodeGraph.md` | True | True | `direct` | `covered` |
+| `node_origin_resolve` | `docs/commands/28_NodeGraph.md` | True | True | `direct` | `covered` |
 | `open_asset_editor` | `docs/commands/01_Core_Level_Assets_Landscape.md` | True | True | `direct` | `covered` |
 | `packaging_cancel_task` | `docs/commands/27_Localization_Packaging_PlatformProfiles.md` | True | True | `direct` | `covered` |
 | `packaging_clean_artifacts` | `docs/commands/27_Localization_Packaging_PlatformProfiles.md` | True | True | `direct` | `covered` |
@@ -674,6 +686,11 @@
 | `platform_profile_validate_packaging` | `docs/commands/27_Localization_Packaging_PlatformProfiles.md` | True | True | `direct` | `covered` |
 | `primary_asset_scan_assets` | `docs/commands/24_DataDriven_DataAsset_DataTable.md` | True | True | `direct` | `covered` |
 | `primary_asset_validate_asset` | `docs/commands/24_DataDriven_DataAsset_DataTable.md` | True | True | `direct` | `covered` |
+| `probe_actor_transform_candidates` | `docs/commands/31_Probe.md` | True | True | `direct` | `covered` |
+| `probe_camera_pixel_scale` | `docs/commands/31_Probe.md` | True | True | `direct` | `covered` |
+| `probe_ik_goal_apply_candidate` | `docs/commands/31_Probe.md` | True | True | `direct` | `covered` |
+| `probe_ik_goal_candidates` | `docs/commands/31_Probe.md` | True | True | `direct` | `covered` |
+| `probe_ik_goal_review_frames` | `docs/commands/31_Probe.md` | True | True | `direct` | `covered` |
 | `project_settings_apply_page` | `docs/commands/22_ProjectSettings_Config.md` | True | True | `direct` | `covered` |
 | `project_settings_diff_page` | `docs/commands/22_ProjectSettings_Config.md` | True | True | `direct` | `covered` |
 | `project_settings_export_index` | `docs/commands/22_ProjectSettings_Config.md` | True | True | `direct` | `covered` |
@@ -905,8 +922,10 @@
 | `umg_export_folder` | `docs/commands/03_UMG.md` | True | True | `direct` | `covered` |
 | `umg_get_compile_log` | `docs/commands/03_UMG.md` | True | True | `direct` | `covered` |
 | `umg_get_info` | `docs/commands/03_UMG.md` | True | True | `direct` | `covered` |
+| `umg_list_widget_events` | `docs/commands/03_UMG.md` | True | True | `direct` | `covered` |
 | `umg_remove_widget` | `docs/commands/deprecatedCommand/03_UMG.md` | True | True | `direct` | `covered` |
 | `umg_rename_widget` | `docs/commands/deprecatedCommand/03_UMG.md` | True | True | `direct` | `covered` |
+| `umg_screenshot` | `docs/commands/03_UMG.md` | True | True | `direct` | `covered` |
 | `umg_set_slot_property` | `docs/commands/deprecatedCommand/03_UMG.md` | True | True | `direct` | `covered` |
 | `umg_set_widget_property` | `docs/commands/deprecatedCommand/03_UMG.md` | True | True | `direct` | `covered` |
 | `undo` | `docs/commands/01_Core_Level_Assets_Landscape.md` | True | True | `direct` | `covered` |
@@ -918,8 +937,11 @@
 | `viewport_frame_folder` | `docs/commands/01_Core_Level_Assets_Landscape.md` | True | True | `direct` | `covered` |
 | `viewport_frame_selection` | `docs/commands/01_Core_Level_Assets_Landscape.md` | True | True | `direct` | `covered` |
 | `viewport_get_camera` | `docs/commands/01_Core_Level_Assets_Landscape.md` | True | True | `direct` | `covered` |
+| `viewport_get_editor_interaction_state` | `docs/commands/01_Core_Level_Assets_Landscape.md` | True | True | `direct` | `covered` |
 | `viewport_get_warnings` | `docs/commands/01_Core_Level_Assets_Landscape.md` | True | True | `direct` | `covered` |
+| `viewport_list_view_modes` | `docs/commands/01_Core_Level_Assets_Landscape.md` | True | True | `direct` | `covered` |
 | `viewport_pick_actor_at_screen` | `docs/commands/01_Core_Level_Assets_Landscape.md` | True | True | `direct` | `covered` |
+| `viewport_restore_editor_interaction_state` | `docs/commands/01_Core_Level_Assets_Landscape.md` | True | True | `direct` | `covered` |
 | `viewport_select_actor_at_screen` | `docs/commands/01_Core_Level_Assets_Landscape.md` | True | True | `direct` | `covered` |
 | `viewport_set_camera` | `docs/commands/01_Core_Level_Assets_Landscape.md` | True | True | `direct` | `covered` |
 | `viewport_set_game_view` | `docs/commands/01_Core_Level_Assets_Landscape.md` | True | True | `direct` | `covered` |

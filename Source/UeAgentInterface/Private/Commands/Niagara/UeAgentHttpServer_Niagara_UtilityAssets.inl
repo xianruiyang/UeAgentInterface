@@ -475,6 +475,18 @@
 		return false;
 	}
 
+	static bool IsNiagaraParameterMapGetNode(const UEdGraphNode* Node)
+	{
+		for (const UClass* Class = Node ? Node->GetClass() : nullptr; Class; Class = Class->GetSuperClass())
+		{
+			if (Class->GetName().Equals(TEXT("NiagaraNodeParameterMapGet"), ESearchCase::CaseSensitive))
+			{
+				return true;
+			}
+		}
+		return false;
+	}
+
 	static UEdGraphPin* FindOverridePinByAliasedInputName(UNiagaraGraph* Graph, const FName AliasedInputName)
 	{
 		if (!Graph || AliasedInputName.IsNone())
@@ -752,6 +764,37 @@
 		return nullptr;
 	}
 
+	static bool TryResolveLinkedInputParameterName(const UEdGraphPin* OverridePin, FString& OutParameterName)
+	{
+		OutParameterName.Reset();
+		if (!OverridePin)
+		{
+			return false;
+		}
+
+		for (UEdGraphPin* LinkedPin : OverridePin->LinkedTo)
+		{
+			if (!LinkedPin)
+			{
+				continue;
+			}
+			if (UNiagaraNodeInput* LinkedInput = Cast<UNiagaraNodeInput>(LinkedPin->GetOwningNode()))
+			{
+				OutParameterName = LinkedInput->Input.GetName().ToString();
+				return !OutParameterName.IsEmpty();
+			}
+			if (IsNiagaraParameterMapGetNode(LinkedPin->GetOwningNode()))
+			{
+				const FNiagaraVariable LinkedVariable = UEdGraphSchema_Niagara::PinToNiagaraVariable(LinkedPin);
+				OutParameterName = LinkedVariable.IsValid()
+					? LinkedVariable.GetName().ToString()
+					: LinkedPin->PinName.ToString();
+				return !OutParameterName.IsEmpty();
+			}
+		}
+		return false;
+	}
+
 	static bool ResolveDataInterfaceFromInputNode(UNiagaraNodeInput* InputNode, UNiagaraDataInterface*& OutDataInterface)
 	{
 		OutDataInterface = nullptr;
@@ -906,6 +949,7 @@
 		InputObj->SetStringField(TEXT("input_name"), InputData.FullInputName);
 		InputObj->SetStringField(TEXT("input_short_name"), InputData.ShortInputName);
 		InputObj->SetStringField(TEXT("input_type"), InputType.GetNameText().ToString());
+		InputObj->SetObjectField(TEXT("input_type_descriptor"), BuildNiagaraInputTypeDescriptorJson(InputType.GetNameText().ToString(), InputType));
 		InputObj->SetBoolField(TEXT("has_override"), bHasLinks || bHasDefaultOverride);
 		InputObj->SetBoolField(TEXT("has_links"), bHasLinks);
 		InputObj->SetStringField(TEXT("override_default_value"), OverrideDefaultValue);
@@ -957,12 +1001,12 @@
 				TArray<TSharedPtr<FJsonValue>> OptionsJson;
 				for (int32 EnumIndex = 0; EnumIndex < EnumType->NumEnums(); ++EnumIndex)
 				{
-					if (EnumType->HasMetaData(TEXT("Hidden"), EnumIndex))
+					const int64 EnumValue = EnumType->GetValueByIndex(EnumIndex);
+					if (!IsUserSettableNiagaraEnumValue(*EnumType, EnumValue))
 					{
 						continue;
 					}
 
-					const int64 EnumValue = EnumType->GetValueByIndex(EnumIndex);
 					TSharedPtr<FJsonObject> OptionObj = MakeShared<FJsonObject>();
 					OptionObj->SetNumberField(TEXT("index"), EnumIndex);
 					OptionObj->SetNumberField(TEXT("value"), static_cast<double>(EnumValue));
@@ -1011,6 +1055,27 @@
 
 				InputObj->SetStringField(TEXT("link_kind"), TEXT("dynamic_input"));
 				InputObj->SetObjectField(TEXT("dynamic_input"), DynamicInputObj);
+			}
+			else
+			{
+				UNiagaraNodeInput* LinkedInputNode = EffectiveInputPin->LinkedTo.Num() == 1
+					? Cast<UNiagaraNodeInput>(EffectiveInputPin->LinkedTo[0]->GetOwningNode())
+					: nullptr;
+				TSharedPtr<FJsonObject> DataInterfaceObj = LinkedInputNode ? BuildDataInterfaceNodeJson(*LinkedInputNode) : nullptr;
+				if (DataInterfaceObj.IsValid())
+				{
+					InputObj->SetStringField(TEXT("link_kind"), TEXT("data_interface"));
+					InputObj->SetObjectField(TEXT("data_interface"), DataInterfaceObj);
+				}
+				else
+				{
+					FString LinkedParameterName;
+					if (TryResolveLinkedInputParameterName(EffectiveInputPin, LinkedParameterName))
+					{
+						InputObj->SetStringField(TEXT("link_kind"), TEXT("linked_input"));
+						InputObj->SetStringField(TEXT("linked_parameter_name"), LinkedParameterName);
+					}
+				}
 			}
 		}
 		return InputObj;

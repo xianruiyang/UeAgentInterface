@@ -8,6 +8,7 @@ bool FUeAgentHttpServer::ExecuteBlueprintCommand(const FString& CommandLower, co
 	if (CommandLower == TEXT("blueprint_export_folder")) return CmdBlueprintExportFolder(Ctx, OutData, OutError);
 	if (CommandLower == TEXT("blueprint_apply_folder")) return CmdBlueprintApplyFolder(Ctx, OutData, OutError);
 	if (CommandLower == TEXT("blueprint_inspect_components")) return CmdBlueprintInspectComponents(Ctx, OutData, OutError);
+	if (CommandLower == TEXT("blueprint_list_component_events")) return CmdBlueprintListComponentEvents(Ctx, OutData, OutError);
 	if (CommandLower == TEXT("blueprint_inspect_nodes")) return CmdBlueprintInspectNodes(Ctx, OutData, OutError);
 	if (CommandLower == TEXT("blueprint_add_component")) return CmdBlueprintAddComponent(Ctx, OutData, OutError);
 	if (CommandLower == TEXT("blueprint_set_component_property")) return CmdBlueprintSetComponentProperty(Ctx, OutData, OutError);

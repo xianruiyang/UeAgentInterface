@@ -245,6 +245,7 @@ namespace
 		{ TEXT("viewport_focus_actor_safe"), TEXT("Core.LevelViewportModeling"), TEXT("needs_ui_smoke"), TEXT("P1") },
 		{ TEXT("viewport_frame_actors"), TEXT("Core.LevelViewportModeling"), TEXT("needs_ui_smoke"), TEXT("P1") },
 		{ TEXT("viewport_frame_selection"), TEXT("Core.LevelViewportModeling"), TEXT("needs_ui_smoke"), TEXT("P1") },
+		{ TEXT("viewport_list_view_modes"), TEXT("Core.LevelViewportModeling"), TEXT("needs_ui_smoke"), TEXT("P1") },
 		{ TEXT("viewport_set_game_view"), TEXT("Core.LevelViewportModeling"), TEXT("needs_ui_smoke"), TEXT("P1") },
 		{ TEXT("viewport_set_realtime"), TEXT("Core.LevelViewportModeling"), TEXT("needs_ui_smoke"), TEXT("P1") },
 		{ TEXT("viewport_trace_screen_point"), TEXT("Core.LevelViewportModeling"), TEXT("needs_ui_smoke"), TEXT("P1") },

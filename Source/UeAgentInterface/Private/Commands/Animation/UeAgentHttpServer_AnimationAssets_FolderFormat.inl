@@ -616,7 +616,9 @@ bool FUeAgentHttpServer::CmdSkeletonApplyFolder(const FUeAgentRequestContext& Ct
 					{
 						VirtualBoneObj->TryGetStringField(TEXT("name"), VirtualBoneName);
 					}
-					if (!VirtualBoneName.TrimStartAndEnd().IsEmpty() && UeAgentAnimationAssetOps::FindVirtualBoneByName(Skeleton, FName(*VirtualBoneName.TrimStartAndEnd())))
+					bool bRemoveVirtualBone = false;
+					VirtualBoneObj->TryGetBoolField(TEXT("remove"), bRemoveVirtualBone);
+					if (!bRemoveVirtualBone && !VirtualBoneName.TrimStartAndEnd().IsEmpty() && UeAgentAnimationAssetOps::FindVirtualBoneByName(Skeleton, FName(*VirtualBoneName.TrimStartAndEnd())))
 					{
 						AddPropertyResult(FString::Printf(TEXT("virtual_bones.json.virtual_bones[%d]"), Index), TEXT("already_present"), VirtualBoneName);
 						continue;

@@ -38,13 +38,11 @@ bool FUeAgentHttpServer::CmdNiagaraExportFolder(const FUeAgentRequestContext& Ct
 	TMap<FString, TSharedPtr<FJsonObject>> ScriptRefs;
 
 	const FString AssetPath = NiagaraSystem->GetOutermost()->GetName();
-	const FString AssetName = FPackageName::GetLongPackageAssetName(AssetPath);
 
 	TSharedPtr<FJsonObject> AssetObj = MakeShared<FJsonObject>();
 	AssetObj->SetNumberField(TEXT("format_version"), UeAgentNiagaraFolderOps::NiagaraFolderFormatVersion);
 	AssetObj->SetStringField(TEXT("asset_kind"), TEXT("niagara_system"));
 	AssetObj->SetStringField(TEXT("asset_path"), AssetPath);
-	AssetObj->SetStringField(TEXT("asset_name"), AssetName);
 	AssetObj->SetStringField(TEXT("object_path"), NiagaraSystem->GetPathName());
 	AssetObj->SetStringField(TEXT("class"), NiagaraSystem->GetClass()->GetPathName());
 	AssetObj->SetStringField(TEXT("engine_target"), TEXT("UE_5.6"));
@@ -77,7 +75,6 @@ bool FUeAgentHttpServer::CmdNiagaraExportFolder(const FUeAgentRequestContext& Ct
 		TSharedPtr<FJsonObject> PlaceholderObj = MakeShared<FJsonObject>();
 		PlaceholderObj->SetNumberField(TEXT("format_version"), UeAgentNiagaraFolderOps::NiagaraFolderFormatVersion);
 		PlaceholderObj->SetStringField(TEXT("asset_path"), AssetPath);
-		PlaceholderObj->SetStringField(TEXT("coverage_note"), TEXT("See settings/system.json raw_properties for the authoritative UObject field mirror; this file is a stable structured extension point."));
 		if (!UeAgentNiagaraFolderOps::SaveJsonFile(FPaths::Combine(FolderPath, TEXT("settings"), SettingsFile), PlaceholderObj, &WrittenFiles))
 		{
 			OutError = TEXT("save_settings_extension_failed");
@@ -116,7 +113,6 @@ bool FUeAgentHttpServer::CmdNiagaraExportFolder(const FUeAgentRequestContext& Ct
 	{
 		TSharedPtr<FJsonObject> ParameterObj = MakeShared<FJsonObject>();
 		ParameterObj->SetArrayField(TEXT("items"), TArray<TSharedPtr<FJsonValue>>());
-		ParameterObj->SetStringField(TEXT("coverage_note"), TEXT("Reserved structured extension point; concrete references are preserved through raw properties and module inputs."));
 		if (!UeAgentNiagaraFolderOps::SaveJsonFile(FPaths::Combine(FolderPath, TEXT("parameters"), ParameterFile), ParameterObj, &WrittenFiles))
 		{
 			OutError = TEXT("save_parameter_extension_failed");
@@ -180,7 +176,6 @@ bool FUeAgentHttpServer::CmdNiagaraExportFolder(const FUeAgentRequestContext& Ct
 	TSharedPtr<FJsonObject> ScriptsIndexObj = MakeShared<FJsonObject>();
 	ScriptsIndexObj->SetArrayField(TEXT("scripts"), ScriptsJson);
 	ScriptsIndexObj->SetNumberField(TEXT("script_count"), ScriptsJson.Num());
-	ScriptsIndexObj->SetStringField(TEXT("coverage_note"), TEXT("Script references are indexed here; standalone NiagaraScript folder commands export/apply script asset graphs when a script asset path is used as the root profile."));
 	if (!UeAgentNiagaraFolderOps::SaveJsonFile(FPaths::Combine(FolderPath, TEXT("scripts"), TEXT("index.json")), ScriptsIndexObj, &WrittenFiles))
 	{
 		OutError = TEXT("save_scripts_index_failed");
@@ -300,7 +295,6 @@ bool FUeAgentHttpServer::CmdNiagaraEmitterExportFolder(const FUeAgentRequestCont
 	AssetObj->SetNumberField(TEXT("format_version"), UeAgentNiagaraFolderOps::NiagaraFolderFormatVersion);
 	AssetObj->SetStringField(TEXT("asset_kind"), TEXT("niagara_emitter"));
 	AssetObj->SetStringField(TEXT("asset_path"), AssetPath);
-	AssetObj->SetStringField(TEXT("asset_name"), AssetName);
 	AssetObj->SetStringField(TEXT("object_path"), NiagaraEmitter->GetPathName());
 	AssetObj->SetStringField(TEXT("class"), NiagaraEmitter->GetClass()->GetPathName());
 	AssetObj->SetStringField(TEXT("engine_target"), TEXT("UE_5.6"));
@@ -339,7 +333,6 @@ bool FUeAgentHttpServer::CmdNiagaraEmitterExportFolder(const FUeAgentRequestCont
 	TSharedPtr<FJsonObject> ScriptsIndexObj = MakeShared<FJsonObject>();
 	ScriptsIndexObj->SetArrayField(TEXT("scripts"), ScriptsJson);
 	ScriptsIndexObj->SetNumberField(TEXT("script_count"), ScriptsJson.Num());
-	ScriptsIndexObj->SetStringField(TEXT("coverage_note"), TEXT("Script references are indexed here; standalone NiagaraScript folder commands export/apply script asset graphs when a script asset path is used as the root profile."));
 	if (!UeAgentNiagaraFolderOps::SaveJsonFile(FPaths::Combine(FolderPath, TEXT("scripts"), TEXT("index.json")), ScriptsIndexObj, &WrittenFiles))
 	{
 		OutError = TEXT("save_scripts_index_failed");
@@ -489,13 +482,44 @@ bool FUeAgentHttpServer::CmdNiagaraEmitterApplyFolder(const FUeAgentRequestConte
 
 	NiagaraEmitter->MarkPackageDirty();
 
-	bool bSaveAfterApply = false;
-	JsonTryGetBool(Ctx.Params, TEXT("save_after_apply"), bSaveAfterApply);
-	if (bSaveAfterApply)
+	bool bCompileAfterApply = true;
+	JsonTryGetBool(Ctx.Params, TEXT("compile_after_apply"), bCompileAfterApply);
+	bool bForceCompile = true;
+	JsonTryGetBool(Ctx.Params, TEXT("force_compile"), bForceCompile);
+	bool bWaitForComplete = true;
+	JsonTryGetBool(Ctx.Params, TEXT("wait_for_complete"), bWaitForComplete);
+	bool bCompilationRequested = false;
+	bool bCompilationComplete = false;
+	bool bCompileHasError = false;
+	bool bCompileLogReadOk = true;
+	FString CompileLogReadError;
+	TSharedPtr<FJsonObject> CompileLogData;
+	if (bCompileAfterApply)
 	{
-		if (!UeAgentNiagaraOps::SaveAssetPackage(NiagaraEmitter, OutError))
+		FUeAgentRequestContext CompileLogCtx;
+		CompileLogCtx.RequestId = TEXT("niagara_emitter_apply_folder_compile_log");
+		CompileLogCtx.Command = TEXT("niagara_get_compile_log");
+		CompileLogCtx.Params = MakeShared<FJsonObject>();
+		CompileLogCtx.Params->SetStringField(TEXT("asset_path"), AssetPath);
+		CompileLogCtx.Params->SetStringField(TEXT("emitter_version"), ApplyVersion.ToString(EGuidFormats::DigitsWithHyphensLower));
+		CompileLogCtx.Params->SetBoolField(TEXT("compile_before_read"), true);
+		CompileLogCtx.Params->SetBoolField(TEXT("force_compile"), bForceCompile);
+		CompileLogCtx.Params->SetBoolField(TEXT("wait_for_complete"), bWaitForComplete);
+		CompileLogCtx.Params->SetBoolField(TEXT("include_events"), true);
+		CompileLogCtx.Params->SetStringField(TEXT("severity_filter"), TEXT("warning_or_error"));
+		CompileLogCtx.Params->SetNumberField(TEXT("max_events_per_script"), 64);
+		CompileLogData = MakeShared<FJsonObject>();
+		if (!CmdNiagaraGetCompileLog(CompileLogCtx, CompileLogData, CompileLogReadError))
 		{
-			return false;
+			bCompileLogReadOk = false;
+			CompileLogData->SetBoolField(TEXT("ok"), false);
+			CompileLogData->SetStringField(TEXT("error"), CompileLogReadError);
+		}
+		if (CompileLogData.IsValid())
+		{
+			CompileLogData->TryGetBoolField(TEXT("compilation_requested"), bCompilationRequested);
+			CompileLogData->TryGetBoolField(TEXT("compilation_complete"), bCompilationComplete);
+			CompileLogData->TryGetBoolField(TEXT("has_error"), bCompileHasError);
 		}
 	}
 
@@ -513,17 +537,43 @@ bool FUeAgentHttpServer::CmdNiagaraEmitterApplyFolder(const FUeAgentRequestConte
 	TSharedPtr<FJsonObject> CoverageObj = UeAgentNiagaraFolderOps::BuildEmitterCoverageReport(AssetPath, TEXT("apply"), Warnings, Stats);
 	UeAgentNiagaraFolderOps::SaveJsonFile(FPaths::Combine(FolderPath, TEXT("validation"), TEXT("coverage_report.json")), CoverageObj, nullptr);
 
+	bool bSaveAfterApply = false;
+	JsonTryGetBool(Ctx.Params, TEXT("save_after_apply"), bSaveAfterApply);
+	bool bSaved = false;
+
 	OutData->SetStringField(TEXT("asset_path"), NiagaraEmitter->GetOutermost()->GetName());
 	OutData->SetStringField(TEXT("emitter_asset_path"), NiagaraEmitter->GetOutermost()->GetName());
 	OutData->SetStringField(TEXT("folder_path"), FolderPath);
 	OutData->SetBoolField(TEXT("asset_json_loaded"), AssetObj.IsValid());
 	OutData->SetBoolField(TEXT("created"), bCreated);
 	OutData->SetNumberField(TEXT("emitter_properties_applied"), AppliedEmitterPropertyCount);
-	OutData->SetBoolField(TEXT("saved"), bSaveAfterApply);
+	OutData->SetBoolField(TEXT("compile_after_apply"), bCompileAfterApply);
+	OutData->SetBoolField(TEXT("force_compile"), bForceCompile);
+	OutData->SetBoolField(TEXT("compilation_requested"), bCompilationRequested);
+	OutData->SetBoolField(TEXT("wait_for_complete"), bWaitForComplete);
+	OutData->SetBoolField(TEXT("compilation_complete"), bCompilationComplete);
+	OutData->SetBoolField(TEXT("compile_log_read_ok"), bCompileLogReadOk);
+	OutData->SetStringField(TEXT("compile_log_read_error"), CompileLogReadError);
+	OutData->SetBoolField(TEXT("compile_has_error"), bCompileHasError);
+	if (CompileLogData.IsValid())
+	{
+		OutData->SetObjectField(TEXT("compile_log"), CompileLogData);
+	}
+	OutData->SetBoolField(TEXT("saved"), bSaved);
 	OutData->SetNumberField(TEXT("warning_count"), Warnings.Num());
 	OutData->SetArrayField(TEXT("warnings"), Warnings);
 	UeAgentNiagaraFolderOps::AppendPostApplyStackIssueFields(OutData, StackIssueReport);
 
+	if (bCompileAfterApply && !bCompileLogReadOk)
+	{
+		OutError = TEXT("compile_log_read_failed_after_apply");
+		return false;
+	}
+	if (bCompileAfterApply && bCompileHasError)
+	{
+		OutError = TEXT("compile_failed_after_apply");
+		return false;
+	}
 	if (bStrict && StackIssueReport.bCollectAfterApply && !StackIssueReport.bCollectionOk)
 	{
 		OutError = TEXT("strict_apply_stack_issue_collection_failed");
@@ -538,6 +588,15 @@ bool FUeAgentHttpServer::CmdNiagaraEmitterApplyFolder(const FUeAgentRequestConte
 	{
 		OutError = TEXT("strict_apply_has_warnings");
 		return false;
+	}
+	if (bSaveAfterApply)
+	{
+		if (!UeAgentNiagaraOps::SaveAssetPackage(NiagaraEmitter, OutError))
+		{
+			return false;
+		}
+		bSaved = true;
+		OutData->SetBoolField(TEXT("saved"), bSaved);
 	}
 	return true;
 }
@@ -587,13 +646,11 @@ bool FUeAgentHttpServer::CmdNiagaraScriptExportFolder(const FUeAgentRequestConte
 	TMap<FString, int32> Stats;
 
 	const FString AssetPath = NiagaraScript->GetOutermost()->GetName();
-	const FString AssetName = FPackageName::GetLongPackageAssetName(AssetPath);
 
 	TSharedPtr<FJsonObject> AssetObj = MakeShared<FJsonObject>();
 	AssetObj->SetNumberField(TEXT("format_version"), UeAgentNiagaraFolderOps::NiagaraFolderFormatVersion);
 	AssetObj->SetStringField(TEXT("asset_kind"), TEXT("niagara_script"));
 	AssetObj->SetStringField(TEXT("asset_path"), AssetPath);
-	AssetObj->SetStringField(TEXT("asset_name"), AssetName);
 	AssetObj->SetStringField(TEXT("object_path"), NiagaraScript->GetPathName());
 	AssetObj->SetStringField(TEXT("class"), NiagaraScript->GetClass()->GetPathName());
 	AssetObj->SetStringField(TEXT("engine_target"), TEXT("UE_5.6"));
@@ -913,22 +970,43 @@ bool FUeAgentHttpServer::CmdNiagaraScriptApplyFolder(const FUeAgentRequestContex
 
 	NiagaraScript->MarkPackageDirty();
 
-	bool bCompileAfterApply = false;
+	bool bCompileAfterApply = true;
 	JsonTryGetBool(Ctx.Params, TEXT("compile_after_apply"), bCompileAfterApply);
+	bool bForceCompile = true;
+	JsonTryGetBool(Ctx.Params, TEXT("force_compile"), bForceCompile);
+	bool bWaitForComplete = true;
+	JsonTryGetBool(Ctx.Params, TEXT("wait_for_complete"), bWaitForComplete);
 	bool bCompilationRequested = false;
+	bool bCompilationComplete = false;
+	bool bCompileHasError = false;
+	bool bCompileLogReadOk = true;
+	FString CompileLogReadError;
+	TSharedPtr<FJsonObject> CompileLogData;
 	if (bCompileAfterApply)
 	{
-		NiagaraScript->RequestCompile(NiagaraScript->GetExposedVersion().VersionGuid, false);
-		bCompilationRequested = true;
-	}
-
-	bool bSaveAfterApply = false;
-	JsonTryGetBool(Ctx.Params, TEXT("save_after_apply"), bSaveAfterApply);
-	if (bSaveAfterApply)
-	{
-		if (!UeAgentNiagaraOps::SaveAssetPackage(NiagaraScript, OutError))
+		FUeAgentRequestContext CompileLogCtx;
+		CompileLogCtx.RequestId = TEXT("niagara_script_apply_folder_compile_log");
+		CompileLogCtx.Command = TEXT("niagara_get_compile_log");
+		CompileLogCtx.Params = MakeShared<FJsonObject>();
+		CompileLogCtx.Params->SetStringField(TEXT("asset_path"), AssetPath);
+		CompileLogCtx.Params->SetBoolField(TEXT("compile_before_read"), true);
+		CompileLogCtx.Params->SetBoolField(TEXT("force_compile"), bForceCompile);
+		CompileLogCtx.Params->SetBoolField(TEXT("wait_for_complete"), bWaitForComplete);
+		CompileLogCtx.Params->SetBoolField(TEXT("include_events"), true);
+		CompileLogCtx.Params->SetStringField(TEXT("severity_filter"), TEXT("warning_or_error"));
+		CompileLogCtx.Params->SetNumberField(TEXT("max_events_per_script"), 64);
+		CompileLogData = MakeShared<FJsonObject>();
+		if (!CmdNiagaraGetCompileLog(CompileLogCtx, CompileLogData, CompileLogReadError))
 		{
-			return false;
+			bCompileLogReadOk = false;
+			CompileLogData->SetBoolField(TEXT("ok"), false);
+			CompileLogData->SetStringField(TEXT("error"), CompileLogReadError);
+		}
+		if (CompileLogData.IsValid())
+		{
+			CompileLogData->TryGetBoolField(TEXT("compilation_requested"), bCompilationRequested);
+			CompileLogData->TryGetBoolField(TEXT("compilation_complete"), bCompilationComplete);
+			CompileLogData->TryGetBoolField(TEXT("has_error"), bCompileHasError);
 		}
 	}
 
@@ -946,6 +1024,10 @@ bool FUeAgentHttpServer::CmdNiagaraScriptApplyFolder(const FUeAgentRequestContex
 		return false;
 	}
 
+	bool bSaveAfterApply = false;
+	JsonTryGetBool(Ctx.Params, TEXT("save_after_apply"), bSaveAfterApply);
+	bool bSaved = false;
+
 	OutData->SetStringField(TEXT("asset_path"), NiagaraScript->GetOutermost()->GetName());
 	OutData->SetStringField(TEXT("script_asset_path"), NiagaraScript->GetOutermost()->GetName());
 	OutData->SetStringField(TEXT("folder_path"), FolderPath);
@@ -953,9 +1035,38 @@ bool FUeAgentHttpServer::CmdNiagaraScriptApplyFolder(const FUeAgentRequestContex
 	OutData->SetNumberField(TEXT("script_properties_applied"), AppliedPropertyCount);
 	OutData->SetNumberField(TEXT("node_properties_applied"), AppliedNodePropertyCount);
 	OutData->SetBoolField(TEXT("compile_after_apply"), bCompileAfterApply);
+	OutData->SetBoolField(TEXT("force_compile"), bForceCompile);
 	OutData->SetBoolField(TEXT("compilation_requested"), bCompilationRequested);
-	OutData->SetBoolField(TEXT("saved"), bSaveAfterApply);
+	OutData->SetBoolField(TEXT("wait_for_complete"), bWaitForComplete);
+	OutData->SetBoolField(TEXT("compilation_complete"), bCompilationComplete);
+	OutData->SetBoolField(TEXT("compile_log_read_ok"), bCompileLogReadOk);
+	OutData->SetStringField(TEXT("compile_log_read_error"), CompileLogReadError);
+	OutData->SetBoolField(TEXT("compile_has_error"), bCompileHasError);
+	if (CompileLogData.IsValid())
+	{
+		OutData->SetObjectField(TEXT("compile_log"), CompileLogData);
+	}
+	OutData->SetBoolField(TEXT("saved"), bSaved);
 	OutData->SetNumberField(TEXT("warning_count"), Warnings.Num());
 	OutData->SetArrayField(TEXT("warnings"), Warnings);
+	if (bCompileAfterApply && !bCompileLogReadOk)
+	{
+		OutError = TEXT("compile_log_read_failed_after_apply");
+		return false;
+	}
+	if (bCompileAfterApply && bCompileHasError)
+	{
+		OutError = TEXT("compile_failed_after_apply");
+		return false;
+	}
+	if (bSaveAfterApply)
+	{
+		if (!UeAgentNiagaraOps::SaveAssetPackage(NiagaraScript, OutError))
+		{
+			return false;
+		}
+		bSaved = true;
+		OutData->SetBoolField(TEXT("saved"), bSaved);
+	}
 	return true;
 }

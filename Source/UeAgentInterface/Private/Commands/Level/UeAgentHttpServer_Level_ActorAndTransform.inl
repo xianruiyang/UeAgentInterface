@@ -798,6 +798,155 @@ bool FUeAgentHttpServer::CmdLevelSetSkeletalMeshMorphTarget(const FUeAgentReques
 	return true;
 }
 
+bool FUeAgentHttpServer::CmdLevelSetSkeletalAnimationPose(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+{
+	UWorld* World = GetEditorWorld(OutError);
+	if (!World)
+	{
+		return false;
+	}
+
+	FString Id;
+	if (!JsonTryGetString(Ctx.Params, TEXT("id"), Id) || Id.IsEmpty())
+	{
+		OutError = TEXT("missing_id");
+		return false;
+	}
+
+	FString ComponentId;
+	JsonTryGetString(Ctx.Params, TEXT("component"), ComponentId);
+	if (ComponentId.IsEmpty())
+	{
+		JsonTryGetString(Ctx.Params, TEXT("component_id"), ComponentId);
+	}
+
+	FString AnimationAssetPath;
+	if (!JsonTryGetString(Ctx.Params, TEXT("animation_asset"), AnimationAssetPath) || AnimationAssetPath.TrimStartAndEnd().IsEmpty())
+	{
+		if (!JsonTryGetString(Ctx.Params, TEXT("anim_sequence"), AnimationAssetPath) || AnimationAssetPath.TrimStartAndEnd().IsEmpty())
+		{
+			JsonTryGetString(Ctx.Params, TEXT("animation_asset_path"), AnimationAssetPath);
+		}
+	}
+	AnimationAssetPath = AnimationAssetPath.TrimStartAndEnd();
+	if (AnimationAssetPath.IsEmpty())
+	{
+		OutError = TEXT("missing_animation_asset");
+		return false;
+	}
+
+	UAnimSequenceBase* AnimationAsset = LoadObject<UAnimSequenceBase>(nullptr, *AnimationAssetPath);
+	if (!AnimationAsset)
+	{
+		OutError = FString::Printf(TEXT("animation_asset_not_found:%s"), *AnimationAssetPath);
+		return false;
+	}
+
+	double TimeSeconds = 0.0;
+	bool bHasTimeSeconds = JsonTryGetNumber(Ctx.Params, TEXT("time_seconds"), TimeSeconds);
+	if (!bHasTimeSeconds)
+	{
+		double FrameIndexNumber = 0.0;
+		if (JsonTryGetNumber(Ctx.Params, TEXT("frame_index"), FrameIndexNumber) || JsonTryGetNumber(Ctx.Params, TEXT("frame"), FrameIndexNumber))
+		{
+			double FrameRateNumber = 30.0;
+			JsonTryGetNumber(Ctx.Params, TEXT("frame_rate"), FrameRateNumber) || JsonTryGetNumber(Ctx.Params, TEXT("fps"), FrameRateNumber);
+			if (FrameRateNumber <= KINDA_SMALL_NUMBER)
+			{
+				OutError = TEXT("invalid_frame_rate");
+				return false;
+			}
+			TimeSeconds = FrameIndexNumber / FrameRateNumber;
+			bHasTimeSeconds = true;
+		}
+	}
+	if (!bHasTimeSeconds)
+	{
+		OutError = TEXT("missing_time_seconds_or_frame_index");
+		return false;
+	}
+
+	const double PlayLength = FMath::Max(static_cast<double>(AnimationAsset->GetPlayLength()), 0.0);
+	const double ClampedTimeSeconds = FMath::Clamp(TimeSeconds, 0.0, PlayLength);
+
+	AActor* Actor = FindActorByNameOrLabel(World, Id);
+	if (!Actor)
+	{
+		OutError = TEXT("actor_not_found");
+		return false;
+	}
+
+	USkeletalMeshComponent* SkeletalComponent = nullptr;
+	if (!ComponentId.TrimStartAndEnd().IsEmpty())
+	{
+		SkeletalComponent = Cast<USkeletalMeshComponent>(UeAgentLevelOps::FindComponentByNameOrPath(Actor, ComponentId));
+		if (!SkeletalComponent)
+		{
+			OutError = TEXT("skeletal_mesh_component_not_found");
+			return false;
+		}
+	}
+	else
+	{
+		SkeletalComponent = Actor->FindComponentByClass<USkeletalMeshComponent>();
+		if (!SkeletalComponent)
+		{
+			OutError = TEXT("actor_has_no_skeletal_mesh_component");
+			return false;
+		}
+	}
+
+	if (!SkeletalComponent->GetSkeletalMeshAsset())
+	{
+		OutError = TEXT("skeletal_mesh_component_has_no_mesh");
+		return false;
+	}
+
+	Actor->Modify();
+	SkeletalComponent->Modify();
+	SkeletalComponent->SetAnimationMode(EAnimationMode::AnimationSingleNode, true);
+	SkeletalComponent->SetAnimation(AnimationAsset);
+	SkeletalComponent->SetPosition(static_cast<float>(ClampedTimeSeconds), false);
+	SkeletalComponent->TickAnimation(0.0f, false);
+	SkeletalComponent->RefreshBoneTransforms();
+	SkeletalComponent->UpdateComponentToWorld();
+	SkeletalComponent->UpdateBounds();
+	SkeletalComponent->MarkRenderDynamicDataDirty();
+	SkeletalComponent->MarkRenderStateDirty();
+	SkeletalComponent->PostEditChange();
+	Actor->MarkPackageDirty();
+
+	bool bSaveAfterSet = false;
+	JsonTryGetBool(Ctx.Params, TEXT("save_after_set"), bSaveAfterSet) || JsonTryGetBool(Ctx.Params, TEXT("save_after_apply"), bSaveAfterSet);
+	bool bSaved = false;
+	if (bSaveAfterSet)
+	{
+		if (UPackage* Package = World->GetOutermost())
+		{
+			const FString Filename = FPackageName::LongPackageNameToFilename(Package->GetName(), FPackageName::GetMapPackageExtension());
+			bSaved = UEditorLoadingAndSavingUtils::SaveMap(World, Filename);
+			if (!bSaved)
+			{
+				OutError = TEXT("save_level_failed");
+				return false;
+			}
+		}
+	}
+
+	OutData->SetStringField(TEXT("actor_name"), Actor->GetName());
+	OutData->SetStringField(TEXT("actor_label"), Actor->GetActorLabel());
+	OutData->SetStringField(TEXT("component_name"), SkeletalComponent->GetName());
+	OutData->SetStringField(TEXT("component_path"), SkeletalComponent->GetPathName());
+	OutData->SetStringField(TEXT("animation_asset"), AnimationAsset->GetPathName());
+	OutData->SetNumberField(TEXT("requested_time_seconds"), TimeSeconds);
+	OutData->SetNumberField(TEXT("time_seconds"), ClampedTimeSeconds);
+	OutData->SetNumberField(TEXT("play_length_seconds"), PlayLength);
+	OutData->SetStringField(TEXT("animation_mode"), TEXT("AnimationSingleNode"));
+	OutData->SetBoolField(TEXT("saved"), bSaved);
+	OutData->SetStringField(TEXT("display_status"), TEXT("scene_component_animation_pose_set"));
+	return true;
+}
+
 bool FUeAgentHttpServer::CmdSpawnActor(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	UWorld* World = GetEditorWorld(OutError);
@@ -2621,6 +2770,355 @@ bool FUeAgentHttpServer::CmdLevelSetActorTransform(const FUeAgentRequestContext&
 	{
 		OutData->SetObjectField(TEXT("collision_result"), CollisionResult);
 	}
+	return true;
+}
+
+bool FUeAgentHttpServer::CmdProbeActorTransformCandidates(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, TArray<TSharedPtr<FJsonValue>>& OutArtifacts, FString& OutError) const
+{
+	if (!OutData.IsValid())
+	{
+		OutData = MakeShared<FJsonObject>();
+	}
+
+	UWorld* World = GetEditorWorld(OutError);
+	if (!World)
+	{
+		return false;
+	}
+
+	FString Id;
+	if (!JsonTryGetString(Ctx.Params, TEXT("id"), Id) || Id.IsEmpty())
+	{
+		OutError = TEXT("missing_id");
+		return false;
+	}
+
+	AActor* Actor = FindActorByNameOrLabel(World, Id);
+	if (!Actor)
+	{
+		OutError = TEXT("actor_not_found");
+		return false;
+	}
+
+	const TArray<TSharedPtr<FJsonValue>>* CandidateValues = nullptr;
+	if (!Ctx.Params.IsValid() || !Ctx.Params->TryGetArrayField(TEXT("candidates"), CandidateValues) || !CandidateValues || CandidateValues->Num() <= 0)
+	{
+		OutError = TEXT("missing_candidates");
+		return false;
+	}
+	if (CandidateValues->Num() > 64)
+	{
+		OutError = TEXT("too_many_candidates");
+		return false;
+	}
+
+	FString Format = TEXT("png");
+	JsonTryGetString(Ctx.Params, TEXT("format"), Format);
+	Format = Format.ToLower();
+	if (Format == TEXT("jpeg"))
+	{
+		Format = TEXT("jpg");
+	}
+	if (Format != TEXT("png") && Format != TEXT("jpg") && Format != TEXT("webp"))
+	{
+		OutError = TEXT("unsupported_format");
+		return false;
+	}
+
+	int32 Quality = 90;
+	double QualityValue = static_cast<double>(Quality);
+	if (JsonTryGetNumber(Ctx.Params, TEXT("quality"), QualityValue))
+	{
+		Quality = FMath::Clamp(FMath::RoundToInt(QualityValue), 1, 100);
+	}
+
+	int32 MaxSize = 720;
+	double MaxSizeValue = static_cast<double>(MaxSize);
+	if (JsonTryGetNumber(Ctx.Params, TEXT("max_size"), MaxSizeValue))
+	{
+		MaxSize = FMath::Clamp(FMath::RoundToInt(MaxSizeValue), 64, 8192);
+	}
+
+	int32 WarmupFrames = 2;
+	double WarmupFramesValue = static_cast<double>(WarmupFrames);
+	if (JsonTryGetNumber(Ctx.Params, TEXT("warmup_frames"), WarmupFramesValue)
+		|| JsonTryGetNumber(Ctx.Params, TEXT("render_warmup_frames"), WarmupFramesValue))
+	{
+		WarmupFrames = FMath::Clamp(FMath::RoundToInt(WarmupFramesValue), 0, 8);
+	}
+
+	bool bTickEditorWorld = false;
+	JsonTryGetBool(Ctx.Params, TEXT("tick_editor_world"), bTickEditorWorld);
+	JsonTryGetBool(Ctx.Params, TEXT("tick_editor_world_during_warmup"), bTickEditorWorld);
+
+	int32 EditorWorldTickFrames = 0;
+	double EditorWorldTickFramesValue = 0.0;
+	if (JsonTryGetNumber(Ctx.Params, TEXT("editor_world_tick_frames"), EditorWorldTickFramesValue))
+	{
+		EditorWorldTickFrames = bTickEditorWorld ? FMath::Clamp(FMath::RoundToInt(EditorWorldTickFramesValue), 0, 240) : 0;
+	}
+
+	double EditorWorldTickDeltaValue = 1.0 / 60.0;
+	JsonTryGetNumber(Ctx.Params, TEXT("editor_world_tick_delta_seconds"), EditorWorldTickDeltaValue);
+	const float EditorWorldTickDeltaSeconds = FMath::Clamp(static_cast<float>(EditorWorldTickDeltaValue), 1.0f / 240.0f, 1.0f / 5.0f);
+
+	bool bRelativeToOriginalDefault = false;
+	JsonTryGetBool(Ctx.Params, TEXT("relative_to_original"), bRelativeToOriginalDefault);
+	bool bWriteIndividualFrames = true;
+	JsonTryGetBool(Ctx.Params, TEXT("write_individual_frames"), bWriteIndividualFrames);
+	bool bCreateFrameSheet = true;
+	JsonTryGetBool(Ctx.Params, TEXT("create_frame_sheet"), bCreateFrameSheet);
+	JsonTryGetBool(Ctx.Params, TEXT("create_sheet"), bCreateFrameSheet);
+
+	const FTransform OriginalTransform = Actor->GetActorTransform();
+	struct FScopedActorTransformRestore
+	{
+		AActor* Actor = nullptr;
+		FTransform OriginalTransform;
+		bool bRestored = false;
+
+		~FScopedActorTransformRestore()
+		{
+			RestoreNow();
+		}
+
+		void RestoreNow()
+		{
+			if (!Actor || bRestored)
+			{
+				return;
+			}
+			Actor->SetActorTransform(OriginalTransform, false, nullptr, ETeleportType::TeleportPhysics);
+			Actor->PostEditMove(false);
+			bRestored = true;
+		}
+	};
+	FScopedActorTransformRestore RestoreScope{ Actor, OriginalTransform, false };
+
+	TArray<TArray<FColor>> FramePixels;
+	TArray<FString> FrameLabels;
+	FIntPoint FrameSize(0, 0);
+	TArray<TSharedPtr<FJsonValue>> FrameResults;
+	TArray<TSharedPtr<FJsonValue>> CandidateResults;
+
+	auto AddArtifact = [&OutArtifacts, &Format](const FString& Kind, const FString& FilePath, const FIntPoint& Size)
+	{
+		const int64 Bytes = IFileManager::Get().FileSize(*FilePath);
+		TSharedPtr<FJsonObject> Artifact = MakeShared<FJsonObject>();
+		Artifact->SetStringField(TEXT("kind"), Kind);
+		Artifact->SetStringField(TEXT("file_path"), FilePath);
+		Artifact->SetNumberField(TEXT("bytes"), static_cast<double>(Bytes));
+		Artifact->SetStringField(TEXT("mime"), Format == TEXT("png") ? TEXT("image/png") : (Format == TEXT("webp") ? TEXT("image/webp") : TEXT("image/jpeg")));
+		Artifact->SetNumberField(TEXT("width"), Size.X);
+		Artifact->SetNumberField(TEXT("height"), Size.Y);
+		OutArtifacts.Add(MakeShared<FJsonValueObject>(Artifact));
+	};
+
+	auto CaptureCurrentFrame = [&](const FString& Kind, const int32 CandidateIndex, const FString& CandidateLabel, const FTransform& AppliedTransform) -> bool
+	{
+		TArray<FColor> RawPixels;
+		FIntPoint RawSize(0, 0);
+		TSharedPtr<FJsonObject> CaptureInfo;
+		if (!TakeActiveViewportScreenshotWithOptions(WarmupFrames, bTickEditorWorld, EditorWorldTickFrames, EditorWorldTickDeltaSeconds, RawPixels, RawSize, CaptureInfo, OutError))
+		{
+			return false;
+		}
+
+		TArray<FColor> ResizedPixels;
+		FIntPoint ResizedSize(0, 0);
+		if (!ResizePixelsMaxSize(RawPixels, RawSize, MaxSize, ResizedPixels, ResizedSize, OutError))
+		{
+			return false;
+		}
+		if (FrameSize.X == 0 || FrameSize.Y == 0)
+		{
+			FrameSize = ResizedSize;
+		}
+		else if (FrameSize != ResizedSize)
+		{
+			OutError = TEXT("probe_frame_size_mismatch");
+			return false;
+		}
+
+		const int32 FrameIndex = FramePixels.Num();
+		const FString FrameLabel = FString::Printf(TEXT("F%d"), FrameIndex);
+		FramePixels.Add(MoveTemp(ResizedPixels));
+		FrameLabels.Add(FrameLabel);
+
+		TSharedPtr<FJsonObject> FrameObj = MakeShared<FJsonObject>();
+		FrameObj->SetNumberField(TEXT("frame_index"), FrameIndex);
+		FrameObj->SetStringField(TEXT("frame_label"), FrameLabel);
+		FrameObj->SetStringField(TEXT("kind"), Kind);
+		FrameObj->SetNumberField(TEXT("candidate_index"), CandidateIndex);
+		FrameObj->SetStringField(TEXT("candidate_label"), CandidateLabel);
+		FrameObj->SetObjectField(TEXT("applied_transform"), UeAgentLevelOps::MakeActorTransformJson(AppliedTransform));
+		FrameObj->SetNumberField(TEXT("width"), ResizedSize.X);
+		FrameObj->SetNumberField(TEXT("height"), ResizedSize.Y);
+		if (CaptureInfo.IsValid())
+		{
+			FrameObj->SetObjectField(TEXT("capture"), CaptureInfo);
+		}
+
+		if (bWriteIndividualFrames)
+		{
+			const FString FramePath = UeAgentLevelOps::MakeProbeArtifactPath(Format, Ctx.RequestId, FrameLabel);
+			if (!WriteCompressedImage(FramePixels.Last(), ResizedSize, Format, Quality, FramePath, OutError))
+			{
+				return false;
+			}
+			const int64 Bytes = IFileManager::Get().FileSize(*FramePath);
+			FrameObj->SetStringField(TEXT("file_path"), FramePath);
+			FrameObj->SetNumberField(TEXT("bytes"), static_cast<double>(Bytes));
+			AddArtifact(TEXT("probe_frame"), FramePath, ResizedSize);
+		}
+
+		FrameResults.Add(MakeShared<FJsonValueObject>(FrameObj));
+		return true;
+	};
+
+	if (!CaptureCurrentFrame(TEXT("original"), INDEX_NONE, TEXT("original"), OriginalTransform))
+	{
+		return false;
+	}
+
+	for (int32 CandidateIndex = 0; CandidateIndex < CandidateValues->Num(); ++CandidateIndex)
+	{
+		const TSharedPtr<FJsonValue>& CandidateValue = (*CandidateValues)[CandidateIndex];
+		const TSharedPtr<FJsonObject>* CandidateObjPtr = nullptr;
+		if (!CandidateValue.IsValid() || !CandidateValue->TryGetObject(CandidateObjPtr) || !CandidateObjPtr || !CandidateObjPtr->IsValid())
+		{
+			OutError = TEXT("invalid_candidate");
+			return false;
+		}
+		TSharedPtr<FJsonObject> CandidateObj = *CandidateObjPtr;
+		TSharedPtr<FJsonObject> TransformObj = CandidateObj;
+		const TSharedPtr<FJsonObject>* NestedTransformObj = nullptr;
+		if (CandidateObj->TryGetObjectField(TEXT("transform"), NestedTransformObj) && NestedTransformObj && NestedTransformObj->IsValid())
+		{
+			TransformObj = *NestedTransformObj;
+		}
+
+		FString CandidateLabel;
+		CandidateObj->TryGetStringField(TEXT("label"), CandidateLabel);
+		if (CandidateLabel.IsEmpty())
+		{
+			CandidateLabel = FString::Printf(TEXT("candidate_%d"), CandidateIndex);
+		}
+
+		bool bRelativeToOriginal = bRelativeToOriginalDefault;
+		CandidateObj->TryGetBoolField(TEXT("relative"), bRelativeToOriginal);
+		CandidateObj->TryGetBoolField(TEXT("relative_to_original"), bRelativeToOriginal);
+
+		FVector CandidateLocation = OriginalTransform.GetLocation();
+		FRotator CandidateRotation = OriginalTransform.Rotator();
+		FVector CandidateScale = OriginalTransform.GetScale3D();
+		bool bHasAnyTransformField = false;
+
+		if (bRelativeToOriginal)
+		{
+			FVector LocationOffset = FVector::ZeroVector;
+			if (JsonTryGetVector(TransformObj, TEXT("location"), LocationOffset)
+				|| JsonTryGetVector(TransformObj, TEXT("location_offset"), LocationOffset)
+				|| JsonTryGetVector(TransformObj, TEXT("location_delta"), LocationOffset)
+				|| JsonTryGetVector(TransformObj, TEXT("delta_location"), LocationOffset))
+			{
+				CandidateLocation = OriginalTransform.GetLocation() + LocationOffset;
+				bHasAnyTransformField = true;
+			}
+
+			FRotator RotationOffset = FRotator::ZeroRotator;
+			if (JsonTryGetRotator(TransformObj, TEXT("rotation"), RotationOffset)
+				|| JsonTryGetRotator(TransformObj, TEXT("rotation_offset"), RotationOffset)
+				|| JsonTryGetRotator(TransformObj, TEXT("rotation_delta"), RotationOffset)
+				|| JsonTryGetRotator(TransformObj, TEXT("delta_rotation"), RotationOffset))
+			{
+				CandidateRotation = OriginalTransform.Rotator() + RotationOffset;
+				bHasAnyTransformField = true;
+			}
+
+			FVector ScaleMultiplier = FVector::OneVector;
+			if (JsonTryGetVector(TransformObj, TEXT("scale"), ScaleMultiplier)
+				|| JsonTryGetVector(TransformObj, TEXT("scale_multiplier"), ScaleMultiplier)
+				|| JsonTryGetVector(TransformObj, TEXT("scale_factor"), ScaleMultiplier))
+			{
+				CandidateScale = OriginalTransform.GetScale3D() * ScaleMultiplier;
+				bHasAnyTransformField = true;
+			}
+		}
+		else
+		{
+			if (JsonTryGetVector(TransformObj, TEXT("location"), CandidateLocation))
+			{
+				bHasAnyTransformField = true;
+			}
+			if (JsonTryGetRotator(TransformObj, TEXT("rotation"), CandidateRotation))
+			{
+				bHasAnyTransformField = true;
+			}
+			if (JsonTryGetVector(TransformObj, TEXT("scale"), CandidateScale))
+			{
+				bHasAnyTransformField = true;
+			}
+		}
+
+		if (!bHasAnyTransformField)
+		{
+			OutError = TEXT("candidate_missing_transform_fields");
+			return false;
+		}
+
+		const FTransform CandidateTransform(CandidateRotation, CandidateLocation, CandidateScale);
+		Actor->SetActorTransform(CandidateTransform, false, nullptr, ETeleportType::TeleportPhysics);
+		Actor->PostEditMove(false);
+
+		if (!CaptureCurrentFrame(TEXT("candidate"), CandidateIndex, CandidateLabel, Actor->GetActorTransform()))
+		{
+			return false;
+		}
+
+		TSharedPtr<FJsonObject> CandidateResult = MakeShared<FJsonObject>();
+		CandidateResult->SetNumberField(TEXT("candidate_index"), CandidateIndex);
+		CandidateResult->SetStringField(TEXT("label"), CandidateLabel);
+		CandidateResult->SetStringField(TEXT("frame_label"), FrameLabels.Last());
+		CandidateResult->SetNumberField(TEXT("frame_index"), FrameLabels.Num() - 1);
+		CandidateResult->SetBoolField(TEXT("relative_to_original"), bRelativeToOriginal);
+		CandidateResult->SetObjectField(TEXT("applied_transform"), UeAgentLevelOps::MakeActorTransformJson(Actor->GetActorTransform()));
+		CandidateResults.Add(MakeShared<FJsonValueObject>(CandidateResult));
+	}
+
+	RestoreScope.RestoreNow();
+
+	OutData->SetStringField(TEXT("schema"), TEXT("uai.probe.actor_transform_candidates.v1"));
+	OutData->SetStringField(TEXT("actor_name"), Actor->GetName());
+	OutData->SetStringField(TEXT("actor_label"), Actor->GetActorLabel());
+	OutData->SetNumberField(TEXT("candidate_count"), CandidateValues->Num());
+	OutData->SetNumberField(TEXT("frame_count"), FramePixels.Num());
+	OutData->SetObjectField(TEXT("original_transform"), UeAgentLevelOps::MakeActorTransformJson(OriginalTransform));
+	OutData->SetObjectField(TEXT("final_transform"), UeAgentLevelOps::MakeActorTransformJson(Actor->GetActorTransform()));
+	OutData->SetBoolField(TEXT("restored"), true);
+	OutData->SetBoolField(TEXT("write_individual_frames"), bWriteIndividualFrames);
+	OutData->SetBoolField(TEXT("create_frame_sheet"), bCreateFrameSheet);
+	OutData->SetStringField(TEXT("format"), Format);
+	OutData->SetNumberField(TEXT("quality"), Quality);
+	OutData->SetNumberField(TEXT("max_size"), MaxSize);
+	OutData->SetArrayField(TEXT("frames"), FrameResults);
+	OutData->SetArrayField(TEXT("candidates"), CandidateResults);
+
+	if (bCreateFrameSheet)
+	{
+		FString SheetPath;
+		TSharedPtr<FJsonObject> SheetData;
+		if (!WriteFrameSequenceSheetImage(FramePixels, FrameLabels, FrameSize, Ctx.Params, Format, Quality, SheetPath, SheetData, OutError))
+		{
+			return false;
+		}
+		OutData->SetObjectField(TEXT("frame_sheet"), SheetData);
+		OutData->SetStringField(TEXT("frame_sheet_file_path"), SheetPath);
+		AddArtifact(TEXT("probe_frame_sheet"), SheetPath, FIntPoint(
+			SheetData.IsValid() ? FMath::RoundToInt(SheetData->GetNumberField(TEXT("width"))) : 0,
+			SheetData.IsValid() ? FMath::RoundToInt(SheetData->GetNumberField(TEXT("height"))) : 0));
+	}
+
 	return true;
 }
 

@@ -140,6 +140,23 @@ namespace UeAgentWidgetBlueprintFolderOps
 		return Obj.IsValid() && Obj->TryGetNumberField(Key, OutValue);
 	}
 
+	static bool CompileDataHasError(const TSharedPtr<FJsonObject>& CompileData)
+	{
+		if (!CompileData.IsValid())
+		{
+			return false;
+		}
+
+		bool bHasError = false;
+		if (CompileData->TryGetBoolField(TEXT("has_error"), bHasError) && bHasError)
+		{
+			return true;
+		}
+
+		double ErrorCount = 0.0;
+		return CompileData->TryGetNumberField(TEXT("error_count"), ErrorCount) && ErrorCount > 0.0;
+	}
+
 	static bool TryGetObjectField(const TSharedPtr<FJsonObject>& Obj, const TCHAR* Key, TSharedPtr<FJsonObject>& OutValue)
 	{
 		const TSharedPtr<FJsonObject>* FoundObject = nullptr;
@@ -840,6 +857,7 @@ namespace UeAgentWidgetBlueprintFolderOps
 		const FString& AssetPath,
 		const FString& WidgetFolderPath,
 		const TSharedPtr<FJsonObject>& SettingsJson,
+		bool bIncludeGraphs,
 		FString& OutProxyFolderPath,
 		FString& OutError)
 	{
@@ -861,7 +879,6 @@ namespace UeAgentWidgetBlueprintFolderOps
 		AssetJson->SetNumberField(TEXT("format_version"), 1);
 		AssetJson->SetStringField(TEXT("asset_kind"), TEXT("actor_blueprint"));
 		AssetJson->SetStringField(TEXT("asset_path"), AssetPath);
-		AssetJson->SetStringField(TEXT("asset_name"), FPackageName::GetLongPackageAssetName(AssetPath));
 		AssetJson->SetStringField(TEXT("parent_class"), ParentClass);
 		AssetJson->SetStringField(TEXT("generated_class_name"), TEXT(""));
 		if (!SaveJsonFile(FPaths::Combine(OutProxyFolderPath, TEXT("asset.json")), AssetJson))
@@ -912,15 +929,18 @@ namespace UeAgentWidgetBlueprintFolderOps
 			return false;
 		}
 
-		const FString WidgetGraphsDir = FPaths::Combine(WidgetFolderPath, TEXT("graphs"));
-		TArray<FString> GraphFiles;
-		IFileManager::Get().FindFiles(GraphFiles, *(FPaths::Combine(WidgetGraphsDir, TEXT("*.json"))), true, false);
-		for (const FString& GraphFile : GraphFiles)
+		if (bIncludeGraphs)
 		{
-			if (!CopyFileIfExists(FPaths::Combine(WidgetGraphsDir, GraphFile), FPaths::Combine(GraphsDir, GraphFile)))
+			const FString WidgetGraphsDir = FPaths::Combine(WidgetFolderPath, TEXT("graphs"));
+			TArray<FString> GraphFiles;
+			IFileManager::Get().FindFiles(GraphFiles, *(FPaths::Combine(WidgetGraphsDir, TEXT("*.json"))), true, false);
+			for (const FString& GraphFile : GraphFiles)
 			{
-				OutError = TEXT("copy_proxy_graph_failed");
-				return false;
+				if (!CopyFileIfExists(FPaths::Combine(WidgetGraphsDir, GraphFile), FPaths::Combine(GraphsDir, GraphFile)))
+				{
+					OutError = TEXT("copy_proxy_graph_failed");
+					return false;
+				}
 			}
 		}
 
@@ -995,7 +1015,6 @@ bool FUeAgentHttpServer::CmdUmgExportFolder(const FUeAgentRequestContext& Ctx, T
 	AssetJson->SetNumberField(TEXT("format_version"), 1);
 	AssetJson->SetStringField(TEXT("asset_kind"), TEXT("widget_blueprint"));
 	AssetJson->SetStringField(TEXT("asset_path"), AssetPath);
-	AssetJson->SetStringField(TEXT("asset_name"), FPackageName::GetLongPackageAssetName(AssetPath));
 	AssetJson->SetNumberField(TEXT("profile_version"), 1);
 	AssetJson->SetStringField(TEXT("widget_subkind"), TEXT("widget_blueprint"));
 	if (!SaveRequiredJson(FPaths::Combine(FolderPath, TEXT("asset.json")), AssetJson)) return false;
@@ -1212,7 +1231,7 @@ bool FUeAgentHttpServer::CmdUmgApplyFolder(const FUeAgentRequestContext& Ctx, TS
 
 	{
 		FString ProxyFolderPath;
-		if (!UeAgentWidgetBlueprintFolderOps::SaveBlueprintProxyFolder(AssetPath, FolderPath, SettingsJson, ProxyFolderPath, OutError))
+		if (!UeAgentWidgetBlueprintFolderOps::SaveBlueprintProxyFolder(AssetPath, FolderPath, SettingsJson, false, ProxyFolderPath, OutError))
 		{
 			return false;
 		}
@@ -1230,7 +1249,6 @@ bool FUeAgentHttpServer::CmdUmgApplyFolder(const FUeAgentRequestContext& Ctx, TS
 		}
 
 		VariablesApplied = static_cast<int32>(ProxyApplyData->GetIntegerField(TEXT("variables_added")) + ProxyApplyData->GetIntegerField(TEXT("variable_defaults_updated")));
-		GraphsApplied = static_cast<int32>(ProxyApplyData->GetIntegerField(TEXT("graphs_rebuilt")));
 
 		IFileManager::Get().DeleteDirectory(*ProxyFolderPath, false, true);
 	}
@@ -1533,6 +1551,46 @@ bool FUeAgentHttpServer::CmdUmgApplyFolder(const FUeAgentRequestContext& Ctx, TS
 					++SlotPropertiesApplied;
 				}
 			}
+		}
+	}
+
+	{
+		const FString WidgetGraphsDir = FPaths::Combine(FolderPath, TEXT("graphs"));
+		TArray<FString> GraphFiles;
+		IFileManager::Get().FindFiles(GraphFiles, *(FPaths::Combine(WidgetGraphsDir, TEXT("*.json"))), true, false);
+		if (GraphFiles.Num() > 0)
+		{
+			WidgetBlueprint = UeAgentUmgOps::LoadWidgetBlueprint(AssetPath);
+			if (!WidgetBlueprint || !WidgetBlueprint->WidgetTree)
+			{
+				OutError = TEXT("widget_blueprint_reload_before_graph_apply_failed");
+				return false;
+			}
+
+			UeAgentUmgOps::SyncWidgetVariableGuidMap(WidgetBlueprint);
+			FKismetEditorUtilities::CompileBlueprint(WidgetBlueprint);
+
+			FString ProxyFolderPath;
+			if (!UeAgentWidgetBlueprintFolderOps::SaveBlueprintProxyFolder(AssetPath, FolderPath, SettingsJson, true, ProxyFolderPath, OutError))
+			{
+				return false;
+			}
+
+			TSharedPtr<FJsonObject> ProxyApplyParams = MakeShared<FJsonObject>();
+			ProxyApplyParams->SetStringField(TEXT("asset_path"), AssetPath);
+			ProxyApplyParams->SetBoolField(TEXT("create_if_missing"), false);
+			ProxyApplyParams->SetBoolField(TEXT("compile_after_apply"), false);
+			ProxyApplyParams->SetBoolField(TEXT("save_after_apply"), false);
+			TSharedPtr<FJsonObject> ProxyApplyData;
+			if (!InvokeBlueprintSubCommand(TEXT("blueprint_apply_folder"), ProxyApplyParams, ProxyApplyData, OutError))
+			{
+				IFileManager::Get().DeleteDirectory(*ProxyFolderPath, false, true);
+				OutError = FString::Printf(TEXT("blueprint_graph_proxy_apply_failed:%s"), *OutError);
+				return false;
+			}
+
+			GraphsApplied = static_cast<int32>(ProxyApplyData->GetIntegerField(TEXT("graphs_rebuilt")));
+			IFileManager::Get().DeleteDirectory(*ProxyFolderPath, false, true);
 		}
 	}
 
@@ -1918,6 +1976,28 @@ bool FUeAgentHttpServer::CmdUmgApplyFolder(const FUeAgentRequestContext& Ctx, TS
 		}
 	}
 
+	bool bSaved = false;
+	auto PopulateApplyResult = [&]()
+	{
+		OutData->SetStringField(TEXT("asset_path"), AssetPath);
+		OutData->SetStringField(TEXT("folder_path"), FolderPath);
+		OutData->SetNumberField(TEXT("variables_applied"), VariablesApplied);
+		OutData->SetNumberField(TEXT("widgets_removed"), WidgetsRemoved);
+		OutData->SetNumberField(TEXT("widgets_added"), WidgetsAdded);
+		OutData->SetNumberField(TEXT("widget_properties_applied"), WidgetPropertiesApplied);
+		OutData->SetNumberField(TEXT("slot_properties_applied"), SlotPropertiesApplied);
+		OutData->SetNumberField(TEXT("widget_properties_skipped"), WidgetPropertiesSkipped);
+		OutData->SetNumberField(TEXT("slot_properties_skipped"), SlotPropertiesSkipped);
+		OutData->SetNumberField(TEXT("bindings_applied"), BindingsApplied);
+		OutData->SetNumberField(TEXT("animations_applied"), AnimationsApplied);
+		OutData->SetNumberField(TEXT("animation_keys_applied"), AnimationKeysApplied);
+		OutData->SetNumberField(TEXT("graphs_applied"), GraphsApplied);
+		OutData->SetNumberField(TEXT("warning_count"), Warnings.Num());
+		OutData->SetArrayField(TEXT("warnings"), Warnings);
+		OutData->SetBoolField(TEXT("compiled"), bCompileAfterApply);
+		OutData->SetBoolField(TEXT("saved"), bSaved);
+	};
+
 	if (bCompileAfterApply)
 	{
 		TSharedPtr<FJsonObject> CompileParams = MakeShared<FJsonObject>();
@@ -1925,39 +2005,31 @@ bool FUeAgentHttpServer::CmdUmgApplyFolder(const FUeAgentRequestContext& Ctx, TS
 		CompileParams->SetBoolField(TEXT("include_messages"), true);
 		CompileParams->SetStringField(TEXT("severity_filter"), TEXT("all"));
 		CompileParams->SetNumberField(TEXT("max_messages"), 64);
-		CompileParams->SetBoolField(TEXT("save_after_compile"), bSaveAfterApply);
+		CompileParams->SetBoolField(TEXT("save_after_compile"), false);
 		TSharedPtr<FJsonObject> CompileData;
 		if (!InvokeUmgSubCommand(TEXT("umg_compile"), CompileParams, CompileData, OutError))
 		{
 			return false;
 		}
 		OutData->SetObjectField(TEXT("compile"), CompileData);
+		if (UeAgentWidgetBlueprintFolderOps::CompileDataHasError(CompileData))
+		{
+			PopulateApplyResult();
+			OutError = TEXT("compile_failed_after_apply");
+			return false;
+		}
 	}
-	else if (bSaveAfterApply)
+
+	if (bSaveAfterApply)
 	{
 		WidgetBlueprint = UeAgentUmgOps::LoadWidgetBlueprint(AssetPath);
 		if (!WidgetBlueprint || !UeAgentUmgOps::SaveWidgetBlueprintPackage(WidgetBlueprint, OutError))
 		{
 			return false;
 		}
+		bSaved = true;
 	}
 
-	OutData->SetStringField(TEXT("asset_path"), AssetPath);
-	OutData->SetStringField(TEXT("folder_path"), FolderPath);
-	OutData->SetNumberField(TEXT("variables_applied"), VariablesApplied);
-	OutData->SetNumberField(TEXT("widgets_removed"), WidgetsRemoved);
-	OutData->SetNumberField(TEXT("widgets_added"), WidgetsAdded);
-	OutData->SetNumberField(TEXT("widget_properties_applied"), WidgetPropertiesApplied);
-	OutData->SetNumberField(TEXT("slot_properties_applied"), SlotPropertiesApplied);
-	OutData->SetNumberField(TEXT("widget_properties_skipped"), WidgetPropertiesSkipped);
-	OutData->SetNumberField(TEXT("slot_properties_skipped"), SlotPropertiesSkipped);
-	OutData->SetNumberField(TEXT("bindings_applied"), BindingsApplied);
-	OutData->SetNumberField(TEXT("animations_applied"), AnimationsApplied);
-	OutData->SetNumberField(TEXT("animation_keys_applied"), AnimationKeysApplied);
-	OutData->SetNumberField(TEXT("graphs_applied"), GraphsApplied);
-	OutData->SetNumberField(TEXT("warning_count"), Warnings.Num());
-	OutData->SetArrayField(TEXT("warnings"), Warnings);
-	OutData->SetBoolField(TEXT("compiled"), bCompileAfterApply);
-	OutData->SetBoolField(TEXT("saved"), bSaveAfterApply);
+	PopulateApplyResult();
 	return true;
 }

@@ -2,6 +2,56 @@
 
 #include "UeAgentSmokeTestSharedIncludes.inl"
 
+#include "MovieSceneTrack.h"
+#include "Sequencer/MovieSceneControlRigParameterSection.h"
+#include "Sequencer/MovieSceneControlRigParameterTrack.h"
+
+namespace
+{
+	static bool ExecuteSequenceCommandExpectFailure(
+		FAutomationTestBase* Test,
+		FScopedUeAgentHttpServer& ServerScope,
+		const FString& RequestId,
+		const FString& Command,
+		const FString& ParamsJson,
+		const FString& ExpectedError)
+	{
+		FHttpSmokeResult Result;
+		const FString Body = MakeExecRequestBody(RequestId, Command, ParamsJson);
+		if (!Test->TestTrue(Command + TEXT(" failure request completed"), ExecuteHttpJsonRequest(TEXT("POST"), ServerScope.BaseUrl + TEXT("/api/exec"), ServerScope.Token, Body, Result)))
+		{
+			return false;
+		}
+		if (!Test->TestTrue(Command + TEXT(" failure http status"), Result.StatusCode == 200 || Result.StatusCode == 400))
+		{
+			Test->AddError(Result.Body.Left(1024));
+			return false;
+		}
+
+		TSharedPtr<FJsonObject> Root;
+		if (!Test->TestTrue(Command + TEXT(" failure response parses"), ParseJson(Result.Body, Root)) || !Root.IsValid())
+		{
+			return false;
+		}
+		bool bOk = true;
+		Root->TryGetBoolField(TEXT("ok"), bOk);
+		if (!Test->TestFalse(Command + TEXT(" failure ok=false"), bOk))
+		{
+			Test->AddError(Result.Body.Left(1024));
+			return false;
+		}
+
+		FString Error;
+		Root->TryGetStringField(TEXT("error"), Error);
+		if (!Test->TestEqual(Command + TEXT(" failure error"), Error, ExpectedError))
+		{
+			Test->AddError(Result.Body.Left(1024));
+			return false;
+		}
+		return true;
+	}
+}
+
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(
 	FUeAgentInterfaceSequenceSmokeTest,
 	"GptProjectTest.UeAgentInterface.Smoke.SequenceWorkflow",
@@ -41,6 +91,27 @@ bool FUeAgentInterfaceSequenceSmokeTest::RunTest(const FString& Parameters)
 		TestEqual(TEXT("Sequence create asset path"), (*CreateData)->GetStringField(TEXT("asset_path")), SequenceAssetPath);
 		TestEqual(TEXT("Sequence create display rate"), (*CreateData)->GetStringField(TEXT("display_rate")), FString(TEXT("24/1")));
 	}
+
+	const FString GuardedCreateAssetPath = MakeAutomationAssetPath(TEXT("SEQOPENBLOCK"));
+	TestTrue(
+		TEXT("Sequence create open_editor requires explicit allow"),
+		ExecuteSequenceCommandExpectFailure(
+			this,
+			ServerScope,
+			TEXT("smoke-sequence-create-open-editor-denied-001"),
+			TEXT("sequence_create_level_sequence"),
+			FString::Printf(TEXT("{\"asset_path\":\"%s\",\"start_seconds\":0.0,\"duration_seconds\":1.0,\"open_editor\":true,\"save_after_create\":false}"), *GuardedCreateAssetPath),
+			TEXT("open_editor_requires_allow_editor_open")));
+
+	TestTrue(
+		TEXT("Sequence open requires explicit allow"),
+		ExecuteSequenceCommandExpectFailure(
+			this,
+			ServerScope,
+			TEXT("smoke-sequence-open-denied-001"),
+			TEXT("sequence_open_level_sequence"),
+			FString::Printf(TEXT("{\"asset_path\":\"%s\"}"), *SequenceAssetPath),
+			TEXT("sequence_open_level_sequence_requires_allow_editor_open")));
 
 	const FString ListBody = MakeExecRequestBody(
 		TEXT("smoke-sequence-list-001"),
@@ -134,6 +205,7 @@ bool FUeAgentInterfaceSequenceFolderSmokeTest::RunTest(const FString& Parameters
 	const FString SequenceAssetPath = MakeAutomationAssetPath(TEXT("SEQFOLDER"));
 	const FString ActorLabel = FString::Printf(TEXT("SmokeSeqActor_%s"), *FGuid::NewGuid().ToString(EGuidFormats::Digits).Left(8));
 	const FString CameraActorLabel = FString::Printf(TEXT("SmokeSeqCamera_%s"), *FGuid::NewGuid().ToString(EGuidFormats::Digits).Left(8));
+	const FString SkeletalActorLabel = FString::Printf(TEXT("SmokeSeqSkeletal_%s"), *FGuid::NewGuid().ToString(EGuidFormats::Digits).Left(8));
 	const FString ChildSequenceAssetPath = MakeAutomationAssetPath(TEXT("SEQCHILD"));
 	const FString FolderRoot = FPaths::ConvertRelativePathToFull(
 		FPaths::Combine(FPaths::ProjectSavedDir(), TEXT("UeAssetFolders"), TEXT("LevelSequence")));
@@ -215,6 +287,37 @@ bool FUeAgentInterfaceSequenceFolderSmokeTest::RunTest(const FString& Parameters
 	}
 	TestNotNull(TEXT("Sequence folder direct camera actor"), DirectCameraActor);
 
+	USkeletalMesh* SmokeSkeletalMesh = LoadObject<USkeletalMesh>(nullptr, TEXT("/Engine/EngineMeshes/SkeletalCube.SkeletalCube"));
+	TestNotNull(TEXT("Sequence folder smoke skeletal mesh"), SmokeSkeletalMesh);
+	FString ControlRigSmokeControlName;
+	FString ControlRigSmokeBoneName;
+	if (SmokeSkeletalMesh && SmokeSkeletalMesh->GetRefSkeleton().GetNum() > 0)
+	{
+		ControlRigSmokeBoneName = SmokeSkeletalMesh->GetRefSkeleton().GetBoneName(0).ToString();
+		ControlRigSmokeControlName = ControlRigSmokeBoneName.ToLower() + TEXT("_CONTROL");
+	}
+	TestTrue(TEXT("Sequence folder control rig smoke control name non-empty"), !ControlRigSmokeControlName.IsEmpty());
+	TestTrue(TEXT("Sequence folder control rig smoke bone name non-empty"), !ControlRigSmokeBoneName.IsEmpty());
+
+	ASkeletalMeshActor* DirectSkeletalActor = nullptr;
+	if (DirectEditorWorld && SmokeSkeletalMesh)
+	{
+		FActorSpawnParameters SpawnParams;
+		SpawnParams.ObjectFlags = RF_Transient;
+		SpawnParams.bHideFromSceneOutliner = false;
+		SpawnParams.SpawnCollisionHandlingOverride = ESpawnActorCollisionHandlingMethod::AlwaysSpawn;
+		DirectSkeletalActor = DirectEditorWorld->SpawnActor<ASkeletalMeshActor>(ASkeletalMeshActor::StaticClass(), FVector(120.0, 0.0, 120.0), FRotator::ZeroRotator, SpawnParams);
+		if (DirectSkeletalActor)
+		{
+			DirectSkeletalActor->SetActorLabel(SkeletalActorLabel);
+			if (USkeletalMeshComponent* SkeletalMeshComponent = DirectSkeletalActor->GetSkeletalMeshComponent())
+			{
+				SkeletalMeshComponent->SetSkeletalMesh(SmokeSkeletalMesh);
+			}
+		}
+	}
+	TestNotNull(TEXT("Sequence folder direct skeletal actor"), DirectSkeletalActor);
+
 	const FString AddBindingBody = MakeExecRequestBody(
 		TEXT("smoke-sequence-folder-bind-001"),
 		TEXT("sequence_add_actor_binding"),
@@ -244,6 +347,21 @@ bool FUeAgentInterfaceSequenceFolderSmokeTest::RunTest(const FString& Parameters
 	TestTrue(TEXT("Sequence folder add camera binding contains data"), AddCameraBindingJson.IsValid() && AddCameraBindingJson->TryGetObjectField(TEXT("data"), AddCameraBindingData) && AddCameraBindingData && AddCameraBindingData->IsValid());
 	const FString CameraBindingGuid = (AddCameraBindingData && AddCameraBindingData->IsValid()) ? (*AddCameraBindingData)->GetStringField(TEXT("binding_guid")) : FString();
 	TestTrue(TEXT("Sequence folder camera binding guid non-empty"), !CameraBindingGuid.IsEmpty());
+
+	const FString AddSkeletalBindingBody = MakeExecRequestBody(
+		TEXT("smoke-sequence-folder-bind-skeletal-001"),
+		TEXT("sequence_add_actor_binding"),
+		FString::Printf(TEXT("{\"asset_path\":\"%s\",\"actor_id\":\"%s\",\"save_after_set\":false}"), *SequenceAssetPath, *SkeletalActorLabel));
+	FHttpSmokeResult AddSkeletalBindingResult;
+	TestTrue(TEXT("Sequence folder add skeletal binding request succeeded"), ExecuteHttpJsonRequest(TEXT("POST"), ServerScope.BaseUrl + TEXT("/api/exec"), ServerScope.Token, AddSkeletalBindingBody, AddSkeletalBindingResult));
+	TestEqual(TEXT("Sequence folder add skeletal binding status code"), AddSkeletalBindingResult.StatusCode, 200);
+
+	TSharedPtr<FJsonObject> AddSkeletalBindingJson;
+	TestTrue(TEXT("Sequence folder add skeletal binding parses JSON"), ParseJson(AddSkeletalBindingResult.Body, AddSkeletalBindingJson));
+	const TSharedPtr<FJsonObject>* AddSkeletalBindingData = nullptr;
+	TestTrue(TEXT("Sequence folder add skeletal binding contains data"), AddSkeletalBindingJson.IsValid() && AddSkeletalBindingJson->TryGetObjectField(TEXT("data"), AddSkeletalBindingData) && AddSkeletalBindingData && AddSkeletalBindingData->IsValid());
+	const FString SkeletalBindingGuid = (AddSkeletalBindingData && AddSkeletalBindingData->IsValid()) ? (*AddSkeletalBindingData)->GetStringField(TEXT("binding_guid")) : FString();
+	TestTrue(TEXT("Sequence folder skeletal binding guid non-empty"), !SkeletalBindingGuid.IsEmpty());
 
 	const FString AddTransformTrackBody = MakeExecRequestBody(
 		TEXT("smoke-sequence-folder-transform-track-001"),
@@ -412,10 +530,125 @@ bool FUeAgentInterfaceSequenceFolderSmokeTest::RunTest(const FString& Parameters
 	TestTrue(TEXT("Sequence folder export request succeeded"), ExecuteHttpJsonRequest(TEXT("POST"), ServerScope.BaseUrl + TEXT("/api/exec"), ServerScope.Token, ExportFolderBody, ExportFolderResult));
 	TestEqual(TEXT("Sequence folder export status code"), ExportFolderResult.StatusCode, 200);
 
+	TSharedPtr<FJsonObject> ExportFolderJson;
+	TestTrue(TEXT("Sequence folder export parses JSON"), ParseJson(ExportFolderResult.Body, ExportFolderJson));
+	const TSharedPtr<FJsonObject>* ExportFolderData = nullptr;
+	TestTrue(TEXT("Sequence folder export contains data"), ExportFolderJson.IsValid() && ExportFolderJson->TryGetObjectField(TEXT("data"), ExportFolderData) && ExportFolderData && ExportFolderData->IsValid());
+	if (ExportFolderData && ExportFolderData->IsValid())
+	{
+		TestTrue(TEXT("Sequence folder export complete inventory flag"), (*ExportFolderData)->GetBoolField(TEXT("complete_inventory_exported")));
+		const FString CompleteInventoryPath = (*ExportFolderData)->GetStringField(TEXT("complete_inventory_path"));
+		TestFalse(TEXT("Sequence folder export complete inventory path non-empty"), CompleteInventoryPath.IsEmpty());
+		TestTrue(TEXT("Sequence folder export complete inventory file exists"), IFileManager::Get().FileExists(*CompleteInventoryPath));
+
+		const TSharedPtr<FJsonObject>* CoverageReport = nullptr;
+		TestTrue(TEXT("Sequence folder export returns coverage report"), (*ExportFolderData)->TryGetObjectField(TEXT("coverage_report"), CoverageReport) && CoverageReport && CoverageReport->IsValid());
+		if (CoverageReport && CoverageReport->IsValid())
+		{
+			TestEqual(TEXT("Sequence folder coverage schema"), (*CoverageReport)->GetStringField(TEXT("schema")), FString(TEXT("uai.sequence.folder_coverage.v1")));
+			TestEqual(TEXT("Sequence folder coverage implementation status"), (*CoverageReport)->GetStringField(TEXT("implementation_status")), FString(TEXT("partial_folder_profile")));
+			TestFalse(TEXT("Sequence folder coverage is not complete target schema"), (*CoverageReport)->GetBoolField(TEXT("is_complete_target_schema")));
+			TestTrue(TEXT("Sequence folder coverage has tracks"), static_cast<int32>((*CoverageReport)->GetIntegerField(TEXT("track_count"))) > 0);
+			TestTrue(TEXT("Sequence folder coverage reports partial tracks"), static_cast<int32>((*CoverageReport)->GetIntegerField(TEXT("partial_roundtrip_track_count"))) > 0);
+		}
+	}
+
+	TSharedPtr<FJsonObject> CompleteInventoryJson;
+	TestTrue(TEXT("Sequence folder complete inventory load"), LoadJsonFile(FPaths::Combine(FolderPath, TEXT("complete"), TEXT("inventory.json")), CompleteInventoryJson));
+	if (CompleteInventoryJson.IsValid())
+	{
+		TestEqual(TEXT("Sequence folder complete inventory schema"), CompleteInventoryJson->GetStringField(TEXT("schema")), FString(TEXT("uai.sequence.complete_inventory.v1")));
+		TestTrue(TEXT("Sequence folder complete inventory read role"), CompleteInventoryJson->GetBoolField(TEXT("is_complete_read_inventory")));
+		TestFalse(TEXT("Sequence folder complete inventory not lossless apply"), CompleteInventoryJson->GetBoolField(TEXT("is_complete_lossless_apply")));
+		TestTrue(TEXT("Sequence folder complete inventory has tracks"), static_cast<int32>(CompleteInventoryJson->GetIntegerField(TEXT("track_count"))) > 0);
+		TestTrue(TEXT("Sequence folder complete inventory has sections"), static_cast<int32>(CompleteInventoryJson->GetIntegerField(TEXT("section_count"))) > 0);
+		const TArray<TSharedPtr<FJsonValue>>* SequenceRawProperties = nullptr;
+		TestTrue(TEXT("Sequence folder complete inventory sequence raw properties"), CompleteInventoryJson->TryGetArrayField(TEXT("sequence_raw_properties"), SequenceRawProperties) && SequenceRawProperties && SequenceRawProperties->Num() > 0);
+		const TArray<TSharedPtr<FJsonValue>>* MovieSceneRawProperties = nullptr;
+		TestTrue(TEXT("Sequence folder complete inventory movie scene raw properties"), CompleteInventoryJson->TryGetArrayField(TEXT("movie_scene_raw_properties"), MovieSceneRawProperties) && MovieSceneRawProperties && MovieSceneRawProperties->Num() > 0);
+		bool bCompleteInventoryHasTrackRawProperties = false;
+		bool bCompleteInventoryHasSectionRawProperties = false;
+		bool bCompleteInventoryHasSectionChannels = false;
+		const TArray<TSharedPtr<FJsonValue>>* CompleteBindings = nullptr;
+		if (CompleteInventoryJson->TryGetArrayField(TEXT("bindings"), CompleteBindings) && CompleteBindings)
+		{
+			for (const TSharedPtr<FJsonValue>& BindingValue : *CompleteBindings)
+			{
+				const TSharedPtr<FJsonObject>* BindingObj = nullptr;
+				if (!BindingValue.IsValid() || !BindingValue->TryGetObject(BindingObj) || !BindingObj || !(*BindingObj).IsValid())
+				{
+					continue;
+				}
+				const TArray<TSharedPtr<FJsonValue>>* CompleteTracks = nullptr;
+				if (!(*BindingObj)->TryGetArrayField(TEXT("tracks"), CompleteTracks) || !CompleteTracks)
+				{
+					continue;
+				}
+				for (const TSharedPtr<FJsonValue>& TrackValue : *CompleteTracks)
+				{
+					const TSharedPtr<FJsonObject>* TrackObj = nullptr;
+					if (!TrackValue.IsValid() || !TrackValue->TryGetObject(TrackObj) || !TrackObj || !(*TrackObj).IsValid())
+					{
+						continue;
+					}
+					const TArray<TSharedPtr<FJsonValue>>* TrackRawProperties = nullptr;
+					if ((*TrackObj)->TryGetArrayField(TEXT("raw_properties"), TrackRawProperties) && TrackRawProperties && TrackRawProperties->Num() > 0)
+					{
+						bCompleteInventoryHasTrackRawProperties = true;
+					}
+					const TArray<TSharedPtr<FJsonValue>>* CompleteSections = nullptr;
+					if (!(*TrackObj)->TryGetArrayField(TEXT("sections"), CompleteSections) || !CompleteSections)
+					{
+						continue;
+					}
+					for (const TSharedPtr<FJsonValue>& SectionValue : *CompleteSections)
+					{
+						const TSharedPtr<FJsonObject>* SectionObj = nullptr;
+						if (!SectionValue.IsValid() || !SectionValue->TryGetObject(SectionObj) || !SectionObj || !(*SectionObj).IsValid())
+						{
+							continue;
+						}
+						const TArray<TSharedPtr<FJsonValue>>* SectionRawProperties = nullptr;
+						if ((*SectionObj)->TryGetArrayField(TEXT("raw_properties"), SectionRawProperties) && SectionRawProperties && SectionRawProperties->Num() > 0)
+						{
+							bCompleteInventoryHasSectionRawProperties = true;
+						}
+						const TArray<TSharedPtr<FJsonValue>>* SectionChannels = nullptr;
+						if ((*SectionObj)->TryGetArrayField(TEXT("channels"), SectionChannels) && SectionChannels && SectionChannels->Num() > 0)
+						{
+							bCompleteInventoryHasSectionChannels = true;
+						}
+					}
+				}
+			}
+		}
+		TestTrue(TEXT("Sequence folder complete inventory track raw properties"), bCompleteInventoryHasTrackRawProperties);
+		TestTrue(TEXT("Sequence folder complete inventory section raw properties"), bCompleteInventoryHasSectionRawProperties);
+		TestTrue(TEXT("Sequence folder complete inventory section channels"), bCompleteInventoryHasSectionChannels);
+	}
+
+	TSharedPtr<FJsonObject> CoverageReportJson;
+	TestTrue(TEXT("Sequence folder coverage report load"), LoadJsonFile(FPaths::Combine(FolderPath, TEXT("validation"), TEXT("coverage_report.json")), CoverageReportJson));
+	if (CoverageReportJson.IsValid())
+	{
+		TestEqual(TEXT("Sequence folder coverage report file schema"), CoverageReportJson->GetStringField(TEXT("schema")), FString(TEXT("uai.sequence.folder_coverage.v1")));
+		TestEqual(TEXT("Sequence folder coverage report file contract"), CoverageReportJson->GetStringField(TEXT("authoring_contract")), FString(TEXT("curated_common_subset_not_full_ue_sequencer_model")));
+	}
+
+	TSharedPtr<FJsonObject> AssetJson;
+	TestTrue(TEXT("Sequence folder asset json load"), LoadJsonFile(FPaths::Combine(FolderPath, TEXT("asset.json")), AssetJson));
+	if (AssetJson.IsValid())
+	{
+		const TArray<TSharedPtr<FJsonValue>>* SequenceRawProperties = nullptr;
+		TestTrue(TEXT("Sequence folder asset json sequence raw properties"), AssetJson->TryGetArrayField(TEXT("sequence_raw_properties"), SequenceRawProperties) && SequenceRawProperties && SequenceRawProperties->Num() > 0);
+	}
+
 	TSharedPtr<FJsonObject> SettingsJson;
 	TestTrue(TEXT("Sequence folder settings load"), LoadJsonFile(FPaths::Combine(FolderPath, TEXT("settings"), TEXT("sequence.json")), SettingsJson));
 	if (SettingsJson.IsValid())
 	{
+		const TArray<TSharedPtr<FJsonValue>>* MovieSceneRawProperties = nullptr;
+		TestTrue(TEXT("Sequence folder settings movie scene raw properties"), SettingsJson->TryGetArrayField(TEXT("movie_scene_raw_properties"), MovieSceneRawProperties) && MovieSceneRawProperties && MovieSceneRawProperties->Num() > 0);
 		const TSharedPtr<FJsonObject>* PlaybackObj = nullptr;
 		TestTrue(TEXT("Sequence folder settings playback exists"), SettingsJson->TryGetObjectField(TEXT("playback"), PlaybackObj) && PlaybackObj && (*PlaybackObj).IsValid());
 		if (PlaybackObj && (*PlaybackObj).IsValid())
@@ -439,7 +672,7 @@ bool FUeAgentInterfaceSequenceFolderSmokeTest::RunTest(const FString& Parameters
 	if (BindingsIndexJson.IsValid())
 	{
 		const TArray<TSharedPtr<FJsonValue>>* Bindings = nullptr;
-		TestTrue(TEXT("Sequence folder bindings index array exists"), BindingsIndexJson->TryGetArrayField(TEXT("bindings"), Bindings) && Bindings && Bindings->Num() >= 4);
+		TestTrue(TEXT("Sequence folder bindings index array exists"), BindingsIndexJson->TryGetArrayField(TEXT("bindings"), Bindings) && Bindings && Bindings->Num() >= 5);
 		if (Bindings)
 		{
 			for (const TSharedPtr<FJsonValue>& BindingValue : *Bindings)
@@ -456,9 +689,103 @@ bool FUeAgentInterfaceSequenceFolderSmokeTest::RunTest(const FString& Parameters
 	const FString BindingFolderName = BindingFolderByGuid.FindRef(BindingGuid);
 	const FString ComponentBindingFolderName = BindingFolderByGuid.FindRef(ComponentBindingGuid);
 	const FString SpawnableBindingFolderName = BindingFolderByGuid.FindRef(SpawnableBindingGuid);
+	const FString SkeletalBindingFolderName = BindingFolderByGuid.FindRef(SkeletalBindingGuid);
 	TestTrue(TEXT("Sequence folder actor binding folder name non-empty"), !BindingFolderName.IsEmpty());
 	TestTrue(TEXT("Sequence folder component binding folder name non-empty"), !ComponentBindingFolderName.IsEmpty());
 	TestTrue(TEXT("Sequence folder spawnable binding folder name non-empty"), !SpawnableBindingFolderName.IsEmpty());
+	TestTrue(TEXT("Sequence folder skeletal binding folder name non-empty"), !SkeletalBindingFolderName.IsEmpty());
+
+	auto TrackFolderHasSectionMetadata = [this, &LoadJsonFile](const FString& TracksDir) -> bool
+	{
+		TArray<FString> TrackFiles;
+		IFileManager::Get().FindFiles(TrackFiles, *(FPaths::Combine(TracksDir, TEXT("*.json"))), true, false);
+		TrackFiles.Sort();
+		for (const FString& TrackFile : TrackFiles)
+		{
+			TSharedPtr<FJsonObject> TrackJson;
+			if (!LoadJsonFile(FPaths::Combine(TracksDir, TrackFile), TrackJson) || !TrackJson.IsValid())
+			{
+				continue;
+			}
+			const TArray<TSharedPtr<FJsonValue>>* Sections = nullptr;
+			if (!TrackJson->TryGetArrayField(TEXT("sections"), Sections) || !Sections)
+			{
+				continue;
+			}
+			for (const TSharedPtr<FJsonValue>& SectionValue : *Sections)
+			{
+				const TSharedPtr<FJsonObject>* SectionObj = nullptr;
+				if (!SectionValue.IsValid() || !SectionValue->TryGetObject(SectionObj) || !SectionObj || !SectionObj->IsValid())
+				{
+					continue;
+				}
+				const TSharedPtr<FJsonObject>* SectionMetadata = nullptr;
+				if ((*SectionObj)->TryGetObjectField(TEXT("section_metadata"), SectionMetadata) && SectionMetadata && SectionMetadata->IsValid())
+				{
+					return true;
+				}
+			}
+		}
+		return false;
+	};
+	TestTrue(TEXT("Sequence folder exported section metadata exists"), TrackFolderHasSectionMetadata(FPaths::Combine(FolderPath, TEXT("bindings"), BindingFolderName, TEXT("tracks"))));
+
+	auto TrackFolderHasRawProperties = [this, &LoadJsonFile](const FString& TracksDir) -> bool
+	{
+		TArray<FString> TrackFiles;
+		IFileManager::Get().FindFiles(TrackFiles, *(FPaths::Combine(TracksDir, TEXT("*.json"))), true, false);
+		TrackFiles.Sort();
+		for (const FString& TrackFile : TrackFiles)
+		{
+			TSharedPtr<FJsonObject> TrackJson;
+			if (!LoadJsonFile(FPaths::Combine(TracksDir, TrackFile), TrackJson) || !TrackJson.IsValid())
+			{
+				continue;
+			}
+			const TArray<TSharedPtr<FJsonValue>>* TrackRawProperties = nullptr;
+			if (TrackJson->TryGetArrayField(TEXT("raw_properties"), TrackRawProperties) && TrackRawProperties && TrackRawProperties->Num() > 0)
+			{
+				return true;
+			}
+		}
+		return false;
+	};
+	TestTrue(TEXT("Sequence folder exported track raw properties exists"), TrackFolderHasRawProperties(FPaths::Combine(FolderPath, TEXT("bindings"), BindingFolderName, TEXT("tracks"))));
+
+	auto TrackFolderHasSectionChannels = [this, &LoadJsonFile](const FString& TracksDir) -> bool
+	{
+		TArray<FString> TrackFiles;
+		IFileManager::Get().FindFiles(TrackFiles, *(FPaths::Combine(TracksDir, TEXT("*.json"))), true, false);
+		TrackFiles.Sort();
+		for (const FString& TrackFile : TrackFiles)
+		{
+			TSharedPtr<FJsonObject> TrackJson;
+			if (!LoadJsonFile(FPaths::Combine(TracksDir, TrackFile), TrackJson) || !TrackJson.IsValid())
+			{
+				continue;
+			}
+			const TArray<TSharedPtr<FJsonValue>>* Sections = nullptr;
+			if (!TrackJson->TryGetArrayField(TEXT("sections"), Sections) || !Sections)
+			{
+				continue;
+			}
+			for (const TSharedPtr<FJsonValue>& SectionValue : *Sections)
+			{
+				const TSharedPtr<FJsonObject>* SectionObj = nullptr;
+				if (!SectionValue.IsValid() || !SectionValue->TryGetObject(SectionObj) || !SectionObj || !(*SectionObj).IsValid())
+				{
+					continue;
+				}
+				const TArray<TSharedPtr<FJsonValue>>* SectionChannels = nullptr;
+				if ((*SectionObj)->TryGetArrayField(TEXT("channels"), SectionChannels) && SectionChannels && SectionChannels->Num() > 0)
+				{
+					return true;
+				}
+			}
+		}
+		return false;
+	};
+	TestTrue(TEXT("Sequence folder exported section channels exists"), TrackFolderHasSectionChannels(FPaths::Combine(FolderPath, TEXT("bindings"), BindingFolderName, TEXT("tracks"))));
 
 	auto ModifyTrackFiles = [this, &LoadJsonFile, &SaveJsonFile, &ComponentBindingGuid, &SpawnableBindingGuid](const FString& TracksDir, const FString& ExpectedBindingGuid, bool& bOutModifiedTransform, bool& bOutModifiedFloat, bool& bOutModifiedSpawn)
 	{
@@ -560,6 +887,51 @@ bool FUeAgentInterfaceSequenceFolderSmokeTest::RunTest(const FString& Parameters
 	TestTrue(TEXT("Sequence folder modified spawnable transform track"), bModifiedSpawnTransform);
 	TestTrue(TEXT("Sequence folder modified spawn track"), bModifiedSpawnTrack);
 
+	bool bAddedControlRigTrack = false;
+	if (!SkeletalBindingFolderName.IsEmpty() && !ControlRigSmokeControlName.IsEmpty())
+	{
+		auto MakeVectorJson = [](double X, double Y, double Z) -> TSharedPtr<FJsonObject>
+		{
+			TSharedPtr<FJsonObject> Obj = MakeShared<FJsonObject>();
+			Obj->SetNumberField(TEXT("x"), X);
+			Obj->SetNumberField(TEXT("y"), Y);
+			Obj->SetNumberField(TEXT("z"), Z);
+			return Obj;
+		};
+
+		TSharedPtr<FJsonObject> TransformValueObj = MakeShared<FJsonObject>();
+		TransformValueObj->SetObjectField(TEXT("location"), MakeVectorJson(12.0, 3.0, 4.0));
+		TSharedPtr<FJsonObject> RotationObj = MakeShared<FJsonObject>();
+		RotationObj->SetNumberField(TEXT("pitch"), 0.0);
+		RotationObj->SetNumberField(TEXT("yaw"), 15.0);
+		RotationObj->SetNumberField(TEXT("roll"), 0.0);
+		TransformValueObj->SetObjectField(TEXT("rotation"), RotationObj);
+		TransformValueObj->SetObjectField(TEXT("scale"), MakeVectorJson(1.0, 1.0, 1.0));
+
+		TSharedPtr<FJsonObject> KeyObj = MakeShared<FJsonObject>();
+		KeyObj->SetNumberField(TEXT("time_seconds"), 0.5);
+		KeyObj->SetStringField(TEXT("control"), ControlRigSmokeControlName);
+		KeyObj->SetStringField(TEXT("control_type"), TEXT("transform"));
+		KeyObj->SetObjectField(TEXT("value"), TransformValueObj);
+
+		TSharedPtr<FJsonObject> SectionObj = MakeShared<FJsonObject>();
+		SectionObj->SetStringField(TEXT("section_type"), TEXT("control_rig"));
+		SectionObj->SetArrayField(TEXT("keys"), { MakeShared<FJsonValueObject>(KeyObj) });
+
+		TSharedPtr<FJsonObject> ControlRigTrackObj = MakeShared<FJsonObject>();
+		ControlRigTrackObj->SetStringField(TEXT("track_type"), TEXT("control_rig"));
+		ControlRigTrackObj->SetStringField(TEXT("track_name"), TEXT("FK Control Rig"));
+		ControlRigTrackObj->SetStringField(TEXT("display_name"), TEXT("FK Control Rig"));
+		ControlRigTrackObj->SetStringField(TEXT("control_rig_class"), TEXT("/Script/ControlRig.FKControlRig"));
+		ControlRigTrackObj->SetBoolField(TEXT("is_additive"), false);
+		ControlRigTrackObj->SetArrayField(TEXT("sections"), { MakeShared<FJsonValueObject>(SectionObj) });
+
+		bAddedControlRigTrack = SaveJsonFile(
+			FPaths::Combine(FolderPath, TEXT("bindings"), SkeletalBindingFolderName, TEXT("tracks"), TEXT("control_rig_smoke.json")),
+			ControlRigTrackObj);
+	}
+	TestTrue(TEXT("Sequence folder added control rig track json"), bAddedControlRigTrack);
+
 	TSharedPtr<FJsonObject> MasterTracksJson;
 	TestTrue(TEXT("Sequence folder master tracks load"), LoadJsonFile(FPaths::Combine(FolderPath, TEXT("master_tracks"), TEXT("index.json")), MasterTracksJson));
 	if (MasterTracksJson.IsValid())
@@ -625,13 +997,298 @@ bool FUeAgentInterfaceSequenceFolderSmokeTest::RunTest(const FString& Parameters
 	TestTrue(TEXT("Sequence folder remove spawnable binding request succeeded"), ExecuteHttpJsonRequest(TEXT("POST"), ServerScope.BaseUrl + TEXT("/api/exec"), ServerScope.Token, RemoveSpawnableBindingBody, RemoveSpawnableBindingResult));
 	TestEqual(TEXT("Sequence folder remove spawnable binding status code"), RemoveSpawnableBindingResult.StatusCode, 200);
 
+	const FString RemoveSkeletalBindingBody = MakeExecRequestBody(
+		TEXT("smoke-sequence-folder-remove-binding-004"),
+		TEXT("sequence_remove_actor_binding"),
+		FString::Printf(TEXT("{\"asset_path\":\"%s\",\"binding_guid\":\"%s\",\"save_after_set\":false}"), *SequenceAssetPath, *SkeletalBindingGuid));
+	FHttpSmokeResult RemoveSkeletalBindingResult;
+	TestTrue(TEXT("Sequence folder remove skeletal binding request succeeded"), ExecuteHttpJsonRequest(TEXT("POST"), ServerScope.BaseUrl + TEXT("/api/exec"), ServerScope.Token, RemoveSkeletalBindingBody, RemoveSkeletalBindingResult));
+	TestEqual(TEXT("Sequence folder remove skeletal binding status code"), RemoveSkeletalBindingResult.StatusCode, 200);
+
 	const FString ApplyFolderBody = MakeExecRequestBody(
 		TEXT("smoke-sequence-folder-apply-001"),
 		TEXT("sequence_apply_folder"),
-		FString::Printf(TEXT("{\"asset_path\":\"%s\",\"create_if_missing\":false,\"save_after_apply\":false}"), *SequenceAssetPath));
+		FString::Printf(TEXT("{\"asset_path\":\"%s\",\"create_if_missing\":false,\"save_after_apply\":false,\"replace_mode\":\"patch\",\"verify_after_apply\":true}"), *SequenceAssetPath));
 	FHttpSmokeResult ApplyFolderResult;
 	TestTrue(TEXT("Sequence folder apply request succeeded"), ExecuteHttpJsonRequest(TEXT("POST"), ServerScope.BaseUrl + TEXT("/api/exec"), ServerScope.Token, ApplyFolderBody, ApplyFolderResult));
 	TestEqual(TEXT("Sequence folder apply status code"), ApplyFolderResult.StatusCode, 200);
+
+	TSharedPtr<FJsonObject> ApplyFolderJson;
+	TestTrue(TEXT("Sequence folder apply parses JSON"), ParseJson(ApplyFolderResult.Body, ApplyFolderJson));
+	const TSharedPtr<FJsonObject>* ApplyFolderData = nullptr;
+	TestTrue(TEXT("Sequence folder apply contains data"), ApplyFolderJson.IsValid() && ApplyFolderJson->TryGetObjectField(TEXT("data"), ApplyFolderData) && ApplyFolderData && ApplyFolderData->IsValid());
+	if (ApplyFolderData && ApplyFolderData->IsValid())
+	{
+		TestEqual(TEXT("Sequence folder apply replace mode"), (*ApplyFolderData)->GetStringField(TEXT("replace_mode")), FString(TEXT("patch")));
+		TestTrue(TEXT("Sequence folder apply raw property count field exists"), (*ApplyFolderData)->HasField(TEXT("raw_properties_applied")));
+		TestTrue(TEXT("Sequence folder apply raw property count positive"), static_cast<int32>((*ApplyFolderData)->GetIntegerField(TEXT("raw_properties_applied"))) > 0);
+		TestTrue(TEXT("Sequence folder apply channel count field exists"), (*ApplyFolderData)->HasField(TEXT("channels_applied")));
+		TestTrue(TEXT("Sequence folder apply channel count positive"), static_cast<int32>((*ApplyFolderData)->GetIntegerField(TEXT("channels_applied"))) > 0);
+		const TSharedPtr<FJsonObject>* InputCoverageReport = nullptr;
+		TestTrue(TEXT("Sequence folder apply input coverage report exists"), (*ApplyFolderData)->TryGetObjectField(TEXT("input_coverage_report"), InputCoverageReport) && InputCoverageReport && InputCoverageReport->IsValid());
+		if (InputCoverageReport && InputCoverageReport->IsValid())
+		{
+			TestEqual(TEXT("Sequence folder apply input coverage schema"), (*InputCoverageReport)->GetStringField(TEXT("schema")), FString(TEXT("uai.sequence.folder_coverage.v1")));
+			TestTrue(TEXT("Sequence folder apply input coverage has tracks"), static_cast<int32>((*InputCoverageReport)->GetIntegerField(TEXT("track_count"))) > 0);
+		}
+		const TSharedPtr<FJsonObject>* PostApplyCoverageReport = nullptr;
+		TestTrue(TEXT("Sequence folder apply post coverage report exists"), (*ApplyFolderData)->TryGetObjectField(TEXT("post_apply_coverage_report"), PostApplyCoverageReport) && PostApplyCoverageReport && PostApplyCoverageReport->IsValid());
+		if (PostApplyCoverageReport && PostApplyCoverageReport->IsValid())
+		{
+			TestEqual(TEXT("Sequence folder apply post coverage schema"), (*PostApplyCoverageReport)->GetStringField(TEXT("schema")), FString(TEXT("uai.sequence.folder_coverage.v1")));
+			TestTrue(TEXT("Sequence folder apply post coverage has tracks"), static_cast<int32>((*PostApplyCoverageReport)->GetIntegerField(TEXT("track_count"))) > 0);
+		}
+		const TSharedPtr<FJsonObject>* CoverageDiff = nullptr;
+		TestTrue(TEXT("Sequence folder apply coverage diff exists"), (*ApplyFolderData)->TryGetObjectField(TEXT("coverage_diff"), CoverageDiff) && CoverageDiff && CoverageDiff->IsValid());
+		if (CoverageDiff && CoverageDiff->IsValid())
+		{
+			TestEqual(TEXT("Sequence folder apply coverage diff schema"), (*CoverageDiff)->GetStringField(TEXT("schema")), FString(TEXT("uai.sequence.folder_coverage_diff.v1")));
+			TestTrue(TEXT("Sequence folder apply coverage diff has post report"), (*CoverageDiff)->GetBoolField(TEXT("has_post_apply_report")));
+		}
+		const TSharedPtr<FJsonObject>* StructuralDiff = nullptr;
+		TestTrue(TEXT("Sequence folder apply structural diff exists"), (*ApplyFolderData)->TryGetObjectField(TEXT("structural_diff"), StructuralDiff) && StructuralDiff && StructuralDiff->IsValid());
+		if (StructuralDiff && StructuralDiff->IsValid())
+		{
+			TestEqual(TEXT("Sequence folder apply structural diff schema"), (*StructuralDiff)->GetStringField(TEXT("schema")), FString(TEXT("uai.sequence.folder_structural_diff.v1")));
+			TestTrue(TEXT("Sequence folder apply structural diff succeeded"), (*StructuralDiff)->GetBoolField(TEXT("success")));
+			TestEqual(TEXT("Sequence folder apply structural diff missing count"), static_cast<int32>((*StructuralDiff)->GetIntegerField(TEXT("missing_entry_count"))), 0);
+			TestEqual(TEXT("Sequence folder apply structural diff extra count"), static_cast<int32>((*StructuralDiff)->GetIntegerField(TEXT("extra_entry_count"))), 0);
+			TestEqual(TEXT("Sequence folder apply structural diff changed count"), static_cast<int32>((*StructuralDiff)->GetIntegerField(TEXT("changed_entry_count"))), 0);
+			const bool bStructurallyEqual = (*StructuralDiff)->GetBoolField(TEXT("is_structurally_equal"));
+			if (!bStructurallyEqual)
+			{
+				FString StructuralDiffText;
+				const TSharedRef<TJsonWriter<TCHAR, TPrettyJsonPrintPolicy<TCHAR>>> Writer =
+					TJsonWriterFactory<TCHAR, TPrettyJsonPrintPolicy<TCHAR>>::Create(&StructuralDiffText);
+				FJsonSerializer::Serialize((*StructuralDiff).ToSharedRef(), Writer);
+				AddError(FString::Printf(TEXT("Sequence folder structural diff detail: %s"), *StructuralDiffText.Left(20000)));
+			}
+			TestTrue(TEXT("Sequence folder apply structural diff equal"), bStructurallyEqual);
+		}
+	}
+
+	if (FApp::CanEverRender())
+	{
+		const FString ProbeControlRigCandidatesBody = MakeExecRequestBody(
+			TEXT("smoke-sequence-control-rig-probe-001"),
+			TEXT("probe_ik_goal_candidates"),
+			FString::Printf(
+				TEXT("{\"sequence_path\":\"%s\",\"binding_guid\":\"%s\",\"control_name\":\"%s\",\"time_seconds\":0.5,\"baseline_from_skeletal_pose\":true,\"baseline_control_bone_map\":{\"%s\":\"%s\"},\"frame_width\":128,\"frame_height\":128,\"max_size\":128,\"frame_sheet_max_size\":768,\"write_individual_frames\":false,\"create_frame_sheet\":true,\"candidates\":[{\"label\":\"same\",\"transform\":{\"location\":{\"x\":0.0,\"y\":0.0,\"z\":0.0}}},{\"label\":\"forward\",\"transform\":{\"location\":{\"x\":24.0,\"y\":0.0,\"z\":0.0}}},{\"label\":\"back\",\"transform\":{\"location\":{\"x\":-24.0,\"y\":0.0,\"z\":0.0}}},{\"label\":\"side_pos\",\"transform\":{\"location\":{\"x\":0.0,\"y\":24.0,\"z\":0.0}}},{\"label\":\"side_neg\",\"transform\":{\"location\":{\"x\":0.0,\"y\":-24.0,\"z\":0.0}}},{\"label\":\"up\",\"transform\":{\"location\":{\"x\":0.0,\"y\":0.0,\"z\":24.0}}},{\"label\":\"down\",\"transform\":{\"location\":{\"x\":0.0,\"y\":0.0,\"z\":-24.0}}},{\"label\":\"yaw_scale\",\"transform\":{\"rotation\":{\"pitch\":0.0,\"yaw\":25.0,\"roll\":0.0},\"scale\":{\"x\":1.08,\"y\":1.0,\"z\":1.0}}}]}"),
+				*SequenceAssetPath,
+				*SkeletalBindingGuid,
+				*ControlRigSmokeControlName,
+				*ControlRigSmokeControlName,
+				*ControlRigSmokeBoneName));
+		FHttpSmokeResult ProbeControlRigCandidatesResult;
+		TestTrue(TEXT("Sequence control rig probe candidates request succeeded"), ExecuteHttpJsonRequest(TEXT("POST"), ServerScope.BaseUrl + TEXT("/api/exec"), ServerScope.Token, ProbeControlRigCandidatesBody, ProbeControlRigCandidatesResult, 60.0));
+		TestEqual(TEXT("Sequence control rig probe candidates status code"), ProbeControlRigCandidatesResult.StatusCode, 200);
+
+		TSharedPtr<FJsonObject> ProbeControlRigCandidatesJson;
+		TestTrue(TEXT("Sequence control rig probe candidates parses JSON"), ParseJson(ProbeControlRigCandidatesResult.Body, ProbeControlRigCandidatesJson));
+		TestTrue(TEXT("Sequence control rig probe candidates ok"), ProbeControlRigCandidatesJson.IsValid() && ProbeControlRigCandidatesJson->GetBoolField(TEXT("ok")));
+		const TSharedPtr<FJsonObject>* ProbeControlRigCandidatesData = nullptr;
+		TestTrue(TEXT("Sequence control rig probe candidates contains data"), ProbeControlRigCandidatesJson.IsValid() && ProbeControlRigCandidatesJson->TryGetObjectField(TEXT("data"), ProbeControlRigCandidatesData) && ProbeControlRigCandidatesData && ProbeControlRigCandidatesData->IsValid());
+		if (ProbeControlRigCandidatesData && ProbeControlRigCandidatesData->IsValid())
+		{
+			TestEqual(TEXT("Sequence control rig probe schema"), (*ProbeControlRigCandidatesData)->GetStringField(TEXT("schema")), FString(TEXT("uai.probe.ik_goal_candidates.v2")));
+			TestEqual(TEXT("Sequence control rig probe context"), (*ProbeControlRigCandidatesData)->GetStringField(TEXT("context_mode")), FString(TEXT("sequence_control_rig")));
+			TestEqual(TEXT("Sequence control rig probe sequence"), (*ProbeControlRigCandidatesData)->GetStringField(TEXT("sequence_path")), SequenceAssetPath);
+			TestEqual(TEXT("Sequence control rig probe binding"), (*ProbeControlRigCandidatesData)->GetStringField(TEXT("binding_guid")), SkeletalBindingGuid);
+			TestEqual(TEXT("Sequence control rig probe control"), (*ProbeControlRigCandidatesData)->GetStringField(TEXT("control_name")), ControlRigSmokeControlName);
+			TestEqual(TEXT("Sequence control rig probe candidate count"), static_cast<int32>((*ProbeControlRigCandidatesData)->GetIntegerField(TEXT("candidate_count"))), 8);
+			TestEqual(TEXT("Sequence control rig probe frame count includes original"), static_cast<int32>((*ProbeControlRigCandidatesData)->GetIntegerField(TEXT("frame_count"))), 9);
+			TestEqual(TEXT("Sequence control rig probe transform semantics"), (*ProbeControlRigCandidatesData)->GetStringField(TEXT("candidate_transform_semantics")), FString(TEXT("relative_transform_from_original_sequence_control_at_frame")));
+			TestEqual(TEXT("Sequence control rig probe baseline mode"), (*ProbeControlRigCandidatesData)->GetStringField(TEXT("baseline_mode")), FString(TEXT("current_sequence_frame_control_transform")));
+			TestEqual(TEXT("Sequence control rig probe baseline control count"), static_cast<int32>((*ProbeControlRigCandidatesData)->GetIntegerField(TEXT("baseline_control_count"))), 0);
+			TestFalse(TEXT("Sequence control rig probe does not write keys"), (*ProbeControlRigCandidatesData)->GetBoolField(TEXT("writes_sequence_keys")));
+			TestFalse(TEXT("Sequence control rig probe does not duplicate sequence"), (*ProbeControlRigCandidatesData)->GetBoolField(TEXT("duplicates_sequence")));
+			TestTrue(TEXT("Sequence control rig probe restored"), (*ProbeControlRigCandidatesData)->GetBoolField(TEXT("restored")));
+			TestTrue(TEXT("Sequence control rig probe cache available"), (*ProbeControlRigCandidatesData)->GetBoolField(TEXT("candidate_cache_available")));
+			TestEqual(TEXT("Sequence control rig probe cache request id"), (*ProbeControlRigCandidatesData)->GetStringField(TEXT("candidate_cache_request_id")), FString(TEXT("smoke-sequence-control-rig-probe-001")));
+
+			const FString ProbeControlRigSheetPath = (*ProbeControlRigCandidatesData)->GetStringField(TEXT("frame_sheet_file_path"));
+			TestFalse(TEXT("Sequence control rig probe frame sheet path non-empty"), ProbeControlRigSheetPath.IsEmpty());
+			TestTrue(TEXT("Sequence control rig probe frame sheet file exists"), IFileManager::Get().FileExists(*ProbeControlRigSheetPath));
+
+			const TArray<TSharedPtr<FJsonValue>>* ProbeControlRigFrames = nullptr;
+			TestTrue(TEXT("Sequence control rig probe frames array exists"), (*ProbeControlRigCandidatesData)->TryGetArrayField(TEXT("frames"), ProbeControlRigFrames) && ProbeControlRigFrames != nullptr);
+			if (ProbeControlRigFrames)
+			{
+				TestEqual(TEXT("Sequence control rig probe frames array count"), ProbeControlRigFrames->Num(), 9);
+				const TSharedPtr<FJsonObject>* FirstProbeControlRigFrame = nullptr;
+				TestTrue(TEXT("Sequence control rig probe first frame parses"), (*ProbeControlRigFrames)[0].IsValid() && (*ProbeControlRigFrames)[0]->TryGetObject(FirstProbeControlRigFrame) && FirstProbeControlRigFrame && FirstProbeControlRigFrame->IsValid());
+				if (FirstProbeControlRigFrame && FirstProbeControlRigFrame->IsValid())
+				{
+					TestEqual(TEXT("Sequence control rig probe first frame label"), (*FirstProbeControlRigFrame)->GetStringField(TEXT("frame_label")), FString(TEXT("F0")));
+					TestEqual(TEXT("Sequence control rig probe first frame kind"), (*FirstProbeControlRigFrame)->GetStringField(TEXT("kind")), FString(TEXT("original")));
+				}
+			}
+		}
+
+		const FString ReviewControlRigProbeFramesBody = MakeExecRequestBody(
+			TEXT("smoke-sequence-control-rig-probe-review-001"),
+			TEXT("probe_ik_goal_review_frames"),
+			TEXT("{\"probe_request_id\":\"smoke-sequence-control-rig-probe-001\",\"frames\":[0,2,5],\"frame_sheet_max_size\":768,\"frame_sheet_label_scale\":1}"));
+		FHttpSmokeResult ReviewControlRigProbeFramesResult;
+		TestTrue(TEXT("Sequence control rig probe review frames request succeeded"), ExecuteHttpJsonRequest(TEXT("POST"), ServerScope.BaseUrl + TEXT("/api/exec"), ServerScope.Token, ReviewControlRigProbeFramesBody, ReviewControlRigProbeFramesResult, 60.0));
+		TestEqual(TEXT("Sequence control rig probe review frames status code"), ReviewControlRigProbeFramesResult.StatusCode, 200);
+
+		TSharedPtr<FJsonObject> ReviewControlRigProbeFramesJson;
+		TestTrue(TEXT("Sequence control rig probe review frames parses JSON"), ParseJson(ReviewControlRigProbeFramesResult.Body, ReviewControlRigProbeFramesJson));
+		TestTrue(TEXT("Sequence control rig probe review frames ok"), ReviewControlRigProbeFramesJson.IsValid() && ReviewControlRigProbeFramesJson->GetBoolField(TEXT("ok")));
+		const TSharedPtr<FJsonObject>* ReviewControlRigProbeFramesData = nullptr;
+		TestTrue(TEXT("Sequence control rig probe review frames contains data"), ReviewControlRigProbeFramesJson.IsValid() && ReviewControlRigProbeFramesJson->TryGetObjectField(TEXT("data"), ReviewControlRigProbeFramesData) && ReviewControlRigProbeFramesData && ReviewControlRigProbeFramesData->IsValid());
+		if (ReviewControlRigProbeFramesData && ReviewControlRigProbeFramesData->IsValid())
+		{
+			TestEqual(TEXT("Sequence control rig probe review schema"), (*ReviewControlRigProbeFramesData)->GetStringField(TEXT("schema")), FString(TEXT("uai.probe.ik_goal_review_frames.v1")));
+			TestEqual(TEXT("Sequence control rig probe review source request id"), (*ReviewControlRigProbeFramesData)->GetStringField(TEXT("source_probe_request_id")), FString(TEXT("smoke-sequence-control-rig-probe-001")));
+			TestEqual(TEXT("Sequence control rig probe review selected frame count"), static_cast<int32>((*ReviewControlRigProbeFramesData)->GetIntegerField(TEXT("selected_frame_count"))), 3);
+			TestEqual(TEXT("Sequence control rig probe review selection semantics"), (*ReviewControlRigProbeFramesData)->GetStringField(TEXT("selection_semantics")), FString(TEXT("frame_index_matches_source_sheet_label")));
+			TestFalse(TEXT("Sequence control rig probe review does not write keys"), (*ReviewControlRigProbeFramesData)->GetBoolField(TEXT("writes_sequence_keys")));
+			TestFalse(TEXT("Sequence control rig probe review does not evaluate sequence"), (*ReviewControlRigProbeFramesData)->GetBoolField(TEXT("evaluates_sequence")));
+
+			const FString ReviewControlRigSheetPath = (*ReviewControlRigProbeFramesData)->GetStringField(TEXT("frame_sheet_file_path"));
+			TestFalse(TEXT("Sequence control rig probe review frame sheet path non-empty"), ReviewControlRigSheetPath.IsEmpty());
+			TestTrue(TEXT("Sequence control rig probe review frame sheet file exists"), IFileManager::Get().FileExists(*ReviewControlRigSheetPath));
+
+			const TArray<TSharedPtr<FJsonValue>>* ReviewControlRigFrames = nullptr;
+			TestTrue(TEXT("Sequence control rig probe review frames array exists"), (*ReviewControlRigProbeFramesData)->TryGetArrayField(TEXT("frames"), ReviewControlRigFrames) && ReviewControlRigFrames != nullptr);
+			if (ReviewControlRigFrames && ReviewControlRigFrames->Num() >= 3)
+			{
+				const TSharedPtr<FJsonObject>* FirstReviewFrame = nullptr;
+				const TSharedPtr<FJsonObject>* ThirdReviewFrame = nullptr;
+				TestTrue(TEXT("Sequence control rig probe review first frame parses"), (*ReviewControlRigFrames)[0].IsValid() && (*ReviewControlRigFrames)[0]->TryGetObject(FirstReviewFrame) && FirstReviewFrame && FirstReviewFrame->IsValid());
+				TestTrue(TEXT("Sequence control rig probe review third frame parses"), (*ReviewControlRigFrames)[2].IsValid() && (*ReviewControlRigFrames)[2]->TryGetObject(ThirdReviewFrame) && ThirdReviewFrame && ThirdReviewFrame->IsValid());
+				if (FirstReviewFrame && FirstReviewFrame->IsValid())
+				{
+					TestEqual(TEXT("Sequence control rig probe review first source label"), (*FirstReviewFrame)->GetStringField(TEXT("source_frame_label")), FString(TEXT("F0")));
+				}
+				if (ThirdReviewFrame && ThirdReviewFrame->IsValid())
+				{
+					TestEqual(TEXT("Sequence control rig probe review third source label"), (*ThirdReviewFrame)->GetStringField(TEXT("source_frame_label")), FString(TEXT("F5")));
+				}
+			}
+		}
+
+		const FString ApplyControlRigProbeCandidateBody = MakeExecRequestBody(
+			TEXT("smoke-sequence-control-rig-probe-apply-001"),
+			TEXT("probe_ik_goal_apply_candidate"),
+			FString::Printf(
+				TEXT("{\"probe_request_id\":\"smoke-sequence-control-rig-probe-001\",\"sequence_path\":\"%s\",\"binding_guid\":\"%s\",\"control_name\":\"%s\",\"frame_index\":1,\"save_after_apply\":false}"),
+				*SequenceAssetPath,
+				*SkeletalBindingGuid,
+				*ControlRigSmokeControlName));
+		FHttpSmokeResult ApplyControlRigProbeCandidateResult;
+		TestTrue(TEXT("Sequence control rig probe apply candidate request succeeded"), ExecuteHttpJsonRequest(TEXT("POST"), ServerScope.BaseUrl + TEXT("/api/exec"), ServerScope.Token, ApplyControlRigProbeCandidateBody, ApplyControlRigProbeCandidateResult));
+		TestEqual(TEXT("Sequence control rig probe apply candidate status code"), ApplyControlRigProbeCandidateResult.StatusCode, 200);
+
+		TSharedPtr<FJsonObject> ApplyControlRigProbeCandidateJson;
+		TestTrue(TEXT("Sequence control rig probe apply candidate parses JSON"), ParseJson(ApplyControlRigProbeCandidateResult.Body, ApplyControlRigProbeCandidateJson));
+		TestTrue(TEXT("Sequence control rig probe apply candidate ok"), ApplyControlRigProbeCandidateJson.IsValid() && ApplyControlRigProbeCandidateJson->GetBoolField(TEXT("ok")));
+		const TSharedPtr<FJsonObject>* ApplyControlRigProbeCandidateData = nullptr;
+		TestTrue(TEXT("Sequence control rig probe apply candidate contains data"), ApplyControlRigProbeCandidateJson.IsValid() && ApplyControlRigProbeCandidateJson->TryGetObjectField(TEXT("data"), ApplyControlRigProbeCandidateData) && ApplyControlRigProbeCandidateData && ApplyControlRigProbeCandidateData->IsValid());
+		if (ApplyControlRigProbeCandidateData && ApplyControlRigProbeCandidateData->IsValid())
+		{
+			TestEqual(TEXT("Sequence control rig probe apply schema"), (*ApplyControlRigProbeCandidateData)->GetStringField(TEXT("schema")), FString(TEXT("uai.probe.ik_goal_apply_candidate.sequence_control_rig.v1")));
+			TestEqual(TEXT("Sequence control rig probe apply sequence"), (*ApplyControlRigProbeCandidateData)->GetStringField(TEXT("sequence_path")), SequenceAssetPath);
+			TestEqual(TEXT("Sequence control rig probe apply binding"), (*ApplyControlRigProbeCandidateData)->GetStringField(TEXT("binding_guid")), SkeletalBindingGuid);
+			TestEqual(TEXT("Sequence control rig probe apply control"), (*ApplyControlRigProbeCandidateData)->GetStringField(TEXT("control_name")), ControlRigSmokeControlName);
+			TestEqual(TEXT("Sequence control rig probe apply frame index"), static_cast<int32>((*ApplyControlRigProbeCandidateData)->GetIntegerField(TEXT("applied_frame_index"))), 1);
+			TestEqual(TEXT("Sequence control rig probe apply candidate index"), static_cast<int32>((*ApplyControlRigProbeCandidateData)->GetIntegerField(TEXT("applied_candidate_index"))), 0);
+			TestEqual(TEXT("Sequence control rig probe apply baseline mode"), (*ApplyControlRigProbeCandidateData)->GetStringField(TEXT("baseline_mode")), FString(TEXT("current_sequence_frame_control_transform")));
+			TestFalse(TEXT("Sequence control rig probe apply baseline controls applied"), (*ApplyControlRigProbeCandidateData)->GetBoolField(TEXT("baseline_controls_applied")));
+			TestTrue(TEXT("Sequence control rig probe apply readback matches"), (*ApplyControlRigProbeCandidateData)->GetBoolField(TEXT("applied_matches_selected")));
+		}
+
+		bool bCorruptedControlRigChannelMap = false;
+		if (ULevelSequence* ProbeSequence = LoadObject<ULevelSequence>(nullptr, *SequenceAssetPath))
+		{
+			if (UMovieScene* ProbeMovieScene = ProbeSequence->GetMovieScene())
+			{
+				FGuid ProbeBindingGuid;
+				if (FGuid::Parse(SkeletalBindingGuid, ProbeBindingGuid))
+				{
+					const TArray<UMovieSceneTrack*> ProbeTracks = ProbeMovieScene->FindTracks(UMovieSceneControlRigParameterTrack::StaticClass(), ProbeBindingGuid, NAME_None);
+					const FName ProbeControlName(*ControlRigSmokeControlName);
+					for (UMovieSceneTrack* ProbeTrack : ProbeTracks)
+					{
+						UMovieSceneControlRigParameterTrack* ProbeControlRigTrack = Cast<UMovieSceneControlRigParameterTrack>(ProbeTrack);
+						if (!ProbeControlRigTrack)
+						{
+							continue;
+						}
+
+						for (UMovieSceneSection* ProbeSectionBase : ProbeControlRigTrack->GetAllSections())
+						{
+							UMovieSceneControlRigParameterSection* ProbeSection = Cast<UMovieSceneControlRigParameterSection>(ProbeSectionBase);
+							if (!ProbeSection)
+							{
+								continue;
+							}
+
+							ProbeSection->ReconstructChannelProxy();
+							ProbeSection->GetChannelProxy().GetChannels<FMovieSceneFloatChannel>();
+							if (FChannelMapInfo* ChannelInfo = ProbeSection->ControlChannelMap.Find(ProbeControlName))
+							{
+								ChannelInfo->ChannelIndex = TNumericLimits<int32>::Min() / 2;
+								bCorruptedControlRigChannelMap = true;
+								break;
+							}
+						}
+
+						if (bCorruptedControlRigChannelMap)
+						{
+							break;
+						}
+					}
+				}
+			}
+		}
+		TestTrue(TEXT("Sequence control rig probe channel map corruption fixture applied"), bCorruptedControlRigChannelMap);
+
+		const FString ApplyControlRigProbeCandidateAfterBadMapBody = MakeExecRequestBody(
+			TEXT("smoke-sequence-control-rig-probe-apply-bad-channel-map-001"),
+			TEXT("probe_ik_goal_apply_candidate"),
+			FString::Printf(
+				TEXT("{\"probe_request_id\":\"smoke-sequence-control-rig-probe-001\",\"sequence_path\":\"%s\",\"binding_guid\":\"%s\",\"control_name\":\"%s\",\"frame_index\":2,\"save_after_apply\":false}"),
+				*SequenceAssetPath,
+				*SkeletalBindingGuid,
+				*ControlRigSmokeControlName));
+		FHttpSmokeResult ApplyControlRigProbeCandidateAfterBadMapResult;
+		TestTrue(TEXT("Sequence control rig probe apply survives bad channel map request"), ExecuteHttpJsonRequest(TEXT("POST"), ServerScope.BaseUrl + TEXT("/api/exec"), ServerScope.Token, ApplyControlRigProbeCandidateAfterBadMapBody, ApplyControlRigProbeCandidateAfterBadMapResult));
+		TestEqual(TEXT("Sequence control rig probe apply survives bad channel map status code"), ApplyControlRigProbeCandidateAfterBadMapResult.StatusCode, 200);
+
+		TSharedPtr<FJsonObject> ApplyControlRigProbeCandidateAfterBadMapJson;
+		TestTrue(TEXT("Sequence control rig probe apply survives bad channel map parses JSON"), ParseJson(ApplyControlRigProbeCandidateAfterBadMapResult.Body, ApplyControlRigProbeCandidateAfterBadMapJson));
+		TestTrue(TEXT("Sequence control rig probe apply survives bad channel map ok"), ApplyControlRigProbeCandidateAfterBadMapJson.IsValid() && ApplyControlRigProbeCandidateAfterBadMapJson->GetBoolField(TEXT("ok")));
+		const TSharedPtr<FJsonObject>* ApplyControlRigProbeCandidateAfterBadMapData = nullptr;
+		TestTrue(TEXT("Sequence control rig probe apply survives bad channel map contains data"), ApplyControlRigProbeCandidateAfterBadMapJson.IsValid() && ApplyControlRigProbeCandidateAfterBadMapJson->TryGetObjectField(TEXT("data"), ApplyControlRigProbeCandidateAfterBadMapData) && ApplyControlRigProbeCandidateAfterBadMapData && ApplyControlRigProbeCandidateAfterBadMapData->IsValid());
+		if (ApplyControlRigProbeCandidateAfterBadMapData && ApplyControlRigProbeCandidateAfterBadMapData->IsValid())
+		{
+			TestEqual(TEXT("Sequence control rig probe apply bad channel map frame index"), static_cast<int32>((*ApplyControlRigProbeCandidateAfterBadMapData)->GetIntegerField(TEXT("applied_frame_index"))), 2);
+			TestTrue(TEXT("Sequence control rig probe apply bad channel map readback matches"), (*ApplyControlRigProbeCandidateAfterBadMapData)->GetBoolField(TEXT("applied_matches_selected")));
+		}
+
+		const FString RestoreControlRigProbeCandidateBody = MakeExecRequestBody(
+			TEXT("smoke-sequence-control-rig-probe-apply-restore-001"),
+			TEXT("probe_ik_goal_apply_candidate"),
+			FString::Printf(
+				TEXT("{\"probe_request_id\":\"smoke-sequence-control-rig-probe-001\",\"sequence_path\":\"%s\",\"binding_guid\":\"%s\",\"control_name\":\"%s\",\"frame_index\":1,\"save_after_apply\":false}"),
+				*SequenceAssetPath,
+				*SkeletalBindingGuid,
+				*ControlRigSmokeControlName));
+		FHttpSmokeResult RestoreControlRigProbeCandidateResult;
+		TestTrue(TEXT("Sequence control rig probe restore request succeeded"), ExecuteHttpJsonRequest(TEXT("POST"), ServerScope.BaseUrl + TEXT("/api/exec"), ServerScope.Token, RestoreControlRigProbeCandidateBody, RestoreControlRigProbeCandidateResult));
+		TestEqual(TEXT("Sequence control rig probe restore status code"), RestoreControlRigProbeCandidateResult.StatusCode, 200);
+
+		TSharedPtr<FJsonObject> RestoreControlRigProbeCandidateJson;
+		TestTrue(TEXT("Sequence control rig probe restore parses JSON"), ParseJson(RestoreControlRigProbeCandidateResult.Body, RestoreControlRigProbeCandidateJson));
+		TestTrue(TEXT("Sequence control rig probe restore ok"), RestoreControlRigProbeCandidateJson.IsValid() && RestoreControlRigProbeCandidateJson->GetBoolField(TEXT("ok")));
+	}
+	else
+	{
+		AddInfo(TEXT("Skipping sequence Control Rig probe smoke because rendering is disabled in the current automation environment."));
+	}
 
 	const FString ReExportBody = MakeExecRequestBody(
 		TEXT("smoke-sequence-folder-export-002"),
@@ -666,7 +1323,7 @@ bool FUeAgentInterfaceSequenceFolderSmokeTest::RunTest(const FString& Parameters
 	if (VerifyBindingsIndexJson.IsValid())
 	{
 		const TArray<TSharedPtr<FJsonValue>>* Bindings = nullptr;
-		TestTrue(TEXT("Sequence folder verify bindings index array exists"), VerifyBindingsIndexJson->TryGetArrayField(TEXT("bindings"), Bindings) && Bindings && Bindings->Num() >= 4);
+		TestTrue(TEXT("Sequence folder verify bindings index array exists"), VerifyBindingsIndexJson->TryGetArrayField(TEXT("bindings"), Bindings) && Bindings && Bindings->Num() >= 5);
 		if (Bindings)
 		{
 			for (const TSharedPtr<FJsonValue>& BindingValue : *Bindings)
@@ -683,9 +1340,11 @@ bool FUeAgentInterfaceSequenceFolderSmokeTest::RunTest(const FString& Parameters
 	const FString VerifyActorBindingDir = FPaths::Combine(FolderPath, TEXT("bindings"), VerifyBindingFolderByGuid.FindRef(BindingGuid), TEXT("tracks"));
 	const FString VerifyComponentBindingDir = FPaths::Combine(FolderPath, TEXT("bindings"), VerifyBindingFolderByGuid.FindRef(ComponentBindingGuid), TEXT("tracks"));
 	const FString VerifySpawnableBindingDir = FPaths::Combine(FolderPath, TEXT("bindings"), VerifyBindingFolderByGuid.FindRef(SpawnableBindingGuid), TEXT("tracks"));
+	const FString VerifySkeletalBindingDir = FPaths::Combine(FolderPath, TEXT("bindings"), VerifyBindingFolderByGuid.FindRef(SkeletalBindingGuid), TEXT("tracks"));
 	TestTrue(TEXT("Sequence folder verify actor binding dir exists"), !VerifyBindingFolderByGuid.FindRef(BindingGuid).IsEmpty());
 	TestTrue(TEXT("Sequence folder verify component binding dir exists"), !VerifyBindingFolderByGuid.FindRef(ComponentBindingGuid).IsEmpty());
 	TestTrue(TEXT("Sequence folder verify spawnable binding dir exists"), !VerifyBindingFolderByGuid.FindRef(SpawnableBindingGuid).IsEmpty());
+	TestTrue(TEXT("Sequence folder verify skeletal binding dir exists"), !VerifyBindingFolderByGuid.FindRef(SkeletalBindingGuid).IsEmpty());
 
 	auto VerifyTrackFiles = [this, &LoadJsonFile, &ComponentBindingGuid, &SpawnableBindingGuid](const FString& TracksDir, const FString& ExpectedBindingGuid, bool& bOutTransform, bool& bOutFloat, bool& bOutSpawn)
 	{
@@ -770,6 +1429,81 @@ bool FUeAgentInterfaceSequenceFolderSmokeTest::RunTest(const FString& Parameters
 		}
 	};
 
+	auto VerifyControlRigTrackFiles = [this, &LoadJsonFile, &ControlRigSmokeControlName](const FString& TracksDir) -> bool
+	{
+		TArray<FString> TrackFiles;
+		IFileManager::Get().FindFiles(TrackFiles, *(FPaths::Combine(TracksDir, TEXT("*.json"))), true, false);
+		TrackFiles.Sort();
+
+		bool bFoundControlRigTrack = false;
+		bool bFoundControlRigKey = false;
+		for (const FString& TrackFile : TrackFiles)
+		{
+			TSharedPtr<FJsonObject> TrackJson;
+			TestTrue(FString::Printf(TEXT("Sequence folder verify control rig track load: %s"), *TrackFile), LoadJsonFile(FPaths::Combine(TracksDir, TrackFile), TrackJson));
+			if (!TrackJson.IsValid())
+			{
+				continue;
+			}
+
+			FString TrackType;
+			if (!TrackJson->TryGetStringField(TEXT("track_type"), TrackType) || TrackType != TEXT("control_rig"))
+			{
+				continue;
+			}
+
+			bFoundControlRigTrack = true;
+			const FString ControlRigClass = TrackJson->GetStringField(TEXT("control_rig_class"));
+			TestTrue(TEXT("Sequence folder control rig class is FKControlRig"), ControlRigClass.Contains(TEXT("FKControlRig")));
+
+			const TArray<TSharedPtr<FJsonValue>>* Sections = nullptr;
+			if (!TrackJson->TryGetArrayField(TEXT("sections"), Sections) || !Sections)
+			{
+				continue;
+			}
+
+			for (const TSharedPtr<FJsonValue>& SectionValue : *Sections)
+			{
+				const TSharedPtr<FJsonObject>* SectionObj = nullptr;
+				if (!SectionValue.IsValid() || !SectionValue->TryGetObject(SectionObj) || !SectionObj || !(*SectionObj).IsValid())
+				{
+					continue;
+				}
+
+				const TArray<TSharedPtr<FJsonValue>>* Keys = nullptr;
+				if (!(*SectionObj)->TryGetArrayField(TEXT("keys"), Keys) || !Keys)
+				{
+					continue;
+				}
+
+				for (const TSharedPtr<FJsonValue>& KeyValue : *Keys)
+				{
+					const TSharedPtr<FJsonObject>* KeyObj = nullptr;
+					if (!KeyValue.IsValid() || !KeyValue->TryGetObject(KeyObj) || !KeyObj || !(*KeyObj).IsValid())
+					{
+						continue;
+					}
+
+					FString ControlName;
+					if (!(*KeyObj)->TryGetStringField(TEXT("control"), ControlName) || ControlName != ControlRigSmokeControlName)
+					{
+						continue;
+					}
+
+					const TSharedPtr<FJsonObject>* ValueObj = nullptr;
+					const TSharedPtr<FJsonObject>* LocationObj = nullptr;
+					if ((*KeyObj)->TryGetObjectField(TEXT("value"), ValueObj) && ValueObj && (*ValueObj).IsValid() &&
+						(*ValueObj)->TryGetObjectField(TEXT("location"), LocationObj) && LocationObj && (*LocationObj).IsValid())
+					{
+						bFoundControlRigKey = FMath::IsNearlyEqual(static_cast<float>((*LocationObj)->GetNumberField(TEXT("x"))), 12.0f, 0.01f);
+					}
+				}
+			}
+		}
+
+		return bFoundControlRigTrack && bFoundControlRigKey;
+	};
+
 	bool bVerifiedActorTransform = false;
 	bool bVerifiedActorFloat = false;
 	bool bVerifiedComponentFloat = false;
@@ -783,6 +1517,7 @@ bool FUeAgentInterfaceSequenceFolderSmokeTest::RunTest(const FString& Parameters
 	TestTrue(TEXT("Sequence folder component float key updated"), bVerifiedComponentFloat);
 	TestTrue(TEXT("Sequence folder spawnable transform key updated"), bVerifiedSpawnableTransform);
 	TestTrue(TEXT("Sequence folder spawn track updated"), bVerifiedSpawnTrack);
+	TestTrue(TEXT("Sequence folder control rig key updated"), VerifyControlRigTrackFiles(VerifySkeletalBindingDir));
 
 	TSharedPtr<FJsonObject> VerifyMasterTracksJson;
 	TestTrue(TEXT("Sequence folder verify master tracks load"), LoadJsonFile(FPaths::Combine(FolderPath, TEXT("master_tracks"), TEXT("index.json")), VerifyMasterTracksJson));
@@ -848,6 +1583,10 @@ bool FUeAgentInterfaceSequenceFolderSmokeTest::RunTest(const FString& Parameters
 	if (DirectCameraActor)
 	{
 		DirectCameraActor->Destroy();
+	}
+	if (DirectSkeletalActor)
+	{
+		DirectSkeletalActor->Destroy();
 	}
 
 	return !HasAnyErrors();

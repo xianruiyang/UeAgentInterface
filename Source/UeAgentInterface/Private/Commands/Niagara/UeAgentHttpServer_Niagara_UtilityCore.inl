@@ -71,6 +71,98 @@
 		return IsValid(LoadedObject) ? LoadedObject : nullptr;
 	}
 
+	struct FNiagaraCompileAfterSetResult
+	{
+		bool bCompileAfterSet = false;
+		bool bForceCompile = true;
+		bool bWaitForComplete = true;
+		bool bCompilationRequested = false;
+		bool bCompilationComplete = false;
+		bool bHasOutstandingCompilationRequests = false;
+	};
+
+	static bool TryGetBoolField(const TSharedPtr<FJsonObject>& Obj, const FString& Key, bool& OutValue)
+	{
+		return Obj.IsValid() && Obj->TryGetBoolField(Key, OutValue);
+	}
+
+	static FNiagaraCompileAfterSetResult ReadCompileAfterSetParams(const TSharedPtr<FJsonObject>& Params, const bool bDefaultCompileAfterSet)
+	{
+		FNiagaraCompileAfterSetResult Result;
+		Result.bCompileAfterSet = bDefaultCompileAfterSet;
+		TryGetBoolField(Params, TEXT("compile_after_set"), Result.bCompileAfterSet);
+		TryGetBoolField(Params, TEXT("force_compile"), Result.bForceCompile);
+		TryGetBoolField(Params, TEXT("wait_for_complete"), Result.bWaitForComplete);
+		return Result;
+	}
+
+	static FNiagaraCompileAfterSetResult CompileSystemAfterSet(UNiagaraSystem* NiagaraSystem, const TSharedPtr<FJsonObject>& Params, const bool bDefaultCompileAfterSet, const bool bShouldCompile = true)
+	{
+		FNiagaraCompileAfterSetResult Result = ReadCompileAfterSetParams(Params, bDefaultCompileAfterSet);
+		if (!Result.bCompileAfterSet || !bShouldCompile || !NiagaraSystem)
+		{
+			return Result;
+		}
+
+		Result.bCompilationRequested = NiagaraSystem->RequestCompile(Result.bForceCompile);
+		if (Result.bWaitForComplete)
+		{
+			if (NiagaraSystem->HasOutstandingCompilationRequests(true))
+			{
+				NiagaraSystem->WaitForCompilationComplete(true, false);
+			}
+			NiagaraSystem->PollForCompilationComplete(true);
+			Result.bHasOutstandingCompilationRequests = NiagaraSystem->HasOutstandingCompilationRequests(true);
+			Result.bCompilationComplete = !Result.bHasOutstandingCompilationRequests;
+			if (Result.bCompilationComplete)
+			{
+				NiagaraSystem->CacheFromCompiledData();
+			}
+		}
+		else
+		{
+			Result.bHasOutstandingCompilationRequests = NiagaraSystem->HasOutstandingCompilationRequests(true);
+		}
+		return Result;
+	}
+
+	static FNiagaraCompileAfterSetResult CompileEmitterScriptsAfterSet(FVersionedNiagaraEmitterData* EmitterData, const TSharedPtr<FJsonObject>& Params, const bool bDefaultCompileAfterSet, const bool bShouldCompile = true)
+	{
+		FNiagaraCompileAfterSetResult Result = ReadCompileAfterSetParams(Params, bDefaultCompileAfterSet);
+		if (!Result.bCompileAfterSet || !bShouldCompile || !EmitterData)
+		{
+			return Result;
+		}
+
+		TArray<UNiagaraScript*> EmitterScripts;
+		EmitterData->GetScripts(EmitterScripts, false, false);
+		for (UNiagaraScript* Script : EmitterScripts)
+		{
+			if (!Script)
+			{
+				continue;
+			}
+			Script->RequestCompile(Script->GetExposedVersion().VersionGuid, Result.bForceCompile);
+			Result.bCompilationRequested = true;
+		}
+		Result.bCompilationComplete = true;
+		return Result;
+	}
+
+	static void AppendCompileAfterSetFields(const TSharedPtr<FJsonObject>& OutData, const FNiagaraCompileAfterSetResult& Result)
+	{
+		if (!OutData.IsValid())
+		{
+			return;
+		}
+		OutData->SetBoolField(TEXT("compile_after_set"), Result.bCompileAfterSet);
+		OutData->SetBoolField(TEXT("force_compile"), Result.bForceCompile);
+		OutData->SetBoolField(TEXT("wait_for_complete"), Result.bWaitForComplete);
+		OutData->SetBoolField(TEXT("compilation_requested"), Result.bCompilationRequested);
+		OutData->SetBoolField(TEXT("compilation_complete"), Result.bCompilationComplete);
+		OutData->SetBoolField(TEXT("has_outstanding_compilation_requests"), Result.bHasOutstandingCompilationRequests);
+	}
+
 	static bool DetachStaleObjectAtPath(const FString& ObjectPath, bool* bOutFoundStaleObject = nullptr)
 	{
 		if (bOutFoundStaleObject)
@@ -1536,6 +1628,100 @@ PRAGMA_ENABLE_DEPRECATION_WARNINGS
 		}
 
 		return true;
+	}
+
+	static bool TryGetBoolAnyField(const TSharedPtr<FJsonObject>& Params, const TArray<FString>& Keys, bool& InOutValue)
+	{
+		if (!Params.IsValid())
+		{
+			return false;
+		}
+
+		for (const FString& Key : Keys)
+		{
+			bool Candidate = false;
+			if (Params->TryGetBoolField(Key, Candidate))
+			{
+				InOutValue = Candidate;
+				return true;
+			}
+		}
+		return false;
+	}
+
+	static TSharedPtr<FJsonObject> RestoreNiagaraPreviewForInteractiveEditing(UNiagaraSystem* NiagaraSystem, TSharedPtr<FNiagaraSystemViewModel> SystemViewModel)
+	{
+		TSharedPtr<FJsonObject> Restore = MakeShared<FJsonObject>();
+		Restore->SetBoolField(TEXT("requested"), true);
+		Restore->SetBoolField(TEXT("restored"), false);
+
+		if (!NiagaraSystem)
+		{
+			Restore->SetStringField(TEXT("error"), TEXT("asset_is_not_niagara_system"));
+			return Restore;
+		}
+
+		if (!SystemViewModel.IsValid())
+		{
+			if (FNiagaraEditorModule* NiagaraEditorModule = FModuleManager::GetModulePtr<FNiagaraEditorModule>(TEXT("NiagaraEditor")))
+			{
+				SystemViewModel = NiagaraEditorModule->GetExistingViewModelForSystem(NiagaraSystem);
+			}
+		}
+
+		if (!SystemViewModel.IsValid())
+		{
+			Restore->SetStringField(TEXT("error"), TEXT("niagara_system_view_model_not_found"));
+			return Restore;
+		}
+
+		UNiagaraComponent* PreviewComponent = SystemViewModel->GetPreviewComponent();
+		if (!PreviewComponent)
+		{
+			Restore->SetStringField(TEXT("error"), TEXT("niagara_preview_component_not_found"));
+			return Restore;
+		}
+
+		const bool bWasPaused = PreviewComponent->IsPaused();
+		const bool bWasActive = PreviewComponent->IsActive();
+		const ENiagaraAgeUpdateMode PreviousAgeUpdateMode = PreviewComponent->GetAgeUpdateMode();
+		const float PreviousSeekDelta = PreviewComponent->GetSeekDelta();
+		const bool bPreviousLockDesiredAgeDeltaTimeToSeekDelta = PreviewComponent->GetLockDesiredAgeDeltaTimeToSeekDelta();
+		const FString PreviousToken = GetNiagaraPreviewStateToken(PreviewComponent);
+		const float PlaybackInterval = static_cast<float>(SystemViewModel->GetEditorData().GetPlaybackFrameRate().AsInterval());
+		const bool bLockPlaybackFrameRate = SystemViewModel->GetEditorData().GetLockPlaybackFrameRate();
+
+		PreviewComponent->SetAsset(NiagaraSystem, false);
+		PreviewComponent->SetForceSolo(true);
+		// Leave the editor preview in live playback mode; DesiredAge keeps it in seek mode and can look frozen.
+		PreviewComponent->SetAgeUpdateMode(ENiagaraAgeUpdateMode::TickDeltaTime);
+		PreviewComponent->SetSeekDelta(PlaybackInterval > SMALL_NUMBER ? PlaybackInterval : (1.0f / 60.0f));
+		PreviewComponent->SetLockDesiredAgeDeltaTimeToSeekDelta(bLockPlaybackFrameRate);
+		PreviewComponent->SetCanRenderWhileSeeking(false);
+		PreviewComponent->SetAllowScalability(false);
+		PreviewComponent->SetRenderingEnabled(true);
+		SetNiagaraPreviewStateToken(PreviewComponent, FString());
+		PreviewComponent->SetPaused(false);
+		PreviewComponent->Activate(true);
+		PreviewComponent->MarkRenderStateDirty();
+		FlushNiagaraPreviewWorld(PreviewComponent);
+		FEditorSupportDelegates::RedrawAllViewports.Broadcast();
+
+		Restore->SetBoolField(TEXT("restored"), true);
+		Restore->SetBoolField(TEXT("was_paused"), bWasPaused);
+		Restore->SetBoolField(TEXT("is_paused"), PreviewComponent->IsPaused());
+		Restore->SetBoolField(TEXT("was_active"), bWasActive);
+		Restore->SetBoolField(TEXT("is_active"), PreviewComponent->IsActive());
+		Restore->SetStringField(TEXT("previous_age_update_mode"), NiagaraEnumToString(PreviousAgeUpdateMode));
+		Restore->SetStringField(TEXT("age_update_mode"), NiagaraEnumToString(PreviewComponent->GetAgeUpdateMode()));
+		Restore->SetStringField(TEXT("restore_policy"), TEXT("live_tick_delta_time"));
+		Restore->SetNumberField(TEXT("previous_seek_delta"), PreviousSeekDelta);
+		Restore->SetNumberField(TEXT("seek_delta"), PreviewComponent->GetSeekDelta());
+		Restore->SetBoolField(TEXT("previous_lock_desired_age_delta_time_to_seek_delta"), bPreviousLockDesiredAgeDeltaTimeToSeekDelta);
+		Restore->SetBoolField(TEXT("lock_desired_age_delta_time_to_seek_delta"), PreviewComponent->GetLockDesiredAgeDeltaTimeToSeekDelta());
+		Restore->SetBoolField(TEXT("previous_preview_state_token_present"), !PreviousToken.IsEmpty());
+		Restore->SetStringField(TEXT("preview_state_token"), GetNiagaraPreviewStateToken(PreviewComponent));
+		return Restore;
 	}
 
 	struct FNiagaraScreenshotFrameRequest

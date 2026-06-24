@@ -693,19 +693,17 @@ namespace UeAgentBlueprintOps
 			FName(TEXT("AnimBlueprintPreviewEditor"))
 		};
 
-		for (const FName& TabId : CandidateTabIds)
+		auto ResolveViewportFromTab = [](const TSharedPtr<SDockTab>& ViewportTab) -> TSharedPtr<SEditorViewport>
 		{
-			FString LocalError;
-			const TSharedPtr<SDockTab> ViewportTab = ResolveBlueprintTab(BlueprintEditor, TabId, LocalError);
 			if (!ViewportTab.IsValid())
 			{
-				continue;
+				return nullptr;
 			}
 
 			const TSharedPtr<SWidget> RootWidget = ViewportTab->GetContent();
 			if (!RootWidget.IsValid())
 			{
-				continue;
+				return nullptr;
 			}
 
 			TSharedPtr<SWidget> FoundWidget;
@@ -713,11 +711,37 @@ namespace UeAgentBlueprintOps
 				!FindWidgetByTypeRecursive(RootWidget.ToSharedRef(), FName(TEXT("SAnimationEditorViewport")), FoundWidget) &&
 				!FindWidgetByTypeRecursive(RootWidget.ToSharedRef(), FName(TEXT("SEditorViewport")), FoundWidget))
 			{
-				continue;
+				return nullptr;
 			}
 
 			const TSharedPtr<SEditorViewport> ViewportWidget = StaticCastSharedPtr<SEditorViewport>(FoundWidget);
 			if (ViewportWidget.IsValid() && ViewportWidget->GetViewportClient().IsValid())
+			{
+				return ViewportWidget;
+			}
+			return nullptr;
+		};
+
+		const TSharedPtr<FTabManager> TabManager = BlueprintEditor.IsValid() ? BlueprintEditor->GetTabManager() : nullptr;
+		if (TabManager.IsValid())
+		{
+			for (const FName& TabId : CandidateTabIds)
+			{
+				const TSharedPtr<SDockTab> ViewportTab = TabManager->FindExistingLiveTab(FTabId(TabId));
+				const TSharedPtr<SEditorViewport> ViewportWidget = ResolveViewportFromTab(ViewportTab);
+				if (ViewportWidget.IsValid())
+				{
+					return ViewportWidget;
+				}
+			}
+		}
+
+		for (const FName& TabId : CandidateTabIds)
+		{
+			FString LocalError;
+			const TSharedPtr<SDockTab> ViewportTab = ResolveBlueprintTab(BlueprintEditor, TabId, LocalError);
+			const TSharedPtr<SEditorViewport> ViewportWidget = ResolveViewportFromTab(ViewportTab);
+			if (ViewportWidget.IsValid())
 			{
 				return ViewportWidget;
 			}

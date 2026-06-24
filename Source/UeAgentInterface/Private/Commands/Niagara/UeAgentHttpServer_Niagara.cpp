@@ -11,6 +11,7 @@
 #include "EdGraph/EdGraph.h"
 #include "EdGraph/EdGraphNode.h"
 #include "Editor.h"
+#include "EditorSupportDelegates.h"
 #include "Engine/SceneCapture2D.h"
 #include "Engine/TextureRenderTarget2D.h"
 #include "Engine/World.h"
@@ -81,6 +82,7 @@
 namespace UeAgentNiagaraOps
 {
 #include "UeAgentHttpServer_Niagara_UtilityCore.inl"
+#include "UeAgentHttpServer_Niagara_InputTypes.inl"
 #include "UeAgentHttpServer_Niagara_UtilityStack.inl"
 #include "UeAgentHttpServer_Niagara_UtilityAssets.inl"
 }

@@ -133,12 +133,16 @@ bool FUeAgentInterfaceAssetReferenceGraphSmokeTest::RunTest(const FString& Param
 
 		const bool bOk = Root->GetBoolField(TEXT("ok"));
 		TestEqual(Command + TEXT(" ok state"), bOk, ExpectedStatus == 200);
+		const TSharedPtr<FJsonObject>* DataObj = nullptr;
+		if (Root->TryGetObjectField(TEXT("data"), DataObj) && DataObj && DataObj->IsValid())
+		{
+			OutData = *DataObj;
+		}
 		if (ExpectedStatus != 200)
 		{
 			return true;
 		}
 
-		const TSharedPtr<FJsonObject>* DataObj = nullptr;
 		if (!TestTrue(Command + TEXT(" contains data"), Root->TryGetObjectField(TEXT("data"), DataObj) && DataObj && DataObj->IsValid()))
 		{
 			return false;
@@ -187,7 +191,9 @@ bool FUeAgentInterfaceAssetReferenceGraphSmokeTest::RunTest(const FString& Param
 		TEXT("asset_fixup_redirectors"),
 		FString::Printf(TEXT("{\"asset_path\":%s,\"dry_run\":false}"), *JsonQuote(MoveSourcePath)),
 		FixupData));
-	TestEqual(TEXT("asset_fixup_redirectors saw redirector"), FixupData.IsValid() ? FixupData->GetIntegerField(TEXT("redirector_count")) : 0, 1);
+	const int32 FixupRedirectorCount = FixupData.IsValid() ? FixupData->GetIntegerField(TEXT("redirector_count")) : 0;
+	const int32 FixupDeletableRedirectorCount = FixupData.IsValid() ? FixupData->GetIntegerField(TEXT("deletable_redirector_count")) : 0;
+	TestTrue(TEXT("asset_fixup_redirectors handles absent or deletable redirector"), FixupRedirectorCount == 0 || FixupDeletableRedirectorCount == FixupRedirectorCount);
 	TestEqual(TEXT("asset_fixup_redirectors removed package"), FixupData.IsValid() ? FixupData->GetIntegerField(TEXT("remaining_package_count")) : 1, 0);
 
 	TSharedPtr<FJsonObject> MoveSourceAfterFixupData;
@@ -197,6 +203,186 @@ bool FUeAgentInterfaceAssetReferenceGraphSmokeTest::RunTest(const FString& Param
 		FString::Printf(TEXT("{\"asset_path\":%s,\"allow_missing\":true,\"direction\":\"both\",\"recursive\":false,\"force_scan\":true}"), *JsonQuote(MoveSourcePath)),
 		MoveSourceAfterFixupData));
 	TestFalse(TEXT("asset_fixup_redirectors source redirector not found"), MoveSourceAfterFixupData.IsValid() && MoveSourceAfterFixupData->GetBoolField(TEXT("asset_found")));
+
+	const FString DeleteAssetPath = MakeAutomationAssetPath(TEXT("SMAssetDeleteCube"));
+	TestTrue(TEXT("asset_delete duplicate setup"), ExecCommand(
+		TEXT("smoke-asset-delete-duplicate"),
+		TEXT("asset_duplicate"),
+		FString::Printf(TEXT("{\"source_asset_path\":\"/Engine/BasicShapes/Cube\",\"destination_asset_path\":%s,\"save_after_duplicate\":true}"), *JsonQuote(DeleteAssetPath)),
+		Data));
+
+	TSharedPtr<FJsonObject> DeleteDryRunData;
+	TestTrue(TEXT("asset_delete dry run succeeds for unreferenced asset"), ExecCommand(
+		TEXT("smoke-asset-delete-dry-run"),
+		TEXT("asset_delete"),
+		FString::Printf(TEXT("{\"asset_path\":%s,\"dry_run\":true,\"include_path_string_hits\":true}"), *JsonQuote(DeleteAssetPath)),
+		DeleteDryRunData));
+	TestEqual(TEXT("asset_delete dry run sees one deletable asset"), DeleteDryRunData.IsValid() ? DeleteDryRunData->GetIntegerField(TEXT("deletable_count")) : 0, 1);
+	TestEqual(TEXT("asset_delete dry run deletes nothing"), DeleteDryRunData.IsValid() ? DeleteDryRunData->GetIntegerField(TEXT("deleted_count")) : -1, 0);
+
+	TSharedPtr<FJsonObject> DeleteData;
+	TestTrue(TEXT("asset_delete deletes unreferenced asset"), ExecCommand(
+		TEXT("smoke-asset-delete"),
+		TEXT("asset_delete"),
+		FString::Printf(TEXT("{\"asset_path\":%s,\"dry_run\":false,\"include_path_string_hits\":true}"), *JsonQuote(DeleteAssetPath)),
+		DeleteData,
+		200));
+	TestEqual(TEXT("asset_delete deleted_count"), DeleteData.IsValid() ? DeleteData->GetIntegerField(TEXT("deleted_count")) : 0, 1);
+	TestEqual(TEXT("asset_delete remaining_package_count"), DeleteData.IsValid() ? DeleteData->GetIntegerField(TEXT("remaining_package_count")) : 1, 0);
+
+	TSharedPtr<FJsonObject> DeleteAfterData;
+	TestTrue(TEXT("asset_delete target is gone after delete"), ExecCommand(
+		TEXT("smoke-asset-delete-refgraph-after"),
+		TEXT("asset_reference_graph"),
+		FString::Printf(TEXT("{\"asset_path\":%s,\"allow_missing\":true,\"direction\":\"both\",\"recursive\":false,\"force_scan\":true}"), *JsonQuote(DeleteAssetPath)),
+		DeleteAfterData));
+	TestFalse(TEXT("asset_delete removed asset is not found"), DeleteAfterData.IsValid() && DeleteAfterData->GetBoolField(TEXT("asset_found")));
+
+	const FString DeleteFolderRoot = TEXT("/Game/__UeAgentInterfaceSmoke/AssetDeleteFolder");
+	const FString DeleteFolderNested = DeleteFolderRoot + TEXT("/Nested");
+	const FString DeleteInternalParentPath = DeleteFolderNested + TEXT("/MAssetDeleteInternalParent");
+	const FString DeleteInternalChildPath = DeleteFolderNested + TEXT("/MIAssetDeleteInternalChild");
+	TestTrue(TEXT("asset_delete internal parent material setup"), ExecCommand(
+		TEXT("smoke-asset-delete-internal-parent"),
+		TEXT("material_create"),
+		FString::Printf(TEXT("{\"asset_path\":%s,\"save_after_create\":true}"), *JsonQuote(DeleteInternalParentPath)),
+		Data));
+	TestTrue(TEXT("asset_delete internal child material instance setup"), ExecCommand(
+		TEXT("smoke-asset-delete-internal-child"),
+		TEXT("material_instance_create"),
+		FString::Printf(TEXT("{\"asset_path\":%s,\"parent_material_path\":%s,\"save_after_create\":true}"), *JsonQuote(DeleteInternalChildPath), *JsonQuote(DeleteInternalParentPath)),
+		Data));
+
+	TSharedPtr<FJsonObject> InternalDeleteDryRunData;
+	TestTrue(TEXT("asset_delete ignores same batch referencers"), ExecCommand(
+		TEXT("smoke-asset-delete-internal-dry-run"),
+		TEXT("asset_delete"),
+		FString::Printf(TEXT("{\"asset_paths\":[%s,%s],\"dry_run\":true,\"include_path_string_hits\":false}"), *JsonQuote(DeleteInternalParentPath), *JsonQuote(DeleteInternalChildPath)),
+		InternalDeleteDryRunData));
+	TestEqual(TEXT("asset_delete internal dry run blocked_count"), InternalDeleteDryRunData.IsValid() ? InternalDeleteDryRunData->GetIntegerField(TEXT("blocked_count")) : -1, 0);
+	TestEqual(TEXT("asset_delete internal dry run deletable_count"), InternalDeleteDryRunData.IsValid() ? InternalDeleteDryRunData->GetIntegerField(TEXT("deletable_count")) : 0, 2);
+	bool bSawInternalReferencer = false;
+	const TArray<TSharedPtr<FJsonValue>>* InternalAssets = nullptr;
+	if (InternalDeleteDryRunData.IsValid() && InternalDeleteDryRunData->TryGetArrayField(TEXT("assets"), InternalAssets) && InternalAssets)
+	{
+		for (const TSharedPtr<FJsonValue>& AssetValue : *InternalAssets)
+		{
+			const TSharedPtr<FJsonObject>* AssetObj = nullptr;
+			if (AssetValue.IsValid() && AssetValue->TryGetObject(AssetObj) && AssetObj && AssetObj->IsValid())
+			{
+				bSawInternalReferencer |= (*AssetObj)->GetIntegerField(TEXT("internal_referencer_count")) > 0;
+			}
+		}
+	}
+	TestTrue(TEXT("asset_delete reports internal referencer diagnostics"), bSawInternalReferencer);
+
+	TSharedPtr<FJsonObject> FolderDeleteDryRunData;
+	TestTrue(TEXT("asset_delete folder recursive dry run succeeds"), ExecCommand(
+		TEXT("smoke-asset-delete-folder-dry-run"),
+		TEXT("asset_delete"),
+		FString::Printf(TEXT("{\"folder_path\":%s,\"recursive\":true,\"dry_run\":true,\"include_path_string_hits\":false}"), *JsonQuote(DeleteFolderRoot)),
+		FolderDeleteDryRunData));
+	TestEqual(TEXT("asset_delete folder dry run requested folder count"), FolderDeleteDryRunData.IsValid() ? FolderDeleteDryRunData->GetIntegerField(TEXT("requested_folder_count")) : 0, 1);
+	TestEqual(TEXT("asset_delete folder dry run unique package count"), FolderDeleteDryRunData.IsValid() ? FolderDeleteDryRunData->GetIntegerField(TEXT("unique_package_count")) : 0, 2);
+	TestEqual(TEXT("asset_delete folder dry run deletable count"), FolderDeleteDryRunData.IsValid() ? FolderDeleteDryRunData->GetIntegerField(TEXT("deletable_count")) : 0, 2);
+
+	TSharedPtr<FJsonObject> FolderDeleteData;
+	TestTrue(TEXT("asset_delete folder recursive deletes resolved assets"), ExecCommand(
+		TEXT("smoke-asset-delete-folder-delete"),
+		TEXT("asset_delete"),
+		FString::Printf(TEXT("{\"folder_path\":%s,\"recursive\":true,\"dry_run\":false,\"include_path_string_hits\":false}"), *JsonQuote(DeleteFolderRoot)),
+		FolderDeleteData,
+		200));
+	TestEqual(TEXT("asset_delete folder recursive deleted_count"), FolderDeleteData.IsValid() ? FolderDeleteData->GetIntegerField(TEXT("deleted_count")) : 0, 2);
+	TestEqual(TEXT("asset_delete folder recursive remaining_package_count"), FolderDeleteData.IsValid() ? FolderDeleteData->GetIntegerField(TEXT("remaining_package_count")) : 1, 0);
+	TestEqual(TEXT("asset_delete folder recursive folder_delete_count"), FolderDeleteData.IsValid() ? FolderDeleteData->GetIntegerField(TEXT("folder_delete_count")) : 0, 1);
+	const FString DeleteFolderRootFilename = FPaths::ConvertRelativePathToFull(FPackageName::LongPackageNameToFilename(DeleteFolderRoot));
+	TestFalse(TEXT("asset_delete folder recursive removes requested empty folder"), IFileManager::Get().DirectoryExists(*DeleteFolderRootFilename));
+
+	const FString DeleteKeepFolderRoot = TEXT("/Game/__UeAgentInterfaceSmoke/AssetDeleteKeepFolder");
+	const FString DeleteKeepFolderAssetPath = DeleteKeepFolderRoot + TEXT("/MAssetDeleteKeepFolder");
+	TestTrue(TEXT("asset_delete keep folder material setup"), ExecCommand(
+		TEXT("smoke-asset-delete-keep-folder-asset"),
+		TEXT("material_create"),
+		FString::Printf(TEXT("{\"asset_path\":%s,\"save_after_create\":true}"), *JsonQuote(DeleteKeepFolderAssetPath)),
+		Data));
+	const FString DeleteKeepFolderFilename = FPaths::ConvertRelativePathToFull(FPackageName::LongPackageNameToFilename(DeleteKeepFolderRoot));
+	TestTrue(TEXT("asset_delete keep folder exists before delete"), IFileManager::Get().DirectoryExists(*DeleteKeepFolderFilename));
+
+	TSharedPtr<FJsonObject> KeepFolderDeleteData;
+	TestTrue(TEXT("asset_delete can keep empty folder when requested"), ExecCommand(
+		TEXT("smoke-asset-delete-keep-folder-delete"),
+		TEXT("asset_delete"),
+		FString::Printf(TEXT("{\"folder_path\":%s,\"recursive\":true,\"dry_run\":false,\"include_path_string_hits\":false,\"delete_empty_folders\":false}"), *JsonQuote(DeleteKeepFolderRoot)),
+		KeepFolderDeleteData,
+		200));
+	TestEqual(TEXT("asset_delete keep folder deleted_count"), KeepFolderDeleteData.IsValid() ? KeepFolderDeleteData->GetIntegerField(TEXT("deleted_count")) : 0, 1);
+	TestEqual(TEXT("asset_delete keep folder folder_delete_count"), KeepFolderDeleteData.IsValid() ? KeepFolderDeleteData->GetIntegerField(TEXT("folder_delete_count")) : -1, 0);
+	TestTrue(TEXT("asset_delete keep folder leaves requested empty folder"), IFileManager::Get().DirectoryExists(*DeleteKeepFolderFilename));
+
+	TSharedPtr<FJsonObject> EmptyFolderDeleteData;
+	TestTrue(TEXT("asset_delete deletes empty folder with no resolved assets"), ExecCommand(
+		TEXT("smoke-asset-delete-empty-folder-delete"),
+		TEXT("asset_delete"),
+		FString::Printf(TEXT("{\"folder_path\":%s,\"recursive\":true,\"dry_run\":false,\"include_path_string_hits\":false}"), *JsonQuote(DeleteKeepFolderRoot)),
+		EmptyFolderDeleteData,
+		200));
+	TestEqual(TEXT("asset_delete empty folder deleted_count"), EmptyFolderDeleteData.IsValid() ? EmptyFolderDeleteData->GetIntegerField(TEXT("deleted_count")) : -1, 0);
+	TestEqual(TEXT("asset_delete empty folder folder_delete_count"), EmptyFolderDeleteData.IsValid() ? EmptyFolderDeleteData->GetIntegerField(TEXT("folder_delete_count")) : 0, 1);
+	TestFalse(TEXT("asset_delete empty folder removes requested folder"), IFileManager::Get().DirectoryExists(*DeleteKeepFolderFilename));
+
+	const FString DeleteMultiFolderRoot = TEXT("/Game/__UeAgentInterfaceSmoke/AssetDeleteMultiFolder");
+	const FString DeleteMultiFolderA = DeleteMultiFolderRoot + TEXT("/A");
+	const FString DeleteMultiFolderB = DeleteMultiFolderRoot + TEXT("/B");
+	const FString DeleteMultiParentPath = DeleteMultiFolderA + TEXT("/MAssetDeleteMultiParent");
+	const FString DeleteMultiChildPath = DeleteMultiFolderB + TEXT("/MIAssetDeleteMultiChild");
+	TestTrue(TEXT("asset_delete multi folder parent material setup"), ExecCommand(
+		TEXT("smoke-asset-delete-multi-folder-parent"),
+		TEXT("material_create"),
+		FString::Printf(TEXT("{\"asset_path\":%s,\"save_after_create\":true}"), *JsonQuote(DeleteMultiParentPath)),
+		Data));
+	TestTrue(TEXT("asset_delete multi folder child material instance setup"), ExecCommand(
+		TEXT("smoke-asset-delete-multi-folder-child"),
+		TEXT("material_instance_create"),
+		FString::Printf(TEXT("{\"asset_path\":%s,\"parent_material_path\":%s,\"save_after_create\":true}"), *JsonQuote(DeleteMultiChildPath), *JsonQuote(DeleteMultiParentPath)),
+		Data));
+
+	TSharedPtr<FJsonObject> MultiFolderDeleteDryRunData;
+	TestTrue(TEXT("asset_delete multi folder dry run succeeds"), ExecCommand(
+		TEXT("smoke-asset-delete-multi-folder-dry-run"),
+		TEXT("asset_delete"),
+		FString::Printf(TEXT("{\"folder_paths\":[%s,%s],\"recursive\":false,\"dry_run\":true,\"include_path_string_hits\":false}"), *JsonQuote(DeleteMultiFolderA), *JsonQuote(DeleteMultiFolderB)),
+		MultiFolderDeleteDryRunData));
+	TestEqual(TEXT("asset_delete multi folder dry run requested folder count"), MultiFolderDeleteDryRunData.IsValid() ? MultiFolderDeleteDryRunData->GetIntegerField(TEXT("requested_folder_count")) : 0, 2);
+	TestEqual(TEXT("asset_delete multi folder dry run unique package count"), MultiFolderDeleteDryRunData.IsValid() ? MultiFolderDeleteDryRunData->GetIntegerField(TEXT("unique_package_count")) : 0, 2);
+	TestEqual(TEXT("asset_delete multi folder dry run blocked count"), MultiFolderDeleteDryRunData.IsValid() ? MultiFolderDeleteDryRunData->GetIntegerField(TEXT("blocked_count")) : -1, 0);
+	bool bSawMultiFolderInternalReferencer = false;
+	const TArray<TSharedPtr<FJsonValue>>* MultiFolderAssets = nullptr;
+	if (MultiFolderDeleteDryRunData.IsValid() && MultiFolderDeleteDryRunData->TryGetArrayField(TEXT("assets"), MultiFolderAssets) && MultiFolderAssets)
+	{
+		for (const TSharedPtr<FJsonValue>& AssetValue : *MultiFolderAssets)
+		{
+			const TSharedPtr<FJsonObject>* AssetObj = nullptr;
+			if (AssetValue.IsValid() && AssetValue->TryGetObject(AssetObj) && AssetObj && AssetObj->IsValid())
+			{
+				bSawMultiFolderInternalReferencer |= (*AssetObj)->GetIntegerField(TEXT("internal_referencer_count")) > 0;
+			}
+		}
+	}
+	TestTrue(TEXT("asset_delete multi folder reports internal referencer diagnostics"), bSawMultiFolderInternalReferencer);
+
+	TSharedPtr<FJsonObject> MultiFolderDeleteData;
+	TestTrue(TEXT("asset_delete multi folder deletes resolved assets"), ExecCommand(
+		TEXT("smoke-asset-delete-multi-folder-delete"),
+		TEXT("asset_delete"),
+		FString::Printf(TEXT("{\"folder_paths\":[%s,%s],\"recursive\":false,\"dry_run\":false,\"include_path_string_hits\":false}"), *JsonQuote(DeleteMultiFolderA), *JsonQuote(DeleteMultiFolderB)),
+		MultiFolderDeleteData,
+		200));
+	TestEqual(TEXT("asset_delete multi folder deleted_count"), MultiFolderDeleteData.IsValid() ? MultiFolderDeleteData->GetIntegerField(TEXT("deleted_count")) : 0, 2);
+	TestEqual(TEXT("asset_delete multi folder remaining_package_count"), MultiFolderDeleteData.IsValid() ? MultiFolderDeleteData->GetIntegerField(TEXT("remaining_package_count")) : 1, 0);
+	TestEqual(TEXT("asset_delete multi folder folder_delete_count"), MultiFolderDeleteData.IsValid() ? MultiFolderDeleteData->GetIntegerField(TEXT("folder_delete_count")) : 0, 2);
+	TestFalse(TEXT("asset_delete multi folder removes folder A"), IFileManager::Get().DirectoryExists(*FPaths::ConvertRelativePathToFull(FPackageName::LongPackageNameToFilename(DeleteMultiFolderA))));
+	TestFalse(TEXT("asset_delete multi folder removes folder B"), IFileManager::Get().DirectoryExists(*FPaths::ConvertRelativePathToFull(FPackageName::LongPackageNameToFilename(DeleteMultiFolderB))));
 
 	TestTrue(TEXT("asset_reference_graph dependencies"), ExecCommand(
 		TEXT("smoke-refgraph-deps"),
@@ -268,6 +454,15 @@ bool FUeAgentInterfaceAssetReferenceGraphSmokeTest::RunTest(const FString& Param
 			}
 		}
 		TestTrue(TEXT("referencer graph links back to duplicated mesh"), bFoundMeshAsReferencer);
+
+		TSharedPtr<FJsonObject> BlockedDeleteData;
+		TestTrue(TEXT("asset_delete blocks referenced dependency"), ExecCommand(
+			TEXT("smoke-asset-delete-blocked-referenced"),
+			TEXT("asset_delete"),
+			FString::Printf(TEXT("{\"asset_path\":%s,\"dry_run\":true,\"allow_non_game\":true,\"include_path_string_hits\":false}"), *JsonQuote(FirstDependencyPackage)),
+			BlockedDeleteData,
+			400));
+		TestTrue(TEXT("asset_delete reports blocked referenced dependency"), BlockedDeleteData.IsValid() && BlockedDeleteData->GetIntegerField(TEXT("blocked_count")) > 0);
 	}
 
 	TSharedPtr<FJsonObject> MissingData;
@@ -575,6 +770,60 @@ bool FUeAgentInterfaceExecSmokeTest::RunTest(const FString& Parameters)
 		TestEqual(TEXT("Batch mode"), (*BatchData)->GetStringField(TEXT("mode")), FString(TEXT("exec_batch")));
 		TestEqual(TEXT("Batch executed count"), static_cast<int32>((*BatchData)->GetIntegerField(TEXT("executed"))), 2);
 		TestEqual(TEXT("Batch succeeded count"), static_cast<int32>((*BatchData)->GetIntegerField(TEXT("succeeded"))), 2);
+	}
+
+	const FString ConsoleExecBody = MakeExecRequestBody(
+		TEXT("smoke-editor-console-exec-001"),
+		TEXT("editor_console_exec"),
+		TEXT("{\"command\":\"r.ViewDistanceScale\",\"max_output_chars\":2048,\"max_output_lines\":16}"));
+	FHttpSmokeResult ConsoleExecResult;
+	TestTrue(TEXT("Editor console exec request succeeded"), ExecuteHttpJsonRequest(TEXT("POST"), ServerScope.BaseUrl + TEXT("/api/exec"), ServerScope.Token, ConsoleExecBody, ConsoleExecResult));
+	TestEqual(TEXT("Editor console exec status code"), ConsoleExecResult.StatusCode, 200);
+
+	TSharedPtr<FJsonObject> ConsoleExecJson;
+	TestTrue(TEXT("Editor console exec response parses as JSON"), ParseJson(ConsoleExecResult.Body, ConsoleExecJson));
+	TestTrue(TEXT("Editor console exec root ok=true"), ConsoleExecJson.IsValid() && ConsoleExecJson->GetBoolField(TEXT("ok")));
+
+	const TSharedPtr<FJsonObject>* ConsoleExecData = nullptr;
+	TestTrue(TEXT("Editor console exec contains data"), ConsoleExecJson.IsValid() && ConsoleExecJson->TryGetObjectField(TEXT("data"), ConsoleExecData) && ConsoleExecData && ConsoleExecData->IsValid());
+	if (ConsoleExecData && ConsoleExecData->IsValid())
+	{
+		TestEqual(TEXT("Editor console exec executor"), (*ConsoleExecData)->GetStringField(TEXT("executor")), FString(TEXT("Cmd")));
+		TestEqual(TEXT("Editor console exec command count"), static_cast<int32>((*ConsoleExecData)->GetIntegerField(TEXT("command_count"))), 1);
+		TestEqual(TEXT("Editor console exec handled count"), static_cast<int32>((*ConsoleExecData)->GetIntegerField(TEXT("handled_count"))), 1);
+		const TArray<TSharedPtr<FJsonValue>>* ConsoleResults = nullptr;
+		TestTrue(TEXT("Editor console exec returns results"), (*ConsoleExecData)->TryGetArrayField(TEXT("results"), ConsoleResults) && ConsoleResults && ConsoleResults->Num() == 1);
+		if (ConsoleResults && ConsoleResults->Num() == 1)
+		{
+			const TSharedPtr<FJsonObject>* ResultObj = nullptr;
+			TestTrue(TEXT("Editor console exec first result is object"), (*ConsoleResults)[0].IsValid() && (*ConsoleResults)[0]->TryGetObject(ResultObj) && ResultObj && ResultObj->IsValid());
+			if (ResultObj && ResultObj->IsValid())
+			{
+				TestTrue(TEXT("Editor console exec first result handled"), (*ResultObj)->GetBoolField(TEXT("handled")));
+				TestFalse(TEXT("Editor console exec first result not blocked"), (*ResultObj)->GetBoolField(TEXT("blocked")));
+			}
+		}
+	}
+
+	const FString BlockedConsoleExecBody = MakeExecRequestBody(
+		TEXT("smoke-editor-console-exec-blocked-001"),
+		TEXT("editor_console_exec"),
+		TEXT("{\"command\":\"QUIT_EDITOR\"}"));
+	FHttpSmokeResult BlockedConsoleExecResult;
+	TestTrue(TEXT("Blocked editor console exec request completed"), ExecuteHttpJsonRequest(TEXT("POST"), ServerScope.BaseUrl + TEXT("/api/exec"), ServerScope.Token, BlockedConsoleExecBody, BlockedConsoleExecResult));
+	TestEqual(TEXT("Blocked editor console exec status code"), BlockedConsoleExecResult.StatusCode, 400);
+
+	TSharedPtr<FJsonObject> BlockedConsoleExecJson;
+	TestTrue(TEXT("Blocked editor console exec response parses as JSON"), ParseJson(BlockedConsoleExecResult.Body, BlockedConsoleExecJson));
+	TestTrue(TEXT("Blocked editor console exec root ok=false"), BlockedConsoleExecJson.IsValid() && !BlockedConsoleExecJson->GetBoolField(TEXT("ok")));
+	TestEqual(TEXT("Blocked editor console exec error code"), BlockedConsoleExecJson.IsValid() ? BlockedConsoleExecJson->GetStringField(TEXT("error")) : FString(), FString(TEXT("editor_console_command_blocked_high_risk")));
+
+	const TSharedPtr<FJsonObject>* BlockedConsoleExecData = nullptr;
+	TestTrue(TEXT("Blocked editor console exec contains data"), BlockedConsoleExecJson.IsValid() && BlockedConsoleExecJson->TryGetObjectField(TEXT("data"), BlockedConsoleExecData) && BlockedConsoleExecData && BlockedConsoleExecData->IsValid());
+	if (BlockedConsoleExecData && BlockedConsoleExecData->IsValid())
+	{
+		TestEqual(TEXT("Blocked editor console exec blocked count"), static_cast<int32>((*BlockedConsoleExecData)->GetIntegerField(TEXT("blocked_count"))), 1);
+		TestEqual(TEXT("Blocked editor console exec executed count"), static_cast<int32>((*BlockedConsoleExecData)->GetIntegerField(TEXT("executed_count"))), 0);
 	}
 
 	return !HasAnyErrors();

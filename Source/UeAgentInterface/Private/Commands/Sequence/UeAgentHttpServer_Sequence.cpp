@@ -14,9 +14,13 @@
 #include "Channels/MovieSceneFloatChannel.h"
 #include "Components/ActorComponent.h"
 #include "Components/SceneCaptureComponent2D.h"
+#include "Components/SkeletalMeshComponent.h"
 #include "Components/Widget.h"
+#include "ControlRig.h"
+#include "ControlRigObjectBinding.h"
 #include "Editor.h"
 #include "EditorViewportClient.h"
+#include "Engine/Blueprint.h"
 #include "Engine/SceneCapture2D.h"
 #include "Engine/TextureRenderTarget2D.h"
 #include "EngineUtils.h"
@@ -41,8 +45,12 @@
 #include "MovieSceneObjectBindingID.h"
 #include "MovieScenePossessable.h"
 #include "MovieSceneSpawnable.h"
+#include "Rigs/FKControlRig.h"
+#include "Rigs/RigHierarchy.h"
 #include "Serialization/JsonReader.h"
 #include "Serialization/JsonSerializer.h"
+#include "Sequencer/MovieSceneControlRigParameterSection.h"
+#include "Sequencer/MovieSceneControlRigParameterTrack.h"
 #include "MovieSceneSequencePlayer.h"
 #include "Sections/MovieSceneCameraCutSection.h"
 #include "Sections/MovieSceneBoolSection.h"
@@ -873,6 +881,13 @@ namespace UeAgentSequenceOps
 			Item->SetStringField(TEXT("vector_precision"), TEXT("double"));
 			Item->SetNumberField(TEXT("channels_used"), DoubleVectorTrack->GetNumChannelsUsed());
 		}
+		if (UMovieSceneControlRigParameterTrack* ControlRigTrack = Cast<UMovieSceneControlRigParameterTrack>(Track))
+		{
+			UControlRig* ControlRig = ControlRigTrack->GetControlRig();
+			Item->SetStringField(TEXT("track_type"), TEXT("control_rig"));
+			Item->SetStringField(TEXT("control_rig_class"), ControlRig ? ControlRig->GetClass()->GetPathName() : TEXT(""));
+			Item->SetBoolField(TEXT("is_additive"), ControlRig ? ControlRig->IsAdditive() : false);
+		}
 
 		TArray<TSharedPtr<FJsonValue>> Sections;
 		if (Track)
@@ -1027,6 +1042,37 @@ namespace UeAgentSequenceOps
 					SectionObject->SetNumberField(TEXT("key_count"), ObjectSection->ObjectChannel.GetData().GetTimes().Num());
 					const UObject* DefaultObject = ObjectSection->ObjectChannel.GetDefault().Get();
 					SectionObject->SetStringField(TEXT("default_value_path"), DefaultObject ? DefaultObject->GetPathName() : TEXT(""));
+				}
+				else if (UMovieSceneControlRigParameterSection* ControlRigSection = Cast<UMovieSceneControlRigParameterSection>(Section))
+				{
+					int32 KeyCount = 0;
+					for (const FScalarParameterNameAndCurve& Curve : ControlRigSection->GetScalarParameterNamesAndCurves()) KeyCount += Curve.ParameterCurve.GetData().GetTimes().Num();
+					for (const FBoolParameterNameAndCurve& Curve : ControlRigSection->GetBoolParameterNamesAndCurves()) KeyCount += Curve.ParameterCurve.GetData().GetTimes().Num();
+					for (const FIntegerParameterNameAndCurve& Curve : ControlRigSection->GetIntegerParameterNamesAndCurves()) KeyCount += Curve.ParameterCurve.GetData().GetTimes().Num();
+					for (const FEnumParameterNameAndCurve& Curve : ControlRigSection->GetEnumParameterNamesAndCurves()) KeyCount += Curve.ParameterCurve.GetData().GetTimes().Num();
+					for (const FVector2DParameterNameAndCurves& Curve : ControlRigSection->GetVector2DParameterNamesAndCurves())
+					{
+						KeyCount += Curve.XCurve.GetData().GetTimes().Num();
+						KeyCount += Curve.YCurve.GetData().GetTimes().Num();
+					}
+					for (const FVectorParameterNameAndCurves& Curve : ControlRigSection->GetVectorParameterNamesAndCurves())
+					{
+						KeyCount += Curve.XCurve.GetData().GetTimes().Num();
+						KeyCount += Curve.YCurve.GetData().GetTimes().Num();
+						KeyCount += Curve.ZCurve.GetData().GetTimes().Num();
+					}
+					for (const FTransformParameterNameAndCurves& Curve : ControlRigSection->GetTransformParameterNamesAndCurves())
+					{
+						for (int32 ChannelIndex = 0; ChannelIndex < 3; ++ChannelIndex)
+						{
+							KeyCount += Curve.Translation[ChannelIndex].GetData().GetTimes().Num();
+							KeyCount += Curve.Rotation[ChannelIndex].GetData().GetTimes().Num();
+							KeyCount += Curve.Scale[ChannelIndex].GetData().GetTimes().Num();
+						}
+					}
+					SectionObject->SetStringField(TEXT("section_type"), TEXT("control_rig"));
+					SectionObject->SetStringField(TEXT("control_rig_class"), ControlRigSection->ControlRigClass ? ControlRigSection->ControlRigClass->GetPathName() : TEXT(""));
+					SectionObject->SetNumberField(TEXT("key_count"), KeyCount);
 				}
 
 				Sections.Add(MakeShared<FJsonValueObject>(SectionObject));

@@ -117,6 +117,11 @@ bool FUeAgentHttpServer::CmdSequenceListLevelSequences(const FUeAgentRequestCont
 
 bool FUeAgentHttpServer::CmdSequenceCreateLevelSequence(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
+	if (!OutData.IsValid())
+	{
+		OutData = MakeShared<FJsonObject>();
+	}
+
 	FString AssetPathInput;
 	if (!JsonTryGetString(Ctx.Params, TEXT("asset_path"), AssetPathInput) || AssetPathInput.IsEmpty())
 	{
@@ -134,6 +139,16 @@ bool FUeAgentHttpServer::CmdSequenceCreateLevelSequence(const FUeAgentRequestCon
 	if (AssetName.IsEmpty())
 	{
 		OutError = TEXT("invalid_asset_name");
+		return false;
+	}
+
+	bool bOpenEditor = false;
+	JsonTryGetBool(Ctx.Params, TEXT("open_editor"), bOpenEditor);
+	bool bAllowEditorOpen = false;
+	JsonTryGetBool(Ctx.Params, TEXT("allow_editor_open"), bAllowEditorOpen);
+	if (bOpenEditor && !bAllowEditorOpen)
+	{
+		OutError = TEXT("open_editor_requires_allow_editor_open");
 		return false;
 	}
 
@@ -186,8 +201,6 @@ bool FUeAgentHttpServer::CmdSequenceCreateLevelSequence(const FUeAgentRequestCon
 	Sequence->MarkPackageDirty();
 	Package->MarkPackageDirty();
 
-	bool bOpenEditor = false;
-	JsonTryGetBool(Ctx.Params, TEXT("open_editor"), bOpenEditor);
 	if (bOpenEditor && GEditor)
 	{
 		if (UAssetEditorSubsystem* AssetEditorSubsystem = GEditor->GetEditorSubsystem<UAssetEditorSubsystem>())
@@ -222,6 +235,14 @@ bool FUeAgentHttpServer::CmdSequenceOpenLevelSequence(const FUeAgentRequestConte
 	if (!JsonTryGetString(Ctx.Params, TEXT("asset_path"), AssetPath) || AssetPath.IsEmpty())
 	{
 		OutError = TEXT("missing_asset_path");
+		return false;
+	}
+
+	bool bAllowEditorOpen = false;
+	JsonTryGetBool(Ctx.Params, TEXT("allow_editor_open"), bAllowEditorOpen);
+	if (!bAllowEditorOpen)
+	{
+		OutError = TEXT("sequence_open_level_sequence_requires_allow_editor_open");
 		return false;
 	}
 
@@ -541,8 +562,28 @@ bool FUeAgentHttpServer::CmdSequenceScreenshot(const FUeAgentRequestContext& Ctx
 
 	auto CaptureRequestedFrame = [&](const UeAgentSequenceOps::FLevelSequenceFrameRequest& Request, const int32 SequenceIndex, TSharedPtr<FJsonObject>& OutFrameObject) -> bool
 	{
-		Cleanup.Player->SetPlaybackPosition(FMovieSceneSequencePlaybackParams(FFrameTime(Request.EvaluationFrame), EUpdatePositionMethod::Jump));
-		World->Tick(LEVELTICK_All, TickDeltaSeconds);
+		const FFrameTime DisplayFrame = ConvertFrameTime(
+			FFrameTime(Request.EvaluationFrame),
+			MovieScene->GetTickResolution(),
+			MovieScene->GetDisplayRate());
+		Cleanup.Player->SetPlaybackPosition(FMovieSceneSequencePlaybackParams(DisplayFrame, EUpdatePositionMethod::Jump));
+		for (TActorIterator<AActor> ActorIt(World); ActorIt; ++ActorIt)
+		{
+			if (AActor* Actor = *ActorIt)
+			{
+				TArray<USkeletalMeshComponent*> SkeletalComponents;
+				Actor->GetComponents<USkeletalMeshComponent>(SkeletalComponents);
+				for (USkeletalMeshComponent* SkeletalComponent : SkeletalComponents)
+				{
+					if (SkeletalComponent)
+					{
+						SkeletalComponent->RefreshBoneTransforms();
+						SkeletalComponent->UpdateComponentToWorld();
+						SkeletalComponent->MarkRenderDynamicDataDirty();
+					}
+				}
+			}
+		}
 		World->SendAllEndOfFrameUpdates();
 		FlushRenderingCommands();
 

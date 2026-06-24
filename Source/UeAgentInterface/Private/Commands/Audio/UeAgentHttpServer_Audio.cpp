@@ -2996,16 +2996,37 @@ bool FUeAgentHttpServer::CmdMetaSoundApplyFolder(const FUeAgentRequestContext& C
 		Asset->PostEditChange();
 		Asset->MarkPackageDirty();
 	}
+	TSharedPtr<FJsonObject> CompileReport;
+	bool bCompiled = false;
+	if (!bDryRun && bCompile)
+	{
+		FUeAgentRequestContext CompileCtx;
+		CompileCtx.RequestId = TEXT("metasound_apply_folder_compile");
+		CompileCtx.Command = TEXT("metasound_compile");
+		CompileCtx.Params = MakeShared<FJsonObject>();
+		CompileCtx.Params->SetStringField(TEXT("asset_path"), NormalizeAssetPath(AssetPath));
+		CompileCtx.Params->SetBoolField(TEXT("save_after_compile"), false);
+		CompileReport = MakeShared<FJsonObject>();
+		if (!CmdMetaSoundCompile(CompileCtx, CompileReport, OutError))
+		{
+			return false;
+		}
+		bCompiled = true;
+	}
 	if (!bDryRun && bSave && !SavePackagesForObjects({ Asset }, OutError))
 	{
 		return false;
 	}
 	OutData = BuildMetaSoundInfo(Asset, true, true, true);
+	if (CompileReport.IsValid())
+	{
+		OutData->SetObjectField(TEXT("compile_report"), CompileReport);
+	}
 	OutData->SetNumberField(TEXT("nodes_created"), NodesCreated);
 	OutData->SetNumberField(TEXT("edges_created"), 0);
 	OutData->SetBoolField(TEXT("dry_run"), bDryRun);
 	OutData->SetBoolField(TEXT("would_create"), bDryRun && bWouldCreate);
-	OutData->SetBoolField(TEXT("compiled"), bCompile && !bDryRun);
+	OutData->SetBoolField(TEXT("compiled"), bCompiled);
 	OutData->SetObjectField(TEXT("coverage_report"), MakeCoverageReport(MetaSoundProfile));
 	return true;
 }

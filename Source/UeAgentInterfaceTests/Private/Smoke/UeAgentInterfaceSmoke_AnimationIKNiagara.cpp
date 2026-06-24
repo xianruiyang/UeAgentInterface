@@ -2835,7 +2835,7 @@ bool FUeAgentInterfaceAnimationAssetsSmokeTest::RunTest(const FString& Parameter
 	const FString SourceAnimSequencePath = TEXT("/Engine/Tutorial/SubEditors/TutorialAssets/Character/Tutorial_Idle");
 	const FString SourceSkeletonPath = TEXT("/Engine/Tutorial/SubEditors/TutorialAssets/Character/TutorialTPP_Skeleton");
 	const FString SourceSkeletalMeshPath = TEXT("/Engine/Tutorial/SubEditors/TutorialAssets/Character/TutorialTPP");
-	const FString AnimMetadataClassPath = TEXT("/Script/GptProjectTest.GptAnimMetaTag");
+	const FString AnimMetadataClassPath = TEXT("/Script/UeAgentInterfaceTests.UeAgentInterfaceTestAnimMetaData");
 	const FString BoneCompressionSettingsPath = TEXT("/Engine/Animation/DefaultRecorderBoneCompression");
 	const FString CurveCompressionSettingsPath = TEXT("/Engine/Animation/DefaultAnimCurveCompressionSettings");
 	const FString VariableFrameStrippingSettingsPath = TEXT("/Engine/Animation/DefaultVariableFrameStrippingSettings");
@@ -3205,7 +3205,7 @@ bool FUeAgentInterfaceAnimationAssetsSmokeTest::RunTest(const FString& Parameter
 	const FString AddNotifyBody = MakeExecRequestBody(
 		TEXT("smoke-anim-assets-notify-001"),
 		TEXT("anim_sequence_set_notify"),
-		FString::Printf(TEXT("{\"asset_path\":\"%s\",\"track_name\":\"%s\",\"time_seconds\":0.20,\"notify_name\":\"%s\",\"trigger_weight_threshold\":0.25,\"notify_trigger_chance\":1.0,\"notify_filter_type\":\"lod\",\"notify_filter_lod\":1,\"notify_color\":{\"r\":0.9,\"g\":0.3,\"b\":0.2,\"a\":1.0},\"save_after_set\":false}"), *SequenceAssetPath, *NotifyTrackName, *NotifyName));
+		FString::Printf(TEXT("{\"asset_path\":\"%s\",\"track_name\":\"%s\",\"time_seconds\":0.02,\"notify_name\":\"%s\",\"trigger_weight_threshold\":0.25,\"notify_trigger_chance\":1.0,\"notify_filter_type\":\"lod\",\"notify_filter_lod\":1,\"notify_color\":{\"r\":0.9,\"g\":0.3,\"b\":0.2,\"a\":1.0},\"save_after_set\":false}"), *SequenceAssetPath, *NotifyTrackName, *NotifyName));
 	FHttpSmokeResult AddNotifyResult;
 	TestTrue(TEXT("Animation assets anim_sequence_set_notify add request succeeded"), ExecuteHttpJsonRequest(TEXT("POST"), ServerScope.BaseUrl + TEXT("/api/exec"), ServerScope.Token, AddNotifyBody, AddNotifyResult));
 	TestEqual(TEXT("Animation assets anim_sequence_set_notify add status code"), AddNotifyResult.StatusCode, 200);
@@ -3229,7 +3229,7 @@ bool FUeAgentInterfaceAnimationAssetsSmokeTest::RunTest(const FString& Parameter
 	const FString UpdateNotifyBody = MakeExecRequestBody(
 		TEXT("smoke-anim-assets-notify-002"),
 		TEXT("anim_sequence_set_notify"),
-		FString::Printf(TEXT("{\"asset_path\":\"%s\",\"notify_index\":%d,\"time_seconds\":0.24,\"notify_color\":{\"r\":0.15,\"g\":0.65,\"b\":0.95,\"a\":1.0},\"save_after_set\":false}"), *SequenceAssetPath, NotifyIndex));
+		FString::Printf(TEXT("{\"asset_path\":\"%s\",\"notify_index\":%d,\"time_seconds\":0.04,\"notify_color\":{\"r\":0.15,\"g\":0.65,\"b\":0.95,\"a\":1.0},\"save_after_set\":false}"), *SequenceAssetPath, NotifyIndex));
 	FHttpSmokeResult UpdateNotifyResult;
 	TestTrue(TEXT("Animation assets anim_sequence_set_notify update request succeeded"), ExecuteHttpJsonRequest(TEXT("POST"), ServerScope.BaseUrl + TEXT("/api/exec"), ServerScope.Token, UpdateNotifyBody, UpdateNotifyResult));
 	TestEqual(TEXT("Animation assets anim_sequence_set_notify update status code"), UpdateNotifyResult.StatusCode, 200);
@@ -3237,10 +3237,29 @@ bool FUeAgentInterfaceAnimationAssetsSmokeTest::RunTest(const FString& Parameter
 	const FString AddFloatCurveBody = MakeExecRequestBody(
 		TEXT("smoke-anim-assets-curve-001"),
 		TEXT("anim_sequence_set_curve"),
-		FString::Printf(TEXT("{\"asset_path\":\"%s\",\"curve_name\":\"%s\",\"curve_type\":\"float\",\"clear_existing_keys\":true,\"keys\":[{\"time_seconds\":0.10,\"value\":1.0},{\"time_seconds\":0.20,\"value\":2.0}],\"save_after_set\":false}"), *SequenceAssetPath, *FloatCurveName));
+		FString::Printf(TEXT("{\"asset_path\":\"%s\",\"curve_name\":\"%s\",\"curve_type\":\"float\",\"clear_existing_keys\":true,\"keys\":[{\"time_seconds\":0.02,\"value\":1.0},{\"time_seconds\":0.04,\"value\":2.0}],\"save_after_set\":false}"), *SequenceAssetPath, *FloatCurveName));
 	FHttpSmokeResult AddFloatCurveResult;
 	TestTrue(TEXT("Animation assets anim_sequence_set_curve float request succeeded"), ExecuteHttpJsonRequest(TEXT("POST"), ServerScope.BaseUrl + TEXT("/api/exec"), ServerScope.Token, AddFloatCurveBody, AddFloatCurveResult));
 	TestEqual(TEXT("Animation assets anim_sequence_set_curve float status code"), AddFloatCurveResult.StatusCode, 200);
+
+	const FString ApplyBoneTracksBody = MakeExecRequestBody(
+		TEXT("smoke-anim-assets-apply-bone-tracks-001"),
+		TEXT("anim_sequence_apply_bone_tracks"),
+		FString::Printf(TEXT("{\"asset_path\":\"%s\",\"frame_rate\":{\"numerator\":30,\"denominator\":1},\"num_frames\":2,\"tracks\":[{\"bone\":\"%s\",\"keys\":[{\"frame\":0,\"rotation\":{\"pitch\":0,\"yaw\":0,\"roll\":0}},{\"frame\":1,\"rotation\":{\"pitch\":0,\"yaw\":20,\"roll\":0}},{\"frame\":2,\"rotation\":{\"pitch\":0,\"yaw\":0,\"roll\":0}}]}],\"save_after_apply\":false}"), *SequenceAssetPath, *TrackToRemove));
+	FHttpSmokeResult ApplyBoneTracksResult;
+	TestTrue(TEXT("Animation assets anim_sequence_apply_bone_tracks request succeeded"), ExecuteHttpJsonRequest(TEXT("POST"), ServerScope.BaseUrl + TEXT("/api/exec"), ServerScope.Token, ApplyBoneTracksBody, ApplyBoneTracksResult));
+	TestEqual(TEXT("Animation assets anim_sequence_apply_bone_tracks status code"), ApplyBoneTracksResult.StatusCode, 200);
+
+	TSharedPtr<FJsonObject> ApplyBoneTracksJson;
+	TestTrue(TEXT("Animation assets anim_sequence_apply_bone_tracks parses JSON"), ParseJson(ApplyBoneTracksResult.Body, ApplyBoneTracksJson));
+	const TSharedPtr<FJsonObject>* ApplyBoneTracksData = nullptr;
+	TestTrue(TEXT("Animation assets anim_sequence_apply_bone_tracks contains data object"), ApplyBoneTracksJson.IsValid() && ApplyBoneTracksJson->TryGetObjectField(TEXT("data"), ApplyBoneTracksData) && ApplyBoneTracksData && ApplyBoneTracksData->IsValid());
+	if (ApplyBoneTracksData && ApplyBoneTracksData->IsValid())
+	{
+		TestEqual(TEXT("Animation assets applied bone track count"), static_cast<int32>((*ApplyBoneTracksData)->GetIntegerField(TEXT("applied_track_count"))), 1);
+		TestTrue(TEXT("Animation assets applied bone track output track count > 0"), static_cast<int32>((*ApplyBoneTracksData)->GetIntegerField(TEXT("track_count"))) > 0);
+		TestEqual(TEXT("Animation assets applied bone track sample key count"), static_cast<int32>((*ApplyBoneTracksData)->GetIntegerField(TEXT("sample_key_count"))), 3);
+	}
 
 	const FString AddMetadataBody = MakeExecRequestBody(
 		TEXT("smoke-anim-assets-metadata-001"),
@@ -3269,7 +3288,7 @@ bool FUeAgentInterfaceAnimationAssetsSmokeTest::RunTest(const FString& Parameter
 	const FString SetSyncMarkersBody = MakeExecRequestBody(
 		TEXT("smoke-anim-assets-sync-markers-001"),
 		TEXT("anim_sequence_set_sync_markers"),
-		FString::Printf(TEXT("{\"asset_path\":\"%s\",\"add_markers\":[{\"marker_name\":\"%s\",\"time_seconds\":0.10,\"notify_track_name\":\"%s\"},{\"marker_name\":\"%s\",\"time_seconds\":0.30,\"notify_track_name\":\"%s\"}],\"save_after_set\":false}"), *SequenceAssetPath, *MarkerA, *NotifyTrackName, *MarkerB, *NotifyTrackName));
+		FString::Printf(TEXT("{\"asset_path\":\"%s\",\"add_markers\":[{\"marker_name\":\"%s\",\"time_seconds\":0.02,\"notify_track_name\":\"%s\"},{\"marker_name\":\"%s\",\"time_seconds\":0.04,\"notify_track_name\":\"%s\"}],\"save_after_set\":false}"), *SequenceAssetPath, *MarkerA, *NotifyTrackName, *MarkerB, *NotifyTrackName));
 	FHttpSmokeResult SetSyncMarkersResult;
 	TestTrue(TEXT("Animation assets anim_sequence_set_sync_markers add request succeeded"), ExecuteHttpJsonRequest(TEXT("POST"), ServerScope.BaseUrl + TEXT("/api/exec"), ServerScope.Token, SetSyncMarkersBody, SetSyncMarkersResult));
 	TestEqual(TEXT("Animation assets anim_sequence_set_sync_markers add status code"), SetSyncMarkersResult.StatusCode, 200);
@@ -3323,7 +3342,7 @@ bool FUeAgentInterfaceAnimationAssetsSmokeTest::RunTest(const FString& Parameter
 		if (NotifyObject.IsValid())
 		{
 			TestEqual(TEXT("Animation assets notify track name"), NotifyObject->GetStringField(TEXT("track_name")), NotifyTrackName);
-			TestTrue(TEXT("Animation assets notify moved time updated"), FMath::IsNearlyEqual(static_cast<float>(NotifyObject->GetNumberField(TEXT("time_seconds"))), 0.24f, 0.001f));
+			TestTrue(TEXT("Animation assets notify moved time updated"), FMath::IsNearlyEqual(static_cast<float>(NotifyObject->GetNumberField(TEXT("time_seconds"))), 0.04f, 0.001f));
 		}
 		TSharedPtr<FJsonObject> FloatCurveObject;
 		TestTrue(TEXT("Animation assets float curve exists"), FindCurveNamed(SequenceInfoAfterData, FloatCurveName, FloatCurveObject));
@@ -3857,6 +3876,22 @@ bool FUeAgentInterfaceIKAssetsSmokeTest::RunTest(const FString& Parameters)
 	FHttpSmokeResult AddFBIKSolverResult;
 	TestTrue(TEXT("IK assets add FBIK solver request succeeded"), ExecuteHttpJsonRequest(TEXT("POST"), ServerScope.BaseUrl + TEXT("/api/exec"), ServerScope.Token, AddFBIKSolverBody, AddFBIKSolverResult));
 	TestEqual(TEXT("IK assets add FBIK solver status code"), AddFBIKSolverResult.StatusCode, 200);
+
+	const FString ProbeIKGoalLegacyAssetBody = MakeExecRequestBody(
+		TEXT("smoke-probe-ik-goal-legacy-asset-rejected-001"),
+		TEXT("probe_ik_goal_candidates"),
+		FString::Printf(
+			TEXT("{\"asset_path\":\"%s\",\"goal_name\":\"%s\",\"candidates\":[{\"label\":\"legacy\",\"transform\":{\"location\":{\"x\":20.0,\"y\":0.0,\"z\":0.0}}}]}"),
+			*SourceIKRigAssetPath,
+			*GoalName));
+	FHttpSmokeResult ProbeIKGoalLegacyAssetResult;
+	TestTrue(TEXT("Probe IK goal legacy asset request reached server"), ExecuteHttpJsonRequest(TEXT("POST"), ServerScope.BaseUrl + TEXT("/api/exec"), ServerScope.Token, ProbeIKGoalLegacyAssetBody, ProbeIKGoalLegacyAssetResult, 30.0));
+	TestEqual(TEXT("Probe IK goal legacy asset status code"), ProbeIKGoalLegacyAssetResult.StatusCode, 400);
+
+	TSharedPtr<FJsonObject> ProbeIKGoalLegacyAssetJson;
+	TestTrue(TEXT("Probe IK goal legacy asset parses JSON"), ParseJson(ProbeIKGoalLegacyAssetResult.Body, ProbeIKGoalLegacyAssetJson));
+	TestFalse(TEXT("Probe IK goal legacy asset mode rejected"), ProbeIKGoalLegacyAssetJson.IsValid() && ProbeIKGoalLegacyAssetJson->GetBoolField(TEXT("ok")));
+	TestTrue(TEXT("Probe IK goal legacy asset rejection explains missing sequence"), ProbeIKGoalLegacyAssetResult.Body.Contains(TEXT("missing_sequence_path")));
 
 	const FString SetTargetChainBody = MakeExecRequestBody(
 		TEXT("smoke-ik-assets-dst-chain-001"),
@@ -4508,6 +4543,11 @@ bool FUeAgentInterfaceNiagaraFolderSmokeTest::RunTest(const FString& Parameters)
 	{
 		TestTrue(TEXT("Niagara emitter folder apply created emitter"), (*EmitterApplyData)->GetBoolField(TEXT("created")));
 		TestTrue(TEXT("Niagara emitter folder apply property count"), static_cast<int32>((*EmitterApplyData)->GetIntegerField(TEXT("emitter_properties_applied"))) >= 1);
+		TestTrue(TEXT("Niagara emitter folder apply defaults compile after apply"), (*EmitterApplyData)->GetBoolField(TEXT("compile_after_apply")));
+		TestTrue(TEXT("Niagara emitter folder apply defaults force compile"), (*EmitterApplyData)->GetBoolField(TEXT("force_compile")));
+		TestTrue(TEXT("Niagara emitter folder apply compile log read ok"), (*EmitterApplyData)->GetBoolField(TEXT("compile_log_read_ok")));
+		TestTrue(TEXT("Niagara emitter folder apply compilation complete"), (*EmitterApplyData)->GetBoolField(TEXT("compilation_complete")));
+		TestFalse(TEXT("Niagara emitter folder apply compile has no error"), (*EmitterApplyData)->GetBoolField(TEXT("compile_has_error")));
 	}
 
 	const FString AppliedEmitterRenderersBody = MakeExecRequestBody(
@@ -4641,7 +4681,7 @@ bool FUeAgentInterfaceNiagaraFolderSmokeTest::RunTest(const FString& Parameters)
 	const FString ApplyBody = MakeExecRequestBody(
 		TEXT("smoke-niagara-folder-apply-001"),
 		TEXT("niagara_apply_folder"),
-		FString::Printf(TEXT("{\"folder_path\":\"%s\",\"asset_path\":\"%s\",\"create_if_missing\":true,\"apply_referenced_emitters\":true,\"compile_after_apply\":false,\"save_after_apply\":false,\"strict\":false}"), *FolderPath.Replace(TEXT("\\"), TEXT("/")), *AppliedSystemAssetPath));
+		FString::Printf(TEXT("{\"folder_path\":\"%s\",\"asset_path\":\"%s\",\"create_if_missing\":true,\"apply_referenced_emitters\":true,\"compile_after_apply\":true,\"force_compile\":true,\"wait_for_complete\":true,\"save_after_apply\":false,\"strict\":false}"), *FolderPath.Replace(TEXT("\\"), TEXT("/")), *AppliedSystemAssetPath));
 	FHttpSmokeResult ApplyResult;
 	TestTrue(TEXT("Niagara folder apply request succeeded"), ExecuteHttpJsonRequest(TEXT("POST"), ServerScope.BaseUrl + TEXT("/api/exec"), ServerScope.Token, ApplyBody, ApplyResult, 30.0));
 	TestEqual(TEXT("Niagara folder apply status code"), ApplyResult.StatusCode, 200);
@@ -4656,6 +4696,12 @@ bool FUeAgentInterfaceNiagaraFolderSmokeTest::RunTest(const FString& Parameters)
 		TestTrue(TEXT("Niagara folder apply created system"), (*ApplyData)->GetBoolField(TEXT("created")));
 		TestTrue(TEXT("Niagara folder apply user parameters"), static_cast<int32>((*ApplyData)->GetIntegerField(TEXT("user_parameters_applied"))) >= 1);
 		TestTrue(TEXT("Niagara folder apply emitter handles"), static_cast<int32>((*ApplyData)->GetIntegerField(TEXT("emitter_handles_applied"))) >= 1);
+		TestTrue(TEXT("Niagara folder apply force compile"), (*ApplyData)->GetBoolField(TEXT("force_compile")));
+		TestTrue(TEXT("Niagara folder apply wait for complete"), (*ApplyData)->GetBoolField(TEXT("wait_for_complete")));
+		TestTrue(TEXT("Niagara folder apply compile log read ok"), (*ApplyData)->GetBoolField(TEXT("compile_log_read_ok")));
+		TestTrue(TEXT("Niagara folder apply compilation complete"), (*ApplyData)->GetBoolField(TEXT("compilation_complete")));
+		TestFalse(TEXT("Niagara folder apply no outstanding compile"), (*ApplyData)->GetBoolField(TEXT("has_outstanding_compilation_requests")));
+		TestFalse(TEXT("Niagara folder apply compile has no error"), (*ApplyData)->GetBoolField(TEXT("compile_has_error")));
 	}
 
 	const FString AppliedInfoBody = MakeExecRequestBody(
@@ -4686,19 +4732,20 @@ bool FUeAgentInterfaceNiagaraFolderSmokeTest::RunTest(const FString& Parameters)
 
 	const FString DeleteRecreateDeleteBody = MakeExecRequestBody(
 		TEXT("smoke-niagara-delete-recreate-delete-001"),
-		TEXT("niagara_delete_asset"),
-		FString::Printf(TEXT("{\"asset_path\":\"%s\",\"force_delete\":true}"), *DeleteRecreateEmitterAssetPath));
+		TEXT("asset_delete"),
+		FString::Printf(TEXT("{\"asset_path\":\"%s\",\"dry_run\":false,\"allow_dirty\":true,\"include_path_string_hits\":false}"), *DeleteRecreateEmitterAssetPath));
 	FHttpSmokeResult DeleteRecreateDeleteResult;
-	TestTrue(TEXT("Niagara delete recreate delete request succeeded"), ExecuteHttpJsonRequest(TEXT("POST"), ServerScope.BaseUrl + TEXT("/api/exec"), ServerScope.Token, DeleteRecreateDeleteBody, DeleteRecreateDeleteResult, 20.0));
-	TestEqual(TEXT("Niagara delete recreate delete status code"), DeleteRecreateDeleteResult.StatusCode, 200);
+	TestTrue(TEXT("Niagara delete recreate asset_delete request succeeded"), ExecuteHttpJsonRequest(TEXT("POST"), ServerScope.BaseUrl + TEXT("/api/exec"), ServerScope.Token, DeleteRecreateDeleteBody, DeleteRecreateDeleteResult, 20.0));
+	TestEqual(TEXT("Niagara delete recreate asset_delete status code"), DeleteRecreateDeleteResult.StatusCode, 200);
 
 	TSharedPtr<FJsonObject> DeleteRecreateDeleteJson;
-	TestTrue(TEXT("Niagara delete recreate delete parses JSON"), ParseJson(DeleteRecreateDeleteResult.Body, DeleteRecreateDeleteJson));
+	TestTrue(TEXT("Niagara delete recreate asset_delete parses JSON"), ParseJson(DeleteRecreateDeleteResult.Body, DeleteRecreateDeleteJson));
 	const TSharedPtr<FJsonObject>* DeleteRecreateDeleteData = nullptr;
-	TestTrue(TEXT("Niagara delete recreate delete contains data object"), DeleteRecreateDeleteJson.IsValid() && DeleteRecreateDeleteJson->TryGetObjectField(TEXT("data"), DeleteRecreateDeleteData) && DeleteRecreateDeleteData && DeleteRecreateDeleteData->IsValid());
+	TestTrue(TEXT("Niagara delete recreate asset_delete contains data object"), DeleteRecreateDeleteJson.IsValid() && DeleteRecreateDeleteJson->TryGetObjectField(TEXT("data"), DeleteRecreateDeleteData) && DeleteRecreateDeleteData && DeleteRecreateDeleteData->IsValid());
 	if (DeleteRecreateDeleteData && DeleteRecreateDeleteData->IsValid())
 	{
-		TestEqual(TEXT("Niagara delete recreate delete strategy"), (*DeleteRecreateDeleteData)->GetStringField(TEXT("delete_strategy")), FString(TEXT("delete_objects_unchecked")));
+		TestEqual(TEXT("Niagara delete recreate asset_delete deleted_count"), (*DeleteRecreateDeleteData)->GetIntegerField(TEXT("deleted_count")), 1);
+		TestEqual(TEXT("Niagara delete recreate asset_delete remaining_package_count"), (*DeleteRecreateDeleteData)->GetIntegerField(TEXT("remaining_package_count")), 0);
 	}
 
 	const FString DeleteRecreateCreateAgainBody = MakeExecRequestBody(

@@ -122,27 +122,7 @@ bool FUeAgentHttpServer::CmdNiagaraEmitterAddRenderer(const FUeAgentRequestConte
 
 	EditContext.Emitter->MarkPackageDirty();
 
-	bool bCompileAfterSet = true;
-	JsonTryGetBool(Ctx.Params, TEXT("compile_after_set"), bCompileAfterSet);
-	bool bWaitForComplete = true;
-	JsonTryGetBool(Ctx.Params, TEXT("wait_for_complete"), bWaitForComplete);
-	bool bCompilationRequested = false;
-	bool bCompilationComplete = false;
-	if (bCompileAfterSet)
-	{
-		TArray<UNiagaraScript*> EmitterScripts;
-		EditContext.EmitterData->GetScripts(EmitterScripts, false, false);
-		for (UNiagaraScript* Script : EmitterScripts)
-		{
-			if (!Script)
-			{
-				continue;
-			}
-			Script->RequestCompile(Script->GetExposedVersion().VersionGuid, false);
-			bCompilationRequested = true;
-		}
-		bCompilationComplete = !bWaitForComplete;
-	}
+	const UeAgentNiagaraOps::FNiagaraCompileAfterSetResult CompileResult = UeAgentNiagaraOps::CompileEmitterScriptsAfterSet(EditContext.EmitterData, Ctx.Params, true);
 
 	bool bSaveAfterSet = false;
 	JsonTryGetBool(Ctx.Params, TEXT("save_after_set"), bSaveAfterSet);
@@ -172,9 +152,7 @@ bool FUeAgentHttpServer::CmdNiagaraEmitterAddRenderer(const FUeAgentRequestConte
 	{
 		OutData->SetObjectField(TEXT("initial_property_import_result"), InitialPropertyResult);
 	}
-	OutData->SetBoolField(TEXT("compile_after_set"), bCompileAfterSet);
-	OutData->SetBoolField(TEXT("compilation_requested"), bCompilationRequested);
-	OutData->SetBoolField(TEXT("compilation_complete"), bCompilationComplete);
+	UeAgentNiagaraOps::AppendCompileAfterSetFields(OutData, CompileResult);
 	OutData->SetBoolField(TEXT("saved"), bSaveAfterSet);
 	return true;
 }
@@ -202,27 +180,7 @@ bool FUeAgentHttpServer::CmdNiagaraEmitterRemoveRenderer(const FUeAgentRequestCo
 	EditContext.Emitter->RemoveRenderer(Renderer, EditContext.VersionGuid);
 	EditContext.Emitter->MarkPackageDirty();
 
-	bool bCompileAfterSet = true;
-	JsonTryGetBool(Ctx.Params, TEXT("compile_after_set"), bCompileAfterSet);
-	bool bWaitForComplete = true;
-	JsonTryGetBool(Ctx.Params, TEXT("wait_for_complete"), bWaitForComplete);
-	bool bCompilationRequested = false;
-	bool bCompilationComplete = false;
-	if (bCompileAfterSet)
-	{
-		TArray<UNiagaraScript*> EmitterScripts;
-		EditContext.EmitterData->GetScripts(EmitterScripts, false, false);
-		for (UNiagaraScript* Script : EmitterScripts)
-		{
-			if (!Script)
-			{
-				continue;
-			}
-			Script->RequestCompile(Script->GetExposedVersion().VersionGuid, false);
-			bCompilationRequested = true;
-		}
-		bCompilationComplete = !bWaitForComplete;
-	}
+	const UeAgentNiagaraOps::FNiagaraCompileAfterSetResult CompileResult = UeAgentNiagaraOps::CompileEmitterScriptsAfterSet(EditContext.EmitterData, Ctx.Params, true);
 
 	bool bSaveAfterSet = false;
 	JsonTryGetBool(Ctx.Params, TEXT("save_after_set"), bSaveAfterSet);
@@ -239,9 +197,7 @@ bool FUeAgentHttpServer::CmdNiagaraEmitterRemoveRenderer(const FUeAgentRequestCo
 	OutData->SetStringField(TEXT("removed_renderer_name"), RemovedRendererName);
 	OutData->SetStringField(TEXT("removed_renderer_class"), RemovedRendererClass);
 	OutData->SetNumberField(TEXT("removed_renderer_index"), RendererIndex);
-	OutData->SetBoolField(TEXT("compile_after_set"), bCompileAfterSet);
-	OutData->SetBoolField(TEXT("compilation_requested"), bCompilationRequested);
-	OutData->SetBoolField(TEXT("compilation_complete"), bCompilationComplete);
+	UeAgentNiagaraOps::AppendCompileAfterSetFields(OutData, CompileResult);
 	OutData->SetBoolField(TEXT("saved"), bSaveAfterSet);
 	return true;
 }
@@ -294,27 +250,7 @@ bool FUeAgentHttpServer::CmdNiagaraEmitterMoveRenderer(const FUeAgentRequestCont
 	EditContext.Emitter->MoveRenderer(Renderer, TargetIndex, EditContext.VersionGuid);
 	EditContext.Emitter->MarkPackageDirty();
 
-	bool bCompileAfterSet = true;
-	JsonTryGetBool(Ctx.Params, TEXT("compile_after_set"), bCompileAfterSet);
-	bool bWaitForComplete = true;
-	JsonTryGetBool(Ctx.Params, TEXT("wait_for_complete"), bWaitForComplete);
-	bool bCompilationRequested = false;
-	bool bCompilationComplete = false;
-	if (bCompileAfterSet)
-	{
-		TArray<UNiagaraScript*> EmitterScripts;
-		EditContext.EmitterData->GetScripts(EmitterScripts, false, false);
-		for (UNiagaraScript* Script : EmitterScripts)
-		{
-			if (!Script)
-			{
-				continue;
-			}
-			Script->RequestCompile(Script->GetExposedVersion().VersionGuid, false);
-			bCompilationRequested = true;
-		}
-		bCompilationComplete = !bWaitForComplete;
-	}
+	const UeAgentNiagaraOps::FNiagaraCompileAfterSetResult CompileResult = UeAgentNiagaraOps::CompileEmitterScriptsAfterSet(EditContext.EmitterData, Ctx.Params, true);
 
 	bool bSaveAfterSet = false;
 	JsonTryGetBool(Ctx.Params, TEXT("save_after_set"), bSaveAfterSet);
@@ -344,9 +280,7 @@ bool FUeAgentHttpServer::CmdNiagaraEmitterMoveRenderer(const FUeAgentRequestCont
 	OutData->SetNumberField(TEXT("target_index"), TargetIndex);
 	OutData->SetNumberField(TEXT("new_index"), NewRendererIndex);
 	OutData->SetObjectField(TEXT("renderer"), UeAgentNiagaraOps::BuildRendererJson(*Renderer, NewRendererIndex));
-	OutData->SetBoolField(TEXT("compile_after_set"), bCompileAfterSet);
-	OutData->SetBoolField(TEXT("compilation_requested"), bCompilationRequested);
-	OutData->SetBoolField(TEXT("compilation_complete"), bCompilationComplete);
+	UeAgentNiagaraOps::AppendCompileAfterSetFields(OutData, CompileResult);
 	OutData->SetBoolField(TEXT("saved"), bSaveAfterSet);
 	OutData->SetBoolField(TEXT("moved"), true);
 	return true;
@@ -445,27 +379,7 @@ bool FUeAgentHttpServer::CmdNiagaraEmitterSetRendererProperty(const FUeAgentRequ
 	}
 	EditContext.Emitter->MarkPackageDirty();
 
-	bool bCompileAfterSet = true;
-	JsonTryGetBool(Ctx.Params, TEXT("compile_after_set"), bCompileAfterSet);
-	bool bWaitForComplete = true;
-	JsonTryGetBool(Ctx.Params, TEXT("wait_for_complete"), bWaitForComplete);
-	bool bCompilationRequested = false;
-	bool bCompilationComplete = false;
-	if (bCompileAfterSet)
-	{
-		TArray<UNiagaraScript*> EmitterScripts;
-		EditContext.EmitterData->GetScripts(EmitterScripts, false, false);
-		for (UNiagaraScript* Script : EmitterScripts)
-		{
-			if (!Script)
-			{
-				continue;
-			}
-			Script->RequestCompile(Script->GetExposedVersion().VersionGuid, false);
-			bCompilationRequested = true;
-		}
-		bCompilationComplete = !bWaitForComplete;
-	}
+	const UeAgentNiagaraOps::FNiagaraCompileAfterSetResult CompileResult = UeAgentNiagaraOps::CompileEmitterScriptsAfterSet(EditContext.EmitterData, Ctx.Params, true);
 
 	bool bSaveAfterSet = false;
 	JsonTryGetBool(Ctx.Params, TEXT("save_after_set"), bSaveAfterSet);
@@ -486,9 +400,7 @@ bool FUeAgentHttpServer::CmdNiagaraEmitterSetRendererProperty(const FUeAgentRequ
 	OutData->SetStringField(TEXT("applied_value_text"), AppliedValueText);
 	SetPropertyImportResultFields(OutData, nullptr, ValueText, AppliedValueText, TEXT("imported_and_read_back"));
 	OutData->SetStringField(TEXT("cpp_type"), CppType);
-	OutData->SetBoolField(TEXT("compile_after_set"), bCompileAfterSet);
-	OutData->SetBoolField(TEXT("compilation_requested"), bCompilationRequested);
-	OutData->SetBoolField(TEXT("compilation_complete"), bCompilationComplete);
+	UeAgentNiagaraOps::AppendCompileAfterSetFields(OutData, CompileResult);
 	OutData->SetBoolField(TEXT("saved"), bSaveAfterSet);
 	return true;
 }
@@ -617,27 +529,7 @@ bool FUeAgentHttpServer::CmdNiagaraEmitterAddEventHandler(const FUeAgentRequestC
 
 	UeAgentNiagaraOps::MarkEmitterGraphEdited(EditContext);
 
-	bool bCompileAfterSet = true;
-	JsonTryGetBool(Ctx.Params, TEXT("compile_after_set"), bCompileAfterSet);
-	bool bWaitForComplete = true;
-	JsonTryGetBool(Ctx.Params, TEXT("wait_for_complete"), bWaitForComplete);
-	bool bCompilationRequested = false;
-	bool bCompilationComplete = false;
-	if (bCompileAfterSet)
-	{
-		TArray<UNiagaraScript*> EmitterScripts;
-		EditContext.EmitterData->GetScripts(EmitterScripts, false, false);
-		for (UNiagaraScript* Script : EmitterScripts)
-		{
-			if (!Script)
-			{
-				continue;
-			}
-			Script->RequestCompile(Script->GetExposedVersion().VersionGuid, false);
-			bCompilationRequested = true;
-		}
-		bCompilationComplete = !bWaitForComplete;
-	}
+	const UeAgentNiagaraOps::FNiagaraCompileAfterSetResult CompileResult = UeAgentNiagaraOps::CompileEmitterScriptsAfterSet(EditContext.EmitterData, Ctx.Params, true);
 
 	bool bSaveAfterSet = false;
 	JsonTryGetBool(Ctx.Params, TEXT("save_after_set"), bSaveAfterSet);
@@ -674,9 +566,7 @@ bool FUeAgentHttpServer::CmdNiagaraEmitterAddEventHandler(const FUeAgentRequestC
 	OutData->SetStringField(TEXT("asset_path"), EditContext.Emitter->GetOutermost()->GetName());
 	OutData->SetStringField(TEXT("emitter_version"), EditContext.VersionGuid.ToString(EGuidFormats::DigitsWithHyphensLower));
 	OutData->SetObjectField(TEXT("event_handler"), UeAgentNiagaraOps::BuildEventHandlerJson(*AddedEventHandler, AddedEventIndex));
-	OutData->SetBoolField(TEXT("compile_after_set"), bCompileAfterSet);
-	OutData->SetBoolField(TEXT("compilation_requested"), bCompilationRequested);
-	OutData->SetBoolField(TEXT("compilation_complete"), bCompilationComplete);
+	UeAgentNiagaraOps::AppendCompileAfterSetFields(OutData, CompileResult);
 	OutData->SetBoolField(TEXT("saved"), bSaveAfterSet);
 	return true;
 }
@@ -709,27 +599,7 @@ bool FUeAgentHttpServer::CmdNiagaraEmitterRemoveEventHandler(const FUeAgentReque
 	}
 	UeAgentNiagaraOps::MarkEmitterGraphEdited(EditContext);
 
-	bool bCompileAfterSet = true;
-	JsonTryGetBool(Ctx.Params, TEXT("compile_after_set"), bCompileAfterSet);
-	bool bWaitForComplete = true;
-	JsonTryGetBool(Ctx.Params, TEXT("wait_for_complete"), bWaitForComplete);
-	bool bCompilationRequested = false;
-	bool bCompilationComplete = false;
-	if (bCompileAfterSet)
-	{
-		TArray<UNiagaraScript*> EmitterScripts;
-		EditContext.EmitterData->GetScripts(EmitterScripts, false, false);
-		for (UNiagaraScript* Script : EmitterScripts)
-		{
-			if (!Script)
-			{
-				continue;
-			}
-			Script->RequestCompile(Script->GetExposedVersion().VersionGuid, false);
-			bCompilationRequested = true;
-		}
-		bCompilationComplete = !bWaitForComplete;
-	}
+	const UeAgentNiagaraOps::FNiagaraCompileAfterSetResult CompileResult = UeAgentNiagaraOps::CompileEmitterScriptsAfterSet(EditContext.EmitterData, Ctx.Params, true);
 
 	bool bSaveAfterSet = false;
 	JsonTryGetBool(Ctx.Params, TEXT("save_after_set"), bSaveAfterSet);
@@ -746,9 +616,7 @@ bool FUeAgentHttpServer::CmdNiagaraEmitterRemoveEventHandler(const FUeAgentReque
 	OutData->SetNumberField(TEXT("removed_event_index"), EventIndex);
 	OutData->SetStringField(TEXT("removed_script_usage_id"), RemovedUsageId.ToString(EGuidFormats::DigitsWithHyphensLower));
 	OutData->SetStringField(TEXT("removed_source_event_name"), RemovedSourceEventName);
-	OutData->SetBoolField(TEXT("compile_after_set"), bCompileAfterSet);
-	OutData->SetBoolField(TEXT("compilation_requested"), bCompilationRequested);
-	OutData->SetBoolField(TEXT("compilation_complete"), bCompilationComplete);
+	UeAgentNiagaraOps::AppendCompileAfterSetFields(OutData, CompileResult);
 	OutData->SetBoolField(TEXT("saved"), bSaveAfterSet);
 	return true;
 }
@@ -854,27 +722,7 @@ bool FUeAgentHttpServer::CmdNiagaraEmitterSetEventHandlerProperty(const FUeAgent
 		*ValueText);
 	UeAgentNiagaraOps::MarkEmitterGraphEdited(EditContext);
 
-	bool bCompileAfterSet = true;
-	JsonTryGetBool(Ctx.Params, TEXT("compile_after_set"), bCompileAfterSet);
-	bool bWaitForComplete = true;
-	JsonTryGetBool(Ctx.Params, TEXT("wait_for_complete"), bWaitForComplete);
-	bool bCompilationRequested = false;
-	bool bCompilationComplete = false;
-	if (bCompileAfterSet)
-	{
-		TArray<UNiagaraScript*> EmitterScripts;
-		EditContext.EmitterData->GetScripts(EmitterScripts, false, false);
-		for (UNiagaraScript* Script : EmitterScripts)
-		{
-			if (!Script)
-			{
-				continue;
-			}
-			Script->RequestCompile(Script->GetExposedVersion().VersionGuid, false);
-			bCompilationRequested = true;
-		}
-		bCompilationComplete = !bWaitForComplete;
-	}
+	const UeAgentNiagaraOps::FNiagaraCompileAfterSetResult CompileResult = UeAgentNiagaraOps::CompileEmitterScriptsAfterSet(EditContext.EmitterData, Ctx.Params, true);
 
 	bool bSaveAfterSet = false;
 	JsonTryGetBool(Ctx.Params, TEXT("save_after_set"), bSaveAfterSet);
@@ -894,9 +742,7 @@ bool FUeAgentHttpServer::CmdNiagaraEmitterSetEventHandlerProperty(const FUeAgent
 	OutData->SetStringField(TEXT("applied_value_text"), AppliedValueText);
 	SetPropertyImportResultFields(OutData, nullptr, ValueText, AppliedValueText, TEXT("imported_and_read_back"));
 	OutData->SetStringField(TEXT("cpp_type"), CppType);
-	OutData->SetBoolField(TEXT("compile_after_set"), bCompileAfterSet);
-	OutData->SetBoolField(TEXT("compilation_requested"), bCompilationRequested);
-	OutData->SetBoolField(TEXT("compilation_complete"), bCompilationComplete);
+	UeAgentNiagaraOps::AppendCompileAfterSetFields(OutData, CompileResult);
 	OutData->SetBoolField(TEXT("saved"), bSaveAfterSet);
 	return true;
 }

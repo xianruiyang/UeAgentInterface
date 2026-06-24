@@ -1,6 +1,7 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "Server/UeAgentHttpServer.h"
+#include "UeAgentLevelContentJsonOps.h"
 
 #include "ActorFactories/ActorFactory.h"
 #include "Builders/CubeBuilder.h"
@@ -8,6 +9,7 @@
 #include "Components/ActorComponent.h"
 #include "Components/PrimitiveComponent.h"
 #include "Components/SceneComponent.h"
+#include "Components/SkeletalMeshComponent.h"
 #include "Components/SplineComponent.h"
 #include "Components/StaticMeshComponent.h"
 #include "Dom/JsonObject.h"
@@ -16,6 +18,7 @@
 #include "Engine/Light.h"
 #include "Engine/OverlapResult.h"
 #include "Engine/PointLight.h"
+#include "Engine/SkeletalMesh.h"
 #include "Engine/Selection.h"
 #include "Engine/StaticMesh.h"
 #include "Engine/StaticMeshActor.h"
@@ -27,6 +30,7 @@
 #include "FileHelpers.h"
 #include "GameFramework/Actor.h"
 #include "Misc/FileHelper.h"
+#include "Misc/PackageName.h"
 #include "Misc/Paths.h"
 #include "NavMesh/NavMeshBoundsVolume.h"
 #include "NavigationPath.h"
@@ -257,7 +261,7 @@ namespace UeAgentLevelContentJson
 		return false;
 	}
 
-	static bool TryGetStringAny(const TSharedPtr<FJsonObject>& Obj, std::initializer_list<const TCHAR*> Keys, FString& OutValue)
+	bool TryGetStringAny(const TSharedPtr<FJsonObject>& Obj, std::initializer_list<const TCHAR*> Keys, FString& OutValue)
 	{
 		if (!Obj.IsValid())
 		{
@@ -273,7 +277,7 @@ namespace UeAgentLevelContentJson
 		return false;
 	}
 
-	static bool TryGetBoolAny(const TSharedPtr<FJsonObject>& Obj, std::initializer_list<const TCHAR*> Keys, bool& OutValue)
+	bool TryGetBoolAny(const TSharedPtr<FJsonObject>& Obj, std::initializer_list<const TCHAR*> Keys, bool& OutValue)
 	{
 		if (!Obj.IsValid())
 		{
@@ -301,7 +305,7 @@ namespace UeAgentLevelContentJson
 		return Obj.IsValid() && Obj->TryGetArrayField(Key, OutArray) && OutArray;
 	}
 
-	static bool TryGetObject(const TSharedPtr<FJsonObject>& Obj, const FString& Key, TSharedPtr<FJsonObject>& OutObj)
+	bool TryGetObject(const TSharedPtr<FJsonObject>& Obj, const FString& Key, TSharedPtr<FJsonObject>& OutObj)
 	{
 		OutObj.Reset();
 		const TSharedPtr<FJsonObject>* Found = nullptr;
@@ -1305,6 +1309,7 @@ namespace UeAgentLevelContentJson
 
 	static FString SanitizeNameImportText(const FString& ImportText);
 	static void RefreshObjectAfterPropertyImport(UObject* TargetObject, const FString& ResolvedPropertyPath, const FString& ImportText, TSharedPtr<FJsonObject>& InOutResult);
+	static bool SetSkeletalMeshComponentAssetFromJson(UObject* TargetObject, const FString& PropertyPath, const FString& ResolvedPropertyPath, FProperty* Property, void* ValuePtr, const FString& ImportText, TSharedPtr<FJsonObject>& OutResult, FString& OutError);
 
 	static bool SetPrimitivePhysicsVirtualPropertyFromJson(UObject* Obj, const FString& PropertyPath, const TSharedPtr<FJsonValue>& Value, UWorld* World, TSharedPtr<FJsonObject>& OutResult, FString& OutError)
 	{
@@ -1439,6 +1444,104 @@ namespace UeAgentLevelContentJson
 		return Clean;
 	}
 
+	static FString NormalizeObjectPathImportText(const FString& ImportText)
+	{
+		FString Clean = SanitizeNameImportText(ImportText);
+		if (Clean.StartsWith(TEXT("Object="), ESearchCase::IgnoreCase))
+		{
+			Clean = Clean.Mid(7).TrimStartAndEnd();
+		}
+		Clean.TrimQuotesInline();
+
+		int32 FirstQuote = INDEX_NONE;
+		int32 LastQuote = INDEX_NONE;
+		if (Clean.FindChar(TEXT('\''), FirstQuote) && Clean.FindLastChar(TEXT('\''), LastQuote) && LastQuote > FirstQuote)
+		{
+			Clean = Clean.Mid(FirstQuote + 1, LastQuote - FirstQuote - 1).TrimStartAndEnd();
+		}
+
+		if (Clean.StartsWith(TEXT("/")) && !Clean.Contains(TEXT(".")))
+		{
+			const FString AssetName = FPackageName::GetLongPackageAssetName(Clean);
+			if (!AssetName.IsEmpty())
+			{
+				Clean = FString::Printf(TEXT("%s.%s"), *Clean, *AssetName);
+			}
+		}
+		return Clean;
+	}
+
+	static bool IsSkeletalMeshComponentAssetPropertyPath(const FString& ResolvedPropertyPath)
+	{
+		const FString Normalized = ResolvedPropertyPath.TrimStartAndEnd();
+		return Normalized.Equals(TEXT("SkeletalMesh"), ESearchCase::IgnoreCase)
+			|| Normalized.Equals(TEXT("SkeletalMeshAsset"), ESearchCase::IgnoreCase)
+			|| Normalized.Equals(TEXT("SkinnedAsset"), ESearchCase::IgnoreCase);
+	}
+
+	static bool SetSkeletalMeshComponentAssetFromJson(UObject* TargetObject, const FString& PropertyPath, const FString& ResolvedPropertyPath, FProperty* Property, void* ValuePtr, const FString& ImportText, TSharedPtr<FJsonObject>& OutResult, FString& OutError)
+	{
+		USkeletalMeshComponent* SkeletalMeshComponent = Cast<USkeletalMeshComponent>(TargetObject);
+		if (!SkeletalMeshComponent || !IsSkeletalMeshComponentAssetPropertyPath(ResolvedPropertyPath))
+		{
+			return false;
+		}
+
+		const FString MeshObjectPath = NormalizeObjectPathImportText(ImportText);
+		USkeletalMesh* Mesh = nullptr;
+		if (!MeshObjectPath.IsEmpty()
+			&& !MeshObjectPath.Equals(TEXT("None"), ESearchCase::IgnoreCase)
+			&& !MeshObjectPath.Equals(TEXT("null"), ESearchCase::IgnoreCase))
+		{
+			Mesh = Cast<USkeletalMesh>(StaticLoadObject(USkeletalMesh::StaticClass(), nullptr, *MeshObjectPath));
+			if (!Mesh)
+			{
+				OutError = TEXT("skeletal_mesh_asset_not_found");
+				OutResult = MakePropertyResult(TargetObject->GetPathName(), PropertyPath, TEXT("import_failed"), ImportText, TEXT(""), OutError);
+				OutResult->SetStringField(TEXT("resolved_property_path"), ResolvedPropertyPath);
+				OutResult->SetStringField(TEXT("property_assignment_method"), TEXT("skeletal_mesh_component_setter"));
+				OutResult->SetStringField(TEXT("normalized_object_path"), MeshObjectPath);
+				return true;
+			}
+		}
+
+		SkeletalMeshComponent->Modify();
+		SkeletalMeshComponent->SetSkeletalMesh(Mesh, true);
+		SkeletalMeshComponent->UpdateBounds();
+		SkeletalMeshComponent->MarkRenderTransformDirty();
+		SkeletalMeshComponent->MarkRenderStateDirty();
+		SkeletalMeshComponent->PostEditChange();
+		SkeletalMeshComponent->MarkPackageDirty();
+
+		FString Exported;
+		if (Property && ValuePtr)
+		{
+			Property->ExportTextItem_Direct(Exported, ValuePtr, nullptr, TargetObject, PPF_None);
+		}
+		if (Exported.IsEmpty())
+		{
+			Exported = Mesh ? Mesh->GetPathName() : TEXT("None");
+		}
+
+		OutResult = MakePropertyResult(TargetObject->GetPathName(), PropertyPath, TEXT("imported_and_read_back"), ImportText, Exported, TEXT(""));
+		OutResult->SetStringField(TEXT("resolved_property_path"), ResolvedPropertyPath);
+		OutResult->SetStringField(TEXT("property_assignment_method"), TEXT("skeletal_mesh_component_setter"));
+		OutResult->SetBoolField(TEXT("skeletal_mesh_setter_applied"), true);
+		OutResult->SetStringField(TEXT("normalized_object_path"), MeshObjectPath);
+		OutResult->SetStringField(TEXT("skeletal_mesh_path_read_back"), Mesh ? Mesh->GetPathName() : TEXT("None"));
+		RefreshObjectAfterPropertyImport(TargetObject, ResolvedPropertyPath, ImportText, OutResult);
+		Exported.Reset();
+		if (Property && ValuePtr)
+		{
+			Property->ExportTextItem_Direct(Exported, ValuePtr, nullptr, TargetObject, PPF_None);
+			if (!Exported.IsEmpty())
+			{
+				OutResult->SetStringField(TEXT("property_value_read_back"), Exported);
+			}
+		}
+		return true;
+	}
+
 	static bool PropertyPathTouchesPrimitiveCollisionState(const FString& PropertyPath)
 	{
 		const FString Normalized = PropertyPath.TrimStartAndEnd();
@@ -1552,6 +1655,10 @@ namespace UeAgentLevelContentJson
 
 		const FString ImportText = JsonValueToImportText(Value, World);
 		TargetObject->Modify();
+		if (SetSkeletalMeshComponentAssetFromJson(TargetObject, PropertyPath, ResolvedPropertyPath, Property, ValuePtr, ImportText, OutResult, OutError))
+		{
+			return OutError.IsEmpty();
+		}
 		if (UPrimitiveComponent* PrimitiveComponent = Cast<UPrimitiveComponent>(TargetObject))
 		{
 			if (IsPrimitiveCollisionProfilePropertyPath(ResolvedPropertyPath))
@@ -4394,7 +4501,7 @@ namespace UeAgentLevelContentJson
 		return Diff;
 	}
 
-	static TSharedPtr<FJsonObject> BuildRepairDiagnosis(UWorld* World, const TSharedPtr<FJsonObject>& Params)
+	TSharedPtr<FJsonObject> BuildRepairDiagnosis(UWorld* World, const TSharedPtr<FJsonObject>& Params)
 	{
 		TSharedPtr<FJsonObject> Data = MakeShared<FJsonObject>();
 		Data->SetStringField(TEXT("schema"), RepairSchema);
@@ -4448,7 +4555,7 @@ namespace UeAgentLevelContentJson
 		return Data;
 	}
 
-	static TSharedPtr<FJsonObject> MergeThreeWay(const TSharedPtr<FJsonObject>& Base, const TSharedPtr<FJsonObject>& Current, const TSharedPtr<FJsonObject>& Target)
+	TSharedPtr<FJsonObject> MergeThreeWay(const TSharedPtr<FJsonObject>& Base, const TSharedPtr<FJsonObject>& Current, const TSharedPtr<FJsonObject>& Target)
 	{
 		TSharedPtr<FJsonObject> Result = MakeShared<FJsonObject>();
 		Result->SetStringField(TEXT("schema"), MergeSchema);
@@ -4863,102 +4970,3 @@ bool FUeAgentHttpServer::CmdLevelContentDeleteScope(const FUeAgentRequestContext
 	return true;
 }
 
-bool FUeAgentHttpServer::CmdLevelContentMergeJson(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
-{
-	TSharedPtr<FJsonObject> Base;
-	TSharedPtr<FJsonObject> Current;
-	TSharedPtr<FJsonObject> Target;
-	if (!Ctx.Params.IsValid() ||
-		!UeAgentLevelContentJson::TryGetObject(Ctx.Params, TEXT("base"), Base) ||
-		!UeAgentLevelContentJson::TryGetObject(Ctx.Params, TEXT("current"), Current) ||
-		!UeAgentLevelContentJson::TryGetObject(Ctx.Params, TEXT("target"), Target) ||
-		!Base.IsValid() || !Current.IsValid() || !Target.IsValid())
-	{
-		OutError = TEXT("missing_base_current_target");
-		return false;
-	}
-	OutData = UeAgentLevelContentJson::MergeThreeWay(Base, Current, Target);
-	return true;
-}
-
-bool FUeAgentHttpServer::CmdLevelContentRepairJson(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
-{
-	UWorld* World = GetEditorWorld(OutError);
-	if (!World)
-	{
-		return false;
-	}
-	OutData = UeAgentLevelContentJson::BuildRepairDiagnosis(World, Ctx.Params);
-	bool bApplySafe = false;
-	UeAgentLevelContentJson::TryGetBoolAny(Ctx.Params, { TEXT("apply_safe"), TEXT("execute") }, bApplySafe);
-	OutData->SetBoolField(TEXT("apply_safe"), bApplySafe);
-	if (bApplySafe)
-	{
-		TSharedPtr<FJsonObject> CleanupData = MakeShared<FJsonObject>();
-		FString CleanupError;
-		FUeAgentRequestContext CleanupCtx = Ctx;
-		CleanupCtx.Params = MakeShared<FJsonObject>();
-		FString Prefix;
-		UeAgentLevelContentJson::TryGetStringAny(Ctx.Params, { TEXT("folder_path_prefix"), TEXT("folder_root") }, Prefix);
-		CleanupCtx.Params->SetStringField(TEXT("folder_path_prefix"), Prefix);
-		CleanupCtx.Params->SetBoolField(TEXT("dry_run"), false);
-		const bool bCleanupOk = CmdLevelCleanupEmptyFolders(CleanupCtx, CleanupData, CleanupError);
-		OutData->SetBoolField(TEXT("cleanup_empty_folders_ok"), bCleanupOk);
-		OutData->SetObjectField(TEXT("cleanup_empty_folders"), CleanupData);
-		if (!bCleanupOk)
-		{
-			OutData->SetStringField(TEXT("cleanup_empty_folders_error"), CleanupError);
-		}
-	}
-	return true;
-}
-
-bool FUeAgentHttpServer::CmdLevelContentQueryJson(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
-{
-	return ExecuteLevelContentQueryJsonInternal(Ctx, OutData, OutError, false);
-}
-
-bool FUeAgentHttpServer::CmdLevelContentValidateJson(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
-{
-	return ExecuteLevelContentValidateJsonInternal(Ctx, OutData, OutError, false);
-}
-
-bool FUeAgentHttpServer::CmdLevelContentApplyJson(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
-{
-	return ExecuteLevelContentApplyJsonInternal(Ctx, OutData, OutError, false);
-}
-
-bool FUeAgentHttpServer::CmdLevelContentDiffJson(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
-{
-	return ExecuteLevelContentDiffJsonInternal(Ctx, OutData, OutError, false);
-}
-
-bool FUeAgentHttpServer::CmdLevelContentSnapshotJson(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
-{
-	return ExecuteLevelContentSnapshotJsonInternal(Ctx, OutData, OutError, false);
-}
-
-bool FUeAgentHttpServer::CmdLevelActorExportJson(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
-{
-	return ExecuteLevelContentQueryJsonInternal(Ctx, OutData, OutError, true);
-}
-
-bool FUeAgentHttpServer::CmdLevelActorValidateJson(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
-{
-	return ExecuteLevelContentValidateJsonInternal(Ctx, OutData, OutError, true);
-}
-
-bool FUeAgentHttpServer::CmdLevelActorApplyJson(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
-{
-	return ExecuteLevelContentApplyJsonInternal(Ctx, OutData, OutError, true);
-}
-
-bool FUeAgentHttpServer::CmdLevelActorDiffJson(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
-{
-	return ExecuteLevelContentDiffJsonInternal(Ctx, OutData, OutError, true);
-}
-
-bool FUeAgentHttpServer::CmdLevelActorSnapshotJson(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
-{
-	return ExecuteLevelContentSnapshotJsonInternal(Ctx, OutData, OutError, true);
-}

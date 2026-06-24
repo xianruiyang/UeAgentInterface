@@ -9,6 +9,8 @@
 | `niagara_emitter_set_property` | **Deprecated for authoring**：设置 Emitter 版本属性 | `emitter_asset_path`（或 `asset_path`）、`property_name`、`value_text` | 仅用于局部修补 |
 | `niagara_emitter_clear_parent` | **Deprecated for authoring**：清除 Emitter parent/merge 残留 | `emitter_asset_path`（或 `asset_path`）、`clear_merge_message` | 仅用于修复父 emitter merge error 或隐藏 parent 残留 |
 
+`niagara_emitter_clear_parent` 默认 `compile_after_apply=true`。命令会在保存前读取 Niagara compile log；如果 owning system 编译等待后仍未完成，返回 `compile_incomplete_after_apply`；如果 `compile_log.has_error=true`，返回 `compile_failed_after_apply`，响应保留 `saved=false` 并且不执行最终保存。该命令仍只用于旧脚本兼容或故障修复，常规 authoring 应编辑 Niagara folder JSON 后调用 `niagara_emitter_apply_folder` / `niagara_apply_folder`。
+
 ## Renderer 管理
 
 | 指令 | 作用 | 关键参数 | 典型用法 |

@@ -1495,7 +1495,6 @@ bool FUeAgentHttpServer::CmdBlueprintExportFolder(const FUeAgentRequestContext& 
 	AssetJson->SetNumberField(TEXT("format_version"), 1);
 	AssetJson->SetStringField(TEXT("asset_kind"), TEXT("actor_blueprint"));
 	AssetJson->SetStringField(TEXT("asset_path"), AssetPath);
-	AssetJson->SetStringField(TEXT("asset_name"), FPackageName::GetLongPackageAssetName(AssetPath));
 	AssetJson->SetStringField(TEXT("parent_class"), Blueprint->ParentClass ? Blueprint->ParentClass->GetPathName() : TEXT(""));
 	AssetJson->SetStringField(TEXT("generated_class_name"), Blueprint->GeneratedClass ? Blueprint->GeneratedClass->GetName() : TEXT(""));
 
