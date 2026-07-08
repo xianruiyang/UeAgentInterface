@@ -1,16 +1,20 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "Server/UeAgentHttpServer.h"
+#include "Server/UeAgentCommandRegistry.h"
 
+#include "Utilities/UeAgentStructuredJsonFormatter.h"
 #include "Utilities/UeAgentJsonDiagnostics.h"
 #include "Module/UeAgentInterfaceLogger.h"
 #include "UeAgentInterfaceSettings.h"
 
 #include "Async/Async.h"
+#include "HAL/FileManager.h"
 #include "HttpServerModule.h"
 #include "IHttpRouter.h"
 #include "IPAddress.h"
 #include "Misc/Guid.h"
+#include "Misc/FileHelper.h"
 #include "Serialization/JsonReader.h"
 #include "Serialization/JsonSerializer.h"
 #include "SocketSubsystem.h"
@@ -151,324 +155,361 @@ namespace UeAgentHttpServer
 	{
 		return FDateTime::Now().ToString(TEXT("%Y-%m-%dT%H:%M:%S.%s"));
 	}
+
+	static bool IsObjectEmpty(const TSharedPtr<FJsonObject>& Object)
+	{
+		return !Object.IsValid() || Object->Values.Num() == 0;
+	}
+
+	static bool IsHiddenDefaultDataField(const FString& FieldName)
+	{
+		static const TSet<FString> HiddenExactFields = {
+			TEXT("timestamp"),
+			TEXT("request_id"),
+			TEXT("error"),
+			TEXT("compatibility"),
+			TEXT("command_manifest_validation"),
+			TEXT("command_param_validation"),
+			TEXT("metrics"),
+			TEXT("diagnostics"),
+			TEXT("coverage_report"),
+			TEXT("validation_report"),
+			TEXT("compile_log"),
+			TEXT("stack_issue_report"),
+			TEXT("raw"),
+			TEXT("readback"),
+			TEXT("complete_readback"),
+			TEXT("diff"),
+			TEXT("structural_diff"),
+		};
+
+		const FString Key = FieldName.ToLower();
+		return HiddenExactFields.Contains(Key) || Key.StartsWith(TEXT("raw_")) || Key.StartsWith(TEXT("debug_"));
+	}
+
+	static bool ShouldExternalizeDefaultDataField(const FString& FieldName)
+	{
+		const FString Key = FieldName.ToLower();
+		static const TSet<FString> ExternalizedExactFields = {
+			TEXT("command_manifest_validation"),
+			TEXT("command_param_validation"),
+			TEXT("coverage_report"),
+			TEXT("validation_report"),
+			TEXT("compile_log"),
+			TEXT("stack_issue_report"),
+			TEXT("readback"),
+			TEXT("complete_readback"),
+			TEXT("diff"),
+			TEXT("structural_diff"),
+			TEXT("raw"),
+		};
+		return ExternalizedExactFields.Contains(Key) || Key.StartsWith(TEXT("raw_")) || Key.EndsWith(TEXT("_report")) || Key.EndsWith(TEXT("_log"));
+	}
+
+	static FString SanitizeArtifactSegment(const FString& Value)
+	{
+		FString Out;
+		Out.Reserve(Value.Len());
+		for (const TCHAR Ch : Value)
+		{
+			if (FChar::IsAlnum(Ch) || Ch == TCHAR('-') || Ch == TCHAR('_'))
+			{
+				Out.AppendChar(Ch);
+			}
+			else
+			{
+				Out.AppendChar(TCHAR('_'));
+			}
+		}
+		Out.TrimStartAndEndInline();
+		return Out.IsEmpty() ? TEXT("artifact") : Out.Left(64);
+	}
+
+	static FString MakeResponseArtifactPath(const FUeAgentRequestContext& Ctx, const FString& FieldName)
+	{
+		const UUeAgentInterfaceSettings* Settings = UUeAgentInterfaceSettings::Get();
+		const FString RootRel = Settings ? Settings->ArtifactsDirRelative : TEXT("Saved/RemoteArtifacts");
+		const FString ResponseDir = FPaths::ConvertRelativePathToFull(FPaths::ProjectDir(), RootRel / TEXT("Responses"));
+		const FString SafeCommand = SanitizeArtifactSegment(Ctx.Command.IsEmpty() ? TEXT("command") : Ctx.Command);
+		const FString SafeRequestId = SanitizeArtifactSegment(Ctx.RequestId.IsEmpty() ? TEXT("request") : Ctx.RequestId);
+		const FString SafeField = SanitizeArtifactSegment(FieldName);
+		const FString Guid = FGuid::NewGuid().ToString(EGuidFormats::Digits);
+		return FPaths::Combine(ResponseDir, SafeCommand, FString::Printf(TEXT("%s_%s_%s.json"), *SafeRequestId, *SafeField, *Guid));
+	}
+
+	static FString JsonValueTypeName(const TSharedPtr<FJsonValue>& Value)
+	{
+		if (!Value.IsValid())
+		{
+			return TEXT("null");
+		}
+		switch (Value->Type)
+		{
+		case EJson::Object:
+			return TEXT("object");
+		case EJson::Array:
+			return TEXT("array");
+		case EJson::String:
+			return TEXT("string");
+		case EJson::Number:
+			return TEXT("number");
+		case EJson::Boolean:
+			return TEXT("boolean");
+		case EJson::Null:
+		case EJson::None:
+		default:
+			return TEXT("null");
+		}
+	}
+
+	static TSharedPtr<FJsonObject> MakeResponseArtifactDescriptor(
+		const FString& FieldName,
+		const TSharedPtr<FJsonValue>& Value,
+		const FString& FilePath)
+	{
+		TSharedPtr<FJsonObject> Descriptor = MakeShared<FJsonObject>();
+		Descriptor->SetStringField(TEXT("kind"), TEXT("response_data"));
+		Descriptor->SetStringField(TEXT("field"), FieldName);
+		Descriptor->SetStringField(TEXT("path"), FilePath);
+		Descriptor->SetStringField(TEXT("value_type"), JsonValueTypeName(Value));
+		if (Value.IsValid() && Value->Type == EJson::Object)
+		{
+			const TSharedPtr<FJsonObject> Object = Value->AsObject();
+			Descriptor->SetNumberField(TEXT("field_count"), Object.IsValid() ? Object->Values.Num() : 0);
+		}
+		else if (Value.IsValid() && Value->Type == EJson::Array)
+		{
+			Descriptor->SetNumberField(TEXT("item_count"), Value->AsArray().Num());
+		}
+		return Descriptor;
+	}
+
+	static bool SaveResponseArtifact(
+		const FUeAgentRequestContext& Ctx,
+		const FString& FieldName,
+		const TSharedPtr<FJsonValue>& Value,
+		FString& OutFilePath)
+	{
+		OutFilePath = MakeResponseArtifactPath(Ctx, FieldName);
+
+		TSharedPtr<FJsonObject> Payload = MakeShared<FJsonObject>();
+		Payload->SetStringField(TEXT("schema"), TEXT("ue_agent_interface.response_artifact.v1"));
+		Payload->SetStringField(TEXT("command"), Ctx.Command);
+		Payload->SetStringField(TEXT("request_id"), Ctx.RequestId);
+		Payload->SetStringField(TEXT("field"), FieldName);
+		Payload->SetField(TEXT("value"), Value.IsValid() ? Value : MakeShared<FJsonValueNull>());
+
+		const FString JsonText = FUeAgentStructuredJsonFormatter::WriteObject(Payload.ToSharedRef());
+		IFileManager::Get().MakeDirectory(*FPaths::GetPath(OutFilePath), true);
+		return FFileHelper::SaveStringToFile(JsonText, *OutFilePath, FFileHelper::EEncodingOptions::ForceUTF8WithoutBOM);
+	}
+
+	static void AppendExternalizedHiddenDataArtifacts(
+		const FUeAgentRequestContext& Ctx,
+		const TSharedPtr<FJsonObject>& HiddenData,
+		TArray<TSharedPtr<FJsonValue>>& InOutArtifacts,
+		TArray<TSharedPtr<FJsonValue>>& InOutWarnings)
+	{
+		if (!HiddenData.IsValid())
+		{
+			return;
+		}
+
+		for (const TPair<FString, TSharedPtr<FJsonValue>>& Pair : HiddenData->Values)
+		{
+			if (!ShouldExternalizeDefaultDataField(Pair.Key))
+			{
+				continue;
+			}
+
+			FString FilePath;
+			if (SaveResponseArtifact(Ctx, Pair.Key, Pair.Value, FilePath))
+			{
+				InOutArtifacts.Add(MakeShared<FJsonValueObject>(MakeResponseArtifactDescriptor(Pair.Key, Pair.Value, FilePath)));
+			}
+			else
+			{
+				InOutWarnings.Add(MakeShared<FJsonValueString>(FString::Printf(TEXT("artifact_externalize_failed:%s"), *Pair.Key)));
+			}
+		}
+	}
+
+	static void SplitDefaultDataFields(
+		const TSharedPtr<FJsonObject>& Data,
+		TSharedPtr<FJsonObject>& OutVisible,
+		TSharedPtr<FJsonObject>& OutHidden)
+	{
+		OutVisible = MakeShared<FJsonObject>();
+		OutHidden = MakeShared<FJsonObject>();
+
+		if (!Data.IsValid())
+		{
+			return;
+		}
+
+		for (const TPair<FString, TSharedPtr<FJsonValue>>& Pair : Data->Values)
+		{
+			if (IsHiddenDefaultDataField(Pair.Key))
+			{
+				OutHidden->SetField(Pair.Key, Pair.Value);
+			}
+			else
+			{
+				OutVisible->SetField(Pair.Key, Pair.Value);
+			}
+		}
+	}
+
+	static TSharedPtr<FJsonObject> BuildDebugObject(
+		const FUeAgentCommandOutput& Output,
+		const TSharedPtr<FJsonObject>& HiddenData)
+	{
+		TSharedPtr<FJsonObject> Debug = MakeShared<FJsonObject>();
+
+		if (Output.Debug.IsValid())
+		{
+			for (const TPair<FString, TSharedPtr<FJsonValue>>& Pair : Output.Debug->Values)
+			{
+				Debug->SetField(Pair.Key, Pair.Value);
+			}
+		}
+
+		if (!IsObjectEmpty(HiddenData))
+		{
+			Debug->SetObjectField(TEXT("filtered_data"), HiddenData);
+		}
+
+		return Debug;
+	}
+
+	static bool IsDebugResponseView(const FUeAgentResponseOptions& Options)
+	{
+		return Options.bDebug || Options.View.Equals(TEXT("debug"), ESearchCase::IgnoreCase);
+	}
+
+	static bool IsRawResponseView(const FUeAgentResponseOptions& Options)
+	{
+		return Options.View.Equals(TEXT("raw"), ESearchCase::IgnoreCase);
+	}
+
+	static bool IsSummaryResponseView(const FUeAgentResponseOptions& Options)
+	{
+		return Options.View.Equals(TEXT("summary"), ESearchCase::IgnoreCase)
+			|| Options.View.Equals(TEXT("llm_summary"), ESearchCase::IgnoreCase)
+			|| Options.View.Equals(TEXT("compact_summary"), ESearchCase::IgnoreCase);
+	}
 }
 
-namespace
+FUeAgentResponseOptions::FUeAgentResponseOptions()
+	: View(TEXT("llm_compact"))
+	, bDebug(false)
+	, Format(TEXT("structured_compact"))
+	, MaxItems(50)
 {
-	using FExactCommandInvoker = bool (*)(const FUeAgentHttpServer*, const FUeAgentRequestContext&, TSharedPtr<FJsonObject>&, TArray<TSharedPtr<FJsonValue>>&, FString&);
-	using FPrefixedCommandInvoker = bool (*)(const FUeAgentHttpServer*, const FString&, const FUeAgentRequestContext&, TSharedPtr<FJsonObject>&, FString&);
-	using FExactNoCtxConstMethod = bool (FUeAgentHttpServer::*)(TSharedPtr<FJsonObject>&, FString&) const;
-	using FExactWithCtxConstMethod = bool (FUeAgentHttpServer::*)(const FUeAgentRequestContext&, TSharedPtr<FJsonObject>&, FString&) const;
-	using FExactWithCtxArtifactsConstMethod = bool (FUeAgentHttpServer::*)(const FUeAgentRequestContext&, TSharedPtr<FJsonObject>&, TArray<TSharedPtr<FJsonValue>>&, FString&) const;
-	using FExactWithCtxMutableMethod = bool (FUeAgentHttpServer::*)(const FUeAgentRequestContext&, TSharedPtr<FJsonObject>&, FString&);
-	using FPrefixedConstMethod = bool (FUeAgentHttpServer::*)(const FString&, const FUeAgentRequestContext&, TSharedPtr<FJsonObject>&, FString&) const;
-
-	struct FExactCommandEntry
-	{
-		const TCHAR* Name;
-		FExactCommandInvoker Invoker;
-	};
-
-	struct FPrefixedCommandEntry
-	{
-		const TCHAR* Prefix;
-		FPrefixedCommandInvoker Invoker;
-	};
-
-	struct FUeAgentHttpServerCommandAccess
-	{
-		template<FExactNoCtxConstMethod Method>
-		static bool InvokeExactNoCtx(const FUeAgentHttpServer* Server, const FUeAgentRequestContext&, TSharedPtr<FJsonObject>& OutDataRef, TArray<TSharedPtr<FJsonValue>>&, FString& OutErrRef)
-		{
-			return (Server->*Method)(OutDataRef, OutErrRef);
-		}
-
-		template<FExactWithCtxConstMethod Method>
-		static bool InvokeExactWithCtx(const FUeAgentHttpServer* Server, const FUeAgentRequestContext& CommandCtx, TSharedPtr<FJsonObject>& OutDataRef, TArray<TSharedPtr<FJsonValue>>&, FString& OutErrRef)
-		{
-			return (Server->*Method)(CommandCtx, OutDataRef, OutErrRef);
-		}
-
-		template<FExactWithCtxArtifactsConstMethod Method>
-		static bool InvokeExactWithCtxArtifacts(const FUeAgentHttpServer* Server, const FUeAgentRequestContext& CommandCtx, TSharedPtr<FJsonObject>& OutDataRef, TArray<TSharedPtr<FJsonValue>>& OutArtifactsRef, FString& OutErrRef)
-		{
-			return (Server->*Method)(CommandCtx, OutDataRef, OutArtifactsRef, OutErrRef);
-		}
-
-		template<FExactWithCtxMutableMethod Method>
-		static bool InvokeExactMutableWithCtx(const FUeAgentHttpServer* Server, const FUeAgentRequestContext& CommandCtx, TSharedPtr<FJsonObject>& OutDataRef, TArray<TSharedPtr<FJsonValue>>&, FString& OutErrRef)
-		{
-			return (const_cast<FUeAgentHttpServer*>(Server)->*Method)(CommandCtx, OutDataRef, OutErrRef);
-		}
-
-		template<FPrefixedConstMethod Method>
-		static bool InvokePrefixed(const FUeAgentHttpServer* Server, const FString& CommandLower, const FUeAgentRequestContext& CommandCtx, TSharedPtr<FJsonObject>& OutDataRef, FString& OutErrRef)
-		{
-			return (Server->*Method)(CommandLower, CommandCtx, OutDataRef, OutErrRef);
-		}
-
-		static FExactCommandInvoker FindExactCommandInvoker(const FString& CommandLower)
-		{
-			static const FExactCommandEntry GExactCommandEntries[] = {
-				{ TEXT("exec_batch"), &InvokeExactWithCtxArtifacts<&FUeAgentHttpServer::ExecuteBatchCommands> },
-				{ TEXT("node_graph_list"), &InvokeExactWithCtx<&FUeAgentHttpServer::CmdNodeGraphList> },
-				{ TEXT("node_graph_layout"), &InvokeExactWithCtx<&FUeAgentHttpServer::CmdNodeGraphLayout> },
-				{ TEXT("node_catalog_search"), &InvokeExactWithCtx<&FUeAgentHttpServer::CmdNodeCatalogSearch> },
-				{ TEXT("node_catalog_categories"), &InvokeExactWithCtx<&FUeAgentHttpServer::CmdNodeCatalogCategories> },
-				{ TEXT("node_origin_resolve"), &InvokeExactWithCtx<&FUeAgentHttpServer::CmdNodeOriginResolve> },
-				{ TEXT("get_world_state"), &InvokeExactNoCtx<&FUeAgentHttpServer::CmdGetWorldState> },
-				{ TEXT("list_actors"), &InvokeExactWithCtx<&FUeAgentHttpServer::CmdListActors> },
-				{ TEXT("actor_list_components"), &InvokeExactWithCtx<&FUeAgentHttpServer::CmdActorListComponents> },
-				{ TEXT("level_list_actor_components"), &InvokeExactWithCtx<&FUeAgentHttpServer::CmdActorListComponents> },
-				{ TEXT("level_get_actor_property"), &InvokeExactWithCtx<&FUeAgentHttpServer::CmdLevelGetActorProperty> },
-				{ TEXT("actor_set_property"), &InvokeExactWithCtx<&FUeAgentHttpServer::CmdActorSetProperty> },
-				{ TEXT("level_set_actor_property"), &InvokeExactWithCtx<&FUeAgentHttpServer::CmdActorSetProperty> },
-				{ TEXT("level_get_component_property"), &InvokeExactWithCtx<&FUeAgentHttpServer::CmdLevelGetComponentProperty> },
-				{ TEXT("component_set_property"), &InvokeExactWithCtx<&FUeAgentHttpServer::CmdComponentSetProperty> },
-				{ TEXT("level_set_component_property"), &InvokeExactWithCtx<&FUeAgentHttpServer::CmdComponentSetProperty> },
-				{ TEXT("level_set_skeletal_mesh_morph_target"), &InvokeExactWithCtx<&FUeAgentHttpServer::CmdLevelSetSkeletalMeshMorphTarget> },
-				{ TEXT("level_set_skeletal_animation_pose"), &InvokeExactWithCtx<&FUeAgentHttpServer::CmdLevelSetSkeletalAnimationPose> },
-				{ TEXT("spawn_actor"), &InvokeExactWithCtx<&FUeAgentHttpServer::CmdSpawnActor> },
-				{ TEXT("level_spawn_wall_with_opening"), &InvokeExactWithCtx<&FUeAgentHttpServer::CmdLevelSpawnWallWithOpening> },
-				{ TEXT("destroy_actor"), &InvokeExactWithCtx<&FUeAgentHttpServer::CmdDestroyActor> },
-				{ TEXT("level_mark_probe"), &InvokeExactWithCtx<&FUeAgentHttpServer::CmdLevelMarkProbe> },
-				{ TEXT("level_generate_probes"), &InvokeExactWithCtx<&FUeAgentHttpServer::CmdLevelGenerateProbes> },
-				{ TEXT("level_destroy_folder_actors"), &InvokeExactWithCtx<&FUeAgentHttpServer::CmdLevelDestroyFolderActors> },
-				{ TEXT("level_cleanup_empty_folders"), &InvokeExactWithCtx<&FUeAgentHttpServer::CmdLevelCleanupEmptyFolders> },
-				{ TEXT("level_attach_actor"), &InvokeExactWithCtx<&FUeAgentHttpServer::CmdLevelAttachActor> },
-				{ TEXT("level_detach_actor"), &InvokeExactWithCtx<&FUeAgentHttpServer::CmdLevelDetachActor> },
-				{ TEXT("level_get_selection"), &InvokeExactNoCtx<&FUeAgentHttpServer::CmdLevelGetSelection> },
-				{ TEXT("level_set_selection"), &InvokeExactWithCtx<&FUeAgentHttpServer::CmdLevelSetSelection> },
-				{ TEXT("level_duplicate_actor"), &InvokeExactWithCtx<&FUeAgentHttpServer::CmdLevelDuplicateActor> },
-				{ TEXT("level_set_actor_folder"), &InvokeExactWithCtx<&FUeAgentHttpServer::CmdLevelSetActorFolder> },
-				{ TEXT("level_add_actor_tag"), &InvokeExactWithCtx<&FUeAgentHttpServer::CmdLevelAddActorTag> },
-				{ TEXT("level_get_actor_transform"), &InvokeExactWithCtx<&FUeAgentHttpServer::CmdLevelGetActorTransform> },
-				{ TEXT("level_set_actor_transform"), &InvokeExactWithCtx<&FUeAgentHttpServer::CmdLevelSetActorTransform> },
-				{ TEXT("probe_actor_transform_candidates"), &InvokeExactWithCtxArtifacts<&FUeAgentHttpServer::CmdProbeActorTransformCandidates> },
-				{ TEXT("probe_camera_pixel_scale"), &InvokeExactWithCtx<&FUeAgentHttpServer::CmdProbeCameraPixelScale> },
-				{ TEXT("probe_ik_goal_candidates"), &InvokeExactWithCtxArtifacts<&FUeAgentHttpServer::CmdProbeIKGoalCandidates> },
-				{ TEXT("probe_ik_goal_review_frames"), &InvokeExactWithCtxArtifacts<&FUeAgentHttpServer::CmdProbeIKGoalReviewFrames> },
-				{ TEXT("probe_ik_goal_apply_candidate"), &InvokeExactWithCtx<&FUeAgentHttpServer::CmdProbeIKGoalApplyCandidate> },
-				{ TEXT("level_set_actor_location"), &InvokeExactWithCtx<&FUeAgentHttpServer::CmdLevelSetActorLocation> },
-				{ TEXT("level_set_actor_rotation"), &InvokeExactWithCtx<&FUeAgentHttpServer::CmdLevelSetActorRotation> },
-				{ TEXT("level_set_actor_scale"), &InvokeExactWithCtx<&FUeAgentHttpServer::CmdLevelSetActorScale> },
-				{ TEXT("level_content_query_json"), &InvokeExactWithCtx<&FUeAgentHttpServer::CmdLevelContentQueryJson> },
-				{ TEXT("level_content_validate_json"), &InvokeExactWithCtx<&FUeAgentHttpServer::CmdLevelContentValidateJson> },
-				{ TEXT("level_content_plan_json"), &InvokeExactWithCtx<&FUeAgentHttpServer::CmdLevelContentPlanJson> },
-				{ TEXT("level_content_apply_json"), &InvokeExactWithCtx<&FUeAgentHttpServer::CmdLevelContentApplyJson> },
-				{ TEXT("level_content_diff_json"), &InvokeExactWithCtx<&FUeAgentHttpServer::CmdLevelContentDiffJson> },
-				{ TEXT("level_content_snapshot_json"), &InvokeExactWithCtx<&FUeAgentHttpServer::CmdLevelContentSnapshotJson> },
-				{ TEXT("level_content_delete_scope"), &InvokeExactWithCtx<&FUeAgentHttpServer::CmdLevelContentDeleteScope> },
-				{ TEXT("level_content_merge_json"), &InvokeExactWithCtx<&FUeAgentHttpServer::CmdLevelContentMergeJson> },
-				{ TEXT("level_content_repair_json"), &InvokeExactWithCtx<&FUeAgentHttpServer::CmdLevelContentRepairJson> },
-				{ TEXT("level_actor_export_json"), &InvokeExactWithCtx<&FUeAgentHttpServer::CmdLevelActorExportJson> },
-				{ TEXT("level_actor_validate_json"), &InvokeExactWithCtx<&FUeAgentHttpServer::CmdLevelActorValidateJson> },
-				{ TEXT("level_actor_apply_json"), &InvokeExactWithCtx<&FUeAgentHttpServer::CmdLevelActorApplyJson> },
-				{ TEXT("level_actor_diff_json"), &InvokeExactWithCtx<&FUeAgentHttpServer::CmdLevelActorDiffJson> },
-				{ TEXT("level_actor_snapshot_json"), &InvokeExactWithCtx<&FUeAgentHttpServer::CmdLevelActorSnapshotJson> },
-				{ TEXT("viewport_get_camera"), &InvokeExactNoCtx<&FUeAgentHttpServer::CmdViewportGetCamera> },
-				{ TEXT("viewport_get_warnings"), &InvokeExactWithCtx<&FUeAgentHttpServer::CmdViewportGetWarnings> },
-				{ TEXT("viewport_set_camera"), &InvokeExactWithCtx<&FUeAgentHttpServer::CmdViewportSetCamera> },
-				{ TEXT("viewport_set_realtime"), &InvokeExactWithCtx<&FUeAgentHttpServer::CmdViewportSetRealtime> },
-				{ TEXT("viewport_set_game_view"), &InvokeExactWithCtx<&FUeAgentHttpServer::CmdViewportSetGameView> },
-				{ TEXT("viewport_get_editor_interaction_state"), &InvokeExactNoCtx<&FUeAgentHttpServer::CmdViewportGetEditorInteractionState> },
-				{ TEXT("viewport_restore_editor_interaction_state"), &InvokeExactWithCtx<&FUeAgentHttpServer::CmdViewportRestoreEditorInteractionState> },
-				{ TEXT("viewport_list_view_modes"), &InvokeExactNoCtx<&FUeAgentHttpServer::CmdViewportListViewModes> },
-				{ TEXT("viewport_focus_actor"), &InvokeExactWithCtx<&FUeAgentHttpServer::CmdViewportFocusActor> },
-				{ TEXT("viewport_focus_actor_safe"), &InvokeExactWithCtx<&FUeAgentHttpServer::CmdViewportFocusActorSafe> },
-				{ TEXT("viewport_frame_actor"), &InvokeExactWithCtx<&FUeAgentHttpServer::CmdViewportFrameActor> },
-				{ TEXT("viewport_frame_selection"), &InvokeExactWithCtx<&FUeAgentHttpServer::CmdViewportFrameSelection> },
-				{ TEXT("viewport_frame_actors"), &InvokeExactWithCtx<&FUeAgentHttpServer::CmdViewportFrameActors> },
-				{ TEXT("viewport_frame_folder"), &InvokeExactWithCtx<&FUeAgentHttpServer::CmdViewportFrameFolder> },
-				{ TEXT("viewport_deproject_screen_to_world"), &InvokeExactWithCtx<&FUeAgentHttpServer::CmdViewportDeprojectScreenToWorld> },
-				{ TEXT("viewport_trace_screen_point"), &InvokeExactWithCtx<&FUeAgentHttpServer::CmdViewportTraceScreenPoint> },
-				{ TEXT("viewport_pick_actor_at_screen"), &InvokeExactWithCtx<&FUeAgentHttpServer::CmdViewportPickActorAtScreen> },
-				{ TEXT("viewport_select_actor_at_screen"), &InvokeExactWithCtx<&FUeAgentHttpServer::CmdViewportSelectActorAtScreen> },
-				{ TEXT("level_get_nearby_actor_obbs"), &InvokeExactWithCtx<&FUeAgentHttpServer::CmdLevelGetNearbyActorObbs> },
-				{ TEXT("level_validate_connectivity"), &InvokeExactWithCtx<&FUeAgentHttpServer::CmdLevelValidateConnectivity> },
-				{ TEXT("navmesh_build"), &InvokeExactWithCtx<&FUeAgentHttpServer::CmdNavmeshBuild> },
-				{ TEXT("navmesh_project_point"), &InvokeExactWithCtx<&FUeAgentHttpServer::CmdNavmeshProjectPoint> },
-				{ TEXT("navmesh_find_path"), &InvokeExactWithCtx<&FUeAgentHttpServer::CmdNavmeshFindPath> },
-				{ TEXT("navmesh_spawn_bounds_volume"), &InvokeExactWithCtx<&FUeAgentHttpServer::CmdNavmeshSpawnBoundsVolume> },
-				{ TEXT("level_trace_world_ray"), &InvokeExactWithCtx<&FUeAgentHttpServer::CmdLevelTraceWorldRay> },
-				{ TEXT("level_sweep_capsule"), &InvokeExactWithCtx<&FUeAgentHttpServer::CmdLevelSweepCapsule> },
-				{ TEXT("level_sweep_capsule_path"), &InvokeExactWithCtx<&FUeAgentHttpServer::CmdLevelSweepCapsulePath> },
-				{ TEXT("level_check_overlaps"), &InvokeExactWithCtx<&FUeAgentHttpServer::CmdLevelCheckOverlaps> },
-				{ TEXT("level_snap_to_surface"), &InvokeExactWithCtx<&FUeAgentHttpServer::CmdLevelSnapToSurface> },
-				{ TEXT("mesh_get_closest_vertex"), &InvokeExactWithCtx<&FUeAgentHttpServer::CmdMeshGetClosestVertex> },
-				{ TEXT("mesh_get_vertex_world_position"), &InvokeExactWithCtx<&FUeAgentHttpServer::CmdMeshGetVertexWorldPosition> },
-				{ TEXT("level_align_actor_vertex_to_vertex"), &InvokeExactWithCtx<&FUeAgentHttpServer::CmdLevelAlignActorVertexToVertex> },
-				{ TEXT("level_align_actor_by_bounds"), &InvokeExactWithCtx<&FUeAgentHttpServer::CmdLevelAlignActorByBounds> },
-				{ TEXT("level_align_face_to_face"), &InvokeExactWithCtx<&FUeAgentHttpServer::CmdLevelAlignFaceToFace> },
-				{ TEXT("screenshot_viewport"), &InvokeExactWithCtxArtifacts<&FUeAgentHttpServer::CmdScreenshotViewport> },
-				{ TEXT("screenshot_viewport_buffer"), &InvokeExactWithCtxArtifacts<&FUeAgentHttpServer::CmdScreenshotViewportBuffer> },
-				{ TEXT("save_current_level"), &InvokeExactWithCtx<&FUeAgentHttpServer::CmdSaveCurrentLevel> },
-				{ TEXT("level_create_blank"), &InvokeExactWithCtx<&FUeAgentHttpServer::CmdLevelCreateBlank> },
-				{ TEXT("level_open"), &InvokeExactWithCtx<&FUeAgentHttpServer::CmdLevelOpen> },
-				{ TEXT("begin_transaction"), &InvokeExactMutableWithCtx<&FUeAgentHttpServer::CmdBeginTransaction> },
-				{ TEXT("end_transaction"), &InvokeExactMutableWithCtx<&FUeAgentHttpServer::CmdEndTransaction> },
-				{ TEXT("undo"), &InvokeExactNoCtx<&FUeAgentHttpServer::CmdUndo> },
-				{ TEXT("redo"), &InvokeExactNoCtx<&FUeAgentHttpServer::CmdRedo> },
-				{ TEXT("editor_get_open_assets"), &InvokeExactNoCtx<&FUeAgentHttpServer::CmdEditorGetOpenAssets> },
-				{ TEXT("open_asset_editor"), &InvokeExactWithCtx<&FUeAgentHttpServer::CmdOpenAssetEditor> },
-				{ TEXT("save_asset"), &InvokeExactWithCtx<&FUeAgentHttpServer::CmdSaveAsset> },
-				{ TEXT("asset_duplicate"), &InvokeExactWithCtx<&FUeAgentHttpServer::CmdAssetDuplicate> },
-				{ TEXT("asset_move"), &InvokeExactWithCtx<&FUeAgentHttpServer::CmdAssetMove> },
-				{ TEXT("asset_delete"), &InvokeExactWithCtx<&FUeAgentHttpServer::CmdAssetDelete> },
-				{ TEXT("asset_fixup_redirectors"), &InvokeExactWithCtx<&FUeAgentHttpServer::CmdAssetFixupRedirectors> },
-				{ TEXT("asset_reference_graph"), &InvokeExactWithCtx<&FUeAgentHttpServer::CmdAssetReferenceGraph> },
-				{ TEXT("asset_import_texture"), &InvokeExactWithCtx<&FUeAgentHttpServer::CmdAssetImportTexture> },
-				{ TEXT("asset_import_fbx_skeletal_mesh"), &InvokeExactWithCtx<&FUeAgentHttpServer::CmdAssetImportFbxSkeletalMesh> },
-				{ TEXT("asset_import_fbx_animation"), &InvokeExactWithCtx<&FUeAgentHttpServer::CmdAssetImportFbxAnimation> },
-				{ TEXT("asset_import_geometry_cache"), &InvokeExactWithCtx<&FUeAgentHttpServer::CmdAssetImportGeometryCache> },
-				{ TEXT("asset_export_property_json"), &InvokeExactWithCtx<&FUeAgentHttpServer::CmdAssetExportPropertyJson> },
-				{ TEXT("asset_apply_property_json"), &InvokeExactWithCtx<&FUeAgentHttpServer::CmdAssetApplyPropertyJson> },
-				{ TEXT("curve_export_json"), &InvokeExactWithCtx<&FUeAgentHttpServer::CmdCurveExportJson> },
-				{ TEXT("curve_apply_json"), &InvokeExactWithCtx<&FUeAgentHttpServer::CmdCurveApplyJson> },
-				{ TEXT("editor_console_exec"), &InvokeExactWithCtx<&FUeAgentHttpServer::CmdEditorConsoleExec> },
-				{ TEXT("editor_list_dirty_resources"), &InvokeExactNoCtx<&FUeAgentHttpServer::CmdEditorListDirtyResources> },
-				{ TEXT("editor_resolve_dirty_resources"), &InvokeExactWithCtx<&FUeAgentHttpServer::CmdEditorResolveDirtyResources> },
-				{ TEXT("editor_close"), &InvokeExactWithCtx<&FUeAgentHttpServer::CmdEditorClose> },
-				{ TEXT("editor_prepare_exit"), &InvokeExactWithCtx<&FUeAgentHttpServer::CmdEditorPrepareExit> },
-				{ TEXT("landscape_create"), &InvokeExactWithCtx<&FUeAgentHttpServer::CmdLandscapeCreate> },
-				{ TEXT("landscape_raise_circle"), &InvokeExactWithCtx<&FUeAgentHttpServer::CmdLandscapeRaiseCircle> },
-				{ TEXT("project_settings_export_index"), &InvokeExactWithCtx<&FUeAgentHttpServer::CmdProjectSettingsExportIndex> },
-				{ TEXT("project_settings_export_page"), &InvokeExactWithCtx<&FUeAgentHttpServer::CmdProjectSettingsExportPage> },
-				{ TEXT("project_settings_validate_page"), &InvokeExactWithCtx<&FUeAgentHttpServer::CmdProjectSettingsValidatePage> },
-				{ TEXT("project_settings_apply_page"), &InvokeExactWithCtx<&FUeAgentHttpServer::CmdProjectSettingsApplyPage> },
-				{ TEXT("project_settings_diff_page"), &InvokeExactWithCtx<&FUeAgentHttpServer::CmdProjectSettingsDiffPage> },
-				{ TEXT("config_export_section"), &InvokeExactWithCtx<&FUeAgentHttpServer::CmdConfigExportSection> },
-				{ TEXT("config_apply_section"), &InvokeExactWithCtx<&FUeAgentHttpServer::CmdConfigApplySection> },
-			};
-
-			for (const FExactCommandEntry& Entry : GExactCommandEntries)
-			{
-				if (CommandLower == Entry.Name)
-				{
-					return Entry.Invoker;
-				}
-			}
-			return nullptr;
-		}
-
-		static FPrefixedCommandInvoker FindPrefixedCommandInvoker(const FString& CommandLower)
-		{
-			static const FPrefixedCommandEntry GPrefixedCommandEntries[] = {
-				{ TEXT("blueprint_"), &InvokePrefixed<&FUeAgentHttpServer::ExecuteBlueprintCommand> },
-				{ TEXT("anim_blueprint_"), &InvokePrefixed<&FUeAgentHttpServer::ExecuteAnimBlueprintCommand> },
-				{ TEXT("montage_"), &InvokePrefixed<&FUeAgentHttpServer::ExecuteMontageCommand> },
-				{ TEXT("umg_"), &InvokePrefixed<&FUeAgentHttpServer::ExecuteUmgCommand> },
-				{ TEXT("static_mesh_"), &InvokePrefixed<&FUeAgentHttpServer::ExecuteStaticMeshCommand> },
-				{ TEXT("enhanced_input_"), &InvokePrefixed<&FUeAgentHttpServer::ExecuteEnhancedInputCommand> },
-				{ TEXT("material_"), &InvokePrefixed<&FUeAgentHttpServer::ExecuteMaterialCommand> },
-				{ TEXT("sequence_"), &InvokePrefixed<&FUeAgentHttpServer::ExecuteSequenceCommand> },
-				{ TEXT("anim_sequence_"), &InvokePrefixed<&FUeAgentHttpServer::ExecuteAnimSequenceCommand> },
-				{ TEXT("blendspace_"), &InvokePrefixed<&FUeAgentHttpServer::ExecuteBlendSpaceCommand> },
-				{ TEXT("skeleton_"), &InvokePrefixed<&FUeAgentHttpServer::ExecuteSkeletonCommand> },
-				{ TEXT("skeletal_mesh_"), &InvokePrefixed<&FUeAgentHttpServer::ExecuteSkeletalMeshCommand> },
-				{ TEXT("ik_rig_"), &InvokePrefixed<&FUeAgentHttpServer::ExecuteIKRigCommand> },
-				{ TEXT("ik_retargeter_"), &InvokePrefixed<&FUeAgentHttpServer::ExecuteIKRetargeterCommand> },
-				{ TEXT("retarget_batch_"), &InvokePrefixed<&FUeAgentHttpServer::ExecuteRetargetBatchCommand> },
-				{ TEXT("control_rig_shape_library_"), &InvokePrefixed<&FUeAgentHttpServer::ExecuteControlRigShapeLibraryCommand> },
-				{ TEXT("control_rig_"), &InvokePrefixed<&FUeAgentHttpServer::ExecuteControlRigCommand> },
-				{ TEXT("geometry_cache_"), &InvokePrefixed<&FUeAgentHttpServer::ExecuteGeometryCacheCommand> },
-				{ TEXT("deformer_graph_"), &InvokePrefixed<&FUeAgentHttpServer::ExecuteDeformerGraphCommand> },
-				{ TEXT("deformer_source_library_"), &InvokePrefixed<&FUeAgentHttpServer::ExecuteDeformerSourceLibraryCommand> },
-				{ TEXT("mesh_deformer_collection_"), &InvokePrefixed<&FUeAgentHttpServer::ExecuteMeshDeformerCollectionCommand> },
-				{ TEXT("ml_deformer_"), &InvokePrefixed<&FUeAgentHttpServer::ExecuteMLDeformerCommand> },
-				{ TEXT("niagara_"), &InvokePrefixed<&FUeAgentHttpServer::ExecuteNiagaraCommand> },
-				{ TEXT("pcg_"), &InvokePrefixed<&FUeAgentHttpServer::ExecutePCGCommand> },
-				{ TEXT("modeling_"), &InvokePrefixed<&FUeAgentHttpServer::ExecuteModelingCommand> },
-				{ TEXT("blackboard_"), &InvokePrefixed<&FUeAgentHttpServer::ExecuteAICommand> },
-				{ TEXT("behavior_tree_"), &InvokePrefixed<&FUeAgentHttpServer::ExecuteAICommand> },
-				{ TEXT("bt_node_blueprint_"), &InvokePrefixed<&FUeAgentHttpServer::ExecuteAICommand> },
-				{ TEXT("state_tree_"), &InvokePrefixed<&FUeAgentHttpServer::ExecuteAICommand> },
-				{ TEXT("eqs_"), &InvokePrefixed<&FUeAgentHttpServer::ExecuteAICommand> },
-				{ TEXT("ai_perception_"), &InvokePrefixed<&FUeAgentHttpServer::ExecuteAICommand> },
-				{ TEXT("navigation_"), &InvokePrefixed<&FUeAgentHttpServer::ExecuteAICommand> },
-				{ TEXT("smart_object_definition_"), &InvokePrefixed<&FUeAgentHttpServer::ExecuteAICommand> },
-				{ TEXT("smart_object_"), &InvokePrefixed<&FUeAgentHttpServer::ExecuteAICommand> },
-				{ TEXT("ai_behavior_stack_"), &InvokePrefixed<&FUeAgentHttpServer::ExecuteAICommand> },
-				{ TEXT("level_topology_"), &InvokePrefixed<&FUeAgentHttpServer::ExecuteLevelTopologyCommand> },
-				{ TEXT("level_streaming_"), &InvokePrefixed<&FUeAgentHttpServer::ExecuteLevelTopologyCommand> },
-				{ TEXT("data_layer_"), &InvokePrefixed<&FUeAgentHttpServer::ExecuteLevelTopologyCommand> },
-				{ TEXT("world_partition_"), &InvokePrefixed<&FUeAgentHttpServer::ExecuteLevelTopologyCommand> },
-				{ TEXT("hlod_"), &InvokePrefixed<&FUeAgentHttpServer::ExecuteLevelTopologyCommand> },
-				{ TEXT("sound_wave_"), &InvokePrefixed<&FUeAgentHttpServer::ExecuteAudioCommand> },
-				{ TEXT("sound_cue_"), &InvokePrefixed<&FUeAgentHttpServer::ExecuteAudioCommand> },
-				{ TEXT("metasound_"), &InvokePrefixed<&FUeAgentHttpServer::ExecuteAudioCommand> },
-				{ TEXT("sound_attenuation_"), &InvokePrefixed<&FUeAgentHttpServer::ExecuteAudioCommand> },
-				{ TEXT("sound_concurrency_"), &InvokePrefixed<&FUeAgentHttpServer::ExecuteAudioCommand> },
-				{ TEXT("sound_class_"), &InvokePrefixed<&FUeAgentHttpServer::ExecuteAudioCommand> },
-				{ TEXT("sound_mix_"), &InvokePrefixed<&FUeAgentHttpServer::ExecuteAudioCommand> },
-				{ TEXT("sound_submix_"), &InvokePrefixed<&FUeAgentHttpServer::ExecuteAudioCommand> },
-				{ TEXT("audio_effect_preset_"), &InvokePrefixed<&FUeAgentHttpServer::ExecuteAudioCommand> },
-				{ TEXT("audio_component_"), &InvokePrefixed<&FUeAgentHttpServer::ExecuteAudioCommand> },
-				{ TEXT("audio_volume_"), &InvokePrefixed<&FUeAgentHttpServer::ExecuteAudioCommand> },
-				{ TEXT("ambient_sound_"), &InvokePrefixed<&FUeAgentHttpServer::ExecuteAudioCommand> },
-				{ TEXT("audio_runtime_"), &InvokePrefixed<&FUeAgentHttpServer::ExecuteAudioCommand> },
-				{ TEXT("audio_submix_"), &InvokePrefixed<&FUeAgentHttpServer::ExecuteAudioCommand> },
-				{ TEXT("audio_stop_"), &InvokePrefixed<&FUeAgentHttpServer::ExecuteAudioCommand> },
-				{ TEXT("runtime_virtual_texture_"), &InvokePrefixed<&FUeAgentHttpServer::ExecuteTextureRenderTargetCommand> },
-				{ TEXT("virtual_texture_"), &InvokePrefixed<&FUeAgentHttpServer::ExecuteTextureRenderTargetCommand> },
-				{ TEXT("texture_cube_array_"), &InvokePrefixed<&FUeAgentHttpServer::ExecuteTextureRenderTargetCommand> },
-				{ TEXT("texture_array_"), &InvokePrefixed<&FUeAgentHttpServer::ExecuteTextureRenderTargetCommand> },
-				{ TEXT("texture_cube_"), &InvokePrefixed<&FUeAgentHttpServer::ExecuteTextureRenderTargetCommand> },
-				{ TEXT("volume_texture_"), &InvokePrefixed<&FUeAgentHttpServer::ExecuteTextureRenderTargetCommand> },
-				{ TEXT("texture_graph_"), &InvokePrefixed<&FUeAgentHttpServer::ExecuteTextureRenderTargetCommand> },
-				{ TEXT("texture_collection_"), &InvokePrefixed<&FUeAgentHttpServer::ExecuteTextureRenderTargetCommand> },
-				{ TEXT("texture_usage_"), &InvokePrefixed<&FUeAgentHttpServer::ExecuteTextureRenderTargetCommand> },
-				{ TEXT("data_asset_"), &InvokePrefixed<&FUeAgentHttpServer::ExecuteDataDrivenCommand> },
-				{ TEXT("primary_asset_"), &InvokePrefixed<&FUeAgentHttpServer::ExecuteDataDrivenCommand> },
-				{ TEXT("data_table_"), &InvokePrefixed<&FUeAgentHttpServer::ExecuteDataDrivenCommand> },
-				{ TEXT("physical_material_"), &InvokePrefixed<&FUeAgentHttpServer::ExecutePhysicsCommand> },
-				{ TEXT("physics_constraint_"), &InvokePrefixed<&FUeAgentHttpServer::ExecutePhysicsCommand> },
-				{ TEXT("physics_asset_"), &InvokePrefixed<&FUeAgentHttpServer::ExecutePhysicsCommand> },
-				{ TEXT("physics_component_"), &InvokePrefixed<&FUeAgentHttpServer::ExecutePhysicsCommand> },
-				{ TEXT("physics_runtime_"), &InvokePrefixed<&FUeAgentHttpServer::ExecutePhysicsCommand> },
-				{ TEXT("physics_capabilities_"), &InvokePrefixed<&FUeAgentHttpServer::ExecutePhysicsCommand> },
-				{ TEXT("localization_"), &InvokePrefixed<&FUeAgentHttpServer::ExecuteProductionPipelineCommand> },
-				{ TEXT("string_table_"), &InvokePrefixed<&FUeAgentHttpServer::ExecuteProductionPipelineCommand> },
-				{ TEXT("packaging_"), &InvokePrefixed<&FUeAgentHttpServer::ExecuteProductionPipelineCommand> },
-				{ TEXT("target_platform_"), &InvokePrefixed<&FUeAgentHttpServer::ExecuteProductionPipelineCommand> },
-				{ TEXT("platform_config_"), &InvokePrefixed<&FUeAgentHttpServer::ExecuteProductionPipelineCommand> },
-				{ TEXT("device_profile_"), &InvokePrefixed<&FUeAgentHttpServer::ExecuteProductionPipelineCommand> },
-				{ TEXT("scalability_"), &InvokePrefixed<&FUeAgentHttpServer::ExecuteProductionPipelineCommand> },
-				{ TEXT("platform_profile_"), &InvokePrefixed<&FUeAgentHttpServer::ExecuteProductionPipelineCommand> },
-				{ TEXT("texture_"), &InvokePrefixed<&FUeAgentHttpServer::ExecuteTextureRenderTargetCommand> },
-				{ TEXT("render_target_"), &InvokePrefixed<&FUeAgentHttpServer::ExecuteTextureRenderTargetCommand> },
-				{ TEXT("scene_capture_"), &InvokePrefixed<&FUeAgentHttpServer::ExecuteTextureRenderTargetCommand> },
-				{ TEXT("media_source_"), &InvokePrefixed<&FUeAgentHttpServer::ExecuteTextureRenderTargetCommand> },
-				{ TEXT("media_player_"), &InvokePrefixed<&FUeAgentHttpServer::ExecuteTextureRenderTargetCommand> },
-				{ TEXT("media_texture_"), &InvokePrefixed<&FUeAgentHttpServer::ExecuteTextureRenderTargetCommand> },
-				{ TEXT("media_runtime_"), &InvokePrefixed<&FUeAgentHttpServer::ExecuteTextureRenderTargetCommand> },
-				{ TEXT("sparse_volume_texture_"), &InvokePrefixed<&FUeAgentHttpServer::ExecuteTextureRenderTargetCommand> },
-				{ TEXT("subuv_animation_"), &InvokePrefixed<&FUeAgentHttpServer::ExecuteTextureRenderTargetCommand> },
-				{ TEXT("paper_sprite_"), &InvokePrefixed<&FUeAgentHttpServer::ExecuteTextureRenderTargetCommand> },
-				{ TEXT("paper_flipbook_"), &InvokePrefixed<&FUeAgentHttpServer::ExecuteTextureRenderTargetCommand> },
-				{ TEXT("paper_tileset_"), &InvokePrefixed<&FUeAgentHttpServer::ExecuteTextureRenderTargetCommand> },
-				{ TEXT("paper_tilemap_"), &InvokePrefixed<&FUeAgentHttpServer::ExecuteTextureRenderTargetCommand> },
-				{ TEXT("paper2d_"), &InvokePrefixed<&FUeAgentHttpServer::ExecuteTextureRenderTargetCommand> },
-				{ TEXT("light_profile_"), &InvokePrefixed<&FUeAgentHttpServer::ExecuteTextureRenderTargetCommand> },
-			};
-
-			for (const FPrefixedCommandEntry& Entry : GPrefixedCommandEntries)
-			{
-				if (CommandLower.StartsWith(Entry.Prefix))
-				{
-					return Entry.Invoker;
-				}
-			}
-			return nullptr;
-		}
-	};
 }
 
-FUeAgentHttpServer::FUeAgentHttpServer() = default;
+void FUeAgentCommandOutput::Reset()
+{
+	Data.Reset();
+	Debug.Reset();
+	Artifacts.Reset();
+	Warnings.Reset();
+}
+
+TSharedPtr<FJsonObject> FUeAgentCommandOutput::GetDataOrEmpty() const
+{
+	return Data.IsValid() ? Data : MakeShared<FJsonObject>();
+}
+
+FUeAgentCommandOutput FUeAgentCommandOutput::FromLegacy(
+	const TSharedPtr<FJsonObject>& InData,
+	const TArray<TSharedPtr<FJsonValue>>& InArtifacts)
+{
+	FUeAgentCommandOutput Output;
+	Output.Data = InData.IsValid() ? InData : MakeShared<FJsonObject>();
+	Output.Artifacts = InArtifacts;
+	return Output;
+}
+
+FUeAgentHttpServer::FTransactionSpawnedActorRecord::FTransactionSpawnedActorRecord()
+	: bLevelPackageWasDirtyBeforeSpawn(false)
+	, bActorPackageWasDirtyBeforeSpawn(false)
+{
+}
+
+FUeAgentHttpServer::FUeAgentHttpServer()
+	: bRunning(false)
+	, bPythonConsoleCommandExecuted(false)
+	, ActiveTransactionIndex(INDEX_NONE)
+{
+}
 
 FUeAgentHttpServer::~FUeAgentHttpServer()
 {
 	Stop();
+}
+
+TSharedPtr<FJsonObject> FUeAgentResponseBuilder::BuildResponseEnvelope(
+	const FUeAgentRequestContext& Ctx,
+	bool bOk,
+	const FString& Error,
+	const FUeAgentCommandOutput& Output)
+{
+	TSharedPtr<FJsonObject> Root = MakeShared<FJsonObject>();
+	Root->SetBoolField(TEXT("ok"), bOk);
+
+	if (UeAgentHttpServer::IsRawResponseView(Ctx.ResponseOptions))
+	{
+		Root->SetStringField(TEXT("request_id"), Ctx.RequestId);
+		Root->SetStringField(TEXT("error"), bOk ? TEXT("") : (Error.IsEmpty() ? TEXT("command_failed") : Error));
+		Root->SetStringField(TEXT("timestamp"), UeAgentHttpServer::NowIso());
+		Root->SetObjectField(TEXT("data"), Output.GetDataOrEmpty());
+		Root->SetArrayField(TEXT("artifacts"), Output.Artifacts);
+		Root->SetArrayField(TEXT("warnings"), Output.Warnings);
+		if (!UeAgentHttpServer::IsObjectEmpty(Output.Debug))
+		{
+			Root->SetObjectField(TEXT("debug"), Output.Debug);
+		}
+		return Root;
+	}
+
+	TSharedPtr<FJsonObject> VisibleData = Output.GetDataOrEmpty();
+	TSharedPtr<FJsonObject> HiddenData = MakeShared<FJsonObject>();
+	TArray<TSharedPtr<FJsonValue>> Artifacts = Output.Artifacts;
+	TArray<TSharedPtr<FJsonValue>> Warnings = Output.Warnings;
+	const bool bSummaryView = UeAgentHttpServer::IsSummaryResponseView(Ctx.ResponseOptions);
+	if (bSummaryView)
+	{
+		UeAgentHttpServer::SplitDefaultDataFields(Output.GetDataOrEmpty(), VisibleData, HiddenData);
+		UeAgentHttpServer::AppendExternalizedHiddenDataArtifacts(Ctx, HiddenData, Artifacts, Warnings);
+	}
+
+	Root->SetObjectField(TEXT("data"), VisibleData);
+	if (!bOk)
+	{
+		Root->SetStringField(TEXT("error"), Error.IsEmpty() ? TEXT("command_failed") : Error);
+	}
+
+	if (Artifacts.Num() > 0)
+	{
+		Root->SetArrayField(TEXT("artifacts"), Artifacts);
+	}
+	if (Warnings.Num() > 0)
+	{
+		Root->SetArrayField(TEXT("warnings"), Warnings);
+	}
+
+	if (UeAgentHttpServer::IsDebugResponseView(Ctx.ResponseOptions))
+	{
+		Root->SetStringField(TEXT("request_id"), Ctx.RequestId);
+		const TSharedPtr<FJsonObject> Debug = UeAgentHttpServer::BuildDebugObject(Output, bSummaryView ? HiddenData : nullptr);
+		if (!UeAgentHttpServer::IsObjectEmpty(Debug))
+		{
+			Root->SetObjectField(TEXT("debug"), Debug);
+		}
+	}
+
+	return Root;
 }
 
 bool FUeAgentHttpServer::Start()
@@ -575,6 +616,11 @@ FString FUeAgentHttpServer::GetAuthToken() const
 	return Settings ? Settings->AuthToken : FString();
 }
 
+FString FUeAgentHttpServer::FormatResponseJson(const TSharedRef<FJsonObject>& Root, const FUeAgentResponseOptions& Options)
+{
+	return FUeAgentStructuredJsonFormatter::WriteObject(Root);
+}
+
 bool FUeAgentHttpServer::BindRoutes()
 {
 	if (!Router.IsValid())
@@ -654,15 +700,14 @@ bool FUeAgentHttpServer::HandlePing(const FHttpServerRequest& Request, const FHt
 {
 	FUeAgentInterfaceLogger::Log(TEXT("HandlePing verb=%s path=%s"), UeAgentHttpServer::VerbToString(Request.Verb), *Request.RelativePath.GetPath());
 
-	TSharedPtr<FJsonObject> Root = MakeShared<FJsonObject>();
-	Root->SetBoolField(TEXT("ok"), true);
-	Root->SetStringField(TEXT("timestamp"), UeAgentHttpServer::NowIso());
+	FUeAgentRequestContext Ctx;
+	Ctx.Command = TEXT("ping");
+	Ctx.Params = MakeShared<FJsonObject>();
+	FUeAgentCommandOutput Output;
+	Output.Data = MakeShared<FJsonObject>();
 
-	FString Out;
-	TSharedRef<TJsonWriter<>> Writer = TJsonWriterFactory<>::Create(&Out);
-	FJsonSerializer::Serialize(Root.ToSharedRef(), Writer);
-
-	OnComplete(MakeJsonResponse(200, Out));
+	const TSharedPtr<FJsonObject> Root = FUeAgentResponseBuilder::BuildResponseEnvelope(Ctx, true, FString(), Output);
+	OnComplete(MakeJsonResponse(200, FormatResponseJson(Root.ToSharedRef(), Ctx.ResponseOptions)));
 	return true;
 }
 
@@ -688,18 +733,14 @@ bool FUeAgentHttpServer::HandleStatus(const FHttpServerRequest& Request, const F
 	Data->SetStringField(TEXT("version_tag"), FUeAgentInterfaceLogger::GetVersionTag());
 	Data->SetBoolField(TEXT("screenshots_enabled"), Settings ? Settings->bEnableScreenshots : false);
 
-	TSharedPtr<FJsonObject> Root = MakeShared<FJsonObject>();
-	Root->SetBoolField(TEXT("ok"), true);
-	Root->SetStringField(TEXT("error"), TEXT(""));
-	Root->SetStringField(TEXT("timestamp"), UeAgentHttpServer::NowIso());
-	Root->SetObjectField(TEXT("data"), Data);
-	Root->SetArrayField(TEXT("artifacts"), TArray<TSharedPtr<FJsonValue>>());
+	FUeAgentRequestContext Ctx;
+	Ctx.Command = TEXT("status");
+	Ctx.Params = MakeShared<FJsonObject>();
+	FUeAgentCommandOutput Output;
+	Output.Data = Data;
 
-	FString Out;
-	TSharedRef<TJsonWriter<>> Writer = TJsonWriterFactory<>::Create(&Out);
-	FJsonSerializer::Serialize(Root.ToSharedRef(), Writer);
-
-	OnComplete(MakeJsonResponse(200, Out));
+	const TSharedPtr<FJsonObject> Root = FUeAgentResponseBuilder::BuildResponseEnvelope(Ctx, true, FString(), Output);
+	OnComplete(MakeJsonResponse(200, FormatResponseJson(Root.ToSharedRef(), Ctx.ResponseOptions)));
 	return true;
 }
 
@@ -724,33 +765,13 @@ bool FUeAgentHttpServer::HandleExec(const FHttpServerRequest& Request, const FHt
 		return true;
 	}
 
-	TSharedPtr<FJsonObject> Data;
-	TArray<TSharedPtr<FJsonValue>> Artifacts;
+	FUeAgentCommandOutput Output;
 	FString ExecError;
-	const bool bOk = ExecuteCommandOnGameThread(Ctx, Data, Artifacts, ExecError);
+	const bool bOk = ExecuteCommandOnGameThread(Ctx, Output, ExecError);
 	FUeAgentInterfaceLogger::Log(TEXT("HandleExec command=%s request_id=%s ok=%s error=%s"), *Ctx.Command, *Ctx.RequestId, bOk ? TEXT("true") : TEXT("false"), *ExecError);
 
-	TSharedPtr<FJsonObject> Root = MakeShared<FJsonObject>();
-	Root->SetBoolField(TEXT("ok"), bOk);
-	Root->SetStringField(TEXT("request_id"), Ctx.RequestId);
-	Root->SetStringField(TEXT("error"), bOk ? TEXT("") : ExecError);
-	Root->SetStringField(TEXT("timestamp"), UeAgentHttpServer::NowIso());
-
-	if (Data.IsValid())
-	{
-		Root->SetObjectField(TEXT("data"), Data);
-	}
-	else
-	{
-		Root->SetObjectField(TEXT("data"), MakeShared<FJsonObject>());
-	}
-	Root->SetArrayField(TEXT("artifacts"), Artifacts);
-
-	FString Out;
-	TSharedRef<TJsonWriter<>> Writer = TJsonWriterFactory<>::Create(&Out);
-	FJsonSerializer::Serialize(Root.ToSharedRef(), Writer);
-
-	OnComplete(MakeJsonResponse(bOk ? 200 : 400, Out));
+	const TSharedPtr<FJsonObject> Root = FUeAgentResponseBuilder::BuildResponseEnvelope(Ctx, bOk, ExecError, Output);
+	OnComplete(MakeJsonResponse(bOk ? 200 : 400, FormatResponseJson(Root.ToSharedRef(), Ctx.ResponseOptions)));
 	return true;
 }
 
@@ -805,23 +826,61 @@ TUniquePtr<FHttpServerResponse> FUeAgentHttpServer::MakeJsonResponse(int32 Code,
 
 TUniquePtr<FHttpServerResponse> FUeAgentHttpServer::MakeErrorResponse(int32 Code, const FString& ErrorCode, const FString& ErrorMessage)
 {
-	TSharedPtr<FJsonObject> Root = MakeShared<FJsonObject>();
-	Root->SetBoolField(TEXT("ok"), false);
-	Root->SetStringField(TEXT("error"), ErrorCode);
-	Root->SetStringField(TEXT("timestamp"), UeAgentHttpServer::NowIso());
+	FUeAgentRequestContext Ctx;
+	Ctx.Command = TEXT("error");
+	Ctx.Params = MakeShared<FJsonObject>();
 
-	TSharedPtr<FJsonObject> Data = MakeShared<FJsonObject>();
+	FUeAgentCommandOutput Output;
+	Output.Data = MakeShared<FJsonObject>();
+	TSharedPtr<FJsonObject> Data = Output.Data;
 	Data->SetStringField(TEXT("error_code"), ErrorCode);
 	Data->SetStringField(TEXT("error_message"), ErrorMessage);
 	Data->SetStringField(TEXT("timestamp"), UeAgentHttpServer::NowIso());
-	Root->SetObjectField(TEXT("data"), Data);
-	Root->SetArrayField(TEXT("artifacts"), TArray<TSharedPtr<FJsonValue>>());
 
-	FString Out;
-	TSharedRef<TJsonWriter<>> Writer = TJsonWriterFactory<>::Create(&Out);
-	FJsonSerializer::Serialize(Root.ToSharedRef(), Writer);
+	const TSharedPtr<FJsonObject> Root = FUeAgentResponseBuilder::BuildResponseEnvelope(Ctx, false, ErrorCode, Output);
+	return MakeJsonResponse(Code, FormatResponseJson(Root.ToSharedRef(), Ctx.ResponseOptions));
+}
 
-	return MakeJsonResponse(Code, Out);
+bool FUeAgentHttpServer::ParseResponseOptions(const TSharedPtr<FJsonObject>& Root, FUeAgentResponseOptions& OutOptions, FString& OutError)
+{
+	OutOptions = FUeAgentResponseOptions();
+
+	const TSharedPtr<FJsonObject>* OptionsObj = nullptr;
+	if (!Root.IsValid() || !Root->TryGetObjectField(TEXT("response_options"), OptionsObj) || !OptionsObj || !OptionsObj->IsValid())
+	{
+		return true;
+	}
+
+	FString View;
+	if (JsonTryGetString(*OptionsObj, TEXT("view"), View) && !View.IsEmpty())
+	{
+		OutOptions.View = View;
+	}
+
+	bool bDebug = false;
+	if (JsonTryGetBool(*OptionsObj, TEXT("debug"), bDebug))
+	{
+		OutOptions.bDebug = bDebug;
+	}
+
+	FString Format;
+	if (JsonTryGetString(*OptionsObj, TEXT("format"), Format) && !Format.IsEmpty())
+	{
+		OutOptions.Format = Format;
+	}
+
+	double MaxItems = 0.0;
+	if (JsonTryGetNumber(*OptionsObj, TEXT("max_items"), MaxItems))
+	{
+		if (MaxItems <= 0.0)
+		{
+			OutError = TEXT("invalid_response_options.max_items");
+			return false;
+		}
+		OutOptions.MaxItems = FMath::RoundToInt(MaxItems);
+	}
+
+	return true;
 }
 
 bool FUeAgentHttpServer::ParseExecBody(const FHttpServerRequest& Request, FUeAgentRequestContext& OutCtx, FString& OutError) const
@@ -856,6 +915,11 @@ bool FUeAgentHttpServer::ParseExecBody(const FHttpServerRequest& Request, FUeAge
 	else
 	{
 		OutCtx.Params = MakeShared<FJsonObject>();
+	}
+
+	if (!ParseResponseOptions(Root, OutCtx.ResponseOptions, OutError))
+	{
+		return false;
 	}
 
 	return true;
@@ -936,6 +1000,7 @@ bool FUeAgentHttpServer::ParseBatchCommands(const FUeAgentRequestContext& BatchC
 		SubCommand.RequestId = RequestId;
 		SubCommand.Command = CommandName;
 		SubCommand.Params = Params;
+		SubCommand.ResponseOptions = BatchCtx.ResponseOptions;
 		OutCommands.Add(SubCommand);
 	}
 
@@ -970,10 +1035,9 @@ bool FUeAgentHttpServer::ExecuteBatchCommands(const FUeAgentRequestContext& Batc
 	for (int32 Index = 0; Index < Commands.Num(); ++Index)
 	{
 		const FUeAgentRequestContext& SubCommand = Commands[Index];
-		TSharedPtr<FJsonObject> SubData;
-		TArray<TSharedPtr<FJsonValue>> SubArtifacts;
+		FUeAgentCommandOutput SubOutput;
 		FString SubError;
-		const bool bSubOk = ExecuteCommandOnGameThread(SubCommand, SubData, SubArtifacts, SubError);
+		const bool bSubOk = ExecuteCommandOnGameThread(SubCommand, SubOutput, SubError);
 
 		TSharedPtr<FJsonObject> Item = MakeShared<FJsonObject>();
 		Item->SetNumberField(TEXT("index"), Index);
@@ -981,8 +1045,8 @@ bool FUeAgentHttpServer::ExecuteBatchCommands(const FUeAgentRequestContext& Batc
 		Item->SetStringField(TEXT("command"), SubCommand.Command);
 		Item->SetBoolField(TEXT("ok"), bSubOk);
 		Item->SetStringField(TEXT("error"), bSubOk ? TEXT("") : SubError);
-		Item->SetObjectField(TEXT("data"), SubData.IsValid() ? SubData : MakeShared<FJsonObject>());
-		Item->SetArrayField(TEXT("artifacts"), SubArtifacts);
+		Item->SetObjectField(TEXT("data"), SubOutput.GetDataOrEmpty());
+		Item->SetArrayField(TEXT("artifacts"), SubOutput.Artifacts);
 		Results.Add(MakeShared<FJsonValueObject>(Item));
 
 		if (bSubOk)
@@ -1032,38 +1096,42 @@ bool FUeAgentHttpServer::ExecuteBatchCommands(const FUeAgentRequestContext& Batc
 	return true;
 }
 
-bool FUeAgentHttpServer::ExecuteCommandOnGameThread(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, TArray<TSharedPtr<FJsonValue>>& OutArtifacts, FString& OutError) const
+bool FUeAgentHttpServer::ExecuteCommandOnGameThread(const FUeAgentRequestContext& Ctx, FUeAgentCommandOutput& OutOutput, FString& OutError) const
 {
-	auto ExecOnGT = [this](const FUeAgentRequestContext& InCtx, TSharedPtr<FJsonObject>& Data, TArray<TSharedPtr<FJsonValue>>& Artifacts, FString& Err) -> bool
+	auto ExecOnGT = [this](const FUeAgentRequestContext& InCtx, FUeAgentCommandOutput& Output, FString& Err) -> bool
 	{
-		Data = MakeShared<FJsonObject>();
-		Artifacts.Reset();
+		Output.Reset();
 		Err.Reset();
 
+		TSharedPtr<FJsonObject> LegacyData = MakeShared<FJsonObject>();
+		TArray<TSharedPtr<FJsonValue>> LegacyArtifacts;
 		const FString Cmd = InCtx.Command.ToLower();
 
-		if (const FExactCommandInvoker ExactInvoker = FUeAgentHttpServerCommandAccess::FindExactCommandInvoker(Cmd))
+		if (const UeAgentCommandRegistry::FExactCommandInvoker ExactInvoker = UeAgentCommandRegistry::FindExactCommandInvoker(Cmd))
 		{
-			return ExactInvoker(this, InCtx, Data, Artifacts, Err);
+			const bool bOk = ExactInvoker(this, InCtx, LegacyData, LegacyArtifacts, Err);
+			Output = FUeAgentCommandOutput::FromLegacy(LegacyData, LegacyArtifacts);
+			return bOk;
 		}
 
-		if (const FPrefixedCommandInvoker PrefixedInvoker = FUeAgentHttpServerCommandAccess::FindPrefixedCommandInvoker(Cmd))
+		if (const UeAgentCommandRegistry::FPrefixedCommandInvoker PrefixedInvoker = UeAgentCommandRegistry::FindPrefixedCommandInvoker(Cmd))
 		{
-			return PrefixedInvoker(this, Cmd, InCtx, Data, Err);
+			const bool bOk = PrefixedInvoker(this, Cmd, InCtx, LegacyData, Err);
+			Output = FUeAgentCommandOutput::FromLegacy(LegacyData, LegacyArtifacts);
+			return bOk;
 		}
 
 		Err = TEXT("unknown_command");
+		Output.Data = MakeShared<FJsonObject>();
 		return false;
 	};
 
 	if (IsInGameThread())
 	{
-		TSharedPtr<FJsonObject> Data;
-		TArray<TSharedPtr<FJsonValue>> Artifacts;
+		FUeAgentCommandOutput Output;
 		FString Err;
-		const bool bOk = ExecOnGT(Ctx, Data, Artifacts, Err);
-		OutData = Data;
-		OutArtifacts = Artifacts;
+		const bool bOk = ExecOnGT(Ctx, Output, Err);
+		OutOutput = Output;
 		if (!bOk)
 		{
 			OutError = Err;
@@ -1075,8 +1143,7 @@ bool FUeAgentHttpServer::ExecuteCommandOnGameThread(const FUeAgentRequestContext
 	struct FExecResult
 	{
 		bool bOk = false;
-		TSharedPtr<FJsonObject> Data;
-		TArray<TSharedPtr<FJsonValue>> Artifacts;
+		FUeAgentCommandOutput Output;
 		FString Error;
 	};
 
@@ -1086,13 +1153,11 @@ bool FUeAgentHttpServer::ExecuteCommandOnGameThread(const FUeAgentRequestContext
 	AsyncTask(ENamedThreads::GameThread, [ExecOnGT, Ctx, Result, Done]()
 	{
 		FString Err;
-		TSharedPtr<FJsonObject> Data;
-		TArray<TSharedPtr<FJsonValue>> Artifacts;
-		const bool bOk = ExecOnGT(Ctx, Data, Artifacts, Err);
+		FUeAgentCommandOutput Output;
+		const bool bOk = ExecOnGT(Ctx, Output, Err);
 
 		Result->bOk = bOk;
-		Result->Data = Data;
-		Result->Artifacts = Artifacts;
+		Result->Output = Output;
 		Result->Error = Err;
 		Done->Trigger();
 	});
@@ -1106,8 +1171,7 @@ bool FUeAgentHttpServer::ExecuteCommandOnGameThread(const FUeAgentRequestContext
 		return false;
 	}
 
-	OutData = Result->Data;
-	OutArtifacts = Result->Artifacts;
+	OutOutput = Result->Output;
 	if (!Result->bOk)
 	{
 		OutError = Result->Error;
@@ -1115,6 +1179,15 @@ bool FUeAgentHttpServer::ExecuteCommandOnGameThread(const FUeAgentRequestContext
 	}
 
 	return true;
+}
+
+bool FUeAgentHttpServer::ExecuteCommandOnGameThread(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, TArray<TSharedPtr<FJsonValue>>& OutArtifacts, FString& OutError) const
+{
+	FUeAgentCommandOutput Output;
+	const bool bOk = ExecuteCommandOnGameThread(Ctx, Output, OutError);
+	OutData = Output.GetDataOrEmpty();
+	OutArtifacts = Output.Artifacts;
+	return bOk;
 }
 
 bool FUeAgentHttpServer::JsonTryGetObject(const TSharedPtr<FJsonObject>& Obj, const FString& Key, TSharedPtr<FJsonObject>& OutObj)

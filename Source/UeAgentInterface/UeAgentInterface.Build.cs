@@ -9,6 +9,13 @@ public class UeAgentInterface : ModuleRules
 		PCHUsage = PCHUsageMode.UseExplicitOrSharedPCHs;
 		bUseUnity = false;
 
+		PrivateIncludePaths.AddRange(
+			new string[]
+			{
+				System.IO.Path.Combine(EngineDirectory, "Source/Editor/MaterialEditor/Private"),
+			}
+		);
+
 		PublicDependencyModuleNames.AddRange(
 			new string[]
 			{
@@ -22,6 +29,7 @@ public class UeAgentInterface : ModuleRules
 			new string[]
 			{
 				"UnrealEd",
+				"MainFrame",
 				"GraphEditor",
 				"LevelEditor",
 				"ApplicationCore",
@@ -51,10 +59,14 @@ public class UeAgentInterface : ModuleRules
 				"BlueprintGraph",
 				"AnimationBlueprintLibrary",
 				"AnimationEditor",
+				"AnimationBlueprintEditor",
 				"AnimGraph",
+				"AdvancedPreviewScene",
 				"AssetTools",
 				"Persona",
 				"StaticMeshEditor",
+				"SkeletalMeshEditor",
+				"SkeletonEditor",
 				"UMG",
 				"UMGEditor",
 				"EnhancedInput",
@@ -68,11 +80,16 @@ public class UeAgentInterface : ModuleRules
 				"WorldConditions",
 				"PropertyBindingUtils",
 				"PhysicsCore",
+				"PhysicsAssetEditor",
+				"HairStrandsCore",
+				"HairStrandsEditor",
 				"MaterialEditor",
 				"LevelSequence",
+				"LevelSequenceEditor",
 				"MovieScene",
 				"MovieSceneTools",
 				"MovieSceneTracks",
+				"Sequencer",
 				"SequencerScriptingEditor",
 				"ControlRig",
 				"ControlRigDeveloper",
@@ -93,6 +110,7 @@ public class UeAgentInterface : ModuleRules
 				"ModelingToolsEditorMode",
 				"MeshModelingTools",
 				"ModelingComponents",
+				"GeometryFramework",
 				"GeometryCore",
 				"MeshDescription",
 				"StaticMeshDescription",

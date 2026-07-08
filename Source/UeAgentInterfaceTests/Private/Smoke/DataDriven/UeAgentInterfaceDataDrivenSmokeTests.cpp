@@ -50,7 +50,11 @@ namespace
 				continue;
 			}
 
-			const FString Name = (*FieldObj)->GetStringField(TEXT("name"));
+			FString Name;
+			if (!(*FieldObj)->TryGetStringField(TEXT("property_path"), Name))
+			{
+				(*FieldObj)->TryGetStringField(TEXT("name"), Name);
+			}
 			const FString AuthoredName = (*FieldObj)->HasField(TEXT("authored_name")) ? (*FieldObj)->GetStringField(TEXT("authored_name")) : FString();
 			if (Name.Equals(FieldName, ESearchCase::IgnoreCase) || AuthoredName.Equals(FieldName, ESearchCase::IgnoreCase))
 			{
@@ -58,6 +62,41 @@ namespace
 			}
 		}
 		return false;
+	}
+
+	static const TSharedPtr<FJsonObject>* FindSmokeFieldObject(const TArray<TSharedPtr<FJsonValue>>* Fields, const FString& FieldName)
+	{
+		if (!Fields)
+		{
+			return nullptr;
+		}
+		for (const TSharedPtr<FJsonValue>& FieldValue : *Fields)
+		{
+			const TSharedPtr<FJsonObject>* FieldObj = nullptr;
+			if (!FieldValue.IsValid() || !FieldValue->TryGetObject(FieldObj) || !FieldObj || !FieldObj->IsValid())
+			{
+				continue;
+			}
+			FString Name;
+			if (!(*FieldObj)->TryGetStringField(TEXT("property_path"), Name))
+			{
+				(*FieldObj)->TryGetStringField(TEXT("name"), Name);
+			}
+			const FString AuthoredName = (*FieldObj)->HasField(TEXT("authored_name")) ? (*FieldObj)->GetStringField(TEXT("authored_name")) : FString();
+			if (Name.Equals(FieldName, ESearchCase::IgnoreCase) || AuthoredName.Equals(FieldName, ESearchCase::IgnoreCase))
+			{
+				return FieldObj;
+			}
+		}
+		return nullptr;
+	}
+
+	static bool HasAuthoringMetadata(const TSharedPtr<FJsonObject>& Obj)
+	{
+		return Obj.IsValid()
+			&& Obj->HasTypedField<EJson::Object>(TEXT("selector"))
+			&& Obj->HasTypedField<EJson::Array>(TEXT("operations"))
+			&& Obj->HasTypedField<EJson::Object>(TEXT("availability"));
 	}
 
 	static bool FindSmokeRowFields(const TArray<TSharedPtr<FJsonValue>>* Rows, const FString& RowName, const TArray<TSharedPtr<FJsonValue>>*& OutFields)
@@ -180,7 +219,7 @@ bool FUeAgentInterfaceDataDrivenDataAssetSmokeTest::RunTest(const FString& Param
 		TEXT("smoke-data-asset-apply-001"),
 		TEXT("data_asset_apply_json"),
 		FString::Printf(
-			TEXT("{\"asset_path\":\"%s\",\"json\":{\"schema\":\"ue_agent_interface.data_asset.v1\",\"asset_path\":\"%s\",\"asset_class\":\"%s\",\"fields\":[{\"name\":\"Power\",\"value_text\":\"42\"}]},\"backup\":true,\"save_after_apply\":false}"),
+			TEXT("{\"asset_path\":\"%s\",\"json\":{\"schema\":\"ue_agent_interface.data_asset.v1\",\"asset_path\":\"%s\",\"asset_class\":\"%s\",\"fields\":[{\"property_path\":\"Power\",\"value_text\":\"42\"}]},\"backup\":true,\"save_after_apply\":false}"),
 			*DataAssetPath,
 			*DataAssetPath,
 			*GeneratedClass),
@@ -209,6 +248,15 @@ bool FUeAgentInterfaceDataDrivenDataAssetSmokeTest::RunTest(const FString& Param
 	FString PowerValue;
 	TestTrue(TEXT("DataAsset exported Power field"), FindSmokeFieldValue(Fields, TEXT("Power"), PowerValue));
 	TestEqual(TEXT("DataAsset exported Power value"), PowerValue, FString(TEXT("42")));
+	const TSharedPtr<FJsonObject>* PowerField = FindSmokeFieldObject(Fields, TEXT("Power"));
+	TestTrue(TEXT("DataAsset Power exposes authoring metadata"), PowerField && PowerField->IsValid() && HasAuthoringMetadata(*PowerField));
+	if (PowerField && PowerField->IsValid())
+	{
+		TestEqual(TEXT("DataAsset Power property_path"), (*PowerField)->GetStringField(TEXT("property_path")), FString(TEXT("Power")));
+		TestFalse(TEXT("DataAsset Power omits duplicate name"), (*PowerField)->HasField(TEXT("name")));
+		TestFalse(TEXT("DataAsset Power omits duplicate authored_name"), (*PowerField)->HasField(TEXT("authored_name")));
+		TestFalse(TEXT("DataAsset Power omits duplicate cpp_type"), (*PowerField)->HasField(TEXT("cpp_type")));
+	}
 
 	TestTrue(TEXT("Diff DataAsset JSON"), ExecDataDrivenSmokeCommand(
 		this,
@@ -384,6 +432,33 @@ bool FUeAgentInterfaceDataDrivenDataTableSmokeTest::RunTest(const FString& Param
 	TestEqual(TEXT("DataTable export has two rows"), static_cast<int32>(Data->GetIntegerField(TEXT("row_count"))), 2);
 	TestEqual(TEXT("DataTable export row_policy is replace_all"), Data->GetStringField(TEXT("row_policy")), FString(TEXT("replace_all")));
 	TestTrue(TEXT("DataTable export has row_struct_schema_hash"), Data.IsValid() && !Data->GetStringField(TEXT("row_struct_schema_hash")).IsEmpty());
+	const TArray<TSharedPtr<FJsonValue>>* ExportedRows = nullptr;
+	TestTrue(TEXT("DataTable export has rows"), Data.IsValid() && Data->TryGetArrayField(TEXT("rows"), ExportedRows) && ExportedRows);
+	bool bFoundRowAuthoringMetadata = false;
+	if (ExportedRows)
+	{
+		for (const TSharedPtr<FJsonValue>& RowValue : *ExportedRows)
+		{
+			const TSharedPtr<FJsonObject>* RowObj = nullptr;
+			if (RowValue.IsValid() && RowValue->TryGetObject(RowObj) && RowObj && HasAuthoringMetadata(*RowObj))
+			{
+				bFoundRowAuthoringMetadata = true;
+				break;
+			}
+		}
+	}
+	TestTrue(TEXT("DataTable row exposes authoring metadata"), bFoundRowAuthoringMetadata);
+	const TArray<TSharedPtr<FJsonValue>>* RowAFields = nullptr;
+	TestTrue(TEXT("DataTable RowA has fields"), FindSmokeRowFields(ExportedRows, TEXT("RowA"), RowAFields));
+	const TSharedPtr<FJsonObject>* RowATagField = FindSmokeFieldObject(RowAFields, TEXT("Tag"));
+	TestTrue(TEXT("DataTable RowA field exposes authoring metadata"), RowATagField && RowATagField->IsValid() && HasAuthoringMetadata(*RowATagField));
+	if (RowATagField && RowATagField->IsValid())
+	{
+		TestEqual(TEXT("DataTable RowA Tag property_path"), (*RowATagField)->GetStringField(TEXT("property_path")), FString(TEXT("Tag")));
+		TestFalse(TEXT("DataTable RowA Tag omits duplicate name"), (*RowATagField)->HasField(TEXT("name")));
+		TestFalse(TEXT("DataTable RowA Tag omits duplicate authored_name"), (*RowATagField)->HasField(TEXT("authored_name")));
+		TestFalse(TEXT("DataTable RowA Tag omits duplicate cpp_type"), (*RowATagField)->HasField(TEXT("cpp_type")));
+	}
 
 	TestTrue(TEXT("Diff DataTable unchanged JSON"), ExecDataDrivenSmokeCommand(
 		this,
@@ -431,7 +506,7 @@ bool FUeAgentInterfaceDataDrivenDataTableSmokeTest::RunTest(const FString& Param
 	TestTrue(TEXT("DataTable sample passed"), Data.IsValid() && Data->GetBoolField(TEXT("passed")));
 
 	const FString PatchRowsJson = FString::Printf(
-		TEXT("{\"schema\":\"ue_agent_interface.data_table.v1\",\"asset_path\":\"%s\",\"row_struct\":\"%s\",\"row_policy\":\"patch\",\"update_rows\":[{\"row_name\":\"RowA\",\"fields\":[{\"name\":\"Tag\",\"value_text\":\"UAI.Smoke.RowA\"},{\"name\":\"DevComment\",\"value_text\":\"UpdatedRow\"}]}],\"remove_rows\":[\"RowB\"]}"),
+		TEXT("{\"schema\":\"ue_agent_interface.data_table.v1\",\"asset_path\":\"%s\",\"row_struct\":\"%s\",\"row_policy\":\"patch\",\"update_rows\":[{\"row_name\":\"RowA\",\"fields\":[{\"property_path\":\"Tag\",\"value_text\":\"UAI.Smoke.RowA\"},{\"property_path\":\"DevComment\",\"value_text\":\"UpdatedRow\"}]}],\"remove_rows\":[\"RowB\"]}"),
 		*DataTablePath,
 		*RowStructPath);
 

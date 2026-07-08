@@ -3,6 +3,9 @@
 #include "UeAgentHttpServer_Deformer.h"
 
 #include "Utilities/UeAgentCurveJson.h"
+#include "Utilities/UeAgentAuthoringJson.h"
+#include "Utilities/UeAgentDetailsAuthoring.h"
+#include "Utilities/UeAgentFolderDetailsExport.h"
 #include "Utilities/UeAgentJsonDiagnostics.h"
 
 #include "Animation/MeshDeformerCollection.h"
@@ -205,6 +208,12 @@ namespace UeAgentDeformerOps
 			Item->SetStringField(TEXT("cpp_type"), Property->GetCPPType());
 			Item->SetStringField(TEXT("value_text"), ValueText);
 			Item->SetBoolField(TEXT("can_edit"), Property->HasAnyPropertyFlags(CPF_Edit));
+			UeAgentAuthoringJson::ApplyPropertyMetadata(
+				Item,
+				Property->GetName(),
+				Property->GetDisplayNameText().ToString(),
+				Property->GetMetaData(TEXT("Category")),
+				TEXT("text"));
 			Properties.Add(MakeShared<FJsonValueObject>(Item));
 			++Count;
 		}
@@ -246,6 +255,12 @@ namespace UeAgentDeformerOps
 				Item->SetStringField(TEXT("cpp_type"), Property->GetCPPType());
 				Item->SetStringField(TEXT("value_text"), ValueText);
 				Item->SetBoolField(TEXT("apply"), false);
+				UeAgentAuthoringJson::ApplyPropertyMetadata(
+					Item,
+					Property->GetName(),
+					Property->GetDisplayNameText().ToString(),
+					Property->GetMetaData(TEXT("Category")),
+					TEXT("text"));
 				Item->SetStringField(
 					TEXT("edit_policy"),
 					Property->HasAnyPropertyFlags(CPF_Edit) ? TEXT("explicit_apply_only") : TEXT("readonly_or_internal"));
@@ -714,6 +729,15 @@ namespace UeAgentDeformerOps
 		Obj->SetStringField(TEXT("data_domain"), Pin->GetDataDomain().ToString());
 		Obj->SetStringField(TEXT("value_text"), Pin->GetValueAsString());
 		Obj->SetNumberField(TEXT("connected_pin_count"), Pin->GetConnectedPins().Num());
+		UeAgentAuthoringJson::ApplyAuthoringMetadata(
+			Obj,
+			TEXT("pin_path"),
+			Pin->GetPinPath(),
+			Pin->GetDisplayName().ToString(),
+			TEXT("DeformerGraph/Pins"),
+			TEXT("optimus_pin"),
+			TEXT("pin"),
+			{ TEXT("connect"), TEXT("disconnect"), TEXT("set_value") });
 
 		TArray<TSharedPtr<FJsonValue>> SubPins;
 		if (Depth < 8)
@@ -742,6 +766,15 @@ namespace UeAgentDeformerOps
 		Obj->SetStringField(TEXT("class"), ClassPathOrEmpty(Node));
 		Obj->SetStringField(TEXT("category"), Node->GetNodeCategory().ToString());
 		Obj->SetObjectField(TEXT("position"), MakeVector2DJson(Node->GetGraphPosition()));
+		UeAgentAuthoringJson::ApplyAuthoringMetadata(
+			Obj,
+			TEXT("node_path"),
+			Node->GetNodePath(),
+			Node->GetDisplayName().ToString(),
+			TEXT("DeformerGraph/Nodes"),
+			TEXT("optimus_node"),
+			TEXT("object"),
+			{ TEXT("move"), TEXT("set_property"), TEXT("connect"), TEXT("delete") });
 		Obj->SetStringField(TEXT("diagnostic_level"), OptimusDiagnosticLevelToString(Node->GetDiagnosticLevel()));
 		Obj->SetBoolField(TEXT("can_user_delete"), Node->CanUserDeleteNode());
 		Obj->SetBoolField(TEXT("is_compute_kernel_provider"), Node->GetClass()->ImplementsInterface(UOptimusComputeKernelProvider::StaticClass()));
@@ -834,7 +867,7 @@ namespace UeAgentDeformerOps
 		Obj->SetStringField(TEXT("schema"), TEXT("ue_agent_interface.deformer_graphs.v1"));
 		Obj->SetStringField(TEXT("profile"), TEXT("deformer_graph"));
 		Obj->SetStringField(TEXT("section"), TEXT("graphs"));
-		Obj->SetStringField(TEXT("edit_policy"), TEXT("read_only_optimus_summary; mutation requires deformer_graph_apply_folder raw_properties or a dedicated Optimus graph adapter"));
+		Obj->SetStringField(TEXT("edit_policy"), TEXT("read_only_optimus_summary; UObject property mutation uses asset.json grouped Details, deep graph mutation requires a dedicated Optimus graph adapter"));
 		Obj->SetObjectField(TEXT("plugin_status"), MakePluginStatusJson());
 		TArray<TSharedPtr<FJsonValue>> Graphs;
 		if (Deformer)
@@ -915,7 +948,6 @@ namespace UeAgentDeformerOps
 					Item->SetStringField(TEXT("data_domain"), Resource->DataDomain.ToString());
 					Item->SetStringField(TEXT("component_binding"), ObjectPathOrEmpty(Resource->ComponentBinding.Get()));
 					Item->SetBoolField(TEXT("has_persistent_buffer_data_interface"), Resource->DataInterface != nullptr);
-					Item->SetObjectField(TEXT("property_summary"), BuildPropertySummaryJson(const_cast<UOptimusResourceDescription*>(Resource)));
 				}
 				Resources.Add(MakeShared<FJsonValueObject>(Item));
 			}
@@ -949,7 +981,6 @@ namespace UeAgentDeformerOps
 					Item->SetStringField(TEXT("guid"), Variable->Guid.ToString());
 					Item->SetNumberField(TEXT("index"), Variable->GetIndex());
 					Item->SetObjectField(TEXT("data_type"), BuildOptimusDataTypeRefJson(Variable->DataType));
-					Item->SetObjectField(TEXT("property_summary"), BuildPropertySummaryJson(const_cast<UOptimusVariableDescription*>(Variable)));
 				}
 				Variables.Add(MakeShared<FJsonValueObject>(Item));
 			}
@@ -1146,7 +1177,6 @@ namespace UeAgentDeformerOps
 			Obj->SetNumberField(TEXT("variable_count"), Deformer->GetVariables().Num());
 			Obj->SetNumberField(TEXT("binding_count"), Deformer->GetComponentBindings().Num());
 			Obj->SetNumberField(TEXT("function_graph_count"), Deformer->GetFunctionGraphs().Num());
-			Obj->SetObjectField(TEXT("raw_property_summary"), BuildPropertySummaryJson(const_cast<UOptimusDeformer*>(Deformer)));
 		}
 		return Obj;
 	}
@@ -1208,6 +1238,12 @@ namespace UeAgentDeformerOps
 				FString ValueText;
 				Property->ExportText_InContainer(0, ValueText, Asset, Asset, Asset, PPF_None);
 				Item->SetStringField(TEXT("value_text"), ValueText);
+				UeAgentAuthoringJson::ApplyPropertyMetadata(
+					Item,
+					Name,
+					Property->GetDisplayNameText().ToString(),
+					Property->GetMetaData(TEXT("Category")),
+					TEXT("text"));
 				Items.Add(MakeShared<FJsonValueObject>(Item));
 			}
 		}
@@ -1553,7 +1589,11 @@ namespace UeAgentDeformerOps
 		if (!JsonFile.IsEmpty())
 		{
 			OutSourcePath = UeAgentJsonDiagnostics::ResolveProjectRelativeFilePath(JsonFile);
-			return UeAgentJsonDiagnostics::LoadJsonObjectFile(JsonFile, OutRoot, &Issues, OutError, false);
+			if (!UeAgentJsonDiagnostics::LoadJsonObjectFile(JsonFile, OutRoot, &Issues, OutError, false))
+			{
+				return false;
+			}
+			return UeAgentDetailsAuthoring::RehydrateGroupedDetailsInObjectTree(OutSourcePath, OutRoot, OutError);
 		}
 		OutRoot = Ctx.Params;
 		OutSourcePath = TEXT("params");
@@ -1571,9 +1611,12 @@ namespace UeAgentDeformerOps
 		FString FilePath = UeAgentJsonDiagnostics::ResolveProjectRelativeFilePath(FilePathInput);
 		IFileManager::Get().MakeDirectory(*FPaths::GetPath(FilePath), true);
 		FString JsonText;
-		const TSharedRef<TJsonWriter<TCHAR, TPrettyJsonPrintPolicy<TCHAR>>> Writer =
-			TJsonWriterFactory<TCHAR, TPrettyJsonPrintPolicy<TCHAR>>::Create(&JsonText);
-		FJsonSerializer::Serialize(Obj.ToSharedRef(), Writer);
+		TSharedPtr<FJsonObject> SaveObj = UeAgentDetailsAuthoring::CloneObjectTree(Obj);
+		if (!UeAgentDetailsAuthoring::ExternalizeInlineDetailsInObjectTree(FilePath, SaveObj, TEXT("deformer_json_export"), OutError))
+		{
+			return false;
+		}
+		UeAgentJsonDiagnostics::SerializeJsonObjectCompact(SaveObj, JsonText);
 		if (!FFileHelper::SaveStringToFile(JsonText, *FilePath, FFileHelper::EEncodingOptions::ForceUTF8WithoutBOM))
 		{
 			OutError = TEXT("save_json_failed");
@@ -1967,6 +2010,17 @@ bool FUeAgentHttpServer::CmdDeformerGraphExportFolder(const FUeAgentRequestConte
 		OutError = TEXT("asset_is_not_deformer_graph");
 		return false;
 	}
+	if (!UeAgentFolderDetailsExport::AttachOwnerDetails(
+		Asset,
+		FolderPath,
+		TEXT("deformer_graph_export_folder"),
+		TEXT("deformer_graph_asset"),
+		Asset->GetPathName(),
+		TEXT("asset"),
+		OutData,
+		OutError)) return false;
+	OutData->RemoveField(TEXT("property_summary"));
+	OutData->RemoveField(TEXT("deformer_graph"));
 	FString OutputPath;
 	if (!UeAgentDeformerOps::SaveJsonFile(FPaths::Combine(FolderPath, TEXT("asset.json")), OutData, OutputPath, OutError)) return false;
 	if (!UeAgentDeformerOps::SaveJsonFile(FPaths::Combine(FolderPath, TEXT("settings.json")), UeAgentDeformerOps::BuildOptimusSettingsJson(Deformer), OutputPath, OutError)) return false;
@@ -1977,8 +2031,6 @@ bool FUeAgentHttpServer::CmdDeformerGraphExportFolder(const FUeAgentRequestConte
 	if (!UeAgentDeformerOps::SaveJsonFile(FPaths::Combine(FolderPath, TEXT("graphs.json")), UeAgentDeformerOps::BuildOptimusGraphsJson(Deformer), OutputPath, OutError)) return false;
 	if (!UeAgentDeformerOps::SaveJsonFile(FPaths::Combine(FolderPath, TEXT("bindings.json")), UeAgentDeformerOps::BuildOptimusBindingsJson(Deformer), OutputPath, OutError)) return false;
 	if (!UeAgentDeformerOps::SaveJsonFile(FPaths::Combine(FolderPath, TEXT("source_libraries.json")), UeAgentDeformerOps::BuildOptimusSourceLibrariesJson(Deformer), OutputPath, OutError)) return false;
-	if (!UeAgentDeformerOps::SaveJsonFile(FPaths::Combine(FolderPath, TEXT("raw_properties.json")), UeAgentDeformerOps::BuildPropertyExportJson(Asset, TEXT("deformer_graph")), OutputPath, OutError)) return false;
-	if (!UeAgentDeformerOps::SaveJsonFile(FPaths::Combine(FolderPath, TEXT("readonly_properties.json")), OutData->GetObjectField(TEXT("property_summary")), OutputPath, OutError)) return false;
 	TSharedPtr<FJsonObject> Coverage = MakeShared<FJsonObject>();
 	Coverage->SetStringField(TEXT("profile"), TEXT("deformer_graph"));
 	Coverage->SetStringField(TEXT("implementation_status"), TEXT("optimus_summary_export_with_explicit_raw_property_apply_and_real_compile_command"));
@@ -2026,6 +2078,22 @@ bool FUeAgentHttpServer::CmdDeformerGraphValidateFolder(const FUeAgentRequestCon
 	TArray<TSharedPtr<FJsonValue>> Issues;
 	TSharedPtr<FJsonObject> AssetJson;
 	const bool bOk = UeAgentJsonDiagnostics::LoadJsonObjectFile(FPaths::Combine(FolderPath, TEXT("asset.json")), AssetJson, &Issues, OutError, false);
+	FString AssetPath;
+	if (AssetJson.IsValid())
+	{
+		AssetJson->TryGetStringField(TEXT("asset_path"), AssetPath);
+	}
+	TSharedPtr<FJsonObject> LegacyRejection;
+	if (UeAgentDetailsAuthoring::BuildLegacyPropertiesFolderRejectionIfPresent(
+		FolderPath,
+		UeAgentDetailsAuthoring::MakeOwnerInfoForObject(nullptr, TEXT("deformer_graph_asset"), AssetPath, TEXT("deformer_graph_validate_folder")),
+		TEXT("asset.json.details.index_file"),
+		LegacyRejection,
+		OutError))
+	{
+		OutData = LegacyRejection;
+		return false;
+	}
 	const TArray<FString> OptionalFiles = {
 		TEXT("settings.json"),
 		TEXT("resources.json"),
@@ -2109,6 +2177,32 @@ bool FUeAgentHttpServer::CmdDeformerGraphApplyFolder(const FUeAgentRequestContex
 	JsonTryGetBool(Ctx.Params, TEXT("validate_only"), bValidateOnly);
 
 	TArray<TSharedPtr<FJsonValue>> Issues;
+	TSharedPtr<FJsonObject> AssetJson;
+	if (!UeAgentJsonDiagnostics::LoadJsonObjectFile(FPaths::Combine(FolderPath, TEXT("asset.json")), AssetJson, &Issues, OutError, false))
+	{
+		OutData->SetArrayField(TEXT("json_issues"), Issues);
+		OutData->SetNumberField(TEXT("json_issue_count"), Issues.Num());
+		return false;
+	}
+	FString AssetPath;
+	JsonTryGetString(Ctx.Params, TEXT("asset_path"), AssetPath);
+	if (AssetPath.TrimStartAndEnd().IsEmpty())
+	{
+		AssetJson->TryGetStringField(TEXT("asset_path"), AssetPath);
+	}
+
+	TSharedPtr<FJsonObject> LegacyRejection;
+	if (UeAgentDetailsAuthoring::BuildLegacyPropertiesFolderRejectionIfPresent(
+		FolderPath,
+		UeAgentDetailsAuthoring::MakeOwnerInfoForObject(nullptr, TEXT("deformer_graph_asset"), AssetPath, TEXT("deformer_graph_apply_folder")),
+		TEXT("asset.json.details.index_file"),
+		LegacyRejection,
+		OutError))
+	{
+		OutData = LegacyRejection;
+		return false;
+	}
+
 	TSharedPtr<FJsonObject> FolderValidation = MakeShared<FJsonObject>();
 	FString FolderValidationError;
 	if (!CmdDeformerGraphValidateFolder(Ctx, FolderValidation, FolderValidationError))
@@ -2125,49 +2219,40 @@ bool FUeAgentHttpServer::CmdDeformerGraphApplyFolder(const FUeAgentRequestContex
 		return false;
 	}
 
-	TSharedPtr<FJsonObject> RawPropertiesJson;
-	if (!UeAgentJsonDiagnostics::LoadJsonObjectFile(FPaths::Combine(FolderPath, TEXT("raw_properties.json")), RawPropertiesJson, &Issues, OutError, true))
+	UObject* Asset = AssetPath.TrimStartAndEnd().IsEmpty() ? nullptr : UeAgentDeformerOps::LoadAssetObject(AssetPath);
+	UOptimusDeformer* Deformer = Cast<UOptimusDeformer>(Asset);
+	TSharedPtr<FJsonObject> DetailsApplySummary;
+	int32 GroupedDetailsApplied = 0;
+	if (!UeAgentDetailsAuthoring::ApplyOwnerDetailsFromEntryIfPresent(
+		Deformer,
+		FolderPath,
+		AssetJson,
+		UeAgentDetailsAuthoring::MakeOwnerInfoForObject(Deformer, TEXT("deformer_graph_asset"), Deformer ? Deformer->GetPathName() : AssetPath, TEXT("deformer_graph_apply_folder")),
+		TEXT("details"),
+		!(bDryRun || bValidateOnly),
+		DetailsApplySummary,
+		GroupedDetailsApplied,
+		OutError))
 	{
 		OutData->SetArrayField(TEXT("json_issues"), Issues);
 		OutData->SetNumberField(TEXT("json_issue_count"), Issues.Num());
 		return false;
 	}
 
-	TSharedPtr<FJsonObject> PropertyApplyParams;
-	int32 SelectedPropertyCount = 0;
-	if (RawPropertiesJson.IsValid()
-		&& !UeAgentDeformerOps::PreparePropertyApplyParams(Ctx, RawPropertiesJson, FString(), TEXT("raw_properties.json"), PropertyApplyParams, SelectedPropertyCount, Issues, OutError))
-	{
-		OutData->SetArrayField(TEXT("json_issues"), Issues);
-		OutData->SetNumberField(TEXT("json_issue_count"), Issues.Num());
-		return false;
-	}
-
-	TSharedPtr<FJsonObject> PropertyApplyData = MakeShared<FJsonObject>();
-	if (SelectedPropertyCount > 0 && !(bDryRun || bValidateOnly))
-	{
-		FString PropertyApplyError;
-		FUeAgentRequestContext PropertyCtx{ TEXT("deformer_graph_apply_raw_properties"), TEXT("asset_apply_property_json"), PropertyApplyParams };
-		if (!CmdAssetApplyPropertyJson(PropertyCtx, PropertyApplyData, PropertyApplyError))
-		{
-			OutError = PropertyApplyError;
-			OutData->SetArrayField(TEXT("json_issues"), Issues);
-			OutData->SetNumberField(TEXT("json_issue_count"), Issues.Num());
-			OutData->SetObjectField(TEXT("property_apply"), PropertyApplyData);
-			return false;
-		}
-	}
-
-	OutData->SetBoolField(TEXT("applied"), SelectedPropertyCount > 0 && !(bDryRun || bValidateOnly));
+	OutData->SetBoolField(TEXT("applied"), GroupedDetailsApplied > 0 && !(bDryRun || bValidateOnly));
 	OutData->SetBoolField(TEXT("dry_run"), bDryRun || bValidateOnly);
-	OutData->SetNumberField(TEXT("selected_property_count"), SelectedPropertyCount);
-	OutData->SetObjectField(TEXT("property_apply"), PropertyApplyData);
+	OutData->SetNumberField(TEXT("selected_property_count"), 0);
+	OutData->SetNumberField(TEXT("grouped_details_applied"), GroupedDetailsApplied);
+	if (DetailsApplySummary.IsValid())
+	{
+		OutData->SetObjectField(TEXT("details_apply"), DetailsApplySummary);
+	}
 	OutData->SetObjectField(TEXT("folder_validation"), FolderValidation);
 	OutData->SetArrayField(TEXT("json_issues"), Issues);
 	OutData->SetNumberField(TEXT("json_issue_count"), Issues.Num());
 	OutData->SetNumberField(TEXT("error_count"), UeAgentJsonDiagnostics::CountIssuesBySeverity(Issues, TEXT("error")));
 	OutData->SetNumberField(TEXT("warning_count"), UeAgentJsonDiagnostics::CountIssuesBySeverity(Issues, TEXT("warning")));
-	OutData->SetStringField(TEXT("graph_mutation_policy"), TEXT("kernel/node/source-library graph mutation still requires version-specific adapter; raw UObject properties use asset_apply_property_json."));
+	OutData->SetStringField(TEXT("graph_mutation_policy"), TEXT("kernel/node/source-library graph mutation still requires version-specific adapter; UObject properties use asset.json grouped Details."));
 	return !UeAgentJsonDiagnostics::HasErrorIssue(Issues);
 }
 

@@ -2,6 +2,9 @@
 
 #include "UeAgentHttpServer_StaticMesh.h"
 
+#include "Commands/EditorViewport/UeAgentEditorViewportLegacy.h"
+#include "Utilities/UeAgentDetailsAuthoring.h"
+#include "Utilities/UeAgentFolderDetailsExport.h"
 #include "Utilities/UeAgentJsonDiagnostics.h"
 
 #include "Editor.h"
@@ -412,9 +415,7 @@ namespace UeAgentStaticMeshOps
 	static FString MakeJsonString(const TSharedPtr<FJsonObject>& Obj)
 	{
 		FString JsonText;
-		const TSharedRef<TJsonWriter<TCHAR, TPrettyJsonPrintPolicy<TCHAR>>> Writer =
-			TJsonWriterFactory<TCHAR, TPrettyJsonPrintPolicy<TCHAR>>::Create(&JsonText);
-		FJsonSerializer::Serialize(Obj.ToSharedRef(), Writer);
+		UeAgentJsonDiagnostics::SerializeJsonObjectCompact(Obj, JsonText);
 		return JsonText;
 	}
 
@@ -1057,13 +1058,6 @@ bool FUeAgentHttpServer::CmdStaticMeshSetPreviewView(const FUeAgentRequestContex
 	bool bOpenEditorIfNeeded = true;
 	JsonTryGetBool(Ctx.Params, TEXT("open_editor_if_needed"), bOpenEditorIfNeeded);
 
-	IStaticMeshEditor* MeshEditor = UeAgentStaticMeshOps::GetStaticMeshEditor(Mesh, bOpenEditorIfNeeded);
-	if (!MeshEditor)
-	{
-		OutError = TEXT("static_mesh_editor_not_opened");
-		return false;
-	}
-
 	const FBoxSphereBounds Bounds = Mesh->GetBounds();
 	FVector Target = Bounds.Origin;
 	JsonTryGetVector(Ctx.Params, TEXT("target"), Target);
@@ -1083,16 +1077,37 @@ bool FUeAgentHttpServer::CmdStaticMeshSetPreviewView(const FUeAgentRequestContex
 	const FRotator ViewRotation((float)Pitch, (float)Yaw, (float)Roll);
 	const FVector ViewLocation = Target - ViewRotation.Vector() * (float)Distance;
 
-	FEditorViewportClient& ViewportClient = MeshEditor->GetViewportClient();
-	ViewportClient.SetLookAtLocation(Target, false);
-	ViewportClient.SetViewLocation(ViewLocation);
-	ViewportClient.SetViewRotation(ViewRotation);
+	TSharedPtr<FJsonObject> ProxyParams = MakeShared<FJsonObject>();
+	if (Ctx.Params.IsValid())
+	{
+		ProxyParams->Values = Ctx.Params->Values;
+	}
+	TSharedPtr<FJsonObject> Camera = MakeShared<FJsonObject>();
+	TSharedPtr<FJsonObject> Orbit = MakeShared<FJsonObject>();
+	Orbit->SetObjectField(TEXT("target"), VecToJson(Target));
+	Orbit->SetNumberField(TEXT("yaw"), Yaw);
+	Orbit->SetNumberField(TEXT("pitch"), Pitch);
+	Orbit->SetNumberField(TEXT("roll"), Roll);
+	Orbit->SetNumberField(TEXT("distance"), Distance);
 	if (bHasFov)
 	{
-		ViewportClient.ViewFOV = (float)FMath::Clamp(Fov, 5.0, 170.0);
+		Orbit->SetNumberField(TEXT("fov"), Fov);
 	}
-	ViewportClient.Invalidate();
-	MeshEditor->RefreshViewport();
+	Camera->SetObjectField(TEXT("orbit"), Orbit);
+	ProxyParams->SetObjectField(TEXT("camera"), Camera);
+
+	FUeAgentRequestContext ProxyCtx = Ctx;
+	ProxyCtx.Command = TEXT("static_mesh_set_preview_view");
+	ProxyCtx.Params = ProxyParams;
+	if (!UeAgentEditorViewportLegacy::ExecuteCameraSet(
+		*this,
+		ProxyCtx,
+		UeAgentEditorViewportLegacy::MakeAssetTarget(Mesh->GetPathName(), TEXT("static_mesh"), TEXT("primary"), bOpenEditorIfNeeded),
+		OutData,
+		OutError))
+	{
+		return false;
+	}
 
 	bool bPersistToAsset = false;
 	JsonTryGetBool(Ctx.Params, TEXT("persist_to_asset"), bPersistToAsset);
@@ -1105,9 +1120,18 @@ bool FUeAgentHttpServer::CmdStaticMeshSetPreviewView(const FUeAgentRequestContex
 
 	OutData->SetStringField(TEXT("asset_path"), Mesh->GetOutermost()->GetName());
 	OutData->SetObjectField(TEXT("target"), VecToJson(Target));
-	OutData->SetObjectField(TEXT("location"), VecToJson(ViewLocation));
-	OutData->SetObjectField(TEXT("rotation"), RotToJson(ViewRotation));
-	OutData->SetNumberField(TEXT("fov"), ViewportClient.ViewFOV);
+	if (!OutData->HasField(TEXT("location")))
+	{
+		OutData->SetObjectField(TEXT("location"), VecToJson(ViewLocation));
+	}
+	if (!OutData->HasField(TEXT("rotation")))
+	{
+		OutData->SetObjectField(TEXT("rotation"), RotToJson(ViewRotation));
+	}
+	if (!OutData->HasField(TEXT("fov")))
+	{
+		OutData->SetNumberField(TEXT("fov"), bHasFov ? FMath::Clamp(Fov, 5.0, 170.0) : 60.0);
+	}
 	OutData->SetBoolField(TEXT("persist_to_asset"), bPersistToAsset);
 	return true;
 }
@@ -1713,7 +1737,17 @@ bool FUeAgentHttpServer::CmdStaticMeshExportFolder(const FUeAgentRequestContext&
 	};
 
 	const FString ValidationDir = FPaths::Combine(FolderPath, TEXT("validation"));
-	if (!SaveRequiredJson(FPaths::Combine(FolderPath, TEXT("asset.json")), UeAgentStaticMeshOps::BuildAssetJson(Mesh))) return false;
+	TSharedPtr<FJsonObject> AssetJson = UeAgentStaticMeshOps::BuildAssetJson(Mesh);
+	if (!UeAgentFolderDetailsExport::AttachOwnerDetails(
+		Mesh,
+		FolderPath,
+		TEXT("static_mesh_export_folder"),
+		TEXT("static_mesh_asset"),
+		Mesh->GetPathName(),
+		TEXT("asset"),
+		AssetJson,
+		OutError)) return false;
+	if (!SaveRequiredJson(FPaths::Combine(FolderPath, TEXT("asset.json")), AssetJson)) return false;
 	if (!SaveRequiredJson(FPaths::Combine(FolderPath, TEXT("mesh.json")), UeAgentStaticMeshOps::BuildMeshJson(Mesh))) return false;
 	if (!SaveRequiredJson(FPaths::Combine(FolderPath, TEXT("materials.json")), UeAgentStaticMeshOps::BuildMaterialsFolderJson(Mesh))) return false;
 	if (!SaveRequiredJson(FPaths::Combine(FolderPath, TEXT("lods"), TEXT("index.json")), UeAgentStaticMeshOps::BuildLodsIndexJson(Mesh))) return false;
@@ -1725,8 +1759,6 @@ bool FUeAgentHttpServer::CmdStaticMeshExportFolder(const FUeAgentRequestContext&
 	if (!SaveRequiredJson(FPaths::Combine(FolderPath, TEXT("build_settings.json")), UeAgentStaticMeshOps::BuildBuildSettingsFolderJson(Mesh))) return false;
 	if (!SaveRequiredJson(FPaths::Combine(FolderPath, TEXT("import_data.json")), UeAgentStaticMeshOps::BuildImportDataJson(Mesh))) return false;
 	if (!SaveRequiredJson(FPaths::Combine(FolderPath, TEXT("raw_mesh_summary.json")), UeAgentStaticMeshOps::BuildRawMeshSummaryJson(Mesh))) return false;
-	if (!SaveRequiredJson(FPaths::Combine(FolderPath, TEXT("raw_properties.json")), MakeShared<FJsonObject>())) return false;
-	if (!SaveRequiredJson(FPaths::Combine(FolderPath, TEXT("readonly_properties.json")), MakeShared<FJsonObject>())) return false;
 	if (!SaveRequiredJson(FPaths::Combine(ValidationDir, TEXT("coverage_report.json")), UeAgentStaticMeshOps::BuildCoverageJson())) return false;
 	if (!SaveRequiredJson(FPaths::Combine(ValidationDir, TEXT("mesh_integrity_report.json")), UeAgentStaticMeshOps::BuildRawMeshSummaryJson(Mesh))) return false;
 	if (!SaveRequiredJson(FPaths::Combine(ValidationDir, TEXT("collision_report.json")), UeAgentStaticMeshOps::BuildCollisionJson(Mesh))) return false;
@@ -1776,7 +1808,7 @@ bool FUeAgentHttpServer::CmdStaticMeshApplyFolder(const FUeAgentRequestContext& 
 		OutData->SetNumberField(TEXT("json_issue_count"), Issues.Num());
 		return false;
 	}
-	UeAgentJsonDiagnostics::WarnUnknownFields(AssetJson, TEXT("asset.json"), { TEXT("schema"), TEXT("profile"), TEXT("schema_version"), TEXT("asset_path"), TEXT("object_path"), TEXT("asset_class"), TEXT("engine_version"), TEXT("exported_at") }, Issues);
+	UeAgentJsonDiagnostics::WarnUnknownFields(AssetJson, TEXT("asset.json"), { TEXT("schema"), TEXT("profile"), TEXT("schema_version"), TEXT("asset_path"), TEXT("object_path"), TEXT("asset_class"), TEXT("engine_version"), TEXT("exported_at"), TEXT("details") }, Issues);
 
 	FString AssetPath;
 	JsonTryGetString(Ctx.Params, TEXT("asset_path"), AssetPath);
@@ -1791,6 +1823,18 @@ bool FUeAgentHttpServer::CmdStaticMeshApplyFolder(const FUeAgentRequestContext& 
 		OutError = TEXT("static_mesh_not_found");
 		OutData->SetArrayField(TEXT("json_issues"), Issues);
 		OutData->SetNumberField(TEXT("json_issue_count"), Issues.Num());
+		return false;
+	}
+
+	TSharedPtr<FJsonObject> LegacyRejection;
+	if (UeAgentDetailsAuthoring::BuildLegacyPropertiesFolderRejectionIfPresent(
+		FolderPath,
+		UeAgentDetailsAuthoring::MakeOwnerInfoForObject(Mesh, TEXT("static_mesh_asset"), Mesh->GetPathName(), TEXT("static_mesh_apply_folder")),
+		TEXT("asset.json.details.index_file"),
+		LegacyRejection,
+		OutError))
+	{
+		OutData = LegacyRejection;
 		return false;
 	}
 
@@ -1859,7 +1903,28 @@ bool FUeAgentHttpServer::CmdStaticMeshApplyFolder(const FUeAgentRequestContext& 
 	}
 
 	int32 StructuredApplied = 0;
+	int32 GroupedDetailsApplied = 0;
+	TSharedPtr<FJsonObject> DetailsApplySummary;
 	bool bNeedsBuild = false;
+	if (!UeAgentDetailsAuthoring::ApplyOwnerDetailsFromEntryIfPresent(
+		Mesh,
+		FolderPath,
+		AssetJson,
+		UeAgentDetailsAuthoring::MakeOwnerInfoForObject(Mesh, TEXT("static_mesh_asset"), Mesh->GetPathName(), TEXT("static_mesh_apply_folder")),
+		TEXT("details"),
+		!(bDryRun || bValidateOnly),
+		DetailsApplySummary,
+		GroupedDetailsApplied,
+		OutError))
+	{
+		return false;
+	}
+	if (GroupedDetailsApplied > 0)
+	{
+		StructuredApplied += GroupedDetailsApplied;
+		bNeedsBuild = true;
+		AddPropertyResult(TEXT("asset.json.details"), TEXT("applied"), FString::FromInt(GroupedDetailsApplied));
+	}
 	if (!bDryRun && !bValidateOnly)
 	{
 		TSharedPtr<FJsonObject> MeshJson;
@@ -2305,12 +2370,17 @@ bool FUeAgentHttpServer::CmdStaticMeshApplyFolder(const FUeAgentRequestContext& 
 	OutData->SetBoolField(TEXT("applied"), !(bDryRun || bValidateOnly));
 	OutData->SetBoolField(TEXT("dry_run"), bDryRun || bValidateOnly);
 	OutData->SetNumberField(TEXT("structured_fields_applied"), StructuredApplied);
+	OutData->SetNumberField(TEXT("grouped_details_applied"), GroupedDetailsApplied);
 	OutData->SetNumberField(TEXT("raw_properties_applied"), 0);
 	OutData->SetArrayField(TEXT("json_issues"), Issues);
 	OutData->SetNumberField(TEXT("json_issue_count"), Issues.Num());
 	OutData->SetNumberField(TEXT("error_count"), UeAgentJsonDiagnostics::CountIssuesBySeverity(Issues, TEXT("error")));
 	OutData->SetNumberField(TEXT("warning_count"), UeAgentJsonDiagnostics::CountIssuesBySeverity(Issues, TEXT("warning")));
 	OutData->SetArrayField(TEXT("property_results"), PropertyResults);
+	if (DetailsApplySummary.IsValid())
+	{
+		OutData->SetObjectField(TEXT("details_apply"), DetailsApplySummary);
+	}
 	OutData->SetObjectField(TEXT("readback"), ReadbackData);
 	OutData->SetObjectField(TEXT("validation_report"), UeAgentStaticMeshOps::BuildCoverageJson());
 	if (UeAgentJsonDiagnostics::HasErrorIssue(Issues))

@@ -109,6 +109,12 @@
 - `failed_error`
 - `results`
 
+Python `uai_core` 读取规则：
+
+- 单条命令读取 `CommandResult.data`，调试信息读取 `CommandResult.debug`，原始 envelope 只在排障时读取 `CommandResult.envelope`。
+- 批处理读取 `BatchResult.results` 和失败定位字段，不再从旧兼容字段读取业务结果。
+- 默认传 `response_options={"view":"llm_compact"}`；需要完整诊断时显式请求 debug/raw 视图。
+
 不要只看最后一条报错字符串，一定要结合 `failed_index` 与已成功步骤一起看。
 
 ## 7. 推荐执行顺序
@@ -121,7 +127,7 @@
    - 导入 `UaiCore` 后运行 `ue.doctor()`。
 5. 再执行 wrapper 或 `ue.batch(..., stop_on_error=True)`。
 6. 只有确认没有可用 UAICMD 或用户明确要求回退时，才使用 skill 内置 CLI `doctor`、`run` 或 `batch`。
-7. 查看 Python response 或 CLI report，并按失败点定位。
+7. 查看 `CommandResult.data/debug/envelope`、`BatchResult.results` 或 CLI report，并按失败点定位。
 8. 任务结束前按需清理临时 JSON。
 
 ## 8. 临时文件清理
@@ -161,10 +167,11 @@ Modeling：
 
 最稳的做法不是“少写几条命令”，而是：
 
-- 用 `uai-cli.exe`
+- 首选 Python `uai_core` wrapper
 - 用文件承载 JSON
-- 用 `run` / `batch` + `exec_batch`
+- 用 `ue.batch(..., stop_on_error=True)` 或 CLI 回退的 `run` / `batch` + `exec_batch`
 - 用 report 做失败定位与复盘
+- 默认使用 `response_options={"view":"llm_compact"}`，完整诊断显式走 debug/raw
 - 用分阶段批处理避免一次提交过大状态
 
 ## 11. 白盒分段验收 batch 模板（示例）

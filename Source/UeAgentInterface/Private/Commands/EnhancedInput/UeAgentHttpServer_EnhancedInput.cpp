@@ -2,6 +2,7 @@
 
 #include "UeAgentHttpServer_EnhancedInput.h"
 
+#include "Utilities/UeAgentAuthoringJson.h"
 #include "Utilities/UeAgentJsonDiagnostics.h"
 #include "Module/UeAgentInterfaceLogger.h"
 
@@ -123,9 +124,7 @@ namespace UeAgentEnhancedInputOps
 		}
 
 		FString JsonText;
-		const TSharedRef<TJsonWriter<TCHAR, TPrettyJsonPrintPolicy<TCHAR>>> Writer =
-			TJsonWriterFactory<TCHAR, TPrettyJsonPrintPolicy<TCHAR>>::Create(&JsonText);
-		if (!FJsonSerializer::Serialize(Root.ToSharedRef(), Writer))
+		if (!UeAgentJsonDiagnostics::SerializeJsonObjectCompact(Root, JsonText))
 		{
 			OutError = TEXT("json_serialize_failed");
 			return false;
@@ -569,8 +568,74 @@ namespace UeAgentEnhancedInputOps
 		TArray<TSharedPtr<FJsonValue>> TriggerClasses;
 		AppendTriggerClassPaths(Mapping.Triggers, TriggerClasses);
 		MappingObj->SetArrayField(TEXT("trigger_classes"), TriggerClasses);
+		UeAgentAuthoringJson::ApplyAuthoringMetadata(
+			MappingObj,
+			TEXT("index"),
+			FString::FromInt(Index),
+			TEXT("Input Mapping"),
+			TEXT("Enhanced Input|Mappings"),
+			TEXT("mapping"),
+			TEXT("struct"),
+			{ TEXT("set"), TEXT("remove") });
 
 		return MappingObj;
+	}
+
+	static TSharedPtr<FJsonObject> MakeEnhancedInputFieldMetadata(
+		const FString& PropertyPath,
+		const FString& DisplayName,
+		const FString& ControlType,
+		const FString& ValueKind)
+	{
+		TSharedPtr<FJsonObject> Field = MakeShared<FJsonObject>();
+		UeAgentAuthoringJson::ApplyAuthoringMetadata(
+			Field,
+			TEXT("property_path"),
+			PropertyPath,
+			DisplayName,
+			TEXT("Enhanced Input"),
+			ControlType,
+			ValueKind,
+			{ TEXT("set") });
+		return Field;
+	}
+
+	static TArray<TSharedPtr<FJsonValue>> MakeInputActionValueTypeCandidates()
+	{
+		TArray<TSharedPtr<FJsonValue>> Candidates;
+		const TArray<FString> Names = { TEXT("Boolean"), TEXT("Axis1D"), TEXT("Axis2D"), TEXT("Axis3D") };
+		for (const FString& Name : Names)
+		{
+			TSharedPtr<FJsonObject> Candidate = MakeShared<FJsonObject>();
+			Candidate->SetStringField(TEXT("name"), Name);
+			Candidate->SetStringField(TEXT("display_name"), Name);
+			Candidates.Add(MakeShared<FJsonValueObject>(Candidate));
+		}
+		return Candidates;
+	}
+
+	static TArray<TSharedPtr<FJsonValue>> MakeActionAuthoringFields()
+	{
+		TArray<TSharedPtr<FJsonValue>> Fields;
+		TSharedPtr<FJsonObject> ValueType = MakeEnhancedInputFieldMetadata(TEXT("value_type"), TEXT("Value Type"), TEXT("enum"), TEXT("enum"));
+		ValueType->SetArrayField(TEXT("candidates"), MakeInputActionValueTypeCandidates());
+		Fields.Add(MakeShared<FJsonValueObject>(ValueType));
+		Fields.Add(MakeShared<FJsonValueObject>(MakeEnhancedInputFieldMetadata(TEXT("consume_input"), TEXT("Consume Input"), TEXT("checkbox"), TEXT("bool"))));
+		Fields.Add(MakeShared<FJsonValueObject>(MakeEnhancedInputFieldMetadata(TEXT("trigger_when_paused"), TEXT("Trigger When Paused"), TEXT("checkbox"), TEXT("bool"))));
+		Fields.Add(MakeShared<FJsonValueObject>(MakeEnhancedInputFieldMetadata(TEXT("reserve_all_mappings"), TEXT("Reserve All Mappings"), TEXT("checkbox"), TEXT("bool"))));
+		Fields.Add(MakeShared<FJsonValueObject>(MakeEnhancedInputFieldMetadata(TEXT("modifier_classes"), TEXT("Modifiers"), TEXT("collection"), TEXT("array"))));
+		Fields.Add(MakeShared<FJsonValueObject>(MakeEnhancedInputFieldMetadata(TEXT("trigger_classes"), TEXT("Triggers"), TEXT("collection"), TEXT("array"))));
+		return Fields;
+	}
+
+	static TArray<TSharedPtr<FJsonValue>> MakeMappingContextAuthoringFields()
+	{
+		TArray<TSharedPtr<FJsonValue>> Fields;
+		Fields.Add(MakeShared<FJsonValueObject>(MakeEnhancedInputFieldMetadata(TEXT("mappings[].key"), TEXT("Key"), TEXT("key_picker"), TEXT("key"))));
+		Fields.Add(MakeShared<FJsonValueObject>(MakeEnhancedInputFieldMetadata(TEXT("mappings[].action_path"), TEXT("Input Action"), TEXT("object_picker"), TEXT("asset_path"))));
+		Fields.Add(MakeShared<FJsonValueObject>(MakeEnhancedInputFieldMetadata(TEXT("mappings[].modifier_classes"), TEXT("Modifiers"), TEXT("collection"), TEXT("array"))));
+		Fields.Add(MakeShared<FJsonValueObject>(MakeEnhancedInputFieldMetadata(TEXT("mappings[].trigger_classes"), TEXT("Triggers"), TEXT("collection"), TEXT("array"))));
+		return Fields;
 	}
 
 	static TSharedPtr<FJsonObject> ExportActionJson(const UInputAction* InputAction)
@@ -597,6 +662,7 @@ namespace UeAgentEnhancedInputOps
 		Root->SetArrayField(TEXT("trigger_classes"), TriggerClasses);
 		Root->SetNumberField(TEXT("modifier_count"), ModifierClasses.Num());
 		Root->SetNumberField(TEXT("trigger_count"), TriggerClasses.Num());
+		Root->SetArrayField(TEXT("authoring_fields"), MakeActionAuthoringFields());
 		return Root;
 	}
 
@@ -625,6 +691,7 @@ namespace UeAgentEnhancedInputOps
 		}
 
 		Root->SetArrayField(TEXT("mappings"), MappingsArray);
+		Root->SetArrayField(TEXT("authoring_fields"), MakeMappingContextAuthoringFields());
 		return Root;
 	}
 }

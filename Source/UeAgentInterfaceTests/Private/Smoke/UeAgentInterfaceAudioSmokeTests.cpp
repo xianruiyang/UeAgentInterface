@@ -266,6 +266,12 @@ bool FUeAgentInterfaceAudioSmokeTest::RunTest(const FString& Parameters)
 		FString::Printf(TEXT("{\"asset_path\":%s,\"include_nodes\":true,\"include_validation\":true}"), *JsonString(Cue)), Data));
 	TestTrue(TEXT("sound_cue_export_folder"), ExecAudioCommand(this, ServerScope, RootId + TEXT("_cue_export"), TEXT("sound_cue_export_folder"),
 		FString::Printf(TEXT("{\"asset_path\":%s,\"folder_path\":%s,\"clean_output_dir\":true,\"include_raw_properties\":true}"), *JsonString(Cue), *JsonString(CueExportFolder)), Data));
+	FString CueAssetJsonText;
+	TSharedPtr<FJsonObject> CueAssetJson;
+	TestTrue(TEXT("sound_cue_export_folder asset.json loads"), FFileHelper::LoadFileToString(CueAssetJsonText, *FPaths::Combine(CueExportFolder, TEXT("asset.json"))) && ParseJson(CueAssetJsonText, CueAssetJson));
+	TestTrue(TEXT("sound_cue_export_folder asset details ref"), CueAssetJson.IsValid() && CueAssetJson->HasTypedField<EJson::Object>(TEXT("details")));
+	TestFalse(TEXT("sound_cue_export_folder omits root raw_properties.json"), FPaths::FileExists(FPaths::Combine(CueExportFolder, TEXT("raw_properties.json"))));
+	TestTrue(TEXT("sound_cue_export_folder explicit raw goes to debug"), FPaths::FileExists(FPaths::Combine(CueExportFolder, TEXT("debug"), TEXT("raw_properties.json"))));
 	TestTrue(TEXT("sound_cue_open_editor"), ExecAudioCommand(this, ServerScope, RootId + TEXT("_cue_open"), TEXT("sound_cue_open_editor"),
 		FString::Printf(TEXT("{\"asset_path\":%s,\"bring_to_front\":false}"), *JsonString(Cue)), Data));
 	TestTrue(TEXT("sound_cue_screenshot"), ExecAudioCommand(this, ServerScope, RootId + TEXT("_cue_shot"), TEXT("sound_cue_screenshot"),
@@ -279,6 +285,12 @@ bool FUeAgentInterfaceAudioSmokeTest::RunTest(const FString& Parameters)
 		FString::Printf(TEXT("{\"asset_path\":%s,\"include_graph\":true,\"include_interfaces\":true,\"include_validation\":true}"), *JsonString(MetaSound)), Data));
 	TestTrue(TEXT("metasound_export_folder"), ExecAudioCommand(this, ServerScope, RootId + TEXT("_ms_export"), TEXT("metasound_export_folder"),
 		FString::Printf(TEXT("{\"asset_path\":%s,\"folder_path\":%s,\"clean_output_dir\":true,\"include_raw_properties\":true}"), *JsonString(MetaSound), *JsonString(MetaSoundFolder)), Data));
+	FString MetaSoundAssetJsonText;
+	TSharedPtr<FJsonObject> MetaSoundAssetJson;
+	TestTrue(TEXT("metasound_export_folder asset.json loads"), FFileHelper::LoadFileToString(MetaSoundAssetJsonText, *FPaths::Combine(MetaSoundFolder, TEXT("asset.json"))) && ParseJson(MetaSoundAssetJsonText, MetaSoundAssetJson));
+	TestTrue(TEXT("metasound_export_folder asset details ref"), MetaSoundAssetJson.IsValid() && MetaSoundAssetJson->HasTypedField<EJson::Object>(TEXT("details")));
+	TestFalse(TEXT("metasound_export_folder omits root raw_properties.json"), FPaths::FileExists(FPaths::Combine(MetaSoundFolder, TEXT("raw_properties.json"))));
+	TestTrue(TEXT("metasound_export_folder explicit raw goes to debug"), FPaths::FileExists(FPaths::Combine(MetaSoundFolder, TEXT("debug"), TEXT("raw_properties.json"))));
 	TestTrue(TEXT("metasound_validate_folder"), ExecAudioCommand(this, ServerScope, RootId + TEXT("_ms_validate"), TEXT("metasound_validate_folder"),
 		FString::Printf(TEXT("{\"folder_path\":%s}"), *JsonString(MetaSoundFolder)), Data));
 	TestTrue(TEXT("metasound_apply_folder"), ExecAudioCommand(this, ServerScope, RootId + TEXT("_ms_apply"), TEXT("metasound_apply_folder"),
@@ -299,6 +311,28 @@ bool FUeAgentInterfaceAudioSmokeTest::RunTest(const FString& Parameters)
 		FString::Printf(TEXT("{\"json_file\":%s,\"asset_path\":%s,\"save_after_apply\":true}"), *JsonString(AttSemanticJson), *JsonString(Attenuation)), Data));
 	TestTrue(TEXT("sound_attenuation_get_info"), ExecAudioCommand(this, ServerScope, RootId + TEXT("_att_info"), TEXT("sound_attenuation_get_info"),
 		FString::Printf(TEXT("{\"asset_path\":%s,\"include_raw_properties\":true}"), *JsonString(Attenuation)), Data));
+	const TSharedPtr<FJsonObject>* RawPropertiesObj = nullptr;
+	const TArray<TSharedPtr<FJsonValue>>* AudioProperties = nullptr;
+	TestTrue(TEXT("sound_attenuation raw_properties exposes authoring properties"),
+		Data.IsValid()
+		&& Data->TryGetObjectField(TEXT("raw_properties"), RawPropertiesObj)
+		&& RawPropertiesObj
+		&& (*RawPropertiesObj)->TryGetArrayField(TEXT("properties"), AudioProperties)
+		&& AudioProperties
+		&& AudioProperties->Num() > 0);
+	if (AudioProperties && AudioProperties->Num() > 0)
+	{
+		const TSharedPtr<FJsonObject>* FirstProperty = nullptr;
+		if ((*AudioProperties)[0].IsValid() && (*AudioProperties)[0]->TryGetObject(FirstProperty) && FirstProperty && FirstProperty->IsValid())
+		{
+			TestTrue(TEXT("sound_attenuation property has property_path"), (*FirstProperty)->HasField(TEXT("property_path")));
+			TestTrue(TEXT("sound_attenuation property has selector"), (*FirstProperty)->HasField(TEXT("selector")));
+			TestTrue(TEXT("sound_attenuation property has availability"), (*FirstProperty)->HasField(TEXT("availability")));
+			TestTrue(TEXT("sound_attenuation property has operations"), (*FirstProperty)->HasField(TEXT("operations")));
+			TestFalse(TEXT("sound_attenuation property omits legacy name"), (*FirstProperty)->HasField(TEXT("name")));
+			TestFalse(TEXT("sound_attenuation property omits cpp_type"), (*FirstProperty)->HasField(TEXT("cpp_type")));
+		}
+	}
 	TestTrue(TEXT("sound_attenuation_export_json"), ExecAudioCommand(this, ServerScope, RootId + TEXT("_att_export"), TEXT("sound_attenuation_export_json"),
 		FString::Printf(TEXT("{\"asset_path\":%s,\"output_file\":%s,\"include_validation\":true}"), *JsonString(Attenuation), *JsonString(AttJson)), Data));
 	TestTrue(TEXT("sound_attenuation_validate_json"), ExecAudioCommand(this, ServerScope, RootId + TEXT("_att_validate"), TEXT("sound_attenuation_validate_json"),
@@ -341,6 +375,12 @@ bool FUeAgentInterfaceAudioSmokeTest::RunTest(const FString& Parameters)
 		FString::Printf(TEXT("{\"asset_path\":%s,\"include_children\":true,\"include_effect_chain\":true}"), *JsonString(Submix)), Data));
 	TestTrue(TEXT("sound_submix_export_folder"), ExecAudioCommand(this, ServerScope, RootId + TEXT("_sub_export"), TEXT("sound_submix_export_folder"),
 		FString::Printf(TEXT("{\"asset_path\":%s,\"folder_path\":%s,\"clean_output_dir\":true,\"include_raw_properties\":true}"), *JsonString(Submix), *JsonString(SubmixFolder)), Data));
+	FString SubmixAssetJsonText;
+	TSharedPtr<FJsonObject> SubmixAssetJson;
+	TestTrue(TEXT("sound_submix_export_folder asset.json loads"), FFileHelper::LoadFileToString(SubmixAssetJsonText, *FPaths::Combine(SubmixFolder, TEXT("asset.json"))) && ParseJson(SubmixAssetJsonText, SubmixAssetJson));
+	TestTrue(TEXT("sound_submix_export_folder asset details ref"), SubmixAssetJson.IsValid() && SubmixAssetJson->HasTypedField<EJson::Object>(TEXT("details")));
+	TestFalse(TEXT("sound_submix_export_folder omits root raw_properties.json"), FPaths::FileExists(FPaths::Combine(SubmixFolder, TEXT("raw_properties.json"))));
+	TestTrue(TEXT("sound_submix_export_folder explicit raw goes to debug"), FPaths::FileExists(FPaths::Combine(SubmixFolder, TEXT("debug"), TEXT("raw_properties.json"))));
 	TestTrue(TEXT("sound_submix_validate_folder"), ExecAudioCommand(this, ServerScope, RootId + TEXT("_sub_validate"), TEXT("sound_submix_validate_folder"),
 		FString::Printf(TEXT("{\"folder_path\":%s}"), *JsonString(SubmixFolder)), Data));
 	TestTrue(TEXT("sound_submix_apply_folder"), ExecAudioCommand(this, ServerScope, RootId + TEXT("_sub_apply"), TEXT("sound_submix_apply_folder"),

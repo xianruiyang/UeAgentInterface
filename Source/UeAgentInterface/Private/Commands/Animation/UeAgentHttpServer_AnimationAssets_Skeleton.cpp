@@ -5,6 +5,9 @@
 #include "UeAgentHttpServer_AnimationAssetOps.h"
 
 #include "Utilities/UeAgentCurveJson.h"
+#include "Utilities/UeAgentAuthoringJson.h"
+#include "Utilities/UeAgentDetailsAuthoring.h"
+#include "Utilities/UeAgentFolderDetailsExport.h"
 #include "Utilities/UeAgentJsonDiagnostics.h"
 
 #include "Animation/AnimationAsset.h"
@@ -572,5 +575,3 @@ bool FUeAgentHttpServer::CmdSkeletonSetVirtualBone(const FUeAgentRequestContext&
 	return true;
 }
 
-
-#include "UeAgentHttpServer_AnimationAssets_FolderFormat.inl"

@@ -3,6 +3,7 @@
 #include "UeAgentHttpServer_IKAssetOps.h"
 #include "UeAgentHttpServer_IKAssets.h"
 
+#include "Utilities/UeAgentAuthoringJson.h"
 #include "Utilities/UeAgentJsonDiagnostics.h"
 #include "UeAgentInterfaceSettings.h"
 
@@ -276,56 +277,24 @@ namespace UeAgentIKAssetOps
 
 	bool TryGetVectorObject(const TSharedPtr<FJsonObject>& Obj, const FString& Key, FVector& OutValue)
 	{
-		if (!Obj.IsValid())
+		const TSharedPtr<FJsonValue>* FieldValue = UeAgentJsonDiagnostics::FindFieldValue(Obj, Key);
+		if (!FieldValue)
 		{
 			return false;
 		}
 
-		const TSharedPtr<FJsonObject>* ValueObject = nullptr;
-		if (!Obj->TryGetObjectField(Key, ValueObject) || !ValueObject || !ValueObject->IsValid())
-		{
-			return false;
-		}
-
-		double X = 0.0;
-		double Y = 0.0;
-		double Z = 0.0;
-		if (!UeAgentJsonDiagnostics::TryReadNumberFieldByAliases(*ValueObject, { TEXT("x"), TEXT("X") }, X)
-			|| !UeAgentJsonDiagnostics::TryReadNumberFieldByAliases(*ValueObject, { TEXT("y"), TEXT("Y") }, Y)
-			|| !UeAgentJsonDiagnostics::TryReadNumberFieldByAliases(*ValueObject, { TEXT("z"), TEXT("Z") }, Z))
-		{
-			return false;
-		}
-
-		OutValue = FVector(X, Y, Z);
-		return true;
+		return UeAgentJsonDiagnostics::TryReadVectorValue(*FieldValue, OutValue);
 	}
 
 	bool TryGetRotatorObject(const TSharedPtr<FJsonObject>& Obj, const FString& Key, FRotator& OutValue)
 	{
-		if (!Obj.IsValid())
+		const TSharedPtr<FJsonValue>* FieldValue = UeAgentJsonDiagnostics::FindFieldValue(Obj, Key);
+		if (!FieldValue)
 		{
 			return false;
 		}
 
-		const TSharedPtr<FJsonObject>* ValueObject = nullptr;
-		if (!Obj->TryGetObjectField(Key, ValueObject) || !ValueObject || !ValueObject->IsValid())
-		{
-			return false;
-		}
-
-		double Pitch = 0.0;
-		double Yaw = 0.0;
-		double Roll = 0.0;
-		if (!UeAgentJsonDiagnostics::TryReadNumberFieldByAliases(*ValueObject, { TEXT("pitch"), TEXT("Pitch") }, Pitch)
-			|| !UeAgentJsonDiagnostics::TryReadNumberFieldByAliases(*ValueObject, { TEXT("yaw"), TEXT("Yaw") }, Yaw)
-			|| !UeAgentJsonDiagnostics::TryReadNumberFieldByAliases(*ValueObject, { TEXT("roll"), TEXT("Roll") }, Roll))
-		{
-			return false;
-		}
-
-		OutValue = FRotator(Pitch, Yaw, Roll);
-		return true;
+		return UeAgentJsonDiagnostics::TryReadRotatorValue(*FieldValue, OutValue);
 	}
 
 	const TCHAR* SourceOrTargetToString(const ERetargetSourceOrTarget Value)
@@ -475,6 +444,15 @@ namespace UeAgentIKAssetOps
 		TransformObject->SetObjectField(TEXT("rotation"), BuildRotatorJson(GoalTransform.Rotator()));
 		TransformObject->SetObjectField(TEXT("scale"), BuildVectorJson(GoalTransform.GetScale3D()));
 		Item->SetObjectField(TEXT("current_transform"), TransformObject);
+		UeAgentAuthoringJson::ApplyAuthoringMetadata(
+			Item,
+			TEXT("goal_name"),
+			Goal ? Goal->GoalName.ToString() : TEXT(""),
+			Goal ? Goal->GoalName.ToString() : TEXT("IK Goal"),
+			TEXT("IK Rig/Goals"),
+			TEXT("ik_goal"),
+			TEXT("goal"),
+			{ TEXT("set"), TEXT("remove") });
 		return Item;
 	}
 
@@ -693,6 +671,15 @@ namespace UeAgentIKAssetOps
 		Item->SetStringField(TEXT("start_bone_name"), Chain.StartBone.BoneName.ToString());
 		Item->SetStringField(TEXT("end_bone_name"), Chain.EndBone.BoneName.ToString());
 		Item->SetStringField(TEXT("goal_name"), Chain.IKGoalName.ToString());
+		UeAgentAuthoringJson::ApplyAuthoringMetadata(
+			Item,
+			TEXT("chain_name"),
+			Chain.ChainName.ToString(),
+			Chain.ChainName.ToString(),
+			TEXT("IK Rig/Retarget Chains"),
+			TEXT("ik_retarget_chain"),
+			TEXT("chain"),
+			{ TEXT("set"), TEXT("remove") });
 		return Item;
 	}
 
@@ -708,6 +695,15 @@ namespace UeAgentIKAssetOps
 	{
 		TSharedPtr<FJsonObject> Item = MakeShared<FJsonObject>();
 		Item->SetObjectField(TEXT("root_offset"), BuildVectorJson(Pose.GetRootTranslationDelta()));
+		UeAgentAuthoringJson::ApplyAuthoringMetadata(
+			Item,
+			TEXT("pose"),
+			TEXT("current_pose"),
+			TEXT("Retarget Pose"),
+			TEXT("IK Retargeter/Poses"),
+			TEXT("retarget_pose"),
+			TEXT("pose"),
+			{ TEXT("set"), TEXT("rename"), TEXT("remove") });
 
 		TArray<TSharedPtr<FJsonValue>> BoneRotationOffsets;
 		for (const TPair<FName, FQuat>& Pair : Pose.GetAllDeltaRotations())
@@ -715,6 +711,15 @@ namespace UeAgentIKAssetOps
 			TSharedPtr<FJsonObject> BoneObject = MakeShared<FJsonObject>();
 			BoneObject->SetStringField(TEXT("bone_name"), Pair.Key.ToString());
 			BoneObject->SetObjectField(TEXT("rotation_offset"), BuildRotatorJson(Pair.Value.Rotator()));
+			UeAgentAuthoringJson::ApplyAuthoringMetadata(
+				BoneObject,
+				TEXT("bone_name"),
+				Pair.Key.ToString(),
+				Pair.Key.ToString(),
+				TEXT("IK Retargeter/Pose Bone Offsets"),
+				TEXT("retarget_pose_bone_offset"),
+				TEXT("rotator"),
+				{ TEXT("set"), TEXT("remove") });
 			BoneRotationOffsets.Add(MakeShared<FJsonValueObject>(BoneObject));
 		}
 		Item->SetNumberField(TEXT("bone_rotation_offset_count"), BoneRotationOffsets.Num());
@@ -936,6 +941,15 @@ namespace UeAgentIKAssetOps
 		Item->SetObjectField(TEXT("rotation_offset"), BuildRotatorJson(Settings.RotationOffset));
 		Item->SetNumberField(TEXT("affect_ik_horizontal"), Settings.AffectIKHorizontal);
 		Item->SetNumberField(TEXT("affect_ik_vertical"), Settings.AffectIKVertical);
+		UeAgentAuthoringJson::ApplyAuthoringMetadata(
+			Item,
+			TEXT("settings"),
+			TEXT("root_settings"),
+			TEXT("Root Settings"),
+			TEXT("IK Retargeter/Root Settings"),
+			TEXT("retarget_root_settings"),
+			TEXT("settings"),
+			{ TEXT("set") });
 		return Item;
 	}
 
@@ -956,6 +970,15 @@ namespace UeAgentIKAssetOps
 		Item->SetNumberField(TEXT("warp_forwards"), Settings.WarpForwards);
 		Item->SetNumberField(TEXT("sideways_offset"), Settings.SidewaysOffset);
 		Item->SetNumberField(TEXT("warp_splay"), Settings.WarpSplay);
+		UeAgentAuthoringJson::ApplyAuthoringMetadata(
+			Item,
+			TEXT("settings"),
+			TEXT("global_settings"),
+			TEXT("Global Settings"),
+			TEXT("IK Retargeter/Global Settings"),
+			TEXT("retarget_global_settings"),
+			TEXT("settings"),
+			{ TEXT("set") });
 		return Item;
 	}
 
@@ -970,6 +993,15 @@ namespace UeAgentIKAssetOps
 		Item->SetNumberField(TEXT("pole_vector_matching"), Settings.PoleVectorMatching);
 		Item->SetBoolField(TEXT("pole_vector_maintain_offset"), Settings.PoleVectorMaintainOffset);
 		Item->SetNumberField(TEXT("pole_vector_offset"), Settings.PoleVectorOffset);
+		UeAgentAuthoringJson::ApplyAuthoringMetadata(
+			Item,
+			TEXT("settings"),
+			TEXT("fk"),
+			TEXT("FK Settings"),
+			TEXT("IK Retargeter/Chain Settings"),
+			TEXT("retarget_chain_fk_settings"),
+			TEXT("settings"),
+			{ TEXT("set") });
 		return Item;
 	}
 
@@ -987,6 +1019,15 @@ namespace UeAgentIKAssetOps
 		Item->SetNumberField(TEXT("scale_vertical"), Settings.ScaleVertical);
 		Item->SetNumberField(TEXT("extension"), Settings.Extension);
 		Item->SetBoolField(TEXT("affected_by_ik_warping"), Settings.bAffectedByIKWarping);
+		UeAgentAuthoringJson::ApplyAuthoringMetadata(
+			Item,
+			TEXT("settings"),
+			TEXT("ik"),
+			TEXT("IK Settings"),
+			TEXT("IK Retargeter/Chain Settings"),
+			TEXT("retarget_chain_ik_settings"),
+			TEXT("settings"),
+			{ TEXT("set") });
 		return Item;
 	}
 
@@ -998,6 +1039,15 @@ namespace UeAgentIKAssetOps
 		Item->SetNumberField(TEXT("speed_threshold"), Settings.SpeedThreshold);
 		Item->SetNumberField(TEXT("unplant_stiffness"), Settings.UnplantStiffness);
 		Item->SetNumberField(TEXT("unplant_critical_damping"), Settings.UnplantCriticalDamping);
+		UeAgentAuthoringJson::ApplyAuthoringMetadata(
+			Item,
+			TEXT("settings"),
+			TEXT("speed_planting"),
+			TEXT("Speed Planting"),
+			TEXT("IK Retargeter/Chain Settings"),
+			TEXT("retarget_chain_speed_planting_settings"),
+			TEXT("settings"),
+			{ TEXT("set") });
 		return Item;
 	}
 
@@ -1206,6 +1256,15 @@ namespace UeAgentIKAssetOps
 		Item->SetStringField(TEXT("target_chain_name"), ChainSettings ? ChainSettings->TargetChain.ToString() : TEXT(""));
 		Item->SetStringField(TEXT("source_chain_name"), ChainSettings ? ChainSettings->SourceChain.ToString() : TEXT(""));
 		Item->SetObjectField(TEXT("settings"), BuildRetargetChainSettingsJson(ChainSettings ? ChainSettings->Settings : FTargetChainSettings()));
+		UeAgentAuthoringJson::ApplyAuthoringMetadata(
+			Item,
+			TEXT("target_chain_name"),
+			ChainSettings ? ChainSettings->TargetChain.ToString() : TEXT(""),
+			ChainSettings ? ChainSettings->TargetChain.ToString() : TEXT("Chain Settings"),
+			TEXT("IK Retargeter/Chain Settings"),
+			TEXT("retarget_chain_settings"),
+			TEXT("settings"),
+			{ TEXT("set") });
 		return Item;
 	}
 

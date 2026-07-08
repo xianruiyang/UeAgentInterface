@@ -378,6 +378,62 @@ namespace
 		Candidate.LegacyAuthoring = RecommendedAuthoring;
 		OutCandidates.Add(MoveTemp(Candidate));
 	}
+
+	static void AddBlueprintVariableDescriptionCandidates(const FSearchParams& Params, const UBlueprint* Blueprint, int32 UiOrderBase, TArray<FCandidate>& OutCandidates)
+	{
+		if (!Blueprint || !Params.CatalogType.Equals(TEXT("blueprint_variable_node")))
+		{
+			return;
+		}
+
+		const FString BlueprintPath = Blueprint->GetPathName();
+		const FString MemberParentClass = Blueprint->GeneratedClass ? Blueprint->GeneratedClass->GetPathName()
+			: (Blueprint->SkeletonGeneratedClass ? Blueprint->SkeletonGeneratedClass->GetPathName() : BlueprintPath);
+
+		int32 VariableIndex = 0;
+		for (const FBPVariableDescription& Variable : Blueprint->NewVariables)
+		{
+			const FString VariableName = Variable.VarName.ToString();
+			if (VariableName.IsEmpty())
+			{
+				continue;
+			}
+
+			const bool bAlreadyAdded = OutCandidates.ContainsByPredicate([&VariableName](const FCandidate& Candidate)
+			{
+				return Candidate.Kind.Equals(TEXT("blueprint_variable_node")) &&
+					(Candidate.CanonicalKey.Equals(VariableName) || Candidate.Name.Equals(VariableName));
+			});
+			if (bAlreadyAdded)
+			{
+				continue;
+			}
+
+			const FString VariablePath = FString::Printf(TEXT("%s.%s"), *BlueprintPath, *VariableName);
+			FCandidate Candidate;
+			Candidate.CandidateId = FString::Printf(TEXT("blueprint_variable_node:%s:%s"), *BlueprintPath, *VariableName);
+			Candidate.Kind = TEXT("blueprint_variable_node");
+			Candidate.Type = Candidate.Kind;
+			Candidate.Name = VariableName;
+			Candidate.FullName = VariablePath;
+			Candidate.StableId = VariablePath;
+			Candidate.CanonicalKey = VariableName;
+			Candidate.DisplayName = FName::NameToDisplayString(VariableName, false);
+			Candidate.CategoryPath = TEXT("Blueprint|Variables");
+			Candidate.Section = TEXT("Blueprint");
+			Candidate.SourceOrigin = TEXT("asset");
+			Candidate.SourceLabel = Blueprint->GetOutermost() ? Blueprint->GetOutermost()->GetName() : BlueprintPath;
+			Candidate.PackagePath = MemberParentClass;
+			Candidate.ObjectPath = VariablePath;
+			Candidate.WriteSupport = TEXT("blueprint_add_variable_node");
+			Candidate.SupportReason = TEXT("Can be written with variable_name and node_type via blueprint_add_variable_node.");
+			Candidate.bInLibrary = false;
+			Candidate.bSupportedInContext = true;
+			Candidate.UiOrder = UiOrderBase + VariableIndex++;
+			Candidate.JsonAuthoring = BuildJsonAuthoringPatch(Candidate);
+			OutCandidates.Add(MoveTemp(Candidate));
+		}
+	}
 }
 
 bool CollectBlueprintCandidates(const FSearchParams& Params, TArray<FCandidate>& OutCandidates, TArray<FString>& OutWarnings, FString& OutError)
@@ -471,6 +527,7 @@ bool CollectBlueprintCandidates(const FSearchParams& Params, TArray<FCandidate>&
 	{
 		AddBlueprintActionCandidate(Params, Builder.GetSchemaAction(Index), Index, OutCandidates);
 	}
+	AddBlueprintVariableDescriptionCandidates(Params, Blueprint, Builder.GetNumActions(), OutCandidates);
 
 	if (!Params.CatalogType.Equals(TEXT("blueprint_node")))
 	{

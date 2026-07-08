@@ -1,7 +1,9 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "UeAgentHttpServer_Level.h"
+#include "UeAgentHttpServer_LevelOps.h"
 
+#include "Commands/EditorViewport/UeAgentEditorViewportSequenceFrameOptions.h"
 #include "Utilities/UeAgentJsonDiagnostics.h"
 #include "Module/UeAgentInterfaceLogger.h"
 #include "UeAgentInterfaceSettings.h"
@@ -12,11 +14,18 @@
 #include "ActorFactories/ActorFactory.h"
 #include "Builders/CubeBuilder.h"
 #include "Components/ActorComponent.h"
+#include "Components/BoxComponent.h"
+#include "Components/CapsuleComponent.h"
 #include "Components/DirectionalLightComponent.h"
+#include "Components/DynamicMeshComponent.h"
+#include "Components/HierarchicalInstancedStaticMeshComponent.h"
+#include "Components/InstancedStaticMeshComponent.h"
 #include "Components/PrimitiveComponent.h"
 #include "Components/SceneComponent.h"
 #include "Components/SceneCaptureComponent2D.h"
 #include "Components/SkeletalMeshComponent.h"
+#include "Components/SphereComponent.h"
+#include "Components/SplineMeshComponent.h"
 #include "Components/StaticMeshComponent.h"
 #include "Containers/Ticker.h"
 #include "EditorActorFolders.h"
@@ -39,6 +48,7 @@
 #include "FileHelpers.h"
 #include "Framework/Application/SlateApplication.h"
 #include "GameFramework/ActorPrimitiveColorHandler.h"
+#include "GeometryCacheComponent.h"
 #include "GPUSkinCacheVisualizationData.h"
 #include "GroomVisualizationData.h"
 #include "ImageUtils.h"
@@ -55,6 +65,8 @@
 #include "NavigationPath.h"
 #include "NavigationSystem.h"
 #include "NiagaraComponent.h"
+#include "PhysicsEngine/AggregateGeom.h"
+#include "PhysicsEngine/BodySetup.h"
 #include "RayTracingVisualizationData.h"
 #include "RenderingThread.h"
 #include "Selection.h"
@@ -100,7 +112,7 @@ namespace UeAgentLevelOps
 		return Path;
 	}
 
-	static bool TryGetLevelPackagePath(const TSharedPtr<FJsonObject>& Params, FString& OutPackagePath)
+	bool TryGetLevelPackagePath(const TSharedPtr<FJsonObject>& Params, FString& OutPackagePath)
 	{
 		if (!Params.IsValid())
 		{
@@ -118,7 +130,7 @@ namespace UeAgentLevelOps
 		return !OutPackagePath.IsEmpty();
 	}
 
-	static bool TryLevelPackageToFilename(const FString& PackagePath, FString& OutFilename, FString& OutError)
+	bool TryLevelPackageToFilename(const FString& PackagePath, FString& OutFilename, FString& OutError)
 	{
 		if (!FPackageName::IsValidLongPackageName(PackagePath))
 		{
@@ -205,46 +217,28 @@ namespace UeAgentLevelOps
 		return false;
 	}
 
-	enum class EViewportVisualizationFamily : uint8
+	FResolvedViewportViewMode::FResolvedViewportViewMode()
+		: ViewMode(VMI_Lit)
+		, VisualizationFamily(EViewportVisualizationFamily::None)
+		, VisualizationMode(NAME_None)
+		, bFinalLitComposition(true)
 	{
-		None,
-		Buffer,
-		Nanite,
-		Lumen,
-		Substrate,
-		Groom,
-		VirtualShadowMap,
-		VirtualTexture,
-		ActorColoration,
-		GPUSkinCache,
-		RayTracingDebug,
-	};
+	}
 
-	struct FResolvedViewportViewMode
+	FViewportViewModeState::FViewportViewModeState()
+		: ViewMode(VMI_Lit)
+		, BufferMode(NAME_None)
+		, NaniteMode(NAME_None)
+		, LumenMode(NAME_None)
+		, SubstrateMode(NAME_None)
+		, GroomMode(NAME_None)
+		, VirtualShadowMapMode(NAME_None)
+		, VirtualTextureMode(NAME_None)
+		, ActorColorationMode(NAME_None)
+		, GPUSkinCacheMode(NAME_None)
+		, RayTracingDebugMode(NAME_None)
 	{
-		FString Key;
-		FString Category;
-		FString Label;
-		EViewModeIndex ViewMode = VMI_Lit;
-		EViewportVisualizationFamily VisualizationFamily = EViewportVisualizationFamily::None;
-		FName VisualizationMode = NAME_None;
-		bool bFinalLitComposition = true;
-	};
-
-	struct FViewportViewModeState
-	{
-		EViewModeIndex ViewMode = VMI_Lit;
-		FName BufferMode = NAME_None;
-		FName NaniteMode = NAME_None;
-		FName LumenMode = NAME_None;
-		FName SubstrateMode = NAME_None;
-		FName GroomMode = NAME_None;
-		FName VirtualShadowMapMode = NAME_None;
-		FName VirtualTextureMode = NAME_None;
-		FName ActorColorationMode = NAME_None;
-		FName GPUSkinCacheMode = NAME_None;
-		FName RayTracingDebugMode = NAME_None;
-	};
+	}
 
 	struct FSimpleViewportViewModeEntry
 	{
@@ -303,7 +297,7 @@ namespace UeAgentLevelOps
 		return Out;
 	}
 
-	static FString ViewModeIndexToStableName(EViewModeIndex ViewMode)
+	FString ViewModeIndexToStableName(EViewModeIndex ViewMode)
 	{
 		switch (ViewMode)
 		{
@@ -391,7 +385,7 @@ namespace UeAgentLevelOps
 		}
 	}
 
-	static bool IsFinalLitCompositionViewMode(EViewModeIndex ViewMode)
+	bool IsFinalLitCompositionViewMode(EViewModeIndex ViewMode)
 	{
 		return ViewMode == VMI_Lit;
 	}
@@ -890,7 +884,7 @@ namespace UeAgentLevelOps
 		return false;
 	}
 
-	static bool TryResolveRequestedViewportViewMode(
+	bool TryResolveRequestedViewportViewMode(
 		const TSharedPtr<FJsonObject>& Params,
 		bool& bOutHasViewMode,
 		FResolvedViewportViewMode& OutResolved,
@@ -956,7 +950,7 @@ namespace UeAgentLevelOps
 		return true;
 	}
 
-	static FViewportViewModeState CaptureViewportViewModeState(FLevelEditorViewportClient* ViewportClient)
+	FViewportViewModeState CaptureViewportViewModeState(FLevelEditorViewportClient* ViewportClient)
 	{
 		FViewportViewModeState State;
 		if (!ViewportClient)
@@ -991,7 +985,7 @@ namespace UeAgentLevelOps
 		}
 	}
 
-	static void RestoreViewportViewModeState(FLevelEditorViewportClient* ViewportClient, const FViewportViewModeState& State)
+	void RestoreViewportViewModeState(FLevelEditorViewportClient* ViewportClient, const FViewportViewModeState& State)
 	{
 		if (!ViewportClient)
 		{
@@ -1048,7 +1042,7 @@ namespace UeAgentLevelOps
 		InvalidateViewportClient(ViewportClient);
 	}
 
-	static void ApplyResolvedViewportViewMode(FLevelEditorViewportClient* ViewportClient, const FResolvedViewportViewMode& Resolved)
+	void ApplyResolvedViewportViewMode(FLevelEditorViewportClient* ViewportClient, const FResolvedViewportViewMode& Resolved)
 	{
 		if (!ViewportClient)
 		{
@@ -1094,7 +1088,7 @@ namespace UeAgentLevelOps
 		InvalidateViewportClient(ViewportClient);
 	}
 
-	static TSharedPtr<FJsonObject> MakeResolvedViewportViewModeJson(const FResolvedViewportViewMode& Resolved)
+	TSharedPtr<FJsonObject> MakeResolvedViewportViewModeJson(const FResolvedViewportViewMode& Resolved)
 	{
 		TSharedPtr<FJsonObject> Obj = MakeShared<FJsonObject>();
 		Obj->SetStringField(TEXT("key"), Resolved.Key);
@@ -1111,7 +1105,7 @@ namespace UeAgentLevelOps
 		return Obj;
 	}
 
-	static TSharedPtr<FJsonObject> MakeCurrentViewportViewModeJson(FLevelEditorViewportClient* ViewportClient)
+	TSharedPtr<FJsonObject> MakeCurrentViewportViewModeJson(FLevelEditorViewportClient* ViewportClient)
 	{
 		TSharedPtr<FJsonObject> Obj = MakeShared<FJsonObject>();
 		if (!ViewportClient)
@@ -1187,7 +1181,7 @@ namespace UeAgentLevelOps
 		}
 	}
 
-	static TSharedPtr<FJsonObject> MakeViewportViewModeCatalogJson()
+	TSharedPtr<FJsonObject> MakeViewportViewModeCatalogJson()
 	{
 		TArray<TSharedPtr<FJsonValue>> Modes;
 
@@ -1319,7 +1313,7 @@ namespace UeAgentLevelOps
 		return -1;
 	}
 
-	static TSharedPtr<FJsonObject> MakeViewportClientJson(FLevelEditorViewportClient* ViewportClient, const FString& SelectionReason)
+	TSharedPtr<FJsonObject> MakeViewportClientJson(FLevelEditorViewportClient* ViewportClient, const FString& SelectionReason)
 	{
 		TSharedPtr<FJsonObject> Obj = MakeShared<FJsonObject>();
 		Obj->SetStringField(TEXT("selection_reason"), SelectionReason);
@@ -1374,7 +1368,7 @@ namespace UeAgentLevelOps
 		return Obj;
 	}
 
-	static void RestoreEditorInteractionState(
+	void RestoreEditorInteractionState(
 		FLevelEditorViewportClient* ViewportClient,
 		bool bGameView,
 		bool bModeWidgets,
@@ -1409,7 +1403,12 @@ namespace UeAgentLevelOps
 		}
 	}
 
-	static FLevelEditorViewportClient* GetPreferredLevelViewportClient(FString* OutSelectionReason = nullptr)
+	FLevelEditorViewportClient* GetPreferredLevelViewportClient()
+	{
+		return GetPreferredLevelViewportClient(nullptr);
+	}
+
+	FLevelEditorViewportClient* GetPreferredLevelViewportClient(FString* OutSelectionReason)
 	{
 		auto SetReason = [OutSelectionReason](const TCHAR* Reason)
 		{
@@ -1518,7 +1517,7 @@ namespace UeAgentLevelOps
 		return nullptr;
 	}
 
-	static bool ResolvePropertyPath(UObject* Obj, const FString& PropertyPath, FProperty*& OutProperty, void*& OutValuePtr)
+	bool ResolvePropertyPath(UObject* Obj, const FString& PropertyPath, FProperty*& OutProperty, void*& OutValuePtr)
 	{
 		OutProperty = nullptr;
 		OutValuePtr = nullptr;
@@ -1564,7 +1563,7 @@ namespace UeAgentLevelOps
 		return false;
 	}
 
-	static UActorComponent* FindComponentByNameOrPath(AActor* Actor, const FString& ComponentId)
+	UActorComponent* FindComponentByNameOrPath(AActor* Actor, const FString& ComponentId)
 	{
 		if (!Actor || ComponentId.IsEmpty())
 		{
@@ -1592,7 +1591,7 @@ namespace UeAgentLevelOps
 		return nullptr;
 	}
 
-	static TSharedPtr<FJsonObject> MakeActorSummaryJson(AActor* Actor)
+	TSharedPtr<FJsonObject> MakeActorSummaryJson(AActor* Actor)
 	{
 		TSharedPtr<FJsonObject> Item = MakeShared<FJsonObject>();
 		Item->SetStringField(TEXT("name"), Actor ? Actor->GetName() : TEXT(""));
@@ -1601,7 +1600,7 @@ namespace UeAgentLevelOps
 		return Item;
 	}
 
-	static void AugmentActorSummaryWithFolderTags(AActor* Actor, TSharedPtr<FJsonObject>& ActorSummary)
+	void AugmentActorSummaryWithFolderTags(AActor* Actor, TSharedPtr<FJsonObject>& ActorSummary)
 	{
 		if (!Actor || !ActorSummary.IsValid())
 		{
@@ -1619,7 +1618,7 @@ namespace UeAgentLevelOps
 		ActorSummary->SetArrayField(TEXT("tags"), TagValues);
 	}
 
-	static TSharedPtr<FJsonObject> MakeHitResultSummaryJson(
+	TSharedPtr<FJsonObject> MakeHitResultSummaryJson(
 		const FHitResult& Hit,
 		const bool bIncludeActorFolderTags,
 		const bool bIncludePenetrationDepth)
@@ -1655,7 +1654,7 @@ namespace UeAgentLevelOps
 		return Item;
 	}
 
-	static void MaybeAttachStartPenetratingAdvice(
+	void MaybeAttachStartPenetratingAdvice(
 		const FString& Context,
 		const bool bStartPenetrating,
 		const bool bFindInitialOverlaps,
@@ -1699,7 +1698,7 @@ namespace UeAgentLevelOps
 		OutData->SetObjectField(TEXT("start_penetrating_advice"), Advice);
 	}
 
-	static void FillActorTransformFields(AActor* Actor, TSharedPtr<FJsonObject>& OutData)
+	void FillActorTransformFields(AActor* Actor, TSharedPtr<FJsonObject>& OutData)
 	{
 		if (!Actor)
 		{
@@ -1718,7 +1717,7 @@ namespace UeAgentLevelOps
 		OutData->SetObjectField(TEXT("transform"), TransformObj);
 	}
 
-	static TSharedPtr<FJsonObject> MakeActorTransformJson(const FTransform& Transform)
+	TSharedPtr<FJsonObject> MakeActorTransformJson(const FTransform& Transform)
 	{
 		TSharedPtr<FJsonObject> Obj = MakeShared<FJsonObject>();
 		Obj->SetObjectField(TEXT("location"), MakeVectorJson(Transform.GetLocation()));
@@ -1746,7 +1745,7 @@ namespace UeAgentLevelOps
 		return Out.IsEmpty() ? TEXT("probe") : Out.Left(64);
 	}
 
-	static FString MakeProbeArtifactPath(const FString& Ext, const FString& RequestId, const FString& Suffix)
+	FString MakeProbeArtifactPath(const FString& Ext, const FString& RequestId, const FString& Suffix)
 	{
 		const UUeAgentInterfaceSettings* Settings = UUeAgentInterfaceSettings::Get();
 		const FString RootRel = Settings ? Settings->ArtifactsDirRelative : TEXT("Saved/RemoteArtifacts");
@@ -1761,7 +1760,7 @@ namespace UeAgentLevelOps
 			FString::Printf(TEXT("probe_%s_%s_%s_%s_%s.%s"), *Hostname, *Timestamp, *SafeRequestId, *SafeSuffix, *Guid, *Ext));
 	}
 
-	static bool ExportResolvedProperty(UObject* Object, const FString& PropertyPath, FString& OutValueText, FString& OutPropertyClass, FString& OutError)
+	bool ExportResolvedProperty(UObject* Object, const FString& PropertyPath, FString& OutValueText, FString& OutPropertyClass, FString& OutError)
 	{
 		FProperty* Property = nullptr;
 		void* ValuePtr = nullptr;
@@ -1777,7 +1776,7 @@ namespace UeAgentLevelOps
 		return true;
 	}
 
-	static void FinishActorTransformEdit(AActor* Actor)
+	void FinishActorTransformEdit(AActor* Actor)
 	{
 		if (!Actor)
 		{
@@ -1788,21 +1787,7 @@ namespace UeAgentLevelOps
 		Actor->MarkPackageDirty();
 	}
 
-	enum class EBoundsAxis : uint8
-	{
-		X,
-		Y,
-		Z
-	};
-
-	enum class EBoundsAnchor : uint8
-	{
-		Min,
-		Center,
-		Max
-	};
-
-	static bool ParseBoundsAxis(const FString& AxisText, EBoundsAxis& OutAxis)
+	bool ParseBoundsAxis(const FString& AxisText, EBoundsAxis& OutAxis)
 	{
 		const FString Normalized = AxisText.TrimStartAndEnd().ToLower();
 		if (Normalized == TEXT("x"))
@@ -1823,7 +1808,7 @@ namespace UeAgentLevelOps
 		return false;
 	}
 
-	static bool ParseBoundsAnchor(const FString& AnchorText, EBoundsAnchor& OutAnchor)
+	bool ParseBoundsAnchor(const FString& AnchorText, EBoundsAnchor& OutAnchor)
 	{
 		const FString Normalized = AnchorText.TrimStartAndEnd().ToLower();
 		if (Normalized == TEXT("min"))
@@ -1844,7 +1829,7 @@ namespace UeAgentLevelOps
 		return false;
 	}
 
-	static double GetAxisValue(const FVector& Vector, EBoundsAxis Axis)
+	double GetAxisValue(const FVector& Vector, EBoundsAxis Axis)
 	{
 		switch (Axis)
 		{
@@ -1854,7 +1839,7 @@ namespace UeAgentLevelOps
 		}
 	}
 
-	static void SetAxisValue(FVector& Vector, EBoundsAxis Axis, double Value)
+	void SetAxisValue(FVector& Vector, EBoundsAxis Axis, double Value)
 	{
 		switch (Axis)
 		{
@@ -1864,7 +1849,7 @@ namespace UeAgentLevelOps
 		}
 	}
 
-	static bool GetActorBoundsBox(AActor* Actor, FBox& OutBox, FString& OutError)
+	bool GetActorBoundsBox(AActor* Actor, FBox& OutBox, FString& OutError)
 	{
 		if (!Actor)
 		{
@@ -1881,7 +1866,7 @@ namespace UeAgentLevelOps
 		return true;
 	}
 
-	static double GetBoundsAnchorValue(const FBox& Box, EBoundsAxis Axis, EBoundsAnchor Anchor)
+	double GetBoundsAnchorValue(const FBox& Box, EBoundsAxis Axis, EBoundsAnchor Anchor)
 	{
 		const FVector Center = Box.GetCenter();
 		const FVector Min = Box.Min;
@@ -1897,7 +1882,7 @@ namespace UeAgentLevelOps
 		}
 	}
 
-	static TSharedPtr<FJsonObject> MakeBoundsJson(const FBox& Box)
+	TSharedPtr<FJsonObject> MakeBoundsJson(const FBox& Box)
 	{
 		TSharedPtr<FJsonObject> Obj = MakeShared<FJsonObject>();
 		Obj->SetObjectField(TEXT("min"), MakeVectorJson(Box.Min));
@@ -1907,7 +1892,7 @@ namespace UeAgentLevelOps
 		return Obj;
 	}
 
-	static FString NormalizeFolderPathForMatch(const FString& InFolderPath)
+	FString NormalizeFolderPathForMatch(const FString& InFolderPath)
 	{
 		FString Normalized = InFolderPath.TrimStartAndEnd();
 		Normalized.ReplaceInline(TEXT("\\"), TEXT("/"));
@@ -1920,7 +1905,7 @@ namespace UeAgentLevelOps
 		return Normalized;
 	}
 
-	static bool DoesActorMatchFolderPath(AActor* Actor, const FString& NormalizedFolderPath, bool bIncludeChildFolders)
+	bool DoesActorMatchFolderPath(AActor* Actor, const FString& NormalizedFolderPath, bool bIncludeChildFolders)
 	{
 		if (!Actor || NormalizedFolderPath.IsEmpty())
 		{
@@ -1946,7 +1931,7 @@ namespace UeAgentLevelOps
 		return ActorFolderPath.StartsWith(NormalizedFolderPath + TEXT("/"), ESearchCase::IgnoreCase);
 	}
 
-	static void AppendIgnoredActorsFromFilters(UWorld* World, const TSharedPtr<FJsonObject>& Params, TArray<AActor*>& InOutIgnoredActors)
+	void AppendIgnoredActorsFromFilters(UWorld* World, const TSharedPtr<FJsonObject>& Params, TArray<AActor*>& InOutIgnoredActors)
 	{
 		if (!World || !Params.IsValid())
 		{
@@ -2057,7 +2042,7 @@ namespace UeAgentLevelOps
 		}
 	}
 
-	static bool GetFolderActorBounds(
+	bool GetFolderActorBounds(
 		UWorld* World,
 		const FString& FolderPath,
 		bool bIncludeChildFolders,
@@ -2120,7 +2105,7 @@ namespace UeAgentLevelOps
 		return true;
 	}
 
-	static bool GetActorsInFolder(
+	bool GetActorsInFolder(
 		UWorld* World,
 		const FString& FolderPath,
 		bool bIncludeChildFolders,
@@ -2174,7 +2159,7 @@ namespace UeAgentLevelOps
 		OutCorners.Add(FVector(Max.X, Max.Y, Max.Z));
 	}
 
-	static bool ComputeViewportLocationToFrameBounds(
+	bool ComputeViewportLocationToFrameBounds(
 		FLevelEditorViewportClient* ViewportClient,
 		const FBox& Bounds,
 		const FRotator& ViewRotation,
@@ -2243,7 +2228,7 @@ namespace UeAgentLevelOps
 		return true;
 	}
 
-	static bool ResolveViewportScreenPoint(FLevelEditorViewportClient* ViewportClient, const TSharedPtr<FJsonObject>& Params, FVector2D& OutScreenPoint, FString& OutError)
+	bool ResolveViewportScreenPoint(FLevelEditorViewportClient* ViewportClient, const TSharedPtr<FJsonObject>& Params, FVector2D& OutScreenPoint, FString& OutError)
 	{
 		if (!ViewportClient || !ViewportClient->Viewport)
 		{
@@ -2272,7 +2257,7 @@ namespace UeAgentLevelOps
 		return true;
 	}
 
-	static bool ResolveTraceChannel(const TSharedPtr<FJsonObject>& Params, ECollisionChannel& OutChannel)
+	bool ResolveTraceChannel(const TSharedPtr<FJsonObject>& Params, ECollisionChannel& OutChannel)
 	{
 		OutChannel = ECC_Visibility;
 
@@ -2317,7 +2302,7 @@ namespace UeAgentLevelOps
 		return false;
 	}
 
-	static void FillHitResultJson(const FHitResult& Hit, TSharedPtr<FJsonObject>& OutData)
+	void FillHitResultJson(const FHitResult& Hit, TSharedPtr<FJsonObject>& OutData)
 	{
 		OutData->SetBoolField(TEXT("hit"), Hit.bBlockingHit);
 		if (!Hit.bBlockingHit)
@@ -2342,7 +2327,7 @@ namespace UeAgentLevelOps
 		}
 	}
 
-	static bool TraceActorFromScreenPoint(
+	bool TraceActorFromScreenPoint(
 		UWorld* World,
 		FLevelEditorViewportClient* ViewportClient,
 		const TSharedPtr<FJsonObject>& Params,
@@ -2471,7 +2456,7 @@ namespace UeAgentLevelOps
 		return true;
 	}
 
-	static bool ComputeActorLocalObbBox(AActor* Actor, FBox& OutLocalBox, FString& OutError)
+	bool ComputeActorLocalObbBox(AActor* Actor, FBox& OutLocalBox, FString& OutError)
 	{
 		if (!Actor)
 		{
@@ -2531,7 +2516,7 @@ namespace UeAgentLevelOps
 		return true;
 	}
 
-	static TSharedPtr<FJsonObject> MakeActorObbJson(AActor* Actor, const FBox& LocalBox)
+	TSharedPtr<FJsonObject> MakeActorObbJson(AActor* Actor, const FBox& LocalBox)
 	{
 		const FTransform ActorTransform = Actor->GetActorTransform();
 		const FVector LocalCenter = LocalBox.GetCenter();
@@ -2586,7 +2571,7 @@ namespace UeAgentLevelOps
 		return ObbJson;
 	}
 
-	static TSharedPtr<FJsonObject> MakeActorInfoJson(AActor* Actor)
+	TSharedPtr<FJsonObject> MakeActorInfoJson(AActor* Actor)
 	{
 		TSharedPtr<FJsonObject> Info = MakeActorSummaryJson(Actor);
 		if (!Actor)
@@ -2622,7 +2607,7 @@ namespace UeAgentLevelOps
 		return Info;
 	}
 
-	static bool GetStaticMeshComponentForVertexQuery(AActor* Actor, const FString& ComponentId, UStaticMeshComponent*& OutComponent, FString& OutError)
+	bool GetStaticMeshComponentForVertexQuery(AActor* Actor, const FString& ComponentId, UStaticMeshComponent*& OutComponent, FString& OutError)
 	{
 		OutComponent = nullptr;
 		if (!Actor)
@@ -2652,7 +2637,7 @@ namespace UeAgentLevelOps
 		return true;
 	}
 
-	static bool GetStaticMeshVertexLocalPositions(UStaticMesh* StaticMesh, TArray<FVector>& OutPositions, FString& OutError)
+	bool GetStaticMeshVertexLocalPositions(UStaticMesh* StaticMesh, TArray<FVector>& OutPositions, FString& OutError)
 	{
 		OutPositions.Reset();
 		if (!StaticMesh)
@@ -2683,7 +2668,7 @@ namespace UeAgentLevelOps
 		return true;
 	}
 
-	static bool ResolveVertexWorldPosition(UStaticMeshComponent* Component, const TArray<FVector>& LocalPositions, int32 VertexIndex, FVector& OutWorldPosition, FString& OutError)
+	bool ResolveVertexWorldPosition(UStaticMeshComponent* Component, const TArray<FVector>& LocalPositions, int32 VertexIndex, FVector& OutWorldPosition, FString& OutError)
 	{
 		if (!Component)
 		{
@@ -2702,7 +2687,3 @@ namespace UeAgentLevelOps
 }
 
 
-#include "UeAgentHttpServer_Level_ActorAndTransform.inl"
-#include "UeAgentHttpServer_Level_ViewportAndMesh.inl"
-#include "UeAgentHttpServer_Level_Navigation.inl"
-#include "UeAgentHttpServer_Level_CaptureAndPersistence.inl"

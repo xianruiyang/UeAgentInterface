@@ -35,6 +35,10 @@
       "Enabled": true
     },
     {
+      "Name": "HairStrands",
+      "Enabled": true
+    },
+    {
       "Name": "GeometryCache",
       "Enabled": true
     },

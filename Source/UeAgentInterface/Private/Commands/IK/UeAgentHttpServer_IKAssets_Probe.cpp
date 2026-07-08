@@ -2,6 +2,7 @@
 
 #include "UeAgentHttpServer_IKAssets.h"
 
+#include "Commands/EditorViewport/UeAgentEditorViewportSequenceFrameOptions.h"
 #include "UeAgentHttpServer_IKAssetOps.h"
 
 #include "Utilities/UeAgentJsonDiagnostics.h"
@@ -2101,6 +2102,12 @@ bool FUeAgentHttpServer::CmdProbeIKGoalCandidates(const FUeAgentRequestContext& 
 		OutData = MakeShared<FJsonObject>();
 	}
 
+	UeAgentEditorViewportSequenceFrameOptions::FUnifiedSequenceFrameOptionsReport UnifiedOptionsReport;
+	UeAgentEditorViewportSequenceFrameOptions::ApplyUnifiedSequenceFrameOptionsToParams(
+		Ctx.Params,
+		UeAgentEditorViewportSequenceFrameOptions::ESequenceFrameCommandKind::IKProbeCandidates,
+		UnifiedOptionsReport);
+
 	UWorld* World = GetEditorWorld(OutError);
 	if (!World)
 	{
@@ -2731,11 +2738,18 @@ bool FUeAgentHttpServer::CmdProbeIKGoalCandidates(const FUeAgentRequestContext& 
 		OutData->SetStringField(TEXT("sequence_frame_image_path"), SheetPath);
 	}
 	OutData->SetNumberField(TEXT("artifact_count"), OutArtifacts.Num());
+	UeAgentEditorViewportSequenceFrameOptions::AttachUnifiedSequenceFrameOptionsReport(OutData, UnifiedOptionsReport);
 	return true;
 }
 
 bool FUeAgentHttpServer::CmdProbeIKGoalReviewFrames(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, TArray<TSharedPtr<FJsonValue>>& OutArtifacts, FString& OutError) const
 {
+	UeAgentEditorViewportSequenceFrameOptions::FUnifiedSequenceFrameOptionsReport UnifiedOptionsReport;
+	UeAgentEditorViewportSequenceFrameOptions::ApplyUnifiedSequenceFrameOptionsToParams(
+		Ctx.Params,
+		UeAgentEditorViewportSequenceFrameOptions::ESequenceFrameCommandKind::IKProbeReviewFrames,
+		UnifiedOptionsReport);
+
 	FString ProbeRequestId;
 	JsonTryGetString(Ctx.Params, TEXT("probe_request_id"), ProbeRequestId);
 	if (ProbeRequestId.TrimStartAndEnd().IsEmpty())
@@ -3174,6 +3188,7 @@ bool FUeAgentHttpServer::CmdProbeIKGoalReviewFrames(const FUeAgentRequestContext
 		OutData->SetStringField(TEXT("sequence_frame_image_path"), SheetPath);
 	}
 	OutData->SetNumberField(TEXT("artifact_count"), OutArtifacts.Num());
+	UeAgentEditorViewportSequenceFrameOptions::AttachUnifiedSequenceFrameOptionsReport(OutData, UnifiedOptionsReport);
 	return true;
 }
 

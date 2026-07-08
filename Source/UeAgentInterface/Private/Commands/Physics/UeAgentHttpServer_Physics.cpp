@@ -2,6 +2,9 @@
 
 #include "Server/UeAgentHttpServer.h"
 
+#include "Utilities/UeAgentAuthoringJson.h"
+#include "Utilities/UeAgentDetailsAuthoring.h"
+#include "Utilities/UeAgentFolderDetailsExport.h"
 #include "Utilities/UeAgentJsonDiagnostics.h"
 
 #include "AssetRegistry/AssetRegistryModule.h"
@@ -169,8 +172,12 @@ namespace UeAgentPhysicsOps
 			IFileManager::Get().MakeDirectory(*OutputDir, true);
 		}
 		FString JsonText;
-		const TSharedRef<TJsonWriter<TCHAR>> Writer = TJsonWriterFactory<TCHAR>::Create(&JsonText);
-		if (!Object.IsValid() || !FJsonSerializer::Serialize(Object.ToSharedRef(), Writer))
+		TSharedPtr<FJsonObject> SaveObject = UeAgentDetailsAuthoring::CloneObjectTree(Object);
+		if (!UeAgentDetailsAuthoring::ExternalizeInlineDetailsInObjectTree(OutResolvedPath, SaveObject, TEXT("physics_json_export"), OutError))
+		{
+			return false;
+		}
+		if (!UeAgentJsonDiagnostics::SerializeJsonObjectCompact(SaveObject, JsonText))
 		{
 			OutError = TEXT("json_serialize_failed");
 			return false;
@@ -198,7 +205,7 @@ namespace UeAgentPhysicsOps
 			OutError = TEXT("json_parse_failed");
 			return false;
 		}
-		return true;
+		return UeAgentDetailsAuthoring::RehydrateGroupedDetailsInObjectTree(OutResolvedPath, OutJson, OutError);
 	}
 
 	static bool GetInputJsonObject(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutJson, FString& OutSource, FString& OutError)
@@ -222,10 +229,9 @@ namespace UeAgentPhysicsOps
 	static FString HashJsonObject(const TSharedPtr<FJsonObject>& Object)
 	{
 		FString JsonText;
-		const TSharedRef<TJsonWriter<TCHAR>> Writer = TJsonWriterFactory<TCHAR>::Create(&JsonText);
 		if (Object.IsValid())
 		{
-			FJsonSerializer::Serialize(Object.ToSharedRef(), Writer);
+			UeAgentJsonDiagnostics::SerializeJsonObjectCompact(Object, JsonText);
 		}
 		return FString::Printf(TEXT("md5:%s"), *FMD5::HashAnsiString(*JsonText));
 	}
@@ -1886,6 +1892,15 @@ namespace
 		Body->SetNumberField(TEXT("box_count"), BodySetup->AggGeom.BoxElems.Num());
 		Body->SetNumberField(TEXT("capsule_count"), BodySetup->AggGeom.SphylElems.Num());
 		Body->SetNumberField(TEXT("convex_count"), BodySetup->AggGeom.ConvexElems.Num());
+		UeAgentAuthoringJson::ApplyAuthoringMetadata(
+			Body,
+			TEXT("bone_name"),
+			BodySetup->BoneName.ToString(),
+			BodySetup->BoneName.ToString(),
+			TEXT("Physics Asset|Bodies"),
+			TEXT("body_setup"),
+			TEXT("physics_body"),
+			{ TEXT("set") });
 
 		TArray<TSharedPtr<FJsonValue>> Shapes;
 		for (const FKSphereElem& SphereElem : BodySetup->AggGeom.SphereElems)
@@ -1894,6 +1909,15 @@ namespace
 			Shape->SetStringField(TEXT("type"), TEXT("sphere"));
 			Shape->SetNumberField(TEXT("radius"), SphereElem.Radius);
 			Shape->SetObjectField(TEXT("transform"), UeAgentPhysicsMakeShapeTransformJson(SphereElem.Center, FRotator::ZeroRotator));
+			UeAgentAuthoringJson::ApplyAuthoringMetadata(
+				Shape,
+				TEXT("shape_index"),
+				FString::FromInt(Shapes.Num()),
+				TEXT("Sphere"),
+				TEXT("Physics Asset|Bodies|Shapes"),
+				TEXT("shape"),
+				TEXT("physics_primitive_shape"),
+				{ TEXT("set") });
 			Shapes.Add(MakeShared<FJsonValueObject>(Shape));
 		}
 		for (const FKBoxElem& BoxElem : BodySetup->AggGeom.BoxElems)
@@ -1904,6 +1928,15 @@ namespace
 			Shape->SetNumberField(TEXT("y"), BoxElem.Y);
 			Shape->SetNumberField(TEXT("z"), BoxElem.Z);
 			Shape->SetObjectField(TEXT("transform"), UeAgentPhysicsMakeShapeTransformJson(BoxElem.Center, BoxElem.Rotation));
+			UeAgentAuthoringJson::ApplyAuthoringMetadata(
+				Shape,
+				TEXT("shape_index"),
+				FString::FromInt(Shapes.Num()),
+				TEXT("Box"),
+				TEXT("Physics Asset|Bodies|Shapes"),
+				TEXT("shape"),
+				TEXT("physics_primitive_shape"),
+				{ TEXT("set") });
 			Shapes.Add(MakeShared<FJsonValueObject>(Shape));
 		}
 		for (const FKSphylElem& CapsuleElem : BodySetup->AggGeom.SphylElems)
@@ -1913,6 +1946,15 @@ namespace
 			Shape->SetNumberField(TEXT("radius"), CapsuleElem.Radius);
 			Shape->SetNumberField(TEXT("length"), CapsuleElem.Length);
 			Shape->SetObjectField(TEXT("transform"), UeAgentPhysicsMakeShapeTransformJson(CapsuleElem.Center, CapsuleElem.Rotation));
+			UeAgentAuthoringJson::ApplyAuthoringMetadata(
+				Shape,
+				TEXT("shape_index"),
+				FString::FromInt(Shapes.Num()),
+				TEXT("Capsule"),
+				TEXT("Physics Asset|Bodies|Shapes"),
+				TEXT("shape"),
+				TEXT("physics_primitive_shape"),
+				{ TEXT("set") });
 			Shapes.Add(MakeShared<FJsonValueObject>(Shape));
 		}
 		Body->SetArrayField(TEXT("primitive_shapes"), Shapes);
@@ -1954,6 +1996,15 @@ namespace
 				Constraint->SetStringField(TEXT("child_body"), Instance.ConstraintBone1.ToString());
 				Constraint->SetStringField(TEXT("parent_body"), Instance.ConstraintBone2.ToString());
 				Constraint->SetObjectField(TEXT("constraint"), UeAgentPhysicsConstraintInstanceToJson(Instance));
+				UeAgentAuthoringJson::ApplyAuthoringMetadata(
+					Constraint,
+					TEXT("name"),
+					Instance.JointName.ToString(),
+					Instance.JointName.ToString(),
+					TEXT("Physics Asset|Constraints"),
+					TEXT("constraint"),
+					TEXT("physics_constraint"),
+					{ TEXT("set") });
 				Constraints.Add(MakeShared<FJsonValueObject>(Constraint));
 			}
 		}
@@ -2465,6 +2516,18 @@ bool FUeAgentHttpServer::CmdPhysicsAssetExportFolder(const FUeAgentRequestContex
 	AssetJson->SetStringField(TEXT("asset_path"), UeAgentPhysicsOps::AssetPathForObject(PhysicsAsset));
 	AssetJson->SetStringField(TEXT("skeletal_mesh"), Readback->GetStringField(TEXT("skeletal_mesh")));
 	AssetJson->SetStringField(TEXT("skeleton"), FString());
+	if (!UeAgentFolderDetailsExport::AttachOwnerDetails(
+		PhysicsAsset,
+		FolderPath,
+		TEXT("physics_asset_export_folder"),
+		TEXT("physics_asset"),
+		PhysicsAsset->GetPathName(),
+		TEXT("asset"),
+		AssetJson,
+		OutError))
+	{
+		return false;
+	}
 
 	TSharedPtr<FJsonObject> BodiesJson = MakeShared<FJsonObject>();
 	BodiesJson->SetBoolField(TEXT("replace_all"), false);
@@ -2491,6 +2554,15 @@ bool FUeAgentHttpServer::CmdPhysicsAssetExportFolder(const FUeAgentRequestContex
 			Entry->SetStringField(TEXT("name"), ConstraintObj->GetStringField(TEXT("name")));
 			Entry->SetStringField(TEXT("parent_body"), ConstraintObj->GetStringField(TEXT("parent_body")));
 			Entry->SetStringField(TEXT("child_body"), ConstraintObj->GetStringField(TEXT("child_body")));
+			UeAgentAuthoringJson::ApplyAuthoringMetadata(
+				Entry,
+				TEXT("name"),
+				ConstraintObj->GetStringField(TEXT("name")),
+				ConstraintObj->GetStringField(TEXT("name")),
+				TEXT("Physics Asset|Constraints"),
+				TEXT("constraint"),
+				TEXT("physics_constraint"),
+				{ TEXT("set") });
 			const TSharedPtr<FJsonObject>* ConstraintSettings = nullptr;
 			if (ConstraintObj->TryGetObjectField(TEXT("constraint"), ConstraintSettings) && ConstraintSettings)
 			{
@@ -2563,6 +2635,18 @@ bool FUeAgentHttpServer::CmdPhysicsAssetValidateFolder(const FUeAgentRequestCont
 	}
 	bool bAllowDestructiveReplace = false;
 	JsonTryGetBool(Ctx.Params, TEXT("allow_destructive_replace"), bAllowDestructiveReplace);
+	const FString FolderPath = UeAgentJsonDiagnostics::ResolveProjectRelativeFilePath(FolderPathInput);
+	TSharedPtr<FJsonObject> LegacyRejection;
+	if (UeAgentDetailsAuthoring::BuildLegacyPropertiesFolderRejectionIfPresent(
+		FolderPath,
+		UeAgentDetailsAuthoring::MakeOwnerInfoForObject(nullptr, TEXT("physics_asset"), FString(), TEXT("physics_asset_validate_folder")),
+		TEXT("asset.json.details.index_file"),
+		LegacyRejection,
+		OutError))
+	{
+		OutData = LegacyRejection;
+		return false;
+	}
 	FUeAgentPhysicsAssetFolder Folder;
 	TArray<TSharedPtr<FJsonValue>> Issues;
 	const bool bValid = UeAgentPhysicsLoadAndValidatePhysicsAssetFolder(FolderPathInput, bAllowDestructiveReplace, Folder, Issues);
@@ -2612,6 +2696,17 @@ bool FUeAgentHttpServer::CmdPhysicsAssetApplyFolder(const FUeAgentRequestContext
 	{
 		Folder.AssetPath = AssetPathOverride;
 	}
+	TSharedPtr<FJsonObject> LegacyRejection;
+	if (UeAgentDetailsAuthoring::BuildLegacyPropertiesFolderRejectionIfPresent(
+		Folder.FolderPath,
+		UeAgentDetailsAuthoring::MakeOwnerInfoForObject(nullptr, TEXT("physics_asset"), Folder.AssetPath, TEXT("physics_asset_apply_folder")),
+		TEXT("asset.json.details.index_file"),
+		LegacyRejection,
+		OutError))
+	{
+		OutData = LegacyRejection;
+		return false;
+	}
 	bool bCreated = false;
 	UPhysicsAsset* PhysicsAsset = UeAgentPhysicsCreateOrLoadPhysicsAsset(Folder.AssetPath, Folder.SkeletalMesh, bCreateIfMissing, bCreated, OutError);
 	if (!PhysicsAsset)
@@ -2628,9 +2723,24 @@ bool FUeAgentHttpServer::CmdPhysicsAssetApplyFolder(const FUeAgentRequestContext
 	TArray<TSharedPtr<FJsonValue>> BodyResults;
 	TArray<TSharedPtr<FJsonValue>> ConstraintResults;
 	TArray<TSharedPtr<FJsonValue>> ProfileResults;
+	int32 GroupedDetailsApplied = 0;
+	TSharedPtr<FJsonObject> DetailsApplySummary;
 	{
 		FScopedTransaction Transaction(NSLOCTEXT("UeAgentInterface", "PhysicsAssetApply", "UeAgentInterface PhysicsAsset Apply"));
 		PhysicsAsset->Modify();
+		if (!UeAgentDetailsAuthoring::ApplyOwnerDetailsFromEntryIfPresent(
+			PhysicsAsset,
+			Folder.FolderPath,
+			Folder.AssetJson,
+			UeAgentDetailsAuthoring::MakeOwnerInfoForObject(PhysicsAsset, TEXT("physics_asset"), PhysicsAsset->GetPathName(), TEXT("physics_asset_apply_folder")),
+			TEXT("details"),
+			true,
+			DetailsApplySummary,
+			GroupedDetailsApplied,
+			OutError))
+		{
+			return false;
+		}
 		bool bReplaceAll = false;
 		Folder.BodiesJson->TryGetBoolField(TEXT("replace_all"), bReplaceAll);
 		if (bReplaceAll)
@@ -2808,6 +2918,11 @@ bool FUeAgentHttpServer::CmdPhysicsAssetApplyFolder(const FUeAgentRequestContext
 	OutData->SetArrayField(TEXT("body_results"), BodyResults);
 	OutData->SetArrayField(TEXT("constraint_results"), ConstraintResults);
 	OutData->SetArrayField(TEXT("profile_results"), ProfileResults);
+	OutData->SetNumberField(TEXT("grouped_details_applied"), GroupedDetailsApplied);
+	if (DetailsApplySummary.IsValid())
+	{
+		OutData->SetObjectField(TEXT("details_apply"), DetailsApplySummary);
+	}
 	OutData->SetObjectField(TEXT("readback"), Readback);
 	OutData->SetStringField(TEXT("readback_hash"), UeAgentPhysicsOps::HashJsonObject(Readback));
 	OutData->SetBoolField(TEXT("saved"), bSaved);

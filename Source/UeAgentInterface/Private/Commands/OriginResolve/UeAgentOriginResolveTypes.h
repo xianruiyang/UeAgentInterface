@@ -25,9 +25,11 @@ namespace UeAgentOriginResolve
 
 	struct FCodePath
 	{
+		FCodePath();
+
 		FString Path;
-		int32 Line = 0;
-		int32 Column = 0;
+		int32 Line;
+		int32 Column;
 		FString Symbol;
 		FString Module;
 		FString Status;
@@ -35,7 +37,9 @@ namespace UeAgentOriginResolve
 
 	struct FResolveResult
 	{
-		bool bResolved = false;
+		FResolveResult();
+
+		bool bResolved;
 		FString Status;
 		FString Kind;
 		FString Name;

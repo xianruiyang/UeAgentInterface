@@ -2,7 +2,11 @@
 
 #include "Server/UeAgentHttpServer.h"
 
+#include "UeAgentHttpServer_AIOps.h"
+
 #include "Commands/UeAgentGraphViewUtils.h"
+#include "Utilities/UeAgentAuthoringJson.h"
+#include "Utilities/UeAgentDetailsAuthoring.h"
 #include "Utilities/UeAgentJsonDiagnostics.h"
 #include "Module/UeAgentInterfaceLogger.h"
 
@@ -104,13 +108,3 @@
 #include "Widgets/Docking/SDockTab.h"
 #include "Widgets/SWindow.h"
 #include "Widgets/SWidget.h"
-
-#include "UeAgentHttpServer_AI_Blackboard.inl"
-
-#include "UeAgentHttpServer_AI_BehaviorTree.inl"
-
-#include "UeAgentHttpServer_AI_StateTreeEQS.inl"
-
-#include "UeAgentHttpServer_AI_PerceptionNavigation.inl"
-
-#include "UeAgentHttpServer_AI_SmartObjectBehaviorStack.inl"

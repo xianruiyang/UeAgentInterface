@@ -2,6 +2,9 @@
 
 #include "Server/UeAgentHttpServer.h"
 
+#include "Utilities/UeAgentAuthoringJson.h"
+#include "Utilities/UeAgentJsonDiagnostics.h"
+
 #include "Dom/JsonObject.h"
 #include "ISettingsCategory.h"
 #include "ISettingsContainer.h"
@@ -60,7 +63,6 @@ namespace UeAgentProjectSettingsOps
 			return;
 		}
 		Obj->SetStringField(TEXT("schema"), Schema);
-		Obj->SetStringField(TEXT("generated_at"), NowIso());
 	}
 
 	static FString NameToString(const FName& Name)
@@ -184,19 +186,13 @@ namespace UeAgentProjectSettingsOps
 		return FMD5::HashAnsiString(*Text);
 	}
 
-	static bool SerializeJsonObject(const TSharedPtr<FJsonObject>& Obj, FString& OutText, bool bPretty = true)
+	static bool SerializeJsonObject(const TSharedPtr<FJsonObject>& Obj, FString& OutText)
 	{
 		if (!Obj.IsValid())
 		{
 			return false;
 		}
-		if (bPretty)
-		{
-			const TSharedRef<TJsonWriter<TCHAR, TPrettyJsonPrintPolicy<TCHAR>>> Writer = TJsonWriterFactory<TCHAR, TPrettyJsonPrintPolicy<TCHAR>>::Create(&OutText);
-			return FJsonSerializer::Serialize(Obj.ToSharedRef(), Writer);
-		}
-		const TSharedRef<TJsonWriter<>> Writer = TJsonWriterFactory<>::Create(&OutText);
-		return FJsonSerializer::Serialize(Obj.ToSharedRef(), Writer);
+		return UeAgentJsonDiagnostics::SerializeJsonObjectCompact(Obj, OutText);
 	}
 
 	static bool SerializeJsonValue(const TSharedPtr<FJsonValue>& Value, FString& OutText)
@@ -206,14 +202,13 @@ namespace UeAgentProjectSettingsOps
 			OutText = TEXT("null");
 			return true;
 		}
-		const TSharedRef<TJsonWriter<>> Writer = TJsonWriterFactory<>::Create(&OutText);
-		return FJsonSerializer::Serialize(Value, TEXT(""), Writer);
+		return UeAgentJsonDiagnostics::SerializeJsonValueCompact(Value, OutText);
 	}
 
 	static bool SaveJsonFile(const FString& FilePath, const TSharedPtr<FJsonObject>& Json, FString& OutSavedPath, FString& OutError)
 	{
 		FString JsonText;
-		if (!SerializeJsonObject(Json, JsonText, true))
+		if (!SerializeJsonObject(Json, JsonText))
 		{
 			OutError = TEXT("json_serialize_failed");
 			return false;
@@ -484,7 +479,7 @@ namespace UeAgentProjectSettingsOps
 		}
 
 		FString RegistryText;
-		SerializeJsonObject(RegistryObj, RegistryText, false);
+		SerializeJsonObject(RegistryObj, RegistryText);
 		return HashString(RegistryText);
 	}
 
@@ -616,9 +611,38 @@ namespace UeAgentProjectSettingsOps
 		return Flags;
 	}
 
+	static FString GetControlTypeForProperty(FProperty* Property)
+	{
+		if (!Property)
+		{
+			return TEXT("property_editor");
+		}
+		if (CastField<FBoolProperty>(Property))
+		{
+			return TEXT("checkbox");
+		}
+		if (CastField<FEnumProperty>(Property) || CastField<FByteProperty>(Property))
+		{
+			return TEXT("enum_select");
+		}
+		if (CastField<FNumericProperty>(Property))
+		{
+			return TEXT("number_input");
+		}
+		if (CastField<FSoftObjectProperty>(Property) || CastField<FObjectPropertyBase>(Property) || CastField<FSoftClassProperty>(Property) || CastField<FClassProperty>(Property))
+		{
+			return TEXT("asset_picker");
+		}
+		if (CastField<FArrayProperty>(Property) || CastField<FSetProperty>(Property) || CastField<FMapProperty>(Property))
+		{
+			return TEXT("collection_editor");
+		}
+		return TEXT("property_text");
+	}
+
 	static void AddCommonPropertySchema(FProperty* Property, TSharedPtr<FJsonObject>& FieldObj)
 	{
-		FieldObj->SetStringField(TEXT("cpp_type"), Property ? Property->GetCPPType() : FString());
+		FieldObj->SetStringField(TEXT("property_path"), Property ? Property->GetName() : FString());
 		FieldObj->SetStringField(TEXT("json_type"), GetJsonTypeForProperty(Property));
 		FieldObj->SetStringField(TEXT("property_class"), Property ? Property->GetClass()->GetName() : FString());
 		FieldObj->SetBoolField(TEXT("editable"), IsEditableSettingProperty(Property));
@@ -629,8 +653,6 @@ namespace UeAgentProjectSettingsOps
 		FieldObj->SetBoolField(TEXT("is_deprecated"), Property && Property->HasAnyPropertyFlags(CPF_Deprecated));
 		FieldObj->SetStringField(TEXT("display_name"), GetPropertyDisplayName(Property));
 		FieldObj->SetStringField(TEXT("tooltip"), GetPropertyTooltip(Property));
-		FieldObj->SetStringField(TEXT("description"), GetPropertyTooltip(Property));
-		FieldObj->SetStringField(TEXT("category"), Property ? Property->GetMetaData(TEXT("Category")) : FString());
 		FieldObj->SetArrayField(TEXT("category_path"), BuildCategoryPathArray(Property));
 		FieldObj->SetStringField(TEXT("config_key"), Property ? Property->GetName() : FString());
 		FieldObj->SetArrayField(TEXT("property_flags"), BuildPropertyFlagsArray(Property));
@@ -645,6 +667,11 @@ namespace UeAgentProjectSettingsOps
 		FieldObj->SetBoolField(TEXT("requires_shader_recompile"), false);
 		FieldObj->SetBoolField(TEXT("requires_plugin_enabled"), false);
 		FieldObj->SetBoolField(TEXT("applied_immediately"), IsEditableSettingProperty(Property) && !bRequiresRestart && !bRequiresConfigReload);
+		FieldObj->SetObjectField(TEXT("selector"), UeAgentAuthoringJson::MakeSelector(TEXT("property_path"), Property ? Property->GetName() : FString()));
+		FieldObj->SetStringField(TEXT("control_type"), GetControlTypeForProperty(Property));
+		FieldObj->SetStringField(TEXT("value_kind"), GetJsonTypeForProperty(Property));
+		FieldObj->SetObjectField(TEXT("availability"), UeAgentAuthoringJson::MakeAvailability(IsEditableSettingProperty(Property), IsEditableSettingProperty(Property) ? FString() : TEXT("not editable in reflected settings object")));
+		FieldObj->SetArrayField(TEXT("operations"), IsEditableSettingProperty(Property) ? UeAgentAuthoringJson::MakeStringArray({ TEXT("set") }) : TArray<TSharedPtr<FJsonValue>>());
 
 		TSharedPtr<FJsonObject> MetaObj = MakeShared<FJsonObject>();
 		if (Property)
@@ -1337,16 +1364,14 @@ namespace UeAgentProjectSettingsOps
 			TSharedPtr<FJsonObject> Option = MakeShared<FJsonObject>();
 			Option->SetStringField(TEXT("name"), Enum->GetNameStringByIndex(Index));
 			Option->SetStringField(TEXT("display_name"), Enum->GetDisplayNameTextByIndex(Index).ToString());
-			Option->SetNumberField(TEXT("value"), static_cast<double>(Enum->GetValueByIndex(Index)));
 			Options.Add(MakeShared<FJsonValueObject>(Option));
 		}
-		FieldObj->SetArrayField(TEXT("enum_options"), Options);
+		FieldObj->SetArrayField(TEXT("candidates"), Options);
 	}
 
 	static TSharedPtr<FJsonObject> BuildFieldObject(FProperty* Property, void* ValuePtr, UObject* Owner)
 	{
 		TSharedPtr<FJsonObject> FieldObj = MakeShared<FJsonObject>();
-		FieldObj->SetStringField(TEXT("name"), Property->GetName());
 		AddCommonPropertySchema(Property, FieldObj);
 		FillEnumOptions(Property, FieldObj);
 
@@ -1372,7 +1397,7 @@ namespace UeAgentProjectSettingsOps
 		TSharedPtr<FJsonObject> SchemaOnly = MakeShared<FJsonObject>();
 		AddCommonPropertySchema(Property, SchemaOnly);
 		FillEnumOptions(Property, SchemaOnly);
-		SerializeJsonObject(SchemaOnly, SchemaText, false);
+		SerializeJsonObject(SchemaOnly, SchemaText);
 		FieldObj->SetStringField(TEXT("field_schema_hash"), HashString(SchemaText));
 		FieldObj->SetStringField(TEXT("apply_support"), IsEditableSettingProperty(Property) ? TEXT("json_or_import_text") : TEXT("read_only"));
 		return FieldObj;
@@ -1489,6 +1514,15 @@ namespace UeAgentProjectSettingsOps
 				Entry->SetStringField(TEXT("key"), Key);
 				Entry->SetStringField(TEXT("value"), Value);
 				Entry->SetStringField(TEXT("value_type"), ValueTypeToString(It.Value().ValueType));
+				UeAgentAuthoringJson::ApplyAuthoringMetadata(
+					Entry,
+					TEXT("key"),
+					Key,
+					Key,
+					TEXT("Config|Section Entries"),
+					TEXT("config_value"),
+					TEXT("config_entry"),
+					{ TEXT("set"), TEXT("remove") });
 				Entries.Add(MakeShared<FJsonValueObject>(Entry));
 				ValuesByKey.FindOrAdd(Key).Add(Value);
 			}
@@ -1515,7 +1549,7 @@ namespace UeAgentProjectSettingsOps
 		Root->SetObjectField(TEXT("values"), ValuesObj);
 		Root->SetNumberField(TEXT("entry_count"), Entries.Num());
 		FString ValueText;
-		SerializeJsonObject(ValuesObj, ValueText, false);
+		SerializeJsonObject(ValuesObj, ValueText);
 		Root->SetStringField(TEXT("section_value_hash"), HashString(ValueText));
 		return Root;
 	}
@@ -1560,10 +1594,10 @@ namespace UeAgentProjectSettingsOps
 			}
 		}
 		FString SchemaText;
-		SerializeJsonObject(SchemaHashSource, SchemaText, false);
+		SerializeJsonObject(SchemaHashSource, SchemaText);
 		Summary.FieldSchemaHash = HashString(SchemaText);
 		FString ValueText;
-		SerializeJsonObject(ValuesObj, ValueText, false);
+		SerializeJsonObject(ValuesObj, ValueText);
 		Summary.PageValueHash = HashString(ValueText);
 		return Summary;
 	}
@@ -1696,11 +1730,11 @@ namespace UeAgentProjectSettingsOps
 			}
 			SchemaHashSource->SetStringField(Pair.Key, (*FieldObj)->GetStringField(TEXT("field_schema_hash")));
 		}
-		SerializeJsonObject(SchemaHashSource, SchemaText, false);
+		SerializeJsonObject(SchemaHashSource, SchemaText);
 		Root->SetStringField(TEXT("field_schema_hash"), HashString(SchemaText));
 
 		FString ValueText;
-		SerializeJsonObject(ValuesObj, ValueText, false);
+		SerializeJsonObject(ValuesObj, ValueText);
 		Root->SetStringField(TEXT("page_value_hash"), HashString(ValueText));
 		Root->SetStringField(TEXT("settings_registry_hash"), BuildSettingsRegistryHash());
 		Root->SetStringField(TEXT("default_output_file"), FPaths::Combine(BuildPageFolder(OutputRoot, Page), TEXT("settings.json")));
@@ -1808,7 +1842,7 @@ namespace UeAgentProjectSettingsOps
 		});
 		Root->SetArrayField(TEXT("enabled_plugins"), Plugins);
 		FString Text;
-		SerializeJsonObject(Root, Text, false);
+		SerializeJsonObject(Root, Text);
 		Root->SetStringField(TEXT("enabled_plugins_hash"), HashString(Text));
 		return Root;
 	}
@@ -2746,6 +2780,15 @@ namespace UeAgentProjectSettingsOps
 				Entry->SetStringField(TEXT("key"), Key);
 				Entry->SetStringField(TEXT("value"), Value);
 				Entry->SetStringField(TEXT("value_type"), ValueTypeToString(It.Value().ValueType));
+				UeAgentAuthoringJson::ApplyAuthoringMetadata(
+					Entry,
+					TEXT("key"),
+					Key,
+					Key,
+					TEXT("Config|Section Entries"),
+					TEXT("config_value"),
+					TEXT("config_entry"),
+					{ TEXT("set"), TEXT("remove") });
 				Entries.Add(MakeShared<FJsonValueObject>(Entry));
 				ValuesByKey.FindOrAdd(Key).Add(Value);
 			}
@@ -2772,7 +2815,7 @@ namespace UeAgentProjectSettingsOps
 		Root->SetObjectField(TEXT("values"), ValuesObj);
 		Root->SetNumberField(TEXT("entry_count"), Entries.Num());
 		FString ValueText;
-		SerializeJsonObject(ValuesObj, ValueText, false);
+		SerializeJsonObject(ValuesObj, ValueText);
 		Root->SetStringField(TEXT("section_value_hash"), HashString(ValueText));
 		return Root;
 	}
@@ -2931,7 +2974,7 @@ bool FUeAgentHttpServer::CmdProjectSettingsExportIndex(const FUeAgentRequestCont
 	OutData->SetObjectField(TEXT("manifest"), Manifest);
 
 	FString RegistryText;
-	SerializeJsonObject(ManifestSections, RegistryText, false);
+	SerializeJsonObject(ManifestSections, RegistryText);
 	OutData->SetStringField(TEXT("settings_registry_hash"), HashString(RegistryText));
 
 	if (bWriteFiles)
@@ -2976,7 +3019,7 @@ bool FUeAgentHttpServer::CmdProjectSettingsExportPage(const FUeAgentRequestConte
 	{
 		Ctx.Params->TryGetBoolField(TEXT("include_hidden_properties"), bIncludeNonEditable);
 	}
-	bool bIncludeRawConfig = true;
+	bool bIncludeRawConfig = false;
 	if (Ctx.Params.IsValid() && Ctx.Params->HasField(TEXT("include_raw_config")))
 	{
 		Ctx.Params->TryGetBoolField(TEXT("include_raw_config"), bIncludeRawConfig);
@@ -3440,3 +3483,4 @@ bool FUeAgentHttpServer::CmdConfigApplySection(const FUeAgentRequestContext& Ctx
 	}
 	return true;
 }
+

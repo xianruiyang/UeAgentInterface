@@ -1,46 +1,67 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "UeAgentHttpServer_Modeling.h"
+#include "UeAgentHttpServer_ModelingOps.h"
 
 #include "Utilities/UeAgentJsonDiagnostics.h"
 #include "Module/UeAgentInterfaceLogger.h"
 
+#include "AssetRegistry/AssetRegistryModule.h"
+#include "AssetToolsModule.h"
+#include "Components/BoxComponent.h"
+#include "Components/DynamicMeshComponent.h"
 #include "Components/PrimitiveComponent.h"
+#include "Components/SkeletalMeshComponent.h"
+#include "Components/SphereComponent.h"
 #include "Components/StaticMeshComponent.h"
+#include "DynamicMesh/DynamicMeshAttributeSet.h"
+#include "DynamicMesh/DynamicMesh3.h"
+#include "DynamicMesh/DynamicMeshOverlay.h"
+#include "DynamicMeshActor.h"
 #include "Editor.h"
 #include "EditorModeManager.h"
 #include "Engine/Selection.h"
+#include "Engine/SkeletalMesh.h"
 #include "Engine/StaticMesh.h"
 #include "Engine/StaticMeshActor.h"
 #include "EngineUtils.h"
 #include "FileHelpers.h"
+#include "HAL/FileManager.h"
 #include "InteractiveTool.h"
 #include "InteractiveToolManager.h"
 #include "InteractiveToolQueryInterfaces.h"
 #include "LevelEditorViewport.h"
+#include "MaterialDomain.h"
+#include "Materials/Material.h"
+#include "Materials/MaterialInterface.h"
+#include "Misc/FileHelper.h"
+#include "Misc/Guid.h"
 #include "Misc/PackageName.h"
 #include "ModelingToolsEditorMode.h"
 #include "ModelingToolsEditorModeSettings.h"
+#include "PhysicsEngine/AggregateGeom.h"
 #include "PhysicsEngine/BodySetup.h"
+#include "PropertySets/CreateMeshObjectTypeProperties.h"
 #include "SceneView.h"
 #include "Selection/GeometrySelectionManager.h"
 #include "Selection/GeometrySelector.h"
+#include "Serialization/JsonReader.h"
+#include "Serialization/JsonSerializer.h"
+#include "Serialization/JsonWriter.h"
 #include "Tools/EdModeInteractiveToolsContext.h"
+#include "UDynamicMesh.h"
+#include "StaticMeshAttributes.h"
 
 namespace UeAgentModelingOps
 {
-	using FGeometrySelectionUpdateConfig = UE::Geometry::FGeometrySelectionUpdateConfig;
-	using FGeometrySelectionUpdateResult = UE::Geometry::FGeometrySelectionUpdateResult;
-	using EGeometrySelectionChangeType = UE::Geometry::EGeometrySelectionChangeType;
-
-	struct FModelingContext
+	FModelingContext::FModelingContext()
+		: Mode(nullptr)
+		, ToolsContext(nullptr)
+		, ViewportClient(nullptr)
 	{
-		UModelingToolsEditorMode* Mode = nullptr;
-		UEditorInteractiveToolsContext* ToolsContext = nullptr;
-		FEditorViewportClient* ViewportClient = nullptr;
-	};
+	}
 
-	static TSharedPtr<FJsonObject> MakeVectorJson(const FVector& Value)
+	TSharedPtr<FJsonObject> MakeVectorJson(const FVector& Value)
 	{
 		TSharedPtr<FJsonObject> Obj = MakeShared<FJsonObject>();
 		Obj->SetNumberField(TEXT("x"), Value.X);
@@ -49,7 +70,7 @@ namespace UeAgentModelingOps
 		return Obj;
 	}
 
-	static TSharedPtr<FJsonObject> MakeRotatorJson(const FRotator& Value)
+	TSharedPtr<FJsonObject> MakeRotatorJson(const FRotator& Value)
 	{
 		TSharedPtr<FJsonObject> Obj = MakeShared<FJsonObject>();
 		Obj->SetNumberField(TEXT("pitch"), Value.Pitch);
@@ -58,7 +79,7 @@ namespace UeAgentModelingOps
 		return Obj;
 	}
 
-	static TSharedPtr<FJsonObject> MakeActorSummaryJson(AActor* Actor)
+	TSharedPtr<FJsonObject> MakeActorSummaryJson(AActor* Actor)
 	{
 		TSharedPtr<FJsonObject> Obj = MakeShared<FJsonObject>();
 		Obj->SetStringField(TEXT("name"), Actor ? Actor->GetName() : TEXT(""));
@@ -67,65 +88,42 @@ namespace UeAgentModelingOps
 		return Obj;
 	}
 
-	static bool TryGetNumberField(const TSharedPtr<FJsonObject>& Obj, const TCHAR* FieldName, double& OutValue)
+	bool TryGetNumberField(const TSharedPtr<FJsonObject>& Obj, const TCHAR* FieldName, double& OutValue)
 	{
 		return Obj.IsValid() && Obj->TryGetNumberField(FieldName, OutValue);
 	}
 
-	static bool TryGetVectorField(const TSharedPtr<FJsonObject>& Obj, const TCHAR* FieldName, FVector& OutValue)
+	bool TryGetVectorField(const TSharedPtr<FJsonObject>& Obj, const TCHAR* FieldName, FVector& OutValue)
 	{
-		const TSharedPtr<FJsonObject>* VectorObject = nullptr;
-		if (!Obj.IsValid() || !Obj->TryGetObjectField(FieldName, VectorObject) || !VectorObject || !VectorObject->IsValid())
+		const TSharedPtr<FJsonValue>* FieldValue = UeAgentJsonDiagnostics::FindFieldValue(Obj, FieldName);
+		if (!FieldValue)
 		{
 			return false;
 		}
 
-		double X = 0.0;
-		double Y = 0.0;
-		double Z = 0.0;
-		if (!TryGetNumberField(*VectorObject, TEXT("x"), X) ||
-			!TryGetNumberField(*VectorObject, TEXT("y"), Y) ||
-			!TryGetNumberField(*VectorObject, TEXT("z"), Z))
-		{
-			return false;
-		}
-
-		OutValue = FVector((float)X, (float)Y, (float)Z);
-		return true;
+		return UeAgentJsonDiagnostics::TryReadVectorValue(*FieldValue, OutValue);
 	}
 
-	static bool TryGetRotatorField(const TSharedPtr<FJsonObject>& Obj, const TCHAR* FieldName, FRotator& OutValue)
+	bool TryGetRotatorField(const TSharedPtr<FJsonObject>& Obj, const TCHAR* FieldName, FRotator& OutValue)
 	{
-		const TSharedPtr<FJsonObject>* RotatorObject = nullptr;
-		if (!Obj.IsValid() || !Obj->TryGetObjectField(FieldName, RotatorObject) || !RotatorObject || !RotatorObject->IsValid())
+		const TSharedPtr<FJsonValue>* FieldValue = UeAgentJsonDiagnostics::FindFieldValue(Obj, FieldName);
+		if (!FieldValue)
 		{
 			return false;
 		}
 
-		double Pitch = 0.0;
-		double Yaw = 0.0;
-		double Roll = 0.0;
-		if (!TryGetNumberField(*RotatorObject, TEXT("pitch"), Pitch) ||
-			!TryGetNumberField(*RotatorObject, TEXT("yaw"), Yaw) ||
-			!TryGetNumberField(*RotatorObject, TEXT("roll"), Roll))
-		{
-			return false;
-		}
-
-		OutValue = FRotator((float)Pitch, (float)Yaw, (float)Roll);
-		return true;
+		return UeAgentJsonDiagnostics::TryReadRotatorValue(*FieldValue, OutValue);
 	}
 
-	struct FPrimitiveBoundsPlacement
+	FPrimitiveBoundsPlacement::FPrimitiveBoundsPlacement()
+		: bEnabled(false)
+		, Center(FVector::ZeroVector)
+		, Extent(FVector::ZeroVector)
+		, Rotation(FRotator::ZeroRotator)
 	{
-		bool bEnabled = false;
-		FVector Center = FVector::ZeroVector;
-		FVector Extent = FVector::ZeroVector;
-		FRotator Rotation = FRotator::ZeroRotator;
-		FString PrimitiveKind;
-	};
+	}
 
-	static bool ParsePrimitiveBoundsPlacement(const TSharedPtr<FJsonObject>& Params, FPrimitiveBoundsPlacement& OutPlacement, FString& OutError)
+	bool ParsePrimitiveBoundsPlacement(const TSharedPtr<FJsonObject>& Params, FPrimitiveBoundsPlacement& OutPlacement, FString& OutError)
 	{
 		OutPlacement = FPrimitiveBoundsPlacement{};
 		if (!Params.IsValid())
@@ -194,7 +192,7 @@ namespace UeAgentModelingOps
 		return true;
 	}
 
-	static TSharedPtr<FJsonValueObject> MakeToolPropertyEntry(const FString& PropertySet, const FString& PropertyName, const FString& ValueText)
+	TSharedPtr<FJsonValueObject> MakeToolPropertyEntry(const FString& PropertySet, const FString& PropertyName, const FString& ValueText)
 	{
 		TSharedPtr<FJsonObject> Obj = MakeShared<FJsonObject>();
 		Obj->SetStringField(TEXT("property_set"), PropertySet);
@@ -203,7 +201,7 @@ namespace UeAgentModelingOps
 		return MakeShared<FJsonValueObject>(Obj);
 	}
 
-	static bool TryGetExplicitToolPropertyValue(const TSharedPtr<FJsonObject>& Params, const FString& PropertySet, const FString& PropertyName, FString& OutValueText)
+	bool TryGetExplicitToolPropertyValue(const TSharedPtr<FJsonObject>& Params, const FString& PropertySet, const FString& PropertyName, FString& OutValueText)
 	{
 		const TArray<TSharedPtr<FJsonValue>>* PropertiesArray = nullptr;
 		if (!Params.IsValid() || !Params->TryGetArrayField(TEXT("tool_properties"), PropertiesArray) || !PropertiesArray)
@@ -236,19 +234,19 @@ namespace UeAgentModelingOps
 		return false;
 	}
 
-	static bool TryGetExplicitToolPropertyNumber(const TSharedPtr<FJsonObject>& Params, const FString& PropertySet, const FString& PropertyName, double& OutValue)
+	bool TryGetExplicitToolPropertyNumber(const TSharedPtr<FJsonObject>& Params, const FString& PropertySet, const FString& PropertyName, double& OutValue)
 	{
 		FString ValueText;
 		return TryGetExplicitToolPropertyValue(Params, PropertySet, PropertyName, ValueText) && LexTryParseString(OutValue, *ValueText);
 	}
 
-	static bool TryGetExplicitToolPropertyInt(const TSharedPtr<FJsonObject>& Params, const FString& PropertySet, const FString& PropertyName, int32& OutValue)
+	bool TryGetExplicitToolPropertyInt(const TSharedPtr<FJsonObject>& Params, const FString& PropertySet, const FString& PropertyName, int32& OutValue)
 	{
 		FString ValueText;
 		return TryGetExplicitToolPropertyValue(Params, PropertySet, PropertyName, ValueText) && LexTryParseString(OutValue, *ValueText);
 	}
 
-	static void GetSelectedActors(TArray<AActor*>& OutActors)
+	void GetSelectedActors(TArray<AActor*>& OutActors)
 	{
 		OutActors.Reset();
 		if (!GEditor)
@@ -265,7 +263,7 @@ namespace UeAgentModelingOps
 		}
 	}
 
-	static AActor* ResolveCreatedActorFromSelectionDelta(const TArray<AActor*>& BeforeSelection, const TArray<AActor*>& AfterSelection)
+	AActor* ResolveCreatedActorFromSelectionDelta(const TArray<AActor*>& BeforeSelection, const TArray<AActor*>& AfterSelection)
 	{
 		TSet<const AActor*> BeforeSet;
 		for (AActor* Actor : BeforeSelection)
@@ -296,7 +294,7 @@ namespace UeAgentModelingOps
 		return nullptr;
 	}
 
-	static bool PreparePrimitivePlacementParameters(
+	bool PreparePrimitivePlacementParameters(
 		const FString& WrapperCommand,
 		const FString& ToolIdentifier,
 		const TSharedPtr<FJsonObject>& InParams,
@@ -429,7 +427,7 @@ namespace UeAgentModelingOps
 		return true;
 	}
 
-	static bool ApplyPrimitivePlacementToActor(AActor* Actor, const FPrimitiveBoundsPlacement& Placement, FString& OutError)
+	bool ApplyPrimitivePlacementToActor(AActor* Actor, const FPrimitiveBoundsPlacement& Placement, FString& OutError)
 	{
 		if (!Actor)
 		{
@@ -444,7 +442,7 @@ namespace UeAgentModelingOps
 		return true;
 	}
 
-	static void ApplyOptionalCreatedActorMetadata(AActor* Actor, const TSharedPtr<FJsonObject>& Params)
+	void ApplyOptionalCreatedActorMetadata(AActor* Actor, const TSharedPtr<FJsonObject>& Params)
 	{
 		if (!Actor || !Params.IsValid())
 		{
@@ -466,7 +464,674 @@ namespace UeAgentModelingOps
 		}
 	}
 
-	static AActor* FindActorByNameOrLabelLoose(UWorld* World, const FString& NameOrLabel)
+	static constexpr const TCHAR* ModelingPrimitiveCollisionTagPrefix = TEXT("UAIModelingPrimitiveCollision:");
+	static constexpr int32 DefaultModelingPrimitiveCollisionMaxBoxes = 256;
+	static constexpr double DefaultModelingPrimitiveCollisionMaxStepHeight = 20.0;
+
+	struct FModelingPrimitiveCollisionOptions
+	{
+		bool bGenerate = true;
+		bool bReplaceExisting = true;
+		FString Mode = TEXT("simple_auto");
+		FString ProfileName = TEXT("BlockAll");
+		FString EnabledText = TEXT("query_and_physics");
+		ECollisionEnabled::Type CollisionEnabled = ECollisionEnabled::QueryAndPhysics;
+		int32 MaxBoxes = DefaultModelingPrimitiveCollisionMaxBoxes;
+		double MaxStepHeight = DefaultModelingPrimitiveCollisionMaxStepHeight;
+	};
+
+	struct FModelingPrimitiveCollisionShapeSpec
+	{
+		FString Shape = TEXT("box");
+		FString Kind;
+		FVector Center = FVector::ZeroVector;
+		FVector Extent = FVector::ZeroVector;
+		double Radius = 0.0;
+	};
+
+	static ECollisionEnabled::Type ParseModelingPrimitiveCollisionEnabled(const FString& Value)
+	{
+		const FString Normalized = Value.TrimStartAndEnd().ToLower();
+		if (Normalized == TEXT("none") || Normalized == TEXT("no_collision") || Normalized == TEXT("disabled"))
+		{
+			return ECollisionEnabled::NoCollision;
+		}
+		if (Normalized == TEXT("query_only"))
+		{
+			return ECollisionEnabled::QueryOnly;
+		}
+		if (Normalized == TEXT("physics_only"))
+		{
+			return ECollisionEnabled::PhysicsOnly;
+		}
+		return ECollisionEnabled::QueryAndPhysics;
+	}
+
+	bool IsModelingPrimitiveCollisionModeDisabled(const FString& Mode)
+	{
+		const FString Normalized = Mode.TrimStartAndEnd().ToLower();
+		return Normalized == TEXT("none") || Normalized == TEXT("disabled") || Normalized == TEXT("no_collision");
+	}
+
+	bool ParseModelingPrimitiveCollisionOptions(const TSharedPtr<FJsonObject>& Params, FModelingPrimitiveCollisionOptions& OutOptions)
+	{
+		OutOptions = FModelingPrimitiveCollisionOptions{};
+		if (!Params.IsValid())
+		{
+			return true;
+		}
+
+		Params->TryGetBoolField(TEXT("auto_generate_collision"), OutOptions.bGenerate);
+
+		const TSharedPtr<FJsonObject>* CollisionObjectPtr = nullptr;
+		if (Params->TryGetObjectField(TEXT("collision"), CollisionObjectPtr) && CollisionObjectPtr && CollisionObjectPtr->IsValid())
+		{
+			const TSharedPtr<FJsonObject>& CollisionObject = *CollisionObjectPtr;
+			CollisionObject->TryGetStringField(TEXT("mode"), OutOptions.Mode);
+			if (!CollisionObject->TryGetStringField(TEXT("profile_name"), OutOptions.ProfileName))
+			{
+				CollisionObject->TryGetStringField(TEXT("profile"), OutOptions.ProfileName);
+			}
+			CollisionObject->TryGetStringField(TEXT("enabled"), OutOptions.EnabledText);
+			CollisionObject->TryGetBoolField(TEXT("replace_existing"), OutOptions.bReplaceExisting);
+
+			double MaxBoxesNumber = static_cast<double>(OutOptions.MaxBoxes);
+			if (CollisionObject->TryGetNumberField(TEXT("max_boxes"), MaxBoxesNumber) ||
+				CollisionObject->TryGetNumberField(TEXT("max_shapes"), MaxBoxesNumber))
+			{
+				OutOptions.MaxBoxes = FMath::Clamp(FMath::RoundToInt(MaxBoxesNumber), 0, 10000);
+			}
+
+			double MaxStepHeightNumber = OutOptions.MaxStepHeight;
+			if (CollisionObject->TryGetNumberField(TEXT("max_step_height_cm"), MaxStepHeightNumber) ||
+				CollisionObject->TryGetNumberField(TEXT("max_step_height"), MaxStepHeightNumber) ||
+				CollisionObject->TryGetNumberField(TEXT("step_height"), MaxStepHeightNumber))
+			{
+				OutOptions.MaxStepHeight = FMath::Max(1.0, MaxStepHeightNumber);
+			}
+		}
+		else
+		{
+			FString CollisionMode;
+			if (Params->TryGetStringField(TEXT("collision"), CollisionMode))
+			{
+				OutOptions.Mode = CollisionMode;
+			}
+		}
+
+		OutOptions.Mode = OutOptions.Mode.TrimStartAndEnd().ToLower();
+		if (OutOptions.Mode.IsEmpty())
+		{
+			OutOptions.Mode = TEXT("simple_auto");
+		}
+		OutOptions.ProfileName = OutOptions.ProfileName.TrimStartAndEnd();
+		if (OutOptions.ProfileName.IsEmpty())
+		{
+			OutOptions.ProfileName = TEXT("BlockAll");
+		}
+		OutOptions.EnabledText = OutOptions.EnabledText.TrimStartAndEnd().ToLower();
+		if (OutOptions.EnabledText.IsEmpty())
+		{
+			OutOptions.EnabledText = TEXT("query_and_physics");
+		}
+		OutOptions.CollisionEnabled = ParseModelingPrimitiveCollisionEnabled(OutOptions.EnabledText);
+		if (IsModelingPrimitiveCollisionModeDisabled(OutOptions.Mode) || OutOptions.CollisionEnabled == ECollisionEnabled::NoCollision)
+		{
+			OutOptions.bGenerate = false;
+		}
+		return true;
+	}
+
+	void RemoveModelingPrimitiveCollisionComponents(AActor* Actor)
+	{
+		if (!Actor)
+		{
+			return;
+		}
+
+		TArray<UActorComponent*> Components;
+		Actor->GetComponents(Components);
+		for (UActorComponent* Component : Components)
+		{
+			if (!Component)
+			{
+				continue;
+			}
+			if (!Component->IsA<UBoxComponent>() && !Component->IsA<USphereComponent>())
+			{
+				continue;
+			}
+
+			bool bMatches = Component->GetName().StartsWith(TEXT("UAI_ModelingCollision_"));
+			for (const FName& TagName : Component->ComponentTags)
+			{
+				if (TagName.ToString().StartsWith(ModelingPrimitiveCollisionTagPrefix))
+				{
+					bMatches = true;
+					break;
+				}
+			}
+
+			if (bMatches)
+			{
+				Component->Modify();
+				Component->DestroyComponent();
+			}
+		}
+	}
+
+	static FVector SanitizeModelingCollisionExtent(const FVector& Extent)
+	{
+		return FVector(
+			FMath::Max(0.5f, FMath::Abs(Extent.X)),
+			FMath::Max(0.5f, FMath::Abs(Extent.Y)),
+			FMath::Max(0.5f, FMath::Abs(Extent.Z)));
+	}
+
+	void AddModelingCollisionBoxSpec(
+		TArray<FModelingPrimitiveCollisionShapeSpec>& Specs,
+		const FString& Kind,
+		const FVector& Center,
+		const FVector& Extent)
+	{
+		FModelingPrimitiveCollisionShapeSpec Spec;
+		Spec.Shape = TEXT("box");
+		Spec.Kind = Kind;
+		Spec.Center = Center;
+		Spec.Extent = SanitizeModelingCollisionExtent(Extent);
+		Specs.Add(Spec);
+	}
+
+	void AddModelingCollisionSphereSpec(
+		TArray<FModelingPrimitiveCollisionShapeSpec>& Specs,
+		const FString& Kind,
+		const FVector& Center,
+		const double Radius)
+	{
+		FModelingPrimitiveCollisionShapeSpec Spec;
+		Spec.Shape = TEXT("sphere");
+		Spec.Kind = Kind;
+		Spec.Center = Center;
+		Spec.Radius = FMath::Max(0.5, Radius);
+		Spec.Extent = FVector(Spec.Radius, Spec.Radius, Spec.Radius);
+		Specs.Add(Spec);
+	}
+
+	bool TryGetDerivedPrimitiveNumber(const TSharedPtr<FJsonObject>& DerivedPrimitiveData, const TCHAR* FieldName, double& OutValue)
+	{
+		return DerivedPrimitiveData.IsValid() && DerivedPrimitiveData->TryGetNumberField(FieldName, OutValue);
+	}
+
+	bool IsModelingPrimitiveCollisionModeComplexMesh(const FString& Mode)
+	{
+		const FString Normalized = Mode.TrimStartAndEnd().ToLower();
+		return Normalized == TEXT("complex") ||
+			Normalized == TEXT("complex_mesh") ||
+			Normalized == TEXT("dynamic_mesh_complex") ||
+			Normalized == TEXT("mesh_complex");
+	}
+
+	bool BuildModelingPrimitiveCollisionShapes(
+		const FPrimitiveBoundsPlacement& Placement,
+		const TSharedPtr<FJsonObject>& DerivedPrimitiveData,
+		const FModelingPrimitiveCollisionOptions& Options,
+		TArray<FModelingPrimitiveCollisionShapeSpec>& OutSpecs,
+		FString& OutModeUsed,
+		FString& OutSource,
+		bool& bOutUseDynamicMeshComplex,
+		FString& OutError)
+	{
+		OutSpecs.Reset();
+		OutSource = TEXT("actor_box_components");
+		bOutUseDynamicMeshComplex = false;
+		const FString PrimitiveKind = Placement.PrimitiveKind.TrimStartAndEnd().ToLower();
+		const FVector FullSize = Placement.Extent * 2.0f;
+		const FString RequestedMode = Options.Mode.IsEmpty() ? TEXT("simple_auto") : Options.Mode;
+
+		if (IsModelingPrimitiveCollisionModeComplexMesh(RequestedMode) ||
+			(RequestedMode == TEXT("simple_auto") &&
+				(PrimitiveKind == TEXT("modeling_create_cylinder") ||
+				 PrimitiveKind == TEXT("modeling_create_ramp") ||
+				 PrimitiveKind == TEXT("modeling_create_ramp_corner"))))
+		{
+			bOutUseDynamicMeshComplex = true;
+			OutModeUsed = TEXT("complex_mesh");
+			OutSource = TEXT("dynamic_mesh_component");
+			return true;
+		}
+
+		if (RequestedMode == TEXT("sphere") || RequestedMode == TEXT("sphere_component") ||
+			(RequestedMode == TEXT("simple_auto") && PrimitiveKind == TEXT("modeling_create_sphere")))
+		{
+			const double Radius = FMath::Max3(FMath::Abs(Placement.Extent.X), FMath::Abs(Placement.Extent.Y), FMath::Abs(Placement.Extent.Z));
+			AddModelingCollisionSphereSpec(OutSpecs, TEXT("sphere_component"), FVector::ZeroVector, Radius);
+			OutModeUsed = TEXT("sphere_component");
+			OutSource = TEXT("actor_sphere_component");
+			return true;
+		}
+
+		if (RequestedMode == TEXT("bounds_box") || RequestedMode == TEXT("box") || RequestedMode == TEXT("box_component"))
+		{
+			AddModelingCollisionBoxSpec(OutSpecs, TEXT("bounds_box"), FVector::ZeroVector, Placement.Extent);
+			OutModeUsed = TEXT("bounds_box");
+			return true;
+		}
+
+		if (RequestedMode != TEXT("simple_auto") &&
+			RequestedMode != TEXT("simple_box_components") &&
+			RequestedMode != TEXT("box_components") &&
+			RequestedMode != TEXT("stairs_step_boxes") &&
+			RequestedMode != TEXT("ramp_step_boxes") &&
+			RequestedMode != TEXT("ramp_corner_step_boxes") &&
+			RequestedMode != TEXT("sphere") &&
+			RequestedMode != TEXT("sphere_component"))
+		{
+			OutError = TEXT("unsupported_modeling_primitive_collision_mode");
+			return false;
+		}
+
+		if (PrimitiveKind == TEXT("modeling_create_stairs") || RequestedMode == TEXT("stairs_step_boxes"))
+		{
+			double StepWidth = 0.0;
+			double StepHeight = 0.0;
+			double StepDepth = 0.0;
+			double NumStepsNumber = 0.0;
+			if (!TryGetDerivedPrimitiveNumber(DerivedPrimitiveData, TEXT("StepWidth"), StepWidth) ||
+				!TryGetDerivedPrimitiveNumber(DerivedPrimitiveData, TEXT("StepHeight"), StepHeight) ||
+				!TryGetDerivedPrimitiveNumber(DerivedPrimitiveData, TEXT("StepDepth"), StepDepth) ||
+				!TryGetDerivedPrimitiveNumber(DerivedPrimitiveData, TEXT("NumSteps"), NumStepsNumber))
+			{
+				OutError = TEXT("invalid_stairs_shape_settings");
+				return false;
+			}
+
+			const int32 NumSteps = FMath::RoundToInt(NumStepsNumber);
+			if (NumSteps < 2 || StepWidth <= 0.0 || StepHeight <= 0.0 || StepDepth <= 0.0)
+			{
+				OutError = TEXT("invalid_stairs_shape_settings");
+				return false;
+			}
+			if (NumSteps > Options.MaxBoxes)
+			{
+				OutError = TEXT("modeling_primitive_collision_box_limit_exceeded");
+				return false;
+			}
+
+			const double TotalRun = StepDepth * NumSteps;
+			const double TotalRise = StepHeight * NumSteps;
+			const double MinX = -TotalRun * 0.5;
+			const double MinZ = -TotalRise * 0.5;
+			for (int32 StepIndex = 0; StepIndex < NumSteps; ++StepIndex)
+			{
+				const double StepSolidHeight = StepHeight * (StepIndex + 1);
+				AddModelingCollisionBoxSpec(
+					OutSpecs,
+					TEXT("stairs_step_box"),
+					FVector(
+						(float)(MinX + StepDepth * (StepIndex + 0.5)),
+						0.0f,
+						(float)(MinZ + StepSolidHeight * 0.5)),
+					FVector(
+						(float)(StepDepth * 0.5),
+						(float)(StepWidth * 0.5),
+						(float)(StepSolidHeight * 0.5)));
+			}
+			OutModeUsed = TEXT("stairs_step_boxes");
+			return true;
+		}
+
+		if (PrimitiveKind == TEXT("modeling_create_ramp") || RequestedMode == TEXT("ramp_step_boxes"))
+		{
+			const int32 SegmentCount = FMath::Max(1, FMath::CeilToInt((double)FullSize.Z / FMath::Max(1.0, Options.MaxStepHeight)));
+			if (SegmentCount > Options.MaxBoxes)
+			{
+				OutError = TEXT("modeling_primitive_collision_box_limit_exceeded");
+				return false;
+			}
+
+			const double SegmentDepth = FullSize.X / SegmentCount;
+			const double SegmentRise = FullSize.Z / SegmentCount;
+			const double MinX = -FullSize.X * 0.5;
+			const double MinZ = -FullSize.Z * 0.5;
+			for (int32 SegmentIndex = 0; SegmentIndex < SegmentCount; ++SegmentIndex)
+			{
+				const double SolidHeight = SegmentRise * (SegmentIndex + 1);
+				AddModelingCollisionBoxSpec(
+					OutSpecs,
+					TEXT("ramp_step_box"),
+					FVector(
+						(float)(MinX + SegmentDepth * (SegmentIndex + 0.5)),
+						0.0f,
+						(float)(MinZ + SolidHeight * 0.5)),
+					FVector(
+						(float)(SegmentDepth * 0.5),
+						Placement.Extent.Y,
+						(float)(SolidHeight * 0.5)));
+			}
+			OutModeUsed = TEXT("ramp_step_boxes");
+			return true;
+		}
+
+		if (PrimitiveKind == TEXT("modeling_create_ramp_corner") || RequestedMode == TEXT("ramp_corner_step_boxes"))
+		{
+			const int32 SegmentCount = FMath::Max(1, FMath::CeilToInt((double)FullSize.Z / FMath::Max(1.0, Options.MaxStepHeight)));
+			if (SegmentCount * SegmentCount > Options.MaxBoxes)
+			{
+				OutError = TEXT("modeling_primitive_collision_box_limit_exceeded");
+				return false;
+			}
+
+			const double SegmentX = FullSize.X / SegmentCount;
+			const double SegmentY = FullSize.Y / SegmentCount;
+			const double SegmentRise = FullSize.Z / SegmentCount;
+			const double MinX = -FullSize.X * 0.5;
+			const double MinY = -FullSize.Y * 0.5;
+			const double MinZ = -FullSize.Z * 0.5;
+			for (int32 XIndex = 0; XIndex < SegmentCount; ++XIndex)
+			{
+				for (int32 YIndex = 0; YIndex < SegmentCount; ++YIndex)
+				{
+					const double SolidHeight = SegmentRise * (FMath::Max(XIndex, YIndex) + 1);
+					AddModelingCollisionBoxSpec(
+						OutSpecs,
+						TEXT("ramp_corner_step_box"),
+						FVector(
+							(float)(MinX + SegmentX * (XIndex + 0.5)),
+							(float)(MinY + SegmentY * (YIndex + 0.5)),
+							(float)(MinZ + SolidHeight * 0.5)),
+						FVector(
+							(float)(SegmentX * 0.5),
+							(float)(SegmentY * 0.5),
+							(float)(SolidHeight * 0.5)));
+				}
+			}
+			OutModeUsed = TEXT("ramp_corner_step_boxes");
+			return true;
+		}
+
+		AddModelingCollisionBoxSpec(OutSpecs, TEXT("bounds_box"), FVector::ZeroVector, Placement.Extent);
+		OutModeUsed = TEXT("bounds_box");
+		return true;
+	}
+
+	void DisableDynamicMeshVisualCollision(AActor* Actor, int32& OutDisabledComponentCount)
+	{
+		OutDisabledComponentCount = 0;
+		if (!Actor)
+		{
+			return;
+		}
+
+		TArray<UActorComponent*> Components;
+		Actor->GetComponents(UDynamicMeshComponent::StaticClass(), Components);
+		for (UActorComponent* Component : Components)
+		{
+			if (UDynamicMeshComponent* DynamicMeshComponent = Cast<UDynamicMeshComponent>(Component))
+			{
+				DynamicMeshComponent->Modify();
+				DynamicMeshComponent->SetCollisionEnabled(ECollisionEnabled::NoCollision);
+				DynamicMeshComponent->SetCollisionProfileName(FName(TEXT("NoCollision")));
+				DynamicMeshComponent->SetComplexAsSimpleCollisionEnabled(false, true);
+				DynamicMeshComponent->UpdateOverlaps();
+				++OutDisabledComponentCount;
+			}
+		}
+	}
+
+	bool CreateModelingPrimitiveCollisionComponents(
+		AActor* Actor,
+		const FModelingPrimitiveCollisionOptions& Options,
+		const TArray<FModelingPrimitiveCollisionShapeSpec>& Specs,
+		TArray<TSharedPtr<FJsonValue>>& OutComponents,
+		FString& OutError)
+	{
+		if (!Actor)
+		{
+			OutError = TEXT("created_actor_resolution_failed");
+			return false;
+		}
+		if (Specs.Num() > Options.MaxBoxes)
+		{
+			OutError = TEXT("modeling_primitive_collision_box_limit_exceeded");
+			return false;
+		}
+
+		USceneComponent* Root = Actor->GetRootComponent();
+		if (!Root)
+		{
+			OutError = TEXT("modeling_primitive_actor_root_missing");
+			return false;
+		}
+
+		const FName CollisionTagName(*FString::Printf(TEXT("%s%s"), ModelingPrimitiveCollisionTagPrefix, *Actor->GetName()));
+		for (int32 Index = 0; Index < Specs.Num(); ++Index)
+		{
+			const FModelingPrimitiveCollisionShapeSpec& Spec = Specs[Index];
+			UPrimitiveComponent* CollisionComponent = nullptr;
+			if (Spec.Shape == TEXT("sphere"))
+			{
+				USphereComponent* SphereComponent = NewObject<USphereComponent>(Actor, *FString::Printf(TEXT("UAI_ModelingCollision_%03d"), Index), RF_Transactional);
+				if (SphereComponent)
+				{
+					SphereComponent->SetSphereRadius(Spec.Radius, false);
+				}
+				CollisionComponent = SphereComponent;
+			}
+			else
+			{
+				UBoxComponent* BoxComponent = NewObject<UBoxComponent>(Actor, *FString::Printf(TEXT("UAI_ModelingCollision_%03d"), Index), RF_Transactional);
+				if (BoxComponent)
+				{
+					BoxComponent->SetBoxExtent(Spec.Extent, false);
+				}
+				CollisionComponent = BoxComponent;
+			}
+
+			if (!CollisionComponent)
+			{
+				OutError = TEXT("modeling_primitive_collision_component_create_failed");
+				return false;
+			}
+
+			CollisionComponent->SetMobility(EComponentMobility::Movable);
+			CollisionComponent->SetupAttachment(Root);
+			CollisionComponent->SetRelativeLocation(Spec.Center);
+			CollisionComponent->SetRelativeRotation(FRotator::ZeroRotator);
+			CollisionComponent->SetRelativeScale3D(FVector::OneVector);
+			CollisionComponent->SetCollisionProfileName(FName(*Options.ProfileName));
+			CollisionComponent->SetCollisionEnabled(Options.CollisionEnabled);
+			CollisionComponent->SetHiddenInGame(true);
+			CollisionComponent->SetVisibility(false, true);
+			CollisionComponent->ComponentTags.AddUnique(CollisionTagName);
+			Actor->AddInstanceComponent(CollisionComponent);
+			CollisionComponent->RegisterComponent();
+			CollisionComponent->UpdateOverlaps();
+
+			TSharedPtr<FJsonObject> ComponentObj = MakeShared<FJsonObject>();
+			ComponentObj->SetStringField(TEXT("name"), CollisionComponent->GetName());
+			ComponentObj->SetStringField(TEXT("shape"), Spec.Shape);
+			ComponentObj->SetStringField(TEXT("kind"), Spec.Kind);
+			ComponentObj->SetObjectField(TEXT("relative_center"), MakeVectorJson(Spec.Center));
+			if (Spec.Shape == TEXT("sphere"))
+			{
+				ComponentObj->SetNumberField(TEXT("radius"), Spec.Radius);
+			}
+			else
+			{
+				ComponentObj->SetObjectField(TEXT("extent"), MakeVectorJson(Spec.Extent));
+			}
+			OutComponents.Add(MakeShared<FJsonValueObject>(ComponentObj));
+		}
+
+		return true;
+	}
+
+	bool EnableDynamicMeshComplexCollision(
+		AActor* Actor,
+		const FModelingPrimitiveCollisionOptions& Options,
+		TArray<TSharedPtr<FJsonValue>>& OutComponents,
+		FString& OutError)
+	{
+		if (!Actor)
+		{
+			OutError = TEXT("created_actor_resolution_failed");
+			return false;
+		}
+
+		TArray<UActorComponent*> Components;
+		Actor->GetComponents(UDynamicMeshComponent::StaticClass(), Components);
+		for (UActorComponent* Component : Components)
+		{
+			UDynamicMeshComponent* DynamicMeshComponent = Cast<UDynamicMeshComponent>(Component);
+			if (!DynamicMeshComponent)
+			{
+				continue;
+			}
+
+			DynamicMeshComponent->Modify();
+			DynamicMeshComponent->SetCollisionProfileName(FName(*Options.ProfileName));
+			DynamicMeshComponent->SetCollisionEnabled(Options.CollisionEnabled);
+			DynamicMeshComponent->SetDeferredCollisionUpdatesEnabled(false, false);
+			DynamicMeshComponent->SetComplexAsSimpleCollisionEnabled(true, true);
+			DynamicMeshComponent->UpdateOverlaps();
+
+			TSharedPtr<FJsonObject> ComponentObj = MakeShared<FJsonObject>();
+			ComponentObj->SetStringField(TEXT("name"), DynamicMeshComponent->GetName());
+			ComponentObj->SetStringField(TEXT("shape"), TEXT("complex_mesh"));
+			ComponentObj->SetStringField(TEXT("kind"), TEXT("dynamic_mesh_complex"));
+			ComponentObj->SetBoolField(TEXT("complex_as_simple"), true);
+			ComponentObj->SetStringField(TEXT("collision_trace_flag"), TEXT("use_complex_as_simple"));
+			OutComponents.Add(MakeShared<FJsonValueObject>(ComponentObj));
+		}
+
+		if (OutComponents.Num() <= 0)
+		{
+			OutError = TEXT("dynamic_mesh_component_not_found");
+			return false;
+		}
+		return true;
+	}
+
+	bool AutoGeneratePrimitiveCollisionIfMissing(
+		AActor* Actor,
+		const FPrimitiveBoundsPlacement& Placement,
+		const TSharedPtr<FJsonObject>& DerivedPrimitiveData,
+		const TSharedPtr<FJsonObject>& Params,
+		TSharedPtr<FJsonObject>& OutData,
+		FString& OutError)
+	{
+		FModelingPrimitiveCollisionOptions Options;
+		ParseModelingPrimitiveCollisionOptions(Params, Options);
+
+		TSharedPtr<FJsonObject> CollisionReadback = MakeShared<FJsonObject>();
+		CollisionReadback->SetStringField(TEXT("requested_mode"), Options.Mode);
+		CollisionReadback->SetStringField(TEXT("profile_name"), Options.ProfileName);
+		CollisionReadback->SetStringField(TEXT("enabled"), Options.EnabledText);
+		CollisionReadback->SetBoolField(TEXT("replace_existing"), Options.bReplaceExisting);
+		CollisionReadback->SetNumberField(TEXT("max_boxes"), Options.MaxBoxes);
+		CollisionReadback->SetNumberField(TEXT("max_step_height_cm"), Options.MaxStepHeight);
+
+		if (!Options.bGenerate)
+		{
+			if (Options.bReplaceExisting)
+			{
+				RemoveModelingPrimitiveCollisionComponents(Actor);
+			}
+
+			int32 DisabledDynamicMeshCollisionCount = 0;
+			DisableDynamicMeshVisualCollision(Actor, DisabledDynamicMeshCollisionCount);
+			if (Actor)
+			{
+				Actor->MarkPackageDirty();
+			}
+
+			CollisionReadback->SetBoolField(TEXT("generated"), false);
+			CollisionReadback->SetBoolField(TEXT("skipped"), true);
+			CollisionReadback->SetStringField(TEXT("skip_reason"), TEXT("collision_disabled"));
+			CollisionReadback->SetNumberField(TEXT("disabled_dynamic_mesh_collision_components"), DisabledDynamicMeshCollisionCount);
+			if (OutData.IsValid())
+			{
+				OutData->SetObjectField(TEXT("collision"), CollisionReadback);
+				OutData->SetBoolField(TEXT("auto_collision_skipped"), true);
+				OutData->SetStringField(TEXT("auto_collision_skip_reason"), TEXT("collision_disabled"));
+				OutData->SetNumberField(TEXT("disabled_dynamic_mesh_collision_components"), DisabledDynamicMeshCollisionCount);
+			}
+			return true;
+		}
+
+		TArray<FModelingPrimitiveCollisionShapeSpec> Specs;
+		FString ModeUsed;
+		FString SourceUsed;
+		bool bUseDynamicMeshComplex = false;
+		if (!BuildModelingPrimitiveCollisionShapes(Placement, DerivedPrimitiveData, Options, Specs, ModeUsed, SourceUsed, bUseDynamicMeshComplex, OutError))
+		{
+			return false;
+		}
+
+		if (Options.bReplaceExisting)
+		{
+			RemoveModelingPrimitiveCollisionComponents(Actor);
+		}
+
+		int32 DisabledDynamicMeshCollisionCount = 0;
+
+		TArray<TSharedPtr<FJsonValue>> ComponentReadback;
+		if (bUseDynamicMeshComplex)
+		{
+			if (!EnableDynamicMeshComplexCollision(Actor, Options, ComponentReadback, OutError))
+			{
+				return false;
+			}
+		}
+		else
+		{
+			DisableDynamicMeshVisualCollision(Actor, DisabledDynamicMeshCollisionCount);
+			if (!CreateModelingPrimitiveCollisionComponents(Actor, Options, Specs, ComponentReadback, OutError))
+			{
+				return false;
+			}
+		}
+
+		if (Actor)
+		{
+			Actor->MarkPackageDirty();
+		}
+
+		int32 BoxCount = 0;
+		int32 SphereCount = 0;
+		for (const FModelingPrimitiveCollisionShapeSpec& Spec : Specs)
+		{
+			if (Spec.Shape == TEXT("sphere"))
+			{
+				++SphereCount;
+			}
+			else
+			{
+				++BoxCount;
+			}
+		}
+		const int32 ShapeCount = bUseDynamicMeshComplex ? ComponentReadback.Num() : Specs.Num();
+		CollisionReadback->SetStringField(TEXT("mode"), ModeUsed);
+		CollisionReadback->SetBoolField(TEXT("generated"), ShapeCount > 0);
+		CollisionReadback->SetStringField(TEXT("source"), SourceUsed);
+		CollisionReadback->SetNumberField(TEXT("box_count"), BoxCount);
+		CollisionReadback->SetNumberField(TEXT("sphere_count"), SphereCount);
+		CollisionReadback->SetNumberField(TEXT("complex_component_count"), bUseDynamicMeshComplex ? ComponentReadback.Num() : 0);
+		CollisionReadback->SetNumberField(TEXT("shape_count"), ShapeCount);
+		CollisionReadback->SetNumberField(TEXT("disabled_dynamic_mesh_collision_components"), DisabledDynamicMeshCollisionCount);
+		CollisionReadback->SetArrayField(TEXT("components"), ComponentReadback);
+		if (OutData.IsValid())
+		{
+			OutData->SetObjectField(TEXT("collision"), CollisionReadback);
+			OutData->SetBoolField(TEXT("auto_collision_generated"), ShapeCount > 0);
+			OutData->SetStringField(TEXT("auto_collision_kind"), ModeUsed);
+			OutData->SetNumberField(TEXT("auto_collision_box_count"), BoxCount);
+			OutData->SetNumberField(TEXT("auto_collision_shape_count"), ShapeCount);
+		}
+		return true;
+	}
+
+	AActor* FindActorByNameOrLabelLoose(UWorld* World, const FString& NameOrLabel)
 	{
 		if (!World || NameOrLabel.IsEmpty())
 		{
@@ -492,7 +1157,7 @@ namespace UeAgentModelingOps
 		return nullptr;
 	}
 
-	static FString NormalizeToolIdentifier(const FString& InValue)
+	FString NormalizeToolIdentifier(const FString& InValue)
 	{
 		const FString Value = InValue.TrimStartAndEnd();
 		if (Value.IsEmpty())
@@ -506,7 +1171,7 @@ namespace UeAgentModelingOps
 		return FString::Printf(TEXT("Begin%s"), *Value);
 	}
 
-	static FString ResolveToolIdentifierAlias(const FString& InValue)
+	FString ResolveToolIdentifierAlias(const FString& InValue)
 	{
 		const FString RawValue = InValue.TrimStartAndEnd();
 		if (RawValue.IsEmpty())
@@ -546,7 +1211,7 @@ namespace UeAgentModelingOps
 		return Normalized;
 	}
 
-	static FString ToObjectPath(const FString& InPath)
+	FString ToObjectPath(const FString& InPath)
 	{
 		FString ObjectPath = InPath.TrimStartAndEnd();
 		if (ObjectPath.IsEmpty())
@@ -562,7 +1227,7 @@ namespace UeAgentModelingOps
 		return AssetName.IsEmpty() ? FString() : FString::Printf(TEXT("%s.%s"), *ObjectPath, *AssetName);
 	}
 
-	static UObject* LoadAssetObject(const FString& InPath)
+	UObject* LoadAssetObject(const FString& InPath)
 	{
 		const FString ObjectPath = ToObjectPath(InPath);
 		if (ObjectPath.IsEmpty())
@@ -576,12 +1241,12 @@ namespace UeAgentModelingOps
 		return LoadObject<UObject>(nullptr, *ObjectPath);
 	}
 
-	static UStaticMesh* LoadStaticMeshAsset(const FString& InPath)
+	UStaticMesh* LoadStaticMeshAsset(const FString& InPath)
 	{
 		return Cast<UStaticMesh>(LoadAssetObject(InPath));
 	}
 
-	static FEditorViewportClient* GetFocusedViewportClient()
+	FEditorViewportClient* GetFocusedViewportClient()
 	{
 		FEditorModeTools& ModeTools = GLevelEditorModeTools();
 		if (FEditorViewportClient* FocusedViewportClient = ModeTools.GetFocusedViewportClient())
@@ -594,7 +1259,7 @@ namespace UeAgentModelingOps
 		return nullptr;
 	}
 
-	static FEditorViewportClient* GetPreferredViewportClient()
+	FEditorViewportClient* GetPreferredViewportClient()
 	{
 		if (FEditorViewportClient* FocusedViewportClient = GetFocusedViewportClient())
 		{
@@ -626,7 +1291,7 @@ namespace UeAgentModelingOps
 		return nullptr;
 	}
 
-	static FEditorViewportClient* ResolveTickViewportClient(FEditorViewportClient* ViewportClient)
+	FEditorViewportClient* ResolveTickViewportClient(FEditorViewportClient* ViewportClient)
 	{
 		if (FEditorViewportClient* FocusedViewportClient = GetFocusedViewportClient())
 		{
@@ -635,7 +1300,7 @@ namespace UeAgentModelingOps
 		return (ViewportClient && ViewportClient->Viewport) ? ViewportClient : GetPreferredViewportClient();
 	}
 
-	static void EnsureViewportClientFocused(FEditorViewportClient* ViewportClient)
+	void EnsureViewportClientFocused(FEditorViewportClient* ViewportClient)
 	{
 		if (!ViewportClient || !ViewportClient->Viewport)
 		{
@@ -649,7 +1314,7 @@ namespace UeAgentModelingOps
 		}
 	}
 
-	static FString ElementTypeToString(UGeometrySelectionManager::EGeometryElementType ElementType)
+	FString ElementTypeToString(UGeometrySelectionManager::EGeometryElementType ElementType)
 	{
 		using EElement = UGeometrySelectionManager::EGeometryElementType;
 		switch (ElementType)
@@ -661,7 +1326,7 @@ namespace UeAgentModelingOps
 		}
 	}
 
-	static FString TopologyModeToString(UGeometrySelectionManager::EMeshTopologyMode Mode)
+	FString TopologyModeToString(UGeometrySelectionManager::EMeshTopologyMode Mode)
 	{
 		switch (Mode)
 		{
@@ -671,7 +1336,7 @@ namespace UeAgentModelingOps
 		}
 	}
 
-	static UGeometrySelectionManager::EGeometryElementType ParseElementType(const FString& InValue)
+	UGeometrySelectionManager::EGeometryElementType ParseElementType(const FString& InValue)
 	{
 		const FString Value = InValue.TrimStartAndEnd().ToLower();
 		if (Value == TEXT("vertex") || Value == TEXT("vertices"))
@@ -685,7 +1350,7 @@ namespace UeAgentModelingOps
 		return UGeometrySelectionManager::EGeometryElementType::Face;
 	}
 
-	static UGeometrySelectionManager::EMeshTopologyMode ParseTopologyMode(const FString& InValue)
+	UGeometrySelectionManager::EMeshTopologyMode ParseTopologyMode(const FString& InValue)
 	{
 		const FString Value = InValue.TrimStartAndEnd().ToLower();
 		if (Value == TEXT("polygroup") || Value == TEXT("group"))
@@ -699,7 +1364,7 @@ namespace UeAgentModelingOps
 		return UGeometrySelectionManager::EMeshTopologyMode::Triangle;
 	}
 
-	static EGeometrySelectionChangeType ParseSelectionChangeType(const FString& InValue)
+	EGeometrySelectionChangeType ParseSelectionChangeType(const FString& InValue)
 	{
 		const FString Value = InValue.TrimStartAndEnd().ToLower();
 		if (Value == TEXT("add") || Value == TEXT("append"))
@@ -713,7 +1378,7 @@ namespace UeAgentModelingOps
 		return EGeometrySelectionChangeType::Replace;
 	}
 
-	static FString SelectionChangeTypeToString(EGeometrySelectionChangeType InValue)
+	FString SelectionChangeTypeToString(EGeometrySelectionChangeType InValue)
 	{
 		switch (InValue)
 		{
@@ -727,7 +1392,7 @@ namespace UeAgentModelingOps
 		}
 	}
 
-	static bool ResolveViewportScreenPoint(const FEditorViewportClient* ViewportClient, const TSharedPtr<FJsonObject>& Params, FVector2D& OutScreenPoint, FString& OutError)
+	bool ResolveViewportScreenPoint(const FEditorViewportClient* ViewportClient, const TSharedPtr<FJsonObject>& Params, FVector2D& OutScreenPoint, FString& OutError)
 	{
 		if (!ViewportClient || !ViewportClient->Viewport)
 		{
@@ -755,7 +1420,7 @@ namespace UeAgentModelingOps
 		return true;
 	}
 
-	static bool DeprojectViewportScreenPoint(const FModelingContext& Context, const FVector2D& ScreenPoint, FRay3d& OutWorldRay, FString& OutError)
+	bool DeprojectViewportScreenPoint(const FModelingContext& Context, const FVector2D& ScreenPoint, FRay3d& OutWorldRay, FString& OutError)
 	{
 		if (!Context.ViewportClient || !Context.ViewportClient->Viewport)
 		{
@@ -788,7 +1453,7 @@ namespace UeAgentModelingOps
 		return true;
 	}
 
-	static bool ResolveWorldRayFromParams(const TSharedPtr<FJsonObject>& Params, FRay3d& OutWorldRay, FString& OutError)
+	bool ResolveWorldRayFromParams(const TSharedPtr<FJsonObject>& Params, FRay3d& OutWorldRay, FString& OutError)
 	{
 		if (!Params.IsValid())
 		{
@@ -796,48 +1461,43 @@ namespace UeAgentModelingOps
 			return false;
 		}
 
-		const TSharedPtr<FJsonObject>* OriginObj = nullptr;
-		const TSharedPtr<FJsonObject>* DirectionObj = nullptr;
-		if (!Params->TryGetObjectField(TEXT("world_origin"), OriginObj) || !OriginObj || !OriginObj->IsValid())
+		const TSharedPtr<FJsonValue>* OriginValue = UeAgentJsonDiagnostics::FindFieldValue(Params, TEXT("world_origin"));
+		const TSharedPtr<FJsonValue>* DirectionValue = UeAgentJsonDiagnostics::FindFieldValue(Params, TEXT("world_direction"));
+		if (!OriginValue)
 		{
 			OutError = TEXT("missing_world_origin");
 			return false;
 		}
-		if (!Params->TryGetObjectField(TEXT("world_direction"), DirectionObj) || !DirectionObj || !DirectionObj->IsValid())
+		if (!DirectionValue)
 		{
 			OutError = TEXT("missing_world_direction");
 			return false;
 		}
 
-		double OriginX = 0.0, OriginY = 0.0, OriginZ = 0.0;
-		double DirX = 0.0, DirY = 0.0, DirZ = 0.0;
-		if (!UeAgentJsonDiagnostics::TryReadNumberFieldByAliases(*OriginObj, { TEXT("x"), TEXT("X") }, OriginX)
-			|| !UeAgentJsonDiagnostics::TryReadNumberFieldByAliases(*OriginObj, { TEXT("y"), TEXT("Y") }, OriginY)
-			|| !UeAgentJsonDiagnostics::TryReadNumberFieldByAliases(*OriginObj, { TEXT("z"), TEXT("Z") }, OriginZ))
+		FVector Origin = FVector::ZeroVector;
+		FVector Direction = FVector::ZeroVector;
+		if (!UeAgentJsonDiagnostics::TryReadVectorValue(*OriginValue, Origin))
 		{
 			OutError = TEXT("invalid_world_origin");
 			return false;
 		}
-		if (!UeAgentJsonDiagnostics::TryReadNumberFieldByAliases(*DirectionObj, { TEXT("x"), TEXT("X") }, DirX)
-			|| !UeAgentJsonDiagnostics::TryReadNumberFieldByAliases(*DirectionObj, { TEXT("y"), TEXT("Y") }, DirY)
-			|| !UeAgentJsonDiagnostics::TryReadNumberFieldByAliases(*DirectionObj, { TEXT("z"), TEXT("Z") }, DirZ))
+		if (!UeAgentJsonDiagnostics::TryReadVectorValue(*DirectionValue, Direction))
 		{
 			OutError = TEXT("invalid_world_direction");
 			return false;
 		}
 
-		const FVector Direction((float)DirX, (float)DirY, (float)DirZ);
 		if (Direction.IsNearlyZero())
 		{
 			OutError = TEXT("invalid_world_direction");
 			return false;
 		}
 
-		OutWorldRay = FRay3d(FVector((float)OriginX, (float)OriginY, (float)OriginZ), Direction.GetSafeNormal());
+		OutWorldRay = FRay3d(Origin, Direction.GetSafeNormal());
 		return true;
 	}
 
-	static void FillSelectionUpdateJson(const UGeometrySelectionManager* SelectionManager, const FGeometrySelectionUpdateConfig& UpdateConfig, const FGeometrySelectionUpdateResult& Result, TSharedPtr<FJsonObject>& OutData)
+	void FillSelectionUpdateJson(const UGeometrySelectionManager* SelectionManager, const FGeometrySelectionUpdateConfig& UpdateConfig, const FGeometrySelectionUpdateResult& Result, TSharedPtr<FJsonObject>& OutData)
 	{
 		OutData->SetStringField(TEXT("change_type"), SelectionChangeTypeToString(UpdateConfig.ChangeType));
 		OutData->SetBoolField(TEXT("selection_missed"), Result.bSelectionMissed);
@@ -861,7 +1521,7 @@ namespace UeAgentModelingOps
 		OutData->SetBoolField(TEXT("has_active_targets"), SelectionManager ? SelectionManager->HasActiveTargets() : false);
 	}
 
-	static FProperty* FindPropertyByNameLoose(UStruct* StructType, const FString& Segment)
+	FProperty* FindPropertyByNameLoose(UStruct* StructType, const FString& Segment)
 	{
 		if (!StructType || Segment.IsEmpty())
 		{
@@ -885,7 +1545,7 @@ namespace UeAgentModelingOps
 		return nullptr;
 	}
 
-	static bool ResolvePropertyPath(UObject* Obj, const FString& PropertyPath, FProperty*& OutProperty, void*& OutValuePtr)
+	bool ResolvePropertyPath(UObject* Obj, const FString& PropertyPath, FProperty*& OutProperty, void*& OutValuePtr)
 	{
 		OutProperty = nullptr;
 		OutValuePtr = nullptr;
@@ -931,7 +1591,7 @@ namespace UeAgentModelingOps
 		return false;
 	}
 
-	static bool ImportResolvedProperty(UObject* Object, const FString& PropertyPath, const FString& ValueText, FString& OutError, FString* OutAppliedValueText = nullptr, FString* OutCppType = nullptr)
+	bool ImportResolvedProperty(UObject* Object, const FString& PropertyPath, const FString& ValueText, FString& OutError, FString* OutAppliedValueText, FString* OutCppType)
 	{
 		FProperty* Property = nullptr;
 		void* ValuePtr = nullptr;
@@ -964,7 +1624,7 @@ namespace UeAgentModelingOps
 		return true;
 	}
 
-	static void NotifyToolPropertySetUpdated(UInteractiveTool* Tool, UObject* PropertySet)
+	void NotifyToolPropertySetUpdated(UInteractiveTool* Tool, UObject* PropertySet)
 	{
 		if (!Tool || !PropertySet)
 		{
@@ -977,7 +1637,7 @@ namespace UeAgentModelingOps
 		}
 	}
 
-	static bool MatchPropertySet(UObject* PropertySet, const FString& Selector)
+	bool MatchPropertySet(UObject* PropertySet, const FString& Selector)
 	{
 		if (!PropertySet)
 		{
@@ -994,7 +1654,7 @@ namespace UeAgentModelingOps
 			PropertySet->GetClass()->GetPathName().Equals(Value, ESearchCase::IgnoreCase);
 	}
 
-	static UObject* FindToolPropertySet(UInteractiveTool* Tool, const FString& Selector)
+	UObject* FindToolPropertySet(UInteractiveTool* Tool, const FString& Selector)
 	{
 		if (!Tool)
 		{
@@ -1012,7 +1672,7 @@ namespace UeAgentModelingOps
 		return nullptr;
 	}
 
-	static void AppendPropertySetJson(UObject* PropertySet, TArray<TSharedPtr<FJsonValue>>& OutPropertySets)
+	void AppendPropertySetJson(UObject* PropertySet, TArray<TSharedPtr<FJsonValue>>& OutPropertySets)
 	{
 		if (!PropertySet)
 		{
@@ -1047,7 +1707,7 @@ namespace UeAgentModelingOps
 		OutPropertySets.Add(MakeShared<FJsonValueObject>(PropertySetObj));
 	}
 
-	static bool GetModelingContext(FModelingContext& OutContext, FString& OutError)
+	bool GetModelingContext(FModelingContext& OutContext, FString& OutError)
 	{
 		UModelingToolsEditorModeSettings* ModelingSettings = GetMutableDefault<UModelingToolsEditorModeSettings>();
 		const bool bNeedEnableMeshSelections = (ModelingSettings && !ModelingSettings->GetMeshSelectionsEnabled());
@@ -1093,7 +1753,7 @@ namespace UeAgentModelingOps
 		return true;
 	}
 
-	static void FlushToolsContext(const FModelingContext& Context, int32 NumTicks = 3)
+	void FlushToolsContext(const FModelingContext& Context, int32 NumTicks)
 	{
 		if (!Context.ToolsContext || !Context.ViewportClient)
 		{
@@ -1129,7 +1789,7 @@ namespace UeAgentModelingOps
 		}
 	}
 
-	static void FillActiveToolData(const FModelingContext& Context, TSharedPtr<FJsonObject>& OutData)
+	void FillActiveToolData(const FModelingContext& Context, TSharedPtr<FJsonObject>& OutData)
 	{
 		UInteractiveToolManager* ToolManager = Context.ToolsContext ? Context.ToolsContext->ToolManager : nullptr;
 		UInteractiveTool* Tool = ToolManager ? ToolManager->GetActiveTool(EToolSide::Left) : nullptr;
@@ -1151,7 +1811,7 @@ namespace UeAgentModelingOps
 		OutData->SetArrayField(TEXT("property_sets"), PropertySets);
 	}
 
-	static bool StartToolByIdentifier(const FString& ToolIdentifier, const FModelingContext& Context, FString& OutError)
+	bool StartToolByIdentifier(const FString& ToolIdentifier, const FModelingContext& Context, FString& OutError)
 	{
 		if (!Context.ToolsContext)
 		{
@@ -1223,7 +1883,7 @@ namespace UeAgentModelingOps
 
 			if (!Context.ToolsContext->HasActiveTool())
 			{
-				FlushToolsContext(Context);
+				FlushToolsContext(Context, 3);
 				UInteractiveToolManager* ToolManager = Context.ToolsContext->ToolManager;
 				UInteractiveTool* LeftTool = ToolManager ? ToolManager->GetActiveTool(EToolSide::Left) : nullptr;
 				UInteractiveTool* MouseTool = ToolManager ? ToolManager->GetActiveTool(EToolSide::Mouse) : nullptr;
@@ -1281,7 +1941,7 @@ namespace UeAgentModelingOps
 		return true;
 	}
 
-	static bool IsPrimitiveCreationTool(const FString& ToolIdentifier)
+	bool IsPrimitiveCreationTool(const FString& ToolIdentifier)
 	{
 		return ToolIdentifier == TEXT("BeginAddBoxPrimitiveTool")
 			|| ToolIdentifier == TEXT("BeginAddCylinderPrimitiveTool")
@@ -1292,7 +1952,7 @@ namespace UeAgentModelingOps
 			|| ToolIdentifier == TEXT("BeginAddRampCornerPrimitiveTool");
 	}
 
-	static bool HasExplicitTargetSurfaceOverride(const TSharedPtr<FJsonObject>& Params)
+	bool HasExplicitTargetSurfaceOverride(const TSharedPtr<FJsonObject>& Params)
 	{
 		if (!Params.IsValid())
 		{
@@ -1311,7 +1971,105 @@ namespace UeAgentModelingOps
 		return TryGetExplicitToolPropertyValue(Params, TEXT("ShapeSettings"), TEXT("TargetSurface"), IgnoredValue);
 	}
 
-	static bool AutoPreparePrimitiveCreationTool(const TSharedPtr<FJsonObject>& Params, UInteractiveTool* Tool, const FString& ToolIdentifier, FString& OutError)
+	void ConfigureDefaultModelingOutputType()
+	{
+		UCreateMeshObjectTypeProperties::bEnableDynamicMeshActorSupport = true;
+		UCreateMeshObjectTypeProperties::DefaultObjectTypeIdentifier = UCreateMeshObjectTypeProperties::DynamicMeshActorIdentifier;
+	}
+
+	bool IsCreateMeshObjectTypePropertySetSelector(const FString& Selector)
+	{
+		return Selector.IsEmpty()
+			|| Selector.Equals(TEXT("CreateMeshObjectTypeProperties"), ESearchCase::IgnoreCase)
+			|| Selector.Equals(TEXT("UCreateMeshObjectTypeProperties"), ESearchCase::IgnoreCase)
+			|| Selector.Equals(TEXT("CreateMeshObjectType"), ESearchCase::IgnoreCase)
+			|| Selector.Equals(TEXT("OutputTypeProperties"), ESearchCase::IgnoreCase);
+	}
+
+	bool HasExplicitOutputTypeOverride(const TSharedPtr<FJsonObject>& Params)
+	{
+		if (!Params.IsValid())
+		{
+			return false;
+		}
+
+		FString PropertySet;
+		FString PropertyName;
+		if (Params->TryGetStringField(TEXT("property_set"), PropertySet) && Params->TryGetStringField(TEXT("property_name"), PropertyName))
+		{
+			return PropertyName.Equals(TEXT("OutputType"), ESearchCase::IgnoreCase)
+				&& IsCreateMeshObjectTypePropertySetSelector(PropertySet);
+		}
+
+		const TArray<TSharedPtr<FJsonValue>>* PropertiesArray = nullptr;
+		if (!Params->TryGetArrayField(TEXT("tool_properties"), PropertiesArray) || !PropertiesArray)
+		{
+			return false;
+		}
+
+		for (const TSharedPtr<FJsonValue>& EntryValue : *PropertiesArray)
+		{
+			const TSharedPtr<FJsonObject> Entry = EntryValue.IsValid() ? EntryValue->AsObject() : nullptr;
+			if (!Entry.IsValid())
+			{
+				continue;
+			}
+
+			FString EntrySet;
+			FString EntryName;
+			Entry->TryGetStringField(TEXT("property_set"), EntrySet);
+			Entry->TryGetStringField(TEXT("property_name"), EntryName);
+			if (EntryName.Equals(TEXT("OutputType"), ESearchCase::IgnoreCase) && IsCreateMeshObjectTypePropertySetSelector(EntrySet))
+			{
+				return true;
+			}
+		}
+		return false;
+	}
+
+	bool AutoPrepareModelingOutputType(const TSharedPtr<FJsonObject>& Params, UInteractiveTool* Tool, FString& OutError, TSharedPtr<FJsonObject>& OutData)
+	{
+		if (!Tool || HasExplicitOutputTypeOverride(Params))
+		{
+			return true;
+		}
+
+		UObject* PropertySet = FindToolPropertySet(Tool, TEXT("CreateMeshObjectTypeProperties"));
+		if (!PropertySet)
+		{
+			if (OutData.IsValid())
+			{
+				OutData->SetBoolField(TEXT("default_output_type_applied"), false);
+				OutData->SetStringField(TEXT("default_output_type_skip_reason"), TEXT("missing_create_mesh_output_type_property"));
+			}
+			return true;
+		}
+
+		FString AppliedValueText;
+		FString CppType;
+		if (!ImportResolvedProperty(
+			PropertySet,
+			TEXT("OutputType"),
+			UCreateMeshObjectTypeProperties::DynamicMeshActorIdentifier,
+			OutError,
+			&AppliedValueText,
+			&CppType))
+		{
+			return false;
+		}
+
+		NotifyToolPropertySetUpdated(Tool, PropertySet);
+		if (OutData.IsValid())
+		{
+			OutData->SetBoolField(TEXT("default_output_type_applied"), true);
+			OutData->SetStringField(TEXT("default_output_type"), UCreateMeshObjectTypeProperties::DynamicMeshActorIdentifier);
+			OutData->SetStringField(TEXT("default_output_type_applied_value"), AppliedValueText);
+			OutData->SetStringField(TEXT("default_output_type_cpp_type"), CppType);
+		}
+		return true;
+	}
+
+	bool AutoPreparePrimitiveCreationTool(const TSharedPtr<FJsonObject>& Params, UInteractiveTool* Tool, const FString& ToolIdentifier, FString& OutError)
 	{
 		if (!Tool || !IsPrimitiveCreationTool(ToolIdentifier) || HasExplicitTargetSurfaceOverride(Params))
 		{
@@ -1324,7 +2082,7 @@ namespace UeAgentModelingOps
 			return true;
 		}
 
-		if (!ImportResolvedProperty(PropertySet, TEXT("TargetSurface"), TEXT("AtOrigin"), OutError))
+		if (!ImportResolvedProperty(PropertySet, TEXT("TargetSurface"), TEXT("AtOrigin"), OutError, nullptr, nullptr))
 		{
 			return false;
 		}
@@ -1333,7 +2091,7 @@ namespace UeAgentModelingOps
 		return true;
 	}
 
-	static bool WaitForToolShutdownReady(const FModelingContext& Context, EToolShutdownType ShutdownType, double TimeoutSeconds = 8.0)
+	bool WaitForToolShutdownReady(const FModelingContext& Context, EToolShutdownType ShutdownType, double TimeoutSeconds)
 	{
 		UEditorInteractiveToolsContext* ToolsContext = Context.ToolsContext;
 		FEditorViewportClient* ViewportClient = Context.ViewportClient;
@@ -1400,7 +2158,7 @@ namespace UeAgentModelingOps
 		return true;
 	}
 
-	static bool FinishTool(const FModelingContext& Context, EToolShutdownType ShutdownType, FString& OutError)
+	bool FinishTool(const FModelingContext& Context, EToolShutdownType ShutdownType, FString& OutError)
 	{
 		UEditorInteractiveToolsContext* ToolsContext = Context.ToolsContext;
 		FEditorViewportClient* ViewportClient = Context.ViewportClient;
@@ -1427,7 +2185,7 @@ namespace UeAgentModelingOps
 			{
 				if (NestedAcceptCancelAPI->ExecuteNestedAcceptCommand())
 				{
-					FlushToolsContext(Context);
+					FlushToolsContext(Context, 3);
 					if (!ToolsContext->HasActiveTool())
 					{
 						return true;
@@ -1441,7 +2199,7 @@ namespace UeAgentModelingOps
 			{
 				if (NestedAcceptCancelAPI->ExecuteNestedCancelCommand())
 				{
-					FlushToolsContext(Context);
+					FlushToolsContext(Context, 3);
 					if (!ToolsContext->HasActiveTool())
 					{
 						return true;
@@ -1454,7 +2212,7 @@ namespace UeAgentModelingOps
 
 		if (ShutdownType == EToolShutdownType::Accept)
 		{
-			WaitForToolShutdownReady(Context, ShutdownType);
+			WaitForToolShutdownReady(Context, ShutdownType, 8.0);
 			if (ToolsContext->CanAcceptActiveTool())
 			{
 				ResolvedShutdownType = EToolShutdownType::Accept;
@@ -1471,7 +2229,7 @@ namespace UeAgentModelingOps
 		}
 		else if (ShutdownType == EToolShutdownType::Cancel)
 		{
-			WaitForToolShutdownReady(Context, ShutdownType);
+			WaitForToolShutdownReady(Context, ShutdownType, 8.0);
 			if (ToolsContext->CanCancelActiveTool())
 			{
 				ResolvedShutdownType = EToolShutdownType::Cancel;
@@ -1488,11 +2246,11 @@ namespace UeAgentModelingOps
 		}
 
 		ToolsContext->EndTool(ResolvedShutdownType);
-		FlushToolsContext(Context);
+		FlushToolsContext(Context, 3);
 		return true;
 	}
 
-	static TArray<AActor*> ResolveActorsByIds(UWorld* World, const TArray<TSharedPtr<FJsonValue>>& IdValues)
+	TArray<AActor*> ResolveActorsByIds(UWorld* World, const TArray<TSharedPtr<FJsonValue>>& IdValues)
 	{
 		TArray<AActor*> Actors;
 		for (const TSharedPtr<FJsonValue>& IdValue : IdValues)
@@ -1510,7 +2268,7 @@ namespace UeAgentModelingOps
 		return Actors;
 	}
 
-	static void SelectActors(const TArray<AActor*>& Actors)
+	void SelectActors(const TArray<AActor*>& Actors)
 	{
 		if (!GEditor)
 		{
@@ -1540,7 +2298,7 @@ namespace UeAgentModelingOps
 		GEditor->NoteSelectionChange();
 	}
 
-	static void SyncGeometryTargets(const TArray<AActor*>& Actors, const FModelingContext& Context)
+	void SyncGeometryTargets(const TArray<AActor*>& Actors, const FModelingContext& Context)
 	{
 		UGeometrySelectionManager* SelectionManager = Context.Mode ? Context.Mode->GetSelectionManager() : nullptr;
 		if (!SelectionManager)
@@ -1593,7 +2351,7 @@ namespace UeAgentModelingOps
 		}
 	}
 
-	static bool ApplyToolProperties(const TSharedPtr<FJsonObject>& Params, UInteractiveTool* Tool, FString& OutError, TArray<TSharedPtr<FJsonValue>>* OutPropertyResults = nullptr)
+	bool ApplyToolProperties(const TSharedPtr<FJsonObject>& Params, UInteractiveTool* Tool, FString& OutError, TArray<TSharedPtr<FJsonValue>>* OutPropertyResults)
 	{
 		const TArray<TSharedPtr<FJsonValue>>* PropertiesArray = nullptr;
 		if (!Params.IsValid() || !Params->TryGetArrayField(TEXT("tool_properties"), PropertiesArray) || !PropertiesArray)
@@ -1708,7 +2466,7 @@ namespace UeAgentModelingOps
 		return true;
 	}
 
-	static bool InvokeActionByName(UObject* Target, const FString& ActionName)
+	bool InvokeActionByName(UObject* Target, const FString& ActionName)
 	{
 		if (!Target || ActionName.IsEmpty())
 		{
@@ -1725,7 +2483,7 @@ namespace UeAgentModelingOps
 		return true;
 	}
 
-	static bool InvokeToolAction(UInteractiveTool* Tool, const FString& ActionName)
+	bool InvokeToolAction(UInteractiveTool* Tool, const FString& ActionName)
 	{
 		if (!Tool)
 		{
@@ -1747,7 +2505,7 @@ namespace UeAgentModelingOps
 		return false;
 	}
 
-	static bool ResolveSelectionActorsFromContext(const FUeAgentRequestContext& Ctx, UWorld* World, TArray<AActor*>& OutActors, FString& OutError)
+	bool ResolveSelectionActorsFromContext(const FUeAgentRequestContext& Ctx, UWorld* World, TArray<AActor*>& OutActors, FString& OutError)
 	{
 		const TArray<TSharedPtr<FJsonValue>>* ActorIds = nullptr;
 		if (Ctx.Params.IsValid() && Ctx.Params->TryGetArrayField(TEXT("actor_ids"), ActorIds) && ActorIds)
@@ -1773,7 +2531,7 @@ namespace UeAgentModelingOps
 		return true;
 	}
 
-static bool SaveActorStaticMeshes(const TArray<AActor*>& Actors, int32& OutSavedCount)
+	bool SaveActorStaticMeshes(const TArray<AActor*>& Actors, int32& OutSavedCount)
 	{
 		OutSavedCount = 0;
 		TArray<UPackage*> PackagesToSave;
@@ -1818,6 +2576,3 @@ static bool SaveActorStaticMeshes(const TArray<AActor*>& Actors, int32& OutSaved
 	}
 }
 
-#include "UeAgentHttpServer_Modeling_DispatchAndSelection.inl"
-#include "UeAgentHttpServer_Modeling_ToolLifecycle.inl"
-#include "UeAgentHttpServer_Modeling_AssetOps.inl"

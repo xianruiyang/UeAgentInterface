@@ -22,7 +22,7 @@ namespace
 		TSharedPtr<FJsonObject>& OutData,
 		const double TimeoutSeconds = 30.0)
 	{
-		const FString Body = MakeExecRequestBody(RequestId, Command, ParamsJson);
+		const FString Body = MakeRawExecRequestBody(RequestId, Command, ParamsJson);
 		FHttpSmokeResult Result;
 		const bool bRequestOk = ExecuteHttpJsonRequest(TEXT("POST"), ServerScope.BaseUrl + TEXT("/api/exec"), ServerScope.Token, Body, Result, TimeoutSeconds);
 		Test->TestTrue(FString::Printf(TEXT("%s request completed"), *RequestId), bRequestOk);
@@ -466,6 +466,33 @@ bool FUeAgentInterfacePhysicsAssetSmokeTest::RunTest(const FString& Parameters)
 		Data,
 		60.0));
 	TestTrue(TEXT("physics asset export folder has asset json"), IFileManager::Get().FileExists(*FPaths::Combine(ExportFolder, TEXT("asset.json"))));
+	TSharedPtr<FJsonObject> ExportedAssetJson;
+	TestTrue(TEXT("physics asset export asset json loads"), LoadSmokeJsonFile(this, FPaths::Combine(ExportFolder, TEXT("asset.json")), ExportedAssetJson, TEXT("PhysicsAsset folder asset.json")));
+	TSharedPtr<FJsonObject> PhysicsAssetDetailsJson;
+	TestTrue(TEXT("physics asset export asset details grouped"), SmokeLoadGroupedDetailsForRef(this, FPaths::Combine(ExportFolder, TEXT("asset.json")), ExportedAssetJson, TEXT("details"), TEXT("physics_asset"), PhysicsAssetDetailsJson));
+	TestFalse(TEXT("physics asset export omits root raw_properties.json"), IFileManager::Get().FileExists(*FPaths::Combine(ExportFolder, TEXT("raw_properties.json"))));
+	TestFalse(TEXT("physics asset export omits root readonly_properties.json"), IFileManager::Get().FileExists(*FPaths::Combine(ExportFolder, TEXT("readonly_properties.json"))));
+	FString ExportedBodiesText;
+	TSharedPtr<FJsonObject> ExportedBodiesJson;
+	TestTrue(TEXT("physics asset export bodies json loads"), FFileHelper::LoadFileToString(ExportedBodiesText, *FPaths::Combine(ExportFolder, TEXT("bodies.json"))) && ParseJson(ExportedBodiesText, ExportedBodiesJson));
+	if (ExportedBodiesJson.IsValid())
+	{
+		const TArray<TSharedPtr<FJsonValue>>* Bodies = nullptr;
+		bool bFoundBodyAuthoringMetadata = false;
+		if (ExportedBodiesJson->TryGetArrayField(TEXT("bodies"), Bodies) && Bodies)
+		{
+			for (const TSharedPtr<FJsonValue>& BodyValue : *Bodies)
+			{
+				const TSharedPtr<FJsonObject>* BodyObj = nullptr;
+				if (BodyValue.IsValid() && BodyValue->TryGetObject(BodyObj) && BodyObj && (*BodyObj)->HasTypedField<EJson::Object>(TEXT("selector")) && (*BodyObj)->HasTypedField<EJson::Array>(TEXT("operations")))
+				{
+					bFoundBodyAuthoringMetadata = true;
+					break;
+				}
+			}
+		}
+		TestTrue(TEXT("physics asset exported body exposes authoring metadata"), bFoundBodyAuthoringMetadata);
+	}
 
 	WritePhysicsSmokeJsonFile(
 		this,

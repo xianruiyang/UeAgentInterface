@@ -2,6 +2,17 @@
 
 #include "UeAgentInterfaceSettings.h"
 
+UUeAgentInterfaceSettings::UUeAgentInterfaceSettings()
+	: ListenAddress(TEXT("127.0.0.1"))
+	, Port(17777)
+	, AuthToken()
+	, bEnableScreenshots(true)
+	, ArtifactsDirRelative(TEXT("Saved/RemoteArtifacts"))
+	, ImportRootDirs()
+	, DefaultImportDestPath(TEXT("/Game/Imported"))
+{
+}
+
 const UUeAgentInterfaceSettings* UUeAgentInterfaceSettings::Get()
 {
 	return GetDefault<UUeAgentInterfaceSettings>();
@@ -11,4 +22,3 @@ UUeAgentInterfaceSettings* UUeAgentInterfaceSettings::GetMutable()
 {
 	return GetMutableDefault<UUeAgentInterfaceSettings>();
 }
-

@@ -1,0 +1,126 @@
+{
+  "schema": "uai.command_source.v1",
+  "domain": "NodeGraph",
+  "description": "Small-domain trial source for exact NodeGraph, PaletteSearch and OriginResolve registry entries.",
+  "generated": {
+    "kind": "exact_registry_include",
+    "generator": "scripts/uai/generate_command_registry_trial.py",
+    "target_file": "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Server/Generated/UeAgentCommandRegistry_NodeGraphExact.h"
+  },
+  "commands": [
+    {
+      "name": "node_graph_list",
+      "lifecycle": "active",
+      "dispatch": {
+        "kind": "exact",
+        "handler_symbol": "CmdNodeGraphList",
+        "invoker_template": "InvokeExactWithCtx",
+        "implementation_file": "Source/UeAgentInterface/Private/Server/Generated/UeAgentCommandRegistry_NodeGraphExact.h"
+      },
+      "documentation": {
+        "doc_file": "docs/commands/28_NodeGraph.md",
+        "section": "NodeGraph"
+      },
+      "coverage": {
+        "smoke_files": [
+          "Source/UeAgentInterfaceTests/Private/Smoke/UeAgentInterfaceSmoke_BlueprintUmg.cpp"
+        ],
+        "wrapper_exposed": true,
+        "manifest_required": true
+      },
+      "deprecated": null
+    },
+    {
+      "name": "node_graph_layout",
+      "lifecycle": "active",
+      "dispatch": {
+        "kind": "exact",
+        "handler_symbol": "CmdNodeGraphLayout",
+        "invoker_template": "InvokeExactWithCtx",
+        "implementation_file": "Source/UeAgentInterface/Private/Server/Generated/UeAgentCommandRegistry_NodeGraphExact.h"
+      },
+      "documentation": {
+        "doc_file": "docs/commands/28_NodeGraph.md",
+        "section": "NodeGraph"
+      },
+      "coverage": {
+        "smoke_files": [
+          "Source/UeAgentInterfaceTests/Private/Smoke/PCG/UeAgentInterfacePCGSmokeTests.cpp",
+          "Source/UeAgentInterfaceTests/Private/Smoke/UeAgentInterfaceSmoke_BlueprintUmg.cpp"
+        ],
+        "wrapper_exposed": true,
+        "manifest_required": true
+      },
+      "deprecated": null
+    },
+    {
+      "name": "node_catalog_search",
+      "lifecycle": "active",
+      "dispatch": {
+        "kind": "exact",
+        "handler_symbol": "CmdNodeCatalogSearch",
+        "invoker_template": "InvokeExactWithCtx",
+        "implementation_file": "Source/UeAgentInterface/Private/Server/Generated/UeAgentCommandRegistry_NodeGraphExact.h"
+      },
+      "documentation": {
+        "doc_file": "docs/commands/28_NodeGraph.md",
+        "section": "Node catalog search"
+      },
+      "coverage": {
+        "smoke_files": [
+          "Source/UeAgentInterfaceTests/Private/Smoke/UeAgentInterfaceNodeCatalogOriginSmokeTests.cpp",
+          "docs/smoke_coverage_ledger.json"
+        ],
+        "wrapper_exposed": true,
+        "manifest_required": true
+      },
+      "deprecated": null
+    },
+    {
+      "name": "node_catalog_categories",
+      "lifecycle": "active",
+      "dispatch": {
+        "kind": "exact",
+        "handler_symbol": "CmdNodeCatalogCategories",
+        "invoker_template": "InvokeExactWithCtx",
+        "implementation_file": "Source/UeAgentInterface/Private/Server/Generated/UeAgentCommandRegistry_NodeGraphExact.h"
+      },
+      "documentation": {
+        "doc_file": "docs/commands/28_NodeGraph.md",
+        "section": "Node catalog categories"
+      },
+      "coverage": {
+        "smoke_files": [
+          "Source/UeAgentInterfaceTests/Private/Smoke/UeAgentInterfaceNodeCatalogOriginSmokeTests.cpp",
+          "docs/smoke_coverage_ledger.json"
+        ],
+        "wrapper_exposed": true,
+        "manifest_required": true
+      },
+      "deprecated": null
+    },
+    {
+      "name": "node_origin_resolve",
+      "lifecycle": "active",
+      "dispatch": {
+        "kind": "exact",
+        "handler_symbol": "CmdNodeOriginResolve",
+        "invoker_template": "InvokeExactWithCtx",
+        "implementation_file": "Source/UeAgentInterface/Private/Server/Generated/UeAgentCommandRegistry_NodeGraphExact.h"
+      },
+      "documentation": {
+        "doc_file": "docs/commands/28_NodeGraph.md",
+        "section": "Origin resolve"
+      },
+      "coverage": {
+        "smoke_files": [
+          "Source/UeAgentInterfaceTests/Private/Smoke/UeAgentInterfaceNodeCatalogOriginSmokeTests.cpp"
+        ],
+        "wrapper_exposed": true,
+        "manifest_required": true
+      },
+      "deprecated": null
+    }
+  ]
+}
+

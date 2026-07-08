@@ -8,35 +8,66 @@
 
 1. JSON parse。
 2. authoring hygiene lint。
-3. adapter 转换。
-4. validate 或 dry-run。
-5. apply。
-6. export/readback。
-7. 语义比较。
+3. validate 或 dry-run；缺 dedicated validate 时记录 coverage gap。
+4. apply。
+5. export/readback。
+6. 语义比较。
 
 ## Lint 必须拦截
 
-- readback/diagnostics 字段泄漏到 authoring。
+- readback/debug/diagnostics/legacy 字段泄漏到 `llm_authoring`。
 - 缺少 enum 候选项。
-- `value` 形态与 `type_info` 不匹配。
+- `value` 形态与 `value_kind` 不匹配。
 - `operation` 未实现。
 - `space_contract` 缺字段。
 - legacy alias 泄漏到 authoring 主面。
+- 默认字段项继续输出 `name/authored_name/cpp_type/enum_options` 等重复或 legacy 字段。
 - 派生 count、file path、coverage report、compile report 被当成可写字段。
-- catalog seed 缺 `kind/name/full_name`，或只有显示 `name` 没有 `full_name`。
-- `json_authoring` 被放到与 `profile_path` 不一致的位置。
+- raw config、export timestamp、coverage report 等 report/debug 字段进入默认 authoring。
+- path-backed seed 使用旧 `full_name`、`asset_path`、`class_path`、`object_path`、`component_class_path`、`script_asset_path` 或 `module_script_path` 作为主输入。
+- 仅凭显示 `name` 写入本应有路径的自定义资产、类或对象。
+- 从 `items_tsv` 解析出的 `path` / `name` seed 被放到与目标 profile/path 不一致的位置。
 - 忽略 `write_support/support_reason`，把候选用于不支持的写入场景。
 
 ## Adapter 必须拦截
 
 - selector 找不到或匹配多个。
 - source/operation 不支持。
-- dynamic input 缺 `kind/name/full_name` 或无法由 `full_name` 解析到真实 script asset path。
+- dynamic input 缺 `path`/`name` seed，或 path 无法解析到真实 script asset。
 - linked input 缺目标参数。
 - enum selected 不在候选项中。
 - 空间合同不完整。
 - 会丢用户意图的降级转换。
 - Niagara module seed 指向的 module 不在当前导出 stage 中，却被当作新增 stack module 成功。
+
+## Dedicated Validate / Diff Coverage
+
+当前 folder validate/diff 覆盖不是完整矩阵。
+
+| 类型 | dedicated validate | dedicated diff |
+| --- | --- | --- |
+| `blueprint` | missing | missing |
+| `umg` | missing | missing |
+| `anim_blueprint` | missing | missing |
+| `material` | missing | missing |
+| `material_instance` | missing | missing |
+| `material_function` | missing | missing |
+| `niagara_system` | missing | missing |
+| `niagara_emitter` | missing | missing |
+| `niagara_script` | missing | missing |
+| `sequence` | missing | missing |
+
+AI 行为树相关既有 folder 文档存在，但 contract operation registration 仍为 `missing`；不得把这些文档写成完整闭环能力。
+
+缺 dedicated validate/diff 时，使用以下证据组合补足验证：
+
+- command response 和 report。
+- export/readback 后目标 JSON 的语义比较。
+- authoring consistency gate。
+- domain compile/stack issue/probe。
+- 必要时对两份 folder package 做结构化文件比较，但必须写明不是 dedicated diff coverage。
+
+Authoring consistency gate 的正式入口、失败字段、deferred check 边界和不得宽泛搜索源码/旧文档的规则见 `07_ImplementationConsistency.md`。
 
 ## Apply 后读回
 
@@ -44,7 +75,7 @@
 | --- | --- |
 | 普通值 | 读回值 exact match 或可解释的 UE normalized match。 |
 | Enum | 读回 selected/write value，并用 display label 辅助确认语义。 |
-| Graph | 节点、连线、pin default、layout 读回；必要时 compile。 |
+| Graph | `graph.json` 中节点/连线/pin default 读回；若改 layout，再读 `layout.json`；必要时 compile。 |
 | Niagara | module input 读回、active branch/mode、Stack issue、compile log；视觉相关再 runtime probe/screenshot。 |
 | 曲线 | key 数量、时间、值、插值、tangent、外推模式读回。 |
 | 空间字段 | 同一 subject、同一 frame、同一 state 读回。 |

@@ -38,6 +38,11 @@ namespace
 			return false;
 		}
 		OutData = *Data;
+		FString EnvelopeError;
+		if (!bExpectOk && Root->TryGetStringField(TEXT("error"), EnvelopeError))
+		{
+			OutData->SetStringField(TEXT("error"), EnvelopeError);
+		}
 		return true;
 	}
 
@@ -232,6 +237,26 @@ namespace
 			&& FMath::Abs((*Location)->GetNumberField(TEXT("z")) - ExpectedZ) <= Tolerance;
 	}
 
+	static bool ResourceTransformHasSpaceContract(const TArray<TSharedPtr<FJsonValue>>* Resources, const FString& ResourceId, const FString& ExpectedReadFrame)
+	{
+		const TSharedPtr<FJsonObject> Resource = FindJsonObjectByStringField(Resources, TEXT("id"), ResourceId);
+		if (!Resource.IsValid())
+		{
+			return false;
+		}
+
+		const TSharedPtr<FJsonObject>* Transform = nullptr;
+		const TSharedPtr<FJsonObject>* SpaceContract = nullptr;
+		if (!Resource->TryGetObjectField(TEXT("transform"), Transform) || !Transform || !Transform->IsValid() ||
+			!(*Transform)->TryGetObjectField(TEXT("space_contract"), SpaceContract) || !SpaceContract || !SpaceContract->IsValid())
+		{
+			return false;
+		}
+
+		return (*SpaceContract)->GetStringField(TEXT("Fread")) == ExpectedReadFrame
+			&& (*SpaceContract)->GetStringField(TEXT("Fwrite")) == ExpectedReadFrame;
+	}
+
 	static FString JsonObjectToCompactString(const TSharedPtr<FJsonObject>& Object)
 	{
 		if (!Object.IsValid())
@@ -243,6 +268,14 @@ namespace
 		TSharedRef<TJsonWriter<TCHAR, TCondensedJsonPrintPolicy<TCHAR>>> Writer = TJsonWriterFactory<TCHAR, TCondensedJsonPrintPolicy<TCHAR>>::Create(&Out);
 		FJsonSerializer::Serialize(Object.ToSharedRef(), Writer);
 		return Out;
+	}
+
+	static FString SmokeJsonString(const FString& Value)
+	{
+		FString Escaped = Value;
+		Escaped.ReplaceInline(TEXT("\\"), TEXT("\\\\"));
+		Escaped.ReplaceInline(TEXT("\""), TEXT("\\\""));
+		return FString::Printf(TEXT("\"%s\""), *Escaped);
 	}
 
 	static bool ActorSummaryMatchesLabel(const TSharedPtr<FJsonObject>& ActorSummary, const FString& ExpectedLabel)
@@ -337,6 +370,7 @@ bool FUeAgentInterfaceLevelContentJsonCrudSmokeTest::RunTest(const FString& Para
 	const FString TriggerId = FString::Printf(TEXT("lcj_trigger_%s"), *Suffix);
 	const FString NavId = FString::Printf(TEXT("lcj_nav_%s"), *Suffix);
 	const FString ProbeId = FString::Printf(TEXT("lcj_probe_%s"), *Suffix);
+	const FString TextId = FString::Printf(TEXT("lcj_text_%s"), *Suffix);
 	const FString CustomId = FString::Printf(TEXT("lcj_custom_%s"), *Suffix);
 
 	const FString ContentJson = FString::Printf(
@@ -352,11 +386,12 @@ bool FUeAgentInterfaceLevelContentJsonCrudSmokeTest::RunTest(const FString& Para
 		TEXT("{\"id\":\"%s\",\"kind\":\"trigger_box\",\"label\":\"LCJ_Trigger_%s\",\"transform\":{\"location\":[61800,61000,120],\"scale\":[1,1,1]}},")
 		TEXT("{\"id\":\"%s\",\"kind\":\"nav_mesh_bounds_volume\",\"label\":\"LCJ_Nav_%s\",\"transform\":{\"location\":[62000,61000,120],\"scale\":[1,1,1]},\"bounds\":{\"center\":[62000,61000,120],\"extent\":[300,300,200]}},")
 		TEXT("{\"id\":\"%s\",\"kind\":\"probe\",\"label\":\"LCJ_Probe_%s\",\"transform\":{\"location\":[62200,61000,120],\"scale\":[1,1,1]}},")
+		TEXT("{\"id\":\"%s\",\"kind\":\"custom\",\"class_path\":\"/Script/Engine.TextRenderActor\",\"label\":\"LCJ_Text_%s\",\"transform\":{\"location\":[62300,61000,180],\"rotation\":[0,180,0],\"scale\":[1,1,1]},\"properties\":{\"TextRenderComponent.Text\":\"LCJ Hello\",\"TextRenderComponent.WorldSize\":64.0}},")
 		TEXT("{\"id\":\"%s\",\"kind\":\"custom\",\"class_path\":\"/Script/Engine.Actor\",\"label\":\"LCJ_Custom_%s\",\"transform\":{\"location\":[62400,61000,120],\"scale\":[1,1,1]},\"components\":[{\"name\":\"CustomRoot\",\"class\":\"/Script/Engine.SceneComponent\"}]}")
 		TEXT("],")
 		TEXT("\"organization\":{\"hlod\":{\"assignments\":[{\"resource\":\"%s\",\"layer\":\"SmokeHLOD\"}]},\"data_layers\":[{\"name\":\"SmokeDataLayer\",\"resources\":[\"%s\"]}]},")
 		TEXT("\"tasks\":[{\"type\":\"navmesh_build\",\"timeout_seconds\":30},{\"type\":\"hlod_build\",\"required\":false}],")
-		TEXT("\"validation\":[{\"type\":\"actor_exists\",\"actor_id\":\"%s\"},{\"type\":\"property_readback\",\"actor_id\":\"%s\",\"property\":\"bHidden\"},{\"type\":\"property_readback\",\"actor_id\":\"%s\",\"property\":\"StaticMeshComponent.BodyInstance.CollisionProfileName\"},{\"type\":\"property_readback\",\"actor_id\":\"%s\",\"property\":\"PointLightComponent.Intensity\"},{\"type\":\"property_readback\",\"actor_id\":\"%s\",\"property\":\"CameraComponent.FieldOfView\"},{\"type\":\"trace\",\"start\":[61000,61000,5400],\"end\":[61000,61000,5300],\"expected_hit\":false},{\"type\":\"overlap\",\"center\":[61000,61000,5000],\"extent\":[80,80,80],\"min_count\":1},{\"type\":\"nav_path\",\"start\":[62000,61000,120],\"end\":[62010,61010,120]},{\"type\":\"streaming_state\",\"level\":\"__UAI_MissingStreamingLevel__\"},{\"type\":\"feature_gate\",\"feature\":\"hlod\",\"required\":false}],")
+		TEXT("\"validation\":[{\"type\":\"actor_exists\",\"actor_id\":\"%s\"},{\"type\":\"property_readback\",\"actor_id\":\"%s\",\"property\":\"bHidden\"},{\"type\":\"property_readback\",\"actor_id\":\"%s\",\"property\":\"StaticMeshComponent.BodyInstance.CollisionProfileName\"},{\"type\":\"property_readback\",\"actor_id\":\"%s\",\"property\":\"PointLightComponent.Intensity\"},{\"type\":\"property_readback\",\"actor_id\":\"%s\",\"property\":\"CameraComponent.FieldOfView\"},{\"type\":\"property_readback\",\"actor_id\":\"%s\",\"property\":\"TextRenderComponent.WorldSize\"},{\"type\":\"trace\",\"start\":[61000,61000,5400],\"end\":[61000,61000,5300],\"expected_hit\":false},{\"type\":\"overlap\",\"center\":[61000,61000,5000],\"extent\":[80,80,80],\"min_count\":1},{\"type\":\"nav_path\",\"start\":[62000,61000,120],\"end\":[62010,61010,120]},{\"type\":\"streaming_state\",\"level\":\"__UAI_MissingStreamingLevel__\"},{\"type\":\"feature_gate\",\"feature\":\"hlod\",\"required\":false}],")
 		TEXT("\"evidence\":{\"report\":true},")
 		TEXT("\"save_policy\":{\"save_level\":false}")
 		TEXT("}"),
@@ -369,9 +404,10 @@ bool FUeAgentInterfaceLevelContentJsonCrudSmokeTest::RunTest(const FString& Para
 		*TriggerId, *Suffix,
 		*NavId, *Suffix,
 		*ProbeId, *Suffix,
+		*TextId, *Suffix,
 		*CustomId, *Suffix,
 		*CrateId, *CrateId,
-		*CrateId, *CrateId, *CrateId, *LightId, *CameraId);
+		*CrateId, *CrateId, *CrateId, *LightId, *CameraId, *TextId);
 
 	TSharedPtr<FJsonObject> ValidateData;
 	TestTrue(TEXT("level_content_validate_json succeeds"), ExecLevelContentSmokeCommand(this, ServerScope, TEXT("lcj-validate"), TEXT("level_content_validate_json"), FString::Printf(TEXT("{\"content\":%s,\"strict\":true}"), *ContentJson), ValidateData));
@@ -403,20 +439,32 @@ bool FUeAgentInterfaceLevelContentJsonCrudSmokeTest::RunTest(const FString& Para
 	const bool bHasDot = LightIntensityReadBack.FindChar(TEXT('.'), FirstDot);
 	LightIntensityReadBack.FindLastChar(TEXT('.'), LastDot);
 	TestTrue(TEXT("normal property readback is not concatenated"), LightIntensityReadBack.StartsWith(TEXT("1250")) && (!bHasDot || FirstDot == LastDot));
+	FString TextWorldSizeReadBack;
+	TestTrue(TEXT("TextRenderActor component property readback is reported"), TryGetResourcePropertyResultStringField(ApplyResourceResults, TextId, TEXT("TextRenderComponent.WorldSize"), TEXT("property_value_read_back"), TextWorldSizeReadBack));
+	TestTrue(TEXT("TextRenderActor WorldSize is applied"), TextWorldSizeReadBack.StartsWith(TEXT("64")));
 	const TSharedPtr<FJsonObject> NavApplyResult = FindJsonObjectByStringField(ApplyResourceResults, TEXT("id"), NavId);
 	bool bNavBoundsUpdated = false;
 	TestTrue(TEXT("nav mesh bounds volume creates brush bounds and updates navigation"), NavApplyResult.IsValid() && NavApplyResult->TryGetBoolField(TEXT("nav_bounds_updated"), bNavBoundsUpdated) && bNavBoundsUpdated && BoundsExtentExceeds(NavApplyResult, 250.0, 250.0, 150.0));
 	const TArray<TSharedPtr<FJsonValue>>* ApplyValidationResults = nullptr;
 	TestTrue(TEXT("feature_gate validation executed"), ApplyData->TryGetArrayField(TEXT("validation_results"), ApplyValidationResults) && JsonArrayContainsStringField(ApplyValidationResults, TEXT("validation"), TEXT("feature_gate")));
 
+	const FString QueryOutputFile = FPaths::ConvertRelativePathToFull(FPaths::Combine(FPaths::ProjectSavedDir(), FString::Printf(TEXT("Automation/UAI/level_content_query_%s.json"), *Suffix)));
 	TSharedPtr<FJsonObject> QueryData;
-	TestTrue(TEXT("level_content_query_json succeeds"), ExecLevelContentSmokeCommand(this, ServerScope, TEXT("lcj-query"), TEXT("level_content_query_json"), FString::Printf(TEXT("{\"selection\":{\"mode\":\"folder\",\"folder_path\":\"%s\",\"include_child_folders\":true},\"projection\":{\"include_components\":true,\"include_bounds\":true}}"), *FolderRoot), QueryData));
-	TestTrue(TEXT("query returns all created resources"), QueryData.IsValid() && QueryData->GetIntegerField(TEXT("resource_count")) >= 8);
+	TestTrue(TEXT("level_content_query_json succeeds"), ExecLevelContentSmokeCommand(this, ServerScope, TEXT("lcj-query"), TEXT("level_content_query_json"), FString::Printf(TEXT("{\"selection\":{\"mode\":\"folder\",\"folder_path\":\"%s\",\"include_child_folders\":true},\"projection\":{\"include_components\":true,\"include_bounds\":true},\"output_file\":%s}"), *FolderRoot, *SmokeJsonString(QueryOutputFile)), QueryData));
+	TestTrue(TEXT("query returns all created resources"), QueryData.IsValid() && QueryData->GetIntegerField(TEXT("resource_count")) >= 9);
+	TestEqual(TEXT("query output file uses structured compact format"), QueryData->GetStringField(TEXT("output_format")), FString(TEXT("structured_compact")));
+	FString QueryOutputText;
+	TSharedPtr<FJsonObject> QueryOutputJson;
+	TestTrue(TEXT("query output file reads"), FFileHelper::LoadFileToString(QueryOutputText, *QueryOutputFile));
+	TestTrue(TEXT("query output file parses"), ParseJson(QueryOutputText, QueryOutputJson) && QueryOutputJson.IsValid());
+	TestTrue(TEXT("query output keeps short location object inline"), QueryOutputText.Contains(TEXT("\"location\": {\"x\"")));
+	TestFalse(TEXT("query output does not pretty-expand location object"), QueryOutputText.Contains(TEXT("\"location\":\n")));
 	const TArray<TSharedPtr<FJsonValue>>* QueryResources = nullptr;
 	TestTrue(TEXT("query exposes resources"), QueryData->TryGetArrayField(TEXT("resources"), QueryResources));
 	TestTrue(TEXT("query reads back non-zero nav mesh bounds"), BoundsExtentExceeds(FindJsonObjectByStringField(QueryResources, TEXT("id"), NavId), 250.0, 250.0, 150.0));
 	TestTrue(TEXT("query reads back spline component points"), ResourceHasComponentWithSplinePointCount(QueryResources, CrateId, TEXT("FenceSpline"), 3));
 	TestTrue(TEXT("rootless custom actor keeps transform after root component creation"), ResourceLocationMatches(QueryResources, CustomId, 62400.0, 61000.0, 120.0));
+	TestTrue(TEXT("query actor transform has space contract"), ResourceTransformHasSpaceContract(QueryResources, CrateId, TEXT("ue_actor_world_transform")));
 
 	TSharedPtr<FJsonObject> ExactLabelQueryData;
 	TestTrue(TEXT("level_content_query_json exact label filter succeeds"), ExecLevelContentSmokeCommand(this, ServerScope, TEXT("lcj-exact-label-query"), TEXT("level_content_query_json"), FString::Printf(TEXT("{\"selection\":{\"label\":\"LCJ_Crate_%s\"},\"projection\":{\"include_bounds\":true}}"), *Suffix), ExactLabelQueryData));
@@ -434,8 +482,8 @@ bool FUeAgentInterfaceLevelContentJsonCrudSmokeTest::RunTest(const FString& Para
 	TestTrue(TEXT("level_content_diff_json succeeds"), ExecLevelContentSmokeCommand(this, ServerScope, TEXT("lcj-diff"), TEXT("level_content_diff_json"), FString::Printf(TEXT("{\"content\":%s,\"delete_policy\":\"none\"}"), *ContentJson), DiffData));
 	TestTrue(TEXT("diff is empty after apply"), DiffData.IsValid() && DiffData->GetBoolField(TEXT("empty")));
 	TestTrue(TEXT("diff exposes diffs array"), DiffData->HasTypedField<EJson::Array>(TEXT("diffs")));
-	TestEqual(TEXT("diff target count"), DiffData->GetIntegerField(TEXT("target_count")), 8);
-	TestEqual(TEXT("diff current count"), DiffData->GetIntegerField(TEXT("current_count")), 8);
+	TestEqual(TEXT("diff target count"), DiffData->GetIntegerField(TEXT("target_count")), 9);
+	TestEqual(TEXT("diff current count"), DiffData->GetIntegerField(TEXT("current_count")), 9);
 
 	TSharedPtr<FJsonObject> ActorAliasData;
 	TestTrue(TEXT("level_actor_export_json succeeds"), ExecLevelContentSmokeCommand(this, ServerScope, TEXT("lcj-actor-export"), TEXT("level_actor_export_json"), FString::Printf(TEXT("{\"selection\":{\"mode\":\"folder\",\"folder_path\":\"%s\",\"include_child_folders\":true}}"), *FolderRoot), ActorAliasData));
@@ -653,6 +701,44 @@ bool FUeAgentInterfaceLevelContentJsonGuardSmokeTest::RunTest(const FString& Par
 	TSharedPtr<FJsonObject> RepairData;
 	TestTrue(TEXT("repair command succeeds"), ExecLevelContentSmokeCommand(this, ServerScope, TEXT("lcj-repair"), TEXT("level_content_repair_json"), FString::Printf(TEXT("{\"folder_root\":\"%s\",\"apply_safe\":false}"), *FolderRoot), RepairData));
 	TestEqual(TEXT("repair schema"), RepairData->GetStringField(TEXT("schema")), FString(TEXT("uai.level_content.repair.v1")));
+
+	const FString UnmanagedFolderRoot = FString::Printf(TEXT("UAI/LevelContentJsonUnmanagedDelete/%s"), *Suffix);
+	const FString UnmanagedLabel = FString::Printf(TEXT("LCJ_Unmanaged_%s"), *Suffix);
+	TSharedPtr<FJsonObject> UnmanagedSpawnData;
+	TestTrue(TEXT("unmanaged actor spawn succeeds"), ExecLevelContentSmokeCommand(
+		this,
+		ServerScope,
+		TEXT("lcj-unmanaged-spawn"),
+		TEXT("spawn_actor"),
+		FString::Printf(
+			TEXT("{\"class_path\":\"/Script/Engine.TargetPoint\",\"label\":\"%s\",\"folder_path\":\"%s\",\"location\":{\"x\":64000,\"y\":64000,\"z\":100}}"),
+			*UnmanagedLabel,
+			*UnmanagedFolderRoot),
+		UnmanagedSpawnData));
+
+	TSharedPtr<FJsonObject> UnmanagedBlockedData;
+	TestTrue(TEXT("delete scope blocks unmanaged actor when managed tag is required"), ExecLevelContentSmokeCommand(
+		this,
+		ServerScope,
+		TEXT("lcj-unmanaged-delete-blocked"),
+		TEXT("level_content_delete_scope"),
+		FString::Printf(TEXT("{\"folder_path\":\"%s\",\"managed_tag\":\"UAI.Managed\",\"dry_run\":true}"), *UnmanagedFolderRoot),
+		UnmanagedBlockedData,
+		false));
+	TestEqual(TEXT("unmanaged blocked delete reports blocked_count"), UnmanagedBlockedData->GetIntegerField(TEXT("blocked_count")), 1);
+	TestEqual(TEXT("unmanaged blocked delete reports deletable_count"), UnmanagedBlockedData->GetIntegerField(TEXT("deletable_count")), 0);
+
+	TSharedPtr<FJsonObject> UnmanagedDeleteData;
+	TestTrue(TEXT("delete scope can explicitly delete unmanaged actor folder"), ExecLevelContentSmokeCommand(
+		this,
+		ServerScope,
+		TEXT("lcj-unmanaged-delete-allow"),
+		TEXT("level_content_delete_scope"),
+		FString::Printf(TEXT("{\"folder_path\":\"%s\",\"dry_run\":false,\"allow_unmanaged_delete\":true,\"delete_empty_folders\":true}"), *UnmanagedFolderRoot),
+		UnmanagedDeleteData));
+	TestEqual(TEXT("unmanaged delete removes one actor"), UnmanagedDeleteData->GetIntegerField(TEXT("deleted_count")), 1);
+	TestEqual(TEXT("unmanaged delete leaves no remaining actor"), UnmanagedDeleteData->GetIntegerField(TEXT("remaining_actor_count")), 0);
+	TestTrue(TEXT("unmanaged delete reports folder cleanup"), UnmanagedDeleteData->GetIntegerField(TEXT("folder_delete_count")) >= 1);
 
 	TSharedPtr<FJsonObject> CleanupData;
 	ExecLevelContentSmokeCommand(this, ServerScope, TEXT("lcj-guard-cleanup"), TEXT("level_content_delete_scope"), FString::Printf(TEXT("{\"folder_root\":\"%s\",\"managed_tag\":\"UAI.Managed\",\"dry_run\":false,\"protected_tags\":[]}"), *FolderRoot), CleanupData, true, 30.0);

@@ -151,8 +151,36 @@ namespace
 				continue;
 			}
 			FString SectionId;
+			FString Id;
+			FString Container;
+			FString Category;
+			FString Section;
+			FString SettingsClass;
+			FString SettingsObjectClass;
+			FString SettingsObjectPath;
+			FString ConfigSection;
 			(*SectionObj)->TryGetStringField(TEXT("section_id"), SectionId);
-			if (SectionId.Contains(Token, ESearchCase::IgnoreCase))
+			(*SectionObj)->TryGetStringField(TEXT("id"), Id);
+			(*SectionObj)->TryGetStringField(TEXT("container"), Container);
+			(*SectionObj)->TryGetStringField(TEXT("category"), Category);
+			(*SectionObj)->TryGetStringField(TEXT("section"), Section);
+			(*SectionObj)->TryGetStringField(TEXT("settings_class"), SettingsClass);
+			(*SectionObj)->TryGetStringField(TEXT("settings_object_class"), SettingsObjectClass);
+			(*SectionObj)->TryGetStringField(TEXT("settings_object_path"), SettingsObjectPath);
+			(*SectionObj)->TryGetStringField(TEXT("config_section"), ConfigSection);
+			const TArray<FString> StableFieldParts = {
+				SectionId,
+				Id,
+				Container,
+				Category,
+				Section,
+				SettingsClass,
+				SettingsObjectClass,
+				SettingsObjectPath,
+				ConfigSection
+			};
+			const FString StableFields = FString::Join(StableFieldParts, TEXT(" "));
+			if (StableFields.Contains(Token, ESearchCase::IgnoreCase))
 			{
 				OutSectionId = SectionId;
 				return !OutSectionId.IsEmpty();
@@ -426,10 +454,10 @@ namespace
 				continue;
 			}
 			bool bEditable = false;
-			FString CppType;
+			FString ValueKind;
 			(*FieldObj)->TryGetBoolField(TEXT("editable"), bEditable);
-			(*FieldObj)->TryGetStringField(TEXT("cpp_type"), CppType);
-			if (bEditable && CppType.Equals(TEXT("bool"), ESearchCase::IgnoreCase))
+			(*FieldObj)->TryGetStringField(TEXT("value_kind"), ValueKind);
+			if (bEditable && ValueKind.Equals(TEXT("boolean"), ESearchCase::IgnoreCase))
 			{
 				OutFieldName = Pair.Key;
 				return true;
@@ -454,11 +482,11 @@ namespace
 			}
 			bool bEditable = false;
 			bool bRequiresRestart = false;
-			FString CppType;
+			FString ValueKind;
 			(*FieldObj)->TryGetBoolField(TEXT("editable"), bEditable);
 			(*FieldObj)->TryGetBoolField(TEXT("requires_restart"), bRequiresRestart);
-			(*FieldObj)->TryGetStringField(TEXT("cpp_type"), CppType);
-			if (bEditable && bRequiresRestart && CppType.Equals(TEXT("bool"), ESearchCase::IgnoreCase))
+			(*FieldObj)->TryGetStringField(TEXT("value_kind"), ValueKind);
+			if (bEditable && bRequiresRestart && ValueKind.Equals(TEXT("boolean"), ESearchCase::IgnoreCase))
 			{
 				OutFieldName = Pair.Key;
 				return true;
@@ -563,7 +591,7 @@ bool FUeAgentInterfaceProjectSettingsJsonSmokeTest::RunTest(const FString& Param
 	if (bIndexOk)
 	{
 		TestEqual(TEXT("index schema"), IndexData->GetStringField(TEXT("schema")), FString(TEXT("ue_agent.project_settings.index.v1")));
-		TestTrue(TEXT("index generated_at"), !IndexData->GetStringField(TEXT("generated_at")).IsEmpty());
+		TestFalse(TEXT("index omits generated_at"), IndexData->HasField(TEXT("generated_at")));
 		TestTrue(TEXT("index project name"), !IndexData->GetStringField(TEXT("project_name")).IsEmpty());
 		TestTrue(TEXT("index plugin fingerprint hash"), !IndexData->GetStringField(TEXT("plugin_fingerprint_hash")).IsEmpty());
 		TestTrue(TEXT("index section_count > 0"), IndexData->GetIntegerField(TEXT("section_count")) > 0);
@@ -648,7 +676,7 @@ bool FUeAgentInterfaceProjectSettingsJsonSmokeTest::RunTest(const FString& Param
 	if (bOk)
 	{
 		TestEqual(TEXT("page schema"), PageData->GetStringField(TEXT("schema")), FString(TEXT("ue_agent.project_settings.page.v1")));
-		TestTrue(TEXT("page generated_at"), !PageData->GetStringField(TEXT("generated_at")).IsEmpty());
+		TestFalse(TEXT("page omits generated_at"), PageData->HasField(TEXT("generated_at")));
 		TestEqual(TEXT("page section_id matches"), PageData->GetStringField(TEXT("section_id")), SectionId);
 		TestTrue(TEXT("page contains field_schema_hash"), !PageData->GetStringField(TEXT("field_schema_hash")).IsEmpty());
 		TestTrue(TEXT("page contains page_value_hash"), !PageData->GetStringField(TEXT("page_value_hash")).IsEmpty());
@@ -657,14 +685,14 @@ bool FUeAgentInterfaceProjectSettingsJsonSmokeTest::RunTest(const FString& Param
 		const TSharedPtr<FJsonObject>* SectionInfoObj = nullptr;
 		TestTrue(TEXT("page contains section_info"), PageData->TryGetObjectField(TEXT("section_info"), SectionInfoObj) && SectionInfoObj && SectionInfoObj->IsValid());
 		TestTrue(TEXT("page file saved"), FPaths::FileExists(PageData->GetStringField(TEXT("output_file"))));
-		TestTrue(TEXT("page raw_config file saved"), FPaths::FileExists(PageData->GetStringField(TEXT("raw_config_file"))));
+		TestFalse(TEXT("page omits default raw_config file"), PageData->HasField(TEXT("raw_config_file")));
 		TestTrue(TEXT("page has ProjectName"), GetExportedFieldStringValue(PageData, TEXT("ProjectName"), OriginalProjectName));
 		TestTrue(TEXT("page has ProjectName field schema hash"), GetExportedFieldSchemaHash(PageData, TEXT("ProjectName"), ProjectNameFieldSchemaHash));
 		TestTrue(TEXT("page has ProjectVersion"), GetExportedFieldStringValue(PageData, TEXT("ProjectVersion"), OriginalProjectVersion));
 		TestTrue(TEXT("page has ProjectVersion field schema hash"), GetExportedFieldSchemaHash(PageData, TEXT("ProjectVersion"), ProjectVersionFieldSchemaHash));
 		TestTrue(TEXT("page has CompanyName"), GetExportedFieldStringValue(PageData, TEXT("CompanyName"), OriginalCompanyName));
 		TestTrue(TEXT("page has CompanyName field schema hash"), GetExportedFieldSchemaHash(PageData, TEXT("CompanyName"), CompanyNameFieldSchemaHash));
-		TestTrue(TEXT("page has raw_config"), PageData->HasField(TEXT("raw_config")));
+		TestFalse(TEXT("page omits default raw_config"), PageData->HasField(TEXT("raw_config")));
 		TestTrue(TEXT("page has editable bool field for invalid type coverage"), FindFirstEditableBoolField(PageData, InvalidTypeBoolFieldName));
 		FindFirstNonEditableField(PageData, NonEditableFieldName);
 		const TSharedPtr<FJsonObject>* ProjectNameField = GetExportedFieldObject(PageData, TEXT("ProjectName"));
@@ -672,30 +700,39 @@ bool FUeAgentInterfaceProjectSettingsJsonSmokeTest::RunTest(const FString& Param
 		if (ProjectNameField && ProjectNameField->IsValid())
 		{
 			TestEqual(TEXT("ProjectName json_type"), (*ProjectNameField)->GetStringField(TEXT("json_type")), FString(TEXT("string")));
+			TestEqual(TEXT("ProjectName property_path"), (*ProjectNameField)->GetStringField(TEXT("property_path")), FString(TEXT("ProjectName")));
 			TestEqual(TEXT("ProjectName config_key"), (*ProjectNameField)->GetStringField(TEXT("config_key")), FString(TEXT("ProjectName")));
 			TestTrue(TEXT("ProjectName has config_source"), !(*ProjectNameField)->GetStringField(TEXT("config_source")).IsEmpty());
 			TestTrue(TEXT("ProjectName has property_flags"), (*ProjectNameField)->HasField(TEXT("property_flags")));
 			TestTrue(TEXT("ProjectName has default_value"), (*ProjectNameField)->HasField(TEXT("default_value")));
 			TestTrue(TEXT("ProjectName has visible"), (*ProjectNameField)->HasField(TEXT("visible")));
+			TestTrue(TEXT("ProjectName has selector"), (*ProjectNameField)->HasTypedField<EJson::Object>(TEXT("selector")));
+			TestTrue(TEXT("ProjectName has operations"), (*ProjectNameField)->HasTypedField<EJson::Array>(TEXT("operations")));
+			TestTrue(TEXT("ProjectName has availability"), (*ProjectNameField)->HasTypedField<EJson::Object>(TEXT("availability")));
+			TestFalse(TEXT("ProjectName omits duplicate name"), (*ProjectNameField)->HasField(TEXT("name")));
+			TestFalse(TEXT("ProjectName omits duplicate cpp_type"), (*ProjectNameField)->HasField(TEXT("cpp_type")));
+			TestFalse(TEXT("ProjectName omits duplicate description"), (*ProjectNameField)->HasField(TEXT("description")));
+			TestFalse(TEXT("ProjectName omits duplicate category"), (*ProjectNameField)->HasField(TEXT("category")));
 		}
 	}
 
-	TSharedPtr<FJsonObject> PageNoRawConfigData;
+	TSharedPtr<FJsonObject> PageRawConfigData;
 	if (bOk)
 	{
 		const FString AliasPageFile = FPaths::Combine(OutputRoot, TEXT("alias_page_settings.json"));
-		const bool bPageNoRawConfigOk = ExecProjectSettingsCommand(
+		const bool bPageRawConfigOk = ExecProjectSettingsCommand(
 			this,
 			ServerScope,
-			TEXT("smoke-project-settings-page-output-path-no-raw-") + RootId,
+			TEXT("smoke-project-settings-page-output-path-raw-") + RootId,
 			TEXT("project_settings_export_page"),
-			FString::Printf(TEXT("{\"section_id\":%s,\"output_path\":%s,\"write_file\":true,\"include_raw_config\":false,\"include_hidden_properties\":false}"), *JsonString(SectionId), *JsonString(AliasPageFile)),
-			PageNoRawConfigData);
-		bOk &= bPageNoRawConfigOk;
-		if (bPageNoRawConfigOk)
+			FString::Printf(TEXT("{\"section_id\":%s,\"output_path\":%s,\"write_file\":true,\"include_raw_config\":true,\"include_hidden_properties\":false}"), *JsonString(SectionId), *JsonString(AliasPageFile)),
+			PageRawConfigData);
+		bOk &= bPageRawConfigOk;
+		if (bPageRawConfigOk)
 		{
-			TestEqual(TEXT("page output_path alias saved"), PageNoRawConfigData->GetStringField(TEXT("output_file")), FPaths::ConvertRelativePathToFull(AliasPageFile));
-			TestFalse(TEXT("page include_raw_config=false omits raw_config"), PageNoRawConfigData->HasField(TEXT("raw_config")));
+			TestEqual(TEXT("page output_path alias saved"), PageRawConfigData->GetStringField(TEXT("output_file")), FPaths::ConvertRelativePathToFull(AliasPageFile));
+			TestTrue(TEXT("page include_raw_config=true includes raw_config"), PageRawConfigData->HasField(TEXT("raw_config")));
+			TestTrue(TEXT("page include_raw_config=true saves raw_config file"), FPaths::FileExists(PageRawConfigData->GetStringField(TEXT("raw_config_file"))));
 		}
 	}
 
@@ -725,78 +762,206 @@ bool FUeAgentInterfaceProjectSettingsJsonSmokeTest::RunTest(const FString& Param
 	}
 
 	FString HighRiskSectionId;
+	TSharedPtr<FJsonObject> HighRiskPageData;
+	FString HighRiskBoolField;
+	auto FindProjectSettingsPageForBoolCoverage = [&](
+		const TArray<FString>& StableTokens,
+		const bool bRequireRestartHint,
+		const bool bFindRestartBool,
+		const FString& RequestIdPrefix,
+		FString& OutSectionId,
+		TSharedPtr<FJsonObject>& OutPageData,
+		FString& OutBoolField) -> bool
+	{
+		const TArray<TSharedPtr<FJsonValue>>* Sections = nullptr;
+		if (!IndexData.IsValid() || !IndexData->TryGetArrayField(TEXT("sections"), Sections) || !Sections)
+		{
+			return false;
+		}
+		for (const TSharedPtr<FJsonValue>& SectionValue : *Sections)
+		{
+			const TSharedPtr<FJsonObject>* SectionObj = nullptr;
+			if (!SectionValue.IsValid() || !SectionValue->TryGetObject(SectionObj) || !SectionObj || !SectionObj->IsValid())
+			{
+				continue;
+			}
+			bool bCanEdit = false;
+			(*SectionObj)->TryGetBoolField(TEXT("can_edit"), bCanEdit);
+			if (!bCanEdit)
+			{
+				continue;
+			}
+			bool bRequiresRestartHint = false;
+			(*SectionObj)->TryGetBoolField(TEXT("requires_restart_hint"), bRequiresRestartHint);
+			if (bRequireRestartHint && !bRequiresRestartHint)
+			{
+				continue;
+			}
+
+			FString SectionId;
+			FString Id;
+			FString Container;
+			FString Category;
+			FString Section;
+			FString SettingsClass;
+			FString SettingsObjectClass;
+			FString SettingsObjectPath;
+			FString ConfigSection;
+			(*SectionObj)->TryGetStringField(TEXT("section_id"), SectionId);
+			(*SectionObj)->TryGetStringField(TEXT("id"), Id);
+			(*SectionObj)->TryGetStringField(TEXT("container"), Container);
+			(*SectionObj)->TryGetStringField(TEXT("category"), Category);
+			(*SectionObj)->TryGetStringField(TEXT("section"), Section);
+			(*SectionObj)->TryGetStringField(TEXT("settings_class"), SettingsClass);
+			(*SectionObj)->TryGetStringField(TEXT("settings_object_class"), SettingsObjectClass);
+			(*SectionObj)->TryGetStringField(TEXT("settings_object_path"), SettingsObjectPath);
+			(*SectionObj)->TryGetStringField(TEXT("config_section"), ConfigSection);
+			const TArray<FString> StableFieldParts = {
+				SectionId,
+				Id,
+				Container,
+				Category,
+				Section,
+				SettingsClass,
+				SettingsObjectClass,
+				SettingsObjectPath,
+				ConfigSection
+			};
+			const FString StableFields = FString::Join(StableFieldParts, TEXT(" "));
+			bool bMatchesToken = StableTokens.Num() == 0;
+			for (const FString& Token : StableTokens)
+			{
+				if (StableFields.Contains(Token, ESearchCase::IgnoreCase))
+				{
+					bMatchesToken = true;
+					break;
+				}
+			}
+			if (!bMatchesToken || SectionId.IsEmpty())
+			{
+				continue;
+			}
+
+			TSharedPtr<FJsonObject> CandidatePageData;
+			if (!ExecProjectSettingsCommand(
+				this,
+				ServerScope,
+				RequestIdPrefix + TEXT("-") + SectionId.Replace(TEXT("."), TEXT("-")) + TEXT("-") + RootId,
+				TEXT("project_settings_export_page"),
+				FString::Printf(TEXT("{\"section_id\":%s,\"write_file\":false}"), *JsonString(SectionId)),
+				CandidatePageData))
+			{
+				continue;
+			}
+			FString CandidateBoolField;
+			const bool bFoundField = bFindRestartBool
+				? FindFirstEditableRestartBoolField(CandidatePageData, CandidateBoolField)
+				: FindFirstEditableBoolField(CandidatePageData, CandidateBoolField);
+			if (bFoundField)
+			{
+				OutSectionId = SectionId;
+				OutPageData = CandidatePageData;
+				OutBoolField = CandidateBoolField;
+				return true;
+			}
+		}
+		return false;
+	};
+
 	if (bOk)
 	{
-		bOk &= TestTrue(TEXT("Rendering settings section found for high risk guard coverage"), FindSectionIdContaining(IndexData, TEXT("Rendering"), HighRiskSectionId));
+		const TArray<FString> HighRiskTokens = {
+			TEXT("RHI"),
+			TEXT("Rendering"),
+			TEXT("TargetHardware"),
+			TEXT("Packaging"),
+			TEXT("Signing"),
+			TEXT("Encryption"),
+			TEXT("Collision"),
+			TEXT("Input"),
+			TEXT("Navigation"),
+			TEXT("WorldPartition"),
+			TEXT("Streaming"),
+			TEXT("AssetManager"),
+			TEXT("Plugins"),
+			TEXT("Platforms")
+		};
+		bOk &= TestTrue(
+			TEXT("high risk settings section with editable bool found"),
+			FindProjectSettingsPageForBoolCoverage(
+				HighRiskTokens,
+				false,
+				false,
+				TEXT("smoke-project-settings-high-risk-page"),
+				HighRiskSectionId,
+				HighRiskPageData,
+				HighRiskBoolField));
 	}
 	if (bOk)
 	{
-		TSharedPtr<FJsonObject> HighRiskPageData;
-		const bool bHighRiskPageOk = ExecProjectSettingsCommand(
-			this,
-			ServerScope,
-			TEXT("smoke-project-settings-high-risk-page-") + RootId,
-			TEXT("project_settings_export_page"),
-			FString::Printf(TEXT("{\"section_id\":%s,\"write_file\":false}"), *JsonString(HighRiskSectionId)),
-			HighRiskPageData);
-		bOk &= bHighRiskPageOk;
-		if (bHighRiskPageOk)
+		bool CurrentValue = false;
+		bOk &= TestTrue(TEXT("high risk bool value reads"), GetExportedFieldBoolValue(HighRiskPageData, HighRiskBoolField, CurrentValue));
+		if (bOk)
 		{
-			FString HighRiskBoolField;
-			bOk &= TestTrue(TEXT("high risk page has editable bool field"), FindFirstEditableBoolField(HighRiskPageData, HighRiskBoolField));
-			if (bOk)
-			{
-				bool CurrentValue = false;
-				bOk &= TestTrue(TEXT("high risk bool value reads"), GetExportedFieldBoolValue(HighRiskPageData, HighRiskBoolField, CurrentValue));
-				if (bOk)
-				{
-					bOk &= ExecProjectSettingsCommandExpectFailureFieldStatus(
-						this,
-						ServerScope,
-						TEXT("smoke-project-settings-high-risk-blocked-") + RootId,
-						TEXT("project_settings_apply_page"),
-						FString::Printf(
-							TEXT("{\"section_id\":%s,\"dry_run\":false,\"backup\":false,\"read_back\":false,\"values\":{%s:%s}}"),
-							*JsonString(HighRiskSectionId),
-							*JsonString(HighRiskBoolField),
-							CurrentValue ? TEXT("false") : TEXT("true")),
-						TEXT("project_settings_apply_failed"),
-						HighRiskBoolField,
-						TEXT("high_risk_blocked"));
-				}
-			}
+			bOk &= ExecProjectSettingsCommandExpectFailureFieldStatus(
+				this,
+				ServerScope,
+				TEXT("smoke-project-settings-high-risk-blocked-") + RootId,
+				TEXT("project_settings_apply_page"),
+				FString::Printf(
+					TEXT("{\"section_id\":%s,\"dry_run\":false,\"backup\":false,\"read_back\":false,\"values\":{%s:%s}}"),
+					*JsonString(HighRiskSectionId),
+					*JsonString(HighRiskBoolField),
+					CurrentValue ? TEXT("false") : TEXT("true")),
+				TEXT("project_settings_apply_failed"),
+				HighRiskBoolField,
+				TEXT("high_risk_blocked"));
+		}
+	}
 
-			FString RestartBoolField;
-			bOk &= TestTrue(TEXT("high risk page has editable restart bool field"), FindFirstEditableRestartBoolField(HighRiskPageData, RestartBoolField));
-			if (bOk)
+	FString RestartSectionId;
+	TSharedPtr<FJsonObject> RestartPageData;
+	FString RestartBoolField;
+	if (bOk)
+	{
+		bOk &= TestTrue(
+			TEXT("project settings section with editable restart bool found"),
+			FindProjectSettingsPageForBoolCoverage(
+				TArray<FString>(),
+				true,
+				true,
+				TEXT("smoke-project-settings-restart-page"),
+				RestartSectionId,
+				RestartPageData,
+				RestartBoolField));
+	}
+	if (bOk)
+	{
+		bool CurrentValue = false;
+		bOk &= TestTrue(TEXT("restart bool value reads"), GetExportedFieldBoolValue(RestartPageData, RestartBoolField, CurrentValue));
+		if (bOk)
+		{
+			TSharedPtr<FJsonObject> RestartValidateData;
+			const bool bRestartValidateOk = ExecProjectSettingsCommand(
+				this,
+				ServerScope,
+				TEXT("smoke-project-settings-restart-blocked-validate-") + RootId,
+				TEXT("project_settings_validate_page"),
+				FString::Printf(
+					TEXT("{\"section_id\":%s,\"fail_on_requires_restart\":true,\"allow_high_risk\":true,\"values\":{%s:%s}}"),
+					*JsonString(RestartSectionId),
+					*JsonString(RestartBoolField),
+					CurrentValue ? TEXT("false") : TEXT("true")),
+				RestartValidateData);
+			bOk &= bRestartValidateOk;
+			if (bRestartValidateOk)
 			{
-				bool CurrentValue = false;
-				bOk &= TestTrue(TEXT("restart bool value reads"), GetExportedFieldBoolValue(HighRiskPageData, RestartBoolField, CurrentValue));
-				if (bOk)
+				TestFalse(TEXT("requires restart validate success=false"), RestartValidateData->GetBoolField(TEXT("success")));
+				const TSharedPtr<FJsonObject>* RestartResult = FindFieldResult(RestartValidateData, RestartBoolField);
+				TestTrue(TEXT("requires restart result exists"), RestartResult && RestartResult->IsValid());
+				if (RestartResult && RestartResult->IsValid())
 				{
-					TSharedPtr<FJsonObject> RestartValidateData;
-					const bool bRestartValidateOk = ExecProjectSettingsCommand(
-						this,
-						ServerScope,
-						TEXT("smoke-project-settings-restart-blocked-validate-") + RootId,
-						TEXT("project_settings_validate_page"),
-						FString::Printf(
-							TEXT("{\"section_id\":%s,\"fail_on_requires_restart\":true,\"allow_high_risk\":true,\"values\":{%s:%s}}"),
-							*JsonString(HighRiskSectionId),
-							*JsonString(RestartBoolField),
-							CurrentValue ? TEXT("false") : TEXT("true")),
-						RestartValidateData);
-					bOk &= bRestartValidateOk;
-					if (bRestartValidateOk)
-					{
-						TestFalse(TEXT("requires restart validate success=false"), RestartValidateData->GetBoolField(TEXT("success")));
-						const TSharedPtr<FJsonObject>* RestartResult = FindFieldResult(RestartValidateData, RestartBoolField);
-						TestTrue(TEXT("requires restart result exists"), RestartResult && RestartResult->IsValid());
-						if (RestartResult && RestartResult->IsValid())
-						{
-							TestEqual(TEXT("requires restart status"), (*RestartResult)->GetStringField(TEXT("status")), FString(TEXT("requires_restart_blocked")));
-						}
-					}
+					TestEqual(TEXT("requires restart status"), (*RestartResult)->GetStringField(TEXT("status")), FString(TEXT("requires_restart_blocked")));
 				}
 			}
 		}
@@ -1441,6 +1606,22 @@ bool FUeAgentInterfaceProjectSettingsJsonSmokeTest::RunTest(const FString& Param
 			TestTrue(TEXT("config export has source_path"), !ConfigExportData->GetStringField(TEXT("source_path")).IsEmpty());
 			const TSharedPtr<FJsonObject>* ValuesObj = nullptr;
 			TestTrue(TEXT("config export has values"), ConfigExportData->TryGetObjectField(TEXT("values"), ValuesObj) && ValuesObj && ValuesObj->IsValid());
+			const TArray<TSharedPtr<FJsonValue>>* ConfigEntries = nullptr;
+			TestTrue(TEXT("config export has entries"), ConfigExportData->TryGetArrayField(TEXT("entries"), ConfigEntries) && ConfigEntries);
+			bool bFoundConfigEntryAuthoringMetadata = false;
+			if (ConfigEntries)
+			{
+				for (const TSharedPtr<FJsonValue>& EntryValue : *ConfigEntries)
+				{
+					const TSharedPtr<FJsonObject>* EntryObj = nullptr;
+					if (EntryValue.IsValid() && EntryValue->TryGetObject(EntryObj) && EntryObj && (*EntryObj)->HasTypedField<EJson::Object>(TEXT("selector")) && (*EntryObj)->HasTypedField<EJson::Array>(TEXT("operations")))
+					{
+						bFoundConfigEntryAuthoringMetadata = true;
+						break;
+					}
+				}
+			}
+			TestTrue(TEXT("config entry exposes authoring metadata"), bFoundConfigEntryAuthoringMetadata);
 			if (ValuesObj && ValuesObj->IsValid())
 			{
 				TestEqual(TEXT("config SmokeKey roundtrip"), (*ValuesObj)->GetStringField(TEXT("SmokeKey")), RootId);

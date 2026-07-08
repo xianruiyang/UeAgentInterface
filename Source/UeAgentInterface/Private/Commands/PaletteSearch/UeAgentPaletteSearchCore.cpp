@@ -8,11 +8,51 @@
 
 namespace UeAgentPaletteSearch
 {
+FSearchParams::FSearchParams()
+	: SearchMode(TEXT("fuzzy"))
+	, Sort(TEXT("ui_order"))
+	, SuggestedFilter(TEXT("all"))
+	, bLibraryOnly(true)
+	, bIncludeItems(true)
+	, bIncludeGroups(true)
+	, bIncludeCategoryTree(true)
+	, bContextSensitive(true)
+	, bIncludeLegacyAuthoring(false)
+	, bIncludeDebugFields(false)
+	, Limit(50)
+	, Offset(0)
+{
+}
+
+FCandidate::FCandidate()
+	: bInLibrary(false)
+	, bSuggested(false)
+	, bSupportedInContext(true)
+	, UiOrder(0)
+	, Score(0.0)
+{
+}
+
+FSearchResult::FSearchResult()
+	: TotalRaw(0)
+	, TotalMatching(0)
+{
+}
+
 namespace
 {
 	static FString NormalizeToken(const FString& InValue)
 	{
 		return InValue.TrimStartAndEnd().ToLower();
+	}
+
+	static FString CanonicalizeCatalogType(const FString& CatalogType)
+	{
+		if (CatalogType.Equals(TEXT("level_actor")) || CatalogType.Equals(TEXT("actor_placeable")))
+		{
+			return TEXT("placeable_actor");
+		}
+		return CatalogType;
 	}
 
 	static void ReadStringArray(const TSharedPtr<FJsonObject>& Obj, const TCHAR* FieldName, TArray<FString>& OutValues)
@@ -313,54 +353,31 @@ namespace
 		return Parts;
 	}
 
-	static TSharedRef<FJsonObject> CandidateToJson(const FSearchParams& Params, const FCandidate& Candidate)
+	static FString CandidateToTsv(const FCandidate& Candidate)
 	{
-		TSharedRef<FJsonObject> Obj = MakeShared<FJsonObject>();
-		const FString Kind = Candidate.Kind.IsEmpty() ? Candidate.Type : Candidate.Kind;
 		const FString Name = Candidate.Name.IsEmpty() ? Candidate.DisplayName : Candidate.Name;
 		const FString FullName = Candidate.FullName.IsEmpty() ? Candidate.StableId : Candidate.FullName;
-		Obj->SetStringField(TEXT("candidate_id"), Candidate.CandidateId);
-		Obj->SetStringField(TEXT("kind"), Kind);
-		Obj->SetStringField(TEXT("name"), Name);
-		Obj->SetStringField(TEXT("full_name"), FullName);
-		Obj->SetStringField(TEXT("category_path"), Candidate.CategoryPath);
-		Obj->SetArrayField(TEXT("category_parts"), MakeStringArray(SplitCategoryPath(Candidate.CategoryPath)));
-		Obj->SetStringField(TEXT("section"), Candidate.Section);
-		Obj->SetStringField(TEXT("type"), Kind);
-		Obj->SetStringField(TEXT("source_origin"), Candidate.SourceOrigin);
-		Obj->SetStringField(TEXT("source_label"), Candidate.SourceLabel);
-		Obj->SetStringField(TEXT("write_support"), Candidate.WriteSupport);
-		Obj->SetStringField(TEXT("support_reason"), Candidate.SupportReason);
-		Obj->SetBoolField(TEXT("in_library"), Candidate.bInLibrary);
-		Obj->SetBoolField(TEXT("suggested"), Candidate.bSuggested);
-		Obj->SetBoolField(TEXT("supported_in_context"), Candidate.bSupportedInContext);
-		Obj->SetNumberField(TEXT("score"), Candidate.Score);
-		if (!Candidate.Tooltip.IsEmpty())
-		{
-			Obj->SetStringField(TEXT("tooltip"), Candidate.Tooltip);
-		}
-		if (!Candidate.Keywords.IsEmpty())
-		{
-			Obj->SetStringField(TEXT("keywords"), Candidate.Keywords);
-		}
+		FString Tooltip = Candidate.Tooltip;
+		Tooltip.ReplaceInline(TEXT("\t"), TEXT(" "));
+		Tooltip.ReplaceInline(TEXT("\n"), TEXT(" "));
+		Tooltip.ReplaceInline(TEXT("\r"), TEXT(" "));
+
+		FString SeedPath;
 		if (Candidate.JsonAuthoring.IsValid())
 		{
-			Obj->SetObjectField(TEXT("json_authoring"), Candidate.JsonAuthoring);
+			const TSharedPtr<FJsonObject>* SeedObj = nullptr;
+			if (Candidate.JsonAuthoring->TryGetObjectField(TEXT("seed"), SeedObj) && SeedObj && SeedObj->IsValid())
+			{
+				(*SeedObj)->TryGetStringField(TEXT("path"), SeedPath);
+			}
 		}
-		if (Params.bIncludeLegacyAuthoring && Candidate.LegacyAuthoring.IsValid())
+		if (SeedPath.IsEmpty())
 		{
-			Obj->SetObjectField(TEXT("legacy_authoring"), Candidate.LegacyAuthoring);
-			Obj->SetObjectField(TEXT("recommended_authoring"), Candidate.LegacyAuthoring);
+			SeedPath = FullName;
 		}
-		if (Params.bIncludeDebugFields)
-		{
-			Obj->SetStringField(TEXT("stable_id"), Candidate.StableId);
-			Obj->SetStringField(TEXT("canonical_key"), Candidate.CanonicalKey);
-			Obj->SetStringField(TEXT("display_name"), Candidate.DisplayName);
-			Obj->SetStringField(TEXT("package_path"), Candidate.PackagePath);
-			Obj->SetStringField(TEXT("object_path"), Candidate.ObjectPath);
-		}
-		return Obj;
+
+		return FString::Printf(TEXT("%s\t%s\t%s\t%s\t%s"),
+			*Name, *FullName, *Candidate.CategoryPath, *Tooltip, *SeedPath);
 	}
 
 	static TArray<TSharedPtr<FJsonValue>> BuildGroupJson(const TArray<FCandidate>& Candidates)
@@ -477,6 +494,8 @@ bool ParseSearchParams(const TSharedPtr<FJsonObject>& Params, FSearchParams& Out
 
 	ReadStringField(Params, TEXT("catalog_type"), OutParams.CatalogType);
 	ReadStringField(Params, TEXT("type"), OutParams.CatalogType);
+	ReadStringField(Params, TEXT("query"), OutParams.SearchText);
+	ReadStringField(Params, TEXT("text"), OutParams.SearchText);
 	ReadStringField(Params, TEXT("search_text"), OutParams.SearchText);
 	ReadStringField(Params, TEXT("search"), OutParams.SearchText);
 	ReadStringField(Params, TEXT("asset_path"), OutParams.AssetPath);
@@ -557,7 +576,7 @@ bool ParseSearchParams(const TSharedPtr<FJsonObject>& Params, FSearchParams& Out
 	ReadStringArray(Params, TEXT("category_paths"), OutParams.CategoryFilters);
 	ReadStringArray(Params, TEXT("types"), OutParams.TypeFilters);
 
-	OutParams.CatalogType = NormalizeToken(OutParams.CatalogType);
+	OutParams.CatalogType = CanonicalizeCatalogType(NormalizeToken(OutParams.CatalogType));
 	OutParams.SearchMode = NormalizeToken(OutParams.SearchMode);
 	OutParams.Sort = NormalizeToken(OutParams.Sort);
 	OutParams.SuggestedFilter = NormalizeToken(OutParams.SuggestedFilter);
@@ -605,9 +624,16 @@ bool ExecuteSearch(const FSearchParams& Params, FSearchResult& OutResult, FStrin
 			return false;
 		}
 	}
+	else if (Params.CatalogType.Equals(TEXT("placeable_actor")))
+	{
+		if (!CollectPlaceableActorCandidates(Params, Candidates, OutResult.Warnings, OutError))
+		{
+			return false;
+		}
+	}
 	else
 	{
-		OutError = FString::Printf(TEXT("unsupported catalog_type '%s'. Supported now: niagara_module, niagara_dynamic_input, niagara_graph_node, material_node, material_expression, material_function_call, blueprint_node, actor_component, umg_widget."), *Params.CatalogType);
+		OutError = FString::Printf(TEXT("unsupported catalog_type '%s'. Supported now: niagara_module, niagara_dynamic_input, niagara_input_value_source, niagara_graph_node, material_node, material_expression, material_function_call, blueprint_node, actor_component, umg_widget, placeable_actor (aliases: level_actor, actor_placeable)."), *Params.CatalogType);
 		return false;
 	}
 
@@ -694,13 +720,13 @@ TSharedRef<FJsonObject> BuildSearchResponse(const FSearchParams& Params, const F
 	}
 	if (Params.bIncludeItems)
 	{
-		TArray<TSharedPtr<FJsonValue>> Items;
+		FString Tsv = TEXT("name\tfull_name\tcategory\ttooltip\tpath");
 		const int32 LastIndex = FMath::Min(Result.MatchingCandidates.Num(), Params.Offset + Params.Limit);
 		for (int32 Index = Params.Offset; Index < LastIndex; ++Index)
 		{
-			Items.Add(MakeShared<FJsonValueObject>(CandidateToJson(Params, Result.MatchingCandidates[Index])));
+			Tsv += TEXT("\n") + CandidateToTsv(Result.MatchingCandidates[Index]);
 		}
-		Root->SetArrayField(TEXT("items"), Items);
+		Root->SetStringField(TEXT("items_tsv"), Tsv);
 	}
 	Root->SetArrayField(TEXT("warnings"), MakeStringArray(Result.Warnings));
 	return Root;

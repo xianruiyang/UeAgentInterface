@@ -562,10 +562,8 @@ bool FUeAgentInterfaceSequenceFolderSmokeTest::RunTest(const FString& Parameters
 		TestFalse(TEXT("Sequence folder complete inventory not lossless apply"), CompleteInventoryJson->GetBoolField(TEXT("is_complete_lossless_apply")));
 		TestTrue(TEXT("Sequence folder complete inventory has tracks"), static_cast<int32>(CompleteInventoryJson->GetIntegerField(TEXT("track_count"))) > 0);
 		TestTrue(TEXT("Sequence folder complete inventory has sections"), static_cast<int32>(CompleteInventoryJson->GetIntegerField(TEXT("section_count"))) > 0);
-		const TArray<TSharedPtr<FJsonValue>>* SequenceRawProperties = nullptr;
-		TestTrue(TEXT("Sequence folder complete inventory sequence raw properties"), CompleteInventoryJson->TryGetArrayField(TEXT("sequence_raw_properties"), SequenceRawProperties) && SequenceRawProperties && SequenceRawProperties->Num() > 0);
-		const TArray<TSharedPtr<FJsonValue>>* MovieSceneRawProperties = nullptr;
-		TestTrue(TEXT("Sequence folder complete inventory movie scene raw properties"), CompleteInventoryJson->TryGetArrayField(TEXT("movie_scene_raw_properties"), MovieSceneRawProperties) && MovieSceneRawProperties && MovieSceneRawProperties->Num() > 0);
+		TestFalse(TEXT("Sequence folder complete inventory omits sequence raw properties by default"), CompleteInventoryJson->HasField(TEXT("sequence_raw_properties")));
+		TestFalse(TEXT("Sequence folder complete inventory omits movie scene raw properties by default"), CompleteInventoryJson->HasField(TEXT("movie_scene_raw_properties")));
 		bool bCompleteInventoryHasTrackRawProperties = false;
 		bool bCompleteInventoryHasSectionRawProperties = false;
 		bool bCompleteInventoryHasSectionChannels = false;
@@ -622,8 +620,8 @@ bool FUeAgentInterfaceSequenceFolderSmokeTest::RunTest(const FString& Parameters
 				}
 			}
 		}
-		TestTrue(TEXT("Sequence folder complete inventory track raw properties"), bCompleteInventoryHasTrackRawProperties);
-		TestTrue(TEXT("Sequence folder complete inventory section raw properties"), bCompleteInventoryHasSectionRawProperties);
+		TestFalse(TEXT("Sequence folder complete inventory track raw properties omitted by default"), bCompleteInventoryHasTrackRawProperties);
+		TestFalse(TEXT("Sequence folder complete inventory section raw properties omitted by default"), bCompleteInventoryHasSectionRawProperties);
 		TestTrue(TEXT("Sequence folder complete inventory section channels"), bCompleteInventoryHasSectionChannels);
 	}
 
@@ -639,16 +637,22 @@ bool FUeAgentInterfaceSequenceFolderSmokeTest::RunTest(const FString& Parameters
 	TestTrue(TEXT("Sequence folder asset json load"), LoadJsonFile(FPaths::Combine(FolderPath, TEXT("asset.json")), AssetJson));
 	if (AssetJson.IsValid())
 	{
-		const TArray<TSharedPtr<FJsonValue>>* SequenceRawProperties = nullptr;
-		TestTrue(TEXT("Sequence folder asset json sequence raw properties"), AssetJson->TryGetArrayField(TEXT("sequence_raw_properties"), SequenceRawProperties) && SequenceRawProperties && SequenceRawProperties->Num() > 0);
+		TestFalse(TEXT("Sequence folder asset json omits sequence raw properties by default"), AssetJson->HasField(TEXT("sequence_raw_properties")));
+		TSharedPtr<FJsonObject> SequenceDetailsJson;
+		TestTrue(
+			TEXT("Sequence folder asset details grouped"),
+			SmokeLoadGroupedDetailsForRef(this, FPaths::Combine(FolderPath, TEXT("asset.json")), AssetJson, TEXT("details"), TEXT("sequence_asset"), SequenceDetailsJson));
 	}
 
 	TSharedPtr<FJsonObject> SettingsJson;
 	TestTrue(TEXT("Sequence folder settings load"), LoadJsonFile(FPaths::Combine(FolderPath, TEXT("settings"), TEXT("sequence.json")), SettingsJson));
 	if (SettingsJson.IsValid())
 	{
-		const TArray<TSharedPtr<FJsonValue>>* MovieSceneRawProperties = nullptr;
-		TestTrue(TEXT("Sequence folder settings movie scene raw properties"), SettingsJson->TryGetArrayField(TEXT("movie_scene_raw_properties"), MovieSceneRawProperties) && MovieSceneRawProperties && MovieSceneRawProperties->Num() > 0);
+		TestFalse(TEXT("Sequence folder settings omits movie scene raw properties by default"), SettingsJson->HasField(TEXT("movie_scene_raw_properties")));
+		TSharedPtr<FJsonObject> MovieSceneDetailsJson;
+		TestTrue(
+			TEXT("Sequence folder settings details grouped"),
+			SmokeLoadGroupedDetailsForRef(this, FPaths::Combine(FolderPath, TEXT("settings"), TEXT("sequence.json")), SettingsJson, TEXT("details"), TEXT("movie_scene_settings"), MovieSceneDetailsJson));
 		const TSharedPtr<FJsonObject>* PlaybackObj = nullptr;
 		TestTrue(TEXT("Sequence folder settings playback exists"), SettingsJson->TryGetObjectField(TEXT("playback"), PlaybackObj) && PlaybackObj && (*PlaybackObj).IsValid());
 		if (PlaybackObj && (*PlaybackObj).IsValid())
@@ -730,6 +734,50 @@ bool FUeAgentInterfaceSequenceFolderSmokeTest::RunTest(const FString& Parameters
 	};
 	TestTrue(TEXT("Sequence folder exported section metadata exists"), TrackFolderHasSectionMetadata(FPaths::Combine(FolderPath, TEXT("bindings"), BindingFolderName, TEXT("tracks"))));
 
+	auto HasAuthoringMetadata = [](const TSharedPtr<FJsonObject>& Obj) -> bool
+	{
+		return Obj.IsValid()
+			&& Obj->HasTypedField<EJson::Object>(TEXT("selector"))
+			&& Obj->HasTypedField<EJson::Array>(TEXT("operations"));
+	};
+	TSharedPtr<FJsonObject> BindingJsonForAuthoring;
+	TestTrue(TEXT("Sequence folder binding authoring json load"), LoadJsonFile(FPaths::Combine(FolderPath, TEXT("bindings"), BindingFolderName, TEXT("binding.json")), BindingJsonForAuthoring));
+	if (BindingJsonForAuthoring.IsValid())
+	{
+		const TSharedPtr<FJsonObject>* BindingObjForAuthoring = nullptr;
+		TestTrue(TEXT("Sequence folder binding has authoring metadata"), BindingJsonForAuthoring->TryGetObjectField(TEXT("binding"), BindingObjForAuthoring) && BindingObjForAuthoring && HasAuthoringMetadata(*BindingObjForAuthoring));
+	}
+
+	auto TrackFolderHasAuthoringMetadata = [&LoadJsonFile, &HasAuthoringMetadata](const FString& TracksDir) -> bool
+	{
+		TArray<FString> TrackFiles;
+		IFileManager::Get().FindFiles(TrackFiles, *(FPaths::Combine(TracksDir, TEXT("*.json"))), true, false);
+		TrackFiles.Sort();
+		for (const FString& TrackFile : TrackFiles)
+		{
+			TSharedPtr<FJsonObject> TrackJson;
+			if (!LoadJsonFile(FPaths::Combine(TracksDir, TrackFile), TrackJson) || !HasAuthoringMetadata(TrackJson))
+			{
+				continue;
+			}
+			const TArray<TSharedPtr<FJsonValue>>* Sections = nullptr;
+			if (!TrackJson->TryGetArrayField(TEXT("sections"), Sections) || !Sections)
+			{
+				continue;
+			}
+			for (const TSharedPtr<FJsonValue>& SectionValue : *Sections)
+			{
+				const TSharedPtr<FJsonObject>* SectionObj = nullptr;
+				if (SectionValue.IsValid() && SectionValue->TryGetObject(SectionObj) && SectionObj && HasAuthoringMetadata(*SectionObj))
+				{
+					return true;
+				}
+			}
+		}
+		return false;
+	};
+	TestTrue(TEXT("Sequence folder track and section authoring metadata exists"), TrackFolderHasAuthoringMetadata(FPaths::Combine(FolderPath, TEXT("bindings"), BindingFolderName, TEXT("tracks"))));
+
 	auto TrackFolderHasRawProperties = [this, &LoadJsonFile](const FString& TracksDir) -> bool
 	{
 		TArray<FString> TrackFiles;
@@ -747,10 +795,65 @@ bool FUeAgentInterfaceSequenceFolderSmokeTest::RunTest(const FString& Parameters
 			{
 				return true;
 			}
+			const TArray<TSharedPtr<FJsonValue>>* Sections = nullptr;
+			if (!TrackJson->TryGetArrayField(TEXT("sections"), Sections) || !Sections)
+			{
+				continue;
+			}
+			for (const TSharedPtr<FJsonValue>& SectionValue : *Sections)
+			{
+				const TSharedPtr<FJsonObject>* SectionObj = nullptr;
+				if (!SectionValue.IsValid() || !SectionValue->TryGetObject(SectionObj) || !SectionObj || !(*SectionObj).IsValid())
+				{
+					continue;
+				}
+				const TArray<TSharedPtr<FJsonValue>>* SectionRawProperties = nullptr;
+				if ((*SectionObj)->TryGetArrayField(TEXT("raw_properties"), SectionRawProperties) && SectionRawProperties && SectionRawProperties->Num() > 0)
+				{
+					return true;
+				}
+			}
 		}
 		return false;
 	};
-	TestTrue(TEXT("Sequence folder exported track raw properties exists"), TrackFolderHasRawProperties(FPaths::Combine(FolderPath, TEXT("bindings"), BindingFolderName, TEXT("tracks"))));
+	TestFalse(TEXT("Sequence folder exported track raw properties omitted by default"), TrackFolderHasRawProperties(FPaths::Combine(FolderPath, TEXT("bindings"), BindingFolderName, TEXT("tracks"))));
+
+	auto TrackFolderHasGroupedDetails = [this, &LoadJsonFile](const FString& TracksDir) -> bool
+	{
+		TArray<FString> TrackFiles;
+		IFileManager::Get().FindFiles(TrackFiles, *(FPaths::Combine(TracksDir, TEXT("*.json"))), true, false);
+		TrackFiles.Sort();
+		bool bFoundTrackDetails = false;
+		bool bFoundSectionDetails = false;
+		for (const FString& TrackFile : TrackFiles)
+		{
+			const FString TrackJsonPath = FPaths::Combine(TracksDir, TrackFile);
+			TSharedPtr<FJsonObject> TrackJson;
+			if (!LoadJsonFile(TrackJsonPath, TrackJson) || !TrackJson.IsValid())
+			{
+				continue;
+			}
+			TSharedPtr<FJsonObject> TrackDetailsJson;
+			bFoundTrackDetails = bFoundTrackDetails || SmokeLoadGroupedDetailsForRef(this, TrackJsonPath, TrackJson, TEXT("details"), TEXT("sequence_track"), TrackDetailsJson);
+			const TArray<TSharedPtr<FJsonValue>>* Sections = nullptr;
+			if (!TrackJson->TryGetArrayField(TEXT("sections"), Sections) || !Sections)
+			{
+				continue;
+			}
+			for (const TSharedPtr<FJsonValue>& SectionValue : *Sections)
+			{
+				const TSharedPtr<FJsonObject>* SectionObj = nullptr;
+				if (!SectionValue.IsValid() || !SectionValue->TryGetObject(SectionObj) || !SectionObj || !(*SectionObj).IsValid())
+				{
+					continue;
+				}
+				TSharedPtr<FJsonObject> SectionDetailsJson;
+				bFoundSectionDetails = bFoundSectionDetails || SmokeLoadGroupedDetailsForRef(this, TrackJsonPath, *SectionObj, TEXT("details"), TEXT("sequence_section"), SectionDetailsJson);
+			}
+		}
+		return bFoundTrackDetails && bFoundSectionDetails;
+	};
+	TestTrue(TEXT("Sequence folder exported track and section details grouped"), TrackFolderHasGroupedDetails(FPaths::Combine(FolderPath, TEXT("bindings"), BindingFolderName, TEXT("tracks"))));
 
 	auto TrackFolderHasSectionChannels = [this, &LoadJsonFile](const FString& TracksDir) -> bool
 	{
@@ -1021,7 +1124,8 @@ bool FUeAgentInterfaceSequenceFolderSmokeTest::RunTest(const FString& Parameters
 	{
 		TestEqual(TEXT("Sequence folder apply replace mode"), (*ApplyFolderData)->GetStringField(TEXT("replace_mode")), FString(TEXT("patch")));
 		TestTrue(TEXT("Sequence folder apply raw property count field exists"), (*ApplyFolderData)->HasField(TEXT("raw_properties_applied")));
-		TestTrue(TEXT("Sequence folder apply raw property count positive"), static_cast<int32>((*ApplyFolderData)->GetIntegerField(TEXT("raw_properties_applied"))) > 0);
+		TestEqual(TEXT("Sequence folder apply raw property count is zero for default export"), static_cast<int32>((*ApplyFolderData)->GetIntegerField(TEXT("raw_properties_applied"))), 0);
+		TestTrue(TEXT("Sequence folder apply grouped details count field exists"), (*ApplyFolderData)->HasField(TEXT("grouped_details_applied")));
 		TestTrue(TEXT("Sequence folder apply channel count field exists"), (*ApplyFolderData)->HasField(TEXT("channels_applied")));
 		TestTrue(TEXT("Sequence folder apply channel count positive"), static_cast<int32>((*ApplyFolderData)->GetIntegerField(TEXT("channels_applied"))) > 0);
 		const TSharedPtr<FJsonObject>* InputCoverageReport = nullptr;

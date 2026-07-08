@@ -304,6 +304,11 @@ bool FUeAgentInterfaceTextureRenderTargetSmokeTest::RunTest(const FString& Param
 		FString::Printf(TEXT("{\"asset_path\":%s,\"source_textures\":%s,\"save_after_create\":true}"), *JsonString(TextureArray), *SingleTextureArray), Data));
 	TestTrue(TEXT("texture_array_export_folder"), ExecTextureCommand(this, ServerScope, RootId + TEXT("_arr_export"), TEXT("texture_array_export_folder"),
 		FString::Printf(TEXT("{\"asset_path\":%s,\"folder_path\":%s}"), *JsonString(TextureArray), *JsonString(ArrayFolder)), Data));
+	FString ArrayAssetJsonText;
+	TSharedPtr<FJsonObject> ArrayAssetJson;
+	TestTrue(TEXT("texture_array_export_folder asset.json loads"), FFileHelper::LoadFileToString(ArrayAssetJsonText, *FPaths::Combine(ArrayFolder, TEXT("asset.json"))) && ParseJson(ArrayAssetJsonText, ArrayAssetJson));
+	TestTrue(TEXT("texture_array_export_folder asset details ref"), ArrayAssetJson.IsValid() && ArrayAssetJson->HasTypedField<EJson::Object>(TEXT("details")));
+	TestFalse(TEXT("texture_array_export_folder omits root raw_properties.json"), FPaths::FileExists(FPaths::Combine(ArrayFolder, TEXT("raw_properties.json"))));
 	TestTrue(TEXT("texture_array_apply_folder"), ExecTextureCommand(this, ServerScope, RootId + TEXT("_arr_apply"), TEXT("texture_array_apply_folder"),
 		FString::Printf(TEXT("{\"folder_path\":%s,\"asset_path\":%s,\"save_after_apply\":true}"), *JsonString(ArrayFolder), *JsonString(TextureArray)), Data));
 	TestTrue(TEXT("texture_array_apply_folder returns slice_results"), Data.IsValid() && Data->HasField(TEXT("slice_results")));
@@ -352,6 +357,21 @@ bool FUeAgentInterfaceTextureRenderTargetSmokeTest::RunTest(const FString& Param
 		FString::Printf(TEXT("{\"asset_path\":%s}"), *JsonString(MediaSource)), Data));
 	TestTrue(TEXT("media_source_export_json"), ExecTextureCommand(this, ServerScope, RootId + TEXT("_ms_export"), TEXT("media_source_export_json"),
 		FString::Printf(TEXT("{\"asset_path\":%s,\"output_file\":%s}"), *JsonString(MediaSource), *JsonString(MediaSourceJson)), Data));
+	const TArray<TSharedPtr<FJsonValue>>* MediaSourceProperties = nullptr;
+	TestTrue(TEXT("media_source_export_json exposes authoring properties"), Data.IsValid() && Data->TryGetArrayField(TEXT("properties"), MediaSourceProperties) && MediaSourceProperties && MediaSourceProperties->Num() > 0);
+	if (MediaSourceProperties && MediaSourceProperties->Num() > 0)
+	{
+		const TSharedPtr<FJsonObject>* FirstProperty = nullptr;
+		if ((*MediaSourceProperties)[0].IsValid() && (*MediaSourceProperties)[0]->TryGetObject(FirstProperty) && FirstProperty && FirstProperty->IsValid())
+		{
+			TestTrue(TEXT("media_source property has property_path"), (*FirstProperty)->HasField(TEXT("property_path")));
+			TestTrue(TEXT("media_source property has selector"), (*FirstProperty)->HasField(TEXT("selector")));
+			TestTrue(TEXT("media_source property has availability"), (*FirstProperty)->HasField(TEXT("availability")));
+			TestTrue(TEXT("media_source property has operations"), (*FirstProperty)->HasField(TEXT("operations")));
+			TestFalse(TEXT("media_source property omits legacy name"), (*FirstProperty)->HasField(TEXT("name")));
+			TestFalse(TEXT("media_source property omits cpp_type"), (*FirstProperty)->HasField(TEXT("cpp_type")));
+		}
+	}
 	TestTrue(TEXT("media_source_apply_json"), ExecTextureCommand(this, ServerScope, RootId + TEXT("_ms_apply"), TEXT("media_source_apply_json"),
 		FString::Printf(TEXT("{\"json_file\":%s,\"asset_path\":%s,\"save_after_apply\":true}"), *JsonString(MediaSourceJson), *JsonString(MediaSource)), Data));
 	TestTrue(TEXT("media_player_create"), ExecTextureCommand(this, ServerScope, RootId + TEXT("_mp_create"), TEXT("media_player_create"),
@@ -403,7 +423,11 @@ bool FUeAgentInterfaceTextureRenderTargetSmokeTest::RunTest(const FString& Param
 		FString::Printf(TEXT("{\"asset_path\":%s}"), *JsonString(TextureGraph)), Data));
 	TestTrue(TEXT("texture_graph_export_folder"), ExecTextureCommand(this, ServerScope, RootId + TEXT("_tg_export"), TEXT("texture_graph_export_folder"),
 		FString::Printf(TEXT("{\"asset_path\":%s,\"folder_path\":%s}"), *JsonString(TextureGraph), *JsonString(GraphFolder)), Data));
-	TestTrue(TEXT("texture_graph_export_folder raw_properties.json"), FPaths::FileExists(FPaths::Combine(GraphFolder, TEXT("raw_properties.json"))));
+	FString TextureGraphAssetJsonText;
+	TSharedPtr<FJsonObject> TextureGraphAssetJson;
+	TestTrue(TEXT("texture_graph_export_folder asset.json loads"), FFileHelper::LoadFileToString(TextureGraphAssetJsonText, *FPaths::Combine(GraphFolder, TEXT("asset.json"))) && ParseJson(TextureGraphAssetJsonText, TextureGraphAssetJson));
+	TestTrue(TEXT("texture_graph_export_folder asset details ref"), TextureGraphAssetJson.IsValid() && TextureGraphAssetJson->HasTypedField<EJson::Object>(TEXT("details")));
+	TestFalse(TEXT("texture_graph_export_folder omits root raw_properties.json"), FPaths::FileExists(FPaths::Combine(GraphFolder, TEXT("raw_properties.json"))));
 	TestTrue(TEXT("texture_graph_validate_folder"), ExecTextureCommand(this, ServerScope, RootId + TEXT("_tg_validate"), TEXT("texture_graph_validate_folder"),
 		FString::Printf(TEXT("{\"folder_path\":%s,\"asset_path\":%s}"), *JsonString(GraphFolder), *JsonString(TextureGraph)), Data));
 	TestTrue(TEXT("texture_graph_apply_folder"), ExecTextureCommand(this, ServerScope, RootId + TEXT("_tg_apply"), TEXT("texture_graph_apply_folder"),

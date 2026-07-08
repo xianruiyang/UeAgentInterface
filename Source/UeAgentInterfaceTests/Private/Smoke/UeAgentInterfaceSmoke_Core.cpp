@@ -1,6 +1,27 @@
 #if WITH_DEV_AUTOMATION_TESTS
 
+#include "Server/UeAgentCommandRegistry.h"
 #include "UeAgentSmokeTestSharedIncludes.inl"
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(
+	FUeAgentInterfaceCommandRegistrySmokeTest,
+	"GptProjectTest.UeAgentInterface.Smoke.CommandRegistry",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::ProductFilter)
+
+bool FUeAgentInterfaceCommandRegistrySmokeTest::RunTest(const FString& Parameters)
+{
+	TestTrue(TEXT("Registry finds exec_batch exact command"), UeAgentCommandRegistry::FindExactCommandInvoker(TEXT("exec_batch")) != nullptr);
+	TestTrue(TEXT("Registry finds list_actors exact command"), UeAgentCommandRegistry::FindExactCommandInvoker(TEXT("list_actors")) != nullptr);
+	TestTrue(TEXT("Registry finds config_apply_section exact command"), UeAgentCommandRegistry::FindExactCommandInvoker(TEXT("config_apply_section")) != nullptr);
+	TestTrue(TEXT("Registry rejects unknown exact command"), UeAgentCommandRegistry::FindExactCommandInvoker(TEXT("definitely_missing_command")) == nullptr);
+
+	TestTrue(TEXT("Registry finds blueprint prefix command"), UeAgentCommandRegistry::FindPrefixedCommandInvoker(TEXT("blueprint_create")) != nullptr);
+	TestTrue(TEXT("Registry finds physics prefix command"), UeAgentCommandRegistry::FindPrefixedCommandInvoker(TEXT("physics_runtime_probe")) != nullptr);
+	TestTrue(TEXT("Registry finds light profile prefix command"), UeAgentCommandRegistry::FindPrefixedCommandInvoker(TEXT("light_profile_import")) != nullptr);
+	TestTrue(TEXT("Registry rejects unknown prefix command"), UeAgentCommandRegistry::FindPrefixedCommandInvoker(TEXT("definitely_missing_command")) == nullptr);
+
+	return !HasAnyErrors();
+}
 
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(
 	FUeAgentInterfacePingStatusSmokeTest,

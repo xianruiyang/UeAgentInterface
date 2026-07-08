@@ -10,10 +10,12 @@ namespace UeAgentPaletteSearch
 {
 	struct FSearchParams
 	{
+		FSearchParams();
+
 		FString CatalogType;
 		FString SearchText;
-		FString SearchMode = TEXT("fuzzy");
-		FString Sort = TEXT("ui_order");
+		FString SearchMode;
+		FString Sort;
 		FString AssetPath;
 		FString GraphName;
 		FString NodeGuid;
@@ -21,23 +23,25 @@ namespace UeAgentPaletteSearch
 		FString PinName;
 		FString CandidateId;
 		FString TargetUsage;
-		FString SuggestedFilter = TEXT("all");
+		FString SuggestedFilter;
 		TArray<FString> SourceFilters;
 		TArray<FString> CategoryFilters;
 		TArray<FString> TypeFilters;
-		bool bLibraryOnly = true;
-		bool bIncludeItems = true;
-		bool bIncludeGroups = true;
-		bool bIncludeCategoryTree = true;
-		bool bContextSensitive = true;
-		bool bIncludeLegacyAuthoring = false;
-		bool bIncludeDebugFields = false;
-		int32 Limit = 50;
-		int32 Offset = 0;
+		bool bLibraryOnly;
+		bool bIncludeItems;
+		bool bIncludeGroups;
+		bool bIncludeCategoryTree;
+		bool bContextSensitive;
+		bool bIncludeLegacyAuthoring;
+		bool bIncludeDebugFields;
+		int32 Limit;
+		int32 Offset;
 	};
 
 	struct FCandidate
 	{
+		FCandidate();
+
 		FString CandidateId;
 		FString Kind;
 		FString Name;
@@ -56,19 +60,21 @@ namespace UeAgentPaletteSearch
 		FString ObjectPath;
 		FString WriteSupport;
 		FString SupportReason;
-		bool bInLibrary = false;
-		bool bSuggested = false;
-		bool bSupportedInContext = true;
-		int32 UiOrder = 0;
-		double Score = 0.0;
+		bool bInLibrary;
+		bool bSuggested;
+		bool bSupportedInContext;
+		int32 UiOrder;
+		double Score;
 		TSharedPtr<FJsonObject> JsonAuthoring;
 		TSharedPtr<FJsonObject> LegacyAuthoring;
 	};
 
 	struct FSearchResult
 	{
-		int32 TotalRaw = 0;
-		int32 TotalMatching = 0;
+		FSearchResult();
+
+		int32 TotalRaw;
+		int32 TotalMatching;
 		TArray<FCandidate> MatchingCandidates;
 		TArray<FString> Warnings;
 	};
@@ -82,4 +88,5 @@ namespace UeAgentPaletteSearch
 	bool CollectMaterialCandidates(const FSearchParams& Params, TArray<FCandidate>& OutCandidates, TArray<FString>& OutWarnings, FString& OutError);
 	bool CollectBlueprintCandidates(const FSearchParams& Params, TArray<FCandidate>& OutCandidates, TArray<FString>& OutWarnings, FString& OutError);
 	bool CollectComponentWidgetCandidates(const FSearchParams& Params, TArray<FCandidate>& OutCandidates, TArray<FString>& OutWarnings, FString& OutError);
+	bool CollectPlaceableActorCandidates(const FSearchParams& Params, TArray<FCandidate>& OutCandidates, TArray<FString>& OutWarnings, FString& OutError);
 }

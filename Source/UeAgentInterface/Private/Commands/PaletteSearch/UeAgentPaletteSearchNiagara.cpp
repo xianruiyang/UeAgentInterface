@@ -28,7 +28,12 @@ namespace
 
 	static bool IsNiagaraDynamicInputCatalog(const FString& CatalogType)
 	{
-		return CatalogType.Equals(TEXT("niagara_dynamic_input")) || CatalogType.Equals(TEXT("niagara_input_value_source"));
+		return CatalogType.Equals(TEXT("niagara_dynamic_input"));
+	}
+
+	static bool IsNiagaraInputValueSourceCatalog(const FString& CatalogType)
+	{
+		return CatalogType.Equals(TEXT("niagara_input_value_source"));
 	}
 
 	static bool IsNiagaraGraphNodeCatalog(const FString& CatalogType)
@@ -41,6 +46,10 @@ namespace
 		if (IsNiagaraDynamicInputCatalog(CatalogType))
 		{
 			return TEXT("niagara_dynamic_input");
+		}
+		if (IsNiagaraInputValueSourceCatalog(CatalogType))
+		{
+			return TEXT("niagara_input_value_source");
 		}
 		if (IsNiagaraGraphNodeCatalog(CatalogType))
 		{
@@ -226,10 +235,49 @@ namespace
 		bool bValue = false;
 		return AssetData.GetTagValue(TagName, bValue) && bValue;
 	}
+
+	static void AddInputValueSourceCandidate(
+		const FString& Name,
+		const FString& StableId,
+		const FString& Tooltip,
+		int32 UiOrder,
+		TArray<FCandidate>& OutCandidates)
+	{
+		FCandidate Candidate;
+		Candidate.Kind = TEXT("niagara_input_value_source");
+		Candidate.Name = Name;
+		Candidate.FullName = StableId;
+		Candidate.CandidateId = Candidate.Kind + TEXT(":") + StableId;
+		Candidate.StableId = StableId;
+		Candidate.CanonicalKey = StableId;
+		Candidate.DisplayName = Name;
+		Candidate.Tooltip = Tooltip;
+		Candidate.CategoryPath = TEXT("Input Value Sources");
+		Candidate.Section = TEXT("Built-in");
+		Candidate.Type = Candidate.Kind;
+		Candidate.SourceOrigin = TEXT("engine");
+		Candidate.SourceLabel = TEXT("Built-in");
+		Candidate.WriteSupport = TEXT("module_input_value_source_json");
+		Candidate.SupportReason = TEXT("Can be written as a Niagara module input value source mode.");
+		Candidate.bInLibrary = true;
+		Candidate.bSupportedInContext = true;
+		Candidate.UiOrder = UiOrder;
+		Candidate.JsonAuthoring = BuildJsonAuthoringPatch(Candidate);
+		OutCandidates.Add(MoveTemp(Candidate));
+	}
 }
 
 bool CollectNiagaraCandidates(const FSearchParams& Params, TArray<FCandidate>& OutCandidates, TArray<FString>& OutWarnings, FString& OutError)
 {
+	if (IsNiagaraInputValueSourceCatalog(Params.CatalogType))
+	{
+		AddInputValueSourceCandidate(TEXT("Linked Parameter"), TEXT("linked_parameter"), TEXT("Use an existing Niagara parameter as the value source."), 0, OutCandidates);
+		AddInputValueSourceCandidate(TEXT("Direct Value"), TEXT("direct_value"), TEXT("Use a literal value stored on the input."), 1, OutCandidates);
+		AddInputValueSourceCandidate(TEXT("Dynamic Input"), TEXT("dynamic_input"), TEXT("Use a nested dynamic input script as the value source."), 2, OutCandidates);
+		AddInputValueSourceCandidate(TEXT("Data Interface"), TEXT("data_interface"), TEXT("Use a data interface-backed value source."), 3, OutCandidates);
+		return true;
+	}
+
 	ENiagaraScriptUsage ScriptUsage = ENiagaraScriptUsage::Module;
 	FString RootCategory = TEXT("Modules");
 	const FString CandidateType = GetCanonicalNiagaraCandidateType(Params.CatalogType);

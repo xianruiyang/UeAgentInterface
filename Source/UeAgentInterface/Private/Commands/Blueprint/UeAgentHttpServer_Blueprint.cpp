@@ -2,7 +2,14 @@
 
 #include "UeAgentHttpServer_Blueprint.h"
 
+#include "Commands/Blueprint/UeAgentHttpServer_BlueprintOps.h"
+#include "Commands/PaletteSearch/UeAgentPaletteSearchAuthoring.h"
+#include "Commands/PaletteSearch/UeAgentPaletteSearchTypes.h"
 #include "Commands/UeAgentGraphViewUtils.h"
+#include "Utilities/UeAgentAuthoringJson.h"
+#include "Utilities/UeAgentDetailsAuthoring.h"
+#include "Utilities/UeAgentJsonDiagnostics.h"
+#include "Utilities/UeAgentUObjectProperties.h"
 #include "AnimGraphNode_StateMachineBase.h"
 #include "Animation/AnimInstance.h"
 #include "AssetRegistry/AssetRegistryModule.h"
@@ -37,6 +44,7 @@
 #include "K2Node_DynamicCast.h"
 #include "K2Node_EnhancedInputAction.h"
 #include "K2Node_Event.h"
+#include "K2Node_ExecutionSequence.h"
 #include "K2Node_Tunnel.h"
 #include "K2Node_VariableGet.h"
 #include "K2Node_VariableSet.h"
@@ -75,16 +83,7 @@
 
 namespace UeAgentBlueprintOps
 {
-	enum class ECompilerMessageSeverityFilter : uint8
-	{
-		All,
-		Error,
-		Warning,
-		Info,
-		WarningOrError
-	};
-
-	static FString NormalizeAssetPath(const FString& InPath)
+	FString NormalizeAssetPath(const FString& InPath)
 	{
 		FString OutPath = InPath;
 		OutPath.TrimStartAndEndInline();
@@ -119,7 +118,7 @@ namespace UeAgentBlueprintOps
 		return FString::Printf(TEXT("%s.%s"), *AssetPath, *AssetName);
 	}
 
-	static UObject* LoadAssetObject(const FString& InPath)
+	UObject* LoadAssetObject(const FString& InPath)
 	{
 		const FString ObjectPath = ToObjectPath(InPath);
 		if (ObjectPath.IsEmpty())
@@ -133,7 +132,7 @@ namespace UeAgentBlueprintOps
 		return LoadObject<UObject>(nullptr, *ObjectPath);
 	}
 
-	static bool AssetExists(const FString& InPath)
+	bool AssetExists(const FString& InPath)
 	{
 		const FString ObjectPath = ToObjectPath(InPath);
 		if (ObjectPath.IsEmpty())
@@ -150,12 +149,12 @@ namespace UeAgentBlueprintOps
 		return AssetRegistryModule.Get().GetAssetByObjectPath(FSoftObjectPath(ObjectPath)).IsValid();
 	}
 
-	static UBlueprint* LoadBlueprintAsset(const FString& InPath)
+	UBlueprint* LoadBlueprintAsset(const FString& InPath)
 	{
 		return Cast<UBlueprint>(LoadAssetObject(InPath));
 	}
 
-	static UClass* ResolveClassByPath(const FString& InClassPath)
+	UClass* ResolveClassByPath(const FString& InClassPath)
 	{
 		FString ClassPath = InClassPath;
 		ClassPath.TrimStartAndEndInline();
@@ -183,7 +182,7 @@ namespace UeAgentBlueprintOps
 		return nullptr;
 	}
 
-	static FString BlueprintStatusToString(const EBlueprintStatus InStatus)
+	FString BlueprintStatusToString(const EBlueprintStatus InStatus)
 	{
 		switch (InStatus)
 		{
@@ -214,7 +213,7 @@ namespace UeAgentBlueprintOps
 		}
 	}
 
-	static bool ParseCompilerSeverityFilter(const FString& InFilterText, ECompilerMessageSeverityFilter& OutFilter)
+	bool ParseCompilerSeverityFilter(const FString& InFilterText, ECompilerMessageSeverityFilter& OutFilter)
 	{
 		FString Normalized = InFilterText.TrimStartAndEnd().ToLower();
 		Normalized.ReplaceInline(TEXT("_"), TEXT(""));
@@ -268,7 +267,7 @@ namespace UeAgentBlueprintOps
 		}
 	}
 
-	static void BuildCompilerLogJson(
+	void BuildCompilerLogJson(
 		const FCompilerResultsLog& InCompilerLog,
 		const ECompilerMessageSeverityFilter InFilter,
 		const int32 InMaxMessages,
@@ -317,7 +316,7 @@ namespace UeAgentBlueprintOps
 		}
 	}
 
-	static UEdGraph* ResolveBlueprintGraph(UBlueprint* Blueprint, const FString& InGraphName)
+	UEdGraph* ResolveBlueprintGraph(UBlueprint* Blueprint, const FString& InGraphName)
 	{
 		if (!Blueprint)
 		{
@@ -388,12 +387,12 @@ namespace UeAgentBlueprintOps
 		return nullptr;
 	}
 
-	static bool IsUserConstructionScriptGraph(const UEdGraph* Graph)
+	bool IsUserConstructionScriptGraph(const UEdGraph* Graph)
 	{
 		return Graph && Graph->GetName().Equals(TEXT("UserConstructionScript"), ESearchCase::IgnoreCase);
 	}
 
-	static bool IsUnsafeConstructionScriptPcgCall(const FString& FunctionOwnerClass, const FString& FunctionName)
+	bool IsUnsafeConstructionScriptPcgCall(const FString& FunctionOwnerClass, const FString& FunctionName)
 	{
 		const bool bOwnerIsPcgComponent =
 			FunctionOwnerClass.Contains(TEXT("PCGComponent"), ESearchCase::IgnoreCase)
@@ -418,12 +417,12 @@ namespace UeAgentBlueprintOps
 		return bOwnerIsPcgGraphParametersHelpers && FunctionName.StartsWith(TEXT("Set"), ESearchCase::IgnoreCase);
 	}
 
-	static bool RequiresExplicitParentOrEventNode(const FString& FunctionName)
+	bool RequiresExplicitParentOrEventNode(const FString& FunctionName)
 	{
 		return FunctionName.Equals(TEXT("ReceiveBeginPlay"), ESearchCase::IgnoreCase);
 	}
 
-	static bool SaveBlueprintPackage(UBlueprint* Blueprint, FString& OutError)
+	bool SaveBlueprintPackage(UBlueprint* Blueprint, FString& OutError)
 	{
 		if (!Blueprint)
 		{
@@ -440,12 +439,21 @@ namespace UeAgentBlueprintOps
 		return true;
 	}
 
-	static bool PersistBlueprintGraphDocumentViewState(
+	bool PersistBlueprintGraphDocumentViewState(
+		UBlueprint* Blueprint,
+		UEdGraph* Graph,
+		const FVector2f& ViewLocation,
+		float ZoomAmount)
+	{
+		return PersistBlueprintGraphDocumentViewState(Blueprint, Graph, ViewLocation, ZoomAmount, nullptr);
+	}
+
+	bool PersistBlueprintGraphDocumentViewState(
 		UBlueprint* Blueprint,
 		UEdGraph* Graph,
 		const FVector2f& ViewLocation,
 		float ZoomAmount,
-		int32* OutRemovedExistingEntryCount = nullptr)
+		int32* OutRemovedExistingEntryCount)
 	{
 		if (OutRemovedExistingEntryCount)
 		{
@@ -473,7 +481,7 @@ namespace UeAgentBlueprintOps
 		return true;
 	}
 
-	static bool TryGetBlueprintGraphDocumentViewState(
+	bool TryGetBlueprintGraphDocumentViewState(
 		const UBlueprint* Blueprint,
 		const UEdGraph* Graph,
 		FVector2f& OutViewLocation,
@@ -498,7 +506,7 @@ namespace UeAgentBlueprintOps
 		return false;
 	}
 
-	static bool RestoreBlueprintGraphEditorToDocumentViewState(
+	bool RestoreBlueprintGraphEditorToDocumentViewState(
 		UBlueprint* Blueprint,
 		UEdGraph* Graph,
 		const TSharedPtr<SGraphEditor>& GraphEditor,
@@ -539,7 +547,7 @@ namespace UeAgentBlueprintOps
 		return true;
 	}
 
-	static TSharedPtr<IBlueprintEditor> GetBlueprintEditor(UBlueprint* Blueprint, bool bOpenIfNeeded, FString& OutError)
+	TSharedPtr<IBlueprintEditor> GetBlueprintEditor(UBlueprint* Blueprint, bool bOpenIfNeeded, FString& OutError)
 	{
 		if (!Blueprint)
 		{
@@ -556,7 +564,7 @@ namespace UeAgentBlueprintOps
 		return BlueprintEditor;
 	}
 
-	static TSharedPtr<SGraphEditor> CreateOffscreenGraphEditorForCapture(UEdGraph* Graph, const FString& CornerText, FString& OutError)
+	TSharedPtr<SGraphEditor> CreateOffscreenGraphEditorForCapture(UEdGraph* Graph, const FString& CornerText, FString& OutError)
 	{
 		if (!Graph)
 		{
@@ -653,7 +661,7 @@ namespace UeAgentBlueprintOps
 		return Tab;
 	}
 
-	static TSharedPtr<SWindow> ResolveBlueprintEditorWindow(const TSharedPtr<IBlueprintEditor>& BlueprintEditor, FString& OutError)
+	TSharedPtr<SWindow> ResolveBlueprintEditorWindow(const TSharedPtr<IBlueprintEditor>& BlueprintEditor, FString& OutError)
 	{
 		if (!BlueprintEditor.IsValid())
 		{
@@ -684,7 +692,7 @@ namespace UeAgentBlueprintOps
 		return ParentWindow;
 	}
 
-	static TSharedPtr<SEditorViewport> ResolveBlueprintViewportWidget(const TSharedPtr<IBlueprintEditor>& BlueprintEditor, FString& OutError)
+	TSharedPtr<SEditorViewport> ResolveBlueprintViewportWidget(const TSharedPtr<IBlueprintEditor>& BlueprintEditor, FString& OutError)
 	{
 		const TArray<FName> CandidateTabIds = {
 			FBlueprintEditorTabs::SCSViewportID,
@@ -751,7 +759,7 @@ namespace UeAgentBlueprintOps
 		return nullptr;
 	}
 
-	static TSharedPtr<SWidget> ResolveBlueprintViewportSceneWidget(const TSharedRef<SEditorViewport>& ViewportWidget)
+	TSharedPtr<SWidget> ResolveBlueprintViewportSceneWidget(const TSharedRef<SEditorViewport>& ViewportWidget)
 	{
 		TArray<TSharedRef<SWidget>> ViewportChildren;
 		FindWidgetsByTypeRecursiveAll(ViewportWidget, FName(TEXT("SViewport")), ViewportChildren);
@@ -775,7 +783,7 @@ namespace UeAgentBlueprintOps
 		return BestWidget;
 	}
 
-	static void PrepareBlueprintViewportForCapture(const TSharedPtr<IBlueprintEditor>& BlueprintEditor, UBlueprint* Blueprint, const TSharedPtr<SEditorViewport>& ViewportWidget)
+	void PrepareBlueprintViewportForCapture(const TSharedPtr<IBlueprintEditor>& BlueprintEditor, UBlueprint* Blueprint, const TSharedPtr<SEditorViewport>& ViewportWidget)
 	{
 		if (BlueprintEditor.IsValid())
 		{
@@ -918,7 +926,7 @@ namespace UeAgentBlueprintOps
 		return true;
 	}
 
-	static void PumpAndTickSlateForCapture()
+	void PumpAndTickSlateForCapture()
 	{
 		if (!FSlateApplication::IsInitialized())
 		{
@@ -933,11 +941,16 @@ namespace UeAgentBlueprintOps
 		}
 	}
 
-	static bool PrepareSlateWindowForCapture(
+	bool PrepareSlateWindowForCapture(const TSharedPtr<SWindow>& Window, FString& OutError)
+	{
+		return PrepareSlateWindowForCapture(Window, OutError, true, nullptr);
+	}
+
+	bool PrepareSlateWindowForCapture(
 		const TSharedPtr<SWindow>& Window,
 		FString& OutError,
-		const bool bAllowWindowMutation = true,
-		bool* OutWindowMutated = nullptr)
+		const bool bAllowWindowMutation,
+		bool* OutWindowMutated)
 	{
 		bool bWindowMutated = false;
 		if (!EnsureSlateWindowRenderableForCapture(Window, OutError, bAllowWindowMutation, &bWindowMutated))
@@ -1071,7 +1084,7 @@ namespace UeAgentBlueprintOps
 		return true;
 	}
 
-	static bool ScreenshotSlateWidget(const TSharedRef<SWidget>& Widget, TArray<FColor>& OutPixels, FIntPoint& OutSize, FString& OutError)
+	bool ScreenshotSlateWidget(const TSharedRef<SWidget>& Widget, TArray<FColor>& OutPixels, FIntPoint& OutSize, FString& OutError)
 	{
 		if (!FSlateApplication::IsInitialized())
 		{
@@ -1087,7 +1100,7 @@ namespace UeAgentBlueprintOps
 		return ScreenshotSlateWidgetWithDrawSize(Widget, DrawSize, OutPixels, OutSize, OutError);
 	}
 
-	static bool ScreenshotSlateWidgetNonInvasive(const TSharedRef<SWidget>& Widget, TArray<FColor>& OutPixels, FIntPoint& OutSize, FString& OutError)
+	bool ScreenshotSlateWidgetNonInvasive(const TSharedRef<SWidget>& Widget, TArray<FColor>& OutPixels, FIntPoint& OutSize, FString& OutError)
 	{
 		if (!FSlateApplication::IsInitialized())
 		{
@@ -1112,7 +1125,7 @@ namespace UeAgentBlueprintOps
 		return ScreenshotSlateWidgetWithDrawSize(Widget, DrawSize, OutPixels, OutSize, OutError);
 	}
 
-	static bool ScreenshotSlateWidgetNonInvasive(
+	bool ScreenshotSlateWidgetNonInvasive(
 		const TSharedRef<SWidget>& Widget,
 		const FVector2D& RequestedDrawSize,
 		TArray<FColor>& OutPixels,
@@ -1132,11 +1145,19 @@ namespace UeAgentBlueprintOps
 		return ScreenshotSlateWidgetWithDrawSize(Widget, DrawSize, OutPixels, OutSize, OutError);
 	}
 
-	static void PrepareOffscreenGraphEditorForCapture(
+	void PrepareOffscreenGraphEditorForCapture(
+		const TSharedPtr<SGraphEditor>& GraphEditor,
+		const FVector2f& ViewLocation,
+		const float ZoomAmount)
+	{
+		PrepareOffscreenGraphEditorForCapture(GraphEditor, ViewLocation, ZoomAmount, 2);
+	}
+
+	void PrepareOffscreenGraphEditorForCapture(
 		const TSharedPtr<SGraphEditor>& GraphEditor,
 		const FVector2f& ViewLocation,
 		const float ZoomAmount,
-		const int32 FrameCount = 2)
+		const int32 FrameCount)
 	{
 		if (!GraphEditor.IsValid() || !FSlateApplication::IsInitialized())
 		{
@@ -1163,7 +1184,7 @@ namespace UeAgentBlueprintOps
 		}
 	}
 
-	static bool ScreenshotEditorViewportPixels(const TSharedRef<SEditorViewport>& ViewportWidget, TArray<FColor>& OutPixels, FIntPoint& OutSize, FString& OutError)
+	bool ScreenshotEditorViewportPixels(const TSharedRef<SEditorViewport>& ViewportWidget, TArray<FColor>& OutPixels, FIntPoint& OutSize, FString& OutError)
 	{
 		const TSharedPtr<FEditorViewportClient> ViewportClient = ViewportWidget->GetViewportClient();
 		if (!ViewportClient.IsValid())
@@ -1225,13 +1246,22 @@ namespace UeAgentBlueprintOps
 		return true;
 	}
 
-	static bool ScreenshotBlueprintWindow(
+	bool ScreenshotBlueprintWindow(
+		const TSharedPtr<IBlueprintEditor>& BlueprintEditor,
+		TArray<FColor>& OutPixels,
+		FIntPoint& OutSize,
+		FString& OutError)
+	{
+		return ScreenshotBlueprintWindow(BlueprintEditor, OutPixels, OutSize, OutError, true, nullptr);
+	}
+
+	bool ScreenshotBlueprintWindow(
 		const TSharedPtr<IBlueprintEditor>& BlueprintEditor,
 		TArray<FColor>& OutPixels,
 		FIntPoint& OutSize,
 		FString& OutError,
-		const bool bAllowWindowMutation = true,
-		bool* OutWindowMutated = nullptr)
+		const bool bAllowWindowMutation,
+		bool* OutWindowMutated)
 	{
 		const TSharedPtr<SWindow> BlueprintWindow = ResolveBlueprintEditorWindow(BlueprintEditor, OutError);
 		if (!BlueprintWindow.IsValid())
@@ -1347,14 +1377,24 @@ namespace UeAgentBlueprintOps
 		return true;
 	}
 
-	static bool ScreenshotBlueprintWindowCropWidget(
+	bool ScreenshotBlueprintWindowCropWidget(
+		const TSharedPtr<IBlueprintEditor>& BlueprintEditor,
+		const TSharedRef<SWidget>& Widget,
+		TArray<FColor>& OutPixels,
+		FIntPoint& OutSize,
+		FString& OutError)
+	{
+		return ScreenshotBlueprintWindowCropWidget(BlueprintEditor, Widget, OutPixels, OutSize, OutError, true, nullptr);
+	}
+
+	bool ScreenshotBlueprintWindowCropWidget(
 		const TSharedPtr<IBlueprintEditor>& BlueprintEditor,
 		const TSharedRef<SWidget>& Widget,
 		TArray<FColor>& OutPixels,
 		FIntPoint& OutSize,
 		FString& OutError,
-		const bool bAllowWindowMutation = true,
-		bool* OutWindowMutated = nullptr)
+		const bool bAllowWindowMutation,
+		bool* OutWindowMutated)
 	{
 		const TSharedPtr<SWindow> BlueprintWindow = ResolveBlueprintEditorWindow(BlueprintEditor, OutError);
 		if (!BlueprintWindow.IsValid())
@@ -1428,8 +1468,3 @@ namespace UeAgentBlueprintOps
 }
 
 
-#include "UeAgentHttpServer_Blueprint_GraphLayout.inl"
-#include "UeAgentHttpServer_Blueprint_AssetAndViewport.inl"
-#include "UeAgentHttpServer_Blueprint_Components.inl"
-#include "UeAgentHttpServer_Blueprint_GraphEditing.inl"
-#include "UeAgentHttpServer_Blueprint_FolderFormat.inl"

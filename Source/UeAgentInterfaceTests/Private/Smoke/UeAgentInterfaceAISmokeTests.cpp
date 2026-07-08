@@ -2,6 +2,7 @@
 
 #include "Server/UeAgentHttpServer.h"
 #include "UeAgentInterfaceSettings.h"
+#include "Utilities/UeAgentDetailsAuthoring.h"
 
 #include "AIController.h"
 #include "Async/TaskGraphInterfaces.h"
@@ -219,6 +220,59 @@ namespace
 			(*Coverage)->HasTypedField<EJson::Array>(TEXT("blocking_gaps"));
 	}
 
+	static bool LoadSmokeJsonFile(FAutomationTestBase* Test, const FString& FilePath, TSharedPtr<FJsonObject>& OutJson, const FString& Label)
+	{
+		FString JsonText;
+		return Test->TestTrue(Label + TEXT(" loads"), FFileHelper::LoadFileToString(JsonText, *FilePath)) &&
+			Test->TestTrue(Label + TEXT(" parses"), ParseJson(JsonText, OutJson));
+	}
+
+	static bool AISmokeLoadGroupedDetailsForRef(
+		FAutomationTestBase* Test,
+		const FString& EntryFilePath,
+		const TSharedPtr<FJsonObject>& Container,
+		const TCHAR* RefFieldName,
+		const FString& ExpectedOwnerKind,
+		TSharedPtr<FJsonObject>& OutPropertiesJson)
+	{
+		OutPropertiesJson.Reset();
+		const TSharedPtr<FJsonObject>* DetailsRef = nullptr;
+		const bool bHasDetailsRef = Container.IsValid()
+			&& Container->TryGetObjectField(RefFieldName, DetailsRef)
+			&& DetailsRef
+			&& DetailsRef->IsValid();
+		if (!Test->TestTrue(FString::Printf(TEXT("%s has grouped details ref"), RefFieldName), bHasDetailsRef))
+		{
+			return false;
+		}
+		Test->TestEqual(FString::Printf(TEXT("%s details schema"), RefFieldName), (*DetailsRef)->GetStringField(TEXT("schema")), FString(TEXT("uai.details_ref.v1")));
+		if (!ExpectedOwnerKind.IsEmpty())
+		{
+			Test->TestEqual(FString::Printf(TEXT("%s details owner kind"), RefFieldName), (*DetailsRef)->GetStringField(TEXT("owner_kind")), ExpectedOwnerKind);
+		}
+		FString IndexFile;
+		if (!(*DetailsRef)->TryGetStringField(TEXT("index_file"), IndexFile) || IndexFile.IsEmpty())
+		{
+			Test->AddError(FString::Printf(TEXT("%s details index_file missing"), RefFieldName));
+			return false;
+		}
+		const FString DetailsRoot = FPaths::Combine(FPaths::GetPath(EntryFilePath), FPaths::GetPath(IndexFile));
+		FString Error;
+		const bool bLoaded = UeAgentDetailsAuthoring::LoadGroupedDetails(DetailsRoot, OutPropertiesJson, Error);
+		if (!Test->TestTrue(FString::Printf(TEXT("%s details load grouped properties"), RefFieldName), bLoaded))
+		{
+			Test->AddError(FString::Printf(TEXT("LoadGroupedDetails failed: %s"), *Error));
+		}
+		return bLoaded;
+	}
+
+	static bool HasAuthoringMetadata(const TSharedPtr<FJsonObject>& Obj)
+	{
+		return Obj.IsValid() &&
+			Obj->HasTypedField<EJson::Object>(TEXT("selector")) &&
+			Obj->HasTypedField<EJson::Array>(TEXT("operations"));
+	}
+
 	static AActor* SpawnSmokeActor(UWorld* World, const FString& Label, const FVector& Location)
 	{
 		FActorSpawnParameters Params;
@@ -283,6 +337,26 @@ bool FUeAgentInterfaceAIBehaviorStackSmokeTest::RunTest(const FString& Parameter
 	TestTrue(TEXT("blackboard_export_json returns coverage_report"), HasCompleteCoverageReport(Data));
 	TestTrue(TEXT("blackboard_validate_json"), ExecSmokeCommand(this, ServerScope, TEXT("ai-bb-validate"), TEXT("blackboard_validate_json"), FString::Printf(TEXT("{\"json_file\":\"%s\",\"strict\":true}"), *BlackboardJson), Data));
 	TestTrue(TEXT("blackboard_validate_json returns coverage_report"), HasCompleteCoverageReport(Data));
+	TSharedPtr<FJsonObject> BlackboardExportJson;
+	TestTrue(TEXT("blackboard export authoring metadata load"), LoadSmokeJsonFile(this, BlackboardJson, BlackboardExportJson, TEXT("Blackboard export json")));
+	if (BlackboardExportJson.IsValid())
+	{
+		const TArray<TSharedPtr<FJsonValue>>* Keys = nullptr;
+		bool bFoundKeyAuthoringMetadata = false;
+		if (BlackboardExportJson->TryGetArrayField(TEXT("keys"), Keys) && Keys)
+		{
+			for (const TSharedPtr<FJsonValue>& KeyValue : *Keys)
+			{
+				const TSharedPtr<FJsonObject>* KeyObj = nullptr;
+				if (KeyValue.IsValid() && KeyValue->TryGetObject(KeyObj) && KeyObj && HasAuthoringMetadata(*KeyObj))
+				{
+					bFoundKeyAuthoringMetadata = true;
+					break;
+				}
+			}
+		}
+		TestTrue(TEXT("blackboard key exposes authoring metadata"), bFoundKeyAuthoringMetadata);
+	}
 	TestTrue(TEXT("blackboard_apply_json"), ExecSmokeCommand(this, ServerScope, TEXT("ai-bb-apply"), TEXT("blackboard_apply_json"), FString::Printf(TEXT("{\"json_file\":\"%s\",\"asset_path\":\"%s\",\"allow_destructive\":true,\"save_after_apply\":false}"), *BlackboardJson, *BlackboardPath), Data));
 	TestTrue(TEXT("blackboard_apply_json returns coverage_report"), HasCompleteCoverageReport(Data));
 
@@ -291,6 +365,33 @@ bool FUeAgentInterfaceAIBehaviorStackSmokeTest::RunTest(const FString& Parameter
 	TestTrue(TEXT("behavior_tree_export_folder"), ExecSmokeCommand(this, ServerScope, TEXT("ai-bt-export"), TEXT("behavior_tree_export_folder"), FString::Printf(TEXT("{\"asset_path\":\"%s\",\"folder_path\":\"%s\",\"clean_output_dir\":true}"), *BehaviorTreePath, *BTFolder), Data));
 	TestTrue(TEXT("behavior_tree_export_folder returns coverage_report"), HasCompleteCoverageReport(Data));
 	TestTrue(TEXT("behavior_tree_export_folder writes validation coverage"), IFileManager::Get().FileExists(*FPaths::Combine(BTFolder, TEXT("validation/coverage_report.json"))));
+	const FString BehaviorTreeNodesPath = FPaths::Combine(BTFolder, TEXT("nodes.json"));
+	TSharedPtr<FJsonObject> BehaviorTreeNodesJson;
+	TestTrue(TEXT("behavior tree nodes authoring metadata load"), LoadSmokeJsonFile(this, BehaviorTreeNodesPath, BehaviorTreeNodesJson, TEXT("BehaviorTree nodes.json")));
+	if (BehaviorTreeNodesJson.IsValid())
+	{
+		const TArray<TSharedPtr<FJsonValue>>* Nodes = nullptr;
+		bool bFoundNodeAuthoringMetadata = false;
+		bool bFoundNodeDetails = false;
+		if (BehaviorTreeNodesJson->TryGetArrayField(TEXT("nodes"), Nodes) && Nodes)
+		{
+			for (const TSharedPtr<FJsonValue>& NodeValue : *Nodes)
+			{
+				const TSharedPtr<FJsonObject>* NodeObj = nullptr;
+				if (NodeValue.IsValid() && NodeValue->TryGetObject(NodeObj) && NodeObj && HasAuthoringMetadata(*NodeObj))
+				{
+					bFoundNodeAuthoringMetadata = true;
+				}
+				if (NodeValue.IsValid() && NodeValue->TryGetObject(NodeObj) && NodeObj && (*NodeObj)->HasTypedField<EJson::Object>(TEXT("details")))
+				{
+					TSharedPtr<FJsonObject> NodeDetailsJson;
+					bFoundNodeDetails = bFoundNodeDetails || AISmokeLoadGroupedDetailsForRef(this, BehaviorTreeNodesPath, *NodeObj, TEXT("details"), TEXT("behavior_tree_node"), NodeDetailsJson);
+				}
+			}
+		}
+		TestTrue(TEXT("behavior tree node exposes authoring metadata"), bFoundNodeAuthoringMetadata);
+		TestTrue(TEXT("behavior tree node details grouped"), bFoundNodeDetails);
+	}
 	TestTrue(TEXT("behavior_tree_validate_folder"), ExecSmokeCommand(this, ServerScope, TEXT("ai-bt-validate"), TEXT("behavior_tree_validate_folder"), FString::Printf(TEXT("{\"folder_path\":\"%s\",\"validate_blackboard_keys\":true}"), *BTFolder), Data));
 	TestEqual(TEXT("behavior_tree_validate_folder consumes validate_blackboard_keys"), Data.IsValid() && Data->HasField(TEXT("validate_blackboard_keys")) ? Data->GetBoolField(TEXT("validate_blackboard_keys")) : false, true);
 	TestTrue(TEXT("behavior_tree_validate_folder returns coverage_report"), HasCompleteCoverageReport(Data));
@@ -310,6 +411,33 @@ bool FUeAgentInterfaceAIBehaviorStackSmokeTest::RunTest(const FString& Parameter
 	TestTrue(TEXT("state_tree_export_folder writes transitions"), IFileManager::Get().FileExists(*FPaths::Combine(StateTreeFolder, TEXT("transitions.json"))));
 	TestTrue(TEXT("state_tree_export_folder writes tasks"), IFileManager::Get().FileExists(*FPaths::Combine(StateTreeFolder, TEXT("tasks.json"))));
 	TestTrue(TEXT("state_tree_export_folder writes conditions"), IFileManager::Get().FileExists(*FPaths::Combine(StateTreeFolder, TEXT("conditions.json"))));
+	const FString StateTreeStatesPath = FPaths::Combine(StateTreeFolder, TEXT("states.json"));
+	TSharedPtr<FJsonObject> StateTreeStatesJson;
+	TestTrue(TEXT("state tree states authoring metadata load"), LoadSmokeJsonFile(this, StateTreeStatesPath, StateTreeStatesJson, TEXT("StateTree states.json")));
+	if (StateTreeStatesJson.IsValid())
+	{
+		const TArray<TSharedPtr<FJsonValue>>* States = nullptr;
+		bool bFoundStateAuthoringMetadata = false;
+		bool bFoundStateDetails = false;
+		if (StateTreeStatesJson->TryGetArrayField(TEXT("states"), States) && States)
+		{
+			for (const TSharedPtr<FJsonValue>& StateValue : *States)
+			{
+				const TSharedPtr<FJsonObject>* StateObj = nullptr;
+				if (StateValue.IsValid() && StateValue->TryGetObject(StateObj) && StateObj && HasAuthoringMetadata(*StateObj))
+				{
+					bFoundStateAuthoringMetadata = true;
+				}
+				if (StateValue.IsValid() && StateValue->TryGetObject(StateObj) && StateObj && (*StateObj)->HasTypedField<EJson::Object>(TEXT("details")))
+				{
+					TSharedPtr<FJsonObject> StateDetailsJson;
+					bFoundStateDetails = bFoundStateDetails || AISmokeLoadGroupedDetailsForRef(this, StateTreeStatesPath, *StateObj, TEXT("details"), TEXT("state_tree_state"), StateDetailsJson);
+				}
+			}
+		}
+		TestTrue(TEXT("state tree state exposes authoring metadata"), bFoundStateAuthoringMetadata);
+		TestTrue(TEXT("state tree state details grouped"), bFoundStateDetails);
+	}
 	TestTrue(TEXT("state_tree_validate_folder"), ExecSmokeCommand(this, ServerScope, TEXT("ai-st-validate"), TEXT("state_tree_validate_folder"), FString::Printf(TEXT("{\"folder_path\":\"%s\"}"), *StateTreeFolder), Data));
 	TestTrue(TEXT("state_tree_validate_folder returns coverage_report"), HasCompleteCoverageReport(Data));
 	TestTrue(TEXT("state_tree_apply_folder"), ExecSmokeCommand(this, ServerScope, TEXT("ai-st-apply"), TEXT("state_tree_apply_folder"), FString::Printf(TEXT("{\"folder_path\":\"%s\",\"asset_path\":\"%s\",\"allow_destructive\":true,\"save_after_apply\":false}"), *StateTreeFolder, *StateTreePath), Data));
@@ -322,6 +450,53 @@ bool FUeAgentInterfaceAIBehaviorStackSmokeTest::RunTest(const FString& Parameter
 	TestTrue(TEXT("eqs_export_folder writes generators"), IFileManager::Get().FileExists(*FPaths::Combine(EqsFolder, TEXT("generators.json"))));
 	TestTrue(TEXT("eqs_export_folder writes tests"), IFileManager::Get().FileExists(*FPaths::Combine(EqsFolder, TEXT("tests.json"))));
 	TestTrue(TEXT("eqs_export_folder writes contexts"), IFileManager::Get().FileExists(*FPaths::Combine(EqsFolder, TEXT("contexts.json"))));
+	const FString EqsOptionsPath = FPaths::Combine(EqsFolder, TEXT("options.json"));
+	TSharedPtr<FJsonObject> EqsOptionsJson;
+	TestTrue(TEXT("eqs options authoring metadata load"), LoadSmokeJsonFile(this, EqsOptionsPath, EqsOptionsJson, TEXT("EQS options.json")));
+	if (EqsOptionsJson.IsValid())
+	{
+		const TArray<TSharedPtr<FJsonValue>>* Options = nullptr;
+		bool bFoundOptionAuthoringMetadata = false;
+		bool bFoundGeneratorDetails = false;
+		bool bFoundTestDetails = false;
+		bool bHasEqsTests = false;
+		if (EqsOptionsJson->TryGetArrayField(TEXT("options"), Options) && Options)
+		{
+			for (const TSharedPtr<FJsonValue>& OptionValue : *Options)
+			{
+				const TSharedPtr<FJsonObject>* OptionObj = nullptr;
+				if (OptionValue.IsValid() && OptionValue->TryGetObject(OptionObj) && OptionObj && HasAuthoringMetadata(*OptionObj))
+				{
+					bFoundOptionAuthoringMetadata = true;
+				}
+				if (OptionValue.IsValid() && OptionValue->TryGetObject(OptionObj) && OptionObj && (*OptionObj)->HasTypedField<EJson::Object>(TEXT("details")))
+				{
+					TSharedPtr<FJsonObject> GeneratorDetailsJson;
+					bFoundGeneratorDetails = bFoundGeneratorDetails || AISmokeLoadGroupedDetailsForRef(this, EqsOptionsPath, *OptionObj, TEXT("details"), TEXT("eqs_generator"), GeneratorDetailsJson);
+				}
+				const TArray<TSharedPtr<FJsonValue>>* Tests = nullptr;
+				if (OptionObj && (*OptionObj)->TryGetArrayField(TEXT("tests"), Tests) && Tests)
+				{
+					for (const TSharedPtr<FJsonValue>& TestValue : *Tests)
+					{
+						bHasEqsTests = true;
+						const TSharedPtr<FJsonObject>* TestObj = nullptr;
+						if (TestValue.IsValid() && TestValue->TryGetObject(TestObj) && TestObj && (*TestObj)->HasTypedField<EJson::Object>(TEXT("details")))
+						{
+							TSharedPtr<FJsonObject> TestDetailsJson;
+							bFoundTestDetails = bFoundTestDetails || AISmokeLoadGroupedDetailsForRef(this, EqsOptionsPath, *TestObj, TEXT("details"), TEXT("eqs_test"), TestDetailsJson);
+						}
+					}
+				}
+			}
+		}
+		TestTrue(TEXT("eqs option exposes authoring metadata"), bFoundOptionAuthoringMetadata);
+		TestTrue(TEXT("eqs generator details grouped"), bFoundGeneratorDetails);
+		if (bHasEqsTests)
+		{
+			TestTrue(TEXT("eqs test details grouped"), bFoundTestDetails);
+		}
+	}
 	TestTrue(TEXT("eqs_validate_folder"), ExecSmokeCommand(this, ServerScope, TEXT("ai-eqs-validate"), TEXT("eqs_validate_folder"), FString::Printf(TEXT("{\"folder_path\":\"%s\"}"), *EqsFolder), Data));
 	TestTrue(TEXT("eqs_validate_folder returns coverage_report"), HasCompleteCoverageReport(Data));
 	TestTrue(TEXT("eqs_apply_folder"), ExecSmokeCommand(this, ServerScope, TEXT("ai-eqs-apply"), TEXT("eqs_apply_folder"), FString::Printf(TEXT("{\"folder_path\":\"%s\",\"asset_path\":\"%s\",\"allow_destructive\":true,\"save_after_apply\":false}"), *EqsFolder, *EqsPath), Data));
@@ -382,6 +557,21 @@ bool FUeAgentInterfaceAIBehaviorStackSmokeTest::RunTest(const FString& Parameter
 	TestTrue(TEXT("smart_object_definition_create"), ExecSmokeCommand(this, ServerScope, TEXT("ai-so-create"), TEXT("smart_object_definition_create"), FString::Printf(TEXT("{\"asset_path\":\"%s\",\"tags\":[\"AI.Activity.Test\"],\"slots\":[{\"name\":\"Use\",\"local_transform\":{\"translation\":{\"x\":0,\"y\":0,\"z\":0},\"rotation\":{\"pitch\":0,\"yaw\":0,\"roll\":0},\"scale\":{\"x\":1,\"y\":1,\"z\":1}},\"tags\":[\"AI.Slot.Test\"],\"enabled\":true,\"behavior_definitions\":[{\"class\":\"/Script/GameplayBehaviorSmartObjectsModule.GameplayBehaviorSmartObjectBehaviorDefinition\"}]}],\"save_after_create\":false}"), *SmartObjectPath), Data));
 	TestTrue(TEXT("smart_object_definition_get_info"), ExecSmokeCommand(this, ServerScope, TEXT("ai-so-info"), TEXT("smart_object_definition_get_info"), FString::Printf(TEXT("{\"asset_path\":\"%s\"}"), *SmartObjectPath), Data));
 	TestTrue(TEXT("smart_object_definition_get_info exports tags and local_transform aliases"), Data.IsValid() && JsonObjectToStringForSmoke(Data).Contains(TEXT("\"local_transform\"")) && JsonObjectToStringForSmoke(Data).Contains(TEXT("\"tags\"")));
+	const TArray<TSharedPtr<FJsonValue>>* SmartObjectSlots = nullptr;
+	bool bFoundSmartObjectSlotAuthoringMetadata = false;
+	if (Data.IsValid() && Data->TryGetArrayField(TEXT("slots"), SmartObjectSlots) && SmartObjectSlots)
+	{
+		for (const TSharedPtr<FJsonValue>& SlotValue : *SmartObjectSlots)
+		{
+			const TSharedPtr<FJsonObject>* SlotObj = nullptr;
+			if (SlotValue.IsValid() && SlotValue->TryGetObject(SlotObj) && SlotObj && HasAuthoringMetadata(*SlotObj))
+			{
+				bFoundSmartObjectSlotAuthoringMetadata = true;
+				break;
+			}
+		}
+	}
+	TestTrue(TEXT("smart object slot exposes authoring metadata"), bFoundSmartObjectSlotAuthoringMetadata);
 	const FString SmartObjectJson = FPaths::Combine(ExportRoot, TEXT("smart_object.json")).Replace(TEXT("\\"), TEXT("/"));
 	TestTrue(TEXT("smart_object_definition_export_json"), ExecSmokeCommand(this, ServerScope, TEXT("ai-so-export"), TEXT("smart_object_definition_export_json"), FString::Printf(TEXT("{\"asset_path\":\"%s\",\"output_file\":\"%s\"}"), *SmartObjectPath, *SmartObjectJson), Data));
 	TestTrue(TEXT("smart_object_definition_export_json returns coverage_report"), HasCompleteCoverageReport(Data));

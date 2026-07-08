@@ -2,6 +2,10 @@
 
 #include "UeAgentHttpServer_AnimBlueprint.h"
 
+#include "UeAgentHttpServer_AnimBlueprintOps.h"
+#include "Commands/EditorViewport/UeAgentEditorViewportLegacy.h"
+#include "Utilities/UeAgentDetailsAuthoring.h"
+#include "Utilities/UeAgentJsonDiagnostics.h"
 #include "Animation/AnimClassInterface.h"
 #include "Animation/AnimBlueprint.h"
 #include "Animation/AnimBlueprintGeneratedClass.h"
@@ -35,16 +39,7 @@
 
 namespace UeAgentAnimBlueprintOps
 {
-	enum class ECompilerMessageSeverityFilter : uint8
-	{
-		All,
-		Error,
-		Warning,
-		Info,
-		WarningOrError
-	};
-
-	static FString NormalizeAssetPath(const FString& InPath)
+	FString NormalizeAssetPath(const FString& InPath)
 	{
 		FString OutPath = InPath;
 		OutPath.TrimStartAndEndInline();
@@ -110,7 +105,7 @@ namespace UeAgentAnimBlueprintOps
 		return AssetRegistryModule.Get().GetAssetByObjectPath(FSoftObjectPath(ObjectPath)).IsValid();
 	}
 
-	static UAnimBlueprint* LoadAnimBlueprint(const FString& InPath)
+	UAnimBlueprint* LoadAnimBlueprint(const FString& InPath)
 	{
 		return Cast<UAnimBlueprint>(LoadAssetObject(InPath));
 	}
@@ -153,7 +148,7 @@ namespace UeAgentAnimBlueprintOps
 		return nullptr;
 	}
 
-	static FString BlueprintStatusToString(const EBlueprintStatus InStatus)
+	FString BlueprintStatusToString(const EBlueprintStatus InStatus)
 	{
 		switch (InStatus)
 		{
@@ -238,7 +233,7 @@ namespace UeAgentAnimBlueprintOps
 		}
 	}
 
-	static void BuildCompilerLogJson(
+	void BuildCompilerLogJson(
 		const FCompilerResultsLog& InCompilerLog,
 		const ECompilerMessageSeverityFilter InFilter,
 		const int32 InMaxMessages,
@@ -286,7 +281,7 @@ namespace UeAgentAnimBlueprintOps
 		}
 	}
 
-	static bool SaveAnimBlueprintPackage(UAnimBlueprint* AnimBlueprint, FString& OutError)
+	bool SaveAnimBlueprintPackage(UAnimBlueprint* AnimBlueprint, FString& OutError)
 	{
 		if (!AnimBlueprint)
 		{
@@ -327,7 +322,7 @@ namespace UeAgentAnimBlueprintOps
 		return true;
 	}
 
-	static FString PreviewApplicationMethodToString(const EPreviewAnimationBlueprintApplicationMethod InMethod)
+	FString PreviewApplicationMethodToString(const EPreviewAnimationBlueprintApplicationMethod InMethod)
 	{
 		switch (InMethod)
 		{
@@ -420,7 +415,7 @@ namespace UeAgentAnimBlueprintOps
 		return InfoClass ? IAnimClassInterface::GetFromClass(InfoClass) : nullptr;
 	}
 
-	static TArray<UEdGraph*> GatherAnimGraphs(UAnimBlueprint* AnimBlueprint)
+	TArray<UEdGraph*> GatherAnimGraphs(UAnimBlueprint* AnimBlueprint)
 	{
 		TArray<UEdGraph*> AnimGraphs;
 		if (!AnimBlueprint)
@@ -444,7 +439,7 @@ namespace UeAgentAnimBlueprintOps
 		return InGuid.IsValid() ? InGuid.ToString() : TEXT("");
 	}
 
-	static TArray<TSharedPtr<FJsonValue>> MakeStringArray(const TArray<FString>& InValues)
+	TArray<TSharedPtr<FJsonValue>> MakeStringArray(const TArray<FString>& InValues)
 	{
 		TArray<TSharedPtr<FJsonValue>> OutValues;
 		OutValues.Reserve(InValues.Num());
@@ -460,7 +455,7 @@ namespace UeAgentAnimBlueprintOps
 		return Node ? Node->NodeGuid.ToString(EGuidFormats::DigitsWithHyphensLower) : TEXT("");
 	}
 
-	static bool ParseNodeGuid(const FString& InNodeGuid, FGuid& OutGuid)
+	bool ParseNodeGuid(const FString& InNodeGuid, FGuid& OutGuid)
 	{
 		FString NodeGuid = InNodeGuid;
 		NodeGuid.TrimStartAndEndInline();
@@ -494,12 +489,12 @@ namespace UeAgentAnimBlueprintOps
 		return nullptr;
 	}
 
-	static bool IsLayerInterfaceBlueprint(const UAnimBlueprint* AnimBlueprint)
+	bool IsLayerInterfaceBlueprint(const UAnimBlueprint* AnimBlueprint)
 	{
 		return AnimBlueprint && AnimBlueprint->BlueprintType == BPTYPE_Interface;
 	}
 
-	static bool IsAnimLayerGraph(const UEdGraph* Graph)
+	bool IsAnimLayerGraph(const UEdGraph* Graph)
 	{
 		return Graph && AnimationEditorUtils::IsAnimGraph(const_cast<UEdGraph*>(Graph)) && Graph->GetFName() != UEdGraphSchema_K2::GN_AnimGraph;
 	}
@@ -652,7 +647,7 @@ namespace UeAgentAnimBlueprintOps
 		return Item;
 	}
 
-	static UAnimGraphNode_StateMachineBase* FindStateMachineNode(UAnimBlueprint* AnimBlueprint, const FString& StateMachineName)
+	UAnimGraphNode_StateMachineBase* FindStateMachineNode(UAnimBlueprint* AnimBlueprint, const FString& StateMachineName)
 	{
 		if (!AnimBlueprint)
 		{
@@ -681,7 +676,7 @@ namespace UeAgentAnimBlueprintOps
 		return nullptr;
 	}
 
-	static UAnimStateNodeBase* FindStateNodeByName(UAnimationStateMachineGraph* StateMachineGraph, const FString& StateName)
+	UAnimStateNodeBase* FindStateNodeByName(UAnimationStateMachineGraph* StateMachineGraph, const FString& StateName)
 	{
 		if (!StateMachineGraph)
 		{
@@ -701,7 +696,7 @@ namespace UeAgentAnimBlueprintOps
 		return nullptr;
 	}
 
-	static UAnimStateNodeBase* FindStateNodeByGuid(UAnimationStateMachineGraph* StateMachineGraph, const FGuid& NodeGuid)
+	UAnimStateNodeBase* FindStateNodeByGuid(UAnimationStateMachineGraph* StateMachineGraph, const FGuid& NodeGuid)
 	{
 		if (!StateMachineGraph || !NodeGuid.IsValid())
 		{
@@ -721,7 +716,7 @@ namespace UeAgentAnimBlueprintOps
 		return nullptr;
 	}
 
-	static UAnimStateTransitionNode* FindTransitionNode(UAnimationStateMachineGraph* StateMachineGraph, const FString& SourceStateName, const FString& TargetStateName)
+	UAnimStateTransitionNode* FindTransitionNode(UAnimationStateMachineGraph* StateMachineGraph, const FString& SourceStateName, const FString& TargetStateName)
 	{
 		if (!StateMachineGraph)
 		{
@@ -750,7 +745,7 @@ namespace UeAgentAnimBlueprintOps
 		return nullptr;
 	}
 
-	static UAnimStateTransitionNode* FindTransitionNodeByGuid(UAnimationStateMachineGraph* StateMachineGraph, const FGuid& NodeGuid)
+	UAnimStateTransitionNode* FindTransitionNodeByGuid(UAnimationStateMachineGraph* StateMachineGraph, const FGuid& NodeGuid)
 	{
 		if (!StateMachineGraph || !NodeGuid.IsValid())
 		{
@@ -918,8 +913,38 @@ bool FUeAgentHttpServer::ExecuteAnimBlueprintCommand(const FString& CommandLower
 	if (CommandLower == TEXT("anim_blueprint_layout_graph")) return CmdBlueprintLayoutGraph(Ctx, OutData, OutError);
 	if (CommandLower == TEXT("anim_blueprint_graph_get_view")) return CmdBlueprintGraphGetView(Ctx, OutData, OutError);
 	if (CommandLower == TEXT("anim_blueprint_graph_set_view")) return CmdBlueprintGraphSetView(Ctx, OutData, OutError);
-	if (CommandLower == TEXT("anim_blueprint_viewport_get_camera")) return CmdBlueprintViewportGetCamera(Ctx, OutData, OutError);
-	if (CommandLower == TEXT("anim_blueprint_viewport_set_camera")) return CmdBlueprintViewportSetCamera(Ctx, OutData, OutError);
+	if (CommandLower == TEXT("anim_blueprint_viewport_get_camera") || CommandLower == TEXT("anim_blueprint_viewport_set_camera"))
+	{
+		FString AssetPathInput;
+		if (!JsonTryGetString(Ctx.Params, TEXT("asset_path"), AssetPathInput) || AssetPathInput.IsEmpty())
+		{
+			OutError = TEXT("missing_asset_path");
+			return false;
+		}
+		UAnimBlueprint* AnimBlueprint = UeAgentAnimBlueprintOps::LoadAnimBlueprint(AssetPathInput);
+		if (!AnimBlueprint)
+		{
+			OutError = TEXT("anim_blueprint_not_found");
+			return false;
+		}
+		bool bOpenEditorIfNeeded = true;
+		JsonTryGetBool(Ctx.Params, TEXT("open_editor_if_needed"), bOpenEditorIfNeeded);
+		const TSharedPtr<FJsonObject> Target = UeAgentEditorViewportLegacy::MakeAssetTarget(
+			AnimBlueprint->GetPathName(),
+			TEXT("anim_blueprint"),
+			TEXT("primary"),
+			bOpenEditorIfNeeded);
+		const bool bOk = CommandLower == TEXT("anim_blueprint_viewport_get_camera")
+			? UeAgentEditorViewportLegacy::ExecuteCameraGet(*this, Ctx, Target, OutData, OutError)
+			: UeAgentEditorViewportLegacy::ExecuteCameraSet(*this, Ctx, Target, OutData, OutError);
+		if (!bOk)
+		{
+			return false;
+		}
+		OutData->SetStringField(TEXT("asset_path"), AnimBlueprint->GetOutermost()->GetName());
+		OutData->SetStringField(TEXT("asset_kind"), TEXT("anim_blueprint"));
+		return true;
+	}
 	if (CommandLower == TEXT("anim_blueprint_screenshot")) return CmdBlueprintScreenshot(Ctx, OutData, OutError);
 	if (CommandLower == TEXT("anim_blueprint_set_cdo_property")) return CmdBlueprintSetCdoProperty(Ctx, OutData, OutError);
 	if (CommandLower == TEXT("anim_blueprint_set_preview_mesh")) return CmdAnimBlueprintSetPreviewMesh(Ctx, OutData, OutError);
@@ -3829,5 +3854,3 @@ bool FUeAgentHttpServer::CmdAnimBlueprintReparent(const FUeAgentRequestContext& 
 	OutData->SetBoolField(TEXT("saved"), bSaveAfterReparent);
 	return true;
 }
-
-#include "UeAgentHttpServer_AnimBlueprint_FolderFormat.inl"

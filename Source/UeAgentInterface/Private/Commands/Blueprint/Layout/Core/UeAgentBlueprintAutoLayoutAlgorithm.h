@@ -9,56 +9,64 @@ namespace UeAgentBlueprintAutoLayout
 {
 	struct FRect
 	{
-		double Left = 0.0;
-		double Top = 0.0;
-		double Right = 0.0;
-		double Bottom = 0.0;
+		FRect();
+		FRect(double InLeft, double InTop, double InRight, double InBottom);
 
-		double Width() const { return Right - Left; }
-		double Height() const { return Bottom - Top; }
-		double CenterY() const { return (Top + Bottom) * 0.5; }
+		double Left;
+		double Top;
+		double Right;
+		double Bottom;
+
+		double Width() const;
+		double Height() const;
+		double CenterY() const;
 		bool Intersects(const FRect& Other, double Padding = 0.0) const;
 	};
 
 	struct FNode
 	{
+		FNode();
+
 		FString Guid;
 		FString Title;
 		FString ClassName;
-		int32 Index = INDEX_NONE;
-		int32 Component = INDEX_NONE;
-		int32 Rank = 0;
-		int32 Order = 0;
-		double Width = 260.0;
-		double Height = 110.0;
-		double OldX = 0.0;
-		double OldY = 0.0;
-		double NewX = 0.0;
-		double NewY = 0.0;
-		bool bHasExecPin = false;
-		bool bRerouteNode = false;
-		bool bIsCommentNode = false;
-		bool bMeasuredGeometry = false;
-		int32 CommentDepth = 0;
+		int32 Index;
+		int32 Component;
+		int32 Rank;
+		int32 Order;
+		double Width;
+		double Height;
+		double OldX;
+		double OldY;
+		double NewX;
+		double NewY;
+		bool bHasExecPin;
+		bool bRerouteNode;
+		bool bIsCommentNode;
+		bool bMeasuredGeometry;
+		int32 CommentDepth;
 		TArray<FString> InputPinNames;
 		TArray<FString> OutputPinNames;
 		TArray<FVector2D> InputPinAnchors;
 		TArray<FVector2D> OutputPinAnchors;
 		TArray<uint8> InputPinAnchorValid;
 		TArray<uint8> OutputPinAnchorValid;
-		int32 InputChainTargetGroupKey = INDEX_NONE;
-		double InputChainTargetGroupPadding = -1.0;
+		int32 InputChainTargetGroupKey;
+		double InputChainTargetGroupPadding;
 	};
 
 	struct FEdge
 	{
-		int32 Source = INDEX_NONE;
-		int32 Target = INDEX_NONE;
+		FEdge();
+		FEdge(int32 InSource, int32 InTarget, const FString& InSourcePin, const FString& InTargetPin, int32 InSourcePinIndex, int32 InTargetPinIndex, bool bInExec);
+
+		int32 Source;
+		int32 Target;
 		FString SourcePin;
 		FString TargetPin;
-		int32 SourcePinIndex = INDEX_NONE;
-		int32 TargetPinIndex = INDEX_NONE;
-		bool bExec = false;
+		int32 SourcePinIndex;
+		int32 TargetPinIndex;
+		bool bExec;
 	};
 
 	enum class ERouteKind : uint8
@@ -77,13 +85,15 @@ namespace UeAgentBlueprintAutoLayout
 
 	struct FReroutePlan
 	{
-		int32 EdgeIndex = INDEX_NONE;
+		FReroutePlan();
+
+		int32 EdgeIndex;
 		FString Reason;
 		FString BusId;
-		ERouteKind RouteKind = ERouteKind::Direct;
-		int32 BusLaneIndex = 0;
-		int32 BranchLaneIndex = 0;
-		int32 AttachmentMergeGroup = INDEX_NONE;
+		ERouteKind RouteKind;
+		int32 BusLaneIndex;
+		int32 BranchLaneIndex;
+		int32 AttachmentMergeGroup;
 		// Points are visible reroute control-point positions in graph coordinates.
 		TArray<FVector2D> Points;
 		// Compatibility mirror for older reports. Reroute points are visible graph positions.
@@ -91,186 +101,178 @@ namespace UeAgentBlueprintAutoLayout
 		TArray<EReroutePointRole> PointRoles;
 	};
 
-	inline const TArray<FVector2D>& GetAuthoritativeReroutePoints(const FReroutePlan& Plan)
-	{
-		return Plan.Points.Num() > 0 || Plan.KnotPoints.Num() == 0
-			? Plan.Points
-			: Plan.KnotPoints;
-	}
+	const TArray<FVector2D>& GetAuthoritativeReroutePoints(const FReroutePlan& Plan);
 
-	inline FString MakeRerouteAttachmentPointMergeKey(const int32 AttachmentMergeGroup, const FVector2D& Point)
-	{
-		if (AttachmentMergeGroup == INDEX_NONE)
-		{
-			return FString();
-		}
-		return FString::Printf(
-			TEXT("%d|%d|%d"),
-			AttachmentMergeGroup,
-			FMath::RoundToInt(Point.X),
-			FMath::RoundToInt(Point.Y));
-	}
+	FString MakeRerouteAttachmentPointMergeKey(const int32 AttachmentMergeGroup, const FVector2D& Point);
 
 	struct FDesignDiagnostics
 	{
-		int32 SccCountBeforeCut = 0;
-		int32 SccFeedbackEdgeCount = 0;
-		int32 FanoutNodeCount = 0;
-		int32 FanoutImplicitEdgeCount = 0;
-		int32 CommentIslandCount = 0;
-		int32 CommentIslandNodeCount = 0;
-		int32 CommentIslandBoundaryEdgeCount = 0;
-		int32 RankIgnoredEdgeCount = 0;
-		int32 IslandCutEdgeCount = 0;
-		int32 ImplicitEdgeCount = 0;
-		int32 NodeIslandCount = 0;
-		int32 MultiSinkIslandCount = 0;
-		int32 InputChainCount = 0;
-		int32 InputChainNodeCount = 0;
-		int32 InputChainForbiddenZoneCount = 0;
-		int32 InputChainForbiddenAvoidanceCount = 0;
-		int32 InputChainCollisionRerouteCount = 0;
-		int32 InputChainCollisionRerouteRejectedCount = 0;
-		int32 IslandEdgeCount = 0;
-		int32 ImplicitEdgeInsideIslandCount = 0;
-		int32 SourceParamCount = 0;
-		int32 InternalBusGroupCount = 0;
-		int32 BoundaryEntryCount = 0;
-		int32 LeftBoundaryEntryCount = 0;
-		int32 TopBoundaryEntryCount = 0;
-		int32 BottomBoundaryEntryCount = 0;
-		int32 BoundaryBusRequiredCount = 0;
-		int32 BoundaryBusCount = 0;
-		int32 InternalAttachMergeGroupCount = 0;
-		int32 BoundaryAttachMergeGroupCount = 0;
-		int32 BoundaryEntryRejectedCandidateCount = 0;
-		int32 AnchoredColumnPlacementCount = 0;
-		int32 AnchoredColumnUnconnectedItemCount = 0;
-		double AnchoredColumnTotalPinResidual = 0.0;
-		double AnchoredColumnMaxPinResidual = 0.0;
-		int32 IslandInternalPlacementCount = 0;
-		int32 IslandInternalLeftBoundaryEntryCount = 0;
-		int32 IslandInternalMultiColumnBusCount = 0;
-		int32 IslandInternalSameColumnCollisionBusCount = 0;
-		double IslandInternalTotalPinResidual = 0.0;
-		double IslandInternalMaxPinResidual = 0.0;
-		int32 IslandLocalFrozenNodeCount = 0;
-		int32 IslandLocalMembershipMutationCount = 0;
-		int32 IslandLocalMutationCount = 0;
-		double IslandLocalMaxMutation = 0.0;
-		int32 EndpointCandidateCount = 0;
-		int32 PlacementGraphEdgeCount = 0;
-		int32 RouteOnlyEdgeCount = 0;
-		int32 PlacementOwnerEdgeCount = 0;
-		int32 PlacementNonOwnerEdgeCount = 0;
-		int32 SourceOrderGroupCount = 0;
-		int32 FanoutIntentGroupCount = 0;
-		int32 PlacementProposalCount = 0;
-		int32 RejectedProposalCount = 0;
-		int32 SourcePortOrderViolationCount = 0;
-		int32 InvalidForwardConnectionCount = 0;
-		int32 SelectedEndpointCandidateCount = 0;
-		int32 ConnectionGroupCount = 0;
-		int32 RouteGroupCount = 0;
-		int32 RouteKindUpgradeCount = 0;
-		int32 BranchMergeGroupCount = 0;
-		int32 CrossBusTrunkLaneCount = 0;
-		int32 CrossBusLaneCount = 0;
-		int32 RouteThroughHardOccupancyCount = 0;
-		double IslandConnectionTotalLength = 0.0;
-		double TotalRouteLength = 0.0;
-		double BusYVarianceTotal = 0.0;
-		int32 IslandConnectionExternalUpgradeCount = 0;
-		double IslandConnectionTopBottomXResidual = 0.0;
-		double IslandConnectionLeftYResidual = 0.0;
-		int32 PlacementComponentCount = 0;
-		int32 LaneColoringLaneCount = 0;
-		int32 RouteThroughIslandCount = 0;
-		int32 IslandTopologicalOrderCount = 0;
-		int32 IslandTopologicalResidualCycleEdgeCount = 0;
-		int32 RootIslandCount = 0;
-		int32 RootScoringTargetCount = 0;
-		int32 RootShareComponentCount = 0;
-		int32 RootEquivalentGroupCount = 0;
-		double RootContinuousOrderScore = 0.0;
-		double RootContinuousOrderInversionScore = 0.0;
-		int32 RootContinuousOrderPrunedStateCount = 0;
-		int32 RootContinuousOrderMemoHitCount = 0;
-		int32 RootContinuousOrderExactLimitExceeded = 0;
-		double RootCompactVerticalGap = 0.0;
-		double RootCompactTotalHeight = 0.0;
-		int32 RootIslandTopYCount = 0;
-		int32 IslandPlacementOrderCount = 0;
-		int32 IslandLeftwardReanchorBaseColumn = INDEX_NONE;
-		int32 IslandLeftwardReanchorColumnCount = 0;
-		int32 DirectIslandConnectionCount = 0;
-		int32 BusIslandConnectionCount = 0;
-		int32 InterIslandFeedbackBusConnectionCount = 0;
-		int32 InterIslandBusCount = 0;
-		int32 InterIslandBusDuplicateMergeCount = 0;
-		int32 InterIslandBusBundleCount = 0;
-		int32 InterIslandBusSlotAssignmentCount = 0;
-		int32 InterIslandBusMaxSlotCount = 0;
-		int32 InterIslandBusBundleCollisionBoxCount = 0;
-		int32 IslandBusCollisionBoxCount = 0;
-		int32 IslandBandGroupCount = 0;
-		int32 TopologyColumnHorizontalPushCount = 0;
-		int32 TopologyColumnBusPullCount = 0;
-		int32 IncomingBusBranchCount = 0;
-		int32 InterIslandBusBranchXSlotCount = 0;
-		int32 IslandBusBranchRightShiftCount = 0;
-		int32 InterIslandBusBranchKnotCount = 0;
-		int32 InterIslandBusBranchKnotOmittedCount = 0;
+		FDesignDiagnostics();
+
+		int32 SccCountBeforeCut;
+		int32 SccFeedbackEdgeCount;
+		int32 FanoutNodeCount;
+		int32 FanoutImplicitEdgeCount;
+		int32 CommentIslandCount;
+		int32 CommentIslandNodeCount;
+		int32 CommentIslandBoundaryEdgeCount;
+		int32 RankIgnoredEdgeCount;
+		int32 IslandCutEdgeCount;
+		int32 ImplicitEdgeCount;
+		int32 NodeIslandCount;
+		int32 MultiSinkIslandCount;
+		int32 InputChainCount;
+		int32 InputChainNodeCount;
+		int32 InputChainForbiddenZoneCount;
+		int32 InputChainForbiddenAvoidanceCount;
+		int32 InputChainCollisionRerouteCount;
+		int32 InputChainCollisionRerouteRejectedCount;
+		int32 IslandEdgeCount;
+		int32 ImplicitEdgeInsideIslandCount;
+		int32 SourceParamCount;
+		int32 InternalBusGroupCount;
+		int32 BoundaryEntryCount;
+		int32 LeftBoundaryEntryCount;
+		int32 TopBoundaryEntryCount;
+		int32 BottomBoundaryEntryCount;
+		int32 BoundaryBusRequiredCount;
+		int32 BoundaryBusCount;
+		int32 InternalAttachMergeGroupCount;
+		int32 BoundaryAttachMergeGroupCount;
+		int32 BoundaryEntryRejectedCandidateCount;
+		int32 AnchoredColumnPlacementCount;
+		int32 AnchoredColumnUnconnectedItemCount;
+		double AnchoredColumnTotalPinResidual;
+		double AnchoredColumnMaxPinResidual;
+		int32 IslandInternalPlacementCount;
+		int32 IslandInternalLeftBoundaryEntryCount;
+		int32 IslandInternalMultiColumnBusCount;
+		int32 IslandInternalSameColumnCollisionBusCount;
+		double IslandInternalTotalPinResidual;
+		double IslandInternalMaxPinResidual;
+		int32 IslandLocalFrozenNodeCount;
+		int32 IslandLocalMembershipMutationCount;
+		int32 IslandLocalMutationCount;
+		double IslandLocalMaxMutation;
+		int32 EndpointCandidateCount;
+		int32 PlacementGraphEdgeCount;
+		int32 RouteOnlyEdgeCount;
+		int32 PlacementOwnerEdgeCount;
+		int32 PlacementNonOwnerEdgeCount;
+		int32 SourceOrderGroupCount;
+		int32 FanoutIntentGroupCount;
+		int32 PlacementProposalCount;
+		int32 RejectedProposalCount;
+		int32 SourcePortOrderViolationCount;
+		int32 InvalidForwardConnectionCount;
+		int32 SelectedEndpointCandidateCount;
+		int32 ConnectionGroupCount;
+		int32 RouteGroupCount;
+		int32 RouteKindUpgradeCount;
+		int32 BranchMergeGroupCount;
+		int32 CrossBusTrunkLaneCount;
+		int32 CrossBusLaneCount;
+		int32 RouteThroughHardOccupancyCount;
+		double IslandConnectionTotalLength;
+		double TotalRouteLength;
+		double BusYVarianceTotal;
+		int32 IslandConnectionExternalUpgradeCount;
+		double IslandConnectionTopBottomXResidual;
+		double IslandConnectionLeftYResidual;
+		int32 PlacementComponentCount;
+		int32 LaneColoringLaneCount;
+		int32 RouteThroughIslandCount;
+		int32 IslandTopologicalOrderCount;
+		int32 IslandTopologicalResidualCycleEdgeCount;
+		int32 RootIslandCount;
+		int32 RootScoringTargetCount;
+		int32 RootShareComponentCount;
+		int32 RootEquivalentGroupCount;
+		double RootContinuousOrderScore;
+		double RootContinuousOrderInversionScore;
+		int32 RootContinuousOrderPrunedStateCount;
+		int32 RootContinuousOrderMemoHitCount;
+		int32 RootContinuousOrderExactLimitExceeded;
+		double RootCompactVerticalGap;
+		double RootCompactTotalHeight;
+		int32 RootIslandTopYCount;
+		int32 IslandPlacementOrderCount;
+		int32 IslandLeftwardReanchorBaseColumn;
+		int32 IslandLeftwardReanchorColumnCount;
+		int32 DirectIslandConnectionCount;
+		int32 BusIslandConnectionCount;
+		int32 InterIslandFeedbackBusConnectionCount;
+		int32 InterIslandBusCount;
+		int32 InterIslandBusDuplicateMergeCount;
+		int32 InterIslandBusBundleCount;
+		int32 InterIslandBusSlotAssignmentCount;
+		int32 InterIslandBusMaxSlotCount;
+		int32 InterIslandBusBundleCollisionBoxCount;
+		int32 IslandBusCollisionBoxCount;
+		int32 IslandBandGroupCount;
+		int32 TopologyColumnHorizontalPushCount;
+		int32 TopologyColumnBusPullCount;
+		int32 IncomingBusBranchCount;
+		int32 InterIslandBusBranchXSlotCount;
+		int32 IslandBusBranchRightShiftCount;
+		int32 InterIslandBusBranchKnotCount;
+		int32 InterIslandBusBranchKnotOmittedCount;
 	};
 
 	struct FMetrics
 	{
-		int32 OverlapCount = 0;
-		int32 EdgeCrossingCount = 0;
-		int32 EdgeNodeIntersectionCount = 0;
-		int32 BackwardEdgeCount = 0;
-		int32 PinOrderViolationCount = 0;
-		double TotalWireLength = 0.0;
-		double TotalNonExecWireLength = 0.0;
-		double LayoutWidth = 0.0;
-		double LayoutHeight = 0.0;
-		double LayoutArea = 0.0;
+		FMetrics();
+
+		int32 OverlapCount;
+		int32 EdgeCrossingCount;
+		int32 EdgeNodeIntersectionCount;
+		int32 BackwardEdgeCount;
+		int32 PinOrderViolationCount;
+		double TotalWireLength;
+		double TotalNonExecWireLength;
+		double LayoutWidth;
+		double LayoutHeight;
+		double LayoutArea;
 	};
 
 	struct FOptions
 	{
-		double OriginX = 0.0;
-		double OriginY = 0.0;
-		double HorizontalSpacing = 300.0;
-		double VerticalSpacing = 140.0;
-		double NodePadding = 24.0;
-		double OutputAccessOffsetX = 0.0;
-		double InputAccessOffsetX = 0.0;
+		FOptions();
+
+		double OriginX;
+		double OriginY;
+		double HorizontalSpacing;
+		double VerticalSpacing;
+		double NodePadding;
+		double OutputAccessOffsetX;
+		double InputAccessOffsetX;
 		FString AccessOffsetSource;
-		bool bUseRealGeometry = false;
-		int32 MissingPinAnchorCount = 0;
-		int32 MissingMeasuredNodeGeometryCount = 0;
+		bool bUseRealGeometry;
+		int32 MissingPinAnchorCount;
+		int32 MissingMeasuredNodeGeometryCount;
 	};
 
 	struct FRunResult
 	{
-		FString Strategy = TEXT("exec_region_deterministic_inter_island_bus_bundle");
-		bool bDesignComplete = false;
-		int32 NodeCount = 0;
-		int32 EdgeCount = 0;
-		int32 IslandCount = 0;
-		int32 IslandEdgeCount = 0;
-		int32 RankCount = 0;
-		int32 MovedNodeCount = 0;
-		int32 ReroutePlanCount = 0;
-		int32 LocalBusEdgeCount = 0;
-		int32 ExternalBusEdgeCount = 0;
-		int32 AlignmentFailedUnitCount = 0;
-		int32 InvalidIslandEdgeCount = 0;
-		int32 DesignFeatureCount = 0;
-		int32 DesignFeatureCompleteCount = 0;
-		int32 DesignFeaturePartialCount = 0;
-		int32 DesignFeatureMissingCount = 0;
+		FRunResult();
+
+		FString Strategy;
+		bool bDesignComplete;
+		int32 NodeCount;
+		int32 EdgeCount;
+		int32 IslandCount;
+		int32 IslandEdgeCount;
+		int32 RankCount;
+		int32 MovedNodeCount;
+		int32 ReroutePlanCount;
+		int32 LocalBusEdgeCount;
+		int32 ExternalBusEdgeCount;
+		int32 AlignmentFailedUnitCount;
+		int32 InvalidIslandEdgeCount;
+		int32 DesignFeatureCount;
+		int32 DesignFeatureCompleteCount;
+		int32 DesignFeaturePartialCount;
+		int32 DesignFeatureMissingCount;
 		FMetrics MetricsBefore;
 		FMetrics MetricsAfter;
 		FMetrics MetricsAfterReroute;
@@ -304,10 +306,12 @@ namespace UeAgentBlueprintAutoLayout
 
 	struct FSelfTestResult
 	{
-		bool bAllPassed = false;
-		int32 CaseCount = 0;
-		int32 PassedCount = 0;
-		int32 FailedCount = 0;
+		FSelfTestResult();
+
+		bool bAllPassed;
+		int32 CaseCount;
+		int32 PassedCount;
+		int32 FailedCount;
 		TArray<TSharedPtr<FJsonValue>> Cases;
 	};
 

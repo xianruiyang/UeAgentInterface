@@ -5,6 +5,59 @@
 #include "Materials/Material.h"
 #include "Materials/MaterialExpression.h"
 
+static bool SmokeMoveInlinePropertiesToGroupedDetails(
+	FAutomationTestBase* Test,
+	const FString& EntryFilePath,
+	const TSharedPtr<FJsonObject>& EntryObject,
+	const FString& OwnerKind,
+	const FString& OwnerId,
+	const FString& DetailsCategory,
+	const FString& SourceCommand)
+{
+	if (!EntryObject.IsValid())
+	{
+		if (Test)
+		{
+			Test->AddError(FString::Printf(TEXT("details migration entry invalid: %s"), *EntryFilePath));
+		}
+		return false;
+	}
+
+	const TArray<TSharedPtr<FJsonValue>>* Properties = nullptr;
+	if (!EntryObject->TryGetArrayField(TEXT("properties"), Properties) || !Properties)
+	{
+		if (Test)
+		{
+			Test->AddError(FString::Printf(TEXT("inline properties missing before details migration: %s"), *EntryFilePath));
+		}
+		return false;
+	}
+
+	TArray<TSharedPtr<FJsonValue>> PropertiesCopy = *Properties;
+	EntryObject->RemoveField(TEXT("properties"));
+
+	UeAgentDetailsAuthoring::FOwnerInfo OwnerInfo;
+	OwnerInfo.OwnerKind = OwnerKind;
+	OwnerInfo.OwnerId = OwnerId;
+	OwnerInfo.OwnerName = OwnerId;
+	OwnerInfo.SourceCommand = SourceCommand;
+
+	FString SafeOwnerId = FPaths::MakeValidFileName(OwnerId, TEXT('_'));
+	if (SafeOwnerId.IsEmpty())
+	{
+		SafeOwnerId = TEXT("owner");
+	}
+	const FString DetailsIndexFile = FPaths::Combine(TEXT("details"), DetailsCategory, SafeOwnerId, TEXT("index.json"));
+	return SmokeWriteGroupedDetailsForRef(
+		Test,
+		EntryFilePath,
+		EntryObject,
+		TEXT("details"),
+		DetailsIndexFile,
+		OwnerInfo,
+		PropertiesCopy);
+}
+
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(
 	FUeAgentInterfaceMaterialSmokeTest,
 	"GptProjectTest.UeAgentInterface.Smoke.MaterialWorkflow",
@@ -820,6 +873,12 @@ bool FUeAgentInterfaceMeshDeformerJsonSmokeTest::RunTest(const FString& Paramete
 	TestTrue(TEXT("StaticMesh mesh.json exists"), FPaths::FileExists(FPaths::Combine(StaticFolderPath, TEXT("mesh.json"))));
 	TestTrue(TEXT("StaticMesh import_data.json exists"), FPaths::FileExists(FPaths::Combine(StaticFolderPath, TEXT("import_data.json"))));
 	TestTrue(TEXT("StaticMesh raw_mesh_summary.json exists"), FPaths::FileExists(FPaths::Combine(StaticFolderPath, TEXT("raw_mesh_summary.json"))));
+	TSharedPtr<FJsonObject> StaticMeshAssetFolderJson;
+	TestTrue(TEXT("StaticMesh folder asset details load"), LoadSmokeJsonFile(this, FPaths::Combine(StaticFolderPath, TEXT("asset.json")), StaticMeshAssetFolderJson, TEXT("StaticMesh folder asset.json")));
+	TSharedPtr<FJsonObject> StaticMeshDetailsJson;
+	TestTrue(TEXT("StaticMesh folder asset details grouped"), SmokeLoadGroupedDetailsForRef(this, FPaths::Combine(StaticFolderPath, TEXT("asset.json")), StaticMeshAssetFolderJson, TEXT("details"), TEXT("static_mesh_asset"), StaticMeshDetailsJson));
+	TestFalse(TEXT("StaticMesh folder omits root raw_properties.json"), FPaths::FileExists(FPaths::Combine(StaticFolderPath, TEXT("raw_properties.json"))));
+	TestFalse(TEXT("StaticMesh folder omits root readonly_properties.json"), FPaths::FileExists(FPaths::Combine(StaticFolderPath, TEXT("readonly_properties.json"))));
 
 	FHttpSmokeResult StaticValidateResult;
 	TSharedPtr<FJsonObject> StaticValidateJson;
@@ -1014,6 +1073,12 @@ bool FUeAgentInterfaceMeshDeformerJsonSmokeTest::RunTest(const FString& Paramete
 	TestTrue(TEXT("SkeletalMesh cloth.json exists"), FPaths::FileExists(FPaths::Combine(SkeletalFolderPath, TEXT("cloth.json"))));
 	TestTrue(TEXT("SkeletalMesh clothing.json compatibility alias exists"), FPaths::FileExists(FPaths::Combine(SkeletalFolderPath, TEXT("clothing.json"))));
 	TestTrue(TEXT("SkeletalMesh import_data.json exists"), FPaths::FileExists(FPaths::Combine(SkeletalFolderPath, TEXT("import_data.json"))));
+	TSharedPtr<FJsonObject> SkeletalMeshAssetFolderJson;
+	TestTrue(TEXT("SkeletalMesh folder asset details load"), LoadSmokeJsonFile(this, FPaths::Combine(SkeletalFolderPath, TEXT("asset.json")), SkeletalMeshAssetFolderJson, TEXT("SkeletalMesh folder asset.json")));
+	TSharedPtr<FJsonObject> SkeletalMeshDetailsJson;
+	TestTrue(TEXT("SkeletalMesh folder asset details grouped"), SmokeLoadGroupedDetailsForRef(this, FPaths::Combine(SkeletalFolderPath, TEXT("asset.json")), SkeletalMeshAssetFolderJson, TEXT("details"), TEXT("skeletal_mesh_asset"), SkeletalMeshDetailsJson));
+	TestFalse(TEXT("SkeletalMesh folder omits root raw_properties.json"), FPaths::FileExists(FPaths::Combine(SkeletalFolderPath, TEXT("raw_properties.json"))));
+	TestFalse(TEXT("SkeletalMesh folder omits root readonly_properties.json"), FPaths::FileExists(FPaths::Combine(SkeletalFolderPath, TEXT("readonly_properties.json"))));
 
 	FHttpSmokeResult SkeletalValidateResult;
 	TSharedPtr<FJsonObject> SkeletalValidateJson;
@@ -1181,6 +1246,12 @@ bool FUeAgentInterfaceMeshDeformerJsonSmokeTest::RunTest(const FString& Paramete
 	TestTrue(TEXT("DeformerGraph settings.json exists"), FPaths::FileExists(FPaths::Combine(DeformerGraphFolderPath, TEXT("settings.json"))));
 	TestTrue(TEXT("DeformerGraph graphs.json exists"), FPaths::FileExists(FPaths::Combine(DeformerGraphFolderPath, TEXT("graphs.json"))));
 	TestTrue(TEXT("DeformerGraph kernels.json exists"), FPaths::FileExists(FPaths::Combine(DeformerGraphFolderPath, TEXT("kernels.json"))));
+	TSharedPtr<FJsonObject> DeformerGraphAssetJson;
+	TSharedPtr<FJsonObject> DeformerGraphAssetDetailsJson;
+	TestTrue(TEXT("DeformerGraph asset parses"), LoadSmokeJsonFile(this, FPaths::Combine(DeformerGraphFolderPath, TEXT("asset.json")), DeformerGraphAssetJson, TEXT("DeformerGraph asset.json")));
+	TestTrue(TEXT("DeformerGraph asset details grouped"), SmokeLoadGroupedDetailsForRef(this, FPaths::Combine(DeformerGraphFolderPath, TEXT("asset.json")), DeformerGraphAssetJson, TEXT("details"), TEXT("deformer_graph_asset"), DeformerGraphAssetDetailsJson));
+	TestFalse(TEXT("DeformerGraph folder omits root raw_properties.json"), FPaths::FileExists(FPaths::Combine(DeformerGraphFolderPath, TEXT("raw_properties.json"))));
+	TestFalse(TEXT("DeformerGraph folder omits root readonly_properties.json"), FPaths::FileExists(FPaths::Combine(DeformerGraphFolderPath, TEXT("readonly_properties.json"))));
 
 	TSharedPtr<FJsonObject> DeformerGraphSettingsJson;
 	TestTrue(TEXT("DeformerGraph settings parses"), LoadSmokeJsonFile(this, FPaths::Combine(DeformerGraphFolderPath, TEXT("settings.json")), DeformerGraphSettingsJson, TEXT("DeformerGraph settings.json")));
@@ -1196,6 +1267,29 @@ bool FUeAgentInterfaceMeshDeformerJsonSmokeTest::RunTest(const FString& Paramete
 	{
 		TestEqual(TEXT("DeformerGraph graphs schema"), DeformerGraphGraphsJson->GetStringField(TEXT("schema")), FString(TEXT("ue_agent_interface.deformer_graphs.v1")));
 		TestTrue(TEXT("DeformerGraph graphs has items field"), DeformerGraphGraphsJson->HasTypedField<EJson::Array>(TEXT("items")));
+		const TArray<TSharedPtr<FJsonValue>>* GraphItems = nullptr;
+		if (DeformerGraphGraphsJson->TryGetArrayField(TEXT("items"), GraphItems) && GraphItems)
+		{
+			for (const TSharedPtr<FJsonValue>& GraphItemValue : *GraphItems)
+			{
+				const TSharedPtr<FJsonObject>* GraphItemObj = nullptr;
+				if (!GraphItemValue.IsValid() || !GraphItemValue->TryGetObject(GraphItemObj) || !GraphItemObj || !GraphItemObj->IsValid())
+				{
+					continue;
+				}
+				const TArray<TSharedPtr<FJsonValue>>* Nodes = nullptr;
+				if ((*GraphItemObj)->TryGetArrayField(TEXT("nodes"), Nodes) && Nodes && Nodes->Num() > 0)
+				{
+					const TSharedPtr<FJsonObject>* NodeObj = nullptr;
+					TestTrue(TEXT("DeformerGraph node parses"), (*Nodes)[0].IsValid() && (*Nodes)[0]->TryGetObject(NodeObj) && NodeObj && NodeObj->IsValid());
+					if (NodeObj && NodeObj->IsValid())
+					{
+						TestTrue(TEXT("DeformerGraph node exposes authoring metadata"), (*NodeObj)->HasTypedField<EJson::Object>(TEXT("selector")) && (*NodeObj)->HasTypedField<EJson::Array>(TEXT("operations")));
+					}
+					break;
+				}
+			}
+		}
 	}
 
 	TSharedPtr<FJsonObject> DeformerGraphCoverageJson;
@@ -1815,6 +1909,64 @@ bool FUeAgentInterfaceMaterialFolderSmokeTest::RunTest(const FString& Parameters
 		return false;
 	}
 
+	const FString AuthoringSettingsJsonPath = FPaths::Combine(FolderPath, TEXT("settings"), TEXT("material.json"));
+	TSharedPtr<FJsonObject> SettingsAuthoringJson;
+	if (!LoadSmokeJsonFile(this, AuthoringSettingsJsonPath, SettingsAuthoringJson, TEXT("Material folder settings authoring json"))
+		|| !SmokeMoveInlinePropertiesToGroupedDetails(
+			this,
+			AuthoringSettingsJsonPath,
+			SettingsAuthoringJson,
+			TEXT("material_settings"),
+			TEXT("settings"),
+			TEXT("settings"),
+			TEXT("material_apply_folder"))
+		|| !SaveSmokeJsonFile(this, AuthoringSettingsJsonPath, SettingsAuthoringJson, TEXT("Material folder settings grouped authoring json")))
+	{
+		return false;
+	}
+
+	const FString AuthoringGraphJsonPath = FPaths::Combine(FolderPath, TEXT("graphs"), TEXT("MaterialGraph.json"));
+	TSharedPtr<FJsonObject> GraphAuthoringJson;
+	if (!LoadSmokeJsonFile(this, AuthoringGraphJsonPath, GraphAuthoringJson, TEXT("Material folder graph authoring json")))
+	{
+		return false;
+	}
+	const TArray<TSharedPtr<FJsonValue>>* AuthoringExpressions = nullptr;
+	if (!GraphAuthoringJson->TryGetArrayField(TEXT("expressions"), AuthoringExpressions) || !AuthoringExpressions)
+	{
+		AddError(TEXT("Material folder graph authoring expressions missing"));
+		return false;
+	}
+	for (const TSharedPtr<FJsonValue>& ExpressionValue : *AuthoringExpressions)
+	{
+		const TSharedPtr<FJsonObject>* ExpressionObj = nullptr;
+		if (!ExpressionValue.IsValid() || !ExpressionValue->TryGetObject(ExpressionObj) || !ExpressionObj || !ExpressionObj->IsValid())
+		{
+			continue;
+		}
+		FString ExpressionId;
+		if (!(*ExpressionObj)->TryGetStringField(TEXT("id"), ExpressionId) || ExpressionId.IsEmpty())
+		{
+			AddError(TEXT("Material folder expression id missing before details migration"));
+			return false;
+		}
+		if (!SmokeMoveInlinePropertiesToGroupedDetails(
+			this,
+			AuthoringGraphJsonPath,
+			*ExpressionObj,
+			TEXT("material_expression"),
+			ExpressionId,
+			TEXT("expressions"),
+			TEXT("material_apply_folder")))
+		{
+			return false;
+		}
+	}
+	if (!SaveSmokeJsonFile(this, AuthoringGraphJsonPath, GraphAuthoringJson, TEXT("Material folder graph grouped authoring json")))
+	{
+		return false;
+	}
+
 	const FString ApplyBody = MakeExecRequestBody(
 		TEXT("smoke-material-folder-apply-001"),
 		TEXT("material_apply_folder"),
@@ -1900,6 +2052,7 @@ bool FUeAgentInterfaceMaterialFolderSmokeTest::RunTest(const FString& Parameters
 			if (ParametersArray)
 			{
 				bool bFoundColorMain = false;
+				bool bFoundParameterAuthoringMetadata = false;
 				for (const TSharedPtr<FJsonValue>& ParameterValue : *ParametersArray)
 				{
 					const TSharedPtr<FJsonObject>* ParameterObj = nullptr;
@@ -1910,10 +2063,13 @@ bool FUeAgentInterfaceMaterialFolderSmokeTest::RunTest(const FString& Parameters
 					if ((*ParameterObj)->GetStringField(TEXT("name")) == TEXT("Color_Main"))
 					{
 						bFoundColorMain = true;
+						bFoundParameterAuthoringMetadata = (*ParameterObj)->HasTypedField<EJson::Object>(TEXT("selector"))
+							&& (*ParameterObj)->HasTypedField<EJson::Array>(TEXT("operations"));
 						break;
 					}
 				}
 				TestTrue(TEXT("Material folder exported Color_Main parameter"), bFoundColorMain);
+				TestTrue(TEXT("Material folder parameter exposes authoring metadata"), bFoundParameterAuthoringMetadata);
 			}
 		}
 	}
@@ -1923,29 +2079,84 @@ bool FUeAgentInterfaceMaterialFolderSmokeTest::RunTest(const FString& Parameters
 		const FString SettingsJsonPath = FPaths::Combine(FolderPath, TEXT("settings"), TEXT("material.json"));
 		FString ExportedSettingsText;
 		TestTrue(TEXT("Material folder exported material.json exists"), FFileHelper::LoadFileToString(ExportedSettingsText, *SettingsJsonPath));
+		TestFalse(TEXT("Material folder exported material.json omits inline properties"), ExportedSettingsText.Contains(TEXT("\"properties\"")));
 		TestTrue(TEXT("Material folder exported material.json parses"), ParseJson(ExportedSettingsText, ExportedSettingsJson));
 		if (ExportedSettingsJson.IsValid())
 		{
-			const TArray<TSharedPtr<FJsonValue>>* PropertiesArray = nullptr;
-			TestTrue(TEXT("Material folder exported settings properties array exists"), ExportedSettingsJson->TryGetArrayField(TEXT("properties"), PropertiesArray) && PropertiesArray);
-			if (PropertiesArray)
+			TSharedPtr<FJsonObject> SettingsDetailsJson;
+			TestTrue(
+				TEXT("Material folder settings details grouped"),
+				SmokeLoadGroupedDetailsForRef(this, SettingsJsonPath, ExportedSettingsJson, TEXT("details"), TEXT("material_settings"), SettingsDetailsJson));
+			TestTrue(
+				TEXT("Material folder settings details contains TwoSided"),
+				SmokeDetailsPropertiesContain(SettingsDetailsJson, TEXT("TwoSided")));
+		}
+	}
+
+	TSharedPtr<FJsonObject> ExportedGraphJson;
+	{
+		const FString GraphJsonPath = FPaths::Combine(FolderPath, TEXT("graphs"), TEXT("MaterialGraph.json"));
+		FString ExportedGraphText;
+		TestTrue(TEXT("Material folder exported MaterialGraph.json exists"), FFileHelper::LoadFileToString(ExportedGraphText, *GraphJsonPath));
+		TestFalse(TEXT("Material folder exported MaterialGraph.json omits inline properties"), ExportedGraphText.Contains(TEXT("\"properties\"")));
+		TestTrue(TEXT("Material folder exported MaterialGraph.json parses"), ParseJson(ExportedGraphText, ExportedGraphJson));
+		if (ExportedGraphJson.IsValid())
+		{
+			const TArray<TSharedPtr<FJsonValue>>* ExpressionsArray = nullptr;
+			TestTrue(TEXT("Material folder exported expressions array exists"), ExportedGraphJson->TryGetArrayField(TEXT("expressions"), ExpressionsArray) && ExpressionsArray);
+			bool bFoundExpressionAuthoringMetadata = false;
+			bool bFoundExpressionDetails = false;
+			if (ExpressionsArray)
 			{
-				bool bFoundTwoSided = false;
-				for (const TSharedPtr<FJsonValue>& PropertyValue : *PropertiesArray)
+				for (const TSharedPtr<FJsonValue>& ExpressionValue : *ExpressionsArray)
 				{
-					const TSharedPtr<FJsonObject>* PropertyObj = nullptr;
-					if (!PropertyValue.IsValid() || !PropertyValue->TryGetObject(PropertyObj) || !PropertyObj || !PropertyObj->IsValid())
+					const TSharedPtr<FJsonObject>* ExpressionObj = nullptr;
+					if (!ExpressionValue.IsValid() || !ExpressionValue->TryGetObject(ExpressionObj) || !ExpressionObj || !ExpressionObj->IsValid())
 					{
 						continue;
 					}
-					if ((*PropertyObj)->GetStringField(TEXT("property_name")) == TEXT("TwoSided"))
+					bFoundExpressionAuthoringMetadata = bFoundExpressionAuthoringMetadata
+						|| ((*ExpressionObj)->HasTypedField<EJson::Object>(TEXT("selector")) && (*ExpressionObj)->HasTypedField<EJson::Array>(TEXT("operations")));
+
+					TSharedPtr<FJsonObject> ExpressionDetailsJson;
+					if (SmokeLoadGroupedDetailsForRef(this, GraphJsonPath, *ExpressionObj, TEXT("details"), TEXT("material_expression"), ExpressionDetailsJson))
 					{
-						bFoundTwoSided = true;
-						break;
+						bFoundExpressionDetails = bFoundExpressionDetails
+							|| SmokeDetailsPropertiesContain(ExpressionDetailsJson, TEXT("DefaultValue"))
+							|| SmokeDetailsPropertiesContain(ExpressionDetailsJson, TEXT("Code"));
 					}
 				}
-				TestTrue(TEXT("Material folder exported TwoSided setting"), bFoundTwoSided);
 			}
+			TestTrue(TEXT("Material folder expression exposes authoring metadata"), bFoundExpressionAuthoringMetadata);
+			TestTrue(TEXT("Material folder expression details grouped"), bFoundExpressionDetails);
+		}
+	}
+
+	if (ExportedSettingsJson.IsValid())
+	{
+		TArray<TSharedPtr<FJsonValue>> LegacyProperties;
+		LegacyProperties.Add(MakeShared<FJsonValueObject>(SmokeMakeDetailsProperty(TEXT("TwoSided"), TEXT("false"))));
+		ExportedSettingsJson->SetArrayField(TEXT("properties"), LegacyProperties);
+		const FString LegacySettingsJsonPath = FPaths::Combine(FolderPath, TEXT("settings"), TEXT("material.json"));
+		TestTrue(TEXT("Material folder save legacy inline properties"), SaveSmokeJsonFile(this, LegacySettingsJsonPath, ExportedSettingsJson, TEXT("Material folder legacy settings json")));
+
+		const FString LegacyApplyBody = MakeExecRequestBody(
+			TEXT("smoke-material-folder-legacy-properties-001"),
+			TEXT("material_apply_folder"),
+			FString::Printf(TEXT("{\"asset_path\":\"%s\",\"compile_after_apply\":false,\"save_after_apply\":false}"), *MaterialAssetPath));
+		FHttpSmokeResult LegacyApplyResult;
+		TestTrue(TEXT("Material folder legacy properties request reached server"), ExecuteHttpJsonRequest(TEXT("POST"), ServerScope.BaseUrl + TEXT("/api/exec"), ServerScope.Token, LegacyApplyBody, LegacyApplyResult, 15.0));
+		TestEqual(TEXT("Material folder legacy properties are rejected"), LegacyApplyResult.StatusCode, 400);
+
+		TSharedPtr<FJsonObject> LegacyApplyJson;
+		TestTrue(TEXT("Material folder legacy properties response parses JSON"), ParseJson(LegacyApplyResult.Body, LegacyApplyJson));
+		const TSharedPtr<FJsonObject>* LegacyApplyData = nullptr;
+		TestTrue(TEXT("Material folder legacy rejection data exists"), LegacyApplyJson.IsValid() && LegacyApplyJson->TryGetObjectField(TEXT("data"), LegacyApplyData) && LegacyApplyData && LegacyApplyData->IsValid());
+		if (LegacyApplyData && LegacyApplyData->IsValid())
+		{
+			TestEqual(TEXT("Material folder legacy rejection schema"), (*LegacyApplyData)->GetStringField(TEXT("schema")), FString(TEXT("uai.legacy_rejection.v1")));
+			TestEqual(TEXT("Material folder legacy rejection error code"), (*LegacyApplyData)->GetStringField(TEXT("error_code")), FString(TEXT("legacy_inline_properties_not_supported")));
+			TestEqual(TEXT("Material folder legacy rejection surface"), (*LegacyApplyData)->GetStringField(TEXT("legacy_surface")), FString(TEXT("properties[]")));
 		}
 	}
 
@@ -2027,6 +2238,64 @@ bool FUeAgentInterfaceMaterialInstanceFolderSmokeTest::RunTest(const FString& Pa
 		return false;
 	}
 
+	const FString ParentSettingsJsonPath = FPaths::Combine(ParentFolderPath, TEXT("settings"), TEXT("material.json"));
+	TSharedPtr<FJsonObject> ParentSettingsJson;
+	if (!LoadSmokeJsonFile(this, ParentSettingsJsonPath, ParentSettingsJson, TEXT("Material instance parent settings authoring json"))
+		|| !SmokeMoveInlinePropertiesToGroupedDetails(
+			this,
+			ParentSettingsJsonPath,
+			ParentSettingsJson,
+			TEXT("material_settings"),
+			TEXT("settings"),
+			TEXT("settings"),
+			TEXT("material_apply_folder"))
+		|| !SaveSmokeJsonFile(this, ParentSettingsJsonPath, ParentSettingsJson, TEXT("Material instance parent settings grouped authoring json")))
+	{
+		return false;
+	}
+
+	const FString ParentGraphJsonPath = FPaths::Combine(ParentFolderPath, TEXT("graphs"), TEXT("MaterialGraph.json"));
+	TSharedPtr<FJsonObject> ParentGraphJson;
+	if (!LoadSmokeJsonFile(this, ParentGraphJsonPath, ParentGraphJson, TEXT("Material instance parent graph authoring json")))
+	{
+		return false;
+	}
+	const TArray<TSharedPtr<FJsonValue>>* ParentExpressions = nullptr;
+	if (!ParentGraphJson->TryGetArrayField(TEXT("expressions"), ParentExpressions) || !ParentExpressions)
+	{
+		AddError(TEXT("Material instance parent graph authoring expressions missing"));
+		return false;
+	}
+	for (const TSharedPtr<FJsonValue>& ExpressionValue : *ParentExpressions)
+	{
+		const TSharedPtr<FJsonObject>* ExpressionObj = nullptr;
+		if (!ExpressionValue.IsValid() || !ExpressionValue->TryGetObject(ExpressionObj) || !ExpressionObj || !ExpressionObj->IsValid())
+		{
+			continue;
+		}
+		FString ExpressionId;
+		if (!(*ExpressionObj)->TryGetStringField(TEXT("id"), ExpressionId) || ExpressionId.IsEmpty())
+		{
+			AddError(TEXT("Material instance parent expression id missing before details migration"));
+			return false;
+		}
+		if (!SmokeMoveInlinePropertiesToGroupedDetails(
+			this,
+			ParentGraphJsonPath,
+			*ExpressionObj,
+			TEXT("material_expression"),
+			ExpressionId,
+			TEXT("expressions"),
+			TEXT("material_apply_folder")))
+		{
+			return false;
+		}
+	}
+	if (!SaveSmokeJsonFile(this, ParentGraphJsonPath, ParentGraphJson, TEXT("Material instance parent graph grouped authoring json")))
+	{
+		return false;
+	}
+
 	const FString ParentApplyBody = MakeExecRequestBody(
 		TEXT("smoke-material-instance-folder-parent-apply-001"),
 		TEXT("material_apply_folder"),
@@ -2081,6 +2350,30 @@ bool FUeAgentInterfaceMaterialInstanceFolderSmokeTest::RunTest(const FString& Pa
 	TSharedPtr<FJsonObject> ExportJson;
 	TestTrue(TEXT("Material instance folder export parses JSON"), ParseJson(ExportResult.Body, ExportJson));
 	TestTrue(TEXT("Material instance folder export root ok=true"), ExportJson.IsValid() && ExportJson->GetBoolField(TEXT("ok")));
+
+	const FString LegacyPropertiesPath = FPaths::Combine(FolderPath, TEXT("properties.json"));
+	TestTrue(TEXT("Material instance folder legacy properties.json writes"), SaveUtf8Json(
+		LegacyPropertiesPath,
+		TEXT("{\"properties\":[{\"property_name\":\"BlendMode\",\"value_text\":\"BLEND_Opaque\"}]}\n")));
+
+	const FString LegacyApplyBody = MakeExecRequestBody(
+		TEXT("smoke-material-instance-folder-legacy-apply-001"),
+		TEXT("material_instance_apply_folder"),
+		FString::Printf(TEXT("{\"asset_path\":\"%s\",\"create_if_missing\":false,\"clear_existing_overrides\":false,\"compile_after_apply\":false,\"save_after_apply\":false}"), *MaterialInstanceAssetPath));
+	FHttpSmokeResult LegacyApplyResult;
+	TestTrue(TEXT("Material instance folder legacy apply request completed"), ExecuteHttpJsonRequest(TEXT("POST"), ServerScope.BaseUrl + TEXT("/api/exec"), ServerScope.Token, LegacyApplyBody, LegacyApplyResult));
+	TestEqual(TEXT("Material instance folder legacy apply status code"), LegacyApplyResult.StatusCode, 400);
+	TSharedPtr<FJsonObject> LegacyApplyJson;
+	TestTrue(TEXT("Material instance folder legacy apply parses JSON"), ParseJson(LegacyApplyResult.Body, LegacyApplyJson));
+	const TSharedPtr<FJsonObject>* LegacyApplyData = nullptr;
+	TestTrue(TEXT("Material instance folder legacy apply contains data object"), LegacyApplyJson.IsValid() && LegacyApplyJson->TryGetObjectField(TEXT("data"), LegacyApplyData) && LegacyApplyData && LegacyApplyData->IsValid());
+	if (LegacyApplyData && LegacyApplyData->IsValid())
+	{
+		TestEqual(TEXT("Material instance folder legacy rejection schema"), (*LegacyApplyData)->GetStringField(TEXT("schema")), FString(TEXT("uai.legacy_rejection.v1")));
+		TestEqual(TEXT("Material instance folder legacy rejection error code"), (*LegacyApplyData)->GetStringField(TEXT("error_code")), FString(TEXT("legacy_properties_file_not_supported")));
+		TestEqual(TEXT("Material instance folder legacy rejection surface"), (*LegacyApplyData)->GetStringField(TEXT("legacy_surface")), FString(TEXT("properties.json")));
+	}
+	TestTrue(TEXT("Material instance folder legacy properties.json removed"), IFileManager::Get().Delete(*LegacyPropertiesPath, false, true));
 
 	const FString OverridesPath = FPaths::Combine(FolderPath, TEXT("parameters"), TEXT("overrides.json"));
 	FString OverridesText;
@@ -2262,6 +2555,48 @@ bool FUeAgentInterfaceMaterialFunctionFolderSmokeTest::RunTest(const FString& Pa
 		return false;
 	}
 
+	const FString FunctionGraphJsonPath = FPaths::Combine(FolderPath, TEXT("graphs"), TEXT("MaterialFunctionGraph.json"));
+	TSharedPtr<FJsonObject> FunctionGraphAuthoringJson;
+	if (!LoadSmokeJsonFile(this, FunctionGraphJsonPath, FunctionGraphAuthoringJson, TEXT("Material function folder graph authoring json")))
+	{
+		return false;
+	}
+	const TArray<TSharedPtr<FJsonValue>>* FunctionAuthoringExpressions = nullptr;
+	if (!FunctionGraphAuthoringJson->TryGetArrayField(TEXT("expressions"), FunctionAuthoringExpressions) || !FunctionAuthoringExpressions)
+	{
+		AddError(TEXT("Material function folder graph authoring expressions missing"));
+		return false;
+	}
+	for (const TSharedPtr<FJsonValue>& ExpressionValue : *FunctionAuthoringExpressions)
+	{
+		const TSharedPtr<FJsonObject>* ExpressionObj = nullptr;
+		if (!ExpressionValue.IsValid() || !ExpressionValue->TryGetObject(ExpressionObj) || !ExpressionObj || !ExpressionObj->IsValid())
+		{
+			continue;
+		}
+		FString ExpressionId;
+		if (!(*ExpressionObj)->TryGetStringField(TEXT("id"), ExpressionId) || ExpressionId.IsEmpty())
+		{
+			AddError(TEXT("Material function expression id missing before details migration"));
+			return false;
+		}
+		if (!SmokeMoveInlinePropertiesToGroupedDetails(
+			this,
+			FunctionGraphJsonPath,
+			*ExpressionObj,
+			TEXT("material_function_expression"),
+			ExpressionId,
+			TEXT("expressions"),
+			TEXT("material_function_apply_folder")))
+		{
+			return false;
+		}
+	}
+	if (!SaveSmokeJsonFile(this, FunctionGraphJsonPath, FunctionGraphAuthoringJson, TEXT("Material function folder graph grouped authoring json")))
+	{
+		return false;
+	}
+
 	const FString ApplyBody = MakeExecRequestBody(
 		TEXT("smoke-material-function-folder-apply-001"),
 		TEXT("material_function_apply_folder"),
@@ -2296,6 +2631,7 @@ bool FUeAgentInterfaceMaterialFunctionFolderSmokeTest::RunTest(const FString& Pa
 	const FString GraphJsonPath = FPaths::Combine(FolderPath, TEXT("graphs"), TEXT("MaterialFunctionGraph.json"));
 	FString ExportedGraphText;
 	TestTrue(TEXT("Material function folder exported graph exists"), FFileHelper::LoadFileToString(ExportedGraphText, *GraphJsonPath));
+	TestFalse(TEXT("Material function folder exported graph omits inline properties"), ExportedGraphText.Contains(TEXT("\"properties\"")));
 
 	TSharedPtr<FJsonObject> ExportedGraphJson;
 	TestTrue(TEXT("Material function folder exported graph parses"), ParseJson(ExportedGraphText, ExportedGraphJson));
@@ -2306,6 +2642,59 @@ bool FUeAgentInterfaceMaterialFunctionFolderSmokeTest::RunTest(const FString& Pa
 		if (Expressions)
 		{
 			TestTrue(TEXT("Material function folder exported expression count >= 2"), Expressions->Num() >= 2);
+			bool bFoundFunctionExpressionDetails = false;
+			for (const TSharedPtr<FJsonValue>& ExpressionValue : *Expressions)
+			{
+				const TSharedPtr<FJsonObject>* ExpressionObj = nullptr;
+				if (!ExpressionValue.IsValid() || !ExpressionValue->TryGetObject(ExpressionObj) || !ExpressionObj || !ExpressionObj->IsValid())
+				{
+					continue;
+				}
+
+				TSharedPtr<FJsonObject> ExpressionDetailsJson;
+				if (SmokeLoadGroupedDetailsForRef(this, GraphJsonPath, *ExpressionObj, TEXT("details"), TEXT("material_function_expression"), ExpressionDetailsJson))
+				{
+					bFoundFunctionExpressionDetails = bFoundFunctionExpressionDetails
+						|| SmokeDetailsPropertiesContain(ExpressionDetailsJson, TEXT("Constant"))
+						|| SmokeDetailsPropertiesContain(ExpressionDetailsJson, TEXT("OutputName"));
+				}
+			}
+			TestTrue(TEXT("Material function folder expression details grouped"), bFoundFunctionExpressionDetails);
+		}
+	}
+
+	if (ExportedGraphJson.IsValid())
+	{
+		const TArray<TSharedPtr<FJsonValue>>* Expressions = nullptr;
+		if (ExportedGraphJson->TryGetArrayField(TEXT("expressions"), Expressions) && Expressions && Expressions->Num() > 0)
+		{
+			const TSharedPtr<FJsonObject>* FirstExpressionObj = nullptr;
+			if ((*Expressions)[0].IsValid() && (*Expressions)[0]->TryGetObject(FirstExpressionObj) && FirstExpressionObj && FirstExpressionObj->IsValid())
+			{
+				TArray<TSharedPtr<FJsonValue>> LegacyProperties;
+				LegacyProperties.Add(MakeShared<FJsonValueObject>(SmokeMakeDetailsProperty(TEXT("Desc"), TEXT("LegacySmoke"))));
+				(*FirstExpressionObj)->SetArrayField(TEXT("properties"), LegacyProperties);
+				TestTrue(TEXT("Material function folder save legacy inline properties"), SaveSmokeJsonFile(this, GraphJsonPath, ExportedGraphJson, TEXT("Material function legacy graph json")));
+
+				const FString LegacyApplyBody = MakeExecRequestBody(
+					TEXT("smoke-material-function-folder-legacy-properties-001"),
+					TEXT("material_function_apply_folder"),
+					FString::Printf(TEXT("{\"asset_path\":\"%s\",\"update_after_apply\":false,\"save_after_apply\":false}"), *FunctionAssetPath));
+				FHttpSmokeResult LegacyApplyResult;
+				TestTrue(TEXT("Material function folder legacy properties request reached server"), ExecuteHttpJsonRequest(TEXT("POST"), ServerScope.BaseUrl + TEXT("/api/exec"), ServerScope.Token, LegacyApplyBody, LegacyApplyResult));
+				TestEqual(TEXT("Material function folder legacy properties are rejected"), LegacyApplyResult.StatusCode, 400);
+
+				TSharedPtr<FJsonObject> LegacyApplyJson;
+				TestTrue(TEXT("Material function folder legacy properties response parses JSON"), ParseJson(LegacyApplyResult.Body, LegacyApplyJson));
+				const TSharedPtr<FJsonObject>* LegacyApplyData = nullptr;
+				TestTrue(TEXT("Material function folder legacy rejection data exists"), LegacyApplyJson.IsValid() && LegacyApplyJson->TryGetObjectField(TEXT("data"), LegacyApplyData) && LegacyApplyData && LegacyApplyData->IsValid());
+				if (LegacyApplyData && LegacyApplyData->IsValid())
+				{
+					TestEqual(TEXT("Material function folder legacy rejection schema"), (*LegacyApplyData)->GetStringField(TEXT("schema")), FString(TEXT("uai.legacy_rejection.v1")));
+					TestEqual(TEXT("Material function folder legacy rejection error code"), (*LegacyApplyData)->GetStringField(TEXT("error_code")), FString(TEXT("legacy_inline_properties_not_supported")));
+					TestEqual(TEXT("Material function folder legacy rejection surface"), (*LegacyApplyData)->GetStringField(TEXT("legacy_surface")), FString(TEXT("properties[]")));
+				}
+			}
 		}
 	}
 

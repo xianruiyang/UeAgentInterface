@@ -33,7 +33,7 @@ preprocess, core algorithm, and postprocess.
 
 ## Change Rules
 
-- Do not add layout decisions to `UeAgentHttpServer_Blueprint_GraphLayout.inl`; that file should parse command parameters, call preprocess, call core, call postprocess, and build the response only.
+- Do not add layout decisions to `UeAgentHttpServer_Blueprint_GraphLayout.cpp`; that file should parse command parameters, call preprocess, call core, call postprocess, and build the response only.
 - Do not add UE graph mutation to `Preprocess/` or `Core/`.
 - Do not add Slate, asset IO, command parameter parsing, or report formatting to `Core/`.
 - Do not add new node-to-`FNode` conversion logic outside `Preprocess/`.

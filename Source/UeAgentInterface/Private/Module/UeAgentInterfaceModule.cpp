@@ -2,25 +2,109 @@
 
 #include "UeAgentInterfaceModule.h"
 
-#include "UeAgentCustomModelingPrimitives.h"
 #include "Server/UeAgentHttpServer.h"
 #include "Module/UeAgentInterfaceLogger.h"
+#include "Utilities/UeAgentCustomModelingPrimitives.h"
 #include "Utilities/UeAgentModelingToolCommands.h"
 #include "UeAgentInterfaceSettings.h"
 
 #include "Features/IModularFeatures.h"
+#include "Framework/Docking/TabManager.h"
 #include "Framework/Notifications/NotificationManager.h"
 #include "HAL/PlatformApplicationMisc.h"
 #include "HAL/IConsoleManager.h"
+#include "Interfaces/IMainFrameModule.h"
+#include "ModelingModeToolExtensions.h"
+#include "Misc/ConfigCacheIni.h"
 #include "Misc/Guid.h"
 #include "Misc/CommandLine.h"
 #include "Misc/Parse.h"
 #include "ToolMenus.h"
+#include "Widgets/SWindow.h"
 #include "Widgets/Notifications/SNotificationList.h"
+
+namespace
+{
+bool IsStartMinimizedMainFrameRequested()
+{
+	const TCHAR* CommandLine = FCommandLine::Get();
+	return FParse::Param(CommandLine, TEXT("UeAgentInterfaceStartMinimized"))
+		|| FParse::Param(CommandLine, TEXT("UAIStartMinimized"));
+}
+
+bool ShouldDisablePersistentLayoutsForHeadlessRun()
+{
+	const TCHAR* CommandLine = FCommandLine::Get();
+	return IsRunningCommandlet()
+		|| FApp::IsUnattended()
+		|| FParse::Param(CommandLine, TEXT("NullRHI"));
+}
+
+void DisablePersistentLayoutsForHeadlessRun()
+{
+	if (!ShouldDisablePersistentLayoutsForHeadlessRun())
+	{
+		return;
+	}
+
+	FGlobalTabmanager::Get()->SetCanSavePersistentLayouts(false);
+	FUeAgentInterfaceLogger::Log(TEXT("StartupModule: persistent layout saving disabled for headless run"));
+}
+
+class FUeAgentModelingModeToolExtension final : public IModelingModeToolExtension
+{
+public:
+	virtual FText GetExtensionName() override
+	{
+		return FText::FromString(TEXT("UeAgentInterface"));
+	}
+
+	virtual FText GetToolSectionName() override
+	{
+		return FText::FromString(TEXT("UAI Primitive"));
+	}
+
+	virtual void GetExtensionTools(const FExtensionToolQueryInfo& QueryInfo, TArray<FExtensionToolDescription>& ToolsOut) override
+	{
+		FExtensionToolDescription RampToolInfo;
+		RampToolInfo.ToolName = FText::FromString(TEXT("BeginAddRampPrimitiveTool"));
+		RampToolInfo.ToolCommand = FUeAgentModelingToolCommands::Get().BeginAddRampPrimitiveTool;
+		RampToolInfo.ToolBuilder = QueryInfo.bIsInfoQueryOnly ? nullptr : UUeAgentAddPrimitiveToolBuilder::CreateRampToolBuilder();
+		ToolsOut.Add(RampToolInfo);
+
+		FExtensionToolDescription RampCornerToolInfo;
+		RampCornerToolInfo.ToolName = FText::FromString(TEXT("BeginAddRampCornerPrimitiveTool"));
+		RampCornerToolInfo.ToolCommand = FUeAgentModelingToolCommands::Get().BeginAddRampCornerPrimitiveTool;
+		RampCornerToolInfo.ToolBuilder = QueryInfo.bIsInfoQueryOnly ? nullptr : UUeAgentAddPrimitiveToolBuilder::CreateRampCornerToolBuilder();
+		ToolsOut.Add(RampCornerToolInfo);
+	}
+
+	virtual bool GetExtensionExtendedInfo(FModelingModeExtensionExtendedInfo& InfoOut) override
+	{
+		InfoOut.ExtensionCommand = FUeAgentModelingToolCommands::Get().UeAgentPrimitivesTabButton;
+		InfoOut.ToolPaletteButtonTooltip = FText::FromString(TEXT("UeAgentInterface custom primitive tools"));
+		return true;
+	}
+};
+
+TUniquePtr<FUeAgentModelingModeToolExtension> GModelingToolExtension;
+}
+
+FUeAgentInterfaceModule::FUeAgentInterfaceModule()
+	: ConsoleCmdStart(nullptr)
+	, ConsoleCmdStop(nullptr)
+	, ConsoleCmdRestart(nullptr)
+	, bAppliedRootWindowMaximizeOverride(false)
+	, bHadPreviousRootWindowInitiallyMaximizedValue(false)
+{
+}
 
 void FUeAgentInterfaceModule::StartupModule()
 {
 	FUeAgentInterfaceLogger::Log(TEXT("StartupModule begin command_line=%s"), FCommandLine::Get());
+
+	DisablePersistentLayoutsForHeadlessRun();
+	InstallStartMinimizedMainFrameHookIfRequested();
 
 	Server = MakeUnique<FUeAgentHttpServer>();
 	FUeAgentInterfaceLogger::Log(TEXT("StartupModule: server instance created"));
@@ -28,7 +112,8 @@ void FUeAgentInterfaceModule::StartupModule()
 	FUeAgentModelingToolCommands::Register();
 	FUeAgentInterfaceLogger::Log(TEXT("StartupModule: modeling tool commands registered"));
 
-	IModularFeatures::Get().RegisterModularFeature(IModelingModeToolExtension::GetModularFeatureName(), this);
+	GModelingToolExtension = MakeUnique<FUeAgentModelingModeToolExtension>();
+	IModularFeatures::Get().RegisterModularFeature(IModelingModeToolExtension::GetModularFeatureName(), GModelingToolExtension.Get());
 	FUeAgentInterfaceLogger::Log(TEXT("StartupModule: modeling modular feature registered"));
 
 	RegisterConsoleCommands();
@@ -55,7 +140,12 @@ void FUeAgentInterfaceModule::StartupModule()
 void FUeAgentInterfaceModule::ShutdownModule()
 {
 	FUeAgentInterfaceLogger::Log(TEXT("ShutdownModule begin"));
-	IModularFeatures::Get().UnregisterModularFeature(IModelingModeToolExtension::GetModularFeatureName(), this);
+	UninstallStartMinimizedMainFrameHook();
+	if (GModelingToolExtension)
+	{
+		IModularFeatures::Get().UnregisterModularFeature(IModelingModeToolExtension::GetModularFeatureName(), GModelingToolExtension.Get());
+		GModelingToolExtension.Reset();
+	}
 	FUeAgentModelingToolCommands::Unregister();
 	UnregisterMenus();
 	UnregisterConsoleCommands();
@@ -63,36 +153,136 @@ void FUeAgentInterfaceModule::ShutdownModule()
 	FUeAgentInterfaceLogger::Log(TEXT("ShutdownModule end"));
 }
 
-FText FUeAgentInterfaceModule::GetExtensionName()
+void FUeAgentInterfaceModule::InstallStartMinimizedMainFrameHookIfRequested()
 {
-	return FText::FromString(TEXT("UeAgentInterface"));
+	if (!IsStartMinimizedMainFrameRequested())
+	{
+		FUeAgentInterfaceLogger::Log(TEXT("StartupModule: StartMinimizedMainFrame not requested"));
+		return;
+	}
+
+	if (IsRunningCommandlet())
+	{
+		FUeAgentInterfaceLogger::Log(TEXT("StartupModule: StartMinimizedMainFrame skipped for commandlet"));
+		return;
+	}
+
+	IMainFrameModule& MainFrameModule = FModuleManager::LoadModuleChecked<IMainFrameModule>(TEXT("MainFrame"));
+	if (MainFrameModule.IsWindowInitialized())
+	{
+		TSharedPtr<SWindow> ParentWindow = MainFrameModule.GetParentWindow();
+		if (ParentWindow.IsValid())
+		{
+			ParentWindow->Minimize();
+		}
+		FUeAgentInterfaceLogger::Log(
+			TEXT("StartupModule: StartMinimizedMainFrame requested after main frame initialization; minimized_existing_window=%s"),
+			ParentWindow.IsValid() ? TEXT("true") : TEXT("false"));
+		return;
+	}
+
+	ApplyTemporaryRootWindowMaximizeOverride();
+
+	MainFrameModule.EnableDelayedShowMainFrame();
+	MainFrameCreationFinishedForStartMinimizedHandle = MainFrameModule.OnMainFrameCreationFinished().AddRaw(
+		this,
+		&FUeAgentInterfaceModule::HandleMainFrameCreationFinishedForStartMinimized);
+
+	FUeAgentInterfaceLogger::Log(TEXT("StartupModule: StartMinimizedMainFrame hook installed; delayed main frame show enabled"));
 }
 
-FText FUeAgentInterfaceModule::GetToolSectionName()
+void FUeAgentInterfaceModule::UninstallStartMinimizedMainFrameHook()
 {
-	return FText::FromString(TEXT("UAI Primitive"));
+	if (MainFrameCreationFinishedForStartMinimizedHandle.IsValid())
+	{
+		if (IMainFrameModule* MainFrameModule = FModuleManager::Get().GetModulePtr<IMainFrameModule>(TEXT("MainFrame")))
+		{
+			MainFrameModule->OnMainFrameCreationFinished().Remove(MainFrameCreationFinishedForStartMinimizedHandle);
+		}
+		MainFrameCreationFinishedForStartMinimizedHandle.Reset();
+	}
+
+	RestoreTemporaryRootWindowMaximizeOverride();
 }
 
-void FUeAgentInterfaceModule::GetExtensionTools(const FExtensionToolQueryInfo& QueryInfo, TArray<FExtensionToolDescription>& ToolsOut)
+void FUeAgentInterfaceModule::HandleMainFrameCreationFinishedForStartMinimized(
+	TSharedPtr<SWindow> MainFrameWindow,
+	bool bShowStartupDialogInPlaceOfMainEditor)
 {
-	FExtensionToolDescription RampToolInfo;
-	RampToolInfo.ToolName = FText::FromString(TEXT("BeginAddRampPrimitiveTool"));
-	RampToolInfo.ToolCommand = FUeAgentModelingToolCommands::Get().BeginAddRampPrimitiveTool;
-	RampToolInfo.ToolBuilder = QueryInfo.bIsInfoQueryOnly ? nullptr : UUeAgentAddPrimitiveToolBuilder::CreateRampToolBuilder();
-	ToolsOut.Add(RampToolInfo);
+	IMainFrameModule& MainFrameModule = FModuleManager::LoadModuleChecked<IMainFrameModule>(TEXT("MainFrame"));
 
-	FExtensionToolDescription RampCornerToolInfo;
-	RampCornerToolInfo.ToolName = FText::FromString(TEXT("BeginAddRampCornerPrimitiveTool"));
-	RampCornerToolInfo.ToolCommand = FUeAgentModelingToolCommands::Get().BeginAddRampCornerPrimitiveTool;
-	RampCornerToolInfo.ToolBuilder = QueryInfo.bIsInfoQueryOnly ? nullptr : UUeAgentAddPrimitiveToolBuilder::CreateRampCornerToolBuilder();
-	ToolsOut.Add(RampCornerToolInfo);
+	if (MainFrameCreationFinishedForStartMinimizedHandle.IsValid())
+	{
+		MainFrameModule.OnMainFrameCreationFinished().Remove(MainFrameCreationFinishedForStartMinimizedHandle);
+		MainFrameCreationFinishedForStartMinimizedHandle.Reset();
+	}
+
+	RestoreTemporaryRootWindowMaximizeOverride();
+
+	const bool bWindowValid = MainFrameWindow.IsValid();
+	if (bWindowValid)
+	{
+		MainFrameWindow->Minimize();
+	}
+
+	FUeAgentInterfaceLogger::Log(
+		TEXT("StartMinimizedMainFrame: main frame generated; window_valid=%s startup_dialog=%s initial_minimize_requested=%s"),
+		bWindowValid ? TEXT("true") : TEXT("false"),
+		bShowStartupDialogInPlaceOfMainEditor ? TEXT("true") : TEXT("false"),
+		bWindowValid ? TEXT("true") : TEXT("false"));
+
+	MainFrameModule.ShowDelayedMainFrame();
 }
 
-bool FUeAgentInterfaceModule::GetExtensionExtendedInfo(FModelingModeExtensionExtendedInfo& InfoOut)
+void FUeAgentInterfaceModule::ApplyTemporaryRootWindowMaximizeOverride()
 {
-	InfoOut.ExtensionCommand = FUeAgentModelingToolCommands::Get().UeAgentPrimitivesTabButton;
-	InfoOut.ToolPaletteButtonTooltip = FText::FromString(TEXT("UeAgentInterface custom primitive tools"));
-	return true;
+	if (bAppliedRootWindowMaximizeOverride || !GConfig)
+	{
+		return;
+	}
+
+	PreviousRootWindowInitiallyMaximizedValue.Reset();
+	bHadPreviousRootWindowInitiallyMaximizedValue = GConfig->GetString(
+		TEXT("RootWindow"),
+		TEXT("InitiallyMaximized"),
+		PreviousRootWindowInitiallyMaximizedValue,
+		GEditorPerProjectIni);
+
+	GConfig->SetBool(TEXT("RootWindow"), TEXT("InitiallyMaximized"), false, GEditorPerProjectIni);
+	bAppliedRootWindowMaximizeOverride = true;
+	FUeAgentInterfaceLogger::Log(
+		TEXT("StartMinimizedMainFrame: temporarily forced RootWindow.InitiallyMaximized=false previous_exists=%s previous_value=%s"),
+		bHadPreviousRootWindowInitiallyMaximizedValue ? TEXT("true") : TEXT("false"),
+		*PreviousRootWindowInitiallyMaximizedValue);
+}
+
+void FUeAgentInterfaceModule::RestoreTemporaryRootWindowMaximizeOverride()
+{
+	if (!bAppliedRootWindowMaximizeOverride || !GConfig)
+	{
+		return;
+	}
+
+	if (bHadPreviousRootWindowInitiallyMaximizedValue)
+	{
+		GConfig->SetString(
+			TEXT("RootWindow"),
+			TEXT("InitiallyMaximized"),
+			*PreviousRootWindowInitiallyMaximizedValue,
+			GEditorPerProjectIni);
+	}
+	else
+	{
+		GConfig->RemoveKey(TEXT("RootWindow"), TEXT("InitiallyMaximized"), GEditorPerProjectIni);
+	}
+
+	FUeAgentInterfaceLogger::Log(
+		TEXT("StartMinimizedMainFrame: restored RootWindow.InitiallyMaximized override previous_exists=%s"),
+		bHadPreviousRootWindowInitiallyMaximizedValue ? TEXT("true") : TEXT("false"));
+
+	PreviousRootWindowInitiallyMaximizedValue.Reset();
+	bHadPreviousRootWindowInitiallyMaximizedValue = false;
+	bAppliedRootWindowMaximizeOverride = false;
 }
 
 void FUeAgentInterfaceModule::RegisterMenus()

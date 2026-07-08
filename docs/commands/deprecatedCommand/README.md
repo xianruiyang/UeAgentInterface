@@ -1,23 +1,25 @@
-# deprecatedCommand
+# Deprecated UAI Command Docs
 
-本目录保存已从主分册抽出的废弃写入命令，按原 `commands/*.md` 文件和章节结构归档。
+本目录同样采用“类别文件夹 + 单命令 Markdown”结构。deprecated 命令只用于兼容、迁移、诊断、修复、bootstrap、schema-boundary 或 smoke，不作为新 authoring 主流程，也不进入默认 command pack 示例。
 
-这些命令仍保留兼容，但资产制作流程应优先使用 JSON / 结构化 JSON：先创建资产，再导出 JSON，写入基础 module 或结构，apply 后再次导出补全属性，继续修改并应用。废弃命令只用于 bootstrap、诊断、迁移、schema 边界和紧急局部修补，不再作为默认 authoring 入口。
+使用 deprecated 命令前必须确认当前替代命令、folder workflow 或 JSON authoring 不能覆盖该操作，并记录 `deprecated_use_case` 和迁移理由。普通资产制作、节点新增、属性写入、UMG/Blueprint/Material/Niagara authoring 不应选择 deprecated 命令。
 
-## 索引
+旧字段和旧结构迁移边界见 `../../json-authoring/06_LegacyMigration.md`。
 
-| 原分册 | 废弃命令归档 |
-|---|---|
-| `01_Core_Level_Assets_Landscape.md` | [`01_Core_Level_Assets_Landscape.md`](01_Core_Level_Assets_Landscape.md) |
-| `02_Blueprint.md` | [`02_Blueprint.md`](02_Blueprint.md) |
-| `03_UMG.md` | [`03_UMG.md`](03_UMG.md) |
-| `04_StaticMesh_EnhancedInput.md` | [`04_StaticMesh_EnhancedInput.md`](04_StaticMesh_EnhancedInput.md) |
-| `05_Material.md` | [`05_Material.md`](05_Material.md) |
-| `06_Sequence.md` | [`06_Sequence.md`](06_Sequence.md) |
-| `07_Niagara_System.md` | [`07_Niagara_System.md`](07_Niagara_System.md) |
-| `08_Niagara_Emitter.md` | [`08_Niagara_Emitter.md`](08_Niagara_Emitter.md) |
-| `09_Niagara_StageGraph.md` | [`09_Niagara_StageGraph.md`](09_Niagara_StageGraph.md) |
-| `11_AnimBlueprint.md` | [`11_AnimBlueprint.md`](11_AnimBlueprint.md) |
-| `12_Montage.md` | [`12_Montage.md`](12_Montage.md) |
-| `13_AnimationAssets_Skeleton.md` | [`13_AnimationAssets_Skeleton.md`](13_AnimationAssets_Skeleton.md) |
-| `14_IKRig_IKRetargeter.md` | [`14_IKRig_IKRetargeter.md`](14_IKRig_IKRetargeter.md) |
+## Categories
+
+- [anim_blueprint](./anim_blueprint/README.md)
+- [animation_assets_skeleton](./animation_assets_skeleton/README.md)
+- [blueprint](./blueprint/README.md)
+- [control_rig_folder_format](./control_rig_folder_format/README.md)
+- [core_level](./core_level/README.md)
+- [material](./material/README.md)
+- [montage](./montage/README.md)
+- [niagara_emitter](./niagara_emitter/README.md)
+- [niagara_stage_graph](./niagara_stage_graph/README.md)
+- [niagara_system](./niagara_system/README.md)
+- [sequence](./sequence/README.md)
+- [static_mesh_enhanced_input](./static_mesh_enhanced_input/README.md)
+- [umg](./umg/README.md)
+
+- 旧 deprecated 大分册已归档到 `../_legacy_big_docs/deprecated/`。

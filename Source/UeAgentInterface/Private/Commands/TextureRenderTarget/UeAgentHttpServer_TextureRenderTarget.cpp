@@ -2,6 +2,9 @@
 
 #include "Server/UeAgentHttpServer.h"
 
+#include "Utilities/UeAgentAuthoringJson.h"
+#include "Utilities/UeAgentDetailsAuthoring.h"
+#include "Utilities/UeAgentFolderDetailsExport.h"
 #include "Utilities/UeAgentJsonDiagnostics.h"
 #include "Module/UeAgentInterfaceLogger.h"
 
@@ -56,7 +59,3 @@
 #include "VT/RuntimeVirtualTexture.h"
 
 #include "UeAgentHttpServer_TextureRenderTarget_TextureAssets.inl"
-
-#include "UeAgentHttpServer_TextureRenderTarget_RenderTargets.inl"
-
-#include "UeAgentHttpServer_TextureRenderTarget_MediaAndSpecializedAssets.inl"

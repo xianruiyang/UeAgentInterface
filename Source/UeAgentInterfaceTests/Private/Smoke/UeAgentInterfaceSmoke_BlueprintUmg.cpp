@@ -1383,15 +1383,54 @@ bool FUeAgentInterfaceBlueprintFolderSmokeTest::RunTest(const FString& Parameter
 	const bool bHasProjectSkeletalAssets =
 		FPackageName::DoesPackageExist(SmokeSkeletalMeshPackage)
 		&& FPackageName::DoesPackageExist(SmokeAnimBlueprintPackage);
-	const FString SkeletalComponentTreeEntry = bHasProjectSkeletalAssets
-		? TEXT(",\n    {\n      \"name\": \"SmokeSkeletalMesh\",\n      \"class\": \"/Script/Engine.SkeletalMeshComponent\",\n      \"parent\": \"DefaultSceneRoot\",\n      \"properties\": [\n        { \"property_name\": \"RelativeLocation\", \"value_text\": \"(X=0.000000,Y=0.000000,Z=64.000000)\" },\n        { \"property_name\": \"RelativeRotation\", \"value_text\": \"(Pitch=0.000000,Yaw=-90.000000,Roll=0.000000)\" },\n        { \"property_name\": \"RelativeScale3D\", \"value_text\": \"(X=1.000000,Y=1.000000,Z=1.000000)\" },\n        { \"property_name\": \"SkeletalMeshAsset\", \"value_text\": \"SkeletalMesh'/Game/Characters/PaladinRootMotion/Mesh/Paladin_WProp_J_Nordstrom_RM.Paladin_WProp_J_Nordstrom_RM'\" },\n        { \"property_name\": \"AnimClass\", \"value_text\": \"AnimBlueprintGeneratedClass'/Game/Characters/PaladinRootMotion/ABP_Paladin_Player_RM.ABP_Paladin_Player_RM_C'\" },\n        { \"property_name\": \"AnimationMode\", \"value_text\": \"AnimationBlueprint\" }\n      ]\n    }")
-		: FString();
+	const FString ComponentsJsonPath = FPaths::Combine(FolderPath, TEXT("components"), TEXT("tree.json"));
 
 	auto SaveUtf8Json = [this](const FString& FilePath, const FString& JsonText) -> bool
 	{
 		const bool bOk = FFileHelper::SaveStringToFile(JsonText, *FilePath, FFileHelper::EEncodingOptions::ForceUTF8WithoutBOM);
 		TestTrue(FString::Printf(TEXT("Save JSON file: %s"), *FilePath), bOk);
 		return bOk;
+	};
+
+	auto SaveJsonObject = [this](const FString& FilePath, const TSharedPtr<FJsonObject>& JsonObject) -> bool
+	{
+		return SaveSmokeJsonFile(this, FilePath, JsonObject, TEXT("Save JSON file"));
+	};
+
+	auto MakeComponentObject = [](const FString& Name, const FString& ClassPath, const FString& Parent) -> TSharedPtr<FJsonObject>
+	{
+		TSharedPtr<FJsonObject> Component = MakeShared<FJsonObject>();
+		Component->SetStringField(TEXT("name"), Name);
+		Component->SetStringField(TEXT("class"), ClassPath);
+		Component->SetStringField(TEXT("parent"), Parent);
+		return Component;
+	};
+
+	auto MakeComponentOwnerInfo = [](const FString& ComponentName, const FString& ClassPath) -> UeAgentDetailsAuthoring::FOwnerInfo
+	{
+		UeAgentDetailsAuthoring::FOwnerInfo OwnerInfo;
+		OwnerInfo.OwnerId = ComponentName;
+		OwnerInfo.OwnerKind = TEXT("blueprint_component");
+		OwnerInfo.OwnerName = ComponentName;
+		OwnerInfo.OwnerClassPath = ClassPath;
+		OwnerInfo.SourceCommand = TEXT("blueprint_apply_folder");
+		return OwnerInfo;
+	};
+
+	auto AddComponentGroupedDetails = [this, &ComponentsJsonPath, &MakeComponentOwnerInfo](
+		const TSharedPtr<FJsonObject>& Component,
+		const FString& ComponentName,
+		const FString& ClassPath,
+		const TArray<TSharedPtr<FJsonValue>>& Properties) -> bool
+	{
+		return SmokeWriteGroupedDetailsForRef(
+			this,
+			ComponentsJsonPath,
+			Component,
+			TEXT("details"),
+			FString::Printf(TEXT("details/components/%s/index.json"), *ComponentName),
+			MakeComponentOwnerInfo(ComponentName, ClassPath),
+			Properties);
 	};
 
 	if (!SaveUtf8Json(
@@ -1425,11 +1464,45 @@ bool FUeAgentInterfaceBlueprintFolderSmokeTest::RunTest(const FString& Parameter
 		return false;
 	}
 
-	if (!SaveUtf8Json(
-		FPaths::Combine(FolderPath, TEXT("components"), TEXT("tree.json")),
-		FString::Printf(
-			TEXT("{\n  \"components\": [\n    {\n      \"name\": \"DefaultSceneRoot\",\n      \"class\": \"/Script/Engine.SceneComponent\",\n      \"parent\": \"\",\n      \"properties\": []\n    },\n    {\n      \"name\": \"SmokeMesh\",\n      \"class\": \"/Script/Engine.StaticMeshComponent\",\n      \"parent\": \"DefaultSceneRoot\",\n      \"properties\": [\n        { \"property_name\": \"RelativeLocation\", \"value_text\": \"(X=0.000000,Y=0.000000,Z=0.000000)\" },\n        { \"property_name\": \"RelativeRotation\", \"value_text\": \"(Pitch=0.000000,Yaw=0.000000,Roll=0.000000)\" },\n        { \"property_name\": \"RelativeScale3D\", \"value_text\": \"(X=1.000000,Y=0.250000,Z=2.000000)\" },\n        { \"property_name\": \"StaticMesh\", \"value_text\": \"StaticMesh'/Engine/BasicShapes/Cube.Cube'\" }\n      ]\n    }%s\n  ]\n}\n"),
-			*SkeletalComponentTreeEntry)))
+	TSharedPtr<FJsonObject> ComponentsJson = MakeShared<FJsonObject>();
+	TArray<TSharedPtr<FJsonValue>> ComponentValues;
+	ComponentValues.Add(MakeShared<FJsonValueObject>(MakeComponentObject(
+		TEXT("DefaultSceneRoot"),
+		TEXT("/Script/Engine.SceneComponent"),
+		FString())));
+
+	const FString StaticMeshClassPath = TEXT("/Script/Engine.StaticMeshComponent");
+	TSharedPtr<FJsonObject> StaticMeshComponent = MakeComponentObject(TEXT("SmokeMesh"), StaticMeshClassPath, TEXT("DefaultSceneRoot"));
+	TArray<TSharedPtr<FJsonValue>> StaticMeshProperties;
+	StaticMeshProperties.Add(MakeShared<FJsonValueObject>(SmokeMakeDetailsProperty(TEXT("RelativeLocation"), TEXT("(X=0.000000,Y=0.000000,Z=0.000000)"))));
+	StaticMeshProperties.Add(MakeShared<FJsonValueObject>(SmokeMakeDetailsProperty(TEXT("RelativeRotation"), TEXT("(Pitch=0.000000,Yaw=0.000000,Roll=0.000000)"))));
+	StaticMeshProperties.Add(MakeShared<FJsonValueObject>(SmokeMakeDetailsProperty(TEXT("RelativeScale3D"), TEXT("(X=1.000000,Y=0.250000,Z=2.000000)"))));
+	StaticMeshProperties.Add(MakeShared<FJsonValueObject>(SmokeMakeDetailsProperty(TEXT("StaticMesh"), TEXT("StaticMesh'/Engine/BasicShapes/Cube.Cube'"))));
+	if (!AddComponentGroupedDetails(StaticMeshComponent, TEXT("SmokeMesh"), StaticMeshClassPath, StaticMeshProperties))
+	{
+		return false;
+	}
+	ComponentValues.Add(MakeShared<FJsonValueObject>(StaticMeshComponent));
+
+	if (bHasProjectSkeletalAssets)
+	{
+		const FString SkeletalMeshClassPath = TEXT("/Script/Engine.SkeletalMeshComponent");
+		TSharedPtr<FJsonObject> SkeletalMeshComponent = MakeComponentObject(TEXT("SmokeSkeletalMesh"), SkeletalMeshClassPath, TEXT("DefaultSceneRoot"));
+		TArray<TSharedPtr<FJsonValue>> SkeletalMeshProperties;
+		SkeletalMeshProperties.Add(MakeShared<FJsonValueObject>(SmokeMakeDetailsProperty(TEXT("RelativeLocation"), TEXT("(X=0.000000,Y=0.000000,Z=64.000000)"))));
+		SkeletalMeshProperties.Add(MakeShared<FJsonValueObject>(SmokeMakeDetailsProperty(TEXT("RelativeRotation"), TEXT("(Pitch=0.000000,Yaw=-90.000000,Roll=0.000000)"))));
+		SkeletalMeshProperties.Add(MakeShared<FJsonValueObject>(SmokeMakeDetailsProperty(TEXT("RelativeScale3D"), TEXT("(X=1.000000,Y=1.000000,Z=1.000000)"))));
+		SkeletalMeshProperties.Add(MakeShared<FJsonValueObject>(SmokeMakeDetailsProperty(TEXT("SkeletalMeshAsset"), TEXT("SkeletalMesh'/Game/Characters/PaladinRootMotion/Mesh/Paladin_WProp_J_Nordstrom_RM.Paladin_WProp_J_Nordstrom_RM'"))));
+		SkeletalMeshProperties.Add(MakeShared<FJsonValueObject>(SmokeMakeDetailsProperty(TEXT("AnimClass"), TEXT("AnimBlueprintGeneratedClass'/Game/Characters/PaladinRootMotion/ABP_Paladin_Player_RM.ABP_Paladin_Player_RM_C'"))));
+		SkeletalMeshProperties.Add(MakeShared<FJsonValueObject>(SmokeMakeDetailsProperty(TEXT("AnimationMode"), TEXT("AnimationBlueprint"))));
+		if (!AddComponentGroupedDetails(SkeletalMeshComponent, TEXT("SmokeSkeletalMesh"), SkeletalMeshClassPath, SkeletalMeshProperties))
+		{
+			return false;
+		}
+		ComponentValues.Add(MakeShared<FJsonValueObject>(SkeletalMeshComponent));
+	}
+	ComponentsJson->SetArrayField(TEXT("components"), MoveTemp(ComponentValues));
+	if (!SaveJsonObject(ComponentsJsonPath, ComponentsJson))
 	{
 		return false;
 	}
@@ -1580,12 +1653,26 @@ bool FUeAgentInterfaceBlueprintFolderSmokeTest::RunTest(const FString& Parameter
 		}
 	}
 
+	{
+		const FString DefaultsJsonPath = FPaths::Combine(FolderPath, TEXT("members"), TEXT("defaults.json"));
+		FString ExportedDefaultsText;
+		TSharedPtr<FJsonObject> ExportedDefaultsJson;
+		TestTrue(TEXT("Blueprint folder exported defaults.json exists"), FFileHelper::LoadFileToString(ExportedDefaultsText, *DefaultsJsonPath));
+		TestFalse(TEXT("Blueprint folder exported defaults has no inline properties"), ExportedDefaultsText.Contains(TEXT("\"properties\"")));
+		TestTrue(TEXT("Blueprint folder exported defaults.json parses"), ParseJson(ExportedDefaultsText, ExportedDefaultsJson));
+		TSharedPtr<FJsonObject> DefaultsDetailsJson;
+		TestTrue(
+			TEXT("Blueprint folder defaults details grouped"),
+			SmokeLoadGroupedDetailsForRef(this, DefaultsJsonPath, ExportedDefaultsJson, TEXT("details"), TEXT("blueprint_class_defaults"), DefaultsDetailsJson));
+	}
+
 	TSharedPtr<FJsonObject> ExportedEventGraphJson;
 	{
-		const FString EventGraphJsonPath = FPaths::Combine(FolderPath, TEXT("graphs"), TEXT("EventGraph.json"));
+		const FString EventGraphJsonPath = FPaths::Combine(FolderPath, TEXT("graphs"), TEXT("items"), TEXT("EventGraph"), TEXT("graph.json"));
 		FString ExportedEventGraphText;
-		TestTrue(TEXT("Blueprint folder exported EventGraph.json exists"), FFileHelper::LoadFileToString(ExportedEventGraphText, *EventGraphJsonPath));
-		TestTrue(TEXT("Blueprint folder exported EventGraph.json parses"), ParseJson(ExportedEventGraphText, ExportedEventGraphJson));
+		TestTrue(TEXT("Blueprint folder exported EventGraph graph.json exists"), FFileHelper::LoadFileToString(ExportedEventGraphText, *EventGraphJsonPath));
+		TestFalse(TEXT("Blueprint folder exported EventGraph has no inline properties"), ExportedEventGraphText.Contains(TEXT("\"properties\"")));
+		TestTrue(TEXT("Blueprint folder exported EventGraph graph.json parses"), ParseJson(ExportedEventGraphText, ExportedEventGraphJson));
 		if (ExportedEventGraphJson.IsValid())
 		{
 			const TArray<TSharedPtr<FJsonValue>>* Nodes = nullptr;
@@ -1594,6 +1681,8 @@ bool FUeAgentInterfaceBlueprintFolderSmokeTest::RunTest(const FString& Parameter
 			{
 				bool bFoundCustomEvent = false;
 				bool bFoundGenericReceiveBeginPlayCall = false;
+				bool bFoundNodeAuthoringMetadata = false;
+				bool bFoundNodeDetails = false;
 				for (const TSharedPtr<FJsonValue>& NodeValue : *Nodes)
 				{
 					const TSharedPtr<FJsonObject>* NodeObj = nullptr;
@@ -1614,18 +1703,27 @@ bool FUeAgentInterfaceBlueprintFolderSmokeTest::RunTest(const FString& Parameter
 					{
 						bFoundGenericReceiveBeginPlayCall = true;
 					}
+					bFoundNodeAuthoringMetadata = bFoundNodeAuthoringMetadata
+						|| ((*NodeObj)->HasTypedField<EJson::Object>(TEXT("selector")) && (*NodeObj)->HasTypedField<EJson::Array>(TEXT("operations")));
+					if ((*NodeObj)->HasTypedField<EJson::Object>(TEXT("details")))
+					{
+						TSharedPtr<FJsonObject> NodeDetailsJson;
+						bFoundNodeDetails = SmokeLoadGroupedDetailsForRef(this, EventGraphJsonPath, *NodeObj, TEXT("details"), TEXT("blueprint_graph_node"), NodeDetailsJson);
+					}
 				}
 				TestTrue(TEXT("Blueprint folder export preserves custom_event node"), bFoundCustomEvent);
 				TestFalse(TEXT("Blueprint folder export does not serialize ReceiveBeginPlay as call_function"), bFoundGenericReceiveBeginPlayCall);
+				TestTrue(TEXT("Blueprint folder node exposes authoring metadata"), bFoundNodeAuthoringMetadata);
+				TestTrue(TEXT("Blueprint folder node details grouped"), bFoundNodeDetails);
 			}
 		}
 	}
 
 	TSharedPtr<FJsonObject> ExportedComponentsJson;
 	{
-		const FString ComponentsJsonPath = FPaths::Combine(FolderPath, TEXT("components"), TEXT("tree.json"));
 		FString ExportedComponentsText;
 		TestTrue(TEXT("Blueprint folder exported components/tree.json exists"), FFileHelper::LoadFileToString(ExportedComponentsText, *ComponentsJsonPath));
+		TestFalse(TEXT("Blueprint folder exported components has no inline properties"), ExportedComponentsText.Contains(TEXT("\"properties\"")));
 		TestTrue(TEXT("Blueprint folder exported components/tree.json parses"), ParseJson(ExportedComponentsText, ExportedComponentsJson));
 		if (ExportedComponentsJson.IsValid())
 		{
@@ -1638,6 +1736,7 @@ bool FUeAgentInterfaceBlueprintFolderSmokeTest::RunTest(const FString& Parameter
 				bool bFoundSkeletalMeshAsset = false;
 				bool bFoundAnimClass = false;
 				bool bFoundAnimationMode = false;
+				bool bFoundComponentDetails = false;
 
 				for (const TSharedPtr<FJsonValue>& ComponentValue : *Components)
 				{
@@ -1659,34 +1758,19 @@ bool FUeAgentInterfaceBlueprintFolderSmokeTest::RunTest(const FString& Parameter
 					}
 
 					bFoundSkeletalMeshComponent = true;
-					const TArray<TSharedPtr<FJsonValue>>* Properties = nullptr;
-					if (!(*ComponentObj)->TryGetArrayField(TEXT("properties"), Properties) || !Properties)
+					TSharedPtr<FJsonObject> ComponentDetailsJson;
+					if (SmokeLoadGroupedDetailsForRef(this, ComponentsJsonPath, *ComponentObj, TEXT("details"), TEXT("blueprint_component"), ComponentDetailsJson))
 					{
-						continue;
-					}
-
-					for (const TSharedPtr<FJsonValue>& PropertyValue : *Properties)
-					{
-						const TSharedPtr<FJsonObject>* PropertyObj = nullptr;
-						if (!PropertyValue.IsValid() || !PropertyValue->TryGetObject(PropertyObj) || !PropertyObj || !PropertyObj->IsValid())
-						{
-							continue;
-						}
-
-						const FString PropertyName = (*PropertyObj)->GetStringField(TEXT("property_name"));
-						const FString ValueText = (*PropertyObj)->GetStringField(TEXT("value_text"));
-						if (PropertyName == TEXT("SkeletalMeshAsset"))
-						{
-							bFoundSkeletalMeshAsset = ValueText.Contains(TEXT("/Game/Characters/PaladinRootMotion/Mesh/Paladin_WProp_J_Nordstrom_RM"));
-						}
-						else if (PropertyName == TEXT("AnimClass"))
-						{
-							bFoundAnimClass = ValueText.Contains(TEXT("/Game/Characters/PaladinRootMotion/ABP_Paladin_Player_RM"));
-						}
-						else if (PropertyName == TEXT("AnimationMode"))
-						{
-							bFoundAnimationMode = ValueText == TEXT("AnimationBlueprint");
-						}
+						bFoundComponentDetails = true;
+						bFoundSkeletalMeshAsset = SmokeDetailsPropertiesContain(
+							ComponentDetailsJson,
+							TEXT("SkeletalMeshAsset"),
+							TEXT("/Game/Characters/PaladinRootMotion/Mesh/Paladin_WProp_J_Nordstrom_RM"));
+						bFoundAnimClass = SmokeDetailsPropertiesContain(
+							ComponentDetailsJson,
+							TEXT("AnimClass"),
+							TEXT("/Game/Characters/PaladinRootMotion/ABP_Paladin_Player_RM"));
+						bFoundAnimationMode = SmokeDetailsPropertiesContain(ComponentDetailsJson, TEXT("AnimationMode"), TEXT("AnimationBlueprint"));
 					}
 				}
 
@@ -1697,12 +1781,13 @@ bool FUeAgentInterfaceBlueprintFolderSmokeTest::RunTest(const FString& Parameter
 					TestTrue(TEXT("Blueprint folder exported skeletal mesh asset property"), bFoundSkeletalMeshAsset);
 					TestTrue(TEXT("Blueprint folder exported anim class property"), bFoundAnimClass);
 					TestTrue(TEXT("Blueprint folder exported animation mode property"), bFoundAnimationMode);
+					TestTrue(TEXT("Blueprint folder component details grouped"), bFoundComponentDetails);
 				}
 			}
 		}
 	}
 
-	const FString EventGraphJsonPath = FPaths::Combine(FolderPath, TEXT("graphs"), TEXT("EventGraph.json"));
+	const FString EventGraphJsonPath = FPaths::Combine(FolderPath, TEXT("graphs"), TEXT("items"), TEXT("EventGraph"), TEXT("graph.json"));
 	const FString ExplicitParentEventGraphJson = TEXT("{\n  \"graph\": {\n    \"name\": \"EventGraph\",\n    \"graph_kind\": \"event_graph\"\n  },\n  \"nodes\": [\n    {\n      \"id\": \"event_begin_play\",\n      \"node_type\": \"event\",\n      \"event_name\": \"ReceiveBeginPlay\",\n      \"event_class\": \"/Script/Engine.Actor\",\n      \"pos\": { \"x\": 0, \"y\": 0 }\n    },\n    {\n      \"id\": \"parent_begin_play\",\n      \"node_type\": \"call_parent_function\",\n      \"function_owner_class\": \"/Script/Engine.Actor\",\n      \"function_name\": \"ReceiveBeginPlay\",\n      \"pos\": { \"x\": 260, \"y\": 0 }\n    }\n  ],\n  \"edges\": []\n}\n");
 	if (!SaveUtf8Json(EventGraphJsonPath, ExplicitParentEventGraphJson))
 	{
@@ -1816,7 +1901,7 @@ bool FUeAgentInterfaceBlueprintFolderSmokeTest::RunTest(const FString& Parameter
 	}
 
 	if (!SaveUtf8Json(
-		FPaths::Combine(FolderPath, TEXT("graphs"), TEXT("Function_UserConstructionScript.json")),
+		FPaths::Combine(FolderPath, TEXT("graphs"), TEXT("items"), TEXT("Function_UserConstructionScript"), TEXT("graph.json")),
 		TEXT("{\n  \"graph\": {\n    \"name\": \"UserConstructionScript\",\n    \"graph_kind\": \"function_graph\"\n  },\n  \"nodes\": [\n    {\n      \"id\": \"call_pcg_generate_local\",\n      \"node_type\": \"call_function\",\n      \"function_owner_class\": \"/Script/PCG.PCGComponent\",\n      \"function_name\": \"GenerateLocal\",\n      \"pos\": { \"x\": 260, \"y\": 0 }\n    }\n  ],\n  \"edges\": []\n}\n")))
 	{
 		return false;
@@ -1840,6 +1925,45 @@ bool FUeAgentInterfaceBlueprintFolderSmokeTest::RunTest(const FString& Parameter
 	TestTrue(
 		TEXT("Blueprint folder unsafe PCG construction script error is explicit"),
 		UnsafeApplyError.Contains(TEXT("unsafe_construction_script_pcg_generation_blocked")));
+
+	TSharedPtr<FJsonObject> LegacyComponentsJson;
+	if (LoadSmokeJsonFile(this, ComponentsJsonPath, LegacyComponentsJson, TEXT("Blueprint legacy components tree")))
+	{
+		const TArray<TSharedPtr<FJsonValue>>* LegacyComponents = nullptr;
+		TestTrue(TEXT("Blueprint legacy components array exists"), LegacyComponentsJson->TryGetArrayField(TEXT("components"), LegacyComponents) && LegacyComponents && LegacyComponents->Num() > 0);
+		if (LegacyComponents && LegacyComponents->Num() > 0)
+		{
+			const TSharedPtr<FJsonObject>* LegacyComponentObj = nullptr;
+			TestTrue(TEXT("Blueprint legacy component parses"), (*LegacyComponents)[0]->TryGetObject(LegacyComponentObj) && LegacyComponentObj && LegacyComponentObj->IsValid());
+			if (LegacyComponentObj && LegacyComponentObj->IsValid())
+			{
+				TArray<TSharedPtr<FJsonValue>> LegacyProperties;
+				LegacyProperties.Add(MakeShared<FJsonValueObject>(SmokeMakeDetailsProperty(TEXT("RelativeLocation"), TEXT("(X=1.000000,Y=2.000000,Z=3.000000)"))));
+				(*LegacyComponentObj)->SetArrayField(TEXT("properties"), MoveTemp(LegacyProperties));
+			}
+		}
+		TestTrue(TEXT("Blueprint legacy components tree saves"), SaveSmokeJsonFile(this, ComponentsJsonPath, LegacyComponentsJson, TEXT("Blueprint legacy components tree")));
+	}
+
+	const FString LegacyApplyBody = MakeExecRequestBody(
+		TEXT("smoke-blueprint-folder-legacy-properties-001"),
+		TEXT("blueprint_apply_folder"),
+		FString::Printf(TEXT("{\"asset_path\":\"%s\",\"compile_after_apply\":false,\"save_after_apply\":false}"), *BlueprintAssetPath));
+	FHttpSmokeResult LegacyApplyResult;
+	TestTrue(TEXT("Blueprint folder legacy properties request reached server"), ExecuteHttpJsonRequest(TEXT("POST"), ServerScope.BaseUrl + TEXT("/api/exec"), ServerScope.Token, LegacyApplyBody, LegacyApplyResult, 15.0));
+	TestEqual(TEXT("Blueprint folder legacy properties are rejected"), LegacyApplyResult.StatusCode, 400);
+
+	TSharedPtr<FJsonObject> LegacyApplyJson;
+	TestTrue(TEXT("Blueprint folder legacy properties response parses JSON"), ParseJson(LegacyApplyResult.Body, LegacyApplyJson));
+	const TSharedPtr<FJsonObject>* LegacyApplyData = nullptr;
+	TestTrue(TEXT("Blueprint folder legacy rejection data exists"), LegacyApplyJson.IsValid() && LegacyApplyJson->TryGetObjectField(TEXT("data"), LegacyApplyData) && LegacyApplyData && LegacyApplyData->IsValid());
+	if (LegacyApplyData && LegacyApplyData->IsValid())
+	{
+		TestEqual(TEXT("Blueprint folder legacy rejection schema"), (*LegacyApplyData)->GetStringField(TEXT("schema")), FString(TEXT("uai.legacy_rejection.v1")));
+		TestEqual(TEXT("Blueprint folder legacy rejection error code"), (*LegacyApplyData)->GetStringField(TEXT("error_code")), FString(TEXT("legacy_inline_properties_not_supported")));
+		TestEqual(TEXT("Blueprint folder legacy rejection surface"), (*LegacyApplyData)->GetStringField(TEXT("legacy_surface")), FString(TEXT("properties[]")));
+		TestFalse(TEXT("Blueprint folder legacy rejection not dropped"), (*LegacyApplyData)->GetBoolField(TEXT("dropped")));
+	}
 
 	return !HasAnyErrors();
 }
@@ -2159,7 +2283,7 @@ bool FUeAgentInterfaceBlueprintGraphSmokeTest::RunTest(const FString& Parameters
 	const FString LayoutAllGraphsBody = MakeExecRequestBody(
 		TEXT("smoke-blueprint-layout-all-graphs-001"),
 		TEXT("blueprint_layout_all_graphs"),
-		FString::Printf(TEXT("{\"asset_path\":\"%s\",\"graph_names\":[\"EventGraph\"],\"dry_run\":true,\"compile_after_layout\":false,\"save_after_layout\":false,\"stop_on_error\":true}"), *BlueprintAssetPath));
+		FString::Printf(TEXT("{\"asset_path\":\"%s\",\"graph_names\":[\"EventGraph\"],\"compile_after_layout\":false,\"save_after_layout\":false,\"stop_on_error\":true}"), *BlueprintAssetPath));
 	FHttpSmokeResult LayoutAllGraphsResult;
 	TestTrue(TEXT("Blueprint layout_all_graphs request succeeded"), ExecuteHttpJsonRequest(TEXT("POST"), ServerScope.BaseUrl + TEXT("/api/exec"), ServerScope.Token, LayoutAllGraphsBody, LayoutAllGraphsResult));
 	TestEqual(TEXT("Blueprint layout_all_graphs status code"), LayoutAllGraphsResult.StatusCode, 200);
@@ -2198,7 +2322,7 @@ bool FUeAgentInterfaceBlueprintGraphSmokeTest::RunTest(const FString& Parameters
 	const FString NodeGraphLayoutBody = MakeExecRequestBody(
 		TEXT("smoke-node-graph-layout-blueprint-001"),
 		TEXT("node_graph_layout"),
-		FString::Printf(TEXT("{\"asset_path\":\"%s\",\"graph_selector\":{\"mode\":\"single\",\"graph_name\":\"EventGraph\"},\"dry_run\":true,\"compile_after_layout\":false,\"save_after_layout\":false,\"stop_on_error\":true}"), *BlueprintAssetPath));
+		FString::Printf(TEXT("{\"asset_path\":\"%s\",\"graph_selector\":{\"mode\":\"single\",\"graph_name\":\"EventGraph\"},\"compile_after_layout\":false,\"save_after_layout\":false,\"stop_on_error\":true}"), *BlueprintAssetPath));
 	FHttpSmokeResult NodeGraphLayoutResult;
 	TestTrue(TEXT("Node graph layout request succeeded"), ExecuteHttpJsonRequest(TEXT("POST"), ServerScope.BaseUrl + TEXT("/api/exec"), ServerScope.Token, NodeGraphLayoutBody, NodeGraphLayoutResult));
 	TestEqual(TEXT("Node graph layout status code"), NodeGraphLayoutResult.StatusCode, 200);
@@ -2233,47 +2357,41 @@ bool FUeAgentInterfaceBlueprintGraphSmokeTest::RunTest(const FString& Parameters
 	{
 		TestTrue(TEXT("Blueprint graph layout covers created nodes"), static_cast<int32>((*LayoutGraphData)->GetIntegerField(TEXT("node_count"))) >= 3);
 		TestTrue(TEXT("Blueprint graph layout sees connected edge"), static_cast<int32>((*LayoutGraphData)->GetIntegerField(TEXT("edge_count"))) >= 1);
-		TestTrue(TEXT("Blueprint graph layout reports connected components"), static_cast<int32>((*LayoutGraphData)->GetIntegerField(TEXT("component_count"))) >= 1);
-		TestEqual(TEXT("Blueprint graph layout reports semantic island strategy"), (*LayoutGraphData)->GetStringField(TEXT("layout_strategy")), FString(TEXT("semantic_island_multiport_bus_layout_v2")));
-		TestEqual(TEXT("Blueprint graph layout selects semantic island engine"), (*LayoutGraphData)->GetStringField(TEXT("selected_candidate")), FString(TEXT("semantic_island_multiport_bus_layout")));
+		TestTrue(TEXT("Blueprint graph layout reports data islands"), static_cast<int32>((*LayoutGraphData)->GetIntegerField(TEXT("data_island_count"))) >= 1);
+		TestEqual(TEXT("Blueprint graph layout reports clean semantic framework"), (*LayoutGraphData)->GetStringField(TEXT("layout_framework")), FString(TEXT("clean_semantic_island_multiport_layout")));
+		TestEqual(TEXT("Blueprint graph layout selects clean rewrite candidate"), (*LayoutGraphData)->GetStringField(TEXT("selected_candidate")), FString(TEXT("clean_rewrite")));
 		TestTrue(TEXT("Blueprint graph layout design coverage is complete"), (*LayoutGraphData)->GetBoolField(TEXT("layout_design_complete")));
 		TestTrue(TEXT("Blueprint graph layout moved nodes"), static_cast<int32>((*LayoutGraphData)->GetIntegerField(TEXT("moved_node_count"))) >= 2);
 		TestEqual(TEXT("Blueprint graph layout removes estimated node overlaps"), static_cast<int32>((*LayoutGraphData)->GetIntegerField(TEXT("overlap_count_after"))), 0);
 		TestEqual(TEXT("Blueprint graph layout avoids estimated wire-node intersections"), static_cast<int32>((*LayoutGraphData)->GetIntegerField(TEXT("edge_node_intersection_count_after"))), 0);
 		TestTrue(TEXT("Blueprint graph layout reports changed"), (*LayoutGraphData)->GetBoolField(TEXT("changed")));
-		TestTrue(TEXT("Blueprint graph layout reports exec-dominant metrics"), (*LayoutGraphData)->HasField(TEXT("metrics_exec_dominant_candidate")));
-		TestTrue(TEXT("Blueprint graph layout reports exec-dominant centered metrics"), (*LayoutGraphData)->HasField(TEXT("metrics_exec_dominant_centered_candidate")));
-		TestTrue(TEXT("Blueprint graph layout reports dependency-dominant metrics"), (*LayoutGraphData)->HasField(TEXT("metrics_dependency_dominant_candidate")));
-		TestTrue(TEXT("Blueprint graph layout reports dependency-dominant refined metrics"), (*LayoutGraphData)->HasField(TEXT("metrics_dependency_dominant_refined_candidate")));
-		TestTrue(TEXT("Blueprint graph layout reports dependency-dominant centered metrics"), (*LayoutGraphData)->HasField(TEXT("metrics_dependency_dominant_centered_candidate")));
-		TestTrue(TEXT("Blueprint graph layout reports existing-refined metrics"), (*LayoutGraphData)->HasField(TEXT("metrics_existing_refined_candidate")));
-		TestTrue(TEXT("Blueprint graph layout reports existing semantic port constraint metrics"), (*LayoutGraphData)->HasField(TEXT("metrics_existing_semantic_port_constraint_candidate")));
-		TestTrue(TEXT("Blueprint graph layout reports semantic port constraint metrics"), (*LayoutGraphData)->HasField(TEXT("metrics_semantic_port_constraint_candidate")));
-		TestTrue(TEXT("Blueprint graph layout reports exec-dominant score"), (*LayoutGraphData)->HasField(TEXT("score_exec_dominant_candidate")));
-		TestTrue(TEXT("Blueprint graph layout reports exec-dominant centered score"), (*LayoutGraphData)->HasField(TEXT("score_exec_dominant_centered_candidate")));
-		TestTrue(TEXT("Blueprint graph layout reports dependency-dominant score"), (*LayoutGraphData)->HasField(TEXT("score_dependency_dominant_candidate")));
-		TestTrue(TEXT("Blueprint graph layout reports dependency-dominant refined score"), (*LayoutGraphData)->HasField(TEXT("score_dependency_dominant_refined_candidate")));
-		TestTrue(TEXT("Blueprint graph layout reports dependency-dominant centered score"), (*LayoutGraphData)->HasField(TEXT("score_dependency_dominant_centered_candidate")));
-		TestTrue(TEXT("Blueprint graph layout reports existing-refined score"), (*LayoutGraphData)->HasField(TEXT("score_existing_refined_candidate")));
-		TestTrue(TEXT("Blueprint graph layout reports existing semantic port constraint score"), (*LayoutGraphData)->HasField(TEXT("score_existing_semantic_port_constraint_candidate")));
-		TestTrue(TEXT("Blueprint graph layout reports semantic port constraint score"), (*LayoutGraphData)->HasField(TEXT("score_semantic_port_constraint_candidate")));
-		TestTrue(TEXT("Blueprint graph layout reports backward edge diagnostics"), (*LayoutGraphData)->HasField(TEXT("backward_edges_after")));
-		TestTrue(TEXT("Blueprint graph layout reports pin order diagnostics"), (*LayoutGraphData)->HasField(TEXT("pin_order_violations_after")));
-		TestTrue(TEXT("Blueprint graph layout reports raw edge count"), (*LayoutGraphData)->HasField(TEXT("raw_edge_count")));
+		TestTrue(TEXT("Blueprint graph layout reports before metrics"), (*LayoutGraphData)->HasField(TEXT("metrics_before")));
+		TestTrue(TEXT("Blueprint graph layout reports after metrics"), (*LayoutGraphData)->HasField(TEXT("metrics_after")));
+		TestTrue(TEXT("Blueprint graph layout reports reroute-plan metrics"), (*LayoutGraphData)->HasField(TEXT("metrics_after_reroute_plan")));
+		TestTrue(TEXT("Blueprint graph layout reports design coverage array"), (*LayoutGraphData)->HasField(TEXT("layout_design_feature_coverage")));
+		TestTrue(TEXT("Blueprint graph layout reports island diagnostics"), (*LayoutGraphData)->HasField(TEXT("island_diagnostics")));
+		TestTrue(TEXT("Blueprint graph layout reports route diagnostics"), (*LayoutGraphData)->HasField(TEXT("route_diagnostics")));
+		TestTrue(TEXT("Blueprint graph layout reports placement component count"), (*LayoutGraphData)->HasField(TEXT("placement_component_count")));
 		TestTrue(TEXT("Blueprint graph layout reports reroute plan"), (*LayoutGraphData)->HasField(TEXT("reroute_plan")));
 		TestTrue(TEXT("Blueprint graph layout reports reroute plan count"), (*LayoutGraphData)->HasField(TEXT("reroute_plan_count")));
-		TestTrue(TEXT("Blueprint graph layout reports inserted reroute count"), (*LayoutGraphData)->HasField(TEXT("reroute_inserted_edge_count")));
+		TestTrue(TEXT("Blueprint graph layout reports created reroute count"), (*LayoutGraphData)->HasField(TEXT("created_reroute_node_count")));
 
 		const TArray<TSharedPtr<FJsonValue>>* LayoutNodes = nullptr;
 		TestTrue(TEXT("Blueprint graph layout returns node entries"), (*LayoutGraphData)->TryGetArrayField(TEXT("nodes"), LayoutNodes) && LayoutNodes && LayoutNodes->Num() >= 3);
 		if (LayoutNodes && LayoutNodes->Num() > 0)
 		{
 			const TSharedPtr<FJsonObject> FirstLayoutNode = (*LayoutNodes)[0]->AsObject();
+			TestTrue(TEXT("Blueprint graph layout node reports guid"), FirstLayoutNode.IsValid() && FirstLayoutNode->HasField(TEXT("guid")));
+			TestTrue(TEXT("Blueprint graph layout node reports title"), FirstLayoutNode.IsValid() && FirstLayoutNode->HasField(TEXT("title")));
+			TestTrue(TEXT("Blueprint graph layout node reports class name"), FirstLayoutNode.IsValid() && FirstLayoutNode->HasField(TEXT("class_name")));
 			TestTrue(TEXT("Blueprint graph layout node reports component"), FirstLayoutNode.IsValid() && FirstLayoutNode->HasField(TEXT("component")));
-			TestTrue(TEXT("Blueprint graph layout node reports input pin count"), FirstLayoutNode.IsValid() && FirstLayoutNode->HasField(TEXT("input_pin_count")));
-			TestTrue(TEXT("Blueprint graph layout node reports output pin count"), FirstLayoutNode.IsValid() && FirstLayoutNode->HasField(TEXT("output_pin_count")));
+			TestTrue(TEXT("Blueprint graph layout node reports rank"), FirstLayoutNode.IsValid() && FirstLayoutNode->HasField(TEXT("rank")));
+			TestTrue(TEXT("Blueprint graph layout node reports order"), FirstLayoutNode.IsValid() && FirstLayoutNode->HasField(TEXT("order")));
+			TestTrue(TEXT("Blueprint graph layout node reports input pin anchors"), FirstLayoutNode.IsValid() && FirstLayoutNode->HasField(TEXT("input_pin_anchor_count")));
+			TestTrue(TEXT("Blueprint graph layout node reports output pin anchors"), FirstLayoutNode.IsValid() && FirstLayoutNode->HasField(TEXT("output_pin_anchor_count")));
 			TestTrue(TEXT("Blueprint graph layout node reports exec pin classification"), FirstLayoutNode.IsValid() && FirstLayoutNode->HasField(TEXT("has_exec_pin")));
-			TestTrue(TEXT("Blueprint graph layout node reports reroute classification"), FirstLayoutNode.IsValid() && FirstLayoutNode->HasField(TEXT("is_reroute_node")));
+			TestTrue(TEXT("Blueprint graph layout node reports comment classification"), FirstLayoutNode.IsValid() && FirstLayoutNode->HasField(TEXT("is_comment_node")));
+			TestTrue(TEXT("Blueprint graph layout node reports measured geometry state"), FirstLayoutNode.IsValid() && FirstLayoutNode->HasField(TEXT("measured_geometry")));
 		}
 
 		const TSharedPtr<FJsonObject>* MetricsAfter = nullptr;
@@ -2281,11 +2399,12 @@ bool FUeAgentInterfaceBlueprintGraphSmokeTest::RunTest(const FString& Parameters
 		if (MetricsAfter && MetricsAfter->IsValid())
 		{
 			TestTrue(TEXT("Blueprint graph layout final metrics include backward edge count"), (*MetricsAfter)->HasField(TEXT("backward_edge_count")));
-			TestTrue(TEXT("Blueprint graph layout final metrics include backward wire length"), (*MetricsAfter)->HasField(TEXT("backward_wire_manhattan_length")));
 			TestTrue(TEXT("Blueprint graph layout final metrics include pin order violation count"), (*MetricsAfter)->HasField(TEXT("pin_order_violation_count")));
+			TestTrue(TEXT("Blueprint graph layout final metrics include total wire length"), (*MetricsAfter)->HasField(TEXT("total_wire_manhattan_length")));
+			TestTrue(TEXT("Blueprint graph layout final metrics include total data wire length"), (*MetricsAfter)->HasField(TEXT("total_non_exec_wire_manhattan_length")));
+			TestTrue(TEXT("Blueprint graph layout final metrics include width"), (*MetricsAfter)->HasField(TEXT("layout_width")));
+			TestTrue(TEXT("Blueprint graph layout final metrics include height"), (*MetricsAfter)->HasField(TEXT("layout_height")));
 			TestTrue(TEXT("Blueprint graph layout final metrics include layout area"), (*MetricsAfter)->HasField(TEXT("layout_area")));
-			TestTrue(TEXT("Blueprint graph layout final metrics include backward data edge count"), (*MetricsAfter)->HasField(TEXT("backward_data_edge_count")));
-			TestTrue(TEXT("Blueprint graph layout final metrics include aspect ratio"), (*MetricsAfter)->HasField(TEXT("layout_aspect_ratio")));
 		}
 	}
 
@@ -2808,7 +2927,7 @@ bool FUeAgentInterfaceUmgFolderSmokeTest::RunTest(const FString& Parameters)
 	TestTrue(TEXT("UMG folder export folder path non-empty"), !FolderPath.IsEmpty());
 
 	const FString VariablesPath = FPaths::Combine(FolderPath, TEXT("members"), TEXT("variables.json"));
-	const FString TreePath = FPaths::Combine(FolderPath, TEXT("widget_tree"), TEXT("tree.json"));
+	const FString TreePath = FPaths::Combine(FolderPath, TEXT("widget_tree.json"));
 	const FString AnimationsPath = FPaths::Combine(FolderPath, TEXT("animations"), TEXT("animations.json"));
 
 	TSharedPtr<FJsonObject> VariablesJson;
@@ -2827,11 +2946,17 @@ bool FUeAgentInterfaceUmgFolderSmokeTest::RunTest(const FString& Parameters)
 	TestTrue(TEXT("UMG folder variables save"), SaveJsonFile(VariablesPath, VariablesJson));
 
 	TSharedPtr<FJsonObject> TreeJson;
+	FString TreeText;
+	TestTrue(TEXT("UMG folder tree text load"), FFileHelper::LoadFileToString(TreeText, *TreePath));
+	TestFalse(TEXT("UMG folder exported tree has no inline properties"), TreeText.Contains(TEXT("\"properties\"")));
 	TestTrue(TEXT("UMG folder tree load"), LoadJsonFile(TreePath, TreeJson));
 	const TArray<TSharedPtr<FJsonValue>>* WidgetsArray = nullptr;
 	TestTrue(TEXT("UMG folder widgets array exists"), TreeJson->TryGetArrayField(TEXT("widgets"), WidgetsArray) && WidgetsArray != nullptr);
-	bool bFoundExportedFontSize = false;
-	bool bUpdatedFontSize = false;
+	bool bUpdatedSlotZOrder = false;
+	bool bFoundWidgetAuthoringMetadata = false;
+	bool bFoundWidgetDetails = false;
+	bool bFoundSlotAuthoringMetadata = false;
+	bool bFoundSlotDetails = false;
 	if (WidgetsArray)
 	{
 		for (const TSharedPtr<FJsonValue>& WidgetValue : *WidgetsArray)
@@ -2845,54 +2970,36 @@ bool FUeAgentInterfaceUmgFolderSmokeTest::RunTest(const FString& Parameters)
 			{
 				continue;
 			}
-
-			const TArray<TSharedPtr<FJsonValue>>* Properties = nullptr;
-			if ((*WidgetObj)->TryGetArrayField(TEXT("properties"), Properties) && Properties)
+			bFoundWidgetAuthoringMetadata = (*WidgetObj)->HasTypedField<EJson::Object>(TEXT("selector"))
+				&& (*WidgetObj)->HasTypedField<EJson::Array>(TEXT("operations"));
+			TSharedPtr<FJsonObject> WidgetDetailsJson;
+			if (SmokeLoadGroupedDetailsForRef(this, TreePath, *WidgetObj, TEXT("details"), TEXT("umg_widget"), WidgetDetailsJson))
 			{
-				for (const TSharedPtr<FJsonValue>& PropertyValue : *Properties)
-				{
-					const TSharedPtr<FJsonObject>* PropertyObj = nullptr;
-					if (!PropertyValue.IsValid() || !PropertyValue->TryGetObject(PropertyObj) || !PropertyObj || !PropertyObj->IsValid())
-					{
-						continue;
-					}
-					if ((*PropertyObj)->GetStringField(TEXT("property_name")) == TEXT("RenderOpacity"))
-					{
-						(*PropertyObj)->SetStringField(TEXT("value_text"), TEXT("0.750000"));
-					}
-					if ((*PropertyObj)->GetStringField(TEXT("property_name")) == TEXT("Font.Size"))
-					{
-						bFoundExportedFontSize = (*PropertyObj)->GetStringField(TEXT("value_text")).Contains(TEXT("32"));
-						(*PropertyObj)->SetStringField(TEXT("value_text"), TEXT("36"));
-						bUpdatedFontSize = true;
-					}
-				}
+				bFoundWidgetDetails = SmokeDetailsPropertiesContain(WidgetDetailsJson, TEXT("RenderOpacity"));
+				TestTrue(
+					TEXT("UMG folder updates RenderOpacity grouped details"),
+					SmokeSetGroupedDetailsFieldStringValue(this, TreePath, *WidgetObj, TEXT("details"), TEXT("RenderOpacity"), TEXT("0.750000")));
 			}
 
 			const TSharedPtr<FJsonObject>* SlotObj = nullptr;
 			if ((*WidgetObj)->TryGetObjectField(TEXT("slot"), SlotObj) && SlotObj && SlotObj->IsValid())
 			{
-				const TArray<TSharedPtr<FJsonValue>>* SlotProperties = nullptr;
-				if ((*SlotObj)->TryGetArrayField(TEXT("properties"), SlotProperties) && SlotProperties)
+				bFoundSlotAuthoringMetadata = (*SlotObj)->HasTypedField<EJson::Object>(TEXT("selector"))
+					&& (*SlotObj)->HasTypedField<EJson::Array>(TEXT("operations"));
+				TSharedPtr<FJsonObject> SlotDetailsJson;
+				if (SmokeLoadGroupedDetailsForRef(this, TreePath, *SlotObj, TEXT("details"), TEXT("umg_slot"), SlotDetailsJson))
 				{
-					for (const TSharedPtr<FJsonValue>& PropertyValue : *SlotProperties)
-					{
-						const TSharedPtr<FJsonObject>* PropertyObj = nullptr;
-						if (!PropertyValue.IsValid() || !PropertyValue->TryGetObject(PropertyObj) || !PropertyObj || !PropertyObj->IsValid())
-						{
-							continue;
-						}
-						if ((*PropertyObj)->GetStringField(TEXT("property_name")) == TEXT("ZOrder"))
-						{
-							(*PropertyObj)->SetStringField(TEXT("value_text"), TEXT("9"));
-						}
-					}
+					bFoundSlotDetails = SmokeDetailsPropertiesContain(SlotDetailsJson, TEXT("ZOrder"));
+					bUpdatedSlotZOrder = SmokeSetGroupedDetailsFieldStringValue(this, TreePath, *SlotObj, TEXT("details"), TEXT("ZOrder"), TEXT("9"));
 				}
 			}
 		}
 	}
-	TestTrue(TEXT("UMG folder exported text font size"), bFoundExportedFontSize);
-	TestTrue(TEXT("UMG folder updated text font size in folder JSON"), bUpdatedFontSize);
+	TestTrue(TEXT("UMG folder widget exposes authoring metadata"), bFoundWidgetAuthoringMetadata);
+	TestTrue(TEXT("UMG folder widget details grouped"), bFoundWidgetDetails);
+	TestTrue(TEXT("UMG folder slot exposes authoring metadata"), bFoundSlotAuthoringMetadata);
+	TestTrue(TEXT("UMG folder slot details grouped"), bFoundSlotDetails);
+	TestTrue(TEXT("UMG folder updated slot ZOrder in grouped details"), bUpdatedSlotZOrder);
 	TestTrue(TEXT("UMG folder tree save"), SaveJsonFile(TreePath, TreeJson));
 
 	TSharedPtr<FJsonObject> AnimationsJson;
@@ -2956,6 +3063,8 @@ bool FUeAgentInterfaceUmgFolderSmokeTest::RunTest(const FString& Parameters)
 			TestFalse(TEXT("UMG folder apply compile has no errors"), (*CompileObj)->GetBoolField(TEXT("has_error")));
 		}
 		TestTrue(TEXT("UMG folder apply changed widgets"), static_cast<int32>((*ApplyData)->GetIntegerField(TEXT("widgets_added"))) >= 1);
+		TestTrue(TEXT("UMG folder apply grouped widget details"), static_cast<int32>((*ApplyData)->GetIntegerField(TEXT("widget_properties_applied"))) >= 1);
+		TestTrue(TEXT("UMG folder apply grouped slot details"), static_cast<int32>((*ApplyData)->GetIntegerField(TEXT("slot_properties_applied"))) >= 1);
 		TestTrue(TEXT("UMG folder apply changed animation keys"), static_cast<int32>((*ApplyData)->GetIntegerField(TEXT("animation_keys_applied"))) >= 3);
 	}
 
@@ -2989,11 +3098,14 @@ bool FUeAgentInterfaceUmgFolderSmokeTest::RunTest(const FString& Parameters)
 	}
 
 	TSharedPtr<FJsonObject> VerifyTreeJson;
-	TestTrue(TEXT("UMG folder verify tree load"), LoadJsonFile(FPaths::Combine(ReExportFolderPath, TEXT("widget_tree"), TEXT("tree.json")), VerifyTreeJson));
+	const FString VerifyTreePath = FPaths::Combine(ReExportFolderPath, TEXT("widget_tree.json"));
+	FString VerifyTreeText;
+	TestTrue(TEXT("UMG folder verify tree text load"), FFileHelper::LoadFileToString(VerifyTreeText, *VerifyTreePath));
+	TestFalse(TEXT("UMG folder re-exported tree has no inline properties"), VerifyTreeText.Contains(TEXT("\"properties\"")));
+	TestTrue(TEXT("UMG folder verify tree load"), LoadJsonFile(VerifyTreePath, VerifyTreeJson));
 	const TArray<TSharedPtr<FJsonValue>>* VerifyWidgetsArray = nullptr;
 	TestTrue(TEXT("UMG folder verify widgets array exists"), VerifyTreeJson->TryGetArrayField(TEXT("widgets"), VerifyWidgetsArray) && VerifyWidgetsArray != nullptr);
 	bool bVerifiedWidgetProperty = false;
-	bool bVerifiedFontSize = false;
 	bool bVerifiedSlotProperty = false;
 	if (VerifyWidgetsArray)
 	{
@@ -3009,54 +3121,24 @@ bool FUeAgentInterfaceUmgFolderSmokeTest::RunTest(const FString& Parameters)
 				continue;
 			}
 
-			const TArray<TSharedPtr<FJsonValue>>* Properties = nullptr;
-			if ((*WidgetObj)->TryGetArrayField(TEXT("properties"), Properties) && Properties)
+			TSharedPtr<FJsonObject> WidgetDetailsJson;
+			if (SmokeLoadGroupedDetailsForRef(this, VerifyTreePath, *WidgetObj, TEXT("details"), TEXT("umg_widget"), WidgetDetailsJson))
 			{
-				for (const TSharedPtr<FJsonValue>& PropertyValue : *Properties)
-				{
-					const TSharedPtr<FJsonObject>* PropertyObj = nullptr;
-					if (!PropertyValue.IsValid() || !PropertyValue->TryGetObject(PropertyObj) || !PropertyObj || !PropertyObj->IsValid())
-					{
-						continue;
-					}
-					if ((*PropertyObj)->GetStringField(TEXT("property_name")) == TEXT("RenderOpacity") &&
-						(*PropertyObj)->GetStringField(TEXT("value_text")).Contains(TEXT("0.750000")))
-					{
-						bVerifiedWidgetProperty = true;
-					}
-					if ((*PropertyObj)->GetStringField(TEXT("property_name")) == TEXT("Font.Size") &&
-						(*PropertyObj)->GetStringField(TEXT("value_text")).Contains(TEXT("36")))
-					{
-						bVerifiedFontSize = true;
-					}
-				}
+				bVerifiedWidgetProperty = SmokeDetailsPropertiesContain(WidgetDetailsJson, TEXT("RenderOpacity"), TEXT("0.750000"));
 			}
 
 			const TSharedPtr<FJsonObject>* SlotObj = nullptr;
 			if ((*WidgetObj)->TryGetObjectField(TEXT("slot"), SlotObj) && SlotObj && SlotObj->IsValid())
 			{
-				const TArray<TSharedPtr<FJsonValue>>* SlotProperties = nullptr;
-				if ((*SlotObj)->TryGetArrayField(TEXT("properties"), SlotProperties) && SlotProperties)
+				TSharedPtr<FJsonObject> SlotDetailsJson;
+				if (SmokeLoadGroupedDetailsForRef(this, VerifyTreePath, *SlotObj, TEXT("details"), TEXT("umg_slot"), SlotDetailsJson))
 				{
-					for (const TSharedPtr<FJsonValue>& PropertyValue : *SlotProperties)
-					{
-						const TSharedPtr<FJsonObject>* PropertyObj = nullptr;
-						if (!PropertyValue.IsValid() || !PropertyValue->TryGetObject(PropertyObj) || !PropertyObj || !PropertyObj->IsValid())
-						{
-							continue;
-						}
-						if ((*PropertyObj)->GetStringField(TEXT("property_name")) == TEXT("ZOrder") &&
-							(*PropertyObj)->GetStringField(TEXT("value_text")).Contains(TEXT("9")))
-						{
-							bVerifiedSlotProperty = true;
-						}
-					}
+					bVerifiedSlotProperty = SmokeDetailsPropertiesContain(SlotDetailsJson, TEXT("ZOrder"), TEXT("9"));
 				}
 			}
 		}
 	}
 	TestTrue(TEXT("UMG folder verify widget property applied"), bVerifiedWidgetProperty);
-	TestTrue(TEXT("UMG folder verify font size applied"), bVerifiedFontSize);
 	TestTrue(TEXT("UMG folder verify slot property applied"), bVerifiedSlotProperty);
 
 	const FString ListAnimationsBody = MakeExecRequestBody(
@@ -3154,6 +3236,44 @@ bool FUeAgentInterfaceUmgFolderSmokeTest::RunTest(const FString& Parameters)
 		}
 		TestTrue(TEXT("UMG folder animation contains three opacity keys"), bVerifiedThreeKeys);
 		TestTrue(TEXT("UMG folder animation contains background color track"), bVerifiedBackgroundColorTrack);
+	}
+
+	if (VerifyTreeJson.IsValid())
+	{
+		const TArray<TSharedPtr<FJsonValue>>* LegacyWidgetsArray = nullptr;
+		TestTrue(TEXT("UMG legacy widgets array exists"), VerifyTreeJson->TryGetArrayField(TEXT("widgets"), LegacyWidgetsArray) && LegacyWidgetsArray && LegacyWidgetsArray->Num() > 0);
+		if (LegacyWidgetsArray && LegacyWidgetsArray->Num() > 0)
+		{
+			const TSharedPtr<FJsonObject>* LegacyWidgetObj = nullptr;
+			TestTrue(TEXT("UMG legacy widget parses"), (*LegacyWidgetsArray)[0]->TryGetObject(LegacyWidgetObj) && LegacyWidgetObj && LegacyWidgetObj->IsValid());
+			if (LegacyWidgetObj && LegacyWidgetObj->IsValid())
+			{
+				TArray<TSharedPtr<FJsonValue>> LegacyProperties;
+				LegacyProperties.Add(MakeShared<FJsonValueObject>(SmokeMakeDetailsProperty(TEXT("RenderOpacity"), TEXT("0.25"))));
+				(*LegacyWidgetObj)->SetArrayField(TEXT("properties"), MoveTemp(LegacyProperties));
+			}
+		}
+		TestTrue(TEXT("UMG legacy tree saves"), SaveJsonFile(VerifyTreePath, VerifyTreeJson));
+	}
+
+	const FString LegacyApplyBody = MakeExecRequestBody(
+		TEXT("smoke-umg-folder-legacy-properties-001"),
+		TEXT("umg_apply_folder"),
+		FString::Printf(TEXT("{\"asset_path\":\"%s\",\"create_if_missing\":false,\"compile_after_apply\":false,\"save_after_apply\":false}"), *WidgetBlueprintAssetPath));
+	FHttpSmokeResult LegacyApplyResult;
+	TestTrue(TEXT("UMG folder legacy properties request reached server"), ExecuteHttpJsonRequest(TEXT("POST"), ServerScope.BaseUrl + TEXT("/api/exec"), ServerScope.Token, LegacyApplyBody, LegacyApplyResult));
+	TestEqual(TEXT("UMG folder legacy properties are rejected"), LegacyApplyResult.StatusCode, 400);
+
+	TSharedPtr<FJsonObject> LegacyApplyJson;
+	TestTrue(TEXT("UMG folder legacy properties response parses JSON"), ParseJson(LegacyApplyResult.Body, LegacyApplyJson));
+	const TSharedPtr<FJsonObject>* LegacyApplyData = nullptr;
+	TestTrue(TEXT("UMG folder legacy rejection data exists"), LegacyApplyJson.IsValid() && LegacyApplyJson->TryGetObjectField(TEXT("data"), LegacyApplyData) && LegacyApplyData && LegacyApplyData->IsValid());
+	if (LegacyApplyData && LegacyApplyData->IsValid())
+	{
+		TestEqual(TEXT("UMG folder legacy rejection schema"), (*LegacyApplyData)->GetStringField(TEXT("schema")), FString(TEXT("uai.legacy_rejection.v1")));
+		TestEqual(TEXT("UMG folder legacy rejection error code"), (*LegacyApplyData)->GetStringField(TEXT("error_code")), FString(TEXT("legacy_inline_properties_not_supported")));
+		TestEqual(TEXT("UMG folder legacy rejection surface"), (*LegacyApplyData)->GetStringField(TEXT("legacy_surface")), FString(TEXT("properties[]")));
+		TestFalse(TEXT("UMG folder legacy rejection not dropped"), (*LegacyApplyData)->GetBoolField(TEXT("dropped")));
 	}
 
 	return !HasAnyErrors();

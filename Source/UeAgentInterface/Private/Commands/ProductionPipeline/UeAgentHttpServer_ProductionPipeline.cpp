@@ -2,6 +2,7 @@
 
 #include "Server/UeAgentHttpServer.h"
 
+#include "Utilities/UeAgentAuthoringJson.h"
 #include "Utilities/UeAgentJsonDiagnostics.h"
 
 #include "AssetRegistry/AssetRegistryModule.h"
@@ -77,6 +78,24 @@ namespace UeAgentProductionPipelineOps
 	static void AddIssue(TArray<TSharedPtr<FJsonValue>>& Issues, const FString& Severity, const FString& Code, const FString& Path, const FString& Message)
 	{
 		UeAgentJsonDiagnostics::AddIssue(Issues, Severity, Code, Path, Message);
+	}
+
+	static void ApplySectionAuthoringMetadata(
+		const TSharedPtr<FJsonObject>& Obj,
+		const FString& SectionName,
+		const FString& DisplayName,
+		const FString& CategoryPath,
+		std::initializer_list<FString> Operations)
+	{
+		UeAgentAuthoringJson::ApplyAuthoringMetadata(
+			Obj,
+			TEXT("section"),
+			SectionName,
+			DisplayName,
+			CategoryPath,
+			TEXT("section"),
+			TEXT("struct"),
+			Operations);
 	}
 
 	static int32 CountErrors(const TArray<TSharedPtr<FJsonValue>>& Issues)
@@ -204,9 +223,7 @@ namespace UeAgentProductionPipelineOps
 		OutputFile = ResolveProjectFilePath(OutputFile);
 		IFileManager::Get().MakeDirectory(*FPaths::GetPath(OutputFile), true);
 		FString JsonText;
-		const TSharedRef<TJsonWriter<TCHAR, TPrettyJsonPrintPolicy<TCHAR>>> Writer =
-			TJsonWriterFactory<TCHAR, TPrettyJsonPrintPolicy<TCHAR>>::Create(&JsonText);
-		if (!FJsonSerializer::Serialize(Root.ToSharedRef(), Writer))
+		if (!UeAgentJsonDiagnostics::SerializeJsonObjectCompact(Root, JsonText))
 		{
 			OutError = TEXT("json_serialize_failed");
 			return false;
@@ -263,8 +280,7 @@ namespace UeAgentProductionPipelineOps
 		FString JsonText;
 		if (Obj.IsValid())
 		{
-			const TSharedRef<TJsonWriter<TCHAR>> Writer = TJsonWriterFactory<TCHAR>::Create(&JsonText);
-			FJsonSerializer::Serialize(Obj.ToSharedRef(), Writer);
+			UeAgentJsonDiagnostics::SerializeJsonObjectCompact(Obj, JsonText);
 		}
 		return JsonText;
 	}
@@ -1309,6 +1325,7 @@ namespace UeAgentProductionPipelineOps
 		TargetObj->SetStringField(TEXT("platform"), Profile.Platform);
 		TargetObj->SetStringField(TEXT("configuration"), Profile.Configuration);
 		TargetObj->SetBoolField(TEXT("client"), true);
+		ApplySectionAuthoringMetadata(TargetObj, TEXT("target"), TEXT("Target"), TEXT("Packaging|Target"), { TEXT("set") });
 		Root->SetObjectField(TEXT("target"), TargetObj);
 		TSharedPtr<FJsonObject> PipelineObj = MakeShared<FJsonObject>();
 		PipelineObj->SetBoolField(TEXT("build"), Profile.bBuild);
@@ -1318,18 +1335,22 @@ namespace UeAgentProductionPipelineOps
 		PipelineObj->SetBoolField(TEXT("archive"), Profile.bArchive);
 		PipelineObj->SetBoolField(TEXT("pak"), Profile.bPak);
 		PipelineObj->SetBoolField(TEXT("iostore"), Profile.bIoStore);
+		ApplySectionAuthoringMetadata(PipelineObj, TEXT("pipeline"), TEXT("Pipeline"), TEXT("Packaging|Pipeline"), { TEXT("set") });
 		Root->SetObjectField(TEXT("pipeline"), PipelineObj);
 		TSharedPtr<FJsonObject> ContentObj = MakeShared<FJsonObject>();
 		ContentObj->SetArrayField(TEXT("maps"), StringArrayToJson(Profile.Maps));
 		ContentObj->SetArrayField(TEXT("cultures"), StringArrayToJson(Profile.Cultures));
+		ApplySectionAuthoringMetadata(ContentObj, TEXT("content"), TEXT("Content"), TEXT("Packaging|Content"), { TEXT("set") });
 		Root->SetObjectField(TEXT("content"), ContentObj);
 		TSharedPtr<FJsonObject> OutputObj = MakeShared<FJsonObject>();
 		OutputObj->SetStringField(TEXT("archive_directory"), Profile.ArchiveDirectory);
+		ApplySectionAuthoringMetadata(OutputObj, TEXT("output"), TEXT("Output"), TEXT("Packaging|Output"), { TEXT("set") });
 		Root->SetObjectField(TEXT("output"), OutputObj);
 		TSharedPtr<FJsonObject> OptionsObj = MakeShared<FJsonObject>();
 		OptionsObj->SetBoolField(TEXT("clean"), Profile.bClean);
 		OptionsObj->SetBoolField(TEXT("compressed"), Profile.bCompressed);
 		OptionsObj->SetBoolField(TEXT("prereqs"), Profile.bPrereqs);
+		ApplySectionAuthoringMetadata(OptionsObj, TEXT("options"), TEXT("Options"), TEXT("Packaging|Options"), { TEXT("set") });
 		Root->SetObjectField(TEXT("options"), OptionsObj);
 		TArray<TSharedPtr<FJsonValue>> SettingsRefs;
 		SettingsRefs.Add(MakeShared<FJsonValueString>(TEXT("project_settings_export_page:Project/Packaging")));
@@ -1541,6 +1562,15 @@ namespace UeAgentProductionPipelineOps
 		Obj->SetStringField(TEXT("device_type"), Profile.DeviceType);
 		Obj->SetStringField(TEXT("base_profile"), Profile.BaseProfile);
 		Obj->SetObjectField(TEXT("cvars"), MakeStringMapObject(Profile.CVars));
+		UeAgentAuthoringJson::ApplyAuthoringMetadata(
+			Obj,
+			TEXT("name"),
+			Profile.Name,
+			Profile.Name,
+			TEXT("Device Profiles"),
+			TEXT("device_profile"),
+			TEXT("struct"),
+			{ TEXT("set"), TEXT("remove") });
 		if (bIncludeSource)
 		{
 			Obj->SetStringField(TEXT("source_file"), Profile.SourceFile);
@@ -1790,6 +1820,7 @@ namespace UeAgentProductionPipelineOps
 			Group->SetStringField(TEXT("section"), Pair.Key);
 			Group->SetStringField(TEXT("source_file"), Pair.Value.SourceFile);
 			Group->SetObjectField(TEXT("values"), MakeStringMapObject(Pair.Value.Values));
+			ApplySectionAuthoringMetadata(Group, Pair.Key, Pair.Key, TEXT("Scalability"), { TEXT("set") });
 			Groups.Add(MakeShared<FJsonValueObject>(Group));
 		}
 		QualityLevels.Sort();

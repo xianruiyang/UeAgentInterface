@@ -247,6 +247,25 @@ namespace
 	};
 }
 
+UUeAgentAddPrimitiveToolBuilder::UUeAgentAddPrimitiveToolBuilder()
+	: ShapeType(EUeAgentPrimitiveShapeType::Ramp)
+{
+}
+
+UUeAgentProceduralRampToolProperties::UUeAgentProceduralRampToolProperties()
+	: Width(100.0f)
+	, Depth(100.0f)
+	, Height(100.0f)
+{
+}
+
+UUeAgentProceduralRampCornerToolProperties::UUeAgentProceduralRampCornerToolProperties()
+	: Width(100.0f)
+	, Depth(100.0f)
+	, Height(100.0f)
+{
+}
+
 bool UUeAgentAddPrimitiveToolBuilder::CanBuildTool(const FToolBuilderState& SceneState) const
 {
 	return true;
@@ -307,6 +326,11 @@ void UUeAgentAddRampPrimitiveTool::GenerateMesh(FDynamicMesh3* OutMesh) const
 	OutMesh->Copy(&Generator);
 }
 
+bool UUeAgentAddRampPrimitiveTool::ShouldCenterXY() const
+{
+	return true;
+}
+
 UUeAgentAddRampCornerPrimitiveTool::UUeAgentAddRampCornerPrimitiveTool(const FObjectInitializer& ObjectInitializer)
 	: Super(ObjectInitializer.SetDefaultSubobjectClass<UUeAgentProceduralRampCornerToolProperties>(TEXT("ShapeSettings")))
 {
@@ -324,6 +348,11 @@ void UUeAgentAddRampCornerPrimitiveTool::GenerateMesh(FDynamicMesh3* OutMesh) co
 	Generator.SetPolygroupMode(ShapeSettings ? ShapeSettings->PolygroupMode : EMakeMeshPolygroupMode::PerFace);
 	Generator.Generate();
 	OutMesh->Copy(&Generator);
+}
+
+bool UUeAgentAddRampCornerPrimitiveTool::ShouldCenterXY() const
+{
+	return true;
 }
 
 #undef LOCTEXT_NAMESPACE

@@ -2,6 +2,9 @@
 
 #include "Server/UeAgentHttpServer.h"
 
+#include "Utilities/UeAgentAuthoringJson.h"
+#include "Utilities/UeAgentDetailsAuthoring.h"
+#include "Utilities/UeAgentFolderDetailsExport.h"
 #include "Utilities/UeAgentJsonDiagnostics.h"
 
 #include "Animation/AnimInstance.h"
@@ -146,6 +149,16 @@ namespace UeAgentSkeletalMeshOps
 		Obj->SetObjectField(TEXT("relative_location"), BuildVectorJson(Socket ? Socket->RelativeLocation : FVector::ZeroVector));
 		Obj->SetObjectField(TEXT("relative_rotation"), BuildRotatorJson(Socket ? Socket->RelativeRotation : FRotator::ZeroRotator));
 		Obj->SetObjectField(TEXT("relative_scale"), BuildVectorJson(Socket ? Socket->RelativeScale : FVector::OneVector));
+		const FString SocketName = Socket ? Socket->SocketName.ToString() : TEXT("");
+		UeAgentAuthoringJson::ApplyAuthoringMetadata(
+			Obj,
+			TEXT("socket_name"),
+			SocketName,
+			SocketName,
+			TEXT("Skeletal Mesh|Sockets"),
+			TEXT("transform"),
+			TEXT("skeletal_mesh_socket"),
+			{ TEXT("set"), TEXT("remove") });
 		return Obj;
 	}
 
@@ -196,9 +209,7 @@ namespace UeAgentSkeletalMeshOps
 	static FString MakeJsonString(const TSharedPtr<FJsonObject>& Obj)
 	{
 		FString JsonText;
-		const TSharedRef<TJsonWriter<TCHAR, TPrettyJsonPrintPolicy<TCHAR>>> Writer =
-			TJsonWriterFactory<TCHAR, TPrettyJsonPrintPolicy<TCHAR>>::Create(&JsonText);
-		FJsonSerializer::Serialize(Obj.ToSharedRef(), Writer);
+		UeAgentJsonDiagnostics::SerializeJsonObjectCompact(Obj, JsonText);
 		return JsonText;
 	}
 
@@ -259,6 +270,15 @@ namespace UeAgentSkeletalMeshOps
 			Item->SetStringField(TEXT("slot_name"), Material.MaterialSlotName.ToString());
 			Item->SetStringField(TEXT("material"), Material.MaterialInterface ? Material.MaterialInterface->GetPathName() : TEXT(""));
 			Item->SetStringField(TEXT("imported_material_slot_name"), Material.ImportedMaterialSlotName.ToString());
+			UeAgentAuthoringJson::ApplyAuthoringMetadata(
+				Item,
+				TEXT("slot_index"),
+				FString::FromInt(Index),
+				Material.MaterialSlotName.ToString(),
+				TEXT("Skeletal Mesh|Materials"),
+				TEXT("asset_picker"),
+				TEXT("material_slot"),
+				{ TEXT("set") });
 			Materials.Add(MakeShared<FJsonValueObject>(Item));
 		}
 		Obj->SetArrayField(TEXT("materials"), Materials);
@@ -413,6 +433,15 @@ namespace UeAgentSkeletalMeshOps
 				TSharedPtr<FJsonObject> Item = MakeShared<FJsonObject>();
 				Item->SetStringField(TEXT("profile_name"), ProfileInfo.Name.ToString());
 				Item->SetBoolField(TEXT("is_available"), true);
+				UeAgentAuthoringJson::ApplyAuthoringMetadata(
+					Item,
+					TEXT("profile_name"),
+					ProfileInfo.Name.ToString(),
+					ProfileInfo.Name.ToString(),
+					TEXT("Skeletal Mesh|Skin Weight Profiles"),
+					TEXT("action"),
+					TEXT("skin_weight_profile"),
+					{ TEXT("remove") });
 				TArray<TSharedPtr<FJsonValue>> LodSources;
 #if WITH_EDITORONLY_DATA
 				for (const TPair<int32, FString>& Pair : ProfileInfo.PerLODSourceFiles)
@@ -689,7 +718,17 @@ bool FUeAgentHttpServer::CmdSkeletalMeshExportFolder(const FUeAgentRequestContex
 	};
 
 	const FString ValidationDir = FPaths::Combine(FolderPath, TEXT("validation"));
-	if (!SaveRequiredJson(FPaths::Combine(FolderPath, TEXT("asset.json")), UeAgentSkeletalMeshOps::BuildAssetJson(Mesh))) return false;
+	TSharedPtr<FJsonObject> AssetJson = UeAgentSkeletalMeshOps::BuildAssetJson(Mesh);
+	if (!UeAgentFolderDetailsExport::AttachOwnerDetails(
+		Mesh,
+		FolderPath,
+		TEXT("skeletal_mesh_export_folder"),
+		TEXT("skeletal_mesh_asset"),
+		Mesh->GetPathName(),
+		TEXT("asset"),
+		AssetJson,
+		OutError)) return false;
+	if (!SaveRequiredJson(FPaths::Combine(FolderPath, TEXT("asset.json")), AssetJson)) return false;
 	if (!SaveRequiredJson(FPaths::Combine(FolderPath, TEXT("mesh.json")), UeAgentSkeletalMeshOps::BuildMeshJson(Mesh))) return false;
 	if (!SaveRequiredJson(FPaths::Combine(FolderPath, TEXT("skeleton.json")), UeAgentSkeletalMeshOps::BuildSkeletonJson(Mesh))) return false;
 	if (!SaveRequiredJson(FPaths::Combine(FolderPath, TEXT("materials.json")), UeAgentSkeletalMeshOps::BuildMaterialsJson(Mesh))) return false;
@@ -707,8 +746,6 @@ bool FUeAgentHttpServer::CmdSkeletalMeshExportFolder(const FUeAgentRequestContex
 	if (!SaveRequiredJson(FPaths::Combine(FolderPath, TEXT("deformers.json")), UeAgentSkeletalMeshOps::BuildDeformersJson(Mesh))) return false;
 	if (!SaveRequiredJson(FPaths::Combine(FolderPath, TEXT("sampling_regions.json")), MakeShared<FJsonObject>())) return false;
 	if (!SaveRequiredJson(FPaths::Combine(FolderPath, TEXT("import_data.json")), UeAgentSkeletalMeshOps::BuildImportDataJson(Mesh))) return false;
-	if (!SaveRequiredJson(FPaths::Combine(FolderPath, TEXT("raw_properties.json")), MakeShared<FJsonObject>())) return false;
-	if (!SaveRequiredJson(FPaths::Combine(FolderPath, TEXT("readonly_properties.json")), MakeShared<FJsonObject>())) return false;
 	if (!SaveRequiredJson(FPaths::Combine(ValidationDir, TEXT("coverage_report.json")), UeAgentSkeletalMeshOps::BuildCoverageJson())) return false;
 	if (!SaveRequiredJson(FPaths::Combine(ValidationDir, TEXT("mesh_integrity_report.json")), UeAgentSkeletalMeshOps::BuildSectionsJson(Mesh))) return false;
 	if (!SaveRequiredJson(FPaths::Combine(ValidationDir, TEXT("morph_target_report.json")), UeAgentSkeletalMeshOps::BuildMorphTargetsJson(Mesh))) return false;
@@ -758,6 +795,18 @@ bool FUeAgentHttpServer::CmdSkeletalMeshApplyFolder(const FUeAgentRequestContext
 	if (!Mesh)
 	{
 		OutError = TEXT("skeletal_mesh_not_found");
+		return false;
+	}
+
+	TSharedPtr<FJsonObject> LegacyRejection;
+	if (UeAgentDetailsAuthoring::BuildLegacyPropertiesFolderRejectionIfPresent(
+		FolderPath,
+		UeAgentDetailsAuthoring::MakeOwnerInfoForObject(Mesh, TEXT("skeletal_mesh_asset"), Mesh->GetPathName(), TEXT("skeletal_mesh_apply_folder")),
+		TEXT("asset.json.details.index_file"),
+		LegacyRejection,
+		OutError))
+	{
+		OutData = LegacyRejection;
 		return false;
 	}
 
@@ -828,6 +877,7 @@ bool FUeAgentHttpServer::CmdSkeletalMeshApplyFolder(const FUeAgentRequestContext
 	}
 
 	int32 StructuredApplied = 0;
+	int32 GroupedDetailsApplied = 0;
 	TArray<TSharedPtr<FJsonValue>> PropertyResults;
 	auto AddPropertyResult = [&PropertyResults](const FString& JsonPath, const FString& Status, const FString& Message)
 	{
@@ -837,6 +887,25 @@ bool FUeAgentHttpServer::CmdSkeletalMeshApplyFolder(const FUeAgentRequestContext
 		Item->SetStringField(TEXT("message"), Message);
 		PropertyResults.Add(MakeShared<FJsonValueObject>(Item));
 	};
+	TSharedPtr<FJsonObject> DetailsApplySummary;
+	if (!UeAgentDetailsAuthoring::ApplyOwnerDetailsFromEntryIfPresent(
+		Mesh,
+		FolderPath,
+		AssetJson,
+		UeAgentDetailsAuthoring::MakeOwnerInfoForObject(Mesh, TEXT("skeletal_mesh_asset"), Mesh->GetPathName(), TEXT("skeletal_mesh_apply_folder")),
+		TEXT("details"),
+		!(bDryRun || bValidateOnly),
+		DetailsApplySummary,
+		GroupedDetailsApplied,
+		OutError))
+	{
+		return false;
+	}
+	if (GroupedDetailsApplied > 0)
+	{
+		StructuredApplied += GroupedDetailsApplied;
+		AddPropertyResult(TEXT("asset.json.details"), TEXT("applied"), FString::FromInt(GroupedDetailsApplied));
+	}
 
 	if (!bDryRun && !bValidateOnly)
 	{
@@ -1080,6 +1149,7 @@ bool FUeAgentHttpServer::CmdSkeletalMeshApplyFolder(const FUeAgentRequestContext
 	OutData->SetBoolField(TEXT("applied"), !(bDryRun || bValidateOnly));
 	OutData->SetBoolField(TEXT("dry_run"), bDryRun || bValidateOnly);
 	OutData->SetNumberField(TEXT("structured_fields_applied"), StructuredApplied);
+	OutData->SetNumberField(TEXT("grouped_details_applied"), GroupedDetailsApplied);
 	OutData->SetNumberField(TEXT("raw_properties_applied"), 0);
 	OutData->SetNumberField(TEXT("operations_executed"), 0);
 	OutData->SetArrayField(TEXT("json_issues"), Issues);
@@ -1087,6 +1157,10 @@ bool FUeAgentHttpServer::CmdSkeletalMeshApplyFolder(const FUeAgentRequestContext
 	OutData->SetNumberField(TEXT("error_count"), UeAgentJsonDiagnostics::CountIssuesBySeverity(Issues, TEXT("error")));
 	OutData->SetNumberField(TEXT("warning_count"), UeAgentJsonDiagnostics::CountIssuesBySeverity(Issues, TEXT("warning")));
 	OutData->SetArrayField(TEXT("property_results"), PropertyResults);
+	if (DetailsApplySummary.IsValid())
+	{
+		OutData->SetObjectField(TEXT("details_apply"), DetailsApplySummary);
+	}
 	OutData->SetObjectField(TEXT("readback"), ReadbackData);
 	OutData->SetObjectField(TEXT("validation_report"), UeAgentSkeletalMeshOps::BuildCoverageJson());
 	if (UeAgentJsonDiagnostics::HasErrorIssue(Issues))

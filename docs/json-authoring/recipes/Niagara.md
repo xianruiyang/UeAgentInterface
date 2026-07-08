@@ -23,10 +23,10 @@ Niagara JSON 里所有 module、dynamic input、node 和 input 名都必须来�
 标准取证顺序：
 
 1. 用 `node_catalog_search(catalog_type=niagara_module/niagara_dynamic_input/niagara_graph_node)` 查真实候选；分类不明确时先 `node_catalog_categories`。
-2. 需要理解候选含义时，用同一组 `kind/name/full_name` 调 `node_origin_resolve`，只读取资产/package/source 路径。
+2. 需要理解候选含义时，优先用 search seed 的 `path` 调 `node_origin_resolve`，只读取资产/package/source 路径。
 3. 用 `niagara*_export_folder` 导出目标资产，读取当前 stage/module/input 结构。
 4. 用 `niagara_emitter_list_stages`、`niagara_emitter_list_stage_modules`、`niagara_emitter_list_stage_nodes`、`niagara_emitter_list_module_inputs` 或对应 `niagara_system_*` 读取 live Stack 细节。
-5. 直接编辑 authoring JSON；新增或切换 dynamic input 时使用 `node_catalog_search` 返回的 `json_authoring` 或 `seed.kind/name/full_name`。
+5. 直接编辑 `llm_authoring` JSON；新增或切换 dynamic input 时使用 `node_catalog_search.items_tsv` 返回的 `path` / `name` seed。
 6. apply 后重新 export，确认 UE 补全后的真实字段、active branch、renderer binding、compile log 和 stack issue。
 
 查询 Stack module 候选：
@@ -40,7 +40,7 @@ Niagara JSON 里所有 module、dynamic input、node 和 input 名都必须来�
 }
 ```
 
-使用返回的 `kind/name/full_name/json_authoring/write_support/support_reason` 写 JSON；`name` 只能作为阅读和默认本地 id，稳定写入必须依赖 `full_name`。Niagara module seed 当前只用于匹配已有导出的 module 并编辑 input；若目标 stage 中不存在该 module，adapter 会返回 `selector_not_found`，不能把它当成新增 stack module 成功。
+使用 `items_tsv` 解析出的 `path` / `name` seed 写 JSON。Path-backed module script 使用 `path`；无路径操作候选使用 `name`。Niagara module seed 当前只用于匹配已有导出的 module 并编辑 input；若目标 stage 中不存在该 module，adapter 会返回 `selector_not_found`，不能把它当成新增 stack module 成功。
 
 查询 Dynamic Input / Function 下拉候选：
 
@@ -53,7 +53,7 @@ Niagara JSON 里所有 module、dynamic input、node 和 input 名都必须来�
 }
 ```
 
-把候选的 `json_authoring` 直接放入某个 module input 的 `value`，或复制 `seed.dynamic_input.kind/name/full_name`。需要理解脚本内部含义时，先 `node_origin_resolve` 看资产路径，再按需用 `niagara_script_export_folder` 只读导出该 script 的图结构；不要修改引擎内置 script 资产。
+把候选 TSV 的 `path` / `name` seed 放入某个 module input 的 `value`。需要理解脚本内部含义时，先 `node_origin_resolve` 看资产路径，再按需用 `niagara_script_export_folder` 只读导出该 script 的图结构；不要修改引擎内置 script 资产。
 
 ## Module input 普通改值
 
@@ -113,7 +113,7 @@ Niagara input 右侧下拉不是普通 enum，它改变 input 来源。JSON 用 
 | `local_value` | 同普通 value，写 `literal/selected/components/curve`。 | supported |
 | `default_value` | `{ "source": "default_value" }`。 | supported |
 | `linked_input` | `{ "source": "linked_input", "linked_parameter": "Particles.Velocity" }`。 | supported |
-| `dynamic_input` | 写 `dynamic_input.kind/name/full_name` 或直接放入 catalog `json_authoring`。 | supported with catalog identity |
+| `dynamic_input` | 写 `items_tsv` 解析出的 `path` 或 `name` seed。 | supported with catalog identity |
 | `make` | 同 dynamic input，候选应为 Make 类 Niagara function。 | supported with catalog identity |
 | `expression` | 目前明确失败。 | unsupported |
 | `scratch_dynamic_input` | 目前明确失败；先创建真实 script asset 后再作为 dynamic input 选择。 | unsupported |
@@ -140,9 +140,7 @@ Dynamic input：
   "value": {
     "source": "dynamic_input",
     "dynamic_input": {
-      "kind": "niagara_dynamic_input",
-      "name": "Random Range Vector",
-      "full_name": "/Niagara/Functions/Random/RandomRangeVector.RandomRangeVector",
+      "path": "/Niagara/Functions/Random/RandomRangeVector.RandomRangeVector",
       "inputs": [],
       "data_interfaces": []
     }
@@ -150,7 +148,7 @@ Dynamic input：
 }
 ```
 
-不能只写 `Random Range Vector` 这个 UI 显示名。adapter 需要能从 `full_name` 解析到真实 Niagara script asset path；旧 `script_asset_path/node_name` 仅保留兼容输入和 readback 证据。
+不能只写 `Random Range Vector` 这个 UI 显示名。旧 `script_asset_path/node_name/full_name` 仅保留为显式迁移、debug/readback 识别字段。
 
 ## Curve
 
@@ -204,6 +202,6 @@ Niagara apply 后至少检查：
 - apply response warning/error。
 - export/readback 的目标 input。
 - `link_kind` / `linked_parameter_name`，如果用了 linked input。
-- dynamic input 的 `full_name`、解析后的脚本路径和子 input/data interface。
+- dynamic input 的 seed、解析后的脚本路径和子 input/data interface。
 - Stack issue 和 compile log。
 - 视觉行为相关时做 preview advance、runtime probe 或 screenshot。

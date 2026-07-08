@@ -2,26 +2,25 @@
 
 #pragma once
 
+#include "Containers/UnrealString.h"
+#include "Delegates/Delegate.h"
 #include "Modules/ModuleManager.h"
-#include "ModelingModeToolExtensions.h"
+#include "Templates/SharedPointer.h"
+#include "Templates/UniquePtr.h"
 
 class FUeAgentHttpServer;
 class IConsoleObject;
+class SWindow;
 
-struct FExtensionToolQueryInfo;
-struct FExtensionToolDescription;
-struct FModelingModeExtensionExtendedInfo;
+struct FToolMenuContext;
 
-class FUeAgentInterfaceModule final : public IModuleInterface, public IModelingModeToolExtension
+class UEAGENTINTERFACE_API FUeAgentInterfaceModule final : public IModuleInterface
 {
 public:
+	FUeAgentInterfaceModule();
+
 	virtual void StartupModule() override;
 	virtual void ShutdownModule() override;
-
-	virtual FText GetExtensionName() override;
-	virtual FText GetToolSectionName() override;
-	virtual void GetExtensionTools(const FExtensionToolQueryInfo& QueryInfo, TArray<FExtensionToolDescription>& ToolsOut) override;
-	virtual bool GetExtensionExtendedInfo(FModelingModeExtensionExtendedInfo& InfoOut) override;
 
 private:
 	void RegisterMenus();
@@ -38,13 +37,24 @@ private:
 	void ConsoleStopServer();
 	void ConsoleRestartServer();
 
+	void InstallStartMinimizedMainFrameHookIfRequested();
+	void UninstallStartMinimizedMainFrameHook();
+	void HandleMainFrameCreationFinishedForStartMinimized(TSharedPtr<SWindow> MainFrameWindow, bool bShowStartupDialogInPlaceOfMainEditor);
+	void ApplyTemporaryRootWindowMaximizeOverride();
+	void RestoreTemporaryRootWindowMaximizeOverride();
+
 	bool EnsureAuthToken() const;
 	bool StartServerInternal();
 	void StopServerInternal();
 
 	TUniquePtr<FUeAgentHttpServer> Server;
 
-	IConsoleObject* ConsoleCmdStart = nullptr;
-	IConsoleObject* ConsoleCmdStop = nullptr;
-	IConsoleObject* ConsoleCmdRestart = nullptr;
+	IConsoleObject* ConsoleCmdStart;
+	IConsoleObject* ConsoleCmdStop;
+	IConsoleObject* ConsoleCmdRestart;
+
+	FDelegateHandle MainFrameCreationFinishedForStartMinimizedHandle;
+	FString PreviousRootWindowInitiallyMaximizedValue;
+	bool bAppliedRootWindowMaximizeOverride;
+	bool bHadPreviousRootWindowInitiallyMaximizedValue;
 };

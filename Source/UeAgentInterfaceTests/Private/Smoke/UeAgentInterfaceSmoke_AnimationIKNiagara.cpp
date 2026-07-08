@@ -2,6 +2,27 @@
 
 #include "UeAgentSmokeTestSharedIncludes.inl"
 
+#include "Framework/Docking/TabManager.h"
+
+static bool HasAuthoringMetadata(const TSharedPtr<FJsonObject>& Obj)
+{
+	return Obj.IsValid()
+		&& Obj->HasTypedField<EJson::Object>(TEXT("selector"))
+		&& Obj->HasTypedField<EJson::Array>(TEXT("operations"));
+}
+
+static void DisableHeadlessDeferredLayoutSaves()
+{
+	if (!FApp::IsUnattended())
+	{
+		return;
+	}
+
+	TSharedRef<FGlobalTabmanager> GlobalTabManager = FGlobalTabmanager::Get();
+	GlobalTabManager->SetCanSavePersistentLayouts(false);
+	GlobalTabManager->ClearPendingLayoutSave();
+}
+
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(
 	FUeAgentInterfaceMontageSmokeTest,
 	"GptProjectTest.UeAgentInterface.Smoke.MontageWorkflow",
@@ -2499,32 +2520,6 @@ bool FUeAgentInterfaceAnimBlueprintFolderSmokeTest::RunTest(const FString& Param
 		return true;
 	};
 
-	auto SaveJsonFile = [this](const FString& FilePath, const TSharedPtr<FJsonObject>& Obj) -> bool
-	{
-		if (!Obj.IsValid())
-		{
-			AddError(FString::Printf(TEXT("Save json failed, invalid object: %s"), *FilePath));
-			return false;
-		}
-
-		FString JsonText;
-		const TSharedRef<TJsonWriter<TCHAR, TPrettyJsonPrintPolicy<TCHAR>>> Writer =
-			TJsonWriterFactory<TCHAR, TPrettyJsonPrintPolicy<TCHAR>>::Create(&JsonText);
-		if (!FJsonSerializer::Serialize(Obj.ToSharedRef(), Writer))
-		{
-			AddError(FString::Printf(TEXT("Serialize json failed: %s"), *FilePath));
-			return false;
-		}
-
-		if (!FFileHelper::SaveStringToFile(JsonText, *FilePath, FFileHelper::EEncodingOptions::ForceUTF8WithoutBOM))
-		{
-			AddError(FString::Printf(TEXT("Write file failed: %s"), *FilePath));
-			return false;
-		}
-
-		return true;
-	};
-
 	auto FindNodeObjectByClass = [](const TSharedPtr<FJsonObject>& GraphRoot, const FString& NodeClassPath, TSharedPtr<FJsonObject>& OutNodeObj) -> bool
 	{
 		if (!GraphRoot.IsValid())
@@ -2550,38 +2545,6 @@ bool FUeAgentInterfaceAnimBlueprintFolderSmokeTest::RunTest(const FString& Param
 			if ((*NodeObjPtr)->TryGetStringField(TEXT("node_class"), NodeClass) && NodeClass.Equals(NodeClassPath, ESearchCase::IgnoreCase))
 			{
 				OutNodeObj = *NodeObjPtr;
-				return true;
-			}
-		}
-
-		return false;
-	};
-
-	auto FindPropertyObject = [](const TSharedPtr<FJsonObject>& NodeObj, const FString& PropertyName, TSharedPtr<FJsonObject>& OutPropertyObj) -> bool
-	{
-		if (!NodeObj.IsValid())
-		{
-			return false;
-		}
-
-		const TArray<TSharedPtr<FJsonValue>>* PropertiesArray = nullptr;
-		if (!NodeObj->TryGetArrayField(TEXT("properties"), PropertiesArray) || !PropertiesArray)
-		{
-			return false;
-		}
-
-		for (const TSharedPtr<FJsonValue>& PropertyValue : *PropertiesArray)
-		{
-			const TSharedPtr<FJsonObject>* PropertyObjPtr = nullptr;
-			if (!PropertyValue.IsValid() || !PropertyValue->TryGetObject(PropertyObjPtr) || !PropertyObjPtr || !PropertyObjPtr->IsValid())
-			{
-				continue;
-			}
-
-			FString CandidateName;
-			if ((*PropertyObjPtr)->TryGetStringField(TEXT("property_name"), CandidateName) && CandidateName == PropertyName)
-			{
-				OutPropertyObj = *PropertyObjPtr;
 				return true;
 			}
 		}
@@ -2734,28 +2697,43 @@ bool FUeAgentInterfaceAnimBlueprintFolderSmokeTest::RunTest(const FString& Param
 	TestTrue(TEXT("AnimBlueprint folder export parses JSON"), ParseJson(ExportResult.Body, ExportJson));
 	TestTrue(TEXT("AnimBlueprint folder export root ok=true"), ExportJson.IsValid() && ExportJson->GetBoolField(TEXT("ok")));
 
-	const FString AnimGraphJsonPath = FPaths::Combine(FolderPath, TEXT("graphs"), TEXT("AnimLayer_AnimGraph.json"));
+	{
+		const FString DefaultsJsonPath = FPaths::Combine(FolderPath, TEXT("members"), TEXT("defaults.json"));
+		FString DefaultsText;
+		TSharedPtr<FJsonObject> DefaultsJson;
+		TestTrue(TEXT("AnimBlueprint folder exported defaults text loads"), FFileHelper::LoadFileToString(DefaultsText, *DefaultsJsonPath));
+		TestFalse(TEXT("AnimBlueprint folder exported defaults has no inline properties"), DefaultsText.Contains(TEXT("\"properties\"")));
+		TestTrue(TEXT("AnimBlueprint folder exported defaults json loads"), LoadJsonFile(DefaultsJsonPath, DefaultsJson));
+		TSharedPtr<FJsonObject> DefaultsDetailsJson;
+		TestTrue(
+			TEXT("AnimBlueprint folder defaults details grouped"),
+			SmokeLoadGroupedDetailsForRef(this, DefaultsJsonPath, DefaultsJson, TEXT("details"), TEXT("blueprint_class_defaults"), DefaultsDetailsJson));
+	}
+
+	const FString AnimGraphJsonPath = FPaths::Combine(FolderPath, TEXT("graphs"), TEXT("items"), TEXT("AnimLayer_AnimGraph"), TEXT("graph.json"));
 	TSharedPtr<FJsonObject> AnimGraphJson;
+	FString AnimGraphText;
+	TestTrue(TEXT("AnimBlueprint folder exported AnimGraph text loads"), FFileHelper::LoadFileToString(AnimGraphText, *AnimGraphJsonPath));
+	TestFalse(TEXT("AnimBlueprint folder exported AnimGraph has no inline properties"), AnimGraphText.Contains(TEXT("\"properties\"")));
 	TestTrue(TEXT("AnimBlueprint folder exported AnimGraph json loads"), LoadJsonFile(AnimGraphJsonPath, AnimGraphJson));
 
 	TSharedPtr<FJsonObject> BlendSpaceNodeJson;
 	TestTrue(
 		TEXT("AnimBlueprint folder exported graph contains BlendSpace player node"),
 		FindNodeObjectByClass(AnimGraphJson, TEXT("/Script/AnimGraph.AnimGraphNode_BlendSpacePlayer"), BlendSpaceNodeJson));
+	TSharedPtr<FJsonObject> BlendSpaceNodeDetailsJson;
+	TestTrue(
+		TEXT("AnimBlueprint folder BlendSpace node details grouped"),
+		SmokeLoadGroupedDetailsForRef(this, AnimGraphJsonPath, BlendSpaceNodeJson, TEXT("details"), TEXT("anim_blueprint_graph_node"), BlendSpaceNodeDetailsJson));
+	TestTrue(
+		TEXT("AnimBlueprint folder BlendSpace node details contains property"),
+		SmokeDetailsPropertiesContain(BlendSpaceNodeDetailsJson, TEXT("Node.BlendSpace"), TEXT("NewBlendSpace1D")));
 
-	TSharedPtr<FJsonObject> BlendSpacePropertyJson;
 	FString OriginalBlendSpaceValueText;
 	TestTrue(
-		TEXT("AnimBlueprint folder exported BlendSpace property exists"),
-		FindPropertyObject(BlendSpaceNodeJson, TEXT("Node.BlendSpace"), BlendSpacePropertyJson));
-	if (BlendSpacePropertyJson.IsValid())
-	{
-		OriginalBlendSpaceValueText = BlendSpacePropertyJson->GetStringField(TEXT("value_text"));
-		TestTrue(TEXT("AnimBlueprint folder exported BlendSpace property references asset"), OriginalBlendSpaceValueText.Contains(TEXT("NewBlendSpace1D")));
-		BlendSpacePropertyJson->SetStringField(TEXT("value_text"), TEXT("None"));
-	}
-
-	TestTrue(TEXT("AnimBlueprint folder mutated AnimGraph json saves"), SaveJsonFile(AnimGraphJsonPath, AnimGraphJson));
+		TEXT("AnimBlueprint folder updates BlendSpace grouped details to None"),
+		SmokeSetGroupedDetailsFieldStringValue(this, AnimGraphJsonPath, BlendSpaceNodeJson, TEXT("details"), TEXT("Node.BlendSpace"), TEXT("None"), &OriginalBlendSpaceValueText));
+	TestTrue(TEXT("AnimBlueprint folder exported BlendSpace property references asset"), OriginalBlendSpaceValueText.Contains(TEXT("NewBlendSpace1D")));
 
 	const FString ApplyNoneBody = MakeExecRequestBody(
 		TEXT("smoke-animbp-folder-apply-001"),
@@ -2768,6 +2746,12 @@ bool FUeAgentInterfaceAnimBlueprintFolderSmokeTest::RunTest(const FString& Param
 	TSharedPtr<FJsonObject> ApplyNoneJson;
 	TestTrue(TEXT("AnimBlueprint folder apply parses JSON"), ParseJson(ApplyNoneResult.Body, ApplyNoneJson));
 	TestTrue(TEXT("AnimBlueprint folder apply root ok=true"), ApplyNoneJson.IsValid() && ApplyNoneJson->GetBoolField(TEXT("ok")));
+	const TSharedPtr<FJsonObject>* ApplyNoneData = nullptr;
+	TestTrue(TEXT("AnimBlueprint folder apply contains data"), ApplyNoneJson.IsValid() && ApplyNoneJson->TryGetObjectField(TEXT("data"), ApplyNoneData) && ApplyNoneData && ApplyNoneData->IsValid());
+	if (ApplyNoneData && ApplyNoneData->IsValid())
+	{
+		TestTrue(TEXT("AnimBlueprint folder apply grouped node details"), static_cast<int32>((*ApplyNoneData)->GetIntegerField(TEXT("graph_node_details_applied"))) >= 1);
+	}
 
 	UAnimBlueprint* AppliedNoneAnimBlueprint = LoadObject<UAnimBlueprint>(nullptr, *AnimBlueprintObjectPath);
 	TestNotNull(TEXT("AnimBlueprint folder smoke reload after apply none"), AppliedNoneAnimBlueprint);
@@ -2780,11 +2764,9 @@ bool FUeAgentInterfaceAnimBlueprintFolderSmokeTest::RunTest(const FString& Param
 		AddError(TEXT("AnimBlueprint folder apply could not find BlendSpace player node after apply."));
 	}
 
-	if (BlendSpacePropertyJson.IsValid())
-	{
-		BlendSpacePropertyJson->SetStringField(TEXT("value_text"), OriginalBlendSpaceValueText);
-	}
-	TestTrue(TEXT("AnimBlueprint folder restored AnimGraph json saves"), SaveJsonFile(AnimGraphJsonPath, AnimGraphJson));
+	TestTrue(
+		TEXT("AnimBlueprint folder restores BlendSpace grouped details"),
+		SmokeSetGroupedDetailsFieldStringValue(this, AnimGraphJsonPath, BlendSpaceNodeJson, TEXT("details"), TEXT("Node.BlendSpace"), OriginalBlendSpaceValueText));
 
 	const FString ApplyRestoreBody = MakeExecRequestBody(
 		TEXT("smoke-animbp-folder-apply-002"),
@@ -2797,6 +2779,12 @@ bool FUeAgentInterfaceAnimBlueprintFolderSmokeTest::RunTest(const FString& Param
 	TSharedPtr<FJsonObject> ApplyRestoreJson;
 	TestTrue(TEXT("AnimBlueprint folder apply restore parses JSON"), ParseJson(ApplyRestoreResult.Body, ApplyRestoreJson));
 	TestTrue(TEXT("AnimBlueprint folder apply restore root ok=true"), ApplyRestoreJson.IsValid() && ApplyRestoreJson->GetBoolField(TEXT("ok")));
+	const TSharedPtr<FJsonObject>* ApplyRestoreData = nullptr;
+	TestTrue(TEXT("AnimBlueprint folder apply restore contains data"), ApplyRestoreJson.IsValid() && ApplyRestoreJson->TryGetObjectField(TEXT("data"), ApplyRestoreData) && ApplyRestoreData && ApplyRestoreData->IsValid());
+	if (ApplyRestoreData && ApplyRestoreData->IsValid())
+	{
+		TestTrue(TEXT("AnimBlueprint folder restore applied grouped node details"), static_cast<int32>((*ApplyRestoreData)->GetIntegerField(TEXT("graph_node_details_applied"))) >= 1);
+	}
 
 	UAnimBlueprint* AppliedRestoreAnimBlueprint = LoadObject<UAnimBlueprint>(nullptr, *AnimBlueprintObjectPath);
 	TestNotNull(TEXT("AnimBlueprint folder smoke reload after restore"), AppliedRestoreAnimBlueprint);
@@ -2812,6 +2800,34 @@ bool FUeAgentInterfaceAnimBlueprintFolderSmokeTest::RunTest(const FString& Param
 	else
 	{
 		AddError(TEXT("AnimBlueprint folder restore could not find BlendSpace player node after apply."));
+	}
+
+	if (BlendSpaceNodeJson.IsValid())
+	{
+		TArray<TSharedPtr<FJsonValue>> LegacyProperties;
+		LegacyProperties.Add(MakeShared<FJsonValueObject>(SmokeMakeDetailsProperty(TEXT("Node.BlendSpace"), TEXT("None"))));
+		BlendSpaceNodeJson->SetArrayField(TEXT("properties"), MoveTemp(LegacyProperties));
+		TestTrue(TEXT("AnimBlueprint folder legacy graph saves"), SaveSmokeJsonFile(this, AnimGraphJsonPath, AnimGraphJson, TEXT("AnimBlueprint legacy graph")));
+	}
+
+	const FString LegacyApplyBody = MakeExecRequestBody(
+		TEXT("smoke-animbp-folder-legacy-properties-001"),
+		TEXT("anim_blueprint_apply_folder"),
+		FString::Printf(TEXT("{\"asset_path\":\"%s\",\"create_if_missing\":false,\"compile_after_apply\":false,\"save_after_apply\":false}"), *AnimBlueprintAssetPath));
+	FHttpSmokeResult LegacyApplyResult;
+	TestTrue(TEXT("AnimBlueprint folder legacy properties request reached server"), ExecuteHttpJsonRequest(TEXT("POST"), ServerScope.BaseUrl + TEXT("/api/exec"), ServerScope.Token, LegacyApplyBody, LegacyApplyResult));
+	TestEqual(TEXT("AnimBlueprint folder legacy properties are rejected"), LegacyApplyResult.StatusCode, 400);
+
+	TSharedPtr<FJsonObject> LegacyApplyJson;
+	TestTrue(TEXT("AnimBlueprint folder legacy properties response parses JSON"), ParseJson(LegacyApplyResult.Body, LegacyApplyJson));
+	const TSharedPtr<FJsonObject>* LegacyApplyData = nullptr;
+	TestTrue(TEXT("AnimBlueprint folder legacy rejection data exists"), LegacyApplyJson.IsValid() && LegacyApplyJson->TryGetObjectField(TEXT("data"), LegacyApplyData) && LegacyApplyData && LegacyApplyData->IsValid());
+	if (LegacyApplyData && LegacyApplyData->IsValid())
+	{
+		TestEqual(TEXT("AnimBlueprint folder legacy rejection schema"), (*LegacyApplyData)->GetStringField(TEXT("schema")), FString(TEXT("uai.legacy_rejection.v1")));
+		TestEqual(TEXT("AnimBlueprint folder legacy rejection error code"), (*LegacyApplyData)->GetStringField(TEXT("error_code")), FString(TEXT("legacy_inline_properties_not_supported")));
+		TestEqual(TEXT("AnimBlueprint folder legacy rejection surface"), (*LegacyApplyData)->GetStringField(TEXT("legacy_surface")), FString(TEXT("properties[]")));
+		TestFalse(TEXT("AnimBlueprint folder legacy rejection not dropped"), (*LegacyApplyData)->GetBoolField(TEXT("dropped")));
 	}
 
 	return !HasAnyErrors();
@@ -3530,8 +3546,54 @@ bool FUeAgentInterfaceAnimationAssetsSmokeTest::RunTest(const FString& Parameter
 
 	TSharedPtr<FJsonObject> SkeletonAssetFolderJson;
 	TestTrue(TEXT("Animation assets skeleton folder asset.json exists"), LoadSmokeJsonFile(this, FPaths::Combine(SkeletonFolderPath, TEXT("asset.json")), SkeletonAssetFolderJson, TEXT("Skeleton folder asset.json")));
+	TSharedPtr<FJsonObject> SkeletonDetailsJson;
+	TestTrue(TEXT("Animation assets skeleton folder asset details grouped"), SmokeLoadGroupedDetailsForRef(this, FPaths::Combine(SkeletonFolderPath, TEXT("asset.json")), SkeletonAssetFolderJson, TEXT("details"), TEXT("skeleton_asset"), SkeletonDetailsJson));
+	TestFalse(TEXT("Animation assets skeleton folder omits root raw_properties.json"), FPaths::FileExists(FPaths::Combine(SkeletonFolderPath, TEXT("raw_properties.json"))));
+	TestFalse(TEXT("Animation assets skeleton folder omits root readonly_properties.json"), FPaths::FileExists(FPaths::Combine(SkeletonFolderPath, TEXT("readonly_properties.json"))));
 	TSharedPtr<FJsonObject> SkeletonCoverageJson;
 	TestTrue(TEXT("Animation assets skeleton folder coverage exists"), LoadSmokeJsonFile(this, FPaths::Combine(SkeletonFolderPath, TEXT("validation"), TEXT("coverage_report.json")), SkeletonCoverageJson, TEXT("Skeleton folder coverage_report.json")));
+
+	TSharedPtr<FJsonObject> SkeletonSocketsJson;
+	TestTrue(TEXT("Animation assets skeleton sockets authoring load"), LoadSmokeJsonFile(this, FPaths::Combine(SkeletonFolderPath, TEXT("sockets.json")), SkeletonSocketsJson, TEXT("Skeleton folder sockets.json")));
+	if (SkeletonSocketsJson.IsValid())
+	{
+		const TArray<TSharedPtr<FJsonValue>>* Sockets = nullptr;
+		bool bFoundSocketAuthoringMetadata = false;
+		if (SkeletonSocketsJson->TryGetArrayField(TEXT("sockets"), Sockets) && Sockets)
+		{
+			for (const TSharedPtr<FJsonValue>& SocketValue : *Sockets)
+			{
+				const TSharedPtr<FJsonObject>* SocketObj = nullptr;
+				if (SocketValue.IsValid() && SocketValue->TryGetObject(SocketObj) && SocketObj && HasAuthoringMetadata(*SocketObj))
+				{
+					bFoundSocketAuthoringMetadata = true;
+					break;
+				}
+			}
+		}
+		TestTrue(TEXT("Animation assets skeleton socket has authoring metadata"), bFoundSocketAuthoringMetadata);
+	}
+
+	TSharedPtr<FJsonObject> SkeletonRetargetingJson;
+	TestTrue(TEXT("Animation assets skeleton retargeting authoring load"), LoadSmokeJsonFile(this, FPaths::Combine(SkeletonFolderPath, TEXT("retargeting.json")), SkeletonRetargetingJson, TEXT("Skeleton folder retargeting.json")));
+	if (SkeletonRetargetingJson.IsValid())
+	{
+		const TArray<TSharedPtr<FJsonValue>>* RetargetModes = nullptr;
+		bool bFoundRetargetModeAuthoringMetadata = false;
+		if (SkeletonRetargetingJson->TryGetArrayField(TEXT("bone_translation_retargeting"), RetargetModes) && RetargetModes)
+		{
+			for (const TSharedPtr<FJsonValue>& ModeValue : *RetargetModes)
+			{
+				const TSharedPtr<FJsonObject>* ModeObj = nullptr;
+				if (ModeValue.IsValid() && ModeValue->TryGetObject(ModeObj) && ModeObj && HasAuthoringMetadata(*ModeObj))
+				{
+					bFoundRetargetModeAuthoringMetadata = true;
+					break;
+				}
+			}
+		}
+		TestTrue(TEXT("Animation assets skeleton retargeting mode has authoring metadata"), bFoundRetargetModeAuthoringMetadata);
+	}
 
 	const FString SkeletonValidateFolderBody = MakeExecRequestBody(
 		TEXT("smoke-anim-assets-skeleton-folder-validate-001"),
@@ -3695,8 +3757,32 @@ bool FUeAgentInterfaceIKAssetsSmokeTest::RunTest(const FString& Parameters)
 
 	TSharedPtr<FJsonObject> SkeletalMeshAssetFolderJson;
 	TestTrue(TEXT("IK assets skeletal mesh folder asset.json exists"), LoadSmokeJsonFile(this, FPaths::Combine(SkeletalMeshFolderPath, TEXT("asset.json")), SkeletalMeshAssetFolderJson, TEXT("SkeletalMesh folder asset.json")));
+	TSharedPtr<FJsonObject> SkeletalMeshDetailsJson;
+	TestTrue(TEXT("IK assets skeletal mesh folder asset details grouped"), SmokeLoadGroupedDetailsForRef(this, FPaths::Combine(SkeletalMeshFolderPath, TEXT("asset.json")), SkeletalMeshAssetFolderJson, TEXT("details"), TEXT("skeletal_mesh_asset"), SkeletalMeshDetailsJson));
+	TestFalse(TEXT("IK assets skeletal mesh folder omits root raw_properties.json"), FPaths::FileExists(FPaths::Combine(SkeletalMeshFolderPath, TEXT("raw_properties.json"))));
+	TestFalse(TEXT("IK assets skeletal mesh folder omits root readonly_properties.json"), FPaths::FileExists(FPaths::Combine(SkeletalMeshFolderPath, TEXT("readonly_properties.json"))));
 	TSharedPtr<FJsonObject> SkeletalMeshCoverageJson;
 	TestTrue(TEXT("IK assets skeletal mesh folder coverage exists"), LoadSmokeJsonFile(this, FPaths::Combine(SkeletalMeshFolderPath, TEXT("validation"), TEXT("coverage_report.json")), SkeletalMeshCoverageJson, TEXT("SkeletalMesh folder coverage_report.json")));
+	TSharedPtr<FJsonObject> SkeletalMeshMaterialsJson;
+	TestTrue(TEXT("IK assets skeletal mesh materials authoring load"), LoadSmokeJsonFile(this, FPaths::Combine(SkeletalMeshFolderPath, TEXT("materials.json")), SkeletalMeshMaterialsJson, TEXT("SkeletalMesh folder materials.json")));
+	if (SkeletalMeshMaterialsJson.IsValid())
+	{
+		const TArray<TSharedPtr<FJsonValue>>* Materials = nullptr;
+		bool bFoundMaterialAuthoringMetadata = false;
+		if (SkeletalMeshMaterialsJson->TryGetArrayField(TEXT("materials"), Materials) && Materials)
+		{
+			for (const TSharedPtr<FJsonValue>& MaterialValue : *Materials)
+			{
+				const TSharedPtr<FJsonObject>* MaterialObj = nullptr;
+				if (MaterialValue.IsValid() && MaterialValue->TryGetObject(MaterialObj) && MaterialObj && HasAuthoringMetadata(*MaterialObj))
+				{
+					bFoundMaterialAuthoringMetadata = true;
+					break;
+				}
+			}
+		}
+		TestTrue(TEXT("IK assets skeletal mesh material exposes authoring metadata"), bFoundMaterialAuthoringMetadata);
+	}
 
 	const FString SkeletalMeshValidateFolderBody = MakeExecRequestBody(
 		TEXT("smoke-ik-assets-skelmesh-folder-validate-001"),
@@ -4037,8 +4123,54 @@ bool FUeAgentInterfaceIKAssetsSmokeTest::RunTest(const FString& Parameters)
 
 	TSharedPtr<FJsonObject> IKRigAssetFolderJson;
 	TestTrue(TEXT("IK assets ik rig folder asset.json exists"), LoadSmokeJsonFile(this, FPaths::Combine(IKRigFolderPath, TEXT("asset.json")), IKRigAssetFolderJson, TEXT("IKRig folder asset.json")));
+	TSharedPtr<FJsonObject> IKRigDetailsJson;
+	TestTrue(TEXT("IK assets ik rig folder asset details grouped"), SmokeLoadGroupedDetailsForRef(this, FPaths::Combine(IKRigFolderPath, TEXT("asset.json")), IKRigAssetFolderJson, TEXT("details"), TEXT("ik_rig_asset"), IKRigDetailsJson));
+	TestFalse(TEXT("IK assets ik rig folder omits root raw_properties.json"), FPaths::FileExists(FPaths::Combine(IKRigFolderPath, TEXT("raw_properties.json"))));
+	TestFalse(TEXT("IK assets ik rig folder omits root readonly_properties.json"), FPaths::FileExists(FPaths::Combine(IKRigFolderPath, TEXT("readonly_properties.json"))));
 	TSharedPtr<FJsonObject> IKRigCoverageJson;
 	TestTrue(TEXT("IK assets ik rig folder coverage exists"), LoadSmokeJsonFile(this, FPaths::Combine(IKRigFolderPath, TEXT("validation"), TEXT("coverage_report.json")), IKRigCoverageJson, TEXT("IKRig folder coverage_report.json")));
+
+	TSharedPtr<FJsonObject> IKRigGoalsJson;
+	TestTrue(TEXT("IK assets ik rig goals authoring load"), LoadSmokeJsonFile(this, FPaths::Combine(IKRigFolderPath, TEXT("goals.json")), IKRigGoalsJson, TEXT("IKRig folder goals.json")));
+	if (IKRigGoalsJson.IsValid())
+	{
+		const TArray<TSharedPtr<FJsonValue>>* Goals = nullptr;
+		bool bFoundGoalAuthoringMetadata = false;
+		if (IKRigGoalsJson->TryGetArrayField(TEXT("goals"), Goals) && Goals)
+		{
+			for (const TSharedPtr<FJsonValue>& GoalValue : *Goals)
+			{
+				const TSharedPtr<FJsonObject>* GoalObj = nullptr;
+				if (GoalValue.IsValid() && GoalValue->TryGetObject(GoalObj) && GoalObj && HasAuthoringMetadata(*GoalObj))
+				{
+					bFoundGoalAuthoringMetadata = true;
+					break;
+				}
+			}
+		}
+		TestTrue(TEXT("IK assets ik rig goal has authoring metadata"), bFoundGoalAuthoringMetadata);
+	}
+
+	TSharedPtr<FJsonObject> IKRigSolversJson;
+	TestTrue(TEXT("IK assets ik rig solvers authoring load"), LoadSmokeJsonFile(this, FPaths::Combine(IKRigFolderPath, TEXT("solvers.json")), IKRigSolversJson, TEXT("IKRig folder solvers.json")));
+	if (IKRigSolversJson.IsValid())
+	{
+		const TArray<TSharedPtr<FJsonValue>>* Solvers = nullptr;
+		bool bFoundSolverAuthoringMetadata = false;
+		if (IKRigSolversJson->TryGetArrayField(TEXT("solvers"), Solvers) && Solvers)
+		{
+			for (const TSharedPtr<FJsonValue>& SolverValue : *Solvers)
+			{
+				const TSharedPtr<FJsonObject>* SolverObj = nullptr;
+				if (SolverValue.IsValid() && SolverValue->TryGetObject(SolverObj) && SolverObj && HasAuthoringMetadata(*SolverObj))
+				{
+					bFoundSolverAuthoringMetadata = true;
+					break;
+				}
+			}
+		}
+		TestTrue(TEXT("IK assets ik rig solver has authoring metadata"), bFoundSolverAuthoringMetadata);
+	}
 
 	const FString IKRigValidateFolderBody = MakeExecRequestBody(
 		TEXT("smoke-ik-assets-rig-folder-validate-001"),
@@ -4276,8 +4408,40 @@ bool FUeAgentInterfaceIKAssetsSmokeTest::RunTest(const FString& Parameters)
 
 	TSharedPtr<FJsonObject> IKRetargeterAssetFolderJson;
 	TestTrue(TEXT("IK assets ik retargeter folder asset.json exists"), LoadSmokeJsonFile(this, FPaths::Combine(IKRetargeterFolderPath, TEXT("asset.json")), IKRetargeterAssetFolderJson, TEXT("IKRetargeter folder asset.json")));
+	TSharedPtr<FJsonObject> IKRetargeterDetailsJson;
+	TestTrue(TEXT("IK assets ik retargeter folder asset details grouped"), SmokeLoadGroupedDetailsForRef(this, FPaths::Combine(IKRetargeterFolderPath, TEXT("asset.json")), IKRetargeterAssetFolderJson, TEXT("details"), TEXT("ik_retargeter_asset"), IKRetargeterDetailsJson));
+	TestFalse(TEXT("IK assets ik retargeter folder omits root raw_properties.json"), FPaths::FileExists(FPaths::Combine(IKRetargeterFolderPath, TEXT("raw_properties.json"))));
+	TestFalse(TEXT("IK assets ik retargeter folder omits root readonly_properties.json"), FPaths::FileExists(FPaths::Combine(IKRetargeterFolderPath, TEXT("readonly_properties.json"))));
 	TSharedPtr<FJsonObject> IKRetargeterCoverageJson;
 	TestTrue(TEXT("IK assets ik retargeter folder coverage exists"), LoadSmokeJsonFile(this, FPaths::Combine(IKRetargeterFolderPath, TEXT("validation"), TEXT("coverage_report.json")), IKRetargeterCoverageJson, TEXT("IKRetargeter folder coverage_report.json")));
+
+	TSharedPtr<FJsonObject> IKRetargeterGlobalSettingsJson;
+	TestTrue(TEXT("IK assets ik retargeter global settings authoring load"), LoadSmokeJsonFile(this, FPaths::Combine(IKRetargeterFolderPath, TEXT("global_settings.json")), IKRetargeterGlobalSettingsJson, TEXT("IKRetargeter folder global_settings.json")));
+	TestTrue(TEXT("IK assets ik retargeter global settings has authoring metadata"), HasAuthoringMetadata(IKRetargeterGlobalSettingsJson));
+
+	TSharedPtr<FJsonObject> IKRetargeterRootSettingsJson;
+	TestTrue(TEXT("IK assets ik retargeter root settings authoring load"), LoadSmokeJsonFile(this, FPaths::Combine(IKRetargeterFolderPath, TEXT("root_settings.json")), IKRetargeterRootSettingsJson, TEXT("IKRetargeter folder root_settings.json")));
+	TestTrue(TEXT("IK assets ik retargeter root settings has authoring metadata"), HasAuthoringMetadata(IKRetargeterRootSettingsJson));
+
+	TSharedPtr<FJsonObject> IKRetargeterChainSettingsJson;
+	TestTrue(TEXT("IK assets ik retargeter chain settings authoring load"), LoadSmokeJsonFile(this, FPaths::Combine(IKRetargeterFolderPath, TEXT("chain_settings.json")), IKRetargeterChainSettingsJson, TEXT("IKRetargeter folder chain_settings.json")));
+	if (IKRetargeterChainSettingsJson.IsValid())
+	{
+		const TArray<TSharedPtr<FJsonValue>>* Chains = nullptr;
+		bool bChainSettingsAuthoringMetadataOk = true;
+		if (IKRetargeterChainSettingsJson->TryGetArrayField(TEXT("chains"), Chains) && Chains)
+		{
+			for (const TSharedPtr<FJsonValue>& ChainValue : *Chains)
+			{
+				const TSharedPtr<FJsonObject>* ChainObj = nullptr;
+				if (ChainValue.IsValid() && ChainValue->TryGetObject(ChainObj) && ChainObj)
+				{
+					bChainSettingsAuthoringMetadataOk &= HasAuthoringMetadata(*ChainObj);
+				}
+			}
+		}
+		TestTrue(TEXT("IK assets ik retargeter chain settings entries expose authoring metadata when present"), bChainSettingsAuthoringMetadataOk);
+	}
 
 	const FString IKRetargeterValidateFolderBody = MakeExecRequestBody(
 		TEXT("smoke-ik-assets-rtg-folder-validate-001"),
@@ -4424,6 +4588,8 @@ IMPLEMENT_SIMPLE_AUTOMATION_TEST(
 
 bool FUeAgentInterfaceNiagaraFolderSmokeTest::RunTest(const FString& Parameters)
 {
+	DisableHeadlessDeferredLayoutSaves();
+
 	FScopedUeAgentHttpServer ServerScope;
 	FString InitError;
 	if (!ServerScope.Initialize(InitError))
@@ -4480,6 +4646,39 @@ bool FUeAgentInterfaceNiagaraFolderSmokeTest::RunTest(const FString& Parameters)
 		return true;
 	};
 
+	auto ExpectLegacyPropertiesFileRejected = [this, &ServerScope](
+		const FString& Label,
+		const FString& RequestId,
+		const FString& Command,
+		const FString& ParamsJson,
+		const FString& LegacyPropertiesPath) -> bool
+	{
+		const bool bSaved = FFileHelper::SaveStringToFile(TEXT("{\"raw_properties\":[]}\n"), *LegacyPropertiesPath, FFileHelper::EEncodingOptions::ForceUTF8WithoutBOM);
+		TestTrue(Label + TEXT(" save legacy properties.json"), bSaved);
+		if (!bSaved)
+		{
+			return false;
+		}
+
+		const FString LegacyApplyBody = MakeExecRequestBody(RequestId, Command, ParamsJson);
+		FHttpSmokeResult LegacyApplyResult;
+		TestTrue(Label + TEXT(" legacy properties request reached server"), ExecuteHttpJsonRequest(TEXT("POST"), ServerScope.BaseUrl + TEXT("/api/exec"), ServerScope.Token, LegacyApplyBody, LegacyApplyResult, 30.0));
+		TestEqual(Label + TEXT(" legacy properties are rejected"), LegacyApplyResult.StatusCode, 400);
+
+		TSharedPtr<FJsonObject> LegacyApplyJson;
+		TestTrue(Label + TEXT(" legacy properties response parses JSON"), ParseJson(LegacyApplyResult.Body, LegacyApplyJson));
+		const TSharedPtr<FJsonObject>* LegacyApplyData = nullptr;
+		TestTrue(Label + TEXT(" legacy rejection data exists"), LegacyApplyJson.IsValid() && LegacyApplyJson->TryGetObjectField(TEXT("data"), LegacyApplyData) && LegacyApplyData && LegacyApplyData->IsValid());
+		if (LegacyApplyData && LegacyApplyData->IsValid())
+		{
+			TestEqual(Label + TEXT(" legacy rejection schema"), (*LegacyApplyData)->GetStringField(TEXT("schema")), FString(TEXT("uai.legacy_rejection.v1")));
+			TestEqual(Label + TEXT(" legacy rejection error code"), (*LegacyApplyData)->GetStringField(TEXT("error_code")), FString(TEXT("legacy_properties_file_not_supported")));
+			TestEqual(Label + TEXT(" legacy rejection surface"), (*LegacyApplyData)->GetStringField(TEXT("legacy_surface")), FString(TEXT("properties.json")));
+		}
+		IFileManager::Get().Delete(*LegacyPropertiesPath);
+		return true;
+	};
+
 	const FString CreateEmitterBody = MakeExecRequestBody(
 		TEXT("smoke-niagara-folder-create-emitter-001"),
 		TEXT("niagara_create_emitter"),
@@ -4525,7 +4724,42 @@ bool FUeAgentInterfaceNiagaraFolderSmokeTest::RunTest(const FString& Parameters)
 		const TArray<TSharedPtr<FJsonValue>>* PendingProfiles = nullptr;
 		TestTrue(TEXT("Niagara emitter folder pending profiles empty"), EmitterCoverageJson->TryGetArrayField(TEXT("pending_profiles"), PendingProfiles) && PendingProfiles && PendingProfiles->Num() == 0);
 	}
+	TestFalse(TEXT("Niagara emitter folder omits default properties.json"), IFileManager::Get().FileExists(*(FPaths::Combine(EmitterFolderPath, TEXT("properties.json")))));
+	TSharedPtr<FJsonObject> EmitterJson;
+	TestTrue(TEXT("Niagara emitter folder exported emitter.json exists"), LoadJsonFile(FPaths::Combine(EmitterFolderPath, TEXT("emitter.json")), EmitterJson));
+	if (EmitterJson.IsValid())
+	{
+		TSharedPtr<FJsonObject> EmitterDetailsJson;
+		TestTrue(
+			TEXT("Niagara emitter folder settings details grouped"),
+			SmokeLoadGroupedDetailsForRef(this, FPaths::Combine(EmitterFolderPath, TEXT("emitter.json")), EmitterJson, TEXT("details"), TEXT("niagara_emitter_settings"), EmitterDetailsJson));
+	}
+	TSharedPtr<FJsonObject> EmitterRenderersJson;
+	TestTrue(TEXT("Niagara emitter folder renderers.json exists"), LoadJsonFile(FPaths::Combine(EmitterFolderPath, TEXT("renderers.json")), EmitterRenderersJson));
+	if (EmitterRenderersJson.IsValid())
+	{
+		const TArray<TSharedPtr<FJsonValue>>* Renderers = nullptr;
+		bool bFoundRendererDetails = false;
+		if (EmitterRenderersJson->TryGetArrayField(TEXT("renderers"), Renderers) && Renderers)
+		{
+			for (const TSharedPtr<FJsonValue>& RendererValue : *Renderers)
+			{
+				const TSharedPtr<FJsonObject>* RendererObj = nullptr;
+				if (!RendererValue.IsValid() || !RendererValue->TryGetObject(RendererObj) || !RendererObj || !RendererObj->IsValid())
+				{
+					continue;
+				}
 
+				TSharedPtr<FJsonObject> RendererDetailsJson;
+				if (SmokeLoadGroupedDetailsForRef(this, FPaths::Combine(EmitterFolderPath, TEXT("renderers.json")), *RendererObj, TEXT("details"), TEXT("niagara_renderer"), RendererDetailsJson))
+				{
+					bFoundRendererDetails = true;
+					break;
+				}
+			}
+		}
+		TestTrue(TEXT("Niagara emitter folder renderer details grouped"), bFoundRendererDetails);
+	}
 	const FString EmitterApplyBody = MakeExecRequestBody(
 		TEXT("smoke-niagara-emitter-folder-apply-001"),
 		TEXT("niagara_emitter_apply_folder"),
@@ -4549,6 +4783,13 @@ bool FUeAgentInterfaceNiagaraFolderSmokeTest::RunTest(const FString& Parameters)
 		TestTrue(TEXT("Niagara emitter folder apply compilation complete"), (*EmitterApplyData)->GetBoolField(TEXT("compilation_complete")));
 		TestFalse(TEXT("Niagara emitter folder apply compile has no error"), (*EmitterApplyData)->GetBoolField(TEXT("compile_has_error")));
 	}
+
+	ExpectLegacyPropertiesFileRejected(
+		TEXT("Niagara emitter folder"),
+		TEXT("smoke-niagara-emitter-folder-legacy-properties-001"),
+		TEXT("niagara_emitter_apply_folder"),
+		FString::Printf(TEXT("{\"folder_path\":\"%s\",\"emitter_asset_path\":\"%s\",\"create_if_missing\":true,\"save_after_apply\":false,\"strict\":false}"), *EmitterFolderPath.Replace(TEXT("\\"), TEXT("/")), *AppliedEmitterAssetPath),
+		FPaths::Combine(EmitterFolderPath, TEXT("properties.json")));
 
 	const FString AppliedEmitterRenderersBody = MakeExecRequestBody(
 		TEXT("smoke-niagara-emitter-folder-applied-renderers-001"),
@@ -4585,7 +4826,16 @@ bool FUeAgentInterfaceNiagaraFolderSmokeTest::RunTest(const FString& Parameters)
 		TestEqual(TEXT("Niagara script folder implementation status"), ScriptCoverageJson->GetStringField(TEXT("implementation_status")), FString(TEXT("complete_folder_profile")));
 		TestTrue(TEXT("Niagara script folder complete target schema is true"), ScriptCoverageJson->GetBoolField(TEXT("is_complete_target_schema")));
 	}
-
+	TestFalse(TEXT("Niagara script folder omits default properties.json"), IFileManager::Get().FileExists(*(FPaths::Combine(ScriptFolderPath, TEXT("properties.json")))));
+	TSharedPtr<FJsonObject> ScriptJson;
+	TestTrue(TEXT("Niagara script folder exported script.json exists"), LoadJsonFile(FPaths::Combine(ScriptFolderPath, TEXT("script.json")), ScriptJson));
+	if (ScriptJson.IsValid())
+	{
+		TSharedPtr<FJsonObject> ScriptDetailsJson;
+		TestTrue(
+			TEXT("Niagara script folder settings details grouped"),
+			SmokeLoadGroupedDetailsForRef(this, FPaths::Combine(ScriptFolderPath, TEXT("script.json")), ScriptJson, TEXT("details"), TEXT("niagara_script_settings"), ScriptDetailsJson));
+	}
 	const FString ScriptApplyBody = MakeExecRequestBody(
 		TEXT("smoke-niagara-script-folder-apply-001"),
 		TEXT("niagara_script_apply_folder"),
@@ -4603,6 +4853,13 @@ bool FUeAgentInterfaceNiagaraFolderSmokeTest::RunTest(const FString& Parameters)
 	{
 		TestTrue(TEXT("Niagara script folder apply created script"), (*ScriptApplyData)->GetBoolField(TEXT("created")));
 	}
+
+	ExpectLegacyPropertiesFileRejected(
+		TEXT("Niagara script folder"),
+		TEXT("smoke-niagara-script-folder-legacy-properties-001"),
+		TEXT("niagara_script_apply_folder"),
+		FString::Printf(TEXT("{\"folder_path\":\"%s\",\"script_asset_path\":\"%s\",\"create_if_missing\":true,\"compile_after_apply\":false,\"save_after_apply\":false,\"strict\":false}"), *ScriptFolderPath.Replace(TEXT("\\"), TEXT("/")), *AppliedScriptAssetPath),
+		FPaths::Combine(ScriptFolderPath, TEXT("properties.json")));
 
 	const FString CreateSystemBody = MakeExecRequestBody(
 		TEXT("smoke-niagara-folder-create-system-001"),
@@ -4657,11 +4914,92 @@ bool FUeAgentInterfaceNiagaraFolderSmokeTest::RunTest(const FString& Parameters)
 		TestEqual(TEXT("Niagara folder exported asset path"), AssetJson->GetStringField(TEXT("asset_path")), SystemAssetPath);
 	}
 
+	TSharedPtr<FJsonObject> SystemSettingsJson;
+	const FString SystemSettingsJsonPath = FPaths::Combine(FolderPath, TEXT("settings"), TEXT("system.json"));
+	TestTrue(TEXT("Niagara folder exported system settings exists"), LoadJsonFile(SystemSettingsJsonPath, SystemSettingsJson));
+	if (SystemSettingsJson.IsValid())
+	{
+		TSharedPtr<FJsonObject> SystemSettingsDetailsJson;
+		TestTrue(
+			TEXT("Niagara folder system settings details grouped"),
+			SmokeLoadGroupedDetailsForRef(this, SystemSettingsJsonPath, SystemSettingsJson, TEXT("details"), TEXT("niagara_system_settings"), SystemSettingsDetailsJson));
+	}
+
 	TSharedPtr<FJsonObject> EmittersIndexJson;
 	TestTrue(TEXT("Niagara folder exported emitters index exists"), LoadJsonFile(FPaths::Combine(FolderPath, TEXT("emitters"), TEXT("index.json")), EmittersIndexJson));
 	if (EmittersIndexJson.IsValid())
 	{
 		TestTrue(TEXT("Niagara folder exported emitters count >= 1"), static_cast<int32>(EmittersIndexJson->GetIntegerField(TEXT("emitter_count"))) >= 1);
+		const TArray<TSharedPtr<FJsonValue>>* Emitters = nullptr;
+		if (EmittersIndexJson->TryGetArrayField(TEXT("emitters"), Emitters) && Emitters)
+		{
+			for (const TSharedPtr<FJsonValue>& EmitterValue : *Emitters)
+			{
+				const TSharedPtr<FJsonObject>* EmitterObj = nullptr;
+				if (!EmitterValue.IsValid() || !EmitterValue->TryGetObject(EmitterObj) || !EmitterObj || !EmitterObj->IsValid())
+				{
+					continue;
+				}
+
+				FString EmitterFolder;
+				if (!(*EmitterObj)->TryGetStringField(TEXT("folder"), EmitterFolder) || EmitterFolder.IsEmpty())
+				{
+					continue;
+				}
+
+				const FString SystemEmitterFolderPath = FPaths::Combine(FolderPath, TEXT("emitters"), EmitterFolder);
+				TestFalse(TEXT("Niagara system emitter folder omits default properties.json"), IFileManager::Get().FileExists(*(FPaths::Combine(SystemEmitterFolderPath, TEXT("properties.json")))));
+			}
+		}
+	}
+
+	TSharedPtr<FJsonObject> UserParametersJson;
+	TestTrue(TEXT("Niagara folder exported user parameters exists"), LoadJsonFile(FPaths::Combine(FolderPath, TEXT("parameters"), TEXT("user_parameters.json")), UserParametersJson));
+	if (UserParametersJson.IsValid())
+	{
+		const TArray<TSharedPtr<FJsonValue>>* UserParameters = nullptr;
+		TestTrue(TEXT("Niagara folder exported user parameters array exists"), UserParametersJson->TryGetArrayField(TEXT("parameters"), UserParameters) && UserParameters);
+		bool bFoundUserParameterAuthoringMetadata = false;
+		bool bFoundFolderSmokeFloatParameter = false;
+		if (UserParameters)
+		{
+			for (const TSharedPtr<FJsonValue>& ParameterValue : *UserParameters)
+			{
+				const TSharedPtr<FJsonObject>* ParameterObj = nullptr;
+				if (!ParameterValue.IsValid() || !ParameterValue->TryGetObject(ParameterObj) || !ParameterObj || !ParameterObj->IsValid())
+				{
+					continue;
+				}
+				FString ParameterName;
+				FString ShortName;
+				FString LeafName;
+				(*ParameterObj)->TryGetStringField(TEXT("name"), ParameterName);
+				(*ParameterObj)->TryGetStringField(TEXT("short_name"), ShortName);
+				(*ParameterObj)->TryGetStringField(TEXT("leaf_name"), LeafName);
+				bool bSelectorMatches = false;
+				const TSharedPtr<FJsonObject>* SelectorObj = nullptr;
+				if ((*ParameterObj)->TryGetObjectField(TEXT("selector"), SelectorObj) && SelectorObj && SelectorObj->IsValid())
+				{
+					FString SelectorParameterName;
+					(*SelectorObj)->TryGetStringField(TEXT("parameter_name"), SelectorParameterName);
+					bSelectorMatches = SelectorParameterName.Equals(TEXT("FolderSmokeFloat"), ESearchCase::IgnoreCase)
+						|| SelectorParameterName.Equals(TEXT("User.FolderSmokeFloat"), ESearchCase::IgnoreCase);
+				}
+				if (ParameterName.Equals(TEXT("FolderSmokeFloat"), ESearchCase::IgnoreCase)
+					|| ParameterName.Equals(TEXT("User.FolderSmokeFloat"), ESearchCase::IgnoreCase)
+					|| ShortName.Equals(TEXT("FolderSmokeFloat"), ESearchCase::IgnoreCase)
+					|| LeafName.Equals(TEXT("FolderSmokeFloat"), ESearchCase::IgnoreCase)
+					|| bSelectorMatches)
+				{
+					bFoundFolderSmokeFloatParameter = true;
+					bFoundUserParameterAuthoringMetadata = (*ParameterObj)->HasTypedField<EJson::Object>(TEXT("selector"))
+						&& (*ParameterObj)->HasTypedField<EJson::Array>(TEXT("operations"));
+					break;
+				}
+			}
+		}
+		TestTrue(TEXT("Niagara folder exported FolderSmokeFloat user parameter"), bFoundFolderSmokeFloatParameter);
+		TestTrue(TEXT("Niagara folder user parameter exposes authoring metadata"), bFoundUserParameterAuthoringMetadata);
 	}
 
 	TSharedPtr<FJsonObject> CoverageJson;
@@ -4703,6 +5041,13 @@ bool FUeAgentInterfaceNiagaraFolderSmokeTest::RunTest(const FString& Parameters)
 		TestFalse(TEXT("Niagara folder apply no outstanding compile"), (*ApplyData)->GetBoolField(TEXT("has_outstanding_compilation_requests")));
 		TestFalse(TEXT("Niagara folder apply compile has no error"), (*ApplyData)->GetBoolField(TEXT("compile_has_error")));
 	}
+
+	ExpectLegacyPropertiesFileRejected(
+		TEXT("Niagara system folder"),
+		TEXT("smoke-niagara-folder-legacy-properties-001"),
+		TEXT("niagara_apply_folder"),
+		FString::Printf(TEXT("{\"folder_path\":\"%s\",\"asset_path\":\"%s\",\"create_if_missing\":true,\"compile_after_apply\":false,\"save_after_apply\":false,\"strict\":false}"), *FolderPath.Replace(TEXT("\\"), TEXT("/")), *AppliedSystemAssetPath),
+		FPaths::Combine(FolderPath, TEXT("properties.json")));
 
 	const FString AppliedInfoBody = MakeExecRequestBody(
 		TEXT("smoke-niagara-folder-applied-info-001"),
@@ -4764,7 +5109,12 @@ bool FUeAgentInterfaceNiagaraFolderSmokeTest::RunTest(const FString& Parameters)
 	TestTrue(TEXT("Niagara delete recreate cleanup request succeeded"), ExecuteHttpJsonRequest(TEXT("POST"), ServerScope.BaseUrl + TEXT("/api/exec"), ServerScope.Token, DeleteRecreateCleanupBody, DeleteRecreateCleanupResult, 20.0));
 	TestEqual(TEXT("Niagara delete recreate cleanup status code"), DeleteRecreateCleanupResult.StatusCode, 200);
 
-	return !HasAnyErrors();
+	const bool bSuccess = !HasAnyErrors();
+	if (bSuccess && FApp::IsUnattended())
+	{
+		FPlatformMisc::RequestExitWithStatus(false, 0, TEXT("NiagaraFolderWorkflow complete"));
+	}
+	return bSuccess;
 }
 
 #endif

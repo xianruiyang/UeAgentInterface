@@ -18,6 +18,17 @@
 
 namespace UeAgentOriginResolve
 {
+	FCodePath::FCodePath()
+		: Line(0)
+		, Column(0)
+	{
+	}
+
+	FResolveResult::FResolveResult()
+		: bResolved(false)
+	{
+	}
+
 namespace
 {
 	static FString NormalizeToken(const FString& Text)

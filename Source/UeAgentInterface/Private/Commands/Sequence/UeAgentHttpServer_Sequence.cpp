@@ -2,6 +2,9 @@
 
 #include "UeAgentHttpServer_Sequence.h"
 
+#include "Commands/EditorViewport/UeAgentEditorViewportSequenceFrameOptions.h"
+#include "Utilities/UeAgentAuthoringJson.h"
+#include "Utilities/UeAgentDetailsAuthoring.h"
 #include "Utilities/UeAgentJsonDiagnostics.h"
 
 #include "Animation/AnimSequenceBase.h"
@@ -116,7 +119,7 @@ namespace UeAgentSequenceOps
 		Double
 	};
 
-	static bool ParseSequencePropertyTrackType(const FString& InText, ESequencePropertyTrackType& OutType)
+	bool ParseSequencePropertyTrackType(const FString& InText, ESequencePropertyTrackType& OutType)
 	{
 		FString Value = InText.TrimStartAndEnd().ToLower();
 		Value.ReplaceInline(TEXT("_"), TEXT(""));
@@ -192,7 +195,7 @@ namespace UeAgentSequenceOps
 		return false;
 	}
 
-	static bool ParseSequenceVectorPrecision(const FString& InText, ESequenceVectorPrecision& OutPrecision)
+	bool ParseSequenceVectorPrecision(const FString& InText, ESequenceVectorPrecision& OutPrecision)
 	{
 		FString Value = InText.TrimStartAndEnd().ToLower();
 		Value.ReplaceInline(TEXT("_"), TEXT(""));
@@ -212,7 +215,7 @@ namespace UeAgentSequenceOps
 		return false;
 	}
 
-	static void InferSequenceVectorDefaultsFromTypeText(
+	void InferSequenceVectorDefaultsFromTypeText(
 		const FString& InText,
 		bool& bOutHasPrecision,
 		ESequenceVectorPrecision& OutPrecision,
@@ -302,7 +305,7 @@ namespace UeAgentSequenceOps
 		}
 	}
 
-	static FString NormalizeAssetPath(const FString& InPath)
+	FString NormalizeAssetPath(const FString& InPath)
 	{
 		FString OutPath = InPath;
 		OutPath.TrimStartAndEndInline();
@@ -315,7 +318,7 @@ namespace UeAgentSequenceOps
 		return OutPath;
 	}
 
-	static FString ToObjectPath(const FString& InPath)
+	FString ToObjectPath(const FString& InPath)
 	{
 		FString InObjectPath = InPath;
 		InObjectPath.TrimStartAndEndInline();
@@ -337,7 +340,7 @@ namespace UeAgentSequenceOps
 		return FString::Printf(TEXT("%s.%s"), *AssetPath, *AssetName);
 	}
 
-	static UObject* LoadAssetObject(const FString& InPath)
+	UObject* LoadAssetObject(const FString& InPath)
 	{
 		const FString ObjectPath = ToObjectPath(InPath);
 		if (ObjectPath.IsEmpty())
@@ -351,7 +354,7 @@ namespace UeAgentSequenceOps
 		return LoadObject<UObject>(nullptr, *ObjectPath);
 	}
 
-	static bool AssetExists(const FString& InPath)
+	bool AssetExists(const FString& InPath)
 	{
 		const FString ObjectPath = ToObjectPath(InPath);
 		if (ObjectPath.IsEmpty())
@@ -368,22 +371,22 @@ namespace UeAgentSequenceOps
 		return AssetRegistryModule.Get().GetAssetByObjectPath(FSoftObjectPath(ObjectPath)).IsValid();
 	}
 
-	static ULevelSequence* LoadLevelSequence(const FString& InPath)
+	ULevelSequence* LoadLevelSequence(const FString& InPath)
 	{
 		return Cast<ULevelSequence>(LoadAssetObject(InPath));
 	}
 
-	static UWidgetBlueprint* LoadWidgetBlueprint(const FString& InPath)
+	UWidgetBlueprint* LoadWidgetBlueprint(const FString& InPath)
 	{
 		return Cast<UWidgetBlueprint>(LoadAssetObject(InPath));
 	}
 
-	static UAnimSequenceBase* LoadAnimSequenceBase(const FString& InPath)
+	UAnimSequenceBase* LoadAnimSequenceBase(const FString& InPath)
 	{
 		return Cast<UAnimSequenceBase>(LoadAssetObject(InPath));
 	}
 
-	static bool SaveAssetPackage(UObject* Asset, FString& OutError)
+	bool SaveAssetPackage(UObject* Asset, FString& OutError)
 	{
 		if (!Asset)
 		{
@@ -401,7 +404,7 @@ namespace UeAgentSequenceOps
 		return true;
 	}
 
-	static bool SaveJsonFile(const FString& OutputPathInput, const TSharedPtr<FJsonObject>& Root, FString& OutOutputPath, FString& OutError)
+	bool SaveJsonFile(const FString& OutputPathInput, const TSharedPtr<FJsonObject>& Root, FString& OutOutputPath, FString& OutError)
 	{
 		OutOutputPath.Reset();
 		if (!Root.IsValid())
@@ -426,9 +429,7 @@ namespace UeAgentSequenceOps
 		}
 
 		FString JsonText;
-		const TSharedRef<TJsonWriter<TCHAR, TPrettyJsonPrintPolicy<TCHAR>>> Writer =
-			TJsonWriterFactory<TCHAR, TPrettyJsonPrintPolicy<TCHAR>>::Create(&JsonText);
-		if (!FJsonSerializer::Serialize(Root.ToSharedRef(), Writer))
+		if (!UeAgentJsonDiagnostics::SerializeJsonObjectCompact(Root, JsonText))
 		{
 			OutError = TEXT("json_serialize_failed");
 			return false;
@@ -444,7 +445,7 @@ namespace UeAgentSequenceOps
 		return true;
 	}
 
-	static bool LoadJsonFile(const FString& InputPathInput, TSharedPtr<FJsonObject>& OutRoot, FString& OutResolvedPath, FString& OutError)
+	bool LoadJsonFile(const FString& InputPathInput, TSharedPtr<FJsonObject>& OutRoot, FString& OutResolvedPath, FString& OutError)
 	{
 		OutRoot.Reset();
 		OutResolvedPath.Reset();
@@ -482,7 +483,7 @@ namespace UeAgentSequenceOps
 		return true;
 	}
 
-	static bool LoadOptionalJsonFile(const FString& InputPathInput, TSharedPtr<FJsonObject>& OutRoot, FString& OutResolvedPath, FString& OutError)
+	bool LoadOptionalJsonFile(const FString& InputPathInput, TSharedPtr<FJsonObject>& OutRoot, FString& OutResolvedPath, FString& OutError)
 	{
 		OutRoot.Reset();
 		OutResolvedPath.Reset();
@@ -509,7 +510,7 @@ namespace UeAgentSequenceOps
 		return true;
 	}
 
-	static bool SetMovieScenePlaybackRangeSeconds(UMovieScene* MovieScene, const double StartSeconds, const double DurationSeconds)
+	bool SetMovieScenePlaybackRangeSeconds(UMovieScene* MovieScene, const double StartSeconds, const double DurationSeconds)
 	{
 		if (!MovieScene || DurationSeconds <= 0.0)
 		{
@@ -535,7 +536,7 @@ namespace UeAgentSequenceOps
 		FFrameNumber EvaluationFrame;
 	};
 
-	static bool TryGetSequenceNumberAnyField(const TSharedPtr<FJsonObject>& Obj, const TArray<FString>& Keys, double& OutValue)
+	bool TryGetSequenceNumberAnyField(const TSharedPtr<FJsonObject>& Obj, const TArray<FString>& Keys, double& OutValue)
 	{
 		if (!Obj.IsValid())
 		{
@@ -551,7 +552,7 @@ namespace UeAgentSequenceOps
 		return false;
 	}
 
-	static bool AddLevelSequenceFrameRequest(
+	bool AddLevelSequenceFrameRequest(
 		UMovieScene* MovieScene,
 		const double RelativeTimeSeconds,
 		const int32 FrameIndex,
@@ -590,7 +591,7 @@ namespace UeAgentSequenceOps
 		return true;
 	}
 
-	static bool ResolveLevelSequenceFrameSequence(ULevelSequence* Sequence, const TSharedPtr<FJsonObject>& Params, TArray<FLevelSequenceFrameRequest>& OutFrames, FString& OutError)
+	bool ResolveLevelSequenceFrameSequence(ULevelSequence* Sequence, const TSharedPtr<FJsonObject>& Params, TArray<FLevelSequenceFrameRequest>& OutFrames, FString& OutError)
 	{
 		OutFrames.Reset();
 		if (!Sequence || !Params.IsValid())
@@ -735,7 +736,7 @@ namespace UeAgentSequenceOps
 		return true;
 	}
 
-	static FLevelEditorViewportClient* GetPreferredLevelViewportClient()
+	FLevelEditorViewportClient* GetPreferredLevelViewportClient()
 	{
 		if (GEditor)
 		{
@@ -769,7 +770,7 @@ namespace UeAgentSequenceOps
 		return nullptr;
 	}
 
-	static UWidgetAnimation* FindWidgetAnimationByAnyName(UWidgetBlueprint* WidgetBlueprint, const FString& InName)
+	UWidgetAnimation* FindWidgetAnimationByAnyName(UWidgetBlueprint* WidgetBlueprint, const FString& InName)
 	{
 		if (!WidgetBlueprint || InName.IsEmpty())
 		{
@@ -797,7 +798,7 @@ namespace UeAgentSequenceOps
 		return nullptr;
 	}
 
-	static UWidget* FindWidgetByAnyName(UWidgetBlueprint* WidgetBlueprint, const FString& InName)
+	UWidget* FindWidgetByAnyName(UWidgetBlueprint* WidgetBlueprint, const FString& InName)
 	{
 		if (!WidgetBlueprint || !WidgetBlueprint->WidgetTree || InName.IsEmpty())
 		{
@@ -822,22 +823,22 @@ namespace UeAgentSequenceOps
 		return nullptr;
 	}
 
-	static int32 GetFloatChannelKeyCount(const FMovieSceneFloatChannel& Channel)
+	int32 GetFloatChannelKeyCount(const FMovieSceneFloatChannel& Channel)
 	{
 		return Channel.GetData().GetTimes().Num();
 	}
 
-	static int32 GetDoubleChannelKeyCount(const FMovieSceneDoubleChannel& Channel)
+	int32 GetDoubleChannelKeyCount(const FMovieSceneDoubleChannel& Channel)
 	{
 		return Channel.GetData().GetTimes().Num();
 	}
 
-	static FString LexToString(const ESequenceVectorPrecision Precision)
+	FString LexToString(const ESequenceVectorPrecision Precision)
 	{
 		return Precision == ESequenceVectorPrecision::Float ? TEXT("float") : TEXT("double");
 	}
 
-	static void PopulateSectionRangeFields(const UMovieSceneSection* Section, TSharedPtr<FJsonObject>& OutObject)
+	void PopulateSectionRangeFields(const UMovieSceneSection* Section, TSharedPtr<FJsonObject>& OutObject)
 	{
 		if (!Section || !OutObject.IsValid())
 		{
@@ -851,7 +852,7 @@ namespace UeAgentSequenceOps
 		OutObject->SetNumberField(TEXT("end_exclusive_frame"), Range.HasUpperBound() ? Range.GetUpperBoundValue().Value : 0);
 	}
 
-	static TSharedPtr<FJsonObject> BuildMovieSceneTrackSummary(UMovieScene* MovieScene, UMovieSceneTrack* Track)
+	TSharedPtr<FJsonObject> BuildMovieSceneTrackSummary(UMovieScene* MovieScene, UMovieSceneTrack* Track)
 	{
 		TSharedPtr<FJsonObject> Item = MakeShared<FJsonObject>();
 		Item->SetStringField(TEXT("class"), Track ? Track->GetClass()->GetPathName() : TEXT(""));
@@ -888,6 +889,16 @@ namespace UeAgentSequenceOps
 			Item->SetStringField(TEXT("control_rig_class"), ControlRig ? ControlRig->GetClass()->GetPathName() : TEXT(""));
 			Item->SetBoolField(TEXT("is_additive"), ControlRig ? ControlRig->IsAdditive() : false);
 		}
+
+		UeAgentAuthoringJson::ApplyAuthoringMetadata(
+			Item,
+			TEXT("track_name"),
+			Track ? Track->GetName() : TEXT(""),
+			Track ? Track->GetName() : TEXT("Track"),
+			TEXT("Sequencer/Tracks"),
+			TEXT("sequencer_track"),
+			TEXT("track"),
+			{ TEXT("edit"), TEXT("add_section"), TEXT("remove_section") });
 
 		TArray<TSharedPtr<FJsonValue>> Sections;
 		if (Track)
@@ -1075,6 +1086,16 @@ namespace UeAgentSequenceOps
 					SectionObject->SetNumberField(TEXT("key_count"), KeyCount);
 				}
 
+				UeAgentAuthoringJson::ApplyAuthoringMetadata(
+					SectionObject,
+					TEXT("section_index"),
+					FString::FromInt(SectionIndex),
+					SectionObject->HasField(TEXT("section_type")) ? SectionObject->GetStringField(TEXT("section_type")) : Section->GetName(),
+					TEXT("Sequencer/Sections"),
+					TEXT("sequencer_section"),
+					TEXT("section"),
+					{ TEXT("set_range"), TEXT("edit_keys"), TEXT("remove") });
+
 				Sections.Add(MakeShared<FJsonValueObject>(SectionObject));
 			}
 		}
@@ -1113,12 +1134,21 @@ namespace UeAgentSequenceOps
 		return MovieScene->FindTrack<TTrackType>(BindingGuid, PropertyName);
 	}
 
-	static TSharedPtr<FJsonObject> BuildMovieSceneBindingSummary(UMovieScene* MovieScene, const FMovieSceneBinding& Binding)
+	TSharedPtr<FJsonObject> BuildMovieSceneBindingSummary(UMovieScene* MovieScene, const FMovieSceneBinding& Binding)
 	{
 		TSharedPtr<FJsonObject> Item = MakeShared<FJsonObject>();
 		Item->SetStringField(TEXT("guid"), Binding.GetObjectGuid().ToString(EGuidFormats::DigitsWithHyphensLower));
 		Item->SetStringField(TEXT("name"), Binding.GetName());
 		Item->SetNumberField(TEXT("track_count"), Binding.GetTracks().Num());
+		UeAgentAuthoringJson::ApplyAuthoringMetadata(
+			Item,
+			TEXT("binding_guid"),
+			Binding.GetObjectGuid().ToString(EGuidFormats::DigitsWithHyphensLower),
+			Binding.GetName(),
+			TEXT("Sequencer/Bindings"),
+			TEXT("sequencer_binding"),
+			TEXT("binding"),
+			{ TEXT("edit_tracks"), TEXT("add_track"), TEXT("remove_binding") });
 
 		TArray<TSharedPtr<FJsonValue>> Tracks;
 		for (UMovieSceneTrack* Track : Binding.GetTracks())
@@ -1132,7 +1162,7 @@ namespace UeAgentSequenceOps
 		return Item;
 	}
 
-	static bool FindOrCreateWidgetAnimationBinding(
+	bool FindOrCreateWidgetAnimationBinding(
 		UWidgetBlueprint* WidgetBlueprint,
 		UWidgetAnimation* TargetAnimation,
 		UWidget* TargetWidget,
@@ -1186,7 +1216,7 @@ namespace UeAgentSequenceOps
 		return true;
 	}
 
-	static bool FindOrCreateUmgTransformSection(
+	bool FindOrCreateUmgTransformSection(
 		UMovieScene* MovieScene,
 		const FGuid& BindingGuid,
 		UMovieScene2DTransformTrack*& OutTrack,
@@ -1235,7 +1265,7 @@ namespace UeAgentSequenceOps
 		return true;
 	}
 
-	static bool FindOrCreateUmgOpacitySection(
+	bool FindOrCreateUmgOpacitySection(
 		UMovieScene* MovieScene,
 		const FGuid& BindingGuid,
 		UMovieSceneFloatTrack*& OutTrack,
@@ -1285,7 +1315,7 @@ namespace UeAgentSequenceOps
 		return true;
 	}
 
-	static bool FindOrCreateUmgFloatSection(
+	bool FindOrCreateUmgFloatSection(
 		UMovieScene* MovieScene,
 		const FGuid& BindingGuid,
 		const FName PropertyName,
@@ -1336,7 +1366,7 @@ namespace UeAgentSequenceOps
 		return true;
 	}
 
-	static bool FindOrCreateUmgColorSection(
+	bool FindOrCreateUmgColorSection(
 		UMovieScene* MovieScene,
 		const FGuid& BindingGuid,
 		const FName PropertyName,
@@ -1388,7 +1418,4 @@ namespace UeAgentSequenceOps
 	}
 }
 
-#include "UeAgentHttpServer_Sequence_DispatchAndLevelSequence.inl"
-#include "UeAgentHttpServer_Sequence_BindingAndTransformTrack.inl"
-#include "UeAgentHttpServer_Sequence_UmgAnimation.inl"
-#include "UeAgentHttpServer_Sequence_FolderFormat.inl"
+#include "UeAgentHttpServer_Sequence_FolderFormat_ChannelsAndTracks.inl"

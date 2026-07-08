@@ -2,6 +2,7 @@
 
 #include "Server/UeAgentHttpServer.h"
 
+#include "Utilities/UeAgentAuthoringJson.h"
 #include "Utilities/UeAgentJsonDiagnostics.h"
 #include "Module/UeAgentInterfaceLogger.h"
 
@@ -248,9 +249,7 @@ namespace UeAgentDataDrivenOps
 		}
 
 		FString JsonText;
-		const TSharedRef<TJsonWriter<TCHAR, TPrettyJsonPrintPolicy<TCHAR>>> Writer =
-			TJsonWriterFactory<TCHAR, TPrettyJsonPrintPolicy<TCHAR>>::Create(&JsonText);
-		if (!FJsonSerializer::Serialize(Root.ToSharedRef(), Writer))
+		if (!UeAgentJsonDiagnostics::SerializeJsonObjectCompact(Root, JsonText))
 		{
 			OutError = TEXT("json_serialize_failed");
 			return false;
@@ -466,6 +465,131 @@ namespace UeAgentDataDrivenOps
 		return Out;
 	}
 
+	static FString GetPropertyControlType(FProperty* Property)
+	{
+		if (!Property)
+		{
+			return TEXT("property_editor");
+		}
+		if (CastField<FBoolProperty>(Property))
+		{
+			return TEXT("checkbox");
+		}
+		if (CastField<FEnumProperty>(Property) || CastField<FByteProperty>(Property))
+		{
+			return TEXT("enum_select");
+		}
+		if (CastField<FNumericProperty>(Property))
+		{
+			return TEXT("number_input");
+		}
+		if (CastField<FSoftObjectProperty>(Property) || CastField<FObjectPropertyBase>(Property) || CastField<FSoftClassProperty>(Property) || CastField<FClassProperty>(Property))
+		{
+			return TEXT("asset_picker");
+		}
+		if (CastField<FArrayProperty>(Property) || CastField<FSetProperty>(Property) || CastField<FMapProperty>(Property))
+		{
+			return TEXT("collection_editor");
+		}
+		return TEXT("property_text");
+	}
+
+	static FString GetPropertyValueKind(FProperty* Property)
+	{
+		if (!Property)
+		{
+			return TEXT("unknown");
+		}
+		if (CastField<FBoolProperty>(Property))
+		{
+			return TEXT("bool");
+		}
+		if (CastField<FEnumProperty>(Property))
+		{
+			return TEXT("enum");
+		}
+		if (FByteProperty* ByteProperty = CastField<FByteProperty>(Property))
+		{
+			return ByteProperty->Enum ? TEXT("enum") : TEXT("number");
+		}
+		if (CastField<FNumericProperty>(Property))
+		{
+			return TEXT("number");
+		}
+		if (CastField<FSoftObjectProperty>(Property) || CastField<FObjectPropertyBase>(Property) || CastField<FSoftClassProperty>(Property) || CastField<FClassProperty>(Property))
+		{
+			return TEXT("asset_path");
+		}
+		if (CastField<FArrayProperty>(Property))
+		{
+			return TEXT("array");
+		}
+		if (CastField<FSetProperty>(Property))
+		{
+			return TEXT("set");
+		}
+		if (CastField<FMapProperty>(Property))
+		{
+			return TEXT("map");
+		}
+		if (CastField<FStructProperty>(Property))
+		{
+			return TEXT("struct");
+		}
+		return TEXT("text");
+	}
+
+	static TArray<TSharedPtr<FJsonValue>> BuildCategoryPath(FProperty* Property)
+	{
+		TArray<TSharedPtr<FJsonValue>> CategoryPath;
+		const FString Category = Property ? Property->GetMetaData(TEXT("Category")) : FString();
+		TArray<FString> Parts;
+		Category.ParseIntoArray(Parts, TEXT("|"), true);
+		if (Parts.Num() == 0 && !Category.IsEmpty())
+		{
+			Parts.Add(Category);
+		}
+		for (FString Part : Parts)
+		{
+			Part.TrimStartAndEndInline();
+			if (!Part.IsEmpty())
+			{
+				CategoryPath.Add(MakeShared<FJsonValueString>(Part));
+			}
+		}
+		return CategoryPath;
+	}
+
+	static void AddEnumCandidates(FProperty* Property, const TSharedPtr<FJsonObject>& Field)
+	{
+		UEnum* Enum = nullptr;
+		if (FEnumProperty* EnumProperty = CastField<FEnumProperty>(Property))
+		{
+			Enum = EnumProperty->GetEnum();
+		}
+		else if (FByteProperty* ByteProperty = CastField<FByteProperty>(Property))
+		{
+			Enum = ByteProperty->Enum;
+		}
+		if (!Enum || !Field.IsValid())
+		{
+			return;
+		}
+		TArray<TSharedPtr<FJsonValue>> Candidates;
+		for (int32 Index = 0; Index < Enum->NumEnums() - 1; ++Index)
+		{
+			if (Enum->HasMetaData(TEXT("Hidden"), Index))
+			{
+				continue;
+			}
+			TSharedPtr<FJsonObject> Candidate = MakeShared<FJsonObject>();
+			Candidate->SetStringField(TEXT("name"), Enum->GetNameStringByIndex(Index));
+			Candidate->SetStringField(TEXT("display_name"), Enum->GetDisplayNameTextByIndex(Index).ToString());
+			Candidates.Add(MakeShared<FJsonValueObject>(Candidate));
+		}
+		Field->SetArrayField(TEXT("candidates"), Candidates);
+	}
+
 	static TSharedPtr<FJsonObject> PropertySchemaToJson(FProperty* Property, const void* Container = nullptr, UObject* Owner = nullptr)
 	{
 		TSharedPtr<FJsonObject> Field = MakeShared<FJsonObject>();
@@ -474,13 +598,20 @@ namespace UeAgentDataDrivenOps
 			return Field;
 		}
 
-		Field->SetStringField(TEXT("name"), Property->GetName());
-		Field->SetStringField(TEXT("authored_name"), Property->GetAuthoredName());
-		Field->SetStringField(TEXT("cpp_type"), Property->GetCPPType());
+		Field->SetStringField(TEXT("property_path"), Property->GetName());
 		Field->SetStringField(TEXT("property_class"), Property->GetClass()->GetName());
 		Field->SetBoolField(TEXT("editable"), Property->HasAnyPropertyFlags(CPF_Edit));
 		Field->SetBoolField(TEXT("blueprint_visible"), Property->HasAnyPropertyFlags(CPF_BlueprintVisible));
 		Field->SetBoolField(TEXT("transient"), Property->HasAnyPropertyFlags(CPF_Transient));
+		Field->SetStringField(TEXT("display_name"), Property->GetDisplayNameText().ToString());
+		Field->SetStringField(TEXT("tooltip"), Property->GetToolTipText().ToString());
+		Field->SetArrayField(TEXT("category_path"), BuildCategoryPath(Property));
+		Field->SetObjectField(TEXT("selector"), UeAgentAuthoringJson::MakeSelector(TEXT("property_path"), Property->GetName()));
+		Field->SetStringField(TEXT("control_type"), GetPropertyControlType(Property));
+		Field->SetStringField(TEXT("value_kind"), GetPropertyValueKind(Property));
+		Field->SetObjectField(TEXT("availability"), UeAgentAuthoringJson::MakeAvailability(Property->HasAnyPropertyFlags(CPF_Edit)));
+		Field->SetArrayField(TEXT("operations"), Property->HasAnyPropertyFlags(CPF_Edit) ? UeAgentAuthoringJson::MakeStringArray({ TEXT("set") }) : TArray<TSharedPtr<FJsonValue>>());
+		AddEnumCandidates(Property, Field);
 		if (Container)
 		{
 			const FString ValueText = ExportPropertyText(Property, Container, Owner);
@@ -524,8 +655,7 @@ namespace UeAgentDataDrivenOps
 		}
 
 		FString SchemaText;
-		const TSharedRef<TJsonWriter<>> Writer = TJsonWriterFactory<>::Create(&SchemaText);
-		FJsonSerializer::Serialize(Schema, Writer);
+		SchemaText = UeAgentJsonDiagnostics::SerializeJsonArrayCompact(Schema);
 		return JsonStringHash(StructType ? StructType->GetPathName() + SchemaText : SchemaText);
 	}
 
@@ -577,9 +707,13 @@ namespace UeAgentDataDrivenOps
 				}
 
 				FString Name;
-				if (!(*FieldObjPtr)->TryGetStringField(TEXT("name"), Name) || Name.TrimStartAndEnd().IsEmpty())
+				if (!(*FieldObjPtr)->TryGetStringField(TEXT("property_path"), Name) || Name.TrimStartAndEnd().IsEmpty())
 				{
-					AddIssue(Issues, TEXT("error"), TEXT("json_missing_required_field"), ItemPath + TEXT(".name"), TEXT("Field item requires name."));
+					(*FieldObjPtr)->TryGetStringField(TEXT("name"), Name);
+				}
+				if (Name.TrimStartAndEnd().IsEmpty())
+				{
+					AddIssue(Issues, TEXT("error"), TEXT("json_missing_required_field"), ItemPath + TEXT(".property_path"), TEXT("Field item requires property_path or legacy name."));
 					continue;
 				}
 
@@ -745,8 +879,7 @@ namespace UeAgentDataDrivenOps
 		Root->SetNumberField(TEXT("field_count"), Fields.Num());
 
 		FString FieldsText;
-		const TSharedRef<TJsonWriter<>> Writer = TJsonWriterFactory<>::Create(&FieldsText);
-		FJsonSerializer::Serialize(Fields, Writer);
+		FieldsText = UeAgentJsonDiagnostics::SerializeJsonArrayCompact(Fields);
 		Root->SetStringField(TEXT("class_schema_hash"), JsonStringHash(Asset && Asset->GetClass() ? Asset->GetClass()->GetPathName() + FieldsText : FieldsText));
 
 		if (bIncludePrimaryAsset && Asset)
@@ -1185,6 +1318,15 @@ namespace UeAgentDataDrivenOps
 				}
 				TSharedPtr<FJsonObject> RowObj = MakeShared<FJsonObject>();
 				RowObj->SetStringField(TEXT("row_name"), RowName.ToString());
+				UeAgentAuthoringJson::ApplyAuthoringMetadata(
+					RowObj,
+					TEXT("row_name"),
+					RowName.ToString(),
+					RowName.ToString(),
+					TEXT("Data Table|Rows"),
+					TEXT("row_editor"),
+					TEXT("data_table_row"),
+					{ TEXT("set"), TEXT("remove") });
 				TArray<TSharedPtr<FJsonValue>> Fields;
 				for (TFieldIterator<FProperty> It(Table->GetRowStruct(), EFieldIterationFlags::IncludeSuper); It; ++It)
 				{
@@ -1198,8 +1340,7 @@ namespace UeAgentDataDrivenOps
 				}
 				RowObj->SetArrayField(TEXT("fields"), Fields);
 				FString RowText;
-				const TSharedRef<TJsonWriter<>> Writer = TJsonWriterFactory<>::Create(&RowText);
-				FJsonSerializer::Serialize(Fields, Writer);
+				RowText = UeAgentJsonDiagnostics::SerializeJsonArrayCompact(Fields);
 				RowObj->SetStringField(TEXT("row_hash"), JsonStringHash(RowName.ToString() + RowText));
 				Rows.Add(MakeShared<FJsonValueObject>(RowObj));
 			}
@@ -1785,8 +1926,7 @@ bool FUeAgentHttpServer::CmdDataAssetApplyJson(const FUeAgentRequestContext& Ctx
 	OutData->SetStringField(TEXT("backup_asset_path"), BackupAssetPath);
 	OutData->SetStringField(TEXT("backup_object_path"), BackupObjectPath);
 	FString ReadBackText;
-	const TSharedRef<TJsonWriter<>> Writer = TJsonWriterFactory<>::Create(&ReadBackText);
-	FJsonSerializer::Serialize(UeAgentDataDrivenOps::BuildDataAssetExportJson(Asset, true).ToSharedRef(), Writer);
+	UeAgentJsonDiagnostics::SerializeJsonObjectCompact(UeAgentDataDrivenOps::BuildDataAssetExportJson(Asset, true), ReadBackText);
 	OutData->SetStringField(TEXT("read_back_hash"), UeAgentDataDrivenOps::JsonStringHash(ReadBackText));
 	if (!JsonFile.IsEmpty())
 	{
@@ -2328,8 +2468,7 @@ bool FUeAgentHttpServer::CmdDataTableApplyJson(const FUeAgentRequestContext& Ctx
 	OutData->SetNumberField(TEXT("error_count"), 0);
 	OutData->SetBoolField(TEXT("saved"), bSaveAfterApply);
 	FString ReadBackText;
-	const TSharedRef<TJsonWriter<>> Writer = TJsonWriterFactory<>::Create(&ReadBackText);
-	FJsonSerializer::Serialize(OutData.ToSharedRef(), Writer);
+	UeAgentJsonDiagnostics::SerializeJsonObjectCompact(OutData, ReadBackText);
 	OutData->SetStringField(TEXT("read_back_hash"), UeAgentDataDrivenOps::JsonStringHash(ReadBackText));
 	if (!JsonFile.IsEmpty())
 	{

@@ -4,6 +4,9 @@
 
 #include "UeAgentHttpServer_IKAssetOps.h"
 
+#include "Utilities/UeAgentAuthoringJson.h"
+#include "Utilities/UeAgentDetailsAuthoring.h"
+#include "Utilities/UeAgentFolderDetailsExport.h"
 #include "Utilities/UeAgentJsonDiagnostics.h"
 #include "UeAgentInterfaceSettings.h"
 
@@ -266,6 +269,15 @@ bool FUeAgentHttpServer::CmdIKRigGetInfo(const FUeAgentRequestContext& Ctx, TSha
 		}
 		SolverObject->SetStringField(TEXT("start_bone"), Controller->GetStartBone(SolverIndex).ToString());
 		SolverObject->SetStringField(TEXT("end_bone"), Controller->GetEndBone(SolverIndex).ToString());
+		UeAgentAuthoringJson::ApplyAuthoringMetadata(
+			SolverObject,
+			TEXT("solver_index"),
+			FString::FromInt(SolverIndex),
+			SolverObject->HasField(TEXT("solver_kind")) ? SolverObject->GetStringField(TEXT("solver_kind")) : TEXT("Solver"),
+			TEXT("IK Rig/Solvers"),
+			TEXT("ik_solver"),
+			TEXT("solver"),
+			{ TEXT("set"), TEXT("remove"), TEXT("move") });
 		Solvers.Add(MakeShared<FJsonValueObject>(SolverObject));
 	}
 

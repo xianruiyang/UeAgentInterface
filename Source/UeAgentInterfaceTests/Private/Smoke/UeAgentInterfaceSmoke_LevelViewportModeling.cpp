@@ -2,8 +2,19 @@
 
 #include "UeAgentSmokeTestSharedIncludes.inl"
 
+#include "Components/BoxComponent.h"
 #include "Components/DirectionalLightComponent.h"
+#include "Components/DynamicMeshComponent.h"
+#include "Components/HierarchicalInstancedStaticMeshComponent.h"
+#include "Components/InstancedStaticMeshComponent.h"
+#include "Components/StaticMeshComponent.h"
+#include "DynamicMesh/DynamicMesh3.h"
+#include "DynamicMesh/DynamicMeshAttributeSet.h"
+#include "DynamicMesh/DynamicMeshOverlay.h"
+#include "DynamicMeshActor.h"
 #include "Engine/StaticMeshActor.h"
+#include "Materials/MaterialInterface.h"
+#include "UDynamicMesh.h"
 
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(
 	FUeAgentInterfaceLevelReadonlySmokeTest,
@@ -543,6 +554,154 @@ bool FUeAgentInterfaceLevelCollisionQueriesSmokeTest::RunTest(const FString& Par
 		ExecuteHttpJsonRequest(TEXT("POST"), ServerScope.BaseUrl + TEXT("/api/exec"), ServerScope.Token, DestroyBody, DestroyResult, 5.0, false);
 	};
 
+	TArray<AActor*> DirectActorsToDestroy;
+	auto TrackDirectActor = [&DirectActorsToDestroy](AActor* Actor) -> AActor*
+	{
+		if (Actor)
+		{
+			DirectActorsToDestroy.Add(Actor);
+		}
+		return Actor;
+	};
+	auto DestroyDirectActors = [&DirectActorsToDestroy]() -> void
+	{
+		for (AActor* Actor : DirectActorsToDestroy)
+		{
+			if (IsValid(Actor) && !Actor->IsActorBeingDestroyed())
+			{
+				Actor->Destroy();
+			}
+		}
+		DirectActorsToDestroy.Reset();
+	};
+	auto ExecMeshShapes = [this, &ServerScope](const FString& RequestId, const FString& Params, TSharedPtr<FJsonObject>& OutData, bool bExpectedOk = true) -> bool
+	{
+		OutData.Reset();
+		const FString Body = MakeExecRequestBody(RequestId, TEXT("level_get_nearby_mesh_shapes"), Params);
+		FHttpSmokeResult Result;
+		if (!ExecuteHttpJsonRequest(TEXT("POST"), ServerScope.BaseUrl + TEXT("/api/exec"), ServerScope.Token, Body, Result))
+		{
+			AddError(FString::Printf(TEXT("%s request failed"), *RequestId));
+			return false;
+		}
+		if (Result.StatusCode != 200)
+		{
+			AddError(FString::Printf(TEXT("%s unexpected status code: %d"), *RequestId, Result.StatusCode));
+			return false;
+		}
+
+		TSharedPtr<FJsonObject> Json;
+		if (!ParseJson(Result.Body, Json) || !Json.IsValid())
+		{
+			AddError(FString::Printf(TEXT("%s returned invalid JSON"), *RequestId));
+			return false;
+		}
+
+		bool bOk = false;
+		Json->TryGetBoolField(TEXT("ok"), bOk);
+		if (bOk != bExpectedOk)
+		{
+			AddError(FString::Printf(TEXT("%s ok mismatch: expected %s, got %s"), *RequestId, bExpectedOk ? TEXT("true") : TEXT("false"), bOk ? TEXT("true") : TEXT("false")));
+			return false;
+		}
+		if (!bExpectedOk)
+		{
+			return true;
+		}
+
+		const TSharedPtr<FJsonObject>* Data = nullptr;
+		if (!Json->TryGetObjectField(TEXT("data"), Data) || !Data || !Data->IsValid())
+		{
+			AddError(FString::Printf(TEXT("%s missing data object"), *RequestId));
+			return false;
+		}
+		OutData = *Data;
+		return true;
+	};
+	auto MeshShapesContainsActor = [](const TSharedPtr<FJsonObject>& Data, const FString& ExpectedActorLabel) -> bool
+	{
+		const TArray<TSharedPtr<FJsonValue>>* Actors = nullptr;
+		if (!Data.IsValid() || !Data->TryGetArrayField(TEXT("actors"), Actors) || !Actors)
+		{
+			return false;
+		}
+		for (const TSharedPtr<FJsonValue>& ActorValue : *Actors)
+		{
+			const TSharedPtr<FJsonObject> ActorObj = ActorValue.IsValid() ? ActorValue->AsObject() : nullptr;
+			if (ActorObj.IsValid() && ActorObj->GetStringField(TEXT("name")) == ExpectedActorLabel)
+			{
+				return true;
+			}
+		}
+		return false;
+	};
+	auto MeshShapesOwnerCountForActor = [](const TSharedPtr<FJsonObject>& Data, const FString& ExpectedActorLabel) -> int32
+	{
+		const TArray<TSharedPtr<FJsonValue>>* Actors = nullptr;
+		if (!Data.IsValid() || !Data->TryGetArrayField(TEXT("actors"), Actors) || !Actors)
+		{
+			return 0;
+		}
+		for (const TSharedPtr<FJsonValue>& ActorValue : *Actors)
+		{
+			const TSharedPtr<FJsonObject> ActorObj = ActorValue.IsValid() ? ActorValue->AsObject() : nullptr;
+			const TArray<TSharedPtr<FJsonValue>>* Components = nullptr;
+			if (ActorObj.IsValid() && ActorObj->GetStringField(TEXT("name")) == ExpectedActorLabel && ActorObj->TryGetArrayField(TEXT("components"), Components) && Components)
+			{
+				return Components->Num();
+			}
+		}
+		return 0;
+	};
+	auto MeshShapesContainsActorShape = [](const TSharedPtr<FJsonObject>& Data, const FString& ExpectedActorLabel, const FString& ExpectedSrc, int32 ExpectedInstanceIndex = INDEX_NONE) -> bool
+	{
+		const TArray<TSharedPtr<FJsonValue>>* Actors = nullptr;
+		if (!Data.IsValid() || !Data->TryGetArrayField(TEXT("actors"), Actors) || !Actors)
+		{
+			return false;
+		}
+		for (const TSharedPtr<FJsonValue>& ActorValue : *Actors)
+		{
+			const TSharedPtr<FJsonObject> ActorObj = ActorValue.IsValid() ? ActorValue->AsObject() : nullptr;
+			const TArray<TSharedPtr<FJsonValue>>* Components = nullptr;
+			if (!ActorObj.IsValid() || ActorObj->GetStringField(TEXT("name")) != ExpectedActorLabel || !ActorObj->TryGetArrayField(TEXT("components"), Components) || !Components)
+			{
+				continue;
+			}
+			for (const TSharedPtr<FJsonValue>& ComponentValue : *Components)
+			{
+				const TSharedPtr<FJsonObject> ComponentObj = ComponentValue.IsValid() ? ComponentValue->AsObject() : nullptr;
+				if (!ComponentObj.IsValid())
+				{
+					continue;
+				}
+				if (ExpectedInstanceIndex != INDEX_NONE)
+				{
+					double InstanceIndexNumber = -1.0;
+					if (!ComponentObj->TryGetNumberField(TEXT("instance_index"), InstanceIndexNumber) || FMath::RoundToInt(InstanceIndexNumber) != ExpectedInstanceIndex)
+					{
+						continue;
+					}
+				}
+
+				const TArray<TSharedPtr<FJsonValue>>* Shapes = nullptr;
+				if (!ComponentObj->TryGetArrayField(TEXT("shapes"), Shapes) || !Shapes)
+				{
+					continue;
+				}
+				for (const TSharedPtr<FJsonValue>& ShapeValue : *Shapes)
+				{
+					const TSharedPtr<FJsonObject> ShapeObj = ShapeValue.IsValid() ? ShapeValue->AsObject() : nullptr;
+					if (ShapeObj.IsValid() && ShapeObj->GetStringField(TEXT("src")) == ExpectedSrc)
+					{
+						return true;
+					}
+				}
+			}
+		}
+		return false;
+	};
+
 	{
 		const FVector TraceStart = ActorLocation + FVector(0.0f, 0.0f, 2000.0f);
 		const FString TraceBody = MakeExecRequestBody(
@@ -740,6 +899,436 @@ bool FUeAgentInterfaceLevelCollisionQueriesSmokeTest::RunTest(const FString& Par
 		}
 	}
 
+	{
+		const FVector QueryMin = ActorLocation - FVector(400.0f, 400.0f, 400.0f);
+		const FVector QueryMax = ActorLocation + FVector(400.0f, 400.0f, 400.0f);
+		const FString MeshShapesBody = MakeExecRequestBody(
+			TEXT("smoke-collision-mesh-shapes-static-001"),
+			TEXT("level_get_nearby_mesh_shapes"),
+			FString::Printf(
+				TEXT("{\"query\":{\"type\":\"aabb\",\"min\":{\"x\":%.3f,\"y\":%.3f,\"z\":%.3f},\"max\":{\"x\":%.3f,\"y\":%.3f,\"z\":%.3f}},\"filters\":{\"types\":[\"static_mesh\"]},\"max_shapes_per_actor\":8}"),
+				QueryMin.X,
+				QueryMin.Y,
+				QueryMin.Z,
+				QueryMax.X,
+				QueryMax.Y,
+				QueryMax.Z));
+		FHttpSmokeResult MeshShapesResult;
+		TestTrue(TEXT("Collision mesh shapes static request succeeded"), ExecuteHttpJsonRequest(TEXT("POST"), ServerScope.BaseUrl + TEXT("/api/exec"), ServerScope.Token, MeshShapesBody, MeshShapesResult));
+		TestEqual(TEXT("Collision mesh shapes static status code"), MeshShapesResult.StatusCode, 200);
+
+		TSharedPtr<FJsonObject> MeshShapesJson;
+		TestTrue(TEXT("Collision mesh shapes static parses JSON"), ParseJson(MeshShapesResult.Body, MeshShapesJson));
+		TestTrue(TEXT("Collision mesh shapes static root ok=true"), MeshShapesJson.IsValid() && MeshShapesJson->GetBoolField(TEXT("ok")));
+
+		const TSharedPtr<FJsonObject>* MeshShapesData = nullptr;
+		TestTrue(TEXT("Collision mesh shapes static contains data"), MeshShapesJson.IsValid() && MeshShapesJson->TryGetObjectField(TEXT("data"), MeshShapesData) && MeshShapesData && MeshShapesData->IsValid());
+		if (MeshShapesData && MeshShapesData->IsValid())
+		{
+			const TSharedPtr<FJsonObject>* ShapeSpace = nullptr;
+			TestTrue(TEXT("Collision mesh shapes shape_space exists"), (*MeshShapesData)->TryGetObjectField(TEXT("shape_space"), ShapeSpace) && ShapeSpace && ShapeSpace->IsValid());
+			if (ShapeSpace && ShapeSpace->IsValid())
+			{
+				TestEqual(TEXT("Collision mesh shapes frame"), (*ShapeSpace)->GetStringField(TEXT("frame")), FString(TEXT("owner_local")));
+				TestEqual(TEXT("Collision mesh shapes repr"), (*ShapeSpace)->GetStringField(TEXT("repr")), FString(TEXT("aabb")));
+			}
+
+			const TArray<TSharedPtr<FJsonValue>>* Actors = nullptr;
+			TestTrue(TEXT("Collision mesh shapes static actors exists"), (*MeshShapesData)->TryGetArrayField(TEXT("actors"), Actors) && Actors);
+			bool bFoundActor = false;
+			bool bFoundBlockingShape = false;
+			bool bSummaryShapeIsCompact = false;
+			if (Actors)
+			{
+				for (const TSharedPtr<FJsonValue>& ActorValue : *Actors)
+				{
+					const TSharedPtr<FJsonObject> ActorObj = ActorValue.IsValid() ? ActorValue->AsObject() : nullptr;
+					if (!ActorObj.IsValid() || ActorObj->GetStringField(TEXT("name")) != ActorLabel)
+					{
+						continue;
+					}
+
+					bFoundActor = true;
+					const TArray<TSharedPtr<FJsonValue>>* Components = nullptr;
+					if (!ActorObj->TryGetArrayField(TEXT("components"), Components) || !Components)
+					{
+						continue;
+					}
+
+					for (const TSharedPtr<FJsonValue>& ComponentValue : *Components)
+					{
+						const TSharedPtr<FJsonObject> ComponentObj = ComponentValue.IsValid() ? ComponentValue->AsObject() : nullptr;
+						if (!ComponentObj.IsValid())
+						{
+							continue;
+						}
+
+						TestTrue(TEXT("Collision mesh shapes component class is UE class"), ComponentObj->GetStringField(TEXT("class")).Contains(TEXT("StaticMeshComponent")));
+						const TArray<TSharedPtr<FJsonValue>>* Shapes = nullptr;
+						if (!ComponentObj->TryGetArrayField(TEXT("shapes"), Shapes) || !Shapes)
+						{
+							continue;
+						}
+
+						for (const TSharedPtr<FJsonValue>& ShapeValue : *Shapes)
+						{
+							const TSharedPtr<FJsonObject> ShapeObj = ShapeValue.IsValid() ? ShapeValue->AsObject() : nullptr;
+							if (!ShapeObj.IsValid())
+							{
+								continue;
+							}
+
+							const FString Src = ShapeObj->GetStringField(TEXT("src"));
+							bFoundBlockingShape |= Src == TEXT("collision_box/block");
+							bSummaryShapeIsCompact |= ShapeObj->HasField(TEXT("src"))
+								&& ShapeObj->HasField(TEXT("center"))
+								&& ShapeObj->HasField(TEXT("extent"))
+								&& !ShapeObj->HasField(TEXT("id"))
+								&& !ShapeObj->HasField(TEXT("n"))
+								&& !ShapeObj->HasField(TEXT("warn"))
+								&& !ShapeObj->HasField(TEXT("world_bounds"));
+						}
+					}
+				}
+			}
+			TestTrue(TEXT("Collision mesh shapes static includes spawned actor label"), bFoundActor);
+			TestTrue(TEXT("Collision mesh shapes static includes blocking box collision"), bFoundBlockingShape);
+			TestTrue(TEXT("Collision mesh shapes summary shape remains compact"), bSummaryShapeIsCompact);
+		}
+
+		const FString MeshShapesStandardBody = MakeExecRequestBody(
+			TEXT("smoke-collision-mesh-shapes-standard-001"),
+			TEXT("level_get_nearby_mesh_shapes"),
+			FString::Printf(
+				TEXT("{\"query\":{\"type\":\"aabb\",\"min\":{\"x\":%.3f,\"y\":%.3f,\"z\":%.3f},\"max\":{\"x\":%.3f,\"y\":%.3f,\"z\":%.3f}},\"filters\":{\"types\":[\"static_mesh\"]},\"detail_level\":\"standard\",\"max_shapes_per_actor\":8}"),
+				QueryMin.X,
+				QueryMin.Y,
+				QueryMin.Z,
+				QueryMax.X,
+				QueryMax.Y,
+				QueryMax.Z));
+		FHttpSmokeResult MeshShapesStandardResult;
+		TestTrue(TEXT("Collision mesh shapes standard request succeeded"), ExecuteHttpJsonRequest(TEXT("POST"), ServerScope.BaseUrl + TEXT("/api/exec"), ServerScope.Token, MeshShapesStandardBody, MeshShapesStandardResult));
+		TestEqual(TEXT("Collision mesh shapes standard status code"), MeshShapesStandardResult.StatusCode, 200);
+
+		TSharedPtr<FJsonObject> MeshShapesStandardJson;
+		TestTrue(TEXT("Collision mesh shapes standard parses JSON"), ParseJson(MeshShapesStandardResult.Body, MeshShapesStandardJson));
+		TestTrue(TEXT("Collision mesh shapes standard root ok=true"), MeshShapesStandardJson.IsValid() && MeshShapesStandardJson->GetBoolField(TEXT("ok")));
+		const TSharedPtr<FJsonObject>* MeshShapesStandardData = nullptr;
+		TestTrue(TEXT("Collision mesh shapes standard contains data"), MeshShapesStandardJson.IsValid() && MeshShapesStandardJson->TryGetObjectField(TEXT("data"), MeshShapesStandardData) && MeshShapesStandardData && MeshShapesStandardData->IsValid());
+		if (MeshShapesStandardData && MeshShapesStandardData->IsValid())
+		{
+			const TArray<TSharedPtr<FJsonValue>>* Actors = nullptr;
+			bool bFoundStandardWorldBounds = false;
+			if ((*MeshShapesStandardData)->TryGetArrayField(TEXT("actors"), Actors) && Actors)
+			{
+				for (const TSharedPtr<FJsonValue>& ActorValue : *Actors)
+				{
+					const TSharedPtr<FJsonObject> ActorObj = ActorValue.IsValid() ? ActorValue->AsObject() : nullptr;
+					const TArray<TSharedPtr<FJsonValue>>* Components = nullptr;
+					if (!ActorObj.IsValid() || ActorObj->GetStringField(TEXT("name")) != ActorLabel || !ActorObj->TryGetArrayField(TEXT("components"), Components) || !Components)
+					{
+						continue;
+					}
+					for (const TSharedPtr<FJsonValue>& ComponentValue : *Components)
+					{
+						const TSharedPtr<FJsonObject> ComponentObj = ComponentValue.IsValid() ? ComponentValue->AsObject() : nullptr;
+						const TArray<TSharedPtr<FJsonValue>>* Shapes = nullptr;
+						if (!ComponentObj.IsValid() || !ComponentObj->TryGetArrayField(TEXT("shapes"), Shapes) || !Shapes)
+						{
+							continue;
+						}
+						for (const TSharedPtr<FJsonValue>& ShapeValue : *Shapes)
+						{
+							const TSharedPtr<FJsonObject> ShapeObj = ShapeValue.IsValid() ? ShapeValue->AsObject() : nullptr;
+							bFoundStandardWorldBounds |= ShapeObj.IsValid() && ShapeObj->HasTypedField<EJson::Object>(TEXT("world_bounds")) && ShapeObj->HasTypedField<EJson::String>(TEXT("authority"));
+						}
+					}
+				}
+			}
+			TestTrue(TEXT("Collision mesh shapes standard expands diagnostics"), bFoundStandardWorldBounds);
+		}
+
+		const FString MeshShapesBadTypeBody = MakeExecRequestBody(
+			TEXT("smoke-collision-mesh-shapes-bad-type-001"),
+			TEXT("level_get_nearby_mesh_shapes"),
+			FString::Printf(
+				TEXT("{\"query\":{\"type\":\"aabb\",\"min\":{\"x\":%.3f,\"y\":%.3f,\"z\":%.3f},\"max\":{\"x\":%.3f,\"y\":%.3f,\"z\":%.3f}},\"filters\":{\"types\":[\"not_a_supported_type\"]}}"),
+				QueryMin.X,
+				QueryMin.Y,
+				QueryMin.Z,
+				QueryMax.X,
+				QueryMax.Y,
+				QueryMax.Z));
+		FHttpSmokeResult MeshShapesBadTypeResult;
+		TestTrue(TEXT("Collision mesh shapes bad type request completed"), ExecuteHttpJsonRequest(TEXT("POST"), ServerScope.BaseUrl + TEXT("/api/exec"), ServerScope.Token, MeshShapesBadTypeBody, MeshShapesBadTypeResult));
+		TestEqual(TEXT("Collision mesh shapes bad type status code"), MeshShapesBadTypeResult.StatusCode, 400);
+		TSharedPtr<FJsonObject> MeshShapesBadTypeJson;
+		TestTrue(TEXT("Collision mesh shapes bad type parses JSON"), ParseJson(MeshShapesBadTypeResult.Body, MeshShapesBadTypeJson));
+		TestFalse(TEXT("Collision mesh shapes bad type root ok=false"), MeshShapesBadTypeJson.IsValid() && MeshShapesBadTypeJson->GetBoolField(TEXT("ok")));
+	}
+
+	{
+		TSharedPtr<FJsonObject> SphereData;
+		const FString SphereParams = FString::Printf(
+			TEXT("{\"query\":{\"type\":\"sphere\",\"center\":{\"x\":%.3f,\"y\":%.3f,\"z\":%.3f},\"radius\":700.0},\"filters\":{\"types\":[\"static_mesh\"]},\"max_shapes_per_actor\":8}"),
+			ActorLocation.X,
+			ActorLocation.Y,
+			ActorLocation.Z);
+		if (ExecMeshShapes(TEXT("smoke-collision-mesh-shapes-sphere-001"), SphereParams, SphereData))
+		{
+			TestTrue(TEXT("Collision mesh shapes sphere query includes spawned actor"), MeshShapesContainsActorShape(SphereData, ActorLabel, TEXT("collision_box/block")));
+		}
+
+		TSharedPtr<FJsonObject> FarAabbData;
+		const FVector FarMin = ActorLocation + FVector(10000.0f, 10000.0f, 10000.0f);
+		const FVector FarMax = FarMin + FVector(100.0f, 100.0f, 100.0f);
+		const FString FarAabbParams = FString::Printf(
+			TEXT("{\"query\":{\"type\":\"aabb\",\"min\":{\"x\":%.3f,\"y\":%.3f,\"z\":%.3f},\"max\":{\"x\":%.3f,\"y\":%.3f,\"z\":%.3f}},\"filters\":{\"types\":[\"static_mesh\"]}}"),
+			FarMin.X,
+			FarMin.Y,
+			FarMin.Z,
+			FarMax.X,
+			FarMax.Y,
+			FarMax.Z);
+		if (ExecMeshShapes(TEXT("smoke-collision-mesh-shapes-far-aabb-001"), FarAabbParams, FarAabbData))
+		{
+			TestFalse(TEXT("Collision mesh shapes far AABB excludes spawned actor"), MeshShapesContainsActor(FarAabbData, ActorLabel));
+		}
+	}
+
+	{
+		UWorld* EditorWorld = GEditor ? GEditor->GetEditorWorldContext().World() : nullptr;
+		UStaticMesh* CubeMesh = LoadObject<UStaticMesh>(nullptr, TEXT("/Engine/BasicShapes/Cube.Cube"));
+		TestNotNull(TEXT("Collision mesh shapes direct world exists"), EditorWorld);
+		TestNotNull(TEXT("Collision mesh shapes cube mesh loaded"), CubeMesh);
+		if (EditorWorld && CubeMesh)
+		{
+			const FVector VisualLocation = ActorLocation + FVector(3000.0f, 0.0f, 100.0f);
+			const FString VisualLabel = FString::Printf(TEXT("SmokeVisualFallback_%s"), *UniqueSuffix);
+			AActor* VisualActor = TrackDirectActor(EditorWorld->SpawnActor<AActor>(VisualLocation, FRotator::ZeroRotator));
+			TestNotNull(TEXT("Collision mesh shapes visual fallback actor spawned"), VisualActor);
+			if (VisualActor)
+			{
+				VisualActor->SetActorLabel(VisualLabel);
+				UStaticMeshComponent* VisualComponent = NewObject<UStaticMeshComponent>(VisualActor, TEXT("SmokeVisualFallbackStaticMesh"));
+				TestNotNull(TEXT("Collision mesh shapes visual fallback component created"), VisualComponent);
+				if (VisualComponent)
+				{
+					VisualComponent->CreationMethod = EComponentCreationMethod::Instance;
+					VisualComponent->SetStaticMesh(CubeMesh);
+					VisualComponent->SetCollisionEnabled(ECollisionEnabled::NoCollision);
+					VisualComponent->SetWorldScale3D(FVector(2.0f, 1.0f, 1.0f));
+					VisualActor->AddInstanceComponent(VisualComponent);
+					VisualActor->SetRootComponent(VisualComponent);
+					VisualComponent->RegisterComponent();
+					VisualComponent->SetWorldLocation(VisualLocation);
+				}
+
+				TSharedPtr<FJsonObject> VisualData;
+				const FVector QueryMin = VisualLocation - FVector(250.0f, 250.0f, 250.0f);
+				const FVector QueryMax = VisualLocation + FVector(250.0f, 250.0f, 250.0f);
+				const FString VisualParams = FString::Printf(
+					TEXT("{\"query\":{\"type\":\"aabb\",\"min\":{\"x\":%.3f,\"y\":%.3f,\"z\":%.3f},\"max\":{\"x\":%.3f,\"y\":%.3f,\"z\":%.3f}},\"filters\":{\"types\":[\"static_mesh\"]},\"max_shapes_per_actor\":8}"),
+					QueryMin.X,
+					QueryMin.Y,
+					QueryMin.Z,
+					QueryMax.X,
+					QueryMax.Y,
+					QueryMax.Z);
+				if (ExecMeshShapes(TEXT("smoke-collision-mesh-shapes-visual-fallback-001"), VisualParams, VisualData))
+				{
+					TestTrue(TEXT("Collision mesh shapes no-collision static mesh uses visual fallback"), MeshShapesContainsActorShape(VisualData, VisualLabel, TEXT("visual_aabb/visual")));
+					TestFalse(TEXT("Collision mesh shapes visual fallback is not reported as blocking collision"), MeshShapesContainsActorShape(VisualData, VisualLabel, TEXT("collision_box/block")));
+				}
+			}
+		}
+	}
+
+	{
+		UWorld* EditorWorld = GEditor ? GEditor->GetEditorWorldContext().World() : nullptr;
+		UStaticMesh* CubeMesh = LoadObject<UStaticMesh>(nullptr, TEXT("/Engine/BasicShapes/Cube.Cube"));
+		if (EditorWorld && CubeMesh)
+		{
+			const FVector IsmLocation = ActorLocation + FVector(5000.0f, 0.0f, 100.0f);
+			const FString IsmLabel = FString::Printf(TEXT("SmokeISM_%s"), *UniqueSuffix);
+			AActor* IsmActor = TrackDirectActor(EditorWorld->SpawnActor<AActor>(IsmLocation, FRotator::ZeroRotator));
+			TestNotNull(TEXT("Collision mesh shapes ISM actor spawned"), IsmActor);
+			if (IsmActor)
+			{
+				IsmActor->SetActorLabel(IsmLabel);
+				UInstancedStaticMeshComponent* IsmComponent = NewObject<UInstancedStaticMeshComponent>(IsmActor, TEXT("SmokeInstancedStaticMesh"));
+				TestNotNull(TEXT("Collision mesh shapes ISM component created"), IsmComponent);
+				if (IsmComponent)
+				{
+					IsmComponent->CreationMethod = EComponentCreationMethod::Instance;
+					IsmComponent->SetStaticMesh(CubeMesh);
+					IsmComponent->SetCollisionEnabled(ECollisionEnabled::QueryAndPhysics);
+					IsmComponent->SetCollisionObjectType(ECC_WorldStatic);
+					IsmComponent->SetCollisionResponseToAllChannels(ECR_Block);
+					IsmActor->AddInstanceComponent(IsmComponent);
+					IsmActor->SetRootComponent(IsmComponent);
+					IsmComponent->RegisterComponent();
+					IsmComponent->SetWorldLocation(IsmLocation);
+					IsmComponent->AddInstance(FTransform(FRotator::ZeroRotator, FVector::ZeroVector, FVector::OneVector), false);
+					IsmComponent->AddInstance(FTransform(FRotator::ZeroRotator, FVector(2000.0f, 0.0f, 0.0f), FVector::OneVector), false);
+				}
+
+				TSharedPtr<FJsonObject> IsmData;
+				const FVector QueryMin = IsmLocation - FVector(250.0f, 250.0f, 250.0f);
+				const FVector QueryMax = IsmLocation + FVector(250.0f, 250.0f, 250.0f);
+				const FString IsmParams = FString::Printf(
+					TEXT("{\"query\":{\"type\":\"aabb\",\"min\":{\"x\":%.3f,\"y\":%.3f,\"z\":%.3f},\"max\":{\"x\":%.3f,\"y\":%.3f,\"z\":%.3f}},\"filters\":{\"types\":[\"instanced_static_mesh\"]},\"max_shapes_per_actor\":8}"),
+					QueryMin.X,
+					QueryMin.Y,
+					QueryMin.Z,
+					QueryMax.X,
+					QueryMax.Y,
+					QueryMax.Z);
+				if (ExecMeshShapes(TEXT("smoke-collision-mesh-shapes-ism-001"), IsmParams, IsmData))
+				{
+					TestTrue(TEXT("Collision mesh shapes ISM returns matching instance"), MeshShapesContainsActorShape(IsmData, IsmLabel, TEXT("collision_box/block"), 0));
+					TestEqual(TEXT("Collision mesh shapes ISM excludes far instance owner"), MeshShapesOwnerCountForActor(IsmData, IsmLabel), 1);
+				}
+			}
+
+			const FVector HismLocation = ActorLocation + FVector(7000.0f, 0.0f, 100.0f);
+			const FString HismLabel = FString::Printf(TEXT("SmokeHISM_%s"), *UniqueSuffix);
+			AActor* HismActor = TrackDirectActor(EditorWorld->SpawnActor<AActor>(HismLocation, FRotator::ZeroRotator));
+			TestNotNull(TEXT("Collision mesh shapes HISM actor spawned"), HismActor);
+			if (HismActor)
+			{
+				HismActor->SetActorLabel(HismLabel);
+				UHierarchicalInstancedStaticMeshComponent* HismComponent = NewObject<UHierarchicalInstancedStaticMeshComponent>(HismActor, TEXT("SmokeHierarchicalInstancedStaticMesh"));
+				TestNotNull(TEXT("Collision mesh shapes HISM component created"), HismComponent);
+				if (HismComponent)
+				{
+					HismComponent->CreationMethod = EComponentCreationMethod::Instance;
+					HismComponent->SetStaticMesh(CubeMesh);
+					HismComponent->SetCollisionEnabled(ECollisionEnabled::QueryAndPhysics);
+					HismComponent->SetCollisionObjectType(ECC_WorldStatic);
+					HismComponent->SetCollisionResponseToAllChannels(ECR_Block);
+					HismActor->AddInstanceComponent(HismComponent);
+					HismActor->SetRootComponent(HismComponent);
+					HismComponent->RegisterComponent();
+					HismComponent->SetWorldLocation(HismLocation);
+					HismComponent->AddInstance(FTransform(FRotator::ZeroRotator, FVector::ZeroVector, FVector::OneVector), false);
+					HismComponent->AddInstance(FTransform(FRotator::ZeroRotator, FVector(2000.0f, 0.0f, 0.0f), FVector::OneVector), false);
+				}
+
+				TSharedPtr<FJsonObject> HismData;
+				const FVector QueryMin = HismLocation - FVector(250.0f, 250.0f, 250.0f);
+				const FVector QueryMax = HismLocation + FVector(250.0f, 250.0f, 250.0f);
+				const FString HismParams = FString::Printf(
+					TEXT("{\"query\":{\"type\":\"aabb\",\"min\":{\"x\":%.3f,\"y\":%.3f,\"z\":%.3f},\"max\":{\"x\":%.3f,\"y\":%.3f,\"z\":%.3f}},\"filters\":{\"types\":[\"hierarchical_instanced_static_mesh\"]},\"max_shapes_per_actor\":8}"),
+					QueryMin.X,
+					QueryMin.Y,
+					QueryMin.Z,
+					QueryMax.X,
+					QueryMax.Y,
+					QueryMax.Z);
+				if (ExecMeshShapes(TEXT("smoke-collision-mesh-shapes-hism-001"), HismParams, HismData))
+				{
+					TestTrue(TEXT("Collision mesh shapes HISM returns matching instance"), MeshShapesContainsActorShape(HismData, HismLabel, TEXT("collision_box/block"), 0));
+					TestEqual(TEXT("Collision mesh shapes HISM excludes far instance owner"), MeshShapesOwnerCountForActor(HismData, HismLabel), 1);
+				}
+			}
+		}
+	}
+
+	{
+		UWorld* EditorWorld = GEditor ? GEditor->GetEditorWorldContext().World() : nullptr;
+		const FVector VoxelLocation = ActorLocation + FVector(1500.0f, 0.0f, 0.0f);
+		const FString VoxelLabel = FString::Printf(TEXT("SmokeVoxelCollision_%s"), *UniqueSuffix);
+		AActor* VoxelActor = EditorWorld ? EditorWorld->SpawnActor<AActor>(VoxelLocation, FRotator::ZeroRotator) : nullptr;
+		TestNotNull(TEXT("Collision mesh shapes voxel actor spawned"), VoxelActor);
+		if (VoxelActor)
+		{
+			VoxelActor->SetActorLabel(VoxelLabel);
+			UBoxComponent* VoxelBox = NewObject<UBoxComponent>(VoxelActor, *FString::Printf(TEXT("UAI_VoxelCollision_%s"), *UniqueSuffix.Left(8)));
+			TestNotNull(TEXT("Collision mesh shapes voxel box component created"), VoxelBox);
+			if (VoxelBox)
+			{
+				VoxelBox->CreationMethod = EComponentCreationMethod::Instance;
+				VoxelBox->SetBoxExtent(FVector(120.0f, 80.0f, 60.0f));
+				VoxelBox->SetCollisionEnabled(ECollisionEnabled::QueryAndPhysics);
+				VoxelBox->SetCollisionObjectType(ECC_WorldStatic);
+				VoxelBox->SetCollisionResponseToAllChannels(ECR_Block);
+				VoxelBox->ComponentTags.Add(FName(*FString::Printf(TEXT("UAIEditableVoxelGridCollision:%s"), *UniqueSuffix.Left(8))));
+				VoxelActor->AddInstanceComponent(VoxelBox);
+				VoxelActor->SetRootComponent(VoxelBox);
+				VoxelBox->RegisterComponent();
+				VoxelBox->SetWorldLocation(VoxelLocation);
+			}
+		}
+
+		if (VoxelActor)
+		{
+			const FVector QueryMin = VoxelLocation - FVector(200.0f, 200.0f, 200.0f);
+			const FVector QueryMax = VoxelLocation + FVector(200.0f, 200.0f, 200.0f);
+			const FString VoxelShapesBody = MakeExecRequestBody(
+				TEXT("smoke-collision-mesh-shapes-voxel-001"),
+				TEXT("level_get_nearby_mesh_shapes"),
+				FString::Printf(
+					TEXT("{\"query\":{\"type\":\"aabb\",\"min\":{\"x\":%.3f,\"y\":%.3f,\"z\":%.3f},\"max\":{\"x\":%.3f,\"y\":%.3f,\"z\":%.3f}},\"filters\":{\"types\":[\"voxel_collision\"]},\"max_shapes_per_actor\":8}"),
+					QueryMin.X,
+					QueryMin.Y,
+					QueryMin.Z,
+					QueryMax.X,
+					QueryMax.Y,
+					QueryMax.Z));
+			FHttpSmokeResult VoxelShapesResult;
+			TestTrue(TEXT("Collision mesh shapes voxel request succeeded"), ExecuteHttpJsonRequest(TEXT("POST"), ServerScope.BaseUrl + TEXT("/api/exec"), ServerScope.Token, VoxelShapesBody, VoxelShapesResult));
+			TestEqual(TEXT("Collision mesh shapes voxel status code"), VoxelShapesResult.StatusCode, 200);
+
+			TSharedPtr<FJsonObject> VoxelShapesJson;
+			TestTrue(TEXT("Collision mesh shapes voxel parses JSON"), ParseJson(VoxelShapesResult.Body, VoxelShapesJson));
+			TestTrue(TEXT("Collision mesh shapes voxel root ok=true"), VoxelShapesJson.IsValid() && VoxelShapesJson->GetBoolField(TEXT("ok")));
+			const TSharedPtr<FJsonObject>* VoxelShapesData = nullptr;
+			TestTrue(TEXT("Collision mesh shapes voxel contains data"), VoxelShapesJson.IsValid() && VoxelShapesJson->TryGetObjectField(TEXT("data"), VoxelShapesData) && VoxelShapesData && VoxelShapesData->IsValid());
+			if (VoxelShapesData && VoxelShapesData->IsValid())
+			{
+				const TArray<TSharedPtr<FJsonValue>>* Actors = nullptr;
+				bool bFoundVoxelActor = false;
+				bool bFoundVoxelShape = false;
+				if ((*VoxelShapesData)->TryGetArrayField(TEXT("actors"), Actors) && Actors)
+				{
+					for (const TSharedPtr<FJsonValue>& ActorValue : *Actors)
+					{
+						const TSharedPtr<FJsonObject> ActorObj = ActorValue.IsValid() ? ActorValue->AsObject() : nullptr;
+						const TArray<TSharedPtr<FJsonValue>>* Components = nullptr;
+						if (!ActorObj.IsValid() || ActorObj->GetStringField(TEXT("name")) != VoxelLabel || !ActorObj->TryGetArrayField(TEXT("components"), Components) || !Components)
+						{
+							continue;
+						}
+						bFoundVoxelActor = true;
+						for (const TSharedPtr<FJsonValue>& ComponentValue : *Components)
+						{
+							const TSharedPtr<FJsonObject> ComponentObj = ComponentValue.IsValid() ? ComponentValue->AsObject() : nullptr;
+							const TArray<TSharedPtr<FJsonValue>>* Shapes = nullptr;
+							if (!ComponentObj.IsValid() || !ComponentObj->TryGetArrayField(TEXT("shapes"), Shapes) || !Shapes)
+							{
+								continue;
+							}
+							for (const TSharedPtr<FJsonValue>& ShapeValue : *Shapes)
+							{
+								const TSharedPtr<FJsonObject> ShapeObj = ShapeValue.IsValid() ? ShapeValue->AsObject() : nullptr;
+								bFoundVoxelShape |= ShapeObj.IsValid() && ShapeObj->GetStringField(TEXT("src")) == TEXT("collision_box/block");
+							}
+						}
+					}
+				}
+				TestTrue(TEXT("Collision mesh shapes voxel includes voxel actor only when queried"), bFoundVoxelActor);
+				TestTrue(TEXT("Collision mesh shapes voxel returns exact box collision"), bFoundVoxelShape);
+			}
+		}
+
+		if (VoxelActor && !VoxelActor->IsActorBeingDestroyed())
+		{
+			VoxelActor->Destroy();
+		}
+	}
+
 	// Validate OBB math under non-uniform scale + rotation (common in whitebox blockout).
 	{
 		const FString RotLabel = FString::Printf(TEXT("SmokeObbRot_%s"), *UniqueSuffix);
@@ -781,6 +1370,17 @@ bool FUeAgentInterfaceLevelCollisionQueriesSmokeTest::RunTest(const FString& Par
 			TestTrue(TEXT("OBB rot set_actor_rotation request succeeded"), ExecuteHttpJsonRequest(TEXT("POST"), ServerScope.BaseUrl + TEXT("/api/exec"), ServerScope.Token, RotSetBody, RotSetResult));
 			TestEqual(TEXT("OBB rot set_actor_rotation status code"), RotSetResult.StatusCode, 200);
 
+			TSharedPtr<FJsonObject> RotMeshShapesData;
+			const FString RotMeshShapesParams = FString::Printf(
+				TEXT("{\"query\":{\"type\":\"obb\",\"center\":{\"x\":%.3f,\"y\":%.3f,\"z\":%.3f},\"axis_x\":{\"x\":1.0,\"y\":0.0,\"z\":0.0},\"axis_y\":{\"x\":0.0,\"y\":1.0,\"z\":0.0},\"axis_z\":{\"x\":0.0,\"y\":0.0,\"z\":1.0},\"half_extent\":{\"x\":700.0,\"y\":700.0,\"z\":300.0}},\"filters\":{\"types\":[\"static_mesh\"]},\"detail_level\":\"standard\",\"max_shapes_per_actor\":8}"),
+				RotLocation.X,
+				RotLocation.Y,
+				RotLocation.Z);
+			if (ExecMeshShapes(TEXT("smoke-collision-mesh-shapes-rot-obb-001"), RotMeshShapesParams, RotMeshShapesData))
+			{
+				TestTrue(TEXT("Collision mesh shapes OBB query includes rotated non-uniform actor"), MeshShapesContainsActorShape(RotMeshShapesData, RotLabel, TEXT("collision_box/block")));
+			}
+
 			const FString RotObbBody = MakeExecRequestBody(
 				TEXT("smoke-collision-obb-rot-query-001"),
 				TEXT("level_get_nearby_actor_obbs"),
@@ -821,6 +1421,7 @@ bool FUeAgentInterfaceLevelCollisionQueriesSmokeTest::RunTest(const FString& Par
 		DestroyActorByName(TEXT("smoke-collision-obb-rot-destroy-001"), RotActorName);
 	}
 
+	DestroyDirectActors();
 	DestroyActorByName(TEXT("smoke-collision-destroy-001"), ActorName);
 	return !HasAnyErrors();
 }
@@ -2012,6 +2613,72 @@ bool FUeAgentInterfaceModelingReadonlySmokeTest::RunTest(const FString& Paramete
 		TestTrue(TEXT("Modeling get_mesh_selection_info contains has_active_targets"), (*GetMeshSelectionInfoData)->HasTypedField<EJson::Boolean>(TEXT("has_active_targets")));
 	}
 
+	const FString GetMeshSpatialInfoBody = MakeExecRequestBody(
+		TEXT("smoke-modeling-mesh-spatial-info-001"),
+		TEXT("modeling_get_mesh_spatial_info"),
+		TEXT("{\"asset_path\":\"/Engine/BasicShapes/Cube.Cube\"}"));
+	FHttpSmokeResult GetMeshSpatialInfoResult;
+	TestTrue(TEXT("Modeling get_mesh_spatial_info request succeeded"), ExecuteHttpJsonRequest(TEXT("POST"), ServerScope.BaseUrl + TEXT("/api/exec"), ServerScope.Token, GetMeshSpatialInfoBody, GetMeshSpatialInfoResult));
+	TestEqual(TEXT("Modeling get_mesh_spatial_info status code"), GetMeshSpatialInfoResult.StatusCode, 200);
+
+	TSharedPtr<FJsonObject> GetMeshSpatialInfoJson;
+	TestTrue(TEXT("Modeling get_mesh_spatial_info response parses as JSON"), ParseJson(GetMeshSpatialInfoResult.Body, GetMeshSpatialInfoJson));
+	TestTrue(TEXT("Modeling get_mesh_spatial_info root ok=true"), GetMeshSpatialInfoJson.IsValid() && GetMeshSpatialInfoJson->GetBoolField(TEXT("ok")));
+
+	const TSharedPtr<FJsonObject>* GetMeshSpatialInfoData = nullptr;
+	TestTrue(TEXT("Modeling get_mesh_spatial_info contains data object"), GetMeshSpatialInfoJson.IsValid() && GetMeshSpatialInfoJson->TryGetObjectField(TEXT("data"), GetMeshSpatialInfoData) && GetMeshSpatialInfoData && GetMeshSpatialInfoData->IsValid());
+	if (GetMeshSpatialInfoData && GetMeshSpatialInfoData->IsValid())
+	{
+		const TSharedPtr<FJsonObject>* Target = nullptr;
+		const TSharedPtr<FJsonObject>* Frame = nullptr;
+		const TSharedPtr<FJsonObject>* Aabb = nullptr;
+		const TSharedPtr<FJsonObject>* PivotInAabb = nullptr;
+		TestTrue(TEXT("Modeling mesh spatial info contains target"), (*GetMeshSpatialInfoData)->TryGetObjectField(TEXT("target"), Target) && Target && Target->IsValid());
+		TestTrue(TEXT("Modeling mesh spatial info contains frame"), (*GetMeshSpatialInfoData)->TryGetObjectField(TEXT("frame"), Frame) && Frame && Frame->IsValid());
+		TestTrue(TEXT("Modeling mesh spatial info contains aabb"), (*GetMeshSpatialInfoData)->TryGetObjectField(TEXT("aabb"), Aabb) && Aabb && Aabb->IsValid());
+		TestTrue(TEXT("Modeling mesh spatial info contains pivot_in_aabb"), (*GetMeshSpatialInfoData)->TryGetObjectField(TEXT("pivot_in_aabb"), PivotInAabb) && PivotInAabb && PivotInAabb->IsValid());
+		TestFalse(TEXT("Modeling mesh spatial info omits issues for regular cube"), (*GetMeshSpatialInfoData)->HasField(TEXT("issues")));
+
+		if (Target && Target->IsValid())
+		{
+			TestEqual(TEXT("Modeling mesh spatial info target type"), (*Target)->GetStringField(TEXT("target_type")), FString(TEXT("static_mesh_asset")));
+			TestEqual(TEXT("Modeling mesh spatial info asset path"), (*Target)->GetStringField(TEXT("asset_path")), FString(TEXT("/Engine/BasicShapes/Cube")));
+		}
+		if (Frame && Frame->IsValid())
+		{
+			TestEqual(TEXT("Modeling mesh spatial info bounds space"), (*Frame)->GetStringField(TEXT("bounds_space")), FString(TEXT("asset_local")));
+			TestEqual(TEXT("Modeling mesh spatial info bounds source"), (*Frame)->GetStringField(TEXT("bounds_source")), FString(TEXT("visual_mesh")));
+			TestEqual(TEXT("Modeling mesh spatial info unit"), (*Frame)->GetStringField(TEXT("unit")), FString(TEXT("cm")));
+		}
+		if (Aabb && Aabb->IsValid())
+		{
+			const TSharedPtr<FJsonObject>* Min = nullptr;
+			const TSharedPtr<FJsonObject>* Max = nullptr;
+			TestTrue(TEXT("Modeling mesh spatial info has aabb min"), (*Aabb)->TryGetObjectField(TEXT("min"), Min) && Min && Min->IsValid());
+			TestTrue(TEXT("Modeling mesh spatial info has aabb max"), (*Aabb)->TryGetObjectField(TEXT("max"), Max) && Max && Max->IsValid());
+			if (Min && Min->IsValid() && Max && Max->IsValid())
+			{
+				TestTrue(TEXT("Modeling mesh spatial info cube min x"), FMath::IsNearlyEqual((*Min)->GetNumberField(TEXT("x")), -50.0, 0.01));
+				TestTrue(TEXT("Modeling mesh spatial info cube min y"), FMath::IsNearlyEqual((*Min)->GetNumberField(TEXT("y")), -50.0, 0.01));
+				TestTrue(TEXT("Modeling mesh spatial info cube min z"), FMath::IsNearlyEqual((*Min)->GetNumberField(TEXT("z")), -50.0, 0.01));
+				TestTrue(TEXT("Modeling mesh spatial info cube max x"), FMath::IsNearlyEqual((*Max)->GetNumberField(TEXT("x")), 50.0, 0.01));
+				TestTrue(TEXT("Modeling mesh spatial info cube max y"), FMath::IsNearlyEqual((*Max)->GetNumberField(TEXT("y")), 50.0, 0.01));
+				TestTrue(TEXT("Modeling mesh spatial info cube max z"), FMath::IsNearlyEqual((*Max)->GetNumberField(TEXT("z")), 50.0, 0.01));
+			}
+		}
+		if (PivotInAabb && PivotInAabb->IsValid())
+		{
+			const TSharedPtr<FJsonObject>* Ratio = nullptr;
+			TestTrue(TEXT("Modeling mesh spatial info has pivot ratio"), (*PivotInAabb)->TryGetObjectField(TEXT("ratio"), Ratio) && Ratio && Ratio->IsValid());
+			if (Ratio && Ratio->IsValid())
+			{
+				TestTrue(TEXT("Modeling mesh spatial info pivot ratio x"), FMath::IsNearlyEqual((*Ratio)->GetNumberField(TEXT("x")), 0.5, 0.001));
+				TestTrue(TEXT("Modeling mesh spatial info pivot ratio y"), FMath::IsNearlyEqual((*Ratio)->GetNumberField(TEXT("y")), 0.5, 0.001));
+				TestTrue(TEXT("Modeling mesh spatial info pivot ratio z"), FMath::IsNearlyEqual((*Ratio)->GetNumberField(TEXT("z")), 0.5, 0.001));
+			}
+		}
+	}
+
 	const FString GetActiveToolBody = MakeExecRequestBody(TEXT("smoke-modeling-active-tool-001"), TEXT("modeling_get_active_tool"));
 	FHttpSmokeResult GetActiveToolResult;
 	TestTrue(TEXT("Modeling get_active_tool request succeeded"), ExecuteHttpJsonRequest(TEXT("POST"), ServerScope.BaseUrl + TEXT("/api/exec"), ServerScope.Token, GetActiveToolBody, GetActiveToolResult));
@@ -2063,13 +2730,19 @@ bool FUeAgentInterfaceModelingCreateByBoundsSmokeTest::RunTest(const FString& Pa
 			const FString& Command,
 			const FVector& ExpectedCenterLocal,
 			const FVector& ExpectedExtentLocal,
-			const FRotator& ExpectedRotationLocal) -> bool
+			const FRotator& ExpectedRotationLocal,
+			const FString& ExpectedCollisionModeLocal,
+			const FString& ExpectedCollisionSourceLocal,
+			int32 ExpectedMinCollisionBoxesLocal,
+			int32 ExpectedMinCollisionShapesLocal,
+			bool bExpectPrimitiveCollisionShapeLocal) -> bool
 	{
+		const FString ExpectedActorLabelLocal = RequestId;
 		const FString CreateBodyLocal = MakeExecRequestBody(
 			RequestId,
 			Command,
 			FString::Printf(
-				TEXT("{\"bounds\":{\"center\":{\"x\":%.3f,\"y\":%.3f,\"z\":%.3f},\"extent\":{\"x\":%.3f,\"y\":%.3f,\"z\":%.3f}},\"rotation\":{\"pitch\":%.3f,\"yaw\":%.3f,\"roll\":%.3f},\"folder_path\":\"%s\"}"),
+				TEXT("{\"bounds\":{\"center\":{\"x\":%.3f,\"y\":%.3f,\"z\":%.3f},\"extent\":{\"x\":%.3f,\"y\":%.3f,\"z\":%.3f}},\"rotation\":{\"pitch\":%.3f,\"yaw\":%.3f,\"roll\":%.3f},\"folder_path\":\"%s\",\"label\":\"%s\"}"),
 				ExpectedCenterLocal.X,
 				ExpectedCenterLocal.Y,
 				ExpectedCenterLocal.Z,
@@ -2079,7 +2752,8 @@ bool FUeAgentInterfaceModelingCreateByBoundsSmokeTest::RunTest(const FString& Pa
 				ExpectedRotationLocal.Pitch,
 				ExpectedRotationLocal.Yaw,
 				ExpectedRotationLocal.Roll,
-				*FolderPath));
+				*FolderPath,
+				*ExpectedActorLabelLocal));
 
 		FHttpSmokeResult CreateResultLocal;
 		TestTrue(FString::Printf(TEXT("%s request succeeded"), *Command), ExecuteHttpJsonRequest(TEXT("POST"), ServerScope.BaseUrl + TEXT("/api/exec"), ServerScope.Token, CreateBodyLocal, CreateResultLocal));
@@ -2099,25 +2773,118 @@ bool FUeAgentInterfaceModelingCreateByBoundsSmokeTest::RunTest(const FString& Pa
 		FString CreatedActorNameLocal;
 		const TSharedPtr<FJsonObject>* CreatedActorLocal = nullptr;
 		TestTrue(FString::Printf(TEXT("%s reports used_bounds_placement"), *Command), (*CreateDataLocal)->GetBoolField(TEXT("used_bounds_placement")));
+		TestTrue(FString::Printf(TEXT("%s reports default dynamic output applied"), *Command), (*CreateDataLocal)->GetBoolField(TEXT("default_output_type_applied")));
+		TestEqual(FString::Printf(TEXT("%s default output type"), *Command), (*CreateDataLocal)->GetStringField(TEXT("default_output_type")), FString(TEXT("Dynamic Mesh")));
 		TestTrue(FString::Printf(TEXT("%s contains created_actor"), *Command), (*CreateDataLocal)->TryGetObjectField(TEXT("created_actor"), CreatedActorLocal) && CreatedActorLocal && CreatedActorLocal->IsValid());
 		if (CreatedActorLocal && CreatedActorLocal->IsValid())
 		{
 			CreatedActorNameLocal = (*CreatedActorLocal)->GetStringField(TEXT("name"));
+			const FString CreatedActorClassLocal = (*CreatedActorLocal)->GetStringField(TEXT("class"));
 			TestFalse(FString::Printf(TEXT("%s created_actor name not empty"), *Command), CreatedActorNameLocal.IsEmpty());
+			TestEqual(FString::Printf(TEXT("%s created_actor label matches"), *Command), (*CreatedActorLocal)->GetStringField(TEXT("label")), ExpectedActorLabelLocal);
+			TestEqual(FString::Printf(TEXT("%s created_actor class dynamic mesh"), *Command), CreatedActorClassLocal, FString(TEXT("/Script/GeometryFramework.DynamicMeshActor")));
 		}
 
 		const TSharedPtr<FJsonObject>* DerivedPrimitiveLocal = nullptr;
 		TestTrue(FString::Printf(TEXT("%s contains derived_primitive"), *Command), (*CreateDataLocal)->TryGetObjectField(TEXT("derived_primitive"), DerivedPrimitiveLocal) && DerivedPrimitiveLocal && DerivedPrimitiveLocal->IsValid());
 		if (DerivedPrimitiveLocal && DerivedPrimitiveLocal->IsValid())
 		{
-			TestEqual(FString::Printf(TEXT("%s derived depth"), *Command), (*DerivedPrimitiveLocal)->GetNumberField(TEXT("Depth")), static_cast<double>(ExpectedExtentLocal.X * 2.0f));
-			TestEqual(FString::Printf(TEXT("%s derived width"), *Command), (*DerivedPrimitiveLocal)->GetNumberField(TEXT("Width")), static_cast<double>(ExpectedExtentLocal.Y * 2.0f));
-			TestEqual(FString::Printf(TEXT("%s derived height"), *Command), (*DerivedPrimitiveLocal)->GetNumberField(TEXT("Height")), static_cast<double>(ExpectedExtentLocal.Z * 2.0f));
+			if (Command == TEXT("modeling_create_stairs"))
+			{
+				TestTrue(TEXT("modeling_create_stairs derived has StepWidth"), (*DerivedPrimitiveLocal)->HasTypedField<EJson::Number>(TEXT("StepWidth")));
+				TestTrue(TEXT("modeling_create_stairs derived has StepHeight"), (*DerivedPrimitiveLocal)->HasTypedField<EJson::Number>(TEXT("StepHeight")));
+				TestTrue(TEXT("modeling_create_stairs derived has StepDepth"), (*DerivedPrimitiveLocal)->HasTypedField<EJson::Number>(TEXT("StepDepth")));
+				TestTrue(TEXT("modeling_create_stairs derived has NumSteps"), (*DerivedPrimitiveLocal)->HasTypedField<EJson::Number>(TEXT("NumSteps")));
+				TestTrue(TEXT("modeling_create_stairs derived step count is valid"), static_cast<int32>((*DerivedPrimitiveLocal)->GetNumberField(TEXT("NumSteps"))) >= 2);
+			}
+			else
+			{
+				TestEqual(FString::Printf(TEXT("%s derived depth"), *Command), (*DerivedPrimitiveLocal)->GetNumberField(TEXT("Depth")), static_cast<double>(ExpectedExtentLocal.X * 2.0f));
+				TestEqual(FString::Printf(TEXT("%s derived width"), *Command), (*DerivedPrimitiveLocal)->GetNumberField(TEXT("Width")), static_cast<double>(ExpectedExtentLocal.Y * 2.0f));
+				TestEqual(FString::Printf(TEXT("%s derived height"), *Command), (*DerivedPrimitiveLocal)->GetNumberField(TEXT("Height")), static_cast<double>(ExpectedExtentLocal.Z * 2.0f));
+			}
+		}
+
+		const TSharedPtr<FJsonObject>* CollisionLocal = nullptr;
+		TestTrue(FString::Printf(TEXT("%s contains collision readback"), *Command), (*CreateDataLocal)->TryGetObjectField(TEXT("collision"), CollisionLocal) && CollisionLocal && CollisionLocal->IsValid());
+		if (CollisionLocal && CollisionLocal->IsValid())
+		{
+			TestTrue(FString::Printf(TEXT("%s collision generated"), *Command), (*CollisionLocal)->GetBoolField(TEXT("generated")));
+			TestEqual(FString::Printf(TEXT("%s collision source"), *Command), (*CollisionLocal)->GetStringField(TEXT("source")), ExpectedCollisionSourceLocal);
+			TestEqual(FString::Printf(TEXT("%s collision mode"), *Command), (*CollisionLocal)->GetStringField(TEXT("mode")), ExpectedCollisionModeLocal);
+			TestTrue(FString::Printf(TEXT("%s collision has expected boxes"), *Command), static_cast<int32>((*CollisionLocal)->GetNumberField(TEXT("box_count"))) >= ExpectedMinCollisionBoxesLocal);
+			TestTrue(FString::Printf(TEXT("%s collision has expected shapes"), *Command), static_cast<int32>((*CollisionLocal)->GetNumberField(TEXT("shape_count"))) >= ExpectedMinCollisionShapesLocal);
 		}
 
 		if (CreatedActorNameLocal.IsEmpty())
 		{
 			return false;
+		}
+
+		if (bExpectPrimitiveCollisionShapeLocal)
+		{
+			const FVector QueryMinLocal = ExpectedCenterLocal - ExpectedExtentLocal - FVector(80.0f, 80.0f, 80.0f);
+			const FVector QueryMaxLocal = ExpectedCenterLocal + ExpectedExtentLocal + FVector(80.0f, 80.0f, 80.0f);
+			const FString MeshShapesBodyLocal = MakeExecRequestBody(
+				RequestId + TEXT("-mesh-shapes"),
+				TEXT("level_get_nearby_mesh_shapes"),
+				FString::Printf(
+					TEXT("{\"query\":{\"type\":\"aabb\",\"min\":{\"x\":%.3f,\"y\":%.3f,\"z\":%.3f},\"max\":{\"x\":%.3f,\"y\":%.3f,\"z\":%.3f}},\"filters\":{\"types\":[\"primitive_collision\"]},\"max_shapes_per_actor\":64}"),
+					QueryMinLocal.X,
+					QueryMinLocal.Y,
+					QueryMinLocal.Z,
+					QueryMaxLocal.X,
+					QueryMaxLocal.Y,
+					QueryMaxLocal.Z));
+			FHttpSmokeResult MeshShapesResultLocal;
+			TestTrue(FString::Printf(TEXT("%s mesh_shapes request succeeded"), *Command), ExecuteHttpJsonRequest(TEXT("POST"), ServerScope.BaseUrl + TEXT("/api/exec"), ServerScope.Token, MeshShapesBodyLocal, MeshShapesResultLocal));
+			TestEqual(FString::Printf(TEXT("%s mesh_shapes status code"), *Command), MeshShapesResultLocal.StatusCode, 200);
+
+			TSharedPtr<FJsonObject> MeshShapesJsonLocal;
+			TestTrue(FString::Printf(TEXT("%s mesh_shapes parses as JSON"), *Command), ParseJson(MeshShapesResultLocal.Body, MeshShapesJsonLocal));
+			TestTrue(FString::Printf(TEXT("%s mesh_shapes root ok=true"), *Command), MeshShapesJsonLocal.IsValid() && MeshShapesJsonLocal->GetBoolField(TEXT("ok")));
+
+			const TSharedPtr<FJsonObject>* MeshShapesDataLocal = nullptr;
+			TestTrue(FString::Printf(TEXT("%s mesh_shapes contains data"), *Command), MeshShapesJsonLocal.IsValid() && MeshShapesJsonLocal->TryGetObjectField(TEXT("data"), MeshShapesDataLocal) && MeshShapesDataLocal && MeshShapesDataLocal->IsValid());
+			if (MeshShapesDataLocal && MeshShapesDataLocal->IsValid())
+			{
+				const TArray<TSharedPtr<FJsonValue>>* ActorsLocal = nullptr;
+				TestTrue(FString::Printf(TEXT("%s mesh_shapes actors exists"), *Command), (*MeshShapesDataLocal)->TryGetArrayField(TEXT("actors"), ActorsLocal) && ActorsLocal);
+
+				bool bFoundPrimitiveCollisionShape = false;
+				if (ActorsLocal)
+				{
+					for (const TSharedPtr<FJsonValue>& ActorValue : *ActorsLocal)
+					{
+						const TSharedPtr<FJsonObject> ActorObj = ActorValue.IsValid() ? ActorValue->AsObject() : nullptr;
+						const TArray<TSharedPtr<FJsonValue>>* Components = nullptr;
+						if (!ActorObj.IsValid() || ActorObj->GetStringField(TEXT("name")) != ExpectedActorLabelLocal || !ActorObj->TryGetArrayField(TEXT("components"), Components) || !Components)
+						{
+							continue;
+						}
+
+						for (const TSharedPtr<FJsonValue>& ComponentValue : *Components)
+						{
+							const TSharedPtr<FJsonObject> ComponentObj = ComponentValue.IsValid() ? ComponentValue->AsObject() : nullptr;
+							const TArray<TSharedPtr<FJsonValue>>* Shapes = nullptr;
+							if (!ComponentObj.IsValid() || !ComponentObj->TryGetArrayField(TEXT("shapes"), Shapes) || !Shapes)
+							{
+								continue;
+							}
+
+							for (const TSharedPtr<FJsonValue>& ShapeValue : *Shapes)
+							{
+								const TSharedPtr<FJsonObject> ShapeObj = ShapeValue.IsValid() ? ShapeValue->AsObject() : nullptr;
+								if (ShapeObj.IsValid() && ShapeObj->GetStringField(TEXT("src")) == TEXT("collision_box/block"))
+								{
+									bFoundPrimitiveCollisionShape = true;
+								}
+							}
+						}
+					}
+				}
+				TestTrue(FString::Printf(TEXT("%s mesh_shapes sees primitive collision"), *Command), bFoundPrimitiveCollisionShape);
+			}
 		}
 
 		const FString GetTransformBodyLocal = MakeExecRequestBody(
@@ -2154,11 +2921,149 @@ bool FUeAgentInterfaceModelingCreateByBoundsSmokeTest::RunTest(const FString& Pa
 			}
 		}
 
+		if (ExpectedCollisionModeLocal == TEXT("complex_mesh"))
+		{
+			const float SweepDistance = FMath::Max(ExpectedExtentLocal.Y + 120.0f, 220.0f);
+			const FVector SweepStartLocal = ExpectedCenterLocal + FVector(0.0f, -SweepDistance, 0.0f);
+			const FVector SweepEndLocal = ExpectedCenterLocal + FVector(0.0f, SweepDistance, 0.0f);
+			const FString SweepBodyLocal = MakeExecRequestBody(
+				RequestId + TEXT("-complex-as-simple-sweep"),
+				TEXT("level_sweep_capsule"),
+				FString::Printf(
+					TEXT("{\"start\":{\"x\":%.3f,\"y\":%.3f,\"z\":%.3f},\"end\":{\"x\":%.3f,\"y\":%.3f,\"z\":%.3f},\"radius_cm\":34.0,\"half_height_cm\":88.0,\"trace_channel\":\"Pawn\",\"trace_complex\":false,\"find_initial_overlaps\":true}"),
+					SweepStartLocal.X,
+					SweepStartLocal.Y,
+					SweepStartLocal.Z,
+					SweepEndLocal.X,
+					SweepEndLocal.Y,
+					SweepEndLocal.Z));
+			FHttpSmokeResult SweepResultLocal;
+			TestTrue(FString::Printf(TEXT("%s complex-as-simple sweep request succeeded"), *Command), ExecuteHttpJsonRequest(TEXT("POST"), ServerScope.BaseUrl + TEXT("/api/exec"), ServerScope.Token, SweepBodyLocal, SweepResultLocal));
+			TestEqual(FString::Printf(TEXT("%s complex-as-simple sweep status code"), *Command), SweepResultLocal.StatusCode, 200);
+
+			TSharedPtr<FJsonObject> SweepJsonLocal;
+			TestTrue(FString::Printf(TEXT("%s complex-as-simple sweep parses JSON"), *Command), ParseJson(SweepResultLocal.Body, SweepJsonLocal));
+			TestTrue(FString::Printf(TEXT("%s complex-as-simple sweep root ok=true"), *Command), SweepJsonLocal.IsValid() && SweepJsonLocal->GetBoolField(TEXT("ok")));
+
+			const TSharedPtr<FJsonObject>* SweepDataLocal = nullptr;
+			TestTrue(FString::Printf(TEXT("%s complex-as-simple sweep contains data object"), *Command), SweepJsonLocal.IsValid() && SweepJsonLocal->TryGetObjectField(TEXT("data"), SweepDataLocal) && SweepDataLocal && SweepDataLocal->IsValid());
+			if (SweepDataLocal && SweepDataLocal->IsValid())
+			{
+				TestTrue(FString::Printf(TEXT("%s complex-as-simple blocks Pawn sweep without trace_complex"), *Command), (*SweepDataLocal)->GetBoolField(TEXT("blocking_hit")));
+				TestEqual(FString::Printf(TEXT("%s complex-as-simple sweep actor_name matches"), *Command), (*SweepDataLocal)->GetStringField(TEXT("actor_name")), CreatedActorNameLocal);
+			}
+		}
+
 		return !HasAnyErrors();
 	};
-	VerifyCreatedPrimitiveByBounds(TEXT("smoke-modeling-create-box-bounds-001"), TEXT("modeling_create_box"), ExpectedCenter, ExpectedExtent, ExpectedRotation);
-	VerifyCreatedPrimitiveByBounds(TEXT("smoke-modeling-create-ramp-bounds-001"), TEXT("modeling_create_ramp"), ExpectedCenter + FVector(400.0f, 0.0f, 0.0f), FVector(120.0f, 90.0f, 60.0f), FRotator(0.0f, 90.0f, 0.0f));
-	VerifyCreatedPrimitiveByBounds(TEXT("smoke-modeling-create-ramp-corner-bounds-001"), TEXT("modeling_create_ramp_corner"), ExpectedCenter + FVector(-400.0f, 0.0f, 0.0f), FVector(100.0f, 100.0f, 80.0f), FRotator(0.0f, -25.0f, 0.0f));
+	VerifyCreatedPrimitiveByBounds(TEXT("smoke-modeling-create-box-bounds-001"), TEXT("modeling_create_box"), ExpectedCenter, ExpectedExtent, ExpectedRotation, TEXT("bounds_box"), TEXT("actor_box_components"), 1, 1, true);
+	VerifyCreatedPrimitiveByBounds(TEXT("smoke-modeling-create-ramp-bounds-001"), TEXT("modeling_create_ramp"), ExpectedCenter + FVector(400.0f, 0.0f, 0.0f), FVector(120.0f, 90.0f, 60.0f), FRotator(0.0f, 90.0f, 0.0f), TEXT("complex_mesh"), TEXT("dynamic_mesh_component"), 0, 1, false);
+	VerifyCreatedPrimitiveByBounds(TEXT("smoke-modeling-create-ramp-corner-bounds-001"), TEXT("modeling_create_ramp_corner"), ExpectedCenter + FVector(-400.0f, 0.0f, 0.0f), FVector(100.0f, 100.0f, 80.0f), FRotator(0.0f, -25.0f, 0.0f), TEXT("complex_mesh"), TEXT("dynamic_mesh_component"), 0, 1, false);
+	VerifyCreatedPrimitiveByBounds(TEXT("smoke-modeling-create-stairs-bounds-001"), TEXT("modeling_create_stairs"), ExpectedCenter + FVector(0.0f, 420.0f, 120.0f), FVector(220.0f, 80.0f, 120.0f), FRotator::ZeroRotator, TEXT("stairs_step_boxes"), TEXT("actor_box_components"), 2, 2, true);
+
+	const FString VisualOnlyLabel = TEXT("smoke-modeling-create-visual-none-001");
+	const FVector VisualOnlyCenter = ExpectedCenter + FVector(0.0f, -420.0f, 0.0f);
+	const FString VisualOnlyBody = MakeExecRequestBody(
+		VisualOnlyLabel,
+		TEXT("modeling_create_box"),
+		FString::Printf(
+			TEXT("{\"bounds\":{\"center\":{\"x\":%.3f,\"y\":%.3f,\"z\":%.3f},\"extent\":{\"x\":%.3f,\"y\":%.3f,\"z\":%.3f}},\"folder_path\":\"%s\",\"label\":\"%s\",\"collision\":{\"mode\":\"none\"}}"),
+			VisualOnlyCenter.X,
+			VisualOnlyCenter.Y,
+			VisualOnlyCenter.Z,
+			ExpectedExtent.X,
+			ExpectedExtent.Y,
+			ExpectedExtent.Z,
+			*FolderPath,
+			*VisualOnlyLabel));
+	FHttpSmokeResult VisualOnlyResult;
+	TestTrue(TEXT("modeling_create_box visual-only request succeeded"), ExecuteHttpJsonRequest(TEXT("POST"), ServerScope.BaseUrl + TEXT("/api/exec"), ServerScope.Token, VisualOnlyBody, VisualOnlyResult));
+	TestEqual(TEXT("modeling_create_box visual-only status code"), VisualOnlyResult.StatusCode, 200);
+
+	TSharedPtr<FJsonObject> VisualOnlyJson;
+	TestTrue(TEXT("modeling_create_box visual-only parses as JSON"), ParseJson(VisualOnlyResult.Body, VisualOnlyJson));
+	TestTrue(TEXT("modeling_create_box visual-only root ok=true"), VisualOnlyJson.IsValid() && VisualOnlyJson->GetBoolField(TEXT("ok")));
+
+	const TSharedPtr<FJsonObject>* VisualOnlyData = nullptr;
+	TestTrue(TEXT("modeling_create_box visual-only contains data"), VisualOnlyJson.IsValid() && VisualOnlyJson->TryGetObjectField(TEXT("data"), VisualOnlyData) && VisualOnlyData && VisualOnlyData->IsValid());
+	if (VisualOnlyData && VisualOnlyData->IsValid())
+	{
+		const TSharedPtr<FJsonObject>* Collision = nullptr;
+		TestTrue(TEXT("modeling_create_box visual-only collision readback exists"), (*VisualOnlyData)->TryGetObjectField(TEXT("collision"), Collision) && Collision && Collision->IsValid());
+		if (Collision && Collision->IsValid())
+		{
+			TestFalse(TEXT("modeling_create_box visual-only collision not generated"), (*Collision)->GetBoolField(TEXT("generated")));
+			TestTrue(TEXT("modeling_create_box visual-only collision skipped"), (*Collision)->GetBoolField(TEXT("skipped")));
+			TestEqual(TEXT("modeling_create_box visual-only skip reason"), (*Collision)->GetStringField(TEXT("skip_reason")), FString(TEXT("collision_disabled")));
+			TestTrue(TEXT("modeling_create_box visual-only disables dynamic mesh collision"), static_cast<int32>((*Collision)->GetNumberField(TEXT("disabled_dynamic_mesh_collision_components"))) > 0);
+		}
+	}
+
+	const FVector VisualQueryMin = VisualOnlyCenter - ExpectedExtent - FVector(80.0f, 80.0f, 80.0f);
+	const FVector VisualQueryMax = VisualOnlyCenter + ExpectedExtent + FVector(80.0f, 80.0f, 80.0f);
+	const FString VisualMeshShapesBody = MakeExecRequestBody(
+		TEXT("smoke-modeling-create-visual-none-mesh-shapes-001"),
+		TEXT("level_get_nearby_mesh_shapes"),
+		FString::Printf(
+			TEXT("{\"query\":{\"type\":\"aabb\",\"min\":{\"x\":%.3f,\"y\":%.3f,\"z\":%.3f},\"max\":{\"x\":%.3f,\"y\":%.3f,\"z\":%.3f}},\"filters\":{\"types\":[\"primitive_collision\"]},\"max_shapes_per_actor\":16}"),
+			VisualQueryMin.X,
+			VisualQueryMin.Y,
+			VisualQueryMin.Z,
+			VisualQueryMax.X,
+			VisualQueryMax.Y,
+			VisualQueryMax.Z));
+	FHttpSmokeResult VisualMeshShapesResult;
+	TestTrue(TEXT("modeling_create_box visual-only mesh_shapes request succeeded"), ExecuteHttpJsonRequest(TEXT("POST"), ServerScope.BaseUrl + TEXT("/api/exec"), ServerScope.Token, VisualMeshShapesBody, VisualMeshShapesResult));
+	TestEqual(TEXT("modeling_create_box visual-only mesh_shapes status code"), VisualMeshShapesResult.StatusCode, 200);
+
+	TSharedPtr<FJsonObject> VisualMeshShapesJson;
+	TestTrue(TEXT("modeling_create_box visual-only mesh_shapes parses JSON"), ParseJson(VisualMeshShapesResult.Body, VisualMeshShapesJson));
+	TestTrue(TEXT("modeling_create_box visual-only mesh_shapes root ok=true"), VisualMeshShapesJson.IsValid() && VisualMeshShapesJson->GetBoolField(TEXT("ok")));
+
+	const TSharedPtr<FJsonObject>* VisualMeshShapesData = nullptr;
+	TestTrue(TEXT("modeling_create_box visual-only mesh_shapes contains data"), VisualMeshShapesJson.IsValid() && VisualMeshShapesJson->TryGetObjectField(TEXT("data"), VisualMeshShapesData) && VisualMeshShapesData && VisualMeshShapesData->IsValid());
+	if (VisualMeshShapesData && VisualMeshShapesData->IsValid())
+	{
+		const TArray<TSharedPtr<FJsonValue>>* Actors = nullptr;
+		TestTrue(TEXT("modeling_create_box visual-only mesh_shapes actors exists"), (*VisualMeshShapesData)->TryGetArrayField(TEXT("actors"), Actors) && Actors);
+		bool bFoundVisualOnlyCollision = false;
+		if (Actors)
+		{
+			for (const TSharedPtr<FJsonValue>& ActorValue : *Actors)
+			{
+				const TSharedPtr<FJsonObject> ActorObj = ActorValue.IsValid() ? ActorValue->AsObject() : nullptr;
+				if (ActorObj.IsValid() && ActorObj->GetStringField(TEXT("name")) == VisualOnlyLabel)
+				{
+					bFoundVisualOnlyCollision = true;
+				}
+			}
+		}
+		TestFalse(TEXT("modeling_create_box visual-only has no primitive collision shapes"), bFoundVisualOnlyCollision);
+	}
+
+	const FVector VisualTraceStart = VisualOnlyCenter + FVector(-ExpectedExtent.X - 120.0f, 0.0f, 0.0f);
+	const FString VisualTraceBody = MakeExecRequestBody(
+		TEXT("smoke-modeling-create-visual-none-trace-001"),
+		TEXT("level_trace_world_ray"),
+		FString::Printf(
+			TEXT("{\"start\":{\"x\":%.3f,\"y\":%.3f,\"z\":%.3f},\"direction\":{\"x\":1.0,\"y\":0.0,\"z\":0.0},\"trace_distance\":%.3f,\"trace_channel\":\"Visibility\",\"trace_complex\":true}"),
+			VisualTraceStart.X,
+			VisualTraceStart.Y,
+			VisualTraceStart.Z,
+			ExpectedExtent.X * 2.0f + 240.0f));
+	FHttpSmokeResult VisualTraceResult;
+	TestTrue(TEXT("modeling_create_box visual-only complex trace request succeeded"), ExecuteHttpJsonRequest(TEXT("POST"), ServerScope.BaseUrl + TEXT("/api/exec"), ServerScope.Token, VisualTraceBody, VisualTraceResult));
+	TestEqual(TEXT("modeling_create_box visual-only complex trace status code"), VisualTraceResult.StatusCode, 200);
+
+	TSharedPtr<FJsonObject> VisualTraceJson;
+	TestTrue(TEXT("modeling_create_box visual-only complex trace parses JSON"), ParseJson(VisualTraceResult.Body, VisualTraceJson));
+	TestTrue(TEXT("modeling_create_box visual-only complex trace root ok=true"), VisualTraceJson.IsValid() && VisualTraceJson->GetBoolField(TEXT("ok")));
+	const TSharedPtr<FJsonObject>* VisualTraceData = nullptr;
+	TestTrue(TEXT("modeling_create_box visual-only complex trace contains data"), VisualTraceJson.IsValid() && VisualTraceJson->TryGetObjectField(TEXT("data"), VisualTraceData) && VisualTraceData && VisualTraceData->IsValid());
+	if (VisualTraceData && VisualTraceData->IsValid())
+	{
+		TestFalse(TEXT("modeling_create_box visual-only complex trace does not hit disabled visual mesh"), (*VisualTraceData)->GetBoolField(TEXT("hit")));
+	}
 
 	const FString DestroyBody = MakeExecRequestBody(
 		TEXT("smoke-modeling-create-bounds-destroy-001"),
@@ -2171,6 +3076,317 @@ bool FUeAgentInterfaceModelingCreateByBoundsSmokeTest::RunTest(const FString& Pa
 	TSharedPtr<FJsonObject> DestroyJson;
 	TestTrue(TEXT("Modeling bounds workflow destroy parses as JSON"), ParseJson(DestroyResult.Body, DestroyJson));
 	TestTrue(TEXT("Modeling bounds workflow destroy root ok=true"), DestroyJson.IsValid() && DestroyJson->GetBoolField(TEXT("ok")));
+
+	return !HasAnyErrors();
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(
+	FUeAgentInterfaceModelingVoxelGridSmokeTest,
+	"GptProjectTest.UeAgentInterface.Smoke.ModelingVoxelGridWorkflow",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::ProductFilter)
+
+bool FUeAgentInterfaceModelingVoxelGridSmokeTest::RunTest(const FString& Parameters)
+{
+	FScopedUeAgentHttpServer ServerScope;
+	FString InitError;
+	if (!ServerScope.Initialize(InitError))
+	{
+		AddError(FString::Printf(TEXT("Initialize failed: %s"), *InitError));
+		return false;
+	}
+
+	const FString Suffix = FGuid::NewGuid().ToString(EGuidFormats::Digits).Left(8);
+	const FString ActorLabel = FString::Printf(TEXT("SmokeVoxelGrid_%s"), *Suffix);
+	const FString FolderPath = FString::Printf(TEXT("Smoke/ModelingVoxelGrid/%s"), *Suffix);
+	FString SessionId;
+
+	auto ExecJson = [this, &ServerScope](const FString& RequestId, const FString& Command, const FString& ParamsJson, TSharedPtr<FJsonObject>& OutJson) -> bool
+	{
+		const FString Body = MakeExecRequestBody(RequestId, Command, ParamsJson);
+		FHttpSmokeResult Result;
+		TestTrue(FString::Printf(TEXT("%s request succeeded"), *Command), ExecuteHttpJsonRequest(TEXT("POST"), ServerScope.BaseUrl + TEXT("/api/exec"), ServerScope.Token, Body, Result));
+		TestEqual(FString::Printf(TEXT("%s status code"), *Command), Result.StatusCode, 200);
+		TestTrue(FString::Printf(TEXT("%s response parses as JSON"), *Command), ParseJson(Result.Body, OutJson));
+		TestTrue(FString::Printf(TEXT("%s root ok=true"), *Command), OutJson.IsValid() && OutJson->GetBoolField(TEXT("ok")));
+		return OutJson.IsValid() && OutJson->GetBoolField(TEXT("ok"));
+	};
+
+	auto GetData = [this](const FString& Label, const TSharedPtr<FJsonObject>& Json) -> const TSharedPtr<FJsonObject>*
+	{
+		const TSharedPtr<FJsonObject>* Data = nullptr;
+		TestTrue(FString::Printf(TEXT("%s contains data object"), *Label), Json.IsValid() && Json->TryGetObjectField(TEXT("data"), Data) && Data && Data->IsValid());
+		return Data;
+	};
+
+	TSharedPtr<FJsonObject> BeginJson;
+	TestTrue(
+		TEXT("Voxel grid begin executes"),
+		ExecJson(
+			TEXT("smoke-modeling-voxel-begin-001"),
+			TEXT("modeling_voxel_grid_begin"),
+			FString::Printf(
+				TEXT("{\"mode\":\"create\",\"label\":\"%s\",\"folder_path\":\"%s\",\"grid\":{\"cell_size\":100,\"origin\":{\"x\":0,\"y\":0,\"z\":0},\"rotation\":{\"pitch\":0,\"yaw\":0,\"roll\":0}}}"),
+				*ActorLabel,
+				*FolderPath),
+			BeginJson));
+
+	const TSharedPtr<FJsonObject>* BeginData = GetData(TEXT("Voxel grid begin"), BeginJson);
+	if (BeginData && BeginData->IsValid())
+	{
+		SessionId = (*BeginData)->GetStringField(TEXT("session_id"));
+		TestFalse(TEXT("Voxel grid session id not empty"), SessionId.IsEmpty());
+		TestEqual(TEXT("Voxel grid output type is dynamic mesh actor"), (*BeginData)->GetStringField(TEXT("output_type")), FString(TEXT("dynamic_mesh_actor")));
+		TestEqual(TEXT("Voxel grid begin cell size"), (*BeginData)->GetNumberField(TEXT("cell_size")), 100.0);
+	}
+
+	if (SessionId.IsEmpty())
+	{
+		return false;
+	}
+
+	TSharedPtr<FJsonObject> AddStripJson;
+	TestTrue(
+		TEXT("Voxel grid add horizontal strip executes"),
+		ExecJson(
+			TEXT("smoke-modeling-voxel-add-strip-001"),
+			TEXT("modeling_voxel_grid_add_bounds"),
+			FString::Printf(TEXT("{\"session_id\":\"%s\",\"expected_revision\":0,\"bounds\":{\"space\":\"grid\",\"min\":{\"x\":0,\"y\":0,\"z\":0},\"max\":{\"x\":300,\"y\":100,\"z\":100}}}"), *SessionId),
+			AddStripJson));
+	const TSharedPtr<FJsonObject>* AddStripData = GetData(TEXT("Voxel grid add strip"), AddStripJson);
+	if (AddStripData && AddStripData->IsValid())
+	{
+		TestEqual(TEXT("Voxel grid add strip changed 3 cells"), (*AddStripData)->GetNumberField(TEXT("changed_cell_count")), 3.0);
+		TestEqual(TEXT("Voxel grid revision after strip"), (*AddStripData)->GetNumberField(TEXT("revision")), 1.0);
+	}
+
+	TSharedPtr<FJsonObject> AddLegJson;
+	TestTrue(
+		TEXT("Voxel grid add vertical leg executes"),
+		ExecJson(
+			TEXT("smoke-modeling-voxel-add-leg-001"),
+			TEXT("modeling_voxel_grid_add_bounds"),
+			FString::Printf(TEXT("{\"session_id\":\"%s\",\"expected_revision\":1,\"bounds\":{\"space\":\"grid\",\"min\":{\"x\":0,\"y\":100,\"z\":0},\"max\":{\"x\":100,\"y\":300,\"z\":100}}}"), *SessionId),
+			AddLegJson));
+	const TSharedPtr<FJsonObject>* AddLegData = GetData(TEXT("Voxel grid add leg"), AddLegJson);
+	if (AddLegData && AddLegData->IsValid())
+	{
+		TestEqual(TEXT("Voxel grid add leg changed 2 cells"), (*AddLegData)->GetNumberField(TEXT("changed_cell_count")), 2.0);
+		TestEqual(TEXT("Voxel grid occupied after add"), (*AddLegData)->GetNumberField(TEXT("occupied_cell_count")), 5.0);
+		TestEqual(TEXT("Voxel grid revision after leg"), (*AddLegData)->GetNumberField(TEXT("revision")), 2.0);
+	}
+
+	TSharedPtr<FJsonObject> ApplyJson;
+	TestTrue(
+		TEXT("Voxel grid first apply executes"),
+		ExecJson(
+			TEXT("smoke-modeling-voxel-apply-001"),
+			TEXT("modeling_voxel_grid_apply"),
+			FString::Printf(TEXT("{\"session_id\":\"%s\",\"expected_revision\":2,\"keep_session\":true,\"collision\":{\"mode\":\"merged_box_components\",\"max_boxes\":16,\"profile_name\":\"BlockAll\"}}"), *SessionId),
+			ApplyJson));
+	const TSharedPtr<FJsonObject>* ApplyData = GetData(TEXT("Voxel grid first apply"), ApplyJson);
+	if (ApplyData && ApplyData->IsValid())
+	{
+		const TSharedPtr<FJsonObject>* Mesh = nullptr;
+		const TSharedPtr<FJsonObject>* Collision = nullptr;
+		TestEqual(TEXT("Voxel grid first apply occupied cells"), (*ApplyData)->GetNumberField(TEXT("occupied_cell_count")), 5.0);
+		TestEqual(TEXT("Voxel grid first apply output type"), (*ApplyData)->GetStringField(TEXT("output_type")), FString(TEXT("dynamic_mesh_actor")));
+		TestTrue(TEXT("Voxel grid first apply keeps session"), !(*ApplyData)->GetBoolField(TEXT("session_closed")));
+		TestTrue(TEXT("Voxel grid first apply has mesh"), (*ApplyData)->TryGetObjectField(TEXT("mesh"), Mesh) && Mesh && Mesh->IsValid());
+		TestTrue(TEXT("Voxel grid first apply has collision"), (*ApplyData)->TryGetObjectField(TEXT("collision"), Collision) && Collision && Collision->IsValid());
+		if (Mesh && Mesh->IsValid())
+		{
+			TestTrue(TEXT("Voxel grid first apply generated triangles"), (*Mesh)->GetNumberField(TEXT("triangle_count")) > 0.0);
+			const TSharedPtr<FJsonObject>* Material = nullptr;
+			TestTrue(TEXT("Voxel grid first apply has material readback"), (*Mesh)->TryGetObjectField(TEXT("material"), Material) && Material && Material->IsValid());
+			if (Material && Material->IsValid())
+			{
+				TestTrue(TEXT("Voxel grid first apply leaves CubeGrid default material slot empty"), (*Material)->GetStringField(TEXT("path")).IsEmpty());
+				TestEqual(TEXT("Voxel grid first apply reports CubeGrid component default material"), (*Material)->GetStringField(TEXT("source")), FString(TEXT("cubegrid_component_default")));
+			}
+		}
+		if (Collision && Collision->IsValid())
+		{
+			TestEqual(TEXT("Voxel grid first apply collision boxes"), (*Collision)->GetNumberField(TEXT("box_count")), 2.0);
+			TestEqual(TEXT("Voxel grid first apply covered cells"), (*Collision)->GetNumberField(TEXT("covered_cell_count")), 5.0);
+			TestTrue(TEXT("Voxel grid first apply exact collision coverage"), (*Collision)->GetBoolField(TEXT("coverage_matches_occupied_cells")));
+		}
+	}
+
+	UWorld* EditorWorld = GEditor ? GEditor->GetEditorWorldContext().World() : nullptr;
+	TestNotNull(TEXT("Voxel grid editor world exists"), EditorWorld);
+	AActor* VoxelActor = nullptr;
+	if (EditorWorld)
+	{
+		for (TActorIterator<AActor> It(EditorWorld); It; ++It)
+		{
+			if ((*It)->GetActorLabel() == ActorLabel)
+			{
+				VoxelActor = *It;
+				break;
+			}
+		}
+	}
+	TestNotNull(TEXT("Voxel grid actor exists after apply"), VoxelActor);
+	UDynamicMeshComponent* VoxelComponent = VoxelActor ? VoxelActor->FindComponentByClass<UDynamicMeshComponent>() : nullptr;
+	TestNotNull(TEXT("Voxel grid dynamic mesh component exists after apply"), VoxelComponent);
+	if (VoxelComponent)
+	{
+		TestEqual(TEXT("Voxel grid component has one CubeGrid default material slot"), VoxelComponent->BaseMaterials.Num(), 1);
+		TestNull(TEXT("Voxel grid component CubeGrid default material slot is empty"), VoxelComponent->BaseMaterials.Num() > 0 ? VoxelComponent->BaseMaterials[0].Get() : nullptr);
+
+		constexpr double CellSize = 100.0;
+		TSet<FIntVector> OccupiedCells;
+		OccupiedCells.Add(FIntVector(0, 0, 0));
+		OccupiedCells.Add(FIntVector(1, 0, 0));
+		OccupiedCells.Add(FIntVector(2, 0, 0));
+		OccupiedCells.Add(FIntVector(0, 1, 0));
+		OccupiedCells.Add(FIntVector(0, 2, 0));
+
+		auto PointToCell = [CellSize](const FVector3d& Point) -> FIntVector
+		{
+			return FIntVector(
+				FMath::FloorToInt(Point.X / CellSize),
+				FMath::FloorToInt(Point.Y / CellSize),
+				FMath::FloorToInt(Point.Z / CellSize));
+		};
+
+		const UDynamicMesh* DynamicMesh = VoxelComponent->GetDynamicMesh();
+		TestNotNull(TEXT("Voxel grid UDynamicMesh exists after apply"), DynamicMesh);
+		int32 CheckedTriangleCount = 0;
+		bool bAllTrianglesHaveNormalOverlay = true;
+		bool bAllNormalsPointOutward = true;
+		bool bAllWindingMatchesVisibleFrontFace = true;
+		bool bHasContinuousUVRange = false;
+		if (DynamicMesh)
+		{
+			DynamicMesh->ProcessMesh([&](const UE::Geometry::FDynamicMesh3& Mesh)
+			{
+				const UE::Geometry::FDynamicMeshNormalOverlay* NormalOverlay = Mesh.HasAttributes() ? Mesh.Attributes()->PrimaryNormals() : nullptr;
+				const UE::Geometry::FDynamicMeshUVOverlay* UVOverlay = Mesh.HasAttributes() ? Mesh.Attributes()->PrimaryUV() : nullptr;
+				if (UVOverlay)
+				{
+					FVector2f MinUV(TNumericLimits<float>::Max(), TNumericLimits<float>::Max());
+					FVector2f MaxUV(TNumericLimits<float>::Lowest(), TNumericLimits<float>::Lowest());
+					for (const int32 ElementId : UVOverlay->ElementIndicesItr())
+					{
+						const FVector2f UV = UVOverlay->GetElement(ElementId);
+						MinUV.X = FMath::Min(MinUV.X, UV.X);
+						MinUV.Y = FMath::Min(MinUV.Y, UV.Y);
+						MaxUV.X = FMath::Max(MaxUV.X, UV.X);
+						MaxUV.Y = FMath::Max(MaxUV.Y, UV.Y);
+					}
+					bHasContinuousUVRange = (MaxUV.X - MinUV.X) > 2.5f || (MaxUV.Y - MinUV.Y) > 2.5f;
+				}
+				for (const int32 TriId : Mesh.TriangleIndicesItr())
+				{
+					const UE::Geometry::FIndex3i Triangle = Mesh.GetTriangle(TriId);
+					const FVector3d A = Mesh.GetVertex(Triangle.A);
+					const FVector3d B = Mesh.GetVertex(Triangle.B);
+					const FVector3d C = Mesh.GetVertex(Triangle.C);
+					FVector3d WindingNormal = (B - A).Cross(C - A);
+					const double WindingNormalLength = WindingNormal.Length();
+					if (WindingNormalLength <= UE_DOUBLE_SMALL_NUMBER)
+					{
+						continue;
+					}
+					WindingNormal /= WindingNormalLength;
+
+					if (!NormalOverlay || !NormalOverlay->IsSetTriangle(TriId))
+					{
+						bAllTrianglesHaveNormalOverlay = false;
+						continue;
+					}
+
+					const UE::Geometry::FIndex3i NormalTriangle = NormalOverlay->GetTriangle(TriId);
+					const FVector3f N0 = NormalOverlay->GetElement(NormalTriangle.A);
+					const FVector3f N1 = NormalOverlay->GetElement(NormalTriangle.B);
+					const FVector3f N2 = NormalOverlay->GetElement(NormalTriangle.C);
+					FVector3d OutwardNormal(
+						static_cast<double>(N0.X + N1.X + N2.X) / 3.0,
+						static_cast<double>(N0.Y + N1.Y + N2.Y) / 3.0,
+						static_cast<double>(N0.Z + N1.Z + N2.Z) / 3.0);
+					const double OutwardNormalLength = OutwardNormal.Length();
+					if (OutwardNormalLength <= UE_DOUBLE_SMALL_NUMBER)
+					{
+						bAllNormalsPointOutward = false;
+						continue;
+					}
+					OutwardNormal /= OutwardNormalLength;
+
+					const FVector3d TriangleCenter = (A + B + C) / 3.0;
+					const FIntVector InsideCell = PointToCell(TriangleCenter - OutwardNormal);
+					const FIntVector OutsideCell = PointToCell(TriangleCenter + OutwardNormal);
+					if (!OccupiedCells.Contains(InsideCell) || OccupiedCells.Contains(OutsideCell))
+					{
+						bAllNormalsPointOutward = false;
+					}
+
+					if (OutwardNormal.Dot(WindingNormal) > -0.9)
+					{
+						bAllWindingMatchesVisibleFrontFace = false;
+					}
+
+					++CheckedTriangleCount;
+				}
+			});
+		}
+		TestTrue(TEXT("Voxel grid checked generated triangles"), CheckedTriangleCount > 0);
+		TestTrue(TEXT("Voxel grid triangles have normal overlay"), bAllTrianglesHaveNormalOverlay);
+		TestTrue(TEXT("Voxel grid overlay normals point out of occupied cells"), bAllNormalsPointOutward);
+		TestTrue(TEXT("Voxel grid winding matches visible front-face convention"), bAllWindingMatchesVisibleFrontFace);
+		TestTrue(TEXT("Voxel grid UVs stay continuous across cell bounds"), bHasContinuousUVRange);
+	}
+
+	TSharedPtr<FJsonObject> RemoveJson;
+	TestTrue(
+		TEXT("Voxel grid remove bound executes"),
+		ExecJson(
+			TEXT("smoke-modeling-voxel-remove-001"),
+			TEXT("modeling_voxel_grid_remove_bounds"),
+			FString::Printf(TEXT("{\"session_id\":\"%s\",\"expected_revision\":2,\"bounds\":{\"space\":\"grid\",\"min\":{\"x\":0,\"y\":100,\"z\":0},\"max\":{\"x\":100,\"y\":200,\"z\":100}}}"), *SessionId),
+			RemoveJson));
+	const TSharedPtr<FJsonObject>* RemoveData = GetData(TEXT("Voxel grid remove"), RemoveJson);
+	if (RemoveData && RemoveData->IsValid())
+	{
+		TestEqual(TEXT("Voxel grid remove changed 1 cell"), (*RemoveData)->GetNumberField(TEXT("changed_cell_count")), 1.0);
+		TestEqual(TEXT("Voxel grid occupied after remove"), (*RemoveData)->GetNumberField(TEXT("occupied_cell_count")), 4.0);
+		TestEqual(TEXT("Voxel grid revision after remove"), (*RemoveData)->GetNumberField(TEXT("revision")), 3.0);
+	}
+
+	TSharedPtr<FJsonObject> FinalApplyJson;
+	TestTrue(
+		TEXT("Voxel grid final apply executes"),
+		ExecJson(
+			TEXT("smoke-modeling-voxel-apply-final-001"),
+			TEXT("modeling_voxel_grid_apply"),
+			FString::Printf(TEXT("{\"session_id\":\"%s\",\"expected_revision\":3,\"collision\":{\"mode\":\"merged_box_components\",\"max_boxes\":16,\"profile_name\":\"BlockAll\"}}"), *SessionId),
+			FinalApplyJson));
+	const TSharedPtr<FJsonObject>* FinalApplyData = GetData(TEXT("Voxel grid final apply"), FinalApplyJson);
+	if (FinalApplyData && FinalApplyData->IsValid())
+	{
+		const TSharedPtr<FJsonObject>* Collision = nullptr;
+		TestEqual(TEXT("Voxel grid final apply occupied cells"), (*FinalApplyData)->GetNumberField(TEXT("occupied_cell_count")), 4.0);
+		TestTrue(TEXT("Voxel grid final apply closes session"), (*FinalApplyData)->GetBoolField(TEXT("session_closed")));
+		TestTrue(TEXT("Voxel grid final apply has collision"), (*FinalApplyData)->TryGetObjectField(TEXT("collision"), Collision) && Collision && Collision->IsValid());
+		if (Collision && Collision->IsValid())
+		{
+			TestEqual(TEXT("Voxel grid final apply collision boxes"), (*Collision)->GetNumberField(TEXT("box_count")), 2.0);
+			TestEqual(TEXT("Voxel grid final apply covered cells"), (*Collision)->GetNumberField(TEXT("covered_cell_count")), 4.0);
+			TestTrue(TEXT("Voxel grid final apply exact collision coverage"), (*Collision)->GetBoolField(TEXT("coverage_matches_occupied_cells")));
+		}
+	}
+
+	const FString DestroyBody = MakeExecRequestBody(
+		TEXT("smoke-modeling-voxel-destroy-001"),
+		TEXT("level_destroy_folder_actors"),
+		FString::Printf(TEXT("{\"folder_path\":\"%s\",\"include_child_folders\":true}"), *FolderPath));
+	FHttpSmokeResult DestroyResult;
+	TestTrue(TEXT("Voxel grid destroy request succeeded"), ExecuteHttpJsonRequest(TEXT("POST"), ServerScope.BaseUrl + TEXT("/api/exec"), ServerScope.Token, DestroyBody, DestroyResult));
+	TestEqual(TEXT("Voxel grid destroy status code"), DestroyResult.StatusCode, 200);
+
+	TSharedPtr<FJsonObject> DestroyJson;
+	TestTrue(TEXT("Voxel grid destroy parses as JSON"), ParseJson(DestroyResult.Body, DestroyJson));
+	TestTrue(TEXT("Voxel grid destroy root ok=true"), DestroyJson.IsValid() && DestroyJson->GetBoolField(TEXT("ok")));
 
 	return !HasAnyErrors();
 }

@@ -2,7 +2,13 @@
 
 #include "UeAgentHttpServer_Material.h"
 
+#include "UeAgentHttpServer_MaterialOps.h"
+#include "Commands/PaletteSearch/UeAgentPaletteSearchAuthoring.h"
+#include "Commands/PaletteSearch/UeAgentPaletteSearchTypes.h"
+#include "Utilities/UeAgentAuthoringJson.h"
+#include "Utilities/UeAgentDetailsAuthoring.h"
 #include "Utilities/UeAgentJsonDiagnostics.h"
+#include "Utilities/UeAgentUObjectProperties.h"
 
 #include "AssetRegistry/AssetRegistryModule.h"
 #include "Editor.h"
@@ -30,25 +36,7 @@
 
 namespace UeAgentMaterialOps
 {
-	enum class ECompileMessageSeverityFilter : uint8
-	{
-		All,
-		Error,
-		Warning,
-		Info,
-		WarningOrError
-	};
-
-	enum class EMaterialInstanceParameterType : uint8
-	{
-		Scalar,
-		Vector,
-		Texture,
-		StaticSwitch,
-		StaticComponentMask
-	};
-
-	static bool ParseMaterialInstanceParameterType(const FString& InText, EMaterialInstanceParameterType& OutType)
+	bool ParseMaterialInstanceParameterType(const FString& InText, EMaterialInstanceParameterType& OutType)
 	{
 		FString Value = InText.TrimStartAndEnd().ToLower();
 		Value.ReplaceInline(TEXT("_"), TEXT(""));
@@ -83,7 +71,7 @@ namespace UeAgentMaterialOps
 		return false;
 	}
 
-	static bool ResolveStaticComponentMaskValue(
+	bool ResolveStaticComponentMaskValue(
 		const UMaterialInterface* MaterialInterface,
 		const FMaterialParameterInfo& ParameterInfo,
 		const FGuid& FallbackExpressionGuid,
@@ -142,7 +130,7 @@ namespace UeAgentMaterialOps
 			OutExpressionGuid);
 	}
 
-	static FString NormalizeAssetPath(const FString& InPath)
+	FString NormalizeAssetPath(const FString& InPath)
 	{
 		FString OutPath = InPath;
 		OutPath.TrimStartAndEndInline();
@@ -177,7 +165,7 @@ namespace UeAgentMaterialOps
 		return FString::Printf(TEXT("%s.%s"), *AssetPath, *AssetName);
 	}
 
-	static UObject* LoadAssetObject(const FString& InPath)
+	UObject* LoadAssetObject(const FString& InPath)
 	{
 		const FString ObjectPath = ToObjectPath(InPath);
 		if (ObjectPath.IsEmpty())
@@ -191,7 +179,7 @@ namespace UeAgentMaterialOps
 		return LoadObject<UObject>(nullptr, *ObjectPath);
 	}
 
-	static bool AssetExists(const FString& InPath)
+	bool AssetExists(const FString& InPath)
 	{
 		const FString ObjectPath = ToObjectPath(InPath);
 		if (ObjectPath.IsEmpty())
@@ -208,27 +196,27 @@ namespace UeAgentMaterialOps
 		return AssetRegistryModule.Get().GetAssetByObjectPath(FSoftObjectPath(ObjectPath)).IsValid();
 	}
 
-	static UMaterial* LoadMaterialAsset(const FString& InPath)
+	UMaterial* LoadMaterialAsset(const FString& InPath)
 	{
 		return Cast<UMaterial>(LoadAssetObject(InPath));
 	}
 
-	static UMaterialInterface* LoadMaterialInterface(const FString& InPath)
+	UMaterialInterface* LoadMaterialInterface(const FString& InPath)
 	{
 		return Cast<UMaterialInterface>(LoadAssetObject(InPath));
 	}
 
-	static UMaterialFunction* LoadMaterialFunctionAsset(const FString& InPath)
+	UMaterialFunction* LoadMaterialFunctionAsset(const FString& InPath)
 	{
 		return Cast<UMaterialFunction>(LoadAssetObject(InPath));
 	}
 
-	static UMaterialInstanceConstant* LoadMaterialInstance(const FString& InPath)
+	UMaterialInstanceConstant* LoadMaterialInstance(const FString& InPath)
 	{
 		return Cast<UMaterialInstanceConstant>(LoadAssetObject(InPath));
 	}
 
-	static bool SaveAssetPackage(UObject* Asset, FString& OutError)
+	bool SaveAssetPackage(UObject* Asset, FString& OutError)
 	{
 		if (!Asset)
 		{
@@ -246,7 +234,7 @@ namespace UeAgentMaterialOps
 		return true;
 	}
 
-	static UClass* ResolveClassByPath(const FString& InClassPath)
+	UClass* ResolveClassByPath(const FString& InClassPath)
 	{
 		FString ClassPath = InClassPath;
 		ClassPath.TrimStartAndEndInline();
@@ -297,7 +285,7 @@ namespace UeAgentMaterialOps
 		return nullptr;
 	}
 
-	static bool ResolvePropertyPath(UObject* Obj, const FString& PropertyPath, FProperty*& OutProperty, void*& OutValuePtr)
+	bool ResolvePropertyPath(UObject* Obj, const FString& PropertyPath, FProperty*& OutProperty, void*& OutValuePtr)
 	{
 		OutProperty = nullptr;
 		OutValuePtr = nullptr;
@@ -342,7 +330,7 @@ namespace UeAgentMaterialOps
 		return false;
 	}
 
-	static bool SetObjectPropertyText(UObject* Target, const FString& PropertyPath, const FString& ValueText, FString* OutAppliedValueText = nullptr, FString* OutCppType = nullptr, FString* OutImportError = nullptr)
+	bool SetObjectPropertyText(UObject* Target, const FString& PropertyPath, const FString& ValueText, FString* OutAppliedValueText, FString* OutCppType, FString* OutImportError)
 	{
 		if (OutImportError)
 		{
@@ -380,7 +368,7 @@ namespace UeAgentMaterialOps
 		return true;
 	}
 
-	static bool ExportObjectPropertyText(UObject* Target, const FString& PropertyPath, FString& OutValueText, FString* OutCppType = nullptr, FString* OutExportError = nullptr)
+	bool ExportObjectPropertyText(UObject* Target, const FString& PropertyPath, FString& OutValueText, FString* OutCppType, FString* OutExportError)
 	{
 		if (OutExportError)
 		{
@@ -415,35 +403,18 @@ namespace UeAgentMaterialOps
 		return true;
 	}
 
-	static bool ParseLinearColor(const TSharedPtr<FJsonObject>& Params, const FString& Key, FLinearColor& OutColor)
+	bool ParseLinearColor(const TSharedPtr<FJsonObject>& Params, const FString& Key, FLinearColor& OutColor)
 	{
-		const TSharedPtr<FJsonObject>* ColorObjPtr = nullptr;
-		if (!Params.IsValid() || !Params->TryGetObjectField(Key, ColorObjPtr) || !ColorObjPtr || !ColorObjPtr->IsValid())
+		const TSharedPtr<FJsonValue>* ColorValue = UeAgentJsonDiagnostics::FindFieldValue(Params, Key);
+		if (!ColorValue)
 		{
 			return false;
 		}
 
-		const TSharedPtr<FJsonObject>& ColorObj = *ColorObjPtr;
-		double R = 0.0;
-		double G = 0.0;
-		double B = 0.0;
-		double A = 1.0;
-
-		const bool bHasRgb =
-			UeAgentJsonDiagnostics::TryReadNumberFieldByAliases(ColorObj, { TEXT("r"), TEXT("R"), TEXT("red"), TEXT("Red"), TEXT("x"), TEXT("X") }, R)
-			&& UeAgentJsonDiagnostics::TryReadNumberFieldByAliases(ColorObj, { TEXT("g"), TEXT("G"), TEXT("green"), TEXT("Green"), TEXT("y"), TEXT("Y") }, G)
-			&& UeAgentJsonDiagnostics::TryReadNumberFieldByAliases(ColorObj, { TEXT("b"), TEXT("B"), TEXT("blue"), TEXT("Blue"), TEXT("z"), TEXT("Z") }, B);
-		if (!bHasRgb)
-		{
-			return false;
-		}
-
-		UeAgentJsonDiagnostics::TryReadNumberFieldByAliases(ColorObj, { TEXT("a"), TEXT("A"), TEXT("alpha"), TEXT("Alpha"), TEXT("w"), TEXT("W") }, A);
-		OutColor = FLinearColor((float)R, (float)G, (float)B, (float)A);
-		return true;
+		return UeAgentJsonDiagnostics::TryReadLinearColorValue(*ColorValue, OutColor);
 	}
 
-	static TSharedPtr<FJsonObject> ExpressionToJson(UMaterialExpression* Expression)
+	TSharedPtr<FJsonObject> ExpressionToJson(UMaterialExpression* Expression)
 	{
 		TSharedPtr<FJsonObject> ExprObj = MakeShared<FJsonObject>();
 		if (!Expression)
@@ -517,7 +488,7 @@ namespace UeAgentMaterialOps
 		return InputName;
 	}
 
-	static FString NormalizeExpressionPinName(const FString& PinName)
+	FString NormalizeExpressionPinName(const FString& PinName)
 	{
 		const FString Trimmed = PinName.TrimStartAndEnd();
 		if (Trimmed.Equals(TEXT("None"), ESearchCase::IgnoreCase)
@@ -598,7 +569,7 @@ namespace UeAgentMaterialOps
 
 		return false;
 	}
-	static bool ManualConnectExpressions(UMaterialExpression* FromExpression, const FString& FromOutputName, UMaterialExpression* ToExpression, const FString& ToInputName)
+	bool ManualConnectExpressions(UMaterialExpression* FromExpression, const FString& FromOutputName, UMaterialExpression* ToExpression, const FString& ToInputName)
 	{
 		int32 OutputIndex = INDEX_NONE;
 		if (!ResolveExpressionOutputIndex(FromExpression, FromOutputName, OutputIndex))
@@ -617,7 +588,7 @@ namespace UeAgentMaterialOps
 		return true;
 	}
 
-	static UMaterialExpression* FindExpressionByParams(UMaterial* Material, const TSharedPtr<FJsonObject>& Params)
+	UMaterialExpression* FindExpressionByParams(UMaterial* Material, const TSharedPtr<FJsonObject>& Params)
 	{
 		if (!Material || !Params.IsValid())
 		{
@@ -667,7 +638,7 @@ namespace UeAgentMaterialOps
 		return nullptr;
 	}
 
-	static UMaterialExpression* FindExpressionBySelector(UMaterial* Material, const TSharedPtr<FJsonObject>& Params, const FString& Prefix)
+	UMaterialExpression* FindExpressionBySelector(UMaterial* Material, const TSharedPtr<FJsonObject>& Params, const FString& Prefix)
 	{
 		if (!Material || !Params.IsValid())
 		{
@@ -721,7 +692,7 @@ namespace UeAgentMaterialOps
 		return nullptr;
 	}
 
-	static bool ParseCompileSeverityFilter(const FString& InFilterText, ECompileMessageSeverityFilter& OutFilter)
+	bool ParseCompileSeverityFilter(const FString& InFilterText, ECompileMessageSeverityFilter& OutFilter)
 	{
 		FString Normalized = InFilterText.TrimStartAndEnd().ToLower();
 		Normalized.ReplaceInline(TEXT("_"), TEXT(""));
@@ -792,7 +763,7 @@ namespace UeAgentMaterialOps
 		}
 	}
 
-	static void CollectMaterialCompileMessages(
+	void CollectMaterialCompileMessages(
 		UMaterialInterface* MaterialInterface,
 		const ECompileMessageSeverityFilter InFilter,
 		const int32 InMaxMessages,
@@ -853,7 +824,7 @@ namespace UeAgentMaterialOps
 		});
 	}
 
-	static bool ParseMaterialProperty(const FString& InPropertyName, EMaterialProperty& OutProperty)
+	bool ParseMaterialProperty(const FString& InPropertyName, EMaterialProperty& OutProperty)
 	{
 		if (InPropertyName.IsEmpty())
 		{
@@ -885,7 +856,3 @@ namespace UeAgentMaterialOps
 }
 
 
-#include "UeAgentHttpServer_Material_DispatchAndAssetInfo.inl"
-#include "UeAgentHttpServer_Material_CompileAndParameters.inl"
-#include "UeAgentHttpServer_Material_ExpressionGraph.inl"
-#include "UeAgentHttpServer_Material_FolderFormat.inl"

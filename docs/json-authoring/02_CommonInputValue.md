@@ -4,28 +4,31 @@
 
 ## 基本原则
 
-1. 可写值统一放在 `value` 对象中。
-2. `type_info` 是紧凑编辑语义类型，例如 `bool`、`float`、`enum`、`vector3`、`float_curve`。
-3. 普通改值只改 `value` 内部字段。
-4. `allowed_values[]` 是 enum/choice 的可写候选；LLM 只能写候选里的值。
-5. `display_name`、`display_label`、默认值、raw enum options、override 状态属于只读辅助，不表达写入意图；可写 `value` 对象里不要放 `display_label`。
-6. `import_text` 只作为兼容 fallback；生成新 authoring 时不要优先使用它。
-7. JSON 输出使用自动紧凑规则：对象暴露出的属性数量低于阈值，且自身或嵌套对象不暴露 list/array 字段时单行；暴露数组字段的对象保持展开。短 `value`、`components` 和 `allowed_values[]` 候选对象通常会单行，复杂 curve、graph、stage、module、input 结构保持多行展开。
+1. 可写值统一放在 `value` 对象、域内结构化值或 `value_text` 中。
+2. `value_kind` 是紧凑编辑语义类型，例如 `bool`、`number`、`enum`、`vector3`、`asset_path`、`struct`。
+3. `control_type` 表达 UE 编辑器控件语义，例如 checkbox、number、enum、object picker、collection。
+4. 普通改值只改 `value`、域内业务值或 `value_text`，不改 metadata。
+5. `candidates[]` 是 enum/choice/object picker 的可写候选；LLM 只能写候选里的值。
+6. `display_name`、`tooltip`、候选展示名、默认值、raw enum options、override 状态属于只读辅助，不表达写入意图。
+7. `import_text` 只作为兼容 fallback；生成新 authoring 时不要优先使用它。
+8. JSON 输出使用统一 compact writer：默认尽量压缩为单行；对象和数组在长度阈值内递归内联，超大结构才按统一规则折行。不要在单命令里绕开该 writer 自行 pretty print。
 
 ## 通用类型写法
 
-| `type_info` 类别 | 写法 | 示例 |
+| `value_kind` 类别 | 写法 | 示例 |
 | --- | --- | --- |
 | `bool` | `value.literal` | `{ "value": { "literal": true } }` |
 | `int` / `float` | `value.literal` | `{ "value": { "literal": 12.5 } }` |
 | `string` / `name` / `text` | `value.literal` | `{ "value": { "literal": "Player" } }` |
-| `enum` / choice | `value.selected` + `allowed_values[]` | `{ "value": { "selected": "NewEnumerator2" } }` |
+| `enum` / choice | `value.selected` 或域内 `value_text` + `candidates[]` | `{ "value": { "selected": "NewEnumerator2" } }` |
 | `vector2` / `vector3` / `color` / `rotator` / `quat` | `value.components` | `{ "value": { "components": { "X": 1, "Y": 2, "Z": 3 } } }` |
 | `transform` | `value.translation`、`value.rotation`、`value.scale` 或域内 transform object | 需同时带 `space_contract` |
-| object/class asset path | 明确语义 path 字段 | `{ "value": { "asset_path": "/Game/Foo.Bar" } }` |
-| folder/package path | 明确语义 path 字段 | `{ "value": { "folder_path": "/Game/Generated" } }` |
+| object/class/asset reference | 公开 `path` seed 或域内明确引用对象 | `{ "value": { "path": "/Game/Foo.Bar" } }` |
+| folder/package path | 明确语义 path 字段 | `{ "value": { "path": "/Game/Generated" } }` |
 | curve | `value.curve` | `{ "value": { "curve": { "schema": "ue_agent_interface.curve.v1", "keys": [] } } }` |
 | array/object | `value.items` 或域内明确结构 | 保留 JSON 原生结构，不转成字符串 |
+
+旧 `asset_path`、`class_path`、`object_path`、`script_asset_path` 等仅用于 legacy/debug/readback 兼容；新 authoring 主路径优先使用语义明确的 `path`。
 
 ## Enum 规则
 
@@ -34,10 +37,10 @@
 ```json
 {
   "input_name": "Randomness Mode",
-  "type_info": "enum",
-  "allowed_values": [
-    { "value": "NewEnumerator0", "display_label": "Simulation Defaults" },
-    { "value": "NewEnumerator2", "display_label": "Non-Deterministic" }
+  "value_kind": "enum",
+  "candidates": [
+    { "name": "NewEnumerator0", "value": 0, "display_name": "Simulation Defaults" },
+    { "name": "NewEnumerator2", "value": 2, "display_name": "Non-Deterministic" }
   ],
   "value": {
     "selected": "NewEnumerator2"
@@ -48,12 +51,11 @@
 规则：
 
 - LLM 写 `value.selected`。
-- 写入值必须来自 `allowed_values[].value`。
-- `value.display_label` 不写。
-- `allowed_values[].display_label` 只读，用于显示候选语义。
-- enum 的数字值、raw `enum_options`、UE 内部 display name 留在 `readback` 或 `diagnostics`。
+- 写入值必须来自 `candidates[]` 中的候选身份。
+- `value.display_name` 不写。
+- `candidates[].display_name` 只读，用于显示候选语义。
+- enum 的数字值、raw `enum_options`、UE 内部 display name 留在 readback 或 debug。
 - 缺少候选项的 editable enum 是 lint error。
-- 候选项对象通常保持一项一行，便于扫读和减少不必要行数。
 
 ## Source 层
 
@@ -69,9 +71,7 @@
   "value": {
     "source": "dynamic_input",
     "dynamic_input": {
-      "kind": "niagara_dynamic_input",
-      "name": "Random Range Vector",
-      "full_name": "/Niagara/Functions/Random/RandomRangeVector.RandomRangeVector"
+      "path": "/Niagara/Functions/Random/RandomRangeVector.RandomRangeVector"
     }
   }
 }
@@ -79,13 +79,13 @@
 
 通用规则：
 
-- `source` 表示值从哪里来，不替代 `type_info`。
-- `local_value` 后面仍按普通 type 写 `literal/selected/components/curve`。
+- `source` 表示值从哪里来，不替代 `value_kind`。
+- `local_value` 后面仍按普通 value kind 写 `literal/selected/components/curve`。
 - `default_value` 表示清除本地 override/link，回到默认。
 - `linked_input` 必须写明确目标参数。
-- `dynamic_input` / `make` 必须写 `kind/name/full_name`，其中 `full_name` 来自 `node_catalog_search(catalog_type=niagara_dynamic_input)`；不能只写 UI 菜单显示名。
-- 也可以把 `node_catalog_search.items[].json_authoring` 整个对象放在 input 的 `value` 位置，由 adapter 解包并转成当前 folder apply 需要的 legacy 字段。
-- 旧 `script_asset_path` / `node_name` 只作为 adapter 兼容输入和 readback 证据，新 authoring 主路径不使用它们。
+- `dynamic_input` / `make` 优先写 search 返回的 `path` seed；无路径候选才写 `name`。
+- 也可以把 `node_catalog_search.items_tsv` 解析出的 `path` / `name` seed 放在 input 的 `value` 位置，由 adapter 解包。
+- 旧 `script_asset_path` / `node_name` 只作为显式迁移、debug/readback 识别字段，新 authoring 主路径不使用它们。
 - 未支持的 source 必须明确失败，不得静默忽略。
 
 ## Operation 边界
@@ -95,7 +95,7 @@
 ```json
 {
   "input_name": "Spawn Rate",
-  "type_info": "float",
+  "value_kind": "number",
   "value": { "literal": 120.0 }
 }
 ```
@@ -131,4 +131,10 @@
 - raw `enum_options`
 - raw `input_type` 显示名
 
-需要这些信息时放到 `readback` 或 `diagnostics`。
+需要这些信息时放到 readback 或 debug。
+
+## Details 属性面
+
+UE Details / UObject 属性面板字段默认不在入口 JSON 内展开 `properties[]`。有稳定输出文件边界时，公共层会把这类数组外置为 `details` 或 `*_details` 引用，并在相邻 `details/<owner_or_field>/index.json` 与 group JSON 中保存可编辑字段。LLM 编辑 group `fields[]` 的值，不编辑入口里的旧 `properties[]`。
+
+旧 inline `properties[]`、`settings_properties[]` 等输入只允许由显式迁移工具、reader 诊断或负例测试识别；新导出和新 authoring 不把它们作为 authoring 面。`raw_properties`、`readonly_properties`、`missing_properties`、`unsupported_properties` 不属于默认可写面，也不作为 apply 输入。

@@ -2,6 +2,13 @@
 
 #include "UeAgentHttpServer_UMG.h"
 
+#include "UeAgentHttpServer_UMGOps.h"
+#include "Commands/PaletteSearch/UeAgentPaletteSearchAuthoring.h"
+#include "Commands/PaletteSearch/UeAgentPaletteSearchTypes.h"
+#include "Utilities/UeAgentAuthoringJson.h"
+#include "Utilities/UeAgentDetailsAuthoring.h"
+#include "Utilities/UeAgentJsonDiagnostics.h"
+#include "Utilities/UeAgentUObjectProperties.h"
 #include "Animation/WidgetAnimation.h"
 #include "AssetRegistry/AssetRegistryModule.h"
 #include "Blueprint/UserWidget.h"
@@ -32,7 +39,7 @@ namespace UeAgentUmgOps
 		WarningOrError
 	};
 
-	static FString NormalizeAssetPath(const FString& InPath)
+	FString NormalizeAssetPath(const FString& InPath)
 	{
 		FString OutPath = InPath;
 		OutPath.TrimStartAndEndInline();
@@ -98,12 +105,12 @@ namespace UeAgentUmgOps
 		return AssetRegistryModule.Get().GetAssetByObjectPath(FSoftObjectPath(ObjectPath)).IsValid();
 	}
 
-	static UWidgetBlueprint* LoadWidgetBlueprint(const FString& InPath)
+	UWidgetBlueprint* LoadWidgetBlueprint(const FString& InPath)
 	{
 		return Cast<UWidgetBlueprint>(LoadAssetObject(InPath));
 	}
 
-	static int32 SyncWidgetVariableGuidMap(UWidgetBlueprint* WidgetBlueprint)
+	int32 SyncWidgetVariableGuidMap(UWidgetBlueprint* WidgetBlueprint)
 	{
 		if (!WidgetBlueprint)
 		{
@@ -331,7 +338,7 @@ namespace UeAgentUmgOps
 		}
 	}
 
-	static bool SaveWidgetBlueprintPackage(UWidgetBlueprint* WidgetBlueprint, FString& OutError)
+	bool SaveWidgetBlueprintPackage(UWidgetBlueprint* WidgetBlueprint, FString& OutError)
 	{
 		if (!WidgetBlueprint)
 		{
@@ -418,7 +425,7 @@ namespace UeAgentUmgOps
 		return false;
 	}
 
-	static UWidget* FindWidgetByAnyName(UWidgetBlueprint* WidgetBlueprint, const FString& WidgetName)
+	UWidget* FindWidgetByAnyName(UWidgetBlueprint* WidgetBlueprint, const FString& WidgetName)
 	{
 		if (!WidgetBlueprint || !WidgetBlueprint->WidgetTree || WidgetName.IsEmpty())
 		{
@@ -1424,4 +1431,3 @@ bool FUeAgentHttpServer::CmdUmgBindWidgetPropertyToVariable(const FUeAgentReques
 	return true;
 }
 
-#include "UeAgentHttpServer_UMG_FolderFormat.inl"

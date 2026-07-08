@@ -1,3 +1,0 @@
-#include "UeAgentHttpServer_Niagara_FolderFormat_Helpers.inl"
-#include "UeAgentHttpServer_Niagara_FolderFormat_ExportEmitterScript.inl"
-#include "UeAgentHttpServer_Niagara_FolderFormat_ApplySystem.inl"

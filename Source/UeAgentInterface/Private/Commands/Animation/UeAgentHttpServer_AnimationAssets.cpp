@@ -2,9 +2,13 @@
 
 #include "UeAgentHttpServer_AnimationAssets.h"
 
+#include "Commands/EditorViewport/UeAgentEditorViewportSequenceFrameOptions.h"
 #include "UeAgentHttpServer_AnimationAssetOps.h"
 
 #include "Utilities/UeAgentCurveJson.h"
+#include "Utilities/UeAgentAuthoringJson.h"
+#include "Utilities/UeAgentDetailsAuthoring.h"
+#include "Utilities/UeAgentFolderDetailsExport.h"
 #include "Utilities/UeAgentJsonDiagnostics.h"
 
 #include "Animation/AnimationAsset.h"
@@ -214,9 +218,7 @@ namespace UeAgentAnimationAssetOps
 		}
 		IFileManager::Get().MakeDirectory(*FPaths::GetPath(FilePath), true);
 		FString JsonText;
-		const TSharedRef<TJsonWriter<TCHAR, TPrettyJsonPrintPolicy<TCHAR>>> Writer =
-			TJsonWriterFactory<TCHAR, TPrettyJsonPrintPolicy<TCHAR>>::Create(&JsonText);
-		FJsonSerializer::Serialize(Obj.ToSharedRef(), Writer);
+		UeAgentJsonDiagnostics::SerializeJsonObjectCompact(Obj, JsonText);
 		if (!FFileHelper::SaveStringToFile(JsonText, *FilePath, FFileHelper::EEncodingOptions::ForceUTF8WithoutBOM))
 		{
 			OutError = TEXT("save_json_failed");
@@ -834,6 +836,15 @@ namespace UeAgentAnimationAssetOps
 		Item->SetStringField(TEXT("track_color"), Track.TrackColor.ToString());
 		Item->SetObjectField(TEXT("track_color_linear"), BuildLinearColorJson(Track.TrackColor));
 		Item->SetNumberField(TEXT("notify_count"), NotifyEvents.Num());
+		UeAgentAuthoringJson::ApplyAuthoringMetadata(
+			Item,
+			TEXT("track_name"),
+			Track.TrackName.ToString(),
+			Track.TrackName.ToString(),
+			TEXT("Animation/Notify Tracks"),
+			TEXT("notify_track"),
+			TEXT("track"),
+			{ TEXT("set"), TEXT("remove") });
 		return Item;
 	}
 
@@ -865,6 +876,15 @@ namespace UeAgentAnimationAssetOps
 #if WITH_EDITORONLY_DATA
 		Item->SetStringField(TEXT("guid"), Notify.Guid.ToString(EGuidFormats::DigitsWithHyphensLower));
 #endif
+		UeAgentAuthoringJson::ApplyAuthoringMetadata(
+			Item,
+			TEXT("notify_index"),
+			FString::FromInt(NotifyIndex),
+			Notify.NotifyName.ToString(),
+			TEXT("Animation/Notifies"),
+			TEXT("anim_notify"),
+			TEXT("timeline_event"),
+			{ TEXT("set"), TEXT("remove") });
 		return Item;
 	}
 
@@ -879,6 +899,15 @@ namespace UeAgentAnimationAssetOps
 		Item->SetStringField(TEXT("track_name"), GetSyncMarkerTrackName(Sequence, Marker));
 		Item->SetStringField(TEXT("guid"), Marker.Guid.ToString(EGuidFormats::DigitsWithHyphensLower));
 #endif
+		UeAgentAuthoringJson::ApplyAuthoringMetadata(
+			Item,
+			TEXT("marker_index"),
+			FString::FromInt(MarkerIndex),
+			Marker.MarkerName.ToString(),
+			TEXT("Animation/Sync Markers"),
+			TEXT("sync_marker"),
+			TEXT("timeline_marker"),
+			{ TEXT("set"), TEXT("remove") });
 		return Item;
 	}
 
@@ -967,6 +996,15 @@ namespace UeAgentAnimationAssetOps
 		TSharedPtr<FJsonObject> Item = MakeShared<FJsonObject>();
 		Item->SetStringField(TEXT("curve_name"), CurveName.ToString());
 		Item->SetStringField(TEXT("curve_type"), CurveTypeToString(CurveType));
+		UeAgentAuthoringJson::ApplyAuthoringMetadata(
+			Item,
+			TEXT("curve_name"),
+			CurveName.ToString(),
+			CurveName.ToString(),
+			TEXT("Animation/Curves"),
+			TEXT("animation_curve"),
+			TEXT("curve"),
+			{ TEXT("set_keys"), TEXT("remove") });
 
 		TArray<TSharedPtr<FJsonValue>> Keys;
 		switch (CurveType)
@@ -1144,6 +1182,15 @@ namespace UeAgentAnimationAssetOps
 		Item->SetObjectField(TEXT("relative_location"), BuildVectorJson(Socket ? Socket->RelativeLocation : FVector::ZeroVector));
 		Item->SetObjectField(TEXT("relative_rotation"), BuildRotatorJson(Socket ? Socket->RelativeRotation : FRotator::ZeroRotator));
 		Item->SetObjectField(TEXT("relative_scale"), BuildVectorJson(Socket ? Socket->RelativeScale : FVector::OneVector));
+		UeAgentAuthoringJson::ApplyAuthoringMetadata(
+			Item,
+			TEXT("socket_name"),
+			Socket ? Socket->SocketName.ToString() : TEXT(""),
+			Socket ? Socket->SocketName.ToString() : TEXT("Socket"),
+			TEXT("Skeleton/Sockets"),
+			TEXT("skeleton_socket"),
+			TEXT("socket"),
+			{ TEXT("set"), TEXT("remove") });
 		return Item;
 	}
 
@@ -1153,6 +1200,15 @@ namespace UeAgentAnimationAssetOps
 		Item->SetStringField(TEXT("source_bone_name"), VirtualBone.SourceBoneName.ToString());
 		Item->SetStringField(TEXT("target_bone_name"), VirtualBone.TargetBoneName.ToString());
 		Item->SetStringField(TEXT("virtual_bone_name"), VirtualBone.VirtualBoneName.ToString());
+		UeAgentAuthoringJson::ApplyAuthoringMetadata(
+			Item,
+			TEXT("virtual_bone_name"),
+			VirtualBone.VirtualBoneName.ToString(),
+			VirtualBone.VirtualBoneName.ToString(),
+			TEXT("Skeleton/Virtual Bones"),
+			TEXT("virtual_bone"),
+			TEXT("bone_link"),
+			{ TEXT("set"), TEXT("remove") });
 		return Item;
 	}
 
@@ -3681,6 +3737,12 @@ bool FUeAgentHttpServer::CmdAnimSequenceScreenshot(const FUeAgentRequestContext&
 		return false;
 	}
 
+	UeAgentEditorViewportSequenceFrameOptions::FUnifiedSequenceFrameOptionsReport UnifiedOptionsReport;
+	UeAgentEditorViewportSequenceFrameOptions::ApplyUnifiedSequenceFrameOptionsToParams(
+		Ctx.Params,
+		UeAgentEditorViewportSequenceFrameOptions::ESequenceFrameCommandKind::AnimSequence,
+		UnifiedOptionsReport);
+
 	FString PreviewMeshPath;
 	JsonTryGetString(Ctx.Params, TEXT("skeletal_mesh_path"), PreviewMeshPath);
 
@@ -4206,6 +4268,7 @@ bool FUeAgentHttpServer::CmdAnimSequenceScreenshot(const FUeAgentRequestContext&
 	OutData->SetNumberField(TEXT("sampling_frame_rate_numerator"), SamplingFrameRate.Numerator);
 	OutData->SetNumberField(TEXT("sampling_frame_rate_denominator"), SamplingFrameRate.Denominator);
 	OutData->SetStringField(TEXT("preview_skeletal_mesh"), EffectivePreviewMeshPath);
+	UeAgentEditorViewportSequenceFrameOptions::AttachUnifiedSequenceFrameOptionsReport(OutData, UnifiedOptionsReport);
 	return true;
 }
 

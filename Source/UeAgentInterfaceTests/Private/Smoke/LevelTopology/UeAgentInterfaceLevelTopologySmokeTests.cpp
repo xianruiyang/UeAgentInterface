@@ -713,17 +713,25 @@ bool FUeAgentInterfaceLevelTopologyHLODSmokeTest::RunTest(const FString& Paramet
 		60.0));
 	TestEqual(TEXT("HLOD validate build status"), Data->GetStringField(TEXT("status")), FString(TEXT("checked")));
 
+	const FString TopologyOutputFile = FPaths::ConvertRelativePathToFull(FPaths::Combine(FPaths::ProjectSavedDir(), TEXT("Automation/UAI/level_topology_export.json")));
 	TestTrue(TEXT("Topology export includes systems"), ExecLevelTopologySmokeCommand(
 		this,
 		ServerScope,
 		TEXT("lt-topology-export"),
 		TEXT("level_topology_export_json"),
-		TEXT("{\"include_actor_assignments\":true,\"actor_assignment_limit\":10}"),
+		FString::Printf(TEXT("{\"include_actor_assignments\":true,\"actor_assignment_limit\":10,\"output_file\":%s}"), *SmokeJsonString(TopologyOutputFile)),
 		Data,
 		true,
 		60.0));
 	TestEqual(TEXT("topology schema"), Data->GetStringField(TEXT("schema")), FString(TEXT("uai.level_topology.v1")));
 	TestTrue(TEXT("topology has feature gates"), Data->HasField(TEXT("feature_gates")));
+	TestEqual(TEXT("topology output file uses structured compact format"), Data->GetStringField(TEXT("output_format")), FString(TEXT("structured_compact")));
+	FString TopologyOutputText;
+	TSharedPtr<FJsonObject> TopologyOutputJson;
+	TestTrue(TEXT("topology output file reads"), FFileHelper::LoadFileToString(TopologyOutputText, *TopologyOutputFile));
+	TestTrue(TEXT("topology output file parses"), ParseJson(TopologyOutputText, TopologyOutputJson) && TopologyOutputJson.IsValid());
+	TestTrue(TEXT("topology output keeps short world object inline"), TopologyOutputText.Contains(TEXT("\"world\": {\"path\"")));
+	TestFalse(TEXT("topology output does not pretty-expand world object"), TopologyOutputText.Contains(TEXT("\"world\":\n")));
 	return true;
 }
 

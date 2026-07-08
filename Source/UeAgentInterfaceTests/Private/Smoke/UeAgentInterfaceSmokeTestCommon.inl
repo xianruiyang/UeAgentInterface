@@ -143,6 +143,15 @@ namespace
 			*ParamsJson);
 	}
 
+	static FString MakeRawExecRequestBody(const FString& RequestId, const FString& Command, const FString& ParamsJson = TEXT("{}"))
+	{
+		return FString::Printf(
+			TEXT("{\"request_id\":\"%s\",\"command\":\"%s\",\"params\":%s,\"response_options\":{\"view\":\"raw\"}}"),
+			*RequestId,
+			*Command,
+			*ParamsJson);
+	}
+
 	static FString MakeAutomationAssetPath(const FString& Prefix)
 	{
 		return FString::Printf(

@@ -7,6 +7,7 @@
 #include "Components/BoxComponent.h"
 #include "GameFramework/Actor.h"
 #include "Misc/PackageName.h"
+#include "Utilities/UeAgentDetailsAuthoring.h"
 
 namespace
 {
@@ -56,6 +57,160 @@ namespace
 		const bool bSaved = FFileHelper::SaveStringToFile(JsonText, *FilePath, FFileHelper::EEncodingOptions::ForceUTF8WithoutBOM);
 		Test->TestTrue(FString::Printf(TEXT("write json %s"), *FilePath), bSaved);
 		return bSaved;
+	}
+
+	static bool WritePCGSmokeDetailsPackage(
+		FAutomationTestBase* Test,
+		const FString& DetailsRoot,
+		const FString& OwnerKind,
+		const FString& OwnerId,
+		const FString& FieldsJson)
+	{
+		const FString IndexJson = FString::Printf(
+			TEXT("{\"schema\":\"uai.details_index.v1\",\"profile\":\"authoring\",\"owner_ref\":{\"owner_kind\":\"%s\",\"owner_id\":\"%s\"},\"groups\":[{\"file\":\"Settings.json\"}]}"),
+			*OwnerKind,
+			*OwnerId);
+		const FString GroupJson = FString::Printf(
+			TEXT("{\"schema\":\"uai.details_group.v1\",\"owner_ref\":{\"owner_kind\":\"%s\",\"owner_id\":\"%s\"},\"group_key\":\"Smoke\",\"display_name\":\"Smoke\",\"fields\":%s}"),
+			*OwnerKind,
+			*OwnerId,
+			*FieldsJson);
+		return
+			WritePCGSmokeJsonFile(Test, FPaths::Combine(DetailsRoot, TEXT("index.json")), IndexJson) &&
+			WritePCGSmokeJsonFile(Test, FPaths::Combine(DetailsRoot, TEXT("Settings.json")), GroupJson);
+	}
+
+	static bool LoadPCGSmokeJsonFile(FAutomationTestBase* Test, const FString& FilePath, TSharedPtr<FJsonObject>& OutJson)
+	{
+		FString JsonText;
+		const bool bLoaded = FFileHelper::LoadFileToString(JsonText, *FilePath);
+		Test->TestTrue(FString::Printf(TEXT("load json %s"), *FilePath), bLoaded);
+		if (!bLoaded)
+		{
+			return false;
+		}
+		const bool bParsed = ParseJson(JsonText, OutJson);
+		Test->TestTrue(FString::Printf(TEXT("parse json %s"), *FilePath), bParsed);
+		return bParsed;
+	}
+
+	static bool PCGSmokeJsonFileTreeContainsText(const FString& RootFolder, const FString& Needle, FString& OutFile)
+	{
+		TArray<FString> JsonFiles;
+		IFileManager::Get().FindFilesRecursive(JsonFiles, *RootFolder, TEXT("*.json"), true, false);
+		for (const FString& JsonFile : JsonFiles)
+		{
+			FString JsonText;
+			if (FFileHelper::LoadFileToString(JsonText, *JsonFile) && JsonText.Contains(Needle))
+			{
+				OutFile = JsonFile;
+				return true;
+			}
+		}
+		OutFile.Reset();
+		return false;
+	}
+
+	static bool PCGSmokeObjectHasFieldRecursive(const TSharedPtr<FJsonObject>& Object, const FString& FieldName)
+	{
+		if (!Object.IsValid())
+		{
+			return false;
+		}
+		if (Object->HasField(FieldName))
+		{
+			return true;
+		}
+
+		for (const TPair<FString, TSharedPtr<FJsonValue>>& Field : Object->Values)
+		{
+			if (!Field.Value.IsValid())
+			{
+				continue;
+			}
+			if (Field.Value->Type == EJson::Object)
+			{
+				if (PCGSmokeObjectHasFieldRecursive(Field.Value->AsObject(), FieldName))
+				{
+					return true;
+				}
+			}
+			else if (Field.Value->Type == EJson::Array)
+			{
+				for (const TSharedPtr<FJsonValue>& Child : Field.Value->AsArray())
+				{
+					if (Child.IsValid() && Child->Type == EJson::Object && PCGSmokeObjectHasFieldRecursive(Child->AsObject(), FieldName))
+					{
+						return true;
+					}
+				}
+			}
+		}
+		return false;
+	}
+
+	static bool PCGSmokeDetailsRefHasReadableGroup(
+		FAutomationTestBase* Test,
+		const FString& EntryFilePath,
+		const TSharedPtr<FJsonObject>& OwnerObject,
+		const TCHAR* RefFieldName,
+		const FString& ExpectedOwnerKind)
+	{
+		const TSharedPtr<FJsonObject>* DetailsRef = nullptr;
+		if (!OwnerObject.IsValid() || !OwnerObject->TryGetObjectField(RefFieldName, DetailsRef) || !DetailsRef || !DetailsRef->IsValid())
+		{
+			return false;
+		}
+
+		Test->TestEqual(FString::Printf(TEXT("%s schema"), RefFieldName), (*DetailsRef)->GetStringField(TEXT("schema")), FString(TEXT("uai.details_ref.v1")));
+		if (!ExpectedOwnerKind.IsEmpty())
+		{
+			Test->TestEqual(FString::Printf(TEXT("%s owner kind"), RefFieldName), (*DetailsRef)->GetStringField(TEXT("owner_kind")), ExpectedOwnerKind);
+		}
+
+		FString IndexFile;
+		if (!(*DetailsRef)->TryGetStringField(TEXT("index_file"), IndexFile) || IndexFile.IsEmpty())
+		{
+			return false;
+		}
+
+		TSharedPtr<FJsonObject> IndexJson;
+		const FString IndexPath = FPaths::Combine(FPaths::GetPath(EntryFilePath), IndexFile);
+		if (!LoadPCGSmokeJsonFile(Test, IndexPath, IndexJson))
+		{
+			return false;
+		}
+
+		const TArray<TSharedPtr<FJsonValue>>* Groups = nullptr;
+		if (!IndexJson.IsValid() || !IndexJson->TryGetArrayField(TEXT("groups"), Groups) || !Groups || Groups->Num() <= 0)
+		{
+			return false;
+		}
+
+		const TSharedPtr<FJsonObject> GroupEntry = (*Groups)[0].IsValid() ? (*Groups)[0]->AsObject() : nullptr;
+		FString GroupFile;
+		if (!GroupEntry.IsValid() || !GroupEntry->TryGetStringField(TEXT("file"), GroupFile) || GroupFile.IsEmpty())
+		{
+			return false;
+		}
+
+		TSharedPtr<FJsonObject> GroupJson;
+		const FString GroupPath = FPaths::Combine(FPaths::GetPath(IndexPath), GroupFile);
+		if (!LoadPCGSmokeJsonFile(Test, GroupPath, GroupJson))
+		{
+			return false;
+		}
+
+		const TArray<TSharedPtr<FJsonValue>>* Fields = nullptr;
+		if (!GroupJson.IsValid() || !GroupJson->TryGetArrayField(TEXT("fields"), Fields) || !Fields || Fields->Num() <= 0)
+		{
+			return false;
+		}
+
+		const TSharedPtr<FJsonObject> FirstField = (*Fields)[0].IsValid() ? (*Fields)[0]->AsObject() : nullptr;
+		return FirstField.IsValid()
+			&& FirstField->HasField(TEXT("value_text"))
+			&& FirstField->HasTypedField<EJson::Array>(TEXT("operations"));
 	}
 
 	static FString MakePCGSmokeFolder(const FString& Name)
@@ -195,8 +350,13 @@ bool FUeAgentInterfacePCGSmokeTest::RunTest(const FString& Parameters)
 	const FString DataAssetPath = MakeAutomationAssetPath(TEXT("PCGDA_Smoke"));
 	const FString InputFolder = MakePCGSmokeFolder(TEXT("InputGraph"));
 	const FString InvalidFolder = MakePCGSmokeFolder(TEXT("InvalidGraph"));
+	const FString LegacyFolder = MakePCGSmokeFolder(TEXT("LegacyGraph"));
 	const FString ExportFolder = MakePCGSmokeFolder(TEXT("ExportGraph"));
 	const FString ActorLabel = FString::Printf(TEXT("UAI_PCG_Smoke_%s"), *FGuid::NewGuid().ToString(EGuidFormats::Digits));
+	IFileManager::Get().DeleteDirectory(*InputFolder, false, true);
+	IFileManager::Get().DeleteDirectory(*InvalidFolder, false, true);
+	IFileManager::Get().DeleteDirectory(*LegacyFolder, false, true);
+	IFileManager::Get().DeleteDirectory(*ExportFolder, false, true);
 
 	const FString AssetJsonPath = FPaths::Combine(InputFolder, TEXT("asset.json"));
 	const FString GraphJsonPath = FPaths::Combine(InputFolder, TEXT("graph.json"));
@@ -207,22 +367,24 @@ bool FUeAgentInterfacePCGSmokeTest::RunTest(const FString& Parameters)
 		TEXT("{\"schema\":\"ue_agent_interface.pcg.graph_folder.v1\",")
 		TEXT("\"parameters\":{\"parameters\":[{\"name\":\"SmokeDensity\",\"type\":\"Float\",\"value_text\":\"0.25\"}]},")
 		TEXT("\"nodes\":[")
-		TEXT("{\"id\":\"__input__\",\"role\":\"input\",\"settings_properties\":[{\"name\":\"Pins\",\"value_text\":\"((Label=\\\"SplineIn\\\",AllowedTypes=Spline))\"}]},")
+		TEXT("{\"id\":\"__input__\",\"role\":\"input\"},")
 		TEXT("{\"id\":\"smoke_param_get\",\"settings_class\":\"/Script/PCG.PCGUserParameterGetSettings\",\"authored_title\":\"SmokeParamGet\",\"pos_x\":100,\"pos_y\":-220,")
 		TEXT("\"output_pins\":[{\"label\":\"SmokeDensity\",\"allowed_types\":\"Param\"}]},")
 		TEXT("{\"id\":\"smoke_grid\",\"settings_class\":\"/Script/PCG.PCGCreatePointsGridSettings\",\"authored_title\":\"SmokeGrid\",\"pos_x\":100,\"pos_y\":0,")
-		TEXT("\"settings_properties\":[{\"name\":\"GridExtents\",\"value_text\":\"(X=100.000000,Y=100.000000,Z=50.000000)\"},{\"name\":\"CellSize\",\"value_text\":\"(X=100.000000,Y=100.000000,Z=100.000000)\"}]},")
-		TEXT("{\"id\":\"smoke_blueprint\",\"settings_class\":\"/Script/PCG.PCGBlueprintSettings\",\"authored_title\":\"SmokeBlueprint\",\"pos_x\":100,\"pos_y\":180,")
-		TEXT("\"settings_properties\":[{\"name\":\"BlueprintElementType\",\"value_text\":\"/Script/CoreUObject.Class'/Script/UeAgentInterfaceTests.UeAgentInterfacePCGSmokeBlueprintElement'\"}]},")
+		TEXT("\"settings_details\":{\"schema\":\"uai.details_ref.v1\",\"index_file\":\"details/smoke_grid/index.json\",\"ref_field\":\"settings_details\",\"owner_kind\":\"pcg_node_settings\",\"owner_id\":\"smoke_grid\"}},")
+		TEXT("{\"id\":\"smoke_blueprint\",\"settings_class\":\"/Script/PCG.PCGBlueprintSettings\",\"authored_title\":\"SmokeBlueprint\",\"pos_x\":100,\"pos_y\":180},")
 		TEXT("{\"id\":\"smoke_add_tag\",\"settings_class\":\"/Script/PCG.PCGAddTagSettings\",\"authored_title\":\"SmokeAddTag\",\"pos_x\":400,\"pos_y\":0},")
-		TEXT("{\"id\":\"smoke_spawner\",\"settings_class\":\"/Script/PCG.PCGStaticMeshSpawnerSettings\",\"authored_title\":\"SmokeSpawner\",\"pos_x\":700,\"pos_y\":0,")
-		TEXT("\"settings_properties\":[{\"name\":\"MeshSelectorType\",\"value_text\":\"/Script/CoreUObject.Class'/Script/PCG.PCGMeshSelectorByAttribute'\"},")
-		TEXT("{\"name\":\"MeshSelectorParameters.AttributeName\",\"value_text\":\"SmokeMesh\"},")
-		TEXT("{\"name\":\"MeshSelectorParameters.bUseAttributeMaterialOverrides\",\"value_text\":\"False\"}]},")
-		TEXT("{\"id\":\"__output__\",\"role\":\"output\",\"settings_properties\":[{\"name\":\"Pins\",\"value_text\":\"((Label=\\\"SmokeOut\\\",AllowedTypes=Point))\"}]}],")
-		TEXT("\"edges\":[{\"from\":\"smoke_grid\",\"from_pin\":\"Out\",\"to\":\"smoke_add_tag\",\"to_pin\":\"In\"},{\"from\":\"smoke_add_tag\",\"from_pin\":\"Out\",\"to\":\"__output__\",\"to_pin\":\"SmokeOut\"}],\"node_count\":7,\"edge_count\":2}");
+		TEXT("{\"id\":\"smoke_spawner\",\"settings_class\":\"/Script/PCG.PCGStaticMeshSpawnerSettings\",\"authored_title\":\"SmokeSpawner\",\"pos_x\":700,\"pos_y\":0},")
+		TEXT("{\"id\":\"__output__\",\"role\":\"output\"}],")
+		TEXT("\"edges\":[{\"from\":\"smoke_grid\",\"from_pin\":\"Out\",\"to\":\"smoke_add_tag\",\"to_pin\":\"In\"},{\"from\":\"smoke_add_tag\",\"from_pin\":\"Out\",\"to\":\"__output__\",\"to_pin\":\"\"}],\"node_count\":7,\"edge_count\":2}");
 	if (!WritePCGSmokeJsonFile(this, AssetJsonPath, AssetJson) ||
-		!WritePCGSmokeJsonFile(this, GraphJsonPath, GraphJson))
+		!WritePCGSmokeJsonFile(this, GraphJsonPath, GraphJson) ||
+		!WritePCGSmokeDetailsPackage(
+			this,
+			FPaths::Combine(InputFolder, TEXT("details"), TEXT("smoke_grid")),
+			TEXT("pcg_node_settings"),
+			TEXT("smoke_grid"),
+			TEXT("[{\"property_path\":\"GridExtents\",\"value_text\":\"(X=100.000000,Y=100.000000,Z=50.000000)\",\"operations\":[\"set\"]},{\"property_path\":\"CellSize\",\"value_text\":\"(X=100.000000,Y=100.000000,Z=100.000000)\",\"operations\":[\"set\"]}]")))
 	{
 		return false;
 	}
@@ -242,6 +404,21 @@ bool FUeAgentInterfacePCGSmokeTest::RunTest(const FString& Parameters)
 		return false;
 	}
 
+	const FString LegacyAssetJsonPath = FPaths::Combine(LegacyFolder, TEXT("asset.json"));
+	const FString LegacyGraphJsonPath = FPaths::Combine(LegacyFolder, TEXT("graph.json"));
+	const FString LegacyGraphJson =
+		TEXT("{\"schema\":\"ue_agent_interface.pcg.graph_folder.v1\",")
+		TEXT("\"nodes\":[")
+		TEXT("{\"id\":\"__input__\",\"role\":\"input\"},")
+		TEXT("{\"id\":\"legacy_grid\",\"settings_class\":\"/Script/PCG.PCGCreatePointsGridSettings\",\"settings_properties\":[{\"name\":\"CellSize\",\"value_text\":\"(X=25.000000,Y=25.000000,Z=25.000000)\"}]},")
+		TEXT("{\"id\":\"__output__\",\"role\":\"output\"}],")
+		TEXT("\"edges\":[],\"node_count\":3,\"edge_count\":0}");
+	if (!WritePCGSmokeJsonFile(this, LegacyAssetJsonPath, AssetJson) ||
+		!WritePCGSmokeJsonFile(this, LegacyGraphJsonPath, LegacyGraphJson))
+	{
+		return false;
+	}
+
 	TSharedPtr<FJsonObject> Root;
 	TSharedPtr<FJsonObject> Data;
 	TestTrue(TEXT("pcg_capabilities_query succeeds"), ExecPCGSmokeCommand(this, ServerScope, TEXT("smoke-pcg-capabilities"), TEXT("pcg_capabilities_query"), TEXT("{}"), 200, Root, Data));
@@ -255,10 +432,19 @@ bool FUeAgentInterfacePCGSmokeTest::RunTest(const FString& Parameters)
 	TestTrue(TEXT("pcg_graph_compile succeeds"), ExecPCGSmokeCommand(this, ServerScope, TEXT("smoke-pcg-compile"), TEXT("pcg_graph_compile"), FString::Printf(TEXT("{\"asset_path\":\"%s\"}"), *GraphPath), 200, Root, Data));
 	TestTrue(TEXT("pcg_graph_snapshot succeeds"), ExecPCGSmokeCommand(this, ServerScope, TEXT("smoke-pcg-snapshot"), TEXT("pcg_graph_snapshot"), FString::Printf(TEXT("{\"asset_path\":\"%s\"}"), *GraphPath), 200, Root, Data));
 	const int32 InitialGraphNodeCount = Data.IsValid() ? Data->GetIntegerField(TEXT("node_count")) : -1;
-	TestTrue(TEXT("pcg_graph_apply_folder preserves input node pins"), PCGSmokeNodeHasPinLabel(FindPCGSmokeNodeById(Data, TEXT("__input__")), TEXT("input_pins"), TEXT("SplineIn")));
 	TestTrue(TEXT("pcg_graph_apply_folder restores Get Graph Parameter output pins from folder JSON"), PCGSmokeNodeHasPinLabel(FindPCGSmokeNodeById(Data, TEXT("SmokeParamGet")), TEXT("output_pins"), TEXT("SmokeDensity")));
-	TestTrue(TEXT("pcg_graph_apply_folder preserves output node pins"), PCGSmokeNodeHasPinLabel(FindPCGSmokeNodeById(Data, TEXT("__output__")), TEXT("input_pins"), TEXT("SmokeOut")));
-	TestTrue(TEXT("pcg_graph_apply_folder instantiates blueprint element types"), PCGSmokeNodeSettingPropertyContains(FindPCGSmokeNodeById(Data, TEXT("SmokeBlueprint")), TEXT("BlueprintElementInstance"), TEXT("UeAgentInterfacePCGSmokeBlueprintElement")));
+	TestTrue(TEXT("pcg_graph_apply_folder applies SmokeGrid CellSize from grouped details"), PCGSmokeNodeSettingPropertyContains(FindPCGSmokeNodeById(Data, TEXT("SmokeGrid")), TEXT("CellSize"), TEXT("X=100.000000")));
+	const FString LegacyFolderParams = FString::Printf(TEXT("{\"folder_path\":\"%s\",\"asset_path\":\"%s\",\"save\":false}"), *LegacyFolder, *GraphPath);
+	TestTrue(TEXT("pcg_graph_apply_folder rejects legacy settings_properties"), ExecPCGSmokeCommand(this, ServerScope, TEXT("smoke-pcg-apply-legacy-settings-properties"), TEXT("pcg_graph_apply_folder"), LegacyFolderParams, 400, Root, Data));
+	TestTrue(TEXT("pcg legacy rejection data returned"), Data.IsValid());
+	if (Data.IsValid())
+	{
+		TestEqual(TEXT("pcg legacy rejection schema"), Data->GetStringField(TEXT("schema")), FString(TEXT("uai.legacy_rejection.v1")));
+		TestEqual(TEXT("pcg legacy rejection error code"), Data->GetStringField(TEXT("error_code")), FString(TEXT("legacy_settings_properties_not_supported")));
+		TestEqual(TEXT("pcg legacy rejection surface"), Data->GetStringField(TEXT("legacy_surface")), FString(TEXT("settings_properties[]")));
+		TestEqual(TEXT("pcg legacy rejection owner kind"), Data->GetStringField(TEXT("owner_kind")), FString(TEXT("pcg_node_settings")));
+		TestFalse(TEXT("pcg legacy rejection not dropped"), Data->GetBoolField(TEXT("dropped")));
+	}
 	const FString GraphLayoutParams = FString::Printf(
 		TEXT("{\"asset_path\":\"%s\",\"layout_options\":{\"horizontal_spacing\":360,\"vertical_spacing\":96,\"node_padding\":16,\"insert_reroute_nodes\":false,\"replace_existing_reroute_nodes\":false},\"save\":false}"),
 		*GraphPath);
@@ -277,6 +463,94 @@ bool FUeAgentInterfacePCGSmokeTest::RunTest(const FString& Parameters)
 	TestTrue(TEXT("pcg_graph_export_folder succeeds"), ExecPCGSmokeCommand(this, ServerScope, TEXT("smoke-pcg-export-folder"), TEXT("pcg_graph_export_folder"), FString::Printf(TEXT("{\"asset_path\":\"%s\",\"folder_path\":\"%s\"}"), *GraphPath, *ExportFolder), 200, Root, Data));
 	TestEqual(TEXT("pcg_graph_export_folder includes input/output nodes"), Data.IsValid() ? Data->GetIntegerField(TEXT("node_count")) : -1, 7);
 	TestEqual(TEXT("pcg_graph_export_folder preserves edge to output"), Data.IsValid() ? Data->GetIntegerField(TEXT("edge_count")) : -1, 2);
+	TSharedPtr<FJsonObject> ExportedPCGGraphJson;
+	const FString ExportedGraphJsonPath = FPaths::Combine(ExportFolder, TEXT("graph.json"));
+	TestTrue(TEXT("pcg_graph_export_folder graph.json authoring load"), LoadPCGSmokeJsonFile(this, ExportedGraphJsonPath, ExportedPCGGraphJson));
+	FString LegacySettingsPropertiesFile;
+	TestFalse(
+		TEXT("pcg_graph_export_folder omits settings_properties from default json files"),
+		PCGSmokeJsonFileTreeContainsText(ExportFolder, TEXT("\"settings_properties\""), LegacySettingsPropertiesFile));
+	if (!LegacySettingsPropertiesFile.IsEmpty())
+	{
+		AddError(FString::Printf(TEXT("settings_properties found in %s"), *LegacySettingsPropertiesFile));
+	}
+	FString ExportedGraphText;
+	TestTrue(TEXT("pcg_graph_export_folder graph.json text load"), FFileHelper::LoadFileToString(ExportedGraphText, *ExportedGraphJsonPath));
+	if (!ExportedGraphText.IsEmpty())
+	{
+		TestFalse(TEXT("pcg graph settings_details refs stay compact"), ExportedGraphText.Contains(TEXT("\"settings_details\": {\n")));
+		TestFalse(TEXT("pcg graph graph_settings details ref stays compact"), ExportedGraphText.Contains(TEXT("\"details\": {\n")));
+	}
+	if (ExportedPCGGraphJson.IsValid())
+	{
+		TestFalse(TEXT("pcg graph default export has no legacy settings_properties fields"), PCGSmokeObjectHasFieldRecursive(ExportedPCGGraphJson, TEXT("settings_properties")));
+		const TSharedPtr<FJsonObject>* GraphSettings = nullptr;
+		TestTrue(TEXT("pcg graph settings object exists"), ExportedPCGGraphJson->TryGetObjectField(TEXT("graph_settings"), GraphSettings) && GraphSettings && GraphSettings->IsValid());
+		if (GraphSettings && GraphSettings->IsValid())
+		{
+			TestFalse(TEXT("pcg graph settings omits legacy properties"), (*GraphSettings)->HasField(TEXT("properties")));
+			TestTrue(TEXT("pcg graph settings details readable"), PCGSmokeDetailsRefHasReadableGroup(this, ExportedGraphJsonPath, *GraphSettings, TEXT("details"), TEXT("pcg_graph_settings")));
+		}
+
+		const TArray<TSharedPtr<FJsonValue>>* ExportedNodes = nullptr;
+		TestTrue(TEXT("pcg graph export nodes array exists"), ExportedPCGGraphJson->TryGetArrayField(TEXT("nodes"), ExportedNodes) && ExportedNodes);
+		bool bFoundNodeAuthoringMetadata = false;
+		bool bFoundGroupedSettingsDetails = false;
+		if (ExportedNodes)
+		{
+			for (const TSharedPtr<FJsonValue>& NodeValue : *ExportedNodes)
+			{
+				const TSharedPtr<FJsonObject>* NodeObj = nullptr;
+				if (NodeValue.IsValid() && NodeValue->TryGetObject(NodeObj) && NodeObj && NodeObj->IsValid())
+				{
+					bFoundGroupedSettingsDetails = bFoundGroupedSettingsDetails || (*NodeObj)->HasTypedField<EJson::Object>(TEXT("settings_details"));
+				}
+			}
+		}
+		TestTrue(TEXT("pcg graph settings details grouped"), bFoundGroupedSettingsDetails);
+		const TSharedPtr<FJsonObject> SmokeGridNode = FindPCGSmokeNodeById(ExportedPCGGraphJson, TEXT("SmokeGrid"));
+		TestTrue(TEXT("pcg graph SmokeGrid settings details readable"), PCGSmokeDetailsRefHasReadableGroup(this, ExportedGraphJsonPath, SmokeGridNode, TEXT("settings_details"), TEXT("pcg_node_settings")));
+
+		FString RehydrateError;
+		TestTrue(
+			TEXT("pcg graph grouped details rehydrate"),
+			UeAgentDetailsAuthoring::RehydrateGroupedDetailsInObjectTree(ExportedGraphJsonPath, ExportedPCGGraphJson, RehydrateError));
+
+		bool bFoundPropertyAuthoringMetadata = false;
+		ExportedNodes = nullptr;
+		ExportedPCGGraphJson->TryGetArrayField(TEXT("nodes"), ExportedNodes);
+		if (ExportedNodes)
+		{
+			for (const TSharedPtr<FJsonValue>& NodeValue : *ExportedNodes)
+			{
+				const TSharedPtr<FJsonObject>* NodeObj = nullptr;
+				if (!NodeValue.IsValid() || !NodeValue->TryGetObject(NodeObj) || !NodeObj || !NodeObj->IsValid())
+				{
+					continue;
+				}
+				bFoundNodeAuthoringMetadata = bFoundNodeAuthoringMetadata
+					|| ((*NodeObj)->HasTypedField<EJson::Object>(TEXT("selector")) && (*NodeObj)->HasTypedField<EJson::Array>(TEXT("operations")));
+				const TArray<TSharedPtr<FJsonValue>>* SettingsProperties = nullptr;
+				if ((*NodeObj)->TryGetArrayField(TEXT("settings_properties"), SettingsProperties) && SettingsProperties)
+				{
+					for (const TSharedPtr<FJsonValue>& PropertyValue : *SettingsProperties)
+					{
+						const TSharedPtr<FJsonObject>* PropertyObj = nullptr;
+						if (PropertyValue.IsValid() && PropertyValue->TryGetObject(PropertyObj) && PropertyObj && PropertyObj->IsValid())
+						{
+							const bool bHasPropertyIdentity =
+								(*PropertyObj)->HasField(TEXT("property_path")) ||
+								(*PropertyObj)->HasTypedField<EJson::Object>(TEXT("selector"));
+							bFoundPropertyAuthoringMetadata = bFoundPropertyAuthoringMetadata
+								|| (bHasPropertyIdentity && (*PropertyObj)->HasTypedField<EJson::Array>(TEXT("operations")));
+						}
+					}
+				}
+			}
+		}
+		TestTrue(TEXT("pcg graph node exposes authoring metadata"), bFoundNodeAuthoringMetadata);
+		TestTrue(TEXT("pcg graph settings property exposes authoring metadata"), bFoundPropertyAuthoringMetadata);
+	}
 
 	TestTrue(TEXT("pcg_graph_parameters_query succeeds"), ExecPCGSmokeCommand(this, ServerScope, TEXT("smoke-pcg-params-query"), TEXT("pcg_graph_parameters_query"), FString::Printf(TEXT("{\"asset_path\":\"%s\"}"), *GraphPath), 200, Root, Data));
 	TestEqual(TEXT("pcg_graph_apply_folder imports graph parameter bag"), Data.IsValid() ? Data->GetIntegerField(TEXT("parameter_count")) : -1, 1);

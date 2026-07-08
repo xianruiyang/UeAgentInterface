@@ -104,37 +104,30 @@ namespace UeAgentMontageOps
 
 	static bool TryParseLinearColorField(const TSharedPtr<FJsonObject>& Params, const FString& FieldName, FLinearColor& OutColor)
 	{
-		const TSharedPtr<FJsonObject>* ColorObject = nullptr;
-		if (!Params.IsValid() || !Params->TryGetObjectField(FieldName, ColorObject) || !ColorObject || !ColorObject->IsValid())
+		const TSharedPtr<FJsonValue>* ColorValue = UeAgentJsonDiagnostics::FindFieldValue(Params, FieldName);
+		if (!ColorValue)
 		{
 			return false;
 		}
 
-		double R = 0.0;
-		double G = 0.0;
-		double B = 0.0;
-		double A = 1.0;
-		const bool bHasR = UeAgentJsonDiagnostics::TryReadNumberFieldByAliases(*ColorObject, { TEXT("r"), TEXT("R"), TEXT("red"), TEXT("Red") }, R);
-		const bool bHasG = UeAgentJsonDiagnostics::TryReadNumberFieldByAliases(*ColorObject, { TEXT("g"), TEXT("G"), TEXT("green"), TEXT("Green") }, G);
-		const bool bHasB = UeAgentJsonDiagnostics::TryReadNumberFieldByAliases(*ColorObject, { TEXT("b"), TEXT("B"), TEXT("blue"), TEXT("Blue") }, B);
-		UeAgentJsonDiagnostics::TryReadNumberFieldByAliases(*ColorObject, { TEXT("a"), TEXT("A"), TEXT("alpha"), TEXT("Alpha") }, A);
-		if (!bHasR || !bHasG || !bHasB)
+		FLinearColor ParsedColor = FLinearColor::White;
+		if (!UeAgentJsonDiagnostics::TryReadLinearColorValue(*ColorValue, ParsedColor))
 		{
 			return false;
 		}
 
-		const bool bLooksByteRange = R > 1.0 || G > 1.0 || B > 1.0 || A > 1.0;
+		const bool bLooksByteRange = ParsedColor.R > 1.0f || ParsedColor.G > 1.0f || ParsedColor.B > 1.0f || ParsedColor.A > 1.0f;
 		if (bLooksByteRange)
 		{
 			OutColor = FLinearColor(
-				static_cast<float>(R / 255.0),
-				static_cast<float>(G / 255.0),
-				static_cast<float>(B / 255.0),
-				static_cast<float>(A / 255.0));
+				ParsedColor.R / 255.0f,
+				ParsedColor.G / 255.0f,
+				ParsedColor.B / 255.0f,
+				ParsedColor.A / 255.0f);
 		}
 		else
 		{
-			OutColor = FLinearColor(static_cast<float>(R), static_cast<float>(G), static_cast<float>(B), static_cast<float>(A));
+			OutColor = ParsedColor;
 		}
 		return true;
 	}
@@ -254,9 +247,7 @@ namespace UeAgentMontageOps
 		}
 
 		FString JsonText;
-		const TSharedRef<TJsonWriter<TCHAR, TPrettyJsonPrintPolicy<TCHAR>>> Writer =
-			TJsonWriterFactory<TCHAR, TPrettyJsonPrintPolicy<TCHAR>>::Create(&JsonText);
-		if (!FJsonSerializer::Serialize(Root.ToSharedRef(), Writer))
+		if (!UeAgentJsonDiagnostics::SerializeJsonObjectCompact(Root, JsonText))
 		{
 			OutError = TEXT("json_serialize_failed");
 			return false;
