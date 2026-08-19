@@ -2,11 +2,21 @@
 
 #include "Utilities/UeAgentUObjectProperties.h"
 
+#include "Utilities/AuthoringCore/UeAgentAuthoringIdentity.h"
+#include "Utilities/AuthoringCore/UeAgentAuthoringNativeDefaults.h"
+#include "Utilities/AuthoringCore/UeAgentAuthoringReflectionDescriptors.h"
+#include "Utilities/AuthoringCore/UeAgentAuthoringSemanticCompare.h"
+#include "Utilities/AuthoringCore/UeAgentAuthoringTargetLocator.h"
+#include "Utilities/AuthoringOperationApply/UeAgentAuthoringDirectApply.h"
+#include "Utilities/UeAgentPropertyValueCodec.h"
+
 #include "Components/ActorComponent.h"
 #include "Dom/JsonObject.h"
 #include "Dom/JsonValue.h"
+#include "Engine/World.h"
 #include "GameFramework/Actor.h"
 #include "UObject/Class.h"
+#include "UObject/Package.h"
 #include "UObject/SoftObjectPath.h"
 #include "UObject/UnrealType.h"
 
@@ -20,7 +30,7 @@ namespace UeAgentUObjectProperties
 		, bIncludeReadOnly(false)
 		, bIncludeNonEditable(false)
 		, MaxProperties(1000)
-		, MaxDepth(4)
+		, MaxDepth(-1)
 		, MaxContainerItems(64)
 		, MaxStringChars(2048)
 	{
@@ -28,6 +38,12 @@ namespace UeAgentUObjectProperties
 
 	FApplyOptions::FApplyOptions()
 		: bAllowReadOnly(false)
+		, bAllowTemplateOwners(false)
+		, bAllowDomainAuthorizedOwners(false)
+		, bEmitEditorNotifications(true)
+		, bMarkPackageDirty(true)
+		, MaxContainerItems(256)
+		, MaxStringChars(4096)
 	{
 	}
 
@@ -43,48 +59,6 @@ namespace UeAgentUObjectProperties
 			return Object && Object->GetPackage() ? Object->GetPackage()->GetName() : FString();
 		}
 
-		static FString GetPropertyDisplayName(const FProperty* Property)
-		{
-			return Property ? Property->GetDisplayNameText().ToString() : FString();
-		}
-
-		static FString GetPropertyTooltip(const FProperty* Property)
-		{
-			return Property ? Property->GetToolTipText().ToString() : FString();
-		}
-
-		static TArray<TSharedPtr<FJsonValue>> BuildPropertyFlags(const FProperty* Property)
-		{
-			TArray<TSharedPtr<FJsonValue>> Flags;
-			if (!Property)
-			{
-				return Flags;
-			}
-
-			auto AddFlag = [&Flags, Property](EPropertyFlags Flag, const TCHAR* Name)
-			{
-				if (Property->HasAnyPropertyFlags(Flag))
-				{
-					Flags.Add(MakeShared<FJsonValueString>(Name));
-				}
-			};
-
-			AddFlag(CPF_Edit, TEXT("Edit"));
-			AddFlag(CPF_EditConst, TEXT("EditConst"));
-			AddFlag(CPF_BlueprintVisible, TEXT("BlueprintVisible"));
-			AddFlag(CPF_BlueprintReadOnly, TEXT("BlueprintReadOnly"));
-			AddFlag(CPF_Config, TEXT("Config"));
-			AddFlag(CPF_GlobalConfig, TEXT("GlobalConfig"));
-			AddFlag(CPF_Transient, TEXT("Transient"));
-			AddFlag(CPF_Deprecated, TEXT("Deprecated"));
-
-			AddFlag(CPF_DuplicateTransient, TEXT("DuplicateTransient"));
-			AddFlag(CPF_NonPIEDuplicateTransient, TEXT("NonPIEDuplicateTransient"));
-			AddFlag(CPF_TextExportTransient, TEXT("TextExportTransient"));
-			AddFlag(CPF_SaveGame, TEXT("SaveGame"));
-			return Flags;
-		}
-
 		static const TCHAR* GetProfileName(EExportProfile Profile)
 		{
 			switch (Profile)
@@ -93,8 +67,8 @@ namespace UeAgentUObjectProperties
 				return TEXT("index");
 			case EExportProfile::Authoring:
 				return TEXT("authoring");
-			case EExportProfile::Full:
-				return TEXT("full");
+			case EExportProfile::Readback:
+				return TEXT("readback");
 			case EExportProfile::Debug:
 				return TEXT("debug");
 			default:
@@ -104,7 +78,7 @@ namespace UeAgentUObjectProperties
 
 		static FExportOptions ResolveOptions(FExportOptions Options)
 		{
-			if (Options.Profile == EExportProfile::Full || Options.Profile == EExportProfile::Debug)
+			if (Options.Profile == EExportProfile::Readback || Options.Profile == EExportProfile::Debug)
 			{
 				Options.bIncludeReadOnly = true;
 				Options.bIncludeNonEditable = true;
@@ -115,13 +89,13 @@ namespace UeAgentUObjectProperties
 
 		static bool ShouldIncludeExtendedMetadata(const FExportOptions& Options)
 		{
-			return Options.Profile == EExportProfile::Full || Options.Profile == EExportProfile::Debug;
+			return Options.Profile == EExportProfile::Readback || Options.Profile == EExportProfile::Debug;
 		}
 
 		static bool ShouldIncludeAuthoringMetadata(const FExportOptions& Options)
 		{
 			return Options.Profile == EExportProfile::Authoring
-				|| Options.Profile == EExportProfile::Full
+				|| Options.Profile == EExportProfile::Readback
 				|| Options.Profile == EExportProfile::Debug;
 		}
 
@@ -137,7 +111,12 @@ namespace UeAgentUObjectProperties
 
 		static bool ShouldIncludeDefaultValues(const FExportOptions& Options)
 		{
-			return Options.Profile == EExportProfile::Full || Options.Profile == EExportProfile::Debug;
+			return Options.Profile == EExportProfile::Readback || Options.Profile == EExportProfile::Debug;
+		}
+
+		static bool ShouldAlwaysIncludeValueText(const FExportOptions& Options)
+		{
+			return Options.Profile == EExportProfile::Readback || Options.Profile == EExportProfile::Debug;
 		}
 
 		static bool ShouldOmitUnchangedProperties(const FExportOptions& Options)
@@ -150,306 +129,45 @@ namespace UeAgentUObjectProperties
 			return Options.Profile == EExportProfile::Debug;
 		}
 
-		static bool IsEditableProperty(const FProperty* Property)
-		{
-			return Property
-				&& Property->HasAnyPropertyFlags(CPF_Edit)
-				&& !Property->HasAnyPropertyFlags(CPF_EditConst | CPF_DisableEditOnInstance | CPF_Deprecated | CPF_Transient);
-		}
-
-		static TArray<TSharedPtr<FJsonValue>> BuildCategoryPath(const FProperty* Property)
-		{
-			TArray<TSharedPtr<FJsonValue>> Path;
-			if (!Property)
-			{
-				return Path;
-			}
-
-			TArray<FString> Parts;
-			Property->GetMetaData(TEXT("Category")).ParseIntoArray(Parts, TEXT("|"), true);
-			for (FString Part : Parts)
-			{
-				Part.TrimStartAndEndInline();
-				if (!Part.IsEmpty())
-				{
-					Path.Add(MakeShared<FJsonValueString>(Part));
-				}
-			}
-			return Path;
-		}
-
-		static FString GetValueKind(const FProperty* Property)
-		{
-			if (!Property)
-			{
-				return TEXT("unknown");
-			}
-			if (CastField<FBoolProperty>(Property))
-			{
-				return TEXT("bool");
-			}
-			if (const FByteProperty* ByteProperty = CastField<FByteProperty>(Property))
-			{
-				return ByteProperty->Enum ? TEXT("enum") : TEXT("int");
-			}
-			if (CastField<FEnumProperty>(Property))
-			{
-				return TEXT("enum");
-			}
-			if (const FNumericProperty* NumericProperty = CastField<FNumericProperty>(Property))
-			{
-				return NumericProperty->IsFloatingPoint() ? TEXT("float") : TEXT("int");
-			}
-			if (CastField<FStrProperty>(Property))
-			{
-				return TEXT("string");
-			}
-			if (CastField<FNameProperty>(Property))
-			{
-				return TEXT("name");
-			}
-			if (CastField<FTextProperty>(Property))
-			{
-				return TEXT("text");
-			}
-			if (CastField<FSoftObjectProperty>(Property))
-			{
-				return TEXT("soft_object");
-			}
-			if (CastField<FClassProperty>(Property) || CastField<FSoftClassProperty>(Property))
-			{
-				return TEXT("class");
-			}
-			if (CastField<FObjectPropertyBase>(Property))
-			{
-				return TEXT("object");
-			}
-			if (const FStructProperty* StructProperty = CastField<FStructProperty>(Property))
-			{
-				if (StructProperty->Struct)
-				{
-					const FString StructName = StructProperty->Struct->GetName();
-					if (StructName == TEXT("Vector") || StructName == TEXT("Vector2D") || StructName == TEXT("Vector3f") || StructName == TEXT("Vector2f"))
-					{
-						return TEXT("vector");
-					}
-					if (StructName == TEXT("Rotator"))
-					{
-						return TEXT("rotator");
-					}
-					if (StructName == TEXT("Transform"))
-					{
-						return TEXT("transform");
-					}
-					if (StructName == TEXT("Color") || StructName == TEXT("LinearColor"))
-					{
-						return TEXT("color");
-					}
-				}
-				return TEXT("struct");
-			}
-			if (CastField<FArrayProperty>(Property))
-			{
-				return TEXT("array");
-			}
-			if (CastField<FSetProperty>(Property))
-			{
-				return TEXT("set");
-			}
-			if (CastField<FMapProperty>(Property))
-			{
-				return TEXT("map");
-			}
-			return TEXT("import_text");
-		}
-
-		static bool IsKnownCompactStruct(const FString& StructName)
-		{
-			return StructName == TEXT("Vector")
-				|| StructName == TEXT("Vector2D")
-				|| StructName == TEXT("Vector3f")
-				|| StructName == TEXT("Vector2f")
-				|| StructName == TEXT("Rotator")
-				|| StructName == TEXT("Color")
-				|| StructName == TEXT("LinearColor");
-		}
-
-		static FString GetControlType(const FProperty* Property)
-		{
-			const FString Kind = GetValueKind(Property);
-			if (Kind == TEXT("bool"))
-			{
-				return TEXT("checkbox");
-			}
-			if (Kind == TEXT("enum"))
-			{
-				return TEXT("enum");
-			}
-			if (Kind == TEXT("int") || Kind == TEXT("float"))
-			{
-				return TEXT("number");
-			}
-			if (Kind == TEXT("object") || Kind == TEXT("soft_object"))
-			{
-				return TEXT("object_picker");
-			}
-			if (Kind == TEXT("class"))
-			{
-				return TEXT("class_picker");
-			}
-			if (Kind == TEXT("array") || Kind == TEXT("set") || Kind == TEXT("map"))
-			{
-				return Kind;
-			}
-			return Kind;
-		}
-
-		static TArray<TSharedPtr<FJsonValue>> BuildSupportedOperations(const FProperty* Property)
-		{
-			TArray<TSharedPtr<FJsonValue>> Operations;
-			auto Add = [&Operations](const TCHAR* Operation)
-			{
-				Operations.Add(MakeShared<FJsonValueString>(Operation));
-			};
-
-			if (CastField<FArrayProperty>(Property))
-			{
-				Add(TEXT("set"));
-				Add(TEXT("add"));
-				Add(TEXT("remove"));
-				Add(TEXT("clear"));
-				Add(TEXT("reorder"));
-			}
-			else if (CastField<FSetProperty>(Property))
-			{
-				Add(TEXT("set"));
-				Add(TEXT("add"));
-				Add(TEXT("remove"));
-				Add(TEXT("clear"));
-			}
-			else if (CastField<FMapProperty>(Property))
-			{
-				Add(TEXT("set"));
-				Add(TEXT("add"));
-				Add(TEXT("remove"));
-				Add(TEXT("clear"));
-			}
-			else if (IsEditableProperty(Property))
-			{
-				Add(TEXT("set"));
-			}
-			return Operations;
-		}
-
-		static TSharedPtr<FJsonObject> BuildAvailability(const FProperty* Property)
-		{
-			const bool bEditable = IsEditableProperty(Property);
-			bool bHasEditCondition = false;
-			bool bHasEditConditionHides = false;
-			FString EditCondition;
-			if (Property)
-			{
-				EditCondition = Property->GetMetaData(TEXT("EditCondition"));
-				bHasEditCondition = !EditCondition.IsEmpty();
-				bHasEditConditionHides = Property->HasMetaData(TEXT("EditConditionHides"));
-			}
-			if (bEditable && !bHasEditCondition && !bHasEditConditionHides)
-			{
-				return nullptr;
-			}
-			TSharedPtr<FJsonObject> Availability = MakeShared<FJsonObject>();
-			Availability->SetBoolField(TEXT("enabled"), bEditable);
-			Availability->SetBoolField(TEXT("editable"), bEditable);
-			if (bHasEditCondition)
-			{
-				Availability->SetStringField(TEXT("edit_condition"), EditCondition);
-			}
-			if (bHasEditConditionHides)
-			{
-				Availability->SetBoolField(TEXT("edit_condition_hides"), true);
-			}
-			if (!bEditable)
-			{
-				Availability->SetStringField(TEXT("disabled_reason"), TEXT("not_editable_by_property_flags"));
-			}
-			return Availability;
-		}
-
-		static TSharedPtr<FJsonObject> BuildConstraints(const FProperty* Property)
-		{
-			TSharedPtr<FJsonObject> Constraints = MakeShared<FJsonObject>();
-			if (!Property)
-			{
-				return Constraints;
-			}
-
-			auto AddMeta = [Property, Constraints](const TCHAR* SourceKey, const TCHAR* OutputKey)
-			{
-				const FString Value = Property->GetMetaData(SourceKey);
-				if (!Value.IsEmpty())
-				{
-					Constraints->SetStringField(OutputKey, Value);
-				}
-			};
-
-			AddMeta(TEXT("ClampMin"), TEXT("clamp_min"));
-			AddMeta(TEXT("ClampMax"), TEXT("clamp_max"));
-			AddMeta(TEXT("UIMin"), TEXT("ui_min"));
-			AddMeta(TEXT("UIMax"), TEXT("ui_max"));
-			AddMeta(TEXT("Units"), TEXT("units"));
-
-			if (const FObjectPropertyBase* ObjectProperty = CastField<FObjectPropertyBase>(Property))
-			{
-				if (ObjectProperty->PropertyClass)
-				{
-					Constraints->SetStringField(TEXT("allowed_class"), GetClassPath(ObjectProperty->PropertyClass));
-				}
-			}
-			if (const FClassProperty* ClassProperty = CastField<FClassProperty>(Property))
-			{
-				if (ClassProperty->MetaClass)
-				{
-					Constraints->SetStringField(TEXT("allowed_class"), GetClassPath(ClassProperty->MetaClass));
-				}
-			}
-			if (const FSoftClassProperty* SoftClassProperty = CastField<FSoftClassProperty>(Property))
-			{
-				if (SoftClassProperty->MetaClass)
-				{
-					Constraints->SetStringField(TEXT("allowed_class"), GetClassPath(SoftClassProperty->MetaClass));
-				}
-			}
-			if (Constraints->Values.IsEmpty())
-			{
-				return nullptr;
-			}
-			return Constraints;
-		}
-
-
-		static bool TryCompareWithDefault(UObject* Object, FProperty* Property, bool& bOutIdentical)
+		static bool TryResolveAndCompareWithDefault(
+			UObject* Object,
+			FProperty* Property,
+			bool& bOutIdentical,
+			UeAgentAuthoringNativeDefaults::FResult& OutDefault)
 		{
 			bOutIdentical = true;
 			if (!Object || !Property || !Object->GetClass() || Object->HasAnyFlags(RF_ClassDefaultObject))
 			{
 				return false;
 			}
-
-			UObject* DefaultObject = Object->GetClass()->GetDefaultObject(false);
-			if (!DefaultObject || DefaultObject == Object)
+			UeAgentAuthoringNativeDefaults::FRequest Request;
+			UeAgentAuthoringTargetLocator::FResolveResult TargetResult;
+			if (!UeAgentAuthoringNativeDefaults::BuildPropertyRequest(
+				Object,
+				Property->GetName(),
+				UeAgentAuthoringNativeDefaults::EOperation::InspectDefault,
+				false,
+				Request,
+				TargetResult))
 			{
 				return false;
 			}
-
 			const void* ValuePtr = Property->ContainerPtrToValuePtr<void>(Object);
-			const void* DefaultValuePtr = Property->ContainerPtrToValuePtr<void>(DefaultObject);
-			if (!ValuePtr || !DefaultValuePtr)
+			if (!UeAgentAuthoringNativeDefaults::Resolve(Request, OutDefault)
+				|| !OutDefault.IsResolved()
+				|| !OutDefault.PropertyValue.IsValid()
+				|| !ValuePtr)
 			{
 				return false;
 			}
-
-			bOutIdentical = Property->Identical(ValuePtr, DefaultValuePtr, PPF_None);
-			return true;
+			FString CompareError;
+			return UeAgentAuthoringSemanticCompare::ArePropertyValuesEquivalent(
+				Property,
+				ValuePtr,
+				OutDefault.PropertyValue->GetValuePtr(),
+				Object,
+				bOutIdentical,
+				CompareError);
 		}
 
 		static TSharedPtr<FJsonValue> MakeBoundedStringValue(const FString& Value, const FExportOptions& Options)
@@ -474,21 +192,6 @@ namespace UeAgentUObjectProperties
 			Obj->SetStringField(TEXT("cpp_type"), Property ? Property->GetCPPType() : FString());
 			Obj->SetNumberField(TEXT("depth"), Depth);
 			return MakeShared<FJsonValueObject>(Obj);
-		}
-
-		static TSharedPtr<FJsonObject> BuildObjectReferenceValue(const UObject* ObjectValue)
-		{
-			TSharedPtr<FJsonObject> Obj = MakeShared<FJsonObject>();
-			Obj->SetStringField(TEXT("kind"), TEXT("object_reference"));
-			Obj->SetBoolField(TEXT("is_null"), ObjectValue == nullptr);
-			if (ObjectValue)
-			{
-				Obj->SetStringField(TEXT("object_path"), ObjectValue->GetPathName());
-				Obj->SetStringField(TEXT("name"), ObjectValue->GetName());
-				Obj->SetStringField(TEXT("class_path"), GetClassPath(ObjectValue->GetClass()));
-				Obj->SetStringField(TEXT("package_path"), ObjectValue->GetPackage() ? ObjectValue->GetPackage()->GetName() : FString());
-			}
-			return Obj;
 		}
 
 		static void WriteEnumCandidatesToDescriptor(TSharedPtr<FJsonObject>& Descriptor, const UEnum* Enum)
@@ -603,188 +306,7 @@ namespace UeAgentUObjectProperties
 			return Result;
 		}
 
-		static bool TryGetStringFromJsonValue(const TSharedPtr<FJsonValue>& Value, FString& OutString)
-		{
-			if (!Value.IsValid() || Value->IsNull())
-			{
-				return false;
-			}
-			if (Value->Type == EJson::String)
-			{
-				OutString = Value->AsString();
-				return true;
-			}
-			if (Value->Type == EJson::Number)
-			{
-				OutString = FString::SanitizeFloat(Value->AsNumber());
-				return true;
-			}
-			if (Value->Type == EJson::Boolean)
-			{
-				OutString = Value->AsBool() ? TEXT("True") : TEXT("False");
-				return true;
-			}
-			return false;
-		}
 
-		static bool TryGetPropertyPathFromDescriptor(const TSharedPtr<FJsonObject>& Descriptor, FString& OutPropertyPath)
-		{
-			OutPropertyPath.Reset();
-			if (!Descriptor.IsValid())
-			{
-				return false;
-			}
-
-			auto TryField = [&OutPropertyPath](const TSharedPtr<FJsonObject>& Object, const TCHAR* FieldName)
-			{
-				return Object.IsValid()
-					&& Object->TryGetStringField(FieldName, OutPropertyPath)
-					&& !OutPropertyPath.IsEmpty();
-			};
-
-			if (TryField(Descriptor, TEXT("property_path"))
-				|| TryField(Descriptor, TEXT("property_name"))
-				|| TryField(Descriptor, TEXT("name")))
-			{
-				return true;
-			}
-
-			const TSharedPtr<FJsonObject>* Selector = nullptr;
-			if (Descriptor->TryGetObjectField(TEXT("selector"), Selector) && Selector && Selector->IsValid())
-			{
-				return TryField(*Selector, TEXT("property_path"))
-					|| TryField(*Selector, TEXT("property_name"))
-					|| TryField(*Selector, TEXT("name"));
-			}
-			return false;
-		}
-
-		static bool TryGetImportTextFromDescriptor(const TSharedPtr<FJsonObject>& Descriptor, const FProperty* Property, FString& OutImportText, FString& OutReason)
-		{
-			OutImportText.Reset();
-			OutReason.Reset();
-			if (!Descriptor.IsValid())
-			{
-				OutReason = TEXT("invalid_descriptor");
-				return false;
-			}
-
-			const TSharedPtr<FJsonValue> ValueTextField = Descriptor->TryGetField(TEXT("value_text"));
-			if (TryGetStringFromJsonValue(ValueTextField, OutImportText))
-			{
-				return true;
-			}
-			if (ValueTextField.IsValid() && ValueTextField->Type == EJson::Object)
-			{
-				const TSharedPtr<FJsonObject> ValueTextObject = ValueTextField->AsObject();
-				if (ValueTextObject.IsValid() && !ValueTextObject->GetBoolField(TEXT("truncated")))
-				{
-					if (ValueTextObject->TryGetStringField(TEXT("preview"), OutImportText))
-					{
-						return true;
-					}
-				}
-			}
-
-			const TSharedPtr<FJsonValue> ValueField = Descriptor->TryGetField(TEXT("value"));
-			if (TryGetStringFromJsonValue(ValueField, OutImportText))
-			{
-				return true;
-			}
-			if (ValueField.IsValid() && ValueField->Type == EJson::Object)
-			{
-				const TSharedPtr<FJsonObject> ValueObject = ValueField->AsObject();
-				if (ValueObject.IsValid())
-				{
-					FString Kind;
-					ValueObject->TryGetStringField(TEXT("kind"), Kind);
-					if (Kind == TEXT("enum"))
-					{
-						if (ValueObject->TryGetStringField(TEXT("name"), OutImportText))
-						{
-							return true;
-						}
-						double RawValue = 0.0;
-						if (ValueObject->TryGetNumberField(TEXT("value"), RawValue))
-						{
-							OutImportText = FString::FromInt(static_cast<int32>(RawValue));
-							return true;
-						}
-					}
-					if (Kind == TEXT("object_reference"))
-					{
-						if (ValueObject->GetBoolField(TEXT("is_null")))
-						{
-							OutImportText = TEXT("None");
-							return true;
-						}
-						if (ValueObject->TryGetStringField(TEXT("object_path"), OutImportText))
-						{
-							return true;
-						}
-					}
-					if (Kind == TEXT("import_text"))
-					{
-						const TSharedPtr<FJsonValue> TextField = ValueObject->TryGetField(TEXT("text"));
-						if (TryGetStringFromJsonValue(TextField, OutImportText))
-						{
-							return true;
-						}
-					}
-				}
-			}
-
-			if (ValueField.IsValid() && ValueField->Type == EJson::Array)
-			{
-				const FStructProperty* StructProp = CastField<FStructProperty>(Property);
-				if (StructProp && StructProp->Struct)
-				{
-					const TArray<TSharedPtr<FJsonValue>>& Arr = ValueField->AsArray();
-					TArray<FString> Parts;
-					int32 Idx = 0;
-					for (TFieldIterator<FProperty> It(StructProp->Struct, EFieldIterationFlags::IncludeSuper); It; ++It)
-					{
-						FProperty* Inner = *It;
-						FString Skip;
-						if (ShouldSkipProperty(Inner, FExportOptions(), Skip))
-						{
-							continue;
-						}
-						if (Idx >= Arr.Num())
-						{
-							break;
-						}
-						const TSharedPtr<FJsonValue>& Elem = Arr[Idx];
-						FString Text;
-						if (TryGetStringFromJsonValue(Elem, Text))
-						{
-							Parts.Add(FString::Printf(TEXT("%s=%s"), *Inner->GetName(), *Text));
-						}
-						else if (Elem.IsValid() && Elem->Type == EJson::Number)
-						{
-							Parts.Add(FString::Printf(TEXT("%s=%s"), *Inner->GetName(), *FString::SanitizeFloat(Elem->AsNumber())));
-						}
-						else if (Elem.IsValid() && Elem->Type == EJson::Boolean)
-						{
-							Parts.Add(FString::Printf(TEXT("%s=%s"), *Inner->GetName(), Elem->AsBool() ? TEXT("true") : TEXT("false")));
-						}
-						else
-						{
-							Parts.Add(FString::Printf(TEXT("%s=0"), *Inner->GetName()));
-						}
-						++Idx;
-					}
-					if (Parts.Num() > 0)
-					{
-						OutImportText = FString::Printf(TEXT("(%s)"), *FString::Join(Parts, TEXT(",")));
-						return true;
-					}
-				}
-			}
-
-			OutReason = TEXT("missing_import_text");
-			return false;
-		}
 	}
 
 	FString GetClassPath(const UClass* Class)
@@ -799,16 +321,33 @@ namespace UeAgentUObjectProperties
 	TSharedPtr<FJsonObject> BuildObjectIdentity(const UObject* Object)
 	{
 		TSharedPtr<FJsonObject> Identity = MakeShared<FJsonObject>();
-		Identity->SetStringField(TEXT("name"), Object ? Object->GetName() : FString());
-		Identity->SetStringField(TEXT("object_path"), GetObjectPathSafe(Object));
-		Identity->SetStringField(TEXT("package_path"), GetPackagePathSafe(Object));
-		Identity->SetStringField(TEXT("class_path"), Object ? GetClassPath(Object->GetClass()) : FString());
-		Identity->SetStringField(TEXT("outer_path"), Object && Object->GetOuter() ? Object->GetOuter()->GetPathName() : FString());
+		if (Object)
+		{
+			TMap<FString, FString> Selectors;
+			Selectors.Add(TEXT("name"), Object->GetName());
+			Selectors.Add(TEXT("object_path"), GetObjectPathSafe(Object));
+			Selectors.Add(TEXT("package_path"), GetPackagePathSafe(Object));
+			Selectors.Add(TEXT("class_path"), GetClassPath(Object->GetClass()));
+			Selectors.Add(TEXT("outer_path"), Object->GetOuter() ? Object->GetOuter()->GetPathName() : FString());
+			UeAgentAuthoringIdentity::FCanonicalIdentity CanonicalIdentity;
+			FString IdentityError;
+			if (ensureAlwaysMsgf(
+				UeAgentAuthoringIdentity::BuildCanonicalIdentity(
+					TEXT("uobject_identity"), TEXT("uobject"), Selectors, CanonicalIdentity, IdentityError),
+				TEXT("Failed to build UObject canonical identity: %s"), *IdentityError))
+			{
+				UeAgentAuthoringIdentity::WriteSelectorsFlat(CanonicalIdentity, Identity.ToSharedRef());
+			}
+		}
+		for (const TCHAR* Field : { TEXT("name"), TEXT("object_path"), TEXT("package_path"), TEXT("class_path"), TEXT("outer_path") })
+		{
+			if (!Identity->HasField(Field)) Identity->SetStringField(Field, FString());
+		}
 		Identity->SetBoolField(TEXT("is_cdo"), Object ? Object->HasAnyFlags(RF_ClassDefaultObject) : false);
 		return Identity;
 	}
 
-	bool ShouldSkipProperty(const FProperty* Property, const FExportOptions& Options, FString& OutReason)
+	bool ShouldSkipProperty(const FProperty* Property, const FExportOptions& Options, FString& OutReason, const UObject* Owner)
 	{
 		OutReason.Reset();
 		if (!Property)
@@ -831,18 +370,55 @@ namespace UeAgentUObjectProperties
 			OutReason = TEXT("editor_only");
 			return true;
 		}
-		const bool bEditable = IsEditableProperty(Property);
-		if (!Options.bIncludeNonEditable && !bEditable)
+		const bool bEditable = UeAgentAuthoringReflection::IsEditableProperty(Property, const_cast<UObject*>(Owner));
+		const bool bConditionallyEditable = Property->HasMetaData(TEXT("EditCondition"))
+			&& Property->HasAnyPropertyFlags(CPF_Edit)
+			&& !Property->HasAnyPropertyFlags(CPF_EditConst | CPF_Deprecated | CPF_Transient);
+		if (!Options.bIncludeNonEditable && !bEditable && !bConditionallyEditable)
 		{
 			OutReason = TEXT("non_editable");
 			return true;
 		}
-		if (!Options.bIncludeReadOnly && !bEditable)
+		if (!Options.bIncludeReadOnly && !bEditable && !bConditionallyEditable)
 		{
 			OutReason = TEXT("read_only");
 			return true;
 		}
 		return false;
+	}
+
+	bool ShouldIncludeStructField(
+		const UScriptStruct* Struct,
+		const FProperty* Field,
+		const FExportOptions& Options,
+		const UObject* Owner)
+	{
+		if (!Struct || !Field) return false;
+		if (!Options.bIncludeTransient && Field->HasAnyPropertyFlags(
+			CPF_Transient | CPF_DuplicateTransient | CPF_NonPIEDuplicateTransient | CPF_TextExportTransient))
+		{
+			return false;
+		}
+		if (!Options.bIncludeDeprecated
+			&& (Field->HasAnyPropertyFlags(CPF_Deprecated) || Field->HasMetaData(TEXT("DeprecatedProperty"))))
+		{
+			return false;
+		}
+		if (!Options.bIncludeEditorOnly && Field->IsEditorOnlyProperty()) return false;
+
+		bool bIncluded = Options.bIncludeReadOnly && Options.bIncludeNonEditable;
+		if (Options.StructFieldOverride)
+		{
+			const TOptional<bool> Override = Options.StructFieldOverride(Struct, Field);
+			if (Override.IsSet()) bIncluded = Override.GetValue();
+			else if (!bIncluded) bIncluded = UeAgentAuthoringReflection::IsEditableByFlags(Field, Owner);
+		}
+		else if (!bIncluded)
+		{
+			bIncluded = UeAgentAuthoringReflection::IsEditableByFlags(Field, Owner);
+		}
+		if (!bIncluded) return false;
+		return !Options.StructFieldFilter || Options.StructFieldFilter(Struct, Field);
 	}
 
 	bool IsUnsignedNumericProperty(const FNumericProperty* Property)
@@ -872,212 +448,18 @@ namespace UeAgentUObjectProperties
 		{
 			return MakeShared<FJsonValueNull>();
 		}
-		if (Options.MaxDepth >= 0 && Depth > Options.MaxDepth)
+		UeAgentPropertyValueCodec::FOptions CodecOptions;
+		CodecOptions.MaxDepth = Options.MaxDepth;
+		CodecOptions.MaxContainerItems = Options.MaxContainerItems;
+		CodecOptions.MaxStringChars = Options.MaxStringChars;
+		CodecOptions.StructFieldFilter = [Options, Owner](
+			const UScriptStruct* Struct,
+			const FProperty* Field)
 		{
-			return MakeDepthExceededValue(Property, Depth);
-		}
+			return ShouldIncludeStructField(Struct, Field, Options, Owner);
+		};
+		return UeAgentPropertyValueCodec::Encode(Property, ValuePtr, Owner, CodecOptions, Depth);
 
-		if (const FBoolProperty* BoolProperty = CastField<FBoolProperty>(Property))
-		{
-			return MakeShared<FJsonValueBoolean>(BoolProperty->GetPropertyValue(ValuePtr));
-		}
-
-		if (const FEnumProperty* EnumProperty = CastField<FEnumProperty>(Property))
-		{
-			const int64 RawValue = EnumProperty->GetUnderlyingProperty()->GetSignedIntPropertyValue(ValuePtr);
-			const UEnum* Enum = EnumProperty->GetEnum();
-			return MakeShared<FJsonValueString>(Enum ? Enum->GetNameStringByValue(RawValue) : FString());
-		}
-
-		if (const FByteProperty* ByteProperty = CastField<FByteProperty>(Property))
-		{
-			if (ByteProperty->Enum)
-			{
-				const int64 RawValue = ByteProperty->GetPropertyValue(ValuePtr);
-				return MakeShared<FJsonValueString>(ByteProperty->Enum->GetNameStringByValue(RawValue));
-			}
-			return MakeShared<FJsonValueNumber>(ByteProperty->GetPropertyValue(ValuePtr));
-		}
-
-		if (const FNumericProperty* NumericProperty = CastField<FNumericProperty>(Property))
-		{
-			if (NumericProperty->IsFloatingPoint())
-			{
-				return MakeShared<FJsonValueNumber>(NumericProperty->GetFloatingPointPropertyValue(ValuePtr));
-			}
-			if (NumericProperty->IsInteger())
-			{
-				if (IsUnsignedNumericProperty(NumericProperty))
-				{
-					return MakeShared<FJsonValueNumber>(static_cast<double>(NumericProperty->GetUnsignedIntPropertyValue(ValuePtr)));
-				}
-				return MakeShared<FJsonValueNumber>(static_cast<double>(NumericProperty->GetSignedIntPropertyValue(ValuePtr)));
-			}
-		}
-
-		if (const FStrProperty* StrProperty = CastField<FStrProperty>(Property))
-		{
-			return MakeBoundedStringValue(StrProperty->GetPropertyValue(ValuePtr), Options);
-		}
-		if (const FNameProperty* NameProperty = CastField<FNameProperty>(Property))
-		{
-			return MakeBoundedStringValue(NameProperty->GetPropertyValue(ValuePtr).ToString(), Options);
-		}
-		if (const FTextProperty* TextProperty = CastField<FTextProperty>(Property))
-		{
-			return MakeBoundedStringValue(TextProperty->GetPropertyValue(ValuePtr).ToString(), Options);
-		}
-
-		if (const FSoftObjectProperty* SoftObjectProperty = CastField<FSoftObjectProperty>(Property))
-		{
-			const FSoftObjectPtr SoftValue = SoftObjectProperty->GetPropertyValue(ValuePtr);
-			const FSoftObjectPath Path = SoftValue.ToSoftObjectPath();
-			TSharedPtr<FJsonObject> Obj = MakeShared<FJsonObject>();
-			Obj->SetStringField(TEXT("kind"), TEXT("soft_object_reference"));
-			Obj->SetBoolField(TEXT("is_null"), Path.IsNull());
-			Obj->SetStringField(TEXT("path"), Path.ToString());
-			Obj->SetStringField(TEXT("asset_path"), Path.GetAssetPathString());
-			Obj->SetStringField(TEXT("sub_path"), Path.GetSubPathString());
-			return MakeShared<FJsonValueObject>(Obj);
-		}
-
-		if (const FObjectPropertyBase* ObjectProperty = CastField<FObjectPropertyBase>(Property))
-		{
-			return MakeShared<FJsonValueObject>(BuildObjectReferenceValue(ObjectProperty->GetObjectPropertyValue(ValuePtr)));
-		}
-
-		if (const FStructProperty* StructProperty = CastField<FStructProperty>(Property))
-		{
-			const bool bCompact = StructProperty->Struct && IsKnownCompactStruct(StructProperty->Struct->GetName());
-			if (bCompact)
-			{
-				TArray<TSharedPtr<FJsonValue>> Items;
-				int32 FieldCount = 0;
-				if (StructProperty->Struct)
-				{
-					for (TFieldIterator<FProperty> It(StructProperty->Struct, EFieldIterationFlags::IncludeSuper); It; ++It)
-					{
-						FProperty* InnerProperty = *It;
-						FString SkipReason;
-						if (ShouldSkipProperty(InnerProperty, Options, SkipReason))
-						{
-							continue;
-						}
-						if (Options.MaxContainerItems > 0 && FieldCount >= Options.MaxContainerItems)
-						{
-							break;
-						}
-						const void* InnerPtr = InnerProperty->ContainerPtrToValuePtr<void>(ValuePtr);
-						Items.Add(ExportPropertyValue(InnerProperty, InnerPtr, Owner, Options, Depth + 1));
-						++FieldCount;
-					}
-				}
-				return MakeShared<FJsonValueArray>(Items);
-			}
-
-			TSharedPtr<FJsonObject> Fields = MakeShared<FJsonObject>();
-			int32 FieldCount = 0;
-			if (StructProperty->Struct)
-			{
-				for (TFieldIterator<FProperty> It(StructProperty->Struct, EFieldIterationFlags::IncludeSuper); It; ++It)
-				{
-					FProperty* InnerProperty = *It;
-					FString SkipReason;
-					if (ShouldSkipProperty(InnerProperty, Options, SkipReason))
-					{
-						continue;
-					}
-					if (Options.MaxContainerItems > 0 && FieldCount >= Options.MaxContainerItems)
-					{
-						break;
-					}
-					const void* InnerPtr = InnerProperty->ContainerPtrToValuePtr<void>(ValuePtr);
-					Fields->SetField(InnerProperty->GetName(), ExportPropertyValue(InnerProperty, InnerPtr, Owner, Options, Depth + 1));
-					++FieldCount;
-				}
-			}
-			return MakeShared<FJsonValueObject>(Fields);
-		}
-
-		if (const FArrayProperty* ArrayProperty = CastField<FArrayProperty>(Property))
-		{
-			FScriptArrayHelper Helper(ArrayProperty, ValuePtr);
-			TArray<TSharedPtr<FJsonValue>> Items;
-			const int32 Count = Helper.Num();
-			const int32 Limit = Options.MaxContainerItems > 0 ? FMath::Min(Count, Options.MaxContainerItems) : Count;
-			for (int32 Index = 0; Index < Limit; ++Index)
-			{
-				Items.Add(ExportPropertyValue(ArrayProperty->Inner, Helper.GetRawPtr(Index), Owner, Options, Depth + 1));
-			}
-			TSharedPtr<FJsonObject> Obj = MakeShared<FJsonObject>();
-			Obj->SetStringField(TEXT("kind"), TEXT("array"));
-			Obj->SetNumberField(TEXT("count"), Count);
-			Obj->SetBoolField(TEXT("truncated"), Limit < Count);
-			Obj->SetArrayField(TEXT("items"), Items);
-			return MakeShared<FJsonValueObject>(Obj);
-		}
-
-		if (const FSetProperty* SetProperty = CastField<FSetProperty>(Property))
-		{
-			FScriptSetHelper Helper(SetProperty, ValuePtr);
-			TArray<TSharedPtr<FJsonValue>> Items;
-			int32 Added = 0;
-			for (int32 Index = 0; Index < Helper.GetMaxIndex(); ++Index)
-			{
-				if (!Helper.IsValidIndex(Index))
-				{
-					continue;
-				}
-				if (Options.MaxContainerItems > 0 && Added >= Options.MaxContainerItems)
-				{
-					break;
-				}
-				Items.Add(ExportPropertyValue(SetProperty->ElementProp, Helper.GetElementPtr(Index), Owner, Options, Depth + 1));
-				++Added;
-			}
-			TSharedPtr<FJsonObject> Obj = MakeShared<FJsonObject>();
-			Obj->SetStringField(TEXT("kind"), TEXT("set"));
-			Obj->SetNumberField(TEXT("count"), Helper.Num());
-			Obj->SetBoolField(TEXT("truncated"), Options.MaxContainerItems > 0 && Added < Helper.Num());
-			Obj->SetArrayField(TEXT("items"), Items);
-			return MakeShared<FJsonValueObject>(Obj);
-		}
-
-		if (const FMapProperty* MapProperty = CastField<FMapProperty>(Property))
-		{
-			FScriptMapHelper Helper(MapProperty, ValuePtr);
-			TArray<TSharedPtr<FJsonValue>> Entries;
-			int32 Added = 0;
-			for (int32 Index = 0; Index < Helper.GetMaxIndex(); ++Index)
-			{
-				if (!Helper.IsValidIndex(Index))
-				{
-					continue;
-				}
-				if (Options.MaxContainerItems > 0 && Added >= Options.MaxContainerItems)
-				{
-					break;
-				}
-				TSharedPtr<FJsonObject> Entry = MakeShared<FJsonObject>();
-				Entry->SetField(TEXT("key"), ExportPropertyValue(MapProperty->KeyProp, Helper.GetKeyPtr(Index), Owner, Options, Depth + 1));
-				Entry->SetField(TEXT("value"), ExportPropertyValue(MapProperty->ValueProp, Helper.GetValuePtr(Index), Owner, Options, Depth + 1));
-				Entries.Add(MakeShared<FJsonValueObject>(Entry));
-				++Added;
-			}
-			TSharedPtr<FJsonObject> Obj = MakeShared<FJsonObject>();
-			Obj->SetStringField(TEXT("kind"), TEXT("map"));
-			Obj->SetNumberField(TEXT("count"), Helper.Num());
-			Obj->SetBoolField(TEXT("truncated"), Options.MaxContainerItems > 0 && Added < Helper.Num());
-			Obj->SetArrayField(TEXT("entries"), Entries);
-			return MakeShared<FJsonValueObject>(Obj);
-		}
-
-		FString TextValue;
-		ExportTextForProperty(Property, ValuePtr, Owner, TextValue);
-		TSharedPtr<FJsonObject> Obj = MakeShared<FJsonObject>();
-		Obj->SetStringField(TEXT("kind"), TEXT("import_text"));
-		Obj->SetField(TEXT("text"), MakeBoundedStringValue(TextValue, Options));
-		return MakeShared<FJsonValueObject>(Obj);
 	}
 
 	TSharedPtr<FJsonObject> BuildPropertyDescriptor(UObject* Object, FProperty* Property, const FExportOptions& Options)
@@ -1089,35 +471,52 @@ namespace UeAgentUObjectProperties
 
 		const FExportOptions ResolvedOptions = ResolveOptions(Options);
 		FString SkipReason;
-		if (ShouldSkipProperty(Property, ResolvedOptions, SkipReason))
+		if (ShouldSkipProperty(Property, ResolvedOptions, SkipReason, Object))
 		{
 			return nullptr;
 		}
 
 		TSharedPtr<FJsonObject> Descriptor = MakeShared<FJsonObject>();
+		const void* ValuePtr = Property->ContainerPtrToValuePtr<void>(Object);
+		UeAgentAuthoringReflection::FDescriptor Reflection;
+		FString ReflectionError;
+		if (!UeAgentAuthoringReflection::Build(Property, Object, ValuePtr, Reflection, ReflectionError))
+		{
+			return nullptr;
+		}
 		const UClass* ObjectClass = Object->GetClass();
 		const UStruct* OwnerStruct = Property->GetOwnerStruct();
 		const UClass* OwnerClass = Cast<UClass>(OwnerStruct);
 		bool bIdenticalToDefault = true;
-		const bool bHasDefaultComparison = TryCompareWithDefault(Object, Property, bIdenticalToDefault);
+		UeAgentAuthoringNativeDefaults::FResult NativeDefault;
+		const bool bHasDefaultComparison = TryResolveAndCompareWithDefault(Object, Property, bIdenticalToDefault, NativeDefault);
 		if (ShouldOmitUnchangedProperties(ResolvedOptions) && bHasDefaultComparison && bIdenticalToDefault)
 		{
 			return nullptr;
 		}
 
-		Descriptor->SetStringField(TEXT("property_path"), Property->GetName());
+		UeAgentAuthoringIdentity::FCanonicalIdentity PropertyIdentity;
+		FString PropertyIdentityError;
+		if (!UeAgentAuthoringTargetLocator::BuildPropertyIdentity(
+			Object, Property->GetName(), Object, PropertyIdentity, PropertyIdentityError))
+		{
+			return nullptr;
+		}
+		Descriptor->SetStringField(TEXT("property_path"), PropertyIdentity.GetSelector(TEXT("property_path")));
 		if (ShouldIncludeAuthoringMetadata(ResolvedOptions))
 		{
-			Descriptor->SetStringField(TEXT("display_name"), GetPropertyDisplayName(Property));
-			Descriptor->SetArrayField(TEXT("category_path"), BuildCategoryPath(Property));
-			Descriptor->SetStringField(TEXT("control_type"), GetControlType(Property));
-			Descriptor->SetStringField(TEXT("value_kind"), GetValueKind(Property));
-			if (TSharedPtr<FJsonObject> Availability = BuildAvailability(Property); Availability.IsValid())
+			const FString& DisplayName = Reflection.DisplayName;
+			if (!DisplayName.IsEmpty() && DisplayName != Property->GetName())
+			{
+				Descriptor->SetStringField(TEXT("display_name"), DisplayName);
+			}
+			Descriptor->SetStringField(TEXT("value_kind"), Reflection.Type.Kind);
+			UeAgentPropertyValueCodec::AddTypeMetadata(Property, Descriptor);
+			if (TSharedPtr<FJsonObject> Availability = Reflection.MakeAvailabilityJson(); Availability.IsValid())
 			{
 				Descriptor->SetObjectField(TEXT("availability"), Availability);
 			}
-			Descriptor->SetArrayField(TEXT("operations"), BuildSupportedOperations(Property));
-			if (TSharedPtr<FJsonObject> ConstraintsRef = BuildConstraints(Property); ConstraintsRef.IsValid())
+			if (TSharedPtr<FJsonObject> ConstraintsRef = Reflection.MakeConstraintsJson(); ConstraintsRef.IsValid())
 			{
 				Descriptor->SetObjectField(TEXT("constraints"), ConstraintsRef);
 			}
@@ -1128,6 +527,7 @@ namespace UeAgentUObjectProperties
 		}
 		if (ShouldIncludeExtendedMetadata(ResolvedOptions))
 		{
+			Descriptor->SetArrayField(TEXT("category_path"), Reflection.MakeCategoryPathJson());
 			Descriptor->SetStringField(TEXT("property_name"), Property->GetName());
 			Descriptor->SetStringField(TEXT("cpp_type"), Property->GetCPPType());
 			Descriptor->SetStringField(TEXT("property_class"), Property->GetClass() ? Property->GetClass()->GetName() : FString());
@@ -1142,7 +542,7 @@ namespace UeAgentUObjectProperties
 
 		if (ShouldIncludeTooltip(ResolvedOptions))
 		{
-			const FString Tooltip = GetPropertyTooltip(Property);
+			const FString& Tooltip = Reflection.Tooltip;
 			if (!Tooltip.IsEmpty())
 			{
 				Descriptor->SetStringField(TEXT("tooltip"), Tooltip);
@@ -1151,30 +551,41 @@ namespace UeAgentUObjectProperties
 
 		if (ShouldIncludeExtendedMetadata(ResolvedOptions))
 		{
-			Descriptor->SetBoolField(TEXT("editable"), IsEditableProperty(Property));
-			Descriptor->SetBoolField(TEXT("read_only"), !IsEditableProperty(Property));
+			Descriptor->SetBoolField(TEXT("editable"), Reflection.bEditableByProperty);
+			Descriptor->SetBoolField(TEXT("read_only"), !Reflection.bEditableByProperty);
 			Descriptor->SetBoolField(TEXT("is_editor_only"), Property->IsEditorOnlyProperty());
-			Descriptor->SetArrayField(TEXT("property_flags"), BuildPropertyFlags(Property));
+			Descriptor->SetArrayField(TEXT("property_flags"), Reflection.MakePropertyFlagsJson());
 			Descriptor->SetBoolField(TEXT("has_cdo_default"), bHasDefaultComparison);
 			Descriptor->SetBoolField(TEXT("differs_from_cdo"), bHasDefaultComparison ? !bIdenticalToDefault : false);
 		}
 
 		if (ShouldIncludeValues(ResolvedOptions))
 		{
-			const void* ValuePtr = Property->ContainerPtrToValuePtr<void>(Object);
 			FString ValueText;
 			ExportTextForProperty(Property, ValuePtr, Object, ValueText);
-			Descriptor->SetField(TEXT("value"), ExportPropertyValue(Property, ValuePtr, Object, ResolvedOptions));
-			Descriptor->SetField(TEXT("value_text"), MakeBoundedStringValue(ValueText, ResolvedOptions));
+			const TSharedPtr<FJsonValue> Value = ExportPropertyValue(Property, ValuePtr, Object, ResolvedOptions);
+			FString ReliabilityReason;
+			const bool bReliable = UeAgentPropertyValueCodec::IsReliableCanonicalValue(Property, Value, &ReliabilityReason);
+			if (bReliable || ResolvedOptions.Profile != EExportProfile::Authoring)
+			{
+				Descriptor->SetField(TEXT("value"), Value);
+			}
+			if (!bReliable && ResolvedOptions.Profile == EExportProfile::Authoring)
+			{
+				TSharedPtr<FJsonObject> Availability = MakeShared<FJsonObject>();
+				Availability->SetBoolField(TEXT("editable"), false);
+				Availability->SetStringField(TEXT("reason"), ReliabilityReason);
+				Descriptor->SetObjectField(TEXT("availability"), Availability);
+			}
+			if (ShouldAlwaysIncludeValueText(ResolvedOptions))
+			{
+				Descriptor->SetField(TEXT("value_text"), MakeBoundedStringValue(ValueText, ResolvedOptions));
+			}
 
 			if (ShouldIncludeDefaultValues(ResolvedOptions) && bHasDefaultComparison)
 			{
-				UObject* DefaultObject = Object->GetClass() ? Object->GetClass()->GetDefaultObject(false) : nullptr;
-				const void* DefaultValuePtr = DefaultObject ? Property->ContainerPtrToValuePtr<void>(DefaultObject) : nullptr;
-				FString DefaultValueText;
-				ExportTextForProperty(Property, DefaultValuePtr, DefaultObject, DefaultValueText);
-				Descriptor->SetField(TEXT("default_value"), ExportPropertyValue(Property, DefaultValuePtr, DefaultObject, ResolvedOptions));
-				Descriptor->SetField(TEXT("default_value_text"), MakeBoundedStringValue(DefaultValueText, ResolvedOptions));
+				Descriptor->SetField(TEXT("default_value"), NativeDefault.Value);
+				Descriptor->SetField(TEXT("default_value_text"), MakeBoundedStringValue(NativeDefault.ValueText, ResolvedOptions));
 			}
 			else if (ShouldIncludeDefaultValues(ResolvedOptions))
 			{
@@ -1190,7 +601,7 @@ namespace UeAgentUObjectProperties
 	{
 		const FExportOptions ResolvedOptions = ResolveOptions(Options);
 		TSharedPtr<FJsonObject> Root = MakeShared<FJsonObject>();
-		Root->SetStringField(TEXT("schema"), TEXT("uai.uobject_properties.v1"));
+		Root->SetStringField(TEXT("schema"), TEXT("uai.uobject_properties.v2"));
 		Root->SetStringField(TEXT("profile"), GetProfileName(ResolvedOptions.Profile));
 		Root->SetObjectField(TEXT("object"), BuildObjectIdentity(Object));
 
@@ -1204,7 +615,7 @@ namespace UeAgentUObjectProperties
 			{
 				FProperty* Property = *It;
 				FString SkipReason;
-				if (ShouldSkipProperty(Property, ResolvedOptions, SkipReason))
+				if (ShouldSkipProperty(Property, ResolvedOptions, SkipReason, Object))
 				{
 					if (ShouldIncludeSkippedDetails(ResolvedOptions))
 					{
@@ -1274,115 +685,307 @@ namespace UeAgentUObjectProperties
 			TSharedPtr<FJsonObject> Entry = MakeShared<FJsonObject>();
 			Entry->SetStringField(TEXT("component_name"), Component->GetName());
 			Entry->SetStringField(TEXT("component_class_path"), GetClassPath(Component->GetClass()));
-			Entry->SetStringField(TEXT("component_schema"), TEXT("uai.uobject_properties.v1"));
+			Entry->SetStringField(TEXT("component_schema"), TEXT("uai.uobject_properties.v2"));
 			Entry->SetObjectField(TEXT("properties"), ExportComponentProperties(Component, Options));
 			OutComponents.Add(MakeShared<FJsonValueObject>(Entry));
 		}
 		return OutComponents;
 	}
 
-	TSharedPtr<FJsonObject> ApplyObjectProperties(UObject* Object, const TSharedPtr<FJsonObject>& PropertiesJson, const FApplyOptions& Options)
+	bool ValidatePropertyDescriptorShape(
+		const TSharedPtr<FJsonObject>& Descriptor,
+		FString& OutPropertyPath,
+		TSharedPtr<FJsonValue>& OutValue,
+		FString& OutError)
+	{
+		OutPropertyPath.Reset();
+		OutValue.Reset();
+		OutError.Reset();
+		if (!Descriptor.IsValid())
+		{
+			OutError = TEXT("invalid_property_descriptor");
+			return false;
+		}
+		static const TSet<FString> AllowedDescriptorFields = {
+			TEXT("property_path"), TEXT("value_kind"), TEXT("value"), TEXT("display_name"), TEXT("tooltip"),
+			TEXT("availability"), TEXT("constraints"), TEXT("candidates"), TEXT("candidates_header"), TEXT("candidates_ref"),
+			TEXT("element_type"), TEXT("key_type"), TEXT("mapped_type"), TEXT("inner_type"), TEXT("fixed_length"),
+			TEXT("struct_path"), TEXT("allowed_class"), TEXT("enum_path")
+		};
+		for (const TPair<FString, TSharedPtr<FJsonValue>>& Field : Descriptor->Values)
+		{
+			if (!AllowedDescriptorFields.Contains(Field.Key))
+			{
+				OutError = TEXT("unexpected_property_descriptor_field:") + Field.Key;
+				return false;
+			}
+		}
+		if (!Descriptor->TryGetStringField(TEXT("property_path"), OutPropertyPath) || OutPropertyPath.IsEmpty())
+		{
+			OutError = TEXT("missing_property_path");
+			return false;
+		}
+		OutValue = Descriptor->TryGetField(TEXT("value"));
+		if (!OutValue.IsValid())
+		{
+			OutError = TEXT("missing_value");
+			return false;
+		}
+		return true;
+	}
+
+	namespace
+	{
+		bool ProjectLegacyApplyDescriptors(
+			const TArray<TSharedPtr<FJsonValue>>& Input,
+			TArray<TSharedPtr<FJsonValue>>& OutProjected,
+			FString& OutPropertyPath,
+			FString& OutError)
+		{
+			static const TSet<FString> AssertionFields = {
+				TEXT("value_kind"), TEXT("struct_path"), TEXT("enum_path"),
+				TEXT("element_type"), TEXT("key_type"), TEXT("mapped_type"),
+				TEXT("inner_type"), TEXT("fixed_length"), TEXT("allowed_class")
+			};
+			OutProjected.Reset();
+			OutPropertyPath.Reset();
+			OutError.Reset();
+			OutProjected.Reserve(Input.Num());
+			for (const TSharedPtr<FJsonValue>& Value : Input)
+			{
+				const TSharedPtr<FJsonObject> Descriptor = Value.IsValid() && Value->Type == EJson::Object
+					? Value->AsObject()
+					: nullptr;
+				TSharedPtr<FJsonValue> CanonicalValue;
+				if (!ValidatePropertyDescriptorShape(Descriptor, OutPropertyPath, CanonicalValue, OutError)) return false;
+
+				TSharedRef<FJsonObject> Projected = MakeShared<FJsonObject>();
+				Projected->SetStringField(TEXT("property_path"), OutPropertyPath);
+				Projected->SetField(TEXT("value"), CanonicalValue);
+				for (const FString& Field : AssertionFields)
+				{
+					if (const TSharedPtr<FJsonValue> Assertion = Descriptor->TryGetField(Field); Assertion.IsValid())
+					{
+						Projected->SetField(Field, Assertion);
+					}
+				}
+				OutProjected.Add(MakeShared<FJsonValueObject>(Projected));
+			}
+			return true;
+		}
+
+		UeAgentAuthoringObjectApply::FOptions MakeObjectApplyOptions(const FApplyOptions& Options)
+		{
+			UeAgentAuthoringObjectApply::FOptions Result;
+			Result.bAllowReadOnly = Options.bAllowReadOnly;
+			Result.bAllowTemplateOwners = Options.bAllowTemplateOwners;
+			Result.bAllowDomainAuthorizedOwners = Options.bAllowDomainAuthorizedOwners;
+			Result.bEmitEditorNotifications = Options.bEmitEditorNotifications;
+			Result.bMarkPackageDirty = Options.bMarkPackageDirty;
+			Result.MaxContainerItems = Options.MaxContainerItems;
+			Result.MaxStringChars = Options.MaxStringChars;
+			return Result;
+		}
+
+	}
+
+	TSharedPtr<FJsonObject> ApplyStructProperties(
+		UStruct* StructType,
+		void* StructData,
+		UObject* Owner,
+		const TSharedPtr<FJsonObject>& PropertiesJson,
+		const FApplyOptions& Options)
 	{
 		TSharedPtr<FJsonObject> Summary = MakeShared<FJsonObject>();
-		Summary->SetStringField(TEXT("schema"), TEXT("uai.uobject_properties_apply.v1"));
-		Summary->SetObjectField(TEXT("object"), BuildObjectIdentity(Object));
-
+		Summary->SetStringField(TEXT("schema"), TEXT("uai.ustruct_properties_apply.v2"));
+		Summary->SetObjectField(TEXT("object"), BuildObjectIdentity(Owner));
 		TArray<TSharedPtr<FJsonValue>> Results;
-		int32 Seen = 0;
-		int32 Applied = 0;
-		int32 Skipped = 0;
-		int32 Failed = 0;
+		auto Finish = [&Summary, &Results](const TCHAR* Status, const FString& Reason, int32 Seen, int32 Applied, int32 Failed)
+		{
+			Summary->SetStringField(TEXT("status"), Status);
+			if (!Reason.IsEmpty()) Summary->SetStringField(TEXT("reason"), Reason);
+			Summary->SetNumberField(TEXT("properties_seen"), Seen);
+			Summary->SetNumberField(TEXT("properties_applied"), Applied);
+			Summary->SetNumberField(TEXT("properties_failed"), Failed);
+			Summary->SetArrayField(TEXT("properties"), Results);
+			return Summary;
+		};
+		if (!StructType || !StructData || !Owner)
+		{
+			return Finish(TEXT("failed"), TEXT("invalid_struct_owner"), 0, 0, 1);
+		}
+		FString InputSchema;
+		if (!PropertiesJson.IsValid()
+			|| !PropertiesJson->TryGetStringField(TEXT("schema"), InputSchema)
+			|| InputSchema != TEXT("uai.uobject_properties.v2"))
+		{
+			return Finish(TEXT("failed"), TEXT("schema_mismatch_expected_uai.uobject_properties.v2"), 0, 0, 1);
+		}
+		const TArray<TSharedPtr<FJsonValue>>* Properties = nullptr;
+		if (!PropertiesJson->TryGetArrayField(TEXT("properties"), Properties) || !Properties)
+		{
+			return Finish(TEXT("failed"), TEXT("missing_properties_array"), 0, 0, 1);
+		}
 
+		TArray<TSharedPtr<FJsonValue>> Projected;
+		FString FailedPath;
+		FString FailureReason;
+		if (!ProjectLegacyApplyDescriptors(*Properties, Projected, FailedPath, FailureReason))
+		{
+			Results.Add(MakeShared<FJsonValueObject>(MakeApplyResult(FailedPath, TEXT("failed"), FailureReason)));
+			return Finish(TEXT("failed"), TEXT("preflight_failed"), Properties->Num(), 0, 1);
+		}
+
+		if (Projected.IsEmpty())
+		{
+			return Finish(TEXT("applied"), FString(), 0, 0, 0);
+		}
+
+		UeAgentAuthoringDirectApply::FResult ApplyResult;
+		if (!UeAgentAuthoringDirectApply::ApplyStructPatch(
+			StructType, StructData, Owner, Projected, MakeObjectApplyOptions(Options), ApplyResult))
+		{
+			Results.Add(MakeShared<FJsonValueObject>(MakeApplyResult(
+				ApplyResult.PropertyPath, TEXT("failed"), ApplyResult.ErrorCode)));
+			return Finish(TEXT("failed"), ApplyResult.ErrorCode, Properties->Num(), 0, 1);
+		}
+		for (const TSharedPtr<FJsonValue>& Value : Projected)
+		{
+			Results.Add(MakeShared<FJsonValueObject>(MakeApplyResult(
+				Value->AsObject()->GetStringField(TEXT("property_path")), TEXT("applied"))));
+		}
+		return Finish(TEXT("applied"), FString(), Properties->Num(), Projected.Num(), 0);
+	}
+
+	TSharedPtr<FJsonObject> ApplyObjectProperties(
+		UObject* Object,
+		const TSharedPtr<FJsonObject>& PropertiesJson,
+		const FApplyOptions& Options)
+	{
+		TSharedPtr<FJsonObject> Summary = MakeShared<FJsonObject>();
+		Summary->SetStringField(TEXT("schema"), TEXT("uai.uobject_properties_apply.v2"));
+		Summary->SetObjectField(TEXT("object"), BuildObjectIdentity(Object));
+		TArray<TSharedPtr<FJsonValue>> Results;
+		auto Finish = [&Summary, &Results](const TCHAR* Status, const FString& Reason, int32 Seen, int32 Applied, int32 Failed)
+		{
+			Summary->SetStringField(TEXT("status"), Status);
+			if (!Reason.IsEmpty()) Summary->SetStringField(TEXT("reason"), Reason);
+			Summary->SetNumberField(TEXT("properties_seen"), Seen);
+			Summary->SetNumberField(TEXT("properties_applied"), Applied);
+			Summary->SetNumberField(TEXT("properties_skipped"),
+				FCString::Stricmp(Status, TEXT("applied")) == 0 ? FMath::Max(0, Seen - Applied) : 0);
+			Summary->SetNumberField(TEXT("properties_failed"), Failed);
+			Summary->SetArrayField(TEXT("properties"), Results);
+			return Summary;
+		};
 		if (!Object || !Object->GetClass())
 		{
-			Summary->SetStringField(TEXT("status"), TEXT("failed"));
-			Summary->SetStringField(TEXT("reason"), TEXT("invalid_object"));
-			Summary->SetNumberField(TEXT("properties_seen"), 0);
-			Summary->SetNumberField(TEXT("properties_applied"), 0);
-			Summary->SetNumberField(TEXT("properties_skipped"), 0);
-			Summary->SetNumberField(TEXT("properties_failed"), 1);
-			Summary->SetArrayField(TEXT("properties"), Results);
-			return Summary;
+			return Finish(TEXT("failed"), TEXT("invalid_object"), 0, 0, 1);
 		}
+		FString InputSchema;
+		if (!PropertiesJson.IsValid()
+			|| !PropertiesJson->TryGetStringField(TEXT("schema"), InputSchema)
+			|| InputSchema != TEXT("uai.uobject_properties.v2"))
+		{
+			return Finish(TEXT("failed"), TEXT("schema_mismatch_expected_uai.uobject_properties.v2"), 0, 0, 1);
+		}
+		const TArray<TSharedPtr<FJsonValue>>* Properties = nullptr;
+		if (!PropertiesJson->TryGetArrayField(TEXT("properties"), Properties) || !Properties)
+		{
+			return Finish(TEXT("failed"), TEXT("missing_properties_array"), 0, 0, 1);
+		}
+
+		TArray<TSharedPtr<FJsonValue>> Projected;
+		FString FailedPath;
+		FString FailureReason;
+		if (!ProjectLegacyApplyDescriptors(*Properties, Projected, FailedPath, FailureReason))
+		{
+			Results.Add(MakeShared<FJsonValueObject>(MakeApplyResult(FailedPath, TEXT("failed"), FailureReason)));
+			return Finish(TEXT("failed"), TEXT("preflight_failed"), Properties->Num(), 0, 1);
+		}
+
+		if (Projected.IsEmpty())
+		{
+			return Finish(TEXT("applied"), FString(), 0, 0, 0);
+		}
+
+		UeAgentAuthoringDirectApply::FResult ApplyResult;
+		if (!UeAgentAuthoringDirectApply::ApplyObjectPatch(
+			Object, Projected, MakeObjectApplyOptions(Options), ApplyResult))
+		{
+			Results.Add(MakeShared<FJsonValueObject>(MakeApplyResult(
+				ApplyResult.PropertyPath, TEXT("failed"), ApplyResult.ErrorCode)));
+			return Finish(TEXT("failed"), ApplyResult.ErrorCode, Properties->Num(), 0, 1);
+		}
+		for (const TSharedPtr<FJsonValue>& Value : Projected)
+		{
+			Results.Add(MakeShared<FJsonValueObject>(MakeApplyResult(
+				Value->AsObject()->GetStringField(TEXT("property_path")), TEXT("applied"))));
+		}
+		return Finish(TEXT("applied"), FString(), Properties->Num(), Projected.Num(), 0);
+	}
+
+	bool ParseApplySummary(
+		const TSharedPtr<FJsonObject>& Summary,
+		FApplySummaryResult& OutResult)
+	{
+		OutResult = FApplySummaryResult();
+		if (!Summary.IsValid())
+		{
+			OutResult.ErrorCode = TEXT("property_apply_summary_missing");
+			OutResult.ErrorDetail = OutResult.ErrorCode;
+			return false;
+		}
+
+		FString Status;
+		if (Summary->TryGetStringField(TEXT("status"), Status) && Status == TEXT("applied"))
+		{
+			double Applied = 0.0;
+			Summary->TryGetNumberField(TEXT("properties_applied"), Applied);
+			OutResult.bApplied = true;
+			OutResult.PropertiesApplied = FMath::RoundToInt(Applied);
+			return true;
+		}
+
+		Summary->TryGetStringField(TEXT("error_code"), OutResult.ErrorCode);
+		Summary->TryGetStringField(TEXT("error_detail"), OutResult.ErrorDetail);
+		FString SummaryReason;
+		Summary->TryGetStringField(TEXT("reason"), SummaryReason);
 
 		const TArray<TSharedPtr<FJsonValue>>* Properties = nullptr;
-		if (!PropertiesJson.IsValid() || !PropertiesJson->TryGetArrayField(TEXT("properties"), Properties) || !Properties)
+		if (Summary->TryGetArrayField(TEXT("properties"), Properties) && Properties)
 		{
-			Summary->SetStringField(TEXT("status"), TEXT("skipped"));
-			Summary->SetStringField(TEXT("reason"), TEXT("missing_properties_array"));
-			Summary->SetNumberField(TEXT("properties_seen"), 0);
-			Summary->SetNumberField(TEXT("properties_applied"), 0);
-			Summary->SetNumberField(TEXT("properties_skipped"), 0);
-			Summary->SetNumberField(TEXT("properties_failed"), 0);
-			Summary->SetArrayField(TEXT("properties"), Results);
-			return Summary;
+			for (const TSharedPtr<FJsonValue>& Value : *Properties)
+			{
+				const TSharedPtr<FJsonObject> Property = Value.IsValid() && Value->Type == EJson::Object
+					? Value->AsObject()
+					: nullptr;
+				FString PropertyStatus;
+				if (!Property.IsValid()
+					|| !Property->TryGetStringField(TEXT("status"), PropertyStatus)
+					|| PropertyStatus != TEXT("failed"))
+				{
+					continue;
+				}
+				Property->TryGetStringField(TEXT("property_path"), OutResult.PropertyPath);
+				FString PropertyReason;
+				Property->TryGetStringField(TEXT("reason"), PropertyReason);
+				if (OutResult.ErrorCode.IsEmpty()) OutResult.ErrorCode = PropertyReason;
+				if (OutResult.ErrorDetail.IsEmpty())
+				{
+					OutResult.ErrorDetail = OutResult.PropertyPath.IsEmpty()
+						? PropertyReason
+						: OutResult.PropertyPath + TEXT(":") + PropertyReason;
+				}
+				break;
+			}
 		}
 
-		for (const TSharedPtr<FJsonValue>& PropertyValue : *Properties)
-		{
-			Seen++;
-			const TSharedPtr<FJsonObject> Descriptor = PropertyValue.IsValid() ? PropertyValue->AsObject() : nullptr;
-			FString PropertyPath;
-			if (!TryGetPropertyPathFromDescriptor(Descriptor, PropertyPath))
-			{
-				Skipped++;
-				Results.Add(MakeShared<FJsonValueObject>(MakeApplyResult(PropertyPath, TEXT("skipped"), TEXT("missing_property_path"))));
-				continue;
-			}
-
-			FProperty* Property = FindFProperty<FProperty>(Object->GetClass(), *PropertyPath);
-			if (!Property)
-			{
-				Skipped++;
-				Results.Add(MakeShared<FJsonValueObject>(MakeApplyResult(PropertyPath, TEXT("skipped"), TEXT("property_not_found"))));
-				continue;
-			}
-			if (!Options.bAllowReadOnly && !IsEditableProperty(Property))
-			{
-				Skipped++;
-				Results.Add(MakeShared<FJsonValueObject>(MakeApplyResult(PropertyPath, TEXT("skipped"), TEXT("read_only_or_non_editable"))));
-				continue;
-			}
-
-			FString ImportText;
-			FString ImportReason;
-			if (!TryGetImportTextFromDescriptor(Descriptor, Property, ImportText, ImportReason))
-			{
-				Skipped++;
-				Results.Add(MakeShared<FJsonValueObject>(MakeApplyResult(PropertyPath, TEXT("skipped"), ImportReason)));
-				continue;
-			}
-
-			void* ValuePtr = Property->ContainerPtrToValuePtr<void>(Object);
-			if (!ValuePtr)
-			{
-				Failed++;
-				Results.Add(MakeShared<FJsonValueObject>(MakeApplyResult(PropertyPath, TEXT("failed"), TEXT("missing_value_ptr"))));
-				continue;
-			}
-
-			Object->PreEditChange(Property);
-			const TCHAR* ImportEnd = Property->ImportText_Direct(*ImportText, ValuePtr, Object, PPF_None);
-			if (!ImportEnd)
-			{
-				Failed++;
-				Results.Add(MakeShared<FJsonValueObject>(MakeApplyResult(PropertyPath, TEXT("failed"), TEXT("import_text_failed"))));
-				continue;
-			}
-			FPropertyChangedEvent ChangeEvent(Property, EPropertyChangeType::ValueSet);
-			Object->PostEditChangeProperty(ChangeEvent);
-			Object->MarkPackageDirty();
-
-			Applied++;
-			Results.Add(MakeShared<FJsonValueObject>(MakeApplyResult(PropertyPath, TEXT("applied"))));
-		}
-
-		Summary->SetStringField(TEXT("status"), Failed > 0 ? TEXT("partial") : TEXT("applied"));
-		Summary->SetNumberField(TEXT("properties_seen"), Seen);
-		Summary->SetNumberField(TEXT("properties_applied"), Applied);
-		Summary->SetNumberField(TEXT("properties_skipped"), Skipped);
-		Summary->SetNumberField(TEXT("properties_failed"), Failed);
-		Summary->SetArrayField(TEXT("properties"), Results);
-		return Summary;
+		if (OutResult.ErrorCode.IsEmpty()) OutResult.ErrorCode = SummaryReason;
+		if (OutResult.ErrorCode.IsEmpty()) OutResult.ErrorCode = TEXT("property_apply_failed");
+		if (OutResult.ErrorDetail.IsEmpty()) OutResult.ErrorDetail = SummaryReason;
+		if (OutResult.ErrorDetail.IsEmpty()) OutResult.ErrorDetail = OutResult.ErrorCode;
+		return false;
 	}
+
 }

@@ -1,0 +1,59 @@
+authoring: { reason: command_has_no_registered_folder_authoring_profile, state: none }
+category: static_mesh_enhanced_input
+command: static_mesh_preview_collision
+deprecation: { reason: command_is_active, state: none }
+discovery: { aliases: [], keywords_en: [static, mesh, preview, collision, static_mesh_enhanced_input], keywords_zh: [static_mesh_preview_collision], summary_en: "Execute static_mesh_preview_collision with a verified implementation contract", summary_zh: "无 UI 读取碰撞预览数据", tags: [static_mesh_enhanced_input, p2-006] }
+errors: {
+  codes: [
+    { code: missing_asset_path, description_zh: "C++ 实现返回错误码 missing_asset_path", retry_safe: true, stage: preflight, wire_match: exact }
+    { code: static_mesh_not_found, description_zh: "C++ 实现返回错误码 static_mesh_not_found", retry_safe: false, stage: execution, wire_match: exact }
+  ]
+}
+evidence: {
+  docs: [
+    { path: "Plugins/UeAgentInterface/docs/commands/static_mesh_enhanced_input/static_mesh_preview_collision.md", purpose: "user documentation cross-check; C++ implementation remains authoritative" }
+  ]
+  implementation: [
+    { line_hint: 2577, path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Commands/StaticMesh/UeAgentHttpServer_StaticMesh.cpp", purpose: "command handler, parameter and return evidence", symbol: CmdStaticMeshPreviewCollision }
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Server/UeAgentHttpServer.cpp", purpose: "transitive helper evidence used by the command handler" }
+  ]
+  tests: [
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterfaceTests/Private/Smoke/UeAgentInterfaceSmoke_MaterialStaticDeformerInput.cpp", purpose: "smoke or negative-path evidence cross-checked for the verified contract" }
+  ]
+}
+execution: {
+  destructive: false
+  editor_state: required
+  game_thread: required
+  idempotent: true
+  kind: read_only
+  overwrite_behavior: none
+  pie_state: allowed
+  retry_safe: true
+  save_behavior: none
+  side_effects: []
+  ui_effect: none
+}
+maturity: verified
+params: {
+  constraints: []
+  fields: { asset_path: { default_state: none, description_zh: "C++ 实现读取的 asset_path 参数", path_semantics: { access_scope: mounted_read, kind: ue_asset }, required: true, type: ue_asset_path } }
+  state: defined
+}
+response: { artifact_fields: [recommended_runtime_validation_commands, bounds, collision], compact_fields: [asset_path, note, preview_status], failure_fields: [params.asset_path], max_items_policy: { fields: [], mode: none } }
+returns: {
+  fields: {
+    asset_path: { description_zh: "C++ 实现返回的 asset_path 字段；是否出现取决于执行分支", required: false, type: ue_asset_path }
+    bounds: { description_zh: "Static Mesh 资产局部空间 bounds", required: false, type: object, type_ref: "shared:StaticMeshBounds" }
+    collision: { description_zh: "C++ 实现返回的 collision 字段；是否出现取决于执行分支", required: false, type: json_value }
+    note: { description_zh: "C++ 实现返回的 note 字段；是否出现取决于执行分支", required: false, type: string }
+    preview_status: { description_zh: "C++ 实现返回的 preview_status 字段；是否出现取决于执行分支", required: false, type: string }
+    recommended_runtime_validation_commands: { description_zh: "C++ 实现返回的 recommended_runtime_validation_commands 字段；是否出现取决于执行分支", item_type: json_value, required: false, type: array }
+  }
+  state: defined
+}
+schema: uai.command_spec.v1
+status: active
+types: {}
+verification: { reason: read_only_command_has_no_post_write_verification, state: none }
+version: 1

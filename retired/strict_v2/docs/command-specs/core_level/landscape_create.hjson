@@ -1,0 +1,88 @@
+authoring: { reason: command_has_no_registered_folder_authoring_profile, state: none }
+category: core_level
+command: landscape_create
+deprecation: { reason: command_is_active, state: none }
+discovery: { aliases: [], keywords_en: [landscape, create, core_level], keywords_zh: [landscape_create], summary_en: "Execute landscape_create with a verified implementation contract", summary_zh: "在当前关卡创建 Landscape", tags: [core_level, p2-002] }
+errors: {
+  codes: [
+    { code: landscape_already_exists, description_zh: "C++ 实现返回错误码 landscape_already_exists", retry_safe: false, stage: execution, wire_match: exact }
+    { code: no_editor_world, description_zh: "C++ 实现返回错误码 no_editor_world", retry_safe: false, stage: execution, wire_match: exact }
+    { code: no_geditor, description_zh: "C++ 实现返回错误码 no_geditor", retry_safe: false, stage: execution, wire_match: exact }
+    { code: spawn_landscape_failed, description_zh: "C++ 实现返回错误码 spawn_landscape_failed", retry_safe: false, stage: execution, wire_match: exact }
+  ]
+}
+evidence: {
+  docs: [
+    { path: "Plugins/UeAgentInterface/docs/commands/core_level/landscape_create.md", purpose: "user documentation cross-check; C++ implementation remains authoritative" }
+  ]
+  implementation: [
+    { line_hint: 29, path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Commands/Landscape/UeAgentHttpServer_Landscape.cpp", purpose: "command handler, parameter and return evidence", symbol: CmdLandscapeCreate }
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Commands/AI/UeAgentHttpServer_AI_Blackboard.cpp", purpose: "transitive helper evidence used by the command handler" }
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Commands/Level/UeAgentHttpServer_Level_CaptureAndPersistence.cpp", purpose: "transitive helper evidence used by the command handler" }
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Server/UeAgentHttpServer.cpp", purpose: "transitive helper evidence used by the command handler" }
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Utilities/UeAgentJsonDiagnostics.cpp", purpose: "transitive helper evidence used by the command handler" }
+  ]
+  tests: [
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterfaceTests/Private/Smoke/UeAgentInterfaceSmoke_LevelViewportModeling.cpp", purpose: "smoke or negative-path evidence cross-checked for the verified contract" }
+  ]
+}
+execution: {
+  destructive: false
+  editor_state: required
+  game_thread: required
+  idempotent: false
+  kind: write
+  overwrite_behavior: none
+  pie_state: allowed
+  retry_safe: false
+  save_behavior: none
+  side_effects: [modifies_level, creates_asset]
+  ui_effect: none
+}
+maturity: verified
+params: {
+  constraints: []
+  fields: {
+    component_count_x: { default: 0, default_state: defined, description_zh: "C++ 实现读取的 component_count_x 参数", required: false, type: integer }
+    component_count_y: { default: 0, default_state: defined, description_zh: "C++ 实现读取的 component_count_y 参数", required: false, type: integer }
+    label: { default: UA_Landscape_01, default_state: defined, description_zh: "C++ 实现读取的 label 参数", required: false, type: string }
+    location: { default_state: none, description_zh: "C++ 实现读取的 location 参数", required: false, type: json_value }
+    quads_per_section: { default: 0, default_state: defined, description_zh: "C++ 实现读取的 quads_per_section 参数", required: false, type: number }
+    rotation: { default_state: none, description_zh: "C++ 实现读取的 rotation 参数", required: false, type: json_value }
+    scale: { default_state: none, description_zh: "C++ 实现读取的 scale 参数", required: false, type: json_value }
+    sections_per_component: { default: 0, default_state: defined, description_zh: "C++ 实现读取的 sections_per_component 参数", required: false, type: number }
+  }
+  state: defined
+}
+response: { artifact_fields: [], compact_fields: [component_count_x, component_count_y, label, location, name, quads_per_section], failure_fields: [], max_items_policy: { fields: [], mode: none } }
+returns: {
+  fields: {
+    component_count_x: { description_zh: "C++ 实现返回的 component_count_x 字段；是否出现取决于执行分支", required: false, type: integer }
+    component_count_y: { description_zh: "C++ 实现返回的 component_count_y 字段；是否出现取决于执行分支", required: false, type: integer }
+    label: { description_zh: "C++ 实现返回的 label 字段；是否出现取决于执行分支", required: false, type: string }
+    location: { description_zh: "C++ 实现返回的 location 字段；是否出现取决于执行分支", required: false, type: json_value }
+    name: { description_zh: "C++ 实现返回的 name 字段；是否出现取决于执行分支", required: false, type: string }
+    quads_per_section: { description_zh: "C++ 实现返回的 quads_per_section 字段；是否出现取决于执行分支", required: false, type: number }
+    rotation: { description_zh: "C++ 实现返回的 rotation 字段；是否出现取决于执行分支", required: false, type: json_value }
+    scale: { description_zh: "C++ 实现返回的 scale 字段；是否出现取决于执行分支", required: false, type: json_value }
+    sections_per_component: { description_zh: "C++ 实现返回的 sections_per_component 字段；是否出现取决于执行分支", required: false, type: number }
+    size_x: { description_zh: "C++ 实现返回的 size_x 字段；是否出现取决于执行分支", required: false, type: number }
+    size_y: { description_zh: "C++ 实现返回的 size_y 字段；是否出现取决于执行分支", required: false, type: number }
+  }
+  state: defined
+}
+schema: uai.command_spec.v1
+status: active
+types: {}
+verification: {
+  assertions: [
+    { id: result_present, operator: exists, source: returns.component_count_x }
+  ]
+  failure_policy: fail_overall
+  methods: [
+    { id: result, kind: result_assertion }
+  ]
+  required: true
+  state: defined
+}
+version: 1

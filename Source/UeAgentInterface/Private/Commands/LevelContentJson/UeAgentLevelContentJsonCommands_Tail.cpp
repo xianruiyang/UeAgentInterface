@@ -1,11 +1,14 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "Commands/Level/UeAgentHttpServer_Level.h"
+#include "Commands/Level/UeAgentCommandSafety.h"
+#include "Domains/Level/Authoring/UeAgentLevelAuthoringApplyProvider.h"
 #include "UeAgentLevelContentJsonOps.h"
 #include "Utilities/UeAgentLevelFolderApply.h"
 #include "Utilities/UeAgentLevelFolderDiff.h"
 #include "Utilities/UeAgentLevelFolderExport.h"
 #include "Utilities/UeAgentLevelFolderValidate.h"
+#include "Utilities/AuthoringCore/UeAgentAuthoringDiagnostics.h"
 
 #include "Dom/JsonObject.h"
 #include "Dom/JsonValue.h"
@@ -87,6 +90,7 @@ bool FUeAgentHttpServer::CmdLevelContentSnapshotJson(const FUeAgentRequestContex
 
 bool FUeAgentHttpServer::CmdLevelExportFolder(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
+	OutData = MakeShared<FJsonObject>();
 	UWorld* World = GetEditorWorld(OutError);
 	if (!World)
 	{
@@ -100,33 +104,71 @@ bool FUeAgentHttpServer::CmdLevelExportFolder(const FUeAgentRequestContext& Ctx,
 		{
 			Ctx.Params->TryGetStringField(TEXT("output_dir"), Options.OutputFolder);
 		}
-		Ctx.Params->TryGetBoolField(TEXT("overwrite"), Options.bOverwrite);
 		Ctx.Params->TryGetStringField(TEXT("profile"), Options.Profile);
-		Ctx.Params->TryGetBoolField(TEXT("split_properties"), Options.bSplitProperties);
 	}
 
-	return UeAgentLevelFolderExport::ExportLevelFolder(World, Options, OutData, OutError);
+	FString OwnershipRoot;
+	if (!Options.OutputFolder.TrimStartAndEnd().IsEmpty())
+	{
+		FString ResolvedOutputFolder;
+		if (!UeAgentCommandSafety::ResolveOwnedAuthoringArtifactFolder(Options.OutputFolder, ResolvedOutputFolder, OwnershipRoot, OutError))
+		{
+			OutData->SetStringField(TEXT("requested_output_folder"), Options.OutputFolder);
+			OutData->SetStringField(TEXT("status"), TEXT("blocked"));
+			OutData->SetBoolField(TEXT("output_reset_allowed"), false);
+			return false;
+		}
+		Options.OutputFolder = ResolvedOutputFolder;
+	}
+
+	const bool bExported = UeAgentLevelFolderExport::ExportLevelFolder(World, Options, OutData, OutError);
+	if (OutData.IsValid())
+	{
+		OutData->SetBoolField(TEXT("output_reset_allowed"), true);
+		if (!OwnershipRoot.IsEmpty())
+		{
+			OutData->SetStringField(TEXT("ownership_root"), OwnershipRoot);
+		}
+	}
+	return bExported;
 }
 
 bool FUeAgentHttpServer::CmdLevelApplyFolder(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
+	OutData = MakeShared<FJsonObject>();
 	UWorld* World = GetEditorWorld(OutError);
 	if (!World)
 	{
 		return false;
 	}
 
-	UeAgentLevelFolderApply::FApplyOptions Options;
+	FString InputFolder;
+	bool bDryRun = true;
 	if (Ctx.Params.IsValid())
 	{
-		if (!Ctx.Params->TryGetStringField(TEXT("input_folder"), Options.InputFolder))
+		if (!Ctx.Params->TryGetStringField(TEXT("input_folder"), InputFolder))
 		{
-			Ctx.Params->TryGetStringField(TEXT("folder_path"), Options.InputFolder);
+			Ctx.Params->TryGetStringField(TEXT("folder_path"), InputFolder);
 		}
-		Ctx.Params->TryGetBoolField(TEXT("create_missing_actors"), Options.bCreateMissingActors);
+		if (!UeAgentCommandSafety::ReadStrictBool(
+			Ctx.Params, TEXT("dry_run"), true, bDryRun, OutError))
+		{
+			return false;
+		}
 	}
-
-	return UeAgentLevelFolderApply::ApplyLevelFolder(World, Options, OutData, OutError);
+	UeAgentLevelAuthoring::FWorkspaceApplyOptions ApplyOptions;
+	ApplyOptions.bDryRun = bDryRun;
+	UeAgentLevelAuthoring::FWorkspaceApplyResult Result;
+	const bool bApplied = UeAgentLevelAuthoring::ApplyWorkspaceDirectory(
+		*World, InputFolder, ApplyOptions, Result, Ctx.RequestId);
+	OutData = Result.ToJsonObject();
+	OutData->SetBoolField(TEXT("dry_run"), bDryRun);
+	if (!bApplied)
+	{
+		OutError = UeAgentAuthoringDiagnostics::GetActionableFailureMessage(
+			Result.ErrorCode, Result.ErrorDetail, TEXT("level_content_folder_apply_failed"));
+	}
+	return bApplied;
 }
 
 bool FUeAgentHttpServer::CmdLevelValidateFolder(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
@@ -138,7 +180,6 @@ bool FUeAgentHttpServer::CmdLevelValidateFolder(const FUeAgentRequestContext& Ct
 		{
 			Ctx.Params->TryGetStringField(TEXT("folder_path"), Options.InputFolder);
 		}
-		Ctx.Params->TryGetBoolField(TEXT("check_references"), Options.bCheckReferences);
 	}
 
 	return UeAgentLevelFolderValidate::ValidateLevelFolder(Options, OutData, OutError);

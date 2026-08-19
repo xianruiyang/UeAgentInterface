@@ -1,0 +1,153 @@
+authoring: { reason: command_has_no_registered_folder_authoring_profile, state: none }
+category: anim_blueprint
+command: anim_blueprint_screenshot
+deprecation: { reason: command_is_active, state: none }
+discovery: { aliases: [], keywords_en: [anim, blueprint, screenshot, anim_blueprint], keywords_zh: [anim_blueprint_screenshot], summary_en: "Execute anim_blueprint_screenshot with a verified implementation contract", summary_zh: "对图面板 / 预览视口 / 窗口截图", tags: [anim_blueprint, p2-003] }
+errors: {
+  codes: [
+    { code: blueprint_editor_not_opened, description_zh: "C++ 实现返回错误码 blueprint_editor_not_opened", retry_safe: false, stage: execution, wire_match: exact }
+    { code: blueprint_editor_open_failed, description_zh: "C++ 实现返回错误码 blueprint_editor_open_failed", retry_safe: false, stage: execution, wire_match: exact }
+    { code: blueprint_not_found, description_zh: "C++ 实现返回错误码 blueprint_not_found", retry_safe: false, stage: execution, wire_match: exact }
+    { code: blueprint_owner_tab_not_found, description_zh: "C++ 实现返回错误码 blueprint_owner_tab_not_found", retry_safe: false, stage: execution, wire_match: exact }
+    { code: blueprint_tab_manager_not_found, description_zh: "C++ 实现返回错误码 blueprint_tab_manager_not_found", retry_safe: false, stage: execution, wire_match: exact }
+    { code: blueprint_viewport_widget_not_found, description_zh: "C++ 实现返回错误码 blueprint_viewport_widget_not_found", retry_safe: false, stage: execution, wire_match: exact }
+    { code: blueprint_widget_crop_invalid, description_zh: "C++ 实现返回错误码 blueprint_widget_crop_invalid", retry_safe: true, stage: preflight, wire_match: exact }
+    { code: blueprint_widget_geometry_invalid, description_zh: "C++ 实现返回错误码 blueprint_widget_geometry_invalid", retry_safe: true, stage: preflight, wire_match: exact }
+    { code: blueprint_window_geometry_invalid, description_zh: "C++ 实现返回错误码 blueprint_window_geometry_invalid", retry_safe: true, stage: preflight, wire_match: exact }
+    { code: blueprint_window_not_found, description_zh: "C++ 实现返回错误码 blueprint_window_not_found", retry_safe: false, stage: execution, wire_match: exact }
+    { code: graph_editor_not_found, description_zh: "C++ 实现返回错误码 graph_editor_not_found", retry_safe: false, stage: execution, wire_match: exact }
+    { code: graph_not_found, description_zh: "C++ 实现返回错误码 graph_not_found", retry_safe: false, stage: execution, wire_match: exact }
+    { code: invalid_crop_rect, description_zh: "C++ 实现返回错误码 invalid_crop_rect", retry_safe: true, stage: preflight, wire_match: exact }
+    { code: invalid_pixels, description_zh: "C++ 实现返回错误码 invalid_pixels", retry_safe: true, stage: preflight, wire_match: exact }
+    { code: invalid_source_pixels, description_zh: "C++ 实现返回错误码 invalid_source_pixels", retry_safe: true, stage: preflight, wire_match: exact }
+    { code: invalid_target, description_zh: "C++ 实现返回错误码 invalid_target", retry_safe: true, stage: preflight, wire_match: exact }
+    { code: missing_asset_path, description_zh: "C++ 实现返回错误码 missing_asset_path", retry_safe: true, stage: preflight, wire_match: exact }
+    { code: offscreen_draw_size_invalid, description_zh: "C++ 实现返回错误码 offscreen_draw_size_invalid", retry_safe: true, stage: preflight, wire_match: exact }
+    { code: offscreen_graph_editor_create_failed, description_zh: "C++ 实现返回错误码 offscreen_graph_editor_create_failed", retry_safe: false, stage: execution, wire_match: exact }
+    { code: offscreen_read_pixels_failed, description_zh: "C++ 实现返回错误码 offscreen_read_pixels_failed", retry_safe: false, stage: execution, wire_match: exact }
+    { code: offscreen_render_target_create_failed, description_zh: "C++ 实现返回错误码 offscreen_render_target_create_failed", retry_safe: false, stage: execution, wire_match: exact }
+    { code: offscreen_render_target_resource_missing, description_zh: "C++ 实现返回错误码 offscreen_render_target_resource_missing", retry_safe: true, stage: preflight, wire_match: exact }
+    { code: offscreen_screenshot_empty, description_zh: "C++ 实现返回错误码 offscreen_screenshot_empty", retry_safe: false, stage: execution, wire_match: exact }
+    { code: open_editor_if_needed_requires_allow_ui_mutation, description_zh: "C++ 实现返回错误码 open_editor_if_needed_requires_allow_ui_mutation", retry_safe: false, stage: execution, wire_match: exact }
+    { code: rendering_not_available, description_zh: "C++ 实现返回错误码 rendering_not_available", retry_safe: false, stage: execution, wire_match: exact }
+    { code: screenshots_disabled, description_zh: "C++ 实现返回错误码 screenshots_disabled", retry_safe: false, stage: execution, wire_match: exact }
+    { code: slate_not_initialized, description_zh: "C++ 实现返回错误码 slate_not_initialized", retry_safe: false, stage: execution, wire_match: exact }
+    { code: slate_window_hidden_ui_mutation_disabled, description_zh: "C++ 实现返回错误码 slate_window_hidden_ui_mutation_disabled", retry_safe: false, stage: execution, wire_match: exact }
+    { code: slate_window_minimized_ui_mutation_disabled, description_zh: "C++ 实现返回错误码 slate_window_minimized_ui_mutation_disabled", retry_safe: false, stage: execution, wire_match: exact }
+    { code: slate_window_not_available, description_zh: "C++ 实现返回错误码 slate_window_not_available", retry_safe: false, stage: execution, wire_match: exact }
+    { code: slate_window_not_renderable, description_zh: "C++ 实现返回错误码 slate_window_not_renderable", retry_safe: false, stage: execution, wire_match: exact }
+    { code: target_widget_not_found, description_zh: "C++ 实现返回错误码 target_widget_not_found", retry_safe: false, stage: execution, wire_match: exact }
+    { code: unsupported_format, description_zh: "C++ 实现返回错误码 unsupported_format", retry_safe: false, stage: execution, wire_match: exact }
+    { code: widget_renderer_create_failed, description_zh: "C++ 实现返回错误码 widget_renderer_create_failed", retry_safe: false, stage: execution, wire_match: exact }
+  ]
+}
+evidence: {
+  docs: [
+    { path: "Plugins/UeAgentInterface/docs/commands/anim_blueprint/anim_blueprint_screenshot.md", purpose: "user documentation cross-check; C++ implementation remains authoritative" }
+  ]
+  implementation: [
+    { line_hint: 702, path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Commands/Blueprint/UeAgentHttpServer_Blueprint_AssetAndViewport.cpp", purpose: "command handler, parameter and return evidence", symbol: CmdBlueprintScreenshot }
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Commands/Blueprint/UeAgentHttpServer_Blueprint.cpp", purpose: "transitive helper evidence used by the command handler" }
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Commands/Level/UeAgentHttpServer_Level_CaptureAndPersistence.cpp", purpose: "transitive helper evidence used by the command handler" }
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Commands/Level/UeAgentHttpServer_Level_ImageHelpers.cpp", purpose: "transitive helper evidence used by the command handler" }
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Commands/Niagara/UeAgentHttpServer_Niagara_UtilityCore.inl", purpose: "transitive helper evidence used by the command handler" }
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Server/UeAgentHttpServer.cpp", purpose: "transitive helper evidence used by the command handler" }
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Utilities/UeAgentJsonDiagnostics.cpp", purpose: "transitive helper evidence used by the command handler" }
+  ]
+  tests: [
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterfaceTests/Private/Smoke/UeAgentInterfaceSmoke_Coverage.cpp", purpose: "smoke or negative-path evidence cross-checked for the verified contract" }
+  ]
+}
+execution: {
+  destructive: false
+  editor_state: required
+  game_thread: required
+  idempotent: true
+  kind: read_only_export
+  overwrite_behavior: owned_artifacts_only
+  pie_state: allowed
+  retry_safe: true
+  save_behavior: none
+  side_effects: [writes_files, captures_media, modifies_editor_session, opens_window]
+  ui_effect: window_mutation
+}
+maturity: verified
+params: {
+  constraints: [
+    { fields: [open_editor_if_needed], kind: requires_when, when: { allow_ui_mutation: true } }
+  ]
+  fields: {
+    allow_ui_mutation: { default: false, default_state: defined, description_zh: "C++ 实现读取的 allow_ui_mutation 参数", required: false, type: bool }
+    allow_window_mutation: { default: false, default_state: defined, description_zh: "C++ 实现读取的 allow_window_mutation 参数", required: false, type: bool }
+    asset_path: { default_state: none, description_zh: "C++ 实现读取的 asset_path 参数", path_semantics: { access_scope: mounted_read, kind: ue_asset }, required: true, type: ue_asset_path }
+    capture_height: { default: 0, default_state: defined, description_zh: "C++ 实现读取的 capture_height 参数", required: false, type: integer }
+    capture_width: { default: 0, default_state: defined, description_zh: "C++ 实现读取的 capture_width 参数", required: false, type: integer }
+    format: { default: jpg, default_state: defined, description_zh: "C++ 实现读取的 format 参数", required: false, type: string }
+    graph_name: { default: EventGraph, default_state: defined, description_zh: "C++ 实现读取的 graph_name 参数", required: false, type: string }
+    max_size: { default_state: none, description_zh: "C++ 实现读取的 max_size 参数", required: false, type: number }
+    open_editor_if_needed: { default: false, default_state: defined, description_zh: "C++ 实现读取的 open_editor_if_needed 参数", required: false, type: bool }
+    quality: { default_state: none, description_zh: "C++ 实现读取的 quality 参数", required: false, type: integer }
+    restore_graph_view_after_capture: { default: true, default_state: defined, description_zh: "C++ 实现读取的 restore_graph_view_after_capture 参数", required: false, type: bool }
+    target: { default: viewport, default_state: defined, description_zh: "C++ 实现读取的 target 参数", required: false, type: string }
+  }
+  state: defined
+}
+response: { artifact_fields: [], compact_fields: [asset_path, file_path, width, height, format], failure_fields: [params.asset_path], max_items_policy: { fields: [], mode: none } }
+returns: {
+  fields: {
+    allow_ui_mutation: { description_zh: "C++ 实现返回的 allow_ui_mutation 字段；是否出现取决于执行分支", required: false, type: bool }
+    allow_window_mutation: { description_zh: "C++ 实现返回的 allow_window_mutation 字段；是否出现取决于执行分支", required: false, type: bool }
+    asset_path: { description_zh: "C++ 实现返回的 asset_path 字段；是否出现取决于执行分支", required: false, type: ue_asset_path }
+    bytes: { description_zh: "C++ 实现返回的 bytes 字段；是否出现取决于执行分支", required: false, type: number }
+    capture_mode: { description_zh: "C++ 实现返回的 capture_mode 字段；是否出现取决于执行分支", required: false, type: string }
+    capture_window_minimized_after: { description_zh: "C++ 实现返回的 capture_window_minimized_after 字段；是否出现取决于执行分支", required: false, type: bool }
+    capture_window_resolved: { description_zh: "C++ 实现返回的 capture_window_resolved 字段；是否出现取决于执行分支", required: false, type: bool }
+    capture_window_visible_after: { description_zh: "C++ 实现返回的 capture_window_visible_after 字段；是否出现取决于执行分支", required: false, type: bool }
+    captured_graph_view_after: { description_zh: "C++ 实现返回的 captured_graph_view_after 字段；是否出现取决于执行分支", required: false, type: bool }
+    captured_graph_view_before: { description_zh: "C++ 实现返回的 captured_graph_view_before 字段；是否出现取决于执行分支", required: false, type: bool }
+    file_path: { description_zh: "C++ 实现返回的 file_path 字段；是否出现取决于执行分支", required: false, type: string }
+    format: { description_zh: "C++ 实现返回的 format 字段；是否出现取决于执行分支", required: false, type: string }
+    graph_capture_draw_height: { description_zh: "C++ 实现返回的 graph_capture_draw_height 字段；是否出现取决于执行分支", required: false, type: integer }
+    graph_capture_draw_size_requested: { description_zh: "C++ 实现返回的 graph_capture_draw_size_requested 字段；是否出现取决于执行分支", required: false, type: bool }
+    graph_capture_draw_width: { description_zh: "C++ 实现返回的 graph_capture_draw_width 字段；是否出现取决于执行分支", required: false, type: integer }
+    graph_capture_used_owned_editor: { description_zh: "C++ 实现返回的 graph_capture_used_owned_editor 字段；是否出现取决于执行分支", required: false, type: bool }
+    graph_capture_widget_source: { description_zh: "C++ 实现返回的 graph_capture_widget_source 字段；是否出现取决于执行分支", required: false, type: string }
+    graph_name: { description_zh: "C++ 实现返回的 graph_name 字段；是否出现取决于执行分支", required: false, type: string }
+    graph_view_after_pixel_residual_x: { description_zh: "C++ 实现返回的 graph_view_after_pixel_residual_x 字段；是否出现取决于执行分支", required: false, type: number }
+    graph_view_after_pixel_residual_y: { description_zh: "C++ 实现返回的 graph_view_after_pixel_residual_y 字段；是否出现取决于执行分支", required: false, type: number }
+    graph_view_after_x: { description_zh: "C++ 实现返回的 graph_view_after_x 字段；是否出现取决于执行分支", required: false, type: number }
+    graph_view_after_y: { description_zh: "C++ 实现返回的 graph_view_after_y 字段；是否出现取决于执行分支", required: false, type: number }
+    graph_view_before_pixel_residual_x: { description_zh: "C++ 实现返回的 graph_view_before_pixel_residual_x 字段；是否出现取决于执行分支", required: false, type: number }
+    graph_view_before_pixel_residual_y: { description_zh: "C++ 实现返回的 graph_view_before_pixel_residual_y 字段；是否出现取决于执行分支", required: false, type: number }
+    graph_view_before_x: { description_zh: "C++ 实现返回的 graph_view_before_x 字段；是否出现取决于执行分支", required: false, type: number }
+    graph_view_before_y: { description_zh: "C++ 实现返回的 graph_view_before_y 字段；是否出现取决于执行分支", required: false, type: number }
+    graph_view_changed_after_capture: { description_zh: "C++ 实现返回的 graph_view_changed_after_capture 字段；是否出现取决于执行分支", required: false, type: bool }
+    graph_view_restore_mode: { description_zh: "C++ 实现返回的 graph_view_restore_mode 字段；是否出现取决于执行分支", required: false, type: string }
+    graph_zoom_after: { description_zh: "C++ 实现返回的 graph_zoom_after 字段；是否出现取决于执行分支", required: false, type: number }
+    graph_zoom_before: { description_zh: "C++ 实现返回的 graph_zoom_before 字段；是否出现取决于执行分支", required: false, type: number }
+    height: { description_zh: "C++ 实现返回的 height 字段；是否出现取决于执行分支", required: false, type: integer }
+    legacy_backbuffer_capture: { description_zh: "C++ 实现返回的 legacy_backbuffer_capture 字段；是否出现取决于执行分支", required: false, type: string }
+    prepared_window_for_capture: { description_zh: "C++ 实现返回的 prepared_window_for_capture 字段；是否出现取决于执行分支", required: false, type: bool }
+    restore_graph_view_after_capture: { description_zh: "C++ 实现返回的 restore_graph_view_after_capture 字段；是否出现取决于执行分支", required: false, type: bool }
+    restored_graph_view_after_capture: { description_zh: "C++ 实现返回的 restored_graph_view_after_capture 字段；是否出现取决于执行分支", required: false, type: bool }
+    target: { description_zh: "C++ 实现返回的 target 字段；是否出现取决于执行分支", required: false, type: string }
+    width: { description_zh: "C++ 实现返回的 width 字段；是否出现取决于执行分支", required: false, type: integer }
+    window_mutated_for_capture: { description_zh: "C++ 实现返回的 window_mutated_for_capture 字段；是否出现取决于执行分支", required: false, type: bool }
+  }
+  state: defined
+}
+schema: uai.command_spec.v1
+status: active
+types: {}
+verification: {
+  assertions: [
+    { id: result_present, operator: exists, source: returns.file_path }
+  ]
+  failure_policy: fail_overall
+  methods: [
+    { id: result, kind: result_assertion }
+  ]
+  required: true
+  state: defined
+}
+version: 1

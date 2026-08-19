@@ -1,0 +1,46 @@
+authoring: { reason: command_has_no_registered_folder_authoring_profile, state: none }
+category: core_level
+command: editor_list_dirty_resources
+deprecation: { reason: command_is_active, state: none }
+discovery: { aliases: [], keywords_en: [editor, list, dirty, resources, core_level], keywords_zh: [editor_list_dirty_resources], summary_en: "Execute editor_list_dirty_resources with a verified implementation contract", summary_zh: "列出当前所有待处理的脏资源", tags: [core_level, p2-002] }
+errors: { codes: [] }
+evidence: {
+  docs: [
+    { path: "Plugins/UeAgentInterface/docs/commands/core_level/editor_list_dirty_resources.md", purpose: "user documentation cross-check; C++ implementation remains authoritative" }
+  ]
+  implementation: [
+    { line_hint: 547, path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Commands/Assets/UeAgentHttpServer_AssetsEditorLifecycle.cpp", purpose: "command handler, parameter and return evidence", symbol: CmdEditorListDirtyResources }
+  ]
+  tests: [
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterfaceTests/Private/Smoke/UeAgentInterfaceSmoke_Core.cpp", purpose: "smoke or negative-path evidence cross-checked for the verified contract" }
+  ]
+}
+execution: {
+  destructive: false
+  editor_state: required
+  game_thread: required
+  idempotent: true
+  kind: read_only
+  overwrite_behavior: none
+  pie_state: allowed
+  retry_safe: true
+  save_behavior: none
+  side_effects: []
+  ui_effect: none
+}
+maturity: verified
+params: { reason: implementation_reads_no_command_parameters, state: none }
+response: { artifact_fields: [], compact_fields: [dirty_resource_count, dirty_resources, has_unresolved_dirty_resources], failure_fields: [], max_items_policy: { fields: [], mode: none } }
+returns: {
+  fields: {
+    dirty_resource_count: { description_zh: "C++ 实现返回的 dirty_resource_count 字段；是否出现取决于执行分支", required: false, type: integer }
+    dirty_resources: { description_zh: "C++ 实现返回的 dirty_resources 字段；是否出现取决于执行分支", item_type: json_value, required: false, type: array }
+    has_unresolved_dirty_resources: { description_zh: "C++ 实现返回的 has_unresolved_dirty_resources 字段；是否出现取决于执行分支", required: false, type: bool }
+  }
+  state: defined
+}
+schema: uai.command_spec.v1
+status: active
+types: {}
+verification: { reason: read_only_command_has_no_post_write_verification, state: none }
+version: 1

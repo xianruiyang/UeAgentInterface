@@ -1,0 +1,1392 @@
+{
+  "schema": "uai.historical_successor.v2",
+  "owner_task_id": "T34-CONTROL-COMMAND-MIGRATION",
+  "commands": [
+    {
+      "historical_command_id": "editor_close",
+      "approval": "1)",
+      "historical_source": "docs/commands/01_Core_Level_Assets_Landscape.md",
+      "historical_contract": {
+        "inputs": "close_all_asset_editors, request_exit",
+        "outputs": "自动化结束时安全退出",
+        "purpose": "关闭编辑器；若仍有未处理脏资源则失败并返回清单"
+      },
+      "successor": {
+        "kind": "exact_command_set",
+        "command_ids": [
+          "editor.safe_exit"
+        ]
+      },
+      "resolved_from_contract_id": "uai.historical_capability.t34.control.command.migration.editor_close/1",
+      "semantic_coverage": {
+        "purpose": {
+          "status": "covered",
+          "by": [
+            "editor.safe_exit"
+          ],
+          "explanation": "历史 editor_close 的冻结purpose“关闭编辑器；若仍有未处理脏资源则失败并返回清单”由精确当前集合 editor.safe_exit 覆盖。dirty_resolution 先精确枚举当前脏资源，以 reject/save/discard 与逐项资源清单决定处理；全部处理成功后才在 game thread 请求真实 Editor 退出，失败返回类型化原因。旧 ID 不作为 alias、SDK 方法或 manifest 身份保留。"
+        },
+        "inputs": {
+          "status": "covered",
+          "by": [
+            "editor.safe_exit"
+          ],
+          "explanation": "历史 editor_close 的冻结inputs“close_all_asset_editors, request_exit”由精确当前集合 editor.safe_exit 覆盖。dirty_resolution 先精确枚举当前脏资源，以 reject/save/discard 与逐项资源清单决定处理；全部处理成功后才在 game thread 请求真实 Editor 退出，失败返回类型化原因。旧 ID 不作为 alias、SDK 方法或 manifest 身份保留。"
+        },
+        "outputs": {
+          "status": "covered",
+          "by": [
+            "editor.safe_exit"
+          ],
+          "explanation": "历史 editor_close 的冻结outputs“自动化结束时安全退出”由精确当前集合 editor.safe_exit 覆盖。dirty_resolution 先精确枚举当前脏资源，以 reject/save/discard 与逐项资源清单决定处理；全部处理成功后才在 game thread 请求真实 Editor 退出，失败返回类型化原因。旧 ID 不作为 alias、SDK 方法或 manifest 身份保留。"
+        }
+      },
+      "product_evidence": {
+        "test_id": "UAI.StrictV2.T34.CONTROL.COMMAND.MIGRATION",
+        "public_command_ids": [
+          "editor.safe_exit"
+        ],
+        "required_claims": [
+          "public_entry",
+          "behavior",
+          "readback",
+          "terminal_state",
+          "failure_semantics",
+          "cleanup",
+          "editor_preserved",
+          "legacy_exit",
+          "documentation"
+        ]
+      },
+      "old_id_exit": {
+        "public_executable": false,
+        "manifest_active": false,
+        "sdk_binding_active": false,
+        "compatibility_alias": false
+      },
+      "final_lifecycle": "deprecated_replaced"
+    },
+    {
+      "historical_command_id": "editor_console_exec",
+      "approval": "1)",
+      "historical_source": "docs/commands/01_Core_Level_Assets_Landscape.md",
+      "historical_contract": {
+        "inputs": "add_to_history, allow_high_risk, command, commands[], fail_on_unhandled, max_output_chars, max_output_lines, stop_on_error, world_context",
+        "outputs": "DumpConsoleCommands, r.*, stat, viewmode",
+        "purpose": "执行 UE 底部状态栏 `Cmd` 控制台命令的等价路径"
+      },
+      "successor": {
+        "kind": "exact_command_set",
+        "command_ids": [
+          "operation.plan.execute"
+        ]
+      },
+      "resolved_from_contract_id": "uai.historical_capability.t34.control.command.migration.editor_console_exec/1",
+      "semantic_coverage": {
+        "purpose": {
+          "status": "covered",
+          "by": [
+            "operation.plan.execute"
+          ],
+          "explanation": "历史 editor_console_exec 的冻结purpose“执行 UE 底部状态栏 `Cmd` 控制台命令的等价路径”由精确当前集合 operation.plan.execute 覆盖。服务端在写前冻结最多 128 个精确步骤；public_command 绑定当前合同 hash，editor_console 限制风险和输出，transaction_history 使用真实 UTransBuffer revision；on_error 和 atomicity 决定顺序与失败终态。旧 ID 不作为 alias、SDK 方法或 manifest 身份保留。"
+        },
+        "inputs": {
+          "status": "covered",
+          "by": [
+            "operation.plan.execute"
+          ],
+          "explanation": "历史 editor_console_exec 的冻结inputs“add_to_history, allow_high_risk, command, commands[], fail_on_unhandled, max_output_chars, max_output_lines, stop_on_error, world_context”由精确当前集合 operation.plan.execute 覆盖。服务端在写前冻结最多 128 个精确步骤；public_command 绑定当前合同 hash，editor_console 限制风险和输出，transaction_history 使用真实 UTransBuffer revision；on_error 和 atomicity 决定顺序与失败终态。旧 ID 不作为 alias、SDK 方法或 manifest 身份保留。"
+        },
+        "outputs": {
+          "status": "covered",
+          "by": [
+            "operation.plan.execute"
+          ],
+          "explanation": "历史 editor_console_exec 的冻结outputs“DumpConsoleCommands, r.*, stat, viewmode”由精确当前集合 operation.plan.execute 覆盖。服务端在写前冻结最多 128 个精确步骤；public_command 绑定当前合同 hash，editor_console 限制风险和输出，transaction_history 使用真实 UTransBuffer revision；on_error 和 atomicity 决定顺序与失败终态。旧 ID 不作为 alias、SDK 方法或 manifest 身份保留。"
+        }
+      },
+      "product_evidence": {
+        "test_id": "UAI.StrictV2.T34.CONTROL.COMMAND.MIGRATION",
+        "public_command_ids": [
+          "operation.plan.execute"
+        ],
+        "required_claims": [
+          "public_entry",
+          "behavior",
+          "readback",
+          "terminal_state",
+          "failure_semantics",
+          "cleanup",
+          "editor_preserved",
+          "legacy_exit",
+          "documentation"
+        ]
+      },
+      "old_id_exit": {
+        "public_executable": false,
+        "manifest_active": false,
+        "sdk_binding_active": false,
+        "compatibility_alias": false
+      },
+      "final_lifecycle": "deprecated_replaced"
+    },
+    {
+      "historical_command_id": "editor_prepare_exit",
+      "approval": "1)",
+      "historical_source": "docs/commands/01_Core_Level_Assets_Landscape.md",
+      "historical_contract": {
+        "inputs": "discard_all_dirty, discard_asset_paths, request_exit, save_asset_paths",
+        "outputs": "自动化结束时避免恢复弹窗",
+        "purpose": "退出前按策略保存/丢弃并请求关闭编辑器"
+      },
+      "successor": {
+        "kind": "exact_command_set",
+        "command_ids": [
+          "editor.safe_exit"
+        ]
+      },
+      "resolved_from_contract_id": "uai.historical_capability.t34.control.command.migration.editor_prepare_exit/1",
+      "semantic_coverage": {
+        "purpose": {
+          "status": "covered",
+          "by": [
+            "editor.safe_exit"
+          ],
+          "explanation": "历史 editor_prepare_exit 的冻结purpose“退出前按策略保存/丢弃并请求关闭编辑器”由精确当前集合 editor.safe_exit 覆盖。dirty_resolution 先精确枚举当前脏资源，以 reject/save/discard 与逐项资源清单决定处理；全部处理成功后才在 game thread 请求真实 Editor 退出，失败返回类型化原因。旧 ID 不作为 alias、SDK 方法或 manifest 身份保留。"
+        },
+        "inputs": {
+          "status": "covered",
+          "by": [
+            "editor.safe_exit"
+          ],
+          "explanation": "历史 editor_prepare_exit 的冻结inputs“discard_all_dirty, discard_asset_paths, request_exit, save_asset_paths”由精确当前集合 editor.safe_exit 覆盖。dirty_resolution 先精确枚举当前脏资源，以 reject/save/discard 与逐项资源清单决定处理；全部处理成功后才在 game thread 请求真实 Editor 退出，失败返回类型化原因。旧 ID 不作为 alias、SDK 方法或 manifest 身份保留。"
+        },
+        "outputs": {
+          "status": "covered",
+          "by": [
+            "editor.safe_exit"
+          ],
+          "explanation": "历史 editor_prepare_exit 的冻结outputs“自动化结束时避免恢复弹窗”由精确当前集合 editor.safe_exit 覆盖。dirty_resolution 先精确枚举当前脏资源，以 reject/save/discard 与逐项资源清单决定处理；全部处理成功后才在 game thread 请求真实 Editor 退出，失败返回类型化原因。旧 ID 不作为 alias、SDK 方法或 manifest 身份保留。"
+        }
+      },
+      "product_evidence": {
+        "test_id": "UAI.StrictV2.T34.CONTROL.COMMAND.MIGRATION",
+        "public_command_ids": [
+          "editor.safe_exit"
+        ],
+        "required_claims": [
+          "public_entry",
+          "behavior",
+          "readback",
+          "terminal_state",
+          "failure_semantics",
+          "cleanup",
+          "editor_preserved",
+          "legacy_exit",
+          "documentation"
+        ]
+      },
+      "old_id_exit": {
+        "public_executable": false,
+        "manifest_active": false,
+        "sdk_binding_active": false,
+        "compatibility_alias": false
+      },
+      "final_lifecycle": "deprecated_replaced"
+    },
+    {
+      "historical_command_id": "editor_resolve_dirty_resources",
+      "approval": "1)",
+      "historical_source": "docs/commands/01_Core_Level_Assets_Landscape.md",
+      "historical_contract": {
+        "inputs": "close_all_asset_editors, discard_all_dirty, discard_resource_paths, only_save_dirty, save_all_dirty, save_resource_paths",
+        "outputs": "先处理脏资源，再决定是否关闭编辑器",
+        "purpose": "按路径或整批保存/丢弃脏资源"
+      },
+      "successor": {
+        "kind": "exact_command_set",
+        "command_ids": [
+          "editor.safe_exit"
+        ]
+      },
+      "resolved_from_contract_id": "uai.historical_capability.t34.control.command.migration.editor_resolve_dirty_resources/1",
+      "semantic_coverage": {
+        "purpose": {
+          "status": "covered",
+          "by": [
+            "editor.safe_exit"
+          ],
+          "explanation": "历史 editor_resolve_dirty_resources 的冻结purpose“按路径或整批保存/丢弃脏资源”由精确当前集合 editor.safe_exit 覆盖。dirty_resolution 先精确枚举当前脏资源，以 reject/save/discard 与逐项资源清单决定处理；全部处理成功后才在 game thread 请求真实 Editor 退出，失败返回类型化原因。旧 ID 不作为 alias、SDK 方法或 manifest 身份保留。"
+        },
+        "inputs": {
+          "status": "covered",
+          "by": [
+            "editor.safe_exit"
+          ],
+          "explanation": "历史 editor_resolve_dirty_resources 的冻结inputs“close_all_asset_editors, discard_all_dirty, discard_resource_paths, only_save_dirty, save_all_dirty, save_resource_paths”由精确当前集合 editor.safe_exit 覆盖。dirty_resolution 先精确枚举当前脏资源，以 reject/save/discard 与逐项资源清单决定处理；全部处理成功后才在 game thread 请求真实 Editor 退出，失败返回类型化原因。旧 ID 不作为 alias、SDK 方法或 manifest 身份保留。"
+        },
+        "outputs": {
+          "status": "covered",
+          "by": [
+            "editor.safe_exit"
+          ],
+          "explanation": "历史 editor_resolve_dirty_resources 的冻结outputs“先处理脏资源，再决定是否关闭编辑器”由精确当前集合 editor.safe_exit 覆盖。dirty_resolution 先精确枚举当前脏资源，以 reject/save/discard 与逐项资源清单决定处理；全部处理成功后才在 game thread 请求真实 Editor 退出，失败返回类型化原因。旧 ID 不作为 alias、SDK 方法或 manifest 身份保留。"
+        }
+      },
+      "product_evidence": {
+        "test_id": "UAI.StrictV2.T34.CONTROL.COMMAND.MIGRATION",
+        "public_command_ids": [
+          "editor.safe_exit"
+        ],
+        "required_claims": [
+          "public_entry",
+          "behavior",
+          "readback",
+          "terminal_state",
+          "failure_semantics",
+          "cleanup",
+          "editor_preserved",
+          "legacy_exit",
+          "documentation"
+        ]
+      },
+      "old_id_exit": {
+        "public_executable": false,
+        "manifest_active": false,
+        "sdk_binding_active": false,
+        "compatibility_alias": false
+      },
+      "final_lifecycle": "deprecated_replaced"
+    },
+    {
+      "historical_command_id": "exec_batch",
+      "approval": "1)",
+      "historical_source": "docs/commands/01_Core_Level_Assets_Landscape.md",
+      "historical_contract": {
+        "inputs": "commands[], stop_on_error",
+        "outputs": "复杂自动化的默认入口",
+        "purpose": "顺序执行多条命令，支持遇错中断"
+      },
+      "successor": {
+        "kind": "exact_command_set",
+        "command_ids": [
+          "operation.plan.execute"
+        ]
+      },
+      "resolved_from_contract_id": "uai.historical_capability.t34.control.command.migration.exec_batch/1",
+      "semantic_coverage": {
+        "purpose": {
+          "status": "covered",
+          "by": [
+            "operation.plan.execute"
+          ],
+          "explanation": "历史 exec_batch 的冻结purpose“顺序执行多条命令，支持遇错中断”由精确当前集合 operation.plan.execute 覆盖。服务端在写前冻结最多 128 个精确步骤；public_command 绑定当前合同 hash，editor_console 限制风险和输出，transaction_history 使用真实 UTransBuffer revision；on_error 和 atomicity 决定顺序与失败终态。旧 ID 不作为 alias、SDK 方法或 manifest 身份保留。"
+        },
+        "inputs": {
+          "status": "covered",
+          "by": [
+            "operation.plan.execute"
+          ],
+          "explanation": "历史 exec_batch 的冻结inputs“commands[], stop_on_error”由精确当前集合 operation.plan.execute 覆盖。服务端在写前冻结最多 128 个精确步骤；public_command 绑定当前合同 hash，editor_console 限制风险和输出，transaction_history 使用真实 UTransBuffer revision；on_error 和 atomicity 决定顺序与失败终态。旧 ID 不作为 alias、SDK 方法或 manifest 身份保留。"
+        },
+        "outputs": {
+          "status": "covered",
+          "by": [
+            "operation.plan.execute"
+          ],
+          "explanation": "历史 exec_batch 的冻结outputs“复杂自动化的默认入口”由精确当前集合 operation.plan.execute 覆盖。服务端在写前冻结最多 128 个精确步骤；public_command 绑定当前合同 hash，editor_console 限制风险和输出，transaction_history 使用真实 UTransBuffer revision；on_error 和 atomicity 决定顺序与失败终态。旧 ID 不作为 alias、SDK 方法或 manifest 身份保留。"
+        }
+      },
+      "product_evidence": {
+        "test_id": "UAI.StrictV2.T34.CONTROL.COMMAND.MIGRATION",
+        "public_command_ids": [
+          "operation.plan.execute"
+        ],
+        "required_claims": [
+          "public_entry",
+          "behavior",
+          "readback",
+          "terminal_state",
+          "failure_semantics",
+          "cleanup",
+          "editor_preserved",
+          "legacy_exit",
+          "documentation"
+        ]
+      },
+      "old_id_exit": {
+        "public_executable": false,
+        "manifest_active": false,
+        "sdk_binding_active": false,
+        "compatibility_alias": false
+      },
+      "final_lifecycle": "deprecated_replaced"
+    },
+    {
+      "historical_command_id": "open_asset_editor",
+      "approval": "1)",
+      "historical_source": "docs/commands/01_Core_Level_Assets_Landscape.md",
+      "historical_contract": {
+        "inputs": "asset_path",
+        "outputs": "打开 Blueprint / Material / Niagara",
+        "purpose": "打开指定资产编辑器"
+      },
+      "successor": {
+        "kind": "exact_command_set",
+        "command_ids": [
+          "editor.session"
+        ]
+      },
+      "resolved_from_contract_id": "uai.historical_capability.t34.control.command.migration.open_asset_editor/1",
+      "semantic_coverage": {
+        "purpose": {
+          "status": "covered",
+          "by": [
+            "editor.session"
+          ],
+          "explanation": "历史 open_asset_editor 的冻结purpose“打开指定资产编辑器”由精确当前集合 editor.session 覆盖。asset_editor family 以 asset: 精确对象身份和 policy 打开 UE AssetEditorSubsystem；operation 状态、取消和终态 readback 由共享生命周期承担。旧 ID 不作为 alias、SDK 方法或 manifest 身份保留。"
+        },
+        "inputs": {
+          "status": "covered",
+          "by": [
+            "editor.session"
+          ],
+          "explanation": "历史 open_asset_editor 的冻结inputs“asset_path”由精确当前集合 editor.session 覆盖。asset_editor family 以 asset: 精确对象身份和 policy 打开 UE AssetEditorSubsystem；operation 状态、取消和终态 readback 由共享生命周期承担。旧 ID 不作为 alias、SDK 方法或 manifest 身份保留。"
+        },
+        "outputs": {
+          "status": "covered",
+          "by": [
+            "editor.session"
+          ],
+          "explanation": "历史 open_asset_editor 的冻结outputs“打开 Blueprint / Material / Niagara”由精确当前集合 editor.session 覆盖。asset_editor family 以 asset: 精确对象身份和 policy 打开 UE AssetEditorSubsystem；operation 状态、取消和终态 readback 由共享生命周期承担。旧 ID 不作为 alias、SDK 方法或 manifest 身份保留。"
+        }
+      },
+      "product_evidence": {
+        "test_id": "UAI.StrictV2.T34.CONTROL.COMMAND.MIGRATION",
+        "public_command_ids": [
+          "editor.session"
+        ],
+        "required_claims": [
+          "public_entry",
+          "behavior",
+          "readback",
+          "terminal_state",
+          "failure_semantics",
+          "cleanup",
+          "editor_preserved",
+          "legacy_exit",
+          "documentation"
+        ]
+      },
+      "old_id_exit": {
+        "public_executable": false,
+        "manifest_active": false,
+        "sdk_binding_active": false,
+        "compatibility_alias": false
+      },
+      "final_lifecycle": "deprecated_replaced"
+    },
+    {
+      "historical_command_id": "packaging_cancel_task",
+      "approval": "2)",
+      "historical_source": "docs/commands/27_Localization_Packaging_PlatformProfiles.md",
+      "historical_contract": {
+        "inputs": "kill_process_tree, task_id",
+        "outputs": "cancelled, processes[]",
+        "purpose": "取消 planned/running 任务"
+      },
+      "successor": {
+        "kind": "exact_command_set",
+        "command_ids": [
+          "job.compile_build",
+          "operation.cancel",
+          "operation.receipt",
+          "operation.release",
+          "operation.status"
+        ]
+      },
+      "resolved_from_contract_id": "uai.historical_capability.t34.control.command.migration.packaging_cancel_task/1",
+      "semantic_coverage": {
+        "purpose": {
+          "status": "covered",
+          "by": [
+            "job.compile_build",
+            "operation.cancel",
+            "operation.receipt",
+            "operation.release",
+            "operation.status"
+          ],
+          "explanation": "历史 packaging_cancel_task 的冻结purpose“取消 planned/running 任务”由精确当前集合 job.compile_build, operation.cancel, operation.receipt, operation.release, operation.status 覆盖。job.compile_build packaging family 通过精确 policy 处理环境、profile、BuildCookRun、日志、制品和托管清理；operation.status/receipt/cancel/release 提供任务身份、运行状态、终态报告、取消及资源释放。旧 ID 不作为 alias、SDK 方法或 manifest 身份保留。"
+        },
+        "inputs": {
+          "status": "covered",
+          "by": [
+            "job.compile_build",
+            "operation.cancel",
+            "operation.receipt",
+            "operation.release",
+            "operation.status"
+          ],
+          "explanation": "历史 packaging_cancel_task 的冻结inputs“kill_process_tree, task_id”由精确当前集合 job.compile_build, operation.cancel, operation.receipt, operation.release, operation.status 覆盖。job.compile_build packaging family 通过精确 policy 处理环境、profile、BuildCookRun、日志、制品和托管清理；operation.status/receipt/cancel/release 提供任务身份、运行状态、终态报告、取消及资源释放。旧 ID 不作为 alias、SDK 方法或 manifest 身份保留。"
+        },
+        "outputs": {
+          "status": "covered",
+          "by": [
+            "job.compile_build",
+            "operation.cancel",
+            "operation.receipt",
+            "operation.release",
+            "operation.status"
+          ],
+          "explanation": "历史 packaging_cancel_task 的冻结outputs“cancelled, processes[]”由精确当前集合 job.compile_build, operation.cancel, operation.receipt, operation.release, operation.status 覆盖。job.compile_build packaging family 通过精确 policy 处理环境、profile、BuildCookRun、日志、制品和托管清理；operation.status/receipt/cancel/release 提供任务身份、运行状态、终态报告、取消及资源释放。旧 ID 不作为 alias、SDK 方法或 manifest 身份保留。"
+        }
+      },
+      "product_evidence": {
+        "test_id": "UAI.StrictV2.T34.CONTROL.COMMAND.MIGRATION",
+        "public_command_ids": [
+          "job.compile_build",
+          "operation.cancel",
+          "operation.receipt",
+          "operation.release",
+          "operation.status"
+        ],
+        "required_claims": [
+          "public_entry",
+          "behavior",
+          "readback",
+          "terminal_state",
+          "failure_semantics",
+          "cleanup",
+          "editor_preserved",
+          "legacy_exit",
+          "documentation"
+        ]
+      },
+      "old_id_exit": {
+        "public_executable": false,
+        "manifest_active": false,
+        "sdk_binding_active": false,
+        "compatibility_alias": false
+      },
+      "final_lifecycle": "deprecated_replaced"
+    },
+    {
+      "historical_command_id": "packaging_clean_artifacts",
+      "approval": "2)",
+      "historical_source": "docs/commands/27_Localization_Packaging_PlatformProfiles.md",
+      "historical_contract": {
+        "inputs": "archive_dir, dry_run, max_delete_bytes",
+        "outputs": "deleted[], freed_bytes",
+        "purpose": "清理 Project/Saved 下 UAI 托管打包输出"
+      },
+      "successor": {
+        "kind": "exact_command_set",
+        "command_ids": [
+          "job.compile_build",
+          "operation.receipt",
+          "operation.release",
+          "operation.status"
+        ]
+      },
+      "resolved_from_contract_id": "uai.historical_capability.t34.control.command.migration.packaging_clean_artifacts/1",
+      "semantic_coverage": {
+        "purpose": {
+          "status": "covered",
+          "by": [
+            "job.compile_build",
+            "operation.receipt",
+            "operation.release",
+            "operation.status"
+          ],
+          "explanation": "历史 packaging_clean_artifacts 的冻结purpose“清理 Project/Saved 下 UAI 托管打包输出”由精确当前集合 job.compile_build, operation.receipt, operation.release, operation.status 覆盖。job.compile_build packaging family 通过精确 policy 处理环境、profile、BuildCookRun、日志、制品和托管清理；operation.status/receipt/cancel/release 提供任务身份、运行状态、终态报告、取消及资源释放。旧 ID 不作为 alias、SDK 方法或 manifest 身份保留。"
+        },
+        "inputs": {
+          "status": "covered",
+          "by": [
+            "job.compile_build",
+            "operation.receipt",
+            "operation.release",
+            "operation.status"
+          ],
+          "explanation": "历史 packaging_clean_artifacts 的冻结inputs“archive_dir, dry_run, max_delete_bytes”由精确当前集合 job.compile_build, operation.receipt, operation.release, operation.status 覆盖。job.compile_build packaging family 通过精确 policy 处理环境、profile、BuildCookRun、日志、制品和托管清理；operation.status/receipt/cancel/release 提供任务身份、运行状态、终态报告、取消及资源释放。旧 ID 不作为 alias、SDK 方法或 manifest 身份保留。"
+        },
+        "outputs": {
+          "status": "covered",
+          "by": [
+            "job.compile_build",
+            "operation.receipt",
+            "operation.release",
+            "operation.status"
+          ],
+          "explanation": "历史 packaging_clean_artifacts 的冻结outputs“deleted[], freed_bytes”由精确当前集合 job.compile_build, operation.receipt, operation.release, operation.status 覆盖。job.compile_build packaging family 通过精确 policy 处理环境、profile、BuildCookRun、日志、制品和托管清理；operation.status/receipt/cancel/release 提供任务身份、运行状态、终态报告、取消及资源释放。旧 ID 不作为 alias、SDK 方法或 manifest 身份保留。"
+        }
+      },
+      "product_evidence": {
+        "test_id": "UAI.StrictV2.T34.CONTROL.COMMAND.MIGRATION",
+        "public_command_ids": [
+          "job.compile_build",
+          "operation.receipt",
+          "operation.release",
+          "operation.status"
+        ],
+        "required_claims": [
+          "public_entry",
+          "behavior",
+          "readback",
+          "terminal_state",
+          "failure_semantics",
+          "cleanup",
+          "editor_preserved",
+          "legacy_exit",
+          "documentation"
+        ]
+      },
+      "old_id_exit": {
+        "public_executable": false,
+        "manifest_active": false,
+        "sdk_binding_active": false,
+        "compatibility_alias": false
+      },
+      "final_lifecycle": "deprecated_replaced"
+    },
+    {
+      "historical_command_id": "packaging_diff_profile_json",
+      "approval": "2)",
+      "historical_source": "docs/commands/27_Localization_Packaging_PlatformProfiles.md",
+      "historical_contract": {
+        "inputs": "json, json_file",
+        "outputs": "setting_diffs[], transient_overrides[]",
+        "purpose": "比较 transient profile 与当前默认 profile"
+      },
+      "successor": {
+        "kind": "exact_command_set",
+        "command_ids": [
+          "job.compile_build",
+          "operation.receipt",
+          "operation.release",
+          "operation.status"
+        ]
+      },
+      "resolved_from_contract_id": "uai.historical_capability.t34.control.command.migration.packaging_diff_profile_json/1",
+      "semantic_coverage": {
+        "purpose": {
+          "status": "covered",
+          "by": [
+            "job.compile_build",
+            "operation.receipt",
+            "operation.release",
+            "operation.status"
+          ],
+          "explanation": "历史 packaging_diff_profile_json 的冻结purpose“比较 transient profile 与当前默认 profile”由精确当前集合 job.compile_build, operation.receipt, operation.release, operation.status 覆盖。job.compile_build packaging family 通过精确 policy 处理环境、profile、BuildCookRun、日志、制品和托管清理；operation.status/receipt/cancel/release 提供任务身份、运行状态、终态报告、取消及资源释放。旧 ID 不作为 alias、SDK 方法或 manifest 身份保留。"
+        },
+        "inputs": {
+          "status": "covered",
+          "by": [
+            "job.compile_build",
+            "operation.receipt",
+            "operation.release",
+            "operation.status"
+          ],
+          "explanation": "历史 packaging_diff_profile_json 的冻结inputs“json, json_file”由精确当前集合 job.compile_build, operation.receipt, operation.release, operation.status 覆盖。job.compile_build packaging family 通过精确 policy 处理环境、profile、BuildCookRun、日志、制品和托管清理；operation.status/receipt/cancel/release 提供任务身份、运行状态、终态报告、取消及资源释放。旧 ID 不作为 alias、SDK 方法或 manifest 身份保留。"
+        },
+        "outputs": {
+          "status": "covered",
+          "by": [
+            "job.compile_build",
+            "operation.receipt",
+            "operation.release",
+            "operation.status"
+          ],
+          "explanation": "历史 packaging_diff_profile_json 的冻结outputs“setting_diffs[], transient_overrides[]”由精确当前集合 job.compile_build, operation.receipt, operation.release, operation.status 覆盖。job.compile_build packaging family 通过精确 policy 处理环境、profile、BuildCookRun、日志、制品和托管清理；operation.status/receipt/cancel/release 提供任务身份、运行状态、终态报告、取消及资源释放。旧 ID 不作为 alias、SDK 方法或 manifest 身份保留。"
+        }
+      },
+      "product_evidence": {
+        "test_id": "UAI.StrictV2.T34.CONTROL.COMMAND.MIGRATION",
+        "public_command_ids": [
+          "job.compile_build",
+          "operation.receipt",
+          "operation.release",
+          "operation.status"
+        ],
+        "required_claims": [
+          "public_entry",
+          "behavior",
+          "readback",
+          "terminal_state",
+          "failure_semantics",
+          "cleanup",
+          "editor_preserved",
+          "legacy_exit",
+          "documentation"
+        ]
+      },
+      "old_id_exit": {
+        "public_executable": false,
+        "manifest_active": false,
+        "sdk_binding_active": false,
+        "compatibility_alias": false
+      },
+      "final_lifecycle": "deprecated_replaced"
+    },
+    {
+      "historical_command_id": "packaging_export_profile_json",
+      "approval": "2)",
+      "historical_source": "docs/commands/27_Localization_Packaging_PlatformProfiles.md",
+      "historical_contract": {
+        "inputs": "configuration, include_project_settings, output_file, platform",
+        "outputs": "pipeline, schema=uai.packaging.v1, settings_refs[], target",
+        "purpose": "导出 transient BuildCookRun profile"
+      },
+      "successor": {
+        "kind": "exact_command_set",
+        "command_ids": [
+          "job.compile_build",
+          "operation.receipt",
+          "operation.release",
+          "operation.status"
+        ]
+      },
+      "resolved_from_contract_id": "uai.historical_capability.t34.control.command.migration.packaging_export_profile_json/1",
+      "semantic_coverage": {
+        "purpose": {
+          "status": "covered",
+          "by": [
+            "job.compile_build",
+            "operation.receipt",
+            "operation.release",
+            "operation.status"
+          ],
+          "explanation": "历史 packaging_export_profile_json 的冻结purpose“导出 transient BuildCookRun profile”由精确当前集合 job.compile_build, operation.receipt, operation.release, operation.status 覆盖。job.compile_build packaging family 通过精确 policy 处理环境、profile、BuildCookRun、日志、制品和托管清理；operation.status/receipt/cancel/release 提供任务身份、运行状态、终态报告、取消及资源释放。旧 ID 不作为 alias、SDK 方法或 manifest 身份保留。"
+        },
+        "inputs": {
+          "status": "covered",
+          "by": [
+            "job.compile_build",
+            "operation.receipt",
+            "operation.release",
+            "operation.status"
+          ],
+          "explanation": "历史 packaging_export_profile_json 的冻结inputs“configuration, include_project_settings, output_file, platform”由精确当前集合 job.compile_build, operation.receipt, operation.release, operation.status 覆盖。job.compile_build packaging family 通过精确 policy 处理环境、profile、BuildCookRun、日志、制品和托管清理；operation.status/receipt/cancel/release 提供任务身份、运行状态、终态报告、取消及资源释放。旧 ID 不作为 alias、SDK 方法或 manifest 身份保留。"
+        },
+        "outputs": {
+          "status": "covered",
+          "by": [
+            "job.compile_build",
+            "operation.receipt",
+            "operation.release",
+            "operation.status"
+          ],
+          "explanation": "历史 packaging_export_profile_json 的冻结outputs“pipeline, schema=uai.packaging.v1, settings_refs[], target”由精确当前集合 job.compile_build, operation.receipt, operation.release, operation.status 覆盖。job.compile_build packaging family 通过精确 policy 处理环境、profile、BuildCookRun、日志、制品和托管清理；operation.status/receipt/cancel/release 提供任务身份、运行状态、终态报告、取消及资源释放。旧 ID 不作为 alias、SDK 方法或 manifest 身份保留。"
+        }
+      },
+      "product_evidence": {
+        "test_id": "UAI.StrictV2.T34.CONTROL.COMMAND.MIGRATION",
+        "public_command_ids": [
+          "job.compile_build",
+          "operation.receipt",
+          "operation.release",
+          "operation.status"
+        ],
+        "required_claims": [
+          "public_entry",
+          "behavior",
+          "readback",
+          "terminal_state",
+          "failure_semantics",
+          "cleanup",
+          "editor_preserved",
+          "legacy_exit",
+          "documentation"
+        ]
+      },
+      "old_id_exit": {
+        "public_executable": false,
+        "manifest_active": false,
+        "sdk_binding_active": false,
+        "compatibility_alias": false
+      },
+      "final_lifecycle": "deprecated_replaced"
+    },
+    {
+      "historical_command_id": "packaging_parse_log",
+      "approval": "2)",
+      "historical_source": "docs/commands/27_Localization_Packaging_PlatformProfiles.md",
+      "historical_contract": {
+        "inputs": "classify_errors, log_file",
+        "outputs": "errors[], phase_summary, warnings[]",
+        "purpose": "解析 UAT/cook log 的 error/warning"
+      },
+      "successor": {
+        "kind": "exact_command_set",
+        "command_ids": [
+          "job.compile_build",
+          "operation.receipt",
+          "operation.release",
+          "operation.status"
+        ]
+      },
+      "resolved_from_contract_id": "uai.historical_capability.t34.control.command.migration.packaging_parse_log/1",
+      "semantic_coverage": {
+        "purpose": {
+          "status": "covered",
+          "by": [
+            "job.compile_build",
+            "operation.receipt",
+            "operation.release",
+            "operation.status"
+          ],
+          "explanation": "历史 packaging_parse_log 的冻结purpose“解析 UAT/cook log 的 error/warning”由精确当前集合 job.compile_build, operation.receipt, operation.release, operation.status 覆盖。job.compile_build packaging family 通过精确 policy 处理环境、profile、BuildCookRun、日志、制品和托管清理；operation.status/receipt/cancel/release 提供任务身份、运行状态、终态报告、取消及资源释放。旧 ID 不作为 alias、SDK 方法或 manifest 身份保留。"
+        },
+        "inputs": {
+          "status": "covered",
+          "by": [
+            "job.compile_build",
+            "operation.receipt",
+            "operation.release",
+            "operation.status"
+          ],
+          "explanation": "历史 packaging_parse_log 的冻结inputs“classify_errors, log_file”由精确当前集合 job.compile_build, operation.receipt, operation.release, operation.status 覆盖。job.compile_build packaging family 通过精确 policy 处理环境、profile、BuildCookRun、日志、制品和托管清理；operation.status/receipt/cancel/release 提供任务身份、运行状态、终态报告、取消及资源释放。旧 ID 不作为 alias、SDK 方法或 manifest 身份保留。"
+        },
+        "outputs": {
+          "status": "covered",
+          "by": [
+            "job.compile_build",
+            "operation.receipt",
+            "operation.release",
+            "operation.status"
+          ],
+          "explanation": "历史 packaging_parse_log 的冻结outputs“errors[], phase_summary, warnings[]”由精确当前集合 job.compile_build, operation.receipt, operation.release, operation.status 覆盖。job.compile_build packaging family 通过精确 policy 处理环境、profile、BuildCookRun、日志、制品和托管清理；operation.status/receipt/cancel/release 提供任务身份、运行状态、终态报告、取消及资源释放。旧 ID 不作为 alias、SDK 方法或 manifest 身份保留。"
+        }
+      },
+      "product_evidence": {
+        "test_id": "UAI.StrictV2.T34.CONTROL.COMMAND.MIGRATION",
+        "public_command_ids": [
+          "job.compile_build",
+          "operation.receipt",
+          "operation.release",
+          "operation.status"
+        ],
+        "required_claims": [
+          "public_entry",
+          "behavior",
+          "readback",
+          "terminal_state",
+          "failure_semantics",
+          "cleanup",
+          "editor_preserved",
+          "legacy_exit",
+          "documentation"
+        ]
+      },
+      "old_id_exit": {
+        "public_executable": false,
+        "manifest_active": false,
+        "sdk_binding_active": false,
+        "compatibility_alias": false
+      },
+      "final_lifecycle": "deprecated_replaced"
+    },
+    {
+      "historical_command_id": "packaging_plan_build",
+      "approval": "2)",
+      "historical_source": "docs/commands/27_Localization_Packaging_PlatformProfiles.md",
+      "historical_contract": {
+        "inputs": "archive, configuration, cook, json, json_file, package, platform, stage",
+        "outputs": "artifacts_expected[], command_line, uat_args[]",
+        "purpose": "生成 UAT BuildCookRun 命令计划"
+      },
+      "successor": {
+        "kind": "exact_command_set",
+        "command_ids": [
+          "job.compile_build",
+          "operation.receipt",
+          "operation.release",
+          "operation.status"
+        ]
+      },
+      "resolved_from_contract_id": "uai.historical_capability.t34.control.command.migration.packaging_plan_build/1",
+      "semantic_coverage": {
+        "purpose": {
+          "status": "covered",
+          "by": [
+            "job.compile_build",
+            "operation.receipt",
+            "operation.release",
+            "operation.status"
+          ],
+          "explanation": "历史 packaging_plan_build 的冻结purpose“生成 UAT BuildCookRun 命令计划”由精确当前集合 job.compile_build, operation.receipt, operation.release, operation.status 覆盖。job.compile_build packaging family 通过精确 policy 处理环境、profile、BuildCookRun、日志、制品和托管清理；operation.status/receipt/cancel/release 提供任务身份、运行状态、终态报告、取消及资源释放。旧 ID 不作为 alias、SDK 方法或 manifest 身份保留。"
+        },
+        "inputs": {
+          "status": "covered",
+          "by": [
+            "job.compile_build",
+            "operation.receipt",
+            "operation.release",
+            "operation.status"
+          ],
+          "explanation": "历史 packaging_plan_build 的冻结inputs“archive, configuration, cook, json, json_file, package, platform, stage”由精确当前集合 job.compile_build, operation.receipt, operation.release, operation.status 覆盖。job.compile_build packaging family 通过精确 policy 处理环境、profile、BuildCookRun、日志、制品和托管清理；operation.status/receipt/cancel/release 提供任务身份、运行状态、终态报告、取消及资源释放。旧 ID 不作为 alias、SDK 方法或 manifest 身份保留。"
+        },
+        "outputs": {
+          "status": "covered",
+          "by": [
+            "job.compile_build",
+            "operation.receipt",
+            "operation.release",
+            "operation.status"
+          ],
+          "explanation": "历史 packaging_plan_build 的冻结outputs“artifacts_expected[], command_line, uat_args[]”由精确当前集合 job.compile_build, operation.receipt, operation.release, operation.status 覆盖。job.compile_build packaging family 通过精确 policy 处理环境、profile、BuildCookRun、日志、制品和托管清理；operation.status/receipt/cancel/release 提供任务身份、运行状态、终态报告、取消及资源释放。旧 ID 不作为 alias、SDK 方法或 manifest 身份保留。"
+        }
+      },
+      "product_evidence": {
+        "test_id": "UAI.StrictV2.T34.CONTROL.COMMAND.MIGRATION",
+        "public_command_ids": [
+          "job.compile_build",
+          "operation.receipt",
+          "operation.release",
+          "operation.status"
+        ],
+        "required_claims": [
+          "public_entry",
+          "behavior",
+          "readback",
+          "terminal_state",
+          "failure_semantics",
+          "cleanup",
+          "editor_preserved",
+          "legacy_exit",
+          "documentation"
+        ]
+      },
+      "old_id_exit": {
+        "public_executable": false,
+        "manifest_active": false,
+        "sdk_binding_active": false,
+        "compatibility_alias": false
+      },
+      "final_lifecycle": "deprecated_replaced"
+    },
+    {
+      "historical_command_id": "packaging_query_environment",
+      "approval": "2)",
+      "historical_source": "docs/commands/27_Localization_Packaging_PlatformProfiles.md",
+      "historical_contract": {
+        "inputs": "include_sdks, include_tools",
+        "outputs": "target_platforms[], tools[]",
+        "purpose": "查询 UAT、UnrealEditor-Cmd、UnrealPak、target platform 和 SDK 状态"
+      },
+      "successor": {
+        "kind": "exact_command_set",
+        "command_ids": [
+          "job.compile_build",
+          "operation.receipt",
+          "operation.release",
+          "operation.status"
+        ]
+      },
+      "resolved_from_contract_id": "uai.historical_capability.t34.control.command.migration.packaging_query_environment/1",
+      "semantic_coverage": {
+        "purpose": {
+          "status": "covered",
+          "by": [
+            "job.compile_build",
+            "operation.receipt",
+            "operation.release",
+            "operation.status"
+          ],
+          "explanation": "历史 packaging_query_environment 的冻结purpose“查询 UAT、UnrealEditor-Cmd、UnrealPak、target platform 和 SDK 状态”由精确当前集合 job.compile_build, operation.receipt, operation.release, operation.status 覆盖。job.compile_build packaging family 通过精确 policy 处理环境、profile、BuildCookRun、日志、制品和托管清理；operation.status/receipt/cancel/release 提供任务身份、运行状态、终态报告、取消及资源释放。旧 ID 不作为 alias、SDK 方法或 manifest 身份保留。"
+        },
+        "inputs": {
+          "status": "covered",
+          "by": [
+            "job.compile_build",
+            "operation.receipt",
+            "operation.release",
+            "operation.status"
+          ],
+          "explanation": "历史 packaging_query_environment 的冻结inputs“include_sdks, include_tools”由精确当前集合 job.compile_build, operation.receipt, operation.release, operation.status 覆盖。job.compile_build packaging family 通过精确 policy 处理环境、profile、BuildCookRun、日志、制品和托管清理；operation.status/receipt/cancel/release 提供任务身份、运行状态、终态报告、取消及资源释放。旧 ID 不作为 alias、SDK 方法或 manifest 身份保留。"
+        },
+        "outputs": {
+          "status": "covered",
+          "by": [
+            "job.compile_build",
+            "operation.receipt",
+            "operation.release",
+            "operation.status"
+          ],
+          "explanation": "历史 packaging_query_environment 的冻结outputs“target_platforms[], tools[]”由精确当前集合 job.compile_build, operation.receipt, operation.release, operation.status 覆盖。job.compile_build packaging family 通过精确 policy 处理环境、profile、BuildCookRun、日志、制品和托管清理；operation.status/receipt/cancel/release 提供任务身份、运行状态、终态报告、取消及资源释放。旧 ID 不作为 alias、SDK 方法或 manifest 身份保留。"
+        }
+      },
+      "product_evidence": {
+        "test_id": "UAI.StrictV2.T34.CONTROL.COMMAND.MIGRATION",
+        "public_command_ids": [
+          "job.compile_build",
+          "operation.receipt",
+          "operation.release",
+          "operation.status"
+        ],
+        "required_claims": [
+          "public_entry",
+          "behavior",
+          "readback",
+          "terminal_state",
+          "failure_semantics",
+          "cleanup",
+          "editor_preserved",
+          "legacy_exit",
+          "documentation"
+        ]
+      },
+      "old_id_exit": {
+        "public_executable": false,
+        "manifest_active": false,
+        "sdk_binding_active": false,
+        "compatibility_alias": false
+      },
+      "final_lifecycle": "deprecated_replaced"
+    },
+    {
+      "historical_command_id": "packaging_report_artifacts",
+      "approval": "2)",
+      "historical_source": "docs/commands/27_Localization_Packaging_PlatformProfiles.md",
+      "historical_contract": {
+        "inputs": "archive_dir, include_hashes, platform",
+        "outputs": "artifacts[], missing_expected[], total_size",
+        "purpose": "扫描 archive 目录产物"
+      },
+      "successor": {
+        "kind": "exact_command_set",
+        "command_ids": [
+          "job.compile_build",
+          "operation.receipt",
+          "operation.release",
+          "operation.status"
+        ]
+      },
+      "resolved_from_contract_id": "uai.historical_capability.t34.control.command.migration.packaging_report_artifacts/1",
+      "semantic_coverage": {
+        "purpose": {
+          "status": "covered",
+          "by": [
+            "job.compile_build",
+            "operation.receipt",
+            "operation.release",
+            "operation.status"
+          ],
+          "explanation": "历史 packaging_report_artifacts 的冻结purpose“扫描 archive 目录产物”由精确当前集合 job.compile_build, operation.receipt, operation.release, operation.status 覆盖。job.compile_build packaging family 通过精确 policy 处理环境、profile、BuildCookRun、日志、制品和托管清理；operation.status/receipt/cancel/release 提供任务身份、运行状态、终态报告、取消及资源释放。旧 ID 不作为 alias、SDK 方法或 manifest 身份保留。"
+        },
+        "inputs": {
+          "status": "covered",
+          "by": [
+            "job.compile_build",
+            "operation.receipt",
+            "operation.release",
+            "operation.status"
+          ],
+          "explanation": "历史 packaging_report_artifacts 的冻结inputs“archive_dir, include_hashes, platform”由精确当前集合 job.compile_build, operation.receipt, operation.release, operation.status 覆盖。job.compile_build packaging family 通过精确 policy 处理环境、profile、BuildCookRun、日志、制品和托管清理；operation.status/receipt/cancel/release 提供任务身份、运行状态、终态报告、取消及资源释放。旧 ID 不作为 alias、SDK 方法或 manifest 身份保留。"
+        },
+        "outputs": {
+          "status": "covered",
+          "by": [
+            "job.compile_build",
+            "operation.receipt",
+            "operation.release",
+            "operation.status"
+          ],
+          "explanation": "历史 packaging_report_artifacts 的冻结outputs“artifacts[], missing_expected[], total_size”由精确当前集合 job.compile_build, operation.receipt, operation.release, operation.status 覆盖。job.compile_build packaging family 通过精确 policy 处理环境、profile、BuildCookRun、日志、制品和托管清理；operation.status/receipt/cancel/release 提供任务身份、运行状态、终态报告、取消及资源释放。旧 ID 不作为 alias、SDK 方法或 manifest 身份保留。"
+        }
+      },
+      "product_evidence": {
+        "test_id": "UAI.StrictV2.T34.CONTROL.COMMAND.MIGRATION",
+        "public_command_ids": [
+          "job.compile_build",
+          "operation.receipt",
+          "operation.release",
+          "operation.status"
+        ],
+        "required_claims": [
+          "public_entry",
+          "behavior",
+          "readback",
+          "terminal_state",
+          "failure_semantics",
+          "cleanup",
+          "editor_preserved",
+          "legacy_exit",
+          "documentation"
+        ]
+      },
+      "old_id_exit": {
+        "public_executable": false,
+        "manifest_active": false,
+        "sdk_binding_active": false,
+        "compatibility_alias": false
+      },
+      "final_lifecycle": "deprecated_replaced"
+    },
+    {
+      "historical_command_id": "packaging_run_build",
+      "approval": "2)",
+      "historical_source": "docs/commands/27_Localization_Packaging_PlatformProfiles.md",
+      "historical_contract": {
+        "inputs": "allow_uat, execute, json, json_file, timeout_seconds",
+        "outputs": "log_file, report_file, status, task_id",
+        "purpose": "计划或执行 UAT 打包任务"
+      },
+      "successor": {
+        "kind": "exact_command_set",
+        "command_ids": [
+          "job.compile_build",
+          "operation.receipt",
+          "operation.release",
+          "operation.status"
+        ]
+      },
+      "resolved_from_contract_id": "uai.historical_capability.t34.control.command.migration.packaging_run_build/1",
+      "semantic_coverage": {
+        "purpose": {
+          "status": "covered",
+          "by": [
+            "job.compile_build",
+            "operation.receipt",
+            "operation.release",
+            "operation.status"
+          ],
+          "explanation": "历史 packaging_run_build 的冻结purpose“计划或执行 UAT 打包任务”由精确当前集合 job.compile_build, operation.receipt, operation.release, operation.status 覆盖。job.compile_build packaging family 通过精确 policy 处理环境、profile、BuildCookRun、日志、制品和托管清理；operation.status/receipt/cancel/release 提供任务身份、运行状态、终态报告、取消及资源释放。旧 ID 不作为 alias、SDK 方法或 manifest 身份保留。"
+        },
+        "inputs": {
+          "status": "covered",
+          "by": [
+            "job.compile_build",
+            "operation.receipt",
+            "operation.release",
+            "operation.status"
+          ],
+          "explanation": "历史 packaging_run_build 的冻结inputs“allow_uat, execute, json, json_file, timeout_seconds”由精确当前集合 job.compile_build, operation.receipt, operation.release, operation.status 覆盖。job.compile_build packaging family 通过精确 policy 处理环境、profile、BuildCookRun、日志、制品和托管清理；operation.status/receipt/cancel/release 提供任务身份、运行状态、终态报告、取消及资源释放。旧 ID 不作为 alias、SDK 方法或 manifest 身份保留。"
+        },
+        "outputs": {
+          "status": "covered",
+          "by": [
+            "job.compile_build",
+            "operation.receipt",
+            "operation.release",
+            "operation.status"
+          ],
+          "explanation": "历史 packaging_run_build 的冻结outputs“log_file, report_file, status, task_id”由精确当前集合 job.compile_build, operation.receipt, operation.release, operation.status 覆盖。job.compile_build packaging family 通过精确 policy 处理环境、profile、BuildCookRun、日志、制品和托管清理；operation.status/receipt/cancel/release 提供任务身份、运行状态、终态报告、取消及资源释放。旧 ID 不作为 alias、SDK 方法或 manifest 身份保留。"
+        }
+      },
+      "product_evidence": {
+        "test_id": "UAI.StrictV2.T34.CONTROL.COMMAND.MIGRATION",
+        "public_command_ids": [
+          "job.compile_build",
+          "operation.receipt",
+          "operation.release",
+          "operation.status"
+        ],
+        "required_claims": [
+          "public_entry",
+          "behavior",
+          "readback",
+          "terminal_state",
+          "failure_semantics",
+          "cleanup",
+          "editor_preserved",
+          "legacy_exit",
+          "documentation"
+        ]
+      },
+      "old_id_exit": {
+        "public_executable": false,
+        "manifest_active": false,
+        "sdk_binding_active": false,
+        "compatibility_alias": false
+      },
+      "final_lifecycle": "deprecated_replaced"
+    },
+    {
+      "historical_command_id": "packaging_task_status",
+      "approval": "2)",
+      "historical_source": "docs/commands/27_Localization_Packaging_PlatformProfiles.md",
+      "historical_contract": {
+        "inputs": "task_id",
+        "outputs": "exit_code, last_log_lines[], phase, running",
+        "purpose": "查询 UAI 任务记录或当前进程状态"
+      },
+      "successor": {
+        "kind": "exact_command_set",
+        "command_ids": [
+          "job.compile_build",
+          "operation.receipt",
+          "operation.release",
+          "operation.status"
+        ]
+      },
+      "resolved_from_contract_id": "uai.historical_capability.t34.control.command.migration.packaging_task_status/1",
+      "semantic_coverage": {
+        "purpose": {
+          "status": "covered",
+          "by": [
+            "job.compile_build",
+            "operation.receipt",
+            "operation.release",
+            "operation.status"
+          ],
+          "explanation": "历史 packaging_task_status 的冻结purpose“查询 UAI 任务记录或当前进程状态”由精确当前集合 job.compile_build, operation.receipt, operation.release, operation.status 覆盖。job.compile_build packaging family 通过精确 policy 处理环境、profile、BuildCookRun、日志、制品和托管清理；operation.status/receipt/cancel/release 提供任务身份、运行状态、终态报告、取消及资源释放。旧 ID 不作为 alias、SDK 方法或 manifest 身份保留。"
+        },
+        "inputs": {
+          "status": "covered",
+          "by": [
+            "job.compile_build",
+            "operation.receipt",
+            "operation.release",
+            "operation.status"
+          ],
+          "explanation": "历史 packaging_task_status 的冻结inputs“task_id”由精确当前集合 job.compile_build, operation.receipt, operation.release, operation.status 覆盖。job.compile_build packaging family 通过精确 policy 处理环境、profile、BuildCookRun、日志、制品和托管清理；operation.status/receipt/cancel/release 提供任务身份、运行状态、终态报告、取消及资源释放。旧 ID 不作为 alias、SDK 方法或 manifest 身份保留。"
+        },
+        "outputs": {
+          "status": "covered",
+          "by": [
+            "job.compile_build",
+            "operation.receipt",
+            "operation.release",
+            "operation.status"
+          ],
+          "explanation": "历史 packaging_task_status 的冻结outputs“exit_code, last_log_lines[], phase, running”由精确当前集合 job.compile_build, operation.receipt, operation.release, operation.status 覆盖。job.compile_build packaging family 通过精确 policy 处理环境、profile、BuildCookRun、日志、制品和托管清理；operation.status/receipt/cancel/release 提供任务身份、运行状态、终态报告、取消及资源释放。旧 ID 不作为 alias、SDK 方法或 manifest 身份保留。"
+        }
+      },
+      "product_evidence": {
+        "test_id": "UAI.StrictV2.T34.CONTROL.COMMAND.MIGRATION",
+        "public_command_ids": [
+          "job.compile_build",
+          "operation.receipt",
+          "operation.release",
+          "operation.status"
+        ],
+        "required_claims": [
+          "public_entry",
+          "behavior",
+          "readback",
+          "terminal_state",
+          "failure_semantics",
+          "cleanup",
+          "editor_preserved",
+          "legacy_exit",
+          "documentation"
+        ]
+      },
+      "old_id_exit": {
+        "public_executable": false,
+        "manifest_active": false,
+        "sdk_binding_active": false,
+        "compatibility_alias": false
+      },
+      "final_lifecycle": "deprecated_replaced"
+    },
+    {
+      "historical_command_id": "packaging_validate_profile_json",
+      "approval": "2)",
+      "historical_source": "docs/commands/27_Localization_Packaging_PlatformProfiles.md",
+      "historical_contract": {
+        "inputs": "json, json_file",
+        "outputs": "estimated_actions[], issues[], valid",
+        "purpose": "校验平台、配置、map、UAT 和 archive 目录"
+      },
+      "successor": {
+        "kind": "exact_command_set",
+        "command_ids": [
+          "job.compile_build",
+          "operation.receipt",
+          "operation.release",
+          "operation.status"
+        ]
+      },
+      "resolved_from_contract_id": "uai.historical_capability.t34.control.command.migration.packaging_validate_profile_json/1",
+      "semantic_coverage": {
+        "purpose": {
+          "status": "covered",
+          "by": [
+            "job.compile_build",
+            "operation.receipt",
+            "operation.release",
+            "operation.status"
+          ],
+          "explanation": "历史 packaging_validate_profile_json 的冻结purpose“校验平台、配置、map、UAT 和 archive 目录”由精确当前集合 job.compile_build, operation.receipt, operation.release, operation.status 覆盖。job.compile_build packaging family 通过精确 policy 处理环境、profile、BuildCookRun、日志、制品和托管清理；operation.status/receipt/cancel/release 提供任务身份、运行状态、终态报告、取消及资源释放。旧 ID 不作为 alias、SDK 方法或 manifest 身份保留。"
+        },
+        "inputs": {
+          "status": "covered",
+          "by": [
+            "job.compile_build",
+            "operation.receipt",
+            "operation.release",
+            "operation.status"
+          ],
+          "explanation": "历史 packaging_validate_profile_json 的冻结inputs“json, json_file”由精确当前集合 job.compile_build, operation.receipt, operation.release, operation.status 覆盖。job.compile_build packaging family 通过精确 policy 处理环境、profile、BuildCookRun、日志、制品和托管清理；operation.status/receipt/cancel/release 提供任务身份、运行状态、终态报告、取消及资源释放。旧 ID 不作为 alias、SDK 方法或 manifest 身份保留。"
+        },
+        "outputs": {
+          "status": "covered",
+          "by": [
+            "job.compile_build",
+            "operation.receipt",
+            "operation.release",
+            "operation.status"
+          ],
+          "explanation": "历史 packaging_validate_profile_json 的冻结outputs“estimated_actions[], issues[], valid”由精确当前集合 job.compile_build, operation.receipt, operation.release, operation.status 覆盖。job.compile_build packaging family 通过精确 policy 处理环境、profile、BuildCookRun、日志、制品和托管清理；operation.status/receipt/cancel/release 提供任务身份、运行状态、终态报告、取消及资源释放。旧 ID 不作为 alias、SDK 方法或 manifest 身份保留。"
+        }
+      },
+      "product_evidence": {
+        "test_id": "UAI.StrictV2.T34.CONTROL.COMMAND.MIGRATION",
+        "public_command_ids": [
+          "job.compile_build",
+          "operation.receipt",
+          "operation.release",
+          "operation.status"
+        ],
+        "required_claims": [
+          "public_entry",
+          "behavior",
+          "readback",
+          "terminal_state",
+          "failure_semantics",
+          "cleanup",
+          "editor_preserved",
+          "legacy_exit",
+          "documentation"
+        ]
+      },
+      "old_id_exit": {
+        "public_executable": false,
+        "manifest_active": false,
+        "sdk_binding_active": false,
+        "compatibility_alias": false
+      },
+      "final_lifecycle": "deprecated_replaced"
+    },
+    {
+      "historical_command_id": "redo",
+      "approval": "1)",
+      "historical_source": "docs/commands/01_Core_Level_Assets_Landscape.md",
+      "historical_contract": {
+        "inputs": "无文档参数；使用 **params 传入 UAI 参数。",
+        "outputs": "验证回滚链路",
+        "purpose": "重做已撤销事务"
+      },
+      "successor": {
+        "kind": "exact_command_set",
+        "command_ids": [
+          "operation.plan.execute"
+        ]
+      },
+      "resolved_from_contract_id": "uai.historical_capability.t34.control.command.migration.redo/1",
+      "semantic_coverage": {
+        "purpose": {
+          "status": "covered",
+          "by": [
+            "operation.plan.execute"
+          ],
+          "explanation": "历史 redo 的冻结purpose“重做已撤销事务”由精确当前集合 operation.plan.execute 覆盖。服务端在写前冻结最多 128 个精确步骤；public_command 绑定当前合同 hash，editor_console 限制风险和输出，transaction_history 使用真实 UTransBuffer revision；on_error 和 atomicity 决定顺序与失败终态。旧 ID 不作为 alias、SDK 方法或 manifest 身份保留。"
+        },
+        "inputs": {
+          "status": "covered",
+          "by": [
+            "operation.plan.execute"
+          ],
+          "explanation": "历史 redo 的冻结inputs“无文档参数；使用 **params 传入 UAI 参数。”由精确当前集合 operation.plan.execute 覆盖。服务端在写前冻结最多 128 个精确步骤；public_command 绑定当前合同 hash，editor_console 限制风险和输出，transaction_history 使用真实 UTransBuffer revision；on_error 和 atomicity 决定顺序与失败终态。旧 ID 不作为 alias、SDK 方法或 manifest 身份保留。"
+        },
+        "outputs": {
+          "status": "covered",
+          "by": [
+            "operation.plan.execute"
+          ],
+          "explanation": "历史 redo 的冻结outputs“验证回滚链路”由精确当前集合 operation.plan.execute 覆盖。服务端在写前冻结最多 128 个精确步骤；public_command 绑定当前合同 hash，editor_console 限制风险和输出，transaction_history 使用真实 UTransBuffer revision；on_error 和 atomicity 决定顺序与失败终态。旧 ID 不作为 alias、SDK 方法或 manifest 身份保留。"
+        }
+      },
+      "product_evidence": {
+        "test_id": "UAI.StrictV2.T34.CONTROL.COMMAND.MIGRATION",
+        "public_command_ids": [
+          "operation.plan.execute"
+        ],
+        "required_claims": [
+          "public_entry",
+          "behavior",
+          "readback",
+          "terminal_state",
+          "failure_semantics",
+          "cleanup",
+          "editor_preserved",
+          "legacy_exit",
+          "documentation"
+        ]
+      },
+      "old_id_exit": {
+        "public_executable": false,
+        "manifest_active": false,
+        "sdk_binding_active": false,
+        "compatibility_alias": false
+      },
+      "final_lifecycle": "deprecated_replaced"
+    },
+    {
+      "historical_command_id": "undo",
+      "approval": "1)",
+      "historical_source": "docs/commands/01_Core_Level_Assets_Landscape.md",
+      "historical_contract": {
+        "inputs": "无文档参数；使用 **params 传入 UAI 参数。",
+        "outputs": "快速回滚错误修改",
+        "purpose": "撤销上一步事务"
+      },
+      "successor": {
+        "kind": "exact_command_set",
+        "command_ids": [
+          "operation.plan.execute"
+        ]
+      },
+      "resolved_from_contract_id": "uai.historical_capability.t34.control.command.migration.undo/1",
+      "semantic_coverage": {
+        "purpose": {
+          "status": "covered",
+          "by": [
+            "operation.plan.execute"
+          ],
+          "explanation": "历史 undo 的冻结purpose“撤销上一步事务”由精确当前集合 operation.plan.execute 覆盖。服务端在写前冻结最多 128 个精确步骤；public_command 绑定当前合同 hash，editor_console 限制风险和输出，transaction_history 使用真实 UTransBuffer revision；on_error 和 atomicity 决定顺序与失败终态。旧 ID 不作为 alias、SDK 方法或 manifest 身份保留。"
+        },
+        "inputs": {
+          "status": "covered",
+          "by": [
+            "operation.plan.execute"
+          ],
+          "explanation": "历史 undo 的冻结inputs“无文档参数；使用 **params 传入 UAI 参数。”由精确当前集合 operation.plan.execute 覆盖。服务端在写前冻结最多 128 个精确步骤；public_command 绑定当前合同 hash，editor_console 限制风险和输出，transaction_history 使用真实 UTransBuffer revision；on_error 和 atomicity 决定顺序与失败终态。旧 ID 不作为 alias、SDK 方法或 manifest 身份保留。"
+        },
+        "outputs": {
+          "status": "covered",
+          "by": [
+            "operation.plan.execute"
+          ],
+          "explanation": "历史 undo 的冻结outputs“快速回滚错误修改”由精确当前集合 operation.plan.execute 覆盖。服务端在写前冻结最多 128 个精确步骤；public_command 绑定当前合同 hash，editor_console 限制风险和输出，transaction_history 使用真实 UTransBuffer revision；on_error 和 atomicity 决定顺序与失败终态。旧 ID 不作为 alias、SDK 方法或 manifest 身份保留。"
+        }
+      },
+      "product_evidence": {
+        "test_id": "UAI.StrictV2.T34.CONTROL.COMMAND.MIGRATION",
+        "public_command_ids": [
+          "operation.plan.execute"
+        ],
+        "required_claims": [
+          "public_entry",
+          "behavior",
+          "readback",
+          "terminal_state",
+          "failure_semantics",
+          "cleanup",
+          "editor_preserved",
+          "legacy_exit",
+          "documentation"
+        ]
+      },
+      "old_id_exit": {
+        "public_executable": false,
+        "manifest_active": false,
+        "sdk_binding_active": false,
+        "compatibility_alias": false
+      },
+      "final_lifecycle": "deprecated_replaced"
+    }
+  ]
+}

@@ -197,46 +197,12 @@ namespace UeAgentAudioOps
 		}
 		return Info;
 	}
-	bool LoadSoundCueFolder(const FString& FolderPathInput, TSharedPtr<FJsonObject>& OutAssetJson, TSharedPtr<FJsonObject>& OutNodesJson, TSharedPtr<FJsonObject>& OutEdgesJson, FString& OutFolder, FString& OutError)
-	{
-		OutFolder = ResolveFilePath(FolderPathInput);
-		if (OutFolder.IsEmpty())
-		{
-			OutError = TEXT("missing_folder_path");
-			return false;
-		}
-		FString ResolvedPath;
-		if (!LoadJsonFile(FPaths::Combine(OutFolder, TEXT("asset.json")), OutAssetJson, ResolvedPath, OutError))
-		{
-			return false;
-		}
-		if (!LoadJsonFile(FPaths::Combine(OutFolder, TEXT("nodes.json")), OutNodesJson, ResolvedPath, OutError))
-		{
-			return false;
-		}
-		TSharedPtr<FJsonObject> EdgesJson;
-		FString EdgePath = FPaths::Combine(OutFolder, TEXT("edges.json"));
-		if (FPaths::FileExists(EdgePath))
-		{
-			if (!LoadJsonFile(EdgePath, EdgesJson, ResolvedPath, OutError))
-			{
-				return false;
-			}
-			OutEdgesJson = EdgesJson;
-		}
-		else
-		{
-			OutEdgesJson = MakeShared<FJsonObject>();
-			OutEdgesJson->SetArrayField(TEXT("edges"), {});
-		}
-		return true;
-	}
 	bool ValidateSoundCueFolderJson(const TSharedPtr<FJsonObject>& NodesJson, const TSharedPtr<FJsonObject>& EdgesJson, TArray<TSharedPtr<FJsonValue>>& Issues)
 	{
 		const TArray<TSharedPtr<FJsonValue>>* Nodes = nullptr;
 		if (!NodesJson.IsValid() || !NodesJson->TryGetArrayField(TEXT("nodes"), Nodes) || !Nodes)
 		{
-			AddIssue(Issues, TEXT("missing_nodes_array"), TEXT("error"), TEXT("nodes.json must contain nodes[]."), TEXT("nodes"));
+			AddIssue(Issues, TEXT("missing_nodes_array"), TEXT("error"), TEXT("Sound Cue graph must contain nodes[]."), TEXT("nodes"));
 			return false;
 		}
 		TSet<FString> NodeIds;
@@ -453,6 +419,7 @@ namespace UeAgentAudioOps
 				OutError = TEXT("create_sound_node_failed");
 				return false;
 			}
+			Node->CreateStartingConnectors();
 			if (!Id.IsEmpty())
 			{
 				Node->Rename(*Id, Cue, REN_DontCreateRedirectors | REN_ForceNoResetLoaders);

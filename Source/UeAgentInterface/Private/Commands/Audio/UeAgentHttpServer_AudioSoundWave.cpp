@@ -34,7 +34,7 @@ bool FUeAgentHttpServer::CmdSoundWaveImport(const FUeAgentRequestContext& Ctx, T
 	}
 	FString DestinationName;
 	Ctx.Params->TryGetStringField(TEXT("destination_name"), DestinationName);
-	bool bReplaceExisting = true;
+	bool bReplaceExisting = false;
 	bool bSave = true;
 	if (!GetOptionalBool(Ctx.Params, TEXT("replace_existing"), bReplaceExisting, OutError)
 		|| !GetOptionalBool(Ctx.Params, TEXT("save_after_import"), bSave, OutError))
@@ -65,6 +65,16 @@ bool FUeAgentHttpServer::CmdSoundWaveReimport(const FUeAgentRequestContext& Ctx,
 	FString AssetPath;
 	if (!GetRequiredString(Ctx, TEXT("asset_path"), AssetPath, OutError))
 	{
+		return false;
+	}
+	bool bAllowReimport = false;
+	if (!GetOptionalBool(Ctx.Params, TEXT("allow_reimport"), bAllowReimport, OutError))
+	{
+		return false;
+	}
+	if (!bAllowReimport)
+	{
+		OutError = TEXT("allow_reimport_required");
 		return false;
 	}
 	USoundWave* Wave = Cast<USoundWave>(LoadAssetObject(AssetPath));

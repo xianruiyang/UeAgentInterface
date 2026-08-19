@@ -1,0 +1,1307 @@
+{
+  "schema": "uai.historical_successor.v2",
+  "owner_task_id": "T06-NON-HJSON-QUERY-MIGRATION",
+  "commands": [
+    {
+      "historical_command_id": "actor_list_components",
+      "approval": "2)",
+      "historical_source": "docs/commands/01_Core_Level_Assets_Landscape.md",
+      "historical_contract": {
+        "inputs": "id, include_non_scene",
+        "outputs": "修改组件前定位组件名",
+        "purpose": "列出 Actor 组件"
+      },
+      "successor": {
+        "kind": "exact_command_set",
+        "command_ids": [
+          "world.actor_components"
+        ]
+      },
+      "semantic_coverage": {
+        "purpose": {
+          "status": "covered",
+          "by": [
+            "world.actor_components"
+          ],
+          "explanation": "world.actor_components 是该只读能力的唯一精确公开入口；服务端 Query owner 将它绑定到真实 UE mechanics，并直接覆盖冻结用途“列出 Actor 组件”。"
+        },
+        "inputs": {
+          "status": "covered",
+          "by": [
+            "world.actor_components"
+          ],
+          "explanation": "world.actor_components 通过精确 target（适用时）和 input 对象接收冻结输入“id, include_non_scene”；context 冻结真实状态层，projection 只约束有界结果，不使用旧 ID、别名或名称猜测。"
+        },
+        "outputs": {
+          "status": "covered",
+          "by": [
+            "world.actor_components"
+          ],
+          "explanation": "world.actor_components 从真实 UE/registry/editor 状态生成带稳定身份、revision、完整度和 provenance 的只读结果，覆盖冻结输出“修改组件前定位组件名”；结果直接经 SDK/CLI 返回，不恢复旧命令。"
+        }
+      },
+      "product_evidence": {
+        "test_id": "UAI.StrictV2.T06.NON.HJSON.QUERY.MIGRATION",
+        "public_command_ids": [
+          "world.actor_components"
+        ],
+        "required_claims": [
+          "public_entry",
+          "behavior",
+          "readback",
+          "failure_semantics",
+          "cleanup",
+          "legacy_exit",
+          "documentation"
+        ]
+      },
+      "old_id_exit": {
+        "public_executable": false,
+        "manifest_active": false,
+        "sdk_binding_active": false,
+        "compatibility_alias": false
+      },
+      "final_lifecycle": "deprecated_replaced"
+    },
+    {
+      "historical_command_id": "asset_reference_graph",
+      "approval": "1)",
+      "historical_source": "docs/commands/01_Core_Level_Assets_Landscape.md",
+      "historical_contract": {
+        "inputs": "asset_path, direction/recursive/max_depth/include_*",
+        "outputs": "在改 AnimBP、Montage、Level、清理旧资源前建立依赖/反向引用图",
+        "purpose": "查询任意资产的 AssetRegistry 引用关系"
+      },
+      "successor": {
+        "kind": "exact_command_set",
+        "command_ids": [
+          "asset.registry_relations"
+        ]
+      },
+      "semantic_coverage": {
+        "purpose": {
+          "status": "covered",
+          "by": [
+            "asset.registry_relations"
+          ],
+          "explanation": "asset.registry_relations 是该只读能力的唯一精确公开入口；服务端 Query owner 将它绑定到真实 UE mechanics，并直接覆盖冻结用途“查询任意资产的 AssetRegistry 引用关系”。"
+        },
+        "inputs": {
+          "status": "covered",
+          "by": [
+            "asset.registry_relations"
+          ],
+          "explanation": "asset.registry_relations 通过精确 target（适用时）和 input 对象接收冻结输入“asset_path, direction/recursive/max_depth/include_*”；context 冻结真实状态层，projection 只约束有界结果，不使用旧 ID、别名或名称猜测。"
+        },
+        "outputs": {
+          "status": "covered",
+          "by": [
+            "asset.registry_relations"
+          ],
+          "explanation": "asset.registry_relations 从真实 UE/registry/editor 状态生成带稳定身份、revision、完整度和 provenance 的只读结果，覆盖冻结输出“在改 AnimBP、Montage、Level、清理旧资源前建立依赖/反向引用图”；结果直接经 SDK/CLI 返回，不恢复旧命令。"
+        }
+      },
+      "product_evidence": {
+        "test_id": "UAI.StrictV2.T06.NON.HJSON.QUERY.MIGRATION",
+        "public_command_ids": [
+          "asset.registry_relations"
+        ],
+        "required_claims": [
+          "public_entry",
+          "behavior",
+          "readback",
+          "failure_semantics",
+          "cleanup",
+          "legacy_exit",
+          "documentation"
+        ]
+      },
+      "old_id_exit": {
+        "public_executable": false,
+        "manifest_active": false,
+        "sdk_binding_active": false,
+        "compatibility_alias": false
+      },
+      "final_lifecycle": "deprecated_replaced",
+      "resolved_from_contract_id": "uai.historical_capability.t06.non.hjson.query.migration.asset_reference_graph/1"
+    },
+    {
+      "historical_command_id": "config_export_section",
+      "approval": "2)",
+      "historical_source": "docs/commands/22_ProjectSettings_Config.md",
+      "historical_contract": {
+        "inputs": "config_file, output_file, output_path, section",
+        "outputs": "entries[], entry_count, schema, section_value_hash, source=config_file_fallback, source_path, values{}",
+        "purpose": "导出受限项目 `.ini` 的 section"
+      },
+      "successor": {
+        "kind": "exact_command_set",
+        "command_ids": [
+          "config.section"
+        ]
+      },
+      "semantic_coverage": {
+        "purpose": {
+          "status": "covered",
+          "by": [
+            "config.section"
+          ],
+          "explanation": "config.section 是该只读能力的唯一精确公开入口；服务端 Query owner 将它绑定到真实 UE mechanics，并直接覆盖冻结用途“导出受限项目 `.ini` 的 section”。"
+        },
+        "inputs": {
+          "status": "covered",
+          "by": [
+            "config.section"
+          ],
+          "explanation": "config.section 通过精确 target（适用时）和 input 对象接收冻结输入“config_file, output_file, output_path, section”；context 冻结真实状态层，projection 只约束有界结果，不使用旧 ID、别名或名称猜测。"
+        },
+        "outputs": {
+          "status": "covered",
+          "by": [
+            "config.section"
+          ],
+          "explanation": "config.section 从真实 UE/registry/editor 状态生成带稳定身份、revision、完整度和 provenance 的只读结果，覆盖冻结输出“entries[], entry_count, schema, section_value_hash, source=config_file_fallback, source_path, values{}”；结果直接经 SDK/CLI 返回，不恢复旧命令。"
+        }
+      },
+      "product_evidence": {
+        "test_id": "UAI.StrictV2.T06.NON.HJSON.QUERY.MIGRATION",
+        "public_command_ids": [
+          "config.section"
+        ],
+        "required_claims": [
+          "public_entry",
+          "behavior",
+          "readback",
+          "failure_semantics",
+          "cleanup",
+          "legacy_exit",
+          "documentation"
+        ]
+      },
+      "old_id_exit": {
+        "public_executable": false,
+        "manifest_active": false,
+        "sdk_binding_active": false,
+        "compatibility_alias": false
+      },
+      "final_lifecycle": "deprecated_replaced",
+      "resolved_from_contract_id": "uai.historical_capability.t06.non.hjson.query.migration.config_export_section/1"
+    },
+    {
+      "historical_command_id": "editor_get_open_assets",
+      "approval": "1)",
+      "historical_source": "docs/commands/01_Core_Level_Assets_Landscape.md",
+      "historical_contract": {
+        "inputs": "无文档参数；使用 **params 传入 UAI 参数。",
+        "outputs": "获取编辑器上下文",
+        "purpose": "列出当前已打开的资产编辑器"
+      },
+      "successor": {
+        "kind": "exact_command_set",
+        "command_ids": [
+          "editor.open_assets"
+        ]
+      },
+      "semantic_coverage": {
+        "purpose": {
+          "status": "covered",
+          "by": [
+            "editor.open_assets"
+          ],
+          "explanation": "editor.open_assets 是该只读能力的唯一精确公开入口；服务端 Query owner 将它绑定到真实 UE mechanics，并直接覆盖冻结用途“列出当前已打开的资产编辑器”。"
+        },
+        "inputs": {
+          "status": "covered",
+          "by": [
+            "editor.open_assets"
+          ],
+          "explanation": "editor.open_assets 通过精确 target（适用时）和 input 对象接收冻结输入“无文档参数；使用 **params 传入 UAI 参数。”；context 冻结真实状态层，projection 只约束有界结果，不使用旧 ID、别名或名称猜测。"
+        },
+        "outputs": {
+          "status": "covered",
+          "by": [
+            "editor.open_assets"
+          ],
+          "explanation": "editor.open_assets 从真实 UE/registry/editor 状态生成带稳定身份、revision、完整度和 provenance 的只读结果，覆盖冻结输出“获取编辑器上下文”；结果直接经 SDK/CLI 返回，不恢复旧命令。"
+        }
+      },
+      "product_evidence": {
+        "test_id": "UAI.StrictV2.T06.NON.HJSON.QUERY.MIGRATION",
+        "public_command_ids": [
+          "editor.open_assets"
+        ],
+        "required_claims": [
+          "public_entry",
+          "behavior",
+          "readback",
+          "failure_semantics",
+          "cleanup",
+          "legacy_exit",
+          "documentation"
+        ]
+      },
+      "old_id_exit": {
+        "public_executable": false,
+        "manifest_active": false,
+        "sdk_binding_active": false,
+        "compatibility_alias": false
+      },
+      "final_lifecycle": "deprecated_replaced",
+      "resolved_from_contract_id": "uai.historical_capability.t06.non.hjson.query.migration.editor_get_open_assets/1"
+    },
+    {
+      "historical_command_id": "editor_list_dirty_resources",
+      "approval": "1)",
+      "historical_source": "docs/commands/01_Core_Level_Assets_Landscape.md",
+      "historical_contract": {
+        "inputs": "无文档参数；使用 **params 传入 UAI 参数。",
+        "outputs": "退出前先枚举未保存关卡/资产",
+        "purpose": "列出当前所有待处理的脏资源"
+      },
+      "successor": {
+        "kind": "exact_command_set",
+        "command_ids": [
+          "editor.dirty_resources"
+        ]
+      },
+      "semantic_coverage": {
+        "purpose": {
+          "status": "covered",
+          "by": [
+            "editor.dirty_resources"
+          ],
+          "explanation": "editor.dirty_resources 是该只读能力的唯一精确公开入口；服务端 Query owner 将它绑定到真实 UE mechanics，并直接覆盖冻结用途“列出当前所有待处理的脏资源”。"
+        },
+        "inputs": {
+          "status": "covered",
+          "by": [
+            "editor.dirty_resources"
+          ],
+          "explanation": "editor.dirty_resources 通过精确 target（适用时）和 input 对象接收冻结输入“无文档参数；使用 **params 传入 UAI 参数。”；context 冻结真实状态层，projection 只约束有界结果，不使用旧 ID、别名或名称猜测。"
+        },
+        "outputs": {
+          "status": "covered",
+          "by": [
+            "editor.dirty_resources"
+          ],
+          "explanation": "editor.dirty_resources 从真实 UE/registry/editor 状态生成带稳定身份、revision、完整度和 provenance 的只读结果，覆盖冻结输出“退出前先枚举未保存关卡/资产”；结果直接经 SDK/CLI 返回，不恢复旧命令。"
+        }
+      },
+      "product_evidence": {
+        "test_id": "UAI.StrictV2.T06.NON.HJSON.QUERY.MIGRATION",
+        "public_command_ids": [
+          "editor.dirty_resources"
+        ],
+        "required_claims": [
+          "public_entry",
+          "behavior",
+          "readback",
+          "failure_semantics",
+          "cleanup",
+          "legacy_exit",
+          "documentation"
+        ]
+      },
+      "old_id_exit": {
+        "public_executable": false,
+        "manifest_active": false,
+        "sdk_binding_active": false,
+        "compatibility_alias": false
+      },
+      "final_lifecycle": "deprecated_replaced",
+      "resolved_from_contract_id": "uai.historical_capability.t06.non.hjson.query.migration.editor_list_dirty_resources/1"
+    },
+    {
+      "historical_command_id": "get_world_state",
+      "approval": "1)",
+      "historical_source": "docs/commands/01_Core_Level_Assets_Landscape.md",
+      "historical_contract": {
+        "inputs": "无文档参数；使用 **params 传入 UAI 参数。",
+        "outputs": "批处理前确认当前关卡和世界是否有效",
+        "purpose": "读取当前编辑器世界状态"
+      },
+      "successor": {
+        "kind": "exact_command_set",
+        "command_ids": [
+          "world.summary"
+        ]
+      },
+      "semantic_coverage": {
+        "purpose": {
+          "status": "covered",
+          "by": [
+            "world.summary"
+          ],
+          "explanation": "world.summary 是该只读能力的唯一精确公开入口；服务端 Query owner 将它绑定到真实 UE mechanics，并直接覆盖冻结用途“读取当前编辑器世界状态”。"
+        },
+        "inputs": {
+          "status": "covered",
+          "by": [
+            "world.summary"
+          ],
+          "explanation": "world.summary 通过精确 target（适用时）和 input 对象接收冻结输入“无文档参数；使用 **params 传入 UAI 参数。”；context 冻结真实状态层，projection 只约束有界结果，不使用旧 ID、别名或名称猜测。"
+        },
+        "outputs": {
+          "status": "covered",
+          "by": [
+            "world.summary"
+          ],
+          "explanation": "world.summary 从真实 UE/registry/editor 状态生成带稳定身份、revision、完整度和 provenance 的只读结果，覆盖冻结输出“批处理前确认当前关卡和世界是否有效”；结果直接经 SDK/CLI 返回，不恢复旧命令。"
+        }
+      },
+      "product_evidence": {
+        "test_id": "UAI.StrictV2.T06.NON.HJSON.QUERY.MIGRATION",
+        "public_command_ids": [
+          "world.summary"
+        ],
+        "required_claims": [
+          "public_entry",
+          "behavior",
+          "readback",
+          "failure_semantics",
+          "cleanup",
+          "legacy_exit",
+          "documentation"
+        ]
+      },
+      "old_id_exit": {
+        "public_executable": false,
+        "manifest_active": false,
+        "sdk_binding_active": false,
+        "compatibility_alias": false
+      },
+      "final_lifecycle": "deprecated_replaced",
+      "resolved_from_contract_id": "uai.historical_capability.t06.non.hjson.query.migration.get_world_state/1"
+    },
+    {
+      "historical_command_id": "hlod_query_actors",
+      "approval": "2)",
+      "historical_source": "docs/commands/25_LevelTopology_Streaming_WorldPartition_DataLayer_HLOD.md",
+      "historical_contract": {
+        "inputs": "actor_ids, folder_root",
+        "outputs": "actor_results[], actors[]",
+        "purpose": "查询 Actor 的 HLOD/WP 分配"
+      },
+      "successor": {
+        "kind": "exact_command_set",
+        "command_ids": [
+          "world.hlod_assignments"
+        ]
+      },
+      "semantic_coverage": {
+        "purpose": {
+          "status": "covered",
+          "by": [
+            "world.hlod_assignments"
+          ],
+          "explanation": "world.hlod_assignments 是该只读能力的唯一精确公开入口；服务端 Query owner 将它绑定到真实 UE mechanics，并直接覆盖冻结用途“查询 Actor 的 HLOD/WP 分配”。"
+        },
+        "inputs": {
+          "status": "covered",
+          "by": [
+            "world.hlod_assignments"
+          ],
+          "explanation": "world.hlod_assignments 通过精确 target（适用时）和 input 对象接收冻结输入“actor_ids, folder_root”；context 冻结真实状态层，projection 只约束有界结果，不使用旧 ID、别名或名称猜测。"
+        },
+        "outputs": {
+          "status": "covered",
+          "by": [
+            "world.hlod_assignments"
+          ],
+          "explanation": "world.hlod_assignments 从真实 UE/registry/editor 状态生成带稳定身份、revision、完整度和 provenance 的只读结果，覆盖冻结输出“actor_results[], actors[]”；结果直接经 SDK/CLI 返回，不恢复旧命令。"
+        }
+      },
+      "product_evidence": {
+        "test_id": "UAI.StrictV2.T06.NON.HJSON.QUERY.MIGRATION",
+        "public_command_ids": [
+          "world.hlod_assignments"
+        ],
+        "required_claims": [
+          "public_entry",
+          "behavior",
+          "readback",
+          "failure_semantics",
+          "cleanup",
+          "legacy_exit",
+          "documentation"
+        ]
+      },
+      "old_id_exit": {
+        "public_executable": false,
+        "manifest_active": false,
+        "sdk_binding_active": false,
+        "compatibility_alias": false
+      },
+      "final_lifecycle": "deprecated_replaced",
+      "resolved_from_contract_id": "uai.historical_capability.t06.non.hjson.query.migration.hlod_query_actors/1"
+    },
+    {
+      "historical_command_id": "level_check_overlaps",
+      "approval": "1)",
+      "historical_source": "docs/commands/01_Core_Level_Assets_Landscape.md",
+      "historical_contract": {
+        "inputs": "center, shape, trace_channel",
+        "outputs": "发现“摆放穿插/互相卡住/门墙不贴合”等问题",
+        "purpose": "Overlap 检测（碰撞穿插）"
+      },
+      "successor": {
+        "kind": "exact_command_set",
+        "command_ids": [
+          "world.overlap"
+        ]
+      },
+      "semantic_coverage": {
+        "purpose": {
+          "status": "covered",
+          "by": [
+            "world.overlap"
+          ],
+          "explanation": "world.overlap 是该只读能力的唯一精确公开入口；服务端 Query owner 将它绑定到真实 UE mechanics，并直接覆盖冻结用途“Overlap 检测（碰撞穿插）”。"
+        },
+        "inputs": {
+          "status": "covered",
+          "by": [
+            "world.overlap"
+          ],
+          "explanation": "world.overlap 通过精确 target（适用时）和 input 对象接收冻结输入“center, shape, trace_channel”；context 冻结真实状态层，projection 只约束有界结果，不使用旧 ID、别名或名称猜测。"
+        },
+        "outputs": {
+          "status": "covered",
+          "by": [
+            "world.overlap"
+          ],
+          "explanation": "world.overlap 从真实 UE/registry/editor 状态生成带稳定身份、revision、完整度和 provenance 的只读结果，覆盖冻结输出“发现“摆放穿插/互相卡住/门墙不贴合”等问题”；结果直接经 SDK/CLI 返回，不恢复旧命令。"
+        }
+      },
+      "product_evidence": {
+        "test_id": "UAI.StrictV2.T06.NON.HJSON.QUERY.MIGRATION",
+        "public_command_ids": [
+          "world.overlap"
+        ],
+        "required_claims": [
+          "public_entry",
+          "behavior",
+          "readback",
+          "failure_semantics",
+          "cleanup",
+          "legacy_exit",
+          "documentation"
+        ]
+      },
+      "old_id_exit": {
+        "public_executable": false,
+        "manifest_active": false,
+        "sdk_binding_active": false,
+        "compatibility_alias": false
+      },
+      "final_lifecycle": "deprecated_replaced",
+      "resolved_from_contract_id": "uai.historical_capability.t06.non.hjson.query.migration.level_check_overlaps/1"
+    },
+    {
+      "historical_command_id": "level_get_nearby_actor_obbs",
+      "approval": "1)",
+      "historical_source": "docs/commands/01_Core_Level_Assets_Landscape.md",
+      "historical_contract": {
+        "inputs": "id 或 center、radius、include_self、folder/tag/class 过滤、limit",
+        "outputs": "—",
+        "purpose": "按 Actor 或世界坐标为中心查询附近 Actor 的有向包围盒，并支持 folder、tag、class 过滤。"
+      },
+      "successor": {
+        "kind": "exact_command_set",
+        "command_ids": [
+          "world.nearby_shapes"
+        ]
+      },
+      "semantic_coverage": {
+        "purpose": {
+          "status": "covered",
+          "by": [
+            "world.nearby_shapes"
+          ],
+          "explanation": "world.nearby_shapes 是该只读能力的唯一精确公开入口；服务端 Query owner 将它绑定到真实 UE mechanics，并直接覆盖冻结用途“按 Actor 或世界坐标为中心查询附近 Actor 的有向包围盒，并支持 folder、tag、class 过滤。”。"
+        },
+        "inputs": {
+          "status": "covered",
+          "by": [
+            "world.nearby_shapes"
+          ],
+          "explanation": "world.nearby_shapes 通过精确 target（适用时）和 input 对象接收冻结输入“id 或 center、radius、include_self、folder/tag/class 过滤、limit”；context 冻结真实状态层，projection 只约束有界结果，不使用旧 ID、别名或名称猜测。"
+        },
+        "outputs": {
+          "status": "covered",
+          "by": [
+            "world.nearby_shapes"
+          ],
+          "explanation": "world.nearby_shapes 从真实 UE/registry/editor 状态生成带稳定身份、revision、完整度和 provenance 的只读结果，覆盖冻结输出“—”；结果直接经 SDK/CLI 返回，不恢复旧命令。"
+        }
+      },
+      "product_evidence": {
+        "test_id": "UAI.StrictV2.T06.NON.HJSON.QUERY.MIGRATION",
+        "public_command_ids": [
+          "world.nearby_shapes"
+        ],
+        "required_claims": [
+          "public_entry",
+          "behavior",
+          "readback",
+          "failure_semantics",
+          "cleanup",
+          "legacy_exit",
+          "documentation"
+        ]
+      },
+      "old_id_exit": {
+        "public_executable": false,
+        "manifest_active": false,
+        "sdk_binding_active": false,
+        "compatibility_alias": false
+      },
+      "final_lifecycle": "deprecated_replaced",
+      "resolved_from_contract_id": "uai.historical_capability.t06.non.hjson.query.migration.level_get_nearby_actor_obbs/1"
+    },
+    {
+      "historical_command_id": "level_get_selection",
+      "approval": "1)",
+      "historical_source": "docs/commands/01_Core_Level_Assets_Landscape.md",
+      "historical_contract": {
+        "inputs": "无文档参数；使用 **params 传入 UAI 参数。",
+        "outputs": "获取当前选中对象",
+        "purpose": "读取当前选择集"
+      },
+      "successor": {
+        "kind": "exact_command_set",
+        "command_ids": [
+          "world.selection"
+        ]
+      },
+      "semantic_coverage": {
+        "purpose": {
+          "status": "covered",
+          "by": [
+            "world.selection"
+          ],
+          "explanation": "world.selection 是该只读能力的唯一精确公开入口；服务端 Query owner 将它绑定到真实 UE mechanics，并直接覆盖冻结用途“读取当前选择集”。"
+        },
+        "inputs": {
+          "status": "covered",
+          "by": [
+            "world.selection"
+          ],
+          "explanation": "world.selection 通过精确 target（适用时）和 input 对象接收冻结输入“无文档参数；使用 **params 传入 UAI 参数。”；context 冻结真实状态层，projection 只约束有界结果，不使用旧 ID、别名或名称猜测。"
+        },
+        "outputs": {
+          "status": "covered",
+          "by": [
+            "world.selection"
+          ],
+          "explanation": "world.selection 从真实 UE/registry/editor 状态生成带稳定身份、revision、完整度和 provenance 的只读结果，覆盖冻结输出“获取当前选中对象”；结果直接经 SDK/CLI 返回，不恢复旧命令。"
+        }
+      },
+      "product_evidence": {
+        "test_id": "UAI.StrictV2.T06.NON.HJSON.QUERY.MIGRATION",
+        "public_command_ids": [
+          "world.selection"
+        ],
+        "required_claims": [
+          "public_entry",
+          "behavior",
+          "readback",
+          "failure_semantics",
+          "cleanup",
+          "legacy_exit",
+          "documentation"
+        ]
+      },
+      "old_id_exit": {
+        "public_executable": false,
+        "manifest_active": false,
+        "sdk_binding_active": false,
+        "compatibility_alias": false
+      },
+      "final_lifecycle": "deprecated_replaced",
+      "resolved_from_contract_id": "uai.historical_capability.t06.non.hjson.query.migration.level_get_selection/1"
+    },
+    {
+      "historical_command_id": "level_list_actor_components",
+      "approval": "2)",
+      "historical_source": "docs/commands/01_Core_Level_Assets_Landscape.md",
+      "historical_contract": {
+        "inputs": "无文档参数；使用 **params 传入 UAI 参数。",
+        "outputs": "level_*",
+        "purpose": "`actor_list_components` 的同义命令"
+      },
+      "successor": {
+        "kind": "exact_command_set",
+        "command_ids": [
+          "world.actor_components"
+        ]
+      },
+      "semantic_coverage": {
+        "purpose": {
+          "status": "covered",
+          "by": [
+            "world.actor_components"
+          ],
+          "explanation": "world.actor_components 是该只读能力的唯一精确公开入口；服务端 Query owner 将它绑定到真实 UE mechanics，并直接覆盖冻结用途“`actor_list_components` 的同义命令”。"
+        },
+        "inputs": {
+          "status": "covered",
+          "by": [
+            "world.actor_components"
+          ],
+          "explanation": "world.actor_components 通过精确 target（适用时）和 input 对象接收冻结输入“无文档参数；使用 **params 传入 UAI 参数。”；context 冻结真实状态层，projection 只约束有界结果，不使用旧 ID、别名或名称猜测。"
+        },
+        "outputs": {
+          "status": "covered",
+          "by": [
+            "world.actor_components"
+          ],
+          "explanation": "world.actor_components 从真实 UE/registry/editor 状态生成带稳定身份、revision、完整度和 provenance 的只读结果，覆盖冻结输出“level_*”；结果直接经 SDK/CLI 返回，不恢复旧命令。"
+        }
+      },
+      "product_evidence": {
+        "test_id": "UAI.StrictV2.T06.NON.HJSON.QUERY.MIGRATION",
+        "public_command_ids": [
+          "world.actor_components"
+        ],
+        "required_claims": [
+          "public_entry",
+          "behavior",
+          "readback",
+          "failure_semantics",
+          "cleanup",
+          "legacy_exit",
+          "documentation"
+        ]
+      },
+      "old_id_exit": {
+        "public_executable": false,
+        "manifest_active": false,
+        "sdk_binding_active": false,
+        "compatibility_alias": false
+      },
+      "final_lifecycle": "deprecated_replaced",
+      "resolved_from_contract_id": "uai.historical_capability.t06.non.hjson.query.migration.level_list_actor_components/1"
+    },
+    {
+      "historical_command_id": "level_streaming_query",
+      "approval": "2)",
+      "historical_source": "docs/commands/25_LevelTopology_Streaming_WorldPartition_DataLayer_HLOD.md",
+      "historical_contract": {
+        "inputs": "include_actors",
+        "outputs": "count, streaming_levels[]",
+        "purpose": "列出当前 World 的 streaming levels"
+      },
+      "successor": {
+        "kind": "exact_command_set",
+        "command_ids": [
+          "world.streaming_levels"
+        ]
+      },
+      "semantic_coverage": {
+        "purpose": {
+          "status": "covered",
+          "by": [
+            "world.streaming_levels"
+          ],
+          "explanation": "world.streaming_levels 是该只读能力的唯一精确公开入口；服务端 Query owner 将它绑定到真实 UE mechanics，并直接覆盖冻结用途“列出当前 World 的 streaming levels”。"
+        },
+        "inputs": {
+          "status": "covered",
+          "by": [
+            "world.streaming_levels"
+          ],
+          "explanation": "world.streaming_levels 通过精确 target（适用时）和 input 对象接收冻结输入“include_actors”；context 冻结真实状态层，projection 只约束有界结果，不使用旧 ID、别名或名称猜测。"
+        },
+        "outputs": {
+          "status": "covered",
+          "by": [
+            "world.streaming_levels"
+          ],
+          "explanation": "world.streaming_levels 从真实 UE/registry/editor 状态生成带稳定身份、revision、完整度和 provenance 的只读结果，覆盖冻结输出“count, streaming_levels[]”；结果直接经 SDK/CLI 返回，不恢复旧命令。"
+        }
+      },
+      "product_evidence": {
+        "test_id": "UAI.StrictV2.T06.NON.HJSON.QUERY.MIGRATION",
+        "public_command_ids": [
+          "world.streaming_levels"
+        ],
+        "required_claims": [
+          "public_entry",
+          "behavior",
+          "readback",
+          "failure_semantics",
+          "cleanup",
+          "legacy_exit",
+          "documentation"
+        ]
+      },
+      "old_id_exit": {
+        "public_executable": false,
+        "manifest_active": false,
+        "sdk_binding_active": false,
+        "compatibility_alias": false
+      },
+      "final_lifecycle": "deprecated_replaced",
+      "resolved_from_contract_id": "uai.historical_capability.t06.non.hjson.query.migration.level_streaming_query/1"
+    },
+    {
+      "historical_command_id": "level_sweep_capsule",
+      "approval": "1)",
+      "historical_source": "docs/commands/01_Core_Level_Assets_Landscape.md",
+      "historical_contract": {
+        "inputs": "end, half_height_cm, radius_cm, start, trace_channel",
+        "outputs": "检查门洞/走廊/电梯轨迹净空",
+        "purpose": "胶囊 Sweep 通行性检测"
+      },
+      "successor": {
+        "kind": "exact_command_set",
+        "command_ids": [
+          "world.capsule_sweep"
+        ]
+      },
+      "semantic_coverage": {
+        "purpose": {
+          "status": "covered",
+          "by": [
+            "world.capsule_sweep"
+          ],
+          "explanation": "world.capsule_sweep 是该只读能力的唯一精确公开入口；服务端 Query owner 将它绑定到真实 UE mechanics，并直接覆盖冻结用途“胶囊 Sweep 通行性检测”。"
+        },
+        "inputs": {
+          "status": "covered",
+          "by": [
+            "world.capsule_sweep"
+          ],
+          "explanation": "world.capsule_sweep 通过精确 target（适用时）和 input 对象接收冻结输入“end, half_height_cm, radius_cm, start, trace_channel”；context 冻结真实状态层，projection 只约束有界结果，不使用旧 ID、别名或名称猜测。"
+        },
+        "outputs": {
+          "status": "covered",
+          "by": [
+            "world.capsule_sweep"
+          ],
+          "explanation": "world.capsule_sweep 从真实 UE/registry/editor 状态生成带稳定身份、revision、完整度和 provenance 的只读结果，覆盖冻结输出“检查门洞/走廊/电梯轨迹净空”；结果直接经 SDK/CLI 返回，不恢复旧命令。"
+        }
+      },
+      "product_evidence": {
+        "test_id": "UAI.StrictV2.T06.NON.HJSON.QUERY.MIGRATION",
+        "public_command_ids": [
+          "world.capsule_sweep"
+        ],
+        "required_claims": [
+          "public_entry",
+          "behavior",
+          "readback",
+          "failure_semantics",
+          "cleanup",
+          "legacy_exit",
+          "documentation"
+        ]
+      },
+      "old_id_exit": {
+        "public_executable": false,
+        "manifest_active": false,
+        "sdk_binding_active": false,
+        "compatibility_alias": false
+      },
+      "final_lifecycle": "deprecated_replaced",
+      "resolved_from_contract_id": "uai.historical_capability.t06.non.hjson.query.migration.level_sweep_capsule/1"
+    },
+    {
+      "historical_command_id": "level_sweep_capsule_path",
+      "approval": "1)",
+      "historical_source": "docs/commands/01_Core_Level_Assets_Landscape.md",
+      "historical_contract": {
+        "inputs": "half_height_cm, points[], radius_cm, step_cm",
+        "outputs": "检查楼梯/走廊/电梯轨迹中途阻挡与净空不足",
+        "purpose": "折线路径胶囊 Sweep（路径净空）"
+      },
+      "successor": {
+        "kind": "exact_command_set",
+        "command_ids": [
+          "world.capsule_path"
+        ]
+      },
+      "semantic_coverage": {
+        "purpose": {
+          "status": "covered",
+          "by": [
+            "world.capsule_path"
+          ],
+          "explanation": "world.capsule_path 是该只读能力的唯一精确公开入口；服务端 Query owner 将它绑定到真实 UE mechanics，并直接覆盖冻结用途“折线路径胶囊 Sweep（路径净空）”。"
+        },
+        "inputs": {
+          "status": "covered",
+          "by": [
+            "world.capsule_path"
+          ],
+          "explanation": "world.capsule_path 通过精确 target（适用时）和 input 对象接收冻结输入“half_height_cm, points[], radius_cm, step_cm”；context 冻结真实状态层，projection 只约束有界结果，不使用旧 ID、别名或名称猜测。"
+        },
+        "outputs": {
+          "status": "covered",
+          "by": [
+            "world.capsule_path"
+          ],
+          "explanation": "world.capsule_path 从真实 UE/registry/editor 状态生成带稳定身份、revision、完整度和 provenance 的只读结果，覆盖冻结输出“检查楼梯/走廊/电梯轨迹中途阻挡与净空不足”；结果直接经 SDK/CLI 返回，不恢复旧命令。"
+        }
+      },
+      "product_evidence": {
+        "test_id": "UAI.StrictV2.T06.NON.HJSON.QUERY.MIGRATION",
+        "public_command_ids": [
+          "world.capsule_path"
+        ],
+        "required_claims": [
+          "public_entry",
+          "behavior",
+          "readback",
+          "failure_semantics",
+          "cleanup",
+          "legacy_exit",
+          "documentation"
+        ]
+      },
+      "old_id_exit": {
+        "public_executable": false,
+        "manifest_active": false,
+        "sdk_binding_active": false,
+        "compatibility_alias": false
+      },
+      "final_lifecycle": "deprecated_replaced",
+      "resolved_from_contract_id": "uai.historical_capability.t06.non.hjson.query.migration.level_sweep_capsule_path/1"
+    },
+    {
+      "historical_command_id": "level_trace_world_ray",
+      "approval": "1)",
+      "historical_source": "docs/commands/01_Core_Level_Assets_Landscape.md",
+      "historical_contract": {
+        "inputs": "direction, start, trace_channel, trace_distance",
+        "outputs": "查地面、查遮挡、查通道是否堵住",
+        "purpose": "世界射线 Trace（不依赖 viewport）"
+      },
+      "successor": {
+        "kind": "exact_command_set",
+        "command_ids": [
+          "world.ray_trace"
+        ]
+      },
+      "semantic_coverage": {
+        "purpose": {
+          "status": "covered",
+          "by": [
+            "world.ray_trace"
+          ],
+          "explanation": "world.ray_trace 是该只读能力的唯一精确公开入口；服务端 Query owner 将它绑定到真实 UE mechanics，并直接覆盖冻结用途“世界射线 Trace（不依赖 viewport）”。"
+        },
+        "inputs": {
+          "status": "covered",
+          "by": [
+            "world.ray_trace"
+          ],
+          "explanation": "world.ray_trace 通过精确 target（适用时）和 input 对象接收冻结输入“direction, start, trace_channel, trace_distance”；context 冻结真实状态层，projection 只约束有界结果，不使用旧 ID、别名或名称猜测。"
+        },
+        "outputs": {
+          "status": "covered",
+          "by": [
+            "world.ray_trace"
+          ],
+          "explanation": "world.ray_trace 从真实 UE/registry/editor 状态生成带稳定身份、revision、完整度和 provenance 的只读结果，覆盖冻结输出“查地面、查遮挡、查通道是否堵住”；结果直接经 SDK/CLI 返回，不恢复旧命令。"
+        }
+      },
+      "product_evidence": {
+        "test_id": "UAI.StrictV2.T06.NON.HJSON.QUERY.MIGRATION",
+        "public_command_ids": [
+          "world.ray_trace"
+        ],
+        "required_claims": [
+          "public_entry",
+          "behavior",
+          "readback",
+          "failure_semantics",
+          "cleanup",
+          "legacy_exit",
+          "documentation"
+        ]
+      },
+      "old_id_exit": {
+        "public_executable": false,
+        "manifest_active": false,
+        "sdk_binding_active": false,
+        "compatibility_alias": false
+      },
+      "final_lifecycle": "deprecated_replaced",
+      "resolved_from_contract_id": "uai.historical_capability.t06.non.hjson.query.migration.level_trace_world_ray/1"
+    },
+    {
+      "historical_command_id": "level_validate_connectivity",
+      "approval": "1)",
+      "historical_source": "docs/commands/01_Core_Level_Assets_Landscape.md",
+      "historical_contract": {
+        "inputs": "graph_root_index, pairs[].edge_type, points[], probe_actor_ids[]",
+        "outputs": "把“断路点/断回环”结构化输出为逐对+图报告",
+        "purpose": "多点连通性验收（walk + 显式边）"
+      },
+      "successor": {
+        "kind": "exact_command_set",
+        "command_ids": [
+          "world.nav_connectivity"
+        ]
+      },
+      "semantic_coverage": {
+        "purpose": {
+          "status": "covered",
+          "by": [
+            "world.nav_connectivity"
+          ],
+          "explanation": "world.nav_connectivity 是该只读能力的唯一精确公开入口；服务端 Query owner 将它绑定到真实 UE mechanics，并直接覆盖冻结用途“多点连通性验收（walk + 显式边）”。"
+        },
+        "inputs": {
+          "status": "covered",
+          "by": [
+            "world.nav_connectivity"
+          ],
+          "explanation": "world.nav_connectivity 通过精确 target（适用时）和 input 对象接收冻结输入“graph_root_index, pairs[].edge_type, points[], probe_actor_ids[]”；context 冻结真实状态层，projection 只约束有界结果，不使用旧 ID、别名或名称猜测。"
+        },
+        "outputs": {
+          "status": "covered",
+          "by": [
+            "world.nav_connectivity"
+          ],
+          "explanation": "world.nav_connectivity 从真实 UE/registry/editor 状态生成带稳定身份、revision、完整度和 provenance 的只读结果，覆盖冻结输出“把“断路点/断回环”结构化输出为逐对+图报告”；结果直接经 SDK/CLI 返回，不恢复旧命令。"
+        }
+      },
+      "product_evidence": {
+        "test_id": "UAI.StrictV2.T06.NON.HJSON.QUERY.MIGRATION",
+        "public_command_ids": [
+          "world.nav_connectivity"
+        ],
+        "required_claims": [
+          "public_entry",
+          "behavior",
+          "readback",
+          "failure_semantics",
+          "cleanup",
+          "legacy_exit",
+          "documentation"
+        ]
+      },
+      "old_id_exit": {
+        "public_executable": false,
+        "manifest_active": false,
+        "sdk_binding_active": false,
+        "compatibility_alias": false
+      },
+      "final_lifecycle": "deprecated_replaced",
+      "resolved_from_contract_id": "uai.historical_capability.t06.non.hjson.query.migration.level_validate_connectivity/1"
+    },
+    {
+      "historical_command_id": "list_actors",
+      "approval": "2)",
+      "historical_source": "docs/commands/01_Core_Level_Assets_Landscape.md",
+      "historical_contract": {
+        "inputs": "limit",
+        "outputs": "读取场景现有对象",
+        "purpose": "列出当前关卡 Actor"
+      },
+      "successor": {
+        "kind": "exact_command_set",
+        "command_ids": [
+          "world.actors"
+        ]
+      },
+      "semantic_coverage": {
+        "purpose": {
+          "status": "covered",
+          "by": [
+            "world.actors"
+          ],
+          "explanation": "world.actors 是该只读能力的唯一精确公开入口；服务端 Query owner 将它绑定到真实 UE mechanics，并直接覆盖冻结用途“列出当前关卡 Actor”。"
+        },
+        "inputs": {
+          "status": "covered",
+          "by": [
+            "world.actors"
+          ],
+          "explanation": "world.actors 通过精确 target（适用时）和 input 对象接收冻结输入“limit”；context 冻结真实状态层，projection 只约束有界结果，不使用旧 ID、别名或名称猜测。"
+        },
+        "outputs": {
+          "status": "covered",
+          "by": [
+            "world.actors"
+          ],
+          "explanation": "world.actors 从真实 UE/registry/editor 状态生成带稳定身份、revision、完整度和 provenance 的只读结果，覆盖冻结输出“读取场景现有对象”；结果直接经 SDK/CLI 返回，不恢复旧命令。"
+        }
+      },
+      "product_evidence": {
+        "test_id": "UAI.StrictV2.T06.NON.HJSON.QUERY.MIGRATION",
+        "public_command_ids": [
+          "world.actors"
+        ],
+        "required_claims": [
+          "public_entry",
+          "behavior",
+          "readback",
+          "failure_semantics",
+          "cleanup",
+          "legacy_exit",
+          "documentation"
+        ]
+      },
+      "old_id_exit": {
+        "public_executable": false,
+        "manifest_active": false,
+        "sdk_binding_active": false,
+        "compatibility_alias": false
+      },
+      "final_lifecycle": "deprecated_replaced",
+      "resolved_from_contract_id": "uai.historical_capability.t06.non.hjson.query.migration.list_actors/1"
+    },
+    {
+      "historical_command_id": "mesh_get_closest_vertex",
+      "approval": "1)",
+      "historical_source": "docs/commands/01_Core_Level_Assets_Landscape.md",
+      "historical_contract": {
+        "inputs": "id, world_position",
+        "outputs": "对齐前定位候选顶点",
+        "purpose": "查询 Actor 网格中最接近世界点的顶点"
+      },
+      "successor": {
+        "kind": "exact_command_set",
+        "command_ids": [
+          "world.mesh_closest_vertex"
+        ]
+      },
+      "semantic_coverage": {
+        "purpose": {
+          "status": "covered",
+          "by": [
+            "world.mesh_closest_vertex"
+          ],
+          "explanation": "world.mesh_closest_vertex 是该只读能力的唯一精确公开入口；服务端 Query owner 将它绑定到真实 UE mechanics，并直接覆盖冻结用途“查询 Actor 网格中最接近世界点的顶点”。"
+        },
+        "inputs": {
+          "status": "covered",
+          "by": [
+            "world.mesh_closest_vertex"
+          ],
+          "explanation": "world.mesh_closest_vertex 通过精确 target（适用时）和 input 对象接收冻结输入“id, world_position”；context 冻结真实状态层，projection 只约束有界结果，不使用旧 ID、别名或名称猜测。"
+        },
+        "outputs": {
+          "status": "covered",
+          "by": [
+            "world.mesh_closest_vertex"
+          ],
+          "explanation": "world.mesh_closest_vertex 从真实 UE/registry/editor 状态生成带稳定身份、revision、完整度和 provenance 的只读结果，覆盖冻结输出“对齐前定位候选顶点”；结果直接经 SDK/CLI 返回，不恢复旧命令。"
+        }
+      },
+      "product_evidence": {
+        "test_id": "UAI.StrictV2.T06.NON.HJSON.QUERY.MIGRATION",
+        "public_command_ids": [
+          "world.mesh_closest_vertex"
+        ],
+        "required_claims": [
+          "public_entry",
+          "behavior",
+          "readback",
+          "failure_semantics",
+          "cleanup",
+          "legacy_exit",
+          "documentation"
+        ]
+      },
+      "old_id_exit": {
+        "public_executable": false,
+        "manifest_active": false,
+        "sdk_binding_active": false,
+        "compatibility_alias": false
+      },
+      "final_lifecycle": "deprecated_replaced",
+      "resolved_from_contract_id": "uai.historical_capability.t06.non.hjson.query.migration.mesh_get_closest_vertex/1"
+    },
+    {
+      "historical_command_id": "mesh_get_vertex_world_position",
+      "approval": "1)",
+      "historical_source": "docs/commands/01_Core_Level_Assets_Landscape.md",
+      "historical_contract": {
+        "inputs": "id, vertex_index",
+        "outputs": "顶点对齐、几何诊断和留证",
+        "purpose": "读取 Actor 网格指定顶点的世界坐标"
+      },
+      "successor": {
+        "kind": "exact_command_set",
+        "command_ids": [
+          "world.mesh_vertex_position"
+        ]
+      },
+      "semantic_coverage": {
+        "purpose": {
+          "status": "covered",
+          "by": [
+            "world.mesh_vertex_position"
+          ],
+          "explanation": "world.mesh_vertex_position 是该只读能力的唯一精确公开入口；服务端 Query owner 将它绑定到真实 UE mechanics，并直接覆盖冻结用途“读取 Actor 网格指定顶点的世界坐标”。"
+        },
+        "inputs": {
+          "status": "covered",
+          "by": [
+            "world.mesh_vertex_position"
+          ],
+          "explanation": "world.mesh_vertex_position 通过精确 target（适用时）和 input 对象接收冻结输入“id, vertex_index”；context 冻结真实状态层，projection 只约束有界结果，不使用旧 ID、别名或名称猜测。"
+        },
+        "outputs": {
+          "status": "covered",
+          "by": [
+            "world.mesh_vertex_position"
+          ],
+          "explanation": "world.mesh_vertex_position 从真实 UE/registry/editor 状态生成带稳定身份、revision、完整度和 provenance 的只读结果，覆盖冻结输出“顶点对齐、几何诊断和留证”；结果直接经 SDK/CLI 返回，不恢复旧命令。"
+        }
+      },
+      "product_evidence": {
+        "test_id": "UAI.StrictV2.T06.NON.HJSON.QUERY.MIGRATION",
+        "public_command_ids": [
+          "world.mesh_vertex_position"
+        ],
+        "required_claims": [
+          "public_entry",
+          "behavior",
+          "readback",
+          "failure_semantics",
+          "cleanup",
+          "legacy_exit",
+          "documentation"
+        ]
+      },
+      "old_id_exit": {
+        "public_executable": false,
+        "manifest_active": false,
+        "sdk_binding_active": false,
+        "compatibility_alias": false
+      },
+      "final_lifecycle": "deprecated_replaced",
+      "resolved_from_contract_id": "uai.historical_capability.t06.non.hjson.query.migration.mesh_get_vertex_world_position/1"
+    },
+    {
+      "historical_command_id": "navmesh_find_path",
+      "approval": "1)",
+      "historical_source": "docs/commands/01_Core_Level_Assets_Landscape.md",
+      "historical_contract": {
+        "inputs": "allow_partial, end, project_to_nav, start",
+        "outputs": "批量判定关键节点连通性",
+        "purpose": "NavMesh 两点查路"
+      },
+      "successor": {
+        "kind": "exact_command_set",
+        "command_ids": [
+          "world.nav_find_path"
+        ]
+      },
+      "semantic_coverage": {
+        "purpose": {
+          "status": "covered",
+          "by": [
+            "world.nav_find_path"
+          ],
+          "explanation": "world.nav_find_path 是该只读能力的唯一精确公开入口；服务端 Query owner 将它绑定到真实 UE mechanics，并直接覆盖冻结用途“NavMesh 两点查路”。"
+        },
+        "inputs": {
+          "status": "covered",
+          "by": [
+            "world.nav_find_path"
+          ],
+          "explanation": "world.nav_find_path 通过精确 target（适用时）和 input 对象接收冻结输入“allow_partial, end, project_to_nav, start”；context 冻结真实状态层，projection 只约束有界结果，不使用旧 ID、别名或名称猜测。"
+        },
+        "outputs": {
+          "status": "covered",
+          "by": [
+            "world.nav_find_path"
+          ],
+          "explanation": "world.nav_find_path 从真实 UE/registry/editor 状态生成带稳定身份、revision、完整度和 provenance 的只读结果，覆盖冻结输出“批量判定关键节点连通性”；结果直接经 SDK/CLI 返回，不恢复旧命令。"
+        }
+      },
+      "product_evidence": {
+        "test_id": "UAI.StrictV2.T06.NON.HJSON.QUERY.MIGRATION",
+        "public_command_ids": [
+          "world.nav_find_path"
+        ],
+        "required_claims": [
+          "public_entry",
+          "behavior",
+          "readback",
+          "failure_semantics",
+          "cleanup",
+          "legacy_exit",
+          "documentation"
+        ]
+      },
+      "old_id_exit": {
+        "public_executable": false,
+        "manifest_active": false,
+        "sdk_binding_active": false,
+        "compatibility_alias": false
+      },
+      "final_lifecycle": "deprecated_replaced",
+      "resolved_from_contract_id": "uai.historical_capability.t06.non.hjson.query.migration.navmesh_find_path/1"
+    },
+    {
+      "historical_command_id": "navmesh_project_point",
+      "approval": "1)",
+      "historical_source": "docs/commands/01_Core_Level_Assets_Landscape.md",
+      "historical_contract": {
+        "inputs": "location, point, project_query_extent",
+        "outputs": "查路前先确认“投影落点是否在期望层面”",
+        "purpose": "单点投影到 NavMesh（只投影不查路）"
+      },
+      "successor": {
+        "kind": "exact_command_set",
+        "command_ids": [
+          "world.nav_project_point"
+        ]
+      },
+      "semantic_coverage": {
+        "purpose": {
+          "status": "covered",
+          "by": [
+            "world.nav_project_point"
+          ],
+          "explanation": "world.nav_project_point 是该只读能力的唯一精确公开入口；服务端 Query owner 将它绑定到真实 UE mechanics，并直接覆盖冻结用途“单点投影到 NavMesh（只投影不查路）”。"
+        },
+        "inputs": {
+          "status": "covered",
+          "by": [
+            "world.nav_project_point"
+          ],
+          "explanation": "world.nav_project_point 通过精确 target（适用时）和 input 对象接收冻结输入“location, point, project_query_extent”；context 冻结真实状态层，projection 只约束有界结果，不使用旧 ID、别名或名称猜测。"
+        },
+        "outputs": {
+          "status": "covered",
+          "by": [
+            "world.nav_project_point"
+          ],
+          "explanation": "world.nav_project_point 从真实 UE/registry/editor 状态生成带稳定身份、revision、完整度和 provenance 的只读结果，覆盖冻结输出“查路前先确认“投影落点是否在期望层面””；结果直接经 SDK/CLI 返回，不恢复旧命令。"
+        }
+      },
+      "product_evidence": {
+        "test_id": "UAI.StrictV2.T06.NON.HJSON.QUERY.MIGRATION",
+        "public_command_ids": [
+          "world.nav_project_point"
+        ],
+        "required_claims": [
+          "public_entry",
+          "behavior",
+          "readback",
+          "failure_semantics",
+          "cleanup",
+          "legacy_exit",
+          "documentation"
+        ]
+      },
+      "old_id_exit": {
+        "public_executable": false,
+        "manifest_active": false,
+        "sdk_binding_active": false,
+        "compatibility_alias": false
+      },
+      "final_lifecycle": "deprecated_replaced",
+      "resolved_from_contract_id": "uai.historical_capability.t06.non.hjson.query.migration.navmesh_project_point/1"
+    }
+  ]
+}

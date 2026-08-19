@@ -10,7 +10,6 @@ namespace UeAgentEditorViewport
 {
 	extern const TCHAR* const SchemaState;
 	extern const TCHAR* const SchemaTarget;
-	extern const TCHAR* const SchemaScreenshot;
 
 	struct FViewportTarget
 	{
@@ -44,26 +43,10 @@ namespace UeAgentEditorViewport
 		bool bCamera;
 		bool bVisualOptions;
 		bool bPreviewState;
-		bool bScreenshot;
 		TArray<FString> FocusModes;
-		TArray<FString> ScreenshotBackends;
 		TArray<FString> VisualOptionKeys;
 		TArray<FString> PreviewStateKeys;
 		TArray<FString> UnsupportedOptions;
-	};
-
-	struct FViewportScreenshotResult
-	{
-		FViewportScreenshotResult();
-
-		FString FilePath;
-		FString Format;
-		FString CaptureBackend;
-		int32 Width;
-		int32 Height;
-		int64 Bytes;
-		TSharedPtr<FJsonObject> PixelSignal;
-		TSharedPtr<FJsonObject> Capture;
 	};
 
 	struct FViewportState
@@ -92,5 +75,4 @@ namespace UeAgentEditorViewport
 	TSharedPtr<FJsonObject> CameraToJson(const FViewportCamera& Camera);
 	TSharedPtr<FJsonObject> CapabilitiesToJson(const FViewportCapabilities& Capabilities);
 	TSharedPtr<FJsonObject> StateToJson(const FViewportState& State);
-	TSharedPtr<FJsonObject> ScreenshotResultToJson(const FViewportScreenshotResult& Result);
 }

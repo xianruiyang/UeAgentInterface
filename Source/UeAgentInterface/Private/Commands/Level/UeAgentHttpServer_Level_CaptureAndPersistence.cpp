@@ -26,283 +26,593 @@
 
 #include <atomic>
 
-bool FUeAgentHttpServer::ExecuteScreenshotViewport(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, TArray<TSharedPtr<FJsonValue>>& OutArtifacts, FString& OutError) const
+bool FUeAgentHttpServer::TrySaveCurrentLevelWithGuard(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
-	// If called on the game thread, fall back to the synchronous implementation.
-	// (Waiting for Slate redraw on the game thread would deadlock.)
-	if (IsInGameThread())
+	UWorld* World = GetEditorWorld(OutError);
+	if (!World)
 	{
-		return CmdScreenshotViewport(Ctx, OutData, OutArtifacts, OutError);
-	}
-
-	// Parse params on the calling thread.
-	FString Format = TEXT("jpg");
-	int32 Quality = 85;
-	int32 MaxSize = 1024;
-	JsonTryGetString(Ctx.Params, TEXT("format"), Format);
-	double QD = (double)Quality;
-	if (JsonTryGetNumber(Ctx.Params, TEXT("quality"), QD))
-	{
-		Quality = FMath::Clamp((int32)QD, 1, 100);
-	}
-	double MSD = (double)MaxSize;
-	if (JsonTryGetNumber(Ctx.Params, TEXT("max_size"), MSD))
-	{
-		MaxSize = FMath::Clamp((int32)MSD, 64, 8192);
-	}
-
-	Format = Format.ToLower();
-	if (Format == TEXT("jpeg"))
-	{
-		Format = TEXT("jpg");
-	}
-	if (Format != TEXT("png") && Format != TEXT("jpg") && Format != TEXT("webp"))
-	{
-		OutError = TEXT("unsupported_format");
 		return false;
 	}
 
-	struct FShotJob
+	const bool bOnlyIfDirty = [&]()
 	{
-		FString Format;
-		int32 Quality = 85;
-		int32 MaxSize = 1024;
+		bool b = true;
+		JsonTryGetBool(Ctx.Params, TEXT("only_if_dirty"), b);
+		return b;
+	}();
 
-		FViewport* Viewport = nullptr;
-		FDelegateHandle PostTickHandle;
-		FEvent* DoneEvent = nullptr;
+	UPackage* Pkg = World->GetOutermost();
+	const bool bDirty = Pkg ? Pkg->IsDirty() : false;
+	OutData->SetBoolField(TEXT("was_dirty"), bDirty);
+	OutData->SetBoolField(TEXT("python_console_command_executed"), bPythonConsoleCommandExecuted);
 
-		std::atomic_bool bFinished{ false };
-
-		bool bOk = false;
-		FString Error;
-		FString FilePath;
-		int32 Width = 0;
-		int32 Height = 0;
-		int64 Bytes = 0;
-	};
-
-	TSharedRef<FShotJob, ESPMode::ThreadSafe> Job = MakeShared<FShotJob, ESPMode::ThreadSafe>();
-	Job->Format = Format;
-	Job->Quality = Quality;
-	Job->MaxSize = MaxSize;
-	Job->DoneEvent = FPlatformProcess::GetSynchEventFromPool(true);
-
-	// Schedule capture on the game thread, but wait on this thread.
-	AsyncTask(ENamedThreads::GameThread, [Job]()
+	bool bAllowPythonGcRisk = false;
+	JsonTryGetBool(Ctx.Params, TEXT("allow_python_gc_risk"), bAllowPythonGcRisk);
+	OutData->SetBoolField(TEXT("allow_python_gc_risk"), bAllowPythonGcRisk);
+	if (bPythonConsoleCommandExecuted && !bAllowPythonGcRisk)
 	{
-		const UUeAgentInterfaceSettings* Settings = UUeAgentInterfaceSettings::Get();
-		if (!Settings || !Settings->bEnableScreenshots)
-		{
-			Job->Error = TEXT("screenshots_disabled");
-			if (!Job->bFinished.exchange(true))
-			{
-				Job->DoneEvent->Trigger();
-			}
-			return;
-		}
-
-		FLevelEditorViewportClient* LVC = GCurrentLevelEditingViewportClient;
-		if (!LVC || !LVC->Viewport)
-		{
-			Job->Error = TEXT("no_level_editor_viewport");
-			if (!Job->bFinished.exchange(true))
-			{
-				Job->DoneEvent->Trigger();
-			}
-			return;
-		}
-
-		Job->Viewport = LVC->Viewport;
-
-		// Request a redraw; we'll capture on the next Slate post-tick (after DrawWindows).
-		LVC->Invalidate();
-		Job->Viewport->Invalidate();
-
-		if (!FSlateApplication::IsInitialized())
-		{
-			// Fallback: capture immediately (may be stale if the editor hasn't redrawn yet).
-			TArray<FColor> Pixels;
-			FIntPoint Size(0, 0);
-			FString Err;
-			if (!TakeActiveViewportScreenshot(Pixels, Size, Err))
-			{
-				Job->Error = Err;
-				if (!Job->bFinished.exchange(true))
-				{
-					Job->DoneEvent->Trigger();
-				}
-				return;
-			}
-
-			TArray<FColor> Resized;
-			FIntPoint ResizedSize(0, 0);
-			if (!ResizePixelsMaxSize(Pixels, Size, Job->MaxSize, Resized, ResizedSize, Err))
-			{
-				Job->Error = Err;
-				if (!Job->bFinished.exchange(true))
-				{
-					Job->DoneEvent->Trigger();
-				}
-				return;
-			}
-
-			const FString OutPath = MakeShotPath(Job->Format);
-			if (!WriteCompressedImage(Resized, ResizedSize, Job->Format, Job->Quality, OutPath, Err))
-			{
-				Job->Error = Err;
-				if (!Job->bFinished.exchange(true))
-				{
-					Job->DoneEvent->Trigger();
-				}
-				return;
-			}
-
-			Job->FilePath = OutPath;
-			Job->Width = ResizedSize.X;
-			Job->Height = ResizedSize.Y;
-			Job->Bytes = IFileManager::Get().FileSize(*OutPath);
-			Job->bOk = true;
-			if (!Job->bFinished.exchange(true))
-			{
-				Job->DoneEvent->Trigger();
-			}
-			return;
-		}
-
-		Job->PostTickHandle = FSlateApplication::Get().OnPostTick().AddLambda([Job](float)
-		{
-			// One-shot capture.
-			if (FSlateApplication::IsInitialized() && Job->PostTickHandle.IsValid())
-			{
-				FSlateApplication::Get().OnPostTick().Remove(Job->PostTickHandle);
-			}
-
-			// If the job already finished (e.g. timed out/canceled), do nothing.
-			if (Job->bFinished.load())
-			{
-				return;
-			}
-
-			if (!Job->Viewport)
-			{
-				Job->Error = TEXT("no_level_editor_viewport");
-				if (!Job->bFinished.exchange(true))
-				{
-					Job->DoneEvent->Trigger();
-				}
-				return;
-			}
-
-			// Ensure the render thread has completed the draw before we read back pixels.
-			FlushRenderingCommands();
-
-			const FIntPoint Size = Job->Viewport->GetSizeXY();
-			if (Size.X <= 0 || Size.Y <= 0)
-			{
-				Job->Error = TEXT("invalid_viewport_size");
-				if (!Job->bFinished.exchange(true))
-				{
-					Job->DoneEvent->Trigger();
-				}
-				return;
-			}
-
-			TArray<FColor> Pixels;
-			Pixels.AddUninitialized(Size.X * Size.Y);
-			if (!Job->Viewport->ReadPixels(Pixels))
-			{
-				Job->Error = TEXT("read_pixels_failed");
-				if (!Job->bFinished.exchange(true))
-				{
-					Job->DoneEvent->Trigger();
-				}
-				return;
-			}
-
-			TArray<FColor> Resized;
-			FIntPoint ResizedSize(0, 0);
-			FString Err;
-			if (!ResizePixelsMaxSize(Pixels, Size, Job->MaxSize, Resized, ResizedSize, Err))
-			{
-				Job->Error = Err;
-				if (!Job->bFinished.exchange(true))
-				{
-					Job->DoneEvent->Trigger();
-				}
-				return;
-			}
-
-			const FString OutPath = MakeShotPath(Job->Format);
-			if (!WriteCompressedImage(Resized, ResizedSize, Job->Format, Job->Quality, OutPath, Err))
-			{
-				Job->Error = Err;
-				if (!Job->bFinished.exchange(true))
-				{
-					Job->DoneEvent->Trigger();
-				}
-				return;
-			}
-
-			Job->FilePath = OutPath;
-			Job->Width = ResizedSize.X;
-			Job->Height = ResizedSize.Y;
-			Job->Bytes = IFileManager::Get().FileSize(*OutPath);
-			Job->bOk = true;
-			if (!Job->bFinished.exchange(true))
-			{
-				Job->DoneEvent->Trigger();
-			}
-		});
-	});
-
-	bool bDone = Job->DoneEvent->Wait(FTimespan::FromSeconds(5));
-	if (!bDone)
-	{
-		// Mark finished to prevent any later post-tick delegate from trying to signal a recycled event.
-		Job->Error = TEXT("screenshot_timeout");
-		Job->bFinished.exchange(true);
-
-		// Best-effort cleanup (no blocking wait here).
-		AsyncTask(ENamedThreads::GameThread, [Job]()
-		{
-			if (FSlateApplication::IsInitialized() && Job->PostTickHandle.IsValid())
-			{
-				FSlateApplication::Get().OnPostTick().Remove(Job->PostTickHandle);
-			}
-		});
-	}
-
-	FPlatformProcess::ReturnSynchEventToPool(Job->DoneEvent);
-	Job->DoneEvent = nullptr;
-
-	if (!Job->bOk)
-	{
-		OutError = Job->Error.IsEmpty() ? TEXT("screenshot_failed") : Job->Error;
+		OutData->SetBoolField(TEXT("saved"), false);
+		OutData->SetBoolField(TEXT("blocked"), true);
+		OutData->SetStringField(TEXT("block_reason"), TEXT("python_gc_save_risk"));
+		OutData->SetStringField(TEXT("reason"), TEXT("python_gc_save_risk"));
+		OutData->SetBoolField(TEXT("requires_allow_python_gc_risk"), true);
+		OutError = TEXT("save_current_level_blocked_python_gc_risk");
 		return false;
 	}
 
-	OutData = MakeShared<FJsonObject>();
-	OutData->SetStringField(TEXT("file_path"), Job->FilePath);
-	OutData->SetNumberField(TEXT("width"), Job->Width);
-	OutData->SetNumberField(TEXT("height"), Job->Height);
-	OutData->SetNumberField(TEXT("bytes"), (double)Job->Bytes);
-	OutData->SetStringField(TEXT("format"), Job->Format);
+	if (bOnlyIfDirty && !bDirty)
+	{
+		OutData->SetBoolField(TEXT("saved"), false);
+		OutData->SetStringField(TEXT("reason"), TEXT("not_dirty"));
+		return true;
+	}
 
-	TSharedPtr<FJsonObject> Artifact = MakeShared<FJsonObject>();
-	Artifact->SetStringField(TEXT("kind"), TEXT("screenshot"));
-	Artifact->SetStringField(TEXT("file_path"), Job->FilePath);
-	Artifact->SetNumberField(TEXT("bytes"), (double)Job->Bytes);
-	Artifact->SetStringField(TEXT("mime"), Job->Format == TEXT("png") ? TEXT("image/png") : (Job->Format == TEXT("webp") ? TEXT("image/webp") : TEXT("image/jpeg")));
-	Artifact->SetNumberField(TEXT("width"), Job->Width);
-	Artifact->SetNumberField(TEXT("height"), Job->Height);
-	OutArtifacts.Add(MakeShared<FJsonValueObject>(Artifact));
-
+	const bool bSaved = UEditorLoadingAndSavingUtils::SaveCurrentLevel();
+	OutData->SetBoolField(TEXT("saved"), bSaved);
+	if (!bSaved)
+	{
+		OutError = TEXT("save_failed");
+		return false;
+	}
 	return true;
 }
 
-bool FUeAgentHttpServer::CmdScreenshotViewport(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, TArray<TSharedPtr<FJsonValue>>& OutArtifacts, FString& OutError) const
+bool FUeAgentHttpServer::CmdSaveCurrentLevel(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
+	return TrySaveCurrentLevelWithGuard(Ctx, OutData, OutError);
+}
+
+bool FUeAgentHttpServer::CmdLevelCreateBlank(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+{
+	FString PackagePath;
+	if (!UeAgentLevelOps::TryGetLevelPackagePath(Ctx.Params, PackagePath))
+	{
+		OutError = TEXT("missing_level_path");
+		return false;
+	}
+
+	FString Filename;
+	if (!UeAgentLevelOps::TryLevelPackageToFilename(PackagePath, Filename, OutError))
+	{
+		return false;
+	}
+
+	FString OverwritePolicy = TEXT("fail");
+	JsonTryGetString(Ctx.Params, TEXT("overwrite_policy"), OverwritePolicy);
+	OverwritePolicy = OverwritePolicy.TrimStartAndEnd().ToLower();
+	if (OverwritePolicy.IsEmpty())
+	{
+		OverwritePolicy = TEXT("fail");
+	}
+	if (FPackageName::DoesPackageExist(PackagePath) && OverwritePolicy != TEXT("replace") && OverwritePolicy != TEXT("reuse"))
+	{
+		OutError = TEXT("level_asset_exists");
+		return false;
+	}
+
+	if (OverwritePolicy == TEXT("reuse") && FPackageName::DoesPackageExist(PackagePath))
+	{
+		UWorld* LoadedWorld = UEditorLoadingAndSavingUtils::LoadMap(Filename);
+		if (!LoadedWorld)
+		{
+			OutError = TEXT("level_open_failed");
+			return false;
+		}
+		OutData->SetStringField(TEXT("schema"), TEXT("uai.level.create_blank_result.v1"));
+		OutData->SetBoolField(TEXT("created"), false);
+		OutData->SetBoolField(TEXT("opened"), true);
+		OutData->SetBoolField(TEXT("saved"), false);
+		OutData->SetStringField(TEXT("asset_path"), PackagePath);
+		OutData->SetStringField(TEXT("filename"), Filename);
+		OutData->SetStringField(TEXT("world_path"), LoadedWorld->GetPathName());
+		OutData->SetStringField(TEXT("overwrite_policy"), OverwritePolicy);
+		return true;
+	}
+
+	bool bSaveExistingMap = true;
+	JsonTryGetBool(Ctx.Params, TEXT("save_existing_map"), bSaveExistingMap);
+	UWorld* NewWorld = UEditorLoadingAndSavingUtils::NewBlankMap(bSaveExistingMap);
+	if (!NewWorld)
+	{
+		OutError = TEXT("new_blank_map_failed");
+		return false;
+	}
+
+	const bool bSaved = UEditorLoadingAndSavingUtils::SaveMap(NewWorld, PackagePath);
+	if (!bSaved)
+	{
+		OutError = TEXT("level_save_failed");
+		return false;
+	}
+
+	OutData->SetStringField(TEXT("schema"), TEXT("uai.level.create_blank_result.v1"));
+	OutData->SetBoolField(TEXT("created"), true);
+	OutData->SetBoolField(TEXT("opened"), true);
+	OutData->SetBoolField(TEXT("saved"), true);
+	OutData->SetStringField(TEXT("asset_path"), PackagePath);
+	OutData->SetStringField(TEXT("filename"), Filename);
+	OutData->SetStringField(TEXT("world_path"), NewWorld->GetPathName());
+	OutData->SetStringField(TEXT("overwrite_policy"), OverwritePolicy);
+	OutData->SetBoolField(TEXT("save_existing_map"), bSaveExistingMap);
+	return true;
+}
+
+bool FUeAgentHttpServer::CmdLevelOpen(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+{
+	FString PackagePath;
+	if (!UeAgentLevelOps::TryGetLevelPackagePath(Ctx.Params, PackagePath))
+	{
+		OutError = TEXT("missing_level_path");
+		return false;
+	}
+
+	FString Filename;
+	if (!UeAgentLevelOps::TryLevelPackageToFilename(PackagePath, Filename, OutError))
+	{
+		return false;
+	}
+	if (!FPackageName::DoesPackageExist(PackagePath) && !FPaths::FileExists(Filename))
+	{
+		OutError = TEXT("level_asset_not_found");
+		return false;
+	}
+
+	bool bSaveExistingMap = true;
+	JsonTryGetBool(Ctx.Params, TEXT("save_existing_map"), bSaveExistingMap);
+	if (bSaveExistingMap && !UEditorLoadingAndSavingUtils::SaveDirtyPackages(true, false))
+	{
+		OutError = TEXT("save_existing_map_failed");
+		return false;
+	}
+
+	UWorld* LoadedWorld = UEditorLoadingAndSavingUtils::LoadMap(Filename);
+	if (!LoadedWorld)
+	{
+		OutError = TEXT("level_open_failed");
+		return false;
+	}
+
+	OutData->SetStringField(TEXT("schema"), TEXT("uai.level.open_result.v1"));
+	OutData->SetBoolField(TEXT("opened"), true);
+	OutData->SetStringField(TEXT("asset_path"), PackagePath);
+	OutData->SetStringField(TEXT("filename"), Filename);
+	OutData->SetStringField(TEXT("world_path"), LoadedWorld->GetPathName());
+	OutData->SetBoolField(TEXT("save_existing_map"), bSaveExistingMap);
+	return true;
+}
+
+UWorld* FUeAgentHttpServer::GetEditorWorld(FString& OutError)
+{
+	if (!GEditor)
+	{
+		OutError = TEXT("no_geditor");
+		return nullptr;
+	}
+	UWorld* World = GEditor->GetEditorWorldContext().World();
+	if (!World)
+	{
+		OutError = TEXT("no_editor_world");
+		return nullptr;
+	}
+	return World;
+}
+
+AActor* FUeAgentHttpServer::FindActorByNameOrLabel(UWorld* World, const FString& NameOrLabel)
+{
+	for (TActorIterator<AActor> It(World); It; ++It)
+	{
+		AActor* A = *It;
+		if (!A)
+		{
+			continue;
+		}
+		if (A->GetName() == NameOrLabel || A->GetActorLabel() == NameOrLabel)
+		{
+			return A;
+		}
+	}
+	return nullptr;
+}
+
+bool FUeAgentHttpServer::TakeActiveViewportScreenshot(TArray<FColor>& OutPixels, FIntPoint& OutSize, FString& OutError)
+{
+	TSharedPtr<FJsonObject> CaptureInfo;
+	return TakeActiveViewportScreenshotWithOptions(0, false, 0, 1.0f / 60.0f, OutPixels, OutSize, CaptureInfo, OutError);
+}
+
+bool FUeAgentHttpServer::TakeActiveViewportScreenshotWithOptions(int32 WarmupFrames, bool bTickEditorWorld, int32 EditorWorldTickFrames, float EditorWorldTickDeltaSeconds, TArray<FColor>& OutPixels, FIntPoint& OutSize, TSharedPtr<FJsonObject>& OutCaptureInfo, FString& OutError)
+{
+	WarmupFrames = FMath::Clamp(WarmupFrames, 0, 8);
+	EditorWorldTickFrames = bTickEditorWorld ? FMath::Clamp(EditorWorldTickFrames, 0, 240) : 0;
+	EditorWorldTickDeltaSeconds = FMath::Clamp(EditorWorldTickDeltaSeconds, 1.0f / 240.0f, 1.0f / 5.0f);
+
+	FString SelectionReason;
+	FLevelEditorViewportClient* LVC = UeAgentLevelOps::GetPreferredLevelViewportClient(&SelectionReason);
+	if (!LVC || !LVC->Viewport)
+	{
+		OutError = TEXT("no_level_editor_viewport");
+		return false;
+	}
+
+	FViewport* Viewport = LVC->Viewport;
+	const bool bRealtimeBefore = LVC->IsRealtime();
+	const FText ScreenshotRealtimeOverrideSystem = NSLOCTEXT("UeAgentInterface", "ScreenshotRealtimeOverrideSystem", "UeAgentInterfaceScreenshot");
+	const bool bNeedTemporaryRealtime = !LVC->IsRealtime();
+	if (bNeedTemporaryRealtime)
+	{
+		if (LVC->HasRealtimeOverride(ScreenshotRealtimeOverrideSystem))
+		{
+			LVC->RemoveRealtimeOverride(ScreenshotRealtimeOverrideSystem, false);
+		}
+		LVC->AddRealtimeOverride(true, ScreenshotRealtimeOverrideSystem);
+	}
+
+	int32 DrawsPerformed = 0;
+	int32 EditorWorldTicksPerformed = 0;
+	if (EditorWorldTickFrames > 0)
+	{
+		UWorld* EditorWorld = nullptr;
+		if (GEditor)
+		{
+			EditorWorld = GEditor->GetEditorWorldContext().World();
+		}
+		if (!EditorWorld)
+		{
+			OutError = TEXT("no_editor_world_for_warmup_tick");
+			return false;
+		}
+		for (int32 TickIndex = 0; TickIndex < EditorWorldTickFrames; ++TickIndex)
+		{
+			EditorWorld->Tick(LEVELTICK_All, EditorWorldTickDeltaSeconds);
+			++EditorWorldTicksPerformed;
+		}
+	}
+
+	for (int32 FrameIndex = 0; FrameIndex < WarmupFrames; ++FrameIndex)
+	{
+		LVC->Invalidate();
+		Viewport->Invalidate();
+		Viewport->Draw(/*bShouldPresent*/ true);
+		FlushRenderingCommands();
+		DrawsPerformed++;
+	}
+
+	LVC->Invalidate();
+	Viewport->Invalidate();
+	Viewport->Draw(/*bShouldPresent*/ true);
+	FlushRenderingCommands();
+	DrawsPerformed++;
+
+	if (bNeedTemporaryRealtime && LVC->HasRealtimeOverride(ScreenshotRealtimeOverrideSystem))
+	{
+		LVC->RemoveRealtimeOverride(ScreenshotRealtimeOverrideSystem, false);
+	}
+
+	const FIntPoint Size = Viewport->GetSizeXY();
+	if (Size.X <= 0 || Size.Y <= 0)
+	{
+		OutError = TEXT("invalid_viewport_size");
+		return false;
+	}
+
+	TArray<FColor> Pixels;
+	Pixels.AddUninitialized(Size.X * Size.Y);
+	if (!Viewport->ReadPixels(Pixels))
+	{
+		OutError = TEXT("read_pixels_failed");
+		return false;
+	}
+
+	OutPixels = MoveTemp(Pixels);
+	OutSize = Size;
+
+	OutCaptureInfo = MakeShared<FJsonObject>();
+	OutCaptureInfo->SetStringField(TEXT("schema"), TEXT("uai.viewport_capture.v1"));
+	OutCaptureInfo->SetStringField(TEXT("render_path"), TEXT("level_viewport_backbuffer"));
+	OutCaptureInfo->SetBoolField(TEXT("final_lit_composition"), UeAgentLevelOps::IsFinalLitCompositionViewMode(LVC->GetViewMode()));
+	OutCaptureInfo->SetStringField(TEXT("view_mode_name"), UeAgentLevelOps::ViewModeIndexToStableName(LVC->GetViewMode()));
+	OutCaptureInfo->SetNumberField(TEXT("warmup_frames_requested"), WarmupFrames);
+	OutCaptureInfo->SetNumberField(TEXT("draws_performed"), DrawsPerformed);
+	OutCaptureInfo->SetBoolField(TEXT("editor_world_tick_requested"), bTickEditorWorld);
+	OutCaptureInfo->SetNumberField(TEXT("editor_world_tick_frames_requested"), EditorWorldTickFrames);
+	OutCaptureInfo->SetNumberField(TEXT("editor_world_ticks_performed"), EditorWorldTicksPerformed);
+	OutCaptureInfo->SetNumberField(TEXT("editor_world_tick_delta_seconds"), EditorWorldTickDeltaSeconds);
+	OutCaptureInfo->SetBoolField(TEXT("temporary_realtime_override"), bNeedTemporaryRealtime);
+	OutCaptureInfo->SetBoolField(TEXT("realtime_before_capture"), bRealtimeBefore);
+	OutCaptureInfo->SetObjectField(TEXT("viewport"), UeAgentLevelOps::MakeViewportClientJson(LVC, SelectionReason));
+	return true;
+}
+
+bool FUeAgentHttpServer::ResizePixelsMaxSize(const TArray<FColor>& InPixels, const FIntPoint& InSize, int32 MaxSize, TArray<FColor>& OutPixels, FIntPoint& OutSize, FString& OutError)
+{
+	if (InSize.X <= 0 || InSize.Y <= 0 || InPixels.Num() != InSize.X * InSize.Y)
+	{
+		OutError = TEXT("invalid_pixels");
+		return false;
+	}
+
+	MaxSize = FMath::Clamp(MaxSize, 64, 8192);
+	if (InSize.X <= MaxSize && InSize.Y <= MaxSize)
+	{
+		OutPixels = InPixels;
+		OutSize = InSize;
+		return true;
+	}
+
+	const float Scale = (float)MaxSize / (float)FMath::Max(InSize.X, InSize.Y);
+	const int32 NewX = FMath::Max(1, (int32)FMath::RoundToInt((float)InSize.X * Scale));
+	const int32 NewY = FMath::Max(1, (int32)FMath::RoundToInt((float)InSize.Y * Scale));
+
+	OutPixels.Reset();
+	OutPixels.AddUninitialized(NewX * NewY);
+	FImageUtils::ImageResize(InSize.X, InSize.Y, InPixels, NewX, NewY, OutPixels, /*bLinearSpace*/ true);
+	OutSize = FIntPoint(NewX, NewY);
+	return true;
+}
+
+bool FUeAgentHttpServer::WriteCompressedImage(const TArray<FColor>& Pixels, const FIntPoint& Size, const FString& Format, int32 Quality, const FString& OutFilePath, FString& OutError, bool bForceOpaqueAlpha)
+{
+	if (Size.X <= 0 || Size.Y <= 0 || Pixels.Num() != Size.X * Size.Y)
+	{
+		OutError = TEXT("invalid_pixels");
+		return false;
+	}
+
+	const TArray<FColor>* PixelsToWrite = &Pixels;
+	TArray<FColor> OpaquePixels;
+	if (bForceOpaqueAlpha)
+	{
+		OpaquePixels = Pixels;
+		for (FColor& Pixel : OpaquePixels)
+		{
+			Pixel.A = 255;
+		}
+		PixelsToWrite = &OpaquePixels;
+	}
+
+	TArray64<uint8> Compressed;
+	const FImageView Img((void*)PixelsToWrite->GetData(), Size.X, Size.Y, ERawImageFormat::BGRA8);
+	if (!FImageUtils::CompressImage(Compressed, *Format, Img, Quality))
+	{
+		OutError = TEXT("compress_failed");
+		return false;
+	}
+
+	TArray<uint8> Bytes;
+	Bytes.Append(Compressed.GetData(), (int32)Compressed.Num());
+
+	IFileManager::Get().MakeDirectory(*FPaths::GetPath(OutFilePath), true);
+	if (!FFileHelper::SaveArrayToFile(Bytes, *OutFilePath))
+	{
+		OutError = TEXT("write_file_failed");
+		return false;
+	}
+	return true;
+}
+
+bool FUeAgentHttpServer::WriteFrameSequenceSheetImage(const TArray<TArray<FColor>>& FramePixels, const TArray<FString>& FrameLabels, const FIntPoint& FrameSize, const TSharedPtr<FJsonObject>& Params, const FString& Format, int32 Quality, FString& OutFilePath, TSharedPtr<FJsonObject>& OutSheetData, FString& OutError)
+{
+	if (FramePixels.Num() <= 0 || FrameSize.X <= 0 || FrameSize.Y <= 0)
+	{
+		OutError = TEXT("frame_sheet_empty");
+		return false;
+	}
+	for (int32 FrameIndex = 0; FrameIndex < FramePixels.Num(); ++FrameIndex)
+	{
+		if (FramePixels[FrameIndex].Num() != FrameSize.X * FrameSize.Y)
+		{
+			OutError = TEXT("frame_sheet_frame_size_mismatch");
+			return false;
+		}
+	}
+
+	const int32 GridSide = FMath::Max(1, FMath::CeilToInt(FMath::Sqrt(static_cast<float>(FramePixels.Num()))));
+	const int32 Columns = GridSide;
+	const int32 Rows = GridSide;
+
+	int32 Padding = 8;
+	double PaddingValue = static_cast<double>(Padding);
+	if (JsonTryGetNumber(Params, TEXT("frame_sheet_padding"), PaddingValue) ||
+		JsonTryGetNumber(Params, TEXT("sheet_padding"), PaddingValue))
+	{
+		Padding = FMath::Clamp(FMath::RoundToInt(PaddingValue), 0, 256);
+	}
+
+	int32 LabelScale = 3;
+	double LabelScaleValue = static_cast<double>(LabelScale);
+	if (JsonTryGetNumber(Params, TEXT("frame_sheet_label_scale"), LabelScaleValue) ||
+		JsonTryGetNumber(Params, TEXT("sheet_label_scale"), LabelScaleValue))
+	{
+		LabelScale = FMath::Clamp(FMath::RoundToInt(LabelScaleValue), 1, 6);
+	}
+	const int32 LabelMargin = FMath::Max(3, LabelScale * 2);
+
+	int32 SheetMaxSize = 8192;
+	double SheetMaxSizeValue = static_cast<double>(SheetMaxSize);
+	if (JsonTryGetNumber(Params, TEXT("frame_sheet_max_size"), SheetMaxSizeValue) ||
+		JsonTryGetNumber(Params, TEXT("sheet_max_size"), SheetMaxSizeValue))
+	{
+		SheetMaxSize = FMath::Clamp(FMath::RoundToInt(SheetMaxSizeValue), 64, 8192);
+	}
+
+	const int64 SheetWidth64 = static_cast<int64>(Columns) * FrameSize.X + static_cast<int64>(Columns + 1) * Padding;
+	const int64 SheetHeight64 = static_cast<int64>(Rows) * FrameSize.Y + static_cast<int64>(Rows + 1) * Padding;
+	if (SheetWidth64 <= 0 || SheetHeight64 <= 0 || SheetWidth64 > 32768 || SheetHeight64 > 32768 || SheetWidth64 * SheetHeight64 > 268435456LL)
+	{
+		OutError = TEXT("frame_sheet_too_large");
+		return false;
+	}
+
+	const FIntPoint RawSheetSize(static_cast<int32>(SheetWidth64), static_cast<int32>(SheetHeight64));
+	TArray<FColor> SheetPixels;
+	SheetPixels.Init(FColor(24, 24, 24, 255), RawSheetSize.X * RawSheetSize.Y);
+	for (int32 FrameIndex = 0; FrameIndex < FramePixels.Num(); ++FrameIndex)
+	{
+		const int32 Column = FrameIndex % Columns;
+		const int32 Row = FrameIndex / Columns;
+		const int32 DestX = Padding + Column * (FrameSize.X + Padding);
+		const int32 DestY = Padding + Row * (FrameSize.Y + Padding);
+		const TArray<FColor>& SourcePixels = FramePixels[FrameIndex];
+		for (int32 Y = 0; Y < FrameSize.Y; ++Y)
+		{
+			const FColor* SourceRow = SourcePixels.GetData() + Y * FrameSize.X;
+			FColor* DestRow = SheetPixels.GetData() + (DestY + Y) * RawSheetSize.X + DestX;
+			FMemory::Memcpy(DestRow, SourceRow, sizeof(FColor) * FrameSize.X);
+		}
+	}
+
+	auto GlyphRows = [](TCHAR Ch, const TCHAR*& R0, const TCHAR*& R1, const TCHAR*& R2, const TCHAR*& R3, const TCHAR*& R4, const TCHAR*& R5, const TCHAR*& R6) -> bool
+	{
+		switch (Ch)
+		{
+		case TCHAR('0'): R0 = TEXT("01110"); R1 = TEXT("10001"); R2 = TEXT("10011"); R3 = TEXT("10101"); R4 = TEXT("11001"); R5 = TEXT("10001"); R6 = TEXT("01110"); return true;
+		case TCHAR('1'): R0 = TEXT("00100"); R1 = TEXT("01100"); R2 = TEXT("00100"); R3 = TEXT("00100"); R4 = TEXT("00100"); R5 = TEXT("00100"); R6 = TEXT("01110"); return true;
+		case TCHAR('2'): R0 = TEXT("01110"); R1 = TEXT("10001"); R2 = TEXT("00001"); R3 = TEXT("00010"); R4 = TEXT("00100"); R5 = TEXT("01000"); R6 = TEXT("11111"); return true;
+		case TCHAR('3'): R0 = TEXT("11110"); R1 = TEXT("00001"); R2 = TEXT("00001"); R3 = TEXT("01110"); R4 = TEXT("00001"); R5 = TEXT("00001"); R6 = TEXT("11110"); return true;
+		case TCHAR('4'): R0 = TEXT("00010"); R1 = TEXT("00110"); R2 = TEXT("01010"); R3 = TEXT("10010"); R4 = TEXT("11111"); R5 = TEXT("00010"); R6 = TEXT("00010"); return true;
+		case TCHAR('5'): R0 = TEXT("11111"); R1 = TEXT("10000"); R2 = TEXT("10000"); R3 = TEXT("11110"); R4 = TEXT("00001"); R5 = TEXT("00001"); R6 = TEXT("11110"); return true;
+		case TCHAR('6'): R0 = TEXT("01110"); R1 = TEXT("10000"); R2 = TEXT("10000"); R3 = TEXT("11110"); R4 = TEXT("10001"); R5 = TEXT("10001"); R6 = TEXT("01110"); return true;
+		case TCHAR('7'): R0 = TEXT("11111"); R1 = TEXT("00001"); R2 = TEXT("00010"); R3 = TEXT("00100"); R4 = TEXT("01000"); R5 = TEXT("01000"); R6 = TEXT("01000"); return true;
+		case TCHAR('8'): R0 = TEXT("01110"); R1 = TEXT("10001"); R2 = TEXT("10001"); R3 = TEXT("01110"); R4 = TEXT("10001"); R5 = TEXT("10001"); R6 = TEXT("01110"); return true;
+		case TCHAR('9'): R0 = TEXT("01110"); R1 = TEXT("10001"); R2 = TEXT("10001"); R3 = TEXT("01111"); R4 = TEXT("00001"); R5 = TEXT("00001"); R6 = TEXT("01110"); return true;
+		case TCHAR('F'):
+		case TCHAR('f'): R0 = TEXT("11111"); R1 = TEXT("10000"); R2 = TEXT("10000"); R3 = TEXT("11110"); R4 = TEXT("10000"); R5 = TEXT("10000"); R6 = TEXT("10000"); return true;
+		case TCHAR('-'): R0 = TEXT("00000"); R1 = TEXT("00000"); R2 = TEXT("00000"); R3 = TEXT("11110"); R4 = TEXT("00000"); R5 = TEXT("00000"); R6 = TEXT("00000"); return true;
+		default: break;
+		}
+		R0 = R1 = R2 = R3 = R4 = R5 = R6 = TEXT("00000");
+		return Ch == TCHAR(' ');
+	};
+
+	auto DrawRect = [&](const int32 X, const int32 Y, const int32 W, const int32 H, const FColor Color)
+	{
+		const int32 MinX = FMath::Clamp(X, 0, RawSheetSize.X);
+		const int32 MinY = FMath::Clamp(Y, 0, RawSheetSize.Y);
+		const int32 MaxX = FMath::Clamp(X + W, 0, RawSheetSize.X);
+		const int32 MaxY = FMath::Clamp(Y + H, 0, RawSheetSize.Y);
+		for (int32 Py = MinY; Py < MaxY; ++Py)
+		{
+			for (int32 Px = MinX; Px < MaxX; ++Px)
+			{
+				SheetPixels[Py * RawSheetSize.X + Px] = Color;
+			}
+		}
+	};
+
+	auto DrawText = [&](const FString& Text, const int32 X, const int32 Y, const FColor Color)
+	{
+		int32 CursorX = X;
+		for (int32 CharIndex = 0; CharIndex < Text.Len(); ++CharIndex)
+		{
+			const TCHAR* Rows[7] = {};
+			if (!GlyphRows(Text[CharIndex], Rows[0], Rows[1], Rows[2], Rows[3], Rows[4], Rows[5], Rows[6]))
+			{
+				CursorX += LabelScale * 6;
+				continue;
+			}
+			for (int32 Gy = 0; Gy < 7; ++Gy)
+			{
+				for (int32 Gx = 0; Gx < 5; ++Gx)
+				{
+					if (Rows[Gy][Gx] != TCHAR('1'))
+					{
+						continue;
+					}
+					DrawRect(CursorX + Gx * LabelScale, Y + Gy * LabelScale, LabelScale, LabelScale, Color);
+				}
+			}
+			CursorX += LabelScale * 6;
+		}
+	};
+
+	for (int32 FrameIndex = 0; FrameIndex < FramePixels.Num(); ++FrameIndex)
+	{
+		const int32 Column = FrameIndex % Columns;
+		const int32 Row = FrameIndex / Columns;
+		const int32 DestX = Padding + Column * (FrameSize.X + Padding);
+		const int32 DestY = Padding + Row * (FrameSize.Y + Padding);
+		const FString Label = FrameLabels.IsValidIndex(FrameIndex) && !FrameLabels[FrameIndex].IsEmpty()
+			? FrameLabels[FrameIndex]
+			: FString::Printf(TEXT("F%d"), FrameIndex);
+		const int32 TextWidth = FMath::Max(1, Label.Len()) * LabelScale * 6;
+		const int32 TextHeight = LabelScale * 7;
+		const int32 LabelBgWidth = FMath::Min(FrameSize.X - LabelMargin * 2, TextWidth + LabelMargin * 2);
+		const int32 LabelBgHeight = FMath::Min(FrameSize.Y - LabelMargin * 2, TextHeight + LabelMargin * 2);
+		if (LabelBgWidth > 0 && LabelBgHeight > 0)
+		{
+			DrawRect(DestX + LabelMargin, DestY + LabelMargin, LabelBgWidth, LabelBgHeight, FColor(8, 8, 8, 255));
+			DrawText(Label, DestX + LabelMargin * 2, DestY + LabelMargin * 2, FColor(255, 230, 120, 255));
+		}
+	}
+
+	TArray<FColor> OutputPixels;
+	FIntPoint OutputSize(0, 0);
+	if (!ResizePixelsMaxSize(SheetPixels, RawSheetSize, SheetMaxSize, OutputPixels, OutputSize, OutError))
+	{
+		return false;
+	}
+
+	OutFilePath = MakeShotPath(Format);
+	if (!WriteCompressedImage(OutputPixels, OutputSize, Format, Quality, OutFilePath, OutError))
+	{
+		return false;
+	}
+
+	const int64 Bytes = IFileManager::Get().FileSize(*OutFilePath);
+	OutSheetData = MakeShared<FJsonObject>();
+	OutSheetData->SetBoolField(TEXT("created"), true);
+	OutSheetData->SetStringField(TEXT("file_path"), OutFilePath);
+	OutSheetData->SetNumberField(TEXT("width"), OutputSize.X);
+	OutSheetData->SetNumberField(TEXT("height"), OutputSize.Y);
+	OutSheetData->SetNumberField(TEXT("bytes"), static_cast<double>(Bytes));
+	OutSheetData->SetNumberField(TEXT("columns"), Columns);
+	OutSheetData->SetNumberField(TEXT("rows"), Rows);
+	OutSheetData->SetNumberField(TEXT("frame_count"), FramePixels.Num());
+	OutSheetData->SetNumberField(TEXT("tile_width"), FrameSize.X);
+	OutSheetData->SetNumberField(TEXT("tile_height"), FrameSize.Y);
+	OutSheetData->SetNumberField(TEXT("padding"), Padding);
+	OutSheetData->SetNumberField(TEXT("label_scale"), LabelScale);
+	OutSheetData->SetNumberField(TEXT("raw_width"), RawSheetSize.X);
+	OutSheetData->SetNumberField(TEXT("raw_height"), RawSheetSize.Y);
+	OutSheetData->SetNumberField(TEXT("max_size"), SheetMaxSize);
+	OutSheetData->SetNumberField(TEXT("scale"), RawSheetSize.X > 0 ? static_cast<double>(OutputSize.X) / static_cast<double>(RawSheetSize.X) : 1.0);
+	return true;
+}
+
+FString FUeAgentHttpServer::MakeShotPath(const FString& Ext)
+{
+	const UUeAgentInterfaceSettings* Settings = UUeAgentInterfaceSettings::Get();
+	const FString Hostname = FPlatformProcess::ComputerName();
+	const FString Ts = FDateTime::Now().ToString(TEXT("%Y%m%d_%H%M%S_%s"));
+
+	const FString RootRel = Settings ? Settings->ArtifactsDirRelative : TEXT("Saved/RemoteArtifacts");
+	const FString ShotsDir = FPaths::ConvertRelativePathToFull(FPaths::ProjectDir(), RootRel / TEXT("Shots"));
+	return FPaths::Combine(ShotsDir, FString::Printf(TEXT("shot_%s_%s.%s"), *Hostname, *Ts, *Ext));
+}
+
+bool FUeAgentHttpServer::CmdScreenshotViewport(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+{
+	TArray<TSharedPtr<FJsonValue>> OutArtifacts;
 	if (!OutData.IsValid())
 	{
 		OutData = MakeShared<FJsonObject>();
@@ -314,91 +624,6 @@ bool FUeAgentHttpServer::CmdScreenshotViewport(const FUeAgentRequestContext& Ctx
 		OutError = TEXT("screenshots_disabled");
 		FUeAgentInterfaceLogger::Log(TEXT("CmdScreenshotViewport req=%s failed: %s"), *Ctx.RequestId, *OutError);
 		return false;
-	}
-
-	const FString AdvancedScreenshotKeys[] = {
-		TEXT("view_mode"),
-		TEXT("editor_view_mode"),
-		TEXT("mode"),
-		TEXT("mode_key"),
-		TEXT("debug_view_mode"),
-		TEXT("visualization_family"),
-		TEXT("visualization_mode"),
-		TEXT("visualizer"),
-		TEXT("visualizer_mode"),
-		TEXT("view_mode_family"),
-		TEXT("debug_mode")
-	};
-	bool bRequiresLegacyViewModePath = false;
-	if (Ctx.Params.IsValid())
-	{
-		for (const FString& Key : AdvancedScreenshotKeys)
-		{
-			if (Ctx.Params->HasField(Key))
-			{
-				bRequiresLegacyViewModePath = true;
-				break;
-			}
-		}
-	}
-	if (!bRequiresLegacyViewModePath)
-	{
-		TSharedPtr<FJsonObject> ProxyParams = UeAgentEditorViewportLegacy::MakeParamsWithTarget(Ctx.Params, UeAgentEditorViewportLegacy::MakeLevelTarget());
-		if (!ProxyParams->HasField(TEXT("format")))
-		{
-			ProxyParams->SetStringField(TEXT("format"), TEXT("jpg"));
-		}
-		if (!ProxyParams->HasField(TEXT("quality")))
-		{
-			ProxyParams->SetNumberField(TEXT("quality"), 85);
-		}
-		if (!ProxyParams->HasField(TEXT("max_size")))
-		{
-			ProxyParams->SetNumberField(TEXT("max_size"), 1024);
-		}
-		if (Ctx.Params.IsValid() && !ProxyParams->HasField(TEXT("warmup_frames")))
-		{
-			const TSharedPtr<FJsonValue>* RenderWarmupFrames = Ctx.Params->Values.Find(TEXT("render_warmup_frames"));
-			if (RenderWarmupFrames && RenderWarmupFrames->IsValid())
-			{
-				ProxyParams->Values.Add(TEXT("warmup_frames"), *RenderWarmupFrames);
-			}
-		}
-
-		FUeAgentRequestContext ProxyCtx = Ctx;
-		ProxyCtx.Command = TEXT("editor_viewport_screenshot");
-		ProxyCtx.Params = ProxyParams;
-		if (!ExecuteEditorViewportCommand(TEXT("editor_viewport_screenshot"), ProxyCtx, OutData, OutError))
-		{
-			FUeAgentInterfaceLogger::Log(TEXT("CmdScreenshotViewport req=%s wrapper failed: %s"), *Ctx.RequestId, *OutError);
-			return false;
-		}
-		UeAgentEditorViewportLegacy::AddCompatMetadata(OutData, TEXT("screenshot_viewport"), TEXT("editor_viewport_screenshot"));
-		OutData->SetBoolField(TEXT("deprecated_for_new_authoring"), false);
-		OutData->SetBoolField(TEXT("partial_migration"), true);
-		OutData->SetStringField(TEXT("compat_subpath"), TEXT("basic_level_viewport_screenshot"));
-
-		FString FilePath;
-		FString Format = TEXT("jpg");
-		double Bytes = 0.0;
-		double Width = 0.0;
-		double Height = 0.0;
-		OutData->TryGetStringField(TEXT("file_path"), FilePath);
-		OutData->TryGetStringField(TEXT("format"), Format);
-		OutData->TryGetNumberField(TEXT("bytes"), Bytes);
-		OutData->TryGetNumberField(TEXT("width"), Width);
-		OutData->TryGetNumberField(TEXT("height"), Height);
-		TSharedPtr<FJsonObject> Artifact = MakeShared<FJsonObject>();
-		Artifact->SetStringField(TEXT("kind"), TEXT("screenshot"));
-		Artifact->SetStringField(TEXT("file_path"), FilePath);
-		Artifact->SetNumberField(TEXT("bytes"), Bytes);
-		Artifact->SetStringField(TEXT("mime"), Format == TEXT("png") ? TEXT("image/png") : (Format == TEXT("webp") ? TEXT("image/webp") : TEXT("image/jpeg")));
-		Artifact->SetNumberField(TEXT("width"), Width);
-		Artifact->SetNumberField(TEXT("height"), Height);
-		Artifact->SetStringField(TEXT("capture_mode"), TEXT("level_viewport_lit"));
-		Artifact->SetBoolField(TEXT("final_lit_composition"), true);
-		OutArtifacts.Add(MakeShared<FJsonValueObject>(Artifact));
-		return true;
 	}
 
 	FString Format = TEXT("jpg");
@@ -629,8 +854,9 @@ bool FUeAgentHttpServer::CmdScreenshotViewport(const FUeAgentRequestContext& Ctx
 	return true;
 }
 
-bool FUeAgentHttpServer::CmdScreenshotViewportBuffer(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, TArray<TSharedPtr<FJsonValue>>& OutArtifacts, FString& OutError) const
+bool FUeAgentHttpServer::CmdScreenshotViewportBuffer(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
+	TArray<TSharedPtr<FJsonValue>> OutArtifacts;
 	if (!OutData.IsValid())
 	{
 		OutData = MakeShared<FJsonObject>();
@@ -1273,694 +1499,4 @@ bool FUeAgentHttpServer::CmdScreenshotViewportBuffer(const FUeAgentRequestContex
 		(long long)Bytes);
 
 	return true;
-}
-
-bool FUeAgentHttpServer::TrySaveCurrentLevelWithGuard(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
-{
-	UWorld* World = GetEditorWorld(OutError);
-	if (!World)
-	{
-		return false;
-	}
-
-	const bool bOnlyIfDirty = [&]()
-	{
-		bool b = true;
-		JsonTryGetBool(Ctx.Params, TEXT("only_if_dirty"), b);
-		return b;
-	}();
-
-	UPackage* Pkg = World->GetOutermost();
-	const bool bDirty = Pkg ? Pkg->IsDirty() : false;
-	OutData->SetBoolField(TEXT("was_dirty"), bDirty);
-	OutData->SetBoolField(TEXT("python_console_command_executed"), bPythonConsoleCommandExecuted);
-
-	bool bAllowPythonGcRisk = false;
-	JsonTryGetBool(Ctx.Params, TEXT("allow_python_gc_risk"), bAllowPythonGcRisk);
-	OutData->SetBoolField(TEXT("allow_python_gc_risk"), bAllowPythonGcRisk);
-	if (bPythonConsoleCommandExecuted && !bAllowPythonGcRisk)
-	{
-		OutData->SetBoolField(TEXT("saved"), false);
-		OutData->SetBoolField(TEXT("blocked"), true);
-		OutData->SetStringField(TEXT("block_reason"), TEXT("python_gc_save_risk"));
-		OutData->SetStringField(TEXT("reason"), TEXT("python_gc_save_risk"));
-		OutData->SetBoolField(TEXT("requires_allow_python_gc_risk"), true);
-		OutError = TEXT("save_current_level_blocked_python_gc_risk");
-		return false;
-	}
-
-	if (bOnlyIfDirty && !bDirty)
-	{
-		OutData->SetBoolField(TEXT("saved"), false);
-		OutData->SetStringField(TEXT("reason"), TEXT("not_dirty"));
-		return true;
-	}
-
-	const bool bSaved = UEditorLoadingAndSavingUtils::SaveCurrentLevel();
-	OutData->SetBoolField(TEXT("saved"), bSaved);
-	if (!bSaved)
-	{
-		OutError = TEXT("save_failed");
-		return false;
-	}
-	return true;
-}
-
-bool FUeAgentHttpServer::CmdSaveCurrentLevel(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
-{
-	return TrySaveCurrentLevelWithGuard(Ctx, OutData, OutError);
-}
-
-bool FUeAgentHttpServer::CmdLevelCreateBlank(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
-{
-	FString PackagePath;
-	if (!UeAgentLevelOps::TryGetLevelPackagePath(Ctx.Params, PackagePath))
-	{
-		OutError = TEXT("missing_level_path");
-		return false;
-	}
-
-	FString Filename;
-	if (!UeAgentLevelOps::TryLevelPackageToFilename(PackagePath, Filename, OutError))
-	{
-		return false;
-	}
-
-	FString OverwritePolicy = TEXT("fail");
-	JsonTryGetString(Ctx.Params, TEXT("overwrite_policy"), OverwritePolicy);
-	OverwritePolicy = OverwritePolicy.TrimStartAndEnd().ToLower();
-	if (OverwritePolicy.IsEmpty())
-	{
-		OverwritePolicy = TEXT("fail");
-	}
-	if (FPackageName::DoesPackageExist(PackagePath) && OverwritePolicy != TEXT("replace") && OverwritePolicy != TEXT("reuse"))
-	{
-		OutError = TEXT("level_asset_exists");
-		return false;
-	}
-
-	if (OverwritePolicy == TEXT("reuse") && FPackageName::DoesPackageExist(PackagePath))
-	{
-		UWorld* LoadedWorld = UEditorLoadingAndSavingUtils::LoadMap(Filename);
-		if (!LoadedWorld)
-		{
-			OutError = TEXT("level_open_failed");
-			return false;
-		}
-		OutData->SetStringField(TEXT("schema"), TEXT("uai.level.create_blank_result.v1"));
-		OutData->SetBoolField(TEXT("created"), false);
-		OutData->SetBoolField(TEXT("opened"), true);
-		OutData->SetBoolField(TEXT("saved"), false);
-		OutData->SetStringField(TEXT("asset_path"), PackagePath);
-		OutData->SetStringField(TEXT("filename"), Filename);
-		OutData->SetStringField(TEXT("world_path"), LoadedWorld->GetPathName());
-		OutData->SetStringField(TEXT("overwrite_policy"), OverwritePolicy);
-		return true;
-	}
-
-	bool bSaveExistingMap = true;
-	JsonTryGetBool(Ctx.Params, TEXT("save_existing_map"), bSaveExistingMap);
-	UWorld* NewWorld = UEditorLoadingAndSavingUtils::NewBlankMap(bSaveExistingMap);
-	if (!NewWorld)
-	{
-		OutError = TEXT("new_blank_map_failed");
-		return false;
-	}
-
-	const bool bSaved = UEditorLoadingAndSavingUtils::SaveMap(NewWorld, PackagePath);
-	if (!bSaved)
-	{
-		OutError = TEXT("level_save_failed");
-		return false;
-	}
-
-	OutData->SetStringField(TEXT("schema"), TEXT("uai.level.create_blank_result.v1"));
-	OutData->SetBoolField(TEXT("created"), true);
-	OutData->SetBoolField(TEXT("opened"), true);
-	OutData->SetBoolField(TEXT("saved"), true);
-	OutData->SetStringField(TEXT("asset_path"), PackagePath);
-	OutData->SetStringField(TEXT("filename"), Filename);
-	OutData->SetStringField(TEXT("world_path"), NewWorld->GetPathName());
-	OutData->SetStringField(TEXT("overwrite_policy"), OverwritePolicy);
-	OutData->SetBoolField(TEXT("save_existing_map"), bSaveExistingMap);
-	return true;
-}
-
-bool FUeAgentHttpServer::CmdLevelOpen(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
-{
-	FString PackagePath;
-	if (!UeAgentLevelOps::TryGetLevelPackagePath(Ctx.Params, PackagePath))
-	{
-		OutError = TEXT("missing_level_path");
-		return false;
-	}
-
-	FString Filename;
-	if (!UeAgentLevelOps::TryLevelPackageToFilename(PackagePath, Filename, OutError))
-	{
-		return false;
-	}
-	if (!FPackageName::DoesPackageExist(PackagePath) && !FPaths::FileExists(Filename))
-	{
-		OutError = TEXT("level_asset_not_found");
-		return false;
-	}
-
-	bool bSaveExistingMap = true;
-	JsonTryGetBool(Ctx.Params, TEXT("save_existing_map"), bSaveExistingMap);
-	if (bSaveExistingMap && !UEditorLoadingAndSavingUtils::SaveDirtyPackages(true, false))
-	{
-		OutError = TEXT("save_existing_map_failed");
-		return false;
-	}
-
-	UWorld* LoadedWorld = UEditorLoadingAndSavingUtils::LoadMap(Filename);
-	if (!LoadedWorld)
-	{
-		OutError = TEXT("level_open_failed");
-		return false;
-	}
-
-	OutData->SetStringField(TEXT("schema"), TEXT("uai.level.open_result.v1"));
-	OutData->SetBoolField(TEXT("opened"), true);
-	OutData->SetStringField(TEXT("asset_path"), PackagePath);
-	OutData->SetStringField(TEXT("filename"), Filename);
-	OutData->SetStringField(TEXT("world_path"), LoadedWorld->GetPathName());
-	OutData->SetBoolField(TEXT("save_existing_map"), bSaveExistingMap);
-	return true;
-}
-
-bool FUeAgentHttpServer::CmdBeginTransaction(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError)
-{
-	FScopeLock Lock(&TransactionMutex);
-	if (ActiveTransactionIndex != INDEX_NONE)
-	{
-		OutError = TEXT("transaction_already_active");
-		return false;
-	}
-
-	FString Label = TEXT("UeAgentInterface Transaction");
-	JsonTryGetString(Ctx.Params, TEXT("label"), Label);
-	ActiveTransactionIndex = GEditor->BeginTransaction(FText::FromString(Label));
-	ActiveTransactionSpawnedActors.Reset();
-	OutData->SetNumberField(TEXT("transaction_index"), ActiveTransactionIndex);
-	OutData->SetStringField(TEXT("label"), Label);
-	return true;
-}
-
-bool FUeAgentHttpServer::CmdEndTransaction(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError)
-{
-	FScopeLock Lock(&TransactionMutex);
-	if (ActiveTransactionIndex == INDEX_NONE)
-	{
-		OutError = TEXT("no_active_transaction");
-		return false;
-	}
-
-	bool bCommit = true;
-	JsonTryGetBool(Ctx.Params, TEXT("commit"), bCommit);
-
-	const int32 RegisteredSpawnedActorCount = ActiveTransactionSpawnedActors.Num();
-	int32 RolledBackSpawnedActorCount = 0;
-	if (bCommit)
-	{
-		GEditor->EndTransaction();
-		OutData->SetBoolField(TEXT("committed"), true);
-	}
-	else
-	{
-		GEditor->CancelTransaction(ActiveTransactionIndex);
-		OutData->SetBoolField(TEXT("committed"), false);
-		for (const FTransactionSpawnedActorRecord& Record : ActiveTransactionSpawnedActors)
-		{
-			AActor* Actor = Record.Actor.Get();
-			if (!Actor || Actor->IsActorBeingDestroyed())
-			{
-				continue;
-			}
-
-			Actor->Modify();
-			Actor->Destroy();
-			RolledBackSpawnedActorCount++;
-
-			UPackage* LevelPackage = Record.LevelPackage.Get();
-			if (LevelPackage && !Record.bLevelPackageWasDirtyBeforeSpawn)
-			{
-				LevelPackage->SetDirtyFlag(false);
-			}
-			UPackage* ActorPackage = Record.ActorPackage.Get();
-			if (ActorPackage && ActorPackage != LevelPackage && !Record.bActorPackageWasDirtyBeforeSpawn)
-			{
-				ActorPackage->SetDirtyFlag(false);
-			}
-		}
-	}
-
-	OutData->SetNumberField(TEXT("transaction_index"), ActiveTransactionIndex);
-	OutData->SetNumberField(TEXT("registered_spawned_actor_count"), RegisteredSpawnedActorCount);
-	OutData->SetNumberField(TEXT("rolled_back_spawned_actor_count"), RolledBackSpawnedActorCount);
-	ActiveTransactionSpawnedActors.Reset();
-	ActiveTransactionIndex = INDEX_NONE;
-	return true;
-}
-
-bool FUeAgentHttpServer::CmdUndo(TSharedPtr<FJsonObject>& OutData, FString& OutError) const
-{
-	if (!GEditor)
-	{
-		OutError = TEXT("no_geditor");
-		return false;
-	}
-	if (!GEditor->UndoTransaction())
-	{
-		OutError = TEXT("undo_failed");
-		return false;
-	}
-	OutData->SetBoolField(TEXT("ok"), true);
-	return true;
-}
-
-bool FUeAgentHttpServer::CmdRedo(TSharedPtr<FJsonObject>& OutData, FString& OutError) const
-{
-	if (!GEditor)
-	{
-		OutError = TEXT("no_geditor");
-		return false;
-	}
-	if (!GEditor->RedoTransaction())
-	{
-		OutError = TEXT("redo_failed");
-		return false;
-	}
-	OutData->SetBoolField(TEXT("ok"), true);
-	return true;
-}
-
-UWorld* FUeAgentHttpServer::GetEditorWorld(FString& OutError)
-{
-	if (!GEditor)
-	{
-		OutError = TEXT("no_geditor");
-		return nullptr;
-	}
-	UWorld* World = GEditor->GetEditorWorldContext().World();
-	if (!World)
-	{
-		OutError = TEXT("no_editor_world");
-		return nullptr;
-	}
-	return World;
-}
-
-AActor* FUeAgentHttpServer::FindActorByNameOrLabel(UWorld* World, const FString& NameOrLabel)
-{
-	for (TActorIterator<AActor> It(World); It; ++It)
-	{
-		AActor* A = *It;
-		if (!A)
-		{
-			continue;
-		}
-		if (A->GetName() == NameOrLabel || A->GetActorLabel() == NameOrLabel)
-		{
-			return A;
-		}
-	}
-	return nullptr;
-}
-
-bool FUeAgentHttpServer::TakeActiveViewportScreenshot(TArray<FColor>& OutPixels, FIntPoint& OutSize, FString& OutError)
-{
-	TSharedPtr<FJsonObject> CaptureInfo;
-	return TakeActiveViewportScreenshotWithOptions(0, false, 0, 1.0f / 60.0f, OutPixels, OutSize, CaptureInfo, OutError);
-}
-
-bool FUeAgentHttpServer::TakeActiveViewportScreenshotWithOptions(int32 WarmupFrames, bool bTickEditorWorld, int32 EditorWorldTickFrames, float EditorWorldTickDeltaSeconds, TArray<FColor>& OutPixels, FIntPoint& OutSize, TSharedPtr<FJsonObject>& OutCaptureInfo, FString& OutError)
-{
-	WarmupFrames = FMath::Clamp(WarmupFrames, 0, 8);
-	EditorWorldTickFrames = bTickEditorWorld ? FMath::Clamp(EditorWorldTickFrames, 0, 240) : 0;
-	EditorWorldTickDeltaSeconds = FMath::Clamp(EditorWorldTickDeltaSeconds, 1.0f / 240.0f, 1.0f / 5.0f);
-
-	FString SelectionReason;
-	FLevelEditorViewportClient* LVC = UeAgentLevelOps::GetPreferredLevelViewportClient(&SelectionReason);
-	if (!LVC || !LVC->Viewport)
-	{
-		OutError = TEXT("no_level_editor_viewport");
-		return false;
-	}
-
-	FViewport* Viewport = LVC->Viewport;
-	const bool bRealtimeBefore = LVC->IsRealtime();
-	const FText ScreenshotRealtimeOverrideSystem = NSLOCTEXT("UeAgentInterface", "ScreenshotRealtimeOverrideSystem", "UeAgentInterfaceScreenshot");
-	const bool bNeedTemporaryRealtime = !LVC->IsRealtime();
-	if (bNeedTemporaryRealtime)
-	{
-		if (LVC->HasRealtimeOverride(ScreenshotRealtimeOverrideSystem))
-		{
-			LVC->RemoveRealtimeOverride(ScreenshotRealtimeOverrideSystem, false);
-		}
-		LVC->AddRealtimeOverride(true, ScreenshotRealtimeOverrideSystem);
-	}
-
-	int32 DrawsPerformed = 0;
-	int32 EditorWorldTicksPerformed = 0;
-	if (EditorWorldTickFrames > 0)
-	{
-		UWorld* EditorWorld = nullptr;
-		if (GEditor)
-		{
-			EditorWorld = GEditor->GetEditorWorldContext().World();
-		}
-		if (!EditorWorld)
-		{
-			OutError = TEXT("no_editor_world_for_warmup_tick");
-			return false;
-		}
-		for (int32 TickIndex = 0; TickIndex < EditorWorldTickFrames; ++TickIndex)
-		{
-			EditorWorld->Tick(LEVELTICK_All, EditorWorldTickDeltaSeconds);
-			++EditorWorldTicksPerformed;
-		}
-	}
-
-	for (int32 FrameIndex = 0; FrameIndex < WarmupFrames; ++FrameIndex)
-	{
-		LVC->Invalidate();
-		Viewport->Invalidate();
-		Viewport->Draw(/*bShouldPresent*/ true);
-		FlushRenderingCommands();
-		DrawsPerformed++;
-	}
-
-	LVC->Invalidate();
-	Viewport->Invalidate();
-	Viewport->Draw(/*bShouldPresent*/ true);
-	FlushRenderingCommands();
-	DrawsPerformed++;
-
-	if (bNeedTemporaryRealtime && LVC->HasRealtimeOverride(ScreenshotRealtimeOverrideSystem))
-	{
-		LVC->RemoveRealtimeOverride(ScreenshotRealtimeOverrideSystem, false);
-	}
-
-	const FIntPoint Size = Viewport->GetSizeXY();
-	if (Size.X <= 0 || Size.Y <= 0)
-	{
-		OutError = TEXT("invalid_viewport_size");
-		return false;
-	}
-
-	TArray<FColor> Pixels;
-	Pixels.AddUninitialized(Size.X * Size.Y);
-	if (!Viewport->ReadPixels(Pixels))
-	{
-		OutError = TEXT("read_pixels_failed");
-		return false;
-	}
-
-	OutPixels = MoveTemp(Pixels);
-	OutSize = Size;
-
-	OutCaptureInfo = MakeShared<FJsonObject>();
-	OutCaptureInfo->SetStringField(TEXT("schema"), TEXT("uai.viewport_capture.v1"));
-	OutCaptureInfo->SetStringField(TEXT("render_path"), TEXT("level_viewport_backbuffer"));
-	OutCaptureInfo->SetBoolField(TEXT("final_lit_composition"), UeAgentLevelOps::IsFinalLitCompositionViewMode(LVC->GetViewMode()));
-	OutCaptureInfo->SetStringField(TEXT("view_mode_name"), UeAgentLevelOps::ViewModeIndexToStableName(LVC->GetViewMode()));
-	OutCaptureInfo->SetNumberField(TEXT("warmup_frames_requested"), WarmupFrames);
-	OutCaptureInfo->SetNumberField(TEXT("draws_performed"), DrawsPerformed);
-	OutCaptureInfo->SetBoolField(TEXT("editor_world_tick_requested"), bTickEditorWorld);
-	OutCaptureInfo->SetNumberField(TEXT("editor_world_tick_frames_requested"), EditorWorldTickFrames);
-	OutCaptureInfo->SetNumberField(TEXT("editor_world_ticks_performed"), EditorWorldTicksPerformed);
-	OutCaptureInfo->SetNumberField(TEXT("editor_world_tick_delta_seconds"), EditorWorldTickDeltaSeconds);
-	OutCaptureInfo->SetBoolField(TEXT("temporary_realtime_override"), bNeedTemporaryRealtime);
-	OutCaptureInfo->SetBoolField(TEXT("realtime_before_capture"), bRealtimeBefore);
-	OutCaptureInfo->SetObjectField(TEXT("viewport"), UeAgentLevelOps::MakeViewportClientJson(LVC, SelectionReason));
-	return true;
-}
-
-bool FUeAgentHttpServer::ResizePixelsMaxSize(const TArray<FColor>& InPixels, const FIntPoint& InSize, int32 MaxSize, TArray<FColor>& OutPixels, FIntPoint& OutSize, FString& OutError)
-{
-	if (InSize.X <= 0 || InSize.Y <= 0 || InPixels.Num() != InSize.X * InSize.Y)
-	{
-		OutError = TEXT("invalid_pixels");
-		return false;
-	}
-
-	MaxSize = FMath::Clamp(MaxSize, 64, 8192);
-	if (InSize.X <= MaxSize && InSize.Y <= MaxSize)
-	{
-		OutPixels = InPixels;
-		OutSize = InSize;
-		return true;
-	}
-
-	const float Scale = (float)MaxSize / (float)FMath::Max(InSize.X, InSize.Y);
-	const int32 NewX = FMath::Max(1, (int32)FMath::RoundToInt((float)InSize.X * Scale));
-	const int32 NewY = FMath::Max(1, (int32)FMath::RoundToInt((float)InSize.Y * Scale));
-
-	OutPixels.Reset();
-	OutPixels.AddUninitialized(NewX * NewY);
-	FImageUtils::ImageResize(InSize.X, InSize.Y, InPixels, NewX, NewY, OutPixels, /*bLinearSpace*/ true);
-	OutSize = FIntPoint(NewX, NewY);
-	return true;
-}
-
-bool FUeAgentHttpServer::WriteCompressedImage(const TArray<FColor>& Pixels, const FIntPoint& Size, const FString& Format, int32 Quality, const FString& OutFilePath, FString& OutError, bool bForceOpaqueAlpha)
-{
-	if (Size.X <= 0 || Size.Y <= 0 || Pixels.Num() != Size.X * Size.Y)
-	{
-		OutError = TEXT("invalid_pixels");
-		return false;
-	}
-
-	const TArray<FColor>* PixelsToWrite = &Pixels;
-	TArray<FColor> OpaquePixels;
-	if (bForceOpaqueAlpha)
-	{
-		OpaquePixels = Pixels;
-		for (FColor& Pixel : OpaquePixels)
-		{
-			Pixel.A = 255;
-		}
-		PixelsToWrite = &OpaquePixels;
-	}
-
-	TArray64<uint8> Compressed;
-	const FImageView Img((void*)PixelsToWrite->GetData(), Size.X, Size.Y, ERawImageFormat::BGRA8);
-	if (!FImageUtils::CompressImage(Compressed, *Format, Img, Quality))
-	{
-		OutError = TEXT("compress_failed");
-		return false;
-	}
-
-	TArray<uint8> Bytes;
-	Bytes.Append(Compressed.GetData(), (int32)Compressed.Num());
-
-	IFileManager::Get().MakeDirectory(*FPaths::GetPath(OutFilePath), true);
-	if (!FFileHelper::SaveArrayToFile(Bytes, *OutFilePath))
-	{
-		OutError = TEXT("write_file_failed");
-		return false;
-	}
-	return true;
-}
-
-bool FUeAgentHttpServer::WriteFrameSequenceSheetImage(const TArray<TArray<FColor>>& FramePixels, const TArray<FString>& FrameLabels, const FIntPoint& FrameSize, const TSharedPtr<FJsonObject>& Params, const FString& Format, int32 Quality, FString& OutFilePath, TSharedPtr<FJsonObject>& OutSheetData, FString& OutError)
-{
-	if (FramePixels.Num() <= 0 || FrameSize.X <= 0 || FrameSize.Y <= 0)
-	{
-		OutError = TEXT("frame_sheet_empty");
-		return false;
-	}
-	for (int32 FrameIndex = 0; FrameIndex < FramePixels.Num(); ++FrameIndex)
-	{
-		if (FramePixels[FrameIndex].Num() != FrameSize.X * FrameSize.Y)
-		{
-			OutError = TEXT("frame_sheet_frame_size_mismatch");
-			return false;
-		}
-	}
-
-	const int32 GridSide = FMath::Max(1, FMath::CeilToInt(FMath::Sqrt(static_cast<float>(FramePixels.Num()))));
-	const int32 Columns = GridSide;
-	const int32 Rows = GridSide;
-
-	int32 Padding = 8;
-	double PaddingValue = static_cast<double>(Padding);
-	if (JsonTryGetNumber(Params, TEXT("frame_sheet_padding"), PaddingValue) ||
-		JsonTryGetNumber(Params, TEXT("sheet_padding"), PaddingValue))
-	{
-		Padding = FMath::Clamp(FMath::RoundToInt(PaddingValue), 0, 256);
-	}
-
-	int32 LabelScale = 3;
-	double LabelScaleValue = static_cast<double>(LabelScale);
-	if (JsonTryGetNumber(Params, TEXT("frame_sheet_label_scale"), LabelScaleValue) ||
-		JsonTryGetNumber(Params, TEXT("sheet_label_scale"), LabelScaleValue))
-	{
-		LabelScale = FMath::Clamp(FMath::RoundToInt(LabelScaleValue), 1, 6);
-	}
-	const int32 LabelMargin = FMath::Max(3, LabelScale * 2);
-
-	int32 SheetMaxSize = 8192;
-	double SheetMaxSizeValue = static_cast<double>(SheetMaxSize);
-	if (JsonTryGetNumber(Params, TEXT("frame_sheet_max_size"), SheetMaxSizeValue) ||
-		JsonTryGetNumber(Params, TEXT("sheet_max_size"), SheetMaxSizeValue))
-	{
-		SheetMaxSize = FMath::Clamp(FMath::RoundToInt(SheetMaxSizeValue), 64, 8192);
-	}
-
-	const int64 SheetWidth64 = static_cast<int64>(Columns) * FrameSize.X + static_cast<int64>(Columns + 1) * Padding;
-	const int64 SheetHeight64 = static_cast<int64>(Rows) * FrameSize.Y + static_cast<int64>(Rows + 1) * Padding;
-	if (SheetWidth64 <= 0 || SheetHeight64 <= 0 || SheetWidth64 > 32768 || SheetHeight64 > 32768 || SheetWidth64 * SheetHeight64 > 268435456LL)
-	{
-		OutError = TEXT("frame_sheet_too_large");
-		return false;
-	}
-
-	const FIntPoint RawSheetSize(static_cast<int32>(SheetWidth64), static_cast<int32>(SheetHeight64));
-	TArray<FColor> SheetPixels;
-	SheetPixels.Init(FColor(24, 24, 24, 255), RawSheetSize.X * RawSheetSize.Y);
-	for (int32 FrameIndex = 0; FrameIndex < FramePixels.Num(); ++FrameIndex)
-	{
-		const int32 Column = FrameIndex % Columns;
-		const int32 Row = FrameIndex / Columns;
-		const int32 DestX = Padding + Column * (FrameSize.X + Padding);
-		const int32 DestY = Padding + Row * (FrameSize.Y + Padding);
-		const TArray<FColor>& SourcePixels = FramePixels[FrameIndex];
-		for (int32 Y = 0; Y < FrameSize.Y; ++Y)
-		{
-			const FColor* SourceRow = SourcePixels.GetData() + Y * FrameSize.X;
-			FColor* DestRow = SheetPixels.GetData() + (DestY + Y) * RawSheetSize.X + DestX;
-			FMemory::Memcpy(DestRow, SourceRow, sizeof(FColor) * FrameSize.X);
-		}
-	}
-
-	auto GlyphRows = [](TCHAR Ch, const TCHAR*& R0, const TCHAR*& R1, const TCHAR*& R2, const TCHAR*& R3, const TCHAR*& R4, const TCHAR*& R5, const TCHAR*& R6) -> bool
-	{
-		switch (Ch)
-		{
-		case TCHAR('0'): R0 = TEXT("01110"); R1 = TEXT("10001"); R2 = TEXT("10011"); R3 = TEXT("10101"); R4 = TEXT("11001"); R5 = TEXT("10001"); R6 = TEXT("01110"); return true;
-		case TCHAR('1'): R0 = TEXT("00100"); R1 = TEXT("01100"); R2 = TEXT("00100"); R3 = TEXT("00100"); R4 = TEXT("00100"); R5 = TEXT("00100"); R6 = TEXT("01110"); return true;
-		case TCHAR('2'): R0 = TEXT("01110"); R1 = TEXT("10001"); R2 = TEXT("00001"); R3 = TEXT("00010"); R4 = TEXT("00100"); R5 = TEXT("01000"); R6 = TEXT("11111"); return true;
-		case TCHAR('3'): R0 = TEXT("11110"); R1 = TEXT("00001"); R2 = TEXT("00001"); R3 = TEXT("01110"); R4 = TEXT("00001"); R5 = TEXT("00001"); R6 = TEXT("11110"); return true;
-		case TCHAR('4'): R0 = TEXT("00010"); R1 = TEXT("00110"); R2 = TEXT("01010"); R3 = TEXT("10010"); R4 = TEXT("11111"); R5 = TEXT("00010"); R6 = TEXT("00010"); return true;
-		case TCHAR('5'): R0 = TEXT("11111"); R1 = TEXT("10000"); R2 = TEXT("10000"); R3 = TEXT("11110"); R4 = TEXT("00001"); R5 = TEXT("00001"); R6 = TEXT("11110"); return true;
-		case TCHAR('6'): R0 = TEXT("01110"); R1 = TEXT("10000"); R2 = TEXT("10000"); R3 = TEXT("11110"); R4 = TEXT("10001"); R5 = TEXT("10001"); R6 = TEXT("01110"); return true;
-		case TCHAR('7'): R0 = TEXT("11111"); R1 = TEXT("00001"); R2 = TEXT("00010"); R3 = TEXT("00100"); R4 = TEXT("01000"); R5 = TEXT("01000"); R6 = TEXT("01000"); return true;
-		case TCHAR('8'): R0 = TEXT("01110"); R1 = TEXT("10001"); R2 = TEXT("10001"); R3 = TEXT("01110"); R4 = TEXT("10001"); R5 = TEXT("10001"); R6 = TEXT("01110"); return true;
-		case TCHAR('9'): R0 = TEXT("01110"); R1 = TEXT("10001"); R2 = TEXT("10001"); R3 = TEXT("01111"); R4 = TEXT("00001"); R5 = TEXT("00001"); R6 = TEXT("01110"); return true;
-		case TCHAR('F'):
-		case TCHAR('f'): R0 = TEXT("11111"); R1 = TEXT("10000"); R2 = TEXT("10000"); R3 = TEXT("11110"); R4 = TEXT("10000"); R5 = TEXT("10000"); R6 = TEXT("10000"); return true;
-		case TCHAR('-'): R0 = TEXT("00000"); R1 = TEXT("00000"); R2 = TEXT("00000"); R3 = TEXT("11110"); R4 = TEXT("00000"); R5 = TEXT("00000"); R6 = TEXT("00000"); return true;
-		default: break;
-		}
-		R0 = R1 = R2 = R3 = R4 = R5 = R6 = TEXT("00000");
-		return Ch == TCHAR(' ');
-	};
-
-	auto DrawRect = [&](const int32 X, const int32 Y, const int32 W, const int32 H, const FColor Color)
-	{
-		const int32 MinX = FMath::Clamp(X, 0, RawSheetSize.X);
-		const int32 MinY = FMath::Clamp(Y, 0, RawSheetSize.Y);
-		const int32 MaxX = FMath::Clamp(X + W, 0, RawSheetSize.X);
-		const int32 MaxY = FMath::Clamp(Y + H, 0, RawSheetSize.Y);
-		for (int32 Py = MinY; Py < MaxY; ++Py)
-		{
-			for (int32 Px = MinX; Px < MaxX; ++Px)
-			{
-				SheetPixels[Py * RawSheetSize.X + Px] = Color;
-			}
-		}
-	};
-
-	auto DrawText = [&](const FString& Text, const int32 X, const int32 Y, const FColor Color)
-	{
-		int32 CursorX = X;
-		for (int32 CharIndex = 0; CharIndex < Text.Len(); ++CharIndex)
-		{
-			const TCHAR* Rows[7] = {};
-			if (!GlyphRows(Text[CharIndex], Rows[0], Rows[1], Rows[2], Rows[3], Rows[4], Rows[5], Rows[6]))
-			{
-				CursorX += LabelScale * 6;
-				continue;
-			}
-			for (int32 Gy = 0; Gy < 7; ++Gy)
-			{
-				for (int32 Gx = 0; Gx < 5; ++Gx)
-				{
-					if (Rows[Gy][Gx] != TCHAR('1'))
-					{
-						continue;
-					}
-					DrawRect(CursorX + Gx * LabelScale, Y + Gy * LabelScale, LabelScale, LabelScale, Color);
-				}
-			}
-			CursorX += LabelScale * 6;
-		}
-	};
-
-	for (int32 FrameIndex = 0; FrameIndex < FramePixels.Num(); ++FrameIndex)
-	{
-		const int32 Column = FrameIndex % Columns;
-		const int32 Row = FrameIndex / Columns;
-		const int32 DestX = Padding + Column * (FrameSize.X + Padding);
-		const int32 DestY = Padding + Row * (FrameSize.Y + Padding);
-		const FString Label = FrameLabels.IsValidIndex(FrameIndex) && !FrameLabels[FrameIndex].IsEmpty()
-			? FrameLabels[FrameIndex]
-			: FString::Printf(TEXT("F%d"), FrameIndex);
-		const int32 TextWidth = FMath::Max(1, Label.Len()) * LabelScale * 6;
-		const int32 TextHeight = LabelScale * 7;
-		const int32 LabelBgWidth = FMath::Min(FrameSize.X - LabelMargin * 2, TextWidth + LabelMargin * 2);
-		const int32 LabelBgHeight = FMath::Min(FrameSize.Y - LabelMargin * 2, TextHeight + LabelMargin * 2);
-		if (LabelBgWidth > 0 && LabelBgHeight > 0)
-		{
-			DrawRect(DestX + LabelMargin, DestY + LabelMargin, LabelBgWidth, LabelBgHeight, FColor(8, 8, 8, 255));
-			DrawText(Label, DestX + LabelMargin * 2, DestY + LabelMargin * 2, FColor(255, 230, 120, 255));
-		}
-	}
-
-	TArray<FColor> OutputPixels;
-	FIntPoint OutputSize(0, 0);
-	if (!ResizePixelsMaxSize(SheetPixels, RawSheetSize, SheetMaxSize, OutputPixels, OutputSize, OutError))
-	{
-		return false;
-	}
-
-	OutFilePath = MakeShotPath(Format);
-	if (!WriteCompressedImage(OutputPixels, OutputSize, Format, Quality, OutFilePath, OutError))
-	{
-		return false;
-	}
-
-	const int64 Bytes = IFileManager::Get().FileSize(*OutFilePath);
-	OutSheetData = MakeShared<FJsonObject>();
-	OutSheetData->SetBoolField(TEXT("created"), true);
-	OutSheetData->SetStringField(TEXT("file_path"), OutFilePath);
-	OutSheetData->SetNumberField(TEXT("width"), OutputSize.X);
-	OutSheetData->SetNumberField(TEXT("height"), OutputSize.Y);
-	OutSheetData->SetNumberField(TEXT("bytes"), static_cast<double>(Bytes));
-	OutSheetData->SetNumberField(TEXT("columns"), Columns);
-	OutSheetData->SetNumberField(TEXT("rows"), Rows);
-	OutSheetData->SetNumberField(TEXT("frame_count"), FramePixels.Num());
-	OutSheetData->SetNumberField(TEXT("tile_width"), FrameSize.X);
-	OutSheetData->SetNumberField(TEXT("tile_height"), FrameSize.Y);
-	OutSheetData->SetNumberField(TEXT("padding"), Padding);
-	OutSheetData->SetNumberField(TEXT("label_scale"), LabelScale);
-	OutSheetData->SetNumberField(TEXT("raw_width"), RawSheetSize.X);
-	OutSheetData->SetNumberField(TEXT("raw_height"), RawSheetSize.Y);
-	OutSheetData->SetNumberField(TEXT("max_size"), SheetMaxSize);
-	OutSheetData->SetNumberField(TEXT("scale"), RawSheetSize.X > 0 ? static_cast<double>(OutputSize.X) / static_cast<double>(RawSheetSize.X) : 1.0);
-	return true;
-}
-
-FString FUeAgentHttpServer::MakeShotPath(const FString& Ext)
-{
-	const UUeAgentInterfaceSettings* Settings = UUeAgentInterfaceSettings::Get();
-	const FString Hostname = FPlatformProcess::ComputerName();
-	const FString Ts = FDateTime::Now().ToString(TEXT("%Y%m%d_%H%M%S_%s"));
-
-	const FString RootRel = Settings ? Settings->ArtifactsDirRelative : TEXT("Saved/RemoteArtifacts");
-	const FString ShotsDir = FPaths::ConvertRelativePathToFull(FPaths::ProjectDir(), RootRel / TEXT("Shots"));
-	return FPaths::Combine(ShotsDir, FString::Printf(TEXT("shot_%s_%s.%s"), *Hostname, *Ts, *Ext));
 }

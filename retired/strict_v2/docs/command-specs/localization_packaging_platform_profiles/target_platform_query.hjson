@@ -1,0 +1,53 @@
+authoring: { reason: command_has_no_registered_folder_authoring_profile, state: none }
+category: localization_packaging_platform_profiles
+command: target_platform_query
+deprecation: { reason: command_is_active, state: none }
+discovery: { aliases: [], keywords_en: [target, platform, query, localization_packaging_platform_profiles], keywords_zh: [target_platform_query], summary_en: "Execute target_platform_query with a verified implementation contract", summary_zh: "查询当前引擎 target platform 与 SDK 状态", tags: [localization_packaging_platform_profiles, p2-002] }
+errors: { codes: [] }
+evidence: {
+  docs: [
+    { path: "Plugins/UeAgentInterface/docs/commands/localization_packaging_platform_profiles/target_platform_query.md", purpose: "user documentation cross-check; C++ implementation remains authoritative" }
+  ]
+  implementation: [
+    { line_hint: 3544, path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Commands/ProductionPipeline/UeAgentHttpServer_ProductionPipeline.cpp", purpose: "command handler, parameter and return evidence", symbol: CmdTargetPlatformQuery }
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Server/UeAgentHttpServer.cpp", purpose: "transitive helper evidence used by the command handler" }
+  ]
+  tests: [
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterfaceTests/Private/Smoke/ProductionPipeline/UeAgentInterfaceProductionPipelineSmokeTests.cpp", purpose: "smoke or negative-path evidence cross-checked for the verified contract" }
+  ]
+}
+execution: {
+  destructive: false
+  editor_state: required
+  game_thread: required
+  idempotent: true
+  kind: read_only
+  overwrite_behavior: none
+  pie_state: allowed
+  retry_safe: true
+  save_behavior: none
+  side_effects: []
+  ui_effect: none
+}
+maturity: verified
+params: {
+  constraints: []
+  fields: { include_sdk: { default: true, default_state: defined, description_zh: "C++ 实现读取的 include_sdk 参数", required: false, type: bool } }
+  state: defined
+}
+response: { artifact_fields: [], compact_fields: [include_texture_formats, schema, sdk_status, target_platforms, tools], failure_fields: [], max_items_policy: { fields: [], mode: none } }
+returns: {
+  fields: {
+    include_texture_formats: { description_zh: "C++ 实现返回的 include_texture_formats 字段；是否出现取决于执行分支", required: false, type: bool }
+    schema: { description_zh: "C++ 实现返回的 schema 字段；是否出现取决于执行分支", required: false, type: string }
+    sdk_status: { description_zh: "C++ 实现返回的 sdk_status 字段；是否出现取决于执行分支", item_type: json_value, required: false, type: array }
+    target_platforms: { description_zh: "C++ 实现返回的 target_platforms 字段；是否出现取决于执行分支", item_type: json_value, required: false, type: array }
+    tools: { description_zh: "C++ 实现返回的 tools 字段；是否出现取决于执行分支", item_type: json_value, required: false, type: array }
+  }
+  state: defined
+}
+schema: uai.command_spec.v1
+status: active
+types: {}
+verification: { reason: read_only_command_has_no_post_write_verification, state: none }
+version: 1

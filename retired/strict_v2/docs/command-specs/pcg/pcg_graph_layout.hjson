@@ -1,0 +1,93 @@
+authoring: { reason: command_has_no_registered_folder_authoring_profile, state: none }
+category: pcg
+command: pcg_graph_layout
+deprecation: { reason: command_is_active, state: none }
+discovery: { aliases: [], keywords_en: [pcg, graph, layout], keywords_zh: [pcg_graph_layout], summary_en: "Execute pcg_graph_layout with a verified implementation contract", summary_zh: "自动排布 PCG Graph Editor 节点", tags: [pcg, p2-005] }
+errors: {
+  codes: [
+    { code: missing_asset_path, description_zh: "C++ 实现返回错误码 missing_asset_path", retry_safe: true, stage: preflight, wire_match: exact }
+    { code: pcg_editor_graph_not_materialized, description_zh: "C++ 实现返回错误码 pcg_editor_graph_not_materialized", retry_safe: false, stage: execution, wire_match: exact }
+    { code: pcg_graph_asset_not_found, description_zh: "C++ 实现返回错误码 pcg_graph_asset_not_found", retry_safe: false, stage: execution, wire_match: exact }
+    { code: pcg_graph_layout_compile_failed, description_zh: "C++ 实现返回错误码 pcg_graph_layout_compile_failed", retry_safe: false, stage: execution, wire_match: exact }
+    { code: pcg_graph_layout_failed, description_zh: "C++ 实现返回错误码 pcg_graph_layout_failed", retry_safe: false, stage: execution, wire_match: exact }
+    { code: pcg_graph_layout_save_after_compile_failed, description_zh: "C++ 实现返回错误码 pcg_graph_layout_save_after_compile_failed", retry_safe: false, stage: execution, wire_match: exact }
+  ]
+}
+evidence: {
+  docs: [
+    { path: "Plugins/UeAgentInterface/docs/commands/pcg/pcg_graph_layout.md", purpose: "user documentation cross-check; C++ implementation remains authoritative" }
+  ]
+  implementation: [
+    { line_hint: 3216, path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Commands/PCG/UeAgentHttpServer_PCG.cpp", purpose: "command handler, parameter and return evidence", symbol: CmdPCGGraphLayout }
+  ]
+  tests: [
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterfaceTests/Private/Smoke/PCG/UeAgentInterfacePCGSmokeTests.cpp", purpose: "smoke or negative-path evidence cross-checked for the verified contract" }
+  ]
+}
+execution: {
+  destructive: false
+  editor_state: required
+  game_thread: required
+  idempotent: false
+  kind: write
+  overwrite_behavior: none
+  pie_state: allowed
+  retry_safe: false
+  save_behavior: caller_controlled
+  side_effects: [modifies_asset, modifies_editor_session, opens_window]
+  ui_effect: window_mutation
+}
+maturity: verified
+params: {
+  constraints: [
+    { fields: [asset_path, graph, graph_asset_path], kind: one_of }
+  ]
+  fields: {
+    asset_path: { default_state: none, description_zh: "C++ 实现读取的 asset_path 参数", path_semantics: { access_scope: project_write, kind: ue_asset }, required: false, type: ue_asset_path }
+    compile: { default: false, default_state: defined, description_zh: "C++ 实现读取的 compile 参数", required: false, type: bool }
+    compile_after_layout: { default: false, default_state: defined, description_zh: "C++ 实现读取的 compile_after_layout 参数", required: false, type: bool }
+    graph: { default_state: none, description_zh: "C++ 实现读取的 graph 参数", required: false, type: string }
+    graph_asset_path: { default_state: none, description_zh: "C++ 实现读取的 graph_asset_path 参数", path_semantics: { access_scope: project_write, kind: ue_asset }, required: false, type: ue_asset_path }
+    layout_options: { default_state: none, description_zh: "C++ 实现读取的 layout_options 参数", required: false, type: object, type_ref: "shared:NodeGraphLayoutOptions" }
+    save: { default: false, default_state: defined, description_zh: "C++ 实现读取的 save 参数", required: false, type: bool }
+    save_after_layout: { default: false, default_state: defined, description_zh: "C++ 实现读取的 save_after_layout 参数", required: false, type: bool }
+  }
+  state: defined
+}
+response: { artifact_fields: [compile_result], compact_fields: [asset_path, compiled, saved, pcg_graph_layout_complete, pcg_graph_layout_strategy], failure_fields: [params.asset_path, params.graph, params.graph_asset_path], max_items_policy: { fields: [], mode: none } }
+returns: {
+  fields: {
+    asset_class: { description_zh: "C++ 实现返回的 asset_class 字段；是否出现取决于执行分支", required: false, type: string }
+    asset_path: { description_zh: "C++ 实现返回的 asset_path 字段；是否出现取决于执行分支", required: false, type: ue_asset_path }
+    compile_error: { description_zh: "C++ 实现返回的 compile_error 字段；是否出现取决于执行分支", required: false, type: string }
+    compile_result: { description_zh: "C++ 实现返回的 compile_result 字段；是否出现取决于执行分支", required: false, type: json_value }
+    compiled: { description_zh: "C++ 实现返回的 compiled 字段；是否出现取决于执行分支", required: false, type: bool }
+    delegated_command: { description_zh: "C++ 实现返回的 delegated_command 字段；是否出现取决于执行分支", required: false, type: string }
+    pcg_editor_graph_had_materialized_edgraph_before_init: { description_zh: "C++ 实现返回的 pcg_editor_graph_had_materialized_edgraph_before_init 字段；是否出现取决于执行分支", required: false, type: bool }
+    pcg_editor_graph_opened_editor_for_init: { description_zh: "C++ 实现返回的 pcg_editor_graph_opened_editor_for_init 字段；是否出现取决于执行分支", required: false, type: bool }
+    pcg_graph_layout_complete: { description_zh: "C++ 实现返回的 pcg_graph_layout_complete 字段；是否出现取决于执行分支", required: false, type: bool }
+    pcg_graph_layout_strategy: { description_zh: "C++ 实现返回的 pcg_graph_layout_strategy 字段；是否出现取决于执行分支", required: false, type: string }
+    save_after_compile_error: { description_zh: "C++ 实现返回的 save_after_compile_error 字段；是否出现取决于执行分支", required: false, type: string }
+    saved: { description_zh: "C++ 实现返回的 saved 字段；是否出现取决于执行分支", required: false, type: bool }
+    saved_after_compile: { description_zh: "C++ 实现返回的 saved_after_compile 字段；是否出现取决于执行分支", required: false, type: bool }
+    schema: { description_zh: "C++ 实现返回的 schema 字段；是否出现取决于执行分支", required: false, type: string }
+  }
+  state: defined
+}
+schema: uai.command_spec.v1
+status: active
+types: {}
+verification: {
+  assertions: [
+    { id: result_present, operator: exists, source: returns.saved }
+    { id: state_readback_present, operator: exists, source: methods.state_readback.asset_path }
+  ]
+  failure_policy: fail_overall
+  methods: [
+    { id: result, kind: result_assertion }
+    { command: pcg_graph_snapshot, id: state_readback, kind: command_readback, params_mapping: { asset_path: returns.asset_path } }
+  ]
+  required: true
+  state: defined
+}
+version: 1

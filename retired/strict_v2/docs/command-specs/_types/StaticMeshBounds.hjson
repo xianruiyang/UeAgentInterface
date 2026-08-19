@@ -1,0 +1,12 @@
+definition: {
+  additional_fields: false
+  fields: {
+    box_extent: { default_state: none, description_zh: "Static Mesh 资产局部 bounds half extent", required: false, type: object, type_ref: "shared:Vector3" }
+    origin: { default_state: none, description_zh: "Static Mesh 资产局部 bounds origin", required: false, type: object, type_ref: "shared:Vector3" }
+    sphere_radius: { default_state: none, description_zh: "资产局部 bounds sphere radius", minimum: 0, required: false, type: number }
+  }
+  kind: object
+}
+schema: uai.command_spec.shared_type.v1
+type_id: StaticMeshBounds
+version: 1

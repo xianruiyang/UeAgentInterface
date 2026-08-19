@@ -1,5 +1,9 @@
 #include "Utilities/UeAgentDetailsAuthoring.h"
+#include "Utilities/AuthoringCore/UeAgentAuthoringState.h"
+#include "Utilities/AuthoringCore/UeAgentAuthoringWorkspacePaths.h"
 #include "Utilities/UeAgentJsonDiagnostics.h"
+#include "Utilities/UeAgentStructuredAuthoringIO.h"
+#include "Utilities/UeAgentAuthoringFieldPolicy.h"
 #include "Utilities/UeAgentStructuredJsonFormatter.h"
 
 #include "Dom/JsonObject.h"
@@ -15,47 +19,33 @@
 
 namespace UeAgentDetailsAuthoring
 {
-	FOwnerDetailsExportRequest::FOwnerDetailsExportRequest()
-		: Object(nullptr)
-		, IndexFile(TEXT("details/index.json"))
-		, RefFieldName(TEXT("details"))
-	{
-	}
-
-	FOwnerDetailsApplyRequest::FOwnerDetailsApplyRequest()
-		: Object(nullptr)
-		, IndexFile(TEXT("details/index.json"))
-		, RefFieldName(TEXT("details"))
-	{
-	}
-
-	FOwnerDetailsValidateRequest::FOwnerDetailsValidateRequest()
-		: IndexFile(TEXT("details/index.json"))
-		, RefFieldName(TEXT("details"))
-	{
-	}
-
-	FOwnerDetailsDiffRequest::FOwnerDetailsDiffRequest()
-		: OldIndexFile(TEXT("details/index.json"))
-		, NewIndexFile(TEXT("details/index.json"))
-		, RefFieldName(TEXT("details"))
-	{
-	}
-
-	FDiagnosticsIsolationRequest::FDiagnosticsIsolationRequest()
-		: AllowedTarget(TEXT("details/index.json"))
-	{
-	}
-
 	namespace
 	{
 		constexpr const TCHAR* DetailsRefSchema = TEXT("uai.details_ref.v1");
 		constexpr const TCHAR* DetailsIndexSchema = TEXT("uai.details_index.v1");
 		constexpr const TCHAR* DetailsGroupSchema = TEXT("uai.details_group.v1");
 		constexpr const TCHAR* DetailsCandidatesSchema = TEXT("uai.details_candidates.v1");
-		constexpr const TCHAR* PropertiesSchema = TEXT("uai.uobject_properties.v1");
+		constexpr const TCHAR* PropertiesSchema = TEXT("uai.uobject_properties.v2");
 		constexpr int32 MaxInlineCandidateCount = 64;
 		constexpr int32 MaxInlineCandidateJsonLength = 6000;
+
+		TSharedPtr<FJsonObject> BuildDirectApplySummary(
+			const UeAgentAuthoringDirectApply::FResult& Result)
+		{
+			TSharedRef<FJsonObject> Summary = MakeShared<FJsonObject>();
+			Summary->SetStringField(TEXT("status"), Result.Status.IsEmpty() ? TEXT("failed") : Result.Status);
+			Summary->SetStringField(TEXT("phase"), Result.Phase);
+			if (!Result.ErrorCode.IsEmpty()) Summary->SetStringField(TEXT("error_code"), Result.ErrorCode);
+			if (!Result.ErrorDetail.IsEmpty()) Summary->SetStringField(TEXT("error_detail"), Result.ErrorDetail);
+			if (!Result.PropertyPath.IsEmpty()) Summary->SetStringField(TEXT("property_path"), Result.PropertyPath);
+			Summary->SetNumberField(TEXT("properties_seen"), Result.PropertiesSeen);
+			Summary->SetNumberField(TEXT("properties_applied"), Result.IsApplied() ? Result.PropertiesSeen : 0);
+			Summary->SetNumberField(TEXT("properties_skipped"), 0);
+			Summary->SetNumberField(TEXT("properties_failed"), Result.IsApplied() ? 0 : Result.PropertiesSeen);
+			Summary->SetBoolField(TEXT("rollback_attempted"), Result.bRollbackAttempted);
+			Summary->SetBoolField(TEXT("rollback_succeeded"), Result.bRollbackSucceeded);
+			return Summary;
+		}
 
 		struct FDetailsGroup
 		{
@@ -80,32 +70,80 @@ namespace UeAgentDetailsAuthoring
 			FString CanonicalJson;
 		};
 
-		bool LoadJsonObjectFile(const FString& FilePath, TSharedPtr<FJsonObject>& OutObject, FString& OutError)
+		bool IsDetailsPropertiesFieldName(const FString& FieldName);
+		FString MakeDetailsFieldName(const FString& PropertiesFieldName);
+
+		bool IsHjsonFilePath(const FString& FilePath)
+		{
+			return FPaths::GetExtension(FilePath, false).Equals(TEXT("hjson"), ESearchCase::IgnoreCase);
+		}
+
+		bool LoadDetailsObjectFile(const FString& FilePath, TSharedPtr<FJsonObject>& OutObject, FString& OutError)
+		{
+			if (!IsHjsonFilePath(FilePath))
+			{
+				OutError = FString::Printf(TEXT("hjson_file_required:%s"), *FilePath);
+				return false;
+			}
+			return UeAgentStructuredAuthoringIO::LoadObject(FilePath, OutObject, OutError);
+		}
+
+		bool ResolveDetailsChildPath(
+			const FString& DetailsRoot,
+			const FString& RelativePath,
+			FString& OutPath,
+			FString& OutError,
+			const bool bRequireExists = false)
+		{
+			UeAgentAuthoringWorkspacePaths::FResolveOptions Options;
+			Options.bRequireHjson = true;
+			Options.bRequireExists = bRequireExists;
+			UeAgentAuthoringWorkspacePaths::FResolvedPath Resolved;
+			if (!UeAgentAuthoringWorkspacePaths::ResolveUnderRoot(
+				DetailsRoot,
+				RelativePath,
+				Options,
+				Resolved,
+				OutError))
+			{
+				return false;
+			}
+			OutPath = Resolved.AbsolutePath;
+			return true;
+		}
+
+		bool LoadLegacyJsonObjectFile(const FString& FilePath, TSharedPtr<FJsonObject>& OutObject)
 		{
 			FString Text;
 			if (!FFileHelper::LoadFileToString(Text, *FilePath))
 			{
-				OutError = FString::Printf(TEXT("json_read_failed:%s"), *FilePath);
 				return false;
 			}
 
 			const TSharedRef<TJsonReader<>> Reader = TJsonReaderFactory<>::Create(Text);
 			if (!FJsonSerializer::Deserialize(Reader, OutObject) || !OutObject.IsValid())
 			{
-				OutError = FString::Printf(TEXT("json_parse_failed:%s"), *FilePath);
 				return false;
 			}
 			return true;
 		}
 
-		TSharedPtr<FJsonValue> CloneJsonValue(const TSharedPtr<FJsonValue>& Value);
+		bool SaveDetailsObjectFile(const FString& FilePath, const TSharedPtr<FJsonObject>& Object, FString& OutError)
+		{
+			if (!IsHjsonFilePath(FilePath))
+			{
+				OutError = FString::Printf(TEXT("hjson_file_required:%s"), *FilePath);
+				return false;
+			}
+			return UeAgentStructuredAuthoringIO::SaveObject(FilePath, Object, &OutError);
+		}
 
 		TSharedPtr<FJsonObject> CloneJsonObject(const TSharedPtr<FJsonObject>& Object, const TSet<FString>* OmittedFields = nullptr)
 		{
-			TSharedPtr<FJsonObject> Clone = MakeShared<FJsonObject>();
+			TSharedPtr<FJsonObject> Filtered = MakeShared<FJsonObject>();
 			if (!Object.IsValid())
 			{
-				return Clone;
+				return Filtered;
 			}
 
 			for (const TPair<FString, TSharedPtr<FJsonValue>>& Pair : Object->Values)
@@ -114,51 +152,35 @@ namespace UeAgentDetailsAuthoring
 				{
 					continue;
 				}
-				Clone->SetField(Pair.Key, CloneJsonValue(Pair.Value));
+				Filtered->SetField(Pair.Key, Pair.Value);
 			}
-			return Clone;
+			const TSharedPtr<FJsonValue> Cloned =
+				UeAgentAuthoringState::CloneCanonicalValue(
+					MakeShared<FJsonValueObject>(Filtered));
+			return Cloned.IsValid() && Cloned->Type == EJson::Object
+				? Cloned->AsObject()
+				: MakeShared<FJsonObject>();
 		}
 
 		TSharedPtr<FJsonValue> CloneJsonValue(const TSharedPtr<FJsonValue>& Value)
 		{
-			if (!Value.IsValid() || Value->IsNull())
+			const TSharedPtr<FJsonValue> Cloned =
+				UeAgentAuthoringState::CloneCanonicalValue(Value);
+			if (!Cloned.IsValid())
 			{
 				return MakeShared<FJsonValueNull>();
 			}
-
-			switch (Value->Type)
-			{
-			case EJson::String:
-				return MakeShared<FJsonValueString>(Value->AsString());
-			case EJson::Number:
-				return MakeShared<FJsonValueNumber>(Value->AsNumber());
-			case EJson::Boolean:
-				return MakeShared<FJsonValueBoolean>(Value->AsBool());
-			case EJson::Array:
-			{
-				TArray<TSharedPtr<FJsonValue>> ClonedValues;
-				for (const TSharedPtr<FJsonValue>& Child : Value->AsArray())
-				{
-					ClonedValues.Add(CloneJsonValue(Child));
-				}
-				return MakeShared<FJsonValueArray>(ClonedValues);
-			}
-			case EJson::Object:
-				return MakeShared<FJsonValueObject>(CloneJsonObject(Value->AsObject()));
-			default:
-				return MakeShared<FJsonValueNull>();
-			}
+			return Cloned;
 		}
 
 		TArray<TSharedPtr<FJsonValue>> CloneJsonArray(const TArray<TSharedPtr<FJsonValue>>& Values)
 		{
-			TArray<TSharedPtr<FJsonValue>> ClonedValues;
-			ClonedValues.Reserve(Values.Num());
-			for (const TSharedPtr<FJsonValue>& Value : Values)
-			{
-				ClonedValues.Add(CloneJsonValue(Value));
-			}
-			return ClonedValues;
+			const TSharedPtr<FJsonValue> Cloned =
+				UeAgentAuthoringState::CloneCanonicalValue(
+					MakeShared<FJsonValueArray>(Values));
+			return Cloned.IsValid() && Cloned->Type == EJson::Array
+				? Cloned->AsArray()
+				: TArray<TSharedPtr<FJsonValue>>();
 		}
 
 		FString SafeFileName(FString Value)
@@ -207,30 +229,6 @@ namespace UeAgentDetailsAuthoring
 			{
 				return PropertyPath;
 			}
-			if (Field->TryGetStringField(TEXT("property_name"), PropertyPath) && !PropertyPath.IsEmpty())
-			{
-				return PropertyPath;
-			}
-			if (Field->TryGetStringField(TEXT("name"), PropertyPath) && !PropertyPath.IsEmpty())
-			{
-				return PropertyPath;
-			}
-			const TSharedPtr<FJsonObject>* Selector = nullptr;
-			if (Field->TryGetObjectField(TEXT("selector"), Selector) && Selector && Selector->IsValid())
-			{
-				if ((*Selector)->TryGetStringField(TEXT("property_path"), PropertyPath) && !PropertyPath.IsEmpty())
-				{
-					return PropertyPath;
-				}
-				if ((*Selector)->TryGetStringField(TEXT("property_name"), PropertyPath) && !PropertyPath.IsEmpty())
-				{
-					return PropertyPath;
-				}
-				if ((*Selector)->TryGetStringField(TEXT("name"), PropertyPath) && !PropertyPath.IsEmpty())
-				{
-					return PropertyPath;
-				}
-			}
 			return FString();
 		}
 
@@ -246,6 +244,44 @@ namespace UeAgentDetailsAuthoring
 				}
 			}
 			return true;
+		}
+
+		TSharedPtr<FJsonObject> BuildEditablePropertiesForApply(
+			const TSharedPtr<FJsonObject>& PropertiesJson,
+			int32& OutSkippedUnavailable)
+		{
+			OutSkippedUnavailable = 0;
+			if (!PropertiesJson.IsValid())
+			{
+				return PropertiesJson;
+			}
+
+			const TArray<TSharedPtr<FJsonValue>>* Properties = nullptr;
+			if (!PropertiesJson->TryGetArrayField(TEXT("properties"), Properties) || !Properties)
+			{
+				return PropertiesJson;
+			}
+
+			TArray<TSharedPtr<FJsonValue>> EditableProperties;
+			EditableProperties.Reserve(Properties->Num());
+			for (const TSharedPtr<FJsonValue>& PropertyValue : *Properties)
+			{
+				const TSharedPtr<FJsonObject> Property = PropertyValue.IsValid() && PropertyValue->Type == EJson::Object
+					? PropertyValue->AsObject()
+					: nullptr;
+				if (Property.IsValid() && !IsEditableField(Property))
+				{
+					++OutSkippedUnavailable;
+					continue;
+				}
+				EditableProperties.Add(PropertyValue);
+			}
+
+			TSharedPtr<FJsonObject> Filtered = MakeShared<FJsonObject>();
+			Filtered->Values = PropertiesJson->Values;
+			Filtered->SetArrayField(TEXT("properties"), MoveTemp(EditableProperties));
+			Filtered->SetNumberField(TEXT("property_count"), Filtered->GetArrayField(TEXT("properties")).Num());
+			return Filtered;
 		}
 
 		void ResolveCategory(
@@ -304,6 +340,7 @@ namespace UeAgentDetailsAuthoring
 			const FString& DetailsRoot,
 			const FOwnerInfo& OwnerInfo,
 			const FString& GroupSlug,
+			const FString& DetailsFileExtension,
 			const TSharedPtr<FJsonObject>& Field,
 			FString& OutError)
 		{
@@ -320,14 +357,14 @@ namespace UeAgentDetailsAuthoring
 			const int32 CandidateCount = Candidates->Num();
 
 			const FString PropertySlug = SafeFileName(GetPropertyPath(Field));
-			const FString CandidateFileName = FString::Printf(TEXT("candidates/%s_%s.json"), *SafeFileName(GroupSlug), *PropertySlug);
+			const FString CandidateFileName = FString::Printf(TEXT("candidates/%s_%s.%s"), *SafeFileName(GroupSlug), *PropertySlug, *DetailsFileExtension);
 			TSharedPtr<FJsonObject> CandidateJson = MakeShared<FJsonObject>();
 			CandidateJson->SetStringField(TEXT("schema"), DetailsCandidatesSchema);
 			CandidateJson->SetObjectField(TEXT("owner_ref"), BuildOwnerRef(OwnerInfo));
 			CandidateJson->SetStringField(TEXT("property_path"), GetPropertyPath(Field));
 			CandidateJson->SetNumberField(TEXT("candidate_count"), CandidateCount);
 			CandidateJson->SetArrayField(TEXT("candidates"), CloneJsonArray(*Candidates));
-			if (!FUeAgentStructuredJsonFormatter::SaveObjectToFile(DetailsRoot / CandidateFileName, CandidateJson, &OutError))
+			if (!SaveDetailsObjectFile(DetailsRoot / CandidateFileName, CandidateJson, OutError))
 			{
 				return false;
 			}
@@ -343,7 +380,6 @@ namespace UeAgentDetailsAuthoring
 			TSharedPtr<FJsonObject> Entry = MakeShared<FJsonObject>();
 			Entry->SetStringField(TEXT("group_key"), Group.GroupKey);
 			Entry->SetStringField(TEXT("display_name"), Group.DisplayName);
-			Entry->SetArrayField(TEXT("category_path"), CloneJsonArray(Group.CategoryPathValues));
 			Entry->SetStringField(TEXT("category_source"), Group.CategorySource);
 			Entry->SetStringField(TEXT("file"), Group.FileName);
 			Entry->SetNumberField(TEXT("field_count"), Group.Fields.Num());
@@ -358,7 +394,6 @@ namespace UeAgentDetailsAuthoring
 			Object->SetObjectField(TEXT("owner_ref"), BuildOwnerRef(OwnerInfo));
 			Object->SetStringField(TEXT("group_key"), Group.GroupKey);
 			Object->SetStringField(TEXT("display_name"), Group.DisplayName);
-			Object->SetArrayField(TEXT("category_path"), CloneJsonArray(Group.CategoryPathValues));
 			Object->SetStringField(TEXT("category_source"), Group.CategorySource);
 			Object->SetNumberField(TEXT("field_count"), Group.Fields.Num());
 			Object->SetNumberField(TEXT("editable_field_count"), Group.EditableFieldCount);
@@ -369,13 +404,17 @@ namespace UeAgentDetailsAuthoring
 		TSet<FString> RedundantFieldNames()
 		{
 			TSet<FString> Fields;
+			Fields.Add(TEXT("category_path"));
+			Fields.Add(TEXT("operations"));
 			return Fields;
 		}
 
 		TSharedPtr<FJsonObject> MakeCompactField(const TSharedPtr<FJsonObject>& Field)
 		{
 			static const TSet<FString> OmittedFields = RedundantFieldNames();
-			return CloneJsonObject(Field, &OmittedFields);
+			TSharedPtr<FJsonObject> CompactField = CloneJsonObject(Field, &OmittedFields);
+			UeAgentAuthoringFieldPolicy::NormalizeAuthoringObjectTree(CompactField);
+			return CompactField;
 		}
 
 		FString FirstStringField(const TSharedPtr<FJsonObject>& Object, std::initializer_list<const TCHAR*> FieldNames)
@@ -403,39 +442,42 @@ namespace UeAgentDetailsAuthoring
 				return false;
 			}
 
-			return
-				Field->HasField(TEXT("property_path")) ||
-				Field->HasField(TEXT("property_name")) ||
-				Field->HasField(TEXT("display_name")) ||
-				Field->HasField(TEXT("category_path")) ||
-				Field->HasField(TEXT("control_type")) ||
-				Field->HasField(TEXT("value_kind")) ||
-				Field->HasField(TEXT("value_text")) ||
-				Field->HasField(TEXT("default_value_text")) ||
-				Field->HasField(TEXT("availability")) ||
-				Field->HasField(TEXT("operations")) ||
-				Field->HasField(TEXT("tooltip")) ||
-				Field->HasField(TEXT("candidates"));
+			FString ValueKind;
+			return Field->TryGetStringField(TEXT("value_kind"), ValueKind) && !ValueKind.IsEmpty();
 		}
 
-		bool IsDetailsPropertyArray(const TArray<TSharedPtr<FJsonValue>>& Properties)
+		bool ValidateInlineDetailsPropertyArray(
+			const TArray<TSharedPtr<FJsonValue>>& Properties,
+			FString& OutErrorCode)
 		{
-			if (Properties.Num() == 0)
-			{
-				return false;
-			}
-
+			TSet<FString> PropertyPaths;
 			for (const TSharedPtr<FJsonValue>& PropertyValue : Properties)
 			{
-				if (!PropertyValue.IsValid() || PropertyValue->Type != EJson::Object)
+				const TSharedPtr<FJsonObject> Property = PropertyValue.IsValid() && PropertyValue->Type == EJson::Object
+					? PropertyValue->AsObject()
+					: nullptr;
+				if (!IsDetailsPropertyDescriptor(Property))
 				{
+					OutErrorCode = TEXT("inline_properties_invalid");
 					return false;
 				}
-				if (!IsDetailsPropertyDescriptor(PropertyValue->AsObject()))
+
+				const FString PropertyPath = GetPropertyPath(Property).ToLower();
+				if (PropertyPaths.Contains(PropertyPath))
 				{
+					OutErrorCode = TEXT("inline_properties_duplicate_property");
+					return false;
+				}
+				PropertyPaths.Add(PropertyPath);
+
+				if (!Property->HasField(TEXT("value")))
+				{
+					OutErrorCode = TEXT("inline_properties_value_missing");
 					return false;
 				}
 			}
+
+			OutErrorCode.Reset();
 			return true;
 		}
 
@@ -459,9 +501,26 @@ namespace UeAgentDetailsAuthoring
 			Normalized.TrimStartAndEndInline();
 			if (Normalized.IsEmpty())
 			{
-				Normalized = TEXT("details/index.json");
+				Normalized = TEXT("details/index.hjson");
 			}
 			return NormalizeJsonRelativePath(Normalized);
+		}
+
+		FString GetDetailsIndexFileName(const FString& IndexFile)
+		{
+			const FString Normalized = NormalizeDetailsIndexFile(IndexFile);
+			const FString FileName = FPaths::GetCleanFilename(Normalized);
+			return FileName.IsEmpty() ? FString(TEXT("index.hjson")) : FileName;
+		}
+
+		FString GetDetailsFileExtensionForIndex(const FString& IndexFile)
+		{
+			return TEXT("hjson");
+		}
+
+		FString MakeDetailsIndexFileForEntryFile(const FString& EntryFilePath)
+		{
+			return TEXT("index.hjson");
 		}
 
 		FString NormalizeDetailsRefFieldName(const FString& RefFieldName)
@@ -489,7 +548,7 @@ namespace UeAgentDetailsAuthoring
 			}
 			if (Resolved.OwnerClassPath.IsEmpty() && Object->GetClass())
 			{
-				Resolved.OwnerClassPath = UeAgentUObjectProperties::GetClassPath(Object->GetClass());
+				Resolved.OwnerClassPath = Object->GetClass()->GetPathName();
 			}
 			if (Resolved.OwnerId.IsEmpty())
 			{
@@ -512,12 +571,13 @@ namespace UeAgentDetailsAuthoring
 			}
 
 			const TSharedPtr<FJsonObject>* Selector = nullptr;
-			const TArray<TSharedPtr<FJsonValue>>* Operations = nullptr;
+			const TSharedPtr<FJsonObject>* Availability = nullptr;
 			return Object->TryGetObjectField(TEXT("selector"), Selector)
 				&& Selector
 				&& Selector->IsValid()
-				&& Object->TryGetArrayField(TEXT("operations"), Operations)
-				&& Operations;
+				&& Object->TryGetObjectField(TEXT("availability"), Availability)
+				&& Availability
+				&& Availability->IsValid();
 		}
 
 		FString MakePathRelativeToRoot(const FString& FilePath, const FString& FolderRoot);
@@ -675,10 +735,10 @@ namespace UeAgentDetailsAuthoring
 			}
 		}
 
-		bool FindLegacyPropertiesSurfaceRecursive(
+		bool FindAuthoringPropertiesIssueRecursive(
 			const TSharedPtr<FJsonObject>& Object,
 			const FString& JsonPath,
-			FString& OutLegacySurface,
+			FString& OutSurface,
 			FString& OutJsonPath,
 			FString& OutErrorCode)
 		{
@@ -693,39 +753,48 @@ namespace UeAgentDetailsAuthoring
 				const FString FieldPath = JsonPath.IsEmpty()
 					? Pair.Key
 					: FString::Printf(TEXT("%s.%s"), *JsonPath, *Pair.Key);
-				if (KeyLower == TEXT("properties") && JsonValueIsArray(Pair.Value))
+				if (IsDiagnosticsOnlyKeyLower(KeyLower))
 				{
-					OutLegacySurface = TEXT("properties[]");
+					OutSurface = Pair.Key;
 					OutJsonPath = FieldPath;
-					OutErrorCode = TEXT("legacy_inline_properties_not_supported");
+					OutErrorCode = DiagnosticsErrorCodeForSurface(Pair.Key);
 					return true;
 				}
-				if (KeyLower == TEXT("settings_properties") && JsonValueIsArray(Pair.Value))
-				{
-					OutLegacySurface = TEXT("settings_properties[]");
-					OutJsonPath = FieldPath;
-					OutErrorCode = TEXT("legacy_settings_properties_not_supported");
-					return true;
-				}
-				if (JsonValueIsArray(Pair.Value) && IsDiagnosticsOnlyKeyLower(KeyLower))
+				if (IsDetailsPropertiesFieldName(KeyLower) && IsAuthoringMetadataObject(Object))
 				{
 					continue;
 				}
-				if (KeyLower.EndsWith(TEXT("_properties"), ESearchCase::CaseSensitive) && JsonValueIsArray(Pair.Value) && IsAuthoringMetadataObject(Object))
+				if (IsDetailsPropertiesFieldName(KeyLower))
 				{
+					if (!JsonValueIsArray(Pair.Value))
+					{
+						OutSurface = Pair.Key;
+						OutJsonPath = FieldPath;
+						OutErrorCode = TEXT("inline_properties_invalid");
+						return true;
+					}
+					if (Object->HasField(MakeDetailsFieldName(Pair.Key)))
+					{
+						OutSurface = Pair.Key + TEXT("[]");
+						OutJsonPath = FieldPath;
+						OutErrorCode = TEXT("inline_grouped_details_conflict");
+						return true;
+					}
+
+					FString InlineErrorCode;
+					if (!ValidateInlineDetailsPropertyArray(Pair.Value->AsArray(), InlineErrorCode))
+					{
+						OutSurface = Pair.Key + TEXT("[]");
+						OutJsonPath = FieldPath;
+						OutErrorCode = InlineErrorCode.IsEmpty() ? FString(TEXT("inline_properties_invalid")) : InlineErrorCode;
+						return true;
+					}
 					continue;
-				}
-				if (KeyLower.EndsWith(TEXT("_properties"), ESearchCase::CaseSensitive) && JsonValueIsArray(Pair.Value))
-				{
-					OutLegacySurface = Pair.Key + TEXT("[]");
-					OutJsonPath = FieldPath;
-					OutErrorCode = TEXT("legacy_inline_properties_not_supported");
-					return true;
 				}
 				const TSharedPtr<FJsonObject>* ChildObject = nullptr;
 				if (Pair.Value.IsValid() && Pair.Value->TryGetObject(ChildObject) && ChildObject && ChildObject->IsValid())
 				{
-					if (FindLegacyPropertiesSurfaceRecursive(*ChildObject, FieldPath, OutLegacySurface, OutJsonPath, OutErrorCode))
+					if (FindAuthoringPropertiesIssueRecursive(*ChildObject, FieldPath, OutSurface, OutJsonPath, OutErrorCode))
 					{
 						return true;
 					}
@@ -743,7 +812,7 @@ namespace UeAgentDetailsAuthoring
 							continue;
 						}
 						const FString ArrayPath = FString::Printf(TEXT("%s.%d"), *FieldPath, Index);
-						if (FindLegacyPropertiesSurfaceRecursive(*ArrayObject, ArrayPath, OutLegacySurface, OutJsonPath, OutErrorCode))
+						if (FindAuthoringPropertiesIssueRecursive(*ArrayObject, ArrayPath, OutSurface, OutJsonPath, OutErrorCode))
 						{
 							return true;
 						}
@@ -753,11 +822,23 @@ namespace UeAgentDetailsAuthoring
 			return false;
 		}
 
-		FString MigrationHintForLegacyError(const FString& ErrorCode)
+		FString ResolutionHintForAuthoringPropertiesError(const FString& ErrorCode)
 		{
-			if (ErrorCode == TEXT("legacy_settings_properties_not_supported"))
+			if (ErrorCode == TEXT("inline_grouped_details_conflict"))
 			{
-				return TEXT("Use settings_details.index_file and edit grouped fields");
+				return TEXT("Choose one property source for the owner: inline *_properties[] for creation seeds, or the referenced grouped Details files");
+			}
+			if (ErrorCode == TEXT("inline_properties_invalid"))
+			{
+				return TEXT("Each inline property must use the uai.uobject_properties.v2 property_path, value_kind, and value fields");
+			}
+			if (ErrorCode == TEXT("inline_properties_duplicate_property"))
+			{
+				return TEXT("Keep one inline descriptor for each case-insensitive property path");
+			}
+			if (ErrorCode == TEXT("inline_properties_value_missing"))
+			{
+				return TEXT("Provide the canonical value field for every inline property");
 			}
 			if (ErrorCode == TEXT("diagnostic_properties_not_authoring"))
 			{
@@ -775,7 +856,7 @@ namespace UeAgentDetailsAuthoring
 			{
 				return TEXT("include_raw_properties is a command parameter only; do not place it in folder JSON");
 			}
-			return TEXT("Move editable fields into the referenced grouped Details owner");
+			return TEXT("Use valid inline *_properties[] for a creation seed, or move editable fields into the referenced grouped Details owner");
 		}
 
 		FString MakePathRelativeToRoot(const FString& FilePath, const FString& FolderRoot)
@@ -802,9 +883,9 @@ namespace UeAgentDetailsAuthoring
 				|| PathLower.StartsWith(TEXT("legacy/"));
 		}
 
-		bool FindLegacyPropertiesFileRecursive(
+		bool FindAuthoringPropertiesFileIssueRecursive(
 			const FString& FolderRoot,
-			FString& OutLegacySurface,
+			FString& OutSurface,
 			FString& OutJsonPath,
 			FString& OutErrorCode)
 		{
@@ -818,11 +899,14 @@ namespace UeAgentDetailsAuthoring
 			struct FLegacyFileRule
 			{
 				const TCHAR* FileName;
-				const TCHAR* LegacySurface;
+				const TCHAR* Surface;
 				const TCHAR* ErrorCode;
 			};
 
 			static const FLegacyFileRule Rules[] = {
+				{ TEXT("properties.hjson"), TEXT("properties.hjson"), TEXT("legacy_properties_file_not_supported") },
+				{ TEXT("raw_properties.hjson"), TEXT("raw_properties.hjson"), TEXT("legacy_raw_properties_not_supported") },
+				{ TEXT("readonly_properties.hjson"), TEXT("readonly_properties.hjson"), TEXT("readonly_properties_not_authoring") },
 				{ TEXT("properties.json"), TEXT("properties.json"), TEXT("legacy_properties_file_not_supported") },
 				{ TEXT("raw_properties.json"), TEXT("raw_properties.json"), TEXT("legacy_raw_properties_not_supported") },
 				{ TEXT("readonly_properties.json"), TEXT("readonly_properties.json"), TEXT("readonly_properties_not_authoring") }
@@ -847,7 +931,7 @@ namespace UeAgentDetailsAuthoring
 						continue;
 					}
 
-					OutLegacySurface = Rule.LegacySurface;
+					OutSurface = Rule.Surface;
 					OutJsonPath = RelativePath;
 					OutErrorCode = Rule.ErrorCode;
 					return true;
@@ -983,9 +1067,16 @@ namespace UeAgentDetailsAuthoring
 			FString CandidatesRef;
 			if (Field->TryGetStringField(TEXT("candidates_ref"), CandidatesRef) && !CandidatesRef.IsEmpty())
 			{
-				if (!IFileManager::Get().FileExists(*(DetailsRoot / CandidatesRef)))
+				FString CandidatePath;
+				FString ResolveError;
+				if (!ResolveDetailsChildPath(DetailsRoot, CandidatesRef, CandidatePath, ResolveError, true))
 				{
-					AddValidationIssue(Issues, TEXT("error"), TEXT("details_field_candidates_ref_missing"), FieldPath / TEXT("candidates_ref"), TEXT("candidates_ref file does not exist"));
+					AddValidationIssue(
+						Issues,
+						TEXT("error"),
+						TEXT("details_field_candidates_ref_invalid"),
+						FieldPath / TEXT("candidates_ref"),
+						ResolveError);
 				}
 			}
 		}
@@ -1038,11 +1129,7 @@ namespace UeAgentDetailsAuthoring
 			}
 
 			const TArray<TSharedPtr<FJsonValue>>* Operations = nullptr;
-			if (!Field->TryGetArrayField(TEXT("operations"), Operations) || !Operations)
-			{
-				AddValidationIssue(Issues, TEXT("error"), TEXT("details_field_operations_missing"), FieldPath / TEXT("operations"), TEXT("operations array is required"));
-			}
-			else
+			if (Field->TryGetArrayField(TEXT("operations"), Operations) && Operations)
 			{
 				static const TSet<FString> AllowedOperations = {
 					TEXT("set"),
@@ -1108,7 +1195,8 @@ namespace UeAgentDetailsAuthoring
 		bool LoadDetailsFieldMap(
 			const FString& DetailsRoot,
 			TMap<FString, FDetailsDiffFieldInfo>& OutFields,
-			FString& OutError)
+			FString& OutError,
+			const FString& IndexFile = FString())
 		{
 			OutFields.Reset();
 			FString NormalizedRoot = DetailsRoot;
@@ -1119,8 +1207,13 @@ namespace UeAgentDetailsAuthoring
 				return false;
 			}
 
+			FString IndexPath;
+			if (!ResolveDetailsChildPath(NormalizedRoot, GetDetailsIndexFileName(IndexFile), IndexPath, OutError))
+			{
+				return false;
+			}
 			TSharedPtr<FJsonObject> Index;
-			if (!LoadJsonObjectFile(NormalizedRoot / TEXT("index.json"), Index, OutError))
+			if (!LoadDetailsObjectFile(IndexPath, Index, OutError))
 			{
 				return false;
 			}
@@ -1145,8 +1238,13 @@ namespace UeAgentDetailsAuthoring
 				FString GroupKey;
 				GroupEntry->TryGetStringField(TEXT("group_key"), GroupKey);
 
+				FString GroupPath;
+				if (!ResolveDetailsChildPath(NormalizedRoot, FileName, GroupPath, OutError))
+				{
+					return false;
+				}
 				TSharedPtr<FJsonObject> GroupJson;
-				if (!LoadJsonObjectFile(NormalizedRoot / FileName, GroupJson, OutError))
+				if (!LoadDetailsObjectFile(GroupPath, GroupJson, OutError))
 				{
 					return false;
 				}
@@ -1375,6 +1473,8 @@ namespace UeAgentDetailsAuthoring
 
 		bool ExternalizeInlineDetailsRecursive(
 			const FString& EntryDirectory,
+			const FString& DetailsIndexFileName,
+			const FString& EntryDetailsScope,
 			const TSharedPtr<FJsonObject>& Object,
 			const FString& SourceCommand,
 			const FString& JsonPath,
@@ -1396,9 +1496,22 @@ namespace UeAgentDetailsAuthoring
 				}
 
 				const TArray<TSharedPtr<FJsonValue>>* Properties = nullptr;
-				if (!Object->TryGetArrayField(Key, Properties) || !Properties || !IsDetailsPropertyArray(*Properties))
+				if (!Object->TryGetArrayField(Key, Properties) || !Properties)
 				{
-					continue;
+					OutError = FString::Printf(TEXT("inline_properties_invalid:%s"), *Key);
+					return false;
+				}
+				const FString DetailsFieldName = MakeDetailsFieldName(Key);
+				if (Object->HasField(DetailsFieldName))
+				{
+					OutError = FString::Printf(TEXT("inline_grouped_details_conflict:%s:%s"), *Key, *DetailsFieldName);
+					return false;
+				}
+				FString InlineErrorCode;
+				if (!ValidateInlineDetailsPropertyArray(*Properties, InlineErrorCode))
+				{
+					OutError = FString::Printf(TEXT("%s:%s"), *InlineErrorCode, *Key);
+					return false;
 				}
 
 				FString Profile;
@@ -1407,21 +1520,33 @@ namespace UeAgentDetailsAuthoring
 				const FString DetailsPath = (Key == TEXT("properties"))
 					? JsonPath
 					: (JsonPath.IsEmpty() ? Key : FString::Printf(TEXT("%s.%s"), *JsonPath, *Key));
-				const FString DetailsRelativeRoot = MakeDetailsRelativeRoot(Object, DetailsPath, UsedDetailsRoots);
+				FString DetailsRelativeRoot = MakeDetailsRelativeRoot(Object, DetailsPath, UsedDetailsRoots);
+				if (!EntryDetailsScope.IsEmpty())
+				{
+					const FString Suffix = DetailsRelativeRoot == TEXT("details")
+						? FString()
+						: DetailsRelativeRoot.RightChop(FCString::Strlen(TEXT("details/")));
+					DetailsRelativeRoot = NormalizeJsonRelativePath(
+						Suffix.IsEmpty()
+							? FString::Printf(TEXT("details/%s"), *EntryDetailsScope)
+							: FString::Printf(TEXT("details/%s/%s"), *EntryDetailsScope, *Suffix));
+				}
+				const FString DetailsIndexFile = DetailsRelativeRoot / DetailsIndexFileName;
 				const FString DetailsRoot = EntryDirectory / DetailsRelativeRoot;
 				if (!WriteGroupedDetails(
 					DetailsRoot,
 					InferOwnerInfo(Object, SourceCommand, DetailsPath),
 					BuildPropertiesContainer(*Properties, Profile),
 					DetailsSummary,
-					OutError))
+					OutError,
+					DetailsIndexFile))
 				{
 					return false;
 				}
 
-				DetailsSummary->SetStringField(TEXT("index_file"), NormalizeJsonRelativePath(DetailsRelativeRoot / TEXT("index.json")));
+				DetailsSummary->SetStringField(TEXT("index_file"), NormalizeJsonRelativePath(DetailsIndexFile));
 				Object->RemoveField(Key);
-				Object->SetObjectField(MakeDetailsFieldName(Key), DetailsSummary);
+				Object->SetObjectField(DetailsFieldName, DetailsSummary);
 			}
 
 			Keys.Reset();
@@ -1442,7 +1567,7 @@ namespace UeAgentDetailsAuthoring
 				const FString ChildPath = JsonPath.IsEmpty() ? Key : FString::Printf(TEXT("%s.%s"), *JsonPath, *Key);
 				if ((*ValuePtr)->Type == EJson::Object)
 				{
-					if (!ExternalizeInlineDetailsRecursive(EntryDirectory, (*ValuePtr)->AsObject(), SourceCommand, ChildPath, UsedDetailsRoots, OutError))
+					if (!ExternalizeInlineDetailsRecursive(EntryDirectory, DetailsIndexFileName, EntryDetailsScope, (*ValuePtr)->AsObject(), SourceCommand, ChildPath, UsedDetailsRoots, OutError))
 					{
 						return false;
 					}
@@ -1455,7 +1580,7 @@ namespace UeAgentDetailsAuthoring
 						if (Array[Index].IsValid() && Array[Index]->Type == EJson::Object)
 						{
 							const FString ArrayPath = FString::Printf(TEXT("%s.%d"), *ChildPath, Index);
-							if (!ExternalizeInlineDetailsRecursive(EntryDirectory, Array[Index]->AsObject(), SourceCommand, ArrayPath, UsedDetailsRoots, OutError))
+							if (!ExternalizeInlineDetailsRecursive(EntryDirectory, DetailsIndexFileName, EntryDetailsScope, Array[Index]->AsObject(), SourceCommand, ArrayPath, UsedDetailsRoots, OutError))
 							{
 								return false;
 							}
@@ -1496,7 +1621,7 @@ namespace UeAgentDetailsAuthoring
 				{
 					const FString DetailsRoot = EntryDirectory / FPaths::GetPath(NormalizeJsonRelativePath(IndexFile));
 					TSharedPtr<FJsonObject> PropertiesJson;
-					if (!LoadGroupedDetails(DetailsRoot, PropertiesJson, OutError))
+					if (!LoadGroupedDetails(DetailsRoot, PropertiesJson, OutError, IndexFile))
 					{
 						return false;
 					}
@@ -1552,54 +1677,6 @@ namespace UeAgentDetailsAuthoring
 		}
 	}
 
-	TSharedPtr<FJsonObject> BuildOwnerRef(const FOwnerInfo& OwnerInfo)
-	{
-		TSharedPtr<FJsonObject> OwnerRef = MakeShared<FJsonObject>();
-		OwnerRef->SetStringField(TEXT("owner_id"), OwnerInfo.OwnerId);
-		OwnerRef->SetStringField(TEXT("owner_kind"), OwnerInfo.OwnerKind);
-		OwnerRef->SetStringField(TEXT("name"), OwnerInfo.OwnerName);
-		OwnerRef->SetStringField(TEXT("object_path"), OwnerInfo.OwnerPath);
-		OwnerRef->SetStringField(TEXT("class_path"), OwnerInfo.OwnerClassPath);
-		if (!OwnerInfo.SourceCommand.IsEmpty())
-		{
-			OwnerRef->SetStringField(TEXT("source_command"), OwnerInfo.SourceCommand);
-		}
-		return OwnerRef;
-	}
-
-	FOwnerInfo MakeOwnerInfoForObject(
-		UObject* Object,
-		const FString& OwnerKind,
-		const FString& OwnerId,
-		const FString& SourceCommand,
-		const FString& OwnerName)
-	{
-		FOwnerInfo OwnerInfo;
-		OwnerInfo.OwnerKind = OwnerKind;
-		OwnerInfo.OwnerId = OwnerId;
-		OwnerInfo.OwnerName = OwnerName;
-		OwnerInfo.SourceCommand = SourceCommand;
-		return ResolveOwnerInfoForObject(OwnerInfo, Object);
-	}
-
-	FOwnerDetailsExportRequest MakeOwnerDetailsExportRequest(
-		UObject* Object,
-		const FString& OwnerKind,
-		const FString& OwnerId,
-		const FString& DetailsRoot,
-		const FString& SourceCommand,
-		const FString& IndexFile,
-		const FString& RefFieldName)
-	{
-		FOwnerDetailsExportRequest Request;
-		Request.Object = Object;
-		Request.OwnerInfo = MakeOwnerInfoForObject(Object, OwnerKind, OwnerId, SourceCommand);
-		Request.DetailsRoot = DetailsRoot;
-		Request.IndexFile = NormalizeDetailsIndexFile(IndexFile);
-		Request.RefFieldName = NormalizeDetailsRefFieldName(RefFieldName);
-		return Request;
-	}
-
 	TSharedPtr<FJsonObject> CloneObjectTree(const TSharedPtr<FJsonObject>& Object)
 	{
 		return CloneJsonObject(Object);
@@ -1637,8 +1714,14 @@ namespace UeAgentDetailsAuthoring
 			return false;
 		}
 
-		TSharedPtr<FJsonObject> PropertiesJson = UeAgentUObjectProperties::ExportObjectProperties(Request.Object, Request.PropertyOptions);
-		if (!WriteGroupedDetails(DetailsRoot, OwnerInfo, PropertiesJson, OutDetailsSummary, OutError))
+		UeAgentAuthoringState::FStateSnapshot Snapshot;
+		TSharedPtr<FJsonObject> PropertiesJson;
+		if (!UeAgentDetailsAuthoringService::CaptureObjectProperties(
+				Request.Object, Request.PropertyOptions, Snapshot, PropertiesJson, OutError))
+		{
+			return false;
+		}
+		if (!WriteGroupedDetails(DetailsRoot, OwnerInfo, PropertiesJson, OutDetailsSummary, OutError, Request.IndexFile))
 		{
 			return false;
 		}
@@ -1683,17 +1766,18 @@ namespace UeAgentDetailsAuthoring
 		}
 
 		TSharedPtr<FJsonObject> PropertiesJson;
-		if (!LoadGroupedDetails(DetailsRoot, PropertiesJson, OutError))
+		if (!LoadGroupedDetails(DetailsRoot, PropertiesJson, OutError, Request.IndexFile))
 		{
 			return false;
 		}
 
-		TSharedPtr<FJsonObject> PropertyApply = UeAgentUObjectProperties::ApplyObjectProperties(Request.Object, PropertiesJson, Request.ApplyOptions);
-		if (!PropertyApply.IsValid())
-		{
-			OutError = TEXT("owner_apply_failed");
-			return false;
-		}
+		int32 SkippedUnavailable = 0;
+		const TSharedPtr<FJsonObject> EditablePropertiesJson = BuildEditablePropertiesForApply(PropertiesJson, SkippedUnavailable);
+		UeAgentAuthoringDirectApply::FResult DirectResult;
+		FString ApplyError;
+		UeAgentDetailsAuthoringService::ApplyObjectProperties(
+			Request.Object, EditablePropertiesJson, Request.ApplyOptions, DirectResult, ApplyError);
+		TSharedPtr<FJsonObject> PropertyApply = BuildDirectApplySummary(DirectResult);
 
 		FString ApplyStatus;
 		PropertyApply->TryGetStringField(TEXT("status"), ApplyStatus);
@@ -1706,10 +1790,12 @@ namespace UeAgentDetailsAuthoring
 		OutApplySummary->SetStringField(TEXT("schema"), TEXT("uai.grouped_details_apply.v1"));
 		OutApplySummary->SetBoolField(TEXT("ok"), !ApplyStatus.Equals(TEXT("failed"), ESearchCase::IgnoreCase));
 		OutApplySummary->SetStringField(TEXT("status"), ApplyStatus);
+		OutApplySummary->SetStringField(TEXT("property_source"), TEXT("grouped"));
 		OutApplySummary->SetObjectField(TEXT("owner_ref"), BuildOwnerRef(OwnerInfo));
 		OutApplySummary->SetStringField(TEXT("details_root"), DetailsRoot);
 		OutApplySummary->SetStringField(TEXT("index_file"), NormalizeDetailsIndexFile(Request.IndexFile));
 		OutApplySummary->SetStringField(TEXT("ref_field"), NormalizeDetailsRefFieldName(Request.RefFieldName));
+		OutApplySummary->SetNumberField(TEXT("properties_skipped_unavailable"), SkippedUnavailable);
 		for (const TCHAR* CountField : { TEXT("properties_seen"), TEXT("properties_applied"), TEXT("properties_skipped"), TEXT("properties_failed") })
 		{
 			double Count = 0.0;
@@ -1719,6 +1805,87 @@ namespace UeAgentDetailsAuthoring
 			}
 		}
 		OutApplySummary->SetObjectField(TEXT("property_apply"), PropertyApply);
+		return true;
+	}
+
+	bool ResolveOwnerPropertiesFromEntry(
+		const FString& EntryDirectory,
+		const TSharedPtr<FJsonObject>& EntryObject,
+		const FString& RefFieldName,
+		FOwnerPropertiesInput& OutInput,
+		FString& OutError)
+	{
+		OutInput = FOwnerPropertiesInput();
+		OutError.Reset();
+		if (!EntryObject.IsValid())
+		{
+			return true;
+		}
+
+		OutInput.RefFieldName = NormalizeDetailsRefFieldName(RefFieldName);
+		OutInput.PropertiesFieldName = MakePropertiesFieldNameFromDetails(OutInput.RefFieldName);
+
+		const TArray<TSharedPtr<FJsonValue>>* InlineProperties = nullptr;
+		const bool bHasInlineField = EntryObject->HasField(OutInput.PropertiesFieldName);
+		if (bHasInlineField)
+		{
+			if (!EntryObject->TryGetArrayField(OutInput.PropertiesFieldName, InlineProperties) || !InlineProperties)
+			{
+				OutError = FString::Printf(TEXT("inline_properties_invalid:%s"), *OutInput.PropertiesFieldName);
+				return false;
+			}
+
+			FString InlineErrorCode;
+			if (!ValidateInlineDetailsPropertyArray(*InlineProperties, InlineErrorCode))
+			{
+				OutError = FString::Printf(TEXT("%s:%s"), *InlineErrorCode, *OutInput.PropertiesFieldName);
+				return false;
+			}
+		}
+
+		bool bHasGroupedDetails = false;
+		if (!ResolveDetailsRefRoot(
+			EntryDirectory,
+			EntryObject,
+			OutInput.RefFieldName,
+			bHasGroupedDetails,
+			OutInput.DetailsRoot,
+			OutInput.IndexFile,
+			OutError))
+		{
+			return false;
+		}
+
+		if (bHasInlineField && bHasGroupedDetails)
+		{
+			OutError = FString::Printf(
+				TEXT("inline_grouped_details_conflict:%s:%s"),
+				*OutInput.PropertiesFieldName,
+				*OutInput.RefFieldName);
+			return false;
+		}
+
+		if (bHasInlineField)
+		{
+			FString Profile;
+			EntryObject->TryGetStringField(TEXT("profile"), Profile);
+			OutInput.bPresent = true;
+			OutInput.bInline = true;
+			OutInput.PropertiesJson = BuildPropertiesContainer(*InlineProperties, Profile);
+			return true;
+		}
+
+		if (!bHasGroupedDetails)
+		{
+			return true;
+		}
+
+		if (!LoadGroupedDetails(OutInput.DetailsRoot, OutInput.PropertiesJson, OutError, OutInput.IndexFile))
+		{
+			return false;
+		}
+		OutInput.bPresent = true;
+		OutInput.bInline = false;
 		return true;
 	}
 
@@ -1734,14 +1901,12 @@ namespace UeAgentDetailsAuthoring
 		FString& OutError)
 	{
 		OutApplySummary.Reset();
-		bool bHasDetails = false;
-		FString DetailsRoot;
-		FString IndexFile;
-		if (!ResolveDetailsRefRoot(EntryDirectory, EntryObject, RefFieldName, bHasDetails, DetailsRoot, IndexFile, OutError))
+		FOwnerPropertiesInput Input;
+		if (!ResolveOwnerPropertiesFromEntry(EntryDirectory, EntryObject, RefFieldName, Input, OutError))
 		{
 			return false;
 		}
-		if (!bHasDetails)
+		if (!Input.bPresent)
 		{
 			return true;
 		}
@@ -1749,26 +1914,73 @@ namespace UeAgentDetailsAuthoring
 		if (!bApply)
 		{
 			OutApplySummary = MakeShared<FJsonObject>();
-			OutApplySummary->SetStringField(TEXT("schema"), TEXT("uai.grouped_details_apply.v1"));
+			OutApplySummary->SetStringField(TEXT("schema"), Input.bInline ? FString(TEXT("uai.inline_details_apply.v1")) : FString(TEXT("uai.grouped_details_apply.v1")));
 			OutApplySummary->SetBoolField(TEXT("ok"), true);
 			OutApplySummary->SetStringField(TEXT("status"), TEXT("skipped"));
 			OutApplySummary->SetObjectField(TEXT("owner_ref"), BuildOwnerRef(OwnerInfo));
-			OutApplySummary->SetStringField(TEXT("details_root"), DetailsRoot);
-			OutApplySummary->SetStringField(TEXT("index_file"), NormalizeDetailsIndexFile(IndexFile));
-			OutApplySummary->SetStringField(TEXT("ref_field"), NormalizeDetailsRefFieldName(RefFieldName));
+			OutApplySummary->SetStringField(TEXT("property_source"), Input.bInline ? FString(TEXT("inline")) : FString(TEXT("grouped")));
+			OutApplySummary->SetStringField(TEXT("ref_field"), Input.RefFieldName);
+			OutApplySummary->SetStringField(TEXT("properties_field"), Input.PropertiesFieldName);
+			if (!Input.bInline)
+			{
+				OutApplySummary->SetStringField(TEXT("details_root"), Input.DetailsRoot);
+				OutApplySummary->SetStringField(TEXT("index_file"), NormalizeDetailsIndexFile(Input.IndexFile));
+			}
 			OutApplySummary->SetNumberField(TEXT("properties_applied"), 0);
 			return true;
 		}
-
-		FOwnerDetailsApplyRequest Request;
-		Request.Object = Object;
-		Request.OwnerInfo = OwnerInfo;
-		Request.DetailsRoot = DetailsRoot;
-		Request.IndexFile = IndexFile;
-		Request.RefFieldName = RefFieldName;
-		if (!ApplyOwnerDetails(Request, OutApplySummary, OutError))
+		if (!Object)
 		{
+			OutError = TEXT("details_owner_missing");
 			return false;
+		}
+
+		if (Input.bInline)
+		{
+			UeAgentAuthoringDirectApply::FResult DirectResult;
+			FString ApplyError;
+			UeAgentDetailsAuthoringService::ApplyObjectProperties(
+				Object, Input.PropertiesJson, UeAgentAuthoringObjectApply::FOptions(),
+				DirectResult, ApplyError);
+			TSharedPtr<FJsonObject> PropertyApply = BuildDirectApplySummary(DirectResult);
+
+			FString ApplyStatus;
+			PropertyApply->TryGetStringField(TEXT("status"), ApplyStatus);
+			if (ApplyStatus.IsEmpty())
+			{
+				ApplyStatus = TEXT("applied");
+			}
+
+			OutApplySummary = MakeShared<FJsonObject>();
+			OutApplySummary->SetStringField(TEXT("schema"), TEXT("uai.inline_details_apply.v1"));
+			OutApplySummary->SetBoolField(TEXT("ok"), !ApplyStatus.Equals(TEXT("failed"), ESearchCase::IgnoreCase));
+			OutApplySummary->SetStringField(TEXT("status"), ApplyStatus);
+			OutApplySummary->SetStringField(TEXT("property_source"), TEXT("inline"));
+			OutApplySummary->SetObjectField(TEXT("owner_ref"), BuildOwnerRef(ResolveOwnerInfoForObject(OwnerInfo, Object)));
+			OutApplySummary->SetStringField(TEXT("ref_field"), Input.RefFieldName);
+			OutApplySummary->SetStringField(TEXT("properties_field"), Input.PropertiesFieldName);
+			for (const TCHAR* CountField : { TEXT("properties_seen"), TEXT("properties_applied"), TEXT("properties_skipped"), TEXT("properties_failed") })
+			{
+				double Count = 0.0;
+				if (PropertyApply->TryGetNumberField(CountField, Count))
+				{
+					OutApplySummary->SetNumberField(CountField, Count);
+				}
+			}
+			OutApplySummary->SetObjectField(TEXT("property_apply"), PropertyApply);
+		}
+		else
+		{
+			FOwnerDetailsApplyRequest Request;
+			Request.Object = Object;
+			Request.OwnerInfo = OwnerInfo;
+			Request.DetailsRoot = Input.DetailsRoot;
+			Request.IndexFile = Input.IndexFile;
+			Request.RefFieldName = Input.RefFieldName;
+			if (!ApplyOwnerDetails(Request, OutApplySummary, OutError))
+			{
+				return false;
+			}
 		}
 
 		if (OutApplySummary.IsValid())
@@ -1780,7 +1992,24 @@ namespace UeAgentDetailsAuthoring
 			}
 			if (!bOk)
 			{
-				OutError = TEXT("grouped_details_apply_failed");
+				OutError = Input.bInline ? FString(TEXT("inline_properties_apply_failed")) : FString(TEXT("grouped_details_apply_failed"));
+				const TSharedPtr<FJsonObject>* PropertyApply = nullptr;
+				if (OutApplySummary->TryGetObjectField(TEXT("property_apply"), PropertyApply) && PropertyApply && PropertyApply->IsValid())
+				{
+					const TArray<TSharedPtr<FJsonValue>>* PropertyResults = nullptr;
+					if ((*PropertyApply)->TryGetArrayField(TEXT("properties"), PropertyResults) && PropertyResults && PropertyResults->Num() > 0)
+					{
+						const TSharedPtr<FJsonObject> FirstResult = (*PropertyResults)[0].IsValid() ? (*PropertyResults)[0]->AsObject() : nullptr;
+						FString PropertyPath;
+						FString PropertyReason;
+						if (FirstResult.IsValid())
+						{
+							FirstResult->TryGetStringField(TEXT("property_path"), PropertyPath);
+							FirstResult->TryGetStringField(TEXT("reason"), PropertyReason);
+						}
+						if (!PropertyReason.IsEmpty()) OutError += TEXT(":") + PropertyPath + TEXT(":") + PropertyReason;
+					}
+				}
 				return false;
 			}
 
@@ -1834,7 +2063,7 @@ namespace UeAgentDetailsAuthoring
 		const FString AllowedTarget = IndexFile;
 
 		TSharedPtr<FJsonObject> Rejection;
-		if (BuildLegacyPropertiesRejectionIfPresent(Request.EntryObject, OwnerInfo, AllowedTarget, Rejection))
+		if (BuildAuthoringPropertiesRejectionIfPresent(Request.EntryObject, OwnerInfo, AllowedTarget, Rejection))
 		{
 			OutValidateSummary = Rejection;
 			OutValidateSummary->TryGetStringField(TEXT("error_code"), OutError);
@@ -1843,7 +2072,7 @@ namespace UeAgentDetailsAuthoring
 
 		FString FolderRoot = Request.FolderRoot;
 		FolderRoot.TrimStartAndEndInline();
-		if (!FolderRoot.IsEmpty() && BuildLegacyPropertiesFileRejectionIfPresent(FolderRoot, OwnerInfo, AllowedTarget, Rejection))
+		if (!FolderRoot.IsEmpty() && BuildAuthoringPropertiesFileRejectionIfPresent(FolderRoot, OwnerInfo, AllowedTarget, Rejection))
 		{
 			OutValidateSummary = Rejection;
 			OutValidateSummary->TryGetStringField(TEXT("error_code"), OutError);
@@ -1910,26 +2139,31 @@ namespace UeAgentDetailsAuthoring
 			return FinalizeSummary();
 		}
 
-		const FString IndexPath = DetailsRoot / TEXT("index.json");
-		TSharedPtr<FJsonObject> Index;
+		FString IndexPath;
 		FString LoadError;
-		if (!LoadJsonObjectFile(IndexPath, Index, LoadError))
+		if (!ResolveDetailsChildPath(DetailsRoot, GetDetailsIndexFileName(IndexFile), IndexPath, LoadError))
 		{
-			AddValidationIssue(Issues, TEXT("error"), TEXT("details_index_read_failed"), TEXT("details/index.json"), LoadError);
+			AddValidationIssue(Issues, TEXT("error"), TEXT("details_index_path_invalid"), IndexFile, LoadError);
+			return FinalizeSummary();
+		}
+		TSharedPtr<FJsonObject> Index;
+		if (!LoadDetailsObjectFile(IndexPath, Index, LoadError))
+		{
+			AddValidationIssue(Issues, TEXT("error"), TEXT("details_index_read_failed"), IndexFile, LoadError);
 			return FinalizeSummary();
 		}
 
 		const FString IndexSchema = ReadStringField(Index, TEXT("schema"));
 		if (IndexSchema != DetailsIndexSchema)
 		{
-			AddValidationIssue(Issues, TEXT("error"), TEXT("details_index_schema_invalid"), TEXT("details/index.json.schema"), TEXT("details index schema must be uai.details_index.v1"));
+			AddValidationIssue(Issues, TEXT("error"), TEXT("details_index_schema_invalid"), IndexFile / TEXT("schema"), TEXT("details index schema must be uai.details_index.v1"));
 		}
-		ValidateOwnerRef(Index, OwnerInfo, TEXT("details/index.json"), Issues);
+		ValidateOwnerRef(Index, OwnerInfo, IndexFile, Issues);
 
 		const TArray<TSharedPtr<FJsonValue>>* Groups = nullptr;
 		if (!Index->TryGetArrayField(TEXT("groups"), Groups) || !Groups)
 		{
-			AddValidationIssue(Issues, TEXT("error"), TEXT("details_index_groups_missing"), TEXT("details/index.json.groups"), TEXT("details index requires groups array"));
+			AddValidationIssue(Issues, TEXT("error"), TEXT("details_index_groups_missing"), IndexFile / TEXT("groups"), TEXT("details index requires groups array"));
 			return FinalizeSummary();
 		}
 
@@ -1941,7 +2175,7 @@ namespace UeAgentDetailsAuthoring
 
 		for (int32 GroupIndex = 0; GroupIndex < Groups->Num(); ++GroupIndex)
 		{
-			const FString GroupPath = FString::Printf(TEXT("details/index.json.groups.%d"), GroupIndex);
+			const FString GroupPath = FString::Printf(TEXT("%s.groups.%d"), *IndexFile, GroupIndex);
 			const TSharedPtr<FJsonObject> GroupEntry = (*Groups)[GroupIndex].IsValid() ? (*Groups)[GroupIndex]->AsObject() : nullptr;
 			if (!GroupEntry.IsValid())
 			{
@@ -1961,8 +2195,14 @@ namespace UeAgentDetailsAuthoring
 			}
 			GroupFiles.Add(FileName);
 
+			FString GroupPathOnDisk;
+			if (!ResolveDetailsChildPath(DetailsRoot, FileName, GroupPathOnDisk, LoadError))
+			{
+				AddValidationIssue(Issues, TEXT("error"), TEXT("details_group_path_invalid"), GroupPath / TEXT("file"), LoadError);
+				continue;
+			}
 			TSharedPtr<FJsonObject> GroupJson;
-			if (!LoadJsonObjectFile(DetailsRoot / FileName, GroupJson, LoadError))
+			if (!LoadDetailsObjectFile(GroupPathOnDisk, GroupJson, LoadError))
 			{
 				AddValidationIssue(Issues, TEXT("error"), TEXT("details_group_read_failed"), GroupPath / TEXT("file"), LoadError);
 				continue;
@@ -2012,17 +2252,17 @@ namespace UeAgentDetailsAuthoring
 		double DeclaredGroupCount = 0.0;
 		if (Index->TryGetNumberField(TEXT("group_count"), DeclaredGroupCount) && static_cast<int32>(DeclaredGroupCount) != Groups->Num())
 		{
-			AddValidationIssue(Issues, TEXT("error"), TEXT("details_index_group_count_mismatch"), TEXT("details/index.json.group_count"), TEXT("details index group_count does not match groups length"));
+			AddValidationIssue(Issues, TEXT("error"), TEXT("details_index_group_count_mismatch"), IndexFile / TEXT("group_count"), TEXT("details index group_count does not match groups length"));
 		}
 		double DeclaredFieldCount = 0.0;
 		if (Index->TryGetNumberField(TEXT("field_count"), DeclaredFieldCount) && static_cast<int32>(DeclaredFieldCount) != ActualFieldCount)
 		{
-			AddValidationIssue(Issues, TEXT("error"), TEXT("details_index_field_count_mismatch"), TEXT("details/index.json.field_count"), TEXT("details index field_count does not match group fields"));
+			AddValidationIssue(Issues, TEXT("error"), TEXT("details_index_field_count_mismatch"), IndexFile / TEXT("field_count"), TEXT("details index field_count does not match group fields"));
 		}
 		double DeclaredEditableFieldCount = 0.0;
 		if (Index->TryGetNumberField(TEXT("editable_field_count"), DeclaredEditableFieldCount) && static_cast<int32>(DeclaredEditableFieldCount) != ActualEditableFieldCount)
 		{
-			AddValidationIssue(Issues, TEXT("error"), TEXT("details_index_editable_field_count_mismatch"), TEXT("details/index.json.editable_field_count"), TEXT("details index editable_field_count does not match group fields"));
+			AddValidationIssue(Issues, TEXT("error"), TEXT("details_index_editable_field_count_mismatch"), IndexFile / TEXT("editable_field_count"), TEXT("details index editable_field_count does not match group fields"));
 		}
 
 		for (const FString& Gap : Request.CoverageGaps)
@@ -2088,8 +2328,8 @@ namespace UeAgentDetailsAuthoring
 		const FString AllowedTarget = NewIndexFile;
 
 		TSharedPtr<FJsonObject> Rejection;
-		if (BuildLegacyPropertiesRejectionIfPresent(Request.OldEntryObject, OwnerInfo, AllowedTarget, Rejection)
-			|| BuildLegacyPropertiesRejectionIfPresent(Request.NewEntryObject, OwnerInfo, AllowedTarget, Rejection))
+		if (BuildAuthoringPropertiesRejectionIfPresent(Request.OldEntryObject, OwnerInfo, AllowedTarget, Rejection)
+			|| BuildAuthoringPropertiesRejectionIfPresent(Request.NewEntryObject, OwnerInfo, AllowedTarget, Rejection))
 		{
 			OutDiffSummary = Rejection;
 			OutDiffSummary->TryGetStringField(TEXT("error_code"), OutError);
@@ -2100,8 +2340,8 @@ namespace UeAgentDetailsAuthoring
 		OldFolderRoot.TrimStartAndEndInline();
 		FString NewFolderRoot = Request.NewFolderRoot;
 		NewFolderRoot.TrimStartAndEndInline();
-		if ((!OldFolderRoot.IsEmpty() && BuildLegacyPropertiesFileRejectionIfPresent(OldFolderRoot, OwnerInfo, AllowedTarget, Rejection))
-			|| (!NewFolderRoot.IsEmpty() && BuildLegacyPropertiesFileRejectionIfPresent(NewFolderRoot, OwnerInfo, AllowedTarget, Rejection)))
+		if ((!OldFolderRoot.IsEmpty() && BuildAuthoringPropertiesFileRejectionIfPresent(OldFolderRoot, OwnerInfo, AllowedTarget, Rejection))
+			|| (!NewFolderRoot.IsEmpty() && BuildAuthoringPropertiesFileRejectionIfPresent(NewFolderRoot, OwnerInfo, AllowedTarget, Rejection)))
 		{
 			OutDiffSummary = Rejection;
 			OutDiffSummary->TryGetStringField(TEXT("error_code"), OutError);
@@ -2159,12 +2399,12 @@ namespace UeAgentDetailsAuthoring
 		TMap<FString, FDetailsDiffFieldInfo> OldFields;
 		TMap<FString, FDetailsDiffFieldInfo> NewFields;
 		FString LoadError;
-		if (!LoadDetailsFieldMap(OldDetailsRoot, OldFields, LoadError))
+		if (!LoadDetailsFieldMap(OldDetailsRoot, OldFields, LoadError, OldIndexFile))
 		{
 			AddValidationIssue(Issues, TEXT("error"), TEXT("old_details_read_failed"), TEXT("old_details_root"), LoadError);
 			return FinalizeSummary();
 		}
-		if (!LoadDetailsFieldMap(NewDetailsRoot, NewFields, LoadError))
+		if (!LoadDetailsFieldMap(NewDetailsRoot, NewFields, LoadError, NewIndexFile))
 		{
 			AddValidationIssue(Issues, TEXT("error"), TEXT("new_details_read_failed"), TEXT("new_details_root"), LoadError);
 			return FinalizeSummary();
@@ -2320,7 +2560,7 @@ namespace UeAgentDetailsAuthoring
 		AllowedTarget.TrimStartAndEndInline();
 		if (AllowedTarget.IsEmpty())
 		{
-			AllowedTarget = TEXT("details/index.json");
+			AllowedTarget = TEXT("details/index.hjson");
 		}
 
 		OutReport = MakeShared<FJsonObject>();
@@ -2339,104 +2579,104 @@ namespace UeAgentDetailsAuthoring
 		return !bHasError;
 	}
 
-	TSharedPtr<FJsonObject> MakeLegacyPropertiesRejection(
+	TSharedPtr<FJsonObject> MakeAuthoringPropertiesRejection(
 		const FString& ErrorCode,
-		const FString& LegacySurface,
+		const FString& Surface,
 		const FOwnerInfo& OwnerInfo,
 		const FString& JsonPath,
-		const FString& MigrationHint,
+		const FString& ResolutionHint,
 		const FString& AllowedTarget)
 	{
 		TSharedPtr<FJsonObject> Rejection = MakeShared<FJsonObject>();
-		Rejection->SetStringField(TEXT("schema"), TEXT("uai.legacy_rejection.v1"));
+		Rejection->SetStringField(TEXT("schema"), TEXT("uai.authoring_properties_rejection.v1"));
 		Rejection->SetBoolField(TEXT("ok"), false);
-		Rejection->SetStringField(TEXT("error_code"), ErrorCode.IsEmpty() ? FString(TEXT("legacy_properties_not_supported")) : ErrorCode);
-		Rejection->SetStringField(TEXT("message"), FString::Printf(TEXT("Legacy properties surface is not supported by grouped Details authoring: %s"), *LegacySurface));
-		Rejection->SetStringField(TEXT("legacy_surface"), LegacySurface);
+		Rejection->SetStringField(TEXT("error_code"), ErrorCode.IsEmpty() ? FString(TEXT("authoring_properties_rejected")) : ErrorCode);
+		Rejection->SetStringField(TEXT("message"), FString::Printf(TEXT("Authoring properties surface was rejected: %s"), *Surface));
+		Rejection->SetStringField(TEXT("surface"), Surface);
 		Rejection->SetStringField(TEXT("owner_kind"), OwnerInfo.OwnerKind);
 		Rejection->SetStringField(TEXT("owner_id"), OwnerInfo.OwnerId);
 		Rejection->SetStringField(TEXT("json_path"), JsonPath);
-		Rejection->SetStringField(TEXT("migration_hint"), MigrationHint.IsEmpty() ? MigrationHintForLegacyError(ErrorCode) : MigrationHint);
+		Rejection->SetStringField(TEXT("resolution_hint"), ResolutionHint.IsEmpty() ? ResolutionHintForAuthoringPropertiesError(ErrorCode) : ResolutionHint);
 		Rejection->SetStringField(TEXT("allowed_target"), AllowedTarget);
 		Rejection->SetBoolField(TEXT("dropped"), false);
 		return Rejection;
 	}
 
-	bool FindLegacyPropertiesSurface(
+	bool FindAuthoringPropertiesIssue(
 		const TSharedPtr<FJsonObject>& Object,
-		FString& OutLegacySurface,
+		FString& OutSurface,
 		FString& OutJsonPath,
 		FString& OutErrorCode)
 	{
-		OutLegacySurface.Reset();
+		OutSurface.Reset();
 		OutJsonPath.Reset();
 		OutErrorCode.Reset();
-		return FindLegacyPropertiesSurfaceRecursive(Object, FString(), OutLegacySurface, OutJsonPath, OutErrorCode);
+		return FindAuthoringPropertiesIssueRecursive(Object, FString(), OutSurface, OutJsonPath, OutErrorCode);
 	}
 
-	bool FindLegacyPropertiesFile(
+	bool FindAuthoringPropertiesFileIssue(
 		const FString& FolderRoot,
-		FString& OutLegacySurface,
+		FString& OutSurface,
 		FString& OutJsonPath,
 		FString& OutErrorCode)
 	{
-		OutLegacySurface.Reset();
+		OutSurface.Reset();
 		OutJsonPath.Reset();
 		OutErrorCode.Reset();
-		return FindLegacyPropertiesFileRecursive(FolderRoot, OutLegacySurface, OutJsonPath, OutErrorCode);
+		return FindAuthoringPropertiesFileIssueRecursive(FolderRoot, OutSurface, OutJsonPath, OutErrorCode);
 	}
 
-	bool BuildLegacyPropertiesRejectionIfPresent(
+	bool BuildAuthoringPropertiesRejectionIfPresent(
 		const TSharedPtr<FJsonObject>& Object,
 		const FOwnerInfo& OwnerInfo,
 		const FString& AllowedTarget,
 		TSharedPtr<FJsonObject>& OutRejection)
 	{
 		OutRejection.Reset();
-		FString LegacySurface;
+		FString Surface;
 		FString JsonPath;
 		FString ErrorCode;
-		if (!FindLegacyPropertiesSurface(Object, LegacySurface, JsonPath, ErrorCode))
+		if (!FindAuthoringPropertiesIssue(Object, Surface, JsonPath, ErrorCode))
 		{
 			return false;
 		}
 
-		OutRejection = MakeLegacyPropertiesRejection(
+		OutRejection = MakeAuthoringPropertiesRejection(
 			ErrorCode,
-			LegacySurface,
+			Surface,
 			OwnerInfo,
 			JsonPath,
-			MigrationHintForLegacyError(ErrorCode),
+			ResolutionHintForAuthoringPropertiesError(ErrorCode),
 			AllowedTarget);
 		return true;
 	}
 
-	bool BuildLegacyPropertiesFileRejectionIfPresent(
+	bool BuildAuthoringPropertiesFileRejectionIfPresent(
 		const FString& FolderRoot,
 		const FOwnerInfo& OwnerInfo,
 		const FString& AllowedTarget,
 		TSharedPtr<FJsonObject>& OutRejection)
 	{
 		OutRejection.Reset();
-		FString LegacySurface;
+		FString Surface;
 		FString JsonPath;
 		FString ErrorCode;
-		if (!FindLegacyPropertiesFile(FolderRoot, LegacySurface, JsonPath, ErrorCode))
+		if (!FindAuthoringPropertiesFileIssue(FolderRoot, Surface, JsonPath, ErrorCode))
 		{
 			return false;
 		}
 
-		OutRejection = MakeLegacyPropertiesRejection(
+		OutRejection = MakeAuthoringPropertiesRejection(
 			ErrorCode,
-			LegacySurface,
+			Surface,
 			OwnerInfo,
 			JsonPath,
-			MigrationHintForLegacyError(ErrorCode),
+			ResolutionHintForAuthoringPropertiesError(ErrorCode),
 			AllowedTarget);
 		return true;
 	}
 
-	bool BuildLegacyPropertiesFolderRejectionIfPresent(
+	bool BuildAuthoringPropertiesFolderRejectionIfPresent(
 		const FString& FolderRoot,
 		const FOwnerInfo& OwnerInfo,
 		const FString& AllowedTarget,
@@ -2447,12 +2687,12 @@ namespace UeAgentDetailsAuthoring
 		OutError.Reset();
 
 		TSharedPtr<FJsonObject> FileRejection;
-		if (BuildLegacyPropertiesFileRejectionIfPresent(FolderRoot, OwnerInfo, AllowedTarget, FileRejection))
+		if (BuildAuthoringPropertiesFileRejectionIfPresent(FolderRoot, OwnerInfo, AllowedTarget, FileRejection))
 		{
 			OutRejection = FileRejection;
 			if (!OutRejection.IsValid() || !OutRejection->TryGetStringField(TEXT("error_code"), OutError) || OutError.IsEmpty())
 			{
-				OutError = TEXT("legacy_properties_not_supported");
+				OutError = TEXT("authoring_properties_rejected");
 			}
 			return true;
 		}
@@ -2465,34 +2705,32 @@ namespace UeAgentDetailsAuthoring
 		}
 
 		const FString AbsoluteRoot = FPaths::ConvertRelativePathToFull(Root);
-		TArray<FString> JsonFiles;
-		IFileManager::Get().FindFilesRecursive(JsonFiles, *AbsoluteRoot, TEXT("*.json"), true, false, false);
-		JsonFiles.Sort();
-		for (const FString& JsonFile : JsonFiles)
+		TArray<FString> AuthoringFiles;
+		IFileManager::Get().FindFilesRecursive(AuthoringFiles, *AbsoluteRoot, TEXT("*.json"), true, false, false);
+		IFileManager::Get().FindFilesRecursive(AuthoringFiles, *AbsoluteRoot, TEXT("*.hjson"), true, false, false);
+		AuthoringFiles.Sort();
+		for (const FString& AuthoringFile : AuthoringFiles)
 		{
-			FString RelativeFile = MakePathRelativeToRoot(JsonFile, AbsoluteRoot);
+			FString RelativeFile = MakePathRelativeToRoot(AuthoringFile, AbsoluteRoot);
 			if (IsDiagnosticsOrMigrationRelativePath(RelativeFile))
 			{
 				continue;
 			}
 
-			FString JsonText;
-			if (!FFileHelper::LoadFileToString(JsonText, *JsonFile))
-			{
-				continue;
-			}
-
 			TSharedPtr<FJsonObject> JsonObject;
-			const TSharedRef<TJsonReader<TCHAR>> Reader = TJsonReaderFactory<TCHAR>::Create(JsonText);
-			if (!FJsonSerializer::Deserialize(Reader, JsonObject) || !JsonObject.IsValid())
+			FString LoadError;
+			const bool bLoaded = IsHjsonFilePath(AuthoringFile)
+				? LoadDetailsObjectFile(AuthoringFile, JsonObject, LoadError)
+				: LoadLegacyJsonObjectFile(AuthoringFile, JsonObject);
+			if (!bLoaded || !JsonObject.IsValid())
 			{
 				continue;
 			}
 
-			FString LegacySurface;
+			FString Surface;
 			FString JsonPath;
 			FString ErrorCode;
-			if (!FindLegacyPropertiesSurface(JsonObject, LegacySurface, JsonPath, ErrorCode))
+			if (!FindAuthoringPropertiesIssue(JsonObject, Surface, JsonPath, ErrorCode))
 			{
 				continue;
 			}
@@ -2501,16 +2739,16 @@ namespace UeAgentDetailsAuthoring
 			const FString FullJsonPath = JsonPath.IsEmpty()
 				? RelativeFile
 				: FString::Printf(TEXT("%s.%s"), *RelativeFile, *JsonPath);
-			OutRejection = MakeLegacyPropertiesRejection(
+			OutRejection = MakeAuthoringPropertiesRejection(
 				ErrorCode,
-				LegacySurface,
+				Surface,
 				OwnerInfo,
 				FullJsonPath,
-				MigrationHintForLegacyError(ErrorCode),
+				ResolutionHintForAuthoringPropertiesError(ErrorCode),
 				AllowedTarget);
 			if (!OutRejection.IsValid() || !OutRejection->TryGetStringField(TEXT("error_code"), OutError) || OutError.IsEmpty())
 			{
-				OutError = TEXT("legacy_properties_not_supported");
+				OutError = TEXT("authoring_properties_rejected");
 			}
 			return true;
 		}
@@ -2551,9 +2789,22 @@ namespace UeAgentDetailsAuthoring
 		}
 
 		OutIndexFile = NormalizeDetailsIndexFile(IndexFile);
-		OutDetailsRoot = EntryDirectory / FPaths::GetPath(OutIndexFile);
+		UeAgentAuthoringWorkspacePaths::FResolveOptions ResolveOptions;
+		ResolveOptions.bRequireHjson = true;
+		UeAgentAuthoringWorkspacePaths::FResolvedPath ResolvedIndex;
+		if (!UeAgentAuthoringWorkspacePaths::ResolveUnderRoot(
+			EntryDirectory,
+			OutIndexFile,
+			ResolveOptions,
+			ResolvedIndex,
+			OutError))
+		{
+			return false;
+		}
+		OutIndexFile = ResolvedIndex.RelativePath;
+		OutDetailsRoot = FPaths::GetPath(ResolvedIndex.AbsolutePath);
 		double FieldCount = -1.0;
-		const FString ResolvedIndexPath = EntryDirectory / OutIndexFile;
+		const FString& ResolvedIndexPath = ResolvedIndex.AbsolutePath;
 		if ((*DetailsRef)->TryGetNumberField(TEXT("field_count"), FieldCount)
 			&& FieldCount <= 0.0
 			&& !IFileManager::Get().FileExists(*ResolvedIndexPath))
@@ -2566,12 +2817,85 @@ namespace UeAgentDetailsAuthoring
 		return true;
 	}
 
+	static bool PrepareDetailsRootForWrite(
+		const FString& DetailsRoot,
+		const FString& IndexFileName,
+		const FOwnerInfo& OwnerInfo,
+		FString& OutError)
+	{
+		UeAgentAuthoringWorkspacePaths::FResolveOptions ResolveOptions;
+		UeAgentAuthoringWorkspacePaths::FResolvedPath ResolvedRoot;
+		if (!UeAgentAuthoringWorkspacePaths::ResolveProjectPath(
+			DetailsRoot,
+			ResolveOptions,
+			ResolvedRoot,
+			OutError))
+		{
+			return false;
+		}
+		const FString& AbsoluteRoot = ResolvedRoot.AbsolutePath;
+
+		const FString ExistingIndexPath = AbsoluteRoot / IndexFileName;
+		if (IFileManager::Get().FileExists(*ExistingIndexPath))
+		{
+			TSharedPtr<FJsonObject> ExistingIndex;
+			if (!LoadDetailsObjectFile(ExistingIndexPath, ExistingIndex, OutError))
+			{
+				return false;
+			}
+			const TSharedPtr<FJsonObject>* ExistingOwnerRef = nullptr;
+			FString ExistingOwnerKind;
+			FString ExistingOwnerId;
+			FString ExistingOwnerPath;
+			if (!ExistingIndex->TryGetObjectField(TEXT("owner_ref"), ExistingOwnerRef)
+				|| !ExistingOwnerRef
+				|| !ExistingOwnerRef->IsValid()
+				|| !(*ExistingOwnerRef)->TryGetStringField(TEXT("owner_kind"), ExistingOwnerKind)
+				|| !(*ExistingOwnerRef)->TryGetStringField(TEXT("owner_id"), ExistingOwnerId))
+			{
+				OutError = FString::Printf(TEXT("details_existing_owner_ref_invalid:%s"), *ExistingIndexPath);
+				return false;
+			}
+			(*ExistingOwnerRef)->TryGetStringField(TEXT("object_path"), ExistingOwnerPath);
+			const bool bOwnerPathConflict = !ExistingOwnerPath.IsEmpty()
+				&& !OwnerInfo.OwnerPath.IsEmpty()
+				&& ExistingOwnerPath != OwnerInfo.OwnerPath;
+			if (ExistingOwnerKind != OwnerInfo.OwnerKind
+				|| ExistingOwnerId != OwnerInfo.OwnerId
+				|| bOwnerPathConflict)
+			{
+				OutError = FString::Printf(
+					TEXT("details_owner_scope_collision:%s:%s:%s:%s:%s"),
+					*ExistingIndexPath,
+					*ExistingOwnerKind,
+					*ExistingOwnerId,
+					*OwnerInfo.OwnerKind,
+					*OwnerInfo.OwnerId);
+				return false;
+			}
+		}
+
+		if (IFileManager::Get().DirectoryExists(*AbsoluteRoot)
+			&& !IFileManager::Get().DeleteDirectory(*AbsoluteRoot, false, true))
+		{
+			OutError = FString::Printf(TEXT("details_directory_reset_failed:%s"), *AbsoluteRoot);
+			return false;
+		}
+		if (!IFileManager::Get().MakeDirectory(*AbsoluteRoot, true))
+		{
+			OutError = FString::Printf(TEXT("details_directory_create_failed:%s"), *AbsoluteRoot);
+			return false;
+		}
+		return true;
+	}
+
 	bool WriteGroupedDetails(
 		const FString& DetailsRoot,
 		const FOwnerInfo& OwnerInfo,
 		const TSharedPtr<FJsonObject>& PropertiesJson,
 		TSharedPtr<FJsonObject>& OutDetailsSummary,
-		FString& OutError)
+		FString& OutError,
+		const FString& IndexFile)
 	{
 		OutDetailsSummary.Reset();
 		if (!PropertiesJson.IsValid())
@@ -2587,9 +2911,15 @@ namespace UeAgentDetailsAuthoring
 			return false;
 		}
 
-		if (!IFileManager::Get().MakeDirectory(*DetailsRoot, true))
+		const FString NormalizedIndexFile = NormalizeDetailsIndexFile(IndexFile);
+		if (!IsHjsonFilePath(NormalizedIndexFile))
 		{
-			OutError = FString::Printf(TEXT("details_directory_create_failed:%s"), *DetailsRoot);
+			OutError = FString::Printf(TEXT("hjson_file_required:%s"), *NormalizedIndexFile);
+			return false;
+		}
+		const FString IndexFileName = GetDetailsIndexFileName(NormalizedIndexFile);
+		if (!PrepareDetailsRootForWrite(DetailsRoot, IndexFileName, OwnerInfo, OutError))
+		{
 			return false;
 		}
 
@@ -2597,6 +2927,7 @@ namespace UeAgentDetailsAuthoring
 		TMap<FString, int32> GroupIndexByKey;
 		TSet<FString> UsedSlugs;
 		TSet<FString> PropertyPaths;
+		const FString DetailsFileExtension = GetDetailsFileExtensionForIndex(NormalizedIndexFile);
 
 		for (int32 Index = 0; Index < Properties->Num(); ++Index)
 		{
@@ -2644,7 +2975,7 @@ namespace UeAgentDetailsAuthoring
 				}
 				UsedSlugs.Add(Slug.ToLower());
 				Group.Slug = Slug;
-				Group.FileName = Slug + TEXT(".json");
+				Group.FileName = Slug + TEXT(".") + DetailsFileExtension;
 
 				const int32 NewIndex = Groups.Add(MoveTemp(Group));
 				GroupIndexByKey.Add(GroupKey, NewIndex);
@@ -2653,7 +2984,7 @@ namespace UeAgentDetailsAuthoring
 
 			FDetailsGroup& Group = Groups[*ExistingIndex];
 			TSharedPtr<FJsonObject> Field = MakeCompactField(SourceField);
-			if (!ExternalizeCandidatesIfNeeded(DetailsRoot, OwnerInfo, Group.Slug, Field, OutError))
+			if (!ExternalizeCandidatesIfNeeded(DetailsRoot, OwnerInfo, Group.Slug, DetailsFileExtension, Field, OutError))
 			{
 				return false;
 			}
@@ -2670,7 +3001,7 @@ namespace UeAgentDetailsAuthoring
 		int32 EditableFieldCount = 0;
 		for (const FDetailsGroup& Group : Groups)
 		{
-			if (!FUeAgentStructuredJsonFormatter::SaveObjectToFile(DetailsRoot / Group.FileName, MakeGroupFile(OwnerInfo, Group), &OutError))
+			if (!SaveDetailsObjectFile(DetailsRoot / Group.FileName, MakeGroupFile(OwnerInfo, Group), OutError))
 			{
 				return false;
 			}
@@ -2695,14 +3026,14 @@ namespace UeAgentDetailsAuthoring
 		Index->SetNumberField(TEXT("editable_field_count"), EditableFieldCount);
 		Index->SetBoolField(TEXT("field_details_inlined"), false);
 		Index->SetArrayField(TEXT("groups"), CloneJsonArray(GroupEntries));
-		if (!FUeAgentStructuredJsonFormatter::SaveObjectToFile(DetailsRoot / TEXT("index.json"), Index, &OutError))
+		if (!SaveDetailsObjectFile(DetailsRoot / IndexFileName, Index, OutError))
 		{
 			return false;
 		}
 
 		OutDetailsSummary = MakeShared<FJsonObject>();
 		OutDetailsSummary->SetStringField(TEXT("schema"), DetailsRefSchema);
-		OutDetailsSummary->SetStringField(TEXT("index_file"), TEXT("details/index.json"));
+		OutDetailsSummary->SetStringField(TEXT("index_file"), NormalizedIndexFile);
 		OutDetailsSummary->SetStringField(TEXT("owner_kind"), OwnerInfo.OwnerKind);
 		OutDetailsSummary->SetStringField(TEXT("owner_id"), OwnerInfo.OwnerId);
 		OutDetailsSummary->SetStringField(TEXT("status"), TEXT("complete"));
@@ -2717,12 +3048,27 @@ namespace UeAgentDetailsAuthoring
 	bool LoadGroupedDetails(
 		const FString& DetailsRoot,
 		TSharedPtr<FJsonObject>& OutPropertiesJson,
-		FString& OutError)
+		FString& OutError,
+		const FString& IndexFile)
 	{
 		OutPropertiesJson.Reset();
-		const FString IndexPath = DetailsRoot / TEXT("index.json");
+		const FString NormalizedIndexFile = NormalizeDetailsIndexFile(IndexFile);
+		if (!IsHjsonFilePath(NormalizedIndexFile))
+		{
+			OutError = FString::Printf(TEXT("hjson_file_required:%s"), *NormalizedIndexFile);
+			return false;
+		}
+		FString IndexPath;
+		if (!ResolveDetailsChildPath(
+			DetailsRoot,
+			GetDetailsIndexFileName(NormalizedIndexFile),
+			IndexPath,
+			OutError))
+		{
+			return false;
+		}
 		TSharedPtr<FJsonObject> Index;
-		if (!LoadJsonObjectFile(IndexPath, Index, OutError))
+		if (!LoadDetailsObjectFile(IndexPath, Index, OutError))
 		{
 			return false;
 		}
@@ -2746,8 +3092,13 @@ namespace UeAgentDetailsAuthoring
 				return false;
 			}
 
+			FString GroupPath;
+			if (!ResolveDetailsChildPath(DetailsRoot, FileName, GroupPath, OutError))
+			{
+				return false;
+			}
 			TSharedPtr<FJsonObject> GroupJson;
-			if (!LoadJsonObjectFile(DetailsRoot / FileName, GroupJson, OutError))
+			if (!LoadDetailsObjectFile(GroupPath, GroupJson, OutError))
 			{
 				return false;
 			}
@@ -2793,16 +3144,26 @@ namespace UeAgentDetailsAuthoring
 		return true;
 	}
 
-	bool HasGroupedDetails(const FString& DetailsRoot)
+	bool HasGroupedDetails(const FString& DetailsRoot, const FString& IndexFile)
 	{
-		return IFileManager::Get().FileExists(*(DetailsRoot / TEXT("index.json")));
+		const FString NormalizedIndexFile = NormalizeDetailsIndexFile(IndexFile);
+		FString IndexPath;
+		FString ResolveError;
+		return IsHjsonFilePath(NormalizedIndexFile)
+			&& ResolveDetailsChildPath(
+				DetailsRoot,
+				GetDetailsIndexFileName(NormalizedIndexFile),
+				IndexPath,
+				ResolveError,
+				true);
 	}
 
 	bool ExternalizeInlineDetailsInObjectTree(
 		const FString& EntryFilePath,
 		const TSharedPtr<FJsonObject>& EntryObject,
 		const FString& SourceCommand,
-		FString& OutError)
+		FString& OutError,
+		bool bScopeToEntryFile)
 	{
 		if (!EntryObject.IsValid())
 		{
@@ -2811,8 +3172,13 @@ namespace UeAgentDetailsAuthoring
 		}
 
 		TSet<FString> UsedDetailsRoots;
+		const FString EntryDetailsScope = bScopeToEntryFile
+			? SafeFileName(FPaths::GetBaseFilename(EntryFilePath))
+			: FString();
 		return ExternalizeInlineDetailsRecursive(
 			FPaths::GetPath(EntryFilePath),
+			MakeDetailsIndexFileForEntryFile(EntryFilePath),
+			EntryDetailsScope,
 			EntryObject,
 			SourceCommand,
 			FString(),
@@ -2822,93 +3188,72 @@ namespace UeAgentDetailsAuthoring
 
 	namespace
 	{
-		bool IsLegacyAuthoringPropertyDescriptor(const TSharedPtr<FJsonObject>& Object)
-		{
-			if (!Object.IsValid())
-			{
-				return false;
-			}
-
-			FString Unused;
-			return Object->TryGetStringField(TEXT("property_path"), Unused)
-				|| Object->TryGetStringField(TEXT("property_name"), Unused);
-		}
-
-		bool IsLegacyAuthoringPropertyArray(const TArray<TSharedPtr<FJsonValue>>& Values)
-		{
-			if (Values.Num() == 0)
-			{
-				return false;
-			}
-
-			for (const TSharedPtr<FJsonValue>& Value : Values)
-			{
-				if (IsLegacyAuthoringPropertyDescriptor(Value.IsValid() ? Value->AsObject() : nullptr))
-				{
-					return true;
-				}
-			}
-			return false;
-		}
-
-		void RemoveLegacyAuthoringFieldsRecursive(const TSharedPtr<FJsonObject>& Object)
+		void RemoveDiagnosticAuthoringFieldsIterative(
+			const TSharedPtr<FJsonObject>& Object)
 		{
 			if (!Object.IsValid())
 			{
 				return;
 			}
 
-			for (const TPair<FString, TSharedPtr<FJsonValue>>& Pair : Object->Values)
+			TArray<TSharedPtr<FJsonValue>> Pending;
+			Pending.Add(MakeShared<FJsonValueObject>(Object));
+			TSet<const FJsonObject*> VisitedObjects;
+			TSet<const FJsonValue*> VisitedArrays;
+			while (!Pending.IsEmpty())
 			{
-				if (!Pair.Value.IsValid())
+				const TSharedPtr<FJsonValue> Value =
+					Pending.Pop(EAllowShrinking::No);
+				if (!Value.IsValid())
 				{
 					continue;
 				}
 
-				if (Pair.Value->Type == EJson::Object)
+				if (Value->Type == EJson::Array)
 				{
-					RemoveLegacyAuthoringFieldsRecursive(Pair.Value->AsObject());
-				}
-				else if (Pair.Value->Type == EJson::Array)
-				{
-					for (const TSharedPtr<FJsonValue>& Item : Pair.Value->AsArray())
+					if (VisitedArrays.Contains(Value.Get()))
 					{
-						if (Item.IsValid() && Item->Type == EJson::Object)
-						{
-							RemoveLegacyAuthoringFieldsRecursive(Item->AsObject());
-						}
+						continue;
 					}
+					VisitedArrays.Add(Value.Get());
+					for (const TSharedPtr<FJsonValue>& Item : Value->AsArray())
+					{
+						Pending.Add(Item);
+					}
+					continue;
 				}
+
+				if (Value->Type != EJson::Object)
+				{
+					continue;
+				}
+
+				const TSharedPtr<FJsonObject> CurrentObject = Value->AsObject();
+				if (!CurrentObject.IsValid()
+					|| VisitedObjects.Contains(CurrentObject.Get()))
+				{
+					continue;
+				}
+				VisitedObjects.Add(CurrentObject.Get());
+				for (const TPair<FString, TSharedPtr<FJsonValue>>& Pair :
+					CurrentObject->Values)
+				{
+					Pending.Add(Pair.Value);
+				}
+
+				CurrentObject->RemoveField(TEXT("raw_properties"));
+				CurrentObject->RemoveField(TEXT("readonly_properties"));
+				CurrentObject->RemoveField(TEXT("property_summary"));
+				CurrentObject->RemoveField(TEXT("raw_property_summary"));
+				CurrentObject->RemoveField(TEXT("raw_properties_count"));
+				CurrentObject->RemoveField(TEXT("readonly_properties_count"));
 			}
-
-			const bool bHasGroupedDetailsRef = Object->HasField(TEXT("details"));
-
-			const TArray<TSharedPtr<FJsonValue>>* Properties = nullptr;
-			if (Object->TryGetArrayField(TEXT("properties"), Properties)
-				&& (bHasGroupedDetailsRef || (Properties && IsLegacyAuthoringPropertyArray(*Properties))))
-			{
-				Object->RemoveField(TEXT("properties"));
-			}
-
-			const TArray<TSharedPtr<FJsonValue>>* SettingsProperties = nullptr;
-			if (Object->TryGetArrayField(TEXT("settings_properties"), SettingsProperties)
-				&& (bHasGroupedDetailsRef || (SettingsProperties && IsLegacyAuthoringPropertyArray(*SettingsProperties))))
-			{
-				Object->RemoveField(TEXT("settings_properties"));
-			}
-
-			Object->RemoveField(TEXT("raw_properties"));
-			Object->RemoveField(TEXT("readonly_properties"));
-			Object->RemoveField(TEXT("property_summary"));
-			Object->RemoveField(TEXT("raw_property_summary"));
-			Object->RemoveField(TEXT("raw_properties_count"));
-			Object->RemoveField(TEXT("readonly_properties_count"));
 		}
 	}
 
-	void RemoveLegacyAuthoringFieldsInObjectTree(const TSharedPtr<FJsonObject>& EntryObject)
+	void RemoveDiagnosticAuthoringFieldsInObjectTree(const TSharedPtr<FJsonObject>& EntryObject)
 	{
-		RemoveLegacyAuthoringFieldsRecursive(EntryObject);
+		RemoveDiagnosticAuthoringFieldsIterative(EntryObject);
 	}
 
 	bool RehydrateGroupedDetailsInObjectTree(

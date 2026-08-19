@@ -1,0 +1,67 @@
+authoring: { reason: command_has_no_registered_folder_authoring_profile, state: none }
+category: ai_behavior_blackboard_statetree_eqs_navigation_smartobject
+command: behavior_tree_open_editor
+deprecation: { reason: command_is_active, state: none }
+discovery: { aliases: [], keywords_en: [behavior, tree, open, editor, ai_behavior_blackboard_statetree_eqs_navigation_smartobject], keywords_zh: [behavior_tree_open_editor], summary_en: "Execute behavior_tree_open_editor with a verified implementation contract", summary_zh: "打开编辑器", tags: [ai_behavior_blackboard_statetree_eqs_navigation_smartobject, p2-007] }
+errors: {
+  codes: [
+    { code: behavior_tree_not_found, description_zh: "C++ 实现返回错误码 behavior_tree_not_found", retry_safe: false, stage: execution, wire_match: exact }
+    { code: missing_asset_path, description_zh: "C++ 实现返回错误码 missing_asset_path", retry_safe: true, stage: preflight, wire_match: exact }
+  ]
+}
+evidence: {
+  docs: [
+    { path: "Plugins/UeAgentInterface/docs/commands/ai_behavior_blackboard_statetree_eqs_navigation_smartobject/behavior_tree_open_editor.md", purpose: "user documentation cross-check; C++ implementation remains authoritative" }
+  ]
+  implementation: [
+    { line_hint: 823, path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Commands/AI/UeAgentHttpServer_AI_BehaviorTree.cpp", purpose: "command handler, parameter and return evidence", symbol: CmdBehaviorTreeOpenEditor }
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Server/UeAgentHttpServer.cpp", purpose: "transitive helper evidence used by the command handler" }
+  ]
+  tests: [
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterfaceTests/Private/Smoke/UeAgentInterfaceSmoke_Coverage.cpp", purpose: "smoke or negative-path evidence cross-checked for the verified contract" }
+  ]
+}
+execution: {
+  destructive: false
+  editor_state: required
+  game_thread: required
+  idempotent: false
+  kind: session_control
+  overwrite_behavior: none
+  pie_state: allowed
+  retry_safe: false
+  save_behavior: none
+  side_effects: [modifies_editor_session, opens_window]
+  ui_effect: opens_editor
+}
+maturity: verified
+params: {
+  constraints: []
+  fields: { asset_path: { default_state: none, description_zh: "C++ 实现读取的 asset_path 参数", path_semantics: { access_scope: mounted_read, kind: ue_asset }, required: true, type: ue_asset_path } }
+  state: defined
+}
+response: { artifact_fields: [], compact_fields: [asset_path, object_path, opened], failure_fields: [params.asset_path], max_items_policy: { fields: [], mode: none } }
+returns: {
+  fields: {
+    asset_path: { description_zh: "C++ 实现返回的 asset_path 字段；是否出现取决于执行分支", required: false, type: ue_asset_path }
+    object_path: { description_zh: "C++ 实现返回的 object_path 字段；是否出现取决于执行分支", required: false, type: ue_object_path }
+    opened: { description_zh: "C++ 实现返回的 opened 字段；是否出现取决于执行分支", required: false, type: bool }
+  }
+  state: defined
+}
+schema: uai.command_spec.v1
+status: active
+types: {}
+verification: {
+  assertions: [
+    { id: result_present, operator: exists, source: returns.asset_path }
+    { expected: true, id: opened_true, operator: equals, source: returns.opened }
+  ]
+  failure_policy: fail_overall
+  methods: [
+    { id: result, kind: result_assertion }
+  ]
+  required: true
+  state: defined
+}
+version: 1

@@ -1,0 +1,163 @@
+authoring: { reason: command_has_no_registered_folder_authoring_profile, state: none }
+category: animation_assets_skeleton
+command: anim_sequence_screenshot
+deprecation: { reason: command_is_active, state: none }
+discovery: { aliases: [], keywords_en: [anim, sequence, screenshot, animation_assets_skeleton], keywords_zh: [anim_sequence_screenshot], summary_en: "Execute anim_sequence_screenshot with a verified implementation contract", summary_zh: "按帧/时间截取 AnimSequence 预览图，也可批量输出序列帧总览图", tags: [animation_assets_skeleton, p2-006] }
+errors: {
+  codes: [
+    { code: anim_sequence_not_found, description_zh: "C++ 实现返回错误码 anim_sequence_not_found", retry_safe: false, stage: execution, wire_match: exact }
+    { code: compress_failed, description_zh: "C++ 实现返回错误码 compress_failed", retry_safe: false, stage: execution, wire_match: exact }
+    { code: frame_sheet_capture_size_mismatch, description_zh: "C++ 实现返回错误码 frame_sheet_capture_size_mismatch", retry_safe: false, stage: execution, wire_match: exact }
+    { code: frame_sheet_empty, description_zh: "C++ 实现返回错误码 frame_sheet_empty", retry_safe: false, stage: execution, wire_match: exact }
+    { code: frame_sheet_frame_size_mismatch, description_zh: "C++ 实现返回错误码 frame_sheet_frame_size_mismatch", retry_safe: false, stage: execution, wire_match: exact }
+    { code: frame_sheet_too_large, description_zh: "C++ 实现返回错误码 frame_sheet_too_large", retry_safe: false, stage: execution, wire_match: exact }
+    { code: invalid_anim_sequence, description_zh: "C++ 实现返回错误码 invalid_anim_sequence", retry_safe: true, stage: preflight, wire_match: exact }
+    { code: invalid_frame_count, description_zh: "C++ 实现返回错误码 invalid_frame_count", retry_safe: true, stage: preflight, wire_match: exact }
+    { code: invalid_frame_index, description_zh: "C++ 实现返回错误码 invalid_frame_index", retry_safe: true, stage: preflight, wire_match: exact }
+    { code: invalid_frame_interval, description_zh: "C++ 实现返回错误码 invalid_frame_interval", retry_safe: true, stage: preflight, wire_match: exact }
+    { code: invalid_interval_seconds, description_zh: "C++ 实现返回错误码 invalid_interval_seconds", retry_safe: true, stage: preflight, wire_match: exact }
+    { code: invalid_pixels, description_zh: "C++ 实现返回错误码 invalid_pixels", retry_safe: true, stage: preflight, wire_match: exact }
+    { code: invalid_target, description_zh: "C++ 实现返回错误码 invalid_target", retry_safe: true, stage: preflight, wire_match: exact }
+    { code: missing_asset_path, description_zh: "C++ 实现返回错误码 missing_asset_path", retry_safe: true, stage: preflight, wire_match: exact }
+    { code: multi_frame_output_disabled, description_zh: "C++ 实现返回错误码 multi_frame_output_disabled", retry_safe: false, stage: execution, wire_match: exact }
+    { code: no_editor_world, description_zh: "C++ 实现返回错误码 no_editor_world", retry_safe: false, stage: execution, wire_match: exact }
+    { code: no_geditor, description_zh: "C++ 实现返回错误码 no_geditor", retry_safe: false, stage: execution, wire_match: exact }
+    { code: preview_actor_spawn_failed, description_zh: "C++ 实现返回错误码 preview_actor_spawn_failed", retry_safe: false, stage: execution, wire_match: exact }
+    { code: preview_frame_capture_empty, description_zh: "C++ 实现返回错误码 preview_frame_capture_empty", retry_safe: false, stage: execution, wire_match: exact }
+    { code: preview_frame_range_exceeds_sequence, description_zh: "C++ 实现返回错误码 preview_frame_range_exceeds_sequence", retry_safe: false, stage: execution, wire_match: exact }
+    { code: preview_frame_sequence_empty, description_zh: "C++ 实现返回错误码 preview_frame_sequence_empty", retry_safe: false, stage: execution, wire_match: exact }
+    { code: preview_mesh_component_not_found, description_zh: "C++ 实现返回错误码 preview_mesh_component_not_found", retry_safe: false, stage: execution, wire_match: exact }
+    { code: preview_mesh_incompatible_with_sequence_skeleton, description_zh: "C++ 实现返回错误码 preview_mesh_incompatible_with_sequence_skeleton", retry_safe: false, stage: execution, wire_match: exact }
+    { code: preview_skeletal_mesh_missing, description_zh: "C++ 实现返回错误码 preview_skeletal_mesh_missing", retry_safe: true, stage: preflight, wire_match: exact }
+    { code: preview_time_range_exceeds_sequence, description_zh: "C++ 实现返回错误码 preview_time_range_exceeds_sequence", retry_safe: false, stage: execution, wire_match: exact }
+    { code: read_render_target_failed, description_zh: "C++ 实现返回错误码 read_render_target_failed", retry_safe: false, stage: execution, wire_match: exact }
+    { code: render_target_alloc_failed, description_zh: "C++ 实现返回错误码 render_target_alloc_failed", retry_safe: false, stage: execution, wire_match: exact }
+    { code: render_target_resource_missing, description_zh: "C++ 实现返回错误码 render_target_resource_missing", retry_safe: true, stage: preflight, wire_match: exact }
+    { code: scene_capture_component_missing, description_zh: "C++ 实现返回错误码 scene_capture_component_missing", retry_safe: true, stage: preflight, wire_match: exact }
+    { code: screenshots_disabled, description_zh: "C++ 实现返回错误码 screenshots_disabled", retry_safe: false, stage: execution, wire_match: exact }
+    { code: skeletal_mesh_not_found, description_zh: "C++ 实现返回错误码 skeletal_mesh_not_found", retry_safe: false, stage: execution, wire_match: exact }
+    { code: spawn_scene_capture_failed, description_zh: "C++ 实现返回错误码 spawn_scene_capture_failed", retry_safe: false, stage: execution, wire_match: exact }
+    { code: unsupported_format, description_zh: "C++ 实现返回错误码 unsupported_format", retry_safe: false, stage: execution, wire_match: exact }
+    { code: write_file_failed, description_zh: "C++ 实现返回错误码 write_file_failed", retry_safe: false, stage: execution, wire_match: exact }
+  ]
+}
+evidence: {
+  docs: [
+    { path: "Plugins/UeAgentInterface/docs/commands/animation_assets_skeleton/anim_sequence_screenshot.md", purpose: "user documentation cross-check; C++ implementation remains authoritative" }
+  ]
+  implementation: [
+    { line_hint: 3650, path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Commands/Animation/UeAgentHttpServer_AnimationAssets.cpp", purpose: "command handler, parameter and return evidence", symbol: CmdAnimSequenceScreenshot }
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Commands/EditorViewport/UeAgentEditorViewportSequenceFrameOptions.cpp", purpose: "transitive helper evidence used by the command handler" }
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Commands/Level/UeAgentHttpServer_Level_CaptureAndPersistence.cpp", purpose: "transitive helper evidence used by the command handler" }
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Commands/Level/UeAgentHttpServer_Level_ImageHelpers.cpp", purpose: "transitive helper evidence used by the command handler" }
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Server/UeAgentHttpServer.cpp", purpose: "transitive helper evidence used by the command handler" }
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Utilities/UeAgentJsonDiagnostics.cpp", purpose: "transitive helper evidence used by the command handler" }
+  ]
+  tests: [
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterfaceTests/Private/Smoke/UeAgentInterfaceSmoke_Coverage.cpp", purpose: "smoke or negative-path evidence cross-checked for the verified contract" }
+  ]
+}
+execution: {
+  destructive: false
+  editor_state: required
+  game_thread: required
+  idempotent: true
+  kind: read_only_export
+  overwrite_behavior: owned_artifacts_only
+  pie_state: allowed
+  retry_safe: true
+  save_behavior: none
+  side_effects: [writes_files, captures_media, modifies_editor_session, opens_window]
+  ui_effect: window_mutation
+}
+maturity: verified
+params: {
+  constraints: []
+  fields: {
+    asset_path: { default_state: none, description_zh: "C++ 实现读取的 asset_path 参数", path_semantics: { access_scope: mounted_read, kind: ue_asset }, required: true, type: ue_asset_path }
+    count: { default: 1, default_state: defined, description_zh: "C++ 实现读取的 count 参数", required: false, type: integer }
+    create_frame_sheet: { default_state: none, description_zh: "C++ 实现读取的 create_frame_sheet 参数", required: false, type: bool }
+    first_frame_index: { default: 0, default_state: defined, description_zh: "C++ 实现读取的 first_frame_index 参数", required: false, type: integer }
+    first_time_seconds: { default: 0, default_state: defined, description_zh: "C++ 实现读取的 first_time_seconds 参数", required: false, type: number }
+    format: { default: jpg, default_state: defined, description_zh: "C++ 实现读取的 format 参数", required: false, type: string }
+    frame: { default: 0, default_state: defined, description_zh: "C++ 实现读取的 frame 参数", required: false, type: integer }
+    frame_count: { default: 1, default_state: defined, description_zh: "C++ 实现读取的 frame_count 参数", required: false, type: integer }
+    frame_index: { default: 0, default_state: defined, description_zh: "C++ 实现读取的 frame_index 参数", required: false, type: integer }
+    frame_interval: { default: 1, default_state: defined, description_zh: "C++ 实现读取的 frame_interval 参数", required: false, type: integer }
+    frame_sheet: { default_state: none, description_zh: "C++ 实现读取的 frame_sheet 参数", required: false, type: bool }
+    frame_sheet_label_scale: { default_state: none, description_zh: "C++ 实现读取的 frame_sheet_label_scale 参数", required: false, type: number }
+    frame_sheet_max_size: { default_state: none, description_zh: "C++ 实现读取的 frame_sheet_max_size 参数", required: false, type: number }
+    frame_sheet_padding: { default_state: none, description_zh: "C++ 实现读取的 frame_sheet_padding 参数", required: false, type: number }
+    frame_stride: { default: 1, default_state: defined, description_zh: "C++ 实现读取的 frame_stride 参数", required: false, type: integer }
+    interval_seconds: { default_state: none, description_zh: "C++ 实现读取的 interval_seconds 参数", required: false, type: number }
+    keep_individual_frames: { default_state: none, description_zh: "C++ 实现读取的 keep_individual_frames 参数", required: false, type: bool }
+    max_size: { default_state: none, description_zh: "C++ 实现读取的 max_size 参数", required: false, type: number }
+    output_individual_frames: { default_state: none, description_zh: "C++ 实现读取的 output_individual_frames 参数", required: false, type: bool }
+    preview_state: { default_state: none, description_zh: "C++ 实现读取的 preview_state 参数", required: false, type: object, type_ref: "shared:EditorViewportPreviewState" }
+    quality: { default_state: none, description_zh: "C++ 实现读取的 quality 参数", required: false, type: integer }
+    sample_count: { default: 1, default_state: defined, description_zh: "C++ 实现读取的 sample_count 参数", required: false, type: integer }
+    sequence_frame_image: { default_state: none, description_zh: "C++ 实现读取的 sequence_frame_image 参数", required: false, type: bool }
+    sheet_label_scale: { default_state: none, description_zh: "C++ 实现读取的 sheet_label_scale 参数", required: false, type: number }
+    sheet_max_size: { default_state: none, description_zh: "C++ 实现读取的 sheet_max_size 参数", required: false, type: number }
+    sheet_padding: { default_state: none, description_zh: "C++ 实现读取的 sheet_padding 参数", required: false, type: number }
+    skeletal_mesh_path: { default_state: none, description_zh: "C++ 实现读取的 skeletal_mesh_path 参数", required: false, type: string }
+    start_frame_index: { default: 0, default_state: defined, description_zh: "C++ 实现读取的 start_frame_index 参数", required: false, type: integer }
+    start_time_seconds: { default: 0, default_state: defined, description_zh: "C++ 实现读取的 start_time_seconds 参数", required: false, type: number }
+    target: { default: viewport, default_state: defined, description_zh: "C++ 实现读取的 target 参数", required: false, type: string }
+    time_interval_seconds: { default_state: none, description_zh: "C++ 实现读取的 time_interval_seconds 参数", required: false, type: number }
+    time_seconds: { default: 0, default_state: defined, description_zh: "C++ 实现读取的 time_seconds 参数", required: false, type: number }
+    visual_options: { default_state: none, description_zh: "C++ 实现读取的 visual_options 参数", required: false, type: object, type_ref: "shared:EditorViewportVisualOptions" }
+    write_individual_frames: { default_state: none, description_zh: "C++ 实现读取的 write_individual_frames 参数", required: false, type: bool }
+  }
+  state: defined
+}
+response: { artifact_fields: [frames, preview_state_ignored, visual_options_ignored, frame_sheet, preview_state_applied, unified_sequence_frame_options, visual_options_applied], compact_fields: [asset_path, file_path, width, height, format], failure_fields: [params.asset_path], max_items_policy: { fields: [], mode: none } }
+returns: {
+  fields: {
+    asset_path: { description_zh: "C++ 实现返回的 asset_path 字段；是否出现取决于执行分支", required: false, type: ue_asset_path }
+    bytes: { description_zh: "C++ 实现返回的 bytes 字段；是否出现取决于执行分支", required: false, type: number }
+    capture_mode: { description_zh: "C++ 实现返回的 capture_mode 字段；是否出现取决于执行分支", required: false, type: string }
+    file_path: { description_zh: "C++ 实现返回的 file_path 字段；是否出现取决于执行分支", required: false, type: string }
+    format: { description_zh: "C++ 实现返回的 format 字段；是否出现取决于执行分支", required: false, type: string }
+    frame_count: { description_zh: "C++ 实现返回的 frame_count 字段；是否出现取决于执行分支", required: false, type: integer }
+    frame_index: { description_zh: "C++ 实现返回的 frame_index 字段；是否出现取决于执行分支", required: false, type: integer }
+    frame_sheet: { description_zh: "C++ 实现返回的 frame_sheet 字段；是否出现取决于执行分支", required: false, type: json_value }
+    frame_sheet_created: { description_zh: "C++ 实现返回的 frame_sheet_created 字段；是否出现取决于执行分支", required: false, type: bool }
+    frame_sheet_file_path: { description_zh: "C++ 实现返回的 frame_sheet_file_path 字段；是否出现取决于执行分支", required: false, type: string }
+    frames: { description_zh: "C++ 实现返回的 frames 字段；是否出现取决于执行分支", item_type: json_value, required: false, type: array }
+    height: { description_zh: "C++ 实现返回的 height 字段；是否出现取决于执行分支", required: false, type: integer }
+    individual_frame_files_created: { description_zh: "C++ 实现返回的 individual_frame_files_created 字段；是否出现取决于执行分支", required: false, type: bool }
+    num_frames: { description_zh: "C++ 实现返回的 num_frames 字段；是否出现取决于执行分支", required: false, type: number }
+    object_path: { description_zh: "C++ 实现返回的 object_path 字段；是否出现取决于执行分支", required: false, type: ue_object_path }
+    preview_skeletal_mesh: { description_zh: "C++ 实现返回的 preview_skeletal_mesh 字段；是否出现取决于执行分支", required: false, type: string }
+    preview_state_applied: { description_zh: "C++ 实现返回的 preview_state_applied 字段；是否出现取决于执行分支", required: false, type: json_value }
+    preview_state_ignored: { description_zh: "C++ 实现返回的 preview_state_ignored 字段；是否出现取决于执行分支", item_type: json_value, required: false, type: array }
+    sampling_frame_rate_denominator: { description_zh: "C++ 实现返回的 sampling_frame_rate_denominator 字段；是否出现取决于执行分支", required: false, type: number }
+    sampling_frame_rate_numerator: { description_zh: "C++ 实现返回的 sampling_frame_rate_numerator 字段；是否出现取决于执行分支", required: false, type: number }
+    sequence_frame_image_path: { description_zh: "C++ 实现返回的 sequence_frame_image_path 字段；是否出现取决于执行分支", required: false, type: string }
+    target: { description_zh: "C++ 实现返回的 target 字段；是否出现取决于执行分支", required: false, type: string }
+    time_seconds: { description_zh: "C++ 实现返回的 time_seconds 字段；是否出现取决于执行分支", required: false, type: number }
+    unified_sequence_frame_options: { description_zh: "C++ 实现返回的 unified_sequence_frame_options 字段；是否出现取决于执行分支", required: false, type: json_value }
+    visual_options_applied: { description_zh: "C++ 实现返回的 visual_options_applied 字段；是否出现取决于执行分支", required: false, type: json_value }
+    visual_options_ignored: { description_zh: "C++ 实现返回的 visual_options_ignored 字段；是否出现取决于执行分支", item_type: json_value, required: false, type: array }
+    width: { description_zh: "C++ 实现返回的 width 字段；是否出现取决于执行分支", required: false, type: integer }
+  }
+  state: defined
+}
+schema: uai.command_spec.v1
+status: active
+types: {}
+verification: {
+  assertions: [
+    { id: result_present, operator: exists, source: returns.asset_path }
+    { id: artifact_present, operator: not_empty, source: returns.file_path }
+  ]
+  failure_policy: fail_overall
+  methods: [
+    { id: result, kind: result_assertion }
+    { artifact_field: file_path, id: artifact, kind: filesystem_artifact }
+  ]
+  required: true
+  state: defined
+}
+version: 1

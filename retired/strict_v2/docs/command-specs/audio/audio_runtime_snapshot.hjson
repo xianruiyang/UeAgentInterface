@@ -1,0 +1,55 @@
+authoring: { reason: command_has_no_registered_folder_authoring_profile, state: none }
+category: audio
+command: audio_runtime_snapshot
+deprecation: { reason: command_is_active, state: none }
+discovery: { aliases: [], keywords_en: [audio, runtime, snapshot], keywords_zh: [audio_runtime_snapshot], summary_en: "Execute audio_runtime_snapshot with a verified implementation contract", summary_zh: "聚合 Audio Device、active sounds、components", tags: [audio, p2-007] }
+errors: {
+  codes: [
+    { code: world_not_found, description_zh: "C++ 实现返回错误码 world_not_found", retry_safe: false, stage: execution, wire_match: exact }
+  ]
+}
+evidence: {
+  docs: [
+    { path: "Plugins/UeAgentInterface/docs/commands/audio/audio_runtime_snapshot.md", purpose: "user documentation cross-check; C++ implementation remains authoritative" }
+  ]
+  implementation: [
+    { line_hint: 161, path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Commands/Audio/UeAgentHttpServer_AudioRuntime.cpp", purpose: "command handler, parameter and return evidence", symbol: CmdAudioRuntimeSnapshot }
+  ]
+  tests: [
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterfaceTests/Private/Smoke/UeAgentInterfaceAudioSmokeTests.cpp", purpose: "smoke or negative-path evidence cross-checked for the verified contract" }
+  ]
+}
+execution: {
+  destructive: false
+  editor_state: required
+  game_thread: required
+  idempotent: true
+  kind: read_only
+  overwrite_behavior: none
+  pie_state: allowed
+  retry_safe: true
+  save_behavior: none
+  side_effects: []
+  ui_effect: none
+}
+maturity: verified
+params: { reason: implementation_reads_no_command_parameters, state: none }
+response: { artifact_fields: [active_sounds, components, submixes, coverage_report], compact_fields: [active_component_count, active_sound_count, audio_component_count, audio_device_available], failure_fields: [], max_items_policy: { fields: [], mode: none } }
+returns: {
+  fields: {
+    active_component_count: { description_zh: "C++ 实现返回的 active_component_count 字段；是否出现取决于执行分支", required: false, type: integer }
+    active_sound_count: { description_zh: "C++ 实现返回的 active_sound_count 字段；是否出现取决于执行分支", required: false, type: integer }
+    active_sounds: { description_zh: "C++ 实现返回的 active_sounds 字段；是否出现取决于执行分支", item_type: json_value, required: false, type: array }
+    audio_component_count: { description_zh: "C++ 实现返回的 audio_component_count 字段；是否出现取决于执行分支", required: false, type: integer }
+    audio_device_available: { description_zh: "C++ 实现返回的 audio_device_available 字段；是否出现取决于执行分支", required: false, type: bool }
+    components: { description_zh: "C++ 实现返回的 components 字段；是否出现取决于执行分支", item_type: json_value, required: false, type: array }
+    coverage_report: { description_zh: "C++ 实现返回的 coverage_report 字段；是否出现取决于执行分支", required: false, type: json_value }
+    submixes: { description_zh: "C++ 实现返回的 submixes 字段；是否出现取决于执行分支", item_type: json_value, required: false, type: array }
+  }
+  state: defined
+}
+schema: uai.command_spec.v1
+status: active
+types: {}
+verification: { reason: read_only_command_has_no_post_write_verification, state: none }
+version: 1

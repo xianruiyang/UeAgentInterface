@@ -1,0 +1,110 @@
+authoring: { reason: command_has_no_registered_folder_authoring_profile, state: none }
+category: niagara_stage_graph
+command: niagara_emitter_move_stage_module
+deprecation: { reason: command_is_active, state: none }
+discovery: { aliases: [], keywords_en: [niagara, emitter, move, stage, module, niagara_stage_graph], keywords_zh: [niagara_emitter_move_stage_module], summary_en: "Execute niagara_emitter_move_stage_module with a verified implementation contract", summary_zh: "**原子/兼容**：移动 standalone Emitter 的 stage module；新 authoring 优先用 folder HJSON", tags: [niagara_stage_graph, p2-005] }
+errors: {
+  codes: [
+    { code: asset_not_found, description_zh: "C++ 实现返回错误码 asset_not_found", retry_safe: false, stage: execution, wire_match: exact }
+    { code: emitter_asset_not_found, description_zh: "C++ 实现返回错误码 emitter_asset_not_found", retry_safe: false, stage: execution, wire_match: exact }
+    { code: emitter_has_no_output_nodes, description_zh: "C++ 实现返回错误码 emitter_has_no_output_nodes", retry_safe: false, stage: execution, wire_match: exact }
+    { code: invalid_emitter_version, description_zh: "C++ 实现返回错误码 invalid_emitter_version", retry_safe: true, stage: preflight, wire_match: exact }
+    { code: invalid_module_index, description_zh: "C++ 实现返回错误码 invalid_module_index", retry_safe: true, stage: preflight, wire_match: exact }
+    { code: invalid_module_node_guid, description_zh: "C++ 实现返回错误码 invalid_module_node_guid", retry_safe: true, stage: preflight, wire_match: exact }
+    { code: invalid_script_usage, description_zh: "C++ 实现返回错误码 invalid_script_usage", retry_safe: true, stage: preflight, wire_match: exact }
+    { code: invalid_script_usage_id, description_zh: "C++ 实现返回错误码 invalid_script_usage_id", retry_safe: true, stage: preflight, wire_match: exact }
+    { code: invalid_stage_key, description_zh: "C++ 实现返回错误码 invalid_stage_key", retry_safe: true, stage: preflight, wire_match: exact }
+    { code: invalid_target_index, description_zh: "C++ 实现返回错误码 invalid_target_index", retry_safe: true, stage: preflight, wire_match: exact }
+    { code: missing_emitter_asset_path, description_zh: "C++ 实现返回错误码 missing_emitter_asset_path", retry_safe: true, stage: preflight, wire_match: exact }
+    { code: missing_emitter_graph_source, description_zh: "C++ 实现返回错误码 missing_emitter_graph_source", retry_safe: true, stage: preflight, wire_match: exact }
+    { code: missing_emitter_version_data, description_zh: "C++ 实现返回错误码 missing_emitter_version_data", retry_safe: true, stage: preflight, wire_match: exact }
+    { code: missing_module_identifier, description_zh: "C++ 实现返回错误码 missing_module_identifier", retry_safe: true, stage: preflight, wire_match: exact }
+    { code: missing_params, description_zh: "C++ 实现返回错误码 missing_params", retry_safe: true, stage: preflight, wire_match: exact }
+    { code: missing_target_index, description_zh: "C++ 实现返回错误码 missing_target_index", retry_safe: true, stage: preflight, wire_match: exact }
+    { code: module_name_not_found, description_zh: "C++ 实现返回错误码 module_name_not_found", retry_safe: false, stage: execution, wire_match: exact }
+    { code: module_node_not_found_in_stage, description_zh: "C++ 实现返回错误码 module_node_not_found_in_stage", retry_safe: false, stage: execution, wire_match: exact }
+    { code: save_asset_failed, description_zh: "C++ 实现返回错误码 save_asset_failed", retry_safe: false, stage: execution, wire_match: exact }
+    { code: stage_has_no_modules, description_zh: "C++ 实现返回错误码 stage_has_no_modules", retry_safe: false, stage: execution, wire_match: exact }
+    { code: stage_is_ambiguous_require_script_usage_id, description_zh: "C++ 实现返回错误码 stage_is_ambiguous_require_script_usage_id", retry_safe: false, stage: execution, wire_match: exact }
+    { code: stage_module_group_not_found, description_zh: "C++ 实现返回错误码 stage_module_group_not_found", retry_safe: false, stage: execution, wire_match: exact }
+    { code: stage_not_found, description_zh: "C++ 实现返回错误码 stage_not_found", retry_safe: false, stage: execution, wire_match: exact }
+    { code: stage_stack_invalid_after_disconnect, description_zh: "C++ 实现返回错误码 stage_stack_invalid_after_disconnect", retry_safe: true, stage: preflight, wire_match: exact }
+  ]
+}
+evidence: {
+  docs: [
+    { path: "Plugins/UeAgentInterface/docs/commands/niagara_stage_graph/niagara_emitter_move_stage_module.md", purpose: "user documentation cross-check; C++ implementation remains authoritative" }
+  ]
+  implementation: [
+    { line_hint: 10741, path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Commands/Niagara/UeAgentHttpServer_Niagara.cpp", purpose: "command handler, parameter and return evidence", symbol: CmdNiagaraEmitterMoveStageModule }
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Server/UeAgentHttpServer.cpp", purpose: "transitive helper evidence used by the command handler" }
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Utilities/UeAgentJsonDiagnostics.cpp", purpose: "transitive helper evidence used by the command handler" }
+  ]
+  tests: [
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterfaceTests/Private/Smoke/UeAgentInterfaceSmoke_Coverage.cpp", purpose: "smoke or negative-path evidence cross-checked for the verified contract" }
+  ]
+}
+execution: {
+  destructive: false
+  editor_state: required
+  game_thread: required
+  idempotent: false
+  kind: write
+  overwrite_behavior: none
+  pie_state: allowed
+  retry_safe: false
+  save_behavior: caller_controlled
+  side_effects: [modifies_asset, renames_asset]
+  ui_effect: none
+}
+maturity: verified
+params: {
+  constraints: []
+  fields: {
+    asset_path: { default_state: none, description_zh: "C++ 实现读取的 asset_path 参数", path_semantics: { access_scope: project_write, kind: ue_asset }, required: false, type: ue_asset_path }
+    emitter_asset_path: { default_state: none, description_zh: "C++ 实现读取的 emitter_asset_path 参数", path_semantics: { access_scope: project_write, kind: ue_asset }, required: true, type: ue_asset_path }
+    emitter_version: { default_state: none, description_zh: "C++ 实现读取的 emitter_version 参数", required: false, type: string }
+    module_index: { default: 0, default_state: defined, description_zh: "C++ 实现读取的 module_index 参数", required: false, type: integer }
+    module_name: { default_state: none, description_zh: "C++ 实现读取的 module_name 参数", required: false, type: string }
+    module_node_guid: { default_state: none, description_zh: "C++ 实现读取的 module_node_guid 参数", required: false, type: string }
+    save_after_set: { default: false, default_state: defined, description_zh: "C++ 实现读取的 save_after_set 参数", required: false, type: bool }
+    script_usage: { default_state: none, description_zh: "C++ 实现读取的 script_usage 参数", required: false, type: string }
+    script_usage_id: { default_state: none, description_zh: "C++ 实现读取的 script_usage_id 参数", required: false, type: string }
+    stage_key: { default_state: none, description_zh: "C++ 实现读取的 stage_key 参数", required: false, type: string }
+    target_index: { default_state: none, description_zh: "C++ 实现读取的 target_index 参数", required: true, type: integer }
+  }
+  state: defined
+}
+response: { artifact_fields: [], compact_fields: [saved, asset_path, module_name, module_node_guid, moved, apply_backend], failure_fields: [params.emitter_asset_path, params.target_index], max_items_policy: { fields: [], mode: none } }
+returns: {
+  fields: {
+	apply_backend: { description_zh: "实际执行写入的统一 Apply 后端", required: true, type: string }
+	asset_path: { description_zh: "C++ 实现返回的 asset_path 字段；是否出现取决于执行分支", required: false, type: ue_asset_path }
+    module_name: { description_zh: "C++ 实现返回的 module_name 字段；是否出现取决于执行分支", required: false, type: string }
+    module_node_guid: { description_zh: "C++ 实现返回的 module_node_guid 字段；是否出现取决于执行分支", required: false, type: string }
+    moved: { description_zh: "C++ 实现返回的 moved 字段；是否出现取决于执行分支", required: false, type: bool }
+    new_index: { description_zh: "C++ 实现返回的 new_index 字段；是否出现取决于执行分支", required: false, type: integer }
+    old_index: { description_zh: "C++ 实现返回的 old_index 字段；是否出现取决于执行分支", required: false, type: integer }
+    saved: { description_zh: "C++ 实现返回的 saved 字段；是否出现取决于执行分支", required: false, type: bool }
+    stage_key: { description_zh: "C++ 实现返回的 stage_key 字段；是否出现取决于执行分支", required: false, type: string }
+    target_index: { description_zh: "C++ 实现返回的 target_index 字段；是否出现取决于执行分支", required: false, type: integer }
+  }
+  state: defined
+}
+schema: uai.command_spec.v1
+status: active
+types: {}
+verification: {
+  assertions: [
+    { id: result_present, operator: exists, source: returns.saved }
+    { id: state_readback_present, operator: exists, source: methods.state_readback.modules }
+  ]
+  failure_policy: fail_overall
+  methods: [
+    { id: result, kind: result_assertion }
+    { command: niagara_emitter_list_stage_modules, id: state_readback, kind: command_readback, params_mapping: { asset_path: returns.asset_path, emitter_asset_path: returns.asset_path, stage_key: returns.stage_key } }
+  ]
+  required: true
+  state: defined
+}
+version: 1

@@ -54,40 +54,12 @@ namespace UeAgentEditorViewport
 
 	static bool TryReadVectorObject(const TSharedPtr<FJsonObject>& Obj, FVector& OutValue)
 	{
-		if (!Obj.IsValid())
-		{
-			return false;
-		}
-		double X = 0.0;
-		double Y = 0.0;
-		double Z = 0.0;
-		if (!UeAgentJsonDiagnostics::TryReadNumberFieldByAliases(Obj, { TEXT("x"), TEXT("X") }, X)
-			|| !UeAgentJsonDiagnostics::TryReadNumberFieldByAliases(Obj, { TEXT("y"), TEXT("Y") }, Y)
-			|| !UeAgentJsonDiagnostics::TryReadNumberFieldByAliases(Obj, { TEXT("z"), TEXT("Z") }, Z))
-		{
-			return false;
-		}
-		OutValue = FVector(X, Y, Z);
-		return true;
+		return UeAgentJsonDiagnostics::TryReadVectorObject(Obj, OutValue);
 	}
 
 	static bool TryReadRotatorObject(const TSharedPtr<FJsonObject>& Obj, FRotator& OutValue)
 	{
-		if (!Obj.IsValid())
-		{
-			return false;
-		}
-		double Pitch = 0.0;
-		double Yaw = 0.0;
-		double Roll = 0.0;
-		if (!UeAgentJsonDiagnostics::TryReadNumberFieldByAliases(Obj, { TEXT("pitch"), TEXT("Pitch") }, Pitch)
-			|| !UeAgentJsonDiagnostics::TryReadNumberFieldByAliases(Obj, { TEXT("yaw"), TEXT("Yaw") }, Yaw)
-			|| !UeAgentJsonDiagnostics::TryReadNumberFieldByAliases(Obj, { TEXT("roll"), TEXT("Roll") }, Roll))
-		{
-			return false;
-		}
-		OutValue = FRotator(Pitch, Yaw, Roll);
-		return true;
+		return UeAgentJsonDiagnostics::TryReadRotatorObject(Obj, OutValue);
 	}
 
 	static bool TryReadVectorField(const TSharedPtr<FJsonObject>& Obj, const FString& Key, FVector& OutValue)
@@ -248,225 +220,13 @@ namespace UeAgentEditorViewport
 		return TryGetObjectField(Options, TEXT("overlays"), Overlays) && TryGetBoolField(Overlays, Key, OutValue);
 	}
 
-	static TSharedPtr<FJsonObject> MakePixelSignalJson(const TArray<FColor>& Pixels, const FIntPoint& Size)
-	{
-		TSharedPtr<FJsonObject> Obj = MakeShared<FJsonObject>();
-		Obj->SetNumberField(TEXT("width"), Size.X);
-		Obj->SetNumberField(TEXT("height"), Size.Y);
-		Obj->SetNumberField(TEXT("sampled_pixel_count"), Pixels.Num());
 
-		int32 BrightPixelCount = 0;
-		int32 TransparentPixelCount = 0;
-		TSet<uint32> UniqueColors;
-		for (const FColor& Pixel : Pixels)
-		{
-			if ((static_cast<int32>(Pixel.R) + static_cast<int32>(Pixel.G) + static_cast<int32>(Pixel.B)) > 12)
-			{
-				++BrightPixelCount;
-			}
-			if (Pixel.A < 250)
-			{
-				++TransparentPixelCount;
-			}
-			if (UniqueColors.Num() <= 512)
-			{
-				UniqueColors.Add(Pixel.ToPackedARGB());
-			}
-		}
-		Obj->SetNumberField(TEXT("bright_pixel_count"), BrightPixelCount);
-		Obj->SetNumberField(TEXT("transparent_pixel_count"), TransparentPixelCount);
-		Obj->SetNumberField(TEXT("unique_color_count_capped"), UniqueColors.Num());
-		Obj->SetBoolField(TEXT("nonblank"), BrightPixelCount > 0 && UniqueColors.Num() > 1);
-		return Obj;
-	}
 
-	struct FResolvedScreenshotOptions
-	{
-		FString Format = TEXT("png");
-		FString OutputPath;
-		int32 Quality = 90;
-		int32 MaxSize = 1600;
-		int32 WarmupFrames = 2;
-	};
+	;
 
-	static bool ParseScreenshotOptions(const TSharedPtr<FJsonObject>& Params, FResolvedScreenshotOptions& OutOptions, FString& OutError)
-	{
-		FString Format = TEXT("png");
-		TryGetStringField(Params, TEXT("format"), Format);
-		Format = NormalizeToken(Format);
-		if (Format == TEXT("jpeg"))
-		{
-			Format = TEXT("jpg");
-		}
-		if (Format != TEXT("png") && Format != TEXT("jpg") && Format != TEXT("webp"))
-		{
-			OutError = TEXT("unsupported_format");
-			return false;
-		}
 
-		int32 Quality = 90;
-		double QualityD = Quality;
-		if (TryGetNumberField(Params, TEXT("quality"), QualityD))
-		{
-			Quality = FMath::Clamp(static_cast<int32>(QualityD), 1, 100);
-		}
-		int32 MaxSize = 1600;
-		double MaxSizeD = MaxSize;
-		if (TryGetNumberField(Params, TEXT("max_size"), MaxSizeD))
-		{
-			MaxSize = FMath::Clamp(static_cast<int32>(MaxSizeD), 64, 8192);
-		}
-		int32 WarmupFrames = 2;
-		double WarmupD = WarmupFrames;
-		if (TryGetNumberField(Params, TEXT("warmup_frames"), WarmupD))
-		{
-			WarmupFrames = FMath::Clamp(static_cast<int32>(WarmupD), 0, 8);
-		}
 
-		FString OutputFile;
-		FString OutputPath;
-		if (TryGetStringField(Params, TEXT("output_file"), OutputFile) && !OutputFile.TrimStartAndEnd().IsEmpty())
-		{
-			OutputPath = UeAgentJsonDiagnostics::ResolveProjectRelativeFilePath(OutputFile);
-			FString Ext = FPaths::GetExtension(OutputPath).ToLower();
-			if (Ext == TEXT("jpeg"))
-			{
-				Ext = TEXT("jpg");
-			}
-			if (Ext.IsEmpty())
-			{
-				OutputPath += FString::Printf(TEXT(".%s"), *Format);
-			}
-			else if (Ext != Format)
-			{
-				OutError = TEXT("output_file_extension_mismatch");
-				return false;
-			}
-		}
-		else
-		{
-			OutputPath = FUeAgentHttpServer::MakeShotPath(Format);
-		}
 
-		OutOptions.Format = Format;
-		OutOptions.OutputPath = OutputPath;
-		OutOptions.Quality = Quality;
-		OutOptions.MaxSize = MaxSize;
-		OutOptions.WarmupFrames = WarmupFrames;
-		return true;
-	}
-
-	static bool CaptureEditorViewportClientBackbuffer(
-		FEditorViewportClient* Client,
-		const FString& AdapterName,
-		const FResolvedScreenshotOptions& Options,
-		TArray<FColor>& OutPixels,
-		FIntPoint& OutSize,
-		TSharedPtr<FJsonObject>& OutCaptureInfo,
-		FString& OutError)
-	{
-		if (!Client || !Client->Viewport)
-		{
-			OutError = TEXT("invalid_editor_viewport_client");
-			return false;
-		}
-
-		const bool bRealtimeBefore = Client->IsRealtime();
-		const FText ScreenshotRealtimeOverrideSystem = NSLOCTEXT("UeAgentInterface", "EditorViewportScreenshotRealtimeOverrideSystem", "UeAgentInterfaceEditorViewportScreenshot");
-		const bool bNeedTemporaryRealtime = !Client->IsRealtime();
-		if (bNeedTemporaryRealtime)
-		{
-			if (Client->HasRealtimeOverride(ScreenshotRealtimeOverrideSystem))
-			{
-				Client->RemoveRealtimeOverride(ScreenshotRealtimeOverrideSystem, false);
-			}
-			Client->AddRealtimeOverride(true, ScreenshotRealtimeOverrideSystem);
-		}
-
-		FViewport* Viewport = Client->Viewport;
-		int32 DrawsPerformed = 0;
-		bool bAppliedFallbackViewportSize = false;
-		FIntPoint InitialViewportSize = Viewport->GetSizeXY();
-		for (int32 FrameIndex = 0; FrameIndex < Options.WarmupFrames; ++FrameIndex)
-		{
-			Client->Invalidate();
-			Viewport->Invalidate();
-			Viewport->Draw(/*bShouldPresent*/ true);
-			FlushRenderingCommands();
-			++DrawsPerformed;
-		}
-
-		Client->Invalidate();
-		Viewport->Invalidate();
-		Viewport->Draw(/*bShouldPresent*/ true);
-		FlushRenderingCommands();
-		++DrawsPerformed;
-
-		if (FApp::CanEverRender() && (Viewport->GetSizeXY().X <= 0 || Viewport->GetSizeXY().Y <= 0))
-		{
-			FSceneViewport* SceneViewport = static_cast<FSceneViewport*>(Viewport);
-			const uint32 FallbackSize = static_cast<uint32>(FMath::Clamp(Options.MaxSize, 512, 2048));
-			SceneViewport->SetFixedViewportSize(FallbackSize, FallbackSize);
-			Client->Invalidate();
-			Viewport->Invalidate();
-			Viewport->Draw(/*bShouldPresent*/ true);
-			FlushRenderingCommands();
-			++DrawsPerformed;
-			bAppliedFallbackViewportSize = Viewport->GetSizeXY().X > 0 && Viewport->GetSizeXY().Y > 0;
-		}
-
-		if (bNeedTemporaryRealtime && Client->HasRealtimeOverride(ScreenshotRealtimeOverrideSystem))
-		{
-			Client->RemoveRealtimeOverride(ScreenshotRealtimeOverrideSystem, false);
-		}
-
-		const FIntPoint Size = Viewport->GetSizeXY();
-		if (Size.X <= 0 || Size.Y <= 0)
-		{
-			if (bAppliedFallbackViewportSize)
-			{
-				static_cast<FSceneViewport*>(Viewport)->SetFixedViewportSize(0, 0);
-			}
-			OutError = TEXT("invalid_viewport_size");
-			return false;
-		}
-
-		TArray<FColor> Pixels;
-		Pixels.AddUninitialized(Size.X * Size.Y);
-		if (!Viewport->ReadPixels(Pixels))
-		{
-			if (bAppliedFallbackViewportSize)
-			{
-				static_cast<FSceneViewport*>(Viewport)->SetFixedViewportSize(0, 0);
-			}
-			OutError = TEXT("read_pixels_failed");
-			return false;
-		}
-
-		OutPixels = MoveTemp(Pixels);
-		OutSize = Size;
-		if (bAppliedFallbackViewportSize)
-		{
-			static_cast<FSceneViewport*>(Viewport)->SetFixedViewportSize(0, 0);
-		}
-
-		OutCaptureInfo = MakeShared<FJsonObject>();
-		OutCaptureInfo->SetStringField(TEXT("schema"), TEXT("uai.viewport_capture.v1"));
-		OutCaptureInfo->SetStringField(TEXT("render_path"), TEXT("editor_viewport_client_backbuffer"));
-		OutCaptureInfo->SetStringField(TEXT("adapter"), AdapterName);
-		TSharedPtr<FJsonObject> InitialSizeJson = MakeShared<FJsonObject>();
-		InitialSizeJson->SetNumberField(TEXT("x"), InitialViewportSize.X);
-		InitialSizeJson->SetNumberField(TEXT("y"), InitialViewportSize.Y);
-		OutCaptureInfo->SetObjectField(TEXT("initial_viewport_size"), InitialSizeJson);
-		OutCaptureInfo->SetNumberField(TEXT("warmup_frames_requested"), Options.WarmupFrames);
-		OutCaptureInfo->SetNumberField(TEXT("draws_performed"), DrawsPerformed);
-		OutCaptureInfo->SetBoolField(TEXT("fallback_viewport_size_applied"), bAppliedFallbackViewportSize);
-		OutCaptureInfo->SetBoolField(TEXT("temporary_realtime_override"), bNeedTemporaryRealtime);
-		OutCaptureInfo->SetBoolField(TEXT("realtime_before_capture"), bRealtimeBefore);
-		OutCaptureInfo->SetStringField(TEXT("view_mode_name"), ViewModeToString(Client->GetViewMode()));
-		OutCaptureInfo->SetNumberField(TEXT("view_mode_value"), static_cast<int32>(Client->GetViewMode()));
-		return true;
-	}
 
 	static bool ParseCameraRequest(const TSharedPtr<FJsonObject>& Params, const FViewportCamera& CurrentCamera, FViewportCamera& OutCamera, FString& OutError)
 	{
@@ -610,8 +370,8 @@ namespace UeAgentEditorViewport
 			OutState.Capabilities.bCamera = true;
 			OutState.Capabilities.bVisualOptions = true;
 			OutState.Capabilities.bPreviewState = false;
-			OutState.Capabilities.bScreenshot = true;
-			OutState.Capabilities.FocusModes = { TEXT("asset_bounds"), TEXT("bounds"), TEXT("selection"), TEXT("pivot"), TEXT("socket"), TEXT("custom_bounds"), TEXT("custom_point") }; OutState.Capabilities.ScreenshotBackends = { TEXT("static_mesh_editor_backbuffer") }; OutState.Capabilities.VisualOptionKeys = { TEXT("view_mode"), TEXT("grid"), TEXT("bounds"), TEXT("pivot"), TEXT("normals"), TEXT("tangents"), TEXT("binormals"), TEXT("vertices"), TEXT("simple_collision"), TEXT("complex_collision"), TEXT("collision") };
+
+			OutState.Capabilities.FocusModes = { TEXT("asset_bounds"), TEXT("bounds"), TEXT("selection"), TEXT("pivot"), TEXT("socket"), TEXT("custom_bounds"), TEXT("custom_point") };  OutState.Capabilities.VisualOptionKeys = { TEXT("view_mode"), TEXT("grid"), TEXT("bounds"), TEXT("pivot"), TEXT("normals"), TEXT("tangents"), TEXT("binormals"), TEXT("vertices"), TEXT("simple_collision"), TEXT("complex_collision"), TEXT("collision") };
 			OutState.VisualOptions = MakeStaticMeshVisualOptionsJson(*MeshEditor, *Client);
 			OutState.PreviewState = MakeStaticMeshPreviewStateJson(*MeshEditor);
 			return true;
@@ -862,60 +622,7 @@ namespace UeAgentEditorViewport
 			return false;
 		}
 
-		virtual bool CaptureScreenshot(const FResolvedViewport& Viewport, const TSharedPtr<FJsonObject>& Params, FViewportScreenshotResult& OutResult, FString& OutError) const override
-		{
-			IStaticMeshEditor* MeshEditor = GetEditorFromResolved(Viewport, OutError);
-			if (!MeshEditor)
-			{
-				return false;
-			}
-			if (!Viewport.ViewportClient)
-			{
-				OutError = TEXT("invalid_static_mesh_viewport");
-				return false;
-			}
-			const UUeAgentInterfaceSettings* Settings = UUeAgentInterfaceSettings::Get();
-			if (!Settings || !Settings->bEnableScreenshots)
-			{
-				OutError = TEXT("screenshots_disabled");
-				return false;
-			}
 
-			FResolvedScreenshotOptions Options;
-			if (!ParseScreenshotOptions(Params, Options, OutError))
-			{
-				return false;
-			}
-
-			TArray<FColor> Pixels;
-			FIntPoint Size(0, 0);
-			TSharedPtr<FJsonObject> CaptureInfo;
-			if (!CaptureEditorViewportClientBackbuffer(Viewport.ViewportClient, GetName(), Options, Pixels, Size, CaptureInfo, OutError))
-			{
-				return false;
-			}
-
-			TArray<FColor> Resized;
-			FIntPoint ResizedSize(0, 0);
-			if (!FUeAgentHttpServer::ResizePixelsMaxSize(Pixels, Size, Options.MaxSize, Resized, ResizedSize, OutError))
-			{
-				return false;
-			}
-			if (!FUeAgentHttpServer::WriteCompressedImage(Resized, ResizedSize, Options.Format, Options.Quality, Options.OutputPath, OutError))
-			{
-				return false;
-			}
-
-			OutResult.FilePath = Options.OutputPath;
-			OutResult.Format = Options.Format;
-			OutResult.Width = ResizedSize.X;
-			OutResult.Height = ResizedSize.Y;
-			OutResult.Bytes = IFileManager::Get().FileSize(*Options.OutputPath);
-			OutResult.CaptureBackend = TEXT("static_mesh_editor_backbuffer");
-			OutResult.PixelSignal = MakePixelSignalJson(Resized, ResizedSize);
-			OutResult.Capture = CaptureInfo;
-			return true;
-		}
 
 		virtual bool SnapshotState(const FResolvedViewport& Viewport, FViewportSnapshot& OutSnapshot, FString& OutError) const override
 		{

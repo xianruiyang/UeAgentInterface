@@ -61,13 +61,11 @@ namespace UeAgentMaterialOps
 	UMaterialFunction* LoadMaterialFunctionAsset(const FString& InPath);
 	UMaterialInstanceConstant* LoadMaterialInstance(const FString& InPath);
 	bool SaveAssetPackage(UObject* Asset, FString& OutError);
-	UClass* ResolveClassByPath(const FString& InClassPath);
 	bool ResolvePropertyPath(UObject* Obj, const FString& PropertyPath, FProperty*& OutProperty, void*& OutValuePtr);
-	bool SetObjectPropertyText(UObject* Target, const FString& PropertyPath, const FString& ValueText, FString* OutAppliedValueText, FString* OutCppType, FString* OutImportError);
+	bool SetDeprecatedObjectPropertyText(UObject* Target, const FString& PropertyPath, const FString& ValueText, FString* OutAppliedValueText, FString* OutCppType, FString* OutImportError);
 	bool ExportObjectPropertyText(UObject* Target, const FString& PropertyPath, FString& OutValueText, FString* OutCppType, FString* OutExportError);
 	bool ParseLinearColor(const TSharedPtr<FJsonObject>& Params, const FString& Key, FLinearColor& OutColor);
 	TSharedPtr<FJsonObject> ExpressionToJson(UMaterialExpression* Expression);
-	FString NormalizeExpressionPinName(const FString& PinName);
 	bool ParseCompileSeverityFilter(const FString& InFilterText, ECompileMessageSeverityFilter& OutFilter);
 	void CollectMaterialCompileMessages(
 		UMaterialInterface* MaterialInterface,
@@ -75,8 +73,4 @@ namespace UeAgentMaterialOps
 		int32 MaxMessages,
 		TArray<TSharedPtr<FJsonValue>>& OutMessages,
 		int32& OutErrorCount);
-	bool ManualConnectExpressions(UMaterialExpression* FromExpression, const FString& FromOutputName, UMaterialExpression* ToExpression, const FString& ToInputName);
-	UMaterialExpression* FindExpressionByParams(UMaterial* Material, const TSharedPtr<FJsonObject>& Params);
-	UMaterialExpression* FindExpressionBySelector(UMaterial* Material, const TSharedPtr<FJsonObject>& Params, const FString& Prefix);
-	bool ParseMaterialProperty(const FString& InPropertyName, EMaterialProperty& OutProperty);
 }

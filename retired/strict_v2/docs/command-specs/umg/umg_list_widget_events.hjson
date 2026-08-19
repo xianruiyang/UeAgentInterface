@@ -1,0 +1,92 @@
+authoring: { reason: command_has_no_registered_folder_authoring_profile, state: none }
+category: umg
+command: umg_list_widget_events
+deprecation: { reason: command_is_active, state: none }
+discovery: { aliases: [], keywords_en: [umg, list, widget, events], keywords_zh: [umg_list_widget_events], summary_en: "Execute umg_list_widget_events with a verified implementation contract", summary_zh: "查询某个 Widget 可绑定的 BlueprintAssignable 事件", tags: [umg, p2-003] }
+errors: {
+  codes: [
+    { code: missing_asset_path, description_zh: "C++ 实现返回错误码 missing_asset_path", retry_safe: true, stage: preflight, wire_match: exact }
+    { code: missing_widget_name, description_zh: "C++ 实现返回错误码 missing_widget_name", retry_safe: true, stage: preflight, wire_match: exact }
+    { code: widget_blueprint_not_found, description_zh: "C++ 实现返回错误码 widget_blueprint_not_found", retry_safe: false, stage: execution, wire_match: exact }
+    { code: widget_not_found, description_zh: "C++ 实现返回错误码 widget_not_found", retry_safe: false, stage: execution, wire_match: exact }
+    { code: widget_tree_missing, description_zh: "C++ 实现返回错误码 widget_tree_missing", retry_safe: true, stage: preflight, wire_match: exact }
+  ]
+}
+evidence: {
+  docs: [
+    { path: "Plugins/UeAgentInterface/docs/commands/umg/umg_list_widget_events.md", purpose: "user documentation cross-check; C++ implementation remains authoritative" }
+  ]
+  implementation: [
+    { line_hint: 346, path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Commands/Blueprint/UeAgentHttpServer_ComponentEventQuery.cpp", purpose: "command handler, parameter and return evidence", symbol: CmdUmgListWidgetEvents }
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Server/UeAgentHttpServer.cpp", purpose: "transitive helper evidence used by the command handler" }
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Utilities/UeAgentJsonDiagnostics.cpp", purpose: "transitive helper evidence used by the command handler" }
+  ]
+  tests: [
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterfaceTests/Private/Smoke/UeAgentInterfaceSmoke_BlueprintUmg.cpp", purpose: "smoke or negative-path evidence cross-checked for the verified contract" }
+  ]
+}
+execution: {
+  destructive: false
+  editor_state: required
+  game_thread: required
+  idempotent: false
+  kind: write
+  overwrite_behavior: target_asset
+  pie_state: allowed
+  retry_safe: false
+  save_behavior: none
+  side_effects: [modifies_asset]
+  ui_effect: none
+}
+maturity: verified
+params: {
+  constraints: []
+  fields: {
+    asset_path: { default_state: none, description_zh: "C++ 实现读取的 asset_path 参数", path_semantics: { access_scope: project_write, kind: ue_asset }, required: true, type: ue_asset_path }
+    compile_before_query: { default: true, default_state: defined, description_zh: "C++ 实现读取的 compile_before_query 参数", required: false, type: bool }
+    include_hidden: { default: false, default_state: defined, description_zh: "C++ 实现读取的 include_hidden 参数", required: false, type: bool }
+    limit: { default: 200, default_state: defined, description_zh: "C++ 实现读取的 limit 参数", required: false, type: integer }
+    only_unbound: { default: false, default_state: defined, description_zh: "C++ 实现读取的 only_unbound 参数", required: false, type: bool }
+    query: { default_state: none, description_zh: "C++ 实现读取的 query 参数", required: false, type: string }
+    widget_name: { default_state: none, description_zh: "C++ 实现读取的 widget_name 参数", required: true, type: string }
+  }
+  state: defined
+}
+response: { artifact_fields: [], compact_fields: [asset_path, can_author_component_bound_event, compiled_before_query, component_name, events, limit], failure_fields: [params.asset_path, params.widget_name], max_items_policy: { fields: [], mode: none } }
+returns: {
+  fields: {
+    asset_path: { description_zh: "C++ 实现返回的 asset_path 字段；是否出现取决于执行分支", required: false, type: ue_asset_path }
+    can_author_component_bound_event: { description_zh: "C++ 实现返回的 can_author_component_bound_event 字段；是否出现取决于执行分支", required: false, type: bool }
+    compiled_before_query: { description_zh: "C++ 实现返回的 compiled_before_query 字段；是否出现取决于执行分支", required: false, type: bool }
+    component_name: { description_zh: "C++ 实现返回的 component_name 字段；是否出现取决于执行分支", required: false, type: string }
+    events: { description_zh: "C++ 实现返回的 events 字段；是否出现取决于执行分支", item_type: json_value, required: false, type: array }
+    limit: { description_zh: "C++ 实现返回的 limit 字段；是否出现取决于执行分支", required: false, type: integer }
+    matched_event_count: { description_zh: "C++ 实现返回的 matched_event_count 字段；是否出现取决于执行分支", required: false, type: integer }
+    query: { description_zh: "C++ 实现返回的 query 字段；是否出现取决于执行分支", required: false, type: string }
+    returned_event_count: { description_zh: "C++ 实现返回的 returned_event_count 字段；是否出现取决于执行分支", required: false, type: integer }
+    target_class: { description_zh: "C++ 实现返回的 target_class 字段；是否出现取决于执行分支", required: false, type: string }
+    target_kind: { description_zh: "C++ 实现返回的 target_kind 字段；是否出现取决于执行分支", required: false, type: string }
+    total_event_count: { description_zh: "C++ 实现返回的 total_event_count 字段；是否出现取决于执行分支", required: false, type: integer }
+    truncated: { description_zh: "C++ 实现返回的 truncated 字段；是否出现取决于执行分支", required: false, type: bool }
+    widget_name: { description_zh: "C++ 实现返回的 widget_name 字段；是否出现取决于执行分支", required: false, type: string }
+    widget_property_found: { description_zh: "C++ 实现返回的 widget_property_found 字段；是否出现取决于执行分支", required: false, type: bool }
+  }
+  state: defined
+}
+schema: uai.command_spec.v1
+status: active
+types: {}
+verification: {
+  assertions: [
+    { id: result_present, operator: exists, source: returns.asset_path }
+    { id: state_readback_present, operator: exists, source: methods.state_readback.status }
+  ]
+  failure_policy: fail_overall
+  methods: [
+    { id: result, kind: result_assertion }
+    { command: umg_get_info, id: state_readback, kind: command_readback, params_mapping: { asset_path: params.asset_path } }
+  ]
+  required: true
+  state: defined
+}
+version: 1

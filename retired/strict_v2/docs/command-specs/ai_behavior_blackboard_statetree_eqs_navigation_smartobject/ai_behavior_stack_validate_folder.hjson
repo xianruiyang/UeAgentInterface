@@ -1,0 +1,98 @@
+authoring: { reason: composite_read_only_package_not_uobject_authoring_profile, state: none }
+category: ai_behavior_blackboard_statetree_eqs_navigation_smartobject
+command: ai_behavior_stack_validate_folder
+deprecation: { reason: command_is_active, state: none }
+discovery: { aliases: [], keywords_en: [ai, behavior, stack, validate, folder, ai_behavior_blackboard_statetree_eqs_navigation_smartobject], keywords_zh: [ai_behavior_stack_validate_folder], summary_en: "Execute ai_behavior_stack_validate_folder with a verified implementation contract", summary_zh: "只读校验跨资产引用闭环", tags: [ai_behavior_blackboard_statetree_eqs_navigation_smartobject, p2-007] }
+errors: {
+  codes: [
+    { code: details_duplicate_property_path, description_zh: "C++ 实现返回错误码 details_duplicate_property_path", retry_safe: false, stage: execution, wire_match: prefix }
+    { code: details_field_missing_property_path, description_zh: "C++ 实现返回错误码 details_field_missing_property_path", retry_safe: true, stage: preflight, wire_match: prefix }
+    { code: details_group_missing_fields, description_zh: "C++ 实现返回错误码 details_group_missing_fields", retry_safe: true, stage: preflight, wire_match: prefix }
+    { code: details_index_invalid_group, description_zh: "C++ 实现返回错误码 details_index_invalid_group", retry_safe: true, stage: preflight, wire_match: prefix }
+    { code: details_index_missing_groups, description_zh: "C++ 实现返回错误码 details_index_missing_groups", retry_safe: true, stage: preflight, wire_match: exact }
+    { code: details_rehydrate_missing_properties, description_zh: "C++ 实现返回错误码 details_rehydrate_missing_properties", retry_safe: true, stage: preflight, wire_match: prefix }
+    { code: entry_object_invalid, description_zh: "C++ 实现返回错误码 entry_object_invalid", retry_safe: true, stage: preflight, wire_match: exact }
+    { code: hjson_file_not_found, description_zh: "C++ 实现返回错误码 hjson_file_not_found", retry_safe: false, stage: execution, wire_match: prefix }
+    { code: hjson_file_required, description_zh: "C++ 实现返回错误码 hjson_file_required", retry_safe: true, stage: preflight, wire_match: prefix }
+    { code: json_file_not_found, description_zh: "C++ 实现返回错误码 json_file_not_found", retry_safe: false, stage: execution, wire_match: prefix }
+    { code: authoring_properties_rejected, description_zh: "C++ 实现返回错误码 authoring_properties_rejected", retry_safe: false, stage: execution, wire_match: exact }
+    { code: missing_folder_path, description_zh: "C++ 实现返回错误码 missing_folder_path", retry_safe: true, stage: preflight, wire_match: exact }
+    { code: missing_input_file, description_zh: "C++ 实现返回错误码 missing_input_file", retry_safe: true, stage: preflight, wire_match: exact }
+  ]
+}
+evidence: {
+  docs: [
+    { path: "Plugins/UeAgentInterface/docs/commands/ai_behavior_blackboard_statetree_eqs_navigation_smartobject/ai_behavior_stack_validate_folder.md", purpose: "user documentation cross-check; C++ implementation remains authoritative" }
+  ]
+  implementation: [
+    { line_hint: 1433, path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Commands/AI/UeAgentHttpServer_AI_SmartObjectBehaviorStack.cpp", purpose: "command handler, parameter and return evidence", symbol: CmdAIBehaviorStackValidateFolder }
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Commands/AI/UeAgentHttpServer_AI_Blackboard.cpp", purpose: "transitive helper evidence used by the command handler" }
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Server/UeAgentHttpServer.cpp", purpose: "transitive helper evidence used by the command handler" }
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Utilities/UeAgentAuthoringFileIO.cpp", purpose: "transitive helper evidence used by the command handler" }
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Utilities/UeAgentDetailsAuthoring.cpp", purpose: "transitive helper evidence used by the command handler" }
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Utilities/UeAgentStructuredAuthoringIO.cpp", purpose: "transitive helper evidence used by the command handler" }
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Utilities/UeAgentStructuredHjsonFormatter.cpp", purpose: "transitive helper evidence used by the command handler" }
+  ]
+  tests: [
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterfaceTests/Private/Smoke/UeAgentInterfaceAISmokeTests.cpp", purpose: "smoke or negative-path evidence cross-checked for the verified contract" }
+  ]
+}
+execution: {
+  destructive: false
+  editor_state: required
+  game_thread: required
+  idempotent: true
+  kind: read_only
+  overwrite_behavior: none
+  pie_state: allowed
+  retry_safe: true
+  save_behavior: none
+  side_effects: []
+  ui_effect: none
+}
+maturity: verified
+params: {
+  constraints: []
+  fields: {
+    folder_path: {
+      default_state: none
+      description_zh: "C++ 实现读取的 folder_path 参数"
+      path_semantics: { kind: filesystem_directory, must_exist: true, writable: false }
+      required: true
+      type: filesystem_path
+    }
+  }
+  state: defined
+}
+response: { artifact_fields: [asset_reference_results, errors, json_issues, warnings, coverage_report], compact_fields: [status, allowed_target, dropped, error_code], failure_fields: [params.folder_path], max_items_policy: { fields: [], mode: none } }
+returns: {
+  fields: {
+    allowed_target: { description_zh: "C++ 实现返回的 allowed_target 字段；是否出现取决于执行分支", required: false, type: string }
+    asset_reference_results: { description_zh: "C++ 实现返回的 asset_reference_results 字段；是否出现取决于执行分支", item_type: json_value, required: false, type: array }
+    coverage_report: { description_zh: "C++ 实现返回的 coverage_report 字段；是否出现取决于执行分支", required: false, type: json_value }
+    dropped: { description_zh: "C++ 实现返回的 dropped 字段；是否出现取决于执行分支", required: false, type: bool }
+    error_code: { description_zh: "C++ 实现返回的 error_code 字段；是否出现取决于执行分支", required: false, type: string }
+    error_count: { description_zh: "C++ 实现返回的 error_count 字段；是否出现取决于执行分支", required: false, type: integer }
+    errors: { description_zh: "C++ 实现返回的 errors 字段；是否出现取决于执行分支", item_type: json_value, required: false, type: array }
+    folder_path: { description_zh: "C++ 实现返回的 folder_path 字段；是否出现取决于执行分支", required: false, type: filesystem_path }
+    json_issues: { description_zh: "C++ 实现返回的 json_issues 字段；是否出现取决于执行分支", item_type: json_value, required: false, type: array }
+    json_path: { description_zh: "C++ 实现返回的 json_path 字段；是否出现取决于执行分支", required: false, type: string }
+    surface: { description_zh: "C++ 实现返回的 surface 字段；是否出现取决于执行分支", required: false, type: string }
+    message: { description_zh: "C++ 实现返回的 message 字段；是否出现取决于执行分支", required: false, type: string }
+    resolution_hint: { description_zh: "C++ 实现返回的 resolution_hint 字段；是否出现取决于执行分支", required: false, type: string }
+    ok: { description_zh: "C++ 实现返回的 ok 字段；是否出现取决于执行分支", required: false, type: bool }
+    owner_id: { description_zh: "C++ 实现返回的 owner_id 字段；是否出现取决于执行分支", required: false, type: string }
+    owner_kind: { description_zh: "C++ 实现返回的 owner_kind 字段；是否出现取决于执行分支", required: false, type: string }
+    profile: { description_zh: "C++ 实现返回的 profile 字段；是否出现取决于执行分支", required: false, type: string }
+    schema: { description_zh: "C++ 实现返回的 schema 字段；是否出现取决于执行分支", required: false, type: string }
+    status: { description_zh: "C++ 实现返回的 status 字段；是否出现取决于执行分支", required: false, type: string }
+    warning_count: { description_zh: "C++ 实现返回的 warning_count 字段；是否出现取决于执行分支", required: false, type: integer }
+    warnings: { description_zh: "C++ 实现返回的 warnings 字段；是否出现取决于执行分支", item_type: json_value, required: false, type: array }
+  }
+  state: defined
+}
+schema: uai.command_spec.v1
+status: active
+types: {}
+verification: { reason: read_only_command_has_no_post_write_verification, state: none }
+version: 1

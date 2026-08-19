@@ -1,0 +1,18 @@
+definition: {
+  additional_fields: true
+  fields: {
+    game_view: { default_state: none, description_zh: "game view 开关", required: false, type: bool }
+    ignore_unsupported: { default_state: none, description_zh: "忽略当前 adapter 不支持的 visual option 并在读回中报告", required: false, type: bool }
+    overlays: { default_state: none, description_zh: "overlay 开关集合", required: false, type: object }
+    realtime: { default_state: none, description_zh: "实时渲染开关", required: false, type: bool }
+    show_flags: { default_state: none, description_zh: "show flag 开关集合", required: false, type: object }
+    view_mode: { default_state: none, description_zh: "稳定视图模式 key；Level viewport 支持完整 optimization 模式表", required: false, type: string }
+    view_mode_state: { default_state: none, description_zh: "Level viewport 当前完整 view mode 读回", required: false, type: object }
+    visualization_family: { default_state: none, description_zh: "Level viewport Visualization family", required: false, type: string }
+    visualization_mode: { default_state: none, description_zh: "Level viewport Visualization family 内的具体模式", required: false, type: string }
+  }
+  kind: object
+}
+schema: uai.command_spec.shared_type.v1
+type_id: EditorViewportVisualOptions
+version: 1

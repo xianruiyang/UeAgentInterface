@@ -11,7 +11,6 @@ namespace UeAgentLevelFolderValidate
 		FValidateOptions();
 
 		FString InputFolder;
-		bool bCheckReferences;
 	};
 
 	UEAGENTINTERFACE_API bool ValidateLevelFolder(

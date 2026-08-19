@@ -2,8 +2,13 @@
 
 #include "Server/UeAgentHttpServer.h"
 
+#include "Utilities/AuthoringCore/UeAgentAuthoringSemanticCompare.h"
+#include "Utilities/UeAgentAuthoringFileIO.h"
 #include "Utilities/UeAgentAuthoringJson.h"
 #include "Utilities/UeAgentJsonDiagnostics.h"
+#include "Utilities/UeAgentPropertyValueCodec.h"
+#include "Utilities/UeAgentStructuredAuthoringIO.h"
+#include "Utilities/UeAgentUObjectProperties.h"
 #include "Module/UeAgentInterfaceLogger.h"
 
 #include "AssetRegistry/AssetRegistryModule.h"
@@ -107,32 +112,6 @@ namespace UeAgentDataDrivenOps
 		return AssetRegistryModule.Get().GetAssetByObjectPath(FSoftObjectPath(ObjectPath)).IsValid();
 	}
 
-	static FString NormalizeReferenceObjectPath(const FString& InValueText)
-	{
-		FString RefPath = InValueText;
-		RefPath.TrimStartAndEndInline();
-		if (RefPath.IsEmpty() || RefPath.Equals(TEXT("None"), ESearchCase::IgnoreCase) || RefPath.Equals(TEXT("Null"), ESearchCase::IgnoreCase))
-		{
-			return FString();
-		}
-
-		int32 FirstQuote = INDEX_NONE;
-		int32 LastQuote = INDEX_NONE;
-		if (RefPath.FindChar(TEXT('\''), FirstQuote) && RefPath.FindLastChar(TEXT('\''), LastQuote) && LastQuote > FirstQuote)
-		{
-			RefPath = RefPath.Mid(FirstQuote + 1, LastQuote - FirstQuote - 1);
-		}
-		if (RefPath.Contains(TEXT(".")))
-		{
-			return RefPath;
-		}
-		if (RefPath.StartsWith(TEXT("/Game/")) || RefPath.StartsWith(TEXT("/Script/")) || RefPath.StartsWith(TEXT("/Engine/")))
-		{
-			return ToObjectPath(RefPath);
-		}
-		return RefPath;
-	}
-
 	static FString JsonStringHash(const FString& Text)
 	{
 		return FString::Printf(TEXT("md5:%s"), *FMD5::HashAnsiString(*Text));
@@ -224,45 +203,12 @@ namespace UeAgentDataDrivenOps
 		return true;
 	}
 
-	static bool SaveJsonFile(const FString& OutputPathInput, const TSharedPtr<FJsonObject>& Root, FString& OutOutputPath, FString& OutError)
+	static bool SaveAuthoringFile(const FString& OutputPathInput, const TSharedPtr<FJsonObject>& Root, FString& OutOutputPath, FString& OutError)
 	{
-		OutOutputPath.Reset();
-		if (!Root.IsValid())
-		{
-			OutError = TEXT("json_root_invalid");
-			return false;
-		}
-
-		FString OutputPath = OutputPathInput;
-		OutputPath.TrimStartAndEndInline();
-		if (OutputPath.IsEmpty())
-		{
-			OutError = TEXT("missing_output_file");
-			return false;
-		}
-
-		OutputPath = UeAgentJsonDiagnostics::ResolveProjectRelativeFilePath(OutputPath);
-		const FString OutputDir = FPaths::GetPath(OutputPath);
-		if (!OutputDir.IsEmpty() && !IFileManager::Get().DirectoryExists(*OutputDir))
-		{
-			IFileManager::Get().MakeDirectory(*OutputDir, true);
-		}
-
-		FString JsonText;
-		if (!UeAgentJsonDiagnostics::SerializeJsonObjectCompact(Root, JsonText))
-		{
-			OutError = TEXT("json_serialize_failed");
-			return false;
-		}
-
-		if (!FFileHelper::SaveStringToFile(JsonText, *OutputPath, FFileHelper::EEncodingOptions::ForceUTF8WithoutBOM))
-		{
-			OutError = TEXT("save_json_file_failed");
-			return false;
-		}
-
-		OutOutputPath = OutputPath;
-		return true;
+		UeAgentAuthoringFileIO::FSaveOptions Options;
+		Options.SourceCommand = TEXT("data_driven_json_export");
+		Options.bExternalizeInlineDetails = false;
+		return UeAgentAuthoringFileIO::SaveObject(OutputPathInput, Root, Options, OutOutputPath, OutError);
 	}
 
 	static bool LoadJsonFromParams(const TSharedPtr<FJsonObject>& Params, TSharedPtr<FJsonObject>& OutRoot, FString& OutJsonFile, FString& OutError)
@@ -273,13 +219,8 @@ namespace UeAgentDataDrivenOps
 		FString JsonFile;
 		if (Params.IsValid() && Params->TryGetStringField(TEXT("json_file"), JsonFile) && !JsonFile.TrimStartAndEnd().IsEmpty())
 		{
-			TArray<TSharedPtr<FJsonValue>> Issues;
-			if (!UeAgentJsonDiagnostics::LoadJsonObjectFile(JsonFile, OutRoot, &Issues, OutError, false))
-			{
-				return false;
-			}
-			OutJsonFile = UeAgentJsonDiagnostics::ResolveProjectRelativeFilePath(JsonFile);
-			return true;
+			UeAgentAuthoringFileIO::FLoadOptions Options;
+			return UeAgentAuthoringFileIO::LoadObject(JsonFile, OutRoot, Options, OutJsonFile, OutError);
 		}
 
 		const TSharedPtr<FJsonObject>* JsonObj = nullptr;
@@ -425,139 +366,9 @@ namespace UeAgentDataDrivenOps
 		return LoadObject<UScriptStruct>(nullptr, *StructPath);
 	}
 
-	static FProperty* FindPropertyByNameLoose(UStruct* StructType, const FString& FieldName)
+	static FProperty* FindCanonicalProperty(UStruct* StructType, const FString& FieldName)
 	{
-		if (!StructType || FieldName.IsEmpty())
-		{
-			return nullptr;
-		}
-
-		const FString Normalized = FieldName.TrimStartAndEnd();
-		const FString NormalizedWithoutB = Normalized.StartsWith(TEXT("b")) ? Normalized.Mid(1) : Normalized;
-		for (TFieldIterator<FProperty> It(StructType, EFieldIterationFlags::IncludeSuper); It; ++It)
-		{
-			FProperty* Property = *It;
-			if (!Property)
-			{
-				continue;
-			}
-
-			const FString PropertyName = Property->GetName();
-			const FString PropertyNameWithoutB = PropertyName.StartsWith(TEXT("b")) ? PropertyName.Mid(1) : PropertyName;
-			if (PropertyName.Equals(Normalized, ESearchCase::IgnoreCase)
-				|| PropertyNameWithoutB.Equals(NormalizedWithoutB, ESearchCase::IgnoreCase)
-				|| Property->GetAuthoredName().Equals(Normalized, ESearchCase::IgnoreCase))
-			{
-				return Property;
-			}
-		}
-		return nullptr;
-	}
-
-	static FString ExportPropertyText(FProperty* Property, const void* Container, UObject* Owner)
-	{
-		FString Out;
-		if (Property && Container)
-		{
-			const void* ValuePtr = Property->ContainerPtrToValuePtr<const void>(Container);
-			Property->ExportTextItem_Direct(Out, ValuePtr, nullptr, Owner, PPF_None);
-		}
-		return Out;
-	}
-
-	static FString GetPropertyControlType(FProperty* Property)
-	{
-		if (!Property)
-		{
-			return TEXT("property_editor");
-		}
-		if (CastField<FBoolProperty>(Property))
-		{
-			return TEXT("checkbox");
-		}
-		if (CastField<FEnumProperty>(Property) || CastField<FByteProperty>(Property))
-		{
-			return TEXT("enum_select");
-		}
-		if (CastField<FNumericProperty>(Property))
-		{
-			return TEXT("number_input");
-		}
-		if (CastField<FSoftObjectProperty>(Property) || CastField<FObjectPropertyBase>(Property) || CastField<FSoftClassProperty>(Property) || CastField<FClassProperty>(Property))
-		{
-			return TEXT("asset_picker");
-		}
-		if (CastField<FArrayProperty>(Property) || CastField<FSetProperty>(Property) || CastField<FMapProperty>(Property))
-		{
-			return TEXT("collection_editor");
-		}
-		return TEXT("property_text");
-	}
-
-	static FString GetPropertyValueKind(FProperty* Property)
-	{
-		if (!Property)
-		{
-			return TEXT("unknown");
-		}
-		if (CastField<FBoolProperty>(Property))
-		{
-			return TEXT("bool");
-		}
-		if (CastField<FEnumProperty>(Property))
-		{
-			return TEXT("enum");
-		}
-		if (FByteProperty* ByteProperty = CastField<FByteProperty>(Property))
-		{
-			return ByteProperty->Enum ? TEXT("enum") : TEXT("number");
-		}
-		if (CastField<FNumericProperty>(Property))
-		{
-			return TEXT("number");
-		}
-		if (CastField<FSoftObjectProperty>(Property) || CastField<FObjectPropertyBase>(Property) || CastField<FSoftClassProperty>(Property) || CastField<FClassProperty>(Property))
-		{
-			return TEXT("asset_path");
-		}
-		if (CastField<FArrayProperty>(Property))
-		{
-			return TEXT("array");
-		}
-		if (CastField<FSetProperty>(Property))
-		{
-			return TEXT("set");
-		}
-		if (CastField<FMapProperty>(Property))
-		{
-			return TEXT("map");
-		}
-		if (CastField<FStructProperty>(Property))
-		{
-			return TEXT("struct");
-		}
-		return TEXT("text");
-	}
-
-	static TArray<TSharedPtr<FJsonValue>> BuildCategoryPath(FProperty* Property)
-	{
-		TArray<TSharedPtr<FJsonValue>> CategoryPath;
-		const FString Category = Property ? Property->GetMetaData(TEXT("Category")) : FString();
-		TArray<FString> Parts;
-		Category.ParseIntoArray(Parts, TEXT("|"), true);
-		if (Parts.Num() == 0 && !Category.IsEmpty())
-		{
-			Parts.Add(Category);
-		}
-		for (FString Part : Parts)
-		{
-			Part.TrimStartAndEndInline();
-			if (!Part.IsEmpty())
-			{
-				CategoryPath.Add(MakeShared<FJsonValueString>(Part));
-			}
-		}
-		return CategoryPath;
+		return StructType && !FieldName.IsEmpty() ? FindFProperty<FProperty>(StructType, *FieldName) : nullptr;
 	}
 
 	static void AddEnumCandidates(FProperty* Property, const TSharedPtr<FJsonObject>& Field)
@@ -599,40 +410,25 @@ namespace UeAgentDataDrivenOps
 		}
 
 		Field->SetStringField(TEXT("property_path"), Property->GetName());
-		Field->SetStringField(TEXT("property_class"), Property->GetClass()->GetName());
-		Field->SetBoolField(TEXT("editable"), Property->HasAnyPropertyFlags(CPF_Edit));
-		Field->SetBoolField(TEXT("blueprint_visible"), Property->HasAnyPropertyFlags(CPF_BlueprintVisible));
-		Field->SetBoolField(TEXT("transient"), Property->HasAnyPropertyFlags(CPF_Transient));
 		Field->SetStringField(TEXT("display_name"), Property->GetDisplayNameText().ToString());
 		Field->SetStringField(TEXT("tooltip"), Property->GetToolTipText().ToString());
-		Field->SetArrayField(TEXT("category_path"), BuildCategoryPath(Property));
-		Field->SetObjectField(TEXT("selector"), UeAgentAuthoringJson::MakeSelector(TEXT("property_path"), Property->GetName()));
-		Field->SetStringField(TEXT("control_type"), GetPropertyControlType(Property));
-		Field->SetStringField(TEXT("value_kind"), GetPropertyValueKind(Property));
-		Field->SetObjectField(TEXT("availability"), UeAgentAuthoringJson::MakeAvailability(Property->HasAnyPropertyFlags(CPF_Edit)));
-		Field->SetArrayField(TEXT("operations"), Property->HasAnyPropertyFlags(CPF_Edit) ? UeAgentAuthoringJson::MakeStringArray({ TEXT("set") }) : TArray<TSharedPtr<FJsonValue>>());
+		Field->SetStringField(TEXT("value_kind"), UeAgentPropertyValueCodec::GetValueKind(Property));
+		UeAgentPropertyValueCodec::AddTypeMetadata(Property, Field);
 		AddEnumCandidates(Property, Field);
 		if (Container)
 		{
-			const FString ValueText = ExportPropertyText(Property, Container, Owner);
-			Field->SetStringField(TEXT("value_text"), ValueText);
-			const bool bReferenceLike =
-				CastField<FSoftObjectProperty>(Property) != nullptr
-				|| CastField<FObjectPropertyBase>(Property) != nullptr
-				|| CastField<FSoftClassProperty>(Property) != nullptr
-				|| CastField<FClassProperty>(Property) != nullptr;
-			if (bReferenceLike)
+			FString CodecReason;
+			if (Property->HasAnyPropertyFlags(CPF_Edit | CPF_BlueprintVisible) && UeAgentPropertyValueCodec::IsSupported(Property, CodecReason))
 			{
-				const FString RefPath = NormalizeReferenceObjectPath(ValueText);
-				if (!RefPath.IsEmpty())
-				{
-					TSharedPtr<FJsonObject> RefObj = MakeShared<FJsonObject>();
-					RefObj->SetStringField(TEXT("object_path"), RefPath);
-					RefObj->SetStringField(TEXT("asset_path"), NormalizeAssetPath(RefPath));
-					RefObj->SetBoolField(TEXT("exists"), AssetExists(RefPath));
-					RefObj->SetBoolField(TEXT("soft"), CastField<FSoftObjectProperty>(Property) != nullptr || CastField<FSoftClassProperty>(Property) != nullptr);
-					Field->SetObjectField(TEXT("reference"), RefObj);
-				}
+				UeAgentPropertyValueCodec::FOptions Options;
+				Field->SetField(TEXT("value"), UeAgentPropertyValueCodec::Encode(Property, Property->ContainerPtrToValuePtr<void>(Container), Owner, Options));
+			}
+			else
+			{
+				TSharedPtr<FJsonObject> Availability = MakeShared<FJsonObject>();
+				Availability->SetBoolField(TEXT("editable"), false);
+				Availability->SetStringField(TEXT("reason"), CodecReason.IsEmpty() ? TEXT("not_editable") : CodecReason);
+				Field->SetObjectField(TEXT("availability"), Availability);
 			}
 		}
 		return Field;
@@ -680,7 +476,8 @@ namespace UeAgentDataDrivenOps
 	struct FFieldPatch
 	{
 		FString Name;
-		FString ValueText;
+		TSharedPtr<FJsonObject> Descriptor;
+		TSharedPtr<FJsonValue> Value;
 		FString JsonPath;
 	};
 
@@ -707,55 +504,31 @@ namespace UeAgentDataDrivenOps
 				}
 
 				FString Name;
-				if (!(*FieldObjPtr)->TryGetStringField(TEXT("property_path"), Name) || Name.TrimStartAndEnd().IsEmpty())
-				{
-					(*FieldObjPtr)->TryGetStringField(TEXT("name"), Name);
-				}
+				(*FieldObjPtr)->TryGetStringField(TEXT("property_path"), Name);
 				if (Name.TrimStartAndEnd().IsEmpty())
 				{
-					AddIssue(Issues, TEXT("error"), TEXT("json_missing_required_field"), ItemPath + TEXT(".property_path"), TEXT("Field item requires property_path or legacy name."));
+					AddIssue(Issues, TEXT("error"), TEXT("json_missing_required_field"), ItemPath + TEXT(".property_path"), TEXT("Field item requires property_path."));
 					continue;
 				}
 
-				FString ValueText;
-				if (!(*FieldObjPtr)->TryGetStringField(TEXT("value_text"), ValueText))
+				const TSharedPtr<FJsonValue> CanonicalValue = (*FieldObjPtr)->TryGetField(TEXT("value"));
+				if (!CanonicalValue.IsValid())
 				{
-					AddIssue(Issues, TEXT("error"), TEXT("json_missing_required_field"), ItemPath + TEXT(".value_text"), TEXT("Field item requires value_text."));
+					AddIssue(Issues, TEXT("error"), TEXT("json_missing_required_field"), ItemPath + TEXT(".value"), TEXT("Field item requires canonical value."));
 					continue;
 				}
 
 				FFieldPatch Patch;
 				Patch.Name = Name.TrimStartAndEnd();
-				Patch.ValueText = ValueText;
+				Patch.Descriptor = *FieldObjPtr;
+				Patch.Value = CanonicalValue;
 				Patch.JsonPath = ItemPath;
 				OutPatches.Add(Patch);
 			}
 			return CountErrors(Issues) == 0;
 		}
 
-		const TSharedPtr<FJsonObject>* ValuesObjPtr = nullptr;
-		if (Root->TryGetObjectField(TEXT("values"), ValuesObjPtr) && ValuesObjPtr && ValuesObjPtr->IsValid())
-		{
-			for (const TPair<FString, TSharedPtr<FJsonValue>>& Pair : (*ValuesObjPtr)->Values)
-			{
-				FString ValueText;
-				if (Pair.Value.IsValid() && Pair.Value->TryGetString(ValueText))
-				{
-					FFieldPatch Patch;
-					Patch.Name = Pair.Key;
-					Patch.ValueText = ValueText;
-					Patch.JsonPath = BasePath + TEXT(".values.") + Pair.Key;
-					OutPatches.Add(Patch);
-				}
-				else
-				{
-					AddIssue(Issues, TEXT("error"), TEXT("json_field_type_mismatch"), BasePath + TEXT(".values.") + Pair.Key, TEXT("Value map entries must be strings containing UE value_text."));
-				}
-			}
-			return CountErrors(Issues) == 0;
-		}
-
-		AddIssue(Issues, TEXT("error"), TEXT("json_missing_required_field"), BasePath + TEXT(".fields"), TEXT("JSON requires fields[] or values{}."));
+		AddIssue(Issues, TEXT("error"), TEXT("json_missing_required_field"), BasePath + TEXT(".fields"), TEXT("JSON requires fields[]."));
 		return false;
 	}
 
@@ -771,12 +544,11 @@ namespace UeAgentDataDrivenOps
 		const bool bAllowMissingProperty = false)
 	{
 		OutResult = MakeShared<FJsonObject>();
-		OutResult->SetStringField(TEXT("name"), Patch.Name);
-		OutResult->SetStringField(TEXT("property_name"), Patch.Name);
-		OutResult->SetStringField(TEXT("requested_value_text"), Patch.ValueText);
+		OutResult->SetStringField(TEXT("property_path"), Patch.Name);
+		OutResult->SetField(TEXT("requested_value"), Patch.Value);
 		OutResult->SetStringField(TEXT("path"), Patch.JsonPath);
 
-		FProperty* Property = FindPropertyByNameLoose(StructType, Patch.Name);
+		FProperty* Property = FindCanonicalProperty(StructType, Patch.Name);
 		if (!Property)
 		{
 			OutResult->SetStringField(TEXT("property_import_status"), bAllowMissingProperty ? TEXT("property_not_found_ignored") : TEXT("property_not_found"));
@@ -793,24 +565,69 @@ namespace UeAgentDataDrivenOps
 		}
 
 		void* ValuePtr = Property->ContainerPtrToValuePtr<void>(Container);
-		OutResult->SetStringField(TEXT("cpp_type"), Property->GetCPPType());
-		if (Property->ImportText_Direct(*Patch.ValueText, ValuePtr, Owner, PPF_None, GLog) == nullptr)
+		FString CodecError;
+		if (!UeAgentPropertyValueCodec::IsSupported(Property, CodecError)
+			|| !UeAgentPropertyValueCodec::ValidateTypeMetadata(Property, Patch.Descriptor, CodecError))
 		{
-			OutResult->SetStringField(TEXT("property_import_status"), TEXT("import_failed"));
-			OutResult->SetStringField(TEXT("property_import_error"), FString::Printf(TEXT("%s:%s"), ImportFailedCode, *Patch.Name));
+			OutResult->SetStringField(TEXT("property_import_status"), TEXT("unsupported_or_type_mismatch"));
+			OutResult->SetStringField(TEXT("property_import_error"), CodecError);
 			OutResult->SetBoolField(TEXT("property_import_verified"), false);
-			AddIssue(Issues, TEXT("error"), ImportFailedCode, Patch.JsonPath, FString::Printf(TEXT("Failed to import value_text for property '%s'."), *Patch.Name), FString(), Patch.Name);
+			AddIssue(Issues, TEXT("error"), ImportFailedCode, Patch.JsonPath, CodecError, FString(), Patch.Name);
 			return false;
 		}
-
-		FString AppliedValueText;
-		Property->ExportTextItem_Direct(AppliedValueText, ValuePtr, nullptr, Owner, PPF_None);
-		OutResult->SetStringField(TEXT("applied_value_text"), AppliedValueText);
-		OutResult->SetStringField(TEXT("property_import_status"), TEXT("imported_and_read_back"));
+		void* Desired = FMemory::Malloc(Property->GetSize(), Property->GetMinAlignment());
+		Property->InitializeValue(Desired);
+		Property->CopyCompleteValue(Desired, ValuePtr);
+		UeAgentPropertyValueCodec::FOptions Options;
+		if (!UeAgentPropertyValueCodec::Decode(Property, Patch.Value, Desired, Owner, Options, CodecError))
+		{
+			Property->DestroyValue(Desired);
+			FMemory::Free(Desired);
+			OutResult->SetStringField(TEXT("property_import_status"), TEXT("invalid_value"));
+			OutResult->SetStringField(TEXT("property_import_error"), CodecError);
+			OutResult->SetBoolField(TEXT("property_import_verified"), false);
+			AddIssue(Issues, TEXT("error"), ImportFailedCode, Patch.JsonPath, CodecError, FString(), Patch.Name);
+			return false;
+		}
+		Property->CopyCompleteValue(ValuePtr, Desired);
+		bool bReadbackMatches = false;
+		FString CompareError;
+		const bool bCompared = UeAgentAuthoringSemanticCompare::ArePropertyValuesEquivalent(
+			Property, ValuePtr, Desired, Owner, bReadbackMatches, CompareError);
+		bReadbackMatches = bCompared && bReadbackMatches;
+		Property->DestroyValue(Desired);
+		FMemory::Free(Desired);
+		OutResult->SetField(TEXT("value_read_back"), UeAgentPropertyValueCodec::Encode(Property, ValuePtr, Owner, Options));
+		OutResult->SetStringField(TEXT("property_import_status"), bReadbackMatches ? TEXT("applied_and_read_back") : TEXT("readback_mismatch"));
 		OutResult->SetBoolField(TEXT("property_import_verified"), true);
-		OutResult->SetBoolField(TEXT("value_text_exact_match"), AppliedValueText == Patch.ValueText);
-		OutResult->SetBoolField(TEXT("value_text_changed_after_import"), AppliedValueText != Patch.ValueText);
-		return true;
+		if (!bReadbackMatches) AddIssue(Issues, TEXT("error"), ImportFailedCode, Patch.JsonPath, TEXT("Canonical value readback mismatch."), FString(), Patch.Name);
+		return bReadbackMatches;
+	}
+
+	static bool PatchMatchesCurrent(FProperty* Property, const void* ValuePtr, UObject* Owner, const FFieldPatch& Patch)
+	{
+		if (!Property || !ValuePtr || !Patch.Value.IsValid()) return false;
+		FString Error;
+		if (!UeAgentPropertyValueCodec::IsSupported(Property, Error)
+			|| !UeAgentPropertyValueCodec::ValidateTypeMetadata(Property, Patch.Descriptor, Error)) return false;
+		void* Desired = FMemory::Malloc(Property->GetSize(), Property->GetMinAlignment());
+		Property->InitializeValue(Desired);
+		Property->CopyCompleteValue(Desired, ValuePtr);
+		UeAgentPropertyValueCodec::FOptions Options;
+		const bool bDecoded = UeAgentPropertyValueCodec::Decode(Property, Patch.Value, Desired, Owner, Options, Error);
+		bool bMatches = false;
+		if (bDecoded)
+		{
+			FString CompareError;
+			if (!UeAgentAuthoringSemanticCompare::ArePropertyValuesEquivalent(
+				Property, ValuePtr, Desired, Owner, bMatches, CompareError))
+			{
+				bMatches = false;
+			}
+		}
+		Property->DestroyValue(Desired);
+		FMemory::Free(Desired);
+		return bMatches;
 	}
 
 	static void ValidateReferencePatch(
@@ -819,7 +636,7 @@ namespace UeAgentDataDrivenOps
 		const FString& ReferencePolicy,
 		TArray<TSharedPtr<FJsonValue>>& Issues)
 	{
-		FProperty* Property = FindPropertyByNameLoose(StructType, Patch.Name);
+		FProperty* Property = FindCanonicalProperty(StructType, Patch.Name);
 		if (!Property)
 		{
 			return;
@@ -834,7 +651,9 @@ namespace UeAgentDataDrivenOps
 			return;
 		}
 
-		const FString RefPath = NormalizeReferenceObjectPath(Patch.ValueText);
+		FString RefPath;
+		const TSharedPtr<FJsonObject>* RefValue = nullptr;
+		if (Patch.Value.IsValid() && Patch.Value->TryGetObject(RefValue) && RefValue && RefValue->IsValid()) (*RefValue)->TryGetStringField(TEXT("path"), RefPath);
 		if (RefPath.IsEmpty())
 		{
 			return;
@@ -985,7 +804,6 @@ namespace UeAgentDataDrivenOps
 		TArray<TSharedPtr<FJsonValue>>& Issues,
 		TArray<TSharedPtr<FJsonValue>>& FieldResults,
 		UClass*& OutClass,
-		const bool bAllowUnknownFields = false,
 		const bool bValidateReferences = false,
 		const FString& ReferencePolicy = TEXT("error"))
 	{
@@ -1034,8 +852,7 @@ namespace UeAgentDataDrivenOps
 				Result,
 				Issues,
 				TEXT("data_asset_property_not_found"),
-				TEXT("data_asset_property_import_failed"),
-				bAllowUnknownFields);
+				TEXT("data_asset_property_import_failed"));
 			if (bValidateReferences)
 			{
 				ValidateReferencePatch(OutClass, Patch, ReferencePolicy, Issues);
@@ -1288,11 +1105,11 @@ namespace UeAgentDataDrivenOps
 					continue;
 				}
 				TSharedPtr<FJsonObject> FieldObj = PropertySchemaToJson(Property, DefaultRow.GetStructMemory(), Table);
-				FString DefaultValueText;
-				if (FieldObj->TryGetStringField(TEXT("value_text"), DefaultValueText))
+				const TSharedPtr<FJsonValue> DefaultValue = FieldObj->TryGetField(TEXT("value"));
+				if (DefaultValue.IsValid())
 				{
-					FieldObj->SetStringField(TEXT("default_value_text"), DefaultValueText);
-					FieldObj->RemoveField(TEXT("value_text"));
+					FieldObj->SetField(TEXT("default_value"), DefaultValue);
+					FieldObj->RemoveField(TEXT("value"));
 				}
 				RowSchema.Add(MakeShared<FJsonValueObject>(FieldObj));
 			}
@@ -1318,15 +1135,7 @@ namespace UeAgentDataDrivenOps
 				}
 				TSharedPtr<FJsonObject> RowObj = MakeShared<FJsonObject>();
 				RowObj->SetStringField(TEXT("row_name"), RowName.ToString());
-				UeAgentAuthoringJson::ApplyAuthoringMetadata(
-					RowObj,
-					TEXT("row_name"),
-					RowName.ToString(),
-					RowName.ToString(),
-					TEXT("Data Table|Rows"),
-					TEXT("row_editor"),
-					TEXT("data_table_row"),
-					{ TEXT("set"), TEXT("remove") });
+				UeAgentAuthoringJson::ApplyAuthoringMetadata(RowObj, TEXT("row_name"), RowName.ToString(), RowName.ToString(), TEXT("Data Table|Rows"), TEXT("data_table_row"));
 				TArray<TSharedPtr<FJsonValue>> Fields;
 				for (TFieldIterator<FProperty> It(Table->GetRowStruct(), EFieldIterationFlags::IncludeSuper); It; ++It)
 				{
@@ -1515,35 +1324,44 @@ namespace UeAgentDataDrivenOps
 		}
 		FString Op = TEXT("==");
 		FilterObj->TryGetStringField(TEXT("op"), Op);
-		FString Expected;
-		if (!FilterObj->TryGetStringField(TEXT("value_text"), Expected))
+		const TSharedPtr<FJsonValue> ExpectedValue = FilterObj->TryGetField(TEXT("value"));
+		if (!ExpectedValue.IsValid()) return false;
+		const void* ActualValuePtr = Property->ContainerPtrToValuePtr<void>(RowData);
+		void* ExpectedValuePtr = FMemory::Malloc(Property->GetSize(), Property->GetMinAlignment());
+		Property->InitializeValue(ExpectedValuePtr);
+		Property->CopyCompleteValue(ExpectedValuePtr, ActualValuePtr);
+		FString CodecError;
+		UeAgentPropertyValueCodec::FOptions Options;
+		if (!UeAgentPropertyValueCodec::Decode(Property, ExpectedValue, ExpectedValuePtr, nullptr, Options, CodecError))
 		{
-			FilterObj->TryGetStringField(TEXT("value"), Expected);
+			Property->DestroyValue(ExpectedValuePtr);
+			FMemory::Free(ExpectedValuePtr);
+			return false;
 		}
-		const FString Actual = ExportPropertyText(Property, RowData, nullptr);
+		bool bResult = false;
 
 		if (FNumericProperty* Numeric = CastField<FNumericProperty>(Property))
 		{
-			const void* ValuePtr = Numeric->ContainerPtrToValuePtr<const void>(RowData);
-			const double ActualNumber = Numeric->IsFloatingPoint() ? Numeric->GetFloatingPointPropertyValue(ValuePtr) : static_cast<double>(Numeric->GetSignedIntPropertyValue(ValuePtr));
-			const double ExpectedNumber = FCString::Atod(*Expected);
-			if (Op == TEXT(">")) return ActualNumber > ExpectedNumber;
-			if (Op == TEXT(">=")) return ActualNumber >= ExpectedNumber;
-			if (Op == TEXT("<")) return ActualNumber < ExpectedNumber;
-			if (Op == TEXT("<=")) return ActualNumber <= ExpectedNumber;
-			if (Op == TEXT("!=")) return !FMath::IsNearlyEqual(ActualNumber, ExpectedNumber);
-			return FMath::IsNearlyEqual(ActualNumber, ExpectedNumber);
+			const double ActualNumber = Numeric->IsFloatingPoint() ? Numeric->GetFloatingPointPropertyValue(ActualValuePtr) : static_cast<double>(Numeric->GetSignedIntPropertyValue(ActualValuePtr));
+			const double ExpectedNumber = Numeric->IsFloatingPoint() ? Numeric->GetFloatingPointPropertyValue(ExpectedValuePtr) : static_cast<double>(Numeric->GetSignedIntPropertyValue(ExpectedValuePtr));
+			if (Op == TEXT(">")) bResult = ActualNumber > ExpectedNumber;
+			else if (Op == TEXT(">=")) bResult = ActualNumber >= ExpectedNumber;
+			else if (Op == TEXT("<")) bResult = ActualNumber < ExpectedNumber;
+			else if (Op == TEXT("<=")) bResult = ActualNumber <= ExpectedNumber;
+			else if (Op == TEXT("!=")) bResult = !FMath::IsNearlyEqual(ActualNumber, ExpectedNumber);
+			else bResult = FMath::IsNearlyEqual(ActualNumber, ExpectedNumber);
 		}
-
-		if (Op == TEXT("!="))
+		else
 		{
-			return Actual != Expected;
+			bool bIdentical = false;
+			FString CompareError;
+			UeAgentAuthoringSemanticCompare::ArePropertyValuesEquivalent(
+				Property, ActualValuePtr, ExpectedValuePtr, nullptr, bIdentical, CompareError);
+			bResult = Op == TEXT("!=") ? !bIdentical : bIdentical;
 		}
-		if (Op.Equals(TEXT("contains"), ESearchCase::IgnoreCase))
-		{
-			return Actual.Contains(Expected);
-		}
-		return Actual == Expected;
+		Property->DestroyValue(ExpectedValuePtr);
+		FMemory::Free(ExpectedValuePtr);
+		return bResult;
 	}
 }
 
@@ -1653,7 +1471,7 @@ bool FUeAgentHttpServer::CmdDataAssetExportJson(const FUeAgentRequestContext& Ct
 	if (JsonTryGetString(Ctx.Params, TEXT("output_file"), OutputFile) && !OutputFile.TrimStartAndEnd().IsEmpty())
 	{
 		FString SavedPath;
-		if (!UeAgentDataDrivenOps::SaveJsonFile(OutputFile, Root, SavedPath, OutError))
+		if (!UeAgentDataDrivenOps::SaveAuthoringFile(OutputFile, Root, SavedPath, OutError))
 		{
 			return false;
 		}
@@ -1681,8 +1499,6 @@ bool FUeAgentHttpServer::CmdDataAssetValidateJson(const FUeAgentRequestContext& 
 	FString ClassPath;
 	JsonTryGetString(Ctx.Params, TEXT("class_path"), ClassPath);
 	UClass* ExplicitClass = ClassPath.IsEmpty() ? nullptr : UeAgentDataDrivenOps::ResolveClassByPath(ClassPath);
-	bool bAllowUnknownFields = false;
-	JsonTryGetBool(Ctx.Params, TEXT("allow_unknown_fields"), bAllowUnknownFields);
 	bool bValidateReferences = false;
 	JsonTryGetBool(Ctx.Params, TEXT("validate_references"), bValidateReferences);
 	FString ReferencePolicy = TEXT("error");
@@ -1698,7 +1514,6 @@ bool FUeAgentHttpServer::CmdDataAssetValidateJson(const FUeAgentRequestContext& 
 		Issues,
 		FieldResults,
 		EffectiveClass,
-		bAllowUnknownFields,
 		bValidateReferences,
 		ReferencePolicy);
 	OutData->SetStringField(TEXT("schema"), TEXT("ue_agent_interface.data_asset.validate_result.v1"));
@@ -1747,10 +1562,10 @@ bool FUeAgentHttpServer::CmdDataAssetDiffJson(const FUeAgentRequestContext& Ctx,
 	TArray<TSharedPtr<FJsonValue>> Diffs;
 	for (const UeAgentDataDrivenOps::FFieldPatch& Patch : Patches)
 	{
-		FProperty* Property = UeAgentDataDrivenOps::FindPropertyByNameLoose(Asset->GetClass(), Patch.Name);
+		FProperty* Property = UeAgentDataDrivenOps::FindCanonicalProperty(Asset->GetClass(), Patch.Name);
 		TSharedPtr<FJsonObject> Diff = MakeShared<FJsonObject>();
-		Diff->SetStringField(TEXT("name"), Patch.Name);
-		Diff->SetStringField(TEXT("target_value_text"), Patch.ValueText);
+		Diff->SetStringField(TEXT("property_path"), Patch.Name);
+		Diff->SetField(TEXT("target_value"), Patch.Value);
 		if (!Property)
 		{
 			Diff->SetStringField(TEXT("status"), TEXT("property_not_found"));
@@ -1758,10 +1573,11 @@ bool FUeAgentHttpServer::CmdDataAssetDiffJson(const FUeAgentRequestContext& Ctx,
 		}
 		else
 		{
-			const FString CurrentValue = UeAgentDataDrivenOps::ExportPropertyText(Property, Asset, Asset);
-			Diff->SetStringField(TEXT("current_value_text"), CurrentValue);
-			Diff->SetBoolField(TEXT("changed"), CurrentValue != Patch.ValueText);
-			Diff->SetStringField(TEXT("status"), CurrentValue == Patch.ValueText ? TEXT("same") : TEXT("changed"));
+			UeAgentPropertyValueCodec::FOptions Options;
+			Diff->SetField(TEXT("current_value"), UeAgentPropertyValueCodec::Encode(Property, Property->ContainerPtrToValuePtr<void>(Asset), Asset, Options));
+			const bool bMatches = UeAgentDataDrivenOps::PatchMatchesCurrent(Property, Property->ContainerPtrToValuePtr<void>(Asset), Asset, Patch);
+			Diff->SetBoolField(TEXT("changed"), !bMatches);
+			Diff->SetStringField(TEXT("status"), bMatches ? TEXT("same") : TEXT("changed"));
 		}
 		Diffs.Add(MakeShared<FJsonValueObject>(Diff));
 	}
@@ -1813,8 +1629,6 @@ bool FUeAgentHttpServer::CmdDataAssetApplyJson(const FUeAgentRequestContext& Ctx
 	JsonTryGetBool(Ctx.Params, TEXT("save_after_apply"), bSaveAfterApply);
 	bool bBackup = false;
 	JsonTryGetBool(Ctx.Params, TEXT("backup"), bBackup);
-	bool bAllowUnknownFields = false;
-	JsonTryGetBool(Ctx.Params, TEXT("allow_unknown_fields"), bAllowUnknownFields);
 	bool bValidateReferences = false;
 	JsonTryGetBool(Ctx.Params, TEXT("validate_references"), bValidateReferences);
 	FString ReferencePolicy = TEXT("error");
@@ -1837,7 +1651,6 @@ bool FUeAgentHttpServer::CmdDataAssetApplyJson(const FUeAgentRequestContext& Ctx
 		Issues,
 		ValidationFieldResults,
 		EffectiveClass,
-		bAllowUnknownFields,
 		bValidateReferences,
 		ReferencePolicy))
 	{
@@ -1849,7 +1662,6 @@ bool FUeAgentHttpServer::CmdDataAssetApplyJson(const FUeAgentRequestContext& Ctx
 		return false;
 	}
 
-	FScopedTransaction Transaction(NSLOCTEXT("UeAgentInterface", "DataAssetApplyJson", "UeAgentInterface DataAsset Apply JSON"));
 	FString BackupAssetPath;
 	FString BackupObjectPath;
 	if (bBackup && Asset)
@@ -1875,38 +1687,39 @@ bool FUeAgentHttpServer::CmdDataAssetApplyJson(const FUeAgentRequestContext& Ctx
 		}
 	}
 
-	Asset->Modify();
 	TArray<UeAgentDataDrivenOps::FFieldPatch> Patches;
 	TArray<TSharedPtr<FJsonValue>> ExtractIssues;
 	UeAgentDataDrivenOps::ExtractFieldPatches(Root, TEXT("$"), Patches, ExtractIssues);
-	TArray<TSharedPtr<FJsonValue>> FieldResults;
+	TArray<TSharedPtr<FJsonValue>> CanonicalDescriptors;
 	for (const UeAgentDataDrivenOps::FFieldPatch& Patch : Patches)
 	{
-		TSharedPtr<FJsonObject> Result;
-		UeAgentDataDrivenOps::TryImportPatchToContainer(
-			Asset->GetClass(),
-			Asset,
-			Asset,
-			Patch,
-			Result,
-			Issues,
-			TEXT("data_asset_property_not_found"),
-			TEXT("data_asset_property_import_failed"),
-			bAllowUnknownFields);
-		FieldResults.Add(MakeShared<FJsonValueObject>(Result));
+		if (UeAgentDataDrivenOps::FindCanonicalProperty(Asset->GetClass(), Patch.Name))
+		{
+			CanonicalDescriptors.Add(MakeShared<FJsonValueObject>(Patch.Descriptor));
+		}
 	}
-
-	if (UeAgentDataDrivenOps::CountErrors(Issues) > 0)
+	TSharedPtr<FJsonObject> ApplyPayload = MakeShared<FJsonObject>();
+	ApplyPayload->SetStringField(TEXT("schema"), TEXT("uai.uobject_properties.v2"));
+	ApplyPayload->SetArrayField(TEXT("properties"), CanonicalDescriptors);
+	UeAgentUObjectProperties::FApplyOptions ApplyOptions;
+	const TSharedPtr<FJsonObject> ApplySummary = UeAgentUObjectProperties::ApplyObjectProperties(Asset, ApplyPayload, ApplyOptions);
+	FString ApplyStatus;
+	ApplySummary->TryGetStringField(TEXT("status"), ApplyStatus);
+	const TArray<TSharedPtr<FJsonValue>>* ApplyResults = nullptr;
+	TArray<TSharedPtr<FJsonValue>> FieldResults;
+	if (ApplySummary->TryGetArrayField(TEXT("properties"), ApplyResults) && ApplyResults) FieldResults = *ApplyResults;
+	if (ApplyStatus != TEXT("applied"))
 	{
 		OutData->SetStringField(TEXT("status"), TEXT("apply_failed"));
 		OutData->SetArrayField(TEXT("issues"), Issues);
 		OutData->SetArrayField(TEXT("field_results"), FieldResults);
-		OutData->SetNumberField(TEXT("error_count"), UeAgentDataDrivenOps::CountErrors(Issues));
-		OutError = TEXT("data_asset_apply_failed");
+		OutData->SetObjectField(TEXT("apply_summary"), ApplySummary);
+		OutData->SetNumberField(TEXT("error_count"), 1);
+		ApplySummary->TryGetStringField(TEXT("reason"), OutError);
+		if (OutError.IsEmpty()) OutError = TEXT("data_asset_apply_failed");
 		return false;
 	}
 
-	Asset->MarkPackageDirty();
 	if (bSaveAfterApply && !UeAgentDataDrivenOps::SaveAssetPackage(Asset, OutError))
 	{
 		return false;
@@ -2122,7 +1935,7 @@ bool FUeAgentHttpServer::CmdDataTableExportJson(const FUeAgentRequestContext& Ct
 	if (JsonTryGetString(Ctx.Params, TEXT("output_file"), OutputFile) && !OutputFile.TrimStartAndEnd().IsEmpty())
 	{
 		FString SavedPath;
-		if (!UeAgentDataDrivenOps::SaveJsonFile(OutputFile, Root, SavedPath, OutError))
+		if (!UeAgentDataDrivenOps::SaveAuthoringFile(OutputFile, Root, SavedPath, OutError))
 		{
 			return false;
 		}
@@ -2244,19 +2057,20 @@ bool FUeAgentHttpServer::CmdDataTableDiffJson(const FUeAgentRequestContext& Ctx,
 		int32 FieldChangeCount = 0;
 		for (const UeAgentDataDrivenOps::FFieldPatch& Patch : Row.Fields)
 		{
-			FProperty* Property = UeAgentDataDrivenOps::FindPropertyByNameLoose(RowStruct, Patch.Name);
+			FProperty* Property = UeAgentDataDrivenOps::FindCanonicalProperty(RowStruct, Patch.Name);
 			if (!Property)
 			{
 				continue;
 			}
-			const FString CurrentValue = UeAgentDataDrivenOps::ExportPropertyText(Property, *CurrentRowDataPtr, Table);
-			if (CurrentValue != Patch.ValueText)
+			const void* CurrentValuePtr = Property->ContainerPtrToValuePtr<void>(*CurrentRowDataPtr);
+			if (!UeAgentDataDrivenOps::PatchMatchesCurrent(Property, CurrentValuePtr, Table, Patch))
 			{
 				TSharedPtr<FJsonObject> FieldDiff = MakeShared<FJsonObject>();
 				FieldDiff->SetStringField(TEXT("row_name"), Row.RowNameText);
-				FieldDiff->SetStringField(TEXT("field_name"), Patch.Name);
-				FieldDiff->SetStringField(TEXT("current_value_text"), CurrentValue);
-				FieldDiff->SetStringField(TEXT("target_value_text"), Patch.ValueText);
+				FieldDiff->SetStringField(TEXT("property_path"), Patch.Name);
+				UeAgentPropertyValueCodec::FOptions Options;
+				FieldDiff->SetField(TEXT("current_value"), UeAgentPropertyValueCodec::Encode(Property, CurrentValuePtr, Table, Options));
+				FieldDiff->SetField(TEXT("target_value"), Patch.Value);
 				FieldChanged.Add(MakeShared<FJsonValueObject>(FieldDiff));
 				++FieldChangeCount;
 			}
@@ -2565,7 +2379,7 @@ bool FUeAgentHttpServer::CmdDataTableQueryRows(const FUeAgentRequestContext& Ctx
 				{
 					continue;
 				}
-				FProperty* Property = UeAgentDataDrivenOps::FindPropertyByNameLoose(const_cast<UScriptStruct*>(Table->GetRowStruct()), FieldName);
+				FProperty* Property = UeAgentDataDrivenOps::FindCanonicalProperty(const_cast<UScriptStruct*>(Table->GetRowStruct()), FieldName);
 				if (!UeAgentDataDrivenOps::CompareFieldFilter(Property, *RowDataPtr, *FilterObj))
 				{
 					bPassFilters = false;
@@ -2653,7 +2467,7 @@ bool FUeAgentHttpServer::CmdDataTableSampleRows(const FUeAgentRequestContext& Ct
 			continue;
 		}
 		uint8* const* RowDataPtr = Table->GetRowMap().Find(FName(*RowNameText));
-		FProperty* Property = UeAgentDataDrivenOps::FindPropertyByNameLoose(const_cast<UScriptStruct*>(Table->GetRowStruct()), FieldName);
+		FProperty* Property = UeAgentDataDrivenOps::FindCanonicalProperty(const_cast<UScriptStruct*>(Table->GetRowStruct()), FieldName);
 		if (!RowDataPtr || !*RowDataPtr || !Property)
 		{
 			Result->SetBoolField(TEXT("passed"), false);
@@ -2666,10 +2480,9 @@ bool FUeAgentHttpServer::CmdDataTableSampleRows(const FUeAgentRequestContext& Ct
 		Result->SetBoolField(TEXT("passed"), bPassed);
 		Result->SetStringField(TEXT("row_name"), RowNameText);
 		Result->SetStringField(TEXT("field"), FieldName);
-		Result->SetStringField(TEXT("actual_value_text"), UeAgentDataDrivenOps::ExportPropertyText(Property, *RowDataPtr, Table));
-		FString ValueText;
-		(*CheckObj)->TryGetStringField(TEXT("value_text"), ValueText);
-		Result->SetStringField(TEXT("expected_value_text"), ValueText);
+		UeAgentPropertyValueCodec::FOptions CodecOptions;
+		Result->SetField(TEXT("actual_value"), UeAgentPropertyValueCodec::Encode(Property, Property->ContainerPtrToValuePtr<void>(*RowDataPtr), Table, CodecOptions));
+		Result->SetField(TEXT("expected_value"), (*CheckObj)->TryGetField(TEXT("value")));
 		if (!bPassed)
 		{
 			++FailedCount;

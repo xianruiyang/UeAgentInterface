@@ -1,0 +1,83 @@
+authoring: { reason: command_has_no_registered_folder_authoring_profile, state: none }
+category: animation_assets_skeleton
+command: skeleton_set_compatible_skeletons
+deprecation: { reason: command_is_active, state: none }
+discovery: { aliases: [], keywords_en: [skeleton, set, compatible, skeletons, animation_assets_skeleton], keywords_zh: [skeleton_set_compatible_skeletons], summary_en: "Execute skeleton_set_compatible_skeletons with a verified implementation contract", summary_zh: "skeleton_set_compatible_skeletons command contract.", tags: [animation_assets_skeleton, p2-006] }
+errors: {
+  codes: [
+    { code: asset_not_found, description_zh: "C++ 实现返回错误码 asset_not_found", retry_safe: false, stage: execution, wire_match: exact }
+    { code: compatible_skeleton_not_found, description_zh: "C++ 实现返回错误码 compatible_skeleton_not_found", retry_safe: false, stage: execution, wire_match: exact }
+    { code: compatible_skeleton_same_as_asset, description_zh: "C++ 实现返回错误码 compatible_skeleton_same_as_asset", retry_safe: false, stage: execution, wire_match: exact }
+    { code: missing_asset_path, description_zh: "C++ 实现返回错误码 missing_asset_path", retry_safe: true, stage: preflight, wire_match: exact }
+    { code: save_asset_failed, description_zh: "C++ 实现返回错误码 save_asset_failed", retry_safe: false, stage: execution, wire_match: exact }
+    { code: skeleton_not_found, description_zh: "C++ 实现返回错误码 skeleton_not_found", retry_safe: false, stage: execution, wire_match: exact }
+  ]
+}
+evidence: {
+  docs: [
+    { path: "Plugins/UeAgentInterface/docs/commands/animation_assets_skeleton/skeleton_set_compatible_skeletons.md", purpose: "user documentation cross-check; C++ implementation remains authoritative" }
+  ]
+  implementation: [
+    { line_hint: 194, path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Commands/Animation/UeAgentHttpServer_AnimationAssets_Skeleton.cpp", purpose: "command handler, parameter and return evidence", symbol: CmdSkeletonSetCompatibleSkeletons }
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Commands/Animation/UeAgentHttpServer_AnimationAssets.cpp", purpose: "transitive helper evidence used by the command handler" }
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Server/UeAgentHttpServer.cpp", purpose: "transitive helper evidence used by the command handler" }
+  ]
+  tests: [
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterfaceTests/Private/Smoke/UeAgentInterfaceSmoke_AnimationIKNiagara.cpp", purpose: "smoke or negative-path evidence cross-checked for the verified contract" }
+  ]
+}
+execution: {
+  destructive: false
+  editor_state: required
+  game_thread: required
+  idempotent: false
+  kind: write
+  overwrite_behavior: none
+  pie_state: allowed
+  retry_safe: false
+  save_behavior: caller_controlled
+  side_effects: [modifies_asset]
+  ui_effect: none
+}
+maturity: verified
+params: {
+  constraints: []
+  fields: {
+    add_compatible_skeleton_paths: { default_state: none, description_zh: "C++ 实现读取的 add_compatible_skeleton_paths 参数", item_type: ue_asset_path, required: false, type: array }
+    asset_path: { default_state: none, description_zh: "C++ 实现读取的 asset_path 参数", path_semantics: { access_scope: project_write, kind: ue_asset }, required: true, type: ue_asset_path }
+    clear_all: { default: false, default_state: defined, description_zh: "C++ 实现读取的 clear_all 参数", required: false, type: bool }
+    remove_compatible_skeleton_paths: { default_state: none, description_zh: "C++ 实现读取的 remove_compatible_skeleton_paths 参数", item_type: ue_asset_path, required: false, type: array }
+    save_after_set: { default: false, default_state: defined, description_zh: "C++ 实现读取的 save_after_set 参数", required: false, type: bool }
+    set_compatible_skeleton_paths: { default_state: none, description_zh: "C++ 实现读取的 set_compatible_skeleton_paths 参数", item_type: ue_asset_path, required: false, type: array }
+    use_retarget_modes_from_compatible_skeleton: { default: false, default_state: defined, description_zh: "C++ 实现读取的 use_retarget_modes_from_compatible_skeleton 参数", required: false, type: bool }
+  }
+  state: defined
+}
+response: { artifact_fields: [compatible_skeletons], compact_fields: [saved, asset_path, compatible_skeleton_count, use_retarget_modes_from_compatible_skeleton], failure_fields: [params.asset_path], max_items_policy: { fields: [], mode: none } }
+returns: {
+  fields: {
+    asset_path: { description_zh: "C++ 实现返回的 asset_path 字段；是否出现取决于执行分支", required: false, type: ue_asset_path }
+    compatible_skeleton_count: { description_zh: "C++ 实现返回的 compatible_skeleton_count 字段；是否出现取决于执行分支", required: false, type: integer }
+    compatible_skeletons: { description_zh: "C++ 实现返回的 compatible_skeletons 字段；是否出现取决于执行分支", item_type: json_value, required: false, type: array }
+    saved: { description_zh: "C++ 实现返回的 saved 字段；是否出现取决于执行分支", required: false, type: bool }
+    use_retarget_modes_from_compatible_skeleton: { description_zh: "C++ 实现返回的 use_retarget_modes_from_compatible_skeleton 字段；是否出现取决于执行分支", required: false, type: bool }
+  }
+  state: defined
+}
+schema: uai.command_spec.v1
+status: active
+types: {}
+verification: {
+  assertions: [
+    { id: result_present, operator: exists, source: returns.saved }
+    { id: state_readback_present, operator: exists, source: methods.state_readback.asset_path }
+  ]
+  failure_policy: fail_overall
+  methods: [
+    { id: result, kind: result_assertion }
+    { command: skeleton_get_info, id: state_readback, kind: command_readback, params_mapping: { asset_path: params.asset_path } }
+  ]
+  required: true
+  state: defined
+}
+version: 1

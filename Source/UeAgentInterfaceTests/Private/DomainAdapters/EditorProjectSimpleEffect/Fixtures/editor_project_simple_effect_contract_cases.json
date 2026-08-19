@@ -1,0 +1,341 @@
+{
+  "schema": "uai.domain_adapter.editor_project_simple_effect.test_fixture.v1",
+  "descriptor_count": 7,
+  "native_operation_types": [
+    "editor_project.typed_update"
+  ],
+  "descriptors": [
+    {
+      "descriptor_id": "uai.operation.editor_project.config_section.update",
+      "capability_id": "editor_project.config_section.update",
+      "profile_id": "config_section",
+      "native_operation_type": "editor_project.typed_update",
+      "native_mechanic_id": "uai.editor_project.mechanic:update_config_section:v1",
+      "field_ids": ["entries"],
+      "source_commands": ["config_apply_section"]
+    },
+    {
+      "descriptor_id": "uai.operation.editor_project.project_settings.update",
+      "capability_id": "editor_project.project_settings.update",
+      "profile_id": "project_settings",
+      "native_operation_type": "editor_project.typed_update",
+      "native_mechanic_id": "uai.editor_project.mechanic:update_project_settings:v1",
+      "field_ids": ["properties"],
+      "source_commands": ["project_settings_apply_page"]
+    },
+    {
+      "descriptor_id": "uai.operation.editor_project.device_profile.update",
+      "capability_id": "editor_project.device_profile.update",
+      "profile_id": "device_profile",
+      "native_operation_type": "editor_project.typed_update",
+      "native_mechanic_id": "uai.editor_project.mechanic:update_device_profile:v1",
+      "field_ids": ["device_type", "base_profile_ref", "cvars"],
+      "source_commands": ["device_profile_apply_json"]
+    },
+    {
+      "descriptor_id": "uai.operation.editor_project.localization_target.update",
+      "capability_id": "editor_project.localization_target.update",
+      "profile_id": "localization_target",
+      "native_operation_type": "editor_project.typed_update",
+      "native_mechanic_id": "uai.editor_project.mechanic:update_localization_target:v1",
+      "field_ids": ["native_culture", "cultures"],
+      "source_commands": ["localization_apply_json"]
+    },
+    {
+      "descriptor_id": "uai.operation.editor_project.platform_config.update",
+      "capability_id": "editor_project.platform_config.update",
+      "profile_id": "platform_config",
+      "native_operation_type": "editor_project.typed_update",
+      "native_mechanic_id": "uai.editor_project.mechanic:update_platform_config:v1",
+      "field_ids": ["entries"],
+      "source_commands": ["platform_config_apply_json"]
+    },
+    {
+      "descriptor_id": "uai.operation.editor_project.scalability_group.update",
+      "capability_id": "editor_project.scalability_group.update",
+      "profile_id": "scalability_group",
+      "native_operation_type": "editor_project.typed_update",
+      "native_mechanic_id": "uai.editor_project.mechanic:update_scalability_group:v1",
+      "field_ids": ["entries"],
+      "source_commands": ["scalability_apply_json"]
+    },
+    {
+      "descriptor_id": "uai.operation.editor_project.string_table.update",
+      "capability_id": "editor_project.string_table.update",
+      "profile_id": "string_table",
+      "native_operation_type": "editor_project.typed_update",
+      "native_mechanic_id": "uai.editor_project.mechanic:update_string_table:v1",
+      "field_ids": ["namespace", "entries"],
+      "source_commands": ["string_table_apply_json"]
+    }
+  ],
+  "field_contract_count": 11,
+  "field_contracts": [
+    {
+      "profile_id": "config_section",
+      "field_id": "entries",
+      "field_binding_id": "editor_project.field.config_section.entries:v1",
+      "type_id": "uai.editor_project.config_entry_map.v1",
+      "value_kind": "object",
+      "allowed_presences": ["set", "remove", "replace", "clear"],
+      "example_value": {"UAI.TestValue": "after"}
+    },
+    {
+      "profile_id": "project_settings",
+      "field_id": "properties",
+      "field_binding_id": "editor_project.field.project_settings.properties:v1",
+      "type_id": "uai.editor_project.settings_property_changes.v1",
+      "value_kind": "array",
+      "allowed_presences": ["set"],
+      "example_value": [
+        {
+          "field_ref": "uai://editor-project-field/test-enabled",
+          "expected_revision": "field:r1",
+          "presence": "set",
+          "type_id": "uai.value.boolean.v1",
+          "value": true
+        }
+      ]
+    },
+    {
+      "profile_id": "device_profile",
+      "field_id": "device_type",
+      "field_binding_id": "editor_project.field.device_profile.device_type:v1",
+      "type_id": "uai.value.string.v1",
+      "value_kind": "string",
+      "allowed_presences": ["set", "clear"],
+      "example_value": "Windows"
+    },
+    {
+      "profile_id": "device_profile",
+      "field_id": "base_profile_ref",
+      "field_binding_id": "editor_project.field.device_profile.base_profile_ref:v1",
+      "type_id": "uai.value.canonical_ref.v1",
+      "value_kind": "string",
+      "allowed_presences": ["set", "null", "clear"],
+      "example_value": "uai://editor-project/device-profile/base"
+    },
+    {
+      "profile_id": "device_profile",
+      "field_id": "cvars",
+      "field_binding_id": "editor_project.field.device_profile.cvars:v1",
+      "type_id": "uai.editor_project.config_entry_map.v1",
+      "value_kind": "object",
+      "allowed_presences": ["set", "remove", "replace", "clear"],
+      "example_value": {"r.UAI.Test": "1"}
+    },
+    {
+      "profile_id": "localization_target",
+      "field_id": "native_culture",
+      "field_binding_id": "editor_project.field.localization_target.native_culture:v1",
+      "type_id": "uai.value.culture_name.v1",
+      "value_kind": "string",
+      "allowed_presences": ["set"],
+      "example_value": "en"
+    },
+    {
+      "profile_id": "localization_target",
+      "field_id": "cultures",
+      "field_binding_id": "editor_project.field.localization_target.cultures:v1",
+      "type_id": "uai.value.culture_name_set.v1",
+      "value_kind": "array",
+      "allowed_presences": ["set", "remove", "replace", "clear"],
+      "example_value": ["en", "zh-Hans"]
+    },
+    {
+      "profile_id": "platform_config",
+      "field_id": "entries",
+      "field_binding_id": "editor_project.field.platform_config.entries:v1",
+      "type_id": "uai.editor_project.config_entry_map.v1",
+      "value_kind": "object",
+      "allowed_presences": ["set", "remove", "replace", "clear"],
+      "example_value": {"r.UAI.Platform": "1"}
+    },
+    {
+      "profile_id": "scalability_group",
+      "field_id": "entries",
+      "field_binding_id": "editor_project.field.scalability_group.entries:v1",
+      "type_id": "uai.editor_project.config_entry_map.v1",
+      "value_kind": "object",
+      "allowed_presences": ["set", "remove", "replace", "clear"],
+      "example_value": {"r.UAI.Quality": "2"}
+    },
+    {
+      "profile_id": "string_table",
+      "field_id": "namespace",
+      "field_binding_id": "editor_project.field.string_table.namespace:v1",
+      "type_id": "uai.value.string.v1",
+      "value_kind": "string",
+      "allowed_presences": ["set", "clear"],
+      "example_value": "UAI.Test"
+    },
+    {
+      "profile_id": "string_table",
+      "field_id": "entries",
+      "field_binding_id": "editor_project.field.string_table.entries:v1",
+      "type_id": "uai.editor_project.string_table_entries.v1",
+      "value_kind": "array",
+      "allowed_presences": ["set", "remove", "replace", "clear"],
+      "example_value": [
+        {
+          "key": "Greeting",
+          "source": "Hello",
+          "metadata": {"Context": "Automation"}
+        }
+      ]
+    }
+  ],
+  "forbidden_input_fields": [
+    "backup",
+    "command",
+    "dry_run",
+    "hjson",
+    "http",
+    "json",
+    "json_file",
+    "output_file",
+    "property_path",
+    "read_back",
+    "route",
+    "save",
+    "save_after_apply",
+    "section_id",
+    "transaction",
+    "verify"
+  ],
+  "e1_negative_cases": [
+    {
+      "case_id": "stale_target_revision",
+      "descriptor_id": "uai.operation.editor_project.config_section.update",
+      "expected_error": "editor_project_target_revision_stale",
+      "mutation_count": 0
+    },
+    {
+      "case_id": "target_profile_mismatch",
+      "descriptor_id": "uai.operation.editor_project.device_profile.update",
+      "expected_error": "editor_project_target_profile_mismatch",
+      "mutation_count": 0
+    },
+    {
+      "case_id": "duplicate_field",
+      "descriptor_id": "uai.operation.editor_project.device_profile.update",
+      "expected_error": "editor_project_change_field_duplicate",
+      "mutation_count": 0
+    },
+    {
+      "case_id": "wrong_field_type",
+      "descriptor_id": "uai.operation.editor_project.localization_target.update",
+      "expected_error": "editor_project_input_schema_rejected",
+      "mutation_count": 0
+    },
+    {
+      "case_id": "presence_not_allowed",
+      "descriptor_id": "uai.operation.editor_project.localization_target.update",
+      "expected_error": "editor_project_input_schema_rejected",
+      "mutation_count": 0
+    },
+    {
+      "case_id": "unsafe_config_key",
+      "descriptor_id": "uai.operation.editor_project.platform_config.update",
+      "expected_error": "editor_project_config_entry_invalid",
+      "mutation_count": 0
+    },
+    {
+      "case_id": "unbound_settings_field",
+      "descriptor_id": "uai.operation.editor_project.project_settings.update",
+      "expected_error": "editor_project_settings_field_unresolved",
+      "mutation_count": 0
+    },
+    {
+      "case_id": "stale_settings_field_revision",
+      "descriptor_id": "uai.operation.editor_project.project_settings.update",
+      "expected_error": "editor_project_settings_field_revision_stale",
+      "mutation_count": 0
+    },
+    {
+      "case_id": "device_profile_inheritance_cycle",
+      "descriptor_id": "uai.operation.editor_project.device_profile.update",
+      "expected_error": "editor_project_device_profile_cycle",
+      "mutation_count": 0
+    },
+    {
+      "case_id": "localization_native_culture_missing",
+      "descriptor_id": "uai.operation.editor_project.localization_target.update",
+      "expected_error": "editor_project_native_culture_missing",
+      "mutation_count": 0
+    },
+    {
+      "case_id": "string_table_entry_duplicate",
+      "descriptor_id": "uai.operation.editor_project.string_table.update",
+      "expected_error": "editor_project_string_table_key_duplicate",
+      "mutation_count": 0
+    }
+  ],
+  "e2_scenarios": [
+    {
+      "scenario_id": "update_owned_config_section",
+      "descriptor_id": "uai.operation.editor_project.config_section.update",
+      "fixture_kind": "owned_config_document",
+      "oracle": "entry value changes in owned FConfigFile only",
+      "rollback_oracle": "original entry and document dirty state restored",
+      "negative_oracle": "post-plan revision drift performs zero mutation"
+    },
+    {
+      "scenario_id": "update_owned_project_settings",
+      "descriptor_id": "uai.operation.editor_project.project_settings.update",
+      "fixture_kind": "transient_settings_uobject",
+      "oracle": "reflected field changes with edit notification on transient object",
+      "rollback_oracle": "original field and package dirty state restored",
+      "negative_oracle": "unbound or stale field ref performs zero mutation"
+    },
+    {
+      "scenario_id": "update_owned_device_profile",
+      "descriptor_id": "uai.operation.editor_project.device_profile.update",
+      "fixture_kind": "owned_config_document",
+      "oracle": "device type, base ref and CVars change in owned document",
+      "rollback_oracle": "profile section content and order restored",
+      "negative_oracle": "inheritance cycle performs zero mutation"
+    },
+    {
+      "scenario_id": "update_owned_localization_target",
+      "descriptor_id": "uai.operation.editor_project.localization_target.update",
+      "fixture_kind": "owned_localization_model",
+      "oracle": "native culture and culture set change without project directory writes",
+      "rollback_oracle": "original target document and virtual directories restored",
+      "negative_oracle": "invalid culture performs zero mutation"
+    },
+    {
+      "scenario_id": "update_owned_platform_config",
+      "descriptor_id": "uai.operation.editor_project.platform_config.update",
+      "fixture_kind": "owned_config_document",
+      "oracle": "entry changes in resolved owned platform section",
+      "rollback_oracle": "original section and document dirty state restored",
+      "negative_oracle": "wrong target kind performs zero mutation"
+    },
+    {
+      "scenario_id": "update_owned_scalability_group",
+      "descriptor_id": "uai.operation.editor_project.scalability_group.update",
+      "fixture_kind": "owned_config_document",
+      "oracle": "quality entry changes in owned scalability group",
+      "rollback_oracle": "original group content and document dirty state restored",
+      "negative_oracle": "non Quality@ target performs zero mutation"
+    },
+    {
+      "scenario_id": "update_owned_string_table",
+      "descriptor_id": "uai.operation.editor_project.string_table.update",
+      "fixture_kind": "temp_string_table_asset",
+      "oracle": "namespace, source strings and metadata read from UStringTable",
+      "rollback_oracle": "original namespace, entries, metadata and package dirty state restored",
+      "negative_oracle": "duplicate key performs zero mutation"
+    }
+  ],
+  "legacy_sources": [
+    {"command": "config_apply_section", "terminal": "ADAPT", "legacy_test": "REWRITE_BEFORE_IMPLEMENTATION"},
+    {"command": "project_settings_apply_page", "terminal": "ADAPT", "legacy_test": "REWRITE_BEFORE_IMPLEMENTATION"},
+    {"command": "device_profile_apply_json", "terminal": "ADAPT", "legacy_test": "REWRITE_BEFORE_IMPLEMENTATION"},
+    {"command": "localization_apply_json", "terminal": "ADAPT_SPLIT", "legacy_test": "REWRITE_BEFORE_IMPLEMENTATION"},
+    {"command": "platform_config_apply_json", "terminal": "ADAPT", "legacy_test": "REWRITE_BEFORE_IMPLEMENTATION"},
+    {"command": "scalability_apply_json", "terminal": "ADAPT", "legacy_test": "REWRITE_BEFORE_IMPLEMENTATION"},
+    {"command": "string_table_apply_json", "terminal": "ADAPT", "legacy_test": "REWRITE_BEFORE_IMPLEMENTATION"}
+  ]
+}

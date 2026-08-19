@@ -39,7 +39,6 @@ namespace UeAgentEditorViewport
 		virtual bool Focus(const FResolvedViewport&, const TSharedPtr<FJsonObject>&, TSharedPtr<FJsonObject>&, FString& OutError) const;
 		virtual bool ApplyVisualOptions(const FResolvedViewport&, const TSharedPtr<FJsonObject>&, TSharedPtr<FJsonObject>&, FString& OutError) const;
 		virtual bool ApplyPreviewState(const FResolvedViewport&, const TSharedPtr<FJsonObject>&, TSharedPtr<FJsonObject>&, FString& OutError) const;
-		virtual bool CaptureScreenshot(const FResolvedViewport&, const TSharedPtr<FJsonObject>&, FViewportScreenshotResult&, FString& OutError) const;
 		virtual bool SnapshotState(const FResolvedViewport&, FViewportSnapshot&, FString& OutError) const;
 		virtual bool RestoreState(const FResolvedViewport&, const FViewportSnapshot&, FString& OutError) const;
 	};

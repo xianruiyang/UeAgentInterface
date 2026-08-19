@@ -1,0 +1,100 @@
+authoring: { reason: command_has_no_registered_folder_authoring_profile, state: none }
+category: core_level
+command: level_set_skeletal_animation_pose
+deprecation: { reason: command_is_active, state: none }
+discovery: { aliases: [], keywords_en: [level, set, skeletal, animation, pose, core_level], keywords_zh: [level_set_skeletal_animation_pose], summary_en: "Execute level_set_skeletal_animation_pose with a verified implementation contract", summary_zh: "设置场景 Actor 上 SkeletalMeshComponent 到指定 AnimSequence 帧/时间并刷新骨骼", tags: [core_level, p2-002] }
+errors: {
+  codes: [
+    { code: actor_has_no_skeletal_mesh_component, description_zh: "C++ 实现返回错误码 actor_has_no_skeletal_mesh_component", retry_safe: false, stage: execution, wire_match: exact }
+    { code: actor_not_found, description_zh: "C++ 实现返回错误码 actor_not_found", retry_safe: false, stage: execution, wire_match: exact }
+    { code: animation_asset_not_found, description_zh: "C++ 实现返回错误码 animation_asset_not_found", retry_safe: false, stage: execution, wire_match: prefix }
+    { code: invalid_frame_rate, description_zh: "C++ 实现返回错误码 invalid_frame_rate", retry_safe: true, stage: preflight, wire_match: exact }
+    { code: missing_animation_asset, description_zh: "C++ 实现返回错误码 missing_animation_asset", retry_safe: true, stage: preflight, wire_match: exact }
+    { code: missing_id, description_zh: "C++ 实现返回错误码 missing_id", retry_safe: true, stage: preflight, wire_match: exact }
+    { code: missing_time_seconds_or_frame_index, description_zh: "C++ 实现返回错误码 missing_time_seconds_or_frame_index", retry_safe: true, stage: preflight, wire_match: exact }
+    { code: no_editor_world, description_zh: "C++ 实现返回错误码 no_editor_world", retry_safe: false, stage: execution, wire_match: exact }
+    { code: no_geditor, description_zh: "C++ 实现返回错误码 no_geditor", retry_safe: false, stage: execution, wire_match: exact }
+    { code: save_level_failed, description_zh: "C++ 实现返回错误码 save_level_failed", retry_safe: false, stage: execution, wire_match: exact }
+    { code: skeletal_mesh_component_has_no_mesh, description_zh: "C++ 实现返回错误码 skeletal_mesh_component_has_no_mesh", retry_safe: false, stage: execution, wire_match: exact }
+    { code: skeletal_mesh_component_not_found, description_zh: "C++ 实现返回错误码 skeletal_mesh_component_not_found", retry_safe: false, stage: execution, wire_match: exact }
+  ]
+}
+evidence: {
+  docs: [
+    { path: "Plugins/UeAgentInterface/docs/commands/core_level/level_set_skeletal_animation_pose.md", purpose: "user documentation cross-check; C++ implementation remains authoritative" }
+  ]
+  implementation: [
+    { line_hint: 827, path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Commands/Level/UeAgentHttpServer_Level_ActorAndTransform.cpp", purpose: "command handler, parameter and return evidence", symbol: CmdLevelSetSkeletalAnimationPose }
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Commands/Level/UeAgentHttpServer_Level_CaptureAndPersistence.cpp", purpose: "transitive helper evidence used by the command handler" }
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Server/UeAgentHttpServer.cpp", purpose: "transitive helper evidence used by the command handler" }
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Utilities/UeAgentJsonDiagnostics.cpp", purpose: "transitive helper evidence used by the command handler" }
+  ]
+  tests: [
+    { path: "Plugins/UeAgentInterface/docs/smoke_coverage_ledger.json", purpose: "smoke or negative-path evidence cross-checked for the verified contract" }
+  ]
+}
+execution: {
+  destructive: false
+  editor_state: required
+  game_thread: required
+  idempotent: false
+  kind: write
+  overwrite_behavior: none
+  pie_state: allowed
+  retry_safe: false
+  save_behavior: caller_controlled
+  side_effects: [modifies_level]
+  ui_effect: none
+}
+maturity: verified
+params: {
+  constraints: []
+  fields: {
+    anim_sequence: { default_state: none, description_zh: "C++ 实现读取的 anim_sequence 参数", required: false, type: string }
+    animation_asset: { default_state: none, description_zh: "C++ 实现读取的 animation_asset 参数", required: true, type: string }
+    animation_asset_path: { default_state: none, description_zh: "C++ 实现读取的 animation_asset_path 参数", path_semantics: { access_scope: mounted_read, kind: ue_asset }, required: false, type: ue_asset_path }
+    component: { default_state: none, description_zh: "C++ 实现读取的 component 参数", required: false, type: string }
+    component_id: { default_state: none, description_zh: "C++ 实现读取的 component_id 参数", required: false, type: string }
+    fps: { default: 30, default_state: defined, description_zh: "C++ 实现读取的 fps 参数", required: false, type: number }
+    frame: { default: 0, default_state: defined, description_zh: "C++ 实现读取的 frame 参数", required: false, type: number }
+    frame_index: { default: 0, default_state: defined, description_zh: "C++ 实现读取的 frame_index 参数", required: false, type: integer }
+    frame_rate: { default: 30, default_state: defined, description_zh: "C++ 实现读取的 frame_rate 参数", required: false, type: number }
+    id: { default_state: none, description_zh: "C++ 实现读取的 id 参数", required: true, type: string }
+    save_after_apply: { default: false, default_state: defined, description_zh: "C++ 实现读取的 save_after_apply 参数", required: false, type: bool }
+    save_after_set: { default: false, default_state: defined, description_zh: "C++ 实现读取的 save_after_set 参数", required: false, type: bool }
+    time_seconds: { default: 0, default_state: defined, description_zh: "C++ 实现读取的 time_seconds 参数", required: false, type: number }
+  }
+  state: defined
+}
+response: { artifact_fields: [], compact_fields: [saved, actor_label, actor_name, animation_asset, animation_mode, component_name], failure_fields: [params.animation_asset, params.id], max_items_policy: { fields: [], mode: none } }
+returns: {
+  fields: {
+    actor_label: { description_zh: "C++ 实现返回的 actor_label 字段；是否出现取决于执行分支", required: false, type: string }
+    actor_name: { description_zh: "C++ 实现返回的 actor_name 字段；是否出现取决于执行分支", required: false, type: string }
+    animation_asset: { description_zh: "C++ 实现返回的 animation_asset 字段；是否出现取决于执行分支", required: false, type: string }
+    animation_mode: { description_zh: "C++ 实现返回的 animation_mode 字段；是否出现取决于执行分支", required: false, type: string }
+    component_name: { description_zh: "C++ 实现返回的 component_name 字段；是否出现取决于执行分支", required: false, type: string }
+    component_path: { description_zh: "C++ 实现返回的 component_path 字段；是否出现取决于执行分支", required: false, type: string }
+    display_status: { description_zh: "C++ 实现返回的 display_status 字段；是否出现取决于执行分支", required: false, type: string }
+    play_length_seconds: { description_zh: "C++ 实现返回的 play_length_seconds 字段；是否出现取决于执行分支", required: false, type: number }
+    requested_time_seconds: { description_zh: "C++ 实现返回的 requested_time_seconds 字段；是否出现取决于执行分支", required: false, type: number }
+    saved: { description_zh: "C++ 实现返回的 saved 字段；是否出现取决于执行分支", required: false, type: bool }
+    time_seconds: { description_zh: "C++ 实现返回的 time_seconds 字段；是否出现取决于执行分支", required: false, type: number }
+  }
+  state: defined
+}
+schema: uai.command_spec.v1
+status: active
+types: {}
+verification: {
+  assertions: [
+    { id: result_present, operator: exists, source: returns.saved }
+  ]
+  failure_policy: fail_overall
+  methods: [
+    { id: result, kind: result_assertion }
+  ]
+  required: true
+  state: defined
+}
+version: 1

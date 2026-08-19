@@ -3,7 +3,10 @@
 #include "Server/UeAgentHttpServer.h"
 
 #include "UeAgentHttpServer_LevelTopologyOps.h"
+#include "Utilities/UeAgentAuthoringFileIO.h"
 #include "Utilities/UeAgentJsonDiagnostics.h"
+#include "Utilities/UeAgentStructuredAuthoringIO.h"
+#include "Utilities/UeAgentUObjectProperties.h"
 
 #include "AssetRegistry/AssetRegistryModule.h"
 #include "AssetToolsModule.h"
@@ -23,7 +26,6 @@
 #include "HAL/PlatformFileManager.h"
 #include "Misc/App.h"
 #include "Misc/CommandLine.h"
-#include "Misc/FileHelper.h"
 #include "Misc/PackageName.h"
 #include "Misc/Parse.h"
 #include "Misc/Paths.h"
@@ -148,17 +150,6 @@ namespace UeAgentLevelTopology
 		return Object && Object->GetOutermost() ? Object->GetOutermost()->GetName() : FString();
 	}
 
-	static FString JsonToString(const TSharedPtr<FJsonObject>& Obj, bool bPretty = true)
-	{
-		FString Out;
-		if (!Obj.IsValid())
-		{
-			return Out;
-		}
-		UeAgentJsonDiagnostics::SerializeJsonObjectCompact(Obj, Out);
-		return Out;
-	}
-
 	static bool ParseJsonObject(const FString& Text, TSharedPtr<FJsonObject>& OutObj, FString& OutError)
 	{
 		const TSharedRef<TJsonReader<TCHAR>> Reader = TJsonReaderFactory<TCHAR>::Create(Text);
@@ -173,6 +164,16 @@ namespace UeAgentLevelTopology
 	static FString ResolveFilePath(const FString& InPath)
 	{
 		return UeAgentJsonDiagnostics::ResolveProjectRelativeFilePath(InPath);
+	}
+
+	static FString ResolveAuthoringFilePath(const FString& InPath)
+	{
+		FString ResolvedPath = UeAgentStructuredAuthoringIO::NormalizeAuthoringPath(ResolveFilePath(InPath));
+		if (FPaths::GetExtension(ResolvedPath, false).Equals(TEXT("json"), ESearchCase::IgnoreCase))
+		{
+			ResolvedPath = FPaths::SetExtension(ResolvedPath, TEXT("hjson"));
+		}
+		return ResolvedPath;
 	}
 
 	bool LoadJsonFromParams(const TSharedPtr<FJsonObject>& Params, TSharedPtr<FJsonObject>& OutRoot, FString& OutSource, FString& OutError)
@@ -207,14 +208,10 @@ namespace UeAgentLevelTopology
 		FString JsonFile;
 		if (Params->TryGetStringField(TEXT("json_file"), JsonFile) || Params->TryGetStringField(TEXT("input_file"), JsonFile))
 		{
-			JsonFile = ResolveFilePath(JsonFile);
-			if (!FFileHelper::LoadFileToString(JsonText, *JsonFile))
-			{
-				OutError = TEXT("json_file_read_failed");
-				return false;
-			}
+			JsonFile = ResolveAuthoringFilePath(JsonFile);
 			OutSource = JsonFile;
-			return ParseJsonObject(JsonText, OutRoot, OutError);
+			UeAgentAuthoringFileIO::FLoadOptions Options;
+			return UeAgentAuthoringFileIO::LoadObject(JsonFile, OutRoot, Options, OutError);
 		}
 
 		OutError = TEXT("missing_json");
@@ -232,19 +229,18 @@ namespace UeAgentLevelTopology
 		{
 			return true;
 		}
-		OutputFile = ResolveFilePath(OutputFile);
-		const FString OutputDir = FPaths::GetPath(OutputFile);
-		if (!OutputDir.IsEmpty())
+		OutputFile = ResolveAuthoringFilePath(OutputFile);
+		UeAgentAuthoringFileIO::FSaveOptions Options;
+		Options.SourceCommand = TEXT("level_topology_export");
+		Options.bExternalizeInlineDetails = false;
+		FString SaveError;
+		if (!UeAgentAuthoringFileIO::SaveObject(OutputFile, Obj, Options, &SaveError))
 		{
-			IFileManager::Get().MakeDirectory(*OutputDir, true);
-		}
-		if (!FFileHelper::SaveStringToFile(JsonToString(Obj, false), *OutputFile, FFileHelper::EEncodingOptions::ForceUTF8WithoutBOM))
-		{
-			OutError = TEXT("output_file_write_failed");
+			OutError = SaveError.IsEmpty() ? TEXT("output_file_write_failed") : SaveError;
 			return false;
 		}
 		OutData->SetStringField(TEXT("output_file"), OutputFile);
-		OutData->SetStringField(TEXT("output_format"), TEXT("structured_compact"));
+		OutData->SetStringField(TEXT("output_format"), TEXT("hjson_authoring"));
 		return true;
 	}
 
@@ -920,33 +916,30 @@ namespace UeAgentLevelTopology
 		return false;
 	}
 
-	bool ImportPropertyText(UObject* Object, const FString& PropertyName, const FString& ValueText, TSharedPtr<FJsonObject>& OutResult)
+	bool ApplyCanonicalProperty(UObject* Object, const FString& PropertyName, const TSharedPtr<FJsonValue>& CanonicalValue, TSharedPtr<FJsonObject>& OutResult)
 	{
-		OutResult = MakeShared<FJsonObject>();
-		OutResult->SetStringField(TEXT("property_name"), PropertyName);
-		OutResult->SetStringField(TEXT("requested_value_text"), ValueText);
-		if (!Object)
+		if (!Object || PropertyName.IsEmpty() || !CanonicalValue.IsValid())
 		{
-			OutResult->SetStringField(TEXT("property_import_status"), TEXT("object_null"));
+			OutResult = MakeShared<FJsonObject>();
+			OutResult->SetStringField(TEXT("status"), TEXT("invalid_canonical_property_request"));
 			return false;
 		}
 		FProperty* Property = Object->GetClass()->FindPropertyByName(FName(*PropertyName));
 		if (!Property)
 		{
-			OutResult->SetStringField(TEXT("property_import_status"), TEXT("property_not_found"));
+			OutResult = MakeShared<FJsonObject>();
+			OutResult->SetStringField(TEXT("status"), TEXT("property_not_found"));
 			return false;
 		}
-		Object->Modify();
-		const TCHAR* Result = Property->ImportText_Direct(*ValueText, Property->ContainerPtrToValuePtr<void>(Object), Object, PPF_None);
-		FString ReadBack;
-		Property->ExportText_Direct(ReadBack, Property->ContainerPtrToValuePtr<void>(Object), Property->ContainerPtrToValuePtr<void>(Object), Object, PPF_None);
-		const bool bImported = Result != nullptr;
-		OutResult->SetStringField(TEXT("applied_value_text"), ReadBack);
-		OutResult->SetStringField(TEXT("property_import_status"), bImported ? TEXT("imported_and_read_back") : TEXT("import_failed"));
-		OutResult->SetBoolField(TEXT("property_import_verified"), bImported);
-		OutResult->SetBoolField(TEXT("value_text_exact_match"), ReadBack.Equals(ValueText, ESearchCase::CaseSensitive));
-		OutResult->SetStringField(TEXT("cpp_type"), Property->GetCPPType());
-		return bImported;
+		UeAgentUObjectProperties::FExportOptions ExportOptions;
+		TSharedPtr<FJsonObject> Descriptor = UeAgentUObjectProperties::BuildPropertyDescriptor(Object, Property, ExportOptions);
+		Descriptor->SetField(TEXT("value"), CanonicalValue);
+		TSharedPtr<FJsonObject> Payload = MakeShared<FJsonObject>();
+		Payload->SetStringField(TEXT("schema"), TEXT("uai.uobject_properties.v2"));
+		Payload->SetArrayField(TEXT("properties"), { MakeShared<FJsonValueObject>(Descriptor) });
+		OutResult = UeAgentUObjectProperties::ApplyObjectProperties(Object, Payload, UeAgentUObjectProperties::FApplyOptions());
+		FString Status;
+		return OutResult.IsValid() && OutResult->TryGetStringField(TEXT("status"), Status) && Status == TEXT("applied");
 	}
 
 	static bool ApplyDataLayerStateFields(
@@ -1213,6 +1206,12 @@ namespace UeAgentLevelTopology
 
 	bool CreateOrLoadAssetWithFactory(const FString& AssetPath, UClass* AssetClass, UFactory* Factory, const FString& OverwritePolicy, UObject*& OutAsset, FString& OutError)
 	{
+		if (!OverwritePolicy.Equals(TEXT("fail"), ESearchCase::IgnoreCase)
+			&& !OverwritePolicy.Equals(TEXT("replace"), ESearchCase::IgnoreCase))
+		{
+			OutError = TEXT("overwrite_policy_invalid");
+			return false;
+		}
 		OutAsset = LoadObjectByPath(AssetPath);
 		if (OutAsset)
 		{
@@ -1258,6 +1257,11 @@ namespace UeAgentLevelTopology
 
 	bool RunCommandletProcess(const FString& ExtraArgs, double TimeoutSeconds, TSharedPtr<FJsonObject>& OutData, FString& OutError)
 	{
+		if (!FMath::IsFinite(TimeoutSeconds) || TimeoutSeconds <= 0.0)
+		{
+			OutError = TEXT("timeout_seconds_invalid");
+			return false;
+		}
 		const FString EditorCmd = FPaths::ConvertRelativePathToFull(FPaths::Combine(FPaths::EngineDir(), TEXT("Binaries/Win64/UnrealEditor-Cmd.exe")));
 		const FString ProjectPath = FPaths::ConvertRelativePathToFull(FPaths::GetProjectFilePath());
 		const FString LogFile = FPaths::ConvertRelativePathToFull(FPaths::Combine(FPaths::ProjectLogDir(), FString::Printf(TEXT("UAI_LevelTopology_Commandlet_%s.log"), *FGuid::NewGuid().ToString(EGuidFormats::Digits))));
@@ -1319,14 +1323,12 @@ bool FUeAgentHttpServer::ExecuteLevelTopologyCommand(const FString& CommandLower
 	if (CommandLower == TEXT("level_topology_validate_json")) return CmdLevelTopologyValidateJson(Ctx, OutData, OutError);
 	if (CommandLower == TEXT("level_topology_diff_json")) return CmdLevelTopologyDiffJson(Ctx, OutData, OutError);
 	if (CommandLower == TEXT("level_topology_apply_json")) return CmdLevelTopologyApplyJson(Ctx, OutData, OutError);
-	if (CommandLower == TEXT("level_topology_set_actor_assignments")) return CmdLevelTopologySetActorAssignments(Ctx, OutData, OutError);
 	if (CommandLower == TEXT("level_streaming_query")) return CmdLevelStreamingQuery(Ctx, OutData, OutError);
 	if (CommandLower == TEXT("level_streaming_create_level")) return CmdLevelStreamingCreateLevel(Ctx, OutData, OutError);
 	if (CommandLower == TEXT("level_streaming_add_existing")) return CmdLevelStreamingAddExisting(Ctx, OutData, OutError);
 	if (CommandLower == TEXT("level_streaming_remove")) return CmdLevelStreamingRemove(Ctx, OutData, OutError);
 	if (CommandLower == TEXT("level_streaming_set_state")) return CmdLevelStreamingSetState(Ctx, OutData, OutError);
 	if (CommandLower == TEXT("level_streaming_move_actors")) return CmdLevelStreamingMoveActors(Ctx, OutData, OutError);
-	if (CommandLower == TEXT("level_streaming_save")) return CmdLevelStreamingSave(Ctx, OutData, OutError);
 	if (CommandLower == TEXT("level_streaming_validate")) return CmdLevelStreamingValidate(Ctx, OutData, OutError);
 	if (CommandLower == TEXT("data_layer_query")) return CmdDataLayerQuery(Ctx, OutData, OutError);
 	if (CommandLower == TEXT("data_layer_create_asset")) return CmdDataLayerCreateAsset(Ctx, OutData, OutError);
@@ -1345,7 +1347,6 @@ bool FUeAgentHttpServer::ExecuteLevelTopologyCommand(const FString& CommandLower
 	if (CommandLower == TEXT("world_partition_list_loaded_regions")) return CmdWorldPartitionListLoadedRegions(Ctx, OutData, OutError);
 	if (CommandLower == TEXT("world_partition_check_errors")) return CmdWorldPartitionCheckErrors(Ctx, OutData, OutError);
 	if (CommandLower == TEXT("world_partition_generate_streaming")) return CmdWorldPartitionGenerateStreaming(Ctx, OutData, OutError);
-	if (CommandLower == TEXT("world_partition_resave_actors")) return CmdWorldPartitionResaveActors(Ctx, OutData, OutError);
 	if (CommandLower == TEXT("hlod_layer_create_json")) return CmdHLODLayerCreateJson(Ctx, OutData, OutError);
 	if (CommandLower == TEXT("hlod_layer_export_json")) return CmdHLODLayerExportJson(Ctx, OutData, OutError);
 	if (CommandLower == TEXT("hlod_layer_validate_json")) return CmdHLODLayerValidateJson(Ctx, OutData, OutError);
@@ -1558,14 +1559,58 @@ bool FUeAgentHttpServer::CmdLevelStreamingRemove(const FUeAgentRequestContext& C
 		return false;
 	}
 	bool bClearSelection = true;
-	bool bResetTransactionBuffer = true;
+	bool bResetTransactionBuffer = false;
 	bool bDeleteAsset = false;
 	bool bTransaction = true;
+	bool bDryRun = true;
+	bool bAllowDestructive = false;
+	bool bAllowDelete = false;
 	JsonTryGetBool(Ctx.Params, TEXT("clear_selection"), bClearSelection);
 	JsonTryGetBool(Ctx.Params, TEXT("reset_transaction_buffer"), bResetTransactionBuffer);
 	JsonTryGetBool(Ctx.Params, TEXT("delete_asset"), bDeleteAsset);
 	JsonTryGetBool(Ctx.Params, TEXT("transaction"), bTransaction);
+	JsonTryGetBool(Ctx.Params, TEXT("dry_run"), bDryRun);
+	JsonTryGetBool(Ctx.Params, TEXT("allow_destructive"), bAllowDestructive);
+	JsonTryGetBool(Ctx.Params, TEXT("allow_delete"), bAllowDelete);
 	const FString RemovedPackage = UeAgentLevelTopology::NormalizePackagePath(StreamingLevel->GetWorldAssetPackageName());
+	UObject* AssetToDelete = nullptr;
+	if (bDeleteAsset)
+	{
+		AssetToDelete = UeAgentLevelTopology::LoadObjectByPath(RemovedPackage);
+		if (!AssetToDelete)
+		{
+			OutError = TEXT("streaming_level_asset_not_found");
+			return false;
+		}
+	}
+	OutData->SetStringField(TEXT("schema"), TEXT("uai.level_streaming.remove_result.v1"));
+	OutData->SetStringField(TEXT("level_package"), RemovedPackage);
+	OutData->SetBoolField(TEXT("removed"), false);
+	OutData->SetBoolField(TEXT("delete_asset"), bDeleteAsset);
+	OutData->SetNumberField(TEXT("deleted_asset_count"), 0);
+	OutData->SetBoolField(TEXT("transaction"), bTransaction);
+	OutData->SetBoolField(TEXT("dry_run"), bDryRun);
+	OutData->SetBoolField(TEXT("allow_destructive"), bAllowDestructive);
+	OutData->SetBoolField(TEXT("allow_delete"), bAllowDelete);
+	if (bDryRun)
+	{
+		OutData->SetStringField(TEXT("status"), TEXT("planned"));
+		return true;
+	}
+	if (!bAllowDestructive)
+	{
+		OutData->SetStringField(TEXT("status"), TEXT("blocked"));
+		OutData->SetStringField(TEXT("error_code"), TEXT("requires_allow_destructive"));
+		OutError = TEXT("requires_allow_destructive");
+		return false;
+	}
+	if (bDeleteAsset && !bAllowDelete)
+	{
+		OutData->SetStringField(TEXT("status"), TEXT("blocked"));
+		OutData->SetStringField(TEXT("error_code"), TEXT("requires_allow_delete"));
+		OutError = TEXT("requires_allow_delete");
+		return false;
+	}
 	TUniquePtr<FScopedTransaction> Transaction;
 	if (bTransaction)
 	{
@@ -1575,20 +1620,28 @@ bool FUeAgentHttpServer::CmdLevelStreamingRemove(const FUeAgentRequestContext& C
 	int32 DeletedAssets = 0;
 	if (bRemoved && bDeleteAsset)
 	{
-		if (UObject* Asset = UeAgentLevelTopology::LoadObjectByPath(RemovedPackage))
-		{
-			TArray<UObject*> ObjectsToDelete;
-			ObjectsToDelete.Add(Asset);
-			DeletedAssets = ObjectTools::DeleteObjectsUnchecked(ObjectsToDelete);
-		}
+		TArray<UObject*> ObjectsToDelete;
+		ObjectsToDelete.Add(AssetToDelete);
+		DeletedAssets = ObjectTools::DeleteObjectsUnchecked(ObjectsToDelete);
 	}
-	OutData->SetStringField(TEXT("schema"), TEXT("uai.level_streaming.remove_result.v1"));
-	OutData->SetStringField(TEXT("level_package"), RemovedPackage);
 	OutData->SetBoolField(TEXT("removed"), bRemoved);
-	OutData->SetBoolField(TEXT("delete_asset"), bDeleteAsset);
 	OutData->SetNumberField(TEXT("deleted_asset_count"), DeletedAssets);
-	OutData->SetBoolField(TEXT("transaction"), bTransaction);
-	return bRemoved;
+	if (!bRemoved)
+	{
+		OutData->SetStringField(TEXT("status"), TEXT("failed"));
+		OutData->SetStringField(TEXT("error_code"), TEXT("streaming_level_remove_failed"));
+		OutError = TEXT("streaming_level_remove_failed");
+		return false;
+	}
+	if (bDeleteAsset && DeletedAssets <= 0)
+	{
+		OutData->SetStringField(TEXT("status"), TEXT("partial_failure"));
+		OutData->SetStringField(TEXT("error_code"), TEXT("streaming_level_asset_delete_failed"));
+		OutError = TEXT("streaming_level_asset_delete_failed");
+		return false;
+	}
+	OutData->SetStringField(TEXT("status"), TEXT("removed"));
+	return true;
 }
 
 bool FUeAgentHttpServer::CmdLevelStreamingSetState(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
@@ -1772,6 +1825,10 @@ bool FUeAgentHttpServer::CmdLevelStreamingValidate(const FUeAgentRequestContext&
 	TArray<TSharedPtr<FJsonValue>> Issues;
 	FString LevelPackage;
 	JsonTryGetString(Ctx.Params, TEXT("level_package"), LevelPackage);
+	if (LevelPackage.TrimStartAndEnd().IsEmpty())
+	{
+		UeAgentLevelTopology::AddIssue(Issues, TEXT("error"), TEXT("missing_validation_expectation"), TEXT("$.level_package"), TEXT("level_streaming_validate requires level_package."));
+	}
 	ULevelStreaming* StreamingLevel = LevelPackage.IsEmpty() ? nullptr : UeAgentLevelTopology::FindStreamingLevel(World, LevelPackage);
 	if (!LevelPackage.IsEmpty() && !StreamingLevel)
 	{
@@ -1865,8 +1922,14 @@ bool FUeAgentHttpServer::CmdDataLayerCreateAsset(const FUeAgentRequestContext& C
 	FString LoadFilterText;
 	if (JsonTryGetString(Ctx.Params, TEXT("load_filter"), LoadFilterText))
 	{
-		TSharedPtr<FJsonObject> ImportResult;
-		UeAgentLevelTopology::ImportPropertyText(DataLayerAsset, TEXT("LoadFilter"), LoadFilterText, ImportResult);
+		TSharedPtr<FJsonObject> Value = MakeShared<FJsonObject>();
+		Value->SetStringField(TEXT("selected"), LoadFilterText);
+		TSharedPtr<FJsonObject> ApplyResult;
+		if (!UeAgentLevelTopology::ApplyCanonicalProperty(DataLayerAsset, TEXT("LoadFilter"), MakeShared<FJsonValueObject>(Value), ApplyResult))
+		{
+			OutError = TEXT("data_layer_load_filter_apply_failed");
+			return false;
+		}
 	}
 	DataLayerAsset->OnCreated();
 	DataLayerAsset->MarkPackageDirty();
@@ -2063,26 +2126,78 @@ bool FUeAgentHttpServer::CmdDataLayerDeleteInstance(const FUeAgentRequestContext
 	const UDataLayerAsset* Asset = Instance->GetAsset();
 	bool bDeleteAsset = false;
 	bool bTransaction = true;
+	bool bDryRun = true;
+	bool bAllowDestructive = false;
+	bool bAllowDelete = false;
 	JsonTryGetBool(Ctx.Params, TEXT("delete_asset"), bDeleteAsset);
 	JsonTryGetBool(Ctx.Params, TEXT("transaction"), bTransaction);
+	JsonTryGetBool(Ctx.Params, TEXT("dry_run"), bDryRun);
+	JsonTryGetBool(Ctx.Params, TEXT("allow_destructive"), bAllowDestructive);
+	JsonTryGetBool(Ctx.Params, TEXT("allow_delete"), bAllowDelete);
+	if (bDeleteAsset && !Asset)
+	{
+		OutError = TEXT("data_layer_asset_not_found");
+		return false;
+	}
+	OutData->SetStringField(TEXT("schema"), TEXT("uai.data_layer.delete_instance_result.v1"));
+	OutData->SetStringField(TEXT("instance_name"), InstanceName);
+	OutData->SetBoolField(TEXT("deleted"), false);
+	OutData->SetBoolField(TEXT("delete_asset"), bDeleteAsset);
+	OutData->SetNumberField(TEXT("deleted_asset_count"), 0);
+	OutData->SetBoolField(TEXT("transaction"), bTransaction);
+	OutData->SetBoolField(TEXT("dry_run"), bDryRun);
+	OutData->SetBoolField(TEXT("allow_destructive"), bAllowDestructive);
+	OutData->SetBoolField(TEXT("allow_delete"), bAllowDelete);
+	if (bDryRun)
+	{
+		OutData->SetStringField(TEXT("status"), TEXT("planned"));
+		return true;
+	}
+	if (!bAllowDestructive)
+	{
+		OutData->SetStringField(TEXT("status"), TEXT("blocked"));
+		OutData->SetStringField(TEXT("error_code"), TEXT("requires_allow_destructive"));
+		OutError = TEXT("requires_allow_destructive");
+		return false;
+	}
+	if (!bAllowDelete)
+	{
+		OutData->SetStringField(TEXT("status"), TEXT("blocked"));
+		OutData->SetStringField(TEXT("error_code"), TEXT("requires_allow_delete"));
+		OutError = TEXT("requires_allow_delete");
+		return false;
+	}
 	TUniquePtr<FScopedTransaction> Transaction;
 	if (bTransaction)
 	{
 		Transaction = MakeUnique<FScopedTransaction>(NSLOCTEXT("UeAgentInterface", "DataLayerDeleteInstance", "UeAgentInterface DataLayer Delete Instance"));
 	}
+	bool bDeleted = false;
 	if (Subsystem)
 	{
 		Subsystem->DeleteDataLayer(Instance);
+		bDeleted = UeAgentLevelTopology::FindDataLayerInstance(World, InstanceName) == nullptr;
 	}
 	else
 	{
 		AWorldDataLayers* WorldDataLayers = UeAgentLevelTopology::FindWorldDataLayers(World);
-		if (!WorldDataLayers || !WorldDataLayers->RemoveDataLayer(Instance, true))
+		bDeleted = WorldDataLayers && WorldDataLayers->RemoveDataLayer(Instance, true);
+		if (!bDeleted)
 		{
 			OutError = TEXT("data_layer_instance_delete_failed");
+			OutData->SetStringField(TEXT("status"), TEXT("failed"));
+			OutData->SetStringField(TEXT("error_code"), OutError);
 			return false;
 		}
 		WorldDataLayers->MarkPackageDirty();
+	}
+	OutData->SetBoolField(TEXT("deleted"), bDeleted);
+	if (!bDeleted)
+	{
+		OutData->SetStringField(TEXT("status"), TEXT("failed"));
+		OutData->SetStringField(TEXT("error_code"), TEXT("data_layer_instance_delete_failed"));
+		OutError = TEXT("data_layer_instance_delete_failed");
+		return false;
 	}
 	int32 DeletedAssetCount = 0;
 	if (bDeleteAsset && Asset)
@@ -2091,12 +2206,15 @@ bool FUeAgentHttpServer::CmdDataLayerDeleteInstance(const FUeAgentRequestContext
 		ObjectsToDelete.Add(const_cast<UDataLayerAsset*>(Asset));
 		DeletedAssetCount = ObjectTools::DeleteObjectsUnchecked(ObjectsToDelete);
 	}
-	OutData->SetStringField(TEXT("schema"), TEXT("uai.data_layer.delete_instance_result.v1"));
-	OutData->SetStringField(TEXT("instance_name"), InstanceName);
-	OutData->SetBoolField(TEXT("deleted"), true);
-	OutData->SetBoolField(TEXT("delete_asset"), bDeleteAsset);
 	OutData->SetNumberField(TEXT("deleted_asset_count"), DeletedAssetCount);
-	OutData->SetBoolField(TEXT("transaction"), bTransaction);
+	if (bDeleteAsset && DeletedAssetCount <= 0)
+	{
+		OutData->SetStringField(TEXT("status"), TEXT("partial_failure"));
+		OutData->SetStringField(TEXT("error_code"), TEXT("data_layer_asset_delete_failed"));
+		OutError = TEXT("data_layer_asset_delete_failed");
+		return false;
+	}
+	OutData->SetStringField(TEXT("status"), TEXT("deleted"));
 	return true;
 }
 
@@ -2167,6 +2285,15 @@ bool FUeAgentHttpServer::CmdDataLayerSetActorMembership(const FUeAgentRequestCon
 	}
 	FString Mode = TEXT("add");
 	JsonTryGetString(Ctx.Params, TEXT("mode"), Mode);
+	if (!Mode.Equals(TEXT("add"), ESearchCase::IgnoreCase)
+		&& !Mode.Equals(TEXT("remove"), ESearchCase::IgnoreCase)
+		&& !Mode.Equals(TEXT("replace"), ESearchCase::IgnoreCase)
+		&& !Mode.Equals(TEXT("clear"), ESearchCase::IgnoreCase))
+	{
+		OutError = TEXT("data_layer_membership_mode_invalid");
+		return false;
+	}
+	Mode = Mode.ToLower();
 	TArray<UDataLayerInstance*> Layers;
 	for (const FString& LayerName : LayerNames)
 	{
@@ -2407,7 +2534,14 @@ bool FUeAgentHttpServer::CmdDataLayerValidate(const FUeAgentRequestContext& Ctx,
 		return false;
 	}
 	TArray<TSharedPtr<FJsonValue>> Issues;
-	for (const FString& LayerName : UeAgentLevelTopology::ReadStringArray(Ctx.Params, TEXT("layers")))
+	const TArray<FString> LayerNames = UeAgentLevelTopology::ReadStringArray(Ctx.Params, TEXT("layers"));
+	const TArray<FString> ExpectedMembership = UeAgentLevelTopology::ReadStringArray(Ctx.Params, TEXT("expect_actor_membership"));
+	const bool bHasActorExpectation = Ctx.Params->HasField(TEXT("actor_ids")) && !ExpectedMembership.IsEmpty();
+	if (LayerNames.IsEmpty() && !bHasActorExpectation)
+	{
+		UeAgentLevelTopology::AddIssue(Issues, TEXT("error"), TEXT("missing_validation_expectation"), TEXT("$"), TEXT("data_layer_validate requires layers or actor_ids with expect_actor_membership."));
+	}
+	for (const FString& LayerName : LayerNames)
 	{
 		if (!UeAgentLevelTopology::FindDataLayerInstance(World, LayerName))
 		{
@@ -2417,17 +2551,23 @@ bool FUeAgentHttpServer::CmdDataLayerValidate(const FUeAgentRequestContext& Ctx,
 	TArray<AActor*> Actors;
 	TArray<TSharedPtr<FJsonValue>> ActorResults;
 	FString ActorError;
-	if (Ctx.Params->HasField(TEXT("actor_ids")) && UeAgentLevelTopology::ResolveActors(World, Ctx.Params, Actors, ActorResults, ActorError))
+	if (bHasActorExpectation)
 	{
-		TArray<FString> ExpectedMembership = UeAgentLevelTopology::ReadStringArray(Ctx.Params, TEXT("expect_actor_membership"));
-		for (AActor* Actor : Actors)
+		if (!UeAgentLevelTopology::ResolveActors(World, Ctx.Params, Actors, ActorResults, ActorError))
 		{
-			for (const FString& Expected : ExpectedMembership)
+			UeAgentLevelTopology::AddIssue(Issues, TEXT("error"), TEXT("actor_selection_invalid"), TEXT("$.actor_ids"), ActorError);
+		}
+		else
+		{
+			for (AActor* Actor : Actors)
 			{
-				UDataLayerInstance* Layer = UeAgentLevelTopology::FindDataLayerInstance(World, Expected);
-				if (!Layer || !UeAgentLevelTopology::ActorContainsDataLayerInstance(Actor, Layer))
+				for (const FString& Expected : ExpectedMembership)
 				{
-					UeAgentLevelTopology::AddIssue(Issues, TEXT("error"), TEXT("actor_data_layer_membership_missing"), Actor ? Actor->GetActorLabel() : FString(), Expected);
+					UDataLayerInstance* Layer = UeAgentLevelTopology::FindDataLayerInstance(World, Expected);
+					if (!Layer || !UeAgentLevelTopology::ActorContainsDataLayerInstance(Actor, Layer))
+					{
+						UeAgentLevelTopology::AddIssue(Issues, TEXT("error"), TEXT("actor_data_layer_membership_missing"), Actor ? Actor->GetActorLabel() : FString(), Expected);
+					}
 				}
 			}
 		}

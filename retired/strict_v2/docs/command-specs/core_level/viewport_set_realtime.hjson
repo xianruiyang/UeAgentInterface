@@ -1,0 +1,77 @@
+authoring: { reason: command_has_no_registered_folder_authoring_profile, state: none }
+category: core_level
+command: viewport_set_realtime
+deprecation: { reason: command_is_active, state: none }
+discovery: { aliases: [], keywords_en: [viewport, set, realtime, core_level], keywords_zh: [viewport_set_realtime], summary_en: "Execute viewport_set_realtime with a verified implementation contract", summary_zh: "切换视口实时刷新", tags: [core_level, p2-002] }
+errors: {
+  codes: [
+    { code: missing_realtime, description_zh: "C++ 实现返回错误码 missing_realtime", retry_safe: true, stage: preflight, wire_match: exact }
+    { code: no_level_editor_viewport, description_zh: "C++ 实现返回错误码 no_level_editor_viewport", retry_safe: false, stage: execution, wire_match: exact }
+  ]
+}
+evidence: {
+  docs: [
+    { path: "Plugins/UeAgentInterface/docs/commands/core_level/viewport_set_realtime.md", purpose: "user documentation cross-check; C++ implementation remains authoritative" }
+  ]
+  implementation: [
+    { line_hint: 282, path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Commands/Level/UeAgentHttpServer_Level_ViewportTrace.cpp", purpose: "command handler, parameter and return evidence", symbol: CmdViewportSetRealtime }
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Server/UeAgentHttpServer.cpp", purpose: "transitive helper evidence used by the command handler" }
+  ]
+  tests: [
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterfaceTests/Private/Smoke/UeAgentInterfaceSmoke_Coverage.cpp", purpose: "smoke or negative-path evidence cross-checked for the verified contract" }
+  ]
+}
+execution: {
+  destructive: false
+  editor_state: required
+  game_thread: required
+  idempotent: false
+  kind: session_control
+  overwrite_behavior: none
+  pie_state: allowed
+  retry_safe: false
+  save_behavior: none
+  side_effects: [modifies_editor_session]
+  ui_effect: none
+}
+maturity: verified
+params: {
+  constraints: []
+  fields: {
+    enabled: { default: true, default_state: defined, description_zh: "C++ 实现读取的 enabled 参数", required: false, type: bool }
+    realtime: { default_state: none, description_zh: "C++ 实现读取的 realtime 参数", required: true, type: bool }
+    store_current_value: { default: false, default_state: defined, description_zh: "C++ 实现读取的 store_current_value 参数", required: false, type: bool }
+  }
+  state: defined
+}
+response: { artifact_fields: [], compact_fields: [fov, location, matched_realtime_client_count, realtime, rotation, store_current_value_ignored], failure_fields: [params.realtime], max_items_policy: { fields: [], mode: none } }
+returns: {
+  fields: {
+    fov: { description_zh: "C++ 实现返回的 fov 字段；是否出现取决于执行分支", required: false, type: number }
+    location: { description_zh: "C++ 实现返回的 location 字段；是否出现取决于执行分支", required: false, type: json_value }
+    matched_realtime_client_count: { description_zh: "C++ 实现返回的 matched_realtime_client_count 字段；是否出现取决于执行分支", required: false, type: integer }
+    realtime: { description_zh: "C++ 实现返回的 realtime 字段；是否出现取决于执行分支", required: false, type: bool }
+    rotation: { description_zh: "C++ 实现返回的 rotation 字段；是否出现取决于执行分支", required: false, type: json_value }
+    store_current_value_ignored: { description_zh: "C++ 实现返回的 store_current_value_ignored 字段；是否出现取决于执行分支", required: false, type: bool }
+    stored_value_updated: { description_zh: "C++ 实现返回的 stored_value_updated 字段；是否出现取决于执行分支", required: false, type: bool }
+    target_client_count: { description_zh: "C++ 实现返回的 target_client_count 字段；是否出现取决于执行分支", required: false, type: integer }
+  }
+  state: defined
+}
+schema: uai.command_spec.v1
+status: active
+types: {}
+verification: {
+  assertions: [
+    { id: result_present, operator: exists, source: returns.fov }
+    { id: state_readback_present, operator: exists, source: methods.state_readback.viewports }
+  ]
+  failure_policy: fail_overall
+  methods: [
+    { id: result, kind: result_assertion }
+    { command: viewport_get_editor_interaction_state, id: state_readback, kind: command_readback, params_mapping: {} }
+  ]
+  required: true
+  state: defined
+}
+version: 1

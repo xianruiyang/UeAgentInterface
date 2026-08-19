@@ -1,0 +1,116 @@
+authoring: { reason: command_has_no_registered_folder_authoring_profile, state: none }
+category: probe
+command: probe_camera_pixel_scale
+deprecation: { reason: command_is_active, state: none }
+discovery: { aliases: [], keywords_en: [probe, camera, pixel, scale], keywords_zh: [probe_camera_pixel_scale], summary_en: "Execute probe_camera_pixel_scale with a verified implementation contract", summary_zh: "计算目标点 / Actor 相对当前 Level Viewport 相机的位置，并给出目标深度处屏幕 1 像素横向 / 纵向对应的相机空间距离", tags: [probe, p2-007] }
+errors: {
+  codes: [
+    { code: actor_not_found, description_zh: "C++ 实现返回错误码 actor_not_found", retry_safe: false, stage: execution, wire_match: exact }
+    { code: calc_scene_view_failed, description_zh: "C++ 实现返回错误码 calc_scene_view_failed", retry_safe: false, stage: execution, wire_match: exact }
+    { code: invalid_viewport_aspect_ratio, description_zh: "C++ 实现返回错误码 invalid_viewport_aspect_ratio", retry_safe: true, stage: preflight, wire_match: exact }
+    { code: invalid_viewport_fov, description_zh: "C++ 实现返回错误码 invalid_viewport_fov", retry_safe: true, stage: preflight, wire_match: exact }
+    { code: invalid_viewport_size, description_zh: "C++ 实现返回错误码 invalid_viewport_size", retry_safe: true, stage: preflight, wire_match: exact }
+    { code: missing_target, description_zh: "C++ 实现返回错误码 missing_target", retry_safe: true, stage: preflight, wire_match: exact }
+    { code: no_editor_world, description_zh: "C++ 实现返回错误码 no_editor_world", retry_safe: false, stage: execution, wire_match: exact }
+    { code: no_geditor, description_zh: "C++ 实现返回错误码 no_geditor", retry_safe: false, stage: execution, wire_match: exact }
+    { code: no_level_editor_viewport, description_zh: "C++ 实现返回错误码 no_level_editor_viewport", retry_safe: false, stage: execution, wire_match: exact }
+    { code: unsupported_target_point, description_zh: "C++ 实现返回错误码 unsupported_target_point", retry_safe: false, stage: execution, wire_match: exact }
+    { code: viewport_not_perspective, description_zh: "C++ 实现返回错误码 viewport_not_perspective", retry_safe: false, stage: execution, wire_match: exact }
+  ]
+}
+evidence: {
+  docs: [
+    { path: "Plugins/UeAgentInterface/docs/commands/probe/probe_camera_pixel_scale.md", purpose: "user documentation cross-check; C++ implementation remains authoritative" }
+  ]
+  implementation: [
+    { line_hint: 53, path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Commands/Level/UeAgentHttpServer_Level_ProjectionAndTrace.cpp", purpose: "command handler, parameter and return evidence", symbol: CmdProbeCameraPixelScale }
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Commands/Level/UeAgentHttpServer_Level_CaptureAndPersistence.cpp", purpose: "transitive helper evidence used by the command handler" }
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Server/UeAgentHttpServer.cpp", purpose: "transitive helper evidence used by the command handler" }
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Utilities/UeAgentJsonDiagnostics.cpp", purpose: "transitive helper evidence used by the command handler" }
+  ]
+  tests: [
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterfaceTests/Private/Smoke/UeAgentInterfaceSmoke_LevelViewportModeling.cpp", purpose: "smoke or negative-path evidence cross-checked for the verified contract" }
+  ]
+}
+execution: {
+  destructive: false
+  editor_state: required
+  game_thread: required
+  idempotent: true
+  kind: read_only
+  overwrite_behavior: none
+  pie_state: allowed
+  retry_safe: true
+  save_behavior: none
+  side_effects: []
+  ui_effect: none
+}
+maturity: verified
+params: {
+  constraints: [
+    { fields: [id, actor_id, actor_name, actor_label, world_location, target_location, location], kind: one_of }
+  ]
+  fields: {
+    actor_id: { default_state: none, description_zh: "C++ 实现读取的 actor_id 参数", required: false, type: string }
+    actor_label: { default_state: none, description_zh: "C++ 实现读取的 actor_label 参数", required: false, type: string }
+    actor_name: { default_state: none, description_zh: "C++ 实现读取的 actor_name 参数", required: false, type: string }
+    id: { default_state: none, description_zh: "C++ 实现读取的 id 参数", required: false, type: string }
+    location: { default_state: none, description_zh: "目标点的 UE Editor World 坐标（cm）", required: false, type: object, type_ref: "shared:Vector3" }
+    pixel_step: {
+      default: 1
+      default_state: defined
+      description_zh: "C++ 实现读取的 pixel_step 参数"
+      maximum: 128
+      minimum: 0.001
+      required: false
+      type: number
+    }
+    point: { default_state: none, description_zh: "C++ 实现读取的 point 参数", required: false, type: string }
+    sample_screen_x: { default: 0, default_state: defined, description_zh: "C++ 实现读取的 sample_screen_x 参数", required: false, type: number }
+    sample_screen_y: { default: 0, default_state: defined, description_zh: "C++ 实现读取的 sample_screen_y 参数", required: false, type: number }
+    target_location: { default_state: none, description_zh: "目标点的 UE Editor World 坐标（cm）", required: false, type: object, type_ref: "shared:Vector3" }
+    target_point: { default_state: none, description_zh: "C++ 实现读取的 target_point 参数", required: false, type: string }
+    world_location: { default_state: none, description_zh: "目标点的 UE Editor World 坐标（cm）", required: false, type: object, type_ref: "shared:Vector3" }
+  }
+  state: defined
+}
+response: { artifact_fields: [warnings, actor_bounds, analytic_camera_space_units_per_pixel, camera, camera_space_delta_per_pixel_x, camera_space_delta_per_pixel_y, camera_space_location, camera_space_units_per_pixel, projected_screen_point, relative_world_location, sample_screen_point, target_world_location, viewport, viewport_size, world_delta_per_pixel_x, world_delta_per_pixel_y, world_units_per_pixel], compact_fields: [target_source, target_point, projection_model, depth_cm, pixel_scale_valid, warning_count], failure_fields: [], max_items_policy: { fields: [], mode: none } }
+returns: {
+  fields: {
+    actor_bounds: { description_zh: "C++ 实现返回的 actor_bounds 字段；是否出现取决于执行分支", required: false, type: object, type_ref: "shared:Box3D" }
+    actor_label: { description_zh: "C++ 实现返回的 actor_label 字段；是否出现取决于执行分支", required: false, type: string }
+    actor_name: { description_zh: "C++ 实现返回的 actor_name 字段；是否出现取决于执行分支", required: false, type: string }
+    analytic_camera_space_units_per_pixel: { description_zh: "C++ 实现返回的 analytic_camera_space_units_per_pixel 字段；是否出现取决于执行分支", required: false, type: object, type_ref: "shared:Vector2" }
+    camera: { description_zh: "C++ 实现返回的 camera 字段；是否出现取决于执行分支", required: false, type: object, type_ref: "shared:ProbeCameraFrame" }
+    camera_space_delta_per_pixel_x: { description_zh: "相机基向量 frame：X=forward/depth，Y=right，Z=up，单位 cm", required: false, type: object, type_ref: "shared:Vector3" }
+    camera_space_delta_per_pixel_y: { description_zh: "相机基向量 frame：X=forward/depth，Y=right，Z=up，单位 cm", required: false, type: object, type_ref: "shared:Vector3" }
+    camera_space_location: { description_zh: "相机基向量 frame：X=forward/depth，Y=right，Z=up，单位 cm", required: false, type: object, type_ref: "shared:Vector3" }
+    camera_space_units_per_pixel: { description_zh: "C++ 实现返回的 camera_space_units_per_pixel 字段；是否出现取决于执行分支", required: false, type: object, type_ref: "shared:Vector2" }
+    depth_cm: { description_zh: "C++ 实现返回的 depth_cm 字段；是否出现取决于执行分支", required: false, type: integer }
+    distance_to_camera: { description_zh: "C++ 实现返回的 distance_to_camera 字段；是否出现取决于执行分支", required: false, type: number }
+    in_front: { description_zh: "C++ 实现返回的 in_front 字段；是否出现取决于执行分支", required: false, type: bool }
+    in_front_of_camera: { description_zh: "C++ 实现返回的 in_front_of_camera 字段；是否出现取决于执行分支", required: false, type: bool }
+    pixel_scale_valid: { description_zh: "C++ 实现返回的 pixel_scale_valid 字段；是否出现取决于执行分支", required: false, type: bool }
+    projected_screen_point: { description_zh: "Level Editor viewport 像素坐标；左上原点，X 向右、Y 向下", required: false, type: object, type_ref: "shared:ProbeScreenPoint" }
+    projection_model: { description_zh: "C++ 实现返回的 projection_model 字段；是否出现取决于执行分支", required: false, type: string }
+    relative_world_location: { description_zh: "UE Editor World frame 中的坐标或每像素位移（cm）", required: false, type: object, type_ref: "shared:Vector3" }
+    sample_screen_point: { description_zh: "Level Editor viewport 像素坐标；左上原点，X 向右、Y 向下", required: false, type: object, type_ref: "shared:ProbeScreenPoint" }
+    schema: { description_zh: "C++ 实现返回的 schema 字段；是否出现取决于执行分支", required: false, type: string }
+    target_point: { description_zh: "C++ 实现返回的 target_point 字段；是否出现取决于执行分支", required: false, type: string }
+    target_source: { description_zh: "C++ 实现返回的 target_source 字段；是否出现取决于执行分支", required: false, type: string }
+    target_world_location: { description_zh: "UE Editor World frame 中的坐标或每像素位移（cm）", required: false, type: object, type_ref: "shared:Vector3" }
+    viewport: { description_zh: "C++ 实现返回的 viewport 字段；是否出现取决于执行分支", required: false, type: json_value }
+    viewport_size: { description_zh: "C++ 实现返回的 viewport_size 字段；是否出现取决于执行分支", required: false, type: object, type_ref: "shared:Vector3" }
+    warning_count: { description_zh: "C++ 实现返回的 warning_count 字段；是否出现取决于执行分支", required: false, type: integer }
+    warnings: { description_zh: "C++ 实现返回的 warnings 字段；是否出现取决于执行分支", item_type: json_value, required: false, type: array }
+    world_delta_per_pixel_x: { description_zh: "UE Editor World frame 中的坐标或每像素位移（cm）", required: false, type: object, type_ref: "shared:Vector3" }
+    world_delta_per_pixel_y: { description_zh: "UE Editor World frame 中的坐标或每像素位移（cm）", required: false, type: object, type_ref: "shared:Vector3" }
+    world_units_per_pixel: { description_zh: "C++ 实现返回的 world_units_per_pixel 字段；是否出现取决于执行分支", required: false, type: object, type_ref: "shared:Vector2" }
+  }
+  state: defined
+}
+schema: uai.command_spec.v1
+status: active
+types: {}
+verification: { reason: read_only_command_has_no_post_write_verification, state: none }
+version: 1

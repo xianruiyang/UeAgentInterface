@@ -3,7 +3,6 @@
 #include "Commands/PaletteSearch/UeAgentPaletteSearchTypes.h"
 
 #include "ActorFactories/ActorFactory.h"
-#include "Commands/PaletteSearch/UeAgentPaletteSearchAuthoring.h"
 #include "GameFramework/Actor.h"
 #include "Internationalization/Text.h"
 #include "Misc/App.h"
@@ -159,15 +158,13 @@ namespace
 		Candidate.Name = Name;
 		Candidate.DisplayName = DisplayName;
 		Candidate.FullName = ClassPath;
-		Candidate.StableId = ClassPath;
-		Candidate.CanonicalKey = Candidate.Kind + TEXT(":") + ClassPath + TEXT(":") + Name;
-		Candidate.CandidateId = Candidate.CanonicalKey;
 		Candidate.CategoryPath = Category;
 		Candidate.Section = Category;
 		Candidate.SourceOrigin = SourceOrigin;
 		Candidate.SourceLabel = SourceOrigin;
 		Candidate.PackagePath = FPackageName::ObjectPathToPackageName(ClassPath);
 		Candidate.ObjectPath = ClassPath;
+		Candidate.AuthoringSelectors.Add(TEXT("actor_class"), ClassPath);
 		Candidate.Tooltip = ActorClass->GetToolTipText().ToString();
 		if (Candidate.Tooltip.IsEmpty())
 		{
@@ -175,10 +172,11 @@ namespace
 		}
 		Candidate.Keywords = FString::Printf(TEXT("%s %s %s %s"), *Name, *DisplayName, *Category, *KeywordsFromActorClass(ActorClass));
 		Candidate.WriteSupport = TEXT("level_folder.actors.items[].actor.class_path");
-		Candidate.SupportReason = TEXT("Use class_path as the Actor class in Level folder package actor.json.");
+		Candidate.SupportReason = TEXT("Use class_path as the Actor class in Level folder package actor.hjson.");
 		Candidate.bInLibrary = true;
 		Candidate.bSupportedInContext = true;
-		Candidate.JsonAuthoring = BuildJsonAuthoringPatch(Candidate);
+		FString IdentityError;
+		ensureAlwaysMsgf(SetCandidateIdentity(Params.CatalogType, ClassPath, Name, Candidate, IdentityError), TEXT("Placeable actor catalog identity failed: %s"), *IdentityError);
 		OutCandidates.Add(MoveTemp(Candidate));
 	}
 

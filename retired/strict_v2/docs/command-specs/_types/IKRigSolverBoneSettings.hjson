@@ -1,0 +1,14 @@
+definition: {
+  additional_fields: false
+  fields: {
+    bone_name: { default_state: none, description_zh: "FBIK bone 名", required: true, type: string }
+    position_stiffness: { default_state: none, description_zh: "位置刚度", required: false, type: number }
+    preferred_angles: { default_state: none, description_zh: "bone-local preferred Euler angles（度）", required: false, type: object, type_ref: "shared:Vector3" }
+    rotation_stiffness: { default_state: none, description_zh: "旋转刚度", required: false, type: number }
+    use_preferred_angles: { default_state: none, description_zh: "是否使用 preferred angles", required: false, type: bool }
+  }
+  kind: object
+}
+schema: uai.command_spec.shared_type.v1
+type_id: IKRigSolverBoneSettings
+version: 1

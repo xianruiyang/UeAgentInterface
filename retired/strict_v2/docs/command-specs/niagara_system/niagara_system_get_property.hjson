@@ -1,0 +1,64 @@
+authoring: { reason: command_has_no_registered_folder_authoring_profile, state: none }
+category: niagara_system
+command: niagara_system_get_property
+deprecation: { reason: command_is_active, state: none }
+discovery: { aliases: [], keywords_en: [niagara, system, get, property, niagara_system], keywords_zh: [niagara_system_get_property], summary_en: "Execute niagara_system_get_property with a verified implementation contract", summary_zh: "读取 System 属性", tags: [niagara_system, p2-005] }
+errors: {
+  codes: [
+    { code: get_property_failed, description_zh: "C++ 实现返回错误码 get_property_failed", retry_safe: false, stage: execution, wire_match: exact }
+    { code: missing_asset_path, description_zh: "C++ 实现返回错误码 missing_asset_path", retry_safe: true, stage: preflight, wire_match: exact }
+    { code: missing_property_name, description_zh: "C++ 实现返回错误码 missing_property_name", retry_safe: true, stage: preflight, wire_match: exact }
+    { code: system_asset_not_found, description_zh: "C++ 实现返回错误码 system_asset_not_found", retry_safe: false, stage: execution, wire_match: exact }
+  ]
+}
+evidence: {
+  docs: [
+    { path: "Plugins/UeAgentInterface/docs/commands/niagara_system/niagara_system_get_property.md", purpose: "user documentation cross-check; C++ implementation remains authoritative" }
+  ]
+  implementation: [
+    { line_hint: 7376, path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Commands/Niagara/UeAgentHttpServer_Niagara.cpp", purpose: "command handler, parameter and return evidence", symbol: CmdNiagaraSystemGetProperty }
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Server/UeAgentHttpServer.cpp", purpose: "transitive helper evidence used by the command handler" }
+  ]
+  tests: [
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterfaceTests/Private/Smoke/UeAgentInterfaceSmoke_Coverage.cpp", purpose: "smoke or negative-path evidence cross-checked for the verified contract" }
+  ]
+}
+execution: {
+  destructive: false
+  editor_state: required
+  game_thread: required
+  idempotent: true
+  kind: read_only
+  overwrite_behavior: none
+  pie_state: allowed
+  retry_safe: true
+  save_behavior: none
+  side_effects: []
+  ui_effect: none
+}
+maturity: verified
+params: {
+  constraints: []
+  fields: {
+    asset_path: { default_state: none, description_zh: "C++ 实现读取的 asset_path 参数", path_semantics: { access_scope: mounted_read, kind: ue_asset }, required: true, type: ue_asset_path }
+    property_name: { default_state: none, description_zh: "C++ 实现读取的 property_name 参数", required: true, type: string }
+  }
+  state: defined
+}
+response: { artifact_fields: [], compact_fields: [asset_path, cpp_type, object_path, property_found, property_name, value_text], failure_fields: [params.asset_path, params.property_name], max_items_policy: { fields: [], mode: none } }
+returns: {
+  fields: {
+    asset_path: { description_zh: "C++ 实现返回的 asset_path 字段；是否出现取决于执行分支", required: false, type: ue_asset_path }
+    cpp_type: { description_zh: "C++ 实现返回的 cpp_type 字段；是否出现取决于执行分支", required: false, type: string }
+    object_path: { description_zh: "C++ 实现返回的 object_path 字段；是否出现取决于执行分支", required: false, type: ue_object_path }
+    property_found: { description_zh: "C++ 实现返回的 property_found 字段；是否出现取决于执行分支", required: false, type: bool }
+    property_name: { description_zh: "C++ 实现返回的 property_name 字段；是否出现取决于执行分支", required: false, type: string }
+    value_text: { description_zh: "C++ 实现返回的 value_text 字段；是否出现取决于执行分支", required: false, type: string }
+  }
+  state: defined
+}
+schema: uai.command_spec.v1
+status: active
+types: {}
+verification: { reason: read_only_command_has_no_post_write_verification, state: none }
+version: 1

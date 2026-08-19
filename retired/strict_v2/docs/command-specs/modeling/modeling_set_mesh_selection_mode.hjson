@@ -1,0 +1,74 @@
+authoring: { reason: command_has_no_registered_folder_authoring_profile, state: none }
+category: modeling
+command: modeling_set_mesh_selection_mode
+deprecation: { reason: command_is_active, state: none }
+discovery: { aliases: [], keywords_en: [modeling, set, mesh, selection, mode], keywords_zh: [modeling_set_mesh_selection_mode], summary_en: "Execute modeling_set_mesh_selection_mode with a verified implementation contract", summary_zh: "**原子/兼容**：控制 Modeling Mode 工具、选择或网格编辑动作", tags: [modeling, p2-002] }
+errors: {
+  codes: [
+    { code: editor_viewport_not_found, description_zh: "C++ 实现返回错误码 editor_viewport_not_found", retry_safe: false, stage: execution, wire_match: exact }
+    { code: modeling_mode_unavailable, description_zh: "C++ 实现返回错误码 modeling_mode_unavailable", retry_safe: false, stage: execution, wire_match: exact }
+    { code: modeling_selection_manager_unavailable, description_zh: "C++ 实现返回错误码 modeling_selection_manager_unavailable", retry_safe: false, stage: execution, wire_match: exact }
+    { code: modeling_tools_context_unavailable, description_zh: "C++ 实现返回错误码 modeling_tools_context_unavailable", retry_safe: false, stage: execution, wire_match: exact }
+  ]
+}
+evidence: {
+  docs: [
+    { path: "Plugins/UeAgentInterface/docs/commands/modeling/modeling_set_mesh_selection_mode.md", purpose: "user documentation cross-check; C++ implementation remains authoritative" }
+  ]
+  implementation: [
+    { line_hint: 162, path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Commands/Modeling/UeAgentHttpServer_Modeling_DispatchAndSelection.cpp", purpose: "command handler, parameter and return evidence", symbol: CmdModelingSetMeshSelectionMode }
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Commands/Modeling/UeAgentHttpServer_Modeling.cpp", purpose: "transitive helper evidence used by the command handler" }
+  ]
+  tests: [
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterfaceTests/Private/Smoke/UeAgentInterfaceSmoke_Coverage.cpp", purpose: "smoke or negative-path evidence cross-checked for the verified contract" }
+  ]
+}
+execution: {
+  destructive: false
+  editor_state: required
+  game_thread: required
+  idempotent: false
+  kind: session_control
+  overwrite_behavior: none
+  pie_state: allowed
+  retry_safe: false
+  save_behavior: none
+  side_effects: [modifies_editor_session]
+  ui_effect: none
+}
+maturity: verified
+params: {
+  constraints: []
+  fields: {
+    convert_existing_selection: { default: true, default_state: defined, description_zh: "C++ 实现读取的 convert_existing_selection 参数", required: false, type: bool }
+    element_type: { default: face, default_state: defined, description_zh: "C++ 实现读取的 element_type 参数", required: false, type: string }
+    topology_mode: { default: triangle, default_state: defined, description_zh: "C++ 实现读取的 topology_mode 参数", required: false, type: string }
+  }
+  state: defined
+}
+response: { artifact_fields: [], compact_fields: [convert_existing_selection, element_type, topology_mode], failure_fields: [], max_items_policy: { fields: [], mode: none } }
+returns: {
+  fields: {
+    convert_existing_selection: { description_zh: "C++ 实现返回的 convert_existing_selection 字段；是否出现取决于执行分支", required: false, type: bool }
+    element_type: { description_zh: "C++ 实现返回的 element_type 字段；是否出现取决于执行分支", required: false, type: string }
+    topology_mode: { description_zh: "C++ 实现返回的 topology_mode 字段；是否出现取决于执行分支", required: false, type: string }
+  }
+  state: defined
+}
+schema: uai.command_spec.v1
+status: active
+types: {}
+verification: {
+  assertions: [
+    { id: result_present, operator: exists, source: returns.convert_existing_selection }
+    { id: state_readback_present, operator: exists, source: methods.state_readback.topology_mode }
+  ]
+  failure_policy: fail_overall
+  methods: [
+    { id: result, kind: result_assertion }
+    { command: modeling_get_mesh_selection_info, id: state_readback, kind: command_readback, params_mapping: {} }
+  ]
+  required: true
+  state: defined
+}
+version: 1

@@ -1,0 +1,153 @@
+authoring: { reason: command_has_no_registered_folder_authoring_profile, state: none }
+category: niagara_system
+command: niagara_system_runtime_probe
+deprecation: { reason: command_is_active, state: none }
+discovery: { aliases: [], keywords_en: [niagara, system, runtime, probe, niagara_system], keywords_zh: [niagara_system_runtime_probe], summary_en: "Execute niagara_system_runtime_probe with a verified implementation contract", summary_zh: "读取 System 预览组件运行统计", tags: [niagara_system, p2-005] }
+errors: {
+  codes: [
+    { code: asset_editor_subsystem_unavailable, description_zh: "C++ 实现返回错误码 asset_editor_subsystem_unavailable", retry_safe: false, stage: execution, wire_match: exact }
+    { code: asset_is_not_niagara_system, description_zh: "C++ 实现返回错误码 asset_is_not_niagara_system", retry_safe: false, stage: execution, wire_match: exact }
+    { code: asset_not_found, description_zh: "C++ 实现返回错误码 asset_not_found", retry_safe: false, stage: execution, wire_match: exact }
+    { code: collect_current_preview_stats_failed, description_zh: "C++ 实现返回错误码 collect_current_preview_stats_failed", retry_safe: false, stage: execution, wire_match: exact }
+    { code: current_level_sample_does_not_support_transient_component, description_zh: "关卡组件只读采样不能同时创建 transient component", retry_safe: true, stage: preflight, wire_match: exact }
+    { code: current_level_sample_requires_actor_component, description_zh: "current_level_component 采样必须同时提供 actor_id 与 component", retry_safe: true, stage: preflight, wire_match: exact }
+    { code: current_preview_sample_does_not_support_transient_component, description_zh: "C++ 实现返回错误码 current_preview_sample_does_not_support_transient_component", retry_safe: false, stage: execution, wire_match: exact }
+    { code: editor_unavailable, description_zh: "C++ 实现返回错误码 editor_unavailable", retry_safe: false, stage: execution, wire_match: exact }
+    { code: editor_world_unavailable, description_zh: "C++ 实现返回错误码 editor_world_unavailable", retry_safe: false, stage: execution, wire_match: exact }
+    { code: level_component_actor_not_found, description_zh: "actor_id 未解析到当前编辑器世界中的 Actor", retry_safe: true, stage: preflight, wire_match: exact }
+    { code: level_component_asset_mismatch, description_zh: "目标 NiagaraComponent 的 Asset 与 asset_path 不一致", retry_safe: true, stage: preflight, wire_match: exact }
+    { code: level_component_not_found, description_zh: "component 未解析到目标 Actor 的组件", retry_safe: true, stage: preflight, wire_match: exact }
+    { code: level_component_not_niagara, description_zh: "目标组件不是 UNiagaraComponent", retry_safe: true, stage: preflight, wire_match: exact }
+    { code: level_component_sample_requires_current_level, description_zh: "提供 actor_id/component 时 sample_mode 必须为 current_level_component", retry_safe: true, stage: preflight, wire_match: exact }
+    { code: missing_asset_path, description_zh: "C++ 实现返回错误码 missing_asset_path", retry_safe: true, stage: preflight, wire_match: exact }
+    { code: niagara_editor_module_not_loaded, description_zh: "C++ 实现返回错误码 niagara_editor_module_not_loaded", retry_safe: false, stage: execution, wire_match: exact }
+    { code: niagara_editor_not_opened, description_zh: "C++ 实现返回错误码 niagara_editor_not_opened", retry_safe: false, stage: execution, wire_match: exact }
+    { code: niagara_editor_open_failed, description_zh: "C++ 实现返回错误码 niagara_editor_open_failed", retry_safe: false, stage: execution, wire_match: exact }
+    { code: niagara_preview_component_missing_after_reset, description_zh: "C++ 实现返回错误码 niagara_preview_component_missing_after_reset", retry_safe: true, stage: preflight, wire_match: exact }
+    { code: niagara_preview_component_not_found, description_zh: "C++ 实现返回错误码 niagara_preview_component_not_found", retry_safe: false, stage: execution, wire_match: exact }
+    { code: niagara_system_view_model_not_found, description_zh: "C++ 实现返回错误码 niagara_system_view_model_not_found", retry_safe: false, stage: execution, wire_match: exact }
+	{ code: max_particle_samples_invalid, description_zh: "max_particle_samples 必须是 1..1024 的整数", retry_safe: true, stage: preflight, wire_match: exact }
+	{ code: particle_attribute_name_invalid, description_zh: "particle_attributes 含空值、重复值、非字符串或超长名称", retry_safe: true, stage: preflight, wire_match: exact }
+	{ code: particle_attributes_invalid, description_zh: "particle_attributes 必须是最多 16 项的字符串数组", retry_safe: true, stage: preflight, wire_match: exact }
+    { code: performance_measurement_requires_simulate, description_zh: "性能计时只支持会主动连续推进的 sample_mode=simulate", retry_safe: true, stage: preflight, wire_match: exact }
+    { code: performance_warmup_ticks_invalid, description_zh: "performance_warmup_ticks 必须是小于 tick_count 的非负整数；未启用计时时允许等于 tick_count", retry_safe: true, stage: preflight, wire_match: exact }
+    { code: preview_component_not_paused, description_zh: "C++ 实现返回错误码 preview_component_not_paused", retry_safe: false, stage: execution, wire_match: exact }
+    { code: preview_frame_mismatch, description_zh: "C++ 实现返回错误码 preview_frame_mismatch", retry_safe: false, stage: execution, wire_match: exact }
+    { code: preview_state_token_mismatch, description_zh: "C++ 实现返回错误码 preview_state_token_mismatch", retry_safe: false, stage: execution, wire_match: exact }
+    { code: transient_niagara_component_create_failed, description_zh: "C++ 实现返回错误码 transient_niagara_component_create_failed", retry_safe: false, stage: execution, wire_match: exact }
+    { code: unsafe_niagara_system_graph_missing_output_nodes, description_zh: "C++ 实现返回错误码 unsafe_niagara_system_graph_missing_output_nodes", retry_safe: true, stage: preflight, wire_match: prefix }
+  ]
+}
+evidence: {
+  docs: [
+    { path: "Plugins/UeAgentInterface/docs/commands/niagara_system/niagara_system_runtime_probe.md", purpose: "user documentation cross-check; C++ implementation remains authoritative" }
+  ]
+  implementation: [
+    { line_hint: 5874, path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Commands/Niagara/UeAgentHttpServer_Niagara.cpp", purpose: "command handler, parameter and return evidence", symbol: CmdNiagaraSystemRuntimeProbe }
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Commands/Niagara/UeAgentHttpServer_Niagara_UtilityCore.inl", purpose: "transitive helper evidence used by the command handler" }
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Server/UeAgentHttpServer.cpp", purpose: "transitive helper evidence used by the command handler" }
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Utilities/UeAgentJsonDiagnostics.cpp", purpose: "transitive helper evidence used by the command handler" }
+  ]
+  tests: [
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterfaceTests/Private/Smoke/UeAgentInterfaceSmoke_Coverage.cpp", purpose: "smoke or negative-path evidence cross-checked for the verified contract" }
+  ]
+}
+execution: {
+  destructive: false
+  editor_state: required
+  game_thread: required
+  idempotent: false
+  kind: session_control
+  overwrite_behavior: none
+  pie_state: allowed
+  retry_safe: false
+  save_behavior: none
+  side_effects: [modifies_editor_session, opens_window]
+  ui_effect: opens_editor
+}
+maturity: verified
+params: {
+  constraints: []
+  fields: {
+    advance_mode: { default: advance_simulation, default_state: defined, description_zh: "C++ 实现读取的 advance_mode 参数", required: false, type: string }
+    actor_id: { default_state: none, description_zh: "current_level_component 只读采样的 Actor 名称或标签；必须与 component 同时提供", required: false, type: string }
+    asset_path: { default_state: none, description_zh: "C++ 实现读取的 asset_path 参数", path_semantics: { access_scope: mounted_read, kind: ue_asset }, required: true, type: ue_asset_path }
+    component: { default_state: none, description_zh: "current_level_component 只读采样的组件名称或对象路径；必须与 actor_id 同时提供", required: false, type: string }
+    deactivate_before_reset: { default: true, default_state: defined, description_zh: "C++ 实现读取的 deactivate_before_reset 参数", required: false, type: bool }
+    expected_frame: { default: 0, default_state: defined, description_zh: "C++ 实现读取的 expected_frame 参数", required: false, type: number }
+    expected_preview_state_token: { default_state: none, description_zh: "C++ 实现读取的 expected_preview_state_token 参数", required: false, type: string }
+    include_each_tick: { default: true, default_state: defined, description_zh: "C++ 实现读取的 include_each_tick 参数", required: false, type: bool }
+    include_snapshots: { default: true, default_state: defined, description_zh: "C++ 实现读取的 include_snapshots 参数", required: false, type: bool }
+    open_editor_if_needed: { default: false, default_state: defined, description_zh: "C++ 实现读取的 open_editor_if_needed 参数", required: false, type: bool }
+    pause_after_probe: { default: false, default_state: defined, description_zh: "C++ 实现读取的 pause_after_probe 参数", required: false, type: bool }
+	particle_attributes: { default_state: none, description_zh: "需要从每个 CPU stateful Emitter 的当前粒子数据集中采样的规范属性名，精确匹配且最多 16 项", item_type: string, required: false, type: array }
+    measure_performance: { default: false, default_state: defined, description_zh: "为 simulate 分支启用逐步 host wall-clock 计时；不隐式等待 GPU 完成", required: false, type: bool }
+    performance_warmup_ticks: { default: 0, default_state: defined, description_zh: "从 tick_count 开头排除的 warmup 步数；启用计时时必须小于 tick_count", required: false, type: integer }
+    probe_mode: { default_state: none, description_zh: "sample_mode 的旧兼容别名；仅在未提供 sample_mode 时读取", required: false, type: string }
+    require_paused: { default: true, default_state: defined, description_zh: "C++ 实现读取的 require_paused 参数", required: false, type: bool }
+    reset_preview: { default: true, default_state: defined, description_zh: "C++ 实现读取的 reset_preview 参数", required: false, type: bool }
+    sample_mode: { default: simulate, default_state: defined, description_zh: "C++ 实现读取的 sample_mode 参数", required: false, type: string }
+    target_frame: { default: 0, default_state: defined, description_zh: "C++ 实现读取的 target_frame 参数", required: false, type: number }
+	max_particle_samples: { default: 64, default_state: defined, description_zh: "每个 Emitter 最多采样的粒子数，1..1024；请求属性时才产生采样成本", required: false, type: integer }
+    tick_count: { default: 3, default_state: defined, description_zh: "C++ 实现读取的 tick_count 参数", required: false, type: integer }
+    tick_delta_seconds: { default_state: none, description_zh: "C++ 实现读取的 tick_delta_seconds 参数", required: false, type: number }
+    use_transient_component: { default: false, default_state: defined, description_zh: "C++ 实现读取的 use_transient_component 参数", required: false, type: bool }
+    use_transient_preview_component: { default: false, default_state: defined, description_zh: "C++ 实现读取的 use_transient_preview_component 参数", required: false, type: bool }
+  }
+  state: defined
+}
+response: { artifact_fields: [snapshots, current_preview_validation, final_stats, initial_stats, preview_restore, summary], compact_fields: [asset_path, sample_mode, tick_count, snapshot_count, component_source, component_name, restored_dirty_state, performance], failure_fields: [params.asset_path, params.actor_id, params.component], max_items_policy: { fields: [], mode: none } }
+returns: {
+  fields: {
+    activate_reset: { description_zh: "C++ 实现返回的 activate_reset 字段；是否出现取决于执行分支", required: false, type: bool }
+    advance_mode: { description_zh: "C++ 实现返回的 advance_mode 字段；是否出现取决于执行分支", required: false, type: string }
+    advance_semantics: { description_zh: "C++ 实现返回的 advance_semantics 字段；是否出现取决于执行分支", required: false, type: string }
+    actor_id: { description_zh: "current_level_component 只读采样解析的 Actor 标识", required: false, type: string }
+    asset_path: { description_zh: "C++ 实现返回的 asset_path 字段；是否出现取决于执行分支", required: false, type: ue_asset_path }
+    component: { description_zh: "current_level_component 只读采样请求的组件标识", required: false, type: string }
+    component_active_before_activation: { description_zh: "C++ 实现返回的 component_active_before_activation 字段；是否出现取决于执行分支", required: false, type: bool }
+    component_name: { description_zh: "C++ 实现返回的 component_name 字段；是否出现取决于执行分支", required: false, type: string }
+    component_path: { description_zh: "C++ 实现返回的 component_path 字段；是否出现取决于执行分支", required: false, type: string }
+    component_source: { description_zh: "C++ 实现返回的 component_source 字段；是否出现取决于执行分支", required: false, type: string }
+    component_world: { description_zh: "C++ 实现返回的 component_world 字段；是否出现取决于执行分支", required: false, type: string }
+    current_preview_validation: { description_zh: "C++ 实现返回的 current_preview_validation 字段；是否出现取决于执行分支", required: false, type: json_value }
+    deactivate_before_reset: { description_zh: "C++ 实现返回的 deactivate_before_reset 字段；是否出现取决于执行分支", required: false, type: bool }
+    final_stats: { description_zh: "C++ 实现返回的 final_stats 字段；是否出现取决于执行分支", required: false, type: json_value }
+    include_snapshots: { description_zh: "C++ 实现返回的 include_snapshots 字段；是否出现取决于执行分支", required: false, type: bool }
+    initial_stats: { description_zh: "C++ 实现返回的 initial_stats 字段；是否出现取决于执行分支", required: false, type: json_value }
+    mutated_preview_component: { description_zh: "C++ 实现返回的 mutated_preview_component 字段；是否出现取决于执行分支", required: false, type: bool }
+    object_path: { description_zh: "C++ 实现返回的 object_path 字段；是否出现取决于执行分支", required: false, type: ue_object_path }
+    pause_after_probe: { description_zh: "C++ 实现返回的 pause_after_probe 字段；是否出现取决于执行分支", required: false, type: bool }
+    performance: { description_zh: "显式启用 measure_performance 时返回 advance、world queue flush 与 combined 的 host wall-clock 统计；不代表 GPU frame time", required: false, type: json_value }
+    preview_restore: { description_zh: "C++ 实现返回的 preview_restore 字段；是否出现取决于执行分支", required: false, type: json_value }
+    reset_preview: { description_zh: "C++ 实现返回的 reset_preview 字段；是否出现取决于执行分支", required: false, type: bool }
+    restore_preview_after_probe: { description_zh: "C++ 实现返回的 restore_preview_after_probe 字段；是否出现取决于执行分支", required: false, type: bool }
+    restored_dirty_state: { description_zh: "C++ 实现返回的 restored_dirty_state 字段；是否出现取决于执行分支", required: false, type: bool }
+    sample_mode: { description_zh: "C++ 实现返回的 sample_mode 字段；是否出现取决于执行分支", required: false, type: string }
+    snapshot_count: { description_zh: "C++ 实现返回的 snapshot_count 字段；是否出现取决于执行分支", required: false, type: integer }
+    snapshots: { description_zh: "C++ 实现返回的 snapshots 字段；是否出现取决于执行分支", item_type: json_value, required: false, type: array }
+    snapshots_emitted_count: { description_zh: "C++ 实现返回的 snapshots_emitted_count 字段；是否出现取决于执行分支", required: false, type: integer }
+    stats_error: { description_zh: "C++ 实现返回的 stats_error 字段；是否出现取决于执行分支", required: false, type: string }
+    summary: { description_zh: "C++ 实现返回的 summary 字段；是否出现取决于执行分支", required: false, type: json_value }
+    tick_count: { description_zh: "C++ 实现返回的 tick_count 字段；是否出现取决于执行分支", required: false, type: integer }
+    tick_delta_seconds: { description_zh: "C++ 实现返回的 tick_delta_seconds 字段；是否出现取决于执行分支", required: false, type: number }
+    used_seek: { description_zh: "C++ 实现返回的 used_seek 字段；是否出现取决于执行分支", required: false, type: bool }
+    was_package_dirty_before_probe: { description_zh: "C++ 实现返回的 was_package_dirty_before_probe 字段；是否出现取决于执行分支", required: false, type: bool }
+  }
+  state: defined
+}
+schema: uai.command_spec.v1
+status: active
+types: {}
+verification: {
+  assertions: [
+    { id: result_present, operator: exists, source: returns.activate_reset }
+  ]
+  failure_policy: fail_overall
+  methods: [
+    { id: result, kind: result_assertion }
+  ]
+  required: true
+  state: defined
+}
+version: 1

@@ -1,6 +1,6 @@
 #include "UeAgentHttpServer_ControlRig.h"
 
-#include "UeAgentHttpServer_ControlRigOps.h"
+#include "Domains/Rigging/UeAgentControlRigDomainBackend.h"
 
 #include "Commands/EditorViewport/UeAgentEditorViewportLegacy.h"
 #include "ControlRigBlueprint.h"

@@ -1,0 +1,78 @@
+authoring: { reason: command_has_no_registered_folder_authoring_profile, state: none }
+category: modeling
+command: modeling_set_active_tool_property
+deprecation: { reason: command_is_active, state: none }
+discovery: { aliases: [], keywords_en: [modeling, set, active, tool, property], keywords_zh: [modeling_set_active_tool_property], summary_en: "Execute modeling_set_active_tool_property with a verified implementation contract", summary_zh: "**原子/兼容**：控制 Modeling Mode 工具、选择或网格编辑动作", tags: [modeling, p2-002] }
+errors: {
+  codes: [
+    { code: editor_viewport_not_found, description_zh: "C++ 实现返回错误码 editor_viewport_not_found", retry_safe: false, stage: execution, wire_match: exact }
+    { code: modeling_mode_unavailable, description_zh: "C++ 实现返回错误码 modeling_mode_unavailable", retry_safe: false, stage: execution, wire_match: exact }
+    { code: modeling_tools_context_unavailable, description_zh: "C++ 实现返回错误码 modeling_tools_context_unavailable", retry_safe: false, stage: execution, wire_match: exact }
+    { code: no_active_tool, description_zh: "C++ 实现返回错误码 no_active_tool", retry_safe: false, stage: execution, wire_match: exact }
+    { code: property_not_found, description_zh: "C++ 实现返回错误码 property_not_found", retry_safe: false, stage: execution, wire_match: exact }
+    { code: tool_property_set_not_found, description_zh: "C++ 实现返回错误码 tool_property_set_not_found", retry_safe: false, stage: execution, wire_match: exact }
+    { code: exactly_one_tool_property_required, description_zh: "C++ 实现返回错误码 exactly_one_tool_property_required", retry_safe: true, stage: preflight, wire_match: exact }
+    { code: invalid_tool_property_descriptor, description_zh: "C++ 实现返回错误码 invalid_tool_property_descriptor", retry_safe: true, stage: preflight, wire_match: exact }
+    { code: tool_property_apply_failed, description_zh: "C++ 实现返回错误码 tool_property_apply_failed", retry_safe: false, stage: execution, wire_match: exact }
+  ]
+}
+evidence: {
+  docs: [
+    { path: "Plugins/UeAgentInterface/docs/commands/modeling/modeling_set_active_tool_property.md", purpose: "user documentation cross-check; C++ implementation remains authoritative" }
+  ]
+  implementation: [
+    { line_hint: 278, path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Commands/Modeling/UeAgentHttpServer_Modeling_ToolLifecycle.cpp", purpose: "command handler, parameter and return evidence", symbol: CmdModelingSetActiveToolProperty }
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Commands/Modeling/UeAgentHttpServer_Modeling.cpp", purpose: "transitive helper evidence used by the command handler" }
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Server/UeAgentHttpServer.cpp", purpose: "transitive helper evidence used by the command handler" }
+  ]
+  tests: [
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterfaceTests/Private/Smoke/UeAgentInterfaceSmoke_Coverage.cpp", purpose: "smoke or negative-path evidence cross-checked for the verified contract" }
+  ]
+}
+execution: {
+  destructive: false
+  editor_state: required
+  game_thread: required
+  idempotent: false
+  kind: write
+  overwrite_behavior: none
+  pie_state: allowed
+  retry_safe: false
+  save_behavior: none
+  side_effects: [modifies_editor_session, modifies_level]
+  ui_effect: none
+}
+maturity: verified
+params: {
+  constraints: []
+  fields: { tool_properties: { default_state: none, description_zh: "必须恰好包含一个 property_set + UObject v2 descriptor", item_type: json_value, required: true, type: array } }
+  state: defined
+}
+response: { artifact_fields: [property_results, property_sets], compact_fields: [active_tool_name, has_active_tool, can_accept, can_cancel], failure_fields: [], max_items_policy: { fields: [], mode: none } }
+returns: {
+  fields: {
+    active_tool_name: { description_zh: "C++ 实现返回的 active_tool_name 字段；是否出现取决于执行分支", required: false, type: string }
+    can_accept: { description_zh: "C++ 实现返回的 can_accept 字段；是否出现取决于执行分支", required: false, type: bool }
+    can_cancel: { description_zh: "C++ 实现返回的 can_cancel 字段；是否出现取决于执行分支", required: false, type: bool }
+    has_active_tool: { description_zh: "C++ 实现返回的 has_active_tool 字段；是否出现取决于执行分支", required: false, type: bool }
+    property_results: { description_zh: "公共 UObject v2 apply 的逐属性结果", item_type: json_value, required: true, type: array }
+    property_sets: { description_zh: "C++ 实现返回的 property_sets 字段；是否出现取决于执行分支", item_type: json_value, required: false, type: array }
+    tool_has_accept: { description_zh: "C++ 实现返回的 tool_has_accept 字段；是否出现取决于执行分支", required: false, type: bool }
+  }
+  state: defined
+}
+schema: uai.command_spec.v1
+status: active
+types: {}
+verification: {
+  assertions: [
+    { id: result_present, operator: exists, source: returns.active_tool_name }
+  ]
+  failure_policy: fail_overall
+  methods: [
+    { id: result, kind: result_assertion }
+  ]
+  required: true
+  state: defined
+}
+version: 1

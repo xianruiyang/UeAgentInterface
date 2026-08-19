@@ -27,8 +27,9 @@ namespace UeAgentTextureOps
 	bool GetOptionalFloat(const TSharedPtr<FJsonObject>& Params, const TCHAR* FieldName, float& InOutValue, FString& OutError);
 	bool ReadStringArray(const TSharedPtr<FJsonObject>& Params, const TCHAR* FieldName, TArray<FString>& OutValues);
 	FString ResolveFilePath(const FString& FilePath);
-	bool SaveJsonFile(const FString& OutputPathInput, const TSharedPtr<FJsonObject>& Root, FString& OutOutputPath, FString& OutError);
-	bool LoadJsonFile(const FString& InputPathInput, TSharedPtr<FJsonObject>& OutRoot, FString& OutResolvedPath, FString& OutError);
+	bool SaveAuthoringFile(const FString& OutputPathInput, const TSharedPtr<FJsonObject>& Root, FString& OutOutputPath, FString& OutError);
+	bool SaveAuthoringFile(const FString& OutputPathInput, const TSharedPtr<FJsonObject>& Root, FString& OutOutputPath, FString& OutError, bool bStandaloneExport);
+	bool LoadAuthoringFile(const FString& InputPathInput, TSharedPtr<FJsonObject>& OutRoot, FString& OutResolvedPath, FString& OutError);
 	TSharedPtr<FJsonObject> MakeCoverageReport(const FString& Profile);
 	TSharedPtr<FJsonObject> MakeIssue(const FString& Code, const FString& Severity, const FString& Message);
 	void AddIssue(TArray<TSharedPtr<FJsonValue>>& Issues, const FString& Code, const FString& Severity, const FString& Message);
@@ -50,15 +51,12 @@ namespace UeAgentTextureOps
 	TSharedPtr<FJsonObject> BuildPixelStatsFromImage(const FImage& Image);
 	bool ReadRenderTarget2DPixels(UTextureRenderTarget2D* RenderTarget, TArray<FColor>& OutPixels, FIntPoint& OutSize, FString& OutError);
 	bool RequireRenderResourceAccess(FString& OutError);
-	FProperty* FindPropertyByNameLoose(UStruct* StructType, const FString& Segment);
-	bool ResolvePropertyPath(UObject* Obj, const FString& PropertyPath, FProperty*& OutProperty, void*& OutValuePtr);
-	bool ExportPropertyText(UObject* Obj, const FString& PropertyPath, FString& OutText, FString& OutCppType);
-	bool ImportPropertyText(UObject* Obj, const FString& PropertyPath, const FString& ValueText, FString& OutReadback, FString& OutError);
+	bool ApplyCanonicalProperty(UObject* Obj, const FString& PropertyPath, const TSharedPtr<FJsonValue>& CanonicalValue, TSharedPtr<FJsonObject>& OutSummary, FString& OutError);
 	TSharedPtr<FJsonObject> BuildTextureInfo(UTexture* Texture, bool bIncludeSource, bool bIncludePixelStats);
 	TSharedPtr<FJsonObject> BuildRenderTargetInfo(UTextureRenderTarget* RenderTarget);
 	TSharedPtr<FJsonObject> BuildGenericAssetJson(UObject* Asset, const FString& Profile, bool bIncludeProperties);
 	bool ApplyGenericProperties(UObject* Asset, const TSharedPtr<FJsonObject>& Root, TArray<TSharedPtr<FJsonValue>>& OutResults, FString& OutError);
-	bool RejectLegacyPropertiesFolderIfPresent(const FString& FolderPath, const FString& OwnerKind, const FString& AssetPath, const FString& SourceCommand, TSharedPtr<FJsonObject>& OutData, FString& OutError);
+	bool RejectAuthoringPropertiesFolderIfPresent(const FString& FolderPath, const FString& OwnerKind, const FString& AssetPath, const FString& SourceCommand, TSharedPtr<FJsonObject>& OutData, FString& OutError);
 	bool ApplyAssetDetailsFromFolderIfPresent(UObject* Asset, const FString& FolderPath, const TSharedPtr<FJsonObject>& Root, const FString& OwnerKind, const FString& SourceCommand, bool bApply, TSharedPtr<FJsonObject>& DetailsApplySummary, int32& GroupedDetailsApplied, FString& OutError);
 	bool RenderTextureGraphViaReflection(UObject* WorldContextObject, UTextureGraphBase* Graph, TArray<UTextureRenderTarget2D*>& OutOutputs, FString& OutError);
 

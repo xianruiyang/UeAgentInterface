@@ -1,0 +1,15 @@
+definition: {
+  additional_fields: false
+  fields: {
+    found: { default_state: none, description_zh: "元素是否存在", required: true, type: bool }
+    global_transform: { default_state: none, description_zh: "求值后的 Control Rig hierarchy-global transform", required: false, type: object, type_ref: "shared:Transform3D" }
+    initial_global_transform: { default_state: none, description_zh: "initial pose 的 hierarchy-global transform", required: false, type: object, type_ref: "shared:Transform3D" }
+    local_transform: { default_state: none, description_zh: "相对 hierarchy parent 的求值 local transform", required: false, type: object, type_ref: "shared:Transform3D" }
+    name: { default_state: none, description_zh: "Hierarchy element 名", required: true, type: string }
+    type: { default_state: none, description_zh: "Hierarchy element 类型", required: true, type: string }
+  }
+  kind: object
+}
+schema: uai.command_spec.shared_type.v1
+type_id: ControlRigHierarchySample
+version: 1

@@ -7,13 +7,10 @@
 #include "Blueprint/BlueprintSupport.h"
 #include "Blueprint/UserWidget.h"
 #include "Blueprint/WidgetBlueprintGeneratedClass.h"
-#include "Commands/PaletteSearch/UeAgentPaletteSearchAuthoring.h"
 #include "Commands/PaletteSearch/UeAgentPaletteSearchNaming.h"
 #include "Components/ActorComponent.h"
 #include "Components/Widget.h"
 #include "ComponentTypeRegistry.h"
-#include "Dom/JsonObject.h"
-#include "Dom/JsonValue.h"
 #include "Internationalization/Text.h"
 #include "Kismet2/KismetEditorUtilities.h"
 #include "Misc/App.h"
@@ -104,46 +101,6 @@ namespace
 			}
 		}
 		return false;
-	}
-
-	static FString MakeSafeObjectName(const FString& Name, const FString& Suffix)
-	{
-		FString Result;
-		for (const TCHAR Ch : Name)
-		{
-			if (FChar::IsAlnum(Ch) || Ch == TEXT('_'))
-			{
-				Result.AppendChar(Ch);
-			}
-		}
-		if (Result.IsEmpty())
-		{
-			Result = TEXT("New");
-		}
-		if (!Suffix.IsEmpty() && !Result.EndsWith(Suffix, ESearchCase::IgnoreCase))
-		{
-			Result += Suffix;
-		}
-		return Result;
-	}
-
-	static TSharedRef<FJsonObject> BuildLegacyAddComponent(const FCandidate& Candidate)
-	{
-		TSharedRef<FJsonObject> Obj = MakeShared<FJsonObject>();
-		Obj->SetStringField(TEXT("operation"), TEXT("blueprint_add_component"));
-		Obj->SetStringField(TEXT("component_class"), Candidate.FullName);
-		Obj->SetStringField(TEXT("component_name"), MakeSafeObjectName(Candidate.Name, TEXT("Component")));
-		return Obj;
-	}
-
-	static TSharedRef<FJsonObject> BuildLegacyAddWidget(const FCandidate& Candidate)
-	{
-		TSharedRef<FJsonObject> Obj = MakeShared<FJsonObject>();
-		Obj->SetStringField(TEXT("operation"), TEXT("umg_add_widget"));
-		Obj->SetStringField(TEXT("widget_class"), Candidate.FullName);
-		Obj->SetStringField(TEXT("widget_name"), MakeSafeObjectName(Candidate.Name, TEXT("Widget")));
-		Obj->SetBoolField(TEXT("make_variable"), false);
-		return Obj;
 	}
 
 	static FString FullNameFromComponentEntry(const FComponentClassComboEntryPtr& Entry)
@@ -254,24 +211,22 @@ namespace
 			Candidate.Name = Name.IsEmpty() ? DisplayNameFromClassPath(FullName) : Name;
 			Candidate.DisplayName = Candidate.Name;
 			Candidate.FullName = FullName;
-			Candidate.StableId = FullName;
-			Candidate.CanonicalKey = Candidate.Kind + TEXT(":") + Candidate.FullName;
-			Candidate.CandidateId = Candidate.CanonicalKey;
 			Candidate.CategoryPath = CurrentSection;
 			Candidate.Section = CurrentSection;
 			Candidate.SourceOrigin = SourceOrigin;
 			Candidate.SourceLabel = SourceOrigin;
 			Candidate.PackagePath = ComponentClass ? ComponentClass->GetOutermost()->GetName() : FPackageName::ObjectPathToPackageName(FullName);
 			Candidate.ObjectPath = FullName;
+			Candidate.AuthoringSelectors.Add(TEXT("component_class"), FullName);
 			Candidate.Tooltip = ComponentClass ? ComponentClass->GetToolTipText().ToString() : Candidate.Name;
 			Candidate.Keywords = FString::Printf(TEXT("%s %s %s"), *Candidate.Name, *FullName, *CurrentSection);
 			Candidate.WriteSupport = TEXT("blueprint.components[].component_class");
-			Candidate.SupportReason = TEXT("Use full_name as component_class in Blueprint folder JSON; the same class path is accepted by blueprint_add_component compatibility.");
+			Candidate.SupportReason = TEXT("Use full_name as component_class in the Blueprint component-tree authoring surface.");
 			Candidate.bInLibrary = true;
 			Candidate.bSupportedInContext = true;
 			Candidate.UiOrder = UiOrder++;
-			Candidate.JsonAuthoring = BuildJsonAuthoringPatch(Candidate);
-			Candidate.LegacyAuthoring = BuildLegacyAddComponent(Candidate);
+			FString IdentityError;
+			ensureAlwaysMsgf(SetCandidateIdentity(Params.CatalogType, FullName, Candidate.Name, Candidate, IdentityError), TEXT("Component catalog identity failed: %s"), *IdentityError);
 			OutCandidates.Add(MoveTemp(Candidate));
 		}
 	}
@@ -348,24 +303,22 @@ namespace
 		OutCandidate.Name = Name;
 		OutCandidate.DisplayName = Name;
 		OutCandidate.FullName = FullName;
-		OutCandidate.StableId = FullName;
-		OutCandidate.CanonicalKey = OutCandidate.Kind + TEXT(":") + FullName;
-		OutCandidate.CandidateId = OutCandidate.CanonicalKey;
 		OutCandidate.CategoryPath = Category.IsEmpty() ? TEXT("Widget") : Category;
 		OutCandidate.Section = OutCandidate.CategoryPath;
 		OutCandidate.SourceOrigin = SourceOrigin;
 		OutCandidate.SourceLabel = SourceOrigin;
 		OutCandidate.PackagePath = PackagePath;
 		OutCandidate.ObjectPath = ObjectPath.IsEmpty() ? FullName : ObjectPath;
+		OutCandidate.AuthoringSelectors.Add(TEXT("widget_class"), FullName);
 		OutCandidate.Tooltip = Tooltip;
 		OutCandidate.Keywords = FString::Printf(TEXT("%s %s %s"), *Name, *FullName, *OutCandidate.CategoryPath);
 		OutCandidate.WriteSupport = TEXT("umg.widget_tree.widgets[].widget_class");
-		OutCandidate.SupportReason = TEXT("Use full_name as widget_class in UMG folder JSON; the same class path is accepted by umg_add_widget compatibility.");
+		OutCandidate.SupportReason = TEXT("Use full_name as widget_class in the UMG widget-tree authoring surface.");
 		OutCandidate.bInLibrary = true;
 		OutCandidate.bSupportedInContext = true;
 		OutCandidate.UiOrder = UiOrder;
-		OutCandidate.JsonAuthoring = BuildJsonAuthoringPatch(OutCandidate);
-		OutCandidate.LegacyAuthoring = BuildLegacyAddWidget(OutCandidate);
+		FString IdentityError;
+		ensureAlwaysMsgf(SetCandidateIdentity(TEXT("umg_widget"), FullName, Name, OutCandidate, IdentityError), TEXT("Widget catalog identity failed: %s"), *IdentityError);
 	}
 
 	static void AddLoadedWidgetCandidates(const FSearchParams& Params, TArray<FCandidate>& OutCandidates, TSet<FString>& SeenFullNames, int32& InOutUiOrder)

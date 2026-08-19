@@ -29,6 +29,7 @@ public:
 	FString GetListenAddress() const;
 	FString GetAuthTokenMasked() const;
 	FString GetAuthToken() const;
+	FString GetServerInstanceId() const;
 
 	static bool ParseResponseOptions(const TSharedPtr<FJsonObject>& Root, FUeAgentResponseOptions& OutOptions, FString& OutError);
 	static FString FormatResponseJson(const TSharedRef<FJsonObject>& Root, const FUeAgentResponseOptions& Options = FUeAgentResponseOptions());
@@ -47,10 +48,7 @@ private:
 	static TUniquePtr<FHttpServerResponse> MakeErrorResponse(int32 Code, const FString& ErrorCode, const FString& ErrorMessage);
 
 	bool ParseExecBody(const FHttpServerRequest& Request, FUeAgentRequestContext& OutCtx, FString& OutError) const;
-	bool ParseBatchCommands(const FUeAgentRequestContext& BatchCtx, TArray<FUeAgentRequestContext>& OutCommands, bool& bOutStopOnError, FString& OutError) const;
-
 public:
-	bool ExecuteBatchCommands(const FUeAgentRequestContext& BatchCtx, TSharedPtr<FJsonObject>& OutData, TArray<TSharedPtr<FJsonValue>>& OutArtifacts, FString& OutError) const;
 	bool ExecuteCommandOnGameThread(const FUeAgentRequestContext& Ctx, FUeAgentCommandOutput& OutOutput, FString& OutError) const;
 	bool ExecuteCommandOnGameThread(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, TArray<TSharedPtr<FJsonValue>>& OutArtifacts, FString& OutError) const;
 
@@ -84,27 +82,17 @@ private:
 		const FString& ImportStatus,
 		const FString& ImportError = FString());
 
+	// Shared editor-world resolution used by command-domain adapters.
+public:
 	static class UWorld* GetEditorWorld(FString& OutError);
 	static class AActor* FindActorByNameOrLabel(UWorld* World, const FString& NameOrLabel);
 
+private:
 	TSharedPtr<IHttpRouter> Router;
 	TArray<FHttpRouteHandle> RouteHandles;
 	FDelegateHandle RequestLogPreprocessorHandle;
 	bool bRunning;
 	mutable bool bPythonConsoleCommandExecuted;
+	FString ServerInstanceId;
 
-	struct FTransactionSpawnedActorRecord
-	{
-		FTransactionSpawnedActorRecord();
-
-		TWeakObjectPtr<class AActor> Actor;
-		TWeakObjectPtr<class UPackage> LevelPackage;
-		TWeakObjectPtr<class UPackage> ActorPackage;
-		bool bLevelPackageWasDirtyBeforeSpawn;
-		bool bActorPackageWasDirtyBeforeSpawn;
-	};
-
-	mutable FCriticalSection TransactionMutex;
-	int32 ActiveTransactionIndex;
-	mutable TArray<FTransactionSpawnedActorRecord> ActiveTransactionSpawnedActors;
 };

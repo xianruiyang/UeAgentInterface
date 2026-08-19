@@ -1,0 +1,11 @@
+definition: {
+  additional_fields: false
+  fields: {
+    fields: { default_state: none, description_zh: "参数名到 canonical value 的映射", required: true, type: object }
+    schema: { default_state: none, description_zh: "参数 schema；容器和复合类型递归携带 element_type、key_type、mapped_type、struct_path 或 class constraint", item_type: object, item_type_ref: "shared:PCGGraphParameterDescriptor", required: true, type: array }
+  }
+  kind: object
+}
+schema: uai.command_spec.shared_type.v1
+type_id: PCGGraphParameterBag
+version: 1

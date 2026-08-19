@@ -1,0 +1,53 @@
+authoring: { reason: command_has_no_registered_folder_authoring_profile, state: none }
+category: audio
+command: audio_stop_all_preview_sounds
+deprecation: { reason: command_is_active, state: none }
+discovery: { aliases: [], keywords_en: [audio, stop, all, preview, sounds], keywords_zh: [audio_stop_all_preview_sounds], summary_en: "Execute audio_stop_all_preview_sounds with a verified implementation contract", summary_zh: "停止 UAI 创建的预览/探针组件", tags: [audio, p2-007] }
+errors: { codes: [] }
+evidence: {
+  docs: [
+    { path: "Plugins/UeAgentInterface/docs/commands/audio/audio_stop_all_preview_sounds.md", purpose: "user documentation cross-check; C++ implementation remains authoritative" }
+  ]
+  implementation: [
+    { line_hint: 206, path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Commands/Audio/UeAgentHttpServer_AudioRecording.cpp", purpose: "command handler, parameter and return evidence", symbol: CmdAudioStopAllPreviewSounds }
+  ]
+  tests: [
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterfaceTests/Private/Smoke/UeAgentInterfaceAudioSmokeTests.cpp", purpose: "smoke or negative-path evidence cross-checked for the verified contract" }
+  ]
+}
+execution: {
+  destructive: true
+  editor_state: required
+  game_thread: required
+  idempotent: false
+  kind: session_control
+  overwrite_behavior: none
+  pie_state: allowed
+  retry_safe: false
+  save_behavior: none
+  side_effects: [stops_runtime, modifies_editor_session]
+  ui_effect: none
+}
+maturity: verified
+params: { reason: implementation_reads_no_command_parameters, state: none }
+response: { artifact_fields: [], compact_fields: [cleanup_complete, stopped_count], failure_fields: [], max_items_policy: { fields: [], mode: none } }
+returns: {
+  fields: { cleanup_complete: { description_zh: "C++ 实现返回的 cleanup_complete 字段；是否出现取决于执行分支", required: false, type: bool }, stopped_count: { description_zh: "C++ 实现返回的 stopped_count 字段；是否出现取决于执行分支", required: false, type: integer } }
+  state: defined
+}
+schema: uai.command_spec.v1
+status: active
+types: {}
+verification: {
+  assertions: [
+    { id: result_present, operator: exists, source: returns.cleanup_complete }
+    { expected: true, id: cleanup_complete_true, operator: equals, source: returns.cleanup_complete }
+  ]
+  failure_policy: fail_overall
+  methods: [
+    { id: result, kind: result_assertion }
+  ]
+  required: true
+  state: defined
+}
+version: 1

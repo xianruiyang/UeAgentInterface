@@ -1,0 +1,77 @@
+authoring: { reason: command_has_no_registered_folder_authoring_profile, state: none }
+category: ai_behavior_blackboard_statetree_eqs_navigation_smartobject
+command: smart_object_claim
+deprecation: { reason: command_is_active, state: none }
+discovery: { aliases: [], keywords_en: [smart, object, claim, ai_behavior_blackboard_statetree_eqs_navigation_smartobject], keywords_zh: [smart_object_claim], summary_en: "Execute smart_object_claim with a verified implementation contract", summary_zh: "claim 查询结果", tags: [ai_behavior_blackboard_statetree_eqs_navigation_smartobject, p2-007] }
+errors: {
+  codes: [
+    { code: no_editor_world, description_zh: "C++ 实现返回错误码 no_editor_world", retry_safe: false, stage: execution, wire_match: exact }
+    { code: no_geditor, description_zh: "C++ 实现返回错误码 no_geditor", retry_safe: false, stage: execution, wire_match: exact }
+    { code: smart_object_claim_failed, description_zh: "C++ 实现返回错误码 smart_object_claim_failed", retry_safe: false, stage: execution, wire_match: exact }
+    { code: smart_object_find_result_not_found, description_zh: "C++ 实现返回错误码 smart_object_find_result_not_found", retry_safe: false, stage: execution, wire_match: exact }
+    { code: smart_object_slot_not_claimable, description_zh: "C++ 实现返回错误码 smart_object_slot_not_claimable", retry_safe: false, stage: execution, wire_match: exact }
+    { code: smart_object_subsystem_not_found, description_zh: "C++ 实现返回错误码 smart_object_subsystem_not_found", retry_safe: false, stage: execution, wire_match: exact }
+  ]
+}
+evidence: {
+  docs: [
+    { path: "Plugins/UeAgentInterface/docs/commands/ai_behavior_blackboard_statetree_eqs_navigation_smartobject/smart_object_claim.md", purpose: "user documentation cross-check; C++ implementation remains authoritative" }
+  ]
+  implementation: [
+    { line_hint: 864, path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Commands/AI/UeAgentHttpServer_AI_SmartObjectBehaviorStack.cpp", purpose: "command handler, parameter and return evidence", symbol: CmdSmartObjectClaim }
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Commands/Level/UeAgentHttpServer_Level_CaptureAndPersistence.cpp", purpose: "transitive helper evidence used by the command handler" }
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Server/UeAgentHttpServer.cpp", purpose: "transitive helper evidence used by the command handler" }
+  ]
+  tests: [
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterfaceTests/Private/Smoke/UeAgentInterfaceAISmokeTests.cpp", purpose: "smoke or negative-path evidence cross-checked for the verified contract" }
+  ]
+}
+execution: {
+  destructive: false
+  editor_state: required
+  game_thread: required
+  idempotent: false
+  kind: session_control
+  overwrite_behavior: none
+  pie_state: allowed
+  retry_safe: false
+  save_behavior: none
+  side_effects: [modifies_editor_session]
+  ui_effect: none
+}
+maturity: verified
+params: {
+  constraints: []
+  fields: {
+    agent: { default_state: none, description_zh: "C++ 实现读取的 agent 参数", required: false, type: string }
+    claim_priority: { default_state: none, description_zh: "C++ 实现读取的 claim_priority 参数", required: false, type: string }
+    result_id: { default_state: none, description_zh: "C++ 实现读取的 result_id 参数", required: false, type: string }
+  }
+  state: defined
+}
+response: { artifact_fields: [result, slot_transform], compact_fields: [status, claim_debug, claim_handle], failure_fields: [], max_items_policy: { fields: [], mode: none } }
+returns: {
+  fields: {
+    claim_debug: { description_zh: "C++ 实现返回的 claim_debug 字段；是否出现取决于执行分支", required: false, type: string }
+    claim_handle: { description_zh: "C++ 实现返回的 claim_handle 字段；是否出现取决于执行分支", required: false, type: string }
+    result: { description_zh: "C++ 实现返回的 result 字段；是否出现取决于执行分支", required: false, type: json_value }
+    slot_transform: { description_zh: "C++ 实现返回的 slot_transform 字段；是否出现取决于执行分支", required: false, type: json_value }
+    status: { description_zh: "C++ 实现返回的 status 字段；是否出现取决于执行分支", required: false, type: string }
+  }
+  state: defined
+}
+schema: uai.command_spec.v1
+status: active
+types: {}
+verification: {
+  assertions: [
+    { id: result_present, operator: exists, source: returns.status }
+  ]
+  failure_policy: fail_overall
+  methods: [
+    { id: result, kind: result_assertion }
+  ]
+  required: true
+  state: defined
+}
+version: 1

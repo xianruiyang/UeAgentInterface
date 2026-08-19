@@ -1,0 +1,213 @@
+authoring: { reason: command_has_no_registered_folder_authoring_profile, state: none }
+category: montage
+command: montage_apply_json
+deprecation: { reason: command_is_active, state: none }
+discovery: { aliases: [], keywords_en: [montage, apply, json], keywords_zh: [montage_apply_json], summary_en: "Execute montage_apply_json with a verified implementation contract", summary_zh: "从单文件 HJSON 回写 Montage", tags: [montage, p2-006] }
+errors: {
+  codes: [
+    { code: add_section_failed, description_zh: "C++ 实现返回错误码 add_section_failed", retry_safe: false, stage: execution, wire_match: exact }
+    { code: animation_asset_not_found, description_zh: "C++ 实现返回错误码 animation_asset_not_found", retry_safe: false, stage: execution, wire_match: exact }
+    { code: animation_asset_skeleton_incompatible, description_zh: "C++ 实现返回错误码 animation_asset_skeleton_incompatible", retry_safe: false, stage: execution, wire_match: exact }
+    { code: asset_already_exists, description_zh: "C++ 实现返回错误码 asset_already_exists", retry_safe: false, stage: execution, wire_match: exact }
+    { code: asset_not_found, description_zh: "C++ 实现返回错误码 asset_not_found", retry_safe: false, stage: execution, wire_match: exact }
+    { code: can_only_remove_last_slot_track, description_zh: "C++ 实现返回错误码 can_only_remove_last_slot_track", retry_safe: false, stage: execution, wire_match: exact }
+    { code: cannot_remove_last_notify_track, description_zh: "C++ 实现返回错误码 cannot_remove_last_notify_track", retry_safe: false, stage: execution, wire_match: exact }
+    { code: cannot_remove_last_section, description_zh: "C++ 实现返回错误码 cannot_remove_last_section", retry_safe: false, stage: execution, wire_match: exact }
+    { code: cannot_remove_last_slot_track, description_zh: "C++ 实现返回错误码 cannot_remove_last_slot_track", retry_safe: false, stage: execution, wire_match: exact }
+    { code: cannot_rename_blueprint_notify_by_name, description_zh: "C++ 实现返回错误码 cannot_rename_blueprint_notify_by_name", retry_safe: false, stage: execution, wire_match: exact }
+    { code: create_anim_montage_factory_failed, description_zh: "C++ 实现返回错误码 create_anim_montage_factory_failed", retry_safe: false, stage: execution, wire_match: exact }
+    { code: create_anim_montage_failed, description_zh: "C++ 实现返回错误码 create_anim_montage_failed", retry_safe: false, stage: execution, wire_match: exact }
+    { code: create_notify_object_failed, description_zh: "C++ 实现返回错误码 create_notify_object_failed", retry_safe: false, stage: execution, wire_match: exact }
+    { code: create_notify_state_object_failed, description_zh: "C++ 实现返回错误码 create_notify_state_object_failed", retry_safe: false, stage: execution, wire_match: exact }
+    { code: create_notify_track_failed, description_zh: "C++ 实现返回错误码 create_notify_track_failed", retry_safe: false, stage: execution, wire_match: exact }
+    { code: create_package_failed, description_zh: "C++ 实现返回错误码 create_package_failed", retry_safe: false, stage: execution, wire_match: exact }
+    { code: details_directory_create_failed, description_zh: "C++ 实现返回错误码 details_directory_create_failed", retry_safe: false, stage: execution, wire_match: prefix }
+    { code: details_directory_reset_failed, description_zh: "C++ 实现返回错误码 details_directory_reset_failed", retry_safe: false, stage: execution, wire_match: prefix }
+    { code: details_duplicate_property_path, description_zh: "C++ 实现返回错误码 details_duplicate_property_path", retry_safe: false, stage: execution, wire_match: prefix }
+    { code: details_existing_owner_ref_invalid, description_zh: "C++ 实现返回错误码 details_existing_owner_ref_invalid", retry_safe: true, stage: preflight, wire_match: prefix }
+    { code: details_field_missing_property_path, description_zh: "C++ 实现返回错误码 details_field_missing_property_path", retry_safe: true, stage: preflight, wire_match: prefix }
+    { code: details_group_missing_fields, description_zh: "C++ 实现返回错误码 details_group_missing_fields", retry_safe: true, stage: preflight, wire_match: prefix }
+    { code: details_index_invalid_group, description_zh: "C++ 实现返回错误码 details_index_invalid_group", retry_safe: true, stage: preflight, wire_match: prefix }
+    { code: details_index_missing_groups, description_zh: "C++ 实现返回错误码 details_index_missing_groups", retry_safe: true, stage: preflight, wire_match: exact }
+    { code: details_owner_scope_collision, description_zh: "C++ 实现返回错误码 details_owner_scope_collision", retry_safe: false, stage: execution, wire_match: prefix }
+    { code: details_rehydrate_missing_properties, description_zh: "C++ 实现返回错误码 details_rehydrate_missing_properties", retry_safe: true, stage: preflight, wire_match: prefix }
+    { code: duplicate_property_path, description_zh: "C++ 实现返回错误码 duplicate_property_path", retry_safe: false, stage: execution, wire_match: prefix }
+    { code: entry_object_invalid, description_zh: "C++ 实现返回错误码 entry_object_invalid", retry_safe: true, stage: preflight, wire_match: exact }
+    { code: hjson_file_not_found, description_zh: "C++ 实现返回错误码 hjson_file_not_found", retry_safe: false, stage: execution, wire_match: prefix }
+    { code: hjson_file_required, description_zh: "C++ 实现返回错误码 hjson_file_required", retry_safe: true, stage: preflight, wire_match: prefix }
+    { code: hjson_object_invalid, description_zh: "C++ 实现返回错误码 hjson_object_invalid", retry_safe: true, stage: preflight, wire_match: exact }
+    { code: invalid_anim_time_range, description_zh: "C++ 实现返回错误码 invalid_anim_time_range", retry_safe: true, stage: preflight, wire_match: exact }
+    { code: invalid_asset_name, description_zh: "C++ 实现返回错误码 invalid_asset_name", retry_safe: true, stage: preflight, wire_match: exact }
+    { code: invalid_asset_path, description_zh: "C++ 实现返回错误码 invalid_asset_path", retry_safe: true, stage: preflight, wire_match: exact }
+    { code: invalid_blend_mode_in, description_zh: "C++ 实现返回错误码 invalid_blend_mode_in", retry_safe: true, stage: preflight, wire_match: exact }
+    { code: invalid_blend_mode_out, description_zh: "C++ 实现返回错误码 invalid_blend_mode_out", retry_safe: true, stage: preflight, wire_match: exact }
+    { code: invalid_duration_seconds, description_zh: "C++ 实现返回错误码 invalid_duration_seconds", retry_safe: true, stage: preflight, wire_match: exact }
+    { code: invalid_notify_filter_lod, description_zh: "C++ 实现返回错误码 invalid_notify_filter_lod", retry_safe: true, stage: preflight, wire_match: exact }
+    { code: invalid_notify_filter_type, description_zh: "C++ 实现返回错误码 invalid_notify_filter_type", retry_safe: true, stage: preflight, wire_match: exact }
+    { code: invalid_notify_trigger_chance, description_zh: "C++ 实现返回错误码 invalid_notify_trigger_chance", retry_safe: true, stage: preflight, wire_match: exact }
+    { code: invalid_play_rate, description_zh: "C++ 实现返回错误码 invalid_play_rate", retry_safe: true, stage: preflight, wire_match: exact }
+    { code: invalid_property_descriptor, description_zh: "C++ 实现返回错误码 invalid_property_descriptor", retry_safe: true, stage: preflight, wire_match: prefix }
+    { code: invalid_root_path, description_zh: "C++ 实现返回错误码 invalid_root_path", retry_safe: true, stage: preflight, wire_match: exact }
+    { code: invalid_start_pos, description_zh: "C++ 实现返回错误码 invalid_start_pos", retry_safe: true, stage: preflight, wire_match: exact }
+    { code: invalid_sync_slot_index, description_zh: "C++ 实现返回错误码 invalid_sync_slot_index", retry_safe: true, stage: preflight, wire_match: exact }
+    { code: invalid_tick_type, description_zh: "C++ 实现返回错误码 invalid_tick_type", retry_safe: true, stage: preflight, wire_match: exact }
+    { code: invalid_time_seconds, description_zh: "C++ 实现返回错误码 invalid_time_seconds", retry_safe: true, stage: preflight, wire_match: exact }
+    { code: invalid_trigger_weight_threshold, description_zh: "C++ 实现返回错误码 invalid_trigger_weight_threshold", retry_safe: true, stage: preflight, wire_match: exact }
+    { code: json_root_invalid, description_zh: "C++ 实现返回错误码 json_root_invalid", retry_safe: true, stage: preflight, wire_match: exact }
+    { code: missing_animation_asset, description_zh: "C++ 实现返回错误码 missing_animation_asset", retry_safe: true, stage: preflight, wire_match: exact }
+    { code: missing_asset_editor_subsystem, description_zh: "C++ 实现返回错误码 missing_asset_editor_subsystem", retry_safe: true, stage: preflight, wire_match: exact }
+    { code: missing_asset_path, description_zh: "C++ 实现返回错误码 missing_asset_path", retry_safe: true, stage: preflight, wire_match: exact }
+    { code: missing_group_name, description_zh: "C++ 实现返回错误码 missing_group_name", retry_safe: true, stage: preflight, wire_match: exact }
+    { code: missing_input_file, description_zh: "C++ 实现返回错误码 missing_input_file", retry_safe: true, stage: preflight, wire_match: exact }
+    { code: missing_json_payload, description_zh: "C++ 实现返回错误码 missing_json_payload", retry_safe: true, stage: preflight, wire_match: exact }
+    { code: missing_new_section_name, description_zh: "C++ 实现返回错误码 missing_new_section_name", retry_safe: true, stage: preflight, wire_match: exact }
+    { code: missing_new_slot_name, description_zh: "C++ 实现返回错误码 missing_new_slot_name", retry_safe: true, stage: preflight, wire_match: exact }
+    { code: missing_next_section_name, description_zh: "C++ 实现返回错误码 missing_next_section_name", retry_safe: true, stage: preflight, wire_match: exact }
+    { code: missing_notify_index, description_zh: "C++ 实现返回错误码 missing_notify_index", retry_safe: true, stage: preflight, wire_match: exact }
+    { code: missing_notify_name_or_notify_class, description_zh: "C++ 实现返回错误码 missing_notify_name_or_notify_class", retry_safe: true, stage: preflight, wire_match: exact }
+    { code: missing_notify_state_class, description_zh: "C++ 实现返回错误码 missing_notify_state_class", retry_safe: true, stage: preflight, wire_match: exact }
+    { code: missing_output_file, description_zh: "C++ 实现返回错误码 missing_output_file", retry_safe: true, stage: preflight, wire_match: exact }
+    { code: missing_property_path, description_zh: "C++ 实现返回错误码 missing_property_path", retry_safe: true, stage: preflight, wire_match: prefix }
+    { code: missing_section_name, description_zh: "C++ 实现返回错误码 missing_section_name", retry_safe: true, stage: preflight, wire_match: exact }
+    { code: missing_segment_index, description_zh: "C++ 实现返回错误码 missing_segment_index", retry_safe: true, stage: preflight, wire_match: exact }
+    { code: missing_skeletal_mesh_path, description_zh: "C++ 实现返回错误码 missing_skeletal_mesh_path", retry_safe: true, stage: preflight, wire_match: exact }
+    { code: missing_skeleton_for_create, description_zh: "C++ 实现返回错误码 missing_skeleton_for_create", retry_safe: true, stage: preflight, wire_match: exact }
+    { code: missing_slot_name, description_zh: "C++ 实现返回错误码 missing_slot_name", retry_safe: true, stage: preflight, wire_match: exact }
+    { code: missing_target_skeleton_or_source_animation, description_zh: "C++ 实现返回错误码 missing_target_skeleton_or_source_animation", retry_safe: true, stage: preflight, wire_match: exact }
+    { code: missing_time_seconds, description_zh: "C++ 实现返回错误码 missing_time_seconds", retry_safe: true, stage: preflight, wire_match: exact }
+    { code: missing_track_name, description_zh: "C++ 实现返回错误码 missing_track_name", retry_safe: true, stage: preflight, wire_match: exact }
+    { code: montage_has_no_slot_tracks, description_zh: "C++ 实现返回错误码 montage_has_no_slot_tracks", retry_safe: false, stage: execution, wire_match: exact }
+    { code: montage_not_found, description_zh: "C++ 实现返回错误码 montage_not_found", retry_safe: false, stage: execution, wire_match: exact }
+    { code: montage_not_found_after_create, description_zh: "C++ 实现返回错误码 montage_not_found_after_create", retry_safe: false, stage: execution, wire_match: exact }
+    { code: montage_reload_failed, description_zh: "C++ 实现返回错误码 montage_reload_failed", retry_safe: false, stage: execution, wire_match: exact }
+    { code: new_slot_name_already_exists, description_zh: "C++ 实现返回错误码 new_slot_name_already_exists", retry_safe: false, stage: execution, wire_match: exact }
+    { code: next_section_not_found, description_zh: "C++ 实现返回错误码 next_section_not_found", retry_safe: false, stage: execution, wire_match: exact }
+    { code: notify_class_is_abstract, description_zh: "C++ 实现返回错误码 notify_class_is_abstract", retry_safe: false, stage: execution, wire_match: exact }
+    { code: notify_class_not_found, description_zh: "C++ 实现返回错误码 notify_class_not_found", retry_safe: false, stage: execution, wire_match: exact }
+    { code: notify_is_not_state, description_zh: "C++ 实现返回错误码 notify_is_not_state", retry_safe: false, stage: execution, wire_match: exact }
+    { code: notify_not_found, description_zh: "C++ 实现返回错误码 notify_not_found", retry_safe: false, stage: execution, wire_match: exact }
+    { code: notify_state_class_is_abstract, description_zh: "C++ 实现返回错误码 notify_state_class_is_abstract", retry_safe: false, stage: execution, wire_match: exact }
+    { code: notify_state_class_not_found, description_zh: "C++ 实现返回错误码 notify_state_class_not_found", retry_safe: false, stage: execution, wire_match: exact }
+    { code: notify_track_not_empty, description_zh: "C++ 实现返回错误码 notify_track_not_empty", retry_safe: false, stage: execution, wire_match: exact }
+    { code: notify_track_not_found, description_zh: "C++ 实现返回错误码 notify_track_not_found", retry_safe: false, stage: execution, wire_match: exact }
+    { code: preview_mesh_skeleton_incompatible, description_zh: "C++ 实现返回错误码 preview_mesh_skeleton_incompatible", retry_safe: false, stage: execution, wire_match: exact }
+    { code: preview_skeletal_mesh_incompatible, description_zh: "C++ 实现返回错误码 preview_skeletal_mesh_incompatible", retry_safe: false, stage: execution, wire_match: exact }
+    { code: preview_skeletal_mesh_not_found, description_zh: "C++ 实现返回错误码 preview_skeletal_mesh_not_found", retry_safe: false, stage: execution, wire_match: exact }
+    { code: properties_array_missing, description_zh: "C++ 实现返回错误码 properties_array_missing", retry_safe: true, stage: preflight, wire_match: exact }
+    { code: properties_json_invalid, description_zh: "C++ 实现返回错误码 properties_json_invalid", retry_safe: true, stage: preflight, wire_match: exact }
+    { code: remove_section_failed, description_zh: "C++ 实现返回错误码 remove_section_failed", retry_safe: false, stage: execution, wire_match: exact }
+    { code: save_asset_failed, description_zh: "C++ 实现返回错误码 save_asset_failed", retry_safe: false, stage: execution, wire_match: exact }
+    { code: section_name_already_exists, description_zh: "C++ 实现返回错误码 section_name_already_exists", retry_safe: false, stage: execution, wire_match: exact }
+    { code: section_not_found, description_zh: "C++ 实现返回错误码 section_not_found", retry_safe: false, stage: execution, wire_match: exact }
+    { code: segment_not_found, description_zh: "C++ 实现返回错误码 segment_not_found", retry_safe: false, stage: execution, wire_match: exact }
+    { code: skeletal_mesh_not_found, description_zh: "C++ 实现返回错误码 skeletal_mesh_not_found", retry_safe: false, stage: execution, wire_match: exact }
+    { code: skeleton_not_found, description_zh: "C++ 实现返回错误码 skeleton_not_found", retry_safe: false, stage: execution, wire_match: exact }
+    { code: skeleton_slot_not_found, description_zh: "C++ 实现返回错误码 skeleton_slot_not_found", retry_safe: false, stage: execution, wire_match: exact }
+    { code: slot_name_already_exists, description_zh: "C++ 实现返回错误码 slot_name_already_exists", retry_safe: false, stage: execution, wire_match: exact }
+    { code: slot_track_not_empty, description_zh: "C++ 实现返回错误码 slot_track_not_empty", retry_safe: false, stage: execution, wire_match: exact }
+    { code: slot_track_not_found, description_zh: "C++ 实现返回错误码 slot_track_not_found", retry_safe: false, stage: execution, wire_match: exact }
+    { code: slot_track_rebuild_failed, description_zh: "C++ 实现返回错误码 slot_track_rebuild_failed", retry_safe: false, stage: execution, wire_match: exact }
+    { code: slot_tracks_must_not_be_empty, description_zh: "C++ 实现返回错误码 slot_tracks_must_not_be_empty", retry_safe: false, stage: execution, wire_match: exact }
+    { code: source_animation_not_found_or_not_anim_sequence, description_zh: "C++ 实现返回错误码 source_animation_not_found_or_not_anim_sequence", retry_safe: false, stage: execution, wire_match: exact }
+    { code: sync_slot_name_not_found, description_zh: "C++ 实现返回错误码 sync_slot_name_not_found", retry_safe: false, stage: execution, wire_match: exact }
+    { code: target_skeleton_not_found, description_zh: "C++ 实现返回错误码 target_skeleton_not_found", retry_safe: false, stage: execution, wire_match: exact }
+    { code: unknown_montage_command, description_zh: "C++ 实现返回错误码 unknown_montage_command", retry_safe: false, stage: execution, wire_match: exact }
+    { code: unsafe_details_root, description_zh: "C++ 实现返回错误码 unsafe_details_root", retry_safe: false, stage: execution, wire_match: prefix }
+  ]
+}
+evidence: {
+  docs: [
+    { path: "Plugins/UeAgentInterface/docs/commands/montage/montage_apply_json.md", purpose: "user documentation cross-check; C++ implementation remains authoritative" }
+  ]
+  implementation: [
+    { line_hint: 1258, path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Commands/Montage/UeAgentHttpServer_Montage.cpp", purpose: "command handler, parameter and return evidence", symbol: CmdMontageApplyJson }
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Commands/Assets/UeAgentHttpServer_Assets_Basic.cpp", purpose: "transitive helper evidence used by the command handler" }
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Server/UeAgentHttpServer.cpp", purpose: "transitive helper evidence used by the command handler" }
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Utilities/UeAgentAuthoringFileIO.cpp", purpose: "transitive helper evidence used by the command handler" }
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Utilities/UeAgentDetailsAuthoring.cpp", purpose: "transitive helper evidence used by the command handler" }
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Utilities/UeAgentStructuredAuthoringIO.cpp", purpose: "transitive helper evidence used by the command handler" }
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Utilities/UeAgentStructuredHjsonFormatter.cpp", purpose: "transitive helper evidence used by the command handler" }
+  ]
+  tests: [
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterfaceTests/Private/Smoke/UeAgentInterfaceSmoke_AnimationIKNiagara.cpp", purpose: "smoke or negative-path evidence cross-checked for the verified contract" }
+  ]
+}
+execution: {
+  destructive: false
+  editor_state: required
+  game_thread: required
+  idempotent: false
+  kind: write
+  overwrite_behavior: none
+  pie_state: allowed
+  retry_safe: false
+  save_behavior: caller_controlled
+  side_effects: [modifies_asset]
+  ui_effect: none
+}
+maturity: verified
+params: {
+  constraints: []
+  fields: {
+    asset_path: { default_state: none, description_zh: "C++ 实现读取的 asset_path 参数", path_semantics: { access_scope: project_write, kind: ue_asset }, required: true, type: ue_asset_path }
+    create_if_missing: { default: true, default_state: defined, description_zh: "C++ 实现读取的 create_if_missing 参数", required: false, type: bool }
+    json_file: {
+      default_state: none
+      description_zh: "C++ 实现读取的 json_file 参数"
+      path_semantics: { kind: filesystem_file, must_exist: false, writable: false }
+      required: false
+      type: filesystem_path
+    }
+    save_after_apply: { default: false, default_state: defined, description_zh: "C++ 实现读取的 save_after_apply 参数", required: false, type: bool }
+  }
+  state: defined
+}
+response: { artifact_fields: [notifies, notify_tracks, sections, skeleton_slots, slot_tracks, sync_markers, warnings, settings, sync], compact_fields: [saved, asset_path, asset_kind, asset_name, format_version, json_file], failure_fields: [params.asset_path], max_items_policy: { fields: [], mode: none } }
+returns: {
+  fields: {
+    asset_kind: { description_zh: "C++ 实现返回的 asset_kind 字段；是否出现取决于执行分支", required: false, type: string }
+    asset_name: { description_zh: "C++ 实现返回的 asset_name 字段；是否出现取决于执行分支", required: false, type: string }
+    asset_path: { description_zh: "C++ 实现返回的 asset_path 字段；是否出现取决于执行分支", required: false, type: ue_asset_path }
+    format_version: { description_zh: "C++ 实现返回的 format_version 字段；是否出现取决于执行分支", required: false, type: number }
+    json_file: { description_zh: "C++ 实现返回的 json_file 字段；是否出现取决于执行分支", required: false, type: filesystem_path }
+    notifies: { description_zh: "C++ 实现返回的 notifies 字段；是否出现取决于执行分支", item_type: json_value, required: false, type: array }
+    notifies_applied: { description_zh: "C++ 实现返回的 notifies_applied 字段；是否出现取决于执行分支", required: false, type: number }
+    notify_tracks: { description_zh: "C++ 实现返回的 notify_tracks 字段；是否出现取决于执行分支", item_type: json_value, required: false, type: array }
+    notify_tracks_applied: { description_zh: "C++ 实现返回的 notify_tracks_applied 字段；是否出现取决于执行分支", required: false, type: number }
+    output_file: { description_zh: "C++ 实现返回的 output_file 字段；是否出现取决于执行分支", required: false, type: filesystem_path }
+    preview_skeletal_mesh: { description_zh: "C++ 实现返回的 preview_skeletal_mesh 字段；是否出现取决于执行分支", required: false, type: string }
+    saved: { description_zh: "C++ 实现返回的 saved 字段；是否出现取决于执行分支", required: false, type: bool }
+    schema: { description_zh: "C++ 实现返回的 schema 字段；是否出现取决于执行分支", required: false, type: string }
+    sections: { description_zh: "C++ 实现返回的 sections 字段；是否出现取决于执行分支", item_type: json_value, required: false, type: array }
+    sections_applied: { description_zh: "C++ 实现返回的 sections_applied 字段；是否出现取决于执行分支", required: false, type: number }
+    segments_applied: { description_zh: "C++ 实现返回的 segments_applied 字段；是否出现取决于执行分支", required: false, type: number }
+    settings: { description_zh: "C++ 实现返回的 settings 字段；是否出现取决于执行分支", required: false, type: json_value }
+    skeleton: { description_zh: "C++ 实现返回的 skeleton 字段；是否出现取决于执行分支", required: false, type: string }
+    skeleton_slots: { description_zh: "C++ 实现返回的 skeleton_slots 字段；是否出现取决于执行分支", item_type: json_value, required: false, type: array }
+    skeleton_slots_applied: { description_zh: "C++ 实现返回的 skeleton_slots_applied 字段；是否出现取决于执行分支", required: false, type: number }
+    slot_tracks: { description_zh: "C++ 实现返回的 slot_tracks 字段；是否出现取决于执行分支", item_type: json_value, required: false, type: array }
+    slot_tracks_applied: { description_zh: "C++ 实现返回的 slot_tracks_applied 字段；是否出现取决于执行分支", required: false, type: number }
+    sync: { description_zh: "C++ 实现返回的 sync 字段；是否出现取决于执行分支", required: false, type: json_value }
+    sync_markers: { description_zh: "C++ 实现返回的 sync_markers 字段；是否出现取决于执行分支", item_type: json_value, required: false, type: array }
+    warning_count: { description_zh: "C++ 实现返回的 warning_count 字段；是否出现取决于执行分支", required: false, type: integer }
+    warnings: { description_zh: "C++ 实现返回的 warnings 字段；是否出现取决于执行分支", item_type: json_value, required: false, type: array }
+  }
+  state: defined
+}
+schema: uai.command_spec.v1
+status: active
+types: {}
+verification: {
+  assertions: [
+    { id: result_present, operator: exists, source: returns.saved }
+    { id: state_readback_present, operator: exists, source: methods.state_readback.asset_path }
+  ]
+  failure_policy: fail_overall
+  methods: [
+    { id: result, kind: result_assertion }
+    { command: montage_get_info, id: state_readback, kind: command_readback, params_mapping: { asset_path: params.asset_path } }
+  ]
+  required: true
+  state: defined
+}
+version: 1

@@ -1,0 +1,58 @@
+authoring: { reason: command_has_no_registered_folder_authoring_profile, state: none }
+category: level_topology_streaming_world_partition_data_layer_hlod
+command: world_partition_query
+deprecation: { reason: command_is_active, state: none }
+discovery: { aliases: [], keywords_en: [world, partition, query, level_topology_streaming_world_partition_data_layer_hlod], keywords_zh: [world_partition_query], summary_en: "Execute world_partition_query with a verified implementation contract", summary_zh: "查询当前 World Partition 状态", tags: [level_topology_streaming_world_partition_data_layer_hlod, p2-002] }
+errors: {
+  codes: [
+    { code: no_editor_world, description_zh: "C++ 实现返回错误码 no_editor_world", retry_safe: false, stage: execution, wire_match: exact }
+    { code: no_geditor, description_zh: "C++ 实现返回错误码 no_geditor", retry_safe: false, stage: execution, wire_match: exact }
+  ]
+}
+evidence: {
+  docs: [
+    { path: "Plugins/UeAgentInterface/docs/commands/level_topology_streaming_world_partition_data_layer_hlod/world_partition_query.md", purpose: "user documentation cross-check; C++ implementation remains authoritative" }
+  ]
+  implementation: [
+    { line_hint: 404, path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Commands/LevelTopology/UeAgentHttpServer_LevelTopology_WorldPartitionHlodAndJson.cpp", purpose: "command handler, parameter and return evidence", symbol: CmdWorldPartitionQuery }
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Commands/Level/UeAgentHttpServer_Level_CaptureAndPersistence.cpp", purpose: "transitive helper evidence used by the command handler" }
+  ]
+  tests: [
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterfaceTests/Private/Smoke/LevelTopology/UeAgentInterfaceLevelTopologySmokeTests.cpp", purpose: "smoke or negative-path evidence cross-checked for the verified contract" }
+  ]
+}
+execution: {
+  destructive: false
+  editor_state: required
+  game_thread: required
+  idempotent: true
+  kind: read_only
+  overwrite_behavior: none
+  pie_state: allowed
+  retry_safe: true
+  save_behavior: none
+  side_effects: []
+  ui_effect: none
+}
+maturity: verified
+params: { reason: implementation_reads_no_command_parameters, state: none }
+response: { artifact_fields: [], compact_fields: [world, editor_name, editor_world_bounds, enabled, loaded_region_count, loaded_regions], failure_fields: [], max_items_policy: { fields: [], mode: none } }
+returns: {
+  fields: {
+    editor_name: { description_zh: "C++ 实现返回的 editor_name 字段；是否出现取决于执行分支", required: false, type: string }
+    editor_world_bounds: { description_zh: "C++ 实现返回的 editor_world_bounds 字段；是否出现取决于执行分支", required: false, type: json_value }
+    enabled: { description_zh: "C++ 实现返回的 enabled 字段；是否出现取决于执行分支", required: false, type: bool }
+    loaded_region_count: { description_zh: "C++ 实现返回的 loaded_region_count 字段；是否出现取决于执行分支", required: false, type: integer }
+    loaded_regions: { description_zh: "C++ 实现返回的 loaded_regions 字段；是否出现取决于执行分支", item_type: json_value, required: false, type: array }
+    runtime_world_bounds: { description_zh: "C++ 实现返回的 runtime_world_bounds 字段；是否出现取决于执行分支", required: false, type: json_value }
+    schema: { description_zh: "C++ 实现返回的 schema 字段；是否出现取决于执行分支", required: false, type: string }
+    streaming_enabled: { description_zh: "C++ 实现返回的 streaming_enabled 字段；是否出现取决于执行分支", required: false, type: bool }
+    world: { description_zh: "C++ 实现返回的 world 字段；是否出现取决于执行分支", required: false, type: string }
+  }
+  state: defined
+}
+schema: uai.command_spec.v1
+status: active
+types: {}
+verification: { reason: read_only_command_has_no_post_write_verification, state: none }
+version: 1

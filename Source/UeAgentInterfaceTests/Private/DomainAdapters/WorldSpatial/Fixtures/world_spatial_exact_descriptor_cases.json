@@ -1,0 +1,455 @@
+{
+  "schema": "uai.domain_adapter.world_spatial.exact_descriptor_fixture.v1",
+  "domain_id": "world_spatial",
+  "space_contract_id": "uai.space_contract.v1",
+  "descriptor_count": 22,
+  "query_count": 11,
+  "operation_count": 11,
+  "components": {
+    "target_ref": {"type":"string","minLength":1},
+    "revision": {
+      "type":"object",
+      "properties": {
+        "source_id":{"type":"string","minLength":1},
+        "generation":{"type":"string","minLength":1},
+        "sequence":{"type":"integer","minimum":0}
+      },
+      "required":["source_id","generation","sequence"],
+      "additionalProperties":false
+    },
+    "temporal_point": {
+      "type":"object",
+      "properties": {
+        "clock_id":{"type":"string","minLength":1},
+        "tick":{"type":"string","minLength":1},
+        "rate_numerator":{"type":"string","minLength":1},
+        "rate_denominator":{"type":"string","minLength":1},
+        "state":{"type":"string","enum":["captured","frozen"]}
+      },
+      "required":["clock_id","tick","rate_numerator","rate_denominator","state"],
+      "additionalProperties":false
+    },
+    "frame_2d": {
+      "type":"object",
+      "properties": {
+        "frame_id":{"type":"string","minLength":1},
+        "basis_frame_id":{"type":"string","minLength":1},
+        "dimension":{"type":"integer","const":2},
+        "unit":{"type":"string","minLength":1},
+        "basis_evidence_id":{"type":"string","minLength":1},
+        "observed_at":{"component":"temporal_point"}
+      },
+      "required":["frame_id","basis_frame_id","dimension","unit","basis_evidence_id","observed_at"],
+      "additionalProperties":false
+    },
+    "frame_3d": {
+      "type":"object",
+      "properties": {
+        "frame_id":{"type":"string","minLength":1},
+        "basis_frame_id":{"type":"string","minLength":1},
+        "dimension":{"type":"integer","const":3},
+        "unit":{"type":"string","minLength":1},
+        "basis_evidence_id":{"type":"string","minLength":1},
+        "observed_at":{"component":"temporal_point"}
+      },
+      "required":["frame_id","basis_frame_id","dimension","unit","basis_evidence_id","observed_at"],
+      "additionalProperties":false
+    },
+    "point_2d": {
+      "type":"object",
+      "properties": {
+        "subject":{"type":"string","minLength":1},
+        "quantity":{"type":"string","const":"point"},
+        "frame":{"component":"frame_2d"},
+        "components":{"type":"array","items":{"type":"string","minLength":1},"minItems":2,"maxItems":2},
+        "conversion_evidence_ids":{"type":"array","items":{"type":"string","minLength":1},"uniqueItems":true}
+      },
+      "required":["subject","quantity","frame","components","conversion_evidence_ids"],
+      "additionalProperties":false
+    },
+    "point_3d": {
+      "type":"object",
+      "properties": {
+        "subject":{"type":"string","minLength":1},
+        "quantity":{"type":"string","const":"point"},
+        "frame":{"component":"frame_3d"},
+        "components":{"type":"array","items":{"type":"string","minLength":1},"minItems":3,"maxItems":3},
+        "conversion_evidence_ids":{"type":"array","items":{"type":"string","minLength":1},"uniqueItems":true}
+      },
+      "required":["subject","quantity","frame","components","conversion_evidence_ids"],
+      "additionalProperties":false
+    },
+    "direction_3d": {
+      "type":"object",
+      "properties": {
+        "subject":{"type":"string","minLength":1},
+        "quantity":{"type":"string","const":"direction"},
+        "frame":{"component":"frame_3d"},
+        "components":{"type":"array","items":{"type":"string","minLength":1},"minItems":3,"maxItems":3},
+        "conversion_evidence_ids":{"type":"array","items":{"type":"string","minLength":1},"uniqueItems":true}
+      },
+      "required":["subject","quantity","frame","components","conversion_evidence_ids"],
+      "additionalProperties":false
+    },
+    "normal_3d": {
+      "type":"object",
+      "properties": {
+        "subject":{"type":"string","minLength":1},
+        "quantity":{"type":"string","const":"normal"},
+        "frame":{"component":"frame_3d"},
+        "components":{"type":"array","items":{"type":"string","minLength":1},"minItems":3,"maxItems":3},
+        "conversion_evidence_ids":{"type":"array","items":{"type":"string","minLength":1},"uniqueItems":true}
+      },
+      "required":["subject","quantity","frame","components","conversion_evidence_ids"],
+      "additionalProperties":false
+    },
+    "transform_3d": {
+      "type":"object",
+      "properties": {
+        "subject":{"type":"string","minLength":1},
+        "quantity":{"type":"string","const":"transform"},
+        "frame":{"component":"frame_3d"},
+        "components":{"type":"array","items":{"type":"string","minLength":1},"minItems":10,"maxItems":10},
+        "conversion_evidence_ids":{"type":"array","items":{"type":"string","minLength":1},"uniqueItems":true}
+      },
+      "required":["subject","quantity","frame","components","conversion_evidence_ids"],
+      "additionalProperties":false
+    },
+    "verification": {
+      "type":"object",
+      "properties": {
+        "oracle_kind":{"type":"string","minLength":1},
+        "evidence_ids":{"type":"array","items":{"type":"string","minLength":1},"minItems":1,"uniqueItems":true}
+      },
+      "required":["oracle_kind","evidence_ids"],
+      "additionalProperties":false
+    },
+    "expected_revision_entry": {
+      "type":"object",
+      "properties": {
+        "target_ref":{"component":"target_ref"},
+        "revision":{"component":"revision"}
+      },
+      "required":["target_ref","revision"],
+      "additionalProperties":false
+    },
+    "graph_view_state": {
+      "type":"object",
+      "properties": {
+        "location":{"component":"point_2d"},
+        "zoom":{"type":"number","exclusiveMinimum":0},
+        "graph_revision":{"component":"revision"}
+      },
+      "required":["location","zoom","graph_revision"],
+      "additionalProperties":false
+    },
+    "node_placement": {
+      "type":"object",
+      "properties": {
+        "node_ref":{"component":"target_ref"},
+        "position":{"component":"point_2d"}
+      },
+      "required":["node_ref","position"],
+      "additionalProperties":false
+    },
+    "node_observation": {
+      "type":"object",
+      "properties": {
+        "node_ref":{"component":"target_ref"},
+        "position":{"component":"point_2d"},
+        "observed_revision":{"component":"revision"}
+      },
+      "required":["node_ref","position","observed_revision"],
+      "additionalProperties":false
+    },
+    "layout_relation": {
+      "type":"object",
+      "properties": {
+        "source_node_ref":{"component":"target_ref"},
+        "target_node_ref":{"component":"target_ref"},
+        "relation":{"type":"string","enum":["right_of","left_of","above","below","same_row","same_column"]},
+        "gap":{"type":"number","minimum":0}
+      },
+      "required":["source_node_ref","target_node_ref","relation"],
+      "additionalProperties":false
+    },
+    "alignment": {
+      "type":"object",
+      "properties": {
+        "kind":{"type":"string","enum":["anchors","bounds","face","vertex"]},
+        "verify_frame":{"component":"frame_3d"},
+        "subject_anchor":{"component":"point_3d"},
+        "reference_anchor":{"component":"point_3d"},
+        "subject_normal":{"component":"normal_3d"},
+        "reference_normal":{"component":"normal_3d"},
+        "rotation_policy":{"type":"string","enum":["preserve","align_normals","align_frames"]},
+        "axis":{"type":"string","enum":["x","y","z"]},
+        "source_anchor":{"type":"string","enum":["min","center","max"]},
+        "target_anchor":{"type":"string","enum":["min","center","max"]},
+        "source_face":{"type":"string","minLength":1},
+        "target_face":{"type":"string","minLength":1},
+        "offset_cm":{"type":"number"},
+        "source_vertex_index":{"type":"integer","minimum":0},
+        "target_vertex_index":{"type":"integer","minimum":0}
+      },
+      "required":["kind","verify_frame"],
+      "additionalProperties":false
+    },
+    "surface_query": {
+      "type":"object",
+      "properties": {
+        "origin":{"component":"point_3d"},
+        "direction":{"component":"direction_3d"},
+        "max_distance_cm":{"type":"number","exclusiveMinimum":0},
+        "trace_channel":{"type":"string","enum":["visibility","camera"]},
+        "trace_complex":{"type":"boolean"},
+        "ignore_target_refs":{"type":"array","items":{"component":"target_ref"},"uniqueItems":true}
+      },
+      "required":["origin","direction","max_distance_cm","trace_channel","trace_complex","ignore_target_refs"],
+      "additionalProperties":false
+    },
+    "placement_policy": {
+      "type":"object",
+      "properties": {
+        "clearance_cm":{"type":"number","minimum":0},
+        "align_to_surface_normal":{"type":"boolean"},
+        "preserve_yaw":{"type":"boolean"}
+      },
+      "required":["clearance_cm","align_to_surface_normal","preserve_yaw"],
+      "additionalProperties":false
+    },
+    "trace_query": {
+      "type":"object",
+      "properties": {
+        "max_distance_cm":{"type":"number","exclusiveMinimum":0},
+        "trace_channel":{"type":"string","minLength":1},
+        "trace_complex":{"type":"boolean"},
+        "ignore_target_refs":{"type":"array","items":{"component":"target_ref"},"uniqueItems":true}
+      },
+      "required":["max_distance_cm","trace_channel","trace_complex","ignore_target_refs"],
+      "additionalProperties":false
+    },
+    "ray_observation": {
+      "type":"object",
+      "properties": {
+        "origin":{"component":"point_3d"},
+        "direction":{"component":"direction_3d"},
+        "dimension_bridge_evidence_id":{"type":"string","minLength":1}
+      },
+      "required":["origin","direction","dimension_bridge_evidence_id"],
+      "additionalProperties":false
+    },
+    "hit_observation": {
+      "type":"object",
+      "properties": {
+        "blocking_hit":{"type":"boolean"},
+        "target_ref":{"component":"target_ref"},
+        "component_ref":{"component":"target_ref"},
+        "location":{"component":"point_3d"},
+        "normal":{"component":"normal_3d"},
+        "distance_cm":{"type":"number","minimum":0}
+      },
+      "required":["blocking_hit","location","normal","distance_cm"],
+      "additionalProperties":false
+    },
+    "target_transform_observation": {
+      "type":"object",
+      "properties": {
+        "target_ref":{"component":"target_ref"},
+        "transform":{"component":"transform_3d"},
+        "observed_revision":{"component":"revision"}
+      },
+      "required":["target_ref","transform","observed_revision"],
+      "additionalProperties":false
+    },
+    "candidate_evaluation": {
+      "type":"object",
+      "properties": {
+        "candidate_index":{"type":"integer","minimum":0},
+        "target_ref":{"component":"target_ref"},
+        "transform":{"component":"transform_3d"},
+        "score":{"type":"number"},
+        "evidence_ids":{"type":"array","items":{"type":"string","minLength":1},"minItems":1,"uniqueItems":true}
+      },
+      "required":["candidate_index","target_ref","transform","score","evidence_ids"],
+      "additionalProperties":false
+    },
+    "frame_policy": {
+      "type":"object",
+      "properties": {
+        "padding_ratio":{"type":"number","minimum":0},
+        "minimum_distance_cm":{"type":"number","minimum":0},
+        "maximum_distance_cm":{"type":"number","exclusiveMinimum":0},
+        "preserve_rotation":{"type":"boolean"},
+        "collision_aware":{"type":"boolean"},
+        "look_at":{"type":"boolean"},
+        "auto_fallback":{"type":"boolean"}
+      },
+      "required":["padding_ratio","minimum_distance_cm","maximum_distance_cm","preserve_rotation"],
+      "additionalProperties":false
+    },
+    "viewport_camera_state": {
+      "type":"object",
+      "properties": {
+        "camera_transform":{"component":"transform_3d"},
+        "fov_degrees":{"type":"number","exclusiveMinimum":0,"maximum":179},
+        "view_mode":{"type":"string","minLength":1},
+        "observed_at":{"component":"temporal_point"}
+      },
+      "required":["camera_transform","fov_degrees","view_mode","observed_at"],
+      "additionalProperties":false
+    },
+    "viewport_interaction_state": {
+      "type":"object",
+      "properties": {
+        "mode_widgets":{"type":"boolean"},
+        "selection":{"type":"boolean"},
+        "pivot":{"type":"boolean"},
+        "editor_primitives":{"type":"boolean"},
+        "game_primitives":{"type":"boolean"},
+        "widget_mode":{"type":"string","minLength":1}
+      },
+      "required":["mode_widgets","selection","pivot","editor_primitives","game_primitives","widget_mode"],
+      "additionalProperties":false
+    },
+    "viewport_state": {
+      "type":"object",
+      "properties": {
+        "viewport_ref":{"component":"target_ref"},
+        "camera":{"component":"viewport_camera_state"},
+        "realtime":{"type":"boolean"},
+        "game_view":{"type":"boolean"},
+        "show_flags":{"type":"array","items":{"type":"string","minLength":1},"uniqueItems":true},
+        "interaction":{"component":"viewport_interaction_state"},
+        "observed_revision":{"component":"revision"}
+      },
+      "required":["viewport_ref","camera","realtime","game_view","show_flags","interaction","observed_revision"],
+      "additionalProperties":false
+    },
+    "viewport_state_patch": {
+      "type":"object",
+      "properties": {
+        "camera_transform":{"component":"transform_3d"},
+        "fov_degrees":{"type":"number","exclusiveMinimum":0,"maximum":179},
+        "view_mode":{"type":"string","minLength":1},
+        "realtime":{"type":"boolean"},
+        "game_view":{"type":"boolean"},
+        "show_flags":{"type":"array","items":{"type":"string","minLength":1},"uniqueItems":true},
+        "interaction":{"component":"viewport_interaction_state"}
+      },
+      "additionalProperties":false
+    }
+  },
+  "descriptors": [
+    {
+      "capability_id":"graph.view.read","descriptor_id":"uai.query.graph.view.read","operation_kind":"query","provider_binding":"world_spatial.graph_view.observe","query_kind":"state","state_planes":["authoring_memory"],"required_facets":["asset_editor"],"resolution_policy":"explicit_only","transient_access_policy":"read_only","oracle_kind":"live_and_persisted_graph_view_readback",
+      "input_fields":[{"name":"include_document_state","required":false,"schema":{"type":"boolean"}}],
+      "result_fields":[{"name":"view_state","required":true,"component":"graph_view_state"}]
+    },
+    {
+      "capability_id":"graph.view.update","descriptor_id":"uai.operation.graph.view.update","operation_kind":"operation","state_planes":["authoring_memory","persisted"],"required_facets":["asset_editor"],"resolution_policy":"explicit_only","transient_access_policy":"temporary_mutation_allowed","oracle_kind":"live_and_persisted_graph_view_readback",
+      "input_fields":[{"name":"view_state","required":true,"component":"graph_view_state"},{"name":"update_document_state","required":false,"schema":{"type":"boolean"}},{"name":"save_after_update","required":false,"schema":{"type":"boolean"}}],
+      "result_fields":[{"name":"view_state","required":true,"component":"graph_view_state"},{"name":"verification","required":true,"component":"verification"}]
+    },
+    {
+      "capability_id":"graph.layout.apply","descriptor_id":"uai.operation.graph.layout.apply","operation_kind":"operation","state_planes":["authoring_memory","persisted"],"required_facets":[],"resolution_policy":"explicit_only","transient_access_policy":"temporary_mutation_allowed","oracle_kind":"independent_node_position_and_connection_readback",
+      "input_fields":[{"name":"graph_ref","required":true,"component":"target_ref"},{"name":"node_placements","required":true,"schema":{"type":"array","items":{"component":"node_placement"},"minItems":1}},{"name":"expected_revision","required":true,"component":"revision"},{"name":"layout_relations","required":false,"schema":{"type":"array","items":{"component":"layout_relation"}}}],
+      "result_fields":[{"name":"node_observations","required":true,"schema":{"type":"array","items":{"component":"node_observation"},"minItems":1}},{"name":"observed_revision","required":true,"component":"revision"},{"name":"verification","required":true,"component":"verification"}]
+    },
+    {
+      "capability_id":"world.object_transform.read","descriptor_id":"uai.query.world.object_transform.read","operation_kind":"query","provider_binding":"world_spatial.object_transform.read","query_kind":"state","state_planes":["authoring_memory"],"required_facets":["world"],"resolution_policy":"explicit_only","transient_access_policy":"read_only","oracle_kind":"independent_target_transform_readback",
+      "input_fields":[{"name":"verify_frame","required":true,"component":"frame_3d"}],
+      "result_fields":[{"name":"transform","required":true,"component":"transform_3d"},{"name":"observed_revision","required":true,"component":"revision"}]
+    },
+    {
+      "capability_id":"world.object_align","descriptor_id":"uai.operation.world.object_align","operation_kind":"operation","state_planes":["authoring_memory"],"required_facets":["world"],"resolution_policy":"explicit_only","transient_access_policy":"temporary_mutation_allowed","oracle_kind":"independent_anchor_and_transform_readback",
+      "input_fields":[{"name":"subject_refs","required":true,"schema":{"type":"array","items":{"component":"target_ref"},"minItems":1,"uniqueItems":true}},{"name":"alignment","required":true,"component":"alignment"},{"name":"expected_revisions","required":true,"schema":{"type":"array","items":{"component":"expected_revision_entry"},"minItems":1}},{"name":"anchor_ref","required":false,"component":"target_ref"}],
+      "result_fields":[{"name":"transforms","required":true,"schema":{"type":"array","items":{"component":"target_transform_observation"},"minItems":1}},{"name":"verification","required":true,"component":"verification"}]
+    },
+    {
+      "capability_id":"world.object_snap_to_surface","descriptor_id":"uai.operation.world.object_snap_to_surface","operation_kind":"operation","state_planes":["authoring_memory"],"required_facets":["world"],"resolution_policy":"explicit_only","transient_access_policy":"temporary_mutation_allowed","oracle_kind":"independent_surface_hit_and_transform_readback",
+      "input_fields":[{"name":"subject_refs","required":true,"schema":{"type":"array","items":{"component":"target_ref"},"minItems":1,"uniqueItems":true}},{"name":"surface_query","required":true,"component":"surface_query"},{"name":"placement_policy","required":true,"component":"placement_policy"},{"name":"expected_revisions","required":true,"schema":{"type":"array","items":{"component":"expected_revision_entry"},"minItems":1}}],
+      "result_fields":[{"name":"surface_hit","required":true,"component":"hit_observation"},{"name":"transforms","required":true,"schema":{"type":"array","items":{"component":"target_transform_observation"},"minItems":1}},{"name":"verification","required":true,"component":"verification"}]
+    },
+    {
+      "capability_id":"mesh.transform.bake","descriptor_id":"uai.operation.mesh.transform.bake","operation_kind":"operation","state_planes":["persisted"],"required_facets":[],"resolution_policy":"explicit_only","transient_access_policy":"temporary_mutation_allowed","oracle_kind":"independent_mesh_geometry_and_placement_readback",
+      "input_fields":[{"name":"transform","required":true,"component":"transform_3d"},{"name":"expected_revision","required":true,"component":"revision"},{"name":"preserve_placement","required":false,"schema":{"type":"boolean"}}],
+      "result_fields":[{"name":"geometry_revision","required":true,"component":"revision"},{"name":"placement","required":true,"component":"transform_3d"},{"name":"verification","required":true,"component":"verification"}]
+    },
+    {
+      "capability_id":"mesh.pivot.update","descriptor_id":"uai.operation.mesh.pivot.update","operation_kind":"operation","state_planes":["persisted"],"required_facets":[],"resolution_policy":"explicit_only","transient_access_policy":"temporary_mutation_allowed","oracle_kind":"independent_pivot_geometry_and_placement_readback",
+      "input_fields":[{"name":"pivot","required":true,"component":"point_3d"},{"name":"expected_revision","required":true,"component":"revision"},{"name":"preserve_world_geometry","required":false,"schema":{"type":"boolean"}}],
+      "result_fields":[{"name":"pivot","required":true,"component":"point_3d"},{"name":"geometry_revision","required":true,"component":"revision"},{"name":"placement","required":true,"component":"transform_3d"},{"name":"verification","required":true,"component":"verification"}]
+    },
+    {
+      "capability_id":"world.transform_candidates.evaluate","descriptor_id":"uai.query.world.transform_candidates.evaluate","operation_kind":"query","provider_binding":"world_spatial.object_transform.evaluate_candidates","query_kind":"runtime_probe","state_planes":["authoring_memory"],"required_facets":["world"],"resolution_policy":"explicit_only","transient_access_policy":"read_only","oracle_kind":"typed_candidate_observations_without_artifact_oracle",
+      "input_fields":[{"name":"subject_refs","required":true,"schema":{"type":"array","items":{"component":"target_ref"},"minItems":1,"uniqueItems":true}},{"name":"candidates","required":true,"schema":{"type":"array","items":{"component":"transform_3d"},"minItems":1}},{"name":"verify_frame","required":true,"component":"frame_3d"}],
+      "result_fields":[{"name":"evaluations","required":true,"schema":{"type":"array","items":{"component":"candidate_evaluation"},"minItems":1}}]
+    },
+    {
+      "capability_id":"viewport.ray.deproject","descriptor_id":"uai.query.viewport.ray.deproject","operation_kind":"query","provider_binding":"world_spatial.viewport_projection.deproject","query_kind":"runtime_probe","state_planes":["authoring_memory"],"required_facets":["viewport"],"resolution_policy":"explicit_only","transient_access_policy":"read_only","oracle_kind":"camera_projection_reconstruction",
+      "input_fields":[{"name":"screen_point","required":true,"component":"point_2d"}],
+      "result_fields":[{"name":"ray","required":true,"component":"ray_observation"}]
+    },
+    {
+      "capability_id":"viewport.ray.trace","descriptor_id":"uai.query.viewport.ray.trace","operation_kind":"query","provider_binding":"world_spatial.viewport_projection.trace","query_kind":"runtime_probe","state_planes":["authoring_memory"],"required_facets":["viewport","world"],"resolution_policy":"explicit_only","transient_access_policy":"read_only","oracle_kind":"independent_world_trace",
+      "input_fields":[{"name":"screen_point","required":true,"component":"point_2d"},{"name":"trace_query","required":true,"component":"trace_query"}],
+      "result_fields":[{"name":"ray","required":true,"component":"ray_observation"},{"name":"hit","required":true,"component":"hit_observation"}]
+    },
+    {
+      "capability_id":"viewport.actor.pick","descriptor_id":"uai.query.viewport.actor.pick","operation_kind":"query","provider_binding":"world_spatial.viewport_projection.pick_actor","query_kind":"runtime_probe","state_planes":["authoring_memory"],"required_facets":["viewport","world"],"resolution_policy":"explicit_only","transient_access_policy":"read_only","oracle_kind":"independent_world_trace_target_identity",
+      "input_fields":[{"name":"screen_point","required":true,"component":"point_2d"},{"name":"trace_query","required":true,"component":"trace_query"},{"name":"allow_no_hit","required":false,"schema":{"type":"boolean"}}],
+      "result_fields":[{"name":"ray","required":true,"component":"ray_observation"},{"name":"hit","required":true,"component":"hit_observation"},{"name":"actor_ref","required":false,"component":"target_ref"}]
+    },
+    {
+      "capability_id":"viewport.actor.select","descriptor_id":"uai.operation.viewport.actor.select","operation_kind":"operation","state_planes":["authoring_memory"],"required_facets":["viewport","world"],"resolution_policy":"explicit_only","transient_access_policy":"temporary_mutation_allowed","oracle_kind":"independent_editor_selection_readback",
+      "input_fields":[{"name":"screen_point","required":false,"component":"point_2d"},{"name":"actor_refs","required":false,"schema":{"type":"array","items":{"component":"target_ref"},"minItems":1,"uniqueItems":true}},{"name":"selection_mode","required":true,"schema":{"type":"string","enum":["replace","add","remove","toggle"]}},{"name":"trace_query","required":false,"component":"trace_query"}],
+      "result_fields":[{"name":"selected_actor_refs","required":true,"schema":{"type":"array","items":{"component":"target_ref"},"uniqueItems":true}},{"name":"hit","required":false,"component":"hit_observation"},{"name":"verification","required":true,"component":"verification"}]
+    },
+    {
+      "capability_id":"mesh.element.select_by_ray","descriptor_id":"uai.operation.mesh.element.select_by_ray","operation_kind":"operation","state_planes":["authoring_memory"],"required_facets":["selection","viewport","world"],"resolution_policy":"explicit_only","transient_access_policy":"temporary_mutation_allowed","oracle_kind":"independent_modeling_selection_readback",
+      "input_fields":[{"name":"screen_point","required":true,"component":"point_2d"},{"name":"element_kind","required":true,"schema":{"type":"string","enum":["vertex","edge","triangle","polygon"]}},{"name":"selection_mode","required":true,"schema":{"type":"string","enum":["replace","add","remove"]}},{"name":"trace_query","required":false,"component":"trace_query"}],
+      "result_fields":[{"name":"selected_elements","required":true,"schema":{"type":"array","items":{"type":"object","properties":{"target_ref":{"component":"target_ref"},"element_kind":{"type":"string","enum":["vertex","edge","triangle","polygon"]},"element_index":{"type":"integer","minimum":0}},"required":["target_ref","element_kind","element_index"],"additionalProperties":false},"uniqueItems":true}},{"name":"verification","required":true,"component":"verification"}]
+    },
+    {
+      "capability_id":"viewport.pixel_scale.read","descriptor_id":"uai.query.viewport.pixel_scale.read","operation_kind":"query","provider_binding":"world_spatial.viewport_projection.read_pixel_scale","query_kind":"runtime_probe","state_planes":["authoring_memory"],"required_facets":["viewport"],"resolution_policy":"explicit_only","transient_access_policy":"read_only","oracle_kind":"camera_projection_neighbor_sample",
+      "input_fields":[{"name":"sample_point","required":true,"component":"point_3d"}],
+      "result_fields":[{"name":"sample_point","required":true,"component":"point_3d"},{"name":"world_units_per_pixel","required":true,"schema":{"type":"number","exclusiveMinimum":0}},{"name":"camera","required":true,"component":"viewport_camera_state"},{"name":"evidence_ids","required":true,"schema":{"type":"array","items":{"type":"string","minLength":1},"minItems":1,"uniqueItems":true}}]
+    },
+    {
+      "capability_id":"viewport.camera.frame","descriptor_id":"uai.operation.viewport.camera.frame","operation_kind":"operation","state_planes":["authoring_memory"],"required_facets":["viewport","world"],"resolution_policy":"explicit_only","transient_access_policy":"temporary_mutation_allowed","oracle_kind":"same_viewport_camera_readback",
+      "input_fields":[{"name":"subject_refs","required":false,"schema":{"type":"array","items":{"component":"target_ref"},"minItems":1,"uniqueItems":true}},{"name":"folder_path","required":false,"schema":{"type":"string","minLength":1}},{"name":"include_child_folders","required":false,"schema":{"type":"boolean"}},{"name":"use_current_selection","required":false,"schema":{"type":"boolean"}},{"name":"frame_policy","required":true,"component":"frame_policy"}],
+      "result_fields":[{"name":"state","required":true,"component":"viewport_state"},{"name":"verification","required":true,"component":"verification"}]
+    },
+    {
+      "capability_id":"viewport.state.read","descriptor_id":"uai.query.viewport.state.read","operation_kind":"query","provider_binding":"world_spatial.viewport_session.read_state","query_kind":"state","state_planes":["authoring_memory"],"required_facets":["viewport"],"resolution_policy":"explicit_only","transient_access_policy":"read_only","oracle_kind":"same_viewport_state_readback",
+      "input_fields":[],
+      "result_fields":[{"name":"state","required":true,"component":"viewport_state"}]
+    },
+    {
+      "capability_id":"viewport.state.restore","descriptor_id":"uai.operation.viewport.state.restore","operation_kind":"operation","state_planes":["authoring_memory"],"required_facets":["viewport"],"resolution_policy":"explicit_only","transient_access_policy":"temporary_mutation_allowed","oracle_kind":"same_viewport_snapshot_readback",
+      "input_fields":[{"name":"snapshot","required":true,"component":"viewport_state"}],
+      "result_fields":[{"name":"state","required":true,"component":"viewport_state"},{"name":"verification","required":true,"component":"verification"}]
+    },
+    {
+      "capability_id":"viewport.warning.list","descriptor_id":"uai.query.viewport.warning.list","operation_kind":"query","provider_binding":"world_spatial.viewport_session.list_warnings","query_kind":"runtime_probe","state_planes":["authoring_memory"],"required_facets":["viewport"],"resolution_policy":"explicit_only","transient_access_policy":"read_only","oracle_kind":"independent_viewport_warning_projection",
+      "input_fields":[{"name":"viewport_ref","required":false,"component":"target_ref"},{"name":"include_suppressed","required":false,"schema":{"type":"boolean"}}],
+      "result_fields":[{"name":"warnings","required":true,"schema":{"type":"array","items":{"type":"object","properties":{"code":{"type":"string","minLength":1},"message":{"type":"string"},"severity":{"type":"string","enum":["info","warning","error"]}},"required":["code","message","severity"],"additionalProperties":false}}}]
+    },
+    {
+      "capability_id":"viewport.view_mode.list","descriptor_id":"uai.query.viewport.view_mode.list","operation_kind":"query","provider_binding":"world_spatial.viewport_session.list_view_modes","query_kind":"catalog","state_planes":["registry_index"],"required_facets":["viewport"],"resolution_policy":"explicit_only","transient_access_policy":"read_only","oracle_kind":"engine_view_mode_catalog",
+      "input_fields":[],
+      "result_fields":[{"name":"modes","required":true,"schema":{"type":"array","items":{"type":"object","properties":{"mode_id":{"type":"string","minLength":1},"label":{"type":"string","minLength":1}},"required":["mode_id","label"],"additionalProperties":false},"minItems":1}},{"name":"active_mode_id","required":true,"schema":{"type":"string","minLength":1}}]
+    },
+    {
+      "capability_id":"viewport.instance.list","descriptor_id":"uai.query.viewport.instance.list","operation_kind":"query","provider_binding":"world_spatial.viewport_session.list_instances","query_kind":"catalog","state_planes":["authoring_memory"],"required_facets":[],"resolution_policy":"explicit_only","transient_access_policy":"read_only","oracle_kind":"editor_viewport_client_catalog",
+      "input_fields":[],
+      "result_fields":[{"name":"instances","required":true,"schema":{"type":"array","items":{"type":"object","properties":{"viewport_ref":{"component":"target_ref"},"viewport_type":{"type":"string","minLength":1},"camera":{"component":"viewport_camera_state"}},"required":["viewport_ref","viewport_type","camera"],"additionalProperties":false},"minItems":1}}]
+    },
+    {
+      "capability_id":"viewport.state.update","descriptor_id":"uai.operation.viewport.state.update","operation_kind":"operation","state_planes":["authoring_memory"],"required_facets":["viewport"],"resolution_policy":"explicit_only","transient_access_policy":"temporary_mutation_allowed","oracle_kind":"same_viewport_typed_patch_readback",
+      "input_fields":[{"name":"state_patch","required":true,"component":"viewport_state_patch"}],
+      "result_fields":[{"name":"state","required":true,"component":"viewport_state"},{"name":"verification","required":true,"component":"verification"}]
+    }
+  ]
+}

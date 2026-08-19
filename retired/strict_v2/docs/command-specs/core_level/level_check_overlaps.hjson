@@ -1,0 +1,112 @@
+authoring: { reason: command_has_no_registered_folder_authoring_profile, state: none }
+category: core_level
+command: level_check_overlaps
+deprecation: { reason: command_is_active, state: none }
+discovery: { aliases: [], keywords_en: [level, check, overlaps, core_level], keywords_zh: [level_check_overlaps], summary_en: "Execute level_check_overlaps with a verified implementation contract", summary_zh: "Overlap 检测（碰撞穿插）", tags: [core_level, p2-002] }
+errors: {
+  codes: [
+    { code: checks_invalid_item, description_zh: "C++ 实现返回错误码 checks_invalid_item", retry_safe: true, stage: preflight, wire_match: exact }
+    { code: missing_box_extent, description_zh: "C++ 实现返回错误码 missing_box_extent", retry_safe: true, stage: preflight, wire_match: exact }
+    { code: missing_center, description_zh: "C++ 实现返回错误码 missing_center", retry_safe: true, stage: preflight, wire_match: exact }
+    { code: missing_half_height_cm, description_zh: "C++ 实现返回错误码 missing_half_height_cm", retry_safe: true, stage: preflight, wire_match: exact }
+    { code: missing_radius_cm, description_zh: "C++ 实现返回错误码 missing_radius_cm", retry_safe: true, stage: preflight, wire_match: exact }
+    { code: missing_shape, description_zh: "C++ 实现返回错误码 missing_shape", retry_safe: true, stage: preflight, wire_match: exact }
+    { code: no_editor_world, description_zh: "C++ 实现返回错误码 no_editor_world", retry_safe: false, stage: execution, wire_match: exact }
+    { code: no_geditor, description_zh: "C++ 实现返回错误码 no_geditor", retry_safe: false, stage: execution, wire_match: exact }
+    { code: unsupported_shape, description_zh: "C++ 实现返回错误码 unsupported_shape", retry_safe: false, stage: execution, wire_match: exact }
+    { code: unsupported_trace_channel, description_zh: "C++ 实现返回错误码 unsupported_trace_channel", retry_safe: false, stage: execution, wire_match: exact }
+  ]
+}
+evidence: {
+  docs: [
+    { path: "Plugins/UeAgentInterface/docs/commands/core_level/level_check_overlaps.md", purpose: "user documentation cross-check; C++ implementation remains authoritative" }
+  ]
+  implementation: [
+    { line_hint: 2233, path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Commands/Level/UeAgentHttpServer_Level_ProjectionAndTrace.cpp", purpose: "command handler, parameter and return evidence", symbol: CmdLevelCheckOverlaps }
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Commands/AI/UeAgentHttpServer_AI_Blackboard.cpp", purpose: "transitive helper evidence used by the command handler" }
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Commands/Level/UeAgentHttpServer_Level.cpp", purpose: "transitive helper evidence used by the command handler" }
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Commands/Level/UeAgentHttpServer_Level_CaptureAndPersistence.cpp", purpose: "transitive helper evidence used by the command handler" }
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Commands/UMG/UeAgentHttpServer_UMG_FolderFormat.cpp", purpose: "transitive helper evidence used by the command handler" }
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Server/UeAgentHttpServer.cpp", purpose: "transitive helper evidence used by the command handler" }
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Utilities/UeAgentJsonDiagnostics.cpp", purpose: "transitive helper evidence used by the command handler" }
+  ]
+  tests: [
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterfaceTests/Private/Smoke/UeAgentInterfaceSmoke_LevelViewportModeling.cpp", purpose: "smoke or negative-path evidence cross-checked for the verified contract" }
+  ]
+}
+execution: {
+  destructive: false
+  editor_state: required
+  game_thread: required
+  idempotent: true
+  kind: read_only
+  overwrite_behavior: none
+  pie_state: allowed
+  retry_safe: true
+  save_behavior: none
+  side_effects: []
+  ui_effect: none
+}
+maturity: verified
+params: {
+  constraints: [
+    { fields: [checks, shape], kind: one_of }
+    { fields: [box_extent], kind: requires_when, when: { shape: box } }
+    { fields: [radius_cm], kind: requires_when, when: { shape: sphere } }
+    { fields: [half_height_cm, radius_cm], kind: requires_when, when: { shape: capsule } }
+  ]
+  fields: {
+    box_extent: { default_state: none, description_zh: "C++ 实现读取的 box_extent 参数", required: false, type: json_value }
+    center: { default_state: none, description_zh: "C++ 实现读取的 center 参数", required: true, type: json_value }
+    checks: { default_state: none, description_zh: "C++ 实现读取的 checks 参数", item_type: json_value, required: false, type: array }
+    continue_on_error: { default: false, default_state: defined, description_zh: "C++ 实现读取的 continue_on_error 参数", required: false, type: bool }
+    half_height_cm: { default_state: none, description_zh: "C++ 实现读取的 half_height_cm 参数", required: false, type: integer }
+    ignore_actor_ids: { default_state: none, description_zh: "C++ 实现读取的 ignore_actor_ids 参数", item_type: json_value, required: false, type: array }
+    ignore_folder_path_prefix: { default_state: none, description_zh: "C++ 实现读取的 ignore_folder_path_prefix 参数", required: false, type: string }
+    include_actor_folder_tags: { default: false, default_state: defined, description_zh: "C++ 实现读取的 include_actor_folder_tags 参数", required: false, type: bool }
+    include_overlaps: { default: true, default_state: defined, description_zh: "C++ 实现读取的 include_overlaps 参数", required: false, type: bool }
+    limit: { default: 100, default_state: defined, description_zh: "C++ 实现读取的 limit 参数", required: false, type: integer }
+    max_items: { default_state: none, description_zh: "C++ 实现读取的 max_items 参数", required: false, type: integer }
+    radius_cm: { default_state: none, description_zh: "C++ 实现读取的 radius_cm 参数", required: false, type: number }
+    rotation: { default_state: none, description_zh: "C++ 实现读取的 rotation 参数", required: false, type: json_value }
+    shape: { default_state: none, description_zh: "C++ 实现读取的 shape 参数", required: false, type: string }
+    stop_on_overlap: { default: false, default_state: defined, description_zh: "C++ 实现读取的 stop_on_overlap 参数", required: false, type: bool }
+    trace_channel: { default_state: none, description_zh: "C++ 实现读取的 trace_channel 参数", required: false, type: string }
+    trace_complex: { default: false, default_state: defined, description_zh: "C++ 实现读取的 trace_complex 参数", required: false, type: bool }
+  }
+  state: defined
+}
+response: { artifact_fields: [], compact_fields: [center, check_count, checks, continue_on_error, error_count, first_error], failure_fields: [params.box_extent, params.center, params.half_height_cm, params.radius_cm, params.shape], max_items_policy: { fields: [], mode: none } }
+returns: {
+  fields: {
+    center: { description_zh: "C++ 实现返回的 center 字段；是否出现取决于执行分支", required: false, type: json_value }
+    check_count: { description_zh: "C++ 实现返回的 check_count 字段；是否出现取决于执行分支", required: false, type: integer }
+    checks: { description_zh: "C++ 实现返回的 checks 字段；是否出现取决于执行分支", item_type: json_value, required: false, type: array }
+    continue_on_error: { description_zh: "C++ 实现返回的 continue_on_error 字段；是否出现取决于执行分支", required: false, type: bool }
+    error_count: { description_zh: "C++ 实现返回的 error_count 字段；是否出现取决于执行分支", required: false, type: integer }
+    first_error: { description_zh: "C++ 实现返回的 first_error 字段；是否出现取决于执行分支", required: false, type: string }
+    first_error_index: { description_zh: "C++ 实现返回的 first_error_index 字段；是否出现取决于执行分支", required: false, type: integer }
+    first_overlapping_index: { description_zh: "C++ 实现返回的 first_overlapping_index 字段；是否出现取决于执行分支", required: false, type: integer }
+    include_actor_folder_tags: { description_zh: "C++ 实现返回的 include_actor_folder_tags 字段；是否出现取决于执行分支", required: false, type: bool }
+    include_overlaps: { description_zh: "C++ 实现返回的 include_overlaps 字段；是否出现取决于执行分支", required: false, type: bool }
+    input_check_count: { description_zh: "C++ 实现返回的 input_check_count 字段；是否出现取决于执行分支", required: false, type: integer }
+    limit: { description_zh: "C++ 实现返回的 limit 字段；是否出现取决于执行分支", required: false, type: integer }
+    max_items: { description_zh: "C++ 实现返回的 max_items 字段；是否出现取决于执行分支", required: false, type: integer }
+    mode: { description_zh: "C++ 实现返回的 mode 字段；是否出现取决于执行分支", required: false, type: string }
+    overlap_count: { description_zh: "C++ 实现返回的 overlap_count 字段；是否出现取决于执行分支", required: false, type: integer }
+    overlaps: { description_zh: "C++ 实现返回的 overlaps 字段；是否出现取决于执行分支", item_type: json_value, required: false, type: array }
+    overlaps_included: { description_zh: "C++ 实现返回的 overlaps_included 字段；是否出现取决于执行分支", required: false, type: bool }
+    shape: { description_zh: "C++ 实现返回的 shape 字段；是否出现取决于执行分支", required: false, type: string }
+    stop_on_overlap: { description_zh: "C++ 实现返回的 stop_on_overlap 字段；是否出现取决于执行分支", required: false, type: bool }
+    total_overlap_count: { description_zh: "C++ 实现返回的 total_overlap_count 字段；是否出现取决于执行分支", required: false, type: integer }
+    trace_channel: { description_zh: "C++ 实现返回的 trace_channel 字段；是否出现取决于执行分支", required: false, type: string }
+    trace_complex: { description_zh: "C++ 实现返回的 trace_complex 字段；是否出现取决于执行分支", required: false, type: bool }
+    truncated: { description_zh: "C++ 实现返回的 truncated 字段；是否出现取决于执行分支", required: false, type: bool }
+  }
+  state: defined
+}
+schema: uai.command_spec.v1
+status: active
+types: {}
+verification: { reason: read_only_command_has_no_post_write_verification, state: none }
+version: 1

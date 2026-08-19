@@ -1,0 +1,60 @@
+authoring: { reason: command_has_no_registered_folder_authoring_profile, state: none }
+category: pcg
+command: pcg_gpu_capabilities_query
+deprecation: { reason: command_is_active, state: none }
+discovery: { aliases: [], keywords_en: [pcg, gpu, capabilities, query], keywords_zh: [pcg_gpu_capabilities_query], summary_en: "Execute pcg_gpu_capabilities_query with a verified implementation contract", summary_zh: "查询 RHI、ComputeFramework、GPU 节点能力", tags: [pcg, p2-005] }
+errors: { codes: [] }
+evidence: {
+  docs: [
+    { path: "Plugins/UeAgentInterface/docs/commands/pcg/pcg_gpu_capabilities_query.md", purpose: "user documentation cross-check; C++ implementation remains authoritative" }
+  ]
+  implementation: [
+    { line_hint: 4399, path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Commands/PCG/UeAgentHttpServer_PCG.cpp", purpose: "command handler, parameter and return evidence", symbol: CmdPCGGPUCapabilitiesQuery }
+  ]
+  tests: [
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterfaceTests/Private/Smoke/PCG/UeAgentInterfacePCGSmokeTests.cpp", purpose: "smoke or negative-path evidence cross-checked for the verified contract" }
+  ]
+}
+execution: {
+  destructive: false
+  editor_state: required
+  game_thread: required
+  idempotent: true
+  kind: read_only
+  overwrite_behavior: none
+  pie_state: allowed
+  retry_safe: true
+  save_behavior: none
+  side_effects: [writes_files]
+  ui_effect: none
+}
+maturity: verified
+params: {
+  constraints: []
+  fields: {
+    include_deprecated: { default: false, default_state: defined, description_zh: "C++ 实现读取的 include_deprecated 参数", required: false, type: bool }
+    output_file: {
+      default_state: none
+      description_zh: "C++ 实现读取的 output_file 参数"
+      path_semantics: { kind: filesystem_file, must_exist: false, writable: true }
+      required: false
+      type: filesystem_path
+    }
+  }
+  state: defined
+}
+response: { artifact_fields: [], compact_fields: [compute_framework_loaded, gpu_capable_node_class_count, rhi, schema], failure_fields: [], max_items_policy: { fields: [], mode: none } }
+returns: {
+  fields: {
+    compute_framework_loaded: { description_zh: "C++ 实现返回的 compute_framework_loaded 字段；是否出现取决于执行分支", required: false, type: bool }
+    gpu_capable_node_class_count: { description_zh: "C++ 实现返回的 gpu_capable_node_class_count 字段；是否出现取决于执行分支", required: false, type: integer }
+    rhi: { description_zh: "C++ 实现返回的 rhi 字段；是否出现取决于执行分支", required: false, type: string }
+    schema: { description_zh: "C++ 实现返回的 schema 字段；是否出现取决于执行分支", required: false, type: string }
+  }
+  state: defined
+}
+schema: uai.command_spec.v1
+status: active
+types: {}
+verification: { reason: read_only_command_has_no_post_write_verification, state: none }
+version: 1

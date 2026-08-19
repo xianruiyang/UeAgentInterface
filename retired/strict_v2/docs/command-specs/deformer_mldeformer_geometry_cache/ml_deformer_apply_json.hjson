@@ -1,0 +1,103 @@
+authoring: { reason: command_has_no_registered_folder_authoring_profile, state: none }
+category: deformer_mldeformer_geometry_cache
+command: ml_deformer_apply_json
+deprecation: { reason: command_is_active, state: none }
+discovery: { aliases: [], keywords_en: [ml, deformer, apply, json, deformer_mldeformer_geometry_cache], keywords_zh: [ml_deformer_apply_json], summary_en: "Execute ml_deformer_apply_json with a verified implementation contract", summary_zh: "应用显式 `apply=true` 的属性项，不启动训练", tags: [deformer_mldeformer_geometry_cache, p2-006] }
+errors: {
+  codes: [
+    { code: details_duplicate_property_path, description_zh: "C++ 实现返回错误码 details_duplicate_property_path", retry_safe: false, stage: execution, wire_match: prefix }
+    { code: details_field_missing_property_path, description_zh: "C++ 实现返回错误码 details_field_missing_property_path", retry_safe: true, stage: preflight, wire_match: prefix }
+    { code: details_group_missing_fields, description_zh: "C++ 实现返回错误码 details_group_missing_fields", retry_safe: true, stage: preflight, wire_match: prefix }
+    { code: details_index_invalid_group, description_zh: "C++ 实现返回错误码 details_index_invalid_group", retry_safe: true, stage: preflight, wire_match: prefix }
+    { code: details_index_missing_groups, description_zh: "C++ 实现返回错误码 details_index_missing_groups", retry_safe: true, stage: preflight, wire_match: exact }
+    { code: details_rehydrate_missing_properties, description_zh: "C++ 实现返回错误码 details_rehydrate_missing_properties", retry_safe: true, stage: preflight, wire_match: prefix }
+    { code: entry_object_invalid, description_zh: "C++ 实现返回错误码 entry_object_invalid", retry_safe: true, stage: preflight, wire_match: exact }
+    { code: hjson_file_not_found, description_zh: "C++ 实现返回错误码 hjson_file_not_found", retry_safe: false, stage: execution, wire_match: prefix }
+    { code: hjson_file_required, description_zh: "C++ 实现返回错误码 hjson_file_required", retry_safe: true, stage: preflight, wire_match: prefix }
+    { code: json_root_invalid, description_zh: "C++ 实现返回错误码 json_root_invalid", retry_safe: true, stage: preflight, wire_match: exact }
+    { code: json_validation_failed, description_zh: "C++ 实现返回错误码 json_validation_failed", retry_safe: false, stage: execution, wire_match: exact }
+    { code: missing_asset_path, description_zh: "C++ 实现返回错误码 missing_asset_path", retry_safe: true, stage: preflight, wire_match: exact }
+    { code: missing_input_file, description_zh: "C++ 实现返回错误码 missing_input_file", retry_safe: true, stage: preflight, wire_match: exact }
+  ]
+}
+evidence: {
+  docs: [
+    { path: "Plugins/UeAgentInterface/docs/commands/deformer_mldeformer_geometry_cache/ml_deformer_apply_json.md", purpose: "user documentation cross-check; C++ implementation remains authoritative" }
+  ]
+  implementation: [
+    { line_hint: 2562, path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Commands/Deformer/UeAgentHttpServer_Deformer.cpp", purpose: "command handler, parameter and return evidence", symbol: CmdMLDeformerApplyJson }
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Server/UeAgentHttpServer.cpp", purpose: "transitive helper evidence used by the command handler" }
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Utilities/UeAgentAuthoringFileIO.cpp", purpose: "transitive helper evidence used by the command handler" }
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Utilities/UeAgentDetailsAuthoring.cpp", purpose: "transitive helper evidence used by the command handler" }
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Utilities/UeAgentStructuredAuthoringIO.cpp", purpose: "transitive helper evidence used by the command handler" }
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Utilities/UeAgentStructuredHjsonFormatter.cpp", purpose: "transitive helper evidence used by the command handler" }
+  ]
+  tests: [
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterfaceTests/Private/Smoke/UeAgentInterfaceSmoke_Coverage.cpp", purpose: "smoke or negative-path evidence cross-checked for the verified contract" }
+  ]
+}
+execution: {
+  destructive: false
+  editor_state: required
+  game_thread: required
+  idempotent: false
+  kind: write
+  overwrite_behavior: none
+  pie_state: allowed
+  retry_safe: false
+  save_behavior: caller_controlled
+  side_effects: [modifies_asset]
+  ui_effect: none
+}
+maturity: verified
+params: {
+  constraints: []
+  fields: {
+    apply_all_properties: { default: false, default_state: defined, description_zh: "C++ 实现读取的 apply_all_properties 参数", required: false, type: bool }
+    asset_path: { default_state: none, description_zh: "C++ 实现读取的 asset_path 参数", path_semantics: { access_scope: project_write, kind: ue_asset }, required: false, type: ue_asset_path }
+    dry_run: { default: false, default_state: defined, description_zh: "C++ 实现读取的 dry_run 参数", required: false, type: bool }
+    json_file: {
+      default_state: none
+      description_zh: "C++ 实现读取的 json_file 参数"
+      path_semantics: { kind: filesystem_file, must_exist: false, writable: false }
+      required: false
+      type: filesystem_path
+    }
+    save_after_apply: { default: false, default_state: defined, description_zh: "C++ 实现读取的 save_after_apply 参数", required: false, type: bool }
+    validate_only: { default: false, default_state: defined, description_zh: "C++ 实现读取的 validate_only 参数", required: false, type: bool }
+  }
+  state: defined
+}
+response: { artifact_fields: [json_issues, plugin_status, property_apply], compact_fields: [applied, dry_run, error_count, expected_profile, json_issue_count], failure_fields: [], max_items_policy: { fields: [], mode: none } }
+returns: {
+  fields: {
+    applied: { description_zh: "C++ 实现返回的 applied 字段；是否出现取决于执行分支", required: false, type: bool }
+    dry_run: { description_zh: "C++ 实现返回的 dry_run 字段；是否出现取决于执行分支", required: false, type: bool }
+    error_count: { description_zh: "C++ 实现返回的 error_count 字段；是否出现取决于执行分支", required: false, type: integer }
+    expected_profile: { description_zh: "C++ 实现返回的 expected_profile 字段；是否出现取决于执行分支", required: false, type: string }
+    json_issue_count: { description_zh: "C++ 实现返回的 json_issue_count 字段；是否出现取决于执行分支", required: false, type: integer }
+    json_issues: { description_zh: "C++ 实现返回的 json_issues 字段；是否出现取决于执行分支", item_type: json_value, required: false, type: array }
+    plugin_status: { description_zh: "C++ 实现返回的 plugin_status 字段；是否出现取决于执行分支", required: false, type: json_value }
+    property_apply: { description_zh: "C++ 实现返回的 property_apply 字段；是否出现取决于执行分支", required: false, type: json_value }
+    selected_property_count: { description_zh: "C++ 实现返回的 selected_property_count 字段；是否出现取决于执行分支", required: false, type: integer }
+    training_policy: { description_zh: "C++ 实现返回的 training_policy 字段；是否出现取决于执行分支", required: false, type: string }
+    training_status: { description_zh: "C++ 实现返回的 training_status 字段；是否出现取决于执行分支", required: false, type: string }
+    warning_count: { description_zh: "C++ 实现返回的 warning_count 字段；是否出现取决于执行分支", required: false, type: integer }
+  }
+  state: defined
+}
+schema: uai.command_spec.v1
+status: active
+types: {}
+verification: {
+  assertions: [
+    { id: result_present, operator: exists, source: returns.applied }
+  ]
+  failure_policy: fail_overall
+  methods: [
+    { id: result, kind: result_assertion }
+  ]
+  required: true
+  state: defined
+}
+version: 1

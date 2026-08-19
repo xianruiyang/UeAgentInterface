@@ -1,0 +1,202 @@
+authoring: { reason: command_has_no_registered_folder_authoring_profile, state: none }
+category: probe
+command: probe_ik_goal_review_frames
+deprecation: { reason: command_is_active, state: none }
+discovery: { aliases: [], keywords_en: [probe, ik, goal, review, frames], keywords_zh: [probe_ik_goal_review_frames], summary_en: "Execute probe_ik_goal_review_frames with a verified implementation contract", summary_zh: "从最近一次或指定 `probe_ik_goal_candidates` 缓存中按 `F0..Fn` 编号筛选帧，默认重新高分辨率捕获选中帧并生成只包含这些帧的序列帧图", tags: [probe, p2-007] }
+errors: {
+  codes: [
+    { code: apply_control_transform_failed, description_zh: "C++ 实现返回错误码 apply_control_transform_failed", retry_safe: false, stage: execution, wire_match: exact }
+    { code: cached_sequence_binding_not_found, description_zh: "C++ 实现返回错误码 cached_sequence_binding_not_found", retry_safe: false, stage: execution, wire_match: exact }
+    { code: compress_failed, description_zh: "C++ 实现返回错误码 compress_failed", retry_safe: false, stage: execution, wire_match: exact }
+    { code: control_rig_control_not_found, description_zh: "C++ 实现返回错误码 control_rig_control_not_found", retry_safe: false, stage: execution, wire_match: exact }
+    { code: control_rig_control_type_not_supported, description_zh: "C++ 实现返回错误码 control_rig_control_type_not_supported", retry_safe: false, stage: execution, wire_match: exact }
+    { code: control_rig_object_binding_create_failed, description_zh: "C++ 实现返回错误码 control_rig_object_binding_create_failed", retry_safe: false, stage: execution, wire_match: exact }
+    { code: control_rig_rebind_failed, description_zh: "C++ 实现返回错误码 control_rig_rebind_failed", retry_safe: false, stage: execution, wire_match: prefix }
+    { code: control_rig_track_filter_not_found, description_zh: "C++ 实现返回错误码 control_rig_track_filter_not_found", retry_safe: false, stage: execution, wire_match: exact }
+    { code: control_rig_track_or_control_not_found, description_zh: "C++ 实现返回错误码 control_rig_track_or_control_not_found", retry_safe: false, stage: execution, wire_match: exact }
+    { code: frame_index_not_found_in_probe_cache, description_zh: "C++ 实现返回错误码 frame_index_not_found_in_probe_cache", retry_safe: false, stage: execution, wire_match: prefix }
+    { code: frame_sheet_empty, description_zh: "C++ 实现返回错误码 frame_sheet_empty", retry_safe: false, stage: execution, wire_match: exact }
+    { code: frame_sheet_frame_size_mismatch, description_zh: "C++ 实现返回错误码 frame_sheet_frame_size_mismatch", retry_safe: false, stage: execution, wire_match: exact }
+    { code: frame_sheet_too_large, description_zh: "C++ 实现返回错误码 frame_sheet_too_large", retry_safe: false, stage: execution, wire_match: exact }
+    { code: invalid_control_rig_rebind_context, description_zh: "C++ 实现返回错误码 invalid_control_rig_rebind_context", retry_safe: true, stage: preflight, wire_match: exact }
+    { code: invalid_control_rig_track_context, description_zh: "C++ 实现返回错误码 invalid_control_rig_track_context", retry_safe: true, stage: preflight, wire_match: exact }
+    { code: invalid_frame_selection_at_index_, description_zh: "C++ 实现返回错误码 invalid_frame_selection_at_index_", retry_safe: true, stage: preflight, wire_match: prefix }
+    { code: invalid_params, description_zh: "C++ 实现返回错误码 invalid_params", retry_safe: true, stage: preflight, wire_match: exact }
+    { code: invalid_pixels, description_zh: "C++ 实现返回错误码 invalid_pixels", retry_safe: true, stage: preflight, wire_match: exact }
+    { code: invalid_selected_frame, description_zh: "C++ 实现返回错误码 invalid_selected_frame", retry_safe: true, stage: preflight, wire_match: exact }
+    { code: invalid_sequence_capture_context, description_zh: "C++ 实现返回错误码 invalid_sequence_capture_context", retry_safe: true, stage: preflight, wire_match: exact }
+    { code: level_sequence_not_found, description_zh: "C++ 实现返回错误码 level_sequence_not_found", retry_safe: false, stage: execution, wire_match: exact }
+    { code: level_sequence_player_create_failed, description_zh: "C++ 实现返回错误码 level_sequence_player_create_failed", retry_safe: false, stage: execution, wire_match: exact }
+    { code: missing_frames, description_zh: "C++ 实现返回错误码 missing_frames", retry_safe: true, stage: preflight, wire_match: exact }
+    { code: missing_probe_request_id, description_zh: "C++ 实现返回错误码 missing_probe_request_id", retry_safe: true, stage: preflight, wire_match: exact }
+    { code: movie_scene_not_found, description_zh: "C++ 实现返回错误码 movie_scene_not_found", retry_safe: false, stage: execution, wire_match: exact }
+    { code: no_editor_world, description_zh: "C++ 实现返回错误码 no_editor_world", retry_safe: false, stage: execution, wire_match: exact }
+    { code: no_geditor, description_zh: "C++ 实现返回错误码 no_geditor", retry_safe: false, stage: execution, wire_match: exact }
+    { code: probe_candidate_cache_not_found, description_zh: "C++ 实现返回错误码 probe_candidate_cache_not_found", retry_safe: false, stage: execution, wire_match: exact }
+    { code: probe_frame_pixels_not_available, description_zh: "C++ 实现返回错误码 probe_frame_pixels_not_available", retry_safe: false, stage: execution, wire_match: prefix }
+    { code: probe_frame_size_not_cached, description_zh: "C++ 实现返回错误码 probe_frame_size_not_cached", retry_safe: false, stage: execution, wire_match: exact }
+    { code: read_render_target_failed, description_zh: "C++ 实现返回错误码 read_render_target_failed", retry_safe: false, stage: execution, wire_match: exact }
+    { code: render_target_alloc_failed, description_zh: "C++ 实现返回错误码 render_target_alloc_failed", retry_safe: false, stage: execution, wire_match: exact }
+    { code: review_recapture_bounds_invalid, description_zh: "C++ 实现返回错误码 review_recapture_bounds_invalid", retry_safe: true, stage: preflight, wire_match: exact }
+    { code: review_recapture_frame_failed, description_zh: "C++ 实现返回错误码 review_recapture_frame_failed", retry_safe: false, stage: execution, wire_match: prefix }
+    { code: scene_capture_component_missing, description_zh: "C++ 实现返回错误码 scene_capture_component_missing", retry_safe: true, stage: preflight, wire_match: exact }
+    { code: sequence_binding_bound_objects_not_found, description_zh: "C++ 实现返回错误码 sequence_binding_bound_objects_not_found", retry_safe: false, stage: execution, wire_match: exact }
+    { code: sequence_binding_bounds_invalid, description_zh: "C++ 实现返回错误码 sequence_binding_bounds_invalid", retry_safe: true, stage: preflight, wire_match: exact }
+    { code: sequence_control_rig_bound_object_not_found, description_zh: "C++ 实现返回错误码 sequence_control_rig_bound_object_not_found", retry_safe: false, stage: execution, wire_match: exact }
+    { code: spawn_scene_capture_failed, description_zh: "C++ 实现返回错误码 spawn_scene_capture_failed", retry_safe: false, stage: execution, wire_match: exact }
+    { code: unsupported_image_format, description_zh: "C++ 实现返回错误码 unsupported_image_format", retry_safe: false, stage: execution, wire_match: exact }
+    { code: write_file_failed, description_zh: "C++ 实现返回错误码 write_file_failed", retry_safe: false, stage: execution, wire_match: exact }
+  ]
+}
+evidence: {
+  docs: [
+    { path: "Plugins/UeAgentInterface/docs/commands/probe/probe_ik_goal_review_frames.md", purpose: "user documentation cross-check; C++ implementation remains authoritative" }
+  ]
+  implementation: [
+    { line_hint: 2745, path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Commands/IK/UeAgentHttpServer_IKAssets_Probe.cpp", purpose: "command handler, parameter and return evidence", symbol: CmdProbeIKGoalReviewFrames }
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Commands/EditorViewport/UeAgentEditorViewportSequenceFrameOptions.cpp", purpose: "transitive helper evidence used by the command handler" }
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Commands/Level/UeAgentHttpServer_Level_CaptureAndPersistence.cpp", purpose: "transitive helper evidence used by the command handler" }
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Commands/Level/UeAgentHttpServer_Level_ImageHelpers.cpp", purpose: "transitive helper evidence used by the command handler" }
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Server/UeAgentHttpServer.cpp", purpose: "transitive helper evidence used by the command handler" }
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Utilities/UeAgentJsonDiagnostics.cpp", purpose: "transitive helper evidence used by the command handler" }
+  ]
+  tests: [
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterfaceTests/Private/Smoke/UeAgentInterfaceSmoke_Sequence.cpp", purpose: "smoke or negative-path evidence cross-checked for the verified contract" }
+  ]
+}
+execution: {
+  destructive: false
+  editor_state: required
+  game_thread: required
+  idempotent: true
+  kind: read_only_export
+  overwrite_behavior: owned_artifacts_only
+  pie_state: allowed
+  retry_safe: true
+  save_behavior: none
+  side_effects: [writes_files, modifies_editor_session, captures_media]
+  ui_effect: none
+}
+maturity: verified
+params: {
+  constraints: []
+  fields: {
+    bounds_padding: { default_state: none, description_zh: "C++ 实现读取的 bounds_padding 参数", required: false, type: number }
+    candidate_cache_request_id: { default_state: none, description_zh: "C++ 实现读取的 candidate_cache_request_id 参数", required: false, type: string }
+    format: { default_state: none, description_zh: "C++ 实现读取的 format 参数", enum_values: [png, jpeg, webp], required: false, type: enum }
+    frame_height: {
+      default_state: none
+      description_zh: "可选复查帧高度；未传时沿用缓存或重渲染尺寸"
+      maximum: 4096
+      minimum: 128
+      required: false
+      type: integer
+    }
+    frame_index: { default_state: none, description_zh: "C++ 实现读取的 frame_index 参数", required: false, type: integer }
+    frame_indexes: { default_state: none, description_zh: "C++ 实现读取的 frame_indexes 参数", item_type: json_value, required: false, type: array }
+    frame_indices: { default_state: none, description_zh: "C++ 实现读取的 frame_indices 参数", item_type: json_value, required: false, type: array }
+    frame_number: { default_state: none, description_zh: "C++ 实现读取的 frame_number 参数", required: false, type: number }
+    frame_sheet_label_scale: { default_state: none, description_zh: "C++ 实现读取的 frame_sheet_label_scale 参数", required: false, type: number }
+    frame_sheet_max_size: { default_state: none, description_zh: "C++ 实现读取的 frame_sheet_max_size 参数", required: false, type: number }
+    frame_sheet_padding: { default_state: none, description_zh: "C++ 实现读取的 frame_sheet_padding 参数", required: false, type: number }
+    frame_width: {
+      default_state: none
+      description_zh: "可选复查帧宽度；未传时沿用缓存或重渲染尺寸"
+      maximum: 4096
+      minimum: 128
+      required: false
+      type: integer
+    }
+    frames: { default_state: none, description_zh: "C++ 实现读取的 frames 参数", item_type: json_value, required: false, type: array }
+    height: { default_state: none, description_zh: "frame_height 的可选兼容输入；未传时不覆盖自动尺寸", minimum: 128, maximum: 4096, required: false, type: integer }
+    index: { default_state: none, description_zh: "C++ 实现读取的 index 参数", required: false, type: integer }
+    mesh_capture_bounds_padding: { default_state: none, description_zh: "C++ 实现读取的 mesh_capture_bounds_padding 参数", required: false, type: number }
+    number: { default_state: none, description_zh: "C++ 实现读取的 number 参数", required: false, type: number }
+    numbers: { default_state: none, description_zh: "C++ 实现读取的 numbers 参数", item_type: json_value, required: false, type: array }
+    preview_state: { default_state: none, description_zh: "C++ 实现读取的 preview_state 参数", required: false, type: object, type_ref: "shared:EditorViewportPreviewState" }
+    probe_request_id: { default_state: none, description_zh: "C++ 实现读取的 probe_request_id 参数", required: false, type: string }
+    quality: { default_state: none, description_zh: "C++ 实现读取的 quality 参数", maximum: 100, minimum: 1, required: false, type: integer }
+    recapture: { default_state: none, description_zh: "C++ 实现读取的 recapture 参数", required: false, type: bool }
+    rerender: { default_state: none, description_zh: "C++ 实现读取的 rerender 参数", required: false, type: bool }
+    rerender_selected_frames: { default_state: none, description_zh: "C++ 实现读取的 rerender_selected_frames 参数", required: false, type: bool }
+    selection: { default_state: none, description_zh: "C++ 实现读取的 selection 参数", required: false, type: number }
+    selections: { default_state: none, description_zh: "C++ 实现读取的 selections 参数", item_type: json_value, required: false, type: array }
+    sheet_label_scale: { default_state: none, description_zh: "C++ 实现读取的 sheet_label_scale 参数", required: false, type: number }
+    sheet_max_size: { default_state: none, description_zh: "C++ 实现读取的 sheet_max_size 参数", required: false, type: number }
+    sheet_padding: { default_state: none, description_zh: "C++ 实现读取的 sheet_padding 参数", required: false, type: number }
+    use_cached_pixels: { default: false, default_state: defined, description_zh: "C++ 实现读取的 use_cached_pixels 参数", required: false, type: bool }
+    visual_options: { default_state: none, description_zh: "C++ 实现读取的 visual_options 参数", required: false, type: object, type_ref: "shared:EditorViewportVisualOptions" }
+    width: { default_state: none, description_zh: "frame_width 的可选兼容输入；未传时不覆盖自动尺寸", minimum: 128, maximum: 4096, required: false, type: integer }
+  }
+  state: defined
+}
+response: { artifact_fields: [frames, preview_state_ignored, requested_frames, visual_options_ignored, warnings, frame_sheet, preview_state_applied, unified_sequence_frame_options, visual_options_applied], compact_fields: [context_mode, probe_request_id, selected_frame_count, frame_count, reuses_cached_pixels, rerenders_selected_frames], failure_fields: [params.probe_request_id], max_items_policy: { fields: [], mode: none } }
+returns: {
+  fields: {
+    artifact_count: { description_zh: "C++ 实现返回的 artifact_count 字段；是否出现取决于执行分支", required: false, type: integer }
+    binding_guid: { description_zh: "C++ 实现返回的 binding_guid 字段；是否出现取决于执行分支", required: false, type: string }
+    binding_name: { description_zh: "C++ 实现返回的 binding_name 字段；是否出现取决于执行分支", required: false, type: string }
+    bounds_padding: { description_zh: "C++ 实现返回的 bounds_padding 字段；是否出现取决于执行分支", required: false, type: number }
+    context_mode: { description_zh: "C++ 实现返回的 context_mode 字段；是否出现取决于执行分支", required: false, type: string }
+    control_name: { description_zh: "C++ 实现返回的 control_name 字段；是否出现取决于执行分支", required: false, type: string }
+    control_rig_class: { description_zh: "C++ 实现返回的 control_rig_class 字段；是否出现取决于执行分支", required: false, type: string }
+    control_type: { description_zh: "C++ 实现返回的 control_type 字段；是否出现取决于执行分支", required: false, type: string }
+    duplicates_sequence: { description_zh: "C++ 实现返回的 duplicates_sequence 字段；是否出现取决于执行分支", required: false, type: bool }
+    evaluates_sequence: { description_zh: "C++ 实现返回的 evaluates_sequence 字段；是否出现取决于执行分支", required: false, type: bool }
+    evaluation_frame: { description_zh: "C++ 实现返回的 evaluation_frame 字段；是否出现取决于执行分支", required: false, type: number }
+    format: { description_zh: "C++ 实现返回的 format 字段；是否出现取决于执行分支", required: false, type: string }
+    frame_count: { description_zh: "C++ 实现返回的 frame_count 字段；是否出现取决于执行分支", required: false, type: integer }
+    frame_height: { description_zh: "C++ 实现返回的 frame_height 字段；是否出现取决于执行分支", required: false, type: integer }
+    frame_sheet: { description_zh: "C++ 实现返回的 frame_sheet 字段；是否出现取决于执行分支", required: false, type: json_value }
+    frame_sheet_file_path: { description_zh: "C++ 实现返回的 frame_sheet_file_path 字段；是否出现取决于执行分支", required: false, type: string }
+    frame_width: { description_zh: "C++ 实现返回的 frame_width 字段；是否出现取决于执行分支", required: false, type: integer }
+    frames: { description_zh: "C++ 实现返回的 frames 字段；是否出现取决于执行分支", item_type: json_value, required: false, type: array }
+    implementation: { description_zh: "C++ 实现返回的 implementation 字段；是否出现取决于执行分支", required: false, type: string }
+    label_mode: { description_zh: "C++ 实现返回的 label_mode 字段；是否出现取决于执行分支", required: false, type: string }
+    preview_state_applied: { description_zh: "C++ 实现返回的 preview_state_applied 字段；是否出现取决于执行分支", required: false, type: json_value }
+    preview_state_ignored: { description_zh: "C++ 实现返回的 preview_state_ignored 字段；是否出现取决于执行分支", item_type: json_value, required: false, type: array }
+    probe_request_id: { description_zh: "C++ 实现返回的 probe_request_id 字段；是否出现取决于执行分支", required: false, type: string }
+    quality: { description_zh: "C++ 实现返回的 quality 字段；是否出现取决于执行分支", required: false, type: integer }
+    request_id: { description_zh: "C++ 实现返回的 request_id 字段；是否出现取决于执行分支", required: false, type: string }
+    requested_frames: { description_zh: "C++ 实现返回的 requested_frames 字段；是否出现取决于执行分支", item_type: json_value, required: false, type: array }
+    rerenders_selected_frames: { description_zh: "C++ 实现返回的 rerenders_selected_frames 字段；是否出现取决于执行分支", required: false, type: bool }
+    reuses_cached_pixels: { description_zh: "C++ 实现返回的 reuses_cached_pixels 字段；是否出现取决于执行分支", required: false, type: bool }
+    schema: { description_zh: "C++ 实现返回的 schema 字段；是否出现取决于执行分支", required: false, type: string }
+    selected_frame_count: { description_zh: "C++ 实现返回的 selected_frame_count 字段；是否出现取决于执行分支", required: false, type: integer }
+    selection_semantics: { description_zh: "C++ 实现返回的 selection_semantics 字段；是否出现取决于执行分支", required: false, type: string }
+    sequence_frame_image_path: { description_zh: "C++ 实现返回的 sequence_frame_image_path 字段；是否出现取决于执行分支", required: false, type: string }
+    sequence_frame_index: { description_zh: "C++ 实现返回的 sequence_frame_index 字段；是否出现取决于执行分支", required: false, type: integer }
+    sequence_object_path: { description_zh: "C++ 实现返回的 sequence_object_path 字段；是否出现取决于执行分支", required: false, type: ue_object_path }
+    sequence_path: { description_zh: "C++ 实现返回的 sequence_path 字段；是否出现取决于执行分支", required: false, type: string }
+    sequence_time_seconds: { description_zh: "C++ 实现返回的 sequence_time_seconds 字段；是否出现取决于执行分支", required: false, type: number }
+    source_frame_count: { description_zh: "C++ 实现返回的 source_frame_count 字段；是否出现取决于执行分支", required: false, type: integer }
+    source_frame_height: { description_zh: "C++ 实现返回的 source_frame_height 字段；是否出现取决于执行分支", required: false, type: integer }
+    source_frame_sheet_file_path: { description_zh: "C++ 实现返回的 source_frame_sheet_file_path 字段；是否出现取决于执行分支", required: false, type: string }
+    source_frame_width: { description_zh: "C++ 实现返回的 source_frame_width 字段；是否出现取决于执行分支", required: false, type: integer }
+    source_probe_request_id: { description_zh: "C++ 实现返回的 source_probe_request_id 字段；是否出现取决于执行分支", required: false, type: string }
+    unified_sequence_frame_options: { description_zh: "C++ 实现返回的 unified_sequence_frame_options 字段；是否出现取决于执行分支", required: false, type: json_value }
+    uses_external_simulation: { description_zh: "C++ 实现返回的 uses_external_simulation 字段；是否出现取决于执行分支", required: false, type: bool }
+    visual_options_applied: { description_zh: "C++ 实现返回的 visual_options_applied 字段；是否出现取决于执行分支", required: false, type: json_value }
+    visual_options_ignored: { description_zh: "C++ 实现返回的 visual_options_ignored 字段；是否出现取决于执行分支", item_type: json_value, required: false, type: array }
+    warnings: { description_zh: "C++ 实现返回的 warnings 字段；是否出现取决于执行分支", item_type: json_value, required: false, type: array }
+    writes_sequence_keys: { description_zh: "C++ 实现返回的 writes_sequence_keys 字段；是否出现取决于执行分支", required: false, type: bool }
+  }
+  state: defined
+}
+schema: uai.command_spec.v1
+status: active
+types: {}
+verification: {
+  assertions: [
+    { id: result_present, operator: exists, source: returns.frame_sheet_file_path }
+    { id: artifact_present, operator: not_empty, source: returns.frame_sheet_file_path }
+  ]
+  failure_policy: fail_overall
+  methods: [
+    { id: result, kind: result_assertion }
+    { artifact_field: frame_sheet_file_path, id: artifact, kind: filesystem_artifact }
+  ]
+  required: true
+  state: defined
+}
+version: 1

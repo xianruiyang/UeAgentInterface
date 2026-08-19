@@ -1,0 +1,307 @@
+{
+  "schema": "uai.domain_adapter.world_spatial.typed_request_fixture.v1",
+  "case_count": 22,
+  "family_count": 5,
+  "cases": [
+    {
+      "capability_id": "graph.view.read",
+      "family_id": "graph_view",
+      "request_kind": "graph_view_read",
+      "typed_request_id": "world_spatial.graph_view.read.request.v1",
+      "valid_input": {}
+    },
+    {
+      "capability_id": "graph.view.update",
+      "family_id": "graph_view",
+      "request_kind": "graph_view_update",
+      "typed_request_id": "world_spatial.graph_view.update.request.v1",
+      "valid_input": {
+        "view_state": {
+          "location": {
+            "subject": "graph:/Game/UAI/Tests/WorldSpatial/BP_GraphViewFixture.EventGraph",
+            "quantity": "point",
+            "frame": {
+              "frame_id": "graph.canvas.canonical",
+              "basis_frame_id": "graph.editor.view.local",
+              "dimension": 2,
+              "unit": "graph_unit",
+              "basis_evidence_id": "basis:graph-view",
+              "observed_at": {"clock_id":"editor","tick":"120","rate_numerator":"60","rate_denominator":"1","state":"frozen"}
+            },
+            "components": ["320", "180"],
+            "conversion_evidence_ids": ["convert:graph-view"]
+          },
+          "zoom": 1.25,
+          "graph_revision": {"source_id":"graph-view","generation":"gen-1","sequence":1}
+        }
+      }
+    },
+    {
+      "capability_id": "graph.layout.apply",
+      "family_id": "graph_layout",
+      "request_kind": "graph_layout_apply",
+      "typed_request_id": "world_spatial.graph_layout.apply.request.v1",
+      "valid_input": {
+        "graph_ref": "graph:/Game/UAI/Tests/WorldSpatial/BP_GraphLayoutFixture.EventGraph",
+        "node_placements": [
+          {"node_ref":"node:alpha","position":{"subject":"node:alpha","quantity":"point","frame":{"frame_id":"graph.local.canonical","basis_frame_id":"graph.node.integer.local","dimension":2,"unit":"graph_unit","basis_evidence_id":"basis:graph-layout","observed_at":{"clock_id":"editor","tick":"121","rate_numerator":"60","rate_denominator":"1","state":"frozen"}},"components":["100","200"],"conversion_evidence_ids":["convert:node-alpha"]}},
+          {"node_ref":"node:beta","position":{"subject":"node:beta","quantity":"point","frame":{"frame_id":"graph.local.canonical","basis_frame_id":"graph.node.integer.local","dimension":2,"unit":"graph_unit","basis_evidence_id":"basis:graph-layout","observed_at":{"clock_id":"editor","tick":"121","rate_numerator":"60","rate_denominator":"1","state":"frozen"}},"components":["500","200"],"conversion_evidence_ids":["convert:node-beta"]}}
+        ],
+        "expected_revision": {"source_id":"graph-layout","generation":"gen-1","sequence":2},
+        "layout_relations": [{"source_node_ref":"node:alpha","target_node_ref":"node:beta","relation":"right_of","gap":200}]
+      }
+    },
+    {
+      "capability_id": "world.object_transform.read",
+      "family_id": "object_transform",
+      "request_kind": "object_transform_read",
+      "typed_request_id": "world_spatial.object_transform.read.request.v1",
+      "valid_input": {
+        "verify_frame": {"frame_id":"fixture.subject.semantic","basis_frame_id":"unreal.world","dimension":3,"unit":"centimeter","basis_evidence_id":"basis:world","observed_at":{"clock_id":"editor","tick":"122","rate_numerator":"60","rate_denominator":"1","state":"frozen"}}
+      }
+    },
+    {
+      "capability_id": "world.object_align",
+      "family_id": "object_transform",
+      "request_kind": "object_align",
+      "typed_request_id": "world_spatial.object_transform.align.request.v1",
+      "valid_input": {
+        "subject_refs": ["actor:subject"],
+        "alignment": {
+          "kind": "bounds",
+          "verify_frame": {"frame_id":"fixture.subject.semantic","basis_frame_id":"unreal.world","dimension":3,"unit":"centimeter","basis_evidence_id":"basis:world","observed_at":{"clock_id":"editor","tick":"123","rate_numerator":"60","rate_denominator":"1","state":"frozen"}},
+          "axis": "x",
+          "source_anchor": "center",
+          "target_anchor": "center",
+          "rotation_policy": "preserve"
+        },
+        "expected_revisions": [{"target_ref":"actor:subject","revision":{"source_id":"actor:subject","generation":"gen-1","sequence":3}}],
+        "anchor_ref": "actor:anchor"
+      }
+    },
+    {
+      "capability_id": "world.object_snap_to_surface",
+      "family_id": "object_transform",
+      "request_kind": "object_snap_to_surface",
+      "typed_request_id": "world_spatial.object_transform.snap_to_surface.request.v1",
+      "valid_input": {
+        "subject_refs": ["actor:subject"],
+        "surface_query": {
+          "origin": {"subject":"trace:origin","quantity":"point","frame":{"frame_id":"unreal.world","basis_frame_id":"unreal.world","dimension":3,"unit":"centimeter","basis_evidence_id":"basis:world","observed_at":{"clock_id":"editor","tick":"124","rate_numerator":"60","rate_denominator":"1","state":"frozen"}},"components":["0","0","100"],"conversion_evidence_ids":[]},
+          "direction": {"subject":"trace:ray","quantity":"direction","frame":{"frame_id":"unreal.world","basis_frame_id":"unreal.world","dimension":3,"unit":"unitless","basis_evidence_id":"basis:world","observed_at":{"clock_id":"editor","tick":"124","rate_numerator":"60","rate_denominator":"1","state":"frozen"}},"components":["0","0","-1"],"conversion_evidence_ids":[]},
+          "max_distance_cm": 500,
+          "trace_channel": "visibility",
+          "trace_complex": true,
+          "ignore_target_refs": ["actor:subject"]
+        },
+        "placement_policy": {"clearance_cm":5,"align_to_surface_normal":true,"preserve_yaw":true},
+        "expected_revisions": [{"target_ref":"actor:subject","revision":{"source_id":"actor:subject","generation":"gen-1","sequence":4}}]
+      }
+    },
+    {
+      "capability_id": "mesh.transform.bake",
+      "family_id": "object_transform",
+      "request_kind": "mesh_transform_bake",
+      "typed_request_id": "world_spatial.object_transform.bake_mesh.request.v1",
+      "valid_input": {
+        "transform": {"subject":"mesh:fixture","quantity":"transform","frame":{"frame_id":"mesh.asset.local","basis_frame_id":"fixture.mesh.semantic","dimension":3,"unit":"centimeter","basis_evidence_id":"basis:mesh","observed_at":{"clock_id":"editor","tick":"125","rate_numerator":"60","rate_denominator":"1","state":"frozen"}},"components":["10","20","30","0","0","0","1","2","2","2"],"conversion_evidence_ids":["convert:mesh"]},
+        "expected_revision": {"source_id":"mesh:fixture","generation":"gen-1","sequence":5},
+        "preserve_placement": true
+      }
+    },
+    {
+      "capability_id": "mesh.pivot.update",
+      "family_id": "object_transform",
+      "request_kind": "mesh_pivot_update",
+      "typed_request_id": "world_spatial.object_transform.update_pivot.request.v1",
+      "valid_input": {
+        "pivot": {"subject":"mesh:fixture","quantity":"point","frame":{"frame_id":"mesh.geometry.local","basis_frame_id":"fixture.mesh.semantic","dimension":3,"unit":"centimeter","basis_evidence_id":"basis:mesh","observed_at":{"clock_id":"editor","tick":"126","rate_numerator":"60","rate_denominator":"1","state":"frozen"}},"components":["10","0","0"],"conversion_evidence_ids":["convert:pivot"]},
+        "expected_revision": {"source_id":"mesh:fixture","generation":"gen-1","sequence":6},
+        "preserve_world_geometry": true
+      }
+    },
+    {
+      "capability_id": "world.transform_candidates.evaluate",
+      "family_id": "object_transform",
+      "request_kind": "transform_candidates_evaluate",
+      "typed_request_id": "world_spatial.object_transform.evaluate_candidates.request.v1",
+      "valid_input": {
+        "subject_refs": ["actor:subject"],
+        "candidates": [{"subject":"actor:subject","quantity":"transform","frame":{"frame_id":"fixture.subject.semantic","basis_frame_id":"unreal.world","dimension":3,"unit":"centimeter","basis_evidence_id":"basis:candidate","observed_at":{"clock_id":"editor","tick":"127","rate_numerator":"60","rate_denominator":"1","state":"frozen"}},"components":["0","0","0","0","0","0","1","1","1","1"],"conversion_evidence_ids":["convert:candidate"]}],
+        "verify_frame": {"frame_id":"fixture.subject.semantic","basis_frame_id":"unreal.world","dimension":3,"unit":"centimeter","basis_evidence_id":"basis:world","observed_at":{"clock_id":"editor","tick":"127","rate_numerator":"60","rate_denominator":"1","state":"frozen"}}
+      }
+    },
+    {
+      "capability_id": "viewport.ray.deproject",
+      "family_id": "viewport_projection",
+      "request_kind": "viewport_ray_deproject",
+      "typed_request_id": "world_spatial.viewport_projection.deproject.request.v1",
+      "valid_input": {
+        "screen_point": {"subject":"viewport:fixture","quantity":"point","frame":{"frame_id":"viewport.screen.pixel","basis_frame_id":"viewport:fixture","dimension":2,"unit":"pixel","basis_evidence_id":"basis:viewport","observed_at":{"clock_id":"editor","tick":"128","rate_numerator":"60","rate_denominator":"1","state":"frozen"}},"components":["640","360"],"conversion_evidence_ids":[]}
+      }
+    },
+    {
+      "capability_id": "viewport.ray.trace",
+      "family_id": "viewport_projection",
+      "request_kind": "viewport_ray_trace",
+      "typed_request_id": "world_spatial.viewport_projection.trace.request.v1",
+      "valid_input": {
+        "screen_point": {"subject":"viewport:fixture","quantity":"point","frame":{"frame_id":"viewport.screen.pixel","basis_frame_id":"viewport:fixture","dimension":2,"unit":"pixel","basis_evidence_id":"basis:viewport","observed_at":{"clock_id":"editor","tick":"129","rate_numerator":"60","rate_denominator":"1","state":"frozen"}},"components":["640","360"],"conversion_evidence_ids":[]},
+        "trace_query": {"max_distance_cm":10000,"trace_channel":"visibility","trace_complex":true,"ignore_target_refs":["actor:ignored"]}
+      }
+    },
+    {
+      "capability_id": "viewport.actor.pick",
+      "family_id": "viewport_projection",
+      "request_kind": "viewport_actor_pick",
+      "typed_request_id": "world_spatial.viewport_projection.pick_actor.request.v1",
+      "valid_input": {
+        "screen_point": {"subject":"viewport:fixture","quantity":"point","frame":{"frame_id":"viewport.screen.pixel","basis_frame_id":"viewport:fixture","dimension":2,"unit":"pixel","basis_evidence_id":"basis:viewport","observed_at":{"clock_id":"editor","tick":"130","rate_numerator":"60","rate_denominator":"1","state":"frozen"}},"components":["640","360"],"conversion_evidence_ids":[]},
+        "trace_query": {"max_distance_cm":10000,"trace_channel":"visibility","trace_complex":true,"ignore_target_refs":[]},
+        "allow_no_hit": true
+      }
+    },
+    {
+      "capability_id": "viewport.actor.select",
+      "family_id": "viewport_projection",
+      "request_kind": "viewport_actor_select",
+      "typed_request_id": "world_spatial.viewport_projection.select_actor.request.v1",
+      "valid_input": {
+        "screen_point": {"subject":"viewport:fixture","quantity":"point","frame":{"frame_id":"viewport.screen.pixel","basis_frame_id":"viewport:fixture","dimension":2,"unit":"pixel","basis_evidence_id":"basis:viewport","observed_at":{"clock_id":"editor","tick":"131","rate_numerator":"60","rate_denominator":"1","state":"frozen"}},"components":["640","360"],"conversion_evidence_ids":[]},
+        "selection_mode": "replace",
+        "trace_query": {"max_distance_cm":10000,"trace_channel":"visibility","trace_complex":true,"ignore_target_refs":[]}
+      }
+    },
+    {
+      "capability_id": "mesh.element.select_by_ray",
+      "family_id": "viewport_projection",
+      "request_kind": "mesh_element_select_by_ray",
+      "typed_request_id": "world_spatial.viewport_projection.select_mesh_element.request.v1",
+      "valid_input": {
+        "screen_point": {"subject":"viewport:fixture","quantity":"point","frame":{"frame_id":"viewport.screen.pixel","basis_frame_id":"viewport:fixture","dimension":2,"unit":"pixel","basis_evidence_id":"basis:viewport","observed_at":{"clock_id":"editor","tick":"132","rate_numerator":"60","rate_denominator":"1","state":"frozen"}},"components":["640","360"],"conversion_evidence_ids":[]},
+        "element_kind": "triangle",
+        "selection_mode": "add",
+        "trace_query": {"max_distance_cm":10000,"trace_channel":"visibility","trace_complex":true,"ignore_target_refs":["actor:ignored"]}
+      }
+    },
+    {
+      "capability_id": "viewport.pixel_scale.read",
+      "family_id": "viewport_projection",
+      "request_kind": "viewport_pixel_scale_read",
+      "typed_request_id": "world_spatial.viewport_projection.read_pixel_scale.request.v1",
+      "valid_input": {
+        "sample_point": {"subject":"actor:target","quantity":"point","frame":{"frame_id":"unreal.world","basis_frame_id":"unreal.world","dimension":3,"unit":"centimeter","basis_evidence_id":"basis:world","observed_at":{"clock_id":"editor","tick":"133","rate_numerator":"60","rate_denominator":"1","state":"frozen"}},"components":["100","0","0"],"conversion_evidence_ids":[]}
+      }
+    },
+    {
+      "capability_id": "viewport.camera.frame",
+      "family_id": "viewport_session_state",
+      "request_kind": "viewport_camera_frame",
+      "typed_request_id": "world_spatial.viewport_session.frame_camera.request.v1",
+      "valid_input": {
+        "subject_refs": ["actor:target"],
+        "frame_policy": {"padding_ratio":0.15,"minimum_distance_cm":100,"maximum_distance_cm":10000,"preserve_rotation":false,"collision_aware":true,"look_at":true,"auto_fallback":true}
+      }
+    },
+    {
+      "capability_id": "viewport.state.read",
+      "family_id": "viewport_session_state",
+      "request_kind": "viewport_state_read",
+      "typed_request_id": "world_spatial.viewport_session.read_state.request.v1",
+      "valid_input": {}
+    },
+    {
+      "capability_id": "viewport.state.restore",
+      "family_id": "viewport_session_state",
+      "request_kind": "viewport_state_restore",
+      "typed_request_id": "world_spatial.viewport_session.restore_state.request.v1",
+      "valid_input": {
+        "snapshot": {
+          "viewport_ref": "viewport:fixture",
+          "camera": {
+            "camera_transform": {"subject":"viewport:fixture.camera","quantity":"transform","frame":{"frame_id":"unreal.world","basis_frame_id":"captured.viewport.session","dimension":3,"unit":"centimeter","basis_evidence_id":"basis:camera","observed_at":{"clock_id":"editor","tick":"134","rate_numerator":"60","rate_denominator":"1","state":"captured"}},"components":["0","0","300","0","0","0","1","1","1","1"],"conversion_evidence_ids":["convert:camera"]},
+            "fov_degrees": 90,
+            "view_mode": "lit",
+            "observed_at": {"clock_id":"editor","tick":"134","rate_numerator":"60","rate_denominator":"1","state":"captured"}
+          },
+          "realtime": true,
+          "game_view": false,
+          "show_flags": ["Lighting", "StaticMeshes"],
+          "interaction": {"mode_widgets":true,"selection":true,"pivot":true,"editor_primitives":true,"game_primitives":false,"widget_mode":"none"},
+          "observed_revision": {"source_id":"viewport:fixture","generation":"gen-1","sequence":7}
+        }
+      }
+    },
+    {
+      "capability_id": "viewport.warning.list",
+      "family_id": "viewport_session_state",
+      "request_kind": "viewport_warning_list",
+      "typed_request_id": "world_spatial.viewport_session.list_warnings.request.v1",
+      "valid_input": {"viewport_ref":"viewport:fixture","include_suppressed":true}
+    },
+    {
+      "capability_id": "viewport.view_mode.list",
+      "family_id": "viewport_session_state",
+      "request_kind": "viewport_view_mode_list",
+      "typed_request_id": "world_spatial.viewport_session.list_view_modes.request.v1",
+      "valid_input": {}
+    },
+    {
+      "capability_id": "viewport.instance.list",
+      "family_id": "viewport_session_state",
+      "request_kind": "viewport_instance_list",
+      "typed_request_id": "world_spatial.viewport_session.list_instances.request.v1",
+      "valid_input": {}
+    },
+    {
+      "capability_id": "viewport.state.update",
+      "family_id": "viewport_session_state",
+      "request_kind": "viewport_state_update",
+      "typed_request_id": "world_spatial.viewport_session.update_state.request.v1",
+      "valid_input": {
+        "state_patch": {
+          "camera_transform": {"subject":"viewport:fixture.camera","quantity":"transform","frame":{"frame_id":"unreal.world","basis_frame_id":"captured.viewport.session","dimension":3,"unit":"centimeter","basis_evidence_id":"basis:camera","observed_at":{"clock_id":"editor","tick":"135","rate_numerator":"60","rate_denominator":"1","state":"frozen"}},"components":["50","0","250","0","0","0","1","1","1","1"],"conversion_evidence_ids":["convert:camera-patch"]},
+          "fov_degrees": 75,
+          "view_mode": "wireframe",
+          "realtime": false,
+          "game_view": true,
+          "show_flags": ["StaticMeshes"],
+          "interaction": {"mode_widgets":true,"selection":true,"pivot":true,"editor_primitives":false,"game_primitives":true,"widget_mode":"none"}
+        }
+      }
+    }
+  ],
+  "t45_semantic_variants": [
+    {
+      "variant_id": "explicit_actor_identity_set",
+      "capability_id": "viewport.actor.select",
+      "valid_input": {"actor_refs":["actor:target","actor:secondary"],"selection_mode":"replace"}
+    },
+    {
+      "variant_id": "outliner_folder_frame",
+      "capability_id": "viewport.camera.frame",
+      "valid_input": {
+        "folder_path":"UAI/FrameTargets",
+        "include_child_folders":true,
+        "frame_policy":{"padding_ratio":0.15,"minimum_distance_cm":100,"maximum_distance_cm":10000,"preserve_rotation":false,"collision_aware":true,"look_at":true,"auto_fallback":true}
+      }
+    },
+    {
+      "variant_id": "current_selection_frame",
+      "capability_id": "viewport.camera.frame",
+      "valid_input": {
+        "use_current_selection":true,
+        "frame_policy":{"padding_ratio":0.1,"minimum_distance_cm":100,"maximum_distance_cm":10000,"preserve_rotation":true,"collision_aware":false,"look_at":false,"auto_fallback":false}
+      }
+    },
+    {
+      "variant_id": "level_viewport_widget_mode_patch",
+      "capability_id": "viewport.state.update",
+      "valid_input": {
+        "state_patch": {
+          "interaction": {"mode_widgets":true,"selection":true,"pivot":true,"editor_primitives":true,"game_primitives":false,"widget_mode":"rotate"}
+        }
+      }
+    }
+  ]
+}

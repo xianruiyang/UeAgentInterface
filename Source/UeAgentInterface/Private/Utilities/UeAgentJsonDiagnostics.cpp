@@ -2,6 +2,9 @@
 
 #include "Utilities/UeAgentJsonDiagnostics.h"
 
+#include "Utilities/AuthoringCore/UeAgentAuthoringWorkspacePaths.h"
+#include "Utilities/UeAgentPropertyValueCodec.h"
+
 #include "Utilities/UeAgentStructuredJsonFormatter.h"
 
 #include "Dom/JsonObject.h"
@@ -15,33 +18,7 @@ namespace UeAgentJsonDiagnostics
 {
 	FString NormalizeResolvedFilePath(FString FilePath)
 	{
-		FPaths::NormalizeFilename(FilePath);
-		FPaths::CollapseRelativeDirectories(FilePath);
-		if (FilePath.Len() >= 3 && FilePath[1] == TEXT(':') && FilePath[2] == TEXT('/'))
-		{
-			const FString Prefix = FilePath.Left(3);
-			TArray<FString> Parts;
-			FilePath.RightChop(3).ParseIntoArray(Parts, TEXT("/"), true);
-			TArray<FString> CollapsedParts;
-			for (const FString& Part : Parts)
-			{
-				if (Part == TEXT("."))
-				{
-					continue;
-				}
-				if (Part == TEXT(".."))
-				{
-					if (CollapsedParts.Num() > 0)
-					{
-						CollapsedParts.Pop(EAllowShrinking::No);
-					}
-					continue;
-				}
-				CollapsedParts.Add(Part);
-			}
-			FilePath = Prefix + FString::Join(CollapsedParts, TEXT("/"));
-		}
-		return FilePath;
+		return UeAgentAuthoringWorkspacePaths::NormalizeAbsolutePath(FilePath);
 	}
 
 	FString ResolveProjectRelativeFilePath(const FString& FilePathInput)
@@ -64,7 +41,7 @@ namespace UeAgentJsonDiagnostics
 		{
 			ResolvedPath = FPaths::ConvertRelativePathToFull(FilePath);
 		}
-		return NormalizeResolvedFilePath(ResolvedPath);
+		return UeAgentAuthoringWorkspacePaths::NormalizeAbsolutePath(ResolvedPath);
 	}
 
 	FString JsonValueTypeToString(const TSharedPtr<FJsonValue>& Value)
@@ -460,161 +437,36 @@ namespace UeAgentJsonDiagnostics
 
 	bool TryReadVectorObject(const TSharedPtr<FJsonObject>& Obj, FVector& OutValue)
 	{
-		double X = 0.0;
-		double Y = 0.0;
-		double Z = 0.0;
-		if (!TryReadNumberFieldByAliases(Obj, { TEXT("x"), TEXT("X") }, X)
-			|| !TryReadNumberFieldByAliases(Obj, { TEXT("y"), TEXT("Y") }, Y)
-			|| !TryReadNumberFieldByAliases(Obj, { TEXT("z"), TEXT("Z") }, Z))
-		{
-			return false;
-		}
-
-		OutValue = FVector(X, Y, Z);
-		return true;
+		return TryReadVectorValue(MakeShared<FJsonValueObject>(Obj), OutValue);
 	}
 
 	bool TryReadRotatorObject(const TSharedPtr<FJsonObject>& Obj, FRotator& OutValue)
 	{
-		double Pitch = 0.0;
-		double Yaw = 0.0;
-		double Roll = 0.0;
-		if (!TryReadNumberFieldByAliases(Obj, { TEXT("pitch"), TEXT("Pitch") }, Pitch)
-			|| !TryReadNumberFieldByAliases(Obj, { TEXT("yaw"), TEXT("Yaw") }, Yaw)
-			|| !TryReadNumberFieldByAliases(Obj, { TEXT("roll"), TEXT("Roll") }, Roll))
-		{
-			return false;
-		}
-
-		OutValue = FRotator(Pitch, Yaw, Roll);
-		return true;
+		return TryReadRotatorValue(MakeShared<FJsonValueObject>(Obj), OutValue);
 	}
 
 	bool TryReadVectorValue(const TSharedPtr<FJsonValue>& Value, FVector& OutValue)
 	{
-		const TSharedPtr<FJsonObject>* ObjectPtr = nullptr;
-		if (Value.IsValid() && Value->TryGetObject(ObjectPtr) && ObjectPtr && ObjectPtr->IsValid())
-		{
-			return TryReadVectorObject(*ObjectPtr, OutValue);
-		}
-
-		const TArray<TSharedPtr<FJsonValue>>* ArrayPtr = nullptr;
-		if (Value.IsValid() && Value->TryGetArray(ArrayPtr) && ArrayPtr && ArrayPtr->Num() >= 3)
-		{
-			double X = 0.0;
-			double Y = 0.0;
-			double Z = 0.0;
-			if (TryReadNumberValue((*ArrayPtr)[0], X)
-				&& TryReadNumberValue((*ArrayPtr)[1], Y)
-				&& TryReadNumberValue((*ArrayPtr)[2], Z))
-			{
-				OutValue = FVector(X, Y, Z);
-				return true;
-			}
-		}
-
-		return false;
+		FString Error;
+		return UeAgentPropertyValueCodec::DecodeStructValue(TBaseStructure<FVector>::Get(), Value, &OutValue, Error);
 	}
 
 	bool TryReadVector2DValue(const TSharedPtr<FJsonValue>& Value, FVector2D& OutValue)
 	{
-		const TSharedPtr<FJsonObject>* ObjectPtr = nullptr;
-		if (Value.IsValid() && Value->TryGetObject(ObjectPtr) && ObjectPtr && ObjectPtr->IsValid())
-		{
-			double X = 0.0;
-			double Y = 0.0;
-			if (TryReadNumberFieldByAliases(*ObjectPtr, { TEXT("x"), TEXT("X") }, X)
-				&& TryReadNumberFieldByAliases(*ObjectPtr, { TEXT("y"), TEXT("Y") }, Y))
-			{
-				OutValue = FVector2D(X, Y);
-				return true;
-			}
-		}
-
-		const TArray<TSharedPtr<FJsonValue>>* ArrayPtr = nullptr;
-		if (Value.IsValid() && Value->TryGetArray(ArrayPtr) && ArrayPtr && ArrayPtr->Num() >= 2)
-		{
-			double X = 0.0;
-			double Y = 0.0;
-			if (TryReadNumberValue((*ArrayPtr)[0], X)
-				&& TryReadNumberValue((*ArrayPtr)[1], Y))
-			{
-				OutValue = FVector2D(X, Y);
-				return true;
-			}
-		}
-
-		return false;
+		FString Error;
+		return UeAgentPropertyValueCodec::DecodeStructValue(TBaseStructure<FVector2D>::Get(), Value, &OutValue, Error);
 	}
 
 	bool TryReadRotatorValue(const TSharedPtr<FJsonValue>& Value, FRotator& OutValue)
 	{
-		const TSharedPtr<FJsonObject>* ObjectPtr = nullptr;
-		if (Value.IsValid() && Value->TryGetObject(ObjectPtr) && ObjectPtr && ObjectPtr->IsValid())
-		{
-			return TryReadRotatorObject(*ObjectPtr, OutValue);
-		}
-
-		const TArray<TSharedPtr<FJsonValue>>* ArrayPtr = nullptr;
-		if (Value.IsValid() && Value->TryGetArray(ArrayPtr) && ArrayPtr && ArrayPtr->Num() >= 3)
-		{
-			double Pitch = 0.0;
-			double Yaw = 0.0;
-			double Roll = 0.0;
-			if (TryReadNumberValue((*ArrayPtr)[0], Pitch)
-				&& TryReadNumberValue((*ArrayPtr)[1], Yaw)
-				&& TryReadNumberValue((*ArrayPtr)[2], Roll))
-			{
-				OutValue = FRotator(Pitch, Yaw, Roll);
-				return true;
-			}
-		}
-
-		return false;
+		FString Error;
+		return UeAgentPropertyValueCodec::DecodeStructValue(TBaseStructure<FRotator>::Get(), Value, &OutValue, Error);
 	}
 
 	bool TryReadLinearColorValue(const TSharedPtr<FJsonValue>& Value, FLinearColor& OutValue)
 	{
-		const TSharedPtr<FJsonObject>* ObjectPtr = nullptr;
-		if (Value.IsValid() && Value->TryGetObject(ObjectPtr) && ObjectPtr && ObjectPtr->IsValid())
-		{
-			double R = 0.0;
-			double G = 0.0;
-			double B = 0.0;
-			double A = 1.0;
-			const bool bHasRgb =
-				TryReadNumberFieldByAliases(*ObjectPtr, { TEXT("r"), TEXT("R"), TEXT("red"), TEXT("Red"), TEXT("x"), TEXT("X") }, R)
-				&& TryReadNumberFieldByAliases(*ObjectPtr, { TEXT("g"), TEXT("G"), TEXT("green"), TEXT("Green"), TEXT("y"), TEXT("Y") }, G)
-				&& TryReadNumberFieldByAliases(*ObjectPtr, { TEXT("b"), TEXT("B"), TEXT("blue"), TEXT("Blue"), TEXT("z"), TEXT("Z") }, B);
-			if (bHasRgb)
-			{
-				TryReadNumberFieldByAliases(*ObjectPtr, { TEXT("a"), TEXT("A"), TEXT("alpha"), TEXT("Alpha"), TEXT("w"), TEXT("W") }, A);
-				OutValue = FLinearColor((float)R, (float)G, (float)B, (float)A);
-				return true;
-			}
-		}
-
-		const TArray<TSharedPtr<FJsonValue>>* ArrayPtr = nullptr;
-		if (Value.IsValid() && Value->TryGetArray(ArrayPtr) && ArrayPtr && ArrayPtr->Num() >= 3)
-		{
-			double R = 0.0;
-			double G = 0.0;
-			double B = 0.0;
-			double A = 1.0;
-			if (TryReadNumberValue((*ArrayPtr)[0], R)
-				&& TryReadNumberValue((*ArrayPtr)[1], G)
-				&& TryReadNumberValue((*ArrayPtr)[2], B))
-			{
-				if (ArrayPtr->Num() >= 4)
-				{
-					TryReadNumberValue((*ArrayPtr)[3], A);
-				}
-				OutValue = FLinearColor((float)R, (float)G, (float)B, (float)A);
-				return true;
-			}
-		}
-
-		return false;
+		FString Error;
+		return UeAgentPropertyValueCodec::DecodeStructValue(TBaseStructure<FLinearColor>::Get(), Value, &OutValue, Error);
 	}
 
 	bool ReadVectorField(
@@ -645,7 +497,7 @@ namespace UeAgentJsonDiagnostics
 			TEXT("warning"),
 			TEXT("json_field_type_mismatch"),
 			Path,
-			FString::Printf(TEXT("Expected vector object {x,y,z}/{X,Y,Z} or numeric array [x,y,z] but got %s."), *JsonValueTypeToString(*FieldValue)));
+			FString::Printf(TEXT("Expected canonical vector value {components:[x,y,z]} but got %s."), *JsonValueTypeToString(*FieldValue)));
 		return false;
 	}
 
@@ -677,7 +529,7 @@ namespace UeAgentJsonDiagnostics
 			TEXT("warning"),
 			TEXT("json_field_type_mismatch"),
 			Path,
-			FString::Printf(TEXT("Expected rotator object {pitch,yaw,roll}/{Pitch,Yaw,Roll} or numeric array [pitch,yaw,roll] but got %s."), *JsonValueTypeToString(*FieldValue)));
+			FString::Printf(TEXT("Expected canonical rotator value {components:[pitch,yaw,roll]} but got %s."), *JsonValueTypeToString(*FieldValue)));
 		return false;
 	}
 

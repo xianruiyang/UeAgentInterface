@@ -1,0 +1,14 @@
+definition: {
+  additional_fields: false
+  fields: {
+    actor: { default_state: none, description_zh: "actor_id 别名", required: false, type: string }
+    actor_id: { default_state: none, description_zh: "Editor World actor id；actor_id/actor 必选其一", required: false, type: string }
+    component: { default_state: none, description_zh: "PrimitiveComponent 名；缺省选择首个可用组件", required: false, type: string }
+    initial_impulse: { default_state: none, description_zh: "UE world-space impulse；以 velocity-change 模式施加", required: false, type: object, type_ref: "shared:Vector3" }
+    initial_velocity: { default_state: none, description_zh: "UE world-space 初始线速度（cm/s）", required: false, type: object, type_ref: "shared:Vector3" }
+  }
+  kind: object
+}
+schema: uai.command_spec.shared_type.v1
+type_id: PhysicsProbeTarget
+version: 1

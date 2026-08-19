@@ -1,0 +1,114 @@
+authoring: { operation: validate, profile_ref: "contracts/field_contracts/state_tree.hjson", state: defined, type_id: state_tree }
+category: ai_behavior_blackboard_statetree_eqs_navigation_smartobject
+command: state_tree_validate_folder
+deprecation: { reason: command_is_active, state: none }
+discovery: { aliases: [], keywords_en: [state, tree, validate, folder, ai_behavior_blackboard_statetree_eqs_navigation_smartobject], keywords_zh: [state_tree_validate_folder], summary_en: "Validate state_tree through the unified Reflection HJSON authoring domain", summary_zh: "通过统一 Reflection HJSON authoring 域执行 `state_tree` 的 validate", tags: [ai_behavior_blackboard_statetree_eqs_navigation_smartobject, reflection_authoring, p5-005] }
+errors: {
+  codes: [
+    { code: folder_path_or_input_file_required, description_zh: "必须提供目录或单文件 source。", retry_safe: true, stage: preflight, wire_match: exact }
+    { code: reflection_workspace_asset_path_conflict, description_zh: "命令 expected asset_path 与 source target 冲突。", retry_safe: true, stage: preflight, wire_match: exact }
+    { code: reflection_workspace_entry_invalid, description_zh: "source 缺少合法 operation/target。", retry_safe: true, stage: preflight, wire_match: exact }
+    { code: reflection_, description_zh: "workspace load、contract 或 preflight 失败。", retry_safe: true, stage: preflight, wire_match: prefix }
+  ]
+}
+evidence: {
+  docs: [
+    { path: "Plugins/UeAgentInterface/docs/commands/ai_behavior_blackboard_statetree_eqs_navigation_smartobject/state_tree_validate_folder.md", purpose: "user documentation cross-check; C++ implementation remains authoritative" }
+  ]
+  implementation: [
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Commands/Assets/UeAgentReflectionAuthoringCommandBridge.cpp", purpose: "all command parameter routing and result mapping", symbol: Validate }
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Domains/Reflection/Authoring/", purpose: "shared profile, contract, lifecycle, snapshot and export owner" }
+  ]
+  tests: [
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterfaceTests/Private/UeAgentInterfaceReflectionAuthoringTests.cpp", purpose: "25-profile registration/class coverage and real render-target round trip" }
+  ]
+}
+execution: {
+  destructive: false
+  editor_state: required
+  game_thread: required
+  idempotent: true
+  kind: read_only
+  overwrite_behavior: none
+  pie_state: allowed
+  retry_safe: true
+  save_behavior: none
+  side_effects: []
+  ui_effect: none
+}
+maturity: verified
+params: {
+  constraints: [
+    { fields: [folder_path, input_folder, json_folder, json_file, input_file], kind: one_of }
+  ]
+  fields: {
+    asset_path: { default_state: none, description_zh: "可选 expected identity；与 source target 冲突时失败。", path_semantics: { access_scope: mounted_read, kind: ue_asset }, required: false, type: ue_asset_path }
+    folder_path: {
+      default_state: none
+      description_zh: "目录 source；目录只允许 index.hjson。"
+      path_semantics: { kind: filesystem_directory, must_exist: true, writable: false }
+      required: false
+      type: filesystem_path
+    }
+    input_file: {
+      default_state: none
+      description_zh: "显式单 HJSON source。"
+      path_semantics: { kind: filesystem_file, must_exist: true, writable: false }
+      required: false
+      type: filesystem_path
+    }
+    input_folder: {
+      default_state: none
+      description_zh: "显式目录 source。"
+      path_semantics: { kind: filesystem_directory, must_exist: true, writable: false }
+      required: false
+      type: filesystem_path
+    }
+    json_file: {
+      default_state: none
+      description_zh: "单 HJSON source。"
+      path_semantics: { kind: filesystem_file, must_exist: true, writable: false }
+      required: false
+      type: filesystem_path
+    }
+    json_folder: {
+      default_state: none
+      description_zh: "目录 source 的 JSON 命令前端字段。"
+      path_semantics: { kind: filesystem_directory, must_exist: true, writable: false }
+      required: false
+      type: filesystem_path
+    }
+  }
+  state: defined
+}
+response: { artifact_fields: [], compact_fields: [status, profile, asset_path, requested_operation, units_checked, asset_exists, would_create, no_op], failure_fields: [returns.error_code, returns.error_detail], max_items_policy: { fields: [], mode: none } }
+returns: {
+  fields: {
+    asset_exists: { description_zh: "目标是否存在。", required: false, type: bool }
+    asset_path: { description_zh: "source canonical target。", required: false, type: ue_asset_path }
+    error_code: { description_zh: "稳定错误码。", required: false, type: string }
+    error_detail: { description_zh: "错误详情。", required: false, type: string }
+    no_op: { description_zh: "当前 source 是否无状态变更。", required: false, type: bool }
+    profile: { description_zh: "Reflection profile ID。", required: false, type: string }
+    requested_operation: { description_zh: "source operation。", required: false, type: string }
+    status: { description_zh: "ready 或 failed。", required: false, type: string }
+    units_checked: { description_zh: "preflight 单元数。", required: false, type: integer }
+    would_create: { description_zh: "Apply 是否会创建。", required: false, type: bool }
+  }
+  state: defined
+}
+schema: uai.command_spec.v1
+status: active
+types: {}
+verification: {
+  assertions: [
+    { id: status_present, operator: exists, source: returns.status }
+  ]
+  failure_policy: fail_overall
+  methods: [
+    { id: result, kind: result_assertion }
+  ]
+  required: true
+  state: defined
+}
+version: 1

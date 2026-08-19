@@ -226,7 +226,7 @@ namespace UeAgentNiagaraOps
 		}
 		if (TypeDefinition == FNiagaraTypeDefinition::GetPositionDef())
 		{
-			ConfigureNiagaraComponentDescriptor(Descriptor, TEXT("position"), TEXT("position"), { TEXT("X"), TEXT("Y"), TEXT("Z") }, true);
+			ConfigureNiagaraComponentDescriptor(Descriptor, TEXT("position"), TEXT("vector3"), { TEXT("X"), TEXT("Y"), TEXT("Z") }, true);
 			return Descriptor;
 		}
 		if (TypeDefinition == FNiagaraTypeDefinition::GetVec4Def())

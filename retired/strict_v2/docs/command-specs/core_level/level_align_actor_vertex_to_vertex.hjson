@@ -1,0 +1,93 @@
+authoring: { reason: command_has_no_registered_folder_authoring_profile, state: none }
+category: core_level
+command: level_align_actor_vertex_to_vertex
+deprecation: { reason: command_is_active, state: none }
+discovery: { aliases: [], keywords_en: [level, align, actor, vertex, to, core_level], keywords_zh: [level_align_actor_vertex_to_vertex], summary_en: "Execute level_align_actor_vertex_to_vertex with a verified implementation contract", summary_zh: "按网格顶点把 Actor 对齐到目标顶点", tags: [core_level, p2-002] }
+errors: {
+  codes: [
+    { code: actor_not_found, description_zh: "C++ 实现返回错误码 actor_not_found", retry_safe: false, stage: execution, wire_match: exact }
+    { code: closest_vertex_not_found, description_zh: "C++ 实现返回错误码 closest_vertex_not_found", retry_safe: false, stage: execution, wire_match: exact }
+    { code: mesh_description_not_found, description_zh: "C++ 实现返回错误码 mesh_description_not_found", retry_safe: false, stage: execution, wire_match: exact }
+    { code: missing_, description_zh: "C++ 实现返回错误码 missing_", retry_safe: true, stage: preflight, wire_match: prefix }
+    { code: missing_source_actor_id, description_zh: "C++ 实现返回错误码 missing_source_actor_id", retry_safe: true, stage: preflight, wire_match: exact }
+    { code: missing_target_actor_id, description_zh: "C++ 实现返回错误码 missing_target_actor_id", retry_safe: true, stage: preflight, wire_match: exact }
+    { code: no_editor_world, description_zh: "C++ 实现返回错误码 no_editor_world", retry_safe: false, stage: execution, wire_match: exact }
+    { code: no_geditor, description_zh: "C++ 实现返回错误码 no_geditor", retry_safe: false, stage: execution, wire_match: exact }
+    { code: source_actor_not_found, description_zh: "C++ 实现返回错误码 source_actor_not_found", retry_safe: false, stage: execution, wire_match: exact }
+    { code: static_mesh_component_not_found, description_zh: "C++ 实现返回错误码 static_mesh_component_not_found", retry_safe: false, stage: execution, wire_match: exact }
+    { code: static_mesh_not_found, description_zh: "C++ 实现返回错误码 static_mesh_not_found", retry_safe: false, stage: execution, wire_match: exact }
+    { code: target_actor_not_found, description_zh: "C++ 实现返回错误码 target_actor_not_found", retry_safe: false, stage: execution, wire_match: exact }
+    { code: vertex_index_out_of_range, description_zh: "C++ 实现返回错误码 vertex_index_out_of_range", retry_safe: false, stage: execution, wire_match: exact }
+    { code: vertex_positions_empty, description_zh: "C++ 实现返回错误码 vertex_positions_empty", retry_safe: false, stage: execution, wire_match: exact }
+  ]
+}
+evidence: {
+  docs: [
+    { path: "Plugins/UeAgentInterface/docs/commands/core_level/level_align_actor_vertex_to_vertex.md", purpose: "user documentation cross-check; C++ implementation remains authoritative" }
+  ]
+  implementation: [
+    { line_hint: 594, path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Commands/Level/UeAgentHttpServer_Level_MeshAlignment.cpp", purpose: "command handler, parameter and return evidence", symbol: CmdLevelAlignActorVertexToVertex }
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Commands/AI/UeAgentHttpServer_AI_Blackboard.cpp", purpose: "transitive helper evidence used by the command handler" }
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Commands/Level/UeAgentHttpServer_Level.cpp", purpose: "transitive helper evidence used by the command handler" }
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Commands/Level/UeAgentHttpServer_Level_CaptureAndPersistence.cpp", purpose: "transitive helper evidence used by the command handler" }
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Server/UeAgentHttpServer.cpp", purpose: "transitive helper evidence used by the command handler" }
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Utilities/UeAgentJsonDiagnostics.cpp", purpose: "transitive helper evidence used by the command handler" }
+  ]
+  tests: [
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterfaceTests/Private/Smoke/UeAgentInterfaceSmoke_Coverage.cpp", purpose: "smoke or negative-path evidence cross-checked for the verified contract" }
+  ]
+}
+execution: {
+  destructive: false
+  editor_state: required
+  game_thread: required
+  idempotent: false
+  kind: write
+  overwrite_behavior: none
+  pie_state: allowed
+  retry_safe: false
+  save_behavior: none
+  side_effects: [modifies_level]
+  ui_effect: none
+}
+maturity: verified
+params: {
+  constraints: []
+  fields: {
+    source_actor_id: { default_state: none, description_zh: "C++ 实现读取的 source_actor_id 参数", required: true, type: string }
+    source_component: { default_state: none, description_zh: "C++ 实现读取的 source_component 参数", required: false, type: string }
+    target_actor_id: { default_state: none, description_zh: "C++ 实现读取的 target_actor_id 参数", required: true, type: string }
+    target_component: { default_state: none, description_zh: "C++ 实现读取的 target_component 参数", required: false, type: string }
+  }
+  state: defined
+}
+response: { artifact_fields: [], compact_fields: [applied_delta, source_actor_location_after, source_actor_name, source_vertex_index, source_vertex_world_after, source_vertex_world_before], failure_fields: [params.source_actor_id, params.target_actor_id], max_items_policy: { fields: [], mode: none } }
+returns: {
+  fields: {
+    applied_delta: { description_zh: "C++ 实现返回的 applied_delta 字段；是否出现取决于执行分支", required: false, type: json_value }
+    source_actor_location_after: { description_zh: "C++ 实现返回的 source_actor_location_after 字段；是否出现取决于执行分支", required: false, type: json_value }
+    source_actor_name: { description_zh: "C++ 实现返回的 source_actor_name 字段；是否出现取决于执行分支", required: false, type: string }
+    source_vertex_index: { description_zh: "C++ 实现返回的 source_vertex_index 字段；是否出现取决于执行分支", required: false, type: integer }
+    source_vertex_world_after: { description_zh: "C++ 实现返回的 source_vertex_world_after 字段；是否出现取决于执行分支", required: false, type: json_value }
+    source_vertex_world_before: { description_zh: "C++ 实现返回的 source_vertex_world_before 字段；是否出现取决于执行分支", required: false, type: json_value }
+    target_actor_name: { description_zh: "C++ 实现返回的 target_actor_name 字段；是否出现取决于执行分支", required: false, type: string }
+    target_vertex_index: { description_zh: "C++ 实现返回的 target_vertex_index 字段；是否出现取决于执行分支", required: false, type: integer }
+    target_vertex_world: { description_zh: "C++ 实现返回的 target_vertex_world 字段；是否出现取决于执行分支", required: false, type: json_value }
+  }
+  state: defined
+}
+schema: uai.command_spec.v1
+status: active
+types: {}
+verification: {
+  assertions: [
+    { id: result_present, operator: exists, source: returns.applied_delta }
+  ]
+  failure_policy: fail_overall
+  methods: [
+    { id: result, kind: result_assertion }
+  ]
+  required: true
+  state: defined
+}
+version: 1

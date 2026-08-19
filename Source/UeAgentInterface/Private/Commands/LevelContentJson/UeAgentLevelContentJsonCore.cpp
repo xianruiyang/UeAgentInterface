@@ -3,7 +3,12 @@
 #include "UeAgentLevelContentJsonCore.h"
 #include "Commands/PaletteSearch/UeAgentPaletteSearchAuthoring.h"
 #include "Commands/PaletteSearch/UeAgentPaletteSearchTypes.h"
+#include "Domains/Level/Authoring/UeAgentLevelAuthoringState.h"
+#include "Utilities/UeAgentAuthoringFileIO.h"
 #include "Utilities/UeAgentJsonDiagnostics.h"
+#include "Utilities/UeAgentStructuredAuthoringIO.h"
+#include "Utilities/UeAgentSpaceContract.h"
+#include "Utilities/AuthoringExport/UeAgentExportPublisher.h"
 
 #include "Components/ActorComponent.h"
 #include "Dom/JsonObject.h"
@@ -11,7 +16,6 @@
 #include "Engine/World.h"
 #include "EngineUtils.h"
 #include "GameFramework/Actor.h"
-#include "Misc/FileHelper.h"
 #include "Misc/Paths.h"
 #include "Serialization/JsonReader.h"
 #include "Serialization/JsonSerializer.h"
@@ -117,15 +121,7 @@ namespace UeAgentLevelContentJson
 
 	TSharedPtr<FJsonObject> MakeSpaceContractJson(const FString& Subject, const FString& Frame)
 	{
-		TSharedPtr<FJsonObject> Obj = MakeShared<FJsonObject>();
-		Obj->SetStringField(TEXT("subject"), Subject);
-		Obj->SetStringField(TEXT("dimension"), TEXT("3d"));
-		Obj->SetStringField(TEXT("Fread"), Frame);
-		Obj->SetStringField(TEXT("Fwrite"), Frame);
-		Obj->SetStringField(TEXT("Fsemantic"), TEXT("requires_command_or_asset_context"));
-		Obj->SetStringField(TEXT("Fverify"), Frame);
-		Obj->SetStringField(TEXT("conversion_chain"), TEXT("semantic_context_to_ue_frame_required"));
-		return Obj;
+		return UeAgentSpaceContract::Make3D(Subject, Frame);
 	}
 
 	FString NormalizeFolder(const FString& Folder)
@@ -154,6 +150,21 @@ namespace UeAgentLevelContentJson
 		return FPaths::ConvertRelativePathToFull(FPaths::ProjectDir(), CleanPath);
 	}
 
+	FString ResolveOutputAuthoringFilePath(const FString& Path)
+	{
+		FString Resolved = ResolveFilePath(Path);
+		if (FPaths::GetExtension(Resolved, false).Equals(TEXT("json"), ESearchCase::IgnoreCase))
+		{
+			Resolved = FPaths::ChangeExtension(Resolved, TEXT("hjson"));
+		}
+		return Resolved;
+	}
+
+	bool IsLegacyJsonFilePath(const FString& Path)
+	{
+		return FPaths::GetExtension(Path, false).Equals(TEXT("json"), ESearchCase::IgnoreCase);
+	}
+
 	bool SaveJsonIfRequested(const TSharedPtr<FJsonObject>& Obj, const TSharedPtr<FJsonObject>& Params, TSharedPtr<FJsonObject>& OutData, FString& OutError)
 	{
 		if (!Params.IsValid() || !Obj.IsValid())
@@ -167,13 +178,31 @@ namespace UeAgentLevelContentJson
 			return true;
 		}
 
-		OutputFile = ResolveFilePath(OutputFile);
-		IFileManager::Get().MakeDirectory(*FPaths::GetPath(OutputFile), true);
-		const FString Text = JsonToString(Obj, false);
-		if (!FFileHelper::SaveStringToFile(Text, *OutputFile, FFileHelper::EEncodingOptions::ForceUTF8WithoutBOM))
+		OutputFile = ResolveOutputAuthoringFilePath(OutputFile);
+		UeAgentExportPublisher::FFilePlan FilePlan;
+		FilePlan.RelativePath = FPaths::GetCleanFilename(OutputFile);
+		FilePlan.Root = Obj;
+		UeAgentExportPublisher::FPublishContext PublishContext;
+		PublishContext.ContractId = TEXT("uai.export.level_content.single_file");
+		PublishContext.ContractVersion = TEXT("1");
+		PublishContext.ProfileId = TEXT("llm_authoring");
+		UeAgentExportPublisher::FPublishResult PublishResult;
+		FString PublishErrorCode;
+		FString PublishErrorDetail;
+		if (!UeAgentExportPublisher::PublishSingleFile(
+			OutputFile,
+			FilePlan,
+			PublishContext,
+			PublishResult,
+			PublishErrorCode,
+			PublishErrorDetail))
 		{
-			OutError = TEXT("output_file_write_failed");
+			OutError = PublishErrorDetail.IsEmpty() ? PublishErrorCode : PublishErrorDetail;
 			return false;
+		}
+		if (PublishResult.WrittenFiles.Num() == 1)
+		{
+			OutputFile = PublishResult.WrittenFiles[0];
 		}
 
 		TSharedPtr<FJsonObject> Compact = MakeShared<FJsonObject>();
@@ -230,10 +259,21 @@ namespace UeAgentLevelContentJson
 		}
 		OutData = Compact;
 		OutData->SetStringField(TEXT("output_file"), OutputFile);
-		OutData->SetStringField(TEXT("output_format"), TEXT("structured_compact"));
+		OutData->SetStringField(TEXT("output_format"), TEXT("hjson_authoring"));
 		OutData->SetBoolField(TEXT("output_written_full"), true);
 		OutData->SetBoolField(TEXT("output_compacted"), true);
 		OutData->SetBoolField(TEXT("resources_omitted"), true);
+		OutData->SetStringField(TEXT("entry_file"), FPaths::GetCleanFilename(OutputFile));
+		TArray<TSharedPtr<FJsonValue>> WrittenRelativeValues;
+		for (const FString& RelativePath : PublishResult.WrittenRelativeFiles)
+		{
+			WrittenRelativeValues.Add(MakeShared<FJsonValueString>(RelativePath));
+		}
+		OutData->SetArrayField(TEXT("written_relative_files"), WrittenRelativeValues);
+		if (PublishResult.Receipt.IsValid())
+		{
+			OutData->SetObjectField(TEXT("publisher"), PublishResult.Receipt.ToSharedRef());
+		}
 		return true;
 	}
 
@@ -277,13 +317,14 @@ namespace UeAgentLevelContentJson
 			if (Params->TryGetStringField(Key, JsonFile) && !JsonFile.TrimStartAndEnd().IsEmpty())
 			{
 				JsonFile = ResolveFilePath(JsonFile);
-				if (!FFileHelper::LoadFileToString(JsonText, *JsonFile))
+				if (IsLegacyJsonFilePath(JsonFile))
 				{
-					OutError = TEXT("json_file_read_failed");
+					OutError = FString::Printf(TEXT("hjson_file_required:%s"), *JsonFile);
 					return false;
 				}
 				OutSource = JsonFile;
-				return ParseJsonObject(JsonText, OutContent, OutError);
+				UeAgentAuthoringFileIO::FLoadOptions Options;
+				return UeAgentAuthoringFileIO::LoadObject(JsonFile, OutContent, Options, OutError);
 			}
 		}
 
@@ -429,28 +470,12 @@ namespace UeAgentLevelContentJson
 
 	FString MakeManagedIdTag(const FString& Id)
 	{
-		return FString::Printf(TEXT("UAI.Id=%s"), *Id);
+		return UeAgentLevelAuthoring::MakeManagedActorTag(Id);
 	}
 
 	FString GetManagedId(AActor* Actor)
 	{
-		if (!Actor)
-		{
-			return FString();
-		}
-		for (const FName& Tag : Actor->Tags)
-		{
-			const FString Text = Tag.ToString();
-			if (Text.StartsWith(TEXT("UAI.Id=")))
-			{
-				return Text.Mid(7);
-			}
-			if (Text.StartsWith(TEXT("UAI.Id:")))
-			{
-				return Text.Mid(7);
-			}
-		}
-		return FString();
+		return Actor ? UeAgentLevelAuthoring::GetManagedActorId(*Actor) : FString();
 	}
 
 	FString ActorStableId(AActor* Actor)

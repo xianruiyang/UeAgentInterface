@@ -1,0 +1,74 @@
+authoring: { reason: command_has_no_registered_folder_authoring_profile, state: none }
+category: modeling
+command: modeling_clear_mesh_selection
+deprecation: { reason: command_is_active, state: none }
+discovery: { aliases: [], keywords_en: [modeling, clear, mesh, selection], keywords_zh: [modeling_clear_mesh_selection], summary_en: "Execute modeling_clear_mesh_selection with a verified implementation contract", summary_zh: "**原子/兼容**：控制 Modeling Mode 工具、选择或网格编辑动作", tags: [modeling, p2-002] }
+errors: {
+  codes: [
+    { code: editor_viewport_not_found, description_zh: "C++ 实现返回错误码 editor_viewport_not_found", retry_safe: false, stage: execution, wire_match: exact }
+    { code: modeling_mode_unavailable, description_zh: "C++ 实现返回错误码 modeling_mode_unavailable", retry_safe: false, stage: execution, wire_match: exact }
+    { code: modeling_selection_manager_unavailable, description_zh: "C++ 实现返回错误码 modeling_selection_manager_unavailable", retry_safe: false, stage: execution, wire_match: exact }
+    { code: modeling_tools_context_unavailable, description_zh: "C++ 实现返回错误码 modeling_tools_context_unavailable", retry_safe: false, stage: execution, wire_match: exact }
+  ]
+}
+evidence: {
+  docs: [
+    { path: "Plugins/UeAgentInterface/docs/commands/modeling/modeling_clear_mesh_selection.md", purpose: "user documentation cross-check; C++ implementation remains authoritative" }
+  ]
+  implementation: [
+    { line_hint: 232, path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Commands/Modeling/UeAgentHttpServer_Modeling_DispatchAndSelection.cpp", purpose: "command handler, parameter and return evidence", symbol: CmdModelingClearMeshSelection }
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Commands/Modeling/UeAgentHttpServer_Modeling.cpp", purpose: "transitive helper evidence used by the command handler" }
+  ]
+  tests: [
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterfaceTests/Private/Smoke/UeAgentInterfaceSmoke_Coverage.cpp", purpose: "smoke or negative-path evidence cross-checked for the verified contract" }
+  ]
+}
+execution: {
+  destructive: false
+  editor_state: required
+  game_thread: required
+  idempotent: false
+  kind: session_control
+  overwrite_behavior: none
+  pie_state: allowed
+  retry_safe: false
+  save_behavior: caller_controlled
+  side_effects: [modifies_editor_session]
+  ui_effect: none
+}
+maturity: verified
+params: {
+  constraints: []
+  fields: { save_selection_before_clear: { default: false, default_state: defined, description_zh: "C++ 实现读取的 save_selection_before_clear 参数", required: false, type: bool } }
+  state: defined
+}
+response: { artifact_fields: [], compact_fields: [element_type, has_active_targets, is_empty, save_selection_before_clear, selection_cleared, target_count], failure_fields: [], max_items_policy: { fields: [], mode: none } }
+returns: {
+  fields: {
+    element_type: { description_zh: "C++ 实现返回的 element_type 字段；是否出现取决于执行分支", required: false, type: string }
+    has_active_targets: { description_zh: "C++ 实现返回的 has_active_targets 字段；是否出现取决于执行分支", required: false, type: bool }
+    is_empty: { description_zh: "C++ 实现返回的 is_empty 字段；是否出现取决于执行分支", required: false, type: bool }
+    save_selection_before_clear: { description_zh: "C++ 实现返回的 save_selection_before_clear 字段；是否出现取决于执行分支", required: false, type: bool }
+    selection_cleared: { description_zh: "C++ 实现返回的 selection_cleared 字段；是否出现取决于执行分支", required: false, type: bool }
+    target_count: { description_zh: "C++ 实现返回的 target_count 字段；是否出现取决于执行分支", required: false, type: integer }
+    topology_mode: { description_zh: "C++ 实现返回的 topology_mode 字段；是否出现取决于执行分支", required: false, type: string }
+  }
+  state: defined
+}
+schema: uai.command_spec.v1
+status: active
+types: {}
+verification: {
+  assertions: [
+    { id: result_present, operator: exists, source: returns.element_type }
+    { id: state_readback_present, operator: exists, source: methods.state_readback.is_empty }
+  ]
+  failure_policy: fail_overall
+  methods: [
+    { id: result, kind: result_assertion }
+    { command: modeling_get_mesh_selection_info, id: state_readback, kind: command_readback, params_mapping: {} }
+  ]
+  required: true
+  state: defined
+}
+version: 1

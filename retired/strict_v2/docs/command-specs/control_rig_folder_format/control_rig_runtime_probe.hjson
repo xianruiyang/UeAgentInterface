@@ -1,0 +1,96 @@
+authoring: { reason: command_has_no_registered_folder_authoring_profile, state: none }
+category: control_rig_folder_format
+command: control_rig_runtime_probe
+deprecation: { reason: command_is_active, state: none }
+discovery: { aliases: [], keywords_en: [control, rig, runtime, probe, control_rig_folder_format], keywords_zh: [control_rig_runtime_probe], summary_en: "Execute control_rig_runtime_probe with a verified implementation contract", summary_zh: "创建 transient rig 实例并采样", tags: [control_rig_folder_format, p2-006] }
+errors: {
+  codes: [
+    { code: asset_path_required, description_zh: "C++ 实现返回错误码 asset_path_required", retry_safe: true, stage: preflight, wire_match: exact }
+    { code: control_rig_class_missing, description_zh: "C++ 实现返回错误码 control_rig_class_missing", retry_safe: true, stage: preflight, wire_match: exact }
+    { code: control_rig_compile_failed, description_zh: "C++ 实现返回错误码 control_rig_compile_failed", retry_safe: false, stage: execution, wire_match: exact }
+    { code: control_rig_not_found, description_zh: "C++ 实现返回错误码 control_rig_not_found", retry_safe: false, stage: execution, wire_match: exact }
+    { code: control_rig_runtime_instance_failed, description_zh: "C++ 实现返回错误码 control_rig_runtime_instance_failed", retry_safe: false, stage: execution, wire_match: exact }
+  ]
+}
+evidence: {
+  docs: [
+    { path: "Plugins/UeAgentInterface/docs/commands/control_rig_folder_format/control_rig_runtime_probe.md", purpose: "user documentation cross-check; C++ implementation remains authoritative" }
+  ]
+  implementation: [
+    { line_hint: 1303, path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Commands/ControlRig/UeAgentHttpServer_ControlRig.cpp", purpose: "command handler, parameter and return evidence", symbol: "FUeAgentHttpServer::ExecuteControlRigCommand__command_control_rig_runtime_probe" }
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Commands/ControlRig/UeAgentHttpServer_ControlRig_RuntimeProbe.cpp", purpose: "transitive helper evidence used by the command handler" }
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Server/UeAgentHttpServer.cpp", purpose: "transitive helper evidence used by the command handler" }
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Utilities/UeAgentJsonDiagnostics.cpp", purpose: "transitive helper evidence used by the command handler" }
+  ]
+  tests: [
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterfaceTests/Private/Smoke/UeAgentInterfaceSmoke_Coverage.cpp", purpose: "smoke or negative-path evidence cross-checked for the verified contract" }
+  ]
+}
+execution: {
+  destructive: false
+  editor_state: required
+  game_thread: required
+  idempotent: false
+  kind: write
+  overwrite_behavior: none
+  pie_state: allowed
+  retry_safe: false
+  save_behavior: none
+  side_effects: [modifies_asset]
+  ui_effect: none
+}
+maturity: verified
+params: {
+  constraints: []
+  fields: {
+    asset_path: { default_state: none, description_zh: "C++ 实现读取的 asset_path 参数", path_semantics: { access_scope: project_write, kind: ue_asset }, required: true, type: ue_asset_path }
+    event_name: { default: "Forwards Solve", default_state: defined, description_zh: "C++ 实现读取的 event_name 参数", required: false, type: string }
+    execute_construction: { default: true, default_state: defined, description_zh: "C++ 实现读取的 execute_construction 参数", required: false, type: bool }
+    frames: { default_state: none, description_zh: "C++ 实现读取的 frames 参数", maximum: 1000, minimum: 0, required: false, type: integer }
+    max_samples: { default_state: none, description_zh: "C++ 实现读取的 max_samples 参数", maximum: 512, minimum: 1, required: false, type: integer }
+    sample_bones: { default_state: none, description_zh: "C++ 实现读取的 sample_bones 参数", item_type: json_value, required: false, type: array }
+    sample_controls: { default_state: none, description_zh: "C++ 实现读取的 sample_controls 参数", item_type: json_value, required: false, type: array }
+    sample_variables: { default_state: none, description_zh: "C++ 实现读取的 sample_variables 参数", item_type: json_value, required: false, type: array }
+    variable_inputs: { default_state: none, description_zh: "C++ 实现读取的 variable_inputs 参数", item_type: object, item_type_ref: "shared:ControlRigVariableInput", required: false, type: array }
+    variables: { default_state: none, description_zh: "C++ 实现读取的 variables 参数", required: false, type: json_value }
+  }
+  state: defined
+}
+response: { artifact_fields: [bones, controls, issues, supported_events, variables, compile_report], compact_fields: [asset_path, probe_mode, event_name, frames, execution_ok, error_count], failure_fields: [params.asset_path], max_items_policy: { fields: [], mode: none } }
+returns: {
+  fields: {
+    asset_path: { description_zh: "C++ 实现返回的 asset_path 字段；是否出现取决于执行分支", required: false, type: ue_asset_path }
+    bones: { description_zh: "C++ 实现返回的 bones 字段；是否出现取决于执行分支", item_type: object, item_type_ref: "shared:ControlRigHierarchySample", required: false, type: array }
+    compile_report: { description_zh: "C++ 实现返回的 compile_report 字段；是否出现取决于执行分支", required: false, type: json_value }
+    construction_executed: { description_zh: "C++ 实现返回的 construction_executed 字段；是否出现取决于执行分支", required: false, type: bool }
+    construction_ok: { description_zh: "C++ 实现返回的 construction_ok 字段；是否出现取决于执行分支", required: false, type: bool }
+    construction_skipped: { description_zh: "C++ 实现返回的 construction_skipped 字段；是否出现取决于执行分支", required: false, type: bool }
+    controls: { description_zh: "C++ 实现返回的 controls 字段；是否出现取决于执行分支", item_type: object, item_type_ref: "shared:ControlRigHierarchySample", required: false, type: array }
+    error_count: { description_zh: "C++ 实现返回的 error_count 字段；是否出现取决于执行分支", required: false, type: integer }
+    event_name: { description_zh: "C++ 实现返回的 event_name 字段；是否出现取决于执行分支", required: false, type: string }
+    execution_ok: { description_zh: "C++ 实现返回的 execution_ok 字段；是否出现取决于执行分支", required: false, type: bool }
+    execution_skipped: { description_zh: "C++ 实现返回的 execution_skipped 字段；是否出现取决于执行分支", required: false, type: bool }
+    frames: { description_zh: "C++ 实现返回的 frames 字段；是否出现取决于执行分支", required: false, type: number }
+    issues: { description_zh: "C++ 实现返回的 issues 字段；是否出现取决于执行分支", item_type: json_value, required: false, type: array }
+    probe_mode: { description_zh: "C++ 实现返回的 probe_mode 字段；是否出现取决于执行分支", required: false, type: string }
+    supported_events: { description_zh: "C++ 实现返回的 supported_events 字段；是否出现取决于执行分支", item_type: json_value, required: false, type: array }
+    variables: { description_zh: "C++ 实现返回的 variables 字段；是否出现取决于执行分支", item_type: json_value, required: false, type: array }
+    warning_count: { description_zh: "C++ 实现返回的 warning_count 字段；是否出现取决于执行分支", required: false, type: integer }
+  }
+  state: defined
+}
+schema: uai.command_spec.v1
+status: active
+types: {}
+verification: {
+  assertions: [
+    { id: result_present, operator: exists, source: returns.asset_path }
+  ]
+  failure_policy: fail_overall
+  methods: [
+    { id: result, kind: result_assertion }
+  ]
+  required: true
+  state: defined
+}
+version: 1

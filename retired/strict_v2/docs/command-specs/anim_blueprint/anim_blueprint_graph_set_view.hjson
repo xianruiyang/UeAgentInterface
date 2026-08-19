@@ -1,0 +1,109 @@
+authoring: { reason: command_has_no_registered_folder_authoring_profile, state: none }
+category: anim_blueprint
+command: anim_blueprint_graph_set_view
+deprecation: { reason: command_is_active, state: none }
+discovery: { aliases: [], keywords_en: [anim, blueprint, graph, set, view, anim_blueprint], keywords_zh: [anim_blueprint_graph_set_view], summary_en: "Execute anim_blueprint_graph_set_view with a verified implementation contract", summary_zh: "设置指定图的平移/缩放", tags: [anim_blueprint, p2-003] }
+errors: {
+  codes: [
+    { code: blueprint_editor_not_opened, description_zh: "C++ 实现返回错误码 blueprint_editor_not_opened", retry_safe: false, stage: execution, wire_match: exact }
+    { code: blueprint_editor_open_failed, description_zh: "C++ 实现返回错误码 blueprint_editor_open_failed", retry_safe: false, stage: execution, wire_match: exact }
+    { code: blueprint_not_found, description_zh: "C++ 实现返回错误码 blueprint_not_found", retry_safe: false, stage: execution, wire_match: exact }
+    { code: graph_editor_not_found, description_zh: "C++ 实现返回错误码 graph_editor_not_found", retry_safe: false, stage: execution, wire_match: exact }
+    { code: graph_not_found, description_zh: "C++ 实现返回错误码 graph_not_found", retry_safe: false, stage: execution, wire_match: exact }
+    { code: missing_asset_path, description_zh: "C++ 实现返回错误码 missing_asset_path", retry_safe: true, stage: preflight, wire_match: exact }
+    { code: missing_view_or_zoom, description_zh: "C++ 实现返回错误码 missing_view_or_zoom", retry_safe: true, stage: preflight, wire_match: exact }
+    { code: save_asset_failed, description_zh: "C++ 实现返回错误码 save_asset_failed", retry_safe: false, stage: execution, wire_match: exact }
+  ]
+}
+evidence: {
+  docs: [
+    { path: "Plugins/UeAgentInterface/docs/commands/anim_blueprint/anim_blueprint_graph_set_view.md", purpose: "user documentation cross-check; C++ implementation remains authoritative" }
+  ]
+  implementation: [
+    { line_hint: 492, path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Commands/Blueprint/UeAgentHttpServer_Blueprint_AssetAndViewport.cpp", purpose: "command handler, parameter and return evidence", symbol: CmdBlueprintGraphSetView }
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Commands/Blueprint/UeAgentHttpServer_Blueprint.cpp", purpose: "transitive helper evidence used by the command handler" }
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Server/UeAgentHttpServer.cpp", purpose: "transitive helper evidence used by the command handler" }
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Utilities/UeAgentJsonDiagnostics.cpp", purpose: "transitive helper evidence used by the command handler" }
+  ]
+  tests: [
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterfaceTests/Private/Smoke/UeAgentInterfaceSmoke_Coverage.cpp", purpose: "smoke or negative-path evidence cross-checked for the verified contract" }
+  ]
+}
+execution: {
+  destructive: false
+  editor_state: required
+  game_thread: required
+  idempotent: false
+  kind: write
+  overwrite_behavior: target_asset
+  pie_state: allowed
+  retry_safe: false
+  save_behavior: caller_controlled
+  side_effects: [modifies_asset, modifies_editor_session, opens_window]
+  ui_effect: opens_editor
+}
+maturity: verified
+params: {
+  constraints: [
+    { fields: [view_x, view_y, zoom], kind: one_of }
+  ]
+  fields: {
+    asset_path: { default_state: none, description_zh: "C++ 实现读取的 asset_path 参数", path_semantics: { access_scope: project_write, kind: ue_asset }, required: true, type: ue_asset_path }
+    graph_name: { default: EventGraph, default_state: defined, description_zh: "C++ 实现读取的 graph_name 参数", required: false, type: string }
+    open_editor_if_needed: { default: false, default_state: defined, description_zh: "C++ 实现读取的 open_editor_if_needed 参数", required: false, type: bool }
+    save_after_set: { default: false, default_state: defined, description_zh: "C++ 实现读取的 save_after_set 参数", required: false, type: bool }
+    snap_to_pixel_grid: { default: true, default_state: defined, description_zh: "C++ 实现读取的 snap_to_pixel_grid 参数", required: false, type: bool }
+    update_document_view_state: { default: true, default_state: defined, description_zh: "C++ 实现读取的 update_document_view_state 参数", required: false, type: bool }
+    view_x: { default_state: none, description_zh: "C++ 实现读取的 view_x 参数", required: false, type: number }
+    view_y: { default_state: none, description_zh: "C++ 实现读取的 view_y 参数", required: false, type: number }
+    zoom: { default_state: none, description_zh: "C++ 实现读取的 zoom 参数", required: false, type: number }
+  }
+  state: defined
+}
+response: { artifact_fields: [], compact_fields: [saved, asset_path, graph_name, persisted_screen_pixel_residual_x, persisted_screen_pixel_residual_y, persisted_screen_pixel_x], failure_fields: [params.asset_path], max_items_policy: { fields: [], mode: none } }
+returns: {
+  fields: {
+    asset_path: { description_zh: "C++ 实现返回的 asset_path 字段；是否出现取决于执行分支", required: false, type: ue_asset_path }
+    graph_name: { description_zh: "C++ 实现返回的 graph_name 字段；是否出现取决于执行分支", required: false, type: string }
+    persisted_screen_pixel_residual_x: { description_zh: "C++ 实现返回的 persisted_screen_pixel_residual_x 字段；是否出现取决于执行分支", required: false, type: number }
+    persisted_screen_pixel_residual_y: { description_zh: "C++ 实现返回的 persisted_screen_pixel_residual_y 字段；是否出现取决于执行分支", required: false, type: number }
+    persisted_screen_pixel_x: { description_zh: "C++ 实现返回的 persisted_screen_pixel_x 字段；是否出现取决于执行分支", required: false, type: number }
+    persisted_screen_pixel_y: { description_zh: "C++ 实现返回的 persisted_screen_pixel_y 字段；是否出现取决于执行分支", required: false, type: number }
+    persisted_view_found: { description_zh: "C++ 实现返回的 persisted_view_found 字段；是否出现取决于执行分支", required: false, type: bool }
+    persisted_view_pixel_aligned: { description_zh: "C++ 实现返回的 persisted_view_pixel_aligned 字段；是否出现取决于执行分支", required: false, type: bool }
+    persisted_view_x: { description_zh: "C++ 实现返回的 persisted_view_x 字段；是否出现取决于执行分支", required: false, type: number }
+    persisted_view_y: { description_zh: "C++ 实现返回的 persisted_view_y 字段；是否出现取决于执行分支", required: false, type: number }
+    persisted_zoom: { description_zh: "C++ 实现返回的 persisted_zoom 字段；是否出现取决于执行分支", required: false, type: number }
+    removed_document_view_state_entry_count: { description_zh: "C++ 实现返回的 removed_document_view_state_entry_count 字段；是否出现取决于执行分支", required: false, type: integer }
+    saved: { description_zh: "C++ 实现返回的 saved 字段；是否出现取决于执行分支", required: false, type: bool }
+    screen_pixel_residual_x: { description_zh: "C++ 实现返回的 screen_pixel_residual_x 字段；是否出现取决于执行分支", required: false, type: number }
+    screen_pixel_residual_y: { description_zh: "C++ 实现返回的 screen_pixel_residual_y 字段；是否出现取决于执行分支", required: false, type: number }
+    screen_pixel_x: { description_zh: "C++ 实现返回的 screen_pixel_x 字段；是否出现取决于执行分支", required: false, type: number }
+    screen_pixel_y: { description_zh: "C++ 实现返回的 screen_pixel_y 字段；是否出现取决于执行分支", required: false, type: number }
+    snap_to_pixel_grid: { description_zh: "C++ 实现返回的 snap_to_pixel_grid 字段；是否出现取决于执行分支", required: false, type: bool }
+    update_document_view_state: { description_zh: "C++ 实现返回的 update_document_view_state 字段；是否出现取决于执行分支", required: false, type: bool }
+    updated_document_view_state: { description_zh: "C++ 实现返回的 updated_document_view_state 字段；是否出现取决于执行分支", required: false, type: bool }
+    view_pixel_aligned: { description_zh: "C++ 实现返回的 view_pixel_aligned 字段；是否出现取决于执行分支", required: false, type: bool }
+    view_x: { description_zh: "C++ 实现返回的 view_x 字段；是否出现取决于执行分支", required: false, type: number }
+    view_y: { description_zh: "C++ 实现返回的 view_y 字段；是否出现取决于执行分支", required: false, type: number }
+    zoom: { description_zh: "C++ 实现返回的 zoom 字段；是否出现取决于执行分支", required: false, type: number }
+  }
+  state: defined
+}
+schema: uai.command_spec.v1
+status: active
+types: {}
+verification: {
+  assertions: [
+    { id: result_present, operator: exists, source: returns.saved }
+    { id: state_readback_present, operator: exists, source: methods.state_readback.view_x }
+  ]
+  failure_policy: fail_overall
+  methods: [
+    { id: result, kind: result_assertion }
+    { command: anim_blueprint_graph_get_view, id: state_readback, kind: command_readback, params_mapping: { asset_path: params.asset_path, graph_name: params.graph_name } }
+  ]
+  required: true
+  state: defined
+}
+version: 1

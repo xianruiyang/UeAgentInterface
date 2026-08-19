@@ -1189,7 +1189,7 @@ namespace UeAgentLevelContentJson
 			else if (Type == TEXT("screenshot") || Type == TEXT("evidence"))
 			{
 				Result->SetStringField(TEXT("status"), TEXT("report_only_visual_capture"));
-				Result->SetStringField(TEXT("reason"), TEXT("use dedicated screenshot_viewport or screenshot_viewport_buffer for crash-guarded capture"));
+				Result->SetStringField(TEXT("reason"), TEXT("use capture.image.execute with the exact viewport policy"));
 			}
 			else if (Type == TEXT("convert") || Type == TEXT("migrate") || Type == TEXT("convert_report"))
 			{

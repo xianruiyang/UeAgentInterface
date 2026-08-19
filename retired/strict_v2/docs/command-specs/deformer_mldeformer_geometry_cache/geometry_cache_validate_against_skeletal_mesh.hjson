@@ -1,0 +1,66 @@
+authoring: { reason: command_has_no_registered_folder_authoring_profile, state: none }
+category: deformer_mldeformer_geometry_cache
+command: geometry_cache_validate_against_skeletal_mesh
+deprecation: { reason: command_is_active, state: none }
+discovery: { aliases: [], keywords_en: [geometry, cache, validate, against, skeletal, mesh, deformer_mldeformer_geometry_cache], keywords_zh: [geometry_cache_validate_against_skeletal_mesh], summary_en: "Execute geometry_cache_validate_against_skeletal_mesh with a verified implementation contract", summary_zh: "校验 Geometry Cache 与 SkeletalMesh 引用关系", tags: [deformer_mldeformer_geometry_cache, p2-006] }
+errors: { codes: [] }
+evidence: {
+  docs: [
+    { path: "Plugins/UeAgentInterface/docs/commands/deformer_mldeformer_geometry_cache/geometry_cache_validate_against_skeletal_mesh.md", purpose: "user documentation cross-check; C++ implementation remains authoritative" }
+  ]
+  implementation: [
+    { line_hint: 1802, path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Commands/Deformer/UeAgentHttpServer_Deformer.cpp", purpose: "command handler, parameter and return evidence", symbol: CmdGeometryCacheValidateAgainstSkeletalMesh }
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Server/UeAgentHttpServer.cpp", purpose: "transitive helper evidence used by the command handler" }
+  ]
+  tests: [
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterfaceTests/Private/Smoke/UeAgentInterfaceSmoke_Coverage.cpp", purpose: "smoke or negative-path evidence cross-checked for the verified contract" }
+  ]
+}
+execution: {
+  destructive: false
+  editor_state: required
+  game_thread: required
+  idempotent: true
+  kind: read_only
+  overwrite_behavior: none
+  pie_state: allowed
+  retry_safe: true
+  save_behavior: none
+  side_effects: []
+  ui_effect: none
+}
+maturity: verified
+params: {
+  constraints: []
+  fields: {
+    geometry_cache: { default_state: none, description_zh: "C++ 实现读取的 geometry_cache 参数", required: false, type: string }
+    geometry_cache_path: { default_state: none, description_zh: "C++ 实现读取的 geometry_cache_path 参数", required: false, type: string }
+    skeletal_mesh: { default_state: none, description_zh: "C++ 实现读取的 skeletal_mesh 参数", required: false, type: string }
+    skeletal_mesh_path: { default_state: none, description_zh: "C++ 实现读取的 skeletal_mesh_path 参数", required: false, type: string }
+  }
+  state: defined
+}
+response: { artifact_fields: [validation_issues, plugin_status], compact_fields: [compatible_with_skeletal_mesh, geometry_cache_class, geometry_cache_found, geometry_cache_vertex_count, skeletal_mesh_class], failure_fields: [], max_items_policy: { fields: [], mode: none } }
+returns: {
+  fields: {
+    compatible_with_skeletal_mesh: { description_zh: "C++ 实现返回的 compatible_with_skeletal_mesh 字段；是否出现取决于执行分支", required: false, type: bool }
+    geometry_cache_class: { description_zh: "C++ 实现返回的 geometry_cache_class 字段；是否出现取决于执行分支", required: false, type: string }
+    geometry_cache_found: { description_zh: "C++ 实现返回的 geometry_cache_found 字段；是否出现取决于执行分支", required: false, type: bool }
+    geometry_cache_vertex_count: { description_zh: "C++ 实现返回的 geometry_cache_vertex_count 字段；是否出现取决于执行分支", required: false, type: integer }
+    plugin_status: { description_zh: "C++ 实现返回的 plugin_status 字段；是否出现取决于执行分支", required: false, type: json_value }
+    skeletal_mesh_class: { description_zh: "C++ 实现返回的 skeletal_mesh_class 字段；是否出现取决于执行分支", required: false, type: string }
+    skeletal_mesh_found: { description_zh: "C++ 实现返回的 skeletal_mesh_found 字段；是否出现取决于执行分支", required: false, type: bool }
+    skeletal_mesh_lod0_vertex_count: { description_zh: "C++ 实现返回的 skeletal_mesh_lod0_vertex_count 字段；是否出现取决于执行分支", required: false, type: integer }
+    validation_error_count: { description_zh: "C++ 实现返回的 validation_error_count 字段；是否出现取决于执行分支", required: false, type: integer }
+    validation_issue_count: { description_zh: "C++ 实现返回的 validation_issue_count 字段；是否出现取决于执行分支", required: false, type: integer }
+    validation_issues: { description_zh: "C++ 实现返回的 validation_issues 字段；是否出现取决于执行分支", item_type: json_value, required: false, type: array }
+    validation_passed: { description_zh: "C++ 实现返回的 validation_passed 字段；是否出现取决于执行分支", required: false, type: bool }
+    validation_policy: { description_zh: "C++ 实现返回的 validation_policy 字段；是否出现取决于执行分支", required: false, type: string }
+  }
+  state: defined
+}
+schema: uai.command_spec.v1
+status: active
+types: {}
+verification: { reason: read_only_command_has_no_post_write_verification, state: none }
+version: 1

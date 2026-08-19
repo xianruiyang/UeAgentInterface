@@ -1,0 +1,541 @@
+{
+  "schema": "uai.domain_adapter.modeling_geometry_effect.test_fixture.v1",
+  "descriptor_count": 31,
+  "native_operation_types": [
+    "geometry.primitive.create",
+    "geometry.topology.edit",
+    "geometry.attribute.edit",
+    "geometry.collision.edit"
+  ],
+  "forbidden_input_fields": [
+    "accept",
+    "active_tool",
+    "command",
+    "command_id",
+    "current_selection",
+    "dry_run",
+    "hjson",
+    "http",
+    "output_file",
+    "route",
+    "save",
+    "save_after_apply",
+    "selected_actor",
+    "tool_identifier",
+    "tool_properties",
+    "transaction",
+    "verify"
+  ],
+  "descriptors": [
+    {
+      "descriptor_id": "uai.operation.mesh.primitive.box.create",
+      "capability_id": "mesh.primitive.box.create",
+      "native_operation_type": "geometry.primitive.create",
+      "operation_key": "box",
+      "primitive_output": true,
+      "placement": true,
+      "parameters": [
+        {"name": "size_cm", "kind": "positive_number_array", "count": 3},
+        {"name": "subdivisions", "kind": "integer_array", "count": 3, "minimum": 1, "maximum": 256},
+        {"name": "anchor", "kind": "enum", "values": ["center", "base_center"]}
+      ]
+    },
+    {
+      "descriptor_id": "uai.operation.mesh.primitive.cylinder.create",
+      "capability_id": "mesh.primitive.cylinder.create",
+      "native_operation_type": "geometry.primitive.create",
+      "operation_key": "cylinder",
+      "primitive_output": true,
+      "placement": true,
+      "parameters": [
+        {"name": "radius_cm", "kind": "positive_number"},
+        {"name": "height_cm", "kind": "positive_number"},
+        {"name": "radial_segments", "kind": "integer", "minimum": 3, "maximum": 512},
+        {"name": "height_segments", "kind": "integer", "minimum": 1, "maximum": 256},
+        {"name": "cap_ends", "kind": "boolean"},
+        {"name": "anchor", "kind": "enum", "values": ["center", "base_center"]}
+      ]
+    },
+    {
+      "descriptor_id": "uai.operation.mesh.primitive.plane.create",
+      "capability_id": "mesh.primitive.plane.create",
+      "native_operation_type": "geometry.primitive.create",
+      "operation_key": "plane",
+      "primitive_output": true,
+      "placement": true,
+      "parameters": [
+        {"name": "size_cm", "kind": "positive_number_array", "count": 2},
+        {"name": "subdivisions", "kind": "integer_array", "count": 2, "minimum": 1, "maximum": 256},
+        {"name": "double_sided", "kind": "boolean"}
+      ]
+    },
+    {
+      "descriptor_id": "uai.operation.mesh.primitive.ramp.create",
+      "capability_id": "mesh.primitive.ramp.create",
+      "native_operation_type": "geometry.primitive.create",
+      "operation_key": "ramp",
+      "primitive_output": true,
+      "placement": true,
+      "parameters": [
+        {"name": "size_cm", "kind": "positive_number_array", "count": 3},
+        {"name": "slope_axis", "kind": "enum", "values": ["x", "y"]},
+        {"name": "rise_direction", "kind": "enum", "values": ["positive", "negative"]}
+      ]
+    },
+    {
+      "descriptor_id": "uai.operation.mesh.primitive.ramp_corner.create",
+      "capability_id": "mesh.primitive.ramp_corner.create",
+      "native_operation_type": "geometry.primitive.create",
+      "operation_key": "ramp_corner",
+      "primitive_output": true,
+      "placement": true,
+      "parameters": [
+        {"name": "size_cm", "kind": "positive_number_array", "count": 3},
+        {"name": "high_corner", "kind": "enum", "values": ["positive_x_positive_y", "positive_x_negative_y", "negative_x_positive_y", "negative_x_negative_y"]}
+      ]
+    },
+    {
+      "descriptor_id": "uai.operation.mesh.primitive.sphere.create",
+      "capability_id": "mesh.primitive.sphere.create",
+      "native_operation_type": "geometry.primitive.create",
+      "operation_key": "sphere",
+      "primitive_output": true,
+      "placement": true,
+      "parameters": [
+        {"name": "radius_cm", "kind": "positive_number"},
+        {"name": "longitude_segments", "kind": "integer", "minimum": 3, "maximum": 512},
+        {"name": "latitude_segments", "kind": "integer", "minimum": 2, "maximum": 256}
+      ]
+    },
+    {
+      "descriptor_id": "uai.operation.mesh.primitive.stairs.create",
+      "capability_id": "mesh.primitive.stairs.create",
+      "native_operation_type": "geometry.primitive.create",
+      "operation_key": "stairs",
+      "primitive_output": true,
+      "placement": true,
+      "parameters": [
+        {"name": "step_count", "kind": "integer", "minimum": 1, "maximum": 1024},
+        {"name": "step_width_cm", "kind": "positive_number"},
+        {"name": "step_depth_cm", "kind": "positive_number"},
+        {"name": "step_height_cm", "kind": "positive_number"},
+        {"name": "rise_axis", "kind": "enum", "values": ["x", "y"]},
+        {"name": "rise_direction", "kind": "enum", "values": ["positive", "negative"]}
+      ]
+    },
+    {
+      "descriptor_id": "uai.operation.mesh.topology.edges.bevel",
+      "capability_id": "mesh.topology.edges.bevel",
+      "native_operation_type": "geometry.topology.edit",
+      "operation_key": "bevel_edges",
+      "existing_target": true,
+      "space_contract": true,
+      "selection_kind": "edge",
+      "parameters": [
+        {"name": "distance_cm", "kind": "positive_number"},
+        {"name": "segments", "kind": "integer", "minimum": 0, "maximum": 64},
+        {"name": "roundness", "kind": "number", "minimum": 0, "maximum": 1}
+      ]
+    },
+    {
+      "descriptor_id": "uai.operation.mesh.topology.boolean",
+      "capability_id": "mesh.topology.boolean",
+      "native_operation_type": "geometry.topology.edit",
+      "operation_key": "boolean",
+      "existing_target": true,
+      "space_contract": true,
+      "operand": true,
+      "parameters": [
+        {"name": "operation", "kind": "enum", "values": ["union", "intersection", "difference"]},
+        {"name": "simplify_output", "kind": "boolean"}
+      ]
+    },
+    {
+      "descriptor_id": "uai.operation.mesh.topology.faces.duplicate",
+      "capability_id": "mesh.topology.faces.duplicate",
+      "native_operation_type": "geometry.topology.edit",
+      "operation_key": "duplicate_faces",
+      "existing_target": true,
+      "space_contract": true,
+      "selection_kind": "triangle",
+      "parameters": [
+        {"name": "translation_cm", "kind": "number_array", "count": 3}
+      ]
+    },
+    {
+      "descriptor_id": "uai.operation.mesh.topology.faces.extrude",
+      "capability_id": "mesh.topology.faces.extrude",
+      "native_operation_type": "geometry.topology.edit",
+      "operation_key": "extrude_faces",
+      "existing_target": true,
+      "space_contract": true,
+      "selection_kind": "triangle",
+      "direction": true,
+      "parameters": [
+        {"name": "distance_cm", "kind": "number"},
+        {"name": "direction_mode", "kind": "enum", "values": ["vertex_normals", "fixed"]}
+      ]
+    },
+    {
+      "descriptor_id": "uai.operation.mesh.topology.holes.fill",
+      "capability_id": "mesh.topology.holes.fill",
+      "native_operation_type": "geometry.topology.edit",
+      "operation_key": "fill_holes",
+      "existing_target": true,
+      "selection_kind": "boundary_edge",
+      "parameters": [
+        {"name": "fill_mode", "kind": "enum", "values": ["minimal", "triangle_fan", "planar"]}
+      ]
+    },
+    {
+      "descriptor_id": "uai.operation.mesh.topology.faces.inset",
+      "capability_id": "mesh.topology.faces.inset",
+      "native_operation_type": "geometry.topology.edit",
+      "operation_key": "inset_faces",
+      "existing_target": true,
+      "space_contract": true,
+      "selection_kind": "triangle",
+      "parameters": [
+        {"name": "distance_cm", "kind": "positive_number"},
+        {"name": "boundary_mode", "kind": "enum", "values": ["uniform", "reprojected"]}
+      ]
+    },
+    {
+      "descriptor_id": "uai.operation.mesh.topology.mesh_cut",
+      "capability_id": "mesh.topology.mesh_cut",
+      "native_operation_type": "geometry.topology.edit",
+      "operation_key": "mesh_cut",
+      "existing_target": true,
+      "space_contract": true,
+      "operand": true,
+      "parameters": [
+        {"name": "keep_sides", "kind": "enum", "values": ["both", "target_outside", "target_inside"]},
+        {"name": "fill_cut", "kind": "boolean"}
+      ]
+    },
+    {
+      "descriptor_id": "uai.operation.mesh.topology.mirror",
+      "capability_id": "mesh.topology.mirror",
+      "native_operation_type": "geometry.topology.edit",
+      "operation_key": "mirror",
+      "existing_target": true,
+      "space_contract": true,
+      "plane": true,
+      "parameters": [
+        {"name": "keep_original", "kind": "boolean"},
+        {"name": "weld_seam", "kind": "boolean"}
+      ]
+    },
+    {
+      "descriptor_id": "uai.operation.mesh.topology.faces.offset",
+      "capability_id": "mesh.topology.faces.offset",
+      "native_operation_type": "geometry.topology.edit",
+      "operation_key": "offset_faces",
+      "existing_target": true,
+      "space_contract": true,
+      "selection_kind": "triangle",
+      "parameters": [
+        {"name": "distance_cm", "kind": "number"},
+        {"name": "offset_mode", "kind": "enum", "values": ["vertex_normals", "face_normals"]}
+      ]
+    },
+    {
+      "descriptor_id": "uai.operation.mesh.topology.plane_cut",
+      "capability_id": "mesh.topology.plane_cut",
+      "native_operation_type": "geometry.topology.edit",
+      "operation_key": "plane_cut",
+      "existing_target": true,
+      "space_contract": true,
+      "plane": true,
+      "parameters": [
+        {"name": "keep_side", "kind": "enum", "values": ["positive", "negative", "both"]},
+        {"name": "fill_hole", "kind": "boolean"}
+      ]
+    },
+    {
+      "descriptor_id": "uai.operation.mesh.topology.faces.push_pull",
+      "capability_id": "mesh.topology.faces.push_pull",
+      "native_operation_type": "geometry.topology.edit",
+      "operation_key": "push_pull_faces",
+      "existing_target": true,
+      "space_contract": true,
+      "selection_kind": "triangle",
+      "direction": true,
+      "parameters": [
+        {"name": "distance_cm", "kind": "number"},
+        {"name": "direction_mode", "kind": "enum", "values": ["face_normals", "fixed"]}
+      ]
+    },
+    {
+      "descriptor_id": "uai.operation.mesh.topology.remesh",
+      "capability_id": "mesh.topology.remesh",
+      "native_operation_type": "geometry.topology.edit",
+      "operation_key": "remesh",
+      "existing_target": true,
+      "space_contract": true,
+      "parameters": [
+        {"name": "target_edge_length_cm", "kind": "positive_number"},
+        {"name": "iterations", "kind": "integer", "minimum": 1, "maximum": 100},
+        {"name": "preserve_boundaries", "kind": "boolean"},
+        {"name": "preserve_sharp_edges", "kind": "boolean"}
+      ]
+    },
+    {
+      "descriptor_id": "uai.operation.mesh.topology.simplify",
+      "capability_id": "mesh.topology.simplify",
+      "native_operation_type": "geometry.topology.edit",
+      "operation_key": "simplify",
+      "existing_target": true,
+      "test_carrier_kind": "static_mesh_asset",
+      "parameters": [
+        {"name": "target_mode", "kind": "enum", "values": ["triangle_count", "triangle_ratio", "tolerance_cm"]},
+        {"name": "target_value", "kind": "positive_number"},
+        {"name": "preserve_boundaries", "kind": "boolean"}
+      ]
+    },
+    {
+      "descriptor_id": "uai.operation.mesh.topology.subdivide",
+      "capability_id": "mesh.topology.subdivide",
+      "native_operation_type": "geometry.topology.edit",
+      "operation_key": "subdivide",
+      "existing_target": true,
+      "parameters": [
+        {"name": "scheme", "kind": "enum", "values": ["uniform", "pn_triangles"]},
+        {"name": "levels", "kind": "integer", "minimum": 1, "maximum": 6}
+      ]
+    },
+    {
+      "descriptor_id": "uai.operation.mesh.topology.trim",
+      "capability_id": "mesh.topology.trim",
+      "native_operation_type": "geometry.topology.edit",
+      "operation_key": "trim",
+      "existing_target": true,
+      "space_contract": true,
+      "operand": true,
+      "parameters": [
+        {"name": "keep_region", "kind": "enum", "values": ["outside", "inside"]},
+        {"name": "fill_hole", "kind": "boolean"}
+      ]
+    },
+    {
+      "descriptor_id": "uai.operation.mesh.topology.voxel_boolean",
+      "capability_id": "mesh.topology.voxel_boolean",
+      "native_operation_type": "geometry.topology.edit",
+      "operation_key": "voxel_boolean",
+      "existing_target": true,
+      "space_contract": true,
+      "operand": true,
+      "parameters": [
+        {"name": "operation", "kind": "enum", "values": ["union", "intersection", "difference"]},
+        {"name": "voxel_size_cm", "kind": "positive_number"},
+        {"name": "adaptivity", "kind": "number", "minimum": 0, "maximum": 1}
+      ]
+    },
+    {
+      "descriptor_id": "uai.operation.mesh.topology.edges.weld",
+      "capability_id": "mesh.topology.edges.weld",
+      "native_operation_type": "geometry.topology.edit",
+      "operation_key": "weld_edges",
+      "existing_target": true,
+      "edge_pairs": true,
+      "parameters": [
+        {"name": "mesh_revision", "kind": "string"},
+        {"name": "tolerance_cm", "kind": "number", "minimum": 0}
+      ]
+    },
+    {
+      "descriptor_id": "uai.operation.mesh.attribute.material_slot.add",
+      "capability_id": "mesh.attribute.material_slot.add",
+      "native_operation_type": "geometry.attribute.edit",
+      "operation_key": "add_material_slot",
+      "existing_target": true,
+      "test_carrier_kind": "static_mesh_asset",
+      "parameters": [
+        {"name": "slot_name", "kind": "string"},
+        {"name": "material_ref", "kind": "string"}
+      ]
+    },
+    {
+      "descriptor_id": "uai.operation.mesh.attribute.uv.auto",
+      "capability_id": "mesh.attribute.uv.auto",
+      "native_operation_type": "geometry.attribute.edit",
+      "operation_key": "auto_uv",
+      "existing_target": true,
+      "parameters": [
+        {"name": "uv_channel", "kind": "integer", "minimum": 0, "maximum": 7},
+        {"name": "method", "kind": "enum", "values": ["patch_builder", "xatlas"]},
+        {"name": "island_source", "kind": "enum", "values": ["polygroups", "existing_seams"]},
+        {"name": "pack", "kind": "boolean"},
+        {"name": "texture_resolution", "kind": "integer", "minimum": 16, "maximum": 16384}
+      ]
+    },
+    {
+      "descriptor_id": "uai.operation.mesh.attribute.uv.project",
+      "capability_id": "mesh.attribute.uv.project",
+      "native_operation_type": "geometry.attribute.edit",
+      "operation_key": "project_uv",
+      "existing_target": true,
+      "space_contract": true,
+      "projection_frame": true,
+      "parameters": [
+        {"name": "uv_channel", "kind": "integer", "minimum": 0, "maximum": 7},
+        {"name": "projection_type", "kind": "enum", "values": ["planar", "box", "cylindrical"]},
+        {"name": "dimensions_cm", "kind": "positive_number_array", "count": 3}
+      ]
+    },
+    {
+      "descriptor_id": "uai.operation.mesh.attribute.normals.recompute",
+      "capability_id": "mesh.attribute.normals.recompute",
+      "native_operation_type": "geometry.attribute.edit",
+      "operation_key": "recompute_normals",
+      "existing_target": true,
+      "test_carrier_kind": "static_mesh_asset",
+      "parameters": [
+        {"name": "mode", "kind": "enum", "values": ["area_angle_weighted", "face", "angle_threshold"]},
+        {"name": "preserve_existing_hard_edges", "kind": "boolean"},
+        {"name": "angle_degrees", "kind": "number", "minimum": 0, "maximum": 180, "required": false}
+      ]
+    },
+    {
+      "descriptor_id": "uai.operation.mesh.attribute.material_slot.assign",
+      "capability_id": "mesh.attribute.material_slot.assign",
+      "native_operation_type": "geometry.attribute.edit",
+      "operation_key": "assign_material_slot",
+      "existing_target": true,
+      "selection_kind": "triangle",
+      "parameters": [
+        {"name": "slot_index", "kind": "integer", "minimum": 0}
+      ]
+    },
+    {
+      "descriptor_id": "uai.operation.mesh.collision.convex.generate",
+      "capability_id": "mesh.collision.convex.generate",
+      "native_operation_type": "geometry.collision.edit",
+      "operation_key": "generate_convex_collision",
+      "existing_target": true,
+      "parameters": [
+        {"name": "mode", "kind": "enum", "values": ["single_hull", "decomposition"]},
+        {"name": "max_hulls", "kind": "integer", "minimum": 1, "maximum": 64},
+        {"name": "max_vertices_per_hull", "kind": "integer", "minimum": 4, "maximum": 1024},
+        {"name": "replace_existing", "kind": "boolean"}
+      ]
+    },
+    {
+      "descriptor_id": "uai.operation.mesh.collision.simple.generate",
+      "capability_id": "mesh.collision.simple.generate",
+      "native_operation_type": "geometry.collision.edit",
+      "operation_key": "generate_simple_collision",
+      "existing_target": true,
+      "test_carrier_kind": "static_mesh_asset",
+      "parameters": [
+        {"name": "method", "kind": "enum", "values": ["aligned_boxes", "min_volume_shapes", "capsules", "spheres"]},
+        {"name": "max_shapes", "kind": "integer", "minimum": 1, "maximum": 256},
+        {"name": "replace_existing", "kind": "boolean"}
+      ]
+    }
+  ],
+  "e1_negative_cases": [
+    {"case_id": "primitive-output-key-already-exists", "descriptor_id": "uai.operation.mesh.primitive.box.create", "expected_error": "modeling_geometry_output_already_exists", "mutation_count": 0},
+    {"case_id": "target-unresolved", "descriptor_id": "uai.operation.mesh.topology.subdivide", "expected_error": "modeling_geometry_reference_unresolved", "mutation_count": 0},
+    {"case_id": "target-revision-stale", "descriptor_id": "uai.operation.mesh.topology.simplify", "expected_error": "modeling_geometry_target_revision_stale", "mutation_count": 0},
+    {"case_id": "selection-revision-mismatch", "descriptor_id": "uai.operation.mesh.topology.edges.bevel", "expected_error": "modeling_geometry_selection_revision_mismatch", "mutation_count": 0},
+    {"case_id": "selection-element-invalid", "descriptor_id": "uai.operation.mesh.topology.faces.extrude", "expected_error": "modeling_geometry_selection_element_invalid", "mutation_count": 0},
+    {"case_id": "boundary-edge-no-longer-boundary", "descriptor_id": "uai.operation.mesh.topology.holes.fill", "expected_error": "modeling_geometry_boundary_edge_invalid", "mutation_count": 0},
+    {"case_id": "operand-unresolved", "descriptor_id": "uai.operation.mesh.topology.boolean", "expected_error": "modeling_geometry_operand_unresolved", "mutation_count": 0},
+    {"case_id": "operand-revision-stale", "descriptor_id": "uai.operation.mesh.topology.trim", "expected_error": "modeling_geometry_operand_revision_stale", "mutation_count": 0},
+    {"case_id": "operand-transform-singular", "descriptor_id": "uai.operation.mesh.topology.voxel_boolean", "expected_error": "modeling_geometry_operand_transform_invalid", "mutation_count": 0},
+    {"case_id": "plane-normal-zero", "descriptor_id": "uai.operation.mesh.topology.plane_cut", "expected_error": "modeling_geometry_plane_invalid", "mutation_count": 0},
+    {"case_id": "fixed-direction-missing", "descriptor_id": "uai.operation.mesh.topology.faces.push_pull", "expected_error": "modeling_geometry_direction_required", "mutation_count": 0},
+    {"case_id": "unsupported-carrier", "descriptor_id": "uai.operation.mesh.attribute.uv.auto", "expected_error": "modeling_geometry_carrier_unsupported", "mutation_count": 0},
+    {"case_id": "simplify-ratio-out-of-range", "descriptor_id": "uai.operation.mesh.topology.simplify", "expected_error": "modeling_geometry_simplify_target_invalid", "mutation_count": 0},
+    {"case_id": "weld-edge-pair-duplicate", "descriptor_id": "uai.operation.mesh.topology.edges.weld", "expected_error": "modeling_geometry_edge_pair_invalid", "mutation_count": 0}
+  ],
+  "e2_scenarios": [
+    {"descriptor_id": "uai.operation.mesh.primitive.box.create", "fixture_kind": "empty_owned_world", "oracle_kind": "created_mesh_bounds", "direct_api_family": "GeometryScript.Primitives"},
+    {"descriptor_id": "uai.operation.mesh.primitive.cylinder.create", "fixture_kind": "empty_owned_world", "oracle_kind": "created_mesh_bounds", "direct_api_family": "GeometryScript.Primitives"},
+    {"descriptor_id": "uai.operation.mesh.primitive.plane.create", "fixture_kind": "empty_owned_world", "oracle_kind": "created_mesh_topology", "direct_api_family": "GeometryScript.Primitives"},
+    {"descriptor_id": "uai.operation.mesh.primitive.ramp.create", "fixture_kind": "empty_owned_world", "oracle_kind": "created_mesh_bounds", "direct_api_family": "DynamicMesh.PureGenerator"},
+    {"descriptor_id": "uai.operation.mesh.primitive.ramp_corner.create", "fixture_kind": "empty_owned_world", "oracle_kind": "created_mesh_bounds", "direct_api_family": "DynamicMesh.PureGenerator"},
+    {"descriptor_id": "uai.operation.mesh.primitive.sphere.create", "fixture_kind": "empty_owned_world", "oracle_kind": "created_mesh_bounds", "direct_api_family": "GeometryScript.Primitives"},
+    {"descriptor_id": "uai.operation.mesh.primitive.stairs.create", "fixture_kind": "empty_owned_world", "oracle_kind": "created_mesh_bounds", "direct_api_family": "GeometryScript.Primitives"},
+    {"descriptor_id": "uai.operation.mesh.topology.edges.bevel", "fixture_kind": "selected_cube", "oracle_kind": "topology_fingerprint", "direct_api_family": "GeometryScript.Modeling"},
+    {"descriptor_id": "uai.operation.mesh.topology.boolean", "fixture_kind": "overlapping_cubes", "oracle_kind": "topology_and_bounds", "direct_api_family": "GeometryScript.Booleans"},
+    {"descriptor_id": "uai.operation.mesh.topology.faces.duplicate", "fixture_kind": "selected_cube", "oracle_kind": "topology_fingerprint", "direct_api_family": "GeometryScript.Modeling"},
+    {"descriptor_id": "uai.operation.mesh.topology.faces.extrude", "fixture_kind": "selected_cube", "oracle_kind": "topology_and_bounds", "direct_api_family": "GeometryScript.Modeling"},
+    {"descriptor_id": "uai.operation.mesh.topology.holes.fill", "fixture_kind": "open_cube", "oracle_kind": "boundary_count", "direct_api_family": "DynamicMesh.HoleFill"},
+    {"descriptor_id": "uai.operation.mesh.topology.faces.inset", "fixture_kind": "selected_cube", "oracle_kind": "topology_fingerprint", "direct_api_family": "GeometryScript.Modeling"},
+    {"descriptor_id": "uai.operation.mesh.topology.mesh_cut", "fixture_kind": "overlapping_cubes", "oracle_kind": "component_and_boundary_count", "direct_api_family": "DynamicMesh.MeshCut"},
+    {"descriptor_id": "uai.operation.mesh.topology.mirror", "fixture_kind": "closed_cube", "oracle_kind": "topology_and_bounds", "direct_api_family": "GeometryScript.Booleans"},
+    {"descriptor_id": "uai.operation.mesh.topology.faces.offset", "fixture_kind": "selected_cube", "oracle_kind": "topology_and_bounds", "direct_api_family": "GeometryScript.Modeling"},
+    {"descriptor_id": "uai.operation.mesh.topology.plane_cut", "fixture_kind": "closed_cube", "oracle_kind": "topology_and_bounds", "direct_api_family": "GeometryScript.Booleans"},
+    {"descriptor_id": "uai.operation.mesh.topology.faces.push_pull", "fixture_kind": "selected_cube", "oracle_kind": "topology_and_bounds", "direct_api_family": "GeometryScript.Modeling"},
+    {"descriptor_id": "uai.operation.mesh.topology.remesh", "fixture_kind": "tessellated_sphere", "oracle_kind": "edge_length_distribution", "direct_api_family": "GeometryScript.Remesh"},
+    {"descriptor_id": "uai.operation.mesh.topology.simplify", "fixture_kind": "tessellated_sphere", "oracle_kind": "triangle_count_and_error", "direct_api_family": "GeometryScript.Simplification"},
+    {"descriptor_id": "uai.operation.mesh.topology.subdivide", "fixture_kind": "closed_cube", "oracle_kind": "triangle_count_and_bounds", "direct_api_family": "GeometryScript.Subdivide"},
+    {"descriptor_id": "uai.operation.mesh.topology.trim", "fixture_kind": "overlapping_cubes", "oracle_kind": "topology_and_bounds", "direct_api_family": "GeometryScript.Booleans"},
+    {"descriptor_id": "uai.operation.mesh.topology.voxel_boolean", "fixture_kind": "overlapping_cubes", "oracle_kind": "topology_and_bounds", "direct_api_family": "DynamicMesh.Voxel"},
+    {"descriptor_id": "uai.operation.mesh.topology.edges.weld", "fixture_kind": "weld_seam", "oracle_kind": "boundary_count", "direct_api_family": "DynamicMesh.Weld"},
+    {"descriptor_id": "uai.operation.mesh.attribute.material_slot.add", "fixture_kind": "material_cube", "oracle_kind": "carrier_material_slots", "direct_api_family": "GeometryScript.Materials"},
+    {"descriptor_id": "uai.operation.mesh.attribute.uv.auto", "fixture_kind": "attribute_cube", "oracle_kind": "uv_overlay", "direct_api_family": "GeometryScript.UV"},
+    {"descriptor_id": "uai.operation.mesh.attribute.uv.project", "fixture_kind": "attribute_cube", "oracle_kind": "uv_overlay", "direct_api_family": "GeometryScript.UV"},
+    {"descriptor_id": "uai.operation.mesh.attribute.normals.recompute", "fixture_kind": "attribute_cube", "oracle_kind": "normal_overlay", "direct_api_family": "GeometryScript.Normals"},
+    {"descriptor_id": "uai.operation.mesh.attribute.material_slot.assign", "fixture_kind": "material_cube", "oracle_kind": "triangle_material_ids", "direct_api_family": "GeometryScript.Materials"},
+    {"descriptor_id": "uai.operation.mesh.collision.convex.generate", "fixture_kind": "collision_cube", "oracle_kind": "collision_aggregate", "direct_api_family": "GeometryScript.Collision"},
+    {"descriptor_id": "uai.operation.mesh.collision.simple.generate", "fixture_kind": "collision_cube", "oracle_kind": "collision_aggregate", "direct_api_family": "GeometryScript.Collision"}
+  ],
+  "legacy_sources": [
+    {"source": "modeling_create_box", "descriptor_id": "uai.operation.mesh.primitive.box.create", "terminal": "REPLACE"},
+    {"source": "modeling_create_cylinder", "descriptor_id": "uai.operation.mesh.primitive.cylinder.create", "terminal": "REPLACE"},
+    {"source": "modeling_create_plane", "descriptor_id": "uai.operation.mesh.primitive.plane.create", "terminal": "REPLACE"},
+    {"source": "modeling_create_ramp", "descriptor_id": "uai.operation.mesh.primitive.ramp.create", "terminal": "REPLACE"},
+    {"source": "modeling_create_ramp_corner", "descriptor_id": "uai.operation.mesh.primitive.ramp_corner.create", "terminal": "REPLACE"},
+    {"source": "modeling_create_sphere", "descriptor_id": "uai.operation.mesh.primitive.sphere.create", "terminal": "REPLACE"},
+    {"source": "modeling_create_stairs", "descriptor_id": "uai.operation.mesh.primitive.stairs.create", "terminal": "REPLACE"},
+    {"source": "modeling_bevel_edges", "descriptor_id": "uai.operation.mesh.topology.edges.bevel", "terminal": "REPLACE"},
+    {"source": "modeling_boolean", "descriptor_id": "uai.operation.mesh.topology.boolean", "terminal": "REPLACE"},
+    {"source": "modeling_duplicate_faces", "descriptor_id": "uai.operation.mesh.topology.faces.duplicate", "terminal": "REPLACE"},
+    {"source": "modeling_extrude_faces", "descriptor_id": "uai.operation.mesh.topology.faces.extrude", "terminal": "REPLACE"},
+    {"source": "modeling_fill_holes", "descriptor_id": "uai.operation.mesh.topology.holes.fill", "terminal": "REPLACE"},
+    {"source": "modeling_inset_faces", "descriptor_id": "uai.operation.mesh.topology.faces.inset", "terminal": "REPLACE"},
+    {"source": "modeling_mesh_cut", "descriptor_id": "uai.operation.mesh.topology.mesh_cut", "terminal": "REPLACE"},
+    {"source": "modeling_mirror", "descriptor_id": "uai.operation.mesh.topology.mirror", "terminal": "REPLACE"},
+    {"source": "modeling_offset", "descriptor_id": "uai.operation.mesh.topology.faces.offset", "terminal": "REPLACE"},
+    {"source": "modeling_plane_cut", "descriptor_id": "uai.operation.mesh.topology.plane_cut", "terminal": "REPLACE"},
+    {"source": "modeling_push_pull", "descriptor_id": "uai.operation.mesh.topology.faces.push_pull", "terminal": "REPLACE"},
+    {"source": "modeling_remesh", "descriptor_id": "uai.operation.mesh.topology.remesh", "terminal": "REPLACE"},
+    {"source": "modeling_simplify", "descriptor_id": "uai.operation.mesh.topology.simplify", "terminal": "REPLACE"},
+    {"source": "modeling_subdivide", "descriptor_id": "uai.operation.mesh.topology.subdivide", "terminal": "REPLACE"},
+    {"source": "modeling_trim", "descriptor_id": "uai.operation.mesh.topology.trim", "terminal": "REPLACE"},
+    {"source": "modeling_voxel_boolean", "descriptor_id": "uai.operation.mesh.topology.voxel_boolean", "terminal": "REPLACE"},
+    {"source": "modeling_weld_edges", "descriptor_id": "uai.operation.mesh.topology.edges.weld", "terminal": "REPLACE"},
+    {"source": "modeling_add_material_slot", "descriptor_id": "uai.operation.mesh.attribute.material_slot.add", "terminal": "REPLACE"},
+    {"source": "modeling_auto_uv", "descriptor_id": "uai.operation.mesh.attribute.uv.auto", "terminal": "REPLACE"},
+    {"source": "modeling_project_uv", "descriptor_id": "uai.operation.mesh.attribute.uv.project", "terminal": "REPLACE"},
+    {"source": "modeling_recompute_normals", "descriptor_id": "uai.operation.mesh.attribute.normals.recompute", "terminal": "REPLACE"},
+    {"source": "modeling_set_material_slot", "descriptor_id": "uai.operation.mesh.attribute.material_slot.assign", "terminal": "REPLACE"},
+    {"source": "modeling_generate_convex_collision", "descriptor_id": "uai.operation.mesh.collision.convex.generate", "terminal": "REPLACE"},
+    {"source": "modeling_generate_simple_collision", "descriptor_id": "uai.operation.mesh.collision.simple.generate", "terminal": "REPLACE"}
+  ],
+  "legacy_assets": [
+    {
+      "path": "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Commands/Modeling/UeAgentHttpServer_Modeling_DispatchAndSelection.cpp",
+      "terminal": "DELETE_AT_SA_008",
+      "reason": "command switch and active Modeling Mode/selection owner"
+    },
+    {
+      "path": "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Commands/Modeling/UeAgentHttpServer_Modeling_ToolLifecycle.cpp",
+      "terminal": "DELETE_AT_SA_008",
+      "reason": "start/accept/cancel/tool property lifecycle is outside atomic geometry"
+    },
+    {
+      "path": "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Utilities/UeAgentCustomModelingPrimitives.cpp",
+      "terminal": "ADAPT_PURE_GENERATORS",
+      "reason": "ramp/ramp-corner mesh math is reusable after Tool classes are removed"
+    },
+    {
+      "path": "Plugins/UeAgentInterface/Source/UeAgentInterfaceTests/Private/Smoke/UeAgentInterfaceSmoke_LevelViewportModeling.cpp",
+      "terminal": "OTHER_OWNER_OR_DELETE_AT_SA_008",
+      "reason": "HTTP/mode/selection/active-tool smoke does not verify atomic geometry"
+    }
+  ]
+}

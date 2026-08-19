@@ -1,0 +1,86 @@
+authoring: { reason: command_has_no_registered_folder_authoring_profile, state: none }
+category: localization_packaging_platform_profiles
+command: localization_import_po
+deprecation: { reason: command_is_active, state: none }
+discovery: { aliases: [], keywords_en: [localization, import, po, localization_packaging_platform_profiles], keywords_zh: [localization_import_po], summary_en: "Execute localization_import_po with a verified implementation contract", summary_zh: "导入 PO 文件到 target/culture 目录", tags: [localization_packaging_platform_profiles, p2-002] }
+errors: {
+  codes: [
+    { code: copy_file_failed, description_zh: "C++ 实现返回错误码 copy_file_failed", retry_safe: false, stage: execution, wire_match: exact }
+    { code: culture_invalid, description_zh: "C++ 实现返回错误码 culture_invalid", retry_safe: true, stage: preflight, wire_match: exact }
+    { code: po_file_not_found, description_zh: "C++ 实现返回错误码 po_file_not_found", retry_safe: false, stage: execution, wire_match: exact }
+    { code: po_parse_failed, description_zh: "C++ 实现返回错误码 po_parse_failed", retry_safe: false, stage: execution, wire_match: exact }
+    { code: source_file_not_found, description_zh: "C++ 实现返回错误码 source_file_not_found", retry_safe: false, stage: execution, wire_match: exact }
+  ]
+}
+evidence: {
+  docs: [
+    { path: "Plugins/UeAgentInterface/docs/commands/localization_packaging_platform_profiles/localization_import_po.md", purpose: "user documentation cross-check; C++ implementation remains authoritative" }
+  ]
+  implementation: [
+    { line_hint: 2813, path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Commands/ProductionPipeline/UeAgentHttpServer_ProductionPipeline.cpp", purpose: "command handler, parameter and return evidence", symbol: CmdLocalizationImportPo }
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Server/UeAgentHttpServer.cpp", purpose: "transitive helper evidence used by the command handler" }
+  ]
+  tests: [
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterfaceTests/Private/Smoke/ProductionPipeline/UeAgentInterfaceProductionPipelineSmokeTests.cpp", purpose: "smoke or negative-path evidence cross-checked for the verified contract" }
+  ]
+}
+execution: {
+  destructive: false
+  editor_state: required
+  game_thread: required
+  idempotent: false
+  kind: write
+  overwrite_behavior: external_files
+  pie_state: allowed
+  retry_safe: false
+  save_behavior: none
+  side_effects: [writes_files, modifies_asset, creates_asset]
+  ui_effect: none
+}
+maturity: verified
+params: {
+  constraints: []
+  fields: {
+    backup: { default: true, default_state: defined, description_zh: "C++ 实现读取的 backup 参数", required: false, type: bool }
+    culture: { default_state: none, description_zh: "C++ 实现读取的 culture 参数", required: false, type: string }
+    dry_run: { default: true, default_state: defined, description_zh: "C++ 实现读取的 dry_run 参数", required: false, type: bool }
+    po_file: {
+      default_state: none
+      description_zh: "C++ 实现读取的 po_file 参数"
+      path_semantics: { kind: filesystem_file, must_exist: false, writable: false }
+      required: false
+      type: filesystem_path
+    }
+    target: { default: Game, default_state: defined, description_zh: "C++ 实现读取的 target 参数", required: false, type: string }
+  }
+  state: defined
+}
+response: { artifact_fields: [], compact_fields: [backup_paths, conflicts, dry_run, imported_count, missing_source, schema], failure_fields: [], max_items_policy: { fields: [], mode: none } }
+returns: {
+  fields: {
+    backup_paths: { description_zh: "C++ 实现返回的 backup_paths 字段；是否出现取决于执行分支", item_type: json_value, required: false, type: array }
+    conflicts: { description_zh: "C++ 实现返回的 conflicts 字段；是否出现取决于执行分支", item_type: json_value, required: false, type: array }
+    dry_run: { description_zh: "C++ 实现返回的 dry_run 字段；是否出现取决于执行分支", required: false, type: bool }
+    imported_count: { description_zh: "C++ 实现返回的 imported_count 字段；是否出现取决于执行分支", required: false, type: integer }
+    missing_source: { description_zh: "C++ 实现返回的 missing_source 字段；是否出现取决于执行分支", item_type: json_value, required: false, type: array }
+    schema: { description_zh: "C++ 实现返回的 schema 字段；是否出现取决于执行分支", required: false, type: string }
+    target_file: { description_zh: "C++ 实现返回的 target_file 字段；是否出现取决于执行分支", required: false, type: filesystem_path }
+    translated_count: { description_zh: "C++ 实现返回的 translated_count 字段；是否出现取决于执行分支", required: false, type: integer }
+  }
+  state: defined
+}
+schema: uai.command_spec.v1
+status: active
+types: {}
+verification: {
+  assertions: [
+    { id: result_present, operator: exists, source: returns.backup_paths }
+  ]
+  failure_policy: fail_overall
+  methods: [
+    { id: result, kind: result_assertion }
+  ]
+  required: true
+  state: defined
+}
+version: 1

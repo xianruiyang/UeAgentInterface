@@ -1,0 +1,169 @@
+{
+  "schema": "uai.domain_adapter.material_niagara_graph.test_fixture.v1",
+  "canonical_value_schema": "uai.graph_compound.canonical.v1",
+  "adapter_id": "D/MaterialNiagaraGraph",
+  "port_family_count": 7,
+  "capability_count": 13,
+  "legacy_candidate_count": 13,
+  "port_families": [
+    {
+      "family_id": "asset_lifecycle",
+      "required_identity_facets": ["asset_kind", "asset_path", "class_or_source_identity"],
+      "required_stages": ["apply", "refresh", "independent_capture"],
+      "oracle_kind": "reloaded_ue_asset_identity"
+    },
+    {
+      "family_id": "material_graph_mutation",
+      "required_identity_facets": ["graph_owner", "expression_guid_or_builtin_role", "pin_identity", "link_identity"],
+      "required_stages": ["preflight", "apply", "compile_settle", "independent_capture"],
+      "oracle_kind": "native_material_expression_collection"
+    },
+    {
+      "family_id": "material_instance_parameter_mutation",
+      "required_identity_facets": ["parameter_name", "parameter_association", "parameter_index"],
+      "required_stages": ["preflight", "apply", "refresh", "independent_capture"],
+      "oracle_kind": "native_material_parameter_info"
+    },
+    {
+      "family_id": "niagara_stack_mutation",
+      "required_identity_facets": ["emitter_handle_or_version", "stage_key", "module_node_guid", "ordering_identity"],
+      "required_stages": ["preflight", "apply", "compile_settle", "independent_capture"],
+      "oracle_kind": "native_niagara_parameter_map_chain"
+    },
+    {
+      "family_id": "niagara_compound_input",
+      "required_identity_facets": ["stage_key", "emitter_handle_id", "module_node_guid", "input_name"],
+      "required_stages": ["delegate_validate", "apply", "compile_settle", "independent_capture"],
+      "oracle_kind": "D/NiagaraCompound"
+    },
+    {
+      "family_id": "niagara_renderer_event_parameter_mutation",
+      "required_identity_facets": ["emitter_handle_or_version", "native_item_identity", "type_identity"],
+      "required_stages": ["preflight", "apply", "refresh", "independent_capture"],
+      "oracle_kind": "native_niagara_emitter_and_parameter_store"
+    },
+    {
+      "family_id": "compile_refresh_settle",
+      "required_identity_facets": ["target_identity", "subject_generation"],
+      "required_stages": ["request", "wait", "inspect", "post_barrier_capture"],
+      "oracle_kind": "native_compile_and_stack_diagnostics"
+    }
+  ],
+  "capabilities": [
+    {"capability_id": "material.asset.create", "port_family_id": "asset_lifecycle", "version": 1},
+    {"capability_id": "material.graph.apply", "port_family_id": "material_graph_mutation", "version": 1},
+    {"capability_id": "material.function.graph.apply", "port_family_id": "material_graph_mutation", "version": 1},
+    {"capability_id": "material_instance.asset.create", "port_family_id": "asset_lifecycle", "version": 1},
+    {"capability_id": "material_instance.parameters.apply", "port_family_id": "material_instance_parameter_mutation", "version": 1},
+    {"capability_id": "niagara.emitter.asset.create", "port_family_id": "asset_lifecycle", "version": 1},
+    {"capability_id": "niagara.system.asset.create", "port_family_id": "asset_lifecycle", "version": 1},
+    {"capability_id": "niagara.asset.duplicate", "port_family_id": "asset_lifecycle", "version": 1},
+    {"capability_id": "niagara.stack.reorder", "port_family_id": "niagara_stack_mutation", "version": 1},
+    {"capability_id": "niagara.stack.issue_fix", "port_family_id": "niagara_stack_mutation", "version": 1},
+    {"capability_id": "niagara.compound.apply", "port_family_id": "niagara_compound_input", "version": 1},
+    {"capability_id": "niagara.renderer_event_parameter.apply", "port_family_id": "niagara_renderer_event_parameter_mutation", "version": 1},
+    {"capability_id": "niagara.compile_refresh_settle", "port_family_id": "compile_refresh_settle", "version": 1}
+  ],
+  "legacy_mappings": [
+    {"legacy_id": "material_apply_folder", "target_capability_ids": ["material.graph.apply"]},
+    {"legacy_id": "material_create", "target_capability_ids": ["material.asset.create"]},
+    {"legacy_id": "material_function_apply_folder", "target_capability_ids": ["material.function.graph.apply"]},
+    {"legacy_id": "material_instance_apply_folder", "target_capability_ids": ["material_instance.parameters.apply"]},
+    {"legacy_id": "material_instance_create", "target_capability_ids": ["material_instance.asset.create"]},
+    {"legacy_id": "niagara_emitter_move_renderer", "target_capability_ids": ["niagara.renderer_event_parameter.apply"]},
+    {"legacy_id": "niagara_emitter_move_stage_module", "target_capability_ids": ["niagara.stack.reorder"]},
+    {"legacy_id": "niagara_apply_stack_issue_fix", "target_capability_ids": ["niagara.stack.issue_fix"]},
+    {"legacy_id": "niagara_compile_system", "target_capability_ids": ["niagara.compile_refresh_settle"]},
+    {"legacy_id": "niagara_create_emitter", "target_capability_ids": ["niagara.emitter.asset.create"]},
+    {"legacy_id": "niagara_create_system", "target_capability_ids": ["niagara.system.asset.create"]},
+    {"legacy_id": "niagara_duplicate_asset", "target_capability_ids": ["niagara.asset.duplicate"]},
+    {"legacy_id": "niagara_refresh_system", "target_capability_ids": ["niagara.compile_refresh_settle"]}
+  ],
+  "identity_cases": [
+    {
+      "case_id": "material_expression_to_root_property",
+      "target_kind": "material",
+      "target_identity": "/Game/UAI/GC004/M_GraphFixture",
+      "structure_identity": "material_graph:root",
+      "items": [
+        {"item_key": "expression:constant3", "native_guid": "11111111-2222-3333-4444-555555555555", "stable_builtin_role": ""},
+        {"item_key": "material:root", "native_guid": "", "stable_builtin_role": "material_root"}
+      ],
+      "pins": [
+        {"pin_key": "expression:constant3:output:0", "owner_item_key": "expression:constant3", "native_name": "", "native_index": 0, "direction": "output"},
+        {"pin_key": "material:root:base_color", "owner_item_key": "material:root", "native_name": "base_color", "native_index": -1, "direction": "input"}
+      ],
+      "links": [
+        {"link_key": "link:constant3:base_color", "from_pin_identity": "expression:constant3:output:0", "to_pin_identity": "material:root:base_color"}
+      ]
+    },
+    {
+      "case_id": "material_instance_parameter_info",
+      "parameter_identity": {
+        "parameter_name": "Tint",
+        "parameter_association": "global_parameter",
+        "parameter_index": -1
+      }
+    },
+    {
+      "case_id": "niagara_stage_stack_and_compound",
+      "stage_identity": {
+        "emitter_handle_id": "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
+        "script_usage": "particle_spawn",
+        "usage_id": "00000000-0000-0000-0000-000000000000",
+        "stage_key": "particle_spawn:00000000-0000-0000-0000-000000000000"
+      },
+      "stack_items": [
+        {"item_key": "module:initialize_particle", "module_node_guid": "22222222-3333-4444-5555-666666666666", "script_identity": "/Niagara/Modules/Spawn/Initialization/InitializeParticle.InitializeParticle"},
+        {"item_key": "module:solve_forces", "module_node_guid": "33333333-4444-5555-6666-777777777777", "script_identity": "/Niagara/Modules/SolveForcesAndVelocity.SolveForcesAndVelocity"}
+      ],
+      "ordering": [
+        {"ordering_identity": "order:particle_spawn:0", "item_key": "module:initialize_particle", "predecessor_item_key": ""},
+        {"ordering_identity": "order:particle_spawn:1", "item_key": "module:solve_forces", "predecessor_item_key": "module:initialize_particle"}
+      ],
+      "compound_delegate": {
+        "adapter_id": "D/NiagaraCompound",
+        "selector_facets": ["stage_key", "emitter_handle_id", "module_node_guid", "input_name"],
+        "failure_policy": "propagate_exact_failure",
+        "nesting_policy": "no_fixed_depth_limit_shared_resource_budget"
+      }
+    }
+  ],
+  "negative_cases": [
+    {"error_code": "material_niagara_graph_item_identity_duplicate", "must_return_false": true, "allow_empty_success": false},
+    {"error_code": "material_niagara_graph_link_endpoint_unresolved", "must_return_false": true, "allow_empty_success": false},
+    {"error_code": "material_niagara_graph_stack_item_identity_missing", "must_return_false": true, "allow_empty_success": false},
+    {"error_code": "material_niagara_graph_stack_capture_failed", "must_return_false": true, "allow_empty_success": false},
+    {"error_code": "material_niagara_graph_compound_capture_failed", "must_return_false": true, "allow_empty_success": false},
+    {"error_code": "niagara_compound_branch_conflict", "must_return_false": true, "allow_empty_success": false},
+    {"error_code": "material_niagara_graph_compile_incomplete", "must_return_false": true, "allow_empty_success": false},
+    {"error_code": "material_niagara_graph_stack_issue", "must_return_false": true, "allow_empty_success": false},
+    {"error_code": "material_niagara_graph_readback_not_independent", "must_return_false": true, "allow_empty_success": false}
+  ],
+  "lifecycle_evidence": {
+    "before_revision": "revision:81",
+    "apply_evidence": "fixture:gc-004:apply:82",
+    "settle_evidence": "fixture:gc-004:settle:82",
+    "readback_revision": "revision:82",
+    "readback_evidence": "fixture:gc-004:independent-readback:82",
+    "required_distinct_evidence": ["apply_evidence", "settle_evidence", "readback_evidence"]
+  },
+  "forbidden_owners": [
+    "public_command_dispatch",
+    "prefix_dispatch",
+    "json_or_hjson_parser",
+    "hjson_workspace_or_layout",
+    "domain_descriptor_registry",
+    "resource_budget_policy",
+    "transaction_or_save",
+    "verification_or_outcome",
+    "response_projection"
+  ],
+  "forbidden_oracles": [
+    "legacy_folder_apply_provider",
+    "legacy_command_success",
+    "request_or_export_echo",
+    "mutation_or_compile_receipt",
+    "self_generated_golden"
+  ]
+}

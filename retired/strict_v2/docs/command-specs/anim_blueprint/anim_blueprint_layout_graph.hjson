@@ -1,0 +1,312 @@
+authoring: { reason: command_has_no_registered_folder_authoring_profile, state: none }
+category: anim_blueprint
+command: anim_blueprint_layout_graph
+deprecation: { reason: command_is_active, state: none }
+discovery: { aliases: [], keywords_en: [anim, blueprint, layout, graph, anim_blueprint], keywords_zh: [anim_blueprint_layout_graph], summary_en: "Execute anim_blueprint_layout_graph with a verified implementation contract", summary_zh: "自动排版指定 AnimBlueprint 图节点", tags: [anim_blueprint, p2-003] }
+errors: {
+  codes: [
+    { code: blueprint_not_found, description_zh: "C++ 实现返回错误码 blueprint_not_found", retry_safe: false, stage: execution, wire_match: exact }
+    { code: dry_run_removed_blueprint_layout_graph_always_writes_use_undo_to_revert, description_zh: "C++ 实现返回错误码 dry_run_removed_blueprint_layout_graph_always_writes_use_undo_to_revert", retry_safe: false, stage: execution, wire_match: exact }
+    { code: graph_editor_access_offset_unavailable, description_zh: "C++ 实现返回错误码 graph_editor_access_offset_unavailable", retry_safe: false, stage: execution, wire_match: exact }
+    { code: graph_not_found, description_zh: "C++ 实现返回错误码 graph_not_found", retry_safe: false, stage: execution, wire_match: exact }
+    { code: island_local_layout_mutation_blocked, description_zh: "C++ 实现返回错误码 island_local_layout_mutation_blocked", retry_safe: false, stage: execution, wire_match: exact }
+    { code: layout_algorithm_failed, description_zh: "C++ 实现返回错误码 layout_algorithm_failed", retry_safe: false, stage: execution, wire_match: exact }
+    { code: layout_report_data_not_found, description_zh: "C++ 实现返回错误码 layout_report_data_not_found", retry_safe: false, stage: execution, wire_match: exact }
+    { code: layout_report_file_load_failed, description_zh: "C++ 实现返回错误码 layout_report_file_load_failed", retry_safe: false, stage: execution, wire_match: prefix }
+    { code: layout_report_file_parse_failed, description_zh: "C++ 实现返回错误码 layout_report_file_parse_failed", retry_safe: false, stage: execution, wire_match: prefix }
+    { code: layout_report_no_matching_nodes, description_zh: "C++ 实现返回错误码 layout_report_no_matching_nodes", retry_safe: false, stage: execution, wire_match: exact }
+    { code: layout_report_nodes_missing, description_zh: "C++ 实现返回错误码 layout_report_nodes_missing", retry_safe: true, stage: preflight, wire_match: exact }
+    { code: missing_asset_path, description_zh: "C++ 实现返回错误码 missing_asset_path", retry_safe: true, stage: preflight, wire_match: exact }
+    { code: real_geometry_required_but_unavailable, description_zh: "C++ 实现返回错误码 real_geometry_required_but_unavailable", retry_safe: true, stage: preflight, wire_match: exact }
+    { code: reroute_delete_all_guard_blocked, description_zh: "C++ 实现返回错误码 reroute_delete_all_guard_blocked", retry_safe: false, stage: execution, wire_match: prefix }
+    { code: save_failed, description_zh: "C++ 实现返回错误码 save_failed", retry_safe: false, stage: execution, wire_match: exact }
+  ]
+}
+evidence: {
+  docs: [
+    { path: "Plugins/UeAgentInterface/docs/commands/anim_blueprint/anim_blueprint_layout_graph.md", purpose: "user documentation cross-check; C++ implementation remains authoritative" }
+  ]
+  implementation: [
+    { line_hint: 37, path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Commands/Blueprint/UeAgentHttpServer_Blueprint_GraphLayout.cpp", purpose: "command handler, parameter and return evidence", symbol: CmdBlueprintLayoutGraph }
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Commands/Blueprint/UeAgentBlueprintGraphLayoutOps.cpp", purpose: "transitive helper evidence used by the command handler" }
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Server/UeAgentHttpServer.cpp", purpose: "transitive helper evidence used by the command handler" }
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Utilities/UeAgentJsonDiagnostics.cpp", purpose: "transitive helper evidence used by the command handler" }
+  ]
+  tests: [
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterfaceTests/Private/Smoke/UeAgentInterfaceSmoke_AnimationIKNiagara.cpp", purpose: "smoke or negative-path evidence cross-checked for the verified contract" }
+  ]
+}
+execution: {
+  destructive: true
+  editor_state: required
+  game_thread: required
+  idempotent: false
+  kind: write
+  overwrite_behavior: target_asset
+  pie_state: allowed
+  retry_safe: false
+  save_behavior: caller_controlled
+  side_effects: [modifies_asset, modifies_editor_session, opens_window]
+  ui_effect: window_mutation
+}
+maturity: verified
+params: {
+  constraints: []
+  fields: {
+    allow_focused_geometry_capture: { default: false, default_state: defined, description_zh: "C++ 实现读取的 allow_focused_geometry_capture 参数", required: false, type: bool }
+    allow_geometry_view_capture: { default: false, default_state: defined, description_zh: "C++ 实现读取的 allow_geometry_view_capture 参数", required: false, type: bool }
+    allow_remove_all_reroute_nodes: { default: false, default_state: defined, description_zh: "C++ 实现读取的 allow_remove_all_reroute_nodes 参数", required: false, type: bool }
+    asset_path: { default_state: none, description_zh: "C++ 实现读取的 asset_path 参数", path_semantics: { access_scope: project_write, kind: ue_asset }, required: true, type: ue_asset_path }
+    compile_after_layout: { default: false, default_state: defined, description_zh: "C++ 实现读取的 compile_after_layout 参数", required: false, type: bool }
+    graph_name: { default: EventGraph, default_state: defined, description_zh: "C++ 实现读取的 graph_name 参数", required: false, type: string }
+    horizontal_spacing: { default_state: none, description_zh: "C++ 实现读取的 horizontal_spacing 参数", required: false, type: number }
+    insert_reroute_nodes: { default: false, default_state: defined, description_zh: "C++ 实现读取的 insert_reroute_nodes 参数", required: false, type: bool }
+    layout_report_file: {
+      default_state: none
+      description_zh: "C++ 实现读取的 layout_report_file 参数"
+      path_semantics: { kind: filesystem_file, must_exist: false, writable: false }
+      required: false
+      type: filesystem_path
+    }
+    node_padding: { default_state: none, description_zh: "C++ 实现读取的 node_padding 参数", required: false, type: number }
+    origin_x: { default_state: none, description_zh: "C++ 实现读取的 origin_x 参数", required: false, type: number }
+    origin_y: { default_state: none, description_zh: "C++ 实现读取的 origin_y 参数", required: false, type: number }
+    replace_existing_reroute_nodes: { default: false, default_state: defined, description_zh: "C++ 实现读取的 replace_existing_reroute_nodes 参数", required: false, type: bool }
+    require_real_geometry: { default: true, default_state: defined, description_zh: "C++ 实现读取的 require_real_geometry 参数", required: false, type: bool }
+    save_after_layout: { default: false, default_state: defined, description_zh: "C++ 实现读取的 save_after_layout 参数", required: false, type: bool }
+    use_real_geometry: { default: true, default_state: defined, description_zh: "C++ 实现读取的 use_real_geometry 参数", required: false, type: bool }
+    vertical_spacing: { default_state: none, description_zh: "C++ 实现读取的 vertical_spacing 参数", required: false, type: number }
+  }
+  state: defined
+}
+response: { artifact_fields: [], compact_fields: [saved, changed, asset_path, access_offset_source, alignment_failed_unit_count, allow_focused_geometry_capture], failure_fields: [params.asset_path], max_items_policy: { fields: [], mode: none } }
+returns: {
+  fields: {
+    access_offset_source: { description_zh: "C++ 实现返回的 access_offset_source 字段；是否出现取决于执行分支", required: false, type: string }
+    alignment_failed_unit_count: { description_zh: "C++ 实现返回的 alignment_failed_unit_count 字段；是否出现取决于执行分支", required: false, type: integer }
+    allow_focused_geometry_capture: { description_zh: "C++ 实现返回的 allow_focused_geometry_capture 字段；是否出现取决于执行分支", required: false, type: bool }
+    allow_geometry_view_capture: { description_zh: "C++ 实现返回的 allow_geometry_view_capture 字段；是否出现取决于执行分支", required: false, type: bool }
+    allow_remove_all_reroute_nodes: { description_zh: "C++ 实现返回的 allow_remove_all_reroute_nodes 字段；是否出现取决于执行分支", required: false, type: bool }
+    anchored_column_max_pin_residual: { description_zh: "C++ 实现返回的 anchored_column_max_pin_residual 字段；是否出现取决于执行分支", required: false, type: number }
+    anchored_column_placement_count: { description_zh: "C++ 实现返回的 anchored_column_placement_count 字段；是否出现取决于执行分支", required: false, type: integer }
+    anchored_column_total_pin_residual: { description_zh: "C++ 实现返回的 anchored_column_total_pin_residual 字段；是否出现取决于执行分支", required: false, type: number }
+    anchored_column_unconnected_item_count: { description_zh: "C++ 实现返回的 anchored_column_unconnected_item_count 字段；是否出现取决于执行分支", required: false, type: integer }
+    applied_move_count: { description_zh: "C++ 实现返回的 applied_move_count 字段；是否出现取决于执行分支", required: false, type: integer }
+    asset_path: { description_zh: "C++ 实现返回的 asset_path 字段；是否出现取决于执行分支", required: false, type: ue_asset_path }
+    bottom_boundary_entry_count: { description_zh: "C++ 实现返回的 bottom_boundary_entry_count 字段；是否出现取决于执行分支", required: false, type: integer }
+    boundary_attach_merge_group_count: { description_zh: "C++ 实现返回的 boundary_attach_merge_group_count 字段；是否出现取决于执行分支", required: false, type: integer }
+    boundary_bus_count: { description_zh: "C++ 实现返回的 boundary_bus_count 字段；是否出现取决于执行分支", required: false, type: integer }
+    boundary_bus_required_count: { description_zh: "C++ 实现返回的 boundary_bus_required_count 字段；是否出现取决于执行分支", required: false, type: integer }
+    boundary_buses: { description_zh: "C++ 实现返回的 boundary_buses 字段；是否出现取决于执行分支", item_type: json_value, required: false, type: array }
+    boundary_entries: { description_zh: "C++ 实现返回的 boundary_entries 字段；是否出现取决于执行分支", item_type: json_value, required: false, type: array }
+    boundary_entry_count: { description_zh: "C++ 实现返回的 boundary_entry_count 字段；是否出现取决于执行分支", required: false, type: integer }
+    boundary_entry_rejected_candidate_count: { description_zh: "C++ 实现返回的 boundary_entry_rejected_candidate_count 字段；是否出现取决于执行分支", required: false, type: integer }
+    branch_merge_group_count: { description_zh: "C++ 实现返回的 branch_merge_group_count 字段；是否出现取决于执行分支", required: false, type: integer }
+    branch_merge_groups: { description_zh: "C++ 实现返回的 branch_merge_groups 字段；是否出现取决于执行分支", item_type: json_value, required: false, type: array }
+    bus_island_connection_count: { description_zh: "C++ 实现返回的 bus_island_connection_count 字段；是否出现取决于执行分支", required: false, type: integer }
+    bus_y_variance_total: { description_zh: "C++ 实现返回的 bus_y_variance_total 字段；是否出现取决于执行分支", required: false, type: number }
+    changed: { description_zh: "C++ 实现返回的 changed 字段；是否出现取决于执行分支", required: false, type: bool }
+    column_diagnostics: { description_zh: "C++ 实现返回的 column_diagnostics 字段；是否出现取决于执行分支", item_type: json_value, required: false, type: array }
+    comment_island_boundary_edge_count: { description_zh: "C++ 实现返回的 comment_island_boundary_edge_count 字段；是否出现取决于执行分支", required: false, type: integer }
+    comment_island_count: { description_zh: "C++ 实现返回的 comment_island_count 字段；是否出现取决于执行分支", required: false, type: integer }
+    comment_island_node_count: { description_zh: "C++ 实现返回的 comment_island_node_count 字段；是否出现取决于执行分支", required: false, type: integer }
+    compile_after_layout: { description_zh: "C++ 实现返回的 compile_after_layout 字段；是否出现取决于执行分支", required: false, type: bool }
+    compile_status_after: { description_zh: "C++ 实现返回的 compile_status_after 字段；是否出现取决于执行分支", required: false, type: string }
+    compile_status_before: { description_zh: "C++ 实现返回的 compile_status_before 字段；是否出现取决于执行分支", required: false, type: string }
+    connection_group_count: { description_zh: "C++ 实现返回的 connection_group_count 字段；是否出现取决于执行分支", required: false, type: integer }
+    created_reroute_node_count: { description_zh: "C++ 实现返回的 created_reroute_node_count 字段；是否出现取决于执行分支", required: false, type: integer }
+    cross_bus_lane_count: { description_zh: "C++ 实现返回的 cross_bus_lane_count 字段；是否出现取决于执行分支", required: false, type: integer }
+    cross_bus_lanes: { description_zh: "C++ 实现返回的 cross_bus_lanes 字段；是否出现取决于执行分支", item_type: json_value, required: false, type: array }
+    cross_bus_trunk_lane_count: { description_zh: "C++ 实现返回的 cross_bus_trunk_lane_count 字段；是否出现取决于执行分支", required: false, type: integer }
+    data_island_count: { description_zh: "C++ 实现返回的 data_island_count 字段；是否出现取决于执行分支", required: false, type: integer }
+    direct_island_connection_count: { description_zh: "C++ 实现返回的 direct_island_connection_count 字段；是否出现取决于执行分支", required: false, type: integer }
+    edge_count: { description_zh: "C++ 实现返回的 edge_count 字段；是否出现取决于执行分支", required: false, type: integer }
+    edge_crossing_count_after: { description_zh: "C++ 实现返回的 edge_crossing_count_after 字段；是否出现取决于执行分支", required: false, type: integer }
+    edge_node_intersection_count_after: { description_zh: "C++ 实现返回的 edge_node_intersection_count_after 字段；是否出现取决于执行分支", required: false, type: integer }
+    effective_replace_existing_reroute_nodes: { description_zh: "C++ 实现返回的 effective_replace_existing_reroute_nodes 字段；是否出现取决于执行分支", required: false, type: bool }
+    endpoint_candidate_count: { description_zh: "C++ 实现返回的 endpoint_candidate_count 字段；是否出现取决于执行分支", required: false, type: integer }
+    existing_reroute_node_count: { description_zh: "C++ 实现返回的 existing_reroute_node_count 字段；是否出现取决于执行分支", required: false, type: integer }
+    external_bus_edge_count: { description_zh: "C++ 实现返回的 external_bus_edge_count 字段；是否出现取决于执行分支", required: false, type: integer }
+    fanout_implicit_edge_count: { description_zh: "C++ 实现返回的 fanout_implicit_edge_count 字段；是否出现取决于执行分支", required: false, type: integer }
+    fanout_intent_group_count: { description_zh: "C++ 实现返回的 fanout_intent_group_count 字段；是否出现取决于执行分支", required: false, type: integer }
+    fanout_intent_groups: { description_zh: "C++ 实现返回的 fanout_intent_groups 字段；是否出现取决于执行分支", item_type: json_value, required: false, type: array }
+    fanout_node_count: { description_zh: "C++ 实现返回的 fanout_node_count 字段；是否出现取决于执行分支", required: false, type: integer }
+    focused_geometry_budget_exhausted: { description_zh: "C++ 实现返回的 focused_geometry_budget_exhausted 字段；是否出现取决于执行分支", required: false, type: bool }
+    focused_geometry_node_count: { description_zh: "C++ 实现返回的 focused_geometry_node_count 字段；是否出现取决于执行分支", required: false, type: integer }
+    geometry_error: { description_zh: "C++ 实现返回的 geometry_error 字段；是否出现取决于执行分支", required: false, type: string }
+    geometry_measurement_zoom: { description_zh: "C++ 实现返回的 geometry_measurement_zoom 字段；是否出现取决于执行分支", required: false, type: number }
+    geometry_restore_view_state_from_document: { description_zh: "C++ 实现返回的 geometry_restore_view_state_from_document 字段；是否出现取决于执行分支", required: false, type: bool }
+    geometry_restored_graph_view_after_capture: { description_zh: "C++ 实现返回的 geometry_restored_graph_view_after_capture 字段；是否出现取决于执行分支", required: false, type: bool }
+    geometry_restored_view_x: { description_zh: "C++ 实现返回的 geometry_restored_view_x 字段；是否出现取决于执行分支", required: false, type: number }
+    geometry_restored_view_y: { description_zh: "C++ 实现返回的 geometry_restored_view_y 字段；是否出现取决于执行分支", required: false, type: number }
+    geometry_restored_zoom: { description_zh: "C++ 实现返回的 geometry_restored_zoom 字段；是否出现取决于执行分支", required: false, type: number }
+    geometry_source: { description_zh: "C++ 实现返回的 geometry_source 字段；是否出现取决于执行分支", required: false, type: string }
+    geometry_used_offscreen_graph_editor: { description_zh: "C++ 实现返回的 geometry_used_offscreen_graph_editor 字段；是否出现取决于执行分支", required: false, type: bool }
+    geometry_window_prepared: { description_zh: "C++ 实现返回的 geometry_window_prepared 字段；是否出现取决于执行分支", required: false, type: bool }
+    graph_name: { description_zh: "C++ 实现返回的 graph_name 字段；是否出现取决于执行分支", required: false, type: string }
+    implicit_edge_count: { description_zh: "C++ 实现返回的 implicit_edge_count 字段；是否出现取决于执行分支", required: false, type: integer }
+    implicit_edge_inside_island_count: { description_zh: "C++ 实现返回的 implicit_edge_inside_island_count 字段；是否出现取决于执行分支", required: false, type: integer }
+    incoming_bus_branch_count: { description_zh: "C++ 实现返回的 incoming_bus_branch_count 字段；是否出现取决于执行分支", required: false, type: integer }
+    input_access_offset_x: { description_zh: "C++ 实现返回的 input_access_offset_x 字段；是否出现取决于执行分支", required: false, type: number }
+    input_chain_collision_reroute_count: { description_zh: "C++ 实现返回的 input_chain_collision_reroute_count 字段；是否出现取决于执行分支", required: false, type: integer }
+    input_chain_collision_reroute_rejected_count: { description_zh: "C++ 实现返回的 input_chain_collision_reroute_rejected_count 字段；是否出现取决于执行分支", required: false, type: integer }
+    input_chain_count: { description_zh: "C++ 实现返回的 input_chain_count 字段；是否出现取决于执行分支", required: false, type: integer }
+    input_chain_forbidden_avoidance_count: { description_zh: "C++ 实现返回的 input_chain_forbidden_avoidance_count 字段；是否出现取决于执行分支", required: false, type: integer }
+    input_chain_forbidden_zone_count: { description_zh: "C++ 实现返回的 input_chain_forbidden_zone_count 字段；是否出现取决于执行分支", required: false, type: integer }
+    input_chain_node_count: { description_zh: "C++ 实现返回的 input_chain_node_count 字段；是否出现取决于执行分支", required: false, type: integer }
+    input_chains: { description_zh: "C++ 实现返回的 input_chains 字段；是否出现取决于执行分支", item_type: json_value, required: false, type: array }
+    insert_reroute_nodes: { description_zh: "C++ 实现返回的 insert_reroute_nodes 字段；是否出现取决于执行分支", required: false, type: bool }
+    inter_island_bus_branch_knot_count: { description_zh: "C++ 实现返回的 inter_island_bus_branch_knot_count 字段；是否出现取决于执行分支", required: false, type: integer }
+    inter_island_bus_branch_knot_omitted_count: { description_zh: "C++ 实现返回的 inter_island_bus_branch_knot_omitted_count 字段；是否出现取决于执行分支", required: false, type: integer }
+    inter_island_bus_branch_target_modes: { description_zh: "C++ 实现返回的 inter_island_bus_branch_target_modes 字段；是否出现取决于执行分支", item_type: json_value, required: false, type: array }
+    inter_island_bus_branch_visible_targets: { description_zh: "C++ 实现返回的 inter_island_bus_branch_visible_targets 字段；是否出现取决于执行分支", item_type: json_value, required: false, type: array }
+    inter_island_bus_branch_x_slot_count: { description_zh: "C++ 实现返回的 inter_island_bus_branch_x_slot_count 字段；是否出现取决于执行分支", required: false, type: integer }
+    inter_island_bus_build_stages: { description_zh: "C++ 实现返回的 inter_island_bus_build_stages 字段；是否出现取决于执行分支", item_type: json_value, required: false, type: array }
+    inter_island_bus_bundle_collision_box_count: { description_zh: "C++ 实现返回的 inter_island_bus_bundle_collision_box_count 字段；是否出现取决于执行分支", required: false, type: integer }
+    inter_island_bus_bundle_count: { description_zh: "C++ 实现返回的 inter_island_bus_bundle_count 字段；是否出现取决于执行分支", required: false, type: integer }
+    inter_island_bus_count: { description_zh: "C++ 实现返回的 inter_island_bus_count 字段；是否出现取决于执行分支", required: false, type: integer }
+    inter_island_bus_duplicate_merge_count: { description_zh: "C++ 实现返回的 inter_island_bus_duplicate_merge_count 字段；是否出现取决于执行分支", required: false, type: integer }
+    inter_island_bus_max_slot_count: { description_zh: "C++ 实现返回的 inter_island_bus_max_slot_count 字段；是否出现取决于执行分支", required: false, type: integer }
+    inter_island_bus_slot_assignment_count: { description_zh: "C++ 实现返回的 inter_island_bus_slot_assignment_count 字段；是否出现取决于执行分支", required: false, type: integer }
+    inter_island_buses: { description_zh: "C++ 实现返回的 inter_island_buses 字段；是否出现取决于执行分支", item_type: json_value, required: false, type: array }
+    inter_island_feedback_bus_connection_count: { description_zh: "C++ 实现返回的 inter_island_feedback_bus_connection_count 字段；是否出现取决于执行分支", required: false, type: integer }
+    internal_attach_merge_group_count: { description_zh: "C++ 实现返回的 internal_attach_merge_group_count 字段；是否出现取决于执行分支", required: false, type: integer }
+    internal_bus_group_count: { description_zh: "C++ 实现返回的 internal_bus_group_count 字段；是否出现取决于执行分支", required: false, type: integer }
+    internal_bus_groups: { description_zh: "C++ 实现返回的 internal_bus_groups 字段；是否出现取决于执行分支", item_type: json_value, required: false, type: array }
+    invalid_forward_connection_count: { description_zh: "C++ 实现返回的 invalid_forward_connection_count 字段；是否出现取决于执行分支", required: false, type: integer }
+    invalid_island_edge_count: { description_zh: "C++ 实现返回的 invalid_island_edge_count 字段；是否出现取决于执行分支", required: false, type: integer }
+    island_band_group_count: { description_zh: "C++ 实现返回的 island_band_group_count 字段；是否出现取决于执行分支", required: false, type: integer }
+    island_bus_branch_right_shift_count: { description_zh: "C++ 实现返回的 island_bus_branch_right_shift_count 字段；是否出现取决于执行分支", required: false, type: integer }
+    island_bus_collision_box_count: { description_zh: "C++ 实现返回的 island_bus_collision_box_count 字段；是否出现取决于执行分支", required: false, type: integer }
+    island_connection_external_upgrade_count: { description_zh: "C++ 实现返回的 island_connection_external_upgrade_count 字段；是否出现取决于执行分支", required: false, type: integer }
+    island_connection_left_y_residual: { description_zh: "C++ 实现返回的 island_connection_left_y_residual 字段；是否出现取决于执行分支", required: false, type: number }
+    island_connection_top_bottom_x_residual: { description_zh: "C++ 实现返回的 island_connection_top_bottom_x_residual 字段；是否出现取决于执行分支", required: false, type: number }
+    island_connection_total_length: { description_zh: "C++ 实现返回的 island_connection_total_length 字段；是否出现取决于执行分支", required: false, type: number }
+    island_cut_edge_count: { description_zh: "C++ 实现返回的 island_cut_edge_count 字段；是否出现取决于执行分支", required: false, type: integer }
+    island_diagnostics: { description_zh: "C++ 实现返回的 island_diagnostics 字段；是否出现取决于执行分支", item_type: json_value, required: false, type: array }
+    island_edge_count: { description_zh: "C++ 实现返回的 island_edge_count 字段；是否出现取决于执行分支", required: false, type: integer }
+    island_edge_diagnostics: { description_zh: "C++ 实现返回的 island_edge_diagnostics 字段；是否出现取决于执行分支", item_type: json_value, required: false, type: array }
+    island_internal_left_boundary_entry_count: { description_zh: "C++ 实现返回的 island_internal_left_boundary_entry_count 字段；是否出现取决于执行分支", required: false, type: integer }
+    island_internal_max_pin_residual: { description_zh: "C++ 实现返回的 island_internal_max_pin_residual 字段；是否出现取决于执行分支", required: false, type: number }
+    island_internal_multi_column_bus_count: { description_zh: "C++ 实现返回的 island_internal_multi_column_bus_count 字段；是否出现取决于执行分支", required: false, type: integer }
+    island_internal_placement_count: { description_zh: "C++ 实现返回的 island_internal_placement_count 字段；是否出现取决于执行分支", required: false, type: integer }
+    island_internal_same_column_collision_bus_count: { description_zh: "C++ 实现返回的 island_internal_same_column_collision_bus_count 字段；是否出现取决于执行分支", required: false, type: integer }
+    island_internal_total_pin_residual: { description_zh: "C++ 实现返回的 island_internal_total_pin_residual 字段；是否出现取决于执行分支", required: false, type: number }
+    island_leftward_reanchor_base_column: { description_zh: "C++ 实现返回的 island_leftward_reanchor_base_column 字段；是否出现取决于执行分支", required: false, type: number }
+    island_leftward_reanchor_column_count: { description_zh: "C++ 实现返回的 island_leftward_reanchor_column_count 字段；是否出现取决于执行分支", required: false, type: integer }
+    island_local_frozen_node_count: { description_zh: "C++ 实现返回的 island_local_frozen_node_count 字段；是否出现取决于执行分支", required: false, type: integer }
+    island_local_max_mutation: { description_zh: "C++ 实现返回的 island_local_max_mutation 字段；是否出现取决于执行分支", required: false, type: number }
+    island_local_membership_mutation_count: { description_zh: "C++ 实现返回的 island_local_membership_mutation_count 字段；是否出现取决于执行分支", required: false, type: integer }
+    island_local_mutation_count: { description_zh: "C++ 实现返回的 island_local_mutation_count 字段；是否出现取决于执行分支", required: false, type: integer }
+    island_local_mutations: { description_zh: "C++ 实现返回的 island_local_mutations 字段；是否出现取决于执行分支", item_type: json_value, required: false, type: array }
+    island_partition_stages: { description_zh: "C++ 实现返回的 island_partition_stages 字段；是否出现取决于执行分支", item_type: json_value, required: false, type: array }
+    island_placement_order_count: { description_zh: "C++ 实现返回的 island_placement_order_count 字段；是否出现取决于执行分支", required: false, type: integer }
+    island_port_candidates: { description_zh: "C++ 实现返回的 island_port_candidates 字段；是否出现取决于执行分支", item_type: json_value, required: false, type: array }
+    island_topological_order_count: { description_zh: "C++ 实现返回的 island_topological_order_count 字段；是否出现取决于执行分支", required: false, type: integer }
+    island_topological_residual_cycle_edge_count: { description_zh: "C++ 实现返回的 island_topological_residual_cycle_edge_count 字段；是否出现取决于执行分支", required: false, type: integer }
+    lane_assignments: { description_zh: "C++ 实现返回的 lane_assignments 字段；是否出现取决于执行分支", item_type: json_value, required: false, type: array }
+    lane_coloring_lane_count: { description_zh: "C++ 实现返回的 lane_coloring_lane_count 字段；是否出现取决于执行分支", required: false, type: integer }
+    layout_design_complete: { description_zh: "C++ 实现返回的 layout_design_complete 字段；是否出现取决于执行分支", required: false, type: bool }
+    layout_design_feature_complete_count: { description_zh: "C++ 实现返回的 layout_design_feature_complete_count 字段；是否出现取决于执行分支", required: false, type: integer }
+    layout_design_feature_count: { description_zh: "C++ 实现返回的 layout_design_feature_count 字段；是否出现取决于执行分支", required: false, type: integer }
+    layout_design_feature_coverage: { description_zh: "C++ 实现返回的 layout_design_feature_coverage 字段；是否出现取决于执行分支", item_type: json_value, required: false, type: array }
+    layout_design_feature_missing_count: { description_zh: "C++ 实现返回的 layout_design_feature_missing_count 字段；是否出现取决于执行分支", required: false, type: integer }
+    layout_design_feature_partial_count: { description_zh: "C++ 实现返回的 layout_design_feature_partial_count 字段；是否出现取决于执行分支", required: false, type: integer }
+    layout_framework: { description_zh: "C++ 实现返回的 layout_framework 字段；是否出现取决于执行分支", required: false, type: string }
+    layout_report_file: { description_zh: "C++ 实现返回的 layout_report_file 字段；是否出现取决于执行分支", required: false, type: filesystem_path }
+    layout_report_restore: { description_zh: "C++ 实现返回的 layout_report_restore 字段；是否出现取决于执行分支", required: false, type: bool }
+    layout_strategy: { description_zh: "C++ 实现返回的 layout_strategy 字段；是否出现取决于执行分支", required: false, type: string }
+    left_boundary_entry_count: { description_zh: "C++ 实现返回的 left_boundary_entry_count 字段；是否出现取决于执行分支", required: false, type: integer }
+    local_bus_edge_count: { description_zh: "C++ 实现返回的 local_bus_edge_count 字段；是否出现取决于执行分支", required: false, type: integer }
+    measured_node_count: { description_zh: "C++ 实现返回的 measured_node_count 字段；是否出现取决于执行分支", required: false, type: integer }
+    metrics_after: { description_zh: "C++ 实现返回的 metrics_after 字段；是否出现取决于执行分支", required: false, type: json_value }
+    metrics_after_reroute_plan: { description_zh: "C++ 实现返回的 metrics_after_reroute_plan 字段；是否出现取决于执行分支", required: false, type: json_value }
+    metrics_before: { description_zh: "C++ 实现返回的 metrics_before 字段；是否出现取决于执行分支", required: false, type: json_value }
+    missing_measured_node_geometry_count: { description_zh: "C++ 实现返回的 missing_measured_node_geometry_count 字段；是否出现取决于执行分支", required: false, type: integer }
+    missing_pin_anchor_count: { description_zh: "C++ 实现返回的 missing_pin_anchor_count 字段；是否出现取决于执行分支", required: false, type: integer }
+    missing_visible_pin_anchor_count: { description_zh: "C++ 实现返回的 missing_visible_pin_anchor_count 字段；是否出现取决于执行分支", required: false, type: integer }
+    moved_node_count: { description_zh: "C++ 实现返回的 moved_node_count 字段；是否出现取决于执行分支", required: false, type: integer }
+    multi_sink_island_count: { description_zh: "C++ 实现返回的 multi_sink_island_count 字段；是否出现取决于执行分支", required: false, type: integer }
+    node_count: { description_zh: "C++ 实现返回的 node_count 字段；是否出现取决于执行分支", required: false, type: integer }
+    node_island_count: { description_zh: "C++ 实现返回的 node_island_count 字段；是否出现取决于执行分支", required: false, type: integer }
+    nodes: { description_zh: "C++ 实现返回的 nodes 字段；是否出现取决于执行分支", item_type: json_value, required: false, type: array }
+    output_access_offset_x: { description_zh: "C++ 实现返回的 output_access_offset_x 字段；是否出现取决于执行分支", required: false, type: number }
+    overlap_count_after: { description_zh: "C++ 实现返回的 overlap_count_after 字段；是否出现取决于执行分支", required: false, type: integer }
+    pin_geometry_anchor_count: { description_zh: "C++ 实现返回的 pin_geometry_anchor_count 字段；是否出现取决于执行分支", required: false, type: integer }
+    pin_widget_count: { description_zh: "C++ 实现返回的 pin_widget_count 字段；是否出现取决于执行分支", required: false, type: integer }
+    placement_component_count: { description_zh: "C++ 实现返回的 placement_component_count 字段；是否出现取决于执行分支", required: false, type: integer }
+    placement_graph_edge_count: { description_zh: "C++ 实现返回的 placement_graph_edge_count 字段；是否出现取决于执行分支", required: false, type: integer }
+    placement_non_owner_edge_count: { description_zh: "C++ 实现返回的 placement_non_owner_edge_count 字段；是否出现取决于执行分支", required: false, type: integer }
+    placement_owner_edge_count: { description_zh: "C++ 实现返回的 placement_owner_edge_count 字段；是否出现取决于执行分支", required: false, type: integer }
+    placement_proposal_count: { description_zh: "C++ 实现返回的 placement_proposal_count 字段；是否出现取决于执行分支", required: false, type: integer }
+    placement_proposals: { description_zh: "C++ 实现返回的 placement_proposals 字段；是否出现取决于执行分支", item_type: json_value, required: false, type: array }
+    planned_reroute_knot_node_count: { description_zh: "C++ 实现返回的 planned_reroute_knot_node_count 字段；是否出现取决于执行分支", required: false, type: integer }
+    precompiled_before_layout: { description_zh: "C++ 实现返回的 precompiled_before_layout 字段；是否出现取决于执行分支", required: false, type: bool }
+    rank_count: { description_zh: "C++ 实现返回的 rank_count 字段；是否出现取决于执行分支", required: false, type: integer }
+    rank_ignored_edge_count: { description_zh: "C++ 实现返回的 rank_ignored_edge_count 字段；是否出现取决于执行分支", required: false, type: integer }
+    real_geometry_capture_requested: { description_zh: "C++ 实现返回的 real_geometry_capture_requested 字段；是否出现取决于执行分支", required: false, type: bool }
+    rejected_proposal_count: { description_zh: "C++ 实现返回的 rejected_proposal_count 字段；是否出现取决于执行分支", required: false, type: integer }
+    rejection_diagnostics: { description_zh: "C++ 实现返回的 rejection_diagnostics 字段；是否出现取决于执行分支", item_type: json_value, required: false, type: array }
+    removed_reroute_node_count: { description_zh: "C++ 实现返回的 removed_reroute_node_count 字段；是否出现取决于执行分支", required: false, type: integer }
+    replace_existing_reroute_nodes: { description_zh: "C++ 实现返回的 replace_existing_reroute_nodes 字段；是否出现取决于执行分支", required: false, type: bool }
+    require_real_geometry: { description_zh: "C++ 实现返回的 require_real_geometry 字段；是否出现取决于执行分支", required: false, type: bool }
+    reroute_knot_control_point_to_node_offset_x: { description_zh: "C++ 实现返回的 reroute_knot_control_point_to_node_offset_x 字段；是否出现取决于执行分支", required: false, type: number }
+    reroute_knot_control_point_to_node_offset_y: { description_zh: "C++ 实现返回的 reroute_knot_control_point_to_node_offset_y 字段；是否出现取决于执行分支", required: false, type: number }
+    reroute_knot_node_spacer_x: { description_zh: "C++ 实现返回的 reroute_knot_node_spacer_x 字段；是否出现取决于执行分支", required: false, type: number }
+    reroute_knot_node_spacer_y: { description_zh: "C++ 实现返回的 reroute_knot_node_spacer_y 字段；是否出现取决于执行分支", required: false, type: number }
+    reroute_plan: { description_zh: "C++ 实现返回的 reroute_plan 字段；是否出现取决于执行分支", item_type: json_value, required: false, type: array }
+    reroute_plan_count: { description_zh: "C++ 实现返回的 reroute_plan_count 字段；是否出现取决于执行分支", required: false, type: integer }
+    root_compact_total_height: { description_zh: "C++ 实现返回的 root_compact_total_height 字段；是否出现取决于执行分支", required: false, type: integer }
+    root_compact_vertical_gap: { description_zh: "C++ 实现返回的 root_compact_vertical_gap 字段；是否出现取决于执行分支", required: false, type: number }
+    root_continuous_order_exact_limit_exceeded: { description_zh: "C++ 实现返回的 root_continuous_order_exact_limit_exceeded 字段；是否出现取决于执行分支", required: false, type: integer }
+    root_continuous_order_inversion_score: { description_zh: "C++ 实现返回的 root_continuous_order_inversion_score 字段；是否出现取决于执行分支", required: false, type: number }
+    root_continuous_order_memo_hit_count: { description_zh: "C++ 实现返回的 root_continuous_order_memo_hit_count 字段；是否出现取决于执行分支", required: false, type: integer }
+    root_continuous_order_pruned_state_count: { description_zh: "C++ 实现返回的 root_continuous_order_pruned_state_count 字段；是否出现取决于执行分支", required: false, type: integer }
+    root_continuous_order_score: { description_zh: "C++ 实现返回的 root_continuous_order_score 字段；是否出现取决于执行分支", required: false, type: number }
+    root_equivalent_group_count: { description_zh: "C++ 实现返回的 root_equivalent_group_count 字段；是否出现取决于执行分支", required: false, type: integer }
+    root_island_count: { description_zh: "C++ 实现返回的 root_island_count 字段；是否出现取决于执行分支", required: false, type: integer }
+    root_island_top_y_count: { description_zh: "C++ 实现返回的 root_island_top_y_count 字段；是否出现取决于执行分支", required: false, type: integer }
+    root_scoring_target_count: { description_zh: "C++ 实现返回的 root_scoring_target_count 字段；是否出现取决于执行分支", required: false, type: integer }
+    root_share_component_count: { description_zh: "C++ 实现返回的 root_share_component_count 字段；是否出现取决于执行分支", required: false, type: integer }
+    route_diagnostics: { description_zh: "C++ 实现返回的 route_diagnostics 字段；是否出现取决于执行分支", item_type: json_value, required: false, type: array }
+    route_group_count: { description_zh: "C++ 实现返回的 route_group_count 字段；是否出现取决于执行分支", required: false, type: integer }
+    route_kind_upgrade_count: { description_zh: "C++ 实现返回的 route_kind_upgrade_count 字段；是否出现取决于执行分支", required: false, type: integer }
+    route_only_edge_count: { description_zh: "C++ 实现返回的 route_only_edge_count 字段；是否出现取决于执行分支", required: false, type: integer }
+    route_through_hard_occupancy_count: { description_zh: "C++ 实现返回的 route_through_hard_occupancy_count 字段；是否出现取决于执行分支", required: false, type: integer }
+    route_through_island_count: { description_zh: "C++ 实现返回的 route_through_island_count 字段；是否出现取决于执行分支", required: false, type: integer }
+    saved: { description_zh: "C++ 实现返回的 saved 字段；是否出现取决于执行分支", required: false, type: bool }
+    scc_count_before_cut: { description_zh: "C++ 实现返回的 scc_count_before_cut 字段；是否出现取决于执行分支", required: false, type: integer }
+    scc_feedback_edge_count: { description_zh: "C++ 实现返回的 scc_feedback_edge_count 字段；是否出现取决于执行分支", required: false, type: integer }
+    selected_candidate: { description_zh: "C++ 实现返回的 selected_candidate 字段；是否出现取决于执行分支", required: false, type: string }
+    selected_endpoint_candidate_count: { description_zh: "C++ 实现返回的 selected_endpoint_candidate_count 字段；是否出现取决于执行分支", required: false, type: integer }
+    selected_endpoint_candidates: { description_zh: "C++ 实现返回的 selected_endpoint_candidates 字段；是否出现取决于执行分支", item_type: json_value, required: false, type: array }
+    source_order_group_count: { description_zh: "C++ 实现返回的 source_order_group_count 字段；是否出现取决于执行分支", required: false, type: integer }
+    source_order_groups: { description_zh: "C++ 实现返回的 source_order_groups 字段；是否出现取决于执行分支", item_type: json_value, required: false, type: array }
+    source_param_count: { description_zh: "C++ 实现返回的 source_param_count 字段；是否出现取决于执行分支", required: false, type: integer }
+    source_port_order_violation_count: { description_zh: "C++ 实现返回的 source_port_order_violation_count 字段；是否出现取决于执行分支", required: false, type: integer }
+    top_boundary_entry_count: { description_zh: "C++ 实现返回的 top_boundary_entry_count 字段；是否出现取决于执行分支", required: false, type: integer }
+    topology_column_bus_pull_count: { description_zh: "C++ 实现返回的 topology_column_bus_pull_count 字段；是否出现取决于执行分支", required: false, type: integer }
+    topology_column_horizontal_push_count: { description_zh: "C++ 实现返回的 topology_column_horizontal_push_count 字段；是否出现取决于执行分支", required: false, type: integer }
+    total_route_length: { description_zh: "C++ 实现返回的 total_route_length 字段；是否出现取决于执行分支", required: false, type: number }
+    use_real_geometry: { description_zh: "C++ 实现返回的 use_real_geometry 字段；是否出现取决于执行分支", required: false, type: bool }
+    used_real_geometry: { description_zh: "C++ 实现返回的 used_real_geometry 字段；是否出现取决于执行分支", required: false, type: bool }
+  }
+  state: defined
+}
+schema: uai.command_spec.v1
+status: active
+types: {}
+verification: {
+  assertions: [
+    { id: result_present, operator: exists, source: returns.saved }
+    { id: state_readback_present, operator: exists, source: methods.state_readback.graphs }
+  ]
+  failure_policy: fail_overall
+  methods: [
+    { id: result, kind: result_assertion }
+    { command: anim_blueprint_inspect_nodes, id: state_readback, kind: command_readback, params_mapping: { asset_path: params.asset_path, graph_name: params.graph_name } }
+  ]
+  required: true
+  state: defined
+}
+version: 1

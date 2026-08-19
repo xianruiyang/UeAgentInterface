@@ -1,0 +1,91 @@
+authoring: { reason: command_has_no_registered_folder_authoring_profile, state: none }
+category: static_mesh_enhanced_input
+command: static_mesh_reimport
+deprecation: { reason: command_is_active, state: none }
+discovery: { aliases: [], keywords_en: [static, mesh, reimport, static_mesh_enhanced_input], keywords_zh: [static_mesh_reimport], summary_en: "Execute static_mesh_reimport with a verified implementation contract", summary_zh: "自动化重导入 StaticMesh", tags: [static_mesh_enhanced_input, p2-006] }
+errors: {
+  codes: [
+    { code: allow_reimport_required, description_zh: "C++ 实现返回错误码 allow_reimport_required", retry_safe: true, stage: preflight, wire_match: exact }
+    { code: missing_asset_path, description_zh: "C++ 实现返回错误码 missing_asset_path", retry_safe: true, stage: preflight, wire_match: exact }
+    { code: reimport_manager_unavailable, description_zh: "C++ 实现返回错误码 reimport_manager_unavailable", retry_safe: false, stage: execution, wire_match: exact }
+    { code: save_asset_failed, description_zh: "C++ 实现返回错误码 save_asset_failed", retry_safe: false, stage: execution, wire_match: exact }
+    { code: source_file_not_found, description_zh: "C++ 实现返回错误码 source_file_not_found", retry_safe: false, stage: execution, wire_match: exact }
+    { code: static_mesh_cannot_reimport, description_zh: "C++ 实现返回错误码 static_mesh_cannot_reimport", retry_safe: false, stage: execution, wire_match: exact }
+    { code: static_mesh_not_found, description_zh: "C++ 实现返回错误码 static_mesh_not_found", retry_safe: false, stage: execution, wire_match: exact }
+    { code: static_mesh_reimport_failed, description_zh: "C++ 实现返回错误码 static_mesh_reimport_failed", retry_safe: false, stage: execution, wire_match: exact }
+  ]
+}
+evidence: {
+  docs: [
+    { path: "Plugins/UeAgentInterface/docs/commands/static_mesh_enhanced_input/static_mesh_reimport.md", purpose: "user documentation cross-check; C++ implementation remains authoritative" }
+  ]
+  implementation: [
+    { line_hint: 2479, path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Commands/StaticMesh/UeAgentHttpServer_StaticMesh.cpp", purpose: "command handler, parameter and return evidence", symbol: CmdStaticMeshReimport }
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Server/UeAgentHttpServer.cpp", purpose: "transitive helper evidence used by the command handler" }
+  ]
+  tests: [
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterfaceTests/Private/Smoke/UeAgentInterfaceSmoke_Coverage.cpp", purpose: "smoke or negative-path evidence cross-checked for the verified contract" }
+  ]
+}
+execution: {
+  destructive: true
+  editor_state: required
+  game_thread: required
+  idempotent: false
+  kind: write
+  overwrite_behavior: none
+  pie_state: allowed
+  retry_safe: false
+  save_behavior: caller_controlled
+  side_effects: [modifies_asset]
+  ui_effect: none
+}
+maturity: verified
+params: {
+  constraints: []
+  fields: {
+    allow_reimport: { default: false, default_state: defined, description_zh: "C++ 实现读取的 allow_reimport 参数", required: false, type: bool }
+    asset_path: { default_state: none, description_zh: "C++ 实现读取的 asset_path 参数", path_semantics: { access_scope: project_write, kind: ue_asset }, required: true, type: ue_asset_path }
+    save_after_reimport: { default: true, default_state: defined, description_zh: "C++ 实现读取的 save_after_reimport 参数", required: false, type: bool }
+    show_notification: { default: false, default_state: defined, description_zh: "C++ 实现读取的 show_notification 参数", required: false, type: bool }
+    source_filename: {
+      default_state: none
+      description_zh: "C++ 实现读取的 source_filename 参数"
+      path_semantics: { kind: filesystem_file, must_exist: false, writable: false }
+      required: false
+      type: filesystem_path
+    }
+  }
+  state: defined
+}
+response: { artifact_fields: [source_filenames, readback], compact_fields: [asset_path, can_reimport, reimported, reimport_status, save_after_reimport], failure_fields: [params.asset_path], max_items_policy: { fields: [], mode: none } }
+returns: {
+  fields: {
+    asset_path: { description_zh: "C++ 实现返回的 asset_path 字段；是否出现取决于执行分支", required: false, type: ue_asset_path }
+    can_reimport: { description_zh: "C++ 实现返回的 can_reimport 字段；是否出现取决于执行分支", required: false, type: bool }
+    preferred_source_filename: { description_zh: "C++ 实现返回的 preferred_source_filename 字段；是否出现取决于执行分支", required: false, type: filesystem_path }
+    readback: { description_zh: "C++ 实现返回的 readback 字段；是否出现取决于执行分支", required: false, type: json_value }
+    reimport_status: { description_zh: "C++ 实现返回的 reimport_status 字段；是否出现取决于执行分支", required: false, type: string }
+    reimported: { description_zh: "C++ 实现返回的 reimported 字段；是否出现取决于执行分支", required: false, type: bool }
+    save_after_reimport: { description_zh: "C++ 实现返回的 save_after_reimport 字段；是否出现取决于执行分支", required: false, type: bool }
+    source_filenames: { description_zh: "C++ 实现返回的 source_filenames 字段；是否出现取决于执行分支", item_type: json_value, required: false, type: array }
+  }
+  state: defined
+}
+schema: uai.command_spec.v1
+status: active
+types: {}
+verification: {
+  assertions: [
+    { id: result_present, operator: exists, source: returns.asset_path }
+    { id: state_readback_present, operator: exists, source: methods.state_readback.asset_path }
+  ]
+  failure_policy: fail_overall
+  methods: [
+    { id: result, kind: result_assertion }
+    { command: static_mesh_get_info, id: state_readback, kind: command_readback, params_mapping: { asset_path: params.asset_path } }
+  ]
+  required: true
+  state: defined
+}
+version: 1

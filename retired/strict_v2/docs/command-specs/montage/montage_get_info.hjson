@@ -1,0 +1,79 @@
+authoring: { reason: command_has_no_registered_folder_authoring_profile, state: none }
+category: montage
+command: montage_get_info
+deprecation: { reason: command_is_active, state: none }
+discovery: { aliases: [], keywords_en: [montage, get, info], keywords_zh: [montage_get_info], summary_en: "Execute montage_get_info with a verified implementation contract", summary_zh: "读取 Montage 信息", tags: [montage, p2-006] }
+errors: {
+  codes: [
+    { code: missing_asset_path, description_zh: "C++ 实现返回错误码 missing_asset_path", retry_safe: true, stage: preflight, wire_match: exact }
+    { code: montage_not_found, description_zh: "C++ 实现返回错误码 montage_not_found", retry_safe: false, stage: execution, wire_match: exact }
+  ]
+}
+evidence: {
+  docs: [
+    { path: "Plugins/UeAgentInterface/docs/commands/montage/montage_get_info.md", purpose: "user documentation cross-check; C++ implementation remains authoritative" }
+  ]
+  implementation: [
+    { line_hint: 1004, path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Commands/Montage/UeAgentHttpServer_Montage.cpp", purpose: "command handler, parameter and return evidence", symbol: CmdMontageGetInfo }
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Server/UeAgentHttpServer.cpp", purpose: "transitive helper evidence used by the command handler" }
+  ]
+  tests: [
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterfaceTests/Private/Smoke/UeAgentInterfaceSmoke_AnimationIKNiagara.cpp", purpose: "smoke or negative-path evidence cross-checked for the verified contract" }
+  ]
+}
+execution: {
+  destructive: false
+  editor_state: required
+  game_thread: required
+  idempotent: true
+  kind: read_only
+  overwrite_behavior: none
+  pie_state: allowed
+  retry_safe: true
+  save_behavior: none
+  side_effects: []
+  ui_effect: none
+}
+maturity: verified
+params: {
+  constraints: []
+  fields: { asset_path: { default_state: none, description_zh: "C++ 实现读取的 asset_path 参数", path_semantics: { access_scope: mounted_read, kind: ue_asset }, required: true, type: ue_asset_path } }
+  state: defined
+}
+response: { artifact_fields: [notifies, notify_tracks, sections, slot_tracks, sync_markers], compact_fields: [asset_path, blend_in_time, blend_mode_in, blend_mode_out, blend_out_time, blend_out_trigger_time], failure_fields: [params.asset_path], max_items_policy: { fields: [], mode: none } }
+returns: {
+  fields: {
+    asset_path: { description_zh: "C++ 实现返回的 asset_path 字段；是否出现取决于执行分支", required: false, type: ue_asset_path }
+    blend_in_time: { description_zh: "C++ 实现返回的 blend_in_time 字段；是否出现取决于执行分支", required: false, type: number }
+    blend_mode_in: { description_zh: "C++ 实现返回的 blend_mode_in 字段；是否出现取决于执行分支", required: false, type: string }
+    blend_mode_out: { description_zh: "C++ 实现返回的 blend_mode_out 字段；是否出现取决于执行分支", required: false, type: string }
+    blend_out_time: { description_zh: "C++ 实现返回的 blend_out_time 字段；是否出现取决于执行分支", required: false, type: number }
+    blend_out_trigger_time: { description_zh: "C++ 实现返回的 blend_out_trigger_time 字段；是否出现取决于执行分支", required: false, type: number }
+    can_use_marker_sync: { description_zh: "C++ 实现返回的 can_use_marker_sync 字段；是否出现取决于执行分支", required: false, type: bool }
+    enable_auto_blend_out: { description_zh: "C++ 实现返回的 enable_auto_blend_out 字段；是否出现取决于执行分支", required: false, type: bool }
+    first_animation_reference: { description_zh: "C++ 实现返回的 first_animation_reference 字段；是否出现取决于执行分支", required: false, type: string }
+    notifies: { description_zh: "C++ 实现返回的 notifies 字段；是否出现取决于执行分支", item_type: json_value, required: false, type: array }
+    notify_tracks: { description_zh: "C++ 实现返回的 notify_tracks 字段；是否出现取决于执行分支", item_type: json_value, required: false, type: array }
+    preview_skeletal_mesh: { description_zh: "C++ 实现返回的 preview_skeletal_mesh 字段；是否出现取决于执行分支", required: false, type: string }
+    section_count: { description_zh: "C++ 实现返回的 section_count 字段；是否出现取决于执行分支", required: false, type: integer }
+    sections: { description_zh: "C++ 实现返回的 sections 字段；是否出现取决于执行分支", item_type: json_value, required: false, type: array }
+    segment_total_count: { description_zh: "C++ 实现返回的 segment_total_count 字段；是否出现取决于执行分支", required: false, type: integer }
+    sequence_length: { description_zh: "C++ 实现返回的 sequence_length 字段；是否出现取决于执行分支", required: false, type: number }
+    skeleton: { description_zh: "C++ 实现返回的 skeleton 字段；是否出现取决于执行分支", required: false, type: string }
+    slot_track_count: { description_zh: "C++ 实现返回的 slot_track_count 字段；是否出现取决于执行分支", required: false, type: integer }
+    slot_tracks: { description_zh: "C++ 实现返回的 slot_tracks 字段；是否出现取决于执行分支", item_type: json_value, required: false, type: array }
+    sync_enabled: { description_zh: "C++ 实现返回的 sync_enabled 字段；是否出现取决于执行分支", required: false, type: bool }
+    sync_group_name: { description_zh: "C++ 实现返回的 sync_group_name 字段；是否出现取决于执行分支", required: false, type: string }
+    sync_marker_count: { description_zh: "C++ 实现返回的 sync_marker_count 字段；是否出现取决于执行分支", required: false, type: integer }
+    sync_markers: { description_zh: "C++ 实现返回的 sync_markers 字段；是否出现取决于执行分支", item_type: json_value, required: false, type: array }
+    sync_slot_index: { description_zh: "C++ 实现返回的 sync_slot_index 字段；是否出现取决于执行分支", required: false, type: integer }
+    sync_slot_name: { description_zh: "C++ 实现返回的 sync_slot_name 字段；是否出现取决于执行分支", required: false, type: string }
+    sync_slot_valid: { description_zh: "C++ 实现返回的 sync_slot_valid 字段；是否出现取决于执行分支", required: false, type: bool }
+  }
+  state: defined
+}
+schema: uai.command_spec.v1
+status: active
+types: {}
+verification: { reason: read_only_command_has_no_post_write_verification, state: none }
+version: 1

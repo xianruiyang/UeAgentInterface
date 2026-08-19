@@ -1,7 +1,7 @@
 #pragma once
 
 #include "CoreMinimal.h"
-#include "Utilities/UeAgentUObjectProperties.h"
+#include "Utilities/AuthoringCore/UeAgentDetailsAuthoringService.h"
 
 class FJsonObject;
 
@@ -17,6 +17,17 @@ namespace UeAgentDetailsAuthoring
 		FString SourceCommand;
 	};
 
+	struct FOwnerPropertiesInput
+	{
+		bool bPresent = false;
+		bool bInline = false;
+		FString PropertiesFieldName;
+		FString RefFieldName;
+		FString DetailsRoot;
+		FString IndexFile;
+		TSharedPtr<FJsonObject> PropertiesJson;
+	};
+
 	struct UEAGENTINTERFACE_API FOwnerDetailsExportRequest
 	{
 		FOwnerDetailsExportRequest();
@@ -26,7 +37,7 @@ namespace UeAgentDetailsAuthoring
 		FString DetailsRoot;
 		FString IndexFile;
 		FString RefFieldName;
-		UeAgentUObjectProperties::FExportOptions PropertyOptions;
+		UeAgentDetailsAuthoringService::FCapturePolicy PropertyOptions;
 	};
 
 	struct UEAGENTINTERFACE_API FOwnerDetailsApplyRequest
@@ -38,7 +49,7 @@ namespace UeAgentDetailsAuthoring
 		FString DetailsRoot;
 		FString IndexFile;
 		FString RefFieldName;
-		UeAgentUObjectProperties::FApplyOptions ApplyOptions;
+		UeAgentAuthoringObjectApply::FOptions ApplyOptions;
 	};
 
 	struct UEAGENTINTERFACE_API FOwnerDetailsValidateRequest
@@ -122,6 +133,13 @@ namespace UeAgentDetailsAuthoring
 		int32& InOutAppliedCount,
 		FString& OutError);
 
+	UEAGENTINTERFACE_API bool ResolveOwnerPropertiesFromEntry(
+		const FString& EntryDirectory,
+		const TSharedPtr<FJsonObject>& EntryObject,
+		const FString& RefFieldName,
+		FOwnerPropertiesInput& OutInput,
+		FString& OutError);
+
 	UEAGENTINTERFACE_API bool ValidateOwnerDetails(
 		const FOwnerDetailsValidateRequest& Request,
 		TSharedPtr<FJsonObject>& OutValidateSummary,
@@ -143,39 +161,39 @@ namespace UeAgentDetailsAuthoring
 		TSharedPtr<FJsonObject>& OutReport,
 		FString& OutError);
 
-	UEAGENTINTERFACE_API TSharedPtr<FJsonObject> MakeLegacyPropertiesRejection(
+	UEAGENTINTERFACE_API TSharedPtr<FJsonObject> MakeAuthoringPropertiesRejection(
 		const FString& ErrorCode,
-		const FString& LegacySurface,
+		const FString& Surface,
 		const FOwnerInfo& OwnerInfo,
 		const FString& JsonPath,
-		const FString& MigrationHint,
+		const FString& ResolutionHint,
 		const FString& AllowedTarget);
 
-	UEAGENTINTERFACE_API bool FindLegacyPropertiesSurface(
+	UEAGENTINTERFACE_API bool FindAuthoringPropertiesIssue(
 		const TSharedPtr<FJsonObject>& Object,
-		FString& OutLegacySurface,
+		FString& OutSurface,
 		FString& OutJsonPath,
 		FString& OutErrorCode);
 
-	UEAGENTINTERFACE_API bool FindLegacyPropertiesFile(
+	UEAGENTINTERFACE_API bool FindAuthoringPropertiesFileIssue(
 		const FString& FolderRoot,
-		FString& OutLegacySurface,
+		FString& OutSurface,
 		FString& OutJsonPath,
 		FString& OutErrorCode);
 
-	UEAGENTINTERFACE_API bool BuildLegacyPropertiesRejectionIfPresent(
+	UEAGENTINTERFACE_API bool BuildAuthoringPropertiesRejectionIfPresent(
 		const TSharedPtr<FJsonObject>& Object,
 		const FOwnerInfo& OwnerInfo,
 		const FString& AllowedTarget,
 		TSharedPtr<FJsonObject>& OutRejection);
 
-	UEAGENTINTERFACE_API bool BuildLegacyPropertiesFileRejectionIfPresent(
+	UEAGENTINTERFACE_API bool BuildAuthoringPropertiesFileRejectionIfPresent(
 		const FString& FolderRoot,
 		const FOwnerInfo& OwnerInfo,
 		const FString& AllowedTarget,
 		TSharedPtr<FJsonObject>& OutRejection);
 
-	UEAGENTINTERFACE_API bool BuildLegacyPropertiesFolderRejectionIfPresent(
+	UEAGENTINTERFACE_API bool BuildAuthoringPropertiesFolderRejectionIfPresent(
 		const FString& FolderRoot,
 		const FOwnerInfo& OwnerInfo,
 		const FString& AllowedTarget,
@@ -196,22 +214,25 @@ namespace UeAgentDetailsAuthoring
 		const FOwnerInfo& OwnerInfo,
 		const TSharedPtr<FJsonObject>& PropertiesJson,
 		TSharedPtr<FJsonObject>& OutDetailsSummary,
-		FString& OutError);
+		FString& OutError,
+		const FString& IndexFile = FString());
 
 	UEAGENTINTERFACE_API bool LoadGroupedDetails(
 		const FString& DetailsRoot,
 		TSharedPtr<FJsonObject>& OutPropertiesJson,
-		FString& OutError);
+		FString& OutError,
+		const FString& IndexFile = FString());
 
-	UEAGENTINTERFACE_API bool HasGroupedDetails(const FString& DetailsRoot);
+	UEAGENTINTERFACE_API bool HasGroupedDetails(const FString& DetailsRoot, const FString& IndexFile = FString());
 
 	UEAGENTINTERFACE_API bool ExternalizeInlineDetailsInObjectTree(
 		const FString& EntryFilePath,
 		const TSharedPtr<FJsonObject>& EntryObject,
 		const FString& SourceCommand,
-		FString& OutError);
+		FString& OutError,
+		bool bScopeToEntryFile = false);
 
-	UEAGENTINTERFACE_API void RemoveLegacyAuthoringFieldsInObjectTree(
+	UEAGENTINTERFACE_API void RemoveDiagnosticAuthoringFieldsInObjectTree(
 		const TSharedPtr<FJsonObject>& EntryObject);
 
 	UEAGENTINTERFACE_API bool RehydrateGroupedDetailsInObjectTree(

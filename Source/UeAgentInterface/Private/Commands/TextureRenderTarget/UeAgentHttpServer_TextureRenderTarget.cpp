@@ -2,10 +2,15 @@
 
 #include "Server/UeAgentHttpServer.h"
 
+#include "Commands/Assets/UeAgentReflectionAuthoringCommandBridge.h"
+#include "Utilities/UeAgentAuthoringFileIO.h"
+#include "Utilities/UeAgentAuthoringFolderIO.h"
 #include "Utilities/UeAgentAuthoringJson.h"
 #include "Utilities/UeAgentDetailsAuthoring.h"
 #include "Utilities/UeAgentFolderDetailsExport.h"
 #include "Utilities/UeAgentJsonDiagnostics.h"
+#include "Utilities/UeAgentStructuredAuthoringIO.h"
+#include "Utilities/UeAgentUObjectProperties.h"
 #include "Module/UeAgentInterfaceLogger.h"
 
 #include "AssetRegistry/AssetRegistryModule.h"

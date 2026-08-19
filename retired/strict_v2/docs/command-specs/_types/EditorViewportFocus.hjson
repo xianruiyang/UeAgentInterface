@@ -1,0 +1,22 @@
+definition: {
+  additional_fields: true
+  fields: {
+    actor_id: { default_state: none, description_zh: "单个 Actor id", required: false, type: string }
+    actor_ids: { default_state: none, description_zh: "Actor id 列表", item_type: string, required: false, type: array }
+    bone_name: { default_state: none, description_zh: "骨骼名", required: false, type: string }
+    component_name: { default_state: none, description_zh: "组件名", required: false, type: string }
+    max: { default_state: none, description_zh: "自定义 bounds 最大点", required: false, type: json_value }
+    min: { default_state: none, description_zh: "自定义 bounds 最小点", required: false, type: json_value }
+    mode: { default_state: none, description_zh: "adapter 支持的聚焦模式", required: false, type: string }
+    padding: { default_state: none, description_zh: "聚焦 padding", required: false, type: number }
+    point: { default_state: none, description_zh: "自定义聚焦点", required: false, type: json_value }
+    preview_role: { default_state: none, description_zh: "预览角色别名", required: false, type: string }
+    role: { default_state: none, description_zh: "adapter 角色别名", required: false, type: string }
+    socket_name: { default_state: none, description_zh: "socket 名", required: false, type: string }
+    source_or_target: { default_state: none, description_zh: "源或目标预览角色", required: false, type: string }
+  }
+  kind: object
+}
+schema: uai.command_spec.shared_type.v1
+type_id: EditorViewportFocus
+version: 1

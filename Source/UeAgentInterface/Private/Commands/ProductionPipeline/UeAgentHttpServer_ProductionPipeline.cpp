@@ -2,13 +2,17 @@
 
 #include "Server/UeAgentHttpServer.h"
 
+#include "Utilities/UeAgentAuthoringFileIO.h"
 #include "Utilities/UeAgentAuthoringJson.h"
 #include "Utilities/UeAgentJsonDiagnostics.h"
+#include "Utilities/UeAgentStructuredAuthoringIO.h"
 
 #include "AssetRegistry/AssetRegistryModule.h"
 #include "Async/Async.h"
+#include "Editor.h"
 #include "FileHelpers.h"
 #include "HAL/FileManager.h"
+#include "HAL/IConsoleManager.h"
 #include "HAL/PlatformFileManager.h"
 #include "HAL/PlatformProcess.h"
 #include "Internationalization/Culture.h"
@@ -39,37 +43,6 @@ namespace UeAgentProductionPipelineOps
 	static constexpr const TCHAR* PlatformConfigSchema = TEXT("uai.platform_config.v1");
 	static constexpr const TCHAR* DeviceProfileSchema = TEXT("uai.device_profile.v1");
 	static constexpr const TCHAR* ScalabilitySchema = TEXT("uai.scalability.v1");
-
-	struct FExternalTaskState
-	{
-		FCriticalSection Mutex;
-		FString TaskId;
-		FString TaskDir;
-		FString CommandLine;
-		FString WorkingDirectory;
-		FString LogFile;
-		FString ReportFile;
-		FString Status = TEXT("planned");
-		FString Phase = TEXT("planned");
-		FString StartedAt;
-		FString FinishedAt;
-		double StartedSeconds = 0.0;
-		double DurationSeconds = 0.0;
-		int32 ExitCode = 0;
-		uint32 ProcessId = 0;
-		FProcHandle ProcessHandle;
-		bool bHasProcessHandle = false;
-		bool bCancelRequested = false;
-	};
-
-	static FCriticalSection GExternalTasksMutex;
-	static TMap<FString, TSharedPtr<FExternalTaskState>> GExternalTasks;
-
-	static FString NowIso()
-	{
-		return FDateTime::UtcNow().ToIso8601();
-	}
-
 	static TSharedPtr<FJsonObject> MakeIssue(const FString& Severity, const FString& Code, const FString& Path, const FString& Message)
 	{
 		return UeAgentJsonDiagnostics::MakeIssue(Severity, Code, Path, Message);
@@ -87,15 +60,7 @@ namespace UeAgentProductionPipelineOps
 		const FString& CategoryPath,
 		std::initializer_list<FString> Operations)
 	{
-		UeAgentAuthoringJson::ApplyAuthoringMetadata(
-			Obj,
-			TEXT("section"),
-			SectionName,
-			DisplayName,
-			CategoryPath,
-			TEXT("section"),
-			TEXT("struct"),
-			Operations);
+		UeAgentAuthoringJson::ApplyAuthoringMetadata(Obj, TEXT("section"), SectionName, DisplayName, CategoryPath, TEXT("struct"));
 	}
 
 	static int32 CountErrors(const TArray<TSharedPtr<FJsonValue>>& Issues)
@@ -115,29 +80,46 @@ namespace UeAgentProductionPipelineOps
 		return UeAgentJsonDiagnostics::ResolveProjectRelativeFilePath(Path);
 	}
 
-	static FString NormalizeAbsoluteDirectoryForPrefixCheck(const FString& Path)
+	static FString NormalizeAbsolutePathForBoundary(const FString& Path)
 	{
 		FString Normalized = UeAgentJsonDiagnostics::NormalizeResolvedFilePath(FPaths::ConvertRelativePathToFull(Path));
 		FPaths::CollapseRelativeDirectories(Normalized);
-		FPaths::NormalizeDirectoryName(Normalized);
-		if (!Normalized.EndsWith(TEXT("/")))
+		FPaths::NormalizeFilename(Normalized);
+		while (Normalized.Len() > 3 && Normalized.EndsWith(TEXT("/")))
 		{
-			Normalized += TEXT("/");
+			Normalized.LeftChopInline(1, EAllowShrinking::No);
 		}
 		return Normalized;
 	}
 
-	static bool IsUnderProjectSavedDir(const FString& Path)
+	static bool IsPathWithinDirectory(const FString& Path, const FString& RootDirectory)
 	{
-		FString NormalizedPath = ResolveProjectFilePath(Path);
-		NormalizedPath = UeAgentJsonDiagnostics::NormalizeResolvedFilePath(NormalizedPath);
-		FPaths::NormalizeDirectoryName(NormalizedPath);
-		if (!NormalizedPath.EndsWith(TEXT("/")))
-		{
-			NormalizedPath += TEXT("/");
-		}
-		const FString SavedDir = NormalizeAbsoluteDirectoryForPrefixCheck(FPaths::ProjectSavedDir());
-		return NormalizedPath.StartsWith(SavedDir, ESearchCase::IgnoreCase);
+		const FString NormalizedPath = NormalizeAbsolutePathForBoundary(Path);
+		const FString NormalizedRoot = NormalizeAbsolutePathForBoundary(RootDirectory);
+		return !NormalizedPath.IsEmpty()
+			&& !NormalizedRoot.IsEmpty()
+			&& (NormalizedPath.Equals(NormalizedRoot, ESearchCase::IgnoreCase)
+				|| NormalizedPath.StartsWith(NormalizedRoot + TEXT("/"), ESearchCase::IgnoreCase));
+	}
+
+	static FString UaiOwnedSavedRoot()
+	{
+		return FPaths::ConvertRelativePathToFull(FPaths::Combine(FPaths::ProjectSavedDir(), TEXT("UeAgentInterface")));
+	}
+
+	static FString UaiOwnedPackagesRoot()
+	{
+		return FPaths::ConvertRelativePathToFull(FPaths::Combine(UaiOwnedSavedRoot(), TEXT("Packages")));
+	}
+
+	static bool IsUaiOwnedSavedPath(const FString& Path)
+	{
+		return IsPathWithinDirectory(Path, UaiOwnedSavedRoot());
+	}
+
+	static bool IsUaiOwnedPackagesPath(const FString& Path)
+	{
+		return IsPathWithinDirectory(Path, UaiOwnedPackagesRoot());
 	}
 
 	static FString GetProjectFile()
@@ -205,36 +187,17 @@ namespace UeAgentProductionPipelineOps
 		return false;
 	}
 
-	static bool SaveJsonFile(const FString& OutputFileInput, const TSharedPtr<FJsonObject>& Root, FString& OutResolvedPath, FString& OutError)
+	static bool SaveAuthoringFile(const FString& OutputFileInput, const TSharedPtr<FJsonObject>& Root, FString& OutResolvedPath, FString& OutError)
 	{
-		OutResolvedPath.Reset();
-		if (!Root.IsValid())
-		{
-			OutError = TEXT("json_root_invalid");
-			return false;
-		}
 		FString OutputFile = OutputFileInput;
-		OutputFile.TrimStartAndEndInline();
-		if (OutputFile.IsEmpty())
+		if (FPaths::GetExtension(OutputFile, false).Equals(TEXT("json"), ESearchCase::IgnoreCase))
 		{
-			OutError = TEXT("missing_output_file");
-			return false;
+			OutputFile = FPaths::ChangeExtension(OutputFile, TEXT("hjson"));
 		}
-		OutputFile = ResolveProjectFilePath(OutputFile);
-		IFileManager::Get().MakeDirectory(*FPaths::GetPath(OutputFile), true);
-		FString JsonText;
-		if (!UeAgentJsonDiagnostics::SerializeJsonObjectCompact(Root, JsonText))
-		{
-			OutError = TEXT("json_serialize_failed");
-			return false;
-		}
-		if (!FFileHelper::SaveStringToFile(JsonText, *OutputFile, FFileHelper::EEncodingOptions::ForceUTF8WithoutBOM))
-		{
-			OutError = TEXT("json_save_failed");
-			return false;
-		}
-		OutResolvedPath = OutputFile;
-		return true;
+		UeAgentAuthoringFileIO::FSaveOptions Options;
+		Options.SourceCommand = TEXT("production_pipeline_json_export");
+		Options.bExternalizeInlineDetails = false;
+		return UeAgentAuthoringFileIO::SaveObject(OutputFile, Root, Options, OutResolvedPath, OutError);
 	}
 
 	static bool LoadJsonFromParams(const TSharedPtr<FJsonObject>& Params, TSharedPtr<FJsonObject>& OutRoot, FString& OutJsonFile, FString& OutError)
@@ -254,7 +217,14 @@ namespace UeAgentProductionPipelineOps
 		}
 		if (Params->TryGetStringField(TEXT("json_file"), OutJsonFile) && !OutJsonFile.TrimStartAndEnd().IsEmpty())
 		{
-			return UeAgentJsonDiagnostics::LoadJsonObjectFile(OutJsonFile, OutRoot, nullptr, OutError, false);
+			UeAgentAuthoringFileIO::FLoadOptions Options;
+			FString ResolvedPath;
+			if (!UeAgentAuthoringFileIO::LoadObject(OutJsonFile, OutRoot, Options, ResolvedPath, OutError))
+			{
+				return false;
+			}
+			OutJsonFile = ResolvedPath;
+			return true;
 		}
 		OutError = TEXT("missing_json_or_json_file");
 		return false;
@@ -285,10 +255,11 @@ namespace UeAgentProductionPipelineOps
 		return JsonText;
 	}
 
-	static bool ReadJsonObjectFile(const FString& FilePath, TSharedPtr<FJsonObject>& OutObj)
+	static bool ReadAuthoringObjectFile(const FString& FilePath, TSharedPtr<FJsonObject>& OutObj)
 	{
+		UeAgentAuthoringFileIO::FLoadOptions Options;
 		FString Error;
-		return UeAgentJsonDiagnostics::LoadJsonObjectFile(FilePath, OutObj, nullptr, Error, false);
+		return UeAgentAuthoringFileIO::LoadObject(FilePath, OutObj, Options, Error);
 	}
 
 	static bool CopyFileWithBackup(const FString& SourcePath, const FString& TargetPath, bool bBackup, TArray<TSharedPtr<FJsonValue>>& BackupPaths, FString& OutError)
@@ -343,12 +314,6 @@ namespace UeAgentProductionPipelineOps
 		return true;
 	}
 
-	static bool AppendTextFileUtf8(const FString& FilePath, const FString& Text)
-	{
-		IFileManager::Get().MakeDirectory(*FPaths::GetPath(FilePath), true);
-		return FFileHelper::SaveStringToFile(Text, *FilePath, FFileHelper::EEncodingOptions::ForceUTF8WithoutBOM, &IFileManager::Get(), FILEWRITE_Append);
-	}
-
 	static bool IsSimpleIdentifier(const FString& Value)
 	{
 		if (Value.IsEmpty())
@@ -358,6 +323,95 @@ namespace UeAgentProductionPipelineOps
 		for (TCHAR Ch : Value)
 		{
 			if (!FChar::IsAlnum(Ch) && Ch != TEXT('_') && Ch != TEXT('-') && Ch != TEXT('.') && Ch != TEXT('@'))
+			{
+				return false;
+			}
+		}
+		return true;
+	}
+
+	static bool ContainsUnsafeShellMeta(const FString& Value)
+	{
+		static const FString UnsafeCharacters = TEXT("&|<>^%!\"()");
+		for (const TCHAR Ch : Value)
+		{
+			int32 UnsafeIndex = INDEX_NONE;
+			if (Ch < TEXT(' ') || UnsafeCharacters.FindChar(Ch, UnsafeIndex))
+			{
+				return true;
+			}
+		}
+		return false;
+	}
+
+	static bool ContainsUnsafeIniToken(const FString& Value)
+	{
+		return Value.Contains(TEXT("\r")) || Value.Contains(TEXT("\n")) || Value.Contains(TEXT("="));
+	}
+
+	static bool IsSafeIniSectionName(const FString& Value)
+	{
+		return !Value.TrimStartAndEnd().IsEmpty()
+			&& !ContainsUnsafeIniToken(Value)
+			&& !Value.Contains(TEXT("["))
+			&& !Value.Contains(TEXT("]"));
+	}
+
+	static bool IsSafeIniKey(const FString& Value)
+	{
+		return !Value.TrimStartAndEnd().IsEmpty() && !ContainsUnsafeIniToken(Value);
+	}
+
+	static bool IsSafeIniValue(const FString& Value)
+	{
+		return !ContainsUnsafeIniToken(Value);
+	}
+
+	static bool IsTaskIdValid(const FString& TaskId)
+	{
+		int32 LastSeparator = INDEX_NONE;
+		if (!TaskId.FindLastChar(TEXT('_'), LastSeparator))
+		{
+			return false;
+		}
+		const FString HexSuffix = TaskId.Mid(LastSeparator + 1);
+		const FString PrefixAndTimestamp = TaskId.Left(LastSeparator);
+		int32 TimestampSeparator = INDEX_NONE;
+		if (!PrefixAndTimestamp.FindLastChar(TEXT('_'), TimestampSeparator))
+		{
+			return false;
+		}
+		const FString Prefix = PrefixAndTimestamp.Left(TimestampSeparator);
+		const FString Timestamp = PrefixAndTimestamp.Mid(TimestampSeparator + 1);
+		if (Prefix != TEXT("packaging") && Prefix != TEXT("localization_gather") && Prefix != TEXT("localization_compile"))
+		{
+			return false;
+		}
+		if (Timestamp.Len() != 16 || Timestamp[8] != TEXT('T') || Timestamp[15] != TEXT('Z') || HexSuffix.Len() != 8)
+		{
+			return false;
+		}
+		for (int32 Index = 0; Index < Timestamp.Len(); ++Index)
+		{
+			if (Index != 8 && Index != 15 && !FChar::IsDigit(Timestamp[Index]))
+			{
+				return false;
+			}
+		}
+		if (!FDateTime::Validate(
+			FCString::Atoi(*Timestamp.Mid(0, 4)),
+			FCString::Atoi(*Timestamp.Mid(4, 2)),
+			FCString::Atoi(*Timestamp.Mid(6, 2)),
+			FCString::Atoi(*Timestamp.Mid(9, 2)),
+			FCString::Atoi(*Timestamp.Mid(11, 2)),
+			FCString::Atoi(*Timestamp.Mid(13, 2)),
+			0))
+		{
+			return false;
+		}
+		for (const TCHAR Ch : HexSuffix)
+		{
+			if (!FChar::IsHexDigit(Ch))
 			{
 				return false;
 			}
@@ -912,7 +966,7 @@ namespace UeAgentProductionPipelineOps
 			|| Root->HasField(TEXT("sections"));
 		if (!bHasLocalizationAuthoringFields && bLooksLikeProjectSettingsOnly)
 		{
-			AddIssue(Issues, TEXT("error"), TEXT("use_project_settings_required"), TEXT("$"), TEXT("Project Settings fields must be edited through project_settings_* commands, not localization_apply_json."));
+			AddIssue(Issues, TEXT("error"), TEXT("use_project_settings_required"), TEXT("$"), TEXT("Project Settings fields must be edited through editor_project.project_settings.update."));
 			return false;
 		}
 		const TArray<TSharedPtr<FJsonValue>>* Targets = nullptr;
@@ -1055,176 +1109,6 @@ namespace UeAgentProductionPipelineOps
 		return FPaths::ConvertRelativePathToFull(FPaths::Combine(FPaths::EngineDir(), TEXT("Binaries/Win64/UnrealPak.exe")));
 	}
 
-	static FString MakeTaskId(const FString& Prefix)
-	{
-		return Prefix + TEXT("_") + FDateTime::UtcNow().ToString(TEXT("%Y%m%dT%H%M%SZ_")) + FGuid::NewGuid().ToString(EGuidFormats::Digits).Left(8);
-	}
-
-	static FString TaskRootDir(const FString& TaskId)
-	{
-		return FPaths::ConvertRelativePathToFull(FPaths::Combine(FPaths::ProjectSavedDir(), TEXT("UeAgentInterface/Tasks"), TaskId));
-	}
-
-	static TSharedPtr<FJsonObject> TaskStateToJson(const TSharedPtr<FExternalTaskState>& State)
-	{
-		TSharedPtr<FJsonObject> Obj = MakeShared<FJsonObject>();
-		if (!State.IsValid())
-		{
-			Obj->SetStringField(TEXT("status"), TEXT("missing"));
-			return Obj;
-		}
-		FScopeLock Lock(&State->Mutex);
-		Obj->SetStringField(TEXT("task_id"), State->TaskId);
-		Obj->SetStringField(TEXT("status"), State->Status);
-		Obj->SetStringField(TEXT("phase"), State->Phase);
-		Obj->SetStringField(TEXT("command_line"), State->CommandLine);
-		Obj->SetStringField(TEXT("working_directory"), State->WorkingDirectory);
-		Obj->SetStringField(TEXT("log_file"), State->LogFile);
-		Obj->SetStringField(TEXT("report_file"), State->ReportFile);
-		Obj->SetStringField(TEXT("started_at"), State->StartedAt);
-		Obj->SetStringField(TEXT("finished_at"), State->FinishedAt);
-		Obj->SetNumberField(TEXT("duration_seconds"), State->DurationSeconds);
-		Obj->SetNumberField(TEXT("exit_code"), State->ExitCode);
-		Obj->SetNumberField(TEXT("process_id"), static_cast<double>(State->ProcessId));
-		Obj->SetBoolField(TEXT("running"), State->Status.Equals(TEXT("running"), ESearchCase::IgnoreCase));
-		return Obj;
-	}
-
-	static void WriteTaskReport(const TSharedPtr<FExternalTaskState>& State)
-	{
-		FString IgnoredError;
-		FString ReportFile = State->ReportFile;
-		FString ResolvedReportFile;
-		SaveJsonFile(ReportFile, TaskStateToJson(State), ResolvedReportFile, IgnoredError);
-	}
-
-	static TSharedPtr<FExternalTaskState> RegisterPlannedTask(const FString& Prefix, const FString& CommandLine, const FString& WorkingDirectory)
-	{
-		TSharedPtr<FExternalTaskState> State = MakeShared<FExternalTaskState>();
-		State->TaskId = MakeTaskId(Prefix);
-		State->TaskDir = TaskRootDir(State->TaskId);
-		State->CommandLine = CommandLine;
-		State->WorkingDirectory = WorkingDirectory;
-		State->LogFile = FPaths::Combine(State->TaskDir, TEXT("stdout.log"));
-		State->ReportFile = FPaths::Combine(State->TaskDir, TEXT("report.json"));
-		State->Status = TEXT("planned");
-		State->Phase = TEXT("planned");
-		IFileManager::Get().MakeDirectory(*State->TaskDir, true);
-		FFileHelper::SaveStringToFile(CommandLine, *FPaths::Combine(State->TaskDir, TEXT("command.txt")), FFileHelper::EEncodingOptions::ForceUTF8WithoutBOM);
-		WriteTaskReport(State);
-		{
-			FScopeLock Lock(&GExternalTasksMutex);
-			GExternalTasks.Add(State->TaskId, State);
-		}
-		return State;
-	}
-
-	static void StartExternalTask(const TSharedPtr<FExternalTaskState>& State, const FString& Executable, const FString& Arguments, double TimeoutSeconds)
-	{
-		if (!State.IsValid())
-		{
-			return;
-		}
-		{
-			FScopeLock Lock(&State->Mutex);
-			State->Status = TEXT("running");
-			State->Phase = TEXT("process");
-			State->StartedAt = NowIso();
-			State->StartedSeconds = FPlatformTime::Seconds();
-		}
-		WriteTaskReport(State);
-		Async(EAsyncExecution::Thread, [State, Executable, Arguments, TimeoutSeconds]()
-		{
-			void* ReadPipe = nullptr;
-			void* WritePipe = nullptr;
-			FPlatformProcess::CreatePipe(ReadPipe, WritePipe);
-			uint32 ProcessId = 0;
-			FProcHandle Handle = FPlatformProcess::CreateProc(*Executable, *Arguments, false, true, true, &ProcessId, 0, *State->WorkingDirectory, WritePipe, ReadPipe);
-			{
-				FScopeLock Lock(&State->Mutex);
-				State->ProcessHandle = Handle;
-				State->ProcessId = ProcessId;
-				State->bHasProcessHandle = Handle.IsValid();
-				if (!Handle.IsValid())
-				{
-					State->Status = TEXT("failed");
-					State->Phase = TEXT("launch_failed");
-					State->FinishedAt = NowIso();
-					State->DurationSeconds = FPlatformTime::Seconds() - State->StartedSeconds;
-				}
-			}
-			if (!Handle.IsValid())
-			{
-				AppendTextFileUtf8(State->LogFile, TEXT("process launch failed") LINE_TERMINATOR);
-				WriteTaskReport(State);
-				FPlatformProcess::ClosePipe(ReadPipe, WritePipe);
-				return;
-			}
-			bool bTimedOut = false;
-			while (FPlatformProcess::IsProcRunning(Handle))
-			{
-				const FString NewOutput = FPlatformProcess::ReadPipe(ReadPipe);
-				if (!NewOutput.IsEmpty())
-				{
-					AppendTextFileUtf8(State->LogFile, NewOutput);
-				}
-				{
-					FScopeLock Lock(&State->Mutex);
-					if (State->bCancelRequested)
-					{
-						FPlatformProcess::TerminateProc(Handle, true);
-						State->Status = TEXT("cancelled");
-						State->Phase = TEXT("cancelled");
-						break;
-					}
-				}
-				if (TimeoutSeconds > 0.0 && (FPlatformTime::Seconds() - State->StartedSeconds) > TimeoutSeconds)
-				{
-					bTimedOut = true;
-					FPlatformProcess::TerminateProc(Handle, true);
-					break;
-				}
-				FPlatformProcess::Sleep(0.1f);
-			}
-			const FString RemainingOutput = FPlatformProcess::ReadPipe(ReadPipe);
-			if (!RemainingOutput.IsEmpty())
-			{
-				AppendTextFileUtf8(State->LogFile, RemainingOutput);
-			}
-			int32 ReturnCode = 0;
-			FPlatformProcess::GetProcReturnCode(Handle, &ReturnCode);
-			{
-				FScopeLock Lock(&State->Mutex);
-				State->ExitCode = ReturnCode;
-				State->FinishedAt = NowIso();
-				State->DurationSeconds = FPlatformTime::Seconds() - State->StartedSeconds;
-				if (bTimedOut)
-				{
-					State->Status = TEXT("timed_out");
-					State->Phase = TEXT("timeout");
-				}
-				else if (!State->Status.Equals(TEXT("cancelled"), ESearchCase::IgnoreCase))
-				{
-					State->Status = ReturnCode == 0 ? TEXT("succeeded") : TEXT("failed");
-					State->Phase = TEXT("finished");
-				}
-			}
-			FPlatformProcess::CloseProc(Handle);
-			FPlatformProcess::ClosePipe(ReadPipe, WritePipe);
-			WriteTaskReport(State);
-		});
-	}
-
-	static TSharedPtr<FExternalTaskState> FindTask(const FString& TaskId)
-	{
-		FScopeLock Lock(&GExternalTasksMutex);
-		if (const TSharedPtr<FExternalTaskState>* Found = GExternalTasks.Find(TaskId))
-		{
-			return *Found;
-		}
-		return nullptr;
-	}
-
 	struct FPackagingProfile
 	{
 		FString Platform = TEXT("Win64");
@@ -1360,6 +1244,10 @@ namespace UeAgentProductionPipelineOps
 
 	static void ValidatePackagingProfile(const FPackagingProfile& Profile, TArray<TSharedPtr<FJsonValue>>& Issues)
 	{
+		if (!IsSimpleIdentifier(Profile.Platform) || Profile.Platform.Contains(TEXT("@")) || ContainsUnsafeShellMeta(Profile.Platform))
+		{
+			AddIssue(Issues, TEXT("error"), TEXT("platform_token_unsafe"), TEXT("$.target.platform"), TEXT("Platform must be a simple shell-safe identifier."));
+		}
 		if (!IsKnownConfiguration(Profile.Configuration))
 		{
 			AddIssue(Issues, TEXT("error"), TEXT("configuration_invalid"), TEXT("$.target.configuration"), TEXT("Unknown packaging configuration."));
@@ -1370,14 +1258,30 @@ namespace UeAgentProductionPipelineOps
 		}
 		for (const FString& Map : Profile.Maps)
 		{
+			if (ContainsUnsafeShellMeta(Map) || !FPackageName::IsValidLongPackageName(Map))
+			{
+				AddIssue(Issues, TEXT("error"), TEXT("map_token_unsafe"), TEXT("$.content.maps"), FString::Printf(TEXT("Map token is not shell-safe: %s"), *Map));
+				continue;
+			}
 			if (!FPackageName::DoesPackageExist(Map))
 			{
 				AddIssue(Issues, TEXT("error"), TEXT("map_not_found"), TEXT("$.content.maps"), FString::Printf(TEXT("Map does not exist: %s"), *Map));
 			}
 		}
-		if (!IsUnderProjectSavedDir(Profile.ArchiveDirectory))
+		for (const FString& Culture : Profile.Cultures)
 		{
-			AddIssue(Issues, TEXT("error"), TEXT("archive_dir_unsafe"), TEXT("$.output.archive_directory"), TEXT("Archive directory must be under Project/Saved for UAI-managed cleanup."));
+			if (!IsCultureNameAllowed(Culture) || ContainsUnsafeShellMeta(Culture))
+			{
+				AddIssue(Issues, TEXT("error"), TEXT("culture_token_unsafe"), TEXT("$.content.cultures"), FString::Printf(TEXT("Culture token is invalid or not shell-safe: %s"), *Culture));
+			}
+		}
+		if (!IsUaiOwnedPackagesPath(Profile.ArchiveDirectory))
+		{
+			AddIssue(Issues, TEXT("error"), TEXT("archive_dir_unsafe"), TEXT("$.output.archive_directory"), TEXT("Archive directory must be under Saved/UeAgentInterface/Packages."));
+		}
+		else if (ContainsUnsafeShellMeta(Profile.ArchiveDirectory))
+		{
+			AddIssue(Issues, TEXT("error"), TEXT("archive_dir_token_unsafe"), TEXT("$.output.archive_directory"), TEXT("Archive directory contains shell metacharacters."));
 		}
 	}
 
@@ -1562,15 +1466,7 @@ namespace UeAgentProductionPipelineOps
 		Obj->SetStringField(TEXT("device_type"), Profile.DeviceType);
 		Obj->SetStringField(TEXT("base_profile"), Profile.BaseProfile);
 		Obj->SetObjectField(TEXT("cvars"), MakeStringMapObject(Profile.CVars));
-		UeAgentAuthoringJson::ApplyAuthoringMetadata(
-			Obj,
-			TEXT("name"),
-			Profile.Name,
-			Profile.Name,
-			TEXT("Device Profiles"),
-			TEXT("device_profile"),
-			TEXT("struct"),
-			{ TEXT("set"), TEXT("remove") });
+		UeAgentAuthoringJson::ApplyAuthoringMetadata(Obj, TEXT("name"), Profile.Name, Profile.Name, TEXT("Device Profiles"), TEXT("struct"));
 		if (bIncludeSource)
 		{
 			Obj->SetStringField(TEXT("source_file"), Profile.SourceFile);
@@ -1647,6 +1543,15 @@ namespace UeAgentProductionPipelineOps
 			Names.Add(Name);
 			FString BaseProfile;
 			Profile->TryGetStringField(TEXT("base_profile"), BaseProfile);
+			if (!BaseProfile.IsEmpty() && (!IsSimpleIdentifier(BaseProfile) || ContainsUnsafeIniToken(BaseProfile)))
+			{
+				AddIssue(Issues, TEXT("error"), TEXT("device_profile_base_invalid"), Path + TEXT(".base_profile"), TEXT("Base profile contains unsafe INI characters."));
+			}
+			FString DeviceType;
+			if (Profile->TryGetStringField(TEXT("device_type"), DeviceType) && (!IsSimpleIdentifier(DeviceType) || ContainsUnsafeIniToken(DeviceType)))
+			{
+				AddIssue(Issues, TEXT("error"), TEXT("device_profile_device_type_invalid"), Path + TEXT(".device_type"), TEXT("Device type contains unsafe INI characters."));
+			}
 			BaseByProfile.Add(Name, BaseProfile);
 			const TSharedPtr<FJsonObject>* CVars = nullptr;
 			if (Profile->TryGetObjectField(TEXT("cvars"), CVars) && CVars && CVars->IsValid())
@@ -1654,9 +1559,13 @@ namespace UeAgentProductionPipelineOps
 				for (const TPair<FString, TSharedPtr<FJsonValue>>& Pair : (*CVars)->Values)
 				{
 					FString CVarValue;
-					if (Pair.Key.IsEmpty() || Pair.Key.Contains(TEXT(" ")) || !Pair.Value.IsValid() || !Pair.Value->TryGetString(CVarValue))
+					if (!IsSafeIniKey(Pair.Key))
 					{
-						AddIssue(Issues, TEXT("error"), TEXT("device_profile_cvar_invalid"), Path + TEXT(".cvars.") + Pair.Key, TEXT("CVar key must be non-empty and value must be string."));
+						AddIssue(Issues, TEXT("error"), TEXT("device_profile_cvar_key_invalid"), Path + TEXT(".cvars.") + Pair.Key, TEXT("CVar key contains unsafe INI characters."));
+					}
+					if (!Pair.Value.IsValid() || !Pair.Value->TryGetString(CVarValue) || !IsSafeIniValue(CVarValue))
+					{
+						AddIssue(Issues, TEXT("error"), TEXT("device_profile_cvar_value_invalid"), Path + TEXT(".cvars.") + Pair.Key, TEXT("CVar value must be a shell-free single-line INI value."));
 					}
 				}
 			}
@@ -1848,14 +1757,29 @@ namespace UeAgentProductionPipelineOps
 			const TSharedPtr<FJsonObject> Group = (*Groups)[Index].IsValid() ? (*Groups)[Index]->AsObject() : nullptr;
 			const FString Path = FString::Printf(TEXT("$.groups[%d]"), Index);
 			FString Section;
-			if (!Group.IsValid() || !Group->TryGetStringField(TEXT("section"), Section) || !Section.Contains(TEXT("Quality@")))
+			if (!Group.IsValid() || !Group->TryGetStringField(TEXT("section"), Section) || !Section.Contains(TEXT("Quality@")) || !IsSafeIniSectionName(Section))
 			{
-				AddIssue(Issues, TEXT("error"), TEXT("scalability_group_invalid"), Path, TEXT("Group section must be like ViewDistanceQuality@0."));
+				AddIssue(Issues, TEXT("error"), TEXT("scalability_section_invalid"), Path + TEXT(".section"), TEXT("Group section must be a safe single-line name like ViewDistanceQuality@0."));
 			}
 			const TSharedPtr<FJsonObject>* Values = nullptr;
 			if (Group.IsValid() && (!Group->TryGetObjectField(TEXT("values"), Values) || !Values || !Values->IsValid()))
 			{
 				AddIssue(Issues, TEXT("error"), TEXT("scalability_values_invalid"), Path + TEXT(".values"), TEXT("Group values must be an object."));
+			}
+			else if (Values && Values->IsValid())
+			{
+				for (const TPair<FString, TSharedPtr<FJsonValue>>& Pair : (*Values)->Values)
+				{
+					FString ValueText;
+					if (!IsSafeIniKey(Pair.Key))
+					{
+						AddIssue(Issues, TEXT("error"), TEXT("scalability_key_invalid"), Path + TEXT(".values.") + Pair.Key, TEXT("Scalability key contains unsafe INI characters."));
+					}
+					if (!Pair.Value.IsValid() || !Pair.Value->TryGetString(ValueText) || !IsSafeIniValue(ValueText))
+					{
+						AddIssue(Issues, TEXT("error"), TEXT("scalability_value_invalid"), Path + TEXT(".values.") + Pair.Key, TEXT("Scalability value must be a single-line INI value without '='."));
+					}
+				}
 			}
 		}
 		return CountErrors(Issues) == 0;
@@ -2027,6 +1951,36 @@ namespace UeAgentProductionPipelineOps
 			if (!FileObj.IsValid() || !FileObj->TryGetArrayField(TEXT("sections"), Sections) || !Sections)
 			{
 				AddIssue(Issues, TEXT("error"), TEXT("platform_config_sections_missing"), FilePath + TEXT(".sections"), TEXT("sections[] is required."));
+				continue;
+			}
+			for (int32 SectionIndex = 0; SectionIndex < Sections->Num(); ++SectionIndex)
+			{
+				const TSharedPtr<FJsonObject> Section = (*Sections)[SectionIndex].IsValid() ? (*Sections)[SectionIndex]->AsObject() : nullptr;
+				const FString SectionPath = FString::Printf(TEXT("%s.sections[%d]"), *FilePath, SectionIndex);
+				FString SectionName;
+				if (!Section.IsValid() || !Section->TryGetStringField(TEXT("name"), SectionName) || !IsSafeIniSectionName(SectionName))
+				{
+					AddIssue(Issues, TEXT("error"), TEXT("platform_config_section_name_invalid"), SectionPath + TEXT(".name"), TEXT("Section name contains unsafe INI characters."));
+					continue;
+				}
+				const TSharedPtr<FJsonObject>* Values = nullptr;
+				if (!Section->TryGetObjectField(TEXT("values"), Values) || !Values || !Values->IsValid())
+				{
+					AddIssue(Issues, TEXT("error"), TEXT("platform_config_values_invalid"), SectionPath + TEXT(".values"), TEXT("Section values must be an object."));
+					continue;
+				}
+				for (const TPair<FString, TSharedPtr<FJsonValue>>& Pair : (*Values)->Values)
+				{
+					FString ValueText;
+					if (!IsSafeIniKey(Pair.Key))
+					{
+						AddIssue(Issues, TEXT("error"), TEXT("platform_config_key_invalid"), SectionPath + TEXT(".values.") + Pair.Key, TEXT("Config key contains unsafe INI characters."));
+					}
+					if (!Pair.Value.IsValid() || !Pair.Value->TryGetString(ValueText) || !IsSafeIniValue(ValueText))
+					{
+						AddIssue(Issues, TEXT("error"), TEXT("platform_config_value_invalid"), SectionPath + TEXT(".values.") + Pair.Key, TEXT("Config value must be a single-line INI value without '='."));
+					}
+				}
 			}
 		}
 		return CountErrors(Issues) == 0;
@@ -2203,41 +2157,31 @@ bool FUeAgentHttpServer::ExecuteProductionPipelineCommand(const FString& Command
 	if (CommandLower == TEXT("localization_export_json")) return CmdLocalizationExportJson(Ctx, OutData, OutError);
 	if (CommandLower == TEXT("localization_validate_json")) return CmdLocalizationValidateJson(Ctx, OutData, OutError);
 	if (CommandLower == TEXT("localization_diff_json")) return CmdLocalizationDiffJson(Ctx, OutData, OutError);
-	if (CommandLower == TEXT("localization_apply_json")) return CmdLocalizationApplyJson(Ctx, OutData, OutError);
-	if (CommandLower == TEXT("localization_gather_text")) return CmdLocalizationGatherText(Ctx, OutData, OutError);
 	if (CommandLower == TEXT("localization_export_po")) return CmdLocalizationExportPo(Ctx, OutData, OutError);
 	if (CommandLower == TEXT("localization_import_po")) return CmdLocalizationImportPo(Ctx, OutData, OutError);
-	if (CommandLower == TEXT("localization_compile_text")) return CmdLocalizationCompileText(Ctx, OutData, OutError);
 	if (CommandLower == TEXT("localization_report")) return CmdLocalizationReport(Ctx, OutData, OutError);
 	if (CommandLower == TEXT("localization_preview_culture")) return CmdLocalizationPreviewCulture(Ctx, OutData, OutError);
 	if (CommandLower == TEXT("string_table_export_json")) return CmdStringTableExportJson(Ctx, OutData, OutError);
 	if (CommandLower == TEXT("string_table_validate_json")) return CmdStringTableValidateJson(Ctx, OutData, OutError);
 	if (CommandLower == TEXT("string_table_diff_json")) return CmdStringTableDiffJson(Ctx, OutData, OutError);
-	if (CommandLower == TEXT("string_table_apply_json")) return CmdStringTableApplyJson(Ctx, OutData, OutError);
 	if (CommandLower == TEXT("packaging_query_environment")) return CmdPackagingQueryEnvironment(Ctx, OutData, OutError);
 	if (CommandLower == TEXT("packaging_export_profile_json")) return CmdPackagingExportProfileJson(Ctx, OutData, OutError);
 	if (CommandLower == TEXT("packaging_validate_profile_json")) return CmdPackagingValidateProfileJson(Ctx, OutData, OutError);
 	if (CommandLower == TEXT("packaging_diff_profile_json")) return CmdPackagingDiffProfileJson(Ctx, OutData, OutError);
 	if (CommandLower == TEXT("packaging_plan_build")) return CmdPackagingPlanBuild(Ctx, OutData, OutError);
-	if (CommandLower == TEXT("packaging_run_build")) return CmdPackagingRunBuild(Ctx, OutData, OutError);
-	if (CommandLower == TEXT("packaging_task_status")) return CmdPackagingTaskStatus(Ctx, OutData, OutError);
-	if (CommandLower == TEXT("packaging_cancel_task")) return CmdPackagingCancelTask(Ctx, OutData, OutError);
 	if (CommandLower == TEXT("packaging_parse_log")) return CmdPackagingParseLog(Ctx, OutData, OutError);
 	if (CommandLower == TEXT("packaging_report_artifacts")) return CmdPackagingReportArtifacts(Ctx, OutData, OutError);
 	if (CommandLower == TEXT("packaging_clean_artifacts")) return CmdPackagingCleanArtifacts(Ctx, OutData, OutError);
 	if (CommandLower == TEXT("target_platform_query")) return CmdTargetPlatformQuery(Ctx, OutData, OutError);
 	if (CommandLower == TEXT("platform_config_export_json")) return CmdPlatformConfigExportJson(Ctx, OutData, OutError);
 	if (CommandLower == TEXT("platform_config_validate_json")) return CmdPlatformConfigValidateJson(Ctx, OutData, OutError);
-	if (CommandLower == TEXT("platform_config_apply_json")) return CmdPlatformConfigApplyJson(Ctx, OutData, OutError);
 	if (CommandLower == TEXT("device_profile_query")) return CmdDeviceProfileQuery(Ctx, OutData, OutError);
 	if (CommandLower == TEXT("device_profile_export_json")) return CmdDeviceProfileExportJson(Ctx, OutData, OutError);
 	if (CommandLower == TEXT("device_profile_validate_json")) return CmdDeviceProfileValidateJson(Ctx, OutData, OutError);
 	if (CommandLower == TEXT("device_profile_diff_json")) return CmdDeviceProfileDiffJson(Ctx, OutData, OutError);
-	if (CommandLower == TEXT("device_profile_apply_json")) return CmdDeviceProfileApplyJson(Ctx, OutData, OutError);
 	if (CommandLower == TEXT("device_profile_resolve_cvars")) return CmdDeviceProfileResolveCVars(Ctx, OutData, OutError);
 	if (CommandLower == TEXT("scalability_export_json")) return CmdScalabilityExportJson(Ctx, OutData, OutError);
 	if (CommandLower == TEXT("scalability_validate_json")) return CmdScalabilityValidateJson(Ctx, OutData, OutError);
-	if (CommandLower == TEXT("scalability_apply_json")) return CmdScalabilityApplyJson(Ctx, OutData, OutError);
 	if (CommandLower == TEXT("platform_profile_validate_packaging")) return CmdPlatformProfileValidatePackaging(Ctx, OutData, OutError);
 	OutError = TEXT("unknown_production_pipeline_command");
 	return false;
@@ -2271,7 +2215,7 @@ bool FUeAgentHttpServer::CmdLocalizationExportJson(const FUeAgentRequestContext&
 	if (!OutputFile.TrimStartAndEnd().IsEmpty())
 	{
 		FString SavedPath;
-		if (!SaveJsonFile(OutputFile, OutData, SavedPath, OutError))
+		if (!SaveAuthoringFile(OutputFile, OutData, SavedPath, OutError))
 		{
 			return false;
 		}
@@ -2458,36 +2402,6 @@ bool FUeAgentHttpServer::CmdLocalizationApplyJson(const FUeAgentRequestContext& 
 	return true;
 }
 
-bool FUeAgentHttpServer::CmdLocalizationGatherText(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
-{
-	using namespace UeAgentProductionPipelineOps;
-	FString Target = TEXT("Game");
-	bool bExecute = false;
-	bool bAllowCommandlet = false;
-	double TimeoutSeconds = 300.0;
-	JsonTryGetString(Ctx.Params, TEXT("target"), Target);
-	JsonTryGetBool(Ctx.Params, TEXT("execute"), bExecute);
-	JsonTryGetBool(Ctx.Params, TEXT("allow_commandlet"), bAllowCommandlet);
-	JsonTryGetNumber(Ctx.Params, TEXT("timeout_seconds"), TimeoutSeconds);
-	const FString ConfigFile = FPaths::Combine(LocalizationConfigRoot(), Target + TEXT(".ini"));
-	const FString Args = FString::Printf(TEXT("\"%s\" -run=GatherText -config=\"%s\" -unattended -nop4"), *GetProjectFile(), *ConfigFile);
-	const FString CommandLine = FString::Printf(TEXT("\"%s\" %s"), *EngineEditorCmdPath(), *Args);
-	TSharedPtr<FExternalTaskState> Task = RegisterPlannedTask(TEXT("localization_gather"), CommandLine, FPaths::ProjectDir());
-	OutData = TaskStateToJson(Task);
-	OutData->SetObjectField(TEXT("commandlet_plan"), TaskStateToJson(Task));
-	if (bExecute)
-	{
-		if (!bAllowCommandlet)
-		{
-			OutError = TEXT("requires_commandlet_permission");
-			return false;
-		}
-		StartExternalTask(Task, EngineEditorCmdPath(), Args, TimeoutSeconds);
-		OutData = TaskStateToJson(Task);
-	}
-	return true;
-}
-
 bool FUeAgentHttpServer::CmdLocalizationExportPo(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	using namespace UeAgentProductionPipelineOps;
@@ -2598,36 +2512,6 @@ bool FUeAgentHttpServer::CmdLocalizationImportPo(const FUeAgentRequestContext& C
 	return true;
 }
 
-bool FUeAgentHttpServer::CmdLocalizationCompileText(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
-{
-	using namespace UeAgentProductionPipelineOps;
-	FString Target = TEXT("Game");
-	bool bExecute = false;
-	bool bAllowCommandlet = false;
-	double TimeoutSeconds = 300.0;
-	JsonTryGetString(Ctx.Params, TEXT("target"), Target);
-	JsonTryGetBool(Ctx.Params, TEXT("execute"), bExecute);
-	JsonTryGetBool(Ctx.Params, TEXT("allow_commandlet"), bAllowCommandlet);
-	JsonTryGetNumber(Ctx.Params, TEXT("timeout_seconds"), TimeoutSeconds);
-	const FString ConfigFile = FPaths::Combine(LocalizationConfigRoot(), Target + TEXT(".ini"));
-	const FString Args = FString::Printf(TEXT("\"%s\" -run=GatherText -config=\"%s\" -unattended -nop4"), *GetProjectFile(), *ConfigFile);
-	const FString CommandLine = FString::Printf(TEXT("\"%s\" %s"), *EngineEditorCmdPath(), *Args);
-	TSharedPtr<FExternalTaskState> Task = RegisterPlannedTask(TEXT("localization_compile"), CommandLine, FPaths::ProjectDir());
-	if (bExecute)
-	{
-		if (!bAllowCommandlet)
-		{
-			OutError = TEXT("requires_commandlet_permission");
-			return false;
-		}
-		StartExternalTask(Task, EngineEditorCmdPath(), Args, TimeoutSeconds);
-	}
-	OutData = TaskStateToJson(Task);
-	OutData->SetArrayField(TEXT("locres_files"), StringArrayToJson(FindFilesRecursiveByExtension(FPaths::Combine(LocalizationContentRoot(), Target), TEXT("locres"))));
-	OutData->SetNumberField(TEXT("compiled_count"), 0);
-	return true;
-}
-
 bool FUeAgentHttpServer::CmdLocalizationReport(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	using namespace UeAgentProductionPipelineOps;
@@ -2712,7 +2596,7 @@ bool FUeAgentHttpServer::CmdStringTableExportJson(const FUeAgentRequestContext& 
 	if (!OutputFile.TrimStartAndEnd().IsEmpty())
 	{
 		FString SavedPath;
-		if (!SaveJsonFile(OutputFile, OutData, SavedPath, OutError))
+		if (!SaveAuthoringFile(OutputFile, OutData, SavedPath, OutError))
 		{
 			return false;
 		}
@@ -2809,7 +2693,7 @@ bool FUeAgentHttpServer::CmdStringTableApplyJson(const FUeAgentRequestContext& C
 		return false;
 	}
 	FString AssetPath;
-	bool bDryRun = false;
+	bool bDryRun = true;
 	bool bBackup = true;
 	bool bSaveAfterApply = false;
 	JsonTryGetString(Ctx.Params, TEXT("asset_path"), AssetPath);
@@ -2860,7 +2744,7 @@ bool FUeAgentHttpServer::CmdPackagingExportProfileJson(const FUeAgentRequestCont
 	if (!OutputFile.TrimStartAndEnd().IsEmpty())
 	{
 		FString SavedPath;
-		if (!SaveJsonFile(OutputFile, OutData, SavedPath, OutError))
+		if (!SaveAuthoringFile(OutputFile, OutData, SavedPath, OutError))
 		{
 			return false;
 		}
@@ -2949,126 +2833,6 @@ bool FUeAgentHttpServer::CmdPackagingPlanBuild(const FUeAgentRequestContext& Ctx
 	return true;
 }
 
-bool FUeAgentHttpServer::CmdPackagingRunBuild(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
-{
-	using namespace UeAgentProductionPipelineOps;
-	TSharedPtr<FJsonObject> Root;
-	FString JsonFile;
-	if (!LoadJsonFromParams(Ctx.Params, Root, JsonFile, OutError))
-	{
-		if (HasJsonInput(Ctx.Params))
-		{
-			return false;
-		}
-		Root = nullptr;
-		OutError.Reset();
-	}
-	FPackagingProfile Profile;
-	ParsePackagingProfile(Root, Ctx.Params, Profile);
-	bool bExecute = false;
-	bool bAllowUat = false;
-	double TimeoutSeconds = 1800.0;
-	JsonTryGetBool(Ctx.Params, TEXT("execute"), bExecute);
-	JsonTryGetBool(Ctx.Params, TEXT("allow_uat"), bAllowUat);
-	JsonTryGetNumber(Ctx.Params, TEXT("timeout_seconds"), TimeoutSeconds);
-	const TArray<FString> Args = BuildUatArgs(Profile);
-	const FString CommandLine = FString::Printf(TEXT("\"%s\" %s"), *RunUatPath(), *FString::Join(Args, TEXT(" ")));
-	TArray<TSharedPtr<FJsonValue>> Issues;
-	ValidatePackagingProfile(Profile, Issues);
-	if (CountErrors(Issues) > 0)
-	{
-		OutData = BuildPlanJson(Profile);
-		OutData->SetStringField(TEXT("schema"), TEXT("uai.packaging.validate_result.v1"));
-		OutData->SetBoolField(TEXT("valid"), false);
-		OutData->SetArrayField(TEXT("issues"), Issues);
-		OutData->SetNumberField(TEXT("error_count"), CountErrors(Issues));
-		OutData->SetArrayField(TEXT("estimated_actions"), StringArrayToJson(Args));
-		OutError = TEXT("packaging_validate_failed");
-		return false;
-	}
-	TSharedPtr<FExternalTaskState> Task = RegisterPlannedTask(TEXT("packaging"), CommandLine, FPaths::ProjectDir());
-	if (bExecute)
-	{
-		if (!bAllowUat)
-		{
-			OutData = TaskStateToJson(Task);
-			OutError = TEXT("requires_uat_permission");
-			return false;
-		}
-		const FString CmdExe = TEXT("cmd.exe");
-		const FString CmdArgs = FString::Printf(TEXT("/C \"\"%s\" %s\""), *RunUatPath(), *FString::Join(Args, TEXT(" ")));
-		StartExternalTask(Task, CmdExe, CmdArgs, TimeoutSeconds);
-	}
-	OutData = TaskStateToJson(Task);
-	OutData->SetObjectField(TEXT("commandlet_plan"), BuildPlanJson(Profile));
-	return true;
-}
-
-bool FUeAgentHttpServer::CmdPackagingTaskStatus(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
-{
-	using namespace UeAgentProductionPipelineOps;
-	FString TaskId;
-	JsonTryGetString(Ctx.Params, TEXT("task_id"), TaskId);
-	if (TaskId.IsEmpty())
-	{
-		OutError = TEXT("missing_task_id");
-		return false;
-	}
-	TSharedPtr<FExternalTaskState> Task = FindTask(TaskId);
-	if (Task.IsValid())
-	{
-		OutData = TaskStateToJson(Task);
-		AddLastLogLines(Task->LogFile, OutData);
-		return true;
-	}
-	const FString ReportFile = FPaths::Combine(TaskRootDir(TaskId), TEXT("report.json"));
-	if (ReadJsonObjectFile(ReportFile, OutData))
-	{
-		AddLastLogLines(FPaths::Combine(TaskRootDir(TaskId), TEXT("stdout.log")), OutData);
-		return true;
-	}
-	OutError = TEXT("task_not_found");
-	return false;
-}
-
-bool FUeAgentHttpServer::CmdPackagingCancelTask(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
-{
-	using namespace UeAgentProductionPipelineOps;
-	FString TaskId;
-	bool bKillProcessTree = true;
-	JsonTryGetString(Ctx.Params, TEXT("task_id"), TaskId);
-	JsonTryGetBool(Ctx.Params, TEXT("kill_process_tree"), bKillProcessTree);
-	if (TaskId.IsEmpty())
-	{
-		OutError = TEXT("missing_task_id");
-		return false;
-	}
-	TSharedPtr<FExternalTaskState> Task = FindTask(TaskId);
-	bool bCancelled = false;
-	if (Task.IsValid())
-	{
-		FScopeLock Lock(&Task->Mutex);
-		Task->bCancelRequested = true;
-		if (Task->bHasProcessHandle && Task->ProcessHandle.IsValid() && FPlatformProcess::IsProcRunning(Task->ProcessHandle))
-		{
-			FPlatformProcess::TerminateProc(Task->ProcessHandle, bKillProcessTree);
-			bCancelled = true;
-		}
-		else if (Task->Status.Equals(TEXT("planned"), ESearchCase::IgnoreCase))
-		{
-			Task->Status = TEXT("cancelled");
-			Task->Phase = TEXT("cancelled_before_launch");
-			bCancelled = true;
-		}
-	}
-	OutData->SetStringField(TEXT("schema"), TEXT("uai.packaging.cancel_result.v1"));
-	OutData->SetStringField(TEXT("task_id"), TaskId);
-	OutData->SetBoolField(TEXT("cancelled"), bCancelled);
-	OutData->SetBoolField(TEXT("kill_process_tree"), bKillProcessTree);
-	OutData->SetArrayField(TEXT("processes"), TArray<TSharedPtr<FJsonValue>>());
-	return true;
-}
-
 bool FUeAgentHttpServer::CmdPackagingParseLog(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	using namespace UeAgentProductionPipelineOps;
@@ -3083,6 +2847,11 @@ bool FUeAgentHttpServer::CmdPackagingParseLog(const FUeAgentRequestContext& Ctx,
 	}
 	FString Text;
 	const FString ResolvedLogFile = ResolveProjectFilePath(LogFile);
+	if (!IsUaiOwnedSavedPath(ResolvedLogFile))
+	{
+		OutError = TEXT("log_file_not_uai_owned");
+		return false;
+	}
 	if (!FFileHelper::LoadFileToString(Text, *ResolvedLogFile))
 	{
 		OutError = TEXT("log_file_not_found");
@@ -3115,6 +2884,11 @@ bool FUeAgentHttpServer::CmdPackagingReportArtifacts(const FUeAgentRequestContex
 	JsonTryGetString(Ctx.Params, TEXT("platform"), Platform);
 	JsonTryGetBool(Ctx.Params, TEXT("include_hashes"), bIncludeHashes);
 	const FString ResolvedArchiveDir = ResolveProjectFilePath(ArchiveDir);
+	if (!IsUaiOwnedPackagesPath(ResolvedArchiveDir))
+	{
+		OutError = TEXT("archive_dir_not_uai_owned");
+		return false;
+	}
 	TArray<FString> Files;
 	if (IFileManager::Get().DirectoryExists(*ResolvedArchiveDir))
 	{
@@ -3149,14 +2923,26 @@ bool FUeAgentHttpServer::CmdPackagingCleanArtifacts(const FUeAgentRequestContext
 	using namespace UeAgentProductionPipelineOps;
 	FString ArchiveDir;
 	bool bDryRun = true;
+	bool bAllowDelete = false;
 	double MaxDeleteBytes = 1024.0 * 1024.0 * 1024.0;
 	JsonTryGetString(Ctx.Params, TEXT("archive_dir"), ArchiveDir);
 	JsonTryGetBool(Ctx.Params, TEXT("dry_run"), bDryRun);
+	JsonTryGetBool(Ctx.Params, TEXT("allow_delete"), bAllowDelete);
 	JsonTryGetNumber(Ctx.Params, TEXT("max_delete_bytes"), MaxDeleteBytes);
 	const FString ResolvedArchiveDir = ResolveProjectFilePath(ArchiveDir);
-	if (ResolvedArchiveDir.IsEmpty() || !IsUnderProjectSavedDir(ResolvedArchiveDir))
+	if (ResolvedArchiveDir.IsEmpty() || !IsUaiOwnedPackagesPath(ResolvedArchiveDir))
 	{
-		OutError = TEXT("archive_dir_unsafe");
+		OutError = TEXT("archive_dir_not_uai_owned");
+		return false;
+	}
+	if (!FMath::IsFinite(MaxDeleteBytes) || MaxDeleteBytes <= 0.0)
+	{
+		OutError = TEXT("max_delete_bytes_invalid");
+		return false;
+	}
+	if (!bDryRun && !bAllowDelete)
+	{
+		OutError = TEXT("requires_delete_permission");
 		return false;
 	}
 	TArray<FString> Files;
@@ -3178,10 +2964,16 @@ bool FUeAgentHttpServer::CmdPackagingCleanArtifacts(const FUeAgentRequestContext
 	}
 	if (!bDryRun && IFileManager::Get().DirectoryExists(*ResolvedArchiveDir))
 	{
-		IFileManager::Get().DeleteDirectory(*ResolvedArchiveDir, false, true);
+		if (!IFileManager::Get().DeleteDirectory(*ResolvedArchiveDir, false, true)
+			|| IFileManager::Get().DirectoryExists(*ResolvedArchiveDir))
+		{
+			OutError = TEXT("delete_directory_failed");
+			return false;
+		}
 	}
 	OutData->SetStringField(TEXT("schema"), TEXT("uai.packaging.clean_artifacts.v1"));
 	OutData->SetBoolField(TEXT("dry_run"), bDryRun);
+	OutData->SetBoolField(TEXT("allow_delete"), bAllowDelete);
 	OutData->SetArrayField(TEXT("deleted"), Deleted);
 	OutData->SetNumberField(TEXT("freed_bytes"), static_cast<double>(TotalSize));
 	return true;
@@ -3216,7 +3008,7 @@ bool FUeAgentHttpServer::CmdPlatformConfigExportJson(const FUeAgentRequestContex
 	if (!OutputFile.TrimStartAndEnd().IsEmpty())
 	{
 		FString SavedPath;
-		if (!SaveJsonFile(OutputFile, OutData, SavedPath, OutError))
+		if (!SaveAuthoringFile(OutputFile, OutData, SavedPath, OutError))
 		{
 			return false;
 		}
@@ -3308,7 +3100,7 @@ bool FUeAgentHttpServer::CmdDeviceProfileExportJson(const FUeAgentRequestContext
 	if (!OutputFile.TrimStartAndEnd().IsEmpty())
 	{
 		FString SavedPath;
-		if (!SaveJsonFile(OutputFile, OutData, SavedPath, OutError))
+		if (!SaveAuthoringFile(OutputFile, OutData, SavedPath, OutError))
 		{
 			return false;
 		}
@@ -3486,7 +3278,7 @@ bool FUeAgentHttpServer::CmdScalabilityExportJson(const FUeAgentRequestContext& 
 	if (!OutputFile.TrimStartAndEnd().IsEmpty())
 	{
 		FString SavedPath;
-		if (!SaveJsonFile(OutputFile, OutData, SavedPath, OutError))
+		if (!SaveAuthoringFile(OutputFile, OutData, SavedPath, OutError))
 		{
 			return false;
 		}

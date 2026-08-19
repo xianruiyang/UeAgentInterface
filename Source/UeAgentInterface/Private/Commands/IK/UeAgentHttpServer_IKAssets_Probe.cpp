@@ -3,7 +3,7 @@
 #include "UeAgentHttpServer_IKAssets.h"
 
 #include "Commands/EditorViewport/UeAgentEditorViewportSequenceFrameOptions.h"
-#include "UeAgentHttpServer_IKAssetOps.h"
+#include "Domains/Rigging/UeAgentIKDomainBackend.h"
 
 #include "Utilities/UeAgentJsonDiagnostics.h"
 #include "UeAgentInterfaceSettings.h"

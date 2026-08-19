@@ -1,0 +1,68 @@
+authoring: { reason: command_has_no_registered_folder_authoring_profile, state: none }
+category: ai_behavior_blackboard_statetree_eqs_navigation_smartobject
+command: smart_object_validate_setup
+deprecation: { reason: command_is_active, state: none }
+discovery: { aliases: [], keywords_en: [smart, object, validate, setup, ai_behavior_blackboard_statetree_eqs_navigation_smartobject], keywords_zh: [smart_object_validate_setup], summary_en: "Execute smart_object_validate_setup with a verified implementation contract", summary_zh: "校验 Definition 与当前关卡 Actor 上 SmartObjectComponent 的引用关系", tags: [ai_behavior_blackboard_statetree_eqs_navigation_smartobject, p2-007] }
+errors: {
+  codes: [
+    { code: no_editor_world, description_zh: "C++ 实现返回错误码 no_editor_world", retry_safe: false, stage: execution, wire_match: exact }
+    { code: no_geditor, description_zh: "C++ 实现返回错误码 no_geditor", retry_safe: false, stage: execution, wire_match: exact }
+  ]
+}
+evidence: {
+  docs: [
+    { path: "Plugins/UeAgentInterface/docs/commands/ai_behavior_blackboard_statetree_eqs_navigation_smartobject/smart_object_validate_setup.md", purpose: "user documentation cross-check; C++ implementation remains authoritative" }
+  ]
+  implementation: [
+    { line_hint: 734, path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Commands/AI/UeAgentHttpServer_AI_SmartObjectBehaviorStack.cpp", purpose: "command handler, parameter and return evidence", symbol: CmdSmartObjectValidateSetup }
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Commands/AI/UeAgentHttpServer_AI_Blackboard.cpp", purpose: "transitive helper evidence used by the command handler" }
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Commands/Level/UeAgentHttpServer_Level_CaptureAndPersistence.cpp", purpose: "transitive helper evidence used by the command handler" }
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Server/UeAgentHttpServer.cpp", purpose: "transitive helper evidence used by the command handler" }
+  ]
+  tests: [
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterfaceTests/Private/Smoke/UeAgentInterfaceAISmokeTests.cpp", purpose: "smoke or negative-path evidence cross-checked for the verified contract" }
+  ]
+}
+execution: {
+  destructive: false
+  editor_state: required
+  game_thread: required
+  idempotent: true
+  kind: read_only
+  overwrite_behavior: none
+  pie_state: allowed
+  retry_safe: true
+  save_behavior: none
+  side_effects: []
+  ui_effect: none
+}
+maturity: verified
+params: {
+  constraints: []
+  fields: {
+    definition_asset: { default_state: none, description_zh: "C++ 实现读取的 definition_asset 参数", required: false, type: string }
+    owner_actor_or_blueprint: { default_state: none, description_zh: "C++ 实现读取的 owner_actor_or_blueprint 参数", required: false, type: string }
+  }
+  state: defined
+}
+response: { artifact_fields: [errors, json_issues, warnings, coverage_report, definition], compact_fields: [status, component_definition, component_owner, error_count], failure_fields: [], max_items_policy: { fields: [], mode: none } }
+returns: {
+  fields: {
+    component_definition: { description_zh: "C++ 实现返回的 component_definition 字段；是否出现取决于执行分支", required: false, type: string }
+    component_owner: { description_zh: "C++ 实现返回的 component_owner 字段；是否出现取决于执行分支", required: false, type: string }
+    coverage_report: { description_zh: "C++ 实现返回的 coverage_report 字段；是否出现取决于执行分支", required: false, type: json_value }
+    definition: { description_zh: "C++ 实现返回的 definition 字段；是否出现取决于执行分支", required: false, type: json_value }
+    error_count: { description_zh: "C++ 实现返回的 error_count 字段；是否出现取决于执行分支", required: false, type: integer }
+    errors: { description_zh: "C++ 实现返回的 errors 字段；是否出现取决于执行分支", item_type: json_value, required: false, type: array }
+    json_issues: { description_zh: "C++ 实现返回的 json_issues 字段；是否出现取决于执行分支", item_type: json_value, required: false, type: array }
+    status: { description_zh: "C++ 实现返回的 status 字段；是否出现取决于执行分支", required: false, type: string }
+    warning_count: { description_zh: "C++ 实现返回的 warning_count 字段；是否出现取决于执行分支", required: false, type: integer }
+    warnings: { description_zh: "C++ 实现返回的 warnings 字段；是否出现取决于执行分支", item_type: json_value, required: false, type: array }
+  }
+  state: defined
+}
+schema: uai.command_spec.v1
+status: active
+types: {}
+verification: { reason: read_only_command_has_no_post_write_verification, state: none }
+version: 1

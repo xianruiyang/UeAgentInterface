@@ -1,0 +1,19 @@
+definition: {
+  additional_fields: false
+  fields: {
+    bone_name: { default_state: none, description_zh: "目标骨骼；新 goal 必填", required: false, type: string }
+    enabled: { default_state: none, description_zh: "是否启用 goal", required: false, type: bool }
+    goal_name: { default_state: none, description_zh: "IK goal 名；goal_name/name 必选其一", required: false, type: string }
+    name: { default_state: none, description_zh: "goal_name 别名", required: false, type: string }
+    position: { default_state: none, description_zh: "由 position_space 解释的目标位置", required: false, type: object, type_ref: "shared:Vector3" }
+    position_alpha: { default_state: none, description_zh: "位置混合权重", maximum: 1, minimum: 0, required: false, type: number }
+    position_space: { default_state: none, description_zh: "位置 frame", enum_values: [component, additive, world], required: false, type: enum }
+    rotation: { default_state: none, description_zh: "由 rotation_space 解释的目标旋转（度）", required: false, type: object, type_ref: "shared:Rotator3D" }
+    rotation_alpha: { default_state: none, description_zh: "旋转混合权重", maximum: 1, minimum: 0, required: false, type: number }
+    rotation_space: { default_state: none, description_zh: "旋转 frame", enum_values: [component, additive, world], required: false, type: enum }
+  }
+  kind: object
+}
+schema: uai.command_spec.shared_type.v1
+type_id: IKRigGoalOverride
+version: 1

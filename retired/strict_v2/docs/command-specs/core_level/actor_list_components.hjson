@@ -1,0 +1,63 @@
+authoring: { reason: command_has_no_registered_folder_authoring_profile, state: none }
+category: core_level
+command: actor_list_components
+deprecation: { reason: command_is_active, state: none }
+discovery: { aliases: [], keywords_en: [actor, list, components, core_level], keywords_zh: [actor_list_components], summary_en: "Execute actor_list_components with a verified implementation contract", summary_zh: "列出 Actor 组件", tags: [core_level, p2-002] }
+errors: {
+  codes: [
+    { code: actor_not_found, description_zh: "C++ 实现返回错误码 actor_not_found", retry_safe: false, stage: execution, wire_match: exact }
+    { code: missing_id, description_zh: "C++ 实现返回错误码 missing_id", retry_safe: true, stage: preflight, wire_match: exact }
+    { code: no_editor_world, description_zh: "C++ 实现返回错误码 no_editor_world", retry_safe: false, stage: execution, wire_match: exact }
+    { code: no_geditor, description_zh: "C++ 实现返回错误码 no_geditor", retry_safe: false, stage: execution, wire_match: exact }
+  ]
+}
+evidence: {
+  docs: [
+    { path: "Plugins/UeAgentInterface/docs/commands/core_level/actor_list_components.md", purpose: "user documentation cross-check; C++ implementation remains authoritative" }
+  ]
+  implementation: [
+    { line_hint: 82, path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Commands/Level/UeAgentHttpServer_Level_ActorAndTransform.cpp", purpose: "command handler, parameter and return evidence", symbol: CmdActorListComponents }
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Commands/Level/UeAgentHttpServer_Level_CaptureAndPersistence.cpp", purpose: "transitive helper evidence used by the command handler" }
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Server/UeAgentHttpServer.cpp", purpose: "transitive helper evidence used by the command handler" }
+  ]
+  tests: [
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterfaceTests/Private/Smoke/UeAgentInterfaceSmoke_Coverage.cpp", purpose: "smoke or negative-path evidence cross-checked for the verified contract" }
+  ]
+}
+execution: {
+  destructive: false
+  editor_state: required
+  game_thread: required
+  idempotent: true
+  kind: read_only
+  overwrite_behavior: none
+  pie_state: allowed
+  retry_safe: true
+  save_behavior: none
+  side_effects: []
+  ui_effect: none
+}
+maturity: verified
+params: {
+  constraints: []
+  fields: {
+    id: { default_state: none, description_zh: "C++ 实现读取的 id 参数", required: true, type: string }
+    include_non_scene: { default: true, default_state: defined, description_zh: "C++ 实现读取的 include_non_scene 参数", required: false, type: bool }
+  }
+  state: defined
+}
+response: { artifact_fields: [], compact_fields: [count, actor_label, actor_name, components], failure_fields: [params.id], max_items_policy: { fields: [], mode: none } }
+returns: {
+  fields: {
+    actor_label: { description_zh: "C++ 实现返回的 actor_label 字段；是否出现取决于执行分支", required: false, type: string }
+    actor_name: { description_zh: "C++ 实现返回的 actor_name 字段；是否出现取决于执行分支", required: false, type: string }
+    components: { description_zh: "C++ 实现返回的 components 字段；是否出现取决于执行分支", item_type: json_value, required: false, type: array }
+    count: { description_zh: "C++ 实现返回的 count 字段；是否出现取决于执行分支", required: false, type: integer }
+  }
+  state: defined
+}
+schema: uai.command_spec.v1
+status: active
+types: {}
+verification: { reason: read_only_command_has_no_post_write_verification, state: none }
+version: 1

@@ -1,0 +1,82 @@
+authoring: { reason: command_has_no_registered_folder_authoring_profile, state: none }
+category: core_level
+command: level_open
+deprecation: { reason: command_is_active, state: none }
+discovery: { aliases: [], keywords_en: [level, open, core_level], keywords_zh: [level_open], summary_en: "Execute level_open with a verified implementation contract", summary_zh: "打开已有 persistent Level 资产", tags: [core_level, p2-002] }
+errors: {
+  codes: [
+    { code: invalid_level_package_path, description_zh: "C++ 实现返回错误码 invalid_level_package_path", retry_safe: true, stage: preflight, wire_match: exact }
+    { code: level_asset_not_found, description_zh: "C++ 实现返回错误码 level_asset_not_found", retry_safe: false, stage: execution, wire_match: exact }
+    { code: level_filename_conversion_failed, description_zh: "C++ 实现返回错误码 level_filename_conversion_failed", retry_safe: false, stage: execution, wire_match: exact }
+    { code: level_open_failed, description_zh: "C++ 实现返回错误码 level_open_failed", retry_safe: false, stage: execution, wire_match: exact }
+    { code: missing_level_path, description_zh: "C++ 实现返回错误码 missing_level_path", retry_safe: true, stage: preflight, wire_match: exact }
+    { code: save_existing_map_failed, description_zh: "C++ 实现返回错误码 save_existing_map_failed", retry_safe: false, stage: execution, wire_match: exact }
+  ]
+}
+evidence: {
+  docs: [
+    { path: "Plugins/UeAgentInterface/docs/commands/core_level/level_open.md", purpose: "user documentation cross-check; C++ implementation remains authoritative" }
+  ]
+  implementation: [
+    { line_hint: 1409, path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Commands/Level/UeAgentHttpServer_Level_CaptureAndPersistence.cpp", purpose: "command handler, parameter and return evidence", symbol: CmdLevelOpen }
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Commands/Level/UeAgentHttpServer_Level.cpp", purpose: "transitive helper evidence used by the command handler" }
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Server/UeAgentHttpServer.cpp", purpose: "transitive helper evidence used by the command handler" }
+  ]
+  tests: [
+    { path: "Plugins/UeAgentInterface/docs/smoke_coverage_ledger.json", purpose: "smoke or negative-path evidence cross-checked for the verified contract" }
+  ]
+}
+execution: {
+  destructive: false
+  editor_state: required
+  game_thread: required
+  idempotent: false
+  kind: write
+  overwrite_behavior: none
+  pie_state: allowed
+  retry_safe: false
+  save_behavior: caller_controlled
+  side_effects: [modifies_level]
+  ui_effect: none
+}
+maturity: verified
+params: {
+  constraints: [
+    { fields: [asset_path, level_path, map_path, package_path], kind: one_of }
+  ]
+  fields: {
+    asset_path: { default_state: none, description_zh: "C++ 实现读取的 asset_path 参数", path_semantics: { access_scope: project_write, kind: ue_asset }, required: false, type: ue_asset_path }
+    level_path: { default_state: none, description_zh: "C++ 实现读取的 level_path 参数", required: false, type: string }
+    map_path: { default_state: none, description_zh: "C++ 实现读取的 map_path 参数", required: false, type: string }
+    package_path: { default_state: none, description_zh: "C++ 实现读取的 package_path 参数", required: false, type: string }
+    save_existing_map: { default: true, default_state: defined, description_zh: "C++ 实现读取的 save_existing_map 参数", required: false, type: bool }
+  }
+  state: defined
+}
+response: { artifact_fields: [], compact_fields: [asset_path, filename, opened, save_existing_map, schema, world_path], failure_fields: [], max_items_policy: { fields: [], mode: none } }
+returns: {
+  fields: {
+    asset_path: { description_zh: "C++ 实现返回的 asset_path 字段；是否出现取决于执行分支", required: false, type: ue_asset_path }
+    filename: { description_zh: "C++ 实现返回的 filename 字段；是否出现取决于执行分支", required: false, type: string }
+    opened: { description_zh: "C++ 实现返回的 opened 字段；是否出现取决于执行分支", required: false, type: bool }
+    save_existing_map: { description_zh: "C++ 实现返回的 save_existing_map 字段；是否出现取决于执行分支", required: false, type: bool }
+    schema: { description_zh: "C++ 实现返回的 schema 字段；是否出现取决于执行分支", required: false, type: string }
+    world_path: { description_zh: "C++ 实现返回的 world_path 字段；是否出现取决于执行分支", required: false, type: string }
+  }
+  state: defined
+}
+schema: uai.command_spec.v1
+status: active
+types: {}
+verification: {
+  assertions: [
+    { id: result_present, operator: exists, source: returns.asset_path }
+  ]
+  failure_policy: fail_overall
+  methods: [
+    { id: result, kind: result_assertion }
+  ]
+  required: true
+  state: defined
+}
+version: 1

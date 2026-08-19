@@ -1,0 +1,67 @@
+authoring: { reason: command_has_no_registered_folder_authoring_profile, state: none }
+category: montage
+command: montage_list_montages
+deprecation: { reason: command_is_active, state: none }
+discovery: { aliases: [], keywords_en: [montage, list, montages], keywords_zh: [montage_list_montages], summary_en: "Execute montage_list_montages with a verified implementation contract", summary_zh: "列出 Montage 资产", tags: [montage, p2-006] }
+errors: {
+  codes: [
+    { code: invalid_root_path, description_zh: "C++ 实现返回错误码 invalid_root_path", retry_safe: true, stage: preflight, wire_match: exact }
+  ]
+}
+evidence: {
+  docs: [
+    { path: "Plugins/UeAgentInterface/docs/commands/montage/montage_list_montages.md", purpose: "user documentation cross-check; C++ implementation remains authoritative" }
+  ]
+  implementation: [
+    { line_hint: 792, path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Commands/Montage/UeAgentHttpServer_Montage.cpp", purpose: "command handler, parameter and return evidence", symbol: CmdMontageListMontages }
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Server/UeAgentHttpServer.cpp", purpose: "transitive helper evidence used by the command handler" }
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Utilities/UeAgentJsonDiagnostics.cpp", purpose: "transitive helper evidence used by the command handler" }
+  ]
+  tests: [
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterfaceTests/Private/Smoke/UeAgentInterfaceSmoke_AnimationIKNiagara.cpp", purpose: "smoke or negative-path evidence cross-checked for the verified contract" }
+  ]
+}
+execution: {
+  destructive: false
+  editor_state: required
+  game_thread: required
+  idempotent: true
+  kind: read_only
+  overwrite_behavior: none
+  pie_state: allowed
+  retry_safe: true
+  save_behavior: none
+  side_effects: []
+  ui_effect: none
+}
+maturity: verified
+params: {
+  constraints: []
+  fields: {
+    limit: { default: 0, default_state: defined, description_zh: "C++ 实现读取的 limit 参数", required: false, type: integer }
+    root_path: {
+      default: "/Game"
+      default_state: defined
+      description_zh: "C++ 实现读取的 root_path 参数"
+      path_semantics: { kind: filesystem_directory, must_exist: false, writable: false }
+      required: false
+      type: filesystem_path
+    }
+  }
+  state: defined
+}
+response: { artifact_fields: [items], compact_fields: [returned_count, root_path, total_count], failure_fields: [], max_items_policy: { fields: [], mode: none } }
+returns: {
+  fields: {
+    items: { description_zh: "C++ 实现返回的 items 字段；是否出现取决于执行分支", item_type: json_value, required: false, type: array }
+    returned_count: { description_zh: "C++ 实现返回的 returned_count 字段；是否出现取决于执行分支", required: false, type: integer }
+    root_path: { description_zh: "C++ 实现返回的 root_path 字段；是否出现取决于执行分支", required: false, type: filesystem_path }
+    total_count: { description_zh: "C++ 实现返回的 total_count 字段；是否出现取决于执行分支", required: false, type: integer }
+  }
+  state: defined
+}
+schema: uai.command_spec.v1
+status: active
+types: {}
+verification: { reason: read_only_command_has_no_post_write_verification, state: none }
+version: 1

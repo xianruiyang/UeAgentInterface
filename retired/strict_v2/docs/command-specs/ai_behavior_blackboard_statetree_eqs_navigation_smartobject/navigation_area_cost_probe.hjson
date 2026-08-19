@@ -1,0 +1,95 @@
+authoring: { reason: command_has_no_registered_folder_authoring_profile, state: none }
+category: ai_behavior_blackboard_statetree_eqs_navigation_smartobject
+command: navigation_area_cost_probe
+deprecation: { reason: command_is_active, state: none }
+discovery: { aliases: [], keywords_en: [navigation, area, cost, probe, ai_behavior_blackboard_statetree_eqs_navigation_smartobject], keywords_zh: [navigation_area_cost_probe], summary_en: "Execute navigation_area_cost_probe with a verified implementation contract", summary_zh: "读取 NavArea cost，可选附带路径", tags: [ai_behavior_blackboard_statetree_eqs_navigation_smartobject, p2-007] }
+errors: {
+  codes: [
+    { code: missing_end, description_zh: "C++ 实现返回错误码 missing_end", retry_safe: true, stage: preflight, wire_match: exact }
+    { code: missing_start, description_zh: "C++ 实现返回错误码 missing_start", retry_safe: true, stage: preflight, wire_match: exact }
+    { code: navmesh_navigation_system_not_found, description_zh: "C++ 实现返回错误码 navmesh_navigation_system_not_found", retry_safe: false, stage: execution, wire_match: exact }
+    { code: navmesh_no_nav_data, description_zh: "C++ 实现返回错误码 navmesh_no_nav_data", retry_safe: false, stage: execution, wire_match: exact }
+    { code: navmesh_project_end_failed, description_zh: "C++ 实现返回错误码 navmesh_project_end_failed", retry_safe: false, stage: execution, wire_match: exact }
+    { code: navmesh_project_start_failed, description_zh: "C++ 实现返回错误码 navmesh_project_start_failed", retry_safe: false, stage: execution, wire_match: exact }
+    { code: no_editor_world, description_zh: "C++ 实现返回错误码 no_editor_world", retry_safe: false, stage: execution, wire_match: exact }
+    { code: no_geditor, description_zh: "C++ 实现返回错误码 no_geditor", retry_safe: false, stage: execution, wire_match: exact }
+  ]
+}
+evidence: {
+  docs: [
+    { path: "Plugins/UeAgentInterface/docs/commands/ai_behavior_blackboard_statetree_eqs_navigation_smartobject/navigation_area_cost_probe.md", purpose: "user documentation cross-check; C++ implementation remains authoritative" }
+  ]
+  implementation: [
+    { line_hint: 517, path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Commands/AI/UeAgentHttpServer_AI_PerceptionNavigation.cpp", purpose: "command handler, parameter and return evidence", symbol: CmdNavigationAreaCostProbe }
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Commands/Level/UeAgentHttpServer_Level_CaptureAndPersistence.cpp", purpose: "transitive helper evidence used by the command handler" }
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Commands/Level/UeAgentHttpServer_Level_Navigation.cpp", purpose: "transitive helper evidence used by the command handler" }
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Server/UeAgentHttpServer.cpp", purpose: "transitive helper evidence used by the command handler" }
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Utilities/UeAgentJsonDiagnostics.cpp", purpose: "transitive helper evidence used by the command handler" }
+  ]
+  tests: [
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterfaceTests/Private/Smoke/UeAgentInterfaceAISmokeTests.cpp", purpose: "smoke or negative-path evidence cross-checked for the verified contract" }
+  ]
+}
+execution: {
+  destructive: false
+  editor_state: required
+  game_thread: required
+  idempotent: true
+  kind: read_only
+  overwrite_behavior: none
+  pie_state: allowed
+  retry_safe: true
+  save_behavior: none
+  side_effects: []
+  ui_effect: none
+}
+maturity: verified
+params: {
+  constraints: []
+  fields: {
+    allow_partial: { default: false, default_state: defined, description_zh: "C++ 实现读取的 allow_partial 参数", required: false, type: bool }
+    allow_projection_failure: { default: false, default_state: defined, description_zh: "C++ 实现读取的 allow_projection_failure 参数", required: false, type: bool }
+    end: { default_state: none, description_zh: "UE Editor World 坐标或 world-space query extent（cm）", required: true, type: object, type_ref: "shared:Vector3" }
+    expected_areas: { default_state: none, description_zh: "C++ 实现读取的 expected_areas 参数", item_type: json_value, required: false, type: array }
+    project_query_extent: { default_state: none, description_zh: "UE Editor World 坐标或 world-space query extent（cm）", required: false, type: object, type_ref: "shared:Vector3" }
+    project_query_extent_cm: { default_state: none, description_zh: "UE Editor World 坐标或 world-space query extent（cm）", required: false, type: object, type_ref: "shared:Vector3" }
+    project_to_nav: { default: true, default_state: defined, description_zh: "C++ 实现读取的 project_to_nav 参数", required: false, type: bool }
+    run_path_probe: { default_state: none, description_zh: "C++ 实现读取的 run_path_probe 参数", required: false, type: bool }
+    start: { default_state: none, description_zh: "UE Editor World 坐标或 world-space query extent（cm）", required: true, type: object, type_ref: "shared:Vector3" }
+    target: { default_state: none, description_zh: "UE Editor World 坐标或 world-space query extent（cm）", required: false, type: object, type_ref: "shared:Vector3" }
+  }
+  state: defined
+}
+response: { artifact_fields: [area_costs, path_points, end, end_projected, end_used, project_query_extent, start, start_projected, start_used], compact_fields: [status, allow_partial, allow_projection_failure], failure_fields: [params.end, params.start], max_items_policy: { fields: [], mode: none } }
+returns: {
+  fields: {
+    allow_partial: { description_zh: "C++ 实现返回的 allow_partial 字段；是否出现取决于执行分支", required: false, type: bool }
+    allow_projection_failure: { description_zh: "C++ 实现返回的 allow_projection_failure 字段；是否出现取决于执行分支", required: false, type: bool }
+    area_costs: { description_zh: "C++ 实现返回的 area_costs 字段；是否出现取决于执行分支", item_type: json_value, required: false, type: array }
+    end: { description_zh: "Navigation probe 的 UE world-space 坐标（cm）", required: false, type: object, type_ref: "shared:Vector3" }
+    end_projected: { description_zh: "Navigation probe 的 UE world-space 坐标（cm）", required: false, type: object, type_ref: "shared:Vector3" }
+    end_projected_distance_cm: { description_zh: "C++ 实现返回的 end_projected_distance_cm 字段；是否出现取决于执行分支", required: false, type: number }
+    end_projected_ok: { description_zh: "C++ 实现返回的 end_projected_ok 字段；是否出现取决于执行分支", required: false, type: bool }
+    end_used: { description_zh: "Navigation probe 的 UE world-space 坐标（cm）", required: false, type: object, type_ref: "shared:Vector3" }
+    is_partial: { description_zh: "C++ 实现返回的 is_partial 字段；是否出现取决于执行分支", required: false, type: bool }
+    nav_data_count: { description_zh: "C++ 实现返回的 nav_data_count 字段；是否出现取决于执行分支", required: false, type: integer }
+    path_found: { description_zh: "C++ 实现返回的 path_found 字段；是否出现取决于执行分支", required: false, type: bool }
+    path_length_cm: { description_zh: "C++ 实现返回的 path_length_cm 字段；是否出现取决于执行分支", required: false, type: number }
+    path_points: { description_zh: "Navigation path 在 UE world frame 中的点序列（cm）", item_type: object, item_type_ref: "shared:Vector3", required: false, type: array }
+    project_query_extent: { description_zh: "Navigation probe 的 UE world-space 坐标（cm）", required: false, type: object, type_ref: "shared:Vector3" }
+    project_to_nav: { description_zh: "C++ 实现返回的 project_to_nav 字段；是否出现取决于执行分支", required: false, type: bool }
+    projection_failed_reason: { description_zh: "C++ 实现返回的 projection_failed_reason 字段；是否出现取决于执行分支", required: false, type: string }
+    start: { description_zh: "Navigation probe 的 UE world-space 坐标（cm）", required: false, type: object, type_ref: "shared:Vector3" }
+    start_projected: { description_zh: "Navigation probe 的 UE world-space 坐标（cm）", required: false, type: object, type_ref: "shared:Vector3" }
+    start_projected_distance_cm: { description_zh: "C++ 实现返回的 start_projected_distance_cm 字段；是否出现取决于执行分支", required: false, type: number }
+    start_projected_ok: { description_zh: "C++ 实现返回的 start_projected_ok 字段；是否出现取决于执行分支", required: false, type: bool }
+    start_used: { description_zh: "Navigation probe 的 UE world-space 坐标（cm）", required: false, type: object, type_ref: "shared:Vector3" }
+    status: { description_zh: "C++ 实现返回的 status 字段；是否出现取决于执行分支", required: false, type: string }
+  }
+  state: defined
+}
+schema: uai.command_spec.v1
+status: active
+types: {}
+verification: { reason: read_only_command_has_no_post_write_verification, state: none }
+version: 1

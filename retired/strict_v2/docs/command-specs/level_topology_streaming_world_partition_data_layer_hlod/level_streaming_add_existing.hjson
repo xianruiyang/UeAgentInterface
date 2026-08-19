@@ -1,0 +1,89 @@
+authoring: { reason: command_has_no_registered_folder_authoring_profile, state: none }
+category: level_topology_streaming_world_partition_data_layer_hlod
+command: level_streaming_add_existing
+deprecation: { reason: command_is_active, state: none }
+discovery: { aliases: [], keywords_en: [level, streaming, add, existing, level_topology_streaming_world_partition_data_layer_hlod], keywords_zh: [level_streaming_add_existing], summary_en: "Execute level_streaming_add_existing with a verified implementation contract", summary_zh: "将已有关卡资产作为 streaming level 挂入当前 World", tags: [level_topology_streaming_world_partition_data_layer_hlod, p2-002] }
+errors: {
+  codes: [
+    { code: missing_level_package, description_zh: "C++ 实现返回错误码 missing_level_package", retry_safe: true, stage: preflight, wire_match: exact }
+    { code: no_editor_world, description_zh: "C++ 实现返回错误码 no_editor_world", retry_safe: false, stage: execution, wire_match: exact }
+    { code: no_geditor, description_zh: "C++ 实现返回错误码 no_geditor", retry_safe: false, stage: execution, wire_match: exact }
+    { code: streaming_class_invalid, description_zh: "C++ 实现返回错误码 streaming_class_invalid", retry_safe: true, stage: preflight, wire_match: exact }
+    { code: streaming_level_add_failed, description_zh: "C++ 实现返回错误码 streaming_level_add_failed", retry_safe: false, stage: execution, wire_match: exact }
+    { code: streaming_level_asset_not_found, description_zh: "C++ 实现返回错误码 streaming_level_asset_not_found", retry_safe: false, stage: execution, wire_match: exact }
+    { code: streaming_level_package_invalid, description_zh: "C++ 实现返回错误码 streaming_level_package_invalid", retry_safe: true, stage: preflight, wire_match: exact }
+  ]
+}
+evidence: {
+  docs: [
+    { path: "Plugins/UeAgentInterface/docs/commands/level_topology_streaming_world_partition_data_layer_hlod/level_streaming_add_existing.md", purpose: "user documentation cross-check; C++ implementation remains authoritative" }
+  ]
+  implementation: [
+    { line_hint: 1497, path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Commands/LevelTopology/UeAgentHttpServer_LevelTopology.cpp", purpose: "command handler, parameter and return evidence", symbol: CmdLevelStreamingAddExisting }
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Commands/Level/UeAgentHttpServer_Level_CaptureAndPersistence.cpp", purpose: "transitive helper evidence used by the command handler" }
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Server/UeAgentHttpServer.cpp", purpose: "transitive helper evidence used by the command handler" }
+  ]
+  tests: [
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterfaceTests/Private/Smoke/LevelTopology/UeAgentInterfaceLevelTopologySmokeTests.cpp", purpose: "smoke or negative-path evidence cross-checked for the verified contract" }
+  ]
+}
+execution: {
+  destructive: false
+  editor_state: required
+  game_thread: required
+  idempotent: false
+  kind: write
+  overwrite_behavior: none
+  pie_state: allowed
+  retry_safe: false
+  save_behavior: none
+  side_effects: [modifies_level]
+  ui_effect: none
+}
+maturity: verified
+params: {
+  constraints: []
+  fields: {
+    level_package: { default_state: none, description_zh: "C++ 实现读取的 level_package 参数", required: true, type: string }
+    package_path: { default_state: none, description_zh: "C++ 实现读取的 package_path 参数", required: false, type: string }
+    streaming_class: { default_state: none, description_zh: "C++ 实现读取的 streaming_class 参数", required: false, type: string }
+    transform: { default_state: none, description_zh: "C++ 实现读取的 transform 参数", required: false, type: json_value }
+  }
+  state: defined
+}
+response: { artifact_fields: [], compact_fields: [actor_count, added, asset_name, dirty, is_current, level_package], failure_fields: [params.level_package], max_items_policy: { fields: [], mode: none } }
+returns: {
+  fields: {
+    actor_count: { description_zh: "C++ 实现返回的 actor_count 字段；是否出现取决于执行分支", required: false, type: integer }
+    added: { description_zh: "C++ 实现返回的 added 字段；是否出现取决于执行分支", required: false, type: bool }
+    asset_name: { description_zh: "C++ 实现返回的 asset_name 字段；是否出现取决于执行分支", required: false, type: string }
+    dirty: { description_zh: "C++ 实现返回的 dirty 字段；是否出现取决于执行分支", required: false, type: bool }
+    is_current: { description_zh: "C++ 实现返回的 is_current 字段；是否出现取决于执行分支", required: false, type: bool }
+    level_package: { description_zh: "C++ 实现返回的 level_package 字段；是否出现取决于执行分支", required: false, type: string }
+    loaded: { description_zh: "C++ 实现返回的 loaded 字段；是否出现取决于执行分支", required: false, type: bool }
+    schema: { description_zh: "C++ 实现返回的 schema 字段；是否出现取决于执行分支", required: false, type: string }
+    should_be_loaded: { description_zh: "C++ 实现返回的 should_be_loaded 字段；是否出现取决于执行分支", required: false, type: bool }
+    should_be_visible: { description_zh: "C++ 实现返回的 should_be_visible 字段；是否出现取决于执行分支", required: false, type: bool }
+    streaming_class: { description_zh: "C++ 实现返回的 streaming_class 字段；是否出现取决于执行分支", required: false, type: string }
+    transform: { description_zh: "C++ 实现返回的 transform 字段；是否出现取决于执行分支", required: false, type: json_value }
+    visible: { description_zh: "C++ 实现返回的 visible 字段；是否出现取决于执行分支", required: false, type: bool }
+  }
+  state: defined
+}
+schema: uai.command_spec.v1
+status: active
+types: {}
+verification: {
+  assertions: [
+    { id: result_present, operator: exists, source: returns.actor_count }
+    { id: state_readback_present, operator: exists, source: methods.state_readback.streaming_levels }
+  ]
+  failure_policy: fail_overall
+  methods: [
+    { id: result, kind: result_assertion }
+    { command: level_streaming_query, id: state_readback, kind: command_readback, params_mapping: {} }
+  ]
+  required: true
+  state: defined
+}
+version: 1

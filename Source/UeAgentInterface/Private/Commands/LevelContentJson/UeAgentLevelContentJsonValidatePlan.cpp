@@ -4,6 +4,7 @@
 #include "UeAgentLevelContentJsonCore.h"
 #include "UeAgentLevelContentJsonProperties.h"
 #include "UeAgentLevelContentJsonQuery.h"
+#include "Utilities/UeAgentStructuredAuthoringIO.h"
 
 #include "Dom/JsonObject.h"
 #include "Dom/JsonValue.h"
@@ -11,8 +12,6 @@
 #include "Engine/World.h"
 #include "EngineUtils.h"
 #include "GameFramework/Actor.h"
-#include "Misc/FileHelper.h"
-#include "Misc/Paths.h"
 
 namespace UeAgentLevelContentJson
 {
@@ -352,16 +351,16 @@ namespace UeAgentLevelContentJson
 		if (bAllowFileWrite && (TryGetStringAny(Evidence, { TEXT("output_file"), TEXT("report_file"), TEXT("evidence_file") }, OutputFile)) && !OutputFile.TrimStartAndEnd().IsEmpty())
 		{
 			OutputFile = ResolveFilePath(OutputFile);
-			IFileManager::Get().MakeDirectory(*FPaths::GetPath(OutputFile), true);
-			if (!FFileHelper::SaveStringToFile(JsonToString(Report, false), *OutputFile, FFileHelper::EEncodingOptions::ForceUTF8WithoutBOM))
+			FString SaveError;
+			if (!UeAgentStructuredAuthoringIO::SaveObject(OutputFile, Report, &SaveError))
 			{
-				OutError = TEXT("evidence_output_file_write_failed");
+				OutError = SaveError.IsEmpty() ? TEXT("evidence_output_file_write_failed") : SaveError;
 				Report->SetStringField(TEXT("status"), TEXT("write_failed"));
 				Report->SetStringField(TEXT("error"), OutError);
 				return Report;
 			}
 			Report->SetStringField(TEXT("output_file"), OutputFile);
-			Report->SetStringField(TEXT("output_format"), TEXT("structured_compact"));
+			Report->SetStringField(TEXT("output_format"), TEXT("hjson_authoring"));
 		}
 		return Report;
 	}

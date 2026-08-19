@@ -1,0 +1,107 @@
+authoring: { reason: command_has_no_registered_folder_authoring_profile, state: none }
+category: ai_behavior_blackboard_statetree_eqs_navigation_smartobject
+command: behavior_tree_screenshot
+deprecation: { reason: command_is_active, state: none }
+discovery: { aliases: [], keywords_en: [behavior, tree, screenshot, ai_behavior_blackboard_statetree_eqs_navigation_smartobject], keywords_zh: [behavior_tree_screenshot], summary_en: "Execute behavior_tree_screenshot with a verified implementation contract", summary_zh: "截取 BT 编辑器", tags: [ai_behavior_blackboard_statetree_eqs_navigation_smartobject, p2-007] }
+errors: {
+  codes: [
+    { code: asset_editor_not_opened, description_zh: "C++ 实现返回错误码 asset_editor_not_opened", retry_safe: false, stage: execution, wire_match: exact }
+    { code: asset_editor_open_failed, description_zh: "C++ 实现返回错误码 asset_editor_open_failed", retry_safe: false, stage: execution, wire_match: exact }
+    { code: asset_editor_owner_tab_not_found, description_zh: "C++ 实现返回错误码 asset_editor_owner_tab_not_found", retry_safe: false, stage: execution, wire_match: exact }
+    { code: asset_editor_screenshot_black, description_zh: "C++ 实现返回错误码 asset_editor_screenshot_black", retry_safe: false, stage: execution, wire_match: exact }
+    { code: asset_editor_subsystem_unavailable, description_zh: "C++ 实现返回错误码 asset_editor_subsystem_unavailable", retry_safe: false, stage: execution, wire_match: exact }
+    { code: asset_editor_tab_manager_not_found, description_zh: "C++ 实现返回错误码 asset_editor_tab_manager_not_found", retry_safe: false, stage: execution, wire_match: exact }
+    { code: asset_editor_window_not_found, description_zh: "C++ 实现返回错误码 asset_editor_window_not_found", retry_safe: false, stage: execution, wire_match: exact }
+    { code: behavior_tree_not_found, description_zh: "C++ 实现返回错误码 behavior_tree_not_found", retry_safe: false, stage: execution, wire_match: exact }
+    { code: compress_failed, description_zh: "C++ 实现返回错误码 compress_failed", retry_safe: false, stage: execution, wire_match: exact }
+    { code: editor_unavailable, description_zh: "C++ 实现返回错误码 editor_unavailable", retry_safe: false, stage: execution, wire_match: exact }
+    { code: invalid_pixels, description_zh: "C++ 实现返回错误码 invalid_pixels", retry_safe: true, stage: preflight, wire_match: exact }
+    { code: missing_asset_path, description_zh: "C++ 实现返回错误码 missing_asset_path", retry_safe: true, stage: preflight, wire_match: exact }
+    { code: offscreen_read_pixels_failed, description_zh: "C++ 实现返回错误码 offscreen_read_pixels_failed", retry_safe: false, stage: execution, wire_match: exact }
+    { code: offscreen_render_target_create_failed, description_zh: "C++ 实现返回错误码 offscreen_render_target_create_failed", retry_safe: false, stage: execution, wire_match: exact }
+    { code: offscreen_render_target_resource_missing, description_zh: "C++ 实现返回错误码 offscreen_render_target_resource_missing", retry_safe: true, stage: preflight, wire_match: exact }
+    { code: offscreen_screenshot_empty, description_zh: "C++ 实现返回错误码 offscreen_screenshot_empty", retry_safe: false, stage: execution, wire_match: exact }
+    { code: rendering_not_available, description_zh: "C++ 实现返回错误码 rendering_not_available", retry_safe: false, stage: execution, wire_match: exact }
+    { code: slate_not_initialized, description_zh: "C++ 实现返回错误码 slate_not_initialized", retry_safe: false, stage: execution, wire_match: exact }
+    { code: widget_renderer_create_failed, description_zh: "C++ 实现返回错误码 widget_renderer_create_failed", retry_safe: false, stage: execution, wire_match: exact }
+    { code: window_not_found, description_zh: "C++ 实现返回错误码 window_not_found", retry_safe: false, stage: execution, wire_match: exact }
+    { code: write_file_failed, description_zh: "C++ 实现返回错误码 write_file_failed", retry_safe: false, stage: execution, wire_match: exact }
+  ]
+}
+evidence: {
+  docs: [
+    { path: "Plugins/UeAgentInterface/docs/commands/ai_behavior_blackboard_statetree_eqs_navigation_smartobject/behavior_tree_screenshot.md", purpose: "user documentation cross-check; C++ implementation remains authoritative" }
+  ]
+  implementation: [
+    { line_hint: 882, path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Commands/AI/UeAgentHttpServer_AI_BehaviorTree.cpp", purpose: "command handler, parameter and return evidence", symbol: CmdBehaviorTreeScreenshot }
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Commands/AI/UeAgentHttpServer_AI_StateTreeEQS.cpp", purpose: "transitive helper evidence used by the command handler" }
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Commands/Level/UeAgentHttpServer_Level_CaptureAndPersistence.cpp", purpose: "transitive helper evidence used by the command handler" }
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Commands/Level/UeAgentHttpServer_Level_ImageHelpers.cpp", purpose: "transitive helper evidence used by the command handler" }
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Server/UeAgentHttpServer.cpp", purpose: "transitive helper evidence used by the command handler" }
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Utilities/UeAgentJsonDiagnostics.cpp", purpose: "transitive helper evidence used by the command handler" }
+  ]
+  tests: [
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterfaceTests/Private/Smoke/UeAgentInterfaceSmoke_Coverage.cpp", purpose: "smoke or negative-path evidence cross-checked for the verified contract" }
+  ]
+}
+execution: {
+  destructive: false
+  editor_state: required
+  game_thread: required
+  idempotent: true
+  kind: read_only_export
+  overwrite_behavior: owned_artifacts_only
+  pie_state: allowed
+  retry_safe: true
+  save_behavior: none
+  side_effects: [writes_files, captures_media]
+  ui_effect: none
+}
+maturity: verified
+params: {
+  constraints: []
+  fields: {
+    asset_path: { default_state: none, description_zh: "C++ 实现读取的 asset_path 参数", path_semantics: { access_scope: mounted_read, kind: ue_asset }, required: true, type: ue_asset_path }
+    format: { default: png, default_state: defined, description_zh: "C++ 实现读取的 format 参数", required: false, type: string }
+    max_size: { default_state: none, description_zh: "C++ 实现读取的 max_size 参数", required: false, type: number }
+    open_editor_if_needed: { default: true, default_state: defined, description_zh: "C++ 实现读取的 open_editor_if_needed 参数", required: false, type: bool }
+    require_non_black: { default: true, default_state: defined, description_zh: "C++ 实现读取的 require_non_black 参数", required: false, type: bool }
+  }
+  state: defined
+}
+response: { artifact_fields: [], compact_fields: [status, asset_path, appears_non_black, average_luma, backbuffer_capture_would_be_unsafe, backbuffer_unsafe_reason], failure_fields: [params.asset_path], max_items_policy: { fields: [], mode: none } }
+returns: {
+  fields: {
+    appears_non_black: { description_zh: "C++ 实现返回的 appears_non_black 字段；是否出现取决于执行分支", required: false, type: bool }
+    asset_path: { description_zh: "C++ 实现返回的 asset_path 字段；是否出现取决于执行分支", required: false, type: ue_asset_path }
+    average_luma: { description_zh: "C++ 实现返回的 average_luma 字段；是否出现取决于执行分支", required: false, type: number }
+    backbuffer_capture_would_be_unsafe: { description_zh: "C++ 实现返回的 backbuffer_capture_would_be_unsafe 字段；是否出现取决于执行分支", required: false, type: bool }
+    backbuffer_unsafe_reason: { description_zh: "C++ 实现返回的 backbuffer_unsafe_reason 字段；是否出现取决于执行分支", required: false, type: string }
+    capture_mode: { description_zh: "C++ 实现返回的 capture_mode 字段；是否出现取决于执行分支", required: false, type: string }
+    file_path: { description_zh: "C++ 实现返回的 file_path 字段；是否出现取决于执行分支", required: false, type: string }
+    format: { description_zh: "C++ 实现返回的 format 字段；是否出现取决于执行分支", required: false, type: string }
+    height: { description_zh: "C++ 实现返回的 height 字段；是否出现取决于执行分支", required: false, type: integer }
+    legacy_backbuffer_capture: { description_zh: "C++ 实现返回的 legacy_backbuffer_capture 字段；是否出现取决于执行分支", required: false, type: string }
+    non_black_pixel_count: { description_zh: "C++ 实现返回的 non_black_pixel_count 字段；是否出现取决于执行分支", required: false, type: integer }
+    status: { description_zh: "C++ 实现返回的 status 字段；是否出现取决于执行分支", required: false, type: string }
+    width: { description_zh: "C++ 实现返回的 width 字段；是否出现取决于执行分支", required: false, type: integer }
+  }
+  state: defined
+}
+schema: uai.command_spec.v1
+status: active
+types: {}
+verification: {
+  assertions: [
+    { id: result_present, operator: exists, source: returns.status }
+    { id: artifact_present, operator: not_empty, source: returns.file_path }
+  ]
+  failure_policy: fail_overall
+  methods: [
+    { id: result, kind: result_assertion }
+    { artifact_field: file_path, id: artifact, kind: filesystem_artifact }
+  ]
+  required: true
+  state: defined
+}
+version: 1

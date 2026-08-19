@@ -27,15 +27,22 @@ bool FUeAgentHttpServer::CmdModelingSaveMeshAsset(const FUeAgentRequestContext& 
 		return false;
 	}
 
-	int32 SavedCount = 0;
-	if (!SaveActorStaticMeshes(Actors, SavedCount))
+	TArray<FString> SavedPackagePaths;
+	if (!SaveActorStaticMeshes(Actors, SavedPackagePaths))
 	{
 		OutError = TEXT("no_static_mesh_packages_saved");
 		return false;
 	}
 
-	OutData->SetNumberField(TEXT("saved_package_count"), SavedCount);
-	FUeAgentInterfaceLogger::Log(TEXT("ModelingSaveMeshAsset req=%s saved_packages=%d"), *Ctx.RequestId, SavedCount);
+	TArray<TSharedPtr<FJsonValue>> SavedPackageValues;
+	SavedPackageValues.Reserve(SavedPackagePaths.Num());
+	for (const FString& PackagePath : SavedPackagePaths)
+	{
+		SavedPackageValues.Add(MakeShared<FJsonValueString>(PackagePath));
+	}
+	OutData->SetNumberField(TEXT("saved_package_count"), SavedPackagePaths.Num());
+	OutData->SetArrayField(TEXT("saved_package_paths"), SavedPackageValues);
+	FUeAgentInterfaceLogger::Log(TEXT("ModelingSaveMeshAsset req=%s saved_packages=%d"), *Ctx.RequestId, SavedPackagePaths.Num());
 	return true;
 }
 

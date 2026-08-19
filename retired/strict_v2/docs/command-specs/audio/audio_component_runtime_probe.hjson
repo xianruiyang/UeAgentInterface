@@ -1,0 +1,97 @@
+authoring: { reason: command_has_no_registered_folder_authoring_profile, state: none }
+category: audio
+command: audio_component_runtime_probe
+deprecation: { reason: command_is_active, state: none }
+discovery: { aliases: [], keywords_en: [audio, component, runtime, probe], keywords_zh: [audio_component_runtime_probe], summary_en: "Execute audio_component_runtime_probe with a verified implementation contract", summary_zh: "播放/采样已有组件", tags: [audio, p2-007] }
+errors: {
+  codes: [
+    { code: actor_not_found, description_zh: "C++ 实现返回错误码 actor_not_found", retry_safe: false, stage: execution, wire_match: exact }
+    { code: audio_component_not_found, description_zh: "C++ 实现返回错误码 audio_component_not_found", retry_safe: false, stage: execution, wire_match: exact }
+    { code: audio_device_unavailable, description_zh: "C++ 实现返回错误码 audio_device_unavailable", retry_safe: false, stage: execution, wire_match: exact }
+    { code: audio_peak_below_expected_min, description_zh: "C++ 实现返回错误码 audio_peak_below_expected_min", retry_safe: false, stage: execution, wire_match: exact }
+    { code: invalid_, description_zh: "C++ 实现返回错误码 invalid_", retry_safe: true, stage: preflight, wire_match: prefix }
+    { code: world_not_found, description_zh: "C++ 实现返回错误码 world_not_found", retry_safe: false, stage: execution, wire_match: exact }
+  ]
+}
+evidence: {
+  docs: [
+    { path: "Plugins/UeAgentInterface/docs/commands/audio/audio_component_runtime_probe.md", purpose: "user documentation cross-check; C++ implementation remains authoritative" }
+  ]
+  implementation: [
+    { line_hint: 55, path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Commands/Audio/UeAgentHttpServer_AudioRuntime.cpp", purpose: "command handler, parameter and return evidence", symbol: CmdAudioComponentRuntimeProbe }
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Commands/Audio/UeAgentHttpServer_AudioOpsCore.cpp", purpose: "transitive helper evidence used by the command handler" }
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Commands/Audio/UeAgentHttpServer_AudioOpsRuntime.cpp", purpose: "transitive helper evidence used by the command handler" }
+  ]
+  tests: [
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterfaceTests/Private/Smoke/UeAgentInterfaceAudioSmokeTests.cpp", purpose: "smoke or negative-path evidence cross-checked for the verified contract" }
+  ]
+}
+execution: {
+  destructive: false
+  editor_state: required
+  game_thread: required
+  idempotent: false
+  kind: session_control
+  overwrite_behavior: none
+  pie_state: allowed
+  retry_safe: false
+  save_behavior: none
+  side_effects: [starts_runtime, stops_runtime, modifies_editor_session]
+  ui_effect: none
+}
+maturity: verified
+params: {
+  constraints: []
+  fields: {
+    actor: { default_state: none, description_zh: "C++ 实现读取的 actor 参数", required: false, type: string }
+    actor_label: { default_state: none, description_zh: "C++ 实现读取的 actor_label 参数", required: false, type: string }
+    actor_name: { default_state: none, description_zh: "C++ 实现读取的 actor_name 参数", required: false, type: string }
+    cleanup: { default: true, default_state: defined, description_zh: "C++ 实现读取的 cleanup 参数", required: false, type: bool }
+    component: { default_state: none, description_zh: "C++ 实现读取的 component 参数", required: false, type: string }
+    component_name: { default_state: none, description_zh: "C++ 实现读取的 component_name 参数", required: false, type: string }
+    duration: { default_state: none, description_zh: "C++ 实现读取的 duration 参数", required: false, type: number }
+    expected_min_peak: { default: 0, default_state: defined, description_zh: "C++ 实现读取的 expected_min_peak 参数", required: false, type: number }
+    stop_after_preview: { default: true, default_state: defined, description_zh: "C++ 实现读取的 stop_after_preview 参数", required: false, type: bool }
+  }
+  state: defined
+}
+response: { artifact_fields: [cleanup_results, coverage_report], compact_fields: [active_wave_count, attenuation, auto_activate, component_name], failure_fields: [], max_items_policy: { fields: [], mode: none } }
+returns: {
+  fields: {
+    active_wave_count: { description_zh: "C++ 实现返回的 active_wave_count 字段；是否出现取决于执行分支", required: false, type: integer }
+    attenuation: { description_zh: "C++ 实现返回的 attenuation 字段；是否出现取决于执行分支", required: false, type: string }
+    auto_activate: { description_zh: "C++ 实现返回的 auto_activate 字段；是否出现取决于执行分支", required: false, type: bool }
+    cleanup_results: { description_zh: "C++ 实现返回的 cleanup_results 字段；是否出现取决于执行分支", item_type: json_value, required: false, type: array }
+    component_name: { description_zh: "C++ 实现返回的 component_name 字段；是否出现取决于执行分支", required: false, type: string }
+    coverage_report: { description_zh: "C++ 实现返回的 coverage_report 字段；是否出现取决于执行分支", required: false, type: json_value }
+    elapsed: { description_zh: "C++ 实现返回的 elapsed 字段；是否出现取决于执行分支", required: false, type: number }
+    is_playing: { description_zh: "C++ 实现返回的 is_playing 字段；是否出现取决于执行分支", required: false, type: bool }
+    observed_playing: { description_zh: "C++ 实现返回的 observed_playing 字段；是否出现取决于执行分支", required: false, type: bool }
+    owner: { description_zh: "C++ 实现返回的 owner 字段；是否出现取决于执行分支", required: false, type: string }
+    peak_envelope: { description_zh: "C++ 实现返回的 peak_envelope 字段；是否出现取决于执行分支", required: false, type: number }
+    pitch_multiplier: { description_zh: "C++ 实现返回的 pitch_multiplier 字段；是否出现取决于执行分支", required: false, type: number }
+    play_state: { description_zh: "C++ 实现返回的 play_state 字段；是否出现取决于执行分支", required: false, type: string }
+    probe_passed: { description_zh: "C++ 实现返回的 probe_passed 字段；是否出现取决于执行分支", required: false, type: bool }
+    sound: { description_zh: "C++ 实现返回的 sound 字段；是否出现取决于执行分支", required: false, type: string }
+    started: { description_zh: "C++ 实现返回的 started 字段；是否出现取决于执行分支", required: false, type: bool }
+    stopped: { description_zh: "C++ 实现返回的 stopped 字段；是否出现取决于执行分支", required: false, type: bool }
+    volume_multiplier: { description_zh: "C++ 实现返回的 volume_multiplier 字段；是否出现取决于执行分支", required: false, type: number }
+  }
+  state: defined
+}
+schema: uai.command_spec.v1
+status: active
+types: {}
+verification: {
+  assertions: [
+    { id: result_present, operator: exists, source: returns.active_wave_count }
+    { expected: true, id: probe_passed_true, operator: equals, source: returns.probe_passed }
+  ]
+  failure_policy: fail_overall
+  methods: [
+    { id: result, kind: result_assertion }
+  ]
+  required: true
+  state: defined
+}
+version: 1

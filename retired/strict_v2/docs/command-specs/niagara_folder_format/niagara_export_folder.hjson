@@ -1,0 +1,113 @@
+schema: uai.command_spec.v1
+version: 1
+maturity: verified
+command: niagara_export_folder
+category: niagara_folder_format
+status: active
+discovery: {
+  summary_zh: "导出 Niagara System 统一 index.hjson workspace"
+  summary_en: "Export Niagara System through the unified index.hjson workspace"
+  aliases: []
+  keywords_zh: ["Niagara", "HJSON", "workspace", "导出"]
+  keywords_en: [niagara, hjson, workspace, export]
+  tags: [niagara, authoring, export, unified_contract]
+}
+types: {}
+execution: {
+  kind: read_only_export
+  side_effects: [writes_files, deletes_owned_files]
+  destructive: false
+  idempotent: true
+  retry_safe: true
+  editor_state: required
+  pie_state: allowed
+  game_thread: required
+  ui_effect: none
+  save_behavior: none
+  overwrite_behavior: owned_artifacts_only
+}
+params: {
+  state: defined
+  fields: {
+    asset_path: {
+      type: ue_asset_path
+      required: true
+      default_state: none
+      description_zh: "要导出的 Niagara System 资产路径"
+      path_semantics: { kind: ue_asset, access_scope: mounted_read }
+    }
+    folder_path: { type: filesystem_path, required: false, default_state: none, description_zh: "导出目录；省略时使用统一默认 workspace", path_semantics: { kind: filesystem_directory, must_exist: false, writable: true } }
+    profile: { type: enum, enum_values: [llm_authoring, readback, debug, validation], required: false, default_state: defined, default: llm_authoring, description_zh: "Export profile" }
+  }
+  constraints: []
+}
+returns: {
+  state: defined
+  fields: {
+    asset_kind: { description_zh: system, required: true, type: string }
+    asset_path: { description_zh: "规范化资产路径", required: true, type: ue_asset_path }
+    contract_id: { description_zh: uai.export.niagara.asset, required: true, type: string }
+    contract_version: { description_zh: "Export contract version", required: true, type: string }
+    entry_file: { description_zh: "workspace-relative canonical 入口文件", required: true, type: string }
+    file_count: { description_zh: "写出的 HJSON 文件数；当前统一 workspace 为 1", required: true, type: integer }
+    files: { description_zh: "规划文件", item_type: json_value, required: true, type: array }
+    folder_path: { description_zh: "导出目录", required: true, type: filesystem_path }
+    metrics: { description_zh: "HJSON 文本指标", required: true, type: json_value }
+    profile_id: { description_zh: "实际 profile", required: true, type: string }
+    publisher: { description_zh: "共享 Export publisher transaction receipt", required: true, type: json_value }
+    schema: { description_zh: uai.export_workspace_result.v1, required: true, type: string }
+    status: { description_zh: written, required: true, type: string }
+    token_budget: { description_zh: "profile token budget", required: true, type: integer }
+    workspace_root: { description_zh: "规范化 workspace 根目录", required: true, type: filesystem_path }
+    written_files: { description_zh: "已写文件", item_type: filesystem_path, required: true, type: array }
+    written_relative_files: { description_zh: "最终 artifact 的完整 workspace-relative 文件集合", item_type: string, required: true, type: array }
+  }
+}
+response: {
+  compact_fields: [status, asset_path, asset_kind, folder_path, file_count, profile_id]
+  failure_fields: ["params.folder_path", "params.asset_path"]
+  artifact_fields: [written_files]
+  max_items_policy: { mode: none, fields: [] }
+}
+errors: {
+  codes: [
+    { code: missing_asset_path, wire_match: exact, stage: preflight, retry_safe: true, description_zh: "缺少 asset_path" }
+    { code: missing_folder_path_or_asset_path, wire_match: exact, stage: preflight, retry_safe: true, description_zh: "Apply 未提供 workspace 或目标资产路径" }
+    { code: niagara_asset_not_found, wire_match: exact, stage: execution, retry_safe: true, description_zh: "找不到目标 Niagara 资产" }
+    { code: niagara_asset_kind_conflict, wire_match: prefix, stage: preflight, retry_safe: true, description_zh: "资产类型与命令不一致" }
+    { code: niagara_workspace_asset_path_conflict, wire_match: exact, stage: preflight, retry_safe: true, description_zh: "外部目标路径与 workspace target 不一致" }
+    { code: niagara_workspace_asset_kind_conflict, wire_match: exact, stage: preflight, retry_safe: true, description_zh: "外部目标类型与 workspace target 不一致" }
+    { code: workspace_source_invalid, wire_match: exact, stage: preflight, retry_safe: true, description_zh: "workspace 目录或 index.hjson 无效" }
+    { code: export_, wire_match: prefix, stage: execution, retry_safe: true, description_zh: "共享 Export Contract/projector/writer 失败" }
+    { code: niagara_workspace_, wire_match: prefix, stage: execution, retry_safe: false, description_zh: "Niagara workspace preflight、mutation 或 verification 失败" }
+  ]
+}
+verification: {
+  assertions: [
+    { expected: written, id: status_written, operator: equals, source: returns.status }
+    { expected: 1, id: one_file_written, operator: equals, source: returns.file_count }
+    { id: folder_exists, operator: exists, source: returns.folder_path }
+  ]
+  failure_policy: fail_overall
+  methods: [
+    { id: result_fields, kind: result_assertion }
+    { artifact_field: folder_path, id: exported_workspace, kind: filesystem_artifact, receipt_source: structured_result }
+  ]
+  required: true
+  state: defined
+}
+authoring: { state: defined, type_id: niagara_system, operation: export, profile_ref: "contracts/field_contracts/niagara_system.hjson" }
+deprecation: { state: none, reason: command_is_active }
+evidence: {
+  implementation: [
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Commands/Niagara/UeAgentHttpServer_Niagara_AuthoringWorkspace.cpp", symbol: ExportWorkspaceCommand, purpose: "统一命令适配器" }
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Domains/Niagara/Authoring/UeAgentNiagaraAuthoringExport.cpp", purpose: "领域契约实现" }
+  ]
+  tests: [
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterfaceTests/Private/Smoke/UeAgentInterfaceSmoke_AnimationIKNiagara.cpp", purpose: "System/Emitter/Script 六入口 roundtrip smoke" }
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterfaceTests/Private/Smoke/UeAgentInterfaceSmoke_NiagaraStagePatch.cpp", purpose: "module/dynamic-input 命令 smoke" }
+  ]
+  docs: [
+    { path: "Plugins/UeAgentInterface/docs/commands/niagara_folder_format/niagara_export_folder.md", purpose: "正式命令文档" }
+  ]
+}

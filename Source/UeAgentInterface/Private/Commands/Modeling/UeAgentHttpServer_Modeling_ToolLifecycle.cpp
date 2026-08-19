@@ -10,35 +10,130 @@
 #include "InteractiveToolManager.h"
 #include "Tools/EdModeInteractiveToolsContext.h"
 
+namespace
+{
+	bool HasAnyField(const TSharedPtr<FJsonObject>& Params, const TArray<const TCHAR*>& FieldNames, FString* OutFieldName = nullptr)
+	{
+		if (!Params.IsValid())
+		{
+			return false;
+		}
+
+		for (const TCHAR* FieldName : FieldNames)
+		{
+			if (Params->HasField(FieldName))
+			{
+				if (OutFieldName)
+				{
+					*OutFieldName = FieldName;
+				}
+				return true;
+			}
+		}
+		return false;
+	}
+
+	bool HasPrimitiveOnlyParameters(const TSharedPtr<FJsonObject>& Params, FString& OutFieldName)
+	{
+		static const TArray<const TCHAR*> PrimitiveOnlyFields = {
+			TEXT("bounds"), TEXT("bounds_center"), TEXT("bounds_extent"), TEXT("bounds_min"), TEXT("bounds_max"),
+			TEXT("rotation"), TEXT("orientation"), TEXT("label"), TEXT("folder_path"),
+			TEXT("auto_generate_collision"), TEXT("collision")
+		};
+		return HasAnyField(Params, PrimitiveOnlyFields, &OutFieldName);
+	}
+
+	bool HasPrimitiveBoundsParameters(const TSharedPtr<FJsonObject>& Params)
+	{
+		static const TArray<const TCHAR*> BoundsFields = {
+			TEXT("bounds"), TEXT("bounds_center"), TEXT("bounds_extent"), TEXT("bounds_min"), TEXT("bounds_max")
+		};
+		return HasAnyField(Params, BoundsFields);
+	}
+}
+
 bool FUeAgentHttpServer::CmdModelingStartTool(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	using namespace UeAgentModelingOps;
 	OutData = MakeShared<FJsonObject>();
 
-	FModelingContext Context;
-	if (!GetModelingContext(Context, OutError))
-	{
-		return false;
-	}
-
+	const FString RequestCommand = Ctx.Command.TrimStartAndEnd().ToLower();
+	const FModelingToolWrapperDefinition* WrapperDefinition = GetModelingToolWrapperRegistry().Find(RequestCommand);
+	const bool bInternalPivotTool = RequestCommand == TEXT("modeling_set_pivot");
+	const FString WrapperCommand = (WrapperDefinition || bInternalPivotTool) ? RequestCommand : FString();
 	FString ToolIdentifier;
-	if (!Ctx.Params.IsValid() || !Ctx.Params->TryGetStringField(TEXT("tool_identifier"), ToolIdentifier))
+	FString PostAction;
+	EModelingOutputTypePolicy OutputTypePolicy = EModelingOutputTypePolicy::DynamicMeshActorDefault;
+	if (WrapperDefinition)
 	{
-		OutError = TEXT("tool_identifier_required");
-		return false;
+		static const TArray<const TCHAR*> WrapperInternalFields = {
+			TEXT("__uai_wrapper_command"), TEXT("tool_identifier"), TEXT("post_action")
+		};
+		if (HasAnyField(Ctx.Params, WrapperInternalFields))
+		{
+			OutError = TEXT("internal_tool_wrapper_parameters_forbidden");
+			return false;
+		}
+		ToolIdentifier = WrapperDefinition->ToolIdentifier;
+		PostAction = WrapperDefinition->PostAction;
+		OutputTypePolicy = WrapperDefinition->OutputTypePolicy;
+		if (!PostAction.IsEmpty() && !WrapperDefinition->bPostActionSupported)
+		{
+			OutError = WrapperDefinition->UnsupportedActionError.IsEmpty()
+				? TEXT("tool_action_not_supported")
+				: WrapperDefinition->UnsupportedActionError;
+			return false;
+		}
 	}
-	ToolIdentifier = ResolveToolIdentifierAlias(ToolIdentifier);
-	if (ToolIdentifier.IsEmpty())
+	else if (bInternalPivotTool)
 	{
-		OutError = TEXT("tool_identifier_required");
+		ToolIdentifier = TEXT("BeginEditPivotTool");
+		if (Ctx.Params.IsValid())
+		{
+			Ctx.Params->TryGetStringField(TEXT("post_action"), PostAction);
+		}
+	}
+	else
+	{
+		static const TArray<const TCHAR*> InternalFields = {
+			TEXT("__uai_wrapper_command"), TEXT("post_action")
+		};
+		if (HasAnyField(Ctx.Params, InternalFields))
+		{
+			OutError = TEXT("internal_tool_wrapper_parameters_forbidden");
+			return false;
+		}
+		FString RequestedToolIdentifier;
+		if (!Ctx.Params.IsValid() || !Ctx.Params->TryGetStringField(TEXT("tool_identifier"), RequestedToolIdentifier) || RequestedToolIdentifier.TrimStartAndEnd().IsEmpty())
+		{
+			OutError = TEXT("tool_identifier_required");
+			return false;
+		}
+		if (!ResolveAllowedModelingToolIdentifier(RequestedToolIdentifier, ToolIdentifier))
+		{
+			OutError = TEXT("tool_identifier_not_allowed");
+			return false;
+		}
+	}
+
+	static const TArray<const TCHAR*> SingletonPropertyFields = {
+		TEXT("property_set"), TEXT("property_path"), TEXT("value_kind"), TEXT("value")
+	};
+	if (HasAnyField(Ctx.Params, SingletonPropertyFields))
+	{
+		OutError = TEXT("tool_properties_array_required");
 		return false;
 	}
 
-	FString WrapperCommand;
-	if (Ctx.Params.IsValid())
+	FString PrimitiveOnlyField;
+	const bool bHasPrimitiveOnlyParameters = HasPrimitiveOnlyParameters(Ctx.Params, PrimitiveOnlyField);
+	if (bHasPrimitiveOnlyParameters && !bInternalPivotTool && (!WrapperDefinition || !WrapperDefinition->bPrimitiveCreation))
 	{
-		Ctx.Params->TryGetStringField(TEXT("__uai_wrapper_command"), WrapperCommand);
+		OutData->SetStringField(TEXT("rejected_parameter"), PrimitiveOnlyField);
+		OutError = TEXT("primitive_parameters_require_create_wrapper");
+		return false;
 	}
+
 	TSharedPtr<FJsonObject> EffectiveParams = Ctx.Params.IsValid() ? MakeShared<FJsonObject>(*Ctx.Params) : MakeShared<FJsonObject>();
 	FPrimitiveBoundsPlacement PrimitivePlacement;
 	TSharedPtr<FJsonObject> DerivedPrimitiveData;
@@ -46,44 +141,65 @@ bool FUeAgentHttpServer::CmdModelingStartTool(const FUeAgentRequestContext& Ctx,
 	{
 		return false;
 	}
-
-	TArray<AActor*> SelectionBeforeCreate;
-	if (PrimitivePlacement.bEnabled)
+	if (WrapperDefinition && WrapperDefinition->bPrimitiveCreation && bHasPrimitiveOnlyParameters && !PrimitivePlacement.bEnabled)
 	{
-		GetSelectedActors(SelectionBeforeCreate);
+		OutError = HasPrimitiveBoundsParameters(EffectiveParams)
+			? TEXT("primitive_bounds_incomplete")
+			: TEXT("primitive_options_require_bounds");
+		return false;
 	}
 
-	ConfigureDefaultModelingOutputType();
+	FModelingContext Context;
+	if (!GetModelingContext(Context, OutError))
+	{
+		return false;
+	}
+
+	TArray<AActor*> SelectionBeforeAccept;
+	GetSelectedActors(SelectionBeforeAccept);
+
+	ConfigureDefaultModelingOutputType(OutputTypePolicy);
 	if (!StartToolByIdentifier(ToolIdentifier, Context, OutError))
 	{
 		FUeAgentInterfaceLogger::Log(TEXT("ModelingStartToolFailed req=%s tool=%s error=%s"), *Ctx.RequestId, *ToolIdentifier, *OutError);
 		return false;
 	}
+	const auto CancelStartedTool = [&Context]()
+	{
+		FString CleanupError;
+		FinishTool(Context, EToolShutdownType::Cancel, CleanupError);
+	};
 
 	UInteractiveTool* Tool = Context.ToolsContext->ToolManager ? Context.ToolsContext->ToolManager->GetActiveTool(EToolSide::Left) : nullptr;
 	TArray<TSharedPtr<FJsonValue>> PropertyImportResults;
-	if (Tool && !AutoPrepareModelingOutputType(EffectiveParams, Tool, OutError, OutData))
+	if (Tool && !AutoPrepareModelingOutputType(EffectiveParams, Tool, OutputTypePolicy, OutError, OutData))
 	{
+		CancelStartedTool();
 		return false;
 	}
 	if (Tool && !ApplyToolProperties(EffectiveParams, Tool, OutError, &PropertyImportResults))
 	{
 		OutData->SetArrayField(TEXT("property_import_results"), PropertyImportResults);
+		CancelStartedTool();
 		return false;
 	}
 	if (Tool && !AutoPreparePrimitiveCreationTool(EffectiveParams, Tool, ToolIdentifier, OutError))
 	{
+		CancelStartedTool();
 		return false;
 	}
 
-	FString PostAction;
-	if (EffectiveParams.IsValid() && EffectiveParams->TryGetStringField(TEXT("post_action"), PostAction) && !PostAction.IsEmpty())
+	if (!PostAction.IsEmpty())
 	{
 		if (!InvokeToolAction(Tool, PostAction))
 		{
-			OutError = TEXT("tool_action_not_found");
+			CancelStartedTool();
+			OutError = WrapperDefinition && !WrapperDefinition->UnsupportedActionError.IsEmpty()
+				? WrapperDefinition->UnsupportedActionError
+				: TEXT("tool_action_not_found");
 			return false;
 		}
+		OutData->SetStringField(TEXT("invoked_action"), PostAction);
 	}
 
 	FlushToolsContext(Context, 3);
@@ -100,30 +216,51 @@ bool FUeAgentHttpServer::CmdModelingStartTool(const FUeAgentRequestContext& Ctx,
 			return false;
 		}
 
+		TArray<AActor*> SelectionAfterAccept;
+		GetSelectedActors(SelectionAfterAccept);
+		AActor* AcceptedOutputActor = ResolveCreatedActorFromSelectionDelta(SelectionBeforeAccept, SelectionAfterAccept);
+
 		if (PrimitivePlacement.bEnabled)
 		{
-			TArray<AActor*> SelectionAfterCreate;
-			GetSelectedActors(SelectionAfterCreate);
-			AActor* CreatedActor = ResolveCreatedActorFromSelectionDelta(SelectionBeforeCreate, SelectionAfterCreate);
-			if (!ApplyPrimitivePlacementToActor(CreatedActor, PrimitivePlacement, OutError))
+			if (!ApplyPrimitivePlacementToActor(AcceptedOutputActor, PrimitivePlacement, OutError))
 			{
 				return false;
 			}
-			ApplyOptionalCreatedActorMetadata(CreatedActor, EffectiveParams);
+			ApplyOptionalCreatedActorMetadata(AcceptedOutputActor, EffectiveParams);
 
-			if (!AutoGeneratePrimitiveCollisionIfMissing(CreatedActor, PrimitivePlacement, DerivedPrimitiveData, EffectiveParams, OutData, OutError))
+			if (!AutoGeneratePrimitiveCollisionIfMissing(AcceptedOutputActor, PrimitivePlacement, DerivedPrimitiveData, EffectiveParams, OutData, OutError))
 			{
 				return false;
 			}
 
 			OutData->SetBoolField(TEXT("used_bounds_placement"), true);
-			OutData->SetObjectField(TEXT("created_actor"), MakeActorSummaryJson(CreatedActor));
-			OutData->SetObjectField(TEXT("created_actor_location"), MakeVectorJson(CreatedActor->GetActorLocation()));
-			OutData->SetObjectField(TEXT("created_actor_rotation"), MakeRotatorJson(CreatedActor->GetActorRotation()));
+			OutData->SetObjectField(TEXT("created_actor"), MakeActorSummaryJson(AcceptedOutputActor));
+			OutData->SetObjectField(TEXT("created_actor_location"), MakeVectorJson(AcceptedOutputActor->GetActorLocation()));
+			OutData->SetObjectField(TEXT("created_actor_rotation"), MakeRotatorJson(AcceptedOutputActor->GetActorRotation()));
 			if (DerivedPrimitiveData.IsValid())
 			{
 				OutData->SetObjectField(TEXT("derived_primitive"), DerivedPrimitiveData);
 			}
+		}
+		else if (OutputTypePolicy == EModelingOutputTypePolicy::StaticMeshRequired)
+		{
+			const FString CreatedAssetPath = ResolveAcceptedOutputAssetPath(AcceptedOutputActor);
+			if (CreatedAssetPath.IsEmpty())
+			{
+				OutError = TEXT("accepted_static_mesh_output_resolution_failed");
+				return false;
+			}
+			OutData->SetObjectField(TEXT("created_actor"), MakeActorSummaryJson(AcceptedOutputActor));
+			OutData->SetStringField(TEXT("created_asset_path"), CreatedAssetPath);
+		}
+		else if (OutputTypePolicy == EModelingOutputTypePolicy::DynamicMeshActorRequired)
+		{
+			if (!IsAcceptedDynamicMeshOutput(AcceptedOutputActor))
+			{
+				OutError = TEXT("accepted_dynamic_mesh_output_resolution_failed");
+				return false;
+			}
+			OutData->SetObjectField(TEXT("created_actor"), MakeActorSummaryJson(AcceptedOutputActor));
 		}
 	}
 
@@ -176,59 +313,22 @@ bool FUeAgentHttpServer::CmdModelingSetActiveToolProperty(const FUeAgentRequestC
 		return false;
 	}
 
-	FString Selector;
-	FString PropertyName;
-	FString ValueText;
-	bool bHasValueText = false;
-	if (Ctx.Params.IsValid())
+	const TArray<TSharedPtr<FJsonValue>>* ToolProperties = nullptr;
+	if (!Ctx.Params.IsValid() || !Ctx.Params->TryGetArrayField(TEXT("tool_properties"), ToolProperties) || !ToolProperties || ToolProperties->Num() != 1)
 	{
-		Ctx.Params->TryGetStringField(TEXT("property_set"), Selector);
-		Ctx.Params->TryGetStringField(TEXT("property_name"), PropertyName);
-		bHasValueText = Ctx.Params->TryGetStringField(TEXT("value_text"), ValueText);
-	}
-	if (PropertyName.IsEmpty() || !bHasValueText)
-	{
-		OutError = TEXT("tool_property_name_or_value_missing");
+		OutError = TEXT("exactly_one_tool_property_required");
 		return false;
 	}
-
-	UObject* PropertySet = FindToolPropertySet(Tool, Selector);
-	if (!PropertySet)
+	TArray<TSharedPtr<FJsonValue>> PropertyResults;
+	if (!ApplyToolProperties(Ctx.Params, Tool, OutError, &PropertyResults))
 	{
-		OutError = TEXT("tool_property_set_not_found");
+		OutData->SetArrayField(TEXT("property_results"), PropertyResults);
 		return false;
 	}
-	FString AppliedValueText;
-	FString CppType;
-	if (!ImportResolvedProperty(PropertySet, PropertyName, ValueText, OutError, &AppliedValueText, &CppType))
-	{
-		const FString ImportStatus = OutError.Equals(TEXT("property_not_found"), ESearchCase::CaseSensitive) ? TEXT("property_not_found") : TEXT("import_failed");
-		OutData->SetStringField(TEXT("property_set"), PropertySet->GetName());
-		OutData->SetStringField(TEXT("property_name"), PropertyName);
-		OutData->SetStringField(TEXT("value_text"), ValueText);
-		SetPropertyImportResultFields(OutData, nullptr, ValueText, TEXT(""), ImportStatus, OutError);
-		OutData->SetStringField(TEXT("cpp_type"), CppType);
-		return false;
-	}
-	NotifyToolPropertySetUpdated(Tool, PropertySet);
 
 	FlushToolsContext(Context, 3);
 	FillActiveToolData(Context, OutData);
-	OutData->SetStringField(TEXT("property_set"), PropertySet->GetName());
-	OutData->SetStringField(TEXT("property_name"), PropertyName);
-	OutData->SetStringField(TEXT("value_text"), ValueText);
-	OutData->SetStringField(TEXT("applied_value_text"), AppliedValueText);
-	SetPropertyImportResultFields(OutData, nullptr, ValueText, AppliedValueText, TEXT("imported_and_read_back"));
-	OutData->SetStringField(TEXT("cpp_type"), CppType);
-	FUeAgentInterfaceLogger::Log(TEXT("ModelingSetActiveToolProperty req=%s tool=%s set=%s property=%s requested=%s applied=%s cpp_type=%s exact=%s"),
-		*Ctx.RequestId,
-		*Context.ToolsContext->GetActiveToolName(),
-		*PropertySet->GetName(),
-		*PropertyName,
-		*ValueText,
-		*AppliedValueText,
-		*CppType,
-		AppliedValueText.Equals(ValueText, ESearchCase::CaseSensitive) ? TEXT("true") : TEXT("false"));
+	OutData->SetArrayField(TEXT("property_results"), PropertyResults);
 	return true;
 }
 

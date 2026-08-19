@@ -31,6 +31,10 @@
       "Enabled": true
     },
     {
+      "Name": "GeometryScripting",
+      "Enabled": true
+    },
+    {
       "Name": "IKRig",
       "Enabled": true
     },
@@ -40,6 +44,10 @@
     },
     {
       "Name": "GeometryCache",
+      "Enabled": true
+    },
+    {
+      "Name": "AlembicImporter",
       "Enabled": true
     },
     {
@@ -56,6 +64,10 @@
     },
     {
       "Name": "GameplayStateTree",
+      "Enabled": true
+    },
+    {
+      "Name": "GameplayInteractions",
       "Enabled": true
     },
     {
@@ -85,6 +97,14 @@
     {
       "Name": "Metasound",
       "Enabled": true
+    },
+    {
+      "Name": "DataValidation",
+      "Enabled": true
+    },
+    {
+      "Name": "EnvironmentQueryEditor",
+      "Enabled": true
     }
   ],
   "Modules": [
@@ -93,11 +113,11 @@
       "Type": "Editor",
       "LoadingPhase": "Default"
     },
-    {
-      "Name": "UeAgentInterfaceTests",
-      "Type": "Editor",
-      "LoadingPhase": "Default"
-    }
+		{
+			"Name": "UeAgentInterfaceTests",
+			"Type": "Editor",
+			"LoadingPhase": "None"
+		}
   ],
   "SupportedTargetPlatforms": [
     "Win64"

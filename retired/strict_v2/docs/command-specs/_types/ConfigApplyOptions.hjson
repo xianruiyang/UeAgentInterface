@@ -1,0 +1,12 @@
+definition: {
+  additional_fields: false
+  fields: {
+    backup: { default: true, default_state: defined, description_zh: "真实写入前备份目标 ini", required: false, type: bool }
+    dry_run: { default: true, default_state: defined, description_zh: "只校验并生成 readback，不写 Config", required: false, type: bool }
+    read_back: { default: true, default_state: defined, description_zh: "写入或校验后返回 section readback", required: false, type: bool }
+  }
+  kind: object
+}
+schema: uai.command_spec.shared_type.v1
+type_id: ConfigApplyOptions
+version: 1

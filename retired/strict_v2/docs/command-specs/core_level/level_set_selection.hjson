@@ -1,0 +1,75 @@
+authoring: { reason: command_has_no_registered_folder_authoring_profile, state: none }
+category: core_level
+command: level_set_selection
+deprecation: { reason: command_is_active, state: none }
+discovery: { aliases: [], keywords_en: [level, set, selection, core_level], keywords_zh: [level_set_selection], summary_en: "Execute level_set_selection with a verified implementation contract", summary_zh: "设置选择集", tags: [core_level, p2-002] }
+errors: {
+  codes: [
+    { code: missing_actor_ids, description_zh: "C++ 实现返回错误码 missing_actor_ids", retry_safe: true, stage: preflight, wire_match: exact }
+    { code: no_editor_world, description_zh: "C++ 实现返回错误码 no_editor_world", retry_safe: false, stage: execution, wire_match: exact }
+    { code: no_geditor, description_zh: "C++ 实现返回错误码 no_geditor", retry_safe: false, stage: execution, wire_match: exact }
+    { code: selected_actors_unavailable, description_zh: "C++ 实现返回错误码 selected_actors_unavailable", retry_safe: false, stage: execution, wire_match: exact }
+  ]
+}
+evidence: {
+  docs: [
+    { path: "Plugins/UeAgentInterface/docs/commands/core_level/level_set_selection.md", purpose: "user documentation cross-check; C++ implementation remains authoritative" }
+  ]
+  implementation: [
+    { line_hint: 2132, path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Commands/Level/UeAgentHttpServer_Level_ActorAndTransform.cpp", purpose: "command handler, parameter and return evidence", symbol: CmdLevelSetSelection }
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Commands/Level/UeAgentHttpServer_Level_CaptureAndPersistence.cpp", purpose: "transitive helper evidence used by the command handler" }
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Server/UeAgentHttpServer.cpp", purpose: "transitive helper evidence used by the command handler" }
+  ]
+  tests: [
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterfaceTests/Private/Smoke/UeAgentInterfaceSmoke_LevelViewportModeling.cpp", purpose: "smoke or negative-path evidence cross-checked for the verified contract" }
+  ]
+}
+execution: {
+  destructive: false
+  editor_state: required
+  game_thread: required
+  idempotent: false
+  kind: session_control
+  overwrite_behavior: none
+  pie_state: allowed
+  retry_safe: false
+  save_behavior: none
+  side_effects: [modifies_editor_session]
+  ui_effect: none
+}
+maturity: verified
+params: {
+  constraints: []
+  fields: {
+    actor_ids: { default_state: none, description_zh: "C++ 实现读取的 actor_ids 参数", item_type: json_value, required: true, type: array }
+    mode: { default: replace, default_state: defined, description_zh: "C++ 实现读取的 mode 参数", required: false, type: string }
+  }
+  state: defined
+}
+response: { artifact_fields: [], compact_fields: [changed, count, actors, mode], failure_fields: [params.actor_ids], max_items_policy: { fields: [], mode: none } }
+returns: {
+  fields: {
+    actors: { description_zh: "C++ 实现返回的 actors 字段；是否出现取决于执行分支", item_type: json_value, required: false, type: array }
+    changed: { description_zh: "C++ 实现返回的 changed 字段；是否出现取决于执行分支", required: false, type: number }
+    count: { description_zh: "C++ 实现返回的 count 字段；是否出现取决于执行分支", required: false, type: integer }
+    mode: { description_zh: "C++ 实现返回的 mode 字段；是否出现取决于执行分支", required: false, type: string }
+  }
+  state: defined
+}
+schema: uai.command_spec.v1
+status: active
+types: {}
+verification: {
+  assertions: [
+    { id: result_present, operator: exists, source: returns.changed }
+    { id: state_readback_present, operator: exists, source: methods.state_readback.actors }
+  ]
+  failure_policy: fail_overall
+  methods: [
+    { id: result, kind: result_assertion }
+    { command: level_get_selection, id: state_readback, kind: command_readback, params_mapping: {} }
+  ]
+  required: true
+  state: defined
+}
+version: 1

@@ -1,0 +1,89 @@
+authoring: { reason: command_has_no_registered_folder_authoring_profile, state: none }
+category: texture_render_target_media
+command: texture_graph_bake_outputs
+deprecation: { reason: command_is_active, state: none }
+discovery: { aliases: [], keywords_en: [texture, graph, bake, outputs, texture_render_target_media], keywords_zh: [texture_graph_bake_outputs], summary_en: "Execute texture_graph_bake_outputs with a verified implementation contract", summary_zh: "Texture Graph folder workflow、bake 和运行探针。", tags: [texture_render_target_media, p2-004] }
+errors: {
+  codes: [
+    { code: invalid_, description_zh: "C++ 实现返回错误码 invalid_", retry_safe: true, stage: preflight, wire_match: prefix }
+    { code: invalid_asset_path, description_zh: "C++ 实现返回错误码 invalid_asset_path", retry_safe: true, stage: preflight, wire_match: exact }
+    { code: missing_, description_zh: "C++ 实现返回错误码 missing_", retry_safe: true, stage: preflight, wire_match: prefix }
+    { code: missing_asset_path, description_zh: "C++ 实现返回错误码 missing_asset_path", retry_safe: true, stage: preflight, wire_match: exact }
+    { code: no_editor_world, description_zh: "C++ 实现返回错误码 no_editor_world", retry_safe: false, stage: execution, wire_match: exact }
+    { code: no_geditor, description_zh: "C++ 实现返回错误码 no_geditor", retry_safe: false, stage: execution, wire_match: exact }
+    { code: save_asset_failed, description_zh: "C++ 实现返回错误码 save_asset_failed", retry_safe: false, stage: execution, wire_match: exact }
+    { code: texture_graph_blueprint_library_default_object_missing, description_zh: "C++ 实现返回错误码 texture_graph_blueprint_library_default_object_missing", retry_safe: true, stage: preflight, wire_match: exact }
+    { code: texture_graph_blueprint_library_not_found, description_zh: "C++ 实现返回错误码 texture_graph_blueprint_library_not_found", retry_safe: false, stage: execution, wire_match: exact }
+    { code: texture_graph_not_found, description_zh: "C++ 实现返回错误码 texture_graph_not_found", retry_safe: false, stage: execution, wire_match: exact }
+    { code: texture_graph_render_function_not_found, description_zh: "C++ 实现返回错误码 texture_graph_render_function_not_found", retry_safe: false, stage: execution, wire_match: exact }
+    { code: texture_graph_render_unavailable_null_rhi, description_zh: "C++ 实现返回错误码 texture_graph_render_unavailable_null_rhi", retry_safe: false, stage: execution, wire_match: exact }
+  ]
+}
+evidence: {
+  docs: [
+    { path: "Plugins/UeAgentInterface/docs/commands/texture_render_target_media/texture_graph_bake_outputs.md", purpose: "user documentation cross-check; C++ implementation remains authoritative" }
+  ]
+  implementation: [
+    { line_hint: 1128, path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Commands/TextureRenderTarget/UeAgentHttpServer_TextureRenderTarget_MediaAndSpecializedAssets.cpp", purpose: "command handler, parameter and return evidence", symbol: CmdTextureGraphBakeOutputs }
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Commands/Level/UeAgentHttpServer_Level_CaptureAndPersistence.cpp", purpose: "transitive helper evidence used by the command handler" }
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Commands/TextureRenderTarget/UeAgentHttpServer_TextureRenderTarget_TextureAssets.inl", purpose: "transitive helper evidence used by the command handler" }
+  ]
+  tests: [
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterfaceTests/Private/Smoke/UeAgentInterfaceTextureRenderTargetSmokeTests.cpp", purpose: "smoke or negative-path evidence cross-checked for the verified contract" }
+  ]
+}
+execution: {
+  destructive: false
+  editor_state: required
+  game_thread: required
+  idempotent: false
+  kind: write
+  overwrite_behavior: none
+  pie_state: allowed
+  retry_safe: false
+  save_behavior: caller_controlled
+  side_effects: [modifies_asset]
+  ui_effect: none
+}
+maturity: verified
+params: {
+  constraints: []
+  fields: {
+    asset_path: { default_state: none, description_zh: "C++ 实现读取的 asset_path 参数", path_semantics: { access_scope: project_write, kind: ue_asset }, required: true, type: ue_asset_path }
+    destination_path: { default_state: none, description_zh: "C++ 实现读取的 destination_path 参数", required: true, type: string }
+    save_after_bake: { default: true, default_state: defined, description_zh: "C++ 实现读取的 save_after_bake 参数", required: false, type: bool }
+  }
+  state: defined
+}
+response: { artifact_fields: [], compact_fields: [asset_path, bake_passed, class, class_path, created_textures, object_path], failure_fields: [params.asset_path, params.destination_path], max_items_policy: { fields: [], mode: none } }
+returns: {
+  fields: {
+    asset_path: { description_zh: "C++ 实现返回的 asset_path 字段；是否出现取决于执行分支", required: false, type: ue_asset_path }
+    bake_passed: { description_zh: "C++ 实现返回的 bake_passed 字段；是否出现取决于执行分支", required: false, type: bool }
+    class: { description_zh: "C++ 实现返回的 class 字段；是否出现取决于执行分支", required: false, type: string }
+    class_path: { description_zh: "C++ 实现返回的 class_path 字段；是否出现取决于执行分支", required: false, type: string }
+    created_textures: { description_zh: "C++ 实现返回的 created_textures 字段；是否出现取决于执行分支", item_type: json_value, required: false, type: array }
+    object_path: { description_zh: "C++ 实现返回的 object_path 字段；是否出现取决于执行分支", required: false, type: ue_object_path }
+    pixel_stats: { description_zh: "C++ 实现返回的 pixel_stats 字段；是否出现取决于执行分支", item_type: json_value, required: false, type: array }
+    render_target_output_count: { description_zh: "C++ 实现返回的 render_target_output_count 字段；是否出现取决于执行分支", required: false, type: integer }
+    save_after_bake: { description_zh: "C++ 实现返回的 save_after_bake 字段；是否出现取决于执行分支", required: false, type: bool }
+  }
+  state: defined
+}
+schema: uai.command_spec.v1
+status: active
+types: {}
+verification: {
+  assertions: [
+    { id: result_present, operator: exists, source: returns.asset_path }
+    { id: state_readback_present, operator: exists, source: methods.state_readback.asset_path }
+  ]
+  failure_policy: fail_overall
+  methods: [
+    { id: result, kind: result_assertion }
+    { command: texture_graph_get_info, id: state_readback, kind: command_readback, params_mapping: { asset_path: params.asset_path } }
+  ]
+  required: true
+  state: defined
+}
+version: 1

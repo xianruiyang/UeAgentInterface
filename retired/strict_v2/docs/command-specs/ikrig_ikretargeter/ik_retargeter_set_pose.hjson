@@ -1,0 +1,107 @@
+authoring: { reason: command_has_no_registered_folder_authoring_profile, state: none }
+category: ikrig_ikretargeter
+command: ik_retargeter_set_pose
+deprecation: { reason: command_is_active, state: none }
+discovery: { aliases: [], keywords_en: [ik, retargeter, set, pose, ikrig_ikretargeter], keywords_zh: [ik_retargeter_set_pose], summary_en: "Execute ik_retargeter_set_pose with a verified implementation contract", summary_zh: "管理 retarget pose 生命周期与 pose 数据", tags: [ikrig_ikretargeter, p2-006] }
+errors: {
+  codes: [
+    { code: asset_not_found, description_zh: "C++ 实现返回错误码 asset_not_found", retry_safe: false, stage: execution, wire_match: exact }
+    { code: create_pose_failed, description_zh: "C++ 实现返回错误码 create_pose_failed", retry_safe: false, stage: execution, wire_match: exact }
+    { code: duplicate_pose_failed, description_zh: "C++ 实现返回错误码 duplicate_pose_failed", retry_safe: false, stage: execution, wire_match: exact }
+    { code: ik_retargeter_controller_not_available, description_zh: "C++ 实现返回错误码 ik_retargeter_controller_not_available", retry_safe: false, stage: execution, wire_match: exact }
+    { code: ik_retargeter_not_found, description_zh: "C++ 实现返回错误码 ik_retargeter_not_found", retry_safe: false, stage: execution, wire_match: exact }
+    { code: invalid_auto_align_method, description_zh: "C++ 实现返回错误码 invalid_auto_align_method", retry_safe: true, stage: preflight, wire_match: exact }
+    { code: invalid_bone_rotation_offset_entry, description_zh: "C++ 实现返回错误码 invalid_bone_rotation_offset_entry", retry_safe: true, stage: preflight, wire_match: exact }
+    { code: invalid_source_or_target, description_zh: "C++ 实现返回错误码 invalid_source_or_target", retry_safe: true, stage: preflight, wire_match: exact }
+    { code: missing_asset_path, description_zh: "C++ 实现返回错误码 missing_asset_path", retry_safe: true, stage: preflight, wire_match: exact }
+    { code: missing_pose_name, description_zh: "C++ 实现返回错误码 missing_pose_name", retry_safe: true, stage: preflight, wire_match: exact }
+    { code: missing_rotation_offset, description_zh: "C++ 实现返回错误码 missing_rotation_offset", retry_safe: true, stage: preflight, wire_match: exact }
+    { code: missing_source_or_target, description_zh: "C++ 实现返回错误码 missing_source_or_target", retry_safe: true, stage: preflight, wire_match: exact }
+    { code: pose_not_found, description_zh: "C++ 实现返回错误码 pose_not_found", retry_safe: false, stage: execution, wire_match: exact }
+    { code: remove_pose_failed, description_zh: "C++ 实现返回错误码 remove_pose_failed", retry_safe: false, stage: execution, wire_match: exact }
+    { code: rename_pose_failed, description_zh: "C++ 实现返回错误码 rename_pose_failed", retry_safe: false, stage: execution, wire_match: exact }
+    { code: save_asset_failed, description_zh: "C++ 实现返回错误码 save_asset_failed", retry_safe: false, stage: execution, wire_match: exact }
+    { code: set_current_pose_failed, description_zh: "C++ 实现返回错误码 set_current_pose_failed", retry_safe: false, stage: execution, wire_match: exact }
+  ]
+}
+evidence: {
+  docs: [
+    { path: "Plugins/UeAgentInterface/docs/commands/ikrig_ikretargeter/ik_retargeter_set_pose.md", purpose: "user documentation cross-check; C++ implementation remains authoritative" }
+  ]
+  implementation: [
+    { line_hint: 1766, path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Commands/IK/UeAgentHttpServer_IKAssets.cpp", purpose: "command handler, parameter and return evidence", symbol: CmdIKRetargeterSetPose }
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Commands/IK/UeAgentHttpServer_IKAssets.cpp", purpose: "current command handler implementation" }
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Server/UeAgentHttpServer.cpp", purpose: "transitive helper evidence used by the command handler" }
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Utilities/UeAgentJsonDiagnostics.cpp", purpose: "transitive helper evidence used by the command handler" }
+  ]
+  tests: [
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterfaceTests/Private/Smoke/UeAgentInterfaceSmoke_AnimationIKNiagara.cpp", purpose: "smoke or negative-path evidence cross-checked for the verified contract" }
+  ]
+}
+execution: {
+  destructive: false
+  editor_state: required
+  game_thread: required
+  idempotent: false
+  kind: write
+  overwrite_behavior: none
+  pie_state: allowed
+  retry_safe: false
+  save_behavior: caller_controlled
+  side_effects: [modifies_asset]
+  ui_effect: none
+}
+maturity: verified
+params: {
+  constraints: []
+  fields: {
+    asset_path: { default_state: none, description_zh: "C++ 实现读取的 asset_path 参数", path_semantics: { access_scope: project_write, kind: ue_asset }, required: true, type: ue_asset_path }
+    auto_align_all: { default: false, default_state: defined, description_zh: "C++ 实现读取的 auto_align_all 参数", required: false, type: bool }
+    auto_align_bones: { default_state: none, description_zh: "C++ 实现读取的 auto_align_bones 参数", item_type: string, required: false, type: array }
+    auto_align_method: { default_state: none, description_zh: "C++ 实现读取的 auto_align_method 参数", required: false, type: string }
+    bone_rotation_offsets: { default_state: none, description_zh: "C++ 实现读取的 bone_rotation_offsets 参数", item_type: object, item_type_ref: "shared:IKRetargetBoneRotationOffset", required: false, type: array }
+    create_if_missing: { default: false, default_state: defined, description_zh: "C++ 实现读取的 create_if_missing 参数", required: false, type: bool }
+    duplicate_from_pose: { default_state: none, description_zh: "C++ 实现读取的 duplicate_from_pose 参数", required: false, type: string }
+    pose_name: { default_state: none, description_zh: "C++ 实现读取的 pose_name 参数", required: false, type: string }
+    remove: { default: false, default_state: defined, description_zh: "C++ 实现读取的 remove 参数", required: false, type: bool }
+    rename_from_pose: { default_state: none, description_zh: "C++ 实现读取的 rename_from_pose 参数", required: false, type: string }
+    reset_all: { default: false, default_state: defined, description_zh: "C++ 实现读取的 reset_all 参数", required: false, type: bool }
+    reset_bones: { default_state: none, description_zh: "C++ 实现读取的 reset_bones 参数", item_type: string, required: false, type: array }
+    root_offset: { default_state: none, description_zh: "C++ 实现读取的 root_offset 参数", required: false, type: object, type_ref: "shared:Vector3" }
+    save_after_set: { default: false, default_state: defined, description_zh: "C++ 实现读取的 save_after_set 参数", required: false, type: bool }
+    set_current: { default: false, default_state: defined, description_zh: "C++ 实现读取的 set_current 参数", required: false, type: bool }
+    snap_bone_to_ground: { default_state: none, description_zh: "需要吸附到地面的骨骼名；不是 bool 开关", required: false, type: string }
+    source_or_target: { default_state: none, description_zh: "C++ 实现读取的 source_or_target 参数", required: true, type: string }
+  }
+  state: defined
+}
+response: { artifact_fields: [pose_names, current_pose_data], compact_fields: [saved, asset_path, current_pose, removed], failure_fields: [params.asset_path, params.source_or_target], max_items_policy: { fields: [], mode: none } }
+returns: {
+  fields: {
+    asset_path: { description_zh: "C++ 实现返回的 asset_path 字段；是否出现取决于执行分支", required: false, type: ue_asset_path }
+    current_pose: { description_zh: "C++ 实现返回的 current_pose 字段；是否出现取决于执行分支", required: false, type: string }
+    current_pose_data: { description_zh: "C++ 实现返回的 current_pose_data 字段；是否出现取决于执行分支", required: false, type: json_value }
+    pose_names: { description_zh: "C++ 实现返回的 pose_names 字段；是否出现取决于执行分支", item_type: json_value, required: false, type: array }
+    removed: { description_zh: "C++ 实现返回的 removed 字段；是否出现取决于执行分支", required: false, type: bool }
+    saved: { description_zh: "C++ 实现返回的 saved 字段；是否出现取决于执行分支", required: false, type: bool }
+    source_or_target: { description_zh: "C++ 实现返回的 source_or_target 字段；是否出现取决于执行分支", required: false, type: string }
+  }
+  state: defined
+}
+schema: uai.command_spec.v1
+status: active
+types: {}
+verification: {
+  assertions: [
+    { id: result_present, operator: exists, source: returns.saved }
+    { id: state_readback_present, operator: exists, source: methods.state_readback.asset_path }
+  ]
+  failure_policy: fail_overall
+  methods: [
+    { id: result, kind: result_assertion }
+    { command: ik_retargeter_get_info, id: state_readback, kind: command_readback, params_mapping: { asset_path: params.asset_path } }
+  ]
+  required: true
+  state: defined
+}
+version: 1

@@ -1,0 +1,20 @@
+definition: {
+  additional_fields: false
+  fields: {
+    affected_by_ik_warping: { default_state: none, description_zh: "是否受 IK warping 影响", required: false, type: bool }
+    blend_to_source: { default_state: none, description_zh: "blend to source", required: false, type: number }
+    blend_to_source_rotation: { default_state: none, description_zh: "rotation blend to source", required: false, type: number }
+    blend_to_source_translation: { default_state: none, description_zh: "translation blend to source", required: false, type: number }
+    blend_to_source_weights: { default_state: none, description_zh: "IK blend 各轴权重", required: false, type: object, type_ref: "shared:Vector3" }
+    enable_ik: { default_state: none, description_zh: "启用 chain IK retarget", required: false, type: bool }
+    extension: { default_state: none, description_zh: "chain extension", required: false, type: number }
+    scale_vertical: { default_state: none, description_zh: "vertical scale", required: false, type: number }
+    static_local_offset: { default_state: none, description_zh: "目标链 local frame 静态 offset", required: false, type: object, type_ref: "shared:Vector3" }
+    static_offset: { default_state: none, description_zh: "retarget/global frame 静态 offset", required: false, type: object, type_ref: "shared:Vector3" }
+    static_rotation_offset: { default_state: none, description_zh: "目标链 local rotation offset（度）", required: false, type: object, type_ref: "shared:Rotator3D" }
+  }
+  kind: object
+}
+schema: uai.command_spec.shared_type.v1
+type_id: IKRetargetChainIKSettings
+version: 1

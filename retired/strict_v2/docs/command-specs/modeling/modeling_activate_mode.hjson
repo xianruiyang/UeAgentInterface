@@ -1,0 +1,59 @@
+authoring: { reason: command_has_no_registered_folder_authoring_profile, state: none }
+category: modeling
+command: modeling_activate_mode
+deprecation: { reason: command_is_active, state: none }
+discovery: { aliases: [], keywords_en: [modeling, activate, mode], keywords_zh: [modeling_activate_mode], summary_en: "Execute modeling_activate_mode with a verified implementation contract", summary_zh: "**原子/兼容**：控制 Modeling Mode 工具、选择或网格编辑动作", tags: [modeling, p2-002] }
+errors: {
+  codes: [
+    { code: editor_viewport_not_found, description_zh: "C++ 实现返回错误码 editor_viewport_not_found", retry_safe: false, stage: execution, wire_match: exact }
+    { code: modeling_mode_unavailable, description_zh: "C++ 实现返回错误码 modeling_mode_unavailable", retry_safe: false, stage: execution, wire_match: exact }
+    { code: modeling_tools_context_unavailable, description_zh: "C++ 实现返回错误码 modeling_tools_context_unavailable", retry_safe: false, stage: execution, wire_match: exact }
+  ]
+}
+evidence: {
+  docs: [
+    { path: "Plugins/UeAgentInterface/docs/commands/modeling/modeling_activate_mode.md", purpose: "user documentation cross-check; C++ implementation remains authoritative" }
+  ]
+  implementation: [
+    { line_hint: 57, path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Commands/Modeling/UeAgentHttpServer_Modeling_DispatchAndSelection.cpp", purpose: "command handler, parameter and return evidence", symbol: CmdModelingActivateMode }
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Commands/Modeling/UeAgentHttpServer_Modeling.cpp", purpose: "transitive helper evidence used by the command handler" }
+  ]
+  tests: [
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterfaceTests/Private/Smoke/UeAgentInterfaceSmoke_LevelViewportModeling.cpp", purpose: "smoke or negative-path evidence cross-checked for the verified contract" }
+  ]
+}
+execution: {
+  destructive: false
+  editor_state: required
+  game_thread: required
+  idempotent: false
+  kind: session_control
+  overwrite_behavior: none
+  pie_state: allowed
+  retry_safe: false
+  save_behavior: none
+  side_effects: [modifies_editor_session]
+  ui_effect: none
+}
+maturity: verified
+params: { reason: implementation_reads_no_command_parameters, state: none }
+response: { artifact_fields: [], compact_fields: [mode_active, mode_id], failure_fields: [], max_items_policy: { fields: [], mode: none } }
+returns: {
+  fields: { mode_active: { description_zh: "C++ 实现返回的 mode_active 字段；是否出现取决于执行分支", required: false, type: bool }, mode_id: { description_zh: "C++ 实现返回的 mode_id 字段；是否出现取决于执行分支", required: false, type: string } }
+  state: defined
+}
+schema: uai.command_spec.v1
+status: active
+types: {}
+verification: {
+  assertions: [
+    { id: result_present, operator: exists, source: returns.mode_active }
+  ]
+  failure_policy: fail_overall
+  methods: [
+    { id: result, kind: result_assertion }
+  ]
+  required: true
+  state: defined
+}
+version: 1

@@ -1,0 +1,115 @@
+authoring: { reason: command_has_no_registered_folder_authoring_profile, state: none }
+category: core_level
+command: viewport_frame_folder
+deprecation: { reason: command_is_active, state: none }
+discovery: { aliases: [], keywords_en: [viewport, frame, folder, core_level], keywords_zh: [viewport_frame_folder], summary_en: "Execute viewport_frame_folder with a verified implementation contract", summary_zh: "按 Outliner folder 聚合 bounds 取景", tags: [core_level, p2-002] }
+errors: {
+  codes: [
+    { code: folder_bounds_invalid, description_zh: "C++ 实现返回错误码 folder_bounds_invalid", retry_safe: true, stage: preflight, wire_match: exact }
+    { code: invalid_viewport_aspect_ratio, description_zh: "C++ 实现返回错误码 invalid_viewport_aspect_ratio", retry_safe: true, stage: preflight, wire_match: exact }
+    { code: invalid_viewport_fov, description_zh: "C++ 实现返回错误码 invalid_viewport_fov", retry_safe: true, stage: preflight, wire_match: exact }
+    { code: invalid_viewport_size, description_zh: "C++ 实现返回错误码 invalid_viewport_size", retry_safe: true, stage: preflight, wire_match: exact }
+    { code: missing_folder_path, description_zh: "C++ 实现返回错误码 missing_folder_path", retry_safe: true, stage: preflight, wire_match: exact }
+    { code: missing_world, description_zh: "C++ 实现返回错误码 missing_world", retry_safe: true, stage: preflight, wire_match: exact }
+    { code: no_editor_world, description_zh: "C++ 实现返回错误码 no_editor_world", retry_safe: false, stage: execution, wire_match: exact }
+    { code: no_geditor, description_zh: "C++ 实现返回错误码 no_geditor", retry_safe: false, stage: execution, wire_match: exact }
+    { code: no_level_editor_viewport, description_zh: "C++ 实现返回错误码 no_level_editor_viewport", retry_safe: false, stage: execution, wire_match: exact }
+    { code: unsupported_trace_channel, description_zh: "C++ 实现返回错误码 unsupported_trace_channel", retry_safe: false, stage: execution, wire_match: exact }
+    { code: viewport_not_perspective, description_zh: "C++ 实现返回错误码 viewport_not_perspective", retry_safe: false, stage: execution, wire_match: exact }
+  ]
+}
+evidence: {
+  docs: [
+    { path: "Plugins/UeAgentInterface/docs/commands/core_level/viewport_frame_folder.md", purpose: "user documentation cross-check; C++ implementation remains authoritative" }
+  ]
+  implementation: [
+    { line_hint: 1290, path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Commands/Level/UeAgentHttpServer_Level_ViewportTrace.cpp", purpose: "command handler, parameter and return evidence", symbol: CmdViewportFrameFolder }
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Commands/Level/UeAgentHttpServer_Level.cpp", purpose: "transitive helper evidence used by the command handler" }
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Commands/Level/UeAgentHttpServer_Level_CaptureAndPersistence.cpp", purpose: "transitive helper evidence used by the command handler" }
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Commands/UMG/UeAgentHttpServer_UMG_FolderFormat.cpp", purpose: "transitive helper evidence used by the command handler" }
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Server/UeAgentHttpServer.cpp", purpose: "transitive helper evidence used by the command handler" }
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Utilities/UeAgentJsonDiagnostics.cpp", purpose: "transitive helper evidence used by the command handler" }
+  ]
+  tests: [
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterfaceTests/Private/Smoke/UeAgentInterfaceSmoke_LevelViewportModeling.cpp", purpose: "smoke or negative-path evidence cross-checked for the verified contract" }
+  ]
+}
+execution: {
+  destructive: false
+  editor_state: required
+  game_thread: required
+  idempotent: false
+  kind: session_control
+  overwrite_behavior: none
+  pie_state: allowed
+  retry_safe: false
+  save_behavior: none
+  side_effects: [modifies_editor_session]
+  ui_effect: none
+}
+maturity: verified
+params: {
+  constraints: []
+  fields: {
+    auto_fallback: { default: false, default_state: defined, description_zh: "C++ 实现读取的 auto_fallback 参数", required: false, type: bool }
+    collision_aware: { default: false, default_state: defined, description_zh: "C++ 实现读取的 collision_aware 参数", required: false, type: bool }
+    fallback_offsets_cm: { default_state: none, description_zh: "C++ 实现读取的 fallback_offsets_cm 参数", item_type: json_value, required: false, type: array }
+    fallback_step_cm: { default: 200, default_state: defined, description_zh: "C++ 实现读取的 fallback_step_cm 参数", required: false, type: number }
+    folder_path: {
+      default_state: none
+      description_zh: "待取景 Actor 的 World Outliner 相对文件夹路径"
+      path_semantics: { kind: actor_folder }
+      required: true
+      type: actor_folder_path
+    }
+    include_child_folders: { default: true, default_state: defined, description_zh: "C++ 实现读取的 include_child_folders 参数", required: false, type: bool }
+    look_at: { default: false, default_state: defined, description_zh: "C++ 实现读取的 look_at 参数", required: false, type: bool }
+    padding: { default: 1.1, default_state: defined, description_zh: "C++ 实现读取的 padding 参数", required: false, type: number }
+    safety_offset_cm: { default: 15, default_state: defined, description_zh: "C++ 实现读取的 safety_offset_cm 参数", required: false, type: number }
+    trace_channel: { default_state: none, description_zh: "C++ 实现读取的 trace_channel 参数", required: false, type: string }
+    trace_complex: { default: false, default_state: defined, description_zh: "C++ 实现读取的 trace_complex 参数", required: false, type: bool }
+  }
+  state: defined
+}
+response: { artifact_fields: [], compact_fields: [actors, bounds, collision_adjusted, collision_aware, collision_trace, desired_location], failure_fields: [params.folder_path], max_items_policy: { fields: [], mode: none } }
+returns: {
+  fields: {
+    actors: { description_zh: "C++ 实现返回的 actors 字段；是否出现取决于执行分支", item_type: json_value, required: false, type: array }
+    bounds: { description_zh: "C++ 实现返回的 bounds 字段；是否出现取决于执行分支", required: false, type: json_value }
+    collision_adjusted: { description_zh: "C++ 实现返回的 collision_adjusted 字段；是否出现取决于执行分支", required: false, type: bool }
+    collision_aware: { description_zh: "C++ 实现返回的 collision_aware 字段；是否出现取决于执行分支", required: false, type: bool }
+    collision_trace: { description_zh: "C++ 实现返回的 collision_trace 字段；是否出现取决于执行分支", required: false, type: json_value }
+    desired_location: { description_zh: "C++ 实现返回的 desired_location 字段；是否出现取决于执行分支", required: false, type: json_value }
+    fallback_index: { description_zh: "C++ 实现返回的 fallback_index 字段；是否出现取决于执行分支", required: false, type: integer }
+    fallback_offset_cm: { description_zh: "C++ 实现返回的 fallback_offset_cm 字段；是否出现取决于执行分支", required: false, type: json_value }
+    fallback_used: { description_zh: "C++ 实现返回的 fallback_used 字段；是否出现取决于执行分支", required: false, type: bool }
+    focused_count: { description_zh: "C++ 实现返回的 focused_count 字段；是否出现取决于执行分支", required: false, type: integer }
+    folder_path: { description_zh: "已取景的 World Outliner 相对文件夹路径", required: false, type: actor_folder_path }
+    fov: { description_zh: "C++ 实现返回的 fov 字段；是否出现取决于执行分支", required: false, type: number }
+    game_view: { description_zh: "C++ 实现返回的 game_view 字段；是否出现取决于执行分支", required: false, type: bool }
+    include_child_folders: { description_zh: "C++ 实现返回的 include_child_folders 字段；是否出现取决于执行分支", required: false, type: bool }
+    look_at: { description_zh: "C++ 实现返回的 look_at 字段；是否出现取决于执行分支", required: false, type: bool }
+    new_location: { description_zh: "C++ 实现返回的 new_location 字段；是否出现取决于执行分支", required: false, type: json_value }
+    padding: { description_zh: "C++ 实现返回的 padding 字段；是否出现取决于执行分支", required: false, type: number }
+    previous_location: { description_zh: "C++ 实现返回的 previous_location 字段；是否出现取决于执行分支", required: false, type: json_value }
+    realtime: { description_zh: "C++ 实现返回的 realtime 字段；是否出现取决于执行分支", required: false, type: bool }
+    rotation: { description_zh: "C++ 实现返回的 rotation 字段；是否出现取决于执行分支", required: false, type: json_value }
+    viewport: { description_zh: "C++ 实现返回的 viewport 字段；是否出现取决于执行分支", required: false, type: json_value }
+  }
+  state: defined
+}
+schema: uai.command_spec.v1
+status: active
+types: {}
+verification: {
+  assertions: [
+    { id: result_present, operator: exists, source: returns.actors }
+  ]
+  failure_policy: fail_overall
+  methods: [
+    { id: result, kind: result_assertion }
+  ]
+  required: true
+  state: defined
+}
+version: 1

@@ -1,0 +1,108 @@
+authoring: { reason: command_has_no_registered_folder_authoring_profile, state: none }
+category: core_level
+command: level_snap_to_surface
+deprecation: { reason: command_is_active, state: none }
+discovery: { aliases: [], keywords_en: [level, snap, to, surface, core_level], keywords_zh: [level_snap_to_surface], summary_en: "Execute level_snap_to_surface with a verified implementation contract", summary_zh: "沿射线吸附 Actor 到命中面", tags: [core_level, p2-002] }
+errors: {
+  codes: [
+    { code: actor_not_found, description_zh: "C++ 实现返回错误码 actor_not_found", retry_safe: false, stage: execution, wire_match: exact }
+    { code: invalid_direction, description_zh: "C++ 实现返回错误码 invalid_direction", retry_safe: true, stage: preflight, wire_match: exact }
+    { code: missing_id, description_zh: "C++ 实现返回错误码 missing_id", retry_safe: true, stage: preflight, wire_match: exact }
+    { code: no_editor_world, description_zh: "C++ 实现返回错误码 no_editor_world", retry_safe: false, stage: execution, wire_match: exact }
+    { code: no_geditor, description_zh: "C++ 实现返回错误码 no_geditor", retry_safe: false, stage: execution, wire_match: exact }
+    { code: unsupported_offset_mode, description_zh: "C++ 实现返回错误码 unsupported_offset_mode", retry_safe: false, stage: execution, wire_match: exact }
+    { code: unsupported_trace_channel, description_zh: "C++ 实现返回错误码 unsupported_trace_channel", retry_safe: false, stage: execution, wire_match: exact }
+  ]
+}
+evidence: {
+  docs: [
+    { path: "Plugins/UeAgentInterface/docs/commands/core_level/level_snap_to_surface.md", purpose: "user documentation cross-check; C++ implementation remains authoritative" }
+  ]
+  implementation: [
+    { line_hint: 955, path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Commands/Level/UeAgentHttpServer_Level_ProjectionAndTrace.cpp", purpose: "command handler, parameter and return evidence", symbol: CmdLevelSnapToSurface }
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Commands/AI/UeAgentHttpServer_AI_Blackboard.cpp", purpose: "transitive helper evidence used by the command handler" }
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Commands/Level/UeAgentHttpServer_Level.cpp", purpose: "transitive helper evidence used by the command handler" }
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Commands/Level/UeAgentHttpServer_Level_CaptureAndPersistence.cpp", purpose: "transitive helper evidence used by the command handler" }
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Commands/UMG/UeAgentHttpServer_UMG_FolderFormat.cpp", purpose: "transitive helper evidence used by the command handler" }
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Server/UeAgentHttpServer.cpp", purpose: "transitive helper evidence used by the command handler" }
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Utilities/UeAgentJsonDiagnostics.cpp", purpose: "transitive helper evidence used by the command handler" }
+  ]
+  tests: [
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterfaceTests/Private/Smoke/UeAgentInterfaceSmoke_LevelViewportModeling.cpp", purpose: "smoke or negative-path evidence cross-checked for the verified contract" }
+  ]
+}
+execution: {
+  destructive: false
+  editor_state: required
+  game_thread: required
+  idempotent: false
+  kind: write
+  overwrite_behavior: none
+  pie_state: allowed
+  retry_safe: false
+  save_behavior: none
+  side_effects: [modifies_level]
+  ui_effect: none
+}
+maturity: verified
+params: {
+  constraints: []
+  fields: {
+    align_rotation: { default: false, default_state: defined, description_zh: "C++ 实现读取的 align_rotation 参数", required: false, type: bool }
+    direction: { default_state: none, description_zh: "C++ 实现读取的 direction 参数", required: false, type: json_value }
+    id: { default_state: none, description_zh: "C++ 实现读取的 id 参数", required: true, type: string }
+    ignore_actor_ids: { default_state: none, description_zh: "C++ 实现读取的 ignore_actor_ids 参数", item_type: json_value, required: false, type: array }
+    offset_cm: { default: 0, default_state: defined, description_zh: "C++ 实现读取的 offset_cm 参数", required: false, type: number }
+    offset_mode: { default: normal, default_state: defined, description_zh: "C++ 实现读取的 offset_mode 参数", required: false, type: string }
+    start: { default_state: none, description_zh: "C++ 实现读取的 start 参数", required: false, type: json_value }
+    trace_channel: { default_state: none, description_zh: "C++ 实现读取的 trace_channel 参数", required: false, type: string }
+    trace_complex: { default: true, default_state: defined, description_zh: "C++ 实现读取的 trace_complex 参数", required: false, type: bool }
+    trace_distance: { default: 100000, default_state: defined, description_zh: "C++ 实现读取的 trace_distance 参数", required: false, type: number }
+  }
+  state: defined
+}
+response: { artifact_fields: [], compact_fields: [actor, actor_id, actor_name, align_rotation, bone_name, component_name], failure_fields: [params.id], max_items_policy: { fields: [], mode: none } }
+returns: {
+  fields: {
+    actor: { description_zh: "C++ 实现返回的 actor 字段；是否出现取决于执行分支", required: false, type: json_value }
+    actor_id: { description_zh: "C++ 实现返回的 actor_id 字段；是否出现取决于执行分支", required: false, type: string }
+    actor_name: { description_zh: "C++ 实现返回的 actor_name 字段；是否出现取决于执行分支", required: false, type: string }
+    align_rotation: { description_zh: "C++ 实现返回的 align_rotation 字段；是否出现取决于执行分支", required: false, type: bool }
+    bone_name: { description_zh: "C++ 实现返回的 bone_name 字段；是否出现取决于执行分支", required: false, type: string }
+    component_name: { description_zh: "C++ 实现返回的 component_name 字段；是否出现取决于执行分支", required: false, type: string }
+    component_path: { description_zh: "C++ 实现返回的 component_path 字段；是否出现取决于执行分支", required: false, type: string }
+    direction: { description_zh: "C++ 实现返回的 direction 字段；是否出现取决于执行分支", required: false, type: json_value }
+    distance: { description_zh: "C++ 实现返回的 distance 字段；是否出现取决于执行分支", required: false, type: number }
+    face_index: { description_zh: "C++ 实现返回的 face_index 字段；是否出现取决于执行分支", required: false, type: string }
+    hit: { description_zh: "C++ 实现返回的 hit 字段；是否出现取决于执行分支", required: false, type: bool }
+    location: { description_zh: "C++ 实现返回的 location 字段；是否出现取决于执行分支", required: false, type: json_value }
+    new_location: { description_zh: "C++ 实现返回的 new_location 字段；是否出现取决于执行分支", required: false, type: json_value }
+    new_rotation: { description_zh: "C++ 实现返回的 new_rotation 字段；是否出现取决于执行分支", required: false, type: json_value }
+    normal: { description_zh: "C++ 实现返回的 normal 字段；是否出现取决于执行分支", required: false, type: json_value }
+    offset_cm: { description_zh: "C++ 实现返回的 offset_cm 字段；是否出现取决于执行分支", required: false, type: number }
+    offset_mode: { description_zh: "C++ 实现返回的 offset_mode 字段；是否出现取决于执行分支", required: false, type: string }
+    previous_location: { description_zh: "C++ 实现返回的 previous_location 字段；是否出现取决于执行分支", required: false, type: json_value }
+    previous_rotation: { description_zh: "C++ 实现返回的 previous_rotation 字段；是否出现取决于执行分支", required: false, type: json_value }
+    snapped: { description_zh: "C++ 实现返回的 snapped 字段；是否出现取决于执行分支", required: false, type: bool }
+    start: { description_zh: "C++ 实现返回的 start 字段；是否出现取决于执行分支", required: false, type: json_value }
+    trace_channel: { description_zh: "C++ 实现返回的 trace_channel 字段；是否出现取决于执行分支", required: false, type: string }
+    trace_complex: { description_zh: "C++ 实现返回的 trace_complex 字段；是否出现取决于执行分支", required: false, type: bool }
+    trace_distance: { description_zh: "C++ 实现返回的 trace_distance 字段；是否出现取决于执行分支", required: false, type: number }
+  }
+  state: defined
+}
+schema: uai.command_spec.v1
+status: active
+types: {}
+verification: {
+  assertions: [
+    { id: result_present, operator: exists, source: returns.actor }
+  ]
+  failure_policy: fail_overall
+  methods: [
+    { id: result, kind: result_assertion }
+  ]
+  required: true
+  state: defined
+}
+version: 1

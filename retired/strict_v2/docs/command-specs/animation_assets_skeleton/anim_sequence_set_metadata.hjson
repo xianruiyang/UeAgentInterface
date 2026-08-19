@@ -1,0 +1,88 @@
+authoring: { reason: command_has_no_registered_folder_authoring_profile, state: none }
+category: animation_assets_skeleton
+command: anim_sequence_set_metadata
+deprecation: { reason: command_is_active, state: none }
+discovery: { aliases: [], keywords_en: [anim, sequence, set, metadata, animation_assets_skeleton], keywords_zh: [anim_sequence_set_metadata], summary_en: "Execute anim_sequence_set_metadata with a verified implementation contract", summary_zh: "统一管理 AnimSequence metadata 生命周期", tags: [animation_assets_skeleton, p2-006] }
+errors: {
+  codes: [
+    { code: add_metadata_failed, description_zh: "C++ 实现返回错误码 add_metadata_failed", retry_safe: false, stage: execution, wire_match: exact }
+    { code: anim_sequence_not_found, description_zh: "C++ 实现返回错误码 anim_sequence_not_found", retry_safe: false, stage: execution, wire_match: exact }
+    { code: asset_not_found, description_zh: "C++ 实现返回错误码 asset_not_found", retry_safe: false, stage: execution, wire_match: exact }
+    { code: invalid_metadata_class, description_zh: "C++ 实现返回错误码 invalid_metadata_class", retry_safe: true, stage: preflight, wire_match: exact }
+    { code: invalid_metadata_property_update, description_zh: "C++ 实现返回错误码 invalid_metadata_property_update", retry_safe: true, stage: preflight, wire_match: exact }
+    { code: metadata_class_is_abstract, description_zh: "C++ 实现返回错误码 metadata_class_is_abstract", retry_safe: false, stage: execution, wire_match: exact }
+    { code: metadata_property_not_found, description_zh: "C++ 实现返回错误码 metadata_property_not_found", retry_safe: false, stage: execution, wire_match: exact }
+    { code: missing_asset_path, description_zh: "C++ 实现返回错误码 missing_asset_path", retry_safe: true, stage: preflight, wire_match: exact }
+    { code: missing_metadata_class_path, description_zh: "C++ 实现返回错误码 missing_metadata_class_path", retry_safe: true, stage: preflight, wire_match: exact }
+    { code: save_asset_failed, description_zh: "C++ 实现返回错误码 save_asset_failed", retry_safe: false, stage: execution, wire_match: exact }
+    { code: unsupported_metadata_property_type, description_zh: "C++ 实现返回错误码 unsupported_metadata_property_type", retry_safe: false, stage: execution, wire_match: exact }
+  ]
+}
+evidence: {
+  docs: [
+    { path: "Plugins/UeAgentInterface/docs/commands/animation_assets_skeleton/anim_sequence_set_metadata.md", purpose: "user documentation cross-check; C++ implementation remains authoritative" }
+  ]
+  implementation: [
+    { line_hint: 69, path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Commands/Animation/UeAgentHttpServer_AnimationAssets_AnimSequenceEdit.cpp", purpose: "command handler, parameter and return evidence", symbol: CmdAnimSequenceSetMetadata }
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Commands/Animation/UeAgentHttpServer_AnimationAssets.cpp", purpose: "transitive helper evidence used by the command handler" }
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Server/UeAgentHttpServer.cpp", purpose: "transitive helper evidence used by the command handler" }
+  ]
+  tests: [
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterfaceTests/Private/Smoke/UeAgentInterfaceSmoke_AnimationIKNiagara.cpp", purpose: "smoke or negative-path evidence cross-checked for the verified contract" }
+  ]
+}
+execution: {
+  destructive: false
+  editor_state: required
+  game_thread: required
+  idempotent: false
+  kind: write
+  overwrite_behavior: none
+  pie_state: allowed
+  retry_safe: false
+  save_behavior: caller_controlled
+  side_effects: [modifies_asset]
+  ui_effect: none
+}
+maturity: verified
+params: {
+  constraints: []
+  fields: {
+    asset_path: { default_state: none, description_zh: "C++ 实现读取的 asset_path 参数", path_semantics: { access_scope: project_write, kind: ue_asset }, required: true, type: ue_asset_path }
+    clear_all: { default: false, default_state: defined, description_zh: "C++ 实现读取的 clear_all 参数", required: false, type: bool }
+    metadata_class_path: { default_state: none, description_zh: "C++ 实现读取的 metadata_class_path 参数", required: true, type: string }
+    metadata_values: { default_state: none, description_zh: "C++ 实现读取的 metadata_values 参数", required: false, type: json_value }
+    remove: { default: false, default_state: defined, description_zh: "C++ 实现读取的 remove 参数", required: false, type: bool }
+    save_after_set: { default: false, default_state: defined, description_zh: "C++ 实现读取的 save_after_set 参数", required: false, type: bool }
+  }
+  state: defined
+}
+response: { artifact_fields: [metadata], compact_fields: [saved, asset_path, cleared_all, metadata_count, removed], failure_fields: [params.asset_path, params.metadata_class_path], max_items_policy: { fields: [], mode: none } }
+returns: {
+  fields: {
+    asset_path: { description_zh: "C++ 实现返回的 asset_path 字段；是否出现取决于执行分支", required: false, type: ue_asset_path }
+    cleared_all: { description_zh: "C++ 实现返回的 cleared_all 字段；是否出现取决于执行分支", required: false, type: bool }
+    metadata: { description_zh: "C++ 实现返回的 metadata 字段；是否出现取决于执行分支", item_type: json_value, required: false, type: array }
+    metadata_count: { description_zh: "C++ 实现返回的 metadata_count 字段；是否出现取决于执行分支", required: false, type: integer }
+    removed: { description_zh: "C++ 实现返回的 removed 字段；是否出现取决于执行分支", required: false, type: bool }
+    saved: { description_zh: "C++ 实现返回的 saved 字段；是否出现取决于执行分支", required: false, type: bool }
+  }
+  state: defined
+}
+schema: uai.command_spec.v1
+status: active
+types: {}
+verification: {
+  assertions: [
+    { id: result_present, operator: exists, source: returns.saved }
+    { id: state_readback_present, operator: exists, source: methods.state_readback.asset_path }
+  ]
+  failure_policy: fail_overall
+  methods: [
+    { id: result, kind: result_assertion }
+    { command: anim_sequence_get_info, id: state_readback, kind: command_readback, params_mapping: { asset_path: params.asset_path } }
+  ]
+  required: true
+  state: defined
+}
+version: 1

@@ -18,44 +18,7 @@ bool FUeAgentHttpServer::ExecuteModelingCommand(const FString& CommandLower, con
 {
 	using namespace UeAgentModelingOps;
 
-	const TMap<FString, FString> ToolWrappers = {
-		{TEXT("modeling_convert_actor_to_dynamic_mesh"), TEXT("BeginConvertMeshesTool")},
-		{TEXT("modeling_duplicate_to_new_static_mesh"), TEXT("BeginDuplicateMeshesTool")},
-		{TEXT("modeling_create_box"), TEXT("BeginAddBoxPrimitiveTool")},
-		{TEXT("modeling_create_cylinder"), TEXT("BeginAddCylinderPrimitiveTool")},
-		{TEXT("modeling_create_sphere"), TEXT("BeginAddSpherePrimitiveTool")},
-		{TEXT("modeling_create_plane"), TEXT("BeginAddRectanglePrimitiveTool")},
-		{TEXT("modeling_create_stairs"), TEXT("BeginAddStairsPrimitiveTool")},
-		{TEXT("modeling_create_ramp"), TEXT("BeginAddRampPrimitiveTool")},
-		{TEXT("modeling_create_ramp_corner"), TEXT("BeginAddRampCornerPrimitiveTool")},
-		{TEXT("modeling_extrude_faces"), TEXT("BeginSelectionExtrudeTool")},
-		{TEXT("modeling_inset_faces"), TEXT("BeginPolyEditTool")},
-		{TEXT("modeling_bevel_edges"), TEXT("BeginPolyEditTool")},
-		{TEXT("modeling_offset"), TEXT("BeginSelectionOffsetTool")},
-		{TEXT("modeling_push_pull"), TEXT("BeginPolyEditTool")},
-		{TEXT("modeling_mirror"), TEXT("BeginMirrorTool")},
-		{TEXT("modeling_duplicate_faces"), TEXT("BeginPolyEditTool")},
-		{TEXT("modeling_boolean"), TEXT("BeginMeshBooleanTool")},
-		{TEXT("modeling_trim"), TEXT("BeginMeshTrimTool")},
-		{TEXT("modeling_plane_cut"), TEXT("BeginPlaneCutTool")},
-		{TEXT("modeling_mesh_cut"), TEXT("BeginCutMeshWithMeshTool")},
-		{TEXT("modeling_voxel_boolean"), TEXT("BeginVoxelBooleanTool")},
-		{TEXT("modeling_remesh"), TEXT("BeginRemeshMeshTool")},
-		{TEXT("modeling_simplify"), TEXT("BeginSimplifyMeshTool")},
-		{TEXT("modeling_subdivide"), TEXT("BeginSubdividePolyTool")},
-		{TEXT("modeling_weld_edges"), TEXT("BeginWeldEdgesTool")},
-		{TEXT("modeling_fill_holes"), TEXT("BeginHoleFillTool")},
-		{TEXT("modeling_recompute_normals"), TEXT("BeginEditNormalsTool")},
-		{TEXT("modeling_bake_transform"), TEXT("BeginBakeTransformTool")},
-		{TEXT("modeling_align_to_world"), TEXT("BeginAlignObjectsTool")},
-		{TEXT("modeling_auto_uv"), TEXT("BeginGlobalUVGenerateTool")},
-		{TEXT("modeling_project_uv"), TEXT("BeginUVProjectionTool")},
-		{TEXT("modeling_set_material_slot"), TEXT("BeginEditMeshMaterialsTool")},
-		{TEXT("modeling_add_material_slot"), TEXT("BeginEditMeshMaterialsTool")},
-		{TEXT("modeling_remove_material_slot"), TEXT("BeginEditMeshMaterialsTool")},
-		{TEXT("modeling_generate_simple_collision"), TEXT("BeginSimpleCollisionEditorTool")},
-		{TEXT("modeling_generate_convex_collision"), TEXT("BeginSetCollisionGeometryTool")}
-	};
+	const TMap<FString, FModelingToolWrapperDefinition>& ToolWrappers = GetModelingToolWrapperRegistry();
 
 	if (CommandLower == TEXT("modeling_activate_mode")) return CmdModelingActivateMode(Ctx, OutData, OutError);
 	if (CommandLower == TEXT("modeling_get_selection")) return CmdModelingGetSelection(Ctx, OutData, OutError);
@@ -74,40 +37,11 @@ bool FUeAgentHttpServer::ExecuteModelingCommand(const FString& CommandLower, con
 	if (CommandLower == TEXT("modeling_invoke_active_tool_action")) return CmdModelingInvokeActiveToolAction(Ctx, OutData, OutError);
 	if (CommandLower == TEXT("modeling_accept_tool")) return CmdModelingAcceptTool(Ctx, OutData, OutError);
 	if (CommandLower == TEXT("modeling_cancel_tool")) return CmdModelingCancelTool(Ctx, OutData, OutError);
-	if (CommandLower == TEXT("modeling_save_mesh_asset")) return CmdModelingSaveMeshAsset(Ctx, OutData, OutError);
 	if (CommandLower == TEXT("modeling_replace_actor_mesh")) return CmdModelingReplaceActorMesh(Ctx, OutData, OutError);
 	if (CommandLower == TEXT("modeling_snap_to_ground")) return CmdModelingSnapToGround(Ctx, OutData, OutError);
-	if (CommandLower == TEXT("modeling_voxel_grid_begin")) return CmdModelingVoxelGridBegin(Ctx, OutData, OutError);
-	if (CommandLower == TEXT("modeling_voxel_grid_add_bounds")) return CmdModelingVoxelGridAddBounds(Ctx, OutData, OutError);
-	if (CommandLower == TEXT("modeling_voxel_grid_remove_bounds")) return CmdModelingVoxelGridRemoveBounds(Ctx, OutData, OutError);
-	if (CommandLower == TEXT("modeling_voxel_grid_apply")) return CmdModelingVoxelGridApply(Ctx, OutData, OutError);
-
-	if (const FString* ToolIdentifier = ToolWrappers.Find(CommandLower))
+	if (ToolWrappers.Contains(CommandLower))
 	{
-		FUeAgentRequestContext WrappedCtx = Ctx;
-		if (!WrappedCtx.Params.IsValid())
-		{
-			WrappedCtx.Params = MakeShared<FJsonObject>();
-		}
-		WrappedCtx.Params->SetStringField(TEXT("__uai_wrapper_command"), CommandLower);
-		WrappedCtx.Params->SetStringField(TEXT("tool_identifier"), *ToolIdentifier);
-		if (CommandLower == TEXT("modeling_duplicate_faces"))
-		{
-			WrappedCtx.Params->SetStringField(TEXT("post_action"), TEXT("Duplicate"));
-		}
-		else if (CommandLower == TEXT("modeling_inset_faces"))
-		{
-			WrappedCtx.Params->SetStringField(TEXT("post_action"), TEXT("Inset"));
-		}
-		else if (CommandLower == TEXT("modeling_push_pull"))
-		{
-			WrappedCtx.Params->SetStringField(TEXT("post_action"), TEXT("PushPull"));
-		}
-		else if (CommandLower == TEXT("modeling_bevel_edges"))
-		{
-			WrappedCtx.Params->SetStringField(TEXT("post_action"), TEXT("Bevel"));
-		}
-		return CmdModelingStartTool(WrappedCtx, OutData, OutError);
+		return CmdModelingStartTool(Ctx, OutData, OutError);
 	}
 
 	OutError = TEXT("unknown_modeling_command");

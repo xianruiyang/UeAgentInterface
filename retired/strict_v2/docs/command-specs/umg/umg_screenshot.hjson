@@ -1,0 +1,142 @@
+authoring: { reason: command_has_no_registered_folder_authoring_profile, state: none }
+category: umg
+command: umg_screenshot
+deprecation: { reason: command_is_active, state: none }
+discovery: { aliases: [], keywords_en: [umg, screenshot], keywords_zh: [umg_screenshot], summary_en: "Execute umg_screenshot with a verified implementation contract", summary_zh: "离屏渲染 WidgetBlueprint 并截图，可自动裁剪到可见控件外接框", tags: [umg, p2-003] }
+errors: {
+  codes: [
+    { code: compile_failed_before_capture, description_zh: "C++ 实现返回错误码 compile_failed_before_capture", retry_safe: false, stage: execution, wire_match: exact }
+    { code: create_user_widget_failed, description_zh: "C++ 实现返回错误码 create_user_widget_failed", retry_safe: false, stage: execution, wire_match: exact }
+    { code: editor_world_not_found, description_zh: "C++ 实现返回错误码 editor_world_not_found", retry_safe: false, stage: execution, wire_match: exact }
+    { code: empty_crop_region, description_zh: "C++ 实现返回错误码 empty_crop_region", retry_safe: false, stage: execution, wire_match: exact }
+    { code: generated_user_widget_class_not_found, description_zh: "C++ 实现返回错误码 generated_user_widget_class_not_found", retry_safe: false, stage: execution, wire_match: exact }
+    { code: invalid_crop_mode, description_zh: "C++ 实现返回错误码 invalid_crop_mode", retry_safe: true, stage: preflight, wire_match: exact }
+    { code: invalid_crop_size, description_zh: "C++ 实现返回错误码 invalid_crop_size", retry_safe: true, stage: preflight, wire_match: exact }
+    { code: invalid_pixels, description_zh: "C++ 实现返回错误码 invalid_pixels", retry_safe: true, stage: preflight, wire_match: exact }
+    { code: missing_asset_path, description_zh: "C++ 实现返回错误码 missing_asset_path", retry_safe: true, stage: preflight, wire_match: exact }
+    { code: missing_crop_width_or_height, description_zh: "C++ 实现返回错误码 missing_crop_width_or_height", retry_safe: true, stage: preflight, wire_match: exact }
+    { code: offscreen_read_pixels_failed, description_zh: "C++ 实现返回错误码 offscreen_read_pixels_failed", retry_safe: false, stage: execution, wire_match: exact }
+    { code: offscreen_render_target_create_failed, description_zh: "C++ 实现返回错误码 offscreen_render_target_create_failed", retry_safe: false, stage: execution, wire_match: exact }
+    { code: offscreen_render_target_resource_missing, description_zh: "C++ 实现返回错误码 offscreen_render_target_resource_missing", retry_safe: true, stage: preflight, wire_match: exact }
+    { code: offscreen_screenshot_empty, description_zh: "C++ 实现返回错误码 offscreen_screenshot_empty", retry_safe: false, stage: execution, wire_match: exact }
+    { code: screenshots_disabled, description_zh: "C++ 实现返回错误码 screenshots_disabled", retry_safe: false, stage: execution, wire_match: exact }
+    { code: slate_not_initialized, description_zh: "C++ 实现返回错误码 slate_not_initialized", retry_safe: false, stage: execution, wire_match: exact }
+    { code: unsupported_format, description_zh: "C++ 实现返回错误码 unsupported_format", retry_safe: false, stage: execution, wire_match: exact }
+    { code: widget_blueprint_not_found, description_zh: "C++ 实现返回错误码 widget_blueprint_not_found", retry_safe: false, stage: execution, wire_match: exact }
+    { code: widget_renderer_create_failed, description_zh: "C++ 实现返回错误码 widget_renderer_create_failed", retry_safe: false, stage: execution, wire_match: exact }
+  ]
+}
+evidence: {
+  docs: [
+    { path: "Plugins/UeAgentInterface/docs/commands/umg/umg_screenshot.md", purpose: "user documentation cross-check; C++ implementation remains authoritative" }
+  ]
+  implementation: [
+    { line_hint: 376, path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Commands/UMG/UeAgentHttpServer_UMG_Screenshot.cpp", purpose: "command handler, parameter and return evidence", symbol: CmdUmgScreenshot }
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Commands/Level/UeAgentHttpServer_Level_CaptureAndPersistence.cpp", purpose: "transitive helper evidence used by the command handler" }
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Commands/Level/UeAgentHttpServer_Level_ImageHelpers.cpp", purpose: "transitive helper evidence used by the command handler" }
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Server/UeAgentHttpServer.cpp", purpose: "transitive helper evidence used by the command handler" }
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Utilities/UeAgentJsonDiagnostics.cpp", purpose: "transitive helper evidence used by the command handler" }
+  ]
+  tests: [
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterfaceTests/Private/Smoke/UeAgentInterfaceSmoke_BlueprintUmg.cpp", purpose: "smoke or negative-path evidence cross-checked for the verified contract" }
+  ]
+}
+execution: {
+  destructive: false
+  editor_state: required
+  game_thread: required
+  idempotent: false
+  kind: write
+  overwrite_behavior: target_asset
+  pie_state: allowed
+  retry_safe: false
+  save_behavior: none
+  side_effects: [writes_files, captures_media, modifies_asset]
+  ui_effect: none
+}
+maturity: verified
+params: {
+  constraints: []
+  fields: {
+    alpha_threshold: { default_state: none, description_zh: "C++ 实现读取的 alpha_threshold 参数", required: false, type: number }
+    asset_path: { default_state: none, description_zh: "C++ 实现读取的 asset_path 参数", path_semantics: { access_scope: project_write, kind: ue_asset }, required: true, type: ue_asset_path }
+    bounds_alpha_threshold: { default_state: none, description_zh: "C++ 实现读取的 bounds_alpha_threshold 参数", required: false, type: number }
+    bounds_padding: { default_state: none, description_zh: "C++ 实现读取的 bounds_padding 参数", required: false, type: number }
+    capture_height: { default_state: none, description_zh: "C++ 实现读取的 capture_height 参数", required: false, type: integer }
+    capture_width: { default_state: none, description_zh: "C++ 实现读取的 capture_width 参数", required: false, type: integer }
+    compile_before_capture: { default: true, default_state: defined, description_zh: "C++ 实现读取的 compile_before_capture 参数", required: false, type: bool }
+    crop: { default_state: none, description_zh: "C++ 实现读取的 crop 参数", required: false, type: object, type_ref: "local:ScreenshotCrop" }
+    crop_mode: { default: auto_bounds, default_state: defined, description_zh: "C++ 实现读取的 crop_mode 参数", required: false, type: string }
+    format: { default: png, default_state: defined, description_zh: "C++ 实现读取的 format 参数", required: false, type: string }
+    max_size: { default_state: none, description_zh: "C++ 实现读取的 max_size 参数", required: false, type: number }
+    output_file: {
+      default_state: none
+      description_zh: "C++ 实现读取的 output_file 参数"
+      path_semantics: { kind: filesystem_file, must_exist: false, writable: true }
+      required: false
+      type: filesystem_path
+    }
+    padding: { default_state: none, description_zh: "C++ 实现读取的 padding 参数", required: false, type: number }
+    quality: { default_state: none, description_zh: "C++ 实现读取的 quality 参数", required: false, type: integer }
+    region: { default_state: none, description_zh: "C++ 实现读取的 region 参数", required: false, type: object, type_ref: "local:ScreenshotCrop" }
+  }
+  state: defined
+}
+response: { artifact_fields: [], compact_fields: [asset_path, file_path, width, height, format, compiled_before_capture], failure_fields: [params.asset_path], max_items_policy: { fields: [], mode: none } }
+returns: {
+  fields: {
+    asset_path: { description_zh: "C++ 实现返回的 asset_path 字段；是否出现取决于执行分支", required: false, type: ue_asset_path }
+    auto_bounds_found: { description_zh: "C++ 实现返回的 auto_bounds_found 字段；是否出现取决于执行分支", required: false, type: bool }
+    blueprint_status_after_compile: { description_zh: "C++ 实现返回的 blueprint_status_after_compile 字段；是否出现取决于执行分支", required: false, type: string }
+    blueprint_status_before: { description_zh: "C++ 实现返回的 blueprint_status_before 字段；是否出现取决于执行分支", required: false, type: string }
+    bounds_alpha_threshold: { description_zh: "C++ 实现返回的 bounds_alpha_threshold 字段；是否出现取决于执行分支", required: false, type: number }
+    bounds_padding: { description_zh: "C++ 实现返回的 bounds_padding 字段；是否出现取决于执行分支", required: false, type: number }
+    bytes: { description_zh: "C++ 实现返回的 bytes 字段；是否出现取决于执行分支", required: false, type: number }
+    canvas: { description_zh: "C++ 实现返回的 canvas 字段；是否出现取决于执行分支", required: false, type: json_value }
+    capture_mode: { description_zh: "C++ 实现返回的 capture_mode 字段；是否出现取决于执行分支", required: false, type: string }
+    compiled_before_capture: { description_zh: "C++ 实现返回的 compiled_before_capture 字段；是否出现取决于执行分支", required: false, type: bool }
+    content_bounds: { description_zh: "C++ 实现返回的 content_bounds 字段；是否出现取决于执行分支", required: false, type: json_value }
+    crop: { description_zh: "C++ 实现返回的 crop 字段；是否出现取决于执行分支", required: false, type: json_value }
+    crop_mode: { description_zh: "C++ 实现返回的 crop_mode 字段；是否出现取决于执行分支", required: false, type: string }
+    file_path: { description_zh: "C++ 实现返回的 file_path 字段；是否出现取决于执行分支", required: false, type: string }
+    format: { description_zh: "C++ 实现返回的 format 字段；是否出现取决于执行分支", required: false, type: string }
+    generated_class: { description_zh: "C++ 实现返回的 generated_class 字段；是否出现取决于执行分支", required: false, type: string }
+    height: { description_zh: "C++ 实现返回的 height 字段；是否出现取决于执行分支", required: false, type: integer }
+    max_size: { description_zh: "C++ 实现返回的 max_size 字段；是否出现取决于执行分支", required: false, type: number }
+    preserve_alpha: { description_zh: "C++ 实现返回的 preserve_alpha 字段；是否出现取决于执行分支", required: false, type: bool }
+    quality: { description_zh: "C++ 实现返回的 quality 字段；是否出现取决于执行分支", required: false, type: integer }
+    raw_height: { description_zh: "C++ 实现返回的 raw_height 字段；是否出现取决于执行分支", required: false, type: integer }
+    raw_width: { description_zh: "C++ 实现返回的 raw_width 字段；是否出现取决于执行分支", required: false, type: integer }
+    scale: { description_zh: "C++ 实现返回的 scale 字段；是否出现取决于执行分支", required: false, type: number }
+    width: { description_zh: "C++ 实现返回的 width 字段；是否出现取决于执行分支", required: false, type: integer }
+  }
+  state: defined
+}
+schema: uai.command_spec.v1
+status: active
+types: {
+  ScreenshotCrop: {
+    additional_fields: false
+    fields: {
+      height: { default_state: none, description_zh: "裁剪高度", minimum: 1, required: false, type: integer }
+      width: { default_state: none, description_zh: "裁剪宽度", minimum: 1, required: false, type: integer }
+      x: { default: 0, default_state: defined, description_zh: "裁剪左上角 X", minimum: 0, required: false, type: integer }
+      y: { default: 0, default_state: defined, description_zh: "裁剪左上角 Y", minimum: 0, required: false, type: integer }
+    }
+    kind: object
+  }
+}
+verification: {
+  assertions: [
+    { id: result_present, operator: exists, source: returns.file_path }
+    { id: state_readback_present, operator: exists, source: methods.state_readback.status }
+  ]
+  failure_policy: fail_overall
+  methods: [
+    { id: result, kind: result_assertion }
+    { command: umg_get_info, id: state_readback, kind: command_readback, params_mapping: { asset_path: params.asset_path } }
+  ]
+  required: true
+  state: defined
+}
+version: 1

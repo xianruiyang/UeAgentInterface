@@ -1,0 +1,11 @@
+definition: {
+  additional_fields: false
+  fields: {
+    x: { default_state: none, description_zh: "纹理源区域 X", required: false, type: integer }
+    y: { default_state: none, description_zh: "纹理源区域 Y", required: false, type: integer }
+  }
+  kind: object
+}
+schema: uai.command_spec.shared_type.v1
+type_id: TextureSourceRegion2D
+version: 1

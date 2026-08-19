@@ -1,0 +1,8 @@
+definition: {
+  additional_fields: true
+  fields: { min_non_black_pixel_count: { default: 0, default_state: defined, description_zh: "探针通过所需的最小非黑像素数量", minimum: 0, required: false, type: integer } }
+  kind: object
+}
+schema: uai.command_spec.shared_type.v1
+type_id: TextureExpectedPixelStats
+version: 1

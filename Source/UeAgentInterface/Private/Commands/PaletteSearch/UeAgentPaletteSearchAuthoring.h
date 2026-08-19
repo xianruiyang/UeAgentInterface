@@ -10,8 +10,12 @@ namespace UeAgentPaletteSearch
 {
 	struct FCandidate;
 
-	TSharedPtr<FJsonObject> BuildJsonAuthoringPatch(const FCandidate& Candidate);
-	bool ResolveCatalogNameToCandidate(
+	UEAGENTINTERFACE_API bool BuildAuthoringProjection(
+		const FCandidate& Candidate,
+		TSharedPtr<FJsonObject>& OutSeed,
+		TSharedPtr<FJsonObject>& OutPlacement,
+		FString& OutError);
+	UEAGENTINTERFACE_API bool ResolveCatalogNameToCandidate(
 		const FString& CatalogType,
 		const FString& Name,
 		FCandidate& OutCandidate,

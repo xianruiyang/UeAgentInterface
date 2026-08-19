@@ -1,0 +1,102 @@
+schema: uai.command_spec.v1
+version: 1
+maturity: verified
+command: blueprint_apply_folder
+category: blueprint
+status: active
+discovery: {
+  summary_zh: "应用 Blueprint 统一 index.hjson workspace"
+  summary_en: "Apply a Blueprint through the unified index.hjson workspace"
+  aliases: []
+  keywords_zh: [Blueprint, HJSON, workspace, "应用"]
+  keywords_en: [blueprint, hjson, workspace, apply]
+  tags: [blueprint, authoring, apply, unified_contract]
+}
+types: {}
+execution: {
+  kind: write
+  side_effects: [modifies_asset]
+  destructive: true
+  idempotent: false
+  retry_safe: false
+  editor_state: required
+  pie_state: allowed
+  game_thread: required
+  ui_effect: none
+  save_behavior: caller_controlled
+  overwrite_behavior: target_asset
+}
+params: {
+  state: defined
+  fields: {
+    asset_path: { type: ue_asset_path, required: true, default_state: none, description_zh: "外部目标约束；必须与 index.hjson target 一致", path_semantics: { kind: ue_asset, access_scope: project_write } }
+    folder_path: { type: filesystem_path, required: false, default_state: none, description_zh: "包含 index.hjson 的 workspace；省略时使用资产默认目录", path_semantics: { kind: filesystem_directory, must_exist: true, writable: false } }
+  }
+  constraints: []
+}
+returns: {
+  state: defined
+  fields: {
+    status: { type: string, required: true, description_zh: "applied" }
+    phase: { type: string, required: true, description_zh: "complete" }
+    asset_path: { type: ue_asset_path, required: true, description_zh: "实际目标资产路径" }
+    asset_kind: { type: string, required: true, description_zh: "actor_blueprint 或 blueprint" }
+    object_path: { type: string, required: true, description_zh: "实际 UObject path" }
+    folder_path: { type: filesystem_path, required: true, description_zh: "workspace 根目录" }
+    resolved_operation: { type: string, required: true, description_zh: "解析后的 create/update/upsert/remove/clone" }
+    variables_applied: { type: integer, required: true, description_zh: "输入变量数" }
+    delegates_applied: { type: integer, required: true, description_zh: "输入 dispatcher 数" }
+    components_applied: { type: integer, required: true, description_zh: "输入组件数" }
+    graphs_applied: { type: integer, required: true, description_zh: "输入图数" }
+    nodes_applied: { type: integer, required: true, description_zh: "输入节点数" }
+    edges_applied: { type: integer, required: true, description_zh: "输入连接数" }
+    units_checked: { type: integer, required: true, description_zh: "preflight 检查单元数" }
+    mutations_applied: { type: integer, required: true, description_zh: "事务 mutation 数" }
+    rollback_attempted: { type: bool, required: true, description_zh: "是否尝试回滚" }
+    rollback_succeeded: { type: bool, required: true, description_zh: "回滚是否成功" }
+  }
+}
+response: {
+  compact_fields: [status, asset_path, asset_kind, folder_path, resolved_operation, units_checked, mutations_applied]
+  failure_fields: ["params.folder_path", "params.asset_path"]
+  artifact_fields: []
+  max_items_policy: { mode: none, fields: [] }
+}
+errors: {
+  codes: [
+    { code: missing_asset_path, wire_match: exact, stage: preflight, retry_safe: true, description_zh: "缺少 asset_path" }
+    { code: blueprint_workspace_entry_invalid, wire_match: exact, stage: preflight, retry_safe: true, description_zh: "index.hjson 缺少合法 operation 或 target" }
+    { code: blueprint_workspace_asset_path_conflict, wire_match: exact, stage: preflight, retry_safe: true, description_zh: "外部 asset_path 与 workspace target 冲突" }
+    { code: blueprint_component_name_conflict, wire_match: prefix, stage: preflight, retry_safe: true, description_zh: "components 映射中存在大小写不敏感的重复组件名" }
+    { code: blueprint_component_parent_removed, wire_match: prefix, stage: preflight, retry_safe: true, description_zh: "组件仍引用同批输入中被删除的父组件" }
+    { code: blueprint_component_parent_cycle, wire_match: prefix, stage: preflight, retry_safe: true, description_zh: "组件 parent 依赖形成循环" }
+    { code: blueprint_, wire_match: prefix, stage: execution, retry_safe: false, description_zh: "Blueprint provider、SCS、graph、compile、save 或 verification 失败" }
+    { code: workspace_, wire_match: prefix, stage: preflight, retry_safe: true, description_zh: "共享 workspace load/dependency 失败" }
+  ]
+}
+verification: {
+  assertions: [
+    { expected: applied, id: status_applied, operator: equals, source: returns.status }
+    { expected_ref: returns.asset_path, id: readback_asset_matches, operator: equals, source: methods.export_readback.asset_path }
+  ]
+  failure_policy: fail_overall
+  methods: [
+    { id: result_fields, kind: result_assertion }
+    { command: blueprint_export_folder, id: export_readback, kind: command_readback, output_override_param: output_folder, params_mapping: { asset_path: returns.asset_path } }
+  ]
+  required: true
+  state: defined
+}
+authoring: { state: defined, type_id: blueprint, operation: apply, profile_ref: "contracts/field_contracts/blueprint.hjson" }
+deprecation: { state: none, reason: command_is_active }
+evidence: {
+  implementation: [
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Commands/Blueprint/UeAgentHttpServer_Blueprint_FolderFormat.cpp", symbol: CmdBlueprintApplyFolder, purpose: "统一命令适配器" }
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Domains/Blueprint/Authoring/UeAgentBlueprintAuthoringApplyProvider.cpp", purpose: "统一 workspace Apply provider" }
+  ]
+  tests: [
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterfaceTests/Private/UeAgentInterfaceBlueprintAuthoringTests.cpp", purpose: "provider、preflight、rollback 与 roundtrip" }
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterfaceTests/Private/Smoke/UeAgentInterfaceSmoke_BlueprintUmg.cpp", purpose: "真实 HTTP workspace smoke" }
+  ]
+  docs: [{ path: "Plugins/UeAgentInterface/docs/commands/blueprint/blueprint_apply_folder.md", purpose: "正式命令文档" }]
+}

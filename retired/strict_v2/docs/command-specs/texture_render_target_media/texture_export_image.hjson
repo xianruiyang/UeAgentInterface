@@ -1,0 +1,98 @@
+authoring: { reason: command_has_no_registered_folder_authoring_profile, state: none }
+category: texture_render_target_media
+command: texture_export_image
+deprecation: { reason: command_is_active, state: none }
+discovery: { aliases: [], keywords_en: [texture, export, image, texture_render_target_media], keywords_zh: [texture_export_image], summary_en: "Execute texture_export_image with a verified implementation contract", summary_zh: "将 Texture source 导出为 `png/exr/hdr/tga`。", tags: [texture_render_target_media, p2-004] }
+errors: {
+  codes: [
+    { code: compress_failed, description_zh: "C++ 实现返回错误码 compress_failed", retry_safe: false, stage: execution, wire_match: exact }
+    { code: invalid_, description_zh: "C++ 实现返回错误码 invalid_", retry_safe: true, stage: preflight, wire_match: prefix }
+    { code: invalid_pixels, description_zh: "C++ 实现返回错误码 invalid_pixels", retry_safe: true, stage: preflight, wire_match: exact }
+    { code: missing_, description_zh: "C++ 实现返回错误码 missing_", retry_safe: true, stage: preflight, wire_match: prefix }
+    { code: texture_not_found, description_zh: "C++ 实现返回错误码 texture_not_found", retry_safe: false, stage: execution, wire_match: exact }
+    { code: texture_source_read_failed, description_zh: "C++ 实现返回错误码 texture_source_read_failed", retry_safe: false, stage: execution, wire_match: exact }
+    { code: texture_source_unavailable, description_zh: "C++ 实现返回错误码 texture_source_unavailable", retry_safe: false, stage: execution, wire_match: exact }
+    { code: write_file_failed, description_zh: "C++ 实现返回错误码 write_file_failed", retry_safe: false, stage: execution, wire_match: exact }
+  ]
+}
+evidence: {
+  docs: [
+    { path: "Plugins/UeAgentInterface/docs/commands/texture_render_target_media/texture_export_image.md", purpose: "user documentation cross-check; C++ implementation remains authoritative" }
+  ]
+  implementation: [
+    { line_hint: 1460, path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Commands/TextureRenderTarget/UeAgentHttpServer_TextureRenderTarget_TextureAssets.inl", purpose: "command handler, parameter and return evidence", symbol: CmdTextureExportImage }
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Commands/Level/UeAgentHttpServer_Level_CaptureAndPersistence.cpp", purpose: "transitive helper evidence used by the command handler" }
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Commands/Level/UeAgentHttpServer_Level_ImageHelpers.cpp", purpose: "transitive helper evidence used by the command handler" }
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Server/UeAgentHttpServer.cpp", purpose: "transitive helper evidence used by the command handler" }
+  ]
+  tests: [
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterfaceTests/Private/Smoke/UeAgentInterfaceTextureRenderTargetSmokeTests.cpp", purpose: "smoke or negative-path evidence cross-checked for the verified contract" }
+  ]
+}
+execution: {
+  destructive: false
+  editor_state: required
+  game_thread: required
+  idempotent: true
+  kind: read_only_export
+  overwrite_behavior: owned_artifacts_only
+  pie_state: allowed
+  retry_safe: true
+  save_behavior: none
+  side_effects: [writes_files]
+  ui_effect: none
+}
+maturity: verified
+params: {
+  constraints: []
+  fields: {
+    asset_path: { default_state: none, description_zh: "C++ 实现读取的 asset_path 参数", path_semantics: { access_scope: mounted_read, kind: ue_asset }, required: true, type: ue_asset_path }
+    face: { default: 0, default_state: defined, description_zh: "C++ 实现读取的 face 参数", required: false, type: number }
+    format: { default: png, default_state: defined, description_zh: "C++ 实现读取的 format 参数", required: false, type: string }
+    mip_index: { default: 0, default_state: defined, description_zh: "C++ 实现读取的 mip_index 参数", required: false, type: integer }
+    output_file: {
+      default_state: none
+      description_zh: "C++ 实现读取的 output_file 参数"
+      path_semantics: { kind: filesystem_file, must_exist: false, writable: true }
+      required: false
+      type: filesystem_path
+    }
+    slice: { default: 0, default_state: defined, description_zh: "C++ 实现读取的 slice 参数", required: false, type: number }
+  }
+  state: defined
+}
+response: { artifact_fields: [], compact_fields: [asset_path, file_path, format, bytes, width, height], failure_fields: [params.asset_path], max_items_policy: { fields: [], mode: none } }
+returns: {
+  fields: {
+    asset_path: { description_zh: "C++ 实现返回的 asset_path 字段；是否出现取决于执行分支", required: false, type: ue_asset_path }
+    bytes: { description_zh: "C++ 实现返回的 bytes 字段；是否出现取决于执行分支", required: false, type: number }
+    class: { description_zh: "C++ 实现返回的 class 字段；是否出现取决于执行分支", required: false, type: string }
+    class_path: { description_zh: "C++ 实现返回的 class_path 字段；是否出现取决于执行分支", required: false, type: string }
+    face: { description_zh: "C++ 实现返回的 face 字段；是否出现取决于执行分支", required: false, type: number }
+    file_path: { description_zh: "C++ 实现返回的 file_path 字段；是否出现取决于执行分支", required: false, type: string }
+    format: { description_zh: "C++ 实现返回的 format 字段；是否出现取决于执行分支", required: false, type: string }
+    height: { description_zh: "C++ 实现返回的 height 字段；是否出现取决于执行分支", required: false, type: integer }
+    mip_index: { description_zh: "C++ 实现返回的 mip_index 字段；是否出现取决于执行分支", required: false, type: integer }
+    object_path: { description_zh: "C++ 实现返回的 object_path 字段；是否出现取决于执行分支", required: false, type: ue_object_path }
+    slice: { description_zh: "C++ 实现返回的 slice 字段；是否出现取决于执行分支", required: false, type: number }
+    width: { description_zh: "C++ 实现返回的 width 字段；是否出现取决于执行分支", required: false, type: integer }
+  }
+  state: defined
+}
+schema: uai.command_spec.v1
+status: active
+types: {}
+verification: {
+  assertions: [
+    { id: result_present, operator: exists, source: returns.asset_path }
+    { id: artifact_present, operator: not_empty, source: returns.file_path }
+  ]
+  failure_policy: fail_overall
+  methods: [
+    { id: result, kind: result_assertion }
+    { artifact_field: file_path, id: artifact, kind: filesystem_artifact }
+  ]
+  required: true
+  state: defined
+}
+version: 1

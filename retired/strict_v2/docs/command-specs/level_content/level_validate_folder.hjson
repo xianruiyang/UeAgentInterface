@@ -1,0 +1,45 @@
+schema: uai.command_spec.v1
+version: 1
+maturity: verified
+command: level_validate_folder
+category: level_content
+status: active
+discovery: { summary_zh: "只读验证统一 Level HJSON workspace", summary_en: "Read-only validation of a unified Level HJSON workspace", aliases: [], keywords_zh: [Level, HJSON, workspace, "验证"], keywords_en: [level, hjson, workspace, validate], tags: [level_content, authoring, validate, unified_contract] }
+types: {}
+execution: { kind: read_only, side_effects: [], destructive: false, idempotent: true, retry_safe: true, editor_state: required, pie_state: allowed, game_thread: required, ui_effect: none, save_behavior: none, overwrite_behavior: none }
+params: {
+  state: defined
+  fields: {
+    input_folder: { type: filesystem_path, required: false, default_state: none, description_zh: "包含 index.hjson 的 Level workspace", path_semantics: { kind: filesystem_directory, must_exist: true, writable: false } }
+    folder_path: { type: filesystem_path, required: false, default_state: none, description_zh: "input_folder 别名", path_semantics: { kind: filesystem_directory, must_exist: true, writable: false } }
+  }
+  constraints: [{ kind: one_of, fields: [input_folder, folder_path] }]
+}
+returns: {
+  state: defined
+  fields: {
+    status: { type: string, required: true, description_zh: "ready 或 failed" }
+    phase: { type: string, required: true, description_zh: "load 或 preflight" }
+    ok: { type: bool, required: true, description_zh: "workspace 是否可安全进入 mutation" }
+    units_checked: { type: integer, required: true, description_zh: "完成 preflight 的 unit 数" }
+    mutations_applied: { type: integer, required: true, description_zh: "始终为 0" }
+    rollback_attempted: { type: bool, required: true, description_zh: "始终为 false" }
+    rollback_succeeded: { type: bool, required: true, description_zh: "始终为 false" }
+    error_code: { type: string, required: false, description_zh: "失败阶段的稳定错误码" }
+    error_detail: { type: string, required: false, description_zh: "失败上下文" }
+  }
+}
+response: { compact_fields: [status, phase, ok, units_checked], failure_fields: [params.input_folder, returns.error_code, returns.error_detail], artifact_fields: [], max_items_policy: { mode: none, fields: [] } }
+errors: { codes: [
+  { code: editor_world_unavailable, wire_match: exact, stage: preflight, retry_safe: false, description_zh: "当前 Editor World 不可用" }
+  { code: level_workspace_, wire_match: prefix, stage: preflight, retry_safe: true, description_zh: "Level workspace 或引用不合法" }
+  { code: workspace_, wire_match: prefix, stage: preflight, retry_safe: true, description_zh: "共享 workspace preflight 失败" }
+] }
+verification: { state: defined, required: true, methods: [{ id: result, kind: result_assertion }], assertions: [{ id: ready, source: "returns.ok", operator: equals, expected: true }, { id: no_mutation, source: "returns.mutations_applied", operator: equals, expected: 0 }], failure_policy: fail_overall }
+authoring: { state: defined, type_id: level, operation: validate, profile_ref: "contracts/field_contracts/level.hjson" }
+deprecation: { state: none, reason: command_is_active }
+evidence: {
+  implementation: [{ path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Commands/LevelContentJson/UeAgentLevelContentJsonCommands_Tail.cpp", symbol: CmdLevelValidateFolder, purpose: "命令适配器" }, { path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Domains/Level/Authoring/UeAgentLevelAuthoringApplyProvider.cpp", symbol: ValidateWorkspaceDirectory, purpose: "共享 dry-run preflight" }]
+  tests: [{ path: "Plugins/UeAgentInterface/Source/UeAgentInterfaceTests/Private/Smoke/UeAgentInterfaceLevelFolderValidateSmokeTests.cpp", purpose: "真实 UE validate smoke" }]
+  docs: [{ path: "Plugins/UeAgentInterface/docs/commands/level_content/level_validate_folder.md", purpose: "正式命令文档" }]
+}

@@ -1,0 +1,59 @@
+authoring: { reason: command_has_no_registered_folder_authoring_profile, state: none }
+category: texture_render_target_media
+command: texture_usage_get_references
+deprecation: { reason: command_is_active, state: none }
+discovery: { aliases: [], keywords_en: [texture, usage, get, references, texture_render_target_media], keywords_zh: [texture_usage_get_references], summary_en: "Execute texture_usage_get_references with a verified implementation contract", summary_zh: "读取 referencer 摘要。", tags: [texture_render_target_media, p2-004] }
+errors: {
+  codes: [
+    { code: invalid_, description_zh: "C++ 实现返回错误码 invalid_", retry_safe: true, stage: preflight, wire_match: prefix }
+    { code: missing_, description_zh: "C++ 实现返回错误码 missing_", retry_safe: true, stage: preflight, wire_match: prefix }
+    { code: texture_asset_not_found, description_zh: "C++ 实现返回错误码 texture_asset_not_found", retry_safe: false, stage: execution, wire_match: exact }
+  ]
+}
+evidence: {
+  docs: [
+    { path: "Plugins/UeAgentInterface/docs/commands/texture_render_target_media/texture_usage_get_references.md", purpose: "user documentation cross-check; C++ implementation remains authoritative" }
+  ]
+  implementation: [
+    { line_hint: 2146, path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Commands/TextureRenderTarget/UeAgentHttpServer_TextureRenderTarget_MediaAndSpecializedAssets.cpp", purpose: "command handler, parameter and return evidence", symbol: CmdTextureUsageGetReferences }
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Commands/TextureRenderTarget/UeAgentHttpServer_TextureRenderTarget_TextureAssets.inl", purpose: "transitive helper evidence used by the command handler" }
+  ]
+  tests: [
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterfaceTests/Private/Smoke/UeAgentInterfaceTextureRenderTargetSmokeTests.cpp", purpose: "smoke or negative-path evidence cross-checked for the verified contract" }
+  ]
+}
+execution: {
+  destructive: false
+  editor_state: required
+  game_thread: required
+  idempotent: true
+  kind: read_only
+  overwrite_behavior: none
+  pie_state: allowed
+  retry_safe: true
+  save_behavior: none
+  side_effects: []
+  ui_effect: none
+}
+maturity: verified
+params: { constraints: [], fields: { texture_asset: { default_state: none, description_zh: "C++ 实现读取的 texture_asset 参数", required: true, type: string } }, state: defined }
+response: { artifact_fields: [], compact_fields: [asset_path, blueprints, class, class_path, levels, materials], failure_fields: [params.texture_asset], max_items_policy: { fields: [], mode: none } }
+returns: {
+  fields: {
+    asset_path: { description_zh: "C++ 实现返回的 asset_path 字段；是否出现取决于执行分支", required: false, type: ue_asset_path }
+    blueprints: { description_zh: "C++ 实现返回的 blueprints 字段；是否出现取决于执行分支", item_type: json_value, required: false, type: array }
+    class: { description_zh: "C++ 实现返回的 class 字段；是否出现取决于执行分支", required: false, type: string }
+    class_path: { description_zh: "C++ 实现返回的 class_path 字段；是否出现取决于执行分支", required: false, type: string }
+    levels: { description_zh: "C++ 实现返回的 levels 字段；是否出现取决于执行分支", item_type: json_value, required: false, type: array }
+    materials: { description_zh: "C++ 实现返回的 materials 字段；是否出现取决于执行分支", item_type: json_value, required: false, type: array }
+    object_path: { description_zh: "C++ 实现返回的 object_path 字段；是否出现取决于执行分支", required: false, type: ue_object_path }
+    referencer_count: { description_zh: "C++ 实现返回的 referencer_count 字段；是否出现取决于执行分支", required: false, type: integer }
+    referencers: { description_zh: "C++ 实现返回的 referencers 字段；是否出现取决于执行分支", item_type: json_value, required: false, type: array }
+  }
+  state: defined
+}
+schema: uai.command_spec.v1
+status: active
+types: {}
+verification: { reason: read_only_command_has_no_post_write_verification, state: none }
+version: 1

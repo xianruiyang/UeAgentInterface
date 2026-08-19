@@ -1,0 +1,89 @@
+schema: uai.command_spec.v1
+version: 1
+maturity: verified
+command: level_export_folder
+category: level_content
+status: active
+discovery: {
+  summary_zh: "将当前 Editor World 只读导出为统一 Level HJSON workspace"
+  summary_en: "Read-only export of the current Editor World to the unified Level HJSON workspace"
+  aliases: []
+  keywords_zh: [Level, HJSON, workspace, Actor, Component, "导出"]
+  keywords_en: [level, hjson, workspace, actor, component, export]
+  tags: [level_content, authoring, export, unified_contract]
+}
+types: {}
+execution: {
+  kind: read_only_export
+  side_effects: [writes_files]
+  destructive: false
+  idempotent: true
+  retry_safe: true
+  editor_state: required
+  pie_state: allowed
+  game_thread: required
+  ui_effect: none
+  save_behavior: none
+  overwrite_behavior: owned_artifacts_only
+}
+params: {
+  state: defined
+  fields: {
+    output_folder: { type: filesystem_path, required: false, default_state: none, description_zh: "输出 workspace；必须位于 UAI authoring 所有权根目录", path_semantics: { kind: filesystem_directory, must_exist: false, writable: true } }
+    output_dir: { type: filesystem_path, required: false, default_state: none, description_zh: "output_folder 别名", path_semantics: { kind: filesystem_directory, must_exist: false, writable: true } }
+    profile: { type: string, required: false, default: llm_authoring, default_state: defined, description_zh: "llm_authoring/readback/debug/validation" }
+  }
+  constraints: []
+}
+returns: {
+  state: defined
+  fields: {
+    status: { type: string, required: true, description_zh: "written 或 failed" }
+    workspace_root: { type: filesystem_path, required: true, description_zh: "实际输出 workspace 根目录" }
+    profile: { type: string, required: true, description_zh: "实际投影 profile" }
+    actor_count: { type: integer, required: true, description_zh: "导出的 Actor 数" }
+    component_count: { type: integer, required: true, description_zh: "导出的 Component 数" }
+    file_count: { type: integer, required: true, description_zh: "写入的 HJSON 文件数" }
+    token_budget: { type: integer, required: true, description_zh: "当前 profile 的完整 Level workspace token proxy 预算" }
+    metrics: { type: json_value, required: true, description_zh: "共享投影与写入指标" }
+    entry_file: { type: string, required: true, description_zh: "workspace-relative canonical 入口，固定为 index.hjson" }
+    written_relative_files: { type: array, item_type: string, required: true, description_zh: "与最终 HJSON 文件树严格一致的 workspace-relative 文件列表" }
+    written_files: { type: array, item_type: filesystem_path, required: true, description_zh: "确定性排序的写入文件" }
+    publisher: { type: json_value, required: true, description_zh: "单次 workspace publisher transaction receipt" }
+    output_reset_allowed: { type: bool, required: true, description_zh: "输出目录已通过所有权门禁" }
+    ownership_root: { type: filesystem_path, required: false, description_zh: "输出目录命中的 UAI 所有权根" }
+    error_code: { type: string, required: false, description_zh: "失败阶段的稳定错误码" }
+    error_detail: { type: string, required: false, description_zh: "失败上下文" }
+  }
+}
+response: { compact_fields: [status, workspace_root, profile, actor_count, component_count, file_count, token_budget, metrics, entry_file, publisher], failure_fields: [params.output_folder, returns.error_code, returns.error_detail], artifact_fields: [written_relative_files, written_files], max_items_policy: { mode: none, fields: [] } }
+errors: { codes: [
+  { code: no_editor_world, wire_match: exact, stage: preflight, retry_safe: false, description_zh: "当前 Editor World 不可用" }
+  { code: output_folder_outside_uai_authoring_roots, wire_match: exact, stage: preflight, retry_safe: false, description_zh: "输出目录不属于 UAI authoring 根" }
+  { code: level_export_, wire_match: prefix, stage: execution, retry_safe: false, description_zh: "Level snapshot、projection、workspace 写入或只读门禁失败" }
+  { code: export_workspace_, wire_match: prefix, stage: execution, retry_safe: false, description_zh: "完整 Level workspace plan 的路径、引用、role、entry 或总 token 门禁失败" }
+  { code: workspace_, wire_match: prefix, stage: execution, retry_safe: false, description_zh: "共享 workspace writer 失败" }
+] }
+verification: {
+  assertions: [
+    { expected: written, id: status_written, operator: equals, source: returns.status }
+    { expected: index.hjson, id: entry_written, operator: equals, source: returns.entry_file }
+  ]
+  failure_policy: fail_overall
+  methods: [
+    { id: result, kind: result_assertion }
+    { artifact_field: workspace_root, id: artifact_integrity, kind: filesystem_artifact, receipt_source: verifier }
+  ]
+  required: true
+  state: defined
+}
+authoring: { state: defined, type_id: level, operation: export, profile_ref: "contracts/field_contracts/level.hjson" }
+deprecation: { state: none, reason: command_is_active }
+evidence: {
+  implementation: [
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Commands/LevelContentJson/UeAgentLevelContentJsonCommands_Tail.cpp", symbol: CmdLevelExportFolder, purpose: "命令适配器和输出所有权门禁" }
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Domains/Level/Authoring/UeAgentLevelAuthoringExport.cpp", purpose: "共享 snapshot/projection/workspace writer 纵切" }
+  ]
+  tests: [{ path: "Plugins/UeAgentInterface/Source/UeAgentInterfaceTests/Private/Smoke/UeAgentInterfaceLevelFolderExportSmokeTests.cpp", purpose: "真实 UE 只读导出 smoke" }]
+  docs: [{ path: "Plugins/UeAgentInterface/docs/commands/level_content/level_export_folder.md", purpose: "正式命令文档" }]
+}

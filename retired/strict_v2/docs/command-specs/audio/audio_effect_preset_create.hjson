@@ -1,0 +1,87 @@
+authoring: { reason: command_has_no_registered_folder_authoring_profile, state: none }
+category: audio
+command: audio_effect_preset_create
+deprecation: { reason: command_is_active, state: none }
+discovery: { aliases: [], keywords_en: [audio, effect, preset, create], keywords_zh: [audio_effect_preset_create], summary_en: "Execute audio_effect_preset_create with a verified implementation contract", summary_zh: "创建 Source/Submix effect preset", tags: [audio, p2-007] }
+errors: {
+  codes: [
+    { code: asset_already_exists, description_zh: "C++ 实现返回错误码 asset_already_exists", retry_safe: false, stage: execution, wire_match: exact }
+    { code: asset_class_is_abstract, description_zh: "C++ 实现返回错误码 asset_class_is_abstract", retry_safe: false, stage: execution, wire_match: exact }
+    { code: asset_class_not_found, description_zh: "C++ 实现返回错误码 asset_class_not_found", retry_safe: false, stage: execution, wire_match: exact }
+    { code: create_asset_failed, description_zh: "C++ 实现返回错误码 create_asset_failed", retry_safe: false, stage: execution, wire_match: exact }
+    { code: create_package_failed, description_zh: "C++ 实现返回错误码 create_package_failed", retry_safe: false, stage: execution, wire_match: exact }
+    { code: existing_asset_class_mismatch, description_zh: "C++ 实现返回错误码 existing_asset_class_mismatch", retry_safe: false, stage: execution, wire_match: exact }
+    { code: invalid_, description_zh: "C++ 实现返回错误码 invalid_", retry_safe: true, stage: preflight, wire_match: prefix }
+    { code: invalid_asset_path, description_zh: "C++ 实现返回错误码 invalid_asset_path", retry_safe: true, stage: preflight, wire_match: exact }
+    { code: invalid_audio_effect_preset_class, description_zh: "C++ 实现返回错误码 invalid_audio_effect_preset_class", retry_safe: true, stage: preflight, wire_match: exact }
+    { code: missing_, description_zh: "C++ 实现返回错误码 missing_", retry_safe: true, stage: preflight, wire_match: prefix }
+    { code: missing_asset_path, description_zh: "C++ 实现返回错误码 missing_asset_path", retry_safe: true, stage: preflight, wire_match: exact }
+    { code: save_asset_failed, description_zh: "C++ 实现返回错误码 save_asset_failed", retry_safe: false, stage: execution, wire_match: exact }
+  ]
+}
+evidence: {
+  docs: [
+    { path: "Plugins/UeAgentInterface/docs/commands/audio/audio_effect_preset_create.md", purpose: "user documentation cross-check; C++ implementation remains authoritative" }
+  ]
+  implementation: [
+    { line_hint: 1071, path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Commands/Audio/UeAgentHttpServer_AudioAssets.cpp", purpose: "command handler, parameter and return evidence", symbol: CmdAudioEffectPresetCreate }
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Commands/Audio/UeAgentHttpServer_AudioOpsCore.cpp", purpose: "transitive helper evidence used by the command handler" }
+  ]
+  tests: [
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterfaceTests/Private/Smoke/UeAgentInterfaceAudioSmokeTests.cpp", purpose: "smoke or negative-path evidence cross-checked for the verified contract" }
+  ]
+}
+execution: {
+  destructive: false
+  editor_state: required
+  game_thread: required
+  idempotent: false
+  kind: write
+  overwrite_behavior: target_asset
+  pie_state: allowed
+  retry_safe: false
+  save_behavior: caller_controlled
+  side_effects: [modifies_asset, creates_asset]
+  ui_effect: none
+}
+maturity: verified
+params: {
+  constraints: []
+  fields: {
+    asset_path: { default_state: none, description_zh: "C++ 实现读取的 asset_path 参数", path_semantics: { access_scope: project_write, kind: ue_asset }, required: true, type: ue_asset_path }
+    preset_class: { default_state: none, description_zh: "C++ 实现读取的 preset_class 参数", required: false, type: string }
+    replace_existing: { default: false, default_state: defined, description_zh: "C++ 实现读取的 replace_existing 参数", required: false, type: bool }
+    save_after_create: { default: true, default_state: defined, description_zh: "C++ 实现读取的 save_after_create 参数", required: false, type: bool }
+  }
+  state: defined
+}
+response: { artifact_fields: [properties], compact_fields: [asset_path, class, class_path, created_asset, object_path, preset_kind], failure_fields: [params.asset_path], max_items_policy: { fields: [], mode: none } }
+returns: {
+  fields: {
+    asset_path: { description_zh: "C++ 实现返回的 asset_path 字段；是否出现取决于执行分支", required: false, type: ue_asset_path }
+    class: { description_zh: "C++ 实现返回的 class 字段；是否出现取决于执行分支", required: false, type: string }
+    class_path: { description_zh: "C++ 实现返回的 class_path 字段；是否出现取决于执行分支", required: false, type: string }
+    created_asset: { description_zh: "C++ 实现返回的 created_asset 字段；是否出现取决于执行分支", required: false, type: bool }
+    object_path: { description_zh: "C++ 实现返回的 object_path 字段；是否出现取决于执行分支", required: false, type: ue_object_path }
+    preset_kind: { description_zh: "C++ 实现返回的 preset_kind 字段；是否出现取决于执行分支", required: false, type: string }
+    profile: { description_zh: "C++ 实现返回的 profile 字段；是否出现取决于执行分支", required: false, type: string }
+    properties: { description_zh: "C++ 实现返回的 properties 字段；是否出现取决于执行分支", item_type: json_value, required: false, type: array }
+    schema_version: { description_zh: "C++ 实现返回的 schema_version 字段；是否出现取决于执行分支", required: false, type: number }
+  }
+  state: defined
+}
+schema: uai.command_spec.v1
+status: active
+types: {}
+verification: {
+  assertions: [
+    { id: result_present, operator: exists, source: returns.asset_path }
+  ]
+  failure_policy: fail_overall
+  methods: [
+    { id: result, kind: result_assertion }
+  ]
+  required: true
+  state: defined
+}
+version: 1

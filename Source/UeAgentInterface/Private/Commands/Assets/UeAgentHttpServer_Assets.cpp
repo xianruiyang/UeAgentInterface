@@ -2,9 +2,13 @@
 
 #include "UeAgentHttpServer_Assets.h"
 #include "UeAgentHttpServer_AssetsOps.h"
+#include "Commands/Level/UeAgentCommandSafety.h"
+#include "Utilities/UeAgentAuthoringFileIO.h"
 #include "Utilities/UeAgentCurveJson.h"
 #include "Utilities/UeAgentDetailsAuthoring.h"
 #include "Utilities/UeAgentJsonDiagnostics.h"
+#include "Utilities/UeAgentPropertyValueCodec.h"
+#include "Utilities/UeAgentUObjectProperties.h"
 #include "Module/UeAgentInterfaceLogger.h"
 
 #include "AssetToolsModule.h"
@@ -39,8 +43,6 @@
 #include "ObjectTools.h"
 #include "PhysicsEngine/PhysicsAsset.h"
 #include "Rendering/SkeletalMeshModel.h"
-#include "Serialization/JsonReader.h"
-#include "Serialization/JsonSerializer.h"
 #include "Subsystems/AssetEditorSubsystem.h"
 #include "Templates/UnrealTemplate.h"
 #include "UObject/ObjectRedirector.h"
@@ -499,88 +501,25 @@ namespace UeAgentAssetOps
 		return true;
 	}
 
-	static bool SaveJsonFile(const FString& OutputPathInput, const TSharedPtr<FJsonObject>& Root, FString& OutOutputPath, FString& OutError)
+	static bool SaveAuthoringFile(const FString& OutputPathInput, const TSharedPtr<FJsonObject>& Root, FString& OutOutputPath, FString& OutError)
 	{
-		OutOutputPath.Reset();
 		if (!Root.IsValid())
 		{
 			OutError = TEXT("json_root_invalid");
 			return false;
 		}
 
-		FString OutputPath = OutputPathInput;
-		OutputPath.TrimStartAndEndInline();
-		if (OutputPath.IsEmpty())
-		{
-			OutError = TEXT("missing_output_file");
-			return false;
-		}
-
-		OutputPath = UeAgentJsonDiagnostics::ResolveProjectRelativeFilePath(OutputPath);
-		const FString OutputDir = FPaths::GetPath(OutputPath);
-		if (!OutputDir.IsEmpty() && !IFileManager::Get().DirectoryExists(*OutputDir))
-		{
-			IFileManager::Get().MakeDirectory(*OutputDir, true);
-		}
-
-		FString JsonText;
-		TSharedPtr<FJsonObject> SaveRoot = UeAgentDetailsAuthoring::CloneObjectTree(Root);
-		if (!UeAgentDetailsAuthoring::ExternalizeInlineDetailsInObjectTree(OutputPath, SaveRoot, TEXT("asset_json_export"), OutError))
-		{
-			return false;
-		}
-		if (!UeAgentJsonDiagnostics::SerializeJsonObjectCompact(SaveRoot, JsonText))
-		{
-			OutError = TEXT("json_serialize_failed");
-			return false;
-		}
-
-		if (!FFileHelper::SaveStringToFile(JsonText, *OutputPath, FFileHelper::EEncodingOptions::ForceUTF8WithoutBOM))
-		{
-			OutError = TEXT("save_json_file_failed");
-			return false;
-		}
-
-		OutOutputPath = OutputPath;
-		return true;
+		UeAgentAuthoringFileIO::FSaveOptions SaveOptions;
+		SaveOptions.SourceCommand = TEXT("asset_json_export");
+		SaveOptions.bRemoveDiagnosticAuthoringFields = false;
+		return UeAgentAuthoringFileIO::SaveObject(OutputPathInput, Root, SaveOptions, OutOutputPath, OutError);
 	}
 
-	static bool LoadJsonFile(const FString& InputPathInput, TSharedPtr<FJsonObject>& OutRoot, FString& OutResolvedPath, FString& OutError)
+	static bool LoadAuthoringFile(const FString& InputPathInput, TSharedPtr<FJsonObject>& OutRoot, FString& OutResolvedPath, FString& OutError)
 	{
-		OutRoot.Reset();
-		OutResolvedPath.Reset();
-
-		FString InputPath = InputPathInput;
-		InputPath.TrimStartAndEndInline();
-		if (InputPath.IsEmpty())
-		{
-			OutError = TEXT("missing_json_file");
-			return false;
-		}
-
-		InputPath = UeAgentJsonDiagnostics::ResolveProjectRelativeFilePath(InputPath);
-		if (!FPaths::FileExists(InputPath))
-		{
-			OutError = TEXT("json_file_not_found");
-			return false;
-		}
-
-		FString JsonText;
-		if (!FFileHelper::LoadFileToString(JsonText, *InputPath))
-		{
-			OutError = TEXT("load_json_file_failed");
-			return false;
-		}
-
-		const TSharedRef<TJsonReader<>> Reader = TJsonReaderFactory<>::Create(JsonText);
-		if (!FJsonSerializer::Deserialize(Reader, OutRoot) || !OutRoot.IsValid())
-		{
-			OutError = TEXT("json_parse_failed");
-			return false;
-		}
-
-		OutResolvedPath = InputPath;
-		return UeAgentDetailsAuthoring::RehydrateGroupedDetailsInObjectTree(InputPath, OutRoot, OutError);
+		UeAgentAuthoringFileIO::FLoadOptions LoadOptions;
+		LoadOptions.bRehydrateGroupedDetails = true;
+		return UeAgentAuthoringFileIO::LoadObject(InputPathInput, OutRoot, LoadOptions, OutResolvedPath, OutError);
 	}
 
 	static FProperty* FindPropertyByNameLoose(UStruct* StructType, const FString& Segment)
@@ -671,60 +610,6 @@ namespace UeAgentAssetOps
 		}
 
 		return false;
-	}
-
-	static bool GetObjectPropertyText(UObject* Target, const FString& PropertyPath, FString& OutValueText, FString& OutCppType)
-	{
-		OutValueText.Reset();
-		OutCppType.Reset();
-
-		FProperty* Property = nullptr;
-		void* ValuePtr = nullptr;
-		if (!ResolvePropertyPath(Target, PropertyPath, Property, ValuePtr) || !Property || !ValuePtr)
-		{
-			return false;
-		}
-
-		OutCppType = Property->GetCPPType();
-		Property->ExportTextItem_Direct(OutValueText, ValuePtr, nullptr, Target, PPF_None);
-		return true;
-	}
-
-	static bool SetObjectPropertyText(UObject* Target, const FString& PropertyPath, const FString& ValueText, FString* OutAppliedValueText = nullptr, FString* OutCppType = nullptr, FString* OutImportError = nullptr)
-	{
-		if (OutImportError)
-		{
-			OutImportError->Reset();
-		}
-
-		FProperty* Property = nullptr;
-		void* ValuePtr = nullptr;
-		if (!ResolvePropertyPath(Target, PropertyPath, Property, ValuePtr) || !Property || !ValuePtr)
-		{
-			if (OutImportError)
-			{
-				*OutImportError = TEXT("property_not_found");
-			}
-			return false;
-		}
-
-		if (OutCppType)
-		{
-			*OutCppType = Property->GetCPPType();
-		}
-		if (Property->ImportText_Direct(*ValueText, ValuePtr, Target, PPF_None, GLog) == nullptr)
-		{
-			if (OutImportError)
-			{
-				*OutImportError = FString::Printf(TEXT("property_import_failed:%s:%s"), *PropertyPath, *ValueText);
-			}
-			return false;
-		}
-		if (OutAppliedValueText)
-		{
-			Property->ExportTextItem_Direct(*OutAppliedValueText, ValuePtr, nullptr, Target, PPF_None);
-		}
-		return true;
 	}
 
 	static bool SaveAssetPackage(UObject* Asset, FString& OutError)
@@ -873,6 +758,16 @@ bool FUeAgentHttpServer::CmdAssetMove(const FUeAgentRequestContext& Ctx, TShared
 		return false;
 	}
 
+	bool bDryRun = true;
+	bool bAllowDestructive = false;
+	bool bOverwriteExisting = false;
+	if (!UeAgentCommandSafety::ReadStrictBool(Ctx.Params, TEXT("dry_run"), true, bDryRun, OutError) ||
+		!UeAgentCommandSafety::ReadStrictBool(Ctx.Params, TEXT("allow_destructive"), false, bAllowDestructive, OutError) ||
+		!UeAgentCommandSafety::ReadStrictBool(Ctx.Params, TEXT("overwrite_existing"), false, bOverwriteExisting, OutError))
+	{
+		return false;
+	}
+
 	if (SourcePackageName.Equals(NormalizedDestinationAssetPath, ESearchCase::IgnoreCase))
 	{
 		OutData->SetStringField(TEXT("source_asset_path"), SourcePackageName);
@@ -880,19 +775,27 @@ bool FUeAgentHttpServer::CmdAssetMove(const FUeAgentRequestContext& Ctx, TShared
 		OutData->SetStringField(TEXT("object_path"), SourceAsset->GetPathName());
 		OutData->SetBoolField(TEXT("changed"), false);
 		OutData->SetBoolField(TEXT("saved"), false);
+		OutData->SetBoolField(TEXT("dry_run"), bDryRun);
+		OutData->SetBoolField(TEXT("allow_destructive"), bAllowDestructive);
+		OutData->SetBoolField(TEXT("overwrite_existing"), bOverwriteExisting);
+		OutData->SetBoolField(TEXT("source_asset_exists_after"), true);
+		OutData->SetBoolField(TEXT("source_redirector_exists_after"), false);
+		OutData->SetBoolField(TEXT("target_asset_exists_after"), true);
 		return true;
 	}
 
-	bool bOverwriteExisting = false;
-	JsonTryGetBool(Ctx.Params, TEXT("overwrite_existing"), bOverwriteExisting);
-	if (!bOverwriteExisting && UeAgentAssetOps::LoadAssetObject(NormalizedDestinationAssetPath))
+	const bool bDestinationExistsBefore = UeAgentAssetOps::LoadAssetObject(NormalizedDestinationAssetPath) != nullptr;
+	if (!bOverwriteExisting && bDestinationExistsBefore)
 	{
+		OutData->SetBoolField(TEXT("dry_run"), bDryRun);
+		OutData->SetBoolField(TEXT("allow_destructive"), bAllowDestructive);
+		OutData->SetBoolField(TEXT("overwrite_existing"), false);
+		OutData->SetBoolField(TEXT("source_asset_exists_after"), true);
+		OutData->SetBoolField(TEXT("target_asset_exists_after"), true);
 		OutError = TEXT("destination_asset_already_exists");
 		return false;
 	}
 
-	bool bDryRun = false;
-	JsonTryGetBool(Ctx.Params, TEXT("dry_run"), bDryRun);
 	if (bDryRun)
 	{
 		OutData->SetStringField(TEXT("source_asset_path"), SourcePackageName);
@@ -901,7 +804,29 @@ bool FUeAgentHttpServer::CmdAssetMove(const FUeAgentRequestContext& Ctx, TShared
 		OutData->SetStringField(TEXT("destination_name"), DestinationAssetName);
 		OutData->SetBoolField(TEXT("changed"), false);
 		OutData->SetBoolField(TEXT("dry_run"), true);
+		OutData->SetBoolField(TEXT("allow_destructive"), bAllowDestructive);
+		OutData->SetBoolField(TEXT("overwrite_existing"), bOverwriteExisting);
+		OutData->SetBoolField(TEXT("would_move"), true);
+		OutData->SetBoolField(TEXT("source_asset_exists_after"), true);
+		OutData->SetBoolField(TEXT("source_redirector_exists_after"), false);
+		OutData->SetBoolField(TEXT("target_asset_exists_after"), bDestinationExistsBefore);
 		return true;
+	}
+	if (!bAllowDestructive)
+	{
+		OutData->SetStringField(TEXT("source_asset_path"), SourcePackageName);
+		OutData->SetStringField(TEXT("asset_path"), NormalizedDestinationAssetPath);
+		OutData->SetStringField(TEXT("destination_folder"), DestinationPackagePath);
+		OutData->SetStringField(TEXT("destination_name"), DestinationAssetName);
+		OutData->SetBoolField(TEXT("changed"), false);
+		OutData->SetBoolField(TEXT("dry_run"), false);
+		OutData->SetBoolField(TEXT("allow_destructive"), false);
+		OutData->SetBoolField(TEXT("overwrite_existing"), bOverwriteExisting);
+		OutData->SetBoolField(TEXT("source_asset_exists_after"), true);
+		OutData->SetBoolField(TEXT("source_redirector_exists_after"), false);
+		OutData->SetBoolField(TEXT("target_asset_exists_after"), bDestinationExistsBefore);
+		OutError = TEXT("allow_destructive_required");
+		return false;
 	}
 
 	if (UAssetEditorSubsystem* AssetEditorSubsystem = GEditor ? GEditor->GetEditorSubsystem<UAssetEditorSubsystem>() : nullptr)
@@ -946,6 +871,28 @@ bool FUeAgentHttpServer::CmdAssetMove(const FUeAgentRequestContext& Ctx, TShared
 	OutData->SetStringField(TEXT("class"), MovedAsset->GetClass()->GetPathName());
 	OutData->SetBoolField(TEXT("changed"), true);
 	OutData->SetBoolField(TEXT("saved"), bSaveAfterMove);
+	OutData->SetBoolField(TEXT("dry_run"), false);
+	OutData->SetBoolField(TEXT("allow_destructive"), true);
+	OutData->SetBoolField(TEXT("overwrite_existing"), bOverwriteExisting);
+	FAssetRegistryModule& AssetRegistryModule = FModuleManager::LoadModuleChecked<FAssetRegistryModule>(TEXT("AssetRegistry"));
+	TArray<FAssetData> SourceAssetsAfter;
+	AssetRegistryModule.Get().GetAssetsByPackageName(FName(*SourcePackageName), SourceAssetsAfter, false);
+	bool bSourceAssetExistsAfter = false;
+	bool bSourceRedirectorExistsAfter = false;
+	for (const FAssetData& AssetData : SourceAssetsAfter)
+	{
+		if (AssetData.AssetClassPath == UObjectRedirector::StaticClass()->GetClassPathName())
+		{
+			bSourceRedirectorExistsAfter = true;
+		}
+		else
+		{
+			bSourceAssetExistsAfter = true;
+		}
+	}
+	OutData->SetBoolField(TEXT("source_asset_exists_after"), bSourceAssetExistsAfter);
+	OutData->SetBoolField(TEXT("source_redirector_exists_after"), bSourceRedirectorExistsAfter);
+	OutData->SetBoolField(TEXT("target_asset_exists_after"), true);
 	return true;
 }
 
@@ -1042,7 +989,10 @@ bool FUeAgentHttpServer::CmdAssetFixupRedirectors(const FUeAgentRequestContext& 
 	}
 
 	bool bRecursive = true;
-	JsonTryGetBool(Ctx.Params, TEXT("recursive"), bRecursive);
+	if (!UeAgentCommandSafety::ReadStrictBool(Ctx.Params, TEXT("recursive"), true, bRecursive, OutError))
+	{
+		return false;
+	}
 
 	TMap<FString, UObjectRedirector*> RedirectorByPackage;
 	TArray<TSharedPtr<FJsonValue>> Skipped;
@@ -1115,8 +1065,13 @@ bool FUeAgentHttpServer::CmdAssetFixupRedirectors(const FUeAgentRequestContext& 
 		RedirectorReports.Add(MakeShared<FJsonValueObject>(Entry));
 	}
 
-	bool bDryRun = false;
-	JsonTryGetBool(Ctx.Params, TEXT("dry_run"), bDryRun);
+	bool bDryRun = true;
+	bool bAllowDestructive = false;
+	if (!UeAgentCommandSafety::ReadStrictBool(Ctx.Params, TEXT("dry_run"), true, bDryRun, OutError) ||
+		!UeAgentCommandSafety::ReadStrictBool(Ctx.Params, TEXT("allow_destructive"), false, bAllowDestructive, OutError))
+	{
+		return false;
+	}
 	FAssetRegistryModule& AssetRegistryModule = FModuleManager::LoadModuleChecked<FAssetRegistryModule>(TEXT("AssetRegistry"));
 	IAssetRegistry& AssetRegistry = AssetRegistryModule.Get();
 
@@ -1152,17 +1107,39 @@ bool FUeAgentHttpServer::CmdAssetFixupRedirectors(const FUeAgentRequestContext& 
 	}
 
 	bool bFailOnBlocked = true;
-	JsonTryGetBool(Ctx.Params, TEXT("fail_on_blocked"), bFailOnBlocked);
+	if (!UeAgentCommandSafety::ReadStrictBool(Ctx.Params, TEXT("fail_on_blocked"), true, bFailOnBlocked, OutError))
+	{
+		return false;
+	}
 	if (!Blocked.IsEmpty() && bFailOnBlocked)
 	{
 		OutData->SetNumberField(TEXT("redirector_count"), Redirectors.Num());
 		OutData->SetNumberField(TEXT("deletable_redirector_count"), RedirectorsToDelete.Num());
 		OutData->SetNumberField(TEXT("blocked_redirector_count"), Blocked.Num());
 		OutData->SetBoolField(TEXT("dry_run"), bDryRun);
+		OutData->SetBoolField(TEXT("allow_destructive"), bAllowDestructive);
 		OutData->SetArrayField(TEXT("redirectors"), RedirectorReports);
 		OutData->SetArrayField(TEXT("blocked"), Blocked);
 		OutData->SetArrayField(TEXT("skipped"), Skipped);
 		OutError = TEXT("redirector_still_referenced");
+		return false;
+	}
+	if (!bDryRun && !RedirectorsToDelete.IsEmpty() && !bAllowDestructive)
+	{
+		TSharedPtr<FJsonObject> SafetyBlock = MakeShared<FJsonObject>();
+		SafetyBlock->SetStringField(TEXT("reason"), TEXT("allow_destructive_required"));
+		SafetyBlock->SetStringField(TEXT("detail"), TEXT("pass allow_destructive=true with dry_run=false to delete redirectors"));
+		Blocked.Add(MakeShared<FJsonValueObject>(SafetyBlock));
+		OutData->SetNumberField(TEXT("redirector_count"), Redirectors.Num());
+		OutData->SetNumberField(TEXT("deletable_redirector_count"), RedirectorsToDelete.Num());
+		OutData->SetNumberField(TEXT("blocked_redirector_count"), Blocked.Num());
+		OutData->SetNumberField(TEXT("deleted_redirector_count"), 0);
+		OutData->SetBoolField(TEXT("dry_run"), false);
+		OutData->SetBoolField(TEXT("allow_destructive"), false);
+		OutData->SetArrayField(TEXT("redirectors"), RedirectorReports);
+		OutData->SetArrayField(TEXT("blocked"), Blocked);
+		OutData->SetArrayField(TEXT("skipped"), Skipped);
+		OutError = TEXT("allow_destructive_required");
 		return false;
 	}
 
@@ -1194,6 +1171,7 @@ bool FUeAgentHttpServer::CmdAssetFixupRedirectors(const FUeAgentRequestContext& 
 	OutData->SetNumberField(TEXT("deleted_redirector_count"), bDryRun ? 0 : DeletedCount);
 	OutData->SetNumberField(TEXT("remaining_package_count"), RemainingPackageCount);
 	OutData->SetBoolField(TEXT("dry_run"), bDryRun);
+	OutData->SetBoolField(TEXT("allow_destructive"), bAllowDestructive);
 	OutData->SetBoolField(TEXT("recursive"), bRecursive);
 	OutData->SetArrayField(TEXT("redirectors"), RedirectorReports);
 	OutData->SetArrayField(TEXT("blocked"), Blocked);
@@ -1511,39 +1489,37 @@ bool FUeAgentHttpServer::CmdAssetExportPropertyJson(const FUeAgentRequestContext
 	int32 ExportedPropertyCount = 0;
 	for (const FString& PropertyPath : PropertyNames)
 	{
-		FString ValueText;
-		FString CppType;
-		if (!UeAgentAssetOps::GetObjectPropertyText(Asset, PropertyPath, ValueText, CppType))
+		FProperty* Property = nullptr;
+		void* ValuePtr = nullptr;
+		if (!UeAgentAssetOps::ResolvePropertyPath(Asset, PropertyPath, Property, ValuePtr) || !Property || !ValuePtr)
 		{
 			MissingPropertiesJson.Add(MakeShared<FJsonValueString>(PropertyPath));
 			continue;
 		}
 
 		TSharedPtr<FJsonObject> PropertyObj = MakeShared<FJsonObject>();
-		PropertyObj->SetStringField(TEXT("property_name"), PropertyPath);
-		PropertyObj->SetStringField(TEXT("value_text"), ValueText);
-		if (!CppType.IsEmpty())
+		PropertyObj->SetStringField(TEXT("property_path"), PropertyPath);
+		PropertyObj->SetStringField(TEXT("value_kind"), UeAgentPropertyValueCodec::GetValueKind(Property));
+		UeAgentPropertyValueCodec::AddTypeMetadata(Property, PropertyObj);
+		FString CodecReason;
+		if (UeAgentPropertyValueCodec::IsSupported(Property, CodecReason))
 		{
-			PropertyObj->SetStringField(TEXT("cpp_type"), CppType);
+			UeAgentPropertyValueCodec::FOptions CodecOptions;
+			PropertyObj->SetField(TEXT("value"), UeAgentPropertyValueCodec::Encode(Property, ValuePtr, Asset, CodecOptions));
 		}
-		FProperty* Property = nullptr;
-		void* ValuePtr = nullptr;
-		if (UeAgentAssetOps::ResolvePropertyPath(Asset, PropertyPath, Property, ValuePtr) && Property && ValuePtr)
+		else
 		{
-			TSharedPtr<FJsonObject> CurveJson;
-			if (UeAgentCurveJson::TryBuildPropertyCurveJson(Property, ValuePtr, CurveJson) && CurveJson.IsValid())
-			{
-				PropertyObj->SetObjectField(TEXT("value_json"), CurveJson);
-				PropertyObj->SetObjectField(TEXT("curve_json"), CurveJson);
-				PropertyObj->SetStringField(TEXT("value_json_schema"), UeAgentCurveJson::SchemaName);
-			}
+			TSharedPtr<FJsonObject> Availability = MakeShared<FJsonObject>();
+			Availability->SetBoolField(TEXT("editable"), false);
+			Availability->SetStringField(TEXT("reason"), CodecReason);
+			PropertyObj->SetObjectField(TEXT("availability"), Availability);
 		}
 		PropertiesJson.Add(MakeShared<FJsonValueObject>(PropertyObj));
 		++ExportedPropertyCount;
 	}
 
 	TSharedPtr<FJsonObject> Root = MakeShared<FJsonObject>();
-	Root->SetNumberField(TEXT("format_version"), 1);
+	Root->SetStringField(TEXT("schema"), TEXT("uai.uobject_properties.v2"));
 	Root->SetStringField(TEXT("asset_path"), UeAgentAssetOps::NormalizeAssetPath(Asset->GetOutermost()->GetName()));
 	Root->SetStringField(TEXT("object_path"), Asset->GetPathName());
 	Root->SetStringField(TEXT("asset_class"), Asset->GetClass() ? Asset->GetClass()->GetPathName() : TEXT(""));
@@ -1563,7 +1539,7 @@ bool FUeAgentHttpServer::CmdAssetExportPropertyJson(const FUeAgentRequestContext
 	FString SavedOutputFile;
 	if (!OutputFile.IsEmpty())
 	{
-		if (!UeAgentAssetOps::SaveJsonFile(OutputFile, Root, SavedOutputFile, OutError))
+		if (!UeAgentAssetOps::SaveAuthoringFile(OutputFile, Root, SavedOutputFile, OutError))
 		{
 			return false;
 		}
@@ -1599,7 +1575,7 @@ bool FUeAgentHttpServer::CmdAssetApplyPropertyJson(const FUeAgentRequestContext&
 	JsonFile.TrimStartAndEndInline();
 	if (!JsonFile.IsEmpty())
 	{
-		if (!UeAgentAssetOps::LoadJsonFile(JsonFile, JsonRoot, ResolvedJsonFile, OutError))
+		if (!UeAgentAssetOps::LoadAuthoringFile(JsonFile, JsonRoot, ResolvedJsonFile, OutError))
 		{
 			return false;
 		}
@@ -1634,149 +1610,35 @@ bool FUeAgentHttpServer::CmdAssetApplyPropertyJson(const FUeAgentRequestContext&
 			return false;
 		}
 	}
+	if (JsonRoot.IsValid())
+	{
+		FString Schema;
+		if (!JsonRoot->TryGetStringField(TEXT("schema"), Schema) || Schema != TEXT("uai.uobject_properties.v2"))
+		{
+			OutError = TEXT("schema_mismatch_expected_uai.uobject_properties.v2");
+			return false;
+		}
+	}
 
 	int32 AppliedPropertyCount = 0;
 	TArray<TSharedPtr<FJsonValue>> PropertyResultsJson;
-	int32 PropertyIndex = 0;
-	for (const TSharedPtr<FJsonValue>& PropertyValue : *PropertiesArray)
+	TSharedPtr<FJsonObject> ApplyPayload = MakeShared<FJsonObject>();
+	ApplyPayload->SetStringField(TEXT("schema"), TEXT("uai.uobject_properties.v2"));
+	ApplyPayload->SetArrayField(TEXT("properties"), *PropertiesArray);
+	UeAgentUObjectProperties::FApplyOptions ApplyOptions;
+	const TSharedPtr<FJsonObject> ApplySummary = UeAgentUObjectProperties::ApplyObjectProperties(Asset, ApplyPayload, ApplyOptions);
+	FString ApplyStatus;
+	ApplySummary->TryGetStringField(TEXT("status"), ApplyStatus);
+	if (ApplyStatus != TEXT("applied"))
 	{
-		const FString PropertyPath = FString::Printf(TEXT("properties[%d]"), PropertyIndex++);
-		TArray<TSharedPtr<FJsonValue>> PropertyJsonIssues;
-		TSharedPtr<FJsonObject> PropertyObj;
-		if (!UeAgentJsonDiagnostics::ReadObjectFromValue(PropertyValue, PropertyPath, PropertyObj, PropertyJsonIssues))
-		{
-			TSharedPtr<FJsonObject> ResultObj = FUeAgentHttpServer::MakePropertyImportResultJson(TEXT(""), nullptr, TEXT(""), TEXT(""), TEXT("invalid_property_entry"));
-			ResultObj->SetArrayField(TEXT("json_issues"), PropertyJsonIssues);
-			PropertyResultsJson.Add(MakeShared<FJsonValueObject>(ResultObj));
-			OutData->SetArrayField(TEXT("property_results"), PropertyResultsJson);
-			OutError = TEXT("invalid_property_entry");
-			return false;
-		}
-
-		UeAgentJsonDiagnostics::WarnUnknownFields(
-			PropertyObj,
-			PropertyPath,
-			{ TEXT("property_name"), TEXT("value_text"), TEXT("cpp_type"), TEXT("value_json"), TEXT("curve_json"), TEXT("value_json_schema") },
-			PropertyJsonIssues);
-
-		FString PropertyName;
-		FString ValueText;
-		if (!UeAgentJsonDiagnostics::ReadStringField(PropertyObj, TEXT("property_name"), PropertyPath + TEXT(".property_name"), PropertyName, PropertyJsonIssues, true)
-			|| PropertyName.IsEmpty())
-		{
-			if (PropertyName.IsEmpty())
-			{
-				UeAgentJsonDiagnostics::AddIssue(PropertyJsonIssues, TEXT("warning"), TEXT("json_missing_required_field"), PropertyPath + TEXT(".property_name"), TEXT("Required string field is empty."));
-			}
-			TSharedPtr<FJsonObject> ResultObj = FUeAgentHttpServer::MakePropertyImportResultJson(TEXT(""), nullptr, TEXT(""), TEXT(""), TEXT("missing_property_name"));
-			ResultObj->SetArrayField(TEXT("json_issues"), PropertyJsonIssues);
-			PropertyResultsJson.Add(MakeShared<FJsonValueObject>(ResultObj));
-			OutData->SetArrayField(TEXT("property_results"), PropertyResultsJson);
-			OutError = TEXT("missing_property_name");
-			return false;
-		}
-
-		TSharedPtr<FJsonObject> TypedCurveJson;
-		bool bHasTypedCurveJson = false;
-		const TSharedPtr<FJsonObject>* CurveJsonPtr = nullptr;
-		FString TypedCurveJsonFieldName;
-		if (PropertyObj->TryGetObjectField(TEXT("curve_json"), CurveJsonPtr) && CurveJsonPtr && CurveJsonPtr->IsValid())
-		{
-			TypedCurveJson = *CurveJsonPtr;
-			bHasTypedCurveJson = true;
-			TypedCurveJsonFieldName = TEXT("curve_json");
-		}
-		else if (PropertyObj->TryGetObjectField(TEXT("value_json"), CurveJsonPtr) && CurveJsonPtr && CurveJsonPtr->IsValid())
-		{
-			TypedCurveJson = *CurveJsonPtr;
-			bHasTypedCurveJson = true;
-			TypedCurveJsonFieldName = TEXT("value_json");
-		}
-
-		if (!bHasTypedCurveJson && !UeAgentJsonDiagnostics::ReadStringField(PropertyObj, TEXT("value_text"), PropertyPath + TEXT(".value_text"), ValueText, PropertyJsonIssues, true))
-		{
-			TSharedPtr<FJsonObject> ResultObj = FUeAgentHttpServer::MakePropertyImportResultJson(PropertyName, nullptr, TEXT(""), TEXT(""), TEXT("missing_value_text"));
-			ResultObj->SetArrayField(TEXT("json_issues"), PropertyJsonIssues);
-			PropertyResultsJson.Add(MakeShared<FJsonValueObject>(ResultObj));
-			OutData->SetArrayField(TEXT("property_results"), PropertyResultsJson);
-			OutError = TEXT("missing_value_text");
-			return false;
-		}
-
-		FString AppliedValueText;
-		FString CppType;
-		FString ImportError;
-		if (bHasTypedCurveJson)
-		{
-			FProperty* Property = nullptr;
-			void* ValuePtr = nullptr;
-			if (!UeAgentAssetOps::ResolvePropertyPath(Asset, PropertyName, Property, ValuePtr) || !Property || !ValuePtr)
-			{
-				TSharedPtr<FJsonObject> ResultObj = FUeAgentHttpServer::MakePropertyImportResultJson(PropertyName, nullptr, TEXT(""), TEXT(""), TEXT("property_not_found"), TEXT("property_not_found"));
-				ResultObj->SetArrayField(TEXT("json_issues"), PropertyJsonIssues);
-				PropertyResultsJson.Add(MakeShared<FJsonValueObject>(ResultObj));
-				OutData->SetArrayField(TEXT("property_results"), PropertyResultsJson);
-				OutError = TEXT("property_not_found");
-				return false;
-			}
-
-			if (!UeAgentCurveJson::TryApplyPropertyCurveJson(Property, ValuePtr, TypedCurveJson, PropertyPath + TEXT(".") + TypedCurveJsonFieldName, PropertyJsonIssues))
-			{
-				TSharedPtr<FJsonObject> ResultObj = FUeAgentHttpServer::MakePropertyImportResultJson(PropertyName, Property, TEXT("<curve_json>"), TEXT(""), TEXT("curve_json_apply_failed"), TEXT("curve_json_apply_failed"));
-				ResultObj->SetArrayField(TEXT("json_issues"), PropertyJsonIssues);
-				PropertyResultsJson.Add(MakeShared<FJsonValueObject>(ResultObj));
-				OutData->SetArrayField(TEXT("property_results"), PropertyResultsJson);
-				OutError = TEXT("curve_json_apply_failed");
-				return false;
-			}
-
-			Property->ExportTextItem_Direct(AppliedValueText, ValuePtr, nullptr, Asset, PPF_None);
-			TSharedPtr<FJsonObject> ResultObj = FUeAgentHttpServer::MakePropertyImportResultJson(PropertyName, Property, TEXT("<curve_json>"), AppliedValueText, TEXT("curve_json_applied_and_read_back"));
-			TSharedPtr<FJsonObject> ReadbackCurveJson;
-			if (UeAgentCurveJson::TryBuildPropertyCurveJson(Property, ValuePtr, ReadbackCurveJson) && ReadbackCurveJson.IsValid())
-			{
-				ResultObj->SetObjectField(TEXT("value_json_read_back"), ReadbackCurveJson);
-			}
-			if (PropertyJsonIssues.Num() > 0)
-			{
-				ResultObj->SetArrayField(TEXT("json_issues"), PropertyJsonIssues);
-			}
-			PropertyResultsJson.Add(MakeShared<FJsonValueObject>(ResultObj));
-			++AppliedPropertyCount;
-			continue;
-		}
-
-		if (!UeAgentAssetOps::SetObjectPropertyText(Asset, PropertyName, ValueText, &AppliedValueText, &CppType, &ImportError))
-		{
-			const FString ImportStatus = ImportError.Equals(TEXT("property_not_found"), ESearchCase::CaseSensitive) ? TEXT("property_not_found") : TEXT("import_failed");
-			TSharedPtr<FJsonObject> ResultObj = FUeAgentHttpServer::MakePropertyImportResultJson(PropertyName, nullptr, ValueText, TEXT(""), ImportStatus, ImportError);
-			ResultObj->SetStringField(TEXT("cpp_type"), CppType);
-			if (PropertyJsonIssues.Num() > 0)
-			{
-				ResultObj->SetArrayField(TEXT("json_issues"), PropertyJsonIssues);
-			}
-			PropertyResultsJson.Add(MakeShared<FJsonValueObject>(ResultObj));
-			OutData->SetArrayField(TEXT("property_results"), PropertyResultsJson);
-			OutError = ImportError.IsEmpty() ? FString::Printf(TEXT("asset_property_apply_failed:%s:%s"), *PropertyName, *ValueText) : ImportError;
-			return false;
-		}
-
-		TSharedPtr<FJsonObject> ResultObj = FUeAgentHttpServer::MakePropertyImportResultJson(PropertyName, nullptr, ValueText, AppliedValueText, TEXT("imported_and_read_back"));
-		ResultObj->SetStringField(TEXT("cpp_type"), CppType);
-		if (PropertyJsonIssues.Num() > 0)
-		{
-			ResultObj->SetArrayField(TEXT("json_issues"), PropertyJsonIssues);
-		}
-		PropertyResultsJson.Add(MakeShared<FJsonValueObject>(ResultObj));
-		++AppliedPropertyCount;
+		ApplySummary->TryGetStringField(TEXT("reason"), OutError);
+		if (OutError.IsEmpty()) OutError = TEXT("asset_property_apply_failed");
+		OutData->SetObjectField(TEXT("apply_summary"), ApplySummary);
+		return false;
 	}
-
-	if (AppliedPropertyCount > 0)
-	{
-		Asset->Modify();
-	}
-	Asset->MarkPackageDirty();
-	Asset->PostEditChange();
+	AppliedPropertyCount = ApplySummary->GetIntegerField(TEXT("properties_applied"));
+	const TArray<TSharedPtr<FJsonValue>>* ApplyResults = nullptr;
+	if (ApplySummary->TryGetArrayField(TEXT("properties"), ApplyResults) && ApplyResults) PropertyResultsJson = *ApplyResults;
 
 	bool bSaveAfterApply = false;
 	JsonTryGetBool(Ctx.Params, TEXT("save_after_apply"), bSaveAfterApply);
@@ -1825,7 +1687,7 @@ bool FUeAgentHttpServer::CmdCurveExportJson(const FUeAgentRequestContext& Ctx, T
 	JsonTryGetString(Ctx.Params, TEXT("output_file"), OutputFile);
 	OutputFile.TrimStartAndEndInline();
 	FString SavedOutputFile;
-	if (!OutputFile.IsEmpty() && !UeAgentAssetOps::SaveJsonFile(OutputFile, CurveJson, SavedOutputFile, OutError))
+	if (!OutputFile.IsEmpty() && !UeAgentAssetOps::SaveAuthoringFile(OutputFile, CurveJson, SavedOutputFile, OutError))
 	{
 		return false;
 	}
@@ -1850,7 +1712,7 @@ bool FUeAgentHttpServer::CmdCurveApplyJson(const FUeAgentRequestContext& Ctx, TS
 	JsonFile.TrimStartAndEndInline();
 	if (!JsonFile.IsEmpty())
 	{
-		if (!UeAgentAssetOps::LoadJsonFile(JsonFile, JsonRoot, ResolvedJsonFile, OutError))
+		if (!UeAgentAssetOps::LoadAuthoringFile(JsonFile, JsonRoot, ResolvedJsonFile, OutError))
 		{
 			return false;
 		}
@@ -1946,7 +1808,7 @@ bool FUeAgentHttpServer::CmdCurveApplyJson(const FUeAgentRequestContext& Ctx, TS
 	JsonTryGetString(Ctx.Params, TEXT("output_file"), OutputFile);
 	OutputFile.TrimStartAndEndInline();
 	FString SavedOutputFile;
-	if (!OutputFile.IsEmpty() && ReadbackCurveJson.IsValid() && !UeAgentAssetOps::SaveJsonFile(OutputFile, ReadbackCurveJson, SavedOutputFile, OutError))
+	if (!OutputFile.IsEmpty() && ReadbackCurveJson.IsValid() && !UeAgentAssetOps::SaveAuthoringFile(OutputFile, ReadbackCurveJson, SavedOutputFile, OutError))
 	{
 		return false;
 	}

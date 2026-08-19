@@ -1,0 +1,78 @@
+authoring: { reason: command_has_no_registered_folder_authoring_profile, state: none }
+category: data_driven_data_asset_data_table
+command: primary_asset_validate_asset
+deprecation: { reason: command_is_active, state: none }
+discovery: { aliases: [], keywords_en: [primary, asset, validate, data_driven_data_asset_data_table], keywords_zh: [primary_asset_validate_asset], summary_en: "Execute primary_asset_validate_asset with a verified implementation contract", summary_zh: "验证单个资产的 Primary Asset ID、注册状态、bundle 和加载探针", tags: [data_driven_data_asset_data_table, p2-007] }
+errors: {
+  codes: [
+    { code: asset_not_found, description_zh: "C++ 实现返回错误码 asset_not_found", retry_safe: false, stage: execution, wire_match: exact }
+    { code: missing_asset_path, description_zh: "C++ 实现返回错误码 missing_asset_path", retry_safe: true, stage: preflight, wire_match: exact }
+    { code: primary_asset_validate_failed, description_zh: "C++ 实现返回错误码 primary_asset_validate_failed", retry_safe: false, stage: execution, wire_match: exact }
+  ]
+}
+evidence: {
+  docs: [
+    { path: "Plugins/UeAgentInterface/docs/commands/data_driven_data_asset_data_table/primary_asset_validate_asset.md", purpose: "user documentation cross-check; C++ implementation remains authoritative" }
+  ]
+  implementation: [
+    { line_hint: 1818, path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Commands/DataDriven/UeAgentHttpServer_DataDriven.cpp", purpose: "command handler, parameter and return evidence", symbol: CmdPrimaryAssetValidateAsset }
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Server/UeAgentHttpServer.cpp", purpose: "transitive helper evidence used by the command handler" }
+  ]
+  tests: [
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterfaceTests/Private/Smoke/DataDriven/UeAgentInterfaceDataDrivenSmokeTests.cpp", purpose: "smoke or negative-path evidence cross-checked for the verified contract" }
+  ]
+}
+execution: {
+  destructive: false
+  editor_state: required
+  game_thread: required
+  idempotent: true
+  kind: read_only
+  overwrite_behavior: none
+  pie_state: allowed
+  retry_safe: true
+  save_behavior: none
+  side_effects: []
+  ui_effect: none
+}
+maturity: verified
+params: {
+  constraints: []
+  fields: {
+    asset_path: { default_state: none, description_zh: "C++ 实现读取的 asset_path 参数", path_semantics: { access_scope: mounted_read, kind: ue_asset }, required: true, type: ue_asset_path }
+    expected_id: { default_state: none, description_zh: "C++ 实现读取的 expected_id 参数", required: false, type: string }
+    expected_type: { default_state: none, description_zh: "C++ 实现读取的 expected_type 参数", required: false, type: string }
+    load_probe: { default: false, default_state: defined, description_zh: "C++ 实现读取的 load_probe 参数", required: false, type: bool }
+    validate_bundles: { default: false, default_state: defined, description_zh: "C++ 实现读取的 validate_bundles 参数", required: false, type: bool }
+  }
+  state: defined
+}
+response: { artifact_fields: [bundles, issues, load_probe], compact_fields: [valid, asset_path, asset_manager_registered, bundle_count, error_count], failure_fields: [params.asset_path], max_items_policy: { fields: [], mode: none } }
+returns: {
+  fields: {
+    asset_manager_registered: { description_zh: "C++ 实现返回的 asset_manager_registered 字段；是否出现取决于执行分支", required: false, type: bool }
+    asset_path: { description_zh: "C++ 实现返回的 asset_path 字段；是否出现取决于执行分支", required: false, type: ue_asset_path }
+    bundle_count: { description_zh: "C++ 实现返回的 bundle_count 字段；是否出现取决于执行分支", required: false, type: integer }
+    bundles: { description_zh: "C++ 实现返回的 bundles 字段；是否出现取决于执行分支", item_type: json_value, required: false, type: array }
+    error_count: { description_zh: "C++ 实现返回的 error_count 字段；是否出现取决于执行分支", required: false, type: integer }
+    expected_id: { description_zh: "C++ 实现返回的 expected_id 字段；是否出现取决于执行分支", required: false, type: string }
+    expected_type: { description_zh: "C++ 实现返回的 expected_type 字段；是否出现取决于执行分支", required: false, type: string }
+    id_matches: { description_zh: "C++ 实现返回的 id_matches 字段；是否出现取决于执行分支", required: false, type: bool }
+    issues: { description_zh: "C++ 实现返回的 issues 字段；是否出现取决于执行分支", item_type: json_value, required: false, type: array }
+    load_probe: { description_zh: "C++ 实现返回的 load_probe 字段；是否出现取决于执行分支", required: false, type: json_value }
+    missing_bundle_asset_count: { description_zh: "C++ 实现返回的 missing_bundle_asset_count 字段；是否出现取决于执行分支", required: false, type: integer }
+    object_path: { description_zh: "C++ 实现返回的 object_path 字段；是否出现取决于执行分支", required: false, type: ue_object_path }
+    object_primary_asset_id: { description_zh: "C++ 实现返回的 object_primary_asset_id 字段；是否出现取决于执行分支", required: false, type: string }
+    registered_primary_asset_id: { description_zh: "C++ 实现返回的 registered_primary_asset_id 字段；是否出现取决于执行分支", required: false, type: string }
+    schema: { description_zh: "C++ 实现返回的 schema 字段；是否出现取决于执行分支", required: false, type: string }
+    type_matches: { description_zh: "C++ 实现返回的 type_matches 字段；是否出现取决于执行分支", required: false, type: bool }
+    valid: { description_zh: "C++ 实现返回的 valid 字段；是否出现取决于执行分支", required: false, type: bool }
+    validate_bundles: { description_zh: "C++ 实现返回的 validate_bundles 字段；是否出现取决于执行分支", required: false, type: bool }
+  }
+  state: defined
+}
+schema: uai.command_spec.v1
+status: active
+types: {}
+verification: { reason: read_only_command_has_no_post_write_verification, state: none }
+version: 1

@@ -1,0 +1,1912 @@
+{
+  "schema": "uai.historical_successor.v2",
+  "owner_task_id": "T59-WORLD-COMMAND-MIGRATION",
+  "approval_authority": {
+    "path": "docs/plan/20260806_UAI_REQUIREMENT_DESIGN_REALIGNMENT/UAI_PRE_REFACTOR_COMMAND_APPROVAL.md",
+    "sha256": "3972f62273a13c8c8a971d7e31924e08c8fc59dad9f35abbb87089728c1c265e"
+  },
+  "commands": [
+    {
+      "historical_command_id": "hlod_assign_actors",
+      "approval": "2)",
+      "historical_source": "docs/commands/25_LevelTopology_Streaming_WorldPartition_DataLayer_HLOD.md",
+      "historical_contract": {
+        "inputs": "actor_ids, folder_root, hlod_layer, is_spatially_loaded, runtime_grid",
+        "outputs": "changed_count, matched_count, results[]",
+        "purpose": "给 Actor 设置 HLOD Layer、Runtime Grid、Spatially Loaded"
+      },
+      "resolved_from_contract_id": "uai.historical_capability.t59.world.command.migration.hlod_assign_actors/1",
+      "successor": {
+        "kind": "exact_command_set",
+        "command_ids": [
+          "world.actor_hlod_layer.update",
+          "world.actor_streaming_policy.update"
+        ]
+      },
+      "routing": {
+        "policy": "typed_world_actor_mutations"
+      },
+      "semantic_coverage": {
+        "purpose": {
+          "status": "covered",
+          "by": [
+            "world.actor_hlod_layer.update",
+            "world.actor_streaming_policy.update"
+          ],
+          "explanation": "冻结用途“给 Actor 设置 HLOD Layer、Runtime Grid、Spatially Loaded”由当前 successor 承接。HLOD Layer 与 Runtime Grid、Spatially Loaded 分属两个类型化 Actor mutation，并共同返回逐 Actor 结果。"
+        },
+        "inputs": {
+          "status": "covered",
+          "by": [
+            "world.actor_hlod_layer.update",
+            "world.actor_streaming_policy.update"
+          ],
+          "explanation": "冻结输入“actor_ids, folder_root, hlod_layer, is_spatially_loaded, runtime_grid”由 routing.policy 精确映射到类型化参数或 policy 参数。HLOD Layer 与 Runtime Grid、Spatially Loaded 分属两个类型化 Actor mutation，并共同返回逐 Actor 结果。"
+        },
+        "outputs": {
+          "status": "covered",
+          "by": [
+            "world.actor_hlod_layer.update",
+            "world.actor_streaming_policy.update"
+          ],
+          "explanation": "冻结输出“changed_count, matched_count, results[]”由真实 UE mechanics、公共 operation 或独立 Query 生成。HLOD Layer 与 Runtime Grid、Spatially Loaded 分属两个类型化 Actor mutation，并共同返回逐 Actor 结果。"
+        }
+      },
+      "product_evidence": {
+        "test_id": "UAI.DeliveryWorkflow.T59.WORLD.COMMAND.MIGRATION",
+        "public_command_ids": [
+          "world.actor_hlod_layer.update",
+          "world.actor_streaming_policy.update"
+        ],
+        "architecture_contract_ids": [
+          "DES-UAI-WORLD-LIFECYCLE-ROUTING",
+          "DES-UAI-OPERATION-LIFECYCLE"
+        ],
+        "required_claims": [
+          "public_to_real_ue",
+          "persistence",
+          "independent_readback",
+          "historical_semantics_covered",
+          "old_public_ids_absent",
+          "cleanup_confirmed"
+        ]
+      },
+      "old_id_exit": {
+        "public_executable": false,
+        "manifest_active": false,
+        "sdk_binding_active": false,
+        "compatibility_alias": false
+      },
+      "final_lifecycle": "deprecated_replaced"
+    },
+    {
+      "historical_command_id": "hlod_build",
+      "approval": "1)",
+      "historical_source": "docs/commands/25_LevelTopology_Streaming_WorldPartition_DataLayer_HLOD.md",
+      "historical_contract": {
+        "inputs": "无文档参数；使用 **params 传入 UAI 参数。",
+        "outputs": "setup",
+        "purpose": "规划或执行 HLOD commandlet 步骤"
+      },
+      "resolved_from_contract_id": "uai.historical_capability.t59.world.command.migration.hlod_build/1",
+      "successor": {
+        "kind": "exact_command_set",
+        "command_ids": [
+          "job.compile_build",
+          "operation.resume",
+          "operation.status"
+        ]
+      },
+      "routing": {
+        "policy": "policy:world-build:hlod-plan/v1|policy:world-build:hlod-run/v1"
+      },
+      "semantic_coverage": {
+        "purpose": {
+          "status": "covered",
+          "by": [
+            "job.compile_build",
+            "operation.resume",
+            "operation.status"
+          ],
+          "explanation": "冻结用途“规划或执行 HLOD commandlet 步骤”由当前 successor 承接。plan 与 execute 由精确 world_build policy 分离，setup、build、finalize、delete、stats 均由受控 commandlet 参数生成并通过公共 operation 观察终态。"
+        },
+        "inputs": {
+          "status": "covered",
+          "by": [
+            "job.compile_build",
+            "operation.resume",
+            "operation.status"
+          ],
+          "explanation": "冻结输入“无文档参数；使用 **params 传入 UAI 参数。”由 routing.policy 精确映射到类型化参数或 policy 参数。plan 与 execute 由精确 world_build policy 分离，setup、build、finalize、delete、stats 均由受控 commandlet 参数生成并通过公共 operation 观察终态。"
+        },
+        "outputs": {
+          "status": "covered",
+          "by": [
+            "job.compile_build",
+            "operation.resume",
+            "operation.status"
+          ],
+          "explanation": "冻结输出“setup”由真实 UE mechanics、公共 operation 或独立 Query 生成。plan 与 execute 由精确 world_build policy 分离，setup、build、finalize、delete、stats 均由受控 commandlet 参数生成并通过公共 operation 观察终态。"
+        }
+      },
+      "product_evidence": {
+        "test_id": "UAI.DeliveryWorkflow.T59.WORLD.COMMAND.MIGRATION",
+        "public_command_ids": [
+          "job.compile_build",
+          "operation.resume",
+          "operation.status"
+        ],
+        "architecture_contract_ids": [
+          "DES-UAI-WORLD-LIFECYCLE-ROUTING",
+          "DES-UAI-OPERATION-LIFECYCLE"
+        ],
+        "required_claims": [
+          "public_to_real_ue",
+          "persistence",
+          "independent_readback",
+          "historical_semantics_covered",
+          "old_public_ids_absent",
+          "cleanup_confirmed"
+        ]
+      },
+      "old_id_exit": {
+        "public_executable": false,
+        "manifest_active": false,
+        "sdk_binding_active": false,
+        "compatibility_alias": false
+      },
+      "final_lifecycle": "deprecated_replaced"
+    },
+    {
+      "historical_command_id": "hlod_layer_apply_json",
+      "approval": "1)",
+      "historical_source": "docs/commands/25_LevelTopology_Streaming_WorldPartition_DataLayer_HLOD.md",
+      "historical_contract": {
+        "inputs": "asset_path, json, json_file, overwrite_policy, save_after_apply",
+        "outputs": "property_results[], status",
+        "purpose": "按 JSON 创建或回写 HLOD Layer"
+      },
+      "resolved_from_contract_id": "uai.historical_capability.t59.world.command.migration.hlod_layer_apply_json/1",
+      "successor": {
+        "kind": "exact_command_set",
+        "command_ids": [
+          "content_graph.import_workspace"
+        ]
+      },
+      "routing": {
+        "policy": "hjson_source:inline|single_file|directory;type:/Script/Engine.HLODLayer"
+      },
+      "semantic_coverage": {
+        "purpose": {
+          "status": "covered",
+          "by": [
+            "content_graph.import_workspace"
+          ],
+          "explanation": "冻结用途“按 JSON 创建或回写 HLOD Layer”由当前 successor 承接。唯一 HJSON 导入入口解析、预检并回写 UHLODLayer，随后保存、重载和独立读回。"
+        },
+        "inputs": {
+          "status": "covered",
+          "by": [
+            "content_graph.import_workspace"
+          ],
+          "explanation": "冻结输入“asset_path, json, json_file, overwrite_policy, save_after_apply”由 routing.policy 精确映射到类型化参数或 policy 参数。唯一 HJSON 导入入口解析、预检并回写 UHLODLayer，随后保存、重载和独立读回。"
+        },
+        "outputs": {
+          "status": "covered",
+          "by": [
+            "content_graph.import_workspace"
+          ],
+          "explanation": "冻结输出“property_results[], status”由真实 UE mechanics、公共 operation 或独立 Query 生成。唯一 HJSON 导入入口解析、预检并回写 UHLODLayer，随后保存、重载和独立读回。"
+        }
+      },
+      "product_evidence": {
+        "test_id": "UAI.DeliveryWorkflow.T59.WORLD.COMMAND.MIGRATION",
+        "public_command_ids": [
+          "content_graph.import_workspace"
+        ],
+        "architecture_contract_ids": [
+          "DES-UAI-WORLD-LIFECYCLE-ROUTING",
+          "DES-UAI-OPERATION-LIFECYCLE"
+        ],
+        "required_claims": [
+          "public_to_real_ue",
+          "persistence",
+          "independent_readback",
+          "historical_semantics_covered",
+          "old_public_ids_absent",
+          "cleanup_confirmed"
+        ]
+      },
+      "old_id_exit": {
+        "public_executable": false,
+        "manifest_active": false,
+        "sdk_binding_active": false,
+        "compatibility_alias": false
+      },
+      "final_lifecycle": "deprecated_replaced"
+    },
+    {
+      "historical_command_id": "hlod_layer_create_json",
+      "approval": "1)",
+      "historical_source": "docs/commands/25_LevelTopology_Streaming_WorldPartition_DataLayer_HLOD.md",
+      "historical_contract": {
+        "inputs": "asset_path, json, json_file, overwrite_policy, save_after_apply",
+        "outputs": "asset_path, layer_type, status",
+        "purpose": "创建或更新 HLOD Layer 资产"
+      },
+      "resolved_from_contract_id": "uai.historical_capability.t59.world.command.migration.hlod_layer_create_json/1",
+      "successor": {
+        "kind": "exact_command_set",
+        "command_ids": [
+          "content_graph.import_workspace"
+        ]
+      },
+      "routing": {
+        "policy": "hjson_source:inline|single_file|directory;type:/Script/Engine.HLODLayer"
+      },
+      "semantic_coverage": {
+        "purpose": {
+          "status": "covered",
+          "by": [
+            "content_graph.import_workspace"
+          ],
+          "explanation": "冻结用途“创建或更新 HLOD Layer 资产”由当前 successor 承接。同一唯一 HJSON 导入入口按 overwrite_policy 创建或更新 UHLODLayer，不恢复领域 JSON 命令。"
+        },
+        "inputs": {
+          "status": "covered",
+          "by": [
+            "content_graph.import_workspace"
+          ],
+          "explanation": "冻结输入“asset_path, json, json_file, overwrite_policy, save_after_apply”由 routing.policy 精确映射到类型化参数或 policy 参数。同一唯一 HJSON 导入入口按 overwrite_policy 创建或更新 UHLODLayer，不恢复领域 JSON 命令。"
+        },
+        "outputs": {
+          "status": "covered",
+          "by": [
+            "content_graph.import_workspace"
+          ],
+          "explanation": "冻结输出“asset_path, layer_type, status”由真实 UE mechanics、公共 operation 或独立 Query 生成。同一唯一 HJSON 导入入口按 overwrite_policy 创建或更新 UHLODLayer，不恢复领域 JSON 命令。"
+        }
+      },
+      "product_evidence": {
+        "test_id": "UAI.DeliveryWorkflow.T59.WORLD.COMMAND.MIGRATION",
+        "public_command_ids": [
+          "content_graph.import_workspace"
+        ],
+        "architecture_contract_ids": [
+          "DES-UAI-WORLD-LIFECYCLE-ROUTING",
+          "DES-UAI-OPERATION-LIFECYCLE"
+        ],
+        "required_claims": [
+          "public_to_real_ue",
+          "persistence",
+          "independent_readback",
+          "historical_semantics_covered",
+          "old_public_ids_absent",
+          "cleanup_confirmed"
+        ]
+      },
+      "old_id_exit": {
+        "public_executable": false,
+        "manifest_active": false,
+        "sdk_binding_active": false,
+        "compatibility_alias": false
+      },
+      "final_lifecycle": "deprecated_replaced"
+    },
+    {
+      "historical_command_id": "hlod_layer_export_json",
+      "approval": "1)",
+      "historical_source": "docs/commands/25_LevelTopology_Streaming_WorldPartition_DataLayer_HLOD.md",
+      "historical_contract": {
+        "inputs": "asset_path, output_file",
+        "outputs": "cell_size, layer_type, loading_range, parent_layer",
+        "purpose": "导出 HLOD Layer JSON"
+      },
+      "resolved_from_contract_id": "uai.historical_capability.t59.world.command.migration.hlod_layer_export_json/1",
+      "successor": {
+        "kind": "exact_command_set",
+        "command_ids": [
+          "content_graph.export_workspace"
+        ]
+      },
+      "routing": {
+        "policy": "content_graph_export;type:/Script/Engine.HLODLayer"
+      },
+      "semantic_coverage": {
+        "purpose": {
+          "status": "covered",
+          "by": [
+            "content_graph.export_workspace"
+          ],
+          "explanation": "冻结用途“导出 HLOD Layer JSON”由当前 successor 承接。公共 ContentGraph export 从真实 UHLODLayer capture 规范文档并写入调用方指定 workspace。"
+        },
+        "inputs": {
+          "status": "covered",
+          "by": [
+            "content_graph.export_workspace"
+          ],
+          "explanation": "冻结输入“asset_path, output_file”由 routing.policy 精确映射到类型化参数或 policy 参数。公共 ContentGraph export 从真实 UHLODLayer capture 规范文档并写入调用方指定 workspace。"
+        },
+        "outputs": {
+          "status": "covered",
+          "by": [
+            "content_graph.export_workspace"
+          ],
+          "explanation": "冻结输出“cell_size, layer_type, loading_range, parent_layer”由真实 UE mechanics、公共 operation 或独立 Query 生成。公共 ContentGraph export 从真实 UHLODLayer capture 规范文档并写入调用方指定 workspace。"
+        }
+      },
+      "product_evidence": {
+        "test_id": "UAI.DeliveryWorkflow.T59.WORLD.COMMAND.MIGRATION",
+        "public_command_ids": [
+          "content_graph.export_workspace"
+        ],
+        "architecture_contract_ids": [
+          "DES-UAI-WORLD-LIFECYCLE-ROUTING",
+          "DES-UAI-OPERATION-LIFECYCLE"
+        ],
+        "required_claims": [
+          "public_to_real_ue",
+          "persistence",
+          "independent_readback",
+          "historical_semantics_covered",
+          "old_public_ids_absent",
+          "cleanup_confirmed"
+        ]
+      },
+      "old_id_exit": {
+        "public_executable": false,
+        "manifest_active": false,
+        "sdk_binding_active": false,
+        "compatibility_alias": false
+      },
+      "final_lifecycle": "deprecated_replaced"
+    },
+    {
+      "historical_command_id": "hlod_layer_validate_json",
+      "approval": "1)",
+      "historical_source": "docs/commands/25_LevelTopology_Streaming_WorldPartition_DataLayer_HLOD.md",
+      "historical_contract": {
+        "inputs": "json, json_file",
+        "outputs": "issues[], valid",
+        "purpose": "校验 HLOD Layer JSON"
+      },
+      "resolved_from_contract_id": "uai.historical_capability.t59.world.command.migration.hlod_layer_validate_json/1",
+      "successor": {
+        "kind": "architecture_contract",
+        "contract_id": "DES-UAI-HJSON-IMPORT-PREFLIGHT",
+        "representative_command_ids": [
+          "content_graph.import_workspace"
+        ]
+      },
+      "routing": {
+        "policy": "content_graph_import_prewrite_preflight"
+      },
+      "semantic_coverage": {
+        "purpose": {
+          "status": "covered",
+          "by": [
+            "DES-UAI-HJSON-IMPORT-PREFLIGHT"
+          ],
+          "explanation": "冻结用途“校验 HLOD Layer JSON”由当前 successor 承接。校验是唯一 import 的写前阶段；解析、类型 schema、引用和递归初始化错误在任何写入前返回。"
+        },
+        "inputs": {
+          "status": "covered",
+          "by": [
+            "DES-UAI-HJSON-IMPORT-PREFLIGHT"
+          ],
+          "explanation": "冻结输入“json, json_file”由 routing.policy 精确映射到类型化参数或 policy 参数。校验是唯一 import 的写前阶段；解析、类型 schema、引用和递归初始化错误在任何写入前返回。"
+        },
+        "outputs": {
+          "status": "covered",
+          "by": [
+            "DES-UAI-HJSON-IMPORT-PREFLIGHT"
+          ],
+          "explanation": "冻结输出“issues[], valid”由真实 UE mechanics、公共 operation 或独立 Query 生成。校验是唯一 import 的写前阶段；解析、类型 schema、引用和递归初始化错误在任何写入前返回。"
+        }
+      },
+      "product_evidence": {
+        "test_id": "UAI.DeliveryWorkflow.T59.WORLD.COMMAND.MIGRATION",
+        "public_command_ids": [
+          "content_graph.import_workspace"
+        ],
+        "architecture_contract_ids": [
+          "DES-UAI-WORLD-LIFECYCLE-ROUTING",
+          "DES-UAI-OPERATION-LIFECYCLE"
+        ],
+        "required_claims": [
+          "public_to_real_ue",
+          "persistence",
+          "independent_readback",
+          "historical_semantics_covered",
+          "old_public_ids_absent",
+          "cleanup_confirmed"
+        ]
+      },
+      "old_id_exit": {
+        "public_executable": false,
+        "manifest_active": false,
+        "sdk_binding_active": false,
+        "compatibility_alias": false
+      },
+      "final_lifecycle": "deprecated_replaced"
+    },
+    {
+      "historical_command_id": "hlod_validate_build",
+      "approval": "1)",
+      "historical_source": "docs/commands/25_LevelTopology_Streaming_WorldPartition_DataLayer_HLOD.md",
+      "historical_contract": {
+        "inputs": "无文档参数；使用 **params 传入 UAI 参数。",
+        "outputs": "hlod_actor_count, issues[]",
+        "purpose": "读取当前场景 HLOD actor 数量和问题列表"
+      },
+      "resolved_from_contract_id": "uai.historical_capability.t59.world.command.migration.hlod_validate_build/1",
+      "successor": {
+        "kind": "exact_command_set",
+        "command_ids": [
+          "world.hlod_assignments",
+          "world.partition_health"
+        ]
+      },
+      "routing": {
+        "policy": "read_only_world_queries"
+      },
+      "semantic_coverage": {
+        "purpose": {
+          "status": "covered",
+          "by": [
+            "world.hlod_assignments",
+            "world.partition_health"
+          ],
+          "explanation": "冻结用途“读取当前场景 HLOD actor 数量和问题列表”由当前 successor 承接。HLOD assignment Query 提供当前 Actor 集合，World Partition health 通过真实 CheckForErrors 返回 invalid_hlod_layer 等精确问题。"
+        },
+        "inputs": {
+          "status": "covered",
+          "by": [
+            "world.hlod_assignments",
+            "world.partition_health"
+          ],
+          "explanation": "冻结输入“无文档参数；使用 **params 传入 UAI 参数。”由 routing.policy 精确映射到类型化参数或 policy 参数。HLOD assignment Query 提供当前 Actor 集合，World Partition health 通过真实 CheckForErrors 返回 invalid_hlod_layer 等精确问题。"
+        },
+        "outputs": {
+          "status": "covered",
+          "by": [
+            "world.hlod_assignments",
+            "world.partition_health"
+          ],
+          "explanation": "冻结输出“hlod_actor_count, issues[]”由真实 UE mechanics、公共 operation 或独立 Query 生成。HLOD assignment Query 提供当前 Actor 集合，World Partition health 通过真实 CheckForErrors 返回 invalid_hlod_layer 等精确问题。"
+        }
+      },
+      "product_evidence": {
+        "test_id": "UAI.DeliveryWorkflow.T59.WORLD.COMMAND.MIGRATION",
+        "public_command_ids": [
+          "world.hlod_assignments",
+          "world.partition_health"
+        ],
+        "architecture_contract_ids": [
+          "DES-UAI-WORLD-LIFECYCLE-ROUTING",
+          "DES-UAI-OPERATION-LIFECYCLE"
+        ],
+        "required_claims": [
+          "public_to_real_ue",
+          "persistence",
+          "independent_readback",
+          "historical_semantics_covered",
+          "old_public_ids_absent",
+          "cleanup_confirmed"
+        ]
+      },
+      "old_id_exit": {
+        "public_executable": false,
+        "manifest_active": false,
+        "sdk_binding_active": false,
+        "compatibility_alias": false
+      },
+      "final_lifecycle": "deprecated_replaced"
+    },
+    {
+      "historical_command_id": "level_create_blank",
+      "approval": "1)",
+      "historical_source": "docs/commands/01_Core_Level_Assets_Landscape.md",
+      "historical_contract": {
+        "inputs": "asset_path, level_path, overwrite_policy, save_existing_map",
+        "outputs": "为自动化演示或测试创建干净场景，避免污染当前关卡",
+        "purpose": "创建并打开新的空 persistent Level 资产"
+      },
+      "resolved_from_contract_id": "uai.historical_capability.t59.world.command.migration.level_create_blank/1",
+      "successor": {
+        "kind": "exact_command_set",
+        "command_ids": [
+          "editor.session",
+          "operation.resume",
+          "operation.status"
+        ]
+      },
+      "routing": {
+        "policy": "policy:world-context:create-blank/v1"
+      },
+      "semantic_coverage": {
+        "purpose": {
+          "status": "covered",
+          "by": [
+            "editor.session",
+            "operation.resume",
+            "operation.status"
+          ],
+          "explanation": "冻结用途“创建并打开新的空 persistent Level 资产”由当前 successor 承接。RecoverableSession 在游戏线程创建空 map，可选择建立 World Partition，完成保存后才进入成功终态。"
+        },
+        "inputs": {
+          "status": "covered",
+          "by": [
+            "editor.session",
+            "operation.resume",
+            "operation.status"
+          ],
+          "explanation": "冻结输入“asset_path, level_path, overwrite_policy, save_existing_map”由 routing.policy 精确映射到类型化参数或 policy 参数。RecoverableSession 在游戏线程创建空 map，可选择建立 World Partition，完成保存后才进入成功终态。"
+        },
+        "outputs": {
+          "status": "covered",
+          "by": [
+            "editor.session",
+            "operation.resume",
+            "operation.status"
+          ],
+          "explanation": "冻结输出“为自动化演示或测试创建干净场景，避免污染当前关卡”由真实 UE mechanics、公共 operation 或独立 Query 生成。RecoverableSession 在游戏线程创建空 map，可选择建立 World Partition，完成保存后才进入成功终态。"
+        }
+      },
+      "product_evidence": {
+        "test_id": "UAI.DeliveryWorkflow.T59.WORLD.COMMAND.MIGRATION",
+        "public_command_ids": [
+          "editor.session",
+          "operation.resume",
+          "operation.status"
+        ],
+        "architecture_contract_ids": [
+          "DES-UAI-WORLD-LIFECYCLE-ROUTING",
+          "DES-UAI-OPERATION-LIFECYCLE"
+        ],
+        "required_claims": [
+          "public_to_real_ue",
+          "persistence",
+          "independent_readback",
+          "historical_semantics_covered",
+          "old_public_ids_absent",
+          "cleanup_confirmed"
+        ]
+      },
+      "old_id_exit": {
+        "public_executable": false,
+        "manifest_active": false,
+        "sdk_binding_active": false,
+        "compatibility_alias": false
+      },
+      "final_lifecycle": "deprecated_replaced"
+    },
+    {
+      "historical_command_id": "level_open",
+      "approval": "1)",
+      "historical_source": "docs/commands/01_Core_Level_Assets_Landscape.md",
+      "historical_contract": {
+        "inputs": "asset_path, level_path, save_existing_map",
+        "outputs": "在专用 demo map 或测试 map 之间切换",
+        "purpose": "打开已有 persistent Level 资产"
+      },
+      "resolved_from_contract_id": "uai.historical_capability.t59.world.command.migration.level_open/1",
+      "successor": {
+        "kind": "exact_command_set",
+        "command_ids": [
+          "editor.session",
+          "operation.resume",
+          "operation.status"
+        ]
+      },
+      "routing": {
+        "policy": "policy:world-context:set-current/v1"
+      },
+      "semantic_coverage": {
+        "purpose": {
+          "status": "covered",
+          "by": [
+            "editor.session",
+            "operation.resume",
+            "operation.status"
+          ],
+          "explanation": "冻结用途“打开已有 persistent Level 资产”由当前 successor 承接。RecoverableSession 精确解析并打开目标 map，在切换前遵守 save_existing_map，并通过公共 operation 返回终态。"
+        },
+        "inputs": {
+          "status": "covered",
+          "by": [
+            "editor.session",
+            "operation.resume",
+            "operation.status"
+          ],
+          "explanation": "冻结输入“asset_path, level_path, save_existing_map”由 routing.policy 精确映射到类型化参数或 policy 参数。RecoverableSession 精确解析并打开目标 map，在切换前遵守 save_existing_map，并通过公共 operation 返回终态。"
+        },
+        "outputs": {
+          "status": "covered",
+          "by": [
+            "editor.session",
+            "operation.resume",
+            "operation.status"
+          ],
+          "explanation": "冻结输出“在专用 demo map 或测试 map 之间切换”由真实 UE mechanics、公共 operation 或独立 Query 生成。RecoverableSession 精确解析并打开目标 map，在切换前遵守 save_existing_map，并通过公共 operation 返回终态。"
+        }
+      },
+      "product_evidence": {
+        "test_id": "UAI.DeliveryWorkflow.T59.WORLD.COMMAND.MIGRATION",
+        "public_command_ids": [
+          "editor.session",
+          "operation.resume",
+          "operation.status"
+        ],
+        "architecture_contract_ids": [
+          "DES-UAI-WORLD-LIFECYCLE-ROUTING",
+          "DES-UAI-OPERATION-LIFECYCLE"
+        ],
+        "required_claims": [
+          "public_to_real_ue",
+          "persistence",
+          "independent_readback",
+          "historical_semantics_covered",
+          "old_public_ids_absent",
+          "cleanup_confirmed"
+        ]
+      },
+      "old_id_exit": {
+        "public_executable": false,
+        "manifest_active": false,
+        "sdk_binding_active": false,
+        "compatibility_alias": false
+      },
+      "final_lifecycle": "deprecated_replaced"
+    },
+    {
+      "historical_command_id": "level_spawn_wall_with_opening",
+      "approval": "1)",
+      "historical_source": "docs/commands/01_Core_Level_Assets_Landscape.md",
+      "historical_contract": {
+        "inputs": "label_prefix, opening_center/opening_size, plane, wall_size",
+        "outputs": "门洞/窗洞/通道口：避免手工拆墙造成接口不连通",
+        "purpose": "生成“带开口的墙”（自动拆成多段网格）"
+      },
+      "resolved_from_contract_id": "uai.historical_capability.t59.world.command.migration.level_spawn_wall_with_opening/1",
+      "successor": {
+        "kind": "exact_command_set",
+        "command_ids": [
+          "world.wall.create_with_opening"
+        ]
+      },
+      "routing": {
+        "policy": "typed_world_wall_operation"
+      },
+      "semantic_coverage": {
+        "purpose": {
+          "status": "covered",
+          "by": [
+            "world.wall.create_with_opening"
+          ],
+          "explanation": "冻结用途“生成“带开口的墙”（自动拆成多段网格）”由当前 successor 承接。类型化墙体 operation 根据 plane、wall_size 与 opening 范围创建不重叠墙段，保存后以独立空间读回验证。"
+        },
+        "inputs": {
+          "status": "covered",
+          "by": [
+            "world.wall.create_with_opening"
+          ],
+          "explanation": "冻结输入“label_prefix, opening_center/opening_size, plane, wall_size”由 routing.policy 精确映射到类型化参数或 policy 参数。类型化墙体 operation 根据 plane、wall_size 与 opening 范围创建不重叠墙段，保存后以独立空间读回验证。"
+        },
+        "outputs": {
+          "status": "covered",
+          "by": [
+            "world.wall.create_with_opening"
+          ],
+          "explanation": "冻结输出“门洞/窗洞/通道口：避免手工拆墙造成接口不连通”由真实 UE mechanics、公共 operation 或独立 Query 生成。类型化墙体 operation 根据 plane、wall_size 与 opening 范围创建不重叠墙段，保存后以独立空间读回验证。"
+        }
+      },
+      "product_evidence": {
+        "test_id": "UAI.DeliveryWorkflow.T59.WORLD.COMMAND.MIGRATION",
+        "public_command_ids": [
+          "world.wall.create_with_opening"
+        ],
+        "architecture_contract_ids": [
+          "DES-UAI-WORLD-LIFECYCLE-ROUTING",
+          "DES-UAI-OPERATION-LIFECYCLE"
+        ],
+        "required_claims": [
+          "public_to_real_ue",
+          "persistence",
+          "independent_readback",
+          "historical_semantics_covered",
+          "old_public_ids_absent",
+          "cleanup_confirmed"
+        ]
+      },
+      "old_id_exit": {
+        "public_executable": false,
+        "manifest_active": false,
+        "sdk_binding_active": false,
+        "compatibility_alias": false
+      },
+      "final_lifecycle": "deprecated_replaced"
+    },
+    {
+      "historical_command_id": "level_streaming_add_existing",
+      "approval": "2)",
+      "historical_source": "docs/commands/25_LevelTopology_Streaming_WorldPartition_DataLayer_HLOD.md",
+      "historical_contract": {
+        "inputs": "level_package, streaming_class, transform",
+        "outputs": "added, level_package, loaded, visible",
+        "purpose": "将已有关卡资产作为 streaming level 挂入当前 World"
+      },
+      "resolved_from_contract_id": "uai.historical_capability.t59.world.command.migration.level_streaming_add_existing/1",
+      "successor": {
+        "kind": "exact_command_set",
+        "command_ids": [
+          "world.streaming_relation.create"
+        ]
+      },
+      "routing": {
+        "policy": "typed_streaming_relation_create"
+      },
+      "semantic_coverage": {
+        "purpose": {
+          "status": "covered",
+          "by": [
+            "world.streaming_relation.create"
+          ],
+          "explanation": "冻结用途“将已有关卡资产作为 streaming level 挂入当前 World”由当前 successor 承接。类型化 relation mutation 将既有关卡 package、streaming class 和 transform 挂入当前 World，并保存后读回加载与可见状态。"
+        },
+        "inputs": {
+          "status": "covered",
+          "by": [
+            "world.streaming_relation.create"
+          ],
+          "explanation": "冻结输入“level_package, streaming_class, transform”由 routing.policy 精确映射到类型化参数或 policy 参数。类型化 relation mutation 将既有关卡 package、streaming class 和 transform 挂入当前 World，并保存后读回加载与可见状态。"
+        },
+        "outputs": {
+          "status": "covered",
+          "by": [
+            "world.streaming_relation.create"
+          ],
+          "explanation": "冻结输出“added, level_package, loaded, visible”由真实 UE mechanics、公共 operation 或独立 Query 生成。类型化 relation mutation 将既有关卡 package、streaming class 和 transform 挂入当前 World，并保存后读回加载与可见状态。"
+        }
+      },
+      "product_evidence": {
+        "test_id": "UAI.DeliveryWorkflow.T59.WORLD.COMMAND.MIGRATION",
+        "public_command_ids": [
+          "world.streaming_relation.create"
+        ],
+        "architecture_contract_ids": [
+          "DES-UAI-WORLD-LIFECYCLE-ROUTING",
+          "DES-UAI-OPERATION-LIFECYCLE"
+        ],
+        "required_claims": [
+          "public_to_real_ue",
+          "persistence",
+          "independent_readback",
+          "historical_semantics_covered",
+          "old_public_ids_absent",
+          "cleanup_confirmed"
+        ]
+      },
+      "old_id_exit": {
+        "public_executable": false,
+        "manifest_active": false,
+        "sdk_binding_active": false,
+        "compatibility_alias": false
+      },
+      "final_lifecycle": "deprecated_replaced"
+    },
+    {
+      "historical_command_id": "level_streaming_create_level",
+      "approval": "2)",
+      "historical_source": "docs/commands/25_LevelTopology_Streaming_WorldPartition_DataLayer_HLOD.md",
+      "historical_contract": {
+        "inputs": "create_world_partition, enable_world_partition_streaming, level_package, move_selected_actors, save_after_create, streaming_class, transform, use_external_actors",
+        "outputs": "created, level_package, saved, streaming_class",
+        "purpose": "创建并挂载新子关卡"
+      },
+      "resolved_from_contract_id": "uai.historical_capability.t59.world.command.migration.level_streaming_create_level/1",
+      "successor": {
+        "kind": "exact_command_set",
+        "command_ids": [
+          "editor.session",
+          "operation.resume",
+          "operation.status",
+          "world.streaming_relation.create"
+        ]
+      },
+      "routing": {
+        "policy": "policy:world-context:create-blank/v1+typed_streaming_relation_create"
+      },
+      "semantic_coverage": {
+        "purpose": {
+          "status": "covered",
+          "by": [
+            "editor.session",
+            "operation.resume",
+            "operation.status",
+            "world.streaming_relation.create"
+          ],
+          "explanation": "冻结用途“创建并挂载新子关卡”由当前 successor 承接。先由 RecoverableSession 创建并保存子关卡，再由类型化 relation mutation 挂载；World Partition 与 external actors 由创建 policy 精确承载。"
+        },
+        "inputs": {
+          "status": "covered",
+          "by": [
+            "editor.session",
+            "operation.resume",
+            "operation.status",
+            "world.streaming_relation.create"
+          ],
+          "explanation": "冻结输入“create_world_partition, enable_world_partition_streaming, level_package, move_selected_actors, save_after_create, streaming_class, transform, use_external_actors”由 routing.policy 精确映射到类型化参数或 policy 参数。先由 RecoverableSession 创建并保存子关卡，再由类型化 relation mutation 挂载；World Partition 与 external actors 由创建 policy 精确承载。"
+        },
+        "outputs": {
+          "status": "covered",
+          "by": [
+            "editor.session",
+            "operation.resume",
+            "operation.status",
+            "world.streaming_relation.create"
+          ],
+          "explanation": "冻结输出“created, level_package, saved, streaming_class”由真实 UE mechanics、公共 operation 或独立 Query 生成。先由 RecoverableSession 创建并保存子关卡，再由类型化 relation mutation 挂载；World Partition 与 external actors 由创建 policy 精确承载。"
+        }
+      },
+      "product_evidence": {
+        "test_id": "UAI.DeliveryWorkflow.T59.WORLD.COMMAND.MIGRATION",
+        "public_command_ids": [
+          "editor.session",
+          "operation.resume",
+          "operation.status",
+          "world.streaming_relation.create"
+        ],
+        "architecture_contract_ids": [
+          "DES-UAI-WORLD-LIFECYCLE-ROUTING",
+          "DES-UAI-OPERATION-LIFECYCLE"
+        ],
+        "required_claims": [
+          "public_to_real_ue",
+          "persistence",
+          "independent_readback",
+          "historical_semantics_covered",
+          "old_public_ids_absent",
+          "cleanup_confirmed"
+        ]
+      },
+      "old_id_exit": {
+        "public_executable": false,
+        "manifest_active": false,
+        "sdk_binding_active": false,
+        "compatibility_alias": false
+      },
+      "final_lifecycle": "deprecated_replaced"
+    },
+    {
+      "historical_command_id": "level_streaming_save",
+      "approval": "2)",
+      "historical_source": "docs/commands/25_LevelTopology_Streaming_WorldPartition_DataLayer_HLOD.md",
+      "historical_contract": {
+        "inputs": "all, level_package",
+        "outputs": "saved_count, saved_packages[]",
+        "purpose": "保存一个或全部 streaming level package"
+      },
+      "resolved_from_contract_id": "uai.historical_capability.t59.world.command.migration.level_streaming_save/1",
+      "successor": {
+        "kind": "architecture_contract",
+        "contract_id": "DES-UAI-STREAMING-PERSIST-STAGE",
+        "representative_command_ids": [
+          "world.streaming_relation.create",
+          "world.streaming_relation.state.update"
+        ]
+      },
+      "routing": {
+        "policy": "operation_persist_stage"
+      },
+      "semantic_coverage": {
+        "purpose": {
+          "status": "covered",
+          "by": [
+            "DES-UAI-STREAMING-PERSIST-STAGE"
+          ],
+          "explanation": "冻结用途“保存一个或全部 streaming level package”由当前 successor 承接。保存不再是独立公共业务命令，而是每个 streaming relation 写操作进入成功终态前不可跳过的 persist 阶段。"
+        },
+        "inputs": {
+          "status": "covered",
+          "by": [
+            "DES-UAI-STREAMING-PERSIST-STAGE"
+          ],
+          "explanation": "冻结输入“all, level_package”由 routing.policy 精确映射到类型化参数或 policy 参数。保存不再是独立公共业务命令，而是每个 streaming relation 写操作进入成功终态前不可跳过的 persist 阶段。"
+        },
+        "outputs": {
+          "status": "covered",
+          "by": [
+            "DES-UAI-STREAMING-PERSIST-STAGE"
+          ],
+          "explanation": "冻结输出“saved_count, saved_packages[]”由真实 UE mechanics、公共 operation 或独立 Query 生成。保存不再是独立公共业务命令，而是每个 streaming relation 写操作进入成功终态前不可跳过的 persist 阶段。"
+        }
+      },
+      "product_evidence": {
+        "test_id": "UAI.DeliveryWorkflow.T59.WORLD.COMMAND.MIGRATION",
+        "public_command_ids": [
+          "world.streaming_relation.create",
+          "world.streaming_relation.state.update"
+        ],
+        "architecture_contract_ids": [
+          "DES-UAI-WORLD-LIFECYCLE-ROUTING",
+          "DES-UAI-OPERATION-LIFECYCLE"
+        ],
+        "required_claims": [
+          "public_to_real_ue",
+          "persistence",
+          "independent_readback",
+          "historical_semantics_covered",
+          "old_public_ids_absent",
+          "cleanup_confirmed"
+        ]
+      },
+      "old_id_exit": {
+        "public_executable": false,
+        "manifest_active": false,
+        "sdk_binding_active": false,
+        "compatibility_alias": false
+      },
+      "final_lifecycle": "deprecated_replaced"
+    },
+    {
+      "historical_command_id": "level_streaming_set_state",
+      "approval": "2)",
+      "historical_source": "docs/commands/25_LevelTopology_Streaming_WorldPartition_DataLayer_HLOD.md",
+      "historical_contract": {
+        "inputs": "current, level_package, loaded, transform, visible",
+        "outputs": "changed, loaded, should_be_loaded, should_be_visible, visible",
+        "purpose": "设置 streaming level 加载、可见、当前关卡和 transform"
+      },
+      "resolved_from_contract_id": "uai.historical_capability.t59.world.command.migration.level_streaming_set_state/1",
+      "successor": {
+        "kind": "exact_command_set",
+        "command_ids": [
+          "world.streaming_relation.state.update"
+        ]
+      },
+      "routing": {
+        "policy": "typed_streaming_relation_state_update"
+      },
+      "semantic_coverage": {
+        "purpose": {
+          "status": "covered",
+          "by": [
+            "world.streaming_relation.state.update"
+          ],
+          "explanation": "冻结用途“设置 streaming level 加载、可见、当前关卡和 transform”由当前 successor 承接。类型化 state mutation 精确承载 loaded、visible、current 与 transform，持久化后返回 should 与 observed 状态。"
+        },
+        "inputs": {
+          "status": "covered",
+          "by": [
+            "world.streaming_relation.state.update"
+          ],
+          "explanation": "冻结输入“current, level_package, loaded, transform, visible”由 routing.policy 精确映射到类型化参数或 policy 参数。类型化 state mutation 精确承载 loaded、visible、current 与 transform，持久化后返回 should 与 observed 状态。"
+        },
+        "outputs": {
+          "status": "covered",
+          "by": [
+            "world.streaming_relation.state.update"
+          ],
+          "explanation": "冻结输出“changed, loaded, should_be_loaded, should_be_visible, visible”由真实 UE mechanics、公共 operation 或独立 Query 生成。类型化 state mutation 精确承载 loaded、visible、current 与 transform，持久化后返回 should 与 observed 状态。"
+        }
+      },
+      "product_evidence": {
+        "test_id": "UAI.DeliveryWorkflow.T59.WORLD.COMMAND.MIGRATION",
+        "public_command_ids": [
+          "world.streaming_relation.state.update"
+        ],
+        "architecture_contract_ids": [
+          "DES-UAI-WORLD-LIFECYCLE-ROUTING",
+          "DES-UAI-OPERATION-LIFECYCLE"
+        ],
+        "required_claims": [
+          "public_to_real_ue",
+          "persistence",
+          "independent_readback",
+          "historical_semantics_covered",
+          "old_public_ids_absent",
+          "cleanup_confirmed"
+        ]
+      },
+      "old_id_exit": {
+        "public_executable": false,
+        "manifest_active": false,
+        "sdk_binding_active": false,
+        "compatibility_alias": false
+      },
+      "final_lifecycle": "deprecated_replaced"
+    },
+    {
+      "historical_command_id": "level_streaming_validate",
+      "approval": "2)",
+      "historical_source": "docs/commands/25_LevelTopology_Streaming_WorldPartition_DataLayer_HLOD.md",
+      "historical_contract": {
+        "inputs": "actor_ids, expected_loaded, expected_visible, level_package",
+        "outputs": "issues[], status",
+        "purpose": "校验子关卡存在、加载/可见状态、Actor 所属关卡"
+      },
+      "resolved_from_contract_id": "uai.historical_capability.t59.world.command.migration.level_streaming_validate/1",
+      "successor": {
+        "kind": "exact_command_set",
+        "command_ids": [
+          "world.streaming_levels"
+        ]
+      },
+      "routing": {
+        "policy": "read_only_streaming_levels_query"
+      },
+      "semantic_coverage": {
+        "purpose": {
+          "status": "covered",
+          "by": [
+            "world.streaming_levels"
+          ],
+          "explanation": "冻结用途“校验子关卡存在、加载/可见状态、Actor 所属关卡”由当前 successor 承接。公共 Query 返回子关卡身份、加载、可见、transform 与 Actor 所属关系，调用方以冻结期望执行无副作用校验。"
+        },
+        "inputs": {
+          "status": "covered",
+          "by": [
+            "world.streaming_levels"
+          ],
+          "explanation": "冻结输入“actor_ids, expected_loaded, expected_visible, level_package”由 routing.policy 精确映射到类型化参数或 policy 参数。公共 Query 返回子关卡身份、加载、可见、transform 与 Actor 所属关系，调用方以冻结期望执行无副作用校验。"
+        },
+        "outputs": {
+          "status": "covered",
+          "by": [
+            "world.streaming_levels"
+          ],
+          "explanation": "冻结输出“issues[], status”由真实 UE mechanics、公共 operation 或独立 Query 生成。公共 Query 返回子关卡身份、加载、可见、transform 与 Actor 所属关系，调用方以冻结期望执行无副作用校验。"
+        }
+      },
+      "product_evidence": {
+        "test_id": "UAI.DeliveryWorkflow.T59.WORLD.COMMAND.MIGRATION",
+        "public_command_ids": [
+          "world.streaming_levels"
+        ],
+        "architecture_contract_ids": [
+          "DES-UAI-WORLD-LIFECYCLE-ROUTING",
+          "DES-UAI-OPERATION-LIFECYCLE"
+        ],
+        "required_claims": [
+          "public_to_real_ue",
+          "persistence",
+          "independent_readback",
+          "historical_semantics_covered",
+          "old_public_ids_absent",
+          "cleanup_confirmed"
+        ]
+      },
+      "old_id_exit": {
+        "public_executable": false,
+        "manifest_active": false,
+        "sdk_binding_active": false,
+        "compatibility_alias": false
+      },
+      "final_lifecycle": "deprecated_replaced"
+    },
+    {
+      "historical_command_id": "navmesh_build",
+      "approval": "1)",
+      "historical_source": "docs/commands/01_Core_Level_Assets_Landscape.md",
+      "historical_contract": {
+        "inputs": "timeout_seconds, wait_for_finish",
+        "outputs": "白盒验收前生成可查询导航数据",
+        "purpose": "构建/刷新 NavMesh"
+      },
+      "resolved_from_contract_id": "uai.historical_capability.t59.world.command.migration.navmesh_build/1",
+      "successor": {
+        "kind": "exact_command_set",
+        "command_ids": [
+          "job.compile_build",
+          "operation.resume",
+          "operation.status"
+        ]
+      },
+      "routing": {
+        "policy": "policy:world-build:navigation/v1"
+      },
+      "semantic_coverage": {
+        "purpose": {
+          "status": "covered",
+          "by": [
+            "job.compile_build",
+            "operation.resume",
+            "operation.status"
+          ],
+          "explanation": "冻结用途“构建/刷新 NavMesh”由当前 successor 承接。公共 world_build job 在游戏线程触发真实导航构建，等待完成并通过公共 operation 暴露进度、超时和终态。"
+        },
+        "inputs": {
+          "status": "covered",
+          "by": [
+            "job.compile_build",
+            "operation.resume",
+            "operation.status"
+          ],
+          "explanation": "冻结输入“timeout_seconds, wait_for_finish”由 routing.policy 精确映射到类型化参数或 policy 参数。公共 world_build job 在游戏线程触发真实导航构建，等待完成并通过公共 operation 暴露进度、超时和终态。"
+        },
+        "outputs": {
+          "status": "covered",
+          "by": [
+            "job.compile_build",
+            "operation.resume",
+            "operation.status"
+          ],
+          "explanation": "冻结输出“白盒验收前生成可查询导航数据”由真实 UE mechanics、公共 operation 或独立 Query 生成。公共 world_build job 在游戏线程触发真实导航构建，等待完成并通过公共 operation 暴露进度、超时和终态。"
+        }
+      },
+      "product_evidence": {
+        "test_id": "UAI.DeliveryWorkflow.T59.WORLD.COMMAND.MIGRATION",
+        "public_command_ids": [
+          "job.compile_build",
+          "operation.resume",
+          "operation.status"
+        ],
+        "architecture_contract_ids": [
+          "DES-UAI-WORLD-LIFECYCLE-ROUTING",
+          "DES-UAI-OPERATION-LIFECYCLE"
+        ],
+        "required_claims": [
+          "public_to_real_ue",
+          "persistence",
+          "independent_readback",
+          "historical_semantics_covered",
+          "old_public_ids_absent",
+          "cleanup_confirmed"
+        ]
+      },
+      "old_id_exit": {
+        "public_executable": false,
+        "manifest_active": false,
+        "sdk_binding_active": false,
+        "compatibility_alias": false
+      },
+      "final_lifecycle": "deprecated_replaced"
+    },
+    {
+      "historical_command_id": "world_partition_check_errors",
+      "approval": "1)",
+      "historical_source": "docs/commands/25_LevelTopology_Streaming_WorldPartition_DataLayer_HLOD.md",
+      "historical_contract": {
+        "inputs": "无文档参数；使用 **params 传入 UAI 参数。",
+        "outputs": "issue_count, issues[]",
+        "purpose": "调用 World Partition 错误检查"
+      },
+      "resolved_from_contract_id": "uai.historical_capability.t59.world.command.migration.world_partition_check_errors/1",
+      "successor": {
+        "kind": "exact_command_set",
+        "command_ids": [
+          "world.partition_health"
+        ]
+      },
+      "routing": {
+        "policy": "read_only_world_partition_health_query"
+      },
+      "semantic_coverage": {
+        "purpose": {
+          "status": "covered",
+          "by": [
+            "world.partition_health"
+          ],
+          "explanation": "冻结用途“调用 World Partition 错误检查”由当前 successor 承接。无副作用 Query 调用 UWorldPartition::CheckForErrors，并返回 health_status、error_count 与逐项 issue。"
+        },
+        "inputs": {
+          "status": "covered",
+          "by": [
+            "world.partition_health"
+          ],
+          "explanation": "冻结输入“无文档参数；使用 **params 传入 UAI 参数。”由 routing.policy 精确映射到类型化参数或 policy 参数。无副作用 Query 调用 UWorldPartition::CheckForErrors，并返回 health_status、error_count 与逐项 issue。"
+        },
+        "outputs": {
+          "status": "covered",
+          "by": [
+            "world.partition_health"
+          ],
+          "explanation": "冻结输出“issue_count, issues[]”由真实 UE mechanics、公共 operation 或独立 Query 生成。无副作用 Query 调用 UWorldPartition::CheckForErrors，并返回 health_status、error_count 与逐项 issue。"
+        }
+      },
+      "product_evidence": {
+        "test_id": "UAI.DeliveryWorkflow.T59.WORLD.COMMAND.MIGRATION",
+        "public_command_ids": [
+          "world.partition_health"
+        ],
+        "architecture_contract_ids": [
+          "DES-UAI-WORLD-LIFECYCLE-ROUTING",
+          "DES-UAI-OPERATION-LIFECYCLE"
+        ],
+        "required_claims": [
+          "public_to_real_ue",
+          "persistence",
+          "independent_readback",
+          "historical_semantics_covered",
+          "old_public_ids_absent",
+          "cleanup_confirmed"
+        ]
+      },
+      "old_id_exit": {
+        "public_executable": false,
+        "manifest_active": false,
+        "sdk_binding_active": false,
+        "compatibility_alias": false
+      },
+      "final_lifecycle": "deprecated_replaced"
+    },
+    {
+      "historical_command_id": "world_partition_generate_streaming",
+      "approval": "1)",
+      "historical_source": "docs/commands/25_LevelTopology_Streaming_WorldPartition_DataLayer_HLOD.md",
+      "historical_contract": {
+        "inputs": "allow_commandlet, execute, timeout_seconds",
+        "outputs": "commandlet_plan, exit_code, status",
+        "purpose": "生成 streaming 数据，默认只返回计划"
+      },
+      "resolved_from_contract_id": "uai.historical_capability.t59.world.command.migration.world_partition_generate_streaming/1",
+      "successor": {
+        "kind": "exact_command_set",
+        "command_ids": [
+          "job.compile_build",
+          "operation.resume",
+          "operation.status"
+        ]
+      },
+      "routing": {
+        "policy": "policy:world-build:partition-streaming-plan/v1|policy:world-build:partition-streaming-run/v1"
+      },
+      "semantic_coverage": {
+        "purpose": {
+          "status": "covered",
+          "by": [
+            "job.compile_build",
+            "operation.resume",
+            "operation.status"
+          ],
+          "explanation": "冻结用途“生成 streaming 数据，默认只返回计划”由当前 successor 承接。默认 plan 只生成确定性 commandlet 计划；显式 execute 与 allow_commandlet 后由 owned UnrealEditor-Cmd 执行并记录进程返回码。"
+        },
+        "inputs": {
+          "status": "covered",
+          "by": [
+            "job.compile_build",
+            "operation.resume",
+            "operation.status"
+          ],
+          "explanation": "冻结输入“allow_commandlet, execute, timeout_seconds”由 routing.policy 精确映射到类型化参数或 policy 参数。默认 plan 只生成确定性 commandlet 计划；显式 execute 与 allow_commandlet 后由 owned UnrealEditor-Cmd 执行并记录进程返回码。"
+        },
+        "outputs": {
+          "status": "covered",
+          "by": [
+            "job.compile_build",
+            "operation.resume",
+            "operation.status"
+          ],
+          "explanation": "冻结输出“commandlet_plan, exit_code, status”由真实 UE mechanics、公共 operation 或独立 Query 生成。默认 plan 只生成确定性 commandlet 计划；显式 execute 与 allow_commandlet 后由 owned UnrealEditor-Cmd 执行并记录进程返回码。"
+        }
+      },
+      "product_evidence": {
+        "test_id": "UAI.DeliveryWorkflow.T59.WORLD.COMMAND.MIGRATION",
+        "public_command_ids": [
+          "job.compile_build",
+          "operation.resume",
+          "operation.status"
+        ],
+        "architecture_contract_ids": [
+          "DES-UAI-WORLD-LIFECYCLE-ROUTING",
+          "DES-UAI-OPERATION-LIFECYCLE"
+        ],
+        "required_claims": [
+          "public_to_real_ue",
+          "persistence",
+          "independent_readback",
+          "historical_semantics_covered",
+          "old_public_ids_absent",
+          "cleanup_confirmed"
+        ]
+      },
+      "old_id_exit": {
+        "public_executable": false,
+        "manifest_active": false,
+        "sdk_binding_active": false,
+        "compatibility_alias": false
+      },
+      "final_lifecycle": "deprecated_replaced"
+    },
+    {
+      "historical_command_id": "world_partition_list_loaded_regions",
+      "approval": "1)",
+      "historical_source": "docs/commands/25_LevelTopology_Streaming_WorldPartition_DataLayer_HLOD.md",
+      "historical_contract": {
+        "inputs": "无文档参数；使用 **params 传入 UAI 参数。",
+        "outputs": "uai_loaders[], user_loaded_regions[]",
+        "purpose": "列出 UAI loader 和 UE user loaded regions"
+      },
+      "resolved_from_contract_id": "uai.historical_capability.t59.world.command.migration.world_partition_list_loaded_regions/1",
+      "successor": {
+        "kind": "exact_command_set",
+        "command_ids": [
+          "world.partition",
+          "operation.status"
+        ]
+      },
+      "routing": {
+        "policy": "partition_query_plus_owned_session_status"
+      },
+      "semantic_coverage": {
+        "purpose": {
+          "status": "covered",
+          "by": [
+            "world.partition",
+            "operation.status"
+          ],
+          "explanation": "冻结用途“列出 UAI loader 和 UE user loaded regions”由当前 successor 承接。World Partition Query 返回 UE user loaded region 观测；UAI loader 由调用方持有的 operation_ref 通过公共 status 逐一查询。"
+        },
+        "inputs": {
+          "status": "covered",
+          "by": [
+            "world.partition",
+            "operation.status"
+          ],
+          "explanation": "冻结输入“无文档参数；使用 **params 传入 UAI 参数。”由 routing.policy 精确映射到类型化参数或 policy 参数。World Partition Query 返回 UE user loaded region 观测；UAI loader 由调用方持有的 operation_ref 通过公共 status 逐一查询。"
+        },
+        "outputs": {
+          "status": "covered",
+          "by": [
+            "world.partition",
+            "operation.status"
+          ],
+          "explanation": "冻结输出“uai_loaders[], user_loaded_regions[]”由真实 UE mechanics、公共 operation 或独立 Query 生成。World Partition Query 返回 UE user loaded region 观测；UAI loader 由调用方持有的 operation_ref 通过公共 status 逐一查询。"
+        }
+      },
+      "product_evidence": {
+        "test_id": "UAI.DeliveryWorkflow.T59.WORLD.COMMAND.MIGRATION",
+        "public_command_ids": [
+          "world.partition",
+          "operation.status"
+        ],
+        "architecture_contract_ids": [
+          "DES-UAI-WORLD-LIFECYCLE-ROUTING",
+          "DES-UAI-OPERATION-LIFECYCLE"
+        ],
+        "required_claims": [
+          "public_to_real_ue",
+          "persistence",
+          "independent_readback",
+          "historical_semantics_covered",
+          "old_public_ids_absent",
+          "cleanup_confirmed"
+        ]
+      },
+      "old_id_exit": {
+        "public_executable": false,
+        "manifest_active": false,
+        "sdk_binding_active": false,
+        "compatibility_alias": false
+      },
+      "final_lifecycle": "deprecated_replaced"
+    },
+    {
+      "historical_command_id": "world_partition_load_actors",
+      "approval": "1)",
+      "historical_source": "docs/commands/25_LevelTopology_Streaming_WorldPartition_DataLayer_HLOD.md",
+      "historical_contract": {
+        "inputs": "actor_guids[], actor_ids[], dry_run",
+        "outputs": "actor_guid_count, loaded, loader_id",
+        "purpose": "通过 Actor GUID 或已加载 Actor 选择创建 actor list loader"
+      },
+      "resolved_from_contract_id": "uai.historical_capability.t59.world.command.migration.world_partition_load_actors/1",
+      "successor": {
+        "kind": "exact_command_set",
+        "command_ids": [
+          "editor.session",
+          "operation.resume",
+          "operation.status"
+        ]
+      },
+      "routing": {
+        "policy": "policy:world-context:partition-actor-loader/v1"
+      },
+      "semantic_coverage": {
+        "purpose": {
+          "status": "covered",
+          "by": [
+            "editor.session",
+            "operation.resume",
+            "operation.status"
+          ],
+          "explanation": "冻结用途“通过 Actor GUID 或已加载 Actor 选择创建 actor list loader”由当前 successor 承接。RecoverableSession 使用 FLoaderAdapterActorList 按精确 Actor GUID 集合加载，operation_ref 是唯一 loader 生命周期身份。"
+        },
+        "inputs": {
+          "status": "covered",
+          "by": [
+            "editor.session",
+            "operation.resume",
+            "operation.status"
+          ],
+          "explanation": "冻结输入“actor_guids[], actor_ids[], dry_run”由 routing.policy 精确映射到类型化参数或 policy 参数。RecoverableSession 使用 FLoaderAdapterActorList 按精确 Actor GUID 集合加载，operation_ref 是唯一 loader 生命周期身份。"
+        },
+        "outputs": {
+          "status": "covered",
+          "by": [
+            "editor.session",
+            "operation.resume",
+            "operation.status"
+          ],
+          "explanation": "冻结输出“actor_guid_count, loaded, loader_id”由真实 UE mechanics、公共 operation 或独立 Query 生成。RecoverableSession 使用 FLoaderAdapterActorList 按精确 Actor GUID 集合加载，operation_ref 是唯一 loader 生命周期身份。"
+        }
+      },
+      "product_evidence": {
+        "test_id": "UAI.DeliveryWorkflow.T59.WORLD.COMMAND.MIGRATION",
+        "public_command_ids": [
+          "editor.session",
+          "operation.resume",
+          "operation.status"
+        ],
+        "architecture_contract_ids": [
+          "DES-UAI-WORLD-LIFECYCLE-ROUTING",
+          "DES-UAI-OPERATION-LIFECYCLE"
+        ],
+        "required_claims": [
+          "public_to_real_ue",
+          "persistence",
+          "independent_readback",
+          "historical_semantics_covered",
+          "old_public_ids_absent",
+          "cleanup_confirmed"
+        ]
+      },
+      "old_id_exit": {
+        "public_executable": false,
+        "manifest_active": false,
+        "sdk_binding_active": false,
+        "compatibility_alias": false
+      },
+      "final_lifecycle": "deprecated_replaced"
+    },
+    {
+      "historical_command_id": "world_partition_load_region",
+      "approval": "1)",
+      "historical_source": "docs/commands/25_LevelTopology_Streaming_WorldPartition_DataLayer_HLOD.md",
+      "historical_contract": {
+        "inputs": "bounds.center+extent, bounds.min+max, dry_run, label",
+        "outputs": "loaded, loader_id, status",
+        "purpose": "通过 bounds 创建并加载 UAI 管理的 region loader"
+      },
+      "resolved_from_contract_id": "uai.historical_capability.t59.world.command.migration.world_partition_load_region/1",
+      "successor": {
+        "kind": "exact_command_set",
+        "command_ids": [
+          "editor.session",
+          "operation.resume",
+          "operation.status"
+        ]
+      },
+      "routing": {
+        "policy": "policy:world-context:partition-region-loader/v1"
+      },
+      "semantic_coverage": {
+        "purpose": {
+          "status": "covered",
+          "by": [
+            "editor.session",
+            "operation.resume",
+            "operation.status"
+          ],
+          "explanation": "冻结用途“通过 bounds 创建并加载 UAI 管理的 region loader”由当前 successor 承接。RecoverableSession 使用 FLoaderAdapterShape 按 center+extent 或 min+max 建立有界 loader，operation_ref 是唯一生命周期身份。"
+        },
+        "inputs": {
+          "status": "covered",
+          "by": [
+            "editor.session",
+            "operation.resume",
+            "operation.status"
+          ],
+          "explanation": "冻结输入“bounds.center+extent, bounds.min+max, dry_run, label”由 routing.policy 精确映射到类型化参数或 policy 参数。RecoverableSession 使用 FLoaderAdapterShape 按 center+extent 或 min+max 建立有界 loader，operation_ref 是唯一生命周期身份。"
+        },
+        "outputs": {
+          "status": "covered",
+          "by": [
+            "editor.session",
+            "operation.resume",
+            "operation.status"
+          ],
+          "explanation": "冻结输出“loaded, loader_id, status”由真实 UE mechanics、公共 operation 或独立 Query 生成。RecoverableSession 使用 FLoaderAdapterShape 按 center+extent 或 min+max 建立有界 loader，operation_ref 是唯一生命周期身份。"
+        }
+      },
+      "product_evidence": {
+        "test_id": "UAI.DeliveryWorkflow.T59.WORLD.COMMAND.MIGRATION",
+        "public_command_ids": [
+          "editor.session",
+          "operation.resume",
+          "operation.status"
+        ],
+        "architecture_contract_ids": [
+          "DES-UAI-WORLD-LIFECYCLE-ROUTING",
+          "DES-UAI-OPERATION-LIFECYCLE"
+        ],
+        "required_claims": [
+          "public_to_real_ue",
+          "persistence",
+          "independent_readback",
+          "historical_semantics_covered",
+          "old_public_ids_absent",
+          "cleanup_confirmed"
+        ]
+      },
+      "old_id_exit": {
+        "public_executable": false,
+        "manifest_active": false,
+        "sdk_binding_active": false,
+        "compatibility_alias": false
+      },
+      "final_lifecycle": "deprecated_replaced"
+    },
+    {
+      "historical_command_id": "world_partition_query",
+      "approval": "1)",
+      "historical_source": "docs/commands/25_LevelTopology_Streaming_WorldPartition_DataLayer_HLOD.md",
+      "historical_contract": {
+        "inputs": "无文档参数；使用 **params 传入 UAI 参数。",
+        "outputs": "available, streaming_enabled, world_path",
+        "purpose": "查询当前 World Partition 状态"
+      },
+      "resolved_from_contract_id": "uai.historical_capability.t59.world.command.migration.world_partition_query/1",
+      "successor": {
+        "kind": "exact_command_set",
+        "command_ids": [
+          "world.partition"
+        ]
+      },
+      "routing": {
+        "policy": "read_only_world_partition_query"
+      },
+      "semantic_coverage": {
+        "purpose": {
+          "status": "covered",
+          "by": [
+            "world.partition"
+          ],
+          "explanation": "冻结用途“查询当前 World Partition 状态”由当前 successor 承接。无副作用 Query 返回 partition_enabled、streaming_enabled、world identity 与 user loaded region 观测。"
+        },
+        "inputs": {
+          "status": "covered",
+          "by": [
+            "world.partition"
+          ],
+          "explanation": "冻结输入“无文档参数；使用 **params 传入 UAI 参数。”由 routing.policy 精确映射到类型化参数或 policy 参数。无副作用 Query 返回 partition_enabled、streaming_enabled、world identity 与 user loaded region 观测。"
+        },
+        "outputs": {
+          "status": "covered",
+          "by": [
+            "world.partition"
+          ],
+          "explanation": "冻结输出“available, streaming_enabled, world_path”由真实 UE mechanics、公共 operation 或独立 Query 生成。无副作用 Query 返回 partition_enabled、streaming_enabled、world identity 与 user loaded region 观测。"
+        }
+      },
+      "product_evidence": {
+        "test_id": "UAI.DeliveryWorkflow.T59.WORLD.COMMAND.MIGRATION",
+        "public_command_ids": [
+          "world.partition"
+        ],
+        "architecture_contract_ids": [
+          "DES-UAI-WORLD-LIFECYCLE-ROUTING",
+          "DES-UAI-OPERATION-LIFECYCLE"
+        ],
+        "required_claims": [
+          "public_to_real_ue",
+          "persistence",
+          "independent_readback",
+          "historical_semantics_covered",
+          "old_public_ids_absent",
+          "cleanup_confirmed"
+        ]
+      },
+      "old_id_exit": {
+        "public_executable": false,
+        "manifest_active": false,
+        "sdk_binding_active": false,
+        "compatibility_alias": false
+      },
+      "final_lifecycle": "deprecated_replaced"
+    },
+    {
+      "historical_command_id": "world_partition_resave_actors",
+      "approval": "1)",
+      "historical_source": "docs/commands/25_LevelTopology_Streaming_WorldPartition_DataLayer_HLOD.md",
+      "historical_contract": {
+        "inputs": "actor_guids[], allow_commandlet, execute, timeout_seconds",
+        "outputs": "commandlet_plan, status",
+        "purpose": "运行 resave actors commandlet，默认只返回计划"
+      },
+      "resolved_from_contract_id": "uai.historical_capability.t59.world.command.migration.world_partition_resave_actors/1",
+      "successor": {
+        "kind": "exact_command_set",
+        "command_ids": [
+          "job.compile_build",
+          "operation.resume",
+          "operation.status"
+        ]
+      },
+      "routing": {
+        "policy": "policy:world-partition-resave:actors-plan/v1|policy:world-partition-resave:actors-run/v1"
+      },
+      "semantic_coverage": {
+        "purpose": {
+          "status": "covered",
+          "by": [
+            "job.compile_build",
+            "operation.resume",
+            "operation.status"
+          ],
+          "explanation": "冻结用途“运行 resave actors commandlet，默认只返回计划”由当前 successor 承接。默认 plan 固定 Actor GUID 范围；显式授权 execute 后由 owned Actor-GUID builder commandlet 执行，并以公共 operation 报告日志、返回码和终态。"
+        },
+        "inputs": {
+          "status": "covered",
+          "by": [
+            "job.compile_build",
+            "operation.resume",
+            "operation.status"
+          ],
+          "explanation": "冻结输入“actor_guids[], allow_commandlet, execute, timeout_seconds”由 routing.policy 精确映射到类型化参数或 policy 参数。默认 plan 固定 Actor GUID 范围；显式授权 execute 后由 owned Actor-GUID builder commandlet 执行，并以公共 operation 报告日志、返回码和终态。"
+        },
+        "outputs": {
+          "status": "covered",
+          "by": [
+            "job.compile_build",
+            "operation.resume",
+            "operation.status"
+          ],
+          "explanation": "冻结输出“commandlet_plan, status”由真实 UE mechanics、公共 operation 或独立 Query 生成。默认 plan 固定 Actor GUID 范围；显式授权 execute 后由 owned Actor-GUID builder commandlet 执行，并以公共 operation 报告日志、返回码和终态。"
+        }
+      },
+      "product_evidence": {
+        "test_id": "UAI.DeliveryWorkflow.T59.WORLD.COMMAND.MIGRATION",
+        "public_command_ids": [
+          "job.compile_build",
+          "operation.resume",
+          "operation.status"
+        ],
+        "architecture_contract_ids": [
+          "DES-UAI-WORLD-LIFECYCLE-ROUTING",
+          "DES-UAI-OPERATION-LIFECYCLE"
+        ],
+        "required_claims": [
+          "public_to_real_ue",
+          "persistence",
+          "independent_readback",
+          "historical_semantics_covered",
+          "old_public_ids_absent",
+          "cleanup_confirmed"
+        ]
+      },
+      "old_id_exit": {
+        "public_executable": false,
+        "manifest_active": false,
+        "sdk_binding_active": false,
+        "compatibility_alias": false
+      },
+      "final_lifecycle": "deprecated_replaced"
+    },
+    {
+      "historical_command_id": "world_partition_set_streaming_enabled",
+      "approval": "2)",
+      "historical_source": "docs/commands/25_LevelTopology_Streaming_WorldPartition_DataLayer_HLOD.md",
+      "historical_contract": {
+        "inputs": "enabled, transaction",
+        "outputs": "streaming_enabled",
+        "purpose": "修改 World Partition streaming 开关"
+      },
+      "resolved_from_contract_id": "uai.historical_capability.t59.world.command.migration.world_partition_set_streaming_enabled/1",
+      "successor": {
+        "kind": "exact_command_set",
+        "command_ids": [
+          "world.world_partition_streaming.update"
+        ]
+      },
+      "routing": {
+        "policy": "typed_world_partition_streaming_mutation"
+      },
+      "semantic_coverage": {
+        "purpose": {
+          "status": "covered",
+          "by": [
+            "world.world_partition_streaming.update"
+          ],
+          "explanation": "冻结用途“修改 World Partition streaming 开关”由当前 successor 承接。类型化 mutation 修改 World Partition streaming 开关，进入 persist 与独立 Query readback 后才成功。"
+        },
+        "inputs": {
+          "status": "covered",
+          "by": [
+            "world.world_partition_streaming.update"
+          ],
+          "explanation": "冻结输入“enabled, transaction”由 routing.policy 精确映射到类型化参数或 policy 参数。类型化 mutation 修改 World Partition streaming 开关，进入 persist 与独立 Query readback 后才成功。"
+        },
+        "outputs": {
+          "status": "covered",
+          "by": [
+            "world.world_partition_streaming.update"
+          ],
+          "explanation": "冻结输出“streaming_enabled”由真实 UE mechanics、公共 operation 或独立 Query 生成。类型化 mutation 修改 World Partition streaming 开关，进入 persist 与独立 Query readback 后才成功。"
+        }
+      },
+      "product_evidence": {
+        "test_id": "UAI.DeliveryWorkflow.T59.WORLD.COMMAND.MIGRATION",
+        "public_command_ids": [
+          "world.world_partition_streaming.update"
+        ],
+        "architecture_contract_ids": [
+          "DES-UAI-WORLD-LIFECYCLE-ROUTING",
+          "DES-UAI-OPERATION-LIFECYCLE"
+        ],
+        "required_claims": [
+          "public_to_real_ue",
+          "persistence",
+          "independent_readback",
+          "historical_semantics_covered",
+          "old_public_ids_absent",
+          "cleanup_confirmed"
+        ]
+      },
+      "old_id_exit": {
+        "public_executable": false,
+        "manifest_active": false,
+        "sdk_binding_active": false,
+        "compatibility_alias": false
+      },
+      "final_lifecycle": "deprecated_replaced"
+    },
+    {
+      "historical_command_id": "world_partition_unload_actors",
+      "approval": "1)",
+      "historical_source": "docs/commands/25_LevelTopology_Streaming_WorldPartition_DataLayer_HLOD.md",
+      "historical_contract": {
+        "inputs": "loader_id",
+        "outputs": "unloaded",
+        "purpose": "卸载 actor list loader"
+      },
+      "resolved_from_contract_id": "uai.historical_capability.t59.world.command.migration.world_partition_unload_actors/1",
+      "successor": {
+        "kind": "exact_command_set",
+        "command_ids": [
+          "operation.cancel",
+          "operation.status",
+          "operation.release"
+        ]
+      },
+      "routing": {
+        "policy": "owned_loader_cancel_then_release"
+      },
+      "semantic_coverage": {
+        "purpose": {
+          "status": "covered",
+          "by": [
+            "operation.cancel",
+            "operation.status",
+            "operation.release"
+          ],
+          "explanation": "冻结用途“卸载 actor list loader”由当前 successor 承接。actor loader 以 operation_ref 取消，取消阶段调用真实 loader Unload；终态可观察后显式 release 移除会话状态。"
+        },
+        "inputs": {
+          "status": "covered",
+          "by": [
+            "operation.cancel",
+            "operation.status",
+            "operation.release"
+          ],
+          "explanation": "冻结输入“loader_id”由 routing.policy 精确映射到类型化参数或 policy 参数。actor loader 以 operation_ref 取消，取消阶段调用真实 loader Unload；终态可观察后显式 release 移除会话状态。"
+        },
+        "outputs": {
+          "status": "covered",
+          "by": [
+            "operation.cancel",
+            "operation.status",
+            "operation.release"
+          ],
+          "explanation": "冻结输出“unloaded”由真实 UE mechanics、公共 operation 或独立 Query 生成。actor loader 以 operation_ref 取消，取消阶段调用真实 loader Unload；终态可观察后显式 release 移除会话状态。"
+        }
+      },
+      "product_evidence": {
+        "test_id": "UAI.DeliveryWorkflow.T59.WORLD.COMMAND.MIGRATION",
+        "public_command_ids": [
+          "operation.cancel",
+          "operation.status",
+          "operation.release"
+        ],
+        "architecture_contract_ids": [
+          "DES-UAI-WORLD-LIFECYCLE-ROUTING",
+          "DES-UAI-OPERATION-LIFECYCLE"
+        ],
+        "required_claims": [
+          "public_to_real_ue",
+          "persistence",
+          "independent_readback",
+          "historical_semantics_covered",
+          "old_public_ids_absent",
+          "cleanup_confirmed"
+        ]
+      },
+      "old_id_exit": {
+        "public_executable": false,
+        "manifest_active": false,
+        "sdk_binding_active": false,
+        "compatibility_alias": false
+      },
+      "final_lifecycle": "deprecated_replaced"
+    },
+    {
+      "historical_command_id": "world_partition_unload_region",
+      "approval": "1)",
+      "historical_source": "docs/commands/25_LevelTopology_Streaming_WorldPartition_DataLayer_HLOD.md",
+      "historical_contract": {
+        "inputs": "loader_id",
+        "outputs": "unloaded",
+        "purpose": "卸载并移除 UAI 管理的 region loader"
+      },
+      "resolved_from_contract_id": "uai.historical_capability.t59.world.command.migration.world_partition_unload_region/1",
+      "successor": {
+        "kind": "exact_command_set",
+        "command_ids": [
+          "operation.cancel",
+          "operation.status",
+          "operation.release"
+        ]
+      },
+      "routing": {
+        "policy": "owned_loader_cancel_then_release"
+      },
+      "semantic_coverage": {
+        "purpose": {
+          "status": "covered",
+          "by": [
+            "operation.cancel",
+            "operation.status",
+            "operation.release"
+          ],
+          "explanation": "冻结用途“卸载并移除 UAI 管理的 region loader”由当前 successor 承接。region loader 以 operation_ref 取消，取消阶段调用真实 loader Unload；终态可观察后显式 release 移除会话状态。"
+        },
+        "inputs": {
+          "status": "covered",
+          "by": [
+            "operation.cancel",
+            "operation.status",
+            "operation.release"
+          ],
+          "explanation": "冻结输入“loader_id”由 routing.policy 精确映射到类型化参数或 policy 参数。region loader 以 operation_ref 取消，取消阶段调用真实 loader Unload；终态可观察后显式 release 移除会话状态。"
+        },
+        "outputs": {
+          "status": "covered",
+          "by": [
+            "operation.cancel",
+            "operation.status",
+            "operation.release"
+          ],
+          "explanation": "冻结输出“unloaded”由真实 UE mechanics、公共 operation 或独立 Query 生成。region loader 以 operation_ref 取消，取消阶段调用真实 loader Unload；终态可观察后显式 release 移除会话状态。"
+        }
+      },
+      "product_evidence": {
+        "test_id": "UAI.DeliveryWorkflow.T59.WORLD.COMMAND.MIGRATION",
+        "public_command_ids": [
+          "operation.cancel",
+          "operation.status",
+          "operation.release"
+        ],
+        "architecture_contract_ids": [
+          "DES-UAI-WORLD-LIFECYCLE-ROUTING",
+          "DES-UAI-OPERATION-LIFECYCLE"
+        ],
+        "required_claims": [
+          "public_to_real_ue",
+          "persistence",
+          "independent_readback",
+          "historical_semantics_covered",
+          "old_public_ids_absent",
+          "cleanup_confirmed"
+        ]
+      },
+      "old_id_exit": {
+        "public_executable": false,
+        "manifest_active": false,
+        "sdk_binding_active": false,
+        "compatibility_alias": false
+      },
+      "final_lifecycle": "deprecated_replaced"
+    }
+  ]
+}

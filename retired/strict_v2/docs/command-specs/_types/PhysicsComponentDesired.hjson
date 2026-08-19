@@ -1,0 +1,17 @@
+definition: {
+  additional_fields: false
+  fields: {
+    angular_damping: { default_state: none, description_zh: "角阻尼", minimum: 0, required: false, type: number }
+    collision_enabled: { default_state: none, description_zh: "碰撞启用模式", required: false, type: string }
+    collision_profile_name: { default_state: none, description_zh: "碰撞 profile", required: false, type: string }
+    enable_gravity: { default_state: none, description_zh: "期望启用重力", required: false, type: bool }
+    linear_damping: { default_state: none, description_zh: "线性阻尼", minimum: 0, required: false, type: number }
+    mass_override_kg: { default_state: none, description_zh: "质量覆盖（kg）", minimum: 0, required: false, type: number }
+    simulate_physics: { default_state: none, description_zh: "期望启用物理模拟", required: false, type: bool }
+    use_ccd: { default_state: none, description_zh: "期望启用 CCD", required: false, type: bool }
+  }
+  kind: object
+}
+schema: uai.command_spec.shared_type.v1
+type_id: PhysicsComponentDesired
+version: 1

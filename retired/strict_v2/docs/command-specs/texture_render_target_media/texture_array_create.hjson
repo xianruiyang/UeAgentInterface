@@ -1,0 +1,112 @@
+authoring: { reason: command_has_no_registered_folder_authoring_profile, state: none }
+category: texture_render_target_media
+command: texture_array_create
+deprecation: { reason: command_is_active, state: none }
+discovery: { aliases: [], keywords_en: [texture, array, create, texture_render_target_media], keywords_zh: [texture_array_create], summary_en: "Execute texture_array_create with a verified implementation contract", summary_zh: "从 Texture2D 列表创建、导出、回写 Texture2DArray。", tags: [texture_render_target_media, p2-004] }
+errors: {
+  codes: [
+    { code: asset_already_exists, description_zh: "C++ 实现返回错误码 asset_already_exists", retry_safe: false, stage: execution, wire_match: exact }
+    { code: asset_class_is_abstract, description_zh: "C++ 实现返回错误码 asset_class_is_abstract", retry_safe: false, stage: execution, wire_match: exact }
+    { code: asset_class_not_found, description_zh: "C++ 实现返回错误码 asset_class_not_found", retry_safe: false, stage: execution, wire_match: exact }
+    { code: create_asset_failed, description_zh: "C++ 实现返回错误码 create_asset_failed", retry_safe: false, stage: execution, wire_match: exact }
+    { code: create_package_failed, description_zh: "C++ 实现返回错误码 create_package_failed", retry_safe: false, stage: execution, wire_match: exact }
+    { code: existing_asset_class_mismatch, description_zh: "C++ 实现返回错误码 existing_asset_class_mismatch", retry_safe: false, stage: execution, wire_match: exact }
+    { code: invalid_, description_zh: "C++ 实现返回错误码 invalid_", retry_safe: true, stage: preflight, wire_match: prefix }
+    { code: invalid_asset_path, description_zh: "C++ 实现返回错误码 invalid_asset_path", retry_safe: true, stage: preflight, wire_match: exact }
+    { code: missing_, description_zh: "C++ 实现返回错误码 missing_", retry_safe: true, stage: preflight, wire_match: prefix }
+    { code: missing_asset_path, description_zh: "C++ 实现返回错误码 missing_asset_path", retry_safe: true, stage: preflight, wire_match: exact }
+    { code: missing_source_textures, description_zh: "C++ 实现返回错误码 missing_source_textures", retry_safe: true, stage: preflight, wire_match: exact }
+    { code: save_asset_failed, description_zh: "C++ 实现返回错误码 save_asset_failed", retry_safe: false, stage: execution, wire_match: exact }
+    { code: source_texture_not_found, description_zh: "C++ 实现返回错误码 source_texture_not_found", retry_safe: false, stage: execution, wire_match: exact }
+    { code: source_texture_size_mismatch, description_zh: "C++ 实现返回错误码 source_texture_size_mismatch", retry_safe: false, stage: execution, wire_match: exact }
+    { code: texture_array_update_source_failed, description_zh: "C++ 实现返回错误码 texture_array_update_source_failed", retry_safe: false, stage: execution, wire_match: exact }
+  ]
+}
+evidence: {
+  docs: [
+    { path: "Plugins/UeAgentInterface/docs/commands/texture_render_target_media/texture_array_create.md", purpose: "user documentation cross-check; C++ implementation remains authoritative" }
+  ]
+  implementation: [
+    { line_hint: 1559, path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Commands/TextureRenderTarget/UeAgentHttpServer_TextureRenderTarget_TextureAssets.inl", purpose: "command handler, parameter and return evidence", symbol: CmdTextureArrayCreate }
+  ]
+  tests: [
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterfaceTests/Private/Smoke/UeAgentInterfaceTextureRenderTargetSmokeTests.cpp", purpose: "smoke or negative-path evidence cross-checked for the verified contract" }
+  ]
+}
+execution: {
+  destructive: false
+  editor_state: required
+  game_thread: required
+  idempotent: false
+  kind: write
+  overwrite_behavior: target_asset
+  pie_state: allowed
+  retry_safe: false
+  save_behavior: caller_controlled
+  side_effects: [modifies_asset, creates_asset]
+  ui_effect: none
+}
+maturity: verified
+params: {
+  constraints: []
+  fields: {
+    asset_path: { default_state: none, description_zh: "C++ 实现读取的 asset_path 参数", path_semantics: { access_scope: project_write, kind: ue_asset }, required: true, type: ue_asset_path }
+    replace_existing: { default: false, default_state: defined, description_zh: "C++ 实现读取的 replace_existing 参数", required: false, type: bool }
+    save_after_create: { default: true, default_state: defined, description_zh: "C++ 实现读取的 save_after_create 参数", required: false, type: bool }
+    source_textures: { default_state: none, description_zh: "C++ 实现读取的 source_textures 参数", item_type: json_value, required: true, type: array }
+  }
+  state: defined
+}
+response: { artifact_fields: [], compact_fields: [asset_path, class, class_path, compression, compression_settings, cube_count], failure_fields: [params.asset_path, params.source_textures], max_items_policy: { fields: [], mode: none } }
+returns: {
+  fields: {
+    asset_path: { description_zh: "C++ 实现返回的 asset_path 字段；是否出现取决于执行分支", required: false, type: ue_asset_path }
+    class: { description_zh: "C++ 实现返回的 class 字段；是否出现取决于执行分支", required: false, type: string }
+    class_path: { description_zh: "C++ 实现返回的 class_path 字段；是否出现取决于执行分支", required: false, type: string }
+    compression: { description_zh: "C++ 实现返回的 compression 字段；是否出现取决于执行分支", required: false, type: string }
+    compression_settings: { description_zh: "C++ 实现返回的 compression_settings 字段；是否出现取决于执行分支", required: false, type: string }
+    cube_count: { description_zh: "C++ 实现返回的 cube_count 字段；是否出现取决于执行分支", required: false, type: integer }
+    face_count: { description_zh: "C++ 实现返回的 face_count 字段；是否出现取决于执行分支", required: false, type: integer }
+    filter: { description_zh: "C++ 实现返回的 filter 字段；是否出现取决于执行分支", required: false, type: string }
+    has_alpha: { description_zh: "C++ 实现返回的 has_alpha 字段；是否出现取决于执行分支", required: false, type: bool }
+    lod_group: { description_zh: "C++ 实现返回的 lod_group 字段；是否出现取决于执行分支", required: false, type: string }
+    mip_gen_settings: { description_zh: "C++ 实现返回的 mip_gen_settings 字段；是否出现取决于执行分支", required: false, type: string }
+    mips: { description_zh: "C++ 实现返回的 mips 字段；是否出现取决于执行分支", required: false, type: number }
+    num_mips: { description_zh: "C++ 实现返回的 num_mips 字段；是否出现取决于执行分支", required: false, type: number }
+    object_path: { description_zh: "C++ 实现返回的 object_path 字段；是否出现取决于执行分支", required: false, type: ue_object_path }
+    pixel_format: { description_zh: "C++ 实现返回的 pixel_format 字段；是否出现取决于执行分支", required: false, type: string }
+    pixel_stats_available: { description_zh: "C++ 实现返回的 pixel_stats_available 字段；是否出现取决于执行分支", required: false, type: bool }
+    pixel_stats_error: { description_zh: "C++ 实现返回的 pixel_stats_error 字段；是否出现取决于执行分支", required: false, type: string }
+    size_x: { description_zh: "C++ 实现返回的 size_x 字段；是否出现取决于执行分支", required: false, type: number }
+    size_y: { description_zh: "C++ 实现返回的 size_y 字段；是否出现取决于执行分支", required: false, type: number }
+    size_z: { description_zh: "C++ 实现返回的 size_z 字段；是否出现取决于执行分支", required: false, type: number }
+    slice_count: { description_zh: "C++ 实现返回的 slice_count 字段；是否出现取决于执行分支", required: false, type: integer }
+    source: { description_zh: "C++ 实现返回的 source 字段；是否出现取决于执行分支", required: false, type: json_value }
+    srgb: { description_zh: "C++ 实现返回的 srgb 字段；是否出现取决于执行分支", required: false, type: bool }
+    stats: { description_zh: "C++ 实现返回的 stats 字段；是否出现取决于执行分支", required: false, type: json_value }
+    surface_array_size: { description_zh: "C++ 实现返回的 surface_array_size 字段；是否出现取决于执行分支", required: false, type: number }
+    surface_depth: { description_zh: "C++ 实现返回的 surface_depth 字段；是否出现取决于执行分支", required: false, type: integer }
+    surface_height: { description_zh: "C++ 实现返回的 surface_height 字段；是否出现取决于执行分支", required: false, type: integer }
+    surface_width: { description_zh: "C++ 实现返回的 surface_width 字段；是否出现取决于执行分支", required: false, type: integer }
+    type: { description_zh: "C++ 实现返回的 type 字段；是否出现取决于执行分支", required: false, type: string }
+    virtual_texture_streaming: { description_zh: "C++ 实现返回的 virtual_texture_streaming 字段；是否出现取决于执行分支", required: false, type: bool }
+  }
+  state: defined
+}
+schema: uai.command_spec.v1
+status: active
+types: {}
+verification: {
+  assertions: [
+    { id: result_present, operator: exists, source: returns.asset_path }
+    { id: state_readback_present, operator: exists, source: methods.state_readback.asset_path }
+  ]
+  failure_policy: fail_overall
+  methods: [
+    { id: result, kind: result_assertion }
+    { command: texture_get_info, id: state_readback, kind: command_readback, params_mapping: { asset_path: returns.asset_path } }
+  ]
+  required: true
+  state: defined
+}
+version: 1

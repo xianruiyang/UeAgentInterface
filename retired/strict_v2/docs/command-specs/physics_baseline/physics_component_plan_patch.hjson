@@ -1,0 +1,66 @@
+authoring: { reason: command_has_no_registered_folder_authoring_profile, state: none }
+category: physics_baseline
+command: physics_component_plan_patch
+deprecation: { reason: command_is_active, state: none }
+discovery: { aliases: [], keywords_en: [physics, component, plan, patch, physics_baseline], keywords_zh: [physics_component_plan_patch], summary_en: "Execute physics_component_plan_patch with a verified implementation contract", summary_zh: "将物理目标转换成 `uai.level_content.v1` patch", tags: [physics_baseline, p2-006] }
+errors: {
+  codes: [
+    { code: missing_actor_id, description_zh: "C++ 实现返回错误码 missing_actor_id", retry_safe: true, stage: preflight, wire_match: exact }
+    { code: missing_desired, description_zh: "C++ 实现返回错误码 missing_desired", retry_safe: true, stage: preflight, wire_match: exact }
+    { code: no_editor_world, description_zh: "C++ 实现返回错误码 no_editor_world", retry_safe: false, stage: execution, wire_match: exact }
+    { code: no_geditor, description_zh: "C++ 实现返回错误码 no_geditor", retry_safe: false, stage: execution, wire_match: exact }
+  ]
+}
+evidence: {
+  docs: [
+    { path: "Plugins/UeAgentInterface/docs/commands/physics_baseline/physics_component_plan_patch.md", purpose: "user documentation cross-check; C++ implementation remains authoritative" }
+  ]
+  implementation: [
+    { line_hint: 734, path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Commands/Physics/UeAgentHttpServer_Physics.cpp", purpose: "command handler, parameter and return evidence", symbol: CmdPhysicsComponentPlanPatch }
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Commands/Level/UeAgentHttpServer_Level_CaptureAndPersistence.cpp", purpose: "transitive helper evidence used by the command handler" }
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Server/UeAgentHttpServer.cpp", purpose: "transitive helper evidence used by the command handler" }
+  ]
+  tests: [
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterfaceTests/Private/Smoke/Physics/UeAgentInterfacePhysicsSmokeTests.cpp", purpose: "smoke or negative-path evidence cross-checked for the verified contract" }
+  ]
+}
+execution: {
+  destructive: false
+  editor_state: required
+  game_thread: required
+  idempotent: true
+  kind: read_only
+  overwrite_behavior: none
+  pie_state: allowed
+  retry_safe: true
+  save_behavior: none
+  side_effects: []
+  ui_effect: none
+}
+maturity: verified
+params: {
+  constraints: []
+  fields: {
+    actor_id: { default_state: none, description_zh: "C++ 实现读取的 actor_id 参数", required: true, type: string }
+    component: { default_state: none, description_zh: "C++ 实现读取的 component 参数", required: false, type: string }
+    desired: { default_state: none, description_zh: "C++ 实现读取的 desired 参数", required: true, type: object, type_ref: "shared:PhysicsComponentDesired" }
+  }
+  state: defined
+}
+response: { artifact_fields: [unsupported_fields, warnings, level_content_patch, properties], compact_fields: [requires_mobility_change, schema], failure_fields: [params.actor_id, params.desired], max_items_policy: { fields: [], mode: none } }
+returns: {
+  fields: {
+    level_content_patch: { description_zh: "C++ 实现返回的 level_content_patch 字段；是否出现取决于执行分支", required: false, type: json_value }
+    properties: { description_zh: "C++ 实现返回的 properties 字段；是否出现取决于执行分支", required: false, type: json_value }
+    requires_mobility_change: { description_zh: "C++ 实现返回的 requires_mobility_change 字段；是否出现取决于执行分支", required: false, type: bool }
+    schema: { description_zh: "C++ 实现返回的 schema 字段；是否出现取决于执行分支", required: false, type: string }
+    unsupported_fields: { description_zh: "C++ 实现返回的 unsupported_fields 字段；是否出现取决于执行分支", item_type: json_value, required: false, type: array }
+    warnings: { description_zh: "C++ 实现返回的 warnings 字段；是否出现取决于执行分支", item_type: json_value, required: false, type: array }
+  }
+  state: defined
+}
+schema: uai.command_spec.v1
+status: active
+types: {}
+verification: { reason: read_only_command_has_no_post_write_verification, state: none }
+version: 1

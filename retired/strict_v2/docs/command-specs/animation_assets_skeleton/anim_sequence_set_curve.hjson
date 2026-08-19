@@ -1,0 +1,95 @@
+authoring: { reason: command_has_no_registered_folder_authoring_profile, state: none }
+category: animation_assets_skeleton
+command: anim_sequence_set_curve
+deprecation: { reason: command_is_active, state: none }
+discovery: { aliases: [], keywords_en: [anim, sequence, set, curve, animation_assets_skeleton], keywords_zh: [anim_sequence_set_curve], summary_en: "Execute anim_sequence_set_curve with a verified implementation contract", summary_zh: "统一管理 AnimSequence 曲线与 key", tags: [animation_assets_skeleton, p2-006] }
+errors: {
+  codes: [
+    { code: anim_sequence_not_found, description_zh: "C++ 实现返回错误码 anim_sequence_not_found", retry_safe: false, stage: execution, wire_match: exact }
+    { code: asset_not_found, description_zh: "C++ 实现返回错误码 asset_not_found", retry_safe: false, stage: execution, wire_match: exact }
+    { code: curve_json_apply_failed, description_zh: "C++ 实现返回错误码 curve_json_apply_failed", retry_safe: false, stage: execution, wire_match: exact }
+    { code: invalid_curve_time_seconds, description_zh: "C++ 实现返回错误码 invalid_curve_time_seconds", retry_safe: true, stage: preflight, wire_match: exact }
+    { code: invalid_curve_type, description_zh: "C++ 实现返回错误码 invalid_curve_type", retry_safe: true, stage: preflight, wire_match: exact }
+    { code: missing_asset_path, description_zh: "C++ 实现返回错误码 missing_asset_path", retry_safe: true, stage: preflight, wire_match: exact }
+    { code: missing_curve_name, description_zh: "C++ 实现返回错误码 missing_curve_name", retry_safe: true, stage: preflight, wire_match: exact }
+    { code: missing_float_curve_value, description_zh: "C++ 实现返回错误码 missing_float_curve_value", retry_safe: true, stage: preflight, wire_match: exact }
+    { code: save_asset_failed, description_zh: "C++ 实现返回错误码 save_asset_failed", retry_safe: false, stage: execution, wire_match: exact }
+  ]
+}
+evidence: {
+  docs: [
+    { path: "Plugins/UeAgentInterface/docs/commands/animation_assets_skeleton/anim_sequence_set_curve.md", purpose: "user documentation cross-check; C++ implementation remains authoritative" }
+  ]
+  implementation: [
+    { line_hint: 379, path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Commands/Animation/UeAgentHttpServer_AnimationAssets_Settings.cpp", purpose: "command handler, parameter and return evidence", symbol: CmdAnimSequenceSetCurve }
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Commands/Animation/UeAgentHttpServer_AnimationAssets.cpp", purpose: "transitive helper evidence used by the command handler" }
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Server/UeAgentHttpServer.cpp", purpose: "transitive helper evidence used by the command handler" }
+  ]
+  tests: [
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterfaceTests/Private/Smoke/UeAgentInterfaceSmoke_AnimationIKNiagara.cpp", purpose: "smoke or negative-path evidence cross-checked for the verified contract" }
+  ]
+}
+execution: {
+  destructive: false
+  editor_state: required
+  game_thread: required
+  idempotent: false
+  kind: write
+  overwrite_behavior: none
+  pie_state: allowed
+  retry_safe: false
+  save_behavior: caller_controlled
+  side_effects: [modifies_asset]
+  ui_effect: none
+}
+maturity: verified
+params: {
+  constraints: []
+  fields: {
+    asset_path: { default_state: none, description_zh: "C++ 实现读取的 asset_path 参数", path_semantics: { access_scope: project_write, kind: ue_asset }, required: true, type: ue_asset_path }
+    clear_existing_keys: { default: false, default_state: defined, description_zh: "C++ 实现读取的 clear_existing_keys 参数", required: false, type: bool }
+    curve: { default_state: none, description_zh: "C++ 实现读取的 curve 参数", required: false, type: json_value }
+    curve_json: { default_state: none, description_zh: "C++ 实现读取的 curve_json 参数", required: false, type: json_value }
+    curve_name: { default_state: none, description_zh: "C++ 实现读取的 curve_name 参数", required: true, type: string }
+    curve_type: { default: float, default_state: defined, description_zh: "C++ 实现读取的 curve_type 参数", required: false, type: string }
+    keys: { default_state: none, description_zh: "C++ 实现读取的 keys 参数", item_type: object, item_type_ref: "shared:AnimSequenceCurveKey", required: false, type: array }
+    meta_data_curve: { default: false, default_state: defined, description_zh: "C++ 实现读取的 meta_data_curve 参数", required: false, type: bool }
+    remove: { default: false, default_state: defined, description_zh: "C++ 实现读取的 remove 参数", required: false, type: bool }
+    remove_name_from_skeleton: { default: false, default_state: defined, description_zh: "C++ 实现读取的 remove_name_from_skeleton 参数", required: false, type: bool }
+    save_after_set: { default: false, default_state: defined, description_zh: "C++ 实现读取的 save_after_set 参数", required: false, type: bool }
+    time_seconds: { default: 0, default_state: defined, description_zh: "C++ 实现读取的 time_seconds 参数", minimum: 0, required: false, type: number }
+    value: { default: 0, default_state: defined, description_zh: "C++ 实现读取的 value 参数", required: false, type: number }
+  }
+  state: defined
+}
+response: { artifact_fields: [json_issues, curve], compact_fields: [saved, asset_path, curve_exists, curve_name, curve_type], failure_fields: [params.asset_path, params.curve_name], max_items_policy: { fields: [], mode: none } }
+returns: {
+  fields: {
+    asset_path: { description_zh: "C++ 实现返回的 asset_path 字段；是否出现取决于执行分支", required: false, type: ue_asset_path }
+    curve: { description_zh: "C++ 实现返回的 curve 字段；是否出现取决于执行分支", required: false, type: json_value }
+    curve_exists: { description_zh: "C++ 实现返回的 curve_exists 字段；是否出现取决于执行分支", required: false, type: bool }
+    curve_name: { description_zh: "C++ 实现返回的 curve_name 字段；是否出现取决于执行分支", required: false, type: string }
+    curve_type: { description_zh: "C++ 实现返回的 curve_type 字段；是否出现取决于执行分支", required: false, type: string }
+    json_issues: { description_zh: "C++ 实现返回的 json_issues 字段；是否出现取决于执行分支", item_type: json_value, required: false, type: array }
+    removed: { description_zh: "C++ 实现返回的 removed 字段；是否出现取决于执行分支", required: false, type: bool }
+    saved: { description_zh: "C++ 实现返回的 saved 字段；是否出现取决于执行分支", required: false, type: bool }
+  }
+  state: defined
+}
+schema: uai.command_spec.v1
+status: active
+types: {}
+verification: {
+  assertions: [
+    { id: result_present, operator: exists, source: returns.saved }
+    { id: state_readback_present, operator: exists, source: methods.state_readback.asset_path }
+  ]
+  failure_policy: fail_overall
+  methods: [
+    { id: result, kind: result_assertion }
+    { command: anim_sequence_get_info, id: state_readback, kind: command_readback, params_mapping: { asset_path: params.asset_path } }
+  ]
+  required: true
+  state: defined
+}
+version: 1

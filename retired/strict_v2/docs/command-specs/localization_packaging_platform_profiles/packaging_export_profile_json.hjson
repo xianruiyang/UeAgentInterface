@@ -1,0 +1,90 @@
+authoring: { reason: command_has_no_registered_folder_authoring_profile, state: none }
+category: localization_packaging_platform_profiles
+command: packaging_export_profile_json
+deprecation: { reason: command_is_active, state: none }
+discovery: { aliases: [], keywords_en: [packaging, export, profile, json, localization_packaging_platform_profiles], keywords_zh: [packaging_export_profile_json], summary_en: "Execute packaging_export_profile_json with a verified implementation contract", summary_zh: "导出 transient BuildCookRun profile", tags: [localization_packaging_platform_profiles, p2-002] }
+errors: {
+  codes: [
+    { code: hjson_file_required, description_zh: "C++ 实现返回错误码 hjson_file_required", retry_safe: true, stage: preflight, wire_match: prefix }
+    { code: hjson_object_invalid, description_zh: "C++ 实现返回错误码 hjson_object_invalid", retry_safe: true, stage: preflight, wire_match: exact }
+    { code: hjson_write_failed, description_zh: "C++ 实现返回错误码 hjson_write_failed", retry_safe: false, stage: execution, wire_match: prefix }
+  ]
+}
+evidence: {
+  docs: [
+    { path: "Plugins/UeAgentInterface/docs/commands/localization_packaging_platform_profiles/packaging_export_profile_json.md", purpose: "user documentation cross-check; C++ implementation remains authoritative" }
+  ]
+  implementation: [
+    { line_hint: 3109, path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Commands/ProductionPipeline/UeAgentHttpServer_ProductionPipeline.cpp", purpose: "command handler, parameter and return evidence", symbol: CmdPackagingExportProfileJson }
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Commands/TextureRenderTarget/UeAgentHttpServer_TextureRenderTarget_TextureAssets.inl", purpose: "transitive helper evidence used by the command handler" }
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Server/UeAgentHttpServer.cpp", purpose: "transitive helper evidence used by the command handler" }
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Utilities/UeAgentStructuredAuthoringIO.cpp", purpose: "transitive helper evidence used by the command handler" }
+  ]
+  tests: [
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterfaceTests/Private/Smoke/ProductionPipeline/UeAgentInterfaceProductionPipelineSmokeTests.cpp", purpose: "smoke or negative-path evidence cross-checked for the verified contract" }
+  ]
+}
+execution: {
+  destructive: false
+  editor_state: required
+  game_thread: required
+  idempotent: true
+  kind: read_only_export
+  overwrite_behavior: owned_artifacts_only
+  pie_state: allowed
+  retry_safe: true
+  save_behavior: none
+  side_effects: [writes_files]
+  ui_effect: none
+}
+maturity: verified
+params: {
+  constraints: []
+  fields: {
+    archive: { default_state: none, description_zh: "C++ 实现读取的 archive 参数", required: false, type: bool }
+    configuration: { default_state: none, description_zh: "C++ 实现读取的 configuration 参数", required: false, type: string }
+    cook: { default_state: none, description_zh: "C++ 实现读取的 cook 参数", required: false, type: bool }
+    output_file: {
+      default_state: none
+      description_zh: "C++ 实现读取的 output_file 参数"
+      path_semantics: { kind: filesystem_file, must_exist: false, writable: true }
+      required: false
+      type: filesystem_path
+    }
+    package: { default_state: none, description_zh: "C++ 实现读取的 package 参数", required: false, type: bool }
+    platform: { default_state: none, description_zh: "C++ 实现读取的 platform 参数", required: false, type: string }
+    stage: { default_state: none, description_zh: "C++ 实现读取的 stage 参数", required: false, type: bool }
+  }
+  state: defined
+}
+response: { artifact_fields: [], compact_fields: [content, include_project_settings, options, output, output_file, pipeline], failure_fields: [], max_items_policy: { fields: [], mode: none } }
+returns: {
+  fields: {
+    content: { description_zh: "C++ 实现返回的 content 字段；是否出现取决于执行分支", required: false, type: json_value }
+    include_project_settings: { description_zh: "C++ 实现返回的 include_project_settings 字段；是否出现取决于执行分支", required: false, type: bool }
+    options: { description_zh: "C++ 实现返回的 options 字段；是否出现取决于执行分支", required: false, type: json_value }
+    output: { description_zh: "C++ 实现返回的 output 字段；是否出现取决于执行分支", required: false, type: json_value }
+    output_file: { description_zh: "C++ 实现返回的 output_file 字段；是否出现取决于执行分支", required: false, type: filesystem_path }
+    pipeline: { description_zh: "C++ 实现返回的 pipeline 字段；是否出现取决于执行分支", required: false, type: json_value }
+    project: { description_zh: "C++ 实现返回的 project 字段；是否出现取决于执行分支", required: false, type: json_value }
+    schema: { description_zh: "C++ 实现返回的 schema 字段；是否出现取决于执行分支", required: false, type: string }
+    settings_refs: { description_zh: "C++ 实现返回的 settings_refs 字段；是否出现取决于执行分支", item_type: json_value, required: false, type: array }
+    target: { description_zh: "C++ 实现返回的 target 字段；是否出现取决于执行分支", required: false, type: json_value }
+  }
+  state: defined
+}
+schema: uai.command_spec.v1
+status: active
+types: {}
+verification: {
+  assertions: [
+    { id: result_present, operator: exists, source: returns.content }
+  ]
+  failure_policy: fail_overall
+  methods: [
+    { id: result, kind: result_assertion }
+  ]
+  required: true
+  state: defined
+}
+version: 1

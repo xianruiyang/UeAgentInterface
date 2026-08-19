@@ -1,0 +1,42 @@
+authoring: { operation: validate, profile_ref: "contracts/field_contracts/ik_rig.hjson", state: defined, type_id: ik_rig }
+category: ikrig_ikretargeter
+command: ik_rig_validate_folder
+deprecation: { reason: command_is_active, state: none }
+discovery: { aliases: [], keywords_en: [ik, rig, validate, folder, hjson], keywords_zh: ["IK绑定", "校验", HJSON], summary_en: "Validate one IK Rig index.hjson through shared preflight", summary_zh: "通过统一预检校验单个 IK Rig index.hjson", tags: [ik_rig, authoring, validate, unified_contract] }
+errors: { codes: [
+  { code: folder_path_required, description_zh: "缺少 workspace 根目录", retry_safe: true, stage: preflight, wire_match: exact }
+  { code: rigging_workspace_, description_zh: "统一 workspace 加载、身份或依赖检查失败", retry_safe: true, stage: preflight, wire_match: prefix }
+  { code: rigging_document_, description_zh: "IK Rig 文档预检失败", retry_safe: true, stage: preflight, wire_match: prefix }
+] }
+evidence: {
+  docs: [{ path: "Plugins/UeAgentInterface/docs/commands/ikrig_ikretargeter/ik_rig_validate_folder.md", purpose: "正式命令文档" }]
+  implementation: [
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Commands/IK/UeAgentHttpServer_IKAssets_FolderFormat.cpp", purpose: "HTTP 参数与结果薄适配器", symbol: CmdIKRigValidateFolder }
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Domains/Rigging/Authoring/UeAgentRiggingAuthoringApplyProvider.cpp", purpose: "统一 Rigging 预检权威实现" }
+  ]
+  tests: [{ path: "Plugins/UeAgentInterface/Source/UeAgentInterfaceTests/Private/UeAgentInterfaceRiggingAuthoringTests.cpp", purpose: "workspace exact-file 与预检测试" }]
+}
+execution: { destructive: false, editor_state: required, game_thread: required, idempotent: true, kind: read_only, overwrite_behavior: none, pie_state: allowed, retry_safe: true, save_behavior: none, side_effects: [], ui_effect: none }
+maturity: verified
+params: { constraints: [], fields: {
+  asset_path: { default_state: none, description_zh: "可选目标身份断言", required: false, type: ue_asset_path }
+  folder_path: { default_state: none, description_zh: "只允许一个 index.hjson 的 workspace 根目录", path_semantics: { kind: filesystem_directory, must_exist: true, writable: false }, required: true, type: filesystem_path }
+}, state: defined }
+response: { artifact_fields: [], compact_fields: [status, asset_path, requested_operation, units_checked, no_op], failure_fields: [params.folder_path, params.asset_path], max_items_policy: { fields: [], mode: none } }
+returns: { fields: {
+  asset_exists: { description_zh: "目标是否存在", required: true, type: bool }
+  asset_path: { description_zh: "目标 IK Rig", required: false, type: ue_asset_path }
+  error_code: { description_zh: "稳定错误码", required: false, type: string }
+  error_detail: { description_zh: "错误详情", required: false, type: string }
+  no_op: { description_zh: "是否无状态变化", required: true, type: bool }
+  planned: { description_zh: "领域 mutation 计划统计", required: true, type: json_value }
+  requested_operation: { description_zh: "请求操作", required: false, type: string }
+  status: { description_zh: "ready 或 failed", required: true, type: string }
+  units_checked: { description_zh: "预检单元数", required: true, type: integer }
+  would_create: { description_zh: "是否将创建资产", required: true, type: bool }
+}, state: defined }
+schema: uai.command_spec.v1
+status: active
+types: {}
+verification: { reason: read_only_preflight_has_no_post_write_verification, state: none }
+version: 1

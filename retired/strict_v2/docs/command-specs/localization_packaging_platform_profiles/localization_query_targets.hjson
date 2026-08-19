@@ -1,0 +1,58 @@
+authoring: { reason: command_has_no_registered_folder_authoring_profile, state: none }
+category: localization_packaging_platform_profiles
+command: localization_query_targets
+deprecation: { reason: command_is_active, state: none }
+discovery: { aliases: [], keywords_en: [localization, query, targets, localization_packaging_platform_profiles], keywords_zh: [localization_query_targets], summary_en: "Execute localization_query_targets with a verified implementation contract", summary_zh: "查询 Localization target、culture、manifest/archive/locres/PO 文件", tags: [localization_packaging_platform_profiles, p2-002] }
+errors: { codes: [] }
+evidence: {
+  docs: [
+    { path: "Plugins/UeAgentInterface/docs/commands/localization_packaging_platform_profiles/localization_query_targets.md", purpose: "user documentation cross-check; C++ implementation remains authoritative" }
+  ]
+  implementation: [
+    { line_hint: 2506, path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Commands/ProductionPipeline/UeAgentHttpServer_ProductionPipeline.cpp", purpose: "command handler, parameter and return evidence", symbol: CmdLocalizationQueryTargets }
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Server/UeAgentHttpServer.cpp", purpose: "transitive helper evidence used by the command handler" }
+  ]
+  tests: [
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterfaceTests/Private/Smoke/ProductionPipeline/UeAgentInterfaceProductionPipelineSmokeTests.cpp", purpose: "smoke or negative-path evidence cross-checked for the verified contract" }
+  ]
+}
+execution: {
+  destructive: false
+  editor_state: required
+  game_thread: required
+  idempotent: true
+  kind: read_only
+  overwrite_behavior: none
+  pie_state: allowed
+  retry_safe: true
+  save_behavior: none
+  side_effects: []
+  ui_effect: none
+}
+maturity: verified
+params: {
+  constraints: []
+  fields: {
+    include_files: { default: false, default_state: defined, description_zh: "C++ 实现读取的 include_files 参数", required: false, type: bool }
+    include_stats: { default: false, default_state: defined, description_zh: "C++ 实现读取的 include_stats 参数", required: false, type: bool }
+  }
+  state: defined
+}
+response: { artifact_fields: [], compact_fields: [status, config_root, content_root, schema, string_tables, target_count], failure_fields: [], max_items_policy: { fields: [], mode: none } }
+returns: {
+  fields: {
+    config_root: { description_zh: "C++ 实现返回的 config_root 字段；是否出现取决于执行分支", required: false, type: string }
+    content_root: { description_zh: "C++ 实现返回的 content_root 字段；是否出现取决于执行分支", required: false, type: string }
+    schema: { description_zh: "C++ 实现返回的 schema 字段；是否出现取决于执行分支", required: false, type: string }
+    status: { description_zh: "C++ 实现返回的 status 字段；是否出现取决于执行分支", required: false, type: string }
+    string_tables: { description_zh: "C++ 实现返回的 string_tables 字段；是否出现取决于执行分支", item_type: json_value, required: false, type: array }
+    target_count: { description_zh: "C++ 实现返回的 target_count 字段；是否出现取决于执行分支", required: false, type: integer }
+    targets: { description_zh: "C++ 实现返回的 targets 字段；是否出现取决于执行分支", item_type: json_value, required: false, type: array }
+  }
+  state: defined
+}
+schema: uai.command_spec.v1
+status: active
+types: {}
+verification: { reason: read_only_command_has_no_post_write_verification, state: none }
+version: 1

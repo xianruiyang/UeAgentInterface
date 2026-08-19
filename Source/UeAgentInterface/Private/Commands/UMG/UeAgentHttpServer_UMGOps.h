@@ -2,6 +2,7 @@
 
 #include "Containers/UnrealString.h"
 #include "CoreTypes.h"
+#include "Misc/Guid.h"
 
 class UWidget;
 class UWidgetBlueprint;
@@ -10,6 +11,7 @@ namespace UeAgentUmgOps
 {
 	FString NormalizeAssetPath(const FString& InPath);
 	UWidgetBlueprint* LoadWidgetBlueprint(const FString& InPath);
+	FGuid MakeStableWidgetVariableGuid(const FString& VariableName);
 	int32 SyncWidgetVariableGuidMap(UWidgetBlueprint* WidgetBlueprint);
 	bool SaveWidgetBlueprintPackage(UWidgetBlueprint* WidgetBlueprint, FString& OutError);
 	UWidget* FindWidgetByAnyName(UWidgetBlueprint* WidgetBlueprint, const FString& WidgetName);

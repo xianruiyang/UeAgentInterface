@@ -1,0 +1,191 @@
+{
+  "schema": "uai.domain_adapter.world_spatial.native_scenario_fixture.v1",
+  "scenario_count": 7,
+  "capability_count": 22,
+  "scenarios": [
+    {
+      "scenario_id": "graph_view_owned_blueprint_editor",
+      "test_id": "UeAgentInterface.DomainAdapters.WorldSpatial.E2.Native.GraphViewOwnedBlueprintEditor",
+      "lane": "rhi",
+      "family_id": "graph_view",
+      "requires_rhi": true,
+      "subject": "graph:/Game/UAI/Tests/WorldSpatial/BP_GraphViewFixture.EventGraph",
+      "dimension": "2d",
+      "semantic_frame": "graph_canvas_canonical",
+      "write_frame": "graph_editor_view_local",
+      "read_frame": "same_graph_editor_view_local",
+      "verify_frame": "graph_canvas_canonical",
+      "conversion_chain": [
+        "graph_canvas_canonical_to_graph_editor_view_local",
+        "graph_editor_view_local_to_graph_canvas_canonical"
+      ],
+      "capabilities": [
+        "graph.view.read",
+        "graph.view.update"
+      ],
+      "setup": "create an owned Blueprint, open its exact EventGraph in an owned asset editor, freeze editor/graph identity and initial view",
+      "write": "set one non-default location and zoom on that exact graph view",
+      "readback": "read location and zoom from the same graph editor view after Slate settle",
+      "cleanup": "restore the captured view, close only the owned asset editor, delete the owned Blueprint"
+    },
+    {
+      "scenario_id": "graph_layout_owned_nodes",
+      "test_id": "UeAgentInterface.DomainAdapters.WorldSpatial.E2.Native.GraphLayoutOwnedNodes",
+      "lane": "nullrhi",
+      "family_id": "graph_layout",
+      "requires_rhi": false,
+      "subject": "graph:/Game/UAI/Tests/WorldSpatial/BP_GraphLayoutFixture.EventGraph",
+      "dimension": "2d",
+      "semantic_frame": "graph_local_canonical",
+      "write_frame": "graph_node_integer_local",
+      "read_frame": "graph_node_integer_local",
+      "verify_frame": "graph_local_canonical",
+      "conversion_chain": [
+        "graph_local_canonical_to_graph_node_integer_local",
+        "graph_node_integer_local_to_graph_local_canonical"
+      ],
+      "capabilities": [
+        "graph.layout.apply"
+      ],
+      "setup": "create an owned Blueprint graph with two stable node identities and capture node revisions",
+      "write": "apply two explicit placements and one right_of relation through the typed layout request",
+      "readback": "read each node position and graph relation independently from the graph",
+      "cleanup": "delete the owned Blueprint without touching user asset editors"
+    },
+    {
+      "scenario_id": "object_transform_owned_editor_world",
+      "test_id": "UeAgentInterface.DomainAdapters.WorldSpatial.E2.Native.ObjectTransformOwnedEditorWorld",
+      "lane": "nullrhi",
+      "family_id": "object_transform",
+      "requires_rhi": false,
+      "subject": "actor:/Game/UAI/Tests/WorldSpatial/WorldSpatialFixture.Subject",
+      "dimension": "3d",
+      "semantic_frame": "fixture_subject_semantic",
+      "write_frame": "unreal_world",
+      "read_frame": "unreal_world",
+      "verify_frame": "fixture_subject_semantic",
+      "conversion_chain": [
+        "fixture_subject_semantic_to_unreal_world",
+        "unreal_world_to_fixture_subject_semantic"
+      ],
+      "capabilities": [
+        "world.object_transform.read",
+        "world.object_align",
+        "world.object_snap_to_surface",
+        "world.transform_candidates.evaluate"
+      ],
+      "setup": "create an owned transient editor world with subject, anchor and surface actors; freeze their identities, bounds and revisions",
+      "write": "align and snap only the owned subject using explicit anchors, normals, surface query and expected revision",
+      "readback": "read subject transform and surface observation independently, then evaluate candidates without mutation",
+      "cleanup": "destroy the owned transient world and actors"
+    },
+    {
+      "scenario_id": "mesh_geometry_owned_asset",
+      "test_id": "UeAgentInterface.DomainAdapters.WorldSpatial.E2.Native.MeshGeometryOwnedAsset",
+      "lane": "nullrhi",
+      "family_id": "object_transform",
+      "requires_rhi": false,
+      "subject": "mesh:/Game/UAI/Tests/WorldSpatial/SM_GeometryFixture",
+      "dimension": "3d",
+      "semantic_frame": "fixture_mesh_semantic",
+      "write_frame": "mesh_asset_local",
+      "read_frame": "mesh_geometry_local",
+      "verify_frame": "fixture_mesh_semantic",
+      "conversion_chain": [
+        "fixture_mesh_semantic_to_mesh_asset_local",
+        "mesh_geometry_local_to_fixture_mesh_semantic"
+      ],
+      "capabilities": [
+        "mesh.transform.bake",
+        "mesh.pivot.update"
+      ],
+      "setup": "create an owned deterministic StaticMesh fixture and capture geometry hash, bounds, pivot and package revision",
+      "write": "bake one explicit transform and then update one explicit pivot with expected revisions",
+      "readback": "read geometry hash, bounds, pivot and revision independently after mesh build settle",
+      "cleanup": "delete the owned StaticMesh and its package"
+    },
+    {
+      "scenario_id": "viewport_projection_owned_level_viewport",
+      "test_id": "UeAgentInterface.DomainAdapters.WorldSpatial.E2.Native.ViewportProjectionOwnedLevelViewport",
+      "lane": "rhi",
+      "family_id": "viewport_projection",
+      "requires_rhi": true,
+      "subject": "viewport:WorldSpatialFixtureViewport",
+      "dimension": "3d_to_2d_projection",
+      "semantic_frame": "viewport_screen_pixel",
+      "write_frame": "viewport_client_and_world_trace",
+      "read_frame": "viewport_camera_world_trace_and_selection",
+      "verify_frame": "declared_world_ray_and_hit_frames",
+      "conversion_chain": [
+        "screen_pixel_2d_to_viewport_normalized_2d",
+        "camera_deprojection_dimension_bridge",
+        "world_ray_3d_to_world_hit_3d"
+      ],
+      "capabilities": [
+        "viewport.ray.deproject",
+        "viewport.ray.trace",
+        "viewport.actor.pick",
+        "viewport.actor.select",
+        "mesh.element.select_by_ray",
+        "viewport.pixel_scale.read"
+      ],
+      "setup": "create an owned level viewport, deterministic camera, actor and mesh hit target; freeze viewport size, camera state and observed-at",
+      "write": "select the owned actor and a real Modeling triangle from one explicit screen point and selection mode",
+      "readback": "read deprojected ray, trace hit, editor actor selection, GeometrySelectionManager element selection and pixel scale from the same explicit viewport/session binding",
+      "cleanup": "restore selection, close only the owned viewport and destroy owned world fixtures"
+    },
+    {
+      "scenario_id": "viewport_instance_discovery_without_prior_identity",
+      "test_id": "UeAgentInterface.DomainAdapters.WorldSpatial.E2.Production.Viewport.InstanceDiscoveryBootstrap",
+      "lane": "rhi",
+      "family_id": "viewport_session_state",
+      "requires_rhi": true,
+      "subject": "editor:viewport-catalog",
+      "dimension": "catalog",
+      "semantic_frame": "viewport_catalog",
+      "write_frame": "none",
+      "read_frame": "explicit_viewport_registry",
+      "verify_frame": "viewport_catalog",
+      "conversion_chain": [
+        "viewport_registry_entry_to_stable_viewport_identity"
+      ],
+      "capabilities": [
+        "viewport.instance.list"
+      ],
+      "setup": "create one owned level viewport but do not place its identity in the request context",
+      "write": "none",
+      "readback": "enumerate the explicit viewport registry and return stable viewport identities, types and cameras",
+      "cleanup": "close only the owned viewport"
+    },
+    {
+      "scenario_id": "viewport_session_state_owned_client",
+      "test_id": "UeAgentInterface.DomainAdapters.WorldSpatial.E2.Native.ViewportSessionStateOwnedClient",
+      "lane": "rhi",
+      "family_id": "viewport_session_state",
+      "requires_rhi": true,
+      "subject": "viewport:WorldSpatialFixtureViewport",
+      "dimension": "2d_ui_and_3d_camera",
+      "semantic_frame": "captured_viewport_session",
+      "write_frame": "same_viewport_client",
+      "read_frame": "same_viewport_client",
+      "verify_frame": "captured_viewport_session",
+      "conversion_chain": [
+        "captured_camera_semantic_to_viewport_camera_world",
+        "viewport_camera_world_to_captured_camera_semantic",
+        "session_flags_identity_mapping"
+      ],
+      "capabilities": [
+        "viewport.camera.frame",
+        "viewport.state.read",
+        "viewport.state.restore",
+        "viewport.warning.list",
+        "viewport.view_mode.list",
+        "viewport.state.update"
+      ],
+      "setup": "create one owned level viewport and capture its exact client identity, camera state and non-spatial session flags",
+      "write": "frame owned subjects, apply one typed camera/view/session patch, then restore the captured snapshot on the same client",
+      "readback": "read camera and flags separately from the same viewport client and query warning/view-mode/instance catalogs without mutation",
+      "cleanup": "restore the captured state and close only the owned viewport"
+    }
+  ]
+}

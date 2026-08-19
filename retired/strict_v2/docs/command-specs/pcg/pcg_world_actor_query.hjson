@@ -1,0 +1,46 @@
+authoring: { reason: command_has_no_registered_folder_authoring_profile, state: none }
+category: pcg
+command: pcg_world_actor_query
+deprecation: { reason: command_is_active, state: none }
+discovery: { aliases: [], keywords_en: [pcg, world, actor, query], keywords_zh: [pcg_world_actor_query], summary_en: "Execute pcg_world_actor_query with a verified implementation contract", summary_zh: "查询 PCGWorldActor", tags: [pcg, p2-005] }
+errors: { codes: [] }
+evidence: {
+  docs: [
+    { path: "Plugins/UeAgentInterface/docs/commands/pcg/pcg_world_actor_query.md", purpose: "user documentation cross-check; C++ implementation remains authoritative" }
+  ]
+  implementation: [
+    { line_hint: 3837, path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Commands/PCG/UeAgentHttpServer_PCG.cpp", purpose: "command handler, parameter and return evidence", symbol: CmdPCGWorldActorQuery }
+  ]
+  tests: [
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterfaceTests/Private/Smoke/PCG/UeAgentInterfacePCGSmokeTests.cpp", purpose: "smoke or negative-path evidence cross-checked for the verified contract" }
+  ]
+}
+execution: {
+  destructive: false
+  editor_state: required
+  game_thread: required
+  idempotent: true
+  kind: read_only
+  overwrite_behavior: none
+  pie_state: allowed
+  retry_safe: true
+  save_behavior: none
+  side_effects: []
+  ui_effect: none
+}
+maturity: verified
+params: { reason: implementation_reads_no_command_parameters, state: none }
+response: { artifact_fields: [world_actors], compact_fields: [schema, world_actor_count], failure_fields: [], max_items_policy: { fields: [], mode: none } }
+returns: {
+  fields: {
+    schema: { description_zh: "C++ 实现返回的 schema 字段；是否出现取决于执行分支", required: false, type: string }
+    world_actor_count: { description_zh: "C++ 实现返回的 world_actor_count 字段；是否出现取决于执行分支", required: false, type: integer }
+    world_actors: { description_zh: "C++ 实现返回的 world_actors 字段；是否出现取决于执行分支", item_type: json_value, required: false, type: array }
+  }
+  state: defined
+}
+schema: uai.command_spec.v1
+status: active
+types: {}
+verification: { reason: read_only_command_has_no_post_write_verification, state: none }
+version: 1

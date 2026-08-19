@@ -1,0 +1,119 @@
+authoring: { reason: command_has_no_registered_folder_authoring_profile, state: none }
+category: ikrig_ikretargeter
+command: ik_rig_set_solver
+deprecation: { reason: command_is_active, state: none }
+discovery: { aliases: [], keywords_en: [ik, rig, set, solver, ikrig_ikretargeter], keywords_zh: [ik_rig_set_solver], summary_en: "Execute ik_rig_set_solver with a verified implementation contract", summary_zh: "新增 / 更新 / 删除 solver", tags: [ikrig_ikretargeter, p2-006] }
+errors: {
+  codes: [
+    { code: add_solver_failed, description_zh: "C++ 实现返回错误码 add_solver_failed", retry_safe: false, stage: execution, wire_match: exact }
+    { code: asset_not_found, description_zh: "C++ 实现返回错误码 asset_not_found", retry_safe: false, stage: execution, wire_match: exact }
+    { code: connect_goal_to_solver_failed, description_zh: "C++ 实现返回错误码 connect_goal_to_solver_failed", retry_safe: false, stage: execution, wire_match: exact }
+    { code: disconnect_goal_from_solver_failed, description_zh: "C++ 实现返回错误码 disconnect_goal_from_solver_failed", retry_safe: false, stage: execution, wire_match: exact }
+    { code: ik_rig_controller_not_available, description_zh: "C++ 实现返回错误码 ik_rig_controller_not_available", retry_safe: false, stage: execution, wire_match: exact }
+    { code: ik_rig_not_found, description_zh: "C++ 实现返回错误码 ik_rig_not_found", retry_safe: false, stage: execution, wire_match: exact }
+    { code: invalid_bone_settings_entry, description_zh: "C++ 实现返回错误码 invalid_bone_settings_entry", retry_safe: true, stage: preflight, wire_match: exact }
+    { code: invalid_goal_settings_entry, description_zh: "C++ 实现返回错误码 invalid_goal_settings_entry", retry_safe: true, stage: preflight, wire_match: exact }
+    { code: invalid_pbik_root_behavior, description_zh: "C++ 实现返回错误码 invalid_pbik_root_behavior", retry_safe: true, stage: preflight, wire_match: exact }
+    { code: missing_asset_path, description_zh: "C++ 实现返回错误码 missing_asset_path", retry_safe: true, stage: preflight, wire_match: exact }
+    { code: missing_solver_index, description_zh: "C++ 实现返回错误码 missing_solver_index", retry_safe: true, stage: preflight, wire_match: exact }
+    { code: missing_solver_index_or_solver_type, description_zh: "C++ 实现返回错误码 missing_solver_index_or_solver_type", retry_safe: true, stage: preflight, wire_match: exact }
+    { code: move_solver_failed, description_zh: "C++ 实现返回错误码 move_solver_failed", retry_safe: false, stage: execution, wire_match: exact }
+    { code: remove_solver_failed, description_zh: "C++ 实现返回错误码 remove_solver_failed", retry_safe: false, stage: execution, wire_match: exact }
+    { code: save_asset_failed, description_zh: "C++ 实现返回错误码 save_asset_failed", retry_safe: false, stage: execution, wire_match: exact }
+    { code: set_solver_enabled_failed, description_zh: "C++ 实现返回错误码 set_solver_enabled_failed", retry_safe: false, stage: execution, wire_match: exact }
+    { code: set_solver_end_bone_failed, description_zh: "C++ 实现返回错误码 set_solver_end_bone_failed", retry_safe: false, stage: execution, wire_match: exact }
+    { code: set_solver_start_bone_failed, description_zh: "C++ 实现返回错误码 set_solver_start_bone_failed", retry_safe: false, stage: execution, wire_match: exact }
+    { code: solver_bone_settings_not_found, description_zh: "C++ 实现返回错误码 solver_bone_settings_not_found", retry_safe: false, stage: execution, wire_match: exact }
+    { code: solver_bone_settings_not_supported, description_zh: "C++ 实现返回错误码 solver_bone_settings_not_supported", retry_safe: false, stage: execution, wire_match: exact }
+    { code: solver_goal_not_connected, description_zh: "C++ 实现返回错误码 solver_goal_not_connected", retry_safe: false, stage: execution, wire_match: exact }
+    { code: solver_goal_settings_not_supported, description_zh: "C++ 实现返回错误码 solver_goal_settings_not_supported", retry_safe: false, stage: execution, wire_match: exact }
+    { code: solver_settings_not_supported, description_zh: "C++ 实现返回错误码 solver_settings_not_supported", retry_safe: false, stage: execution, wire_match: exact }
+    { code: solver_struct_not_found, description_zh: "C++ 实现返回错误码 solver_struct_not_found", retry_safe: false, stage: execution, wire_match: exact }
+  ]
+}
+evidence: {
+  docs: [
+    { path: "Plugins/UeAgentInterface/docs/commands/ikrig_ikretargeter/ik_rig_set_solver.md", purpose: "user documentation cross-check; C++ implementation remains authoritative" }
+  ]
+  implementation: [
+    { line_hint: 289, path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Commands/IK/UeAgentHttpServer_IKAssets.cpp", purpose: "command handler, parameter and return evidence", symbol: CmdIKRigSetSolver }
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Commands/IK/UeAgentHttpServer_IKAssets.cpp", purpose: "current command handler implementation" }
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Server/UeAgentHttpServer.cpp", purpose: "transitive helper evidence used by the command handler" }
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Utilities/UeAgentJsonDiagnostics.cpp", purpose: "transitive helper evidence used by the command handler" }
+  ]
+  tests: [
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterfaceTests/Private/Smoke/UeAgentInterfaceSmoke_AnimationIKNiagara.cpp", purpose: "smoke or negative-path evidence cross-checked for the verified contract" }
+  ]
+}
+execution: {
+  destructive: false
+  editor_state: required
+  game_thread: required
+  idempotent: false
+  kind: write
+  overwrite_behavior: none
+  pie_state: allowed
+  retry_safe: false
+  save_behavior: caller_controlled
+  side_effects: [modifies_asset]
+  ui_effect: none
+}
+maturity: verified
+params: {
+  constraints: []
+  fields: {
+    asset_path: { default_state: none, description_zh: "C++ 实现读取的 asset_path 参数", path_semantics: { access_scope: project_write, kind: ue_asset }, required: true, type: ue_asset_path }
+    bone_settings: { default_state: none, description_zh: "C++ 实现读取的 bone_settings 参数", item_type: object, item_type_ref: "shared:IKRigSolverBoneSettings", required: false, type: array }
+    connect_goal_names: { default_state: none, description_zh: "C++ 实现读取的 connect_goal_names 参数", item_type: string, required: false, type: array }
+    disconnect_goal_names: { default_state: none, description_zh: "C++ 实现读取的 disconnect_goal_names 参数", item_type: string, required: false, type: array }
+    enabled: { default: false, default_state: defined, description_zh: "C++ 实现读取的 enabled 参数", required: false, type: bool }
+    end_bone_name: { default_state: none, description_zh: "C++ 实现读取的 end_bone_name 参数", required: false, type: string }
+    goal_settings: { default_state: none, description_zh: "C++ 实现读取的 goal_settings 参数", item_type: object, item_type_ref: "shared:IKRigSolverGoalSettings", required: false, type: array }
+    move_to_index: { default: 0, default_state: defined, description_zh: "C++ 实现读取的 move_to_index 参数", required: false, type: integer }
+    remove: { default: false, default_state: defined, description_zh: "C++ 实现读取的 remove 参数", required: false, type: bool }
+    save_after_set: { default: false, default_state: defined, description_zh: "C++ 实现读取的 save_after_set 参数", required: false, type: bool }
+    settings: { default_state: none, description_zh: "C++ 实现读取的 settings 参数", required: false, type: object, type_ref: "shared:IKRigSolverSettings" }
+    solver_index: { default_state: none, description_zh: "C++ 实现读取的 solver_index 参数", required: true, type: integer }
+    solver_type: { default_state: none, description_zh: "C++ 实现读取的 solver_type 参数", required: false, type: string }
+    start_bone_name: { default_state: none, description_zh: "C++ 实现读取的 start_bone_name 参数", required: false, type: string }
+  }
+  state: defined
+}
+response: { artifact_fields: [bone_settings, goal_settings, settings], compact_fields: [saved, asset_path, bone_setting_count, enabled, end_bone], failure_fields: [params.asset_path, params.solver_index], max_items_policy: { fields: [], mode: none } }
+returns: {
+  fields: {
+    asset_path: { description_zh: "C++ 实现返回的 asset_path 字段；是否出现取决于执行分支", required: false, type: ue_asset_path }
+    bone_setting_count: { description_zh: "C++ 实现返回的 bone_setting_count 字段；是否出现取决于执行分支", required: false, type: integer }
+    bone_settings: { description_zh: "C++ 实现返回的 bone_settings 字段；是否出现取决于执行分支", item_type: json_value, required: false, type: array }
+    enabled: { description_zh: "C++ 实现返回的 enabled 字段；是否出现取决于执行分支", required: false, type: bool }
+    end_bone: { description_zh: "C++ 实现返回的 end_bone 字段；是否出现取决于执行分支", required: false, type: string }
+    goal_setting_count: { description_zh: "C++ 实现返回的 goal_setting_count 字段；是否出现取决于执行分支", required: false, type: integer }
+    goal_settings: { description_zh: "C++ 实现返回的 goal_settings 字段；是否出现取决于执行分支", item_type: json_value, required: false, type: array }
+    removed: { description_zh: "C++ 实现返回的 removed 字段；是否出现取决于执行分支", required: false, type: bool }
+    saved: { description_zh: "C++ 实现返回的 saved 字段；是否出现取决于执行分支", required: false, type: bool }
+    settings: { description_zh: "C++ 实现返回的 settings 字段；是否出现取决于执行分支", required: false, type: json_value }
+    solver_count: { description_zh: "C++ 实现返回的 solver_count 字段；是否出现取决于执行分支", required: false, type: integer }
+    solver_index: { description_zh: "C++ 实现返回的 solver_index 字段；是否出现取决于执行分支", required: false, type: integer }
+    solver_kind: { description_zh: "C++ 实现返回的 solver_kind 字段；是否出现取决于执行分支", required: false, type: string }
+    solver_struct: { description_zh: "C++ 实现返回的 solver_struct 字段；是否出现取决于执行分支", required: false, type: string }
+    start_bone: { description_zh: "C++ 实现返回的 start_bone 字段；是否出现取决于执行分支", required: false, type: string }
+  }
+  state: defined
+}
+schema: uai.command_spec.v1
+status: active
+types: {}
+verification: {
+  assertions: [
+    { id: result_present, operator: exists, source: returns.saved }
+    { id: state_readback_present, operator: exists, source: methods.state_readback.asset_path }
+  ]
+  failure_policy: fail_overall
+  methods: [
+    { id: result, kind: result_assertion }
+    { command: ik_rig_get_info, id: state_readback, kind: command_readback, params_mapping: { asset_path: params.asset_path } }
+  ]
+  required: true
+  state: defined
+}
+version: 1

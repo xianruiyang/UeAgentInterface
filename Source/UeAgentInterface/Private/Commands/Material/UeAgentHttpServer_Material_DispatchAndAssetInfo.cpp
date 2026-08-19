@@ -2,7 +2,10 @@
 
 #include "UeAgentHttpServer_Material.h"
 
+#include "Commands/Assets/UeAgentReflectionAuthoringCommandBridge.h"
 #include "UeAgentHttpServer_MaterialOps.h"
+
+#include "Domains/Material/Authoring/UeAgentMaterialAuthoringApplyProvider.h"
 
 #include "AssetRegistry/AssetRegistryModule.h"
 #include "Dom/JsonObject.h"
@@ -35,23 +38,11 @@ bool FUeAgentHttpServer::ExecuteMaterialCommand(const FString& CommandLower, con
 	if (CommandLower == TEXT("material_get_info")) return CmdMaterialGetInfo(Ctx, OutData, OutError);
 	if (CommandLower == TEXT("material_compile")) return CmdMaterialCompile(Ctx, OutData, OutError);
 	if (CommandLower == TEXT("material_get_compile_log")) return CmdMaterialGetCompileLog(Ctx, OutData, OutError);
-	if (CommandLower == TEXT("material_set_property")) return CmdMaterialSetProperty(Ctx, OutData, OutError);
-	if (CommandLower == TEXT("material_set_instance_parent")) return CmdMaterialSetInstanceParent(Ctx, OutData, OutError);
-	if (CommandLower == TEXT("material_set_parameter")) return CmdMaterialSetParameter(Ctx, OutData, OutError);
-	if (CommandLower == TEXT("material_set_scalar_parameter")) return CmdMaterialSetScalarParameter(Ctx, OutData, OutError);
-	if (CommandLower == TEXT("material_set_vector_parameter")) return CmdMaterialSetVectorParameter(Ctx, OutData, OutError);
-	if (CommandLower == TEXT("material_set_texture_parameter")) return CmdMaterialSetTextureParameter(Ctx, OutData, OutError);
-	if (CommandLower == TEXT("material_set_static_switch_parameter")) return CmdMaterialSetStaticSwitchParameter(Ctx, OutData, OutError);
 	if (CommandLower == TEXT("material_list_expressions")) return CmdMaterialListExpressions(Ctx, OutData, OutError);
-	if (CommandLower == TEXT("material_add_expression")) return CmdMaterialAddExpression(Ctx, OutData, OutError);
-	if (CommandLower == TEXT("material_set_expression_property")) return CmdMaterialSetExpressionProperty(Ctx, OutData, OutError);
-	if (CommandLower == TEXT("material_connect_expressions")) return CmdMaterialConnectExpressions(Ctx, OutData, OutError);
-	if (CommandLower == TEXT("material_connect_expression_to_property")) return CmdMaterialConnectExpressionToProperty(Ctx, OutData, OutError);
-	if (CommandLower == TEXT("material_delete_expression")) return CmdMaterialDeleteExpression(Ctx, OutData, OutError);
 	if (CommandLower == TEXT("material_export_folder")) return CmdMaterialExportFolder(Ctx, OutData, OutError);
 	if (CommandLower == TEXT("material_apply_folder")) return CmdMaterialApplyFolder(Ctx, OutData, OutError);
-	if (CommandLower == TEXT("material_instance_export_folder")) return CmdMaterialInstanceExportFolder(Ctx, OutData, OutError);
-	if (CommandLower == TEXT("material_instance_apply_folder")) return CmdMaterialInstanceApplyFolder(Ctx, OutData, OutError);
+	if (CommandLower == TEXT("material_instance_export_folder")) return UeAgentReflectionAuthoringCommandBridge::Export(TEXT("material_instance"), Ctx.Params, OutData, OutError);
+	if (CommandLower == TEXT("material_instance_apply_folder")) return UeAgentReflectionAuthoringCommandBridge::Apply(TEXT("material_instance"), Ctx.Params, OutData, OutError, Ctx.RequestId);
 	if (CommandLower == TEXT("material_function_export_folder")) return CmdMaterialFunctionExportFolder(Ctx, OutData, OutError);
 	if (CommandLower == TEXT("material_function_apply_folder")) return CmdMaterialFunctionApplyFolder(Ctx, OutData, OutError);
 
@@ -71,55 +62,31 @@ bool FUeAgentHttpServer::CmdMaterialCreate(const FUeAgentRequestContext& Ctx, TS
 		return false;
 	}
 
-	const FString PackageName = UeAgentMaterialOps::NormalizeAssetPath(AssetPathInput);
-	if (!FPackageName::IsValidLongPackageName(PackageName))
-	{
-		OutError = TEXT("invalid_asset_path");
-		return false;
-	}
-	const FString AssetName = FPackageName::GetLongPackageAssetName(PackageName);
-	if (AssetName.IsEmpty())
-	{
-		OutError = TEXT("invalid_asset_name");
-		return false;
-	}
-
-	const FString ObjectPath = FString::Printf(TEXT("%s.%s"), *PackageName, *AssetName);
-	if (UeAgentMaterialOps::AssetExists(ObjectPath))
-	{
-		OutError = TEXT("asset_already_exists");
-		return false;
-	}
-
-	UPackage* Package = CreatePackage(*PackageName);
-	if (!Package)
-	{
-		OutError = TEXT("create_package_failed");
-		return false;
-	}
-
-	UMaterial* Material = NewObject<UMaterial>(Package, *AssetName, RF_Public | RF_Standalone | RF_Transactional);
-	if (!Material)
-	{
-		OutError = TEXT("create_material_failed");
-		return false;
-	}
-
-	FAssetRegistryModule::AssetCreated(Material);
-	Material->MarkPackageDirty();
-	Material->PostEditChange();
-
 	bool bCompileAfterCreate = true;
 	JsonTryGetBool(Ctx.Params, TEXT("compile_after_create"), bCompileAfterCreate);
-	if (bCompileAfterCreate)
-	{
-		UMaterialEditingLibrary::RecompileMaterial(Material);
-	}
-
 	bool bSaveAfterCreate = true;
 	JsonTryGetBool(Ctx.Params, TEXT("save_after_create"), bSaveAfterCreate);
-	if (bSaveAfterCreate && !UeAgentMaterialOps::SaveAssetPackage(Material, OutError))
+
+	UeAgentMaterialAuthoring::FAssetApplyRequest Request;
+	Request.Operation = UeAgentApplyInputContract::EOperation::Create;
+	Request.AssetPath = AssetPathInput;
+	Request.AssetKind = TEXT("material");
+	Request.bCompile = bCompileAfterCreate;
+	Request.bSave = bSaveAfterCreate;
+	UeAgentMaterialAuthoring::FAssetApplyResult Result;
+	if (!UeAgentMaterialAuthoring::ApplyAsset(Request, Result, Ctx.RequestId))
 	{
+		OutData->SetStringField(TEXT("apply_status"), Result.Status);
+		OutData->SetStringField(TEXT("apply_phase"), Result.Phase);
+		OutData->SetBoolField(TEXT("rollback_attempted"), Result.bRollbackAttempted);
+		OutData->SetBoolField(TEXT("rollback_succeeded"), Result.bRollbackSucceeded);
+		OutError = Result.ErrorCode.IsEmpty() ? TEXT("create_material_failed") : Result.ErrorCode;
+		return false;
+	}
+	UMaterial* Material = Cast<UMaterial>(Result.Asset);
+	if (!Material)
+	{
+		OutError = TEXT("create_material_readback_failed");
 		return false;
 	}
 
@@ -128,6 +95,8 @@ bool FUeAgentHttpServer::CmdMaterialCreate(const FUeAgentRequestContext& Ctx, TS
 	OutData->SetStringField(TEXT("class"), Material->GetClass()->GetPathName());
 	OutData->SetBoolField(TEXT("compiled"), bCompileAfterCreate);
 	OutData->SetBoolField(TEXT("saved"), bSaveAfterCreate);
+	OutData->SetStringField(TEXT("apply_status"), Result.Status);
+	OutData->SetStringField(TEXT("resolved_operation"), Result.ResolvedOperation);
 	return true;
 }
 

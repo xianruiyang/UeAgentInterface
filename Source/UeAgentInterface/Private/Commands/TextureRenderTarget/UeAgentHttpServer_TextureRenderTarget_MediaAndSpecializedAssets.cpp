@@ -2,8 +2,11 @@
 
 #include "Server/UeAgentHttpServer.h"
 
+#include "Commands/Assets/UeAgentReflectionAuthoringCommandBridge.h"
 #include "UeAgentHttpServer_TextureRenderTargetOps.h"
 
+#include "Commands/Level/UeAgentCommandSafety.h"
+#include "Utilities/UeAgentAuthoringFolderIO.h"
 #include "Utilities/UeAgentAuthoringJson.h"
 #include "Utilities/UeAgentDetailsAuthoring.h"
 #include "Utilities/UeAgentFolderDetailsExport.h"
@@ -126,118 +129,12 @@ bool FUeAgentHttpServer::CmdMediaSourceGetInfo(const FUeAgentRequestContext& Ctx
 
 bool FUeAgentHttpServer::CmdMediaSourceExportJson(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
-	using namespace UeAgentTextureOps;
-	FString AssetPath;
-	FString OutputFile;
-	if (!GetRequiredString(Ctx, TEXT("asset_path"), AssetPath, OutError) || !GetRequiredString(Ctx, TEXT("output_file"), OutputFile, OutError))
-	{
-		return false;
-	}
-	UMediaSource* Source = LoadAsset<UMediaSource>(AssetPath);
-	if (!Source)
-	{
-		OutError = TEXT("media_source_not_found");
-		return false;
-	}
-	TSharedPtr<FJsonObject> Root = BuildGenericAssetJson(Source, TEXT("ue_agent_interface.media_source.v1"), true);
-	Root->SetStringField(TEXT("url"), Source->GetUrl());
-	if (UFileMediaSource* FileSource = Cast<UFileMediaSource>(Source))
-	{
-		Root->SetStringField(TEXT("file_path"), FileSource->FilePath);
-	}
-	if (UStreamMediaSource* StreamSource = Cast<UStreamMediaSource>(Source))
-	{
-		Root->SetStringField(TEXT("stream_url"), StreamSource->StreamUrl);
-	}
-	EchoOptionalBool(Ctx.Params, Root, TEXT("include_validation"), true, OutError);
-	Root->SetObjectField(TEXT("coverage_report"), MakeCoverageReport(TEXT("ue_agent_interface.media_source.v1")));
-	FString Saved;
-	if (!SaveJsonFile(OutputFile, Root, Saved, OutError))
-	{
-		return false;
-	}
-	OutData = Root;
-	OutData->SetStringField(TEXT("output_file"), Saved);
-	return true;
+	return UeAgentReflectionAuthoringCommandBridge::Export(TEXT("media_source"), Ctx.Params, OutData, OutError);
 }
 
 bool FUeAgentHttpServer::CmdMediaSourceApplyJson(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
-	using namespace UeAgentTextureOps;
-	FString JsonFile;
-	if (!GetRequiredString(Ctx, TEXT("json_file"), JsonFile, OutError))
-	{
-		return false;
-	}
-	TSharedPtr<FJsonObject> Root;
-	FString Resolved;
-	if (!LoadJsonFile(JsonFile, Root, Resolved, OutError))
-	{
-		return false;
-	}
-	FString AssetPath;
-	Root->TryGetStringField(TEXT("asset_path"), AssetPath);
-	JsonTryGetString(Ctx.Params, TEXT("asset_path"), AssetPath);
-	UMediaSource* Source = LoadAsset<UMediaSource>(AssetPath);
-	if (!Source)
-	{
-		bool bCreate = false;
-		GetOptionalBool(Ctx.Params, TEXT("create_if_missing"), bCreate, OutError);
-		if (!bCreate)
-		{
-			OutError = TEXT("media_source_not_found");
-			return false;
-		}
-		FString SourceType = TEXT("file");
-		Root->TryGetStringField(TEXT("source_type"), SourceType);
-		SourceType = SourceType.ToLower();
-		UClass* SourceClass = (SourceType == TEXT("stream") || SourceType == TEXT("url")) ? UStreamMediaSource::StaticClass() : UFileMediaSource::StaticClass();
-		Source = Cast<UMediaSource>(CreateAssetObject(SourceClass, AssetPath, false, OutError));
-		if (!Source)
-		{
-			return false;
-		}
-	}
-	bool bDryRun = false;
-	bool bValidateOnly = false;
-	GetOptionalBool(Ctx.Params, TEXT("dry_run"), bDryRun, OutError);
-	GetOptionalBool(Ctx.Params, TEXT("validate_only"), bValidateOnly, OutError);
-	if (bDryRun || bValidateOnly)
-	{
-		OutData = BuildGenericAssetJson(Source, TEXT("ue_agent_interface.media_source.v1"), false);
-		OutData->SetStringField(TEXT("json_file"), Resolved);
-		OutData->SetBoolField(TEXT("dry_run"), bDryRun);
-		OutData->SetBoolField(TEXT("validate_only"), bValidateOnly);
-		OutData->SetArrayField(TEXT("property_results"), {});
-		return true;
-	}
-	FString FilePath;
-	if (Root->TryGetStringField(TEXT("file_path"), FilePath))
-	{
-		if (UFileMediaSource* FileSource = Cast<UFileMediaSource>(Source))
-		{
-			FileSource->SetFilePath(ResolveFilePath(FilePath));
-		}
-	}
-	FString StreamUrl;
-	if (Root->TryGetStringField(TEXT("stream_url"), StreamUrl))
-	{
-		if (UStreamMediaSource* StreamSource = Cast<UStreamMediaSource>(Source))
-		{
-			StreamSource->StreamUrl = StreamUrl;
-		}
-	}
-	TArray<TSharedPtr<FJsonValue>> Results;
-	ApplyGenericProperties(Source, Root, Results, OutError);
-	Source->PostEditChange();
-	Source->MarkPackageDirty();
-	bool bSave = true;
-	GetOptionalBool(Ctx.Params, TEXT("save_after_apply"), bSave, OutError);
-	if (bSave && !SavePackagesForObjects({ Source }, OutError))
-	{
-		return false;
-	}
-	return CmdMediaSourceGetInfo(Ctx, OutData, OutError);
+	return UeAgentReflectionAuthoringCommandBridge::Apply(TEXT("media_source"), Ctx.Params, OutData, OutError, Ctx.RequestId);
 }
 
 bool FUeAgentHttpServer::CmdMediaPlayerCreate(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
@@ -292,82 +189,12 @@ bool FUeAgentHttpServer::CmdMediaPlayerCreate(const FUeAgentRequestContext& Ctx,
 
 bool FUeAgentHttpServer::CmdMediaPlayerExportJson(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
-	using namespace UeAgentTextureOps;
-	FString AssetPath;
-	FString OutputFile;
-	if (!GetRequiredString(Ctx, TEXT("asset_path"), AssetPath, OutError) || !GetRequiredString(Ctx, TEXT("output_file"), OutputFile, OutError))
-	{
-		return false;
-	}
-	UMediaPlayer* Player = LoadAsset<UMediaPlayer>(AssetPath);
-	if (!Player)
-	{
-		OutError = TEXT("media_player_not_found");
-		return false;
-	}
-	TSharedPtr<FJsonObject> Root = BuildGenericAssetJson(Player, TEXT("ue_agent_interface.media_player.v1"), true);
-	EchoOptionalBool(Ctx.Params, Root, TEXT("include_tracks"), true, OutError);
-	EchoOptionalBool(Ctx.Params, Root, TEXT("include_validation"), true, OutError);
-	Root->SetObjectField(TEXT("settings"), MakeShared<FJsonObject>());
-	Root->SetArrayField(TEXT("tracks"), {});
-	Root->SetObjectField(TEXT("coverage_report"), MakeCoverageReport(TEXT("ue_agent_interface.media_player.v1")));
-	FString Saved;
-	if (!SaveJsonFile(OutputFile, Root, Saved, OutError))
-	{
-		return false;
-	}
-	OutData = Root;
-	OutData->SetStringField(TEXT("output_file"), Saved);
-	return true;
+	return UeAgentReflectionAuthoringCommandBridge::Export(TEXT("media_player"), Ctx.Params, OutData, OutError);
 }
 
 bool FUeAgentHttpServer::CmdMediaPlayerApplyJson(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
-	using namespace UeAgentTextureOps;
-	FString JsonFile;
-	if (!GetRequiredString(Ctx, TEXT("json_file"), JsonFile, OutError))
-	{
-		return false;
-	}
-	TSharedPtr<FJsonObject> Root;
-	FString Resolved;
-	if (!LoadJsonFile(JsonFile, Root, Resolved, OutError))
-	{
-		return false;
-	}
-	FString AssetPath;
-	Root->TryGetStringField(TEXT("asset_path"), AssetPath);
-	JsonTryGetString(Ctx.Params, TEXT("asset_path"), AssetPath);
-	UMediaPlayer* Player = LoadAsset<UMediaPlayer>(AssetPath);
-	if (!Player)
-	{
-		bool bCreate = false;
-		GetOptionalBool(Ctx.Params, TEXT("create_if_missing"), bCreate, OutError);
-		if (!bCreate)
-		{
-			OutError = TEXT("media_player_not_found");
-			return false;
-		}
-		Player = Cast<UMediaPlayer>(CreateAssetObject(UMediaPlayer::StaticClass(), AssetPath, false, OutError));
-		if (!Player)
-		{
-			return false;
-		}
-	}
-	TArray<TSharedPtr<FJsonValue>> Results;
-	if (!ApplyGenericProperties(Player, Root, Results, OutError))
-	{
-		return false;
-	}
-	bool bSave = true;
-	GetOptionalBool(Ctx.Params, TEXT("save_after_apply"), bSave, OutError);
-	if (bSave && !SavePackagesForObjects({ Player }, OutError))
-	{
-		return false;
-	}
-	OutData = BuildGenericAssetJson(Player, TEXT("ue_agent_interface.media_player.v1"), false);
-	OutData->SetArrayField(TEXT("property_results"), Results);
-	return true;
+	return UeAgentReflectionAuthoringCommandBridge::Apply(TEXT("media_player"), Ctx.Params, OutData, OutError, Ctx.RequestId);
 }
 
 bool FUeAgentHttpServer::CmdMediaTextureCreate(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
@@ -397,17 +224,22 @@ bool FUeAgentHttpServer::CmdMediaTextureCreate(const FUeAgentRequestContext& Ctx
 		MediaTexture->SetMediaPlayer(Player);
 	}
 	TArray<TSharedPtr<FJsonValue>> PropertyResults;
-	auto ApplyMediaTextureProperty = [&MediaTexture, &PropertyResults, &OutError](const FString& PropertyName, const FString& ValueText)
+	auto ApplyMediaTextureProperty = [&MediaTexture, &PropertyResults, &OutError](const FString& PropertyName, const TSharedPtr<FJsonObject>& CanonicalValue)
 	{
-		FString Readback;
 		FString Error;
-		const bool bApplied = ImportPropertyText(MediaTexture, PropertyName, ValueText, Readback, Error);
+		TSharedPtr<FJsonObject> Summary;
+		const bool bApplied = ApplyCanonicalProperty(
+			MediaTexture,
+			PropertyName,
+			MakeShared<FJsonValueObject>(CanonicalValue),
+			Summary,
+			Error);
 		TSharedPtr<FJsonObject> Result = MakeShared<FJsonObject>();
-		Result->SetStringField(TEXT("property"), PropertyName);
-		Result->SetStringField(TEXT("value_text"), ValueText);
-		Result->SetStringField(TEXT("property_value_read_back"), Readback);
+		Result->SetStringField(TEXT("property_path"), PropertyName);
+		Result->SetObjectField(TEXT("requested_value"), CanonicalValue);
 		Result->SetBoolField(TEXT("applied"), bApplied);
-		Result->SetStringField(TEXT("property_import_status"), bApplied ? TEXT("ok") : Error);
+		Result->SetStringField(TEXT("status"), bApplied ? TEXT("applied") : Error);
+		if (Summary.IsValid()) Result->SetObjectField(TEXT("apply_summary"), Summary);
 		PropertyResults.Add(MakeShared<FJsonValueObject>(Result));
 		if (!bApplied && OutError.IsEmpty())
 		{
@@ -418,12 +250,16 @@ bool FUeAgentHttpServer::CmdMediaTextureCreate(const FUeAgentRequestContext& Ctx
 	FString AddressX;
 	if (JsonTryGetString(Ctx.Params, TEXT("address_x"), AddressX) && !AddressX.TrimStartAndEnd().IsEmpty())
 	{
-		ApplyMediaTextureProperty(TEXT("AddressX"), AddressX.TrimStartAndEnd());
+		TSharedPtr<FJsonObject> Value = MakeShared<FJsonObject>();
+		Value->SetStringField(TEXT("selected"), AddressX.TrimStartAndEnd());
+		if (!ApplyMediaTextureProperty(TEXT("AddressX"), Value)) return false;
 	}
 	FString AddressY;
 	if (JsonTryGetString(Ctx.Params, TEXT("address_y"), AddressY) && !AddressY.TrimStartAndEnd().IsEmpty())
 	{
-		ApplyMediaTextureProperty(TEXT("AddressY"), AddressY.TrimStartAndEnd());
+		TSharedPtr<FJsonObject> Value = MakeShared<FJsonObject>();
+		Value->SetStringField(TEXT("selected"), AddressY.TrimStartAndEnd());
+		if (!ApplyMediaTextureProperty(TEXT("AddressY"), Value)) return false;
 	}
 	FLinearColor ClearColor;
 	if (Ctx.Params.IsValid() && (Ctx.Params->HasField(TEXT("clear_color")) || Ctx.Params->HasField(TEXT("clear_colour"))))
@@ -432,7 +268,14 @@ bool FUeAgentHttpServer::CmdMediaTextureCreate(const FUeAgentRequestContext& Ctx
 		{
 			return false;
 		}
-		ApplyMediaTextureProperty(TEXT("ClearColor"), FString::Printf(TEXT("(R=%f,G=%f,B=%f,A=%f)"), ClearColor.R, ClearColor.G, ClearColor.B, ClearColor.A));
+		TSharedPtr<FJsonObject> Value = MakeShared<FJsonObject>();
+		Value->SetArrayField(TEXT("components"), {
+			MakeShared<FJsonValueNumber>(ClearColor.R),
+			MakeShared<FJsonValueNumber>(ClearColor.G),
+			MakeShared<FJsonValueNumber>(ClearColor.B),
+			MakeShared<FJsonValueNumber>(ClearColor.A)
+		});
+		if (!ApplyMediaTextureProperty(TEXT("ClearColor"), Value)) return false;
 	}
 	MediaTexture->UpdateResource();
 	MediaTexture->PostEditChange();
@@ -450,83 +293,12 @@ bool FUeAgentHttpServer::CmdMediaTextureCreate(const FUeAgentRequestContext& Ctx
 
 bool FUeAgentHttpServer::CmdMediaTextureExportJson(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
-	using namespace UeAgentTextureOps;
-	FString AssetPath;
-	FString OutputFile;
-	if (!GetRequiredString(Ctx, TEXT("asset_path"), AssetPath, OutError) || !GetRequiredString(Ctx, TEXT("output_file"), OutputFile, OutError))
-	{
-		return false;
-	}
-	UMediaTexture* MediaTexture = LoadAsset<UMediaTexture>(AssetPath);
-	if (!MediaTexture)
-	{
-		OutError = TEXT("media_texture_not_found");
-		return false;
-	}
-	TSharedPtr<FJsonObject> Root = BuildGenericAssetJson(MediaTexture, TEXT("ue_agent_interface.media_texture.v1"), true);
-	if (MediaTexture->GetMediaPlayer() && MediaTexture->GetMediaPlayer()->GetOutermost())
-	{
-		Root->SetStringField(TEXT("media_player"), NormalizeAssetPath(MediaTexture->GetMediaPlayer()->GetOutermost()->GetName()));
-	}
-	EchoOptionalBool(Ctx.Params, Root, TEXT("include_validation"), true, OutError);
-	Root->SetObjectField(TEXT("coverage_report"), MakeCoverageReport(TEXT("ue_agent_interface.media_texture.v1")));
-	FString Saved;
-	if (!SaveJsonFile(OutputFile, Root, Saved, OutError))
-	{
-		return false;
-	}
-	OutData = Root;
-	OutData->SetStringField(TEXT("output_file"), Saved);
-	return true;
+	return UeAgentReflectionAuthoringCommandBridge::Export(TEXT("media_texture"), Ctx.Params, OutData, OutError);
 }
 
 bool FUeAgentHttpServer::CmdMediaTextureApplyJson(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
-	using namespace UeAgentTextureOps;
-	FString JsonFile;
-	if (!GetRequiredString(Ctx, TEXT("json_file"), JsonFile, OutError))
-	{
-		return false;
-	}
-	TSharedPtr<FJsonObject> Root;
-	FString Resolved;
-	if (!LoadJsonFile(JsonFile, Root, Resolved, OutError))
-	{
-		return false;
-	}
-	FString AssetPath;
-	Root->TryGetStringField(TEXT("asset_path"), AssetPath);
-	JsonTryGetString(Ctx.Params, TEXT("asset_path"), AssetPath);
-	UMediaTexture* MediaTexture = LoadAsset<UMediaTexture>(AssetPath);
-	if (!MediaTexture)
-	{
-		OutError = TEXT("media_texture_not_found");
-		return false;
-	}
-	FString PlayerPath;
-	if (Root->TryGetStringField(TEXT("media_player"), PlayerPath))
-	{
-		UMediaPlayer* Player = LoadAsset<UMediaPlayer>(PlayerPath);
-		if (!Player)
-		{
-			OutError = TEXT("media_player_not_found");
-			return false;
-		}
-		MediaTexture->SetMediaPlayer(Player);
-	}
-	TArray<TSharedPtr<FJsonValue>> Results;
-	ApplyGenericProperties(MediaTexture, Root, Results, OutError);
-	MediaTexture->UpdateResource();
-	MediaTexture->PostEditChange();
-	bool bSave = true;
-	GetOptionalBool(Ctx.Params, TEXT("save_after_apply"), bSave, OutError);
-	if (bSave && !SavePackagesForObjects({ MediaTexture }, OutError))
-	{
-		return false;
-	}
-	OutData = BuildTextureInfo(MediaTexture, false, false);
-	OutData->SetArrayField(TEXT("property_results"), Results);
-	return true;
+	return UeAgentReflectionAuthoringCommandBridge::Apply(TEXT("media_texture"), Ctx.Params, OutData, OutError, Ctx.RequestId);
 }
 
 bool FUeAgentHttpServer::CmdMediaRuntimeProbe(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
@@ -609,6 +381,14 @@ bool FUeAgentHttpServer::CmdSparseVolumeTextureImport(const FUeAgentRequestConte
 	}
 	FString DestinationName;
 	JsonTryGetString(Ctx.Params, TEXT("destination_name"), DestinationName);
+	bool bReplaceExisting = false;
+	bool bAllowOverwrite = false;
+	if (!UeAgentCommandSafety::ResolveOverwriteConfirmation(Ctx.Params, bReplaceExisting, bAllowOverwrite, OutError) ||
+		!UeAgentCommandSafety::EnsureImportTargetCanBeWritten(
+			DestinationPath, DestinationName, SourceFile, bReplaceExisting, OutError))
+	{
+		return false;
+	}
 	UAutomatedAssetImportData* ImportData = NewObject<UAutomatedAssetImportData>();
 	if (!ImportData)
 	{
@@ -618,7 +398,7 @@ bool FUeAgentHttpServer::CmdSparseVolumeTextureImport(const FUeAgentRequestConte
 	ImportData->AddToRoot();
 	ImportData->Filenames = { SourceFile };
 	ImportData->DestinationPath = DestinationPath;
-	ImportData->bReplaceExisting = true;
+	ImportData->bReplaceExisting = bReplaceExisting;
 	FAssetToolsModule& AssetToolsModule = FModuleManager::LoadModuleChecked<FAssetToolsModule>(TEXT("AssetTools"));
 	TArray<UObject*> Imported = AssetToolsModule.Get().ImportAssetsAutomated(ImportData);
 	ImportData->RemoveFromRoot();
@@ -664,6 +444,8 @@ bool FUeAgentHttpServer::CmdSparseVolumeTextureImport(const FUeAgentRequestConte
 	}
 	OutData = BuildGenericAssetJson(SVT, TEXT("ue_agent_interface.sparse_volume_texture.v1"), false);
 	OutData->SetStringField(TEXT("source_file"), SourceFile);
+	OutData->SetBoolField(TEXT("replace_existing"), bReplaceExisting);
+	OutData->SetBoolField(TEXT("allow_overwrite"), bAllowOverwrite);
 	OutData->SetNumberField(TEXT("frame_count"), 0);
 	TSharedPtr<FJsonObject> Resolution = MakeShared<FJsonObject>();
 	Resolution->SetBoolField(TEXT("available"), false);
@@ -761,84 +543,12 @@ bool FUeAgentHttpServer::CmdSparseVolumeTextureGetInfo(const FUeAgentRequestCont
 
 bool FUeAgentHttpServer::CmdSparseVolumeTextureExportJson(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
-	using namespace UeAgentTextureOps;
-	FString AssetPath;
-	FString OutputFile;
-	if (!GetRequiredString(Ctx, TEXT("asset_path"), AssetPath, OutError) || !GetRequiredString(Ctx, TEXT("output_file"), OutputFile, OutError))
-	{
-		return false;
-	}
-	USparseVolumeTexture* SVT = LoadAsset<USparseVolumeTexture>(AssetPath);
-	if (!SVT)
-	{
-		OutError = TEXT("sparse_volume_texture_not_found");
-		return false;
-	}
-	TSharedPtr<FJsonObject> Root = BuildGenericAssetJson(SVT, TEXT("ue_agent_interface.sparse_volume_texture.v1"), true);
-	EchoOptionalBool(Ctx.Params, Root, TEXT("include_validation"), true, OutError);
-	Root->SetObjectField(TEXT("coverage_report"), MakeCoverageReport(TEXT("ue_agent_interface.sparse_volume_texture.v1")));
-	FString Saved;
-	if (!SaveJsonFile(OutputFile, Root, Saved, OutError))
-	{
-		return false;
-	}
-	OutData = Root;
-	EchoOptionalBool(Ctx.Params, OutData, TEXT("include_validation"), true, OutError);
-	OutData->SetObjectField(TEXT("coverage_report"), MakeCoverageReport(TEXT("ue_agent_interface.sparse_volume_texture.v1")));
-	OutData->SetStringField(TEXT("output_file"), Saved);
-	return true;
+	return UeAgentReflectionAuthoringCommandBridge::Export(TEXT("sparse_volume_texture"), Ctx.Params, OutData, OutError);
 }
 
 bool FUeAgentHttpServer::CmdSparseVolumeTextureApplyJson(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
-	using namespace UeAgentTextureOps;
-	FString JsonFile;
-	if (!GetRequiredString(Ctx, TEXT("json_file"), JsonFile, OutError))
-	{
-		return false;
-	}
-	TSharedPtr<FJsonObject> Root;
-	FString Resolved;
-	if (!LoadJsonFile(JsonFile, Root, Resolved, OutError))
-	{
-		return false;
-	}
-	FString AssetPath;
-	Root->TryGetStringField(TEXT("asset_path"), AssetPath);
-	JsonTryGetString(Ctx.Params, TEXT("asset_path"), AssetPath);
-	UObject* Asset = LoadAssetObject(AssetPath);
-	if (!Asset || !Asset->IsA<USparseVolumeTexture>())
-	{
-		OutError = TEXT("sparse_volume_texture_not_found");
-		return false;
-	}
-	bool bDryRun = false;
-	bool bValidateOnly = false;
-	GetOptionalBool(Ctx.Params, TEXT("dry_run"), bDryRun, OutError);
-	GetOptionalBool(Ctx.Params, TEXT("validate_only"), bValidateOnly, OutError);
-	if (bDryRun || bValidateOnly)
-	{
-		OutData = BuildGenericAssetJson(Asset, TEXT("ue_agent_interface.sparse_volume_texture.v1"), false);
-		OutData->SetStringField(TEXT("json_file"), Resolved);
-		OutData->SetBoolField(TEXT("dry_run"), bDryRun);
-		OutData->SetBoolField(TEXT("validate_only"), bValidateOnly);
-		OutData->SetArrayField(TEXT("property_results"), {});
-		return true;
-	}
-	TArray<TSharedPtr<FJsonValue>> Results;
-	if (!ApplyGenericProperties(Asset, Root, Results, OutError))
-	{
-		return false;
-	}
-	bool bSave = true;
-	GetOptionalBool(Ctx.Params, TEXT("save_after_apply"), bSave, OutError);
-	if (bSave && !SavePackagesForObjects({ Asset }, OutError))
-	{
-		return false;
-	}
-	OutData = BuildGenericAssetJson(Asset, TEXT("ue_agent_interface.sparse_volume_texture.v1"), false);
-	OutData->SetArrayField(TEXT("property_results"), Results);
-	return true;
+	return UeAgentReflectionAuthoringCommandBridge::Apply(TEXT("sparse_volume_texture"), Ctx.Params, OutData, OutError, Ctx.RequestId);
 }
 
 bool FUeAgentHttpServer::CmdSparseVolumeTexturePreviewProbe(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
@@ -943,178 +653,17 @@ bool FUeAgentHttpServer::CmdTextureGraphGetInfo(const FUeAgentRequestContext& Ct
 
 bool FUeAgentHttpServer::CmdTextureGraphExportFolder(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
-	using namespace UeAgentTextureOps;
-	FString AssetPath;
-	FString FolderPath;
-	if (!GetRequiredString(Ctx, TEXT("asset_path"), AssetPath, OutError) || !GetRequiredString(Ctx, TEXT("folder_path"), FolderPath, OutError))
-	{
-		return false;
-	}
-	UTextureGraphBase* Graph = LoadAsset<UTextureGraphBase>(AssetPath);
-	if (!Graph)
-	{
-		OutError = TEXT("texture_graph_not_found");
-		return false;
-	}
-	FolderPath = ResolveFilePath(FolderPath);
-	bool bCleanOutputDir = false;
-	GetOptionalBool(Ctx.Params, TEXT("clean_output_dir"), bCleanOutputDir, OutError);
-	if (bCleanOutputDir)
-	{
-		IFileManager::Get().DeleteDirectory(*FolderPath, false, true);
-	}
-	IFileManager::Get().MakeDirectory(*FolderPath, true);
-	bool bIncludeRaw = false;
-	GetOptionalBool(Ctx.Params, TEXT("include_raw_properties"), bIncludeRaw, OutError);
-	TSharedPtr<FJsonObject> AssetJson = BuildGenericAssetJson(Graph, TEXT("ue_agent_interface.texture_graph.v1"), bIncludeRaw);
-	AssetJson->SetBoolField(TEXT("include_raw_properties"), bIncludeRaw);
-	EchoOptionalBool(Ctx.Params, AssetJson, TEXT("include_validation"), true, OutError);
-	if (!UeAgentFolderDetailsExport::AttachOwnerDetails(Graph, FolderPath, TEXT("texture_graph_export_folder"), TEXT("texture_graph_asset"), Graph->GetPathName(), TEXT("asset"), AssetJson, OutError))
-	{
-		return false;
-	}
-	FString SavedPath;
-	if (!SaveJsonFile(FPaths::Combine(FolderPath, TEXT("asset.json")), AssetJson, SavedPath, OutError))
-	{
-		return false;
-	}
-	const TArray<TPair<FString, FString>> EmptyFiles = {
-		{ TEXT("parameters.json"), TEXT("{\n  \"parameters\": []\n}\n") },
-		{ TEXT("graphs/nodes.json"), TEXT("{\n  \"nodes\": []\n}\n") },
-		{ TEXT("graphs/edges.json"), TEXT("{\n  \"edges\": []\n}\n") },
-		{ TEXT("outputs.json"), TEXT("{\n  \"outputs\": []\n}\n") },
-		{ TEXT("layout.json"), TEXT("{\n  \"layout\": {}\n}\n") },
-		{ TEXT("validation/issues.json"), TEXT("{\n  \"json_issues\": []\n}\n") }
-	};
-	TArray<TSharedPtr<FJsonValue>> Files;
-	Files.Add(MakeShared<FJsonValueString>(SavedPath));
-	if (bIncludeRaw)
-	{
-		TSharedPtr<FJsonObject> RawPropertiesJson = BuildGenericAssetJson(Graph, TEXT("ue_agent_interface.texture_graph.v1"), true);
-		FString RawPath;
-		if (!SaveJsonFile(FPaths::Combine(FolderPath, TEXT("debug/raw_properties.json")), RawPropertiesJson, RawPath, OutError))
-		{
-			return false;
-		}
-		Files.Add(MakeShared<FJsonValueString>(RawPath));
-	}
-	for (const TPair<FString, FString>& Pair : EmptyFiles)
-	{
-		const FString Path = FPaths::Combine(FolderPath, Pair.Key);
-		IFileManager::Get().MakeDirectory(*FPaths::GetPath(Path), true);
-		FFileHelper::SaveStringToFile(Pair.Value, *Path, FFileHelper::EEncodingOptions::ForceUTF8WithoutBOM);
-		Files.Add(MakeShared<FJsonValueString>(Path));
-	}
-	TSharedPtr<FJsonObject> Coverage = MakeCoverageReport(TEXT("ue_agent_interface.texture_graph.v1"));
-	FString CoveragePath;
-	SaveJsonFile(FPaths::Combine(FolderPath, TEXT("validation/coverage_report.json")), Coverage, CoveragePath, OutError);
-	Files.Add(MakeShared<FJsonValueString>(CoveragePath));
-	OutData = MakeShared<FJsonObject>();
-	OutData->SetStringField(TEXT("folder_path"), FolderPath);
-	OutData->SetBoolField(TEXT("clean_output_dir"), bCleanOutputDir);
-	OutData->SetBoolField(TEXT("include_raw_properties"), bIncludeRaw);
-	EchoOptionalBool(Ctx.Params, OutData, TEXT("include_validation"), true, OutError);
-	OutData->SetArrayField(TEXT("files"), Files);
-	OutData->SetObjectField(TEXT("coverage_report"), Coverage);
-	return true;
+	return UeAgentReflectionAuthoringCommandBridge::Export(TEXT("texture_graph"), Ctx.Params, OutData, OutError);
 }
 
 bool FUeAgentHttpServer::CmdTextureGraphValidateFolder(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
-	using namespace UeAgentTextureOps;
-	FString FolderPath;
-	if (!GetRequiredString(Ctx, TEXT("folder_path"), FolderPath, OutError))
-	{
-		return false;
-	}
-	const FString AssetJson = FPaths::Combine(ResolveFilePath(FolderPath), TEXT("asset.json"));
-	TSharedPtr<FJsonObject> Root;
-	FString Resolved;
-	if (!LoadJsonFile(AssetJson, Root, Resolved, OutError))
-	{
-		return false;
-	}
-	FString AssetPath;
-	if (Root.IsValid())
-	{
-		Root->TryGetStringField(TEXT("asset_path"), AssetPath);
-	}
-	if (RejectLegacyPropertiesFolderIfPresent(FolderPath, TEXT("texture_graph_asset"), AssetPath, TEXT("texture_graph_validate_folder"), OutData, OutError))
-	{
-		return false;
-	}
-	OutData = MakeShared<FJsonObject>();
-	OutData->SetStringField(TEXT("folder_path"), ResolveFilePath(FolderPath));
-	OutData->SetBoolField(TEXT("validation_passed"), true);
-	OutData->SetArrayField(TEXT("json_issues"), {});
-	OutData->SetArrayField(TEXT("unsupported_nodes"), {});
-	OutData->SetObjectField(TEXT("coverage_report"), MakeCoverageReport(TEXT("ue_agent_interface.texture_graph.v1")));
-	return true;
+	return UeAgentReflectionAuthoringCommandBridge::Validate(TEXT("texture_graph"), Ctx.Params, OutData, OutError);
 }
 
 bool FUeAgentHttpServer::CmdTextureGraphApplyFolder(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
-	using namespace UeAgentTextureOps;
-	FString FolderPath;
-	if (!GetRequiredString(Ctx, TEXT("folder_path"), FolderPath, OutError))
-	{
-		return false;
-	}
-	TSharedPtr<FJsonObject> Root;
-	FString Resolved;
-	if (!LoadJsonFile(FPaths::Combine(ResolveFilePath(FolderPath), TEXT("asset.json")), Root, Resolved, OutError))
-	{
-		return false;
-	}
-	FString AssetPath;
-	Root->TryGetStringField(TEXT("asset_path"), AssetPath);
-	JsonTryGetString(Ctx.Params, TEXT("asset_path"), AssetPath);
-	if (RejectLegacyPropertiesFolderIfPresent(FolderPath, TEXT("texture_graph_asset"), AssetPath, TEXT("texture_graph_apply_folder"), OutData, OutError))
-	{
-		return false;
-	}
-	UTextureGraphBase* Graph = LoadAsset<UTextureGraphBase>(AssetPath);
-	if (!Graph)
-	{
-		bool bCreate = false;
-		GetOptionalBool(Ctx.Params, TEXT("create_if_missing"), bCreate, OutError);
-		if (!bCreate)
-		{
-			OutError = TEXT("texture_graph_not_found");
-			return false;
-		}
-		TSharedPtr<FJsonObject> CreateParams = MakeShared<FJsonObject>();
-		CreateParams->SetStringField(TEXT("asset_path"), AssetPath);
-		FUeAgentRequestContext CreateCtx = Ctx;
-		CreateCtx.Params = CreateParams;
-		return CmdTextureGraphCreate(CreateCtx, OutData, OutError);
-	}
-	TArray<TSharedPtr<FJsonValue>> Results;
-	int32 GroupedDetailsApplied = 0;
-	TSharedPtr<FJsonObject> DetailsApplySummary;
-	if (!ApplyAssetDetailsFromFolderIfPresent(Graph, FolderPath, Root, TEXT("texture_graph_asset"), TEXT("texture_graph_apply_folder"), true, DetailsApplySummary, GroupedDetailsApplied, OutError))
-	{
-		return false;
-	}
-	bool bSave = true;
-	GetOptionalBool(Ctx.Params, TEXT("save_after_apply"), bSave, OutError);
-	if (bSave && !SavePackagesForObjects({ Graph }, OutError))
-	{
-		return false;
-	}
-	OutData = BuildGenericAssetJson(Graph, TEXT("ue_agent_interface.texture_graph.v1"), false);
-	OutData->SetArrayField(TEXT("property_results"), Results);
-	OutData->SetNumberField(TEXT("grouped_details_applied"), GroupedDetailsApplied);
-	if (DetailsApplySummary.IsValid())
-	{
-		OutData->SetObjectField(TEXT("details_apply"), DetailsApplySummary);
-	}
-	OutData->SetNumberField(TEXT("nodes_created"), 0);
-	OutData->SetNumberField(TEXT("edges_created"), 0);
-	TSharedPtr<FJsonObject> CompileReport = MakeShared<FJsonObject>();
-	CompileReport->SetStringField(TEXT("status"), TEXT("not_required_for_property_apply"));
-	OutData->SetObjectField(TEXT("compile_report"), CompileReport);
-	return true;
+	return UeAgentReflectionAuthoringCommandBridge::Apply(TEXT("texture_graph"), Ctx.Params, OutData, OutError, Ctx.RequestId);
 }
 
 bool FUeAgentHttpServer::CmdTextureGraphBakeOutputs(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
@@ -1313,53 +862,12 @@ bool FUeAgentHttpServer::CmdSubUVAnimationGetInfo(const FUeAgentRequestContext& 
 
 bool FUeAgentHttpServer::CmdSubUVAnimationExportJson(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
-	using namespace UeAgentTextureOps;
-	FString OutputFile;
-	if (!GetRequiredString(Ctx, TEXT("output_file"), OutputFile, OutError) || !CmdSubUVAnimationGetInfo(Ctx, OutData, OutError))
-	{
-		return false;
-	}
-	EchoOptionalBool(Ctx.Params, OutData, TEXT("include_validation"), true, OutError);
-	OutData->SetObjectField(TEXT("coverage_report"), MakeCoverageReport(TEXT("ue_agent_interface.subuv_animation.v1")));
-	FString Saved;
-	if (!SaveJsonFile(OutputFile, OutData, Saved, OutError))
-	{
-		return false;
-	}
-	EchoOptionalBool(Ctx.Params, OutData, TEXT("include_validation"), true, OutError);
-	OutData->SetObjectField(TEXT("coverage_report"), MakeCoverageReport(TEXT("ue_agent_interface.subuv_animation.v1")));
-	OutData->SetStringField(TEXT("output_file"), Saved);
-	return true;
+	return UeAgentReflectionAuthoringCommandBridge::Export(TEXT("subuv_animation"), Ctx.Params, OutData, OutError);
 }
 
 bool FUeAgentHttpServer::CmdSubUVAnimationApplyJson(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
-	using namespace UeAgentTextureOps;
-	FString JsonFile;
-	if (!GetRequiredString(Ctx, TEXT("json_file"), JsonFile, OutError))
-	{
-		return false;
-	}
-	TSharedPtr<FJsonObject> Root;
-	FString Resolved;
-	if (!LoadJsonFile(JsonFile, Root, Resolved, OutError))
-	{
-		return false;
-	}
-	FString AssetPath;
-	FString SourceTexture;
-	Root->TryGetStringField(TEXT("asset_path"), AssetPath);
-	Root->TryGetStringField(TEXT("source_texture"), SourceTexture);
-	JsonTryGetString(Ctx.Params, TEXT("asset_path"), AssetPath);
-	TSharedPtr<FJsonObject> Params = MakeShared<FJsonObject>();
-	Params->SetStringField(TEXT("asset_path"), AssetPath);
-	Params->SetStringField(TEXT("source_texture"), SourceTexture);
-	if (Root->HasField(TEXT("horizontal_images"))) { Params->SetNumberField(TEXT("horizontal_images"), Root->GetNumberField(TEXT("horizontal_images"))); }
-	if (Root->HasField(TEXT("vertical_images"))) { Params->SetNumberField(TEXT("vertical_images"), Root->GetNumberField(TEXT("vertical_images"))); }
-	Params->SetBoolField(TEXT("replace_existing"), true);
-	FUeAgentRequestContext CreateCtx = Ctx;
-	CreateCtx.Params = Params;
-	return CmdSubUVAnimationCreate(CreateCtx, OutData, OutError);
+	return UeAgentReflectionAuthoringCommandBridge::Apply(TEXT("subuv_animation"), Ctx.Params, OutData, OutError, Ctx.RequestId);
 }
 
 bool FUeAgentHttpServer::CmdSubUVAnimationPreviewProbe(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
@@ -1410,8 +918,10 @@ bool FUeAgentHttpServer::CmdPaperSpriteCreate(const FUeAgentRequestContext& Ctx,
 	{
 		return false;
 	}
-	FString SourceTextureReadback;
-	ImportPropertyText(Sprite, TEXT("SourceTexture"), SourceTexture->GetPathName(), SourceTextureReadback, OutError);
+	TSharedPtr<FJsonObject> ApplySummary;
+	TSharedPtr<FJsonObject> SourceTextureValue = MakeShared<FJsonObject>();
+	SourceTextureValue->SetStringField(TEXT("path"), SourceTexture->GetPathName());
+	if (!ApplyCanonicalProperty(Sprite, TEXT("SourceTexture"), MakeShared<FJsonValueObject>(SourceTextureValue), ApplySummary, OutError)) return false;
 	FVector2D SourceUV(0, 0);
 	FVector2D SourceDimension(SourceTexture->GetSizeX(), SourceTexture->GetSizeY());
 	const TSharedPtr<FJsonObject>* SourceUVObj = nullptr;
@@ -1430,13 +940,23 @@ bool FUeAgentHttpServer::CmdPaperSpriteCreate(const FUeAgentRequestContext& Ctx,
 		(*SourceDimObj)->TryGetNumberField(TEXT("y"), Y);
 		SourceDimension = FVector2D(X, Y);
 	}
-	FString Readback;
-	ImportPropertyText(Sprite, TEXT("SourceUV"), FString::Printf(TEXT("(X=%f,Y=%f)"), SourceUV.X, SourceUV.Y), Readback, OutError);
-	ImportPropertyText(Sprite, TEXT("SourceDimension"), FString::Printf(TEXT("(X=%f,Y=%f)"), SourceDimension.X, SourceDimension.Y), Readback, OutError);
+	auto MakeVector2Value = [](const FVector2D& Vector)
+	{
+		TSharedPtr<FJsonObject> Value = MakeShared<FJsonObject>();
+		Value->SetArrayField(TEXT("components"), {
+			MakeShared<FJsonValueNumber>(Vector.X),
+			MakeShared<FJsonValueNumber>(Vector.Y)
+		});
+		return MakeShared<FJsonValueObject>(Value);
+	};
+	if (!ApplyCanonicalProperty(Sprite, TEXT("SourceUV"), MakeVector2Value(SourceUV), ApplySummary, OutError)) return false;
+	if (!ApplyCanonicalProperty(Sprite, TEXT("SourceDimension"), MakeVector2Value(SourceDimension), ApplySummary, OutError)) return false;
 	FString PivotMode;
 	if (JsonTryGetString(Ctx.Params, TEXT("pivot_mode"), PivotMode) && !PivotMode.TrimStartAndEnd().IsEmpty())
 	{
-		ImportPropertyText(Sprite, TEXT("PivotMode"), PivotMode.TrimStartAndEnd(), Readback, OutError);
+		TSharedPtr<FJsonObject> PivotValue = MakeShared<FJsonObject>();
+		PivotValue->SetStringField(TEXT("selected"), PivotMode.TrimStartAndEnd());
+		if (!ApplyCanonicalProperty(Sprite, TEXT("PivotMode"), MakeShared<FJsonValueObject>(PivotValue), ApplySummary, OutError)) return false;
 	}
 	Sprite->PostEditChange();
 	bool bSave = true;
@@ -1461,69 +981,12 @@ bool FUeAgentHttpServer::CmdPaperSpriteCreate(const FUeAgentRequestContext& Ctx,
 
 bool FUeAgentHttpServer::CmdPaperSpriteExportJson(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
-	using namespace UeAgentTextureOps;
-	FString AssetPath;
-	FString OutputFile;
-	if (!GetRequiredString(Ctx, TEXT("asset_path"), AssetPath, OutError) || !GetRequiredString(Ctx, TEXT("output_file"), OutputFile, OutError))
-	{
-		return false;
-	}
-	UObject* Sprite = LoadAssetObject(AssetPath);
-	if (!Sprite || Sprite->GetClass()->GetName() != TEXT("PaperSprite"))
-	{
-		OutError = TEXT("paper_sprite_not_found");
-		return false;
-	}
-	TSharedPtr<FJsonObject> Root = BuildGenericAssetJson(Sprite, TEXT("ue_agent_interface.paper_sprite.v1"), true);
-	EchoOptionalBool(Ctx.Params, Root, TEXT("include_collision"), true, OutError);
-	EchoOptionalBool(Ctx.Params, Root, TEXT("include_render_geometry"), true, OutError);
-	FString Saved;
-	if (!SaveJsonFile(OutputFile, Root, Saved, OutError))
-	{
-		return false;
-	}
-	OutData = Root;
-	OutData->SetStringField(TEXT("output_file"), Saved);
-	return true;
+	return UeAgentReflectionAuthoringCommandBridge::Export(TEXT("paper_sprite"), Ctx.Params, OutData, OutError);
 }
 
 bool FUeAgentHttpServer::CmdPaperSpriteApplyJson(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
-	using namespace UeAgentTextureOps;
-	FString JsonFile;
-	if (!GetRequiredString(Ctx, TEXT("json_file"), JsonFile, OutError))
-	{
-		return false;
-	}
-	TSharedPtr<FJsonObject> Root;
-	FString Resolved;
-	if (!LoadJsonFile(JsonFile, Root, Resolved, OutError))
-	{
-		return false;
-	}
-	FString AssetPath;
-	Root->TryGetStringField(TEXT("asset_path"), AssetPath);
-	JsonTryGetString(Ctx.Params, TEXT("asset_path"), AssetPath);
-	UObject* Sprite = LoadAssetObject(AssetPath);
-	if (!Sprite)
-	{
-		OutError = TEXT("paper_sprite_not_found");
-		return false;
-	}
-	TArray<TSharedPtr<FJsonValue>> Results;
-	if (!ApplyGenericProperties(Sprite, Root, Results, OutError))
-	{
-		return false;
-	}
-	bool bSave = true;
-	GetOptionalBool(Ctx.Params, TEXT("save_after_apply"), bSave, OutError);
-	if (bSave && !SavePackagesForObjects({ Sprite }, OutError))
-	{
-		return false;
-	}
-	OutData = BuildGenericAssetJson(Sprite, TEXT("ue_agent_interface.paper_sprite.v1"), false);
-	OutData->SetArrayField(TEXT("property_results"), Results);
-	return true;
+	return UeAgentReflectionAuthoringCommandBridge::Apply(TEXT("paper_sprite"), Ctx.Params, OutData, OutError, Ctx.RequestId);
 }
 
 bool FUeAgentHttpServer::CmdPaperFlipbookCreate(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
@@ -1549,8 +1012,10 @@ bool FUeAgentHttpServer::CmdPaperFlipbookCreate(const FUeAgentRequestContext& Ct
 	}
 	float FPS = 12.f;
 	GetOptionalFloat(Ctx.Params, TEXT("frames_per_second"), FPS, OutError);
-	FString Readback;
-	ImportPropertyText(Flipbook, TEXT("FramesPerSecond"), FString::SanitizeFloat(FPS), Readback, OutError);
+	TSharedPtr<FJsonObject> FPSValue = MakeShared<FJsonObject>();
+	FPSValue->SetNumberField(TEXT("literal"), FPS);
+	TSharedPtr<FJsonObject> ApplySummary;
+	if (!ApplyCanonicalProperty(Flipbook, TEXT("FramesPerSecond"), MakeShared<FJsonValueObject>(FPSValue), ApplySummary, OutError)) return false;
 	bool bSave = true;
 	GetOptionalBool(Ctx.Params, TEXT("save_after_create"), bSave, OutError);
 	if (bSave && !SavePackagesForObjects({ Flipbook }, OutError))
@@ -1565,70 +1030,12 @@ bool FUeAgentHttpServer::CmdPaperFlipbookCreate(const FUeAgentRequestContext& Ct
 
 bool FUeAgentHttpServer::CmdPaperFlipbookExportJson(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
-	using namespace UeAgentTextureOps;
-	FString AssetPath;
-	FString OutputFile;
-	if (!GetRequiredString(Ctx, TEXT("asset_path"), AssetPath, OutError) || !GetRequiredString(Ctx, TEXT("output_file"), OutputFile, OutError))
-	{
-		return false;
-	}
-	UObject* Flipbook = LoadAssetObject(AssetPath);
-	if (!Flipbook || Flipbook->GetClass()->GetName() != TEXT("PaperFlipbook"))
-	{
-		OutError = TEXT("paper_flipbook_not_found");
-		return false;
-	}
-	TSharedPtr<FJsonObject> Root = BuildGenericAssetJson(Flipbook, TEXT("ue_agent_interface.paper_flipbook.v1"), true);
-	EchoOptionalBool(Ctx.Params, Root, TEXT("include_validation"), true, OutError);
-	Root->SetObjectField(TEXT("coverage_report"), MakeCoverageReport(TEXT("ue_agent_interface.paper_flipbook.v1")));
-	FString Saved;
-	if (!SaveJsonFile(OutputFile, Root, Saved, OutError))
-	{
-		return false;
-	}
-	OutData = Root;
-	OutData->SetStringField(TEXT("output_file"), Saved);
-	return true;
+	return UeAgentReflectionAuthoringCommandBridge::Export(TEXT("paper_flipbook"), Ctx.Params, OutData, OutError);
 }
 
 bool FUeAgentHttpServer::CmdPaperFlipbookApplyJson(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
-	using namespace UeAgentTextureOps;
-	FString JsonFile;
-	if (!GetRequiredString(Ctx, TEXT("json_file"), JsonFile, OutError))
-	{
-		return false;
-	}
-	TSharedPtr<FJsonObject> Root;
-	FString Resolved;
-	if (!LoadJsonFile(JsonFile, Root, Resolved, OutError))
-	{
-		return false;
-	}
-	FString AssetPath;
-	Root->TryGetStringField(TEXT("asset_path"), AssetPath);
-	JsonTryGetString(Ctx.Params, TEXT("asset_path"), AssetPath);
-	UObject* Flipbook = LoadAssetObject(AssetPath);
-	if (!Flipbook)
-	{
-		OutError = TEXT("paper_flipbook_not_found");
-		return false;
-	}
-	TArray<TSharedPtr<FJsonValue>> Results;
-	if (!ApplyGenericProperties(Flipbook, Root, Results, OutError))
-	{
-		return false;
-	}
-	bool bSave = true;
-	GetOptionalBool(Ctx.Params, TEXT("save_after_apply"), bSave, OutError);
-	if (bSave && !SavePackagesForObjects({ Flipbook }, OutError))
-	{
-		return false;
-	}
-	OutData = BuildGenericAssetJson(Flipbook, TEXT("ue_agent_interface.paper_flipbook.v1"), false);
-	OutData->SetArrayField(TEXT("property_results"), Results);
-	OutData->SetArrayField(TEXT("frame_results"), {});
-	return true;
+	return UeAgentReflectionAuthoringCommandBridge::Apply(TEXT("paper_flipbook"), Ctx.Params, OutData, OutError, Ctx.RequestId);
 }
 
 static bool ExportGenericPaperFolder(const FUeAgentRequestContext& Ctx, const FString& Profile, FString& OutError, TSharedPtr<FJsonObject>& OutData)
@@ -1647,6 +1054,10 @@ static bool ExportGenericPaperFolder(const FUeAgentRequestContext& Ctx, const FS
 		return false;
 	}
 	FolderPath = ResolveFilePath(FolderPath);
+	if (!UeAgentAuthoringFolderIO::ResetExportFolder(FolderPath, OutError))
+	{
+		return false;
+	}
 	TSharedPtr<FJsonObject> Root = BuildGenericAssetJson(Asset, Profile, true);
 	const FString SourceCommand = Profile.Contains(TEXT("tileset")) ? TEXT("paper_tileset_export_folder") : TEXT("paper_tilemap_export_folder");
 	const FString OwnerKind = Profile.Contains(TEXT("tileset")) ? TEXT("paper_tileset_asset") : TEXT("paper_tilemap_asset");
@@ -1655,7 +1066,7 @@ static bool ExportGenericPaperFolder(const FUeAgentRequestContext& Ctx, const FS
 		return false;
 	}
 	FString Saved;
-	if (!SaveJsonFile(FPaths::Combine(FolderPath, TEXT("asset.json")), Root, Saved, OutError))
+	if (!SaveAuthoringFile(FPaths::Combine(FolderPath, TEXT("asset.hjson")), Root, Saved, OutError))
 	{
 		return false;
 	}
@@ -1687,7 +1098,7 @@ static bool ApplyGenericPaperFolder(const FUeAgentRequestContext& Ctx, const FSt
 	}
 	TSharedPtr<FJsonObject> Root;
 	FString Resolved;
-	if (!LoadJsonFile(FPaths::Combine(ResolveFilePath(FolderPath), TEXT("asset.json")), Root, Resolved, OutError))
+	if (!LoadAuthoringFile(FPaths::Combine(ResolveFilePath(FolderPath), TEXT("asset.hjson")), Root, Resolved, OutError))
 	{
 		return false;
 	}
@@ -1699,7 +1110,7 @@ static bool ApplyGenericPaperFolder(const FUeAgentRequestContext& Ctx, const FSt
 	}
 	const FString SourceCommand = Profile.Contains(TEXT("tileset")) ? TEXT("paper_tileset_apply_folder") : TEXT("paper_tilemap_apply_folder");
 	const FString OwnerKind = Profile.Contains(TEXT("tileset")) ? TEXT("paper_tileset_asset") : TEXT("paper_tilemap_asset");
-	if (RejectLegacyPropertiesFolderIfPresent(FolderPath, OwnerKind, AssetPath, SourceCommand, OutData, OutError))
+	if (RejectAuthoringPropertiesFolderIfPresent(FolderPath, OwnerKind, AssetPath, SourceCommand, OutData, OutError))
 	{
 		return false;
 	}
@@ -1742,33 +1153,22 @@ static bool ApplyGenericPaperFolder(const FUeAgentRequestContext& Ctx, const FSt
 
 bool FUeAgentHttpServer::CmdPaperTileSetExportFolder(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
-	const bool bOk = ExportGenericPaperFolder(Ctx, TEXT("ue_agent_interface.paper_tileset.v1"), OutError, OutData);
-	if (bOk)
-	{
-		UeAgentTextureOps::EchoOptionalBool(Ctx.Params, OutData, TEXT("include_collision"), true, OutError);
-		UeAgentTextureOps::EchoOptionalBool(Ctx.Params, OutData, TEXT("include_metadata"), true, OutError);
-	}
-	return bOk;
+	return UeAgentReflectionAuthoringCommandBridge::Export(TEXT("paper_tileset"), Ctx.Params, OutData, OutError);
 }
 
 bool FUeAgentHttpServer::CmdPaperTileSetApplyFolder(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
-	return ApplyGenericPaperFolder(Ctx, TEXT("ue_agent_interface.paper_tileset.v1"), OutError, OutData);
+	return UeAgentReflectionAuthoringCommandBridge::Apply(TEXT("paper_tileset"), Ctx.Params, OutData, OutError, Ctx.RequestId);
 }
 
 bool FUeAgentHttpServer::CmdPaperTileMapExportFolder(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
-	const bool bOk = ExportGenericPaperFolder(Ctx, TEXT("ue_agent_interface.paper_tilemap.v1"), OutError, OutData);
-	if (bOk)
-	{
-		UeAgentTextureOps::EchoOptionalBool(Ctx.Params, OutData, TEXT("include_layers"), true, OutError);
-	}
-	return bOk;
+	return UeAgentReflectionAuthoringCommandBridge::Export(TEXT("paper_tilemap"), Ctx.Params, OutData, OutError);
 }
 
 bool FUeAgentHttpServer::CmdPaperTileMapApplyFolder(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
-	return ApplyGenericPaperFolder(Ctx, TEXT("ue_agent_interface.paper_tilemap.v1"), OutError, OutData);
+	return UeAgentReflectionAuthoringCommandBridge::Apply(TEXT("paper_tilemap"), Ctx.Params, OutData, OutError, Ctx.RequestId);
 }
 
 bool FUeAgentHttpServer::CmdPaper2DPreviewProbe(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
@@ -1820,6 +1220,14 @@ bool FUeAgentHttpServer::CmdLightProfileTextureImport(const FUeAgentRequestConte
 	}
 	FString DestinationName;
 	JsonTryGetString(Ctx.Params, TEXT("destination_name"), DestinationName);
+	bool bReplaceExisting = false;
+	bool bAllowOverwrite = false;
+	if (!UeAgentCommandSafety::ResolveOverwriteConfirmation(Ctx.Params, bReplaceExisting, bAllowOverwrite, OutError) ||
+		!UeAgentCommandSafety::EnsureImportTargetCanBeWritten(
+			DestinationPath, DestinationName, SourceFile, bReplaceExisting, OutError))
+	{
+		return false;
+	}
 	UAutomatedAssetImportData* ImportData = NewObject<UAutomatedAssetImportData>();
 	if (!ImportData)
 	{
@@ -1829,7 +1237,7 @@ bool FUeAgentHttpServer::CmdLightProfileTextureImport(const FUeAgentRequestConte
 	ImportData->AddToRoot();
 	ImportData->Filenames = { SourceFile };
 	ImportData->DestinationPath = DestinationPath;
-	ImportData->bReplaceExisting = true;
+	ImportData->bReplaceExisting = bReplaceExisting;
 	FAssetToolsModule& AssetToolsModule = FModuleManager::LoadModuleChecked<FAssetToolsModule>(TEXT("AssetTools"));
 	TArray<UObject*> Imported = AssetToolsModule.Get().ImportAssetsAutomated(ImportData);
 	ImportData->RemoveFromRoot();
@@ -1865,6 +1273,8 @@ bool FUeAgentHttpServer::CmdLightProfileTextureImport(const FUeAgentRequestConte
 	}
 	OutData = BuildTextureInfo(Profile, true, true);
 	OutData->SetStringField(TEXT("source_file"), SourceFile);
+	OutData->SetBoolField(TEXT("replace_existing"), bReplaceExisting);
+	OutData->SetBoolField(TEXT("allow_overwrite"), bAllowOverwrite);
 	OutData->SetObjectField(TEXT("brightness_summary"), OutData->HasTypedField<EJson::Object>(TEXT("stats")) ? OutData->GetObjectField(TEXT("stats")) : MakeShared<FJsonObject>());
 	return true;
 }
@@ -2017,92 +1427,12 @@ bool FUeAgentHttpServer::CmdTextureCollectionGetInfo(const FUeAgentRequestContex
 
 bool FUeAgentHttpServer::CmdTextureCollectionExportJson(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
-	using namespace UeAgentTextureOps;
-	FString OutputFile;
-	if (!GetRequiredString(Ctx, TEXT("output_file"), OutputFile, OutError) || !CmdTextureCollectionGetInfo(Ctx, OutData, OutError))
-	{
-		return false;
-	}
-	EchoOptionalBool(Ctx.Params, OutData, TEXT("include_validation"), true, OutError);
-	OutData->SetObjectField(TEXT("coverage_report"), MakeCoverageReport(TEXT("ue_agent_interface.texture_collection.v1")));
-	FString Saved;
-	if (!SaveJsonFile(OutputFile, OutData, Saved, OutError))
-	{
-		return false;
-	}
-	EchoOptionalBool(Ctx.Params, OutData, TEXT("include_validation"), true, OutError);
-	OutData->SetObjectField(TEXT("coverage_report"), MakeCoverageReport(TEXT("ue_agent_interface.texture_collection.v1")));
-	OutData->SetStringField(TEXT("output_file"), Saved);
-	return true;
+	return UeAgentReflectionAuthoringCommandBridge::Export(TEXT("texture_collection"), Ctx.Params, OutData, OutError);
 }
 
 bool FUeAgentHttpServer::CmdTextureCollectionApplyJson(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
-	using namespace UeAgentTextureOps;
-	FString JsonFile;
-	if (!GetRequiredString(Ctx, TEXT("json_file"), JsonFile, OutError))
-	{
-		return false;
-	}
-	TSharedPtr<FJsonObject> Root;
-	FString Resolved;
-	if (!LoadJsonFile(JsonFile, Root, Resolved, OutError))
-	{
-		return false;
-	}
-	FString AssetPath;
-	Root->TryGetStringField(TEXT("asset_path"), AssetPath);
-	JsonTryGetString(Ctx.Params, TEXT("asset_path"), AssetPath);
-	UTextureCollection* Collection = LoadAsset<UTextureCollection>(AssetPath);
-	if (!Collection)
-	{
-		OutError = TEXT("texture_collection_not_found");
-		return false;
-	}
-	TArray<FString> TexturePaths;
-	ReadStringArray(Root, TEXT("textures"), TexturePaths);
-	bool bAllowDestructive = false;
-	GetOptionalBool(Ctx.Params, TEXT("allow_destructive"), bAllowDestructive, OutError);
-	if (TexturePaths.Num() < Collection->Textures.Num() && !bAllowDestructive)
-	{
-		OutError = TEXT("destructive_collection_edit_requires_allow_destructive");
-		return false;
-	}
-	Collection->Textures.Reset();
-	for (const FString& TexturePath : TexturePaths)
-	{
-		UTexture* Texture = LoadAsset<UTexture>(TexturePath);
-		if (!Texture)
-		{
-			OutError = TEXT("collection_texture_not_found");
-			return false;
-		}
-		Collection->Textures.Add(Texture);
-	}
-	Collection->UpdateResource();
-	Collection->PostEditChange();
-	Collection->MarkPackageDirty();
-	bool bSave = true;
-	GetOptionalBool(Ctx.Params, TEXT("save_after_apply"), bSave, OutError);
-	if (bSave && !SavePackagesForObjects({ Collection }, OutError))
-	{
-		return false;
-	}
-	if (!CmdTextureCollectionGetInfo(Ctx, OutData, OutError))
-	{
-		return false;
-	}
-	TArray<TSharedPtr<FJsonValue>> TextureResults;
-	for (int32 Index = 0; Index < TexturePaths.Num(); ++Index)
-	{
-		TSharedPtr<FJsonObject> Result = MakeShared<FJsonObject>();
-		Result->SetNumberField(TEXT("index"), Index);
-		Result->SetStringField(TEXT("texture"), TexturePaths[Index]);
-		Result->SetBoolField(TEXT("applied"), true);
-		TextureResults.Add(MakeShared<FJsonValueObject>(Result));
-	}
-	OutData->SetArrayField(TEXT("texture_results"), TextureResults);
-	return true;
+	return UeAgentReflectionAuthoringCommandBridge::Apply(TEXT("texture_collection"), Ctx.Params, OutData, OutError, Ctx.RequestId);
 }
 
 bool GetReferencesForAsset(const FString& AssetPath, TArray<TSharedPtr<FJsonValue>>& OutReferencers)

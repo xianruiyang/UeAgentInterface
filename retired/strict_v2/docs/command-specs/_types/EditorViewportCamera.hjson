@@ -1,0 +1,14 @@
+definition: {
+  additional_fields: false
+  fields: {
+    fov: { default_state: none, description_zh: "视野角", maximum: 170, minimum: 5, required: false, type: number }
+    location: { default_state: none, description_zh: "相机位置，接受实现支持的向量形状", required: false, type: json_value }
+    orbit: { default_state: none, description_zh: "orbit 相机请求", required: false, type: object, type_ref: "shared:EditorViewportOrbit" }
+    projection: { default_state: none, description_zh: "投影模式", required: false, type: string }
+    rotation: { default_state: none, description_zh: "相机旋转，接受实现支持的 rotator 形状", required: false, type: json_value }
+  }
+  kind: object
+}
+schema: uai.command_spec.shared_type.v1
+type_id: EditorViewportCamera
+version: 1

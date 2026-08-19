@@ -1,0 +1,75 @@
+authoring: { reason: command_has_no_registered_folder_authoring_profile, state: none }
+category: pcg
+command: pcg_graph_compile
+deprecation: { reason: command_is_active, state: none }
+discovery: { aliases: [], keywords_en: [pcg, graph, compile], keywords_zh: [pcg_graph_compile], summary_en: "Execute pcg_graph_compile with a verified implementation contract", summary_zh: "重新编译 Graph 并 prime compilation cache", tags: [pcg, p2-005] }
+errors: {
+  codes: [
+    { code: missing_asset_path, description_zh: "C++ 实现返回错误码 missing_asset_path", retry_safe: true, stage: preflight, wire_match: exact }
+    { code: pcg_graph_asset_not_found, description_zh: "C++ 实现返回错误码 pcg_graph_asset_not_found", retry_safe: false, stage: execution, wire_match: exact }
+  ]
+}
+evidence: {
+  docs: [
+    { path: "Plugins/UeAgentInterface/docs/commands/pcg/pcg_graph_compile.md", purpose: "user documentation cross-check; C++ implementation remains authoritative" }
+  ]
+  implementation: [
+    { line_hint: 3170, path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Commands/PCG/UeAgentHttpServer_PCG.cpp", purpose: "command handler, parameter and return evidence", symbol: CmdPCGGraphCompile }
+  ]
+  tests: [
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterfaceTests/Private/Smoke/PCG/UeAgentInterfacePCGSmokeTests.cpp", purpose: "smoke or negative-path evidence cross-checked for the verified contract" }
+  ]
+}
+execution: {
+  destructive: false
+  editor_state: required
+  game_thread: required
+  idempotent: false
+  kind: write
+  overwrite_behavior: none
+  pie_state: allowed
+  retry_safe: false
+  save_behavior: none
+  side_effects: [modifies_asset]
+  ui_effect: none
+}
+maturity: verified
+params: {
+  constraints: [
+    { fields: [asset_path, graph, graph_asset_path], kind: one_of }
+  ]
+  fields: {
+    asset_path: { default_state: none, description_zh: "C++ 实现读取的 asset_path 参数", path_semantics: { access_scope: project_write, kind: ue_asset }, required: false, type: ue_asset_path }
+    graph: { default_state: none, description_zh: "C++ 实现读取的 graph 参数", required: false, type: string }
+    graph_asset_path: { default_state: none, description_zh: "C++ 实现读取的 graph_asset_path 参数", path_semantics: { access_scope: project_write, kind: ue_asset }, required: false, type: ue_asset_path }
+  }
+  state: defined
+}
+response: { artifact_fields: [snapshot], compact_fields: [asset_path, recompiled, primed_compilation_cache], failure_fields: [params.asset_path, params.graph, params.graph_asset_path], max_items_policy: { fields: [], mode: none } }
+returns: {
+  fields: {
+    asset_path: { description_zh: "C++ 实现返回的 asset_path 字段；是否出现取决于执行分支", required: false, type: ue_asset_path }
+    primed_compilation_cache: { description_zh: "C++ 实现返回的 primed_compilation_cache 字段；是否出现取决于执行分支", required: false, type: bool }
+    recompiled: { description_zh: "C++ 实现返回的 recompiled 字段；是否出现取决于执行分支", required: false, type: bool }
+    schema: { description_zh: "C++ 实现返回的 schema 字段；是否出现取决于执行分支", required: false, type: string }
+    snapshot: { description_zh: "C++ 实现返回的 snapshot 字段；是否出现取决于执行分支", required: false, type: json_value }
+  }
+  state: defined
+}
+schema: uai.command_spec.v1
+status: active
+types: {}
+verification: {
+  assertions: [
+    { id: result_present, operator: exists, source: returns.asset_path }
+    { id: state_readback_present, operator: exists, source: methods.state_readback.asset_path }
+  ]
+  failure_policy: fail_overall
+  methods: [
+    { id: result, kind: result_assertion }
+    { command: pcg_graph_snapshot, id: state_readback, kind: command_readback, params_mapping: { asset_path: returns.asset_path } }
+  ]
+  required: true
+  state: defined
+}
+version: 1

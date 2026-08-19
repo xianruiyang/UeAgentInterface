@@ -1,0 +1,98 @@
+authoring: { reason: command_has_no_registered_folder_authoring_profile, state: none }
+category: core_level
+command: level_align_actor_by_bounds
+deprecation: { reason: command_is_active, state: none }
+discovery: { aliases: [], keywords_en: [level, align, actor, by, bounds, core_level], keywords_zh: [level_align_actor_by_bounds], summary_en: "Execute level_align_actor_by_bounds with a verified implementation contract", summary_zh: "level_align_actor_by_bounds command contract.", tags: [core_level, p2-002] }
+errors: {
+  codes: [
+    { code: actor_has_invalid_bounds, description_zh: "C++ 实现返回错误码 actor_has_invalid_bounds", retry_safe: true, stage: preflight, wire_match: exact }
+    { code: actor_not_found, description_zh: "C++ 实现返回错误码 actor_not_found", retry_safe: false, stage: execution, wire_match: exact }
+    { code: invalid_axis, description_zh: "C++ 实现返回错误码 invalid_axis", retry_safe: true, stage: preflight, wire_match: exact }
+    { code: invalid_source_anchor, description_zh: "C++ 实现返回错误码 invalid_source_anchor", retry_safe: true, stage: preflight, wire_match: exact }
+    { code: invalid_target_anchor, description_zh: "C++ 实现返回错误码 invalid_target_anchor", retry_safe: true, stage: preflight, wire_match: exact }
+    { code: missing_source_actor_id, description_zh: "C++ 实现返回错误码 missing_source_actor_id", retry_safe: true, stage: preflight, wire_match: exact }
+    { code: missing_target_actor_id, description_zh: "C++ 实现返回错误码 missing_target_actor_id", retry_safe: true, stage: preflight, wire_match: exact }
+    { code: no_editor_world, description_zh: "C++ 实现返回错误码 no_editor_world", retry_safe: false, stage: execution, wire_match: exact }
+    { code: no_geditor, description_zh: "C++ 实现返回错误码 no_geditor", retry_safe: false, stage: execution, wire_match: exact }
+    { code: source_actor_not_found, description_zh: "C++ 实现返回错误码 source_actor_not_found", retry_safe: false, stage: execution, wire_match: exact }
+    { code: target_actor_not_found, description_zh: "C++ 实现返回错误码 target_actor_not_found", retry_safe: false, stage: execution, wire_match: exact }
+  ]
+}
+evidence: {
+  docs: [
+    { path: "Plugins/UeAgentInterface/docs/commands/core_level/level_align_actor_by_bounds.md", purpose: "user documentation cross-check; C++ implementation remains authoritative" }
+  ]
+  implementation: [
+    { line_hint: 717, path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Commands/Level/UeAgentHttpServer_Level_MeshAlignment.cpp", purpose: "command handler, parameter and return evidence", symbol: CmdLevelAlignActorByBounds }
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Commands/Level/UeAgentHttpServer_Level.cpp", purpose: "transitive helper evidence used by the command handler" }
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Commands/Level/UeAgentHttpServer_Level_CaptureAndPersistence.cpp", purpose: "transitive helper evidence used by the command handler" }
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Server/UeAgentHttpServer.cpp", purpose: "transitive helper evidence used by the command handler" }
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Utilities/UeAgentJsonDiagnostics.cpp", purpose: "transitive helper evidence used by the command handler" }
+  ]
+  tests: [
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterfaceTests/Private/Smoke/UeAgentInterfaceSmoke_Coverage.cpp", purpose: "smoke or negative-path evidence cross-checked for the verified contract" }
+  ]
+}
+execution: {
+  destructive: false
+  editor_state: required
+  game_thread: required
+  idempotent: false
+  kind: write
+  overwrite_behavior: none
+  pie_state: allowed
+  retry_safe: false
+  save_behavior: none
+  side_effects: [modifies_level]
+  ui_effect: none
+}
+maturity: verified
+params: {
+  constraints: []
+  fields: {
+    axis: { default: x, default_state: defined, description_zh: "C++ 实现读取的 axis 参数", required: false, type: string }
+    offset: { default: 0, default_state: defined, description_zh: "C++ 实现读取的 offset 参数", required: false, type: number }
+    source_actor_id: { default_state: none, description_zh: "C++ 实现读取的 source_actor_id 参数", required: true, type: string }
+    source_anchor: { default: min, default_state: defined, description_zh: "C++ 实现读取的 source_anchor 参数", required: false, type: string }
+    target_actor_id: { default_state: none, description_zh: "C++ 实现读取的 target_actor_id 参数", required: true, type: string }
+    target_anchor: { default: max, default_state: defined, description_zh: "C++ 实现读取的 target_anchor 参数", required: false, type: string }
+  }
+  state: defined
+}
+response: { artifact_fields: [], compact_fields: [actor_label, actor_name, applied_delta, axis, location, offset], failure_fields: [params.source_actor_id, params.target_actor_id], max_items_policy: { fields: [], mode: none } }
+returns: {
+  fields: {
+    actor_label: { description_zh: "C++ 实现返回的 actor_label 字段；是否出现取决于执行分支", required: false, type: string }
+    actor_name: { description_zh: "C++ 实现返回的 actor_name 字段；是否出现取决于执行分支", required: false, type: string }
+    applied_delta: { description_zh: "C++ 实现返回的 applied_delta 字段；是否出现取决于执行分支", required: false, type: number }
+    axis: { description_zh: "C++ 实现返回的 axis 字段；是否出现取决于执行分支", required: false, type: string }
+    location: { description_zh: "C++ 实现返回的 location 字段；是否出现取决于执行分支", required: false, type: json_value }
+    offset: { description_zh: "C++ 实现返回的 offset 字段；是否出现取决于执行分支", required: false, type: number }
+    rotation: { description_zh: "C++ 实现返回的 rotation 字段；是否出现取决于执行分支", required: false, type: json_value }
+    scale: { description_zh: "C++ 实现返回的 scale 字段；是否出现取决于执行分支", required: false, type: json_value }
+    source_actor_name: { description_zh: "C++ 实现返回的 source_actor_name 字段；是否出现取决于执行分支", required: false, type: string }
+    source_anchor: { description_zh: "C++ 实现返回的 source_anchor 字段；是否出现取决于执行分支", required: false, type: string }
+    source_bounds_after: { description_zh: "C++ 实现返回的 source_bounds_after 字段；是否出现取决于执行分支", required: false, type: json_value }
+    source_bounds_before: { description_zh: "C++ 实现返回的 source_bounds_before 字段；是否出现取决于执行分支", required: false, type: json_value }
+    target_actor_name: { description_zh: "C++ 实现返回的 target_actor_name 字段；是否出现取决于执行分支", required: false, type: string }
+    target_anchor: { description_zh: "C++ 实现返回的 target_anchor 字段；是否出现取决于执行分支", required: false, type: string }
+    target_bounds: { description_zh: "C++ 实现返回的 target_bounds 字段；是否出现取决于执行分支", required: false, type: json_value }
+    transform: { description_zh: "C++ 实现返回的 transform 字段；是否出现取决于执行分支", required: false, type: json_value }
+  }
+  state: defined
+}
+schema: uai.command_spec.v1
+status: active
+types: {}
+verification: {
+  assertions: [
+    { id: result_present, operator: exists, source: returns.actor_label }
+  ]
+  failure_policy: fail_overall
+  methods: [
+    { id: result, kind: result_assertion }
+  ]
+  required: true
+  state: defined
+}
+version: 1

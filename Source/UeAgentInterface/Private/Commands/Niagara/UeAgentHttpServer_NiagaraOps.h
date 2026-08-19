@@ -10,6 +10,7 @@ struct FNiagaraTypeDefinition;
 
 namespace UeAgentNiagaraOps
 {
+	UObject* LoadAssetObject(const FString& InPath);
 	bool IsUserSettableNiagaraEnumValue(const UEnum& EnumType, int64 EnumValue);
-	TSharedPtr<FJsonObject> BuildNiagaraInputTypeDescriptorJson(const FString& InTypeText, const FNiagaraTypeDefinition& TypeDefinition);
+	UEAGENTINTERFACE_API TSharedPtr<FJsonObject> BuildNiagaraInputTypeDescriptorJson(const FString& InTypeText, const FNiagaraTypeDefinition& TypeDefinition);
 }

@@ -1,0 +1,15 @@
+definition: {
+  additional_fields: false
+  fields: {
+    distance: { default: 500, default_state: defined, description_zh: "orbit 距离", minimum: 1, required: false, type: number }
+    fov: { default_state: none, description_zh: "视野角", maximum: 170, minimum: 5, required: false, type: number }
+    pitch: { default_state: none, description_zh: "orbit pitch", required: false, type: number }
+    roll: { default: 0, default_state: defined, description_zh: "orbit roll", required: false, type: number }
+    target: { default_state: none, description_zh: "orbit 目标点，接受实现支持的向量形状", required: false, type: json_value }
+    yaw: { default_state: none, description_zh: "orbit yaw", required: false, type: number }
+  }
+  kind: object
+}
+schema: uai.command_spec.shared_type.v1
+type_id: EditorViewportOrbit
+version: 1

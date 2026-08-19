@@ -1,0 +1,64 @@
+authoring: { reason: command_has_no_registered_folder_authoring_profile, state: none }
+category: data_driven_data_asset_data_table
+command: data_table_sample_rows
+deprecation: { reason: command_is_active, state: none }
+discovery: { aliases: [], keywords_en: [data, table, sample, rows, data_driven_data_asset_data_table], keywords_zh: [data_table_sample_rows], summary_en: "Execute data_table_sample_rows with a verified implementation contract", summary_zh: "对指定行字段做断言采样", tags: [data_driven_data_asset_data_table, p2-007] }
+errors: {
+  codes: [
+    { code: asset_not_found_or_not_data_table, description_zh: "C++ 实现返回错误码 asset_not_found_or_not_data_table", retry_safe: false, stage: execution, wire_match: exact }
+    { code: data_table_sample_failed, description_zh: "C++ 实现返回错误码 data_table_sample_failed", retry_safe: false, stage: execution, wire_match: exact }
+    { code: missing_asset_path, description_zh: "C++ 实现返回错误码 missing_asset_path", retry_safe: true, stage: preflight, wire_match: exact }
+    { code: missing_checks, description_zh: "C++ 实现返回错误码 missing_checks", retry_safe: true, stage: preflight, wire_match: exact }
+  ]
+}
+evidence: {
+  docs: [
+    { path: "Plugins/UeAgentInterface/docs/commands/data_driven_data_asset_data_table/data_table_sample_rows.md", purpose: "user documentation cross-check; C++ implementation remains authoritative" }
+  ]
+  implementation: [
+    { line_hint: 2489, path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Commands/DataDriven/UeAgentHttpServer_DataDriven.cpp", purpose: "command handler, parameter and return evidence", symbol: CmdDataTableSampleRows }
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Server/UeAgentHttpServer.cpp", purpose: "transitive helper evidence used by the command handler" }
+  ]
+  tests: [
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterfaceTests/Private/Smoke/DataDriven/UeAgentInterfaceDataDrivenSmokeTests.cpp", purpose: "smoke or negative-path evidence cross-checked for the verified contract" }
+  ]
+}
+execution: {
+  destructive: false
+  editor_state: required
+  game_thread: required
+  idempotent: true
+  kind: read_only
+  overwrite_behavior: none
+  pie_state: allowed
+  retry_safe: true
+  save_behavior: none
+  side_effects: []
+  ui_effect: none
+}
+maturity: verified
+params: {
+  constraints: []
+  fields: {
+    asset_path: { default_state: none, description_zh: "C++ 实现读取的 asset_path 参数", path_semantics: { access_scope: mounted_read, kind: ue_asset }, required: true, type: ue_asset_path }
+    checks: { default_state: none, description_zh: "C++ 实现读取的 checks 参数", item_type: object, item_type_ref: "shared:DataTableSampleCheck", required: true, type: array }
+  }
+  state: defined
+}
+response: { artifact_fields: [checks], compact_fields: [asset_path, passed, check_count, failed_count], failure_fields: [params.asset_path, params.checks], max_items_policy: { fields: [], mode: none } }
+returns: {
+  fields: {
+    asset_path: { description_zh: "C++ 实现返回的 asset_path 字段；是否出现取决于执行分支", required: false, type: ue_asset_path }
+    check_count: { description_zh: "C++ 实现返回的 check_count 字段；是否出现取决于执行分支", required: false, type: integer }
+    checks: { description_zh: "C++ 实现返回的 checks 字段；是否出现取决于执行分支", item_type: json_value, required: false, type: array }
+    failed_count: { description_zh: "C++ 实现返回的 failed_count 字段；是否出现取决于执行分支", required: false, type: integer }
+    passed: { description_zh: "C++ 实现返回的 passed 字段；是否出现取决于执行分支", required: false, type: bool }
+    schema: { description_zh: "C++ 实现返回的 schema 字段；是否出现取决于执行分支", required: false, type: string }
+  }
+  state: defined
+}
+schema: uai.command_spec.v1
+status: active
+types: {}
+verification: { reason: read_only_command_has_no_post_write_verification, state: none }
+version: 1

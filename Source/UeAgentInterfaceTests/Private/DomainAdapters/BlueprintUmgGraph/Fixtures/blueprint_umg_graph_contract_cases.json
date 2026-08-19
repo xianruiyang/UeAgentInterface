@@ -1,0 +1,132 @@
+{
+  "schema": "uai.domain_adapter.blueprint_umg_graph.test_fixture.v1",
+  "canonical_value_schema": "uai.graph_compound.canonical.v1",
+  "adapter_id": "D/BlueprintUmgGraph",
+  "port_family_count": 6,
+  "capability_count": 6,
+  "legacy_candidate_count": 6,
+  "port_families": [
+    {
+      "family_id": "asset_lifecycle",
+      "required_identity_facets": ["target_identity", "target_kind", "parent_class_identity"],
+      "required_stages": ["apply", "compile_or_refresh", "settle", "independent_readback"],
+      "oracle_kind": "independent_loaded_asset_readback"
+    },
+    {
+      "family_id": "graph_mutation",
+      "required_identity_facets": ["target_identity", "graph_identity", "item_identity", "pin_identity", "relation_identity"],
+      "required_stages": ["apply", "compile", "settle", "independent_readback"],
+      "oracle_kind": "independent_graph_node_pin_and_link_readback"
+    },
+    {
+      "family_id": "hierarchy_mutation",
+      "required_identity_facets": ["target_identity", "tree_identity", "item_identity", "parent_identity", "ordering_identity"],
+      "required_stages": ["apply", "refresh", "compile", "settle", "independent_readback"],
+      "oracle_kind": "independent_scs_or_widget_tree_readback"
+    },
+    {
+      "family_id": "binding_mutation",
+      "required_identity_facets": ["target_identity", "binding_identity", "source_identity", "target_identity_ref"],
+      "required_stages": ["apply", "compile", "settle", "independent_readback"],
+      "oracle_kind": "independent_delegate_or_property_binding_readback"
+    },
+    {
+      "family_id": "event_discovery",
+      "required_identity_facets": ["target_identity", "owner_item_identity", "owner_class_identity"],
+      "required_stages": ["independent_readback"],
+      "oracle_kind": "native_blueprint_assignable_delegate_enumeration"
+    },
+    {
+      "family_id": "compile_settle",
+      "required_identity_facets": ["target_identity", "target_generation"],
+      "required_stages": ["compile_or_refresh", "settle", "independent_readback"],
+      "oracle_kind": "compile_status_plus_distinct_post_barrier_readback"
+    }
+  ],
+  "capabilities": [
+    {"capability_id":"blueprint.asset.create","descriptor_id":"uai.operation.blueprint.asset.create","version":1,"operation_kind":"operation","effect_class":"write","port_family_id":"asset_lifecycle"},
+    {"capability_id":"blueprint.authoring.apply","descriptor_id":"uai.operation.blueprint.authoring.apply","version":1,"operation_kind":"operation","effect_class":"write","port_family_id":"graph_mutation"},
+    {"capability_id":"blueprint.component.events.discover","descriptor_id":"uai.query.blueprint.component.events.discover","version":1,"operation_kind":"query","effect_class":"read_only","port_family_id":"event_discovery"},
+    {"capability_id":"umg.asset.create","descriptor_id":"uai.operation.umg.asset.create","version":1,"operation_kind":"operation","effect_class":"write","port_family_id":"asset_lifecycle"},
+    {"capability_id":"umg.authoring.apply","descriptor_id":"uai.operation.umg.authoring.apply","version":1,"operation_kind":"operation","effect_class":"write","port_family_id":"hierarchy_mutation"},
+    {"capability_id":"umg.widget.events.discover","descriptor_id":"uai.query.umg.widget.events.discover","version":1,"operation_kind":"query","effect_class":"read_only","port_family_id":"event_discovery"}
+  ],
+  "legacy_mappings": [
+    {"legacy_id":"blueprint_apply_folder","disposition":"compose","target_capability_ids":["blueprint.authoring.apply"]},
+    {"legacy_id":"blueprint_create","disposition":"adapt","target_capability_ids":["blueprint.asset.create"]},
+    {"legacy_id":"blueprint_list_component_events","disposition":"adapt","target_capability_ids":["blueprint.component.events.discover"]},
+    {"legacy_id":"umg_apply_folder","disposition":"compose","target_capability_ids":["umg.authoring.apply"]},
+    {"legacy_id":"umg_create_widget_blueprint","disposition":"adapt","target_capability_ids":["umg.asset.create"]},
+    {"legacy_id":"umg_list_widget_events","disposition":"adapt","target_capability_ids":["umg.widget.events.discover"]}
+  ],
+  "identity_cases": [
+    {
+      "case_id": "blueprint_builtin_and_guid_nodes",
+      "target_kind": "blueprint",
+      "target_identity": "/Game/UAI/GC002/BP_GraphFixture",
+      "structure_identity": "graph:EventGraph",
+      "items": [
+        {"item_identity":"node:builtin:event_entry","native_guid":"","stable_builtin_role":"event_entry:ReceiveBeginPlay"},
+        {"item_identity":"node:call:print_string","native_guid":"11111111-2222-3333-4444-555555555555","stable_builtin_role":""}
+      ],
+      "pins": [
+        {"pin_identity":"pin:entry:Then","owner_item_identity":"node:builtin:event_entry","native_name":"Then","direction":"output"},
+        {"pin_identity":"pin:print:execute","owner_item_identity":"node:call:print_string","native_name":"execute","direction":"input"}
+      ],
+      "links": [
+        {"relation_identity":"link:begin_play_to_print","from_pin_identity":"pin:entry:Then","to_pin_identity":"pin:print:execute"}
+      ]
+    },
+    {
+      "case_id": "umg_tree_slot_and_binding",
+      "target_kind": "widget_blueprint",
+      "target_identity": "/Game/UAI/GC002/WBP_GraphFixture",
+      "structure_identity": "tree:WidgetTree",
+      "items": [
+        {"item_identity":"widget:RootCanvas","native_guid":"aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee","stable_builtin_role":"root_widget"},
+        {"item_identity":"widget:ConfirmButton","native_guid":"99999999-8888-7777-6666-555555555555","stable_builtin_role":""}
+      ],
+      "hierarchy": [
+        {"relation_identity":"parent:ConfirmButton","item_identity":"widget:ConfirmButton","parent_identity":"widget:RootCanvas","ordering_identity":"order:RootCanvas:0"}
+      ],
+      "bindings": [
+        {"binding_identity":"binding:ConfirmButton.OnClicked","source_identity":"widget:ConfirmButton","source_field":"OnClicked","target_identity_ref":"graph:EventGraph","target_field":"event:ConfirmButton_OnClicked"}
+      ]
+    }
+  ],
+  "negative_cases": [
+    {"case_id":"duplicate_item_identity","error_code":"blueprint_umg_graph_item_identity_duplicate","mutation_started":false},
+    {"case_id":"unresolved_link_endpoint","error_code":"blueprint_umg_graph_link_endpoint_unresolved","mutation_started":false},
+    {"case_id":"hierarchy_cycle","error_code":"blueprint_umg_graph_hierarchy_cycle","mutation_started":false},
+    {"case_id":"missing_builtin_identity","error_code":"blueprint_umg_graph_builtin_identity_missing","mutation_started":false},
+    {"case_id":"compile_incomplete","error_code":"blueprint_umg_graph_compile_incomplete","mutation_started":true},
+    {"case_id":"readback_reuses_apply_evidence","error_code":"blueprint_umg_graph_readback_not_independent","mutation_started":true}
+  ],
+  "lifecycle_evidence": {
+    "before_revision": "revision:41",
+    "apply_evidence": "fixture:gc-002:apply:42",
+    "settle_evidence": "fixture:gc-002:settle:42",
+    "readback_revision": "revision:42",
+    "readback_evidence": "fixture:gc-002:independent-readback:42",
+    "required_distinct_evidence": ["apply_evidence", "settle_evidence", "readback_evidence"]
+  },
+  "forbidden_owners": [
+    "public_command_dispatch",
+    "prefix_dispatch",
+    "json_or_hjson_parser",
+    "hjson_workspace_or_layout",
+    "domain_descriptor_registry",
+    "transaction_or_save",
+    "verification_or_outcome",
+    "response_projection"
+  ],
+  "forbidden_oracles": [
+    "legacy_folder_apply_provider",
+    "legacy_command_success",
+    "request_or_export_echo",
+    "apply_receipt_as_readback",
+    "compile_receipt_as_readback",
+    "mutation_cache",
+    "self_generated_golden"
+  ]
+}

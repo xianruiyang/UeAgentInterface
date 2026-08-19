@@ -1,0 +1,69 @@
+{
+  "schema": "uai.historical_successor.v2",
+  "owner_task_id": "T29-EXTERNAL-SKIN-WEIGHT-IMPORT",
+  "commands": [
+    {
+      "historical_command_id": "skeletal_mesh_import_skin_weight_profile",
+      "approval": "1)",
+      "historical_source": "docs/commands/16_SkeletalMesh_FolderFormat.md",
+      "historical_contract": {
+        "inputs": "asset_path, lod_index, profile_name, save_after_import, source_filename",
+        "outputs": "—",
+        "purpose": "从 FBX 导入指定 LOD 的 Skin Weight Profile"
+      },
+      "successor": {
+        "kind": "exact_command_set",
+        "command_ids": [
+          "external.skin_weight_profile.import"
+        ]
+      },
+      "resolved_from_contract_id": "uai.historical_capability.t29.external.skin.weight.import.skeletal_mesh_import_skin_weight_profile/1",
+      "semantic_coverage": {
+        "purpose": {
+          "status": "covered",
+          "by": [
+            "external.skin_weight_profile.import"
+          ],
+          "explanation": "external.skin_weight_profile.import 通过独立 skin-weight-import-owner 与正式 ImportAlternateSkinWeight mechanics 覆盖冻结用途“从 FBX 导入指定 LOD 的 Skin Weight Profile”，不恢复旧 ID。"
+        },
+        "inputs": {
+          "status": "covered",
+          "by": [
+            "external.skin_weight_profile.import"
+          ],
+          "explanation": "external.skin_weight_profile.import 以精确 source_ref、target_ref、profile_name 与 lod_index 覆盖冻结输入“asset_path, lod_index, profile_name, save_after_import, source_filename”；成功必定保存重载，因此不保留 save_after_import 分支。"
+        },
+        "outputs": {
+          "status": "covered",
+          "by": [
+            "external.skin_weight_profile.import"
+          ],
+          "explanation": "external.skin_weight_profile.import 返回真实终态、持久化收据和独立 profile 读回；冻结输出为“—”，没有额外旧输出合同需要兼容。"
+        }
+      },
+      "product_evidence": {
+        "test_id": "UAI.StrictV2.T29.EXTERNAL.SKIN.WEIGHT.IMPORT",
+        "public_command_ids": [
+          "external.skin_weight_profile.import"
+        ],
+        "required_claims": [
+          "public_entry",
+          "behavior",
+          "readback",
+          "failure_semantics",
+          "cleanup",
+          "legacy_exit",
+          "documentation",
+          "terminal_state"
+        ]
+      },
+      "old_id_exit": {
+        "public_executable": false,
+        "manifest_active": false,
+        "sdk_binding_active": false,
+        "compatibility_alias": false
+      },
+      "final_lifecycle": "deprecated_replaced"
+    }
+  ]
+}

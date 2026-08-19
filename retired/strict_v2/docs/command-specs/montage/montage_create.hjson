@@ -1,0 +1,94 @@
+authoring: { reason: command_has_no_registered_folder_authoring_profile, state: none }
+category: montage
+command: montage_create
+deprecation: { reason: command_is_active, state: none }
+discovery: { aliases: [], keywords_en: [montage, create], keywords_zh: [montage_create], summary_en: "Execute montage_create with a verified implementation contract", summary_zh: "创建 Montage 资产", tags: [montage, p2-006] }
+errors: {
+  codes: [
+    { code: asset_already_exists, description_zh: "C++ 实现返回错误码 asset_already_exists", retry_safe: false, stage: execution, wire_match: exact }
+    { code: asset_not_found, description_zh: "C++ 实现返回错误码 asset_not_found", retry_safe: false, stage: execution, wire_match: exact }
+    { code: create_anim_montage_factory_failed, description_zh: "C++ 实现返回错误码 create_anim_montage_factory_failed", retry_safe: false, stage: execution, wire_match: exact }
+    { code: create_anim_montage_failed, description_zh: "C++ 实现返回错误码 create_anim_montage_failed", retry_safe: false, stage: execution, wire_match: exact }
+    { code: create_package_failed, description_zh: "C++ 实现返回错误码 create_package_failed", retry_safe: false, stage: execution, wire_match: exact }
+    { code: invalid_asset_name, description_zh: "C++ 实现返回错误码 invalid_asset_name", retry_safe: true, stage: preflight, wire_match: exact }
+    { code: invalid_asset_path, description_zh: "C++ 实现返回错误码 invalid_asset_path", retry_safe: true, stage: preflight, wire_match: exact }
+    { code: missing_asset_path, description_zh: "C++ 实现返回错误码 missing_asset_path", retry_safe: true, stage: preflight, wire_match: exact }
+    { code: missing_target_skeleton_or_source_animation, description_zh: "C++ 实现返回错误码 missing_target_skeleton_or_source_animation", retry_safe: true, stage: preflight, wire_match: exact }
+    { code: preview_skeletal_mesh_incompatible, description_zh: "C++ 实现返回错误码 preview_skeletal_mesh_incompatible", retry_safe: false, stage: execution, wire_match: exact }
+    { code: preview_skeletal_mesh_not_found, description_zh: "C++ 实现返回错误码 preview_skeletal_mesh_not_found", retry_safe: false, stage: execution, wire_match: exact }
+    { code: save_asset_failed, description_zh: "C++ 实现返回错误码 save_asset_failed", retry_safe: false, stage: execution, wire_match: exact }
+    { code: source_animation_not_found_or_not_anim_sequence, description_zh: "C++ 实现返回错误码 source_animation_not_found_or_not_anim_sequence", retry_safe: false, stage: execution, wire_match: exact }
+    { code: target_skeleton_not_found, description_zh: "C++ 实现返回错误码 target_skeleton_not_found", retry_safe: false, stage: execution, wire_match: exact }
+  ]
+}
+evidence: {
+  docs: [
+    { path: "Plugins/UeAgentInterface/docs/commands/montage/montage_create.md", purpose: "user documentation cross-check; C++ implementation remains authoritative" }
+  ]
+  implementation: [
+    { line_hint: 852, path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Commands/Montage/UeAgentHttpServer_Montage.cpp", purpose: "command handler, parameter and return evidence", symbol: CmdMontageCreate }
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Server/UeAgentHttpServer.cpp", purpose: "transitive helper evidence used by the command handler" }
+  ]
+  tests: [
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterfaceTests/Private/Smoke/UeAgentInterfaceSmoke_AnimationIKNiagara.cpp", purpose: "smoke or negative-path evidence cross-checked for the verified contract" }
+  ]
+}
+execution: {
+  destructive: false
+  editor_state: required
+  game_thread: required
+  idempotent: false
+  kind: write
+  overwrite_behavior: none
+  pie_state: allowed
+  retry_safe: false
+  save_behavior: caller_controlled
+  side_effects: [modifies_asset, creates_asset, modifies_editor_session, opens_window]
+  ui_effect: opens_editor
+}
+maturity: verified
+params: {
+  constraints: []
+  fields: {
+    asset_path: { default_state: none, description_zh: "C++ 实现读取的 asset_path 参数", path_semantics: { access_scope: project_write, kind: ue_asset }, required: true, type: ue_asset_path }
+    open_editor: { default: false, default_state: defined, description_zh: "C++ 实现读取的 open_editor 参数", required: false, type: bool }
+    preview_skeletal_mesh: { default_state: none, description_zh: "C++ 实现读取的 preview_skeletal_mesh 参数", required: false, type: string }
+    save_after_create: { default: false, default_state: defined, description_zh: "C++ 实现读取的 save_after_create 参数", required: false, type: bool }
+    source_animation: { default_state: none, description_zh: "C++ 实现读取的 source_animation 参数", required: false, type: string }
+    target_skeleton: { default_state: none, description_zh: "C++ 实现读取的 target_skeleton 参数", required: true, type: string }
+  }
+  state: defined
+}
+response: { artifact_fields: [], compact_fields: [saved, asset_path, asset_name, object_path, opened_editor, preview_skeletal_mesh], failure_fields: [params.asset_path, params.target_skeleton], max_items_policy: { fields: [], mode: none } }
+returns: {
+  fields: {
+    asset_name: { description_zh: "C++ 实现返回的 asset_name 字段；是否出现取决于执行分支", required: false, type: string }
+    asset_path: { description_zh: "C++ 实现返回的 asset_path 字段；是否出现取决于执行分支", required: false, type: ue_asset_path }
+    object_path: { description_zh: "C++ 实现返回的 object_path 字段；是否出现取决于执行分支", required: false, type: ue_object_path }
+    opened_editor: { description_zh: "C++ 实现返回的 opened_editor 字段；是否出现取决于执行分支", required: false, type: bool }
+    preview_skeletal_mesh: { description_zh: "C++ 实现返回的 preview_skeletal_mesh 字段；是否出现取决于执行分支", required: false, type: string }
+    saved: { description_zh: "C++ 实现返回的 saved 字段；是否出现取决于执行分支", required: false, type: bool }
+    section_count: { description_zh: "C++ 实现返回的 section_count 字段；是否出现取决于执行分支", required: false, type: integer }
+    skeleton: { description_zh: "C++ 实现返回的 skeleton 字段；是否出现取决于执行分支", required: false, type: string }
+    slot_track_count: { description_zh: "C++ 实现返回的 slot_track_count 字段；是否出现取决于执行分支", required: false, type: integer }
+    source_animation: { description_zh: "C++ 实现返回的 source_animation 字段；是否出现取决于执行分支", required: false, type: string }
+  }
+  state: defined
+}
+schema: uai.command_spec.v1
+status: active
+types: {}
+verification: {
+  assertions: [
+    { id: result_present, operator: exists, source: returns.saved }
+    { id: state_readback_present, operator: exists, source: methods.state_readback.asset_path }
+  ]
+  failure_policy: fail_overall
+  methods: [
+    { id: result, kind: result_assertion }
+    { command: montage_get_info, id: state_readback, kind: command_readback, params_mapping: { asset_path: returns.asset_path } }
+  ]
+  required: true
+  state: defined
+}
+version: 1

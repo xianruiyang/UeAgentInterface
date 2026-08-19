@@ -1,0 +1,84 @@
+authoring: { reason: command_has_no_registered_folder_authoring_profile, state: none }
+category: node_graph
+command: node_catalog_categories
+deprecation: { reason: command_is_active, state: none }
+discovery: { aliases: [], keywords_en: [node, catalog, categories, node_graph], keywords_zh: [node_catalog_categories], summary_en: "Execute node_catalog_categories with a verified implementation contract", summary_zh: "查询同一候选源的分类/分组统计；当 LLM 不确定 UE 菜单分类时先用它缩小范围", tags: [node_graph, p2-003] }
+errors: {
+  codes: [
+    { code: asset_registry_module_unavailable, description_zh: "C++ 实现返回错误码 asset_registry_module_unavailable", retry_safe: false, stage: execution, wire_match: exact }
+    { code: blueprint_not_found, description_zh: "C++ 实现返回错误码 blueprint_not_found", retry_safe: false, stage: execution, wire_match: exact }
+    { code: graph_not_found, description_zh: "C++ 实现返回错误码 graph_not_found", retry_safe: false, stage: execution, wire_match: exact }
+    { code: material_asset_not_found, description_zh: "C++ 实现返回错误码 material_asset_not_found", retry_safe: false, stage: execution, wire_match: exact }
+    { code: material_function_preview_duplicate_failed, description_zh: "C++ 实现返回错误码 material_function_preview_duplicate_failed", retry_safe: false, stage: execution, wire_match: exact }
+    { code: material_function_preview_material_create_failed, description_zh: "C++ 实现返回错误码 material_function_preview_material_create_failed", retry_safe: false, stage: execution, wire_match: exact }
+    { code: material_function_required, description_zh: "C++ 实现返回错误码 material_function_required", retry_safe: true, stage: preflight, wire_match: exact }
+    { code: material_graph_not_found, description_zh: "C++ 实现返回错误码 material_graph_not_found", retry_safe: false, stage: execution, wire_match: exact }
+    { code: material_graph_schema_unavailable, description_zh: "C++ 实现返回错误码 material_graph_schema_unavailable", retry_safe: false, stage: execution, wire_match: exact }
+    { code: missing_asset_path_for_material_pin_context, description_zh: "C++ 实现返回错误码 missing_asset_path_for_material_pin_context", retry_safe: true, stage: preflight, wire_match: exact }
+    { code: pin_not_found, description_zh: "C++ 实现返回错误码 pin_not_found", retry_safe: false, stage: execution, wire_match: exact }
+    { code: placeable_actor_catalog_empty_no_factories_found, description_zh: "C++ 实现返回错误码 placeable_actor_catalog_empty_no_factories_found", retry_safe: false, stage: execution, wire_match: exact }
+    { code: unsupported, description_zh: "C++ 实现返回错误码 unsupported", retry_safe: false, stage: execution, wire_match: prefix }
+    { code: unsupported_material_asset_type, description_zh: "C++ 实现返回错误码 unsupported_material_asset_type", retry_safe: false, stage: execution, wire_match: exact }
+  ]
+}
+evidence: {
+  docs: [
+    { path: "Plugins/UeAgentInterface/docs/commands/node_graph/node_catalog_categories.md", purpose: "user documentation cross-check; C++ implementation remains authoritative" }
+  ]
+  implementation: [
+    { line_hint: 26, path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Commands/PaletteSearch/UeAgentHttpServer_PaletteSearch.cpp", purpose: "command handler, parameter and return evidence", symbol: CmdNodeCatalogCategories }
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Commands/PaletteSearch/UeAgentPaletteSearchBlueprint.cpp", purpose: "transitive helper evidence used by the command handler" }
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Commands/PaletteSearch/UeAgentPaletteSearchComponentWidget.cpp", purpose: "transitive helper evidence used by the command handler" }
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Commands/PaletteSearch/UeAgentPaletteSearchCore.cpp", purpose: "transitive helper evidence used by the command handler" }
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Commands/PaletteSearch/UeAgentPaletteSearchMaterial.cpp", purpose: "transitive helper evidence used by the command handler" }
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Commands/PaletteSearch/UeAgentPaletteSearchNiagara.cpp", purpose: "transitive helper evidence used by the command handler" }
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Commands/PaletteSearch/UeAgentPaletteSearchPlaceableActor.cpp", purpose: "transitive helper evidence used by the command handler" }
+  ]
+  tests: [
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterfaceTests/Private/Smoke/UeAgentInterfaceNodeCatalogOriginSmokeTests.cpp", purpose: "smoke or negative-path evidence cross-checked for the verified contract" }
+    { path: "Plugins/UeAgentInterface/docs/smoke_coverage_ledger.json", purpose: "smoke or negative-path evidence cross-checked for the verified contract" }
+  ]
+}
+execution: {
+  destructive: false
+  editor_state: required
+  game_thread: required
+  idempotent: true
+  kind: read_only
+  overwrite_behavior: none
+  pie_state: allowed
+  retry_safe: true
+  save_behavior: none
+  side_effects: []
+  ui_effect: none
+}
+maturity: verified
+params: {
+  constraints: []
+  fields: {
+    catalog_type: { default_state: none, description_zh: "C++ 实现读取的 catalog_type 参数", required: true, type: string }
+    context: { default_state: none, description_zh: "C++ 实现读取的 context 参数", required: false, type: object, type_ref: "shared:NodeCatalogContext" }
+    filters: { default_state: none, description_zh: "C++ 实现读取的 filters 参数", required: false, type: object, type_ref: "shared:NodeCatalogFilters" }
+    query: { default_state: none, description_zh: "C++ 实现读取的 query 参数", required: false, type: object, type_ref: "shared:NodeCatalogQuery" }
+    view: { default_state: none, description_zh: "C++ 实现读取的 view 参数", required: false, type: object, type_ref: "shared:NodeCatalogView" }
+  }
+  state: defined
+}
+response: { artifact_fields: [], compact_fields: [catalog_type, query, counts, groups, category_tree, warnings], failure_fields: [params.catalog_type], max_items_policy: { fields: [], mode: none } }
+returns: {
+  fields: {
+    catalog_type: { description_zh: "C++ 实现返回的 catalog_type 字段；是否出现取决于执行分支", required: false, type: string }
+    category_tree: { description_zh: "C++ 实现返回的 category_tree 字段；是否出现取决于执行分支", item_type: json_value, required: false, type: array }
+    counts: { description_zh: "C++ 实现返回的 counts 字段；是否出现取决于执行分支", required: false, type: json_value }
+    groups: { description_zh: "C++ 实现返回的 groups 字段；是否出现取决于执行分支", item_type: json_value, required: false, type: array }
+    query: { description_zh: "C++ 实现返回的 query 字段；是否出现取决于执行分支", required: false, type: json_value }
+    schema: { description_zh: "C++ 实现返回的 schema 字段；是否出现取决于执行分支", required: false, type: string }
+    warnings: { description_zh: "C++ 实现返回的 warnings 字段；是否出现取决于执行分支", item_type: json_value, required: false, type: array }
+  }
+  state: defined
+}
+schema: uai.command_spec.v1
+status: active
+types: {}
+verification: { reason: read_only_command_has_no_post_write_verification, state: none }
+version: 1

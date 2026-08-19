@@ -2,7 +2,6 @@
 
 #include "Commands/PaletteSearch/UeAgentPaletteSearchTypes.h"
 
-#include "Commands/PaletteSearch/UeAgentPaletteSearchAuthoring.h"
 #include "Commands/PaletteSearch/UeAgentPaletteSearchNaming.h"
 #include "BlueprintActionFilter.h"
 #include "BlueprintActionMenuBuilder.h"
@@ -13,7 +12,6 @@
 #include "BlueprintFunctionNodeSpawner.h"
 #include "BlueprintNodeSpawner.h"
 #include "BlueprintVariableNodeSpawner.h"
-#include "Dom/JsonObject.h"
 #include "EdGraph/EdGraph.h"
 #include "EdGraph/EdGraphNode.h"
 #include "EdGraph/EdGraphPin.h"
@@ -215,63 +213,6 @@ namespace
 		return TEXT("plugins");
 	}
 
-	static TSharedRef<FJsonObject> BuildGenericNodeAuthoring(const FSearchParams& Params, const UClass* NodeClass)
-	{
-		TSharedRef<FJsonObject> Obj = MakeShared<FJsonObject>();
-		Obj->SetStringField(TEXT("operation"), TEXT("blueprint_add_node_by_class"));
-		Obj->SetStringField(TEXT("asset_path"), Params.AssetPath);
-		Obj->SetStringField(TEXT("graph_name"), Params.GraphName.IsEmpty() ? TEXT("EventGraph") : Params.GraphName);
-		Obj->SetStringField(TEXT("node_class"), NodeClass ? NodeClass->GetPathName() : FString());
-		Obj->SetNumberField(TEXT("node_pos_x"), 0);
-		Obj->SetNumberField(TEXT("node_pos_y"), 0);
-		return Obj;
-	}
-
-	static TSharedRef<FJsonObject> BuildFunctionAuthoring(const FSearchParams& Params, const UFunction* Function)
-	{
-		TSharedRef<FJsonObject> Obj = MakeShared<FJsonObject>();
-		Obj->SetStringField(TEXT("operation"), TEXT("blueprint_add_call_function_node"));
-		Obj->SetStringField(TEXT("asset_path"), Params.AssetPath);
-		Obj->SetStringField(TEXT("graph_name"), Params.GraphName.IsEmpty() ? TEXT("EventGraph") : Params.GraphName);
-		Obj->SetStringField(TEXT("function_owner_class"), Function && Function->GetOwnerClass() ? Function->GetOwnerClass()->GetPathName() : FString());
-		Obj->SetStringField(TEXT("function_name"), Function ? Function->GetName() : FString());
-		Obj->SetNumberField(TEXT("node_pos_x"), 0);
-		Obj->SetNumberField(TEXT("node_pos_y"), 0);
-		return Obj;
-	}
-
-	static TSharedRef<FJsonObject> BuildEventAuthoring(const FSearchParams& Params, const UFunction* Function)
-	{
-		TSharedRef<FJsonObject> Obj = MakeShared<FJsonObject>();
-		Obj->SetStringField(TEXT("operation"), TEXT("blueprint_add_event_node"));
-		Obj->SetStringField(TEXT("asset_path"), Params.AssetPath);
-		Obj->SetStringField(TEXT("graph_name"), Params.GraphName.IsEmpty() ? TEXT("EventGraph") : Params.GraphName);
-		Obj->SetStringField(TEXT("event_class"), Function && Function->GetOwnerClass() ? Function->GetOwnerClass()->GetPathName() : FString());
-		Obj->SetStringField(TEXT("event_name"), Function ? Function->GetName() : FString());
-		Obj->SetNumberField(TEXT("node_pos_x"), 0);
-		Obj->SetNumberField(TEXT("node_pos_y"), 0);
-		return Obj;
-	}
-
-	static TSharedRef<FJsonObject> BuildVariableAuthoring(const FSearchParams& Params, const UBlueprintVariableNodeSpawner* VariableSpawner)
-	{
-		const FProperty* VarProperty = VariableSpawner ? VariableSpawner->GetVarProperty() : nullptr;
-		const FString NodeClassName = VariableSpawner && VariableSpawner->NodeClass ? VariableSpawner->NodeClass->GetName() : FString();
-		TSharedRef<FJsonObject> Obj = MakeShared<FJsonObject>();
-		Obj->SetStringField(TEXT("operation"), TEXT("blueprint_add_variable_node"));
-		Obj->SetStringField(TEXT("asset_path"), Params.AssetPath);
-		Obj->SetStringField(TEXT("graph_name"), Params.GraphName.IsEmpty() ? TEXT("EventGraph") : Params.GraphName);
-		Obj->SetStringField(TEXT("variable_name"), VarProperty ? VarProperty->GetName() : FString());
-		Obj->SetStringField(TEXT("node_type"), NodeClassName.Contains(TEXT("Set")) ? TEXT("set") : TEXT("get"));
-		if (VarProperty && VarProperty->GetOwnerClass())
-		{
-			Obj->SetStringField(TEXT("member_parent_class"), VarProperty->GetOwnerClass()->GetPathName());
-		}
-		Obj->SetNumberField(TEXT("node_pos_x"), 0);
-		Obj->SetNumberField(TEXT("node_pos_y"), 0);
-		return Obj;
-	}
-
 	static void AddBlueprintActionCandidate(const FSearchParams& Params, const TSharedPtr<FEdGraphSchemaAction>& Action, int32 UiOrder, TArray<FCandidate>& OutCandidates)
 	{
 		if (!Action.IsValid())
@@ -302,9 +243,10 @@ namespace
 		FString Type = TEXT("blueprint_node");
 		FString StableId = NodeClass->GetPathName();
 		FString CanonicalKey = NodeClass->GetName();
-		FString WriteSupport = TEXT("blueprint_add_node_by_class");
-		FString SupportReason = TEXT("Can be written with node_class via blueprint_add_node_by_class; some actions may need specialized fields.");
-		TSharedPtr<FJsonObject> RecommendedAuthoring = BuildGenericNodeAuthoring(Params, NodeClass);
+		FString WriteSupport = TEXT("blueprint.graphs[].items[].candidate");
+		FString SupportReason = TEXT("Use node_class as the item candidate in the Blueprint graph authoring surface; specialized candidates may require additional fields.");
+		TMap<FString, FString> AuthoringSelectors;
+		AuthoringSelectors.Add(TEXT("node_class"), NodeClass->GetPathName());
 
 		if (const UBlueprintFunctionNodeSpawner* FunctionSpawner = Cast<const UBlueprintFunctionNodeSpawner>(Spawner))
 		{
@@ -313,9 +255,11 @@ namespace
 				Type = TEXT("blueprint_call_function");
 				StableId = Function->GetPathName();
 				CanonicalKey = Function->GetName();
-				WriteSupport = TEXT("blueprint_add_call_function_node");
-				SupportReason = TEXT("Can be written with function_owner_class and function_name via blueprint_add_call_function_node.");
-				RecommendedAuthoring = BuildFunctionAuthoring(Params, Function);
+				WriteSupport = TEXT("blueprint.graphs[].items[].candidate");
+				SupportReason = TEXT("Use function_owner_class and function_name as the call-function item candidate fields.");
+				AuthoringSelectors.Reset();
+				if (Function->GetOwnerClass()) AuthoringSelectors.Add(TEXT("function_owner_class"), Function->GetOwnerClass()->GetPathName());
+				AuthoringSelectors.Add(TEXT("function_name"), Function->GetName());
 			}
 		}
 		else if (const UBlueprintEventNodeSpawner* EventSpawner = Cast<const UBlueprintEventNodeSpawner>(Spawner))
@@ -325,9 +269,11 @@ namespace
 				Type = TEXT("blueprint_event");
 				StableId = Function->GetPathName();
 				CanonicalKey = Function->GetName();
-				WriteSupport = TEXT("blueprint_add_event_node");
-				SupportReason = TEXT("Can be written with event_class and event_name via blueprint_add_event_node.");
-				RecommendedAuthoring = BuildEventAuthoring(Params, Function);
+				WriteSupport = TEXT("blueprint.graphs[].items[].candidate");
+				SupportReason = TEXT("Use event_class and event_name as the event item candidate fields.");
+				AuthoringSelectors.Reset();
+				if (Function->GetOwnerClass()) AuthoringSelectors.Add(TEXT("event_class"), Function->GetOwnerClass()->GetPathName());
+				AuthoringSelectors.Add(TEXT("event_name"), Function->GetName());
 			}
 		}
 		else if (const UBlueprintVariableNodeSpawner* VariableSpawner = Cast<const UBlueprintVariableNodeSpawner>(Spawner))
@@ -338,9 +284,13 @@ namespace
 				Type = TEXT("blueprint_variable_node");
 				StableId = VarProperty->GetPathName();
 				CanonicalKey = VarProperty->GetName();
-				WriteSupport = TEXT("blueprint_add_variable_node");
-				SupportReason = TEXT("Can be written with variable_name and node_type via blueprint_add_variable_node.");
-				RecommendedAuthoring = BuildVariableAuthoring(Params, VariableSpawner);
+				WriteSupport = TEXT("blueprint.graphs[].items[].candidate");
+				SupportReason = TEXT("Use variable_name and node_type as the variable item candidate fields.");
+				AuthoringSelectors.Reset();
+				AuthoringSelectors.Add(TEXT("variable_name"), VarProperty->GetName());
+				const FString NodeClassName = VariableSpawner->NodeClass ? VariableSpawner->NodeClass->GetName() : FString();
+				AuthoringSelectors.Add(TEXT("node_type"), NodeClassName.Contains(TEXT("Set")) ? TEXT("set") : TEXT("get"));
+				if (VarProperty->GetOwnerClass()) AuthoringSelectors.Add(TEXT("member_parent_class"), VarProperty->GetOwnerClass()->GetPathName());
 			}
 		}
 		else if (const UBlueprintFieldNodeSpawner* FieldSpawner = Cast<const UBlueprintFieldNodeSpawner>(Spawner))
@@ -357,9 +307,6 @@ namespace
 		Candidate.Kind = Type;
 		Candidate.Name = MenuNameFromText(Action->GetMenuDescription(), CanonicalKey);
 		Candidate.FullName = StableId;
-		Candidate.CandidateId = Candidate.Kind + TEXT(":") + Candidate.FullName;
-		Candidate.StableId = StableId;
-		Candidate.CanonicalKey = CanonicalKey;
 		Candidate.DisplayName = Candidate.Name;
 		Candidate.Tooltip = Action->GetTooltipDescription().ToString();
 		Candidate.Keywords = Action->GetKeywords().ToString();
@@ -369,13 +316,14 @@ namespace
 		Candidate.SourceOrigin = ClassSourceOrigin(NodeClass);
 		Candidate.SourceLabel = NodeClass->GetOutermost()->GetName();
 		Candidate.ObjectPath = NodeClass->GetPathName();
+		Candidate.AuthoringSelectors = MoveTemp(AuthoringSelectors);
 		Candidate.WriteSupport = WriteSupport;
 		Candidate.SupportReason = SupportReason;
 		Candidate.bInLibrary = true;
 		Candidate.bSupportedInContext = true;
 		Candidate.UiOrder = UiOrder;
-		Candidate.JsonAuthoring = BuildJsonAuthoringPatch(Candidate);
-		Candidate.LegacyAuthoring = RecommendedAuthoring;
+		FString IdentityError;
+		ensureAlwaysMsgf(SetCandidateIdentity(Params.CatalogType, StableId, CanonicalKey, Candidate, IdentityError), TEXT("Blueprint catalog identity failed: %s"), *IdentityError);
 		OutCandidates.Add(MoveTemp(Candidate));
 	}
 
@@ -402,7 +350,7 @@ namespace
 			const bool bAlreadyAdded = OutCandidates.ContainsByPredicate([&VariableName](const FCandidate& Candidate)
 			{
 				return Candidate.Kind.Equals(TEXT("blueprint_variable_node")) &&
-					(Candidate.CanonicalKey.Equals(VariableName) || Candidate.Name.Equals(VariableName));
+					(Candidate.SearchKey.Equals(VariableName) || Candidate.Name.Equals(VariableName));
 			});
 			if (bAlreadyAdded)
 			{
@@ -411,13 +359,10 @@ namespace
 
 			const FString VariablePath = FString::Printf(TEXT("%s.%s"), *BlueprintPath, *VariableName);
 			FCandidate Candidate;
-			Candidate.CandidateId = FString::Printf(TEXT("blueprint_variable_node:%s:%s"), *BlueprintPath, *VariableName);
 			Candidate.Kind = TEXT("blueprint_variable_node");
 			Candidate.Type = Candidate.Kind;
 			Candidate.Name = VariableName;
 			Candidate.FullName = VariablePath;
-			Candidate.StableId = VariablePath;
-			Candidate.CanonicalKey = VariableName;
 			Candidate.DisplayName = FName::NameToDisplayString(VariableName, false);
 			Candidate.CategoryPath = TEXT("Blueprint|Variables");
 			Candidate.Section = TEXT("Blueprint");
@@ -425,12 +370,15 @@ namespace
 			Candidate.SourceLabel = Blueprint->GetOutermost() ? Blueprint->GetOutermost()->GetName() : BlueprintPath;
 			Candidate.PackagePath = MemberParentClass;
 			Candidate.ObjectPath = VariablePath;
-			Candidate.WriteSupport = TEXT("blueprint_add_variable_node");
-			Candidate.SupportReason = TEXT("Can be written with variable_name and node_type via blueprint_add_variable_node.");
+			Candidate.AuthoringSelectors.Add(TEXT("variable_name"), VariableName);
+			Candidate.AuthoringSelectors.Add(TEXT("member_parent_class"), MemberParentClass);
+			Candidate.WriteSupport = TEXT("blueprint.graphs[].items[].candidate");
+			Candidate.SupportReason = TEXT("Use variable_name, member_parent_class and node_type as variable item candidate fields.");
 			Candidate.bInLibrary = false;
 			Candidate.bSupportedInContext = true;
 			Candidate.UiOrder = UiOrderBase + VariableIndex++;
-			Candidate.JsonAuthoring = BuildJsonAuthoringPatch(Candidate);
+			FString IdentityError;
+			ensureAlwaysMsgf(SetCandidateIdentity(Params.CatalogType, VariablePath, VariableName, Candidate, IdentityError), TEXT("Blueprint variable catalog identity failed: %s"), *IdentityError);
 			OutCandidates.Add(MoveTemp(Candidate));
 		}
 	}

@@ -21,7 +21,6 @@ class USoundNode;
 class USoundSubmix;
 class USoundSubmixBase;
 class USoundWave;
-class UMetaSoundBuilderBase;
 class UWorld;
 class FProperty;
 class UStruct;
@@ -40,18 +39,7 @@ namespace UeAgentAudioOps
 	extern const TCHAR* AudioEffectPresetProfile;
 	extern const TCHAR* AudioRuntimeProfile;
 
-	struct FAudioRecordSession
-	{
-		FAudioRecordSession();
-
-		TWeakObjectPtr<USoundSubmix> Submix;
-		FString Name;
-		FString Path;
-		double StartTimeSeconds;
-	};
-
 	extern TArray<TWeakObjectPtr<UAudioComponent>> GPreviewComponents;
-	extern TMap<FString, FAudioRecordSession> GRecordSessions;
 
 	bool IsHeadlessEditorUi();
 	FString NormalizeAssetPath(const FString& InPath);
@@ -71,8 +59,8 @@ namespace UeAgentAudioOps
 	bool GetOptionalInt(const TSharedPtr<FJsonObject>& Params, const TCHAR* FieldName, int32& InOutValue, FString& OutError);
 	bool ReadStringArray(const TSharedPtr<FJsonObject>& Params, const TCHAR* FieldName, TArray<FString>& OutValues);
 	FString ResolveFilePath(const FString& FilePath);
-	bool SaveJsonFile(const FString& OutputPathInput, const TSharedPtr<FJsonObject>& Root, FString& OutOutputPath, FString& OutError);
-	bool LoadJsonFile(const FString& InputPathInput, TSharedPtr<FJsonObject>& OutRoot, FString& OutResolvedPath, FString& OutError);
+	bool SaveAuthoringFile(const FString& OutputPathInput, const TSharedPtr<FJsonObject>& Root, FString& OutOutputPath, FString& OutError);
+	bool LoadAuthoringFile(const FString& InputPathInput, TSharedPtr<FJsonObject>& OutRoot, FString& OutResolvedPath, FString& OutError);
 	bool SavePackagesForObjects(const TArray<UObject*>& Objects, FString& OutError);
 	bool ValidateAssetPathForCreate(const FString& AssetPathInput, FString& OutAssetPath, FString& OutAssetName, FString& OutError);
 	UObject* CreateAssetObject(UClass* AssetClass, const FString& AssetPathInput, bool bReplaceExisting, FString& OutError);
@@ -89,7 +77,6 @@ namespace UeAgentAudioOps
 	bool ApplySoundAttenuationSemanticJson(USoundAttenuation* Asset, const TSharedPtr<FJsonObject>& Root, TArray<TSharedPtr<FJsonValue>>& OutResults, bool bDryRun, FString& OutError);
 	FString PlayStateToString(EAudioComponentPlayState State);
 	TSharedPtr<FJsonObject> BuildGenericAssetJson(UObject* Asset, const FString& Profile, bool bIncludeProperties);
-	bool SaveTrackedJson(const FString& FolderPath, const FString& FileName, const TSharedPtr<FJsonObject>& Root, TArray<TSharedPtr<FJsonValue>>& OutFiles, FString& OutError);
 	UWorld* GetEditorWorldDirect();
 	AActor* FindActorByNameOrLabelDirect(UWorld* World, const FString& NameOrLabel);
 	UAudioComponent* FindAudioComponentInWorld(UWorld* World, const TSharedPtr<FJsonObject>& Params, FString& OutError);
@@ -97,13 +84,9 @@ namespace UeAgentAudioOps
 	TSharedPtr<FJsonObject> BuildSoundWaveInfo(USoundWave* Wave, bool bIncludeProperties, bool bIncludeCuePoints, bool bIncludeAnalysis);
 	bool ImportSoundWaveFromFile(const FString& SourceFilename, const FString& DestinationPathInput, const FString& DestinationNameInput, bool bReplaceExisting, USoundWave*& OutWave, FString& OutError);
 	TSharedPtr<FJsonObject> BuildSoundCueInfo(USoundCue* Cue, bool bIncludeNodes, bool bIncludeProperties, bool bIncludeValidation);
-	bool LoadSoundCueFolder(const FString& FolderPathInput, TSharedPtr<FJsonObject>& OutAssetJson, TSharedPtr<FJsonObject>& OutNodesJson, TSharedPtr<FJsonObject>& OutEdgesJson, FString& OutFolder, FString& OutError);
 	bool ValidateSoundCueFolderJson(const TSharedPtr<FJsonObject>& NodesJson, const TSharedPtr<FJsonObject>& EdgesJson, TArray<TSharedPtr<FJsonValue>>& Issues);
 	bool ApplySoundCueGraph(USoundCue* Cue, const TSharedPtr<FJsonObject>& NodesJson, const TSharedPtr<FJsonObject>& EdgesJson, TArray<TSharedPtr<FJsonValue>>& OutPropertyResults, int32& OutNodesCreated, int32& OutEdgesCreated, bool bDryRun, FString& OutError);
 	TSharedPtr<FJsonObject> BuildMetaSoundInfo(UObject* MetaSound, bool bIncludeGraph, bool bIncludeInterfaces, bool bIncludeValidation);
-	bool ValidateMetaSoundFolder(const FString& FolderPathInput, TArray<TSharedPtr<FJsonValue>>& Issues, TSharedPtr<FJsonObject>& OutAssetJson, TSharedPtr<FJsonObject>& OutInputsJson, TSharedPtr<FJsonObject>& OutOutputsJson, FString& OutFolder, FString& OutError);
-	bool AddMetaSoundMembers(UMetaSoundBuilderBase* Builder, const TSharedPtr<FJsonObject>& MembersJson, const TCHAR* ArrayField, bool bInput, int32& OutAdded, FString& OutError);
-	bool CreateMetaSoundAsset(const FString& AssetPath, const FString& AssetTypeInput, bool bReplaceExisting, UObject*& OutAsset, FString& OutError);
 	TSharedPtr<FJsonObject> BuildSoundAttenuationInfo(USoundAttenuation* Asset, bool bIncludeRawProperties);
 	TSharedPtr<FJsonObject> BuildSoundConcurrencyInfo(USoundConcurrency* Asset, bool bIncludeRawProperties);
 	TSharedPtr<FJsonObject> BuildSoundClassInfo(USoundClass* Asset, bool bIncludeChildren, bool bIncludeRawProperties);

@@ -1,0 +1,11 @@
+definition: {
+  additional_fields: false
+  fields: {
+    search_mode: { default: fuzzy, default_state: defined, description_zh: "匹配模式", enum_values: [fuzzy, exact, prefix, contains], required: false, type: enum }
+    text: { default: "", default_state: defined, description_zh: "搜索文本", required: false, type: string }
+  }
+  kind: object
+}
+schema: uai.command_spec.shared_type.v1
+type_id: NodeCatalogQuery
+version: 1

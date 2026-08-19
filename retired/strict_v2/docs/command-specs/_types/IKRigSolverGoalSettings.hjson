@@ -1,0 +1,15 @@
+definition: {
+  additional_fields: true
+  fields: {
+    chain_depth: { default_state: none, description_zh: "FBIK chain depth", minimum: 0, required: false, type: integer }
+    goal_name: { default_state: none, description_zh: "solver goal 名", required: true, type: string }
+    influence_multiplier: { default_state: none, description_zh: "BodyMover influence", required: false, type: number }
+    pin_rotation: { default_state: none, description_zh: "FBIK pin rotation", required: false, type: number }
+    pull_chain_alpha: { default_state: none, description_zh: "FBIK pull-chain alpha", required: false, type: number }
+    strength_alpha: { default_state: none, description_zh: "FBIK strength alpha", required: false, type: number }
+  }
+  kind: object
+}
+schema: uai.command_spec.shared_type.v1
+type_id: IKRigSolverGoalSettings
+version: 1

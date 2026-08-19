@@ -1,0 +1,123 @@
+authoring: { reason: command_has_no_registered_folder_authoring_profile, state: none }
+category: modeling
+command: modeling_weld_edges
+deprecation: { reason: command_is_active, state: none }
+discovery: { aliases: [], keywords_en: [modeling, weld, edges], keywords_zh: [modeling_weld_edges], summary_en: "Execute modeling_weld_edges with a verified implementation contract", summary_zh: "Modeling ToolWrappers 封装命令，内部设置 `tool_identifier` 后走 `modeling_start_tool`", tags: [modeling, p2-002] }
+errors: {
+  codes: [
+    { code: active_tool_exists, description_zh: "C++ 实现返回错误码 active_tool_exists", retry_safe: false, stage: execution, wire_match: exact }
+    { code: cannot_accept_active_tool, description_zh: "C++ 实现返回错误码 cannot_accept_active_tool", retry_safe: false, stage: execution, wire_match: exact }
+    { code: cannot_cancel_active_tool, description_zh: "C++ 实现返回错误码 cannot_cancel_active_tool", retry_safe: false, stage: execution, wire_match: exact }
+    { code: cannot_start_tool, description_zh: "C++ 实现返回错误码 cannot_start_tool", retry_safe: false, stage: execution, wire_match: exact }
+    { code: created_actor_resolution_failed, description_zh: "C++ 实现返回错误码 created_actor_resolution_failed", retry_safe: false, stage: execution, wire_match: exact }
+    { code: dynamic_mesh_component_not_found, description_zh: "C++ 实现返回错误码 dynamic_mesh_component_not_found", retry_safe: false, stage: execution, wire_match: exact }
+    { code: editor_viewport_not_found, description_zh: "C++ 实现返回错误码 editor_viewport_not_found", retry_safe: false, stage: execution, wire_match: exact }
+    { code: internal_tool_wrapper_parameters_forbidden, description_zh: "C++ 实现返回错误码 internal_tool_wrapper_parameters_forbidden", retry_safe: true, stage: preflight, wire_match: exact }
+    { code: invalid_stairs_shape_settings, description_zh: "C++ 实现返回错误码 invalid_stairs_shape_settings", retry_safe: true, stage: preflight, wire_match: exact }
+    { code: modeling_mode_unavailable, description_zh: "C++ 实现返回错误码 modeling_mode_unavailable", retry_safe: false, stage: execution, wire_match: exact }
+    { code: modeling_primitive_actor_root_missing, description_zh: "C++ 实现返回错误码 modeling_primitive_actor_root_missing", retry_safe: true, stage: preflight, wire_match: exact }
+    { code: modeling_primitive_collision_box_limit_exceeded, description_zh: "C++ 实现返回错误码 modeling_primitive_collision_box_limit_exceeded", retry_safe: false, stage: execution, wire_match: exact }
+    { code: modeling_primitive_collision_component_create_failed, description_zh: "C++ 实现返回错误码 modeling_primitive_collision_component_create_failed", retry_safe: false, stage: execution, wire_match: exact }
+    { code: modeling_tools_context_unavailable, description_zh: "C++ 实现返回错误码 modeling_tools_context_unavailable", retry_safe: false, stage: execution, wire_match: exact }
+    { code: no_active_tool, description_zh: "C++ 实现返回错误码 no_active_tool", retry_safe: false, stage: execution, wire_match: exact }
+    { code: primitive_bounds_extent_invalid, description_zh: "C++ 实现返回错误码 primitive_bounds_extent_invalid", retry_safe: true, stage: preflight, wire_match: exact }
+    { code: primitive_bounds_require_accept, description_zh: "C++ 实现返回错误码 primitive_bounds_require_accept", retry_safe: false, stage: execution, wire_match: exact }
+    { code: primitive_parameters_require_create_wrapper, description_zh: "C++ 实现返回错误码 primitive_parameters_require_create_wrapper", retry_safe: false, stage: execution, wire_match: exact }
+    { code: property_not_found, description_zh: "C++ 实现返回错误码 property_not_found", retry_safe: false, stage: execution, wire_match: exact }
+    { code: tool_identifier_not_allowed, description_zh: "C++ 实现返回错误码 tool_identifier_not_allowed", retry_safe: true, stage: preflight, wire_match: exact }
+    { code: tool_identifier_required, description_zh: "C++ 实现返回错误码 tool_identifier_required", retry_safe: true, stage: preflight, wire_match: exact }
+    { code: tool_properties_array_required, description_zh: "C++ 实现返回错误码 tool_properties_array_required", retry_safe: true, stage: preflight, wire_match: exact }
+    { code: tool_property_set_not_found, description_zh: "C++ 实现返回错误码 tool_property_set_not_found", retry_safe: false, stage: execution, wire_match: exact }
+    { code: tool_start_failed, description_zh: "C++ 实现返回错误码 tool_start_failed", retry_safe: false, stage: execution, wire_match: exact }
+    { code: unsupported_modeling_primitive_collision_mode, description_zh: "C++ 实现返回错误码 unsupported_modeling_primitive_collision_mode", retry_safe: false, stage: execution, wire_match: exact }
+    { code: invalid_tool_property_descriptor, description_zh: "C++ 实现返回错误码 invalid_tool_property_descriptor", retry_safe: true, stage: preflight, wire_match: exact }
+    { code: tool_property_apply_failed, description_zh: "C++ 实现返回错误码 tool_property_apply_failed", retry_safe: false, stage: execution, wire_match: exact }
+  ]
+}
+evidence: {
+  docs: [
+    { path: "Plugins/UeAgentInterface/docs/commands/modeling/modeling_weld_edges.md", purpose: "user documentation cross-check; C++ implementation remains authoritative" }
+  ]
+  implementation: [
+    { line_hint: 55, path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Commands/Modeling/UeAgentHttpServer_Modeling_ToolLifecycle.cpp", purpose: "command handler, parameter and return evidence", symbol: CmdModelingStartTool }
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Commands/Modeling/UeAgentHttpServer_Modeling.cpp", purpose: "transitive helper evidence used by the command handler" }
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Utilities/UeAgentJsonDiagnostics.cpp", purpose: "transitive helper evidence used by the command handler" }
+  ]
+  tests: [
+    { path: "Plugins/UeAgentInterface/docs/smoke_coverage_ledger.json", purpose: "smoke or negative-path evidence cross-checked for the verified contract" }
+  ]
+}
+execution: {
+  destructive: false
+  editor_state: required
+  game_thread: required
+  idempotent: false
+  kind: write
+  overwrite_behavior: none
+  pie_state: allowed
+  retry_safe: false
+  save_behavior: none
+  side_effects: [modifies_editor_session, modifies_level]
+  ui_effect: none
+}
+maturity: verified
+params: {
+  constraints: []
+  fields: {
+    accept: { default: false, default_state: defined, description_zh: "C++ 实现读取的 accept 参数", required: false, type: bool }
+    tool_properties: { default_state: none, description_zh: "C++ 实现读取的 tool_properties 参数", item_type: json_value, required: false, type: array }
+  }
+  state: defined
+}
+response: { artifact_fields: [], compact_fields: [accepted, active_tool_name, auto_collision_box_count, auto_collision_generated, auto_collision_kind, auto_collision_shape_count], failure_fields: [], max_items_policy: { fields: [], mode: none } }
+returns: {
+  fields: {
+    accepted: { description_zh: "C++ 实现返回的 accepted 字段；是否出现取决于执行分支", required: false, type: bool }
+    active_tool_name: { description_zh: "C++ 实现返回的 active_tool_name 字段；是否出现取决于执行分支", required: false, type: string }
+    auto_collision_box_count: { description_zh: "C++ 实现返回的 auto_collision_box_count 字段；是否出现取决于执行分支", required: false, type: integer }
+    auto_collision_generated: { description_zh: "C++ 实现返回的 auto_collision_generated 字段；是否出现取决于执行分支", required: false, type: bool }
+    auto_collision_kind: { description_zh: "C++ 实现返回的 auto_collision_kind 字段；是否出现取决于执行分支", required: false, type: string }
+    auto_collision_shape_count: { description_zh: "C++ 实现返回的 auto_collision_shape_count 字段；是否出现取决于执行分支", required: false, type: integer }
+    auto_collision_skip_reason: { description_zh: "C++ 实现返回的 auto_collision_skip_reason 字段；是否出现取决于执行分支", required: false, type: string }
+    auto_collision_skipped: { description_zh: "C++ 实现返回的 auto_collision_skipped 字段；是否出现取决于执行分支", required: false, type: bool }
+    can_accept: { description_zh: "C++ 实现返回的 can_accept 字段；是否出现取决于执行分支", required: false, type: bool }
+    can_cancel: { description_zh: "C++ 实现返回的 can_cancel 字段；是否出现取决于执行分支", required: false, type: bool }
+    collision: { description_zh: "C++ 实现返回的 collision 字段；是否出现取决于执行分支", required: false, type: json_value }
+    created_actor: { description_zh: "C++ 实现返回的 created_actor 字段；是否出现取决于执行分支", required: false, type: json_value }
+    created_actor_location: { description_zh: "C++ 实现返回的 created_actor_location 字段；是否出现取决于执行分支", required: false, type: json_value }
+    created_actor_rotation: { description_zh: "C++ 实现返回的 created_actor_rotation 字段；是否出现取决于执行分支", required: false, type: json_value }
+    default_output_type: { description_zh: "C++ 实现返回的 default_output_type 字段；是否出现取决于执行分支", required: false, type: string }
+    default_output_type_applied: { description_zh: "C++ 实现返回的 default_output_type_applied 字段；是否出现取决于执行分支", required: false, type: bool }
+    default_output_type_applied_value: { description_zh: "C++ 实现返回的 default_output_type_applied_value 字段；是否出现取决于执行分支", required: false, type: string }
+    default_output_type_cpp_type: { description_zh: "C++ 实现返回的 default_output_type_cpp_type 字段；是否出现取决于执行分支", required: false, type: string }
+    default_output_type_skip_reason: { description_zh: "C++ 实现返回的 default_output_type_skip_reason 字段；是否出现取决于执行分支", required: false, type: string }
+    derived_primitive: { description_zh: "C++ 实现返回的 derived_primitive 字段；是否出现取决于执行分支", required: false, type: json_value }
+    disabled_dynamic_mesh_collision_components: { description_zh: "C++ 实现返回的 disabled_dynamic_mesh_collision_components 字段；是否出现取决于执行分支", required: false, type: number }
+    has_active_tool: { description_zh: "C++ 实现返回的 has_active_tool 字段；是否出现取决于执行分支", required: false, type: bool }
+    invoked_action: { description_zh: "C++ 实现返回的 invoked_action 字段；是否出现取决于执行分支", required: false, type: string }
+    property_import_results: { description_zh: "C++ 实现返回的 property_import_results 字段；是否出现取决于执行分支", item_type: json_value, required: false, type: array }
+    property_sets: { description_zh: "C++ 实现返回的 property_sets 字段；是否出现取决于执行分支", item_type: json_value, required: false, type: array }
+    rejected_parameter: { description_zh: "C++ 实现返回的 rejected_parameter 字段；是否出现取决于执行分支", required: false, type: string }
+    requested_tool_identifier: { description_zh: "C++ 实现返回的 requested_tool_identifier 字段；是否出现取决于执行分支", required: false, type: string }
+    tool_has_accept: { description_zh: "C++ 实现返回的 tool_has_accept 字段；是否出现取决于执行分支", required: false, type: bool }
+    used_bounds_placement: { description_zh: "C++ 实现返回的 used_bounds_placement 字段；是否出现取决于执行分支", required: false, type: bool }
+  }
+  state: defined
+}
+schema: uai.command_spec.v1
+status: active
+types: {}
+verification: {
+  assertions: [
+    { id: result_present, operator: exists, source: returns.accepted }
+    { id: state_readback_present, operator: exists, source: methods.state_readback.has_active_tool }
+  ]
+  failure_policy: fail_overall
+  methods: [
+    { id: result, kind: result_assertion }
+    { command: modeling_get_active_tool, id: state_readback, kind: command_readback, params_mapping: {} }
+  ]
+  required: true
+  state: defined
+}
+version: 1

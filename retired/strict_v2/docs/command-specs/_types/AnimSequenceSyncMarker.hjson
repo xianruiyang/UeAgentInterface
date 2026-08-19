@@ -1,0 +1,12 @@
+definition: {
+  additional_fields: false
+  fields: {
+    marker_name: { default_state: none, description_zh: "Sync Marker 名", required: true, type: string }
+    notify_track_name: { default: "1", default_state: defined, description_zh: "承载 marker 的 notify track", required: false, type: string }
+    time_seconds: { default_state: none, description_zh: "AnimSequence 时间（秒）", minimum: 0, required: true, type: number }
+  }
+  kind: object
+}
+schema: uai.command_spec.shared_type.v1
+type_id: AnimSequenceSyncMarker
+version: 1

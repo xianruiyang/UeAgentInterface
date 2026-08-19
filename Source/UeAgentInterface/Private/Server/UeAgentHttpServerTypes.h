@@ -12,8 +12,6 @@ struct UEAGENTINTERFACE_API FUeAgentResponseOptions
 	FUeAgentResponseOptions();
 
 	FString View;
-	bool bDebug;
-	FString Format;
 	int32 MaxItems;
 };
 

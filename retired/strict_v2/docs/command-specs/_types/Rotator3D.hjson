@@ -1,0 +1,12 @@
+definition: {
+  additional_fields: false
+  fields: {
+    pitch: { default_state: none, description_zh: "Pitch，单位为度", required: false, type: number }
+    yaw: { default_state: none, description_zh: "Yaw，单位为度", required: false, type: number }
+    roll: { default_state: none, description_zh: "Roll，单位为度", required: false, type: number }
+  }
+  kind: object
+}
+schema: uai.command_spec.shared_type.v1
+type_id: Rotator3D
+version: 1

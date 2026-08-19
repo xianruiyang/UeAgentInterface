@@ -65,8 +65,8 @@ namespace UeAgentSequenceOps
 	UWidgetBlueprint* LoadWidgetBlueprint(const FString& InPath);
 	UAnimSequenceBase* LoadAnimSequenceBase(const FString& InPath);
 	bool SaveAssetPackage(UObject* Asset, FString& OutError);
-	bool SaveJsonFile(const FString& OutputPathInput, const TSharedPtr<FJsonObject>& Root, FString& OutOutputPath, FString& OutError);
-	bool LoadJsonFile(const FString& InputPathInput, TSharedPtr<FJsonObject>& OutRoot, FString& OutResolvedPath, FString& OutError);
+	bool SaveAuthoringFile(const FString& OutputPathInput, const TSharedPtr<FJsonObject>& Root, FString& OutOutputPath, FString& OutError);
+	bool LoadAuthoringFile(const FString& InputPathInput, TSharedPtr<FJsonObject>& OutRoot, FString& OutResolvedPath, FString& OutError);
 	bool LoadOptionalJsonFile(const FString& InputPathInput, TSharedPtr<FJsonObject>& OutRoot, FString& OutResolvedPath, FString& OutError);
 	bool SetMovieScenePlaybackRangeSeconds(UMovieScene* MovieScene, double StartSeconds, double DurationSeconds);
 	bool TryGetSequenceNumberAnyField(const TSharedPtr<FJsonObject>& Obj, const TArray<FString>& Keys, double& OutValue);

@@ -13,8 +13,6 @@ namespace UeAgentLevelFolderExport
 
 		FString OutputFolder;
 		FString Profile;
-		bool bOverwrite;
-		bool bSplitProperties;
 	};
 
 	UEAGENTINTERFACE_API bool ExportLevelFolder(

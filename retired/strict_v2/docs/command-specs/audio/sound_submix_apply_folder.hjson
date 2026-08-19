@@ -1,0 +1,86 @@
+authoring: { operation: apply, profile_ref: "contracts/field_contracts/sound_submix.hjson", state: defined, type_id: sound_submix }
+category: audio
+command: sound_submix_apply_folder
+deprecation: { reason: command_is_active, state: none }
+discovery: { aliases: [], keywords_en: [sound, submix, apply, folder, audio], keywords_zh: [sound_submix_apply_folder], summary_en: "Execute sound_submix_apply_folder with a verified implementation contract", summary_zh: "回写 parent 与 effect chain", tags: [audio, p2-007] }
+errors: {
+  codes: [
+    { code: audio_authoring_profile_missing, description_zh: "C++ 实现返回错误码 audio_authoring_profile_missing", retry_safe: true, stage: preflight, wire_match: exact }
+  ]
+}
+evidence: {
+  docs: [
+    { path: "Plugins/UeAgentInterface/docs/commands/audio/sound_submix_apply_folder.md", purpose: "user documentation cross-check; C++ implementation remains authoritative" }
+  ]
+  implementation: [
+    { line_hint: 793, path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Commands/Audio/UeAgentHttpServer_AudioAssets.cpp", purpose: "command handler, parameter and return evidence", symbol: CmdSoundSubmixApplyFolder }
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Commands/Audio/UeAgentAudioFolderCommandBridge.cpp", purpose: "transitive helper evidence used by the command handler" }
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Domains/Audio/Authoring/UeAgentAudioAuthoringApplyProvider.cpp", purpose: "transitive helper evidence used by the command handler" }
+  ]
+  tests: [
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterfaceTests/Private/Smoke/UeAgentInterfaceAudioSmokeTests.cpp", purpose: "smoke or negative-path evidence cross-checked for the verified contract" }
+  ]
+}
+execution: {
+  destructive: false
+  editor_state: required
+  game_thread: required
+  idempotent: false
+  kind: write
+  overwrite_behavior: target_asset
+  pie_state: allowed
+  retry_safe: false
+  save_behavior: none
+  side_effects: [modifies_asset]
+  ui_effect: none
+}
+maturity: verified
+params: {
+  constraints: []
+  fields: {
+    asset_path: { default_state: none, description_zh: "C++ 实现读取的 asset_path 参数", path_semantics: { access_scope: project_write, kind: ue_asset }, required: false, type: ue_asset_path }
+    folder_path: {
+      default_state: none
+      description_zh: "C++ 实现读取的 folder_path 参数"
+      path_semantics: { kind: filesystem_directory, must_exist: true, writable: false }
+      required: false
+      type: filesystem_path
+    }
+  }
+  state: defined
+}
+response: { artifact_fields: [applied], compact_fields: [status, asset_path, error_code, error_detail, mutations_applied], failure_fields: [], max_items_policy: { fields: [], mode: none } }
+returns: {
+  fields: {
+    applied: { description_zh: "C++ 实现返回的 applied 字段；是否出现取决于执行分支", required: false, type: json_value }
+    asset_path: { description_zh: "C++ 实现返回的 asset_path 字段；是否出现取决于执行分支", required: false, type: ue_asset_path }
+    error_code: { description_zh: "C++ 实现返回的 error_code 字段；是否出现取决于执行分支", required: false, type: string }
+    error_detail: { description_zh: "C++ 实现返回的 error_detail 字段；是否出现取决于执行分支", required: false, type: string }
+    mutations_applied: { description_zh: "C++ 实现返回的 mutations_applied 字段；是否出现取决于执行分支", required: false, type: number }
+    object_path: { description_zh: "C++ 实现返回的 object_path 字段；是否出现取决于执行分支", required: false, type: ue_object_path }
+    phase: { description_zh: "C++ 实现返回的 phase 字段；是否出现取决于执行分支", required: false, type: string }
+    resolved_operation: { description_zh: "C++ 实现返回的 resolved_operation 字段；是否出现取决于执行分支", required: false, type: string }
+    rollback_attempted: { description_zh: "C++ 实现返回的 rollback_attempted 字段；是否出现取决于执行分支", required: false, type: bool }
+    rollback_succeeded: { description_zh: "C++ 实现返回的 rollback_succeeded 字段；是否出现取决于执行分支", required: false, type: bool }
+    status: { description_zh: "C++ 实现返回的 status 字段；是否出现取决于执行分支", required: false, type: string }
+    units_checked: { description_zh: "C++ 实现返回的 units_checked 字段；是否出现取决于执行分支", required: false, type: number }
+  }
+  state: defined
+}
+schema: uai.command_spec.v1
+status: active
+types: {}
+verification: {
+  assertions: [
+    { id: result_present, operator: exists, source: returns.status }
+    { id: state_readback_present, operator: exists, source: methods.state_readback.asset_path }
+  ]
+  failure_policy: fail_overall
+  methods: [
+    { id: result, kind: result_assertion }
+    { command: sound_submix_get_info, id: state_readback, kind: command_readback, params_mapping: { asset_path: returns.asset_path } }
+  ]
+  required: true
+  state: defined
+}
+version: 1

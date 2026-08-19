@@ -131,7 +131,7 @@ namespace UeAgentEditorViewport
 			OutState.Capabilities.bCamera = true;
 			OutState.Capabilities.bVisualOptions = true;
 			OutState.Capabilities.bPreviewState = true;
-			OutState.Capabilities.bScreenshot = true;
+
 			OutState.Capabilities.FocusModes = { TEXT("preview_component_bounds"), TEXT("asset_bounds"), TEXT("bounds"), TEXT("selection"), TEXT("bone"), TEXT("socket"), TEXT("custom_bounds"), TEXT("custom_point") };
 			if (bControlRigOnly)
 			{
@@ -139,7 +139,7 @@ namespace UeAgentEditorViewport
 				OutState.Capabilities.FocusModes.Add(TEXT("null"));
 				OutState.Capabilities.FocusModes.Add(TEXT("space"));
 			}
-			OutState.Capabilities.ScreenshotBackends = { TEXT("persona_editor_backbuffer") };
+
 			OutState.Capabilities.VisualOptionKeys = { TEXT("view_mode"), TEXT("grid"), TEXT("bounds"), TEXT("bones"), TEXT("bone_draw_mode"), TEXT("local_axes"), TEXT("local_axes_mode"), TEXT("sockets"), TEXT("mesh_sockets"), TEXT("skeleton_sockets"), TEXT("normals"), TEXT("tangents"), TEXT("binormals") };
 			OutState.Capabilities.PreviewStateKeys = { TEXT("show_reference_pose") };
 			OutState.VisualOptions = MakePersonaVisualOptionsJson(*Client, PreviewScene->GetPreviewMeshComponent());
@@ -665,55 +665,7 @@ namespace UeAgentEditorViewport
 			return true;
 		}
 
-		virtual bool CaptureScreenshot(const FResolvedViewport& Viewport, const TSharedPtr<FJsonObject>& Params, FViewportScreenshotResult& OutResult, FString& OutError) const override
-		{
-			if (!AsPersonaClient(Viewport))
-			{
-				OutError = TEXT("invalid_persona_viewport");
-				return false;
-			}
-			const UUeAgentInterfaceSettings* Settings = UUeAgentInterfaceSettings::Get();
-			if (!Settings || !Settings->bEnableScreenshots)
-			{
-				OutError = TEXT("screenshots_disabled");
-				return false;
-			}
 
-			FResolvedScreenshotOptions Options;
-			if (!ParseScreenshotOptions(Params, Options, OutError))
-			{
-				return false;
-			}
-
-			TArray<FColor> Pixels;
-			FIntPoint Size(0, 0);
-			TSharedPtr<FJsonObject> CaptureInfo;
-			if (!CaptureEditorViewportClientBackbuffer(Viewport.ViewportClient, GetName(), Options, Pixels, Size, CaptureInfo, OutError))
-			{
-				return false;
-			}
-
-			TArray<FColor> Resized;
-			FIntPoint ResizedSize(0, 0);
-			if (!FUeAgentHttpServer::ResizePixelsMaxSize(Pixels, Size, Options.MaxSize, Resized, ResizedSize, OutError))
-			{
-				return false;
-			}
-			if (!FUeAgentHttpServer::WriteCompressedImage(Resized, ResizedSize, Options.Format, Options.Quality, Options.OutputPath, OutError))
-			{
-				return false;
-			}
-
-			OutResult.FilePath = Options.OutputPath;
-			OutResult.Format = Options.Format;
-			OutResult.Width = ResizedSize.X;
-			OutResult.Height = ResizedSize.Y;
-			OutResult.Bytes = IFileManager::Get().FileSize(*Options.OutputPath);
-			OutResult.CaptureBackend = TEXT("persona_editor_backbuffer");
-			OutResult.PixelSignal = MakePixelSignalJson(Resized, ResizedSize);
-			OutResult.Capture = CaptureInfo;
-			return true;
-		}
 
 		virtual bool SnapshotState(const FResolvedViewport& Viewport, FViewportSnapshot& OutSnapshot, FString& OutError) const override
 		{

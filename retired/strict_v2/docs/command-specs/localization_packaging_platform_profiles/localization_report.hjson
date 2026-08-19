@@ -1,0 +1,59 @@
+authoring: { reason: command_has_no_registered_folder_authoring_profile, state: none }
+category: localization_packaging_platform_profiles
+command: localization_report
+deprecation: { reason: command_is_active, state: none }
+discovery: { aliases: [], keywords_en: [localization, report, localization_packaging_platform_profiles], keywords_zh: [localization_report], summary_en: "Execute localization_report with a verified implementation contract", summary_zh: "汇总 PO 覆盖和缺失信息", tags: [localization_packaging_platform_profiles, p2-002] }
+errors: { codes: [] }
+evidence: {
+  docs: [
+    { path: "Plugins/UeAgentInterface/docs/commands/localization_packaging_platform_profiles/localization_report.md", purpose: "user documentation cross-check; C++ implementation remains authoritative" }
+  ]
+  implementation: [
+    { line_hint: 2891, path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Commands/ProductionPipeline/UeAgentHttpServer_ProductionPipeline.cpp", purpose: "command handler, parameter and return evidence", symbol: CmdLocalizationReport }
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Server/UeAgentHttpServer.cpp", purpose: "transitive helper evidence used by the command handler" }
+  ]
+  tests: [
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterfaceTests/Private/Smoke/ProductionPipeline/UeAgentInterfaceProductionPipelineSmokeTests.cpp", purpose: "smoke or negative-path evidence cross-checked for the verified contract" }
+  ]
+}
+execution: {
+  destructive: false
+  editor_state: required
+  game_thread: required
+  idempotent: true
+  kind: read_only_export
+  overwrite_behavior: owned_artifacts_only
+  pie_state: allowed
+  retry_safe: true
+  save_behavior: none
+  side_effects: [writes_files]
+  ui_effect: none
+}
+maturity: verified
+params: { constraints: [], fields: { target: { default_state: none, description_zh: "C++ 实现读取的 target 参数", required: false, type: string } }, state: defined }
+response: { artifact_fields: [], compact_fields: [coverage_by_culture, include_assets, missing, schema, stale], failure_fields: [], max_items_policy: { fields: [], mode: none } }
+returns: {
+  fields: {
+    coverage_by_culture: { description_zh: "C++ 实现返回的 coverage_by_culture 字段；是否出现取决于执行分支", item_type: json_value, required: false, type: array }
+    include_assets: { description_zh: "C++ 实现返回的 include_assets 字段；是否出现取决于执行分支", required: false, type: bool }
+    missing: { description_zh: "C++ 实现返回的 missing 字段；是否出现取决于执行分支", item_type: json_value, required: false, type: array }
+    schema: { description_zh: "C++ 实现返回的 schema 字段；是否出现取决于执行分支", required: false, type: string }
+    stale: { description_zh: "C++ 实现返回的 stale 字段；是否出现取决于执行分支", item_type: json_value, required: false, type: array }
+  }
+  state: defined
+}
+schema: uai.command_spec.v1
+status: active
+types: {}
+verification: {
+  assertions: [
+    { id: result_present, operator: exists, source: returns.coverage_by_culture }
+  ]
+  failure_policy: fail_overall
+  methods: [
+    { id: result, kind: result_assertion }
+  ]
+  required: true
+  state: defined
+}
+version: 1

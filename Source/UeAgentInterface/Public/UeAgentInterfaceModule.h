@@ -8,9 +8,18 @@
 #include "Templates/SharedPointer.h"
 #include "Templates/UniquePtr.h"
 
-class FUeAgentHttpServer;
 class IConsoleObject;
 class SWindow;
+
+namespace UE::UAI::ServiceComposition::CommandService
+{
+	class FUeAgentCommandService;
+}
+
+namespace UE::UAI::ServiceComposition::Transport
+{
+	class FUeAgentTransportService;
+}
 
 struct FToolMenuContext;
 
@@ -40,6 +49,7 @@ private:
 	void InstallStartMinimizedMainFrameHookIfRequested();
 	void UninstallStartMinimizedMainFrameHook();
 	void HandleMainFrameCreationFinishedForStartMinimized(TSharedPtr<SWindow> MainFrameWindow, bool bShowStartupDialogInPlaceOfMainEditor);
+	void HandleEditorMapOpened(const FString& Filename, bool bAsTemplate);
 	void ApplyTemporaryRootWindowMaximizeOverride();
 	void RestoreTemporaryRootWindowMaximizeOverride();
 
@@ -47,13 +57,19 @@ private:
 	bool StartServerInternal();
 	void StopServerInternal();
 
-	TUniquePtr<FUeAgentHttpServer> Server;
+	TUniquePtr<
+		UE::UAI::ServiceComposition::CommandService::
+			FUeAgentCommandService> CommandService;
+	TUniquePtr<
+		UE::UAI::ServiceComposition::Transport::
+			FUeAgentTransportService> TransportService;
 
 	IConsoleObject* ConsoleCmdStart;
 	IConsoleObject* ConsoleCmdStop;
 	IConsoleObject* ConsoleCmdRestart;
 
 	FDelegateHandle MainFrameCreationFinishedForStartMinimizedHandle;
+	FDelegateHandle EditorMapOpenedHandle;
 	FString PreviousRootWindowInitiallyMaximizedValue;
 	bool bAppliedRootWindowMaximizeOverride;
 	bool bHadPreviousRootWindowInitiallyMaximizedValue;

@@ -1,0 +1,109 @@
+authoring: { operation: apply, profile_ref: "contracts/field_contracts/niagara_emitter.hjson", state: defined, type_id: niagara_emitter }
+category: niagara_emitter
+command: niagara_emitter_apply_folder
+deprecation: { reason: command_is_active, state: none }
+discovery: { aliases: [], keywords_en: [niagara, hjson, workspace, apply], keywords_zh: [Niagara, HJSON, workspace, "应用"], summary_en: "Apply standalone Niagara Emitter through the unified index.hjson workspace", summary_zh: "应用 standalone Niagara Emitter 统一 index.hjson workspace", tags: [niagara, authoring, apply, unified_contract] }
+errors: {
+  codes: [
+    { code: missing_emitter_asset_path, description_zh: "缺少 emitter_asset_path", retry_safe: true, stage: preflight, wire_match: exact }
+    { code: missing_folder_path_or_asset_path, description_zh: "Apply 未提供 workspace 或目标资产路径", retry_safe: true, stage: preflight, wire_match: exact }
+    { code: niagara_asset_not_found, description_zh: "找不到目标 Niagara 资产", retry_safe: true, stage: execution, wire_match: exact }
+    { code: niagara_asset_kind_conflict, description_zh: "资产类型与命令不一致", retry_safe: true, stage: preflight, wire_match: prefix }
+    { code: niagara_workspace_asset_path_conflict, description_zh: "外部目标路径与 workspace target 不一致", retry_safe: true, stage: preflight, wire_match: exact }
+    { code: niagara_workspace_asset_kind_conflict, description_zh: "外部目标类型与 workspace target 不一致", retry_safe: true, stage: preflight, wire_match: exact }
+    { code: workspace_source_invalid, description_zh: "workspace 目录或 index.hjson 无效", retry_safe: true, stage: preflight, wire_match: exact }
+    { code: export_, description_zh: "共享 Export Contract/projector/writer 失败", retry_safe: true, stage: execution, wire_match: prefix }
+    { code: niagara_workspace_, description_zh: "Niagara workspace preflight、mutation 或 verification 失败", retry_safe: false, stage: execution, wire_match: prefix }
+  ]
+}
+evidence: {
+  docs: [
+    { path: "Plugins/UeAgentInterface/docs/commands/niagara_emitter/niagara_emitter_apply_folder.md", purpose: "正式命令文档" }
+  ]
+  implementation: [
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Commands/Niagara/UeAgentHttpServer_Niagara_AuthoringWorkspace.cpp", purpose: "统一命令适配器", symbol: ApplyWorkspaceCommand }
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Domains/Niagara/Authoring/UeAgentNiagaraAuthoringApplyProvider.cpp", purpose: "领域契约实现" }
+  ]
+  tests: [
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterfaceTests/Private/Smoke/UeAgentInterfaceSmoke_AnimationIKNiagara.cpp", purpose: "System/Emitter/Script 六入口 roundtrip smoke" }
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterfaceTests/Private/Smoke/UeAgentInterfaceSmoke_NiagaraStagePatch.cpp", purpose: "module/dynamic-input 命令 smoke" }
+  ]
+}
+execution: {
+  destructive: false
+  editor_state: required
+  game_thread: required
+  idempotent: false
+  kind: write
+  overwrite_behavior: target_asset
+  pie_state: allowed
+  retry_safe: false
+  save_behavior: always
+  side_effects: [modifies_asset]
+  ui_effect: none
+}
+maturity: verified
+params: {
+  constraints: [
+    { fields: [folder_path, emitter_asset_path, asset_path], kind: one_of }
+  ]
+  fields: {
+    asset_path: { default_state: none, description_zh: "目标资产路径别名；与 emitter_asset_path 同时提供时必须一致", path_semantics: { access_scope: project_write, kind: ue_asset }, required: false, type: ue_asset_path }
+    emitter_asset_path: { default_state: none, description_zh: "外部目标约束；必须与 workspace target 一致", path_semantics: { access_scope: project_write, kind: ue_asset }, required: false, type: ue_asset_path }
+    folder_path: {
+      default_state: none
+      description_zh: "包含 index.hjson 的 workspace 目录"
+      path_semantics: { kind: filesystem_directory, must_exist: true, writable: false }
+      required: false
+      type: filesystem_path
+    }
+  }
+  state: defined
+}
+response: { artifact_fields: [], compact_fields: [status, asset_path, asset_kind, folder_path, resolved_operation, units_checked, mutations_applied, compile_status, saved], failure_fields: [params.folder_path, params.emitter_asset_path], max_items_policy: { fields: [], mode: none } }
+returns: {
+  fields: {
+    asset_kind: { description_zh: "实际 Niagara 资产种类", required: true, type: string }
+    asset_path: { description_zh: "实际目标资产路径", required: true, type: ue_asset_path }
+    compilation_complete: { description_zh: "所有受影响 Niagara script 是否完成编译", required: true, type: bool }
+    compile_error_count: { description_zh: "存在编译错误的 script 数", required: true, type: integer }
+    compile_status: { description_zh: "编译完成态；持久化完成要求为 complete", required: true, type: string }
+    compile_warning_count: { description_zh: "存在编译 warning 的 script 数", required: true, type: integer }
+    compiled_targets: { description_zh: "本次编译收据覆盖的 Niagara script UObject paths", item_type: string, required: true, type: array }
+    folder_path: { description_zh: "workspace 根目录", required: true, type: filesystem_path }
+    mutations_applied: { description_zh: "事务执行的 mutation operation 数", required: true, type: integer }
+    object_path: { description_zh: "实际 UObject path", required: true, type: string }
+    phase: { description_zh: complete, required: true, type: string }
+    repaired_emitter_version_count: { description_zh: "修复的 emitter version 数", required: true, type: integer }
+    resolved_operation: { description_zh: "解析后的 create/update/remove/clone", required: true, type: string }
+    rollback_attempted: { description_zh: "是否尝试回滚", required: true, type: bool }
+    rollback_succeeded: { description_zh: "回滚是否成功", required: true, type: bool }
+    saved: { description_zh: "目标 package 是否已持久化并通过文件读回", required: true, type: bool }
+    stack_issue_count: { description_zh: "阻断完成态的 Niagara stack error 总数", required: true, type: integer }
+    stack_warning_count: { description_zh: "非阻断的 Niagara stack warning 总数", required: true, type: integer }
+    status: { description_zh: "complete；显式不保存时为 applied_in_memory", required: true, type: string }
+    units_checked: { description_zh: "preflight 检查单元数", required: true, type: integer }
+  }
+  state: defined
+}
+schema: uai.command_spec.v1
+status: active
+types: {}
+verification: {
+  assertions: [
+    { expected: complete, id: status_complete, operator: equals, source: returns.status }
+    { expected: true, id: asset_saved, operator: equals, source: returns.saved }
+    { expected: 0, id: compile_error_free, operator: equals, source: returns.compile_error_count }
+    { expected: 0, id: stack_issue_free, operator: equals, source: returns.stack_issue_count }
+    { expected_ref: returns.asset_path, id: readback_asset_matches, operator: equals, source: methods.export_readback.asset_path }
+  ]
+  failure_policy: fail_overall
+  methods: [
+    { id: result_fields, kind: result_assertion }
+    { command: niagara_get_compile_log, id: compile_receipt, kind: compile, params_mapping: { asset_path: returns.asset_path } }
+    { command: niagara_emitter_export_folder, id: export_readback, kind: command_readback, output_override_param: folder_path, params_mapping: { emitter_asset_path: returns.asset_path } }
+  ]
+  required: true
+  state: defined
+}
+version: 1

@@ -1,0 +1,147 @@
+authoring: { reason: command_has_no_registered_folder_authoring_profile, state: none }
+category: animation_assets_skeleton
+command: anim_sequence_apply_bone_tracks
+deprecation: { reason: command_is_active, state: none }
+discovery: { aliases: [], keywords_en: [anim, sequence, apply, bone, tracks, animation_assets_skeleton], keywords_zh: [anim_sequence_apply_bone_tracks], summary_en: "Execute anim_sequence_apply_bone_tracks with a verified implementation contract", summary_zh: "写入 AnimSequence 骨骼 transform 轨道 key，可创建新 AnimSequence 或更新已有轨道", tags: [animation_assets_skeleton, p2-006] }
+errors: {
+  codes: [
+    { code: add_bone_track_failed, description_zh: "C++ 实现返回错误码 add_bone_track_failed", retry_safe: false, stage: execution, wire_match: prefix }
+    { code: anim_sequence_data_model_not_found, description_zh: "C++ 实现返回错误码 anim_sequence_data_model_not_found", retry_safe: false, stage: execution, wire_match: exact }
+    { code: anim_sequence_missing_skeleton, description_zh: "C++ 实现返回错误码 anim_sequence_missing_skeleton", retry_safe: true, stage: preflight, wire_match: exact }
+    { code: anim_sequence_not_found, description_zh: "C++ 实现返回错误码 anim_sequence_not_found", retry_safe: false, stage: execution, wire_match: exact }
+    { code: asset_exists_with_different_class, description_zh: "C++ 实现返回错误码 asset_exists_with_different_class", retry_safe: false, stage: execution, wire_match: exact }
+    { code: asset_not_found, description_zh: "C++ 实现返回错误码 asset_not_found", retry_safe: false, stage: execution, wire_match: exact }
+    { code: bone_not_found, description_zh: "C++ 实现返回错误码 bone_not_found", retry_safe: false, stage: execution, wire_match: prefix }
+    { code: bone_track_key_count_mismatch, description_zh: "C++ 实现返回错误码 bone_track_key_count_mismatch", retry_safe: false, stage: execution, wire_match: prefix }
+    { code: bone_track_key_frame_out_of_range, description_zh: "C++ 实现返回错误码 bone_track_key_frame_out_of_range", retry_safe: false, stage: execution, wire_match: exact }
+    { code: bone_track_key_must_be_object, description_zh: "C++ 实现返回错误码 bone_track_key_must_be_object", retry_safe: false, stage: execution, wire_match: prefix }
+    { code: bone_track_missing_bone_name, description_zh: "C++ 实现返回错误码 bone_track_missing_bone_name", retry_safe: true, stage: preflight, wire_match: exact }
+    { code: bone_track_missing_keys, description_zh: "C++ 实现返回错误码 bone_track_missing_keys", retry_safe: true, stage: preflight, wire_match: prefix }
+    { code: bone_track_must_be_object, description_zh: "C++ 实现返回错误码 bone_track_must_be_object", retry_safe: false, stage: execution, wire_match: exact }
+    { code: create_anim_sequence_failed, description_zh: "C++ 实现返回错误码 create_anim_sequence_failed", retry_safe: false, stage: execution, wire_match: exact }
+    { code: frame_rate_missing_numerator, description_zh: "C++ 实现返回错误码 frame_rate_missing_numerator", retry_safe: true, stage: preflight, wire_match: exact }
+    { code: invalid_bone_track_key, description_zh: "C++ 实现返回错误码 invalid_bone_track_key", retry_safe: true, stage: preflight, wire_match: prefix }
+    { code: invalid_bone_track_object, description_zh: "C++ 实现返回错误码 invalid_bone_track_object", retry_safe: true, stage: preflight, wire_match: exact }
+    { code: invalid_frame_rate, description_zh: "C++ 实现返回错误码 invalid_frame_rate", retry_safe: true, stage: preflight, wire_match: exact }
+    { code: invalid_location, description_zh: "C++ 实现返回错误码 invalid_location", retry_safe: true, stage: preflight, wire_match: prefix }
+    { code: invalid_num_frames, description_zh: "C++ 实现返回错误码 invalid_num_frames", retry_safe: true, stage: preflight, wire_match: exact }
+    { code: invalid_pre_rotation_delta, description_zh: "C++ 实现返回错误码 invalid_pre_rotation_delta", retry_safe: true, stage: preflight, wire_match: prefix }
+    { code: invalid_rotation, description_zh: "C++ 实现返回错误码 invalid_rotation", retry_safe: true, stage: preflight, wire_match: prefix }
+    { code: invalid_rotation_delta, description_zh: "C++ 实现返回错误码 invalid_rotation_delta", retry_safe: true, stage: preflight, wire_match: prefix }
+    { code: invalid_rotation_value, description_zh: "C++ 实现返回错误码 invalid_rotation_value", retry_safe: true, stage: preflight, wire_match: exact }
+    { code: invalid_scale, description_zh: "C++ 实现返回错误码 invalid_scale", retry_safe: true, stage: preflight, wire_match: prefix }
+    { code: invalid_transform_key, description_zh: "C++ 实现返回错误码 invalid_transform_key", retry_safe: true, stage: preflight, wire_match: exact }
+    { code: invalid_vector_value, description_zh: "C++ 实现返回错误码 invalid_vector_value", retry_safe: true, stage: preflight, wire_match: exact }
+    { code: missing_asset_path, description_zh: "C++ 实现返回错误码 missing_asset_path", retry_safe: true, stage: preflight, wire_match: exact }
+    { code: missing_bone_tracks, description_zh: "C++ 实现返回错误码 missing_bone_tracks", retry_safe: true, stage: preflight, wire_match: exact }
+    { code: preview_skeletal_mesh_not_compatible_with_target_skeleton, description_zh: "C++ 实现返回错误码 preview_skeletal_mesh_not_compatible_with_target_skeleton", retry_safe: false, stage: execution, wire_match: exact }
+    { code: preview_skeletal_mesh_not_found, description_zh: "C++ 实现返回错误码 preview_skeletal_mesh_not_found", retry_safe: false, stage: execution, wire_match: exact }
+    { code: quat_object_requires_xyzw, description_zh: "C++ 实现返回错误码 quat_object_requires_xyzw", retry_safe: false, stage: execution, wire_match: exact }
+    { code: rotation_array_has_non_number, description_zh: "C++ 实现返回错误码 rotation_array_has_non_number", retry_safe: false, stage: execution, wire_match: exact }
+    { code: rotation_array_requires_3_or_4_numbers, description_zh: "C++ 实现返回错误码 rotation_array_requires_3_or_4_numbers", retry_safe: false, stage: execution, wire_match: exact }
+    { code: rotation_value_must_be_object_or_array, description_zh: "C++ 实现返回错误码 rotation_value_must_be_object_or_array", retry_safe: false, stage: execution, wire_match: exact }
+    { code: rotator_object_requires_pitch_yaw_roll, description_zh: "C++ 实现返回错误码 rotator_object_requires_pitch_yaw_roll", retry_safe: false, stage: execution, wire_match: exact }
+    { code: save_asset_failed, description_zh: "C++ 实现返回错误码 save_asset_failed", retry_safe: false, stage: execution, wire_match: exact }
+    { code: set_bone_track_keys_failed, description_zh: "C++ 实现返回错误码 set_bone_track_keys_failed", retry_safe: false, stage: execution, wire_match: prefix }
+    { code: target_skeleton_has_no_bones, description_zh: "C++ 实现返回错误码 target_skeleton_has_no_bones", retry_safe: false, stage: execution, wire_match: exact }
+    { code: target_skeleton_not_compatible_with_existing_sequence, description_zh: "C++ 实现返回错误码 target_skeleton_not_compatible_with_existing_sequence", retry_safe: false, stage: execution, wire_match: exact }
+    { code: target_skeleton_not_found, description_zh: "C++ 实现返回错误码 target_skeleton_not_found", retry_safe: false, stage: execution, wire_match: exact }
+    { code: target_skeleton_required_for_new_anim_sequence, description_zh: "C++ 实现返回错误码 target_skeleton_required_for_new_anim_sequence", retry_safe: true, stage: preflight, wire_match: exact }
+    { code: vector_array_has_non_number, description_zh: "C++ 实现返回错误码 vector_array_has_non_number", retry_safe: false, stage: execution, wire_match: exact }
+    { code: vector_array_requires_3_numbers, description_zh: "C++ 实现返回错误码 vector_array_requires_3_numbers", retry_safe: false, stage: execution, wire_match: exact }
+    { code: vector_object_requires_xyz, description_zh: "C++ 实现返回错误码 vector_object_requires_xyz", retry_safe: false, stage: execution, wire_match: exact }
+    { code: vector_value_must_be_object_or_array, description_zh: "C++ 实现返回错误码 vector_value_must_be_object_or_array", retry_safe: false, stage: execution, wire_match: exact }
+  ]
+}
+evidence: {
+  docs: [
+    { path: "Plugins/UeAgentInterface/docs/commands/animation_assets_skeleton/anim_sequence_apply_bone_tracks.md", purpose: "user documentation cross-check; C++ implementation remains authoritative" }
+  ]
+  implementation: [
+    { line_hint: 4213, path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Commands/Animation/UeAgentHttpServer_AnimationAssets.cpp", purpose: "command handler, parameter and return evidence", symbol: CmdAnimSequenceApplyBoneTracks }
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Server/UeAgentHttpServer.cpp", purpose: "transitive helper evidence used by the command handler" }
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Utilities/UeAgentJsonDiagnostics.cpp", purpose: "transitive helper evidence used by the command handler" }
+  ]
+  tests: [
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterfaceTests/Private/Smoke/UeAgentInterfaceSmoke_AnimationIKNiagara.cpp", purpose: "smoke or negative-path evidence cross-checked for the verified contract" }
+  ]
+}
+execution: {
+  destructive: false
+  editor_state: required
+  game_thread: required
+  idempotent: false
+  kind: write
+  overwrite_behavior: target_asset
+  pie_state: allowed
+  retry_safe: false
+  save_behavior: caller_controlled
+  side_effects: [modifies_asset]
+  ui_effect: none
+}
+maturity: verified
+params: {
+  constraints: [
+    { fields: [tracks, bone_tracks], kind: one_of }
+  ]
+  fields: {
+    asset_path: { default_state: none, description_zh: "C++ 实现读取的 asset_path 参数", path_semantics: { access_scope: project_write, kind: ue_asset }, required: true, type: ue_asset_path }
+    bone_tracks: { default_state: none, description_zh: "骨骼轨道；每个 key 的 transform 都是相对父骨骼的 bone-local transform，缺省分量继承 reference pose", item_type: object, item_type_ref: "shared:AnimSequenceBoneTrack", required: false, type: array }
+    create_if_missing: { default: false, default_state: defined, description_zh: "C++ 实现读取的 create_if_missing 参数", required: false, type: bool }
+    fps: { default_state: none, description_zh: "可选帧率；未传时使用现有序列采样率或 30 fps fallback", required: false, type: number }
+    frame_count: { default_state: none, description_zh: "可选帧数；未传时使用现有序列帧数", minimum: 1, required: false, type: integer }
+    frame_rate: { default_state: none, description_zh: "可选结构化帧率；未传时使用现有序列采样率或 30/1 fallback", required: false, type: object, type_ref: "shared:FrameRate" }
+    frame_rate_denominator: { default_state: none, description_zh: "可选帧率分母；未传时使用 fallback 分母", minimum: 1, required: false, type: integer }
+    frame_rate_numerator: { default_state: none, description_zh: "可选帧率分子；未传时使用 fallback 分子", minimum: 1, required: false, type: integer }
+    num_frames: { default_state: none, description_zh: "可选帧数；未传时使用现有序列帧数", minimum: 1, required: false, type: integer }
+    preview_skeletal_mesh: { default_state: none, description_zh: "C++ 实现读取的 preview_skeletal_mesh 参数", required: false, type: string }
+    replace_existing_tracks: { default: false, default_state: defined, description_zh: "C++ 实现读取的 replace_existing_tracks 参数", required: false, type: bool }
+    sampling_frame_rate: { default_state: none, description_zh: "C++ 实现读取的 sampling_frame_rate 参数", required: false, type: object, type_ref: "shared:FrameRate" }
+    sampling_frame_rate_denominator: { default_state: none, description_zh: "可选采样帧率分母；未传时使用 fallback 分母", minimum: 1, required: false, type: integer }
+    sampling_frame_rate_numerator: { default_state: none, description_zh: "可选采样帧率分子；未传时使用 fallback 分子", minimum: 1, required: false, type: integer }
+    save_after_apply: { default: false, default_state: defined, description_zh: "C++ 实现读取的 save_after_apply 参数", required: false, type: bool }
+    save_after_set: { default: false, default_state: defined, description_zh: "C++ 实现读取的 save_after_set 参数", required: false, type: bool }
+    skeletal_mesh_path: { default_state: none, description_zh: "C++ 实现读取的 skeletal_mesh_path 参数", required: false, type: string }
+    skeleton: { default_state: none, description_zh: "C++ 实现读取的 skeleton 参数", required: false, type: string }
+    target_skeleton: { default_state: none, description_zh: "C++ 实现读取的 target_skeleton 参数", required: false, type: string }
+    tracks: { default_state: none, description_zh: "骨骼轨道；每个 key 的 transform 都是相对父骨骼的 bone-local transform，缺省分量继承 reference pose", item_type: object, item_type_ref: "shared:AnimSequenceBoneTrack", required: false, type: array }
+  }
+  state: defined
+}
+response: { artifact_fields: [applied_tracks, track_names, frame_rate], compact_fields: [saved, asset_path, applied_track_count, created], failure_fields: [params.asset_path, params.bone_tracks], max_items_policy: { fields: [], mode: none } }
+returns: {
+  fields: {
+    applied_track_count: { description_zh: "C++ 实现返回的 applied_track_count 字段；是否出现取决于执行分支", required: false, type: integer }
+    applied_tracks: { description_zh: "C++ 实现返回的 applied_tracks 字段；是否出现取决于执行分支", item_type: json_value, required: false, type: array }
+    asset_path: { description_zh: "C++ 实现返回的 asset_path 字段；是否出现取决于执行分支", required: false, type: ue_asset_path }
+    created: { description_zh: "C++ 实现返回的 created 字段；是否出现取决于执行分支", required: false, type: bool }
+    frame_rate: { description_zh: "C++ 实现返回的 frame_rate 字段；是否出现取决于执行分支", required: false, type: json_value }
+    num_frames: { description_zh: "C++ 实现返回的 num_frames 字段；是否出现取决于执行分支", required: false, type: number }
+    object_path: { description_zh: "C++ 实现返回的 object_path 字段；是否出现取决于执行分支", required: false, type: ue_object_path }
+    preview_skeletal_mesh: { description_zh: "C++ 实现返回的 preview_skeletal_mesh 字段；是否出现取决于执行分支", required: false, type: string }
+    replace_existing_tracks: { description_zh: "C++ 实现返回的 replace_existing_tracks 字段；是否出现取决于执行分支", required: false, type: bool }
+    sample_key_count: { description_zh: "C++ 实现返回的 sample_key_count 字段；是否出现取决于执行分支", required: false, type: integer }
+    saved: { description_zh: "C++ 实现返回的 saved 字段；是否出现取决于执行分支", required: false, type: bool }
+    skeleton: { description_zh: "C++ 实现返回的 skeleton 字段；是否出现取决于执行分支", required: false, type: string }
+    track_count: { description_zh: "C++ 实现返回的 track_count 字段；是否出现取决于执行分支", required: false, type: integer }
+    track_names: { description_zh: "C++ 实现返回的 track_names 字段；是否出现取决于执行分支", item_type: json_value, required: false, type: array }
+  }
+  state: defined
+}
+schema: uai.command_spec.v1
+status: active
+types: {}
+verification: {
+  assertions: [
+    { id: result_present, operator: exists, source: returns.saved }
+    { id: state_readback_present, operator: exists, source: methods.state_readback.asset_path }
+  ]
+  failure_policy: fail_overall
+  methods: [
+    { id: result, kind: result_assertion }
+    { command: anim_sequence_get_info, id: state_readback, kind: command_readback, params_mapping: { asset_path: params.asset_path } }
+  ]
+  required: true
+  state: defined
+}
+version: 1

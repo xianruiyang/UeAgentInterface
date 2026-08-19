@@ -1,0 +1,11 @@
+definition: {
+  additional_fields: false
+  fields: {
+    x: { default_state: none, description_zh: "X 分量", required: false, type: number }
+    y: { default_state: none, description_zh: "Y 分量", required: false, type: number }
+  }
+  kind: object
+}
+schema: uai.command_spec.shared_type.v1
+type_id: Vector2
+version: 1

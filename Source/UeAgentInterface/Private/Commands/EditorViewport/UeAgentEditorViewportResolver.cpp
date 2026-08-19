@@ -34,11 +34,7 @@ namespace UeAgentEditorViewport
 		return false;
 	}
 
-	bool IViewportAdapter::CaptureScreenshot(const FResolvedViewport&, const TSharedPtr<FJsonObject>&, FViewportScreenshotResult&, FString& OutError) const
-	{
-		OutError = TEXT("editor_viewport_screenshot_not_supported");
-		return false;
-	}
+
 
 	bool IViewportAdapter::SnapshotState(const FResolvedViewport&, FViewportSnapshot&, FString& OutError) const
 	{

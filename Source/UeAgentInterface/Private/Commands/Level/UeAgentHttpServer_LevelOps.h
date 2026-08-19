@@ -7,6 +7,7 @@
 #include "Engine/EngineTypes.h"
 
 class AActor;
+class FEditorViewportClient;
 class FLevelEditorViewportClient;
 class FJsonObject;
 class FProperty;
@@ -83,12 +84,13 @@ namespace UeAgentLevelOps
 	FString ViewModeIndexToStableName(EViewModeIndex ViewMode);
 	bool IsFinalLitCompositionViewMode(EViewModeIndex ViewMode);
 	bool TryResolveRequestedViewportViewMode(const TSharedPtr<FJsonObject>& Params, bool& bOutHasViewMode, FResolvedViewportViewMode& OutResolved, FString& OutError);
-	void ApplyResolvedViewportViewMode(FLevelEditorViewportClient* ViewportClient, const FResolvedViewportViewMode& Resolved);
-	FViewportViewModeState CaptureViewportViewModeState(FLevelEditorViewportClient* ViewportClient);
-	void RestoreViewportViewModeState(FLevelEditorViewportClient* ViewportClient, const FViewportViewModeState& State);
+	void ApplyResolvedViewportViewMode(FEditorViewportClient* ViewportClient, const FResolvedViewportViewMode& Resolved);
+	FViewportViewModeState CaptureViewportViewModeState(FEditorViewportClient* ViewportClient);
+	void RestoreViewportViewModeState(FEditorViewportClient* ViewportClient, const FViewportViewModeState& State);
 	TSharedPtr<FJsonObject> MakeResolvedViewportViewModeJson(const FResolvedViewportViewMode& Resolved);
-	TSharedPtr<FJsonObject> MakeCurrentViewportViewModeJson(FLevelEditorViewportClient* ViewportClient);
+	TSharedPtr<FJsonObject> MakeCurrentViewportViewModeJson(FEditorViewportClient* ViewportClient);
 	TSharedPtr<FJsonObject> MakeViewportViewModeCatalogJson();
+	bool BuildViewportWarnings(UWorld* World, bool bIncludeSuppressed, TSharedPtr<FJsonObject>& OutData, FString& OutError);
 	TSharedPtr<FJsonObject> MakeViewportClientJson(FLevelEditorViewportClient* ViewportClient, const FString& SelectionReason);
 	void RestoreEditorInteractionState(FLevelEditorViewportClient* ViewportClient, bool bGameView, bool bModeWidgets, bool bSelection, bool bPivot, const FString& WidgetModePolicy);
 	FLevelEditorViewportClient* GetPreferredLevelViewportClient();

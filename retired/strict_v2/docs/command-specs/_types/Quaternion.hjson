@@ -1,0 +1,13 @@
+definition: {
+  additional_fields: false
+  fields: {
+    w: { default_state: none, description_zh: "四元数 W", required: false, type: number }
+    x: { default_state: none, description_zh: "四元数 X", required: false, type: number }
+    y: { default_state: none, description_zh: "四元数 Y", required: false, type: number }
+    z: { default_state: none, description_zh: "四元数 Z", required: false, type: number }
+  }
+  kind: object
+}
+schema: uai.command_spec.shared_type.v1
+type_id: Quaternion
+version: 1

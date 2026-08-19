@@ -1,0 +1,107 @@
+authoring: { operation: export, profile_ref: "contracts/field_contracts/pcg_graph.hjson", state: defined, type_id: pcg_graph }
+category: pcg
+command: pcg_graph_export_folder
+deprecation: { reason: command_is_active, state: none }
+discovery: { aliases: [], keywords_en: [pcg, graph, export, folder], keywords_zh: [pcg_graph_export_folder], summary_en: "Export one PCG Graph index.hjson through the shared read-only snapshot pipeline", summary_zh: "通过统一只读快照导出单个 PCG Graph index.hjson", tags: [pcg, authoring, export, unified_contract] }
+errors: {
+  codes: [
+    { code: missing_folder_path, description_zh: "缺少 workspace 路径", retry_safe: true, stage: preflight, wire_match: exact }
+    { code: pcg_workspace_, description_zh: "统一 workspace 加载、身份或依赖检查失败", retry_safe: true, stage: preflight, wire_match: prefix }
+    { code: pcg_graph_, description_zh: "PCG 图解析、Apply、快照或验证失败", retry_safe: false, stage: execution, wire_match: prefix }
+    { code: object_operation_, description_zh: "共享反射 Apply 预检失败", retry_safe: true, stage: preflight, wire_match: prefix }
+    { code: pcg_graph_asset_not_found, description_zh: "找不到 UPCGGraph", retry_safe: true, stage: preflight, wire_match: exact }
+    { code: export_, description_zh: "共享 projector 或 writer 失败", retry_safe: true, stage: execution, wire_match: prefix }
+  ]
+}
+evidence: {
+  docs: [
+    { path: "Plugins/UeAgentInterface/docs/commands/pcg/pcg_graph_export_folder.md", purpose: "正式命令文档" }
+  ]
+  implementation: [
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Commands/PCG/UeAgentHttpServer_PCG.cpp", purpose: "HTTP 参数与结果薄适配器", symbol: CmdPCGGraphExportFolder }
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Domains/PCG/Authoring/UeAgentPCGAuthoringExport.cpp", purpose: "统一 PCG authoring 权威实现" }
+  ]
+  tests: [
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterfaceTests/Private/UeAgentInterfacePCGAuthoringTests.cpp", purpose: "注册、单文件 round-trip、no-op 和回滚" }
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterfaceTests/Private/Smoke/PCG/UeAgentInterfacePCGSmokeTests.cpp", purpose: "真实命令链路 smoke" }
+  ]
+}
+execution: {
+  destructive: false
+  editor_state: required
+  game_thread: required
+  idempotent: true
+  kind: read_only_export
+  overwrite_behavior: owned_artifacts_only
+  pie_state: allowed
+  retry_safe: true
+  save_behavior: none
+  side_effects: [writes_files]
+  ui_effect: none
+}
+maturity: verified
+params: {
+  constraints: [
+    { fields: [asset_path, graph, graph_asset_path], kind: one_of }
+    { fields: [folder_path, input_folder, folder], kind: one_of }
+  ]
+  fields: {
+    asset_path: {
+      default_state: none
+      description_zh: "要导出的 UPCGGraph"
+      path_semantics: { access_scope: mounted_read, kind: ue_asset }
+      required: false
+      type: ue_asset_path
+    }
+    folder: { default_state: none, description_zh: "folder_path 的兼容参数名；仅作为命令参数别名", required: false, type: string }
+    folder_path: {
+      default_state: none
+      description_zh: "统一 PCG Graph workspace 根目录"
+      path_semantics: { kind: filesystem_directory, must_exist: false, writable: true }
+      required: false
+      type: filesystem_path
+    }
+    graph: { default_state: none, description_zh: "asset_path 别名", required: false, type: ue_asset_path }
+    graph_asset_path: { default_state: none, description_zh: "asset_path 别名", required: false, type: ue_asset_path }
+    input_folder: { default_state: none, description_zh: "folder_path 的输入别名", required: false, type: string }
+    profile: { default: llm_authoring, default_state: defined, description_zh: "共享 Export profile", enum_values: [llm_authoring, readback, debug, validation], required: false, type: enum }
+  }
+  state: defined
+}
+response: { artifact_fields: [written_files], compact_fields: [status, asset_path, workspace_root, profile_id], failure_fields: [params.asset_path, params.folder_path], max_items_policy: { fields: [], mode: none } }
+returns: {
+  fields: {
+    asset_path: { description_zh: "规范化资产路径", required: true, type: ue_asset_path }
+    contract_id: { description_zh: uai.export.pcg.graph, required: true, type: string }
+    contract_version: { description_zh: "Export contract 版本", required: true, type: string }
+    entry_file: { description_zh: "workspace-relative canonical 入口文件", required: true, type: string }
+    error_code: { description_zh: "稳定错误码", required: false, type: string }
+    error_detail: { description_zh: "错误详情", required: false, type: string }
+    files: { description_zh: "规划文件", item_type: json_value, required: true, type: array }
+    metrics: { description_zh: "HJSON 文本指标", required: true, type: json_value }
+    profile_id: { description_zh: "实际 profile", required: true, type: string }
+    publisher: { description_zh: "共享 Export publisher transaction receipt", required: true, type: json_value }
+    schema: { description_zh: ue_agent_interface.pcg.graph_folder.v2, required: true, type: string }
+    status: { description_zh: written, required: true, type: string }
+    token_budget: { description_zh: "profile token budget", required: true, type: integer }
+    workspace_root: { description_zh: "workspace 根目录", required: true, type: filesystem_path }
+    written_files: { description_zh: "写入的 index.hjson", item_type: filesystem_path, required: true, type: array }
+    written_relative_files: { description_zh: "最终 artifact 的完整 workspace-relative 文件集合", item_type: string, required: true, type: array }
+  }
+  state: defined
+}
+schema: uai.command_spec.v1
+status: active
+types: {}
+verification: {
+  assertions: [
+    { expected: written, id: written, operator: equals, source: returns.status }
+  ]
+  failure_policy: fail_overall
+  methods: [
+    { artifact_field: workspace_root, id: workspace, kind: filesystem_artifact, receipt_source: structured_result }
+  ]
+  required: true
+  state: defined
+}
+version: 1

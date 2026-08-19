@@ -1,0 +1,96 @@
+authoring: { reason: command_has_no_registered_folder_authoring_profile, state: none }
+category: control_rig_folder_format
+command: control_rig_bake_to_animation
+deprecation: { reason: command_is_active, state: none }
+discovery: { aliases: [], keywords_en: [control, rig, bake, to, animation, control_rig_folder_format], keywords_zh: [control_rig_bake_to_animation], summary_en: "Execute control_rig_bake_to_animation with a verified implementation contract", summary_zh: "从 Sequencer 显式 Bake To Animation", tags: [control_rig_folder_format, p2-006] }
+errors: {
+  codes: [
+    { code: binding_id_required, description_zh: "C++ 实现返回错误码 binding_id_required", retry_safe: true, stage: preflight, wire_match: exact }
+    { code: control_rig_bake_to_animation_empty_bone_tracks, description_zh: "C++ 实现返回错误码 control_rig_bake_to_animation_empty_bone_tracks", retry_safe: false, stage: execution, wire_match: exact }
+    { code: control_rig_bake_to_animation_failed, description_zh: "C++ 实现返回错误码 control_rig_bake_to_animation_failed", retry_safe: false, stage: execution, wire_match: exact }
+    { code: create_anim_sequence_failed, description_zh: "C++ 实现返回错误码 create_anim_sequence_failed", retry_safe: false, stage: execution, wire_match: exact }
+    { code: editor_world_not_found, description_zh: "C++ 实现返回错误码 editor_world_not_found", retry_safe: false, stage: execution, wire_match: exact }
+    { code: invalid_output_anim_sequence_path, description_zh: "C++ 实现返回错误码 invalid_output_anim_sequence_path", retry_safe: true, stage: preflight, wire_match: exact }
+    { code: level_sequence_not_found, description_zh: "C++ 实现返回错误码 level_sequence_not_found", retry_safe: false, stage: execution, wire_match: exact }
+    { code: output_anim_sequence_required, description_zh: "C++ 实现返回错误码 output_anim_sequence_required", retry_safe: true, stage: preflight, wire_match: exact }
+    { code: output_asset_exists_with_different_class, description_zh: "C++ 实现返回错误码 output_asset_exists_with_different_class", retry_safe: false, stage: execution, wire_match: exact }
+    { code: preview_skeletal_mesh_not_compatible_with_target_skeleton, description_zh: "C++ 实现返回错误码 preview_skeletal_mesh_not_compatible_with_target_skeleton", retry_safe: false, stage: execution, wire_match: exact }
+    { code: preview_skeletal_mesh_not_found, description_zh: "C++ 实现返回错误码 preview_skeletal_mesh_not_found", retry_safe: false, stage: execution, wire_match: exact }
+    { code: sequence_path_required, description_zh: "C++ 实现返回错误码 sequence_path_required", retry_safe: true, stage: preflight, wire_match: exact }
+    { code: target_skeleton_not_compatible_with_sequence_binding, description_zh: "C++ 实现返回错误码 target_skeleton_not_compatible_with_sequence_binding", retry_safe: false, stage: execution, wire_match: exact }
+    { code: target_skeleton_not_found, description_zh: "C++ 实现返回错误码 target_skeleton_not_found", retry_safe: false, stage: execution, wire_match: exact }
+    { code: target_skeleton_required_for_new_anim_sequence, description_zh: "C++ 实现返回错误码 target_skeleton_required_for_new_anim_sequence", retry_safe: true, stage: preflight, wire_match: exact }
+  ]
+}
+evidence: {
+  docs: [
+    { path: "Plugins/UeAgentInterface/docs/commands/control_rig_folder_format/control_rig_bake_to_animation.md", purpose: "user documentation cross-check; C++ implementation remains authoritative" }
+  ]
+  implementation: [
+    { line_hint: 1303, path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Commands/ControlRig/UeAgentHttpServer_ControlRig.cpp", purpose: "command handler, parameter and return evidence", symbol: "FUeAgentHttpServer::ExecuteControlRigCommand__command_control_rig_bake_to_animation" }
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Commands/ControlRig/UeAgentHttpServer_ControlRig_Bake.cpp", purpose: "transitive helper evidence used by the command handler" }
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Server/UeAgentHttpServer.cpp", purpose: "transitive helper evidence used by the command handler" }
+  ]
+  tests: [
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterfaceTests/Private/Smoke/UeAgentInterfaceSmoke_Coverage.cpp", purpose: "smoke or negative-path evidence cross-checked for the verified contract" }
+  ]
+}
+execution: {
+  destructive: false
+  editor_state: required
+  game_thread: required
+  idempotent: false
+  kind: write
+  overwrite_behavior: none
+  pie_state: allowed
+  retry_safe: false
+  save_behavior: none
+  side_effects: [modifies_asset]
+  ui_effect: none
+}
+maturity: verified
+params: {
+  constraints: []
+  fields: {
+    create_link: { default: true, default_state: defined, description_zh: "C++ 实现读取的 create_link 参数", required: false, type: bool }
+    output_anim_sequence: { default_state: none, description_zh: "C++ 实现读取的 output_anim_sequence 参数", required: true, type: string }
+    preview_skeletal_mesh: { default_state: none, description_zh: "C++ 实现读取的 preview_skeletal_mesh 参数", required: false, type: string }
+    sequence_path: { default_state: none, description_zh: "C++ 实现读取的 sequence_path 参数", required: true, type: string }
+    target_skeleton: { default_state: none, description_zh: "C++ 实现读取的 target_skeleton 参数", required: false, type: string }
+  }
+  state: defined
+}
+response: { artifact_fields: [bone_track_names, binding_preflight], compact_fields: [status, binding_id, bone_track_count, created], failure_fields: [params.output_anim_sequence, params.sequence_path], max_items_policy: { fields: [], mode: none } }
+returns: {
+  fields: {
+    binding_id: { description_zh: "C++ 实现返回的 binding_id 字段；是否出现取决于执行分支", required: false, type: string }
+    binding_preflight: { description_zh: "C++ 实现返回的 binding_preflight 字段；是否出现取决于执行分支", required: false, type: json_value }
+    bone_track_count: { description_zh: "C++ 实现返回的 bone_track_count 字段；是否出现取决于执行分支", required: false, type: integer }
+    bone_track_names: { description_zh: "C++ 实现返回的 bone_track_names 字段；是否出现取决于执行分支", item_type: json_value, required: false, type: array }
+    created: { description_zh: "C++ 实现返回的 created 字段；是否出现取决于执行分支", required: false, type: bool }
+    export_api: { description_zh: "C++ 实现返回的 export_api 字段；是否出现取决于执行分支", required: false, type: string }
+    exported: { description_zh: "C++ 实现返回的 exported 字段；是否出现取决于执行分支", required: false, type: bool }
+    output_anim_sequence: { description_zh: "C++ 实现返回的 output_anim_sequence 字段；是否出现取决于执行分支", required: false, type: string }
+    output_asset_class: { description_zh: "C++ 实现返回的 output_asset_class 字段；是否出现取决于执行分支", required: false, type: string }
+    sequence_path: { description_zh: "C++ 实现返回的 sequence_path 字段；是否出现取决于执行分支", required: false, type: string }
+    status: { description_zh: "C++ 实现返回的 status 字段；是否出现取决于执行分支", required: false, type: string }
+  }
+  state: defined
+}
+schema: uai.command_spec.v1
+status: active
+types: {}
+verification: {
+  assertions: [
+    { id: result_present, operator: exists, source: returns.status }
+    { id: state_readback_present, operator: exists, source: methods.state_readback.asset_path }
+  ]
+  failure_policy: fail_overall
+  methods: [
+    { id: result, kind: result_assertion }
+    { command: anim_sequence_get_info, id: state_readback, kind: command_readback, params_mapping: { asset_path: returns.output_anim_sequence } }
+  ]
+  required: true
+  state: defined
+}
+version: 1

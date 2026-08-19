@@ -1,14 +1,19 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "Commands/EditorViewport/UeAgentHttpServer_EditorViewportInternal.h"
+#include "Commands/Level/UeAgentHttpServer_LevelOps.h"
 
 #include "Server/UeAgentHttpServer.h"
 #include "UeAgentInterfaceSettings.h"
 
 #include "Editor.h"
 #include "EditorViewportClient.h"
+#include "GameFramework/Actor.h"
 #include "HAL/FileManager.h"
 #include "LevelEditorViewport.h"
+#include "NiagaraComponent.h"
+#include "NiagaraSystem.h"
+#include "NiagaraSystemInstanceController.h"
 
 namespace UeAgentEditorViewport
 {
@@ -74,9 +79,9 @@ namespace UeAgentEditorViewport
 			OutState.Camera.bValid = true;
 			OutState.Capabilities.bCamera = true;
 			OutState.Capabilities.bVisualOptions = true;
-			OutState.Capabilities.bPreviewState = false;
-			OutState.Capabilities.bScreenshot = true;
-			OutState.Capabilities.FocusModes = { TEXT("selection"), TEXT("actor"), TEXT("actors"), TEXT("custom_bounds"), TEXT("custom_point") }; OutState.Capabilities.ScreenshotBackends = { TEXT("level_viewport_backbuffer") }; OutState.Capabilities.VisualOptionKeys = { TEXT("view_mode"), TEXT("grid"), TEXT("bounds"), TEXT("pivot"), TEXT("selection"), TEXT("mode_widgets"), TEXT("collision") };
+			OutState.Capabilities.bPreviewState = true;
+
+			OutState.Capabilities.FocusModes = { TEXT("selection"), TEXT("actor"), TEXT("actors"), TEXT("custom_bounds"), TEXT("custom_point") };  OutState.Capabilities.VisualOptionKeys = { TEXT("view_mode"), TEXT("visualization_family"), TEXT("visualization_mode"), TEXT("grid"), TEXT("bounds"), TEXT("pivot"), TEXT("selection"), TEXT("mode_widgets"), TEXT("collision") };
 			OutState.VisualOptions = MakeLevelVisualOptionsJson(Client);
 			OutState.PreviewState = MakeShared<FJsonObject>();
 			return true;
@@ -124,7 +129,8 @@ namespace UeAgentEditorViewport
 			if (Mode == TEXT("actor"))
 			{
 				FString Id;
-				if (!TryGetStringField(FocusObj, TEXT("id"), Id)
+				if (!TryGetStringField(FocusObj, TEXT("actor_id"), Id)
+					&& !TryGetStringField(FocusObj, TEXT("id"), Id)
 					&& !TryGetStringField(FocusObj, TEXT("actor"), Id)
 					&& !TryGetStringField(FocusObj, TEXT("actor_name"), Id)
 					&& !TryGetStringField(FocusObj, TEXT("actor_label"), Id))
@@ -281,36 +287,26 @@ namespace UeAgentEditorViewport
 				return false;
 			}
 
+			bool bHasRequestedViewMode = false;
+			UeAgentLevelOps::FResolvedViewportViewMode RequestedViewMode;
 			TArray<FString> Unsupported;
-			FString ViewModeText;
-			if (TryGetStringField(Options, TEXT("view_mode"), ViewModeText))
+			if (!UeAgentLevelOps::TryResolveRequestedViewportViewMode(Options, bHasRequestedViewMode, RequestedViewMode, OutError))
 			{
-				EViewModeIndex ViewMode = VMI_Lit;
-				if (!TryParseViewMode(ViewModeText, ViewMode))
+				bool bIgnoreUnsupported = false;
+				TryGetBoolField(Options, TEXT("ignore_unsupported"), bIgnoreUnsupported);
+				if (!bIgnoreUnsupported)
 				{
-					Unsupported.Add(TEXT("view_mode"));
+					OutError = TEXT("unsupported_visual_options");
+					return false;
 				}
-				else
-				{
-					Client->SetViewMode(ViewMode);
-				}
+				Unsupported.Add(TEXT("view_mode"));
+				OutError.Reset();
+				bHasRequestedViewMode = false;
 			}
-
-			auto ApplyBoolFlag = [Client, Options](const TCHAR* Key, auto Setter)
+			if (bHasRequestedViewMode)
 			{
-				bool bValue = false;
-				if (TryReadBoolOption(Options, Key, bValue))
-				{
-					Setter(bValue);
-				}
-			};
-
-			ApplyBoolFlag(TEXT("grid"), [Client](bool bValue) { Client->EngineShowFlags.SetGrid(bValue); });
-			ApplyBoolFlag(TEXT("bounds"), [Client](bool bValue) { Client->EngineShowFlags.SetBounds(bValue); });
-			ApplyBoolFlag(TEXT("pivot"), [Client](bool bValue) { Client->EngineShowFlags.SetPivot(bValue); });
-			ApplyBoolFlag(TEXT("selection"), [Client](bool bValue) { Client->EngineShowFlags.SetSelection(bValue); });
-			ApplyBoolFlag(TEXT("mode_widgets"), [Client](bool bValue) { Client->EngineShowFlags.SetModeWidgets(bValue); });
-			ApplyBoolFlag(TEXT("collision"), [Client](bool bValue) { Client->EngineShowFlags.SetCollision(bValue); });
+				UeAgentLevelOps::ApplyResolvedViewportViewMode(Client, RequestedViewMode);
+			}
 
 			bool bRealtime = Client->IsRealtime();
 			if (TryGetBoolField(Options, TEXT("realtime"), bRealtime))
@@ -323,6 +319,23 @@ namespace UeAgentEditorViewport
 				Client->SetGameView(bGameView);
 			}
 
+			auto ApplyBoolFlag = [Client, Options](const TCHAR* Key, auto Setter)
+			{
+				bool bValue = false;
+				if (TryReadBoolOption(Options, Key, bValue))
+				{
+					Setter(bValue);
+				}
+			};
+
+			// SetGameView rewrites several show flags, so explicit overlays are applied last.
+			ApplyBoolFlag(TEXT("grid"), [Client](bool bValue) { Client->EngineShowFlags.SetGrid(bValue); });
+			ApplyBoolFlag(TEXT("bounds"), [Client](bool bValue) { Client->EngineShowFlags.SetBounds(bValue); });
+			ApplyBoolFlag(TEXT("pivot"), [Client](bool bValue) { Client->EngineShowFlags.SetPivot(bValue); });
+			ApplyBoolFlag(TEXT("selection"), [Client](bool bValue) { Client->EngineShowFlags.SetSelection(bValue); });
+			ApplyBoolFlag(TEXT("mode_widgets"), [Client](bool bValue) { Client->EngineShowFlags.SetModeWidgets(bValue); });
+			ApplyBoolFlag(TEXT("collision"), [Client](bool bValue) { Client->EngineShowFlags.SetCollision(bValue); });
+
 			Client->Invalidate();
 			if (Client->Viewport)
 			{
@@ -330,21 +343,13 @@ namespace UeAgentEditorViewport
 			}
 
 			OutData = MakeLevelVisualOptionsJson(Client);
+			if (bHasRequestedViewMode)
+			{
+				OutData->SetObjectField(TEXT("requested_view_mode"), UeAgentLevelOps::MakeResolvedViewportViewModeJson(RequestedViewMode));
+			}
 			if (Unsupported.Num() > 0)
 			{
-				TArray<TSharedPtr<FJsonValue>> UnsupportedJson;
-				for (const FString& Key : Unsupported)
-				{
-					UnsupportedJson.Add(MakeShared<FJsonValueString>(Key));
-				}
-				OutData->SetArrayField(TEXT("unsupported_options"), UnsupportedJson);
-				bool bIgnoreUnsupported = false;
-				TryGetBoolField(Options, TEXT("ignore_unsupported"), bIgnoreUnsupported);
-				if (!bIgnoreUnsupported)
-				{
-					OutError = TEXT("unsupported_visual_options");
-					return false;
-				}
+				OutData->SetArrayField(TEXT("unsupported_options"), MakeStringArrayJson(Unsupported));
 			}
 			return true;
 		}
@@ -358,59 +363,161 @@ namespace UeAgentEditorViewport
 				OutData->SetStringField(TEXT("reason"), TEXT("empty_preview_state"));
 				return true;
 			}
-			OutError = TEXT("editor_viewport_preview_state_not_supported");
-			return false;
-		}
 
-		virtual bool CaptureScreenshot(const FResolvedViewport& Viewport, const TSharedPtr<FJsonObject>& Params, FViewportScreenshotResult& OutResult, FString& OutError) const override
-		{
-			FLevelEditorViewportClient* Client = AsLevelClient(Viewport);
-			if (!Client)
+			FString ActorId;
+			if (!TryGetStringField(PreviewState, TEXT("actor_id"), ActorId)
+				&& !TryGetStringField(PreviewState, TEXT("actor"), ActorId)
+				&& !TryGetStringField(PreviewState, TEXT("actor_name"), ActorId)
+				&& !TryGetStringField(PreviewState, TEXT("actor_label"), ActorId))
 			{
-				OutError = TEXT("invalid_level_viewport");
+				OutError = TEXT("missing_level_preview_actor_id");
 				return false;
 			}
-			const UUeAgentInterfaceSettings* Settings = UUeAgentInterfaceSettings::Get();
-			if (!Settings || !Settings->bEnableScreenshots)
+			FString ComponentId;
+			if (!TryGetStringField(PreviewState, TEXT("component_id"), ComponentId)
+				&& !TryGetStringField(PreviewState, TEXT("component"), ComponentId)
+				&& !TryGetStringField(PreviewState, TEXT("component_name"), ComponentId))
 			{
-				OutError = TEXT("screenshots_disabled");
-				return false;
-			}
-
-			FResolvedScreenshotOptions Options;
-			if (!ParseScreenshotOptions(Params, Options, OutError))
-			{
-				return false;
-			}
-			TArray<FColor> Pixels;
-			FIntPoint Size(0, 0);
-			TSharedPtr<FJsonObject> CaptureInfo;
-			if (!CaptureEditorViewportClientBackbuffer(Client, GetName(), Options, Pixels, Size, CaptureInfo, OutError))
-			{
+				OutError = TEXT("missing_level_preview_component_id");
 				return false;
 			}
 
-			TArray<FColor> Resized;
-			FIntPoint ResizedSize(0, 0);
-			if (!FUeAgentHttpServer::ResizePixelsMaxSize(Pixels, Size, Options.MaxSize, Resized, ResizedSize, OutError))
+			FString WorldError;
+			UWorld* World = Server.GetEditorWorld(WorldError);
+			if (!World)
 			{
+				OutError = WorldError.IsEmpty() ? TEXT("no_editor_world") : WorldError;
 				return false;
 			}
-			if (!FUeAgentHttpServer::WriteCompressedImage(Resized, ResizedSize, Options.Format, Options.Quality, Options.OutputPath, OutError))
+			AActor* Actor = Server.FindActorByNameOrLabel(World, ActorId);
+			if (!Actor)
 			{
+				OutError = TEXT("level_preview_actor_not_found");
+				return false;
+			}
+			UActorComponent* ActorComponent = UeAgentLevelOps::FindComponentByNameOrPath(Actor, ComponentId);
+			if (!ActorComponent)
+			{
+				OutError = TEXT("level_preview_component_not_found");
+				return false;
+			}
+			UNiagaraComponent* NiagaraComponent = Cast<UNiagaraComponent>(ActorComponent);
+			if (!NiagaraComponent)
+			{
+				OutError = TEXT("level_preview_component_not_niagara");
 				return false;
 			}
 
-			OutResult.FilePath = Options.OutputPath;
-			OutResult.Format = Options.Format;
-			OutResult.Width = ResizedSize.X;
-			OutResult.Height = ResizedSize.Y;
-			OutResult.Bytes = IFileManager::Get().FileSize(*Options.OutputPath);
-			OutResult.CaptureBackend = TEXT("level_viewport_backbuffer");
-			OutResult.PixelSignal = MakePixelSignalJson(Resized, ResizedSize);
-			OutResult.Capture = CaptureInfo;
+			double AbsoluteAgeNumber = 0.0;
+			const bool bHasAbsoluteAge =
+				TryGetNumberField(PreviewState, TEXT("absolute_time"), AbsoluteAgeNumber)
+				|| TryGetNumberField(PreviewState, TEXT("absolute_time_seconds"), AbsoluteAgeNumber)
+				|| TryGetNumberField(PreviewState, TEXT("time_seconds"), AbsoluteAgeNumber)
+				|| TryGetNumberField(PreviewState, TEXT("seconds"), AbsoluteAgeNumber)
+				|| TryGetNumberField(PreviewState, TEXT("desired_age"), AbsoluteAgeNumber)
+				|| TryGetNumberField(PreviewState, TEXT("age"), AbsoluteAgeNumber);
+			if (bHasAbsoluteAge && (!FMath::IsFinite(AbsoluteAgeNumber) || AbsoluteAgeNumber < 0.0))
+			{
+				OutError = TEXT("invalid_level_preview_absolute_time");
+				return false;
+			}
+			bool bSimulation = true;
+			const bool bHasSimulation = TryGetBoolField(PreviewState, TEXT("simulation"), bSimulation);
+			bool bPaused = true;
+			const bool bHasPaused =
+				TryGetBoolField(PreviewState, TEXT("pause_after_advance"), bPaused)
+				|| TryGetBoolField(PreviewState, TEXT("pause"), bPaused)
+				|| TryGetBoolField(PreviewState, TEXT("paused"), bPaused);
+			if (!bHasAbsoluteAge && !bHasSimulation && !bHasPaused)
+			{
+				OutError = TEXT("level_preview_state_missing_action");
+				return false;
+			}
+			if (bHasAbsoluteAge && bHasSimulation && !bSimulation)
+			{
+				OutError = TEXT("level_preview_state_conflicting_simulation");
+				return false;
+			}
+
+			CaptureNiagaraPreviewRestoreState(NiagaraComponent);
+			const float AgeBefore = GetNiagaraComponentActualAge(NiagaraComponent);
+			if (bHasAbsoluteAge)
+			{
+				double TickDeltaNumber = 1.0 / 60.0;
+				TryGetNumberField(PreviewState, TEXT("tick_delta_seconds"), TickDeltaNumber);
+				TryGetNumberField(PreviewState, TEXT("preview_tick_delta_seconds"), TickDeltaNumber);
+				const float TickDeltaSeconds = FMath::Clamp(static_cast<float>(TickDeltaNumber), 1.0f / 240.0f, 1.0f / 5.0f);
+				const float AbsoluteAge = static_cast<float>(AbsoluteAgeNumber);
+				bool bReset = true;
+				TryGetBoolField(PreviewState, TEXT("reset"), bReset);
+				TryGetBoolField(PreviewState, TEXT("reset_preview"), bReset);
+
+				if (UNiagaraSystem* NiagaraSystem = NiagaraComponent->GetAsset())
+				{
+					if (NiagaraSystem->HasOutstandingCompilationRequests(true))
+					{
+						NiagaraSystem->WaitForCompilationComplete(true, false);
+						NiagaraSystem->PollForCompilationComplete(true);
+					}
+					NiagaraSystem->CacheFromCompiledData();
+				}
+				NiagaraComponent->SetPaused(false);
+				float ActualAge = 0.0f;
+				if (!SeekNiagaraComponentToAbsoluteAge(NiagaraComponent, World, AbsoluteAge, TickDeltaSeconds, bReset, ActualAge))
+				{
+					FString RestoreError;
+					RestoreNiagaraPreviewState(RestoreError);
+					OutError = TEXT("level_preview_seek_incomplete");
+					return false;
+				}
+				NiagaraComponent->SetPaused(bHasPaused ? bPaused : true);
+				NiagaraComponent->MarkRenderStateDirty();
+
+				OutData->SetStringField(TEXT("mode"), TEXT("seek_absolute_time"));
+				OutData->SetNumberField(TEXT("absolute_time_seconds"), AbsoluteAge);
+				OutData->SetNumberField(TEXT("tick_delta_seconds"), TickDeltaSeconds);
+				OutData->SetBoolField(TEXT("reset"), bReset);
+				OutData->SetBoolField(TEXT("pause_after_advance"), bHasPaused ? bPaused : true);
+				OutData->SetNumberField(TEXT("actual_age_seconds"), ActualAge);
+			}
+			else
+			{
+				if (bHasSimulation)
+				{
+					if (bSimulation)
+					{
+						NiagaraComponent->Activate(false);
+					}
+					else
+					{
+						NiagaraComponent->DeactivateImmediate();
+					}
+				}
+				if (bHasPaused)
+				{
+					NiagaraComponent->SetPaused(bPaused);
+				}
+				OutData->SetStringField(TEXT("mode"), TEXT("simulation_state"));
+			}
+
+			OutData->SetBoolField(TEXT("applied"), true);
+			OutData->SetStringField(TEXT("actor_id"), ActorId);
+			OutData->SetStringField(TEXT("actor_name"), Actor->GetName());
+			OutData->SetStringField(TEXT("actor_label"), Actor->GetActorLabel());
+			OutData->SetStringField(TEXT("component_id"), ComponentId);
+			OutData->SetStringField(TEXT("component_name"), NiagaraComponent->GetName());
+			OutData->SetStringField(TEXT("component_class"), NiagaraComponent->GetClass()->GetPathName());
+			OutData->SetNumberField(TEXT("age_before_seconds"), AgeBefore);
+			if (!OutData->HasField(TEXT("actual_age_seconds")))
+			{
+				OutData->SetNumberField(TEXT("actual_age_seconds"), GetNiagaraComponentActualAge(NiagaraComponent));
+			}
+			OutData->SetBoolField(TEXT("active"), NiagaraComponent->IsActive());
+			OutData->SetBoolField(TEXT("paused"), NiagaraComponent->IsPaused());
 			return true;
 		}
+
+
 
 		virtual bool SnapshotState(const FResolvedViewport& Viewport, FViewportSnapshot& OutSnapshot, FString& OutError) const override
 		{
@@ -435,11 +542,165 @@ namespace UeAgentEditorViewport
 				return false;
 			}
 			TSharedPtr<FJsonObject> Applied;
-			return ApplyVisualOptions(Viewport, Snapshot.State.VisualOptions, Applied, OutError);
+			if (!ApplyVisualOptions(Viewport, Snapshot.State.VisualOptions, Applied, OutError))
+			{
+				return false;
+			}
+			return RestoreNiagaraPreviewState(OutError);
 		}
 
 	private:
+		struct FNiagaraPreviewRestoreState
+		{
+			TWeakObjectPtr<UNiagaraComponent> Component;
+			ENiagaraAgeUpdateMode AgeUpdateMode = ENiagaraAgeUpdateMode::TickDeltaTime;
+			float DesiredAge = 0.0f;
+			float ActualAge = 0.0f;
+			float SeekDelta = 1.0f / 60.0f;
+			bool bLockDesiredAgeDeltaTimeToSeekDelta = false;
+			bool bForceSolo = false;
+			bool bPaused = false;
+			bool bActive = false;
+			bool bValid = false;
+		};
+
 		const FUeAgentHttpServer& Server;
+		mutable FNiagaraPreviewRestoreState NiagaraPreviewRestoreState;
+
+		static float GetNiagaraComponentActualAge(UNiagaraComponent* Component)
+		{
+			if (!Component)
+			{
+				return 0.0f;
+			}
+			const FNiagaraSystemInstanceControllerPtr Controller = Component->GetSystemInstanceController();
+			return Controller.IsValid() ? Controller->GetAge() : Component->GetDesiredAge();
+		}
+
+		static bool SeekNiagaraComponentToAbsoluteAge(
+			UNiagaraComponent* Component,
+			UWorld* World,
+			const float AbsoluteAge,
+			const float TickDeltaSeconds,
+			const bool bReset,
+			float& OutActualAge)
+		{
+			OutActualAge = GetNiagaraComponentActualAge(Component);
+			if (!Component || !World)
+			{
+				return false;
+			}
+			Component->SetForceSolo(true);
+			if (bReset)
+			{
+				Component->DeactivateImmediate();
+				Component->SetDesiredAge(0.0f);
+				Component->ReinitializeSystem();
+			}
+			Component->SetAgeUpdateMode(ENiagaraAgeUpdateMode::DesiredAge);
+			Component->SetSeekDelta(TickDeltaSeconds);
+			Component->SetLockDesiredAgeDeltaTimeToSeekDelta(true);
+			Component->Activate(false);
+			Component->InitializeSystem();
+			Component->SetDesiredAge(AbsoluteAge);
+			Component->SeekToDesiredAge(AbsoluteAge);
+
+			const float Tolerance = FMath::Max(TickDeltaSeconds * 0.5f, 0.0001f);
+			const int32 MaxPasses = FMath::Clamp(FMath::CeilToInt(AbsoluteAge / TickDeltaSeconds) + 4, 4, 2048);
+			for (int32 Pass = 0; Pass < MaxPasses; ++Pass)
+			{
+				Component->TickComponent(0.0f, ELevelTick::LEVELTICK_All, nullptr);
+				World->SendAllEndOfFrameUpdates();
+				OutActualAge = GetNiagaraComponentActualAge(Component);
+				if (FMath::Abs(OutActualAge - AbsoluteAge) <= Tolerance)
+				{
+					return true;
+				}
+			}
+
+			float RemainingAge = AbsoluteAge - OutActualAge;
+			if (RemainingAge > Tolerance)
+			{
+				const int32 FixedStepCount = FMath::Clamp(FMath::FloorToInt(RemainingAge / TickDeltaSeconds + KINDA_SMALL_NUMBER), 0, 2048);
+				if (FixedStepCount > 0)
+				{
+					Component->AdvanceSimulation(FixedStepCount, TickDeltaSeconds);
+					World->SendAllEndOfFrameUpdates();
+					OutActualAge = GetNiagaraComponentActualAge(Component);
+					RemainingAge = AbsoluteAge - OutActualAge;
+				}
+				if (RemainingAge > Tolerance)
+				{
+					Component->AdvanceSimulation(1, RemainingAge);
+					World->SendAllEndOfFrameUpdates();
+					OutActualAge = GetNiagaraComponentActualAge(Component);
+				}
+			}
+			return FMath::Abs(OutActualAge - AbsoluteAge) <= Tolerance;
+		}
+
+		void CaptureNiagaraPreviewRestoreState(UNiagaraComponent* Component) const
+		{
+			if (!Component || NiagaraPreviewRestoreState.bValid)
+			{
+				return;
+			}
+			NiagaraPreviewRestoreState.Component = Component;
+			NiagaraPreviewRestoreState.AgeUpdateMode = Component->GetAgeUpdateMode();
+			NiagaraPreviewRestoreState.DesiredAge = Component->GetDesiredAge();
+			NiagaraPreviewRestoreState.ActualAge = GetNiagaraComponentActualAge(Component);
+			NiagaraPreviewRestoreState.SeekDelta = Component->GetSeekDelta();
+			NiagaraPreviewRestoreState.bLockDesiredAgeDeltaTimeToSeekDelta = Component->GetLockDesiredAgeDeltaTimeToSeekDelta();
+			NiagaraPreviewRestoreState.bForceSolo = Component->GetForceSolo();
+			NiagaraPreviewRestoreState.bPaused = Component->IsPaused();
+			NiagaraPreviewRestoreState.bActive = Component->IsActive();
+			NiagaraPreviewRestoreState.bValid = true;
+		}
+
+		bool RestoreNiagaraPreviewState(FString& OutError) const
+		{
+			if (!NiagaraPreviewRestoreState.bValid)
+			{
+				return true;
+			}
+			const FNiagaraPreviewRestoreState RestoreState = NiagaraPreviewRestoreState;
+			NiagaraPreviewRestoreState = FNiagaraPreviewRestoreState();
+			UNiagaraComponent* Component = RestoreState.Component.Get();
+			if (!Component)
+			{
+				return true;
+			}
+
+			Component->SetPaused(false);
+			if (RestoreState.bActive)
+			{
+				UWorld* World = Component->GetWorld();
+				float RestoredActualAge = 0.0f;
+				if (!SeekNiagaraComponentToAbsoluteAge(
+					Component,
+					World,
+					FMath::Max(RestoreState.ActualAge, 0.0f),
+					FMath::Clamp(RestoreState.SeekDelta, 1.0f / 240.0f, 1.0f / 5.0f),
+					true,
+					RestoredActualAge))
+				{
+					OutError = TEXT("level_preview_restore_seek_incomplete");
+					return false;
+				}
+			}
+			else
+			{
+				Component->DeactivateImmediate();
+			}
+			Component->SetAgeUpdateMode(RestoreState.AgeUpdateMode);
+			Component->SetDesiredAge(RestoreState.DesiredAge);
+			Component->SetSeekDelta(RestoreState.SeekDelta);
+			Component->SetLockDesiredAgeDeltaTimeToSeekDelta(RestoreState.bLockDesiredAgeDeltaTimeToSeekDelta);
+			Component->SetForceSolo(RestoreState.bForceSolo);
+			Component->SetPaused(RestoreState.bPaused);
+			Component->MarkRenderStateDirty();
+			return true;
+		}
 
 		static FLevelEditorViewportClient* AsLevelClient(const FResolvedViewport& Viewport)
 		{

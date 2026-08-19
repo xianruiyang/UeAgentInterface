@@ -1,0 +1,104 @@
+authoring: { operation: export, profile_ref: "contracts/field_contracts/sequence.hjson", state: defined, type_id: sequence }
+category: sequence
+command: sequence_export_folder
+deprecation: { reason: command_is_active, state: none }
+discovery: { aliases: [], keywords_en: [sequence, export, folder], keywords_zh: [sequence_export_folder], summary_en: "Export sequence through the unified Reflection HJSON authoring domain", summary_zh: "通过统一 Reflection HJSON authoring 域执行 `sequence` 的 export", tags: [sequence, reflection_authoring, p5-005] }
+errors: {
+  codes: [
+    { code: asset_path_required, description_zh: "缺少 asset_path。", retry_safe: true, stage: preflight, wire_match: exact }
+    { code: sequence_not_found, description_zh: "目标资产不存在或类型不匹配。", retry_safe: false, stage: execution, wire_match: exact }
+    { code: reflection_authoring_profile_missing, description_zh: "未注册对应 Reflection profile。", retry_safe: false, stage: preflight, wire_match: prefix }
+    { code: reflection_export_, description_zh: "共享 snapshot/projector/writer 导出失败。", retry_safe: false, stage: execution, wire_match: prefix }
+  ]
+}
+evidence: {
+  docs: [
+    { path: "Plugins/UeAgentInterface/docs/commands/sequence/sequence_export_folder.md", purpose: "user documentation cross-check; C++ implementation remains authoritative" }
+  ]
+  implementation: [
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Commands/Assets/UeAgentReflectionAuthoringCommandBridge.cpp", purpose: "all command parameter routing and result mapping", symbol: Export }
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Domains/Reflection/Authoring/", purpose: "shared profile, contract, lifecycle, snapshot and export owner" }
+  ]
+  tests: [
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterfaceTests/Private/UeAgentInterfaceReflectionAuthoringTests.cpp", purpose: "25-profile registration/class coverage and real render-target round trip" }
+  ]
+}
+execution: {
+  destructive: false
+  editor_state: required
+  game_thread: required
+  idempotent: true
+  kind: read_only_export
+  overwrite_behavior: owned_artifacts_only
+  pie_state: allowed
+  retry_safe: true
+  save_behavior: none
+  side_effects: [writes_files]
+  ui_effect: none
+}
+maturity: verified
+params: {
+  constraints: []
+  fields: {
+    asset_path: { default_state: none, description_zh: "要导出的 UE 资产 package path。", path_semantics: { access_scope: mounted_read, kind: ue_asset }, required: true, type: ue_asset_path }
+    folder_path: {
+      default_state: none
+      description_zh: "可选 canonical workspace 目录；目录内只写 index.hjson。"
+      path_semantics: { kind: filesystem_directory, must_exist: false, writable: true }
+      required: false
+      type: filesystem_path
+    }
+    output_file: {
+      default_state: none
+      description_zh: "可选单 HJSON 输出文件。"
+      path_semantics: { kind: filesystem_file, must_exist: false, writable: true }
+      required: false
+      type: filesystem_path
+    }
+    output_folder: {
+      default_state: none
+      description_zh: "folder_path 的显式输出目录形式。"
+      path_semantics: { kind: filesystem_directory, must_exist: false, writable: true }
+      required: false
+      type: filesystem_path
+    }
+    profile: { default: llm_authoring, default_state: defined, description_zh: "Export profile；默认 llm_authoring。", required: false, type: string }
+  }
+  state: defined
+}
+response: { artifact_fields: [written_files], compact_fields: [status, asset_path, workspace_root, profile_id, metrics], failure_fields: [params.asset_path], max_items_policy: { fields: [], mode: none } }
+returns: {
+  fields: {
+    asset_path: { description_zh: "canonical asset package path。", required: false, type: ue_asset_path }
+    contract_id: { description_zh: "生效的 ExportContract ID。", required: false, type: string }
+    contract_version: { description_zh: "ExportContract 版本。", required: false, type: string }
+    entry_file: { description_zh: "workspace-relative canonical 入口文件", required: true, type: string }
+    files: { description_zh: "规划文件；当前 canonical contract 只有一个 index.hjson。", item_type: json_value, required: false, type: array }
+    metrics: { description_zh: "字符、字节、行数和 token proxy 指标。", required: false, type: json_value }
+    profile_id: { description_zh: "实际 export profile。", required: false, type: string }
+    publisher: { description_zh: "共享 Export publisher transaction receipt", required: true, type: json_value }
+    schema: { description_zh: "统一 export workspace result schema。", required: true, type: string }
+    status: { description_zh: "written 或 failed。", required: false, type: string }
+    token_budget: { description_zh: "ExportContract token proxy 预算。", required: false, type: integer }
+    workspace_root: { description_zh: "实际 workspace 根目录。", required: false, type: filesystem_path }
+    written_files: { description_zh: "实际写入文件。", item_type: filesystem_path, required: false, type: array }
+    written_relative_files: { description_zh: "最终 artifact 的完整 workspace-relative 文件集合", item_type: string, required: true, type: array }
+  }
+  state: defined
+}
+schema: uai.command_spec.v1
+status: active
+types: {}
+verification: {
+  assertions: [
+    { id: status_present, operator: exists, source: returns.status }
+  ]
+  failure_policy: fail_overall
+  methods: [
+    { id: result, kind: result_assertion }
+    { artifact_field: workspace_root, id: artifact_integrity, kind: filesystem_artifact, receipt_source: structured_result }
+  ]
+  required: true
+  state: defined
+}
+version: 1

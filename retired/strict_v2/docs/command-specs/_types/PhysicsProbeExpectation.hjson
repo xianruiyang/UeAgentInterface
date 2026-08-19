@@ -1,0 +1,14 @@
+definition: {
+  additional_fields: false
+  fields: {
+    actor: { default_state: none, description_zh: "actor_id 别名", required: false, type: string }
+    actor_id: { default_state: none, description_zh: "目标 actor id；actor_id/actor 必选其一", required: false, type: string }
+    component: { default_state: none, description_zh: "PrimitiveComponent 名", required: false, type: string }
+    min_velocity_size: { default_state: none, description_zh: "world-space 线速度模长的最小值（cm/s）", minimum: 0, required: false, type: number }
+    min_z_delta: { default_state: none, description_zh: "world Z 位移的最小值（cm）", required: false, type: number }
+  }
+  kind: object
+}
+schema: uai.command_spec.shared_type.v1
+type_id: PhysicsProbeExpectation
+version: 1

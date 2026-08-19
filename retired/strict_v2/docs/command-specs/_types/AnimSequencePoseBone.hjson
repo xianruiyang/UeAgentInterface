@@ -1,0 +1,13 @@
+definition: {
+  additional_fields: false
+  fields: {
+    bone_index: { default_state: none, description_zh: "求值 pose 中的骨骼索引", minimum: 0, required: true, type: integer }
+    bone_name: { default_state: none, description_zh: "骨骼名", required: true, type: string }
+    ref_transform: { default_state: none, description_zh: "同一 space 下的 reference-pose 变换", required: false, type: object, type_ref: "shared:Transform3D" }
+    transform: { default_state: none, description_zh: "由命令顶层 space 指定 frame 的求值变换", required: true, type: object, type_ref: "shared:Transform3D" }
+  }
+  kind: object
+}
+schema: uai.command_spec.shared_type.v1
+type_id: AnimSequencePoseBone
+version: 1

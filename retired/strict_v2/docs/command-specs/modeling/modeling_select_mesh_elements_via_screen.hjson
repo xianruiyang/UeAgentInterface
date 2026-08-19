@@ -1,0 +1,89 @@
+authoring: { reason: command_has_no_registered_folder_authoring_profile, state: none }
+category: modeling
+command: modeling_select_mesh_elements_via_screen
+deprecation: { reason: command_is_active, state: none }
+discovery: { aliases: [], keywords_en: [modeling, select, mesh, elements, via, screen], keywords_zh: [modeling_select_mesh_elements_via_screen], summary_en: "Execute modeling_select_mesh_elements_via_screen with a verified implementation contract", summary_zh: "**原子/兼容**：控制 Modeling Mode 工具、选择或网格编辑动作", tags: [modeling, p2-002] }
+errors: {
+  codes: [
+    { code: calc_scene_view_failed, description_zh: "C++ 实现返回错误码 calc_scene_view_failed", retry_safe: false, stage: execution, wire_match: exact }
+    { code: editor_viewport_not_found, description_zh: "C++ 实现返回错误码 editor_viewport_not_found", retry_safe: false, stage: execution, wire_match: exact }
+    { code: editor_viewport_world_not_found, description_zh: "C++ 实现返回错误码 editor_viewport_world_not_found", retry_safe: false, stage: execution, wire_match: exact }
+    { code: invalid_viewport_size, description_zh: "C++ 实现返回错误码 invalid_viewport_size", retry_safe: true, stage: preflight, wire_match: exact }
+    { code: missing_screen_point, description_zh: "C++ 实现返回错误码 missing_screen_point", retry_safe: true, stage: preflight, wire_match: exact }
+    { code: modeling_mode_unavailable, description_zh: "C++ 实现返回错误码 modeling_mode_unavailable", retry_safe: false, stage: execution, wire_match: exact }
+    { code: modeling_selection_manager_unavailable, description_zh: "C++ 实现返回错误码 modeling_selection_manager_unavailable", retry_safe: false, stage: execution, wire_match: exact }
+    { code: modeling_selection_targets_empty, description_zh: "C++ 实现返回错误码 modeling_selection_targets_empty", retry_safe: false, stage: execution, wire_match: exact }
+    { code: modeling_tools_context_unavailable, description_zh: "C++ 实现返回错误码 modeling_tools_context_unavailable", retry_safe: false, stage: execution, wire_match: exact }
+  ]
+}
+evidence: {
+  docs: [
+    { path: "Plugins/UeAgentInterface/docs/commands/modeling/modeling_select_mesh_elements_via_screen.md", purpose: "user documentation cross-check; C++ implementation remains authoritative" }
+  ]
+  implementation: [
+    { line_hint: 279, path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Commands/Modeling/UeAgentHttpServer_Modeling_DispatchAndSelection.cpp", purpose: "command handler, parameter and return evidence", symbol: CmdModelingSelectMeshElementsViaScreen }
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Commands/Modeling/UeAgentHttpServer_Modeling.cpp", purpose: "transitive helper evidence used by the command handler" }
+  ]
+  tests: [
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterfaceTests/Private/Smoke/UeAgentInterfaceSmoke_Coverage.cpp", purpose: "smoke or negative-path evidence cross-checked for the verified contract" }
+  ]
+}
+execution: {
+  destructive: false
+  editor_state: required
+  game_thread: required
+  idempotent: false
+  kind: write
+  overwrite_behavior: none
+  pie_state: allowed
+  retry_safe: false
+  save_behavior: none
+  side_effects: [modifies_editor_session, modifies_level]
+  ui_effect: none
+}
+maturity: verified
+params: {
+  constraints: []
+  fields: {
+    change_type: { default: replace, default_state: defined, description_zh: "C++ 实现读取的 change_type 参数", required: false, type: string }
+    clear_on_miss: { default_state: none, description_zh: "C++ 实现读取的 clear_on_miss 参数", required: false, type: bool }
+    screen_x: { default: 0, default_state: defined, description_zh: "C++ 实现读取的 screen_x 参数", required: false, type: number }
+    screen_y: { default: 0, default_state: defined, description_zh: "C++ 实现读取的 screen_y 参数", required: false, type: number }
+  }
+  state: defined
+}
+response: { artifact_fields: [], compact_fields: [change_type, clear_on_miss, delta_added_count, delta_removed_count, element_type, has_active_targets], failure_fields: [], max_items_policy: { fields: [], mode: none } }
+returns: {
+  fields: {
+    change_type: { description_zh: "C++ 实现返回的 change_type 字段；是否出现取决于执行分支", required: false, type: string }
+    clear_on_miss: { description_zh: "C++ 实现返回的 clear_on_miss 字段；是否出现取决于执行分支", required: false, type: bool }
+    delta_added_count: { description_zh: "C++ 实现返回的 delta_added_count 字段；是否出现取决于执行分支", required: false, type: integer }
+    delta_removed_count: { description_zh: "C++ 实现返回的 delta_removed_count 字段；是否出现取决于执行分支", required: false, type: integer }
+    element_type: { description_zh: "C++ 实现返回的 element_type 字段；是否出现取决于执行分支", required: false, type: string }
+    has_active_targets: { description_zh: "C++ 实现返回的 has_active_targets 字段；是否出现取决于执行分支", required: false, type: bool }
+    is_empty: { description_zh: "C++ 实现返回的 is_empty 字段；是否出现取决于执行分支", required: false, type: bool }
+    screen_point: { description_zh: "C++ 实现返回的 screen_point 字段；是否出现取决于执行分支", required: false, type: json_value }
+    selection_missed: { description_zh: "C++ 实现返回的 selection_missed 字段；是否出现取决于执行分支", required: false, type: bool }
+    selection_modified: { description_zh: "C++ 实现返回的 selection_modified 字段；是否出现取决于执行分支", required: false, type: bool }
+    target_count: { description_zh: "C++ 实现返回的 target_count 字段；是否出现取决于执行分支", required: false, type: integer }
+    topology_mode: { description_zh: "C++ 实现返回的 topology_mode 字段；是否出现取决于执行分支", required: false, type: string }
+    world_direction: { description_zh: "C++ 实现返回的 world_direction 字段；是否出现取决于执行分支", required: false, type: json_value }
+    world_origin: { description_zh: "C++ 实现返回的 world_origin 字段；是否出现取决于执行分支", required: false, type: json_value }
+  }
+  state: defined
+}
+schema: uai.command_spec.v1
+status: active
+types: {}
+verification: {
+  assertions: [
+    { id: result_present, operator: exists, source: returns.change_type }
+  ]
+  failure_policy: fail_overall
+  methods: [
+    { id: result, kind: result_assertion }
+  ]
+  required: true
+  state: defined
+}
+version: 1

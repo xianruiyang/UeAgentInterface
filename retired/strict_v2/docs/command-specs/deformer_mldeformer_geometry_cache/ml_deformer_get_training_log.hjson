@@ -1,0 +1,59 @@
+authoring: { reason: command_has_no_registered_folder_authoring_profile, state: none }
+category: deformer_mldeformer_geometry_cache
+command: ml_deformer_get_training_log
+deprecation: { reason: command_is_active, state: none }
+discovery: { aliases: [], keywords_en: [ml, deformer, get, training, log, deformer_mldeformer_geometry_cache], keywords_zh: [ml_deformer_get_training_log], summary_en: "Execute ml_deformer_get_training_log with a verified implementation contract", summary_zh: "读取训练日志尾部", tags: [deformer_mldeformer_geometry_cache, p2-006] }
+errors: { codes: [] }
+evidence: {
+  docs: [
+    { path: "Plugins/UeAgentInterface/docs/commands/deformer_mldeformer_geometry_cache/ml_deformer_get_training_log.md", purpose: "user documentation cross-check; C++ implementation remains authoritative" }
+  ]
+  implementation: [
+    { line_hint: 2731, path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Commands/Deformer/UeAgentHttpServer_Deformer.cpp", purpose: "command handler, parameter and return evidence", symbol: CmdMLDeformerGetTrainingLog }
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Server/UeAgentHttpServer.cpp", purpose: "transitive helper evidence used by the command handler" }
+  ]
+  tests: [
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterfaceTests/Private/Smoke/UeAgentInterfaceSmoke_Coverage.cpp", purpose: "smoke or negative-path evidence cross-checked for the verified contract" }
+  ]
+}
+execution: {
+  destructive: false
+  editor_state: required
+  game_thread: required
+  idempotent: true
+  kind: read_only
+  overwrite_behavior: none
+  pie_state: allowed
+  retry_safe: true
+  save_behavior: none
+  side_effects: []
+  ui_effect: none
+}
+maturity: verified
+params: {
+  constraints: []
+  fields: {
+    log_file: {
+      default_state: none
+      description_zh: "C++ 实现读取的 log_file 参数"
+      path_semantics: { kind: filesystem_file, must_exist: false, writable: false }
+      required: false
+      type: filesystem_path
+    }
+  }
+  state: defined
+}
+response: { artifact_fields: [], compact_fields: [status, log_file, tail], failure_fields: [], max_items_policy: { fields: [], mode: none } }
+returns: {
+  fields: {
+    log_file: { description_zh: "C++ 实现返回的 log_file 字段；是否出现取决于执行分支", required: false, type: filesystem_path }
+    status: { description_zh: "C++ 实现返回的 status 字段；是否出现取决于执行分支", required: false, type: string }
+    tail: { description_zh: "C++ 实现返回的 tail 字段；是否出现取决于执行分支", required: false, type: string }
+  }
+  state: defined
+}
+schema: uai.command_spec.v1
+status: active
+types: {}
+verification: { reason: read_only_command_has_no_post_write_verification, state: none }
+version: 1

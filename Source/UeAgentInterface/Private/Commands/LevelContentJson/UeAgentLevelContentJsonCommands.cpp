@@ -1,6 +1,7 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "Server/UeAgentHttpServer.h"
+#include "Commands/Level/UeAgentCommandSafety.h"
 #include "UeAgentLevelContentJsonApply.h"
 #include "UeAgentLevelContentJsonCore.h"
 #include "UeAgentLevelContentJsonDiff.h"
@@ -17,6 +18,62 @@
 #include "GameFramework/Actor.h"
 #include "ScopedTransaction.h"
 #include "Subsystems/EditorActorSubsystem.h"
+
+namespace
+{
+	bool LevelContentRequestsDelete(
+		const TSharedPtr<FJsonObject>& Content,
+		const FString& Mode,
+		const FString& DeletePolicy)
+	{
+		if (Mode == TEXT("delete_only") || Mode == TEXT("replace_scope") ||
+			DeletePolicy == TEXT("only_managed_missing") || DeletePolicy == TEXT("replace_scope_managed"))
+		{
+			return true;
+		}
+
+		TArray<TSharedPtr<FJsonObject>> Resources;
+		UeAgentLevelContentJson::CollectResourceObjects(Content, Resources);
+		for (const TSharedPtr<FJsonObject>& Resource : Resources)
+		{
+			if (UeAgentLevelContentJson::GetResourceOperation(Resource, TEXT("upsert")) == TEXT("delete"))
+			{
+				return true;
+			}
+		}
+
+		const TArray<TSharedPtr<FJsonValue>>* Operations = nullptr;
+		if (Content.IsValid() && Content->TryGetArrayField(TEXT("operations"), Operations) && Operations)
+		{
+			for (const TSharedPtr<FJsonValue>& Value : *Operations)
+			{
+				const TSharedPtr<FJsonObject> Operation = Value.IsValid() ? Value->AsObject() : nullptr;
+				FString Type;
+				if (Operation.IsValid() && UeAgentLevelContentJson::TryGetStringAny(Operation, { TEXT("type"), TEXT("operation") }, Type) &&
+					Type.TrimStartAndEnd().Equals(TEXT("delete"), ESearchCase::IgnoreCase))
+				{
+					return true;
+				}
+			}
+		}
+		return false;
+	}
+
+	bool LevelContentValidationResultsPassed(const TArray<TSharedPtr<FJsonValue>>& ValidationResults)
+	{
+		for (const TSharedPtr<FJsonValue>& Value : ValidationResults)
+		{
+			const TSharedPtr<FJsonObject> Result = Value.IsValid() ? Value->AsObject() : nullptr;
+			bool bPassed = false;
+			if (!Result.IsValid() || !Result->TryGetBoolField(TEXT("passed"), bPassed) || !bPassed)
+			{
+				return false;
+			}
+		}
+		return true;
+	}
+}
+
 bool FUeAgentHttpServer::ExecuteLevelContentQueryJsonInternal(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError, bool bActorOnly) const
 {
 	UWorld* World = GetEditorWorld(OutError);
@@ -105,12 +162,19 @@ bool FUeAgentHttpServer::ExecuteLevelContentApplyJsonInternal(const FUeAgentRequ
 		return false;
 	}
 
-	bool bDryRun = false;
-	UeAgentLevelContentJson::TryGetBoolAny(Ctx.Params, { TEXT("dry_run") }, bDryRun);
+	bool bDryRun = true;
 	bool bPreflight = true;
-	UeAgentLevelContentJson::TryGetBoolAny(Ctx.Params, { TEXT("preflight") }, bPreflight);
 	bool bTransaction = true;
-	UeAgentLevelContentJson::TryGetBoolAny(Ctx.Params, { TEXT("transaction") }, bTransaction);
+	bool bValidateAfterApply = true;
+	bool bAllowDestructive = false;
+	if (!UeAgentCommandSafety::ReadStrictBool(Ctx.Params, TEXT("dry_run"), true, bDryRun, OutError) ||
+		!UeAgentCommandSafety::ReadStrictBool(Ctx.Params, TEXT("preflight"), true, bPreflight, OutError) ||
+		!UeAgentCommandSafety::ReadStrictBool(Ctx.Params, TEXT("transaction"), true, bTransaction, OutError) ||
+		!UeAgentCommandSafety::ReadStrictBool(Ctx.Params, TEXT("validate_after_apply"), true, bValidateAfterApply, OutError) ||
+		!UeAgentCommandSafety::ReadStrictBool(Ctx.Params, TEXT("allow_destructive"), false, bAllowDestructive, OutError))
+	{
+		return false;
+	}
 	FString Mode = TEXT("upsert");
 	UeAgentLevelContentJson::TryGetStringAny(Ctx.Params, { TEXT("mode") }, Mode);
 	Mode = Mode.TrimStartAndEnd().ToLower();
@@ -118,17 +182,43 @@ bool FUeAgentHttpServer::ExecuteLevelContentApplyJsonInternal(const FUeAgentRequ
 	{
 		Mode = TEXT("upsert");
 	}
+	const TSet<FString> SupportedModes = { TEXT("upsert"), TEXT("patch"), TEXT("create_only"), TEXT("delete_only"), TEXT("replace_scope") };
+	if (!SupportedModes.Contains(Mode))
+	{
+		OutError = TEXT("invalid_mode");
+		return false;
+	}
+
+	FString DeletePolicy;
+	UeAgentLevelContentJson::TryGetStringAny(Ctx.Params, { TEXT("delete_policy") }, DeletePolicy);
+	DeletePolicy = DeletePolicy.TrimStartAndEnd().ToLower();
+	const TSet<FString> SupportedDeletePolicies = { TEXT(""), TEXT("none"), TEXT("only_managed_missing"), TEXT("replace_scope_managed") };
+	if (!SupportedDeletePolicies.Contains(DeletePolicy))
+	{
+		OutError = TEXT("invalid_delete_policy");
+		return false;
+	}
+	const bool bDestructive = LevelContentRequestsDelete(Content, Mode, DeletePolicy);
+	if (!bDryRun && bDestructive && !bAllowDestructive)
+	{
+		OutData->SetStringField(TEXT("status"), TEXT("blocked"));
+		OutData->SetBoolField(TEXT("dry_run"), false);
+		OutData->SetBoolField(TEXT("destructive"), true);
+		OutData->SetBoolField(TEXT("allow_destructive"), false);
+		OutError = TEXT("allow_destructive_required");
+		return false;
+	}
 
 	TSharedPtr<FJsonObject> Validation;
 	UeAgentLevelContentJson::ValidateLevelContent(World, Content, Ctx.Params, bActorOnly, Validation);
-	if (bPreflight && Validation.IsValid() && !Validation->GetBoolField(TEXT("valid")))
+	if ((bPreflight || !bDryRun) && Validation.IsValid() && !Validation->GetBoolField(TEXT("valid")))
 	{
 		OutData = MakeShared<FJsonObject>();
 		OutData->SetStringField(TEXT("schema"), UeAgentLevelContentJson::ApplySchema);
 		OutData->SetStringField(TEXT("source"), Source);
 		OutData->SetStringField(TEXT("status"), TEXT("preflight_failed"));
 		OutData->SetObjectField(TEXT("validation"), Validation);
-		OutError = TEXT("level_content_preflight_failed");
+		OutError = bPreflight ? TEXT("level_content_preflight_failed") : TEXT("level_content_validation_failed");
 		return false;
 	}
 
@@ -137,6 +227,8 @@ bool FUeAgentHttpServer::ExecuteLevelContentApplyJsonInternal(const FUeAgentRequ
 		OutData = UeAgentLevelContentJson::BuildPlan(World, Content, Ctx.Params, bActorOnly);
 		OutData->SetStringField(TEXT("source"), Source);
 		OutData->SetBoolField(TEXT("dry_run"), true);
+		OutData->SetBoolField(TEXT("destructive"), bDestructive);
+		OutData->SetBoolField(TEXT("allow_destructive"), bAllowDestructive);
 		OutData->SetObjectField(TEXT("validation"), Validation);
 		return true;
 	}
@@ -152,7 +244,7 @@ bool FUeAgentHttpServer::ExecuteLevelContentApplyJsonInternal(const FUeAgentRequ
 	TMap<FString, AActor*> ActorById;
 	TSet<FString> TargetIds;
 	const TArray<FString> ProtectionTags = UeAgentLevelContentJson::ReadProtectionTags(Content);
-	bool bMayNeedRollback = false;
+	bool bMayNeedRollback = true;
 
 	TUniquePtr<FScopedTransaction> Transaction;
 	if (bTransaction)
@@ -185,9 +277,6 @@ bool FUeAgentHttpServer::ExecuteLevelContentApplyJsonInternal(const FUeAgentRequ
 		bOk = UeAgentLevelContentJson::ApplyAttachments(World, Resources, ActorById, AttachmentResults, LocalError);
 	}
 
-	FString DeletePolicy;
-	UeAgentLevelContentJson::TryGetStringAny(Ctx.Params, { TEXT("delete_policy") }, DeletePolicy);
-	DeletePolicy = DeletePolicy.ToLower();
 	if (bOk && (Mode == TEXT("replace_scope") || DeletePolicy == TEXT("only_managed_missing") || DeletePolicy == TEXT("replace_scope_managed")))
 	{
 		bOk = UeAgentLevelContentJson::DeleteManagedMissing(World, Content, Ctx.Params, TargetIds, ProtectionTags, false, Results, LocalError);
@@ -201,9 +290,14 @@ bool FUeAgentHttpServer::ExecuteLevelContentApplyJsonInternal(const FUeAgentRequ
 	{
 		bOk = UeAgentLevelContentJson::ExecuteTasks(World, Content, false, TaskResults, LocalError);
 	}
-	if (bOk)
+	if (bOk && bValidateAfterApply)
 	{
 		UeAgentLevelContentJson::ExecuteValidations(World, Content, ValidationResults);
+		if (!LevelContentValidationResultsPassed(ValidationResults))
+		{
+			LocalError = TEXT("level_content_validation_failed");
+			bOk = false;
+		}
 	}
 	if (bOk)
 	{
@@ -216,13 +310,13 @@ bool FUeAgentHttpServer::ExecuteLevelContentApplyJsonInternal(const FUeAgentRequ
 		}
 	}
 
+	bool bRollbackAttempted = false;
+	bool bRollbackSucceeded = false;
 	if (!bOk && Transaction && bMayNeedRollback)
 	{
 		Transaction.Reset();
-		if (GEditor)
-		{
-			GEditor->UndoTransaction();
-		}
+		bRollbackAttempted = true;
+		bRollbackSucceeded = GEditor && GEditor->UndoTransaction();
 	}
 	else if (!bOk && Transaction)
 	{
@@ -240,8 +334,12 @@ bool FUeAgentHttpServer::ExecuteLevelContentApplyJsonInternal(const FUeAgentRequ
 	OutData->SetStringField(TEXT("status"), bOk ? TEXT("applied") : TEXT("failed"));
 	OutData->SetBoolField(TEXT("success"), bOk);
 	OutData->SetBoolField(TEXT("dry_run"), false);
+	OutData->SetBoolField(TEXT("destructive"), bDestructive);
+	OutData->SetBoolField(TEXT("allow_destructive"), bAllowDestructive);
+	OutData->SetBoolField(TEXT("validate_after_apply"), bValidateAfterApply);
 	OutData->SetBoolField(TEXT("transaction"), bTransaction);
-	OutData->SetBoolField(TEXT("rollback_attempted"), !bOk && bTransaction);
+	OutData->SetBoolField(TEXT("rollback_attempted"), bRollbackAttempted);
+	OutData->SetBoolField(TEXT("rollback_succeeded"), bRollbackSucceeded);
 	OutData->SetObjectField(TEXT("validation"), Validation);
 	OutData->SetArrayField(TEXT("results"), Results);
 	OutData->SetArrayField(TEXT("resource_results"), Results);
@@ -318,7 +416,21 @@ bool FUeAgentHttpServer::CmdLevelContentDeleteScope(const FUeAgentRequestContext
 	}
 
 	bool bDryRun = true;
-	UeAgentLevelContentJson::TryGetBoolAny(Ctx.Params, { TEXT("dry_run") }, bDryRun);
+	bool bAllowDestructive = false;
+	if (!UeAgentCommandSafety::ReadStrictBool(Ctx.Params, TEXT("dry_run"), true, bDryRun, OutError) ||
+		!UeAgentCommandSafety::ReadStrictBool(Ctx.Params, TEXT("allow_destructive"), false, bAllowDestructive, OutError))
+	{
+		return false;
+	}
+	if (!bDryRun && !bAllowDestructive)
+	{
+		OutData->SetStringField(TEXT("status"), TEXT("blocked"));
+		OutData->SetBoolField(TEXT("dry_run"), false);
+		OutData->SetBoolField(TEXT("allow_destructive"), false);
+		OutData->SetNumberField(TEXT("deleted_count"), 0);
+		OutError = TEXT("allow_destructive_required");
+		return false;
+	}
 
 	bool bRecursive = true;
 	UeAgentLevelContentJson::TryGetBoolAny(Ctx.Params, { TEXT("recursive"), TEXT("include_child_folders") }, bRecursive);
@@ -417,8 +529,11 @@ bool FUeAgentHttpServer::CmdLevelContentDeleteScope(const FUeAgentRequestContext
 	}
 	ManagedTag = bHasManagedTag ? ManagedTag.TrimStartAndEnd() : FString();
 
-	bool bAllowUnmanagedDelete = !bHasManagedTag && ManagedIdSet.IsEmpty();
-	UeAgentLevelContentJson::TryGetBoolAny(Ctx.Params, { TEXT("allow_unmanaged_delete") }, bAllowUnmanagedDelete);
+	bool bAllowUnmanagedDelete = false;
+	if (!UeAgentCommandSafety::ReadStrictBool(Ctx.Params, TEXT("allow_unmanaged_delete"), false, bAllowUnmanagedDelete, OutError))
+	{
+		return false;
+	}
 
 	auto MakeReason = [](const FString& Reason, const FString& Detail = FString()) -> TSharedPtr<FJsonObject>
 	{
@@ -607,6 +722,7 @@ bool FUeAgentHttpServer::CmdLevelContentDeleteScope(const FUeAgentRequestContext
 	OutData->SetBoolField(TEXT("recursive"), bRecursive);
 	OutData->SetBoolField(TEXT("include_child_folders"), bRecursive);
 	OutData->SetBoolField(TEXT("fail_on_blocked"), bFailOnBlocked);
+	OutData->SetBoolField(TEXT("allow_destructive"), bAllowDestructive);
 	OutData->SetBoolField(TEXT("allow_unmanaged_delete"), bAllowUnmanagedDelete);
 	OutData->SetBoolField(TEXT("delete_empty_folders"), bDeleteEmptyFolders);
 	OutData->SetBoolField(TEXT("save_level"), bSaveLevel);

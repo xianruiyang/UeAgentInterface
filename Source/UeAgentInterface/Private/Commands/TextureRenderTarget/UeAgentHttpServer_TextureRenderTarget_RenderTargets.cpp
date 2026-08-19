@@ -2,6 +2,7 @@
 
 #include "Server/UeAgentHttpServer.h"
 
+#include "Commands/Assets/UeAgentReflectionAuthoringCommandBridge.h"
 #include "UeAgentHttpServer_TextureRenderTargetOps.h"
 
 #include "Utilities/UeAgentAuthoringJson.h"
@@ -189,121 +190,17 @@ bool FUeAgentHttpServer::CmdRenderTargetGetInfo(const FUeAgentRequestContext& Ct
 
 bool FUeAgentHttpServer::CmdRenderTargetExportJson(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
-	using namespace UeAgentTextureOps;
-	FString AssetPath;
-	FString OutputFile;
-	if (!GetRequiredString(Ctx, TEXT("asset_path"), AssetPath, OutError) || !GetRequiredString(Ctx, TEXT("output_file"), OutputFile, OutError))
-	{
-		return false;
-	}
-	UTextureRenderTarget* RenderTarget = LoadAsset<UTextureRenderTarget>(AssetPath);
-	if (!RenderTarget)
-	{
-		OutError = TEXT("render_target_not_found");
-		return false;
-	}
-	TSharedPtr<FJsonObject> Root = BuildGenericAssetJson(RenderTarget, TEXT("ue_agent_interface.render_target.v1"), true);
-	EchoOptionalBool(Ctx.Params, Root, TEXT("include_raw_properties"), true, OutError);
-	EchoOptionalBool(Ctx.Params, Root, TEXT("include_validation"), true, OutError);
-	Root->SetObjectField(TEXT("render_target_info"), BuildRenderTargetInfo(RenderTarget));
-	FString Saved;
-	if (!SaveJsonFile(OutputFile, Root, Saved, OutError))
-	{
-		return false;
-	}
-	OutData = Root;
-	OutData->SetStringField(TEXT("output_file"), Saved);
-	return true;
+	return UeAgentReflectionAuthoringCommandBridge::Export(TEXT("render_target"), Ctx.Params, OutData, OutError);
 }
 
 bool FUeAgentHttpServer::CmdRenderTargetValidateJson(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
-	using namespace UeAgentTextureOps;
-	FString JsonFile;
-	if (!GetRequiredString(Ctx, TEXT("json_file"), JsonFile, OutError))
-	{
-		return false;
-	}
-	TSharedPtr<FJsonObject> Root;
-	FString Resolved;
-	if (!LoadJsonFile(JsonFile, Root, Resolved, OutError))
-	{
-		return false;
-	}
-	TArray<TSharedPtr<FJsonValue>> Issues;
-	FString Profile;
-	Root->TryGetStringField(TEXT("profile"), Profile);
-	if (Profile != TEXT("ue_agent_interface.render_target.v1"))
-	{
-		AddIssue(Issues, TEXT("unexpected_profile"), TEXT("warning"), TEXT("JSON profile is not ue_agent_interface.render_target.v1."));
-	}
-	OutData = MakeShared<FJsonObject>();
-	OutData->SetStringField(TEXT("json_file"), Resolved);
-	OutData->SetBoolField(TEXT("validation_passed"), true);
-	OutData->SetArrayField(TEXT("json_issues"), Issues);
-	OutData->SetObjectField(TEXT("coverage_report"), MakeCoverageReport(TEXT("ue_agent_interface.render_target.v1")));
-	return true;
+	return UeAgentReflectionAuthoringCommandBridge::Validate(TEXT("render_target"), Ctx.Params, OutData, OutError);
 }
 
 bool FUeAgentHttpServer::CmdRenderTargetApplyJson(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
-	using namespace UeAgentTextureOps;
-	FString JsonFile;
-	if (!GetRequiredString(Ctx, TEXT("json_file"), JsonFile, OutError))
-	{
-		return false;
-	}
-	TSharedPtr<FJsonObject> Root;
-	FString Resolved;
-	if (!LoadJsonFile(JsonFile, Root, Resolved, OutError))
-	{
-		return false;
-	}
-	FString AssetPath;
-	Root->TryGetStringField(TEXT("asset_path"), AssetPath);
-	JsonTryGetString(Ctx.Params, TEXT("asset_path"), AssetPath);
-	UTextureRenderTarget* RenderTarget = LoadAsset<UTextureRenderTarget>(AssetPath);
-	if (!RenderTarget)
-	{
-		OutError = TEXT("render_target_not_found");
-		return false;
-	}
-	bool bDryRun = false;
-	bool bValidateOnly = false;
-	bool bAllowResize = false;
-	GetOptionalBool(Ctx.Params, TEXT("dry_run"), bDryRun, OutError);
-	GetOptionalBool(Ctx.Params, TEXT("validate_only"), bValidateOnly, OutError);
-	GetOptionalBool(Ctx.Params, TEXT("allow_resize"), bAllowResize, OutError);
-	if (bDryRun || bValidateOnly)
-	{
-		OutData = BuildRenderTargetInfo(RenderTarget);
-		OutData->SetStringField(TEXT("json_file"), Resolved);
-		OutData->SetBoolField(TEXT("dry_run"), bDryRun);
-		OutData->SetBoolField(TEXT("validate_only"), bValidateOnly);
-		OutData->SetBoolField(TEXT("allow_resize"), bAllowResize);
-		OutData->SetArrayField(TEXT("property_results"), {});
-		OutData->SetObjectField(TEXT("resize_result"), MakeShared<FJsonObject>());
-		return true;
-	}
-	TArray<TSharedPtr<FJsonValue>> Results;
-	if (!ApplyGenericProperties(RenderTarget, Root, Results, OutError))
-	{
-		return false;
-	}
-	RenderTarget->PostEditChange();
-	RenderTarget->UpdateResource();
-	bool bSave = true;
-	GetOptionalBool(Ctx.Params, TEXT("save_after_apply"), bSave, OutError);
-	if (bSave && !SavePackagesForObjects({ RenderTarget }, OutError))
-	{
-		return false;
-	}
-	OutData = BuildRenderTargetInfo(RenderTarget);
-	OutData->SetStringField(TEXT("json_file"), Resolved);
-	OutData->SetBoolField(TEXT("allow_resize"), bAllowResize);
-	OutData->SetArrayField(TEXT("property_results"), Results);
-	OutData->SetObjectField(TEXT("resize_result"), MakeShared<FJsonObject>());
-	return true;
+	return UeAgentReflectionAuthoringCommandBridge::Apply(TEXT("render_target"), Ctx.Params, OutData, OutError, Ctx.RequestId);
 }
 
 bool FUeAgentHttpServer::CmdRenderTargetResize(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
@@ -956,16 +853,18 @@ bool FUeAgentHttpServer::CmdRenderTargetCreateStaticTexture(const FUeAgentReques
 	FString CompressionSettings;
 	if (JsonTryGetString(Ctx.Params, TEXT("compression_settings"), CompressionSettings) && !CompressionSettings.TrimStartAndEnd().IsEmpty())
 	{
-		FString Readback;
-		FString ImportError;
-		ImportPropertyText(Texture, TEXT("CompressionSettings"), CompressionSettings.TrimStartAndEnd(), Readback, ImportError);
+		TSharedPtr<FJsonObject> Value = MakeShared<FJsonObject>();
+		Value->SetStringField(TEXT("selected"), CompressionSettings.TrimStartAndEnd());
+		TSharedPtr<FJsonObject> ApplySummary;
+		if (!ApplyCanonicalProperty(Texture, TEXT("CompressionSettings"), MakeShared<FJsonValueObject>(Value), ApplySummary, OutError)) return false;
 	}
 	FString MipSettings;
 	if (JsonTryGetStringAny(Ctx.Params, { TEXT("mip_settings"), TEXT("mip_gen_settings") }, MipSettings) && !MipSettings.TrimStartAndEnd().IsEmpty())
 	{
-		FString Readback;
-		FString ImportError;
-		ImportPropertyText(Texture, TEXT("MipGenSettings"), MipSettings.TrimStartAndEnd(), Readback, ImportError);
+		TSharedPtr<FJsonObject> Value = MakeShared<FJsonObject>();
+		Value->SetStringField(TEXT("selected"), MipSettings.TrimStartAndEnd());
+		TSharedPtr<FJsonObject> ApplySummary;
+		if (!ApplyCanonicalProperty(Texture, TEXT("MipGenSettings"), MakeShared<FJsonValueObject>(Value), ApplySummary, OutError)) return false;
 	}
 	FAssetRegistryModule::AssetCreated(Texture);
 	Texture->PostEditChange();

@@ -1,0 +1,18 @@
+definition: {
+  additional_fields: false
+  fields: {
+    candidate_index: { default_state: none, description_zh: "候选 0-based 索引", minimum: 0, required: false, type: integer }
+    control_transform: { default_state: none, description_zh: "实际求值的 Control Rig control-local transform", required: false, type: object, type_ref: "shared:Transform3D" }
+    delta_transform: { default_state: none, description_zh: "相对原 control-local transform 的增量", required: false, type: object, type_ref: "shared:Transform3D" }
+    frame_index: { default_state: none, description_zh: "frame sheet 中的 frame 索引", minimum: 0, required: false, type: integer }
+    frame_label: { default_state: none, description_zh: "frame sheet 标签", required: false, type: string }
+    label: { default_state: none, description_zh: "候选标签", required: false, type: string }
+    max_bone_location_delta_from_f0: { default_state: none, description_zh: "与 F0 相比的最大 component-space bone location 差（cm）", minimum: 0, required: false, type: number }
+    mean_pixel_diff_from_f0: { default_state: none, description_zh: "与 F0 的平均像素差", minimum: 0, required: false, type: number }
+    transform_mode: { default_state: none, description_zh: "实际 relative/absolute 解释模式", required: false, type: string }
+  }
+  kind: object
+}
+schema: uai.command_spec.shared_type.v1
+type_id: ProbeIKGoalCandidateResult
+version: 1

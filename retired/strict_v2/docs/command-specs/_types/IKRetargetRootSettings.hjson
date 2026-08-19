@@ -1,0 +1,19 @@
+definition: {
+  additional_fields: false
+  fields: {
+    affect_ik_horizontal: { default_state: none, description_zh: "horizontal root offset 对 IK 的影响", required: false, type: number }
+    affect_ik_vertical: { default_state: none, description_zh: "vertical root offset 对 IK 的影响", required: false, type: number }
+    blend_to_source: { default_state: none, description_zh: "blend to source", required: false, type: number }
+    blend_to_source_weights: { default_state: none, description_zh: "root translation 各轴权重", required: false, type: object, type_ref: "shared:Vector3" }
+    rotation_alpha: { default_state: none, description_zh: "root rotation alpha", required: false, type: number }
+    rotation_offset: { default_state: none, description_zh: "retarget root/global frame 的 rotation offset（度）", required: false, type: object, type_ref: "shared:Rotator3D" }
+    scale_horizontal: { default_state: none, description_zh: "horizontal scale", required: false, type: number }
+    scale_vertical: { default_state: none, description_zh: "vertical scale", required: false, type: number }
+    translation_alpha: { default_state: none, description_zh: "root translation alpha", required: false, type: number }
+    translation_offset: { default_state: none, description_zh: "retarget root/global frame 的 translation offset", required: false, type: object, type_ref: "shared:Vector3" }
+  }
+  kind: object
+}
+schema: uai.command_spec.shared_type.v1
+type_id: IKRetargetRootSettings
+version: 1

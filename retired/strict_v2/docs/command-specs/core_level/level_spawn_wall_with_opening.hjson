@@ -1,0 +1,109 @@
+authoring: { reason: command_has_no_registered_folder_authoring_profile, state: none }
+category: core_level
+command: level_spawn_wall_with_opening
+deprecation: { reason: command_is_active, state: none }
+discovery: { aliases: [], keywords_en: [level, spawn, wall, with, opening, core_level], keywords_zh: [level_spawn_wall_with_opening], summary_en: "Execute level_spawn_wall_with_opening with a verified implementation contract", summary_zh: "生成“带开口的墙”（自动拆成多段网格）", tags: [core_level, p2-002] }
+errors: {
+  codes: [
+    { code: actor_has_no_static_mesh_component, description_zh: "C++ 实现返回错误码 actor_has_no_static_mesh_component", retry_safe: false, stage: execution, wire_match: exact }
+    { code: failed_to_load_class, description_zh: "C++ 实现返回错误码 failed_to_load_class", retry_safe: false, stage: execution, wire_match: prefix }
+    { code: failed_to_load_static_mesh, description_zh: "C++ 实现返回错误码 failed_to_load_static_mesh", retry_safe: false, stage: execution, wire_match: prefix }
+    { code: invalid_wall_size, description_zh: "C++ 实现返回错误码 invalid_wall_size", retry_safe: true, stage: preflight, wire_match: exact }
+    { code: missing_opening_center_right_cm, description_zh: "C++ 实现返回错误码 missing_opening_center_right_cm", retry_safe: true, stage: preflight, wire_match: exact }
+    { code: missing_opening_center_up_cm, description_zh: "C++ 实现返回错误码 missing_opening_center_up_cm", retry_safe: true, stage: preflight, wire_match: exact }
+    { code: missing_opening_size_height_cm, description_zh: "C++ 实现返回错误码 missing_opening_size_height_cm", retry_safe: true, stage: preflight, wire_match: exact }
+    { code: missing_opening_size_width_cm, description_zh: "C++ 实现返回错误码 missing_opening_size_width_cm", retry_safe: true, stage: preflight, wire_match: exact }
+    { code: missing_plane, description_zh: "C++ 实现返回错误码 missing_plane", retry_safe: true, stage: preflight, wire_match: exact }
+    { code: missing_plane_center, description_zh: "C++ 实现返回错误码 missing_plane_center", retry_safe: true, stage: preflight, wire_match: exact }
+    { code: missing_plane_normal, description_zh: "C++ 实现返回错误码 missing_plane_normal", retry_safe: true, stage: preflight, wire_match: exact }
+    { code: missing_wall_size, description_zh: "C++ 实现返回错误码 missing_wall_size", retry_safe: true, stage: preflight, wire_match: exact }
+    { code: missing_wall_size_height_cm, description_zh: "C++ 实现返回错误码 missing_wall_size_height_cm", retry_safe: true, stage: preflight, wire_match: exact }
+    { code: missing_wall_size_thickness_cm, description_zh: "C++ 实现返回错误码 missing_wall_size_thickness_cm", retry_safe: true, stage: preflight, wire_match: exact }
+    { code: missing_wall_size_width_cm, description_zh: "C++ 实现返回错误码 missing_wall_size_width_cm", retry_safe: true, stage: preflight, wire_match: exact }
+    { code: no_editor_world, description_zh: "C++ 实现返回错误码 no_editor_world", retry_safe: false, stage: execution, wire_match: exact }
+    { code: no_geditor, description_zh: "C++ 实现返回错误码 no_geditor", retry_safe: false, stage: execution, wire_match: exact }
+    { code: opening_collapsed, description_zh: "C++ 实现返回错误码 opening_collapsed", retry_safe: false, stage: execution, wire_match: exact }
+    { code: opening_out_of_bounds, description_zh: "C++ 实现返回错误码 opening_out_of_bounds", retry_safe: false, stage: execution, wire_match: exact }
+    { code: spawn_failed, description_zh: "C++ 实现返回错误码 spawn_failed", retry_safe: false, stage: execution, wire_match: exact }
+  ]
+}
+evidence: {
+  docs: [
+    { path: "Plugins/UeAgentInterface/docs/commands/core_level/level_spawn_wall_with_opening.md", purpose: "user documentation cross-check; C++ implementation remains authoritative" }
+  ]
+  implementation: [
+    { line_hint: 1184, path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Commands/Level/UeAgentHttpServer_Level_ActorAndTransform.cpp", purpose: "command handler, parameter and return evidence", symbol: CmdLevelSpawnWallWithOpening }
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Commands/Level/UeAgentHttpServer_Level_CaptureAndPersistence.cpp", purpose: "transitive helper evidence used by the command handler" }
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Server/UeAgentHttpServer.cpp", purpose: "transitive helper evidence used by the command handler" }
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Utilities/UeAgentJsonDiagnostics.cpp", purpose: "transitive helper evidence used by the command handler" }
+  ]
+  tests: [
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterfaceTests/Private/Smoke/UeAgentInterfaceSmoke_Coverage.cpp", purpose: "smoke or negative-path evidence cross-checked for the verified contract" }
+  ]
+}
+execution: {
+  destructive: false
+  editor_state: required
+  game_thread: required
+  idempotent: false
+  kind: write
+  overwrite_behavior: none
+  pie_state: allowed
+  retry_safe: false
+  save_behavior: none
+  side_effects: [modifies_level]
+  ui_effect: none
+}
+maturity: verified
+params: {
+  constraints: []
+  fields: {
+    clamp_opening: { default: false, default_state: defined, description_zh: "C++ 实现读取的 clamp_opening 参数", required: false, type: bool }
+    class_path: { default_state: none, description_zh: "C++ 实现读取的 class_path 参数", required: false, type: string }
+    epsilon_cm: { default: 0.01, default_state: defined, description_zh: "C++ 实现读取的 epsilon_cm 参数", required: false, type: number }
+    folder_path: {
+      default_state: none
+      description_zh: "新建墙体 Actor 的 World Outliner 相对文件夹路径"
+      path_semantics: { kind: actor_folder }
+      required: false
+      type: actor_folder_path
+    }
+    label_prefix: { default_state: none, description_zh: "C++ 实现读取的 label_prefix 参数", required: false, type: string }
+    min_segment_size_cm: { default: 1, default_state: defined, description_zh: "C++ 实现读取的 min_segment_size_cm 参数", required: false, type: number }
+    opening_center: { default_state: none, description_zh: "C++ 实现读取的 opening_center 参数", required: true, type: json_value }
+    opening_padding_cm: { default: 0, default_state: defined, description_zh: "C++ 实现读取的 opening_padding_cm 参数", required: false, type: number }
+    opening_size: { default_state: none, description_zh: "C++ 实现读取的 opening_size 参数", required: true, type: json_value }
+    plane: { default_state: none, description_zh: "C++ 实现读取的 plane 参数", required: true, type: json_value }
+    static_mesh: { default_state: none, description_zh: "C++ 实现读取的 static_mesh 参数", required: false, type: string }
+    wall_size: { default_state: none, description_zh: "C++ 实现读取的 wall_size 参数", required: true, type: json_value }
+  }
+  state: defined
+}
+response: { artifact_fields: [], compact_fields: [folder_path, label_prefix, opening, plane, segment_count, segments], failure_fields: [params.opening_center, params.opening_size, params.plane, params.wall_size], max_items_policy: { fields: [], mode: none } }
+returns: {
+  fields: {
+    folder_path: { description_zh: "墙体 Actor 的 World Outliner 相对文件夹路径", required: false, type: actor_folder_path }
+    label_prefix: { description_zh: "C++ 实现返回的 label_prefix 字段；是否出现取决于执行分支", required: false, type: string }
+    opening: { description_zh: "C++ 实现返回的 opening 字段；是否出现取决于执行分支", required: false, type: json_value }
+    plane: { description_zh: "C++ 实现返回的 plane 字段；是否出现取决于执行分支", required: false, type: json_value }
+    segment_count: { description_zh: "C++ 实现返回的 segment_count 字段；是否出现取决于执行分支", required: false, type: integer }
+    segments: { description_zh: "C++ 实现返回的 segments 字段；是否出现取决于执行分支", item_type: json_value, required: false, type: array }
+    wall_size: { description_zh: "C++ 实现返回的 wall_size 字段；是否出现取决于执行分支", required: false, type: json_value }
+  }
+  state: defined
+}
+schema: uai.command_spec.v1
+status: active
+types: {}
+verification: {
+  assertions: [
+    { id: result_present, operator: exists, source: returns.folder_path }
+  ]
+  failure_policy: fail_overall
+  methods: [
+    { id: result, kind: result_assertion }
+  ]
+  required: true
+  state: defined
+}
+version: 1

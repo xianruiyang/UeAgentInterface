@@ -1,0 +1,18 @@
+definition: {
+  additional_fields: true
+  fields: {
+    bone_name: { default_state: none, description_zh: "目标骨骼", required: false, type: string }
+    enabled: { default_state: none, description_zh: "是否启用", required: false, type: bool }
+    final_blended_position: { default_state: none, description_zh: "求解器最终 character-global/component-space 位置", required: false, type: object, type_ref: "shared:Vector3" }
+    final_blended_rotation: { default_state: none, description_zh: "求解器最终 character-global/component-space 旋转", required: false, type: object, type_ref: "shared:Rotator3D" }
+    goal_name: { default_state: none, description_zh: "IK goal 名", required: false, type: string }
+    position: { default_state: none, description_zh: "由 position_space 声明 frame 的输入位置", required: false, type: object, type_ref: "shared:Vector3" }
+    position_space: { default_state: none, description_zh: "位置 frame", enum_values: [component, additive, world], required: false, type: enum }
+    rotation: { default_state: none, description_zh: "由 rotation_space 声明 frame 的输入旋转", required: false, type: object, type_ref: "shared:Rotator3D" }
+    rotation_space: { default_state: none, description_zh: "旋转 frame", enum_values: [component, additive, world], required: false, type: enum }
+  }
+  kind: object
+}
+schema: uai.command_spec.shared_type.v1
+type_id: IKRigGoalResult
+version: 1

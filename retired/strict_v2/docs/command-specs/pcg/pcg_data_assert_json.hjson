@@ -1,0 +1,92 @@
+authoring: { reason: command_has_no_registered_folder_authoring_profile, state: none }
+category: pcg
+command: pcg_data_assert_json
+deprecation: { reason: command_is_active, state: none }
+discovery: { aliases: [], keywords_en: [pcg, data, assert, json], keywords_zh: [pcg_data_assert_json], summary_en: "Execute pcg_data_assert_json with a verified implementation contract", summary_zh: "对生成数据做阈值断言", tags: [pcg, p2-005] }
+errors: {
+  codes: [
+    { code: actor_not_found, description_zh: "C++ 实现返回错误码 actor_not_found", retry_safe: false, stage: execution, wire_match: exact }
+    { code: details_directory_create_failed, description_zh: "C++ 实现返回错误码 details_directory_create_failed", retry_safe: false, stage: execution, wire_match: prefix }
+    { code: details_directory_reset_failed, description_zh: "C++ 实现返回错误码 details_directory_reset_failed", retry_safe: false, stage: execution, wire_match: prefix }
+    { code: details_existing_owner_ref_invalid, description_zh: "C++ 实现返回错误码 details_existing_owner_ref_invalid", retry_safe: true, stage: preflight, wire_match: prefix }
+    { code: details_owner_scope_collision, description_zh: "C++ 实现返回错误码 details_owner_scope_collision", retry_safe: false, stage: execution, wire_match: prefix }
+    { code: duplicate_property_path, description_zh: "C++ 实现返回错误码 duplicate_property_path", retry_safe: false, stage: execution, wire_match: prefix }
+    { code: entry_object_invalid, description_zh: "C++ 实现返回错误码 entry_object_invalid", retry_safe: true, stage: preflight, wire_match: exact }
+    { code: hjson_file_not_found, description_zh: "C++ 实现返回错误码 hjson_file_not_found", retry_safe: false, stage: execution, wire_match: prefix }
+    { code: hjson_file_required, description_zh: "C++ 实现返回错误码 hjson_file_required", retry_safe: true, stage: preflight, wire_match: prefix }
+    { code: hjson_object_invalid, description_zh: "C++ 实现返回错误码 hjson_object_invalid", retry_safe: true, stage: preflight, wire_match: exact }
+    { code: invalid_property_descriptor, description_zh: "C++ 实现返回错误码 invalid_property_descriptor", retry_safe: true, stage: preflight, wire_match: prefix }
+    { code: missing_output_file, description_zh: "C++ 实现返回错误码 missing_output_file", retry_safe: true, stage: preflight, wire_match: exact }
+    { code: missing_property_path, description_zh: "C++ 实现返回错误码 missing_property_path", retry_safe: true, stage: preflight, wire_match: prefix }
+    { code: pcg_component_not_found, description_zh: "C++ 实现返回错误码 pcg_component_not_found", retry_safe: false, stage: execution, wire_match: exact }
+    { code: properties_array_missing, description_zh: "C++ 实现返回错误码 properties_array_missing", retry_safe: true, stage: preflight, wire_match: exact }
+    { code: properties_json_invalid, description_zh: "C++ 实现返回错误码 properties_json_invalid", retry_safe: true, stage: preflight, wire_match: exact }
+    { code: unsafe_details_root, description_zh: "C++ 实现返回错误码 unsafe_details_root", retry_safe: false, stage: execution, wire_match: prefix }
+  ]
+}
+evidence: {
+  docs: [
+    { path: "Plugins/UeAgentInterface/docs/commands/pcg/pcg_data_assert_json.md", purpose: "user documentation cross-check; C++ implementation remains authoritative" }
+  ]
+  implementation: [
+    { line_hint: 4270, path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Commands/PCG/UeAgentHttpServer_PCG.cpp", purpose: "command handler, parameter and return evidence", symbol: CmdPCGDataAssertJson }
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Utilities/UeAgentAuthoringFileIO.cpp", purpose: "transitive helper evidence used by the command handler" }
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Utilities/UeAgentDetailsAuthoring.cpp", purpose: "transitive helper evidence used by the command handler" }
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Utilities/UeAgentStructuredAuthoringIO.cpp", purpose: "transitive helper evidence used by the command handler" }
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Utilities/UeAgentStructuredHjsonFormatter.cpp", purpose: "transitive helper evidence used by the command handler" }
+  ]
+  tests: [
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterfaceTests/Private/Smoke/PCG/UeAgentInterfacePCGSmokeTests.cpp", purpose: "smoke or negative-path evidence cross-checked for the verified contract" }
+  ]
+}
+execution: {
+  destructive: false
+  editor_state: required
+  game_thread: required
+  idempotent: true
+  kind: read_only
+  overwrite_behavior: none
+  pie_state: allowed
+  retry_safe: true
+  save_behavior: none
+  side_effects: [writes_files]
+  ui_effect: none
+}
+maturity: verified
+params: {
+  constraints: []
+  fields: {
+    actor: { default_state: none, description_zh: "C++ 实现读取的 actor 参数", required: false, type: string }
+    actor_label: { default_state: none, description_zh: "C++ 实现读取的 actor_label 参数", required: false, type: string }
+    actor_name: { default_state: none, description_zh: "C++ 实现读取的 actor_name 参数", required: false, type: string }
+    component: { default_state: none, description_zh: "C++ 实现读取的 component 参数", required: false, type: string }
+    component_name: { default_state: none, description_zh: "C++ 实现读取的 component_name 参数", required: false, type: string }
+    max_points_per_data: { default: 16, default_state: defined, description_zh: "C++ 实现读取的 max_points_per_data 参数", required: false, type: number }
+    min_data_count: { default: -1, default_state: defined, description_zh: "C++ 实现读取的 min_data_count 参数", required: false, type: integer }
+    min_total_point_count: { default: -1, default_state: defined, description_zh: "C++ 实现读取的 min_total_point_count 参数", required: false, type: integer }
+    output_file: {
+      default_state: none
+      description_zh: "C++ 实现读取的 output_file 参数"
+      path_semantics: { kind: filesystem_file, must_exist: false, writable: true }
+      required: false
+      type: filesystem_path
+    }
+    pcg_component: { default_state: none, description_zh: "C++ 实现读取的 pcg_component 参数", required: false, type: string }
+  }
+  state: defined
+}
+response: { artifact_fields: [data, issues], compact_fields: [passed, schema], failure_fields: [params.actor, params.actor_label, params.actor_name, params.component, params.component_name, params.pcg_component], max_items_policy: { fields: [], mode: none } }
+returns: {
+  fields: {
+    data: { description_zh: "C++ 实现返回的 data 字段；是否出现取决于执行分支", required: false, type: json_value }
+    issues: { description_zh: "C++ 实现返回的 issues 字段；是否出现取决于执行分支", item_type: json_value, required: false, type: array }
+    passed: { description_zh: "C++ 实现返回的 passed 字段；是否出现取决于执行分支", required: false, type: bool }
+    schema: { description_zh: "C++ 实现返回的 schema 字段；是否出现取决于执行分支", required: false, type: string }
+  }
+  state: defined
+}
+schema: uai.command_spec.v1
+status: active
+types: {}
+verification: { reason: read_only_command_has_no_post_write_verification, state: none }
+version: 1

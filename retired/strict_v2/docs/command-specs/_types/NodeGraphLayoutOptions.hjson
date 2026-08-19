@@ -1,0 +1,30 @@
+definition: {
+  additional_fields: true
+  fields: {
+    allow_focused_geometry_capture: { default: false, default_state: defined, description_zh: "允许聚焦式几何采集", required: false, type: bool }
+    allow_geometry_view_capture: { default: false, default_state: defined, description_zh: "允许图视图几何采集", required: false, type: bool }
+    allow_remove_all_reroute_nodes: { default: false, default_state: defined, description_zh: "允许删除全部已有 reroute 节点", required: false, type: bool }
+    compile_after_layout: { default: false, default_state: defined, description_zh: "排版后编译", required: false, type: bool }
+    horizontal_spacing: { default_state: none, description_zh: "水平间距", required: false, type: number }
+    insert_reroute_nodes: { default: false, default_state: defined, description_zh: "插入 reroute 节点", required: false, type: bool }
+    layout_report_file: {
+      default_state: none
+      description_zh: "布局报告文件"
+      path_semantics: { allowed_roots: [], kind: filesystem_file, must_exist: false, writable: true }
+      required: false
+      type: filesystem_path
+    }
+    node_padding: { default_state: none, description_zh: "节点 padding", required: false, type: number }
+    origin_x: { default_state: none, description_zh: "排版原点 X", required: false, type: number }
+    origin_y: { default_state: none, description_zh: "排版原点 Y", required: false, type: number }
+    replace_existing_reroute_nodes: { default: false, default_state: defined, description_zh: "替换已有 reroute 节点", required: false, type: bool }
+    require_real_geometry: { default: true, default_state: defined, description_zh: "要求真实 Slate 几何", required: false, type: bool }
+    save_after_layout: { default: false, default_state: defined, description_zh: "排版后保存", required: false, type: bool }
+    use_real_geometry: { default: true, default_state: defined, description_zh: "使用真实 Slate 几何", required: false, type: bool }
+    vertical_spacing: { default_state: none, description_zh: "垂直间距", required: false, type: number }
+  }
+  kind: object
+}
+schema: uai.command_spec.shared_type.v1
+type_id: NodeGraphLayoutOptions
+version: 1

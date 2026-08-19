@@ -1,0 +1,15 @@
+definition: {
+  additional_fields: true
+  fields: {
+    location: { default_state: none, description_zh: "平移；frame 由包含字段声明", required: false, type: object, type_ref: "shared:Vector3" }
+    quaternion: { default_state: none, description_zh: "四元数旋转", required: false, type: object, type_ref: "shared:Quaternion" }
+    rotation: { default_state: none, description_zh: "欧拉旋转（度）；frame 由包含字段声明", required: false, type: object, type_ref: "shared:Rotator3D" }
+    scale: { default_state: none, description_zh: "局部缩放", required: false, type: object, type_ref: "shared:Vector3" }
+    scale3d: { default_state: none, description_zh: "scale 别名", required: false, type: object, type_ref: "shared:Vector3" }
+    translation: { default_state: none, description_zh: "location 别名", required: false, type: object, type_ref: "shared:Vector3" }
+  }
+  kind: object
+}
+schema: uai.command_spec.shared_type.v1
+type_id: Transform3D
+version: 1

@@ -1,0 +1,86 @@
+authoring: { reason: command_has_no_registered_folder_authoring_profile, state: none }
+category: umg
+command: umg_create_widget_blueprint
+deprecation: { reason: command_is_active, state: none }
+discovery: { aliases: [], keywords_en: [umg, create, widget, blueprint], keywords_zh: [umg_create_widget_blueprint], summary_en: "Execute umg_create_widget_blueprint with a verified implementation contract", summary_zh: "创建 WidgetBlueprint", tags: [umg, p2-003] }
+errors: {
+  codes: [
+    { code: asset_already_exists, description_zh: "C++ 实现返回错误码 asset_already_exists", retry_safe: false, stage: execution, wire_match: exact }
+    { code: create_package_failed, description_zh: "C++ 实现返回错误码 create_package_failed", retry_safe: false, stage: execution, wire_match: exact }
+    { code: create_widget_blueprint_failed, description_zh: "C++ 实现返回错误码 create_widget_blueprint_failed", retry_safe: false, stage: execution, wire_match: exact }
+    { code: invalid_asset_name, description_zh: "C++ 实现返回错误码 invalid_asset_name", retry_safe: true, stage: preflight, wire_match: exact }
+    { code: invalid_asset_path, description_zh: "C++ 实现返回错误码 invalid_asset_path", retry_safe: true, stage: preflight, wire_match: exact }
+    { code: invalid_parent_class, description_zh: "C++ 实现返回错误码 invalid_parent_class", retry_safe: true, stage: preflight, wire_match: exact }
+    { code: missing_asset_path, description_zh: "C++ 实现返回错误码 missing_asset_path", retry_safe: true, stage: preflight, wire_match: exact }
+    { code: save_asset_failed, description_zh: "C++ 实现返回错误码 save_asset_failed", retry_safe: false, stage: execution, wire_match: exact }
+    { code: widget_blueprint_not_found, description_zh: "C++ 实现返回错误码 widget_blueprint_not_found", retry_safe: false, stage: execution, wire_match: exact }
+  ]
+}
+evidence: {
+  docs: [
+    { path: "Plugins/UeAgentInterface/docs/commands/umg/umg_create_widget_blueprint.md", purpose: "user documentation cross-check; C++ implementation remains authoritative" }
+  ]
+  implementation: [
+    { line_hint: 495, path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Commands/UMG/UeAgentHttpServer_UMG.cpp", purpose: "command handler, parameter and return evidence", symbol: CmdUmgCreateWidgetBlueprint }
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Server/UeAgentHttpServer.cpp", purpose: "transitive helper evidence used by the command handler" }
+  ]
+  tests: [
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterfaceTests/Private/Smoke/UeAgentInterfaceSmoke_BlueprintUmg.cpp", purpose: "smoke or negative-path evidence cross-checked for the verified contract" }
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterfaceTests/Private/Smoke/UeAgentInterfaceSmoke_Sequence.cpp", purpose: "smoke or negative-path evidence cross-checked for the verified contract" }
+  ]
+}
+execution: {
+  destructive: false
+  editor_state: required
+  game_thread: required
+  idempotent: false
+  kind: write
+  overwrite_behavior: target_asset
+  pie_state: allowed
+  retry_safe: false
+  save_behavior: caller_controlled
+  side_effects: [modifies_asset, creates_asset, modifies_editor_session, opens_window]
+  ui_effect: opens_editor
+}
+maturity: verified
+params: {
+  constraints: []
+  fields: {
+    asset_path: { default_state: none, description_zh: "C++ 实现读取的 asset_path 参数", path_semantics: { access_scope: project_write, kind: ue_asset }, required: true, type: ue_asset_path }
+    compile_after_create: { default: true, default_state: defined, description_zh: "C++ 实现读取的 compile_after_create 参数", required: false, type: bool }
+    create_default_root: { default: true, default_state: defined, description_zh: "C++ 实现读取的 create_default_root 参数", required: false, type: bool }
+    open_editor: { default: false, default_state: defined, description_zh: "C++ 实现读取的 open_editor 参数", required: false, type: bool }
+    parent_class: { default: "/Script/UMG.UserWidget", default_state: defined, description_zh: "C++ 实现读取的 parent_class 参数", required: false, type: string }
+    save_after_create: { default: false, default_state: defined, description_zh: "C++ 实现读取的 save_after_create 参数", required: false, type: bool }
+  }
+  state: defined
+}
+response: { artifact_fields: [], compact_fields: [status, saved, asset_path, generated_class, object_path, root_widget], failure_fields: [params.asset_path], max_items_policy: { fields: [], mode: none } }
+returns: {
+  fields: {
+    asset_path: { description_zh: "C++ 实现返回的 asset_path 字段；是否出现取决于执行分支", required: false, type: ue_asset_path }
+    generated_class: { description_zh: "C++ 实现返回的 generated_class 字段；是否出现取决于执行分支", required: false, type: string }
+    object_path: { description_zh: "C++ 实现返回的 object_path 字段；是否出现取决于执行分支", required: false, type: ue_object_path }
+    root_widget: { description_zh: "C++ 实现返回的 root_widget 字段；是否出现取决于执行分支", required: false, type: string }
+    saved: { description_zh: "C++ 实现返回的 saved 字段；是否出现取决于执行分支", required: false, type: bool }
+    status: { description_zh: "C++ 实现返回的 status 字段；是否出现取决于执行分支", required: false, type: string }
+  }
+  state: defined
+}
+schema: uai.command_spec.v1
+status: active
+types: {}
+verification: {
+  assertions: [
+    { id: result_present, operator: exists, source: returns.status }
+    { id: state_readback_present, operator: exists, source: methods.state_readback.asset_path }
+  ]
+  failure_policy: fail_overall
+  methods: [
+    { id: result, kind: result_assertion }
+    { command: umg_get_info, id: state_readback, kind: command_readback, params_mapping: { asset_path: returns.asset_path } }
+  ]
+  required: true
+  state: defined
+}
+version: 1

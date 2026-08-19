@@ -1,0 +1,15 @@
+definition: {
+  additional_fields: true
+  fields: {
+    name: { default_state: none, description_zh: "属性短名", required: false, type: string }
+    property_name: { default_state: none, description_zh: "属性名", required: false, type: string }
+    property_path: { default_state: none, description_zh: "稳定属性路径", required: false, type: string }
+    selector: { default_state: none, description_zh: "结构化属性选择器", required: false, type: json_value }
+    value: { default_state: none, description_zh: "结构化属性值", required: false, type: json_value }
+    value_text: { default_state: none, description_zh: "无法可靠结构化时的文本值", required: false, type: string }
+  }
+  kind: object
+}
+schema: uai.command_spec.shared_type.v1
+type_id: PCGPropertyAssignment
+version: 1

@@ -1,0 +1,106 @@
+authoring: { reason: command_has_no_registered_folder_authoring_profile, state: none }
+category: texture_render_target_media
+command: texture_reimport
+deprecation: { reason: command_is_active, state: none }
+discovery: { aliases: [], keywords_en: [texture, reimport, texture_render_target_media], keywords_zh: [texture_reimport], summary_en: "Execute texture_reimport with a verified implementation contract", summary_zh: "重导入已有 Texture；可传 `source_filename` 覆盖源文件，或使用资产已有导入数据。", tags: [texture_render_target_media, p2-004] }
+errors: {
+  codes: [
+    { code: create_texture_import_task_failed, description_zh: "C++ 实现返回错误码 create_texture_import_task_failed", retry_safe: false, stage: execution, wire_match: exact }
+    { code: import_target_exists_requires_allow_overwrite, description_zh: "C++ 实现返回错误码 import_target_exists_requires_allow_overwrite", retry_safe: false, stage: execution, wire_match: exact }
+    { code: invalid_, description_zh: "C++ 实现返回错误码 invalid_", retry_safe: true, stage: preflight, wire_match: prefix }
+    { code: invalid_destination_name, description_zh: "C++ 实现返回错误码 invalid_destination_name", retry_safe: true, stage: preflight, wire_match: exact }
+    { code: invalid_destination_path, description_zh: "C++ 实现返回错误码 invalid_destination_path", retry_safe: true, stage: preflight, wire_match: exact }
+    { code: invalid_import_target_asset_path, description_zh: "C++ 实现返回错误码 invalid_import_target_asset_path", retry_safe: true, stage: preflight, wire_match: exact }
+    { code: invalid_open_editor, description_zh: "C++ 实现返回错误码 invalid_open_editor", retry_safe: true, stage: preflight, wire_match: exact }
+    { code: invalid_replace_existing_settings, description_zh: "C++ 实现返回错误码 invalid_replace_existing_settings", retry_safe: true, stage: preflight, wire_match: exact }
+    { code: invalid_save_after_import, description_zh: "C++ 实现返回错误码 invalid_save_after_import", retry_safe: true, stage: preflight, wire_match: exact }
+    { code: invalid_srgb, description_zh: "C++ 实现返回错误码 invalid_srgb", retry_safe: true, stage: preflight, wire_match: exact }
+    { code: missing_, description_zh: "C++ 实现返回错误码 missing_", retry_safe: true, stage: preflight, wire_match: prefix }
+    { code: missing_destination_path, description_zh: "C++ 实现返回错误码 missing_destination_path", retry_safe: true, stage: preflight, wire_match: exact }
+    { code: missing_source_filename, description_zh: "C++ 实现返回错误码 missing_source_filename", retry_safe: true, stage: preflight, wire_match: exact }
+    { code: reimport_failed, description_zh: "C++ 实现返回错误码 reimport_failed", retry_safe: false, stage: execution, wire_match: exact }
+    { code: save_asset_failed, description_zh: "C++ 实现返回错误码 save_asset_failed", retry_safe: false, stage: execution, wire_match: exact }
+    { code: source_file_extension_not_allowed, description_zh: "C++ 实现返回错误码 source_file_extension_not_allowed", retry_safe: true, stage: preflight, wire_match: exact }
+    { code: source_file_not_found, description_zh: "C++ 实现返回错误码 source_file_not_found", retry_safe: false, stage: execution, wire_match: exact }
+    { code: source_file_not_supported_by_texture_factory, description_zh: "C++ 实现返回错误码 source_file_not_supported_by_texture_factory", retry_safe: false, stage: execution, wire_match: exact }
+    { code: texture_import_created_no_texture2d, description_zh: "C++ 实现返回错误码 texture_import_created_no_texture2d", retry_safe: false, stage: execution, wire_match: exact }
+    { code: texture_not_found, description_zh: "C++ 实现返回错误码 texture_not_found", retry_safe: false, stage: execution, wire_match: exact }
+  ]
+}
+evidence: {
+  docs: [
+    { path: "Plugins/UeAgentInterface/docs/commands/texture_render_target_media/texture_reimport.md", purpose: "user documentation cross-check; C++ implementation remains authoritative" }
+  ]
+  implementation: [
+    { line_hint: 1176, path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Commands/TextureRenderTarget/UeAgentHttpServer_TextureRenderTarget_TextureAssets.inl", purpose: "command handler, parameter and return evidence", symbol: CmdTextureReimport }
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Commands/Assets/UeAgentHttpServer_AssetsImport.cpp", purpose: "transitive helper evidence used by the command handler" }
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Commands/Level/UeAgentCommandSafety.h", purpose: "transitive helper evidence used by the command handler" }
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Server/UeAgentHttpServer.cpp", purpose: "transitive helper evidence used by the command handler" }
+  ]
+  tests: [
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterfaceTests/Private/Smoke/UeAgentInterfaceTextureRenderTargetSmokeTests.cpp", purpose: "smoke or negative-path evidence cross-checked for the verified contract" }
+  ]
+}
+execution: {
+  destructive: false
+  editor_state: required
+  game_thread: required
+  idempotent: false
+  kind: write
+  overwrite_behavior: target_asset
+  pie_state: allowed
+  retry_safe: false
+  save_behavior: caller_controlled
+  side_effects: [modifies_asset]
+  ui_effect: none
+}
+maturity: verified
+params: {
+  constraints: []
+  fields: {
+    asset_path: { default_state: none, description_zh: "C++ 实现读取的 asset_path 参数", path_semantics: { access_scope: project_write, kind: ue_asset }, required: true, type: ue_asset_path }
+    replace_existing_settings: { default: true, default_state: defined, description_zh: "C++ 实现读取的 replace_existing_settings 参数", required: false, type: bool }
+    save_after_reimport: { default: true, default_state: defined, description_zh: "C++ 实现读取的 save_after_reimport 参数", required: false, type: bool }
+    source_filename: {
+      default_state: none
+      description_zh: "C++ 实现读取的 source_filename 参数"
+      path_semantics: { kind: filesystem_file, must_exist: false, writable: false }
+      required: false
+      type: filesystem_path
+    }
+  }
+  state: defined
+}
+response: { artifact_fields: [], compact_fields: [after, before, format_after, format_before, import_attempt, import_result], failure_fields: [params.asset_path], max_items_policy: { fields: [], mode: none } }
+returns: {
+  fields: {
+    after: { description_zh: "C++ 实现返回的 after 字段；是否出现取决于执行分支", required: false, type: json_value }
+    before: { description_zh: "C++ 实现返回的 before 字段；是否出现取决于执行分支", required: false, type: json_value }
+    format_after: { description_zh: "C++ 实现返回的 format_after 字段；是否出现取决于执行分支", required: false, type: string }
+    format_before: { description_zh: "C++ 实现返回的 format_before 字段；是否出现取决于执行分支", required: false, type: string }
+    import_attempt: { description_zh: "C++ 实现返回的 import_attempt 字段；是否出现取决于执行分支", required: false, type: json_value }
+    import_result: { description_zh: "C++ 实现返回的 import_result 字段；是否出现取决于执行分支", required: false, type: json_value }
+    reimported: { description_zh: "C++ 实现返回的 reimported 字段；是否出现取决于执行分支", required: false, type: bool }
+    size_after: { description_zh: "C++ 实现返回的 size_after 字段；是否出现取决于执行分支", required: false, type: json_value }
+    size_before: { description_zh: "C++ 实现返回的 size_before 字段；是否出现取决于执行分支", required: false, type: json_value }
+    warnings: { description_zh: "C++ 实现返回的 warnings 字段；是否出现取决于执行分支", item_type: json_value, required: false, type: array }
+  }
+  state: defined
+}
+schema: uai.command_spec.v1
+status: active
+types: {}
+verification: {
+  assertions: [
+    { id: result_present, operator: exists, source: returns.after }
+    { id: state_readback_present, operator: exists, source: methods.state_readback.asset_path }
+  ]
+  failure_policy: fail_overall
+  methods: [
+    { id: result, kind: result_assertion }
+    { command: texture_get_info, id: state_readback, kind: command_readback, params_mapping: { asset_path: params.asset_path } }
+  ]
+  required: true
+  state: defined
+}
+version: 1

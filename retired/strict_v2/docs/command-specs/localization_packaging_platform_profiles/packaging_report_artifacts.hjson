@@ -1,0 +1,71 @@
+authoring: { reason: command_has_no_registered_folder_authoring_profile, state: none }
+category: localization_packaging_platform_profiles
+command: packaging_report_artifacts
+deprecation: { reason: command_is_active, state: none }
+discovery: { aliases: [], keywords_en: [packaging, report, artifacts, localization_packaging_platform_profiles], keywords_zh: [packaging_report_artifacts], summary_en: "Execute packaging_report_artifacts with a verified implementation contract", summary_zh: "扫描 archive 目录产物", tags: [localization_packaging_platform_profiles, p2-002] }
+errors: {
+  codes: [
+    { code: archive_dir_not_uai_owned, description_zh: "C++ 实现返回错误码 archive_dir_not_uai_owned", retry_safe: false, stage: execution, wire_match: exact }
+  ]
+}
+evidence: {
+  docs: [
+    { path: "Plugins/UeAgentInterface/docs/commands/localization_packaging_platform_profiles/packaging_report_artifacts.md", purpose: "user documentation cross-check; C++ implementation remains authoritative" }
+  ]
+  implementation: [
+    { line_hint: 3429, path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Commands/ProductionPipeline/UeAgentHttpServer_ProductionPipeline.cpp", purpose: "command handler, parameter and return evidence", symbol: CmdPackagingReportArtifacts }
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Server/UeAgentHttpServer.cpp", purpose: "transitive helper evidence used by the command handler" }
+  ]
+  tests: [
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterfaceTests/Private/Smoke/ProductionPipeline/UeAgentInterfaceProductionPipelineSmokeTests.cpp", purpose: "smoke or negative-path evidence cross-checked for the verified contract" }
+  ]
+}
+execution: {
+  destructive: false
+  editor_state: required
+  game_thread: required
+  idempotent: true
+  kind: read_only_export
+  overwrite_behavior: owned_artifacts_only
+  pie_state: allowed
+  retry_safe: true
+  save_behavior: none
+  side_effects: [writes_files]
+  ui_effect: none
+}
+maturity: verified
+params: {
+  constraints: []
+  fields: {
+    archive_dir: { default_state: none, description_zh: "C++ 实现读取的 archive_dir 参数", required: false, type: string }
+    include_hashes: { default: false, default_state: defined, description_zh: "C++ 实现读取的 include_hashes 参数", required: false, type: bool }
+  }
+  state: defined
+}
+response: { artifact_fields: [], compact_fields: [archive_dir, artifacts, missing_expected, platform, schema, total_size], failure_fields: [], max_items_policy: { fields: [], mode: none } }
+returns: {
+  fields: {
+    archive_dir: { description_zh: "C++ 实现返回的 archive_dir 字段；是否出现取决于执行分支", required: false, type: string }
+    artifacts: { description_zh: "C++ 实现返回的 artifacts 字段；是否出现取决于执行分支", item_type: json_value, required: false, type: array }
+    missing_expected: { description_zh: "C++ 实现返回的 missing_expected 字段；是否出现取决于执行分支", item_type: json_value, required: false, type: array }
+    platform: { description_zh: "C++ 实现返回的 platform 字段；是否出现取决于执行分支", required: false, type: string }
+    schema: { description_zh: "C++ 实现返回的 schema 字段；是否出现取决于执行分支", required: false, type: string }
+    total_size: { description_zh: "C++ 实现返回的 total_size 字段；是否出现取决于执行分支", required: false, type: number }
+  }
+  state: defined
+}
+schema: uai.command_spec.v1
+status: active
+types: {}
+verification: {
+  assertions: [
+    { id: result_present, operator: exists, source: returns.archive_dir }
+  ]
+  failure_policy: fail_overall
+  methods: [
+    { id: result, kind: result_assertion }
+  ]
+  required: true
+  state: defined
+}
+version: 1

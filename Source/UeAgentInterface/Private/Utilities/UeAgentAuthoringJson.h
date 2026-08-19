@@ -6,7 +6,6 @@
 
 class FJsonObject;
 class FJsonValue;
-class FProperty;
 class UEnum;
 
 namespace UeAgentAuthoringJson
@@ -17,14 +16,6 @@ namespace UeAgentAuthoringJson
 
 	TSharedPtr<FJsonObject> MakeAvailability(const bool bEditable, const FString& Reason = FString());
 
-	FString GetReflectedPropertyCategoryPath(const FProperty* Property);
-
-	FString GetReflectedPropertyControlType(const FProperty* Property);
-
-	FString GetReflectedPropertyValueKind(const FProperty* Property);
-
-	const UEnum* GetReflectedPropertyEnum(const FProperty* Property);
-
 	TArray<TSharedPtr<FJsonValue>> MakeEnumCandidates(const UEnum* Enum);
 
 	void ApplyAuthoringMetadata(
@@ -33,9 +24,7 @@ namespace UeAgentAuthoringJson
 			const FString& SelectorValue,
 			const FString& DisplayName,
 			const FString& CategoryPath,
-			const FString& ControlType,
 			const FString& ValueKind,
-			std::initializer_list<FString> Operations,
 			const bool bEditable = true);
 
 	void ApplyPropertyMetadata(
@@ -45,5 +34,4 @@ namespace UeAgentAuthoringJson
 			const FString& CategoryPath,
 			const FString& ValueKind);
 
-	void ApplyReflectedPropertyMetadata(const TSharedPtr<FJsonObject>& Obj, const FProperty* Property, const FString& PropertyPath);
 }

@@ -72,9 +72,6 @@ bool FUeAgentHttpServer::ExecuteAudioCommand(const FString& CommandLower, const 
 		{ TEXT("audio_runtime_snapshot"), &FUeAgentHttpServer::CmdAudioRuntimeSnapshot },
 		{ TEXT("audio_runtime_probe"), &FUeAgentHttpServer::CmdAudioRuntimeProbe },
 		{ TEXT("audio_submix_meter_probe"), &FUeAgentHttpServer::CmdAudioSubmixMeterProbe },
-		{ TEXT("audio_submix_record_start"), &FUeAgentHttpServer::CmdAudioSubmixRecordStart },
-		{ TEXT("audio_submix_record_stop"), &FUeAgentHttpServer::CmdAudioSubmixRecordStop },
-		{ TEXT("audio_submix_record_cancel"), &FUeAgentHttpServer::CmdAudioSubmixRecordCancel },
 		{ TEXT("audio_stop_all_preview_sounds"), &FUeAgentHttpServer::CmdAudioStopAllPreviewSounds },
 	};
 

@@ -1,0 +1,86 @@
+authoring: { reason: command_has_no_registered_folder_authoring_profile, state: none }
+category: core_level
+command: asset_import_geometry_cache
+deprecation: { reason: command_is_active, state: none }
+discovery: { aliases: [], keywords_en: [asset, import, geometry, cache, core_level], keywords_zh: [asset_import_geometry_cache], summary_en: "Execute asset_import_geometry_cache with a verified implementation contract", summary_zh: "导入 Geometry Cache / Alembic", tags: [core_level, p2-002] }
+errors: {
+  codes: [
+    { code: import_target_exists_requires_allow_overwrite, description_zh: "C++ 实现返回错误码 import_target_exists_requires_allow_overwrite", retry_safe: false, stage: execution, wire_match: exact }
+    { code: invalid_, description_zh: "C++ 实现返回错误码 invalid_", retry_safe: true, stage: preflight, wire_match: prefix }
+    { code: invalid_import_target_asset_path, description_zh: "C++ 实现返回错误码 invalid_import_target_asset_path", retry_safe: true, stage: preflight, wire_match: exact }
+    { code: missing_destination_path, description_zh: "C++ 实现返回错误码 missing_destination_path", retry_safe: true, stage: preflight, wire_match: exact }
+    { code: missing_source_file, description_zh: "C++ 实现返回错误码 missing_source_file", retry_safe: true, stage: preflight, wire_match: exact }
+    { code: source_file_not_found, description_zh: "C++ 实现返回错误码 source_file_not_found", retry_safe: false, stage: execution, wire_match: exact }
+  ]
+}
+evidence: {
+  docs: [
+    { path: "Plugins/UeAgentInterface/docs/commands/core_level/asset_import_geometry_cache.md", purpose: "user documentation cross-check; C++ implementation remains authoritative" }
+  ]
+  implementation: [
+    { line_hint: 1708, path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Commands/Deformer/UeAgentHttpServer_Deformer.cpp", purpose: "command handler, parameter and return evidence", symbol: CmdAssetImportGeometryCache }
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Commands/Level/UeAgentCommandSafety.h", purpose: "transitive helper evidence used by the command handler" }
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Server/UeAgentHttpServer.cpp", purpose: "transitive helper evidence used by the command handler" }
+  ]
+  tests: [
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterfaceTests/Private/Smoke/UeAgentInterfaceSmoke_Coverage.cpp", purpose: "smoke or negative-path evidence cross-checked for the verified contract" }
+  ]
+}
+execution: {
+  destructive: true
+  editor_state: required
+  game_thread: required
+  idempotent: false
+  kind: write
+  overwrite_behavior: target_asset
+  pie_state: allowed
+  retry_safe: false
+  save_behavior: none
+  side_effects: [modifies_asset, creates_asset]
+  ui_effect: none
+}
+maturity: verified
+params: {
+  constraints: []
+  fields: {
+    allow_overwrite: { default: false, default_state: defined, description_zh: "C++ 实现读取的 allow_overwrite 参数", required: false, type: bool }
+    destination_path: { default_state: none, description_zh: "C++ 实现读取的 destination_path 参数", required: true, type: string }
+    replace_existing: { default: false, default_state: defined, description_zh: "C++ 实现读取的 replace_existing 参数", required: false, type: bool }
+    source_file: {
+      default_state: none
+      description_zh: "C++ 实现读取的 source_file 参数"
+      path_semantics: { kind: filesystem_file, must_exist: false, writable: false }
+      required: true
+      type: filesystem_path
+    }
+  }
+  state: defined
+}
+response: { artifact_fields: [], compact_fields: [allow_overwrite, destination_path, imported_asset_count, imported_assets, plugin_status, replace_existing], failure_fields: [params.destination_path, params.source_file], max_items_policy: { fields: [], mode: none } }
+returns: {
+  fields: {
+    allow_overwrite: { description_zh: "C++ 实现返回的 allow_overwrite 字段；是否出现取决于执行分支", required: false, type: bool }
+    destination_path: { description_zh: "C++ 实现返回的 destination_path 字段；是否出现取决于执行分支", required: false, type: string }
+    imported_asset_count: { description_zh: "C++ 实现返回的 imported_asset_count 字段；是否出现取决于执行分支", required: false, type: integer }
+    imported_assets: { description_zh: "C++ 实现返回的 imported_assets 字段；是否出现取决于执行分支", item_type: json_value, required: false, type: array }
+    plugin_status: { description_zh: "C++ 实现返回的 plugin_status 字段；是否出现取决于执行分支", required: false, type: json_value }
+    replace_existing: { description_zh: "C++ 实现返回的 replace_existing 字段；是否出现取决于执行分支", required: false, type: bool }
+    source_file: { description_zh: "C++ 实现返回的 source_file 字段；是否出现取决于执行分支", required: false, type: filesystem_path }
+  }
+  state: defined
+}
+schema: uai.command_spec.v1
+status: active
+types: {}
+verification: {
+  assertions: [
+    { id: result_present, operator: exists, source: returns.allow_overwrite }
+  ]
+  failure_policy: fail_overall
+  methods: [
+    { id: result, kind: result_assertion }
+  ]
+  required: true
+  state: defined
+}
+version: 1

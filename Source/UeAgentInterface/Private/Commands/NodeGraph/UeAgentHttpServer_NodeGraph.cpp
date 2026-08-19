@@ -114,13 +114,13 @@ bool FUeAgentHttpServer::CmdNodeGraphLayout(const FUeAgentRequestContext& Ctx, T
 		LegacyCtx.Params = LegacyParams;
 
 		TSharedPtr<FJsonObject> LegacyData;
-		FString LegacyError;
-		if (!ExecuteBlueprintCommand(TEXT("blueprint_layout_all_graphs"), LegacyCtx, LegacyData, LegacyError))
+		FString AuthoringError;
+		if (!ExecuteBlueprintCommand(TEXT("blueprint_layout_all_graphs"), LegacyCtx, LegacyData, AuthoringError))
 		{
 			OutData = LegacyData.IsValid() ? LegacyData : MakeShared<FJsonObject>();
 			OutData->SetStringField(TEXT("adapter"), Adapter);
 			OutData->SetStringField(TEXT("delegated_command"), TEXT("blueprint_layout_all_graphs"));
-			OutError = LegacyError;
+			OutError = AuthoringError;
 			return false;
 		}
 

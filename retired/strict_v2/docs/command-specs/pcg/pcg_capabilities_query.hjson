@@ -1,0 +1,55 @@
+authoring: { reason: command_has_no_registered_folder_authoring_profile, state: none }
+category: pcg
+command: pcg_capabilities_query
+deprecation: { reason: command_is_active, state: none }
+discovery: { aliases: [], keywords_en: [pcg, capabilities, query], keywords_zh: [pcg_capabilities_query], summary_en: "Execute pcg_capabilities_query with a verified implementation contract", summary_zh: "返回 PCG UAI 能力、RHI、可用命令", tags: [pcg, p2-005] }
+errors: { codes: [] }
+evidence: {
+  docs: [
+    { path: "Plugins/UeAgentInterface/docs/commands/pcg/pcg_capabilities_query.md", purpose: "user documentation cross-check; C++ implementation remains authoritative" }
+  ]
+  implementation: [
+    { line_hint: 2513, path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Commands/PCG/UeAgentHttpServer_PCG.cpp", purpose: "command handler, parameter and return evidence", symbol: CmdPCGCapabilitiesQuery }
+  ]
+  tests: [
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterfaceTests/Private/Smoke/PCG/UeAgentInterfacePCGSmokeTests.cpp", purpose: "smoke or negative-path evidence cross-checked for the verified contract" }
+  ]
+}
+execution: {
+  destructive: false
+  editor_state: required
+  game_thread: required
+  idempotent: true
+  kind: read_only
+  overwrite_behavior: none
+  pie_state: allowed
+  retry_safe: true
+  save_behavior: none
+  side_effects: []
+  ui_effect: none
+}
+maturity: verified
+params: { reason: implementation_reads_no_command_parameters, state: none }
+response: { artifact_fields: [commands], compact_fields: [command_count, compute_framework_loaded, pcg_editor_module_loaded, pcg_module_loaded, rhi], failure_fields: [], max_items_policy: { fields: [], mode: none } }
+returns: {
+  fields: {
+    command_count: { description_zh: "C++ 实现返回的 command_count 字段；是否出现取决于执行分支", required: false, type: integer }
+    commands: { description_zh: "C++ 实现返回的 commands 字段；是否出现取决于执行分支", item_type: json_value, required: false, type: array }
+    compute_framework_loaded: { description_zh: "C++ 实现返回的 compute_framework_loaded 字段；是否出现取决于执行分支", required: false, type: bool }
+    pcg_editor_module_loaded: { description_zh: "C++ 实现返回的 pcg_editor_module_loaded 字段；是否出现取决于执行分支", required: false, type: bool }
+    pcg_module_loaded: { description_zh: "C++ 实现返回的 pcg_module_loaded 字段；是否出现取决于执行分支", required: false, type: bool }
+    rhi: { description_zh: "C++ 实现返回的 rhi 字段；是否出现取决于执行分支", required: false, type: string }
+    schema: { description_zh: "C++ 实现返回的 schema 字段；是否出现取决于执行分支", required: false, type: string }
+    supports_component_generation: { description_zh: "C++ 实现返回的 supports_component_generation 字段；是否出现取决于执行分支", required: false, type: bool }
+    supports_execution_inspection: { description_zh: "C++ 实现返回的 supports_execution_inspection 字段；是否出现取决于执行分支", required: false, type: bool }
+    supports_graph_folder_workflow: { description_zh: "C++ 实现返回的 supports_graph_folder_workflow 字段；是否出现取决于执行分支", required: false, type: bool }
+    supports_level_to_asset: { description_zh: "C++ 实现返回的 supports_level_to_asset 字段；是否出现取决于执行分支", required: false, type: bool }
+    supports_viewport_screenshot_bridge: { description_zh: "C++ 实现返回的 supports_viewport_screenshot_bridge 字段；是否出现取决于执行分支", required: false, type: bool }
+  }
+  state: defined
+}
+schema: uai.command_spec.v1
+status: active
+types: {}
+verification: { reason: read_only_command_has_no_post_write_verification, state: none }
+version: 1

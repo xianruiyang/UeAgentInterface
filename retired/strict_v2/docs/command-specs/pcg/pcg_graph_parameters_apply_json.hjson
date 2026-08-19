@@ -1,0 +1,83 @@
+authoring: { reason: command_has_no_registered_folder_authoring_profile, state: none }
+category: pcg
+command: pcg_graph_parameters_apply_json
+deprecation: { reason: command_is_active, state: none }
+discovery: { aliases: [], keywords_en: [pcg, graph, parameters, apply, json], keywords_zh: [pcg_graph_parameters_apply_json], summary_en: "Execute pcg_graph_parameters_apply_json with a verified implementation contract", summary_zh: "写入 Graph 或 GraphInstance 参数包", tags: [pcg, p2-005] }
+errors: {
+  codes: [
+    { code: graph_parameters_apply_failed, description_zh: "C++ 实现返回错误码 graph_parameters_apply_failed", retry_safe: false, stage: execution, wire_match: exact }
+    { code: graph_parameters_preflight_failed, description_zh: "C++ 实现返回错误码 graph_parameters_preflight_failed", retry_safe: false, stage: execution, wire_match: exact }
+    { code: missing_asset_path, description_zh: "C++ 实现返回错误码 missing_asset_path", retry_safe: true, stage: preflight, wire_match: exact }
+    { code: missing_parameters, description_zh: "C++ 实现返回错误码 missing_parameters", retry_safe: true, stage: preflight, wire_match: exact }
+    { code: pcg_graph_interface_not_found, description_zh: "C++ 实现返回错误码 pcg_graph_interface_not_found", retry_safe: false, stage: execution, wire_match: exact }
+    { code: save_package_failed, description_zh: "C++ 实现返回错误码 save_package_failed", retry_safe: false, stage: execution, wire_match: exact }
+  ]
+}
+evidence: {
+  docs: [
+    { path: "Plugins/UeAgentInterface/docs/commands/pcg/pcg_graph_parameters_apply_json.md", purpose: "user documentation cross-check; C++ implementation remains authoritative" }
+  ]
+  implementation: [
+    { line_hint: 3549, path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Commands/PCG/UeAgentHttpServer_PCG.cpp", purpose: "command handler, parameter and return evidence", symbol: CmdPCGGraphParametersApplyJson }
+  ]
+  tests: [
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterfaceTests/Private/Smoke/PCG/UeAgentInterfacePCGSmokeTests.cpp", purpose: "smoke or negative-path evidence cross-checked for the verified contract" }
+  ]
+}
+execution: {
+  destructive: false
+  editor_state: required
+  game_thread: required
+  idempotent: false
+  kind: write
+  overwrite_behavior: none
+  pie_state: allowed
+  retry_safe: false
+  save_behavior: caller_controlled
+  side_effects: [modifies_asset]
+  ui_effect: none
+}
+maturity: verified
+params: {
+  constraints: [
+    { fields: [asset_path, graph, instance_asset_path], kind: one_of }
+  ]
+  fields: {
+    asset_path: { default_state: none, description_zh: "C++ 实现读取的 asset_path 参数", path_semantics: { access_scope: project_write, kind: ue_asset }, required: false, type: ue_asset_path }
+    graph: { default_state: none, description_zh: "C++ 实现读取的 graph 参数", required: false, type: string }
+    instance_asset_path: { default_state: none, description_zh: "C++ 实现读取的 instance_asset_path 参数", path_semantics: { access_scope: project_write, kind: ue_asset }, required: false, type: ue_asset_path }
+    parameters: { default_state: none, description_zh: "canonical Graph 参数包", required: true, type: object, type_ref: "shared:PCGGraphParameterBag" }
+    save: { default: true, default_state: defined, description_zh: "C++ 实现读取的 save 参数", required: false, type: bool }
+  }
+  state: defined
+}
+response: { artifact_fields: [issues, parameters], compact_fields: [applied_count, error_count, parameter_count, preflight_applied_count], failure_fields: [params.asset_path, params.graph, params.instance_asset_path, params.parameters], max_items_policy: { fields: [], mode: none } }
+returns: {
+  fields: {
+    applied_count: { description_zh: "C++ 实现返回的 applied_count 字段；是否出现取决于执行分支", required: false, type: integer }
+    error_count: { description_zh: "C++ 实现返回的 error_count 字段；是否出现取决于执行分支", required: false, type: integer }
+    issues: { description_zh: "C++ 实现返回的 issues 字段；是否出现取决于执行分支", item_type: json_value, required: false, type: array }
+    parameter_count: { description_zh: "C++ 实现返回的 parameter_count 字段；是否出现取决于执行分支", required: false, type: integer }
+    parameters: { description_zh: "写后读回的 canonical Graph 参数包", required: false, type: object, type_ref: "shared:PCGGraphParameterBag" }
+    preflight_applied_count: { description_zh: "C++ 实现返回的 preflight_applied_count 字段；是否出现取决于执行分支", required: false, type: integer }
+    schema: { description_zh: "C++ 实现返回的 schema 字段；是否出现取决于执行分支", required: false, type: string }
+  }
+  state: defined
+}
+schema: uai.command_spec.v1
+status: active
+types: {}
+verification: {
+  assertions: [
+    { id: result_present, operator: exists, source: returns.applied_count }
+    { id: state_readback_present, operator: exists, source: methods.state_readback.parameters }
+  ]
+  failure_policy: fail_overall
+  methods: [
+    { id: result, kind: result_assertion }
+    { command: pcg_graph_parameters_query, id: state_readback, kind: command_readback, params_mapping: { asset_path: params.asset_path, instance_asset_path: params.instance_asset_path } }
+  ]
+  required: true
+  state: defined
+}
+version: 1

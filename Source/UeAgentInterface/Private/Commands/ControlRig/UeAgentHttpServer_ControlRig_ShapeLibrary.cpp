@@ -1,8 +1,9 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "UeAgentHttpServer_ControlRig.h"
-#include "UeAgentHttpServer_ControlRigOps.h"
+#include "Domains/Rigging/UeAgentControlRigDomainBackend.h"
 #include "Utilities/UeAgentJsonDiagnostics.h"
+#include "Utilities/UeAgentStructuredAuthoringIO.h"
 
 #include "Dom/JsonObject.h"
 #include "Dom/JsonValue.h"
@@ -81,14 +82,15 @@ bool FUeAgentHttpServer::CmdControlRigShapeLibraryExportJson(const FUeAgentReque
 		FString SafeName = UeAgentControlRigOps::NormalizeAssetPath(AssetPath);
 		SafeName.RemoveFromStart(TEXT("/"));
 		SafeName.ReplaceInline(TEXT("/"), TEXT("__"));
-		OutputFile = FPaths::Combine(FPaths::ProjectSavedDir(), TEXT("UeAssetJson"), TEXT("ControlRigShapeLibrary"), SafeName + TEXT(".json"));
+		OutputFile = FPaths::Combine(FPaths::ProjectSavedDir(), TEXT("UeAssetFolders"), TEXT("ControlRigShapeLibrary"), SafeName + TEXT(".hjson"));
 	}
+	OutputFile = UeAgentStructuredAuthoringIO::NormalizeAuthoringPath(OutputFile);
 
-	if (!UeAgentControlRigOps::SaveJsonFile(OutputFile, OutData, OutError))
+	if (!UeAgentControlRigOps::SaveAuthoringFile(OutputFile, OutData, OutError))
 	{
 		return false;
 	}
-	OutData->SetStringField(TEXT("json_file"), UeAgentJsonDiagnostics::ResolveProjectRelativeFilePath(OutputFile));
+	OutData->SetStringField(TEXT("json_file"), OutputFile);
 	return true;
 }
 
@@ -103,7 +105,7 @@ bool FUeAgentHttpServer::CmdControlRigShapeLibraryValidateJson(const FUeAgentReq
 
 	TArray<TSharedPtr<FJsonValue>> Issues;
 	TSharedPtr<FJsonObject> Root;
-	UeAgentControlRigOps::LoadJsonFile(JsonFile, Root, Issues, OutError, false);
+	UeAgentControlRigOps::LoadAuthoringFile(JsonFile, Root, Issues, OutError, false);
 	if (Root.IsValid())
 	{
 		UeAgentJsonDiagnostics::WarnUnknownFields(Root, TEXT("shape_library"), { TEXT("schema"), TEXT("asset_path"), TEXT("object_path"), TEXT("asset_class"), TEXT("default_shape"), TEXT("default_material"), TEXT("xray_material"), TEXT("material_color_parameter"), TEXT("shapes"), TEXT("shape_count") }, Issues);
@@ -150,7 +152,7 @@ bool FUeAgentHttpServer::CmdControlRigShapeLibraryApplyJson(const FUeAgentReques
 
 	TArray<TSharedPtr<FJsonValue>> Issues;
 	TSharedPtr<FJsonObject> Root;
-	if (!UeAgentControlRigOps::LoadJsonFile(JsonFile, Root, Issues, OutError, false) || !Root.IsValid())
+	if (!UeAgentControlRigOps::LoadAuthoringFile(JsonFile, Root, Issues, OutError, false) || !Root.IsValid())
 	{
 		OutData = MakeShared<FJsonObject>();
 		OutData->SetArrayField(TEXT("issues"), Issues);

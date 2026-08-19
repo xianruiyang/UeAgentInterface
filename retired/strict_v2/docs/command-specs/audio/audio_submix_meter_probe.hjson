@@ -1,0 +1,78 @@
+authoring: { reason: command_has_no_registered_folder_authoring_profile, state: none }
+category: audio
+command: audio_submix_meter_probe
+deprecation: { reason: command_is_active, state: none }
+discovery: { aliases: [], keywords_en: [audio, submix, meter, probe], keywords_zh: [audio_submix_meter_probe], summary_en: "Execute audio_submix_meter_probe with a verified implementation contract", summary_zh: "采样 Submix meter", tags: [audio, p2-007] }
+errors: {
+  codes: [
+    { code: audio_device_unavailable, description_zh: "C++ 实现返回错误码 audio_device_unavailable", retry_safe: false, stage: execution, wire_match: exact }
+    { code: audio_peak_below_expected_min, description_zh: "C++ 实现返回错误码 audio_peak_below_expected_min", retry_safe: false, stage: execution, wire_match: exact }
+    { code: invalid_, description_zh: "C++ 实现返回错误码 invalid_", retry_safe: true, stage: preflight, wire_match: prefix }
+    { code: world_not_found, description_zh: "C++ 实现返回错误码 world_not_found", retry_safe: false, stage: execution, wire_match: exact }
+  ]
+}
+evidence: {
+  docs: [
+    { path: "Plugins/UeAgentInterface/docs/commands/audio/audio_submix_meter_probe.md", purpose: "user documentation cross-check; C++ implementation remains authoritative" }
+  ]
+  implementation: [
+    { line_hint: 274, path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Commands/Audio/UeAgentHttpServer_AudioRuntime.cpp", purpose: "command handler, parameter and return evidence", symbol: CmdAudioSubmixMeterProbe }
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Commands/Audio/UeAgentHttpServer_AudioOpsCore.cpp", purpose: "transitive helper evidence used by the command handler" }
+  ]
+  tests: [
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterfaceTests/Private/Smoke/UeAgentInterfaceAudioSmokeTests.cpp", purpose: "smoke or negative-path evidence cross-checked for the verified contract" }
+  ]
+}
+execution: {
+  destructive: false
+  editor_state: required
+  game_thread: required
+  idempotent: false
+  kind: session_control
+  overwrite_behavior: none
+  pie_state: allowed
+  retry_safe: false
+  save_behavior: none
+  side_effects: [starts_runtime, stops_runtime, modifies_editor_session]
+  ui_effect: none
+}
+maturity: verified
+params: {
+  constraints: []
+  fields: {
+    bands: { default_state: none, description_zh: "C++ 实现读取的 bands 参数", item_type: json_value, required: false, type: array }
+    duration: { default_state: none, description_zh: "C++ 实现读取的 duration 参数", required: false, type: number }
+    expected_min_peak: { default: 0, default_state: defined, description_zh: "C++ 实现读取的 expected_min_peak 参数", required: false, type: number }
+    frequencies: { default_state: none, description_zh: "C++ 实现读取的 frequencies 参数", item_type: json_value, required: false, type: array }
+    submix: { default_state: none, description_zh: "C++ 实现读取的 submix 参数", required: false, type: string }
+  }
+  state: defined
+}
+response: { artifact_fields: [frequencies, magnitudes, peak_by_channel, spectrum, coverage_report], compact_fields: [peak_envelope], failure_fields: [], max_items_policy: { fields: [], mode: none } }
+returns: {
+  fields: {
+    coverage_report: { description_zh: "C++ 实现返回的 coverage_report 字段；是否出现取决于执行分支", required: false, type: json_value }
+    frequencies: { description_zh: "C++ 实现返回的 frequencies 字段；是否出现取决于执行分支", item_type: json_value, required: false, type: array }
+    magnitudes: { description_zh: "C++ 实现返回的 magnitudes 字段；是否出现取决于执行分支", item_type: json_value, required: false, type: array }
+    peak_by_channel: { description_zh: "C++ 实现返回的 peak_by_channel 字段；是否出现取决于执行分支", item_type: json_value, required: false, type: array }
+    peak_envelope: { description_zh: "C++ 实现返回的 peak_envelope 字段；是否出现取决于执行分支", required: false, type: number }
+    spectrum: { description_zh: "C++ 实现返回的 spectrum 字段；是否出现取决于执行分支", item_type: json_value, required: false, type: array }
+    submix: { description_zh: "C++ 实现返回的 submix 字段；是否出现取决于执行分支", required: false, type: string }
+  }
+  state: defined
+}
+schema: uai.command_spec.v1
+status: active
+types: {}
+verification: {
+  assertions: [
+    { id: result_present, operator: exists, source: returns.coverage_report }
+  ]
+  failure_policy: fail_overall
+  methods: [
+    { id: result, kind: result_assertion }
+  ]
+  required: true
+  state: defined
+}
+version: 1

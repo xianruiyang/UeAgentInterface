@@ -43,7 +43,7 @@ namespace UeAgentLevelTopology
 	UDataLayerInstance* FindDataLayerInstance(UWorld* World, const FString& LayerNameOrPath);
 	bool ActorContainsDataLayerInstance(AActor* Actor, UDataLayerInstance* Layer);
 	bool ParseDataLayerRuntimeState(const FString& Text, EDataLayerRuntimeState& OutState);
-	bool ImportPropertyText(UObject* Object, const FString& PropertyName, const FString& ValueText, TSharedPtr<FJsonObject>& OutResult);
+	bool ApplyCanonicalProperty(UObject* Object, const FString& PropertyName, const TSharedPtr<FJsonValue>& CanonicalValue, TSharedPtr<FJsonObject>& OutResult);
 	bool ParseHLODLayerType(const FString& Text, EHLODLayerType& OutType);
 	TSharedPtr<FJsonObject> HLODLayerToJson(UHLODLayer* Layer);
 	bool CreateOrLoadAssetWithFactory(const FString& AssetPath, UClass* AssetClass, UFactory* Factory, const FString& OverwritePolicy, UObject*& OutAsset, FString& OutError);

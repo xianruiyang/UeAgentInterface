@@ -1,0 +1,21 @@
+definition: {
+  additional_fields: true
+  fields: {
+    absolute_time_seconds: { default_state: none, description_zh: "Niagara 预览绝对时间（秒）；Level 目标还需 actor_id 与 component_id", minimum: 0, required: false, type: number }
+    age: { default_state: none, description_zh: "预览时间或 Niagara age", required: false, type: number }
+    animation_asset_path: { default_state: none, description_zh: "预览动画资产", path_semantics: { access_scope: mounted_read, kind: ue_asset }, required: false, type: ue_asset_path }
+    animation_playing: { default_state: none, description_zh: "预览动画播放状态", required: false, type: bool }
+    animation_time: { default_state: none, description_zh: "预览动画时间", required: false, type: number }
+    actor_id: { default_state: none, description_zh: "Level preview_state 的 Actor 名称或标签选择器", required: false, type: string }
+    component_id: { default_state: none, description_zh: "Level preview_state 的组件名称或路径选择器；component_name 为兼容别名", required: false, type: string }
+    pause_after_advance: { default: true, default_state: defined, description_zh: "Niagara 定帧完成后暂停组件，防止墙钟继续推进", required: false, type: bool }
+    reset: { default: true, default_state: defined, description_zh: "Niagara 绝对时间求值前重新初始化组件", required: false, type: bool }
+    simulation: { default_state: none, description_zh: "预览模拟状态", required: false, type: bool }
+    source_or_target: { default_state: none, description_zh: "源或目标预览角色", required: false, type: string }
+    tick_delta_seconds: { default: 0.0166666666666667, default_state: defined, description_zh: "Niagara DesiredAge seek 的固定模拟步长", maximum: 0.2, minimum: 0.00416666666666667, required: false, type: number }
+  }
+  kind: object
+}
+schema: uai.command_spec.shared_type.v1
+type_id: EditorViewportPreviewState
+version: 1

@@ -1,0 +1,71 @@
+authoring: { reason: command_has_no_registered_folder_authoring_profile, state: none }
+category: audio
+command: audio_component_runtime_snapshot
+deprecation: { reason: command_is_active, state: none }
+discovery: { aliases: [], keywords_en: [audio, component, runtime, snapshot], keywords_zh: [audio_component_runtime_snapshot], summary_en: "Execute audio_component_runtime_snapshot with a verified implementation contract", summary_zh: "读取 AudioComponent 播放状态", tags: [audio, p2-007] }
+errors: {
+  codes: [
+    { code: actor_not_found, description_zh: "C++ 实现返回错误码 actor_not_found", retry_safe: false, stage: execution, wire_match: exact }
+    { code: audio_component_not_found, description_zh: "C++ 实现返回错误码 audio_component_not_found", retry_safe: false, stage: execution, wire_match: exact }
+    { code: world_not_found, description_zh: "C++ 实现返回错误码 world_not_found", retry_safe: false, stage: execution, wire_match: exact }
+  ]
+}
+evidence: {
+  docs: [
+    { path: "Plugins/UeAgentInterface/docs/commands/audio/audio_component_runtime_snapshot.md", purpose: "user documentation cross-check; C++ implementation remains authoritative" }
+  ]
+  implementation: [
+    { line_hint: 41, path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Commands/Audio/UeAgentHttpServer_AudioRuntime.cpp", purpose: "command handler, parameter and return evidence", symbol: CmdAudioComponentRuntimeSnapshot }
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Commands/Audio/UeAgentHttpServer_AudioOpsCore.cpp", purpose: "transitive helper evidence used by the command handler" }
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Commands/Audio/UeAgentHttpServer_AudioOpsRuntime.cpp", purpose: "transitive helper evidence used by the command handler" }
+  ]
+  tests: [
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterfaceTests/Private/Smoke/UeAgentInterfaceAudioSmokeTests.cpp", purpose: "smoke or negative-path evidence cross-checked for the verified contract" }
+  ]
+}
+execution: {
+  destructive: false
+  editor_state: required
+  game_thread: required
+  idempotent: true
+  kind: read_only
+  overwrite_behavior: none
+  pie_state: allowed
+  retry_safe: true
+  save_behavior: none
+  side_effects: []
+  ui_effect: none
+}
+maturity: verified
+params: {
+  constraints: []
+  fields: {
+    actor: { default_state: none, description_zh: "C++ 实现读取的 actor 参数", required: false, type: string }
+    actor_label: { default_state: none, description_zh: "C++ 实现读取的 actor_label 参数", required: false, type: string }
+    actor_name: { default_state: none, description_zh: "C++ 实现读取的 actor_name 参数", required: false, type: string }
+    component: { default_state: none, description_zh: "C++ 实现读取的 component 参数", required: false, type: string }
+    component_name: { default_state: none, description_zh: "C++ 实现读取的 component_name 参数", required: false, type: string }
+  }
+  state: defined
+}
+response: { artifact_fields: [], compact_fields: [attenuation, audio_device_available, auto_activate, component_name, is_playing, owner], failure_fields: [], max_items_policy: { fields: [], mode: none } }
+returns: {
+  fields: {
+    attenuation: { description_zh: "C++ 实现返回的 attenuation 字段；是否出现取决于执行分支", required: false, type: string }
+    audio_device_available: { description_zh: "C++ 实现返回的 audio_device_available 字段；是否出现取决于执行分支", required: false, type: bool }
+    auto_activate: { description_zh: "C++ 实现返回的 auto_activate 字段；是否出现取决于执行分支", required: false, type: bool }
+    component_name: { description_zh: "C++ 实现返回的 component_name 字段；是否出现取决于执行分支", required: false, type: string }
+    is_playing: { description_zh: "C++ 实现返回的 is_playing 字段；是否出现取决于执行分支", required: false, type: bool }
+    owner: { description_zh: "C++ 实现返回的 owner 字段；是否出现取决于执行分支", required: false, type: string }
+    pitch_multiplier: { description_zh: "C++ 实现返回的 pitch_multiplier 字段；是否出现取决于执行分支", required: false, type: number }
+    play_state: { description_zh: "C++ 实现返回的 play_state 字段；是否出现取决于执行分支", required: false, type: string }
+    sound: { description_zh: "C++ 实现返回的 sound 字段；是否出现取决于执行分支", required: false, type: string }
+    volume_multiplier: { description_zh: "C++ 实现返回的 volume_multiplier 字段；是否出现取决于执行分支", required: false, type: number }
+  }
+  state: defined
+}
+schema: uai.command_spec.v1
+status: active
+types: {}
+verification: { reason: read_only_command_has_no_post_write_verification, state: none }
+version: 1

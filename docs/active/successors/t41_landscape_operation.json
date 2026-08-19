@@ -1,0 +1,100 @@
+{
+  "schema": "uai.historical_successor.v2",
+  "owner_task_id": "T41-LANDSCAPE-OPERATION",
+  "approval_authority": {
+    "path": "docs/plan/20260806_UAI_REQUIREMENT_DESIGN_REALIGNMENT/UAI_PRE_REFACTOR_COMMAND_APPROVAL.md",
+    "sha256": "3972f62273a13c8c8a971d7e31924e08c8fc59dad9f35abbb87089728c1c265e"
+  },
+  "commands": [
+    {
+      "historical_command_id": "landscape_create",
+      "approval": "1)",
+      "historical_source": "docs/commands/01_Core_Level_Assets_Landscape.md",
+      "historical_contract": {
+        "inputs": "component_count_x, component_count_y, location, quads_per_section, scale, sections_per_component",
+        "outputs": "初始化测试地形",
+        "purpose": "在当前关卡创建 Landscape"
+      },
+      "resolved_from_contract_id": "uai.historical_capability.t41.landscape.operation.landscape_create/1",
+      "successor": {
+        "kind": "exact_command_set",
+        "command_ids": ["landscape.create"]
+      },
+      "semantic_coverage": {
+        "purpose": {
+          "status": "covered",
+          "by": ["landscape.create"],
+          "explanation": "当前命令在显式 target_ref 下通过原生 ALandscape::Import 创建并初始化当前 Editor world 中的 Landscape，且不恢复旧公共 ID。"
+        },
+        "inputs": {
+          "status": "covered",
+          "by": ["landscape.create"],
+          "explanation": "topology 精确承载 component_count_x/y、quads_per_section 和 sections_per_component；placement 精确承载 location、scale 及显式旋转，sample_region 与 initial_height 补全可验证的初始化范围和高度。"
+        },
+        "outputs": {
+          "status": "covered",
+          "by": ["landscape.create"],
+          "explanation": "公共结果只在原生创建、保存和独立读回完成后返回 operation_id 与 verified projection；产品测试从真实 UE actor 读回拓扑、变换和初始高度。"
+        }
+      },
+      "product_evidence": {
+        "test_id": "UAI.DeliveryWorkflow.T41.LANDSCAPE.OPERATION",
+        "public_command_ids": ["landscape.create"],
+        "architecture_contract_ids": ["DES-UAI-OPERATION-LIFECYCLE", "DES-UAI-DOMAIN-CAPABILITY-CONTRIBUTION"],
+        "required_claims": ["public_to_real_ue", "create_persisted", "independent_readback", "failure_semantics", "old_public_id_non_executable", "cleanup"]
+      },
+      "old_id_exit": {
+        "public_executable": false,
+        "manifest_active": false,
+        "sdk_binding_active": false,
+        "compatibility_alias": false
+      },
+      "final_lifecycle": "deprecated_replaced"
+    },
+    {
+      "historical_command_id": "landscape_raise_circle",
+      "approval": "1)",
+      "historical_source": "docs/commands/01_Core_Level_Assets_Landscape.md",
+      "historical_contract": {
+        "inputs": "center, falloff, radius_cm, strength_cm",
+        "outputs": "快速做起伏地形",
+        "purpose": "抬高圆形区域"
+      },
+      "resolved_from_contract_id": "uai.historical_capability.t41.landscape.operation.landscape_raise_circle/1",
+      "successor": {
+        "kind": "exact_command_set",
+        "command_ids": ["landscape.height_delta"]
+      },
+      "semantic_coverage": {
+        "purpose": {
+          "status": "covered",
+          "by": ["landscape.height_delta"],
+          "explanation": "通用高度增量命令以一个有界 delta grid 完成圆形抬高；当前正式教程冻结世界圆到 sample grid 的确定性转换，因此无需保留第二个单用途命令。"
+        },
+        "inputs": {
+          "status": "covered",
+          "by": ["landscape.height_delta"],
+          "explanation": "center 先经目标逆变换得到 local sample center；radius_cm 分别使用已观测 scale.x/scale.y 计算世界距离，falloff 在线性权重与 smoothstep 间插值，strength_cm 除以 scale.z 得到 local height delta。region、row_stride 和 values 完整承载转换结果。"
+        },
+        "outputs": {
+          "status": "covered",
+          "by": ["landscape.height_delta"],
+          "explanation": "真实非均匀缩放 Landscape 测试验证中心达到 strength_cm、等世界距离具有相同衰减、区外不抬高，并覆盖保存、卸载、重载及独立原生高度读回。"
+        }
+      },
+      "product_evidence": {
+        "test_id": "UAI.DeliveryWorkflow.T41.LANDSCAPE.OPERATION",
+        "public_command_ids": ["landscape.height_delta"],
+        "architecture_contract_ids": ["DES-UAI-OPERATION-LIFECYCLE", "DES-UAI-DOMAIN-CAPABILITY-CONTRIBUTION"],
+        "required_claims": ["public_to_real_ue", "circle_raise_preserved", "persistence", "independent_readback", "failure_semantics", "old_public_id_non_executable", "cleanup"]
+      },
+      "old_id_exit": {
+        "public_executable": false,
+        "manifest_active": false,
+        "sdk_binding_active": false,
+        "compatibility_alias": false
+      },
+      "final_lifecycle": "deprecated_replaced"
+    }
+  ]
+}

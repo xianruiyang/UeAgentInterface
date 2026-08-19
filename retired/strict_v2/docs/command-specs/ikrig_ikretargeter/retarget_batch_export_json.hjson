@@ -1,0 +1,70 @@
+authoring: { reason: command_has_no_registered_folder_authoring_profile, state: none }
+category: ikrig_ikretargeter
+command: retarget_batch_export_json
+deprecation: { reason: command_is_active, state: none }
+discovery: { aliases: [], keywords_en: [retarget, batch, export, json, ikrig_ikretargeter], keywords_zh: [retarget_batch_export_json], summary_en: "Execute retarget_batch_export_json with a verified implementation contract", summary_zh: "生成批量重定向单文件 HJSON", tags: [ikrig_ikretargeter, p2-006] }
+errors: {
+  codes: [
+    { code: hjson_object_invalid, description_zh: "C++ 实现返回错误码 hjson_object_invalid", retry_safe: true, stage: preflight, wire_match: exact }
+    { code: missing_output_file, description_zh: "C++ 实现返回错误码 missing_output_file", retry_safe: true, stage: preflight, wire_match: exact }
+    { code: save_json_failed, description_zh: "C++ 实现返回错误码 save_json_failed", retry_safe: false, stage: execution, wire_match: exact }
+  ]
+}
+evidence: {
+  docs: [
+    { path: "Plugins/UeAgentInterface/docs/commands/ikrig_ikretargeter/retarget_batch_export_json.md", purpose: "user documentation cross-check; C++ implementation remains authoritative" }
+  ]
+  implementation: [
+    { line_hint: 1288, path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Commands/IK/UeAgentHttpServer_IKAssets_FolderFormat.cpp", purpose: "command handler, parameter and return evidence", symbol: CmdRetargetBatchExportJson }
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Server/UeAgentHttpServer.cpp", purpose: "transitive helper evidence used by the command handler" }
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Utilities/UeAgentAuthoringFileIO.cpp", purpose: "transitive helper evidence used by the command handler" }
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Utilities/UeAgentDetailsAuthoring.cpp", purpose: "transitive helper evidence used by the command handler" }
+  ]
+  tests: [
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterfaceTests/Private/Smoke/UeAgentInterfaceSmoke_AnimationIKNiagara.cpp", purpose: "smoke or negative-path evidence cross-checked for the verified contract" }
+  ]
+}
+execution: {
+  destructive: false
+  editor_state: required
+  game_thread: required
+  idempotent: true
+  kind: read_only
+  overwrite_behavior: none
+  pie_state: allowed
+  retry_safe: true
+  save_behavior: none
+  side_effects: [writes_files]
+  ui_effect: none
+}
+maturity: verified
+params: {
+  constraints: []
+  fields: {
+    asset_paths: { default_state: none, description_zh: "C++ 实现读取的 asset_paths 参数", item_type: ue_asset_path, required: false, type: array }
+    output_file: {
+      default_state: none
+      description_zh: "C++ 实现读取的 output_file 参数"
+      path_semantics: { kind: filesystem_file, must_exist: false, writable: true }
+      required: false
+      type: filesystem_path
+    }
+    retargeter: { default_state: none, description_zh: "C++ 实现读取的 retargeter 参数", required: false, type: string }
+  }
+  state: defined
+}
+response: { artifact_fields: [source_assets], compact_fields: [output_file, retargeter, schema], failure_fields: [], max_items_policy: { fields: [], mode: none } }
+returns: {
+  fields: {
+    output_file: { description_zh: "C++ 实现返回的 output_file 字段；是否出现取决于执行分支", required: false, type: filesystem_path }
+    retargeter: { description_zh: "C++ 实现返回的 retargeter 字段；是否出现取决于执行分支", required: false, type: string }
+    schema: { description_zh: "C++ 实现返回的 schema 字段；是否出现取决于执行分支", required: false, type: string }
+    source_assets: { description_zh: "C++ 实现返回的 source_assets 字段；是否出现取决于执行分支", item_type: json_value, required: false, type: array }
+  }
+  state: defined
+}
+schema: uai.command_spec.v1
+status: active
+types: {}
+verification: { reason: read_only_command_has_no_post_write_verification, state: none }
+version: 1

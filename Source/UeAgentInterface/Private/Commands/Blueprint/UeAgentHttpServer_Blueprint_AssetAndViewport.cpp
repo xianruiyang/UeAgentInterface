@@ -54,27 +54,6 @@ bool FUeAgentHttpServer::ExecuteBlueprintCommand(const FString& CommandLower, co
 	if (CommandLower == TEXT("blueprint_inspect_components")) return CmdBlueprintInspectComponents(Ctx, OutData, OutError);
 	if (CommandLower == TEXT("blueprint_list_component_events")) return CmdBlueprintListComponentEvents(Ctx, OutData, OutError);
 	if (CommandLower == TEXT("blueprint_inspect_nodes")) return CmdBlueprintInspectNodes(Ctx, OutData, OutError);
-	if (CommandLower == TEXT("blueprint_add_component")) return CmdBlueprintAddComponent(Ctx, OutData, OutError);
-	if (CommandLower == TEXT("blueprint_set_component_property")) return CmdBlueprintSetComponentProperty(Ctx, OutData, OutError);
-	if (CommandLower == TEXT("blueprint_add_event_node")) return CmdBlueprintAddEventNode(Ctx, OutData, OutError);
-	if (CommandLower == TEXT("blueprint_add_custom_event_node")) return CmdBlueprintAddCustomEventNode(Ctx, OutData, OutError);
-	if (CommandLower == TEXT("blueprint_add_node_by_class")) return CmdBlueprintAddNodeByClass(Ctx, OutData, OutError);
-	if (CommandLower == TEXT("blueprint_add_call_function_node")) return CmdBlueprintAddCallFunctionNode(Ctx, OutData, OutError);
-	if (CommandLower == TEXT("blueprint_connect_pins")) return CmdBlueprintConnectPins(Ctx, OutData, OutError);
-	if (CommandLower == TEXT("blueprint_disconnect_pins")) return CmdBlueprintDisconnectPins(Ctx, OutData, OutError);
-	if (CommandLower == TEXT("blueprint_set_pin_default_value")) return CmdBlueprintSetPinDefaultValue(Ctx, OutData, OutError);
-	if (CommandLower == TEXT("blueprint_remove_node")) return CmdBlueprintRemoveNode(Ctx, OutData, OutError);
-	if (CommandLower == TEXT("blueprint_add_variable")) return CmdBlueprintAddVariable(Ctx, OutData, OutError);
-	if (CommandLower == TEXT("blueprint_remove_variable")) return CmdBlueprintRemoveVariable(Ctx, OutData, OutError);
-	if (CommandLower == TEXT("blueprint_add_variable_node")) return CmdBlueprintAddVariableNode(Ctx, OutData, OutError);
-	if (CommandLower == TEXT("blueprint_add_component_bound_event")) return CmdBlueprintAddComponentBoundEvent(Ctx, OutData, OutError);
-	if (CommandLower == TEXT("blueprint_add_enhanced_input_action_event")) return CmdBlueprintAddEnhancedInputActionEvent(Ctx, OutData, OutError);
-	if (CommandLower == TEXT("blueprint_add_enhanced_input_local_player_subsystem_node")) return CmdBlueprintAddEnhancedInputLocalPlayerSubsystemNode(Ctx, OutData, OutError);
-	if (CommandLower == TEXT("blueprint_add_enhanced_input_add_mapping_context_node")) return CmdBlueprintAddEnhancedInputAddMappingContextNode(Ctx, OutData, OutError);
-	if (CommandLower == TEXT("blueprint_add_dynamic_cast_node")) return CmdBlueprintAddDynamicCastNode(Ctx, OutData, OutError);
-	if (CommandLower == TEXT("blueprint_add_function_graph")) return CmdBlueprintAddFunctionGraph(Ctx, OutData, OutError);
-	if (CommandLower == TEXT("blueprint_add_macro_graph")) return CmdBlueprintAddMacroGraph(Ctx, OutData, OutError);
-	if (CommandLower == TEXT("blueprint_add_event_dispatcher")) return CmdBlueprintAddEventDispatcher(Ctx, OutData, OutError);
 	if (CommandLower == TEXT("blueprint_layout_graph_self_test")) return CmdBlueprintLayoutGraphSelfTest(Ctx, OutData, OutError);
 	if (CommandLower == TEXT("blueprint_layout_graph")) return CmdBlueprintLayoutGraph(Ctx, OutData, OutError);
 	if (CommandLower == TEXT("blueprint_layout_all_graphs"))
@@ -90,12 +69,7 @@ bool FUeAgentHttpServer::ExecuteBlueprintCommand(const FString& CommandLower, co
 	}
 	if (CommandLower == TEXT("blueprint_graph_get_view")) return CmdBlueprintGraphGetView(Ctx, OutData, OutError);
 	if (CommandLower == TEXT("blueprint_graph_set_view")) return CmdBlueprintGraphSetView(Ctx, OutData, OutError);
-	if (CommandLower == TEXT("blueprint_viewport_get_camera")) return CmdBlueprintViewportGetCamera(Ctx, OutData, OutError);
-	if (CommandLower == TEXT("blueprint_viewport_set_camera")) return CmdBlueprintViewportSetCamera(Ctx, OutData, OutError);
 	if (CommandLower == TEXT("blueprint_screenshot")) return CmdBlueprintScreenshot(Ctx, OutData, OutError);
-	if (CommandLower == TEXT("blueprint_reparent")) return CmdBlueprintReparent(Ctx, OutData, OutError);
-	if (CommandLower == TEXT("blueprint_remove_component")) return CmdBlueprintRemoveComponent(Ctx, OutData, OutError);
-	if (CommandLower == TEXT("blueprint_set_cdo_property")) return CmdBlueprintSetCdoProperty(Ctx, OutData, OutError);
 
 	OutError = TEXT("unknown_blueprint_command");
 	return false;
@@ -423,7 +397,7 @@ bool FUeAgentHttpServer::CmdBlueprintGraphGetView(const FUeAgentRequestContext& 
 		return false;
 	}
 
-	bool bOpenEditorIfNeeded = true;
+	bool bOpenEditorIfNeeded = false;
 	JsonTryGetBool(Ctx.Params, TEXT("open_editor_if_needed"), bOpenEditorIfNeeded);
 	TSharedPtr<IBlueprintEditor> BlueprintEditor = UeAgentBlueprintOps::GetBlueprintEditor(Blueprint, bOpenEditorIfNeeded, OutError);
 	if (!BlueprintEditor.IsValid())
@@ -505,7 +479,7 @@ bool FUeAgentHttpServer::CmdBlueprintGraphSetView(const FUeAgentRequestContext& 
 		return false;
 	}
 
-	bool bOpenEditorIfNeeded = true;
+	bool bOpenEditorIfNeeded = false;
 	JsonTryGetBool(Ctx.Params, TEXT("open_editor_if_needed"), bOpenEditorIfNeeded);
 	TSharedPtr<IBlueprintEditor> BlueprintEditor = UeAgentBlueprintOps::GetBlueprintEditor(Blueprint, bOpenEditorIfNeeded, OutError);
 	if (!BlueprintEditor.IsValid())
@@ -735,16 +709,16 @@ bool FUeAgentHttpServer::CmdBlueprintScreenshot(const FUeAgentRequestContext& Ct
 		|| Target == TEXT("graph")
 		|| Target.StartsWith(TEXT("graph:"));
 
-	bool bAllowUiMutation = !bGraphTarget;
+	bool bAllowUiMutation = false;
 	JsonTryGetBool(Ctx.Params, TEXT("allow_ui_mutation"), bAllowUiMutation);
-	bool bAllowWindowMutation = bAllowUiMutation;
+	bool bAllowWindowMutation = false;
 	JsonTryGetBool(Ctx.Params, TEXT("allow_window_mutation"), bAllowWindowMutation);
 	if (bAllowUiMutation)
 	{
 		bAllowWindowMutation = true;
 	}
 
-	bool bOpenEditorIfNeeded = bAllowUiMutation;
+	bool bOpenEditorIfNeeded = false;
 	JsonTryGetBool(Ctx.Params, TEXT("open_editor_if_needed"), bOpenEditorIfNeeded);
 	if (bOpenEditorIfNeeded && !bAllowUiMutation)
 	{

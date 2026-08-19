@@ -1,0 +1,110 @@
+{
+  "schema": "uai.domain_adapter.audio_media_graph.test_fixture.v1",
+  "canonical_value_schema": "uai.graph_compound.canonical.v1",
+  "adapter_id": "D/AudioMediaGraph",
+  "port_family_count": 5,
+  "capability_count": 15,
+  "legacy_candidate_count": 7,
+  "external_successor_capability_ids": ["texture_graph.artifact.bake"],
+  "port_families": [
+    {
+      "family_id": "asset_lifecycle",
+      "required_identity_facets": ["asset_kind", "asset_path", "native_class"],
+      "required_stages": ["apply", "refresh", "independent_capture"],
+      "barrier_kind": "refresh",
+      "oracle_kind": "reloaded_native_asset_identity"
+    },
+    {
+      "family_id": "metasound_document_graph_mutation",
+      "required_identity_facets": ["asset_owner", "frontend_node_guid", "frontend_vertex_guid", "class_name_and_version", "pin_direction_and_type"],
+      "required_stages": ["preflight", "apply", "frontend_register_compile_settle", "independent_capture"],
+      "barrier_kind": "compile",
+      "oracle_kind": "fresh_metasound_frontend_document_and_registration_state"
+    },
+    {
+      "family_id": "sound_cue_node_graph_mutation",
+      "required_identity_facets": ["cue_owner", "sound_node_object_path", "sound_node_class", "root_role", "ordered_child_relation"],
+      "required_stages": ["preflight", "apply", "graph_sync_compile_settle", "independent_capture"],
+      "barrier_kind": "compile",
+      "oracle_kind": "fresh_sound_cue_nodes_root_children_and_graph_links"
+    },
+    {
+      "family_id": "texture_graph_topology_mutation",
+      "required_identity_facets": ["graph_owner", "expression_object_path", "ftg_node_id", "ftg_pin_id", "argument_name_direction_and_type", "parameter_alias"],
+      "required_stages": ["preflight", "apply", "validate_evaluate_settle", "independent_capture"],
+      "barrier_kind": "evaluate",
+      "oracle_kind": "fresh_texture_graph_nodes_pins_edges_params_and_output_settings"
+    },
+    {
+      "family_id": "texture_graph_artifact_state",
+      "required_identity_facets": ["graph_owner", "output_pin_identity", "output_name", "output_settings", "evaluated_value_type"],
+      "required_stages": ["capture_after_settle", "artifact_state_validate", "independent_capture"],
+      "barrier_kind": "artifact_capture",
+      "oracle_kind": "post_evaluation_native_output_value_and_settings"
+    }
+  ],
+  "capabilities": [
+    {"capability_id":"audio_media.asset.create","descriptor_id":"uai.audio_media.asset.create.v1","port_family_id":"asset_lifecycle","operation_kind":"create","effect_class":"compound_effect","version":1},
+    {"capability_id":"metasound.graph.interface.mutate","descriptor_id":"uai.metasound.graph.interface.mutate.v1","port_family_id":"metasound_document_graph_mutation","operation_kind":"mutate","effect_class":"compound_effect","version":1},
+    {"capability_id":"metasound.graph.node.mutate","descriptor_id":"uai.metasound.graph.node.mutate.v1","port_family_id":"metasound_document_graph_mutation","operation_kind":"mutate","effect_class":"compound_effect","version":1},
+    {"capability_id":"metasound.graph.link.mutate","descriptor_id":"uai.metasound.graph.link.mutate.v1","port_family_id":"metasound_document_graph_mutation","operation_kind":"mutate","effect_class":"compound_effect","version":1},
+    {"capability_id":"metasound.graph.default.mutate","descriptor_id":"uai.metasound.graph.default.mutate.v1","port_family_id":"metasound_document_graph_mutation","operation_kind":"mutate","effect_class":"compound_effect","version":1},
+    {"capability_id":"metasound.graph.compile_settle","descriptor_id":"uai.metasound.graph.compile_settle.v1","port_family_id":"metasound_document_graph_mutation","operation_kind":"settle","effect_class":"compound_effect","version":1},
+    {"capability_id":"sound_cue.graph.node.mutate","descriptor_id":"uai.sound_cue.graph.node.mutate.v1","port_family_id":"sound_cue_node_graph_mutation","operation_kind":"mutate","effect_class":"compound_effect","version":1},
+    {"capability_id":"sound_cue.graph.relation.mutate","descriptor_id":"uai.sound_cue.graph.relation.mutate.v1","port_family_id":"sound_cue_node_graph_mutation","operation_kind":"mutate","effect_class":"compound_effect","version":1},
+    {"capability_id":"sound_cue.graph.root.mutate","descriptor_id":"uai.sound_cue.graph.root.mutate.v1","port_family_id":"sound_cue_node_graph_mutation","operation_kind":"mutate","effect_class":"compound_effect","version":1},
+    {"capability_id":"sound_cue.graph.compile_settle","descriptor_id":"uai.sound_cue.graph.compile_settle.v1","port_family_id":"sound_cue_node_graph_mutation","operation_kind":"settle","effect_class":"compound_effect","version":1},
+    {"capability_id":"texture_graph.graph.node.mutate","descriptor_id":"uai.texture_graph.graph.node.mutate.v1","port_family_id":"texture_graph_topology_mutation","operation_kind":"mutate","effect_class":"compound_effect","version":1},
+    {"capability_id":"texture_graph.graph.link.mutate","descriptor_id":"uai.texture_graph.graph.link.mutate.v1","port_family_id":"texture_graph_topology_mutation","operation_kind":"mutate","effect_class":"compound_effect","version":1},
+    {"capability_id":"texture_graph.graph.parameter.mutate","descriptor_id":"uai.texture_graph.graph.parameter.mutate.v1","port_family_id":"texture_graph_topology_mutation","operation_kind":"mutate","effect_class":"compound_effect","version":1},
+    {"capability_id":"texture_graph.graph.validate_evaluate_settle","descriptor_id":"uai.texture_graph.graph.validate_evaluate_settle.v1","port_family_id":"texture_graph_topology_mutation","operation_kind":"settle","effect_class":"compound_effect","version":1},
+    {"capability_id":"texture_graph.artifact.capture","descriptor_id":"uai.texture_graph.artifact.capture.v1","port_family_id":"texture_graph_artifact_state","operation_kind":"query","effect_class":"compound_query","version":1}
+  ],
+  "legacy_mappings": [
+    {"legacy_id":"metasound_create","source_role":"scenario_only","target_capability_ids":["audio_media.asset.create"],"prohibited_oracle":"legacy_command_success"},
+    {"legacy_id":"metasound_apply_folder","source_role":"scenario_only","target_capability_ids":["metasound.graph.interface.mutate","metasound.graph.node.mutate","metasound.graph.link.mutate","metasound.graph.default.mutate","metasound.graph.compile_settle"],"prohibited_oracle":"legacy_folder_apply_provider"},
+    {"legacy_id":"sound_cue_create","source_role":"scenario_only","target_capability_ids":["audio_media.asset.create"],"prohibited_oracle":"legacy_command_success"},
+    {"legacy_id":"sound_cue_apply_folder","source_role":"scenario_only","target_capability_ids":["sound_cue.graph.node.mutate","sound_cue.graph.relation.mutate","sound_cue.graph.root.mutate","sound_cue.graph.compile_settle"],"prohibited_oracle":"legacy_folder_apply_provider"},
+    {"legacy_id":"texture_graph_create","source_role":"scenario_only","target_capability_ids":["audio_media.asset.create"],"prohibited_oracle":"legacy_command_success"},
+    {"legacy_id":"texture_graph_apply_folder","source_role":"scenario_only","target_capability_ids":["texture_graph.graph.node.mutate","texture_graph.graph.link.mutate","texture_graph.graph.parameter.mutate","texture_graph.graph.validate_evaluate_settle"],"prohibited_oracle":"legacy_reflection_apply_provider"},
+    {"legacy_id":"texture_graph_bake_outputs","source_role":"scenario_only","target_capability_ids":["texture_graph.artifact.bake"],"prohibited_oracle":"outputs_num_nonnegative_or_created_texture_echo"}
+  ],
+  "identity_cases": [
+    {"case_id":"metasound_node","identity_source":"native_guid","native_key":"node_guid:11111111-1111-1111-1111-111111111111","type_key":"MetasoundFrontendNode"},
+    {"case_id":"metasound_pin","identity_source":"native_composite","native_key":"node_guid:11111111-1111-1111-1111-111111111111|vertex_guid:22222222-2222-2222-2222-222222222222","type_key":"MetasoundFrontendVertex"},
+    {"case_id":"sound_cue_node","identity_source":"uobject_path","native_key":"/Temp/UAI/AudioMediaGraph/SC_GC010.SoundNodeMixer_0","type_key":"/Script/Engine.SoundNodeMixer"},
+    {"case_id":"sound_cue_child_relation","identity_source":"native_composite","native_key":"parent:/Temp/UAI/AudioMediaGraph/SC_GC010.SoundNodeMixer_0|child:/Temp/UAI/AudioMediaGraph/SC_GC010.SoundNodeDelay_0|slot:0","type_key":"sound_cue_child"},
+    {"case_id":"texture_graph_node","identity_source":"native_composite","native_key":"expression:/Temp/UAI/AudioMediaGraph/TG_GC010.TG_Expression_Scalar_0|ftg_node:1","type_key":"/Script/TextureGraph.TG_Expression_Scalar"},
+    {"case_id":"texture_graph_pin","identity_source":"native_composite","native_key":"expression:/Temp/UAI/AudioMediaGraph/TG_GC010.TG_Expression_Scalar_0|ftg_pin:1.0|argument:Input","type_key":"FTG_Pin"},
+    {"case_id":"texture_graph_output","identity_source":"native_composite","native_key":"owner:/Temp/UAI/AudioMediaGraph/TG_GC010|output_pin:2.1|name:Output","type_key":"FTG_OutputSettings"}
+  ],
+  "deep_acyclic_case": {"item_count":512,"validation":"iterative_no_fixed_depth_limit","operation_budget":2048},
+  "negative_cases": [
+    {"case_id":"identity_source_missing","error_code":"audio_media_graph_identity_source_missing"},
+    {"case_id":"native_key_missing","error_code":"audio_media_graph_native_identity_missing"},
+    {"case_id":"duplicate_identity","error_code":"audio_media_graph_duplicate_identity"},
+    {"case_id":"endpoint_missing","error_code":"audio_media_graph_endpoint_missing"},
+    {"case_id":"pin_direction_invalid","error_code":"audio_media_graph_pin_direction_invalid"},
+    {"case_id":"relation_order_invalid","error_code":"audio_media_graph_relation_order_invalid"},
+    {"case_id":"cycle","error_code":"audio_media_graph_cycle"},
+    {"case_id":"compile_incomplete","error_code":"audio_media_graph_compile_incomplete"},
+    {"case_id":"evaluate_incomplete","error_code":"audio_media_graph_evaluate_incomplete"},
+    {"case_id":"settle_incomplete","error_code":"audio_media_graph_settle_incomplete"},
+    {"case_id":"capture_failed","error_code":"audio_media_graph_capture_failed"},
+    {"case_id":"artifact_before_settle","error_code":"audio_media_graph_artifact_before_settle"},
+    {"case_id":"artifact_output_missing","error_code":"audio_media_graph_artifact_output_missing"},
+    {"case_id":"echo_readback","error_code":"audio_media_graph_echo_readback_forbidden"}
+  ],
+  "lifecycle_evidence": {
+    "before_revision":"revision:100",
+    "apply_evidence":"fixture:gc-010:apply:101",
+    "barrier_evidence":"fixture:gc-010:barrier:101",
+    "settle_evidence":"fixture:gc-010:settle:101",
+    "readback_revision":"revision:101",
+    "readback_evidence":"fixture:gc-010:independent-readback:101",
+    "artifact_evidence":"fixture:gc-010:artifact-state:101",
+    "required_distinct_evidence":["apply_evidence","barrier_evidence","settle_evidence","readback_evidence","artifact_evidence"]
+  },
+  "forbidden_owners": ["public_or_prefix_dispatch","json_or_hjson_parser","descriptor_registry","canonical_state_owner","workspace_or_file_layout","token_budget","transaction_or_save","verification_or_outcome","response_projection","network_transport","artifact_publisher"],
+  "forbidden_oracles": ["legacy_folder_or_reflection_apply_provider","legacy_command_success","request_or_export_echo","empty_nodes_edges_outputs_arrays","outputs_num_nonnegative","created_texture_echo","mutation_cache","compile_receipt_as_readback","self_generated_golden","display_name_or_bare_array_index_identity"]
+}

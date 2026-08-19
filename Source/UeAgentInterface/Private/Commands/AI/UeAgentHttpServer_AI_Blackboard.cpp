@@ -1,10 +1,15 @@
 #include "Server/UeAgentHttpServer.h"
 
+#include "Commands/Assets/UeAgentReflectionAuthoringCommandBridge.h"
 #include "UeAgentHttpServer_AIOps.h"
 
+#include "Utilities/UeAgentAuthoringFileIO.h"
 #include "Utilities/UeAgentAuthoringJson.h"
 #include "Utilities/UeAgentDetailsAuthoring.h"
+#include "Utilities/UeAgentFolderDetailsExport.h"
 #include "Utilities/UeAgentJsonDiagnostics.h"
+#include "Utilities/UeAgentPropertyValueCodec.h"
+#include "Utilities/UeAgentStructuredAuthoringIO.h"
 
 #include "AssetRegistry/AssetRegistryModule.h"
 #include "BehaviorTree/BlackboardData.h"
@@ -255,58 +260,11 @@ namespace UeAgentAIOps
 		AttachCoverageReport(OutData);
 	}
 
-	bool SaveJsonFile(const FString& OutputPathInput, const TSharedPtr<FJsonObject>& Root, FString& OutOutputPath, FString& OutError)
+	bool SaveAuthoringFile(const FString& OutputPathInput, const TSharedPtr<FJsonObject>& Root, FString& OutOutputPath, FString& OutError)
 	{
-		OutOutputPath.Reset();
-		if (!Root.IsValid())
-		{
-			OutError = TEXT("json_root_invalid");
-			return false;
-		}
-		FString OutputPath = OutputPathInput;
-		OutputPath.TrimStartAndEndInline();
-		if (OutputPath.IsEmpty())
-		{
-			OutError = TEXT("missing_output_file");
-			return false;
-		}
-
-		OutputPath = UeAgentJsonDiagnostics::ResolveProjectRelativeFilePath(OutputPath);
-		const FString OutputDir = FPaths::GetPath(OutputPath);
-		if (!OutputDir.IsEmpty() && !IFileManager::Get().DirectoryExists(*OutputDir))
-		{
-			IFileManager::Get().MakeDirectory(*OutputDir, true);
-		}
-
-		FString JsonText;
-		TSharedPtr<FJsonObject> SaveRoot = UeAgentDetailsAuthoring::CloneObjectTree(Root);
-		if (!UeAgentDetailsAuthoring::ExternalizeInlineDetailsInObjectTree(OutputPath, SaveRoot, TEXT("ai_json_export"), OutError))
-		{
-			return false;
-		}
-		if (!UeAgentJsonDiagnostics::SerializeJsonObjectCompact(SaveRoot, JsonText))
-		{
-			OutError = TEXT("json_serialize_failed");
-			return false;
-		}
-		if (!FFileHelper::SaveStringToFile(JsonText, *OutputPath, FFileHelper::EEncodingOptions::ForceUTF8WithoutBOM))
-		{
-			OutError = TEXT("save_json_file_failed");
-			return false;
-		}
-
-		OutOutputPath = OutputPath;
-		return true;
-	}
-
-	static FString MakeDetailsStem(const FString& Category, const FString& OwnerId)
-	{
-		FString SafeOwnerId = FPaths::MakeValidFileName(OwnerId, TEXT('_'));
-		if (SafeOwnerId.IsEmpty())
-		{
-			SafeOwnerId = TEXT("owner");
-		}
-		return FPaths::Combine(TEXT("details"), Category, SafeOwnerId);
+		UeAgentAuthoringFileIO::FSaveOptions Options;
+		Options.SourceCommand = TEXT("ai_json_export");
+		return UeAgentAuthoringFileIO::SaveObject(OutputPathInput, Root, Options, OutOutputPath, OutError);
 	}
 
 	bool ExportFolderOwnerDetails(
@@ -324,30 +282,25 @@ namespace UeAgentAIOps
 			return true;
 		}
 
-		const FString ResolvedOwnerId = OwnerId.IsEmpty() ? Object->GetName() : OwnerId;
-		const FString DetailsStem = MakeDetailsStem(DetailsCategory, ResolvedOwnerId);
-		UeAgentDetailsAuthoring::FOwnerDetailsExportRequest Request =
-			UeAgentDetailsAuthoring::MakeOwnerDetailsExportRequest(
-				Object,
-				OwnerKind,
-				ResolvedOwnerId,
-				FPaths::Combine(EntryDirectory, DetailsStem),
-				SourceCommand,
-				FPaths::Combine(DetailsStem, TEXT("index.json")),
-				TEXT("details"));
-
-		TSharedPtr<FJsonObject> DetailsSummary;
-		if (!UeAgentDetailsAuthoring::ExportOwnerDetails(Request, DetailsSummary, OutError))
+		UeAgentFolderDetailsExport::FOwnerDetailsAttachOptions Options;
+		Options.RefFieldName = TEXT("details");
+		if (!UeAgentFolderDetailsExport::AttachOwnerDetails(
+			Object,
+			EntryDirectory,
+			SourceCommand,
+			OwnerKind,
+			OwnerId,
+			DetailsCategory,
+			EntryObject,
+			OutError,
+			Options))
 		{
-			OutError = FString::Printf(TEXT("%s_details_export_failed:%s:%s"), *SourceCommand, *ResolvedOwnerId, *OutError);
+			OutError = FString::Printf(TEXT("%s_details_export_failed:%s:%s"), *SourceCommand, *OwnerId, *OutError);
 			return false;
 		}
 
-		EntryObject->RemoveField(TEXT("properties"));
 		EntryObject->RemoveField(TEXT("generator_properties"));
-		EntryObject->RemoveField(TEXT("raw_properties"));
 		EntryObject->RemoveField(TEXT("raw_properties_count"));
-		EntryObject->SetObjectField(TEXT("details"), DetailsSummary);
 		return true;
 	}
 
@@ -372,18 +325,6 @@ namespace UeAgentAIOps
 			SourceCommand);
 	}
 
-	static int32 GetGroupedDetailsAppliedCount(const TSharedPtr<FJsonObject>& ApplySummary)
-	{
-		if (!ApplySummary.IsValid())
-		{
-			return 0;
-		}
-		double Applied = 0.0;
-		return ApplySummary->TryGetNumberField(TEXT("properties_applied"), Applied)
-			? static_cast<int32>(Applied)
-			: 0;
-	}
-
 	bool ApplyFolderOwnerDetailsIfPresent(
 		UObject* Object,
 		const FString& EntryDirectory,
@@ -394,97 +335,29 @@ namespace UeAgentAIOps
 		FString& OutError,
 		int32& InOutAppliedCount)
 	{
-		bool bHasDetails = false;
-		FString DetailsRoot;
-		FString IndexFile;
-		if (!UeAgentDetailsAuthoring::ResolveDetailsRefRoot(
+		TSharedPtr<FJsonObject> ApplySummary;
+		return UeAgentDetailsAuthoring::ApplyOwnerDetailsFromEntryIfPresent(
+			Object,
 			EntryDirectory,
 			EntryObject,
+			MakeApplyOwnerInfo(OwnerKind, OwnerId, SourceCommand, Object),
 			TEXT("details"),
-			bHasDetails,
-			DetailsRoot,
-			IndexFile,
-			OutError))
-		{
-			return false;
-		}
-		if (!bHasDetails)
-		{
-			return true;
-		}
-		if (!Object)
-		{
-			OutError = TEXT("details_owner_missing");
-			return false;
-		}
-
-		UeAgentDetailsAuthoring::FOwnerDetailsApplyRequest Request;
-		Request.Object = Object;
-		Request.OwnerInfo = MakeApplyOwnerInfo(OwnerKind, OwnerId, SourceCommand, Object);
-		Request.DetailsRoot = DetailsRoot;
-		Request.IndexFile = IndexFile;
-		Request.RefFieldName = TEXT("details");
-
-		TSharedPtr<FJsonObject> ApplySummary;
-		if (!UeAgentDetailsAuthoring::ApplyOwnerDetails(Request, ApplySummary, OutError))
-		{
-			return false;
-		}
-		bool bOk = true;
-		if (ApplySummary.IsValid() && ApplySummary->HasField(TEXT("ok")))
-		{
-			bOk = ApplySummary->GetBoolField(TEXT("ok"));
-		}
-		if (!bOk)
-		{
-			OutError = TEXT("grouped_details_apply_failed");
-			return false;
-		}
-
-		InOutAppliedCount += GetGroupedDetailsAppliedCount(ApplySummary);
-		return true;
+			true,
+			ApplySummary,
+			InOutAppliedCount,
+			OutError);
 	}
 
-	bool LoadJsonFile(const FString& InputPathInput, TSharedPtr<FJsonObject>& OutRoot, FString& OutResolvedPath, FString& OutError)
+	bool LoadAuthoringFile(const FString& InputPathInput, TSharedPtr<FJsonObject>& OutRoot, FString& OutResolvedPath, FString& OutError)
 	{
-		return LoadJsonFile(InputPathInput, OutRoot, OutResolvedPath, OutError, true);
+		return LoadAuthoringFile(InputPathInput, OutRoot, OutResolvedPath, OutError, true);
 	}
 
-	bool LoadJsonFile(const FString& InputPathInput, TSharedPtr<FJsonObject>& OutRoot, FString& OutResolvedPath, FString& OutError, const bool bRehydrateGroupedDetails)
+	bool LoadAuthoringFile(const FString& InputPathInput, TSharedPtr<FJsonObject>& OutRoot, FString& OutResolvedPath, FString& OutError, const bool bRehydrateGroupedDetails)
 	{
-		OutRoot.Reset();
-		OutResolvedPath.Reset();
-		FString InputPath = InputPathInput;
-		InputPath.TrimStartAndEndInline();
-		if (InputPath.IsEmpty())
-		{
-			OutError = TEXT("missing_json_file");
-			return false;
-		}
-		InputPath = UeAgentJsonDiagnostics::ResolveProjectRelativeFilePath(InputPath);
-		if (!FPaths::FileExists(InputPath))
-		{
-			OutError = TEXT("json_file_not_found");
-			return false;
-		}
-		FString JsonText;
-		if (!FFileHelper::LoadFileToString(JsonText, *InputPath))
-		{
-			OutError = TEXT("load_json_file_failed");
-			return false;
-		}
-		const TSharedRef<TJsonReader<>> Reader = TJsonReaderFactory<>::Create(JsonText);
-		if (!FJsonSerializer::Deserialize(Reader, OutRoot) || !OutRoot.IsValid())
-		{
-			OutError = TEXT("json_parse_failed");
-			return false;
-		}
-		OutResolvedPath = InputPath;
-		if (!bRehydrateGroupedDetails)
-		{
-			return true;
-		}
-		return UeAgentDetailsAuthoring::RehydrateGroupedDetailsInObjectTree(InputPath, OutRoot, OutError);
+		UeAgentAuthoringFileIO::FLoadOptions Options;
+		Options.bRehydrateGroupedDetails = bRehydrateGroupedDetails;
+		return UeAgentAuthoringFileIO::LoadObject(InputPathInput, OutRoot, Options, OutResolvedPath, OutError);
 	}
 
 	FString ResolveFolderPath(const FString& FolderPathInput, const FString& Profile, const FString& AssetPath)
@@ -507,20 +380,20 @@ namespace UeAgentAIOps
 		return FPaths::ConvertRelativePathToFull(FolderPath);
 	}
 
-	bool SaveFolderJson(const FString& FolderPath, const FString& FileName, const TSharedPtr<FJsonObject>& Root, FString& OutError)
+	bool SaveFolderAuthoringFile(const FString& FolderPath, const FString& FileName, const TSharedPtr<FJsonObject>& Root, FString& OutError)
 	{
 		FString SavedPath;
-		return SaveJsonFile(FPaths::Combine(FolderPath, FileName), Root, SavedPath, OutError);
+		return SaveAuthoringFile(FPaths::Combine(FolderPath, FileName), Root, SavedPath, OutError);
 	}
 
-	bool SaveTrackedFolderJson(
+	bool SaveTrackedFolderAuthoringFile(
 		const FString& FolderPath,
 		const FString& FileName,
 		const TSharedPtr<FJsonObject>& Root,
 		TArray<TSharedPtr<FJsonValue>>& WrittenFiles,
 		FString& OutError)
 	{
-		if (!SaveFolderJson(FolderPath, FileName, Root, OutError))
+		if (!SaveFolderAuthoringFile(FolderPath, FileName, Root, OutError))
 		{
 			return false;
 		}
@@ -562,17 +435,17 @@ namespace UeAgentAIOps
 		return Obj;
 	}
 
-	bool LoadFolderJson(const FString& FolderPath, const FString& FileName, TSharedPtr<FJsonObject>& OutRoot, FString& OutError)
+	bool LoadFolderAuthoringFile(const FString& FolderPath, const FString& FileName, TSharedPtr<FJsonObject>& OutRoot, FString& OutError)
 	{
-		return LoadFolderJson(FolderPath, FileName, OutRoot, OutError, true, true);
+		return LoadFolderAuthoringFile(FolderPath, FileName, OutRoot, OutError, true, true);
 	}
 
-	bool LoadFolderJson(const FString& FolderPath, const FString& FileName, TSharedPtr<FJsonObject>& OutRoot, FString& OutError, const bool bRequired)
+	bool LoadFolderAuthoringFile(const FString& FolderPath, const FString& FileName, TSharedPtr<FJsonObject>& OutRoot, FString& OutError, const bool bRequired)
 	{
-		return LoadFolderJson(FolderPath, FileName, OutRoot, OutError, bRequired, true);
+		return LoadFolderAuthoringFile(FolderPath, FileName, OutRoot, OutError, bRequired, true);
 	}
 
-	bool LoadFolderJson(const FString& FolderPath, const FString& FileName, TSharedPtr<FJsonObject>& OutRoot, FString& OutError, const bool bRequired, const bool bRehydrateGroupedDetails)
+	bool LoadFolderAuthoringFile(const FString& FolderPath, const FString& FileName, TSharedPtr<FJsonObject>& OutRoot, FString& OutError, const bool bRequired, const bool bRehydrateGroupedDetails)
 	{
 		FString ResolvedPath;
 		const FString Path = FPaths::Combine(FolderPath, FileName);
@@ -586,7 +459,7 @@ namespace UeAgentAIOps
 			OutRoot.Reset();
 			return true;
 		}
-		if (!LoadJsonFile(Path, OutRoot, ResolvedPath, OutError, bRehydrateGroupedDetails))
+		if (!LoadAuthoringFile(Path, OutRoot, ResolvedPath, OutError, bRehydrateGroupedDetails))
 		{
 			OutError = FString::Printf(TEXT("%s:%s"), *OutError, *FileName);
 			return false;
@@ -765,7 +638,7 @@ namespace UeAgentAIOps
 		return false;
 	}
 
-	bool ImportPropertyValue(UStruct* Struct, void* Container, UObject* Owner, const FString& PropertyPath, const FString& ValueText, FString& OutError)
+	bool ImportPropertyValue(UStruct* Struct, void* Container, UObject* Owner, const FString& PropertyPath, const TSharedPtr<FJsonObject>& Descriptor, FString& OutError)
 	{
 		FProperty* Property = nullptr;
 		void* ValuePtr = nullptr;
@@ -774,11 +647,41 @@ namespace UeAgentAIOps
 			OutError = FString::Printf(TEXT("property_not_found:%s"), *PropertyPath);
 			return false;
 		}
-		if (!Property->ImportText_Direct(*ValueText, ValuePtr, Owner, PPF_None))
+		if (!UeAgentPropertyValueCodec::IsSupported(Property, OutError))
 		{
-			OutError = FString::Printf(TEXT("property_import_failed:%s"), *PropertyPath);
 			return false;
 		}
+		if (!UeAgentPropertyValueCodec::ValidateTypeMetadata(Property, Descriptor, OutError)) return false;
+		const TSharedPtr<FJsonValue> Value = Descriptor.IsValid() ? Descriptor->TryGetField(TEXT("value")) : nullptr;
+		if (!Value.IsValid())
+		{
+			OutError = TEXT("missing_property_value");
+			return false;
+		}
+		void* Desired = FMemory::Malloc(Property->GetSize(), Property->GetMinAlignment());
+		Property->InitializeValue(Desired);
+		Property->CopyCompleteValue(Desired, ValuePtr);
+		UeAgentPropertyValueCodec::FOptions Options;
+		if (!UeAgentPropertyValueCodec::Decode(Property, Value, Desired, Owner, Options, OutError))
+		{
+			Property->DestroyValue(Desired);
+			FMemory::Free(Desired);
+			return false;
+		}
+		if (Owner)
+		{
+			Owner->Modify();
+			Owner->PreEditChange(Property);
+		}
+		Property->CopyCompleteValue(ValuePtr, Desired);
+		if (Owner)
+		{
+			FPropertyChangedEvent ChangedEvent(Property, EPropertyChangeType::ValueSet);
+			Owner->PostEditChangeProperty(ChangedEvent);
+			Owner->MarkPackageDirty();
+		}
+		Property->DestroyValue(Desired);
+		FMemory::Free(Desired);
 		return true;
 	}
 
@@ -851,38 +754,27 @@ namespace UeAgentAIOps
 				return false;
 			}
 			FString Name;
-			FString ValueText;
-			if (!(*PropObjPtr)->TryGetStringField(TEXT("name"), Name) || Name.IsEmpty())
-			{
-				(*PropObjPtr)->TryGetStringField(TEXT("property_name"), Name);
-			}
-			if (Name.IsEmpty())
-			{
-				(*PropObjPtr)->TryGetStringField(TEXT("property_path"), Name);
-			}
+			(*PropObjPtr)->TryGetStringField(TEXT("property_path"), Name);
 			if (Name.IsEmpty())
 			{
 				OutError = TEXT("missing_property_name");
 				return false;
 			}
-			if (!(*PropObjPtr)->TryGetStringField(TEXT("value_text"), ValueText))
+			const TSharedPtr<FJsonValue> CanonicalValue = (*PropObjPtr)->TryGetField(TEXT("value"));
+			if (!CanonicalValue.IsValid())
 			{
-				(*PropObjPtr)->TryGetStringField(TEXT("value"), ValueText);
-			}
-			if (ValueText.IsEmpty())
-			{
-				OutError = TEXT("missing_property_value_text");
+				OutError = TEXT("missing_property_value");
 				return false;
 			}
 			FString ImportError;
-			if (!ImportPropertyValue(Object->GetClass(), Object, Object, Name, ValueText, ImportError))
+			if (!ImportPropertyValue(Object->GetClass(), Object, Object, Name, *PropObjPtr, ImportError))
 			{
 				OutError = ImportError;
 				return false;
 			}
 			TSharedPtr<FJsonObject> Result = MakeShared<FJsonObject>();
-			Result->SetStringField(TEXT("property_name"), Name);
-			Result->SetStringField(TEXT("requested_value_text"), ValueText);
+			Result->SetStringField(TEXT("property_path"), Name);
+			Result->SetField(TEXT("requested_value"), CanonicalValue);
 			Result->SetStringField(TEXT("status"), TEXT("applied"));
 			OutResults.Add(MakeShared<FJsonValueObject>(Result));
 		}
@@ -904,38 +796,27 @@ namespace UeAgentAIOps
 				return false;
 			}
 			FString Name;
-			FString ValueText;
-			if (!(*PropObjPtr)->TryGetStringField(TEXT("name"), Name) || Name.IsEmpty())
-			{
-				(*PropObjPtr)->TryGetStringField(TEXT("property_name"), Name);
-			}
-			if (Name.IsEmpty())
-			{
-				(*PropObjPtr)->TryGetStringField(TEXT("property_path"), Name);
-			}
+			(*PropObjPtr)->TryGetStringField(TEXT("property_path"), Name);
 			if (Name.IsEmpty())
 			{
 				OutError = TEXT("missing_property_name");
 				return false;
 			}
-			if (!(*PropObjPtr)->TryGetStringField(TEXT("value_text"), ValueText))
+			const TSharedPtr<FJsonValue> CanonicalValue = (*PropObjPtr)->TryGetField(TEXT("value"));
+			if (!CanonicalValue.IsValid())
 			{
-				(*PropObjPtr)->TryGetStringField(TEXT("value"), ValueText);
-			}
-			if (ValueText.IsEmpty())
-			{
-				OutError = TEXT("missing_property_value_text");
+				OutError = TEXT("missing_property_value");
 				return false;
 			}
 			FString ImportError;
-			if (!ImportPropertyValue(Struct, StructMemory, Owner, Name, ValueText, ImportError))
+			if (!ImportPropertyValue(Struct, StructMemory, Owner, Name, *PropObjPtr, ImportError))
 			{
 				OutError = ImportError;
 				return false;
 			}
 			TSharedPtr<FJsonObject> Result = MakeShared<FJsonObject>();
-			Result->SetStringField(TEXT("property_name"), Name);
-			Result->SetStringField(TEXT("requested_value_text"), ValueText);
+			Result->SetStringField(TEXT("property_path"), Name);
+			Result->SetField(TEXT("requested_value"), CanonicalValue);
 			Result->SetStringField(TEXT("status"), TEXT("applied"));
 			OutResults.Add(MakeShared<FJsonValueObject>(Result));
 		}
@@ -1067,28 +948,11 @@ namespace UeAgentAIOps
 		}
 		if (bInherited)
 		{
-			UeAgentAuthoringJson::ApplyAuthoringMetadata(
-				Obj,
-				TEXT("name"),
-				Entry.EntryName.ToString(),
-				Entry.EntryName.ToString(),
-				TEXT("AI|Blackboard|Keys"),
-				TEXT("blackboard_key"),
-				TEXT("blackboard_key"),
-				{},
-				false);
+			UeAgentAuthoringJson::ApplyAuthoringMetadata(Obj, TEXT("name"), Entry.EntryName.ToString(), Entry.EntryName.ToString(), TEXT("AI|Blackboard|Keys"), TEXT("blackboard_key"), false);
 		}
 		else
 		{
-			UeAgentAuthoringJson::ApplyAuthoringMetadata(
-				Obj,
-				TEXT("name"),
-				Entry.EntryName.ToString(),
-				Entry.EntryName.ToString(),
-				TEXT("AI|Blackboard|Keys"),
-				TEXT("blackboard_key"),
-				TEXT("blackboard_key"),
-				{ TEXT("set"), TEXT("remove") });
+			UeAgentAuthoringJson::ApplyAuthoringMetadata(Obj, TEXT("name"), Entry.EntryName.ToString(), Entry.EntryName.ToString(), TEXT("AI|Blackboard|Keys"), TEXT("blackboard_key"));
 		}
 		return Obj;
 	}
@@ -1165,7 +1029,7 @@ namespace UeAgentAIOps
 			const TSharedPtr<FJsonObject>& KeyObj = *KeyObjPtr;
 			if (bStrict)
 			{
-				StrictCheckFields(KeyObj, { TEXT("name"), TEXT("type"), TEXT("key_type"), TEXT("key_type_class"), TEXT("base_class"), TEXT("object_base_class"), TEXT("enum"), TEXT("enum_type"), TEXT("enum_name"), TEXT("instance_synced"), TEXT("inherited"), TEXT("description"), TEXT("category"), TEXT("_delete"), TEXT("selector"), TEXT("display_name"), TEXT("category_path"), TEXT("control_type"), TEXT("value_kind"), TEXT("availability"), TEXT("operations") }, FString::Printf(TEXT("$.keys[%d]"), Index), Issues);
+				StrictCheckFields(KeyObj, { TEXT("name"), TEXT("type"), TEXT("key_type"), TEXT("key_type_class"), TEXT("base_class"), TEXT("object_base_class"), TEXT("enum"), TEXT("enum_type"), TEXT("enum_name"), TEXT("instance_synced"), TEXT("inherited"), TEXT("description"), TEXT("category"), TEXT("_delete"), TEXT("selector"), TEXT("display_name"), TEXT("category_path"), TEXT("value_kind"), TEXT("availability"), TEXT("operations") }, FString::Printf(TEXT("$.keys[%d]"), Index), Issues);
 			}
 			FString Name;
 			FString Type;
@@ -1357,9 +1221,9 @@ bool FUeAgentHttpServer::ExecuteAICommand(const FString& CommandLower, const FUe
 	if (CommandLower == TEXT("blackboard_apply_json")) return CmdBlackboardApplyJson(Ctx, OutData, OutError);
 	if (CommandLower == TEXT("behavior_tree_create")) return CmdBehaviorTreeCreate(Ctx, OutData, OutError);
 	if (CommandLower == TEXT("behavior_tree_get_info")) return CmdBehaviorTreeGetInfo(Ctx, OutData, OutError);
-	if (CommandLower == TEXT("behavior_tree_export_folder")) return CmdBehaviorTreeExportFolder(Ctx, OutData, OutError);
-	if (CommandLower == TEXT("behavior_tree_validate_folder")) return CmdBehaviorTreeValidateFolder(Ctx, OutData, OutError);
-	if (CommandLower == TEXT("behavior_tree_apply_folder")) return CmdBehaviorTreeApplyFolder(Ctx, OutData, OutError);
+	if (CommandLower == TEXT("behavior_tree_export_folder")) return UeAgentReflectionAuthoringCommandBridge::Export(TEXT("behavior_tree"), Ctx.Params, OutData, OutError);
+	if (CommandLower == TEXT("behavior_tree_validate_folder")) return UeAgentReflectionAuthoringCommandBridge::Validate(TEXT("behavior_tree"), Ctx.Params, OutData, OutError);
+	if (CommandLower == TEXT("behavior_tree_apply_folder")) return UeAgentReflectionAuthoringCommandBridge::Apply(TEXT("behavior_tree"), Ctx.Params, OutData, OutError, Ctx.RequestId);
 	if (CommandLower == TEXT("behavior_tree_open_editor")) return CmdBehaviorTreeOpenEditor(Ctx, OutData, OutError);
 	if (CommandLower == TEXT("behavior_tree_graph_get_view")) return CmdBehaviorTreeGraphGetView(Ctx, OutData, OutError);
 	if (CommandLower == TEXT("behavior_tree_graph_set_view")) return CmdBehaviorTreeGraphSetView(Ctx, OutData, OutError);
@@ -1368,18 +1232,18 @@ bool FUeAgentHttpServer::ExecuteAICommand(const FString& CommandLower, const FUe
 	if (CommandLower == TEXT("bt_node_blueprint_get_info")) return CmdBTNodeBlueprintGetInfo(Ctx, OutData, OutError);
 	if (CommandLower == TEXT("state_tree_create")) return CmdStateTreeCreate(Ctx, OutData, OutError);
 	if (CommandLower == TEXT("state_tree_get_info")) return CmdStateTreeGetInfo(Ctx, OutData, OutError);
-	if (CommandLower == TEXT("state_tree_export_folder")) return CmdStateTreeExportFolder(Ctx, OutData, OutError);
-	if (CommandLower == TEXT("state_tree_validate_folder")) return CmdStateTreeValidateFolder(Ctx, OutData, OutError);
-	if (CommandLower == TEXT("state_tree_apply_folder")) return CmdStateTreeApplyFolder(Ctx, OutData, OutError);
+	if (CommandLower == TEXT("state_tree_export_folder")) return UeAgentReflectionAuthoringCommandBridge::Export(TEXT("state_tree"), Ctx.Params, OutData, OutError);
+	if (CommandLower == TEXT("state_tree_validate_folder")) return UeAgentReflectionAuthoringCommandBridge::Validate(TEXT("state_tree"), Ctx.Params, OutData, OutError);
+	if (CommandLower == TEXT("state_tree_apply_folder")) return UeAgentReflectionAuthoringCommandBridge::Apply(TEXT("state_tree"), Ctx.Params, OutData, OutError, Ctx.RequestId);
 	if (CommandLower == TEXT("state_tree_open_editor")) return CmdStateTreeOpenEditor(Ctx, OutData, OutError);
 	if (CommandLower == TEXT("state_tree_screenshot")) return CmdStateTreeScreenshot(Ctx, OutData, OutError);
 	if (CommandLower == TEXT("state_tree_runtime_snapshot")) return CmdStateTreeRuntimeSnapshot(Ctx, OutData, OutError);
 	if (CommandLower == TEXT("state_tree_node_blueprint_get_info")) return CmdStateTreeNodeBlueprintGetInfo(Ctx, OutData, OutError);
 	if (CommandLower == TEXT("eqs_create")) return CmdEqsCreate(Ctx, OutData, OutError);
 	if (CommandLower == TEXT("eqs_get_info")) return CmdEqsGetInfo(Ctx, OutData, OutError);
-	if (CommandLower == TEXT("eqs_export_folder")) return CmdEqsExportFolder(Ctx, OutData, OutError);
-	if (CommandLower == TEXT("eqs_validate_folder")) return CmdEqsValidateFolder(Ctx, OutData, OutError);
-	if (CommandLower == TEXT("eqs_apply_folder")) return CmdEqsApplyFolder(Ctx, OutData, OutError);
+	if (CommandLower == TEXT("eqs_export_folder")) return UeAgentReflectionAuthoringCommandBridge::Export(TEXT("eqs"), Ctx.Params, OutData, OutError);
+	if (CommandLower == TEXT("eqs_validate_folder")) return UeAgentReflectionAuthoringCommandBridge::Validate(TEXT("eqs"), Ctx.Params, OutData, OutError);
+	if (CommandLower == TEXT("eqs_apply_folder")) return UeAgentReflectionAuthoringCommandBridge::Apply(TEXT("eqs"), Ctx.Params, OutData, OutError, Ctx.RequestId);
 	if (CommandLower == TEXT("eqs_run_query")) return CmdEqsRunQuery(Ctx, OutData, OutError);
 	if (CommandLower == TEXT("eqs_debug_snapshot")) return CmdEqsDebugSnapshot(Ctx, OutData, OutError);
 	if (CommandLower == TEXT("ai_perception_get_component_info")) return CmdAIPerceptionGetComponentInfo(Ctx, OutData, OutError);
@@ -1506,7 +1370,7 @@ bool FUeAgentHttpServer::CmdBlackboardExportJson(const FUeAgentRequestContext& C
 	if (!OutputFile.IsEmpty())
 	{
 		FString SavedPath;
-		if (!UeAgentAIOps::SaveJsonFile(OutputFile, OutData, SavedPath, OutError))
+		if (!UeAgentAIOps::SaveAuthoringFile(OutputFile, OutData, SavedPath, OutError))
 		{
 			return false;
 		}
@@ -1526,7 +1390,7 @@ bool FUeAgentHttpServer::CmdBlackboardValidateJson(const FUeAgentRequestContext&
 		OutError = TEXT("missing_json_file");
 		return false;
 	}
-	if (!UeAgentAIOps::LoadJsonFile(JsonFile, Root, ResolvedPath, OutError))
+	if (!UeAgentAIOps::LoadAuthoringFile(JsonFile, Root, ResolvedPath, OutError))
 	{
 		return false;
 	}
@@ -1550,7 +1414,7 @@ bool FUeAgentHttpServer::CmdBlackboardApplyJson(const FUeAgentRequestContext& Ct
 	JsonTryGetString(Ctx.Params, TEXT("json_file"), JsonFile);
 	if (!JsonFile.IsEmpty())
 	{
-		if (!UeAgentAIOps::LoadJsonFile(JsonFile, Root, ResolvedPath, OutError))
+		if (!UeAgentAIOps::LoadAuthoringFile(JsonFile, Root, ResolvedPath, OutError))
 		{
 			return false;
 		}

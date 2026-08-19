@@ -1039,19 +1039,7 @@ bool FUeAgentHttpServer::CmdSpawnActor(const FUeAgentRequestContext& Ctx, TShare
 		}
 	}
 
-	const bool bUseAutoTx = [&]()
-	{
-		FScopeLock Lock(&TransactionMutex);
-		return ActiveTransactionIndex == INDEX_NONE;
-	}();
-	UPackage* SpawnLevelPackage = (World->GetCurrentLevel() ? World->GetCurrentLevel()->GetOutermost() : World->GetOutermost());
-	const bool bSpawnLevelPackageWasDirty = SpawnLevelPackage ? SpawnLevelPackage->IsDirty() : false;
-
-	TOptional<FScopedTransaction> AutoTx;
-	if (bUseAutoTx)
-	{
-		AutoTx.Emplace(NSLOCTEXT("UeAgentInterface", "SpawnActorTx", "UeAgentInterface Spawn Actor"));
-	}
+	FScopedTransaction Transaction(NSLOCTEXT("UeAgentInterface", "SpawnActorTx", "UeAgentInterface Spawn Actor"));
 
 	FActorSpawnParameters SpawnParams;
 	SpawnParams.SpawnCollisionHandlingOverride = ESpawnActorCollisionHandlingMethod::AlwaysSpawn;
@@ -1064,22 +1052,6 @@ bool FUeAgentHttpServer::CmdSpawnActor(const FUeAgentRequestContext& Ctx, TShare
 		return false;
 	}
 	NewActor->Modify();
-
-	bool bRegisteredWithActiveTransaction = false;
-	{
-		FScopeLock Lock(&TransactionMutex);
-		if (ActiveTransactionIndex != INDEX_NONE)
-		{
-			FTransactionSpawnedActorRecord Record;
-			Record.Actor = NewActor;
-			Record.LevelPackage = SpawnLevelPackage;
-			Record.ActorPackage = NewActor->GetOutermost();
-			Record.bLevelPackageWasDirtyBeforeSpawn = bSpawnLevelPackageWasDirty;
-			Record.bActorPackageWasDirtyBeforeSpawn = (Record.ActorPackage == Record.LevelPackage) ? bSpawnLevelPackageWasDirty : false;
-			ActiveTransactionSpawnedActors.Add(Record);
-			bRegisteredWithActiveTransaction = true;
-		}
-	}
 
 	FString Label;
 	if (JsonTryGetString(Ctx.Params, TEXT("label"), Label) && !Label.IsEmpty())
@@ -1176,8 +1148,7 @@ bool FUeAgentHttpServer::CmdSpawnActor(const FUeAgentRequestContext& Ctx, TShare
 	OutData->SetBoolField(TEXT("snap_ground_hit"), bGroundHit);
 	OutData->SetBoolField(TEXT("snap_use_actor_bounds"), bSnapUseActorBounds);
 	OutData->SetNumberField(TEXT("ground_z"), GroundZ);
-	OutData->SetBoolField(TEXT("auto_transaction"), bUseAutoTx);
-	OutData->SetBoolField(TEXT("registered_with_active_transaction"), bRegisteredWithActiveTransaction);
+	OutData->SetBoolField(TEXT("auto_transaction"), true);
 	return true;
 }
 
@@ -1366,16 +1337,7 @@ bool FUeAgentHttpServer::CmdLevelSpawnWallWithOpening(const FUeAgentRequestConte
 		OpeningHeightCm,
 		bClampOpening ? TEXT("true") : TEXT("false"));
 
-	const bool bUseAutoTx = [&]()
-	{
-		FScopeLock Lock(&TransactionMutex);
-		return ActiveTransactionIndex == INDEX_NONE;
-	}();
-	TOptional<FScopedTransaction> AutoTx;
-	if (bUseAutoTx)
-	{
-		AutoTx.Emplace(NSLOCTEXT("UeAgentInterface", "SpawnWallWithOpeningTx", "UeAgentInterface Spawn Wall With Opening"));
-	}
+	FScopedTransaction Transaction(NSLOCTEXT("UeAgentInterface", "SpawnWallWithOpeningTx", "UeAgentInterface Spawn Wall With Opening"));
 
 	FActorSpawnParameters SpawnParams;
 	SpawnParams.SpawnCollisionHandlingOverride = ESpawnActorCollisionHandlingMethod::AlwaysSpawn;
@@ -1595,16 +1557,7 @@ bool FUeAgentHttpServer::CmdDestroyActor(const FUeAgentRequestContext& Ctx, TSha
 		return false;
 	}
 
-	const bool bUseAutoTx = [&]()
-	{
-		FScopeLock Lock(&TransactionMutex);
-		return ActiveTransactionIndex == INDEX_NONE;
-	}();
-	TOptional<FScopedTransaction> AutoTx;
-	if (bUseAutoTx)
-	{
-		AutoTx.Emplace(NSLOCTEXT("UeAgentInterface", "DestroyActorTx", "UeAgentInterface Destroy Actor"));
-	}
+	FScopedTransaction Transaction(NSLOCTEXT("UeAgentInterface", "DestroyActorTx", "UeAgentInterface Destroy Actor"));
 
 	if (GEditor)
 	{
@@ -1875,16 +1828,7 @@ bool FUeAgentHttpServer::CmdLevelDestroyFolderActors(const FUeAgentRequestContex
 		return true;
 	}
 
-	const bool bUseAutoTx = [&]()
-	{
-		FScopeLock Lock(&TransactionMutex);
-		return ActiveTransactionIndex == INDEX_NONE;
-	}();
-	TOptional<FScopedTransaction> AutoTx;
-	if (bUseAutoTx)
-	{
-		AutoTx.Emplace(NSLOCTEXT("UeAgentInterface", "DestroyFolderActorsTx", "UeAgentInterface Destroy Folder Actors"));
-	}
+	FScopedTransaction Transaction(NSLOCTEXT("UeAgentInterface", "DestroyFolderActorsTx", "UeAgentInterface Destroy Folder Actors"));
 
 	UEditorActorSubsystem* ActorSubsystem = GEditor ? GEditor->GetEditorSubsystem<UEditorActorSubsystem>() : nullptr;
 	if (!ActorSubsystem)
@@ -1986,13 +1930,8 @@ bool FUeAgentHttpServer::CmdLevelCleanupEmptyFolders(const FUeAgentRequestContex
 
 	EmptyFolders.Sort([](const FFolder& A, const FFolder& B) { return A.ToString().Len() > B.ToString().Len(); });
 
-	const bool bUseAutoTx = [&]()
-	{
-		FScopeLock Lock(&TransactionMutex);
-		return ActiveTransactionIndex == INDEX_NONE;
-	}();
 	TOptional<FScopedTransaction> AutoTx;
-	if (bUseAutoTx && !bDryRun && EmptyFolders.Num() > 0)
+	if (!bDryRun && EmptyFolders.Num() > 0)
 	{
 		AutoTx.Emplace(NSLOCTEXT("UeAgentInterface", "CleanupEmptyFoldersTx", "UeAgentInterface Cleanup Empty Folders"));
 	}

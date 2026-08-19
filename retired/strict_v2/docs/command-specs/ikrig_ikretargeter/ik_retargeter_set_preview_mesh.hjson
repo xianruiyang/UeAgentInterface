@@ -1,0 +1,84 @@
+authoring: { reason: command_has_no_registered_folder_authoring_profile, state: none }
+category: ikrig_ikretargeter
+command: ik_retargeter_set_preview_mesh
+deprecation: { reason: command_is_active, state: none }
+discovery: { aliases: [], keywords_en: [ik, retargeter, set, preview, mesh, ikrig_ikretargeter], keywords_zh: [ik_retargeter_set_preview_mesh], summary_en: "Execute ik_retargeter_set_preview_mesh with a verified implementation contract", summary_zh: "设置 source / target preview mesh", tags: [ikrig_ikretargeter, p2-006] }
+errors: {
+  codes: [
+    { code: asset_not_found, description_zh: "C++ 实现返回错误码 asset_not_found", retry_safe: false, stage: execution, wire_match: exact }
+    { code: ik_retargeter_controller_not_available, description_zh: "C++ 实现返回错误码 ik_retargeter_controller_not_available", retry_safe: false, stage: execution, wire_match: exact }
+    { code: ik_retargeter_not_found, description_zh: "C++ 实现返回错误码 ik_retargeter_not_found", retry_safe: false, stage: execution, wire_match: exact }
+    { code: invalid_source_or_target, description_zh: "C++ 实现返回错误码 invalid_source_or_target", retry_safe: true, stage: preflight, wire_match: exact }
+    { code: missing_asset_path, description_zh: "C++ 实现返回错误码 missing_asset_path", retry_safe: true, stage: preflight, wire_match: exact }
+    { code: missing_skeletal_mesh_path, description_zh: "C++ 实现返回错误码 missing_skeletal_mesh_path", retry_safe: true, stage: preflight, wire_match: exact }
+    { code: missing_source_or_target, description_zh: "C++ 实现返回错误码 missing_source_or_target", retry_safe: true, stage: preflight, wire_match: exact }
+    { code: save_asset_failed, description_zh: "C++ 实现返回错误码 save_asset_failed", retry_safe: false, stage: execution, wire_match: exact }
+    { code: skeletal_mesh_not_found, description_zh: "C++ 实现返回错误码 skeletal_mesh_not_found", retry_safe: false, stage: execution, wire_match: exact }
+  ]
+}
+evidence: {
+  docs: [
+    { path: "Plugins/UeAgentInterface/docs/commands/ikrig_ikretargeter/ik_retargeter_set_preview_mesh.md", purpose: "user documentation cross-check; C++ implementation remains authoritative" }
+  ]
+  implementation: [
+    { line_hint: 2132, path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Commands/IK/UeAgentHttpServer_IKAssets.cpp", purpose: "command handler, parameter and return evidence", symbol: CmdIKRetargeterSetPreviewMesh }
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Commands/IK/UeAgentHttpServer_IKAssets.cpp", purpose: "current command handler implementation" }
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Server/UeAgentHttpServer.cpp", purpose: "transitive helper evidence used by the command handler" }
+  ]
+  tests: [
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterfaceTests/Private/Smoke/UeAgentInterfaceSmoke_AnimationIKNiagara.cpp", purpose: "smoke or negative-path evidence cross-checked for the verified contract" }
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterfaceTests/Private/Smoke/UeAgentInterfaceSmoke_EditorViewport.cpp", purpose: "smoke or negative-path evidence cross-checked for the verified contract" }
+  ]
+}
+execution: {
+  destructive: false
+  editor_state: required
+  game_thread: required
+  idempotent: false
+  kind: write
+  overwrite_behavior: none
+  pie_state: allowed
+  retry_safe: false
+  save_behavior: caller_controlled
+  side_effects: [modifies_asset]
+  ui_effect: none
+}
+maturity: verified
+params: {
+  constraints: []
+  fields: {
+    asset_path: { default_state: none, description_zh: "C++ 实现读取的 asset_path 参数", path_semantics: { access_scope: project_write, kind: ue_asset }, required: true, type: ue_asset_path }
+    clear_preview_mesh: { default: false, default_state: defined, description_zh: "C++ 实现读取的 clear_preview_mesh 参数", required: false, type: bool }
+    save_after_set: { default: false, default_state: defined, description_zh: "C++ 实现读取的 save_after_set 参数", required: false, type: bool }
+    skeletal_mesh_path: { default_state: none, description_zh: "C++ 实现读取的 skeletal_mesh_path 参数", required: true, type: string }
+    source_or_target: { default_state: none, description_zh: "C++ 实现读取的 source_or_target 参数", required: true, type: string }
+  }
+  state: defined
+}
+response: { artifact_fields: [], compact_fields: [saved, asset_path, preview_skeletal_mesh, source_or_target], failure_fields: [params.asset_path, params.skeletal_mesh_path, params.source_or_target], max_items_policy: { fields: [], mode: none } }
+returns: {
+  fields: {
+    asset_path: { description_zh: "C++ 实现返回的 asset_path 字段；是否出现取决于执行分支", required: false, type: ue_asset_path }
+    preview_skeletal_mesh: { description_zh: "C++ 实现返回的 preview_skeletal_mesh 字段；是否出现取决于执行分支", required: false, type: string }
+    saved: { description_zh: "C++ 实现返回的 saved 字段；是否出现取决于执行分支", required: false, type: bool }
+    source_or_target: { description_zh: "C++ 实现返回的 source_or_target 字段；是否出现取决于执行分支", required: false, type: string }
+  }
+  state: defined
+}
+schema: uai.command_spec.v1
+status: active
+types: {}
+verification: {
+  assertions: [
+    { id: result_present, operator: exists, source: returns.saved }
+    { id: state_readback_present, operator: exists, source: methods.state_readback.asset_path }
+  ]
+  failure_policy: fail_overall
+  methods: [
+    { id: result, kind: result_assertion }
+    { command: ik_retargeter_get_info, id: state_readback, kind: command_readback, params_mapping: { asset_path: params.asset_path } }
+  ]
+  required: true
+  state: defined
+}
+version: 1

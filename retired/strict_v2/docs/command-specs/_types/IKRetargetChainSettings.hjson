@@ -1,0 +1,12 @@
+definition: {
+  additional_fields: false
+  fields: {
+    fk: { default_state: none, description_zh: "FK chain settings", required: false, type: object, type_ref: "shared:IKRetargetChainFKSettings" }
+    ik: { default_state: none, description_zh: "IK chain settings", required: false, type: object, type_ref: "shared:IKRetargetChainIKSettings" }
+    speed_planting: { default_state: none, description_zh: "speed planting settings", required: false, type: object, type_ref: "shared:IKRetargetChainSpeedPlantSettings" }
+  }
+  kind: object
+}
+schema: uai.command_spec.shared_type.v1
+type_id: IKRetargetChainSettings
+version: 1

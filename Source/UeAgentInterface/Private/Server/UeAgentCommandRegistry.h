@@ -13,4 +13,5 @@ namespace UeAgentCommandRegistry
 
 	UEAGENTINTERFACE_API FExactCommandInvoker FindExactCommandInvoker(const FString& CommandLower);
 	UEAGENTINTERFACE_API FPrefixedCommandInvoker FindPrefixedCommandInvoker(const FString& CommandLower);
+	UEAGENTINTERFACE_API bool IsExplicitlyUnsupportedCommand(const FString& CommandLower);
 }

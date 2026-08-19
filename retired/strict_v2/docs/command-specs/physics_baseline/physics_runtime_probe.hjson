@@ -1,0 +1,94 @@
+authoring: { reason: command_has_no_registered_folder_authoring_profile, state: none }
+category: physics_baseline
+command: physics_runtime_probe
+deprecation: { reason: command_is_active, state: none }
+discovery: { aliases: [], keywords_en: [physics, runtime, probe, physics_baseline], keywords_zh: [physics_runtime_probe], summary_en: "Execute physics_runtime_probe with a verified implementation contract", summary_zh: "在 editor world 中短时间推进物理，采样速度/位移并可恢复", tags: [physics_baseline, p2-006] }
+errors: {
+  codes: [
+    { code: missing_targets, description_zh: "C++ 实现返回错误码 missing_targets", retry_safe: true, stage: preflight, wire_match: exact }
+    { code: no_editor_world, description_zh: "C++ 实现返回错误码 no_editor_world", retry_safe: false, stage: execution, wire_match: exact }
+    { code: no_geditor, description_zh: "C++ 实现返回错误码 no_geditor", retry_safe: false, stage: execution, wire_match: exact }
+    { code: physics_probe_expectation_failed, description_zh: "C++ 实现返回错误码 physics_probe_expectation_failed", retry_safe: false, stage: execution, wire_match: exact }
+    { code: physics_probe_unstable_world, description_zh: "C++ 实现返回错误码 physics_probe_unstable_world", retry_safe: false, stage: execution, wire_match: exact }
+  ]
+}
+evidence: {
+  docs: [
+    { path: "Plugins/UeAgentInterface/docs/commands/physics_baseline/physics_runtime_probe.md", purpose: "user documentation cross-check; C++ implementation remains authoritative" }
+  ]
+  implementation: [
+    { line_hint: 2860, path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Commands/Physics/UeAgentHttpServer_Physics.cpp", purpose: "command handler, parameter and return evidence", symbol: CmdPhysicsRuntimeProbe }
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Commands/Level/UeAgentHttpServer_Level_CaptureAndPersistence.cpp", purpose: "transitive helper evidence used by the command handler" }
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Server/UeAgentHttpServer.cpp", purpose: "transitive helper evidence used by the command handler" }
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Utilities/UeAgentJsonDiagnostics.cpp", purpose: "transitive helper evidence used by the command handler" }
+  ]
+  tests: [
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterfaceTests/Private/Smoke/Physics/UeAgentInterfacePhysicsSmokeTests.cpp", purpose: "smoke or negative-path evidence cross-checked for the verified contract" }
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterfaceTests/Private/Smoke/UeAgentInterfaceSmoke_Core.cpp", purpose: "smoke or negative-path evidence cross-checked for the verified contract" }
+  ]
+}
+execution: {
+  destructive: false
+  editor_state: required
+  game_thread: required
+  idempotent: false
+  kind: session_control
+  overwrite_behavior: none
+  pie_state: allowed
+  retry_safe: false
+  save_behavior: none
+  side_effects: [modifies_editor_session, starts_runtime]
+  ui_effect: none
+}
+maturity: verified
+params: {
+  constraints: []
+  fields: {
+    cleanup: { default: restore_transforms, default_state: defined, description_zh: "C++ 实现读取的 cleanup 参数", enum_values: [restore_transforms, restore, none], required: false, type: enum }
+    duration_seconds: {
+      default: 0.1
+      default_state: defined
+      description_zh: "C++ 实现读取的 duration_seconds 参数"
+      maximum: 5
+      minimum: 0
+      required: false
+      type: number
+    }
+    expect: { default_state: none, description_zh: "C++ 实现读取的 expect 参数", item_type: object, item_type_ref: "shared:PhysicsProbeExpectation", required: false, type: array }
+    fixed_delta_seconds: { default_state: none, description_zh: "C++ 实现读取的 fixed_delta_seconds 参数", maximum: 0.05, minimum: 0.001, required: false, type: number }
+    targets: { default_state: none, description_zh: "C++ 实现读取的 targets 参数", item_type: object, item_type_ref: "shared:PhysicsProbeTarget", required: true, type: array }
+  }
+  state: defined
+}
+response: { artifact_fields: [expectation_results, issues, samples, warnings], compact_fields: [world_tick_mode, duration_seconds, fixed_delta_seconds, tick_count, expectations_passed, restored], failure_fields: [params.targets], max_items_policy: { fields: [], mode: none } }
+returns: {
+  fields: {
+    duration_seconds: { description_zh: "C++ 实现返回的 duration_seconds 字段；是否出现取决于执行分支", required: false, type: number }
+    expectation_results: { description_zh: "C++ 实现返回的 expectation_results 字段；是否出现取决于执行分支", item_type: json_value, required: false, type: array }
+    expectations_passed: { description_zh: "C++ 实现返回的 expectations_passed 字段；是否出现取决于执行分支", required: false, type: bool }
+    fixed_delta_seconds: { description_zh: "C++ 实现返回的 fixed_delta_seconds 字段；是否出现取决于执行分支", required: false, type: number }
+    issues: { description_zh: "C++ 实现返回的 issues 字段；是否出现取决于执行分支", item_type: json_value, required: false, type: array }
+    restored: { description_zh: "C++ 实现返回的 restored 字段；是否出现取决于执行分支", required: false, type: bool }
+    samples: { description_zh: "Editor World 固定步长推进后的世界空间样本；location/start_location 使用 UE world coordinates，velocity 使用 world cm/s", item_type: object, item_type_ref: "shared:PhysicsProbeSample", required: false, type: array }
+    schema: { description_zh: "C++ 实现返回的 schema 字段；是否出现取决于执行分支", required: false, type: string }
+    tick_count: { description_zh: "C++ 实现返回的 tick_count 字段；是否出现取决于执行分支", required: false, type: integer }
+    warnings: { description_zh: "C++ 实现返回的 warnings 字段；是否出现取决于执行分支", item_type: json_value, required: false, type: array }
+    world_tick_mode: { description_zh: "C++ 实现返回的 world_tick_mode 字段；是否出现取决于执行分支", required: false, type: string }
+  }
+  state: defined
+}
+schema: uai.command_spec.v1
+status: active
+types: {}
+verification: {
+  assertions: [
+    { id: result_present, operator: exists, source: returns.duration_seconds }
+  ]
+  failure_policy: fail_overall
+  methods: [
+    { id: result, kind: result_assertion }
+  ]
+  required: true
+  state: defined
+}
+version: 1

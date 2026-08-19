@@ -2,6 +2,8 @@
 
 #include "UeAgentLevelContentJsonProperties.h"
 #include "UeAgentLevelContentJsonCore.h"
+#include "Utilities/UeAgentPropertyValueCodec.h"
+#include "Utilities/UeAgentUObjectProperties.h"
 
 #include "Components/ActorComponent.h"
 #include "Components/PrimitiveComponent.h"
@@ -12,7 +14,6 @@
 #include "Engine/SkeletalMesh.h"
 #include "Engine/World.h"
 #include "GameFramework/Actor.h"
-#include "Misc/PackageName.h"
 
 namespace UeAgentLevelContentJson
 {
@@ -174,136 +175,68 @@ namespace UeAgentLevelContentJson
 		return true;
 	}
 
-	bool ReadLinearColorValue(const TSharedPtr<FJsonValue>& Value, FString& OutText)
+	bool TryReadCanonicalLiteral(const TSharedPtr<FJsonValue>& Value, TSharedPtr<FJsonValue>& OutLiteral)
 	{
-		if (!Value.IsValid())
+		if (!Value.IsValid() || Value->Type != EJson::Object) return false;
+		const TSharedPtr<FJsonObject> Object = Value->AsObject();
+		if (!Object.IsValid() || Object->Values.Num() != 1) return false;
+		OutLiteral = Object->TryGetField(TEXT("literal"));
+		return OutLiteral.IsValid();
+	}
+
+	bool TryReadCanonicalPath(const TSharedPtr<FJsonValue>& Value, FString& OutPath, bool& bOutNull)
+	{
+		bOutNull = false;
+		if (!Value.IsValid() || Value->Type != EJson::Object) return false;
+		const TSharedPtr<FJsonObject> Object = Value->AsObject();
+		if (!Object.IsValid() || Object->Values.Num() != 1) return false;
+		const TSharedPtr<FJsonValue> Path = Object->TryGetField(TEXT("path"));
+		if (!Path.IsValid()) return false;
+		if (Path->Type == EJson::Null)
 		{
-			return false;
+			bOutNull = true;
+			OutPath.Reset();
+			return true;
 		}
-		TArray<TSharedPtr<FJsonValue>> Arr;
-		if (Value->Type == EJson::Array)
-		{
-			Arr = Value->AsArray();
-		}
-		else if (Value->Type == EJson::Object)
-		{
-			const TSharedPtr<FJsonObject> Obj = Value->AsObject();
-			const TSharedPtr<FJsonValue> Inner = Obj.IsValid() ? Obj->TryGetField(TEXT("value")) : nullptr;
-			if (Inner.IsValid() && Inner->Type == EJson::Array)
-			{
-				Arr = Inner->AsArray();
-			}
-		}
-		if (Arr.Num() < 3)
-		{
-			return false;
-		}
-		const double R = Arr[0].IsValid() ? Arr[0]->AsNumber() : 0.0;
-		const double G = Arr[1].IsValid() ? Arr[1]->AsNumber() : 0.0;
-		const double B = Arr[2].IsValid() ? Arr[2]->AsNumber() : 0.0;
-		const double A = Arr.Num() > 3 && Arr[3].IsValid() ? Arr[3]->AsNumber() : 1.0;
-		OutText = FString::Printf(TEXT("(R=%g,G=%g,B=%g,A=%g)"), R, G, B, A);
+		if (Path->Type != EJson::String) return false;
+		OutPath = Path->AsString();
 		return true;
 	}
 
-	FString JsonValueToImportText(const TSharedPtr<FJsonValue>& Value, UWorld* World)
-	{
-		if (!Value.IsValid())
-		{
-			return TEXT("None");
-		}
-		if (Value->Type == EJson::Boolean)
-		{
-			return Value->AsBool() ? TEXT("true") : TEXT("false");
-		}
-		if (Value->Type == EJson::Number)
-		{
-			return FString::SanitizeFloat(Value->AsNumber(), 6);
-		}
-		if (Value->Type == EJson::String)
-		{
-			return Value->AsString();
-		}
-		if (Value->Type == EJson::Array)
-		{
-			FVector Vector;
-			if (TryReadVectorValue(Value, Vector))
-			{
-				return FString::Printf(TEXT("(X=%g,Y=%g,Z=%g)"), Vector.X, Vector.Y, Vector.Z);
-			}
-			return JsonValueToString(Value);
-		}
-		if (Value->Type != EJson::Object)
-		{
-			return JsonValueToString(Value);
-		}
-
-		const TSharedPtr<FJsonObject> Obj = Value->AsObject();
-		if (!Obj.IsValid())
-		{
-			return TEXT("None");
-		}
-
-		FString ValueText;
-		if (Obj->TryGetStringField(TEXT("value_text"), ValueText))
-		{
-			return ValueText;
-		}
-		if (Obj->TryGetStringField(TEXT("asset"), ValueText) || Obj->TryGetStringField(TEXT("object"), ValueText) ||
-			Obj->TryGetStringField(TEXT("class"), ValueText))
-		{
-			return ValueText;
-		}
-		FString ActorId;
-		if (Obj->TryGetStringField(TEXT("actor_id"), ActorId) && World)
-		{
-			if (AActor* Actor = FindActorByNameLabelOrManagedId(World, ActorId))
-			{
-				return Actor->GetPathName();
-			}
-			return ActorId;
-		}
-		const TSharedPtr<FJsonValue> InnerValue = Obj->TryGetField(TEXT("value"));
-		FString TypeText;
-		Obj->TryGetStringField(TEXT("type"), TypeText);
-		if (InnerValue.IsValid())
-		{
-			if (TypeText.Equals(TEXT("LinearColor"), ESearchCase::IgnoreCase) ||
-				TypeText.Equals(TEXT("Color"), ESearchCase::IgnoreCase))
-			{
-				FString ColorText;
-				if (ReadLinearColorValue(InnerValue, ColorText))
-				{
-					return ColorText;
-				}
-			}
-			if (TypeText.Equals(TEXT("Rotator"), ESearchCase::IgnoreCase))
-			{
-				FRotator Rotator;
-				if (TryReadRotatorValue(InnerValue, Rotator))
-				{
-					return FString::Printf(TEXT("(Pitch=%g,Yaw=%g,Roll=%g)"), Rotator.Pitch, Rotator.Yaw, Rotator.Roll);
-				}
-			}
-			return JsonValueToImportText(InnerValue, World);
-		}
-		return JsonValueToString(Value);
-	}
-
-	TSharedPtr<FJsonObject> MakePropertyResult(const FString& Target, const FString& PropertyPath, const FString& Status, const FString& Requested, const FString& ReadBack, const FString& Error)
+	TSharedPtr<FJsonObject> MakePropertyResult(
+		const FString& Target,
+		const FString& PropertyPath,
+		const FString& Status,
+		const TSharedPtr<FJsonValue>& Requested,
+		const TSharedPtr<FJsonValue>& ReadBack,
+		const FString& Error)
 	{
 		TSharedPtr<FJsonObject> Result = MakeShared<FJsonObject>();
 		Result->SetStringField(TEXT("target"), Target);
 		Result->SetStringField(TEXT("property_path"), PropertyPath);
 		Result->SetStringField(TEXT("status"), Status);
-		Result->SetStringField(TEXT("requested_value_text"), Requested);
-		Result->SetStringField(TEXT("property_value_read_back"), ReadBack);
-		Result->SetBoolField(TEXT("property_import_verified"), Error.IsEmpty() && !ReadBack.IsEmpty());
+		if (Requested.IsValid()) Result->SetField(TEXT("requested_value"), Requested);
+		if (ReadBack.IsValid()) Result->SetField(TEXT("value_read_back"), ReadBack);
+		Result->SetBoolField(TEXT("readback_verified"), Error.IsEmpty() && ReadBack.IsValid());
 		if (!Error.IsEmpty())
 		{
 			Result->SetStringField(TEXT("error"), Error);
 		}
 		return Result;
+	}
+
+	TSharedPtr<FJsonValue> MakeLiteralValue(const TSharedPtr<FJsonValue>& Literal)
+	{
+		TSharedPtr<FJsonObject> Object = MakeShared<FJsonObject>();
+		Object->SetField(TEXT("literal"), Literal);
+		return MakeShared<FJsonValueObject>(Object);
+	}
+
+	TSharedPtr<FJsonValue> MakeSelectedValue(const FString& Selected)
+	{
+		TSharedPtr<FJsonObject> Object = MakeShared<FJsonObject>();
+		Object->SetStringField(TEXT("selected"), Selected);
+		return MakeShared<FJsonValueObject>(Object);
 	}
 
 	FString JoinPathSegments(const TArray<FString>& Segments, int32 StartIndex)
@@ -412,53 +345,18 @@ namespace UeAgentLevelContentJson
 
 	bool TryReadBoolImportValue(const TSharedPtr<FJsonValue>& Value, bool& OutValue)
 	{
-		if (!Value.IsValid())
-		{
-			return false;
-		}
-		if (Value->Type == EJson::Boolean)
-		{
-			OutValue = Value->AsBool();
-			return true;
-		}
-		if (Value->Type == EJson::Number)
-		{
-			OutValue = !FMath::IsNearlyZero(Value->AsNumber());
-			return true;
-		}
-		if (Value->Type == EJson::String)
-		{
-			const FString Text = Value->AsString().TrimStartAndEnd();
-			if (Text.Equals(TEXT("true"), ESearchCase::IgnoreCase) || Text.Equals(TEXT("1"), ESearchCase::IgnoreCase))
-			{
-				OutValue = true;
-				return true;
-			}
-			if (Text.Equals(TEXT("false"), ESearchCase::IgnoreCase) || Text.Equals(TEXT("0"), ESearchCase::IgnoreCase))
-			{
-				OutValue = false;
-				return true;
-			}
-		}
-		return false;
+		TSharedPtr<FJsonValue> Literal;
+		if (!TryReadCanonicalLiteral(Value, Literal) || Literal->Type != EJson::Boolean) return false;
+		OutValue = Literal->AsBool();
+		return true;
 	}
 
 	bool TryReadNumberImportValue(const TSharedPtr<FJsonValue>& Value, double& OutValue)
 	{
-		if (!Value.IsValid())
-		{
-			return false;
-		}
-		if (Value->Type == EJson::Number)
-		{
-			OutValue = Value->AsNumber();
-			return true;
-		}
-		if (Value->Type == EJson::String)
-		{
-			return LexTryParseString(OutValue, *Value->AsString().TrimStartAndEnd());
-		}
-		return false;
+		TSharedPtr<FJsonValue> Literal;
+		if (!TryReadCanonicalLiteral(Value, Literal) || Literal->Type != EJson::Number || !FMath::IsFinite(Literal->AsNumber())) return false;
+		OutValue = Literal->AsNumber();
+		return true;
 	}
 
 	bool TryParseCollisionEnabledValue(const FString& Text, ECollisionEnabled::Type& OutValue)
@@ -552,9 +450,8 @@ namespace UeAgentLevelContentJson
 		}
 	}
 
-	FString SanitizeNameImportText(const FString& ImportText);
-	void RefreshObjectAfterPropertyImport(UObject* TargetObject, const FString& ResolvedPropertyPath, const FString& ImportText, TSharedPtr<FJsonObject>& InOutResult);
-	bool SetSkeletalMeshComponentAssetFromJson(UObject* TargetObject, const FString& PropertyPath, const FString& ResolvedPropertyPath, FProperty* Property, void* ValuePtr, const FString& ImportText, TSharedPtr<FJsonObject>& OutResult, FString& OutError);
+	void RefreshObjectAfterPropertyImport(UObject* TargetObject, const FString& ResolvedPropertyPath, const FString& CollisionProfileName, TSharedPtr<FJsonObject>& InOutResult);
+	bool SetSkeletalMeshComponentAssetFromJson(UObject* TargetObject, const FString& PropertyPath, const FString& ResolvedPropertyPath, const TSharedPtr<FJsonValue>& Value, TSharedPtr<FJsonObject>& OutResult, FString& OutError);
 
 	bool SetPrimitivePhysicsVirtualPropertyFromJson(UObject* Obj, const FString& PropertyPath, const TSharedPtr<FJsonValue>& Value, UWorld* World, TSharedPtr<FJsonObject>& OutResult, FString& OutError)
 	{
@@ -566,7 +463,6 @@ namespace UeAgentLevelContentJson
 			return false;
 		}
 
-		const FString ImportText = JsonValueToImportText(Value, World);
 		PrimitiveComponent->Modify();
 		bool bApplied = false;
 		switch (Kind)
@@ -645,8 +541,11 @@ namespace UeAgentLevelContentJson
 		}
 		case EPrimitivePhysicsVirtualProperty::CollisionEnabled:
 		{
+			const TSharedPtr<FJsonObject> Object = Value.IsValid() && Value->Type == EJson::Object ? Value->AsObject() : nullptr;
+			FString Selected;
 			ECollisionEnabled::Type CollisionEnabled = ECollisionEnabled::NoCollision;
-			if (!TryParseCollisionEnabledValue(SanitizeNameImportText(ImportText), CollisionEnabled))
+			if (!Object.IsValid() || Object->Values.Num() != 1 || !Object->TryGetStringField(TEXT("selected"), Selected)
+				|| !TryParseCollisionEnabledValue(Selected, CollisionEnabled))
 			{
 				OutError = TEXT("invalid_collision_enabled");
 				break;
@@ -662,58 +561,45 @@ namespace UeAgentLevelContentJson
 
 		if (!bApplied)
 		{
-			OutResult = MakePropertyResult(PrimitiveComponent->GetPathName(), PropertyPath, TEXT("import_failed"), ImportText, TEXT(""), OutError);
+			OutResult = MakePropertyResult(PrimitiveComponent->GetPathName(), PropertyPath, TEXT("apply_failed"), Value, nullptr, OutError);
 			return true;
 		}
 
 		PrimitiveComponent->PostEditChange();
 		PrimitiveComponent->MarkPackageDirty();
-		FString ReadBack;
-		ExportPrimitivePhysicsVirtualPropertyText(PrimitiveComponent, Kind, ReadBack);
-		OutResult = MakePropertyResult(PrimitiveComponent->GetPathName(), PropertyPath, TEXT("imported_and_read_back"), ImportText, ReadBack, TEXT(""));
+		TSharedPtr<FJsonValue> ReadBack;
+		switch (Kind)
+		{
+		case EPrimitivePhysicsVirtualProperty::SimulatePhysics:
+			ReadBack = MakeLiteralValue(MakeShared<FJsonValueBoolean>(PrimitiveComponent->IsSimulatingPhysics()));
+			break;
+		case EPrimitivePhysicsVirtualProperty::EnableGravity:
+			ReadBack = MakeLiteralValue(MakeShared<FJsonValueBoolean>(PrimitiveComponent->IsGravityEnabled()));
+			break;
+		case EPrimitivePhysicsVirtualProperty::UseCCD:
+			ReadBack = MakeLiteralValue(MakeShared<FJsonValueBoolean>(PrimitiveComponent->BodyInstance.bUseCCD != 0));
+			break;
+		case EPrimitivePhysicsVirtualProperty::MassOverrideKg:
+			ReadBack = MakeLiteralValue(MakeShared<FJsonValueNumber>(PrimitiveComponent->BodyInstance.GetMassOverride()));
+			break;
+		case EPrimitivePhysicsVirtualProperty::LinearDamping:
+			ReadBack = MakeLiteralValue(MakeShared<FJsonValueNumber>(PrimitiveComponent->GetLinearDamping()));
+			break;
+		case EPrimitivePhysicsVirtualProperty::AngularDamping:
+			ReadBack = MakeLiteralValue(MakeShared<FJsonValueNumber>(PrimitiveComponent->GetAngularDamping()));
+			break;
+		case EPrimitivePhysicsVirtualProperty::CollisionEnabled:
+			ReadBack = MakeSelectedValue(CollisionEnabledToString(PrimitiveComponent->GetCollisionEnabled()));
+			break;
+		default:
+			break;
+		}
+		OutResult = MakePropertyResult(PrimitiveComponent->GetPathName(), PropertyPath, TEXT("applied"), Value, ReadBack, TEXT(""));
 		OutResult->SetStringField(TEXT("resolved_property_path"), ResolvedPropertyPath);
 		OutResult->SetStringField(TEXT("property_assignment_method"), TEXT("primitive_physics_setter"));
 		OutResult->SetBoolField(TEXT("primitive_physics_setter_applied"), true);
-		RefreshObjectAfterPropertyImport(PrimitiveComponent, ResolvedPropertyPath, ImportText, OutResult);
+		RefreshObjectAfterPropertyImport(PrimitiveComponent, ResolvedPropertyPath, FString(), OutResult);
 		return true;
-	}
-
-	FString SanitizeNameImportText(const FString& ImportText)
-	{
-		FString Clean = ImportText.TrimStartAndEnd();
-		if (Clean.StartsWith(TEXT("Name="), ESearchCase::IgnoreCase))
-		{
-			Clean = Clean.Mid(5).TrimStartAndEnd();
-		}
-		Clean.TrimQuotesInline();
-		return Clean;
-	}
-
-	FString NormalizeObjectPathImportText(const FString& ImportText)
-	{
-		FString Clean = SanitizeNameImportText(ImportText);
-		if (Clean.StartsWith(TEXT("Object="), ESearchCase::IgnoreCase))
-		{
-			Clean = Clean.Mid(7).TrimStartAndEnd();
-		}
-		Clean.TrimQuotesInline();
-
-		int32 FirstQuote = INDEX_NONE;
-		int32 LastQuote = INDEX_NONE;
-		if (Clean.FindChar(TEXT('\''), FirstQuote) && Clean.FindLastChar(TEXT('\''), LastQuote) && LastQuote > FirstQuote)
-		{
-			Clean = Clean.Mid(FirstQuote + 1, LastQuote - FirstQuote - 1).TrimStartAndEnd();
-		}
-
-		if (Clean.StartsWith(TEXT("/")) && !Clean.Contains(TEXT(".")))
-		{
-			const FString AssetName = FPackageName::GetLongPackageAssetName(Clean);
-			if (!AssetName.IsEmpty())
-			{
-				Clean = FString::Printf(TEXT("%s.%s"), *Clean, *AssetName);
-			}
-		}
-		return Clean;
 	}
 
 	bool IsSkeletalMeshComponentAssetPropertyPath(const FString& ResolvedPropertyPath)
@@ -724,7 +610,7 @@ namespace UeAgentLevelContentJson
 			|| Normalized.Equals(TEXT("SkinnedAsset"), ESearchCase::IgnoreCase);
 	}
 
-	bool SetSkeletalMeshComponentAssetFromJson(UObject* TargetObject, const FString& PropertyPath, const FString& ResolvedPropertyPath, FProperty* Property, void* ValuePtr, const FString& ImportText, TSharedPtr<FJsonObject>& OutResult, FString& OutError)
+	bool SetSkeletalMeshComponentAssetFromJson(UObject* TargetObject, const FString& PropertyPath, const FString& ResolvedPropertyPath, const TSharedPtr<FJsonValue>& Value, TSharedPtr<FJsonObject>& OutResult, FString& OutError)
 	{
 		USkeletalMeshComponent* SkeletalMeshComponent = Cast<USkeletalMeshComponent>(TargetObject);
 		if (!SkeletalMeshComponent || !IsSkeletalMeshComponentAssetPropertyPath(ResolvedPropertyPath))
@@ -732,17 +618,22 @@ namespace UeAgentLevelContentJson
 			return false;
 		}
 
-		const FString MeshObjectPath = NormalizeObjectPathImportText(ImportText);
+		FString MeshObjectPath;
+		bool bNullPath = false;
+		if (!TryReadCanonicalPath(Value, MeshObjectPath, bNullPath))
+		{
+			OutError = TEXT("invalid_skeletal_mesh_reference");
+			OutResult = MakePropertyResult(TargetObject->GetPathName(), PropertyPath, TEXT("invalid_value"), Value, nullptr, OutError);
+			return true;
+		}
 		USkeletalMesh* Mesh = nullptr;
-		if (!MeshObjectPath.IsEmpty()
-			&& !MeshObjectPath.Equals(TEXT("None"), ESearchCase::IgnoreCase)
-			&& !MeshObjectPath.Equals(TEXT("null"), ESearchCase::IgnoreCase))
+		if (!bNullPath)
 		{
 			Mesh = Cast<USkeletalMesh>(StaticLoadObject(USkeletalMesh::StaticClass(), nullptr, *MeshObjectPath));
 			if (!Mesh)
 			{
 				OutError = TEXT("skeletal_mesh_asset_not_found");
-				OutResult = MakePropertyResult(TargetObject->GetPathName(), PropertyPath, TEXT("import_failed"), ImportText, TEXT(""), OutError);
+				OutResult = MakePropertyResult(TargetObject->GetPathName(), PropertyPath, TEXT("apply_failed"), Value, nullptr, OutError);
 				OutResult->SetStringField(TEXT("resolved_property_path"), ResolvedPropertyPath);
 				OutResult->SetStringField(TEXT("property_assignment_method"), TEXT("skeletal_mesh_component_setter"));
 				OutResult->SetStringField(TEXT("normalized_object_path"), MeshObjectPath);
@@ -758,32 +649,15 @@ namespace UeAgentLevelContentJson
 		SkeletalMeshComponent->PostEditChange();
 		SkeletalMeshComponent->MarkPackageDirty();
 
-		FString Exported;
-		if (Property && ValuePtr)
-		{
-			Property->ExportTextItem_Direct(Exported, ValuePtr, nullptr, TargetObject, PPF_None);
-		}
-		if (Exported.IsEmpty())
-		{
-			Exported = Mesh ? Mesh->GetPathName() : TEXT("None");
-		}
-
-		OutResult = MakePropertyResult(TargetObject->GetPathName(), PropertyPath, TEXT("imported_and_read_back"), ImportText, Exported, TEXT(""));
+		TSharedPtr<FJsonObject> ReadBackObject = MakeShared<FJsonObject>();
+		if (Mesh) ReadBackObject->SetStringField(TEXT("path"), Mesh->GetPathName()); else ReadBackObject->SetField(TEXT("path"), MakeShared<FJsonValueNull>());
+		OutResult = MakePropertyResult(TargetObject->GetPathName(), PropertyPath, TEXT("applied"), Value, MakeShared<FJsonValueObject>(ReadBackObject), TEXT(""));
 		OutResult->SetStringField(TEXT("resolved_property_path"), ResolvedPropertyPath);
 		OutResult->SetStringField(TEXT("property_assignment_method"), TEXT("skeletal_mesh_component_setter"));
 		OutResult->SetBoolField(TEXT("skeletal_mesh_setter_applied"), true);
 		OutResult->SetStringField(TEXT("normalized_object_path"), MeshObjectPath);
 		OutResult->SetStringField(TEXT("skeletal_mesh_path_read_back"), Mesh ? Mesh->GetPathName() : TEXT("None"));
-		RefreshObjectAfterPropertyImport(TargetObject, ResolvedPropertyPath, ImportText, OutResult);
-		Exported.Reset();
-		if (Property && ValuePtr)
-		{
-			Property->ExportTextItem_Direct(Exported, ValuePtr, nullptr, TargetObject, PPF_None);
-			if (!Exported.IsEmpty())
-			{
-				OutResult->SetStringField(TEXT("property_value_read_back"), Exported);
-			}
-		}
+		RefreshObjectAfterPropertyImport(TargetObject, ResolvedPropertyPath, FString(), OutResult);
 		return true;
 	}
 
@@ -802,7 +676,7 @@ namespace UeAgentLevelContentJson
 			|| Normalized.Equals(TEXT("CollisionProfileName"), ESearchCase::IgnoreCase);
 	}
 
-	void RefreshObjectAfterPropertyImport(UObject* TargetObject, const FString& ResolvedPropertyPath, const FString& ImportText, TSharedPtr<FJsonObject>& InOutResult)
+	void RefreshObjectAfterPropertyImport(UObject* TargetObject, const FString& ResolvedPropertyPath, const FString& CollisionProfileName, TSharedPtr<FJsonObject>& InOutResult)
 	{
 		if (!TargetObject || !InOutResult.IsValid())
 		{
@@ -825,7 +699,7 @@ namespace UeAgentLevelContentJson
 		{
 			if (IsPrimitiveCollisionProfilePropertyPath(NormalizedPropertyPath))
 			{
-				const FString ProfileName = SanitizeNameImportText(ImportText);
+				const FString ProfileName = CollisionProfileName.TrimStartAndEnd();
 				if (!ProfileName.IsEmpty())
 				{
 					PrimitiveComponent->SetCollisionProfileName(FName(*ProfileName));
@@ -880,7 +754,7 @@ namespace UeAgentLevelContentJson
 		if (!Obj)
 		{
 			OutError = TEXT("property_target_null");
-			OutResult = MakePropertyResult(TEXT(""), PropertyPath, TEXT("target_null"), TEXT(""), TEXT(""), OutError);
+			OutResult = MakePropertyResult(TEXT(""), PropertyPath, TEXT("target_null"), Value, nullptr, OutError);
 			return false;
 		}
 		if (SetPrimitivePhysicsVirtualPropertyFromJson(Obj, PropertyPath, Value, World, OutResult, OutError))
@@ -894,13 +768,11 @@ namespace UeAgentLevelContentJson
 		if (!ResolveObjectPropertyPath(Obj, PropertyPath, TargetObject, ResolvedPropertyPath, Property, ValuePtr) || !TargetObject || !Property || !ValuePtr)
 		{
 			OutError = TEXT("property_not_found");
-			OutResult = MakePropertyResult(Obj->GetPathName(), PropertyPath, TEXT("property_not_found"), TEXT(""), TEXT(""), OutError);
+			OutResult = MakePropertyResult(Obj->GetPathName(), PropertyPath, TEXT("property_not_found"), Value, nullptr, OutError);
 			return false;
 		}
 
-		const FString ImportText = JsonValueToImportText(Value, World);
-		TargetObject->Modify();
-		if (SetSkeletalMeshComponentAssetFromJson(TargetObject, PropertyPath, ResolvedPropertyPath, Property, ValuePtr, ImportText, OutResult, OutError))
+		if (SetSkeletalMeshComponentAssetFromJson(TargetObject, PropertyPath, ResolvedPropertyPath, Value, OutResult, OutError))
 		{
 			return OutError.IsEmpty();
 		}
@@ -908,48 +780,57 @@ namespace UeAgentLevelContentJson
 		{
 			if (IsPrimitiveCollisionProfilePropertyPath(ResolvedPropertyPath))
 			{
-				const FString ProfileName = SanitizeNameImportText(ImportText);
+				TSharedPtr<FJsonValue> Literal;
+				const FString ProfileName = TryReadCanonicalLiteral(Value, Literal) && Literal->Type == EJson::String ? Literal->AsString() : FString();
 				if (ProfileName.IsEmpty())
 				{
 					OutError = TEXT("empty_collision_profile_name");
-					OutResult = MakePropertyResult(TargetObject->GetPathName(), PropertyPath, TEXT("import_failed"), ImportText, TEXT(""), OutError);
+					OutResult = MakePropertyResult(TargetObject->GetPathName(), PropertyPath, TEXT("invalid_value"), Value, nullptr, OutError);
 					return false;
 				}
 
+				TargetObject->Modify();
 				PrimitiveComponent->SetCollisionProfileName(FName(*ProfileName));
 				TargetObject->PostEditChange();
 				TargetObject->MarkPackageDirty();
 
-				FString Exported;
-				Property->ExportTextItem_Direct(Exported, ValuePtr, nullptr, TargetObject, PPF_None);
-				OutResult = MakePropertyResult(TargetObject->GetPathName(), PropertyPath, TEXT("imported_and_read_back"), ImportText, Exported, TEXT(""));
+				const TSharedPtr<FJsonValue> ReadBack = MakeLiteralValue(MakeShared<FJsonValueString>(PrimitiveComponent->GetCollisionProfileName().ToString()));
+				OutResult = MakePropertyResult(TargetObject->GetPathName(), PropertyPath, TEXT("applied"), Value, ReadBack, TEXT(""));
 				OutResult->SetStringField(TEXT("resolved_property_path"), ResolvedPropertyPath);
 				OutResult->SetStringField(TEXT("property_assignment_method"), TEXT("collision_profile_setter"));
 				OutResult->SetBoolField(TEXT("collision_profile_setter_applied"), true);
-				RefreshObjectAfterPropertyImport(TargetObject, ResolvedPropertyPath, ImportText, OutResult);
-				Exported.Reset();
-				Property->ExportTextItem_Direct(Exported, ValuePtr, nullptr, TargetObject, PPF_None);
-				OutResult->SetStringField(TEXT("property_value_read_back"), Exported);
+				RefreshObjectAfterPropertyImport(TargetObject, ResolvedPropertyPath, ProfileName, OutResult);
 				return true;
 			}
 		}
-		if (!Property->ImportText_Direct(*ImportText, ValuePtr, TargetObject, PPF_None))
+
+		TSharedPtr<FJsonObject> Descriptor = MakeShared<FJsonObject>();
+		Descriptor->SetStringField(TEXT("property_path"), ResolvedPropertyPath);
+		Descriptor->SetStringField(TEXT("value_kind"), UeAgentPropertyValueCodec::GetValueKind(Property));
+		UeAgentPropertyValueCodec::AddTypeMetadata(Property, Descriptor);
+		Descriptor->SetField(TEXT("value"), Value);
+		TSharedPtr<FJsonObject> Payload = MakeShared<FJsonObject>();
+		Payload->SetStringField(TEXT("schema"), TEXT("uai.uobject_properties.v2"));
+		Payload->SetArrayField(TEXT("properties"), { MakeShared<FJsonValueObject>(Descriptor) });
+		UeAgentUObjectProperties::FApplyOptions ApplyOptions;
+		const TSharedPtr<FJsonObject> ApplySummary = UeAgentUObjectProperties::ApplyObjectProperties(TargetObject, Payload, ApplyOptions);
+		FString ApplyStatus;
+		ApplySummary->TryGetStringField(TEXT("status"), ApplyStatus);
+		if (ApplyStatus != TEXT("applied"))
 		{
-			OutError = TEXT("property_import_failed");
-			OutResult = MakePropertyResult(TargetObject->GetPathName(), PropertyPath, TEXT("import_failed"), ImportText, TEXT(""), OutError);
+			ApplySummary->TryGetStringField(TEXT("reason"), OutError);
+			if (OutError.IsEmpty()) OutError = TEXT("property_apply_failed");
+			OutResult = MakePropertyResult(TargetObject->GetPathName(), PropertyPath, TEXT("apply_failed"), Value, nullptr, OutError);
+			OutResult->SetObjectField(TEXT("apply_summary"), ApplySummary);
 			return false;
 		}
-		TargetObject->PostEditChange();
-		TargetObject->MarkPackageDirty();
 
-		FString Exported;
-		Property->ExportTextItem_Direct(Exported, ValuePtr, nullptr, TargetObject, PPF_None);
-		OutResult = MakePropertyResult(TargetObject->GetPathName(), PropertyPath, TEXT("imported_and_read_back"), ImportText, Exported, TEXT(""));
+		UeAgentPropertyValueCodec::FOptions CodecOptions;
+		const TSharedPtr<FJsonValue> ReadBack = UeAgentPropertyValueCodec::Encode(Property, ValuePtr, TargetObject, CodecOptions);
+		OutResult = MakePropertyResult(TargetObject->GetPathName(), PropertyPath, TEXT("applied"), Value, ReadBack, TEXT(""));
 		OutResult->SetStringField(TEXT("resolved_property_path"), ResolvedPropertyPath);
-		RefreshObjectAfterPropertyImport(TargetObject, ResolvedPropertyPath, ImportText, OutResult);
-		Exported.Reset();
-		Property->ExportTextItem_Direct(Exported, ValuePtr, nullptr, TargetObject, PPF_None);
-		OutResult->SetStringField(TEXT("property_value_read_back"), Exported);
+		OutResult->SetObjectField(TEXT("apply_summary"), ApplySummary);
+		RefreshObjectAfterPropertyImport(TargetObject, ResolvedPropertyPath, FString(), OutResult);
 		return true;
 	}
 

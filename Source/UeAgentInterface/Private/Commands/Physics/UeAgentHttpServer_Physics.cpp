@@ -2,10 +2,14 @@
 
 #include "Server/UeAgentHttpServer.h"
 
+#include "Commands/Assets/UeAgentReflectionAuthoringCommandBridge.h"
+#include "Utilities/UeAgentAuthoringFileIO.h"
+#include "Utilities/UeAgentAuthoringFolderIO.h"
 #include "Utilities/UeAgentAuthoringJson.h"
 #include "Utilities/UeAgentDetailsAuthoring.h"
 #include "Utilities/UeAgentFolderDetailsExport.h"
 #include "Utilities/UeAgentJsonDiagnostics.h"
+#include "Utilities/UeAgentStructuredAuthoringIO.h"
 
 #include "AssetRegistry/AssetRegistryModule.h"
 #include "BodySetupEnums.h"
@@ -163,49 +167,18 @@ namespace UeAgentPhysicsOps
 		return true;
 	}
 
-	static bool SaveJsonObjectToFile(const FString& OutputFile, const TSharedPtr<FJsonObject>& Object, FString& OutResolvedPath, FString& OutError)
+	static bool SaveAuthoringObjectToFile(const FString& OutputFile, const TSharedPtr<FJsonObject>& Object, FString& OutResolvedPath, FString& OutError)
 	{
-		OutResolvedPath = UeAgentJsonDiagnostics::ResolveProjectRelativeFilePath(OutputFile);
-		const FString OutputDir = FPaths::GetPath(OutResolvedPath);
-		if (!OutputDir.IsEmpty())
-		{
-			IFileManager::Get().MakeDirectory(*OutputDir, true);
-		}
-		FString JsonText;
-		TSharedPtr<FJsonObject> SaveObject = UeAgentDetailsAuthoring::CloneObjectTree(Object);
-		if (!UeAgentDetailsAuthoring::ExternalizeInlineDetailsInObjectTree(OutResolvedPath, SaveObject, TEXT("physics_json_export"), OutError))
-		{
-			return false;
-		}
-		if (!UeAgentJsonDiagnostics::SerializeJsonObjectCompact(SaveObject, JsonText))
-		{
-			OutError = TEXT("json_serialize_failed");
-			return false;
-		}
-		if (!FFileHelper::SaveStringToFile(JsonText, *OutResolvedPath, FFileHelper::EEncodingOptions::ForceUTF8WithoutBOM))
-		{
-			OutError = TEXT("json_file_write_failed");
-			return false;
-		}
-		return true;
+		UeAgentAuthoringFileIO::FSaveOptions Options;
+		Options.SourceCommand = TEXT("physics_json_export");
+		return UeAgentAuthoringFileIO::SaveObject(OutputFile, Object, Options, OutResolvedPath, OutError);
 	}
 
-	static bool LoadJsonObjectFromFile(const FString& InputFile, TSharedPtr<FJsonObject>& OutJson, FString& OutResolvedPath, FString& OutError)
+	static bool LoadAuthoringObjectFromFile(const FString& InputFile, TSharedPtr<FJsonObject>& OutJson, FString& OutResolvedPath, FString& OutError)
 	{
-		OutResolvedPath = UeAgentJsonDiagnostics::ResolveProjectRelativeFilePath(InputFile);
-		FString JsonText;
-		if (!FFileHelper::LoadFileToString(JsonText, *OutResolvedPath))
-		{
-			OutError = TEXT("json_file_not_found");
-			return false;
-		}
-		const TSharedRef<TJsonReader<TCHAR>> Reader = TJsonReaderFactory<TCHAR>::Create(JsonText);
-		if (!FJsonSerializer::Deserialize(Reader, OutJson) || !OutJson.IsValid())
-		{
-			OutError = TEXT("json_parse_failed");
-			return false;
-		}
-		return UeAgentDetailsAuthoring::RehydrateGroupedDetailsInObjectTree(OutResolvedPath, OutJson, OutError);
+		UeAgentAuthoringFileIO::FLoadOptions Options;
+		Options.bRehydrateGroupedDetails = true;
+		return UeAgentAuthoringFileIO::LoadObject(InputFile, OutJson, Options, OutResolvedPath, OutError);
 	}
 
 	static bool GetInputJsonObject(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutJson, FString& OutSource, FString& OutError)
@@ -220,7 +193,7 @@ namespace UeAgentPhysicsOps
 		FString JsonFile;
 		if (Ctx.Params.IsValid() && Ctx.Params->TryGetStringField(TEXT("json_file"), JsonFile) && !JsonFile.TrimStartAndEnd().IsEmpty())
 		{
-			return LoadJsonObjectFromFile(JsonFile, OutJson, OutSource, OutError);
+			return LoadAuthoringObjectFromFile(JsonFile, OutJson, OutSource, OutError);
 		}
 		OutError = TEXT("missing_json_or_json_file");
 		return false;
@@ -495,9 +468,9 @@ bool FUeAgentHttpServer::ExecutePhysicsCommand(const FString& CommandLower, cons
 	if (CommandLower == TEXT("physics_constraint_export_json")) return CmdPhysicsConstraintExportJson(Ctx, OutData, OutError);
 	if (CommandLower == TEXT("physics_constraint_validate_json")) return CmdPhysicsConstraintValidateJson(Ctx, OutData, OutError);
 	if (CommandLower == TEXT("physics_constraint_apply_json")) return CmdPhysicsConstraintApplyJson(Ctx, OutData, OutError);
-	if (CommandLower == TEXT("physics_asset_export_folder")) return CmdPhysicsAssetExportFolder(Ctx, OutData, OutError);
-	if (CommandLower == TEXT("physics_asset_validate_folder")) return CmdPhysicsAssetValidateFolder(Ctx, OutData, OutError);
-	if (CommandLower == TEXT("physics_asset_apply_folder")) return CmdPhysicsAssetApplyFolder(Ctx, OutData, OutError);
+	if (CommandLower == TEXT("physics_asset_export_folder")) return UeAgentReflectionAuthoringCommandBridge::Export(TEXT("physics_asset"), Ctx.Params, OutData, OutError);
+	if (CommandLower == TEXT("physics_asset_validate_folder")) return UeAgentReflectionAuthoringCommandBridge::Validate(TEXT("physics_asset"), Ctx.Params, OutData, OutError);
+	if (CommandLower == TEXT("physics_asset_apply_folder")) return UeAgentReflectionAuthoringCommandBridge::Apply(TEXT("physics_asset"), Ctx.Params, OutData, OutError, Ctx.RequestId);
 
 	OutError = TEXT("unknown_physics_command");
 	return false;
@@ -1048,7 +1021,7 @@ bool FUeAgentHttpServer::CmdPhysicalMaterialExportJson(const FUeAgentRequestCont
 	if (JsonTryGetString(Ctx.Params, TEXT("output_file"), OutputFile) && !OutputFile.TrimStartAndEnd().IsEmpty())
 	{
 		FString ResolvedPath;
-		if (!UeAgentPhysicsOps::SaveJsonObjectToFile(OutputFile, OutData, ResolvedPath, OutError))
+		if (!UeAgentPhysicsOps::SaveAuthoringObjectToFile(OutputFile, OutData, ResolvedPath, OutError))
 		{
 			return false;
 		}
@@ -1557,7 +1530,7 @@ bool FUeAgentHttpServer::CmdPhysicsConstraintExportJson(const FUeAgentRequestCon
 	if (JsonTryGetString(Ctx.Params, TEXT("output_file"), OutputFile) && !OutputFile.TrimStartAndEnd().IsEmpty())
 	{
 		FString ResolvedPath;
-		if (!UeAgentPhysicsOps::SaveJsonObjectToFile(OutputFile, OutData, ResolvedPath, OutError))
+		if (!UeAgentPhysicsOps::SaveAuthoringObjectToFile(OutputFile, OutData, ResolvedPath, OutError))
 		{
 			return false;
 		}
@@ -1771,7 +1744,7 @@ namespace
 		return UeAgentJsonDiagnostics::ResolveProjectRelativeFilePath(FolderPath).Replace(TEXT("\\"), TEXT("/"));
 	}
 
-	static bool UeAgentPhysicsLoadFolderJsonFile(const FString& FolderPath, const FString& FileName, bool bRequired, TSharedPtr<FJsonObject>& OutJson, TArray<TSharedPtr<FJsonValue>>& Issues)
+	static bool UeAgentPhysicsLoadFolderAuthoringFile(const FString& FolderPath, const FString& FileName, bool bRequired, TSharedPtr<FJsonObject>& OutJson, TArray<TSharedPtr<FJsonValue>>& Issues)
 	{
 		const FString FilePath = FPaths::Combine(FolderPath, FileName);
 		if (!IFileManager::Get().FileExists(*FilePath))
@@ -1785,7 +1758,7 @@ namespace
 		}
 		FString ResolvedPath;
 		FString Error;
-		if (!UeAgentPhysicsOps::LoadJsonObjectFromFile(FilePath, OutJson, ResolvedPath, Error))
+		if (!UeAgentPhysicsOps::LoadAuthoringObjectFromFile(FilePath, OutJson, ResolvedPath, Error))
 		{
 			UeAgentPhysicsOps::AddIssue(Issues, TEXT("error"), Error, FString::Printf(TEXT("%s could not be loaded."), *FileName), FileName);
 			return false;
@@ -1892,15 +1865,7 @@ namespace
 		Body->SetNumberField(TEXT("box_count"), BodySetup->AggGeom.BoxElems.Num());
 		Body->SetNumberField(TEXT("capsule_count"), BodySetup->AggGeom.SphylElems.Num());
 		Body->SetNumberField(TEXT("convex_count"), BodySetup->AggGeom.ConvexElems.Num());
-		UeAgentAuthoringJson::ApplyAuthoringMetadata(
-			Body,
-			TEXT("bone_name"),
-			BodySetup->BoneName.ToString(),
-			BodySetup->BoneName.ToString(),
-			TEXT("Physics Asset|Bodies"),
-			TEXT("body_setup"),
-			TEXT("physics_body"),
-			{ TEXT("set") });
+		UeAgentAuthoringJson::ApplyAuthoringMetadata(Body, TEXT("bone_name"), BodySetup->BoneName.ToString(), BodySetup->BoneName.ToString(), TEXT("Physics Asset|Bodies"), TEXT("physics_body"));
 
 		TArray<TSharedPtr<FJsonValue>> Shapes;
 		for (const FKSphereElem& SphereElem : BodySetup->AggGeom.SphereElems)
@@ -1909,15 +1874,7 @@ namespace
 			Shape->SetStringField(TEXT("type"), TEXT("sphere"));
 			Shape->SetNumberField(TEXT("radius"), SphereElem.Radius);
 			Shape->SetObjectField(TEXT("transform"), UeAgentPhysicsMakeShapeTransformJson(SphereElem.Center, FRotator::ZeroRotator));
-			UeAgentAuthoringJson::ApplyAuthoringMetadata(
-				Shape,
-				TEXT("shape_index"),
-				FString::FromInt(Shapes.Num()),
-				TEXT("Sphere"),
-				TEXT("Physics Asset|Bodies|Shapes"),
-				TEXT("shape"),
-				TEXT("physics_primitive_shape"),
-				{ TEXT("set") });
+			UeAgentAuthoringJson::ApplyAuthoringMetadata(Shape, TEXT("shape_index"), FString::FromInt(Shapes.Num()), TEXT("Sphere"), TEXT("Physics Asset|Bodies|Shapes"), TEXT("physics_primitive_shape"));
 			Shapes.Add(MakeShared<FJsonValueObject>(Shape));
 		}
 		for (const FKBoxElem& BoxElem : BodySetup->AggGeom.BoxElems)
@@ -1928,15 +1885,7 @@ namespace
 			Shape->SetNumberField(TEXT("y"), BoxElem.Y);
 			Shape->SetNumberField(TEXT("z"), BoxElem.Z);
 			Shape->SetObjectField(TEXT("transform"), UeAgentPhysicsMakeShapeTransformJson(BoxElem.Center, BoxElem.Rotation));
-			UeAgentAuthoringJson::ApplyAuthoringMetadata(
-				Shape,
-				TEXT("shape_index"),
-				FString::FromInt(Shapes.Num()),
-				TEXT("Box"),
-				TEXT("Physics Asset|Bodies|Shapes"),
-				TEXT("shape"),
-				TEXT("physics_primitive_shape"),
-				{ TEXT("set") });
+			UeAgentAuthoringJson::ApplyAuthoringMetadata(Shape, TEXT("shape_index"), FString::FromInt(Shapes.Num()), TEXT("Box"), TEXT("Physics Asset|Bodies|Shapes"), TEXT("physics_primitive_shape"));
 			Shapes.Add(MakeShared<FJsonValueObject>(Shape));
 		}
 		for (const FKSphylElem& CapsuleElem : BodySetup->AggGeom.SphylElems)
@@ -1946,15 +1895,7 @@ namespace
 			Shape->SetNumberField(TEXT("radius"), CapsuleElem.Radius);
 			Shape->SetNumberField(TEXT("length"), CapsuleElem.Length);
 			Shape->SetObjectField(TEXT("transform"), UeAgentPhysicsMakeShapeTransformJson(CapsuleElem.Center, CapsuleElem.Rotation));
-			UeAgentAuthoringJson::ApplyAuthoringMetadata(
-				Shape,
-				TEXT("shape_index"),
-				FString::FromInt(Shapes.Num()),
-				TEXT("Capsule"),
-				TEXT("Physics Asset|Bodies|Shapes"),
-				TEXT("shape"),
-				TEXT("physics_primitive_shape"),
-				{ TEXT("set") });
+			UeAgentAuthoringJson::ApplyAuthoringMetadata(Shape, TEXT("shape_index"), FString::FromInt(Shapes.Num()), TEXT("Capsule"), TEXT("Physics Asset|Bodies|Shapes"), TEXT("physics_primitive_shape"));
 			Shapes.Add(MakeShared<FJsonValueObject>(Shape));
 		}
 		Body->SetArrayField(TEXT("primitive_shapes"), Shapes);
@@ -1996,15 +1937,7 @@ namespace
 				Constraint->SetStringField(TEXT("child_body"), Instance.ConstraintBone1.ToString());
 				Constraint->SetStringField(TEXT("parent_body"), Instance.ConstraintBone2.ToString());
 				Constraint->SetObjectField(TEXT("constraint"), UeAgentPhysicsConstraintInstanceToJson(Instance));
-				UeAgentAuthoringJson::ApplyAuthoringMetadata(
-					Constraint,
-					TEXT("name"),
-					Instance.JointName.ToString(),
-					Instance.JointName.ToString(),
-					TEXT("Physics Asset|Constraints"),
-					TEXT("constraint"),
-					TEXT("physics_constraint"),
-					{ TEXT("set") });
+				UeAgentAuthoringJson::ApplyAuthoringMetadata(Constraint, TEXT("name"), Instance.JointName.ToString(), Instance.JointName.ToString(), TEXT("Physics Asset|Constraints"), TEXT("physics_constraint"));
 				Constraints.Add(MakeShared<FJsonValueObject>(Constraint));
 			}
 		}
@@ -2103,11 +2036,11 @@ namespace
 				Name.TrimStartAndEndInline();
 				if (Name.IsEmpty())
 				{
-					UeAgentPhysicsOps::AddIssue(Issues, TEXT("error"), TEXT("invalid_profile_name"), TEXT("Profile name cannot be empty."), FString::Printf(TEXT("profiles.json.%s[%d]"), ArrayKey, Index));
+					UeAgentPhysicsOps::AddIssue(Issues, TEXT("error"), TEXT("invalid_profile_name"), TEXT("Profile name cannot be empty."), FString::Printf(TEXT("profiles.hjson.%s[%d]"), ArrayKey, Index));
 				}
 				if (Seen.Contains(Name))
 				{
-					UeAgentPhysicsOps::AddIssue(Issues, TEXT("error"), TEXT("duplicate_profile_name"), FString::Printf(TEXT("Profile '%s' is duplicated."), *Name), FString::Printf(TEXT("profiles.json.%s[%d]"), ArrayKey, Index));
+					UeAgentPhysicsOps::AddIssue(Issues, TEXT("error"), TEXT("duplicate_profile_name"), FString::Printf(TEXT("Profile '%s' is duplicated."), *Name), FString::Printf(TEXT("profiles.hjson.%s[%d]"), ArrayKey, Index));
 				}
 				Seen.Add(Name);
 			}
@@ -2124,10 +2057,10 @@ namespace
 			UeAgentPhysicsOps::AddIssue(Issues, TEXT("error"), TEXT("missing_folder_path"), TEXT("folder_path is required."), TEXT("folder_path"));
 			return false;
 		}
-		UeAgentPhysicsLoadFolderJsonFile(OutFolder.FolderPath, TEXT("asset.json"), true, OutFolder.AssetJson, Issues);
-		UeAgentPhysicsLoadFolderJsonFile(OutFolder.FolderPath, TEXT("bodies.json"), true, OutFolder.BodiesJson, Issues);
-		UeAgentPhysicsLoadFolderJsonFile(OutFolder.FolderPath, TEXT("constraints.json"), false, OutFolder.ConstraintsJson, Issues);
-		UeAgentPhysicsLoadFolderJsonFile(OutFolder.FolderPath, TEXT("profiles.json"), false, OutFolder.ProfilesJson, Issues);
+		UeAgentPhysicsLoadFolderAuthoringFile(OutFolder.FolderPath, TEXT("asset.hjson"), true, OutFolder.AssetJson, Issues);
+		UeAgentPhysicsLoadFolderAuthoringFile(OutFolder.FolderPath, TEXT("bodies.hjson"), true, OutFolder.BodiesJson, Issues);
+		UeAgentPhysicsLoadFolderAuthoringFile(OutFolder.FolderPath, TEXT("constraints.hjson"), false, OutFolder.ConstraintsJson, Issues);
+		UeAgentPhysicsLoadFolderAuthoringFile(OutFolder.FolderPath, TEXT("profiles.hjson"), false, OutFolder.ProfilesJson, Issues);
 		if (UeAgentPhysicsOps::HasErrorIssue(Issues))
 		{
 			return false;
@@ -2135,10 +2068,10 @@ namespace
 		FString UnsupportedKey;
 		FString UnsupportedPath;
 		for (const TPair<TSharedPtr<FJsonObject>, FString> JsonWithPath : {
-			TPair<TSharedPtr<FJsonObject>, FString>(OutFolder.AssetJson, TEXT("asset.json")),
-			TPair<TSharedPtr<FJsonObject>, FString>(OutFolder.BodiesJson, TEXT("bodies.json")),
-			TPair<TSharedPtr<FJsonObject>, FString>(OutFolder.ConstraintsJson, TEXT("constraints.json")),
-			TPair<TSharedPtr<FJsonObject>, FString>(OutFolder.ProfilesJson, TEXT("profiles.json")) })
+			TPair<TSharedPtr<FJsonObject>, FString>(OutFolder.AssetJson, TEXT("asset.hjson")),
+			TPair<TSharedPtr<FJsonObject>, FString>(OutFolder.BodiesJson, TEXT("bodies.hjson")),
+			TPair<TSharedPtr<FJsonObject>, FString>(OutFolder.ConstraintsJson, TEXT("constraints.hjson")),
+			TPair<TSharedPtr<FJsonObject>, FString>(OutFolder.ProfilesJson, TEXT("profiles.hjson")) })
 		{
 			if (UeAgentPhysicsJsonHasUnsupportedOptionalField(JsonWithPath.Key, JsonWithPath.Value, UnsupportedKey, UnsupportedPath))
 			{
@@ -2152,18 +2085,18 @@ namespace
 		OutFolder.SkeletalMeshPath.TrimStartAndEndInline();
 		if (OutFolder.AssetPath.IsEmpty() || !FPackageName::IsValidLongPackageName(UeAgentPhysicsOps::NormalizeAssetPath(OutFolder.AssetPath)))
 		{
-			UeAgentPhysicsOps::AddIssue(Issues, TEXT("error"), TEXT("invalid_asset_path"), TEXT("asset.json asset_path must be a valid long package name."), TEXT("asset.json.asset_path"));
+			UeAgentPhysicsOps::AddIssue(Issues, TEXT("error"), TEXT("invalid_asset_path"), TEXT("asset.hjson asset_path must be a valid long package name."), TEXT("asset.hjson.asset_path"));
 		}
 		if (OutFolder.SkeletalMeshPath.IsEmpty())
 		{
-			UeAgentPhysicsOps::AddIssue(Issues, TEXT("error"), TEXT("physics_asset_missing_skeleton"), TEXT("asset.json skeletal_mesh is required."), TEXT("asset.json.skeletal_mesh"));
+			UeAgentPhysicsOps::AddIssue(Issues, TEXT("error"), TEXT("physics_asset_missing_skeleton"), TEXT("asset.hjson skeletal_mesh is required."), TEXT("asset.hjson.skeletal_mesh"));
 		}
 		else
 		{
 			OutFolder.SkeletalMesh = UeAgentPhysicsOps::LoadAsset<USkeletalMesh>(OutFolder.SkeletalMeshPath);
 			if (!OutFolder.SkeletalMesh)
 			{
-				UeAgentPhysicsOps::AddIssue(Issues, TEXT("error"), TEXT("physics_asset_missing_skeleton"), TEXT("skeletal_mesh could not be loaded."), TEXT("asset.json.skeletal_mesh"));
+				UeAgentPhysicsOps::AddIssue(Issues, TEXT("error"), TEXT("physics_asset_missing_skeleton"), TEXT("skeletal_mesh could not be loaded."), TEXT("asset.hjson.skeletal_mesh"));
 			}
 		}
 
@@ -2171,19 +2104,19 @@ namespace
 		OutFolder.BodiesJson->TryGetBoolField(TEXT("replace_all"), bReplaceAll);
 		if (bReplaceAll && !bAllowDestructiveReplace)
 		{
-			UeAgentPhysicsOps::AddIssue(Issues, TEXT("error"), TEXT("destructive_replace_requires_confirmation"), TEXT("replace_all=true requires allow_destructive_replace=true."), TEXT("bodies.json.replace_all"));
+			UeAgentPhysicsOps::AddIssue(Issues, TEXT("error"), TEXT("destructive_replace_requires_confirmation"), TEXT("replace_all=true requires allow_destructive_replace=true."), TEXT("bodies.hjson.replace_all"));
 		}
 		const TArray<TSharedPtr<FJsonValue>>* Bodies = nullptr;
 		if (!OutFolder.BodiesJson->TryGetArrayField(TEXT("bodies"), Bodies) || !Bodies)
 		{
-			UeAgentPhysicsOps::AddIssue(Issues, TEXT("error"), TEXT("json_missing_required_field"), TEXT("bodies.json requires bodies array."), TEXT("bodies.json.bodies"));
+			UeAgentPhysicsOps::AddIssue(Issues, TEXT("error"), TEXT("json_missing_required_field"), TEXT("bodies.hjson requires bodies array."), TEXT("bodies.hjson.bodies"));
 		}
 		else
 		{
 			for (int32 Index = 0; Index < Bodies->Num(); ++Index)
 			{
 				const TSharedPtr<FJsonObject> BodyObj = (*Bodies)[Index].IsValid() ? (*Bodies)[Index]->AsObject() : nullptr;
-				const FString BodyPath = FString::Printf(TEXT("bodies.json.bodies[%d]"), Index);
+				const FString BodyPath = FString::Printf(TEXT("bodies.hjson.bodies[%d]"), Index);
 				if (!BodyObj.IsValid())
 				{
 					UeAgentPhysicsOps::AddIssue(Issues, TEXT("error"), TEXT("json_invalid_item"), TEXT("Body entry must be an object."), BodyPath);
@@ -2227,7 +2160,7 @@ namespace
 			OutFolder.ConstraintsJson->TryGetBoolField(TEXT("replace_all"), bReplaceConstraints);
 			if (bReplaceConstraints && !bAllowDestructiveReplace)
 			{
-				UeAgentPhysicsOps::AddIssue(Issues, TEXT("error"), TEXT("destructive_replace_requires_confirmation"), TEXT("constraints replace_all=true requires allow_destructive_replace=true."), TEXT("constraints.json.replace_all"));
+				UeAgentPhysicsOps::AddIssue(Issues, TEXT("error"), TEXT("destructive_replace_requires_confirmation"), TEXT("constraints replace_all=true requires allow_destructive_replace=true."), TEXT("constraints.hjson.replace_all"));
 			}
 			const TArray<TSharedPtr<FJsonValue>>* Constraints = nullptr;
 			if (OutFolder.ConstraintsJson->TryGetArrayField(TEXT("constraints"), Constraints) && Constraints)
@@ -2235,7 +2168,7 @@ namespace
 				for (int32 Index = 0; Index < Constraints->Num(); ++Index)
 				{
 					const TSharedPtr<FJsonObject> ConstraintObj = (*Constraints)[Index].IsValid() ? (*Constraints)[Index]->AsObject() : nullptr;
-					const FString ConstraintPath = FString::Printf(TEXT("constraints.json.constraints[%d]"), Index);
+					const FString ConstraintPath = FString::Printf(TEXT("constraints.hjson.constraints[%d]"), Index);
 					if (!ConstraintObj.IsValid())
 					{
 						UeAgentPhysicsOps::AddIssue(Issues, TEXT("error"), TEXT("json_invalid_item"), TEXT("Constraint entry must be an object."), ConstraintPath);
@@ -2247,11 +2180,11 @@ namespace
 					ConstraintObj->TryGetStringField(TEXT("child_body"), ChildBody);
 					if (!OutFolder.DeclaredBodyNames.Contains(FName(*ParentBody)))
 					{
-						UeAgentPhysicsOps::AddIssue(Issues, TEXT("error"), TEXT("physics_asset_constraint_body_missing"), TEXT("parent_body is not declared in bodies.json."), ConstraintPath + TEXT(".parent_body"));
+						UeAgentPhysicsOps::AddIssue(Issues, TEXT("error"), TEXT("physics_asset_constraint_body_missing"), TEXT("parent_body is not declared in bodies.hjson."), ConstraintPath + TEXT(".parent_body"));
 					}
 					if (!OutFolder.DeclaredBodyNames.Contains(FName(*ChildBody)))
 					{
-						UeAgentPhysicsOps::AddIssue(Issues, TEXT("error"), TEXT("physics_asset_constraint_body_missing"), TEXT("child_body is not declared in bodies.json."), ConstraintPath + TEXT(".child_body"));
+						UeAgentPhysicsOps::AddIssue(Issues, TEXT("error"), TEXT("physics_asset_constraint_body_missing"), TEXT("child_body is not declared in bodies.hjson."), ConstraintPath + TEXT(".child_body"));
 					}
 					TSharedPtr<FJsonObject> ConstraintSettings = MakeShared<FJsonObject>();
 					const TSharedPtr<FJsonObject>* Linear = nullptr;
@@ -2484,450 +2417,17 @@ namespace
 
 bool FUeAgentHttpServer::CmdPhysicsAssetExportFolder(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
-	FString AssetPath;
-	if (!JsonTryGetString(Ctx.Params, TEXT("asset_path"), AssetPath) || AssetPath.TrimStartAndEnd().IsEmpty())
-	{
-		OutError = TEXT("missing_asset_path");
-		return false;
-	}
-	FString FolderPathInput;
-	if (!JsonTryGetString(Ctx.Params, TEXT("folder_path"), FolderPathInput) || FolderPathInput.TrimStartAndEnd().IsEmpty())
-	{
-		JsonTryGetString(Ctx.Params, TEXT("output_folder"), FolderPathInput);
-	}
-	if (FolderPathInput.TrimStartAndEnd().IsEmpty())
-	{
-		OutError = TEXT("missing_folder_path");
-		return false;
-	}
-	UPhysicsAsset* PhysicsAsset = UeAgentPhysicsOps::LoadAsset<UPhysicsAsset>(AssetPath);
-	if (!PhysicsAsset)
-	{
-		OutError = TEXT("physics_asset_not_found");
-		return false;
-	}
-	const FString FolderPath = UeAgentPhysicsResolveFolderPath(FolderPathInput);
-	IFileManager::Get().MakeDirectory(*FolderPath, true);
-	IFileManager::Get().MakeDirectory(*FPaths::Combine(FolderPath, TEXT("validation")), true);
-
-	TSharedPtr<FJsonObject> Readback = UeAgentPhysicsAssetReadbackToJson(PhysicsAsset);
-	TSharedPtr<FJsonObject> AssetJson = MakeShared<FJsonObject>();
-	AssetJson->SetStringField(TEXT("schema"), UeAgentPhysicsOps::PhysicsAssetSchema);
-	AssetJson->SetStringField(TEXT("asset_path"), UeAgentPhysicsOps::AssetPathForObject(PhysicsAsset));
-	AssetJson->SetStringField(TEXT("skeletal_mesh"), Readback->GetStringField(TEXT("skeletal_mesh")));
-	AssetJson->SetStringField(TEXT("skeleton"), FString());
-	if (!UeAgentFolderDetailsExport::AttachOwnerDetails(
-		PhysicsAsset,
-		FolderPath,
-		TEXT("physics_asset_export_folder"),
-		TEXT("physics_asset"),
-		PhysicsAsset->GetPathName(),
-		TEXT("asset"),
-		AssetJson,
-		OutError))
-	{
-		return false;
-	}
-
-	TSharedPtr<FJsonObject> BodiesJson = MakeShared<FJsonObject>();
-	BodiesJson->SetBoolField(TEXT("replace_all"), false);
-	const TArray<TSharedPtr<FJsonValue>>* Bodies = nullptr;
-	if (Readback->TryGetArrayField(TEXT("bodies"), Bodies) && Bodies)
-	{
-		BodiesJson->SetArrayField(TEXT("bodies"), *Bodies);
-	}
-
-	TSharedPtr<FJsonObject> ConstraintsJson = MakeShared<FJsonObject>();
-	ConstraintsJson->SetBoolField(TEXT("replace_all"), false);
-	const TArray<TSharedPtr<FJsonValue>>* Constraints = nullptr;
-	if (Readback->TryGetArrayField(TEXT("constraints"), Constraints) && Constraints)
-	{
-		TArray<TSharedPtr<FJsonValue>> ConstraintEntries;
-		for (const TSharedPtr<FJsonValue>& Value : *Constraints)
-		{
-			const TSharedPtr<FJsonObject> ConstraintObj = Value.IsValid() ? Value->AsObject() : nullptr;
-			if (!ConstraintObj.IsValid())
-			{
-				continue;
-			}
-			TSharedPtr<FJsonObject> Entry = MakeShared<FJsonObject>();
-			Entry->SetStringField(TEXT("name"), ConstraintObj->GetStringField(TEXT("name")));
-			Entry->SetStringField(TEXT("parent_body"), ConstraintObj->GetStringField(TEXT("parent_body")));
-			Entry->SetStringField(TEXT("child_body"), ConstraintObj->GetStringField(TEXT("child_body")));
-			UeAgentAuthoringJson::ApplyAuthoringMetadata(
-				Entry,
-				TEXT("name"),
-				ConstraintObj->GetStringField(TEXT("name")),
-				ConstraintObj->GetStringField(TEXT("name")),
-				TEXT("Physics Asset|Constraints"),
-				TEXT("constraint"),
-				TEXT("physics_constraint"),
-				{ TEXT("set") });
-			const TSharedPtr<FJsonObject>* ConstraintSettings = nullptr;
-			if (ConstraintObj->TryGetObjectField(TEXT("constraint"), ConstraintSettings) && ConstraintSettings)
-			{
-				const TSharedPtr<FJsonObject>* Linear = nullptr;
-				if ((*ConstraintSettings)->TryGetObjectField(TEXT("linear"), Linear) && Linear)
-				{
-					Entry->SetObjectField(TEXT("linear"), *Linear);
-				}
-				const TSharedPtr<FJsonObject>* Angular = nullptr;
-				if ((*ConstraintSettings)->TryGetObjectField(TEXT("angular"), Angular) && Angular)
-				{
-					Entry->SetObjectField(TEXT("angular"), *Angular);
-				}
-			}
-			ConstraintEntries.Add(MakeShared<FJsonValueObject>(Entry));
-		}
-		ConstraintsJson->SetArrayField(TEXT("constraints"), ConstraintEntries);
-	}
-
-	TSharedPtr<FJsonObject> ProfilesJson = MakeShared<FJsonObject>();
-	const TSharedPtr<FJsonObject>* Profiles = nullptr;
-	if (Readback->TryGetObjectField(TEXT("profiles"), Profiles) && Profiles)
-	{
-		ProfilesJson = *Profiles;
-	}
-
-	TSharedPtr<FJsonObject> Coverage = MakeShared<FJsonObject>();
-	Coverage->SetStringField(TEXT("schema"), TEXT("ue_agent_interface.physics_asset.coverage.v1"));
-	Coverage->SetStringField(TEXT("implementation_status"), TEXT("complete_folder_profile"));
-	Coverage->SetBoolField(TEXT("is_complete_target_schema"), true);
-	Coverage->SetNumberField(TEXT("body_count"), Readback->GetNumberField(TEXT("body_count")));
-	Coverage->SetNumberField(TEXT("constraint_count"), Readback->GetNumberField(TEXT("constraint_count")));
-	Coverage->SetArrayField(TEXT("pending_profiles"), TArray<TSharedPtr<FJsonValue>>());
-	Coverage->SetArrayField(TEXT("blocking_gaps"), TArray<TSharedPtr<FJsonValue>>());
-
-	TArray<TSharedPtr<FJsonValue>> Files;
-	auto SaveFile = [&Files, &OutError](const FString& FilePath, const TSharedPtr<FJsonObject>& Json) -> bool
-	{
-		FString Resolved;
-		if (!UeAgentPhysicsOps::SaveJsonObjectToFile(FilePath, Json, Resolved, OutError))
-		{
-			return false;
-		}
-		Files.Add(MakeShared<FJsonValueString>(Resolved));
-		return true;
-	};
-	if (!SaveFile(FPaths::Combine(FolderPath, TEXT("asset.json")), AssetJson)
-		|| !SaveFile(FPaths::Combine(FolderPath, TEXT("bodies.json")), BodiesJson)
-		|| !SaveFile(FPaths::Combine(FolderPath, TEXT("constraints.json")), ConstraintsJson)
-		|| !SaveFile(FPaths::Combine(FolderPath, TEXT("profiles.json")), ProfilesJson)
-		|| !SaveFile(FPaths::Combine(FolderPath, TEXT("validation"), TEXT("coverage_report.json")), Coverage)
-		|| !SaveFile(FPaths::Combine(FolderPath, TEXT("validation"), TEXT("body_readback.json")), Readback))
-	{
-		return false;
-	}
-	OutData->SetStringField(TEXT("schema"), UeAgentPhysicsOps::PhysicsAssetSchema);
-	OutData->SetStringField(TEXT("folder_path"), FolderPath);
-	OutData->SetArrayField(TEXT("files"), Files);
-	OutData->SetObjectField(TEXT("readback"), Readback);
-	return true;
+	return UeAgentReflectionAuthoringCommandBridge::Export(TEXT("physics_asset"), Ctx.Params, OutData, OutError);
 }
 
 bool FUeAgentHttpServer::CmdPhysicsAssetValidateFolder(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
-	FString FolderPathInput;
-	if (!JsonTryGetString(Ctx.Params, TEXT("folder_path"), FolderPathInput) || FolderPathInput.TrimStartAndEnd().IsEmpty())
-	{
-		OutError = TEXT("missing_folder_path");
-		return false;
-	}
-	bool bAllowDestructiveReplace = false;
-	JsonTryGetBool(Ctx.Params, TEXT("allow_destructive_replace"), bAllowDestructiveReplace);
-	const FString FolderPath = UeAgentJsonDiagnostics::ResolveProjectRelativeFilePath(FolderPathInput);
-	TSharedPtr<FJsonObject> LegacyRejection;
-	if (UeAgentDetailsAuthoring::BuildLegacyPropertiesFolderRejectionIfPresent(
-		FolderPath,
-		UeAgentDetailsAuthoring::MakeOwnerInfoForObject(nullptr, TEXT("physics_asset"), FString(), TEXT("physics_asset_validate_folder")),
-		TEXT("asset.json.details.index_file"),
-		LegacyRejection,
-		OutError))
-	{
-		OutData = LegacyRejection;
-		return false;
-	}
-	FUeAgentPhysicsAssetFolder Folder;
-	TArray<TSharedPtr<FJsonValue>> Issues;
-	const bool bValid = UeAgentPhysicsLoadAndValidatePhysicsAssetFolder(FolderPathInput, bAllowDestructiveReplace, Folder, Issues);
-	OutData->SetStringField(TEXT("schema"), UeAgentPhysicsOps::PhysicsAssetSchema);
-	OutData->SetStringField(TEXT("folder_path"), Folder.FolderPath);
-	OutData->SetStringField(TEXT("asset_path"), Folder.AssetPath);
-	OutData->SetStringField(TEXT("skeletal_mesh"), Folder.SkeletalMeshPath);
-	OutData->SetBoolField(TEXT("valid"), bValid);
-	OutData->SetArrayField(TEXT("issues"), Issues);
-	OutData->SetNumberField(TEXT("issue_count"), Issues.Num());
-	OutData->SetNumberField(TEXT("declared_body_count"), Folder.DeclaredBodyNames.Num());
-	if (!bValid)
-	{
-		OutError = TEXT("physics_asset_folder_invalid");
-		return false;
-	}
-	return true;
+	return UeAgentReflectionAuthoringCommandBridge::Validate(TEXT("physics_asset"), Ctx.Params, OutData, OutError);
 }
 
 bool FUeAgentHttpServer::CmdPhysicsAssetApplyFolder(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
-	FString FolderPathInput;
-	if (!JsonTryGetString(Ctx.Params, TEXT("folder_path"), FolderPathInput) || FolderPathInput.TrimStartAndEnd().IsEmpty())
-	{
-		OutError = TEXT("missing_folder_path");
-		return false;
-	}
-	bool bAllowDestructiveReplace = false;
-	bool bCreateIfMissing = true;
-	bool bSaveAfterApply = false;
-	bool bBackup = false;
-	JsonTryGetBool(Ctx.Params, TEXT("allow_destructive_replace"), bAllowDestructiveReplace);
-	JsonTryGetBool(Ctx.Params, TEXT("create_if_missing"), bCreateIfMissing);
-	JsonTryGetBool(Ctx.Params, TEXT("save_after_apply"), bSaveAfterApply);
-	JsonTryGetBool(Ctx.Params, TEXT("backup"), bBackup);
-
-	FUeAgentPhysicsAssetFolder Folder;
-	TArray<TSharedPtr<FJsonValue>> Issues;
-	if (!UeAgentPhysicsLoadAndValidatePhysicsAssetFolder(FolderPathInput, bAllowDestructiveReplace, Folder, Issues))
-	{
-		OutData->SetArrayField(TEXT("issues"), Issues);
-		OutError = TEXT("physics_asset_folder_invalid");
-		return false;
-	}
-	FString AssetPathOverride;
-	if (JsonTryGetString(Ctx.Params, TEXT("asset_path"), AssetPathOverride) && !AssetPathOverride.TrimStartAndEnd().IsEmpty())
-	{
-		Folder.AssetPath = AssetPathOverride;
-	}
-	TSharedPtr<FJsonObject> LegacyRejection;
-	if (UeAgentDetailsAuthoring::BuildLegacyPropertiesFolderRejectionIfPresent(
-		Folder.FolderPath,
-		UeAgentDetailsAuthoring::MakeOwnerInfoForObject(nullptr, TEXT("physics_asset"), Folder.AssetPath, TEXT("physics_asset_apply_folder")),
-		TEXT("asset.json.details.index_file"),
-		LegacyRejection,
-		OutError))
-	{
-		OutData = LegacyRejection;
-		return false;
-	}
-	bool bCreated = false;
-	UPhysicsAsset* PhysicsAsset = UeAgentPhysicsCreateOrLoadPhysicsAsset(Folder.AssetPath, Folder.SkeletalMesh, bCreateIfMissing, bCreated, OutError);
-	if (!PhysicsAsset)
-	{
-		return false;
-	}
-	FString BackupAssetPath;
-	FString BackupObjectPath;
-	if (bBackup && !bCreated && !UeAgentPhysicsOps::BackupAssetObject(PhysicsAsset, BackupAssetPath, BackupObjectPath, OutError))
-	{
-		return false;
-	}
-
-	TArray<TSharedPtr<FJsonValue>> BodyResults;
-	TArray<TSharedPtr<FJsonValue>> ConstraintResults;
-	TArray<TSharedPtr<FJsonValue>> ProfileResults;
-	int32 GroupedDetailsApplied = 0;
-	TSharedPtr<FJsonObject> DetailsApplySummary;
-	{
-		FScopedTransaction Transaction(NSLOCTEXT("UeAgentInterface", "PhysicsAssetApply", "UeAgentInterface PhysicsAsset Apply"));
-		PhysicsAsset->Modify();
-		if (!UeAgentDetailsAuthoring::ApplyOwnerDetailsFromEntryIfPresent(
-			PhysicsAsset,
-			Folder.FolderPath,
-			Folder.AssetJson,
-			UeAgentDetailsAuthoring::MakeOwnerInfoForObject(PhysicsAsset, TEXT("physics_asset"), PhysicsAsset->GetPathName(), TEXT("physics_asset_apply_folder")),
-			TEXT("details"),
-			true,
-			DetailsApplySummary,
-			GroupedDetailsApplied,
-			OutError))
-		{
-			return false;
-		}
-		bool bReplaceAll = false;
-		Folder.BodiesJson->TryGetBoolField(TEXT("replace_all"), bReplaceAll);
-		if (bReplaceAll)
-		{
-			PhysicsAsset->SkeletalBodySetups.Empty();
-		}
-		const TArray<TSharedPtr<FJsonValue>>* Bodies = nullptr;
-		if (Folder.BodiesJson->TryGetArrayField(TEXT("bodies"), Bodies) && Bodies)
-		{
-			for (const TSharedPtr<FJsonValue>& BodyValue : *Bodies)
-			{
-				const TSharedPtr<FJsonObject> BodyObj = BodyValue.IsValid() ? BodyValue->AsObject() : nullptr;
-				if (!BodyObj.IsValid())
-				{
-					continue;
-				}
-				FString BoneNameString;
-				BodyObj->TryGetStringField(TEXT("bone_name"), BoneNameString);
-				bool bBodyCreated = false;
-				USkeletalBodySetup* BodySetup = UeAgentPhysicsFindOrCreateBodySetup(PhysicsAsset, FName(*BoneNameString), bBodyCreated);
-				if (!BodySetup || !UeAgentPhysicsApplyBodyShapes(BodySetup, BodyObj, OutError))
-				{
-					return false;
-				}
-				TSharedPtr<FJsonObject> Result = MakeShared<FJsonObject>();
-				Result->SetStringField(TEXT("bone_name"), BoneNameString);
-				Result->SetStringField(TEXT("status"), TEXT("applied"));
-				Result->SetBoolField(TEXT("created"), bBodyCreated);
-				Result->SetObjectField(TEXT("readback"), UeAgentPhysicsBodySetupToJson(BodySetup));
-				BodyResults.Add(MakeShared<FJsonValueObject>(Result));
-			}
-		}
-		PhysicsAsset->UpdateBodySetupIndexMap();
-
-		if (Folder.ConstraintsJson.IsValid())
-		{
-			bool bReplaceConstraints = false;
-			Folder.ConstraintsJson->TryGetBoolField(TEXT("replace_all"), bReplaceConstraints);
-			if (bReplaceConstraints)
-			{
-				PhysicsAsset->ConstraintSetup.Empty();
-			}
-			const TArray<TSharedPtr<FJsonValue>>* Constraints = nullptr;
-			if (Folder.ConstraintsJson->TryGetArrayField(TEXT("constraints"), Constraints) && Constraints)
-			{
-				for (const TSharedPtr<FJsonValue>& ConstraintValue : *Constraints)
-				{
-					const TSharedPtr<FJsonObject> ConstraintObj = ConstraintValue.IsValid() ? ConstraintValue->AsObject() : nullptr;
-					if (!ConstraintObj.IsValid())
-					{
-						continue;
-					}
-					FString Name;
-					FString ParentBody;
-					FString ChildBody;
-					ConstraintObj->TryGetStringField(TEXT("name"), Name);
-					ConstraintObj->TryGetStringField(TEXT("parent_body"), ParentBody);
-					ConstraintObj->TryGetStringField(TEXT("child_body"), ChildBody);
-					if (Name.TrimStartAndEnd().IsEmpty())
-					{
-						Name = FString::Printf(TEXT("%s_to_%s"), *ChildBody, *ParentBody);
-					}
-					UPhysicsConstraintTemplate* Template = nullptr;
-					for (UPhysicsConstraintTemplate* ExistingTemplate : PhysicsAsset->ConstraintSetup)
-					{
-						if (ExistingTemplate && ExistingTemplate->DefaultInstance.JointName == FName(*Name))
-						{
-							Template = ExistingTemplate;
-							break;
-						}
-					}
-					bool bConstraintCreated = false;
-					if (!Template)
-					{
-						const FName ObjectName = MakeUniqueObjectName(PhysicsAsset, UPhysicsConstraintTemplate::StaticClass(), FName(*Name));
-						Template = NewObject<UPhysicsConstraintTemplate>(PhysicsAsset, UPhysicsConstraintTemplate::StaticClass(), ObjectName, RF_Transactional);
-						if (Template)
-						{
-							PhysicsAsset->ConstraintSetup.Add(Template);
-							bConstraintCreated = true;
-						}
-					}
-					if (!Template)
-					{
-						OutError = TEXT("create_physics_constraint_template_failed");
-						return false;
-					}
-					Template->Modify();
-					FConstraintInstance& Instance = Template->DefaultInstance;
-					Instance.JointName = FName(*Name);
-					Instance.ConstraintBone1 = FName(*ChildBody);
-					Instance.ConstraintBone2 = FName(*ParentBody);
-					TSharedPtr<FJsonObject> ConstraintSettings = MakeShared<FJsonObject>();
-					const TSharedPtr<FJsonObject>* Linear = nullptr;
-					if (ConstraintObj->TryGetObjectField(TEXT("linear"), Linear) && Linear)
-					{
-						ConstraintSettings->SetObjectField(TEXT("linear"), *Linear);
-					}
-					const TSharedPtr<FJsonObject>* Angular = nullptr;
-					if (ConstraintObj->TryGetObjectField(TEXT("angular"), Angular) && Angular)
-					{
-						ConstraintSettings->SetObjectField(TEXT("angular"), *Angular);
-					}
-					if (ConstraintObj->HasField(TEXT("disable_collision")))
-					{
-						bool bDisableCollision = false;
-						ConstraintObj->TryGetBoolField(TEXT("disable_collision"), bDisableCollision);
-						ConstraintSettings->SetBoolField(TEXT("disable_collision"), bDisableCollision);
-					}
-					UeAgentPhysicsApplyConstraintInstanceFromJson(Instance, ConstraintSettings);
-					TSharedPtr<FJsonObject> Result = MakeShared<FJsonObject>();
-					Result->SetStringField(TEXT("name"), Name);
-					Result->SetStringField(TEXT("parent_body"), ParentBody);
-					Result->SetStringField(TEXT("child_body"), ChildBody);
-					Result->SetStringField(TEXT("status"), TEXT("applied"));
-					Result->SetBoolField(TEXT("created"), bConstraintCreated);
-					Result->SetObjectField(TEXT("readback"), UeAgentPhysicsConstraintInstanceToJson(Instance));
-					ConstraintResults.Add(MakeShared<FJsonValueObject>(Result));
-				}
-			}
-		}
-
-#if WITH_EDITORONLY_DATA
-		if (Folder.ProfilesJson.IsValid())
-		{
-			auto ApplyProfileNames = [&ProfileResults](const TSharedPtr<FJsonObject>& ProfilesJson, const TCHAR* Key, TArray<FName>& Target)
-			{
-				const TArray<TSharedPtr<FJsonValue>>* Names = nullptr;
-				if (!ProfilesJson->TryGetArrayField(Key, Names) || !Names)
-				{
-					return;
-				}
-				Target.Reset();
-				for (const TSharedPtr<FJsonValue>& Value : *Names)
-				{
-					const FString Name = Value.IsValid() ? Value->AsString() : FString();
-					if (!Name.TrimStartAndEnd().IsEmpty())
-					{
-						Target.Add(FName(*Name));
-						TSharedPtr<FJsonObject> Result = MakeShared<FJsonObject>();
-						Result->SetStringField(TEXT("profile_type"), Key);
-						Result->SetStringField(TEXT("name"), Name);
-						Result->SetStringField(TEXT("status"), TEXT("applied"));
-						ProfileResults.Add(MakeShared<FJsonValueObject>(Result));
-					}
-				}
-			};
-			ApplyProfileNames(Folder.ProfilesJson, TEXT("constraint_profiles"), PhysicsAsset->ConstraintProfiles);
-			ApplyProfileNames(Folder.ProfilesJson, TEXT("physical_animation_profiles"), PhysicsAsset->PhysicalAnimationProfiles);
-		}
-#endif
-
-#if WITH_EDITOR
-		PhysicsAsset->InvalidateAllPhysicsMeshes();
-#endif
-		PhysicsAsset->PostEditChange();
-		PhysicsAsset->MarkPackageDirty();
-	}
-	bool bSaved = false;
-	if (bSaveAfterApply)
-	{
-		if (!UeAgentPhysicsOps::SaveAssetPackage(PhysicsAsset, OutError))
-		{
-			return false;
-		}
-		bSaved = true;
-	}
-	TSharedPtr<FJsonObject> Readback = UeAgentPhysicsAssetReadbackToJson(PhysicsAsset);
-	OutData->SetStringField(TEXT("schema"), UeAgentPhysicsOps::PhysicsAssetSchema);
-	OutData->SetStringField(TEXT("asset_path"), UeAgentPhysicsOps::AssetPathForObject(PhysicsAsset));
-	OutData->SetBoolField(TEXT("asset_created"), bCreated);
-	OutData->SetBoolField(TEXT("backup_created"), !BackupAssetPath.IsEmpty());
-	OutData->SetStringField(TEXT("backup_asset_path"), BackupAssetPath);
-	OutData->SetStringField(TEXT("backup_object_path"), BackupObjectPath);
-	OutData->SetArrayField(TEXT("body_results"), BodyResults);
-	OutData->SetArrayField(TEXT("constraint_results"), ConstraintResults);
-	OutData->SetArrayField(TEXT("profile_results"), ProfileResults);
-	OutData->SetNumberField(TEXT("grouped_details_applied"), GroupedDetailsApplied);
-	if (DetailsApplySummary.IsValid())
-	{
-		OutData->SetObjectField(TEXT("details_apply"), DetailsApplySummary);
-	}
-	OutData->SetObjectField(TEXT("readback"), Readback);
-	OutData->SetStringField(TEXT("readback_hash"), UeAgentPhysicsOps::HashJsonObject(Readback));
-	OutData->SetBoolField(TEXT("saved"), bSaved);
-	OutData->SetArrayField(TEXT("issues"), Issues);
-	return true;
+	return UeAgentReflectionAuthoringCommandBridge::Apply(TEXT("physics_asset"), Ctx.Params, OutData, OutError, Ctx.RequestId);
 }
 
 bool FUeAgentHttpServer::CmdPhysicsRuntimeProbe(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const

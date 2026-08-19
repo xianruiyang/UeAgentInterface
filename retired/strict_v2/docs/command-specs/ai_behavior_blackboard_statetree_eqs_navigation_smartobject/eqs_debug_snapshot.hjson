@@ -1,0 +1,82 @@
+authoring: { reason: command_has_no_registered_folder_authoring_profile, state: none }
+category: ai_behavior_blackboard_statetree_eqs_navigation_smartobject
+command: eqs_debug_snapshot
+deprecation: { reason: command_is_active, state: none }
+discovery: { aliases: [], keywords_en: [eqs, debug, snapshot, ai_behavior_blackboard_statetree_eqs_navigation_smartobject], keywords_zh: [eqs_debug_snapshot], summary_en: "Execute eqs_debug_snapshot with a verified implementation contract", summary_zh: "运行并返回 debug 摘要", tags: [ai_behavior_blackboard_statetree_eqs_navigation_smartobject, p2-007] }
+errors: {
+  codes: [
+    { code: eqs_manager_not_found, description_zh: "C++ 实现返回错误码 eqs_manager_not_found", retry_safe: false, stage: execution, wire_match: exact }
+    { code: eqs_query_not_found, description_zh: "C++ 实现返回错误码 eqs_query_not_found", retry_safe: false, stage: execution, wire_match: exact }
+    { code: eqs_run_failed, description_zh: "C++ 实现返回错误码 eqs_run_failed", retry_safe: false, stage: execution, wire_match: exact }
+    { code: missing_asset_path, description_zh: "C++ 实现返回错误码 missing_asset_path", retry_safe: true, stage: preflight, wire_match: exact }
+    { code: no_editor_world, description_zh: "C++ 实现返回错误码 no_editor_world", retry_safe: false, stage: execution, wire_match: exact }
+    { code: no_geditor, description_zh: "C++ 实现返回错误码 no_geditor", retry_safe: false, stage: execution, wire_match: exact }
+    { code: querier_not_found, description_zh: "C++ 实现返回错误码 querier_not_found", retry_safe: false, stage: execution, wire_match: exact }
+  ]
+}
+evidence: {
+  docs: [
+    { path: "Plugins/UeAgentInterface/docs/commands/ai_behavior_blackboard_statetree_eqs_navigation_smartobject/eqs_debug_snapshot.md", purpose: "user documentation cross-check; C++ implementation remains authoritative" }
+  ]
+  implementation: [
+    { line_hint: 2506, path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Commands/AI/UeAgentHttpServer_AI_StateTreeEQS.cpp", purpose: "command handler, parameter and return evidence", symbol: CmdEqsDebugSnapshot }
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Commands/Level/UeAgentHttpServer_Level_CaptureAndPersistence.cpp", purpose: "transitive helper evidence used by the command handler" }
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Server/UeAgentHttpServer.cpp", purpose: "transitive helper evidence used by the command handler" }
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Utilities/UeAgentJsonDiagnostics.cpp", purpose: "transitive helper evidence used by the command handler" }
+  ]
+  tests: [
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterfaceTests/Private/Smoke/UeAgentInterfaceAISmokeTests.cpp", purpose: "smoke or negative-path evidence cross-checked for the verified contract" }
+  ]
+}
+execution: {
+  destructive: false
+  editor_state: required
+  game_thread: required
+  idempotent: false
+  kind: session_control
+  overwrite_behavior: none
+  pie_state: allowed
+  retry_safe: false
+  save_behavior: none
+  side_effects: [starts_runtime, stops_runtime, modifies_editor_session]
+  ui_effect: none
+}
+maturity: verified
+params: {
+  constraints: []
+  fields: {
+    asset_path: { default_state: none, description_zh: "C++ 实现读取的 asset_path 参数", path_semantics: { access_scope: mounted_read, kind: ue_asset }, required: true, type: ue_asset_path }
+    max_results: { default_state: none, description_zh: "C++ 实现读取的 max_results 参数", required: false, type: number }
+    querier: { default_state: none, description_zh: "C++ 实现读取的 querier 参数", required: false, type: string }
+    run_mode: { default_state: none, description_zh: "C++ 实现读取的 run_mode 参数", required: false, type: string }
+  }
+  state: defined
+}
+response: { artifact_fields: [items], compact_fields: [status, asset_path, item_count, item_type, successful], failure_fields: [params.asset_path], max_items_policy: { fields: [], mode: none } }
+returns: {
+  fields: {
+    asset_path: { description_zh: "C++ 实现返回的 asset_path 字段；是否出现取决于执行分支", required: false, type: ue_asset_path }
+    item_count: { description_zh: "C++ 实现返回的 item_count 字段；是否出现取决于执行分支", required: false, type: integer }
+    item_type: { description_zh: "C++ 实现返回的 item_type 字段；是否出现取决于执行分支", required: false, type: string }
+    items: { description_zh: "C++ 实现返回的 items 字段；是否出现取决于执行分支", item_type: json_value, required: false, type: array }
+    status: { description_zh: "C++ 实现返回的 status 字段；是否出现取决于执行分支", required: false, type: string }
+    successful: { description_zh: "C++ 实现返回的 successful 字段；是否出现取决于执行分支", required: false, type: bool }
+    truncated: { description_zh: "C++ 实现返回的 truncated 字段；是否出现取决于执行分支", required: false, type: bool }
+  }
+  state: defined
+}
+schema: uai.command_spec.v1
+status: active
+types: {}
+verification: {
+  assertions: [
+    { id: result_present, operator: exists, source: returns.status }
+  ]
+  failure_policy: fail_overall
+  methods: [
+    { id: result, kind: result_assertion }
+  ]
+  required: true
+  state: defined
+}
+version: 1

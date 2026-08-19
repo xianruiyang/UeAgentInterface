@@ -1,0 +1,213 @@
+authoring: { reason: command_has_no_registered_folder_authoring_profile, state: none }
+category: modeling
+command: modeling_set_pivot
+deprecation: { reason: command_is_active, state: none }
+discovery: { aliases: [], keywords_en: [modeling, set, pivot], keywords_zh: [modeling_set_pivot], summary_en: "Execute modeling_set_pivot with a verified implementation contract", summary_zh: "modeling_set_pivot command contract.", tags: [modeling, p2-002] }
+errors: {
+  codes: [
+    { code: active_tool_exists, description_zh: "C++ 实现返回错误码 active_tool_exists", retry_safe: false, stage: execution, wire_match: exact }
+    { code: actor_ids_required, description_zh: "C++ 实现返回错误码 actor_ids_required", retry_safe: true, stage: preflight, wire_match: exact }
+    { code: actor_not_found, description_zh: "C++ 实现返回错误码 actor_not_found", retry_safe: false, stage: execution, wire_match: exact }
+    { code: asset_target_does_not_support_world_bounds_space, description_zh: "C++ 实现返回错误码 asset_target_does_not_support_world_bounds_space", retry_safe: false, stage: execution, wire_match: exact }
+    { code: cannot_accept_active_tool, description_zh: "C++ 实现返回错误码 cannot_accept_active_tool", retry_safe: false, stage: execution, wire_match: exact }
+    { code: cannot_cancel_active_tool, description_zh: "C++ 实现返回错误码 cannot_cancel_active_tool", retry_safe: false, stage: execution, wire_match: exact }
+    { code: cannot_start_tool, description_zh: "C++ 实现返回错误码 cannot_start_tool", retry_safe: false, stage: execution, wire_match: exact }
+    { code: component_required_for_world_bounds_space, description_zh: "C++ 实现返回错误码 component_required_for_world_bounds_space", retry_safe: true, stage: preflight, wire_match: exact }
+    { code: component_required_for_world_custom_point, description_zh: "C++ 实现返回错误码 component_required_for_world_custom_point", retry_safe: true, stage: preflight, wire_match: exact }
+    { code: component_required_for_world_origin, description_zh: "C++ 实现返回错误码 component_required_for_world_origin", retry_safe: true, stage: preflight, wire_match: exact }
+    { code: conflicting_pivot_post_action, description_zh: "C++ 实现返回错误码 conflicting_pivot_post_action", retry_safe: false, stage: execution, wire_match: exact }
+    { code: created_actor_resolution_failed, description_zh: "C++ 实现返回错误码 created_actor_resolution_failed", retry_safe: false, stage: execution, wire_match: exact }
+    { code: custom_point_required, description_zh: "C++ 实现返回错误码 custom_point_required", retry_safe: true, stage: preflight, wire_match: exact }
+    { code: custom_point_requires_supported_mesh_write_backend, description_zh: "C++ 实现返回错误码 custom_point_requires_supported_mesh_write_backend", retry_safe: false, stage: execution, wire_match: exact }
+    { code: duplicate_asset_destination_exists, description_zh: "C++ 实现返回错误码 duplicate_asset_destination_exists", retry_safe: false, stage: execution, wire_match: exact }
+    { code: duplicate_asset_path_resolution_failed, description_zh: "C++ 实现返回错误码 duplicate_asset_path_resolution_failed", retry_safe: false, stage: execution, wire_match: exact }
+    { code: duplicate_static_mesh_failed, description_zh: "C++ 实现返回错误码 duplicate_static_mesh_failed", retry_safe: false, stage: execution, wire_match: exact }
+    { code: dynamic_mesh_component_not_found, description_zh: "C++ 实现返回错误码 dynamic_mesh_component_not_found", retry_safe: false, stage: execution, wire_match: exact }
+    { code: dynamic_mesh_component_required, description_zh: "C++ 实现返回错误码 dynamic_mesh_component_required", retry_safe: true, stage: preflight, wire_match: exact }
+    { code: dynamic_mesh_missing, description_zh: "C++ 实现返回错误码 dynamic_mesh_missing", retry_safe: true, stage: preflight, wire_match: exact }
+    { code: editor_pivot_offset_requires_actor_target, description_zh: "C++ 实现返回错误码 editor_pivot_offset_requires_actor_target", retry_safe: false, stage: execution, wire_match: exact }
+    { code: editor_viewport_not_found, description_zh: "C++ 实现返回错误码 editor_viewport_not_found", retry_safe: false, stage: execution, wire_match: exact }
+    { code: editor_world_not_available, description_zh: "C++ 实现返回错误码 editor_world_not_available", retry_safe: false, stage: execution, wire_match: exact }
+    { code: internal_tool_wrapper_parameters_forbidden, description_zh: "C++ 实现返回错误码 internal_tool_wrapper_parameters_forbidden", retry_safe: true, stage: preflight, wire_match: exact }
+    { code: invalid_custom_point, description_zh: "C++ 实现返回错误码 invalid_custom_point", retry_safe: true, stage: preflight, wire_match: exact }
+    { code: invalid_duplicate_asset_path, description_zh: "C++ 实现返回错误码 invalid_duplicate_asset_path", retry_safe: true, stage: preflight, wire_match: exact }
+    { code: invalid_dynamic_mesh_bounds, description_zh: "C++ 实现返回错误码 invalid_dynamic_mesh_bounds", retry_safe: true, stage: preflight, wire_match: exact }
+    { code: invalid_mesh_bounds, description_zh: "C++ 实现返回错误码 invalid_mesh_bounds", retry_safe: true, stage: preflight, wire_match: exact }
+    { code: invalid_stairs_shape_settings, description_zh: "C++ 实现返回错误码 invalid_stairs_shape_settings", retry_safe: true, stage: preflight, wire_match: exact }
+    { code: invalid_static_mesh_bounds, description_zh: "C++ 实现返回错误码 invalid_static_mesh_bounds", retry_safe: true, stage: preflight, wire_match: exact }
+    { code: invalid_voxel_grid_bounds, description_zh: "C++ 实现返回错误码 invalid_voxel_grid_bounds", retry_safe: true, stage: preflight, wire_match: exact }
+    { code: missing_asset_path_or_actor, description_zh: "C++ 实现返回错误码 missing_asset_path_or_actor", retry_safe: true, stage: preflight, wire_match: exact }
+    { code: missing_params, description_zh: "C++ 实现返回错误码 missing_params", retry_safe: true, stage: preflight, wire_match: exact }
+    { code: missing_pivot_preset_or_custom_point, description_zh: "C++ 实现返回错误码 missing_pivot_preset_or_custom_point", retry_safe: true, stage: preflight, wire_match: exact }
+    { code: modeling_mode_unavailable, description_zh: "C++ 实现返回错误码 modeling_mode_unavailable", retry_safe: false, stage: execution, wire_match: exact }
+    { code: modeling_primitive_actor_root_missing, description_zh: "C++ 实现返回错误码 modeling_primitive_actor_root_missing", retry_safe: true, stage: preflight, wire_match: exact }
+    { code: modeling_primitive_collision_box_limit_exceeded, description_zh: "C++ 实现返回错误码 modeling_primitive_collision_box_limit_exceeded", retry_safe: false, stage: execution, wire_match: exact }
+    { code: modeling_primitive_collision_component_create_failed, description_zh: "C++ 实现返回错误码 modeling_primitive_collision_component_create_failed", retry_safe: false, stage: execution, wire_match: exact }
+    { code: modeling_tools_context_unavailable, description_zh: "C++ 实现返回错误码 modeling_tools_context_unavailable", retry_safe: false, stage: execution, wire_match: exact }
+    { code: no_active_tool, description_zh: "C++ 实现返回错误码 no_active_tool", retry_safe: false, stage: execution, wire_match: exact }
+    { code: no_editor_world, description_zh: "C++ 实现返回错误码 no_editor_world", retry_safe: false, stage: execution, wire_match: exact }
+    { code: no_geditor, description_zh: "C++ 实现返回错误码 no_geditor", retry_safe: false, stage: execution, wire_match: exact }
+    { code: primitive_bounds_extent_invalid, description_zh: "C++ 实现返回错误码 primitive_bounds_extent_invalid", retry_safe: true, stage: preflight, wire_match: exact }
+    { code: primitive_bounds_require_accept, description_zh: "C++ 实现返回错误码 primitive_bounds_require_accept", retry_safe: false, stage: execution, wire_match: exact }
+    { code: primitive_parameters_require_create_wrapper, description_zh: "C++ 实现返回错误码 primitive_parameters_require_create_wrapper", retry_safe: false, stage: execution, wire_match: exact }
+    { code: property_not_found, description_zh: "C++ 实现返回错误码 property_not_found", retry_safe: false, stage: execution, wire_match: exact }
+    { code: source_static_mesh_asset_invalid, description_zh: "C++ 实现返回错误码 source_static_mesh_asset_invalid", retry_safe: true, stage: preflight, wire_match: exact }
+    { code: static_mesh_asset_is_shared, description_zh: "C++ 实现返回错误码 static_mesh_asset_is_shared", retry_safe: false, stage: execution, wire_match: exact }
+    { code: static_mesh_asset_not_found, description_zh: "C++ 实现返回错误码 static_mesh_asset_not_found", retry_safe: false, stage: execution, wire_match: exact }
+    { code: static_mesh_asset_required, description_zh: "C++ 实现返回错误码 static_mesh_asset_required", retry_safe: true, stage: preflight, wire_match: exact }
+    { code: static_mesh_component_has_no_mesh, description_zh: "C++ 实现返回错误码 static_mesh_component_has_no_mesh", retry_safe: false, stage: execution, wire_match: exact }
+    { code: static_mesh_has_no_source_lods, description_zh: "C++ 实现返回错误码 static_mesh_has_no_source_lods", retry_safe: false, stage: execution, wire_match: exact }
+    { code: static_mesh_lod0_mesh_description_missing, description_zh: "C++ 实现返回错误码 static_mesh_lod0_mesh_description_missing", retry_safe: true, stage: preflight, wire_match: exact }
+    { code: tool_identifier_not_allowed, description_zh: "C++ 实现返回错误码 tool_identifier_not_allowed", retry_safe: true, stage: preflight, wire_match: exact }
+    { code: tool_identifier_required, description_zh: "C++ 实现返回错误码 tool_identifier_required", retry_safe: true, stage: preflight, wire_match: exact }
+    { code: tool_properties_array_required, description_zh: "C++ 实现返回错误码 tool_properties_array_required", retry_safe: true, stage: preflight, wire_match: exact }
+    { code: tool_property_set_not_found, description_zh: "C++ 实现返回错误码 tool_property_set_not_found", retry_safe: false, stage: execution, wire_match: exact }
+    { code: tool_start_failed, description_zh: "C++ 实现返回错误码 tool_start_failed", retry_safe: false, stage: execution, wire_match: exact }
+    { code: unsupported_asset_write_policy, description_zh: "C++ 实现返回错误码 unsupported_asset_write_policy", retry_safe: false, stage: execution, wire_match: exact }
+    { code: unsupported_bounds_space, description_zh: "C++ 实现返回错误码 unsupported_bounds_space", retry_safe: false, stage: execution, wire_match: exact }
+    { code: unsupported_custom_point_space, description_zh: "C++ 实现返回错误码 unsupported_custom_point_space", retry_safe: false, stage: execution, wire_match: exact }
+    { code: unsupported_modeling_primitive_collision_mode, description_zh: "C++ 实现返回错误码 unsupported_modeling_primitive_collision_mode", retry_safe: false, stage: execution, wire_match: exact }
+    { code: unsupported_pivot_preset, description_zh: "C++ 实现返回错误码 unsupported_pivot_preset", retry_safe: false, stage: execution, wire_match: exact }
+    { code: unsupported_preserve_world_geometry_false, description_zh: "C++ 实现返回错误码 unsupported_preserve_world_geometry_false", retry_safe: false, stage: execution, wire_match: exact }
+    { code: unsupported_static_mesh_collision_shape, description_zh: "C++ 实现返回错误码 unsupported_static_mesh_collision_shape", retry_safe: false, stage: execution, wire_match: exact }
+    { code: unsupported_voxel_pivot_point_space, description_zh: "C++ 实现返回错误码 unsupported_voxel_pivot_point_space", retry_safe: false, stage: execution, wire_match: exact }
+    { code: voxel_grid_has_no_occupied_cells, description_zh: "C++ 实现返回错误码 voxel_grid_has_no_occupied_cells", retry_safe: false, stage: execution, wire_match: exact }
+    { code: voxel_grid_session_prepare_failed, description_zh: "C++ 实现返回错误码 voxel_grid_session_prepare_failed", retry_safe: false, stage: execution, wire_match: exact }
+    { code: voxel_grid_sidecar_cell_size_invalid, description_zh: "C++ 实现返回错误码 voxel_grid_sidecar_cell_size_invalid", retry_safe: true, stage: preflight, wire_match: exact }
+    { code: voxel_grid_sidecar_cells_missing, description_zh: "C++ 实现返回错误码 voxel_grid_sidecar_cells_missing", retry_safe: true, stage: preflight, wire_match: exact }
+    { code: voxel_grid_sidecar_schema_unsupported, description_zh: "C++ 实现返回错误码 voxel_grid_sidecar_schema_unsupported", retry_safe: false, stage: execution, wire_match: exact }
+    { code: voxel_grid_sidecar_transform_invalid, description_zh: "C++ 实现返回错误码 voxel_grid_sidecar_transform_invalid", retry_safe: true, stage: preflight, wire_match: exact }
+    { code: invalid_tool_property_descriptor, description_zh: "C++ 实现返回错误码 invalid_tool_property_descriptor", retry_safe: true, stage: preflight, wire_match: exact }
+    { code: tool_property_apply_failed, description_zh: "C++ 实现返回错误码 tool_property_apply_failed", retry_safe: false, stage: execution, wire_match: exact }
+  ]
+}
+evidence: {
+  docs: [
+    { path: "Plugins/UeAgentInterface/docs/commands/modeling/modeling_set_pivot.md", purpose: "user documentation cross-check; C++ implementation remains authoritative" }
+  ]
+  implementation: [
+    { line_hint: 1437, path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Commands/Modeling/UeAgentHttpServer_Modeling_Pivot.cpp", purpose: "command handler, parameter and return evidence", symbol: CmdModelingSetPivot }
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Commands/Level/UeAgentHttpServer_Level_CaptureAndPersistence.cpp", purpose: "transitive helper evidence used by the command handler" }
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Commands/Modeling/UeAgentHttpServer_Modeling.cpp", purpose: "transitive helper evidence used by the command handler" }
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Commands/Modeling/UeAgentHttpServer_Modeling_DispatchAndSelection.cpp", purpose: "transitive helper evidence used by the command handler" }
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Commands/Modeling/UeAgentHttpServer_Modeling_SpatialInfo.cpp", purpose: "transitive helper evidence used by the command handler" }
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Commands/Modeling/UeAgentHttpServer_Modeling_ToolLifecycle.cpp", purpose: "transitive helper evidence used by the command handler" }
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Commands/Modeling/UeAgentHttpServer_Modeling_VoxelGrid.cpp", purpose: "transitive helper evidence used by the command handler" }
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Utilities/UeAgentJsonDiagnostics.cpp", purpose: "transitive helper evidence used by the command handler" }
+  ]
+  tests: [
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterfaceTests/Private/Smoke/UeAgentInterfaceSmoke_ModelingSpatialInfo.cpp", purpose: "smoke or negative-path evidence cross-checked for the verified contract" }
+  ]
+}
+execution: {
+  destructive: false
+  editor_state: required
+  game_thread: required
+  idempotent: false
+  kind: write
+  overwrite_behavior: target_asset
+  pie_state: forbidden
+  retry_safe: false
+  save_behavior: none
+  side_effects: [modifies_editor_session, modifies_level]
+  ui_effect: none
+}
+maturity: verified
+params: {
+  constraints: []
+  fields: {
+    accept: { default_state: none, description_zh: "C++ 实现读取的 accept 参数", required: false, type: bool }
+    actor: { default_state: none, description_zh: "C++ 实现读取的 actor 参数", required: false, type: string }
+    actor_id: { default_state: none, description_zh: "C++ 实现读取的 actor_id 参数", required: false, type: string }
+    actor_ids: { default_state: none, description_zh: "C++ 实现读取的 actor_ids 参数", item_type: json_value, required: false, type: array }
+    actor_label: { default_state: none, description_zh: "C++ 实现读取的 actor_label 参数", required: false, type: string }
+    actor_path: { default_state: none, description_zh: "C++ 实现读取的 actor_path 参数", required: false, type: string }
+    allow_destructive: { default: false, default_state: defined, description_zh: "C++ 实现读取的 allow_destructive 参数", required: false, type: bool }
+    apply_to_all_lods: { default: true, default_state: defined, description_zh: "C++ 实现读取的 apply_to_all_lods 参数", required: false, type: bool }
+    asset_path: { default_state: none, description_zh: "C++ 实现读取的 asset_path 参数", required: false, type: json_value }
+    asset_write_policy: { default_state: none, description_zh: "C++ 实现读取的 asset_write_policy 参数", required: false, type: string }
+    bounds_space: { default_state: none, description_zh: "C++ 实现读取的 bounds_space 参数", required: false, type: string }
+    box_space: { default_state: none, description_zh: "C++ 实现读取的 box_space 参数", required: false, type: string }
+    collision: { default_state: none, description_zh: "C++ 实现读取的 collision 参数", required: false, type: json_value }
+    component: { default_state: none, description_zh: "C++ 实现读取的 component 参数", required: false, type: string }
+    component_name: { default_state: none, description_zh: "C++ 实现读取的 component_name 参数", required: false, type: string }
+    custom_point: { default_state: none, description_zh: "C++ 实现读取的 custom_point 参数", required: false, type: json_value }
+    custom_point_space: { default_state: none, description_zh: "C++ 实现读取的 custom_point_space 参数", required: false, type: string }
+    destination_asset_path: { default_state: none, description_zh: "C++ 实现读取的 destination_asset_path 参数", path_semantics: { access_scope: project_write, kind: ue_asset }, required: false, type: ue_asset_path }
+    duplicate_asset_path: { default_state: none, description_zh: "C++ 实现读取的 duplicate_asset_path 参数", path_semantics: { access_scope: project_write, kind: ue_asset }, required: false, type: ue_asset_path }
+    overwrite_existing: { default: false, default_state: defined, description_zh: "C++ 实现读取的 overwrite_existing 参数", required: false, type: bool }
+    pivot_point: { default_state: none, description_zh: "C++ 实现读取的 pivot_point 参数", required: false, type: json_value }
+    pivot_point_space: { default_state: none, description_zh: "C++ 实现读取的 pivot_point_space 参数", required: false, type: string }
+    pivot_preset: { default_state: none, description_zh: "C++ 实现读取的 pivot_preset 参数", required: true, type: json_value }
+    post_action: { default_state: none, description_zh: "C++ 实现读取的 post_action 参数", required: false, type: string }
+    preserve_world_geometry: { default: true, default_state: defined, description_zh: "C++ 实现读取的 preserve_world_geometry 参数", required: false, type: bool }
+    preset: { default_state: none, description_zh: "C++ 实现读取的 preset 参数", required: false, type: json_value }
+    readback: { default: false, default_state: defined, description_zh: "C++ 实现读取的 readback 参数", required: false, type: bool }
+    tool_properties: { default_state: none, description_zh: "C++ 实现读取的 tool_properties 参数", item_type: json_value, required: false, type: array }
+  }
+  state: defined
+}
+response: { artifact_fields: [], compact_fields: [accepted, affected_component_count, affected_components, anchor_after, anchor_before, asset_duplicated], failure_fields: [params.pivot_preset], max_items_policy: { fields: [], mode: none } }
+returns: {
+  fields: {
+    accepted: { description_zh: "C++ 实现返回的 accepted 字段；是否出现取决于执行分支", required: false, type: bool }
+    affected_component_count: { description_zh: "C++ 实现返回的 affected_component_count 字段；是否出现取决于执行分支", required: false, type: integer }
+    affected_components: { description_zh: "C++ 实现返回的 affected_components 字段；是否出现取决于执行分支", item_type: json_value, required: false, type: array }
+    anchor_after: { description_zh: "C++ 实现返回的 anchor_after 字段；是否出现取决于执行分支", required: false, type: json_value }
+    anchor_before: { description_zh: "C++ 实现返回的 anchor_before 字段；是否出现取决于执行分支", required: false, type: json_value }
+    asset_duplicated: { description_zh: "C++ 实现返回的 asset_duplicated 字段；是否出现取决于执行分支", required: false, type: bool }
+    asset_write_policy: { description_zh: "C++ 实现返回的 asset_write_policy 字段；是否出现取决于执行分支", required: false, type: string }
+    build_errors: { description_zh: "C++ 实现返回的 build_errors 字段；是否出现取决于执行分支", item_type: json_value, required: false, type: array }
+    collision: { description_zh: "C++ 实现返回的 collision 字段；是否出现取决于执行分支", required: false, type: json_value }
+    collision_preserved: { description_zh: "C++ 实现返回的 collision_preserved 字段；是否出现取决于执行分支", required: false, type: bool }
+    component_location_after: { description_zh: "C++ 实现返回的 component_location_after 字段；是否出现取决于执行分支", required: false, type: json_value }
+    component_location_before: { description_zh: "C++ 实现返回的 component_location_before 字段；是否出现取决于执行分支", required: false, type: json_value }
+    duplicate_asset: { description_zh: "C++ 实现返回的 duplicate_asset 字段；是否出现取决于执行分支", required: false, type: json_value }
+    edited_asset_path: { description_zh: "C++ 实现返回的 edited_asset_path 字段；是否出现取决于执行分支", required: false, type: ue_asset_path }
+    frame: { description_zh: "C++ 实现返回的 frame 字段；是否出现取决于执行分支", required: false, type: json_value }
+    geometry_preserved: { description_zh: "C++ 实现返回的 geometry_preserved 字段；是否出现取决于执行分支", required: false, type: bool }
+    grid_id: { description_zh: "C++ 实现返回的 grid_id 字段；是否出现取决于执行分支", required: false, type: string }
+    lods_touched: { description_zh: "C++ 实现返回的 lods_touched 字段；是否出现取决于执行分支", required: false, type: number }
+    mesh_geometry_changed: { description_zh: "C++ 实现返回的 mesh_geometry_changed 字段；是否出现取决于执行分支", required: false, type: bool }
+    normalized_request: { description_zh: "C++ 实现返回的 normalized_request 字段；是否出现取决于执行分支", required: false, type: json_value }
+    open_world_reference_count: { description_zh: "C++ 实现返回的 open_world_reference_count 字段；是否出现取决于执行分支", required: false, type: integer }
+    pivot_after: { description_zh: "C++ 实现返回的 pivot_after 字段；是否出现取决于执行分支", required: false, type: json_value }
+    pivot_backend: { description_zh: "C++ 实现返回的 pivot_backend 字段；是否出现取决于执行分支", required: false, type: string }
+    pivot_before: { description_zh: "C++ 实现返回的 pivot_before 字段；是否出现取决于执行分支", required: false, type: json_value }
+    pivot_offset_actor_local: { description_zh: "C++ 实现返回的 pivot_offset_actor_local 字段；是否出现取决于执行分支", required: false, type: json_value }
+    pivot_point_asset_local: { description_zh: "C++ 实现返回的 pivot_point_asset_local 字段；是否出现取决于执行分支", required: false, type: json_value }
+    pivot_point_component_local: { description_zh: "C++ 实现返回的 pivot_point_component_local 字段；是否出现取决于执行分支", required: false, type: json_value }
+    pivot_point_grid_local: { description_zh: "C++ 实现返回的 pivot_point_grid_local 字段；是否出现取决于执行分支", required: false, type: json_value }
+    pivot_point_world: { description_zh: "C++ 实现返回的 pivot_point_world 字段；是否出现取决于执行分支", required: false, type: json_value }
+    readback: { description_zh: "C++ 实现返回的 readback 字段；是否出现取决于执行分支", required: false, type: json_value }
+    readback_error: { description_zh: "C++ 实现返回的 readback_error 字段；是否出现取决于执行分支", required: false, type: string }
+    revision: { description_zh: "C++ 实现返回的 revision 字段；是否出现取决于执行分支", required: false, type: integer }
+    selection: { description_zh: "C++ 实现返回的 selection 字段；是否出现取决于执行分支", required: false, type: json_value }
+    session_id: { description_zh: "C++ 实现返回的 session_id 字段；是否出现取决于执行分支", required: false, type: string }
+    shared_asset_modified: { description_zh: "C++ 实现返回的 shared_asset_modified 字段；是否出现取决于执行分支", required: false, type: bool }
+    source_asset_path: { description_zh: "C++ 实现返回的 source_asset_path 字段；是否出现取决于执行分支", required: false, type: ue_asset_path }
+    target: { description_zh: "C++ 实现返回的 target 字段；是否出现取决于执行分支", required: false, type: json_value }
+    tool: { description_zh: "C++ 实现返回的 tool 字段；是否出现取决于执行分支", required: false, type: json_value }
+    voxel_apply: { description_zh: "C++ 实现返回的 voxel_apply 字段；是否出现取决于执行分支", required: false, type: json_value }
+    world_bounds_extent_delta: { description_zh: "C++ 实现返回的 world_bounds_extent_delta 字段；是否出现取决于执行分支", required: false, type: json_value }
+    world_bounds_origin_delta: { description_zh: "C++ 实现返回的 world_bounds_origin_delta 字段；是否出现取决于执行分支", required: false, type: json_value }
+  }
+  state: defined
+}
+schema: uai.command_spec.v1
+status: active
+types: {}
+verification: {
+  assertions: [
+    { id: result_present, operator: exists, source: returns.accepted }
+    { id: state_readback_present, operator: exists, source: methods.state_readback.target }
+  ]
+  failure_policy: fail_overall
+  methods: [
+    { id: result, kind: result_assertion }
+    { command: modeling_get_mesh_spatial_info, id: state_readback, kind: command_readback, params_mapping: {} }
+  ]
+  required: true
+  state: defined
+}
+version: 1

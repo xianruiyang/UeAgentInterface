@@ -2,6 +2,7 @@
 
 #include "UeAgentHttpServer_Montage.h"
 
+#include "Utilities/UeAgentAuthoringFileIO.h"
 #include "Utilities/UeAgentJsonDiagnostics.h"
 
 #include "Animation/AnimMontage.h"
@@ -16,12 +17,9 @@
 #include "Engine/SkeletalMesh.h"
 #include "Factories/AnimMontageFactory.h"
 #include "FileHelpers.h"
-#include "Misc/FileHelper.h"
 #include "Misc/PackageName.h"
 #include "Misc/Paths.h"
 #include "Modules/ModuleManager.h"
-#include "Serialization/JsonReader.h"
-#include "Serialization/JsonSerializer.h"
 #include "Subsystems/AssetEditorSubsystem.h"
 
 namespace UeAgentMontageOps
@@ -222,83 +220,25 @@ namespace UeAgentMontageOps
 		return true;
 	}
 
-	static bool SaveJsonFile(const FString& OutputPathInput, const TSharedPtr<FJsonObject>& Root, FString& OutOutputPath, FString& OutError)
+	static bool SaveAuthoringFile(const FString& OutputPathInput, const TSharedPtr<FJsonObject>& Root, FString& OutOutputPath, FString& OutError)
 	{
-		OutOutputPath.Reset();
 		if (!Root.IsValid())
 		{
 			OutError = TEXT("json_root_invalid");
 			return false;
 		}
 
-		FString OutputPath = OutputPathInput;
-		OutputPath.TrimStartAndEndInline();
-		if (OutputPath.IsEmpty())
-		{
-			OutError = TEXT("missing_output_file");
-			return false;
-		}
-
-		OutputPath = UeAgentJsonDiagnostics::ResolveProjectRelativeFilePath(OutputPath);
-		const FString OutputDir = FPaths::GetPath(OutputPath);
-		if (!OutputDir.IsEmpty() && !IFileManager::Get().DirectoryExists(*OutputDir))
-		{
-			IFileManager::Get().MakeDirectory(*OutputDir, true);
-		}
-
-		FString JsonText;
-		if (!UeAgentJsonDiagnostics::SerializeJsonObjectCompact(Root, JsonText))
-		{
-			OutError = TEXT("json_serialize_failed");
-			return false;
-		}
-
-		if (!FFileHelper::SaveStringToFile(JsonText, *OutputPath, FFileHelper::EEncodingOptions::ForceUTF8WithoutBOM))
-		{
-			OutError = TEXT("save_json_file_failed");
-			return false;
-		}
-
-		OutOutputPath = OutputPath;
-		return true;
+		UeAgentAuthoringFileIO::FSaveOptions SaveOptions;
+		SaveOptions.SourceCommand = TEXT("montage_export_json");
+		SaveOptions.bExternalizeInlineDetails = false;
+		SaveOptions.bRemoveDiagnosticAuthoringFields = false;
+		return UeAgentAuthoringFileIO::SaveObject(OutputPathInput, Root, SaveOptions, OutOutputPath, OutError);
 	}
 
-	static bool LoadJsonFile(const FString& InputPathInput, TSharedPtr<FJsonObject>& OutRoot, FString& OutResolvedPath, FString& OutError)
+	static bool LoadAuthoringFile(const FString& InputPathInput, TSharedPtr<FJsonObject>& OutRoot, FString& OutResolvedPath, FString& OutError)
 	{
-		OutRoot.Reset();
-		OutResolvedPath.Reset();
-
-		FString InputPath = InputPathInput;
-		InputPath.TrimStartAndEndInline();
-		if (InputPath.IsEmpty())
-		{
-			OutError = TEXT("missing_json_file");
-			return false;
-		}
-
-		InputPath = UeAgentJsonDiagnostics::ResolveProjectRelativeFilePath(InputPath);
-		if (!FPaths::FileExists(InputPath))
-		{
-			OutError = TEXT("json_file_not_found");
-			return false;
-		}
-
-		FString JsonText;
-		if (!FFileHelper::LoadFileToString(JsonText, *InputPath))
-		{
-			OutError = TEXT("load_json_file_failed");
-			return false;
-		}
-
-		const TSharedRef<TJsonReader<>> Reader = TJsonReaderFactory<>::Create(JsonText);
-		if (!FJsonSerializer::Deserialize(Reader, OutRoot) || !OutRoot.IsValid())
-		{
-			OutError = TEXT("json_parse_failed");
-			return false;
-		}
-
-		OutResolvedPath = InputPath;
-		return true;
+		UeAgentAuthoringFileIO::FLoadOptions LoadOptions;
+		return UeAgentAuthoringFileIO::LoadObject(InputPathInput, OutRoot, LoadOptions, OutResolvedPath, OutError);
 	}
 
 	static int32 FindSlotTrackIndexByName(const UAnimMontage* Montage, const FString& InSlotName)
@@ -1301,7 +1241,7 @@ bool FUeAgentHttpServer::CmdMontageExportJson(const FUeAgentRequestContext& Ctx,
 	FString SavedOutputFile;
 	if (!OutputFile.IsEmpty())
 	{
-		if (!UeAgentMontageOps::SaveJsonFile(OutputFile, Root, SavedOutputFile, OutError))
+		if (!UeAgentMontageOps::SaveAuthoringFile(OutputFile, Root, SavedOutputFile, OutError))
 		{
 			return false;
 		}
@@ -1324,7 +1264,7 @@ bool FUeAgentHttpServer::CmdMontageApplyJson(const FUeAgentRequestContext& Ctx, 
 	JsonFile.TrimStartAndEndInline();
 	if (!JsonFile.IsEmpty())
 	{
-		if (!UeAgentMontageOps::LoadJsonFile(JsonFile, JsonRoot, ResolvedJsonFile, OutError))
+		if (!UeAgentMontageOps::LoadAuthoringFile(JsonFile, JsonRoot, ResolvedJsonFile, OutError))
 		{
 			return false;
 		}

@@ -1,0 +1,84 @@
+authoring: { reason: command_has_no_registered_folder_authoring_profile, state: none }
+category: ai_behavior_blackboard_statetree_eqs_navigation_smartobject
+command: smart_object_find
+deprecation: { reason: command_is_active, state: none }
+discovery: { aliases: [], keywords_en: [smart, object, find, ai_behavior_blackboard_statetree_eqs_navigation_smartobject], keywords_zh: [smart_object_find], summary_en: "Execute smart_object_find with a verified implementation contract", summary_zh: "查询可用 Smart Object", tags: [ai_behavior_blackboard_statetree_eqs_navigation_smartobject, p2-007] }
+errors: {
+  codes: [
+    { code: no_editor_world, description_zh: "C++ 实现返回错误码 no_editor_world", retry_safe: false, stage: execution, wire_match: exact }
+    { code: no_geditor, description_zh: "C++ 实现返回错误码 no_geditor", retry_safe: false, stage: execution, wire_match: exact }
+    { code: smart_object_subsystem_not_found, description_zh: "C++ 实现返回错误码 smart_object_subsystem_not_found", retry_safe: false, stage: execution, wire_match: exact }
+  ]
+}
+evidence: {
+  docs: [
+    { path: "Plugins/UeAgentInterface/docs/commands/ai_behavior_blackboard_statetree_eqs_navigation_smartobject/smart_object_find.md", purpose: "user documentation cross-check; C++ implementation remains authoritative" }
+  ]
+  implementation: [
+    { line_hint: 786, path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Commands/AI/UeAgentHttpServer_AI_SmartObjectBehaviorStack.cpp", purpose: "command handler, parameter and return evidence", symbol: CmdSmartObjectFind }
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Commands/Level/UeAgentHttpServer_Level_CaptureAndPersistence.cpp", purpose: "transitive helper evidence used by the command handler" }
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Server/UeAgentHttpServer.cpp", purpose: "transitive helper evidence used by the command handler" }
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Utilities/UeAgentJsonDiagnostics.cpp", purpose: "transitive helper evidence used by the command handler" }
+  ]
+  tests: [
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterfaceTests/Private/Smoke/UeAgentInterfaceAISmokeTests.cpp", purpose: "smoke or negative-path evidence cross-checked for the verified contract" }
+  ]
+}
+execution: {
+  destructive: false
+  editor_state: required
+  game_thread: required
+  idempotent: false
+  kind: session_control
+  overwrite_behavior: none
+  pie_state: allowed
+  retry_safe: false
+  save_behavior: none
+  side_effects: [starts_runtime, modifies_editor_session]
+  ui_effect: none
+}
+maturity: verified
+params: {
+  constraints: []
+  fields: {
+    agent: { default_state: none, description_zh: "C++ 实现读取的 agent 参数", required: false, type: string }
+    include_claimed: { default: false, default_state: defined, description_zh: "C++ 实现读取的 include_claimed 参数", required: false, type: bool }
+    max_results: { default_state: none, description_zh: "C++ 实现读取的 max_results 参数", required: false, type: number }
+    query_bounds: { default_state: none, description_zh: "Smart Object 查询 AABB，使用 UE Editor World 坐标（cm）", required: false, type: object, type_ref: "shared:Box3D" }
+    radius: { default: 2000, default_state: defined, description_zh: "C++ 实现读取的 radius 参数", required: false, type: number }
+    required_tags: { default_state: none, description_zh: "C++ 实现读取的 required_tags 参数", item_type: json_value, required: false, type: array }
+  }
+  state: defined
+}
+response: { artifact_fields: [candidate_components, results, query_max, query_min], compact_fields: [status, agent, result_count, candidate_actor_count, truncated], failure_fields: [], max_items_policy: { fields: [], mode: none } }
+returns: {
+  fields: {
+    agent: { description_zh: "C++ 实现返回的 agent 字段；是否出现取决于执行分支", required: false, type: string }
+    candidate_actor_count: { description_zh: "C++ 实现返回的 candidate_actor_count 字段；是否出现取决于执行分支", required: false, type: integer }
+    candidate_components: { description_zh: "C++ 实现返回的 candidate_components 字段；是否出现取决于执行分支", item_type: json_value, required: false, type: array }
+    created_runtime_entries_for_query: { description_zh: "C++ 实现返回的 created_runtime_entries_for_query 字段；是否出现取决于执行分支", required: false, type: number }
+    query_max: { description_zh: "实际 Smart Object 查询 AABB 的 UE world-space 边界（cm）", required: false, type: object, type_ref: "shared:Vector3" }
+    query_min: { description_zh: "实际 Smart Object 查询 AABB 的 UE world-space 边界（cm）", required: false, type: object, type_ref: "shared:Vector3" }
+    result_count: { description_zh: "C++ 实现返回的 result_count 字段；是否出现取决于执行分支", required: false, type: integer }
+    results: { description_zh: "C++ 实现返回的 results 字段；是否出现取决于执行分支", item_type: json_value, required: false, type: array }
+    status: { description_zh: "C++ 实现返回的 status 字段；是否出现取决于执行分支", required: false, type: string }
+    truncated: { description_zh: "C++ 实现返回的 truncated 字段；是否出现取决于执行分支", required: false, type: bool }
+    used_actor_list_fallback: { description_zh: "C++ 实现返回的 used_actor_list_fallback 字段；是否出现取决于执行分支", required: false, type: bool }
+  }
+  state: defined
+}
+schema: uai.command_spec.v1
+status: active
+types: {}
+verification: {
+  assertions: [
+    { id: result_present, operator: exists, source: returns.status }
+  ]
+  failure_policy: fail_overall
+  methods: [
+    { id: result, kind: result_assertion }
+  ]
+  required: true
+  state: defined
+}
+version: 1

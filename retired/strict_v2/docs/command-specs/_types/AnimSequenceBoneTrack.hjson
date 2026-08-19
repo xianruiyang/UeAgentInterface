@@ -1,0 +1,14 @@
+definition: {
+  additional_fields: false
+  fields: {
+    bone: { default_state: none, description_zh: "目标骨骼名；bone/bone_name/track_name 三者必选其一", required: false, type: string }
+    bone_name: { default_state: none, description_zh: "bone 别名", required: false, type: string }
+    keys: { default_state: none, description_zh: "bone-local transform keys；keys/transforms 二者必选其一", item_type: object, item_type_ref: "shared:AnimSequenceBoneTrackKey", required: false, type: array }
+    track_name: { default_state: none, description_zh: "bone 别名", required: false, type: string }
+    transforms: { default_state: none, description_zh: "keys 别名", item_type: object, item_type_ref: "shared:AnimSequenceBoneTrackKey", required: false, type: array }
+  }
+  kind: object
+}
+schema: uai.command_spec.shared_type.v1
+type_id: AnimSequenceBoneTrack
+version: 1

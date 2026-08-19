@@ -1,0 +1,94 @@
+authoring: { reason: command_has_no_registered_folder_authoring_profile, state: none }
+category: editor_viewport
+command: editor_viewport_set_preview_state
+deprecation: { reason: command_is_active, state: none }
+discovery: { aliases: [], keywords_en: [editor, viewport, set, preview, state, level, niagara, component, desired_age, seek, temporal, frame, editor_viewport], keywords_zh: ["编辑器视口", "预览状态", "关卡", "Niagara组件", "绝对时间", "定帧", "跳转", editor_viewport_set_preview_state], summary_en: "Set adapter preview state, including deterministic absolute-age seeking for Niagara components in a Level viewport", summary_zh: "设置 adapter 预览状态，并支持关卡 NiagaraComponent 的绝对时间确定性定帧", tags: [editor_viewport, niagara, temporal, p2-003] }
+errors: {
+  codes: [
+    { code: ambiguous_viewport_target, description_zh: "C++ 实现返回错误码 ambiguous_viewport_target", retry_safe: false, stage: execution, wire_match: exact }
+    { code: asset_editor, description_zh: "C++ 实现返回错误码 asset_editor", retry_safe: false, stage: execution, wire_match: exact }
+    { code: editor_viewport_preview_state_not_supported, description_zh: "C++ 实现返回错误码 editor_viewport_preview_state_not_supported", retry_safe: false, stage: execution, wire_match: exact }
+    { code: invalid_persona_viewport, description_zh: "C++ 实现返回错误码 invalid_persona_viewport", retry_safe: true, stage: preflight, wire_match: exact }
+    { code: invalid_level_preview_absolute_time, description_zh: "Level NiagaraComponent 绝对预览时间必须是非负有限数", retry_safe: true, stage: preflight, wire_match: exact }
+    { code: level_preview_actor_not_found, description_zh: "当前 Editor World 中未找到 actor_id 对应 Actor", retry_safe: true, stage: preflight, wire_match: exact }
+    { code: level_preview_component_not_found, description_zh: "目标 Actor 中未找到 component_id 对应组件", retry_safe: true, stage: preflight, wire_match: exact }
+    { code: level_preview_component_not_niagara, description_zh: "Level preview_state 当前只对 NiagaraComponent 提供时间求值", retry_safe: true, stage: preflight, wire_match: exact }
+    { code: level_preview_state_conflicting_simulation, description_zh: "绝对时间求值不能与 simulation=false 同时请求", retry_safe: true, stage: preflight, wire_match: exact }
+    { code: level_preview_state_missing_action, description_zh: "Level preview_state 未提供 age、simulation 或 pause 动作", retry_safe: true, stage: preflight, wire_match: exact }
+    { code: level_preview_seek_incomplete, description_zh: "NiagaraComponent 未达到请求的绝对模拟时间，命令不会返回假成功", retry_safe: false, stage: execution, wire_match: exact }
+    { code: level_preview_restore_seek_incomplete, description_zh: "截图恢复阶段未能恢复 NiagaraComponent 原模拟年龄", retry_safe: false, stage: execution, wire_match: exact }
+    { code: missing_level_preview_actor_id, description_zh: "Level preview_state 缺少 actor_id", retry_safe: true, stage: preflight, wire_match: exact }
+    { code: missing_level_preview_component_id, description_zh: "Level preview_state 缺少 component_id", retry_safe: true, stage: preflight, wire_match: exact }
+    { code: unsupported_asset_editor_viewport, description_zh: "C++ 实现返回错误码 unsupported_asset_editor_viewport", retry_safe: false, stage: execution, wire_match: exact }
+    { code: unsupported_editor_viewport_target, description_zh: "C++ 实现返回错误码 unsupported_editor_viewport_target", retry_safe: false, stage: execution, wire_match: exact }
+  ]
+}
+evidence: {
+  docs: [
+    { path: "Plugins/UeAgentInterface/docs/commands/editor_viewport/editor_viewport_set_preview_state.md", purpose: "user documentation cross-check; C++ implementation remains authoritative" }
+  ]
+  implementation: [
+    { line_hint: 156, path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Commands/EditorViewport/UeAgentHttpServer_EditorViewportDispatch.cpp", purpose: "command handler, parameter and return evidence", symbol: "FUeAgentHttpServer::ExecuteEditorViewportCommand__command_editor_viewport_set_preview_state" }
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Commands/EditorViewport/UeAgentEditorViewportTypes.cpp", purpose: "transitive helper evidence used by the command handler" }
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Commands/EditorViewport/UeAgentHttpServer_EditorViewportCore.cpp", purpose: "transitive helper evidence used by the command handler" }
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Commands/EditorViewport/UeAgentHttpServer_EditorViewportPersona.cpp", purpose: "transitive helper evidence used by the command handler" }
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Commands/EditorViewport/UeAgentHttpServer_EditorViewportLevel.cpp", purpose: "Level NiagaraComponent preview-state resolution, absolute-age seek and restore" }
+  ]
+  tests: [
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterfaceTests/Private/Smoke/UeAgentInterfaceSmoke_EditorViewport.cpp", purpose: "smoke or negative-path evidence cross-checked for the verified contract" }
+  ]
+}
+execution: {
+  destructive: false
+  editor_state: required
+  game_thread: required
+  idempotent: false
+  kind: session_control
+  overwrite_behavior: none
+  pie_state: allowed
+  retry_safe: false
+  save_behavior: none
+  side_effects: [modifies_editor_session, opens_window]
+  ui_effect: window_mutation
+}
+maturity: verified
+params: {
+  constraints: []
+  fields: {
+    preview_state: { default_state: none, description_zh: "C++ 实现读取的 preview_state 参数", required: true, type: object, type_ref: "shared:EditorViewportPreviewState" }
+    target: { default_state: none, description_zh: "C++ 实现读取的 target 参数", required: false, type: object, type_ref: "shared:EditorViewportTarget" }
+  }
+  state: defined
+}
+response: { artifact_fields: [], compact_fields: [adapter, camera, capabilities, client_class, preview_state, preview_state_applied], failure_fields: [params.preview_state], max_items_policy: { fields: [], mode: none } }
+returns: {
+  fields: {
+    adapter: { description_zh: "C++ 实现返回的 adapter 字段；是否出现取决于执行分支", required: false, type: string }
+    camera: { description_zh: "C++ 实现返回的 camera 字段；是否出现取决于执行分支", required: false, type: object, type_ref: "shared:EditorViewportCamera" }
+    capabilities: { description_zh: "C++ 实现返回的 capabilities 字段；是否出现取决于执行分支", required: false, type: json_value }
+    client_class: { description_zh: "C++ 实现返回的 client_class 字段；是否出现取决于执行分支", required: false, type: string }
+    preview_state: { description_zh: "C++ 实现返回的 preview_state 字段；是否出现取决于执行分支", required: false, type: object, type_ref: "shared:EditorViewportPreviewState" }
+    preview_state_applied: { description_zh: "C++ 实现返回的 preview_state_applied 字段；是否出现取决于执行分支", required: false, type: json_value }
+    schema: { description_zh: "C++ 实现返回的 schema 字段；是否出现取决于执行分支", required: false, type: string }
+    target: { description_zh: "C++ 实现返回的 target 字段；是否出现取决于执行分支", required: false, type: object, type_ref: "shared:EditorViewportTarget" }
+    visual_options: { description_zh: "C++ 实现返回的 visual_options 字段；是否出现取决于执行分支", required: false, type: object, type_ref: "shared:EditorViewportVisualOptions" }
+  }
+  state: defined
+}
+schema: uai.command_spec.v1
+status: active
+types: {}
+verification: {
+  assertions: [
+    { id: result_present, operator: exists, source: returns.adapter }
+    { id: state_readback_present, operator: exists, source: methods.state_readback.preview_state }
+  ]
+  failure_policy: fail_overall
+  methods: [
+    { id: result, kind: result_assertion }
+    { command: editor_viewport_get_state, id: state_readback, kind: command_readback, params_mapping: { target: params.target } }
+  ]
+  required: true
+  state: defined
+}
+version: 1

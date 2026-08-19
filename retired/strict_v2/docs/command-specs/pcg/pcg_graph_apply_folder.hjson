@@ -1,0 +1,103 @@
+authoring: { operation: apply, profile_ref: "contracts/field_contracts/pcg_graph.hjson", state: defined, type_id: pcg_graph }
+category: pcg
+command: pcg_graph_apply_folder
+deprecation: { reason: command_is_active, state: none }
+discovery: { aliases: [], keywords_en: [pcg, graph, apply, folder], keywords_zh: [pcg_graph_apply_folder], summary_en: "Preflight or atomically apply a PCG Graph from one index.hjson", summary_zh: "通过单个 index.hjson 预检或原子应用 PCG Graph", tags: [pcg, authoring, apply, unified_contract] }
+errors: {
+  codes: [
+    { code: missing_folder_path, description_zh: "缺少 workspace 路径", retry_safe: true, stage: preflight, wire_match: exact }
+    { code: pcg_workspace_, description_zh: "统一 workspace 加载、身份或依赖检查失败", retry_safe: true, stage: preflight, wire_match: prefix }
+    { code: pcg_graph_, description_zh: "PCG 图解析、Apply、快照或验证失败", retry_safe: false, stage: execution, wire_match: prefix }
+    { code: object_operation_, description_zh: "共享反射 Apply 预检失败", retry_safe: true, stage: preflight, wire_match: prefix }
+  ]
+}
+evidence: {
+  docs: [
+    { path: "Plugins/UeAgentInterface/docs/commands/pcg/pcg_graph_apply_folder.md", purpose: "正式命令文档" }
+  ]
+  implementation: [
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Commands/PCG/UeAgentHttpServer_PCG.cpp", purpose: "HTTP 参数与结果薄适配器", symbol: CmdPCGGraphApplyFolder }
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Domains/PCG/Authoring/UeAgentPCGAuthoringApplyProvider.cpp", purpose: "统一 PCG authoring 权威实现" }
+  ]
+  tests: [
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterfaceTests/Private/UeAgentInterfacePCGAuthoringTests.cpp", purpose: "注册、单文件 round-trip、no-op 和回滚" }
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterfaceTests/Private/Smoke/PCG/UeAgentInterfacePCGSmokeTests.cpp", purpose: "真实命令链路 smoke" }
+  ]
+}
+execution: {
+  destructive: true
+  editor_state: required
+  game_thread: required
+  idempotent: false
+  kind: write
+  overwrite_behavior: none
+  pie_state: allowed
+  retry_safe: false
+  save_behavior: caller_controlled
+  side_effects: [modifies_asset]
+  ui_effect: none
+}
+maturity: verified
+params: {
+  constraints: [
+    { fields: [folder_path, input_folder, folder], kind: one_of }
+  ]
+  fields: {
+    asset_path: { default_state: none, description_zh: "外部目标断言；必须与 index.hjson target 一致", required: false, type: ue_asset_path }
+    dry_run: { default: true, default_state: defined, description_zh: "仅执行共享预检", required: false, type: bool }
+    folder: { default_state: none, description_zh: "folder_path 的兼容参数名；仅作为命令参数别名", required: false, type: string }
+    folder_path: {
+      default_state: none
+      description_zh: "统一 PCG Graph workspace 根目录"
+      path_semantics: { kind: filesystem_directory, must_exist: true, writable: false }
+      required: false
+      type: filesystem_path
+    }
+    input_folder: { default_state: none, description_zh: "folder_path 的输入别名", required: false, type: string }
+  }
+  state: defined
+}
+response: { artifact_fields: [], compact_fields: [status, asset_path, folder_path, dry_run, resolved_operation, mutations_applied], failure_fields: [params.folder_path, params.asset_path], max_items_policy: { fields: [], mode: none } }
+returns: {
+  fields: {
+    applied_edge_count: { description_zh: "已应用连线数", required: false, type: integer }
+    applied_node_count: { description_zh: "已应用节点数", required: false, type: integer }
+    applied_node_property_count: { description_zh: "已应用节点属性数", required: false, type: integer }
+    asset_path: { description_zh: "目标 PCG Graph", required: false, type: ue_asset_path }
+    dry_run: { description_zh: "是否仅预检", required: true, type: bool }
+    error_code: { description_zh: "稳定错误码", required: false, type: string }
+    error_detail: { description_zh: "错误详情", required: false, type: string }
+    folder_path: { description_zh: "workspace 根目录", required: true, type: filesystem_path }
+    mutations_applied: { description_zh: "共享事务 mutation 数", required: false, type: integer }
+    no_op: { description_zh: "是否无状态变化", required: false, type: bool }
+    object_path: { description_zh: "实际 UObject path", required: false, type: string }
+    phase: { description_zh: "事务阶段", required: false, type: string }
+    planned_edge_count: { description_zh: "预检连线数", required: false, type: integer }
+    planned_node_count: { description_zh: "预检节点数", required: false, type: integer }
+    planned_node_property_count: { description_zh: "预检节点属性数", required: false, type: integer }
+    ready: { description_zh: "dry-run 是否通过", required: false, type: bool }
+    resolved_operation: { description_zh: "解析后的资产操作", required: false, type: string }
+    rollback_attempted: { description_zh: "是否尝试回滚", required: false, type: bool }
+    rollback_succeeded: { description_zh: "回滚是否成功", required: false, type: bool }
+    schema: { description_zh: ue_agent_interface.pcg.graph_apply.v2, required: true, type: string }
+    status: { description_zh: "applied 或 failed", required: false, type: string }
+  }
+  state: defined
+}
+schema: uai.command_spec.v1
+status: active
+types: {}
+verification: {
+  assertions: [
+    { id: result_present, operator: exists, source: returns.dry_run }
+    { id: readback_present, operator: exists, source: methods.state_readback.asset_path }
+  ]
+  failure_policy: fail_overall
+  methods: [
+    { id: result, kind: result_assertion }
+    { command: pcg_graph_snapshot, id: state_readback, kind: command_readback, params_mapping: { asset_path: returns.asset_path } }
+  ]
+  required: true
+  state: defined
+}
+version: 1

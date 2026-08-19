@@ -1,0 +1,1080 @@
+{
+  "schema": "uai.domain_adapter.world_simple_effect.test_fixture.v1",
+  "descriptor_count": 11,
+  "native_operation_types": [
+    "world.entity.create",
+    "world.membership.update",
+    "world.state.update"
+  ],
+  "descriptors": [
+    {
+      "descriptor_id": "uai.operation.world.actor.create",
+      "version": 1,
+      "descriptor_hash": "sha256:ef48592d995cc18cfbe112bac443db7ff7f047a82e126b3a90df0623ca128fc5",
+      "capability_id": "world.actor.create",
+      "native_operation_type": "world.entity.create",
+      "required_context_facets": ["level", "world"],
+      "allowed_state_planes": ["authoring_memory"],
+      "space_contract": {
+        "subject": "new actor placement transform",
+        "dimension": 3,
+        "semantic_frame": "declared_actor_placement",
+        "write_frame": "ue_world",
+        "read_frame": "ue_world",
+        "verify_frame": "ue_world",
+        "conversion_chain": "declared actor placement -> C4 canonical spatial values -> UE world actor transform -> independent actor readback"
+      },
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "actor_class_ref": {"type": "string", "minLength": 1},
+          "placement": {
+            "type": "object",
+            "properties": {
+              "frame_id": {"type": "string", "minLength": 1},
+              "unit": {"type": "string", "enum": ["centimeter", "meter"]},
+              "translation": {
+                "type": "array",
+                "items": {"type": "number"},
+                "minItems": 3,
+                "maxItems": 3
+              },
+              "rotation_quaternion_xyzw": {
+                "type": "array",
+                "items": {"type": "number"},
+                "minItems": 4,
+                "maxItems": 4
+              },
+              "scale": {
+                "type": "array",
+                "items": {"type": "number"},
+                "minItems": 3,
+                "maxItems": 3
+              },
+              "basis_evidence": {"type": "string", "minLength": 1}
+            },
+            "required": ["frame_id", "unit", "translation", "rotation_quaternion_xyzw", "scale", "basis_evidence"],
+            "additionalProperties": false
+          },
+          "label": {"type": "string", "minLength": 1},
+          "folder_path": {"type": "string"},
+          "tags": {
+            "type": "array",
+            "items": {"type": "string", "minLength": 1},
+            "uniqueItems": true
+          },
+          "save_level": {"type": "boolean"}
+        },
+        "required": ["actor_class_ref", "placement", "label", "save_level"],
+        "additionalProperties": false
+      },
+      "result_schema": {
+        "type": "object",
+        "properties": {
+          "operation_id": {"type": "string", "minLength": 1},
+          "outcome": {"type": "string", "enum": ["complete", "partial", "rolled_back", "state_unknown"]},
+          "target_refs": {
+            "type": "array",
+            "items": {"type": "string", "minLength": 1},
+            "uniqueItems": true
+          },
+          "evidence_refs": {
+            "type": "array",
+            "items": {"type": "string", "minLength": 1},
+            "uniqueItems": true
+          }
+        },
+        "required": ["operation_id", "outcome", "target_refs"],
+        "additionalProperties": false
+      }
+    },
+    {
+      "descriptor_id": "uai.operation.world.wall.create_with_opening",
+      "version": 1,
+      "descriptor_hash": "sha256:afae257cfa65ee52931f7a03480eb812e104b80ff326f0423e0bbb639770d4d2",
+      "capability_id": "world.wall.create_with_opening",
+      "native_operation_type": "world.entity.create",
+      "required_context_facets": ["level", "world"],
+      "allowed_state_planes": ["authoring_memory"],
+      "space_contract": {
+        "subject": "wall plane, opening rectangle, and generated wall segments",
+        "dimension": 3,
+        "semantic_frame": "declared_wall_plane",
+        "write_frame": "ue_world",
+        "read_frame": "ue_world",
+        "verify_frame": "declared_wall_plane",
+        "conversion_chain": "declared wall plane -> C4 canonical spatial values -> UE world segment transforms -> independent actor readback -> declared wall plane"
+      },
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "plane": {
+            "type": "object",
+            "properties": {
+              "frame_id": {"type": "string", "minLength": 1},
+              "unit": {"type": "string", "enum": ["centimeter", "meter"]},
+              "center": {
+                "type": "array",
+                "items": {"type": "number"},
+                "minItems": 3,
+                "maxItems": 3
+              },
+              "normal": {
+                "type": "array",
+                "items": {"type": "number"},
+                "minItems": 3,
+                "maxItems": 3
+              },
+              "up": {
+                "type": "array",
+                "items": {"type": "number"},
+                "minItems": 3,
+                "maxItems": 3
+              },
+              "basis_evidence": {"type": "string", "minLength": 1}
+            },
+            "required": ["frame_id", "unit", "center", "normal", "up", "basis_evidence"],
+            "additionalProperties": false
+          },
+          "wall": {
+            "type": "object",
+            "properties": {
+              "thickness": {"type": "number", "exclusiveMinimum": 0},
+              "width": {"type": "number", "exclusiveMinimum": 0},
+              "height": {"type": "number", "exclusiveMinimum": 0}
+            },
+            "required": ["thickness", "width", "height"],
+            "additionalProperties": false
+          },
+          "opening": {
+            "type": "object",
+            "properties": {
+              "center": {
+                "type": "array",
+                "items": {"type": "number"},
+                "minItems": 2,
+                "maxItems": 2
+              },
+              "size": {
+                "type": "array",
+                "items": {"type": "number", "exclusiveMinimum": 0},
+                "minItems": 2,
+                "maxItems": 2
+              },
+              "padding": {"type": "number", "minimum": 0},
+              "out_of_bounds": {"type": "string", "enum": ["reject", "clamp"]},
+              "minimum_segment_size": {"type": "number", "minimum": 0}
+            },
+            "required": ["center", "size"],
+            "additionalProperties": false
+          },
+          "segment_template": {
+            "type": "object",
+            "properties": {
+              "actor_class_ref": {"type": "string", "minLength": 1},
+              "mesh_ref": {"type": "string", "minLength": 1},
+              "folder_path": {"type": "string"},
+              "label_prefix": {"type": "string", "minLength": 1}
+            },
+            "required": ["actor_class_ref", "mesh_ref"],
+            "additionalProperties": false
+          }
+        },
+        "required": ["plane", "wall", "opening", "segment_template"],
+        "additionalProperties": false
+      },
+      "result_schema": {
+        "type": "object",
+        "properties": {
+          "operation_id": {"type": "string", "minLength": 1},
+          "outcome": {"type": "string", "enum": ["complete", "partial", "rolled_back", "state_unknown"]},
+          "target_refs": {
+            "type": "array",
+            "items": {"type": "string", "minLength": 1},
+            "uniqueItems": true
+          },
+          "evidence_refs": {
+            "type": "array",
+            "items": {"type": "string", "minLength": 1},
+            "uniqueItems": true
+          }
+        },
+        "required": ["operation_id", "outcome", "target_refs"],
+        "additionalProperties": false
+      }
+    },
+    {
+      "descriptor_id": "uai.operation.world.data_layer_instance.create",
+      "version": 1,
+      "descriptor_hash": "sha256:adfcd0f822359bfb044f5b3946287bfca5f9746118057d871b5524d69d673178",
+      "capability_id": "world.data_layer_instance.create",
+      "native_operation_type": "world.entity.create",
+      "required_context_facets": ["level", "world"],
+      "allowed_state_planes": ["authoring_memory"],
+      "input_schema": {
+        "oneOf": [
+          {
+            "type": "object",
+            "properties": {
+              "asset_ref": {"type": "string", "minLength": 1},
+              "parent_ref": {"type": "string", "minLength": 1},
+              "private": {"const": false},
+              "initial_state": {
+                "type": "object",
+                "properties": {
+                  "initial_runtime_state": {"type": "string", "enum": ["unloaded", "loaded", "activated"]},
+                  "initially_visible": {"type": "boolean"},
+                  "loaded_in_editor": {"type": "boolean"},
+                  "visible": {"type": "boolean"}
+                },
+                "minProperties": 1,
+                "additionalProperties": false
+              }
+            },
+            "required": ["asset_ref"],
+            "additionalProperties": false
+          },
+          {
+            "type": "object",
+            "properties": {
+              "parent_ref": {"type": "string", "minLength": 1},
+              "private": {"const": true},
+              "short_name": {"type": "string", "minLength": 1},
+              "initial_state": {
+                "type": "object",
+                "properties": {
+                  "initial_runtime_state": {"type": "string", "enum": ["unloaded", "loaded", "activated"]},
+                  "initially_visible": {"type": "boolean"},
+                  "loaded_in_editor": {"type": "boolean"},
+                  "visible": {"type": "boolean"}
+                },
+                "minProperties": 1,
+                "additionalProperties": false
+              }
+            },
+            "required": ["private", "short_name"],
+            "additionalProperties": false
+          }
+        ]
+      },
+      "result_schema": {
+        "type": "object",
+        "properties": {
+          "operation_id": {"type": "string", "minLength": 1},
+          "outcome": {"type": "string", "enum": ["complete", "partial", "rolled_back", "state_unknown"]},
+          "target_refs": {
+            "type": "array",
+            "items": {"type": "string", "minLength": 1},
+            "uniqueItems": true
+          },
+          "evidence_refs": {
+            "type": "array",
+            "items": {"type": "string", "minLength": 1},
+            "uniqueItems": true
+          }
+        },
+        "required": ["operation_id", "outcome", "target_refs"],
+        "additionalProperties": false
+      }
+    },
+    {
+      "descriptor_id": "uai.operation.world.data_layer_relation.update",
+      "version": 1,
+      "descriptor_hash": "sha256:d6572ec8ab59510bcfe91db0f545465a604567a4715101b3c45115db7d7adf9c",
+      "capability_id": "world.data_layer_relation.update",
+      "native_operation_type": "world.membership.update",
+      "required_context_facets": ["level", "world"],
+      "allowed_state_planes": ["authoring_memory"],
+      "input_schema": {
+        "oneOf": [
+          {
+            "type": "object",
+            "properties": {
+              "relation_kind": {"const": "actor_membership"},
+              "subject_refs": {
+                "type": "array",
+                "items": {"type": "string", "minLength": 1},
+                "minItems": 1,
+                "uniqueItems": true
+              },
+              "collection_refs": {
+                "type": "array",
+                "items": {"type": "string", "minLength": 1},
+                "uniqueItems": true
+              },
+              "mode": {"type": "string", "enum": ["add", "remove", "replace", "clear"]}
+            },
+            "required": ["relation_kind", "subject_refs", "collection_refs", "mode"],
+            "additionalProperties": false
+          },
+          {
+            "type": "object",
+            "properties": {
+              "relation_kind": {"const": "parent"},
+              "subject_refs": {
+                "type": "array",
+                "items": {"type": "string", "minLength": 1},
+                "minItems": 1,
+                "uniqueItems": true
+              },
+              "collection_refs": {
+                "type": "array",
+                "items": {"type": "string", "minLength": 1},
+                "maxItems": 1,
+                "uniqueItems": true
+              },
+              "mode": {"type": "string", "enum": ["replace", "clear"]}
+            },
+            "required": ["relation_kind", "subject_refs", "collection_refs", "mode"],
+            "additionalProperties": false
+          }
+        ]
+      },
+      "result_schema": {
+        "type": "object",
+        "properties": {
+          "operation_id": {"type": "string", "minLength": 1},
+          "outcome": {"type": "string", "enum": ["complete", "partial", "rolled_back", "state_unknown"]},
+          "target_refs": {
+            "type": "array",
+            "items": {"type": "string", "minLength": 1},
+            "uniqueItems": true
+          },
+          "evidence_refs": {
+            "type": "array",
+            "items": {"type": "string", "minLength": 1},
+            "uniqueItems": true
+          }
+        },
+        "required": ["operation_id", "outcome", "target_refs"],
+        "additionalProperties": false
+      }
+    },
+    {
+      "descriptor_id": "uai.operation.world.data_layer_state.update",
+      "version": 1,
+      "descriptor_hash": "sha256:d75a283bac3d696d2e8c7e141302957644de688eaa10704127527e22266ad404",
+      "capability_id": "world.data_layer_state.update",
+      "native_operation_type": "world.state.update",
+      "required_context_facets": ["level", "world"],
+      "allowed_state_planes": ["authoring_memory"],
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "target_refs": {
+            "type": "array",
+            "items": {"type": "string", "minLength": 1},
+            "minItems": 1,
+            "uniqueItems": true
+          },
+          "changes": {
+            "type": "object",
+            "properties": {
+              "initial_runtime_state": {"type": "string", "enum": ["unloaded", "loaded", "activated"]},
+              "initially_visible": {"type": "boolean"},
+              "loaded_in_editor": {"type": "boolean"},
+              "visible": {"type": "boolean"},
+              "short_name": {"type": "string", "minLength": 1}
+            },
+            "minProperties": 1,
+            "additionalProperties": false
+          }
+        },
+        "required": ["target_refs", "changes"],
+        "additionalProperties": false
+      },
+      "result_schema": {
+        "type": "object",
+        "properties": {
+          "operation_id": {"type": "string", "minLength": 1},
+          "outcome": {"type": "string", "enum": ["complete", "partial", "rolled_back", "state_unknown"]},
+          "target_refs": {
+            "type": "array",
+            "items": {"type": "string", "minLength": 1},
+            "uniqueItems": true
+          },
+          "evidence_refs": {
+            "type": "array",
+            "items": {"type": "string", "minLength": 1},
+            "uniqueItems": true
+          }
+        },
+        "required": ["operation_id", "outcome", "target_refs"],
+        "additionalProperties": false
+      }
+    },
+    {
+      "descriptor_id": "uai.operation.world.actor_hlod_layer.update",
+      "version": 1,
+      "descriptor_hash": "sha256:3a4945c7b3ab00c58cde8a475610f855f16fb53cdc3e656bac310e3d7a3c76a0",
+      "capability_id": "world.actor_hlod_layer.update",
+      "native_operation_type": "world.membership.update",
+      "required_context_facets": ["level", "world"],
+      "allowed_state_planes": ["authoring_memory"],
+      "input_schema": {
+        "oneOf": [
+          {
+            "type": "object",
+            "properties": {
+              "subject_refs": {
+                "type": "array",
+                "items": {"type": "string", "minLength": 1},
+                "minItems": 1,
+                "uniqueItems": true
+              },
+              "mode": {"const": "replace"},
+              "collection_ref": {"type": "string", "minLength": 1}
+            },
+            "required": ["subject_refs", "mode", "collection_ref"],
+            "additionalProperties": false
+          },
+          {
+            "type": "object",
+            "properties": {
+              "subject_refs": {
+                "type": "array",
+                "items": {"type": "string", "minLength": 1},
+                "minItems": 1,
+                "uniqueItems": true
+              },
+              "mode": {"const": "clear"}
+            },
+            "required": ["subject_refs", "mode"],
+            "additionalProperties": false
+          }
+        ]
+      },
+      "result_schema": {
+        "type": "object",
+        "properties": {
+          "operation_id": {"type": "string", "minLength": 1},
+          "outcome": {"type": "string", "enum": ["complete", "partial", "rolled_back", "state_unknown"]},
+          "target_refs": {
+            "type": "array",
+            "items": {"type": "string", "minLength": 1},
+            "uniqueItems": true
+          },
+          "evidence_refs": {
+            "type": "array",
+            "items": {"type": "string", "minLength": 1},
+            "uniqueItems": true
+          }
+        },
+        "required": ["operation_id", "outcome", "target_refs"],
+        "additionalProperties": false
+      }
+    },
+    {
+      "descriptor_id": "uai.operation.world.actor_streaming_policy.update",
+      "version": 1,
+      "descriptor_hash": "sha256:127c8f4013c746cc0786d82e7ca5217591923b8225fd5e42ef90723b7f501373",
+      "capability_id": "world.actor_streaming_policy.update",
+      "native_operation_type": "world.state.update",
+      "required_context_facets": ["level", "world"],
+      "allowed_state_planes": ["authoring_memory"],
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "target_refs": {
+            "type": "array",
+            "items": {"type": "string", "minLength": 1},
+            "minItems": 1,
+            "uniqueItems": true
+          },
+          "changes": {
+            "type": "object",
+            "properties": {
+              "runtime_grid": {
+                "oneOf": [
+                  {
+                    "type": "object",
+                    "properties": {
+                      "intent": {"const": "set"},
+                      "value": {"type": "string", "minLength": 1}
+                    },
+                    "required": ["intent", "value"],
+                    "additionalProperties": false
+                  },
+                  {
+                    "type": "object",
+                    "properties": {
+                      "intent": {"const": "clear"}
+                    },
+                    "required": ["intent"],
+                    "additionalProperties": false
+                  }
+                ]
+              },
+              "is_spatially_loaded": {"type": "boolean"}
+            },
+            "minProperties": 1,
+            "additionalProperties": false
+          }
+        },
+        "required": ["target_refs", "changes"],
+        "additionalProperties": false
+      },
+      "result_schema": {
+        "type": "object",
+        "properties": {
+          "operation_id": {"type": "string", "minLength": 1},
+          "outcome": {"type": "string", "enum": ["complete", "partial", "rolled_back", "state_unknown"]},
+          "target_refs": {
+            "type": "array",
+            "items": {"type": "string", "minLength": 1},
+            "uniqueItems": true
+          },
+          "evidence_refs": {
+            "type": "array",
+            "items": {"type": "string", "minLength": 1},
+            "uniqueItems": true
+          }
+        },
+        "required": ["operation_id", "outcome", "target_refs"],
+        "additionalProperties": false
+      }
+    },
+    {
+      "descriptor_id": "uai.operation.world.streaming_relation.create",
+      "version": 1,
+      "descriptor_hash": "sha256:a320e65a408b02338329c76279e08952761a08cf1491acc7d820ec224599903f",
+      "capability_id": "world.streaming_relation.create",
+      "native_operation_type": "world.entity.create",
+      "required_context_facets": ["level", "world"],
+      "allowed_state_planes": ["authoring_memory"],
+      "space_contract": {
+        "subject": "streaming relation placement",
+        "dimension": 3,
+        "semantic_frame": "declared_level_placement",
+        "write_frame": "ue_world",
+        "read_frame": "ue_world",
+        "verify_frame": "declared_level_placement",
+        "conversion_chain": "declared placement -> C4 canonical transform -> ULevelStreaming LevelTransform -> independent streaming query -> declared placement"
+      },
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "level_asset_ref": {"type": "string", "minLength": 1},
+          "streaming_class_ref": {"type": "string", "minLength": 1},
+          "placement": {
+            "type": "object",
+            "properties": {
+              "frame_id": {"type": "string", "minLength": 1},
+              "unit": {"type": "string", "enum": ["centimeter", "meter"]},
+              "translation": {
+                "type": "array",
+                "items": {"type": "number"},
+                "minItems": 3,
+                "maxItems": 3
+              },
+              "rotation_quaternion_xyzw": {
+                "type": "array",
+                "items": {"type": "number"},
+                "minItems": 4,
+                "maxItems": 4
+              },
+              "scale": {
+                "type": "array",
+                "items": {"type": "number"},
+                "minItems": 3,
+                "maxItems": 3
+              },
+              "basis_evidence": {"type": "string", "minLength": 1}
+            },
+            "required": ["frame_id", "unit", "translation", "rotation_quaternion_xyzw", "scale", "basis_evidence"],
+            "additionalProperties": false
+          }
+        },
+        "required": ["level_asset_ref", "streaming_class_ref"],
+        "additionalProperties": false
+      },
+      "result_schema": {
+        "type": "object",
+        "properties": {
+          "operation_id": {"type": "string", "minLength": 1},
+          "outcome": {"type": "string", "enum": ["complete", "partial", "rolled_back", "state_unknown"]},
+          "target_refs": {
+            "type": "array",
+            "items": {"type": "string", "minLength": 1},
+            "uniqueItems": true
+          },
+          "evidence_refs": {
+            "type": "array",
+            "items": {"type": "string", "minLength": 1},
+            "uniqueItems": true
+          }
+        },
+        "required": ["operation_id", "outcome", "target_refs"],
+        "additionalProperties": false
+      }
+    },
+    {
+      "descriptor_id": "uai.operation.world.streaming_relation.state.update",
+      "version": 1,
+      "descriptor_hash": "sha256:b2bec3d2ba22b96ed3ce490fffed6868944db0e44bd6bfb3990fa1d530ee3b40",
+      "capability_id": "world.streaming_relation.state.update",
+      "native_operation_type": "world.state.update",
+      "required_context_facets": ["level", "world"],
+      "allowed_state_planes": ["authoring_memory"],
+      "space_contract": {
+        "subject": "streaming relation state and placement",
+        "dimension": 3,
+        "semantic_frame": "declared_level_placement",
+        "write_frame": "ue_world",
+        "read_frame": "ue_world",
+        "verify_frame": "declared_level_placement",
+        "conversion_chain": "declared placement -> C4 canonical transform -> ULevelStreaming state/LevelTransform -> independent streaming query -> declared placement"
+      },
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "target_ref": {"type": "string", "minLength": 1},
+          "changes": {
+            "type": "object",
+            "properties": {
+              "loaded": {"type": "boolean"},
+              "visible": {"type": "boolean"},
+              "placement": {
+                "type": "object",
+                "properties": {
+                  "frame_id": {"type": "string", "minLength": 1},
+                  "unit": {"type": "string", "enum": ["centimeter", "meter"]},
+                  "translation": {
+                    "type": "array",
+                    "items": {"type": "number"},
+                    "minItems": 3,
+                    "maxItems": 3
+                  },
+                  "rotation_quaternion_xyzw": {
+                    "type": "array",
+                    "items": {"type": "number"},
+                    "minItems": 4,
+                    "maxItems": 4
+                  },
+                  "scale": {
+                    "type": "array",
+                    "items": {"type": "number"},
+                    "minItems": 3,
+                    "maxItems": 3
+                  },
+                  "basis_evidence": {"type": "string", "minLength": 1}
+                },
+                "required": ["frame_id", "unit", "translation", "rotation_quaternion_xyzw", "scale", "basis_evidence"],
+                "additionalProperties": false
+              }
+            },
+            "minProperties": 1,
+            "additionalProperties": false
+          }
+        },
+        "required": ["target_ref", "changes"],
+        "additionalProperties": false
+      },
+      "result_schema": {
+        "type": "object",
+        "properties": {
+          "operation_id": {"type": "string", "minLength": 1},
+          "outcome": {"type": "string", "enum": ["complete", "partial", "rolled_back", "state_unknown"]},
+          "target_refs": {
+            "type": "array",
+            "items": {"type": "string", "minLength": 1},
+            "uniqueItems": true
+          },
+          "evidence_refs": {
+            "type": "array",
+            "items": {"type": "string", "minLength": 1},
+            "uniqueItems": true
+          }
+        },
+        "required": ["operation_id", "outcome", "target_refs"],
+        "additionalProperties": false
+      }
+    },
+    {
+      "descriptor_id": "uai.operation.world.world_partition_streaming.update",
+      "version": 1,
+      "descriptor_hash": "sha256:5419fbf11af5d86ee907d1e3e8163506b225783df56f646c68f394c3cba9294c",
+      "capability_id": "world.world_partition_streaming.update",
+      "native_operation_type": "world.state.update",
+      "required_context_facets": ["level", "world"],
+      "allowed_state_planes": ["authoring_memory"],
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "enabled": {"type": "boolean"}
+        },
+        "required": ["enabled"],
+        "additionalProperties": false
+      },
+      "result_schema": {
+        "type": "object",
+        "properties": {
+          "operation_id": {"type": "string", "minLength": 1},
+          "outcome": {"type": "string", "enum": ["complete", "partial", "rolled_back", "state_unknown"]},
+          "target_refs": {
+            "type": "array",
+            "items": {"type": "string", "minLength": 1},
+            "uniqueItems": true
+          },
+          "evidence_refs": {
+            "type": "array",
+            "items": {"type": "string", "minLength": 1},
+            "uniqueItems": true
+          }
+        },
+        "required": ["operation_id", "outcome", "target_refs"],
+        "additionalProperties": false
+      }
+    },
+    {
+      "descriptor_id": "uai.operation.world.level_game_mode.update",
+      "version": 1,
+      "descriptor_hash": "sha256:86238f06501f0d6a34297302dd18e57ee4602f2efcb52dbf326370ae2e3eb23d",
+      "capability_id": "world.level_game_mode.update",
+      "native_operation_type": "world.state.update",
+      "required_context_facets": ["level", "world"],
+      "allowed_state_planes": ["authoring_memory"],
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "game_mode_class_ref": {"type": "string", "minLength": 1},
+          "save_level": {"type": "boolean"}
+        },
+        "required": ["game_mode_class_ref", "save_level"],
+        "additionalProperties": false
+      },
+      "result_schema": {
+        "type": "object",
+        "properties": {
+          "operation_id": {"type": "string", "minLength": 1},
+          "outcome": {"type": "string", "enum": ["complete", "partial", "rolled_back", "state_unknown"]},
+          "target_refs": {
+            "type": "array",
+            "items": {"type": "string", "minLength": 1},
+            "uniqueItems": true
+          },
+          "evidence_refs": {
+            "type": "array",
+            "items": {"type": "string", "minLength": 1},
+            "uniqueItems": true
+          }
+        },
+        "required": ["operation_id", "outcome", "target_refs"],
+        "additionalProperties": false
+      }
+    }
+  ],
+  "contract_cases": [
+    {
+      "descriptor_id": "uai.operation.world.actor.create",
+      "valid_input": {
+        "actor_class_ref": "/Script/Engine.StaticMeshActor",
+        "placement": {
+          "frame_id": "ue.world",
+          "unit": "centimeter",
+          "translation": [125, -75, 50],
+          "rotation_quaternion_xyzw": [0, 0, 0, 1],
+          "scale": [1, 1, 1],
+          "basis_evidence": "explicit UE world frame"
+        },
+        "label": "WorldSimpleActorCreate",
+        "folder_path": "UAI/Tests",
+        "tags": ["UAIActorCreateTest"],
+        "save_level": false
+      },
+      "invalid_input": {
+        "actor_class_ref": "/Script/Engine.StaticMeshActor",
+        "placement": {
+          "frame_id": "ue.world",
+          "unit": "centimeter",
+          "translation": [125, -75],
+          "rotation_quaternion_xyzw": [0, 0, 0, 1],
+          "scale": [1, 1, 1],
+          "basis_evidence": "explicit UE world frame"
+        },
+        "label": "WorldSimpleActorCreate",
+        "save_level": false
+      }
+    },
+    {
+      "descriptor_id": "uai.operation.world.wall.create_with_opening",
+      "valid_input": {
+        "plane": {
+          "frame_id": "ue.world",
+          "unit": "centimeter",
+          "center": [0, 0, 100],
+          "normal": [1, 0, 0],
+          "up": [0, 0, 1],
+          "basis_evidence": "explicit test frame"
+        },
+        "wall": {"thickness": 20, "width": 400, "height": 300},
+        "opening": {"center": [0, -50], "size": [100, 200], "out_of_bounds": "reject"},
+        "segment_template": {
+          "actor_class_ref": "/Script/Engine.StaticMeshActor",
+          "mesh_ref": "/Engine/BasicShapes/Cube.Cube"
+        }
+      },
+      "invalid_input": {
+        "plane": {
+          "frame_id": "ue.world",
+          "unit": "centimeter",
+          "center": [0, 0, 100],
+          "normal": [1, 0, 0],
+          "up": [0, 0, 1],
+          "basis_evidence": "explicit test frame"
+        },
+        "wall": {"thickness": 20, "width": 400, "height": 300},
+        "opening": {"center": [0, -50], "size": [100, 200]},
+        "transaction": true
+      }
+    },
+    {
+      "descriptor_id": "uai.operation.world.data_layer_instance.create",
+      "valid_input": {
+        "asset_ref": "uai://asset/Game/UAI/DL_Runtime",
+        "initial_state": {"initial_runtime_state": "activated"}
+      },
+      "invalid_input": {"private": true}
+    },
+    {
+      "descriptor_id": "uai.operation.world.data_layer_relation.update",
+      "valid_input": {
+        "relation_kind": "actor_membership",
+        "subject_refs": ["uai://actor/A"],
+        "collection_refs": ["uai://data-layer/DL_Runtime"],
+        "mode": "replace"
+      },
+      "invalid_input": {
+        "relation_kind": "parent",
+        "subject_refs": ["uai://data-layer/Child"],
+        "collection_refs": ["uai://data-layer/ParentA", "uai://data-layer/ParentB"],
+        "mode": "replace"
+      }
+    },
+    {
+      "descriptor_id": "uai.operation.world.data_layer_state.update",
+      "valid_input": {
+        "target_refs": ["uai://data-layer/DL_Runtime"],
+        "changes": {"visible": true, "initial_runtime_state": "loaded"}
+      },
+      "invalid_input": {
+        "target_refs": ["uai://data-layer/DL_Runtime"],
+        "changes": {"parent_ref": "uai://data-layer/Parent"}
+      }
+    },
+    {
+      "descriptor_id": "uai.operation.world.actor_hlod_layer.update",
+      "valid_input": {
+        "subject_refs": ["uai://actor/A"],
+        "mode": "replace",
+        "collection_ref": "uai://asset/Game/UAI/HLOD"
+      },
+      "invalid_input": {
+        "subject_refs": ["uai://actor/A"],
+        "mode": "clear",
+        "collection_ref": "uai://asset/Game/UAI/HLOD"
+      }
+    },
+    {
+      "descriptor_id": "uai.operation.world.actor_streaming_policy.update",
+      "valid_input": {
+        "target_refs": ["uai://actor/A"],
+        "changes": {
+          "runtime_grid": {"intent": "set", "value": "MainGrid"},
+          "is_spatially_loaded": true
+        }
+      },
+      "invalid_input": {
+        "target_refs": ["uai://actor/A"],
+        "changes": {"runtime_grid": {"intent": "set"}}
+      }
+    },
+    {
+      "descriptor_id": "uai.operation.world.streaming_relation.create",
+      "valid_input": {
+        "level_asset_ref": "uai://asset/Game/UAI/SubLevel",
+        "streaming_class_ref": "/Script/Engine.LevelStreamingDynamic",
+        "placement": {
+          "frame_id": "ue.world",
+          "unit": "centimeter",
+          "translation": [100, 200, 0],
+          "rotation_quaternion_xyzw": [0, 0, 0, 1],
+          "scale": [1, 1, 1],
+          "basis_evidence": "explicit UE world frame"
+        }
+      },
+      "invalid_input": {
+        "level_asset_ref": "uai://asset/Game/UAI/SubLevel",
+        "streaming_class_ref": "/Script/Engine.LevelStreamingDynamic",
+        "placement": {
+          "frame_id": "ue.world",
+          "unit": "centimeter",
+          "translation": [100, 200],
+          "rotation_quaternion_xyzw": [0, 0, 0, 1],
+          "scale": [1, 1, 1],
+          "basis_evidence": "explicit UE world frame"
+        }
+      }
+    },
+    {
+      "descriptor_id": "uai.operation.world.streaming_relation.state.update",
+      "valid_input": {
+        "target_ref": "uai://streaming-relation/Game/UAI/SubLevel",
+        "changes": {
+          "loaded": true,
+          "visible": true,
+          "placement": {
+            "frame_id": "ue.world",
+            "unit": "centimeter",
+            "translation": [0, 0, 0],
+            "rotation_quaternion_xyzw": [0, 0, 0, 1],
+            "scale": [1, 1, 1],
+            "basis_evidence": "explicit UE world frame"
+          }
+        }
+      },
+      "invalid_input": {
+        "target_ref": "uai://streaming-relation/Game/UAI/SubLevel",
+        "changes": {"current": true}
+      }
+    },
+    {
+      "descriptor_id": "uai.operation.world.world_partition_streaming.update",
+      "valid_input": {"enabled": true},
+      "invalid_input": {"enabled": true, "transaction": true}
+    },
+    {
+      "descriptor_id": "uai.operation.world.level_game_mode.update",
+      "valid_input": {
+        "game_mode_class_ref": "/Script/Engine.GameModeBase",
+        "save_level": true
+      },
+      "invalid_input": {
+        "game_mode_class_ref": "",
+        "save_level": true
+      }
+    }
+  ],
+  "e2_scenarios": [
+    {
+      "case_id": "actor_is_created_with_exact_identity_and_placement",
+      "descriptor_id": "uai.operation.world.actor.create",
+      "oracle": "world.actors plus exact class, label, tags, folder, and world-transform readback identify the new actor",
+      "negative_oracle": "missing class, invalid class, or invalid placement leaves zero tagged actors and preserves the level dirty state"
+    },
+    {
+      "case_id": "wall_segments_cover_wall_except_opening",
+      "descriptor_id": "uai.operation.world.wall.create_with_opening",
+      "oracle": "world.read.actors plus actor transform and mesh-bounds readback projected into the declared wall frame",
+      "negative_oracle": "invalid basis, out-of-bounds opening, missing class, or missing mesh leaves zero spawned actors"
+    },
+    {
+      "case_id": "data_layer_instance_is_new_and_exact",
+      "descriptor_id": "uai.operation.world.data_layer_instance.create",
+      "oracle": "world.read.data_layers returns the new exact instance, parent, and explicit initial state",
+      "negative_oracle": "existing instance is a create conflict and invalid parent leaves zero new instances"
+    },
+    {
+      "case_id": "data_layer_relation_matches_requested_set",
+      "descriptor_id": "uai.operation.world.data_layer_relation.update",
+      "oracle": "world.read.data_layer_membership reads each actor membership or data-layer parent relation independently",
+      "negative_oracle": "any unresolved subject or collection fails before all relation mutations"
+    },
+    {
+      "case_id": "data_layer_state_matches_explicit_changes",
+      "descriptor_id": "uai.operation.world.data_layer_state.update",
+      "oracle": "world.read.data_layers independently reads the exact state and short name",
+      "negative_oracle": "unknown state or target fails before all state mutations"
+    },
+    {
+      "case_id": "actor_hlod_membership_matches",
+      "descriptor_id": "uai.operation.world.actor_hlod_layer.update",
+      "oracle": "world.read.actor_hlod reads the actual HLOD Layer of every target actor",
+      "negative_oracle": "unresolved actor or HLOD Layer fails before all membership mutations"
+    },
+    {
+      "case_id": "actor_streaming_policy_matches",
+      "descriptor_id": "uai.operation.world.actor_streaming_policy.update",
+      "oracle": "world.read.actor_streaming_policy reads runtime grid and spatially-loaded state from every target actor",
+      "negative_oracle": "invalid runtime-grid intent or unresolved actor fails before all policy mutations"
+    },
+    {
+      "case_id": "streaming_relation_is_created_with_placement",
+      "descriptor_id": "uai.operation.world.streaming_relation.create",
+      "oracle": "world.read.streaming_levels returns exact asset, class, state, and canonical placement",
+      "negative_oracle": "missing asset, invalid class, or invalid placement leaves zero new streaming relations"
+    },
+    {
+      "case_id": "streaming_relation_state_settles_and_matches",
+      "descriptor_id": "uai.operation.world.streaming_relation.state.update",
+      "oracle": "world.read.streaming_levels independently reads loaded, visible, and canonical placement after settle",
+      "negative_oracle": "unknown relation or invalid placement leaves loaded, visible, placement, and current level unchanged"
+    },
+    {
+      "case_id": "world_partition_streaming_flag_matches",
+      "descriptor_id": "uai.operation.world.world_partition_streaming.update",
+      "oracle": "world.read.world_partition independently reads the exact world's persisted streaming-enabled flag",
+      "negative_oracle": "non-World-Partition world fails without dirtying the world package"
+    },
+    {
+      "case_id": "level_game_mode_override_matches",
+      "descriptor_id": "uai.operation.world.level_game_mode.update",
+      "oracle": "world.property independently reads the exact level WorldSettings DefaultGameMode class after map save",
+      "negative_oracle": "an unresolved or non-GameModeBase class leaves WorldSettings and level dirty state unchanged"
+    }
+  ],
+  "legacy_sources": [
+    {
+      "legacy_command_id": "level_spawn_wall_with_opening",
+      "terminal": "MIGRATE",
+      "capability_ids": ["world.wall.create_with_opening"]
+    },
+    {
+      "legacy_command_id": "data_layer_create_instance",
+      "terminal": "MIGRATE",
+      "capability_ids": ["world.data_layer_instance.create"]
+    },
+    {
+      "legacy_command_id": "data_layer_set_actor_membership",
+      "terminal": "MIGRATE",
+      "capability_ids": ["world.data_layer_relation.update"]
+    },
+    {
+      "legacy_command_id": "data_layer_set_state",
+      "terminal": "MIGRATE",
+      "capability_ids": ["world.data_layer_relation.update", "world.data_layer_state.update"]
+    },
+    {
+      "legacy_command_id": "hlod_assign_actors",
+      "terminal": "MIGRATE",
+      "capability_ids": ["world.actor_hlod_layer.update", "world.actor_streaming_policy.update"]
+    },
+    {
+      "legacy_command_id": "level_streaming_add_existing",
+      "terminal": "MIGRATE",
+      "capability_ids": ["world.streaming_relation.create"]
+    },
+    {
+      "legacy_command_id": "level_streaming_set_state",
+      "terminal": "MIGRATE_SPLIT",
+      "capability_ids": ["world.streaming_relation.state.update"],
+      "external_capability_ids": ["editor.current_level.set"]
+    },
+    {
+      "legacy_command_id": "level_topology_set_actor_assignments",
+      "terminal": "DELETE",
+      "capability_ids": [],
+      "replacement_capability_ids": [
+        "world.data_layer_relation.update",
+        "world.actor_hlod_layer.update",
+        "world.actor_streaming_policy.update",
+        "world.streaming_actor_membership.update"
+      ]
+    },
+    {
+      "legacy_command_id": "world_partition_set_streaming_enabled",
+      "terminal": "MIGRATE",
+      "capability_ids": ["world.world_partition_streaming.update"]
+    }
+  ]
+}

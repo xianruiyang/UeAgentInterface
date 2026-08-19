@@ -1,0 +1,74 @@
+authoring: { reason: command_has_no_registered_folder_authoring_profile, state: none }
+category: core_level
+command: mesh_get_closest_vertex
+deprecation: { reason: command_is_active, state: none }
+discovery: { aliases: [], keywords_en: [mesh, get, closest, vertex, core_level], keywords_zh: [mesh_get_closest_vertex], summary_en: "Execute mesh_get_closest_vertex with a verified implementation contract", summary_zh: "查询 Actor 网格中最接近世界点的顶点", tags: [core_level, p2-002] }
+errors: {
+  codes: [
+    { code: actor_not_found, description_zh: "C++ 实现返回错误码 actor_not_found", retry_safe: false, stage: execution, wire_match: exact }
+    { code: closest_vertex_not_found, description_zh: "C++ 实现返回错误码 closest_vertex_not_found", retry_safe: false, stage: execution, wire_match: exact }
+    { code: mesh_description_not_found, description_zh: "C++ 实现返回错误码 mesh_description_not_found", retry_safe: false, stage: execution, wire_match: exact }
+    { code: missing_id, description_zh: "C++ 实现返回错误码 missing_id", retry_safe: true, stage: preflight, wire_match: exact }
+    { code: missing_world_point, description_zh: "C++ 实现返回错误码 missing_world_point", retry_safe: true, stage: preflight, wire_match: exact }
+    { code: no_editor_world, description_zh: "C++ 实现返回错误码 no_editor_world", retry_safe: false, stage: execution, wire_match: exact }
+    { code: no_geditor, description_zh: "C++ 实现返回错误码 no_geditor", retry_safe: false, stage: execution, wire_match: exact }
+    { code: static_mesh_component_not_found, description_zh: "C++ 实现返回错误码 static_mesh_component_not_found", retry_safe: false, stage: execution, wire_match: exact }
+    { code: static_mesh_not_found, description_zh: "C++ 实现返回错误码 static_mesh_not_found", retry_safe: false, stage: execution, wire_match: exact }
+    { code: vertex_positions_empty, description_zh: "C++ 实现返回错误码 vertex_positions_empty", retry_safe: false, stage: execution, wire_match: exact }
+  ]
+}
+evidence: {
+  docs: [
+    { path: "Plugins/UeAgentInterface/docs/commands/core_level/mesh_get_closest_vertex.md", purpose: "user documentation cross-check; C++ implementation remains authoritative" }
+  ]
+  implementation: [
+    { line_hint: 477, path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Commands/Level/UeAgentHttpServer_Level_MeshAlignment.cpp", purpose: "command handler, parameter and return evidence", symbol: CmdMeshGetClosestVertex }
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Commands/AI/UeAgentHttpServer_AI_Blackboard.cpp", purpose: "transitive helper evidence used by the command handler" }
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Commands/Level/UeAgentHttpServer_Level.cpp", purpose: "transitive helper evidence used by the command handler" }
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Commands/Level/UeAgentHttpServer_Level_CaptureAndPersistence.cpp", purpose: "transitive helper evidence used by the command handler" }
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Server/UeAgentHttpServer.cpp", purpose: "transitive helper evidence used by the command handler" }
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Utilities/UeAgentJsonDiagnostics.cpp", purpose: "transitive helper evidence used by the command handler" }
+  ]
+  tests: [
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterfaceTests/Private/Smoke/UeAgentInterfaceSmoke_Coverage.cpp", purpose: "smoke or negative-path evidence cross-checked for the verified contract" }
+  ]
+}
+execution: {
+  destructive: false
+  editor_state: required
+  game_thread: required
+  idempotent: true
+  kind: read_only
+  overwrite_behavior: none
+  pie_state: allowed
+  retry_safe: true
+  save_behavior: none
+  side_effects: []
+  ui_effect: none
+}
+maturity: verified
+params: {
+  constraints: []
+  fields: {
+    component: { default_state: none, description_zh: "C++ 实现读取的 component 参数", required: false, type: string }
+    id: { default_state: none, description_zh: "C++ 实现读取的 id 参数", required: true, type: string }
+    world_point: { default_state: none, description_zh: "C++ 实现读取的 world_point 参数", required: true, type: json_value }
+  }
+  state: defined
+}
+response: { artifact_fields: [], compact_fields: [actor_name, component_name, distance, vertex_index, world_position], failure_fields: [params.id, params.world_point], max_items_policy: { fields: [], mode: none } }
+returns: {
+  fields: {
+    actor_name: { description_zh: "C++ 实现返回的 actor_name 字段；是否出现取决于执行分支", required: false, type: string }
+    component_name: { description_zh: "C++ 实现返回的 component_name 字段；是否出现取决于执行分支", required: false, type: string }
+    distance: { description_zh: "C++ 实现返回的 distance 字段；是否出现取决于执行分支", required: false, type: number }
+    vertex_index: { description_zh: "C++ 实现返回的 vertex_index 字段；是否出现取决于执行分支", required: false, type: integer }
+    world_position: { description_zh: "C++ 实现返回的 world_position 字段；是否出现取决于执行分支", required: false, type: json_value }
+  }
+  state: defined
+}
+schema: uai.command_spec.v1
+status: active
+types: {}
+verification: { reason: read_only_command_has_no_post_write_verification, state: none }
+version: 1

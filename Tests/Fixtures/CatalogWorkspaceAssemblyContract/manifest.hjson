@@ -1,0 +1,36 @@
+schema: "uai.catalog_workspace_assembly_contract.v1"
+dialect_id: "uai-hjson-authoring/1"
+development_truth: "Plugins/UeAgentInterface/Tests/Fixtures/CatalogWorkspaceAssemblyContract"
+kind_truth: "UeAgentInterfaceCMD/cli/uai_core/contracts/authoring_registry_snapshot.hjson"
+field_samples: "field_samples.hjson"
+domain_oracles: "five_domain_oracles.hjson"
+placement_schema: "uai.catalog_placement.v2"
+virtual_workspace_schema: "uai.virtual_workspace.v1"
+required_binding_fields: [kind, domain_id, workspace_contract_id, input_contract_id, unit_id, path_pattern, exact_identity_fields, pointer_template, merge_mode, seed_bindings, required_context]
+stable_errors: {
+  missing_context: seed_context_required
+  stale_contract: catalog_contract_stale
+  unresolved_pointer: catalog_pointer_binding_unresolved
+  page_limit: catalog_page_limit_exceeded
+}
+output_budget: {
+  broad_default_rows: 5
+  normal_max_rows: 20
+  max_bytes: 16384
+  max_cell_bytes: 2048
+  tooltip_max_codepoints: 512
+}
+required_catalog_test_ids: [
+  UAI.CatalogWorkspace.Python.DesignOracle
+  UAI.CatalogWorkspace.Python.BindingContract
+  UAI.CatalogWorkspace.Python.SeedNormalization
+  UAI.CatalogWorkspace.Python.NoManualKindMapping
+  UAI.CatalogWorkspace.Cpp.NoUeAllBindings
+  UAI.CatalogWorkspace.Cpp.FailureSemantics
+  UAI.CatalogWorkspace.Cpp.OutputBudget
+  UAI.CatalogWorkspace.UE.MaterialRoundTrip
+  UAI.CatalogWorkspace.UE.NiagaraRoundTrip
+  UAI.CatalogWorkspace.UE.BlueprintRoundTrip
+  UAI.CatalogWorkspace.UE.UMGRoundTrip
+  UAI.CatalogWorkspace.UE.LevelRoundTrip
+]

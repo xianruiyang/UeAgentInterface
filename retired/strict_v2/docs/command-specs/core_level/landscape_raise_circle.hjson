@@ -1,0 +1,84 @@
+authoring: { reason: command_has_no_registered_folder_authoring_profile, state: none }
+category: core_level
+command: landscape_raise_circle
+deprecation: { reason: command_is_active, state: none }
+discovery: { aliases: [], keywords_en: [landscape, raise, circle, core_level], keywords_zh: [landscape_raise_circle], summary_en: "Execute landscape_raise_circle with a verified implementation contract", summary_zh: "抬高圆形区域", tags: [core_level, p2-002] }
+errors: {
+  codes: [
+    { code: failed_get_landscape_extent, description_zh: "C++ 实现返回错误码 failed_get_landscape_extent", retry_safe: false, stage: execution, wire_match: exact }
+    { code: invalid_region, description_zh: "C++ 实现返回错误码 invalid_region", retry_safe: true, stage: preflight, wire_match: exact }
+    { code: missing_landscape_info, description_zh: "C++ 实现返回错误码 missing_landscape_info", retry_safe: true, stage: preflight, wire_match: exact }
+    { code: no_editor_world, description_zh: "C++ 实现返回错误码 no_editor_world", retry_safe: false, stage: execution, wire_match: exact }
+    { code: no_geditor, description_zh: "C++ 实现返回错误码 no_geditor", retry_safe: false, stage: execution, wire_match: exact }
+    { code: no_landscape_in_level, description_zh: "C++ 实现返回错误码 no_landscape_in_level", retry_safe: false, stage: execution, wire_match: exact }
+  ]
+}
+evidence: {
+  docs: [
+    { path: "Plugins/UeAgentInterface/docs/commands/core_level/landscape_raise_circle.md", purpose: "user documentation cross-check; C++ implementation remains authoritative" }
+  ]
+  implementation: [
+    { line_hint: 135, path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Commands/Landscape/UeAgentHttpServer_Landscape.cpp", purpose: "command handler, parameter and return evidence", symbol: CmdLandscapeRaiseCircle }
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Commands/AI/UeAgentHttpServer_AI_Blackboard.cpp", purpose: "transitive helper evidence used by the command handler" }
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Commands/Level/UeAgentHttpServer_Level_CaptureAndPersistence.cpp", purpose: "transitive helper evidence used by the command handler" }
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Server/UeAgentHttpServer.cpp", purpose: "transitive helper evidence used by the command handler" }
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Utilities/UeAgentJsonDiagnostics.cpp", purpose: "transitive helper evidence used by the command handler" }
+  ]
+  tests: [
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterfaceTests/Private/Smoke/UeAgentInterfaceSmoke_LevelViewportModeling.cpp", purpose: "smoke or negative-path evidence cross-checked for the verified contract" }
+  ]
+}
+execution: {
+  destructive: false
+  editor_state: required
+  game_thread: required
+  idempotent: false
+  kind: write
+  overwrite_behavior: none
+  pie_state: allowed
+  retry_safe: false
+  save_behavior: none
+  side_effects: [modifies_level]
+  ui_effect: none
+}
+maturity: verified
+params: {
+  constraints: []
+  fields: {
+    center: { default_state: none, description_zh: "C++ 实现读取的 center 参数", required: false, type: json_value }
+    falloff: { default: 1, default_state: defined, description_zh: "C++ 实现读取的 falloff 参数", required: false, type: number }
+    radius_cm: { default: 2000, default_state: defined, description_zh: "C++ 实现读取的 radius_cm 参数", required: false, type: number }
+    strength_cm: { default: 300, default_state: defined, description_zh: "C++ 实现读取的 strength_cm 参数", required: false, type: number }
+  }
+  state: defined
+}
+response: { artifact_fields: [], compact_fields: [center_world, label, name, radius_cm, region_x1, region_x2], failure_fields: [], max_items_policy: { fields: [], mode: none } }
+returns: {
+  fields: {
+    center_world: { description_zh: "C++ 实现返回的 center_world 字段；是否出现取决于执行分支", required: false, type: json_value }
+    label: { description_zh: "C++ 实现返回的 label 字段；是否出现取决于执行分支", required: false, type: string }
+    name: { description_zh: "C++ 实现返回的 name 字段；是否出现取决于执行分支", required: false, type: string }
+    radius_cm: { description_zh: "C++ 实现返回的 radius_cm 字段；是否出现取决于执行分支", required: false, type: number }
+    region_x1: { description_zh: "C++ 实现返回的 region_x1 字段；是否出现取决于执行分支", required: false, type: number }
+    region_x2: { description_zh: "C++ 实现返回的 region_x2 字段；是否出现取决于执行分支", required: false, type: number }
+    region_y1: { description_zh: "C++ 实现返回的 region_y1 字段；是否出现取决于执行分支", required: false, type: number }
+    region_y2: { description_zh: "C++ 实现返回的 region_y2 字段；是否出现取决于执行分支", required: false, type: number }
+    strength_cm: { description_zh: "C++ 实现返回的 strength_cm 字段；是否出现取决于执行分支", required: false, type: number }
+  }
+  state: defined
+}
+schema: uai.command_spec.v1
+status: active
+types: {}
+verification: {
+  assertions: [
+    { id: result_present, operator: exists, source: returns.center_world }
+  ]
+  failure_policy: fail_overall
+  methods: [
+    { id: result, kind: result_assertion }
+  ]
+  required: true
+  state: defined
+}
+version: 1

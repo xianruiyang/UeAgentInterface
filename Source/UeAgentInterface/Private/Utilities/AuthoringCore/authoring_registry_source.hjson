@@ -1,0 +1,114 @@
+schema: uai.authoring_registry_source.v1
+schema_version: 1
+dialect_id: "uai-hjson-authoring/1"
+seed_contract: {
+  allowed_fields: [actor_class, actor_name, binding_name, bone_name, component_class, component_name, event_class, event_name, function_name, function_owner_class, graph_name, input_name, member_name, member_parent_class, name, node_class, node_type, output_name, parameter_name, path, pin_name, section_name, socket_name, track_name, variable_name, widget_class]
+}
+domains: [
+  {
+    domain_id: animation
+    apply_contract: {
+      workspace_contract_ids: [uai.apply_workspace.animation.anim_blueprint, uai.apply_workspace.animation.skeletal_mesh, uai.apply_workspace.animation.skeleton]
+      input_contract_ids: [uai.apply_input.animation.anim_blueprint, uai.apply_input.animation.skeletal_mesh, uai.apply_input.animation.skeleton]
+    }
+    export_contract: { contract_ids: [uai.export.animation.anim_blueprint, uai.export.animation.skeletal_mesh, uai.export.animation.skeleton] }
+    catalog_bindings: []
+  }
+  {
+    domain_id: audio
+    apply_contract: {
+      workspace_contract_ids: [uai.apply_workspace.audio.metasound, uai.apply_workspace.audio.sound_cue, uai.apply_workspace.audio.sound_submix]
+      input_contract_ids: [uai.apply_input.audio.metasound, uai.apply_input.audio.sound_cue, uai.apply_input.audio.sound_submix]
+    }
+    export_contract: { contract_ids: [uai.export.audio.metasound, uai.export.audio.sound_cue, uai.export.audio.sound_submix] }
+    catalog_bindings: []
+  }
+  {
+    domain_id: blueprint
+    apply_contract: {
+      workspace_contract_ids: [uai.apply_workspace.blueprint.asset]
+      input_contract_ids: [uai.apply_input.blueprint.asset]
+    }
+    export_contract: { contract_ids: [uai.export.blueprint.asset] }
+    catalog_bindings: [
+      { kind: actor_component, workspace_contract_id: uai.apply_workspace.blueprint.asset, input_contract_id: uai.apply_input.blueprint.asset, unit_id: asset, path_pattern: index.hjson, relative_path_template: index.hjson, exact_identity_fields: [component_class], pointer_template: "/provider_extension/components/scene_component:{node_id}", merge_mode: merge_object, operation_map: { create: update }, seed_bindings: { component_class: "/provider_extension/components/scene_component:{node_id}/class" }, required_context: [asset_path, node_id], context_bindings: { asset_path: "/target/asset_path", node_id: "/provider_extension/components/scene_component:{node_id}/name" }, constant_bindings: {}, required_seed_fields: [component_class], optional_seed_fields: [] }
+      { kind: blueprint_call_function, catalog_type_aliases: [blueprint_action], workspace_contract_id: uai.apply_workspace.blueprint.asset, input_contract_id: uai.apply_input.blueprint.asset, unit_id: asset, path_pattern: index.hjson, relative_path_template: index.hjson, exact_identity_fields: [function_name, function_owner_class], pointer_template: "/provider_extension/graphs/event_graph:{graph_name}/nodes/call_function:{node_id}", merge_mode: merge_object, operation_map: { create: update }, seed_bindings: { function_name: "/provider_extension/graphs/event_graph:{graph_name}/nodes/call_function:{node_id}/function_name", function_owner_class: "/provider_extension/graphs/event_graph:{graph_name}/nodes/call_function:{node_id}/function_owner_class" }, required_context: [asset_path, graph_name, node_id], context_bindings: { asset_path: "/target/asset_path", graph_name: "/provider_extension/graphs/event_graph:{graph_name}/graph/name", node_id: "/provider_extension/graphs/event_graph:{graph_name}/nodes/call_function:{node_id}/id" }, constant_bindings: {}, required_seed_fields: [function_name, function_owner_class], optional_seed_fields: [] }
+      { kind: blueprint_event, workspace_contract_id: uai.apply_workspace.blueprint.asset, input_contract_id: uai.apply_input.blueprint.asset, unit_id: asset, path_pattern: index.hjson, relative_path_template: index.hjson, exact_identity_fields: [event_class, event_name], pointer_template: "/provider_extension/graphs/event_graph:{graph_name}/nodes/event:{node_id}", merge_mode: merge_object, operation_map: { create: update }, seed_bindings: { event_class: "/provider_extension/graphs/event_graph:{graph_name}/nodes/event:{node_id}/event_class", event_name: "/provider_extension/graphs/event_graph:{graph_name}/nodes/event:{node_id}/event_name" }, required_context: [asset_path, graph_name, node_id], context_bindings: { asset_path: "/target/asset_path", graph_name: "/provider_extension/graphs/event_graph:{graph_name}/graph/name", node_id: "/provider_extension/graphs/event_graph:{graph_name}/nodes/event:{node_id}/id" }, constant_bindings: {}, required_seed_fields: [event_class, event_name], optional_seed_fields: [] }
+      { kind: blueprint_node, workspace_contract_id: uai.apply_workspace.blueprint.asset, input_contract_id: uai.apply_input.blueprint.asset, unit_id: asset, path_pattern: index.hjson, relative_path_template: index.hjson, exact_identity_fields: [node_class], pointer_template: "/provider_extension/graphs/event_graph:{graph_name}/nodes/node_by_class:{node_id}", merge_mode: merge_object, operation_map: { create: update }, seed_bindings: { node_class: "/provider_extension/graphs/event_graph:{graph_name}/nodes/node_by_class:{node_id}/node_class" }, required_context: [asset_path, graph_name, node_id], context_bindings: { asset_path: "/target/asset_path", graph_name: "/provider_extension/graphs/event_graph:{graph_name}/graph/name", node_id: "/provider_extension/graphs/event_graph:{graph_name}/nodes/node_by_class:{node_id}/id" }, constant_bindings: {}, required_seed_fields: [node_class], optional_seed_fields: [] }
+      { kind: blueprint_variable_node, workspace_contract_id: uai.apply_workspace.blueprint.asset, input_contract_id: uai.apply_input.blueprint.asset, unit_id: asset, path_pattern: index.hjson, relative_path_template: index.hjson, exact_identity_fields: [variable_name], pointer_template: "/provider_extension/graphs/event_graph:{graph_name}/nodes/variable_node:{node_id}", merge_mode: merge_object, operation_map: { create: update }, seed_bindings: { variable_name: "/provider_extension/graphs/event_graph:{graph_name}/nodes/variable_node:{node_id}/variable_name", member_parent_class: "/provider_extension/graphs/event_graph:{graph_name}/nodes/variable_node:{node_id}/member_parent_class", node_type: "/provider_extension/graphs/event_graph:{graph_name}/nodes/variable_node:{node_id}/access" }, required_context: [asset_path, graph_name, node_id], context_bindings: { asset_path: "/target/asset_path", graph_name: "/provider_extension/graphs/event_graph:{graph_name}/graph/name", node_id: "/provider_extension/graphs/event_graph:{graph_name}/nodes/variable_node:{node_id}/id" }, constant_bindings: {}, required_seed_fields: [variable_name], optional_seed_fields: [member_parent_class, node_type] }
+    ]
+  }
+  {
+    domain_id: core.reflection
+    apply_contract: { workspace_contract_ids: [], input_contract_ids: [] }
+    export_contract: { contract_ids: [] }
+    catalog_bindings: []
+  }
+  {
+    domain_id: level
+    apply_contract: {
+      workspace_contract_ids: [uai.apply_workspace.level.authoring]
+      input_contract_ids: [uai.apply_input.level.actor, uai.apply_input.level.component, uai.apply_input.level.world]
+    }
+    export_contract: { contract_ids: [uai.export.level.actor.v2, uai.export.level.component.v2, uai.export.level.world.v2] }
+    catalog_bindings: [
+      { kind: placeable_actor, workspace_contract_id: uai.apply_workspace.level.authoring, input_contract_id: uai.apply_input.level.actor, unit_id: actor, path_pattern: "actors/items/*/actor.hjson", relative_path_template: "actors/items/{managed_id}/actor.hjson", exact_identity_fields: [actor_class], pointer_template: "/target", merge_mode: merge_object, seed_bindings: { actor_class: "/target/actor_class" }, required_context: [managed_id, world_path], context_bindings: { managed_id: "/target/managed_id", world_path: "/target/world_path" }, constant_bindings: {}, required_seed_fields: [actor_class], optional_seed_fields: [] }
+    ]
+  }
+  {
+    domain_id: material
+    apply_contract: {
+      workspace_contract_ids: [uai.apply_workspace.material.asset, uai.apply_workspace.material.graph_mutation]
+      input_contract_ids: [uai.apply_input.material.asset, uai.apply_input.material.graph_mutation]
+    }
+    export_contract: { contract_ids: [uai.export.material.asset, uai.export.material.function] }
+    catalog_bindings: [
+      { kind: material_expression, workspace_contract_id: uai.apply_workspace.material.graph_mutation, input_contract_id: uai.apply_input.material.graph_mutation, unit_id: mutation, path_pattern: index.hjson, relative_path_template: index.hjson, exact_identity_fields: [path], pointer_template: "/provider_extension", merge_mode: merge_object, seed_bindings: { path: "/provider_extension/path" }, required_context: [asset_path], context_bindings: { asset_path: "/target/asset_path" }, constant_bindings: { "/provider_extension/mutation_kind": expression }, required_seed_fields: [path], optional_seed_fields: [] }
+      { kind: material_function_call, workspace_contract_id: uai.apply_workspace.material.graph_mutation, input_contract_id: uai.apply_input.material.graph_mutation, unit_id: mutation, path_pattern: index.hjson, relative_path_template: index.hjson, exact_identity_fields: [path], pointer_template: "/provider_extension", merge_mode: merge_object, seed_bindings: { path: "/provider_extension/path" }, required_context: [asset_path], context_bindings: { asset_path: "/target/asset_path" }, constant_bindings: { "/provider_extension/mutation_kind": expression }, required_seed_fields: [path], optional_seed_fields: [] }
+    ]
+  }
+  {
+    domain_id: niagara
+    apply_contract: {
+      workspace_contract_ids: [uai.apply_workspace.niagara.asset, uai.apply_workspace.niagara.dynamic_input, uai.apply_workspace.niagara.module]
+      input_contract_ids: [uai.apply_input.niagara.asset, uai.apply_input.niagara.dynamic_input, uai.apply_input.niagara.module]
+    }
+    export_contract: { contract_ids: [uai.export.niagara.asset] }
+    catalog_bindings: [
+      { kind: niagara_dynamic_input, workspace_contract_id: uai.apply_workspace.niagara.dynamic_input, input_contract_id: uai.apply_input.niagara.dynamic_input, unit_id: dynamic_input, path_pattern: index.hjson, relative_path_template: index.hjson, exact_identity_fields: [path], pointer_template: "/provider_extension", merge_mode: merge_object, seed_bindings: { path: "/provider_extension/path" }, required_context: [asset_path, stage_name], context_bindings: { asset_path: "/target/asset_path", stage_name: "/target/usage" }, context_value_aliases: { "stage_name:particlespawn": ParticleSpawnScript }, constant_bindings: {}, required_seed_fields: [path], optional_seed_fields: [] }
+      { kind: niagara_module, workspace_contract_id: uai.apply_workspace.niagara.module, input_contract_id: uai.apply_input.niagara.module, unit_id: module, path_pattern: index.hjson, relative_path_template: index.hjson, exact_identity_fields: [path], pointer_template: "/provider_extension", merge_mode: merge_object, seed_bindings: { path: "/provider_extension/path" }, required_context: [asset_path, stage_name], context_bindings: { asset_path: "/target/asset_path", stage_name: "/target/usage" }, context_value_aliases: { "stage_name:particlespawn": ParticleSpawnScript }, constant_bindings: {}, required_seed_fields: [path], optional_seed_fields: [] }
+    ]
+  }
+  {
+    domain_id: pcg
+    apply_contract: { workspace_contract_ids: [uai.apply_workspace.pcg.graph], input_contract_ids: [uai.apply_input.pcg.graph] }
+    export_contract: { contract_ids: [uai.export.pcg.graph] }
+    catalog_bindings: []
+  }
+  {
+    domain_id: reflection
+    apply_contract: {
+      workspace_contract_ids: [uai.apply_workspace.reflection.behavior_tree, uai.apply_workspace.reflection.deformer_graph, uai.apply_workspace.reflection.eqs, uai.apply_workspace.reflection.material_instance, uai.apply_workspace.reflection.media_player, uai.apply_workspace.reflection.media_source, uai.apply_workspace.reflection.media_texture, uai.apply_workspace.reflection.paper_flipbook, uai.apply_workspace.reflection.paper_sprite, uai.apply_workspace.reflection.paper_tilemap, uai.apply_workspace.reflection.paper_tileset, uai.apply_workspace.reflection.physics_asset, uai.apply_workspace.reflection.render_target, uai.apply_workspace.reflection.runtime_virtual_texture, uai.apply_workspace.reflection.sequence, uai.apply_workspace.reflection.sparse_volume_texture, uai.apply_workspace.reflection.state_tree, uai.apply_workspace.reflection.static_mesh, uai.apply_workspace.reflection.subuv_animation, uai.apply_workspace.reflection.texture_array, uai.apply_workspace.reflection.texture_collection, uai.apply_workspace.reflection.texture_cube, uai.apply_workspace.reflection.texture_cube_array, uai.apply_workspace.reflection.texture_graph, uai.apply_workspace.reflection.volume_texture]
+      input_contract_ids: [uai.apply_input.reflection.behavior_tree, uai.apply_input.reflection.deformer_graph, uai.apply_input.reflection.eqs, uai.apply_input.reflection.material_instance, uai.apply_input.reflection.media_player, uai.apply_input.reflection.media_source, uai.apply_input.reflection.media_texture, uai.apply_input.reflection.paper_flipbook, uai.apply_input.reflection.paper_sprite, uai.apply_input.reflection.paper_tilemap, uai.apply_input.reflection.paper_tileset, uai.apply_input.reflection.physics_asset, uai.apply_input.reflection.render_target, uai.apply_input.reflection.runtime_virtual_texture, uai.apply_input.reflection.sequence, uai.apply_input.reflection.sparse_volume_texture, uai.apply_input.reflection.state_tree, uai.apply_input.reflection.static_mesh, uai.apply_input.reflection.subuv_animation, uai.apply_input.reflection.texture_array, uai.apply_input.reflection.texture_collection, uai.apply_input.reflection.texture_cube, uai.apply_input.reflection.texture_cube_array, uai.apply_input.reflection.texture_graph, uai.apply_input.reflection.volume_texture]
+    }
+    export_contract: { contract_ids: [uai.export.reflection.behavior_tree, uai.export.reflection.deformer_graph, uai.export.reflection.eqs, uai.export.reflection.material_instance, uai.export.reflection.media_player, uai.export.reflection.media_source, uai.export.reflection.media_texture, uai.export.reflection.paper_flipbook, uai.export.reflection.paper_sprite, uai.export.reflection.paper_tilemap, uai.export.reflection.paper_tileset, uai.export.reflection.physics_asset, uai.export.reflection.render_target, uai.export.reflection.runtime_virtual_texture, uai.export.reflection.sequence, uai.export.reflection.sparse_volume_texture, uai.export.reflection.state_tree, uai.export.reflection.static_mesh, uai.export.reflection.subuv_animation, uai.export.reflection.texture_array, uai.export.reflection.texture_collection, uai.export.reflection.texture_cube, uai.export.reflection.texture_cube_array, uai.export.reflection.texture_graph, uai.export.reflection.volume_texture] }
+    catalog_bindings: []
+  }
+  {
+    domain_id: rigging
+    apply_contract: {
+      workspace_contract_ids: [uai.apply_workspace.rigging.control_rig, uai.apply_workspace.rigging.ik_retargeter, uai.apply_workspace.rigging.ik_rig]
+      input_contract_ids: [uai.apply_input.rigging.control_rig, uai.apply_input.rigging.ik_retargeter, uai.apply_input.rigging.ik_rig]
+    }
+    export_contract: { contract_ids: [uai.export.rigging.control_rig, uai.export.rigging.ik_retargeter, uai.export.rigging.ik_rig] }
+    catalog_bindings: []
+  }
+  {
+    domain_id: umg
+    apply_contract: { workspace_contract_ids: [uai.apply_workspace.umg.asset], input_contract_ids: [uai.apply_input.umg.asset] }
+    export_contract: { contract_ids: [uai.export.umg.asset.v2] }
+    catalog_bindings: [
+      { kind: umg_widget, workspace_contract_id: uai.apply_workspace.umg.asset, input_contract_id: uai.apply_input.umg.asset, unit_id: asset, path_pattern: index.hjson, relative_path_template: index.hjson, exact_identity_fields: [widget_class], pointer_template: "/provider_extension/widget_tree/widgets/widget:{widget_name}", merge_mode: merge_object, operation_map: { create: update }, seed_bindings: { widget_class: "/provider_extension/widget_tree/widgets/widget:{widget_name}/class" }, required_context: [asset_path, parent_widget_name, widget_name], context_bindings: { asset_path: "/target/asset_path", parent_widget_name: "/provider_extension/widget_tree/widgets/widget:{widget_name}/parent", widget_name: "/provider_extension/widget_tree/widgets/widget:{widget_name}/name" }, constant_bindings: {}, required_seed_fields: [widget_class], optional_seed_fields: [] }
+    ]
+  }
+]

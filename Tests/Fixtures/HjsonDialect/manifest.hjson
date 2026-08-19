@@ -1,0 +1,30 @@
+{
+  schema: uai.hjson_dialect_corpus_manifest.v1
+  dialect_id: "uai-hjson-authoring/1"
+  development_truth_root: "Plugins/UeAgentInterface/Tests/Fixtures/HjsonDialect"
+  oracle_policy: {
+    semantics: design_owned_typed_expectation
+    canonical: human_reviewed_not_writer_generated
+    errors: stable_code_phase_pointer_location
+    depth: no_semantic_max_depth
+  }
+  support_fixtures: [
+    "valid/hjson_safety_fixture.hjson"
+    "valid/hjson_inline_tuple_fixture.hjson"
+    "invalid/missing_inline_comma.hjson"
+    "invalid/ambiguous_bare_colon.hjson"
+    "invalid/unclosed_string.hjson"
+  ]
+  cases: [
+    { case_id: multiline_full, classification: valid, input: "valid/multiline_full/input.hjson", semantics: "valid/multiline_full/expected_semantics.hjson", canonical: "valid/multiline_full/expected_canonical.hjson" }
+    { case_id: exact_numbers, classification: valid, input: "valid/exact_numbers/input.hjson", semantics: "valid/exact_numbers/expected_semantics.hjson", canonical: "valid/exact_numbers/expected_canonical.hjson" }
+    { case_id: deep_structure, classification: valid_generator, input: "valid/deep_structure/input.hjson", semantics: "valid/deep_structure/expected_semantics.hjson", canonical: "valid/deep_structure/expected_canonical.hjson" }
+    { case_id: nonfinite_nan, classification: invalid, input: "invalid/nonfinite_nan/input.hjson", error: "invalid/nonfinite_nan/expected_error.hjson" }
+    { case_id: nonfinite_positive_infinity, classification: invalid, input: "invalid/nonfinite_positive_infinity/input.hjson", error: "invalid/nonfinite_positive_infinity/expected_error.hjson" }
+    { case_id: nonfinite_negative_infinity, classification: invalid, input: "invalid/nonfinite_negative_infinity/input.hjson", error: "invalid/nonfinite_negative_infinity/expected_error.hjson" }
+    { case_id: multiline_unclosed, classification: invalid, input: "invalid/multiline_unclosed/input.hjson", error: "invalid/multiline_unclosed/expected_error.hjson" }
+    { case_id: multiline_invalid_indentation, classification: invalid, input: "invalid/multiline_invalid_indentation/input.hjson", error: "invalid/multiline_invalid_indentation/expected_error.hjson" }
+    { case_id: multiline_trailing_token, classification: invalid, input: "invalid/multiline_trailing_token/input.hjson", error: "invalid/multiline_trailing_token/expected_error.hjson" }
+    { case_id: nested_error_location, classification: invalid, input: "invalid/nested_error_location/input.hjson", error: "invalid/nested_error_location/expected_error.hjson" }
+  ]
+}

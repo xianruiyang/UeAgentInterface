@@ -1,0 +1,20 @@
+definition: {
+  additional_fields: false
+  fields: {
+    limit: {
+      default: 5
+      default_state: defined
+      description_zh: "最大返回候选数"
+      maximum: 20
+      minimum: 1
+      required: false
+      type: integer
+    }
+    offset: { default: 0, default_state: defined, description_zh: "分页偏移", minimum: 0, required: false, type: integer }
+    sort: { default: ui_order, default_state: defined, description_zh: "排序模式", enum_values: [ui_order, name, category], required: false, type: enum }
+  }
+  kind: object
+}
+schema: uai.command_spec.shared_type.v1
+type_id: NodeCatalogPage
+version: 1

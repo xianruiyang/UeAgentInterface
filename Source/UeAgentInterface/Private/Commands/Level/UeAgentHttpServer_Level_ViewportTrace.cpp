@@ -85,16 +85,21 @@ namespace
 	}
 }
 
-bool FUeAgentHttpServer::CmdViewportGetWarnings(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool UeAgentLevelOps::BuildViewportWarnings(
+	UWorld* World,
+	const bool bIncludeSuppressed,
+	TSharedPtr<FJsonObject>& OutData,
+	FString& OutError)
 {
-	UWorld* World = GetEditorWorld(OutError);
 	if (!World)
 	{
+		OutError = TEXT("no_editor_world");
 		return false;
 	}
-
-	bool bIncludeSuppressed = false;
-	JsonTryGetBool(Ctx.Params, TEXT("include_suppressed"), bIncludeSuppressed);
+	if (!OutData.IsValid())
+	{
+		OutData = MakeShared<FJsonObject>();
+	}
 
 	bool bClipPlaneCVarFound = false;
 	const int32 ClipPlaneCVarValue = GetConsoleVariableIntForWarnings(TEXT("r.AllowGlobalClipPlane"), bClipPlaneCVarFound);
@@ -245,6 +250,22 @@ bool FUeAgentHttpServer::CmdViewportGetWarnings(const FUeAgentRequestContext& Ct
 	OutData->SetArrayField(TEXT("warnings"), Warnings);
 	OutData->SetArrayField(TEXT("suppressed_warnings"), SuppressedWarnings);
 	return true;
+}
+
+bool FUeAgentHttpServer::CmdViewportGetWarnings(
+	const FUeAgentRequestContext& Ctx,
+	TSharedPtr<FJsonObject>& OutData,
+	FString& OutError) const
+{
+	UWorld* World = GetEditorWorld(OutError);
+	if (!World)
+	{
+		return false;
+	}
+	bool bIncludeSuppressed = false;
+	JsonTryGetBool(Ctx.Params, TEXT("include_suppressed"), bIncludeSuppressed);
+	return UeAgentLevelOps::BuildViewportWarnings(
+		World, bIncludeSuppressed, OutData, OutError);
 }
 
 bool FUeAgentHttpServer::CmdViewportGetCamera(TSharedPtr<FJsonObject>& OutData, FString& OutError) const

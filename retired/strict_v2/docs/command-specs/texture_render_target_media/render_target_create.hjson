@@ -1,0 +1,113 @@
+authoring: { reason: command_has_no_registered_folder_authoring_profile, state: none }
+category: texture_render_target_media
+command: render_target_create
+deprecation: { reason: command_is_active, state: none }
+discovery: { aliases: [], keywords_en: [render, target, create, texture_render_target_media], keywords_zh: [render_target_create], summary_en: "Execute render_target_create with a verified implementation contract", summary_zh: "创建 `2d/canvas2d/cube/2d_array/volume` RenderTarget。", tags: [texture_render_target_media, p2-004] }
+errors: {
+  codes: [
+    { code: asset_already_exists, description_zh: "C++ 实现返回错误码 asset_already_exists", retry_safe: false, stage: execution, wire_match: exact }
+    { code: asset_class_is_abstract, description_zh: "C++ 实现返回错误码 asset_class_is_abstract", retry_safe: false, stage: execution, wire_match: exact }
+    { code: asset_class_not_found, description_zh: "C++ 实现返回错误码 asset_class_not_found", retry_safe: false, stage: execution, wire_match: exact }
+    { code: create_asset_failed, description_zh: "C++ 实现返回错误码 create_asset_failed", retry_safe: false, stage: execution, wire_match: exact }
+    { code: create_package_failed, description_zh: "C++ 实现返回错误码 create_package_failed", retry_safe: false, stage: execution, wire_match: exact }
+    { code: existing_asset_class_mismatch, description_zh: "C++ 实现返回错误码 existing_asset_class_mismatch", retry_safe: false, stage: execution, wire_match: exact }
+    { code: invalid_, description_zh: "C++ 实现返回错误码 invalid_", retry_safe: true, stage: preflight, wire_match: prefix }
+    { code: invalid_asset_path, description_zh: "C++ 实现返回错误码 invalid_asset_path", retry_safe: true, stage: preflight, wire_match: exact }
+    { code: invalid_render_target_format, description_zh: "C++ 实现返回错误码 invalid_render_target_format", retry_safe: true, stage: preflight, wire_match: exact }
+    { code: missing_, description_zh: "C++ 实现返回错误码 missing_", retry_safe: true, stage: preflight, wire_match: prefix }
+    { code: missing_asset_path, description_zh: "C++ 实现返回错误码 missing_asset_path", retry_safe: true, stage: preflight, wire_match: exact }
+    { code: save_asset_failed, description_zh: "C++ 实现返回错误码 save_asset_failed", retry_safe: false, stage: execution, wire_match: exact }
+  ]
+}
+evidence: {
+  docs: [
+    { path: "Plugins/UeAgentInterface/docs/commands/texture_render_target_media/render_target_create.md", purpose: "user documentation cross-check; C++ implementation remains authoritative" }
+  ]
+  implementation: [
+    { line_hint: 42, path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Commands/TextureRenderTarget/UeAgentHttpServer_TextureRenderTarget_RenderTargets.cpp", purpose: "command handler, parameter and return evidence", symbol: CmdRenderTargetCreate }
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Commands/TextureRenderTarget/UeAgentHttpServer_TextureRenderTarget_TextureAssets.inl", purpose: "transitive helper evidence used by the command handler" }
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Server/UeAgentHttpServer.cpp", purpose: "transitive helper evidence used by the command handler" }
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Utilities/UeAgentJsonDiagnostics.cpp", purpose: "transitive helper evidence used by the command handler" }
+  ]
+  tests: [
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterfaceTests/Private/Smoke/UeAgentInterfaceTextureRenderTargetSmokeTests.cpp", purpose: "smoke or negative-path evidence cross-checked for the verified contract" }
+  ]
+}
+execution: {
+  destructive: false
+  editor_state: required
+  game_thread: required
+  idempotent: false
+  kind: write
+  overwrite_behavior: target_asset
+  pie_state: allowed
+  retry_safe: false
+  save_behavior: caller_controlled
+  side_effects: [modifies_asset, creates_asset]
+  ui_effect: none
+}
+maturity: verified
+params: {
+  constraints: []
+  fields: {
+    asset_path: { default_state: none, description_zh: "C++ 实现读取的 asset_path 参数", path_semantics: { access_scope: project_write, kind: ue_asset }, required: true, type: ue_asset_path }
+    auto_generate_mips: { default: false, default_state: defined, description_zh: "C++ 实现读取的 auto_generate_mips 参数", required: false, type: bool }
+    depth: { default: 1, default_state: defined, description_zh: "C++ 实现读取的 depth 参数", required: false, type: integer }
+    depth_or_slices: { default: 1, default_state: defined, description_zh: "C++ 实现读取的 depth_or_slices 参数", required: false, type: integer }
+    format: { default: RTF_RGBA8, default_state: defined, description_zh: "C++ 实现读取的 format 参数", required: false, type: string }
+    height: { default: 256, default_state: defined, description_zh: "C++ 实现读取的 height 参数", required: false, type: integer }
+    replace_existing: { default: false, default_state: defined, description_zh: "C++ 实现读取的 replace_existing 参数", required: false, type: bool }
+    save_after_create: { default: true, default_state: defined, description_zh: "C++ 实现读取的 save_after_create 参数", required: false, type: bool }
+    slices: { default: 1, default_state: defined, description_zh: "C++ 实现读取的 slices 参数", required: false, type: number }
+    target_type: { default: "2d", default_state: defined, description_zh: "C++ 实现读取的 target_type 参数", required: false, type: string }
+    type: { default: "2d", default_state: defined, description_zh: "C++ 实现读取的 type 参数", required: false, type: string }
+    width: { default: 256, default_state: defined, description_zh: "C++ 实现读取的 width 参数", required: false, type: integer }
+  }
+  state: defined
+}
+response: { artifact_fields: [], compact_fields: [asset_path, auto_generate_mips, can_read_pixels, class, class_path, clear_color], failure_fields: [params.asset_path], max_items_policy: { fields: [], mode: none } }
+returns: {
+  fields: {
+    asset_path: { description_zh: "C++ 实现返回的 asset_path 字段；是否出现取决于执行分支", required: false, type: ue_asset_path }
+    auto_generate_mips: { description_zh: "C++ 实现返回的 auto_generate_mips 字段；是否出现取决于执行分支", required: false, type: bool }
+    can_read_pixels: { description_zh: "C++ 实现返回的 can_read_pixels 字段；是否出现取决于执行分支", required: false, type: bool }
+    class: { description_zh: "C++ 实现返回的 class 字段；是否出现取决于执行分支", required: false, type: string }
+    class_path: { description_zh: "C++ 实现返回的 class_path 字段；是否出现取决于执行分支", required: false, type: string }
+    clear_color: { description_zh: "C++ 实现返回的 clear_color 字段；是否出现取决于执行分支", required: false, type: json_value }
+    created: { description_zh: "C++ 实现返回的 created 字段；是否出现取决于执行分支", required: false, type: bool }
+    depth: { description_zh: "C++ 实现返回的 depth 字段；是否出现取决于执行分支", required: false, type: integer }
+    face_count: { description_zh: "C++ 实现返回的 face_count 字段；是否出现取决于执行分支", required: false, type: integer }
+    height: { description_zh: "C++ 实现返回的 height 字段；是否出现取决于执行分支", required: false, type: integer }
+    object_path: { description_zh: "C++ 实现返回的 object_path 字段；是否出现取决于执行分支", required: false, type: ue_object_path }
+    pixel_format: { description_zh: "C++ 实现返回的 pixel_format 字段；是否出现取决于执行分支", required: false, type: string }
+    render_target_format: { description_zh: "C++ 实现返回的 render_target_format 字段；是否出现取决于执行分支", required: false, type: string }
+    resource_state: { description_zh: "C++ 实现返回的 resource_state 字段；是否出现取决于执行分支", required: false, type: string }
+    resource_valid: { description_zh: "C++ 实现返回的 resource_valid 字段；是否出现取决于执行分支", required: false, type: bool }
+    slice_count: { description_zh: "C++ 实现返回的 slice_count 字段；是否出现取决于执行分支", required: false, type: integer }
+    surface_array_size: { description_zh: "C++ 实现返回的 surface_array_size 字段；是否出现取决于执行分支", required: false, type: number }
+    surface_depth: { description_zh: "C++ 实现返回的 surface_depth 字段；是否出现取决于执行分支", required: false, type: integer }
+    surface_height: { description_zh: "C++ 实现返回的 surface_height 字段；是否出现取决于执行分支", required: false, type: integer }
+    surface_width: { description_zh: "C++ 实现返回的 surface_width 字段；是否出现取决于执行分支", required: false, type: integer }
+    target_type: { description_zh: "C++ 实现返回的 target_type 字段；是否出现取决于执行分支", required: false, type: string }
+    type: { description_zh: "C++ 实现返回的 type 字段；是否出现取决于执行分支", required: false, type: string }
+    width: { description_zh: "C++ 实现返回的 width 字段；是否出现取决于执行分支", required: false, type: integer }
+  }
+  state: defined
+}
+schema: uai.command_spec.v1
+status: active
+types: {}
+verification: {
+  assertions: [
+    { id: result_present, operator: exists, source: returns.asset_path }
+    { id: state_readback_present, operator: exists, source: methods.state_readback.asset_path }
+  ]
+  failure_policy: fail_overall
+  methods: [
+    { id: result, kind: result_assertion }
+    { command: render_target_get_info, id: state_readback, kind: command_readback, params_mapping: { asset_path: returns.asset_path, render_target: returns.asset_path } }
+  ]
+  required: true
+  state: defined
+}
+version: 1

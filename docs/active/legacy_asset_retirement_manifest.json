@@ -1,0 +1,438 @@
+{
+  "schema": "uai.legacy_asset_retirement.v1",
+  "owner_task_id": "T90-LEGACY-ASSET-RETIREMENT",
+  "command_inventory": {
+    "path": "docs/plan/20260806_UAI_REQUIREMENT_DESIGN_REALIGNMENT/UAI_COMMAND_TASK_INVENTORY.json",
+    "entry_count": 344,
+    "sha256": "sha256:f729b99069e251710e026a851005365f0e637620b83674a27c0888c39d030a95",
+    "validation": "unique_complete_disposition"
+  },
+  "retired_task_helpers": [
+    {
+      "task_id": "T04-PUBLIC-SDK-CLI",
+      "original_path": "UeAgentInterfaceCMD/cli/uai/generated_commands/core",
+      "isolated_path": "UeAgentInterfaceCMD/retired/strict_v2/generated_commands/active_root/core"
+    },
+    {
+      "task_id": "T05-QUERY-PUBLIC-CALIBRATION",
+      "original_path": "UeAgentInterfaceCMD/cli/uai/generated_commands/query_calibration",
+      "isolated_path": "UeAgentInterfaceCMD/retired/strict_v2/generated_commands/active_root/query_calibration"
+    },
+    {
+      "task_id": "T06-NON-HJSON-QUERY-MIGRATION",
+      "original_path": "UeAgentInterfaceCMD/cli/uai/generated_commands/query",
+      "isolated_path": "UeAgentInterfaceCMD/retired/strict_v2/generated_commands/task_helpers/query"
+    },
+    {
+      "task_id": "T11-BLUEPRINT-NODE",
+      "original_path": "UeAgentInterfaceCMD/cli/uai/generated_commands/blueprint_node",
+      "isolated_path": "UeAgentInterfaceCMD/retired/strict_v2/generated_commands/task_helpers/blueprint_node"
+    },
+    {
+      "task_id": "T12-BLUEPRINT-COMPONENT",
+      "original_path": "UeAgentInterfaceCMD/cli/uai/generated_commands/blueprint_component",
+      "isolated_path": "UeAgentInterfaceCMD/retired/strict_v2/generated_commands/task_helpers/blueprint_component"
+    },
+    {
+      "task_id": "T13-UOBJECT-RECURSIVE-INIT",
+      "original_path": "UeAgentInterfaceCMD/cli/uai/generated_commands/uobject_dataasset",
+      "isolated_path": "UeAgentInterfaceCMD/retired/strict_v2/generated_commands/task_helpers/uobject_dataasset"
+    },
+    {
+      "task_id": "T14-BLUEPRINT-SURFACES",
+      "original_path": "UeAgentInterfaceCMD/cli/uai/generated_commands/t14_blueprint_surfaces",
+      "isolated_path": "UeAgentInterfaceCMD/retired/strict_v2/generated_commands/task_helpers/t14_blueprint_surfaces"
+    },
+    {
+      "task_id": "T15-UMG-WIDGET-DOMAIN",
+      "original_path": "UeAgentInterfaceCMD/cli/uai/generated_commands/t15_umg_widget_domain",
+      "isolated_path": "UeAgentInterfaceCMD/retired/strict_v2/generated_commands/task_helpers/t15_umg_widget_domain"
+    },
+    {
+      "task_id": "T16-ANIMATION-BLUEPRINT-DOMAIN",
+      "original_path": "UeAgentInterfaceCMD/cli/uai/generated_commands/t16_animation_blueprint_domain",
+      "isolated_path": "UeAgentInterfaceCMD/retired/strict_v2/generated_commands/task_helpers/t16_animation_blueprint_domain"
+    },
+    {
+      "task_id": "T17-MATERIAL-DOMAIN",
+      "original_path": "UeAgentInterfaceCMD/cli/uai/generated_commands/t17_material_domain",
+      "isolated_path": "UeAgentInterfaceCMD/retired/strict_v2/generated_commands/task_helpers/t17_material_domain"
+    },
+    {
+      "task_id": "T18-NIAGARA-DOMAIN",
+      "original_path": "UeAgentInterfaceCMD/cli/uai/generated_commands/t18_niagara_domain",
+      "isolated_path": "UeAgentInterfaceCMD/retired/strict_v2/generated_commands/task_helpers/t18_niagara_domain"
+    },
+    {
+      "task_id": "T19-PCG-DOMAIN",
+      "original_path": "UeAgentInterfaceCMD/cli/uai/generated_commands/t19_pcg_domain",
+      "isolated_path": "UeAgentInterfaceCMD/retired/strict_v2/generated_commands/task_helpers/t19_pcg_domain"
+    },
+    {
+      "task_id": "T20-AI-BEHAVIOR-DOMAIN",
+      "original_path": "UeAgentInterfaceCMD/cli/uai/generated_commands/t20_ai_behavior_domain",
+      "isolated_path": "UeAgentInterfaceCMD/retired/strict_v2/generated_commands/task_helpers/t20_ai_behavior_domain"
+    },
+    {
+      "task_id": "T21-AUDIO-DOMAIN",
+      "original_path": "UeAgentInterfaceCMD/cli/uai/generated_commands/t21_audio_domain",
+      "isolated_path": "UeAgentInterfaceCMD/retired/strict_v2/generated_commands/task_helpers/t21_audio_domain"
+    },
+    {
+      "task_id": "T22-SEQUENCE-DOMAIN",
+      "original_path": "UeAgentInterfaceCMD/cli/uai/generated_commands/t22_sequence_domain",
+      "isolated_path": "UeAgentInterfaceCMD/retired/strict_v2/generated_commands/task_helpers/t22_sequence_domain"
+    },
+    {
+      "task_id": "T23-ANIMATION-CURVE-DOMAIN",
+      "original_path": "UeAgentInterfaceCMD/cli/uai/generated_commands/t23_animation_curve_domain",
+      "isolated_path": "UeAgentInterfaceCMD/retired/strict_v2/generated_commands/task_helpers/t23_animation_curve_domain"
+    },
+    {
+      "task_id": "T24-ANIMATION-RIG-GRAPH-DOMAIN",
+      "original_path": "UeAgentInterfaceCMD/cli/uai/generated_commands/t24_animation_rig_graph_domain",
+      "isolated_path": "UeAgentInterfaceCMD/retired/strict_v2/generated_commands/task_helpers/t24_animation_rig_graph_domain"
+    },
+    {
+      "task_id": "T25-RIG-SIMULATION-SPATIAL-DOMAIN",
+      "original_path": "UeAgentInterfaceCMD/cli/uai/generated_commands/t25_rig_simulation_spatial_domain",
+      "isolated_path": "UeAgentInterfaceCMD/retired/strict_v2/generated_commands/task_helpers/t25_rig_simulation_spatial_domain"
+    },
+    {
+      "task_id": "T26-LEVEL-WORLD-DOMAIN",
+      "original_path": "UeAgentInterfaceCMD/cli/uai/generated_commands/t26_level_world_domain",
+      "isolated_path": "UeAgentInterfaceCMD/retired/strict_v2/generated_commands/task_helpers/t26_level_world_domain"
+    },
+    {
+      "task_id": "T27-DATATABLE-CURVETABLE-DOMAIN",
+      "original_path": "UeAgentInterfaceCMD/cli/uai/generated_commands/t27_datatable_curvetable_domain",
+      "isolated_path": "UeAgentInterfaceCMD/retired/strict_v2/generated_commands/task_helpers/t27_datatable_curvetable_domain"
+    },
+    {
+      "task_id": "T28-EXTERNAL-FACTORY-IMPORT",
+      "original_path": "UeAgentInterfaceCMD/cli/uai/generated_commands/t28_external_factory_import",
+      "isolated_path": "UeAgentInterfaceCMD/retired/strict_v2/generated_commands/task_helpers/t28_external_factory_import"
+    },
+    {
+      "task_id": "T29-EXTERNAL-SKIN-WEIGHT-IMPORT",
+      "original_path": "UeAgentInterfaceCMD/cli/uai/generated_commands/t29_external_skin_weight_import",
+      "isolated_path": "UeAgentInterfaceCMD/retired/strict_v2/generated_commands/task_helpers/t29_external_skin_weight_import"
+    },
+    {
+      "task_id": "T30-EXTERNAL-LOCALIZATION-IMPORT",
+      "original_path": "UeAgentInterfaceCMD/cli/uai/generated_commands/t30_external_localization_import",
+      "isolated_path": "UeAgentInterfaceCMD/retired/strict_v2/generated_commands/task_helpers/t30_external_localization_import"
+    },
+    {
+      "task_id": "T31-DESTRUCTIVE-CONTENT-OPS",
+      "original_path": "UeAgentInterfaceCMD/cli/uai/generated_commands/destructive_content",
+      "isolated_path": "UeAgentInterfaceCMD/retired/strict_v2/generated_commands/task_helpers/destructive_content"
+    },
+    {
+      "task_id": "T32-LONG-RUNNING",
+      "original_path": "UeAgentInterfaceCMD/cli/uai/generated_commands/long_running",
+      "isolated_path": "UeAgentInterfaceCMD/retired/strict_v2/generated_commands/task_helpers/long_running"
+    },
+    {
+      "task_id": "T34-CONTROL-COMMAND-MIGRATION",
+      "original_path": "UeAgentInterfaceCMD/cli/uai/generated_commands/editor_session_build",
+      "isolated_path": "UeAgentInterfaceCMD/retired/strict_v2/generated_commands/task_helpers/editor_session_build"
+    },
+    {
+      "task_id": "T37-ASSET-SIMPLE-OPERATION",
+      "original_path": "UeAgentInterfaceCMD/cli/uai/generated_commands/t37_asset_simple_operation",
+      "isolated_path": "UeAgentInterfaceCMD/retired/strict_v2/generated_commands/task_helpers/t37_asset_simple_operation"
+    },
+    {
+      "task_id": "T38-MODELING-GEOMETRY-OPERATION",
+      "original_path": "UeAgentInterfaceCMD/cli/uai/generated_commands/t38_modeling_geometry_operation",
+      "isolated_path": "UeAgentInterfaceCMD/retired/strict_v2/generated_commands/task_helpers/t38_modeling_geometry_operation"
+    },
+    {
+      "task_id": "T39-EDITOR-PROJECT-OPERATION",
+      "original_path": "UeAgentInterfaceCMD/cli/uai/generated_commands/t39_editor_project_operation",
+      "isolated_path": "UeAgentInterfaceCMD/retired/strict_v2/generated_commands/task_helpers/t39_editor_project_operation"
+    },
+    {
+      "task_id": "T40-TEXTURE-GRAPH-OPERATION",
+      "original_path": "UeAgentInterfaceCMD/cli/uai/generated_commands/t40_texture_graph_operation",
+      "isolated_path": "UeAgentInterfaceCMD/retired/strict_v2/generated_commands/task_helpers/t40_texture_graph_operation"
+    },
+    {
+      "task_id": "T41-LANDSCAPE-OPERATION",
+      "original_path": "UeAgentInterfaceCMD/cli/uai/generated_commands/t41_landscape_operation",
+      "isolated_path": "UeAgentInterfaceCMD/retired/strict_v2/generated_commands/task_helpers/t41_landscape_operation"
+    },
+    {
+      "task_id": "T42-PHYSICS-DEFORMER-OPERATION",
+      "original_path": "UeAgentInterfaceCMD/cli/uai/generated_commands/t42_physics_deformer_operation",
+      "isolated_path": "UeAgentInterfaceCMD/retired/strict_v2/generated_commands/task_helpers/t42_physics_deformer_operation"
+    },
+    {
+      "task_id": "T43-REFERENCE-OPERATION",
+      "original_path": "UeAgentInterfaceCMD/cli/uai/generated_commands/t43_reference_operation",
+      "isolated_path": "UeAgentInterfaceCMD/retired/strict_v2/generated_commands/task_helpers/t43_reference_operation"
+    },
+    {
+      "task_id": "T44-CAPTURE-MEDIA-OPERATION",
+      "original_path": "UeAgentInterfaceCMD/cli/uai/generated_commands/capture_media",
+      "isolated_path": "UeAgentInterfaceCMD/retired/strict_v2/generated_commands/task_helpers/capture_media"
+    },
+    {
+      "task_id": "T45-VIEWPORT-GRAPH-CONTROL",
+      "original_path": "UeAgentInterfaceCMD/cli/uai/generated_commands/viewport_graph",
+      "isolated_path": "UeAgentInterfaceCMD/retired/strict_v2/generated_commands/task_helpers/viewport_graph"
+    },
+    {
+      "task_id": "T46-SPATIAL-CONTENT-OPERATION",
+      "original_path": "UeAgentInterfaceCMD/cli/uai/generated_commands/t46_spatial_content_operation",
+      "isolated_path": "UeAgentInterfaceCMD/retired/strict_v2/generated_commands/task_helpers/t46_spatial_content_operation"
+    },
+    {
+      "task_id": "T47-BLUEPRINT-COMMAND-MIGRATION",
+      "original_path": "UeAgentInterfaceCMD/cli/uai/generated_commands/t47_blueprint_command_migration",
+      "isolated_path": "UeAgentInterfaceCMD/retired/strict_v2/generated_commands/task_helpers/t47_blueprint_command_migration"
+    },
+    {
+      "task_id": "T48-UMG-COMMAND-MIGRATION",
+      "original_path": "UeAgentInterfaceCMD/cli/uai/generated_commands/t48_umg_command_migration",
+      "isolated_path": "UeAgentInterfaceCMD/retired/strict_v2/generated_commands/task_helpers/t48_umg_command_migration"
+    },
+    {
+      "task_id": "T49-ANIMATION-BLUEPRINT-COMMAND-MIGRATION",
+      "original_path": "UeAgentInterfaceCMD/cli/uai/generated_commands/t49_animation_blueprint_command_migration",
+      "isolated_path": "UeAgentInterfaceCMD/retired/strict_v2/generated_commands/task_helpers/t49_animation_blueprint_command_migration"
+    },
+    {
+      "task_id": "T50-MATERIAL-COMMAND-MIGRATION",
+      "original_path": "UeAgentInterfaceCMD/cli/uai/generated_commands/t50_material_command_migration",
+      "isolated_path": "UeAgentInterfaceCMD/retired/strict_v2/generated_commands/task_helpers/t50_material_command_migration"
+    },
+    {
+      "task_id": "T51-NIAGARA-COMMAND-MIGRATION",
+      "original_path": "UeAgentInterfaceCMD/cli/uai/generated_commands/t51_niagara_command_migration",
+      "isolated_path": "UeAgentInterfaceCMD/retired/strict_v2/generated_commands/task_helpers/t51_niagara_command_migration"
+    },
+    {
+      "task_id": "T52-PCG-COMMAND-MIGRATION",
+      "original_path": "UeAgentInterfaceCMD/cli/uai/generated_commands/t52_pcg_command_migration",
+      "isolated_path": "UeAgentInterfaceCMD/retired/strict_v2/generated_commands/task_helpers/t52_pcg_command_migration"
+    },
+    {
+      "task_id": "T53-AI-COMMAND-MIGRATION",
+      "original_path": "UeAgentInterfaceCMD/cli/uai/generated_commands/t53_ai_command_migration",
+      "isolated_path": "UeAgentInterfaceCMD/retired/strict_v2/generated_commands/task_helpers/t53_ai_command_migration"
+    },
+    {
+      "task_id": "T54-AUDIO-COMMAND-MIGRATION",
+      "original_path": "UeAgentInterfaceCMD/cli/uai/generated_commands/t54_audio_command_migration",
+      "isolated_path": "UeAgentInterfaceCMD/retired/strict_v2/generated_commands/task_helpers/t54_audio_command_migration"
+    },
+    {
+      "task_id": "T55-TIMELINE-SEQUENCE-COMMAND-MIGRATION",
+      "original_path": "UeAgentInterfaceCMD/cli/uai/generated_commands/t55_timeline_sequence_command_migration",
+      "isolated_path": "UeAgentInterfaceCMD/retired/strict_v2/generated_commands/task_helpers/t55_timeline_sequence_command_migration"
+    },
+    {
+      "task_id": "T56-ANIMATION-CURVE-COMMAND-MIGRATION",
+      "original_path": "UeAgentInterfaceCMD/cli/uai/generated_commands/t56_animation_curve_command_migration",
+      "isolated_path": "UeAgentInterfaceCMD/retired/strict_v2/generated_commands/task_helpers/t56_animation_curve_command_migration"
+    },
+    {
+      "task_id": "T57-ANIMATION-RIG-COMMAND-MIGRATION",
+      "original_path": "UeAgentInterfaceCMD/cli/uai/generated_commands/t57_animation_rig_command_migration",
+      "isolated_path": "UeAgentInterfaceCMD/retired/strict_v2/generated_commands/task_helpers/t57_animation_rig_command_migration"
+    },
+    {
+      "task_id": "T58-RIG-SPATIAL-COMMAND-MIGRATION",
+      "original_path": "UeAgentInterfaceCMD/cli/uai/generated_commands/t58_rig_spatial_command_migration",
+      "isolated_path": "UeAgentInterfaceCMD/retired/strict_v2/generated_commands/task_helpers/t58_rig_spatial_command_migration"
+    },
+    {
+      "task_id": "T59-WORLD-COMMAND-MIGRATION",
+      "original_path": "UeAgentInterfaceCMD/cli/uai/generated_commands/t59_world_command_migration",
+      "isolated_path": "UeAgentInterfaceCMD/retired/strict_v2/generated_commands/task_helpers/t59_world_command_migration"
+    },
+    {
+      "task_id": "T60-HJSON-EXTERNAL-INPUT-DOMAIN",
+      "original_path": "UeAgentInterfaceCMD/cli/uai/generated_commands/hjson_external_input",
+      "isolated_path": "UeAgentInterfaceCMD/retired/strict_v2/generated_commands/active_root/hjson_external_input"
+    }
+  ],
+  "entries": [
+    {
+      "original_path": "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Commands",
+      "disposition": "retain_active_mechanics",
+      "reason": "Current domain owners still consume shared Blueprint, UMG, palette-search, viewport, audio, material, and sequence mechanics from this mixed root; it is mechanics, not the command-routing authority.",
+      "active_consumers": [
+        "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Domains/Blueprint/Authoring/UeAgentBlueprintAuthoringApplyProvider.cpp"
+      ]
+    },
+    {
+      "original_path": "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Domains",
+      "disposition": "retain_active_mechanics",
+      "reason": "The strict_v2 domain owners and authoring backends live here and are composed by the current service composition.",
+      "active_consumers": [
+        "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Composition/UeAgentQueryServiceComposition.cpp"
+      ]
+    },
+    {
+      "original_path": "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Server",
+      "disposition": "retain_active_mechanics",
+      "reason": "Compiled legacy handler mechanics remain consumed by command implementation translation units; the formal ingress and routing authority has moved to NetworkTransport, CommandService, and immutable composition.",
+      "active_consumers": [
+        "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Commands/UMG/UeAgentHttpServer_UMG.h"
+      ]
+    },
+    {
+      "original_path": "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Composition",
+      "disposition": "retain_active_mechanics",
+      "reason": "This is the current composition root for immutable command owners and service activation.",
+      "active_consumers": [
+        "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Module/UeAgentInterfaceModule.cpp"
+      ]
+    },
+    {
+      "original_path": "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Utilities/AuthoringObjectApply",
+      "disposition": "retain_active_mechanics",
+      "reason": "The unified recursive authoring operation provider directly consumes this object-apply engine.",
+      "active_consumers": [
+        "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Utilities/AuthoringOperationApply/UeAgentAuthoringObjectApplyProvider.h"
+      ]
+    },
+    {
+      "original_path": "UeAgentInterfaceCMD/cli/uai/commands",
+      "disposition": "retain_active_mechanics",
+      "reason": "This is the current statically generated public SDK binding surface derived from the C++ manifest.",
+      "active_consumers": [
+        "UeAgentInterfaceCMD/cli/uai/uai_client/__init__.py"
+      ]
+    },
+    {
+      "original_path": "UeAgentInterfaceCMD/cli/uai/generated_commands",
+      "disposition": "isolate_for_audit",
+      "reason": "Task-local projection packages and frozen hash tables duplicated the default manifest-generated uai.commands surface and no longer have active runtime consumers.",
+      "isolated_path": "UeAgentInterfaceCMD/retired/strict_v2/generated_commands/active_root",
+      "forbidden_reference_tokens": [
+        "uai.generated_commands."
+      ]
+    },
+    {
+      "original_path": "Plugins/UeAgentInterface/docs/command-specs",
+      "disposition": "isolate_for_audit",
+      "reason": "Generated per-command HJSON specs were a parallel command-contract authority; the C++ manifest and generated Python signature are now authoritative.",
+      "isolated_path": "Plugins/UeAgentInterface/retired/strict_v2/docs/command-specs"
+    },
+    {
+      "original_path": "Plugins/UeAgentInterface/docs/commands",
+      "disposition": "isolate_for_audit",
+      "reason": "Generated command pages and deprecated command pages duplicated the current manifest and could no longer define behavior.",
+      "isolated_path": "Plugins/UeAgentInterface/retired/strict_v2/docs/commands",
+      "forbidden_reference_tokens": [
+        "`docs/commands/`"
+      ]
+    },
+    {
+      "original_path": "Plugins/UeAgentInterface/docs/contracts",
+      "disposition": "retain_active_mechanics",
+      "reason": "The public edge, read/export, reference, typed CRUD, and long-running behavior contracts remain current explanatory contracts.",
+      "active_consumers": [
+        "Plugins/UeAgentInterface/docs/UeAgentInterface_Usage.md"
+      ]
+    },
+    {
+      "original_path": "Plugins/UeAgentInterface/docs/generated",
+      "disposition": "isolate_for_audit",
+      "reason": "Generated coverage-debt and catalog reports are historical observations, not current completion or command authorities.",
+      "isolated_path": "Plugins/UeAgentInterface/retired/strict_v2/docs/generated",
+      "forbidden_reference_tokens": [
+        "`docs/generated/`"
+      ]
+    },
+    {
+      "original_path": "Plugins/UeAgentInterface/docs/hjson-authoring",
+      "disposition": "retain_active_mechanics",
+      "reason": "These pages remain the detailed user-facing explanation of the unified HJSON model and are routed by the current usage entry.",
+      "active_consumers": [
+        "Plugins/UeAgentInterface/docs/UeAgentInterface_Usage.md"
+      ]
+    },
+    {
+      "original_path": "Plugins/UeAgentInterface/docs/authoring_registry.md",
+      "disposition": "isolate_for_audit",
+      "reason": "The old authoring-registry narrative described a parallel snapshot authority that the unified manifest and composition replaced.",
+      "isolated_path": "Plugins/UeAgentInterface/retired/strict_v2/docs/authoring_registry.md"
+    },
+    {
+      "original_path": "Plugins/UeAgentInterface/docs/HjsonAuthoring_Guide.md",
+      "disposition": "retain_active_mechanics",
+      "reason": "The consolidated HJSON user guide remains routed by the current usage entry and is supplemented by strict_v2 active evidence pages.",
+      "active_consumers": [
+        "Plugins/UeAgentInterface/docs/UeAgentInterface_Usage.md"
+      ]
+    },
+    {
+      "original_path": "UeAgentInterfaceCMD/docs/generated",
+      "disposition": "isolate_for_audit",
+      "reason": "The empty historical generated-doc discovery root has no public SDK consumer.",
+      "isolated_path": "UeAgentInterfaceCMD/retired/strict_v2/docs/generated"
+    },
+    {
+      "original_path": "UeAgentInterfaceCMD/docs/plan",
+      "disposition": "isolate_for_audit",
+      "reason": "The empty historical planning-doc discovery root is not a current plan authority.",
+      "isolated_path": "UeAgentInterfaceCMD/retired/strict_v2/docs/plan"
+    },
+    {
+      "original_path": "UeAgentInterfaceCMD/docs/quality",
+      "disposition": "isolate_for_audit",
+      "reason": "The empty historical quality-doc discovery root is not a current verification authority.",
+      "isolated_path": "UeAgentInterfaceCMD/retired/strict_v2/docs/quality"
+    },
+    {
+      "original_path": "UeAgentInterfacePak/skills/ue-agent-interface/docs/UeAgentInterface/commands",
+      "disposition": "isolate_for_audit",
+      "reason": "The packaged per-command Markdown tree pointed to the retired uai_core.command_docs authority instead of the public uai SDK discovery path.",
+      "isolated_path": "UeAgentInterfacePak/retired/strict_v2/skills/ue-agent-interface/docs/UeAgentInterface/commands",
+      "forbidden_reference_tokens": [
+        "uai_core.command_docs."
+      ]
+    },
+    {
+      "original_path": "UeAgentInterfacePak/UeAgentInterface/docs/commands",
+      "disposition": "isolate_for_audit",
+      "reason": "The Pak source command Markdown mirror duplicated the retired command-doc index and has no active public SDK role.",
+      "isolated_path": "UeAgentInterfacePak/retired/strict_v2/UeAgentInterface/docs/commands",
+      "forbidden_reference_tokens": [
+        "uai_core.command_docs."
+      ]
+    },
+    {
+      "original_path": "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Server/CommandSources",
+      "disposition": "isolate_for_audit",
+      "reason": "This one-off NodeGraph command-source trial no longer feeds the immutable registry, build, startup, selector, runner, or gate.",
+      "isolated_path": "Plugins/UeAgentInterface/retired/strict_v2/source/server_command_sources",
+      "forbidden_reference_tokens": [
+        "Generated by scripts/uai/generate_command_registry_trial.py."
+      ]
+    },
+    {
+      "original_path": "scripts/uai/generate_command_registry_trial.py",
+      "disposition": "isolate_for_audit",
+      "reason": "The one-off trial generator consumed the retired command-source input and is not part of the formal manifest binding pipeline.",
+      "isolated_path": "Plugins/UeAgentInterface/retired/strict_v2/tools/generate_command_registry_trial.py"
+    },
+    {
+      "original_path": "Plugins/UeAgentInterface/Tests/Fixtures/AuthoringRegistryContract",
+      "disposition": "isolate_for_audit",
+      "reason": "This fixture asserted the retired multi-surface authoring-registry snapshot and has no active test consumer.",
+      "isolated_path": "Plugins/UeAgentInterface/retired/strict_v2/audit-fixtures/authoring_registry_contract"
+    },
+    {
+      "original_path": "Plugins/UeAgentInterface/docs/contracts/authoring_registry_snapshot.hjson",
+      "disposition": "isolate_for_audit",
+      "reason": "The snapshot was the retired fixture's parallel authoring-registry authority; current ownership is the C++ manifest and strict_v2 composition.",
+      "isolated_path": "Plugins/UeAgentInterface/retired/strict_v2/docs/contracts/authoring_registry_snapshot.hjson"
+    }
+  ]
+}

@@ -1,0 +1,74 @@
+authoring: { reason: command_has_no_registered_folder_authoring_profile, state: none }
+category: ikrig_ikretargeter
+command: ik_retargeter_get_info
+deprecation: { reason: command_is_active, state: none }
+discovery: { aliases: [], keywords_en: [ik, retargeter, get, info, ikrig_ikretargeter], keywords_zh: [ik_retargeter_get_info], summary_en: "Execute ik_retargeter_get_info with a verified implementation contract", summary_zh: "读取 IK Retargeter 摘要", tags: [ikrig_ikretargeter, p2-006] }
+errors: {
+  codes: [
+    { code: ik_retargeter_controller_not_available, description_zh: "C++ 实现返回错误码 ik_retargeter_controller_not_available", retry_safe: false, stage: execution, wire_match: exact }
+    { code: ik_retargeter_not_found, description_zh: "C++ 实现返回错误码 ik_retargeter_not_found", retry_safe: false, stage: execution, wire_match: exact }
+    { code: missing_asset_path, description_zh: "C++ 实现返回错误码 missing_asset_path", retry_safe: true, stage: preflight, wire_match: exact }
+  ]
+}
+evidence: {
+  docs: [
+    { path: "Plugins/UeAgentInterface/docs/commands/ikrig_ikretargeter/ik_retargeter_get_info.md", purpose: "user documentation cross-check; C++ implementation remains authoritative" }
+  ]
+  implementation: [
+    { line_hint: 1448, path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Commands/IK/UeAgentHttpServer_IKAssets.cpp", purpose: "command handler, parameter and return evidence", symbol: CmdIKRetargeterGetInfo }
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Server/UeAgentHttpServer.cpp", purpose: "transitive helper evidence used by the command handler" }
+  ]
+  tests: [
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterfaceTests/Private/Smoke/UeAgentInterfaceSmoke_AnimationIKNiagara.cpp", purpose: "smoke or negative-path evidence cross-checked for the verified contract" }
+  ]
+}
+execution: {
+  destructive: false
+  editor_state: required
+  game_thread: required
+  idempotent: true
+  kind: read_only
+  overwrite_behavior: none
+  pie_state: allowed
+  retry_safe: true
+  save_behavior: none
+  side_effects: []
+  ui_effect: none
+}
+maturity: verified
+params: {
+  constraints: []
+  fields: { asset_path: { default_state: none, description_zh: "C++ 实现读取的 asset_path 参数", path_semantics: { access_scope: mounted_read, kind: ue_asset }, required: true, type: ue_asset_path } }
+  state: defined
+}
+response: { artifact_fields: [chain_mappings, chain_settings, source_pose_names, target_pose_names, current_source_pose, current_target_pose, global_settings, root_settings], compact_fields: [asset_path, chain_mapping_count, chain_mapping_ready, chain_settings_count], failure_fields: [params.asset_path], max_items_policy: { fields: [], mode: none } }
+returns: {
+  fields: {
+    asset_path: { description_zh: "C++ 实现返回的 asset_path 字段；是否出现取决于执行分支", required: false, type: ue_asset_path }
+    chain_mapping_count: { description_zh: "C++ 实现返回的 chain_mapping_count 字段；是否出现取决于执行分支", required: false, type: integer }
+    chain_mapping_ready: { description_zh: "C++ 实现返回的 chain_mapping_ready 字段；是否出现取决于执行分支", required: false, type: bool }
+    chain_mappings: { description_zh: "C++ 实现返回的 chain_mappings 字段；是否出现取决于执行分支", item_type: json_value, required: false, type: array }
+    chain_settings: { description_zh: "C++ 实现返回的 chain_settings 字段；是否出现取决于执行分支", item_type: json_value, required: false, type: array }
+    chain_settings_count: { description_zh: "C++ 实现返回的 chain_settings_count 字段；是否出现取决于执行分支", required: false, type: integer }
+    current_source_pose: { description_zh: "C++ 实现返回的 current_source_pose 字段；是否出现取决于执行分支", required: false, type: json_value }
+    current_target_pose: { description_zh: "C++ 实现返回的 current_target_pose 字段；是否出现取决于执行分支", required: false, type: json_value }
+    global_settings: { description_zh: "C++ 实现返回的 global_settings 字段；是否出现取决于执行分支", required: false, type: json_value }
+    object_path: { description_zh: "C++ 实现返回的 object_path 字段；是否出现取决于执行分支", required: false, type: ue_object_path }
+    retarget_op_count: { description_zh: "C++ 实现返回的 retarget_op_count 字段；是否出现取决于执行分支", required: false, type: integer }
+    root_settings: { description_zh: "C++ 实现返回的 root_settings 字段；是否出现取决于执行分支", required: false, type: json_value }
+    source_ik_rig: { description_zh: "C++ 实现返回的 source_ik_rig 字段；是否出现取决于执行分支", required: false, type: string }
+    source_pose_names: { description_zh: "C++ 实现返回的 source_pose_names 字段；是否出现取决于执行分支", item_type: json_value, required: false, type: array }
+    source_preview_mesh: { description_zh: "C++ 实现返回的 source_preview_mesh 字段；是否出现取决于执行分支", required: false, type: string }
+    source_retarget_pose: { description_zh: "C++ 实现返回的 source_retarget_pose 字段；是否出现取决于执行分支", required: false, type: string }
+    target_ik_rig: { description_zh: "C++ 实现返回的 target_ik_rig 字段；是否出现取决于执行分支", required: false, type: string }
+    target_pose_names: { description_zh: "C++ 实现返回的 target_pose_names 字段；是否出现取决于执行分支", item_type: json_value, required: false, type: array }
+    target_preview_mesh: { description_zh: "C++ 实现返回的 target_preview_mesh 字段；是否出现取决于执行分支", required: false, type: string }
+    target_retarget_pose: { description_zh: "C++ 实现返回的 target_retarget_pose 字段；是否出现取决于执行分支", required: false, type: string }
+  }
+  state: defined
+}
+schema: uai.command_spec.v1
+status: active
+types: {}
+verification: { reason: read_only_command_has_no_post_write_verification, state: none }
+version: 1

@@ -1,0 +1,92 @@
+authoring: { reason: command_has_no_registered_folder_authoring_profile, state: none }
+category: ai_behavior_blackboard_statetree_eqs_navigation_smartobject
+command: smart_object_runtime_probe
+deprecation: { reason: command_is_active, state: none }
+discovery: { aliases: [], keywords_en: [smart, object, runtime, probe, ai_behavior_blackboard_statetree_eqs_navigation_smartobject], keywords_zh: [smart_object_runtime_probe], summary_en: "Execute smart_object_runtime_probe with a verified implementation contract", summary_zh: "find/claim/release 一体探针", tags: [ai_behavior_blackboard_statetree_eqs_navigation_smartobject, p2-007] }
+errors: {
+  codes: [
+    { code: no_editor_world, description_zh: "C++ 实现返回错误码 no_editor_world", retry_safe: false, stage: execution, wire_match: exact }
+    { code: no_geditor, description_zh: "C++ 实现返回错误码 no_geditor", retry_safe: false, stage: execution, wire_match: exact }
+    { code: smart_object_subsystem_not_found, description_zh: "C++ 实现返回错误码 smart_object_subsystem_not_found", retry_safe: false, stage: execution, wire_match: exact }
+  ]
+}
+evidence: {
+  docs: [
+    { path: "Plugins/UeAgentInterface/docs/commands/ai_behavior_blackboard_statetree_eqs_navigation_smartobject/smart_object_runtime_probe.md", purpose: "user documentation cross-check; C++ implementation remains authoritative" }
+  ]
+  implementation: [
+    { line_hint: 990, path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Commands/AI/UeAgentHttpServer_AI_SmartObjectBehaviorStack.cpp", purpose: "command handler, parameter and return evidence", symbol: CmdSmartObjectRuntimeProbe }
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Commands/Level/UeAgentHttpServer_Level_CaptureAndPersistence.cpp", purpose: "transitive helper evidence used by the command handler" }
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Server/UeAgentHttpServer.cpp", purpose: "transitive helper evidence used by the command handler" }
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Utilities/UeAgentJsonDiagnostics.cpp", purpose: "transitive helper evidence used by the command handler" }
+  ]
+  tests: [
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterfaceTests/Private/Smoke/UeAgentInterfaceAISmokeTests.cpp", purpose: "smoke or negative-path evidence cross-checked for the verified contract" }
+  ]
+}
+execution: {
+  destructive: false
+  editor_state: required
+  game_thread: required
+  idempotent: false
+  kind: session_control
+  overwrite_behavior: none
+  pie_state: allowed
+  retry_safe: false
+  save_behavior: none
+  side_effects: [starts_runtime, stops_runtime, modifies_editor_session]
+  ui_effect: none
+}
+maturity: verified
+params: {
+  constraints: []
+  fields: {
+    agent: { default_state: none, description_zh: "C++ 实现读取的 agent 参数", required: false, type: string }
+    expect_claimable: { default: true, default_state: defined, description_zh: "C++ 实现读取的 expect_claimable 参数", required: false, type: bool }
+    expect_reachable: { default: false, default_state: defined, description_zh: "C++ 实现读取的 expect_reachable 参数", required: false, type: bool }
+    include_claimed: { default: false, default_state: defined, description_zh: "C++ 实现读取的 include_claimed 参数", required: false, type: bool }
+    max_results: { default_state: none, description_zh: "C++ 实现读取的 max_results 参数", required: false, type: number }
+    query_bounds: { default_state: none, description_zh: "Smart Object 查询 AABB，使用 UE Editor World 坐标（cm）", required: false, type: object, type_ref: "shared:Box3D" }
+    radius: { default: 2000, default_state: defined, description_zh: "C++ 实现读取的 radius 参数", required: false, type: number }
+    required_tags: { default_state: none, description_zh: "C++ 实现读取的 required_tags 参数", item_type: json_value, required: false, type: array }
+  }
+  state: defined
+}
+response: { artifact_fields: [cleanup_results, claim, claim_result, find, find_result, navigation_result, release, release_result], compact_fields: [status, probe_passed, found_any, claimed, released], failure_fields: [], max_items_policy: { fields: [], mode: none } }
+returns: {
+  fields: {
+    claim: { description_zh: "C++ 实现返回的 claim 字段；是否出现取决于执行分支", required: false, type: json_value }
+    claim_error: { description_zh: "C++ 实现返回的 claim_error 字段；是否出现取决于执行分支", required: false, type: string }
+    claim_result: { description_zh: "C++ 实现返回的 claim_result 字段；是否出现取决于执行分支", required: false, type: json_value }
+    claimed: { description_zh: "C++ 实现返回的 claimed 字段；是否出现取决于执行分支", required: false, type: bool }
+    cleanup_results: { description_zh: "C++ 实现返回的 cleanup_results 字段；是否出现取决于执行分支", item_type: json_value, required: false, type: array }
+    expect_claimable: { description_zh: "C++ 实现返回的 expect_claimable 字段；是否出现取决于执行分支", required: false, type: bool }
+    expect_reachable: { description_zh: "C++ 实现返回的 expect_reachable 字段；是否出现取决于执行分支", required: false, type: bool }
+    find: { description_zh: "C++ 实现返回的 find 字段；是否出现取决于执行分支", required: false, type: json_value }
+    find_result: { description_zh: "C++ 实现返回的 find_result 字段；是否出现取决于执行分支", required: false, type: json_value }
+    found_any: { description_zh: "C++ 实现返回的 found_any 字段；是否出现取决于执行分支", required: false, type: bool }
+    navigation_result: { description_zh: "C++ 实现返回的 navigation_result 字段；是否出现取决于执行分支", required: false, type: json_value }
+    probe_passed: { description_zh: "C++ 实现返回的 probe_passed 字段；是否出现取决于执行分支", required: false, type: bool }
+    release: { description_zh: "C++ 实现返回的 release 字段；是否出现取决于执行分支", required: false, type: json_value }
+    release_result: { description_zh: "C++ 实现返回的 release_result 字段；是否出现取决于执行分支", required: false, type: json_value }
+    released: { description_zh: "C++ 实现返回的 released 字段；是否出现取决于执行分支", required: false, type: bool }
+    status: { description_zh: "C++ 实现返回的 status 字段；是否出现取决于执行分支", required: false, type: string }
+  }
+  state: defined
+}
+schema: uai.command_spec.v1
+status: active
+types: {}
+verification: {
+  assertions: [
+    { id: result_present, operator: exists, source: returns.status }
+    { expected: true, id: probe_passed_true, operator: equals, source: returns.probe_passed }
+  ]
+  failure_policy: fail_overall
+  methods: [
+    { id: result, kind: result_assertion }
+  ]
+  required: true
+  state: defined
+}
+version: 1

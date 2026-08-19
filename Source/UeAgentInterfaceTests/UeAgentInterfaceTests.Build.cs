@@ -7,6 +7,8 @@ public class UeAgentInterfaceTests : ModuleRules
 {
 	public UeAgentInterfaceTests(ReadOnlyTargetRules Target) : base(Target)
 	{
+		// Production composition tests stay in family-specific source files.
+		// Domain behavior and native scenario tests are discovered as separate sources.
 		PCHUsage = PCHUsageMode.UseExplicitOrSharedPCHs;
 		bUseUnity = false;
 
@@ -24,7 +26,10 @@ public class UeAgentInterfaceTests : ModuleRules
 				"Core",
 				"CoreUObject",
 				"Engine",
+				"ImageCore",
 				"UnrealEd",
+				"RenderCore",
+				"RHI",
 				"ApplicationCore",
 				"Slate",
 				"SlateCore",
@@ -32,11 +37,14 @@ public class UeAgentInterfaceTests : ModuleRules
 				"HTTP",
 				"Json",
 				"JsonUtilities",
+				"Localization",
 				"AssetRegistry",
 				"AssetTools",
+				"DataValidation",
 				"Kismet",
 				"KismetCompiler",
 				"BlueprintGraph",
+				"GraphEditor",
 				"BlueprintEditorLibrary",
 				"AnimationBlueprintLibrary",
 				"AnimationEditor",
@@ -50,12 +58,17 @@ public class UeAgentInterfaceTests : ModuleRules
 				"InputCore",
 				"GameplayTags",
 				"AIModule",
+				"AIGraph",
+				"BehaviorTreeEditor",
+				"EnvironmentQueryEditor",
 				"GameplayTasks",
 				"NavigationSystem",
 				"StateTreeModule",
 				"StateTreeEditorModule",
 				"GameplayStateTreeModule",
+				"GameplayInteractionsModule",
 				"SmartObjectsModule",
+				"SmartObjectsEditorModule",
 				"WorldConditions",
 				"PropertyBindingUtils",
 				"PhysicsCore",
@@ -88,8 +101,10 @@ public class UeAgentInterfaceTests : ModuleRules
 				"ModelingToolsEditorMode",
 				"MeshModelingTools",
 				"ModelingComponents",
+				"ModelingComponentsEditorOnly",
 				"GeometryFramework",
 				"GeometryCore",
+				"MeshConversion",
 				"MeshDescription",
 				"StaticMeshDescription",
 				"MediaAssets",
@@ -106,5 +121,7 @@ public class UeAgentInterfaceTests : ModuleRules
 				"TargetPlatform",
 			}
 		);
+
+		AddEngineThirdPartyPrivateStaticDependencies(Target, "OpenSSL");
 	}
 }

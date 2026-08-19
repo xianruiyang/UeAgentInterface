@@ -1,0 +1,14 @@
+definition: {
+  additional_fields: false
+  fields: {
+    enable_speed_planting: { default_state: none, description_zh: "启用 speed planting", required: false, type: bool }
+    speed_curve_name: { default_state: none, description_zh: "速度曲线名", required: false, type: string }
+    speed_threshold: { default_state: none, description_zh: "速度阈值", required: false, type: number }
+    unplant_critical_damping: { default_state: none, description_zh: "unplant critical damping", required: false, type: number }
+    unplant_stiffness: { default_state: none, description_zh: "unplant stiffness", required: false, type: number }
+  }
+  kind: object
+}
+schema: uai.command_spec.shared_type.v1
+type_id: IKRetargetChainSpeedPlantSettings
+version: 1

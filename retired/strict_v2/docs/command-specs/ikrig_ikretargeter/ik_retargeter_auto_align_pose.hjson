@@ -1,0 +1,95 @@
+authoring: { reason: command_has_no_registered_folder_authoring_profile, state: none }
+category: ikrig_ikretargeter
+command: ik_retargeter_auto_align_pose
+deprecation: { reason: command_is_active, state: none }
+discovery: { aliases: [], keywords_en: [ik, retargeter, auto, align, pose, ikrig_ikretargeter], keywords_zh: [ik_retargeter_auto_align_pose], summary_en: "Execute ik_retargeter_auto_align_pose with a verified implementation contract", summary_zh: "对当前或指定 retarget pose 执行自动姿势对齐", tags: [ikrig_ikretargeter, p2-006] }
+errors: {
+  codes: [
+    { code: asset_not_found, description_zh: "C++ 实现返回错误码 asset_not_found", retry_safe: false, stage: execution, wire_match: exact }
+    { code: create_pose_failed, description_zh: "C++ 实现返回错误码 create_pose_failed", retry_safe: false, stage: execution, wire_match: exact }
+    { code: duplicate_pose_failed, description_zh: "C++ 实现返回错误码 duplicate_pose_failed", retry_safe: false, stage: execution, wire_match: exact }
+    { code: ik_retargeter_controller_not_available, description_zh: "C++ 实现返回错误码 ik_retargeter_controller_not_available", retry_safe: false, stage: execution, wire_match: exact }
+    { code: ik_retargeter_not_found, description_zh: "C++ 实现返回错误码 ik_retargeter_not_found", retry_safe: false, stage: execution, wire_match: exact }
+    { code: invalid_auto_align_method, description_zh: "C++ 实现返回错误码 invalid_auto_align_method", retry_safe: true, stage: preflight, wire_match: exact }
+    { code: invalid_bone_rotation_offset_entry, description_zh: "C++ 实现返回错误码 invalid_bone_rotation_offset_entry", retry_safe: true, stage: preflight, wire_match: exact }
+    { code: invalid_source_or_target, description_zh: "C++ 实现返回错误码 invalid_source_or_target", retry_safe: true, stage: preflight, wire_match: exact }
+    { code: missing_asset_path, description_zh: "C++ 实现返回错误码 missing_asset_path", retry_safe: true, stage: preflight, wire_match: exact }
+    { code: missing_pose_name, description_zh: "C++ 实现返回错误码 missing_pose_name", retry_safe: true, stage: preflight, wire_match: exact }
+    { code: missing_rotation_offset, description_zh: "C++ 实现返回错误码 missing_rotation_offset", retry_safe: true, stage: preflight, wire_match: exact }
+    { code: missing_source_or_target, description_zh: "C++ 实现返回错误码 missing_source_or_target", retry_safe: true, stage: preflight, wire_match: exact }
+    { code: pose_not_found, description_zh: "C++ 实现返回错误码 pose_not_found", retry_safe: false, stage: execution, wire_match: exact }
+    { code: remove_pose_failed, description_zh: "C++ 实现返回错误码 remove_pose_failed", retry_safe: false, stage: execution, wire_match: exact }
+    { code: rename_pose_failed, description_zh: "C++ 实现返回错误码 rename_pose_failed", retry_safe: false, stage: execution, wire_match: exact }
+    { code: save_asset_failed, description_zh: "C++ 实现返回错误码 save_asset_failed", retry_safe: false, stage: execution, wire_match: exact }
+    { code: set_current_pose_failed, description_zh: "C++ 实现返回错误码 set_current_pose_failed", retry_safe: false, stage: execution, wire_match: exact }
+  ]
+}
+evidence: {
+  docs: [
+    { path: "Plugins/UeAgentInterface/docs/commands/ikrig_ikretargeter/ik_retargeter_auto_align_pose.md", purpose: "user documentation cross-check; C++ implementation remains authoritative" }
+  ]
+  implementation: [
+    { line_hint: 2055, path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Commands/IK/UeAgentHttpServer_IKAssets.cpp", purpose: "command handler, parameter and return evidence", symbol: CmdIKRetargeterAutoAlignPose }
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Commands/IK/UeAgentHttpServer_IKAssets.cpp", purpose: "current command handler implementation" }
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Server/UeAgentHttpServer.cpp", purpose: "transitive helper evidence used by the command handler" }
+  ]
+  tests: [
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterfaceTests/Private/Smoke/UeAgentInterfaceSmoke_Coverage.cpp", purpose: "smoke or negative-path evidence cross-checked for the verified contract" }
+  ]
+}
+execution: {
+  destructive: false
+  editor_state: required
+  game_thread: required
+  idempotent: false
+  kind: write
+  overwrite_behavior: none
+  pie_state: allowed
+  retry_safe: false
+  save_behavior: none
+  side_effects: [modifies_asset]
+  ui_effect: none
+}
+maturity: verified
+params: {
+  constraints: []
+  fields: {
+    asset_path: { default_state: none, description_zh: "C++ 实现读取的 asset_path 参数", path_semantics: { access_scope: project_write, kind: ue_asset }, required: true, type: ue_asset_path }
+    auto_align_method: { default_state: none, description_zh: "C++ 实现读取的 auto_align_method 参数", required: false, type: string }
+    source_or_target: { default_state: none, description_zh: "C++ 实现读取的 source_or_target 参数", required: true, type: string }
+  }
+  state: defined
+}
+response: { artifact_fields: [pose_names, current_pose_data], compact_fields: [saved, asset_path, action, auto_align_method, current_pose], failure_fields: [params.asset_path, params.source_or_target], max_items_policy: { fields: [], mode: none } }
+returns: {
+  fields: {
+    action: { description_zh: "C++ 实现返回的 action 字段；是否出现取决于执行分支", required: false, type: string }
+    asset_path: { description_zh: "C++ 实现返回的 asset_path 字段；是否出现取决于执行分支", required: false, type: ue_asset_path }
+    auto_align_method: { description_zh: "C++ 实现返回的 auto_align_method 字段；是否出现取决于执行分支", required: false, type: string }
+    current_pose: { description_zh: "C++ 实现返回的 current_pose 字段；是否出现取决于执行分支", required: false, type: string }
+    current_pose_data: { description_zh: "C++ 实现返回的 current_pose_data 字段；是否出现取决于执行分支", required: false, type: json_value }
+    pose_names: { description_zh: "C++ 实现返回的 pose_names 字段；是否出现取决于执行分支", item_type: json_value, required: false, type: array }
+    removed: { description_zh: "C++ 实现返回的 removed 字段；是否出现取决于执行分支", required: false, type: bool }
+    saved: { description_zh: "C++ 实现返回的 saved 字段；是否出现取决于执行分支", required: false, type: bool }
+    source_or_target: { description_zh: "C++ 实现返回的 source_or_target 字段；是否出现取决于执行分支", required: false, type: string }
+    used_auto_align_all: { description_zh: "C++ 实现返回的 used_auto_align_all 字段；是否出现取决于执行分支", required: false, type: bool }
+    used_auto_align_bones_count: { description_zh: "C++ 实现返回的 used_auto_align_bones_count 字段；是否出现取决于执行分支", required: false, type: integer }
+    used_bones_alias: { description_zh: "C++ 实现返回的 used_bones_alias 字段；是否出现取决于执行分支", required: false, type: bool }
+  }
+  state: defined
+}
+schema: uai.command_spec.v1
+status: active
+types: {}
+verification: {
+  assertions: [
+    { id: result_present, operator: exists, source: returns.saved }
+  ]
+  failure_policy: fail_overall
+  methods: [
+    { id: result, kind: result_assertion }
+  ]
+  required: true
+  state: defined
+}
+version: 1

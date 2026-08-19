@@ -2,6 +2,9 @@
 
 #include "Server/UeAgentHttpServer.h"
 #include "Server/UeAgentCommandRegistry.h"
+#include "Server/Generated/UeAgentCommandSpecBuildInfo.h"
+#include "Server/Generated/UeAgentCommandSpecFailurePolicy.h"
+#include "Server/Generated/UeAgentCommandSpecResponsePolicy.h"
 
 #include "Utilities/UeAgentStructuredJsonFormatter.h"
 #include "Utilities/UeAgentJsonDiagnostics.h"
@@ -161,49 +164,47 @@ namespace UeAgentHttpServer
 		return !Object.IsValid() || Object->Values.Num() == 0;
 	}
 
-	static bool IsHiddenDefaultDataField(const FString& FieldName)
+	static bool TryGetSystemCompactPolicy(
+		const FString& Command,
+		TSet<FString>& OutCompactFields,
+		TSet<FString>& OutArtifactFields,
+		UeAgentCommandSpecResponsePolicy::FMaxItemsPolicy& OutMaxItemsPolicy)
 	{
-		static const TSet<FString> HiddenExactFields = {
-			TEXT("timestamp"),
-			TEXT("request_id"),
-			TEXT("error"),
-			TEXT("compatibility"),
-			TEXT("command_manifest_validation"),
-			TEXT("command_param_validation"),
-			TEXT("metrics"),
-			TEXT("diagnostics"),
-			TEXT("coverage_report"),
-			TEXT("validation_report"),
-			TEXT("compile_log"),
-			TEXT("stack_issue_report"),
-			TEXT("raw"),
-			TEXT("readback"),
-			TEXT("complete_readback"),
-			TEXT("diff"),
-			TEXT("structural_diff"),
-		};
-
-		const FString Key = FieldName.ToLower();
-		return HiddenExactFields.Contains(Key) || Key.StartsWith(TEXT("raw_")) || Key.StartsWith(TEXT("debug_"));
-	}
-
-	static bool ShouldExternalizeDefaultDataField(const FString& FieldName)
-	{
-		const FString Key = FieldName.ToLower();
-		static const TSet<FString> ExternalizedExactFields = {
-			TEXT("command_manifest_validation"),
-			TEXT("command_param_validation"),
-			TEXT("coverage_report"),
-			TEXT("validation_report"),
-			TEXT("compile_log"),
-			TEXT("stack_issue_report"),
-			TEXT("readback"),
-			TEXT("complete_readback"),
-			TEXT("diff"),
-			TEXT("structural_diff"),
-			TEXT("raw"),
-		};
-		return ExternalizedExactFields.Contains(Key) || Key.StartsWith(TEXT("raw_")) || Key.EndsWith(TEXT("_report")) || Key.EndsWith(TEXT("_log"));
+		OutCompactFields.Reset();
+		OutArtifactFields.Reset();
+		OutMaxItemsPolicy.Reset();
+		if (Command.Equals(TEXT("ping"), ESearchCase::IgnoreCase))
+		{
+			return true;
+		}
+		if (Command.Equals(TEXT("error"), ESearchCase::IgnoreCase))
+		{
+			OutCompactFields = {TEXT("error_code")};
+			OutArtifactFields = {TEXT("error_message")};
+			return true;
+		}
+		if (Command.Equals(TEXT("status"), ESearchCase::IgnoreCase))
+		{
+			OutCompactFields = {
+				TEXT("running"),
+				TEXT("listen_address"),
+				TEXT("port"),
+				TEXT("token_masked"),
+				TEXT("version_tag"),
+				TEXT("plugin_version_tag"),
+				TEXT("server_instance_id"),
+				TEXT("command_spec_schema"),
+				TEXT("command_spec_version"),
+				TEXT("command_spec_hash"),
+				TEXT("command_spec_shared_types_hash"),
+				TEXT("command_count"),
+				TEXT("active_command_count"),
+				TEXT("deprecated_command_count"),
+				TEXT("screenshots_enabled"),
+			};
+			return true;
+		}
+		return false;
 	}
 
 	static FString SanitizeArtifactSegment(const FString& Value)
@@ -229,49 +230,40 @@ namespace UeAgentHttpServer
 	{
 		const UUeAgentInterfaceSettings* Settings = UUeAgentInterfaceSettings::Get();
 		const FString RootRel = Settings ? Settings->ArtifactsDirRelative : TEXT("Saved/RemoteArtifacts");
-		const FString ResponseDir = FPaths::ConvertRelativePathToFull(FPaths::ProjectDir(), RootRel / TEXT("Responses"));
+		if (!FPaths::IsRelative(RootRel))
+		{
+			return FString();
+		}
+		const FString ProjectDir = FPaths::ConvertRelativePathToFull(FPaths::ProjectDir());
+		const FString ResponseDir = FPaths::ConvertRelativePathToFull(ProjectDir, RootRel / TEXT("Responses"));
+		FString RelativeResponseDir = ResponseDir;
+		if (!FPaths::MakePathRelativeTo(RelativeResponseDir, *ProjectDir))
+		{
+			return FString();
+		}
+		FPaths::NormalizeFilename(RelativeResponseDir);
+		if (RelativeResponseDir.Equals(TEXT("..")) || RelativeResponseDir.StartsWith(TEXT("../")))
+		{
+			return FString();
+		}
 		const FString SafeCommand = SanitizeArtifactSegment(Ctx.Command.IsEmpty() ? TEXT("command") : Ctx.Command);
 		const FString SafeRequestId = SanitizeArtifactSegment(Ctx.RequestId.IsEmpty() ? TEXT("request") : Ctx.RequestId);
 		const FString SafeField = SanitizeArtifactSegment(FieldName);
 		const FString Guid = FGuid::NewGuid().ToString(EGuidFormats::Digits);
-		return FPaths::Combine(ResponseDir, SafeCommand, FString::Printf(TEXT("%s_%s_%s.json"), *SafeRequestId, *SafeField, *Guid));
-	}
-
-	static FString JsonValueTypeName(const TSharedPtr<FJsonValue>& Value)
-	{
-		if (!Value.IsValid())
-		{
-			return TEXT("null");
-		}
-		switch (Value->Type)
-		{
-		case EJson::Object:
-			return TEXT("object");
-		case EJson::Array:
-			return TEXT("array");
-		case EJson::String:
-			return TEXT("string");
-		case EJson::Number:
-			return TEXT("number");
-		case EJson::Boolean:
-			return TEXT("boolean");
-		case EJson::Null:
-		case EJson::None:
-		default:
-			return TEXT("null");
-		}
+		return FPaths::Combine(ResponseDir, SafeCommand, FString::Printf(TEXT("%s_%s_%s.hjson"), *SafeRequestId, *SafeField, *Guid));
 	}
 
 	static TSharedPtr<FJsonObject> MakeResponseArtifactDescriptor(
-		const FString& FieldName,
 		const TSharedPtr<FJsonValue>& Value,
 		const FString& FilePath)
 	{
 		TSharedPtr<FJsonObject> Descriptor = MakeShared<FJsonObject>();
 		Descriptor->SetStringField(TEXT("kind"), TEXT("response_data"));
-		Descriptor->SetStringField(TEXT("field"), FieldName);
-		Descriptor->SetStringField(TEXT("path"), FilePath);
-		Descriptor->SetStringField(TEXT("value_type"), JsonValueTypeName(Value));
+		FString RelativePath = FilePath;
+		FPaths::MakePathRelativeTo(RelativePath, *FPaths::ConvertRelativePathToFull(FPaths::ProjectDir()));
+		FPaths::NormalizeFilename(RelativePath);
+		Descriptor->SetStringField(TEXT("path"), RelativePath);
+		Descriptor->SetStringField(TEXT("read_section"), TEXT("value"));
 		if (Value.IsValid() && Value->Type == EJson::Object)
 		{
 			const TSharedPtr<FJsonObject> Object = Value->AsObject();
@@ -291,6 +283,10 @@ namespace UeAgentHttpServer
 		FString& OutFilePath)
 	{
 		OutFilePath = MakeResponseArtifactPath(Ctx, FieldName);
+		if (OutFilePath.IsEmpty())
+		{
+			return false;
+		}
 
 		TSharedPtr<FJsonObject> Payload = MakeShared<FJsonObject>();
 		Payload->SetStringField(TEXT("schema"), TEXT("ue_agent_interface.response_artifact.v1"));
@@ -299,14 +295,18 @@ namespace UeAgentHttpServer
 		Payload->SetStringField(TEXT("field"), FieldName);
 		Payload->SetField(TEXT("value"), Value.IsValid() ? Value : MakeShared<FJsonValueNull>());
 
-		const FString JsonText = FUeAgentStructuredJsonFormatter::WriteObject(Payload.ToSharedRef());
-		IFileManager::Get().MakeDirectory(*FPaths::GetPath(OutFilePath), true);
+		const FString JsonText = FUeAgentStructuredJsonFormatter::WriteObject(Payload.ToSharedRef()) + LINE_TERMINATOR;
+		if (!IFileManager::Get().MakeDirectory(*FPaths::GetPath(OutFilePath), true))
+		{
+			return false;
+		}
 		return FFileHelper::SaveStringToFile(JsonText, *OutFilePath, FFileHelper::EEncodingOptions::ForceUTF8WithoutBOM);
 	}
 
 	static void AppendExternalizedHiddenDataArtifacts(
 		const FUeAgentRequestContext& Ctx,
 		const TSharedPtr<FJsonObject>& HiddenData,
+		const TSet<FString>& PolicyArtifactFields,
 		TArray<TSharedPtr<FJsonValue>>& InOutArtifacts,
 		TArray<TSharedPtr<FJsonValue>>& InOutWarnings)
 	{
@@ -317,7 +317,7 @@ namespace UeAgentHttpServer
 
 		for (const TPair<FString, TSharedPtr<FJsonValue>>& Pair : HiddenData->Values)
 		{
-			if (!ShouldExternalizeDefaultDataField(Pair.Key))
+			if (!PolicyArtifactFields.Contains(Pair.Key.ToLower()))
 			{
 				continue;
 			}
@@ -325,7 +325,7 @@ namespace UeAgentHttpServer
 			FString FilePath;
 			if (SaveResponseArtifact(Ctx, Pair.Key, Pair.Value, FilePath))
 			{
-				InOutArtifacts.Add(MakeShared<FJsonValueObject>(MakeResponseArtifactDescriptor(Pair.Key, Pair.Value, FilePath)));
+				InOutArtifacts.Add(MakeShared<FJsonValueObject>(MakeResponseArtifactDescriptor(Pair.Value, FilePath)));
 			}
 			else
 			{
@@ -334,22 +334,32 @@ namespace UeAgentHttpServer
 		}
 	}
 
-	static void SplitDefaultDataFields(
+	static bool SplitCompactDataFields(
+		const FUeAgentRequestContext& Ctx,
 		const TSharedPtr<FJsonObject>& Data,
 		TSharedPtr<FJsonObject>& OutVisible,
-		TSharedPtr<FJsonObject>& OutHidden)
+		TSharedPtr<FJsonObject>& OutHidden,
+		TSet<FString>& OutArtifactFields,
+		UeAgentCommandSpecResponsePolicy::FMaxItemsPolicy& OutMaxItemsPolicy)
 	{
 		OutVisible = MakeShared<FJsonObject>();
 		OutHidden = MakeShared<FJsonObject>();
+		TSet<FString> CompactFields;
+		const bool bHasPolicy = UeAgentCommandSpecResponsePolicy::TryGetPolicy(
+			Ctx.Command,
+			CompactFields,
+			OutArtifactFields,
+			OutMaxItemsPolicy)
+			|| TryGetSystemCompactPolicy(Ctx.Command, CompactFields, OutArtifactFields, OutMaxItemsPolicy);
 
 		if (!Data.IsValid())
 		{
-			return;
+			return bHasPolicy;
 		}
 
 		for (const TPair<FString, TSharedPtr<FJsonValue>>& Pair : Data->Values)
 		{
-			if (IsHiddenDefaultDataField(Pair.Key))
+			if (!bHasPolicy || !CompactFields.Contains(Pair.Key.ToLower()))
 			{
 				OutHidden->SetField(Pair.Key, Pair.Value);
 			}
@@ -358,11 +368,88 @@ namespace UeAgentHttpServer
 				OutVisible->SetField(Pair.Key, Pair.Value);
 			}
 		}
+		return bHasPolicy;
 	}
 
-	static TSharedPtr<FJsonObject> BuildDebugObject(
-		const FUeAgentCommandOutput& Output,
-		const TSharedPtr<FJsonObject>& HiddenData)
+	static void ApplyCompactMaxItems(
+		const FUeAgentResponseOptions& Options,
+		const UeAgentCommandSpecResponsePolicy::FMaxItemsPolicy& Policy,
+		const TSharedPtr<FJsonObject>& VisibleData,
+		TArray<TSharedPtr<FJsonValue>>& InOutWarnings)
+	{
+		if (!Policy.IsEnabled() || !VisibleData.IsValid())
+		{
+			return;
+		}
+
+		const int32 RequestedMaxItems = Options.MaxItems;
+		const int32 EffectiveMaxItems = RequestedMaxItems > 0
+			? FMath::Min(RequestedMaxItems, Policy.HardMaxItems)
+			: Policy.DefaultMaxItems;
+		if (RequestedMaxItems > Policy.HardMaxItems)
+		{
+			InOutWarnings.Add(MakeShared<FJsonValueString>(FString::Printf(
+				TEXT("max_items_clamped:%d:%d"),
+				RequestedMaxItems,
+				Policy.HardMaxItems)));
+		}
+
+		TArray<FString> Fields = Policy.Fields.Array();
+		Fields.Sort();
+		TSharedPtr<FJsonObject> FieldPages = MakeShared<FJsonObject>();
+		int32 TotalCount = 0;
+		int32 ReturnedCount = 0;
+		bool bAnyTruncated = false;
+		for (const FString& Field : Fields)
+		{
+			const TArray<TSharedPtr<FJsonValue>>* Array = nullptr;
+			if (!VisibleData->TryGetArrayField(Field, Array) || !Array)
+			{
+				continue;
+			}
+
+			const int32 FieldTotal = Array->Num();
+			const int32 FieldReturned = FMath::Min(FieldTotal, EffectiveMaxItems);
+			const bool bFieldTruncated = FieldReturned < FieldTotal;
+			if (bFieldTruncated)
+			{
+				TArray<TSharedPtr<FJsonValue>> Truncated;
+				Truncated.Append(Array->GetData(), FieldReturned);
+				VisibleData->SetArrayField(Field, MoveTemp(Truncated));
+			}
+
+			TSharedPtr<FJsonObject> FieldPage = MakeShared<FJsonObject>();
+			FieldPage->SetNumberField(TEXT("returned"), FieldReturned);
+			FieldPage->SetNumberField(TEXT("total"), FieldTotal);
+			FieldPage->SetBoolField(TEXT("truncated"), bFieldTruncated);
+			FieldPages->SetObjectField(Field, FieldPage);
+			TotalCount += FieldTotal;
+			ReturnedCount += FieldReturned;
+			bAnyTruncated = bAnyTruncated || bFieldTruncated;
+		}
+
+		if (FieldPages->Values.Num() == 0)
+		{
+			return;
+		}
+
+		TSharedPtr<FJsonObject> Page = MakeShared<FJsonObject>();
+		const TSharedPtr<FJsonObject>* ExistingPage = nullptr;
+		if (VisibleData->TryGetObjectField(Policy.PageField, ExistingPage) && ExistingPage && ExistingPage->IsValid())
+		{
+			for (const TPair<FString, TSharedPtr<FJsonValue>>& Pair : (*ExistingPage)->Values)
+			{
+				Page->SetField(Pair.Key, Pair.Value);
+			}
+		}
+		Page->SetNumberField(TEXT("returned"), ReturnedCount);
+		Page->SetNumberField(TEXT("total"), TotalCount);
+		Page->SetBoolField(TEXT("truncated"), bAnyTruncated);
+		Page->SetObjectField(TEXT("fields"), FieldPages);
+		VisibleData->SetObjectField(Policy.PageField, Page);
+	}
+
+	static TSharedPtr<FJsonObject> BuildDebugObject(const FUeAgentCommandOutput& Output)
 	{
 		TSharedPtr<FJsonObject> Debug = MakeShared<FJsonObject>();
 
@@ -374,17 +461,76 @@ namespace UeAgentHttpServer
 			}
 		}
 
-		if (!IsObjectEmpty(HiddenData))
+		return Debug;
+	}
+
+	static TSharedPtr<FJsonObject> BuildFailureObject(
+		const FUeAgentRequestContext& Ctx,
+		const FString& Error)
+	{
+		UeAgentCommandSpecFailurePolicy::FResolvedFailure Resolved;
+		if (Ctx.Command.Equals(TEXT("error"), ESearchCase::IgnoreCase))
 		{
-			Debug->SetObjectField(TEXT("filtered_data"), HiddenData);
+			Resolved.Code = Error.IsEmpty() ? TEXT("invalid_request") : Error;
+			Resolved.Stage = TEXT("transport");
+			Resolved.bRetrySafe = true;
+			Resolved.bRuleMatched = true;
+		}
+		else
+		{
+			UeAgentCommandSpecFailurePolicy::Resolve(Ctx.Command, Error, Resolved);
 		}
 
-		return Debug;
+		TSharedPtr<FJsonObject> Failure = MakeShared<FJsonObject>();
+		Failure->SetStringField(TEXT("code"), Resolved.Code);
+		Failure->SetStringField(TEXT("stage"), Resolved.Stage);
+		Failure->SetBoolField(TEXT("retry_safe"), Resolved.bRetrySafe);
+		Failure->SetStringField(TEXT("command"), Ctx.Command);
+		Failure->SetStringField(
+			TEXT("diagnostic_id"),
+			FString::Printf(TEXT("%s:%s"), *Ctx.Command, *Resolved.Code));
+		if (!Error.IsEmpty() && Error != Resolved.Code)
+		{
+			constexpr int32 MaxWireErrorChars = 512;
+			Failure->SetStringField(TEXT("wire_error"), Error.Left(MaxWireErrorChars));
+			if (Error.Len() > MaxWireErrorChars)
+			{
+				Failure->SetBoolField(TEXT("wire_error_truncated"), true);
+			}
+		}
+		return Failure;
+	}
+
+	static void PreserveCompactFailureDiagnostics(
+		const FUeAgentCommandOutput& Output,
+		const TSharedPtr<FJsonObject>& VisibleData)
+	{
+		if (!VisibleData.IsValid())
+		{
+			return;
+		}
+
+		const TSharedPtr<FJsonObject> SourceData = Output.GetDataOrEmpty();
+		static const TCHAR* DiagnosticFields[] = {
+			TEXT("status"),
+			TEXT("phase"),
+			TEXT("error_code"),
+			TEXT("error_detail"),
+			TEXT("rollback_attempted"),
+			TEXT("rollback_succeeded"),
+		};
+		for (const TCHAR* FieldName : DiagnosticFields)
+		{
+			if (const TSharedPtr<FJsonValue>* Value = SourceData->Values.Find(FieldName))
+			{
+				VisibleData->SetField(FieldName, *Value);
+			}
+		}
 	}
 
 	static bool IsDebugResponseView(const FUeAgentResponseOptions& Options)
 	{
-		return Options.bDebug || Options.View.Equals(TEXT("debug"), ESearchCase::IgnoreCase);
+		return Options.View.Equals(TEXT("debug"), ESearchCase::IgnoreCase);
 	}
 
 	static bool IsRawResponseView(const FUeAgentResponseOptions& Options)
@@ -392,19 +538,15 @@ namespace UeAgentHttpServer
 		return Options.View.Equals(TEXT("raw"), ESearchCase::IgnoreCase);
 	}
 
-	static bool IsSummaryResponseView(const FUeAgentResponseOptions& Options)
+	static bool IsCompactResponseView(const FUeAgentResponseOptions& Options)
 	{
-		return Options.View.Equals(TEXT("summary"), ESearchCase::IgnoreCase)
-			|| Options.View.Equals(TEXT("llm_summary"), ESearchCase::IgnoreCase)
-			|| Options.View.Equals(TEXT("compact_summary"), ESearchCase::IgnoreCase);
+		return Options.View.Equals(TEXT("llm_compact"), ESearchCase::IgnoreCase);
 	}
 }
 
 FUeAgentResponseOptions::FUeAgentResponseOptions()
 	: View(TEXT("llm_compact"))
-	, bDebug(false)
-	, Format(TEXT("structured_compact"))
-	, MaxItems(50)
+	, MaxItems(0)
 {
 }
 
@@ -431,16 +573,10 @@ FUeAgentCommandOutput FUeAgentCommandOutput::FromLegacy(
 	return Output;
 }
 
-FUeAgentHttpServer::FTransactionSpawnedActorRecord::FTransactionSpawnedActorRecord()
-	: bLevelPackageWasDirtyBeforeSpawn(false)
-	, bActorPackageWasDirtyBeforeSpawn(false)
-{
-}
-
 FUeAgentHttpServer::FUeAgentHttpServer()
 	: bRunning(false)
 	, bPythonConsoleCommandExecuted(false)
-	, ActiveTransactionIndex(INDEX_NONE)
+	, ServerInstanceId(FGuid::NewGuid().ToString(EGuidFormats::DigitsWithHyphensLower))
 {
 }
 
@@ -457,6 +593,9 @@ TSharedPtr<FJsonObject> FUeAgentResponseBuilder::BuildResponseEnvelope(
 {
 	TSharedPtr<FJsonObject> Root = MakeShared<FJsonObject>();
 	Root->SetBoolField(TEXT("ok"), bOk);
+	const TSharedPtr<FJsonObject> Failure = bOk
+		? TSharedPtr<FJsonObject>()
+		: UeAgentHttpServer::BuildFailureObject(Ctx, Error);
 
 	if (UeAgentHttpServer::IsRawResponseView(Ctx.ResponseOptions))
 	{
@@ -466,6 +605,10 @@ TSharedPtr<FJsonObject> FUeAgentResponseBuilder::BuildResponseEnvelope(
 		Root->SetObjectField(TEXT("data"), Output.GetDataOrEmpty());
 		Root->SetArrayField(TEXT("artifacts"), Output.Artifacts);
 		Root->SetArrayField(TEXT("warnings"), Output.Warnings);
+		if (Failure.IsValid())
+		{
+			Root->SetObjectField(TEXT("failure"), Failure);
+		}
 		if (!UeAgentHttpServer::IsObjectEmpty(Output.Debug))
 		{
 			Root->SetObjectField(TEXT("debug"), Output.Debug);
@@ -477,17 +620,35 @@ TSharedPtr<FJsonObject> FUeAgentResponseBuilder::BuildResponseEnvelope(
 	TSharedPtr<FJsonObject> HiddenData = MakeShared<FJsonObject>();
 	TArray<TSharedPtr<FJsonValue>> Artifacts = Output.Artifacts;
 	TArray<TSharedPtr<FJsonValue>> Warnings = Output.Warnings;
-	const bool bSummaryView = UeAgentHttpServer::IsSummaryResponseView(Ctx.ResponseOptions);
-	if (bSummaryView)
+	const bool bCompactView = UeAgentHttpServer::IsCompactResponseView(Ctx.ResponseOptions);
+	if (bCompactView)
 	{
-		UeAgentHttpServer::SplitDefaultDataFields(Output.GetDataOrEmpty(), VisibleData, HiddenData);
-		UeAgentHttpServer::AppendExternalizedHiddenDataArtifacts(Ctx, HiddenData, Artifacts, Warnings);
+		TSet<FString> PolicyArtifactFields;
+		UeAgentCommandSpecResponsePolicy::FMaxItemsPolicy MaxItemsPolicy;
+		const bool bHasPolicy = UeAgentHttpServer::SplitCompactDataFields(
+			Ctx,
+			Output.GetDataOrEmpty(),
+			VisibleData,
+			HiddenData,
+			PolicyArtifactFields,
+			MaxItemsPolicy);
+		UeAgentHttpServer::ApplyCompactMaxItems(Ctx.ResponseOptions, MaxItemsPolicy, VisibleData, Warnings);
+		UeAgentHttpServer::AppendExternalizedHiddenDataArtifacts(Ctx, HiddenData, PolicyArtifactFields, Artifacts, Warnings);
+		if (!bHasPolicy)
+		{
+			Warnings.Add(MakeShared<FJsonValueString>(FString::Printf(TEXT("compact_policy_missing:%s"), *Ctx.Command)));
+		}
+		if (!bOk)
+		{
+			UeAgentHttpServer::PreserveCompactFailureDiagnostics(Output, VisibleData);
+		}
 	}
 
 	Root->SetObjectField(TEXT("data"), VisibleData);
 	if (!bOk)
 	{
-		Root->SetStringField(TEXT("error"), Error.IsEmpty() ? TEXT("command_failed") : Error);
+		Root->SetStringField(TEXT("error"), Failure->GetStringField(TEXT("code")));
+		Root->SetObjectField(TEXT("failure"), Failure);
 	}
 
 	if (Artifacts.Num() > 0)
@@ -502,7 +663,11 @@ TSharedPtr<FJsonObject> FUeAgentResponseBuilder::BuildResponseEnvelope(
 	if (UeAgentHttpServer::IsDebugResponseView(Ctx.ResponseOptions))
 	{
 		Root->SetStringField(TEXT("request_id"), Ctx.RequestId);
-		const TSharedPtr<FJsonObject> Debug = UeAgentHttpServer::BuildDebugObject(Output, bSummaryView ? HiddenData : nullptr);
+		const TSharedPtr<FJsonObject> Debug = UeAgentHttpServer::BuildDebugObject(Output);
+		if (!bOk)
+		{
+			Debug->SetStringField(TEXT("error_message"), Error.IsEmpty() ? TEXT("command_failed") : Error);
+		}
 		if (!UeAgentHttpServer::IsObjectEmpty(Debug))
 		{
 			Root->SetObjectField(TEXT("debug"), Debug);
@@ -616,6 +781,11 @@ FString FUeAgentHttpServer::GetAuthToken() const
 	return Settings ? Settings->AuthToken : FString();
 }
 
+FString FUeAgentHttpServer::GetServerInstanceId() const
+{
+	return ServerInstanceId;
+}
+
 FString FUeAgentHttpServer::FormatResponseJson(const TSharedRef<FJsonObject>& Root, const FUeAgentResponseOptions& Options)
 {
 	return FUeAgentStructuredJsonFormatter::WriteObject(Root);
@@ -648,11 +818,6 @@ bool FUeAgentHttpServer::BindRoutes()
 	}
 
 	if (!BindCheckedRoute(TEXT("/api/status"), EHttpServerRequestVerbs::VERB_GET, FHttpRequestHandler::CreateRaw(this, &FUeAgentHttpServer::HandleStatus)))
-	{
-		return false;
-	}
-
-	if (!BindCheckedRoute(TEXT("/api/exec"), EHttpServerRequestVerbs::VERB_POST, FHttpRequestHandler::CreateRaw(this, &FUeAgentHttpServer::HandleExec)))
 	{
 		return false;
 	}
@@ -730,7 +895,17 @@ bool FUeAgentHttpServer::HandleStatus(const FHttpServerRequest& Request, const F
 	Data->SetStringField(TEXT("listen_address"), Settings ? Settings->ListenAddress : TEXT(""));
 	Data->SetNumberField(TEXT("port"), Settings ? Settings->Port : 0);
 	Data->SetStringField(TEXT("token_masked"), Settings ? UeAgentHttpServer::MaskToken(Settings->AuthToken) : TEXT("********"));
-	Data->SetStringField(TEXT("version_tag"), FUeAgentInterfaceLogger::GetVersionTag());
+	const FString PluginVersionTag = FUeAgentInterfaceLogger::GetVersionTag();
+	Data->SetStringField(TEXT("version_tag"), PluginVersionTag);
+	Data->SetStringField(TEXT("plugin_version_tag"), PluginVersionTag);
+	Data->SetStringField(TEXT("server_instance_id"), ServerInstanceId);
+	Data->SetStringField(TEXT("command_spec_schema"), UeAgentCommandSpecBuildInfo::Schema);
+	Data->SetNumberField(TEXT("command_spec_version"), UeAgentCommandSpecBuildInfo::Version);
+	Data->SetStringField(TEXT("command_spec_hash"), UeAgentCommandSpecBuildInfo::Hash);
+	Data->SetStringField(TEXT("command_spec_shared_types_hash"), UeAgentCommandSpecBuildInfo::SharedTypesHash);
+	Data->SetNumberField(TEXT("command_count"), UeAgentCommandSpecBuildInfo::CommandCount);
+	Data->SetNumberField(TEXT("active_command_count"), UeAgentCommandSpecBuildInfo::ActiveCommandCount);
+	Data->SetNumberField(TEXT("deprecated_command_count"), UeAgentCommandSpecBuildInfo::DeprecatedCommandCount);
 	Data->SetBoolField(TEXT("screenshots_enabled"), Settings ? Settings->bEnableScreenshots : false);
 
 	FUeAgentRequestContext Ctx;
@@ -850,34 +1025,39 @@ bool FUeAgentHttpServer::ParseResponseOptions(const TSharedPtr<FJsonObject>& Roo
 	{
 		return true;
 	}
+	static const TSet<FString> AllowedFields = {TEXT("view"), TEXT("max_items")};
+	for (const TPair<FString, TSharedPtr<FJsonValue>>& Pair : (*OptionsObj)->Values)
+	{
+		if (!AllowedFields.Contains(Pair.Key))
+		{
+			OutError = FString::Printf(TEXT("invalid_response_options.unknown_field:%s"), *Pair.Key);
+			return false;
+		}
+	}
 
 	FString View;
 	if (JsonTryGetString(*OptionsObj, TEXT("view"), View) && !View.IsEmpty())
 	{
-		OutOptions.View = View;
-	}
-
-	bool bDebug = false;
-	if (JsonTryGetBool(*OptionsObj, TEXT("debug"), bDebug))
-	{
-		OutOptions.bDebug = bDebug;
-	}
-
-	FString Format;
-	if (JsonTryGetString(*OptionsObj, TEXT("format"), Format) && !Format.IsEmpty())
-	{
-		OutOptions.Format = Format;
+		const FString NormalizedView = View.ToLower();
+		if (NormalizedView != TEXT("llm_compact") && NormalizedView != TEXT("debug") && NormalizedView != TEXT("raw"))
+		{
+			OutError = TEXT("invalid_response_options.view");
+			return false;
+		}
+		OutOptions.View = NormalizedView;
 	}
 
 	double MaxItems = 0.0;
 	if (JsonTryGetNumber(*OptionsObj, TEXT("max_items"), MaxItems))
 	{
-		if (MaxItems <= 0.0)
+		if (MaxItems <= 0.0
+			|| MaxItems > static_cast<double>(MAX_int32)
+			|| !FMath::IsNearlyEqual(MaxItems, FMath::RoundToDouble(MaxItems)))
 		{
 			OutError = TEXT("invalid_response_options.max_items");
 			return false;
 		}
-		OutOptions.MaxItems = FMath::RoundToInt(MaxItems);
+		OutOptions.MaxItems = static_cast<int32>(MaxItems);
 	}
 
 	return true;
@@ -925,177 +1105,6 @@ bool FUeAgentHttpServer::ParseExecBody(const FHttpServerRequest& Request, FUeAge
 	return true;
 }
 
-bool FUeAgentHttpServer::ParseBatchCommands(const FUeAgentRequestContext& BatchCtx, TArray<FUeAgentRequestContext>& OutCommands, bool& bOutStopOnError, FString& OutError) const
-{
-	OutCommands.Reset();
-	bOutStopOnError = true;
-
-	if (!BatchCtx.Params.IsValid())
-	{
-		OutError = TEXT("missing_params");
-		return false;
-	}
-
-	const TArray<TSharedPtr<FJsonValue>>* CommandValues = nullptr;
-	if (!BatchCtx.Params->TryGetArrayField(TEXT("commands"), CommandValues) || !CommandValues)
-	{
-		OutError = TEXT("missing_commands");
-		return false;
-	}
-
-	if (CommandValues->Num() <= 0)
-	{
-		OutError = TEXT("commands_empty");
-		return false;
-	}
-
-	bool bStopOnError = true;
-	BatchCtx.Params->TryGetBoolField(TEXT("stop_on_error"), bStopOnError);
-	bOutStopOnError = bStopOnError;
-
-	OutCommands.Reserve(CommandValues->Num());
-	for (int32 Index = 0; Index < CommandValues->Num(); ++Index)
-	{
-		const TSharedPtr<FJsonValue>& CommandValue = (*CommandValues)[Index];
-		if (!CommandValue.IsValid() || CommandValue->Type != EJson::Object)
-		{
-			OutError = FString::Printf(TEXT("invalid_command_item_%d"), Index);
-			return false;
-		}
-
-		const TSharedPtr<FJsonObject> CommandObj = CommandValue->AsObject();
-		if (!CommandObj.IsValid())
-		{
-			OutError = FString::Printf(TEXT("invalid_command_item_object_%d"), Index);
-			return false;
-		}
-
-		FString CommandName;
-		if (!JsonTryGetString(CommandObj, TEXT("command"), CommandName) || CommandName.IsEmpty())
-		{
-			OutError = FString::Printf(TEXT("missing_command_%d"), Index);
-			return false;
-		}
-
-		if (CommandName.Equals(TEXT("exec_batch"), ESearchCase::IgnoreCase))
-		{
-			OutError = FString::Printf(TEXT("nested_exec_batch_not_allowed_%d"), Index);
-			return false;
-		}
-
-		FString RequestId;
-		if (!JsonTryGetString(CommandObj, TEXT("request_id"), RequestId) || RequestId.IsEmpty())
-		{
-			RequestId = FString::Printf(TEXT("%s-%d"), *BatchCtx.RequestId, Index);
-		}
-
-		const TSharedPtr<FJsonObject>* ParamsObj = nullptr;
-		TSharedPtr<FJsonObject> Params = MakeShared<FJsonObject>();
-		if (CommandObj->TryGetObjectField(TEXT("params"), ParamsObj) && ParamsObj && ParamsObj->IsValid())
-		{
-			Params = *ParamsObj;
-		}
-
-		FUeAgentRequestContext SubCommand;
-		SubCommand.RequestId = RequestId;
-		SubCommand.Command = CommandName;
-		SubCommand.Params = Params;
-		SubCommand.ResponseOptions = BatchCtx.ResponseOptions;
-		OutCommands.Add(SubCommand);
-	}
-
-	return true;
-}
-
-bool FUeAgentHttpServer::ExecuteBatchCommands(const FUeAgentRequestContext& BatchCtx, TSharedPtr<FJsonObject>& OutData, TArray<TSharedPtr<FJsonValue>>& OutArtifacts, FString& OutError) const
-{
-	TArray<FUeAgentRequestContext> Commands;
-	bool bStopOnError = true;
-	FString ParseError;
-	if (!ParseBatchCommands(BatchCtx, Commands, bStopOnError, ParseError))
-	{
-		OutError = ParseError;
-		return false;
-	}
-
-	FUeAgentInterfaceLogger::Log(TEXT("ExecBatch start request_id=%s count=%d stop_on_error=%s"), *BatchCtx.RequestId, Commands.Num(), bStopOnError ? TEXT("true") : TEXT("false"));
-
-	OutData = MakeShared<FJsonObject>();
-	OutArtifacts.Reset();
-
-	TArray<TSharedPtr<FJsonValue>> Results;
-	Results.Reserve(Commands.Num());
-
-	int32 Succeeded = 0;
-	int32 FailedIndex = INDEX_NONE;
-	FString FailedCommand;
-	FString FailedRequestId;
-	FString FailedError;
-
-	for (int32 Index = 0; Index < Commands.Num(); ++Index)
-	{
-		const FUeAgentRequestContext& SubCommand = Commands[Index];
-		FUeAgentCommandOutput SubOutput;
-		FString SubError;
-		const bool bSubOk = ExecuteCommandOnGameThread(SubCommand, SubOutput, SubError);
-
-		TSharedPtr<FJsonObject> Item = MakeShared<FJsonObject>();
-		Item->SetNumberField(TEXT("index"), Index);
-		Item->SetStringField(TEXT("request_id"), SubCommand.RequestId);
-		Item->SetStringField(TEXT("command"), SubCommand.Command);
-		Item->SetBoolField(TEXT("ok"), bSubOk);
-		Item->SetStringField(TEXT("error"), bSubOk ? TEXT("") : SubError);
-		Item->SetObjectField(TEXT("data"), SubOutput.GetDataOrEmpty());
-		Item->SetArrayField(TEXT("artifacts"), SubOutput.Artifacts);
-		Results.Add(MakeShared<FJsonValueObject>(Item));
-
-		if (bSubOk)
-		{
-			++Succeeded;
-		}
-		else if (FailedIndex == INDEX_NONE)
-		{
-			FailedIndex = Index;
-			FailedCommand = SubCommand.Command;
-			FailedRequestId = SubCommand.RequestId;
-			FailedError = SubError;
-
-			FUeAgentInterfaceLogger::Log(TEXT("ExecBatch interrupted request_id=%s index=%d command=%s error=%s"),
-				*BatchCtx.RequestId, FailedIndex, *FailedCommand, *FailedError);
-
-			if (bStopOnError)
-			{
-				break;
-			}
-		}
-	}
-
-	const int32 Executed = Results.Num();
-	const bool bInterrupted = (FailedIndex != INDEX_NONE) && bStopOnError;
-
-	OutData->SetStringField(TEXT("mode"), TEXT("exec_batch"));
-	OutData->SetNumberField(TEXT("total"), Commands.Num());
-	OutData->SetNumberField(TEXT("executed"), Executed);
-	OutData->SetNumberField(TEXT("succeeded"), Succeeded);
-	OutData->SetNumberField(TEXT("failed"), Executed - Succeeded);
-	OutData->SetBoolField(TEXT("stop_on_error"), bStopOnError);
-	OutData->SetBoolField(TEXT("interrupted"), bInterrupted);
-	OutData->SetNumberField(TEXT("failed_index"), FailedIndex);
-	OutData->SetStringField(TEXT("failed_command"), FailedCommand);
-	OutData->SetStringField(TEXT("failed_request_id"), FailedRequestId);
-	OutData->SetStringField(TEXT("failed_error"), FailedError);
-	OutData->SetArrayField(TEXT("results"), Results);
-
-	if (FailedIndex != INDEX_NONE)
-	{
-		OutError = FString::Printf(TEXT("batch_interrupted_at_%d:%s"), FailedIndex, *FailedError);
-		return false;
-	}
-
-	FUeAgentInterfaceLogger::Log(TEXT("ExecBatch done request_id=%s total=%d succeeded=%d"), *BatchCtx.RequestId, Commands.Num(), Succeeded);
-	return true;
-}
-
 bool FUeAgentHttpServer::ExecuteCommandOnGameThread(const FUeAgentRequestContext& Ctx, FUeAgentCommandOutput& OutOutput, FString& OutError) const
 {
 	auto ExecOnGT = [this](const FUeAgentRequestContext& InCtx, FUeAgentCommandOutput& Output, FString& Err) -> bool
@@ -1119,6 +1128,13 @@ bool FUeAgentHttpServer::ExecuteCommandOnGameThread(const FUeAgentRequestContext
 			const bool bOk = PrefixedInvoker(this, Cmd, InCtx, LegacyData, Err);
 			Output = FUeAgentCommandOutput::FromLegacy(LegacyData, LegacyArtifacts);
 			return bOk;
+		}
+
+		if (UeAgentCommandRegistry::IsExplicitlyUnsupportedCommand(Cmd))
+		{
+			Err = TEXT("capability_not_supported");
+			Output.Data = MakeShared<FJsonObject>();
+			return false;
 		}
 
 		Err = TEXT("unknown_command");
@@ -1162,14 +1178,11 @@ bool FUeAgentHttpServer::ExecuteCommandOnGameThread(const FUeAgentRequestContext
 		Done->Trigger();
 	});
 
-	const bool bDone = Done->Wait(FTimespan::FromSeconds(30));
+	// This is only a thread-affinity bridge. Deadline, cancellation and Outcome
+	// belong to the application execution owner; returning while a queued Game
+	// Thread mutation can still run would create ownerless late work.
+	Done->Wait();
 	FPlatformProcess::ReturnSynchEventToPool(Done);
-
-	if (!bDone)
-	{
-		OutError = TEXT("timeout_waiting_gamethread");
-		return false;
-	}
 
 	OutOutput = Result->Output;
 	if (!Result->bOk)

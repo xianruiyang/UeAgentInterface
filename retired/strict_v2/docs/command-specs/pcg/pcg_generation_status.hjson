@@ -1,0 +1,77 @@
+authoring: { reason: command_has_no_registered_folder_authoring_profile, state: none }
+category: pcg
+command: pcg_generation_status
+deprecation: { reason: command_is_active, state: none }
+discovery: { aliases: [], keywords_en: [pcg, generation, status], keywords_zh: [pcg_generation_status], summary_en: "Execute pcg_generation_status with a verified implementation contract", summary_zh: "查询生成/清理状态", tags: [pcg, p2-005] }
+errors: {
+  codes: [
+    { code: actor_not_found, description_zh: "C++ 实现返回错误码 actor_not_found", retry_safe: false, stage: execution, wire_match: exact }
+    { code: pcg_component_not_found, description_zh: "C++ 实现返回错误码 pcg_component_not_found", retry_safe: false, stage: execution, wire_match: exact }
+  ]
+}
+evidence: {
+  docs: [
+    { path: "Plugins/UeAgentInterface/docs/commands/pcg/pcg_generation_status.md", purpose: "user documentation cross-check; C++ implementation remains authoritative" }
+  ]
+  implementation: [
+    { line_hint: 4085, path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Commands/PCG/UeAgentHttpServer_PCG.cpp", purpose: "command handler, parameter and return evidence", symbol: CmdPCGGenerationStatus }
+  ]
+  tests: [
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterfaceTests/Private/Smoke/PCG/UeAgentInterfacePCGSmokeTests.cpp", purpose: "smoke or negative-path evidence cross-checked for the verified contract" }
+  ]
+}
+execution: {
+  destructive: false
+  editor_state: required
+  game_thread: required
+  idempotent: true
+  kind: read_only
+  overwrite_behavior: none
+  pie_state: allowed
+  retry_safe: true
+  save_behavior: none
+  side_effects: []
+  ui_effect: none
+}
+maturity: verified
+params: {
+  constraints: []
+  fields: {
+    actor: { default_state: none, description_zh: "C++ 实现读取的 actor 参数", required: false, type: string }
+    actor_label: { default_state: none, description_zh: "C++ 实现读取的 actor_label 参数", required: false, type: string }
+    actor_name: { default_state: none, description_zh: "C++ 实现读取的 actor_name 参数", required: false, type: string }
+    component: { default_state: none, description_zh: "C++ 实现读取的 component 参数", required: false, type: string }
+    component_name: { default_state: none, description_zh: "C++ 实现读取的 component_name 参数", required: false, type: string }
+    pcg_component: { default_state: none, description_zh: "C++ 实现读取的 pcg_component 参数", required: false, type: string }
+  }
+  state: defined
+}
+response: { artifact_fields: [properties], compact_fields: [component_path, graph_asset_path, generated, generated_output_count, is_generating], failure_fields: [params.actor, params.actor_label, params.actor_name, params.component, params.component_name, params.pcg_component], max_items_policy: { fields: [], mode: none } }
+returns: {
+  fields: {
+    activated: { description_zh: "C++ 实现返回的 activated 字段；是否出现取决于执行分支", required: false, type: bool }
+    actor_label: { description_zh: "C++ 实现返回的 actor_label 字段；是否出现取决于执行分支", required: false, type: string }
+    actor_name: { description_zh: "C++ 实现返回的 actor_name 字段；是否出现取决于执行分支", required: false, type: string }
+    component_name: { description_zh: "C++ 实现返回的 component_name 字段；是否出现取决于执行分支", required: false, type: string }
+    component_path: { description_zh: "C++ 实现返回的 component_path 字段；是否出现取决于执行分支", required: false, type: string }
+    current_generation_task: { description_zh: "C++ 实现返回的 current_generation_task 字段；是否出现取决于执行分支", required: false, type: number }
+    generated: { description_zh: "C++ 实现返回的 generated 字段；是否出现取决于执行分支", required: false, type: bool }
+    generated_output_count: { description_zh: "C++ 实现返回的 generated_output_count 字段；是否出现取决于执行分支", required: false, type: integer }
+    generation_trigger: { description_zh: "C++ 实现返回的 generation_trigger 字段；是否出现取决于执行分支", required: false, type: string }
+    graph: { description_zh: "C++ 实现返回的 graph 字段；是否出现取决于执行分支", required: false, type: string }
+    graph_asset_path: { description_zh: "C++ 实现返回的 graph_asset_path 字段；是否出现取决于执行分支", required: false, type: ue_asset_path }
+    is_cleaning_up: { description_zh: "C++ 实现返回的 is_cleaning_up 字段；是否出现取决于执行分支", required: false, type: bool }
+    is_generating: { description_zh: "C++ 实现返回的 is_generating 字段；是否出现取决于执行分支", required: false, type: bool }
+    partitioned: { description_zh: "C++ 实现返回的 partitioned 字段；是否出现取决于执行分支", required: false, type: bool }
+    properties: { description_zh: "C++ 实现返回的 properties 字段；是否出现取决于执行分支", item_type: json_value, required: false, type: array }
+    schema: { description_zh: "C++ 实现返回的 schema 字段；是否出现取决于执行分支", required: false, type: string }
+    seed: { description_zh: "C++ 实现返回的 seed 字段；是否出现取决于执行分支", required: false, type: number }
+    was_generated_this_session: { description_zh: "C++ 实现返回的 was_generated_this_session 字段；是否出现取决于执行分支", required: false, type: bool }
+  }
+  state: defined
+}
+schema: uai.command_spec.v1
+status: active
+types: {}
+verification: { reason: read_only_command_has_no_post_write_verification, state: none }
+version: 1

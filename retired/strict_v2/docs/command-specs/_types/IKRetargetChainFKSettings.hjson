@@ -1,0 +1,17 @@
+definition: {
+  additional_fields: false
+  fields: {
+    enable_fk: { default_state: none, description_zh: "启用 chain FK retarget", required: false, type: bool }
+    pole_vector_maintain_offset: { default_state: none, description_zh: "保持 pole-vector offset", required: false, type: bool }
+    pole_vector_matching: { default_state: none, description_zh: "pole-vector matching", required: false, type: number }
+    pole_vector_offset: { default_state: none, description_zh: "pole-vector offset", required: false, type: number }
+    rotation_alpha: { default_state: none, description_zh: "rotation alpha", required: false, type: number }
+    rotation_mode: { default_state: none, description_zh: "chain rotation retarget mode", required: false, type: string }
+    translation_alpha: { default_state: none, description_zh: "translation alpha", required: false, type: number }
+    translation_mode: { default_state: none, description_zh: "chain translation retarget mode", required: false, type: string }
+  }
+  kind: object
+}
+schema: uai.command_spec.shared_type.v1
+type_id: IKRetargetChainFKSettings
+version: 1

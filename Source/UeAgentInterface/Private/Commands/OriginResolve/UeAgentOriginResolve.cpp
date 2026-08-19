@@ -2,6 +2,7 @@
 
 #include "Commands/OriginResolve/UeAgentOriginResolveTypes.h"
 
+#include "Commands/PaletteSearch/UeAgentPaletteSearchTypes.h"
 #include "Dom/JsonObject.h"
 #include "Dom/JsonValue.h"
 #include "HAL/PlatformStackWalk.h"
@@ -15,6 +16,7 @@
 #include "UObject/Field.h"
 #include "UObject/Package.h"
 #include "UObject/UObjectGlobals.h"
+#include "Utilities/AuthoringCore/UeAgentAuthoringIdentity.h"
 
 namespace UeAgentOriginResolve
 {
@@ -501,19 +503,51 @@ namespace
 		return true;
 	}
 
-	static void ParseCandidateIdFallback(FResolveParams& InOutParams)
+	static bool ResolveCatalogCandidateIdentity(FResolveParams& InOutParams, FString& OutError)
 	{
-		if (InOutParams.CandidateId.IsEmpty() || !InOutParams.Kind.IsEmpty() || !InOutParams.FullName.IsEmpty())
+		if (InOutParams.CandidateId.IsEmpty())
 		{
-			return;
+			OutError = TEXT("target_query_invalid");
+			return false;
 		}
-		FString Kind;
-		FString FullName;
-		if (InOutParams.CandidateId.Split(TEXT(":"), &Kind, &FullName))
+
+		UeAgentAuthoringIdentity::FCanonicalIdentity ParsedIdentity;
+		FString IdentityError;
+		if (!UeAgentAuthoringIdentity::ParseCanonicalKey(InOutParams.CandidateId, ParsedIdentity, IdentityError)
+			|| ParsedIdentity.ModelId != TEXT("catalog_candidate_identity"))
 		{
-			InOutParams.Kind = Kind;
-			InOutParams.FullName = FullName;
+			OutError = TEXT("target_query_invalid");
+			return false;
 		}
+
+		UeAgentPaletteSearch::FSearchParams SearchParams;
+		SearchParams.CatalogType = ParsedIdentity.GetSelector(TEXT("catalog_type"));
+		SearchParams.CandidateId = InOutParams.CandidateId;
+		SearchParams.bIncludeItems = false;
+		SearchParams.bIncludeGroups = false;
+		SearchParams.bIncludeCategoryTree = false;
+		UeAgentPaletteSearch::FSearchResult SearchResult;
+		if (!UeAgentPaletteSearch::ExecuteSearch(SearchParams, SearchResult, OutError)) return false;
+		if (SearchResult.MatchingCandidates.Num() != 1)
+		{
+			OutError = SearchResult.bHasTargetResolution && !SearchResult.TargetResolution.ErrorCode.IsEmpty()
+				? SearchResult.TargetResolution.ErrorCode
+				: FString(TEXT("target_not_found"));
+			return false;
+		}
+
+		const UeAgentPaletteSearch::FCandidate& Candidate = SearchResult.MatchingCandidates[0];
+		if ((!InOutParams.Kind.IsEmpty() && !InOutParams.Kind.Equals(Candidate.Kind, ESearchCase::IgnoreCase))
+			|| (!InOutParams.FullName.IsEmpty() && !InOutParams.FullName.Equals(Candidate.FullName, ESearchCase::IgnoreCase)))
+		{
+			OutError = TEXT("target_identity_conflict");
+			return false;
+		}
+		InOutParams.Kind = Candidate.Kind;
+		InOutParams.FullName = Candidate.FullName;
+		if (InOutParams.Name.IsEmpty()) InOutParams.Name = Candidate.Name;
+		OutError.Reset();
+		return true;
 	}
 
 	static bool ResolveCodeOrAsset(FResolveParams& Params, FResolveResult& OutResult)
@@ -525,6 +559,54 @@ namespace
 		{
 			OutResult.Status = TEXT("missing_full_name");
 			return false;
+		}
+
+		if (Params.TargetSource == TEXT("ue_object"))
+		{
+			UObject* Object = FindObject<UObject>(nullptr, *OutResult.FullName);
+			if (!Object && LooksLikeAssetPath(OutResult.FullName))
+			{
+				Object = LoadObject<UObject>(nullptr, *OutResult.FullName);
+			}
+			if (!Object)
+			{
+				OutResult.Status = TEXT("ue_object_not_found");
+				return false;
+			}
+			OutResult.FullName = Object->GetPathName();
+			if (OutResult.Name.IsEmpty())
+			{
+				OutResult.Name = Object->GetName();
+			}
+			if (OutResult.Kind.IsEmpty())
+			{
+				OutResult.Kind = Object->GetClass()->GetName();
+			}
+			if (UFunction* Function = Cast<UFunction>(Object))
+			{
+				OutResult.bResolved = AddFunctionSourcePath(
+					Function,
+					OutResult.CodePaths,
+					OutResult.Warnings);
+			}
+			else if (UClass* Class = Cast<UClass>(Object))
+			{
+				AddClassSourcePaths(
+					Class,
+					OutResult.CodePaths,
+					TEXT("class_source"));
+				OutResult.bResolved = !OutResult.CodePaths.IsEmpty();
+			}
+			else
+			{
+				AddAssetOrigin(OutResult.FullName, OutResult);
+				OutResult.bResolved = !OutResult.AssetPaths.IsEmpty()
+					|| !OutResult.PackagePaths.IsEmpty();
+			}
+			OutResult.Status = OutResult.bResolved
+				? FString(TEXT("resolved_ue_object"))
+				: FString(TEXT("ue_object_origin_unresolved"));
+			return OutResult.bResolved;
 		}
 
 		if (LooksLikeAssetPath(OutResult.FullName))
@@ -648,7 +730,6 @@ bool ParseResolveParams(const TSharedPtr<FJsonObject>& Params, FResolveParams& O
 		}
 	}
 
-	ParseCandidateIdFallback(OutParams);
 	if (OutParams.TargetSource.IsEmpty())
 	{
 		if (!OutParams.JsonFile.IsEmpty())
@@ -681,7 +762,7 @@ bool ResolveOrigin(const FResolveParams& Params, FResolveResult& OutResult, FStr
 	}
 	else if (WorkingParams.TargetSource.Equals(TEXT("catalog_candidate")))
 	{
-		ParseCandidateIdFallback(WorkingParams);
+		if (!ResolveCatalogCandidateIdentity(WorkingParams, OutError)) return false;
 	}
 	else if (!WorkingParams.TargetSource.Equals(TEXT("name_reference")) &&
 		!WorkingParams.TargetSource.Equals(TEXT("ue_object")) &&

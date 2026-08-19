@@ -1,0 +1,95 @@
+authoring: { reason: command_has_no_registered_folder_authoring_profile, state: none }
+category: level_topology_streaming_world_partition_data_layer_hlod
+command: data_layer_set_actor_membership
+deprecation: { reason: command_is_active, state: none }
+discovery: { aliases: [], keywords_en: [data, layer, set, actor, membership, level_topology_streaming_world_partition_data_layer_hlod], keywords_zh: [data_layer_set_actor_membership], summary_en: "Execute data_layer_set_actor_membership with a verified implementation contract", summary_zh: "设置 Actor 与 DataLayer 的成员关系", tags: [level_topology_streaming_world_partition_data_layer_hlod, p2-002] }
+errors: {
+  codes: [
+    { code: actor_selection_empty, description_zh: "C++ 实现返回错误码 actor_selection_empty", retry_safe: false, stage: execution, wire_match: exact }
+    { code: actor_selection_exceeds_max_actors, description_zh: "C++ 实现返回错误码 actor_selection_exceeds_max_actors", retry_safe: false, stage: execution, wire_match: exact }
+    { code: data_layer_instance_not_found, description_zh: "C++ 实现返回错误码 data_layer_instance_not_found", retry_safe: false, stage: execution, wire_match: exact }
+    { code: data_layer_membership_mode_invalid, description_zh: "C++ 实现返回错误码 data_layer_membership_mode_invalid", retry_safe: true, stage: preflight, wire_match: exact }
+    { code: data_layer_membership_readback_failed, description_zh: "C++ 实现返回错误码 data_layer_membership_readback_failed", retry_safe: false, stage: execution, wire_match: exact }
+    { code: missing_actor_selection, description_zh: "C++ 实现返回错误码 missing_actor_selection", retry_safe: true, stage: preflight, wire_match: exact }
+    { code: missing_world_or_params, description_zh: "C++ 实现返回错误码 missing_world_or_params", retry_safe: true, stage: preflight, wire_match: exact }
+    { code: no_editor_world, description_zh: "C++ 实现返回错误码 no_editor_world", retry_safe: false, stage: execution, wire_match: exact }
+    { code: no_geditor, description_zh: "C++ 实现返回错误码 no_geditor", retry_safe: false, stage: execution, wire_match: exact }
+  ]
+}
+evidence: {
+  docs: [
+    { path: "Plugins/UeAgentInterface/docs/commands/level_topology_streaming_world_partition_data_layer_hlod/data_layer_set_actor_membership.md", purpose: "user documentation cross-check; C++ implementation remains authoritative" }
+  ]
+  implementation: [
+    { line_hint: 2262, path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Commands/LevelTopology/UeAgentHttpServer_LevelTopology.cpp", purpose: "command handler, parameter and return evidence", symbol: CmdDataLayerSetActorMembership }
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Commands/Level/UeAgentHttpServer_Level_CaptureAndPersistence.cpp", purpose: "transitive helper evidence used by the command handler" }
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Commands/TextureRenderTarget/UeAgentHttpServer_TextureRenderTarget_TextureAssets.inl", purpose: "transitive helper evidence used by the command handler" }
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Server/UeAgentHttpServer.cpp", purpose: "transitive helper evidence used by the command handler" }
+  ]
+  tests: [
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterfaceTests/Private/Smoke/LevelTopology/UeAgentInterfaceLevelTopologySmokeTests.cpp", purpose: "smoke or negative-path evidence cross-checked for the verified contract" }
+  ]
+}
+execution: {
+  destructive: false
+  editor_state: required
+  game_thread: required
+  idempotent: false
+  kind: write
+  overwrite_behavior: none
+  pie_state: allowed
+  retry_safe: false
+  save_behavior: none
+  side_effects: [modifies_level]
+  ui_effect: none
+}
+maturity: verified
+params: {
+  constraints: []
+  fields: {
+    actor: { default_state: none, description_zh: "C++ 实现读取的 actor 参数", required: false, type: string }
+    actor_id: { default_state: none, description_zh: "C++ 实现读取的 actor_id 参数", required: false, type: string }
+    actor_ids: { default_state: none, description_zh: "C++ 实现读取的 actor_ids 参数", item_type: json_value, required: false, type: array }
+    actor_selection: { default_state: none, description_zh: "C++ 实现读取的 actor_selection 参数", required: true, type: json_value }
+    actors: { default_state: none, description_zh: "C++ 实现读取的 actors 参数", item_type: json_value, required: false, type: array }
+    folder_root: { default_state: none, description_zh: "C++ 实现读取的 folder_root 参数", required: false, type: string }
+    layer: { default_state: none, description_zh: "C++ 实现读取的 layer 参数", required: false, type: string }
+    layers: { default_state: none, description_zh: "C++ 实现读取的 layers 参数", item_type: json_value, required: false, type: array }
+    managed_tag: { default_state: none, description_zh: "C++ 实现读取的 managed_tag 参数", required: false, type: string }
+    max_actors: { default: 0, default_state: defined, description_zh: "C++ 实现读取的 max_actors 参数", required: false, type: number }
+    mode: { default: add, default_state: defined, description_zh: "C++ 实现读取的 mode 参数", enum_values: [add, remove, replace, clear], required: false, type: enum }
+    transaction: { default: true, default_state: defined, description_zh: "C++ 实现读取的 transaction 参数", required: false, type: bool }
+  }
+  state: defined
+}
+response: { artifact_fields: [], compact_fields: [actor_results, changed_count, matched_count, mode, readback_failure_count, results], failure_fields: [params.actor_selection], max_items_policy: { fields: [], mode: none } }
+returns: {
+  fields: {
+    actor_results: { description_zh: "C++ 实现返回的 actor_results 字段；是否出现取决于执行分支", item_type: json_value, required: false, type: array }
+    changed_count: { description_zh: "C++ 实现返回的 changed_count 字段；是否出现取决于执行分支", required: false, type: integer }
+    matched_count: { description_zh: "C++ 实现返回的 matched_count 字段；是否出现取决于执行分支", required: false, type: integer }
+    mode: { description_zh: "C++ 实现返回的 mode 字段；是否出现取决于执行分支", required: false, type: string }
+    readback_failure_count: { description_zh: "C++ 实现返回的 readback_failure_count 字段；是否出现取决于执行分支", required: false, type: integer }
+    results: { description_zh: "C++ 实现返回的 results 字段；是否出现取决于执行分支", item_type: json_value, required: false, type: array }
+    schema: { description_zh: "C++ 实现返回的 schema 字段；是否出现取决于执行分支", required: false, type: string }
+    transaction: { description_zh: "C++ 实现返回的 transaction 字段；是否出现取决于执行分支", required: false, type: bool }
+  }
+  state: defined
+}
+schema: uai.command_spec.v1
+status: active
+types: {}
+verification: {
+  assertions: [
+    { id: result_present, operator: exists, source: returns.actor_results }
+    { id: state_readback_present, operator: exists, source: methods.state_readback.data_layers }
+  ]
+  failure_policy: fail_overall
+  methods: [
+    { id: result, kind: result_assertion }
+    { command: data_layer_query, id: state_readback, kind: command_readback, params_mapping: {} }
+  ]
+  required: true
+  state: defined
+}
+version: 1

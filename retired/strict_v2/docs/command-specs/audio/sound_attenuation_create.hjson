@@ -1,0 +1,93 @@
+authoring: { reason: command_has_no_registered_folder_authoring_profile, state: none }
+category: audio
+command: sound_attenuation_create
+deprecation: { reason: command_is_active, state: none }
+discovery: { aliases: [], keywords_en: [sound, attenuation, create, audio], keywords_zh: [sound_attenuation_create], summary_en: "Execute sound_attenuation_create with a verified implementation contract", summary_zh: "创建 `USoundAttenuation`", tags: [audio, p2-007] }
+errors: {
+  codes: [
+    { code: asset_already_exists, description_zh: "C++ 实现返回错误码 asset_already_exists", retry_safe: false, stage: execution, wire_match: exact }
+    { code: asset_class_is_abstract, description_zh: "C++ 实现返回错误码 asset_class_is_abstract", retry_safe: false, stage: execution, wire_match: exact }
+    { code: asset_class_not_found, description_zh: "C++ 实现返回错误码 asset_class_not_found", retry_safe: false, stage: execution, wire_match: exact }
+    { code: create_asset_failed, description_zh: "C++ 实现返回错误码 create_asset_failed", retry_safe: false, stage: execution, wire_match: exact }
+    { code: create_package_failed, description_zh: "C++ 实现返回错误码 create_package_failed", retry_safe: false, stage: execution, wire_match: exact }
+    { code: existing_asset_class_mismatch, description_zh: "C++ 实现返回错误码 existing_asset_class_mismatch", retry_safe: false, stage: execution, wire_match: exact }
+    { code: invalid_, description_zh: "C++ 实现返回错误码 invalid_", retry_safe: true, stage: preflight, wire_match: prefix }
+    { code: invalid_asset_path, description_zh: "C++ 实现返回错误码 invalid_asset_path", retry_safe: true, stage: preflight, wire_match: exact }
+    { code: missing_, description_zh: "C++ 实现返回错误码 missing_", retry_safe: true, stage: preflight, wire_match: prefix }
+    { code: missing_asset_path, description_zh: "C++ 实现返回错误码 missing_asset_path", retry_safe: true, stage: preflight, wire_match: exact }
+    { code: save_asset_failed, description_zh: "C++ 实现返回错误码 save_asset_failed", retry_safe: false, stage: execution, wire_match: exact }
+  ]
+}
+evidence: {
+  docs: [
+    { path: "Plugins/UeAgentInterface/docs/commands/audio/sound_attenuation_create.md", purpose: "user documentation cross-check; C++ implementation remains authoritative" }
+  ]
+  implementation: [
+    { line_hint: 24, path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Commands/Audio/UeAgentHttpServer_AudioAssets.cpp", purpose: "command handler, parameter and return evidence", symbol: CmdSoundAttenuationCreate }
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Commands/Audio/UeAgentHttpServer_AudioOpsAssets.cpp", purpose: "transitive helper evidence used by the command handler" }
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Commands/Audio/UeAgentHttpServer_AudioOpsCore.cpp", purpose: "transitive helper evidence used by the command handler" }
+  ]
+  tests: [
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterfaceTests/Private/Smoke/UeAgentInterfaceAudioSmokeTests.cpp", purpose: "smoke or negative-path evidence cross-checked for the verified contract" }
+  ]
+}
+execution: {
+  destructive: false
+  editor_state: required
+  game_thread: required
+  idempotent: false
+  kind: write
+  overwrite_behavior: target_asset
+  pie_state: allowed
+  retry_safe: false
+  save_behavior: caller_controlled
+  side_effects: [modifies_asset, creates_asset]
+  ui_effect: none
+}
+maturity: verified
+params: {
+  constraints: []
+  fields: {
+    asset_path: { default_state: none, description_zh: "C++ 实现读取的 asset_path 参数", path_semantics: { access_scope: project_write, kind: ue_asset }, required: true, type: ue_asset_path }
+    replace_existing: { default: false, default_state: defined, description_zh: "C++ 实现读取的 replace_existing 参数", required: false, type: bool }
+    save_after_create: { default: true, default_state: defined, description_zh: "C++ 实现读取的 save_after_create 参数", required: false, type: bool }
+    template: { default_state: none, description_zh: "C++ 实现读取的 template 参数", required: false, type: json_value }
+  }
+  state: defined
+}
+response: { artifact_fields: [coverage_report, raw_properties], compact_fields: [asset_path, attenuate, class, class_path, created_asset], failure_fields: [params.asset_path], max_items_policy: { fields: [], mode: none } }
+returns: {
+  fields: {
+    asset_path: { description_zh: "C++ 实现返回的 asset_path 字段；是否出现取决于执行分支", required: false, type: ue_asset_path }
+    attenuate: { description_zh: "C++ 实现返回的 attenuate 字段；是否出现取决于执行分支", required: false, type: bool }
+    class: { description_zh: "C++ 实现返回的 class 字段；是否出现取决于执行分支", required: false, type: string }
+    class_path: { description_zh: "C++ 实现返回的 class_path 字段；是否出现取决于执行分支", required: false, type: string }
+    coverage_report: { description_zh: "C++ 实现返回的 coverage_report 字段；是否出现取决于执行分支", required: false, type: json_value }
+    created_asset: { description_zh: "C++ 实现返回的 created_asset 字段；是否出现取决于执行分支", required: false, type: bool }
+    falloff_distance: { description_zh: "C++ 实现返回的 falloff_distance 字段；是否出现取决于执行分支", required: false, type: number }
+    object_path: { description_zh: "C++ 实现返回的 object_path 字段；是否出现取决于执行分支", required: false, type: ue_object_path }
+    occlusion: { description_zh: "C++ 实现返回的 occlusion 字段；是否出现取决于执行分支", required: false, type: bool }
+    occlusion_low_pass_filter_frequency: { description_zh: "C++ 实现返回的 occlusion_low_pass_filter_frequency 字段；是否出现取决于执行分支", required: false, type: number }
+    occlusion_volume_attenuation: { description_zh: "C++ 实现返回的 occlusion_volume_attenuation 字段；是否出现取决于执行分支", required: false, type: number }
+    raw_properties: { description_zh: "C++ 实现返回的 raw_properties 字段；是否出现取决于执行分支", required: false, type: json_value }
+    spatialize: { description_zh: "C++ 实现返回的 spatialize 字段；是否出现取决于执行分支", required: false, type: bool }
+  }
+  state: defined
+}
+schema: uai.command_spec.v1
+status: active
+types: {}
+verification: {
+  assertions: [
+    { id: result_present, operator: exists, source: returns.asset_path }
+    { id: state_readback_present, operator: exists, source: methods.state_readback.asset_path }
+  ]
+  failure_policy: fail_overall
+  methods: [
+    { id: result, kind: result_assertion }
+    { command: sound_attenuation_get_info, id: state_readback, kind: command_readback, params_mapping: { asset_path: returns.asset_path } }
+  ]
+  required: true
+  state: defined
+}
+version: 1

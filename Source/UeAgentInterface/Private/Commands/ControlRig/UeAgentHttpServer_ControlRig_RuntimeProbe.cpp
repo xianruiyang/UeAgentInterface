@@ -1,8 +1,9 @@
 #include "UeAgentHttpServer_ControlRig.h"
 
-#include "UeAgentHttpServer_ControlRigOps.h"
+#include "Domains/Rigging/UeAgentControlRigDomainBackend.h"
 
 #include "Utilities/UeAgentJsonDiagnostics.h"
+#include "Utilities/UeAgentUObjectProperties.h"
 #include "ControlRig.h"
 #include "ControlRigBlueprint.h"
 #include "Dom/JsonObject.h"
@@ -93,66 +94,31 @@ bool FUeAgentHttpServer::CmdControlRigRuntimeProbe(const FUeAgentRequestContext&
 
 	TArray<TSharedPtr<FJsonValue>> ProbeIssues;
 	TArray<FString> VariableNamesToSample;
-	auto ApplyVariableInput = [&](const FString& VariableName, const TSharedPtr<FJsonValue>& Value, const FString& JsonPath)
+	const TArray<TSharedPtr<FJsonValue>>* VariableProperties = nullptr;
+	if (Ctx.Params.IsValid() && Ctx.Params->TryGetArrayField(TEXT("properties"), VariableProperties) && VariableProperties && !VariableProperties->IsEmpty())
 	{
-		if (VariableName.TrimStartAndEnd().IsEmpty())
+		for (int32 PropertyIndex = 0; PropertyIndex < VariableProperties->Num(); ++PropertyIndex)
 		{
-			UeAgentJsonDiagnostics::AddIssue(ProbeIssues, TEXT("error"), TEXT("control_rig_probe_variable_name_required"), JsonPath, TEXT("Runtime probe variable input requires a non-empty variable name."));
-			return;
-		}
-		FString ValueText;
-		if (!UeAgentControlRigOps::ReadJsonValueAsDefaultText(Value, ValueText))
-		{
-			UeAgentJsonDiagnostics::AddIssue(ProbeIssues, TEXT("error"), TEXT("control_rig_probe_variable_value_invalid"), JsonPath, TEXT("Runtime probe variable value must be a string, number, bool, vector object, or color object."));
-			return;
-		}
-		FProperty* Property = FindFProperty<FProperty>(RigClass, FName(*VariableName));
-		if (!Property)
-		{
-			UeAgentJsonDiagnostics::AddIssue(ProbeIssues, TEXT("error"), TEXT("control_rig_probe_variable_not_found"), JsonPath, FString::Printf(TEXT("Variable '%s' does not exist on the generated Control Rig class."), *VariableName));
-			return;
-		}
-		void* ValuePtr = Property->ContainerPtrToValuePtr<void>(RuntimeRig);
-		if (!ValuePtr || Property->ImportText_Direct(*ValueText, ValuePtr, RuntimeRig, PPF_None) == nullptr)
-		{
-			UeAgentJsonDiagnostics::AddIssue(ProbeIssues, TEXT("error"), TEXT("control_rig_probe_variable_import_failed"), JsonPath, FString::Printf(TEXT("Failed to import runtime value for variable '%s'."), *VariableName));
-			return;
-		}
-		VariableNamesToSample.AddUnique(VariableName);
-	};
-
-	const TSharedPtr<FJsonObject>* VariableInputsObj = nullptr;
-	if (Ctx.Params.IsValid() && Ctx.Params->TryGetObjectField(TEXT("variables"), VariableInputsObj) && VariableInputsObj && VariableInputsObj->IsValid())
-	{
-		for (const TPair<FString, TSharedPtr<FJsonValue>>& Pair : (*VariableInputsObj)->Values)
-		{
-			ApplyVariableInput(Pair.Key, Pair.Value, FString::Printf(TEXT("variables.%s"), *Pair.Key));
-		}
-	}
-	const TArray<TSharedPtr<FJsonValue>>* VariableInputsArray = nullptr;
-	if (Ctx.Params.IsValid() && Ctx.Params->TryGetArrayField(TEXT("variable_inputs"), VariableInputsArray) && VariableInputsArray)
-	{
-		for (int32 VariableInputIndex = 0; VariableInputIndex < VariableInputsArray->Num(); ++VariableInputIndex)
-		{
-			TSharedPtr<FJsonObject> VariableInputObj;
-			const FString VariableInputPath = FString::Printf(TEXT("variable_inputs[%d]"), VariableInputIndex);
-			if (!UeAgentJsonDiagnostics::ReadObjectFromValue((*VariableInputsArray)[VariableInputIndex], VariableInputPath, VariableInputObj, ProbeIssues))
+			const TSharedPtr<FJsonObject> Descriptor = (*VariableProperties)[PropertyIndex].IsValid()
+				? (*VariableProperties)[PropertyIndex]->AsObject()
+				: nullptr;
+			FString PropertyPath;
+			if (Descriptor.IsValid() && Descriptor->TryGetStringField(TEXT("property_path"), PropertyPath) && !PropertyPath.IsEmpty())
 			{
-				continue;
+				VariableNamesToSample.AddUnique(PropertyPath);
 			}
-			FString Name;
-			UeAgentJsonDiagnostics::ReadStringField(VariableInputObj, TEXT("name"), VariableInputPath + TEXT(".name"), Name, ProbeIssues, true);
-			const TSharedPtr<FJsonValue>* Value = UeAgentJsonDiagnostics::FindFieldValue(VariableInputObj, TEXT("value"));
-			if (!Value)
-			{
-				Value = UeAgentJsonDiagnostics::FindFieldValue(VariableInputObj, TEXT("default_value"));
-			}
-			if (!Value)
-			{
-				UeAgentJsonDiagnostics::AddIssue(ProbeIssues, TEXT("error"), TEXT("control_rig_probe_variable_value_required"), VariableInputPath, TEXT("variable_inputs item requires value or default_value."));
-				continue;
-			}
-			ApplyVariableInput(Name, *Value, VariableInputPath + TEXT(".value"));
+		}
+		TSharedPtr<FJsonObject> Payload = MakeShared<FJsonObject>();
+		Payload->SetStringField(TEXT("schema"), TEXT("uai.uobject_properties.v2"));
+		Payload->SetArrayField(TEXT("properties"), *VariableProperties);
+		const TSharedPtr<FJsonObject> ApplySummary = UeAgentUObjectProperties::ApplyObjectProperties(
+			RuntimeRig,
+			Payload,
+			UeAgentUObjectProperties::FApplyOptions());
+		FString ApplyStatus;
+		if (!ApplySummary.IsValid() || !ApplySummary->TryGetStringField(TEXT("status"), ApplyStatus) || ApplyStatus != TEXT("applied"))
+		{
+			UeAgentJsonDiagnostics::AddIssue(ProbeIssues, TEXT("error"), TEXT("control_rig_probe_variable_apply_failed"), TEXT("properties"), TEXT("Canonical runtime property apply failed."));
 		}
 	}
 
@@ -280,15 +246,16 @@ bool FUeAgentHttpServer::CmdControlRigRuntimeProbe(const FUeAgentRequestContext&
 		}
 		else
 		{
+			VariableObj = UeAgentUObjectProperties::BuildPropertyDescriptor(
+				RuntimeRig,
+				Property,
+				[]
+				{
+					UeAgentUObjectProperties::FExportOptions Options;
+					Options.Profile = UeAgentUObjectProperties::EExportProfile::Readback;
+					return Options;
+				}());
 			VariableObj->SetBoolField(TEXT("found"), true);
-			FString ExtendedType;
-			VariableObj->SetStringField(TEXT("cpp_type"), Property->GetCPPType(&ExtendedType) + ExtendedType);
-			FString ValueText;
-			if (void* ValuePtr = Property->ContainerPtrToValuePtr<void>(RuntimeRig))
-			{
-				Property->ExportTextItem_Direct(ValueText, ValuePtr, ValuePtr, RuntimeRig, PPF_None);
-			}
-			VariableObj->SetStringField(TEXT("value_text"), ValueText);
 		}
 		VariableValues.Add(MakeShared<FJsonValueObject>(VariableObj));
 	}

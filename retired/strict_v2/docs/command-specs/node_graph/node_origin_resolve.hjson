@@ -1,0 +1,112 @@
+authoring: { reason: command_has_no_registered_folder_authoring_profile, state: none }
+category: node_graph
+command: node_origin_resolve
+deprecation: { reason: command_is_active, state: none }
+discovery: { aliases: [], keywords_en: [node, origin, resolve, node_graph], keywords_zh: [node_origin_resolve], summary_en: "Execute node_origin_resolve with a verified implementation contract", summary_zh: "根据 catalog 候选、`kind/name/full_name`、JSON 指针或 UE 对象身份返回资产/源码路径", tags: [node_graph, p2-003] }
+errors: {
+  codes: [
+    { code: json_file_not_readable, description_zh: "C++ 实现返回错误码 json_file_not_readable", retry_safe: false, stage: execution, wire_match: prefix }
+    { code: json_file_parse_failed, description_zh: "C++ 实现返回错误码 json_file_parse_failed", retry_safe: false, stage: execution, wire_match: prefix }
+    { code: json_pointer_not_found, description_zh: "C++ 实现返回错误码 json_pointer_not_found", retry_safe: false, stage: execution, wire_match: prefix }
+    { code: json_reference_has_no_supported_identity, description_zh: "C++ 实现返回错误码 json_reference_has_no_supported_identity", retry_safe: false, stage: execution, wire_match: exact }
+    { code: origin_unresolved, description_zh: "C++ 实现返回错误码 origin_unresolved", retry_safe: false, stage: execution, wire_match: exact }
+    { code: unsupported, description_zh: "C++ 实现返回错误码 unsupported", retry_safe: false, stage: execution, wire_match: prefix }
+  ]
+}
+evidence: {
+  docs: [
+    { path: "Plugins/UeAgentInterface/docs/commands/node_graph/node_origin_resolve.md", purpose: "user documentation cross-check; C++ implementation remains authoritative" }
+  ]
+  implementation: [
+    { line_hint: 8, path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Commands/OriginResolve/UeAgentHttpServer_OriginResolve.cpp", purpose: "command handler, parameter and return evidence", symbol: CmdNodeOriginResolve }
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Commands/OriginResolve/UeAgentOriginResolve.cpp", purpose: "transitive helper evidence used by the command handler" }
+  ]
+  tests: [
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterfaceTests/Private/Smoke/UeAgentInterfaceNodeCatalogOriginSmokeTests.cpp", purpose: "smoke or negative-path evidence cross-checked for the verified contract" }
+  ]
+}
+execution: {
+  destructive: false
+  editor_state: required
+  game_thread: required
+  idempotent: true
+  kind: read_only
+  overwrite_behavior: none
+  pie_state: allowed
+  retry_safe: true
+  save_behavior: none
+  side_effects: []
+  ui_effect: none
+}
+maturity: verified
+params: {
+  constraints: [
+    { fields: [target, json_file, asset_path, folder_path, candidate_id, node_guid, name, full_name], kind: one_of }
+  ]
+  fields: {
+    asset_path: { default_state: none, description_zh: "C++ 实现读取的 asset_path 参数", path_semantics: { access_scope: mounted_read, kind: ue_asset }, required: false, type: ue_asset_path }
+    candidate_id: { default_state: none, description_zh: "C++ 实现读取的 candidate_id 参数", required: false, type: string }
+    folder_path: {
+      default_state: none
+      description_zh: "目标 authoring 文件系统目录"
+      path_semantics: { kind: filesystem_directory, must_exist: false, writable: false }
+      required: false
+      type: filesystem_path
+    }
+    full_name: { default_state: none, description_zh: "C++ 实现读取的 full_name 参数", required: false, type: string }
+    graph_name: { default_state: none, description_zh: "C++ 实现读取的 graph_name 参数", required: false, type: string }
+    json_file: {
+      default_state: none
+      description_zh: "C++ 实现读取的 json_file 参数"
+      path_semantics: { kind: filesystem_file, must_exist: false, writable: false }
+      required: false
+      type: filesystem_path
+    }
+    json_pointer: { default_state: none, description_zh: "C++ 实现读取的 json_pointer 参数", required: false, type: string }
+    kind: { default_state: none, description_zh: "C++ 实现读取的 kind 参数", required: false, type: string }
+    name: { default_state: none, description_zh: "C++ 实现读取的 name 参数", required: false, type: string }
+    node_guid: { default_state: none, description_zh: "C++ 实现读取的 node_guid 参数", required: false, type: string }
+    source: { default_state: none, description_zh: "C++ 实现读取的 source 参数", required: false, type: string }
+    target: { default_state: none, description_zh: "C++ 实现读取的 target 参数", required: false, type: object, type_ref: "local:NodeOriginTarget" }
+    target_source: { default_state: none, description_zh: "C++ 实现读取的 target_source 参数", required: false, type: string }
+  }
+  state: defined
+}
+response: { artifact_fields: [], compact_fields: [status, origin, resolved, schema, target, warnings], failure_fields: [], max_items_policy: { fields: [], mode: none } }
+returns: {
+  fields: {
+    origin: { description_zh: "C++ 实现返回的 origin 字段；是否出现取决于执行分支", required: false, type: json_value }
+    resolved: { description_zh: "C++ 实现返回的 resolved 字段；是否出现取决于执行分支", required: false, type: bool }
+    schema: { description_zh: "C++ 实现返回的 schema 字段；是否出现取决于执行分支", required: false, type: string }
+    status: { description_zh: "C++ 实现返回的 status 字段；是否出现取决于执行分支", required: false, type: string }
+    target: { description_zh: "C++ 实现返回的 target 字段；是否出现取决于执行分支", required: false, type: json_value }
+    warnings: { description_zh: "C++ 实现返回的 warnings 字段；是否出现取决于执行分支", item_type: json_value, required: false, type: array }
+  }
+  state: defined
+}
+schema: uai.command_spec.v1
+status: active
+types: {
+  NodeOriginTarget: {
+    additional_fields: false
+    fields: {
+      asset_path: { default_state: none, description_zh: "目标资产路径", path_semantics: { access_scope: mounted_read, kind: ue_asset }, required: false, type: ue_asset_path }
+      candidate_id: { default_state: none, description_zh: "catalog 稳定候选 id", required: false, type: string }
+      folder_path: {
+        default_state: none
+        description_zh: "目标 authoring 文件夹"
+        path_semantics: { allowed_roots: [], kind: filesystem_directory, must_exist: false, writable: false }
+        required: false
+        type: filesystem_path
+      }
+      full_name: { default_state: none, description_zh: "目标完整名", required: false, type: string }
+      graph_name: { default_state: none, description_zh: "目标图名", required: false, type: string }
+      kind: { default_state: none, description_zh: "目标类型", required: false, type: string }
+      name: { default_state: none, description_zh: "目标短名", required: false, type: string }
+      node_guid: { default_state: none, description_zh: "目标节点 GUID", required: false, type: string }
+    }
+    kind: object
+  }
+}
+verification: { reason: read_only_command_has_no_post_write_verification, state: none }
+version: 1

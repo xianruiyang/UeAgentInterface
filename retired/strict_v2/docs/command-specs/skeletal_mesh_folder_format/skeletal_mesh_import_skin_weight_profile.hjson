@@ -1,0 +1,101 @@
+authoring: { reason: command_has_no_registered_folder_authoring_profile, state: none }
+category: skeletal_mesh_folder_format
+command: skeletal_mesh_import_skin_weight_profile
+deprecation: { reason: command_is_active, state: none }
+discovery: { aliases: [], keywords_en: [skeletal, mesh, import, skin, weight, profile, skeletal_mesh_folder_format], keywords_zh: [skeletal_mesh_import_skin_weight_profile], summary_en: "Execute skeletal_mesh_import_skin_weight_profile with a verified implementation contract", summary_zh: "从 FBX 导入指定 LOD 的 Skin Weight Profile", tags: [skeletal_mesh_folder_format, p2-006] }
+errors: {
+  codes: [
+    { code: asset_not_found, description_zh: "C++ 实现返回错误码 asset_not_found", retry_safe: false, stage: execution, wire_match: exact }
+    { code: invalid_lod_index, description_zh: "C++ 实现返回错误码 invalid_lod_index", retry_safe: true, stage: preflight, wire_match: exact }
+    { code: missing_asset_path, description_zh: "C++ 实现返回错误码 missing_asset_path", retry_safe: true, stage: preflight, wire_match: exact }
+    { code: missing_profile_name, description_zh: "C++ 实现返回错误码 missing_profile_name", retry_safe: true, stage: preflight, wire_match: exact }
+    { code: missing_source_filename, description_zh: "C++ 实现返回错误码 missing_source_filename", retry_safe: true, stage: preflight, wire_match: exact }
+    { code: save_asset_failed, description_zh: "C++ 实现返回错误码 save_asset_failed", retry_safe: false, stage: execution, wire_match: exact }
+    { code: skeletal_mesh_not_found, description_zh: "C++ 实现返回错误码 skeletal_mesh_not_found", retry_safe: false, stage: execution, wire_match: exact }
+    { code: skin_weight_profile_import_failed, description_zh: "C++ 实现返回错误码 skin_weight_profile_import_failed", retry_safe: false, stage: execution, wire_match: exact }
+    { code: source_file_not_found, description_zh: "C++ 实现返回错误码 source_file_not_found", retry_safe: false, stage: execution, wire_match: exact }
+  ]
+}
+evidence: {
+  docs: [
+    { path: "Plugins/UeAgentInterface/docs/commands/skeletal_mesh_folder_format/skeletal_mesh_import_skin_weight_profile.md", purpose: "user documentation cross-check; C++ implementation remains authoritative" }
+  ]
+  implementation: [
+    { line_hint: 1350, path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Commands/Animation/UeAgentHttpServer_SkeletalMesh.cpp", purpose: "command handler, parameter and return evidence", symbol: CmdSkeletalMeshImportSkinWeightProfile }
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Server/UeAgentHttpServer.cpp", purpose: "transitive helper evidence used by the command handler" }
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Utilities/UeAgentJsonDiagnostics.cpp", purpose: "transitive helper evidence used by the command handler" }
+  ]
+  tests: [
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterfaceTests/Private/Smoke/UeAgentInterfaceSmoke_MaterialStaticDeformerInput.cpp", purpose: "smoke or negative-path evidence cross-checked for the verified contract" }
+  ]
+}
+execution: {
+  destructive: false
+  editor_state: required
+  game_thread: required
+  idempotent: false
+  kind: write
+  overwrite_behavior: none
+  pie_state: allowed
+  retry_safe: false
+  save_behavior: caller_controlled
+  side_effects: [modifies_asset, creates_asset]
+  ui_effect: none
+}
+maturity: verified
+params: {
+  constraints: [
+    { fields: [source_file, source_filename], kind: one_of }
+  ]
+  fields: {
+    asset_path: { default_state: none, description_zh: "C++ 实现读取的 asset_path 参数", path_semantics: { access_scope: project_write, kind: ue_asset }, required: true, type: ue_asset_path }
+    lod_index: { default: 0, default_state: defined, description_zh: "C++ 实现读取的 lod_index 参数", required: false, type: integer }
+    profile_name: { default_state: none, description_zh: "C++ 实现读取的 profile_name 参数", required: true, type: string }
+    save_after_import: { default: false, default_state: defined, description_zh: "C++ 实现读取的 save_after_import 参数", required: false, type: bool }
+    source_file: {
+      default_state: none
+      description_zh: "C++ 实现读取的 source_file 参数"
+      path_semantics: { kind: filesystem_file, must_exist: false, writable: false }
+      required: false
+      type: filesystem_path
+    }
+    source_filename: {
+      default_state: none
+      description_zh: "C++ 实现读取的 source_filename 参数"
+      path_semantics: { kind: filesystem_file, must_exist: false, writable: false }
+      required: false
+      type: filesystem_path
+    }
+  }
+  state: defined
+}
+response: { artifact_fields: [readback], compact_fields: [saved, asset_path, imported, lod_index, profile_name], failure_fields: [params.asset_path, params.profile_name, params.source_file, params.source_filename], max_items_policy: { fields: [], mode: none } }
+returns: {
+  fields: {
+    asset_path: { description_zh: "C++ 实现返回的 asset_path 字段；是否出现取决于执行分支", required: false, type: ue_asset_path }
+    imported: { description_zh: "C++ 实现返回的 imported 字段；是否出现取决于执行分支", required: false, type: bool }
+    lod_index: { description_zh: "C++ 实现返回的 lod_index 字段；是否出现取决于执行分支", required: false, type: integer }
+    profile_name: { description_zh: "C++ 实现返回的 profile_name 字段；是否出现取决于执行分支", required: false, type: string }
+    readback: { description_zh: "C++ 实现返回的 readback 字段；是否出现取决于执行分支", required: false, type: json_value }
+    saved: { description_zh: "C++ 实现返回的 saved 字段；是否出现取决于执行分支", required: false, type: bool }
+    source_filename: { description_zh: "C++ 实现返回的 source_filename 字段；是否出现取决于执行分支", required: false, type: filesystem_path }
+  }
+  state: defined
+}
+schema: uai.command_spec.v1
+status: active
+types: {}
+verification: {
+  assertions: [
+    { id: result_present, operator: exists, source: returns.saved }
+    { id: state_readback_present, operator: exists, source: methods.state_readback.asset_path }
+  ]
+  failure_policy: fail_overall
+  methods: [
+    { id: result, kind: result_assertion }
+    { command: skeletal_mesh_get_info, id: state_readback, kind: command_readback, params_mapping: { asset_path: params.asset_path } }
+  ]
+  required: true
+  state: defined
+}
+version: 1

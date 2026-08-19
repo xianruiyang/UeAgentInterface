@@ -1,0 +1,73 @@
+authoring: { reason: command_has_no_registered_folder_authoring_profile, state: none }
+category: pcg
+command: pcg_world_actor_apply_json
+deprecation: { reason: command_is_active, state: none }
+discovery: { aliases: [], keywords_en: [pcg, world, actor, apply, json], keywords_zh: [pcg_world_actor_apply_json], summary_en: "Execute pcg_world_actor_apply_json with a verified implementation contract", summary_zh: "创建或更新 PCGWorldActor 设置", tags: [pcg, p2-005] }
+errors: {
+  codes: [
+    { code: invalid_partition_grid_size, description_zh: "C++ 实现返回错误码 invalid_partition_grid_size", retry_safe: true, stage: preflight, wire_match: exact }
+    { code: pcg_world_actor_create_failed, description_zh: "C++ 实现返回错误码 pcg_world_actor_create_failed", retry_safe: false, stage: execution, wire_match: exact }
+  ]
+}
+evidence: {
+  docs: [
+    { path: "Plugins/UeAgentInterface/docs/commands/pcg/pcg_world_actor_apply_json.md", purpose: "user documentation cross-check; C++ implementation remains authoritative" }
+  ]
+  implementation: [
+    { line_hint: 3870, path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Commands/PCG/UeAgentHttpServer_PCG.cpp", purpose: "command handler, parameter and return evidence", symbol: CmdPCGWorldActorApplyJson }
+  ]
+  tests: [
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterfaceTests/Private/Smoke/PCG/UeAgentInterfacePCGSmokeTests.cpp", purpose: "smoke or negative-path evidence cross-checked for the verified contract" }
+  ]
+}
+execution: {
+  destructive: false
+  editor_state: required
+  game_thread: required
+  idempotent: false
+  kind: write
+  overwrite_behavior: none
+  pie_state: allowed
+  retry_safe: false
+  save_behavior: none
+  side_effects: [modifies_level]
+  ui_effect: none
+}
+maturity: verified
+params: {
+  constraints: []
+  fields: {
+    enable_world_partition_generation_sources: { default: false, default_state: defined, description_zh: "C++ 实现读取的 enable_world_partition_generation_sources 参数", required: false, type: bool }
+    partition_grid_size: { default: 0, default_state: defined, description_zh: "C++ 实现读取的 partition_grid_size 参数", required: false, type: number }
+    treat_editor_viewport_as_generation_source: { default: false, default_state: defined, description_zh: "C++ 实现读取的 treat_editor_viewport_as_generation_source 参数", required: false, type: bool }
+  }
+  state: defined
+}
+response: { artifact_fields: [], compact_fields: [created, enable_world_partition_generation_sources, name, partition_grid_size, schema], failure_fields: [], max_items_policy: { fields: [], mode: none } }
+returns: {
+  fields: {
+    created: { description_zh: "C++ 实现返回的 created 字段；是否出现取决于执行分支", required: false, type: bool }
+    enable_world_partition_generation_sources: { description_zh: "C++ 实现返回的 enable_world_partition_generation_sources 字段；是否出现取决于执行分支", required: false, type: bool }
+    name: { description_zh: "C++ 实现返回的 name 字段；是否出现取决于执行分支", required: false, type: string }
+    partition_grid_size: { description_zh: "C++ 实现返回的 partition_grid_size 字段；是否出现取决于执行分支", required: false, type: number }
+    schema: { description_zh: "C++ 实现返回的 schema 字段；是否出现取决于执行分支", required: false, type: string }
+  }
+  state: defined
+}
+schema: uai.command_spec.v1
+status: active
+types: {}
+verification: {
+  assertions: [
+    { id: result_present, operator: exists, source: returns.created }
+    { id: state_readback_present, operator: exists, source: methods.state_readback.world_actors }
+  ]
+  failure_policy: fail_overall
+  methods: [
+    { id: result, kind: result_assertion }
+    { command: pcg_world_actor_query, id: state_readback, kind: command_readback, params_mapping: {} }
+  ]
+  required: true
+  state: defined
+}
+version: 1

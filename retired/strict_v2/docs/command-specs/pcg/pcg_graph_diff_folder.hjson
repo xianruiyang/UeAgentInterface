@@ -1,0 +1,78 @@
+authoring: { operation: diff, profile_ref: "contracts/field_contracts/pcg_graph.hjson", state: defined, type_id: pcg_graph }
+category: pcg
+command: pcg_graph_diff_folder
+deprecation: { reason: command_is_active, state: none }
+discovery: { aliases: [], keywords_en: [pcg, graph, diff, folder], keywords_zh: [pcg_graph_diff_folder], summary_en: "Diff one PCG Graph index.hjson against the current asset through shared semantics", summary_zh: "通过统一语义比较单个 PCG Graph index.hjson 与当前资产", tags: [pcg, authoring, diff, unified_contract] }
+errors: {
+  codes: [
+    { code: missing_folder_path, description_zh: "缺少 workspace 路径", retry_safe: true, stage: preflight, wire_match: exact }
+    { code: pcg_workspace_, description_zh: "统一 workspace 加载、身份或依赖检查失败", retry_safe: true, stage: preflight, wire_match: prefix }
+    { code: pcg_graph_, description_zh: "PCG 图解析、Apply、快照或验证失败", retry_safe: false, stage: execution, wire_match: prefix }
+    { code: object_operation_, description_zh: "共享反射 Apply 预检失败", retry_safe: true, stage: preflight, wire_match: prefix }
+  ]
+}
+evidence: {
+  docs: [
+    { path: "Plugins/UeAgentInterface/docs/commands/pcg/pcg_graph_diff_folder.md", purpose: "正式命令文档" }
+  ]
+  implementation: [
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Commands/PCG/UeAgentHttpServer_PCG.cpp", purpose: "HTTP 参数与结果薄适配器", symbol: CmdPCGGraphDiffFolder }
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Domains/PCG/Authoring/UeAgentPCGAuthoringApplyProvider.cpp", purpose: "统一 PCG authoring 权威实现" }
+  ]
+  tests: [
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterfaceTests/Private/UeAgentInterfacePCGAuthoringTests.cpp", purpose: "注册、单文件 round-trip、no-op 和回滚" }
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterfaceTests/Private/Smoke/PCG/UeAgentInterfacePCGSmokeTests.cpp", purpose: "真实命令链路 smoke" }
+  ]
+}
+execution: {
+  destructive: false
+  editor_state: required
+  game_thread: required
+  idempotent: true
+  kind: read_only
+  overwrite_behavior: none
+  pie_state: allowed
+  retry_safe: true
+  save_behavior: none
+  side_effects: []
+  ui_effect: none
+}
+maturity: verified
+params: {
+  constraints: [
+    { fields: [folder_path, input_folder, folder], kind: one_of }
+  ]
+  fields: {
+    asset_path: { default_state: none, description_zh: "可选目标身份断言", required: false, type: ue_asset_path }
+    folder: { default_state: none, description_zh: "folder_path 的兼容参数名；仅作为命令参数别名", required: false, type: string }
+    folder_path: {
+      default_state: none
+      description_zh: "统一 PCG Graph workspace 根目录"
+      path_semantics: { kind: filesystem_directory, must_exist: true, writable: false }
+      required: false
+      type: filesystem_path
+    }
+    input_folder: { default_state: none, description_zh: "folder_path 的输入别名", required: false, type: string }
+  }
+  state: defined
+}
+response: { artifact_fields: [], compact_fields: [asset_path, folder_path, different, no_op, change_count], failure_fields: [params.folder_path, params.asset_path], max_items_policy: { fields: [], mode: none } }
+returns: {
+  fields: {
+    asset_path: { description_zh: "目标资产", required: false, type: ue_asset_path }
+    change_count: { description_zh: "语义变化计数", required: true, type: integer }
+    different: { description_zh: "是否存在语义变化", required: true, type: bool }
+    error_code: { description_zh: "稳定错误码", required: false, type: string }
+    error_detail: { description_zh: "错误详情", required: false, type: string }
+    folder_path: { description_zh: "workspace 根目录", required: false, type: filesystem_path }
+    no_op: { description_zh: "是否无变化", required: true, type: bool }
+    schema: { description_zh: ue_agent_interface.pcg.graph_diff.v2, required: true, type: string }
+    would_create_asset: { description_zh: "是否创建资产", required: false, type: bool }
+  }
+  state: defined
+}
+schema: uai.command_spec.v1
+status: active
+types: {}
+verification: { reason: read_only_preflight_has_no_post_write_verification, state: none }
+version: 1

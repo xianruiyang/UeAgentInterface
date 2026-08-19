@@ -4,267 +4,114 @@
 
 #include "Commands/PaletteSearch/UeAgentPaletteSearchTypes.h"
 #include "Dom/JsonObject.h"
-#include "Dom/JsonValue.h"
+#include "Utilities/AuthoringCore/UeAgentAuthoringDomainRegistry.h"
+#include "Utilities/AuthoringCore/UeAgentAuthoringRegistrySnapshot.h"
+#include "Utilities/AuthoringOperationApply/UeAgentApplyInputContract.h"
+#include "Utilities/AuthoringWorkspaceApply/UeAgentApplyWorkspaceContract.h"
 
 namespace UeAgentPaletteSearch
 {
 namespace
 {
-	static void SetIdentityFields(const FCandidate& Candidate, const TSharedRef<FJsonObject>& Obj)
+	TArray<TSharedPtr<FJsonValue>> StringArray(const TArray<FString>& Values)
 	{
-		Obj->SetStringField(TEXT("name"), Candidate.Name);
-	}
-
-	static FString PathSeedFromCandidate(const FCandidate& Candidate)
-	{
-		if (!Candidate.ObjectPath.IsEmpty())
-		{
-			return Candidate.ObjectPath;
-		}
-		if (!Candidate.PackagePath.IsEmpty())
-		{
-			return Candidate.PackagePath;
-		}
-		if (Candidate.FullName.StartsWith(TEXT("/")))
-		{
-			return Candidate.FullName;
-		}
-		return FString();
-	}
-
-	static bool TrySplitOwnerMemberPath(const FString& FullName, FString& OutPath, FString& OutMemberName)
-	{
-		FString Left;
-		FString Right;
-		if (!FullName.Split(TEXT(":"), &Left, &Right))
-		{
-			return false;
-		}
-		Left.TrimStartAndEndInline();
-		Right.TrimStartAndEndInline();
-		if (Left.IsEmpty() || Right.IsEmpty())
-		{
-			return false;
-		}
-		OutPath = Left;
-		OutMemberName = Right;
-		return true;
-	}
-
-	static bool ShouldPreferPathSeed(const FCandidate& Candidate)
-	{
-		return
-			Candidate.Kind.Equals(TEXT("material_function_call")) ||
-			Candidate.Kind.Equals(TEXT("material_expression")) ||
-			Candidate.Kind.Equals(TEXT("actor_component")) ||
-			Candidate.Kind.Equals(TEXT("umg_widget")) ||
-			Candidate.Kind.Equals(TEXT("placeable_actor")) ||
-			Candidate.Kind.Equals(TEXT("niagara_module")) ||
-			Candidate.Kind.Equals(TEXT("niagara_dynamic_input")) ||
-			Candidate.Kind.Equals(TEXT("niagara_graph_function")) ||
-			Candidate.Kind.StartsWith(TEXT("blueprint_"));
-	}
-
-	static void SetMinimalIdentityFields(const FCandidate& Candidate, const TSharedRef<FJsonObject>& Obj)
-	{
-		FString OwnerPath;
-		FString MemberName;
-		if (Candidate.Kind.Equals(TEXT("blueprint_call_function")) && TrySplitOwnerMemberPath(Candidate.FullName, OwnerPath, MemberName))
-		{
-			Obj->SetStringField(TEXT("path"), OwnerPath);
-			Obj->SetStringField(TEXT("function_name"), MemberName);
-			return;
-		}
-
-		if (ShouldPreferPathSeed(Candidate))
-		{
-			const FString Path = PathSeedFromCandidate(Candidate);
-			if (!Path.IsEmpty())
-			{
-				Obj->SetStringField(TEXT("path"), Path);
-				return;
-			}
-		}
-
-		SetIdentityFields(Candidate, Obj);
-	}
-
-	static bool CatalogNameEquals(const FString& A, const FString& B)
-	{
-		return A.TrimStartAndEnd().Equals(B.TrimStartAndEnd(), ESearchCase::IgnoreCase);
-	}
-
-	static TSharedRef<FJsonObject> MakePosition(int32 X = 0, int32 Y = 0)
-	{
-		TSharedRef<FJsonObject> PositionObj = MakeShared<FJsonObject>();
-		PositionObj->SetNumberField(TEXT("x"), X);
-		PositionObj->SetNumberField(TEXT("y"), Y);
-		return PositionObj;
-	}
-
-	static TSharedRef<FJsonObject> MakeSpaceContract(const FString& Subject, int32 Dimension, const FString& Frame, const FString& Semantic)
-	{
-		TSharedRef<FJsonObject> ContractObj = MakeShared<FJsonObject>();
-		ContractObj->SetStringField(TEXT("subject"), Subject);
-		ContractObj->SetNumberField(TEXT("dimension"), Dimension);
-		ContractObj->SetStringField(TEXT("Fsemantic"), Frame);
-		ContractObj->SetStringField(TEXT("Fwrite"), Frame);
-		ContractObj->SetStringField(TEXT("Fread"), Frame);
-		ContractObj->SetStringField(TEXT("Fverify"), Frame);
-		ContractObj->SetStringField(TEXT("conversion_chain"), FString::Printf(TEXT("%s already expressed in %s; verify by UE readback after apply."), *Semantic, *Frame));
-		return ContractObj;
-	}
-
-	static TSharedRef<FJsonObject> MakeLayout(const FString& Space, const FString& Subject)
-	{
-		TSharedRef<FJsonObject> LayoutObj = MakeShared<FJsonObject>();
-		LayoutObj->SetStringField(TEXT("space"), Space);
-		LayoutObj->SetObjectField(TEXT("space_contract"), MakeSpaceContract(Subject, 2, Space, TEXT("graph editor layout coordinates")));
-		LayoutObj->SetObjectField(TEXT("position"), MakePosition());
-		return LayoutObj;
-	}
-
-	static TArray<TSharedPtr<FJsonValue>> EmptyArray()
-	{
-		return TArray<TSharedPtr<FJsonValue>>();
-	}
-
-	static TArray<TSharedPtr<FJsonValue>> MakeNumberArray(double A, double B, double C)
-	{
-		TArray<TSharedPtr<FJsonValue>> Values;
-		Values.Add(MakeShared<FJsonValueNumber>(A));
-		Values.Add(MakeShared<FJsonValueNumber>(B));
-		Values.Add(MakeShared<FJsonValueNumber>(C));
-		return Values;
-	}
-
-	static TSharedPtr<FJsonObject> MakeRoot(const FString& Route, const FString& Target, const FString& ProfilePath, const TSharedRef<FJsonObject>& Seed)
-	{
-		TSharedRef<FJsonObject> RootObj = MakeShared<FJsonObject>();
-		RootObj->SetStringField(TEXT("schema"), TEXT("uai.catalog_authoring_seed.v1"));
-		RootObj->SetStringField(TEXT("route"), Route);
-		RootObj->SetStringField(TEXT("target"), Target);
-		RootObj->SetStringField(TEXT("profile_path"), ProfilePath);
-		RootObj->SetBoolField(TEXT("readback_after_apply"), true);
-		RootObj->SetObjectField(TEXT("seed"), Seed);
-		return RootObj;
-	}
-
-	static FString MakeSafeObjectName(const FString& Name, const FString& Suffix)
-	{
-		FString Result;
-		for (const TCHAR Ch : Name)
-		{
-			if (FChar::IsAlnum(Ch) || Ch == TEXT('_'))
-			{
-				Result.AppendChar(Ch);
-			}
-		}
-		if (Result.IsEmpty())
-		{
-			Result = TEXT("New");
-		}
-		if (!Suffix.IsEmpty() && !Result.EndsWith(Suffix, ESearchCase::IgnoreCase))
-		{
-			Result += Suffix;
-		}
+		TArray<TSharedPtr<FJsonValue>> Result;
+		for (const FString& Value : Values) Result.Add(MakeShared<FJsonValueString>(Value));
 		return Result;
 	}
 
-	static TSharedPtr<FJsonObject> BuildNiagaraModuleSeed(const FCandidate& Candidate)
+	TSharedRef<FJsonObject> StringMap(const TMap<FString, FString>& Values)
 	{
-		TSharedRef<FJsonObject> SeedObj = MakeShared<FJsonObject>();
-		SetMinimalIdentityFields(Candidate, SeedObj);
-		return MakeRoot(TEXT("niagara_authoring_profile"), TEXT("niagara.modules[]"), TEXT("stages[].modules[]"), SeedObj);
-	}
-
-	static TSharedPtr<FJsonObject> BuildNiagaraDynamicInputSeed(const FCandidate& Candidate)
-	{
-		TSharedRef<FJsonObject> SeedObj = MakeShared<FJsonObject>();
-		SetMinimalIdentityFields(Candidate, SeedObj);
-		return MakeRoot(TEXT("niagara_authoring_profile"), TEXT("niagara.modules[].inputs[].value"), TEXT("stages[].modules[].inputs[].value"), SeedObj);
-	}
-
-	static TSharedPtr<FJsonObject> BuildNiagaraInputValueSourceSeed(const FCandidate& Candidate)
-	{
-		TSharedRef<FJsonObject> SeedObj = MakeShared<FJsonObject>();
-		SetMinimalIdentityFields(Candidate, SeedObj);
-		return MakeRoot(TEXT("niagara_authoring_profile"), TEXT("niagara.modules[].inputs[].value"), TEXT("stages[].modules[].inputs[].value"), SeedObj);
-	}
-
-	static TSharedPtr<FJsonObject> BuildGraphNodeSeed(const FCandidate& Candidate, const FString& Route, const FString& Target, const FString& ProfilePath, const FString& LayoutSpace)
-	{
-		TSharedRef<FJsonObject> SeedObj = MakeShared<FJsonObject>();
-		SetMinimalIdentityFields(Candidate, SeedObj);
-		return MakeRoot(Route, Target, ProfilePath, SeedObj);
-	}
-
-	static TSharedRef<FJsonObject> MakeDefaultActorTransform(const FString& ActorId)
-	{
-		TSharedRef<FJsonObject> TransformObj = MakeShared<FJsonObject>();
-		TransformObj->SetStringField(TEXT("space"), TEXT("ue_world"));
-		TransformObj->SetObjectField(TEXT("space_contract"), MakeSpaceContract(
-			ActorId,
-			3,
-			TEXT("ue_world"),
-			TEXT("default actor spawn transform in UE editor world coordinates")));
-		TransformObj->SetArrayField(TEXT("location"), MakeNumberArray(0.0, 0.0, 0.0));
-		TransformObj->SetArrayField(TEXT("rotation"), MakeNumberArray(0.0, 0.0, 0.0));
-		TransformObj->SetArrayField(TEXT("scale"), MakeNumberArray(1.0, 1.0, 1.0));
-		return TransformObj;
-	}
-
-	static TSharedPtr<FJsonObject> BuildPlaceableActorSeed(const FCandidate& Candidate)
-	{
-		TSharedRef<FJsonObject> SeedObj = MakeShared<FJsonObject>();
-		SetMinimalIdentityFields(Candidate, SeedObj);
-		return MakeRoot(TEXT("level_folder_package"), TEXT("level.actors.items[]"), TEXT("actors/items/<actor_id>/actor.json"), SeedObj);
+		TSharedRef<FJsonObject> Result = MakeShared<FJsonObject>();
+		for (const TPair<FString, FString>& Pair : Values) Result->SetStringField(Pair.Key, Pair.Value);
+		return Result;
 	}
 }
 
-TSharedPtr<FJsonObject> BuildJsonAuthoringPatch(const FCandidate& Candidate)
+bool BuildAuthoringProjection(
+	const FCandidate& Candidate,
+	TSharedPtr<FJsonObject>& OutSeed,
+	TSharedPtr<FJsonObject>& OutPlacement,
+	FString& OutError)
 {
-	if (Candidate.Kind.Equals(TEXT("niagara_module")))
+	OutSeed.Reset();
+	OutPlacement.Reset();
+	OutError.Reset();
+
+	UeAgentAuthoringDomainRegistry::FCatalogBinding Binding;
+	if (!UeAgentAuthoringDomainRegistry::FRegistry::Get().FindCatalogBinding(Candidate.Kind, Binding))
 	{
-		return BuildNiagaraModuleSeed(Candidate);
+		return true;
 	}
-	if (Candidate.Kind.Equals(TEXT("niagara_dynamic_input")))
+
+	UeAgentApplyWorkspaceContract::FContract WorkspaceContract;
+	if (!UeAgentApplyWorkspaceContract::FRegistry::Get().FindContract(Binding.WorkspaceContractId, WorkspaceContract))
 	{
-		return BuildNiagaraDynamicInputSeed(Candidate);
+		OutError = TEXT("catalog_workspace_contract_not_registered:") + Binding.WorkspaceContractId;
+		return false;
 	}
-	if (Candidate.Kind.Equals(TEXT("niagara_input_value_source")))
+	UeAgentApplyInputContract::FContract InputContract;
+	if (!UeAgentApplyInputContract::FRegistry::Get().FindContract(Binding.InputContractId, InputContract))
 	{
-		return BuildNiagaraInputValueSourceSeed(Candidate);
+		OutError = TEXT("catalog_input_contract_not_registered:") + Binding.InputContractId;
+		return false;
 	}
-	if (Candidate.Kind.Equals(TEXT("niagara_graph_function")))
+	const UeAgentApplyWorkspaceContract::FUnitDescriptor* Unit = WorkspaceContract.FindUnit(Binding.UnitId);
+	const FString ExpectedMergePolicy = Binding.MergeMode == TEXT("merge_object")
+		? FString(TEXT("replace"))
+		: Binding.MergeMode;
+	if (!Unit || Unit->ApplyContractRef != Binding.InputContractId
+		|| Unit->PathPattern != Binding.PathPattern || Unit->MergePolicy != ExpectedMergePolicy)
 	{
-		return BuildGraphNodeSeed(Candidate, TEXT("niagara_script_authoring_profile"), TEXT("niagara_script.graph.nodes[]"), TEXT("graph.nodes[]"), TEXT("niagara_graph_2d"));
+		OutError = TEXT("catalog_workspace_unit_contract_mismatch:") + Binding.Kind;
+		return false;
 	}
-	if (Candidate.Kind.Equals(TEXT("material_expression")) || Candidate.Kind.Equals(TEXT("material_function_call")))
+	TSharedRef<FJsonObject> Seed = MakeShared<FJsonObject>();
+	for (const FString& Field : Binding.RequiredSeedFields)
 	{
-		return BuildGraphNodeSeed(Candidate, TEXT("material_authoring_profile"), TEXT("material.graph.nodes[]"), TEXT("material_graph.nodes[]"), TEXT("material_graph_2d"));
+		const FString Value = Candidate.Identity.GetSelector(Field);
+		if (Value.IsEmpty())
+		{
+			OutError = TEXT("catalog_seed_selector_missing:") + Field;
+			return false;
+		}
+		Seed->SetStringField(Field, Value);
 	}
-	if (Candidate.Kind.StartsWith(TEXT("blueprint_")))
+	for (const FString& Field : Binding.OptionalSeedFields)
 	{
-		return BuildGraphNodeSeed(Candidate, TEXT("blueprint_umg_authoring_profile"), TEXT("blueprint.graph.nodes[]"), TEXT("blueprint_graphs[].nodes[]"), TEXT("event_graph_2d"));
+		const FString Value = Candidate.Identity.GetSelector(Field);
+		if (!Value.IsEmpty())
+		{
+			Seed->SetStringField(Field, Value);
+		}
 	}
-	if (Candidate.Kind.Equals(TEXT("actor_component")))
-	{
-		TSharedRef<FJsonObject> SeedObj = MakeShared<FJsonObject>();
-		SetMinimalIdentityFields(Candidate, SeedObj);
-		return MakeRoot(TEXT("blueprint_umg_authoring_profile"), TEXT("blueprint.components[]"), TEXT("components[]"), SeedObj);
-	}
-	if (Candidate.Kind.Equals(TEXT("umg_widget")))
-	{
-		TSharedRef<FJsonObject> SeedObj = MakeShared<FJsonObject>();
-		SetMinimalIdentityFields(Candidate, SeedObj);
-		return MakeRoot(TEXT("blueprint_umg_authoring_profile"), TEXT("umg.widget_tree.widgets[]"), TEXT("widget_tree.widgets[]"), SeedObj);
-	}
-	if (Candidate.Kind.Equals(TEXT("placeable_actor")))
-	{
-		return BuildPlaceableActorSeed(Candidate);
-	}
-	return nullptr;
+
+	TSharedPtr<FJsonObject> Snapshot;
+	if (!UeAgentAuthoringRegistrySnapshot::BuildSnapshot(Snapshot, OutError) || !Snapshot.IsValid()) return false;
+	TSharedRef<FJsonObject> Placement = MakeShared<FJsonObject>();
+	Placement->SetStringField(TEXT("schema"), TEXT("uai.catalog_placement.v2"));
+	Placement->SetStringField(TEXT("contract_hash"), Snapshot->GetStringField(TEXT("registry_hash")));
+	Placement->SetStringField(TEXT("kind"), Binding.Kind);
+	Placement->SetStringField(TEXT("domain_id"), Binding.DomainId);
+	Placement->SetStringField(TEXT("workspace_contract_id"), WorkspaceContract.ContractId);
+	Placement->SetStringField(TEXT("input_contract_id"), InputContract.ContractId);
+	Placement->SetStringField(TEXT("unit_id"), Binding.UnitId);
+	Placement->SetStringField(TEXT("path_pattern"), Binding.PathPattern);
+	Placement->SetStringField(TEXT("relative_path_template"), Binding.RelativePathTemplate);
+	Placement->SetArrayField(TEXT("exact_identity_fields"), StringArray(Binding.ExactIdentityFields));
+	Placement->SetStringField(TEXT("pointer_template"), Binding.PointerTemplate);
+	Placement->SetStringField(TEXT("merge_mode"), Binding.MergeMode);
+	Placement->SetObjectField(TEXT("operation_map"), StringMap(Binding.OperationMap));
+	Placement->SetObjectField(TEXT("seed_bindings"), StringMap(Binding.SeedBindings));
+	Placement->SetArrayField(TEXT("required_context"), StringArray(Binding.RequiredContext));
+	Placement->SetObjectField(TEXT("context_bindings"), StringMap(Binding.ContextBindings));
+	Placement->SetObjectField(TEXT("context_value_aliases"), StringMap(Binding.ContextValueAliases));
+	Placement->SetObjectField(TEXT("constant_bindings"), StringMap(Binding.ConstantBindings));
+	Placement->SetArrayField(TEXT("required_seed_fields"), StringArray(Binding.RequiredSeedFields));
+	Placement->SetArrayField(TEXT("optional_seed_fields"), StringArray(Binding.OptionalSeedFields));
+	OutSeed = Seed;
+	OutPlacement = Placement;
+	return true;
 }
 
 bool ResolveCatalogNameToCandidate(
@@ -288,17 +135,20 @@ bool ResolveCatalogNameToCandidate(
 	}
 
 	FSearchParams Params;
-	Params.CatalogType = CatalogType;
+	UeAgentAuthoringDomainRegistry::FCatalogBinding RequestedBinding;
+	Params.CatalogType = UeAgentAuthoringDomainRegistry::FRegistry::Get().FindCatalogBinding(
+		CatalogType, RequestedBinding)
+		? RequestedBinding.Kind
+		: CatalogType;
 	Params.SearchText = TrimmedName;
 	Params.SearchMode = TEXT("exact");
 	Params.Sort = TEXT("score");
 	Params.AssetPath = AssetPath;
 	Params.GraphName = GraphName;
-	Params.Limit = 50;
+	Params.Limit = 1;
 	Params.bIncludeItems = true;
 	Params.bIncludeGroups = false;
 	Params.bIncludeCategoryTree = false;
-	Params.bIncludeLegacyAuthoring = false;
 	Params.bIncludeDebugFields = false;
 
 	FSearchResult Result;
@@ -307,35 +157,25 @@ bool ResolveCatalogNameToCandidate(
 		return false;
 	}
 
-	TArray<FCandidate> ExactMatches;
-	for (const FCandidate& Candidate : Result.MatchingCandidates)
+	if (Result.bHasTargetResolution && Result.TargetResolution.IsResolved() && Result.MatchingCandidates.Num() == 1)
 	{
-		if (CatalogNameEquals(Candidate.Name, TrimmedName) ||
-			CatalogNameEquals(Candidate.DisplayName, TrimmedName) ||
-			CatalogNameEquals(Candidate.FullName, TrimmedName))
+		OutCandidate = Result.MatchingCandidates[0];
+		OutError.Reset();
+		return true;
+	}
+
+	OutError = Result.bHasTargetResolution && !Result.TargetResolution.ErrorCode.IsEmpty()
+		? Result.TargetResolution.ErrorCode
+		: FString(TEXT("target_not_found"));
+	if (Result.bHasTargetResolution && !Result.TargetResolution.Candidates.IsEmpty())
+	{
+		TArray<FString> CandidateKeys;
+		for (const UeAgentAuthoringTargetLocator::FDiagnosticCandidate& Candidate : Result.TargetResolution.Candidates)
 		{
-			ExactMatches.Add(Candidate);
+			CandidateKeys.Add(Candidate.Identity.CanonicalKey);
 		}
+		OutError += TEXT(":candidates=") + FString::Join(CandidateKeys, TEXT(","));
 	}
-
-	if (ExactMatches.IsEmpty())
-	{
-		OutError = FString::Printf(TEXT("catalog_name_not_found:%s:%s"), *CatalogType, *TrimmedName);
-		return false;
-	}
-
-	TArray<FCandidate> NameMatches = ExactMatches.FilterByPredicate([&TrimmedName](const FCandidate& Candidate)
-	{
-		return CatalogNameEquals(Candidate.Name, TrimmedName);
-	});
-	const TArray<FCandidate>& PreferredMatches = NameMatches.IsEmpty() ? ExactMatches : NameMatches;
-	if (PreferredMatches.Num() != 1)
-	{
-		OutError = FString::Printf(TEXT("catalog_name_ambiguous:%s:%s:%d"), *CatalogType, *TrimmedName, PreferredMatches.Num());
-		return false;
-	}
-
-	OutCandidate = PreferredMatches[0];
-	return true;
+	return false;
 }
 }

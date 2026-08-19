@@ -1,0 +1,70 @@
+authoring: { reason: command_has_no_registered_folder_authoring_profile, state: none }
+category: pcg
+command: pcg_data_asset_export_json
+deprecation: { reason: command_is_active, state: none }
+discovery: { aliases: [], keywords_en: [pcg, data, asset, export, json], keywords_zh: [pcg_data_asset_export_json], summary_en: "Execute pcg_data_asset_export_json with a verified implementation contract", summary_zh: "导出 `UPCGDataAsset` 摘要", tags: [pcg, p2-005] }
+errors: {
+  codes: [
+    { code: missing_asset_path, description_zh: "C++ 实现返回错误码 missing_asset_path", retry_safe: true, stage: preflight, wire_match: exact }
+    { code: pcg_data_asset_not_found, description_zh: "C++ 实现返回错误码 pcg_data_asset_not_found", retry_safe: false, stage: execution, wire_match: exact }
+  ]
+}
+evidence: {
+  docs: [
+    { path: "Plugins/UeAgentInterface/docs/commands/pcg/pcg_data_asset_export_json.md", purpose: "user documentation cross-check; C++ implementation remains authoritative" }
+  ]
+  implementation: [
+    { line_hint: 4506, path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Commands/PCG/UeAgentHttpServer_PCG.cpp", purpose: "command handler, parameter and return evidence", symbol: CmdPCGDataAssetExportJson }
+  ]
+  tests: [
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterfaceTests/Private/Smoke/PCG/UeAgentInterfacePCGSmokeTests.cpp", purpose: "smoke or negative-path evidence cross-checked for the verified contract" }
+  ]
+}
+execution: {
+  destructive: false
+  editor_state: required
+  game_thread: required
+  idempotent: true
+  kind: read_only
+  overwrite_behavior: none
+  pie_state: allowed
+  retry_safe: true
+  save_behavior: none
+  side_effects: []
+  ui_effect: none
+}
+maturity: verified
+params: {
+  constraints: [
+    { fields: [asset_path, data_asset], kind: one_of }
+  ]
+  fields: {
+    asset_path: { default_state: none, description_zh: "C++ 实现读取的 asset_path 参数", path_semantics: { access_scope: mounted_read, kind: ue_asset }, required: false, type: ue_asset_path }
+    data_asset: { default_state: none, description_zh: "C++ 实现读取的 data_asset 参数", required: false, type: string }
+    max_points_per_data: { default: 16, default_state: defined, description_zh: "C++ 实现读取的 max_points_per_data 参数", required: false, type: number }
+  }
+  state: defined
+}
+response: { artifact_fields: [data], compact_fields: [asset_path, data_count, point_data_count, total_point_count, name, category], failure_fields: [params.asset_path, params.data_asset], max_items_policy: { fields: [], mode: none } }
+returns: {
+  fields: {
+    asset_path: { description_zh: "C++ 实现返回的 asset_path 字段；是否出现取决于执行分支", required: false, type: ue_asset_path }
+    category: { description_zh: "C++ 实现返回的 category 字段；是否出现取决于执行分支", required: false, type: string }
+    data: { description_zh: "C++ 实现返回的 data 字段；是否出现取决于执行分支", item_type: json_value, required: false, type: array }
+    data_count: { description_zh: "C++ 实现返回的 data_count 字段；是否出现取决于执行分支", required: false, type: integer }
+    description: { description_zh: "C++ 实现返回的 description 字段；是否出现取决于执行分支", required: false, type: string }
+    expose_to_library: { description_zh: "C++ 实现返回的 expose_to_library 字段；是否出现取决于执行分支", required: false, type: bool }
+    name: { description_zh: "C++ 实现返回的 name 字段；是否出现取决于执行分支", required: false, type: string }
+    object_path: { description_zh: "C++ 实现返回的 object_path 字段；是否出现取决于执行分支", required: false, type: ue_object_path }
+    object_path_source: { description_zh: "C++ 实现返回的 object_path_source 字段；是否出现取决于执行分支", required: false, type: string }
+    point_data_count: { description_zh: "C++ 实现返回的 point_data_count 字段；是否出现取决于执行分支", required: false, type: integer }
+    schema: { description_zh: "C++ 实现返回的 schema 字段；是否出现取决于执行分支", required: false, type: string }
+    total_point_count: { description_zh: "C++ 实现返回的 total_point_count 字段；是否出现取决于执行分支", required: false, type: integer }
+  }
+  state: defined
+}
+schema: uai.command_spec.v1
+status: active
+types: {}
+verification: { reason: read_only_command_has_no_post_write_verification, state: none }
+version: 1

@@ -1,0 +1,92 @@
+authoring: { reason: command_has_no_registered_folder_authoring_profile, state: none }
+category: audio
+command: metasound_preview
+deprecation: { reason: command_is_active, state: none }
+discovery: { aliases: [], keywords_en: [metasound, preview, audio], keywords_zh: [metasound_preview], summary_en: "Execute metasound_preview with a verified implementation contract", summary_zh: "预览并设置输入参数", tags: [audio, p2-007] }
+errors: {
+  codes: [
+    { code: audio_device_unavailable, description_zh: "C++ 实现返回错误码 audio_device_unavailable", retry_safe: false, stage: execution, wire_match: exact }
+    { code: audio_peak_below_expected_min, description_zh: "C++ 实现返回错误码 audio_peak_below_expected_min", retry_safe: false, stage: execution, wire_match: exact }
+    { code: create_audio_component_failed, description_zh: "C++ 实现返回错误码 create_audio_component_failed", retry_safe: false, stage: execution, wire_match: exact }
+    { code: invalid_, description_zh: "C++ 实现返回错误码 invalid_", retry_safe: true, stage: preflight, wire_match: prefix }
+    { code: missing_sound, description_zh: "C++ 实现返回错误码 missing_sound", retry_safe: true, stage: preflight, wire_match: exact }
+    { code: sound_not_found, description_zh: "C++ 实现返回错误码 sound_not_found", retry_safe: false, stage: execution, wire_match: exact }
+    { code: world_not_found, description_zh: "C++ 实现返回错误码 world_not_found", retry_safe: false, stage: execution, wire_match: exact }
+  ]
+}
+evidence: {
+  docs: [
+    { path: "Plugins/UeAgentInterface/docs/commands/audio/metasound_preview.md", purpose: "user documentation cross-check; C++ implementation remains authoritative" }
+  ]
+  implementation: [
+    { line_hint: 465, path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Commands/Audio/UeAgentHttpServer_AudioMetaSound.cpp", purpose: "command handler, parameter and return evidence", symbol: CmdMetaSoundPreview }
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Commands/Audio/UeAgentHttpServer_AudioOpsCore.cpp", purpose: "transitive helper evidence used by the command handler" }
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Commands/Audio/UeAgentHttpServer_AudioRuntime.cpp", purpose: "transitive helper evidence used by the command handler" }
+  ]
+  tests: [
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterfaceTests/Private/Smoke/UeAgentInterfaceAudioSmokeTests.cpp", purpose: "smoke or negative-path evidence cross-checked for the verified contract" }
+  ]
+}
+execution: {
+  destructive: false
+  editor_state: required
+  game_thread: required
+  idempotent: false
+  kind: session_control
+  overwrite_behavior: none
+  pie_state: allowed
+  retry_safe: false
+  save_behavior: none
+  side_effects: [starts_runtime, stops_runtime, modifies_editor_session]
+  ui_effect: none
+}
+maturity: verified
+params: {
+  constraints: [
+    { fields: [sound, asset_path, sound_asset], kind: one_of }
+  ]
+  fields: {
+    asset_path: { default_state: none, description_zh: "C++ 实现读取的 asset_path 参数", path_semantics: { access_scope: mounted_read, kind: ue_asset }, required: false, type: ue_asset_path }
+    duration: { default_state: none, description_zh: "C++ 实现读取的 duration 参数", maximum: 30, minimum: 0, required: false, type: number }
+    expected_min_peak: { default: 0, default_state: defined, description_zh: "C++ 实现读取的 expected_min_peak 参数", minimum: 0, required: false, type: number }
+    sound: { default_state: none, description_zh: "C++ 实现读取的 sound 参数", path_semantics: { access_scope: mounted_read, kind: ue_asset }, required: false, type: ue_asset_path }
+    sound_asset: { default_state: none, description_zh: "C++ 实现读取的 sound_asset 参数", path_semantics: { access_scope: mounted_read, kind: ue_asset }, required: false, type: ue_asset_path }
+    stop_after_preview: { default: true, default_state: defined, description_zh: "C++ 实现读取的 stop_after_preview 参数", required: false, type: bool }
+    volume: { default_state: none, description_zh: "C++ 实现读取的 volume 参数", required: false, type: number }
+  }
+  state: defined
+}
+response: { artifact_fields: [coverage_report], compact_fields: [asset_path, active_wave_count, class, class_path, elapsed], failure_fields: [params.sound], max_items_policy: { fields: [], mode: none } }
+returns: {
+  fields: {
+    active_wave_count: { description_zh: "C++ 实现返回的 active_wave_count 字段；是否出现取决于执行分支", required: false, type: integer }
+    asset_path: { description_zh: "C++ 实现返回的 asset_path 字段；是否出现取决于执行分支", required: false, type: ue_asset_path }
+    class: { description_zh: "C++ 实现返回的 class 字段；是否出现取决于执行分支", required: false, type: string }
+    class_path: { description_zh: "C++ 实现返回的 class_path 字段；是否出现取决于执行分支", required: false, type: string }
+    coverage_report: { description_zh: "C++ 实现返回的 coverage_report 字段；是否出现取决于执行分支", required: false, type: json_value }
+    elapsed: { description_zh: "C++ 实现返回的 elapsed 字段；是否出现取决于执行分支", required: false, type: number }
+    object_path: { description_zh: "C++ 实现返回的 object_path 字段；是否出现取决于执行分支", required: false, type: ue_object_path }
+    observed_playing: { description_zh: "C++ 实现返回的 observed_playing 字段；是否出现取决于执行分支", required: false, type: bool }
+    peak_envelope: { description_zh: "C++ 实现返回的 peak_envelope 字段；是否出现取决于执行分支", required: false, type: number }
+    probe_passed: { description_zh: "C++ 实现返回的 probe_passed 字段；是否出现取决于执行分支", required: false, type: bool }
+    started: { description_zh: "C++ 实现返回的 started 字段；是否出现取决于执行分支", required: false, type: bool }
+    stopped: { description_zh: "C++ 实现返回的 stopped 字段；是否出现取决于执行分支", required: false, type: bool }
+  }
+  state: defined
+}
+schema: uai.command_spec.v1
+status: active
+types: {}
+verification: {
+  assertions: [
+    { id: result_present, operator: exists, source: returns.active_wave_count }
+    { expected: true, id: probe_passed_true, operator: equals, source: returns.probe_passed }
+  ]
+  failure_policy: fail_overall
+  methods: [
+    { id: result, kind: result_assertion }
+  ]
+  required: true
+  state: defined
+}
+version: 1

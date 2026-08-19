@@ -1,0 +1,88 @@
+authoring: { reason: command_has_no_registered_folder_authoring_profile, state: none }
+category: physics_baseline
+command: physics_component_query
+deprecation: { reason: command_is_active, state: none }
+discovery: { aliases: [], keywords_en: [physics, component, query, physics_baseline], keywords_zh: [physics_component_query], summary_en: "Execute physics_component_query with a verified implementation contract", summary_zh: "查询 Actor 上 PrimitiveComponent 的物理/碰撞/质量/材质/运行时状态", tags: [physics_baseline, p2-006] }
+errors: {
+  codes: [
+    { code: actor_not_found, description_zh: "C++ 实现返回错误码 actor_not_found", retry_safe: false, stage: execution, wire_match: exact }
+    { code: missing_actor_id, description_zh: "C++ 实现返回错误码 missing_actor_id", retry_safe: true, stage: preflight, wire_match: exact }
+    { code: no_editor_world, description_zh: "C++ 实现返回错误码 no_editor_world", retry_safe: false, stage: execution, wire_match: exact }
+    { code: no_geditor, description_zh: "C++ 实现返回错误码 no_geditor", retry_safe: false, stage: execution, wire_match: exact }
+    { code: physics_not_primitive_component, description_zh: "C++ 实现返回错误码 physics_not_primitive_component", retry_safe: false, stage: execution, wire_match: exact }
+  ]
+}
+evidence: {
+  docs: [
+    { path: "Plugins/UeAgentInterface/docs/commands/physics_baseline/physics_component_query.md", purpose: "user documentation cross-check; C++ implementation remains authoritative" }
+  ]
+  implementation: [
+    { line_hint: 624, path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Commands/Physics/UeAgentHttpServer_Physics.cpp", purpose: "command handler, parameter and return evidence", symbol: CmdPhysicsComponentQuery }
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Commands/Level/UeAgentHttpServer_Level_CaptureAndPersistence.cpp", purpose: "transitive helper evidence used by the command handler" }
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Server/UeAgentHttpServer.cpp", purpose: "transitive helper evidence used by the command handler" }
+  ]
+  tests: [
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterfaceTests/Private/Smoke/Physics/UeAgentInterfacePhysicsSmokeTests.cpp", purpose: "smoke or negative-path evidence cross-checked for the verified contract" }
+  ]
+}
+execution: {
+  destructive: false
+  editor_state: required
+  game_thread: required
+  idempotent: true
+  kind: read_only
+  overwrite_behavior: none
+  pie_state: allowed
+  retry_safe: true
+  save_behavior: none
+  side_effects: []
+  ui_effect: none
+}
+maturity: verified
+params: {
+  constraints: []
+  fields: {
+    actor_id: { default_state: none, description_zh: "C++ 实现读取的 actor_id 参数", required: true, type: string }
+    component: { default_state: none, description_zh: "C++ 实现读取的 component 参数", required: false, type: string }
+    include_collision_responses: { default: true, default_state: defined, description_zh: "C++ 实现读取的 include_collision_responses 参数", required: false, type: bool }
+    include_material: { default: true, default_state: defined, description_zh: "C++ 实现读取的 include_material 参数", required: false, type: bool }
+    include_runtime_state: { default: true, default_state: defined, description_zh: "C++ 实现读取的 include_runtime_state 参数", required: false, type: bool }
+  }
+  state: defined
+}
+response: { artifact_fields: [bounds, level_content_patch_hint, physical_material, responses], compact_fields: [actor_id, actor_name, angular_damping, awake, collision_enabled], failure_fields: [params.actor_id], max_items_policy: { fields: [], mode: none } }
+returns: {
+  fields: {
+    actor_id: { description_zh: "C++ 实现返回的 actor_id 字段；是否出现取决于执行分支", required: false, type: string }
+    actor_name: { description_zh: "C++ 实现返回的 actor_name 字段；是否出现取决于执行分支", required: false, type: string }
+    angular_damping: { description_zh: "C++ 实现返回的 angular_damping 字段；是否出现取决于执行分支", required: false, type: number }
+    awake: { description_zh: "C++ 实现返回的 awake 字段；是否出现取决于执行分支", required: false, type: bool }
+    bounds: { description_zh: "C++ 实现返回的 bounds 字段；是否出现取决于执行分支", required: false, type: json_value }
+    collision_enabled: { description_zh: "C++ 实现返回的 collision_enabled 字段；是否出现取决于执行分支", required: false, type: string }
+    collision_profile_name: { description_zh: "C++ 实现返回的 collision_profile_name 字段；是否出现取决于执行分支", required: false, type: string }
+    component: { description_zh: "C++ 实现返回的 component 字段；是否出现取决于执行分支", required: false, type: string }
+    component_class: { description_zh: "C++ 实现返回的 component_class 字段；是否出现取决于执行分支", required: false, type: string }
+    component_path: { description_zh: "C++ 实现返回的 component_path 字段；是否出现取决于执行分支", required: false, type: string }
+    enable_gravity: { description_zh: "C++ 实现返回的 enable_gravity 字段；是否出现取决于执行分支", required: false, type: bool }
+    is_primitive_component: { description_zh: "C++ 实现返回的 is_primitive_component 字段；是否出现取决于执行分支", required: false, type: bool }
+    level_content_patch_hint: { description_zh: "C++ 实现返回的 level_content_patch_hint 字段；是否出现取决于执行分支", required: false, type: json_value }
+    linear_damping: { description_zh: "C++ 实现返回的 linear_damping 字段；是否出现取决于执行分支", required: false, type: number }
+    mass_kg: { description_zh: "C++ 实现返回的 mass_kg 字段；是否出现取决于执行分支", required: false, type: number }
+    mass_override: { description_zh: "C++ 实现返回的 mass_override 字段；是否出现取决于执行分支", required: false, type: bool }
+    mass_override_kg: { description_zh: "C++ 实现返回的 mass_override_kg 字段；是否出现取决于执行分支", required: false, type: number }
+    mobility: { description_zh: "C++ 实现返回的 mobility 字段；是否出现取决于执行分支", required: false, type: string }
+    object_type: { description_zh: "C++ 实现返回的 object_type 字段；是否出现取决于执行分支", required: false, type: string }
+    physical_material: { description_zh: "C++ 实现返回的 physical_material 字段；是否出现取决于执行分支", required: false, type: json_value }
+    responses: { description_zh: "C++ 实现返回的 responses 字段；是否出现取决于执行分支", required: false, type: json_value }
+    schema: { description_zh: "C++ 实现返回的 schema 字段；是否出现取决于执行分支", required: false, type: string }
+    simulate_physics: { description_zh: "C++ 实现返回的 simulate_physics 字段；是否出现取决于执行分支", required: false, type: bool }
+    sleeping: { description_zh: "C++ 实现返回的 sleeping 字段；是否出现取决于执行分支", required: false, type: bool }
+    use_ccd: { description_zh: "C++ 实现返回的 use_ccd 字段；是否出现取决于执行分支", required: false, type: bool }
+  }
+  state: defined
+}
+schema: uai.command_spec.v1
+status: active
+types: {}
+verification: { reason: read_only_command_has_no_post_write_verification, state: none }
+version: 1

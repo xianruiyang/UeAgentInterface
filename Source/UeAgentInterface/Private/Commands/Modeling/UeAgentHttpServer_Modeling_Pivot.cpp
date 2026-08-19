@@ -100,8 +100,8 @@ namespace UeAgentModelingPivot
 	static void AppendToolProperty(
 		TSharedPtr<FJsonObject>& Params,
 		const FString& PropertySet,
-		const FString& PropertyName,
-		const FString& ValueText)
+		const FString& PropertyPath,
+		bool bValue)
 	{
 		if (!Params.IsValid())
 		{
@@ -117,8 +117,11 @@ namespace UeAgentModelingPivot
 
 		TSharedPtr<FJsonObject> Entry = MakeShared<FJsonObject>();
 		Entry->SetStringField(TEXT("property_set"), PropertySet);
-		Entry->SetStringField(TEXT("property_name"), PropertyName);
-		Entry->SetStringField(TEXT("value_text"), ValueText);
+		Entry->SetStringField(TEXT("property_path"), PropertyPath);
+		Entry->SetStringField(TEXT("value_kind"), TEXT("bool"));
+		TSharedPtr<FJsonObject> Value = MakeShared<FJsonObject>();
+		Value->SetBoolField(TEXT("literal"), bValue);
+		Entry->SetObjectField(TEXT("value"), Value);
 		ToolProperties.Add(MakeShared<FJsonValueObject>(Entry));
 		Params->SetArrayField(TEXT("tool_properties"), ToolProperties);
 	}
@@ -1214,114 +1217,6 @@ namespace UeAgentModelingPivot
 		return true;
 	}
 
-	static TSharedPtr<FJsonObject> MakeVoxelAnchorJson(const FVector& AnchorLocal)
-	{
-		TSharedPtr<FJsonObject> Obj = UeAgentModelingOps::MakeVectorJson(AnchorLocal);
-		Obj->SetStringField(TEXT("space"), TEXT("grid_local"));
-		return Obj;
-	}
-
-	static bool ResolveVoxelPivotAnchor(
-		const TSharedPtr<FJsonObject>& Params,
-		const UDynamicMeshComponent* Component,
-		const UeAgentModelingVoxelGrid::FVoxelGridSession& Session,
-		const FBox& LocalBounds,
-		FVector& OutPivotComponentLocal,
-		FVector& OutAnchorLocal,
-		FString& OutPointSource,
-		FString& OutError)
-	{
-		if (HasCustomPoint(Params))
-		{
-			const TSharedPtr<FJsonValue>* PointValue = nullptr;
-			if (!Params.IsValid())
-			{
-				OutError = TEXT("missing_params");
-				return false;
-			}
-			PointValue = UeAgentJsonDiagnostics::FindFieldValue(Params, TEXT("custom_point"));
-			if (!PointValue)
-			{
-				PointValue = UeAgentJsonDiagnostics::FindFieldValue(Params, TEXT("pivot_point"));
-				if (!PointValue)
-				{
-					OutError = TEXT("custom_point_required");
-					return false;
-				}
-			}
-
-			FVector Point = FVector::ZeroVector;
-			if (!UeAgentJsonDiagnostics::TryReadVectorValue(*PointValue, Point))
-			{
-				OutError = TEXT("invalid_custom_point");
-				return false;
-			}
-
-			FString Space;
-			const TSharedPtr<FJsonObject> PointObject = (*PointValue).IsValid() ? (*PointValue)->AsObject() : nullptr;
-			if (PointObject.IsValid())
-			{
-				PointObject->TryGetStringField(TEXT("space"), Space);
-			}
-			if (Space.IsEmpty())
-			{
-				Params->TryGetStringField(TEXT("custom_point_space"), Space);
-			}
-			if (Space.IsEmpty())
-			{
-				Params->TryGetStringField(TEXT("pivot_point_space"), Space);
-			}
-			if (Space.IsEmpty())
-			{
-				Space = TEXT("component_local");
-			}
-			Space = Space.TrimStartAndEnd().ToLower();
-
-			if (Space == TEXT("grid") || Space == TEXT("grid_local") || Space == TEXT("voxel_grid"))
-			{
-				OutAnchorLocal = Point;
-				OutPivotComponentLocal = UeAgentModelingVoxelGrid::GridToComponentLocal(Session, Point);
-			}
-			else if (Space == TEXT("component_local") || Space == TEXT("local") || Space == TEXT("mesh_local"))
-			{
-				OutPivotComponentLocal = Point;
-				OutAnchorLocal = UeAgentModelingVoxelGrid::ComponentLocalToGrid(Session, Point);
-			}
-			else if (Space == TEXT("world") || Space == TEXT("world_space"))
-			{
-				if (!Component)
-				{
-					OutError = TEXT("component_required_for_world_custom_point");
-					return false;
-				}
-				OutPivotComponentLocal = Component->GetComponentTransform().InverseTransformPosition(Point);
-				OutAnchorLocal = UeAgentModelingVoxelGrid::ComponentLocalToGrid(Session, OutPivotComponentLocal);
-			}
-			else
-			{
-				OutError = TEXT("unsupported_voxel_pivot_point_space");
-				return false;
-			}
-
-			OutPointSource = TEXT("custom_point");
-			return true;
-		}
-
-		FString Preset;
-		if (!Params.IsValid() || (!Params->TryGetStringField(TEXT("preset"), Preset) && !Params->TryGetStringField(TEXT("pivot_preset"), Preset)))
-		{
-			OutError = TEXT("missing_pivot_preset_or_custom_point");
-			return false;
-		}
-		if (!ResolvePresetPoint(Preset, Component, LocalBounds, OutPivotComponentLocal, OutError))
-		{
-			return false;
-		}
-		OutAnchorLocal = UeAgentModelingVoxelGrid::ComponentLocalToGrid(Session, OutPivotComponentLocal);
-		OutPointSource = TEXT("preset");
-		return true;
-	}
-
 	static bool ShouldUseDynamicMeshBackend(const TSharedPtr<FJsonObject>& Params)
 	{
 		return HasCustomPoint(Params) || (Params.IsValid() && (Params->HasField(TEXT("preset")) || Params->HasField(TEXT("pivot_preset"))));
@@ -1379,12 +1274,12 @@ namespace UeAgentModelingPivot
 		{
 			if (BoundsSpace == TEXT("world") || BoundsSpace == TEXT("world_space"))
 			{
-				AppendToolProperty(Params, TEXT("UEditPivotToolActionPropertySet"), TEXT("bUseWorldBox"), TEXT("True"));
+				AppendToolProperty(Params, TEXT("UEditPivotToolActionPropertySet"), TEXT("bUseWorldBox"), true);
 				OutNormalized->SetStringField(TEXT("bounds_space"), TEXT("world"));
 			}
 			else if (BoundsSpace == TEXT("object") || BoundsSpace == TEXT("object_local") || BoundsSpace == TEXT("component_local") || BoundsSpace == TEXT("asset_local") || BoundsSpace == TEXT("local"))
 			{
-				AppendToolProperty(Params, TEXT("UEditPivotToolActionPropertySet"), TEXT("bUseWorldBox"), TEXT("False"));
+				AppendToolProperty(Params, TEXT("UEditPivotToolActionPropertySet"), TEXT("bUseWorldBox"), false);
 				OutNormalized->SetStringField(TEXT("bounds_space"), BoundsSpace == TEXT("asset_local") ? TEXT("asset_local") : TEXT("component_local"));
 			}
 			else
@@ -1397,7 +1292,7 @@ namespace UeAgentModelingPivot
 		bool bApplyToAllLods = true;
 		if (Params.IsValid() && Params->TryGetBoolField(TEXT("apply_to_all_lods"), bApplyToAllLods))
 		{
-			AppendToolProperty(Params, TEXT("UEditPivotToolProperties"), TEXT("bApplyToAllLODs"), bApplyToAllLods ? TEXT("True") : TEXT("False"));
+			AppendToolProperty(Params, TEXT("UEditPivotToolProperties"), TEXT("bApplyToAllLODs"), bApplyToAllLods);
 			OutNormalized->SetBoolField(TEXT("apply_to_all_lods"), bApplyToAllLods);
 		}
 
@@ -1494,150 +1389,6 @@ bool FUeAgentHttpServer::CmdModelingSetPivot(const FUeAgentRequestContext& Ctx, 
 					if (UDynamicMeshComponent* DynamicMeshComponent = Cast<UDynamicMeshComponent>(PrimitiveComponent))
 					{
 						FString VoxelGridId;
-						if (UeAgentModelingVoxelGrid::TryGetGridIdFromActor(Actor, VoxelGridId))
-						{
-							using namespace UeAgentModelingVoxelGrid;
-
-							FVoxelGridSession* VoxelSession = FindActiveSessionForActor(Actor);
-							bool bTemporarySession = false;
-							FString VoxelSessionId;
-							if (!VoxelSession)
-							{
-								FVoxelGridSession LoadedSession;
-								LoadedSession.SessionId = MakeNewSessionId();
-								VoxelSessionId = LoadedSession.SessionId;
-								LoadedSession.GridId = VoxelGridId;
-								LoadedSession.Actor = Actor;
-								LoadedSession.SidecarPath = GetVoxelGridSidecarPath(VoxelGridId);
-								if (!LoadSidecar(LoadedSession, OutError))
-								{
-									return false;
-								}
-								bTemporarySession = true;
-								GVoxelGridSessions.Add(VoxelSessionId, MoveTemp(LoadedSession));
-								VoxelSession = GVoxelGridSessions.Find(VoxelSessionId);
-							}
-							else
-							{
-								VoxelSessionId = VoxelSession->SessionId;
-							}
-
-							if (!VoxelSession)
-							{
-								OutError = TEXT("voxel_grid_session_prepare_failed");
-								return false;
-							}
-							if (VoxelSession->OccupiedCells.Num() == 0)
-							{
-								OutError = TEXT("voxel_grid_has_no_occupied_cells");
-								if (bTemporarySession)
-								{
-									GVoxelGridSessions.Remove(VoxelSessionId);
-								}
-								return false;
-							}
-
-							FVoxelGridSession BeforeSession = *VoxelSession;
-							FBox BeforeLocalBounds = ComputeLocalCellBounds(BeforeSession.OccupiedCells, BeforeSession.CellSize, BeforeSession.AnchorLocal);
-							if (BeforeLocalBounds.IsValid == 0)
-							{
-								OutError = TEXT("invalid_voxel_grid_bounds");
-								if (bTemporarySession)
-								{
-									GVoxelGridSessions.Remove(VoxelSessionId);
-								}
-								return false;
-							}
-
-							FVector PivotComponentLocal = FVector::ZeroVector;
-							FVector NewAnchorLocal = FVector::ZeroVector;
-							FString PointSource;
-							if (!ResolveVoxelPivotAnchor(EffectiveParams, DynamicMeshComponent, *VoxelSession, BeforeLocalBounds, PivotComponentLocal, NewAnchorLocal, PointSource, OutError))
-							{
-								if (bTemporarySession)
-								{
-									GVoxelGridSessions.Remove(VoxelSessionId);
-								}
-								return false;
-							}
-							Normalized->SetStringField(TEXT("point_source"), PointSource);
-
-							const FVector OldAnchorLocal = VoxelSession->AnchorLocal;
-							const int64 OldRevision = VoxelSession->Revision;
-							const bool bOldDirty = VoxelSession->bDirty;
-							VoxelSession->AnchorLocal = NewAnchorLocal;
-							++VoxelSession->Revision;
-							VoxelSession->bDirty = true;
-
-							TSharedPtr<FJsonObject> ApplyParams = MakeShared<FJsonObject>();
-							ApplyParams->SetStringField(TEXT("session_id"), VoxelSession->SessionId);
-							ApplyParams->SetStringField(TEXT("mesh_build"), TEXT("exposed_faces"));
-							ApplyParams->SetBoolField(TEXT("keep_session"), !bTemporarySession);
-							const TSharedPtr<FJsonObject>* CollisionObject = nullptr;
-							if (EffectiveParams->TryGetObjectField(TEXT("collision"), CollisionObject) && CollisionObject && CollisionObject->IsValid())
-							{
-								ApplyParams->SetObjectField(TEXT("collision"), *CollisionObject);
-							}
-
-							FUeAgentRequestContext ApplyCtx = Ctx;
-							ApplyCtx.Params = ApplyParams;
-							TSharedPtr<FJsonObject> ApplyData;
-							FString ApplyError;
-							if (!CmdModelingVoxelGridApply(ApplyCtx, ApplyData, ApplyError))
-							{
-								VoxelSession->AnchorLocal = OldAnchorLocal;
-								VoxelSession->Revision = OldRevision;
-								VoxelSession->bDirty = bOldDirty;
-								if (bTemporarySession)
-								{
-									GVoxelGridSessions.Remove(VoxelSessionId);
-								}
-								OutError = ApplyError;
-								return false;
-							}
-
-							FVoxelGridSession AfterSession = BeforeSession;
-							AfterSession.AnchorLocal = NewAnchorLocal;
-							FBox AfterLocalBounds = ComputeLocalCellBounds(AfterSession.OccupiedCells, AfterSession.CellSize, AfterSession.AnchorLocal);
-							const FBox BeforeWorldBounds = TransformBoxBy(BeforeLocalBounds, MakeActorTransformFromGridAndAnchor(BeforeSession));
-							const FBox AfterWorldBounds = TransformBoxBy(AfterLocalBounds, MakeActorTransformFromGridAndAnchor(AfterSession));
-							const FVector WorldOriginDelta = (AfterWorldBounds.IsValid != 0 && BeforeWorldBounds.IsValid != 0) ? (AfterWorldBounds.GetCenter() - BeforeWorldBounds.GetCenter()) : FVector::ZeroVector;
-							const FVector WorldExtentDelta = (AfterWorldBounds.IsValid != 0 && BeforeWorldBounds.IsValid != 0) ? (AfterWorldBounds.GetExtent() - BeforeWorldBounds.GetExtent()) : FVector::ZeroVector;
-							const bool bGeometryPreserved = WorldOriginDelta.Size() < 0.01 && WorldExtentDelta.Size() < 0.01;
-
-							bool bCollisionPreserved = true;
-							const TSharedPtr<FJsonObject>* CollisionReadback = nullptr;
-							if (ApplyData.IsValid() && ApplyData->TryGetObjectField(TEXT("collision"), CollisionReadback) && CollisionReadback && CollisionReadback->IsValid())
-							{
-								bool bCoverageMatches = true;
-								if ((*CollisionReadback)->TryGetBoolField(TEXT("coverage_matches_occupied_cells"), bCoverageMatches))
-								{
-									bCollisionPreserved = bCoverageMatches;
-								}
-							}
-
-							OutData->SetStringField(TEXT("pivot_backend"), TEXT("voxel_grid"));
-							OutData->SetObjectField(TEXT("normalized_request"), Normalized);
-							OutData->SetObjectField(TEXT("target"), MakeComponentTargetJson(Actor, DynamicMeshComponent, TEXT("dynamic_mesh_component")));
-							OutData->SetObjectField(TEXT("frame"), MakeFrameJson(TEXT("component_local")));
-							OutData->SetStringField(TEXT("grid_id"), VoxelGridId);
-							OutData->SetStringField(TEXT("session_id"), ApplyData.IsValid() && ApplyData->HasField(TEXT("session_id")) ? ApplyData->GetStringField(TEXT("session_id")) : VoxelSessionId);
-							OutData->SetObjectField(TEXT("anchor_before"), MakeVoxelAnchorJson(OldAnchorLocal));
-							OutData->SetObjectField(TEXT("anchor_after"), MakeVoxelAnchorJson(NewAnchorLocal));
-							OutData->SetObjectField(TEXT("pivot_point_component_local"), UeAgentModelingOps::MakeVectorJson(PivotComponentLocal));
-							OutData->SetObjectField(TEXT("pivot_point_grid_local"), MakeVoxelAnchorJson(NewAnchorLocal));
-							OutData->SetObjectField(TEXT("pivot_before"), MakePivotReadbackJson(BeforeLocalBounds));
-							OutData->SetObjectField(TEXT("pivot_after"), MakePivotReadbackJson(AfterLocalBounds));
-							OutData->SetObjectField(TEXT("world_bounds_origin_delta"), UeAgentModelingOps::MakeVectorJson(WorldOriginDelta));
-							OutData->SetObjectField(TEXT("world_bounds_extent_delta"), UeAgentModelingOps::MakeVectorJson(WorldExtentDelta));
-							OutData->SetBoolField(TEXT("geometry_preserved"), bGeometryPreserved);
-							OutData->SetBoolField(TEXT("collision_preserved"), bCollisionPreserved);
-							OutData->SetNumberField(TEXT("revision"), ApplyData.IsValid() && ApplyData->HasField(TEXT("revision")) ? ApplyData->GetNumberField(TEXT("revision")) : OldRevision + 1);
-							OutData->SetObjectField(TEXT("voxel_apply"), ApplyData);
-							OutData->SetBoolField(TEXT("accepted"), true);
-							return true;
-						}
-
 						FBox LocalBounds;
 						if (!BuildDynamicMeshLocalBounds(DynamicMeshComponent, LocalBounds))
 						{
@@ -1714,9 +1465,6 @@ bool FUeAgentHttpServer::CmdModelingSetPivot(const FUeAgentRequestContext& Ctx, 
 		}
 		OutData->SetObjectField(TEXT("selection"), SelectionData);
 	}
-
-	EffectiveParams->SetStringField(TEXT("__uai_wrapper_command"), TEXT("modeling_set_pivot"));
-	EffectiveParams->SetStringField(TEXT("tool_identifier"), TEXT("BeginEditPivotTool"));
 
 	FUeAgentRequestContext WrappedCtx = Ctx;
 	WrappedCtx.Params = EffectiveParams;

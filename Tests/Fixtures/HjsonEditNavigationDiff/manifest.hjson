@@ -1,0 +1,37 @@
+{
+  schema: uai.hjson_edit_navigation_diff_fixture.v1
+  fixture_id: hjson_edit_navigation_diff_v1
+  development_truth: "Plugins/UeAgentInterface/Tests/Fixtures/HjsonEditNavigationDiff"
+  atomic_baseline_test_id: UAI.HjsonDialect.Python.AtomicWrite
+  cases: [
+    {
+      case_id: layout_leaf_patch
+      input: "layout/input.hjson"
+      expected_after_patch: "layout/expected_after_patch.hjson"
+      target_pointer: "/owner/fields/0/value"
+      replacement: true
+      oracle: exact_source_text
+    }
+    {
+      case_id: contained_parent_reference
+      workspace_root: "reference/workspace"
+      target_path: "collections/A/item.hjson"
+      expected_projection: "reference/expected_projection.hjson"
+      oracle: resolved_final_path_and_projection
+    }
+    {
+      case_id: owner_scoped_diff
+      before: "diff/before.hjson"
+      after: "diff/after.hjson"
+      expected: "diff/expected_entries.hjson"
+      oracle: owner_scoped_identity_and_pointers
+    }
+  ]
+  required_catalog_test_ids: [
+    UAI.HjsonEdit.Manifest.DesignOracle
+    UAI.HjsonEdit.Python.AtomicPatchFailure
+    UAI.HjsonEdit.Python.LayoutPreservingPatch
+    UAI.HjsonEdit.Python.ContainedParentReference
+    UAI.HjsonEdit.Python.OwnerScopedDiff
+  ]
+}

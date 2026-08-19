@@ -1,0 +1,78 @@
+authoring: { reason: level_command_is_not_a_registered_folder_operation, state: none }
+category: level_content
+command: level_content_repair_json
+deprecation: { reason: command_is_active, state: none }
+discovery: { aliases: [], keywords_en: [level, content, repair, json, level_content], keywords_zh: [level_content_repair_json], summary_en: "Execute level_content_repair_json with a verified implementation contract", summary_zh: "诊断并可安全修复 folder/托管内容残留", tags: [level_content, p2-002] }
+errors: {
+  codes: [
+    { code: no_editor_world, description_zh: "C++ 实现返回错误码 no_editor_world", retry_safe: false, stage: execution, wire_match: exact }
+    { code: no_geditor, description_zh: "C++ 实现返回错误码 no_geditor", retry_safe: false, stage: execution, wire_match: exact }
+  ]
+}
+evidence: {
+  docs: [
+    { path: "Plugins/UeAgentInterface/docs/commands/level_content/level_content_repair_json.md", purpose: "user documentation cross-check; C++ implementation remains authoritative" }
+  ]
+  implementation: [
+    { line_hint: 38, path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Commands/LevelContentJson/UeAgentLevelContentJsonCommands_Tail.cpp", purpose: "command handler, parameter and return evidence", symbol: CmdLevelContentRepairJson }
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Commands/Level/UeAgentHttpServer_Level_CaptureAndPersistence.cpp", purpose: "transitive helper evidence used by the command handler" }
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Commands/LevelContentJson/UeAgentLevelContentJsonCore.cpp", purpose: "transitive helper evidence used by the command handler" }
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Commands/LevelContentJson/UeAgentLevelContentJsonDiff.cpp", purpose: "transitive helper evidence used by the command handler" }
+  ]
+  tests: [
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterfaceTests/Private/Smoke/LevelContentJson/UeAgentInterfaceLevelContentJsonSmokeTests.cpp", purpose: "smoke or negative-path evidence cross-checked for the verified contract" }
+  ]
+}
+execution: {
+  destructive: true
+  editor_state: required
+  game_thread: required
+  idempotent: false
+  kind: write
+  overwrite_behavior: none
+  pie_state: allowed
+  retry_safe: false
+  save_behavior: none
+  side_effects: [modifies_level]
+  ui_effect: none
+}
+maturity: verified
+params: {
+  constraints: []
+  fields: {
+    apply_safe: { default: false, default_state: defined, description_zh: "C++ 实现读取的 apply_safe 参数", required: false, type: bool }
+    execute: { default: false, default_state: defined, description_zh: "C++ 实现读取的 execute 参数", required: false, type: bool }
+    folder_path_prefix: { default_state: none, description_zh: "C++ 实现读取的 folder_path_prefix 参数", required: false, type: string }
+    folder_root: { default_state: none, description_zh: "C++ 实现读取的 folder_root 参数", required: false, type: string }
+  }
+  state: defined
+}
+response: { artifact_fields: [], compact_fields: [apply_safe, cleanup_empty_folders, cleanup_empty_folders_error, cleanup_empty_folders_ok, diagnostic_count, diagnostics], failure_fields: [], max_items_policy: { fields: [], mode: none } }
+returns: {
+  fields: {
+    apply_safe: { description_zh: "C++ 实现返回的 apply_safe 字段；是否出现取决于执行分支", required: false, type: bool }
+    cleanup_empty_folders: { description_zh: "C++ 实现返回的 cleanup_empty_folders 字段；是否出现取决于执行分支", required: false, type: json_value }
+    cleanup_empty_folders_error: { description_zh: "C++ 实现返回的 cleanup_empty_folders_error 字段；是否出现取决于执行分支", required: false, type: string }
+    cleanup_empty_folders_ok: { description_zh: "C++ 实现返回的 cleanup_empty_folders_ok 字段；是否出现取决于执行分支", required: false, type: bool }
+    diagnostic_count: { description_zh: "C++ 实现返回的 diagnostic_count 字段；是否出现取决于执行分支", required: false, type: integer }
+    diagnostics: { description_zh: "C++ 实现返回的 diagnostics 字段；是否出现取决于执行分支", item_type: json_value, required: false, type: array }
+    feature_gates: { description_zh: "C++ 实现返回的 feature_gates 字段；是否出现取决于执行分支", required: false, type: json_value }
+    schema: { description_zh: "C++ 实现返回的 schema 字段；是否出现取决于执行分支", required: false, type: string }
+  }
+  state: defined
+}
+schema: uai.command_spec.v1
+status: active
+types: {}
+verification: {
+  assertions: [
+    { id: result_present, operator: exists, source: returns.apply_safe }
+  ]
+  failure_policy: fail_overall
+  methods: [
+    { id: result, kind: result_assertion }
+  ]
+  required: true
+  state: defined
+}
+version: 1

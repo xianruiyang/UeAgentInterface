@@ -1,0 +1,177 @@
+authoring: { operation: apply, profile_ref: "contracts/field_contracts/level.hjson", state: defined, type_id: level }
+category: level_content
+command: level_content_apply_json
+deprecation: { reason: command_is_active, state: none }
+discovery: { aliases: [], keywords_en: [level, content, apply, json, level_content], keywords_zh: [level_content_apply_json], summary_en: "Execute level_content_apply_json with a verified implementation contract", summary_zh: "应用 create/upsert/patch/delete/clone、组织关系、任务和验证。", tags: [level_content, p2-002] }
+errors: {
+  codes: [
+    { code: actor_already_exists, description_zh: "C++ 实现返回错误码 actor_already_exists", retry_safe: false, stage: execution, wire_match: exact }
+    { code: actor_class_not_found, description_zh: "C++ 实现返回错误码 actor_class_not_found", retry_safe: false, stage: execution, wire_match: exact }
+    { code: actor_not_found_for_patch, description_zh: "C++ 实现返回错误码 actor_not_found_for_patch", retry_safe: false, stage: execution, wire_match: exact }
+    { code: actor_protected, description_zh: "C++ 实现返回错误码 actor_protected", retry_safe: false, stage: execution, wire_match: exact }
+    { code: actor_unresolved, description_zh: "C++ 实现返回错误码 actor_unresolved", retry_safe: false, stage: execution, wire_match: exact }
+    { code: align_actor_not_found, description_zh: "C++ 实现返回错误码 align_actor_not_found", retry_safe: false, stage: execution, wire_match: exact }
+    { code: allow_destructive_required, description_zh: "C++ 实现返回错误码 allow_destructive_required", retry_safe: true, stage: preflight, wire_match: exact }
+    { code: attachment_actor_not_found, description_zh: "C++ 实现返回错误码 attachment_actor_not_found", retry_safe: false, stage: execution, wire_match: exact }
+    { code: clone_failed, description_zh: "C++ 实现返回错误码 clone_failed", retry_safe: false, stage: execution, wire_match: exact }
+    { code: clone_missing_source_actor, description_zh: "C++ 实现返回错误码 clone_missing_source_actor", retry_safe: true, stage: preflight, wire_match: exact }
+    { code: clone_missing_target_id, description_zh: "C++ 实现返回错误码 clone_missing_target_id", retry_safe: true, stage: preflight, wire_match: exact }
+    { code: clone_source_actor_not_found, description_zh: "C++ 实现返回错误码 clone_source_actor_not_found", retry_safe: false, stage: execution, wire_match: exact }
+    { code: clone_target_already_exists, description_zh: "C++ 实现返回错误码 clone_target_already_exists", retry_safe: false, stage: execution, wire_match: exact }
+    { code: delete_scope_requires_folder_or_managed_tag, description_zh: "C++ 实现返回错误码 delete_scope_requires_folder_or_managed_tag", retry_safe: false, stage: execution, wire_match: exact }
+    { code: editor_actor_subsystem_unavailable, description_zh: "C++ 实现返回错误码 editor_actor_subsystem_unavailable", retry_safe: false, stage: execution, wire_match: exact }
+    { code: hjson_file_not_found, description_zh: "C++ 实现返回错误码 hjson_file_not_found", retry_safe: false, stage: execution, wire_match: prefix }
+    { code: hjson_file_required, description_zh: "C++ 实现返回错误码 hjson_file_required", retry_safe: true, stage: preflight, wire_match: prefix }
+    { code: invalid_, description_zh: "C++ 实现返回错误码 invalid_", retry_safe: true, stage: preflight, wire_match: prefix }
+    { code: invalid_delete_policy, description_zh: "C++ 实现返回错误码 invalid_delete_policy", retry_safe: true, stage: preflight, wire_match: exact }
+    { code: invalid_mode, description_zh: "C++ 实现返回错误码 invalid_mode", retry_safe: true, stage: preflight, wire_match: exact }
+    { code: json_parse_failed, description_zh: "C++ 实现返回错误码 json_parse_failed", retry_safe: false, stage: execution, wire_match: exact }
+    { code: missing_level_content_json, description_zh: "C++ 实现返回错误码 missing_level_content_json", retry_safe: true, stage: preflight, wire_match: exact }
+    { code: missing_params, description_zh: "C++ 实现返回错误码 missing_params", retry_safe: true, stage: preflight, wire_match: exact }
+    { code: no_editor_world, description_zh: "C++ 实现返回错误码 no_editor_world", retry_safe: false, stage: execution, wire_match: exact }
+    { code: no_geditor, description_zh: "C++ 实现返回错误码 no_geditor", retry_safe: false, stage: execution, wire_match: exact }
+    { code: operation_actor_not_found, description_zh: "C++ 实现返回错误码 operation_actor_not_found", retry_safe: false, stage: execution, wire_match: exact }
+    { code: spawn_failed, description_zh: "C++ 实现返回错误码 spawn_failed", retry_safe: false, stage: execution, wire_match: exact }
+    { code: unsupported_resource_kind, description_zh: "C++ 实现返回错误码 unsupported_resource_kind", retry_safe: false, stage: execution, wire_match: exact }
+  ]
+}
+evidence: {
+  docs: [
+    { path: "Plugins/UeAgentInterface/docs/commands/level_content/level_content_apply_json.md", purpose: "user documentation cross-check; C++ implementation remains authoritative" }
+  ]
+  implementation: [
+    { line_hint: 80, path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Commands/LevelContentJson/UeAgentLevelContentJsonCommands_Tail.cpp", purpose: "command handler, parameter and return evidence", symbol: CmdLevelContentApplyJson }
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Commands/Level/UeAgentCommandSafety.h", purpose: "transitive helper evidence used by the command handler" }
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Commands/Level/UeAgentHttpServer_Level_CaptureAndPersistence.cpp", purpose: "transitive helper evidence used by the command handler" }
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Commands/LevelContentJson/UeAgentLevelContentJsonApply.cpp", purpose: "transitive helper evidence used by the command handler" }
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Commands/LevelContentJson/UeAgentLevelContentJsonCommands.cpp", purpose: "transitive helper evidence used by the command handler" }
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Commands/LevelContentJson/UeAgentLevelContentJsonCore.cpp", purpose: "transitive helper evidence used by the command handler" }
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Commands/LevelContentJson/UeAgentLevelContentJsonValidatePlan.cpp", purpose: "transitive helper evidence used by the command handler" }
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Commands/LevelTopology/UeAgentHttpServer_LevelTopology.cpp", purpose: "transitive helper evidence used by the command handler" }
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Utilities/UeAgentStructuredAuthoringIO.cpp", purpose: "transitive helper evidence used by the command handler" }
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Utilities/UeAgentStructuredHjsonFormatter.cpp", purpose: "transitive helper evidence used by the command handler" }
+  ]
+  tests: [
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterfaceTests/Private/Smoke/LevelContentJson/UeAgentInterfaceLevelContentJsonSmokeTests.cpp", purpose: "smoke or negative-path evidence cross-checked for the verified contract" }
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterfaceTests/Private/Smoke/LevelTopology/UeAgentInterfaceLevelTopologySmokeTests.cpp", purpose: "smoke or negative-path evidence cross-checked for the verified contract" }
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterfaceTests/Private/Smoke/Physics/UeAgentInterfacePhysicsSmokeTests.cpp", purpose: "smoke or negative-path evidence cross-checked for the verified contract" }
+  ]
+}
+execution: {
+  destructive: true
+  editor_state: required
+  game_thread: required
+  idempotent: false
+  kind: write
+  overwrite_behavior: none
+  pie_state: allowed
+  retry_safe: false
+  save_behavior: caller_controlled
+  side_effects: [modifies_level]
+  ui_effect: none
+}
+maturity: verified
+params: {
+  constraints: [
+    { fields: [actors, content, content_file, content_json, file_path, input_file, json, json_file, json_text, level_content, operations, resources, schema, target_json, target_json_text], kind: one_of }
+  ]
+  fields: {
+    actors: { default_state: none, description_zh: "C++ 实现读取的 actors 参数", required: false, type: json_value }
+    allow_destructive: { default: false, default_state: defined, description_zh: "C++ 实现读取的 allow_destructive 参数", required: false, type: bool }
+    allow_python_gc_risk: { default: false, default_state: defined, description_zh: "C++ 实现读取的 allow_python_gc_risk 参数", required: false, type: bool }
+    content: { default_state: none, description_zh: "C++ 实现读取的 content 参数", required: false, type: json_value }
+    content_file: {
+      default_state: none
+      description_zh: "C++ 实现读取的 content_file 参数"
+      path_semantics: { kind: filesystem_file, must_exist: false, writable: false }
+      required: false
+      type: filesystem_path
+    }
+    content_json: { default_state: none, description_zh: "C++ 实现读取的 content_json 参数", required: false, type: string }
+    delete_policy: { default_state: none, description_zh: "C++ 实现读取的 delete_policy 参数", required: false, type: string }
+    dry_run: { default: true, default_state: defined, description_zh: "C++ 实现读取的 dry_run 参数", required: false, type: bool }
+    file_path: { default_state: none, description_zh: "C++ 实现读取的 file_path 参数", required: false, type: string }
+    input_file: {
+      default_state: none
+      description_zh: "C++ 实现读取的 input_file 参数"
+      path_semantics: { kind: filesystem_file, must_exist: false, writable: false }
+      required: false
+      type: filesystem_path
+    }
+    json: { default_state: none, description_zh: "C++ 实现读取的 json 参数", required: false, type: json_value }
+    json_file: {
+      default_state: none
+      description_zh: "C++ 实现读取的 json_file 参数"
+      path_semantics: { kind: filesystem_file, must_exist: false, writable: false }
+      required: false
+      type: filesystem_path
+    }
+    json_text: { default_state: none, description_zh: "C++ 实现读取的 json_text 参数", required: false, type: string }
+    level_content: { default_state: none, description_zh: "C++ 实现读取的 level_content 参数", required: false, type: json_value }
+    mode: { default: upsert, default_state: defined, description_zh: "C++ 实现读取的 mode 参数", required: false, type: string }
+    operations: { default_state: none, description_zh: "C++ 实现读取的 operations 参数", required: false, type: json_value }
+    preflight: { default: true, default_state: defined, description_zh: "C++ 实现读取的 preflight 参数", required: false, type: bool }
+    resources: { default_state: none, description_zh: "C++ 实现读取的 resources 参数", required: false, type: json_value }
+    save_level: { default: false, default_state: defined, description_zh: "C++ 实现读取的 save_level 参数", required: false, type: bool }
+    schema: { default_state: none, description_zh: "C++ 实现读取的 schema 参数", required: false, type: json_value }
+    scope: { default_state: none, description_zh: "C++ 实现读取的 scope 参数", required: false, type: json_value }
+    target_json: { default_state: none, description_zh: "C++ 实现读取的 target_json 参数", required: false, type: json_value }
+    target_json_text: { default_state: none, description_zh: "C++ 实现读取的 target_json_text 参数", required: false, type: string }
+    transaction: { default: true, default_state: defined, description_zh: "C++ 实现读取的 transaction 参数", required: false, type: bool }
+    validate_after_apply: { default: true, default_state: defined, description_zh: "C++ 实现读取的 validate_after_apply 参数", required: false, type: bool }
+  }
+  state: defined
+}
+response: { artifact_fields: [], compact_fields: [success, status, saved, world, actor_only, allow_destructive], failure_fields: [params.json_file], max_items_policy: { fields: [], mode: none } }
+returns: {
+  fields: {
+    actor_only: { description_zh: "C++ 实现返回的 actor_only 字段；是否出现取决于执行分支", required: false, type: bool }
+    allow_destructive: { description_zh: "C++ 实现返回的 allow_destructive 字段；是否出现取决于执行分支", required: false, type: bool }
+    attachment_results: { description_zh: "C++ 实现返回的 attachment_results 字段；是否出现取决于执行分支", item_type: json_value, required: false, type: array }
+    destructive: { description_zh: "C++ 实现返回的 destructive 字段；是否出现取决于执行分支", required: false, type: bool }
+    dry_run: { description_zh: "C++ 实现返回的 dry_run 字段；是否出现取决于执行分支", required: false, type: bool }
+    error: { description_zh: "C++ 实现返回的 error 字段；是否出现取决于执行分支", required: false, type: string }
+    evidence: { description_zh: "C++ 实现返回的 evidence 字段；是否出现取决于执行分支", required: false, type: json_value }
+    evidence_results: { description_zh: "C++ 实现返回的 evidence_results 字段；是否出现取决于执行分支", required: false, type: json_value }
+    feature_gates: { description_zh: "C++ 实现返回的 feature_gates 字段；是否出现取决于执行分支", required: false, type: json_value }
+    operation_results: { description_zh: "C++ 实现返回的 operation_results 字段；是否出现取决于执行分支", item_type: json_value, required: false, type: array }
+    resource_results: { description_zh: "C++ 实现返回的 resource_results 字段；是否出现取决于执行分支", item_type: json_value, required: false, type: array }
+    results: { description_zh: "C++ 实现返回的 results 字段；是否出现取决于执行分支", item_type: json_value, required: false, type: array }
+    rollback_attempted: { description_zh: "C++ 实现返回的 rollback_attempted 字段；是否出现取决于执行分支", required: false, type: bool }
+    rollback_succeeded: { description_zh: "C++ 实现返回的 rollback_succeeded 字段；是否出现取决于执行分支", required: false, type: bool }
+    save_level_data: { description_zh: "C++ 实现返回的 save_level_data 字段；是否出现取决于执行分支", required: false, type: json_value }
+    save_level_error: { description_zh: "C++ 实现返回的 save_level_error 字段；是否出现取决于执行分支", required: false, type: string }
+    save_level_ok: { description_zh: "C++ 实现返回的 save_level_ok 字段；是否出现取决于执行分支", required: false, type: bool }
+    saved: { description_zh: "C++ 实现返回的 saved 字段；是否出现取决于执行分支", required: false, type: bool }
+    schema: { description_zh: "C++ 实现返回的 schema 字段；是否出现取决于执行分支", required: false, type: string }
+    source: { description_zh: "C++ 实现返回的 source 字段；是否出现取决于执行分支", required: false, type: string }
+    status: { description_zh: "C++ 实现返回的 status 字段；是否出现取决于执行分支", required: false, type: string }
+    step_count: { description_zh: "C++ 实现返回的 step_count 字段；是否出现取决于执行分支", required: false, type: integer }
+    steps: { description_zh: "C++ 实现返回的 steps 字段；是否出现取决于执行分支", item_type: json_value, required: false, type: array }
+    success: { description_zh: "C++ 实现返回的 success 字段；是否出现取决于执行分支", required: false, type: bool }
+    task_results: { description_zh: "C++ 实现返回的 task_results 字段；是否出现取决于执行分支", item_type: json_value, required: false, type: array }
+    transaction: { description_zh: "C++ 实现返回的 transaction 字段；是否出现取决于执行分支", required: false, type: bool }
+    validate_after_apply: { description_zh: "C++ 实现返回的 validate_after_apply 字段；是否出现取决于执行分支", required: false, type: bool }
+    validation: { description_zh: "C++ 实现返回的 validation 字段；是否出现取决于执行分支", required: false, type: json_value }
+    validation_results: { description_zh: "C++ 实现返回的 validation_results 字段；是否出现取决于执行分支", item_type: json_value, required: false, type: array }
+    world: { description_zh: "C++ 实现返回的 world 字段；是否出现取决于执行分支", required: false, type: json_value }
+  }
+  state: defined
+}
+schema: uai.command_spec.v1
+status: active
+types: {}
+verification: {
+  assertions: [
+    { id: result_present, operator: exists, source: returns.success }
+    { id: state_readback_present, operator: exists, source: methods.state_readback.resources }
+  ]
+  failure_policy: fail_overall
+  methods: [
+    { id: result, kind: result_assertion }
+    { command: level_content_query_json, id: state_readback, kind: command_readback, params_mapping: {} }
+  ]
+  required: true
+  state: defined
+}
+version: 1

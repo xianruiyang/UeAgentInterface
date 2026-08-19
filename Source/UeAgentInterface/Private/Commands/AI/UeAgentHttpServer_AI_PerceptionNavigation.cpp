@@ -408,7 +408,7 @@ bool FUeAgentHttpServer::CmdNavigationExportConfigJson(const FUeAgentRequestCont
 	if (!OutputFile.TrimStartAndEnd().IsEmpty())
 	{
 		FString SavedPath;
-		if (!UeAgentAIOps::SaveJsonFile(OutputFile, OutData, SavedPath, OutError))
+		if (!UeAgentAIOps::SaveAuthoringFile(OutputFile, OutData, SavedPath, OutError))
 		{
 			return false;
 		}

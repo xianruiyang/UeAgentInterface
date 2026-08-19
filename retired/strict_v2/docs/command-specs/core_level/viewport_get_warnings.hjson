@@ -1,0 +1,62 @@
+authoring: { reason: command_has_no_registered_folder_authoring_profile, state: none }
+category: core_level
+command: viewport_get_warnings
+deprecation: { reason: command_is_active, state: none }
+discovery: { aliases: [], keywords_en: [viewport, get, warnings, core_level], keywords_zh: [viewport_get_warnings], summary_en: "Execute viewport_get_warnings with a verified implementation contract", summary_zh: "读取当前 Level Viewport renderer warning/probe", tags: [core_level, p2-002] }
+errors: {
+  codes: [
+    { code: no_editor_world, description_zh: "C++ 实现返回错误码 no_editor_world", retry_safe: false, stage: execution, wire_match: exact }
+    { code: no_geditor, description_zh: "C++ 实现返回错误码 no_geditor", retry_safe: false, stage: execution, wire_match: exact }
+  ]
+}
+evidence: {
+  docs: [
+    { path: "Plugins/UeAgentInterface/docs/commands/core_level/viewport_get_warnings.md", purpose: "user documentation cross-check; C++ implementation remains authoritative" }
+  ]
+  implementation: [
+    { line_hint: 88, path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Commands/Level/UeAgentHttpServer_Level_ViewportTrace.cpp", purpose: "command handler, parameter and return evidence", symbol: CmdViewportGetWarnings }
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Commands/Level/UeAgentHttpServer_Level_CaptureAndPersistence.cpp", purpose: "transitive helper evidence used by the command handler" }
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Server/UeAgentHttpServer.cpp", purpose: "transitive helper evidence used by the command handler" }
+  ]
+  tests: [
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterfaceTests/Private/Smoke/UeAgentInterfaceSmoke_LevelViewportModeling.cpp", purpose: "smoke or negative-path evidence cross-checked for the verified contract" }
+  ]
+}
+execution: {
+  destructive: false
+  editor_state: required
+  game_thread: required
+  idempotent: true
+  kind: read_only
+  overwrite_behavior: none
+  pie_state: allowed
+  retry_safe: true
+  save_behavior: none
+  side_effects: []
+  ui_effect: none
+}
+maturity: verified
+params: {
+  constraints: []
+  fields: { include_suppressed: { default: false, default_state: defined, description_zh: "C++ 实现读取的 include_suppressed 参数", required: false, type: bool } }
+  state: defined
+}
+response: { artifact_fields: [], compact_fields: [world, display_gates, renderer_probe, schema, suppressed_warning_count, suppressed_warnings], failure_fields: [], max_items_policy: { fields: [], mode: none } }
+returns: {
+  fields: {
+    display_gates: { description_zh: "C++ 实现返回的 display_gates 字段；是否出现取决于执行分支", required: false, type: json_value }
+    renderer_probe: { description_zh: "C++ 实现返回的 renderer_probe 字段；是否出现取决于执行分支", required: false, type: json_value }
+    schema: { description_zh: "C++ 实现返回的 schema 字段；是否出现取决于执行分支", required: false, type: string }
+    suppressed_warning_count: { description_zh: "C++ 实现返回的 suppressed_warning_count 字段；是否出现取决于执行分支", required: false, type: integer }
+    suppressed_warnings: { description_zh: "C++ 实现返回的 suppressed_warnings 字段；是否出现取决于执行分支", item_type: json_value, required: false, type: array }
+    warning_count: { description_zh: "C++ 实现返回的 warning_count 字段；是否出现取决于执行分支", required: false, type: integer }
+    warnings: { description_zh: "C++ 实现返回的 warnings 字段；是否出现取决于执行分支", item_type: json_value, required: false, type: array }
+    world: { description_zh: "C++ 实现返回的 world 字段；是否出现取决于执行分支", required: false, type: json_value }
+  }
+  state: defined
+}
+schema: uai.command_spec.v1
+status: active
+types: {}
+verification: { reason: read_only_command_has_no_post_write_verification, state: none }
+version: 1

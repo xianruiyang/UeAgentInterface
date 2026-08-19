@@ -1,0 +1,134 @@
+authoring: { reason: command_has_no_registered_folder_authoring_profile, state: none }
+category: niagara_system
+command: niagara_apply_stack_issue_fix
+deprecation: { reason: command_is_active, state: none }
+discovery: { aliases: [], keywords_en: [niagara, apply, stack, issue, fix, niagara_system], keywords_zh: [niagara_apply_stack_issue_fix], summary_en: "Execute niagara_apply_stack_issue_fix with a verified implementation contract", summary_zh: "应用 Stack issue 提供的修复项", tags: [niagara_system, p2-005] }
+errors: {
+  codes: [
+    { code: asset_editor_subsystem_unavailable, description_zh: "C++ 实现返回错误码 asset_editor_subsystem_unavailable", retry_safe: false, stage: execution, wire_match: exact }
+    { code: asset_is_not_niagara, description_zh: "C++ 实现返回错误码 asset_is_not_niagara", retry_safe: false, stage: execution, wire_match: exact }
+    { code: asset_is_not_niagara_system, description_zh: "C++ 实现返回错误码 asset_is_not_niagara_system", retry_safe: false, stage: execution, wire_match: exact }
+    { code: asset_not_found, description_zh: "C++ 实现返回错误码 asset_not_found", retry_safe: false, stage: execution, wire_match: exact }
+    { code: compile_failed_after_apply, description_zh: "C++ 实现返回错误码 compile_failed_after_apply", retry_safe: false, stage: execution, wire_match: exact }
+    { code: compile_incomplete_after_apply, description_zh: "C++ 实现返回错误码 compile_incomplete_after_apply", retry_safe: false, stage: execution, wire_match: exact }
+    { code: editor_unavailable, description_zh: "C++ 实现返回错误码 editor_unavailable", retry_safe: false, stage: execution, wire_match: exact }
+    { code: emitter_asset_not_found, description_zh: "C++ 实现返回错误码 emitter_asset_not_found", retry_safe: false, stage: execution, wire_match: exact }
+    { code: invalid_emitter_id, description_zh: "C++ 实现返回错误码 invalid_emitter_id", retry_safe: true, stage: preflight, wire_match: exact }
+    { code: invalid_emitter_version, description_zh: "C++ 实现返回错误码 invalid_emitter_version", retry_safe: true, stage: preflight, wire_match: exact }
+    { code: invalid_module_node_guid, description_zh: "C++ 实现返回错误码 invalid_module_node_guid", retry_safe: true, stage: preflight, wire_match: exact }
+    { code: invalid_severity_filter, description_zh: "C++ 实现返回错误码 invalid_severity_filter", retry_safe: true, stage: preflight, wire_match: exact }
+    { code: missing_asset_path, description_zh: "C++ 实现返回错误码 missing_asset_path", retry_safe: true, stage: preflight, wire_match: exact }
+    { code: missing_emitter_asset_path, description_zh: "C++ 实现返回错误码 missing_emitter_asset_path", retry_safe: true, stage: preflight, wire_match: exact }
+    { code: missing_emitter_graph_source, description_zh: "C++ 实现返回错误码 missing_emitter_graph_source", retry_safe: true, stage: preflight, wire_match: exact }
+    { code: missing_emitter_version_data, description_zh: "C++ 实现返回错误码 missing_emitter_version_data", retry_safe: true, stage: preflight, wire_match: exact }
+    { code: missing_stack_issue_selector, description_zh: "C++ 实现返回错误码 missing_stack_issue_selector", retry_safe: true, stage: preflight, wire_match: exact }
+    { code: multiple_matching_stack_issue_fixes, description_zh: "C++ 实现返回错误码 multiple_matching_stack_issue_fixes", retry_safe: false, stage: execution, wire_match: exact }
+    { code: niagara_editor_not_opened, description_zh: "C++ 实现返回错误码 niagara_editor_not_opened", retry_safe: false, stage: execution, wire_match: exact }
+    { code: niagara_editor_open_failed, description_zh: "C++ 实现返回错误码 niagara_editor_open_failed", retry_safe: false, stage: execution, wire_match: exact }
+    { code: niagara_system_view_model_create_failed, description_zh: "C++ 实现返回错误码 niagara_system_view_model_create_failed", retry_safe: false, stage: execution, wire_match: exact }
+    { code: no_matching_stack_issue_fix, description_zh: "C++ 实现返回错误码 no_matching_stack_issue_fix", retry_safe: false, stage: execution, wire_match: exact }
+    { code: save_asset_failed, description_zh: "C++ 实现返回错误码 save_asset_failed", retry_safe: false, stage: execution, wire_match: exact }
+    { code: selected_stack_issue_fix_has_no_delegate, description_zh: "C++ 实现返回错误码 selected_stack_issue_fix_has_no_delegate", retry_safe: false, stage: execution, wire_match: exact }
+    { code: unsafe_niagara_system_graph_missing_output_nodes, description_zh: "C++ 实现返回错误码 unsafe_niagara_system_graph_missing_output_nodes", retry_safe: true, stage: preflight, wire_match: prefix }
+  ]
+}
+evidence: {
+  docs: [
+    { path: "Plugins/UeAgentInterface/docs/commands/niagara_system/niagara_apply_stack_issue_fix.md", purpose: "user documentation cross-check; C++ implementation remains authoritative" }
+  ]
+  implementation: [
+    { line_hint: 6646, path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Commands/Niagara/UeAgentHttpServer_Niagara.cpp", purpose: "command handler, parameter and return evidence", symbol: CmdNiagaraApplyStackIssueFix }
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Commands/Niagara/UeAgentHttpServer_Niagara_UtilityCore.inl", purpose: "transitive helper evidence used by the command handler" }
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Server/UeAgentHttpServer.cpp", purpose: "transitive helper evidence used by the command handler" }
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Utilities/UeAgentJsonDiagnostics.cpp", purpose: "transitive helper evidence used by the command handler" }
+  ]
+  tests: [
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterfaceTests/Private/Smoke/UeAgentInterfaceSmoke_Coverage.cpp", purpose: "smoke or negative-path evidence cross-checked for the verified contract" }
+  ]
+}
+execution: {
+  destructive: true
+  editor_state: required
+  game_thread: required
+  idempotent: false
+  kind: write
+  overwrite_behavior: none
+  pie_state: allowed
+  retry_safe: false
+  save_behavior: caller_controlled
+  side_effects: [modifies_asset, modifies_editor_session, opens_window]
+  ui_effect: opens_editor
+}
+maturity: verified
+params: {
+  constraints: []
+  fields: {
+    allow_link_fix: { default: false, default_state: defined, description_zh: "C++ 实现读取的 allow_link_fix 参数", required: false, type: bool }
+    apply_first_match: { default: false, default_state: defined, description_zh: "C++ 实现读取的 apply_first_match 参数", required: false, type: bool }
+    asset_path: { default_state: none, description_zh: "C++ 实现读取的 asset_path 参数", path_semantics: { access_scope: project_write, kind: ue_asset }, required: true, type: ue_asset_path }
+    compile_after_apply: { default: true, default_state: defined, description_zh: "C++ 实现读取的 compile_after_apply 参数", required: false, type: bool }
+    emitter_id: { default_state: none, description_zh: "C++ 实现读取的 emitter_id 参数", required: false, type: string }
+    emitter_index: { default: 0, default_state: defined, description_zh: "C++ 实现读取的 emitter_index 参数", required: false, type: integer }
+    emitter_name: { default_state: none, description_zh: "C++ 实现读取的 emitter_name 参数", required: false, type: string }
+    entry_path_contains: { default_state: none, description_zh: "C++ 实现读取的 entry_path_contains 参数", required: false, type: string }
+    fix_description_contains: { default_state: none, description_zh: "C++ 实现读取的 fix_description_contains 参数", required: false, type: string }
+    fix_index: { default: 0, default_state: defined, description_zh: "C++ 实现读取的 fix_index 参数", required: false, type: integer }
+    fix_unique_identifier: { default_state: none, description_zh: "C++ 实现读取的 fix_unique_identifier 参数", required: false, type: string }
+    force_compile: { default: true, default_state: defined, description_zh: "C++ 实现读取的 force_compile 参数", required: false, type: bool }
+    include_emitters: { default: true, default_state: defined, description_zh: "C++ 实现读取的 include_emitters 参数", required: false, type: bool }
+    include_system_scope: { default: true, default_state: defined, description_zh: "C++ 实现读取的 include_system_scope 参数", required: false, type: bool }
+    issue_unique_identifier: { default_state: none, description_zh: "C++ 实现读取的 issue_unique_identifier 参数", required: false, type: string }
+    long_description_contains: { default_state: none, description_zh: "C++ 实现读取的 long_description_contains 参数", required: false, type: string }
+    module_node_guid: { default_state: none, description_zh: "C++ 实现读取的 module_node_guid 参数", required: false, type: string }
+    open_editor_if_needed: { default: false, default_state: defined, description_zh: "C++ 实现读取的 open_editor_if_needed 参数", required: false, type: bool }
+    prefer_existing_view_model: { default: true, default_state: defined, description_zh: "C++ 实现读取的 prefer_existing_view_model 参数", required: false, type: bool }
+    save_after_apply: { default: false, default_state: defined, description_zh: "C++ 实现读取的 save_after_apply 参数", required: false, type: bool }
+    scope_type: { default_state: none, description_zh: "C++ 实现读取的 scope_type 参数", required: false, type: string }
+    severity_filter: { default: all, default_state: defined, description_zh: "C++ 实现读取的 severity_filter 参数", required: false, type: string }
+    short_description_contains: { default_state: none, description_zh: "C++ 实现读取的 short_description_contains 参数", required: false, type: string }
+    wait_for_complete: { default: true, default_state: defined, description_zh: "C++ 实现读取的 wait_for_complete 参数", required: false, type: bool }
+  }
+  state: defined
+}
+response: { artifact_fields: [applied_issue, compile_log, matches, system_refresh], compact_fields: [saved, asset_path, applied, compilation_complete, compilation_requested], failure_fields: [params.asset_path], max_items_policy: { fields: [], mode: none } }
+returns: {
+  fields: {
+    applied: { description_zh: "C++ 实现返回的 applied 字段；是否出现取决于执行分支", required: false, type: bool }
+    applied_issue: { description_zh: "C++ 实现返回的 applied_issue 字段；是否出现取决于执行分支", required: false, type: json_value }
+    asset_path: { description_zh: "C++ 实现返回的 asset_path 字段；是否出现取决于执行分支", required: false, type: ue_asset_path }
+    compilation_complete: { description_zh: "C++ 实现返回的 compilation_complete 字段；是否出现取决于执行分支", required: false, type: bool }
+    compilation_requested: { description_zh: "C++ 实现返回的 compilation_requested 字段；是否出现取决于执行分支", required: false, type: bool }
+    compile_after_apply: { description_zh: "C++ 实现返回的 compile_after_apply 字段；是否出现取决于执行分支", required: false, type: bool }
+    compile_has_error: { description_zh: "C++ 实现返回的 compile_has_error 字段；是否出现取决于执行分支", required: false, type: bool }
+    compile_log: { description_zh: "C++ 实现返回的 compile_log 字段；是否出现取决于执行分支", required: false, type: json_value }
+    force_compile: { description_zh: "C++ 实现返回的 force_compile 字段；是否出现取决于执行分支", required: false, type: bool }
+    has_outstanding_compilation_requests: { description_zh: "C++ 实现返回的 has_outstanding_compilation_requests 字段；是否出现取决于执行分支", required: false, type: bool }
+    matches: { description_zh: "C++ 实现返回的 matches 字段；是否出现取决于执行分支", item_type: json_value, required: false, type: array }
+    matching_issue_count: { description_zh: "C++ 实现返回的 matching_issue_count 字段；是否出现取决于执行分支", required: false, type: integer }
+    object_path: { description_zh: "C++ 实现返回的 object_path 字段；是否出现取决于执行分支", required: false, type: ue_object_path }
+    saved: { description_zh: "C++ 实现返回的 saved 字段；是否出现取决于执行分支", required: false, type: bool }
+    system_refresh: { description_zh: "C++ 实现返回的 system_refresh 字段；是否出现取决于执行分支", required: false, type: json_value }
+    view_model_source: { description_zh: "C++ 实现返回的 view_model_source 字段；是否出现取决于执行分支", required: false, type: string }
+    visited_issue_count: { description_zh: "C++ 实现返回的 visited_issue_count 字段；是否出现取决于执行分支", required: false, type: integer }
+    visited_scope_count: { description_zh: "C++ 实现返回的 visited_scope_count 字段；是否出现取决于执行分支", required: false, type: integer }
+    wait_for_complete: { description_zh: "C++ 实现返回的 wait_for_complete 字段；是否出现取决于执行分支", required: false, type: bool }
+  }
+  state: defined
+}
+schema: uai.command_spec.v1
+status: active
+types: {}
+verification: {
+  assertions: [
+    { id: result_present, operator: exists, source: returns.saved }
+    { id: state_readback_present, operator: exists, source: methods.state_readback.asset_path }
+  ]
+  failure_policy: fail_overall
+  methods: [
+    { id: result, kind: result_assertion }
+    { command: niagara_get_stack_issues, id: state_readback, kind: command_readback, params_mapping: { asset_path: returns.asset_path } }
+  ]
+  required: true
+  state: defined
+}
+version: 1

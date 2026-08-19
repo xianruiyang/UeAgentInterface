@@ -1,0 +1,137 @@
+authoring: { reason: command_has_no_registered_folder_authoring_profile, state: none }
+category: project_settings_config
+command: project_settings_validate_page
+deprecation: { reason: command_is_active, state: none }
+discovery: { aliases: [], keywords_en: [project, settings, validate, page, project_settings_config], keywords_zh: [project_settings_validate_page], summary_en: "Execute project_settings_validate_page with a verified implementation contract", summary_zh: "只读校验 v2 properties 是否可按当前 Settings schema 写入", tags: [project_settings_config, p2-007] }
+errors: {
+  codes: [
+    { code: config_backup_failed, description_zh: "C++ 实现返回错误码 config_backup_failed", retry_safe: false, stage: execution, wire_match: exact }
+    { code: config_save_failed, description_zh: "C++ 实现返回错误码 config_save_failed", retry_safe: false, stage: execution, wire_match: exact }
+    { code: details_duplicate_property_path, description_zh: "C++ 实现返回错误码 details_duplicate_property_path", retry_safe: false, stage: execution, wire_match: prefix }
+    { code: details_field_missing_property_path, description_zh: "C++ 实现返回错误码 details_field_missing_property_path", retry_safe: true, stage: preflight, wire_match: prefix }
+    { code: details_group_missing_fields, description_zh: "C++ 实现返回错误码 details_group_missing_fields", retry_safe: true, stage: preflight, wire_match: prefix }
+    { code: details_index_invalid_group, description_zh: "C++ 实现返回错误码 details_index_invalid_group", retry_safe: true, stage: preflight, wire_match: prefix }
+    { code: details_index_missing_groups, description_zh: "C++ 实现返回错误码 details_index_missing_groups", retry_safe: true, stage: preflight, wire_match: exact }
+    { code: details_rehydrate_missing_properties, description_zh: "C++ 实现返回错误码 details_rehydrate_missing_properties", retry_safe: true, stage: preflight, wire_match: prefix }
+    { code: entry_object_invalid, description_zh: "C++ 实现返回错误码 entry_object_invalid", retry_safe: true, stage: preflight, wire_match: exact }
+    { code: hjson_file_not_found, description_zh: "C++ 实现返回错误码 hjson_file_not_found", retry_safe: false, stage: execution, wire_match: prefix }
+    { code: hjson_file_required, description_zh: "C++ 实现返回错误码 hjson_file_required", retry_safe: true, stage: preflight, wire_match: prefix }
+    { code: missing_input_file, description_zh: "C++ 实现返回错误码 missing_input_file", retry_safe: true, stage: preflight, wire_match: exact }
+    { code: missing_properties_array, description_zh: "缺少 v2 properties 数组", retry_safe: true, stage: preflight, wire_match: exact }
+    { code: missing_property_schema, description_zh: "导出 HJSON 缺少 property_schema", retry_safe: true, stage: preflight, wire_match: exact }
+    { code: missing_section_id_or_container_category_section, description_zh: "C++ 实现返回错误码 missing_section_id_or_container_category_section", retry_safe: true, stage: preflight, wire_match: exact }
+    { code: missing_value, description_zh: "descriptor 缺少 canonical value", retry_safe: true, stage: preflight, wire_match: exact }
+    { code: project_settings_apply_failed, description_zh: "C++ 实现返回错误码 project_settings_apply_failed", retry_safe: false, stage: execution, wire_match: exact }
+    { code: property_schema_changed, description_zh: "输入属性 schema hash 与当前反射 schema 不一致", retry_safe: true, stage: preflight, wire_match: exact }
+    { code: property_schema_mismatch_expected_uai, description_zh: "property_schema 不是 v2", retry_safe: true, stage: preflight, wire_match: prefix }
+    { code: requires_plugin_not_enabled, description_zh: "C++ 实现返回错误码 requires_plugin_not_enabled", retry_safe: false, stage: execution, wire_match: exact }
+    { code: settings_module_unavailable, description_zh: "C++ 实现返回错误码 settings_module_unavailable", retry_safe: false, stage: execution, wire_match: exact }
+    { code: settings_section_cannot_edit, description_zh: "C++ 实现返回错误码 settings_section_cannot_edit", retry_safe: false, stage: execution, wire_match: exact }
+    { code: settings_section_not_found, description_zh: "C++ 实现返回错误码 settings_section_not_found", retry_safe: false, stage: execution, wire_match: exact }
+    { code: unexpected_property_descriptor_field, description_zh: "descriptor 含非 v2 字段", retry_safe: true, stage: preflight, wire_match: prefix }
+  ]
+}
+evidence: {
+  docs: [
+    { path: "Plugins/UeAgentInterface/docs/commands/project_settings_config/project_settings_validate_page.md", purpose: "user documentation cross-check; C++ implementation remains authoritative" }
+  ]
+  implementation: [
+    { line_hint: 3005, path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Commands/ProjectSettings/UeAgentHttpServer_ProjectSettings.cpp", purpose: "command handler, parameter and return evidence", symbol: CmdProjectSettingsValidatePage }
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Utilities/UeAgentAuthoringFileIO.cpp", purpose: "transitive helper evidence used by the command handler" }
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Utilities/UeAgentDetailsAuthoring.cpp", purpose: "transitive helper evidence used by the command handler" }
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Utilities/UeAgentStructuredAuthoringIO.cpp", purpose: "transitive helper evidence used by the command handler" }
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Utilities/UeAgentStructuredHjsonFormatter.cpp", purpose: "transitive helper evidence used by the command handler" }
+  ]
+  tests: [
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterfaceTests/Private/Smoke/UeAgentInterfaceProjectSettingsSmokeTests.cpp", purpose: "smoke or negative-path evidence cross-checked for the verified contract" }
+  ]
+}
+execution: {
+  destructive: false
+  editor_state: required
+  game_thread: required
+  idempotent: true
+  kind: read_only
+  overwrite_behavior: none
+  pie_state: allowed
+  retry_safe: true
+  save_behavior: none
+  side_effects: []
+  ui_effect: none
+}
+maturity: verified
+params: {
+  constraints: [
+    { fields: [section_id, container, category, section], kind: one_of }
+    { fields: [json_file, properties], kind: one_of }
+    { fields: [category, section], kind: requires_when, when: { container: present } }
+    { fields: [container, section], kind: requires_when, when: { category: present } }
+    { fields: [container, category], kind: requires_when, when: { section: present } }
+  ]
+  fields: {
+    allow_high_risk: { default: false, default_state: defined, description_zh: "允许高风险 Project Settings 写入", required: false, type: bool }
+    base_property_schema_hash: { default_state: none, description_zh: "可选的导出时属性 schema hash", required: false, type: string }
+    category: { default_state: none, description_zh: "Settings category 名称", required: false, type: string }
+    container: { default_state: none, description_zh: "Settings container 名称", required: false, type: string }
+    fail_on_requires_restart: { default: false, default_state: defined, description_zh: "遇到需重启变更时阻断", required: false, type: bool }
+    json_file: {
+      default_state: none
+      description_zh: "导出的 HJSON authoring 文件"
+      path_semantics: { kind: filesystem_file, must_exist: true, writable: false }
+      required: false
+      type: filesystem_path
+    }
+    properties: { default_state: none, description_zh: "v2 property descriptors", item_type: json_value, required: false, type: array }
+    property_schema: { default_state: none, description_zh: "固定为 uai.uobject_properties.v2", required: false, type: string }
+    requires_plugin: { default_state: none, description_zh: "要求已启用的插件名称", required: false, type: string }
+    section: { default_state: none, description_zh: "Settings section 名称", required: false, type: string }
+    section_id: { default_state: none, description_zh: "Settings 页稳定 id", required: false, type: string }
+  }
+  state: defined
+}
+response: { artifact_fields: [changes, errors, property_diffs, property_results, read_back, warnings], compact_fields: [success, valid, changed, properties_applied, applied_immediately, backup_file], failure_fields: [], max_items_policy: { fields: [], mode: none } }
+returns: {
+  fields: {
+    applied_immediately: { description_zh: "C++ 实现返回的 applied_immediately 字段；是否出现取决于执行分支", required: false, type: bool }
+    backup_file: { description_zh: "C++ 实现返回的 backup_file 字段；是否出现取决于执行分支", required: false, type: filesystem_path }
+    backup_path: { description_zh: "C++ 实现返回的 backup_path 字段；是否出现取决于执行分支", required: false, type: string }
+    base_property_schema_hash: { description_zh: "输入属性 schema hash", required: false, type: string }
+    changed: { description_zh: "C++ 实现返回的 changed 字段；是否出现取决于执行分支", required: false, type: bool }
+    changes: { description_zh: "C++ 实现返回的 changes 字段；是否出现取决于执行分支", item_type: json_value, required: false, type: array }
+    current_property_schema_hash: { description_zh: "当前属性 schema hash", required: false, type: string }
+    dry_run: { description_zh: "C++ 实现返回的 dry_run 字段；是否出现取决于执行分支", required: false, type: bool }
+    error: { description_zh: "C++ 实现返回的 error 字段；是否出现取决于执行分支", required: false, type: string }
+    error_count: { description_zh: "C++ 实现返回的 error_count 字段；是否出现取决于执行分支", required: false, type: integer }
+    errors: { description_zh: "C++ 实现返回的 errors 字段；是否出现取决于执行分支", item_type: json_value, required: false, type: array }
+    json_file: { description_zh: "C++ 实现返回的 json_file 字段；是否出现取决于执行分支", required: false, type: filesystem_path }
+    object_path: { description_zh: "C++ 实现返回的 object_path 字段；是否出现取决于执行分支", required: false, type: ue_object_path }
+    profile: { description_zh: "C++ 实现返回的 profile 字段；是否出现取决于执行分支", required: false, type: string }
+    project_file: { description_zh: "C++ 实现返回的 project_file 字段；是否出现取决于执行分支", required: false, type: filesystem_path }
+    project_name: { description_zh: "C++ 实现返回的 project_name 字段；是否出现取决于执行分支", required: false, type: string }
+    properties_applied: { description_zh: "成功提交的属性数量", required: false, type: integer }
+    property_diffs: { description_zh: "结构化属性差异", item_type: json_value, required: false, type: array }
+    property_results: { description_zh: "每个输入属性的 compact 结果", item_type: json_value, required: false, type: array }
+    read_back: { description_zh: "成功写入后的 v2 页面读回", required: false, type: json_value }
+    recommendation: { description_zh: "C++ 实现返回的 recommendation 字段；是否出现取决于执行分支", required: false, type: string }
+    requires_asset_rescan: { description_zh: "C++ 实现返回的 requires_asset_rescan 字段；是否出现取决于执行分支", required: false, type: bool }
+    requires_config_reload: { description_zh: "C++ 实现返回的 requires_config_reload 字段；是否出现取决于执行分支", required: false, type: bool }
+    requires_editor_reopen: { description_zh: "C++ 实现返回的 requires_editor_reopen 字段；是否出现取决于执行分支", required: false, type: bool }
+    requires_navigation_rebuild: { description_zh: "C++ 实现返回的 requires_navigation_rebuild 字段；是否出现取决于执行分支", required: false, type: bool }
+    requires_plugin_enabled: { description_zh: "C++ 实现返回的 requires_plugin_enabled 字段；是否出现取决于执行分支", required: false, type: bool }
+    requires_rebuild: { description_zh: "C++ 实现返回的 requires_rebuild 字段；是否出现取决于执行分支", required: false, type: bool }
+    requires_restart: { description_zh: "C++ 实现返回的 requires_restart 字段；是否出现取决于执行分支", required: false, type: bool }
+    requires_shader_recompile: { description_zh: "C++ 实现返回的 requires_shader_recompile 字段；是否出现取决于执行分支", required: false, type: bool }
+    schema: { description_zh: "C++ 实现返回的 schema 字段；是否出现取决于执行分支", required: false, type: string }
+    schema_mismatch: { description_zh: "C++ 实现返回的 schema_mismatch 字段；是否出现取决于执行分支", required: false, type: bool }
+    section_id: { description_zh: "C++ 实现返回的 section_id 字段；是否出现取决于执行分支", required: false, type: string }
+    success: { description_zh: "C++ 实现返回的 success 字段；是否出现取决于执行分支", required: false, type: bool }
+    valid: { description_zh: "C++ 实现返回的 valid 字段；是否出现取决于执行分支", required: false, type: bool }
+    warnings: { description_zh: "C++ 实现返回的 warnings 字段；是否出现取决于执行分支", item_type: json_value, required: false, type: array }
+  }
+  state: defined
+}
+schema: uai.command_spec.v1
+status: active
+types: {}
+verification: { reason: read_only_command_has_no_post_write_verification, state: none }
+version: 1

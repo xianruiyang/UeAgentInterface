@@ -1,14 +1,10 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "Server/UeAgentHttpServer.h"
+#include "Commands/Audio/UeAgentAudioFolderCommandBridge.h"
 #include "Commands/Audio/UeAgentHttpServer_AudioOps.h"
 #include "Dom/JsonObject.h"
 #include "Dom/JsonValue.h"
-#include "Misc/PackageName.h"
-#include "Misc/Paths.h"
-#include "Utilities/UeAgentDetailsAuthoring.h"
-#include "Utilities/UeAgentFolderDetailsExport.h"
-#include "HAL/FileManager.h"
 #include "Sound/SoundAttenuation.h"
 #include "Sound/SoundClass.h"
 #include "Sound/SoundConcurrency.h"
@@ -96,7 +92,7 @@ bool FUeAgentHttpServer::CmdSoundAttenuationExportJson(const FUeAgentRequestCont
 	Root->SetObjectField(TEXT("summary"), BuildSoundAttenuationInfo(Asset, false));
 	Root->SetObjectField(TEXT("attenuation"), BuildSoundAttenuationInfo(Asset, false));
 	FString SavedPath;
-	if (!SaveJsonFile(OutputFile, Root, SavedPath, OutError))
+	if (!SaveAuthoringFile(OutputFile, Root, SavedPath, OutError))
 	{
 		return false;
 	}
@@ -114,7 +110,7 @@ bool FUeAgentHttpServer::CmdSoundAttenuationValidateJson(const FUeAgentRequestCo
 	}
 	TSharedPtr<FJsonObject> Root;
 	FString ResolvedPath;
-	if (!LoadJsonFile(JsonFile, Root, ResolvedPath, OutError))
+	if (!LoadAuthoringFile(JsonFile, Root, ResolvedPath, OutError))
 	{
 		return false;
 	}
@@ -145,7 +141,7 @@ bool FUeAgentHttpServer::CmdSoundAttenuationApplyJson(const FUeAgentRequestConte
 	}
 	TSharedPtr<FJsonObject> Root;
 	FString ResolvedPath;
-	if (!LoadJsonFile(JsonFile, Root, ResolvedPath, OutError))
+	if (!LoadAuthoringFile(JsonFile, Root, ResolvedPath, OutError))
 	{
 		return false;
 	}
@@ -286,7 +282,7 @@ bool FUeAgentHttpServer::CmdSoundConcurrencyExportJson(const FUeAgentRequestCont
 	}
 	Root->SetObjectField(TEXT("concurrency"), Concurrency);
 	FString SavedPath;
-	if (!SaveJsonFile(OutputFile, Root, SavedPath, OutError))
+	if (!SaveAuthoringFile(OutputFile, Root, SavedPath, OutError))
 	{
 		return false;
 	}
@@ -304,7 +300,7 @@ bool FUeAgentHttpServer::CmdSoundConcurrencyValidateJson(const FUeAgentRequestCo
 	}
 	TSharedPtr<FJsonObject> Root;
 	FString ResolvedPath;
-	if (!LoadJsonFile(JsonFile, Root, ResolvedPath, OutError))
+	if (!LoadAuthoringFile(JsonFile, Root, ResolvedPath, OutError))
 	{
 		return false;
 	}
@@ -340,7 +336,7 @@ bool FUeAgentHttpServer::CmdSoundConcurrencyApplyJson(const FUeAgentRequestConte
 	}
 	TSharedPtr<FJsonObject> Root;
 	FString ResolvedPath;
-	if (!LoadJsonFile(JsonFile, Root, ResolvedPath, OutError))
+	if (!LoadAuthoringFile(JsonFile, Root, ResolvedPath, OutError))
 	{
 		return false;
 	}
@@ -483,7 +479,7 @@ bool FUeAgentHttpServer::CmdSoundClassExportJson(const FUeAgentRequestContext& C
 	Properties->SetBoolField(TEXT("bIsMusic"), Asset->Properties.bIsMusic != 0);
 	Root->SetObjectField(TEXT("properties_struct"), Properties);
 	FString SavedPath;
-	if (!SaveJsonFile(OutputFile, Root, SavedPath, OutError))
+	if (!SaveAuthoringFile(OutputFile, Root, SavedPath, OutError))
 	{
 		return false;
 	}
@@ -501,7 +497,7 @@ bool FUeAgentHttpServer::CmdSoundClassValidateJson(const FUeAgentRequestContext&
 	}
 	TSharedPtr<FJsonObject> Root;
 	FString ResolvedPath;
-	if (!LoadJsonFile(JsonFile, Root, ResolvedPath, OutError))
+	if (!LoadAuthoringFile(JsonFile, Root, ResolvedPath, OutError))
 	{
 		return false;
 	}
@@ -532,7 +528,7 @@ bool FUeAgentHttpServer::CmdSoundClassApplyJson(const FUeAgentRequestContext& Ct
 	}
 	TSharedPtr<FJsonObject> Root;
 	FString ResolvedPath;
-	if (!LoadJsonFile(JsonFile, Root, ResolvedPath, OutError))
+	if (!LoadAuthoringFile(JsonFile, Root, ResolvedPath, OutError))
 	{
 		return false;
 	}
@@ -645,7 +641,7 @@ bool FUeAgentHttpServer::CmdSoundMixExportJson(const FUeAgentRequestContext& Ctx
 	Root->SetObjectField(TEXT("summary"), BuildSoundMixInfo(Asset, false));
 	Root->SetArrayField(TEXT("sound_class_effects"), BuildSoundMixInfo(Asset, false)->GetArrayField(TEXT("class_adjusters")));
 	FString SavedPath;
-	if (!SaveJsonFile(OutputFile, Root, SavedPath, OutError))
+	if (!SaveAuthoringFile(OutputFile, Root, SavedPath, OutError))
 	{
 		return false;
 	}
@@ -663,7 +659,7 @@ bool FUeAgentHttpServer::CmdSoundMixApplyJson(const FUeAgentRequestContext& Ctx,
 	}
 	TSharedPtr<FJsonObject> Root;
 	FString ResolvedPath;
-	if (!LoadJsonFile(JsonFile, Root, ResolvedPath, OutError))
+	if (!LoadAuthoringFile(JsonFile, Root, ResolvedPath, OutError))
 	{
 		return false;
 	}
@@ -761,49 +757,7 @@ bool FUeAgentHttpServer::CmdSoundMixApplyJson(const FUeAgentRequestContext& Ctx,
 }
 bool FUeAgentHttpServer::CmdSoundSubmixCreate(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
-	using namespace UeAgentAudioOps;
-	FString AssetPath;
-	if (!GetRequiredString(Ctx, TEXT("asset_path"), AssetPath, OutError))
-	{
-		return false;
-	}
-	FString SubmixClassPath;
-	Ctx.Params->TryGetStringField(TEXT("submix_class"), SubmixClassPath);
-	UClass* SubmixClass = SubmixClassPath.IsEmpty() ? USoundSubmix::StaticClass() : LoadClassByPath(SubmixClassPath);
-	if (!SubmixClass || !SubmixClass->IsChildOf(USoundSubmixBase::StaticClass()))
-	{
-		OutError = TEXT("invalid_submix_class");
-		return false;
-	}
-	bool bReplace = false;
-	bool bSave = true;
-	GetOptionalBool(Ctx.Params, TEXT("replace_existing"), bReplace, OutError);
-	GetOptionalBool(Ctx.Params, TEXT("save_after_create"), bSave, OutError);
-	USoundSubmixBase* Asset = Cast<USoundSubmixBase>(CreateAssetObject(SubmixClass, AssetPath, bReplace, OutError));
-	if (!Asset)
-	{
-		return false;
-	}
-	FString ParentPath;
-	if (Ctx.Params->TryGetStringField(TEXT("parent_submix"), ParentPath) && !ParentPath.TrimStartAndEnd().IsEmpty())
-	{
-		USoundSubmixBase* Parent = Cast<USoundSubmixBase>(LoadAssetObject(ParentPath));
-		USoundSubmixWithParentBase* WithParent = Cast<USoundSubmixWithParentBase>(Asset);
-		if (!Parent || !WithParent)
-		{
-			OutError = TEXT("parent_submix_not_applicable");
-			return false;
-		}
-		WithParent->SetParentSubmix(Parent, true);
-	}
-	if (bSave && !SavePackagesForObjects({ Asset }, OutError))
-	{
-		return false;
-	}
-	OutData = BuildSoundSubmixInfo(Asset, true, true, true);
-	OutData->SetBoolField(TEXT("created_asset"), true);
-	OutData->SetObjectField(TEXT("coverage_report"), MakeCoverageReport(SoundSubmixProfile));
-	return true;
+	return UeAgentAudioFolderCommandBridge::CreateSoundSubmix(Ctx.Params, OutData, OutError, Ctx.RequestId);
 }
 bool FUeAgentHttpServer::CmdSoundSubmixGetInfo(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
@@ -830,245 +784,15 @@ bool FUeAgentHttpServer::CmdSoundSubmixGetInfo(const FUeAgentRequestContext& Ctx
 }
 bool FUeAgentHttpServer::CmdSoundSubmixExportFolder(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
-	using namespace UeAgentAudioOps;
-	FString AssetPath;
-	FString FolderPath;
-	if (!GetRequiredString(Ctx, TEXT("asset_path"), AssetPath, OutError) || !GetRequiredString(Ctx, TEXT("folder_path"), FolderPath, OutError))
-	{
-		return false;
-	}
-	USoundSubmixBase* Asset = Cast<USoundSubmixBase>(LoadAssetObject(AssetPath));
-	if (!Asset)
-	{
-		OutError = TEXT("sound_submix_not_found");
-		return false;
-	}
-	bool bClean = false;
-	bool bIncludeRaw = false;
-	GetOptionalBool(Ctx.Params, TEXT("clean_output_dir"), bClean, OutError);
-	GetOptionalBool(Ctx.Params, TEXT("include_raw_properties"), bIncludeRaw, OutError);
-	FolderPath = ResolveFilePath(FolderPath);
-	if (bClean)
-	{
-		IFileManager::Get().DeleteDirectory(*FolderPath, false, true);
-	}
-	IFileManager::Get().MakeDirectory(*FolderPath, true);
-	TSharedPtr<FJsonObject> Info = BuildSoundSubmixInfo(Asset, true, true, bIncludeRaw);
-	TArray<TSharedPtr<FJsonValue>> Files;
-	TSharedPtr<FJsonObject> AssetJson = BuildGenericAssetJson(Asset, SoundSubmixProfile, bIncludeRaw);
-	AssetJson->SetStringField(TEXT("submix_class"), Asset->GetClass()->GetPathName());
-	if (!UeAgentFolderDetailsExport::AttachOwnerDetails(Asset, FolderPath, TEXT("sound_submix_export_folder"), TEXT("sound_submix_asset"), Asset->GetPathName(), TEXT("asset"), AssetJson, OutError)) return false;
-	if (!SaveTrackedJson(FolderPath, TEXT("asset.json"), AssetJson, Files, OutError)) return false;
-	TSharedPtr<FJsonObject> GraphJson = MakeShared<FJsonObject>();
-	GraphJson->SetStringField(TEXT("parent"), Info->HasField(TEXT("parent")) ? Info->GetStringField(TEXT("parent")) : FString());
-	GraphJson->SetArrayField(TEXT("children"), Info->HasField(TEXT("children")) ? Info->GetArrayField(TEXT("children")) : TArray<TSharedPtr<FJsonValue>>{});
-	if (!SaveTrackedJson(FolderPath, TEXT("graph.json"), GraphJson, Files, OutError)) return false;
-	TSharedPtr<FJsonObject> EffectsJson = MakeShared<FJsonObject>();
-	EffectsJson->SetArrayField(TEXT("effect_chain"), Info->HasField(TEXT("effect_chain")) ? Info->GetArrayField(TEXT("effect_chain")) : TArray<TSharedPtr<FJsonValue>>{});
-	if (!SaveTrackedJson(FolderPath, TEXT("effects.json"), EffectsJson, Files, OutError)) return false;
-	if (!SaveTrackedJson(FolderPath, TEXT("analysis_settings.json"), MakeShared<FJsonObject>(), Files, OutError)) return false;
-	if (bIncludeRaw && !SaveTrackedJson(FolderPath, TEXT("debug/raw_properties.json"), BuildGenericAssetJson(Asset, SoundSubmixProfile, true), Files, OutError)) return false;
-	if (!SaveTrackedJson(FolderPath, TEXT("validation/coverage_report.json"), MakeCoverageReport(SoundSubmixProfile), Files, OutError)) return false;
-	TSharedPtr<FJsonObject> IssuesJson = MakeShared<FJsonObject>();
-	IssuesJson->SetArrayField(TEXT("json_issues"), {});
-	if (!SaveTrackedJson(FolderPath, TEXT("validation/issues.json"), IssuesJson, Files, OutError)) return false;
-	OutData = MakeShared<FJsonObject>();
-	FillAssetIdentity(Asset, OutData);
-	OutData->SetStringField(TEXT("folder_path"), FolderPath);
-	OutData->SetArrayField(TEXT("files"), Files);
-	OutData->SetObjectField(TEXT("coverage_report"), MakeCoverageReport(SoundSubmixProfile));
-	return true;
+	return UeAgentAudioFolderCommandBridge::Export(UeAgentAudioAuthoring::EAssetKind::SoundSubmix, Ctx.Params, OutData, OutError);
 }
 bool FUeAgentHttpServer::CmdSoundSubmixValidateFolder(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
-	using namespace UeAgentAudioOps;
-	FString FolderPath;
-	if (!GetRequiredString(Ctx, TEXT("folder_path"), FolderPath, OutError))
-	{
-		return false;
-	}
-	FolderPath = ResolveFilePath(FolderPath);
-	TSharedPtr<FJsonObject> LegacyRejection;
-	if (UeAgentDetailsAuthoring::BuildLegacyPropertiesFolderRejectionIfPresent(
-		FolderPath,
-		UeAgentDetailsAuthoring::MakeOwnerInfoForObject(nullptr, TEXT("sound_submix_asset"), FString(), TEXT("sound_submix_validate_folder")),
-		TEXT("asset.json.details.index_file"),
-		LegacyRejection,
-		OutError))
-	{
-		OutData = LegacyRejection;
-		return false;
-	}
-	TArray<TSharedPtr<FJsonValue>> Issues;
-	if (!FPaths::FileExists(FPaths::Combine(FolderPath, TEXT("asset.json"))))
-	{
-		AddIssue(Issues, TEXT("missing_asset_json"), TEXT("error"), TEXT("asset.json is required."));
-	}
-	if (!FPaths::FileExists(FPaths::Combine(FolderPath, TEXT("effects.json"))))
-	{
-		AddIssue(Issues, TEXT("missing_effects_json"), TEXT("error"), TEXT("effects.json is required."));
-	}
-	OutData = MakeShared<FJsonObject>();
-	OutData->SetStringField(TEXT("folder_path"), FolderPath);
-	OutData->SetStringField(TEXT("status"), Issues.Num() == 0 ? TEXT("ok") : TEXT("failed"));
-	OutData->SetArrayField(TEXT("json_issues"), Issues);
-	OutData->SetObjectField(TEXT("coverage_report"), MakeCoverageReport(SoundSubmixProfile));
-	return true;
+	return UeAgentAudioFolderCommandBridge::Validate(UeAgentAudioAuthoring::EAssetKind::SoundSubmix, Ctx.Params, OutData, OutError);
 }
 bool FUeAgentHttpServer::CmdSoundSubmixApplyFolder(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
-	using namespace UeAgentAudioOps;
-	FString FolderPath;
-	if (!GetRequiredString(Ctx, TEXT("folder_path"), FolderPath, OutError))
-	{
-		return false;
-	}
-	FolderPath = ResolveFilePath(FolderPath);
-	TSharedPtr<FJsonObject> AssetJson;
-	FString ResolvedPath;
-	if (!LoadJsonFile(FPaths::Combine(FolderPath, TEXT("asset.json")), AssetJson, ResolvedPath, OutError))
-	{
-		return false;
-	}
-	FString AssetPath;
-	Ctx.Params->TryGetStringField(TEXT("asset_path"), AssetPath);
-	if (AssetPath.IsEmpty())
-	{
-		AssetJson->TryGetStringField(TEXT("asset_path"), AssetPath);
-	}
-	TSharedPtr<FJsonObject> LegacyRejection;
-	if (UeAgentDetailsAuthoring::BuildLegacyPropertiesFolderRejectionIfPresent(
-		FolderPath,
-		UeAgentDetailsAuthoring::MakeOwnerInfoForObject(nullptr, TEXT("sound_submix_asset"), AssetPath, TEXT("sound_submix_apply_folder")),
-		TEXT("asset.json.details.index_file"),
-		LegacyRejection,
-		OutError))
-	{
-		OutData = LegacyRejection;
-		return false;
-	}
-	FString ClassPath;
-	AssetJson->TryGetStringField(TEXT("submix_class"), ClassPath);
-	UClass* SubmixClass = ClassPath.IsEmpty() ? USoundSubmix::StaticClass() : LoadClassByPath(ClassPath);
-	if (!SubmixClass || !SubmixClass->IsChildOf(USoundSubmixBase::StaticClass()))
-	{
-		OutError = TEXT("invalid_submix_class");
-		return false;
-	}
-	bool bCreateIfMissing = true;
-	bool bDryRun = false;
-	bool bValidateOnly = false;
-	bool bSave = true;
-	GetOptionalBool(Ctx.Params, TEXT("create_if_missing"), bCreateIfMissing, OutError);
-	GetOptionalBool(Ctx.Params, TEXT("dry_run"), bDryRun, OutError);
-	GetOptionalBool(Ctx.Params, TEXT("validate_only"), bValidateOnly, OutError);
-	GetOptionalBool(Ctx.Params, TEXT("save_after_apply"), bSave, OutError);
-	if (bValidateOnly)
-	{
-		return CmdSoundSubmixValidateFolder(Ctx, OutData, OutError);
-	}
-	USoundSubmixBase* Asset = Cast<USoundSubmixBase>(LoadAssetObject(AssetPath));
-	const bool bWouldCreate = Asset == nullptr;
-	if (!Asset)
-	{
-		if (!bCreateIfMissing)
-		{
-			OutError = TEXT("sound_submix_not_found");
-			return false;
-		}
-		Asset = bDryRun
-			? NewObject<USoundSubmixBase>(GetTransientPackage(), SubmixClass, NAME_None, RF_Transient)
-			: Cast<USoundSubmixBase>(CreateAssetObject(SubmixClass, AssetPath, false, OutError));
-		if (!Asset)
-		{
-			return false;
-		}
-	}
-	TArray<TSharedPtr<FJsonValue>> PropertyResults;
-	int32 GroupedDetailsApplied = 0;
-	TSharedPtr<FJsonObject> DetailsApplySummary;
-	if (!UeAgentDetailsAuthoring::ApplyOwnerDetailsFromEntryIfPresent(
-		Asset,
-		FolderPath,
-		AssetJson,
-		UeAgentDetailsAuthoring::MakeOwnerInfoForObject(Asset, TEXT("sound_submix_asset"), Asset->GetPathName(), TEXT("sound_submix_apply_folder")),
-		TEXT("details"),
-		!bDryRun,
-		DetailsApplySummary,
-		GroupedDetailsApplied,
-		OutError))
-	{
-		return false;
-	}
-	TSharedPtr<FJsonObject> GraphJson;
-	if (FPaths::FileExists(FPaths::Combine(FolderPath, TEXT("graph.json"))))
-	{
-		if (!LoadJsonFile(FPaths::Combine(FolderPath, TEXT("graph.json")), GraphJson, ResolvedPath, OutError))
-		{
-			return false;
-		}
-		FString ParentPath;
-		if (GraphJson->TryGetStringField(TEXT("parent"), ParentPath) && !ParentPath.IsEmpty() && !bDryRun)
-		{
-			USoundSubmixBase* Parent = Cast<USoundSubmixBase>(LoadAssetObject(ParentPath));
-			USoundSubmixWithParentBase* WithParent = Cast<USoundSubmixWithParentBase>(Asset);
-			if (!Parent || !WithParent)
-			{
-				OutError = TEXT("parent_submix_not_applicable");
-				return false;
-			}
-			WithParent->SetParentSubmix(Parent, true);
-		}
-	}
-	TSharedPtr<FJsonObject> EffectsJson;
-	int32 EffectsApplied = 0;
-	if (FPaths::FileExists(FPaths::Combine(FolderPath, TEXT("effects.json"))))
-	{
-		if (!LoadJsonFile(FPaths::Combine(FolderPath, TEXT("effects.json")), EffectsJson, ResolvedPath, OutError))
-		{
-			return false;
-		}
-		const TArray<TSharedPtr<FJsonValue>>* Chain = nullptr;
-		if (EffectsJson->TryGetArrayField(TEXT("effect_chain"), Chain) && Chain && !bDryRun)
-		{
-			if (USoundSubmix* Submix = Cast<USoundSubmix>(Asset))
-			{
-				Submix->Modify();
-				Submix->SubmixEffectChain.Reset();
-				for (const TSharedPtr<FJsonValue>& Value : *Chain)
-				{
-					FString PresetPath = Value.IsValid() ? Value->AsString() : FString();
-					USoundEffectSubmixPreset* Preset = Cast<USoundEffectSubmixPreset>(LoadAssetObject(PresetPath));
-					if (!Preset)
-					{
-						OutError = TEXT("submix_effect_preset_not_found");
-						return false;
-					}
-					Submix->SubmixEffectChain.Add(Preset);
-					++EffectsApplied;
-				}
-				Submix->PostEditChange();
-				Submix->MarkPackageDirty();
-			}
-		}
-	}
-	if (!bDryRun && bSave && !SavePackagesForObjects({ Asset }, OutError))
-	{
-		return false;
-	}
-	OutData = BuildSoundSubmixInfo(Asset, true, true, true);
-	OutData->SetArrayField(TEXT("property_results"), PropertyResults);
-	OutData->SetNumberField(TEXT("grouped_details_applied"), GroupedDetailsApplied);
-	if (DetailsApplySummary.IsValid())
-	{
-		OutData->SetObjectField(TEXT("details_apply"), DetailsApplySummary);
-	}
-	OutData->SetNumberField(TEXT("effects_applied"), EffectsApplied);
-	OutData->SetBoolField(TEXT("dry_run"), bDryRun);
-	OutData->SetBoolField(TEXT("would_create"), bDryRun && bWouldCreate);
-	OutData->SetBoolField(TEXT("saved"), !bDryRun && bSave);
-	OutData->SetObjectField(TEXT("coverage_report"), MakeCoverageReport(SoundSubmixProfile));
-	return true;
+	return UeAgentAudioFolderCommandBridge::Apply(UeAgentAudioAuthoring::EAssetKind::SoundSubmix, Ctx.Params, OutData, OutError, Ctx.RequestId);
 }
 bool FUeAgentHttpServer::CmdAudioEffectPresetCreate(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
@@ -1122,7 +846,7 @@ bool FUeAgentHttpServer::CmdAudioEffectPresetExportJson(const FUeAgentRequestCon
 	TSharedPtr<FJsonObject> Root = BuildGenericAssetJson(Preset, AudioEffectPresetProfile, true);
 	Root->SetStringField(TEXT("preset_kind"), Preset->IsA<USoundEffectSubmixPreset>() ? TEXT("submix") : TEXT("source"));
 	FString SavedPath;
-	if (!SaveJsonFile(OutputFile, Root, SavedPath, OutError))
+	if (!SaveAuthoringFile(OutputFile, Root, SavedPath, OutError))
 	{
 		return false;
 	}
@@ -1140,7 +864,7 @@ bool FUeAgentHttpServer::CmdAudioEffectPresetApplyJson(const FUeAgentRequestCont
 	}
 	TSharedPtr<FJsonObject> Root;
 	FString ResolvedPath;
-	if (!LoadJsonFile(JsonFile, Root, ResolvedPath, OutError))
+	if (!LoadAuthoringFile(JsonFile, Root, ResolvedPath, OutError))
 	{
 		return false;
 	}

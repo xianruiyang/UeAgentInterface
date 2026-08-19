@@ -1,0 +1,540 @@
+{
+  "schema": "uai.domain_adapter.asset_project_read.test_fixture.v1",
+  "descriptor_count": 17,
+  "required_families": [
+    "asset",
+    "registry",
+    "editor",
+    "project",
+    "config",
+    "reference"
+  ],
+  "descriptors": [
+    {
+      "descriptor_id": "uai.query.asset.summary",
+      "version": 1,
+      "descriptor_hash": "sha256:72a69072c32e4e0e096549473f5607ad3974a0987d557bfd5eea883f2a70e421",
+      "capability_id": "asset.summary.read",
+      "provider_binding": "asset_project.read.asset_summary",
+      "family": "asset",
+      "query_kind": "state",
+      "allowed_state_planes": ["authoring_memory", "persisted", "compiled_generated"],
+      "required_context_facets": [],
+      "requires_target": true,
+      "target_kinds": ["asset"],
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "include_class_lineage": {"type": "boolean"},
+          "include_package_state": {"type": "boolean"}
+        },
+        "additionalProperties": false
+      },
+      "result_schema": {"type": "object"}
+    },
+    {
+      "descriptor_id": "uai.query.asset.properties",
+      "version": 1,
+      "descriptor_hash": "sha256:72338ed09b27f39027ca1ff2850c3a1c22b06cfb5c01e823bb6d0b689ddfc71d",
+      "capability_id": "asset.properties.read",
+      "provider_binding": "asset_project.read.asset_properties",
+      "family": "asset",
+      "query_kind": "state",
+      "allowed_state_planes": ["authoring_memory", "persisted", "compiled_generated"],
+      "required_context_facets": [],
+      "requires_target": true,
+      "target_kinds": ["asset"],
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "field_ids": {
+            "type": "array",
+            "items": {"type": "string", "minLength": 1},
+            "uniqueItems": true
+          },
+          "include_defaults": {"type": "boolean"},
+          "include_presence": {"type": "boolean"}
+        },
+        "additionalProperties": false
+      },
+      "result_schema": {"type": "object"}
+    },
+    {
+      "descriptor_id": "uai.query.asset.relations",
+      "version": 1,
+      "descriptor_hash": "sha256:4b2a31dd853f8eeac4d960b82ddf0abf3caeb1b02596daabb0212821d5880e6f",
+      "capability_id": "asset.relations.read",
+      "provider_binding": "asset_project.read.asset_relations",
+      "family": "asset",
+      "query_kind": "state",
+      "allowed_state_planes": ["authoring_memory", "persisted", "registry_index"],
+      "required_context_facets": [],
+      "requires_target": true,
+      "target_kinds": ["asset"],
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "direction": {
+            "type": "string",
+            "enum": ["dependencies", "referencers", "both"]
+          },
+          "relation_kinds": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "enum": ["hard", "soft", "manage", "searchable_name"]
+            },
+            "uniqueItems": true
+          }
+        },
+        "required": ["direction"],
+        "additionalProperties": false
+      },
+      "result_schema": {"type": "object"}
+    },
+    {
+      "descriptor_id": "uai.query.asset.validation",
+      "version": 1,
+      "descriptor_hash": "sha256:c90ef3c9048489bd53d93336c5582fcf6499bc7809a76a8ec3cc456ad75a483f",
+      "capability_id": "asset.validation.read",
+      "provider_binding": "asset_project.read.asset_validation",
+      "family": "asset",
+      "query_kind": "runtime_probe",
+      "allowed_state_planes": ["authoring_memory", "persisted", "compiled_generated"],
+      "required_context_facets": [],
+      "requires_target": true,
+      "target_kinds": ["asset"],
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "rule_ids": {
+            "type": "array",
+            "items": {"type": "string", "minLength": 1},
+            "uniqueItems": true
+          },
+          "include_passed": {"type": "boolean"}
+        },
+        "additionalProperties": false
+      },
+      "result_schema": {"type": "object"}
+    },
+    {
+      "descriptor_id": "uai.query.asset.collection",
+      "version": 1,
+      "descriptor_hash": "sha256:0a3259ac7aa3d9d1e654108ad4b72becb6119d0dd9f82f11cbee50818796f113",
+      "capability_id": "asset.collection.read",
+      "provider_binding": "asset_project.read.asset_collection",
+      "family": "asset",
+      "query_kind": "state",
+      "allowed_state_planes": ["authoring_memory", "persisted"],
+      "required_context_facets": [],
+      "requires_target": true,
+      "target_kinds": ["asset"],
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "collection_kind": {
+            "type": "string",
+            "enum": ["rows", "items", "entries"]
+          },
+          "keys": {
+            "type": "array",
+            "items": {"type": "string", "minLength": 1},
+            "uniqueItems": true
+          },
+          "key_prefix": {"type": "string"},
+          "field_ids": {
+            "type": "array",
+            "items": {"type": "string", "minLength": 1},
+            "uniqueItems": true
+          }
+        },
+        "required": ["collection_kind"],
+        "additionalProperties": false
+      },
+      "result_schema": {"type": "object"}
+    },
+    {
+      "descriptor_id": "uai.query.asset.sample",
+      "version": 1,
+      "descriptor_hash": "sha256:a21954ee8e211316c8a728505d203333e173bf63d8cfb2e68eabe67c5f355f79",
+      "capability_id": "asset.sample.read",
+      "provider_binding": "asset_project.read.asset_sample",
+      "family": "asset",
+      "query_kind": "runtime_probe",
+      "allowed_state_planes": ["authoring_memory", "persisted", "compiled_generated", "rendered_observation"],
+      "required_context_facets": [],
+      "requires_target": true,
+      "target_kinds": ["asset"],
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "sample_kind": {
+            "type": "string",
+            "enum": ["pixel", "uv", "vertex", "bounds", "preview_state"]
+          },
+          "coordinates": {
+            "type": "array",
+            "items": {"type": "number"}
+          },
+          "index": {"type": "integer", "minimum": 0},
+          "channel": {"type": "string", "minLength": 1}
+        },
+        "required": ["sample_kind"],
+        "additionalProperties": false
+      },
+      "result_schema": {"type": "object"}
+    },
+    {
+      "descriptor_id": "uai.query.reference.origin.resolve",
+      "version": 1,
+      "descriptor_hash": "sha256:c03a818f38e2405c6b73af0b5e5ab2eb8aea0671a4cc051fd2dee07e71d36296",
+      "capability_id": "reference.origin.resolve",
+      "provider_binding": "asset_project.read.reference_origin",
+      "family": "reference",
+      "query_kind": "reference",
+      "allowed_state_planes": ["authoring_memory", "persisted", "compiled_generated"],
+      "required_context_facets": [],
+      "requires_target": false,
+      "target_kinds": [],
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "target": {
+            "type": "object",
+            "properties": {
+              "source": {"type": "string", "enum": ["catalog_candidate", "json_reference", "ue_object", "graph_node", "name_reference"]},
+              "candidate_id": {"type": "string", "minLength": 1},
+              "json_file": {"type": "string", "minLength": 1},
+              "json_pointer": {"type": "string", "minLength": 1},
+              "kind": {"type": "string", "minLength": 1},
+              "name": {"type": "string", "minLength": 1},
+              "full_name": {"type": "string", "minLength": 1},
+              "asset_path": {"type": "string", "minLength": 1},
+              "graph_name": {"type": "string", "minLength": 1},
+              "node_guid": {"type": "string", "minLength": 1}
+            },
+            "required": ["source"],
+            "additionalProperties": false
+          }
+        },
+        "required": ["target"],
+        "additionalProperties": false
+      },
+      "result_schema": {"type": "object"}
+    },
+    {
+      "descriptor_id": "uai.query.asset.registry_record",
+      "version": 1,
+      "descriptor_hash": "sha256:1395062a9c39e7bfecf28142732c13c126aaff4d49568c5aefe6df02dddf659f",
+      "capability_id": "asset.registry_record.read",
+      "provider_binding": "asset_project.read.registry_record",
+      "family": "registry",
+      "query_kind": "state",
+      "allowed_state_planes": ["registry_index"],
+      "required_context_facets": [],
+      "requires_target": true,
+      "target_kinds": ["asset"],
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "include_tags": {"type": "boolean"},
+          "include_chunk_ids": {"type": "boolean"}
+        },
+        "additionalProperties": false
+      },
+      "result_schema": {"type": "object"}
+    },
+    {
+      "descriptor_id": "uai.query.asset.registry_relations",
+      "version": 1,
+      "descriptor_hash": "sha256:5615497f2b41bcb8a3d0d2185e07030c65b66607b9c3e3f471ebabb88ba00737",
+      "capability_id": "asset.registry_relations.read",
+      "provider_binding": "asset_project.read.registry_relations",
+      "family": "registry",
+      "query_kind": "state",
+      "allowed_state_planes": ["registry_index"],
+      "required_context_facets": [],
+      "requires_target": true,
+      "target_kinds": ["asset"],
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "direction": {
+            "type": "string",
+            "enum": ["dependencies", "referencers", "both"]
+          },
+          "relation_kinds": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "enum": ["hard", "soft", "manage", "searchable_name"]
+            },
+            "uniqueItems": true
+          }
+        },
+        "required": ["direction"],
+        "additionalProperties": false
+      },
+      "result_schema": {"type": "object"}
+    },
+    {
+      "descriptor_id": "uai.query.editor.open_assets",
+      "version": 1,
+      "descriptor_hash": "sha256:793d8c0fdffc117fc18cfb2f42e6abd4649ec07e67e6610c2216616ea4eb3096",
+      "capability_id": "editor.open_assets.read",
+      "provider_binding": "asset_project.read.editor_open_assets",
+      "family": "editor",
+      "query_kind": "runtime_probe",
+      "allowed_state_planes": ["authoring_memory"],
+      "required_context_facets": [],
+      "requires_target": false,
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "include_editor_identity": {"type": "boolean"}
+        },
+        "additionalProperties": false
+      },
+      "result_schema": {"type": "object"}
+    },
+    {
+      "descriptor_id": "uai.query.editor.dirty_resources",
+      "version": 1,
+      "descriptor_hash": "sha256:d600c586edc61834d732ba941f51a01f9f35e5b559b224758e0e0b47afdaf8ce",
+      "capability_id": "editor.dirty_resources.read",
+      "provider_binding": "asset_project.read.editor_dirty_resources",
+      "family": "editor",
+      "query_kind": "runtime_probe",
+      "allowed_state_planes": ["authoring_memory"],
+      "required_context_facets": [],
+      "requires_target": false,
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "resource_kinds": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "enum": ["asset", "map", "config"]
+            },
+            "uniqueItems": true
+          }
+        },
+        "additionalProperties": false
+      },
+      "result_schema": {"type": "object"}
+    },
+    {
+      "descriptor_id": "uai.query.project.summary",
+      "version": 1,
+      "descriptor_hash": "sha256:2946f37f18ce8b1ba614fc9cfed3ca821b07685d51e4aecfc7cf2eda2b508825",
+      "capability_id": "project.summary.read",
+      "provider_binding": "asset_project.read.project_summary",
+      "family": "project",
+      "query_kind": "state",
+      "allowed_state_planes": ["authoring_memory", "persisted"],
+      "required_context_facets": [],
+      "requires_target": false,
+      "input_schema": {
+        "type": "object",
+        "properties": {},
+        "additionalProperties": false
+      },
+      "result_schema": {"type": "object"}
+    },
+    {
+      "descriptor_id": "uai.query.project.settings",
+      "version": 1,
+      "descriptor_hash": "sha256:2c0ac63d822ba9d7c8edcaa7380e5b1e15a8617821fc389e10bec1c338f74b32",
+      "capability_id": "project.settings.read",
+      "provider_binding": "asset_project.read.project_settings",
+      "family": "project",
+      "query_kind": "state",
+      "allowed_state_planes": ["authoring_memory", "persisted"],
+      "required_context_facets": [],
+      "requires_target": false,
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "section_id": {"type": "string", "minLength": 1},
+          "field_ids": {
+            "type": "array",
+            "items": {"type": "string", "minLength": 1},
+            "uniqueItems": true
+          },
+          "include_defaults": {"type": "boolean"},
+          "editor_project_capability": {"type": "string", "enum": ["project_settings.index", "project_settings.page", "target.read"]},
+          "parameters": {"type": "object"}
+        },
+        "required": ["section_id"],
+        "additionalProperties": false
+      },
+      "result_schema": {"type": "object"}
+    },
+    {
+      "descriptor_id": "uai.query.project.platform",
+      "version": 1,
+      "descriptor_hash": "sha256:76f2a14fe537aad20734c81d097865d374d169256f2102d24412f92f185b5d85",
+      "capability_id": "project.platform.read",
+      "provider_binding": "asset_project.read.project_platform",
+      "family": "project",
+      "query_kind": "state",
+      "allowed_state_planes": ["authoring_memory", "persisted"],
+      "required_context_facets": [],
+      "requires_target": false,
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "platform_ids": {
+            "type": "array",
+            "items": {"type": "string", "minLength": 1},
+            "uniqueItems": true
+          },
+          "field_ids": {
+            "type": "array",
+            "items": {"type": "string", "minLength": 1},
+            "uniqueItems": true
+          },
+          "resolve_inheritance": {"type": "boolean"},
+          "editor_project_capability": {"type": "string", "enum": ["platform_config.export", "target_platform.query", "target.read"]},
+          "parameters": {"type": "object"}
+        },
+        "additionalProperties": false
+      },
+      "result_schema": {"type": "object"}
+    },
+    {
+      "descriptor_id": "uai.query.project.validation",
+      "version": 1,
+      "descriptor_hash": "sha256:432978314fe69e5bf01391989a7ee11b93851e91f25bf8268f29a19951062734",
+      "capability_id": "project.validation.read",
+      "provider_binding": "asset_project.read.project_validation",
+      "family": "project",
+      "query_kind": "runtime_probe",
+      "allowed_state_planes": ["authoring_memory", "persisted"],
+      "required_context_facets": [],
+      "requires_target": false,
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "section_ids": {
+            "type": "array",
+            "items": {"type": "string", "minLength": 1},
+            "uniqueItems": true
+          },
+          "rule_ids": {
+            "type": "array",
+            "items": {"type": "string", "minLength": 1},
+            "uniqueItems": true
+          },
+          "include_passed": {"type": "boolean"},
+          "editor_project_capability": {"type": "string", "enum": ["device_profile.diff", "device_profile.validate", "platform_config.validate", "platform_profile.validate_packaging", "project_settings.diff", "project_settings.validate", "scalability.validate", "target.read"]},
+          "parameters": {"type": "object"}
+        },
+        "additionalProperties": false
+      },
+      "result_schema": {"type": "object"}
+    },
+    {
+      "descriptor_id": "uai.query.config.section",
+      "version": 1,
+      "descriptor_hash": "sha256:17b868e7323148560ebdd2900b2fe8ecb085c5bf37fb0b81015e90de8a60bc00",
+      "capability_id": "config.section.read",
+      "provider_binding": "asset_project.read.config_section",
+      "family": "config",
+      "query_kind": "state",
+      "allowed_state_planes": ["authoring_memory", "persisted"],
+      "required_context_facets": [],
+      "requires_target": false,
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "config_scope": {
+            "type": "string",
+            "enum": ["engine", "game", "editor", "input", "device_profiles", "scalability", "platform"]
+          },
+          "section_id": {"type": "string", "minLength": 1},
+          "keys": {
+            "type": "array",
+            "items": {"type": "string", "minLength": 1},
+            "uniqueItems": true
+          },
+          "editor_project_capability": {"type": "string", "enum": ["device_profile.export", "device_profile.query", "scalability.export", "target.read"]},
+          "parameters": {"type": "object"}
+        },
+        "required": ["config_scope", "section_id"],
+        "additionalProperties": false
+      },
+      "result_schema": {"type": "object"}
+    },
+    {
+      "descriptor_id": "uai.query.config.resolved_value",
+      "version": 1,
+      "descriptor_hash": "sha256:38cd6d7c152d23ca33d3b19f47e12d8c73570d91c4f9cbbd353dff7bf81de388",
+      "capability_id": "config.resolved_value.read",
+      "provider_binding": "asset_project.read.config_resolved_value",
+      "family": "config",
+      "query_kind": "runtime_probe",
+      "allowed_state_planes": ["authoring_memory", "persisted"],
+      "required_context_facets": [],
+      "requires_target": false,
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "config_scope": {
+            "type": "string",
+            "enum": ["engine", "game", "editor", "input", "device_profiles", "scalability", "platform"]
+          },
+          "section_id": {"type": "string", "minLength": 1},
+          "key": {"type": "string", "minLength": 1},
+          "platform_id": {"type": "string", "minLength": 1},
+          "device_profile_id": {"type": "string", "minLength": 1},
+          "editor_project_capability": {"type": "string", "enum": ["device_profile.resolve_cvars", "target.read"]},
+          "parameters": {"type": "object"}
+        },
+        "required": ["config_scope", "section_id", "key"],
+        "additionalProperties": false
+      },
+      "result_schema": {"type": "object"}
+    }
+  ],
+  "e2_scenarios": [
+    {
+      "case_id": "asset_project_read.reference_origin",
+      "family": "reference",
+      "provider_binding": "asset_project.read.reference_origin",
+      "oracle": "the explicit source union resolves to canonical target, asset/package/source origins, status and warnings without mutation"
+    },
+    {
+      "case_id": "asset_project_read.asset",
+      "family": "asset",
+      "provider_binding": "asset_project.read.asset_summary",
+      "oracle": "owned UObject identity, class, package state and unchanged property are read from the Ticket-resolved asset"
+    },
+    {
+      "case_id": "asset_project_read.registry",
+      "family": "registry",
+      "provider_binding": "asset_project.read.registry_record",
+      "oracle": "FAssetData identity and class facts are read from the Ticket-resolved registry record"
+    },
+    {
+      "case_id": "asset_project_read.editor",
+      "family": "editor",
+      "provider_binding": "asset_project.read.editor_dirty_resources",
+      "oracle": "owned clean package is observed through the explicit editor-resource environment without changing dirty state"
+    },
+    {
+      "case_id": "asset_project_read.project",
+      "family": "project",
+      "provider_binding": "asset_project.read.project_summary",
+      "oracle": "project facts come from the project object resolved by the frozen ExecutionContextRef"
+    },
+    {
+      "case_id": "asset_project_read.config",
+      "family": "config",
+      "provider_binding": "asset_project.read.config_section",
+      "oracle": "known in-memory FConfigFile values are returned without filesystem inference or mutation"
+    }
+  ]
+}

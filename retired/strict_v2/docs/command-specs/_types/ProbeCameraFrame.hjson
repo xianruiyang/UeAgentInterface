@@ -1,0 +1,16 @@
+definition: {
+  additional_fields: false
+  fields: {
+    forward: { default_state: none, description_zh: "UE world frame 中的 camera forward 基向量", required: false, type: object, type_ref: "shared:Vector3" }
+    fov: { default_state: none, description_zh: "水平 FOV（度）", required: false, type: number }
+    fov_axis: { default_state: none, description_zh: "FOV 轴；当前实现为 horizontal", required: false, type: string }
+    location: { default_state: none, description_zh: "Level Editor camera 的 UE world location（cm）", required: false, type: object, type_ref: "shared:Vector3" }
+    right: { default_state: none, description_zh: "UE world frame 中的 camera right 基向量", required: false, type: object, type_ref: "shared:Vector3" }
+    rotation: { default_state: none, description_zh: "Level Editor camera 的 UE world rotation（度）", required: false, type: object, type_ref: "shared:Rotator3D" }
+    up: { default_state: none, description_zh: "UE world frame 中的 camera up 基向量", required: false, type: object, type_ref: "shared:Vector3" }
+  }
+  kind: object
+}
+schema: uai.command_spec.shared_type.v1
+type_id: ProbeCameraFrame
+version: 1

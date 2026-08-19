@@ -1,0 +1,87 @@
+authoring: { reason: command_has_no_registered_folder_authoring_profile, state: none }
+category: localization_packaging_platform_profiles
+command: packaging_plan_build
+deprecation: { reason: command_is_active, state: none }
+discovery: { aliases: [], keywords_en: [packaging, plan, build, localization_packaging_platform_profiles], keywords_zh: [packaging_plan_build], summary_en: "Execute packaging_plan_build with a verified implementation contract", summary_zh: "生成 UAT BuildCookRun 命令计划", tags: [localization_packaging_platform_profiles, p2-002] }
+errors: {
+  codes: [
+    { code: hjson_file_not_found, description_zh: "C++ 实现返回错误码 hjson_file_not_found", retry_safe: false, stage: execution, wire_match: prefix }
+    { code: missing_json_or_json_file, description_zh: "C++ 实现返回错误码 missing_json_or_json_file", retry_safe: true, stage: preflight, wire_match: exact }
+    { code: missing_params, description_zh: "C++ 实现返回错误码 missing_params", retry_safe: true, stage: preflight, wire_match: exact }
+  ]
+}
+evidence: {
+  docs: [
+    { path: "Plugins/UeAgentInterface/docs/commands/localization_packaging_platform_profiles/packaging_plan_build.md", purpose: "user documentation cross-check; C++ implementation remains authoritative" }
+  ]
+  implementation: [
+    { line_hint: 3188, path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Commands/ProductionPipeline/UeAgentHttpServer_ProductionPipeline.cpp", purpose: "command handler, parameter and return evidence", symbol: CmdPackagingPlanBuild }
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Utilities/UeAgentStructuredAuthoringIO.cpp", purpose: "transitive helper evidence used by the command handler" }
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Utilities/UeAgentStructuredHjsonFormatter.cpp", purpose: "transitive helper evidence used by the command handler" }
+  ]
+  tests: [
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterfaceTests/Private/Smoke/ProductionPipeline/UeAgentInterfaceProductionPipelineSmokeTests.cpp", purpose: "smoke or negative-path evidence cross-checked for the verified contract" }
+  ]
+}
+execution: {
+  destructive: false
+  editor_state: required
+  game_thread: required
+  idempotent: false
+  kind: write
+  overwrite_behavior: external_files
+  pie_state: allowed
+  retry_safe: false
+  save_behavior: none
+  side_effects: [writes_files]
+  ui_effect: none
+}
+maturity: verified
+params: {
+  constraints: []
+  fields: {
+    archive: { default_state: none, description_zh: "C++ 实现读取的 archive 参数", required: false, type: bool }
+    configuration: { default_state: none, description_zh: "C++ 实现读取的 configuration 参数", required: false, type: string }
+    cook: { default_state: none, description_zh: "C++ 实现读取的 cook 参数", required: false, type: bool }
+    json: { default_state: none, description_zh: "C++ 实现读取的 json 参数", required: false, type: json_value }
+    json_file: {
+      default_state: none
+      description_zh: "C++ 实现读取的 json_file 参数"
+      path_semantics: { kind: filesystem_file, must_exist: false, writable: false }
+      required: false
+      type: filesystem_path
+    }
+    package: { default_state: none, description_zh: "C++ 实现读取的 package 参数", required: false, type: bool }
+    platform: { default_state: none, description_zh: "C++ 实现读取的 platform 参数", required: false, type: string }
+    stage: { default_state: none, description_zh: "C++ 实现读取的 stage 参数", required: false, type: bool }
+  }
+  state: defined
+}
+response: { artifact_fields: [], compact_fields: [valid, artifacts_expected, command_line, issues, schema, uat_args], failure_fields: [], max_items_policy: { fields: [], mode: none } }
+returns: {
+  fields: {
+    artifacts_expected: { description_zh: "C++ 实现返回的 artifacts_expected 字段；是否出现取决于执行分支", item_type: json_value, required: false, type: array }
+    command_line: { description_zh: "C++ 实现返回的 command_line 字段；是否出现取决于执行分支", required: false, type: string }
+    issues: { description_zh: "C++ 实现返回的 issues 字段；是否出现取决于执行分支", item_type: json_value, required: false, type: array }
+    schema: { description_zh: "C++ 实现返回的 schema 字段；是否出现取决于执行分支", required: false, type: string }
+    uat_args: { description_zh: "C++ 实现返回的 uat_args 字段；是否出现取决于执行分支", item_type: json_value, required: false, type: array }
+    uat_path: { description_zh: "C++ 实现返回的 uat_path 字段；是否出现取决于执行分支", required: false, type: string }
+    valid: { description_zh: "C++ 实现返回的 valid 字段；是否出现取决于执行分支", required: false, type: bool }
+  }
+  state: defined
+}
+schema: uai.command_spec.v1
+status: active
+types: {}
+verification: {
+  assertions: [
+    { id: result_present, operator: exists, source: returns.valid }
+  ]
+  failure_policy: fail_overall
+  methods: [
+    { id: result, kind: result_assertion }
+  ]
+  required: true
+  state: defined
+}
+version: 1

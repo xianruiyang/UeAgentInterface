@@ -2,6 +2,7 @@
 
 #include "UeAgentHttpServer_Assets.h"
 #include "UeAgentHttpServer_AssetsOps.h"
+#include "Commands/Level/UeAgentCommandSafety.h"
 #include "Utilities/UeAgentCurveJson.h"
 #include "Utilities/UeAgentJsonDiagnostics.h"
 #include "Module/UeAgentInterfaceLogger.h"
@@ -623,17 +624,40 @@ bool FUeAgentHttpServer::CmdEditorClose(const FUeAgentRequestContext& Ctx, TShar
 	UWorld* EditorWorld = GEditor ? GEditor->GetEditorWorldContext().World() : nullptr;
 	UAssetEditorSubsystem* AssetEditorSubsystem = GEditor ? GEditor->GetEditorSubsystem<UAssetEditorSubsystem>() : nullptr;
 
-	bool bCloseAllAssetEditors = true;
-	JsonTryGetBool(Ctx.Params, TEXT("close_all_asset_editors"), bCloseAllAssetEditors);
+	bool bCloseAllAssetEditors = false;
+	if (!UeAgentCommandSafety::ReadStrictBool(Ctx.Params, TEXT("close_all_asset_editors"), false, bCloseAllAssetEditors, OutError))
+	{
+		return false;
+	}
 
-	bool bCloseWorldBrowserTabs = true;
-	JsonTryGetBool(Ctx.Params, TEXT("close_world_browser_tabs"), bCloseWorldBrowserTabs);
+	bool bCloseWorldBrowserTabs = false;
+	if (!UeAgentCommandSafety::ReadStrictBool(Ctx.Params, TEXT("close_world_browser_tabs"), false, bCloseWorldBrowserTabs, OutError))
+	{
+		return false;
+	}
 
-	bool bUnloadLateShutdownEditorModules = true;
-	JsonTryGetBool(Ctx.Params, TEXT("unload_late_shutdown_editor_modules"), bUnloadLateShutdownEditorModules);
+	bool bUnloadLateShutdownEditorModules = false;
+	if (!UeAgentCommandSafety::ReadStrictBool(Ctx.Params, TEXT("unload_late_shutdown_editor_modules"), false, bUnloadLateShutdownEditorModules, OutError))
+	{
+		return false;
+	}
 
-	bool bRequestExit = true;
-	JsonTryGetBool(Ctx.Params, TEXT("request_exit"), bRequestExit);
+	bool bRequestExit = false;
+	bool bAllowExit = false;
+	if (!UeAgentCommandSafety::ReadStrictBool(Ctx.Params, TEXT("request_exit"), false, bRequestExit, OutError) ||
+		!UeAgentCommandSafety::ReadStrictBool(Ctx.Params, TEXT("allow_exit"), false, bAllowExit, OutError))
+	{
+		return false;
+	}
+	if (bRequestExit && !bAllowExit)
+	{
+		OutData->SetBoolField(TEXT("request_exit"), true);
+		OutData->SetBoolField(TEXT("allow_exit"), false);
+		OutData->SetBoolField(TEXT("close_requested"), false);
+		OutData->SetBoolField(TEXT("closed"), false);
+		OutError = TEXT("allow_exit_required");
+		return false;
+	}
 
 	double ExitDelaySeconds = 0.25;
 	Ctx.Params->TryGetNumberField(TEXT("exit_delay_seconds"), ExitDelaySeconds);
@@ -646,6 +670,7 @@ bool FUeAgentHttpServer::CmdEditorClose(const FUeAgentRequestContext& Ctx, TShar
 	UeAgentAssetOps::MakeDirtyResourceArrayJson(DirtyPackages, EditorWorld, AssetEditorSubsystem, DirtyResourcesJson);
 
 	OutData->SetBoolField(TEXT("request_exit"), bRequestExit);
+	OutData->SetBoolField(TEXT("allow_exit"), bAllowExit);
 	OutData->SetBoolField(TEXT("close_all_asset_editors"), bCloseAllAssetEditors);
 	OutData->SetBoolField(TEXT("close_world_browser_tabs"), bCloseWorldBrowserTabs);
 	OutData->SetBoolField(TEXT("unload_late_shutdown_editor_modules"), bUnloadLateShutdownEditorModules);
@@ -698,10 +723,16 @@ bool FUeAgentHttpServer::CmdEditorClose(const FUeAgentRequestContext& Ctx, TShar
 bool FUeAgentHttpServer::CmdEditorPrepareExit(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	bool bSaveCurrentLevel = false;
-	JsonTryGetBool(Ctx.Params, TEXT("save_current_level"), bSaveCurrentLevel);
+	if (!UeAgentCommandSafety::ReadStrictBool(Ctx.Params, TEXT("save_current_level"), false, bSaveCurrentLevel, OutError))
+	{
+		return false;
+	}
 
 	bool bDiscardCurrentLevel = false;
-	JsonTryGetBool(Ctx.Params, TEXT("discard_current_level"), bDiscardCurrentLevel);
+	if (!UeAgentCommandSafety::ReadStrictBool(Ctx.Params, TEXT("discard_current_level"), false, bDiscardCurrentLevel, OutError))
+	{
+		return false;
+	}
 	if (bSaveCurrentLevel && bDiscardCurrentLevel)
 	{
 		OutError = TEXT("save_and_discard_current_level_conflict");
@@ -709,41 +740,78 @@ bool FUeAgentHttpServer::CmdEditorPrepareExit(const FUeAgentRequestContext& Ctx,
 	}
 
 	bool bSaveAllDirty = false;
-	JsonTryGetBool(Ctx.Params, TEXT("save_all_dirty"), bSaveAllDirty);
-	if (!bSaveAllDirty)
+	bool bSaveAllAlias = false;
+	if (!UeAgentCommandSafety::ReadStrictBool(Ctx.Params, TEXT("save_all_dirty"), false, bSaveAllDirty, OutError) ||
+		!UeAgentCommandSafety::ReadStrictBool(Ctx.Params, TEXT("save_all"), false, bSaveAllAlias, OutError))
 	{
-		JsonTryGetBool(Ctx.Params, TEXT("save_all"), bSaveAllDirty);
+		return false;
+	}
+	bSaveAllDirty = bSaveAllDirty || bSaveAllAlias;
+
+	bool bDiscardAllDirty = false;
+	bool bDiscardAllAlias = false;
+	if (!UeAgentCommandSafety::ReadStrictBool(Ctx.Params, TEXT("discard_all_dirty"), false, bDiscardAllDirty, OutError) ||
+		!UeAgentCommandSafety::ReadStrictBool(Ctx.Params, TEXT("discard_all"), false, bDiscardAllAlias, OutError))
+	{
+		return false;
+	}
+	bDiscardAllDirty = bDiscardAllDirty || bDiscardAllAlias;
+
+	bool bCloseAllAssetEditors = false;
+	if (!UeAgentCommandSafety::ReadStrictBool(Ctx.Params, TEXT("close_all_asset_editors"), false, bCloseAllAssetEditors, OutError))
+	{
+		return false;
 	}
 
-	bool bDiscardAllDirty = true;
-	JsonTryGetBool(Ctx.Params, TEXT("discard_all_dirty"), bDiscardAllDirty);
-	if (!bDiscardAllDirty)
+	bool bCloseWorldBrowserTabs = false;
+	if (!UeAgentCommandSafety::ReadStrictBool(Ctx.Params, TEXT("close_world_browser_tabs"), false, bCloseWorldBrowserTabs, OutError))
 	{
-		JsonTryGetBool(Ctx.Params, TEXT("discard_all"), bDiscardAllDirty);
+		return false;
 	}
 
-	bool bCloseAllAssetEditors = true;
-	JsonTryGetBool(Ctx.Params, TEXT("close_all_asset_editors"), bCloseAllAssetEditors);
+	bool bUnloadLateShutdownEditorModules = false;
+	if (!UeAgentCommandSafety::ReadStrictBool(Ctx.Params, TEXT("unload_late_shutdown_editor_modules"), false, bUnloadLateShutdownEditorModules, OutError))
+	{
+		return false;
+	}
 
-	bool bCloseWorldBrowserTabs = true;
-	JsonTryGetBool(Ctx.Params, TEXT("close_world_browser_tabs"), bCloseWorldBrowserTabs);
-
-	bool bUnloadLateShutdownEditorModules = true;
-	JsonTryGetBool(Ctx.Params, TEXT("unload_late_shutdown_editor_modules"), bUnloadLateShutdownEditorModules);
-
-	bool bRequestExit = true;
-	JsonTryGetBool(Ctx.Params, TEXT("request_exit"), bRequestExit);
+	bool bRequestExit = false;
+	bool bAllowExit = false;
+	bool bAllowDiscard = false;
+	if (!UeAgentCommandSafety::ReadStrictBool(Ctx.Params, TEXT("request_exit"), false, bRequestExit, OutError) ||
+		!UeAgentCommandSafety::ReadStrictBool(Ctx.Params, TEXT("allow_exit"), false, bAllowExit, OutError) ||
+		!UeAgentCommandSafety::ReadStrictBool(Ctx.Params, TEXT("allow_discard"), false, bAllowDiscard, OutError))
+	{
+		return false;
+	}
+	if (bRequestExit && !bAllowExit)
+	{
+		OutData->SetBoolField(TEXT("request_exit"), true);
+		OutData->SetBoolField(TEXT("allow_exit"), false);
+		OutError = TEXT("allow_exit_required");
+		return false;
+	}
 
 	double ExitDelaySeconds = 0.25;
 	Ctx.Params->TryGetNumberField(TEXT("exit_delay_seconds"), ExitDelaySeconds);
 	ExitDelaySeconds = FMath::Clamp(ExitDelaySeconds, 0.0, 10.0);
 
 	bool bOnlySaveDirty = true;
-	JsonTryGetBool(Ctx.Params, TEXT("only_save_dirty"), bOnlySaveDirty);
+	if (!UeAgentCommandSafety::ReadStrictBool(Ctx.Params, TEXT("only_save_dirty"), true, bOnlySaveDirty, OutError))
+	{
+		return false;
+	}
 
 	TArray<FString> SaveAssetPaths;
 	TArray<FString> DiscardAssetPaths;
 	UeAgentAssetOps::ParseResourcePathArrays(Ctx.Params, SaveAssetPaths, DiscardAssetPaths);
+	if ((bDiscardCurrentLevel || bDiscardAllDirty || !DiscardAssetPaths.IsEmpty()) && !bAllowDiscard)
+	{
+		OutData->SetBoolField(TEXT("allow_discard"), false);
+		OutData->SetBoolField(TEXT("request_exit"), bRequestExit);
+		OutError = TEXT("allow_discard_required");
+		return false;
+	}
 
 	TSet<UPackage*> SavePackagesSet;
 	TSet<UPackage*> DiscardPackagesSet;
@@ -886,6 +954,8 @@ bool FUeAgentHttpServer::CmdEditorPrepareExit(const FUeAgentRequestContext& Ctx,
 	OutData->SetNumberField(TEXT("explicit_discarded_package_count"), ExplicitDiscardedCount);
 	OutData->SetNumberField(TEXT("auto_discarded_package_count"), AutoDiscardedCount);
 	OutData->SetBoolField(TEXT("request_exit"), bRequestExit);
+	OutData->SetBoolField(TEXT("allow_exit"), bAllowExit);
+	OutData->SetBoolField(TEXT("allow_discard"), bAllowDiscard);
 	OutData->SetBoolField(TEXT("close_all_asset_editors"), bCloseAllAssetEditors);
 	OutData->SetBoolField(TEXT("close_world_browser_tabs"), bCloseWorldBrowserTabs);
 	OutData->SetBoolField(TEXT("unload_late_shutdown_editor_modules"), bUnloadLateShutdownEditorModules);

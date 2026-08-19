@@ -1,0 +1,93 @@
+{
+  "schema": "uai.domain_adapter.capture_media_long_job.test_fixture.v1",
+  "operation_owner": "C7/FLongRunningOperationOwner",
+  "native_owner": "C11/operation_scoped_port",
+  "artifact_owner": "C8F/artifact_publisher",
+  "verification_owner": "C9/independent_readback",
+  "signal_payload_contract": "C4/FUeAgentCanonicalValueRef",
+  "delivery_failure_semantics": "no_operation_outcome_rewrite",
+  "cleanup_scope": "exact_owned_native_resource_only",
+  "common_request_fields": ["family_id", "subject_ref", "policy_id", "parameters"],
+  "forbidden_request_fields": [
+    "command_id", "http_route", "timeout_seconds", "process_handle",
+    "capture_handle", "task_map", "session_registry", "owner_lease_id",
+    "server_session_id", "raw_image_bytes", "raw_audio_bytes",
+    "raw_video_bytes", "base64_payload", "delivery_status",
+    "business_outcome", "use_current_viewport", "use_selection"
+  ],
+  "required_scenarios": [
+    "accepted_then_run", "progress_is_non_terminal",
+    "artifact_ready_is_non_terminal", "delivery_failure_does_not_rewrite_receipt",
+    "wrong_session_and_stale_generation_do_no_native_work",
+    "cancel_waits_for_physical_exit", "deadline_before_start_does_no_native_work",
+    "owned_temporary_resource_cleanup", "non_owned_resource_survives_cleanup",
+    "deep_valid_parameters", "deep_forbidden_field_rejected",
+    "render_target_clear_copy_bake_draw_use_render_resource_readback"
+  ],
+  "family_count": 3,
+  "families": [
+    {
+      "family_id": "image_capture",
+      "subject_kind": "capture_subject_ref",
+      "policy_kind": "image_capture_policy_ref",
+      "signal_type_id": "uai.capture.image.progress/v1",
+      "target_operation": "capture.image.execute"
+    },
+    {
+      "family_id": "media_recording",
+      "subject_kind": "media_source_ref",
+      "policy_kind": "media_recording_policy_ref",
+      "signal_type_id": "uai.capture.media.progress/v1",
+      "target_operation": "capture.media.execute"
+    },
+    {
+      "family_id": "render_resource",
+      "subject_kind": "render_resource_ref",
+      "policy_kind": "render_operation_policy_ref",
+      "signal_type_id": "uai.capture.render.progress/v1",
+      "target_operation": "capture.render.execute"
+    }
+  ],
+  "legacy_candidate_count": 27,
+  "legacy_mappings": [
+    {"legacy_id":"behavior_tree_screenshot","source":"P0-002","disposition":"adapt","owner":"D/CaptureMediaLongJob","family_id":"image_capture","target_operation":"capture.image.execute"},
+    {"legacy_id":"state_tree_screenshot","source":"P0-002","disposition":"adapt","owner":"D/CaptureMediaLongJob","family_id":"image_capture","target_operation":"capture.image.execute"},
+    {"legacy_id":"anim_blueprint_screenshot","source":"P0-002","disposition":"adapt","owner":"D/CaptureMediaLongJob","family_id":"image_capture","target_operation":"capture.image.execute"},
+    {"legacy_id":"anim_sequence_screenshot","source":"P0-002","disposition":"adapt","owner":"D/CaptureMediaLongJob","family_id":"image_capture","target_operation":"capture.image.execute"},
+    {"legacy_id":"metasound_screenshot","source":"P0-002","disposition":"adapt","owner":"D/CaptureMediaLongJob","family_id":"image_capture","target_operation":"capture.image.execute"},
+    {"legacy_id":"sound_cue_screenshot","source":"P0-002","disposition":"adapt","owner":"D/CaptureMediaLongJob","family_id":"image_capture","target_operation":"capture.image.execute"},
+    {"legacy_id":"blueprint_screenshot","source":"P0-002","disposition":"adapt","owner":"D/CaptureMediaLongJob","family_id":"image_capture","target_operation":"capture.image.execute"},
+    {"legacy_id":"control_rig_screenshot","source":"P0-002","disposition":"adapt","owner":"D/CaptureMediaLongJob","family_id":"image_capture","target_operation":"capture.image.execute"},
+    {"legacy_id":"screenshot_viewport","source":"P0-002","disposition":"adapt","owner":"D/CaptureMediaLongJob","family_id":"image_capture","target_operation":"capture.image.execute"},
+    {"legacy_id":"screenshot_viewport_buffer","source":"P0-002","disposition":"adapt","owner":"D/CaptureMediaLongJob","family_id":"image_capture","target_operation":"capture.image.execute"},
+    {"legacy_id":"geometry_cache_screenshot_frame","source":"P0-002","disposition":"split","owner":"D/CaptureMediaLongJob","family_id":"image_capture","target_operation":"capture.image.execute"},
+    {"legacy_id":"editor_viewport_screenshot","source":"P0-002","disposition":"adapt","owner":"D/CaptureMediaLongJob","family_id":"image_capture","target_operation":"capture.image.execute"},
+    {"legacy_id":"niagara_screenshot","source":"P0-002","disposition":"adapt","owner":"D/CaptureMediaLongJob","family_id":"image_capture","target_operation":"capture.image.execute"},
+    {"legacy_id":"pcg_screenshot","source":"P0-002","disposition":"split","owner":"D/CaptureMediaLongJob","family_id":"image_capture","target_operation":"capture.image.execute"},
+    {"legacy_id":"sequence_screenshot","source":"P0-002","disposition":"adapt","owner":"D/CaptureMediaLongJob","family_id":"image_capture","target_operation":"capture.image.execute"},
+    {"legacy_id":"texture_screenshot","source":"P0-002","disposition":"adapt","owner":"D/CaptureMediaLongJob","family_id":"image_capture","target_operation":"capture.image.execute"},
+    {"legacy_id":"umg_screenshot","source":"P0-002","disposition":"adapt","owner":"D/CaptureMediaLongJob","family_id":"image_capture","target_operation":"capture.image.execute"},
+    {"legacy_id":"audio_submix_record_start","source":"P0-002","disposition":"adapt","owner":"D/CaptureMediaLongJob","family_id":"media_recording","target_operation":"capture.media.execute"},
+    {"legacy_id":"audio_submix_record_stop","source":"P0-002","disposition":"adapt","owner":"D/CaptureMediaLongJob","family_id":"media_recording","target_operation":"capture.media.execute"},
+    {"legacy_id":"audio_submix_record_cancel","source":"P0-002","disposition":"adapt","owner":"D/CaptureMediaLongJob","family_id":"media_recording","target_operation":"capture.media.execute"},
+    {"legacy_id":"render_target_capture_scene","source":"P0-002","disposition":"adapt","owner":"D/CaptureMediaLongJob","family_id":"render_resource","target_operation":"capture.render.execute"},
+    {"legacy_id":"scene_capture_runtime_probe","source":"P0-002","disposition":"split","owner":"D/CaptureMediaLongJob","family_id":"render_resource","target_operation":"capture.render.execute"},
+    {"legacy_id":"scene_capture_validate_render_target","source":"P0-002","disposition":"split","owner":"D/CaptureMediaLongJob","family_id":"render_resource","target_operation":"capture.render.execute"},
+    {"legacy_id":"render_target_clear","source":"SA-004","disposition":"reallocate","owner":"D/CaptureMediaLongJob","family_id":"render_resource","target_operation":"capture.render.execute","render_action":"clear"},
+    {"legacy_id":"render_target_copy_texture","source":"SA-004","disposition":"reallocate","owner":"D/CaptureMediaLongJob","family_id":"render_resource","target_operation":"capture.render.execute","render_action":"copy"},
+    {"legacy_id":"render_target_create_static_texture","source":"SA-004","disposition":"reallocate","owner":"D/CaptureMediaLongJob","family_id":"render_resource","target_operation":"capture.render.execute","render_action":"bake"},
+    {"legacy_id":"render_target_draw_material","source":"SA-004","disposition":"reallocate","owner":"D/CaptureMediaLongJob","family_id":"render_resource","target_operation":"capture.render.execute","render_action":"draw"}
+  ],
+  "render_resource_readback": {
+    "clear": "target_pixel_stats",
+    "copy": "source_target_pixel_relation",
+    "bake": "created_texture_pixel_readback",
+    "draw": "target_pixel_stats"
+  },
+  "activation_contract": {
+    "owner_task": "LS-008",
+    "public_commands_active_in_ls006": false,
+    "python_business_logic": false,
+    "direct_http_binding": false
+  }
+}

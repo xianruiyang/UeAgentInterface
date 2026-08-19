@@ -1,0 +1,66 @@
+authoring: { reason: command_has_no_registered_folder_authoring_profile, state: none }
+category: pcg
+command: pcg_node_inspect
+deprecation: { reason: command_is_active, state: none }
+discovery: { aliases: [], keywords_en: [pcg, node, inspect], keywords_zh: [pcg_node_inspect], summary_en: "Execute pcg_node_inspect with a verified implementation contract", summary_zh: "读取节点结构与 Inspection 标记", tags: [pcg, p2-005] }
+errors: {
+  codes: [
+    { code: actor_not_found, description_zh: "C++ 实现返回错误码 actor_not_found", retry_safe: false, stage: execution, wire_match: exact }
+    { code: pcg_component_not_found, description_zh: "C++ 实现返回错误码 pcg_component_not_found", retry_safe: false, stage: execution, wire_match: exact }
+  ]
+}
+evidence: {
+  docs: [
+    { path: "Plugins/UeAgentInterface/docs/commands/pcg/pcg_node_inspect.md", purpose: "user documentation cross-check; C++ implementation remains authoritative" }
+  ]
+  implementation: [
+    { line_hint: 4186, path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Commands/PCG/UeAgentHttpServer_PCG.cpp", purpose: "command handler, parameter and return evidence", symbol: CmdPCGNodeInspect }
+  ]
+  tests: [
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterfaceTests/Private/Smoke/PCG/UeAgentInterfacePCGSmokeTests.cpp", purpose: "smoke or negative-path evidence cross-checked for the verified contract" }
+  ]
+}
+execution: {
+  destructive: false
+  editor_state: required
+  game_thread: required
+  idempotent: true
+  kind: read_only
+  overwrite_behavior: none
+  pie_state: allowed
+  retry_safe: true
+  save_behavior: none
+  side_effects: []
+  ui_effect: none
+}
+maturity: verified
+params: {
+  constraints: []
+  fields: {
+    actor: { default_state: none, description_zh: "C++ 实现读取的 actor 参数", required: false, type: string }
+    actor_label: { default_state: none, description_zh: "C++ 实现读取的 actor_label 参数", required: false, type: string }
+    actor_name: { default_state: none, description_zh: "C++ 实现读取的 actor_name 参数", required: false, type: string }
+    component: { default_state: none, description_zh: "C++ 实现读取的 component 参数", required: false, type: string }
+    component_name: { default_state: none, description_zh: "C++ 实现读取的 component_name 参数", required: false, type: string }
+    node: { default_state: none, description_zh: "C++ 实现读取的 node 参数", required: false, type: string }
+    node_id: { default_state: none, description_zh: "C++ 实现读取的 node_id 参数", required: false, type: string }
+    node_title: { default_state: none, description_zh: "C++ 实现读取的 node_title 参数", required: false, type: string }
+    pcg_component: { default_state: none, description_zh: "C++ 实现读取的 pcg_component 参数", required: false, type: string }
+  }
+  state: defined
+}
+response: { artifact_fields: [nodes, component], compact_fields: [node_count, schema], failure_fields: [params.actor, params.actor_label, params.actor_name, params.component, params.component_name, params.node, params.node_id, params.node_title], max_items_policy: { fields: [], mode: none } }
+returns: {
+  fields: {
+    component: { description_zh: "C++ 实现返回的 component 字段；是否出现取决于执行分支", required: false, type: json_value }
+    node_count: { description_zh: "C++ 实现返回的 node_count 字段；是否出现取决于执行分支", required: false, type: integer }
+    nodes: { description_zh: "C++ 实现返回的 nodes 字段；是否出现取决于执行分支", item_type: json_value, required: false, type: array }
+    schema: { description_zh: "C++ 实现返回的 schema 字段；是否出现取决于执行分支", required: false, type: string }
+  }
+  state: defined
+}
+schema: uai.command_spec.v1
+status: active
+types: {}
+verification: { reason: read_only_command_has_no_post_write_verification, state: none }
+version: 1

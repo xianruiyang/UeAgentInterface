@@ -1,0 +1,92 @@
+authoring: { reason: command_has_no_registered_folder_authoring_profile, state: none }
+category: data_driven_data_asset_data_table
+command: data_asset_create
+deprecation: { reason: command_is_active, state: none }
+discovery: { aliases: [], keywords_en: [data, asset, create, data_driven_data_asset_data_table], keywords_zh: [data_asset_create], summary_en: "Execute data_asset_create with a verified implementation contract", summary_zh: "按类创建 `UDataAsset / UPrimaryDataAsset` 实例资产", tags: [data_driven_data_asset_data_table, p2-007] }
+errors: {
+  codes: [
+    { code: asset_already_exists, description_zh: "C++ 实现返回错误码 asset_already_exists", retry_safe: false, stage: execution, wire_match: exact }
+    { code: asset_not_found, description_zh: "C++ 实现返回错误码 asset_not_found", retry_safe: false, stage: execution, wire_match: exact }
+    { code: backup_create_package_failed, description_zh: "C++ 实现返回错误码 backup_create_package_failed", retry_safe: false, stage: execution, wire_match: exact }
+    { code: backup_duplicate_failed, description_zh: "C++ 实现返回错误码 backup_duplicate_failed", retry_safe: false, stage: execution, wire_match: exact }
+    { code: create_package_failed, description_zh: "C++ 实现返回错误码 create_package_failed", retry_safe: false, stage: execution, wire_match: exact }
+    { code: data_asset_class_abstract, description_zh: "C++ 实现返回错误码 data_asset_class_abstract", retry_safe: false, stage: execution, wire_match: exact }
+    { code: data_asset_class_not_data_asset, description_zh: "C++ 实现返回错误码 data_asset_class_not_data_asset", retry_safe: false, stage: execution, wire_match: exact }
+    { code: data_asset_class_not_found, description_zh: "C++ 实现返回错误码 data_asset_class_not_found", retry_safe: false, stage: execution, wire_match: exact }
+    { code: data_asset_create_failed, description_zh: "C++ 实现返回错误码 data_asset_create_failed", retry_safe: false, stage: execution, wire_match: exact }
+    { code: invalid_asset_name, description_zh: "C++ 实现返回错误码 invalid_asset_name", retry_safe: true, stage: preflight, wire_match: exact }
+    { code: invalid_asset_path, description_zh: "C++ 实现返回错误码 invalid_asset_path", retry_safe: true, stage: preflight, wire_match: exact }
+    { code: missing_asset_path, description_zh: "C++ 实现返回错误码 missing_asset_path", retry_safe: true, stage: preflight, wire_match: exact }
+    { code: missing_class_path, description_zh: "C++ 实现返回错误码 missing_class_path", retry_safe: true, stage: preflight, wire_match: exact }
+    { code: save_asset_failed, description_zh: "C++ 实现返回错误码 save_asset_failed", retry_safe: false, stage: execution, wire_match: exact }
+  ]
+}
+evidence: {
+  docs: [
+    { path: "Plugins/UeAgentInterface/docs/commands/data_driven_data_asset_data_table/data_asset_create.md", purpose: "user documentation cross-check; C++ implementation remains authoritative" }
+  ]
+  implementation: [
+    { line_hint: 1450, path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Commands/DataDriven/UeAgentHttpServer_DataDriven.cpp", purpose: "command handler, parameter and return evidence", symbol: CmdDataAssetCreate }
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Server/UeAgentHttpServer.cpp", purpose: "transitive helper evidence used by the command handler" }
+  ]
+  tests: [
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterfaceTests/Private/Smoke/DataDriven/UeAgentInterfaceDataDrivenSmokeTests.cpp", purpose: "smoke or negative-path evidence cross-checked for the verified contract" }
+  ]
+}
+execution: {
+  destructive: true
+  editor_state: required
+  game_thread: required
+  idempotent: false
+  kind: write
+  overwrite_behavior: target_asset
+  pie_state: allowed
+  retry_safe: false
+  save_behavior: caller_controlled
+  side_effects: [modifies_asset, creates_asset]
+  ui_effect: none
+}
+maturity: verified
+params: {
+  constraints: []
+  fields: {
+    asset_path: { default_state: none, description_zh: "C++ 实现读取的 asset_path 参数", path_semantics: { access_scope: project_write, kind: ue_asset }, required: true, type: ue_asset_path }
+    backup: { default: false, default_state: defined, description_zh: "C++ 实现读取的 backup 参数", required: false, type: bool }
+    class_path: { default_state: none, description_zh: "C++ 实现读取的 class_path 参数", required: true, type: string }
+    overwrite_policy: { default: fail, default_state: defined, description_zh: "C++ 实现读取的 overwrite_policy 参数", enum_values: [fail, replace], required: false, type: enum }
+    save_after_create: { default: false, default_state: defined, description_zh: "C++ 实现读取的 save_after_create 参数", required: false, type: bool }
+  }
+  state: defined
+}
+response: { artifact_fields: [], compact_fields: [status, saved, asset_path, asset_class, backup_asset_path, backup_created], failure_fields: [params.asset_path, params.class_path], max_items_policy: { fields: [], mode: none } }
+returns: {
+  fields: {
+    asset_class: { description_zh: "C++ 实现返回的 asset_class 字段；是否出现取决于执行分支", required: false, type: string }
+    asset_path: { description_zh: "C++ 实现返回的 asset_path 字段；是否出现取决于执行分支", required: false, type: ue_asset_path }
+    backup_asset_path: { description_zh: "C++ 实现返回的 backup_asset_path 字段；是否出现取决于执行分支", required: false, type: ue_asset_path }
+    backup_created: { description_zh: "C++ 实现返回的 backup_created 字段；是否出现取决于执行分支", required: false, type: bool }
+    backup_object_path: { description_zh: "C++ 实现返回的 backup_object_path 字段；是否出现取决于执行分支", required: false, type: ue_object_path }
+    object_path: { description_zh: "C++ 实现返回的 object_path 字段；是否出现取决于执行分支", required: false, type: ue_object_path }
+    saved: { description_zh: "C++ 实现返回的 saved 字段；是否出现取决于执行分支", required: false, type: bool }
+    schema: { description_zh: "C++ 实现返回的 schema 字段；是否出现取决于执行分支", required: false, type: string }
+    status: { description_zh: "C++ 实现返回的 status 字段；是否出现取决于执行分支", required: false, type: string }
+  }
+  state: defined
+}
+schema: uai.command_spec.v1
+status: active
+types: {}
+verification: {
+  assertions: [
+    { id: result_present, operator: exists, source: returns.status }
+    { id: state_readback_present, operator: exists, source: methods.state_readback.asset_path }
+  ]
+  failure_policy: fail_overall
+  methods: [
+    { id: result, kind: result_assertion }
+    { command: data_asset_export_json, id: state_readback, kind: command_readback, params_mapping: { asset_path: returns.asset_path } }
+  ]
+  required: true
+  state: defined
+}
+version: 1

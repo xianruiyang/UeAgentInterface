@@ -950,7 +950,7 @@ namespace UeAgentLevelOps
 		return true;
 	}
 
-	FViewportViewModeState CaptureViewportViewModeState(FLevelEditorViewportClient* ViewportClient)
+	FViewportViewModeState CaptureViewportViewModeState(FEditorViewportClient* ViewportClient)
 	{
 		FViewportViewModeState State;
 		if (!ViewportClient)
@@ -972,7 +972,7 @@ namespace UeAgentLevelOps
 		return State;
 	}
 
-	static void InvalidateViewportClient(FLevelEditorViewportClient* ViewportClient)
+	static void InvalidateViewportClient(FEditorViewportClient* ViewportClient)
 	{
 		if (!ViewportClient)
 		{
@@ -985,7 +985,7 @@ namespace UeAgentLevelOps
 		}
 	}
 
-	void RestoreViewportViewModeState(FLevelEditorViewportClient* ViewportClient, const FViewportViewModeState& State)
+	void RestoreViewportViewModeState(FEditorViewportClient* ViewportClient, const FViewportViewModeState& State)
 	{
 		if (!ViewportClient)
 		{
@@ -1042,7 +1042,7 @@ namespace UeAgentLevelOps
 		InvalidateViewportClient(ViewportClient);
 	}
 
-	void ApplyResolvedViewportViewMode(FLevelEditorViewportClient* ViewportClient, const FResolvedViewportViewMode& Resolved)
+	void ApplyResolvedViewportViewMode(FEditorViewportClient* ViewportClient, const FResolvedViewportViewMode& Resolved)
 	{
 		if (!ViewportClient)
 		{
@@ -1105,7 +1105,7 @@ namespace UeAgentLevelOps
 		return Obj;
 	}
 
-	TSharedPtr<FJsonObject> MakeCurrentViewportViewModeJson(FLevelEditorViewportClient* ViewportClient)
+	TSharedPtr<FJsonObject> MakeCurrentViewportViewModeJson(FEditorViewportClient* ViewportClient)
 	{
 		TSharedPtr<FJsonObject> Obj = MakeShared<FJsonObject>();
 		if (!ViewportClient)
@@ -1120,6 +1120,59 @@ namespace UeAgentLevelOps
 		Obj->SetStringField(TEXT("view_mode_display_name"), ViewModeIndexToDisplayName(ViewMode));
 		Obj->SetNumberField(TEXT("view_mode_value"), (int32)ViewMode);
 		Obj->SetBoolField(TEXT("final_lit_composition"), IsFinalLitCompositionViewMode(ViewMode));
+
+		FString ActiveVisualizationFamily;
+		FName ActiveVisualizationMode = NAME_None;
+		switch (ViewMode)
+		{
+		case VMI_VisualizeBuffer:
+			ActiveVisualizationFamily = TEXT("buffer");
+			ActiveVisualizationMode = ViewportClient->CurrentBufferVisualizationMode;
+			break;
+		case VMI_VisualizeNanite:
+			ActiveVisualizationFamily = TEXT("nanite");
+			ActiveVisualizationMode = ViewportClient->CurrentNaniteVisualizationMode;
+			break;
+		case VMI_VisualizeLumen:
+			ActiveVisualizationFamily = TEXT("lumen");
+			ActiveVisualizationMode = ViewportClient->CurrentLumenVisualizationMode;
+			break;
+		case VMI_VisualizeSubstrate:
+			ActiveVisualizationFamily = TEXT("substrate");
+			ActiveVisualizationMode = ViewportClient->CurrentSubstrateVisualizationMode;
+			break;
+		case VMI_VisualizeGroom:
+			ActiveVisualizationFamily = TEXT("groom");
+			ActiveVisualizationMode = ViewportClient->CurrentGroomVisualizationMode;
+			break;
+		case VMI_VisualizeVirtualShadowMap:
+			ActiveVisualizationFamily = TEXT("virtual_shadow_map");
+			ActiveVisualizationMode = ViewportClient->CurrentVirtualShadowMapVisualizationMode;
+			break;
+		case VMI_VisualizeVirtualTexture:
+			ActiveVisualizationFamily = TEXT("virtual_texture");
+			ActiveVisualizationMode = ViewportClient->CurrentVirtualTextureVisualizationMode;
+			break;
+		case VMI_VisualizeActorColoration:
+			ActiveVisualizationFamily = TEXT("actor_coloration");
+			ActiveVisualizationMode = FActorPrimitiveColorHandler::Get().GetActivePrimitiveColorHandler();
+			break;
+		case VMI_VisualizeGPUSkinCache:
+			ActiveVisualizationFamily = TEXT("gpu_skin_cache");
+			ActiveVisualizationMode = ViewportClient->CurrentGPUSkinCacheVisualizationMode;
+			break;
+		case VMI_RayTracingDebug:
+			ActiveVisualizationFamily = TEXT("ray_tracing_debug");
+			ActiveVisualizationMode = ViewportClient->CurrentRayTracingDebugVisualizationMode;
+			break;
+		default:
+			break;
+		}
+		if (!ActiveVisualizationFamily.IsEmpty())
+		{
+			Obj->SetStringField(TEXT("visualization_family"), ActiveVisualizationFamily);
+			Obj->SetStringField(TEXT("visualization_mode"), ActiveVisualizationMode.ToString());
+		}
 
 		TSharedPtr<FJsonObject> Visualization = MakeShared<FJsonObject>();
 		Visualization->SetStringField(TEXT("buffer"), ViewportClient->CurrentBufferVisualizationMode.ToString());
@@ -1288,7 +1341,7 @@ namespace UeAgentLevelOps
 
 		TSharedPtr<FJsonObject> Obj = MakeShared<FJsonObject>();
 		Obj->SetStringField(TEXT("schema"), TEXT("uai.viewport_view_modes.v1"));
-		Obj->SetStringField(TEXT("usage"), TEXT("screenshot_viewport accepts view_mode=<key> or visualization_family + visualization_mode"));
+		Obj->SetStringField(TEXT("usage"), TEXT("apply a listed view mode, then use capture.image.execute with the exact viewport policy"));
 		Obj->SetNumberField(TEXT("mode_count"), Modes.Num());
 		Obj->SetArrayField(TEXT("modes"), Modes);
 		return Obj;

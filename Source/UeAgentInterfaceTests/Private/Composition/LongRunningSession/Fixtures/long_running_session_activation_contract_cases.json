@@ -1,0 +1,258 @@
+{
+  "schema": "uai.long_running_session.public_activation.test_fixture.v1",
+  "command_count": 12,
+  "start_command_count": 6,
+  "lifecycle_command_count": 6,
+  "family_binding_count": 13,
+  "operation_ref_fields": [
+    "operation_id",
+    "owner_lease_id",
+    "server_session_id"
+  ],
+  "commands": [
+    {
+      "command_id": "job.compile_build",
+      "namespace": "job",
+      "method": "compile_build",
+      "kind": "start",
+      "descriptor_id": "uai.long_running.job.compile_build/v1",
+      "handler_binding": "long-running-session.job.compile-build.v1",
+      "parameters": [
+        {"name":"family_id","wire_type":"string","required":true,"nullable":false},
+        {"name":"subject_ref","wire_type":"string","required":true,"nullable":false},
+        {"name":"policy_id","wire_type":"string","required":true,"nullable":false},
+        {"name":"parameters","wire_type":"object","required":true,"nullable":false}
+      ],
+      "example_params": {
+        "family_id": "asset_compile",
+        "subject_ref": "asset:/Game/UAI/Fixture.Asset",
+        "policy_id": "policy:asset-compile:default/v1",
+        "parameters": {}
+      }
+    },
+    {
+      "command_id": "editor.session",
+      "namespace": "editor",
+      "method": "session",
+      "kind": "start",
+      "descriptor_id": "uai.long_running.editor.session/v1",
+      "handler_binding": "long-running-session.editor.session.v1",
+      "parameters": [
+        {"name":"family_id","wire_type":"string","required":true,"nullable":false},
+        {"name":"subject_ref","wire_type":"string","required":true,"nullable":false},
+        {"name":"policy_id","wire_type":"string","required":true,"nullable":false},
+        {"name":"parameters","wire_type":"object","required":true,"nullable":false}
+      ],
+      "example_params": {
+        "family_id": "asset_editor",
+        "subject_ref": "asset:/Game/UAI/Fixture.Asset",
+        "policy_id": "policy:asset-editor:open/v1",
+        "parameters": {}
+      }
+    },
+    {
+      "command_id": "capture.image.execute",
+      "namespace": "capture",
+      "method": "image_execute",
+      "kind": "start",
+      "descriptor_id": "uai.long_running.capture.image/v1",
+      "handler_binding": "long-running-session.capture.image.v1",
+      "parameters": [
+        {"name":"subject_ref","wire_type":"string","required":true,"nullable":false},
+        {"name":"policy_id","wire_type":"string","required":true,"nullable":false},
+        {"name":"parameters","wire_type":"object","required":true,"nullable":false}
+      ],
+      "example_params": {
+        "subject_ref": "capture-subject:viewport:owned-fixture",
+        "policy_id": "policy:image-capture:png/v1",
+        "parameters": {}
+      }
+    },
+    {
+      "command_id": "capture.media.execute",
+      "namespace": "capture",
+      "method": "media_execute",
+      "kind": "start",
+      "descriptor_id": "uai.long_running.capture.media/v1",
+      "handler_binding": "long-running-session.capture.media.v1",
+      "parameters": [
+        {"name":"subject_ref","wire_type":"string","required":true,"nullable":false},
+        {"name":"policy_id","wire_type":"string","required":true,"nullable":false},
+        {"name":"parameters","wire_type":"object","required":true,"nullable":false}
+      ],
+      "example_params": {
+        "subject_ref": "media-source:audio-submix:owned-fixture",
+        "policy_id": "policy:media-recording:wav/v1",
+        "parameters": {}
+      }
+    },
+    {
+      "command_id": "capture.render.execute",
+      "namespace": "capture",
+      "method": "render_execute",
+      "kind": "start",
+      "descriptor_id": "uai.long_running.capture.render/v1",
+      "handler_binding": "long-running-session.capture.render.v1",
+      "parameters": [
+        {"name":"subject_ref","wire_type":"string","required":true,"nullable":false},
+        {"name":"policy_id","wire_type":"string","required":true,"nullable":false},
+        {"name":"parameters","wire_type":"object","required":true,"nullable":false}
+      ],
+      "example_params": {
+        "subject_ref": "render-resource:/Game/UAI/FixtureRT.FixtureRT",
+        "policy_id": "policy:render-operation:clear/v1",
+        "parameters": {}
+      }
+    },
+    {
+      "command_id": "editor.safe_exit",
+      "namespace": "editor",
+      "method": "safe_exit",
+      "kind": "start",
+      "descriptor_id": "uai.long_running.editor.safe_exit/v1",
+      "handler_binding": "long-running-session.editor.safe-exit.v1",
+      "parameters": [
+        {"name":"dirty_resolution","wire_type":"object","required":true,"nullable":false}
+      ],
+      "example_params": {
+        "dirty_resolution": {"mode":"reject","save_resources":[],"discard_resources":[]}
+      }
+    },
+    {
+      "command_id": "operation.status",
+      "namespace": "operation",
+      "method": "status",
+      "kind": "lifecycle",
+      "descriptor_id": "uai.long_running.operation.status/v1",
+      "handler_binding": "long-running-session.operation.status.v1",
+      "parameters": [
+        {"name":"operation_ref","wire_type":"object","required":true,"nullable":false}
+      ],
+      "example_params": {
+        "operation_ref": {"operation_id":"op-fixture","owner_lease_id":"lease-fixture","server_session_id":"session-fixture"}
+      }
+    },
+    {
+      "command_id": "operation.resume",
+      "namespace": "operation",
+      "method": "resume",
+      "kind": "lifecycle",
+      "descriptor_id": "uai.long_running.operation.resume/v1",
+      "handler_binding": "long-running-session.operation.resume.v1",
+      "parameters": [
+        {"name":"operation_ref","wire_type":"object","required":true,"nullable":false},
+        {"name":"expected_generation","wire_type":"integer","required":true,"nullable":false}
+      ],
+      "example_params": {
+        "operation_ref": {"operation_id":"op-fixture","owner_lease_id":"lease-fixture","server_session_id":"session-fixture"},
+        "expected_generation": 1
+      }
+    },
+    {
+      "command_id": "operation.cancel",
+      "namespace": "operation",
+      "method": "cancel",
+      "kind": "lifecycle",
+      "descriptor_id": "uai.long_running.operation.cancel/v1",
+      "handler_binding": "long-running-session.operation.cancel.v1",
+      "parameters": [
+        {"name":"operation_ref","wire_type":"object","required":true,"nullable":false},
+        {"name":"reason","wire_type":"string","required":true,"nullable":false}
+      ],
+      "example_params": {
+        "operation_ref": {"operation_id":"op-fixture","owner_lease_id":"lease-fixture","server_session_id":"session-fixture"},
+        "reason": "fixture-cancel"
+      }
+    },
+    {
+      "command_id": "operation.receipt",
+      "namespace": "operation",
+      "method": "receipt",
+      "kind": "lifecycle",
+      "descriptor_id": "uai.long_running.operation.receipt/v1",
+      "handler_binding": "long-running-session.operation.receipt.v1",
+      "parameters": [
+        {"name":"operation_ref","wire_type":"object","required":true,"nullable":false}
+      ],
+      "example_params": {
+        "operation_ref": {"operation_id":"op-fixture","owner_lease_id":"lease-fixture","server_session_id":"session-fixture"}
+      }
+    },
+    {
+      "command_id": "operation.reconcile",
+      "namespace": "operation",
+      "method": "reconcile",
+      "kind": "lifecycle",
+      "descriptor_id": "uai.long_running.operation.reconcile/v1",
+      "handler_binding": "long-running-session.operation.reconcile.v1",
+      "parameters": [
+        {"name":"operation_ref","wire_type":"object","required":true,"nullable":false},
+        {"name":"expected_generation","wire_type":"integer","required":true,"nullable":false}
+      ],
+      "example_params": {
+        "operation_ref": {"operation_id":"op-fixture","owner_lease_id":"lease-fixture","server_session_id":"session-fixture"},
+        "expected_generation": 1
+      },
+      "may_start_or_advance_native_work": false
+    },
+    {
+      "command_id": "operation.release",
+      "namespace": "operation",
+      "method": "release",
+      "kind": "lifecycle",
+      "descriptor_id": "uai.long_running.operation.release/v1",
+      "handler_binding": "long-running-session.operation.release.v1",
+      "parameters": [
+        {"name":"operation_ref","wire_type":"object","required":true,"nullable":false}
+      ],
+      "example_params": {
+        "operation_ref": {"operation_id":"op-fixture","owner_lease_id":"lease-fixture","server_session_id":"session-fixture"}
+      }
+    }
+  ],
+  "family_bindings": [
+    {"adapter_id":"compile_build_job","family_id":"asset_compile","command_id":"job.compile_build"},
+    {"adapter_id":"compile_build_job","family_id":"world_build","command_id":"job.compile_build"},
+    {"adapter_id":"compile_build_job","family_id":"external_process","command_id":"job.compile_build"},
+    {"adapter_id":"compile_build_job","family_id":"world_partition_resave","command_id":"job.compile_build"},
+    {"adapter_id":"editor_session_operation","family_id":"asset_editor","command_id":"editor.session"},
+    {"adapter_id":"editor_session_operation","family_id":"runtime_preview","command_id":"editor.session"},
+    {"adapter_id":"editor_session_operation","family_id":"world_context","command_id":"editor.session"},
+    {"adapter_id":"editor_session_operation","family_id":"modeling_tool","command_id":"editor.session"},
+    {"adapter_id":"editor_session_operation","family_id":"voxel_grid","command_id":"editor.session"},
+    {"adapter_id":"editor_session_operation","family_id":"host_lifecycle","command_id":"editor.safe_exit"},
+    {"adapter_id":"capture_media_long_job","family_id":"image_capture","command_id":"capture.image.execute"},
+    {"adapter_id":"capture_media_long_job","family_id":"media_recording","command_id":"capture.media.execute"},
+    {"adapter_id":"capture_media_long_job","family_id":"render_resource","command_id":"capture.render.execute"}
+  ],
+  "result_contract": {
+    "snapshot_schema": "uai.long_running.snapshot.v1",
+    "receipt_schema": "uai.long_running.receipt.v1",
+    "accepted_is_complete": false,
+    "exit_scheduled_is_complete": false,
+    "artifact_ready_is_complete": false,
+    "state_unknown_retry_safe": false,
+    "disconnect_implies_outcome": false
+  },
+  "python_boundary": {
+    "one_function_one_command": true,
+    "hidden_poll_loop": false,
+    "hidden_retry": false,
+    "process_close_logic": false,
+    "direct_http": false
+  },
+  "forbidden_public_parameters": [
+    "adapter_id",
+    "command_line",
+    "executable",
+    "arguments",
+    "process_handle",
+    "session_registry",
+    "timeout_seconds",
+    "http_route",
+    "raw_image_bytes",
+    "raw_audio_bytes",
+    "raw_video_bytes",
+    "business_outcome"
+  ]
+}

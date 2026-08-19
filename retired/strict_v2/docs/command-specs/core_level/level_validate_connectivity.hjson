@@ -1,0 +1,91 @@
+authoring: { reason: command_has_no_registered_folder_authoring_profile, state: none }
+category: core_level
+command: level_validate_connectivity
+deprecation: { reason: command_is_active, state: none }
+discovery: { aliases: [], keywords_en: [level, validate, connectivity, core_level], keywords_zh: [level_validate_connectivity], summary_en: "Execute level_validate_connectivity with a verified implementation contract", summary_zh: "多点连通性验收（walk + 显式边）", tags: [core_level, p2-002] }
+errors: {
+  codes: [
+    { code: navmesh_navigation_system_not_found, description_zh: "C++ 实现返回错误码 navmesh_navigation_system_not_found", retry_safe: false, stage: execution, wire_match: exact }
+    { code: navmesh_no_nav_data, description_zh: "C++ 实现返回错误码 navmesh_no_nav_data", retry_safe: false, stage: execution, wire_match: exact }
+    { code: no_editor_world, description_zh: "C++ 实现返回错误码 no_editor_world", retry_safe: false, stage: execution, wire_match: exact }
+    { code: no_geditor, description_zh: "C++ 实现返回错误码 no_geditor", retry_safe: false, stage: execution, wire_match: exact }
+    { code: not_enough_nodes, description_zh: "C++ 实现返回错误码 not_enough_nodes", retry_safe: false, stage: execution, wire_match: exact }
+    { code: pairs_index_out_of_range, description_zh: "C++ 实现返回错误码 pairs_index_out_of_range", retry_safe: false, stage: execution, wire_match: exact }
+    { code: pairs_invalid_item, description_zh: "C++ 实现返回错误码 pairs_invalid_item", retry_safe: true, stage: preflight, wire_match: exact }
+    { code: pairs_missing_indices, description_zh: "C++ 实现返回错误码 pairs_missing_indices", retry_safe: true, stage: preflight, wire_match: exact }
+    { code: points_invalid_vector, description_zh: "C++ 实现返回错误码 points_invalid_vector", retry_safe: true, stage: preflight, wire_match: exact }
+    { code: points_or_probe_actor_ids_required, description_zh: "C++ 实现返回错误码 points_or_probe_actor_ids_required", retry_safe: true, stage: preflight, wire_match: exact }
+    { code: probe_actor_ids_contains_empty, description_zh: "C++ 实现返回错误码 probe_actor_ids_contains_empty", retry_safe: false, stage: execution, wire_match: exact }
+    { code: probe_actor_not_found, description_zh: "C++ 实现返回错误码 probe_actor_not_found", retry_safe: false, stage: execution, wire_match: exact }
+  ]
+}
+evidence: {
+  docs: [
+    { path: "Plugins/UeAgentInterface/docs/commands/core_level/level_validate_connectivity.md", purpose: "user documentation cross-check; C++ implementation remains authoritative" }
+  ]
+  implementation: [
+    { line_hint: 328, path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Commands/Level/UeAgentHttpServer_Level_Navigation.cpp", purpose: "command handler, parameter and return evidence", symbol: CmdLevelValidateConnectivity }
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Commands/AI/UeAgentHttpServer_AI_Blackboard.cpp", purpose: "transitive helper evidence used by the command handler" }
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Commands/Level/UeAgentHttpServer_Level_CaptureAndPersistence.cpp", purpose: "transitive helper evidence used by the command handler" }
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Server/UeAgentHttpServer.cpp", purpose: "transitive helper evidence used by the command handler" }
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Utilities/UeAgentJsonDiagnostics.cpp", purpose: "transitive helper evidence used by the command handler" }
+  ]
+  tests: [
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterfaceTests/Private/Smoke/UeAgentInterfaceSmoke_LevelViewportModeling.cpp", purpose: "smoke or negative-path evidence cross-checked for the verified contract" }
+  ]
+}
+execution: {
+  destructive: false
+  editor_state: required
+  game_thread: required
+  idempotent: true
+  kind: read_only
+  overwrite_behavior: none
+  pie_state: allowed
+  retry_safe: true
+  save_behavior: none
+  side_effects: []
+  ui_effect: none
+}
+maturity: verified
+params: {
+  constraints: []
+  fields: {
+    allow_partial: { default: false, default_state: defined, description_zh: "C++ 实现读取的 allow_partial 参数", required: false, type: bool }
+    graph_root_index: { default: 0, default_state: defined, description_zh: "C++ 实现读取的 graph_root_index 参数", required: false, type: integer }
+    include_path_points: { default: false, default_state: defined, description_zh: "C++ 实现读取的 include_path_points 参数", required: false, type: bool }
+    max_path_points: { default_state: none, description_zh: "C++ 实现读取的 max_path_points 参数", required: false, type: number }
+    max_projection_distance_cm: { default: -1, default_state: defined, description_zh: "C++ 实现读取的 max_projection_distance_cm 参数", required: false, type: number }
+    pairs: { default_state: none, description_zh: "C++ 实现读取的 pairs 参数", item_type: json_value, required: false, type: array }
+    points: { default_state: none, description_zh: "C++ 实现读取的 points 参数", item_type: json_value, required: false, type: array }
+    probe_actor_ids: { default_state: none, description_zh: "C++ 实现读取的 probe_actor_ids 参数", item_type: json_value, required: false, type: array }
+    project_query_extent: { default_state: none, description_zh: "C++ 实现读取的 project_query_extent 参数", required: false, type: json_value }
+    project_query_extent_cm: { default_state: none, description_zh: "C++ 实现读取的 project_query_extent_cm 参数", required: false, type: json_value }
+    project_to_nav: { default: true, default_state: defined, description_zh: "C++ 实现读取的 project_to_nav 参数", required: false, type: bool }
+    stop_on_failure: { default: false, default_state: defined, description_zh: "C++ 实现读取的 stop_on_failure 参数", required: false, type: bool }
+  }
+  state: defined
+}
+response: { artifact_fields: [], compact_fields: [all_connected, first_failure_pair_index, first_failure_reason, graph, include_path_points, max_path_points], failure_fields: [], max_items_policy: { fields: [], mode: none } }
+returns: {
+  fields: {
+    all_connected: { description_zh: "C++ 实现返回的 all_connected 字段；是否出现取决于执行分支", required: false, type: bool }
+    first_failure_pair_index: { description_zh: "C++ 实现返回的 first_failure_pair_index 字段；是否出现取决于执行分支", required: false, type: integer }
+    first_failure_reason: { description_zh: "C++ 实现返回的 first_failure_reason 字段；是否出现取决于执行分支", required: false, type: string }
+    graph: { description_zh: "C++ 实现返回的 graph 字段；是否出现取决于执行分支", required: false, type: json_value }
+    include_path_points: { description_zh: "C++ 实现返回的 include_path_points 字段；是否出现取决于执行分支", required: false, type: bool }
+    max_path_points: { description_zh: "C++ 实现返回的 max_path_points 字段；是否出现取决于执行分支", required: false, type: number }
+    nav_data_count: { description_zh: "C++ 实现返回的 nav_data_count 字段；是否出现取决于执行分支", required: false, type: integer }
+    node_count: { description_zh: "C++ 实现返回的 node_count 字段；是否出现取决于执行分支", required: false, type: integer }
+    nodes: { description_zh: "C++ 实现返回的 nodes 字段；是否出现取决于执行分支", item_type: json_value, required: false, type: array }
+    pair_count: { description_zh: "C++ 实现返回的 pair_count 字段；是否出现取决于执行分支", required: false, type: integer }
+    pairs: { description_zh: "C++ 实现返回的 pairs 字段；是否出现取决于执行分支", item_type: json_value, required: false, type: array }
+    pairs_truncated: { description_zh: "C++ 实现返回的 pairs_truncated 字段；是否出现取决于执行分支", required: false, type: bool }
+  }
+  state: defined
+}
+schema: uai.command_spec.v1
+status: active
+types: {}
+verification: { reason: read_only_command_has_no_post_write_verification, state: none }
+version: 1

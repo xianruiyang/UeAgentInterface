@@ -1,0 +1,188 @@
+authoring: { reason: command_has_no_registered_folder_authoring_profile, state: none }
+category: node_graph
+command: node_graph_layout
+deprecation: { reason: command_is_active, state: none }
+discovery: { aliases: [], keywords_en: [node, graph, layout, node_graph], keywords_zh: [node_graph_layout], summary_en: "Execute node_graph_layout with a verified implementation contract", summary_zh: "对一个资产内指定或批量选中的节点连线图执行自动排布", tags: [node_graph, p2-003] }
+errors: {
+  codes: [
+    { code: add_reroute, description_zh: "C++ 实现返回错误码 add_reroute", retry_safe: false, stage: execution, wire_match: exact }
+    { code: asset_not_found, description_zh: "C++ 实现返回错误码 asset_not_found", retry_safe: false, stage: execution, wire_match: exact }
+    { code: asset_or_graph_missing_for_real_geometry, description_zh: "C++ 实现返回错误码 asset_or_graph_missing_for_real_geometry", retry_safe: true, stage: preflight, wire_match: exact }
+    { code: break, description_zh: "C++ 实现返回错误码 break", retry_safe: false, stage: execution, wire_match: exact }
+    { code: dry_run_removed_node_graph_layout_always_writes_use_undo_to_revert, description_zh: "C++ 实现返回错误码 dry_run_removed_node_graph_layout_always_writes_use_undo_to_revert", retry_safe: false, stage: execution, wire_match: exact }
+    { code: ensure, description_zh: "C++ 实现返回错误码 ensure", retry_safe: false, stage: execution, wire_match: exact }
+    { code: generic_edgraph_reroute_writeback_unsupported_for_adapter, description_zh: "C++ 实现返回错误码 generic_edgraph_reroute_writeback_unsupported_for_adapter", retry_safe: false, stage: execution, wire_match: exact }
+    { code: graph_editor_access_offset_unavailable, description_zh: "C++ 实现返回错误码 graph_editor_access_offset_unavailable", retry_safe: false, stage: execution, wire_match: exact }
+    { code: graph_not_found, description_zh: "C++ 实现返回错误码 graph_not_found", retry_safe: false, stage: execution, wire_match: exact }
+    { code: graph_panel_not_found_for_real_geometry, description_zh: "C++ 实现返回错误码 graph_panel_not_found_for_real_geometry", retry_safe: false, stage: execution, wire_match: exact }
+    { code: material_edgraph_not_found, description_zh: "C++ 实现返回错误码 material_edgraph_not_found", retry_safe: false, stage: execution, wire_match: exact }
+    { code: material_function_preview_duplicate_failed, description_zh: "C++ 实现返回错误码 material_function_preview_duplicate_failed", retry_safe: false, stage: execution, wire_match: exact }
+    { code: material_function_preview_expression_writeback_failed, description_zh: "C++ 实现返回错误码 material_function_preview_expression_writeback_failed", retry_safe: false, stage: execution, wire_match: prefix }
+    { code: material_function_preview_material_create_failed, description_zh: "C++ 实现返回错误码 material_function_preview_material_create_failed", retry_safe: false, stage: execution, wire_match: exact }
+    { code: material_function_required_for_transient_layout_graph, description_zh: "C++ 实现返回错误码 material_function_required_for_transient_layout_graph", retry_safe: true, stage: preflight, wire_match: exact }
+    { code: material_graph_asset_required, description_zh: "C++ 实现返回错误码 material_graph_asset_required", retry_safe: true, stage: preflight, wire_match: exact }
+    { code: material_graph_reroute_writeback_unsupported_for_adapter, description_zh: "C++ 实现返回错误码 material_graph_reroute_writeback_unsupported_for_adapter", retry_safe: false, stage: execution, wire_match: exact }
+    { code: missing_asset_path, description_zh: "C++ 实现返回错误码 missing_asset_path", retry_safe: true, stage: preflight, wire_match: exact }
+    { code: package_not_found, description_zh: "C++ 实现返回错误码 package_not_found", retry_safe: false, stage: execution, wire_match: exact }
+    { code: real_geometry_incomplete, description_zh: "C++ 实现返回错误码 real_geometry_incomplete", retry_safe: false, stage: execution, wire_match: prefix }
+    { code: reroute_delete_all_guard_blocked, description_zh: "C++ 实现返回错误码 reroute_delete_all_guard_blocked", retry_safe: false, stage: execution, wire_match: prefix }
+    { code: rigvm_, description_zh: "C++ 实现返回错误码 rigvm_", retry_safe: false, stage: execution, wire_match: prefix }
+    { code: rigvm_bus_branch_point_missing, description_zh: "C++ 实现返回错误码 rigvm_bus_branch_point_missing", retry_safe: true, stage: preflight, wire_match: prefix }
+    { code: rigvm_bus_topology_invalid, description_zh: "C++ 实现返回错误码 rigvm_bus_topology_invalid", retry_safe: true, stage: preflight, wire_match: exact }
+    { code: rigvm_bus_topology_temp_target_missing, description_zh: "C++ 实现返回错误码 rigvm_bus_topology_temp_target_missing", retry_safe: true, stage: preflight, wire_match: exact }
+    { code: rigvm_edge_pin_path_unavailable, description_zh: "C++ 实现返回错误码 rigvm_edge_pin_path_unavailable", retry_safe: false, stage: execution, wire_match: prefix }
+    { code: rigvm_graph_or_controller_unavailable, description_zh: "C++ 实现返回错误码 rigvm_graph_or_controller_unavailable", retry_safe: false, stage: execution, wire_match: exact }
+    { code: rigvm_remove_reroute_failed, description_zh: "C++ 实现返回错误码 rigvm_remove_reroute_failed", retry_safe: false, stage: execution, wire_match: prefix }
+    { code: rigvm_reroute_alignment_ednode_not_found, description_zh: "C++ 实现返回错误码 rigvm_reroute_alignment_ednode_not_found", retry_safe: false, stage: execution, wire_match: prefix }
+    { code: rigvm_reroute_alignment_graph_or_controller_unavailable, description_zh: "C++ 实现返回错误码 rigvm_reroute_alignment_graph_or_controller_unavailable", retry_safe: false, stage: execution, wire_match: exact }
+    { code: rigvm_reroute_alignment_graph_panel_unavailable, description_zh: "C++ 实现返回错误码 rigvm_reroute_alignment_graph_panel_unavailable", retry_safe: false, stage: execution, wire_match: exact }
+    { code: rigvm_reroute_alignment_invalid_target, description_zh: "C++ 实现返回错误码 rigvm_reroute_alignment_invalid_target", retry_safe: true, stage: preflight, wire_match: prefix }
+    { code: rigvm_reroute_alignment_measure_failed, description_zh: "C++ 实现返回错误码 rigvm_reroute_alignment_measure_failed", retry_safe: false, stage: execution, wire_match: prefix }
+    { code: rigvm_reroute_alignment_move_failed, description_zh: "C++ 实现返回错误码 rigvm_reroute_alignment_move_failed", retry_safe: false, stage: execution, wire_match: prefix }
+    { code: rigvm_reroute_alignment_node_lost, description_zh: "C++ 实现返回错误码 rigvm_reroute_alignment_node_lost", retry_safe: false, stage: execution, wire_match: exact }
+    { code: rigvm_reroute_alignment_residual_too_large, description_zh: "C++ 实现返回错误码 rigvm_reroute_alignment_residual_too_large", retry_safe: false, stage: execution, wire_match: prefix }
+    { code: rigvm_reroute_alignment_slate_not_initialized, description_zh: "C++ 实现返回错误码 rigvm_reroute_alignment_slate_not_initialized", retry_safe: false, stage: execution, wire_match: exact }
+    { code: rigvm_reroute_alignment_verify_ednode_not_found, description_zh: "C++ 实现返回错误码 rigvm_reroute_alignment_verify_ednode_not_found", retry_safe: false, stage: execution, wire_match: prefix }
+    { code: rigvm_reroute_alignment_verify_measure_failed, description_zh: "C++ 实现返回错误码 rigvm_reroute_alignment_verify_measure_failed", retry_safe: false, stage: execution, wire_match: prefix }
+    { code: rigvm_reroute_alignment_verify_node_lost, description_zh: "C++ 实现返回错误码 rigvm_reroute_alignment_verify_node_lost", retry_safe: false, stage: execution, wire_match: exact }
+    { code: rigvm_restore_semantic_link_failed, description_zh: "C++ 实现返回错误码 rigvm_restore_semantic_link_failed", retry_safe: false, stage: execution, wire_match: prefix }
+    { code: save_package_failed, description_zh: "C++ 实现返回错误码 save_package_failed", retry_safe: false, stage: execution, wire_match: exact }
+    { code: shared_blueprint_layout_core_failed, description_zh: "C++ 实现返回错误码 shared_blueprint_layout_core_failed", retry_safe: false, stage: execution, wire_match: exact }
+    { code: slate_not_initialized_for_real_geometry, description_zh: "C++ 实现返回错误码 slate_not_initialized_for_real_geometry", retry_safe: false, stage: execution, wire_match: exact }
+    { code: unsupported_non_pin_node_graph_or_vertical_state_graph, description_zh: "C++ 实现返回错误码 unsupported_non_pin_node_graph_or_vertical_state_graph", retry_safe: false, stage: execution, wire_match: exact }
+  ]
+}
+evidence: {
+  docs: [
+    { path: "Plugins/UeAgentInterface/docs/commands/node_graph/node_graph_layout.md", purpose: "user documentation cross-check; C++ implementation remains authoritative" }
+  ]
+  implementation: [
+    { line_hint: 80, path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Commands/NodeGraph/UeAgentHttpServer_NodeGraph.cpp", purpose: "command handler, parameter and return evidence", symbol: CmdNodeGraphLayout }
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Commands/NodeGraph/UeAgentHttpServer_NodeGraphOpsApply.cpp", purpose: "transitive helper evidence used by the command handler" }
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Commands/NodeGraph/UeAgentHttpServer_NodeGraphOpsCore.cpp", purpose: "transitive helper evidence used by the command handler" }
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Commands/NodeGraph/UeAgentHttpServer_NodeGraphOpsDiagnostics.cpp", purpose: "transitive helper evidence used by the command handler" }
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Commands/NodeGraph/UeAgentHttpServer_NodeGraphOpsLayout.cpp", purpose: "transitive helper evidence used by the command handler" }
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Commands/NodeGraph/UeAgentHttpServer_NodeGraphOpsMaterial.cpp", purpose: "transitive helper evidence used by the command handler" }
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Commands/NodeGraph/UeAgentHttpServer_NodeGraphOps_GenericLayout.cpp", purpose: "transitive helper evidence used by the command handler" }
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Server/UeAgentHttpServer.cpp", purpose: "transitive helper evidence used by the command handler" }
+  ]
+  tests: [
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterfaceTests/Private/Smoke/PCG/UeAgentInterfacePCGSmokeTests.cpp", purpose: "smoke or negative-path evidence cross-checked for the verified contract" }
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterfaceTests/Private/Smoke/UeAgentInterfaceSmoke_BlueprintUmg.cpp", purpose: "smoke or negative-path evidence cross-checked for the verified contract" }
+  ]
+}
+execution: {
+  destructive: true
+  editor_state: required
+  game_thread: required
+  idempotent: false
+  kind: write
+  overwrite_behavior: target_asset
+  pie_state: allowed
+  retry_safe: false
+  save_behavior: none
+  side_effects: [modifies_asset, modifies_editor_session, opens_window]
+  ui_effect: window_mutation
+}
+maturity: verified
+params: {
+  constraints: []
+  fields: {
+    asset_path: { default_state: none, description_zh: "C++ 实现读取的 asset_path 参数", path_semantics: { access_scope: project_write, kind: ue_asset }, required: true, type: ue_asset_path }
+    graph_selector: { default_state: none, description_zh: "C++ 实现读取的 graph_selector 参数", required: false, type: object, type_ref: "shared:NodeGraphSelector" }
+    layout_options: { default_state: none, description_zh: "C++ 实现读取的 layout_options 参数", required: false, type: object, type_ref: "shared:NodeGraphLayoutOptions" }
+  }
+  state: defined
+}
+response: { artifact_fields: [], compact_fields: [asset_path, changed, saved, node_count, moved_node_count], failure_fields: [params.asset_path], max_items_policy: { fields: [], mode: none } }
+returns: {
+  fields: {
+    access_offset_source: { description_zh: "C++ 实现返回的 access_offset_source 字段；是否出现取决于执行分支", required: false, type: string }
+    adapter: { description_zh: "C++ 实现返回的 adapter 字段；是否出现取决于执行分支", required: false, type: string }
+    allow_remove_all_reroute_nodes: { description_zh: "C++ 实现返回的 allow_remove_all_reroute_nodes 字段；是否出现取决于执行分支", required: false, type: bool }
+    asset_path: { description_zh: "C++ 实现返回的 asset_path 字段；是否出现取决于执行分支", required: false, type: ue_asset_path }
+    boundary_bus_count: { description_zh: "C++ 实现返回的 boundary_bus_count 字段；是否出现取决于执行分支", required: false, type: integer }
+    changed: { description_zh: "C++ 实现返回的 changed 字段；是否出现取决于执行分支", required: false, type: bool }
+    collapsed_reroute_edge_count: { description_zh: "C++ 实现返回的 collapsed_reroute_edge_count 字段；是否出现取决于执行分支", required: false, type: integer }
+    collapsed_reroute_node_count: { description_zh: "C++ 实现返回的 collapsed_reroute_node_count 字段；是否出现取决于执行分支", required: false, type: integer }
+    compile_skipped_reason: { description_zh: "C++ 实现返回的 compile_skipped_reason 字段；是否出现取决于执行分支", required: false, type: string }
+    compiled: { description_zh: "C++ 实现返回的 compiled 字段；是否出现取决于执行分支", required: false, type: bool }
+    created_reroute_node_count: { description_zh: "C++ 实现返回的 created_reroute_node_count 字段；是否出现取决于执行分支", required: false, type: integer }
+    delegated_command: { description_zh: "C++ 实现返回的 delegated_command 字段；是否出现取决于执行分支", required: false, type: string }
+    edge_count: { description_zh: "C++ 实现返回的 edge_count 字段；是否出现取决于执行分支", required: false, type: integer }
+    edges: { description_zh: "C++ 实现返回的 edges 字段；是否出现取决于执行分支", item_type: json_value, required: false, type: array }
+    effective_replace_existing_reroute_nodes: { description_zh: "C++ 实现返回的 effective_replace_existing_reroute_nodes 字段；是否出现取决于执行分支", required: false, type: bool }
+    existing_reroute_node_count: { description_zh: "C++ 实现返回的 existing_reroute_node_count 字段；是否出现取决于执行分支", required: false, type: integer }
+    external_bus_edge_count: { description_zh: "C++ 实现返回的 external_bus_edge_count 字段；是否出现取决于执行分支", required: false, type: integer }
+    focused_geometry_budget_exhausted: { description_zh: "C++ 实现返回的 focused_geometry_budget_exhausted 字段；是否出现取决于执行分支", required: false, type: bool }
+    focused_geometry_node_count: { description_zh: "C++ 实现返回的 focused_geometry_node_count 字段；是否出现取决于执行分支", required: false, type: integer }
+    geometry_error: { description_zh: "C++ 实现返回的 geometry_error 字段；是否出现取决于执行分支", required: false, type: string }
+    geometry_measurement_zoom: { description_zh: "C++ 实现返回的 geometry_measurement_zoom 字段；是否出现取决于执行分支", required: false, type: number }
+    geometry_node_count: { description_zh: "C++ 实现返回的 geometry_node_count 字段；是否出现取决于执行分支", required: false, type: integer }
+    geometry_source: { description_zh: "C++ 实现返回的 geometry_source 字段；是否出现取决于执行分支", required: false, type: string }
+    geometry_used_offscreen_graph_editor: { description_zh: "C++ 实现返回的 geometry_used_offscreen_graph_editor 字段；是否出现取决于执行分支", required: false, type: bool }
+    graph_name: { description_zh: "C++ 实现返回的 graph_name 字段；是否出现取决于执行分支", required: false, type: string }
+    graph_path: { description_zh: "C++ 实现返回的 graph_path 字段；是否出现取决于执行分支", required: false, type: string }
+    input_access_offset_x: { description_zh: "C++ 实现返回的 input_access_offset_x 字段；是否出现取决于执行分支", required: false, type: number }
+    input_chain_count: { description_zh: "C++ 实现返回的 input_chain_count 字段；是否出现取决于执行分支", required: false, type: integer }
+    insert_reroute_nodes: { description_zh: "C++ 实现返回的 insert_reroute_nodes 字段；是否出现取决于执行分支", required: false, type: bool }
+    island_internal_multi_column_bus_count: { description_zh: "C++ 实现返回的 island_internal_multi_column_bus_count 字段；是否出现取决于执行分支", required: false, type: integer }
+    island_internal_same_column_collision_bus_count: { description_zh: "C++ 实现返回的 island_internal_same_column_collision_bus_count 字段；是否出现取决于执行分支", required: false, type: integer }
+    lane_assignments: { description_zh: "C++ 实现返回的 lane_assignments 字段；是否出现取决于执行分支", item_type: json_value, required: false, type: array }
+    layout_design_complete: { description_zh: "C++ 实现返回的 layout_design_complete 字段；是否出现取决于执行分支", required: false, type: bool }
+    layout_design_feature_complete_count: { description_zh: "C++ 实现返回的 layout_design_feature_complete_count 字段；是否出现取决于执行分支", required: false, type: integer }
+    layout_design_feature_count: { description_zh: "C++ 实现返回的 layout_design_feature_count 字段；是否出现取决于执行分支", required: false, type: integer }
+    layout_design_feature_coverage: { description_zh: "C++ 实现返回的 layout_design_feature_coverage 字段；是否出现取决于执行分支", item_type: json_value, required: false, type: array }
+    layout_design_feature_missing_count: { description_zh: "C++ 实现返回的 layout_design_feature_missing_count 字段；是否出现取决于执行分支", required: false, type: integer }
+    layout_design_feature_partial_count: { description_zh: "C++ 实现返回的 layout_design_feature_partial_count 字段；是否出现取决于执行分支", required: false, type: integer }
+    layout_framework: { description_zh: "C++ 实现返回的 layout_framework 字段；是否出现取决于执行分支", required: false, type: string }
+    layout_strategy: { description_zh: "C++ 实现返回的 layout_strategy 字段；是否出现取决于执行分支", required: false, type: string }
+    local_bus_edge_count: { description_zh: "C++ 实现返回的 local_bus_edge_count 字段；是否出现取决于执行分支", required: false, type: integer }
+    measured_node_count: { description_zh: "C++ 实现返回的 measured_node_count 字段；是否出现取决于执行分支", required: false, type: integer }
+    metrics_after: { description_zh: "C++ 实现返回的 metrics_after 字段；是否出现取决于执行分支", required: false, type: json_value }
+    metrics_after_reroute_plan: { description_zh: "C++ 实现返回的 metrics_after_reroute_plan 字段；是否出现取决于执行分支", required: false, type: json_value }
+    metrics_before: { description_zh: "C++ 实现返回的 metrics_before 字段；是否出现取决于执行分支", required: false, type: json_value }
+    missing_measured_node_geometry_count: { description_zh: "C++ 实现返回的 missing_measured_node_geometry_count 字段；是否出现取决于执行分支", required: false, type: integer }
+    missing_pin_anchor_count: { description_zh: "C++ 实现返回的 missing_pin_anchor_count 字段；是否出现取决于执行分支", required: false, type: integer }
+    missing_visible_pin_anchor_count: { description_zh: "C++ 实现返回的 missing_visible_pin_anchor_count 字段；是否出现取决于执行分支", required: false, type: integer }
+    moved_node_count: { description_zh: "C++ 实现返回的 moved_node_count 字段；是否出现取决于执行分支", required: false, type: integer }
+    node_count: { description_zh: "C++ 实现返回的 node_count 字段；是否出现取决于执行分支", required: false, type: integer }
+    node_graph_layout_strategy: { description_zh: "C++ 实现返回的 node_graph_layout_strategy 字段；是否出现取决于执行分支", required: false, type: string }
+    nodes: { description_zh: "C++ 实现返回的 nodes 字段；是否出现取决于执行分支", item_type: json_value, required: false, type: array }
+    opened_editor_for_geometry: { description_zh: "C++ 实现返回的 opened_editor_for_geometry 字段；是否出现取决于执行分支", required: false, type: bool }
+    output_access_offset_x: { description_zh: "C++ 实现返回的 output_access_offset_x 字段；是否出现取决于执行分支", required: false, type: number }
+    pin_geometry_anchor_count: { description_zh: "C++ 实现返回的 pin_geometry_anchor_count 字段；是否出现取决于执行分支", required: false, type: integer }
+    pin_widget_count: { description_zh: "C++ 实现返回的 pin_widget_count 字段；是否出现取决于执行分支", required: false, type: integer }
+    planned_reroute_knot_node_count: { description_zh: "C++ 实现返回的 planned_reroute_knot_node_count 字段；是否出现取决于执行分支", required: false, type: integer }
+    rejection_diagnostics: { description_zh: "C++ 实现返回的 rejection_diagnostics 字段；是否出现取决于执行分支", item_type: json_value, required: false, type: array }
+    replace_existing_reroute_nodes: { description_zh: "C++ 实现返回的 replace_existing_reroute_nodes 字段；是否出现取决于执行分支", required: false, type: bool }
+    reroute_plan: { description_zh: "C++ 实现返回的 reroute_plan 字段；是否出现取决于执行分支", item_type: json_value, required: false, type: array }
+    reroute_plan_count: { description_zh: "C++ 实现返回的 reroute_plan_count 字段；是否出现取决于执行分支", required: false, type: integer }
+    reroute_writeback_supported: { description_zh: "C++ 实现返回的 reroute_writeback_supported 字段；是否出现取决于执行分支", required: false, type: bool }
+    restored_graph_view_after_capture: { description_zh: "C++ 实现返回的 restored_graph_view_after_capture 字段；是否出现取决于执行分支", required: false, type: bool }
+    route_through_hard_occupancy_count: { description_zh: "C++ 实现返回的 route_through_hard_occupancy_count 字段；是否出现取决于执行分支", required: false, type: integer }
+    route_through_island_count: { description_zh: "C++ 实现返回的 route_through_island_count 字段；是否出现取决于执行分支", required: false, type: integer }
+    saved: { description_zh: "C++ 实现返回的 saved 字段；是否出现取决于执行分支", required: false, type: bool }
+    use_real_geometry: { description_zh: "C++ 实现返回的 use_real_geometry 字段；是否出现取决于执行分支", required: false, type: bool }
+    used_real_geometry: { description_zh: "C++ 实现返回的 used_real_geometry 字段；是否出现取决于执行分支", required: false, type: bool }
+    virtual_node_count: { description_zh: "C++ 实现返回的 virtual_node_count 字段；是否出现取决于执行分支", required: false, type: integer }
+  }
+  state: defined
+}
+schema: uai.command_spec.v1
+status: active
+types: {}
+verification: {
+  assertions: [
+    { id: result_present, operator: exists, source: returns.saved }
+    { id: state_readback_present, operator: exists, source: methods.state_readback.graphs }
+  ]
+  failure_policy: fail_overall
+  methods: [
+    { id: result, kind: result_assertion }
+    { command: node_graph_list, id: state_readback, kind: command_readback, params_mapping: { asset_path: params.asset_path, graph_selector: params.graph_selector } }
+  ]
+  required: true
+  state: defined
+}
+version: 1

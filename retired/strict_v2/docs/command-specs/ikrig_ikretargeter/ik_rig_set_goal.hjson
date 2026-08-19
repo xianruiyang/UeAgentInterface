@@ -1,0 +1,100 @@
+authoring: { reason: command_has_no_registered_folder_authoring_profile, state: none }
+category: ikrig_ikretargeter
+command: ik_rig_set_goal
+deprecation: { reason: command_is_active, state: none }
+discovery: { aliases: [], keywords_en: [ik, rig, set, goal, ikrig_ikretargeter], keywords_zh: [ik_rig_set_goal], summary_en: "Execute ik_rig_set_goal with a verified implementation contract", summary_zh: "新增 / 更新 / 删除 goal", tags: [ikrig_ikretargeter, p2-006] }
+errors: {
+  codes: [
+    { code: add_goal_failed, description_zh: "C++ 实现返回错误码 add_goal_failed", retry_safe: false, stage: execution, wire_match: exact }
+    { code: asset_not_found, description_zh: "C++ 实现返回错误码 asset_not_found", retry_safe: false, stage: execution, wire_match: exact }
+    { code: goal_not_found, description_zh: "C++ 实现返回错误码 goal_not_found", retry_safe: false, stage: execution, wire_match: exact }
+    { code: goal_not_found_after_create_or_update, description_zh: "C++ 实现返回错误码 goal_not_found_after_create_or_update", retry_safe: false, stage: execution, wire_match: exact }
+    { code: ik_rig_controller_not_available, description_zh: "C++ 实现返回错误码 ik_rig_controller_not_available", retry_safe: false, stage: execution, wire_match: exact }
+    { code: ik_rig_not_found, description_zh: "C++ 实现返回错误码 ik_rig_not_found", retry_safe: false, stage: execution, wire_match: exact }
+    { code: missing_asset_path, description_zh: "C++ 实现返回错误码 missing_asset_path", retry_safe: true, stage: preflight, wire_match: exact }
+    { code: missing_bone_name, description_zh: "C++ 实现返回错误码 missing_bone_name", retry_safe: true, stage: preflight, wire_match: exact }
+    { code: missing_goal_name, description_zh: "C++ 实现返回错误码 missing_goal_name", retry_safe: true, stage: preflight, wire_match: exact }
+    { code: rename_goal_failed, description_zh: "C++ 实现返回错误码 rename_goal_failed", retry_safe: false, stage: execution, wire_match: exact }
+    { code: save_asset_failed, description_zh: "C++ 实现返回错误码 save_asset_failed", retry_safe: false, stage: execution, wire_match: exact }
+    { code: set_goal_bone_failed, description_zh: "C++ 实现返回错误码 set_goal_bone_failed", retry_safe: false, stage: execution, wire_match: exact }
+  ]
+}
+evidence: {
+  docs: [
+    { path: "Plugins/UeAgentInterface/docs/commands/ikrig_ikretargeter/ik_rig_set_goal.md", purpose: "user documentation cross-check; C++ implementation remains authoritative" }
+  ]
+  implementation: [
+    { line_hint: 714, path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Commands/IK/UeAgentHttpServer_IKAssets.cpp", purpose: "command handler, parameter and return evidence", symbol: CmdIKRigSetGoal }
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Commands/IK/UeAgentHttpServer_IKAssets.cpp", purpose: "current command handler implementation" }
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Server/UeAgentHttpServer.cpp", purpose: "transitive helper evidence used by the command handler" }
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Utilities/UeAgentJsonDiagnostics.cpp", purpose: "transitive helper evidence used by the command handler" }
+  ]
+  tests: [
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterfaceTests/Private/Smoke/UeAgentInterfaceSmoke_AnimationIKNiagara.cpp", purpose: "smoke or negative-path evidence cross-checked for the verified contract" }
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterfaceTests/Private/Smoke/UeAgentInterfaceSmoke_EditorViewport.cpp", purpose: "smoke or negative-path evidence cross-checked for the verified contract" }
+  ]
+}
+execution: {
+  destructive: false
+  editor_state: required
+  game_thread: required
+  idempotent: false
+  kind: write
+  overwrite_behavior: none
+  pie_state: allowed
+  retry_safe: false
+  save_behavior: caller_controlled
+  side_effects: [modifies_asset]
+  ui_effect: none
+}
+maturity: verified
+params: {
+  constraints: []
+  fields: {
+    asset_path: { default_state: none, description_zh: "C++ 实现读取的 asset_path 参数", path_semantics: { access_scope: project_write, kind: ue_asset }, required: true, type: ue_asset_path }
+    bone_name: { default_state: none, description_zh: "C++ 实现读取的 bone_name 参数", required: true, type: string }
+    current_transform: { default_state: none, description_zh: "IK Rig goal 的 character-global/component-space 当前变换；不是 bone-local 或 UE world transform", required: false, type: object, type_ref: "shared:Transform3D" }
+    goal_name: { default_state: none, description_zh: "C++ 实现读取的 goal_name 参数", required: true, type: string }
+    new_goal_name: { default_state: none, description_zh: "C++ 实现读取的 new_goal_name 参数", required: false, type: string }
+    position: { default_state: none, description_zh: "IK Rig goal 的 character-global/component-space 当前变换；不是 bone-local 或 UE world transform", required: false, type: object, type_ref: "shared:Vector3" }
+    position_alpha: { default: 0, default_state: defined, description_zh: "C++ 实现读取的 position_alpha 参数", required: false, type: number }
+    remove: { default: false, default_state: defined, description_zh: "C++ 实现读取的 remove 参数", required: false, type: bool }
+    rotation: { default_state: none, description_zh: "IK Rig goal 的 character-global/component-space 当前变换；不是 bone-local 或 UE world transform", required: false, type: object, type_ref: "shared:Rotator3D" }
+    rotation_alpha: { default: 0, default_state: defined, description_zh: "C++ 实现读取的 rotation_alpha 参数", required: false, type: number }
+    save_after_set: { default: false, default_state: defined, description_zh: "C++ 实现读取的 save_after_set 参数", required: false, type: bool }
+  }
+  state: defined
+}
+response: { artifact_fields: [current_location, current_rotation], compact_fields: [saved, asset_path, bone_name, goal_count], failure_fields: [params.asset_path, params.bone_name, params.goal_name], max_items_policy: { fields: [], mode: none } }
+returns: {
+  fields: {
+    asset_path: { description_zh: "C++ 实现返回的 asset_path 字段；是否出现取决于执行分支", required: false, type: ue_asset_path }
+    bone_name: { description_zh: "C++ 实现返回的 bone_name 字段；是否出现取决于执行分支", required: false, type: string }
+    current_location: { description_zh: "C++ 实现返回的 current_location 字段；是否出现取决于执行分支", required: false, type: object, type_ref: "shared:Vector3" }
+    current_rotation: { description_zh: "C++ 实现返回的 current_rotation 字段；是否出现取决于执行分支", required: false, type: object, type_ref: "shared:Rotator3D" }
+    goal_count: { description_zh: "C++ 实现返回的 goal_count 字段；是否出现取决于执行分支", required: false, type: integer }
+    goal_name: { description_zh: "C++ 实现返回的 goal_name 字段；是否出现取决于执行分支", required: false, type: string }
+    position_alpha: { description_zh: "C++ 实现返回的 position_alpha 字段；是否出现取决于执行分支", required: false, type: number }
+    removed: { description_zh: "C++ 实现返回的 removed 字段；是否出现取决于执行分支", required: false, type: bool }
+    rotation_alpha: { description_zh: "C++ 实现返回的 rotation_alpha 字段；是否出现取决于执行分支", required: false, type: number }
+    saved: { description_zh: "C++ 实现返回的 saved 字段；是否出现取决于执行分支", required: false, type: bool }
+  }
+  state: defined
+}
+schema: uai.command_spec.v1
+status: active
+types: {}
+verification: {
+  assertions: [
+    { id: result_present, operator: exists, source: returns.saved }
+    { id: state_readback_present, operator: exists, source: methods.state_readback.asset_path }
+  ]
+  failure_policy: fail_overall
+  methods: [
+    { id: result, kind: result_assertion }
+    { command: ik_rig_get_info, id: state_readback, kind: command_readback, params_mapping: { asset_path: params.asset_path } }
+  ]
+  required: true
+  state: defined
+}
+version: 1

@@ -1,0 +1,34 @@
+schema: "uai.export_safety_contract.v1"
+dialect_id: "uai-hjson-authoring/1"
+development_truth: "Plugins/UeAgentInterface/Tests/Fixtures/ExportSafetyContract"
+oracle_source: independent_design_fixture
+export_contract_truth: "UeAgentInterfaceCMD/cli/uai_core/contracts/authoring_registry_snapshot.hjson#/registry/export_contract"
+golden_level_tree: golden_level_tree.hjson
+old_final_snapshot: old_final_snapshot.hjson
+failure_injection_contract: failure_injection_contract.hjson
+level_global_plan_cases: level_global_plan_cases.hjson
+enumeration: {
+  default_max_files: 4096
+  expected_stop_entry: 4097
+  expected_error_code: workspace_preflight_failed
+  required_receipt: { entries_visited: 4097, stopped_early: true }
+}
+stable_errors: {
+  reparse_escape: workspace_reparse_escape
+  external_policy_unimplemented: apply_workspace_external_reference_policy_unimplemented
+  ownership_missing: export_workspace_ownership_required
+  publish_failed: export_publish_failed
+  level_plan_invalid: export_level_plan_invalid
+}
+failure_points: [nth_file_write, final_to_backup_then_publish, single_file_replace, level_fragment_assembly]
+required_catalog_test_ids: [
+  UAI.ExportSafety.Python.DesignOracle
+  UAI.ExportSafety.Cpp.TraversalEarlyStop
+  UAI.ExportSafety.Cpp.ReparseEscape
+  UAI.ExportSafety.Cpp.ExternalPolicy
+  UAI.ExportSafety.Cpp.MultiFileOldFinal
+  UAI.ExportSafety.Cpp.PublishSecondStep
+  UAI.ExportSafety.Cpp.PublisherReceipt
+  UAI.ExportSafety.Cpp.LevelGlobalPlan
+  UAI.ExportSafety.UE.LevelGoldenTree
+]

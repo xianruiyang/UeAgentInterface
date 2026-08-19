@@ -1,11 +1,21 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "Server/UeAgentHttpServer.h"
+#include "Domains/PCG/Authoring/UeAgentPCGAuthoringApplyProvider.h"
+#include "Domains/PCG/Authoring/UeAgentPCGAuthoringExport.h"
+#include "Domains/PCG/UeAgentPCGDomainBackend.h"
 
 #include "Module/UeAgentInterfaceLogger.h"
+#include "Utilities/UeAgentAuthoringFileIO.h"
+#include "Utilities/UeAgentAuthoringFolderIO.h"
+#include "Utilities/UeAgentAuthoringFolderStats.h"
 #include "Utilities/UeAgentAuthoringJson.h"
+#include "Utilities/AuthoringCore/UeAgentAuthoringDiagnostics.h"
 #include "Utilities/UeAgentDetailsAuthoring.h"
 #include "Utilities/UeAgentJsonDiagnostics.h"
+#include "Utilities/UeAgentPropertyValueCodec.h"
+#include "Utilities/UeAgentStructuredAuthoringIO.h"
+#include "Utilities/UeAgentUObjectProperties.h"
 
 #include "AssetRegistry/AssetRegistryModule.h"
 #include "Async/TaskGraphInterfaces.h"
@@ -56,2453 +66,6 @@
 #include "UObject/UObjectGlobals.h"
 #include "UObject/UnrealType.h"
 
-namespace UeAgentPCG
-{
-	static constexpr const TCHAR* SchemaCapabilities = TEXT("ue_agent_interface.pcg.capabilities.v1");
-	static constexpr const TCHAR* SchemaCatalog = TEXT("ue_agent_interface.pcg.node_catalog.v1");
-	static constexpr const TCHAR* SchemaFolder = TEXT("ue_agent_interface.pcg.graph_folder.v1");
-	static constexpr const TCHAR* SchemaComponent = TEXT("ue_agent_interface.pcg.component.v1");
-	static constexpr const TCHAR* SchemaData = TEXT("ue_agent_interface.pcg.data.v1");
-	static constexpr const TCHAR* InputNodeId = TEXT("__input__");
-	static constexpr const TCHAR* OutputNodeId = TEXT("__output__");
-
-	static FString NormalizeAssetPath(const FString& InPath)
-	{
-		FString OutPath = InPath;
-		OutPath.TrimStartAndEndInline();
-		OutPath.ReplaceInline(TEXT("\\"), TEXT("/"));
-		int32 DotIndex = INDEX_NONE;
-		if (OutPath.FindChar(TEXT('.'), DotIndex) && DotIndex > 0)
-		{
-			OutPath = OutPath.Left(DotIndex);
-		}
-		return OutPath;
-	}
-
-	static FString ToObjectPath(const FString& InPath)
-	{
-		FString ObjectPath = InPath;
-		ObjectPath.TrimStartAndEndInline();
-		ObjectPath.ReplaceInline(TEXT("\\"), TEXT("/"));
-		if (ObjectPath.IsEmpty())
-		{
-			return FString();
-		}
-		if (ObjectPath.Contains(TEXT(".")))
-		{
-			return ObjectPath;
-		}
-		const FString AssetPath = NormalizeAssetPath(ObjectPath);
-		const FString AssetName = FPackageName::GetLongPackageAssetName(AssetPath);
-		return AssetName.IsEmpty() ? FString() : FString::Printf(TEXT("%s.%s"), *AssetPath, *AssetName);
-	}
-
-	static FString ResolveFolderPath(const FString& InPath)
-	{
-		FString Folder = InPath;
-		Folder.TrimStartAndEndInline();
-		Folder.ReplaceInline(TEXT("\\"), TEXT("/"));
-		return UeAgentJsonDiagnostics::ResolveProjectRelativeFilePath(Folder);
-	}
-
-	static UObject* LoadAssetObject(const FString& InPath)
-	{
-		const FString ObjectPath = ToObjectPath(InPath);
-		if (ObjectPath.IsEmpty())
-		{
-			return nullptr;
-		}
-		if (UObject* Existing = FindObject<UObject>(nullptr, *ObjectPath))
-		{
-			return Existing;
-		}
-		const FString PackagePath = NormalizeAssetPath(InPath);
-		if (!FPackageName::DoesPackageExist(PackagePath))
-		{
-			return nullptr;
-		}
-		return LoadObject<UObject>(nullptr, *ObjectPath);
-	}
-
-	template<typename TObjectType>
-	static TObjectType* LoadAsset(const FString& InPath)
-	{
-		return Cast<TObjectType>(LoadAssetObject(InPath));
-	}
-
-	static bool SavePackagesForObjects(const TArray<UObject*>& Objects, FString& OutError)
-	{
-		TArray<UPackage*> PackagesToSave;
-		for (UObject* Object : Objects)
-		{
-			if (Object && Object->GetOutermost())
-			{
-				PackagesToSave.AddUnique(Object->GetOutermost());
-			}
-		}
-		if (PackagesToSave.Num() > 0 && !UEditorLoadingAndSavingUtils::SavePackages(PackagesToSave, false))
-		{
-			OutError = TEXT("save_package_failed");
-			return false;
-		}
-		return true;
-	}
-
-	static bool SaveJsonFile(const FString& OutputPathInput, const TSharedPtr<FJsonObject>& Root, FString& OutOutputPath, FString& OutError)
-	{
-		OutOutputPath.Reset();
-		if (!Root.IsValid())
-		{
-			OutError = TEXT("json_root_invalid");
-			return false;
-		}
-
-		FString OutputPath = UeAgentJsonDiagnostics::ResolveProjectRelativeFilePath(OutputPathInput);
-		const FString OutputDir = FPaths::GetPath(OutputPath);
-		if (!OutputDir.IsEmpty() && !IFileManager::Get().DirectoryExists(*OutputDir))
-		{
-			IFileManager::Get().MakeDirectory(*OutputDir, true);
-		}
-
-		FString JsonText;
-		TSharedPtr<FJsonObject> SaveRoot = UeAgentDetailsAuthoring::CloneObjectTree(Root);
-		if (!UeAgentDetailsAuthoring::ExternalizeInlineDetailsInObjectTree(OutputPath, SaveRoot, TEXT("pcg_json_export"), OutError))
-		{
-			return false;
-		}
-		if (!UeAgentJsonDiagnostics::SerializeJsonObjectCompact(SaveRoot, JsonText))
-		{
-			OutError = TEXT("json_serialize_failed");
-			return false;
-		}
-		if (!FFileHelper::SaveStringToFile(JsonText, *OutputPath, FFileHelper::EEncodingOptions::ForceUTF8WithoutBOM))
-		{
-			OutError = TEXT("save_json_file_failed");
-			return false;
-		}
-
-		OutOutputPath = OutputPath;
-		return true;
-	}
-
-	static bool SaveTrackedJson(
-		const FString& FolderPath,
-		const FString& RelativePath,
-		const TSharedPtr<FJsonObject>& Root,
-		TArray<TSharedPtr<FJsonValue>>& OutFiles,
-		FString& OutError)
-	{
-		FString SavedPath;
-		if (!SaveJsonFile(FPaths::Combine(FolderPath, RelativePath), Root, SavedPath, OutError))
-		{
-			return false;
-		}
-		TSharedPtr<FJsonObject> FileObj = MakeShared<FJsonObject>();
-		FileObj->SetStringField(TEXT("path"), SavedPath);
-		FileObj->SetStringField(TEXT("relative_path"), RelativePath.Replace(TEXT("\\"), TEXT("/")));
-		OutFiles.Add(MakeShared<FJsonValueObject>(FileObj));
-		return true;
-	}
-
-	static FString MakeSafePCGNodeFileStem(const FString& NodeId, TSet<FString>& UsedFileStems)
-	{
-		FString Stem;
-		Stem.Reserve(NodeId.Len());
-		for (const TCHAR Ch : NodeId)
-		{
-			const bool bSafe =
-				(Ch >= TEXT('A') && Ch <= TEXT('Z')) ||
-				(Ch >= TEXT('a') && Ch <= TEXT('z')) ||
-				(Ch >= TEXT('0') && Ch <= TEXT('9')) ||
-				Ch == TEXT('_') ||
-				Ch == TEXT('-') ||
-				Ch == TEXT('.');
-			Stem.AppendChar(bSafe ? Ch : TEXT('_'));
-		}
-		Stem.TrimStartAndEndInline();
-		if (Stem.IsEmpty() || Stem == TEXT(".") || Stem == TEXT(".."))
-		{
-			Stem = TEXT("node");
-		}
-		FString UniqueStem = Stem;
-		int32 Suffix = 2;
-		while (UsedFileStems.Contains(UniqueStem))
-		{
-			UniqueStem = FString::Printf(TEXT("%s_%d"), *Stem, Suffix++);
-		}
-		UsedFileStems.Add(UniqueStem);
-		return UniqueStem;
-	}
-
-	static FString MakePCGDetailsStem(const FString& OwnerId)
-	{
-		if (OwnerId == InputNodeId)
-		{
-			return TEXT("input");
-		}
-		if (OwnerId == OutputNodeId)
-		{
-			return TEXT("output");
-		}
-
-		TSet<FString> UsedFileStems;
-		return MakeSafePCGNodeFileStem(OwnerId, UsedFileStems);
-	}
-
-	static bool PCGGraphHasMaterializedEditorGraph(const UPCGGraph* Graph)
-	{
-		if (!Graph)
-		{
-			return false;
-		}
-		TArray<UObject*> ChildObjects;
-		GetObjectsWithOuter(Graph, ChildObjects, true);
-		for (UObject* Child : ChildObjects)
-		{
-			if (UEdGraph* EditorGraph = Cast<UEdGraph>(Child))
-			{
-				if (EditorGraph->Nodes.Num() > 0)
-				{
-					return true;
-				}
-			}
-		}
-		return false;
-	}
-
-	static void PumpSlateForPCGEditorGraphInit(const int32 FrameCount = 4)
-	{
-		if (!FSlateApplication::IsInitialized())
-		{
-			return;
-		}
-		for (int32 FrameIndex = 0; FrameIndex < FrameCount; ++FrameIndex)
-		{
-			FSlateApplication::Get().PumpMessages();
-			FSlateApplication::Get().Tick();
-			FPlatformProcess::Sleep(0.01f);
-		}
-	}
-
-	static bool IsHeadlessPCGEditorGraphInit()
-	{
-		const TCHAR* CommandLine = FCommandLine::Get();
-		return IsRunningCommandlet()
-			|| FApp::IsUnattended()
-			|| FParse::Param(CommandLine, TEXT("NullRHI"));
-	}
-
-	static void ClosePCGEditorOpenedForGraphInit(
-		UAssetEditorSubsystem* AssetEditorSubsystem,
-		UPCGGraph* Graph,
-		const bool bOpenedEditorForGraphInit)
-	{
-		if (!bOpenedEditorForGraphInit
-			|| !IsHeadlessPCGEditorGraphInit()
-			|| !AssetEditorSubsystem
-			|| !Graph)
-		{
-			return;
-		}
-
-		if (IAssetEditorInstance* EditorInstance = AssetEditorSubsystem->FindEditorForAsset(Graph, false))
-		{
-			const TSharedPtr<FTabManager> TabManager = EditorInstance->GetAssociatedTabManager();
-			if (TabManager.IsValid())
-			{
-				TabManager->CloseAllAreas();
-			}
-		}
-
-		PumpSlateForPCGEditorGraphInit(2);
-		AssetEditorSubsystem->CloseAllEditorsForAsset(Graph);
-		PumpSlateForPCGEditorGraphInit(2);
-	}
-
-	static bool EnsurePCGEditorGraphMaterialized(UPCGGraph* Graph, bool& bOutOpenedEditor)
-	{
-		bOutOpenedEditor = false;
-		if (!Graph)
-		{
-			return false;
-		}
-		if (PCGGraphHasMaterializedEditorGraph(Graph))
-		{
-			return true;
-		}
-		if (!GEditor)
-		{
-			return false;
-		}
-
-		UAssetEditorSubsystem* AssetEditorSubsystem = GEditor->GetEditorSubsystem<UAssetEditorSubsystem>();
-		if (!AssetEditorSubsystem)
-		{
-			return false;
-		}
-		IAssetEditorInstance* EditorInstance = AssetEditorSubsystem->FindEditorForAsset(Graph, false);
-		if (!EditorInstance)
-		{
-			if (!AssetEditorSubsystem->OpenEditorForAsset(Graph))
-			{
-				return false;
-			}
-			bOutOpenedEditor = true;
-			EditorInstance = AssetEditorSubsystem->FindEditorForAsset(Graph, false);
-		}
-		PumpSlateForPCGEditorGraphInit(8);
-		return PCGGraphHasMaterializedEditorGraph(Graph);
-	}
-
-	static bool LoadJsonFile(const FString& FilePath, TSharedPtr<FJsonObject>& OutRoot, FString& OutError)
-	{
-		TArray<TSharedPtr<FJsonValue>> Issues;
-		if (!UeAgentJsonDiagnostics::LoadJsonObjectFile(FilePath, OutRoot, &Issues, OutError, false))
-		{
-			return false;
-		}
-		return UeAgentDetailsAuthoring::RehydrateGroupedDetailsInObjectTree(FilePath, OutRoot, OutError);
-	}
-
-	static bool LoadRawJsonFile(const FString& FilePath, TSharedPtr<FJsonObject>& OutRoot, FString& OutError)
-	{
-		TArray<TSharedPtr<FJsonValue>> Issues;
-		return UeAgentJsonDiagnostics::LoadJsonObjectFile(FilePath, OutRoot, &Issues, OutError, false);
-	}
-
-	static TSharedPtr<FJsonObject> MakeIssue(const FString& Severity, const FString& Code, const FString& Path, const FString& Message)
-	{
-		return UeAgentJsonDiagnostics::MakeIssue(Severity, Code, Path, Message);
-	}
-
-	static void AddIssue(TArray<TSharedPtr<FJsonValue>>& Issues, const FString& Severity, const FString& Code, const FString& Path, const FString& Message)
-	{
-		Issues.Add(MakeShared<FJsonValueObject>(MakeIssue(Severity, Code, Path, Message)));
-	}
-
-	static int32 CountErrors(const TArray<TSharedPtr<FJsonValue>>& Issues)
-	{
-		return UeAgentJsonDiagnostics::CountIssuesBySeverity(Issues, TEXT("error"));
-	}
-
-	static FString EnumValueToString(const UEnum* Enum, int64 Value)
-	{
-		if (!Enum)
-		{
-			return FString::FromInt(Value);
-		}
-		return Enum->GetNameStringByValue(Value);
-	}
-
-	static TSharedPtr<FJsonObject> VecToJson(const FVector& V)
-	{
-		TSharedPtr<FJsonObject> Obj = MakeShared<FJsonObject>();
-		Obj->SetNumberField(TEXT("x"), V.X);
-		Obj->SetNumberField(TEXT("y"), V.Y);
-		Obj->SetNumberField(TEXT("z"), V.Z);
-		return Obj;
-	}
-
-	static TSharedPtr<FJsonObject> RotToJson(const FRotator& R)
-	{
-		TSharedPtr<FJsonObject> Obj = MakeShared<FJsonObject>();
-		Obj->SetNumberField(TEXT("pitch"), R.Pitch);
-		Obj->SetNumberField(TEXT("yaw"), R.Yaw);
-		Obj->SetNumberField(TEXT("roll"), R.Roll);
-		return Obj;
-	}
-
-	static FString JsonValueToImportText(const TSharedPtr<FJsonValue>& Value)
-	{
-		if (!Value.IsValid() || Value->Type == EJson::Null)
-		{
-			return TEXT("None");
-		}
-		FString StringValue;
-		if (Value->TryGetString(StringValue))
-		{
-			return StringValue;
-		}
-		double NumberValue = 0.0;
-		if (Value->TryGetNumber(NumberValue))
-		{
-			return FString::SanitizeFloat(NumberValue);
-		}
-		bool BoolValue = false;
-		if (Value->TryGetBool(BoolValue))
-		{
-			return BoolValue ? TEXT("True") : TEXT("False");
-		}
-
-		FString JsonText;
-		UeAgentJsonDiagnostics::SerializeJsonValueCompact(Value, JsonText);
-		return JsonText;
-	}
-
-	static FString ExportPropertyValue(UObject* Object, const FProperty* Property)
-	{
-		if (!Object || !Property)
-		{
-			return FString();
-		}
-		FString ValueText;
-		Property->ExportText_InContainer(0, ValueText, Object, Object, Object, PPF_None);
-		return ValueText;
-	}
-
-	static bool ImportPropertyValue(UObject* Object, FProperty* Property, const FString& ValueText, FString& OutError)
-	{
-		if (!Object || !Property)
-		{
-			OutError = TEXT("property_not_found");
-			return false;
-		}
-		const TCHAR* ImportResult = Property->ImportText_InContainer(*ValueText, Object, Object, PPF_None);
-		if (!ImportResult)
-		{
-			OutError = FString::Printf(TEXT("import_failed:%s"), *Property->GetName());
-			return false;
-		}
-		return true;
-	}
-
-	static void ExportEditablePropertiesRecursive(UObject* Object, const FString& NamePrefix, int32 RemainingObjectDepth, TSet<const UObject*>& VisitedObjects, TArray<TSharedPtr<FJsonValue>>& Properties)
-	{
-		if (!Object)
-		{
-			return;
-		}
-		if (VisitedObjects.Contains(Object))
-		{
-			return;
-		}
-		VisitedObjects.Add(Object);
-
-		for (TFieldIterator<FProperty> It(Object->GetClass()); It; ++It)
-		{
-			FProperty* Property = *It;
-			if (!Property || !Property->HasAnyPropertyFlags(CPF_Edit))
-			{
-				continue;
-			}
-			if (Property->HasAnyPropertyFlags(CPF_Deprecated | CPF_Transient | CPF_DisableEditOnInstance))
-			{
-				continue;
-			}
-
-			TSharedPtr<FJsonObject> PropertyObj = MakeShared<FJsonObject>();
-			PropertyObj->SetStringField(TEXT("name"), NamePrefix + Property->GetName());
-			PropertyObj->SetStringField(TEXT("cpp_type"), Property->GetCPPType());
-			PropertyObj->SetStringField(TEXT("value_text"), ExportPropertyValue(Object, Property));
-			UeAgentAuthoringJson::ApplyPropertyMetadata(
-				PropertyObj,
-				NamePrefix + Property->GetName(),
-				Property->GetDisplayNameText().ToString(),
-				Property->GetMetaData(TEXT("Category")),
-				TEXT("text"));
-			Properties.Add(MakeShared<FJsonValueObject>(PropertyObj));
-
-			if (RemainingObjectDepth > 0)
-			{
-				if (const FObjectPropertyBase* ObjectProperty = CastField<FObjectPropertyBase>(Property))
-				{
-					UObject* SubObject = ObjectProperty->GetObjectPropertyValue_InContainer(Object);
-					if (SubObject && SubObject->IsIn(Object))
-					{
-						ExportEditablePropertiesRecursive(SubObject, NamePrefix + Property->GetName() + TEXT("."), RemainingObjectDepth - 1, VisitedObjects, Properties);
-					}
-				}
-			}
-		}
-	}
-
-	static TArray<TSharedPtr<FJsonValue>> ExportEditableProperties(UObject* Object)
-	{
-		TArray<TSharedPtr<FJsonValue>> Properties;
-		TSet<const UObject*> VisitedObjects;
-		ExportEditablePropertiesRecursive(Object, FString(), 1, VisitedObjects, Properties);
-		return Properties;
-	}
-
-	static bool ResolvePropertyPath(UObject* RootObject, const FString& PropertyPath, UObject*& OutObject, FProperty*& OutProperty, FString& OutError)
-	{
-		OutObject = RootObject;
-		OutProperty = nullptr;
-		if (!OutObject)
-		{
-			OutError = TEXT("property_owner_not_found");
-			return false;
-		}
-
-		FString Remaining = PropertyPath;
-		FString Segment;
-		FString Rest;
-		while (Remaining.Split(TEXT("."), &Segment, &Rest))
-		{
-			FProperty* SegmentProperty = OutObject->GetClass()->FindPropertyByName(*Segment);
-			const FObjectPropertyBase* ObjectProperty = CastField<FObjectPropertyBase>(SegmentProperty);
-			if (!ObjectProperty)
-			{
-				OutError = FString::Printf(TEXT("nested_property_not_object:%s"), *Segment);
-				return false;
-			}
-
-			if (UPCGStaticMeshSpawnerSettings* StaticMeshSpawnerSettings = Cast<UPCGStaticMeshSpawnerSettings>(OutObject))
-			{
-				if (Segment == TEXT("MeshSelectorParameters"))
-				{
-					StaticMeshSpawnerSettings->SetMeshSelectorType(StaticMeshSpawnerSettings->MeshSelectorType);
-				}
-				else if (Segment == TEXT("InstanceDataPackerParameters"))
-				{
-					StaticMeshSpawnerSettings->SetInstancePackerType(StaticMeshSpawnerSettings->InstanceDataPackerType);
-				}
-			}
-
-			UObject* SubObject = ObjectProperty->GetObjectPropertyValue_InContainer(OutObject);
-			if (!SubObject || !SubObject->IsIn(OutObject))
-			{
-				OutError = FString::Printf(TEXT("nested_property_target_not_instanced:%s"), *Segment);
-				return false;
-			}
-
-			OutObject = SubObject;
-			Remaining = Rest;
-		}
-
-		OutProperty = OutObject->GetClass()->FindPropertyByName(*Remaining);
-		if (!OutProperty)
-		{
-			OutError = TEXT("property_not_found");
-			return false;
-		}
-		return true;
-	}
-
-	static bool ShouldSkipDirectInstancedSubobjectImport(const FString& PropertyName, const FProperty* Property)
-	{
-		return Property &&
-			!PropertyName.Contains(TEXT(".")) &&
-			Property->HasAnyPropertyFlags(CPF_InstancedReference);
-	}
-
-	static UClass* ResolveClassImportText(const FString& ValueText)
-	{
-		FString ClassPath = ValueText;
-		ClassPath.TrimStartAndEndInline();
-		if (ClassPath.IsEmpty() || ClassPath == TEXT("None"))
-		{
-			return nullptr;
-		}
-
-		FString QuotedPath;
-		if (ClassPath.Split(TEXT("'"), nullptr, &QuotedPath, ESearchCase::CaseSensitive) && QuotedPath.EndsWith(TEXT("'")))
-		{
-			QuotedPath.LeftChopInline(1);
-			ClassPath = QuotedPath;
-		}
-
-		if (UClass* Class = LoadObject<UClass>(nullptr, *ClassPath))
-		{
-			return Class;
-		}
-		return FindObject<UClass>(nullptr, *ClassPath);
-	}
-
-	static bool TryApplyPCGSpecialProperty(UObject* Object, const FString& PropertyName, const FString& ValueText, bool& bOutHandled, FString& OutError)
-	{
-		bOutHandled = false;
-		if (UPCGBlueprintSettings* BlueprintSettings = Cast<UPCGBlueprintSettings>(Object))
-		{
-			if (PropertyName == TEXT("BlueprintElementType"))
-			{
-				bOutHandled = true;
-				UClass* ElementClass = ResolveClassImportText(ValueText);
-				if (!ElementClass && !ValueText.TrimStartAndEnd().IsEmpty() && ValueText.TrimStartAndEnd() != TEXT("None"))
-				{
-					OutError = FString::Printf(TEXT("blueprint_element_class_not_found:%s"), *ValueText);
-					return false;
-				}
-				if (ElementClass && !ElementClass->IsChildOf(UPCGBlueprintElement::StaticClass()))
-				{
-					OutError = FString::Printf(TEXT("blueprint_element_class_invalid:%s"), *ValueText);
-					return false;
-				}
-
-				BlueprintSettings->Modify();
-				UPCGBlueprintElement* ElementInstance = nullptr;
-				BlueprintSettings->SetElementType(ElementClass, ElementInstance);
-				if (ElementClass && !ElementInstance)
-				{
-					OutError = FString::Printf(TEXT("blueprint_element_instance_not_created:%s"), *ValueText);
-					return false;
-				}
-				return true;
-			}
-		}
-		if (UPCGStaticMeshSpawnerSettings* StaticMeshSpawnerSettings = Cast<UPCGStaticMeshSpawnerSettings>(Object))
-		{
-			if (PropertyName == GET_MEMBER_NAME_STRING_CHECKED(UPCGStaticMeshSpawnerSettings, MeshSelectorType))
-			{
-				bOutHandled = true;
-				UClass* MeshSelectorClass = ResolveClassImportText(ValueText);
-				if (!MeshSelectorClass || !MeshSelectorClass->IsChildOf(UPCGMeshSelectorBase::StaticClass()))
-				{
-					OutError = FString::Printf(TEXT("mesh_selector_class_not_found:%s"), *ValueText);
-					return false;
-				}
-				StaticMeshSpawnerSettings->SetMeshSelectorType(MeshSelectorClass);
-				return true;
-			}
-		}
-		return false;
-	}
-
-	static void RefreshPCGImportedPropertySideEffects(UObject* Object, const FString& PropertyName)
-	{
-		if (UPCGStaticMeshSpawnerSettings* StaticMeshSpawnerSettings = Cast<UPCGStaticMeshSpawnerSettings>(Object))
-		{
-			if (PropertyName == GET_MEMBER_NAME_STRING_CHECKED(UPCGStaticMeshSpawnerSettings, MeshSelectorType))
-			{
-				StaticMeshSpawnerSettings->SetMeshSelectorType(StaticMeshSpawnerSettings->MeshSelectorType);
-			}
-			else if (PropertyName == GET_MEMBER_NAME_STRING_CHECKED(UPCGStaticMeshSpawnerSettings, InstanceDataPackerType))
-			{
-				StaticMeshSpawnerSettings->SetInstancePackerType(StaticMeshSpawnerSettings->InstanceDataPackerType);
-			}
-		}
-	}
-
-	static FString FirstPinLabelFromNodeJson(const TSharedPtr<FJsonObject>& NodeObj, const TCHAR* PinArrayField)
-	{
-		const TArray<TSharedPtr<FJsonValue>>* PinValues = nullptr;
-		if (!NodeObj.IsValid() || !NodeObj->TryGetArrayField(PinArrayField, PinValues))
-		{
-			return FString();
-		}
-
-		for (const TSharedPtr<FJsonValue>& PinValue : *PinValues)
-		{
-			const TSharedPtr<FJsonObject>* PinObj = nullptr;
-			FString Label;
-			if (PinValue.IsValid() &&
-				PinValue->TryGetObject(PinObj) &&
-				PinObj &&
-				PinObj->IsValid() &&
-				(*PinObj)->TryGetStringField(TEXT("label"), Label) &&
-				!Label.IsEmpty())
-			{
-				return Label;
-			}
-		}
-		return FString();
-	}
-
-	static void ApplyNodeJsonDerivedSettings(UPCGSettings* Settings, const TSharedPtr<FJsonObject>& NodeObj)
-	{
-		if (UPCGUserParameterGetSettings* UserParameterGetSettings = Cast<UPCGUserParameterGetSettings>(Settings))
-		{
-			const FString OutputPinLabel = FirstPinLabelFromNodeJson(NodeObj, TEXT("output_pins"));
-			if (!OutputPinLabel.IsEmpty())
-			{
-				UserParameterGetSettings->PropertyName = FName(*OutputPinLabel);
-			}
-		}
-	}
-
-	static int32 ApplyPropertyArray(UObject* Object, const TArray<TSharedPtr<FJsonValue>>* PropertyValues, TArray<TSharedPtr<FJsonValue>>& Issues, const FString& PathPrefix)
-	{
-		if (!Object || !PropertyValues)
-		{
-			return 0;
-		}
-
-		int32 AppliedCount = 0;
-		for (const TSharedPtr<FJsonValue>& Value : *PropertyValues)
-		{
-			const TSharedPtr<FJsonObject>* PropertyObj = nullptr;
-			if (!Value.IsValid() || !Value->TryGetObject(PropertyObj) || !PropertyObj || !PropertyObj->IsValid())
-			{
-				AddIssue(Issues, TEXT("error"), TEXT("invalid_property_entry"), PathPrefix, TEXT("Property entry must be a JSON object."));
-				continue;
-			}
-
-			FString PropertyName;
-			if (!(*PropertyObj)->TryGetStringField(TEXT("name"), PropertyName) || PropertyName.IsEmpty())
-			{
-				AddIssue(Issues, TEXT("error"), TEXT("missing_property_name"), PathPrefix, TEXT("Property entry is missing name."));
-				continue;
-			}
-
-			FString ValueText;
-			if (!(*PropertyObj)->TryGetStringField(TEXT("value_text"), ValueText))
-			{
-				const TSharedPtr<FJsonValue>* RawValue = (*PropertyObj)->Values.Find(TEXT("value"));
-				ValueText = RawValue ? JsonValueToImportText(*RawValue) : FString();
-			}
-
-			UObject* TargetObject = nullptr;
-			FProperty* Property = nullptr;
-			FString ImportError;
-			bool bHandledSpecialProperty = false;
-			if (TryApplyPCGSpecialProperty(Object, PropertyName, ValueText, bHandledSpecialProperty, ImportError))
-			{
-				AppliedCount++;
-				continue;
-			}
-			if (bHandledSpecialProperty)
-			{
-				AddIssue(Issues, TEXT("error"), TEXT("property_import_failed"), FString::Printf(TEXT("%s.%s"), *PathPrefix, *PropertyName), ImportError);
-				continue;
-			}
-			if (!ResolvePropertyPath(Object, PropertyName, TargetObject, Property, ImportError))
-			{
-				AddIssue(Issues, TEXT("error"), TEXT("property_import_failed"), FString::Printf(TEXT("%s.%s"), *PathPrefix, *PropertyName), ImportError);
-				continue;
-			}
-			if (ShouldSkipDirectInstancedSubobjectImport(PropertyName, Property))
-			{
-				continue;
-			}
-			if (!ImportPropertyValue(TargetObject, Property, ValueText, ImportError))
-			{
-				AddIssue(Issues, TEXT("error"), TEXT("property_import_failed"), FString::Printf(TEXT("%s.%s"), *PathPrefix, *PropertyName), ImportError);
-				continue;
-			}
-			RefreshPCGImportedPropertySideEffects(Object, PropertyName);
-			AppliedCount++;
-		}
-		return AppliedCount;
-	}
-
-	static TSharedPtr<FJsonObject> PinPropertiesToJson(const FPCGPinProperties& PinProperties)
-	{
-		TSharedPtr<FJsonObject> PinObj = MakeShared<FJsonObject>();
-		PinObj->SetStringField(TEXT("label"), PinProperties.Label.ToString());
-		PinObj->SetStringField(TEXT("allowed_types"), EnumValueToString(StaticEnum<EPCGDataType>(), static_cast<int64>(PinProperties.AllowedTypes)));
-		PinObj->SetStringField(TEXT("usage"), EnumValueToString(StaticEnum<EPCGPinUsage>(), static_cast<int64>(PinProperties.Usage)));
-		PinObj->SetStringField(TEXT("status"), EnumValueToString(StaticEnum<EPCGPinStatus>(), static_cast<int64>(PinProperties.PinStatus)));
-		PinObj->SetBoolField(TEXT("allow_multiple_data"), PinProperties.bAllowMultipleData);
-		PinObj->SetBoolField(TEXT("allow_multiple_connections"), PinProperties.AllowsMultipleConnections());
-		PinObj->SetBoolField(TEXT("advanced"), PinProperties.IsAdvancedPin());
-		PinObj->SetBoolField(TEXT("required"), PinProperties.IsRequiredPin());
-		UeAgentAuthoringJson::ApplyAuthoringMetadata(
-			PinObj,
-			TEXT("pin_label"),
-			PinProperties.Label.ToString(),
-			PinProperties.Label.ToString(),
-			TEXT("PCG/Pins"),
-			TEXT("pcg_pin"),
-			TEXT("pin"),
-			{ TEXT("connect"), TEXT("disconnect") });
-		return PinObj;
-	}
-
-	static TArray<TSharedPtr<FJsonValue>> PinsToJson(const TArray<FPCGPinProperties>& Pins)
-	{
-		TArray<TSharedPtr<FJsonValue>> PinArray;
-		for (const FPCGPinProperties& Pin : Pins)
-		{
-			PinArray.Add(MakeShared<FJsonValueObject>(PinPropertiesToJson(Pin)));
-		}
-		return PinArray;
-	}
-
-	static UClass* ResolvePCGSettingsClass(const FString& ClassPathInput)
-	{
-		FString ClassPath = ClassPathInput;
-		ClassPath.TrimStartAndEndInline();
-		if (ClassPath.IsEmpty())
-		{
-			return nullptr;
-		}
-
-		if (UClass* LoadedClass = LoadObject<UClass>(nullptr, *ClassPath))
-		{
-			if (LoadedClass->IsChildOf(UPCGSettings::StaticClass()))
-			{
-				return LoadedClass;
-			}
-		}
-
-		for (TObjectIterator<UClass> It; It; ++It)
-		{
-			UClass* Class = *It;
-			if (!Class || !Class->IsChildOf(UPCGSettings::StaticClass()))
-			{
-				continue;
-			}
-			if (Class->GetPathName() == ClassPath || Class->GetName() == ClassPath || Class->GetFullName() == ClassPath)
-			{
-				return Class;
-			}
-		}
-		return nullptr;
-	}
-
-	static TSharedPtr<FJsonObject> SettingsClassToCatalogJson(UClass* Class)
-	{
-		TSharedPtr<FJsonObject> NodeObj = MakeShared<FJsonObject>();
-		if (!Class)
-		{
-			return NodeObj;
-		}
-
-		const UPCGSettings* CDO = Class->GetDefaultObject<UPCGSettings>();
-		NodeObj->SetStringField(TEXT("class_path"), Class->GetPathName());
-		NodeObj->SetStringField(TEXT("class_name"), Class->GetName());
-		NodeObj->SetStringField(TEXT("module"), Class->GetOutermost() ? Class->GetOutermost()->GetName() : FString());
-		NodeObj->SetBoolField(TEXT("abstract"), Class->HasAnyClassFlags(CLASS_Abstract));
-		NodeObj->SetBoolField(TEXT("deprecated"), Class->HasAnyClassFlags(CLASS_Deprecated | CLASS_NewerVersionExists));
-		if (CDO)
-		{
-#if WITH_EDITOR
-			NodeObj->SetStringField(TEXT("title"), CDO->GetDefaultNodeTitle().ToString());
-			NodeObj->SetStringField(TEXT("category"), EnumValueToString(StaticEnum<EPCGSettingsType>(), static_cast<int64>(CDO->GetType())));
-			NodeObj->SetBoolField(TEXT("supports_gpu_toggle"), CDO->DisplayExecuteOnGPUSetting());
-#endif
-			NodeObj->SetBoolField(TEXT("should_execute_on_gpu_default"), CDO->ShouldExecuteOnGPU());
-			NodeObj->SetArrayField(TEXT("input_pins"), PinsToJson(CDO->AllInputPinProperties()));
-			NodeObj->SetArrayField(TEXT("output_pins"), PinsToJson(CDO->AllOutputPinProperties()));
-		}
-		return NodeObj;
-	}
-
-	static FString MakeStableNodeId(UPCGGraph* Graph, UPCGNode* Node, TSet<FString>& UsedIds)
-	{
-		if (!Graph || !Node)
-		{
-			return FString();
-		}
-		if (Node == Graph->GetInputNode())
-		{
-			return InputNodeId;
-		}
-		if (Node == Graph->GetOutputNode())
-		{
-			return OutputNodeId;
-		}
-
-		FString Base = Node->GetAuthoredTitleName() != NAME_None ? Node->GetAuthoredTitleName().ToString() : Node->GetName();
-		Base.TrimStartAndEndInline();
-		if (Base.IsEmpty())
-		{
-			Base = TEXT("node");
-		}
-		Base.ReplaceInline(TEXT(" "), TEXT("_"));
-		Base.ReplaceInline(TEXT("."), TEXT("_"));
-		Base.ReplaceInline(TEXT("/"), TEXT("_"));
-		Base.ReplaceInline(TEXT("\\"), TEXT("_"));
-
-		FString Candidate = Base;
-		int32 Suffix = 2;
-		while (UsedIds.Contains(Candidate))
-		{
-			Candidate = FString::Printf(TEXT("%s_%d"), *Base, Suffix++);
-		}
-		UsedIds.Add(Candidate);
-		return Candidate;
-	}
-
-	static TArray<UPCGNode*> GatherExportNodes(UPCGGraph* Graph)
-	{
-		TArray<UPCGNode*> ExportNodes;
-		TSet<UPCGNode*> SeenExportNodes;
-
-		auto AddExportNode = [&ExportNodes, &SeenExportNodes](UPCGNode* Node)
-		{
-			if (Node && !SeenExportNodes.Contains(Node))
-			{
-				SeenExportNodes.Add(Node);
-				ExportNodes.Add(Node);
-			}
-		};
-
-		if (!Graph)
-		{
-			return ExportNodes;
-		}
-
-		AddExportNode(Graph->GetInputNode());
-		for (UPCGNode* Node : Graph->GetNodes())
-		{
-			AddExportNode(Node);
-		}
-		AddExportNode(Graph->GetOutputNode());
-		return ExportNodes;
-	}
-
-	static TMap<FString, UPCGNode*> BuildExportNodeMapById(UPCGGraph* Graph)
-	{
-		TMap<FString, UPCGNode*> NodeById;
-		TSet<FString> UsedIds;
-		for (UPCGNode* Node : GatherExportNodes(Graph))
-		{
-			NodeById.Add(MakeStableNodeId(Graph, Node, UsedIds), Node);
-		}
-		return NodeById;
-	}
-
-	static TSharedPtr<FJsonObject> NodeToJson(UPCGGraph* Graph, UPCGNode* Node, const FString& NodeId)
-	{
-		TSharedPtr<FJsonObject> NodeObj = MakeShared<FJsonObject>();
-		if (!Graph || !Node)
-		{
-			return NodeObj;
-		}
-
-		NodeObj->SetStringField(TEXT("id"), NodeId);
-		NodeObj->SetStringField(TEXT("object_name"), Node->GetName());
-		NodeObj->SetStringField(TEXT("title"), Node->GetNodeTitle(EPCGNodeTitleType::ListView).ToString());
-		NodeObj->SetStringField(TEXT("authored_title"), Node->GetAuthoredTitleName().ToString());
-		UeAgentAuthoringJson::ApplyAuthoringMetadata(
-			NodeObj,
-			TEXT("node_id"),
-			NodeId,
-			Node->GetNodeTitle(EPCGNodeTitleType::ListView).ToString(),
-			TEXT("PCG/Nodes"),
-			TEXT("pcg_node"),
-			TEXT("object"),
-			{ TEXT("move"), TEXT("set_property"), TEXT("connect"), TEXT("delete") });
-		if (Node == Graph->GetInputNode())
-		{
-			NodeObj->SetStringField(TEXT("role"), TEXT("input"));
-		}
-		else if (Node == Graph->GetOutputNode())
-		{
-			NodeObj->SetStringField(TEXT("role"), TEXT("output"));
-		}
-		else
-		{
-			NodeObj->SetStringField(TEXT("role"), TEXT("settings"));
-		}
-
-#if WITH_EDITOR
-		int32 PosX = 0;
-		int32 PosY = 0;
-		Node->GetNodePosition(PosX, PosY);
-		NodeObj->SetNumberField(TEXT("pos_x"), PosX);
-		NodeObj->SetNumberField(TEXT("pos_y"), PosY);
-#endif
-
-		UPCGSettings* Settings = Node->GetSettings();
-		if (Settings)
-		{
-			NodeObj->SetStringField(TEXT("settings_class"), Settings->GetClass()->GetPathName());
-			NodeObj->SetStringField(TEXT("settings_name"), Settings->GetName());
-			NodeObj->SetArrayField(TEXT("settings_properties"), ExportEditableProperties(Settings));
-			NodeObj->SetBoolField(TEXT("enabled"), Settings->bEnabled);
-			NodeObj->SetBoolField(TEXT("debug"), Settings->bDebug);
-#if WITH_EDITOR
-			NodeObj->SetBoolField(TEXT("inspect"), Settings->bIsInspecting);
-			NodeObj->SetBoolField(TEXT("supports_gpu_toggle"), Settings->DisplayExecuteOnGPUSetting());
-#endif
-			NodeObj->SetBoolField(TEXT("should_execute_on_gpu"), Settings->ShouldExecuteOnGPU());
-			NodeObj->SetArrayField(TEXT("input_pins"), PinsToJson(Settings->AllInputPinProperties()));
-			NodeObj->SetArrayField(TEXT("output_pins"), PinsToJson(Settings->AllOutputPinProperties()));
-		}
-		else
-		{
-			NodeObj->SetArrayField(TEXT("input_pins"), PinsToJson(Node->InputPinProperties()));
-			NodeObj->SetArrayField(TEXT("output_pins"), PinsToJson(Node->OutputPinProperties()));
-		}
-
-		return NodeObj;
-	}
-
-	static TSharedPtr<FJsonObject> EdgeToJson(const FString& FromId, const FString& FromPin, const FString& ToId, const FString& ToPin)
-	{
-		TSharedPtr<FJsonObject> EdgeObj = MakeShared<FJsonObject>();
-		EdgeObj->SetStringField(TEXT("from"), FromId);
-		EdgeObj->SetStringField(TEXT("from_pin"), FromPin);
-		EdgeObj->SetStringField(TEXT("to"), ToId);
-		EdgeObj->SetStringField(TEXT("to_pin"), ToPin);
-		return EdgeObj;
-	}
-
-	static bool ExportPCGFolderOwnerDetails(
-		UObject* Object,
-		const FString& EntryDirectory,
-		const FString& OwnerKind,
-		const FString& OwnerId,
-		const FString& DetailsStem,
-		const FString& PropertiesFieldName,
-		const FString& RefFieldName,
-		const TSharedPtr<FJsonObject>& EntryObject,
-		FString& OutError)
-	{
-		if (!Object || !EntryObject.IsValid())
-		{
-			return true;
-		}
-
-		const FString DetailsRoot = FPaths::Combine(EntryDirectory, TEXT("details"), DetailsStem);
-		const FString IndexFile = FString::Printf(TEXT("details/%s/index.json"), *DetailsStem);
-		UeAgentDetailsAuthoring::FOwnerDetailsExportRequest Request =
-			UeAgentDetailsAuthoring::MakeOwnerDetailsExportRequest(
-				Object,
-				OwnerKind,
-				OwnerId,
-				DetailsRoot,
-				TEXT("pcg_graph_export_folder"),
-				IndexFile,
-				RefFieldName);
-
-		TSharedPtr<FJsonObject> DetailsSummary;
-		if (!UeAgentDetailsAuthoring::ExportOwnerDetails(Request, DetailsSummary, OutError))
-		{
-			OutError = FString::Printf(TEXT("pcg_folder_details_export_failed:%s:%s"), *OwnerId, *OutError);
-			return false;
-		}
-
-		EntryObject->RemoveField(PropertiesFieldName);
-		EntryObject->SetObjectField(RefFieldName, DetailsSummary);
-		return true;
-	}
-
-	static bool ExportPCGNodeSettingsDetailsForFolderEntry(
-		const TMap<FString, UPCGNode*>& NodeById,
-		const FString& EntryDirectory,
-		const TSharedPtr<FJsonObject>& NodeObj,
-		FString& OutError)
-	{
-		if (!NodeObj.IsValid())
-		{
-			return true;
-		}
-
-		FString NodeId;
-		NodeObj->TryGetStringField(TEXT("id"), NodeId);
-		UPCGNode* const* NodePtr = NodeById.Find(NodeId);
-		UPCGNode* Node = NodePtr ? *NodePtr : nullptr;
-		UPCGSettings* Settings = Node ? Node->GetSettings() : nullptr;
-		if (!Settings)
-		{
-			return true;
-		}
-
-		return ExportPCGFolderOwnerDetails(
-			Settings,
-			EntryDirectory,
-			TEXT("pcg_node_settings"),
-			NodeId,
-			MakePCGDetailsStem(NodeId),
-			TEXT("settings_properties"),
-			TEXT("settings_details"),
-			NodeObj,
-			OutError);
-	}
-
-	static bool ExportPCGGraphDetailsForFolderEntry(
-		UPCGGraph* Graph,
-		const TMap<FString, UPCGNode*>& NodeById,
-		const FString& EntryDirectory,
-		const TSharedPtr<FJsonObject>& GraphObj,
-		FString& OutError)
-	{
-		if (!GraphObj.IsValid())
-		{
-			return true;
-		}
-
-		const TSharedPtr<FJsonObject>* GraphSettings = nullptr;
-		if (GraphObj->TryGetObjectField(TEXT("graph_settings"), GraphSettings) && GraphSettings && GraphSettings->IsValid())
-		{
-			if (!ExportPCGFolderOwnerDetails(
-				Graph,
-				EntryDirectory,
-				TEXT("pcg_graph_settings"),
-				TEXT("graph_settings"),
-				TEXT("graph_settings"),
-				TEXT("properties"),
-				TEXT("details"),
-				*GraphSettings,
-				OutError))
-			{
-				return false;
-			}
-		}
-
-		const TArray<TSharedPtr<FJsonValue>>* Nodes = nullptr;
-		if (GraphObj->TryGetArrayField(TEXT("nodes"), Nodes) && Nodes)
-		{
-			for (const TSharedPtr<FJsonValue>& NodeValue : *Nodes)
-			{
-				const TSharedPtr<FJsonObject>* NodeObj = nullptr;
-				if (NodeValue.IsValid() && NodeValue->TryGetObject(NodeObj) && NodeObj && NodeObj->IsValid())
-				{
-					if (!ExportPCGNodeSettingsDetailsForFolderEntry(NodeById, EntryDirectory, *NodeObj, OutError))
-					{
-						return false;
-					}
-				}
-			}
-		}
-		return true;
-	}
-
-	static bool FindPCGFolderLegacyPropertiesField(
-		const TSharedPtr<FJsonObject>& Object,
-		const FString& JsonPath,
-		FString& OutJsonPath)
-	{
-		if (!Object.IsValid())
-		{
-			return false;
-		}
-
-		for (const TPair<FString, TSharedPtr<FJsonValue>>& Field : Object->Values)
-		{
-			const FString FieldPath = JsonPath.IsEmpty() ? Field.Key : FString::Printf(TEXT("%s.%s"), *JsonPath, *Field.Key);
-			if (Field.Key == TEXT("properties") || Field.Key == TEXT("settings_properties"))
-			{
-				OutJsonPath = FieldPath;
-				return true;
-			}
-			if (!Field.Value.IsValid())
-			{
-				continue;
-			}
-			if (Field.Value->Type == EJson::Object)
-			{
-				if (FindPCGFolderLegacyPropertiesField(Field.Value->AsObject(), FieldPath, OutJsonPath))
-				{
-					return true;
-				}
-			}
-			else if (Field.Value->Type == EJson::Array)
-			{
-				const TArray<TSharedPtr<FJsonValue>>& Array = Field.Value->AsArray();
-				for (int32 Index = 0; Index < Array.Num(); ++Index)
-				{
-					if (Array[Index].IsValid() && Array[Index]->Type == EJson::Object)
-					{
-						const FString ItemPath = FString::Printf(TEXT("%s.%d"), *FieldPath, Index);
-						if (FindPCGFolderLegacyPropertiesField(Array[Index]->AsObject(), ItemPath, OutJsonPath))
-						{
-							return true;
-						}
-					}
-				}
-			}
-		}
-		return false;
-	}
-
-	static bool EnsurePCGFolderEntryGroupedOnly(
-		const TSharedPtr<FJsonObject>& EntryObject,
-		const FString& RelativePath,
-		FString& OutError)
-	{
-		FString JsonPath;
-		if (FindPCGFolderLegacyPropertiesField(EntryObject, FString(), JsonPath))
-		{
-			OutError = FString::Printf(TEXT("pcg_export_folder_legacy_properties_field:%s:%s"), *RelativePath, *JsonPath);
-			return false;
-		}
-		return true;
-	}
-
-	static UeAgentDetailsAuthoring::FOwnerInfo MakePCGFolderOwnerInfo(
-		const FString& OwnerKind,
-		const FString& OwnerId,
-		UObject* Object = nullptr)
-	{
-		return UeAgentDetailsAuthoring::MakeOwnerInfoForObject(
-			Object,
-			OwnerKind,
-			OwnerId,
-			TEXT("pcg_graph_apply_folder"));
-	}
-
-	static bool BuildPCGLegacyPropertiesRejectionIfPresent(
-		const TSharedPtr<FJsonObject>& EntryObject,
-		const UeAgentDetailsAuthoring::FOwnerInfo& OwnerInfo,
-		const FString& AllowedTarget,
-		TSharedPtr<FJsonObject>& OutRejection,
-		FString& OutError)
-	{
-		OutRejection.Reset();
-		OutError.Reset();
-		if (!UeAgentDetailsAuthoring::BuildLegacyPropertiesRejectionIfPresent(EntryObject, OwnerInfo, AllowedTarget, OutRejection))
-		{
-			return false;
-		}
-		if (!OutRejection.IsValid() || !OutRejection->TryGetStringField(TEXT("error_code"), OutError) || OutError.IsEmpty())
-		{
-			OutError = TEXT("legacy_properties_not_supported");
-		}
-		return true;
-	}
-
-	static bool BuildPCGGraphFolderLegacyRejection(
-		const TSharedPtr<FJsonObject>& GraphJson,
-		TSharedPtr<FJsonObject>& OutRejection,
-		FString& OutError)
-	{
-		OutRejection.Reset();
-		OutError.Reset();
-		if (!GraphJson.IsValid())
-		{
-			return false;
-		}
-
-		const TSharedPtr<FJsonObject>* GraphSettings = nullptr;
-		if (GraphJson->TryGetObjectField(TEXT("graph_settings"), GraphSettings) && GraphSettings && GraphSettings->IsValid())
-		{
-			if (BuildPCGLegacyPropertiesRejectionIfPresent(
-				*GraphSettings,
-				MakePCGFolderOwnerInfo(TEXT("pcg_graph_settings"), TEXT("graph_settings")),
-				TEXT("details.index_file"),
-				OutRejection,
-				OutError))
-			{
-				return true;
-			}
-		}
-
-		const TArray<TSharedPtr<FJsonValue>>* Nodes = nullptr;
-		if (GraphJson->TryGetArrayField(TEXT("nodes"), Nodes) && Nodes)
-		{
-			for (const TSharedPtr<FJsonValue>& NodeValue : *Nodes)
-			{
-				const TSharedPtr<FJsonObject> NodeObj = NodeValue.IsValid() ? NodeValue->AsObject() : nullptr;
-				if (!NodeObj.IsValid())
-				{
-					continue;
-				}
-				FString NodeId;
-				NodeObj->TryGetStringField(TEXT("id"), NodeId);
-				if (NodeId.IsEmpty())
-				{
-					NodeId = TEXT("unknown_node");
-				}
-				if (BuildPCGLegacyPropertiesRejectionIfPresent(
-					NodeObj,
-					MakePCGFolderOwnerInfo(TEXT("pcg_node_settings"), NodeId),
-					TEXT("settings_details.index_file"),
-					OutRejection,
-					OutError))
-				{
-					return true;
-				}
-			}
-		}
-
-		return BuildPCGLegacyPropertiesRejectionIfPresent(
-			GraphJson,
-			MakePCGFolderOwnerInfo(TEXT("pcg_graph_folder"), TEXT("graph.json")),
-			TEXT("settings_details.index_file"),
-			OutRejection,
-			OutError);
-	}
-
-	static void AddPCGLegacyValidationIssueIfPresent(
-		const TSharedPtr<FJsonObject>& EntryObject,
-		const UeAgentDetailsAuthoring::FOwnerInfo& OwnerInfo,
-		const FString& AllowedTarget,
-		const FString& PathPrefix,
-		TArray<TSharedPtr<FJsonValue>>& Issues)
-	{
-		TSharedPtr<FJsonObject> Rejection;
-		FString ErrorCode;
-		if (!BuildPCGLegacyPropertiesRejectionIfPresent(EntryObject, OwnerInfo, AllowedTarget, Rejection, ErrorCode))
-		{
-			return;
-		}
-
-		FString JsonPath;
-		FString MigrationHint;
-		if (Rejection.IsValid())
-		{
-			Rejection->TryGetStringField(TEXT("json_path"), JsonPath);
-			Rejection->TryGetStringField(TEXT("migration_hint"), MigrationHint);
-		}
-		AddIssue(
-			Issues,
-			TEXT("error"),
-			ErrorCode.IsEmpty() ? TEXT("legacy_properties_not_supported") : ErrorCode,
-			JsonPath.IsEmpty() ? PathPrefix : FString::Printf(TEXT("%s.%s"), *PathPrefix, *JsonPath),
-			MigrationHint.IsEmpty() ? FString::Printf(TEXT("Use %s"), *AllowedTarget) : MigrationHint);
-	}
-
-	static void AddPCGGraphFolderLegacyValidationIssues(
-		const TSharedPtr<FJsonObject>& GraphJson,
-		TArray<TSharedPtr<FJsonValue>>& Issues)
-	{
-		if (!GraphJson.IsValid())
-		{
-			return;
-		}
-
-		const TSharedPtr<FJsonObject>* GraphSettings = nullptr;
-		if (GraphJson->TryGetObjectField(TEXT("graph_settings"), GraphSettings) && GraphSettings && GraphSettings->IsValid())
-		{
-			AddPCGLegacyValidationIssueIfPresent(
-				*GraphSettings,
-				MakePCGFolderOwnerInfo(TEXT("pcg_graph_settings"), TEXT("graph_settings")),
-				TEXT("details.index_file"),
-				TEXT("graph.json.graph_settings"),
-				Issues);
-		}
-
-		const TArray<TSharedPtr<FJsonValue>>* Nodes = nullptr;
-		if (GraphJson->TryGetArrayField(TEXT("nodes"), Nodes) && Nodes)
-		{
-			for (const TSharedPtr<FJsonValue>& NodeValue : *Nodes)
-			{
-				const TSharedPtr<FJsonObject> NodeObj = NodeValue.IsValid() ? NodeValue->AsObject() : nullptr;
-				if (!NodeObj.IsValid())
-				{
-					continue;
-				}
-				FString NodeId;
-				NodeObj->TryGetStringField(TEXT("id"), NodeId);
-				if (NodeId.IsEmpty())
-				{
-					NodeId = TEXT("unknown_node");
-				}
-				AddPCGLegacyValidationIssueIfPresent(
-					NodeObj,
-					MakePCGFolderOwnerInfo(TEXT("pcg_node_settings"), NodeId),
-					TEXT("settings_details.index_file"),
-					FString::Printf(TEXT("graph.json.nodes.%s"), *NodeId),
-					Issues);
-			}
-		}
-	}
-
-	static bool ResolvePCGFolderDetailsRef(
-		const FString& EntryDirectory,
-		const TSharedPtr<FJsonObject>& EntryObject,
-		const FString& RefFieldName,
-		bool& bOutHasDetails,
-		FString& OutDetailsRoot,
-		FString& OutIndexFile,
-		FString& OutError)
-	{
-		bOutHasDetails = false;
-		OutDetailsRoot.Reset();
-		OutIndexFile.Reset();
-		OutError.Reset();
-		if (!EntryObject.IsValid() || !EntryObject->HasField(RefFieldName))
-		{
-			return true;
-		}
-
-		const TSharedPtr<FJsonObject>* DetailsRef = nullptr;
-		if (!EntryObject->TryGetObjectField(RefFieldName, DetailsRef) || !DetailsRef || !DetailsRef->IsValid())
-		{
-			OutError = TEXT("details_ref_invalid");
-			return false;
-		}
-
-		FString IndexFile;
-		if (!(*DetailsRef)->TryGetStringField(TEXT("index_file"), IndexFile) || IndexFile.TrimStartAndEnd().IsEmpty())
-		{
-			OutError = TEXT("details_ref_missing_index_file");
-			return false;
-		}
-		IndexFile.ReplaceInline(TEXT("\\"), TEXT("/"));
-		const FString IndexDirectory = FPaths::GetPath(IndexFile);
-		OutDetailsRoot = IndexDirectory.IsEmpty() ? EntryDirectory : FPaths::Combine(EntryDirectory, IndexDirectory);
-		OutIndexFile = IndexFile;
-		bOutHasDetails = true;
-		return true;
-	}
-
-	static void RefreshPCGDetailsApplySideEffects(UObject* Object, const TSharedPtr<FJsonObject>& ApplySummary)
-	{
-		if (!Object || !ApplySummary.IsValid())
-		{
-			return;
-		}
-
-		const TSharedPtr<FJsonObject>* PropertyApply = nullptr;
-		if (!ApplySummary->TryGetObjectField(TEXT("property_apply"), PropertyApply) || !PropertyApply || !PropertyApply->IsValid())
-		{
-			return;
-		}
-
-		const TArray<TSharedPtr<FJsonValue>>* Properties = nullptr;
-		if (!(*PropertyApply)->TryGetArrayField(TEXT("properties"), Properties) || !Properties)
-		{
-			return;
-		}
-
-		for (const TSharedPtr<FJsonValue>& PropertyValue : *Properties)
-		{
-			const TSharedPtr<FJsonObject> PropertyObj = PropertyValue.IsValid() ? PropertyValue->AsObject() : nullptr;
-			if (!PropertyObj.IsValid())
-			{
-				continue;
-			}
-			FString Status;
-			FString PropertyPath;
-			PropertyObj->TryGetStringField(TEXT("status"), Status);
-			PropertyObj->TryGetStringField(TEXT("property_path"), PropertyPath);
-			if (Status == TEXT("applied") && !PropertyPath.IsEmpty())
-			{
-				RefreshPCGImportedPropertySideEffects(Object, PropertyPath);
-			}
-		}
-	}
-
-	static bool ApplyPCGFolderOwnerDetailsIfPresent(
-		UObject* Object,
-		const FString& EntryDirectory,
-		const TSharedPtr<FJsonObject>& EntryObject,
-		const FString& RefFieldName,
-		const FString& OwnerKind,
-		const FString& OwnerId,
-		const FString& PathPrefix,
-		TArray<TSharedPtr<FJsonValue>>& Issues)
-	{
-		bool bHasDetails = false;
-		FString DetailsRoot;
-		FString IndexFile;
-		FString DetailsError;
-		if (!ResolvePCGFolderDetailsRef(EntryDirectory, EntryObject, RefFieldName, bHasDetails, DetailsRoot, IndexFile, DetailsError))
-		{
-			AddIssue(Issues, TEXT("error"), TEXT("details_ref_invalid"), PathPrefix / RefFieldName, DetailsError);
-			return false;
-		}
-		if (!bHasDetails)
-		{
-			return true;
-		}
-		if (!Object)
-		{
-			AddIssue(Issues, TEXT("error"), TEXT("details_owner_missing"), PathPrefix / RefFieldName, TEXT("Details owner object is unavailable."));
-			return false;
-		}
-
-		UeAgentDetailsAuthoring::FOwnerDetailsApplyRequest Request;
-		Request.Object = Object;
-		Request.OwnerInfo = MakePCGFolderOwnerInfo(OwnerKind, OwnerId, Object);
-		Request.DetailsRoot = DetailsRoot;
-		Request.IndexFile = IndexFile;
-		Request.RefFieldName = RefFieldName;
-
-		TSharedPtr<FJsonObject> ApplySummary;
-		FString ApplyError;
-		if (!UeAgentDetailsAuthoring::ApplyOwnerDetails(Request, ApplySummary, ApplyError))
-		{
-			AddIssue(Issues, TEXT("error"), TEXT("grouped_details_apply_failed"), PathPrefix / RefFieldName, ApplyError);
-			return false;
-		}
-
-		bool bOk = true;
-		if (ApplySummary.IsValid() && ApplySummary->HasField(TEXT("ok")))
-		{
-			bOk = ApplySummary->GetBoolField(TEXT("ok"));
-		}
-		if (!bOk)
-		{
-			AddIssue(Issues, TEXT("error"), TEXT("grouped_details_apply_failed"), PathPrefix / RefFieldName, TEXT("Grouped details apply returned ok=false."));
-			return false;
-		}
-
-		RefreshPCGDetailsApplySideEffects(Object, ApplySummary);
-		return true;
-	}
-
-	static UPCGPin* ResolvePCGEdgePin(UPCGNode* Node, const FString& RequestedLabel, bool bOutputPin, FString& OutResolvedLabel)
-	{
-		OutResolvedLabel = RequestedLabel;
-		if (!Node)
-		{
-			return nullptr;
-		}
-
-		UPCGPin* Pin = RequestedLabel.IsEmpty()
-			? nullptr
-			: (bOutputPin ? Node->GetOutputPin(FName(*RequestedLabel)) : Node->GetInputPin(FName(*RequestedLabel)));
-		if (!Pin && RequestedLabel.IsEmpty())
-		{
-			const TArray<TObjectPtr<UPCGPin>>& Pins = bOutputPin ? Node->GetOutputPins() : Node->GetInputPins();
-			if (Pins.Num() == 1)
-			{
-				Pin = Pins[0].Get();
-			}
-		}
-		if (Pin)
-		{
-			OutResolvedLabel = Pin->Properties.Label.ToString();
-		}
-		return Pin;
-	}
-
-	static bool HasPCGEdge(UPCGPin* FromPin, UPCGPin* ToPin)
-	{
-		if (!FromPin || !ToPin)
-		{
-			return false;
-		}
-		for (const TObjectPtr<UPCGEdge>& EdgePtr : FromPin->Edges)
-		{
-			UPCGEdge* Edge = EdgePtr.Get();
-			if (Edge && Edge->InputPin == FromPin && Edge->OutputPin == ToPin)
-			{
-				return true;
-			}
-		}
-		return false;
-	}
-
-	static TSharedPtr<FJsonObject> ExportParameterBagToJson(const FInstancedPropertyBag* Bag);
-
-	static TSharedPtr<FJsonObject> ExportGraphToJson(UPCGGraph* Graph)
-	{
-		TSharedPtr<FJsonObject> Root = MakeShared<FJsonObject>();
-		Root->SetStringField(TEXT("schema"), SchemaFolder);
-		if (!Graph)
-		{
-			return Root;
-		}
-
-		Root->SetStringField(TEXT("asset_path"), Graph->GetOutermost() ? Graph->GetOutermost()->GetName() : FString());
-		Root->SetStringField(TEXT("object_path"), Graph->GetPathName());
-		Root->SetStringField(TEXT("asset_class"), Graph->GetClass()->GetPathName());
-
-		TSharedPtr<FJsonObject> GraphSettings = MakeShared<FJsonObject>();
-		GraphSettings->SetBoolField(TEXT("landscape_uses_metadata"), Graph->bLandscapeUsesMetadata);
-		GraphSettings->SetArrayField(TEXT("properties"), ExportEditableProperties(Graph));
-		Root->SetObjectField(TEXT("graph_settings"), GraphSettings);
-		Root->SetObjectField(TEXT("parameters"), ExportParameterBagToJson(Graph->GetUserParametersStruct()));
-
-		TArray<TSharedPtr<FJsonValue>> Nodes;
-		TArray<TSharedPtr<FJsonValue>> Edges;
-		TMap<UPCGNode*, FString> NodeIds;
-		TSet<FString> UsedIds;
-		TArray<UPCGNode*> ExportNodes = GatherExportNodes(Graph);
-
-		for (UPCGNode* Node : ExportNodes)
-		{
-			const FString NodeId = MakeStableNodeId(Graph, Node, UsedIds);
-			NodeIds.Add(Node, NodeId);
-		}
-
-		for (UPCGNode* Node : ExportNodes)
-		{
-			const FString* NodeId = NodeIds.Find(Node);
-			Nodes.Add(MakeShared<FJsonValueObject>(NodeToJson(Graph, Node, NodeId ? *NodeId : FString())));
-		}
-
-		for (UPCGNode* Node : ExportNodes)
-		{
-			const FString* FromId = NodeIds.Find(Node);
-			if (!FromId)
-			{
-				continue;
-			}
-			for (const TObjectPtr<UPCGPin>& PinPtr : Node->GetOutputPins())
-			{
-				UPCGPin* Pin = PinPtr.Get();
-				if (!Pin)
-				{
-					continue;
-				}
-				for (const TObjectPtr<UPCGEdge>& EdgePtr : Pin->Edges)
-				{
-					UPCGEdge* Edge = EdgePtr.Get();
-					if (!Edge || Edge->InputPin != Pin || !Edge->OutputPin || !Edge->OutputPin->Node)
-					{
-						continue;
-					}
-					const FString* ToId = NodeIds.Find(Edge->OutputPin->Node);
-					if (!ToId)
-					{
-						continue;
-					}
-					Edges.Add(MakeShared<FJsonValueObject>(EdgeToJson(
-						*FromId,
-						Pin->Properties.Label.ToString(),
-						*ToId,
-						Edge->OutputPin->Properties.Label.ToString())));
-				}
-			}
-		}
-
-		Root->SetArrayField(TEXT("nodes"), Nodes);
-		Root->SetArrayField(TEXT("edges"), Edges);
-		Root->SetNumberField(TEXT("node_count"), Nodes.Num());
-		Root->SetNumberField(TEXT("edge_count"), Edges.Num());
-		return Root;
-	}
-
-	static TSharedPtr<FJsonObject> ExportParameterBagToJson(const FInstancedPropertyBag* Bag)
-	{
-		TSharedPtr<FJsonObject> Root = MakeShared<FJsonObject>();
-		TArray<TSharedPtr<FJsonValue>> Parameters;
-		if (!Bag || !Bag->IsValid() || !Bag->GetPropertyBagStruct())
-		{
-			Root->SetArrayField(TEXT("parameters"), Parameters);
-			return Root;
-		}
-
-		for (const FPropertyBagPropertyDesc& Desc : Bag->GetPropertyBagStruct()->GetPropertyDescs())
-		{
-			TSharedPtr<FJsonObject> ParamObj = MakeShared<FJsonObject>();
-			ParamObj->SetStringField(TEXT("name"), Desc.Name.ToString());
-			ParamObj->SetStringField(TEXT("type"), EnumValueToString(StaticEnum<EPropertyBagPropertyType>(), static_cast<int64>(Desc.ValueType)));
-			ParamObj->SetStringField(TEXT("container_type"), Desc.ContainerTypes.IsEmpty() ? TEXT("None") : EnumValueToString(StaticEnum<EPropertyBagContainerType>(), static_cast<int64>(Desc.ContainerTypes.GetFirstContainerType())));
-			TArray<TSharedPtr<FJsonValue>> ContainerTypes;
-			for (const EPropertyBagContainerType ContainerType : Desc.ContainerTypes)
-			{
-				ContainerTypes.Add(MakeShared<FJsonValueString>(EnumValueToString(StaticEnum<EPropertyBagContainerType>(), static_cast<int64>(ContainerType))));
-			}
-			ParamObj->SetArrayField(TEXT("container_types"), ContainerTypes);
-			ParamObj->SetStringField(TEXT("type_object"), Desc.ValueTypeObject ? Desc.ValueTypeObject->GetPathName() : FString());
-			if (TValueOrError<FString, EPropertyBagResult> Serialized = Bag->GetValueSerializedString(Desc.Name); Serialized.IsValid())
-			{
-				ParamObj->SetStringField(TEXT("value_text"), Serialized.GetValue());
-			}
-			UeAgentAuthoringJson::ApplyAuthoringMetadata(
-				ParamObj,
-				TEXT("parameter_name"),
-				Desc.Name.ToString(),
-				Desc.Name.ToString(),
-				TEXT("PCG/Parameters"),
-				TEXT("parameter"),
-				TEXT("typed_value"),
-				{ TEXT("set") });
-			Parameters.Add(MakeShared<FJsonValueObject>(ParamObj));
-		}
-		Root->SetArrayField(TEXT("parameters"), Parameters);
-		Root->SetNumberField(TEXT("parameter_count"), Parameters.Num());
-		return Root;
-	}
-
-	static EPropertyBagPropertyType ParseBagPropertyType(const FString& TypeText)
-	{
-		if (TypeText.IsEmpty())
-		{
-			return EPropertyBagPropertyType::String;
-		}
-		const UEnum* TypeEnum = StaticEnum<EPropertyBagPropertyType>();
-		const int64 Value = TypeEnum ? TypeEnum->GetValueByNameString(TypeText) : INDEX_NONE;
-		if (Value != INDEX_NONE)
-		{
-			return static_cast<EPropertyBagPropertyType>(Value);
-		}
-		if (TypeText.Equals(TEXT("bool"), ESearchCase::IgnoreCase)) return EPropertyBagPropertyType::Bool;
-		if (TypeText.Equals(TEXT("int"), ESearchCase::IgnoreCase) || TypeText.Equals(TEXT("int32"), ESearchCase::IgnoreCase)) return EPropertyBagPropertyType::Int32;
-		if (TypeText.Equals(TEXT("float"), ESearchCase::IgnoreCase)) return EPropertyBagPropertyType::Float;
-		if (TypeText.Equals(TEXT("double"), ESearchCase::IgnoreCase)) return EPropertyBagPropertyType::Double;
-		if (TypeText.Equals(TEXT("name"), ESearchCase::IgnoreCase)) return EPropertyBagPropertyType::Name;
-		if (TypeText.Equals(TEXT("text"), ESearchCase::IgnoreCase)) return EPropertyBagPropertyType::Text;
-		return EPropertyBagPropertyType::String;
-	}
-
-	static EPropertyBagContainerType ParseBagContainerType(const FString& TypeText)
-	{
-		if (TypeText.IsEmpty())
-		{
-			return EPropertyBagContainerType::None;
-		}
-		const UEnum* TypeEnum = StaticEnum<EPropertyBagContainerType>();
-		const int64 Value = TypeEnum ? TypeEnum->GetValueByNameString(TypeText) : INDEX_NONE;
-		if (Value != INDEX_NONE)
-		{
-			return static_cast<EPropertyBagContainerType>(Value);
-		}
-		if (TypeText.Equals(TEXT("array"), ESearchCase::IgnoreCase))
-		{
-			return EPropertyBagContainerType::Array;
-		}
-		if (TypeText.Equals(TEXT("set"), ESearchCase::IgnoreCase))
-		{
-			return EPropertyBagContainerType::Set;
-		}
-		return EPropertyBagContainerType::None;
-	}
-
-	static FPropertyBagContainerTypes ParseBagContainerTypesFromJson(const TSharedPtr<FJsonObject>& ParamObj)
-	{
-		FPropertyBagContainerTypes ContainerTypes;
-		if (!ParamObj.IsValid())
-		{
-			return ContainerTypes;
-		}
-
-		const TArray<TSharedPtr<FJsonValue>>* ContainerTypeValues = nullptr;
-		if (ParamObj->TryGetArrayField(TEXT("container_types"), ContainerTypeValues) && ContainerTypeValues)
-		{
-			for (const TSharedPtr<FJsonValue>& Value : *ContainerTypeValues)
-			{
-				FString TypeText;
-				if (Value.IsValid() && Value->TryGetString(TypeText))
-				{
-					const EPropertyBagContainerType ContainerType = ParseBagContainerType(TypeText);
-					if (ContainerType != EPropertyBagContainerType::None)
-					{
-						ContainerTypes.Add(ContainerType);
-					}
-				}
-			}
-			return ContainerTypes;
-		}
-
-		FString ContainerTypeText;
-		if (ParamObj->TryGetStringField(TEXT("container_type"), ContainerTypeText))
-		{
-			const EPropertyBagContainerType ContainerType = ParseBagContainerType(ContainerTypeText);
-			if (ContainerType != EPropertyBagContainerType::None)
-			{
-				ContainerTypes.Add(ContainerType);
-			}
-		}
-		return ContainerTypes;
-	}
-
-	static int32 ApplyParameterArray(
-		FInstancedPropertyBag& Bag,
-		const TArray<TSharedPtr<FJsonValue>>* Parameters,
-		TArray<TSharedPtr<FJsonValue>>& Issues,
-		TArray<FName>* OutAppliedNames = nullptr,
-		bool bAllowAddMissingParameters = true)
-	{
-		if (!Parameters)
-		{
-			return 0;
-		}
-		int32 AppliedCount = 0;
-		for (const TSharedPtr<FJsonValue>& Value : *Parameters)
-		{
-			const TSharedPtr<FJsonObject>* ParamObj = nullptr;
-			if (!Value.IsValid() || !Value->TryGetObject(ParamObj) || !ParamObj || !ParamObj->IsValid())
-			{
-				AddIssue(Issues, TEXT("error"), TEXT("invalid_parameter_entry"), TEXT("parameters"), TEXT("Parameter entry must be a JSON object."));
-				continue;
-			}
-
-			FString NameText;
-			if (!(*ParamObj)->TryGetStringField(TEXT("name"), NameText) || NameText.IsEmpty())
-			{
-				AddIssue(Issues, TEXT("error"), TEXT("missing_parameter_name"), TEXT("parameters"), TEXT("Parameter entry is missing name."));
-				continue;
-			}
-
-			FString TypeText;
-			(*ParamObj)->TryGetStringField(TEXT("type"), TypeText);
-			FString TypeObjectPath;
-			(*ParamObj)->TryGetStringField(TEXT("type_object"), TypeObjectPath);
-			const FName ParamName(*NameText);
-			const EPropertyBagPropertyType BagType = ParseBagPropertyType(TypeText);
-			const FPropertyBagContainerTypes ContainerTypes = ParseBagContainerTypesFromJson(*ParamObj);
-			UObject* TypeObject = TypeObjectPath.IsEmpty() ? nullptr : LoadObject<UObject>(nullptr, *TypeObjectPath);
-			if (!TypeObjectPath.IsEmpty() && !TypeObject)
-			{
-				AddIssue(Issues, TEXT("error"), TEXT("parameter_type_object_not_found"), FString::Printf(TEXT("parameters.%s.type_object"), *NameText), TypeObjectPath);
-				continue;
-			}
-
-			const FPropertyBagPropertyDesc* ExistingDesc = Bag.FindPropertyDescByName(ParamName);
-			if (!ExistingDesc)
-			{
-				if (!bAllowAddMissingParameters)
-				{
-					AddIssue(Issues, TEXT("error"), TEXT("unknown_parameter"), FString::Printf(TEXT("parameters.%s"), *NameText), TEXT("Graph instance parameters must already exist on the parent graph."));
-					continue;
-				}
-				const EPropertyBagAlterationResult AddResult = ContainerTypes.IsEmpty()
-					? Bag.AddProperty(ParamName, BagType, TypeObject, true)
-					: Bag.AddContainerProperty(ParamName, ContainerTypes, BagType, TypeObject, true);
-				if (AddResult != EPropertyBagAlterationResult::Success)
-				{
-					AddIssue(Issues, TEXT("error"), TEXT("parameter_add_failed"), FString::Printf(TEXT("parameters.%s"), *NameText), EnumValueToString(StaticEnum<EPropertyBagAlterationResult>(), static_cast<int64>(AddResult)));
-					continue;
-				}
-			}
-			else if (bAllowAddMissingParameters && (ExistingDesc->ValueType != BagType || ExistingDesc->ValueTypeObject.Get() != TypeObject || ExistingDesc->ContainerTypes != ContainerTypes))
-			{
-				const EPropertyBagAlterationResult AddResult = ContainerTypes.IsEmpty()
-					? Bag.AddProperty(ParamName, BagType, TypeObject, true)
-					: Bag.AddContainerProperty(ParamName, ContainerTypes, BagType, TypeObject, true);
-				if (AddResult != EPropertyBagAlterationResult::Success)
-				{
-					AddIssue(Issues, TEXT("error"), TEXT("parameter_retype_failed"), FString::Printf(TEXT("parameters.%s"), *NameText), EnumValueToString(StaticEnum<EPropertyBagAlterationResult>(), static_cast<int64>(AddResult)));
-					continue;
-				}
-			}
-
-			FString ValueText;
-			if (!(*ParamObj)->TryGetStringField(TEXT("value_text"), ValueText))
-			{
-				const TSharedPtr<FJsonValue>* RawValue = (*ParamObj)->Values.Find(TEXT("value"));
-				ValueText = RawValue ? JsonValueToImportText(*RawValue) : FString();
-			}
-			if (Bag.SetValueSerializedString(ParamName, ValueText) != EPropertyBagResult::Success)
-			{
-				AddIssue(Issues, TEXT("error"), TEXT("parameter_import_failed"), FString::Printf(TEXT("parameters.%s"), *NameText), TEXT("SetValueSerializedString failed."));
-				continue;
-			}
-			AppliedCount++;
-			if (OutAppliedNames)
-			{
-				OutAppliedNames->AddUnique(ParamName);
-			}
-		}
-		return AppliedCount;
-	}
-
-	static int32 PreflightParameterArray(
-		const FInstancedPropertyBag* SourceBag,
-		const TArray<TSharedPtr<FJsonValue>>* Parameters,
-		TArray<TSharedPtr<FJsonValue>>& Issues,
-		bool bAllowAddMissingParameters)
-	{
-		FInstancedPropertyBag PreviewBag;
-		if (SourceBag)
-		{
-			PreviewBag = *SourceBag;
-		}
-		TArray<FName> PreviewAppliedNames;
-		return ApplyParameterArray(PreviewBag, Parameters, Issues, &PreviewAppliedNames, bAllowAddMissingParameters);
-	}
-
-	static void RefreshGraphInstanceParameters(UPCGGraphInstance* Instance)
-	{
-		if (Instance)
-		{
-			Instance->OnGraphParametersChanged(EPCGGraphParameterEvent::GraphPostLoad, NAME_None);
-		}
-	}
-
-	static void NotifyGraphInstanceParameterValuesChanged(UPCGGraphInstance* Instance, const TArray<FName>& ParameterNames)
-	{
-		if (!Instance)
-		{
-			return;
-		}
-		for (const FName& ParamName : ParameterNames)
-		{
-			if (!ParamName.IsNone())
-			{
-				Instance->OnGraphParametersChanged(EPCGGraphParameterEvent::ValueModifiedLocally, ParamName);
-			}
-		}
-	}
-
-	static UPCGGraph* CreateOrLoadGraphAsset(const FString& AssetPathInput, bool bCreateIfMissing, bool& bOutCreated, FString& OutError)
-	{
-		bOutCreated = false;
-		const FString AssetPath = NormalizeAssetPath(AssetPathInput);
-		if (UPCGGraph* ExistingGraph = LoadAsset<UPCGGraph>(AssetPath))
-		{
-			return ExistingGraph;
-		}
-		if (!bCreateIfMissing)
-		{
-			OutError = TEXT("pcg_graph_asset_not_found");
-			return nullptr;
-		}
-		if (!FPackageName::IsValidLongPackageName(AssetPath))
-		{
-			OutError = TEXT("invalid_asset_path");
-			return nullptr;
-		}
-
-		const FString AssetName = FPackageName::GetLongPackageAssetName(AssetPath);
-		UPackage* Package = CreatePackage(*AssetPath);
-		if (!Package)
-		{
-			OutError = TEXT("create_package_failed");
-			return nullptr;
-		}
-
-		UPCGGraph* Graph = NewObject<UPCGGraph>(Package, UPCGGraph::StaticClass(), *AssetName, RF_Public | RF_Standalone | RF_Transactional);
-		if (!Graph)
-		{
-			OutError = TEXT("create_pcg_graph_failed");
-			return nullptr;
-		}
-		FAssetRegistryModule::AssetCreated(Graph);
-		Graph->MarkPackageDirty();
-		Package->MarkPackageDirty();
-		bOutCreated = true;
-		return Graph;
-	}
-
-	static bool ApplyGraphJson(UPCGGraph* Graph, const TSharedPtr<FJsonObject>& GraphJson, const FString& GraphEntryDirectory, bool bReplaceNodes, TArray<TSharedPtr<FJsonValue>>& Issues, int32& OutAppliedNodes, int32& OutAppliedEdges)
-	{
-		OutAppliedNodes = 0;
-		OutAppliedEdges = 0;
-		if (!Graph || !GraphJson.IsValid())
-		{
-			AddIssue(Issues, TEXT("error"), TEXT("invalid_graph_apply_input"), TEXT("graph"), TEXT("Graph asset or graph JSON is invalid."));
-			return false;
-		}
-
-		const TArray<TSharedPtr<FJsonValue>>* NodeValues = nullptr;
-		GraphJson->TryGetArrayField(TEXT("nodes"), NodeValues);
-		const TArray<TSharedPtr<FJsonValue>>* EdgeValues = nullptr;
-		GraphJson->TryGetArrayField(TEXT("edges"), EdgeValues);
-
-		if (bReplaceNodes)
-		{
-			TArray<UPCGNode*> NodesToRemove;
-			for (UPCGNode* Node : Graph->GetNodes())
-			{
-				if (Node && Node != Graph->GetInputNode() && Node != Graph->GetOutputNode())
-				{
-					NodesToRemove.Add(Node);
-				}
-			}
-			if (NodesToRemove.Num() > 0)
-			{
-				Graph->RemoveNodes(NodesToRemove);
-			}
-		}
-
-		TMap<FString, UPCGNode*> NodeById;
-		NodeById.Add(InputNodeId, Graph->GetInputNode());
-		NodeById.Add(OutputNodeId, Graph->GetOutputNode());
-
-		if (NodeValues)
-		{
-			for (const TSharedPtr<FJsonValue>& Value : *NodeValues)
-			{
-				const TSharedPtr<FJsonObject>* NodeObj = nullptr;
-				if (!Value.IsValid() || !Value->TryGetObject(NodeObj) || !NodeObj || !NodeObj->IsValid())
-				{
-					AddIssue(Issues, TEXT("error"), TEXT("invalid_node_entry"), TEXT("nodes"), TEXT("Node entry must be a JSON object."));
-					continue;
-				}
-
-				FString Id;
-				(*NodeObj)->TryGetStringField(TEXT("id"), Id);
-				if (Id.IsEmpty())
-				{
-					AddIssue(Issues, TEXT("error"), TEXT("missing_node_id"), TEXT("nodes"), TEXT("Node entry is missing id."));
-					continue;
-				}
-				if (Id == InputNodeId || Id == OutputNodeId)
-				{
-					UPCGNode* Node = (Id == InputNodeId) ? Graph->GetInputNode() : Graph->GetOutputNode();
-					UPCGSettings* Settings = Node ? Node->GetSettings() : nullptr;
-					if (!Node || !Settings)
-					{
-						AddIssue(Issues, TEXT("error"), TEXT("input_output_node_not_found"), FString::Printf(TEXT("nodes.%s"), *Id), TEXT("Graph input/output node or settings is unavailable."));
-						continue;
-					}
-
-					FString AuthoredTitle;
-					if ((*NodeObj)->TryGetStringField(TEXT("authored_title"), AuthoredTitle) && !AuthoredTitle.IsEmpty() && AuthoredTitle != TEXT("None"))
-					{
-						Node->NodeTitle = FName(*AuthoredTitle);
-					}
-
-#if WITH_EDITOR
-					double PosX = 0.0;
-					double PosY = 0.0;
-					if ((*NodeObj)->TryGetNumberField(TEXT("pos_x"), PosX) || (*NodeObj)->TryGetNumberField(TEXT("x"), PosX))
-					{
-						(*NodeObj)->TryGetNumberField(TEXT("pos_y"), PosY);
-						Node->SetNodePosition(static_cast<int32>(PosX), static_cast<int32>(PosY));
-					}
-#endif
-
-					ApplyPCGFolderOwnerDetailsIfPresent(
-						Settings,
-						GraphEntryDirectory,
-						*NodeObj,
-						TEXT("settings_details"),
-						TEXT("pcg_node_settings"),
-						Id,
-						FString::Printf(TEXT("nodes.%s"), *Id),
-						Issues);
-					ApplyNodeJsonDerivedSettings(Settings, *NodeObj);
-
-					bool bBoolValue = false;
-					if ((*NodeObj)->TryGetBoolField(TEXT("enabled"), bBoolValue))
-					{
-						Settings->SetEnabled(bBoolValue);
-					}
-					if ((*NodeObj)->TryGetBoolField(TEXT("debug"), bBoolValue))
-					{
-						Settings->bDebug = bBoolValue;
-					}
-#if WITH_EDITOR
-					if ((*NodeObj)->TryGetBoolField(TEXT("inspect"), bBoolValue))
-					{
-						Settings->bIsInspecting = bBoolValue;
-					}
-#endif
-					Node->UpdateAfterSettingsChangeDuringCreation();
-					continue;
-				}
-
-				FString SettingsClassPath;
-				if (!(*NodeObj)->TryGetStringField(TEXT("settings_class"), SettingsClassPath) || SettingsClassPath.IsEmpty())
-				{
-					AddIssue(Issues, TEXT("error"), TEXT("missing_settings_class"), FString::Printf(TEXT("nodes.%s"), *Id), TEXT("Settings node is missing settings_class."));
-					continue;
-				}
-
-				UClass* SettingsClass = ResolvePCGSettingsClass(SettingsClassPath);
-				if (!SettingsClass)
-				{
-					AddIssue(Issues, TEXT("error"), TEXT("settings_class_not_found"), FString::Printf(TEXT("nodes.%s"), *Id), SettingsClassPath);
-					continue;
-				}
-
-				UPCGSettings* DefaultSettings = nullptr;
-				UPCGNode* Node = Graph->AddNodeOfType(SettingsClass, DefaultSettings);
-				if (!Node || !DefaultSettings)
-				{
-					AddIssue(Issues, TEXT("error"), TEXT("add_node_failed"), FString::Printf(TEXT("nodes.%s"), *Id), SettingsClassPath);
-					continue;
-				}
-
-				FString AuthoredTitle;
-				if ((*NodeObj)->TryGetStringField(TEXT("authored_title"), AuthoredTitle) && !AuthoredTitle.IsEmpty() && AuthoredTitle != TEXT("None"))
-				{
-					Node->NodeTitle = FName(*AuthoredTitle);
-				}
-
-#if WITH_EDITOR
-				double PosX = 0.0;
-				double PosY = 0.0;
-				if ((*NodeObj)->TryGetNumberField(TEXT("pos_x"), PosX) || (*NodeObj)->TryGetNumberField(TEXT("x"), PosX))
-				{
-					(*NodeObj)->TryGetNumberField(TEXT("pos_y"), PosY);
-					Node->SetNodePosition(static_cast<int32>(PosX), static_cast<int32>(PosY));
-				}
-#endif
-
-				ApplyPCGFolderOwnerDetailsIfPresent(
-					DefaultSettings,
-					GraphEntryDirectory,
-					*NodeObj,
-					TEXT("settings_details"),
-					TEXT("pcg_node_settings"),
-					Id,
-					FString::Printf(TEXT("nodes.%s"), *Id),
-					Issues);
-				ApplyNodeJsonDerivedSettings(DefaultSettings, *NodeObj);
-				bool bBoolValue = false;
-				if ((*NodeObj)->TryGetBoolField(TEXT("enabled"), bBoolValue))
-				{
-					DefaultSettings->SetEnabled(bBoolValue);
-				}
-				if ((*NodeObj)->TryGetBoolField(TEXT("debug"), bBoolValue))
-				{
-					DefaultSettings->bDebug = bBoolValue;
-				}
-#if WITH_EDITOR
-				if ((*NodeObj)->TryGetBoolField(TEXT("inspect"), bBoolValue))
-				{
-					DefaultSettings->bIsInspecting = bBoolValue;
-				}
-#endif
-				Node->UpdateAfterSettingsChangeDuringCreation();
-				NodeById.Add(Id, Node);
-				OutAppliedNodes++;
-			}
-		}
-
-		if (EdgeValues)
-		{
-			for (const TSharedPtr<FJsonValue>& Value : *EdgeValues)
-			{
-				const TSharedPtr<FJsonObject>* EdgeObj = nullptr;
-				if (!Value.IsValid() || !Value->TryGetObject(EdgeObj) || !EdgeObj || !EdgeObj->IsValid())
-				{
-					AddIssue(Issues, TEXT("error"), TEXT("invalid_edge_entry"), TEXT("edges"), TEXT("Edge entry must be a JSON object."));
-					continue;
-				}
-				FString FromId;
-				FString ToId;
-				FString FromPin;
-				FString ToPin;
-				(*EdgeObj)->TryGetStringField(TEXT("from"), FromId);
-				(*EdgeObj)->TryGetStringField(TEXT("to"), ToId);
-				(*EdgeObj)->TryGetStringField(TEXT("from_pin"), FromPin);
-				(*EdgeObj)->TryGetStringField(TEXT("to_pin"), ToPin);
-				UPCGNode** FromNode = NodeById.Find(FromId);
-				UPCGNode** ToNode = NodeById.Find(ToId);
-				if (!FromNode || !ToNode || !*FromNode || !*ToNode)
-				{
-					AddIssue(Issues, TEXT("error"), TEXT("edge_node_not_found"), TEXT("edges"), FString::Printf(TEXT("%s -> %s"), *FromId, *ToId));
-					continue;
-				}
-				FString ResolvedFromPin;
-				FString ResolvedToPin;
-				UPCGPin* SourcePin = ResolvePCGEdgePin(*FromNode, FromPin, true, ResolvedFromPin);
-				UPCGPin* TargetPin = ResolvePCGEdgePin(*ToNode, ToPin, false, ResolvedToPin);
-				if (!SourcePin || !TargetPin)
-				{
-					AddIssue(Issues, TEXT("error"), TEXT("edge_pin_not_found"), TEXT("edges"), FString::Printf(TEXT("%s.%s -> %s.%s"), *FromId, *FromPin, *ToId, *ToPin));
-					continue;
-				}
-				Graph->AddLabeledEdge(*FromNode, FName(*ResolvedFromPin), *ToNode, FName(*ResolvedToPin));
-				if (!HasPCGEdge(SourcePin, TargetPin))
-				{
-					AddIssue(Issues, TEXT("error"), TEXT("add_edge_failed"), TEXT("edges"), FString::Printf(TEXT("%s.%s -> %s.%s"), *FromId, *FromPin, *ToId, *ToPin));
-					continue;
-				}
-				OutAppliedEdges++;
-			}
-		}
-
-		const TSharedPtr<FJsonObject>* GraphSettings = nullptr;
-		if (GraphJson->TryGetObjectField(TEXT("graph_settings"), GraphSettings) && GraphSettings && GraphSettings->IsValid())
-		{
-			ApplyPCGFolderOwnerDetailsIfPresent(
-				Graph,
-				GraphEntryDirectory,
-				*GraphSettings,
-				TEXT("details"),
-				TEXT("pcg_graph_settings"),
-				TEXT("graph_settings"),
-				TEXT("graph_settings"),
-				Issues);
-		}
-
-		const TSharedPtr<FJsonObject>* ParametersObj = nullptr;
-		if (GraphJson->TryGetObjectField(TEXT("parameters"), ParametersObj) && ParametersObj && ParametersObj->IsValid())
-		{
-			const TArray<TSharedPtr<FJsonValue>>* ParameterValues = nullptr;
-			if ((*ParametersObj)->TryGetArrayField(TEXT("parameters"), ParameterValues))
-			{
-				Graph->UpdateUserParametersStruct([&](FInstancedPropertyBag& Bag)
-				{
-					ApplyParameterArray(Bag, ParameterValues, Issues, nullptr, true);
-				});
-			}
-		}
-
-		Graph->Recompile();
-		Graph->MarkPackageDirty();
-		return CountErrors(Issues) == 0;
-	}
-
-	static bool PreflightApplyGraphJson(UPCGGraph* ExistingGraph, const TSharedPtr<FJsonObject>& GraphJson, const FString& GraphEntryDirectory, bool bReplaceNodes, TArray<TSharedPtr<FJsonValue>>& Issues, int32& OutAppliedNodes, int32& OutAppliedEdges)
-	{
-		UPCGGraph* PreflightGraph = ExistingGraph ? DuplicateObject<UPCGGraph>(ExistingGraph, GetTransientPackage()) : nullptr;
-		if (!PreflightGraph)
-		{
-			PreflightGraph = NewObject<UPCGGraph>(GetTransientPackage(), UPCGGraph::StaticClass(), NAME_None, RF_Transient);
-		}
-		if (!PreflightGraph)
-		{
-			OutAppliedNodes = 0;
-			OutAppliedEdges = 0;
-			AddIssue(Issues, TEXT("error"), TEXT("preflight_graph_create_failed"), TEXT("graph"), TEXT("Failed to create a transient PCG graph for apply preflight."));
-			return false;
-		}
-
-		PreflightGraph->SetFlags(RF_Transient);
-		return ApplyGraphJson(PreflightGraph, GraphJson, GraphEntryDirectory, bReplaceNodes, Issues, OutAppliedNodes, OutAppliedEdges);
-	}
-
-	static AActor* FindActorByNameOrLabelDirect(UWorld* World, const FString& NameOrLabel)
-	{
-		if (!World || NameOrLabel.IsEmpty())
-		{
-			return nullptr;
-		}
-		for (TActorIterator<AActor> It(World); It; ++It)
-		{
-			AActor* Actor = *It;
-			if (!Actor)
-			{
-				continue;
-			}
-			if (Actor->GetName().Equals(NameOrLabel, ESearchCase::IgnoreCase))
-			{
-				return Actor;
-			}
-#if WITH_EDITOR
-			if (Actor->GetActorLabel().Equals(NameOrLabel, ESearchCase::IgnoreCase))
-			{
-				return Actor;
-			}
-#endif
-		}
-		return nullptr;
-	}
-
-	static bool GetStringAny(const TSharedPtr<FJsonObject>& Params, const TArray<const TCHAR*>& Keys, FString& OutValue)
-	{
-		if (!Params.IsValid())
-		{
-			return false;
-		}
-		for (const TCHAR* Key : Keys)
-		{
-			if (Key && Params->TryGetStringField(Key, OutValue) && !OutValue.TrimStartAndEnd().IsEmpty())
-			{
-				OutValue.TrimStartAndEndInline();
-				return true;
-			}
-		}
-		return false;
-	}
-
-	static UPCGComponent* FindPCGComponent(UWorld* World, const TSharedPtr<FJsonObject>& Params, FString& OutError)
-	{
-		FString ActorName;
-		GetStringAny(Params, { TEXT("actor"), TEXT("actor_name"), TEXT("actor_label") }, ActorName);
-		FString ComponentName;
-		GetStringAny(Params, { TEXT("component"), TEXT("component_name"), TEXT("pcg_component") }, ComponentName);
-
-		if (!ActorName.IsEmpty())
-		{
-			AActor* Actor = FindActorByNameOrLabelDirect(World, ActorName);
-			if (!Actor)
-			{
-				OutError = TEXT("actor_not_found");
-				return nullptr;
-			}
-
-			TArray<UPCGComponent*> Components;
-			Actor->GetComponents<UPCGComponent>(Components);
-			for (UPCGComponent* Component : Components)
-			{
-				if (!Component)
-				{
-					continue;
-				}
-				if (ComponentName.IsEmpty() ||
-					Component->GetName().Equals(ComponentName, ESearchCase::IgnoreCase))
-				{
-					return Component;
-				}
-			}
-			OutError = TEXT("pcg_component_not_found");
-			return nullptr;
-		}
-
-		for (TActorIterator<AActor> It(World); It; ++It)
-		{
-			TArray<UPCGComponent*> Components;
-			It->GetComponents<UPCGComponent>(Components);
-			for (UPCGComponent* Component : Components)
-			{
-				if (!Component)
-				{
-					continue;
-				}
-				if (ComponentName.IsEmpty() || Component->GetName().Equals(ComponentName, ESearchCase::IgnoreCase))
-				{
-					return Component;
-				}
-			}
-		}
-		OutError = TEXT("pcg_component_not_found");
-		return nullptr;
-	}
-
-	static FString ComponentGenerationTriggerToString(EPCGComponentGenerationTrigger Trigger)
-	{
-		return EnumValueToString(StaticEnum<EPCGComponentGenerationTrigger>(), static_cast<int64>(Trigger));
-	}
-
-	static bool TryParseGenerationTrigger(const FString& TriggerText, EPCGComponentGenerationTrigger& OutTrigger)
-	{
-		const UEnum* TriggerEnum = StaticEnum<EPCGComponentGenerationTrigger>();
-		const int64 Value = TriggerEnum ? TriggerEnum->GetValueByNameString(TriggerText) : INDEX_NONE;
-		if (Value != INDEX_NONE)
-		{
-			OutTrigger = static_cast<EPCGComponentGenerationTrigger>(Value);
-			return true;
-		}
-		if (TriggerText.Equals(TEXT("on_demand"), ESearchCase::IgnoreCase) || TriggerText.Equals(TEXT("GenerateOnDemand"), ESearchCase::IgnoreCase))
-		{
-			OutTrigger = EPCGComponentGenerationTrigger::GenerateOnDemand;
-			return true;
-		}
-		if (TriggerText.Equals(TEXT("runtime"), ESearchCase::IgnoreCase) || TriggerText.Equals(TEXT("GenerateAtRuntime"), ESearchCase::IgnoreCase))
-		{
-			OutTrigger = EPCGComponentGenerationTrigger::GenerateAtRuntime;
-			return true;
-		}
-		if (TriggerText.Equals(TEXT("load"), ESearchCase::IgnoreCase) || TriggerText.Equals(TEXT("GenerateOnLoad"), ESearchCase::IgnoreCase))
-		{
-			OutTrigger = EPCGComponentGenerationTrigger::GenerateOnLoad;
-			return true;
-		}
-		return false;
-	}
-
-	static EPCGComponentGenerationTrigger ParseGenerationTrigger(const FString& TriggerText, EPCGComponentGenerationTrigger DefaultValue)
-	{
-		EPCGComponentGenerationTrigger Parsed = DefaultValue;
-		return TryParseGenerationTrigger(TriggerText, Parsed) ? Parsed : DefaultValue;
-	}
-
-	static TSharedPtr<FJsonObject> ComponentToJson(UPCGComponent* Component)
-	{
-		TSharedPtr<FJsonObject> Root = MakeShared<FJsonObject>();
-		Root->SetStringField(TEXT("schema"), SchemaComponent);
-		if (!Component)
-		{
-			return Root;
-		}
-
-		AActor* Owner = Component->GetOwner();
-		Root->SetStringField(TEXT("component_name"), Component->GetName());
-		Root->SetStringField(TEXT("component_path"), Component->GetPathName());
-		Root->SetStringField(TEXT("actor_name"), Owner ? Owner->GetName() : FString());
-#if WITH_EDITOR
-		Root->SetStringField(TEXT("actor_label"), Owner ? Owner->GetActorLabel() : FString());
-#endif
-		Root->SetStringField(TEXT("graph"), Component->GetGraph() ? Component->GetGraph()->GetPathName() : FString());
-		Root->SetStringField(TEXT("graph_asset_path"), Component->GetGraph() && Component->GetGraph()->GetOutermost() ? Component->GetGraph()->GetOutermost()->GetName() : FString());
-		Root->SetNumberField(TEXT("seed"), Component->Seed);
-		Root->SetBoolField(TEXT("activated"), Component->bActivated);
-		Root->SetBoolField(TEXT("partitioned"), Component->bIsComponentPartitioned);
-		Root->SetStringField(TEXT("generation_trigger"), ComponentGenerationTriggerToString(Component->GenerationTrigger));
-		Root->SetBoolField(TEXT("is_generating"), Component->IsGenerating());
-		Root->SetBoolField(TEXT("is_cleaning_up"), Component->IsCleaningUp());
-		Root->SetBoolField(TEXT("was_generated_this_session"), Component->WasGeneratedThisSession());
-		Root->SetBoolField(TEXT("generated"), Component->bGenerated);
-		Root->SetNumberField(TEXT("current_generation_task"), static_cast<double>(Component->GetGenerationTaskId()));
-		Root->SetNumberField(TEXT("generated_output_count"), Component->GetGeneratedGraphOutput().TaggedData.Num());
-		Root->SetArrayField(TEXT("properties"), ExportEditableProperties(Component));
-		return Root;
-	}
-
-	static TSharedPtr<FJsonObject> PCGDataCollectionToJson(const FPCGDataCollection& Collection, int32 MaxPointsPerData)
-	{
-		TSharedPtr<FJsonObject> Root = MakeShared<FJsonObject>();
-		Root->SetStringField(TEXT("schema"), SchemaData);
-		TArray<TSharedPtr<FJsonValue>> DataEntries;
-		int32 PointDataCount = 0;
-		int32 TotalPointCount = 0;
-		for (int32 Index = 0; Index < Collection.TaggedData.Num(); ++Index)
-		{
-			const FPCGTaggedData& TaggedData = Collection.TaggedData[Index];
-			TSharedPtr<FJsonObject> Entry = MakeShared<FJsonObject>();
-			Entry->SetNumberField(TEXT("index"), Index);
-			Entry->SetStringField(TEXT("pin"), TaggedData.Pin.ToString());
-			Entry->SetBoolField(TEXT("used_multiple_times"), TaggedData.bIsUsedMultipleTimes);
-			TArray<TSharedPtr<FJsonValue>> Tags;
-			for (const FString& Tag : TaggedData.Tags)
-			{
-				Tags.Add(MakeShared<FJsonValueString>(Tag));
-			}
-			Entry->SetArrayField(TEXT("tags"), Tags);
-
-			const UPCGData* Data = TaggedData.Data.Get();
-			Entry->SetStringField(TEXT("data_class"), Data ? Data->GetClass()->GetPathName() : FString());
-			Entry->SetStringField(TEXT("data_path"), Data ? Data->GetPathName() : FString());
-			if (const UPCGBasePointData* PointData = Cast<UPCGBasePointData>(Data))
-			{
-				const int32 NumPoints = PointData->GetNumPoints();
-				PointDataCount++;
-				TotalPointCount += NumPoints;
-				Entry->SetNumberField(TEXT("point_count"), NumPoints);
-
-				TArray<TSharedPtr<FJsonValue>> PointSamples;
-				const int32 SampleCount = MaxPointsPerData < 0 ? NumPoints : FMath::Min(NumPoints, MaxPointsPerData);
-				for (int32 PointIndex = 0; PointIndex < SampleCount; ++PointIndex)
-				{
-					const FTransform& Transform = PointData->GetTransform(PointIndex);
-					TSharedPtr<FJsonObject> PointObj = MakeShared<FJsonObject>();
-					PointObj->SetNumberField(TEXT("index"), PointIndex);
-					PointObj->SetObjectField(TEXT("location"), VecToJson(Transform.GetLocation()));
-					PointObj->SetObjectField(TEXT("rotation"), RotToJson(Transform.Rotator()));
-					PointObj->SetObjectField(TEXT("scale"), VecToJson(Transform.GetScale3D()));
-					PointObj->SetNumberField(TEXT("density"), PointData->GetDensity(PointIndex));
-					PointObj->SetNumberField(TEXT("seed"), PointData->GetSeed(PointIndex));
-					PointObj->SetObjectField(TEXT("bounds_min"), VecToJson(PointData->GetBoundsMin(PointIndex)));
-					PointObj->SetObjectField(TEXT("bounds_max"), VecToJson(PointData->GetBoundsMax(PointIndex)));
-					PointSamples.Add(MakeShared<FJsonValueObject>(PointObj));
-				}
-				Entry->SetArrayField(TEXT("point_samples"), PointSamples);
-			}
-			DataEntries.Add(MakeShared<FJsonValueObject>(Entry));
-		}
-
-		Root->SetArrayField(TEXT("data"), DataEntries);
-		Root->SetNumberField(TEXT("data_count"), DataEntries.Num());
-		Root->SetNumberField(TEXT("point_data_count"), PointDataCount);
-		Root->SetNumberField(TEXT("total_point_count"), TotalPointCount);
-		return Root;
-	}
-
-	static void SetActionStatus(TSharedPtr<FJsonObject>& OutData, UPCGComponent* Component)
-	{
-		if (!OutData.IsValid())
-		{
-			OutData = MakeShared<FJsonObject>();
-		}
-		OutData->SetObjectField(TEXT("component"), ComponentToJson(Component));
-	}
-
-	static void BuildAuthoringGraphAndLayout(
-		const TSharedPtr<FJsonObject>& SourceGraph,
-		TSharedPtr<FJsonObject>& OutGraph,
-		TSharedPtr<FJsonObject>& OutLayout)
-	{
-		OutGraph = MakeShared<FJsonObject>();
-		OutLayout = MakeShared<FJsonObject>();
-		OutLayout->SetStringField(TEXT("schema"), TEXT("ue_agent_interface.pcg_graph_layout.v1"));
-
-		if (!SourceGraph.IsValid())
-		{
-			OutGraph->SetArrayField(TEXT("nodes"), {});
-			OutGraph->SetArrayField(TEXT("edges"), {});
-			OutLayout->SetArrayField(TEXT("nodes"), {});
-			return;
-		}
-
-		for (const TPair<FString, TSharedPtr<FJsonValue>>& Field : SourceGraph->Values)
-		{
-			if (Field.Key != TEXT("nodes"))
-			{
-				OutGraph->SetField(Field.Key, Field.Value);
-			}
-		}
-
-		TArray<TSharedPtr<FJsonValue>> CleanNodes;
-		TArray<TSharedPtr<FJsonValue>> LayoutNodes;
-		const TArray<TSharedPtr<FJsonValue>>* SourceNodes = nullptr;
-		if (SourceGraph->TryGetArrayField(TEXT("nodes"), SourceNodes) && SourceNodes)
-		{
-			for (const TSharedPtr<FJsonValue>& NodeValue : *SourceNodes)
-			{
-				const TSharedPtr<FJsonObject>* NodeObj = nullptr;
-				if (!NodeValue.IsValid() || !NodeValue->TryGetObject(NodeObj) || !NodeObj || !NodeObj->IsValid())
-				{
-					continue;
-				}
-
-				TSharedPtr<FJsonObject> CleanNode = MakeShared<FJsonObject>();
-				for (const TPair<FString, TSharedPtr<FJsonValue>>& Field : (*NodeObj)->Values)
-				{
-					if (Field.Key != TEXT("pos_x") && Field.Key != TEXT("pos_y"))
-					{
-						CleanNode->SetField(Field.Key, Field.Value);
-					}
-				}
-				CleanNodes.Add(MakeShared<FJsonValueObject>(CleanNode));
-
-				double PosX = 0.0;
-				double PosY = 0.0;
-				const bool bHasPosX = (*NodeObj)->TryGetNumberField(TEXT("pos_x"), PosX);
-				const bool bHasPosY = (*NodeObj)->TryGetNumberField(TEXT("pos_y"), PosY);
-				if (bHasPosX || bHasPosY)
-				{
-					FString Id;
-					(*NodeObj)->TryGetStringField(TEXT("id"), Id);
-					TSharedPtr<FJsonObject> LayoutNode = MakeShared<FJsonObject>();
-					LayoutNode->SetStringField(TEXT("id"), Id);
-					LayoutNode->SetNumberField(TEXT("x"), PosX);
-					LayoutNode->SetNumberField(TEXT("y"), PosY);
-					LayoutNodes.Add(MakeShared<FJsonValueObject>(LayoutNode));
-				}
-			}
-		}
-		OutGraph->SetArrayField(TEXT("nodes"), CleanNodes);
-		OutLayout->SetArrayField(TEXT("nodes"), LayoutNodes);
-	}
-}
-
 bool FUeAgentHttpServer::ExecutePCGCommand(const FString& CommandLower, const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	struct FEntry
@@ -2544,7 +107,6 @@ bool FUeAgentHttpServer::ExecutePCGCommand(const FString& CommandLower, const FU
 		{ TEXT("pcg_data_export_json"), &FUeAgentHttpServer::CmdPCGDataExportJson },
 		{ TEXT("pcg_data_assert_json"), &FUeAgentHttpServer::CmdPCGDataAssertJson },
 		{ TEXT("pcg_component_runtime_probe"), &FUeAgentHttpServer::CmdPCGComponentRuntimeProbe },
-		{ TEXT("pcg_screenshot"), &FUeAgentHttpServer::CmdPCGScreenshot },
 		{ TEXT("pcg_profile_report"), &FUeAgentHttpServer::CmdPCGProfileReport },
 		{ TEXT("pcg_gpu_capabilities_query"), &FUeAgentHttpServer::CmdPCGGPUCapabilitiesQuery },
 		{ TEXT("pcg_compute_graph_validate"), &FUeAgentHttpServer::CmdPCGComputeGraphValidate },
@@ -2593,7 +155,7 @@ bool FUeAgentHttpServer::CmdPCGCapabilitiesQuery(const FUeAgentRequestContext& C
 		TEXT("pcg_cancel_generation"), TEXT("pcg_generation_status"), TEXT("pcg_wait"),
 		TEXT("pcg_runtime_generation_probe"), TEXT("pcg_inspection_set"), TEXT("pcg_node_inspect"),
 		TEXT("pcg_data_export_json"), TEXT("pcg_data_assert_json"), TEXT("pcg_component_runtime_probe"),
-		TEXT("pcg_screenshot"), TEXT("pcg_profile_report"), TEXT("pcg_gpu_capabilities_query"),
+		TEXT("pcg_profile_report"), TEXT("pcg_gpu_capabilities_query"),
 		TEXT("pcg_compute_graph_validate"), TEXT("pcg_hlsl_validate"), TEXT("pcg_data_asset_export_json"),
 		TEXT("pcg_data_asset_apply_json"), TEXT("pcg_level_to_asset_export")
 	};
@@ -2661,7 +223,7 @@ bool FUeAgentHttpServer::CmdPCGNodeCatalogExport(const FUeAgentRequestContext& C
 	if (Ctx.Params.IsValid() && Ctx.Params->TryGetStringField(TEXT("output_file"), OutputFile) && !OutputFile.TrimStartAndEnd().IsEmpty())
 	{
 		FString SavedPath;
-		if (!SaveJsonFile(OutputFile, OutData, SavedPath, OutError))
+		if (!SaveAuthoringFile(OutputFile, OutData, SavedPath, OutError))
 		{
 			return false;
 		}
@@ -2726,102 +288,24 @@ bool FUeAgentHttpServer::CmdPCGGraphExportFolder(const FUeAgentRequestContext& C
 		OutError = TEXT("missing_folder_path");
 		return false;
 	}
-
 	UPCGGraph* Graph = LoadAsset<UPCGGraph>(AssetPath);
 	if (!Graph)
 	{
 		OutError = TEXT("pcg_graph_asset_not_found");
 		return false;
 	}
-
+	FString ProfileId = TEXT("llm_authoring");
+	if (Ctx.Params.IsValid()) Ctx.Params->TryGetStringField(TEXT("profile"), ProfileId);
 	const FString FolderPath = ResolveFolderPath(FolderPathInput);
-	IFileManager::Get().MakeDirectory(*FolderPath, true);
-	IFileManager::Get().MakeDirectory(*FPaths::Combine(FolderPath, TEXT("nodes")), true);
-	IFileManager::Get().MakeDirectory(*FPaths::Combine(FolderPath, TEXT("validation")), true);
-
-	TArray<TSharedPtr<FJsonValue>> Files;
-	TSharedPtr<FJsonObject> GraphJsonSource = ExportGraphToJson(Graph);
-	const TMap<FString, UPCGNode*> NodeById = BuildExportNodeMapById(Graph);
-
-	TSharedPtr<FJsonObject> AssetJson = MakeShared<FJsonObject>();
-	AssetJson->SetStringField(TEXT("schema"), SchemaFolder);
-	AssetJson->SetStringField(TEXT("asset_path"), Graph->GetOutermost() ? Graph->GetOutermost()->GetName() : AssetPath);
-	AssetJson->SetStringField(TEXT("object_path"), Graph->GetPathName());
-	AssetJson->SetStringField(TEXT("asset_class"), Graph->GetClass()->GetPathName());
-
-	TSharedPtr<FJsonObject> NodeIndex = MakeShared<FJsonObject>();
-	TArray<TSharedPtr<FJsonValue>> NodeIndexEntries;
-	const TArray<TSharedPtr<FJsonValue>>* NodeValues = nullptr;
-	TSet<FString> UsedNodeFileStems;
-	if (GraphJsonSource->TryGetArrayField(TEXT("nodes"), NodeValues) && NodeValues)
+	UeAgentExportWorkspaceWriter::FWorkspaceResult Result;
+	if (!UeAgentPCGAuthoring::ExportAssetWorkspace(*Graph, FolderPath, ProfileId, Result, OutError))
 	{
-		for (const TSharedPtr<FJsonValue>& NodeValue : *NodeValues)
-		{
-			const TSharedPtr<FJsonObject>* NodeObj = nullptr;
-			if (!NodeValue.IsValid() || !NodeValue->TryGetObject(NodeObj) || !NodeObj || !NodeObj->IsValid())
-			{
-				continue;
-			}
-			FString Id;
-			(*NodeObj)->TryGetStringField(TEXT("id"), Id);
-			if (Id.IsEmpty())
-			{
-				continue;
-			}
-			const FString NodeFile = FString::Printf(TEXT("nodes/%s.json"), *MakeSafePCGNodeFileStem(Id, UsedNodeFileStems));
-			TSharedPtr<FJsonObject> IndexObj = MakeShared<FJsonObject>();
-			IndexObj->SetStringField(TEXT("id"), Id);
-			IndexObj->SetStringField(TEXT("file"), NodeFile);
-			NodeIndexEntries.Add(MakeShared<FJsonValueObject>(IndexObj));
-			TSharedPtr<FJsonObject> NodeFileJson = UeAgentDetailsAuthoring::CloneObjectTree(*NodeObj);
-			if (!ExportPCGNodeSettingsDetailsForFolderEntry(NodeById, FPaths::Combine(FolderPath, TEXT("nodes")), NodeFileJson, OutError))
-			{
-				return false;
-			}
-			if (!EnsurePCGFolderEntryGroupedOnly(NodeFileJson, NodeFile, OutError))
-			{
-				return false;
-			}
-			if (!SaveTrackedJson(FolderPath, NodeFile, NodeFileJson, Files, OutError))
-			{
-				return false;
-			}
-		}
+		OutData = Result.ToJsonObject();
+		return false;
 	}
-	NodeIndex->SetArrayField(TEXT("nodes"), NodeIndexEntries);
-	NodeIndex->SetNumberField(TEXT("node_count"), NodeIndexEntries.Num());
-
-	TSharedPtr<FJsonObject> Coverage = MakeShared<FJsonObject>();
-	Coverage->SetStringField(TEXT("schema"), TEXT("ue_agent_interface.pcg.folder_coverage.v1"));
-	Coverage->SetBoolField(TEXT("asset_json"), true);
-	Coverage->SetBoolField(TEXT("graph_json"), true);
-	Coverage->SetBoolField(TEXT("nodes_index_json"), true);
-	Coverage->SetNumberField(TEXT("node_count"), NodeIndexEntries.Num());
-	Coverage->SetNumberField(TEXT("edge_count"), GraphJsonSource->GetIntegerField(TEXT("edge_count")));
-
-	if (!SaveTrackedJson(FolderPath, TEXT("asset.json"), AssetJson, Files, OutError)) return false;
-	TSharedPtr<FJsonObject> GraphJson = UeAgentDetailsAuthoring::CloneObjectTree(GraphJsonSource);
-	if (!ExportPCGGraphDetailsForFolderEntry(Graph, NodeById, FolderPath, GraphJson, OutError)) return false;
-	if (!EnsurePCGFolderEntryGroupedOnly(GraphJson, TEXT("graph.json"), OutError)) return false;
-	if (!SaveTrackedJson(FolderPath, TEXT("graph.json"), GraphJson, Files, OutError)) return false;
-	if (!SaveTrackedJson(FolderPath, TEXT("nodes/index.json"), NodeIndex, Files, OutError)) return false;
-	TSharedPtr<FJsonObject> AuthoringGraphJson;
-	TSharedPtr<FJsonObject> AuthoringLayoutJson;
-	BuildAuthoringGraphAndLayout(GraphJsonSource, AuthoringGraphJson, AuthoringLayoutJson);
-	if (!ExportPCGGraphDetailsForFolderEntry(Graph, NodeById, FPaths::Combine(FolderPath, TEXT("graphs"), TEXT("items"), TEXT("main")), AuthoringGraphJson, OutError)) return false;
-	if (!EnsurePCGFolderEntryGroupedOnly(AuthoringGraphJson, TEXT("graphs/items/main/graph.json"), OutError)) return false;
-	if (!SaveTrackedJson(FolderPath, TEXT("graphs/items/main/graph.json"), AuthoringGraphJson, Files, OutError)) return false;
-	if (!SaveTrackedJson(FolderPath, TEXT("graphs/items/main/layout.json"), AuthoringLayoutJson, Files, OutError)) return false;
-	if (!SaveTrackedJson(FolderPath, TEXT("validation/coverage_report.json"), Coverage, Files, OutError)) return false;
-
-	OutData = MakeShared<FJsonObject>();
-	OutData->SetStringField(TEXT("schema"), SchemaFolder);
-	OutData->SetStringField(TEXT("folder_path"), FolderPath);
-	OutData->SetStringField(TEXT("asset_path"), AssetJson->GetStringField(TEXT("asset_path")));
-	OutData->SetArrayField(TEXT("files"), Files);
-	OutData->SetNumberField(TEXT("file_count"), Files.Num());
-	OutData->SetNumberField(TEXT("node_count"), NodeIndexEntries.Num());
-	OutData->SetNumberField(TEXT("edge_count"), GraphJsonSource->GetIntegerField(TEXT("edge_count")));
+	OutData = Result.ToJsonObject();
+	OutData->SetStringField(TEXT("schema"), TEXT("ue_agent_interface.pcg.graph_folder.v2"));
+	OutData->SetStringField(TEXT("asset_path"), Graph->GetOutermost()->GetName());
 	return true;
 }
 
@@ -2834,111 +318,26 @@ bool FUeAgentHttpServer::CmdPCGGraphValidateFolder(const FUeAgentRequestContext&
 		OutError = TEXT("missing_folder_path");
 		return false;
 	}
+	FString ExpectedAssetPath;
+	if (Ctx.Params.IsValid()) Ctx.Params->TryGetStringField(TEXT("asset_path"), ExpectedAssetPath);
 	const FString FolderPath = ResolveFolderPath(FolderPathInput);
-	TSharedPtr<FJsonObject> LegacyRejection;
-	if (UeAgentDetailsAuthoring::BuildLegacyPropertiesFolderRejectionIfPresent(
-		FolderPath,
-		MakePCGFolderOwnerInfo(TEXT("pcg_graph_folder"), TEXT("pcg_graph_validate_folder")),
-		TEXT("settings_details.index_file"),
-		LegacyRejection,
-		OutError))
+	UeAgentPCGAuthoring::FWorkspaceInspectResult Result;
+	const bool bReady = UeAgentPCGAuthoring::InspectAssetWorkspace(FolderPath, ExpectedAssetPath, Result);
+	OutData = MakeShared<FJsonObject>();
+	OutData->SetStringField(TEXT("schema"), TEXT("ue_agent_interface.pcg.folder_validation.v2"));
+	OutData->SetStringField(TEXT("folder_path"), FolderPath);
+	OutData->SetStringField(TEXT("asset_path"), Result.AssetPath);
+	OutData->SetBoolField(TEXT("valid"), bReady);
+	OutData->SetNumberField(TEXT("units_checked"), Result.UnitsChecked);
+	OutData->SetStringField(TEXT("error_code"), Result.ErrorCode);
+	OutData->SetStringField(TEXT("error_detail"), Result.ErrorDetail);
+	if (!bReady)
 	{
-		OutData = LegacyRejection;
+		OutError = UeAgentAuthoringDiagnostics::GetActionableFailureMessage(
+			Result.ErrorCode, Result.ErrorDetail, TEXT("pcg_graph_folder_validation_failed"));
 		return false;
 	}
-	TArray<TSharedPtr<FJsonValue>> Issues;
-
-	TSharedPtr<FJsonObject> AssetJson;
-	TSharedPtr<FJsonObject> GraphJson;
-	if (!LoadRawJsonFile(FPaths::Combine(FolderPath, TEXT("asset.json")), AssetJson, OutError))
-	{
-		AddIssue(Issues, TEXT("error"), TEXT("asset_json_missing_or_invalid"), TEXT("asset.json"), OutError);
-	}
-	if (!LoadRawJsonFile(FPaths::Combine(FolderPath, TEXT("graph.json")), GraphJson, OutError))
-	{
-		AddIssue(Issues, TEXT("error"), TEXT("graph_json_missing_or_invalid"), TEXT("graph.json"), OutError);
-	}
-
-	if (GraphJson.IsValid())
-	{
-		AddPCGGraphFolderLegacyValidationIssues(GraphJson, Issues);
-
-		const TArray<TSharedPtr<FJsonValue>>* Nodes = nullptr;
-		const TArray<TSharedPtr<FJsonValue>>* Edges = nullptr;
-		if (!GraphJson->TryGetArrayField(TEXT("nodes"), Nodes) || !Nodes)
-		{
-			AddIssue(Issues, TEXT("error"), TEXT("nodes_missing"), TEXT("graph.json.nodes"), TEXT("Graph folder must contain nodes array."));
-		}
-		if (!GraphJson->TryGetArrayField(TEXT("edges"), Edges) || !Edges)
-		{
-			AddIssue(Issues, TEXT("error"), TEXT("edges_missing"), TEXT("graph.json.edges"), TEXT("Graph folder must contain edges array."));
-		}
-
-		TSet<FString> NodeIds;
-		if (Nodes)
-		{
-			for (const TSharedPtr<FJsonValue>& Value : *Nodes)
-			{
-				const TSharedPtr<FJsonObject>* NodeObj = nullptr;
-				if (!Value.IsValid() || !Value->TryGetObject(NodeObj) || !NodeObj || !NodeObj->IsValid())
-				{
-					AddIssue(Issues, TEXT("error"), TEXT("invalid_node_entry"), TEXT("graph.json.nodes"), TEXT("Node entry must be an object."));
-					continue;
-				}
-				FString Id;
-				(*NodeObj)->TryGetStringField(TEXT("id"), Id);
-				if (Id.IsEmpty())
-				{
-					AddIssue(Issues, TEXT("error"), TEXT("missing_node_id"), TEXT("graph.json.nodes"), TEXT("Node entry is missing id."));
-					continue;
-				}
-				if (NodeIds.Contains(Id))
-				{
-					AddIssue(Issues, TEXT("error"), TEXT("duplicate_node_id"), TEXT("graph.json.nodes"), Id);
-				}
-				NodeIds.Add(Id);
-				FString Role;
-				(*NodeObj)->TryGetStringField(TEXT("role"), Role);
-				if (Role != TEXT("input") && Role != TEXT("output"))
-				{
-					FString SettingsClass;
-					if (!(*NodeObj)->TryGetStringField(TEXT("settings_class"), SettingsClass) || !ResolvePCGSettingsClass(SettingsClass))
-					{
-						AddIssue(Issues, TEXT("error"), TEXT("invalid_settings_class"), FString::Printf(TEXT("graph.json.nodes.%s"), *Id), SettingsClass);
-					}
-				}
-			}
-		}
-		if (Edges)
-		{
-			for (const TSharedPtr<FJsonValue>& Value : *Edges)
-			{
-				const TSharedPtr<FJsonObject>* EdgeObj = nullptr;
-				if (!Value.IsValid() || !Value->TryGetObject(EdgeObj) || !EdgeObj || !EdgeObj->IsValid())
-				{
-					AddIssue(Issues, TEXT("error"), TEXT("invalid_edge_entry"), TEXT("graph.json.edges"), TEXT("Edge entry must be an object."));
-					continue;
-				}
-				FString From;
-				FString To;
-				(*EdgeObj)->TryGetStringField(TEXT("from"), From);
-				(*EdgeObj)->TryGetStringField(TEXT("to"), To);
-				if (!NodeIds.Contains(From) || !NodeIds.Contains(To))
-				{
-					AddIssue(Issues, TEXT("error"), TEXT("edge_references_missing_node"), TEXT("graph.json.edges"), FString::Printf(TEXT("%s -> %s"), *From, *To));
-				}
-			}
-		}
-	}
-
-	OutData = MakeShared<FJsonObject>();
-	OutData->SetStringField(TEXT("schema"), TEXT("ue_agent_interface.pcg.folder_validation.v1"));
-	OutData->SetStringField(TEXT("folder_path"), FolderPath);
-	OutData->SetArrayField(TEXT("issues"), Issues);
-	OutData->SetNumberField(TEXT("issue_count"), Issues.Num());
-	OutData->SetNumberField(TEXT("error_count"), CountErrors(Issues));
-	OutData->SetBoolField(TEXT("valid"), CountErrors(Issues) == 0);
-	return CountErrors(Issues) == 0;
+	return true;
 }
 
 bool FUeAgentHttpServer::CmdPCGGraphPlanFolder(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
@@ -2950,54 +349,30 @@ bool FUeAgentHttpServer::CmdPCGGraphPlanFolder(const FUeAgentRequestContext& Ctx
 		OutError = TEXT("missing_folder_path");
 		return false;
 	}
-
-	TSharedPtr<FJsonObject> Validation;
-	FString ValidationError;
-	const bool bValidFolder = CmdPCGGraphValidateFolder(Ctx, Validation, ValidationError);
-
+	FString ExpectedAssetPath;
+	if (Ctx.Params.IsValid()) Ctx.Params->TryGetStringField(TEXT("asset_path"), ExpectedAssetPath);
 	const FString FolderPath = ResolveFolderPath(FolderPathInput);
-	if (!bValidFolder)
-	{
-		OutData = MakeShared<FJsonObject>();
-		OutData->SetStringField(TEXT("schema"), TEXT("ue_agent_interface.pcg.graph_plan.v1"));
-		OutData->SetStringField(TEXT("folder_path"), FolderPath);
-		OutData->SetObjectField(TEXT("validation"), Validation);
-		OutData->SetNumberField(TEXT("error_count"), Validation.IsValid() ? Validation->GetIntegerField(TEXT("error_count")) : 1);
-		OutError = TEXT("pcg_graph_folder_validation_failed");
-		return false;
-	}
-
-	TSharedPtr<FJsonObject> AssetJson;
-	TSharedPtr<FJsonObject> GraphJson;
-	LoadRawJsonFile(FPaths::Combine(FolderPath, TEXT("asset.json")), AssetJson, OutError);
-	LoadRawJsonFile(FPaths::Combine(FolderPath, TEXT("graph.json")), GraphJson, OutError);
-
-	FString AssetPath;
-	if (Ctx.Params.IsValid())
-	{
-		Ctx.Params->TryGetStringField(TEXT("asset_path"), AssetPath);
-	}
-	if (AssetPath.IsEmpty() && AssetJson.IsValid())
-	{
-		AssetJson->TryGetStringField(TEXT("asset_path"), AssetPath);
-	}
-
+	UeAgentPCGAuthoring::FWorkspaceInspectResult Result;
+	const bool bReady = UeAgentPCGAuthoring::InspectAssetWorkspace(FolderPath, ExpectedAssetPath, Result);
 	OutData = MakeShared<FJsonObject>();
-	OutData->SetStringField(TEXT("schema"), TEXT("ue_agent_interface.pcg.graph_plan.v1"));
+	OutData->SetStringField(TEXT("schema"), TEXT("ue_agent_interface.pcg.graph_plan.v2"));
 	OutData->SetStringField(TEXT("folder_path"), FolderPath);
-	OutData->SetStringField(TEXT("asset_path"), AssetPath);
-	OutData->SetBoolField(TEXT("asset_exists"), LoadAsset<UPCGGraph>(AssetPath) != nullptr);
-	OutData->SetBoolField(TEXT("would_create_asset"), !AssetPath.IsEmpty() && LoadAsset<UPCGGraph>(AssetPath) == nullptr);
-	OutData->SetBoolField(TEXT("would_replace_nodes"), true);
-	OutData->SetObjectField(TEXT("validation"), Validation);
-	if (GraphJson.IsValid())
+	OutData->SetStringField(TEXT("asset_path"), Result.AssetPath);
+	OutData->SetStringField(TEXT("operation"), Result.RequestedOperation);
+	OutData->SetBoolField(TEXT("asset_exists"), Result.bAssetExists);
+	OutData->SetBoolField(TEXT("would_create_asset"), Result.bWouldCreate);
+	OutData->SetBoolField(TEXT("no_op"), Result.bNoOp);
+	OutData->SetNumberField(TEXT("planned_node_count"), Result.NodesPlanned);
+	OutData->SetNumberField(TEXT("planned_edge_count"), Result.EdgesPlanned);
+	OutData->SetNumberField(TEXT("planned_node_property_count"), Result.NodePropertiesPlanned);
+	OutData->SetNumberField(TEXT("units_checked"), Result.UnitsChecked);
+	if (!bReady)
 	{
-		const TArray<TSharedPtr<FJsonValue>>* Nodes = nullptr;
-		const TArray<TSharedPtr<FJsonValue>>* Edges = nullptr;
-		GraphJson->TryGetArrayField(TEXT("nodes"), Nodes);
-		GraphJson->TryGetArrayField(TEXT("edges"), Edges);
-		OutData->SetNumberField(TEXT("planned_node_count"), Nodes ? Nodes->Num() : 0);
-		OutData->SetNumberField(TEXT("planned_edge_count"), Edges ? Edges->Num() : 0);
+		OutData->SetStringField(TEXT("error_code"), Result.ErrorCode);
+		OutData->SetStringField(TEXT("error_detail"), Result.ErrorDetail);
+		OutError = UeAgentAuthoringDiagnostics::GetActionableFailureMessage(
+			Result.ErrorCode, Result.ErrorDetail, TEXT("pcg_graph_plan_failed"));
+		return false;
 	}
 	return true;
 }
@@ -3011,73 +386,26 @@ bool FUeAgentHttpServer::CmdPCGGraphDiffFolder(const FUeAgentRequestContext& Ctx
 		OutError = TEXT("missing_folder_path");
 		return false;
 	}
+	FString ExpectedAssetPath;
+	if (Ctx.Params.IsValid()) Ctx.Params->TryGetStringField(TEXT("asset_path"), ExpectedAssetPath);
 	const FString FolderPath = ResolveFolderPath(FolderPathInput);
-	TSharedPtr<FJsonObject> Validation;
-	FString ValidationError;
-	if (!CmdPCGGraphValidateFolder(Ctx, Validation, ValidationError))
+	UeAgentPCGAuthoring::FWorkspaceInspectResult Result;
+	const bool bReady = UeAgentPCGAuthoring::InspectAssetWorkspace(FolderPath, ExpectedAssetPath, Result);
+	OutData = MakeShared<FJsonObject>();
+	OutData->SetStringField(TEXT("schema"), TEXT("ue_agent_interface.pcg.graph_diff.v2"));
+	OutData->SetStringField(TEXT("asset_path"), Result.AssetPath);
+	OutData->SetBoolField(TEXT("different"), bReady && !Result.bNoOp);
+	OutData->SetBoolField(TEXT("no_op"), Result.bNoOp);
+	OutData->SetBoolField(TEXT("would_create_asset"), Result.bWouldCreate);
+	OutData->SetNumberField(TEXT("change_count"), bReady && !Result.bNoOp ? 1 : 0);
+	if (!bReady)
 	{
-		OutData = MakeShared<FJsonObject>();
-		OutData->SetStringField(TEXT("schema"), TEXT("ue_agent_interface.pcg.graph_diff.v1"));
-		OutData->SetStringField(TEXT("folder_path"), FolderPath);
-		OutData->SetObjectField(TEXT("validation"), Validation);
-		OutData->SetNumberField(TEXT("error_count"), Validation.IsValid() ? Validation->GetIntegerField(TEXT("error_count")) : 1);
-		OutError = TEXT("pcg_graph_folder_validation_failed");
+		OutData->SetStringField(TEXT("error_code"), Result.ErrorCode);
+		OutData->SetStringField(TEXT("error_detail"), Result.ErrorDetail);
+		OutError = UeAgentAuthoringDiagnostics::GetActionableFailureMessage(
+			Result.ErrorCode, Result.ErrorDetail, TEXT("pcg_graph_diff_failed"));
 		return false;
 	}
-
-	TSharedPtr<FJsonObject> AssetJson;
-	TSharedPtr<FJsonObject> DesiredGraph;
-	if (!LoadRawJsonFile(FPaths::Combine(FolderPath, TEXT("asset.json")), AssetJson, OutError)) return false;
-	if (!LoadRawJsonFile(FPaths::Combine(FolderPath, TEXT("graph.json")), DesiredGraph, OutError)) return false;
-
-	FString AssetPath;
-	if (Ctx.Params.IsValid())
-	{
-		Ctx.Params->TryGetStringField(TEXT("asset_path"), AssetPath);
-	}
-	if (AssetPath.IsEmpty())
-	{
-		AssetJson->TryGetStringField(TEXT("asset_path"), AssetPath);
-	}
-
-	UPCGGraph* ExistingGraph = LoadAsset<UPCGGraph>(AssetPath);
-	TSharedPtr<FJsonObject> ExistingGraphJson = ExistingGraph ? ExportGraphToJson(ExistingGraph) : MakeShared<FJsonObject>();
-	const int32 ExistingNodes = ExistingGraph ? ExistingGraphJson->GetIntegerField(TEXT("node_count")) : 0;
-	const int32 DesiredNodes = DesiredGraph->GetIntegerField(TEXT("node_count"));
-	const int32 ExistingEdges = ExistingGraph ? ExistingGraphJson->GetIntegerField(TEXT("edge_count")) : 0;
-	const int32 DesiredEdges = DesiredGraph->GetIntegerField(TEXT("edge_count"));
-
-	TArray<TSharedPtr<FJsonValue>> Changes;
-	if (!ExistingGraph)
-	{
-		TSharedPtr<FJsonObject> Change = MakeShared<FJsonObject>();
-		Change->SetStringField(TEXT("kind"), TEXT("create_asset"));
-		Change->SetStringField(TEXT("asset_path"), AssetPath);
-		Changes.Add(MakeShared<FJsonValueObject>(Change));
-	}
-	if (ExistingNodes != DesiredNodes)
-	{
-		TSharedPtr<FJsonObject> Change = MakeShared<FJsonObject>();
-		Change->SetStringField(TEXT("kind"), TEXT("node_count"));
-		Change->SetNumberField(TEXT("current"), ExistingNodes);
-		Change->SetNumberField(TEXT("desired"), DesiredNodes);
-		Changes.Add(MakeShared<FJsonValueObject>(Change));
-	}
-	if (ExistingEdges != DesiredEdges)
-	{
-		TSharedPtr<FJsonObject> Change = MakeShared<FJsonObject>();
-		Change->SetStringField(TEXT("kind"), TEXT("edge_count"));
-		Change->SetNumberField(TEXT("current"), ExistingEdges);
-		Change->SetNumberField(TEXT("desired"), DesiredEdges);
-		Changes.Add(MakeShared<FJsonValueObject>(Change));
-	}
-
-	OutData = MakeShared<FJsonObject>();
-	OutData->SetStringField(TEXT("schema"), TEXT("ue_agent_interface.pcg.graph_diff.v1"));
-	OutData->SetStringField(TEXT("asset_path"), AssetPath);
-	OutData->SetArrayField(TEXT("changes"), Changes);
-	OutData->SetNumberField(TEXT("change_count"), Changes.Num());
-	OutData->SetBoolField(TEXT("different"), Changes.Num() > 0);
 	return true;
 }
 
@@ -3090,129 +418,65 @@ bool FUeAgentHttpServer::CmdPCGGraphApplyFolder(const FUeAgentRequestContext& Ct
 		OutError = TEXT("missing_folder_path");
 		return false;
 	}
-	const FString FolderPath = ResolveFolderPath(FolderPathInput);
-	TSharedPtr<FJsonObject> AssetJson;
-	TSharedPtr<FJsonObject> GraphJson;
-	if (!LoadRawJsonFile(FPaths::Combine(FolderPath, TEXT("asset.json")), AssetJson, OutError)) return false;
-	if (!LoadRawJsonFile(FPaths::Combine(FolderPath, TEXT("graph.json")), GraphJson, OutError)) return false;
-
-	FString AssetPath;
+	FString ExpectedAssetPath;
+	bool bDryRun = true;
 	if (Ctx.Params.IsValid())
 	{
-		Ctx.Params->TryGetStringField(TEXT("asset_path"), AssetPath);
-	}
-	if (AssetPath.IsEmpty())
-	{
-		AssetJson->TryGetStringField(TEXT("asset_path"), AssetPath);
-	}
-	if (AssetPath.IsEmpty())
-	{
-		OutError = TEXT("missing_asset_path");
-		return false;
-	}
-
-	TSharedPtr<FJsonObject> LegacyRejection;
-	FString LegacyError;
-	if (BuildPCGGraphFolderLegacyRejection(GraphJson, LegacyRejection, LegacyError))
-	{
-		OutData = LegacyRejection;
-		OutError = LegacyError;
-		return false;
-	}
-
-	bool bDryRun = false;
-	bool bSave = true;
-	bool bReplaceNodes = true;
-	if (Ctx.Params.IsValid())
-	{
+		Ctx.Params->TryGetStringField(TEXT("asset_path"), ExpectedAssetPath);
 		Ctx.Params->TryGetBoolField(TEXT("dry_run"), bDryRun);
-		Ctx.Params->TryGetBoolField(TEXT("save"), bSave);
-		Ctx.Params->TryGetBoolField(TEXT("replace_nodes"), bReplaceNodes);
 	}
-
-	OutData = MakeShared<FJsonObject>();
-	OutData->SetStringField(TEXT("schema"), TEXT("ue_agent_interface.pcg.graph_apply.v1"));
-	OutData->SetStringField(TEXT("folder_path"), FolderPath);
-	OutData->SetStringField(TEXT("asset_path"), AssetPath);
-	OutData->SetBoolField(TEXT("dry_run"), bDryRun);
+	const FString FolderPath = ResolveFolderPath(FolderPathInput);
 	if (bDryRun)
 	{
-		TSharedPtr<FJsonObject> Plan;
-		FString PlanError;
-		CmdPCGGraphPlanFolder(Ctx, Plan, PlanError);
-		OutData->SetObjectField(TEXT("plan"), Plan);
+		UeAgentPCGAuthoring::FWorkspaceInspectResult Result;
+		const bool bReady = UeAgentPCGAuthoring::InspectAssetWorkspace(FolderPath, ExpectedAssetPath, Result);
+		OutData = MakeShared<FJsonObject>();
+		OutData->SetStringField(TEXT("schema"), TEXT("ue_agent_interface.pcg.graph_apply.v2"));
+		OutData->SetStringField(TEXT("folder_path"), FolderPath);
+		OutData->SetStringField(TEXT("asset_path"), Result.AssetPath);
+		OutData->SetBoolField(TEXT("dry_run"), true);
+		OutData->SetBoolField(TEXT("ready"), bReady);
+		OutData->SetBoolField(TEXT("no_op"), Result.bNoOp);
+		OutData->SetNumberField(TEXT("planned_node_count"), Result.NodesPlanned);
+		OutData->SetNumberField(TEXT("planned_edge_count"), Result.EdgesPlanned);
+		OutData->SetNumberField(TEXT("planned_node_property_count"), Result.NodePropertiesPlanned);
+		if (!bReady)
+		{
+			OutData->SetStringField(TEXT("error_code"), Result.ErrorCode);
+			OutData->SetStringField(TEXT("error_detail"), Result.ErrorDetail);
+			OutError = UeAgentAuthoringDiagnostics::GetActionableFailureMessage(
+				Result.ErrorCode, Result.ErrorDetail, TEXT("pcg_graph_apply_preflight_failed"));
+			return false;
+		}
 		return true;
 	}
 
-	TSharedPtr<FJsonObject> Validation;
-	FString ValidationError;
-	const bool bValidFolder = CmdPCGGraphValidateFolder(Ctx, Validation, ValidationError);
-	OutData->SetObjectField(TEXT("validation"), Validation);
-	if (!bValidFolder)
-	{
-		OutData->SetNumberField(TEXT("error_count"), Validation.IsValid() ? Validation->GetIntegerField(TEXT("error_count")) : 1);
-		OutError = TEXT("pcg_graph_folder_validation_failed");
-		return false;
-	}
-
-	UPCGGraph* ExistingGraph = LoadAsset<UPCGGraph>(AssetPath);
-	TArray<TSharedPtr<FJsonValue>> PreflightIssues;
-	int32 PreflightNodes = 0;
-	int32 PreflightEdges = 0;
-	const bool bPreflightApplied = PreflightApplyGraphJson(ExistingGraph, GraphJson, FolderPath, bReplaceNodes, PreflightIssues, PreflightNodes, PreflightEdges);
-	OutData->SetArrayField(TEXT("preflight_issues"), PreflightIssues);
-	OutData->SetNumberField(TEXT("preflight_error_count"), CountErrors(PreflightIssues));
-	OutData->SetNumberField(TEXT("preflight_node_count"), PreflightNodes);
-	OutData->SetNumberField(TEXT("preflight_edge_count"), PreflightEdges);
-	if (!bPreflightApplied)
-	{
-		OutData->SetNumberField(TEXT("error_count"), CountErrors(PreflightIssues));
-		OutError = TEXT("pcg_graph_apply_preflight_failed");
-		return false;
-	}
-
-	bool bCreated = false;
-	UPCGGraph* Graph = ExistingGraph ? ExistingGraph : CreateOrLoadGraphAsset(AssetPath, true, bCreated, OutError);
-	if (!Graph)
-	{
-		return false;
-	}
-
-	TSharedPtr<FJsonObject> RollbackGraphJson = bCreated ? nullptr : ExportGraphToJson(Graph);
-	FScopedTransaction Transaction(NSLOCTEXT("UeAgentInterfacePCG", "ApplyPCGGraphFolder", "Apply PCG Graph Folder"), true);
-	Graph->Modify();
-
-	TArray<TSharedPtr<FJsonValue>> Issues;
-	int32 AppliedNodes = 0;
-	int32 AppliedEdges = 0;
-	const bool bApplied = ApplyGraphJson(Graph, GraphJson, FolderPath, bReplaceNodes, Issues, AppliedNodes, AppliedEdges);
+	UeAgentPCGAuthoring::FAssetApplyResult Result;
+	const bool bApplied = UeAgentPCGAuthoring::ApplyAssetWorkspace(FolderPath, ExpectedAssetPath, Result, Ctx.RequestId);
+	OutData = MakeShared<FJsonObject>();
+	OutData->SetStringField(TEXT("schema"), TEXT("ue_agent_interface.pcg.graph_apply.v2"));
+	OutData->SetStringField(TEXT("folder_path"), FolderPath);
+	OutData->SetStringField(TEXT("asset_path"), Result.AssetPath);
+	OutData->SetStringField(TEXT("object_path"), Result.ObjectPath);
+	OutData->SetStringField(TEXT("status"), Result.Status);
+	OutData->SetStringField(TEXT("phase"), Result.Phase);
+	OutData->SetStringField(TEXT("resolved_operation"), Result.ResolvedOperation);
+	OutData->SetBoolField(TEXT("dry_run"), false);
+	OutData->SetNumberField(TEXT("applied_node_count"), Result.NodesApplied);
+	OutData->SetNumberField(TEXT("applied_edge_count"), Result.EdgesApplied);
+	OutData->SetNumberField(TEXT("applied_node_property_count"), Result.NodePropertiesApplied);
+	OutData->SetNumberField(TEXT("mutations_applied"), Result.MutationsApplied);
+	OutData->SetBoolField(TEXT("rollback_attempted"), Result.bRollbackAttempted);
+	OutData->SetBoolField(TEXT("rollback_succeeded"), Result.bRollbackSucceeded);
 	if (!bApplied)
 	{
-		TArray<TSharedPtr<FJsonValue>> RollbackIssues;
-		int32 RollbackNodes = 0;
-		int32 RollbackEdges = 0;
-		const bool bRolledBack = RollbackGraphJson.IsValid() ? ApplyGraphJson(Graph, RollbackGraphJson, FString(), true, RollbackIssues, RollbackNodes, RollbackEdges) : false;
-		OutData->SetBoolField(TEXT("rolled_back"), bRolledBack);
-		OutData->SetArrayField(TEXT("rollback_issues"), RollbackIssues);
-		OutData->SetNumberField(TEXT("rollback_error_count"), CountErrors(RollbackIssues));
-		OutData->SetArrayField(TEXT("issues"), Issues);
-		OutData->SetNumberField(TEXT("error_count"), CountErrors(Issues));
-		Transaction.Cancel();
-		OutError = TEXT("pcg_graph_apply_failed");
+		OutData->SetStringField(TEXT("error_code"), Result.ErrorCode);
+		OutData->SetStringField(TEXT("error_detail"), Result.ErrorDetail);
+		OutError = UeAgentAuthoringDiagnostics::GetActionableFailureMessage(
+			Result.ErrorCode, Result.ErrorDetail, TEXT("pcg_graph_apply_failed"));
 		return false;
 	}
-	if (bApplied && bSave && !SavePackagesForObjects({ Graph }, OutError))
-	{
-		return false;
-	}
-
-	OutData->SetBoolField(TEXT("created"), bCreated);
-	OutData->SetBoolField(TEXT("saved"), bApplied && bSave);
-	OutData->SetNumberField(TEXT("applied_node_count"), AppliedNodes);
-	OutData->SetNumberField(TEXT("applied_edge_count"), AppliedEdges);
-	OutData->SetArrayField(TEXT("issues"), Issues);
-	OutData->SetNumberField(TEXT("error_count"), CountErrors(Issues));
-	return bApplied;
+	return true;
 }
 
 bool FUeAgentHttpServer::CmdPCGGraphCompile(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
@@ -3469,8 +733,8 @@ bool FUeAgentHttpServer::CmdPCGGraphInstanceJson(const FUeAgentRequestContext& C
 		}
 	}
 
-	const TArray<TSharedPtr<FJsonValue>>* Parameters = nullptr;
-	const bool bHasParameters = Ctx.Params.IsValid() && Ctx.Params->TryGetArrayField(TEXT("parameters"), Parameters);
+	const TSharedPtr<FJsonObject>* Parameters = nullptr;
+	const bool bHasParameters = Ctx.Params.IsValid() && Ctx.Params->TryGetObjectField(TEXT("parameters"), Parameters) && Parameters && Parameters->IsValid();
 	if (bHasParameters)
 	{
 		UPCGGraphInstance* PreviewInstance = Instance ? DuplicateObject<UPCGGraphInstance>(Instance, GetTransientPackage()) : NewObject<UPCGGraphInstance>(GetTransientPackage(), UPCGGraphInstance::StaticClass(), NAME_None, RF_Transient);
@@ -3486,7 +750,7 @@ bool FUeAgentHttpServer::CmdPCGGraphInstanceJson(const FUeAgentRequestContext& C
 		}
 		RefreshGraphInstanceParameters(PreviewInstance);
 		TArray<TSharedPtr<FJsonValue>> PreflightIssues;
-		PreflightParameterArray(&PreviewInstance->ParametersOverrides.Parameters, Parameters, PreflightIssues, false);
+		PreflightCanonicalParameterBag(&PreviewInstance->ParametersOverrides.Parameters, *Parameters, PreflightIssues, false);
 		if (CountErrors(PreflightIssues) > 0)
 		{
 			OutError = TEXT("graph_instance_parameter_preflight_failed");
@@ -3542,7 +806,7 @@ bool FUeAgentHttpServer::CmdPCGGraphInstanceJson(const FUeAgentRequestContext& C
 		TArray<TSharedPtr<FJsonValue>> Issues;
 		TArray<FName> AppliedNames;
 		RefreshGraphInstanceParameters(Instance);
-		ApplyParameterArray(Instance->ParametersOverrides.Parameters, Parameters, Issues, &AppliedNames, false);
+		ApplyCanonicalParameterBag(Instance->ParametersOverrides.Parameters, *Parameters, Issues, &AppliedNames, false);
 		NotifyGraphInstanceParameterValuesChanged(Instance, AppliedNames);
 		Instance->MarkPackageDirty();
 		if (CountErrors(Issues) > 0)
@@ -3569,7 +833,9 @@ bool FUeAgentHttpServer::CmdPCGGraphInstanceJson(const FUeAgentRequestContext& C
 	OutData->SetStringField(TEXT("object_path"), Instance->GetPathName());
 	OutData->SetStringField(TEXT("graph"), Instance->Graph ? Instance->Graph->GetPathName() : FString());
 	OutData->SetBoolField(TEXT("created"), bCreated);
-	OutData->SetObjectField(TEXT("parameters"), ExportParameterBagToJson(Instance->GetUserParametersStruct()));
+	const FInstancedPropertyBag* InstanceParameters = Instance->GetUserParametersStruct();
+	OutData->SetObjectField(TEXT("parameters"), ExportParameterBagToJson(InstanceParameters));
+	OutData->SetNumberField(TEXT("parameter_count"), GetParameterBagPropertyCount(InstanceParameters));
 	return true;
 }
 
@@ -3588,9 +854,12 @@ bool FUeAgentHttpServer::CmdPCGGraphParametersQuery(const FUeAgentRequestContext
 		OutError = TEXT("pcg_graph_interface_not_found");
 		return false;
 	}
-	OutData = ExportParameterBagToJson(GraphInterface->GetUserParametersStruct());
+	OutData = MakeShared<FJsonObject>();
 	OutData->SetStringField(TEXT("schema"), TEXT("ue_agent_interface.pcg.graph_parameters.v1"));
 	OutData->SetStringField(TEXT("asset_path"), GraphInterface->GetOutermost() ? GraphInterface->GetOutermost()->GetName() : AssetPath);
+	const FInstancedPropertyBag* Parameters = GraphInterface->GetUserParametersStruct();
+	OutData->SetObjectField(TEXT("parameters"), ExportParameterBagToJson(Parameters));
+	OutData->SetNumberField(TEXT("parameter_count"), GetParameterBagPropertyCount(Parameters));
 	return true;
 }
 
@@ -3610,8 +879,8 @@ bool FUeAgentHttpServer::CmdPCGGraphParametersApplyJson(const FUeAgentRequestCon
 		return false;
 	}
 
-	const TArray<TSharedPtr<FJsonValue>>* Parameters = nullptr;
-	if (!Ctx.Params.IsValid() || !Ctx.Params->TryGetArrayField(TEXT("parameters"), Parameters))
+	const TSharedPtr<FJsonObject>* Parameters = nullptr;
+	if (!Ctx.Params.IsValid() || !Ctx.Params->TryGetObjectField(TEXT("parameters"), Parameters) || !Parameters || !Parameters->IsValid())
 	{
 		OutError = TEXT("missing_parameters");
 		return false;
@@ -3623,7 +892,7 @@ bool FUeAgentHttpServer::CmdPCGGraphParametersApplyJson(const FUeAgentRequestCon
 	int32 PreflightAppliedCount = 0;
 	if (UPCGGraph* Graph = Cast<UPCGGraph>(GraphInterface))
 	{
-		PreflightAppliedCount = PreflightParameterArray(Graph->GetUserParametersStruct(), Parameters, Issues, true);
+		PreflightAppliedCount = PreflightCanonicalParameterBag(Graph->GetUserParametersStruct(), *Parameters, Issues, true);
 	}
 	else if (UPCGGraphInstance* Instance = Cast<UPCGGraphInstance>(GraphInterface))
 	{
@@ -3635,13 +904,15 @@ bool FUeAgentHttpServer::CmdPCGGraphParametersApplyJson(const FUeAgentRequestCon
 		}
 		PreviewInstance->SetFlags(RF_Transient);
 		RefreshGraphInstanceParameters(PreviewInstance);
-		PreflightAppliedCount = PreflightParameterArray(&PreviewInstance->ParametersOverrides.Parameters, Parameters, Issues, false);
+		PreflightAppliedCount = PreflightCanonicalParameterBag(&PreviewInstance->ParametersOverrides.Parameters, *Parameters, Issues, false);
 	}
 	if (CountErrors(Issues) > 0)
 	{
 		OutError = TEXT("graph_parameters_preflight_failed");
-		OutData = ExportParameterBagToJson(GraphInterface->GetUserParametersStruct());
+		OutData = MakeShared<FJsonObject>();
 		OutData->SetStringField(TEXT("schema"), TEXT("ue_agent_interface.pcg.graph_parameters_apply.v1"));
+		OutData->SetObjectField(TEXT("parameters"), ExportParameterBagToJson(GraphInterface->GetUserParametersStruct()));
+		OutData->SetNumberField(TEXT("parameter_count"), GetParameterBagPropertyCount(GraphInterface->GetUserParametersStruct()));
 		OutData->SetNumberField(TEXT("applied_count"), 0);
 		OutData->SetNumberField(TEXT("preflight_applied_count"), PreflightAppliedCount);
 		OutData->SetArrayField(TEXT("issues"), Issues);
@@ -3656,7 +927,7 @@ bool FUeAgentHttpServer::CmdPCGGraphParametersApplyJson(const FUeAgentRequestCon
 	{
 		Graph->UpdateUserParametersStruct([&](FInstancedPropertyBag& Bag)
 		{
-			AppliedCount = ApplyParameterArray(Bag, Parameters, Issues);
+			AppliedCount = ApplyCanonicalParameterBag(Bag, *Parameters, Issues);
 		});
 		Graph->MarkPackageDirty();
 	}
@@ -3664,7 +935,7 @@ bool FUeAgentHttpServer::CmdPCGGraphParametersApplyJson(const FUeAgentRequestCon
 	{
 		TArray<FName> AppliedNames;
 		RefreshGraphInstanceParameters(Instance);
-		AppliedCount = ApplyParameterArray(Instance->ParametersOverrides.Parameters, Parameters, Issues, &AppliedNames, false);
+		AppliedCount = ApplyCanonicalParameterBag(Instance->ParametersOverrides.Parameters, *Parameters, Issues, &AppliedNames, false);
 		NotifyGraphInstanceParameterValuesChanged(Instance, AppliedNames);
 		Instance->MarkPackageDirty();
 	}
@@ -3672,8 +943,10 @@ bool FUeAgentHttpServer::CmdPCGGraphParametersApplyJson(const FUeAgentRequestCon
 	{
 		Transaction.Cancel();
 		OutError = TEXT("graph_parameters_apply_failed");
-		OutData = ExportParameterBagToJson(GraphInterface->GetUserParametersStruct());
+		OutData = MakeShared<FJsonObject>();
 		OutData->SetStringField(TEXT("schema"), TEXT("ue_agent_interface.pcg.graph_parameters_apply.v1"));
+		OutData->SetObjectField(TEXT("parameters"), ExportParameterBagToJson(GraphInterface->GetUserParametersStruct()));
+		OutData->SetNumberField(TEXT("parameter_count"), GetParameterBagPropertyCount(GraphInterface->GetUserParametersStruct()));
 		OutData->SetNumberField(TEXT("applied_count"), AppliedCount);
 		OutData->SetArrayField(TEXT("issues"), Issues);
 		OutData->SetNumberField(TEXT("error_count"), CountErrors(Issues));
@@ -3685,8 +958,10 @@ bool FUeAgentHttpServer::CmdPCGGraphParametersApplyJson(const FUeAgentRequestCon
 		return false;
 	}
 
-	OutData = ExportParameterBagToJson(GraphInterface->GetUserParametersStruct());
+	OutData = MakeShared<FJsonObject>();
 	OutData->SetStringField(TEXT("schema"), TEXT("ue_agent_interface.pcg.graph_parameters_apply.v1"));
+	OutData->SetObjectField(TEXT("parameters"), ExportParameterBagToJson(GraphInterface->GetUserParametersStruct()));
+	OutData->SetNumberField(TEXT("parameter_count"), GetParameterBagPropertyCount(GraphInterface->GetUserParametersStruct()));
 	OutData->SetNumberField(TEXT("applied_count"), AppliedCount);
 	OutData->SetArrayField(TEXT("issues"), Issues);
 	OutData->SetNumberField(TEXT("error_count"), CountErrors(Issues));
@@ -4306,7 +1581,7 @@ bool FUeAgentHttpServer::CmdPCGDataExportJson(const FUeAgentRequestContext& Ctx,
 	if (Ctx.Params->TryGetStringField(TEXT("output_file"), OutputFile) && !OutputFile.TrimStartAndEnd().IsEmpty())
 	{
 		FString SavedPath;
-		if (!SaveJsonFile(OutputFile, OutData, SavedPath, OutError))
+		if (!SaveAuthoringFile(OutputFile, OutData, SavedPath, OutError))
 		{
 			return false;
 		}
@@ -4347,43 +1622,61 @@ bool FUeAgentHttpServer::CmdPCGComponentRuntimeProbe(const FUeAgentRequestContex
 	return CmdPCGRuntimeGenerationProbe(Ctx, OutData, OutError);
 }
 
-bool FUeAgentHttpServer::CmdPCGScreenshot(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentHttpServer::CmdPCGScreenshot(
+	const FUeAgentRequestContext& Ctx,
+	TSharedPtr<FJsonObject>& OutData,
+	FString& OutError) const
 {
 	using namespace UeAgentPCG;
 	TSharedPtr<FJsonObject> FrameData;
-	FString FrameError;
-	if (Ctx.Params.IsValid() && (Ctx.Params->HasField(TEXT("actor")) || Ctx.Params->HasField(TEXT("actor_name")) || Ctx.Params->HasField(TEXT("actor_label"))))
+	if (Ctx.Params.IsValid()
+		&& (Ctx.Params->HasField(TEXT("actor"))
+			|| Ctx.Params->HasField(TEXT("actor_name"))
+			|| Ctx.Params->HasField(TEXT("actor_label"))))
 	{
-		FUeAgentRequestContext FrameCtx = Ctx;
-		TSharedPtr<FJsonObject> FrameParams = MakeShared<FJsonObject>();
-		FrameParams->Values = Ctx.Params->Values;
-		if (!FrameParams->HasField(TEXT("id")))
+		FUeAgentRequestContext FrameContext = Ctx;
+		TSharedPtr<FJsonObject> FrameParameters = MakeShared<FJsonObject>();
+		FrameParameters->Values = Ctx.Params->Values;
+		if (!FrameParameters->HasField(TEXT("id")))
 		{
 			FString ActorId;
-			if (GetStringAny(FrameParams, { TEXT("actor"), TEXT("actor_name"), TEXT("actor_label") }, ActorId) && !ActorId.IsEmpty())
+			if (GetStringAny(
+					FrameParameters,
+					{TEXT("actor"), TEXT("actor_name"), TEXT("actor_label")},
+					ActorId)
+				&& !ActorId.IsEmpty())
 			{
-				FrameParams->SetStringField(TEXT("id"), ActorId);
+				FrameParameters->SetStringField(TEXT("id"), ActorId);
 			}
 		}
-		FrameCtx.Params = FrameParams;
-		if (!CmdViewportFrameActor(FrameCtx, FrameData, FrameError))
+		FrameContext.Params = FrameParameters;
+		if (!CmdViewportFrameActor(FrameContext, FrameData, OutError))
 		{
-			OutError = FrameError.IsEmpty() ? TEXT("pcg_frame_actor_failed") : FrameError;
+			if (OutError.IsEmpty())
+			{
+				OutError = TEXT("pcg_frame_actor_failed");
+			}
 			return false;
 		}
 	}
 
 	TSharedPtr<FJsonObject> ScreenshotData;
-	TArray<TSharedPtr<FJsonValue>> Artifacts;
-	if (!CmdScreenshotViewport(Ctx, ScreenshotData, Artifacts, OutError))
+	if (!CmdScreenshotViewport(Ctx, ScreenshotData, OutError)
+		|| !ScreenshotData.IsValid())
 	{
 		return false;
 	}
 	OutData = MakeShared<FJsonObject>();
-	OutData->SetStringField(TEXT("schema"), TEXT("ue_agent_interface.pcg.screenshot.v1"));
-	OutData->SetObjectField(TEXT("frame_actor"), FrameData);
+	OutData->SetStringField(
+		TEXT("schema"), TEXT("ue_agent_interface.pcg.screenshot.v2"));
+	OutData->SetObjectField(TEXT("frame_actor"),
+		FrameData.IsValid() ? FrameData : MakeShared<FJsonObject>());
 	OutData->SetObjectField(TEXT("screenshot"), ScreenshotData);
-	OutData->SetArrayField(TEXT("artifacts"), Artifacts);
+	FString FilePath;
+	if (ScreenshotData->TryGetStringField(TEXT("file_path"), FilePath))
+	{
+		OutData->SetStringField(TEXT("file_path"), FilePath);
+	}
 	return true;
 }
 
@@ -4668,6 +1961,13 @@ bool FUeAgentHttpServer::CmdPCGLevelToAssetExport(const FUeAgentRequestContext& 
 	}
 	bool bSave = true;
 	Ctx.Params->TryGetBoolField(TEXT("save"), bSave);
+	bool bAllowOverwrite = false;
+	Ctx.Params->TryGetBoolField(TEXT("allow_overwrite"), bAllowOverwrite);
+	if (LoadAssetObject(NormalizedAssetPath) && !bAllowOverwrite)
+	{
+		OutError = TEXT("allow_overwrite_required");
+		return false;
+	}
 
 	FPCGAssetExporterParameters Parameters;
 	Parameters.bOpenSaveDialog = false;
@@ -4686,5 +1986,6 @@ bool FUeAgentHttpServer::CmdPCGLevelToAssetExport(const FUeAgentRequestContext& 
 	OutData->SetStringField(TEXT("asset_path"), NormalizedAssetPath);
 	OutData->SetStringField(TEXT("package"), ModifiedPackage->GetName());
 	OutData->SetBoolField(TEXT("saved"), bSave);
+	OutData->SetBoolField(TEXT("allow_overwrite"), bAllowOverwrite);
 	return true;
 }

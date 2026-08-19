@@ -1,0 +1,58 @@
+authoring: { reason: command_has_no_registered_folder_authoring_profile, state: none }
+category: static_mesh_enhanced_input
+command: enhanced_input_get_mapping_context_info
+deprecation: { reason: command_is_active, state: none }
+discovery: { aliases: [], keywords_en: [enhanced, input, get, mapping, context, info, static_mesh_enhanced_input], keywords_zh: [enhanced_input_get_mapping_context_info], summary_en: "Execute enhanced_input_get_mapping_context_info with a verified implementation contract", summary_zh: "读取 `MappingContext` 信息", tags: [static_mesh_enhanced_input, p2-007] }
+errors: {
+  codes: [
+    { code: mapping_context_not_found, description_zh: "C++ 实现返回错误码 mapping_context_not_found", retry_safe: false, stage: execution, wire_match: exact }
+    { code: missing_asset_path, description_zh: "C++ 实现返回错误码 missing_asset_path", retry_safe: true, stage: preflight, wire_match: exact }
+  ]
+}
+evidence: {
+  docs: [
+    { path: "Plugins/UeAgentInterface/docs/commands/static_mesh_enhanced_input/enhanced_input_get_mapping_context_info.md", purpose: "user documentation cross-check; C++ implementation remains authoritative" }
+  ]
+  implementation: [
+    { line_hint: 965, path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Commands/EnhancedInput/UeAgentHttpServer_EnhancedInput.cpp", purpose: "command handler, parameter and return evidence", symbol: CmdEnhancedInputGetMappingContextInfo }
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Server/UeAgentHttpServer.cpp", purpose: "transitive helper evidence used by the command handler" }
+  ]
+  tests: [
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterfaceTests/Private/Smoke/UeAgentInterfaceSmoke_MaterialStaticDeformerInput.cpp", purpose: "smoke or negative-path evidence cross-checked for the verified contract" }
+  ]
+}
+execution: {
+  destructive: false
+  editor_state: required
+  game_thread: required
+  idempotent: true
+  kind: read_only
+  overwrite_behavior: none
+  pie_state: allowed
+  retry_safe: true
+  save_behavior: none
+  side_effects: []
+  ui_effect: none
+}
+maturity: verified
+params: {
+  constraints: []
+  fields: { asset_path: { default_state: none, description_zh: "C++ 实现读取的 asset_path 参数", path_semantics: { access_scope: mounted_read, kind: ue_asset }, required: true, type: ue_asset_path } }
+  state: defined
+}
+response: { artifact_fields: [mappings], compact_fields: [asset_path, dirty, mapping_count, object_path], failure_fields: [params.asset_path], max_items_policy: { fields: [], mode: none } }
+returns: {
+  fields: {
+    asset_path: { description_zh: "C++ 实现返回的 asset_path 字段；是否出现取决于执行分支", required: false, type: ue_asset_path }
+    dirty: { description_zh: "C++ 实现返回的 dirty 字段；是否出现取决于执行分支", required: false, type: bool }
+    mapping_count: { description_zh: "C++ 实现返回的 mapping_count 字段；是否出现取决于执行分支", required: false, type: integer }
+    mappings: { description_zh: "C++ 实现返回的 mappings 字段；是否出现取决于执行分支", item_type: json_value, required: false, type: array }
+    object_path: { description_zh: "C++ 实现返回的 object_path 字段；是否出现取决于执行分支", required: false, type: ue_object_path }
+  }
+  state: defined
+}
+schema: uai.command_spec.v1
+status: active
+types: {}
+verification: { reason: read_only_command_has_no_post_write_verification, state: none }
+version: 1

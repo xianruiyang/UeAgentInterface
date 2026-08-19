@@ -1,0 +1,46 @@
+schema: uai.command_spec.v1
+version: 1
+maturity: verified
+command: level_diff_folder
+category: level_content
+status: active
+discovery: { summary_zh: "按统一 Level workspace unit 比较两份 HJSON 目录", summary_en: "Compare two unified Level HJSON workspaces by canonical workspace unit", aliases: [], keywords_zh: [Level, HJSON, workspace, "差异"], keywords_en: [level, hjson, workspace, diff], tags: [level_content, authoring, diff, unified_contract] }
+types: {}
+execution: { kind: read_only, side_effects: [], destructive: false, idempotent: true, retry_safe: true, editor_state: not_required, pie_state: allowed, game_thread: required, ui_effect: none, save_behavior: none, overwrite_behavior: none }
+params: {
+  state: defined
+  fields: {
+    base_folder: { type: filesystem_path, required: false, default_state: none, description_zh: "基准 workspace", path_semantics: { kind: filesystem_directory, must_exist: true, writable: false } }
+    left_folder: { type: filesystem_path, required: false, default_state: none, description_zh: "base_folder 别名", path_semantics: { kind: filesystem_directory, must_exist: true, writable: false } }
+    target_folder: { type: filesystem_path, required: false, default_state: none, description_zh: "目标 workspace", path_semantics: { kind: filesystem_directory, must_exist: true, writable: false } }
+    right_folder: { type: filesystem_path, required: false, default_state: none, description_zh: "target_folder 别名", path_semantics: { kind: filesystem_directory, must_exist: true, writable: false } }
+    max_changes: { type: integer, required: false, default: 256, default_state: defined, description_zh: "返回的最大 changed unit 数" }
+  }
+  constraints: [
+    { kind: one_of, fields: [base_folder, left_folder] }
+    { kind: one_of, fields: [target_folder, right_folder] }
+  ]
+}
+returns: {
+  state: defined
+  fields: {
+    schema: { type: string, required: true, description_zh: "uai.level.workspace_diff.v1" }
+    equal: { type: bool, required: true, description_zh: "两份 canonical workspace 是否相同" }
+    change_count: { type: integer, required: true, description_zh: "返回的 changed unit 数" }
+    truncated: { type: bool, required: true, description_zh: "是否达到 max_changes" }
+    changes: { type: array, item_type: object, required: true, description_zh: "按相对路径排序的 added/removed/changed unit" }
+  }
+}
+response: { compact_fields: [equal, change_count, truncated], failure_fields: [params.base_folder, params.target_folder], artifact_fields: [changes], max_items_policy: { mode: none, fields: [] } }
+errors: { codes: [
+  { code: level_workspace_contract_missing, wire_match: exact, stage: preflight, retry_safe: false, description_zh: "Level workspace contract 未注册" }
+  { code: workspace_, wire_match: prefix, stage: preflight, retry_safe: true, description_zh: "任一 workspace 加载失败" }
+] }
+verification: { state: defined, required: true, methods: [{ id: result, kind: result_assertion }], assertions: [{ id: result_present, source: "returns.equal", operator: exists }], failure_policy: fail_overall }
+authoring: { state: defined, type_id: level, operation: diff, profile_ref: "contracts/field_contracts/level.hjson" }
+deprecation: { state: none, reason: command_is_active }
+evidence: {
+  implementation: [{ path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Commands/LevelContentJson/UeAgentLevelContentJsonCommands_Tail.cpp", symbol: CmdLevelDiffFolder, purpose: "命令适配器" }, { path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Domains/Level/Authoring/UeAgentLevelAuthoringApplyProvider.cpp", symbol: DiffWorkspaceDirectories, purpose: "共享 loader 后的 canonical unit diff" }]
+  tests: [{ path: "Plugins/UeAgentInterface/Source/UeAgentInterfaceTests/Private/Smoke/UeAgentInterfaceLevelFolderDiffSmokeTests.cpp", purpose: "真实 workspace diff smoke" }]
+  docs: [{ path: "Plugins/UeAgentInterface/docs/commands/level_content/level_diff_folder.md", purpose: "正式命令文档" }]
+}

@@ -1,0 +1,13 @@
+definition: {
+  additional_fields: false
+  fields: {
+    height: { default_state: none, description_zh: "像素矩形高度", minimum: 1, required: false, type: integer }
+    width: { default_state: none, description_zh: "像素矩形宽度", minimum: 1, required: false, type: integer }
+    x: { default: 0, default_state: defined, description_zh: "像素矩形左上角 X", minimum: 0, required: false, type: integer }
+    y: { default: 0, default_state: defined, description_zh: "像素矩形左上角 Y", minimum: 0, required: false, type: integer }
+  }
+  kind: object
+}
+schema: uai.command_spec.shared_type.v1
+type_id: RenderTargetPixelRect
+version: 1

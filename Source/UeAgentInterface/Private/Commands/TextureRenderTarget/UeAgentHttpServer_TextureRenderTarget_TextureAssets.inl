@@ -187,68 +187,32 @@ namespace UeAgentTextureOps
 		return UeAgentJsonDiagnostics::ResolveProjectRelativeFilePath(FilePath);
 	}
 
-	bool SaveJsonFile(const FString& OutputPathInput, const TSharedPtr<FJsonObject>& Root, FString& OutOutputPath, FString& OutError)
+	bool SaveAuthoringFile(const FString& OutputPathInput, const TSharedPtr<FJsonObject>& Root, FString& OutOutputPath, FString& OutError, bool bStandaloneExport)
 	{
-		OutOutputPath.Reset();
-		if (!Root.IsValid())
-		{
-			OutError = TEXT("json_root_invalid");
-			return false;
-		}
-		FString OutputPath = ResolveFilePath(OutputPathInput);
-		OutputPath.TrimStartAndEndInline();
-		if (OutputPath.IsEmpty())
-		{
-			OutError = TEXT("missing_output_file");
-			return false;
-		}
-		IFileManager::Get().MakeDirectory(*FPaths::GetPath(OutputPath), true);
-		FString JsonText;
-		TSharedPtr<FJsonObject> SaveRoot = UeAgentDetailsAuthoring::CloneObjectTree(Root);
-		if (!UeAgentDetailsAuthoring::ExternalizeInlineDetailsInObjectTree(OutputPath, SaveRoot, TEXT("texture_json_export"), OutError))
-		{
-			return false;
-		}
-		if (!UeAgentJsonDiagnostics::SerializeJsonObjectCompact(SaveRoot, JsonText))
-		{
-			OutError = TEXT("json_serialize_failed");
-			return false;
-		}
-		if (!FFileHelper::SaveStringToFile(JsonText, *OutputPath, FFileHelper::EEncodingOptions::ForceUTF8WithoutBOM))
-		{
-			OutError = TEXT("save_json_file_failed");
-			return false;
-		}
-		OutOutputPath = OutputPath;
-		return true;
+		UeAgentAuthoringFileIO::FSaveOptions Options;
+		Options.SourceCommand = TEXT("texture_json_export");
+		Options.bScopeInlineDetailsToEntryFile = bStandaloneExport;
+		return UeAgentAuthoringFileIO::SaveObject(OutputPathInput, Root, Options, OutOutputPath, OutError);
 	}
 
-	bool LoadJsonFile(const FString& InputPathInput, TSharedPtr<FJsonObject>& OutRoot, FString& OutResolvedPath, FString& OutError)
+	bool SaveAuthoringFile(const FString& OutputPathInput, const TSharedPtr<FJsonObject>& Root, FString& OutOutputPath, FString& OutError)
+	{
+		return SaveAuthoringFile(OutputPathInput, Root, OutOutputPath, OutError, false);
+	}
+
+	bool LoadAuthoringFile(const FString& InputPathInput, TSharedPtr<FJsonObject>& OutRoot, FString& OutResolvedPath, FString& OutError)
 	{
 		OutRoot.Reset();
 		OutResolvedPath.Reset();
-		FString InputPath = ResolveFilePath(InputPathInput);
+		FString InputPath = UeAgentStructuredAuthoringIO::NormalizeAuthoringPath(InputPathInput);
 		InputPath.TrimStartAndEndInline();
 		if (InputPath.IsEmpty())
 		{
 			OutError = TEXT("missing_json_file");
 			return false;
 		}
-		if (!FPaths::FileExists(InputPath))
+		if (!UeAgentStructuredAuthoringIO::LoadObject(InputPath, OutRoot, OutError))
 		{
-			OutError = TEXT("json_file_not_found");
-			return false;
-		}
-		FString JsonText;
-		if (!FFileHelper::LoadFileToString(JsonText, *InputPath))
-		{
-			OutError = TEXT("load_json_file_failed");
-			return false;
-		}
-		const TSharedRef<TJsonReader<>> Reader = TJsonReaderFactory<>::Create(JsonText);
-		if (!FJsonSerializer::Deserialize(Reader, OutRoot) || !OutRoot.IsValid())
-		{
-			OutError = TEXT("json_parse_failed");
 			return false;
 		}
 		OutResolvedPath = InputPath;
@@ -644,103 +608,33 @@ namespace UeAgentTextureOps
 		return true;
 	}
 
-	FProperty* FindPropertyByNameLoose(UStruct* StructType, const FString& Segment)
+	bool ApplyCanonicalProperty(UObject* Obj, const FString& PropertyPath, const TSharedPtr<FJsonValue>& CanonicalValue, TSharedPtr<FJsonObject>& OutSummary, FString& OutError)
 	{
-		if (!StructType || Segment.IsEmpty())
+		OutSummary.Reset();
+		if (!Obj || PropertyPath.IsEmpty() || !CanonicalValue.IsValid())
 		{
-			return nullptr;
-		}
-		const FString Normalized = Segment.TrimStartAndEnd();
-		const FString NormalizedWithoutB = Normalized.StartsWith(TEXT("b")) ? Normalized.Mid(1) : Normalized;
-		for (TFieldIterator<FProperty> It(StructType, EFieldIterationFlags::IncludeSuper); It; ++It)
-		{
-			FProperty* Property = *It;
-			const FString PropertyName = Property->GetName();
-			const FString PropertyNameWithoutB = PropertyName.StartsWith(TEXT("b")) ? PropertyName.Mid(1) : PropertyName;
-			if (PropertyName.Equals(Normalized, ESearchCase::IgnoreCase) ||
-				PropertyNameWithoutB.Equals(NormalizedWithoutB, ESearchCase::IgnoreCase) ||
-				Property->GetAuthoredName().Equals(Normalized, ESearchCase::IgnoreCase))
-			{
-				return Property;
-			}
-		}
-		return nullptr;
-	}
-
-	bool ResolvePropertyPath(UObject* Obj, const FString& PropertyPath, FProperty*& OutProperty, void*& OutValuePtr)
-	{
-		OutProperty = nullptr;
-		OutValuePtr = nullptr;
-		if (!Obj || PropertyPath.IsEmpty())
-		{
+			OutError = TEXT("invalid_canonical_property_request");
 			return false;
 		}
-		TArray<FString> Segments;
-		PropertyPath.ParseIntoArray(Segments, TEXT("."), true);
-		if (Segments.Num() == 0)
-		{
-			return false;
-		}
-		UStruct* CurrentStruct = Obj->GetClass();
-		void* CurrentContainer = Obj;
-		for (int32 Index = 0; Index < Segments.Num(); ++Index)
-		{
-			FProperty* Property = FindPropertyByNameLoose(CurrentStruct, Segments[Index]);
-			if (!Property)
-			{
-				return false;
-			}
-			void* ValuePtr = Property->ContainerPtrToValuePtr<void>(CurrentContainer);
-			if (Index == Segments.Num() - 1)
-			{
-				OutProperty = Property;
-				OutValuePtr = ValuePtr;
-				return true;
-			}
-			FStructProperty* StructProperty = CastField<FStructProperty>(Property);
-			if (!StructProperty)
-			{
-				return false;
-			}
-			CurrentStruct = StructProperty->Struct;
-			CurrentContainer = ValuePtr;
-		}
-		return false;
-	}
-
-	bool ExportPropertyText(UObject* Obj, const FString& PropertyPath, FString& OutText, FString& OutCppType)
-	{
-		FProperty* Property = nullptr;
-		void* ValuePtr = nullptr;
-		if (!ResolvePropertyPath(Obj, PropertyPath, Property, ValuePtr) || !Property || !ValuePtr)
-		{
-			return false;
-		}
-		OutText.Reset();
-		Property->ExportTextItem_Direct(OutText, ValuePtr, nullptr, Obj, PPF_None);
-		OutCppType = Property->GetCPPType();
-		return true;
-	}
-
-	bool ImportPropertyText(UObject* Obj, const FString& PropertyPath, const FString& ValueText, FString& OutReadback, FString& OutError)
-	{
-		FProperty* Property = nullptr;
-		void* ValuePtr = nullptr;
-		if (!ResolvePropertyPath(Obj, PropertyPath, Property, ValuePtr) || !Property || !ValuePtr)
+		FProperty* Property = FindFProperty<FProperty>(Obj->GetClass(), *PropertyPath);
+		if (!Property)
 		{
 			OutError = TEXT("property_not_found");
 			return false;
 		}
-		Obj->Modify();
-		const TCHAR* Result = Property->ImportText_Direct(*ValueText, ValuePtr, Obj, PPF_None);
-		if (!Result)
+		UeAgentUObjectProperties::FExportOptions ExportOptions;
+		TSharedPtr<FJsonObject> Descriptor = UeAgentUObjectProperties::BuildPropertyDescriptor(Obj, Property, ExportOptions);
+		Descriptor->SetField(TEXT("value"), CanonicalValue);
+		TSharedPtr<FJsonObject> Payload = MakeShared<FJsonObject>();
+		Payload->SetStringField(TEXT("schema"), TEXT("uai.uobject_properties.v2"));
+		Payload->SetArrayField(TEXT("properties"), { MakeShared<FJsonValueObject>(Descriptor) });
+		OutSummary = UeAgentUObjectProperties::ApplyObjectProperties(Obj, Payload, UeAgentUObjectProperties::FApplyOptions());
+		FString Status;
+		if (!OutSummary.IsValid() || !OutSummary->TryGetStringField(TEXT("status"), Status) || Status != TEXT("applied"))
 		{
-			OutError = TEXT("property_import_failed");
+			OutError = TEXT("canonical_property_apply_failed");
 			return false;
 		}
-		Property->ExportTextItem_Direct(OutReadback, ValuePtr, nullptr, Obj, PPF_None);
-		Obj->PostEditChange();
-		Obj->MarkPackageDirty();
 		return true;
 	}
 
@@ -893,32 +787,13 @@ namespace UeAgentTextureOps
 
 	TSharedPtr<FJsonObject> BuildGenericAssetJson(UObject* Asset, const FString& Profile, bool bIncludeProperties)
 	{
-		TSharedPtr<FJsonObject> Root = MakeShared<FJsonObject>();
-		Root->SetStringField(TEXT("profile"), Profile);
-		Root->SetNumberField(TEXT("schema_version"), 1);
+		UeAgentUObjectProperties::FExportOptions Options;
+		Options.Profile = bIncludeProperties
+			? UeAgentUObjectProperties::EExportProfile::Authoring
+			: UeAgentUObjectProperties::EExportProfile::Index;
+		TSharedPtr<FJsonObject> Root = UeAgentUObjectProperties::ExportObjectProperties(Asset, Options);
+		Root->SetStringField(TEXT("domain_profile"), Profile);
 		FillAssetIdentity(Asset, Root);
-		if (Asset && bIncludeProperties)
-		{
-			TArray<TSharedPtr<FJsonValue>> Properties;
-			for (TFieldIterator<FProperty> It(Asset->GetClass(), EFieldIterationFlags::IncludeSuper); It; ++It)
-			{
-				FProperty* Property = *It;
-				if (!Property || !Property->HasAnyPropertyFlags(CPF_Edit))
-				{
-					continue;
-				}
-				FString ValueText;
-				FString CppType;
-				if (ExportPropertyText(Asset, Property->GetName(), ValueText, CppType))
-				{
-					TSharedPtr<FJsonObject> PropObj = MakeShared<FJsonObject>();
-					PropObj->SetStringField(TEXT("value_text"), ValueText);
-					UeAgentAuthoringJson::ApplyReflectedPropertyMetadata(PropObj, Property, Property->GetName());
-					Properties.Add(MakeShared<FJsonValueObject>(PropObj));
-				}
-			}
-			Root->SetArrayField(TEXT("properties"), Properties);
-		}
 		return Root;
 	}
 
@@ -929,40 +804,25 @@ namespace UeAgentTextureOps
 		{
 			return true;
 		}
-		for (const TSharedPtr<FJsonValue>& Value : *Properties)
+		TSharedPtr<FJsonObject> Payload = MakeShared<FJsonObject>();
+		Payload->SetStringField(TEXT("schema"), TEXT("uai.uobject_properties.v2"));
+		Payload->SetArrayField(TEXT("properties"), *Properties);
+		const TSharedPtr<FJsonObject> Summary = UeAgentUObjectProperties::ApplyObjectProperties(
+			Asset,
+			Payload,
+			UeAgentUObjectProperties::FApplyOptions());
+		const TArray<TSharedPtr<FJsonValue>>* Results = nullptr;
+		if (Summary.IsValid() && Summary->TryGetArrayField(TEXT("properties"), Results) && Results) OutResults = *Results;
+		FString Status;
+		if (!Summary.IsValid() || !Summary->TryGetStringField(TEXT("status"), Status) || Status != TEXT("applied"))
 		{
-			const TSharedPtr<FJsonObject>* Obj = nullptr;
-			if (!Value.IsValid() || !Value->TryGetObject(Obj) || !Obj || !Obj->IsValid())
-			{
-				continue;
-			}
-			FString Name;
-			FString ValueText;
-			if (!(*Obj)->TryGetStringField(TEXT("property_path"), Name))
-			{
-				(*Obj)->TryGetStringField(TEXT("name"), Name);
-			}
-			(*Obj)->TryGetStringField(TEXT("value_text"), ValueText);
-			TSharedPtr<FJsonObject> Result = MakeShared<FJsonObject>();
-			Result->SetStringField(TEXT("property_path"), Name);
-			Result->SetStringField(TEXT("requested_value_text"), ValueText);
-			FString Readback;
-			FString Error;
-			const bool bOk = ImportPropertyText(Asset, Name, ValueText, Readback, Error);
-			Result->SetBoolField(TEXT("applied"), bOk);
-			Result->SetStringField(TEXT("property_value_read_back"), Readback);
-			Result->SetStringField(TEXT("property_import_status"), bOk ? TEXT("ok") : Error);
-			OutResults.Add(MakeShared<FJsonValueObject>(Result));
-			if (!bOk)
-			{
-				OutError = Error;
-				return false;
-			}
+			OutError = TEXT("generic_properties_apply_failed");
+			return false;
 		}
 		return true;
 	}
 
-	bool RejectLegacyPropertiesFolderIfPresent(
+	bool RejectAuthoringPropertiesFolderIfPresent(
 		const FString& FolderPath,
 		const FString& OwnerKind,
 		const FString& OwnerId,
@@ -970,18 +830,18 @@ namespace UeAgentTextureOps
 		TSharedPtr<FJsonObject>& OutData,
 		FString& OutError)
 	{
-		TSharedPtr<FJsonObject> LegacyRejection;
-		if (!UeAgentDetailsAuthoring::BuildLegacyPropertiesFolderRejectionIfPresent(
+		TSharedPtr<FJsonObject> AuthoringRejection;
+		if (!UeAgentDetailsAuthoring::BuildAuthoringPropertiesFolderRejectionIfPresent(
 			ResolveFilePath(FolderPath),
 			UeAgentDetailsAuthoring::MakeOwnerInfoForObject(nullptr, OwnerKind, OwnerId, SourceCommand),
-			TEXT("asset.json.details.index_file"),
-			LegacyRejection,
+			TEXT("asset.hjson.details.index_file"),
+			AuthoringRejection,
 			OutError))
 		{
 			return false;
 		}
 
-		OutData = LegacyRejection;
+		OutData = AuthoringRejection;
 		return true;
 	}
 
@@ -1072,29 +932,16 @@ namespace
 		{ TEXT("texture_pixel_probe"), &FUeAgentHttpServer::CmdTexturePixelProbe },
 		{ TEXT("texture_screenshot"), &FUeAgentHttpServer::CmdTextureScreenshot },
 		{ TEXT("texture_array_create"), &FUeAgentHttpServer::CmdTextureArrayCreate },
-		{ TEXT("texture_array_export_folder"), &FUeAgentHttpServer::CmdTextureArrayExportFolder },
-		{ TEXT("texture_array_apply_folder"), &FUeAgentHttpServer::CmdTextureArrayApplyFolder },
 		{ TEXT("texture_cube_create"), &FUeAgentHttpServer::CmdTextureCubeCreate },
-		{ TEXT("texture_cube_export_folder"), &FUeAgentHttpServer::CmdTextureCubeExportFolder },
-		{ TEXT("texture_cube_apply_folder"), &FUeAgentHttpServer::CmdTextureCubeApplyFolder },
 		{ TEXT("texture_cube_array_create"), &FUeAgentHttpServer::CmdTextureCubeArrayCreate },
-		{ TEXT("texture_cube_array_export_folder"), &FUeAgentHttpServer::CmdTextureCubeArrayExportFolder },
-		{ TEXT("texture_cube_array_apply_folder"), &FUeAgentHttpServer::CmdTextureCubeArrayApplyFolder },
 		{ TEXT("volume_texture_create"), &FUeAgentHttpServer::CmdVolumeTextureCreate },
-		{ TEXT("volume_texture_export_folder"), &FUeAgentHttpServer::CmdVolumeTextureExportFolder },
-		{ TEXT("volume_texture_apply_folder"), &FUeAgentHttpServer::CmdVolumeTextureApplyFolder },
 		{ TEXT("virtual_texture_get_info"), &FUeAgentHttpServer::CmdVirtualTextureGetInfo },
 		{ TEXT("virtual_texture_validate_setup"), &FUeAgentHttpServer::CmdVirtualTextureValidateSetup },
 		{ TEXT("runtime_virtual_texture_create"), &FUeAgentHttpServer::CmdRuntimeVirtualTextureCreate },
 		{ TEXT("runtime_virtual_texture_get_info"), &FUeAgentHttpServer::CmdRuntimeVirtualTextureGetInfo },
-		{ TEXT("runtime_virtual_texture_export_json"), &FUeAgentHttpServer::CmdRuntimeVirtualTextureExportJson },
-		{ TEXT("runtime_virtual_texture_apply_json"), &FUeAgentHttpServer::CmdRuntimeVirtualTextureApplyJson },
 		{ TEXT("runtime_virtual_texture_validate_setup"), &FUeAgentHttpServer::CmdRuntimeVirtualTextureValidateSetup },
 		{ TEXT("render_target_create"), &FUeAgentHttpServer::CmdRenderTargetCreate },
 		{ TEXT("render_target_get_info"), &FUeAgentHttpServer::CmdRenderTargetGetInfo },
-		{ TEXT("render_target_export_json"), &FUeAgentHttpServer::CmdRenderTargetExportJson },
-		{ TEXT("render_target_validate_json"), &FUeAgentHttpServer::CmdRenderTargetValidateJson },
-		{ TEXT("render_target_apply_json"), &FUeAgentHttpServer::CmdRenderTargetApplyJson },
 		{ TEXT("render_target_resize"), &FUeAgentHttpServer::CmdRenderTargetResize },
 		{ TEXT("render_target_clear"), &FUeAgentHttpServer::CmdRenderTargetClear },
 		{ TEXT("render_target_draw_material"), &FUeAgentHttpServer::CmdRenderTargetDrawMaterial },
@@ -1109,52 +956,29 @@ namespace
 		{ TEXT("scene_capture_runtime_probe"), &FUeAgentHttpServer::CmdSceneCaptureRuntimeProbe },
 		{ TEXT("media_source_create"), &FUeAgentHttpServer::CmdMediaSourceCreate },
 		{ TEXT("media_source_get_info"), &FUeAgentHttpServer::CmdMediaSourceGetInfo },
-		{ TEXT("media_source_export_json"), &FUeAgentHttpServer::CmdMediaSourceExportJson },
-		{ TEXT("media_source_apply_json"), &FUeAgentHttpServer::CmdMediaSourceApplyJson },
 		{ TEXT("media_player_create"), &FUeAgentHttpServer::CmdMediaPlayerCreate },
-		{ TEXT("media_player_export_json"), &FUeAgentHttpServer::CmdMediaPlayerExportJson },
-		{ TEXT("media_player_apply_json"), &FUeAgentHttpServer::CmdMediaPlayerApplyJson },
 		{ TEXT("media_texture_create"), &FUeAgentHttpServer::CmdMediaTextureCreate },
-		{ TEXT("media_texture_export_json"), &FUeAgentHttpServer::CmdMediaTextureExportJson },
-		{ TEXT("media_texture_apply_json"), &FUeAgentHttpServer::CmdMediaTextureApplyJson },
 		{ TEXT("media_runtime_probe"), &FUeAgentHttpServer::CmdMediaRuntimeProbe },
 		{ TEXT("sparse_volume_texture_import"), &FUeAgentHttpServer::CmdSparseVolumeTextureImport },
 		{ TEXT("sparse_volume_texture_reimport"), &FUeAgentHttpServer::CmdSparseVolumeTextureReimport },
 		{ TEXT("sparse_volume_texture_get_info"), &FUeAgentHttpServer::CmdSparseVolumeTextureGetInfo },
-		{ TEXT("sparse_volume_texture_export_json"), &FUeAgentHttpServer::CmdSparseVolumeTextureExportJson },
-		{ TEXT("sparse_volume_texture_apply_json"), &FUeAgentHttpServer::CmdSparseVolumeTextureApplyJson },
 		{ TEXT("sparse_volume_texture_preview_probe"), &FUeAgentHttpServer::CmdSparseVolumeTexturePreviewProbe },
 		{ TEXT("sparse_volume_texture_validate_setup"), &FUeAgentHttpServer::CmdSparseVolumeTextureValidateSetup },
 		{ TEXT("texture_graph_create"), &FUeAgentHttpServer::CmdTextureGraphCreate },
 		{ TEXT("texture_graph_get_info"), &FUeAgentHttpServer::CmdTextureGraphGetInfo },
-		{ TEXT("texture_graph_export_folder"), &FUeAgentHttpServer::CmdTextureGraphExportFolder },
-		{ TEXT("texture_graph_validate_folder"), &FUeAgentHttpServer::CmdTextureGraphValidateFolder },
-		{ TEXT("texture_graph_apply_folder"), &FUeAgentHttpServer::CmdTextureGraphApplyFolder },
 		{ TEXT("texture_graph_bake_outputs"), &FUeAgentHttpServer::CmdTextureGraphBakeOutputs },
 		{ TEXT("texture_graph_runtime_probe"), &FUeAgentHttpServer::CmdTextureGraphRuntimeProbe },
 		{ TEXT("subuv_animation_create"), &FUeAgentHttpServer::CmdSubUVAnimationCreate },
 		{ TEXT("subuv_animation_get_info"), &FUeAgentHttpServer::CmdSubUVAnimationGetInfo },
-		{ TEXT("subuv_animation_export_json"), &FUeAgentHttpServer::CmdSubUVAnimationExportJson },
-		{ TEXT("subuv_animation_apply_json"), &FUeAgentHttpServer::CmdSubUVAnimationApplyJson },
 		{ TEXT("subuv_animation_preview_probe"), &FUeAgentHttpServer::CmdSubUVAnimationPreviewProbe },
 		{ TEXT("paper_sprite_create"), &FUeAgentHttpServer::CmdPaperSpriteCreate },
-		{ TEXT("paper_sprite_export_json"), &FUeAgentHttpServer::CmdPaperSpriteExportJson },
-		{ TEXT("paper_sprite_apply_json"), &FUeAgentHttpServer::CmdPaperSpriteApplyJson },
 		{ TEXT("paper_flipbook_create"), &FUeAgentHttpServer::CmdPaperFlipbookCreate },
-		{ TEXT("paper_flipbook_export_json"), &FUeAgentHttpServer::CmdPaperFlipbookExportJson },
-		{ TEXT("paper_flipbook_apply_json"), &FUeAgentHttpServer::CmdPaperFlipbookApplyJson },
-		{ TEXT("paper_tileset_export_folder"), &FUeAgentHttpServer::CmdPaperTileSetExportFolder },
-		{ TEXT("paper_tileset_apply_folder"), &FUeAgentHttpServer::CmdPaperTileSetApplyFolder },
-		{ TEXT("paper_tilemap_export_folder"), &FUeAgentHttpServer::CmdPaperTileMapExportFolder },
-		{ TEXT("paper_tilemap_apply_folder"), &FUeAgentHttpServer::CmdPaperTileMapApplyFolder },
 		{ TEXT("paper2d_preview_probe"), &FUeAgentHttpServer::CmdPaper2DPreviewProbe },
 		{ TEXT("light_profile_texture_import"), &FUeAgentHttpServer::CmdLightProfileTextureImport },
 		{ TEXT("light_profile_texture_get_info"), &FUeAgentHttpServer::CmdLightProfileTextureGetInfo },
 		{ TEXT("light_profile_validate_setup"), &FUeAgentHttpServer::CmdLightProfileValidateSetup },
 		{ TEXT("texture_collection_create"), &FUeAgentHttpServer::CmdTextureCollectionCreate },
 		{ TEXT("texture_collection_get_info"), &FUeAgentHttpServer::CmdTextureCollectionGetInfo },
-		{ TEXT("texture_collection_export_json"), &FUeAgentHttpServer::CmdTextureCollectionExportJson },
-		{ TEXT("texture_collection_apply_json"), &FUeAgentHttpServer::CmdTextureCollectionApplyJson },
 		{ TEXT("texture_collection_validate_usage"), &FUeAgentHttpServer::CmdTextureCollectionValidateUsage },
 		{ TEXT("texture_usage_validate"), &FUeAgentHttpServer::CmdTextureUsageValidate },
 		{ TEXT("texture_usage_get_references"), &FUeAgentHttpServer::CmdTextureUsageGetReferences },
@@ -1173,12 +997,93 @@ namespace
 		}
 		return nullptr;
 	}
+
+	enum class EReflectionAuthoringOperation : uint8
+	{
+		Export,
+		Apply,
+		Validate
+	};
+
+	struct FReflectionAuthoringCommandEntry
+	{
+		const TCHAR* Command;
+		const TCHAR* TypeId;
+		EReflectionAuthoringOperation Operation;
+	};
+
+	static const FReflectionAuthoringCommandEntry GReflectionAuthoringCommandEntries[] =
+	{
+		{ TEXT("texture_array_export_folder"), TEXT("texture_array"), EReflectionAuthoringOperation::Export },
+		{ TEXT("texture_array_apply_folder"), TEXT("texture_array"), EReflectionAuthoringOperation::Apply },
+		{ TEXT("texture_cube_export_folder"), TEXT("texture_cube"), EReflectionAuthoringOperation::Export },
+		{ TEXT("texture_cube_apply_folder"), TEXT("texture_cube"), EReflectionAuthoringOperation::Apply },
+		{ TEXT("texture_cube_array_export_folder"), TEXT("texture_cube_array"), EReflectionAuthoringOperation::Export },
+		{ TEXT("texture_cube_array_apply_folder"), TEXT("texture_cube_array"), EReflectionAuthoringOperation::Apply },
+		{ TEXT("volume_texture_export_folder"), TEXT("volume_texture"), EReflectionAuthoringOperation::Export },
+		{ TEXT("volume_texture_apply_folder"), TEXT("volume_texture"), EReflectionAuthoringOperation::Apply },
+		{ TEXT("runtime_virtual_texture_export_json"), TEXT("runtime_virtual_texture"), EReflectionAuthoringOperation::Export },
+		{ TEXT("runtime_virtual_texture_apply_json"), TEXT("runtime_virtual_texture"), EReflectionAuthoringOperation::Apply },
+		{ TEXT("render_target_export_json"), TEXT("render_target"), EReflectionAuthoringOperation::Export },
+		{ TEXT("render_target_validate_json"), TEXT("render_target"), EReflectionAuthoringOperation::Validate },
+		{ TEXT("render_target_apply_json"), TEXT("render_target"), EReflectionAuthoringOperation::Apply },
+		{ TEXT("media_source_export_json"), TEXT("media_source"), EReflectionAuthoringOperation::Export },
+		{ TEXT("media_source_apply_json"), TEXT("media_source"), EReflectionAuthoringOperation::Apply },
+		{ TEXT("media_player_export_json"), TEXT("media_player"), EReflectionAuthoringOperation::Export },
+		{ TEXT("media_player_apply_json"), TEXT("media_player"), EReflectionAuthoringOperation::Apply },
+		{ TEXT("media_texture_export_json"), TEXT("media_texture"), EReflectionAuthoringOperation::Export },
+		{ TEXT("media_texture_apply_json"), TEXT("media_texture"), EReflectionAuthoringOperation::Apply },
+		{ TEXT("sparse_volume_texture_export_json"), TEXT("sparse_volume_texture"), EReflectionAuthoringOperation::Export },
+		{ TEXT("sparse_volume_texture_apply_json"), TEXT("sparse_volume_texture"), EReflectionAuthoringOperation::Apply },
+		{ TEXT("texture_graph_export_folder"), TEXT("texture_graph"), EReflectionAuthoringOperation::Export },
+		{ TEXT("texture_graph_validate_folder"), TEXT("texture_graph"), EReflectionAuthoringOperation::Validate },
+		{ TEXT("texture_graph_apply_folder"), TEXT("texture_graph"), EReflectionAuthoringOperation::Apply },
+		{ TEXT("subuv_animation_export_json"), TEXT("subuv_animation"), EReflectionAuthoringOperation::Export },
+		{ TEXT("subuv_animation_apply_json"), TEXT("subuv_animation"), EReflectionAuthoringOperation::Apply },
+		{ TEXT("paper_sprite_export_json"), TEXT("paper_sprite"), EReflectionAuthoringOperation::Export },
+		{ TEXT("paper_sprite_apply_json"), TEXT("paper_sprite"), EReflectionAuthoringOperation::Apply },
+		{ TEXT("paper_flipbook_export_json"), TEXT("paper_flipbook"), EReflectionAuthoringOperation::Export },
+		{ TEXT("paper_flipbook_apply_json"), TEXT("paper_flipbook"), EReflectionAuthoringOperation::Apply },
+		{ TEXT("paper_tileset_export_folder"), TEXT("paper_tileset"), EReflectionAuthoringOperation::Export },
+		{ TEXT("paper_tileset_apply_folder"), TEXT("paper_tileset"), EReflectionAuthoringOperation::Apply },
+		{ TEXT("paper_tilemap_export_folder"), TEXT("paper_tilemap"), EReflectionAuthoringOperation::Export },
+		{ TEXT("paper_tilemap_apply_folder"), TEXT("paper_tilemap"), EReflectionAuthoringOperation::Apply },
+		{ TEXT("texture_collection_export_json"), TEXT("texture_collection"), EReflectionAuthoringOperation::Export },
+		{ TEXT("texture_collection_apply_json"), TEXT("texture_collection"), EReflectionAuthoringOperation::Apply }
+	};
+
+	static const FReflectionAuthoringCommandEntry* FindReflectionAuthoringCommand(const FString& CommandLower)
+	{
+		for (const FReflectionAuthoringCommandEntry& Entry : GReflectionAuthoringCommandEntries)
+		{
+			if (CommandLower == Entry.Command)
+			{
+				return &Entry;
+			}
+		}
+		return nullptr;
+	}
 }
 
 bool GetReferencesForAsset(const FString& AssetPath, TArray<TSharedPtr<FJsonValue>>& OutReferencers);
 
 bool FUeAgentHttpServer::ExecuteTextureRenderTargetCommand(const FString& CommandLower, const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
+	if (const FReflectionAuthoringCommandEntry* Entry = FindReflectionAuthoringCommand(CommandLower))
+	{
+		switch (Entry->Operation)
+		{
+		case EReflectionAuthoringOperation::Export:
+			return UeAgentReflectionAuthoringCommandBridge::Export(Entry->TypeId, Ctx.Params, OutData, OutError);
+		case EReflectionAuthoringOperation::Apply:
+			return UeAgentReflectionAuthoringCommandBridge::Apply(Entry->TypeId, Ctx.Params, OutData, OutError, Ctx.RequestId);
+		case EReflectionAuthoringOperation::Validate:
+			return UeAgentReflectionAuthoringCommandBridge::Validate(Entry->TypeId, Ctx.Params, OutData, OutError);
+		default:
+			OutError = TEXT("unsupported_reflection_authoring_operation");
+			return false;
+		}
+	}
 	if (const FTextureCommandHandler Handler = FindTextureCommandHandler(CommandLower))
 	{
 		return (this->*Handler)(Ctx, OutData, OutError);
@@ -1662,157 +1567,12 @@ bool FUeAgentHttpServer::CmdTextureArrayCreate(const FUeAgentRequestContext& Ctx
 
 bool FUeAgentHttpServer::CmdTextureArrayExportFolder(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
-	using namespace UeAgentTextureOps;
-	FString AssetPath;
-	FString FolderPath;
-	if (!GetRequiredString(Ctx, TEXT("asset_path"), AssetPath, OutError) || !GetRequiredString(Ctx, TEXT("folder_path"), FolderPath, OutError))
-	{
-		return false;
-	}
-	UTexture2DArray* TextureArray = LoadAsset<UTexture2DArray>(AssetPath);
-	if (!TextureArray)
-	{
-		OutError = TEXT("texture_array_not_found");
-		return false;
-	}
-	FolderPath = ResolveFilePath(FolderPath);
-	IFileManager::Get().MakeDirectory(*FolderPath, true);
-	TSharedPtr<FJsonObject> AssetJson = BuildTextureInfo(TextureArray, true, false);
-	AssetJson->SetStringField(TEXT("profile"), TEXT("ue_agent_interface.texture_array.v1"));
-	TArray<TSharedPtr<FJsonValue>> SourceValues;
-	for (UTexture2D* Source : TextureArray->SourceTextures)
-	{
-		if (Source && Source->GetOutermost())
-		{
-			SourceValues.Add(MakeShared<FJsonValueString>(NormalizeAssetPath(Source->GetOutermost()->GetName())));
-		}
-	}
-	AssetJson->SetArrayField(TEXT("source_textures"), SourceValues);
-	if (!UeAgentFolderDetailsExport::AttachOwnerDetails(TextureArray, FolderPath, TEXT("texture_array_export_folder"), TEXT("texture_array_asset"), TextureArray->GetPathName(), TEXT("asset"), AssetJson, OutError))
-	{
-		return false;
-	}
-	FString SavedPath;
-	if (!SaveJsonFile(FPaths::Combine(FolderPath, TEXT("asset.json")), AssetJson, SavedPath, OutError))
-	{
-		return false;
-	}
-	TArray<TSharedPtr<FJsonValue>> Files;
-	Files.Add(MakeShared<FJsonValueString>(SavedPath));
-	TSharedPtr<FJsonObject> SourcesJson = MakeShared<FJsonObject>();
-	SourcesJson->SetArrayField(TEXT("source_textures"), SourceValues);
-	FString SourcesPath;
-	if (!SaveJsonFile(FPaths::Combine(FolderPath, TEXT("sources.json")), SourcesJson, SourcesPath, OutError))
-	{
-		return false;
-	}
-	Files.Add(MakeShared<FJsonValueString>(SourcesPath));
-	TArray<TSharedPtr<FJsonValue>> Slices;
-	for (int32 SliceIndex = 0; SliceIndex < SourceValues.Num(); ++SliceIndex)
-	{
-		TSharedPtr<FJsonObject> Slice = MakeShared<FJsonObject>();
-		Slice->SetNumberField(TEXT("index"), SliceIndex);
-		Slice->SetStringField(TEXT("source_texture"), SourceValues[SliceIndex]->AsString());
-		Slices.Add(MakeShared<FJsonValueObject>(Slice));
-	}
-	TSharedPtr<FJsonObject> SlicesJson = MakeShared<FJsonObject>();
-	SlicesJson->SetArrayField(TEXT("slices"), Slices);
-	FString SlicesPath;
-	if (!SaveJsonFile(FPaths::Combine(FolderPath, TEXT("slices.json")), SlicesJson, SlicesPath, OutError))
-	{
-		return false;
-	}
-	Files.Add(MakeShared<FJsonValueString>(SlicesPath));
-	OutData = MakeShared<FJsonObject>();
-	OutData->SetStringField(TEXT("folder_path"), FolderPath);
-	OutData->SetArrayField(TEXT("files"), Files);
-	OutData->SetArrayField(TEXT("slice_results"), Slices);
-	EchoOptionalBool(Ctx.Params, OutData, TEXT("include_validation"), true, OutError);
-	OutData->SetObjectField(TEXT("coverage_report"), MakeCoverageReport(TEXT("ue_agent_interface.texture_array.v1")));
-	return true;
+	return UeAgentReflectionAuthoringCommandBridge::Export(TEXT("texture_array"), Ctx.Params, OutData, OutError);
 }
 
 bool FUeAgentHttpServer::CmdTextureArrayApplyFolder(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
-	using namespace UeAgentTextureOps;
-	FString FolderPath;
-	if (!GetRequiredString(Ctx, TEXT("folder_path"), FolderPath, OutError))
-	{
-		return false;
-	}
-	TSharedPtr<FJsonObject> Root;
-	FString ResolvedJson;
-	if (!LoadJsonFile(FPaths::Combine(ResolveFilePath(FolderPath), TEXT("asset.json")), Root, ResolvedJson, OutError))
-	{
-		return false;
-	}
-	FString AssetPath;
-	Root->TryGetStringField(TEXT("asset_path"), AssetPath);
-	if (Ctx.Params.IsValid())
-	{
-		JsonTryGetString(Ctx.Params, TEXT("asset_path"), AssetPath);
-	}
-	if (RejectLegacyPropertiesFolderIfPresent(FolderPath, TEXT("texture_array_asset"), AssetPath, TEXT("texture_array_apply_folder"), OutData, OutError))
-	{
-		return false;
-	}
-	if (!LoadAssetObject(AssetPath))
-	{
-		bool bCreateIfMissing = false;
-		GetOptionalBool(Ctx.Params, TEXT("create_if_missing"), bCreateIfMissing, OutError);
-		if (!bCreateIfMissing)
-		{
-			OutError = TEXT("texture_array_not_found");
-			return false;
-		}
-	}
-	TArray<FString> Sources;
-	ReadStringArray(Root, TEXT("source_textures"), Sources);
-	TSharedPtr<FJsonObject> Params = MakeShared<FJsonObject>();
-	Params->SetStringField(TEXT("asset_path"), AssetPath);
-	TArray<TSharedPtr<FJsonValue>> SourceValues;
-	for (const FString& Source : Sources)
-	{
-		SourceValues.Add(MakeShared<FJsonValueString>(Source));
-	}
-	Params->SetArrayField(TEXT("source_textures"), SourceValues);
-	Params->SetBoolField(TEXT("replace_existing"), true);
-	bool bSave = true;
-	GetOptionalBool(Ctx.Params, TEXT("save_after_apply"), bSave, OutError);
-	Params->SetBoolField(TEXT("save_after_create"), bSave);
-	FUeAgentRequestContext CreateCtx = Ctx;
-	CreateCtx.Params = Params;
-	if (!CmdTextureArrayCreate(CreateCtx, OutData, OutError))
-	{
-		return false;
-	}
-	UObject* AppliedAsset = LoadAssetObject(AssetPath);
-	int32 GroupedDetailsApplied = 0;
-	TSharedPtr<FJsonObject> DetailsApplySummary;
-	if (!ApplyAssetDetailsFromFolderIfPresent(AppliedAsset, FolderPath, Root, TEXT("texture_array_asset"), TEXT("texture_array_apply_folder"), true, DetailsApplySummary, GroupedDetailsApplied, OutError))
-	{
-		return false;
-	}
-	if (GroupedDetailsApplied > 0 && bSave && AppliedAsset && !SavePackagesForObjects({ AppliedAsset }, OutError))
-	{
-		return false;
-	}
-	TArray<TSharedPtr<FJsonValue>> SliceResults;
-	for (int32 Index = 0; Index < Sources.Num(); ++Index)
-	{
-		TSharedPtr<FJsonObject> Slice = MakeShared<FJsonObject>();
-		Slice->SetNumberField(TEXT("index"), Index);
-		Slice->SetStringField(TEXT("source_texture"), Sources[Index]);
-		Slice->SetBoolField(TEXT("applied"), true);
-		SliceResults.Add(MakeShared<FJsonValueObject>(Slice));
-	}
-	OutData->SetArrayField(TEXT("slice_results"), SliceResults);
-	OutData->SetNumberField(TEXT("grouped_details_applied"), GroupedDetailsApplied);
-	if (DetailsApplySummary.IsValid())
-	{
-		OutData->SetObjectField(TEXT("details_apply"), DetailsApplySummary);
-	}
-	return true;
+	return UeAgentReflectionAuthoringCommandBridge::Apply(TEXT("texture_array"), Ctx.Params, OutData, OutError, Ctx.RequestId);
 }
 
 bool FUeAgentHttpServer::CmdTextureCubeCreate(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
@@ -1926,181 +1686,12 @@ bool FUeAgentHttpServer::CmdTextureCubeCreate(const FUeAgentRequestContext& Ctx,
 
 bool FUeAgentHttpServer::CmdTextureCubeExportFolder(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
-	using namespace UeAgentTextureOps;
-	FString AssetPath;
-	FString FolderPath;
-	if (!GetRequiredString(Ctx, TEXT("asset_path"), AssetPath, OutError) || !GetRequiredString(Ctx, TEXT("folder_path"), FolderPath, OutError))
-	{
-		return false;
-	}
-	UTextureCube* Cube = LoadAsset<UTextureCube>(AssetPath);
-	if (!Cube)
-	{
-		OutError = TEXT("texture_cube_not_found");
-		return false;
-	}
-	FolderPath = ResolveFilePath(FolderPath);
-	IFileManager::Get().MakeDirectory(*FolderPath, true);
-	TSharedPtr<FJsonObject> AssetJson = BuildTextureInfo(Cube, true, false);
-	AssetJson->SetStringField(TEXT("profile"), TEXT("ue_agent_interface.texture_cube.v1"));
-	if (!UeAgentFolderDetailsExport::AttachOwnerDetails(Cube, FolderPath, TEXT("texture_cube_export_folder"), TEXT("texture_cube_asset"), Cube->GetPathName(), TEXT("asset"), AssetJson, OutError))
-	{
-		return false;
-	}
-	FString SavedPath;
-	if (!SaveJsonFile(FPaths::Combine(FolderPath, TEXT("asset.json")), AssetJson, SavedPath, OutError))
-	{
-		return false;
-	}
-	const TArray<FString> FaceNames = { TEXT("+X"), TEXT("-X"), TEXT("+Y"), TEXT("-Y"), TEXT("+Z"), TEXT("-Z") };
-	TArray<TSharedPtr<FJsonValue>> FaceValues;
-	for (int32 FaceIndex = 0; FaceIndex < FaceNames.Num(); ++FaceIndex)
-	{
-		TSharedPtr<FJsonObject> FaceJson = MakeShared<FJsonObject>();
-		FaceJson->SetNumberField(TEXT("index"), FaceIndex);
-		FaceJson->SetStringField(TEXT("name"), FaceNames[FaceIndex]);
-		FaceJson->SetStringField(TEXT("source_asset"), AssetPath);
-		FaceValues.Add(MakeShared<FJsonValueObject>(FaceJson));
-	}
-	TSharedPtr<FJsonObject> FacesJson = MakeShared<FJsonObject>();
-	FacesJson->SetArrayField(TEXT("faces"), FaceValues);
-	FString FacesPath;
-	if (!SaveJsonFile(FPaths::Combine(FolderPath, TEXT("faces.json")), FacesJson, FacesPath, OutError))
-	{
-		return false;
-	}
-	OutData = MakeShared<FJsonObject>();
-	OutData->SetStringField(TEXT("folder_path"), FolderPath);
-	OutData->SetArrayField(TEXT("files"), { MakeShared<FJsonValueString>(SavedPath), MakeShared<FJsonValueString>(FacesPath) });
-	OutData->SetArrayField(TEXT("face_results"), FaceValues);
-	EchoOptionalBool(Ctx.Params, OutData, TEXT("include_validation"), true, OutError);
-	OutData->SetObjectField(TEXT("coverage_report"), MakeCoverageReport(TEXT("ue_agent_interface.texture_cube.v1")));
-	return true;
+	return UeAgentReflectionAuthoringCommandBridge::Export(TEXT("texture_cube"), Ctx.Params, OutData, OutError);
 }
 
 bool FUeAgentHttpServer::CmdTextureCubeApplyFolder(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
-	using namespace UeAgentTextureOps;
-	FString FolderPath;
-	if (!GetRequiredString(Ctx, TEXT("folder_path"), FolderPath, OutError))
-	{
-		return false;
-	}
-	TSharedPtr<FJsonObject> Root;
-	FString ResolvedJson;
-	if (!LoadJsonFile(FPaths::Combine(ResolveFilePath(FolderPath), TEXT("asset.json")), Root, ResolvedJson, OutError))
-	{
-		return false;
-	}
-	FString AssetPath;
-	Root->TryGetStringField(TEXT("asset_path"), AssetPath);
-	JsonTryGetString(Ctx.Params, TEXT("asset_path"), AssetPath);
-	if (RejectLegacyPropertiesFolderIfPresent(FolderPath, TEXT("texture_cube_asset"), AssetPath, TEXT("texture_cube_apply_folder"), OutData, OutError))
-	{
-		return false;
-	}
-	TArray<TSharedPtr<FJsonValue>> FaceResults;
-	TSharedPtr<FJsonObject> FacesRoot;
-	FString FacesJsonPath;
-	if (LoadJsonFile(FPaths::Combine(ResolveFilePath(FolderPath), TEXT("faces.json")), FacesRoot, FacesJsonPath, OutError))
-	{
-		const TArray<TSharedPtr<FJsonValue>>* Faces = nullptr;
-		if (FacesRoot->TryGetArrayField(TEXT("faces"), Faces) && Faces)
-		{
-			FaceResults = *Faces;
-		}
-	}
-	else
-	{
-		OutError.Reset();
-	}
-	UObject* Cube = LoadAssetObject(AssetPath);
-	if (!Cube)
-	{
-		bool bCreate = false;
-		GetOptionalBool(Ctx.Params, TEXT("create_if_missing"), bCreate, OutError);
-		if (!bCreate)
-		{
-			OutError = TEXT("texture_cube_not_found");
-			return false;
-		}
-		TArray<FString> FaceTextures;
-		ReadStringArray(Root, TEXT("face_textures"), FaceTextures);
-		if (FaceTextures.Num() != 6 && FaceResults.Num() == 6)
-		{
-			FaceTextures.Reset();
-			for (const TSharedPtr<FJsonValue>& FaceValue : FaceResults)
-			{
-				const TSharedPtr<FJsonObject>* FaceObj = nullptr;
-				FString FaceTexture;
-				if (FaceValue.IsValid() && FaceValue->TryGetObject(FaceObj) && FaceObj && FaceObj->IsValid() &&
-					((*FaceObj)->TryGetStringField(TEXT("source_texture"), FaceTexture) || (*FaceObj)->TryGetStringField(TEXT("face_texture"), FaceTexture)) &&
-					!FaceTexture.TrimStartAndEnd().IsEmpty())
-				{
-					FaceTexture.TrimStartAndEndInline();
-					FaceTextures.Add(FaceTexture);
-				}
-			}
-		}
-		if (FaceTextures.Num() != 6)
-		{
-			OutError = TEXT("texture_cube_apply_missing_face_sources");
-			return false;
-		}
-		TArray<TSharedPtr<FJsonValue>> FaceTextureValues;
-		for (const FString& FaceTexture : FaceTextures)
-		{
-			FaceTextureValues.Add(MakeShared<FJsonValueString>(FaceTexture));
-		}
-		TSharedPtr<FJsonObject> Params = MakeShared<FJsonObject>();
-		Params->SetStringField(TEXT("asset_path"), AssetPath);
-		Params->SetArrayField(TEXT("face_textures"), FaceTextureValues);
-		Params->SetBoolField(TEXT("replace_existing"), false);
-		bool bSaveCreate = true;
-		GetOptionalBool(Ctx.Params, TEXT("save_after_apply"), bSaveCreate, OutError);
-		Params->SetBoolField(TEXT("save_after_create"), bSaveCreate);
-		FUeAgentRequestContext CreateCtx = Ctx;
-		CreateCtx.Params = Params;
-		if (!CmdTextureCubeCreate(CreateCtx, OutData, OutError))
-		{
-			return false;
-		}
-		if (FaceResults.Num() == 0)
-		{
-			for (int32 Index = 0; Index < FaceTextures.Num(); ++Index)
-			{
-				TSharedPtr<FJsonObject> Face = MakeShared<FJsonObject>();
-				Face->SetNumberField(TEXT("index"), Index);
-				Face->SetStringField(TEXT("source_texture"), FaceTextures[Index]);
-				Face->SetBoolField(TEXT("applied"), true);
-				FaceResults.Add(MakeShared<FJsonValueObject>(Face));
-			}
-		}
-		OutData->SetArrayField(TEXT("face_results"), FaceResults);
-		return true;
-	}
-	TArray<TSharedPtr<FJsonValue>> Results;
-	int32 GroupedDetailsApplied = 0;
-	TSharedPtr<FJsonObject> DetailsApplySummary;
-	if (!ApplyAssetDetailsFromFolderIfPresent(Cube, FolderPath, Root, TEXT("texture_cube_asset"), TEXT("texture_cube_apply_folder"), true, DetailsApplySummary, GroupedDetailsApplied, OutError))
-	{
-		return false;
-	}
-	bool bSave = true;
-	GetOptionalBool(Ctx.Params, TEXT("save_after_apply"), bSave, OutError);
-	if (bSave && !SavePackagesForObjects({ Cube }, OutError))
-	{
-		return false;
-	}
-	OutData = BuildTextureInfo(Cast<UTexture>(Cube), true, false);
-	OutData->SetArrayField(TEXT("property_results"), Results);
-	OutData->SetNumberField(TEXT("grouped_details_applied"), GroupedDetailsApplied);
-	if (DetailsApplySummary.IsValid())
-	{
-		OutData->SetObjectField(TEXT("details_apply"), DetailsApplySummary);
-	}
-	OutData->SetArrayField(TEXT("face_results"), FaceResults);
-	return true;
+	return UeAgentReflectionAuthoringCommandBridge::Apply(TEXT("texture_cube"), Ctx.Params, OutData, OutError, Ctx.RequestId);
 }
 
 bool FUeAgentHttpServer::CmdTextureCubeArrayCreate(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
@@ -2157,123 +1748,12 @@ bool FUeAgentHttpServer::CmdTextureCubeArrayCreate(const FUeAgentRequestContext&
 
 bool FUeAgentHttpServer::CmdTextureCubeArrayExportFolder(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
-	using namespace UeAgentTextureOps;
-	FString AssetPath;
-	FString FolderPath;
-	if (!GetRequiredString(Ctx, TEXT("asset_path"), AssetPath, OutError) || !GetRequiredString(Ctx, TEXT("folder_path"), FolderPath, OutError))
-	{
-		return false;
-	}
-	UTextureCubeArray* CubeArray = LoadAsset<UTextureCubeArray>(AssetPath);
-	if (!CubeArray)
-	{
-		OutError = TEXT("texture_cube_array_not_found");
-		return false;
-	}
-	FolderPath = ResolveFilePath(FolderPath);
-	TSharedPtr<FJsonObject> AssetJson = BuildTextureInfo(CubeArray, true, false);
-	AssetJson->SetStringField(TEXT("profile"), TEXT("ue_agent_interface.texture_cube_array.v1"));
-	TArray<TSharedPtr<FJsonValue>> SourceValues;
-	for (UTextureCube* Source : CubeArray->SourceTextures)
-	{
-		if (Source && Source->GetOutermost())
-		{
-			SourceValues.Add(MakeShared<FJsonValueString>(NormalizeAssetPath(Source->GetOutermost()->GetName())));
-		}
-	}
-	AssetJson->SetArrayField(TEXT("source_cubes"), SourceValues);
-	if (!UeAgentFolderDetailsExport::AttachOwnerDetails(CubeArray, FolderPath, TEXT("texture_cube_array_export_folder"), TEXT("texture_cube_array_asset"), CubeArray->GetPathName(), TEXT("asset"), AssetJson, OutError))
-	{
-		return false;
-	}
-	FString SavedPath;
-	if (!SaveJsonFile(FPaths::Combine(FolderPath, TEXT("asset.json")), AssetJson, SavedPath, OutError))
-	{
-		return false;
-	}
-	OutData = MakeShared<FJsonObject>();
-	OutData->SetStringField(TEXT("folder_path"), FolderPath);
-	OutData->SetArrayField(TEXT("files"), { MakeShared<FJsonValueString>(SavedPath) });
-	EchoOptionalBool(Ctx.Params, OutData, TEXT("include_validation"), true, OutError);
-	OutData->SetObjectField(TEXT("coverage_report"), MakeCoverageReport(TEXT("ue_agent_interface.texture_cube_array.v1")));
-	return true;
+	return UeAgentReflectionAuthoringCommandBridge::Export(TEXT("texture_cube_array"), Ctx.Params, OutData, OutError);
 }
 
 bool FUeAgentHttpServer::CmdTextureCubeArrayApplyFolder(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
-	using namespace UeAgentTextureOps;
-	FString FolderPath;
-	if (!GetRequiredString(Ctx, TEXT("folder_path"), FolderPath, OutError))
-	{
-		return false;
-	}
-	TSharedPtr<FJsonObject> Root;
-	FString ResolvedJson;
-	if (!LoadJsonFile(FPaths::Combine(ResolveFilePath(FolderPath), TEXT("asset.json")), Root, ResolvedJson, OutError))
-	{
-		return false;
-	}
-	FString AssetPath;
-	Root->TryGetStringField(TEXT("asset_path"), AssetPath);
-	JsonTryGetString(Ctx.Params, TEXT("asset_path"), AssetPath);
-	if (RejectLegacyPropertiesFolderIfPresent(FolderPath, TEXT("texture_cube_array_asset"), AssetPath, TEXT("texture_cube_array_apply_folder"), OutData, OutError))
-	{
-		return false;
-	}
-	if (!LoadAssetObject(AssetPath))
-	{
-		bool bCreateIfMissing = false;
-		GetOptionalBool(Ctx.Params, TEXT("create_if_missing"), bCreateIfMissing, OutError);
-		if (!bCreateIfMissing)
-		{
-			OutError = TEXT("texture_cube_array_not_found");
-			return false;
-		}
-	}
-	TArray<FString> Sources;
-	ReadStringArray(Root, TEXT("source_cubes"), Sources);
-	TSharedPtr<FJsonObject> Params = MakeShared<FJsonObject>();
-	Params->SetStringField(TEXT("asset_path"), AssetPath);
-	TArray<TSharedPtr<FJsonValue>> SourceValues;
-	for (const FString& Source : Sources)
-	{
-		SourceValues.Add(MakeShared<FJsonValueString>(Source));
-	}
-	Params->SetArrayField(TEXT("source_cubes"), SourceValues);
-	Params->SetBoolField(TEXT("replace_existing"), true);
-	bool bSave = true;
-	GetOptionalBool(Ctx.Params, TEXT("save_after_apply"), bSave, OutError);
-	Params->SetBoolField(TEXT("save_after_create"), bSave);
-	FUeAgentRequestContext CreateCtx = Ctx;
-	CreateCtx.Params = Params;
-	if (!CmdTextureCubeArrayCreate(CreateCtx, OutData, OutError))
-	{
-		return false;
-	}
-	UObject* AppliedAsset = LoadAssetObject(AssetPath);
-	int32 GroupedDetailsApplied = 0;
-	TSharedPtr<FJsonObject> DetailsApplySummary;
-	if (!ApplyAssetDetailsFromFolderIfPresent(AppliedAsset, FolderPath, Root, TEXT("texture_cube_array_asset"), TEXT("texture_cube_array_apply_folder"), true, DetailsApplySummary, GroupedDetailsApplied, OutError))
-	{
-		return false;
-	}
-	if (GroupedDetailsApplied > 0 && bSave && AppliedAsset && !SavePackagesForObjects({ AppliedAsset }, OutError))
-	{
-		return false;
-	}
-	TArray<TSharedPtr<FJsonValue>> Results;
-	TSharedPtr<FJsonObject> Result = MakeShared<FJsonObject>();
-	Result->SetStringField(TEXT("property"), TEXT("SourceTextures"));
-	Result->SetBoolField(TEXT("applied"), true);
-	Result->SetNumberField(TEXT("source_count"), Sources.Num());
-	Results.Add(MakeShared<FJsonValueObject>(Result));
-	OutData->SetArrayField(TEXT("property_results"), Results);
-	OutData->SetNumberField(TEXT("grouped_details_applied"), GroupedDetailsApplied);
-	if (DetailsApplySummary.IsValid())
-	{
-		OutData->SetObjectField(TEXT("details_apply"), DetailsApplySummary);
-	}
-	return true;
+	return UeAgentReflectionAuthoringCommandBridge::Apply(TEXT("texture_cube_array"), Ctx.Params, OutData, OutError, Ctx.RequestId);
 }
 
 bool FUeAgentHttpServer::CmdVolumeTextureCreate(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
@@ -2412,155 +1892,12 @@ bool FUeAgentHttpServer::CmdVolumeTextureCreate(const FUeAgentRequestContext& Ct
 
 bool FUeAgentHttpServer::CmdVolumeTextureExportFolder(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
-	using namespace UeAgentTextureOps;
-	FString AssetPath;
-	FString FolderPath;
-	if (!GetRequiredString(Ctx, TEXT("asset_path"), AssetPath, OutError) || !GetRequiredString(Ctx, TEXT("folder_path"), FolderPath, OutError))
-	{
-		return false;
-	}
-	UVolumeTexture* Volume = LoadAsset<UVolumeTexture>(AssetPath);
-	if (!Volume)
-	{
-		OutError = TEXT("volume_texture_not_found");
-		return false;
-	}
-	FolderPath = ResolveFilePath(FolderPath);
-	TSharedPtr<FJsonObject> AssetJson = BuildTextureInfo(Volume, true, false);
-	AssetJson->SetStringField(TEXT("profile"), TEXT("ue_agent_interface.volume_texture.v1"));
-	if (Volume->Source2DTexture && Volume->Source2DTexture->GetOutermost())
-	{
-		AssetJson->SetStringField(TEXT("source_texture"), NormalizeAssetPath(Volume->Source2DTexture->GetOutermost()->GetName()));
-	}
-	AssetJson->SetNumberField(TEXT("tile_size_x"), Volume->Source2DTileSizeX);
-	AssetJson->SetNumberField(TEXT("tile_size_y"), Volume->Source2DTileSizeY);
-	if (!UeAgentFolderDetailsExport::AttachOwnerDetails(Volume, FolderPath, TEXT("volume_texture_export_folder"), TEXT("volume_texture_asset"), Volume->GetPathName(), TEXT("asset"), AssetJson, OutError))
-	{
-		return false;
-	}
-	FString SavedPath;
-	if (!SaveJsonFile(FPaths::Combine(FolderPath, TEXT("asset.json")), AssetJson, SavedPath, OutError))
-	{
-		return false;
-	}
-	TArray<TSharedPtr<FJsonValue>> Files;
-	Files.Add(MakeShared<FJsonValueString>(SavedPath));
-	TSharedPtr<FJsonObject> SourcesJson = MakeShared<FJsonObject>();
-	SourcesJson->SetStringField(TEXT("source_texture"), AssetJson->HasField(TEXT("source_texture")) ? AssetJson->GetStringField(TEXT("source_texture")) : FString());
-	SourcesJson->SetNumberField(TEXT("tile_size_x"), Volume->Source2DTileSizeX);
-	SourcesJson->SetNumberField(TEXT("tile_size_y"), Volume->Source2DTileSizeY);
-	FString SourcesPath;
-	if (!SaveJsonFile(FPaths::Combine(FolderPath, TEXT("sources.json")), SourcesJson, SourcesPath, OutError))
-	{
-		return false;
-	}
-	Files.Add(MakeShared<FJsonValueString>(SourcesPath));
-	TArray<TSharedPtr<FJsonValue>> Slices;
-	const int32 SliceCount = FMath::Max(1, Volume->GetSizeZ());
-	for (int32 SliceIndex = 0; SliceIndex < SliceCount; ++SliceIndex)
-	{
-		TSharedPtr<FJsonObject> Slice = MakeShared<FJsonObject>();
-		Slice->SetNumberField(TEXT("index"), SliceIndex);
-		Slice->SetNumberField(TEXT("tile_size_x"), Volume->Source2DTileSizeX);
-		Slice->SetNumberField(TEXT("tile_size_y"), Volume->Source2DTileSizeY);
-		Slices.Add(MakeShared<FJsonValueObject>(Slice));
-	}
-	TSharedPtr<FJsonObject> SlicesJson = MakeShared<FJsonObject>();
-	SlicesJson->SetArrayField(TEXT("slices"), Slices);
-	FString SlicesPath;
-	if (!SaveJsonFile(FPaths::Combine(FolderPath, TEXT("slices.json")), SlicesJson, SlicesPath, OutError))
-	{
-		return false;
-	}
-	Files.Add(MakeShared<FJsonValueString>(SlicesPath));
-	OutData = MakeShared<FJsonObject>();
-	OutData->SetStringField(TEXT("folder_path"), FolderPath);
-	OutData->SetArrayField(TEXT("files"), Files);
-	OutData->SetArrayField(TEXT("slice_results"), Slices);
-	EchoOptionalBool(Ctx.Params, OutData, TEXT("include_validation"), true, OutError);
-	OutData->SetObjectField(TEXT("coverage_report"), MakeCoverageReport(TEXT("ue_agent_interface.volume_texture.v1")));
-	return true;
+	return UeAgentReflectionAuthoringCommandBridge::Export(TEXT("volume_texture"), Ctx.Params, OutData, OutError);
 }
 
 bool FUeAgentHttpServer::CmdVolumeTextureApplyFolder(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
-	using namespace UeAgentTextureOps;
-	FString FolderPath;
-	if (!GetRequiredString(Ctx, TEXT("folder_path"), FolderPath, OutError))
-	{
-		return false;
-	}
-	TSharedPtr<FJsonObject> Root;
-	FString ResolvedJson;
-	if (!LoadJsonFile(FPaths::Combine(ResolveFilePath(FolderPath), TEXT("asset.json")), Root, ResolvedJson, OutError))
-	{
-		return false;
-	}
-	FString AssetPath;
-	FString SourceTexture;
-	Root->TryGetStringField(TEXT("asset_path"), AssetPath);
-	JsonTryGetString(Ctx.Params, TEXT("asset_path"), AssetPath);
-	Root->TryGetStringField(TEXT("source_texture"), SourceTexture);
-	if (RejectLegacyPropertiesFolderIfPresent(FolderPath, TEXT("volume_texture_asset"), AssetPath, TEXT("volume_texture_apply_folder"), OutData, OutError))
-	{
-		return false;
-	}
-	TSharedPtr<FJsonObject> Params = MakeShared<FJsonObject>();
-	Params->SetStringField(TEXT("asset_path"), AssetPath);
-	Params->SetStringField(TEXT("source_texture"), SourceTexture);
-	Params->SetBoolField(TEXT("replace_existing"), true);
-	if (Root->HasField(TEXT("tile_size_x"))) { Params->SetNumberField(TEXT("tile_size_x"), Root->GetNumberField(TEXT("tile_size_x"))); }
-	if (Root->HasField(TEXT("tile_size_y"))) { Params->SetNumberField(TEXT("tile_size_y"), Root->GetNumberField(TEXT("tile_size_y"))); }
-	bool bSave = true;
-	GetOptionalBool(Ctx.Params, TEXT("save_after_apply"), bSave, OutError);
-	Params->SetBoolField(TEXT("save_after_create"), bSave);
-	FUeAgentRequestContext CreateCtx = Ctx;
-	CreateCtx.Params = Params;
-	if (!CmdVolumeTextureCreate(CreateCtx, OutData, OutError))
-	{
-		return false;
-	}
-	UObject* AppliedAsset = LoadAssetObject(AssetPath);
-	int32 GroupedDetailsApplied = 0;
-	TSharedPtr<FJsonObject> DetailsApplySummary;
-	if (!ApplyAssetDetailsFromFolderIfPresent(AppliedAsset, FolderPath, Root, TEXT("volume_texture_asset"), TEXT("volume_texture_apply_folder"), true, DetailsApplySummary, GroupedDetailsApplied, OutError))
-	{
-		return false;
-	}
-	if (GroupedDetailsApplied > 0 && bSave && AppliedAsset && !SavePackagesForObjects({ AppliedAsset }, OutError))
-	{
-		return false;
-	}
-	TArray<TSharedPtr<FJsonValue>> SliceResults;
-	TSharedPtr<FJsonObject> SlicesRoot;
-	FString SlicesPath;
-	if (LoadJsonFile(FPaths::Combine(ResolveFilePath(FolderPath), TEXT("slices.json")), SlicesRoot, SlicesPath, OutError))
-	{
-		const TArray<TSharedPtr<FJsonValue>>* Slices = nullptr;
-		if (SlicesRoot->TryGetArrayField(TEXT("slices"), Slices) && Slices)
-		{
-			SliceResults = *Slices;
-		}
-	}
-	else
-	{
-		OutError.Reset();
-	}
-	if (SliceResults.Num() == 0)
-	{
-		TSharedPtr<FJsonObject> Slice = MakeShared<FJsonObject>();
-		Slice->SetNumberField(TEXT("index"), 0);
-		Slice->SetStringField(TEXT("source_texture"), SourceTexture);
-		Slice->SetBoolField(TEXT("applied"), true);
-		SliceResults.Add(MakeShared<FJsonValueObject>(Slice));
-	}
-	OutData->SetArrayField(TEXT("slice_results"), SliceResults);
-	OutData->SetNumberField(TEXT("grouped_details_applied"), GroupedDetailsApplied);
-	if (DetailsApplySummary.IsValid())
-	{
-		OutData->SetObjectField(TEXT("details_apply"), DetailsApplySummary);
-	}
-	return true;
+	return UeAgentReflectionAuthoringCommandBridge::Apply(TEXT("volume_texture"), Ctx.Params, OutData, OutError, Ctx.RequestId);
 }
 
 bool FUeAgentHttpServer::CmdVirtualTextureGetInfo(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
@@ -2656,43 +1993,13 @@ bool FUeAgentHttpServer::CmdRuntimeVirtualTextureCreate(const FUeAgentRequestCon
 	{
 		return false;
 	}
-	FString MaterialType;
-	if (JsonTryGetString(Ctx.Params, TEXT("material_type"), MaterialType) && !MaterialType.TrimStartAndEnd().IsEmpty())
-	{
-		FString Readback;
-		FString ImportError;
-		if (!ImportPropertyText(RVT, TEXT("MaterialType"), MaterialType.TrimStartAndEnd(), Readback, ImportError))
-		{
-			OutError = ImportError;
-			return false;
-		}
-	}
-	const TSharedPtr<FJsonObject>* Settings = nullptr;
-	if (Ctx.Params.IsValid() && Ctx.Params->TryGetObjectField(TEXT("settings"), Settings) && Settings && Settings->IsValid())
+	const TArray<TSharedPtr<FJsonValue>>* Properties = nullptr;
+	if (Ctx.Params.IsValid() && Ctx.Params->TryGetArrayField(TEXT("properties"), Properties) && Properties && !Properties->IsEmpty())
 	{
 		TArray<TSharedPtr<FJsonValue>> Results;
 		TSharedPtr<FJsonObject> Root = MakeShared<FJsonObject>();
-		TArray<TSharedPtr<FJsonValue>> Props;
-		for (const auto& Pair : (*Settings)->Values)
-		{
-			TSharedPtr<FJsonObject> Prop = MakeShared<FJsonObject>();
-			Prop->SetStringField(TEXT("name"), Pair.Key);
-			if (Pair.Value->Type == EJson::String)
-			{
-				Prop->SetStringField(TEXT("value_text"), Pair.Value->AsString());
-			}
-			else if (Pair.Value->Type == EJson::Number)
-			{
-				Prop->SetStringField(TEXT("value_text"), FString::SanitizeFloat(Pair.Value->AsNumber()));
-			}
-			else if (Pair.Value->Type == EJson::Boolean)
-			{
-				Prop->SetStringField(TEXT("value_text"), Pair.Value->AsBool() ? TEXT("True") : TEXT("False"));
-			}
-			Props.Add(MakeShared<FJsonValueObject>(Prop));
-		}
-		Root->SetArrayField(TEXT("properties"), Props);
-		ApplyGenericProperties(RVT, Root, Results, OutError);
+		Root->SetArrayField(TEXT("properties"), *Properties);
+		if (!ApplyGenericProperties(RVT, Root, Results, OutError)) return false;
 	}
 	bool bSave = true;
 	GetOptionalBool(Ctx.Params, TEXT("save_after_create"), bSave, OutError);
@@ -2734,93 +2041,12 @@ bool FUeAgentHttpServer::CmdRuntimeVirtualTextureGetInfo(const FUeAgentRequestCo
 
 bool FUeAgentHttpServer::CmdRuntimeVirtualTextureExportJson(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
-	using namespace UeAgentTextureOps;
-	FString AssetPath;
-	FString OutputFile;
-	if (!GetRequiredString(Ctx, TEXT("asset_path"), AssetPath, OutError) || !GetRequiredString(Ctx, TEXT("output_file"), OutputFile, OutError))
-	{
-		return false;
-	}
-	URuntimeVirtualTexture* RVT = LoadAsset<URuntimeVirtualTexture>(AssetPath);
-	if (!RVT)
-	{
-		OutError = TEXT("runtime_virtual_texture_not_found");
-		return false;
-	}
-	TSharedPtr<FJsonObject> Root = BuildGenericAssetJson(RVT, TEXT("ue_agent_interface.runtime_virtual_texture.v1"), true);
-	EchoOptionalBool(Ctx.Params, Root, TEXT("include_validation"), true, OutError);
-	FString Saved;
-	if (!SaveJsonFile(OutputFile, Root, Saved, OutError))
-	{
-		return false;
-	}
-	OutData = Root;
-	EchoOptionalBool(Ctx.Params, OutData, TEXT("include_validation"), true, OutError);
-	OutData->SetStringField(TEXT("output_file"), Saved);
-	return true;
+	return UeAgentReflectionAuthoringCommandBridge::Export(TEXT("runtime_virtual_texture"), Ctx.Params, OutData, OutError);
 }
 
 bool FUeAgentHttpServer::CmdRuntimeVirtualTextureApplyJson(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
-	using namespace UeAgentTextureOps;
-	FString JsonFile;
-	if (!GetRequiredString(Ctx, TEXT("json_file"), JsonFile, OutError))
-	{
-		return false;
-	}
-	TSharedPtr<FJsonObject> Root;
-	FString Resolved;
-	if (!LoadJsonFile(JsonFile, Root, Resolved, OutError))
-	{
-		return false;
-	}
-	FString AssetPath;
-	Root->TryGetStringField(TEXT("asset_path"), AssetPath);
-	JsonTryGetString(Ctx.Params, TEXT("asset_path"), AssetPath);
-	URuntimeVirtualTexture* RVT = LoadAsset<URuntimeVirtualTexture>(AssetPath);
-	if (!RVT)
-	{
-		bool bCreate = false;
-		GetOptionalBool(Ctx.Params, TEXT("create_if_missing"), bCreate, OutError);
-		if (!bCreate)
-		{
-			OutError = TEXT("runtime_virtual_texture_not_found");
-			return false;
-		}
-		RVT = Cast<URuntimeVirtualTexture>(CreateAssetObject(URuntimeVirtualTexture::StaticClass(), AssetPath, false, OutError));
-		if (!RVT)
-		{
-			return false;
-		}
-	}
-	bool bDryRun = false;
-	bool bValidateOnly = false;
-	GetOptionalBool(Ctx.Params, TEXT("dry_run"), bDryRun, OutError);
-	GetOptionalBool(Ctx.Params, TEXT("validate_only"), bValidateOnly, OutError);
-	if (bDryRun || bValidateOnly)
-	{
-		OutData = BuildGenericAssetJson(RVT, TEXT("ue_agent_interface.runtime_virtual_texture.v1"), false);
-		OutData->SetStringField(TEXT("json_file"), Resolved);
-		OutData->SetBoolField(TEXT("dry_run"), bDryRun);
-		OutData->SetBoolField(TEXT("validate_only"), bValidateOnly);
-		OutData->SetArrayField(TEXT("property_results"), {});
-		return true;
-	}
-	TArray<TSharedPtr<FJsonValue>> Results;
-	if (!ApplyGenericProperties(RVT, Root, Results, OutError))
-	{
-		return false;
-	}
-	bool bSave = true;
-	GetOptionalBool(Ctx.Params, TEXT("save_after_apply"), bSave, OutError);
-	if (bSave && !SavePackagesForObjects({ RVT }, OutError))
-	{
-		return false;
-	}
-	OutData = BuildGenericAssetJson(RVT, TEXT("ue_agent_interface.runtime_virtual_texture.v1"), false);
-	OutData->SetStringField(TEXT("json_file"), Resolved);
-	OutData->SetArrayField(TEXT("property_results"), Results);
-	return true;
+	return UeAgentReflectionAuthoringCommandBridge::Apply(TEXT("runtime_virtual_texture"), Ctx.Params, OutData, OutError, Ctx.RequestId);
 }
 
 bool FUeAgentHttpServer::CmdRuntimeVirtualTextureValidateSetup(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const

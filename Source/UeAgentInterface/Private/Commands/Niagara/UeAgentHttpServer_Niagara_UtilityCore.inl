@@ -55,7 +55,7 @@
 		return FString::Printf(TEXT("%s.%s"), *AssetPath, *AssetName);
 	}
 
-	static UObject* LoadAssetObject(const FString& InPath)
+	UObject* LoadAssetObject(const FString& InPath)
 	{
 		const FString ObjectPath = ToObjectPath(InPath);
 		if (ObjectPath.IsEmpty())
@@ -79,6 +79,9 @@
 		bool bCompilationRequested = false;
 		bool bCompilationComplete = false;
 		bool bHasOutstandingCompilationRequests = false;
+		bool bCompileHasError = false;
+		int32 CompileErrorScriptCount = 0;
+		FString FirstCompileError;
 	};
 
 	static bool TryGetBoolField(const TSharedPtr<FJsonObject>& Obj, const FString& Key, bool& OutValue)
@@ -123,29 +126,49 @@
 		{
 			Result.bHasOutstandingCompilationRequests = NiagaraSystem->HasOutstandingCompilationRequests(true);
 		}
+		if (Result.bCompilationComplete)
+		{
+			const UeAgentNiagaraCompileValidation::FResult Validation =
+				UeAgentNiagaraCompileValidation::InspectAsset(NiagaraSystem);
+			Result.bCompileHasError = Validation.bHasError;
+			Result.CompileErrorScriptCount = Validation.ErrorScriptCount;
+			Result.FirstCompileError = Validation.FirstError;
+		}
 		return Result;
 	}
 
-	static FNiagaraCompileAfterSetResult CompileEmitterScriptsAfterSet(FVersionedNiagaraEmitterData* EmitterData, const TSharedPtr<FJsonObject>& Params, const bool bDefaultCompileAfterSet, const bool bShouldCompile = true)
+	static FNiagaraCompileAfterSetResult CompileEmitterAfterSet(UNiagaraEmitter* Emitter, const FGuid& VersionGuid, const TSharedPtr<FJsonObject>& Params, const bool bDefaultCompileAfterSet, const bool bShouldCompile = true)
 	{
 		FNiagaraCompileAfterSetResult Result = ReadCompileAfterSetParams(Params, bDefaultCompileAfterSet);
-		if (!Result.bCompileAfterSet || !bShouldCompile || !EmitterData)
+		if (!Result.bCompileAfterSet || !bShouldCompile || !Emitter)
 		{
 			return Result;
 		}
 
-		TArray<UNiagaraScript*> EmitterScripts;
-		EmitterData->GetScripts(EmitterScripts, false, false);
-		for (UNiagaraScript* Script : EmitterScripts)
+		UeAgentNiagaraEmitterCompileContext::FResult CompileContext;
+		FString CompileError;
+		if (!UeAgentNiagaraEmitterCompileContext::Compile(
+			*Emitter,
+			VersionGuid,
+			Result.bForceCompile,
+			CompileContext,
+			CompileError))
 		{
-			if (!Script)
-			{
-				continue;
-			}
-			Script->RequestCompile(Script->GetExposedVersion().VersionGuid, Result.bForceCompile);
-			Result.bCompilationRequested = true;
+			Result.bCompileHasError = true;
+			Result.CompileErrorScriptCount = 1;
+			Result.FirstCompileError = CompileError;
+			return Result;
 		}
-		Result.bCompilationComplete = true;
+
+		// A standalone emitter's compilation context is transient, so it must finish
+		// before the command returns even when an asynchronous wait was requested.
+		Result.bWaitForComplete = true;
+		Result.bCompilationRequested = CompileContext.bCompilationRequested;
+		Result.bCompilationComplete = CompileContext.bCompilationComplete;
+		Result.bHasOutstandingCompilationRequests = CompileContext.bHasOutstandingCompilationRequests;
+		Result.bCompileHasError = CompileContext.Validation.bHasError;
+		Result.CompileErrorScriptCount = CompileContext.Validation.ErrorScriptCount;
+		Result.FirstCompileError = CompileContext.Validation.FirstError;
 		return Result;
 	}
 
@@ -161,6 +184,12 @@
 		OutData->SetBoolField(TEXT("compilation_requested"), Result.bCompilationRequested);
 		OutData->SetBoolField(TEXT("compilation_complete"), Result.bCompilationComplete);
 		OutData->SetBoolField(TEXT("has_outstanding_compilation_requests"), Result.bHasOutstandingCompilationRequests);
+		OutData->SetBoolField(TEXT("compile_has_error"), Result.bCompileHasError);
+		OutData->SetNumberField(TEXT("compile_error_script_count"), Result.CompileErrorScriptCount);
+		if (!Result.FirstCompileError.IsEmpty())
+		{
+			OutData->SetStringField(TEXT("first_compile_error"), Result.FirstCompileError);
+		}
 	}
 
 	static bool DetachStaleObjectAtPath(const FString& ObjectPath, bool* bOutFoundStaleObject = nullptr)
@@ -290,24 +319,60 @@
 		return true;
 	}
 
-	static int32 CloseAssetEditorsForStructuralNiagaraEdit(UObject& Asset)
+	bool PrepareAssetForStructuralNiagaraEdit(
+		UObject& Asset,
+		int32& OutClosedEditorCount,
+		FString& OutError)
 	{
-		if (!GEditor)
+		OutClosedEditorCount = 0;
+		OutError.Reset();
+		if (IsRunningCommandlet() || !FApp::CanEverRender() || !GEditor)
 		{
-			return 0;
+			return true;
 		}
 
 		UAssetEditorSubsystem* AssetEditorSubsystem = GEditor->GetEditorSubsystem<UAssetEditorSubsystem>();
 		if (!AssetEditorSubsystem || !AssetEditorSubsystem->FindEditorForAsset(&Asset, false))
 		{
-			return 0;
+			return true;
 		}
 
-		const int32 ClosedEditorCount = AssetEditorSubsystem->CloseAllEditorsForAsset(&Asset);
+		OutClosedEditorCount = AssetEditorSubsystem->CloseAllEditorsForAsset(&Asset);
 		FUeAgentInterfaceLogger::Log(
 			TEXT("Niagara structural edit closed open asset editors: asset=%s closed=%d"),
 			*Asset.GetPathName(),
-			ClosedEditorCount);
+			OutClosedEditorCount);
+
+		if (AssetEditorSubsystem->FindEditorForAsset(&Asset, false))
+		{
+			OutError = TEXT("niagara_structural_edit_asset_editor_close_failed");
+			return false;
+		}
+		if (UNiagaraSystem* NiagaraSystem = Cast<UNiagaraSystem>(&Asset))
+		{
+			if (FNiagaraEditorModule* NiagaraEditorModule = FModuleManager::GetModulePtr<FNiagaraEditorModule>(TEXT("NiagaraEditor")))
+			{
+				if (NiagaraEditorModule->GetExistingViewModelForSystem(NiagaraSystem).IsValid())
+				{
+					OutError = TEXT("niagara_structural_edit_view_model_still_active");
+					return false;
+				}
+			}
+		}
+		return true;
+	}
+
+	static int32 CloseAssetEditorsForStructuralNiagaraEdit(UObject& Asset)
+	{
+		int32 ClosedEditorCount = 0;
+		FString Error;
+		if (!PrepareAssetForStructuralNiagaraEdit(Asset, ClosedEditorCount, Error))
+		{
+			FUeAgentInterfaceLogger::Log(
+				TEXT("Niagara structural edit editor isolation failed: asset=%s error=%s"),
+				*Asset.GetPathName(),
+				*Error);
+		}
 		return ClosedEditorCount;
 	}
 
@@ -747,6 +812,24 @@
 		float& OutFov)
 	{
 		TSharedPtr<FJsonObject> CameraInfo = MakeShared<FJsonObject>();
+		auto TryReadTriple = [](const TSharedPtr<FJsonObject>& Object, const FString& Field, FVector& OutValue) -> bool
+		{
+			const TArray<TSharedPtr<FJsonValue>>* Values = nullptr;
+			if (!Object.IsValid() || !Object->TryGetArrayField(Field, Values) || !Values || Values->Num() != 3)
+			{
+				return false;
+			}
+			double Components[3] = { 0.0, 0.0, 0.0 };
+			for (int32 Index = 0; Index < 3; ++Index)
+			{
+				if (!(*Values)[Index].IsValid() || !(*Values)[Index]->TryGetNumber(Components[Index]) || !FMath::IsFinite(Components[Index]))
+				{
+					return false;
+				}
+			}
+			OutValue = FVector(Components[0], Components[1], Components[2]);
+			return true;
+		};
 
 		double FovValue = 45.0;
 		double DistanceValue = 0.0;
@@ -762,6 +845,31 @@
 			Params->TryGetNumberField(TEXT("camera_target_z_offset"), TargetZOffsetValue);
 			Params->TryGetNumberField(TEXT("camera_height_offset"), HeightOffsetValue);
 			Params->TryGetNumberField(TEXT("camera_side_offset"), SideOffsetValue);
+		}
+		const TSharedPtr<FJsonObject>* ExplicitCamera = nullptr;
+		if (Params.IsValid() && Params->TryGetObjectField(TEXT("camera"), ExplicitCamera) && ExplicitCamera && ExplicitCamera->IsValid())
+		{
+			FVector Translation;
+			FVector RotationComponents;
+			const bool bHasTranslation = TryReadTriple(*ExplicitCamera, TEXT("translation"), Translation)
+				|| TryReadTriple(*ExplicitCamera, TEXT("location"), Translation);
+			const bool bHasRotation = TryReadTriple(*ExplicitCamera, TEXT("rotation"), RotationComponents);
+			if (bHasTranslation && bHasRotation)
+			{
+				(*ExplicitCamera)->TryGetNumberField(TEXT("fov"), FovValue);
+				OutLocation = Translation;
+				OutRotation = FRotator(RotationComponents.X, RotationComponents.Y, RotationComponents.Z);
+				OutFov = FMath::Clamp(static_cast<float>(FovValue), 5.0f, 170.0f);
+				CameraInfo->SetStringField(TEXT("source"), TEXT("explicit_world_camera"));
+				CameraInfo->SetNumberField(TEXT("camera_location_x"), OutLocation.X);
+				CameraInfo->SetNumberField(TEXT("camera_location_y"), OutLocation.Y);
+				CameraInfo->SetNumberField(TEXT("camera_location_z"), OutLocation.Z);
+				CameraInfo->SetNumberField(TEXT("camera_rotation_pitch"), OutRotation.Pitch);
+				CameraInfo->SetNumberField(TEXT("camera_rotation_yaw"), OutRotation.Yaw);
+				CameraInfo->SetNumberField(TEXT("camera_rotation_roll"), OutRotation.Roll);
+				CameraInfo->SetNumberField(TEXT("camera_fov"), OutFov);
+				return CameraInfo;
+			}
 		}
 
 		OutFov = FMath::Clamp(static_cast<float>(FovValue), 5.0f, 170.0f);
@@ -790,6 +898,7 @@
 		OutRotation = FRotationMatrix::MakeFromX(ViewDirection).Rotator();
 
 		CameraInfo->SetBoolField(TEXT("used_component_bounds"), bUsedComponentBounds);
+		CameraInfo->SetStringField(TEXT("source"), TEXT("component_bounds_derived"));
 		CameraInfo->SetNumberField(TEXT("bounds_origin_x"), BoundsOrigin.X);
 		CameraInfo->SetNumberField(TEXT("bounds_origin_y"), BoundsOrigin.Y);
 		CameraInfo->SetNumberField(TEXT("bounds_origin_z"), BoundsOrigin.Z);
@@ -1333,23 +1442,7 @@
 		return true;
 	}
 
-	struct FNiagaraSystemRefreshResult
-	{
-		bool bPerformed = false;
-		bool bSynchronizedOverviewGraph = false;
-		bool bRebuiltEmitterNodes = false;
-		bool bComputedExecutionOrder = false;
-		bool bInvalidatedCachedData = false;
-		bool bBroadcastPostEditChange = false;
-		bool bCreatedDataProcessingViewModel = false;
-		bool bHadExistingSystemViewModel = false;
-		bool bMarkedDirty = false;
-		int32 OverviewNodeCountBefore = INDEX_NONE;
-		int32 OverviewNodeCountAfter = INDEX_NONE;
-		int32 EmitterCount = 0;
-	};
-
-	static FNiagaraSystemRefreshResult RefreshNiagaraSystemAfterStructuralEdit(
+	FNiagaraSystemRefreshResult RefreshNiagaraSystemAfterStructuralEdit(
 		UNiagaraSystem& NiagaraSystem,
 		const bool bBroadcastPostEditChange,
 		const bool bMarkDirty)
@@ -1745,7 +1838,12 @@ PRAGMA_ENABLE_DEPRECATION_WARNINGS
 		return false;
 	}
 
-	static bool ResolveNiagaraScreenshotFrameSequence(const TSharedPtr<FJsonObject>& Params, TArray<FNiagaraScreenshotFrameRequest>& OutFrames, bool& bOutFrameSequenceRequested, FString& OutError)
+	static bool ResolveNiagaraScreenshotFrameSequence(
+		const TSharedPtr<FJsonObject>& Params,
+		TArray<FNiagaraScreenshotFrameRequest>& OutFrames,
+		bool& bOutFrameSequenceRequested,
+		FString& OutError,
+		const int32 MaxFrameCount = 120)
 	{
 		OutFrames.Reset();
 		bOutFrameSequenceRequested = false;
@@ -1776,7 +1874,7 @@ PRAGMA_ENABLE_DEPRECATION_WARNINGS
 		const TArray<TSharedPtr<FJsonValue>>* ExplicitFrames = nullptr;
 		if (Params->TryGetArrayField(TEXT("frames"), ExplicitFrames) && ExplicitFrames)
 		{
-			if (ExplicitFrames->Num() < 1 || ExplicitFrames->Num() > 120)
+			if (ExplicitFrames->Num() < 1 || ExplicitFrames->Num() > MaxFrameCount)
 			{
 				OutError = TEXT("invalid_frame_count");
 				return false;
@@ -1828,7 +1926,7 @@ PRAGMA_ENABLE_DEPRECATION_WARNINGS
 		double CountValue = 1.0;
 		TryGetNiagaraNumberAnyField(Params, { TEXT("count"), TEXT("frame_count"), TEXT("sample_count") }, CountValue);
 		const int32 RequestedCount = FMath::RoundToInt(CountValue);
-		if (RequestedCount < 1 || RequestedCount > 120)
+		if (RequestedCount < 1 || RequestedCount > MaxFrameCount)
 		{
 			OutError = TEXT("invalid_frame_count");
 			return false;

@@ -1,0 +1,72 @@
+authoring: { operation: validate, profile_ref: "contracts/field_contracts/metasound.hjson", state: defined, type_id: metasound }
+category: audio
+command: metasound_validate_folder
+deprecation: { reason: command_is_active, state: none }
+discovery: { aliases: [], keywords_en: [metasound, validate, folder, audio], keywords_zh: [metasound_validate_folder], summary_en: "Execute metasound_validate_folder with a verified implementation contract", summary_zh: "只读校验 folder", tags: [audio, p2-007] }
+errors: {
+  codes: [
+    { code: audio_authoring_profile_missing, description_zh: "C++ 实现返回错误码 audio_authoring_profile_missing", retry_safe: true, stage: preflight, wire_match: exact }
+  ]
+}
+evidence: {
+  docs: [
+    { path: "Plugins/UeAgentInterface/docs/commands/audio/metasound_validate_folder.md", purpose: "user documentation cross-check; C++ implementation remains authoritative" }
+  ]
+  implementation: [
+    { line_hint: 46, path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Commands/Audio/UeAgentHttpServer_AudioMetaSound.cpp", purpose: "command handler, parameter and return evidence", symbol: CmdMetaSoundValidateFolder }
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Commands/Audio/UeAgentAudioFolderCommandBridge.cpp", purpose: "transitive helper evidence used by the command handler" }
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Domains/Audio/Authoring/UeAgentAudioAuthoringApplyProvider.cpp", purpose: "transitive helper evidence used by the command handler" }
+  ]
+  tests: [
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterfaceTests/Private/Smoke/UeAgentInterfaceAudioSmokeTests.cpp", purpose: "smoke or negative-path evidence cross-checked for the verified contract" }
+  ]
+}
+execution: {
+  destructive: false
+  editor_state: required
+  game_thread: required
+  idempotent: true
+  kind: read_only
+  overwrite_behavior: none
+  pie_state: allowed
+  retry_safe: true
+  save_behavior: none
+  side_effects: []
+  ui_effect: none
+}
+maturity: verified
+params: {
+  constraints: []
+  fields: {
+    asset_path: { default_state: none, description_zh: "C++ 实现读取的 asset_path 参数", path_semantics: { access_scope: mounted_read, kind: ue_asset }, required: false, type: ue_asset_path }
+    folder_path: {
+      default_state: none
+      description_zh: "C++ 实现读取的 folder_path 参数"
+      path_semantics: { kind: filesystem_directory, must_exist: true, writable: false }
+      required: false
+      type: filesystem_path
+    }
+  }
+  state: defined
+}
+response: { artifact_fields: [planned], compact_fields: [status, asset_path, asset_exists, error_code, error_detail, no_op], failure_fields: [], max_items_policy: { fields: [], mode: none } }
+returns: {
+  fields: {
+    asset_exists: { description_zh: "C++ 实现返回的 asset_exists 字段；是否出现取决于执行分支", required: false, type: bool }
+    asset_path: { description_zh: "C++ 实现返回的 asset_path 字段；是否出现取决于执行分支", required: false, type: ue_asset_path }
+    error_code: { description_zh: "C++ 实现返回的 error_code 字段；是否出现取决于执行分支", required: false, type: string }
+    error_detail: { description_zh: "C++ 实现返回的 error_detail 字段；是否出现取决于执行分支", required: false, type: string }
+    no_op: { description_zh: "C++ 实现返回的 no_op 字段；是否出现取决于执行分支", required: false, type: bool }
+    planned: { description_zh: "C++ 实现返回的 planned 字段；是否出现取决于执行分支", required: false, type: json_value }
+    requested_operation: { description_zh: "C++ 实现返回的 requested_operation 字段；是否出现取决于执行分支", required: false, type: string }
+    status: { description_zh: "C++ 实现返回的 status 字段；是否出现取决于执行分支", required: false, type: string }
+    units_checked: { description_zh: "C++ 实现返回的 units_checked 字段；是否出现取决于执行分支", required: false, type: number }
+    would_create: { description_zh: "C++ 实现返回的 would_create 字段；是否出现取决于执行分支", required: false, type: bool }
+  }
+  state: defined
+}
+schema: uai.command_spec.v1
+status: active
+types: {}
+verification: { reason: read_only_command_has_no_post_write_verification, state: none }
+version: 1

@@ -1,0 +1,253 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "uai.historical_successor.v2",
+  "title": "UAI historical successor owner decision",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "owner_task_id",
+    "approval_authority",
+    "commands"
+  ],
+  "properties": {
+    "schema": {
+      "const": "uai.historical_successor.v2"
+    },
+    "owner_task_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "approval_authority": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "path",
+        "sha256"
+      ],
+      "properties": {
+        "path": {
+          "type": "string",
+          "minLength": 1
+        },
+        "sha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        }
+      }
+    },
+    "commands": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "$ref": "#/$defs/command"
+      }
+    }
+  },
+  "$defs": {
+    "nonEmptyString": {
+      "type": "string",
+      "minLength": 1
+    },
+    "commandIdList": {
+      "type": "array",
+      "minItems": 1,
+      "uniqueItems": true,
+      "items": {
+        "$ref": "#/$defs/nonEmptyString"
+      }
+    },
+    "semanticDimension": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "status",
+        "by",
+        "explanation"
+      ],
+      "properties": {
+        "status": {
+          "const": "covered"
+        },
+        "by": {
+          "$ref": "#/$defs/commandIdList"
+        },
+        "explanation": {
+          "$ref": "#/$defs/nonEmptyString"
+        }
+      }
+    },
+    "command": {
+      "type": "object",
+      "required": [
+        "historical_command_id",
+        "approval",
+        "historical_source",
+        "historical_contract",
+        "resolved_from_contract_id",
+        "successor",
+        "semantic_coverage",
+        "product_evidence",
+        "old_id_exit",
+        "final_lifecycle"
+      ],
+      "properties": {
+        "historical_command_id": {
+          "$ref": "#/$defs/nonEmptyString"
+        },
+        "approval": {
+          "$ref": "#/$defs/nonEmptyString"
+        },
+        "historical_source": {
+          "$ref": "#/$defs/nonEmptyString"
+        },
+        "historical_contract": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "inputs",
+            "outputs",
+            "purpose"
+          ],
+          "properties": {
+            "inputs": {
+              "$ref": "#/$defs/nonEmptyString"
+            },
+            "outputs": {
+              "$ref": "#/$defs/nonEmptyString"
+            },
+            "purpose": {
+              "$ref": "#/$defs/nonEmptyString"
+            }
+          }
+        },
+        "resolved_from_contract_id": {
+          "$ref": "#/$defs/nonEmptyString"
+        },
+        "successor": {
+          "oneOf": [
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "kind",
+                "command_ids"
+              ],
+              "properties": {
+                "kind": {
+                  "const": "exact_command_set"
+                },
+                "command_ids": {
+                  "$ref": "#/$defs/commandIdList"
+                }
+              }
+            },
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "kind",
+                "contract_id",
+                "representative_command_ids"
+              ],
+              "properties": {
+                "kind": {
+                  "const": "architecture_contract"
+                },
+                "contract_id": {
+                  "$ref": "#/$defs/nonEmptyString"
+                },
+                "representative_command_ids": {
+                  "$ref": "#/$defs/commandIdList"
+                }
+              }
+            }
+          ]
+        },
+        "routing": {
+          "type": "object"
+        },
+        "semantic_coverage": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "purpose",
+            "inputs",
+            "outputs"
+          ],
+          "properties": {
+            "purpose": {
+              "$ref": "#/$defs/semanticDimension"
+            },
+            "inputs": {
+              "$ref": "#/$defs/semanticDimension"
+            },
+            "outputs": {
+              "$ref": "#/$defs/semanticDimension"
+            }
+          }
+        },
+        "product_evidence": {
+          "type": "object",
+          "required": [
+            "test_id",
+            "public_command_ids",
+            "architecture_contract_ids",
+            "required_claims"
+          ],
+          "properties": {
+            "test_id": {
+              "$ref": "#/$defs/nonEmptyString"
+            },
+            "public_command_ids": {
+              "$ref": "#/$defs/commandIdList"
+            },
+            "architecture_contract_ids": {
+              "type": "array",
+              "minItems": 1,
+              "uniqueItems": true,
+              "items": {
+                "$ref": "#/$defs/nonEmptyString"
+              }
+            },
+            "required_claims": {
+              "type": "array",
+              "minItems": 1,
+              "uniqueItems": true,
+              "items": {
+                "$ref": "#/$defs/nonEmptyString"
+              }
+            }
+          }
+        },
+        "old_id_exit": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "public_executable",
+            "manifest_active",
+            "sdk_binding_active",
+            "compatibility_alias"
+          ],
+          "properties": {
+            "public_executable": {
+              "const": false
+            },
+            "manifest_active": {
+              "const": false
+            },
+            "sdk_binding_active": {
+              "const": false
+            },
+            "compatibility_alias": {
+              "const": false
+            }
+          }
+        },
+        "final_lifecycle": {
+          "$ref": "#/$defs/nonEmptyString"
+        }
+      }
+    }
+  }
+}

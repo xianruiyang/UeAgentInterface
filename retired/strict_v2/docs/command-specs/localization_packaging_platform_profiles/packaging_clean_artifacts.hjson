@@ -1,0 +1,79 @@
+authoring: { reason: command_has_no_registered_folder_authoring_profile, state: none }
+category: localization_packaging_platform_profiles
+command: packaging_clean_artifacts
+deprecation: { reason: command_is_active, state: none }
+discovery: { aliases: [], keywords_en: [packaging, clean, artifacts, localization_packaging_platform_profiles], keywords_zh: [packaging_clean_artifacts], summary_en: "Execute packaging_clean_artifacts with a verified implementation contract", summary_zh: "清理 Project/Saved 下 UAI 托管打包输出", tags: [localization_packaging_platform_profiles, p2-002] }
+errors: {
+  codes: [
+    { code: archive_dir_not_uai_owned, description_zh: "C++ 实现返回错误码 archive_dir_not_uai_owned", retry_safe: false, stage: execution, wire_match: exact }
+    { code: delete_directory_failed, description_zh: "C++ 实现返回错误码 delete_directory_failed", retry_safe: false, stage: execution, wire_match: exact }
+    { code: max_delete_bytes_exceeded, description_zh: "C++ 实现返回错误码 max_delete_bytes_exceeded", retry_safe: false, stage: execution, wire_match: exact }
+    { code: max_delete_bytes_invalid, description_zh: "C++ 实现返回错误码 max_delete_bytes_invalid", retry_safe: true, stage: preflight, wire_match: exact }
+    { code: packaging_task_active, description_zh: "C++ 实现返回错误码 packaging_task_active", retry_safe: false, stage: execution, wire_match: exact }
+    { code: requires_delete_permission, description_zh: "C++ 实现返回错误码 requires_delete_permission", retry_safe: false, stage: execution, wire_match: exact }
+  ]
+}
+evidence: {
+  docs: [
+    { path: "Plugins/UeAgentInterface/docs/commands/localization_packaging_platform_profiles/packaging_clean_artifacts.md", purpose: "user documentation cross-check; C++ implementation remains authoritative" }
+  ]
+  implementation: [
+    { line_hint: 3473, path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Commands/ProductionPipeline/UeAgentHttpServer_ProductionPipeline.cpp", purpose: "command handler, parameter and return evidence", symbol: CmdPackagingCleanArtifacts }
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Server/UeAgentHttpServer.cpp", purpose: "transitive helper evidence used by the command handler" }
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Utilities/UeAgentJsonDiagnostics.cpp", purpose: "transitive helper evidence used by the command handler" }
+  ]
+  tests: [
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterfaceTests/Private/Smoke/ProductionPipeline/UeAgentInterfaceProductionPipelineSmokeTests.cpp", purpose: "smoke or negative-path evidence cross-checked for the verified contract" }
+  ]
+}
+execution: {
+  destructive: true
+  editor_state: required
+  game_thread: required
+  idempotent: false
+  kind: destructive_write
+  overwrite_behavior: external_files
+  pie_state: allowed
+  retry_safe: false
+  save_behavior: none
+  side_effects: [writes_files, deletes_owned_files]
+  ui_effect: none
+}
+maturity: verified
+params: {
+  constraints: []
+  fields: {
+    allow_delete: { default: false, default_state: defined, description_zh: "C++ 实现读取的 allow_delete 参数", required: false, type: bool }
+    archive_dir: { default_state: none, description_zh: "C++ 实现读取的 archive_dir 参数", required: false, type: string }
+    dry_run: { default: true, default_state: defined, description_zh: "C++ 实现读取的 dry_run 参数", required: false, type: bool }
+    max_delete_bytes: { default_state: none, description_zh: "C++ 实现读取的 max_delete_bytes 参数", required: false, type: number }
+  }
+  state: defined
+}
+response: { artifact_fields: [], compact_fields: [active_task_id, allow_delete, deleted, dry_run, freed_bytes, schema], failure_fields: [], max_items_policy: { fields: [], mode: none } }
+returns: {
+  fields: {
+    active_task_id: { description_zh: "C++ 实现返回的 active_task_id 字段；是否出现取决于执行分支", required: false, type: string }
+    allow_delete: { description_zh: "C++ 实现返回的 allow_delete 字段；是否出现取决于执行分支", required: false, type: bool }
+    deleted: { description_zh: "C++ 实现返回的 deleted 字段；是否出现取决于执行分支", item_type: json_value, required: false, type: array }
+    dry_run: { description_zh: "C++ 实现返回的 dry_run 字段；是否出现取决于执行分支", required: false, type: bool }
+    freed_bytes: { description_zh: "C++ 实现返回的 freed_bytes 字段；是否出现取决于执行分支", required: false, type: number }
+    schema: { description_zh: "C++ 实现返回的 schema 字段；是否出现取决于执行分支", required: false, type: string }
+  }
+  state: defined
+}
+schema: uai.command_spec.v1
+status: active
+types: {}
+verification: {
+  assertions: [
+    { id: result_present, operator: exists, source: returns.active_task_id }
+  ]
+  failure_policy: fail_overall
+  methods: [
+    { id: result, kind: result_assertion }
+  ]
+  required: true
+  state: defined
+}
+version: 1

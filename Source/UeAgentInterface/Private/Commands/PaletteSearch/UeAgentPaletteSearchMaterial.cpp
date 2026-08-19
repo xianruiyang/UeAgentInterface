@@ -2,9 +2,7 @@
 
 #include "Commands/PaletteSearch/UeAgentPaletteSearchTypes.h"
 
-#include "Commands/PaletteSearch/UeAgentPaletteSearchAuthoring.h"
 #include "Commands/PaletteSearch/UeAgentPaletteSearchNaming.h"
-#include "Dom/JsonObject.h"
 #include "EdGraph/EdGraph.h"
 #include "EdGraph/EdGraphNode.h"
 #include "EdGraph/EdGraphPin.h"
@@ -18,7 +16,6 @@
 #include "Materials/Material.h"
 #include "Materials/MaterialExpression.h"
 #include "Materials/MaterialExpressionFunctionOutput.h"
-#include "Materials/MaterialExpressionMaterialFunctionCall.h"
 #include "Materials/MaterialFunction.h"
 
 namespace UeAgentPaletteSearch
@@ -255,29 +252,6 @@ namespace
 		return CatalogType.Equals(TEXT("material_node")) || CatalogType.Equals(TEXT("material_function")) || CatalogType.Equals(TEXT("material_function_call"));
 	}
 
-	static TSharedRef<FJsonObject> BuildExpressionLegacyAuthoring(UClass* ExpressionClass)
-	{
-		TSharedRef<FJsonObject> Obj = MakeShared<FJsonObject>();
-		Obj->SetStringField(TEXT("operation"), TEXT("add_material_expression"));
-		Obj->SetStringField(TEXT("expression_class"), ExpressionClass ? ExpressionClass->GetPathName() : FString());
-		Obj->SetNumberField(TEXT("node_pos_x"), 0);
-		Obj->SetNumberField(TEXT("node_pos_y"), 0);
-		return Obj;
-	}
-
-	static TSharedRef<FJsonObject> BuildFunctionLegacyAuthoring(const FString& FunctionPath)
-	{
-		TSharedRef<FJsonObject> Obj = MakeShared<FJsonObject>();
-		Obj->SetStringField(TEXT("operation"), TEXT("add_material_function_call"));
-		Obj->SetStringField(TEXT("expression_class"), UMaterialExpressionMaterialFunctionCall::StaticClass()->GetPathName());
-		Obj->SetStringField(TEXT("material_function"), FunctionPath);
-		Obj->SetStringField(TEXT("post_create_property"), TEXT("MaterialFunction"));
-		Obj->SetStringField(TEXT("post_create_value_text"), FunctionPath);
-		Obj->SetNumberField(TEXT("node_pos_x"), 0);
-		Obj->SetNumberField(TEXT("node_pos_y"), 0);
-		return Obj;
-	}
-
 	static FString BuildActionCategoryPath(const FString& RootCategory, const FEdGraphSchemaAction& Action)
 	{
 		const FString Category = Action.GetCategory().ToString().TrimStartAndEnd();
@@ -313,9 +287,6 @@ namespace
 			Candidate.Kind = TEXT("material_expression");
 			Candidate.Name = MenuNameFromText(Action->GetMenuDescription(), ExpressionClass->GetName());
 			Candidate.FullName = ExpressionClass->GetPathName();
-			Candidate.CandidateId = Candidate.Kind + TEXT(":") + Candidate.FullName;
-			Candidate.StableId = ExpressionClass->GetPathName();
-			Candidate.CanonicalKey = ExpressionClass->GetName();
 			Candidate.DisplayName = Candidate.Name;
 			Candidate.Tooltip = Action->GetTooltipDescription().ToString();
 			Candidate.Keywords = Action->GetKeywords().ToString();
@@ -325,13 +296,14 @@ namespace
 			Candidate.SourceOrigin = ExpressionClass->GetOutermost()->GetName().StartsWith(TEXT("/Script/")) ? TEXT("engine") : TEXT("project");
 			Candidate.SourceLabel = ExpressionClass->GetOutermost()->GetName();
 			Candidate.ObjectPath = ExpressionClass->GetPathName();
+			Candidate.AuthoringSelectors.Add(TEXT("path"), ExpressionClass->GetPathName());
 			Candidate.WriteSupport = TEXT("material_expression_graph_json");
-			Candidate.SupportReason = TEXT("Can be written with expression_class via material_add_expression or material folder JSON.");
+			Candidate.SupportReason = TEXT("Use expression_class as the item candidate in the Material graph authoring surface.");
 			Candidate.bInLibrary = true;
 			Candidate.bSupportedInContext = true;
 			Candidate.UiOrder = UiOrder;
-			Candidate.JsonAuthoring = BuildJsonAuthoringPatch(Candidate);
-			Candidate.LegacyAuthoring = BuildExpressionLegacyAuthoring(ExpressionClass);
+			FString IdentityError;
+			ensureAlwaysMsgf(SetCandidateIdentity(Params.CatalogType, ExpressionClass->GetPathName(), ExpressionClass->GetName(), Candidate, IdentityError), TEXT("Material catalog identity failed: %s"), *IdentityError);
 			OutCandidates.Add(MoveTemp(Candidate));
 			return;
 		}
@@ -354,9 +326,6 @@ namespace
 			Candidate.Kind = TEXT("material_function_call");
 			Candidate.Name = MenuNameFromText(Action->GetMenuDescription(), FunctionPath);
 			Candidate.FullName = FunctionPath;
-			Candidate.CandidateId = Candidate.Kind + TEXT(":") + Candidate.FullName;
-			Candidate.StableId = FunctionPath;
-			Candidate.CanonicalKey = FunctionPath;
 			Candidate.DisplayName = Candidate.Name;
 			Candidate.Tooltip = Action->GetTooltipDescription().ToString();
 			Candidate.CategoryPath = BuildActionCategoryPath(TEXT("Functions"), *Action);
@@ -366,13 +335,14 @@ namespace
 			Candidate.SourceLabel = FunctionPath;
 			Candidate.PackagePath = FunctionPath;
 			Candidate.ObjectPath = FunctionPath;
+			Candidate.AuthoringSelectors.Add(TEXT("path"), FunctionPath);
 			Candidate.WriteSupport = TEXT("material_expression_graph_json");
 			Candidate.SupportReason = TEXT("Create MaterialExpressionMaterialFunctionCall, then set MaterialFunction to this function path.");
 			Candidate.bInLibrary = true;
 			Candidate.bSupportedInContext = true;
 			Candidate.UiOrder = UiOrder;
-			Candidate.JsonAuthoring = BuildJsonAuthoringPatch(Candidate);
-			Candidate.LegacyAuthoring = BuildFunctionLegacyAuthoring(FunctionPath);
+			FString IdentityError;
+			ensureAlwaysMsgf(SetCandidateIdentity(Params.CatalogType, FunctionPath, FunctionPath, Candidate, IdentityError), TEXT("Material catalog identity failed: %s"), *IdentityError);
 			OutCandidates.Add(MoveTemp(Candidate));
 		}
 	}

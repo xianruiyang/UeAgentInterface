@@ -1,5 +1,8 @@
 #include "Server/UeAgentHttpServer.h"
 
+#include "Commands/Assets/UeAgentReflectionAuthoringCommandBridge.h"
+#include "Utilities/UeAgentAuthoringFolderIO.h"
+
 #include "UeAgentHttpServer_AIOps.h"
 
 #include "Commands/UeAgentGraphViewUtils.h"
@@ -88,15 +91,7 @@ namespace UeAgentAIOps
 		Obj->SetNumberField(TEXT("expression_indent"), Node.ExpressionIndent);
 		Obj->SetStringField(TEXT("expression_operand"), EnumToString(Node.ExpressionOperand));
 		const FString NodeId = Node.ID.IsValid() ? Node.ID.ToString(EGuidFormats::DigitsWithHyphens) : Node.GetName().ToString();
-		UeAgentAuthoringJson::ApplyAuthoringMetadata(
-			Obj,
-			TEXT("id"),
-			NodeId,
-			Node.GetName().ToString(),
-			TEXT("AI|StateTree|Nodes"),
-			TEXT("node"),
-			TEXT("state_tree_node"),
-			{ TEXT("set"), TEXT("remove") });
+		UeAgentAuthoringJson::ApplyAuthoringMetadata(Obj, TEXT("id"), NodeId, Node.GetName().ToString(), TEXT("AI|StateTree|Nodes"), TEXT("state_tree_node"));
 		if (DetailsEntryDirectory && OutError && OutError->IsEmpty() && Node.InstanceObject)
 		{
 			ExportFolderOwnerDetails(
@@ -128,15 +123,7 @@ namespace UeAgentAIOps
 		Obj->SetBoolField(TEXT("delay_enabled"), Transition.bDelayTransition);
 		Obj->SetNumberField(TEXT("delay_duration"), Transition.DelayDuration);
 		Obj->SetNumberField(TEXT("delay_random_variance"), Transition.DelayRandomVariance);
-		UeAgentAuthoringJson::ApplyAuthoringMetadata(
-			Obj,
-			TEXT("id"),
-			Transition.ID.IsValid() ? Transition.ID.ToString(EGuidFormats::DigitsWithHyphens) : FString(),
-			TEXT("Transition"),
-			TEXT("AI|StateTree|Transitions"),
-			TEXT("transition"),
-			TEXT("state_tree_transition"),
-			{ TEXT("set"), TEXT("remove") });
+		UeAgentAuthoringJson::ApplyAuthoringMetadata(Obj, TEXT("id"), Transition.ID.IsValid() ? Transition.ID.ToString(EGuidFormats::DigitsWithHyphens) : FString(), TEXT("Transition"), TEXT("AI|StateTree|Transitions"), TEXT("state_tree_transition"));
 		TArray<TSharedPtr<FJsonValue>> Conditions;
 		for (const FStateTreeEditorNode& Condition : Transition.Conditions)
 		{
@@ -164,15 +151,7 @@ namespace UeAgentAIOps
 		Obj->SetStringField(TEXT("tasks_completion"), EnumToString(State->TasksCompletion));
 		Obj->SetBoolField(TEXT("enabled"), State->bEnabled);
 		Obj->SetStringField(TEXT("tag"), State->Tag.IsValid() ? State->Tag.ToString() : FString());
-		UeAgentAuthoringJson::ApplyAuthoringMetadata(
-			Obj,
-			TEXT("id"),
-			StateId,
-			State->Name.ToString(),
-			TEXT("AI|StateTree|States"),
-			TEXT("state"),
-			TEXT("state_tree_state"),
-			{ TEXT("set"), TEXT("remove") });
+		UeAgentAuthoringJson::ApplyAuthoringMetadata(Obj, TEXT("id"), StateId, State->Name.ToString(), TEXT("AI|StateTree|States"), TEXT("state_tree_state"));
 		if (DetailsEntryDirectory && OutError && OutError->IsEmpty())
 		{
 			ExportFolderOwnerDetails(
@@ -342,12 +321,12 @@ namespace UeAgentAIOps
 	{
 		if (!AssetJson.IsValid())
 		{
-			AddIssue(Issues, TEXT("missing_required_file"), TEXT("Missing asset.json."), TEXT("asset.json"));
+			AddIssue(Issues, TEXT("missing_required_file"), TEXT("Missing asset.hjson."), TEXT("asset.hjson"));
 		}
 		const TArray<TSharedPtr<FJsonValue>>* States = nullptr;
 		if (!StatesJson.IsValid() || !StatesJson->TryGetArrayField(TEXT("states"), States) || !States)
 		{
-			AddIssue(Issues, TEXT("missing_required_field"), TEXT("Missing states array."), TEXT("states.json.states"));
+			AddIssue(Issues, TEXT("missing_required_field"), TEXT("Missing states array."), TEXT("states.hjson.states"));
 			return false;
 		}
 		TSet<FString> Ids;
@@ -356,7 +335,7 @@ namespace UeAgentAIOps
 			const TSharedPtr<FJsonObject>* StateObjPtr = nullptr;
 			if (!(*States)[Index].IsValid() || !(*States)[Index]->TryGetObject(StateObjPtr) || !StateObjPtr || !StateObjPtr->IsValid())
 			{
-				AddIssue(Issues, TEXT("invalid_state_item"), TEXT("State item must be an object."), FString::Printf(TEXT("states.json.states[%d]"), Index));
+				AddIssue(Issues, TEXT("invalid_state_item"), TEXT("State item must be an object."), FString::Printf(TEXT("states.hjson.states[%d]"), Index));
 				continue;
 			}
 			FString Id;
@@ -365,16 +344,16 @@ namespace UeAgentAIOps
 			(*StateObjPtr)->TryGetStringField(TEXT("name"), Name);
 			if (Id.IsEmpty())
 			{
-				AddIssue(Issues, TEXT("missing_required_field"), TEXT("Missing state id."), FString::Printf(TEXT("states.json.states[%d].id"), Index));
+				AddIssue(Issues, TEXT("missing_required_field"), TEXT("Missing state id."), FString::Printf(TEXT("states.hjson.states[%d].id"), Index));
 			}
 			else if (Ids.Contains(Id))
 			{
-				AddIssue(Issues, TEXT("duplicate_id"), FString::Printf(TEXT("Duplicate state id '%s'."), *Id), FString::Printf(TEXT("states.json.states[%d].id"), Index));
+				AddIssue(Issues, TEXT("duplicate_id"), FString::Printf(TEXT("Duplicate state id '%s'."), *Id), FString::Printf(TEXT("states.hjson.states[%d].id"), Index));
 			}
 			Ids.Add(Id);
 			if (Name.IsEmpty())
 			{
-				AddIssue(Issues, TEXT("missing_required_field"), TEXT("Missing state name."), FString::Printf(TEXT("states.json.states[%d].name"), Index));
+				AddIssue(Issues, TEXT("missing_required_field"), TEXT("Missing state name."), FString::Printf(TEXT("states.hjson.states[%d].name"), Index));
 			}
 		}
 		return Issues.Num() == 0;
@@ -485,15 +464,7 @@ namespace UeAgentAIOps
 				OptionObj->SetStringField(TEXT("id"), OptionId);
 				OptionObj->SetStringField(TEXT("generator_class"), (Option && Option->Generator) ? Option->Generator->GetClass()->GetPathName() : FString());
 				OptionObj->SetStringField(TEXT("generator_name"), (Option && Option->Generator) ? Option->Generator->GetName() : FString());
-				UeAgentAuthoringJson::ApplyAuthoringMetadata(
-					OptionObj,
-					TEXT("id"),
-					FString::Printf(TEXT("option_%d"), OptionIndex),
-					(Option && Option->Generator) ? Option->Generator->GetName() : FString::Printf(TEXT("Option %d"), OptionIndex),
-					TEXT("AI|EQS|Options"),
-					TEXT("option"),
-					TEXT("eqs_option"),
-					{ TEXT("set"), TEXT("remove") });
+				UeAgentAuthoringJson::ApplyAuthoringMetadata(OptionObj, TEXT("id"), FString::Printf(TEXT("option_%d"), OptionIndex), (Option && Option->Generator) ? Option->Generator->GetName() : FString::Printf(TEXT("Option %d"), OptionIndex), TEXT("AI|EQS|Options"), TEXT("eqs_option"));
 				if (DetailsEntryDirectory && OutError && OutError->IsEmpty() && Option && Option->Generator)
 				{
 					ExportFolderOwnerDetails(
@@ -517,15 +488,7 @@ namespace UeAgentAIOps
 						TestObj->SetStringField(TEXT("id"), TestId);
 						TestObj->SetStringField(TEXT("class"), Test ? Test->GetClass()->GetPathName() : FString());
 						TestObj->SetStringField(TEXT("name"), Test ? Test->GetName() : FString());
-						UeAgentAuthoringJson::ApplyAuthoringMetadata(
-							TestObj,
-							TEXT("id"),
-							FString::Printf(TEXT("test_%d"), TestIndex),
-							Test ? Test->GetName() : FString::Printf(TEXT("Test %d"), TestIndex),
-							TEXT("AI|EQS|Tests"),
-							TEXT("test"),
-							TEXT("eqs_test"),
-							{ TEXT("set"), TEXT("remove") });
+						UeAgentAuthoringJson::ApplyAuthoringMetadata(TestObj, TEXT("id"), FString::Printf(TEXT("test_%d"), TestIndex), Test ? Test->GetName() : FString::Printf(TEXT("Test %d"), TestIndex), TEXT("AI|EQS|Tests"), TEXT("eqs_test"));
 						if (DetailsEntryDirectory && OutError && OutError->IsEmpty() && Test)
 						{
 							ExportFolderOwnerDetails(
@@ -554,12 +517,12 @@ namespace UeAgentAIOps
 	{
 		if (!AssetJson.IsValid())
 		{
-			AddIssue(Issues, TEXT("missing_required_file"), TEXT("Missing asset.json."), TEXT("asset.json"));
+			AddIssue(Issues, TEXT("missing_required_file"), TEXT("Missing asset.hjson."), TEXT("asset.hjson"));
 		}
 		const TArray<TSharedPtr<FJsonValue>>* Options = nullptr;
 		if (!OptionsJson.IsValid() || !OptionsJson->TryGetArrayField(TEXT("options"), Options) || !Options)
 		{
-			AddIssue(Issues, TEXT("missing_required_field"), TEXT("Missing options array."), TEXT("options.json.options"));
+			AddIssue(Issues, TEXT("missing_required_field"), TEXT("Missing options array."), TEXT("options.hjson.options"));
 			return false;
 		}
 		for (int32 Index = 0; Index < Options->Num(); ++Index)
@@ -567,7 +530,7 @@ namespace UeAgentAIOps
 			const TSharedPtr<FJsonObject>* OptionObjPtr = nullptr;
 			if (!(*Options)[Index].IsValid() || !(*Options)[Index]->TryGetObject(OptionObjPtr) || !OptionObjPtr || !OptionObjPtr->IsValid())
 			{
-				AddIssue(Issues, TEXT("invalid_option_item"), TEXT("Option item must be an object."), FString::Printf(TEXT("options.json.options[%d]"), Index));
+				AddIssue(Issues, TEXT("invalid_option_item"), TEXT("Option item must be an object."), FString::Printf(TEXT("options.hjson.options[%d]"), Index));
 				continue;
 			}
 			FString GeneratorClass;
@@ -577,7 +540,7 @@ namespace UeAgentAIOps
 				UClass* Class = ResolveClass(GeneratorClass);
 				if (!Class || !Class->IsChildOf(UEnvQueryGenerator::StaticClass()))
 				{
-					AddIssue(Issues, TEXT("eqs_generator_class_not_found"), FString::Printf(TEXT("Invalid EQS generator '%s'."), *GeneratorClass), FString::Printf(TEXT("options.json.options[%d].generator_class"), Index));
+					AddIssue(Issues, TEXT("eqs_generator_class_not_found"), FString::Printf(TEXT("Invalid EQS generator '%s'."), *GeneratorClass), FString::Printf(TEXT("options.hjson.options[%d].generator_class"), Index));
 				}
 			}
 			const TArray<TSharedPtr<FJsonValue>>* Tests = nullptr;
@@ -588,7 +551,7 @@ namespace UeAgentAIOps
 					const TSharedPtr<FJsonObject>* TestObjPtr = nullptr;
 					if (!(*Tests)[TestIndex].IsValid() || !(*Tests)[TestIndex]->TryGetObject(TestObjPtr) || !TestObjPtr || !TestObjPtr->IsValid())
 					{
-						AddIssue(Issues, TEXT("invalid_test_item"), TEXT("Test item must be an object."), FString::Printf(TEXT("options.json.options[%d].tests[%d]"), Index, TestIndex));
+						AddIssue(Issues, TEXT("invalid_test_item"), TEXT("Test item must be an object."), FString::Printf(TEXT("options.hjson.options[%d].tests[%d]"), Index, TestIndex));
 						continue;
 					}
 					FString TestClass;
@@ -598,7 +561,7 @@ namespace UeAgentAIOps
 						UClass* Class = ResolveClass(TestClass);
 						if (!Class || !Class->IsChildOf(UEnvQueryTest::StaticClass()))
 						{
-							AddIssue(Issues, TEXT("eqs_test_class_not_found"), FString::Printf(TEXT("Invalid EQS test '%s'."), *TestClass), FString::Printf(TEXT("options.json.options[%d].tests[%d].class"), Index, TestIndex));
+							AddIssue(Issues, TEXT("eqs_test_class_not_found"), FString::Printf(TEXT("Invalid EQS test '%s'."), *TestClass), FString::Printf(TEXT("options.hjson.options[%d].tests[%d].class"), Index, TestIndex));
 						}
 					}
 				}
@@ -637,15 +600,7 @@ namespace UeAgentAIOps
 			BehaviorObj->SetStringField(TEXT("id"), Id);
 			BehaviorObj->SetStringField(TEXT("class"), Behavior ? Behavior->GetClass()->GetPathName() : FString());
 			BehaviorObj->SetStringField(TEXT("name"), Behavior ? Behavior->GetName() : FString());
-			UeAgentAuthoringJson::ApplyAuthoringMetadata(
-				BehaviorObj,
-				TEXT("id"),
-				Id,
-				Behavior ? Behavior->GetName() : Id,
-				TEXT("AI|Smart Object|Behavior Definitions"),
-				TEXT("asset_picker"),
-				TEXT("smart_object_behavior_definition"),
-				{ TEXT("set"), TEXT("remove") });
+			UeAgentAuthoringJson::ApplyAuthoringMetadata(BehaviorObj, TEXT("id"), Id, Behavior ? Behavior->GetName() : Id, TEXT("AI|Smart Object|Behavior Definitions"), TEXT("smart_object_behavior_definition"));
 			if (DetailsEntryDirectory && OutError && OutError->IsEmpty() && Behavior)
 			{
 				ExportFolderOwnerDetails(
@@ -704,15 +659,7 @@ namespace UeAgentAIOps
 #else
 					FString::Printf(TEXT("Slot %d"), Index);
 #endif
-				UeAgentAuthoringJson::ApplyAuthoringMetadata(
-					SlotObj,
-					TEXT("id"),
-					FString::Printf(TEXT("slot_%d"), Index),
-					SlotDisplayName,
-					TEXT("AI|Smart Object|Slots"),
-					TEXT("transform"),
-					TEXT("smart_object_slot"),
-					{ TEXT("set"), TEXT("remove") });
+				UeAgentAuthoringJson::ApplyAuthoringMetadata(SlotObj, TEXT("id"), FString::Printf(TEXT("slot_%d"), Index), SlotDisplayName, TEXT("AI|Smart Object|Slots"), TEXT("smart_object_slot"));
 				TArray<TSharedPtr<FJsonValue>> Behaviors;
 				for (int32 BehaviorIndex = 0; BehaviorIndex < Slot.BehaviorDefinitions.Num(); ++BehaviorIndex)
 				{
@@ -1037,18 +984,18 @@ namespace UeAgentAIOps
 		BlackboardJson->SetStringField(TEXT("profile"), BehaviorTreeProfile);
 		BlackboardJson->SetNumberField(TEXT("schema_version"), 1);
 		BlackboardJson->SetStringField(TEXT("blackboard_asset"), Tree->BlackboardAsset ? Tree->BlackboardAsset->GetPathName() : FString());
-		if (!SaveTrackedFolderJson(FolderPath, TEXT("asset.json"), MakeBTAssetJson(Tree), WrittenFiles, OutError)) return false;
-		if (!SaveTrackedFolderJson(FolderPath, TEXT("blackboard.json"), BlackboardJson, WrittenFiles, OutError)) return false;
-		if (!SaveTrackedFolderJson(FolderPath, TEXT("tree.json"), TreeJson, WrittenFiles, OutError)) return false;
-		if (!SaveTrackedFolderJson(FolderPath, TEXT("nodes.json"), NodesJson, WrittenFiles, OutError)) return false;
-		if (!SaveTrackedFolderJson(FolderPath, TEXT("decorators.json"), MakeShared<FJsonObject>(), WrittenFiles, OutError)) return false;
-		if (!SaveTrackedFolderJson(FolderPath, TEXT("services.json"), MakeShared<FJsonObject>(), WrittenFiles, OutError)) return false;
-		if (!SaveTrackedFolderJson(FolderPath, TEXT("layout.json"), MakeShared<FJsonObject>(), WrittenFiles, OutError)) return false;
+		if (!SaveTrackedFolderAuthoringFile(FolderPath, TEXT("asset.hjson"), MakeBTAssetJson(Tree), WrittenFiles, OutError)) return false;
+		if (!SaveTrackedFolderAuthoringFile(FolderPath, TEXT("blackboard.hjson"), BlackboardJson, WrittenFiles, OutError)) return false;
+		if (!SaveTrackedFolderAuthoringFile(FolderPath, TEXT("tree.hjson"), TreeJson, WrittenFiles, OutError)) return false;
+		if (!SaveTrackedFolderAuthoringFile(FolderPath, TEXT("nodes.hjson"), NodesJson, WrittenFiles, OutError)) return false;
+		if (!SaveTrackedFolderAuthoringFile(FolderPath, TEXT("decorators.hjson"), MakeShared<FJsonObject>(), WrittenFiles, OutError)) return false;
+		if (!SaveTrackedFolderAuthoringFile(FolderPath, TEXT("services.hjson"), MakeShared<FJsonObject>(), WrittenFiles, OutError)) return false;
+		if (!SaveTrackedFolderAuthoringFile(FolderPath, TEXT("layout.hjson"), MakeShared<FJsonObject>(), WrittenFiles, OutError)) return false;
 		IFileManager::Get().MakeDirectory(*FPaths::Combine(FolderPath, TEXT("validation")), true);
 		TArray<TSharedPtr<FJsonValue>> Issues;
 		ValidateBTFolderJson(MakeBTAssetJson(Tree), NodesJson, Issues);
-		if (!SaveTrackedFolderJson(FolderPath, TEXT("validation/checks.json"), MakeValidationChecks(Issues), WrittenFiles, OutError)) return false;
-		if (!SaveTrackedFolderJson(FolderPath, TEXT("validation/coverage_report.json"), MakeCoverageReport(), WrittenFiles, OutError)) return false;
+		if (!SaveTrackedFolderAuthoringFile(FolderPath, TEXT("validation/checks.hjson"), MakeValidationChecks(Issues), WrittenFiles, OutError)) return false;
+		if (!SaveTrackedFolderAuthoringFile(FolderPath, TEXT("validation/coverage_report.hjson"), MakeCoverageReport(), WrittenFiles, OutError)) return false;
 		return true;
 	}
 
@@ -1079,23 +1026,23 @@ namespace UeAgentAIOps
 		TSharedPtr<FJsonObject> BindingsJson;
 		TSharedPtr<FJsonObject> GlobalTasksJson;
 		BuildStateTreeSplitJson(Exported, SchemaJson, ParametersJson, TransitionsJson, TasksJson, ConditionsJson, EvaluatorsJson, BindingsJson, GlobalTasksJson);
-		if (!SaveTrackedFolderJson(FolderPath, TEXT("asset.json"), AssetJson, WrittenFiles, OutError)) return false;
-		if (!SaveTrackedFolderJson(FolderPath, TEXT("schema.json"), SchemaJson, WrittenFiles, OutError)) return false;
-		if (!SaveTrackedFolderJson(FolderPath, TEXT("parameters.json"), ParametersJson, WrittenFiles, OutError)) return false;
-		if (!SaveTrackedFolderJson(FolderPath, TEXT("states.json"), StatesJson, WrittenFiles, OutError)) return false;
-		if (!SaveTrackedFolderJson(FolderPath, TEXT("transitions.json"), TransitionsJson, WrittenFiles, OutError)) return false;
-		if (!SaveTrackedFolderJson(FolderPath, TEXT("tasks.json"), TasksJson, WrittenFiles, OutError)) return false;
-		if (!SaveTrackedFolderJson(FolderPath, TEXT("conditions.json"), ConditionsJson, WrittenFiles, OutError)) return false;
-		if (!SaveTrackedFolderJson(FolderPath, TEXT("evaluators.json"), EvaluatorsJson, WrittenFiles, OutError)) return false;
-		if (!SaveTrackedFolderJson(FolderPath, TEXT("bindings.json"), BindingsJson, WrittenFiles, OutError)) return false;
-		if (!SaveTrackedFolderJson(FolderPath, TEXT("global_tasks.json"), GlobalTasksJson, WrittenFiles, OutError)) return false;
-		if (!SaveTrackedFolderJson(FolderPath, TEXT("property_bag.json"), MakeShared<FJsonObject>(), WrittenFiles, OutError)) return false;
-		if (!SaveTrackedFolderJson(FolderPath, TEXT("graph_layout.json"), MakeShared<FJsonObject>(), WrittenFiles, OutError)) return false;
+		if (!SaveTrackedFolderAuthoringFile(FolderPath, TEXT("asset.hjson"), AssetJson, WrittenFiles, OutError)) return false;
+		if (!SaveTrackedFolderAuthoringFile(FolderPath, TEXT("schema.hjson"), SchemaJson, WrittenFiles, OutError)) return false;
+		if (!SaveTrackedFolderAuthoringFile(FolderPath, TEXT("parameters.hjson"), ParametersJson, WrittenFiles, OutError)) return false;
+		if (!SaveTrackedFolderAuthoringFile(FolderPath, TEXT("states.hjson"), StatesJson, WrittenFiles, OutError)) return false;
+		if (!SaveTrackedFolderAuthoringFile(FolderPath, TEXT("transitions.hjson"), TransitionsJson, WrittenFiles, OutError)) return false;
+		if (!SaveTrackedFolderAuthoringFile(FolderPath, TEXT("tasks.hjson"), TasksJson, WrittenFiles, OutError)) return false;
+		if (!SaveTrackedFolderAuthoringFile(FolderPath, TEXT("conditions.hjson"), ConditionsJson, WrittenFiles, OutError)) return false;
+		if (!SaveTrackedFolderAuthoringFile(FolderPath, TEXT("evaluators.hjson"), EvaluatorsJson, WrittenFiles, OutError)) return false;
+		if (!SaveTrackedFolderAuthoringFile(FolderPath, TEXT("bindings.hjson"), BindingsJson, WrittenFiles, OutError)) return false;
+		if (!SaveTrackedFolderAuthoringFile(FolderPath, TEXT("global_tasks.hjson"), GlobalTasksJson, WrittenFiles, OutError)) return false;
+		if (!SaveTrackedFolderAuthoringFile(FolderPath, TEXT("property_bag.hjson"), MakeShared<FJsonObject>(), WrittenFiles, OutError)) return false;
+		if (!SaveTrackedFolderAuthoringFile(FolderPath, TEXT("graph_layout.hjson"), MakeShared<FJsonObject>(), WrittenFiles, OutError)) return false;
 		IFileManager::Get().MakeDirectory(*FPaths::Combine(FolderPath, TEXT("validation")), true);
 		TArray<TSharedPtr<FJsonValue>> Issues;
 		ValidateStateTreeFolderJson(AssetJson, StatesJson, Issues);
-		if (!SaveTrackedFolderJson(FolderPath, TEXT("validation/checks.json"), MakeValidationChecks(Issues), WrittenFiles, OutError)) return false;
-		if (!SaveTrackedFolderJson(FolderPath, TEXT("validation/coverage_report.json"), MakeCoverageReport(), WrittenFiles, OutError)) return false;
+		if (!SaveTrackedFolderAuthoringFile(FolderPath, TEXT("validation/checks.hjson"), MakeValidationChecks(Issues), WrittenFiles, OutError)) return false;
+		if (!SaveTrackedFolderAuthoringFile(FolderPath, TEXT("validation/coverage_report.hjson"), MakeCoverageReport(), WrittenFiles, OutError)) return false;
 		return true;
 	}
 
@@ -1121,16 +1068,16 @@ namespace UeAgentAIOps
 		TSharedPtr<FJsonObject> TestsJson;
 		TSharedPtr<FJsonObject> ContextsJson;
 		BuildEqsSplitJson(Exported, GeneratorsJson, TestsJson, ContextsJson);
-		if (!SaveTrackedFolderJson(FolderPath, TEXT("asset.json"), AssetJson, WrittenFiles, OutError)) return false;
-		if (!SaveTrackedFolderJson(FolderPath, TEXT("options.json"), OptionsJson, WrittenFiles, OutError)) return false;
-		if (!SaveTrackedFolderJson(FolderPath, TEXT("generators.json"), GeneratorsJson, WrittenFiles, OutError)) return false;
-		if (!SaveTrackedFolderJson(FolderPath, TEXT("tests.json"), TestsJson, WrittenFiles, OutError)) return false;
-		if (!SaveTrackedFolderJson(FolderPath, TEXT("contexts.json"), ContextsJson, WrittenFiles, OutError)) return false;
+		if (!SaveTrackedFolderAuthoringFile(FolderPath, TEXT("asset.hjson"), AssetJson, WrittenFiles, OutError)) return false;
+		if (!SaveTrackedFolderAuthoringFile(FolderPath, TEXT("options.hjson"), OptionsJson, WrittenFiles, OutError)) return false;
+		if (!SaveTrackedFolderAuthoringFile(FolderPath, TEXT("generators.hjson"), GeneratorsJson, WrittenFiles, OutError)) return false;
+		if (!SaveTrackedFolderAuthoringFile(FolderPath, TEXT("tests.hjson"), TestsJson, WrittenFiles, OutError)) return false;
+		if (!SaveTrackedFolderAuthoringFile(FolderPath, TEXT("contexts.hjson"), ContextsJson, WrittenFiles, OutError)) return false;
 		IFileManager::Get().MakeDirectory(*FPaths::Combine(FolderPath, TEXT("validation")), true);
 		TArray<TSharedPtr<FJsonValue>> Issues;
 		ValidateEqsFolderJson(AssetJson, OptionsJson, Issues);
-		if (!SaveTrackedFolderJson(FolderPath, TEXT("validation/checks.json"), MakeValidationChecks(Issues), WrittenFiles, OutError)) return false;
-		if (!SaveTrackedFolderJson(FolderPath, TEXT("validation/coverage_report.json"), MakeCoverageReport(), WrittenFiles, OutError)) return false;
+		if (!SaveTrackedFolderAuthoringFile(FolderPath, TEXT("validation/checks.hjson"), MakeValidationChecks(Issues), WrittenFiles, OutError)) return false;
+		if (!SaveTrackedFolderAuthoringFile(FolderPath, TEXT("validation/coverage_report.hjson"), MakeCoverageReport(), WrittenFiles, OutError)) return false;
 		return true;
 	}
 
@@ -1481,531 +1428,17 @@ bool FUeAgentHttpServer::CmdStateTreeGetInfo(const FUeAgentRequestContext& Ctx, 
 
 bool FUeAgentHttpServer::CmdStateTreeExportFolder(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
-	FString AssetPath;
-	if (!JsonTryGetString(Ctx.Params, TEXT("asset_path"), AssetPath) || AssetPath.IsEmpty())
-	{
-		OutError = TEXT("missing_asset_path");
-		return false;
-	}
-	UStateTree* Tree = UeAgentAIOps::LoadAsset<UStateTree>(AssetPath);
-	if (!Tree)
-	{
-		OutError = TEXT("state_tree_not_found");
-		return false;
-	}
-	FString FolderInput;
-	JsonTryGetString(Ctx.Params, TEXT("folder_path"), FolderInput);
-	const FString FolderPath = UeAgentAIOps::ResolveFolderPath(FolderInput, UeAgentAIOps::StateTreeProfile, AssetPath);
-	bool bClean = false;
-	JsonTryGetBool(Ctx.Params, TEXT("clean_output_dir"), bClean);
-	if (bClean && IFileManager::Get().DirectoryExists(*FolderPath))
-	{
-		IFileManager::Get().DeleteDirectory(*FolderPath, false, true);
-	}
-	IFileManager::Get().MakeDirectory(*FolderPath, true);
-	TArray<TSharedPtr<FJsonValue>> WrittenFiles;
-	if (!UeAgentAIOps::SaveStateTreeFolderContents(FolderPath, Tree, WrittenFiles, OutError))
-	{
-		return false;
-	}
-	OutData = UeAgentAIOps::ExportStateTree(Tree, true);
-	OutData->SetArrayField(TEXT("written_files"), WrittenFiles);
-	OutData->SetStringField(TEXT("folder_path"), FolderPath);
-	OutData->SetStringField(TEXT("status"), TEXT("ok"));
-	UeAgentAIOps::AttachCoverageReport(OutData);
-	return true;
+	return UeAgentReflectionAuthoringCommandBridge::Export(TEXT("state_tree"), Ctx.Params, OutData, OutError);
 }
 
 bool FUeAgentHttpServer::CmdStateTreeValidateFolder(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
-	FString FolderInput;
-	if (!JsonTryGetString(Ctx.Params, TEXT("folder_path"), FolderInput) || FolderInput.IsEmpty())
-	{
-		OutError = TEXT("missing_folder_path");
-		return false;
-	}
-	const FString FolderPath = UeAgentJsonDiagnostics::ResolveProjectRelativeFilePath(FolderInput);
-	TSharedPtr<FJsonObject> LegacyRejection;
-	FString LegacyError;
-	if (UeAgentDetailsAuthoring::BuildLegacyPropertiesFolderRejectionIfPresent(
-		FolderPath,
-		UeAgentAIOps::MakeApplyOwnerInfo(TEXT("state_tree_folder"), FString(), TEXT("state_tree_validate_folder")),
-		TEXT("details.index_file"),
-		LegacyRejection,
-		LegacyError))
-	{
-		OutData = LegacyRejection;
-		OutError = LegacyError.IsEmpty() ? FString(TEXT("legacy_properties_not_supported")) : LegacyError;
-		return false;
-	}
-	TSharedPtr<FJsonObject> AssetJson;
-	TSharedPtr<FJsonObject> StatesJson;
-	if (!UeAgentAIOps::LoadFolderJson(FolderPath, TEXT("asset.json"), AssetJson, OutError) ||
-		!UeAgentAIOps::LoadFolderJson(FolderPath, TEXT("states.json"), StatesJson, OutError))
-	{
-		return false;
-	}
-	TArray<TSharedPtr<FJsonValue>> Issues;
-	UeAgentAIOps::ValidateStateTreeFolderJson(AssetJson, StatesJson, Issues);
-	OutData->SetStringField(TEXT("profile"), UeAgentAIOps::StateTreeProfile);
-	OutData->SetStringField(TEXT("folder_path"), FolderPath);
-	OutData->SetStringField(TEXT("status"), Issues.Num() == 0 ? TEXT("ok") : TEXT("validate_failed"));
-	UeAgentAIOps::SetDiagnostics(OutData, Issues);
-	return Issues.Num() == 0;
+	return UeAgentReflectionAuthoringCommandBridge::Validate(TEXT("state_tree"), Ctx.Params, OutData, OutError);
 }
 
 bool FUeAgentHttpServer::CmdStateTreeApplyFolder(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
-	FString FolderInput;
-	if (!JsonTryGetString(Ctx.Params, TEXT("folder_path"), FolderInput) || FolderInput.IsEmpty())
-	{
-		OutError = TEXT("missing_folder_path");
-		return false;
-	}
-	const FString FolderPath = UeAgentJsonDiagnostics::ResolveProjectRelativeFilePath(FolderInput);
-	TSharedPtr<FJsonObject> AssetJson;
-	TSharedPtr<FJsonObject> StatesJson;
-	if (!UeAgentAIOps::LoadFolderJson(FolderPath, TEXT("asset.json"), AssetJson, OutError, true, false) ||
-		!UeAgentAIOps::LoadFolderJson(FolderPath, TEXT("states.json"), StatesJson, OutError, true, false))
-	{
-		return false;
-	}
-	TSharedPtr<FJsonObject> LegacyRejection;
-	FString LegacyError;
-	if (UeAgentDetailsAuthoring::BuildLegacyPropertiesFolderRejectionIfPresent(
-		FolderPath,
-		UeAgentAIOps::MakeApplyOwnerInfo(TEXT("state_tree_folder"), FString(), TEXT("state_tree_apply_folder")),
-		TEXT("details.index_file"),
-		LegacyRejection,
-		LegacyError))
-	{
-		OutData = LegacyRejection;
-		OutError = LegacyError.IsEmpty() ? FString(TEXT("legacy_properties_not_supported")) : LegacyError;
-		return false;
-	}
-	TArray<TSharedPtr<FJsonValue>> Issues;
-	if (!UeAgentAIOps::ValidateStateTreeFolderJson(AssetJson, StatesJson, Issues))
-	{
-		OutData->SetStringField(TEXT("status"), TEXT("validate_failed"));
-		UeAgentAIOps::SetDiagnostics(OutData, Issues);
-		return false;
-	}
-
-	FString AssetPath;
-	JsonTryGetString(Ctx.Params, TEXT("asset_path"), AssetPath);
-	if (AssetPath.IsEmpty())
-	{
-		AssetJson->TryGetStringField(TEXT("asset_path"), AssetPath);
-	}
-	if (AssetPath.IsEmpty())
-	{
-		OutError = TEXT("missing_asset_path");
-		return false;
-	}
-	bool bCreateIfMissing = false;
-	bool bDryRun = false;
-	bool bValidateOnly = false;
-	bool bAllowDestructive = false;
-	JsonTryGetBool(Ctx.Params, TEXT("create_if_missing"), bCreateIfMissing);
-	JsonTryGetBool(Ctx.Params, TEXT("dry_run"), bDryRun);
-	JsonTryGetBool(Ctx.Params, TEXT("validate_only"), bValidateOnly);
-	JsonTryGetBool(Ctx.Params, TEXT("allow_destructive"), bAllowDestructive);
-	if (bDryRun || bValidateOnly)
-	{
-		OutData->SetStringField(TEXT("profile"), UeAgentAIOps::StateTreeProfile);
-		OutData->SetStringField(TEXT("folder_path"), FolderPath);
-		OutData->SetStringField(TEXT("status"), TEXT("ok"));
-		OutData->SetBoolField(TEXT("dry_run"), bDryRun);
-		OutData->SetBoolField(TEXT("validate_only"), bValidateOnly);
-		UeAgentAIOps::SetDiagnostics(OutData, Issues);
-		return true;
-	}
-	UStateTree* Tree = UeAgentAIOps::LoadAsset<UStateTree>(AssetPath);
-	bool bCreated = false;
-	if (!Tree)
-	{
-		if (!bCreateIfMissing)
-		{
-			OutError = TEXT("state_tree_not_found");
-			return false;
-		}
-		if (!UeAgentAIOps::CreateAsset<UStateTree>(AssetPath, Tree, OutError) || !Tree)
-		{
-			return false;
-		}
-		bCreated = true;
-	}
-	FString SchemaClassPath;
-	AssetJson->TryGetStringField(TEXT("schema_class"), SchemaClassPath);
-	UClass* SchemaClass = UStateTreeComponentSchema::StaticClass();
-	if (!SchemaClassPath.IsEmpty())
-	{
-		SchemaClass = UeAgentAIOps::ResolveClass(SchemaClassPath);
-		if (!SchemaClass)
-		{
-			OutError = TEXT("invalid_state_tree_schema_class");
-			return false;
-		}
-	}
-	if (!UeAgentAIOps::EnsureStateTreeEditorData(Tree, SchemaClass, OutError))
-	{
-		return false;
-	}
-#if WITH_EDITORONLY_DATA
-	UStateTreeEditorData* EditorData = UeAgentAIOps::GetStateTreeEditorData(Tree);
-	if (!EditorData)
-	{
-		OutError = TEXT("state_tree_editor_data_unavailable");
-		return false;
-	}
-	if (EditorData->SubTrees.Num() > 0 && !bCreated && !bAllowDestructive)
-	{
-		OutError = TEXT("state_tree_rebuild_requires_allow_destructive");
-		return false;
-	}
-	Tree->Modify();
-	EditorData->Modify();
-	EditorData->SubTrees.Reset();
-	EditorData->Evaluators.Reset();
-	EditorData->GlobalTasks.Reset();
-	TArray<TSharedPtr<FJsonValue>> PropertyResults;
-	int32 GroupedDetailsApplied = 0;
-	const TArray<TSharedPtr<FJsonValue>>* Evaluators = nullptr;
-	if (StatesJson->TryGetArrayField(TEXT("evaluators"), Evaluators) && Evaluators)
-	{
-		for (const TSharedPtr<FJsonValue>& EvaluatorValue : *Evaluators)
-		{
-			const TSharedPtr<FJsonObject>* EvaluatorObjPtr = nullptr;
-			if (EvaluatorValue->TryGetObject(EvaluatorObjPtr))
-			{
-				FStateTreeEditorNode& Node = EditorData->Evaluators.AddDefaulted_GetRef();
-				if (!UeAgentAIOps::ConfigureStateTreeEditorNode(Node, EditorData, *EvaluatorObjPtr, FStateTreeEvaluatorBase::StaticStruct(), UStateTreeEvaluatorBlueprintBase::StaticClass(), PropertyResults, OutError))
-				{
-					return false;
-				}
-				FString NodeId;
-				(*EvaluatorObjPtr)->TryGetStringField(TEXT("id"), NodeId);
-				if (!UeAgentAIOps::ApplyFolderOwnerDetailsIfPresent(
-					Node.InstanceObject,
-					FolderPath,
-					*EvaluatorObjPtr,
-					TEXT("state_tree_node"),
-					NodeId,
-					TEXT("state_tree_apply_folder"),
-					OutError,
-					GroupedDetailsApplied))
-				{
-					return false;
-				}
-			}
-		}
-	}
-	const TArray<TSharedPtr<FJsonValue>>* GlobalTasks = nullptr;
-	if (StatesJson->TryGetArrayField(TEXT("global_tasks"), GlobalTasks) && GlobalTasks)
-	{
-		for (const TSharedPtr<FJsonValue>& TaskValue : *GlobalTasks)
-		{
-			const TSharedPtr<FJsonObject>* TaskObjPtr = nullptr;
-			if (TaskValue->TryGetObject(TaskObjPtr))
-			{
-				FStateTreeEditorNode& Node = EditorData->GlobalTasks.AddDefaulted_GetRef();
-				if (!UeAgentAIOps::ConfigureStateTreeEditorNode(Node, EditorData, *TaskObjPtr, FStateTreeTaskBase::StaticStruct(), UStateTreeTaskBlueprintBase::StaticClass(), PropertyResults, OutError))
-				{
-					return false;
-				}
-				FString NodeId;
-				(*TaskObjPtr)->TryGetStringField(TEXT("id"), NodeId);
-				if (!UeAgentAIOps::ApplyFolderOwnerDetailsIfPresent(
-					Node.InstanceObject,
-					FolderPath,
-					*TaskObjPtr,
-					TEXT("state_tree_node"),
-					NodeId,
-					TEXT("state_tree_apply_folder"),
-					OutError,
-					GroupedDetailsApplied))
-				{
-					return false;
-				}
-			}
-		}
-	}
-	TMap<FString, UStateTreeState*> StateMap;
-	TMap<FString, UStateTreeState*> StateNameMap;
-	TMultiMap<FString, TSharedPtr<FJsonObject>> ChildrenByParent;
-	const TArray<TSharedPtr<FJsonValue>>* States = nullptr;
-	StatesJson->TryGetArrayField(TEXT("states"), States);
-	for (const TSharedPtr<FJsonValue>& StateValue : *States)
-	{
-		const TSharedPtr<FJsonObject>* StateObjPtr = nullptr;
-		StateValue->TryGetObject(StateObjPtr);
-		FString ParentId;
-		(*StateObjPtr)->TryGetStringField(TEXT("parent_id"), ParentId);
-		ChildrenByParent.Add(ParentId, *StateObjPtr);
-	}
-	TFunction<UStateTreeState*(const TSharedPtr<FJsonObject>&, UStateTreeState*)> BuildState =
-		[&](const TSharedPtr<FJsonObject>& StateObj, UStateTreeState* Parent) -> UStateTreeState*
-		{
-			FString Id;
-			FString Name;
-			FString TypeText;
-			StateObj->TryGetStringField(TEXT("id"), Id);
-			StateObj->TryGetStringField(TEXT("name"), Name);
-			StateObj->TryGetStringField(TEXT("type"), TypeText);
-			UStateTreeState* State = nullptr;
-			if (Parent)
-			{
-				State = &Parent->AddChildState(FName(*Name), UeAgentAIOps::ParseStateType(TypeText));
-			}
-			else
-			{
-				State = &EditorData->AddSubTree(FName(*Name));
-				State->Type = UeAgentAIOps::ParseStateType(TypeText);
-			}
-			State->ID = FGuid::NewGuid();
-			State->Description = StateObj->GetStringField(TEXT("description"));
-			FString SelectionText;
-			FString CompletionText;
-			StateObj->TryGetStringField(TEXT("selection_behavior"), SelectionText);
-			StateObj->TryGetStringField(TEXT("tasks_completion"), CompletionText);
-			State->SelectionBehavior = UeAgentAIOps::EnumFromString(SelectionText, EStateTreeStateSelectionBehavior::TrySelectChildrenInOrder);
-			State->TasksCompletion = UeAgentAIOps::EnumFromString(CompletionText, EStateTreeTaskCompletionType::Any);
-			bool bEnabled = true;
-			StateObj->TryGetBoolField(TEXT("enabled"), bEnabled);
-			State->bEnabled = bEnabled;
-			FString TagText;
-			if (StateObj->TryGetStringField(TEXT("tag"), TagText) && !TagText.IsEmpty())
-			{
-				State->Tag = FGameplayTag::RequestGameplayTag(FName(*TagText), false);
-			}
-			if (!UeAgentAIOps::ApplyFolderOwnerDetailsIfPresent(
-				State,
-				FolderPath,
-				StateObj,
-				TEXT("state_tree_state"),
-				Id,
-				TEXT("state_tree_apply_folder"),
-				OutError,
-				GroupedDetailsApplied))
-			{
-				return nullptr;
-			}
-			const TArray<TSharedPtr<FJsonValue>>* Conditions = nullptr;
-			if (StateObj->TryGetArrayField(TEXT("enter_conditions"), Conditions) && Conditions)
-			{
-				for (const TSharedPtr<FJsonValue>& ConditionValue : *Conditions)
-				{
-					const TSharedPtr<FJsonObject>* ConditionObjPtr = nullptr;
-					if (ConditionValue->TryGetObject(ConditionObjPtr))
-					{
-						FStateTreeEditorNode& Node = State->EnterConditions.AddDefaulted_GetRef();
-						if (!UeAgentAIOps::ConfigureStateTreeEditorNode(Node, State, *ConditionObjPtr, FStateTreeConditionBase::StaticStruct(), UStateTreeConditionBlueprintBase::StaticClass(), PropertyResults, OutError))
-						{
-							return nullptr;
-						}
-						FString NodeId;
-						(*ConditionObjPtr)->TryGetStringField(TEXT("id"), NodeId);
-						if (!UeAgentAIOps::ApplyFolderOwnerDetailsIfPresent(
-							Node.InstanceObject,
-							FolderPath,
-							*ConditionObjPtr,
-							TEXT("state_tree_node"),
-							NodeId,
-							TEXT("state_tree_apply_folder"),
-							OutError,
-							GroupedDetailsApplied))
-						{
-							return nullptr;
-						}
-					}
-				}
-			}
-			const TArray<TSharedPtr<FJsonValue>>* Tasks = nullptr;
-			if (StateObj->TryGetArrayField(TEXT("tasks"), Tasks) && Tasks)
-			{
-				for (const TSharedPtr<FJsonValue>& TaskValue : *Tasks)
-				{
-					const TSharedPtr<FJsonObject>* TaskObjPtr = nullptr;
-					if (TaskValue->TryGetObject(TaskObjPtr))
-					{
-						FStateTreeEditorNode& Node = State->Tasks.AddDefaulted_GetRef();
-						if (!UeAgentAIOps::ConfigureStateTreeEditorNode(Node, State, *TaskObjPtr, FStateTreeTaskBase::StaticStruct(), UStateTreeTaskBlueprintBase::StaticClass(), PropertyResults, OutError))
-						{
-							return nullptr;
-						}
-						FString NodeId;
-						(*TaskObjPtr)->TryGetStringField(TEXT("id"), NodeId);
-						if (!UeAgentAIOps::ApplyFolderOwnerDetailsIfPresent(
-							Node.InstanceObject,
-							FolderPath,
-							*TaskObjPtr,
-							TEXT("state_tree_node"),
-							NodeId,
-							TEXT("state_tree_apply_folder"),
-							OutError,
-							GroupedDetailsApplied))
-						{
-							return nullptr;
-						}
-					}
-				}
-			}
-			StateMap.Add(Id, State);
-			StateNameMap.Add(Name, State);
-			TArray<TSharedPtr<FJsonObject>> Children;
-			ChildrenByParent.MultiFind(Id, Children);
-			Algo::Reverse(Children);
-			for (const TSharedPtr<FJsonObject>& ChildObj : Children)
-			{
-				if (!BuildState(ChildObj, State))
-				{
-					return nullptr;
-				}
-			}
-			return State;
-		};
-	TArray<TSharedPtr<FJsonObject>> RootStates;
-	ChildrenByParent.MultiFind(FString(), RootStates);
-	Algo::Reverse(RootStates);
-	for (const TSharedPtr<FJsonObject>& StateObj : RootStates)
-	{
-		if (!BuildState(StateObj, nullptr))
-		{
-			return false;
-		}
-	}
-	for (const TSharedPtr<FJsonValue>& StateValue : *States)
-	{
-		const TSharedPtr<FJsonObject>* StateObjPtr = nullptr;
-		if (!StateValue->TryGetObject(StateObjPtr) || !StateObjPtr || !StateObjPtr->IsValid())
-		{
-			continue;
-		}
-		FString SourceId;
-		(*StateObjPtr)->TryGetStringField(TEXT("id"), SourceId);
-		UStateTreeState* SourceState = StateMap.FindRef(SourceId);
-		if (!SourceState)
-		{
-			continue;
-		}
-		const TArray<TSharedPtr<FJsonValue>>* Transitions = nullptr;
-		if (!(*StateObjPtr)->TryGetArrayField(TEXT("transitions"), Transitions) || !Transitions)
-		{
-			continue;
-		}
-		for (const TSharedPtr<FJsonValue>& TransitionValue : *Transitions)
-		{
-			const TSharedPtr<FJsonObject>* TransitionObjPtr = nullptr;
-			if (!TransitionValue->TryGetObject(TransitionObjPtr) || !TransitionObjPtr || !TransitionObjPtr->IsValid())
-			{
-				continue;
-			}
-			FString TriggerText;
-			FString PriorityText;
-			FString TypeText;
-			FString FallbackText;
-			FString TargetId;
-			FString TargetName;
-			(*TransitionObjPtr)->TryGetStringField(TEXT("trigger"), TriggerText);
-			(*TransitionObjPtr)->TryGetStringField(TEXT("priority"), PriorityText);
-			(*TransitionObjPtr)->TryGetStringField(TEXT("type"), TypeText);
-			(*TransitionObjPtr)->TryGetStringField(TEXT("fallback"), FallbackText);
-			(*TransitionObjPtr)->TryGetStringField(TEXT("target_state_id"), TargetId);
-			(*TransitionObjPtr)->TryGetStringField(TEXT("target_state_name"), TargetName);
-
-			const EStateTreeTransitionType LinkType = UeAgentAIOps::EnumFromString(TypeText, EStateTreeTransitionType::GotoState);
-			UStateTreeState* TargetState = !TargetId.IsEmpty() ? StateMap.FindRef(TargetId) : nullptr;
-			if (!TargetState && !TargetName.IsEmpty())
-			{
-				TargetState = StateNameMap.FindRef(TargetName);
-			}
-			if (LinkType == EStateTreeTransitionType::GotoState && !TargetState)
-			{
-				OutError = FString::Printf(TEXT("state_tree_transition_target_not_found:%s"), *TargetId);
-				return false;
-			}
-
-			FStateTreeTransition& Transition = SourceState->Transitions.AddDefaulted_GetRef();
-			Transition.ID = FGuid::NewGuid();
-			Transition.Trigger = UeAgentAIOps::EnumFromString(TriggerText, EStateTreeTransitionTrigger::OnStateCompleted);
-			Transition.Priority = UeAgentAIOps::EnumFromString(PriorityText, EStateTreeTransitionPriority::Normal);
-			Transition.State.LinkType = LinkType;
-			Transition.State.Fallback = UeAgentAIOps::EnumFromString(FallbackText, EStateTreeSelectionFallback::None);
-			Transition.State.ID = TargetState ? TargetState->ID : FGuid();
-			Transition.State.Name = TargetState ? TargetState->Name : FName(*TargetName);
-			bool bTransitionEnabled = true;
-			(*TransitionObjPtr)->TryGetBoolField(TEXT("enabled"), bTransitionEnabled);
-			Transition.bTransitionEnabled = bTransitionEnabled;
-			bool bDelay = false;
-			(*TransitionObjPtr)->TryGetBoolField(TEXT("delay_enabled"), bDelay);
-			Transition.bDelayTransition = bDelay;
-			double DelayValue = 0.0;
-			if ((*TransitionObjPtr)->TryGetNumberField(TEXT("delay_duration"), DelayValue))
-			{
-				Transition.DelayDuration = static_cast<float>(DelayValue);
-			}
-			if ((*TransitionObjPtr)->TryGetNumberField(TEXT("delay_random_variance"), DelayValue))
-			{
-				Transition.DelayRandomVariance = static_cast<float>(DelayValue);
-			}
-
-			const TArray<TSharedPtr<FJsonValue>>* TransitionConditions = nullptr;
-			if ((*TransitionObjPtr)->TryGetArrayField(TEXT("conditions"), TransitionConditions) && TransitionConditions)
-			{
-				for (const TSharedPtr<FJsonValue>& ConditionValue : *TransitionConditions)
-				{
-					const TSharedPtr<FJsonObject>* ConditionObjPtr = nullptr;
-					if (ConditionValue->TryGetObject(ConditionObjPtr))
-					{
-						FStateTreeEditorNode& Node = Transition.Conditions.AddDefaulted_GetRef();
-						if (!UeAgentAIOps::ConfigureStateTreeEditorNode(Node, SourceState, *ConditionObjPtr, FStateTreeConditionBase::StaticStruct(), UStateTreeConditionBlueprintBase::StaticClass(), PropertyResults, OutError))
-						{
-							return false;
-						}
-						FString NodeId;
-						(*ConditionObjPtr)->TryGetStringField(TEXT("id"), NodeId);
-						if (!UeAgentAIOps::ApplyFolderOwnerDetailsIfPresent(
-							Node.InstanceObject,
-							FolderPath,
-							*ConditionObjPtr,
-							TEXT("state_tree_node"),
-							NodeId,
-							TEXT("state_tree_apply_folder"),
-							OutError,
-							GroupedDetailsApplied))
-						{
-							return false;
-						}
-					}
-				}
-			}
-		}
-	}
-	TSharedPtr<FJsonObject> CompileReport;
-	UeAgentAIOps::CompileStateTree(Tree, CompileReport);
-	Tree->MarkPackageDirty();
-	Tree->PostEditChange();
-	bool bSave = false;
-	JsonTryGetBool(Ctx.Params, TEXT("save_after_apply"), bSave);
-	if (bSave && !UeAgentAIOps::SaveAssetPackage(Tree, OutError))
-	{
-		return false;
-	}
-	OutData = UeAgentAIOps::ExportStateTree(Tree, true);
-	OutData->SetObjectField(TEXT("compile_report"), CompileReport);
-	OutData->SetStringField(TEXT("folder_path"), FolderPath);
-	OutData->SetBoolField(TEXT("created_asset"), bCreated);
-	OutData->SetBoolField(TEXT("changed"), true);
-	OutData->SetBoolField(TEXT("saved"), bSave);
-	OutData->SetArrayField(TEXT("property_results"), PropertyResults);
-	OutData->SetNumberField(TEXT("grouped_details_applied"), GroupedDetailsApplied);
-	OutData->SetStringField(TEXT("status"), TEXT("ok"));
-	UeAgentAIOps::AttachCoverageReport(OutData);
-	return true;
-#else
-	OutError = TEXT("state_tree_editor_data_unavailable");
-	return false;
-#endif
+	return UeAgentReflectionAuthoringCommandBridge::Apply(TEXT("state_tree"), Ctx.Params, OutData, OutError, Ctx.RequestId);
 }
 
 bool FUeAgentHttpServer::CmdStateTreeOpenEditor(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
@@ -2240,252 +1673,17 @@ bool FUeAgentHttpServer::CmdEqsGetInfo(const FUeAgentRequestContext& Ctx, TShare
 
 bool FUeAgentHttpServer::CmdEqsExportFolder(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
-	FString AssetPath;
-	if (!JsonTryGetString(Ctx.Params, TEXT("asset_path"), AssetPath) || AssetPath.IsEmpty())
-	{
-		OutError = TEXT("missing_asset_path");
-		return false;
-	}
-	UEnvQuery* Query = UeAgentAIOps::LoadAsset<UEnvQuery>(AssetPath);
-	if (!Query)
-	{
-		OutError = TEXT("eqs_query_not_found");
-		return false;
-	}
-	FString FolderInput;
-	JsonTryGetString(Ctx.Params, TEXT("folder_path"), FolderInput);
-	const FString FolderPath = UeAgentAIOps::ResolveFolderPath(FolderInput, UeAgentAIOps::EqsProfile, AssetPath);
-	bool bClean = false;
-	JsonTryGetBool(Ctx.Params, TEXT("clean_output_dir"), bClean);
-	if (bClean && IFileManager::Get().DirectoryExists(*FolderPath))
-	{
-		IFileManager::Get().DeleteDirectory(*FolderPath, false, true);
-	}
-	IFileManager::Get().MakeDirectory(*FolderPath, true);
-	TArray<TSharedPtr<FJsonValue>> WrittenFiles;
-	if (!UeAgentAIOps::SaveEqsFolderContents(FolderPath, Query, WrittenFiles, OutError))
-	{
-		return false;
-	}
-	OutData = UeAgentAIOps::ExportEqs(Query, true);
-	OutData->SetArrayField(TEXT("written_files"), WrittenFiles);
-	OutData->SetStringField(TEXT("folder_path"), FolderPath);
-	OutData->SetStringField(TEXT("status"), TEXT("ok"));
-	UeAgentAIOps::AttachCoverageReport(OutData);
-	return true;
+	return UeAgentReflectionAuthoringCommandBridge::Export(TEXT("eqs"), Ctx.Params, OutData, OutError);
 }
 
 bool FUeAgentHttpServer::CmdEqsValidateFolder(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
-	FString FolderInput;
-	if (!JsonTryGetString(Ctx.Params, TEXT("folder_path"), FolderInput) || FolderInput.IsEmpty())
-	{
-		OutError = TEXT("missing_folder_path");
-		return false;
-	}
-	const FString FolderPath = UeAgentJsonDiagnostics::ResolveProjectRelativeFilePath(FolderInput);
-	TSharedPtr<FJsonObject> LegacyRejection;
-	FString LegacyError;
-	if (UeAgentDetailsAuthoring::BuildLegacyPropertiesFolderRejectionIfPresent(
-		FolderPath,
-		UeAgentAIOps::MakeApplyOwnerInfo(TEXT("eqs_folder"), FString(), TEXT("eqs_validate_folder")),
-		TEXT("details.index_file"),
-		LegacyRejection,
-		LegacyError))
-	{
-		OutData = LegacyRejection;
-		OutError = LegacyError.IsEmpty() ? FString(TEXT("legacy_properties_not_supported")) : LegacyError;
-		return false;
-	}
-	TSharedPtr<FJsonObject> AssetJson;
-	TSharedPtr<FJsonObject> OptionsJson;
-	if (!UeAgentAIOps::LoadFolderJson(FolderPath, TEXT("asset.json"), AssetJson, OutError) ||
-		!UeAgentAIOps::LoadFolderJson(FolderPath, TEXT("options.json"), OptionsJson, OutError))
-	{
-		return false;
-	}
-	TArray<TSharedPtr<FJsonValue>> Issues;
-	UeAgentAIOps::ValidateEqsFolderJson(AssetJson, OptionsJson, Issues);
-	OutData->SetStringField(TEXT("profile"), UeAgentAIOps::EqsProfile);
-	OutData->SetStringField(TEXT("folder_path"), FolderPath);
-	OutData->SetStringField(TEXT("status"), Issues.Num() == 0 ? TEXT("ok") : TEXT("validate_failed"));
-	UeAgentAIOps::SetDiagnostics(OutData, Issues);
-	return Issues.Num() == 0;
+	return UeAgentReflectionAuthoringCommandBridge::Validate(TEXT("eqs"), Ctx.Params, OutData, OutError);
 }
 
 bool FUeAgentHttpServer::CmdEqsApplyFolder(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
-	FString FolderInput;
-	if (!JsonTryGetString(Ctx.Params, TEXT("folder_path"), FolderInput) || FolderInput.IsEmpty())
-	{
-		OutError = TEXT("missing_folder_path");
-		return false;
-	}
-	const FString FolderPath = UeAgentJsonDiagnostics::ResolveProjectRelativeFilePath(FolderInput);
-	TSharedPtr<FJsonObject> AssetJson;
-	TSharedPtr<FJsonObject> OptionsJson;
-	if (!UeAgentAIOps::LoadFolderJson(FolderPath, TEXT("asset.json"), AssetJson, OutError, true, false) ||
-		!UeAgentAIOps::LoadFolderJson(FolderPath, TEXT("options.json"), OptionsJson, OutError, true, false))
-	{
-		return false;
-	}
-	TSharedPtr<FJsonObject> LegacyRejection;
-	FString LegacyError;
-	if (UeAgentDetailsAuthoring::BuildLegacyPropertiesFolderRejectionIfPresent(
-		FolderPath,
-		UeAgentAIOps::MakeApplyOwnerInfo(TEXT("eqs_folder"), FString(), TEXT("eqs_apply_folder")),
-		TEXT("details.index_file"),
-		LegacyRejection,
-		LegacyError))
-	{
-		OutData = LegacyRejection;
-		OutError = LegacyError.IsEmpty() ? FString(TEXT("legacy_properties_not_supported")) : LegacyError;
-		return false;
-	}
-	TArray<TSharedPtr<FJsonValue>> Issues;
-	if (!UeAgentAIOps::ValidateEqsFolderJson(AssetJson, OptionsJson, Issues))
-	{
-		OutData->SetStringField(TEXT("status"), TEXT("validate_failed"));
-		UeAgentAIOps::SetDiagnostics(OutData, Issues);
-		return false;
-	}
-	bool bDryRun = false;
-	bool bValidateOnly = false;
-	JsonTryGetBool(Ctx.Params, TEXT("dry_run"), bDryRun);
-	JsonTryGetBool(Ctx.Params, TEXT("validate_only"), bValidateOnly);
-	if (bDryRun || bValidateOnly)
-	{
-		OutData->SetStringField(TEXT("profile"), UeAgentAIOps::EqsProfile);
-		OutData->SetStringField(TEXT("folder_path"), FolderPath);
-		OutData->SetStringField(TEXT("status"), TEXT("ok"));
-		OutData->SetBoolField(TEXT("dry_run"), bDryRun);
-		OutData->SetBoolField(TEXT("validate_only"), bValidateOnly);
-		UeAgentAIOps::SetDiagnostics(OutData, Issues);
-		return true;
-	}
-	FString AssetPath;
-	JsonTryGetString(Ctx.Params, TEXT("asset_path"), AssetPath);
-	if (AssetPath.IsEmpty())
-	{
-		AssetJson->TryGetStringField(TEXT("asset_path"), AssetPath);
-	}
-	bool bCreateIfMissing = false;
-	bool bAllowDestructive = false;
-	JsonTryGetBool(Ctx.Params, TEXT("create_if_missing"), bCreateIfMissing);
-	JsonTryGetBool(Ctx.Params, TEXT("allow_destructive"), bAllowDestructive);
-	UEnvQuery* Query = UeAgentAIOps::LoadAsset<UEnvQuery>(AssetPath);
-	bool bCreated = false;
-	if (!Query)
-	{
-		if (!bCreateIfMissing)
-		{
-			OutError = TEXT("eqs_query_not_found");
-			return false;
-		}
-		if (!UeAgentAIOps::CreateAsset<UEnvQuery>(AssetPath, Query, OutError) || !Query)
-		{
-			return false;
-		}
-		bCreated = true;
-	}
-	if (Query->GetOptions().Num() > 0 && !bCreated && !bAllowDestructive)
-	{
-		OutError = TEXT("eqs_rebuild_requires_allow_destructive");
-		return false;
-	}
-	Query->Modify();
-	Query->GetOptionsMutable().Reset();
-	TArray<TSharedPtr<FJsonValue>> PropertyResults;
-	int32 GroupedDetailsApplied = 0;
-	const TArray<TSharedPtr<FJsonValue>>* Options = nullptr;
-	OptionsJson->TryGetArrayField(TEXT("options"), Options);
-	for (const TSharedPtr<FJsonValue>& OptionValue : *Options)
-	{
-		const TSharedPtr<FJsonObject>* OptionObjPtr = nullptr;
-		if (!OptionValue->TryGetObject(OptionObjPtr))
-		{
-			continue;
-		}
-		UEnvQueryOption* Option = NewObject<UEnvQueryOption>(Query, UEnvQueryOption::StaticClass(), NAME_None, RF_Transactional);
-		FString GeneratorClassPath;
-		(*OptionObjPtr)->TryGetStringField(TEXT("generator_class"), GeneratorClassPath);
-		UClass* GeneratorClass = GeneratorClassPath.IsEmpty() ? UEnvQueryGenerator_SimpleGrid::StaticClass() : UeAgentAIOps::ResolveClass(GeneratorClassPath);
-		if (!GeneratorClass || !GeneratorClass->IsChildOf(UEnvQueryGenerator::StaticClass()))
-		{
-			OutError = TEXT("eqs_generator_class_not_found");
-			return false;
-		}
-		Option->Generator = NewObject<UEnvQueryGenerator>(Option, GeneratorClass, NAME_None, RF_Transactional);
-		FString OptionId;
-		(*OptionObjPtr)->TryGetStringField(TEXT("id"), OptionId);
-		if (!UeAgentAIOps::ApplyFolderOwnerDetailsIfPresent(
-			Option->Generator,
-			FolderPath,
-			*OptionObjPtr,
-			TEXT("eqs_generator"),
-			OptionId.IsEmpty() ? FString() : OptionId + TEXT("_generator"),
-			TEXT("eqs_apply_folder"),
-			OutError,
-			GroupedDetailsApplied))
-		{
-			return false;
-		}
-		const TArray<TSharedPtr<FJsonValue>>* Tests = nullptr;
-		if ((*OptionObjPtr)->TryGetArrayField(TEXT("tests"), Tests) && Tests)
-		{
-			for (const TSharedPtr<FJsonValue>& TestValue : *Tests)
-			{
-				const TSharedPtr<FJsonObject>* TestObjPtr = nullptr;
-				if (!TestValue->TryGetObject(TestObjPtr))
-				{
-					continue;
-				}
-				FString TestClassPath;
-				(*TestObjPtr)->TryGetStringField(TEXT("class"), TestClassPath);
-				UClass* TestClass = TestClassPath.IsEmpty() ? UEnvQueryTest_Distance::StaticClass() : UeAgentAIOps::ResolveClass(TestClassPath);
-				if (!TestClass || !TestClass->IsChildOf(UEnvQueryTest::StaticClass()))
-				{
-					OutError = TEXT("eqs_test_class_not_found");
-					return false;
-				}
-				UEnvQueryTest* Test = NewObject<UEnvQueryTest>(Option, TestClass, NAME_None, RF_Transactional);
-				FString TestId;
-				(*TestObjPtr)->TryGetStringField(TEXT("id"), TestId);
-				if (!UeAgentAIOps::ApplyFolderOwnerDetailsIfPresent(
-					Test,
-					FolderPath,
-					*TestObjPtr,
-					TEXT("eqs_test"),
-					TestId,
-					TEXT("eqs_apply_folder"),
-					OutError,
-					GroupedDetailsApplied))
-				{
-					return false;
-				}
-				Option->Tests.Add(Test);
-			}
-		}
-		Query->GetOptionsMutable().Add(Option);
-	}
-	Query->MarkPackageDirty();
-	Query->PostEditChange();
-	bool bSave = false;
-	JsonTryGetBool(Ctx.Params, TEXT("save_after_apply"), bSave);
-	if (bSave && !UeAgentAIOps::SaveAssetPackage(Query, OutError))
-	{
-		return false;
-	}
-	OutData = UeAgentAIOps::ExportEqs(Query, true);
-	OutData->SetStringField(TEXT("folder_path"), FolderPath);
-	OutData->SetBoolField(TEXT("created_asset"), bCreated);
-	OutData->SetBoolField(TEXT("changed"), true);
-	OutData->SetBoolField(TEXT("saved"), bSave);
-	OutData->SetArrayField(TEXT("property_results"), PropertyResults);
-	OutData->SetNumberField(TEXT("grouped_details_applied"), GroupedDetailsApplied);
-	OutData->SetStringField(TEXT("status"), TEXT("ok"));
-	UeAgentAIOps::AttachCoverageReport(OutData);
-	return true;
+	return UeAgentReflectionAuthoringCommandBridge::Apply(TEXT("eqs"), Ctx.Params, OutData, OutError, Ctx.RequestId);
 }
 
 bool FUeAgentHttpServer::CmdEqsRunQuery(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const

@@ -1,0 +1,16 @@
+definition: {
+  additional_fields: false
+  fields: {
+    asset_path: { default_state: none, description_zh: "资产编辑器目标资产", path_semantics: { access_scope: mounted_read, kind: ue_asset }, required: false, type: ue_asset_path }
+    asset_type: { default_state: none, description_zh: "目标资产类型标识", required: false, type: string }
+    open_editor_if_needed: { default: false, default_state: defined, description_zh: "目标资产编辑器未打开时是否允许打开", required: false, type: bool }
+    scope: { default: level, default_state: defined, description_zh: "视口作用域", enum_values: [level, asset_editor], required: false, type: enum }
+    viewport: { default: active, default_state: defined, description_zh: "Level 视口选择器", required: false, type: string }
+    viewport_id: { default_state: none, description_zh: "稳定视口 id", required: false, type: string }
+    viewport_role: { default: primary, default_state: defined, description_zh: "资产编辑器视口角色", required: false, type: string }
+  }
+  kind: object
+}
+schema: uai.command_spec.shared_type.v1
+type_id: EditorViewportTarget
+version: 1

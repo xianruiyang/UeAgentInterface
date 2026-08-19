@@ -1,0 +1,89 @@
+authoring: { reason: command_has_no_registered_folder_authoring_profile, state: none }
+category: niagara_system
+command: niagara_duplicate_asset
+deprecation: { reason: command_is_active, state: none }
+discovery: { aliases: [], keywords_en: [niagara, duplicate, asset, niagara_system], keywords_zh: [niagara_duplicate_asset], summary_en: "Execute niagara_duplicate_asset with a verified implementation contract", summary_zh: "复制 Niagara 资产", tags: [niagara_system, p2-005] }
+errors: {
+  codes: [
+    { code: asset_not_found, description_zh: "C++ 实现返回错误码 asset_not_found", retry_safe: false, stage: execution, wire_match: exact }
+    { code: create_target_package_failed, description_zh: "C++ 实现返回错误码 create_target_package_failed", retry_safe: false, stage: execution, wire_match: exact }
+    { code: duplicate_asset_failed, description_zh: "C++ 实现返回错误码 duplicate_asset_failed", retry_safe: false, stage: execution, wire_match: exact }
+    { code: invalid_target_asset_name, description_zh: "C++ 实现返回错误码 invalid_target_asset_name", retry_safe: true, stage: preflight, wire_match: exact }
+    { code: invalid_target_asset_path, description_zh: "C++ 实现返回错误码 invalid_target_asset_path", retry_safe: true, stage: preflight, wire_match: exact }
+    { code: missing_source_asset_path, description_zh: "C++ 实现返回错误码 missing_source_asset_path", retry_safe: true, stage: preflight, wire_match: exact }
+    { code: missing_target_asset_path, description_zh: "C++ 实现返回错误码 missing_target_asset_path", retry_safe: true, stage: preflight, wire_match: exact }
+    { code: save_asset_failed, description_zh: "C++ 实现返回错误码 save_asset_failed", retry_safe: false, stage: execution, wire_match: exact }
+    { code: source_asset_is_not_niagara, description_zh: "C++ 实现返回错误码 source_asset_is_not_niagara", retry_safe: false, stage: execution, wire_match: exact }
+    { code: source_asset_not_found, description_zh: "C++ 实现返回错误码 source_asset_not_found", retry_safe: false, stage: execution, wire_match: exact }
+    { code: target_asset_already_exists, description_zh: "C++ 实现返回错误码 target_asset_already_exists", retry_safe: false, stage: execution, wire_match: exact }
+  ]
+}
+evidence: {
+  docs: [
+    { path: "Plugins/UeAgentInterface/docs/commands/niagara_system/niagara_duplicate_asset.md", purpose: "user documentation cross-check; C++ implementation remains authoritative" }
+  ]
+  implementation: [
+    { line_hint: 4574, path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Commands/Niagara/UeAgentHttpServer_Niagara.cpp", purpose: "command handler, parameter and return evidence", symbol: CmdNiagaraDuplicateAsset }
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Server/UeAgentHttpServer.cpp", purpose: "transitive helper evidence used by the command handler" }
+  ]
+  tests: [
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterfaceTests/Private/Smoke/UeAgentInterfaceSmoke_Coverage.cpp", purpose: "smoke or negative-path evidence cross-checked for the verified contract" }
+  ]
+}
+execution: {
+  destructive: false
+  editor_state: required
+  game_thread: required
+  idempotent: false
+  kind: write
+  overwrite_behavior: none
+  pie_state: allowed
+  retry_safe: false
+  save_behavior: caller_controlled
+  side_effects: [modifies_asset, creates_asset, modifies_editor_session, opens_window]
+  ui_effect: opens_editor
+}
+maturity: verified
+params: {
+  constraints: []
+  fields: {
+    open_editor: { default: false, default_state: defined, description_zh: "C++ 实现读取的 open_editor 参数", required: false, type: bool }
+    save_after_create: { default: false, default_state: defined, description_zh: "C++ 实现读取的 save_after_create 参数", required: false, type: bool }
+    source_asset_path: { default_state: none, description_zh: "C++ 实现读取的 source_asset_path 参数", path_semantics: { access_scope: mounted_read, kind: ue_asset }, required: true, type: ue_asset_path }
+    target_asset_path: { default_state: none, description_zh: "C++ 实现读取的 target_asset_path 参数", path_semantics: { access_scope: project_write, kind: ue_asset }, required: true, type: ue_asset_path }
+  }
+  state: defined
+}
+response: { artifact_fields: [], compact_fields: [saved, asset_kind, opened_editor, repaired_emitter_version_count, apply_backend], failure_fields: [params.source_asset_path, params.target_asset_path], max_items_policy: { fields: [], mode: none } }
+returns: {
+  fields: {
+	apply_backend: { description_zh: "实际执行写入的统一 Apply 后端", required: true, type: string }
+    asset_kind: { description_zh: "C++ 实现返回的 asset_kind 字段；是否出现取决于执行分支", required: false, type: string }
+    detached_stale_target_object_before_duplicate: { description_zh: "C++ 实现返回的 detached_stale_target_object_before_duplicate 字段；是否出现取决于执行分支", required: false, type: bool }
+    found_stale_target_object_before_duplicate: { description_zh: "C++ 实现返回的 found_stale_target_object_before_duplicate 字段；是否出现取决于执行分支", required: false, type: bool }
+    opened_editor: { description_zh: "C++ 实现返回的 opened_editor 字段；是否出现取决于执行分支", required: false, type: bool }
+    repaired_emitter_version_count: { description_zh: "C++ 实现返回的 repaired_emitter_version_count 字段；是否出现取决于执行分支", required: false, type: integer }
+    saved: { description_zh: "C++ 实现返回的 saved 字段；是否出现取决于执行分支", required: false, type: bool }
+    source_asset_path: { description_zh: "C++ 实现返回的 source_asset_path 字段；是否出现取决于执行分支", required: false, type: ue_asset_path }
+    target_asset_path: { description_zh: "C++ 实现返回的 target_asset_path 字段；是否出现取决于执行分支", required: false, type: ue_asset_path }
+    target_object_path: { description_zh: "C++ 实现返回的 target_object_path 字段；是否出现取决于执行分支", required: false, type: ue_object_path }
+  }
+  state: defined
+}
+schema: uai.command_spec.v1
+status: active
+types: {}
+verification: {
+  assertions: [
+    { id: result_present, operator: exists, source: returns.saved }
+    { id: state_readback_present, operator: exists, source: methods.state_readback.asset_path }
+  ]
+  failure_policy: fail_overall
+  methods: [
+    { id: result, kind: result_assertion }
+    { command: niagara_get_info, id: state_readback, kind: command_readback, params_mapping: { asset_path: returns.target_asset_path } }
+  ]
+  required: true
+  state: defined
+}
+version: 1

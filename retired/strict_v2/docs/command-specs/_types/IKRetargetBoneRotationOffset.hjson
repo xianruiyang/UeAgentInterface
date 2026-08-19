@@ -1,0 +1,14 @@
+definition: {
+  additional_fields: false
+  fields: {
+    bone_name: { default_state: none, description_zh: "Retarget pose 骨骼名", required: true, type: string }
+    pitch: { default_state: none, description_zh: "rotation_offset.Pitch 兼容字段", required: false, type: number }
+    roll: { default_state: none, description_zh: "rotation_offset.Roll 兼容字段", required: false, type: number }
+    rotation_offset: { default_state: none, description_zh: "Retarget pose 中的 bone rotation offset（度）", required: false, type: object, type_ref: "shared:Rotator3D" }
+    yaw: { default_state: none, description_zh: "rotation_offset.Yaw 兼容字段", required: false, type: number }
+  }
+  kind: object
+}
+schema: uai.command_spec.shared_type.v1
+type_id: IKRetargetBoneRotationOffset
+version: 1

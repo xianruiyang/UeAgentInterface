@@ -1,0 +1,84 @@
+authoring: { reason: command_has_no_registered_folder_authoring_profile, state: none }
+category: deformer_mldeformer_geometry_cache
+command: mesh_deformer_collection_create
+deprecation: { reason: command_is_active, state: none }
+discovery: { aliases: [], keywords_en: [mesh, deformer, collection, create, deformer_mldeformer_geometry_cache], keywords_zh: [mesh_deformer_collection_create], summary_en: "Execute mesh_deformer_collection_create with a verified implementation contract", summary_zh: "创建 Mesh Deformer Collection", tags: [deformer_mldeformer_geometry_cache, p2-006] }
+errors: {
+  codes: [
+    { code: asset_already_exists, description_zh: "C++ 实现返回错误码 asset_already_exists", retry_safe: false, stage: execution, wire_match: exact }
+    { code: asset_class_is_abstract, description_zh: "C++ 实现返回错误码 asset_class_is_abstract", retry_safe: false, stage: execution, wire_match: prefix }
+    { code: asset_class_not_available, description_zh: "C++ 实现返回错误码 asset_class_not_available", retry_safe: false, stage: execution, wire_match: prefix }
+    { code: asset_not_found, description_zh: "C++ 实现返回错误码 asset_not_found", retry_safe: false, stage: execution, wire_match: exact }
+    { code: create_asset_failed, description_zh: "C++ 实现返回错误码 create_asset_failed", retry_safe: false, stage: execution, wire_match: exact }
+    { code: invalid_asset_path, description_zh: "C++ 实现返回错误码 invalid_asset_path", retry_safe: true, stage: preflight, wire_match: exact }
+    { code: missing_asset_path, description_zh: "C++ 实现返回错误码 missing_asset_path", retry_safe: true, stage: preflight, wire_match: exact }
+    { code: save_asset_failed, description_zh: "C++ 实现返回错误码 save_asset_failed", retry_safe: false, stage: execution, wire_match: exact }
+  ]
+}
+evidence: {
+  docs: [
+    { path: "Plugins/UeAgentInterface/docs/commands/deformer_mldeformer_geometry_cache/mesh_deformer_collection_create.md", purpose: "user documentation cross-check; C++ implementation remains authoritative" }
+  ]
+  implementation: [
+    { line_hint: 2435, path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Commands/Deformer/UeAgentHttpServer_Deformer.cpp", purpose: "command handler, parameter and return evidence", symbol: CmdMeshDeformerCollectionCreate }
+  ]
+  tests: [
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterfaceTests/Private/Smoke/UeAgentInterfaceSmoke_Coverage.cpp", purpose: "smoke or negative-path evidence cross-checked for the verified contract" }
+  ]
+}
+execution: {
+  destructive: false
+  editor_state: required
+  game_thread: required
+  idempotent: false
+  kind: write
+  overwrite_behavior: none
+  pie_state: allowed
+  retry_safe: false
+  save_behavior: caller_controlled
+  side_effects: [modifies_asset, creates_asset]
+  ui_effect: none
+}
+maturity: verified
+params: {
+  constraints: []
+  fields: {
+    asset_path: { default_state: none, description_zh: "C++ 实现读取的 asset_path 参数", path_semantics: { access_scope: project_write, kind: ue_asset }, required: true, type: ue_asset_path }
+    class_path: { default_state: none, description_zh: "C++ 实现读取的 class_path 参数", required: false, type: string }
+    save_after_create: { default: false, default_state: defined, description_zh: "C++ 实现读取的 save_after_create 参数", required: false, type: bool }
+  }
+  state: defined
+}
+response: { artifact_fields: [candidate_classes, plugin_status, property_summary], compact_fields: [saved, asset_path, asset_class, asset_found, created], failure_fields: [params.asset_path], max_items_policy: { fields: [], mode: none } }
+returns: {
+  fields: {
+    asset_class: { description_zh: "C++ 实现返回的 asset_class 字段；是否出现取决于执行分支", required: false, type: string }
+    asset_found: { description_zh: "C++ 实现返回的 asset_found 字段；是否出现取决于执行分支", required: false, type: bool }
+    asset_path: { description_zh: "C++ 实现返回的 asset_path 字段；是否出现取决于执行分支", required: false, type: ue_asset_path }
+    candidate_classes: { description_zh: "C++ 实现返回的 candidate_classes 字段；是否出现取决于执行分支", item_type: json_value, required: false, type: array }
+    created: { description_zh: "C++ 实现返回的 created 字段；是否出现取决于执行分支", required: false, type: bool }
+    dirty: { description_zh: "C++ 实现返回的 dirty 字段；是否出现取决于执行分支", required: false, type: bool }
+    engine_version: { description_zh: "C++ 实现返回的 engine_version 字段；是否出现取决于执行分支", required: false, type: string }
+    object_path: { description_zh: "C++ 实现返回的 object_path 字段；是否出现取决于执行分支", required: false, type: ue_object_path }
+    plugin_status: { description_zh: "C++ 实现返回的 plugin_status 字段；是否出现取决于执行分支", required: false, type: json_value }
+    profile: { description_zh: "C++ 实现返回的 profile 字段；是否出现取决于执行分支", required: false, type: string }
+    property_summary: { description_zh: "C++ 实现返回的 property_summary 字段；是否出现取决于执行分支", required: false, type: json_value }
+    saved: { description_zh: "C++ 实现返回的 saved 字段；是否出现取决于执行分支", required: false, type: bool }
+  }
+  state: defined
+}
+schema: uai.command_spec.v1
+status: active
+types: {}
+verification: {
+  assertions: [
+    { id: result_present, operator: exists, source: returns.saved }
+  ]
+  failure_policy: fail_overall
+  methods: [
+    { id: result, kind: result_assertion }
+  ]
+  required: true
+  state: defined
+}
+version: 1

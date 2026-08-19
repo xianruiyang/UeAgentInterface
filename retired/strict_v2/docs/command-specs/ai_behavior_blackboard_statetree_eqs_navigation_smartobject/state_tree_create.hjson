@@ -1,0 +1,89 @@
+authoring: { reason: command_has_no_registered_folder_authoring_profile, state: none }
+category: ai_behavior_blackboard_statetree_eqs_navigation_smartobject
+command: state_tree_create
+deprecation: { reason: command_is_active, state: none }
+discovery: { aliases: [], keywords_en: [state, tree, create, ai_behavior_blackboard_statetree_eqs_navigation_smartobject], keywords_zh: [state_tree_create], summary_en: "Execute state_tree_create with a verified implementation contract", summary_zh: "创建最小 StateTree", tags: [ai_behavior_blackboard_statetree_eqs_navigation_smartobject, p2-007] }
+errors: {
+  codes: [
+    { code: asset_not_found, description_zh: "C++ 实现返回错误码 asset_not_found", retry_safe: false, stage: execution, wire_match: exact }
+    { code: invalid_state_tree_schema_class, description_zh: "C++ 实现返回错误码 invalid_state_tree_schema_class", retry_safe: true, stage: preflight, wire_match: exact }
+    { code: missing_asset_path, description_zh: "C++ 实现返回错误码 missing_asset_path", retry_safe: true, stage: preflight, wire_match: exact }
+    { code: save_asset_failed, description_zh: "C++ 实现返回错误码 save_asset_failed", retry_safe: false, stage: execution, wire_match: exact }
+    { code: state_tree_editor_data_unavailable, description_zh: "C++ 实现返回错误码 state_tree_editor_data_unavailable", retry_safe: false, stage: execution, wire_match: exact }
+    { code: state_tree_not_found, description_zh: "C++ 实现返回错误码 state_tree_not_found", retry_safe: false, stage: execution, wire_match: exact }
+  ]
+}
+evidence: {
+  docs: [
+    { path: "Plugins/UeAgentInterface/docs/commands/ai_behavior_blackboard_statetree_eqs_navigation_smartobject/state_tree_create.md", purpose: "user documentation cross-check; C++ implementation remains authoritative" }
+  ]
+  implementation: [
+    { line_hint: 1363, path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Commands/AI/UeAgentHttpServer_AI_StateTreeEQS.cpp", purpose: "command handler, parameter and return evidence", symbol: CmdStateTreeCreate }
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Commands/AI/UeAgentHttpServer_AI_Blackboard.cpp", purpose: "transitive helper evidence used by the command handler" }
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Server/UeAgentHttpServer.cpp", purpose: "transitive helper evidence used by the command handler" }
+  ]
+  tests: [
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterfaceTests/Private/Smoke/UeAgentInterfaceAISmokeTests.cpp", purpose: "smoke or negative-path evidence cross-checked for the verified contract" }
+  ]
+}
+execution: {
+  destructive: false
+  editor_state: required
+  game_thread: required
+  idempotent: false
+  kind: write
+  overwrite_behavior: target_asset
+  pie_state: allowed
+  retry_safe: false
+  save_behavior: caller_controlled
+  side_effects: [modifies_asset, creates_asset]
+  ui_effect: none
+}
+maturity: verified
+params: {
+  constraints: []
+  fields: {
+    asset_path: { default_state: none, description_zh: "C++ 实现读取的 asset_path 参数", path_semantics: { access_scope: project_write, kind: ue_asset }, required: true, type: ue_asset_path }
+    save_after_create: { default: false, default_state: defined, description_zh: "C++ 实现读取的 save_after_create 参数", required: false, type: bool }
+    schema_class: { default_state: none, description_zh: "C++ 实现读取的 schema_class 参数", required: false, type: string }
+  }
+  state: defined
+}
+response: { artifact_fields: [evaluators, global_tasks, states, compile_report], compact_fields: [status, saved, asset_path, created_asset, dirty], failure_fields: [params.asset_path], max_items_policy: { fields: [], mode: none } }
+returns: {
+  fields: {
+    asset_path: { description_zh: "C++ 实现返回的 asset_path 字段；是否出现取决于执行分支", required: false, type: ue_asset_path }
+    compile_report: { description_zh: "C++ 实现返回的 compile_report 字段；是否出现取决于执行分支", required: false, type: json_value }
+    created_asset: { description_zh: "C++ 实现返回的 created_asset 字段；是否出现取决于执行分支", required: false, type: bool }
+    dirty: { description_zh: "C++ 实现返回的 dirty 字段；是否出现取决于执行分支", required: false, type: bool }
+    evaluators: { description_zh: "C++ 实现返回的 evaluators 字段；是否出现取决于执行分支", item_type: json_value, required: false, type: array }
+    global_tasks: { description_zh: "C++ 实现返回的 global_tasks 字段；是否出现取决于执行分支", item_type: json_value, required: false, type: array }
+    object_path: { description_zh: "C++ 实现返回的 object_path 字段；是否出现取决于执行分支", required: false, type: ue_object_path }
+    profile: { description_zh: "C++ 实现返回的 profile 字段；是否出现取决于执行分支", required: false, type: string }
+    ready_to_run: { description_zh: "C++ 实现返回的 ready_to_run 字段；是否出现取决于执行分支", required: false, type: bool }
+    saved: { description_zh: "C++ 实现返回的 saved 字段；是否出现取决于执行分支", required: false, type: bool }
+    schema_class: { description_zh: "C++ 实现返回的 schema_class 字段；是否出现取决于执行分支", required: false, type: string }
+    schema_version: { description_zh: "C++ 实现返回的 schema_version 字段；是否出现取决于执行分支", required: false, type: number }
+    state_count: { description_zh: "C++ 实现返回的 state_count 字段；是否出现取决于执行分支", required: false, type: integer }
+    states: { description_zh: "C++ 实现返回的 states 字段；是否出现取决于执行分支", item_type: json_value, required: false, type: array }
+    status: { description_zh: "C++ 实现返回的 status 字段；是否出现取决于执行分支", required: false, type: string }
+  }
+  state: defined
+}
+schema: uai.command_spec.v1
+status: active
+types: {}
+verification: {
+  assertions: [
+    { id: result_present, operator: exists, source: returns.status }
+    { id: state_readback_present, operator: exists, source: methods.state_readback.asset_path }
+  ]
+  failure_policy: fail_overall
+  methods: [
+    { id: result, kind: result_assertion }
+    { command: state_tree_get_info, id: state_readback, kind: command_readback, params_mapping: { asset_path: returns.asset_path } }
+  ]
+  required: true
+  state: defined
+}
+version: 1

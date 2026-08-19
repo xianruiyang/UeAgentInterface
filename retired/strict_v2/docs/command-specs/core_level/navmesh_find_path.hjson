@@ -1,0 +1,88 @@
+authoring: { reason: command_has_no_registered_folder_authoring_profile, state: none }
+category: core_level
+command: navmesh_find_path
+deprecation: { reason: command_is_active, state: none }
+discovery: { aliases: [], keywords_en: [navmesh, find, path, core_level], keywords_zh: [navmesh_find_path], summary_en: "Execute navmesh_find_path with a verified implementation contract", summary_zh: "NavMesh 两点查路", tags: [core_level, p2-002] }
+errors: {
+  codes: [
+    { code: missing_end, description_zh: "C++ 实现返回错误码 missing_end", retry_safe: true, stage: preflight, wire_match: exact }
+    { code: missing_start, description_zh: "C++ 实现返回错误码 missing_start", retry_safe: true, stage: preflight, wire_match: exact }
+    { code: navmesh_navigation_system_not_found, description_zh: "C++ 实现返回错误码 navmesh_navigation_system_not_found", retry_safe: false, stage: execution, wire_match: exact }
+    { code: navmesh_no_nav_data, description_zh: "C++ 实现返回错误码 navmesh_no_nav_data", retry_safe: false, stage: execution, wire_match: exact }
+    { code: no_editor_world, description_zh: "C++ 实现返回错误码 no_editor_world", retry_safe: false, stage: execution, wire_match: exact }
+    { code: no_geditor, description_zh: "C++ 实现返回错误码 no_geditor", retry_safe: false, stage: execution, wire_match: exact }
+  ]
+}
+evidence: {
+  docs: [
+    { path: "Plugins/UeAgentInterface/docs/commands/core_level/navmesh_find_path.md", purpose: "user documentation cross-check; C++ implementation remains authoritative" }
+  ]
+  implementation: [
+    { line_hint: 143, path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Commands/Level/UeAgentHttpServer_Level_Navigation.cpp", purpose: "command handler, parameter and return evidence", symbol: CmdNavmeshFindPath }
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Commands/AI/UeAgentHttpServer_AI_Blackboard.cpp", purpose: "transitive helper evidence used by the command handler" }
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Commands/Level/UeAgentHttpServer_Level_CaptureAndPersistence.cpp", purpose: "transitive helper evidence used by the command handler" }
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Server/UeAgentHttpServer.cpp", purpose: "transitive helper evidence used by the command handler" }
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Utilities/UeAgentJsonDiagnostics.cpp", purpose: "transitive helper evidence used by the command handler" }
+  ]
+  tests: [
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterfaceTests/Private/Smoke/UeAgentInterfaceSmoke_LevelViewportModeling.cpp", purpose: "smoke or negative-path evidence cross-checked for the verified contract" }
+  ]
+}
+execution: {
+  destructive: false
+  editor_state: required
+  game_thread: required
+  idempotent: true
+  kind: read_only
+  overwrite_behavior: none
+  pie_state: allowed
+  retry_safe: true
+  save_behavior: none
+  side_effects: []
+  ui_effect: none
+}
+maturity: verified
+params: {
+  constraints: []
+  fields: {
+    allow_partial: { default: false, default_state: defined, description_zh: "C++ 实现读取的 allow_partial 参数", required: false, type: bool }
+    allow_projection_failure: { default: false, default_state: defined, description_zh: "C++ 实现读取的 allow_projection_failure 参数", required: false, type: bool }
+    end: { default_state: none, description_zh: "C++ 实现读取的 end 参数", required: true, type: json_value }
+    project_query_extent: { default_state: none, description_zh: "C++ 实现读取的 project_query_extent 参数", required: false, type: json_value }
+    project_query_extent_cm: { default_state: none, description_zh: "C++ 实现读取的 project_query_extent_cm 参数", required: false, type: json_value }
+    project_to_nav: { default: true, default_state: defined, description_zh: "C++ 实现读取的 project_to_nav 参数", required: false, type: bool }
+    start: { default_state: none, description_zh: "C++ 实现读取的 start 参数", required: true, type: json_value }
+  }
+  state: defined
+}
+response: { artifact_fields: [], compact_fields: [allow_partial, allow_projection_failure, end, end_projected, end_projected_distance_cm, end_projected_ok], failure_fields: [params.end, params.start], max_items_policy: { fields: [], mode: none } }
+returns: {
+  fields: {
+    allow_partial: { description_zh: "C++ 实现返回的 allow_partial 字段；是否出现取决于执行分支", required: false, type: bool }
+    allow_projection_failure: { description_zh: "C++ 实现返回的 allow_projection_failure 字段；是否出现取决于执行分支", required: false, type: bool }
+    end: { description_zh: "C++ 实现返回的 end 字段；是否出现取决于执行分支", required: false, type: json_value }
+    end_projected: { description_zh: "C++ 实现返回的 end_projected 字段；是否出现取决于执行分支", required: false, type: json_value }
+    end_projected_distance_cm: { description_zh: "C++ 实现返回的 end_projected_distance_cm 字段；是否出现取决于执行分支", required: false, type: number }
+    end_projected_ok: { description_zh: "C++ 实现返回的 end_projected_ok 字段；是否出现取决于执行分支", required: false, type: bool }
+    end_used: { description_zh: "C++ 实现返回的 end_used 字段；是否出现取决于执行分支", required: false, type: json_value }
+    is_partial: { description_zh: "C++ 实现返回的 is_partial 字段；是否出现取决于执行分支", required: false, type: bool }
+    nav_data_count: { description_zh: "C++ 实现返回的 nav_data_count 字段；是否出现取决于执行分支", required: false, type: integer }
+    path_found: { description_zh: "C++ 实现返回的 path_found 字段；是否出现取决于执行分支", required: false, type: bool }
+    path_length_cm: { description_zh: "C++ 实现返回的 path_length_cm 字段；是否出现取决于执行分支", required: false, type: number }
+    path_points: { description_zh: "C++ 实现返回的 path_points 字段；是否出现取决于执行分支", item_type: json_value, required: false, type: array }
+    project_query_extent: { description_zh: "C++ 实现返回的 project_query_extent 字段；是否出现取决于执行分支", required: false, type: json_value }
+    project_to_nav: { description_zh: "C++ 实现返回的 project_to_nav 字段；是否出现取决于执行分支", required: false, type: bool }
+    projection_failed_reason: { description_zh: "C++ 实现返回的 projection_failed_reason 字段；是否出现取决于执行分支", required: false, type: string }
+    start: { description_zh: "C++ 实现返回的 start 字段；是否出现取决于执行分支", required: false, type: json_value }
+    start_projected: { description_zh: "C++ 实现返回的 start_projected 字段；是否出现取决于执行分支", required: false, type: json_value }
+    start_projected_distance_cm: { description_zh: "C++ 实现返回的 start_projected_distance_cm 字段；是否出现取决于执行分支", required: false, type: number }
+    start_projected_ok: { description_zh: "C++ 实现返回的 start_projected_ok 字段；是否出现取决于执行分支", required: false, type: bool }
+    start_used: { description_zh: "C++ 实现返回的 start_used 字段；是否出现取决于执行分支", required: false, type: json_value }
+  }
+  state: defined
+}
+schema: uai.command_spec.v1
+status: active
+types: {}
+verification: { reason: read_only_command_has_no_post_write_verification, state: none }
+version: 1

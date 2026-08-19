@@ -1,0 +1,57 @@
+authoring: { reason: command_has_no_registered_folder_authoring_profile, state: none }
+category: localization_packaging_platform_profiles
+command: device_profile_query
+deprecation: { reason: command_is_active, state: none }
+discovery: { aliases: [], keywords_en: [device, profile, query, localization_packaging_platform_profiles], keywords_zh: [device_profile_query], summary_en: "Execute device_profile_query with a verified implementation contract", summary_zh: "查询 DeviceProfile、继承链和 CVar", tags: [localization_packaging_platform_profiles, p2-002] }
+errors: { codes: [] }
+evidence: {
+  docs: [
+    { path: "Plugins/UeAgentInterface/docs/commands/localization_packaging_platform_profiles/device_profile_query.md", purpose: "user documentation cross-check; C++ implementation remains authoritative" }
+  ]
+  implementation: [
+    { line_hint: 3632, path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Commands/ProductionPipeline/UeAgentHttpServer_ProductionPipeline.cpp", purpose: "command handler, parameter and return evidence", symbol: CmdDeviceProfileQuery }
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Server/UeAgentHttpServer.cpp", purpose: "transitive helper evidence used by the command handler" }
+  ]
+  tests: [
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterfaceTests/Private/Smoke/ProductionPipeline/UeAgentInterfaceProductionPipelineSmokeTests.cpp", purpose: "smoke or negative-path evidence cross-checked for the verified contract" }
+  ]
+}
+execution: {
+  destructive: false
+  editor_state: required
+  game_thread: required
+  idempotent: true
+  kind: read_only
+  overwrite_behavior: none
+  pie_state: allowed
+  retry_safe: true
+  save_behavior: none
+  side_effects: []
+  ui_effect: none
+}
+maturity: verified
+params: {
+  constraints: []
+  fields: {
+    include_inherited: { default: true, default_state: defined, description_zh: "C++ 实现读取的 include_inherited 参数", required: false, type: bool }
+    profile: { default_state: none, description_zh: "C++ 实现读取的 profile 参数", required: false, type: string }
+  }
+  state: defined
+}
+response: { artifact_fields: [], compact_fields: [conflicts, cvars, inheritance_chain, profile_count, profiles, schema], failure_fields: [], max_items_policy: { fields: [], mode: none } }
+returns: {
+  fields: {
+    conflicts: { description_zh: "C++ 实现返回的 conflicts 字段；是否出现取决于执行分支", item_type: json_value, required: false, type: array }
+    cvars: { description_zh: "C++ 实现返回的 cvars 字段；是否出现取决于执行分支", required: false, type: json_value }
+    inheritance_chain: { description_zh: "C++ 实现返回的 inheritance_chain 字段；是否出现取决于执行分支", item_type: json_value, required: false, type: array }
+    profile_count: { description_zh: "C++ 实现返回的 profile_count 字段；是否出现取决于执行分支", required: false, type: integer }
+    profiles: { description_zh: "C++ 实现返回的 profiles 字段；是否出现取决于执行分支", item_type: json_value, required: false, type: array }
+    schema: { description_zh: "C++ 实现返回的 schema 字段；是否出现取决于执行分支", required: false, type: string }
+  }
+  state: defined
+}
+schema: uai.command_spec.v1
+status: active
+types: {}
+verification: { reason: read_only_command_has_no_post_write_verification, state: none }
+version: 1

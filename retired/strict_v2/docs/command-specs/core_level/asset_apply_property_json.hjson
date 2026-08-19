@@ -1,0 +1,101 @@
+authoring: { reason: command_has_no_registered_folder_authoring_profile, state: none }
+category: core_level
+command: asset_apply_property_json
+deprecation: { reason: command_is_active, state: none }
+discovery: { aliases: [], keywords_en: [asset, apply, property, json, core_level], keywords_zh: [asset_apply_property_json], summary_en: "Execute asset_apply_property_json with a verified implementation contract", summary_zh: "从 HJSON 回写资产属性", tags: [core_level, p2-002] }
+errors: {
+  codes: [
+    { code: asset_not_found, description_zh: "C++ 实现返回错误码 asset_not_found", retry_safe: false, stage: execution, wire_match: exact }
+    { code: hjson_file_not_found, description_zh: "C++ 实现返回错误码 hjson_file_not_found", retry_safe: false, stage: execution, wire_match: prefix }
+    { code: missing_asset_path, description_zh: "C++ 实现返回错误码 missing_asset_path", retry_safe: true, stage: preflight, wire_match: exact }
+    { code: missing_properties, description_zh: "C++ 实现返回错误码 missing_properties", retry_safe: true, stage: preflight, wire_match: exact }
+    { code: schema_mismatch_expected_uai, description_zh: "单文件 source schema 不是 uai.uobject_properties.v2", retry_safe: true, stage: preflight, wire_match: prefix }
+    { code: preflight_failed, description_zh: "属性描述符 shape 在共享 Object Apply preflight 失败；详细项位于 apply_summary", retry_safe: true, stage: preflight, wire_match: exact }
+    { code: asset_property_apply_failed, description_zh: "共享 Object Apply 未返回更具体错误码", retry_safe: false, stage: execution, wire_match: exact }
+    { code: workspace_, description_zh: "共享 workspace load、route 或 dependency 失败", retry_safe: true, stage: preflight, wire_match: prefix }
+    { code: direct_, description_zh: "direct UObject/UStruct 虚拟 workspace 失败", retry_safe: false, stage: execution, wire_match: prefix }
+    { code: property_, description_zh: "属性解析、写入或读回失败", retry_safe: false, stage: execution, wire_match: prefix }
+    { code: struct_, description_zh: "结构体递归解析或写入失败", retry_safe: false, stage: execution, wire_match: prefix }
+    { code: container_, description_zh: "容器递归解析或写入失败", retry_safe: false, stage: execution, wire_match: prefix }
+    { code: external_reference_, description_zh: "外部对象引用不允许递归 patch", retry_safe: true, stage: preflight, wire_match: prefix }
+    { code: owned_object_, description_zh: "owned object outer、class 或引用边界不合法", retry_safe: true, stage: preflight, wire_match: prefix }
+    { code: unexpected_property_descriptor_field, description_zh: "属性描述符包含 Apply contract 未接受的字段", retry_safe: true, stage: preflight, wire_match: exact }
+    { code: transient_deprecated_or_unsafe_property, description_zh: "属性不可安全写入", retry_safe: true, stage: preflight, wire_match: exact }
+    { code: save_asset_failed, description_zh: "C++ 实现返回错误码 save_asset_failed", retry_safe: false, stage: execution, wire_match: exact }
+  ]
+}
+evidence: {
+  docs: [
+    { path: "Plugins/UeAgentInterface/docs/commands/core_level/asset_apply_property_json.md", purpose: "user documentation cross-check; C++ implementation remains authoritative" }
+  ]
+  implementation: [
+    { line_hint: 1623, path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Commands/Assets/UeAgentHttpServer_Assets.cpp", purpose: "command handler, parameter and return evidence", symbol: CmdAssetApplyPropertyJson }
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Commands/Sequence/UeAgentHttpServer_Sequence.cpp", purpose: "transitive helper evidence used by the command handler" }
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Commands/TextureRenderTarget/UeAgentHttpServer_TextureRenderTarget_TextureAssets.inl", purpose: "transitive helper evidence used by the command handler" }
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Server/UeAgentHttpServer.cpp", purpose: "transitive helper evidence used by the command handler" }
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Utilities/UeAgentDetailsAuthoring.cpp", purpose: "transitive helper evidence used by the command handler" }
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Utilities/UeAgentStructuredAuthoringIO.cpp", purpose: "transitive helper evidence used by the command handler" }
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Utilities/UeAgentStructuredHjsonFormatter.cpp", purpose: "transitive helper evidence used by the command handler" }
+  ]
+  tests: [
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterfaceTests/Private/Smoke/UeAgentInterfaceSmoke_Core.cpp", purpose: "smoke or negative-path evidence cross-checked for the verified contract" }
+  ]
+}
+execution: {
+  destructive: false
+  editor_state: required
+  game_thread: required
+  idempotent: false
+  kind: write
+  overwrite_behavior: none
+  pie_state: allowed
+  retry_safe: false
+  save_behavior: caller_controlled
+  side_effects: [modifies_asset]
+  ui_effect: none
+}
+maturity: verified
+params: {
+  constraints: [{ fields: [json_file, properties], kind: one_of }]
+  fields: {
+    asset_path: { default_state: none, description_zh: "可从参数或 json_file.asset_path 读取；冲突时以显式参数作为目标约束", path_semantics: { access_scope: project_write, kind: ue_asset }, required: false, type: ue_asset_path }
+    json_file: {
+      default_state: none
+      description_zh: "C++ 实现读取的 json_file 参数"
+      path_semantics: { kind: filesystem_file, must_exist: true, writable: false }
+      required: false
+      type: filesystem_path
+    }
+    properties: { default_state: none, description_zh: "inline property descriptor 列表；每项最小为 property_path + value", item_type: json_value, required: false, type: array }
+    save_after_apply: { default: false, default_state: defined, description_zh: "C++ 实现读取的 save_after_apply 参数", required: false, type: bool }
+  }
+  state: defined
+}
+response: { artifact_fields: [], compact_fields: [saved, asset_path, applied_property_count, asset_class, json_file, object_path], failure_fields: [params.asset_path, params.properties], max_items_policy: { fields: [], mode: none } }
+returns: {
+  fields: {
+    applied_property_count: { description_zh: "成功提交并通过读回的属性数", required: true, type: integer }
+    asset_class: { description_zh: "实际写入对象的 UClass path", required: true, type: string }
+    asset_path: { description_zh: "实际写入资产路径", required: true, type: ue_asset_path }
+    json_file: { description_zh: "C++ 实现返回的 json_file 字段；是否出现取决于执行分支", required: false, type: filesystem_path }
+    object_path: { description_zh: "实际写入 UObject path", required: true, type: ue_object_path }
+    property_results: { description_zh: "逐 property_path 的 applied 结果", item_type: json_value, required: true, type: array }
+    saved: { description_zh: "本次是否请求并完成保存", required: true, type: bool }
+  }
+  state: defined
+}
+schema: uai.command_spec.v1
+status: active
+types: {}
+verification: {
+  assertions: [
+    { id: result_present, operator: exists, source: returns.saved }
+  ]
+  failure_policy: fail_overall
+  methods: [
+    { id: result, kind: result_assertion }
+  ]
+  required: true
+  state: defined
+}
+version: 1

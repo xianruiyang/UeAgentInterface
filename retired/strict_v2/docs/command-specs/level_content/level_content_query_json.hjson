@@ -1,0 +1,84 @@
+authoring: { operation: readback, profile_ref: "contracts/field_contracts/level.hjson", state: defined, type_id: level }
+category: level_content
+command: level_content_query_json
+deprecation: { reason: command_is_active, state: none }
+discovery: { aliases: [], keywords_en: [level, content, query, json, level_content], keywords_zh: [level_content_query_json], summary_en: "Execute level_content_query_json with a verified implementation contract", summary_zh: "查询当前世界中的场景内容，并按 Level Content JSON 投影返回。", tags: [level_content, p2-002] }
+errors: {
+  codes: [
+    { code: hjson_object_invalid, description_zh: "C++ 实现返回错误码 hjson_object_invalid", retry_safe: true, stage: preflight, wire_match: exact }
+    { code: hjson_write_failed, description_zh: "C++ 实现返回错误码 hjson_write_failed", retry_safe: false, stage: execution, wire_match: prefix }
+    { code: level_content_query_failed, description_zh: "C++ 实现返回错误码 level_content_query_failed", retry_safe: false, stage: execution, wire_match: exact }
+    { code: no_editor_world, description_zh: "C++ 实现返回错误码 no_editor_world", retry_safe: false, stage: execution, wire_match: exact }
+    { code: no_geditor, description_zh: "C++ 实现返回错误码 no_geditor", retry_safe: false, stage: execution, wire_match: exact }
+  ]
+}
+evidence: {
+  docs: [
+    { path: "Plugins/UeAgentInterface/docs/commands/level_content/level_content_query_json.md", purpose: "user documentation cross-check; C++ implementation remains authoritative" }
+  ]
+  implementation: [
+    { line_hint: 70, path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Commands/LevelContentJson/UeAgentLevelContentJsonCommands_Tail.cpp", purpose: "command handler, parameter and return evidence", symbol: CmdLevelContentQueryJson }
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Commands/Level/UeAgentHttpServer_Level_CaptureAndPersistence.cpp", purpose: "transitive helper evidence used by the command handler" }
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Commands/LevelContentJson/UeAgentLevelContentJsonCommands.cpp", purpose: "transitive helper evidence used by the command handler" }
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Commands/LevelContentJson/UeAgentLevelContentJsonCore.cpp", purpose: "transitive helper evidence used by the command handler" }
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Commands/LevelContentJson/UeAgentLevelContentJsonQuery.cpp", purpose: "transitive helper evidence used by the command handler" }
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Commands/LevelTopology/UeAgentHttpServer_LevelTopology.cpp", purpose: "transitive helper evidence used by the command handler" }
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Utilities/UeAgentStructuredAuthoringIO.cpp", purpose: "transitive helper evidence used by the command handler" }
+  ]
+  tests: [
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterfaceTests/Private/Smoke/LevelContentJson/UeAgentInterfaceLevelContentJsonSmokeTests.cpp", purpose: "smoke or negative-path evidence cross-checked for the verified contract" }
+  ]
+}
+execution: {
+  destructive: false
+  editor_state: required
+  game_thread: required
+  idempotent: true
+  kind: read_only
+  overwrite_behavior: none
+  pie_state: allowed
+  retry_safe: true
+  save_behavior: none
+  side_effects: []
+  ui_effect: none
+}
+maturity: verified
+params: {
+  constraints: []
+  fields: {
+    include_bounds: { default: false, default_state: defined, description_zh: "C++ 实现读取的 include_bounds 参数", required: false, type: bool }
+    include_components: { default: false, default_state: defined, description_zh: "C++ 实现读取的 include_components 参数", required: false, type: bool }
+    output_file: {
+      default_state: none
+      description_zh: "C++ 实现读取的 output_file 参数"
+      path_semantics: { kind: filesystem_file, must_exist: false, writable: true }
+      required: false
+      type: filesystem_path
+    }
+    projection: { default_state: none, description_zh: "C++ 实现读取的 projection 参数", required: false, type: json_value }
+    selection: { default_state: none, description_zh: "C++ 实现读取的 selection 参数", required: false, type: json_value }
+  }
+  state: defined
+}
+response: { artifact_fields: [], compact_fields: [world, actor_only, feature_gates, organization, output_file, output_format], failure_fields: [], max_items_policy: { fields: [], mode: none } }
+returns: {
+  fields: {
+    actor_only: { description_zh: "C++ 实现返回的 actor_only 字段；是否出现取决于执行分支", required: false, type: bool }
+    feature_gates: { description_zh: "C++ 实现返回的 feature_gates 字段；是否出现取决于执行分支", required: false, type: json_value }
+    organization: { description_zh: "C++ 实现返回的 organization 字段；是否出现取决于执行分支", required: false, type: json_value }
+    output_file: { description_zh: "C++ 实现返回的 output_file 字段；是否出现取决于执行分支", required: false, type: filesystem_path }
+    output_format: { description_zh: "C++ 实现返回的 output_format 字段；是否出现取决于执行分支", required: false, type: string }
+    query_schema: { description_zh: "C++ 实现返回的 query_schema 字段；是否出现取决于执行分支", required: false, type: string }
+    resource_count: { description_zh: "C++ 实现返回的 resource_count 字段；是否出现取决于执行分支", required: false, type: integer }
+    resources: { description_zh: "C++ 实现返回的 resources 字段；是否出现取决于执行分支", item_type: json_value, required: false, type: array }
+    schema: { description_zh: "C++ 实现返回的 schema 字段；是否出现取决于执行分支", required: false, type: string }
+    visited_actor_count: { description_zh: "C++ 实现返回的 visited_actor_count 字段；是否出现取决于执行分支", required: false, type: integer }
+    world: { description_zh: "C++ 实现返回的 world 字段；是否出现取决于执行分支", required: false, type: json_value }
+  }
+  state: defined
+}
+schema: uai.command_spec.v1
+status: active
+types: {}
+verification: { reason: read_only_command_has_no_post_write_verification, state: none }
+version: 1

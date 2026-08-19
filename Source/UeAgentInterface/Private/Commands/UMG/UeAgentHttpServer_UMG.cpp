@@ -25,6 +25,7 @@
 #include "Kismet2/KismetEditorUtilities.h"
 #include "Misc/Guid.h"
 #include "Misc/PackageName.h"
+#include "Misc/SecureHash.h"
 #include "Subsystems/AssetEditorSubsystem.h"
 #include "WidgetBlueprint.h"
 
@@ -110,6 +111,14 @@ namespace UeAgentUmgOps
 		return Cast<UWidgetBlueprint>(LoadAssetObject(InPath));
 	}
 
+	FGuid MakeStableWidgetVariableGuid(const FString& VariableName)
+	{
+		FGuid Result;
+		const FString StableKey = TEXT("uai.umg.variable:") + VariableName.TrimStartAndEnd().ToLower();
+		FGuid::ParseExact(FMD5::HashAnsiString(*StableKey), EGuidFormats::Digits, Result);
+		return Result;
+	}
+
 	int32 SyncWidgetVariableGuidMap(UWidgetBlueprint* WidgetBlueprint)
 	{
 		if (!WidgetBlueprint)
@@ -129,7 +138,8 @@ namespace UeAgentUmgOps
 			FGuid* ExistingGuid = WidgetBlueprint->WidgetVariableNameToGuidMap.Find(VariableName);
 			if (!ExistingGuid || !ExistingGuid->IsValid())
 			{
-				WidgetBlueprint->WidgetVariableNameToGuidMap.Add(VariableName, FGuid::NewGuid());
+				WidgetBlueprint->WidgetVariableNameToGuidMap.Add(
+					VariableName, MakeStableWidgetVariableGuid(VariableName.ToString()));
 				++FixupCount;
 			}
 		};
@@ -162,7 +172,7 @@ namespace UeAgentUmgOps
 
 			if (!It.Value().IsValid() || SeenGuids.Contains(It.Value()))
 			{
-				It.Value() = FGuid::NewGuid();
+				It.Value() = MakeStableWidgetVariableGuid(It.Key().ToString());
 				++FixupCount;
 			}
 			SeenGuids.Add(It.Value());
@@ -479,12 +489,6 @@ bool FUeAgentHttpServer::ExecuteUmgCommand(const FString& CommandLower, const FU
 	if (CommandLower == TEXT("umg_get_info")) return CmdUmgGetInfo(Ctx, OutData, OutError);
 	if (CommandLower == TEXT("umg_screenshot")) return CmdUmgScreenshot(Ctx, OutData, OutError);
 	if (CommandLower == TEXT("umg_list_widget_events")) return CmdUmgListWidgetEvents(Ctx, OutData, OutError);
-	if (CommandLower == TEXT("umg_add_widget")) return CmdUmgAddWidget(Ctx, OutData, OutError);
-	if (CommandLower == TEXT("umg_remove_widget")) return CmdUmgRemoveWidget(Ctx, OutData, OutError);
-	if (CommandLower == TEXT("umg_set_widget_property")) return CmdUmgSetWidgetProperty(Ctx, OutData, OutError);
-	if (CommandLower == TEXT("umg_set_slot_property")) return CmdUmgSetSlotProperty(Ctx, OutData, OutError);
-	if (CommandLower == TEXT("umg_rename_widget")) return CmdUmgRenameWidget(Ctx, OutData, OutError);
-	if (CommandLower == TEXT("umg_bind_widget_property_to_variable")) return CmdUmgBindWidgetPropertyToVariable(Ctx, OutData, OutError);
 	if (CommandLower == TEXT("umg_export_folder")) return CmdUmgExportFolder(Ctx, OutData, OutError);
 	if (CommandLower == TEXT("umg_apply_folder")) return CmdUmgApplyFolder(Ctx, OutData, OutError);
 

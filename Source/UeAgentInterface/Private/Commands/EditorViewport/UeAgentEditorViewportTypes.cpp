@@ -6,7 +6,6 @@ namespace UeAgentEditorViewport
 {
 	const TCHAR* const SchemaState = TEXT("uai.editor_viewport.state.v1");
 	const TCHAR* const SchemaTarget = TEXT("uai.editor_viewport.target.v1");
-	const TCHAR* const SchemaScreenshot = TEXT("uai.editor_viewport.screenshot.v1");
 
 	FViewportTarget::FViewportTarget()
 		: Scope(TEXT("level"))
@@ -30,14 +29,6 @@ namespace UeAgentEditorViewport
 		: bCamera(false)
 		, bVisualOptions(false)
 		, bPreviewState(false)
-		, bScreenshot(false)
-	{
-	}
-
-	FViewportScreenshotResult::FViewportScreenshotResult()
-		: Width(0)
-		, Height(0)
-		, Bytes(0)
 	{
 	}
 
@@ -107,9 +98,7 @@ namespace UeAgentEditorViewport
 		Obj->SetBoolField(TEXT("camera"), Capabilities.bCamera);
 		Obj->SetBoolField(TEXT("visual_options"), Capabilities.bVisualOptions);
 		Obj->SetBoolField(TEXT("preview_state"), Capabilities.bPreviewState);
-		Obj->SetBoolField(TEXT("screenshot"), Capabilities.bScreenshot);
 		Obj->SetArrayField(TEXT("focus"), MakeStringArrayJson(Capabilities.FocusModes));
-		Obj->SetArrayField(TEXT("screenshot_backends"), MakeStringArrayJson(Capabilities.ScreenshotBackends));
 		Obj->SetArrayField(TEXT("visual_option_keys"), MakeStringArrayJson(Capabilities.VisualOptionKeys));
 		Obj->SetArrayField(TEXT("preview_state_keys"), MakeStringArrayJson(Capabilities.PreviewStateKeys));
 		Obj->SetArrayField(TEXT("unsupported_options"), MakeStringArrayJson(Capabilities.UnsupportedOptions));
@@ -127,24 +116,6 @@ namespace UeAgentEditorViewport
 		Obj->SetObjectField(TEXT("capabilities"), CapabilitiesToJson(State.Capabilities));
 		Obj->SetObjectField(TEXT("visual_options"), State.VisualOptions.IsValid() ? State.VisualOptions : MakeShared<FJsonObject>());
 		Obj->SetObjectField(TEXT("preview_state"), State.PreviewState.IsValid() ? State.PreviewState : MakeShared<FJsonObject>());
-		return Obj;
-	}
-
-	TSharedPtr<FJsonObject> ScreenshotResultToJson(const FViewportScreenshotResult& Result)
-	{
-		TSharedPtr<FJsonObject> Obj = MakeShared<FJsonObject>();
-		Obj->SetStringField(TEXT("schema"), SchemaScreenshot);
-		Obj->SetStringField(TEXT("file_path"), Result.FilePath);
-		Obj->SetStringField(TEXT("format"), Result.Format);
-		Obj->SetStringField(TEXT("capture_backend"), Result.CaptureBackend);
-		Obj->SetNumberField(TEXT("width"), Result.Width);
-		Obj->SetNumberField(TEXT("height"), Result.Height);
-		Obj->SetNumberField(TEXT("bytes"), static_cast<double>(Result.Bytes));
-		Obj->SetObjectField(TEXT("pixel_signal"), Result.PixelSignal.IsValid() ? Result.PixelSignal : MakeShared<FJsonObject>());
-		if (Result.Capture.IsValid())
-		{
-			Obj->SetObjectField(TEXT("capture"), Result.Capture);
-		}
 		return Obj;
 	}
 }

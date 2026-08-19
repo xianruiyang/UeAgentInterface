@@ -1,0 +1,406 @@
+{
+  "schema": "uai.historical_successor.v2",
+  "owner_task_id": "T31-DESTRUCTIVE-CONTENT-OPS",
+  "approval_authority": {
+    "path": "docs/plan/20260806_UAI_REQUIREMENT_DESIGN_REALIGNMENT/UAI_PRE_REFACTOR_COMMAND_APPROVAL.md",
+    "sha256": "3972f62273a13c8c8a971d7e31924e08c8fc59dad9f35abbb87089728c1c265e"
+  },
+  "commands": [
+    {
+      "historical_command_id": "asset_delete",
+      "approval": "1",
+      "historical_source": "docs/commands/01_Core_Level_Assets_Landscape.md",
+      "historical_contract": {
+        "inputs": "allow_dirty, allow_non_game, asset_path, asset_paths, delete_empty_folders, dry_run, folder_path, folder_paths, include_path_string_hits, recursive",
+        "outputs": "清理确认无外部引用的普通资产、临时 Niagara 资产或测试资产；同批次内部引用只诊断不阻断，有外部 referencer / 可疑路径字符串 / 打开编辑器 / 脏包时默认阻断；按文件夹删除时默认连空文件夹本体一起删除",
+        "purpose": "删除未被任何外部对象引用的资产"
+      },
+      "resolved_from_contract_id": "uai.historical_capability.t31.destructive.content.ops.asset_delete/1",
+      "successor": {
+        "kind": "exact_command_set",
+        "command_ids": [
+          "asset.delete"
+        ]
+      },
+      "semantic_coverage": {
+        "purpose": {
+          "status": "covered",
+          "by": [
+            "asset.delete"
+          ],
+          "explanation": "精确当前 destructive command 保留冻结用途并收敛到计划绑定授权：删除未被任何外部对象引用的资产"
+        },
+        "inputs": {
+          "status": "covered",
+          "by": [
+            "asset.delete"
+          ],
+          "explanation": "当前合同以精确目标字段、完整影响范围与 destructive_authorization_id 承接适用输入；不恢复旧批量 alias：allow_dirty, allow_non_game, asset_path, asset_paths, delete_empty_folders, dry_run, folder_path, folder_paths, include_path_string_hits, recursive"
+        },
+        "outputs": {
+          "status": "covered",
+          "by": [
+            "asset.delete"
+          ],
+          "explanation": "当前结果返回计划、终态、原生 mechanics projection 与独立持久化读回，覆盖冻结输出：清理确认无外部引用的普通资产、临时 Niagara 资产或测试资产；同批次内部引用只诊断不阻断，有外部 referencer / 可疑路径字符串 / 打开编辑器 / 脏包时默认阻断；按文件夹删除时默认连空文件夹本体一起删除"
+        }
+      },
+      "product_evidence": {
+        "test_id": "UAI.DeliveryWorkflow.T31.DESTRUCTIVE.CONTENT.OPS",
+        "public_command_ids": [
+          "asset.delete"
+        ],
+        "architecture_contract_ids": [
+          "DES-UAI-OPERATION-LIFECYCLE"
+        ],
+        "required_claims": [
+          "public_entry",
+          "behavior",
+          "readback",
+          "terminal_state",
+          "failure_semantics",
+          "cleanup",
+          "legacy_exit",
+          "documentation"
+        ]
+      },
+      "old_id_exit": {
+        "public_executable": false,
+        "manifest_active": false,
+        "sdk_binding_active": false,
+        "compatibility_alias": false
+      },
+      "final_lifecycle": "deprecated_replaced"
+    },
+    {
+      "historical_command_id": "asset_duplicate",
+      "approval": "1",
+      "historical_source": "docs/commands/01_Core_Level_Assets_Landscape.md",
+      "historical_contract": {
+        "inputs": "destination_asset_path, save_after_duplicate, source_asset_path",
+        "outputs": "先复制测试资产，再在副本上做安全修改",
+        "purpose": "复制资产到指定路径"
+      },
+      "resolved_from_contract_id": "uai.historical_capability.t31.destructive.content.ops.asset_duplicate/1",
+      "successor": {
+        "kind": "exact_command_set",
+        "command_ids": [
+          "asset.object.clone"
+        ]
+      },
+      "semantic_coverage": {
+        "purpose": {
+          "status": "covered",
+          "by": [
+            "asset.object.clone"
+          ],
+          "explanation": "精确当前 destructive command 保留冻结用途并收敛到计划绑定授权：复制资产到指定路径"
+        },
+        "inputs": {
+          "status": "covered",
+          "by": [
+            "asset.object.clone"
+          ],
+          "explanation": "当前合同以精确目标字段、完整影响范围与 destructive_authorization_id 承接适用输入；不恢复旧批量 alias：destination_asset_path, save_after_duplicate, source_asset_path"
+        },
+        "outputs": {
+          "status": "covered",
+          "by": [
+            "asset.object.clone"
+          ],
+          "explanation": "当前结果返回计划、终态、原生 mechanics projection 与独立持久化读回，覆盖冻结输出：先复制测试资产，再在副本上做安全修改"
+        }
+      },
+      "product_evidence": {
+        "test_id": "UAI.DeliveryWorkflow.T31.DESTRUCTIVE.CONTENT.OPS",
+        "public_command_ids": [
+          "asset.object.clone"
+        ],
+        "architecture_contract_ids": [
+          "DES-UAI-OPERATION-LIFECYCLE"
+        ],
+        "required_claims": [
+          "public_entry",
+          "behavior",
+          "readback",
+          "terminal_state",
+          "failure_semantics",
+          "cleanup",
+          "legacy_exit",
+          "documentation"
+        ]
+      },
+      "old_id_exit": {
+        "public_executable": false,
+        "manifest_active": false,
+        "sdk_binding_active": false,
+        "compatibility_alias": false
+      },
+      "final_lifecycle": "deprecated_replaced"
+    },
+    {
+      "historical_command_id": "asset_fixup_redirectors",
+      "approval": "1)",
+      "historical_source": "docs/commands/01_Core_Level_Assets_Landscape.md",
+      "historical_contract": {
+        "inputs": "asset_path, asset_paths, dry_run, fail_on_blocked, folder_path, folder_paths, recursive",
+        "outputs": "redirector_still_referenced",
+        "purpose": "删除资产移动后已无引用的 `ObjectRedirector`"
+      },
+      "resolved_from_contract_id": "uai.historical_capability.t31.destructive.content.ops.asset_fixup_redirectors/1",
+      "successor": {
+        "kind": "exact_command_set",
+        "command_ids": [
+          "asset.fixup_redirectors"
+        ]
+      },
+      "semantic_coverage": {
+        "purpose": {
+          "status": "covered",
+          "by": [
+            "asset.fixup_redirectors"
+          ],
+          "explanation": "精确当前 destructive command 保留冻结用途并收敛到计划绑定授权：删除资产移动后已无引用的 `ObjectRedirector`"
+        },
+        "inputs": {
+          "status": "covered",
+          "by": [
+            "asset.fixup_redirectors"
+          ],
+          "explanation": "当前合同以精确目标字段、完整影响范围与 destructive_authorization_id 承接适用输入；不恢复旧批量 alias：asset_path, asset_paths, dry_run, fail_on_blocked, folder_path, folder_paths, recursive"
+        },
+        "outputs": {
+          "status": "covered",
+          "by": [
+            "asset.fixup_redirectors"
+          ],
+          "explanation": "当前结果返回计划、终态、原生 mechanics projection 与独立持久化读回，覆盖冻结输出：redirector_still_referenced"
+        }
+      },
+      "product_evidence": {
+        "test_id": "UAI.DeliveryWorkflow.T31.DESTRUCTIVE.CONTENT.OPS",
+        "public_command_ids": [
+          "asset.fixup_redirectors"
+        ],
+        "architecture_contract_ids": [
+          "DES-UAI-OPERATION-LIFECYCLE"
+        ],
+        "required_claims": [
+          "public_entry",
+          "behavior",
+          "readback",
+          "terminal_state",
+          "failure_semantics",
+          "cleanup",
+          "legacy_exit",
+          "documentation"
+        ]
+      },
+      "old_id_exit": {
+        "public_executable": false,
+        "manifest_active": false,
+        "sdk_binding_active": false,
+        "compatibility_alias": false
+      },
+      "final_lifecycle": "deprecated_replaced"
+    },
+    {
+      "historical_command_id": "asset_move",
+      "approval": "1)",
+      "historical_source": "docs/commands/01_Core_Level_Assets_Landscape.md",
+      "historical_contract": {
+        "inputs": "asset_path, destination_asset_path, destination_folder, destination_name/dry_run/save_after_move, source_asset_path",
+        "outputs": "把旧资产归档到 Deprecated 目录，同时让 UE 处理重命名、引用更新和保存",
+        "purpose": "通过 UE AssetTools 移动或重命名资产"
+      },
+      "resolved_from_contract_id": "uai.historical_capability.t31.destructive.content.ops.asset_move/1",
+      "successor": {
+        "kind": "exact_command_set",
+        "command_ids": [
+          "asset.move"
+        ]
+      },
+      "semantic_coverage": {
+        "purpose": {
+          "status": "covered",
+          "by": [
+            "asset.move"
+          ],
+          "explanation": "精确当前 destructive command 保留冻结用途并收敛到计划绑定授权：通过 UE AssetTools 移动或重命名资产"
+        },
+        "inputs": {
+          "status": "covered",
+          "by": [
+            "asset.move"
+          ],
+          "explanation": "当前合同以精确目标字段、完整影响范围与 destructive_authorization_id 承接适用输入；不恢复旧批量 alias：asset_path, destination_asset_path, destination_folder, destination_name/dry_run/save_after_move, source_asset_path"
+        },
+        "outputs": {
+          "status": "covered",
+          "by": [
+            "asset.move"
+          ],
+          "explanation": "当前结果返回计划、终态、原生 mechanics projection 与独立持久化读回，覆盖冻结输出：把旧资产归档到 Deprecated 目录，同时让 UE 处理重命名、引用更新和保存"
+        }
+      },
+      "product_evidence": {
+        "test_id": "UAI.DeliveryWorkflow.T31.DESTRUCTIVE.CONTENT.OPS",
+        "public_command_ids": [
+          "asset.move"
+        ],
+        "architecture_contract_ids": [
+          "DES-UAI-OPERATION-LIFECYCLE"
+        ],
+        "required_claims": [
+          "public_entry",
+          "behavior",
+          "readback",
+          "terminal_state",
+          "failure_semantics",
+          "cleanup",
+          "legacy_exit",
+          "documentation"
+        ]
+      },
+      "old_id_exit": {
+        "public_executable": false,
+        "manifest_active": false,
+        "sdk_binding_active": false,
+        "compatibility_alias": false
+      },
+      "final_lifecycle": "deprecated_replaced"
+    },
+    {
+      "historical_command_id": "level_streaming_move_actors",
+      "approval": "2)",
+      "historical_source": "docs/commands/25_LevelTopology_Streaming_WorldPartition_DataLayer_HLOD.md",
+      "historical_contract": {
+        "inputs": "actor_ids, folder_root, level_package, target_level, warn_about_references",
+        "outputs": "actor_results[], moved_count",
+        "purpose": "将 Actor 移入目标子关卡"
+      },
+      "resolved_from_contract_id": "uai.historical_capability.t31.destructive.content.ops.level_streaming_move_actors/1",
+      "successor": {
+        "kind": "exact_command_set",
+        "command_ids": [
+          "world.level_streaming.move_actors"
+        ]
+      },
+      "semantic_coverage": {
+        "purpose": {
+          "status": "covered",
+          "by": [
+            "world.level_streaming.move_actors"
+          ],
+          "explanation": "精确当前 destructive command 保留冻结用途并收敛到计划绑定授权：将 Actor 移入目标子关卡"
+        },
+        "inputs": {
+          "status": "covered",
+          "by": [
+            "world.level_streaming.move_actors"
+          ],
+          "explanation": "当前合同以精确目标字段、完整影响范围与 destructive_authorization_id 承接适用输入；不恢复旧批量 alias：actor_ids, folder_root, level_package, target_level, warn_about_references"
+        },
+        "outputs": {
+          "status": "covered",
+          "by": [
+            "world.level_streaming.move_actors"
+          ],
+          "explanation": "当前结果返回计划、终态、原生 mechanics projection 与独立持久化读回，覆盖冻结输出：actor_results[], moved_count"
+        }
+      },
+      "product_evidence": {
+        "test_id": "UAI.DeliveryWorkflow.T31.DESTRUCTIVE.CONTENT.OPS",
+        "public_command_ids": [
+          "world.level_streaming.move_actors"
+        ],
+        "architecture_contract_ids": [
+          "DES-UAI-OPERATION-LIFECYCLE"
+        ],
+        "required_claims": [
+          "public_entry",
+          "behavior",
+          "readback",
+          "terminal_state",
+          "failure_semantics",
+          "cleanup",
+          "legacy_exit",
+          "documentation"
+        ]
+      },
+      "old_id_exit": {
+        "public_executable": false,
+        "manifest_active": false,
+        "sdk_binding_active": false,
+        "compatibility_alias": false
+      },
+      "final_lifecycle": "deprecated_replaced"
+    },
+    {
+      "historical_command_id": "level_streaming_remove",
+      "approval": "2)",
+      "historical_source": "docs/commands/25_LevelTopology_Streaming_WorldPartition_DataLayer_HLOD.md",
+      "historical_contract": {
+        "inputs": "clear_selection, delete_asset, level_package, reset_transaction_buffer",
+        "outputs": "delete_asset, level_package, removed",
+        "purpose": "从当前 World 移除 streaming level"
+      },
+      "resolved_from_contract_id": "uai.historical_capability.t31.destructive.content.ops.level_streaming_remove/1",
+      "successor": {
+        "kind": "exact_command_set",
+        "command_ids": [
+          "world.level_streaming.remove"
+        ]
+      },
+      "semantic_coverage": {
+        "purpose": {
+          "status": "covered",
+          "by": [
+            "world.level_streaming.remove"
+          ],
+          "explanation": "精确当前 destructive command 保留冻结用途并收敛到计划绑定授权：从当前 World 移除 streaming level"
+        },
+        "inputs": {
+          "status": "covered",
+          "by": [
+            "world.level_streaming.remove"
+          ],
+          "explanation": "当前合同以精确目标字段、完整影响范围与 destructive_authorization_id 承接适用输入；不恢复旧批量 alias：clear_selection, delete_asset, level_package, reset_transaction_buffer"
+        },
+        "outputs": {
+          "status": "covered",
+          "by": [
+            "world.level_streaming.remove"
+          ],
+          "explanation": "当前结果返回计划、终态、原生 mechanics projection 与独立持久化读回，覆盖冻结输出：delete_asset, level_package, removed"
+        }
+      },
+      "product_evidence": {
+        "test_id": "UAI.DeliveryWorkflow.T31.DESTRUCTIVE.CONTENT.OPS",
+        "public_command_ids": [
+          "world.level_streaming.remove"
+        ],
+        "architecture_contract_ids": [
+          "DES-UAI-OPERATION-LIFECYCLE"
+        ],
+        "required_claims": [
+          "public_entry",
+          "behavior",
+          "readback",
+          "terminal_state",
+          "failure_semantics",
+          "cleanup",
+          "legacy_exit",
+          "documentation"
+        ]
+      },
+      "old_id_exit": {
+        "public_executable": false,
+        "manifest_active": false,
+        "sdk_binding_active": false,
+        "compatibility_alias": false
+      },
+      "final_lifecycle": "deprecated_replaced"
+    }
+  ]
+}

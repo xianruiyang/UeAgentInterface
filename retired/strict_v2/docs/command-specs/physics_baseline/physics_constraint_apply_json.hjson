@@ -1,0 +1,104 @@
+authoring: { reason: command_has_no_registered_folder_authoring_profile, state: none }
+category: physics_baseline
+command: physics_constraint_apply_json
+deprecation: { reason: command_is_active, state: none }
+discovery: { aliases: [], keywords_en: [physics, constraint, apply, json, physics_baseline], keywords_zh: [physics_constraint_apply_json], summary_en: "Execute physics_constraint_apply_json with a verified implementation contract", summary_zh: "创建或更新场景 PhysicsConstraintActor/Component 并绑定两个 PrimitiveComponent", tags: [physics_baseline, p2-006] }
+errors: {
+  codes: [
+    { code: details_duplicate_property_path, description_zh: "C++ 实现返回错误码 details_duplicate_property_path", retry_safe: false, stage: execution, wire_match: prefix }
+    { code: details_field_missing_property_path, description_zh: "C++ 实现返回错误码 details_field_missing_property_path", retry_safe: true, stage: preflight, wire_match: prefix }
+    { code: details_group_missing_fields, description_zh: "C++ 实现返回错误码 details_group_missing_fields", retry_safe: true, stage: preflight, wire_match: prefix }
+    { code: details_index_invalid_group, description_zh: "C++ 实现返回错误码 details_index_invalid_group", retry_safe: true, stage: preflight, wire_match: prefix }
+    { code: details_index_missing_groups, description_zh: "C++ 实现返回错误码 details_index_missing_groups", retry_safe: true, stage: preflight, wire_match: exact }
+    { code: details_rehydrate_missing_properties, description_zh: "C++ 实现返回错误码 details_rehydrate_missing_properties", retry_safe: true, stage: preflight, wire_match: prefix }
+    { code: entry_object_invalid, description_zh: "C++ 实现返回错误码 entry_object_invalid", retry_safe: true, stage: preflight, wire_match: exact }
+    { code: hjson_file_not_found, description_zh: "C++ 实现返回错误码 hjson_file_not_found", retry_safe: false, stage: execution, wire_match: prefix }
+    { code: hjson_file_required, description_zh: "C++ 实现返回错误码 hjson_file_required", retry_safe: true, stage: preflight, wire_match: prefix }
+    { code: invalid_constraint_apply_target, description_zh: "C++ 实现返回错误码 invalid_constraint_apply_target", retry_safe: true, stage: preflight, wire_match: exact }
+    { code: missing_input_file, description_zh: "C++ 实现返回错误码 missing_input_file", retry_safe: true, stage: preflight, wire_match: exact }
+    { code: missing_json_or_json_file, description_zh: "C++ 实现返回错误码 missing_json_or_json_file", retry_safe: true, stage: preflight, wire_match: exact }
+    { code: no_editor_world, description_zh: "C++ 实现返回错误码 no_editor_world", retry_safe: false, stage: execution, wire_match: exact }
+    { code: no_geditor, description_zh: "C++ 实现返回错误码 no_geditor", retry_safe: false, stage: execution, wire_match: exact }
+    { code: physics_constraint_component_unresolved, description_zh: "C++ 实现返回错误码 physics_constraint_component_unresolved", retry_safe: false, stage: execution, wire_match: exact }
+    { code: physics_constraint_endpoint_unresolved, description_zh: "C++ 实现返回错误码 physics_constraint_endpoint_unresolved", retry_safe: false, stage: execution, wire_match: exact }
+    { code: physics_constraint_json_invalid, description_zh: "C++ 实现返回错误码 physics_constraint_json_invalid", retry_safe: true, stage: preflight, wire_match: exact }
+    { code: physics_constraint_target_unresolved, description_zh: "C++ 实现返回错误码 physics_constraint_target_unresolved", retry_safe: false, stage: execution, wire_match: exact }
+  ]
+}
+evidence: {
+  docs: [
+    { path: "Plugins/UeAgentInterface/docs/commands/physics_baseline/physics_constraint_apply_json.md", purpose: "user documentation cross-check; C++ implementation remains authoritative" }
+  ]
+  implementation: [
+    { line_hint: 1606, path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Commands/Physics/UeAgentHttpServer_Physics.cpp", purpose: "command handler, parameter and return evidence", symbol: CmdPhysicsConstraintApplyJson }
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Commands/Level/UeAgentHttpServer_Level_CaptureAndPersistence.cpp", purpose: "transitive helper evidence used by the command handler" }
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Server/UeAgentHttpServer.cpp", purpose: "transitive helper evidence used by the command handler" }
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Utilities/UeAgentAuthoringFileIO.cpp", purpose: "transitive helper evidence used by the command handler" }
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Utilities/UeAgentDetailsAuthoring.cpp", purpose: "transitive helper evidence used by the command handler" }
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Utilities/UeAgentStructuredAuthoringIO.cpp", purpose: "transitive helper evidence used by the command handler" }
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Utilities/UeAgentStructuredHjsonFormatter.cpp", purpose: "transitive helper evidence used by the command handler" }
+  ]
+  tests: [
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterfaceTests/Private/Smoke/Physics/UeAgentInterfacePhysicsSmokeTests.cpp", purpose: "smoke or negative-path evidence cross-checked for the verified contract" }
+  ]
+}
+execution: {
+  destructive: false
+  editor_state: required
+  game_thread: required
+  idempotent: false
+  kind: write
+  overwrite_behavior: none
+  pie_state: allowed
+  retry_safe: false
+  save_behavior: none
+  side_effects: [modifies_asset]
+  ui_effect: none
+}
+maturity: verified
+params: {
+  constraints: []
+  fields: {
+    create_if_missing: { default: true, default_state: defined, description_zh: "C++ 实现读取的 create_if_missing 参数", required: false, type: bool }
+    json: { default_state: none, description_zh: "C++ 实现读取的 json 参数", required: true, type: json_value }
+    json_file: {
+      default_state: none
+      description_zh: "C++ 实现读取的 json_file 参数"
+      path_semantics: { kind: filesystem_file, must_exist: false, writable: false }
+      required: false
+      type: filesystem_path
+    }
+  }
+  state: defined
+}
+response: { artifact_fields: [endpoint_issues, constrained, constraint, endpoint_resolution, target, validation], compact_fields: [actor_created, resolved], failure_fields: [params.json], max_items_policy: { fields: [], mode: none } }
+returns: {
+  fields: {
+    actor_created: { description_zh: "C++ 实现返回的 actor_created 字段；是否出现取决于执行分支", required: false, type: bool }
+    constrained: { description_zh: "C++ 实现返回的 constrained 字段；是否出现取决于执行分支", required: false, type: json_value }
+    constraint: { description_zh: "C++ 实现返回的 constraint 字段；是否出现取决于执行分支", required: false, type: json_value }
+    endpoint_issues: { description_zh: "C++ 实现返回的 endpoint_issues 字段；是否出现取决于执行分支", item_type: json_value, required: false, type: array }
+    endpoint_resolution: { description_zh: "C++ 实现返回的 endpoint_resolution 字段；是否出现取决于执行分支", required: false, type: json_value }
+    resolved: { description_zh: "C++ 实现返回的 resolved 字段；是否出现取决于执行分支", required: false, type: bool }
+    schema: { description_zh: "C++ 实现返回的 schema 字段；是否出现取决于执行分支", required: false, type: string }
+    set_constrained_components_applied: { description_zh: "C++ 实现返回的 set_constrained_components_applied 字段；是否出现取决于执行分支", required: false, type: bool }
+    target: { description_zh: "C++ 实现返回的 target 字段；是否出现取决于执行分支", required: false, type: json_value }
+    validation: { description_zh: "C++ 实现返回的 validation 字段；是否出现取决于执行分支", required: false, type: json_value }
+  }
+  state: defined
+}
+schema: uai.command_spec.v1
+status: active
+types: {}
+verification: {
+  assertions: [
+    { id: result_present, operator: exists, source: returns.actor_created }
+  ]
+  failure_policy: fail_overall
+  methods: [
+    { id: result, kind: result_assertion }
+  ]
+  required: true
+  state: defined
+}
+version: 1

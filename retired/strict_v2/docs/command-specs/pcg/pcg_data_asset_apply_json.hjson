@@ -1,0 +1,85 @@
+authoring: { reason: command_has_no_registered_folder_authoring_profile, state: none }
+category: pcg
+command: pcg_data_asset_apply_json
+deprecation: { reason: command_is_active, state: none }
+discovery: { aliases: [], keywords_en: [pcg, data, asset, apply, json], keywords_zh: [pcg_data_asset_apply_json], summary_en: "Execute pcg_data_asset_apply_json with a verified implementation contract", summary_zh: "创建或更新 `UPCGDataAsset` 元数据", tags: [pcg, p2-005] }
+errors: {
+  codes: [
+    { code: create_package_failed, description_zh: "C++ 实现返回错误码 create_package_failed", retry_safe: false, stage: execution, wire_match: exact }
+    { code: create_pcg_data_asset_failed, description_zh: "C++ 实现返回错误码 create_pcg_data_asset_failed", retry_safe: false, stage: execution, wire_match: exact }
+    { code: invalid_asset_path, description_zh: "C++ 实现返回错误码 invalid_asset_path", retry_safe: true, stage: preflight, wire_match: exact }
+    { code: missing_asset_path, description_zh: "C++ 实现返回错误码 missing_asset_path", retry_safe: true, stage: preflight, wire_match: exact }
+    { code: pcg_data_asset_not_found, description_zh: "C++ 实现返回错误码 pcg_data_asset_not_found", retry_safe: false, stage: execution, wire_match: exact }
+    { code: save_package_failed, description_zh: "C++ 实现返回错误码 save_package_failed", retry_safe: false, stage: execution, wire_match: exact }
+  ]
+}
+evidence: {
+  docs: [
+    { path: "Plugins/UeAgentInterface/docs/commands/pcg/pcg_data_asset_apply_json.md", purpose: "user documentation cross-check; C++ implementation remains authoritative" }
+  ]
+  implementation: [
+    { line_hint: 4536, path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Commands/PCG/UeAgentHttpServer_PCG.cpp", purpose: "command handler, parameter and return evidence", symbol: CmdPCGDataAssetApplyJson }
+  ]
+  tests: [
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterfaceTests/Private/Smoke/PCG/UeAgentInterfacePCGSmokeTests.cpp", purpose: "smoke or negative-path evidence cross-checked for the verified contract" }
+  ]
+}
+execution: {
+  destructive: false
+  editor_state: required
+  game_thread: required
+  idempotent: false
+  kind: write
+  overwrite_behavior: none
+  pie_state: allowed
+  retry_safe: false
+  save_behavior: caller_controlled
+  side_effects: [modifies_asset]
+  ui_effect: none
+}
+maturity: verified
+params: {
+  constraints: [
+    { fields: [asset_path, data_asset], kind: one_of }
+  ]
+  fields: {
+    asset_path: { default_state: none, description_zh: "C++ 实现读取的 asset_path 参数", path_semantics: { access_scope: project_write, kind: ue_asset }, required: false, type: ue_asset_path }
+    category: { default_state: none, description_zh: "C++ 实现读取的 category 参数", required: false, type: string }
+    create: { default: true, default_state: defined, description_zh: "C++ 实现读取的 create 参数", required: false, type: bool }
+    data_asset: { default_state: none, description_zh: "C++ 实现读取的 data_asset 参数", required: false, type: string }
+    description: { default_state: none, description_zh: "C++ 实现读取的 description 参数", required: false, type: string }
+    expose_to_library: { default: false, default_state: defined, description_zh: "C++ 实现读取的 expose_to_library 参数", required: false, type: bool }
+    name: { default_state: none, description_zh: "C++ 实现读取的 name 参数", required: false, type: string }
+    object_path: { default_state: none, description_zh: "C++ 实现读取的 object_path 参数", path_semantics: { access_scope: project_write, kind: ue_object }, required: false, type: ue_object_path }
+    object_path_source: { default_state: none, description_zh: "C++ 实现读取的 object_path_source 参数", required: false, type: string }
+    save: { default: true, default_state: defined, description_zh: "C++ 实现读取的 save 参数", required: false, type: bool }
+  }
+  state: defined
+}
+response: { artifact_fields: [], compact_fields: [asset_path, created, object_path, schema], failure_fields: [params.asset_path, params.data_asset], max_items_policy: { fields: [], mode: none } }
+returns: {
+  fields: {
+    asset_path: { description_zh: "C++ 实现返回的 asset_path 字段；是否出现取决于执行分支", required: false, type: ue_asset_path }
+    created: { description_zh: "C++ 实现返回的 created 字段；是否出现取决于执行分支", required: false, type: bool }
+    object_path: { description_zh: "C++ 实现返回的 object_path 字段；是否出现取决于执行分支", required: false, type: ue_object_path }
+    schema: { description_zh: "C++ 实现返回的 schema 字段；是否出现取决于执行分支", required: false, type: string }
+  }
+  state: defined
+}
+schema: uai.command_spec.v1
+status: active
+types: {}
+verification: {
+  assertions: [
+    { id: result_present, operator: exists, source: returns.asset_path }
+    { id: state_readback_present, operator: exists, source: methods.state_readback.asset_path }
+  ]
+  failure_policy: fail_overall
+  methods: [
+    { id: result, kind: result_assertion }
+    { command: pcg_asset_info, id: state_readback, kind: command_readback, params_mapping: { asset_path: returns.asset_path } }
+  ]
+  required: true
+  state: defined
+}
+version: 1

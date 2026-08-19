@@ -1,0 +1,16 @@
+definition: {
+  additional_fields: true
+  fields: {
+    label: { default_state: none, description_zh: "候选显示标签", required: false, type: string }
+    location: { default_state: none, description_zh: "直接 location；绝对模式为 world cm，relative 模式为 world location offset", required: false, type: object, type_ref: "shared:Vector3" }
+    relative: { default_state: none, description_zh: "是否按原 Actor world transform 的分量增量解释", required: false, type: bool }
+    relative_to_original: { default_state: none, description_zh: "relative 别名", required: false, type: bool }
+    rotation: { default_state: none, description_zh: "直接 rotation；绝对模式为 world rotation，relative 模式为 world Euler offset", required: false, type: object, type_ref: "shared:Rotator3D" }
+    scale: { default_state: none, description_zh: "直接 scale；绝对模式为 world scale，relative 模式为分量乘数", required: false, type: object, type_ref: "shared:Vector3" }
+    transform: { default_state: none, description_zh: "候选 transform；绝对模式为 UE world，relative 模式为 world 分量增量", required: false, type: object, type_ref: "shared:Transform3D" }
+  }
+  kind: object
+}
+schema: uai.command_spec.shared_type.v1
+type_id: ProbeActorTransformCandidate
+version: 1

@@ -1,0 +1,95 @@
+authoring: { reason: command_has_no_registered_folder_authoring_profile, state: none }
+category: core_level
+command: level_get_nearby_mesh_shapes
+deprecation: { reason: command_is_active, state: none }
+discovery: { aliases: [], keywords_en: [level, get, nearby, mesh, shapes, core_level], keywords_zh: [level_get_nearby_mesh_shapes], summary_en: "Execute level_get_nearby_mesh_shapes with a verified implementation contract", summary_zh: "查询世界范围内 Actor/Component/Instance 的简单碰撞 shape，缺少简单碰撞时按配置返回 visual fallback。", tags: [core_level, p2-002] }
+errors: {
+  codes: [
+    { code: invalid_obb_half_extent, description_zh: "C++ 实现返回错误码 invalid_obb_half_extent", retry_safe: true, stage: preflight, wire_match: exact }
+    { code: missing_aabb_min_max_or_center_extent, description_zh: "C++ 实现返回错误码 missing_aabb_min_max_or_center_extent", retry_safe: true, stage: preflight, wire_match: exact }
+    { code: missing_obb_center_or_axes, description_zh: "C++ 实现返回错误码 missing_obb_center_or_axes", retry_safe: true, stage: preflight, wire_match: exact }
+    { code: missing_obb_half_extent, description_zh: "C++ 实现返回错误码 missing_obb_half_extent", retry_safe: true, stage: preflight, wire_match: exact }
+    { code: missing_sphere_center_or_radius, description_zh: "C++ 实现返回错误码 missing_sphere_center_or_radius", retry_safe: true, stage: preflight, wire_match: exact }
+    { code: no_editor_world, description_zh: "C++ 实现返回错误码 no_editor_world", retry_safe: false, stage: execution, wire_match: exact }
+    { code: no_geditor, description_zh: "C++ 实现返回错误码 no_geditor", retry_safe: false, stage: execution, wire_match: exact }
+    { code: unsupported_detail_level, description_zh: "C++ 实现返回错误码 unsupported_detail_level", retry_safe: false, stage: execution, wire_match: prefix }
+    { code: unsupported_output_style, description_zh: "C++ 实现返回错误码 unsupported_output_style", retry_safe: false, stage: execution, wire_match: prefix }
+    { code: unsupported_query_type, description_zh: "C++ 实现返回错误码 unsupported_query_type", retry_safe: false, stage: execution, wire_match: prefix }
+    { code: unsupported_type, description_zh: "C++ 实现返回错误码 unsupported_type", retry_safe: false, stage: execution, wire_match: prefix }
+  ]
+}
+evidence: {
+  docs: [
+    { path: "Plugins/UeAgentInterface/docs/commands/core_level/level_get_nearby_mesh_shapes.md", purpose: "user documentation cross-check; C++ implementation remains authoritative" }
+  ]
+  implementation: [
+    { line_hint: 1013, path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Commands/Level/UeAgentHttpServer_Level_MeshShapes.cpp", purpose: "command handler, parameter and return evidence", symbol: CmdLevelGetNearbyMeshShapes }
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Commands/Level/UeAgentHttpServer_Level_CaptureAndPersistence.cpp", purpose: "transitive helper evidence used by the command handler" }
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Commands/Modeling/UeAgentHttpServer_Modeling.cpp", purpose: "transitive helper evidence used by the command handler" }
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Commands/Niagara/UeAgentHttpServer_Niagara_UtilityCore.inl", purpose: "transitive helper evidence used by the command handler" }
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Utilities/UeAgentJsonDiagnostics.cpp", purpose: "transitive helper evidence used by the command handler" }
+  ]
+  tests: [
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterfaceTests/Private/Smoke/UeAgentInterfaceSmoke_LevelViewportModeling.cpp", purpose: "smoke or negative-path evidence cross-checked for the verified contract" }
+  ]
+}
+execution: {
+  destructive: false
+  editor_state: required
+  game_thread: required
+  idempotent: true
+  kind: read_only
+  overwrite_behavior: none
+  pie_state: allowed
+  retry_safe: true
+  save_behavior: none
+  side_effects: []
+  ui_effect: none
+}
+maturity: verified
+params: {
+  constraints: []
+  fields: {
+    accept_folder_path_prefix: { default_state: none, description_zh: "C++ 实现读取的 accept_folder_path_prefix 参数", required: false, type: string }
+    axis_x: { default_state: none, description_zh: "C++ 实现读取的 axis_x 参数", required: false, type: json_value }
+    axis_y: { default_state: none, description_zh: "C++ 实现读取的 axis_y 参数", required: false, type: json_value }
+    axis_z: { default_state: none, description_zh: "C++ 实现读取的 axis_z 参数", required: false, type: json_value }
+    center: { default_state: none, description_zh: "C++ 实现读取的 center 参数", required: false, type: json_value }
+    detail_level: { default: summary, default_state: defined, description_zh: "C++ 实现读取的 detail_level 参数", required: false, type: string }
+    extent: { default_state: none, description_zh: "C++ 实现读取的 extent 参数", required: false, type: json_value }
+    filters: { default_state: none, description_zh: "C++ 实现读取的 filters 参数", required: false, type: json_value }
+    folder_path_prefix: { default_state: none, description_zh: "C++ 实现读取的 folder_path_prefix 参数", required: false, type: string }
+    half_extent: { default_state: none, description_zh: "C++ 实现读取的 half_extent 参数", required: false, type: json_value }
+    half_extents: { default_state: none, description_zh: "C++ 实现读取的 half_extents 参数", required: false, type: json_value }
+    ignore_folder_path_prefix: { default_state: none, description_zh: "C++ 实现读取的 ignore_folder_path_prefix 参数", required: false, type: string }
+    include_visual_fallback: { default: true, default_state: defined, description_zh: "C++ 实现读取的 include_visual_fallback 参数", required: false, type: bool }
+    limit: { default: 1000, default_state: defined, description_zh: "C++ 实现读取的 limit 参数", required: false, type: integer }
+    max: { default_state: none, description_zh: "C++ 实现读取的 max 参数", required: false, type: json_value }
+    max_shapes_per_actor: { default: 64, default_state: defined, description_zh: "C++ 实现读取的 max_shapes_per_actor 参数", required: false, type: integer }
+    min: { default_state: none, description_zh: "C++ 实现读取的 min 参数", required: false, type: json_value }
+    output_style: { default: compact, default_state: defined, description_zh: "C++ 实现读取的 output_style 参数", required: false, type: string }
+    query: { default_state: none, description_zh: "C++ 实现读取的 query 参数", required: false, type: json_value }
+    radius: { default: 0, default_state: defined, description_zh: "C++ 实现读取的 radius 参数", required: false, type: number }
+    type: { default: sphere, default_state: defined, description_zh: "C++ 实现读取的 type 参数", required: false, type: string }
+  }
+  state: defined
+}
+response: { artifact_fields: [], compact_fields: [actor_count, actors, component_owner_count, detail_level, omitted_actors, output_style], failure_fields: [], max_items_policy: { fields: [], mode: none } }
+returns: {
+  fields: {
+    actor_count: { description_zh: "C++ 实现返回的 actor_count 字段；是否出现取决于执行分支", required: false, type: integer }
+    actors: { description_zh: "C++ 实现返回的 actors 字段；是否出现取决于执行分支", item_type: json_value, required: false, type: array }
+    component_owner_count: { description_zh: "C++ 实现返回的 component_owner_count 字段；是否出现取决于执行分支", required: false, type: integer }
+    detail_level: { description_zh: "C++ 实现返回的 detail_level 字段；是否出现取决于执行分支", required: false, type: string }
+    omitted_actors: { description_zh: "C++ 实现返回的 omitted_actors 字段；是否出现取决于执行分支", required: false, type: number }
+    output_style: { description_zh: "C++ 实现返回的 output_style 字段；是否出现取决于执行分支", required: false, type: string }
+    q: { description_zh: "C++ 实现返回的 q 字段；是否出现取决于执行分支", required: false, type: json_value }
+    shape_space: { description_zh: "C++ 实现返回的 shape_space 字段；是否出现取决于执行分支", required: false, type: json_value }
+  }
+  state: defined
+}
+schema: uai.command_spec.v1
+status: active
+types: {}
+verification: { reason: read_only_command_has_no_post_write_verification, state: none }
+version: 1

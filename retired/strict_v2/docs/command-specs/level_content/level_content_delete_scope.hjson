@@ -1,0 +1,141 @@
+authoring: { reason: level_command_is_not_a_registered_folder_operation, state: none }
+category: level_content
+command: level_content_delete_scope
+deprecation: { reason: command_is_active, state: none }
+discovery: { aliases: [], keywords_en: [level, content, delete, scope, level_content], keywords_zh: [level_content_delete_scope], summary_en: "Execute level_content_delete_scope with a verified implementation contract", summary_zh: "按 Outliner folder 清理当前关卡 Actor，交互语义对齐 asset_delete。", tags: [level_content, p2-002] }
+errors: {
+  codes: [
+    { code: allow_destructive_required, description_zh: "C++ 实现返回错误码 allow_destructive_required", retry_safe: true, stage: preflight, wire_match: exact }
+    { code: editor_actor_subsystem_unavailable, description_zh: "C++ 实现返回错误码 editor_actor_subsystem_unavailable", retry_safe: false, stage: execution, wire_match: exact }
+    { code: invalid_, description_zh: "C++ 实现返回错误码 invalid_", retry_safe: true, stage: preflight, wire_match: prefix }
+    { code: level_content_delete_scope_blocked, description_zh: "C++ 实现返回错误码 level_content_delete_scope_blocked", retry_safe: false, stage: execution, wire_match: exact }
+    { code: level_content_delete_scope_folder_incomplete, description_zh: "C++ 实现返回错误码 level_content_delete_scope_folder_incomplete", retry_safe: false, stage: execution, wire_match: exact }
+    { code: level_content_delete_scope_incomplete, description_zh: "C++ 实现返回错误码 level_content_delete_scope_incomplete", retry_safe: false, stage: execution, wire_match: exact }
+    { code: missing_folder_path, description_zh: "C++ 实现返回错误码 missing_folder_path", retry_safe: true, stage: preflight, wire_match: exact }
+    { code: no_editor_world, description_zh: "C++ 实现返回错误码 no_editor_world", retry_safe: false, stage: execution, wire_match: exact }
+    { code: no_geditor, description_zh: "C++ 实现返回错误码 no_geditor", retry_safe: false, stage: execution, wire_match: exact }
+  ]
+}
+evidence: {
+  docs: [
+    { path: "Plugins/UeAgentInterface/docs/commands/level_content/level_content_delete_scope.md", purpose: "user documentation cross-check; C++ implementation remains authoritative" }
+  ]
+  implementation: [
+    { line_hint: 410, path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Commands/LevelContentJson/UeAgentLevelContentJsonCommands.cpp", purpose: "command handler, parameter and return evidence", symbol: CmdLevelContentDeleteScope }
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Commands/Level/UeAgentCommandSafety.h", purpose: "transitive helper evidence used by the command handler" }
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Commands/Level/UeAgentHttpServer_Level_CaptureAndPersistence.cpp", purpose: "transitive helper evidence used by the command handler" }
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Commands/LevelContentJson/UeAgentLevelContentJsonCore.cpp", purpose: "transitive helper evidence used by the command handler" }
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Commands/TextureRenderTarget/UeAgentHttpServer_TextureRenderTarget_TextureAssets.inl", purpose: "transitive helper evidence used by the command handler" }
+  ]
+  tests: [
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterfaceTests/Private/Smoke/LevelContentJson/UeAgentInterfaceLevelContentJsonSmokeTests.cpp", purpose: "smoke or negative-path evidence cross-checked for the verified contract" }
+  ]
+}
+execution: {
+  destructive: true
+  editor_state: required
+  game_thread: required
+  idempotent: false
+  kind: destructive_write
+  overwrite_behavior: none
+  pie_state: allowed
+  retry_safe: false
+  save_behavior: caller_controlled
+  side_effects: [modifies_level, deletes_asset]
+  ui_effect: none
+}
+maturity: verified
+params: {
+  constraints: []
+  fields: {
+    allow_destructive: { default: false, default_state: defined, description_zh: "C++ 实现读取的 allow_destructive 参数", required: false, type: bool }
+    allow_python_gc_risk: { default: false, default_state: defined, description_zh: "C++ 实现读取的 allow_python_gc_risk 参数", required: false, type: bool }
+    allow_unmanaged_delete: { default: false, default_state: defined, description_zh: "C++ 实现读取的 allow_unmanaged_delete 参数", required: false, type: bool }
+    delete_empty_folders: { default: true, default_state: defined, description_zh: "C++ 实现读取的 delete_empty_folders 参数", required: false, type: bool }
+    delete_folders: { default: true, default_state: defined, description_zh: "C++ 实现读取的 delete_folders 参数", required: false, type: bool }
+    dry_run: { default: true, default_state: defined, description_zh: "C++ 实现读取的 dry_run 参数", required: false, type: bool }
+    fail_on_blocked: { default: true, default_state: defined, description_zh: "C++ 实现读取的 fail_on_blocked 参数", required: false, type: bool }
+    folder: { default_state: none, description_zh: "World Outliner 相对文件夹路径别名", path_semantics: { kind: actor_folder }, required: false, type: actor_folder_path }
+    folder_path: {
+      default_state: none
+      description_zh: "World Outliner 相对文件夹路径"
+      path_semantics: { kind: actor_folder }
+      required: false
+      type: actor_folder_path
+    }
+    folder_paths: { default_state: none, description_zh: "World Outliner 相对文件夹路径列表", item_type: actor_folder_path, required: false, type: array }
+    folder_root: { default_state: none, description_zh: "World Outliner 相对文件夹根路径", path_semantics: { kind: actor_folder }, required: false, type: actor_folder_path }
+    folder_roots: { default_state: none, description_zh: "World Outliner 相对文件夹根路径列表", item_type: actor_folder_path, required: false, type: array }
+    include_child_folders: { default: true, default_state: defined, description_zh: "C++ 实现读取的 include_child_folders 参数", required: false, type: bool }
+    managed_id: { default_state: none, description_zh: "C++ 实现读取的 managed_id 参数", required: false, type: string }
+    managed_ids: { default_state: none, description_zh: "C++ 实现读取的 managed_ids 参数", item_type: json_value, required: false, type: array }
+    managed_tag: { default_state: none, description_zh: "C++ 实现读取的 managed_tag 参数", required: false, type: string }
+    protected_tags: { default_state: none, description_zh: "C++ 实现读取的 protected_tags 参数", item_type: json_value, required: false, type: array }
+    recursive: { default: true, default_state: defined, description_zh: "C++ 实现读取的 recursive 参数", required: false, type: bool }
+    save_after_delete: { default: false, default_state: defined, description_zh: "C++ 实现读取的 save_after_delete 参数", required: false, type: bool }
+    save_level: { default: false, default_state: defined, description_zh: "C++ 实现读取的 save_level 参数", required: false, type: bool }
+    scope: { default_state: none, description_zh: "C++ 实现读取的 scope 参数", required: false, type: json_value }
+  }
+  state: defined
+}
+response: { artifact_fields: [], compact_fields: [status, saved, actors, allow_destructive, allow_unmanaged_delete, blocked], failure_fields: [], max_items_policy: { fields: [], mode: none } }
+returns: {
+  fields: {
+    actors: { description_zh: "C++ 实现返回的 actors 字段；是否出现取决于执行分支", item_type: json_value, required: false, type: array }
+    allow_destructive: { description_zh: "C++ 实现返回的 allow_destructive 字段；是否出现取决于执行分支", required: false, type: bool }
+    allow_unmanaged_delete: { description_zh: "C++ 实现返回的 allow_unmanaged_delete 字段；是否出现取决于执行分支", required: false, type: bool }
+    blocked: { description_zh: "C++ 实现返回的 blocked 字段；是否出现取决于执行分支", item_type: json_value, required: false, type: array }
+    blocked_count: { description_zh: "C++ 实现返回的 blocked_count 字段；是否出现取决于执行分支", required: false, type: integer }
+    deletable_count: { description_zh: "C++ 实现返回的 deletable_count 字段；是否出现取决于执行分支", required: false, type: integer }
+    delete_empty_folders: { description_zh: "C++ 实现返回的 delete_empty_folders 字段；是否出现取决于执行分支", required: false, type: bool }
+    deleted_actors: { description_zh: "C++ 实现返回的 deleted_actors 字段；是否出现取决于执行分支", item_type: json_value, required: false, type: array }
+    deleted_count: { description_zh: "C++ 实现返回的 deleted_count 字段；是否出现取决于执行分支", required: false, type: integer }
+    destroy_actors_ok: { description_zh: "C++ 实现返回的 destroy_actors_ok 字段；是否出现取决于执行分支", required: false, type: bool }
+    dry_run: { description_zh: "C++ 实现返回的 dry_run 字段；是否出现取决于执行分支", required: false, type: bool }
+    duplicate_count: { description_zh: "C++ 实现返回的 duplicate_count 字段；是否出现取决于执行分支", required: false, type: integer }
+    fail_on_blocked: { description_zh: "C++ 实现返回的 fail_on_blocked 字段；是否出现取决于执行分支", required: false, type: bool }
+    folder_delete_blocked_count: { description_zh: "C++ 实现返回的 folder_delete_blocked_count 字段；是否出现取决于执行分支", required: false, type: integer }
+    folder_delete_count: { description_zh: "C++ 实现返回的 folder_delete_count 字段；是否出现取决于执行分支", required: false, type: integer }
+    folder_deletions: { description_zh: "C++ 实现返回的 folder_deletions 字段；是否出现取决于执行分支", item_type: json_value, required: false, type: array }
+    folder_expansions: { description_zh: "C++ 实现返回的 folder_expansions 字段；是否出现取决于执行分支", item_type: json_value, required: false, type: array }
+    folder_paths: { description_zh: "匹配的 World Outliner 相对文件夹路径", item_type: actor_folder_path, required: false, type: array }
+    folder_root: { description_zh: "World Outliner 相对文件夹根路径", required: false, type: actor_folder_path }
+    folder_would_delete_count: { description_zh: "C++ 实现返回的 folder_would_delete_count 字段；是否出现取决于执行分支", required: false, type: integer }
+    include_child_folders: { description_zh: "C++ 实现返回的 include_child_folders 字段；是否出现取决于执行分支", required: false, type: bool }
+    managed_id_filtered_count: { description_zh: "C++ 实现返回的 managed_id_filtered_count 字段；是否出现取决于执行分支", required: false, type: integer }
+    managed_tag: { description_zh: "C++ 实现返回的 managed_tag 字段；是否出现取决于执行分支", required: false, type: string }
+    matched_count: { description_zh: "C++ 实现返回的 matched_count 字段；是否出现取决于执行分支", required: false, type: integer }
+    recursive: { description_zh: "C++ 实现返回的 recursive 字段；是否出现取决于执行分支", required: false, type: bool }
+    remaining_actor_count: { description_zh: "C++ 实现返回的 remaining_actor_count 字段；是否出现取决于执行分支", required: false, type: integer }
+    requested_count: { description_zh: "C++ 实现返回的 requested_count 字段；是否出现取决于执行分支", required: false, type: integer }
+    requested_folder_count: { description_zh: "C++ 实现返回的 requested_folder_count 字段；是否出现取决于执行分支", required: false, type: integer }
+    results: { description_zh: "C++ 实现返回的 results 字段；是否出现取决于执行分支", item_type: json_value, required: false, type: array }
+    save_level: { description_zh: "C++ 实现返回的 save_level 字段；是否出现取决于执行分支", required: false, type: bool }
+    save_level_data: { description_zh: "C++ 实现返回的 save_level_data 字段；是否出现取决于执行分支", required: false, type: json_value }
+    save_level_error: { description_zh: "C++ 实现返回的 save_level_error 字段；是否出现取决于执行分支", required: false, type: string }
+    save_level_ok: { description_zh: "C++ 实现返回的 save_level_ok 字段；是否出现取决于执行分支", required: false, type: bool }
+    saved: { description_zh: "C++ 实现返回的 saved 字段；是否出现取决于执行分支", required: false, type: bool }
+    schema: { description_zh: "C++ 实现返回的 schema 字段；是否出现取决于执行分支", required: false, type: string }
+    status: { description_zh: "C++ 实现返回的 status 字段；是否出现取决于执行分支", required: false, type: string }
+    unique_actor_count: { description_zh: "C++ 实现返回的 unique_actor_count 字段；是否出现取决于执行分支", required: false, type: integer }
+    would_delete_count: { description_zh: "C++ 实现返回的 would_delete_count 字段；是否出现取决于执行分支", required: false, type: integer }
+  }
+  state: defined
+}
+schema: uai.command_spec.v1
+status: active
+types: {}
+verification: {
+  assertions: [
+    { id: result_present, operator: exists, source: returns.status }
+    { id: state_readback_present, operator: exists, source: methods.state_readback.resources }
+  ]
+  failure_policy: fail_overall
+  methods: [
+    { id: result, kind: result_assertion }
+    { command: level_content_query_json, id: state_readback, kind: command_readback, params_mapping: {} }
+  ]
+  required: true
+  state: defined
+}
+version: 1

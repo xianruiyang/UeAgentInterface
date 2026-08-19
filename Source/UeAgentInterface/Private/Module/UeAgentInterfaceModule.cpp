@@ -2,8 +2,15 @@
 
 #include "UeAgentInterfaceModule.h"
 
-#include "Server/UeAgentHttpServer.h"
+#include "CommandRegistry/UeAgentActiveCommandManifest.h"
+#include "Core/Contract/UeAgentCommandContract.h"
+#include "Core/DomainCapability/UeAgentDomainCapability.h"
+#include "NetworkTransport/UeAgentHttpTransportAdapter.h"
+#include "Module/CommandRegistration/Active/UeAgentActiveCommandComposition.h"
 #include "Module/UeAgentInterfaceLogger.h"
+#include "ServiceComposition/CommandService/UeAgentCommandService.h"
+#include "ServiceComposition/Query/UeAgentQueryCommandIngress.h"
+#include "ServiceComposition/Transport/UeAgentTransportService.h"
 #include "Utilities/UeAgentCustomModelingPrimitives.h"
 #include "Utilities/UeAgentModelingToolCommands.h"
 #include "UeAgentInterfaceSettings.h"
@@ -22,6 +29,7 @@
 #include "ToolMenus.h"
 #include "Widgets/SWindow.h"
 #include "Widgets/Notifications/SNotificationList.h"
+#include "Editor.h"
 
 namespace
 {
@@ -50,6 +58,27 @@ void DisablePersistentLayoutsForHeadlessRun()
 	FGlobalTabmanager::Get()->SetCanSavePersistentLayouts(false);
 	FUeAgentInterfaceLogger::Log(TEXT("StartupModule: persistent layout saving disabled for headless run"));
 }
+
+class FModuleRequestContextInvalidator final
+	: public UE::UAI::ServiceComposition::CommandService::
+		IUeAgentRequestContextInvalidator
+{
+public:
+	virtual void InvalidateWorld(
+		const FString& WorldIdentity) override
+	{
+		LastWorldIdentity = WorldIdentity;
+		++Generation;
+		FUeAgentInterfaceLogger::Log(
+			TEXT("Request context invalidated generation=%llu world=%s"),
+			Generation,
+			*WorldIdentity);
+	}
+
+private:
+	FString LastWorldIdentity;
+	uint64 Generation = 0;
+};
 
 class FUeAgentModelingModeToolExtension final : public IModelingModeToolExtension
 {
@@ -106,8 +135,9 @@ void FUeAgentInterfaceModule::StartupModule()
 	DisablePersistentLayoutsForHeadlessRun();
 	InstallStartMinimizedMainFrameHookIfRequested();
 
-	Server = MakeUnique<FUeAgentHttpServer>();
-	FUeAgentInterfaceLogger::Log(TEXT("StartupModule: server instance created"));
+	EditorMapOpenedHandle = FEditorDelegates::OnMapOpened.AddRaw(
+		this,
+		&FUeAgentInterfaceModule::HandleEditorMapOpened);
 
 	FUeAgentModelingToolCommands::Register();
 	FUeAgentInterfaceLogger::Log(TEXT("StartupModule: modeling tool commands registered"));
@@ -141,6 +171,11 @@ void FUeAgentInterfaceModule::ShutdownModule()
 {
 	FUeAgentInterfaceLogger::Log(TEXT("ShutdownModule begin"));
 	UninstallStartMinimizedMainFrameHook();
+	if (EditorMapOpenedHandle.IsValid())
+	{
+		FEditorDelegates::OnMapOpened.Remove(EditorMapOpenedHandle);
+		EditorMapOpenedHandle.Reset();
+	}
 	if (GModelingToolExtension)
 	{
 		IModularFeatures::Get().UnregisterModularFeature(IModelingModeToolExtension::GetModularFeatureName(), GModelingToolExtension.Get());
@@ -149,7 +184,9 @@ void FUeAgentInterfaceModule::ShutdownModule()
 	FUeAgentModelingToolCommands::Unregister();
 	UnregisterMenus();
 	UnregisterConsoleCommands();
-	Server.Reset();
+	StopServerInternal();
+	TransportService.Reset();
+	CommandService.Reset();
 	FUeAgentInterfaceLogger::Log(TEXT("ShutdownModule end"));
 }
 
@@ -403,26 +440,244 @@ bool FUeAgentInterfaceModule::EnsureAuthToken() const
 
 bool FUeAgentInterfaceModule::StartServerInternal()
 {
-	FUeAgentInterfaceLogger::Log(TEXT("StartServerInternal begin server_valid=%s"), Server ? TEXT("true") : TEXT("false"));
+	using namespace UE::UAI::ServiceComposition::CommandService;
+	using namespace UE::UAI::ServiceComposition::Transport;
+	using namespace UE::UAI::NetworkTransport;
 
-	const bool bHasToken = EnsureAuthToken();
-	FUeAgentInterfaceLogger::Log(TEXT("StartServerInternal: EnsureAuthToken ok=%s"), bHasToken ? TEXT("true") : TEXT("false"));
-	if (!bHasToken)
+	if (TransportService && TransportService->IsRunning())
 	{
+		return true;
+	}
+	StopServerInternal();
+	if (!EnsureAuthToken())
+	{
+		FUeAgentInterfaceLogger::Log(
+			TEXT("StartServerInternal: authentication setup failed"));
 		return false;
 	}
 
-	const bool bOk = Server ? Server->Start() : false;
-	FUeAgentInterfaceLogger::Log(TEXT("StartServerInternal end ok=%s"), bOk ? TEXT("true") : TEXT("false"));
-	return bOk;
+	const UUeAgentInterfaceSettings* Settings =
+		UUeAgentInterfaceSettings::Get();
+	if (!Settings
+		|| Settings->Port <= 0
+		|| Settings->Port > 65535
+		|| Settings->AuthToken.IsEmpty())
+	{
+		FUeAgentInterfaceLogger::Log(
+			TEXT("StartServerInternal: settings are invalid"));
+		return false;
+	}
+	if (!Settings->ListenAddress.Equals(TEXT("127.0.0.1"))
+		&& !Settings->ListenAddress.Equals(
+			TEXT("localhost"),
+			ESearchCase::IgnoreCase))
+	{
+		FUeAgentInterfaceLogger::Log(
+			TEXT("StartServerInternal: only a loopback listener is supported"));
+		return false;
+	}
+
+	const TSharedRef<
+		FModuleRequestContextInvalidator,
+		ESPMode::ThreadSafe> ContextInvalidator =
+		MakeShared<
+				FModuleRequestContextInvalidator,
+				ESPMode::ThreadSafe>();
+	TSharedPtr<const UE::UAI::DomainCapability::
+		FFrozenDomainCapabilitySet> FrozenDomainCapabilities;
+	UE::UAI::DomainCapability::FDomainCapabilityAuthorities
+		DomainCapabilityPreflight;
+	FString DomainCapabilityError;
+	if (!UE::UAI::DomainCapability::TryFreezeProcessDomainCapabilities(
+			FrozenDomainCapabilities,
+			DomainCapabilityError)
+		|| !FrozenDomainCapabilities.IsValid()
+		|| !FrozenDomainCapabilities->TryBuildAuthorities(
+			DomainCapabilityPreflight,
+			DomainCapabilityError))
+	{
+		FUeAgentInterfaceLogger::Log(
+			TEXT("StartServerInternal: domain capability preflight failed error=%s"),
+			*DomainCapabilityError);
+		return false;
+	}
+	TSharedPtr<
+		const UE::UAI::CommandRegistry::
+			FUeAgentImmutableCommandRegistry> ActiveRegistry =
+				DomainCapabilityPreflight.GetCommandRegistry();
+	TSharedPtr<
+		const UE::UAI::CommandEdge::FUeAgentExactCommandDispatch>
+		ActiveDispatch = DomainCapabilityPreflight.GetCommandDispatch();
+	FString ActiveCompositionError;
+	if (!ActiveRegistry.IsValid() || !ActiveDispatch.IsValid())
+	{
+		FUeAgentInterfaceLogger::Log(
+			TEXT("StartServerInternal: domain capability activation did not publish the process command authority"));
+		return false;
+	}
+	if (!UE::UAI::CommandRegistry::FUeAgentActiveCommandManifest::
+		TryVerify(
+			ActiveRegistry.ToSharedRef(),
+			UE::UAI::CommandContract::GetUaiCommandManifestPluginVersion(),
+			UE::UAI::CommandContract::GetUaiCommandManifestBuildId(),
+			UE::UAI::CommandContract::GetDefaultCommandManifestPath(),
+			ActiveCompositionError))
+	{
+		FUeAgentInterfaceLogger::Log(
+			TEXT("StartServerInternal: active command manifest verification failed error=%s"),
+			*ActiveCompositionError);
+		return false;
+	}
+	TSharedPtr<
+		IUeAgentTransportRequestHandler,
+		ESPMode::ThreadSafe> QueryIngress;
+	if (!UE::UAI::ServiceComposition::Query::
+		TryCreateQueryCommandIngress(
+			ActiveDispatch.ToSharedRef(),
+			TEXT("uai-local-authenticated-client"),
+			{
+				TEXT("uai:query"),
+				TEXT("uai:export"),
+				TEXT("uai:operate"),
+			},
+			QueryIngress,
+			ActiveCompositionError))
+	{
+		FUeAgentInterfaceLogger::Log(
+			TEXT("StartServerInternal: query ingress failed error=%s"),
+			*ActiveCompositionError);
+		return false;
+	}
+	for (const UE::UAI::CommandContract::FUeAgentFrozenCommandContract&
+		Contract : ActiveRegistry->GetContracts())
+	{
+		FUeAgentInterfaceLogger::Log(
+			TEXT("Activated exact command id=%s contract=%s owner=%s"),
+			*Contract.GetCommandId(),
+			*Contract.GetContractHash(),
+			*Contract.GetPublicOwner());
+	}
+	TUniquePtr<FUeAgentCommandService> NewCommandService;
+	FString CommandServiceError;
+	if (!FUeAgentCommandService::TryCreate(
+			QueryIngress.ToSharedRef(),
+			ContextInvalidator,
+			NewCommandService,
+			CommandServiceError))
+	{
+		FUeAgentInterfaceLogger::Log(
+			TEXT("StartServerInternal: command service failed error=%s"),
+			*CommandServiceError);
+		return false;
+	}
+
+	const FString OwnerId = TEXT("uai-module-transport");
+	FUeAgentHttpAdapterConfig AdapterConfig;
+	AdapterConfig.OwnerId = OwnerId;
+	AdapterConfig.InstanceId =
+		TEXT("uai-module-http:")
+		+ FGuid::NewGuid().ToString(EGuidFormats::DigitsWithHyphensLower);
+	AdapterConfig.Method = TEXT("POST");
+	AdapterConfig.RoutePath = GetUaiHttpCommandRoutePath();
+	AdapterConfig.AuthHeader = TEXT("X-UeAgentInterface-Token");
+	AdapterConfig.AuthToken = Settings->AuthToken;
+	AdapterConfig.Channel = TEXT("uai.command.v1");
+	AdapterConfig.PrincipalSubject = TEXT("uai-local-authenticated-client");
+	AdapterConfig.MaxFrameBytes = 4 * 1024 * 1024;
+
+	const TSharedRef<
+		FUeAgentEngineHttpRouteHost,
+		ESPMode::ThreadSafe> RouteHost =
+		MakeShared<
+			FUeAgentEngineHttpRouteHost,
+			ESPMode::ThreadSafe>(static_cast<uint32>(Settings->Port));
+	TUniquePtr<IUeAgentNetworkServerControl> ServerControl =
+		MakeUnique<FUeAgentHttpTransportAdapter>(
+			AdapterConfig,
+			RouteHost,
+			NewCommandService->GetIngressHandler());
+
+	FUeAgentTransportServiceConfig TransportConfig;
+	TransportConfig.OwnerId = OwnerId;
+	TransportConfig.Capabilities.bOrdered = true;
+	TransportConfig.Capabilities.bReliable = true;
+	TransportConfig.Capabilities.bPreservesMessageBoundaries = true;
+	TransportConfig.Capabilities.MaxFrameBytes =
+		AdapterConfig.MaxFrameBytes;
+	TransportConfig.Capabilities.bRequestReply = true;
+	TransportConfig.Requirements.bRequireOrdered = true;
+	TransportConfig.Requirements.bRequireReliable = true;
+	TransportConfig.Requirements.bRequireMessageBoundaries = true;
+	TransportConfig.Requirements.MaxFrameBytes =
+		AdapterConfig.MaxFrameBytes;
+	TransportConfig.Requirements.bRequireRequestReply = true;
+
+	TUniquePtr<FUeAgentTransportService> NewTransportService;
+	FUeAgentTransportDiagnostic TransportDiagnostic;
+	if (!FUeAgentTransportService::TryCreate(
+			TransportConfig,
+			MoveTemp(ServerControl),
+			NewTransportService,
+			TransportDiagnostic)
+		|| !NewTransportService->Start(TransportDiagnostic))
+	{
+		FUeAgentInterfaceLogger::Log(
+			TEXT("StartServerInternal: transport failed code=%s detail=%s"),
+			*TransportDiagnostic.Code,
+			*TransportDiagnostic.Message);
+		return false;
+	}
+
+	CommandService = MoveTemp(NewCommandService);
+	TransportService = MoveTemp(NewTransportService);
+
+	FUeAgentInterfaceLogger::Log(
+		TEXT("StartServerInternal: ok=true command_route=%s instance=%s registry=%s"),
+		*GetUaiHttpCommandRoutePath(),
+		*TransportService->GetIdentity().InstanceId,
+		*ActiveRegistry->GetRegistryHash());
+	return true;
+}
+
+void FUeAgentInterfaceModule::HandleEditorMapOpened(
+	const FString& Filename,
+	bool bAsTemplate)
+{
+	if (!TransportService
+		|| !TransportService->IsRunning()
+		|| !CommandService)
+	{
+		return;
+	}
+
+	CommandService->NotifyWorldChanged(
+		Filename.IsEmpty() ? TEXT("editor-map-event") : Filename);
+	FUeAgentInterfaceLogger::Log(
+		TEXT("Editor map opened: request context invalidated generation=%llu filename=%s as_template=%s"),
+		CommandService->GetContextGeneration(),
+		*Filename,
+		bAsTemplate ? TEXT("true") : TEXT("false"));
 }
 
 void FUeAgentInterfaceModule::StopServerInternal()
 {
-	if (Server)
+	using namespace UE::UAI::NetworkTransport;
+	if (TransportService)
 	{
-		Server->Stop();
+		FUeAgentTransportDiagnostic Diagnostic;
+		if (!TransportService->Stop(Diagnostic))
+		{
+			FUeAgentInterfaceLogger::Log(
+				TEXT("StopServerInternal: transport stop failed code=%s detail=%s"),
+				*Diagnostic.Code,
+				*Diagnostic.Message);
+			return;
+		}
+		TransportService.Reset();
 	}
+	CommandService.Reset();
+	FUeAgentInterfaceLogger::Log(
+		TEXT("StopServerInternal: owned transport stopped"));
 }
 
 void FUeAgentInterfaceModule::StartServerFromUI(const FToolMenuContext& Context)
@@ -445,13 +700,20 @@ void FUeAgentInterfaceModule::StopServerFromUI(const FToolMenuContext& Context)
 
 void FUeAgentInterfaceModule::CopyConnectionInfoToClipboard(const FToolMenuContext& Context)
 {
-	if (!Server)
+	const UUeAgentInterfaceSettings* Settings =
+		UUeAgentInterfaceSettings::Get();
+	if (!Settings
+		|| !TransportService
+		|| !TransportService->IsRunning())
 	{
 		return;
 	}
 
-	const FString Url = FString::Printf(TEXT("http://%s:%d"), *Server->GetListenAddress(), Server->GetPort());
-	const FString Token = Server->GetAuthToken();
+	const FString Url = FString::Printf(
+		TEXT("http://%s:%d"),
+		*Settings->ListenAddress,
+		Settings->Port);
+	const FString Token = Settings->AuthToken;
 	const FString Text = FString::Printf(TEXT("BASE_URL=%s\nTOKEN=%s\nHEADER=X-UeAgentInterface-Token: %s\n"),
 		*Url,
 		*Token,

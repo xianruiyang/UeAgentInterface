@@ -1,0 +1,129 @@
+authoring: { reason: command_has_no_registered_folder_authoring_profile, state: none }
+category: core_level
+command: asset_import_texture
+deprecation: { reason: command_is_active, state: none }
+discovery: { aliases: [], keywords_en: [asset, import, texture, core_level], keywords_zh: [asset_import_texture], summary_en: "Execute asset_import_texture with a verified implementation contract", summary_zh: "导入外部贴图为 Texture2D", tags: [core_level, p2-002] }
+errors: {
+  codes: [
+    { code: create_texture_import_task_failed, description_zh: "C++ 实现返回错误码 create_texture_import_task_failed", retry_safe: false, stage: execution, wire_match: exact }
+    { code: import_target_exists_requires_allow_overwrite, description_zh: "C++ 实现返回错误码 import_target_exists_requires_allow_overwrite", retry_safe: false, stage: execution, wire_match: exact }
+    { code: invalid_, description_zh: "C++ 实现返回错误码 invalid_", retry_safe: true, stage: preflight, wire_match: prefix }
+    { code: invalid_destination_name, description_zh: "C++ 实现返回错误码 invalid_destination_name", retry_safe: true, stage: preflight, wire_match: exact }
+    { code: invalid_destination_path, description_zh: "C++ 实现返回错误码 invalid_destination_path", retry_safe: true, stage: preflight, wire_match: exact }
+    { code: invalid_import_target_asset_path, description_zh: "C++ 实现返回错误码 invalid_import_target_asset_path", retry_safe: true, stage: preflight, wire_match: exact }
+    { code: invalid_open_editor, description_zh: "C++ 实现返回错误码 invalid_open_editor", retry_safe: true, stage: preflight, wire_match: exact }
+    { code: invalid_replace_existing_settings, description_zh: "C++ 实现返回错误码 invalid_replace_existing_settings", retry_safe: true, stage: preflight, wire_match: exact }
+    { code: invalid_save_after_import, description_zh: "C++ 实现返回错误码 invalid_save_after_import", retry_safe: true, stage: preflight, wire_match: exact }
+    { code: invalid_srgb, description_zh: "C++ 实现返回错误码 invalid_srgb", retry_safe: true, stage: preflight, wire_match: exact }
+    { code: missing_destination_path, description_zh: "C++ 实现返回错误码 missing_destination_path", retry_safe: true, stage: preflight, wire_match: exact }
+    { code: missing_source_filename, description_zh: "C++ 实现返回错误码 missing_source_filename", retry_safe: true, stage: preflight, wire_match: exact }
+    { code: save_asset_failed, description_zh: "C++ 实现返回错误码 save_asset_failed", retry_safe: false, stage: execution, wire_match: exact }
+    { code: source_file_not_found, description_zh: "C++ 实现返回错误码 source_file_not_found", retry_safe: false, stage: execution, wire_match: exact }
+    { code: source_file_not_supported_by_texture_factory, description_zh: "C++ 实现返回错误码 source_file_not_supported_by_texture_factory", retry_safe: false, stage: execution, wire_match: exact }
+    { code: texture_import_created_no_texture2d, description_zh: "C++ 实现返回错误码 texture_import_created_no_texture2d", retry_safe: false, stage: execution, wire_match: exact }
+  ]
+}
+evidence: {
+  docs: [
+    { path: "Plugins/UeAgentInterface/docs/commands/core_level/asset_import_texture.md", purpose: "user documentation cross-check; C++ implementation remains authoritative" }
+  ]
+  implementation: [
+    { line_hint: 316, path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Commands/Assets/UeAgentHttpServer_AssetsImport.cpp", purpose: "command handler, parameter and return evidence", symbol: CmdAssetImportTexture }
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Commands/Level/UeAgentCommandSafety.h", purpose: "transitive helper evidence used by the command handler" }
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Server/UeAgentHttpServer.cpp", purpose: "transitive helper evidence used by the command handler" }
+  ]
+  tests: [
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterfaceTests/Private/Smoke/UeAgentInterfaceSmoke_Coverage.cpp", purpose: "smoke or negative-path evidence cross-checked for the verified contract" }
+  ]
+}
+execution: {
+  destructive: true
+  editor_state: required
+  game_thread: required
+  idempotent: false
+  kind: write
+  overwrite_behavior: target_asset
+  pie_state: allowed
+  retry_safe: false
+  save_behavior: caller_controlled
+  side_effects: [modifies_asset, creates_asset]
+  ui_effect: none
+}
+maturity: verified
+params: {
+  constraints: []
+  fields: {
+    allow_overwrite: { default: false, default_state: defined, description_zh: "C++ 实现读取的 allow_overwrite 参数", required: false, type: bool }
+    compression_settings: { default_state: none, description_zh: "C++ 实现读取的 compression_settings 参数", required: false, type: json_value }
+    destination_name: { default_state: none, description_zh: "C++ 实现读取的 destination_name 参数", required: false, type: string }
+    destination_path: { default_state: none, description_zh: "C++ 实现读取的 destination_path 参数", required: true, type: string }
+    lod_group: { default_state: none, description_zh: "C++ 实现读取的 lod_group 参数", required: false, type: json_value }
+    mip_gen_settings: { default_state: none, description_zh: "C++ 实现读取的 mip_gen_settings 参数", required: false, type: json_value }
+    open_editor: { default: false, default_state: defined, description_zh: "C++ 实现读取的 open_editor 参数", required: false, type: bool }
+    replace_existing: { default: false, default_state: defined, description_zh: "C++ 实现读取的 replace_existing 参数", required: false, type: bool }
+    replace_existing_settings: { default: true, default_state: defined, description_zh: "C++ 实现读取的 replace_existing_settings 参数", required: false, type: bool }
+    save_after_import: { default: true, default_state: defined, description_zh: "C++ 实现读取的 save_after_import 参数", required: false, type: bool }
+    source_filename: {
+      default_state: none
+      description_zh: "C++ 实现读取的 source_filename 参数"
+      path_semantics: { kind: filesystem_file, must_exist: false, writable: false }
+      required: true
+      type: filesystem_path
+    }
+    srgb: { default: true, default_state: defined, description_zh: "C++ 实现读取的 srgb 参数", required: false, type: bool }
+  }
+  state: defined
+}
+response: { artifact_fields: [], compact_fields: [allow_overwrite, anim_sequence_asset_paths, compression_settings, destination_name, destination_path, factory_can_import], failure_fields: [params.destination_path, params.source_filename], max_items_policy: { fields: [], mode: none } }
+returns: {
+  fields: {
+    allow_overwrite: { description_zh: "C++ 实现返回的 allow_overwrite 字段；是否出现取决于执行分支", required: false, type: bool }
+    anim_sequence_asset_paths: { description_zh: "C++ 实现返回的 anim_sequence_asset_paths 字段；是否出现取决于执行分支", item_type: json_value, required: false, type: array }
+    compression_settings: { description_zh: "C++ 实现返回的 compression_settings 字段；是否出现取决于执行分支", required: false, type: string }
+    destination_name: { description_zh: "C++ 实现返回的 destination_name 字段；是否出现取决于执行分支", required: false, type: string }
+    destination_path: { description_zh: "C++ 实现返回的 destination_path 字段；是否出现取决于执行分支", required: false, type: string }
+    factory_can_import: { description_zh: "C++ 实现返回的 factory_can_import 字段；是否出现取决于执行分支", required: false, type: bool }
+    factory_class: { description_zh: "C++ 实现返回的 factory_class 字段；是否出现取决于执行分支", required: false, type: string }
+    imported_object_count: { description_zh: "C++ 实现返回的 imported_object_count 字段；是否出现取决于执行分支", required: false, type: integer }
+    imported_object_paths: { description_zh: "C++ 实现返回的 imported_object_paths 字段；是否出现取决于执行分支", item_type: json_value, required: false, type: array }
+    imported_objects: { description_zh: "C++ 实现返回的 imported_objects 字段；是否出现取决于执行分支", item_type: json_value, required: false, type: array }
+    lod_group: { description_zh: "C++ 实现返回的 lod_group 字段；是否出现取决于执行分支", required: false, type: string }
+    mip_gen_settings: { description_zh: "C++ 实现返回的 mip_gen_settings 字段；是否出现取决于执行分支", required: false, type: string }
+    physics_asset_paths: { description_zh: "C++ 实现返回的 physics_asset_paths 字段；是否出现取决于执行分支", item_type: json_value, required: false, type: array }
+    primary_asset_path: { description_zh: "C++ 实现返回的 primary_asset_path 字段；是否出现取决于执行分支", required: false, type: ue_asset_path }
+    primary_class: { description_zh: "C++ 实现返回的 primary_class 字段；是否出现取决于执行分支", required: false, type: string }
+    primary_object_path: { description_zh: "C++ 实现返回的 primary_object_path 字段；是否出现取决于执行分支", required: false, type: ue_object_path }
+    replace_existing: { description_zh: "C++ 实现返回的 replace_existing 字段；是否出现取决于执行分支", required: false, type: bool }
+    replace_existing_settings: { description_zh: "C++ 实现返回的 replace_existing_settings 字段；是否出现取决于执行分支", required: false, type: bool }
+    save_after_import: { description_zh: "C++ 实现返回的 save_after_import 字段；是否出现取决于执行分支", required: false, type: bool }
+    skeletal_mesh_asset_paths: { description_zh: "C++ 实现返回的 skeletal_mesh_asset_paths 字段；是否出现取决于执行分支", item_type: json_value, required: false, type: array }
+    skeleton_asset_paths: { description_zh: "C++ 实现返回的 skeleton_asset_paths 字段；是否出现取决于执行分支", item_type: json_value, required: false, type: array }
+    source_filename: { description_zh: "C++ 实现返回的 source_filename 字段；是否出现取决于执行分支", required: false, type: filesystem_path }
+    srgb: { description_zh: "C++ 实现返回的 srgb 字段；是否出现取决于执行分支", required: false, type: bool }
+    texture_asset_path: { description_zh: "C++ 实现返回的 texture_asset_path 字段；是否出现取决于执行分支", required: false, type: ue_asset_path }
+    texture_asset_paths: { description_zh: "C++ 实现返回的 texture_asset_paths 字段；是否出现取决于执行分支", item_type: json_value, required: false, type: array }
+    texture_count: { description_zh: "C++ 实现返回的 texture_count 字段；是否出现取决于执行分支", required: false, type: integer }
+    texture_has_alpha: { description_zh: "C++ 实现返回的 texture_has_alpha 字段；是否出现取决于执行分支", required: false, type: bool }
+    texture_num_mips: { description_zh: "C++ 实现返回的 texture_num_mips 字段；是否出现取决于执行分支", required: false, type: number }
+    texture_object_path: { description_zh: "C++ 实现返回的 texture_object_path 字段；是否出现取决于执行分支", required: false, type: ue_object_path }
+    texture_object_paths: { description_zh: "C++ 实现返回的 texture_object_paths 字段；是否出现取决于执行分支", item_type: json_value, required: false, type: array }
+    texture_size_x: { description_zh: "C++ 实现返回的 texture_size_x 字段；是否出现取决于执行分支", required: false, type: number }
+    texture_size_y: { description_zh: "C++ 实现返回的 texture_size_y 字段；是否出现取决于执行分支", required: false, type: number }
+  }
+  state: defined
+}
+schema: uai.command_spec.v1
+status: active
+types: {}
+verification: {
+  assertions: [
+    { id: result_present, operator: exists, source: returns.allow_overwrite }
+  ]
+  failure_policy: fail_overall
+  methods: [
+    { id: result, kind: result_assertion }
+  ]
+  required: true
+  state: defined
+}
+version: 1

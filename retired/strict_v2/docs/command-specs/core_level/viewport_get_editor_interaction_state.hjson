@@ -1,0 +1,51 @@
+authoring: { reason: command_has_no_registered_folder_authoring_profile, state: none }
+category: core_level
+command: viewport_get_editor_interaction_state
+deprecation: { reason: command_is_active, state: none }
+discovery: { aliases: [], keywords_en: [viewport, get, editor, interaction, state, core_level], keywords_zh: [viewport_get_editor_interaction_state], summary_en: "Execute viewport_get_editor_interaction_state with a verified implementation contract", summary_zh: "读取 Level Viewport 编辑器交互状态", tags: [core_level, p2-002] }
+errors: {
+  codes: [
+    { code: no_level_editor_viewport, description_zh: "C++ 实现返回错误码 no_level_editor_viewport", retry_safe: false, stage: execution, wire_match: exact }
+  ]
+}
+evidence: {
+  docs: [
+    { path: "Plugins/UeAgentInterface/docs/commands/core_level/viewport_get_editor_interaction_state.md", purpose: "user documentation cross-check; C++ implementation remains authoritative" }
+  ]
+  implementation: [
+    { line_hint: 440, path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Commands/Level/UeAgentHttpServer_Level_ViewportTrace.cpp", purpose: "command handler, parameter and return evidence", symbol: CmdViewportGetEditorInteractionState }
+  ]
+  tests: [
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterfaceTests/Private/Smoke/UeAgentInterfaceSmoke_LevelViewportModeling.cpp", purpose: "smoke or negative-path evidence cross-checked for the verified contract" }
+  ]
+}
+execution: {
+  destructive: false
+  editor_state: required
+  game_thread: required
+  idempotent: true
+  kind: read_only
+  overwrite_behavior: none
+  pie_state: allowed
+  retry_safe: true
+  save_behavior: none
+  side_effects: []
+  ui_effect: none
+}
+maturity: verified
+params: { reason: implementation_reads_no_command_parameters, state: none }
+response: { artifact_fields: [], compact_fields: [selected_actor_count, viewport, viewport_count, viewports], failure_fields: [], max_items_policy: { fields: [], mode: none } }
+returns: {
+  fields: {
+    selected_actor_count: { description_zh: "C++ 实现返回的 selected_actor_count 字段；是否出现取决于执行分支", required: false, type: integer }
+    viewport: { description_zh: "C++ 实现返回的 viewport 字段；是否出现取决于执行分支", required: false, type: json_value }
+    viewport_count: { description_zh: "C++ 实现返回的 viewport_count 字段；是否出现取决于执行分支", required: false, type: integer }
+    viewports: { description_zh: "C++ 实现返回的 viewports 字段；是否出现取决于执行分支", item_type: json_value, required: false, type: array }
+  }
+  state: defined
+}
+schema: uai.command_spec.v1
+status: active
+types: {}
+verification: { reason: read_only_command_has_no_post_write_verification, state: none }
+version: 1

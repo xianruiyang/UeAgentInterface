@@ -1,0 +1,17 @@
+definition: {
+  additional_fields: false
+  fields: {
+    bone_count: { default_state: none, description_zh: "返回骨骼数", minimum: 0, required: false, type: integer }
+    bones: { default_state: none, description_zh: "pose bones", item_type: object, item_type_ref: "shared:AnimSequencePoseBone", required: false, type: array }
+    frame_index: { default_state: none, description_zh: "动画采样 frame", minimum: 0, required: true, type: integer }
+    missing_bones: { default_state: none, description_zh: "此采样未解析的骨骼名", item_type: string, required: false, type: array }
+    normalized_time: { default_state: none, description_zh: "归一化动画时间", maximum: 1, minimum: 0, required: true, type: number }
+    sample_index: { default_state: none, description_zh: "采样序号", minimum: 0, required: true, type: integer }
+    time_seconds: { default_state: none, description_zh: "动画采样时间（秒）", minimum: 0, required: true, type: number }
+    used_frame_index: { default_state: none, description_zh: "是否由 frame selector 建立采样", required: false, type: bool }
+  }
+  kind: object
+}
+schema: uai.command_spec.shared_type.v1
+type_id: AnimSequencePoseSample
+version: 1

@@ -1,0 +1,108 @@
+authoring: { reason: command_has_no_registered_folder_authoring_profile, state: none }
+category: core_level
+command: level_set_skeletal_mesh_morph_target
+deprecation: { reason: command_is_active, state: none }
+discovery: { aliases: [], keywords_en: [level, set, skeletal, mesh, morph, target, core_level], keywords_zh: [level_set_skeletal_mesh_morph_target], summary_en: "Execute level_set_skeletal_mesh_morph_target with a verified implementation contract", summary_zh: "设置场景 Actor 上 SkeletalMeshComponent 的 Morph Target 权重，可选启动平滑 pulse", tags: [core_level, p2-002] }
+errors: {
+  codes: [
+    { code: actor_has_no_skeletal_mesh_component, description_zh: "C++ 实现返回错误码 actor_has_no_skeletal_mesh_component", retry_safe: false, stage: execution, wire_match: exact }
+    { code: actor_not_found, description_zh: "C++ 实现返回错误码 actor_not_found", retry_safe: false, stage: execution, wire_match: exact }
+    { code: failed_to_load_skeletal_mesh, description_zh: "C++ 实现返回错误码 failed_to_load_skeletal_mesh", retry_safe: false, stage: execution, wire_match: prefix }
+    { code: missing_id, description_zh: "C++ 实现返回错误码 missing_id", retry_safe: true, stage: preflight, wire_match: exact }
+    { code: missing_morph_target, description_zh: "C++ 实现返回错误码 missing_morph_target", retry_safe: true, stage: preflight, wire_match: exact }
+    { code: morph_target_not_found, description_zh: "C++ 实现返回错误码 morph_target_not_found", retry_safe: false, stage: execution, wire_match: exact }
+    { code: no_editor_world, description_zh: "C++ 实现返回错误码 no_editor_world", retry_safe: false, stage: execution, wire_match: exact }
+    { code: no_geditor, description_zh: "C++ 实现返回错误码 no_geditor", retry_safe: false, stage: execution, wire_match: exact }
+    { code: skeletal_mesh_component_has_no_mesh, description_zh: "C++ 实现返回错误码 skeletal_mesh_component_has_no_mesh", retry_safe: false, stage: execution, wire_match: exact }
+    { code: skeletal_mesh_component_not_found, description_zh: "C++ 实现返回错误码 skeletal_mesh_component_not_found", retry_safe: false, stage: execution, wire_match: exact }
+  ]
+}
+evidence: {
+  docs: [
+    { path: "Plugins/UeAgentInterface/docs/commands/core_level/level_set_skeletal_mesh_morph_target.md", purpose: "user documentation cross-check; C++ implementation remains authoritative" }
+  ]
+  implementation: [
+    { line_hint: 562, path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Commands/Level/UeAgentHttpServer_Level_ActorAndTransform.cpp", purpose: "command handler, parameter and return evidence", symbol: CmdLevelSetSkeletalMeshMorphTarget }
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Commands/Level/UeAgentHttpServer_Level_CaptureAndPersistence.cpp", purpose: "transitive helper evidence used by the command handler" }
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Server/UeAgentHttpServer.cpp", purpose: "transitive helper evidence used by the command handler" }
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Utilities/UeAgentJsonDiagnostics.cpp", purpose: "transitive helper evidence used by the command handler" }
+  ]
+  tests: [
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterfaceTests/Private/Smoke/UeAgentInterfaceSmoke_Coverage.cpp", purpose: "smoke or negative-path evidence cross-checked for the verified contract" }
+  ]
+}
+execution: {
+  destructive: false
+  editor_state: required
+  game_thread: required
+  idempotent: false
+  kind: write
+  overwrite_behavior: none
+  pie_state: allowed
+  retry_safe: false
+  save_behavior: none
+  side_effects: [modifies_level]
+  ui_effect: none
+}
+maturity: verified
+params: {
+  constraints: []
+  fields: {
+    animate: { default_state: none, description_zh: "C++ 实现读取的 animate 参数", required: false, type: bool }
+    clear_existing: { default: false, default_state: defined, description_zh: "C++ 实现读取的 clear_existing 参数", required: false, type: bool }
+    component: { default_state: none, description_zh: "C++ 实现读取的 component 参数", required: false, type: string }
+    component_id: { default_state: none, description_zh: "C++ 实现读取的 component_id 参数", required: false, type: string }
+    id: { default_state: none, description_zh: "C++ 实现读取的 id 参数", required: true, type: string }
+    morph_target: { default_state: none, description_zh: "C++ 实现读取的 morph_target 参数", required: true, type: string }
+    morph_target_name: { default_state: none, description_zh: "C++ 实现读取的 morph_target_name 参数", required: false, type: string }
+    name: { default_state: none, description_zh: "C++ 实现读取的 name 参数", required: false, type: string }
+    pulse: { default_state: none, description_zh: "C++ 实现读取的 pulse 参数", required: false, type: json_value }
+    skeletal_mesh: { default_state: none, description_zh: "C++ 实现读取的 skeletal_mesh 参数", required: false, type: string }
+    start_pulse: { default_state: none, description_zh: "C++ 实现读取的 start_pulse 参数", required: false, type: bool }
+    stop_animation: { default: false, default_state: defined, description_zh: "C++ 实现读取的 stop_animation 参数", required: false, type: bool }
+    stop_pulse: { default: false, default_state: defined, description_zh: "C++ 实现读取的 stop_pulse 参数", required: false, type: bool }
+    weight: { default_state: none, description_zh: "C++ 实现读取的 weight 参数", required: false, type: json_value }
+  }
+  state: defined
+}
+response: { artifact_fields: [], compact_fields: [actor_label, actor_name, applied_weight, clear_existing, component_name, component_path], failure_fields: [params.id, params.morph_target], max_items_policy: { fields: [], mode: none } }
+returns: {
+  fields: {
+    actor_label: { description_zh: "C++ 实现返回的 actor_label 字段；是否出现取决于执行分支", required: false, type: string }
+    actor_name: { description_zh: "C++ 实现返回的 actor_name 字段；是否出现取决于执行分支", required: false, type: string }
+    applied_weight: { description_zh: "C++ 实现返回的 applied_weight 字段；是否出现取决于执行分支", required: false, type: number }
+    clear_existing: { description_zh: "C++ 实现返回的 clear_existing 字段；是否出现取决于执行分支", required: false, type: bool }
+    component_name: { description_zh: "C++ 实现返回的 component_name 字段；是否出现取决于执行分支", required: false, type: string }
+    component_path: { description_zh: "C++ 实现返回的 component_path 字段；是否出现取决于执行分支", required: false, type: string }
+    display_status: { description_zh: "C++ 实现返回的 display_status 字段；是否出现取决于执行分支", required: false, type: string }
+    morph_target: { description_zh: "C++ 实现返回的 morph_target 字段；是否出现取决于执行分支", required: false, type: string }
+    pulse_cycle_seconds: { description_zh: "C++ 实现返回的 pulse_cycle_seconds 字段；是否出现取决于执行分支", required: false, type: number }
+    pulse_duration_seconds: { description_zh: "C++ 实现返回的 pulse_duration_seconds 字段；是否出现取决于执行分支", required: false, type: number }
+    pulse_key: { description_zh: "C++ 实现返回的 pulse_key 字段；是否出现取决于执行分支", required: false, type: string }
+    pulse_loop: { description_zh: "C++ 实现返回的 pulse_loop 字段；是否出现取决于执行分支", required: false, type: bool }
+    pulse_max_weight: { description_zh: "C++ 实现返回的 pulse_max_weight 字段；是否出现取决于执行分支", required: false, type: number }
+    pulse_min_weight: { description_zh: "C++ 实现返回的 pulse_min_weight 字段；是否出现取决于执行分支", required: false, type: number }
+    pulse_started: { description_zh: "C++ 实现返回的 pulse_started 字段；是否出现取决于执行分支", required: false, type: bool }
+    pulse_stopped: { description_zh: "C++ 实现返回的 pulse_stopped 字段；是否出现取决于执行分支", required: false, type: bool }
+    pulse_tick_interval_seconds: { description_zh: "C++ 实现返回的 pulse_tick_interval_seconds 字段；是否出现取决于执行分支", required: false, type: number }
+    requested_weight: { description_zh: "C++ 实现返回的 requested_weight 字段；是否出现取决于执行分支", required: false, type: number }
+    skeletal_mesh: { description_zh: "C++ 实现返回的 skeletal_mesh 字段；是否出现取决于执行分支", required: false, type: string }
+    stopped_existing_pulse: { description_zh: "C++ 实现返回的 stopped_existing_pulse 字段；是否出现取决于执行分支", required: false, type: bool }
+  }
+  state: defined
+}
+schema: uai.command_spec.v1
+status: active
+types: {}
+verification: {
+  assertions: [
+    { id: result_present, operator: exists, source: returns.actor_label }
+  ]
+  failure_policy: fail_overall
+  methods: [
+    { id: result, kind: result_assertion }
+  ]
+  required: true
+  state: defined
+}
+version: 1

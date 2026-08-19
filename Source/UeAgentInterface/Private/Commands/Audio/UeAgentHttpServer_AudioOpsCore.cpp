@@ -2,9 +2,11 @@
 
 #include "Commands/Audio/UeAgentHttpServer_AudioOps.h"
 #include "Server/UeAgentHttpServer.h"
-#include "Utilities/UeAgentAuthoringJson.h"
+#include "Utilities/UeAgentAuthoringFileIO.h"
+#include "Utilities/UeAgentUObjectProperties.h"
 #include "Utilities/UeAgentDetailsAuthoring.h"
 #include "Utilities/UeAgentJsonDiagnostics.h"
+#include "Utilities/UeAgentStructuredAuthoringIO.h"
 #include "AssetRegistry/AssetRegistryModule.h"
 #include "Editor.h"
 #include "FileHelpers.h"
@@ -20,10 +22,6 @@
 
 namespace UeAgentAudioOps
 {
-	FAudioRecordSession::FAudioRecordSession()
-		: StartTimeSeconds(0.0)
-	{
-	}
 	bool IsHeadlessEditorUi()
 	{
 		return IsRunningCommandlet() || FApp::IsUnattended() || !GEditor;
@@ -39,7 +37,6 @@ namespace UeAgentAudioOps
 	const TCHAR* AudioEffectPresetProfile = TEXT("ue_agent_interface.audio_effect_preset.v1");
 	const TCHAR* AudioRuntimeProfile = TEXT("ue_agent_interface.audio_runtime.v1");
 	TArray<TWeakObjectPtr<UAudioComponent>> GPreviewComponents;
-	TMap<FString, FAudioRecordSession> GRecordSessions;
 	FString NormalizeAssetPath(const FString& InPath)
 	{
 		FString OutPath = InPath;
@@ -238,71 +235,18 @@ namespace UeAgentAudioOps
 	{
 		return UeAgentJsonDiagnostics::ResolveProjectRelativeFilePath(FilePath);
 	}
-	bool SaveJsonFile(const FString& OutputPathInput, const TSharedPtr<FJsonObject>& Root, FString& OutOutputPath, FString& OutError)
+	bool SaveAuthoringFile(const FString& OutputPathInput, const TSharedPtr<FJsonObject>& Root, FString& OutOutputPath, FString& OutError)
 	{
-		OutOutputPath.Reset();
-		if (!Root.IsValid())
-		{
-			OutError = TEXT("json_root_invalid");
-			return false;
-		}
-		FString OutputPath = ResolveFilePath(OutputPathInput);
-		OutputPath.TrimStartAndEndInline();
-		if (OutputPath.IsEmpty())
-		{
-			OutError = TEXT("missing_output_file");
-			return false;
-		}
-		IFileManager::Get().MakeDirectory(*FPaths::GetPath(OutputPath), true);
-		FString JsonText;
-		TSharedPtr<FJsonObject> SaveRoot = UeAgentDetailsAuthoring::CloneObjectTree(Root);
-		if (!UeAgentDetailsAuthoring::ExternalizeInlineDetailsInObjectTree(OutputPath, SaveRoot, TEXT("audio_json_export"), OutError))
-		{
-			return false;
-		}
-		if (!UeAgentJsonDiagnostics::SerializeJsonObjectCompact(SaveRoot, JsonText))
-		{
-			OutError = TEXT("json_serialize_failed");
-			return false;
-		}
-		if (!FFileHelper::SaveStringToFile(JsonText, *OutputPath, FFileHelper::EEncodingOptions::ForceUTF8WithoutBOM))
-		{
-			OutError = TEXT("save_json_file_failed");
-			return false;
-		}
-		OutOutputPath = OutputPath;
-		return true;
+		UeAgentAuthoringFileIO::FSaveOptions Options;
+		Options.SourceCommand = TEXT("audio_json_export");
+		Options.bScopeInlineDetailsToEntryFile = true;
+		return UeAgentAuthoringFileIO::SaveObject(OutputPathInput, Root, Options, OutOutputPath, OutError);
 	}
-	bool LoadJsonFile(const FString& InputPathInput, TSharedPtr<FJsonObject>& OutRoot, FString& OutResolvedPath, FString& OutError)
+	bool LoadAuthoringFile(const FString& InputPathInput, TSharedPtr<FJsonObject>& OutRoot, FString& OutResolvedPath, FString& OutError)
 	{
-		OutRoot.Reset();
-		OutResolvedPath.Reset();
-		FString InputPath = ResolveFilePath(InputPathInput);
-		InputPath.TrimStartAndEndInline();
-		if (InputPath.IsEmpty())
-		{
-			OutError = TEXT("missing_json_file");
-			return false;
-		}
-		if (!FPaths::FileExists(InputPath))
-		{
-			OutError = TEXT("json_file_not_found");
-			return false;
-		}
-		FString JsonText;
-		if (!FFileHelper::LoadFileToString(JsonText, *InputPath))
-		{
-			OutError = TEXT("load_json_file_failed");
-			return false;
-		}
-		const TSharedRef<TJsonReader<>> Reader = TJsonReaderFactory<>::Create(JsonText);
-		if (!FJsonSerializer::Deserialize(Reader, OutRoot) || !OutRoot.IsValid())
-		{
-			OutError = TEXT("json_parse_failed");
-			return false;
-		}
-		OutResolvedPath = InputPath;
-		return UeAgentDetailsAuthoring::RehydrateGroupedDetailsInObjectTree(InputPath, OutRoot, OutError);
+		UeAgentAuthoringFileIO::FLoadOptions Options;
+		Options.bRehydrateGroupedDetails = true;
+		return UeAgentAuthoringFileIO::LoadObject(InputPathInput, OutRoot, Options, OutResolvedPath, OutError);
 	}
 	bool SavePackagesForObjects(const TArray<UObject*>& Objects, FString& OutError)
 	{
@@ -444,42 +388,13 @@ namespace UeAgentAudioOps
 	}
 	TSharedPtr<FJsonObject> BuildGenericAssetJson(UObject* Asset, const FString& Profile, bool bIncludeProperties)
 	{
-		TSharedPtr<FJsonObject> Root = MakeShared<FJsonObject>();
-		Root->SetStringField(TEXT("profile"), Profile);
-		Root->SetNumberField(TEXT("schema_version"), 1);
+		UeAgentUObjectProperties::FExportOptions Options;
+		Options.Profile = bIncludeProperties
+			? UeAgentUObjectProperties::EExportProfile::Authoring
+			: UeAgentUObjectProperties::EExportProfile::Index;
+		TSharedPtr<FJsonObject> Root = UeAgentUObjectProperties::ExportObjectProperties(Asset, Options);
+		Root->SetStringField(TEXT("domain_profile"), Profile);
 		FillAssetIdentity(Asset, Root);
-		if (Asset && bIncludeProperties)
-		{
-			TArray<TSharedPtr<FJsonValue>> Properties;
-			for (TFieldIterator<FProperty> It(Asset->GetClass(), EFieldIterationFlags::IncludeSuper); It; ++It)
-			{
-				FProperty* Property = *It;
-				if (!Property || !Property->HasAnyPropertyFlags(CPF_Edit))
-				{
-					continue;
-				}
-				FString ValueText;
-				FString CppType;
-				if (ExportPropertyText(Asset, Property->GetName(), ValueText, CppType))
-				{
-					TSharedPtr<FJsonObject> PropObj = MakeShared<FJsonObject>();
-					PropObj->SetStringField(TEXT("value_text"), ValueText);
-					UeAgentAuthoringJson::ApplyReflectedPropertyMetadata(PropObj, Property, Property->GetName());
-					Properties.Add(MakeShared<FJsonValueObject>(PropObj));
-				}
-			}
-			Root->SetArrayField(TEXT("properties"), Properties);
-		}
 		return Root;
-	}
-	bool SaveTrackedJson(const FString& FolderPath, const FString& FileName, const TSharedPtr<FJsonObject>& Root, TArray<TSharedPtr<FJsonValue>>& OutFiles, FString& OutError)
-	{
-		FString SavedPath;
-		if (!SaveJsonFile(FPaths::Combine(FolderPath, FileName), Root, SavedPath, OutError))
-		{
-			return false;
-		}
-		OutFiles.Add(JsonStringValue(SavedPath));
-		return true;
 	}
 }

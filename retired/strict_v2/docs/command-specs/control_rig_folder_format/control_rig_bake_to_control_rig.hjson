@@ -1,0 +1,86 @@
+authoring: { reason: command_has_no_registered_folder_authoring_profile, state: none }
+category: control_rig_folder_format
+command: control_rig_bake_to_control_rig
+deprecation: { reason: command_is_active, state: none }
+discovery: { aliases: [], keywords_en: [control, rig, bake, to, control_rig_folder_format], keywords_zh: [control_rig_bake_to_control_rig], summary_en: "Execute control_rig_bake_to_control_rig with a verified implementation contract", summary_zh: "从 Sequencer 显式 Bake To Control Rig", tags: [control_rig_folder_format, p2-006] }
+errors: {
+  codes: [
+    { code: binding_id_required, description_zh: "C++ 实现返回错误码 binding_id_required", retry_safe: true, stage: preflight, wire_match: exact }
+    { code: control_rig_bake_requires_fk_or_inverse_event, description_zh: "C++ 实现返回错误码 control_rig_bake_requires_fk_or_inverse_event", retry_safe: false, stage: execution, wire_match: exact }
+    { code: control_rig_bake_to_control_rig_failed, description_zh: "C++ 实现返回错误码 control_rig_bake_to_control_rig_failed", retry_safe: false, stage: execution, wire_match: exact }
+    { code: control_rig_class_required, description_zh: "C++ 实现返回错误码 control_rig_class_required", retry_safe: true, stage: preflight, wire_match: exact }
+    { code: editor_world_not_found, description_zh: "C++ 实现返回错误码 editor_world_not_found", retry_safe: false, stage: execution, wire_match: exact }
+    { code: invalid_control_rig_class, description_zh: "C++ 实现返回错误码 invalid_control_rig_class", retry_safe: true, stage: preflight, wire_match: exact }
+    { code: level_sequence_not_found, description_zh: "C++ 实现返回错误码 level_sequence_not_found", retry_safe: false, stage: execution, wire_match: exact }
+    { code: sequence_path_required, description_zh: "C++ 实现返回错误码 sequence_path_required", retry_safe: true, stage: preflight, wire_match: exact }
+  ]
+}
+evidence: {
+  docs: [
+    { path: "Plugins/UeAgentInterface/docs/commands/control_rig_folder_format/control_rig_bake_to_control_rig.md", purpose: "user documentation cross-check; C++ implementation remains authoritative" }
+  ]
+  implementation: [
+    { line_hint: 1303, path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Commands/ControlRig/UeAgentHttpServer_ControlRig.cpp", purpose: "command handler, parameter and return evidence", symbol: "FUeAgentHttpServer::ExecuteControlRigCommand__command_control_rig_bake_to_control_rig" }
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Commands/ControlRig/UeAgentHttpServer_ControlRig_Bake.cpp", purpose: "transitive helper evidence used by the command handler" }
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Server/UeAgentHttpServer.cpp", purpose: "transitive helper evidence used by the command handler" }
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Utilities/UeAgentJsonDiagnostics.cpp", purpose: "transitive helper evidence used by the command handler" }
+  ]
+  tests: [
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterfaceTests/Private/Smoke/UeAgentInterfaceSmoke_Coverage.cpp", purpose: "smoke or negative-path evidence cross-checked for the verified contract" }
+  ]
+}
+execution: {
+  destructive: false
+  editor_state: required
+  game_thread: required
+  idempotent: false
+  kind: write
+  overwrite_behavior: none
+  pie_state: allowed
+  retry_safe: false
+  save_behavior: none
+  side_effects: [modifies_asset]
+  ui_effect: none
+}
+maturity: verified
+params: {
+  constraints: []
+  fields: {
+    control_rig_class: { default_state: none, description_zh: "C++ 实现读取的 control_rig_class 参数", required: true, type: string }
+    reduce_keys: { default: false, default_state: defined, description_zh: "C++ 实现读取的 reduce_keys 参数", required: false, type: bool }
+    reset_controls: { default: true, default_state: defined, description_zh: "C++ 实现读取的 reset_controls 参数", required: false, type: bool }
+    sequence_path: { default_state: none, description_zh: "C++ 实现读取的 sequence_path 参数", required: true, type: string }
+    tolerance: { default: 0.001, default_state: defined, description_zh: "C++ 实现读取的 tolerance 参数", required: false, type: number }
+  }
+  state: defined
+}
+response: { artifact_fields: [binding_preflight], compact_fields: [baked, binding_id, control_rig_class, is_fk_control_rig, sequence_path], failure_fields: [params.control_rig_class, params.sequence_path], max_items_policy: { fields: [], mode: none } }
+returns: {
+  fields: {
+    baked: { description_zh: "C++ 实现返回的 baked 字段；是否出现取决于执行分支", required: false, type: bool }
+    binding_id: { description_zh: "C++ 实现返回的 binding_id 字段；是否出现取决于执行分支", required: false, type: string }
+    binding_preflight: { description_zh: "C++ 实现返回的 binding_preflight 字段；是否出现取决于执行分支", required: false, type: json_value }
+    control_rig_class: { description_zh: "C++ 实现返回的 control_rig_class 字段；是否出现取决于执行分支", required: false, type: string }
+    is_fk_control_rig: { description_zh: "C++ 实现返回的 is_fk_control_rig 字段；是否出现取决于执行分支", required: false, type: bool }
+    sequence_path: { description_zh: "C++ 实现返回的 sequence_path 字段；是否出现取决于执行分支", required: false, type: string }
+    supports_inverse_event: { description_zh: "C++ 实现返回的 supports_inverse_event 字段；是否出现取决于执行分支", required: false, type: bool }
+  }
+  state: defined
+}
+schema: uai.command_spec.v1
+status: active
+types: {}
+verification: {
+  assertions: [
+    { id: result_present, operator: exists, source: returns.baked }
+    { id: state_readback_present, operator: exists, source: methods.state_readback.asset_path }
+  ]
+  failure_policy: fail_overall
+  methods: [
+    { id: result, kind: result_assertion }
+    { command: sequence_get_level_sequence_info, id: state_readback, kind: command_readback, params_mapping: { asset_path: returns.sequence_path } }
+  ]
+  required: true
+  state: defined
+}
+version: 1

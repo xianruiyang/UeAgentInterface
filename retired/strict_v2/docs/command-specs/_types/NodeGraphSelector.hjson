@@ -1,0 +1,19 @@
+definition: {
+  additional_fields: false
+  fields: {
+    graph_kinds: { default_state: none, description_zh: "图种类过滤器", item_type: string, required: false, type: array }
+    graph_name: { default_state: none, description_zh: "单个图名", required: false, type: string }
+    graph_names: { default_state: none, description_zh: "图名列表", item_type: string, required: false, type: array }
+    graph_path: { default_state: none, description_zh: "单个图路径", required: false, type: string }
+    graph_paths: { default_state: none, description_zh: "图路径列表", item_type: string, required: false, type: array }
+    graphs: { default_state: none, description_zh: "图引用列表", item_type: json_value, required: false, type: array }
+    include_nested_graphs: { default: false, default_state: defined, description_zh: "包含嵌套图", required: false, type: bool }
+    mode: { default_state: none, description_zh: "选择模式", required: false, type: string }
+    scope: { default_state: none, description_zh: "选择模式别名", required: false, type: string }
+    skip_empty_graphs: { default: true, default_state: defined, description_zh: "跳过空图", required: false, type: bool }
+  }
+  kind: object
+}
+schema: uai.command_spec.shared_type.v1
+type_id: NodeGraphSelector
+version: 1

@@ -49,6 +49,23 @@ namespace UeAgentModelingOps
 		FString PrimitiveKind;
 	};
 
+	enum class EModelingOutputTypePolicy : uint8
+	{
+		DynamicMeshActorDefault,
+		DynamicMeshActorRequired,
+		StaticMeshRequired
+	};
+
+	struct FModelingToolWrapperDefinition
+	{
+		FString ToolIdentifier;
+		FString PostAction;
+		FString UnsupportedActionError;
+		bool bPostActionSupported = true;
+		bool bPrimitiveCreation = false;
+		EModelingOutputTypePolicy OutputTypePolicy = EModelingOutputTypePolicy::DynamicMeshActorDefault;
+	};
+
 	TSharedPtr<FJsonObject> MakeVectorJson(const FVector& Value);
 	TSharedPtr<FJsonObject> MakeRotatorJson(const FRotator& Value);
 	TSharedPtr<FJsonObject> MakeActorSummaryJson(AActor* Actor);
@@ -77,6 +94,8 @@ namespace UeAgentModelingOps
 	AActor* FindActorByNameOrLabelLoose(UWorld* World, const FString& NameOrLabel);
 	UObject* LoadAssetObject(const FString& InPath);
 	UStaticMesh* LoadStaticMeshAsset(const FString& InPath);
+	UEAGENTINTERFACE_API const TMap<FString, FModelingToolWrapperDefinition>& GetModelingToolWrapperRegistry();
+	UEAGENTINTERFACE_API bool ResolveAllowedModelingToolIdentifier(const FString& InValue, FString& OutToolIdentifier);
 	FString ResolveToolIdentifierAlias(const FString& InValue);
 	FEditorViewportClient* ResolveTickViewportClient(FEditorViewportClient* ViewportClient);
 	void EnsureViewportClientFocused(FEditorViewportClient* ViewportClient);
@@ -102,8 +121,10 @@ namespace UeAgentModelingOps
 	void FlushToolsContext(const FModelingContext& Context, int32 NumTicks);
 	void FillActiveToolData(const FModelingContext& Context, TSharedPtr<FJsonObject>& OutData);
 	bool StartToolByIdentifier(const FString& ToolIdentifier, const FModelingContext& Context, FString& OutError);
-	void ConfigureDefaultModelingOutputType();
-	bool AutoPrepareModelingOutputType(const TSharedPtr<FJsonObject>& Params, UInteractiveTool* Tool, FString& OutError, TSharedPtr<FJsonObject>& OutData);
+	void ConfigureDefaultModelingOutputType(EModelingOutputTypePolicy Policy);
+	bool AutoPrepareModelingOutputType(const TSharedPtr<FJsonObject>& Params, UInteractiveTool* Tool, EModelingOutputTypePolicy Policy, FString& OutError, TSharedPtr<FJsonObject>& OutData);
+	FString ResolveAcceptedOutputAssetPath(AActor* Actor);
+	bool IsAcceptedDynamicMeshOutput(AActor* Actor);
 	bool AutoPreparePrimitiveCreationTool(const TSharedPtr<FJsonObject>& Params, UInteractiveTool* Tool, const FString& ToolIdentifier, FString& OutError);
 	bool FinishTool(const FModelingContext& Context, EToolShutdownType ShutdownType, FString& OutError);
 	TArray<AActor*> ResolveActorsByIds(UWorld* World, const TArray<TSharedPtr<FJsonValue>>& IdValues);
@@ -112,7 +133,7 @@ namespace UeAgentModelingOps
 	bool ApplyToolProperties(const TSharedPtr<FJsonObject>& Params, UInteractiveTool* Tool, FString& OutError, TArray<TSharedPtr<FJsonValue>>* OutPropertyResults);
 	bool InvokeToolAction(UInteractiveTool* Tool, const FString& ActionName);
 	bool ResolveSelectionActorsFromContext(const FUeAgentRequestContext& Ctx, UWorld* World, TArray<AActor*>& OutActors, FString& OutError);
-	bool SaveActorStaticMeshes(const TArray<AActor*>& Actors, int32& OutSavedCount);
+	bool SaveActorStaticMeshes(const TArray<AActor*>& Actors, TArray<FString>& OutSavedPackagePaths);
 }
 
 namespace UeAgentModelingSpatialInfo
@@ -125,36 +146,4 @@ namespace UeAgentModelingSpatialInfo
 	bool ResolveMeshComponent(AActor* Actor, const FString& ComponentName, UPrimitiveComponent*& OutComponent, FString& OutError);
 	TSharedPtr<FJsonObject> MakeAssetTargetJson(const UObject* Asset, const FString& TargetType);
 	TSharedPtr<FJsonObject> MakeComponentTargetJson(const AActor* Actor, const UPrimitiveComponent* Component, const FString& TargetType);
-}
-
-namespace UeAgentModelingVoxelGrid
-{
-	struct FVoxelGridSession
-	{
-		FVoxelGridSession();
-
-		FString SessionId;
-		FString GridId;
-		TWeakObjectPtr<AActor> Actor;
-		double CellSize;
-		FTransform GridToWorld;
-		FVector AnchorLocal;
-		TSet<FIntVector> OccupiedCells;
-		int64 Revision;
-		bool bDirty;
-		FString SidecarPath;
-	};
-
-	extern TMap<FString, FVoxelGridSession> GVoxelGridSessions;
-
-	FString MakeNewSessionId();
-	FString GetVoxelGridSidecarPath(const FString& GridId);
-	FVector GridToComponentLocal(const FVoxelGridSession& Session, const FVector& GridLocalPoint);
-	FVector ComponentLocalToGrid(const FVoxelGridSession& Session, const FVector& ComponentLocalPoint);
-	FTransform MakeActorTransformFromGridAndAnchor(const FVoxelGridSession& Session);
-	FBox TransformBoxBy(const FBox& Box, const FTransform& Transform);
-	FBox ComputeLocalCellBounds(const TSet<FIntVector>& Cells, double CellSize, const FVector& AnchorLocal);
-	bool TryGetGridIdFromActor(AActor* Actor, FString& OutGridId);
-	bool LoadSidecar(FVoxelGridSession& Session, FString& OutError);
-	FVoxelGridSession* FindActiveSessionForActor(AActor* Actor);
 }

@@ -1,0 +1,75 @@
+authoring: { reason: command_has_no_registered_folder_authoring_profile, state: none }
+category: core_level
+command: navmesh_build
+deprecation: { reason: command_is_active, state: none }
+discovery: { aliases: [], keywords_en: [navmesh, build, core_level], keywords_zh: [navmesh_build], summary_en: "Execute navmesh_build with a verified implementation contract", summary_zh: "构建/刷新 NavMesh", tags: [core_level, p2-002] }
+errors: {
+  codes: [
+    { code: navmesh_navigation_system_not_found, description_zh: "C++ 实现返回错误码 navmesh_navigation_system_not_found", retry_safe: false, stage: execution, wire_match: exact }
+    { code: navmesh_no_nav_data, description_zh: "C++ 实现返回错误码 navmesh_no_nav_data", retry_safe: false, stage: execution, wire_match: exact }
+    { code: no_editor_world, description_zh: "C++ 实现返回错误码 no_editor_world", retry_safe: false, stage: execution, wire_match: exact }
+    { code: no_geditor, description_zh: "C++ 实现返回错误码 no_geditor", retry_safe: false, stage: execution, wire_match: exact }
+  ]
+}
+evidence: {
+  docs: [
+    { path: "Plugins/UeAgentInterface/docs/commands/core_level/navmesh_build.md", purpose: "user documentation cross-check; C++ implementation remains authoritative" }
+  ]
+  implementation: [
+    { line_hint: 21, path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Commands/Level/UeAgentHttpServer_Level_Navigation.cpp", purpose: "command handler, parameter and return evidence", symbol: CmdNavmeshBuild }
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Commands/Level/UeAgentHttpServer_Level_CaptureAndPersistence.cpp", purpose: "transitive helper evidence used by the command handler" }
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Server/UeAgentHttpServer.cpp", purpose: "transitive helper evidence used by the command handler" }
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Utilities/UeAgentJsonDiagnostics.cpp", purpose: "transitive helper evidence used by the command handler" }
+  ]
+  tests: [
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterfaceTests/Private/Smoke/UeAgentInterfaceSmoke_LevelViewportModeling.cpp", purpose: "smoke or negative-path evidence cross-checked for the verified contract" }
+  ]
+}
+execution: {
+  destructive: false
+  editor_state: required
+  game_thread: required
+  idempotent: false
+  kind: write
+  overwrite_behavior: none
+  pie_state: allowed
+  retry_safe: false
+  save_behavior: none
+  side_effects: [modifies_level]
+  ui_effect: none
+}
+maturity: verified
+params: {
+  constraints: []
+  fields: {
+    timeout_seconds: { default: 10, default_state: defined, description_zh: "C++ 实现读取的 timeout_seconds 参数", required: false, type: number }
+    wait_for_finish: { default: false, default_state: defined, description_zh: "C++ 实现读取的 wait_for_finish 参数", required: false, type: bool }
+  }
+  state: defined
+}
+response: { artifact_fields: [], compact_fields: [build_in_progress, build_requested, nav_data_count, timeout_seconds, wait_for_finish], failure_fields: [], max_items_policy: { fields: [], mode: none } }
+returns: {
+  fields: {
+    build_in_progress: { description_zh: "C++ 实现返回的 build_in_progress 字段；是否出现取决于执行分支", required: false, type: bool }
+    build_requested: { description_zh: "C++ 实现返回的 build_requested 字段；是否出现取决于执行分支", required: false, type: bool }
+    nav_data_count: { description_zh: "C++ 实现返回的 nav_data_count 字段；是否出现取决于执行分支", required: false, type: integer }
+    timeout_seconds: { description_zh: "C++ 实现返回的 timeout_seconds 字段；是否出现取决于执行分支", required: false, type: number }
+    wait_for_finish: { description_zh: "C++ 实现返回的 wait_for_finish 字段；是否出现取决于执行分支", required: false, type: bool }
+  }
+  state: defined
+}
+schema: uai.command_spec.v1
+status: active
+types: {}
+verification: {
+  assertions: [
+    { id: result_present, operator: exists, source: returns.build_in_progress }
+  ]
+  failure_policy: fail_overall
+  methods: [
+    { id: result, kind: result_assertion }
+  ]
+  required: true
+  state: defined
+}
+version: 1

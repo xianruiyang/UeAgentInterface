@@ -2,10 +2,15 @@
 
 #include "UeAgentHttpServer_Sequence.h"
 
+#include "Commands/Assets/UeAgentReflectionAuthoringCommandBridge.h"
 #include "Commands/EditorViewport/UeAgentEditorViewportSequenceFrameOptions.h"
+#include "Utilities/UeAgentAuthoringFileIO.h"
+#include "Utilities/UeAgentAuthoringFolderIO.h"
+#include "Utilities/UeAgentAuthoringFolderStats.h"
 #include "Utilities/UeAgentAuthoringJson.h"
 #include "Utilities/UeAgentDetailsAuthoring.h"
 #include "Utilities/UeAgentJsonDiagnostics.h"
+#include "Utilities/UeAgentStructuredAuthoringIO.h"
 
 #include "Animation/AnimSequenceBase.h"
 #include "Animation/MovieScene2DTransformSection.h"
@@ -404,83 +409,18 @@ namespace UeAgentSequenceOps
 		return true;
 	}
 
-	bool SaveJsonFile(const FString& OutputPathInput, const TSharedPtr<FJsonObject>& Root, FString& OutOutputPath, FString& OutError)
+	bool SaveAuthoringFile(const FString& OutputPathInput, const TSharedPtr<FJsonObject>& Root, FString& OutOutputPath, FString& OutError)
 	{
-		OutOutputPath.Reset();
-		if (!Root.IsValid())
-		{
-			OutError = TEXT("json_root_invalid");
-			return false;
-		}
-
-		FString OutputPath = OutputPathInput;
-		OutputPath.TrimStartAndEndInline();
-		if (OutputPath.IsEmpty())
-		{
-			OutError = TEXT("missing_output_file");
-			return false;
-		}
-
-		OutputPath = UeAgentJsonDiagnostics::ResolveProjectRelativeFilePath(OutputPath);
-		const FString OutputDir = FPaths::GetPath(OutputPath);
-		if (!OutputDir.IsEmpty() && !IFileManager::Get().DirectoryExists(*OutputDir))
-		{
-			IFileManager::Get().MakeDirectory(*OutputDir, true);
-		}
-
-		FString JsonText;
-		if (!UeAgentJsonDiagnostics::SerializeJsonObjectCompact(Root, JsonText))
-		{
-			OutError = TEXT("json_serialize_failed");
-			return false;
-		}
-
-		if (!FFileHelper::SaveStringToFile(JsonText, *OutputPath, FFileHelper::EEncodingOptions::ForceUTF8WithoutBOM))
-		{
-			OutError = TEXT("save_json_file_failed");
-			return false;
-		}
-
-		OutOutputPath = OutputPath;
-		return true;
+		UeAgentAuthoringFileIO::FSaveOptions Options;
+		Options.SourceCommand = TEXT("sequence_json_export");
+		Options.bExternalizeInlineDetails = false;
+		return UeAgentAuthoringFileIO::SaveObject(OutputPathInput, Root, Options, OutOutputPath, OutError);
 	}
 
-	bool LoadJsonFile(const FString& InputPathInput, TSharedPtr<FJsonObject>& OutRoot, FString& OutResolvedPath, FString& OutError)
+	bool LoadAuthoringFile(const FString& InputPathInput, TSharedPtr<FJsonObject>& OutRoot, FString& OutResolvedPath, FString& OutError)
 	{
-		OutRoot.Reset();
-		OutResolvedPath.Reset();
-
-		FString InputPath = InputPathInput;
-		InputPath.TrimStartAndEndInline();
-		if (InputPath.IsEmpty())
-		{
-			OutError = TEXT("missing_json_file");
-			return false;
-		}
-
-		InputPath = UeAgentJsonDiagnostics::ResolveProjectRelativeFilePath(InputPath);
-		if (!FPaths::FileExists(InputPath))
-		{
-			OutError = TEXT("json_file_not_found");
-			return false;
-		}
-
-		FString JsonText;
-		if (!FFileHelper::LoadFileToString(JsonText, *InputPath))
-		{
-			OutError = TEXT("load_json_file_failed");
-			return false;
-		}
-
-		const TSharedRef<TJsonReader<>> Reader = TJsonReaderFactory<>::Create(JsonText);
-		if (!FJsonSerializer::Deserialize(Reader, OutRoot) || !OutRoot.IsValid())
-		{
-			OutError = TEXT("json_parse_failed");
-			return false;
-		}
-
-		OutResolvedPath = InputPath;
-		return true;
+		UeAgentAuthoringFileIO::FLoadOptions Options;
+		return UeAgentAuthoringFileIO::LoadObject(InputPathInput, OutRoot, Options, OutResolvedPath, OutError);
 	}
 
 	bool LoadOptionalJsonFile(const FString& InputPathInput, TSharedPtr<FJsonObject>& OutRoot, FString& OutResolvedPath, FString& OutError)
@@ -495,14 +435,10 @@ namespace UeAgentSequenceOps
 			return true;
 		}
 
-		InputPath = UeAgentJsonDiagnostics::ResolveProjectRelativeFilePath(InputPath);
-		if (!FPaths::FileExists(InputPath))
-		{
-			return true;
-		}
-
+		UeAgentAuthoringFileIO::FLoadOptions Options;
+		Options.bOptional = true;
 		FString LoadError;
-		if (!LoadJsonFile(InputPath, OutRoot, OutResolvedPath, LoadError))
+		if (!UeAgentAuthoringFileIO::LoadObject(InputPath, OutRoot, Options, OutResolvedPath, LoadError))
 		{
 			OutError = FString::Printf(TEXT("%s:%s"), *LoadError, *InputPath);
 			return false;
@@ -890,15 +826,7 @@ namespace UeAgentSequenceOps
 			Item->SetBoolField(TEXT("is_additive"), ControlRig ? ControlRig->IsAdditive() : false);
 		}
 
-		UeAgentAuthoringJson::ApplyAuthoringMetadata(
-			Item,
-			TEXT("track_name"),
-			Track ? Track->GetName() : TEXT(""),
-			Track ? Track->GetName() : TEXT("Track"),
-			TEXT("Sequencer/Tracks"),
-			TEXT("sequencer_track"),
-			TEXT("track"),
-			{ TEXT("edit"), TEXT("add_section"), TEXT("remove_section") });
+		UeAgentAuthoringJson::ApplyAuthoringMetadata(Item, TEXT("track_name"), Track ? Track->GetName() : TEXT(""), Track ? Track->GetName() : TEXT("Track"), TEXT("Sequencer/Tracks"), TEXT("track"));
 
 		TArray<TSharedPtr<FJsonValue>> Sections;
 		if (Track)
@@ -1086,15 +1014,7 @@ namespace UeAgentSequenceOps
 					SectionObject->SetNumberField(TEXT("key_count"), KeyCount);
 				}
 
-				UeAgentAuthoringJson::ApplyAuthoringMetadata(
-					SectionObject,
-					TEXT("section_index"),
-					FString::FromInt(SectionIndex),
-					SectionObject->HasField(TEXT("section_type")) ? SectionObject->GetStringField(TEXT("section_type")) : Section->GetName(),
-					TEXT("Sequencer/Sections"),
-					TEXT("sequencer_section"),
-					TEXT("section"),
-					{ TEXT("set_range"), TEXT("edit_keys"), TEXT("remove") });
+				UeAgentAuthoringJson::ApplyAuthoringMetadata(SectionObject, TEXT("section_index"), FString::FromInt(SectionIndex), SectionObject->HasField(TEXT("section_type")) ? SectionObject->GetStringField(TEXT("section_type")) : Section->GetName(), TEXT("Sequencer/Sections"), TEXT("section"));
 
 				Sections.Add(MakeShared<FJsonValueObject>(SectionObject));
 			}
@@ -1140,15 +1060,7 @@ namespace UeAgentSequenceOps
 		Item->SetStringField(TEXT("guid"), Binding.GetObjectGuid().ToString(EGuidFormats::DigitsWithHyphensLower));
 		Item->SetStringField(TEXT("name"), Binding.GetName());
 		Item->SetNumberField(TEXT("track_count"), Binding.GetTracks().Num());
-		UeAgentAuthoringJson::ApplyAuthoringMetadata(
-			Item,
-			TEXT("binding_guid"),
-			Binding.GetObjectGuid().ToString(EGuidFormats::DigitsWithHyphensLower),
-			Binding.GetName(),
-			TEXT("Sequencer/Bindings"),
-			TEXT("sequencer_binding"),
-			TEXT("binding"),
-			{ TEXT("edit_tracks"), TEXT("add_track"), TEXT("remove_binding") });
+		UeAgentAuthoringJson::ApplyAuthoringMetadata(Item, TEXT("binding_guid"), Binding.GetObjectGuid().ToString(EGuidFormats::DigitsWithHyphensLower), Binding.GetName(), TEXT("Sequencer/Bindings"), TEXT("binding"));
 
 		TArray<TSharedPtr<FJsonValue>> Tracks;
 		for (UMovieSceneTrack* Track : Binding.GetTracks())

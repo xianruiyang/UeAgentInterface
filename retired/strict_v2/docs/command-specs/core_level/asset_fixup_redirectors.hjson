@@ -1,0 +1,99 @@
+authoring: { reason: command_has_no_registered_folder_authoring_profile, state: none }
+category: core_level
+command: asset_fixup_redirectors
+deprecation: { reason: command_is_active, state: none }
+discovery: { aliases: [], keywords_en: [asset, fixup, redirectors, core_level], keywords_zh: [asset_fixup_redirectors], summary_en: "Execute asset_fixup_redirectors with a verified implementation contract", summary_zh: "删除资产移动后已无引用的 `ObjectRedirector`", tags: [core_level, p2-002] }
+errors: {
+  codes: [
+    { code: allow_destructive_required, description_zh: "C++ 实现返回错误码 allow_destructive_required", retry_safe: true, stage: preflight, wire_match: exact }
+    { code: invalid_, description_zh: "C++ 实现返回错误码 invalid_", retry_safe: true, stage: preflight, wire_match: prefix }
+    { code: missing_asset_path_or_folder_path, description_zh: "C++ 实现返回错误码 missing_asset_path_or_folder_path", retry_safe: true, stage: preflight, wire_match: exact }
+    { code: redirector_still_referenced, description_zh: "C++ 实现返回错误码 redirector_still_referenced", retry_safe: false, stage: execution, wire_match: exact }
+  ]
+}
+evidence: {
+  docs: [
+    { path: "Plugins/UeAgentInterface/docs/commands/core_level/asset_fixup_redirectors.md", purpose: "user documentation cross-check; C++ implementation remains authoritative" }
+  ]
+  implementation: [
+    { line_hint: 951, path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Commands/Assets/UeAgentHttpServer_Assets.cpp", purpose: "command handler, parameter and return evidence", symbol: CmdAssetFixupRedirectors }
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Commands/Level/UeAgentCommandSafety.h", purpose: "transitive helper evidence used by the command handler" }
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Server/UeAgentHttpServer.cpp", purpose: "transitive helper evidence used by the command handler" }
+  ]
+  tests: [
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterfaceTests/Private/Smoke/UeAgentInterfaceSmoke_Core.cpp", purpose: "smoke or negative-path evidence cross-checked for the verified contract" }
+  ]
+}
+execution: {
+  destructive: true
+  editor_state: required
+  game_thread: required
+  idempotent: false
+  kind: destructive_write
+  overwrite_behavior: none
+  pie_state: allowed
+  retry_safe: false
+  save_behavior: none
+  side_effects: [modifies_asset]
+  ui_effect: none
+}
+maturity: verified
+params: {
+  constraints: [
+    { fields: [asset_path, asset_paths, folder_path, folder_paths], kind: one_of }
+  ]
+  fields: {
+    allow_destructive: { default: false, default_state: defined, description_zh: "C++ 实现读取的 allow_destructive 参数", required: false, type: bool }
+    asset_path: { default_state: none, description_zh: "C++ 实现读取的 asset_path 参数", path_semantics: { access_scope: project_write, kind: ue_asset }, required: false, type: ue_asset_path }
+    asset_paths: { default_state: none, description_zh: "C++ 实现读取的 asset_paths 参数", item_type: json_value, required: false, type: array }
+    dry_run: { default: true, default_state: defined, description_zh: "C++ 实现读取的 dry_run 参数", required: false, type: bool }
+    fail_on_blocked: { default: true, default_state: defined, description_zh: "C++ 实现读取的 fail_on_blocked 参数", required: false, type: bool }
+    folder_path: {
+      default_state: none
+      description_zh: "C++ 实现读取的 folder_path 参数"
+      path_semantics: { allowed_roots: ["/Game"], kind: folder_package, must_exist: false, writable: true }
+      required: false
+      type: folder_package_path
+    }
+    folder_paths: { default_state: none, description_zh: "C++ 实现读取的 folder_paths 参数", item_type: json_value, required: false, type: array }
+    recursive: { default: true, default_state: defined, description_zh: "C++ 实现读取的 recursive 参数", required: false, type: bool }
+    redirector_folder: { default_state: none, description_zh: "C++ 实现读取的 redirector_folder 参数", required: false, type: string }
+    redirector_folders: { default_state: none, description_zh: "C++ 实现读取的 redirector_folders 参数", item_type: json_value, required: false, type: array }
+    redirector_path: { default_state: none, description_zh: "C++ 实现读取的 redirector_path 参数", required: false, type: string }
+    redirector_paths: { default_state: none, description_zh: "C++ 实现读取的 redirector_paths 参数", item_type: json_value, required: false, type: array }
+  }
+  state: defined
+}
+response: { artifact_fields: [], compact_fields: [allow_destructive, blocked, blocked_redirector_count, deletable_redirector_count, deleted_redirector_count, dry_run], failure_fields: [], max_items_policy: { fields: [], mode: none } }
+returns: {
+  fields: {
+    allow_destructive: { description_zh: "C++ 实现返回的 allow_destructive 字段；是否出现取决于执行分支", required: false, type: bool }
+    blocked: { description_zh: "C++ 实现返回的 blocked 字段；是否出现取决于执行分支", item_type: json_value, required: false, type: array }
+    blocked_redirector_count: { description_zh: "C++ 实现返回的 blocked_redirector_count 字段；是否出现取决于执行分支", required: false, type: integer }
+    deletable_redirector_count: { description_zh: "C++ 实现返回的 deletable_redirector_count 字段；是否出现取决于执行分支", required: false, type: integer }
+    deleted_redirector_count: { description_zh: "C++ 实现返回的 deleted_redirector_count 字段；是否出现取决于执行分支", required: false, type: integer }
+    dry_run: { description_zh: "C++ 实现返回的 dry_run 字段；是否出现取决于执行分支", required: false, type: bool }
+    recursive: { description_zh: "C++ 实现返回的 recursive 字段；是否出现取决于执行分支", required: false, type: bool }
+    redirector_count: { description_zh: "C++ 实现返回的 redirector_count 字段；是否出现取决于执行分支", required: false, type: integer }
+    redirectors: { description_zh: "C++ 实现返回的 redirectors 字段；是否出现取决于执行分支", item_type: json_value, required: false, type: array }
+    remaining_package_count: { description_zh: "C++ 实现返回的 remaining_package_count 字段；是否出现取决于执行分支", required: false, type: integer }
+    remaining_packages: { description_zh: "C++ 实现返回的 remaining_packages 字段；是否出现取决于执行分支", item_type: json_value, required: false, type: array }
+    skipped: { description_zh: "C++ 实现返回的 skipped 字段；是否出现取决于执行分支", item_type: json_value, required: false, type: array }
+  }
+  state: defined
+}
+schema: uai.command_spec.v1
+status: active
+types: {}
+verification: {
+  assertions: [
+    { id: result_present, operator: exists, source: returns.allow_destructive }
+  ]
+  failure_policy: fail_overall
+  methods: [
+    { id: result, kind: result_assertion }
+  ]
+  required: true
+  state: defined
+}
+version: 1

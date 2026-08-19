@@ -1,0 +1,302 @@
+{
+  "schema": "uai.domain_adapter.content_graph_read.test_fixture.v1",
+  "descriptor_count": 7,
+  "required_domains": [
+    "blueprint",
+    "material",
+    "niagara",
+    "pcg",
+    "animation",
+    "audio"
+  ],
+  "descriptors": [
+    {
+      "descriptor_id": "uai.query.content_graph.summary",
+      "version": 1,
+      "descriptor_hash": "sha256:fcc5a16effcca7382ddbc71c03d1b0c6e700a7e5b2883ca882fb5efd80cce9f4",
+      "capability_id": "content_graph.summary.read",
+      "provider_binding": "content_graph.read.summary",
+      "query_kind": "state",
+      "allowed_state_planes": ["authoring_memory", "persisted", "compiled_generated"],
+      "required_context_facets": [],
+      "requires_target": true,
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "include_counts": {"type": "boolean"},
+          "include_revision": {"type": "boolean"}
+        },
+        "additionalProperties": false
+      },
+      "result_schema": {"type": "object"}
+    },
+    {
+      "descriptor_id": "uai.query.content_graph.structure",
+      "version": 1,
+      "descriptor_hash": "sha256:ba7bb17241770e90dec4b09e08239334cd95c055e7afe19b9f03ff13a933708c",
+      "capability_id": "content_graph.structure.read",
+      "provider_binding": "content_graph.read.structure",
+      "query_kind": "state",
+      "allowed_state_planes": ["authoring_memory", "persisted", "compiled_generated"],
+      "required_context_facets": [],
+      "requires_target": true,
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "container_ids": {
+            "type": "array",
+            "items": {"type": "string", "minLength": 1},
+            "uniqueItems": true
+          },
+          "include_hierarchy": {"type": "boolean"},
+          "include_order": {"type": "boolean"}
+        },
+        "additionalProperties": false
+      },
+      "result_schema": {"type": "object"}
+    },
+    {
+      "descriptor_id": "uai.query.content_graph.items",
+      "version": 1,
+      "descriptor_hash": "sha256:6145ef33779b3e0889ae2757c1e6856b730855c4d2bef7ab01a9b3d6bd49de4a",
+      "capability_id": "content_graph.items.read",
+      "provider_binding": "content_graph.read.items",
+      "query_kind": "state",
+      "allowed_state_planes": ["authoring_memory", "persisted", "compiled_generated"],
+      "required_context_facets": [],
+      "requires_target": true,
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "item_ids": {
+            "type": "array",
+            "items": {"type": "string", "minLength": 1},
+            "uniqueItems": true
+          },
+          "item_kinds": {
+            "type": "array",
+            "items": {"type": "string", "minLength": 1},
+            "uniqueItems": true
+          },
+          "field_ids": {
+            "type": "array",
+            "items": {"type": "string", "minLength": 1},
+            "uniqueItems": true
+          }
+        },
+        "additionalProperties": false
+      },
+      "result_schema": {"type": "object"}
+    },
+    {
+      "descriptor_id": "uai.query.content_graph.relations",
+      "version": 1,
+      "descriptor_hash": "sha256:86eaa07f9bd79db91a86a209105b55cf77931403ede9ac684f488b07acfcad00",
+      "capability_id": "content_graph.relations.read",
+      "provider_binding": "content_graph.read.relations",
+      "query_kind": "state",
+      "allowed_state_planes": ["authoring_memory", "persisted", "compiled_generated"],
+      "required_context_facets": [],
+      "requires_target": true,
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "relation_ids": {
+            "type": "array",
+            "items": {"type": "string", "minLength": 1},
+            "uniqueItems": true
+          },
+          "endpoint_ids": {
+            "type": "array",
+            "items": {"type": "string", "minLength": 1},
+            "uniqueItems": true
+          },
+          "relation_kinds": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "enum": ["connection", "parent", "membership", "order", "reference", "transition"]
+            },
+            "uniqueItems": true
+          }
+        },
+        "additionalProperties": false
+      },
+      "result_schema": {"type": "object"}
+    },
+    {
+      "descriptor_id": "uai.query.content_graph.properties",
+      "version": 1,
+      "descriptor_hash": "sha256:58aae781d0bec72a562d3803dfb7f5a5ef1b729324ede7fa04e7fda3ca7a36b9",
+      "capability_id": "content_graph.properties.read",
+      "provider_binding": "content_graph.read.properties",
+      "query_kind": "state",
+      "allowed_state_planes": ["authoring_memory", "persisted", "compiled_generated"],
+      "required_context_facets": [],
+      "requires_target": true,
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "owner_ids": {
+            "type": "array",
+            "items": {"type": "string", "minLength": 1},
+            "uniqueItems": true
+          },
+          "field_ids": {
+            "type": "array",
+            "items": {"type": "string", "minLength": 1},
+            "uniqueItems": true
+          },
+          "include_defaults": {"type": "boolean"},
+          "include_presence": {"type": "boolean"}
+        },
+        "required": ["owner_ids"],
+        "additionalProperties": false
+      },
+      "result_schema": {"type": "object"}
+    },
+    {
+      "descriptor_id": "uai.query.content_graph.diagnostics",
+      "version": 1,
+      "descriptor_hash": "sha256:ad9f63b7aa89735eac4ddff4816e8b389980d7ab1c53e79faeabc0db4db4cf06",
+      "capability_id": "content_graph.diagnostics.read",
+      "provider_binding": "content_graph.read.diagnostics",
+      "query_kind": "runtime_probe",
+      "allowed_state_planes": ["authoring_memory", "compiled_generated"],
+      "required_context_facets": [],
+      "requires_target": true,
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "severity": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "enum": ["info", "warning", "error"]
+            },
+            "uniqueItems": true
+          },
+          "include_resolved": {"type": "boolean"}
+        },
+        "additionalProperties": false
+      },
+      "result_schema": {"type": "object"}
+    },
+    {
+      "descriptor_id": "uai.query.content_graph.compound",
+      "version": 1,
+      "descriptor_hash": "sha256:5115bd528cefb896dccc1a6f5861f0e2fe99d12ce218790184c16571903a2f36",
+      "capability_id": "content_graph.compound.read",
+      "provider_binding": "content_graph.read.compound",
+      "query_kind": "state",
+      "allowed_state_planes": ["authoring_memory", "persisted", "compiled_generated"],
+      "required_context_facets": [],
+      "requires_target": true,
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "sections": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "enum": ["summary", "structure", "items", "relations", "properties", "parameters", "diagnostics"]
+            },
+            "uniqueItems": true
+          },
+          "root_ids": {
+            "type": "array",
+            "items": {"type": "string", "minLength": 1},
+            "uniqueItems": true
+          },
+          "include_closure": {"type": "boolean"}
+        },
+        "required": ["sections"],
+        "additionalProperties": false
+      },
+      "result_schema": {"type": "object"}
+    }
+  ],
+  "e2_provider_scenarios": [
+    {
+      "case_id": "content_graph_read.summary",
+      "provider_binding": "content_graph.read.summary",
+      "expected_semantic_prefixes": ["content_graph.summary:"]
+    },
+    {
+      "case_id": "content_graph_read.structure",
+      "provider_binding": "content_graph.read.structure",
+      "expected_semantic_prefixes": ["content_graph.container:"]
+    },
+    {
+      "case_id": "content_graph_read.items",
+      "provider_binding": "content_graph.read.items",
+      "expected_semantic_prefixes": ["content_graph.item:"]
+    },
+    {
+      "case_id": "content_graph_read.relations",
+      "provider_binding": "content_graph.read.relations",
+      "expected_semantic_prefixes": ["content_graph.relation:"]
+    },
+    {
+      "case_id": "content_graph_read.properties",
+      "provider_binding": "content_graph.read.properties",
+      "expected_semantic_prefixes": ["content_graph.property:"]
+    },
+    {
+      "case_id": "content_graph_read.diagnostics",
+      "provider_binding": "content_graph.read.diagnostics",
+      "expected_semantic_prefixes": ["content_graph.diagnostic:"]
+    },
+    {
+      "case_id": "content_graph_read.compound",
+      "provider_binding": "content_graph.read.compound",
+      "expected_semantic_prefixes": [
+        "content_graph.summary:",
+        "content_graph.container:",
+        "content_graph.item:",
+        "content_graph.relation:",
+        "content_graph.property:",
+        "content_graph.parameter:",
+        "content_graph.diagnostic:"
+      ]
+    }
+  ],
+  "e2_domain_scenarios": [
+    {
+      "case_id": "content_graph_read.blueprint",
+      "domain": "blueprint",
+      "provider_binding": "content_graph.read.compound",
+      "oracle": "owned UBlueprint graph containers, nodes and pin links are captured from the Ticket-resolved Blueprint owner"
+    },
+    {
+      "case_id": "content_graph_read.material",
+      "domain": "material",
+      "provider_binding": "content_graph.read.compound",
+      "oracle": "owned UMaterial expressions and expression connections are captured from the Material owner"
+    },
+    {
+      "case_id": "content_graph_read.niagara",
+      "domain": "niagara",
+      "provider_binding": "content_graph.read.compound",
+      "oracle": "owned UNiagaraSystem emitter, stage, module and parameter facts retain Niagara ownership"
+    },
+    {
+      "case_id": "content_graph_read.pcg",
+      "domain": "pcg",
+      "provider_binding": "content_graph.read.compound",
+      "oracle": "owned UPCGGraph nodes, pins and edges retain PCG graph ownership"
+    },
+    {
+      "case_id": "content_graph_read.animation",
+      "domain": "animation",
+      "provider_binding": "content_graph.read.compound",
+      "oracle": "owned animation graph or state-machine items and transitions retain animation ownership"
+    },
+    {
+      "case_id": "content_graph_read.audio",
+      "domain": "audio",
+      "provider_binding": "content_graph.read.compound",
+      "oracle": "owned audio graph nodes and links retain SoundCue or MetaSound ownership"
+    }
+  ]
+}

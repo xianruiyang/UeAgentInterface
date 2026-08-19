@@ -1,0 +1,26 @@
+{
+  schema: uai.authoring_registry_test_contract.v1
+  fixture_id: authoring_registry_contract_v1
+  development_truth: "Plugins/UeAgentInterface/Tests/Fixtures/AuthoringRegistryContract"
+  snapshot_schema: uai.authoring_registry_snapshot.v1
+  schema_version: 1
+  dialect_id: "uai-hjson-authoring/1"
+  hash_algorithm: sha256_canonical_hjson_without_trailing_newline
+  synthetic_registry: synthetic_registry.hjson
+  expected_hashes: expected_hashes.hjson
+  surfaces: {
+    dev: "Plugins/UeAgentInterface/docs/contracts/authoring_registry_snapshot.hjson"
+    cli: "UeAgentInterfaceCMD/cli/uai_core/contracts/authoring_registry_snapshot.hjson"
+    pak: "UeAgentInterfacePak/skills/ue-agent-interface/docs/UeAgentInterface/contracts/authoring_registry_snapshot.hjson"
+    installed_relative: "ue-agent-interface/docs/UeAgentInterface/contracts/authoring_registry_snapshot.hjson"
+  }
+  required_catalog_test_ids: [
+    UAI.AuthoringRegistry.Manifest.DesignOracle
+    UAI.AuthoringRegistry.Python.HashOracle
+    UAI.AuthoringRegistry.Python.UniqueRegistrationRoot
+    UAI.AuthoringRegistry.Python.NoManualClientMappings
+    UAI.AuthoringRegistry.Python.GeneratedSnapshot
+    UAI.AuthoringRegistry.Python.SurfaceParity
+    UAI.AuthoringRegistry.Cpp.LiveSnapshotParity
+  ]
+}

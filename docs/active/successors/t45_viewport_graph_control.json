@@ -1,0 +1,1427 @@
+{
+  "schema": "uai.historical_successor.v2",
+  "owner_task_id": "T45-VIEWPORT-GRAPH-CONTROL",
+  "approval_authority": {
+    "path": "docs/plan/20260806_UAI_REQUIREMENT_DESIGN_REALIGNMENT/UAI_PRE_REFACTOR_COMMAND_APPROVAL.md",
+    "sha256": "3972f62273a13c8c8a971d7e31924e08c8fc59dad9f35abbb87089728c1c265e"
+  },
+  "commands": [
+    {
+      "historical_command_id": "level_set_selection",
+      "approval": "1)",
+      "historical_source": "docs/commands/01_Core_Level_Assets_Landscape.md",
+      "historical_contract": {
+        "inputs": "actor_ids, mode",
+        "outputs": "后续聚焦、批量操作",
+        "purpose": "设置选择集"
+      },
+      "resolved_from_contract_id": "uai.historical_capability.t45.viewport.graph.control.level_set_selection/1",
+      "successor": {
+        "kind": "exact_command_set",
+        "command_ids": [
+          "viewport.actor.select"
+        ]
+      },
+      "routing": {
+        "policy": "explicit_actor_refs+selection_mode"
+      },
+      "semantic_coverage": {
+        "purpose": {
+          "status": "covered",
+          "by": [
+            "viewport.actor.select"
+          ],
+          "explanation": "冻结用途“设置选择集”由当前 successor 承接。actor_refs 精确承载 Actor 身份集合，selection_mode 明确 replace、add 或 remove；成功后从真实 GEditor selection 独立读回。"
+        },
+        "inputs": {
+          "status": "covered",
+          "by": [
+            "viewport.actor.select"
+          ],
+          "explanation": "冻结输入“actor_ids, mode”由 routing.policy 精确映射到当前公共参数。actor_refs 精确承载 Actor 身份集合，selection_mode 明确 replace、add 或 remove；成功后从真实 GEditor selection 独立读回。"
+        },
+        "outputs": {
+          "status": "covered",
+          "by": [
+            "viewport.actor.select"
+          ],
+          "explanation": "冻结输出“后续聚焦、批量操作”由真实 UE mechanics 与独立公开读回生成。actor_refs 精确承载 Actor 身份集合，selection_mode 明确 replace、add 或 remove；成功后从真实 GEditor selection 独立读回。"
+        }
+      },
+      "product_evidence": {
+        "test_id": "UAI.DeliveryWorkflow.T45.VIEWPORT.GRAPH.CONTROL",
+        "public_command_ids": [
+          "viewport.actor.select"
+        ],
+        "architecture_contract_ids": [
+          "DES-UAI-COMMAND-CONTRACT",
+          "DES-UAI-STATE-VALUE-CONTEXT",
+          "DES-UAI-OPERATION-LIFECYCLE",
+          "DES-UAI-EDITOR-AUTOMATION",
+          "DES-UAI-PRODUCTION-EVIDENCE"
+        ],
+        "required_claims": [
+          "public_to_real_ue",
+          "editor_transient_state",
+          "independent_readback",
+          "failure_before_mutation",
+          "historical_semantics_covered",
+          "old_public_ids_absent",
+          "cleanup_confirmed",
+          "editor_preserved"
+        ]
+      },
+      "old_id_exit": {
+        "public_executable": false,
+        "manifest_active": false,
+        "sdk_binding_active": false,
+        "compatibility_alias": false
+      },
+      "final_lifecycle": "deprecated_replaced"
+    },
+    {
+      "historical_command_id": "viewport_deproject_screen_to_world",
+      "approval": "1)",
+      "historical_source": "docs/commands/01_Core_Level_Assets_Landscape.md",
+      "historical_contract": {
+        "inputs": "screen_x, screen_y",
+        "outputs": "视口拾取和屏幕点诊断",
+        "purpose": "屏幕坐标反投影到世界射线"
+      },
+      "resolved_from_contract_id": "uai.historical_capability.t45.viewport.graph.control.viewport_deproject_screen_to_world/1",
+      "successor": {
+        "kind": "exact_command_set",
+        "command_ids": [
+          "viewport.ray.deproject"
+        ]
+      },
+      "routing": {
+        "policy": "explicit_viewport+screen_point"
+      },
+      "semantic_coverage": {
+        "purpose": {
+          "status": "covered",
+          "by": [
+            "viewport.ray.deproject"
+          ],
+          "explanation": "冻结用途“屏幕坐标反投影到世界射线”由当前 successor 承接。显式 viewport identity、pixel frame、basis evidence 与二维分量进入真实 FSceneView 反投影，返回同一视口的世界射线。"
+        },
+        "inputs": {
+          "status": "covered",
+          "by": [
+            "viewport.ray.deproject"
+          ],
+          "explanation": "冻结输入“screen_x, screen_y”由 routing.policy 精确映射到当前公共参数。显式 viewport identity、pixel frame、basis evidence 与二维分量进入真实 FSceneView 反投影，返回同一视口的世界射线。"
+        },
+        "outputs": {
+          "status": "covered",
+          "by": [
+            "viewport.ray.deproject"
+          ],
+          "explanation": "冻结输出“视口拾取和屏幕点诊断”由真实 UE mechanics 与独立公开读回生成。显式 viewport identity、pixel frame、basis evidence 与二维分量进入真实 FSceneView 反投影，返回同一视口的世界射线。"
+        }
+      },
+      "product_evidence": {
+        "test_id": "UAI.DeliveryWorkflow.T45.VIEWPORT.GRAPH.CONTROL",
+        "public_command_ids": [
+          "viewport.ray.deproject"
+        ],
+        "architecture_contract_ids": [
+          "DES-UAI-COMMAND-CONTRACT",
+          "DES-UAI-STATE-VALUE-CONTEXT",
+          "DES-UAI-OPERATION-LIFECYCLE",
+          "DES-UAI-EDITOR-AUTOMATION",
+          "DES-UAI-PRODUCTION-EVIDENCE"
+        ],
+        "required_claims": [
+          "public_to_real_ue",
+          "editor_transient_state",
+          "independent_readback",
+          "failure_before_mutation",
+          "historical_semantics_covered",
+          "old_public_ids_absent",
+          "cleanup_confirmed",
+          "editor_preserved"
+        ]
+      },
+      "old_id_exit": {
+        "public_executable": false,
+        "manifest_active": false,
+        "sdk_binding_active": false,
+        "compatibility_alias": false
+      },
+      "final_lifecycle": "deprecated_replaced"
+    },
+    {
+      "historical_command_id": "viewport_focus_actor",
+      "approval": "2)",
+      "historical_source": "docs/commands/01_Core_Level_Assets_Landscape.md",
+      "historical_contract": {
+        "inputs": "id, padding",
+        "outputs": "快速定位目标 Actor",
+        "purpose": "聚焦单个 Actor"
+      },
+      "resolved_from_contract_id": "uai.historical_capability.t45.viewport.graph.control.viewport_focus_actor/1",
+      "successor": {
+        "kind": "exact_command_set",
+        "command_ids": [
+          "viewport.camera.frame"
+        ]
+      },
+      "routing": {
+        "policy": "subject_refs[1]+frame_policy"
+      },
+      "semantic_coverage": {
+        "purpose": {
+          "status": "covered",
+          "by": [
+            "viewport.camera.frame"
+          ],
+          "explanation": "冻结用途“聚焦单个 Actor”由当前 successor 承接。单个精确 Actor ref 与 padding_ratio 进入统一 framing mechanics，并由 viewport.state.read 读回相机。"
+        },
+        "inputs": {
+          "status": "covered",
+          "by": [
+            "viewport.camera.frame"
+          ],
+          "explanation": "冻结输入“id, padding”由 routing.policy 精确映射到当前公共参数。单个精确 Actor ref 与 padding_ratio 进入统一 framing mechanics，并由 viewport.state.read 读回相机。"
+        },
+        "outputs": {
+          "status": "covered",
+          "by": [
+            "viewport.camera.frame"
+          ],
+          "explanation": "冻结输出“快速定位目标 Actor”由真实 UE mechanics 与独立公开读回生成。单个精确 Actor ref 与 padding_ratio 进入统一 framing mechanics，并由 viewport.state.read 读回相机。"
+        }
+      },
+      "product_evidence": {
+        "test_id": "UAI.DeliveryWorkflow.T45.VIEWPORT.GRAPH.CONTROL",
+        "public_command_ids": [
+          "viewport.camera.frame"
+        ],
+        "architecture_contract_ids": [
+          "DES-UAI-COMMAND-CONTRACT",
+          "DES-UAI-STATE-VALUE-CONTEXT",
+          "DES-UAI-OPERATION-LIFECYCLE",
+          "DES-UAI-EDITOR-AUTOMATION",
+          "DES-UAI-PRODUCTION-EVIDENCE"
+        ],
+        "required_claims": [
+          "public_to_real_ue",
+          "editor_transient_state",
+          "independent_readback",
+          "failure_before_mutation",
+          "historical_semantics_covered",
+          "old_public_ids_absent",
+          "cleanup_confirmed",
+          "editor_preserved"
+        ]
+      },
+      "old_id_exit": {
+        "public_executable": false,
+        "manifest_active": false,
+        "sdk_binding_active": false,
+        "compatibility_alias": false
+      },
+      "final_lifecycle": "deprecated_replaced"
+    },
+    {
+      "historical_command_id": "viewport_focus_actor_safe",
+      "approval": "2)",
+      "historical_source": "docs/commands/01_Core_Level_Assets_Landscape.md",
+      "historical_contract": {
+        "inputs": "collision_aware/look_at/auto_fallback, id",
+        "outputs": "室内或遮挡复杂场景的取景",
+        "purpose": "防卡墙的稳健 Actor 聚焦"
+      },
+      "resolved_from_contract_id": "uai.historical_capability.t45.viewport.graph.control.viewport_focus_actor_safe/1",
+      "successor": {
+        "kind": "exact_command_set",
+        "command_ids": [
+          "viewport.camera.frame"
+        ]
+      },
+      "routing": {
+        "policy": "subject_refs[1]+collision_aware+look_at+auto_fallback"
+      },
+      "semantic_coverage": {
+        "purpose": {
+          "status": "covered",
+          "by": [
+            "viewport.camera.frame"
+          ],
+          "explanation": "冻结用途“防卡墙的稳健 Actor 聚焦”由当前 successor 承接。统一 frame_policy 明确 collision_aware、look_at 与 auto_fallback，保留遮挡复杂场景的稳健聚焦语义。"
+        },
+        "inputs": {
+          "status": "covered",
+          "by": [
+            "viewport.camera.frame"
+          ],
+          "explanation": "冻结输入“collision_aware/look_at/auto_fallback, id”由 routing.policy 精确映射到当前公共参数。统一 frame_policy 明确 collision_aware、look_at 与 auto_fallback，保留遮挡复杂场景的稳健聚焦语义。"
+        },
+        "outputs": {
+          "status": "covered",
+          "by": [
+            "viewport.camera.frame"
+          ],
+          "explanation": "冻结输出“室内或遮挡复杂场景的取景”由真实 UE mechanics 与独立公开读回生成。统一 frame_policy 明确 collision_aware、look_at 与 auto_fallback，保留遮挡复杂场景的稳健聚焦语义。"
+        }
+      },
+      "product_evidence": {
+        "test_id": "UAI.DeliveryWorkflow.T45.VIEWPORT.GRAPH.CONTROL",
+        "public_command_ids": [
+          "viewport.camera.frame"
+        ],
+        "architecture_contract_ids": [
+          "DES-UAI-COMMAND-CONTRACT",
+          "DES-UAI-STATE-VALUE-CONTEXT",
+          "DES-UAI-OPERATION-LIFECYCLE",
+          "DES-UAI-EDITOR-AUTOMATION",
+          "DES-UAI-PRODUCTION-EVIDENCE"
+        ],
+        "required_claims": [
+          "public_to_real_ue",
+          "editor_transient_state",
+          "independent_readback",
+          "failure_before_mutation",
+          "historical_semantics_covered",
+          "old_public_ids_absent",
+          "cleanup_confirmed",
+          "editor_preserved"
+        ]
+      },
+      "old_id_exit": {
+        "public_executable": false,
+        "manifest_active": false,
+        "sdk_binding_active": false,
+        "compatibility_alias": false
+      },
+      "final_lifecycle": "deprecated_replaced"
+    },
+    {
+      "historical_command_id": "viewport_frame_actor",
+      "approval": "2)",
+      "historical_source": "docs/commands/01_Core_Level_Assets_Landscape.md",
+      "historical_contract": {
+        "inputs": "id, padding/collision_aware/look_at",
+        "outputs": "精确 framing 并返回相机读回",
+        "purpose": "按 Actor bounds 计算并写入视口相机"
+      },
+      "resolved_from_contract_id": "uai.historical_capability.t45.viewport.graph.control.viewport_frame_actor/1",
+      "successor": {
+        "kind": "exact_command_set",
+        "command_ids": [
+          "viewport.camera.frame",
+          "viewport.state.read"
+        ]
+      },
+      "routing": {
+        "policy": "subject_refs[1]+frame_policy+independent_state_readback"
+      },
+      "semantic_coverage": {
+        "purpose": {
+          "status": "covered",
+          "by": [
+            "viewport.camera.frame",
+            "viewport.state.read"
+          ],
+          "explanation": "冻结用途“按 Actor bounds 计算并写入视口相机”由当前 successor 承接。真实 Actor bounds 驱动相机 framing；成功后以独立 state query 返回位置、旋转和 FOV。"
+        },
+        "inputs": {
+          "status": "covered",
+          "by": [
+            "viewport.camera.frame",
+            "viewport.state.read"
+          ],
+          "explanation": "冻结输入“id, padding/collision_aware/look_at”由 routing.policy 精确映射到当前公共参数。真实 Actor bounds 驱动相机 framing；成功后以独立 state query 返回位置、旋转和 FOV。"
+        },
+        "outputs": {
+          "status": "covered",
+          "by": [
+            "viewport.camera.frame",
+            "viewport.state.read"
+          ],
+          "explanation": "冻结输出“精确 framing 并返回相机读回”由真实 UE mechanics 与独立公开读回生成。真实 Actor bounds 驱动相机 framing；成功后以独立 state query 返回位置、旋转和 FOV。"
+        }
+      },
+      "product_evidence": {
+        "test_id": "UAI.DeliveryWorkflow.T45.VIEWPORT.GRAPH.CONTROL",
+        "public_command_ids": [
+          "viewport.camera.frame",
+          "viewport.state.read"
+        ],
+        "architecture_contract_ids": [
+          "DES-UAI-COMMAND-CONTRACT",
+          "DES-UAI-STATE-VALUE-CONTEXT",
+          "DES-UAI-OPERATION-LIFECYCLE",
+          "DES-UAI-EDITOR-AUTOMATION",
+          "DES-UAI-PRODUCTION-EVIDENCE"
+        ],
+        "required_claims": [
+          "public_to_real_ue",
+          "editor_transient_state",
+          "independent_readback",
+          "failure_before_mutation",
+          "historical_semantics_covered",
+          "old_public_ids_absent",
+          "cleanup_confirmed",
+          "editor_preserved"
+        ]
+      },
+      "old_id_exit": {
+        "public_executable": false,
+        "manifest_active": false,
+        "sdk_binding_active": false,
+        "compatibility_alias": false
+      },
+      "final_lifecycle": "deprecated_replaced"
+    },
+    {
+      "historical_command_id": "viewport_frame_actors",
+      "approval": "1)",
+      "historical_source": "docs/commands/01_Core_Level_Assets_Landscape.md",
+      "historical_contract": {
+        "inputs": "actor_ids[], padding",
+        "outputs": "批量对象截图",
+        "purpose": "按多个 Actor 聚合 bounds 取景"
+      },
+      "resolved_from_contract_id": "uai.historical_capability.t45.viewport.graph.control.viewport_frame_actors/1",
+      "successor": {
+        "kind": "exact_command_set",
+        "command_ids": [
+          "viewport.camera.frame"
+        ]
+      },
+      "routing": {
+        "policy": "subject_refs[n]+aggregate_bounds+frame_policy"
+      },
+      "semantic_coverage": {
+        "purpose": {
+          "status": "covered",
+          "by": [
+            "viewport.camera.frame"
+          ],
+          "explanation": "冻结用途“按多个 Actor 聚合 bounds 取景”由当前 successor 承接。subject_refs[] 的完整精确集合聚合真实 bounds，不从选择集或名称推断对象。"
+        },
+        "inputs": {
+          "status": "covered",
+          "by": [
+            "viewport.camera.frame"
+          ],
+          "explanation": "冻结输入“actor_ids[], padding”由 routing.policy 精确映射到当前公共参数。subject_refs[] 的完整精确集合聚合真实 bounds，不从选择集或名称推断对象。"
+        },
+        "outputs": {
+          "status": "covered",
+          "by": [
+            "viewport.camera.frame"
+          ],
+          "explanation": "冻结输出“批量对象截图”由真实 UE mechanics 与独立公开读回生成。subject_refs[] 的完整精确集合聚合真实 bounds，不从选择集或名称推断对象。"
+        }
+      },
+      "product_evidence": {
+        "test_id": "UAI.DeliveryWorkflow.T45.VIEWPORT.GRAPH.CONTROL",
+        "public_command_ids": [
+          "viewport.camera.frame"
+        ],
+        "architecture_contract_ids": [
+          "DES-UAI-COMMAND-CONTRACT",
+          "DES-UAI-STATE-VALUE-CONTEXT",
+          "DES-UAI-OPERATION-LIFECYCLE",
+          "DES-UAI-EDITOR-AUTOMATION",
+          "DES-UAI-PRODUCTION-EVIDENCE"
+        ],
+        "required_claims": [
+          "public_to_real_ue",
+          "editor_transient_state",
+          "independent_readback",
+          "failure_before_mutation",
+          "historical_semantics_covered",
+          "old_public_ids_absent",
+          "cleanup_confirmed",
+          "editor_preserved"
+        ]
+      },
+      "old_id_exit": {
+        "public_executable": false,
+        "manifest_active": false,
+        "sdk_binding_active": false,
+        "compatibility_alias": false
+      },
+      "final_lifecycle": "deprecated_replaced"
+    },
+    {
+      "historical_command_id": "viewport_frame_folder",
+      "approval": "2)",
+      "historical_source": "docs/commands/01_Core_Level_Assets_Landscape.md",
+      "historical_contract": {
+        "inputs": "folder_path, include_child_folders/padding/collision_aware",
+        "outputs": "白盒区域或托管资源整组留证",
+        "purpose": "按 Outliner folder 聚合 bounds 取景"
+      },
+      "resolved_from_contract_id": "uai.historical_capability.t45.viewport.graph.control.viewport_frame_folder/1",
+      "successor": {
+        "kind": "exact_command_set",
+        "command_ids": [
+          "viewport.camera.frame"
+        ]
+      },
+      "routing": {
+        "policy": "folder_path+include_child_folders+frame_policy"
+      },
+      "semantic_coverage": {
+        "purpose": {
+          "status": "covered",
+          "by": [
+            "viewport.camera.frame"
+          ],
+          "explanation": "冻结用途“按 Outliner folder 聚合 bounds 取景”由当前 successor 承接。folder_path 与 include_child_folders 显式选择 Outliner folder 范围，再聚合其真实 Actor bounds。"
+        },
+        "inputs": {
+          "status": "covered",
+          "by": [
+            "viewport.camera.frame"
+          ],
+          "explanation": "冻结输入“folder_path, include_child_folders/padding/collision_aware”由 routing.policy 精确映射到当前公共参数。folder_path 与 include_child_folders 显式选择 Outliner folder 范围，再聚合其真实 Actor bounds。"
+        },
+        "outputs": {
+          "status": "covered",
+          "by": [
+            "viewport.camera.frame"
+          ],
+          "explanation": "冻结输出“白盒区域或托管资源整组留证”由真实 UE mechanics 与独立公开读回生成。folder_path 与 include_child_folders 显式选择 Outliner folder 范围，再聚合其真实 Actor bounds。"
+        }
+      },
+      "product_evidence": {
+        "test_id": "UAI.DeliveryWorkflow.T45.VIEWPORT.GRAPH.CONTROL",
+        "public_command_ids": [
+          "viewport.camera.frame"
+        ],
+        "architecture_contract_ids": [
+          "DES-UAI-COMMAND-CONTRACT",
+          "DES-UAI-STATE-VALUE-CONTEXT",
+          "DES-UAI-OPERATION-LIFECYCLE",
+          "DES-UAI-EDITOR-AUTOMATION",
+          "DES-UAI-PRODUCTION-EVIDENCE"
+        ],
+        "required_claims": [
+          "public_to_real_ue",
+          "editor_transient_state",
+          "independent_readback",
+          "failure_before_mutation",
+          "historical_semantics_covered",
+          "old_public_ids_absent",
+          "cleanup_confirmed",
+          "editor_preserved"
+        ]
+      },
+      "old_id_exit": {
+        "public_executable": false,
+        "manifest_active": false,
+        "sdk_binding_active": false,
+        "compatibility_alias": false
+      },
+      "final_lifecycle": "deprecated_replaced"
+    },
+    {
+      "historical_command_id": "viewport_frame_selection",
+      "approval": "2)",
+      "historical_source": "docs/commands/01_Core_Level_Assets_Landscape.md",
+      "historical_contract": {
+        "inputs": "padding",
+        "outputs": "人工选择后自动留证",
+        "purpose": "按当前选择集聚合 bounds 取景"
+      },
+      "resolved_from_contract_id": "uai.historical_capability.t45.viewport.graph.control.viewport_frame_selection/1",
+      "successor": {
+        "kind": "exact_command_set",
+        "command_ids": [
+          "viewport.camera.frame"
+        ]
+      },
+      "routing": {
+        "policy": "use_current_selection=true+frame_policy"
+      },
+      "semantic_coverage": {
+        "purpose": {
+          "status": "covered",
+          "by": [
+            "viewport.camera.frame"
+          ],
+          "explanation": "冻结用途“按当前选择集聚合 bounds 取景”由当前 successor 承接。唯一 selector 明确使用当前真实 Editor selection，并在执行时冻结其 Actor 集合用于 framing。"
+        },
+        "inputs": {
+          "status": "covered",
+          "by": [
+            "viewport.camera.frame"
+          ],
+          "explanation": "冻结输入“padding”由 routing.policy 精确映射到当前公共参数。唯一 selector 明确使用当前真实 Editor selection，并在执行时冻结其 Actor 集合用于 framing。"
+        },
+        "outputs": {
+          "status": "covered",
+          "by": [
+            "viewport.camera.frame"
+          ],
+          "explanation": "冻结输出“人工选择后自动留证”由真实 UE mechanics 与独立公开读回生成。唯一 selector 明确使用当前真实 Editor selection，并在执行时冻结其 Actor 集合用于 framing。"
+        }
+      },
+      "product_evidence": {
+        "test_id": "UAI.DeliveryWorkflow.T45.VIEWPORT.GRAPH.CONTROL",
+        "public_command_ids": [
+          "viewport.camera.frame"
+        ],
+        "architecture_contract_ids": [
+          "DES-UAI-COMMAND-CONTRACT",
+          "DES-UAI-STATE-VALUE-CONTEXT",
+          "DES-UAI-OPERATION-LIFECYCLE",
+          "DES-UAI-EDITOR-AUTOMATION",
+          "DES-UAI-PRODUCTION-EVIDENCE"
+        ],
+        "required_claims": [
+          "public_to_real_ue",
+          "editor_transient_state",
+          "independent_readback",
+          "failure_before_mutation",
+          "historical_semantics_covered",
+          "old_public_ids_absent",
+          "cleanup_confirmed",
+          "editor_preserved"
+        ]
+      },
+      "old_id_exit": {
+        "public_executable": false,
+        "manifest_active": false,
+        "sdk_binding_active": false,
+        "compatibility_alias": false
+      },
+      "final_lifecycle": "deprecated_replaced"
+    },
+    {
+      "historical_command_id": "viewport_get_camera",
+      "approval": "2)",
+      "historical_source": "docs/commands/01_Core_Level_Assets_Landscape.md",
+      "historical_contract": {
+        "inputs": "无文档参数；使用 **params 传入 UAI 参数。",
+        "outputs": "保存当前取景状态",
+        "purpose": "读取当前 Level Viewport 相机"
+      },
+      "resolved_from_contract_id": "uai.historical_capability.t45.viewport.graph.control.viewport_get_camera/1",
+      "successor": {
+        "kind": "exact_command_set",
+        "command_ids": [
+          "viewport.state.read"
+        ]
+      },
+      "routing": {
+        "policy": "explicit_viewport_transient_state_query"
+      },
+      "semantic_coverage": {
+        "purpose": {
+          "status": "covered",
+          "by": [
+            "viewport.state.read"
+          ],
+          "explanation": "冻结用途“读取当前 Level Viewport 相机”由当前 successor 承接。只读 Query 返回真实 Level viewport 的 camera transform、FOV、view mode 与观测时间，不冒充资产持久化。"
+        },
+        "inputs": {
+          "status": "covered",
+          "by": [
+            "viewport.state.read"
+          ],
+          "explanation": "冻结输入“无文档参数；使用 **params 传入 UAI 参数。”由 routing.policy 精确映射到当前公共参数。只读 Query 返回真实 Level viewport 的 camera transform、FOV、view mode 与观测时间，不冒充资产持久化。"
+        },
+        "outputs": {
+          "status": "covered",
+          "by": [
+            "viewport.state.read"
+          ],
+          "explanation": "冻结输出“保存当前取景状态”由真实 UE mechanics 与独立公开读回生成。只读 Query 返回真实 Level viewport 的 camera transform、FOV、view mode 与观测时间，不冒充资产持久化。"
+        }
+      },
+      "product_evidence": {
+        "test_id": "UAI.DeliveryWorkflow.T45.VIEWPORT.GRAPH.CONTROL",
+        "public_command_ids": [
+          "viewport.state.read"
+        ],
+        "architecture_contract_ids": [
+          "DES-UAI-COMMAND-CONTRACT",
+          "DES-UAI-STATE-VALUE-CONTEXT",
+          "DES-UAI-OPERATION-LIFECYCLE",
+          "DES-UAI-EDITOR-AUTOMATION",
+          "DES-UAI-PRODUCTION-EVIDENCE"
+        ],
+        "required_claims": [
+          "public_to_real_ue",
+          "editor_transient_state",
+          "independent_readback",
+          "failure_before_mutation",
+          "historical_semantics_covered",
+          "old_public_ids_absent",
+          "cleanup_confirmed",
+          "editor_preserved"
+        ]
+      },
+      "old_id_exit": {
+        "public_executable": false,
+        "manifest_active": false,
+        "sdk_binding_active": false,
+        "compatibility_alias": false
+      },
+      "final_lifecycle": "deprecated_replaced"
+    },
+    {
+      "historical_command_id": "viewport_get_editor_interaction_state",
+      "approval": "2)",
+      "historical_source": "docs/commands/01_Core_Level_Assets_Landscape.md",
+      "historical_contract": {
+        "inputs": "无文档参数；使用 **params 传入 UAI 参数。",
+        "outputs": "诊断坐标轴/变换控件消失、Game View、Selection/ModeWidgets/Pivot show flag",
+        "purpose": "读取 Level Viewport 编辑器交互状态"
+      },
+      "resolved_from_contract_id": "uai.historical_capability.t45.viewport.graph.control.viewport_get_editor_interaction_state/1",
+      "successor": {
+        "kind": "exact_command_set",
+        "command_ids": [
+          "viewport.state.read"
+        ]
+      },
+      "routing": {
+        "policy": "explicit_viewport_interaction_query"
+      },
+      "semantic_coverage": {
+        "purpose": {
+          "status": "covered",
+          "by": [
+            "viewport.state.read"
+          ],
+          "explanation": "冻结用途“读取 Level Viewport 编辑器交互状态”由当前 successor 承接。同一只读状态 Query 返回 Game View、ModeWidgets、Selection、Pivot、Editor/Game primitives 与 widget mode。"
+        },
+        "inputs": {
+          "status": "covered",
+          "by": [
+            "viewport.state.read"
+          ],
+          "explanation": "冻结输入“无文档参数；使用 **params 传入 UAI 参数。”由 routing.policy 精确映射到当前公共参数。同一只读状态 Query 返回 Game View、ModeWidgets、Selection、Pivot、Editor/Game primitives 与 widget mode。"
+        },
+        "outputs": {
+          "status": "covered",
+          "by": [
+            "viewport.state.read"
+          ],
+          "explanation": "冻结输出“诊断坐标轴/变换控件消失、Game View、Selection/ModeWidgets/Pivot show flag”由真实 UE mechanics 与独立公开读回生成。同一只读状态 Query 返回 Game View、ModeWidgets、Selection、Pivot、Editor/Game primitives 与 widget mode。"
+        }
+      },
+      "product_evidence": {
+        "test_id": "UAI.DeliveryWorkflow.T45.VIEWPORT.GRAPH.CONTROL",
+        "public_command_ids": [
+          "viewport.state.read"
+        ],
+        "architecture_contract_ids": [
+          "DES-UAI-COMMAND-CONTRACT",
+          "DES-UAI-STATE-VALUE-CONTEXT",
+          "DES-UAI-OPERATION-LIFECYCLE",
+          "DES-UAI-EDITOR-AUTOMATION",
+          "DES-UAI-PRODUCTION-EVIDENCE"
+        ],
+        "required_claims": [
+          "public_to_real_ue",
+          "editor_transient_state",
+          "independent_readback",
+          "failure_before_mutation",
+          "historical_semantics_covered",
+          "old_public_ids_absent",
+          "cleanup_confirmed",
+          "editor_preserved"
+        ]
+      },
+      "old_id_exit": {
+        "public_executable": false,
+        "manifest_active": false,
+        "sdk_binding_active": false,
+        "compatibility_alias": false
+      },
+      "final_lifecycle": "deprecated_replaced"
+    },
+    {
+      "historical_command_id": "viewport_get_warnings",
+      "approval": "1)",
+      "historical_source": "docs/commands/01_Core_Level_Assets_Landscape.md",
+      "historical_contract": {
+        "inputs": "include_suppressed",
+        "outputs": "诊断全局裁剪平面、forward shading 主光等渲染告警",
+        "purpose": "读取当前 Level Viewport renderer warning/probe"
+      },
+      "resolved_from_contract_id": "uai.historical_capability.t45.viewport.graph.control.viewport_get_warnings/1",
+      "successor": {
+        "kind": "exact_command_set",
+        "command_ids": [
+          "viewport.warning.list"
+        ]
+      },
+      "routing": {
+        "policy": "real_renderer_warning_probe+include_suppressed"
+      },
+      "semantic_coverage": {
+        "purpose": {
+          "status": "covered",
+          "by": [
+            "viewport.warning.list"
+          ],
+          "explanation": "冻结用途“读取当前 Level Viewport renderer warning/probe”由当前 successor 承接。调用真实 renderer warning probe，并按 include_suppressed 返回当前引擎可观察的告警集合。"
+        },
+        "inputs": {
+          "status": "covered",
+          "by": [
+            "viewport.warning.list"
+          ],
+          "explanation": "冻结输入“include_suppressed”由 routing.policy 精确映射到当前公共参数。调用真实 renderer warning probe，并按 include_suppressed 返回当前引擎可观察的告警集合。"
+        },
+        "outputs": {
+          "status": "covered",
+          "by": [
+            "viewport.warning.list"
+          ],
+          "explanation": "冻结输出“诊断全局裁剪平面、forward shading 主光等渲染告警”由真实 UE mechanics 与独立公开读回生成。调用真实 renderer warning probe，并按 include_suppressed 返回当前引擎可观察的告警集合。"
+        }
+      },
+      "product_evidence": {
+        "test_id": "UAI.DeliveryWorkflow.T45.VIEWPORT.GRAPH.CONTROL",
+        "public_command_ids": [
+          "viewport.warning.list"
+        ],
+        "architecture_contract_ids": [
+          "DES-UAI-COMMAND-CONTRACT",
+          "DES-UAI-STATE-VALUE-CONTEXT",
+          "DES-UAI-OPERATION-LIFECYCLE",
+          "DES-UAI-EDITOR-AUTOMATION",
+          "DES-UAI-PRODUCTION-EVIDENCE"
+        ],
+        "required_claims": [
+          "public_to_real_ue",
+          "editor_transient_state",
+          "independent_readback",
+          "failure_before_mutation",
+          "historical_semantics_covered",
+          "old_public_ids_absent",
+          "cleanup_confirmed",
+          "editor_preserved"
+        ]
+      },
+      "old_id_exit": {
+        "public_executable": false,
+        "manifest_active": false,
+        "sdk_binding_active": false,
+        "compatibility_alias": false
+      },
+      "final_lifecycle": "deprecated_replaced"
+    },
+    {
+      "historical_command_id": "viewport_list_view_modes",
+      "approval": "1)",
+      "historical_source": "docs/commands/01_Core_Level_Assets_Landscape.md",
+      "historical_contract": {
+        "inputs": "无文档参数；使用 **params 传入 UAI 参数。",
+        "outputs": "生成/调试截图请求前发现当前引擎实际可用的 mode key",
+        "purpose": "列出 `screenshot_viewport` 可用的视口模式和可视化子模式"
+      },
+      "resolved_from_contract_id": "uai.historical_capability.t45.viewport.graph.control.viewport_list_view_modes/1",
+      "successor": {
+        "kind": "exact_command_set",
+        "command_ids": [
+          "viewport.view_mode.list"
+        ]
+      },
+      "routing": {
+        "policy": "complete_engine_view_mode_catalog"
+      },
+      "semantic_coverage": {
+        "purpose": {
+          "status": "covered",
+          "by": [
+            "viewport.view_mode.list"
+          ],
+          "explanation": "冻结用途“列出 `screenshot_viewport` 可用的视口模式和可视化子模式”由当前 successor 承接。从当前引擎 Level viewport mechanics 生成完整 mode 与可视化子模式 catalog，而不是固定样例列表。"
+        },
+        "inputs": {
+          "status": "covered",
+          "by": [
+            "viewport.view_mode.list"
+          ],
+          "explanation": "冻结输入“无文档参数；使用 **params 传入 UAI 参数。”由 routing.policy 精确映射到当前公共参数。从当前引擎 Level viewport mechanics 生成完整 mode 与可视化子模式 catalog，而不是固定样例列表。"
+        },
+        "outputs": {
+          "status": "covered",
+          "by": [
+            "viewport.view_mode.list"
+          ],
+          "explanation": "冻结输出“生成/调试截图请求前发现当前引擎实际可用的 mode key”由真实 UE mechanics 与独立公开读回生成。从当前引擎 Level viewport mechanics 生成完整 mode 与可视化子模式 catalog，而不是固定样例列表。"
+        }
+      },
+      "product_evidence": {
+        "test_id": "UAI.DeliveryWorkflow.T45.VIEWPORT.GRAPH.CONTROL",
+        "public_command_ids": [
+          "viewport.view_mode.list"
+        ],
+        "architecture_contract_ids": [
+          "DES-UAI-COMMAND-CONTRACT",
+          "DES-UAI-STATE-VALUE-CONTEXT",
+          "DES-UAI-OPERATION-LIFECYCLE",
+          "DES-UAI-EDITOR-AUTOMATION",
+          "DES-UAI-PRODUCTION-EVIDENCE"
+        ],
+        "required_claims": [
+          "public_to_real_ue",
+          "editor_transient_state",
+          "independent_readback",
+          "failure_before_mutation",
+          "historical_semantics_covered",
+          "old_public_ids_absent",
+          "cleanup_confirmed",
+          "editor_preserved"
+        ]
+      },
+      "old_id_exit": {
+        "public_executable": false,
+        "manifest_active": false,
+        "sdk_binding_active": false,
+        "compatibility_alias": false
+      },
+      "final_lifecycle": "deprecated_replaced"
+    },
+    {
+      "historical_command_id": "viewport_pick_actor_at_screen",
+      "approval": "1)",
+      "historical_source": "docs/commands/01_Core_Level_Assets_Landscape.md",
+      "historical_contract": {
+        "inputs": "screen_x、screen_y、trace_distance、trace_channel、trace_complex、ignore_actor_ids、allow_no_hit",
+        "outputs": "—",
+        "purpose": "把屏幕像素反投影为世界射线并拾取 Actor，只读返回命中 Actor、组件、位置和法线。"
+      },
+      "resolved_from_contract_id": "uai.historical_capability.t45.viewport.graph.control.viewport_pick_actor_at_screen/1",
+      "successor": {
+        "kind": "exact_command_set",
+        "command_ids": [
+          "viewport.actor.pick"
+        ]
+      },
+      "routing": {
+        "policy": "screen_point+trace_query+allow_no_hit"
+      },
+      "semantic_coverage": {
+        "purpose": {
+          "status": "covered",
+          "by": [
+            "viewport.actor.pick"
+          ],
+          "explanation": "冻结用途“把屏幕像素反投影为世界射线并拾取 Actor，只读返回命中 Actor、组件、位置和法线。”由当前 successor 承接。屏幕点经真实反投影与 world trace 返回 Actor、component、位置和法线；allow_no_hit 显式决定空命中是否成功。"
+        },
+        "inputs": {
+          "status": "covered",
+          "by": [
+            "viewport.actor.pick"
+          ],
+          "explanation": "冻结输入“screen_x、screen_y、trace_distance、trace_channel、trace_complex、ignore_actor_ids、allow_no_hit”由 routing.policy 精确映射到当前公共参数。屏幕点经真实反投影与 world trace 返回 Actor、component、位置和法线；allow_no_hit 显式决定空命中是否成功。"
+        },
+        "outputs": {
+          "status": "covered",
+          "by": [
+            "viewport.actor.pick"
+          ],
+          "explanation": "冻结输出“—”由真实 UE mechanics 与独立公开读回生成。屏幕点经真实反投影与 world trace 返回 Actor、component、位置和法线；allow_no_hit 显式决定空命中是否成功。"
+        }
+      },
+      "product_evidence": {
+        "test_id": "UAI.DeliveryWorkflow.T45.VIEWPORT.GRAPH.CONTROL",
+        "public_command_ids": [
+          "viewport.actor.pick"
+        ],
+        "architecture_contract_ids": [
+          "DES-UAI-COMMAND-CONTRACT",
+          "DES-UAI-STATE-VALUE-CONTEXT",
+          "DES-UAI-OPERATION-LIFECYCLE",
+          "DES-UAI-EDITOR-AUTOMATION",
+          "DES-UAI-PRODUCTION-EVIDENCE"
+        ],
+        "required_claims": [
+          "public_to_real_ue",
+          "editor_transient_state",
+          "independent_readback",
+          "failure_before_mutation",
+          "historical_semantics_covered",
+          "old_public_ids_absent",
+          "cleanup_confirmed",
+          "editor_preserved"
+        ]
+      },
+      "old_id_exit": {
+        "public_executable": false,
+        "manifest_active": false,
+        "sdk_binding_active": false,
+        "compatibility_alias": false
+      },
+      "final_lifecycle": "deprecated_replaced"
+    },
+    {
+      "historical_command_id": "viewport_restore_editor_interaction_state",
+      "approval": "2)",
+      "historical_source": "docs/commands/01_Core_Level_Assets_Landscape.md",
+      "historical_contract": {
+        "inputs": "all_viewports, game_view, mode_widgets, pivot, selection, widget_mode",
+        "outputs": "自动化操作后恢复 Actor 选中时的变换控件/坐标轴",
+        "purpose": "恢复 Level Viewport 编辑器交互状态"
+      },
+      "resolved_from_contract_id": "uai.historical_capability.t45.viewport.graph.control.viewport_restore_editor_interaction_state/1",
+      "successor": {
+        "kind": "exact_command_set",
+        "command_ids": [
+          "viewport.instance.list",
+          "viewport.state.restore",
+          "viewport.state.read"
+        ]
+      },
+      "routing": {
+        "policy": "captured_snapshot_per_explicit_viewport"
+      },
+      "semantic_coverage": {
+        "purpose": {
+          "status": "covered",
+          "by": [
+            "viewport.instance.list",
+            "viewport.state.restore",
+            "viewport.state.read"
+          ],
+          "explanation": "冻结用途“恢复 Level Viewport 编辑器交互状态”由当前 successor 承接。单视口以完整捕获 snapshot 精确恢复；all_viewports 由 instance.list 冻结集合后逐一 restore 并 readback，不增加第二个批量状态源。"
+        },
+        "inputs": {
+          "status": "covered",
+          "by": [
+            "viewport.instance.list",
+            "viewport.state.restore",
+            "viewport.state.read"
+          ],
+          "explanation": "冻结输入“all_viewports, game_view, mode_widgets, pivot, selection, widget_mode”由 routing.policy 精确映射到当前公共参数。单视口以完整捕获 snapshot 精确恢复；all_viewports 由 instance.list 冻结集合后逐一 restore 并 readback，不增加第二个批量状态源。"
+        },
+        "outputs": {
+          "status": "covered",
+          "by": [
+            "viewport.instance.list",
+            "viewport.state.restore",
+            "viewport.state.read"
+          ],
+          "explanation": "冻结输出“自动化操作后恢复 Actor 选中时的变换控件/坐标轴”由真实 UE mechanics 与独立公开读回生成。单视口以完整捕获 snapshot 精确恢复；all_viewports 由 instance.list 冻结集合后逐一 restore 并 readback，不增加第二个批量状态源。"
+        }
+      },
+      "product_evidence": {
+        "test_id": "UAI.DeliveryWorkflow.T45.VIEWPORT.GRAPH.CONTROL",
+        "public_command_ids": [
+          "viewport.instance.list",
+          "viewport.state.restore",
+          "viewport.state.read"
+        ],
+        "architecture_contract_ids": [
+          "DES-UAI-COMMAND-CONTRACT",
+          "DES-UAI-STATE-VALUE-CONTEXT",
+          "DES-UAI-OPERATION-LIFECYCLE",
+          "DES-UAI-EDITOR-AUTOMATION",
+          "DES-UAI-PRODUCTION-EVIDENCE"
+        ],
+        "required_claims": [
+          "public_to_real_ue",
+          "editor_transient_state",
+          "independent_readback",
+          "failure_before_mutation",
+          "historical_semantics_covered",
+          "old_public_ids_absent",
+          "cleanup_confirmed",
+          "editor_preserved"
+        ]
+      },
+      "old_id_exit": {
+        "public_executable": false,
+        "manifest_active": false,
+        "sdk_binding_active": false,
+        "compatibility_alias": false
+      },
+      "final_lifecycle": "deprecated_replaced"
+    },
+    {
+      "historical_command_id": "viewport_select_actor_at_screen",
+      "approval": "1)",
+      "historical_source": "docs/commands/01_Core_Level_Assets_Landscape.md",
+      "historical_contract": {
+        "inputs": "screen_x、screen_y、selection_mode，以及 viewport_pick_actor_at_screen 的 Trace 参数",
+        "outputs": "—",
+        "purpose": "从屏幕像素拾取 Actor，并按 replace/add/remove 更新编辑器选择集。"
+      },
+      "resolved_from_contract_id": "uai.historical_capability.t45.viewport.graph.control.viewport_select_actor_at_screen/1",
+      "successor": {
+        "kind": "exact_command_set",
+        "command_ids": [
+          "viewport.actor.select"
+        ]
+      },
+      "routing": {
+        "policy": "screen_point+trace_query+selection_mode"
+      },
+      "semantic_coverage": {
+        "purpose": {
+          "status": "covered",
+          "by": [
+            "viewport.actor.select"
+          ],
+          "explanation": "冻结用途“从屏幕像素拾取 Actor，并按 replace/add/remove 更新编辑器选择集。”由当前 successor 承接。screen selector 复用真实 pick mechanics，并按 replace、add 或 remove 原子更新 Editor selection。"
+        },
+        "inputs": {
+          "status": "covered",
+          "by": [
+            "viewport.actor.select"
+          ],
+          "explanation": "冻结输入“screen_x、screen_y、selection_mode，以及 viewport_pick_actor_at_screen 的 Trace 参数”由 routing.policy 精确映射到当前公共参数。screen selector 复用真实 pick mechanics，并按 replace、add 或 remove 原子更新 Editor selection。"
+        },
+        "outputs": {
+          "status": "covered",
+          "by": [
+            "viewport.actor.select"
+          ],
+          "explanation": "冻结输出“—”由真实 UE mechanics 与独立公开读回生成。screen selector 复用真实 pick mechanics，并按 replace、add 或 remove 原子更新 Editor selection。"
+        }
+      },
+      "product_evidence": {
+        "test_id": "UAI.DeliveryWorkflow.T45.VIEWPORT.GRAPH.CONTROL",
+        "public_command_ids": [
+          "viewport.actor.select"
+        ],
+        "architecture_contract_ids": [
+          "DES-UAI-COMMAND-CONTRACT",
+          "DES-UAI-STATE-VALUE-CONTEXT",
+          "DES-UAI-OPERATION-LIFECYCLE",
+          "DES-UAI-EDITOR-AUTOMATION",
+          "DES-UAI-PRODUCTION-EVIDENCE"
+        ],
+        "required_claims": [
+          "public_to_real_ue",
+          "editor_transient_state",
+          "independent_readback",
+          "failure_before_mutation",
+          "historical_semantics_covered",
+          "old_public_ids_absent",
+          "cleanup_confirmed",
+          "editor_preserved"
+        ]
+      },
+      "old_id_exit": {
+        "public_executable": false,
+        "manifest_active": false,
+        "sdk_binding_active": false,
+        "compatibility_alias": false
+      },
+      "final_lifecycle": "deprecated_replaced"
+    },
+    {
+      "historical_command_id": "viewport_set_camera",
+      "approval": "2)",
+      "historical_source": "docs/commands/01_Core_Level_Assets_Landscape.md",
+      "historical_contract": {
+        "inputs": "fov, location, rotation",
+        "outputs": "复现固定视角并截图",
+        "purpose": "设置当前 Level Viewport 相机"
+      },
+      "resolved_from_contract_id": "uai.historical_capability.t45.viewport.graph.control.viewport_set_camera/1",
+      "successor": {
+        "kind": "exact_command_set",
+        "command_ids": [
+          "viewport.state.update",
+          "viewport.state.read"
+        ]
+      },
+      "routing": {
+        "policy": "camera_transform+fov_degrees+independent_state_readback"
+      },
+      "semantic_coverage": {
+        "purpose": {
+          "status": "covered",
+          "by": [
+            "viewport.state.update",
+            "viewport.state.read"
+          ],
+          "explanation": "冻结用途“设置当前 Level Viewport 相机”由当前 successor 承接。显式 world frame 的 camera transform 与 FOV 写入精确 Level viewport，随后由独立 Query 验证。"
+        },
+        "inputs": {
+          "status": "covered",
+          "by": [
+            "viewport.state.update",
+            "viewport.state.read"
+          ],
+          "explanation": "冻结输入“fov, location, rotation”由 routing.policy 精确映射到当前公共参数。显式 world frame 的 camera transform 与 FOV 写入精确 Level viewport，随后由独立 Query 验证。"
+        },
+        "outputs": {
+          "status": "covered",
+          "by": [
+            "viewport.state.update",
+            "viewport.state.read"
+          ],
+          "explanation": "冻结输出“复现固定视角并截图”由真实 UE mechanics 与独立公开读回生成。显式 world frame 的 camera transform 与 FOV 写入精确 Level viewport，随后由独立 Query 验证。"
+        }
+      },
+      "product_evidence": {
+        "test_id": "UAI.DeliveryWorkflow.T45.VIEWPORT.GRAPH.CONTROL",
+        "public_command_ids": [
+          "viewport.state.update",
+          "viewport.state.read"
+        ],
+        "architecture_contract_ids": [
+          "DES-UAI-COMMAND-CONTRACT",
+          "DES-UAI-STATE-VALUE-CONTEXT",
+          "DES-UAI-OPERATION-LIFECYCLE",
+          "DES-UAI-EDITOR-AUTOMATION",
+          "DES-UAI-PRODUCTION-EVIDENCE"
+        ],
+        "required_claims": [
+          "public_to_real_ue",
+          "editor_transient_state",
+          "independent_readback",
+          "failure_before_mutation",
+          "historical_semantics_covered",
+          "old_public_ids_absent",
+          "cleanup_confirmed",
+          "editor_preserved"
+        ]
+      },
+      "old_id_exit": {
+        "public_executable": false,
+        "manifest_active": false,
+        "sdk_binding_active": false,
+        "compatibility_alias": false
+      },
+      "final_lifecycle": "deprecated_replaced"
+    },
+    {
+      "historical_command_id": "viewport_set_game_view",
+      "approval": "2)",
+      "historical_source": "docs/commands/01_Core_Level_Assets_Landscape.md",
+      "historical_contract": {
+        "inputs": "game_view, restore_editor_widgets",
+        "outputs": "截图前隐藏或恢复编辑器辅助显示；退出 Game View 时默认恢复变换控件相关 show flags",
+        "purpose": "切换 Game View"
+      },
+      "resolved_from_contract_id": "uai.historical_capability.t45.viewport.graph.control.viewport_set_game_view/1",
+      "successor": {
+        "kind": "exact_command_set",
+        "command_ids": [
+          "viewport.state.update",
+          "viewport.state.read"
+        ]
+      },
+      "routing": {
+        "policy": "game_view+interaction_patch"
+      },
+      "semantic_coverage": {
+        "purpose": {
+          "status": "covered",
+          "by": [
+            "viewport.state.update",
+            "viewport.state.read"
+          ],
+          "explanation": "冻结用途“切换 Game View”由当前 successor 承接。game_view 与需要恢复的 interaction flags 在同一可恢复 state patch 中提交，并以完整捕获 snapshot 回退。"
+        },
+        "inputs": {
+          "status": "covered",
+          "by": [
+            "viewport.state.update",
+            "viewport.state.read"
+          ],
+          "explanation": "冻结输入“game_view, restore_editor_widgets”由 routing.policy 精确映射到当前公共参数。game_view 与需要恢复的 interaction flags 在同一可恢复 state patch 中提交，并以完整捕获 snapshot 回退。"
+        },
+        "outputs": {
+          "status": "covered",
+          "by": [
+            "viewport.state.update",
+            "viewport.state.read"
+          ],
+          "explanation": "冻结输出“截图前隐藏或恢复编辑器辅助显示；退出 Game View 时默认恢复变换控件相关 show flags”由真实 UE mechanics 与独立公开读回生成。game_view 与需要恢复的 interaction flags 在同一可恢复 state patch 中提交，并以完整捕获 snapshot 回退。"
+        }
+      },
+      "product_evidence": {
+        "test_id": "UAI.DeliveryWorkflow.T45.VIEWPORT.GRAPH.CONTROL",
+        "public_command_ids": [
+          "viewport.state.update",
+          "viewport.state.read"
+        ],
+        "architecture_contract_ids": [
+          "DES-UAI-COMMAND-CONTRACT",
+          "DES-UAI-STATE-VALUE-CONTEXT",
+          "DES-UAI-OPERATION-LIFECYCLE",
+          "DES-UAI-EDITOR-AUTOMATION",
+          "DES-UAI-PRODUCTION-EVIDENCE"
+        ],
+        "required_claims": [
+          "public_to_real_ue",
+          "editor_transient_state",
+          "independent_readback",
+          "failure_before_mutation",
+          "historical_semantics_covered",
+          "old_public_ids_absent",
+          "cleanup_confirmed",
+          "editor_preserved"
+        ]
+      },
+      "old_id_exit": {
+        "public_executable": false,
+        "manifest_active": false,
+        "sdk_binding_active": false,
+        "compatibility_alias": false
+      },
+      "final_lifecycle": "deprecated_replaced"
+    },
+    {
+      "historical_command_id": "viewport_set_realtime",
+      "approval": "2)",
+      "historical_source": "docs/commands/01_Core_Level_Assets_Landscape.md",
+      "historical_contract": {
+        "inputs": "enabled, realtime",
+        "outputs": "需要 Niagara/动画预览或稳定截图时控制实时性",
+        "purpose": "切换视口实时刷新"
+      },
+      "resolved_from_contract_id": "uai.historical_capability.t45.viewport.graph.control.viewport_set_realtime/1",
+      "successor": {
+        "kind": "exact_command_set",
+        "command_ids": [
+          "viewport.state.update",
+          "viewport.state.read"
+        ]
+      },
+      "routing": {
+        "policy": "effective_realtime_named_override"
+      },
+      "semantic_coverage": {
+        "purpose": {
+          "status": "covered",
+          "by": [
+            "viewport.state.update",
+            "viewport.state.read"
+          ],
+          "explanation": "冻结用途“切换视口实时刷新”由当前 successor 承接。写入基础 realtime 状态；存在其他系统临时 override 时只叠加 UAI 自有命名 override，后续 update/restore 仅移除自身并独立读回有效状态。"
+        },
+        "inputs": {
+          "status": "covered",
+          "by": [
+            "viewport.state.update",
+            "viewport.state.read"
+          ],
+          "explanation": "冻结输入“enabled, realtime”由 routing.policy 精确映射到当前公共参数。写入基础 realtime 状态；存在其他系统临时 override 时只叠加 UAI 自有命名 override，后续 update/restore 仅移除自身并独立读回有效状态。"
+        },
+        "outputs": {
+          "status": "covered",
+          "by": [
+            "viewport.state.update",
+            "viewport.state.read"
+          ],
+          "explanation": "冻结输出“需要 Niagara/动画预览或稳定截图时控制实时性”由真实 UE mechanics 与独立公开读回生成。写入基础 realtime 状态；存在其他系统临时 override 时只叠加 UAI 自有命名 override，后续 update/restore 仅移除自身并独立读回有效状态。"
+        }
+      },
+      "product_evidence": {
+        "test_id": "UAI.DeliveryWorkflow.T45.VIEWPORT.GRAPH.CONTROL",
+        "public_command_ids": [
+          "viewport.state.update",
+          "viewport.state.read"
+        ],
+        "architecture_contract_ids": [
+          "DES-UAI-COMMAND-CONTRACT",
+          "DES-UAI-STATE-VALUE-CONTEXT",
+          "DES-UAI-OPERATION-LIFECYCLE",
+          "DES-UAI-EDITOR-AUTOMATION",
+          "DES-UAI-PRODUCTION-EVIDENCE"
+        ],
+        "required_claims": [
+          "public_to_real_ue",
+          "editor_transient_state",
+          "independent_readback",
+          "failure_before_mutation",
+          "historical_semantics_covered",
+          "old_public_ids_absent",
+          "cleanup_confirmed",
+          "editor_preserved"
+        ]
+      },
+      "old_id_exit": {
+        "public_executable": false,
+        "manifest_active": false,
+        "sdk_binding_active": false,
+        "compatibility_alias": false
+      },
+      "final_lifecycle": "deprecated_replaced"
+    },
+    {
+      "historical_command_id": "viewport_trace_screen_point",
+      "approval": "1)",
+      "historical_source": "docs/commands/01_Core_Level_Assets_Landscape.md",
+      "historical_contract": {
+        "inputs": "screen_x, screen_y, trace_channel/trace_distance",
+        "outputs": "根据截图坐标定位命中 Actor",
+        "purpose": "从屏幕点发起世界 Trace"
+      },
+      "resolved_from_contract_id": "uai.historical_capability.t45.viewport.graph.control.viewport_trace_screen_point/1",
+      "successor": {
+        "kind": "exact_command_set",
+        "command_ids": [
+          "viewport.ray.trace"
+        ]
+      },
+      "routing": {
+        "policy": "screen_point+bounded_trace_query"
+      },
+      "semantic_coverage": {
+        "purpose": {
+          "status": "covered",
+          "by": [
+            "viewport.ray.trace"
+          ],
+          "explanation": "冻结用途“从屏幕点发起世界 Trace”由当前 successor 承接。显式 screen frame 经真实反投影后按 trace_channel 与 max_distance_cm 执行有界 world trace，并返回命中状态。"
+        },
+        "inputs": {
+          "status": "covered",
+          "by": [
+            "viewport.ray.trace"
+          ],
+          "explanation": "冻结输入“screen_x, screen_y, trace_channel/trace_distance”由 routing.policy 精确映射到当前公共参数。显式 screen frame 经真实反投影后按 trace_channel 与 max_distance_cm 执行有界 world trace，并返回命中状态。"
+        },
+        "outputs": {
+          "status": "covered",
+          "by": [
+            "viewport.ray.trace"
+          ],
+          "explanation": "冻结输出“根据截图坐标定位命中 Actor”由真实 UE mechanics 与独立公开读回生成。显式 screen frame 经真实反投影后按 trace_channel 与 max_distance_cm 执行有界 world trace，并返回命中状态。"
+        }
+      },
+      "product_evidence": {
+        "test_id": "UAI.DeliveryWorkflow.T45.VIEWPORT.GRAPH.CONTROL",
+        "public_command_ids": [
+          "viewport.ray.trace"
+        ],
+        "architecture_contract_ids": [
+          "DES-UAI-COMMAND-CONTRACT",
+          "DES-UAI-STATE-VALUE-CONTEXT",
+          "DES-UAI-OPERATION-LIFECYCLE",
+          "DES-UAI-EDITOR-AUTOMATION",
+          "DES-UAI-PRODUCTION-EVIDENCE"
+        ],
+        "required_claims": [
+          "public_to_real_ue",
+          "editor_transient_state",
+          "independent_readback",
+          "failure_before_mutation",
+          "historical_semantics_covered",
+          "old_public_ids_absent",
+          "cleanup_confirmed",
+          "editor_preserved"
+        ]
+      },
+      "old_id_exit": {
+        "public_executable": false,
+        "manifest_active": false,
+        "sdk_binding_active": false,
+        "compatibility_alias": false
+      },
+      "final_lifecycle": "deprecated_replaced"
+    }
+  ]
+}

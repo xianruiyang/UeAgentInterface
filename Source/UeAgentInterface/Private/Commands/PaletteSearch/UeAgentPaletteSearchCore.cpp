@@ -3,8 +3,10 @@
 #include "Commands/PaletteSearch/UeAgentPaletteSearchTypes.h"
 
 #include "Algo/Sort.h"
+#include "Commands/PaletteSearch/UeAgentPaletteSearchAuthoring.h"
 #include "Dom/JsonObject.h"
 #include "Dom/JsonValue.h"
+#include "Utilities/AuthoringCore/UeAgentAuthoringCatalogCandidates.h"
 
 namespace UeAgentPaletteSearch
 {
@@ -17,9 +19,8 @@ FSearchParams::FSearchParams()
 	, bIncludeGroups(true)
 	, bIncludeCategoryTree(true)
 	, bContextSensitive(true)
-	, bIncludeLegacyAuthoring(false)
 	, bIncludeDebugFields(false)
-	, Limit(50)
+	, Limit(5)
 	, Offset(0)
 {
 }
@@ -33,10 +34,43 @@ FCandidate::FCandidate()
 {
 }
 
+FString FCandidate::GetCandidateId() const
+{
+	return Identity.CanonicalKey;
+}
+
+FString FCandidate::GetStableId() const
+{
+	return Identity.GetSelector(TEXT("stable_id"));
+}
+
 FSearchResult::FSearchResult()
 	: TotalRaw(0)
 	, TotalMatching(0)
+	, bHasTargetResolution(false)
 {
+}
+
+bool SetCandidateIdentity(
+	const FString& CatalogType,
+	const FString& StableId,
+	const FString& SearchKey,
+	FCandidate& InOutCandidate,
+	FString& OutError)
+{
+	UeAgentAuthoringCatalogCandidates::FIdentityInput Input;
+	Input.CatalogType = CatalogType;
+	Input.TargetKind = InOutCandidate.Kind;
+	Input.Name = InOutCandidate.Name;
+	Input.DisplayName = InOutCandidate.DisplayName;
+	Input.FullName = InOutCandidate.FullName;
+	Input.StableId = StableId;
+	Input.SearchKey = SearchKey;
+	Input.ObjectPath = InOutCandidate.ObjectPath;
+	Input.PackagePath = InOutCandidate.PackagePath;
+	Input.AuthoringSelectors = InOutCandidate.AuthoringSelectors;
+	InOutCandidate.SearchKey = SearchKey;
+	return UeAgentAuthoringCatalogCandidates::BuildIdentity(Input, InOutCandidate.Identity, OutError);
 }
 
 namespace
@@ -240,8 +274,8 @@ namespace
 			Candidate.CategoryPath,
 			Candidate.Keywords,
 			Candidate.Tooltip,
-			Candidate.CanonicalKey,
-			Candidate.StableId,
+			Candidate.SearchKey,
+			Candidate.GetStableId(),
 			Candidate.PackagePath,
 			Candidate.ObjectPath
 		};
@@ -353,31 +387,54 @@ namespace
 		return Parts;
 	}
 
-	static FString CandidateToTsv(const FCandidate& Candidate)
+	static int32 Utf8Bytes(const FString& Value)
 	{
-		const FString Name = Candidate.Name.IsEmpty() ? Candidate.DisplayName : Candidate.Name;
-		const FString FullName = Candidate.FullName.IsEmpty() ? Candidate.StableId : Candidate.FullName;
-		FString Tooltip = Candidate.Tooltip;
-		Tooltip.ReplaceInline(TEXT("\t"), TEXT(" "));
-		Tooltip.ReplaceInline(TEXT("\n"), TEXT(" "));
-		Tooltip.ReplaceInline(TEXT("\r"), TEXT(" "));
+		return FTCHARToUTF8(*Value).Length();
+	}
 
-		FString SeedPath;
-		if (Candidate.JsonAuthoring.IsValid())
+	static FString TruncateCell(const FString& Source, const int32 MaxCodepoints, const int32 MaxBytes, bool& bOutTruncated)
+	{
+		FString Result;
+		Result.Reserve(FMath::Min(Source.Len(), MaxCodepoints));
+		int32 Codepoints = 0;
+		for (int32 Index = 0; Index < Source.Len() && Codepoints < MaxCodepoints; ++Codepoints)
 		{
-			const TSharedPtr<FJsonObject>* SeedObj = nullptr;
-			if (Candidate.JsonAuthoring->TryGetObjectField(TEXT("seed"), SeedObj) && SeedObj && SeedObj->IsValid())
+			const int32 Start = Index++;
+			const uint32 First = static_cast<uint32>(Source[Start]);
+			if (First >= 0xD800 && First <= 0xDBFF && Index < Source.Len())
 			{
-				(*SeedObj)->TryGetStringField(TEXT("path"), SeedPath);
+				const uint32 Second = static_cast<uint32>(Source[Index]);
+				if (Second >= 0xDC00 && Second <= 0xDFFF) ++Index;
 			}
+			const FString Candidate = Result + Source.Mid(Start, Index - Start);
+			if (Utf8Bytes(Candidate) > MaxBytes)
+			{
+				bOutTruncated = true;
+				break;
+			}
+			Result = Candidate;
 		}
-		if (SeedPath.IsEmpty())
-		{
-			SeedPath = FullName;
-		}
+		if (Result.Len() < Source.Len()) bOutTruncated = true;
+		return Result;
+	}
 
+	static FString SanitizeCell(FString Value, const int32 MaxCodepoints, bool& bOutTruncated)
+	{
+		Value.ReplaceInline(TEXT("\t"), TEXT(" "));
+		Value.ReplaceInline(TEXT("\n"), TEXT(" "));
+		Value.ReplaceInline(TEXT("\r"), TEXT(" "));
+		return TruncateCell(Value, MaxCodepoints, 2048, bOutTruncated);
+	}
+
+	static FString CandidateToTsv(const FCandidate& Candidate, bool& bOutTruncated)
+	{
+		const FString Name = SanitizeCell(
+			Candidate.Name.IsEmpty() ? Candidate.DisplayName : Candidate.Name, 512, bOutTruncated);
+		const FString Kind = SanitizeCell(Candidate.Kind, 512, bOutTruncated);
+		const FString Category = SanitizeCell(Candidate.CategoryPath, 512, bOutTruncated);
+		const FString Summary = SanitizeCell(Candidate.Tooltip, 512, bOutTruncated);
 		return FString::Printf(TEXT("%s\t%s\t%s\t%s\t%s"),
-			*Name, *FullName, *Candidate.CategoryPath, *Tooltip, *SeedPath);
+			*Candidate.GetCandidateId(), *Name, *Kind, *Category, *Summary);
 	}
 
 	static TArray<TSharedPtr<FJsonValue>> BuildGroupJson(const TArray<FCandidate>& Candidates)
@@ -454,7 +511,6 @@ namespace
 		ContextObj->SetStringField(TEXT("candidate_id"), Params.CandidateId);
 		QueryObj->SetObjectField(TEXT("context"), ContextObj);
 		TSharedRef<FJsonObject> ViewObj = MakeShared<FJsonObject>();
-		ViewObj->SetBoolField(TEXT("include_legacy_authoring"), Params.bIncludeLegacyAuthoring);
 		ViewObj->SetBoolField(TEXT("include_debug_fields"), Params.bIncludeDebugFields);
 		QueryObj->SetObjectField(TEXT("view"), ViewObj);
 		return QueryObj;
@@ -481,6 +537,40 @@ namespace
 		PageObj->SetStringField(TEXT("sort"), Params.Sort);
 		PageObj->SetBoolField(TEXT("has_more"), Params.Offset + Params.Limit < Result.TotalMatching);
 		return PageObj;
+	}
+
+	static UeAgentAuthoringCatalogCandidates::FSortKey MakeSortKey(const FCandidate& Candidate)
+	{
+		UeAgentAuthoringCatalogCandidates::FSortKey Key;
+		Key.CanonicalKey = Candidate.GetCandidateId();
+		Key.Name = Candidate.Name.IsEmpty() ? Candidate.DisplayName : Candidate.Name;
+		Key.CategoryPath = Candidate.CategoryPath;
+		Key.UiOrder = Candidate.UiOrder;
+		Key.Score = Candidate.Score;
+		return Key;
+	}
+
+	static void SortCandidates(const FSearchParams& Params, TArray<FCandidate>& Candidates)
+	{
+		using namespace UeAgentAuthoringCatalogCandidates;
+		ESortMode Mode = ESortMode::UiOrder;
+		if (Params.Sort.Equals(TEXT("name"))) Mode = ESortMode::Name;
+		else if (Params.Sort.Equals(TEXT("category"))) Mode = ESortMode::Category;
+		else if (!Params.SearchText.TrimStartAndEnd().IsEmpty()) Mode = ESortMode::Score;
+		Algo::Sort(Candidates, [Mode](const FCandidate& Left, const FCandidate& Right)
+		{
+			return Less(MakeSortKey(Left), MakeSortKey(Right), Mode);
+		});
+	}
+
+	static TSharedRef<FJsonObject> BuildCandidateJson(const FCandidate& Candidate)
+	{
+		TSharedRef<FJsonObject> Result = MakeShared<FJsonObject>();
+		Result->SetStringField(TEXT("candidate_id"), Candidate.GetCandidateId());
+		Result->SetStringField(TEXT("kind"), Candidate.Kind);
+		Result->SetStringField(TEXT("name"), Candidate.Name.IsEmpty() ? Candidate.DisplayName : Candidate.Name);
+		Result->SetStringField(TEXT("full_name"), Candidate.FullName);
+		return Result;
 	}
 }
 
@@ -514,7 +604,6 @@ bool ParseSearchParams(const TSharedPtr<FJsonObject>& Params, FSearchParams& Out
 	ReadBoolField(Params, TEXT("include_groups"), OutParams.bIncludeGroups);
 	ReadBoolField(Params, TEXT("include_category_tree"), OutParams.bIncludeCategoryTree);
 	ReadBoolField(Params, TEXT("context_sensitive"), OutParams.bContextSensitive);
-	ReadBoolField(Params, TEXT("include_legacy_authoring"), OutParams.bIncludeLegacyAuthoring);
 	ReadBoolField(Params, TEXT("include_debug_fields"), OutParams.bIncludeDebugFields);
 	ReadIntField(Params, TEXT("limit"), OutParams.Limit);
 	ReadIntField(Params, TEXT("offset"), OutParams.Offset);
@@ -558,7 +647,6 @@ bool ParseSearchParams(const TSharedPtr<FJsonObject>& Params, FSearchParams& Out
 		ReadBoolField(*ViewObjPtr, TEXT("include_items"), OutParams.bIncludeItems);
 		ReadBoolField(*ViewObjPtr, TEXT("include_groups"), OutParams.bIncludeGroups);
 		ReadBoolField(*ViewObjPtr, TEXT("include_category_tree"), OutParams.bIncludeCategoryTree);
-		ReadBoolField(*ViewObjPtr, TEXT("include_legacy_authoring"), OutParams.bIncludeLegacyAuthoring);
 		ReadBoolField(*ViewObjPtr, TEXT("include_debug_fields"), OutParams.bIncludeDebugFields);
 	}
 
@@ -581,7 +669,11 @@ bool ParseSearchParams(const TSharedPtr<FJsonObject>& Params, FSearchParams& Out
 	OutParams.Sort = NormalizeToken(OutParams.Sort);
 	OutParams.SuggestedFilter = NormalizeToken(OutParams.SuggestedFilter);
 	OutParams.TargetUsage = NormalizeToken(OutParams.TargetUsage);
-	OutParams.Limit = FMath::Clamp(OutParams.Limit, 1, 200);
+	if (OutParams.Limit < 1 || OutParams.Limit > 20)
+	{
+		OutError = TEXT("catalog_page_limit_exceeded");
+		return false;
+	}
 	OutParams.Offset = FMath::Max(0, OutParams.Offset);
 
 	if (OutParams.CatalogType.IsEmpty())
@@ -638,13 +730,16 @@ bool ExecuteSearch(const FSearchParams& Params, FSearchResult& OutResult, FStrin
 	}
 
 	OutResult.TotalRaw = Candidates.Num();
+	TArray<FCandidate> FilteredCandidates;
+	TSet<FString> SeenCanonicalKeys;
 	for (FCandidate& Candidate : Candidates)
 	{
-		const FString CandidateKind = Candidate.Kind.IsEmpty() ? Candidate.Type : Candidate.Kind;
-		if (!Params.CandidateId.IsEmpty() && !Candidate.CandidateId.Equals(Params.CandidateId, ESearchCase::IgnoreCase))
+		if (!Candidate.Identity.IsValid())
 		{
-			continue;
+			OutError = FString::Printf(TEXT("catalog_candidate_identity_missing:%s:%s"), *Candidate.Kind, *Candidate.FullName);
+			return false;
 		}
+		const FString CandidateKind = Candidate.Kind.IsEmpty() ? Candidate.Type : Candidate.Kind;
 		if (!ContainsAnyNormalized(Params.TypeFilters, CandidateKind))
 		{
 			continue;
@@ -657,45 +752,81 @@ bool ExecuteSearch(const FSearchParams& Params, FSearchResult& OutResult, FStrin
 		{
 			continue;
 		}
+		FString CanonicalKey = Candidate.Identity.CanonicalKey;
+		CanonicalKey.ToLowerInline();
+		if (SeenCanonicalKeys.Contains(CanonicalKey))
+		{
+			continue;
+		}
+		SeenCanonicalKeys.Add(MoveTemp(CanonicalKey));
 
 		Candidate.Score = ComputeScore(Params, Candidate);
-		OutResult.MatchingCandidates.Add(Candidate);
+		FilteredCandidates.Add(Candidate);
 	}
+	SortCandidates(Params, FilteredCandidates);
 
+	if (!Params.CandidateId.IsEmpty())
+	{
+		UeAgentAuthoringIdentity::FCanonicalIdentity ParsedIdentity;
+		FString ParseError;
+		UeAgentAuthoringTargetLocator::FTargetQuery Query;
+		if (UeAgentAuthoringIdentity::ParseCanonicalKey(Params.CandidateId, ParsedIdentity, ParseError)
+			&& ParsedIdentity.ModelId == TEXT("catalog_candidate_identity"))
+		{
+			Query.ModelId = ParsedIdentity.ModelId;
+			Query.TargetKind = ParsedIdentity.TargetKind;
+			Query.CanonicalKey = Params.CandidateId;
+		}
+		else
+		{
+			Query.ModelId = TEXT("catalog_candidate_identity");
+			Query.CanonicalKey = Params.CandidateId;
+		}
+		TArray<UeAgentAuthoringIdentity::FCanonicalIdentity> Identities;
+		for (const FCandidate& Candidate : FilteredCandidates) Identities.Add(Candidate.Identity);
+		OutResult.bHasTargetResolution = true;
+		if (UeAgentAuthoringTargetLocator::ResolveExact(Query, Identities, OutResult.TargetResolution)
+			&& FilteredCandidates.IsValidIndex(OutResult.TargetResolution.ResolvedIndex))
+		{
+			OutResult.MatchingCandidates.Add(FilteredCandidates[OutResult.TargetResolution.ResolvedIndex]);
+		}
+	}
+	else
+	{
+		OutResult.MatchingCandidates = MoveTemp(FilteredCandidates);
+		if (Params.SearchMode.Equals(TEXT("exact")))
+		{
+			TArray<UeAgentAuthoringIdentity::FCanonicalIdentity> Identities;
+			for (const FCandidate& Candidate : OutResult.MatchingCandidates) Identities.Add(Candidate.Identity);
+			static const TCHAR* SelectorOrder[] = { TEXT("name"), TEXT("display_name"), TEXT("full_name"), TEXT("search_key") };
+			for (const TCHAR* SelectorName : SelectorOrder)
+			{
+				UeAgentAuthoringTargetLocator::FTargetQuery Query;
+				Query.ModelId = TEXT("catalog_candidate_identity");
+				Query.Selectors.Add(SelectorName, Params.SearchText);
+				OutResult.bHasTargetResolution = true;
+				if (UeAgentAuthoringTargetLocator::ResolveExact(Query, Identities, OutResult.TargetResolution))
+				{
+					const int32 ResolvedIndex = OutResult.TargetResolution.ResolvedIndex;
+					if (OutResult.MatchingCandidates.IsValidIndex(ResolvedIndex))
+					{
+						const FCandidate ResolvedCandidate = OutResult.MatchingCandidates[ResolvedIndex];
+						OutResult.MatchingCandidates = { ResolvedCandidate };
+					}
+					break;
+				}
+				if (OutResult.TargetResolution.ErrorCode != TEXT("target_not_found")) break;
+			}
+		}
+	}
 	OutResult.TotalMatching = OutResult.MatchingCandidates.Num();
-
-	if (Params.Sort.Equals(TEXT("name")))
+	const bool bRequestsCandidateDetail = !Params.CandidateId.IsEmpty()
+		|| Params.SearchMode.Equals(TEXT("exact"), ESearchCase::IgnoreCase);
+	if (bRequestsCandidateDetail && OutResult.MatchingCandidates.Num() == 1)
 	{
-		Algo::Sort(OutResult.MatchingCandidates, [](const FCandidate& A, const FCandidate& B)
-		{
-			const FString AName = A.Name.IsEmpty() ? A.DisplayName : A.Name;
-			const FString BName = B.Name.IsEmpty() ? B.DisplayName : B.Name;
-			return AName < BName;
-		});
-	}
-	else if (Params.Sort.Equals(TEXT("category")))
-	{
-		Algo::Sort(OutResult.MatchingCandidates, [](const FCandidate& A, const FCandidate& B)
-		{
-			const FString AName = A.Name.IsEmpty() ? A.DisplayName : A.Name;
-			const FString BName = B.Name.IsEmpty() ? B.DisplayName : B.Name;
-			if (A.CategoryPath.Equals(B.CategoryPath))
-			{
-				return AName < BName;
-			}
-			return A.CategoryPath < B.CategoryPath;
-		});
-	}
-	else if (!Params.SearchText.TrimStartAndEnd().IsEmpty())
-	{
-		Algo::Sort(OutResult.MatchingCandidates, [](const FCandidate& A, const FCandidate& B)
-		{
-			if (!FMath::IsNearlyEqual(A.Score, B.Score))
-			{
-				return A.Score > B.Score;
-			}
-			return A.UiOrder < B.UiOrder;
-		});
+		TSharedPtr<FJsonObject> Seed;
+		TSharedPtr<FJsonObject> Placement;
+		if (!BuildAuthoringProjection(OutResult.MatchingCandidates[0], Seed, Placement, OutError)) return false;
 	}
 
 	return true;
@@ -709,6 +840,10 @@ TSharedRef<FJsonObject> BuildSearchResponse(const FSearchParams& Params, const F
 	Root->SetObjectField(TEXT("query"), BuildQueryJson(Params));
 	Root->SetObjectField(TEXT("counts"), BuildCountsJson(Params, Result));
 	Root->SetObjectField(TEXT("page"), BuildPageJson(Params, Result));
+	if (Result.bHasTargetResolution)
+	{
+		Root->SetObjectField(TEXT("candidate_resolution"), Result.TargetResolution.ToJsonObject());
+	}
 
 	if (Params.bIncludeGroups)
 	{
@@ -718,17 +853,62 @@ TSharedRef<FJsonObject> BuildSearchResponse(const FSearchParams& Params, const F
 	{
 		Root->SetArrayField(TEXT("category_tree"), BuildCategoryTreeJson(Result.MatchingCandidates));
 	}
-	if (Params.bIncludeItems)
+	const bool bRequestsCandidateDetail =
+		!Params.CandidateId.IsEmpty() || Params.SearchMode.Equals(TEXT("exact"), ESearchCase::IgnoreCase);
+	if (Params.bIncludeItems && !bRequestsCandidateDetail)
 	{
-		FString Tsv = TEXT("name\tfull_name\tcategory\ttooltip\tpath");
+		constexpr int32 MaxRows = 20;
+		constexpr int32 MaxBytes = 16384;
+		FString Tsv = TEXT("candidate_id\tname\tkind\tcategory\tsummary");
+		bool bTruncated = false;
+		int32 RowsEmitted = 0;
 		const int32 LastIndex = FMath::Min(Result.MatchingCandidates.Num(), Params.Offset + Params.Limit);
 		for (int32 Index = Params.Offset; Index < LastIndex; ++Index)
 		{
-			Tsv += TEXT("\n") + CandidateToTsv(Result.MatchingCandidates[Index]);
+			bool bRowTruncated = false;
+			const FString Row = TEXT("\n") + CandidateToTsv(Result.MatchingCandidates[Index], bRowTruncated);
+			if (Utf8Bytes(Tsv) + Utf8Bytes(Row) > MaxBytes)
+			{
+				bTruncated = true;
+				break;
+			}
+			Tsv += Row;
+			bTruncated |= bRowTruncated;
+			++RowsEmitted;
 		}
+		bTruncated |= Params.Offset + RowsEmitted < Result.MatchingCandidates.Num();
 		Root->SetStringField(TEXT("items_tsv"), Tsv);
+		TSharedRef<FJsonObject> Budget = MakeShared<FJsonObject>();
+		Budget->SetNumberField(TEXT("max_rows"), MaxRows);
+		Budget->SetNumberField(TEXT("max_bytes"), MaxBytes);
+		Budget->SetNumberField(TEXT("max_cell_bytes"), 2048);
+		Budget->SetNumberField(TEXT("tooltip_max_codepoints"), 512);
+		Budget->SetNumberField(TEXT("rows_emitted"), RowsEmitted);
+		Budget->SetNumberField(TEXT("bytes_emitted"), Utf8Bytes(Tsv));
+		Budget->SetBoolField(TEXT("truncated"), bTruncated);
+		Root->SetObjectField(TEXT("table_budget"), Budget);
 	}
-	Root->SetArrayField(TEXT("warnings"), MakeStringArray(Result.Warnings));
+	if (bRequestsCandidateDetail && Result.MatchingCandidates.Num() == 1)
+	{
+		Root->SetObjectField(TEXT("candidate"), BuildCandidateJson(Result.MatchingCandidates[0]));
+	}
+	TArray<FString> ResponseWarnings = Result.Warnings;
+	if (bRequestsCandidateDetail && Result.MatchingCandidates.Num() == 1)
+	{
+		TSharedPtr<FJsonObject> Seed;
+		TSharedPtr<FJsonObject> Placement;
+		FString ProjectionError;
+		if (!BuildAuthoringProjection(Result.MatchingCandidates[0], Seed, Placement, ProjectionError))
+		{
+			ResponseWarnings.Add(ProjectionError);
+		}
+		else if (Seed.IsValid() && Placement.IsValid())
+		{
+			Root->SetObjectField(TEXT("seed"), Seed);
+			Root->SetObjectField(TEXT("placement"), Placement);
+		}
+	}
+	Root->SetArrayField(TEXT("warnings"), MakeStringArray(ResponseWarnings));
 	return Root;
 }
 

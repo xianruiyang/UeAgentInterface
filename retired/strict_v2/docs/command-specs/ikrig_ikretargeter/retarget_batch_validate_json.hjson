@@ -1,0 +1,66 @@
+authoring: { reason: command_has_no_registered_folder_authoring_profile, state: none }
+category: ikrig_ikretargeter
+command: retarget_batch_validate_json
+deprecation: { reason: command_is_active, state: none }
+discovery: { aliases: [], keywords_en: [retarget, batch, validate, json, ikrig_ikretargeter], keywords_zh: [retarget_batch_validate_json], summary_en: "Execute retarget_batch_validate_json with a verified implementation contract", summary_zh: "校验批量重定向 JSON", tags: [ikrig_ikretargeter, p2-006] }
+errors: {
+  codes: [
+    { code: hjson_load_failed, description_zh: "C++ 实现返回错误码 hjson_load_failed", retry_safe: false, stage: execution, wire_match: exact }
+    { code: missing_json_file, description_zh: "C++ 实现返回错误码 missing_json_file", retry_safe: true, stage: preflight, wire_match: exact }
+  ]
+}
+evidence: {
+  docs: [
+    { path: "Plugins/UeAgentInterface/docs/commands/ikrig_ikretargeter/retarget_batch_validate_json.md", purpose: "user documentation cross-check; C++ implementation remains authoritative" }
+  ]
+  implementation: [
+    { line_hint: 1390, path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Commands/IK/UeAgentHttpServer_IKAssets_FolderFormat.cpp", purpose: "command handler, parameter and return evidence", symbol: CmdRetargetBatchValidateJson }
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Server/UeAgentHttpServer.cpp", purpose: "transitive helper evidence used by the command handler" }
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Utilities/UeAgentJsonDiagnostics.cpp", purpose: "transitive helper evidence used by the command handler" }
+  ]
+  tests: [
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterfaceTests/Private/Smoke/UeAgentInterfaceSmoke_AnimationIKNiagara.cpp", purpose: "smoke or negative-path evidence cross-checked for the verified contract" }
+  ]
+}
+execution: {
+  destructive: false
+  editor_state: required
+  game_thread: required
+  idempotent: true
+  kind: read_only
+  overwrite_behavior: none
+  pie_state: allowed
+  retry_safe: true
+  save_behavior: none
+  side_effects: []
+  ui_effect: none
+}
+maturity: verified
+params: {
+  constraints: []
+  fields: {
+    json_file: {
+      default_state: none
+      description_zh: "C++ 实现读取的 json_file 参数"
+      path_semantics: { kind: filesystem_file, must_exist: false, writable: false }
+      required: true
+      type: filesystem_path
+    }
+  }
+  state: defined
+}
+response: { artifact_fields: [json_issues], compact_fields: [valid, json_file, json_issue_count], failure_fields: [params.json_file], max_items_policy: { fields: [], mode: none } }
+returns: {
+  fields: {
+    json_file: { description_zh: "C++ 实现返回的 json_file 字段；是否出现取决于执行分支", required: false, type: filesystem_path }
+    json_issue_count: { description_zh: "C++ 实现返回的 json_issue_count 字段；是否出现取决于执行分支", required: false, type: integer }
+    json_issues: { description_zh: "C++ 实现返回的 json_issues 字段；是否出现取决于执行分支", item_type: json_value, required: false, type: array }
+    valid: { description_zh: "C++ 实现返回的 valid 字段；是否出现取决于执行分支", required: false, type: bool }
+  }
+  state: defined
+}
+schema: uai.command_spec.v1
+status: active
+types: {}
+verification: { reason: read_only_command_has_no_post_write_verification, state: none }
+version: 1

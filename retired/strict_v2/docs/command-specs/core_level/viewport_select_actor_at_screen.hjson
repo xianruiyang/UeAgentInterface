@@ -1,0 +1,108 @@
+authoring: { reason: command_has_no_registered_folder_authoring_profile, state: none }
+category: core_level
+command: viewport_select_actor_at_screen
+deprecation: { reason: command_is_active, state: none }
+discovery: { aliases: [], keywords_en: [viewport, select, actor, at, screen, core_level], keywords_zh: [viewport_select_actor_at_screen], summary_en: "Execute viewport_select_actor_at_screen with a verified implementation contract", summary_zh: "viewport_select_actor_at_screen command contract.", tags: [core_level, p2-002] }
+errors: {
+  codes: [
+    { code: actor_not_hit, description_zh: "C++ 实现返回错误码 actor_not_hit", retry_safe: false, stage: execution, wire_match: exact }
+    { code: calc_scene_view_failed, description_zh: "C++ 实现返回错误码 calc_scene_view_failed", retry_safe: false, stage: execution, wire_match: exact }
+    { code: editor_viewport_not_found, description_zh: "C++ 实现返回错误码 editor_viewport_not_found", retry_safe: false, stage: execution, wire_match: exact }
+    { code: hit_actor_missing, description_zh: "C++ 实现返回错误码 hit_actor_missing", retry_safe: true, stage: preflight, wire_match: exact }
+    { code: invalid_viewport_size, description_zh: "C++ 实现返回错误码 invalid_viewport_size", retry_safe: true, stage: preflight, wire_match: exact }
+    { code: missing_screen_point, description_zh: "C++ 实现返回错误码 missing_screen_point", retry_safe: true, stage: preflight, wire_match: exact }
+    { code: missing_world, description_zh: "C++ 实现返回错误码 missing_world", retry_safe: true, stage: preflight, wire_match: exact }
+    { code: no_editor_world, description_zh: "C++ 实现返回错误码 no_editor_world", retry_safe: false, stage: execution, wire_match: exact }
+    { code: no_geditor, description_zh: "C++ 实现返回错误码 no_geditor", retry_safe: false, stage: execution, wire_match: exact }
+    { code: no_level_editor_viewport, description_zh: "C++ 实现返回错误码 no_level_editor_viewport", retry_safe: false, stage: execution, wire_match: exact }
+    { code: selected_actors_unavailable, description_zh: "C++ 实现返回错误码 selected_actors_unavailable", retry_safe: false, stage: execution, wire_match: exact }
+    { code: unsupported_trace_channel, description_zh: "C++ 实现返回错误码 unsupported_trace_channel", retry_safe: false, stage: execution, wire_match: exact }
+  ]
+}
+evidence: {
+  docs: [
+    { path: "Plugins/UeAgentInterface/docs/commands/core_level/viewport_select_actor_at_screen.md", purpose: "user documentation cross-check; C++ implementation remains authoritative" }
+  ]
+  implementation: [
+    { line_hint: 74, path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Commands/Level/UeAgentHttpServer_Level_MeshAlignment.cpp", purpose: "command handler, parameter and return evidence", symbol: CmdViewportSelectActorAtScreen }
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Commands/Level/UeAgentHttpServer_Level.cpp", purpose: "transitive helper evidence used by the command handler" }
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Commands/Level/UeAgentHttpServer_Level_ActorAndTransform.cpp", purpose: "transitive helper evidence used by the command handler" }
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Commands/Level/UeAgentHttpServer_Level_CaptureAndPersistence.cpp", purpose: "transitive helper evidence used by the command handler" }
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Commands/Modeling/UeAgentHttpServer_Modeling.cpp", purpose: "transitive helper evidence used by the command handler" }
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Commands/UMG/UeAgentHttpServer_UMG_FolderFormat.cpp", purpose: "transitive helper evidence used by the command handler" }
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Server/UeAgentHttpServer.cpp", purpose: "transitive helper evidence used by the command handler" }
+  ]
+  tests: [
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterfaceTests/Private/Smoke/UeAgentInterfaceSmoke_LevelViewportModeling.cpp", purpose: "smoke or negative-path evidence cross-checked for the verified contract" }
+  ]
+}
+execution: {
+  destructive: false
+  editor_state: required
+  game_thread: required
+  idempotent: false
+  kind: session_control
+  overwrite_behavior: none
+  pie_state: allowed
+  retry_safe: false
+  save_behavior: none
+  side_effects: [modifies_editor_session]
+  ui_effect: none
+}
+maturity: verified
+params: {
+  constraints: []
+  fields: {
+    allow_no_hit: { default: false, default_state: defined, description_zh: "C++ 实现读取的 allow_no_hit 参数", required: false, type: bool }
+    ignore_actor_ids: { default_state: none, description_zh: "C++ 实现读取的 ignore_actor_ids 参数", item_type: json_value, required: false, type: array }
+    screen_x: { default: 0, default_state: defined, description_zh: "C++ 实现读取的 screen_x 参数", required: false, type: number }
+    screen_y: { default: 0, default_state: defined, description_zh: "C++ 实现读取的 screen_y 参数", required: false, type: number }
+    selection_mode: { default: replace, default_state: defined, description_zh: "C++ 实现读取的 selection_mode 参数", required: false, type: string }
+    trace_channel: { default_state: none, description_zh: "C++ 实现读取的 trace_channel 参数", required: false, type: string }
+    trace_complex: { default_state: none, description_zh: "C++ 实现读取的 trace_complex 参数", required: false, type: bool }
+    trace_distance: { default_state: none, description_zh: "C++ 实现读取的 trace_distance 参数", required: false, type: number }
+  }
+  state: defined
+}
+response: { artifact_fields: [], compact_fields: [count, actor, actor_id, actor_info, actor_name, actors], failure_fields: [], max_items_policy: { fields: [], mode: none } }
+returns: {
+  fields: {
+    actor: { description_zh: "C++ 实现返回的 actor 字段；是否出现取决于执行分支", required: false, type: json_value }
+    actor_id: { description_zh: "C++ 实现返回的 actor_id 字段；是否出现取决于执行分支", required: false, type: string }
+    actor_info: { description_zh: "C++ 实现返回的 actor_info 字段；是否出现取决于执行分支", required: false, type: json_value }
+    actor_name: { description_zh: "C++ 实现返回的 actor_name 字段；是否出现取决于执行分支", required: false, type: string }
+    actors: { description_zh: "C++ 实现返回的 actors 字段；是否出现取决于执行分支", item_type: json_value, required: false, type: array }
+    bone_name: { description_zh: "C++ 实现返回的 bone_name 字段；是否出现取决于执行分支", required: false, type: string }
+    component_name: { description_zh: "C++ 实现返回的 component_name 字段；是否出现取决于执行分支", required: false, type: string }
+    component_path: { description_zh: "C++ 实现返回的 component_path 字段；是否出现取决于执行分支", required: false, type: string }
+    count: { description_zh: "C++ 实现返回的 count 字段；是否出现取决于执行分支", required: false, type: integer }
+    distance: { description_zh: "C++ 实现返回的 distance 字段；是否出现取决于执行分支", required: false, type: number }
+    face_index: { description_zh: "C++ 实现返回的 face_index 字段；是否出现取决于执行分支", required: false, type: string }
+    hit: { description_zh: "C++ 实现返回的 hit 字段；是否出现取决于执行分支", required: false, type: bool }
+    location: { description_zh: "C++ 实现返回的 location 字段；是否出现取决于执行分支", required: false, type: json_value }
+    normal: { description_zh: "C++ 实现返回的 normal 字段；是否出现取决于执行分支", required: false, type: json_value }
+    screen_point: { description_zh: "C++ 实现返回的 screen_point 字段；是否出现取决于执行分支", required: false, type: json_value }
+    selection_mode: { description_zh: "C++ 实现返回的 selection_mode 字段；是否出现取决于执行分支", required: false, type: string }
+    trace_channel: { description_zh: "C++ 实现返回的 trace_channel 字段；是否出现取决于执行分支", required: false, type: string }
+    trace_complex: { description_zh: "C++ 实现返回的 trace_complex 字段；是否出现取决于执行分支", required: false, type: bool }
+    trace_distance: { description_zh: "C++ 实现返回的 trace_distance 字段；是否出现取决于执行分支", required: false, type: number }
+    world_direction: { description_zh: "C++ 实现返回的 world_direction 字段；是否出现取决于执行分支", required: false, type: json_value }
+    world_origin: { description_zh: "C++ 实现返回的 world_origin 字段；是否出现取决于执行分支", required: false, type: json_value }
+  }
+  state: defined
+}
+schema: uai.command_spec.v1
+status: active
+types: {}
+verification: {
+  assertions: [
+    { id: result_present, operator: exists, source: returns.actor }
+  ]
+  failure_policy: fail_overall
+  methods: [
+    { id: result, kind: result_assertion }
+  ]
+  required: true
+  state: defined
+}
+version: 1

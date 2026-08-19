@@ -1,11 +1,12 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "Commands/Audio/UeAgentHttpServer_AudioOps.h"
-#include "Utilities/UeAgentJsonDiagnostics.h"
 #include "Dom/JsonObject.h"
 #include "Dom/JsonValue.h"
 #include "Sound/SoundAttenuation.h"
+#include "UObject/StrongObjectPtr.h"
 #include "UObject/UnrealType.h"
+#include "Utilities/AuthoringOperationApply/UeAgentAuthoringDirectApply.h"
 
 namespace UeAgentAudioOps
 {
@@ -97,97 +98,65 @@ namespace UeAgentAudioOps
 	{
 		FProperty* Property = nullptr;
 		void* ValuePtr = nullptr;
-		if (!ResolvePropertyPath(Obj, PropertyPath, Property, ValuePtr) || !Property || !ValuePtr)
-		{
-			return false;
-		}
+		if (!ResolvePropertyPath(Obj, PropertyPath, Property, ValuePtr) || !Property || !ValuePtr) return false;
 		OutText.Reset();
 		Property->ExportTextItem_Direct(OutText, ValuePtr, nullptr, Obj, PPF_None);
 		OutCppType = Property->GetCPPType();
 		return true;
 	}
-	bool ImportPropertyText(UObject* Obj, const FString& PropertyPath, const FString& ValueText, FString& OutReadback, FString& OutError)
-	{
-		FProperty* Property = nullptr;
-		void* ValuePtr = nullptr;
-		if (!ResolvePropertyPath(Obj, PropertyPath, Property, ValuePtr) || !Property || !ValuePtr)
-		{
-			OutError = TEXT("property_not_found");
-			return false;
-		}
-		Obj->Modify();
-		const TCHAR* Result = Property->ImportText_Direct(*ValueText, ValuePtr, Obj, PPF_None);
-		if (!Result)
-		{
-			OutError = TEXT("property_import_failed");
-			return false;
-		}
-		Property->ExportTextItem_Direct(OutReadback, ValuePtr, nullptr, Obj, PPF_None);
-		Obj->PostEditChange();
-		Obj->MarkPackageDirty();
-		return true;
-	}
-	FString JsonValueToImportText(const TSharedPtr<FJsonValue>& Value)
-	{
-		if (!Value.IsValid())
-		{
-			return FString();
-		}
-		switch (Value->Type)
-		{
-		case EJson::String:
-			return Value->AsString();
-		case EJson::Number:
-			return FString::SanitizeFloat(Value->AsNumber());
-		case EJson::Boolean:
-			return Value->AsBool() ? TEXT("True") : TEXT("False");
-		case EJson::Object:
-		case EJson::Array:
-		{
-			FString JsonText;
-			UeAgentJsonDiagnostics::SerializeJsonValueCompact(Value, JsonText);
-			return JsonText;
-		}
-		default:
-			return FString();
-		}
-	}
-	bool ApplyProperty(UObject* Asset, const FString& PropertyPath, const FString& ValueText, TArray<TSharedPtr<FJsonValue>>& OutResults, bool bDryRun, FString& OutError)
+	bool ApplyProperty(UObject* Asset, const FString& PropertyPath, const TSharedPtr<FJsonValue>& Value, TArray<TSharedPtr<FJsonValue>>& OutResults, bool bDryRun, FString& OutError)
 	{
 		TSharedPtr<FJsonObject> Result = MakeShared<FJsonObject>();
 		Result->SetStringField(TEXT("property_path"), PropertyPath);
-		Result->SetStringField(TEXT("requested_value_text"), ValueText);
-		if (bDryRun)
+		Result->SetField(TEXT("requested_value"), Value);
+		if (!Asset || PropertyPath.IsEmpty() || !Value.IsValid())
 		{
-			FString Existing;
-			FString CppType;
-			Result->SetBoolField(TEXT("applied"), false);
-			Result->SetBoolField(TEXT("dry_run"), true);
-			if (ExportPropertyText(Asset, PropertyPath, Existing, CppType))
-			{
-				Result->SetStringField(TEXT("property_value_read_back"), Existing);
-				Result->SetStringField(TEXT("property_import_status"), TEXT("would_apply"));
-			}
-			else
-			{
-				Result->SetStringField(TEXT("property_import_status"), TEXT("property_not_found"));
-			}
+			Result->SetStringField(TEXT("status"), TEXT("invalid_request"));
 			OutResults.Add(MakeShared<FJsonValueObject>(Result));
-			return true;
-		}
-
-		FString Readback;
-		FString Error;
-		const bool bOk = ImportPropertyText(Asset, PropertyPath, ValueText, Readback, Error);
-		Result->SetBoolField(TEXT("applied"), bOk);
-		Result->SetStringField(TEXT("property_value_read_back"), Readback);
-		Result->SetStringField(TEXT("property_import_status"), bOk ? TEXT("ok") : Error);
-		OutResults.Add(MakeShared<FJsonValueObject>(Result));
-		if (!bOk)
-		{
-			OutError = Error;
+			OutError = TEXT("audio_property_apply_request_invalid");
 			return false;
 		}
+
+		TStrongObjectPtr<UObject> DryRunTarget;
+		UObject* Target = Asset;
+		if (bDryRun)
+		{
+			DryRunTarget.Reset(StaticDuplicateObject(
+				Asset, GetTransientPackage(), NAME_None, RF_Transient));
+			Target = DryRunTarget.Get();
+		}
+		if (!Target)
+		{
+			Result->SetStringField(TEXT("status"), TEXT("dry_run_clone_failed"));
+			OutResults.Add(MakeShared<FJsonValueObject>(Result));
+			OutError = TEXT("audio_property_dry_run_clone_failed");
+			return false;
+		}
+
+		TSharedRef<FJsonObject> Descriptor = MakeShared<FJsonObject>();
+		Descriptor->SetStringField(TEXT("property_path"), PropertyPath);
+		Descriptor->SetField(TEXT("value"), Value);
+		UeAgentAuthoringObjectApply::FOptions Options;
+		Options.bAllowDomainAuthorizedOwners = true;
+		UeAgentAuthoringDirectApply::FResult ApplyResult;
+		if (!UeAgentAuthoringDirectApply::ApplyObjectPatch(
+				Target, {MakeShared<FJsonValueObject>(Descriptor)}, Options,
+				ApplyResult))
+		{
+			Result->SetStringField(TEXT("status"), ApplyResult.Status);
+			Result->SetStringField(TEXT("phase"), ApplyResult.Phase);
+			Result->SetStringField(TEXT("error_code"), ApplyResult.ErrorCode);
+			Result->SetStringField(TEXT("error_detail"), ApplyResult.ErrorDetail);
+			OutResults.Add(MakeShared<FJsonValueObject>(Result));
+			OutError = ApplyResult.ErrorCode;
+			if (!ApplyResult.ErrorDetail.IsEmpty())
+				OutError += TEXT(":") + ApplyResult.ErrorDetail;
+			return false;
+		}
+		Result->SetBoolField(TEXT("applied"), !bDryRun);
+		Result->SetBoolField(TEXT("dry_run"), bDryRun);
+		Result->SetStringField(TEXT("status"), bDryRun ? TEXT("validated") : TEXT("applied"));
+		OutResults.Add(MakeShared<FJsonValueObject>(Result));
 		return true;
 	}
 	bool ApplyPropertiesArray(UObject* Asset, const TSharedPtr<FJsonObject>& Root, TArray<TSharedPtr<FJsonValue>>& OutResults, bool bDryRun, FString& OutError)
@@ -205,13 +174,9 @@ namespace UeAgentAudioOps
 				continue;
 			}
 			FString Name;
-			FString ValueText;
-			if (!(*Obj)->TryGetStringField(TEXT("property_path"), Name))
-			{
-				(*Obj)->TryGetStringField(TEXT("name"), Name);
-			}
-			(*Obj)->TryGetStringField(TEXT("value_text"), ValueText);
-			if (!Name.IsEmpty() && !ApplyProperty(Asset, Name, ValueText, OutResults, bDryRun, OutError))
+			(*Obj)->TryGetStringField(TEXT("property_path"), Name);
+			const TSharedPtr<FJsonValue> CanonicalValue = (*Obj)->TryGetField(TEXT("value"));
+			if (!Name.IsEmpty() && CanonicalValue.IsValid() && !ApplyProperty(Asset, Name, CanonicalValue, OutResults, bDryRun, OutError))
 			{
 				return false;
 			}
@@ -228,7 +193,7 @@ namespace UeAgentAudioOps
 		for (const TPair<FString, TSharedPtr<FJsonValue>>& Pair : (*Props)->Values)
 		{
 			const FString PropertyPath = Prefix.IsEmpty() ? Pair.Key : Prefix + TEXT(".") + Pair.Key;
-			if (!ApplyProperty(Asset, PropertyPath, JsonValueToImportText(Pair.Value), OutResults, bDryRun, OutError))
+			if (!ApplyProperty(Asset, PropertyPath, Pair.Value, OutResults, bDryRun, OutError))
 			{
 				return false;
 			}
@@ -246,7 +211,7 @@ namespace UeAgentAudioOps
 		{
 			return true;
 		}
-		return ApplyProperty(Asset, PropertyPath, JsonValueToImportText(*Value), OutResults, bDryRun, OutError);
+		return ApplyProperty(Asset, PropertyPath, *Value, OutResults, bDryRun, OutError);
 	}
 	bool ApplySoundAttenuationSemanticJson(USoundAttenuation* Asset, const TSharedPtr<FJsonObject>& Root, TArray<TSharedPtr<FJsonValue>>& OutResults, bool bDryRun, FString& OutError)
 	{
@@ -273,8 +238,9 @@ namespace UeAgentAudioOps
 			double InnerRadius = 0.0;
 			if (A->TryGetNumberField(TEXT("inner_radius"), InnerRadius))
 			{
-				const FString Extents = FString::Printf(TEXT("(X=%s,Y=0.000000,Z=0.000000)"), *FString::SanitizeFloat(InnerRadius));
-				if (!ApplyProperty(Asset, TEXT("Attenuation.AttenuationShapeExtents"), Extents, OutResults, bDryRun, OutError))
+				TSharedPtr<FJsonObject> Extents = MakeShared<FJsonObject>();
+				Extents->SetArrayField(TEXT("components"), { MakeShared<FJsonValueNumber>(InnerRadius), MakeShared<FJsonValueNumber>(0.0), MakeShared<FJsonValueNumber>(0.0) });
+				if (!ApplyProperty(Asset, TEXT("Attenuation.AttenuationShapeExtents"), MakeShared<FJsonValueObject>(Extents), OutResults, bDryRun, OutError))
 				{
 					return false;
 				}

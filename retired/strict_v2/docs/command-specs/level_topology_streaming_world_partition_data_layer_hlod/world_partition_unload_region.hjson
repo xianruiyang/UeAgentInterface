@@ -1,0 +1,82 @@
+authoring: { reason: command_has_no_registered_folder_authoring_profile, state: none }
+category: level_topology_streaming_world_partition_data_layer_hlod
+command: world_partition_unload_region
+deprecation: { reason: command_is_active, state: none }
+discovery: { aliases: [], keywords_en: [world, partition, unload, region, level_topology_streaming_world_partition_data_layer_hlod], keywords_zh: [world_partition_unload_region], summary_en: "Execute world_partition_unload_region with a verified implementation contract", summary_zh: "卸载并移除 UAI 管理的 region loader", tags: [level_topology_streaming_world_partition_data_layer_hlod, p2-002] }
+errors: {
+  codes: [
+    { code: missing_loader_id, description_zh: "C++ 实现返回错误码 missing_loader_id", retry_safe: true, stage: preflight, wire_match: exact }
+    { code: requires_allow_destructive, description_zh: "C++ 实现返回错误码 requires_allow_destructive", retry_safe: false, stage: execution, wire_match: exact }
+    { code: world_partition_loader_adapter_invalid, description_zh: "C++ 实现返回错误码 world_partition_loader_adapter_invalid", retry_safe: true, stage: preflight, wire_match: exact }
+    { code: world_partition_loader_kind_mismatch, description_zh: "C++ 实现返回错误码 world_partition_loader_kind_mismatch", retry_safe: false, stage: execution, wire_match: exact }
+    { code: world_partition_loader_not_found, description_zh: "C++ 实现返回错误码 world_partition_loader_not_found", retry_safe: false, stage: execution, wire_match: exact }
+    { code: world_partition_loader_unload_failed, description_zh: "C++ 实现返回错误码 world_partition_loader_unload_failed", retry_safe: false, stage: execution, wire_match: exact }
+  ]
+}
+evidence: {
+  docs: [
+    { path: "Plugins/UeAgentInterface/docs/commands/level_topology_streaming_world_partition_data_layer_hlod/world_partition_unload_region.md", purpose: "user documentation cross-check; C++ implementation remains authoritative" }
+  ]
+  implementation: [
+    { line_hint: 530, path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Commands/LevelTopology/UeAgentHttpServer_LevelTopology_WorldPartitionHlodAndJson.cpp", purpose: "command handler, parameter and return evidence", symbol: CmdWorldPartitionUnloadRegion }
+  ]
+  tests: [
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterfaceTests/Private/Smoke/LevelTopology/UeAgentInterfaceLevelTopologySmokeTests.cpp", purpose: "smoke or negative-path evidence cross-checked for the verified contract" }
+  ]
+}
+execution: {
+  destructive: true
+  editor_state: required
+  game_thread: required
+  idempotent: false
+  kind: session_control
+  overwrite_behavior: none
+  pie_state: allowed
+  retry_safe: false
+  save_behavior: none
+  side_effects: [modifies_editor_session]
+  ui_effect: none
+}
+maturity: verified
+params: {
+  constraints: []
+  fields: {
+    allow_destructive: { default: false, default_state: defined, description_zh: "C++ 实现读取的 allow_destructive 参数", required: false, type: bool }
+    dry_run: { default: true, default_state: defined, description_zh: "C++ 实现读取的 dry_run 参数", required: false, type: bool }
+    loader_id: { default_state: none, description_zh: "C++ 实现读取的 loader_id 参数", required: true, type: string }
+  }
+  state: defined
+}
+response: { artifact_fields: [], compact_fields: [status, actual_kind, allow_destructive, dry_run, error_code, expected_kind], failure_fields: [params.loader_id], max_items_policy: { fields: [], mode: none } }
+returns: {
+  fields: {
+    actual_kind: { description_zh: "C++ 实现返回的 actual_kind 字段；是否出现取决于执行分支", required: false, type: string }
+    allow_destructive: { description_zh: "C++ 实现返回的 allow_destructive 字段；是否出现取决于执行分支", required: false, type: bool }
+    dry_run: { description_zh: "C++ 实现返回的 dry_run 字段；是否出现取决于执行分支", required: false, type: bool }
+    error_code: { description_zh: "C++ 实现返回的 error_code 字段；是否出现取决于执行分支", required: false, type: string }
+    expected_kind: { description_zh: "C++ 实现返回的 expected_kind 字段；是否出现取决于执行分支", required: false, type: string }
+    kind: { description_zh: "C++ 实现返回的 kind 字段；是否出现取决于执行分支", required: false, type: string }
+    loader_id: { description_zh: "C++ 实现返回的 loader_id 字段；是否出现取决于执行分支", required: false, type: string }
+    schema: { description_zh: "C++ 实现返回的 schema 字段；是否出现取决于执行分支", required: false, type: string }
+    status: { description_zh: "C++ 实现返回的 status 字段；是否出现取决于执行分支", required: false, type: string }
+    unloaded: { description_zh: "C++ 实现返回的 unloaded 字段；是否出现取决于执行分支", required: false, type: bool }
+  }
+  state: defined
+}
+schema: uai.command_spec.v1
+status: active
+types: {}
+verification: {
+  assertions: [
+    { id: result_present, operator: exists, source: returns.status }
+    { id: state_readback_present, operator: exists, source: methods.state_readback.user_loaded_regions }
+  ]
+  failure_policy: fail_overall
+  methods: [
+    { id: result, kind: result_assertion }
+    { command: world_partition_list_loaded_regions, id: state_readback, kind: command_readback, params_mapping: {} }
+  ]
+  required: true
+  state: defined
+}
+version: 1

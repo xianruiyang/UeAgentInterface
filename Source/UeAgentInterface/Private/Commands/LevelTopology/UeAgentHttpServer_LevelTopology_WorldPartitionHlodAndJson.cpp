@@ -65,6 +65,234 @@ namespace
 		return Registry;
 	}
 
+	bool UnloadWorldPartitionLoader(
+		const FUeAgentRequestContext& Ctx,
+		const FString& ExpectedKind,
+		const FString& ResultSchema,
+		TSharedPtr<FJsonObject>& OutData,
+		FString& OutError)
+	{
+		FString LoaderId;
+		if (!Ctx.Params.IsValid() || !Ctx.Params->TryGetStringField(TEXT("loader_id"), LoaderId) || LoaderId.TrimStartAndEnd().IsEmpty())
+		{
+			OutError = TEXT("missing_loader_id");
+			return false;
+		}
+		TUniquePtr<FStoredWorldPartitionLoader>* EntryPtr = GetLoaderRegistry().Find(LoaderId);
+		if (!EntryPtr || !EntryPtr->IsValid())
+		{
+			OutData->SetStringField(TEXT("error_code"), TEXT("world_partition_loader_not_found"));
+			OutError = TEXT("world_partition_loader_not_found");
+			return false;
+		}
+		FStoredWorldPartitionLoader* Entry = EntryPtr->Get();
+		if (!Entry->Kind.Equals(ExpectedKind, ESearchCase::IgnoreCase))
+		{
+			OutData->SetStringField(TEXT("error_code"), TEXT("world_partition_loader_kind_mismatch"));
+			OutData->SetStringField(TEXT("loader_id"), LoaderId);
+			OutData->SetStringField(TEXT("expected_kind"), ExpectedKind);
+			OutData->SetStringField(TEXT("actual_kind"), Entry->Kind);
+			OutError = TEXT("world_partition_loader_kind_mismatch");
+			return false;
+		}
+		bool bDryRun = true;
+		bool bAllowDestructive = false;
+		Ctx.Params->TryGetBoolField(TEXT("dry_run"), bDryRun);
+		Ctx.Params->TryGetBoolField(TEXT("allow_destructive"), bAllowDestructive);
+		OutData->SetStringField(TEXT("schema"), ResultSchema);
+		OutData->SetStringField(TEXT("loader_id"), LoaderId);
+		OutData->SetStringField(TEXT("kind"), Entry->Kind);
+		OutData->SetBoolField(TEXT("unloaded"), false);
+		OutData->SetBoolField(TEXT("dry_run"), bDryRun);
+		OutData->SetBoolField(TEXT("allow_destructive"), bAllowDestructive);
+		if (bDryRun)
+		{
+			OutData->SetStringField(TEXT("status"), TEXT("planned"));
+			return true;
+		}
+		if (!bAllowDestructive)
+		{
+			OutData->SetStringField(TEXT("status"), TEXT("blocked"));
+			OutData->SetStringField(TEXT("error_code"), TEXT("requires_allow_destructive"));
+			OutError = TEXT("requires_allow_destructive");
+			return false;
+		}
+		if (!Entry->Adapter.IsValid())
+		{
+			OutData->SetStringField(TEXT("status"), TEXT("failed"));
+			OutData->SetStringField(TEXT("error_code"), TEXT("world_partition_loader_adapter_invalid"));
+			OutError = TEXT("world_partition_loader_adapter_invalid");
+			return false;
+		}
+		Entry->Adapter->Unload();
+		const bool bUnloaded = !Entry->Adapter->IsLoaded();
+		OutData->SetBoolField(TEXT("unloaded"), bUnloaded);
+		if (!bUnloaded)
+		{
+			OutData->SetStringField(TEXT("status"), TEXT("failed"));
+			OutData->SetStringField(TEXT("error_code"), TEXT("world_partition_loader_unload_failed"));
+			OutError = TEXT("world_partition_loader_unload_failed");
+			return false;
+		}
+		GetLoaderRegistry().Remove(LoaderId);
+		OutData->SetStringField(TEXT("status"), TEXT("unloaded"));
+		return true;
+	}
+
+	TSharedPtr<FJsonObject> CopyParamsWithExecutionAuthorization(
+		const TSharedPtr<FJsonObject>& Source,
+		bool bAllowDestructive,
+		bool bAllowDelete)
+	{
+		TSharedPtr<FJsonObject> Params = MakeShared<FJsonObject>();
+		if (Source.IsValid())
+		{
+			Params->Values = Source->Values;
+		}
+		Params->SetBoolField(TEXT("dry_run"), false);
+		Params->SetBoolField(TEXT("allow_destructive"), bAllowDestructive);
+		Params->SetBoolField(TEXT("allow_delete"), bAllowDelete);
+		return Params;
+	}
+
+	bool ValidateTopologyDestructiveAuthorization(
+		const TSharedPtr<FJsonObject>& Root,
+		bool bAllowDestructive,
+		bool bAllowDelete,
+		FString& OutError)
+	{
+		auto RequireDestructive = [&bAllowDestructive, &OutError]()
+		{
+			if (!bAllowDestructive)
+			{
+				OutError = TEXT("topology_requires_allow_destructive");
+				return false;
+			}
+			return true;
+		};
+		auto RequireDelete = [&bAllowDelete, &OutError]()
+		{
+			if (!bAllowDelete)
+			{
+				OutError = TEXT("topology_requires_allow_delete");
+				return false;
+			}
+			return true;
+		};
+		auto CheckBuildRequest = [&RequireDestructive, &RequireDelete](const TSharedPtr<FJsonObject>& Build)
+		{
+			if (!Build.IsValid())
+			{
+				return true;
+			}
+			bool bExecute = false;
+			bool bReportOnly = true;
+			Build->TryGetBoolField(TEXT("execute"), bExecute);
+			Build->TryGetBoolField(TEXT("report_only"), bReportOnly);
+			if (!bExecute || bReportOnly)
+			{
+				return true;
+			}
+			if (!RequireDestructive())
+			{
+				return false;
+			}
+			FString Step;
+			Build->TryGetStringField(TEXT("step"), Step);
+			return !Step.Equals(TEXT("delete"), ESearchCase::IgnoreCase) || RequireDelete();
+		};
+
+		const TArray<TSharedPtr<FJsonValue>>* Items = nullptr;
+		if (Root->TryGetArrayField(TEXT("streaming_levels"), Items) && Items)
+		{
+			for (const TSharedPtr<FJsonValue>& Value : *Items)
+			{
+				const TSharedPtr<FJsonObject> Item = Value.IsValid() ? Value->AsObject() : nullptr;
+				FString Operation;
+				if (Item.IsValid() && Item->TryGetStringField(TEXT("operation"), Operation) && Operation.Equals(TEXT("remove"), ESearchCase::IgnoreCase))
+				{
+					if (!RequireDestructive()) return false;
+					bool bDeleteAsset = false;
+					Item->TryGetBoolField(TEXT("delete_asset"), bDeleteAsset);
+					if (bDeleteAsset && !RequireDelete()) return false;
+				}
+			}
+		}
+		if (Root->TryGetArrayField(TEXT("data_layers"), Items) && Items)
+		{
+			for (const TSharedPtr<FJsonValue>& Value : *Items)
+			{
+				const TSharedPtr<FJsonObject> Item = Value.IsValid() ? Value->AsObject() : nullptr;
+				FString Operation;
+				if (Item.IsValid() && Item->TryGetStringField(TEXT("operation"), Operation) && Operation.Equals(TEXT("delete"), ESearchCase::IgnoreCase))
+				{
+					if (!RequireDestructive() || !RequireDelete()) return false;
+				}
+			}
+		}
+		if (Root->TryGetArrayField(TEXT("actor_assignments"), Items) && Items)
+		{
+			for (const TSharedPtr<FJsonValue>& Value : *Items)
+			{
+				const TSharedPtr<FJsonObject> Item = Value.IsValid() ? Value->AsObject() : nullptr;
+				const TSharedPtr<FJsonObject>* AssignmentsPtr = nullptr;
+				const TSharedPtr<FJsonObject> Assignments = Item.IsValid() && Item->TryGetObjectField(TEXT("assignments"), AssignmentsPtr) && AssignmentsPtr && AssignmentsPtr->IsValid() ? *AssignmentsPtr : Item;
+				bool bClear = false;
+				if (Assignments.IsValid() && Assignments->TryGetBoolField(TEXT("clear_hlod_layer"), bClear) && bClear && !RequireDestructive()) return false;
+			}
+		}
+		const TSharedPtr<FJsonObject>* WorldPartitionObj = nullptr;
+		if (Root->TryGetObjectField(TEXT("world_partition"), WorldPartitionObj) && WorldPartitionObj && WorldPartitionObj->IsValid())
+		{
+			const TArray<TSharedPtr<FJsonValue>>* UnloadItems = nullptr;
+			if (((*WorldPartitionObj)->TryGetArrayField(TEXT("unload_regions"), UnloadItems) && UnloadItems && !UnloadItems->IsEmpty())
+				|| ((*WorldPartitionObj)->TryGetArrayField(TEXT("unload_actors"), UnloadItems) && UnloadItems && !UnloadItems->IsEmpty()))
+			{
+				if (!RequireDestructive()) return false;
+			}
+			const TSharedPtr<FJsonObject>* Generate = nullptr;
+			if ((*WorldPartitionObj)->TryGetObjectField(TEXT("generate_streaming"), Generate) && Generate && Generate->IsValid())
+			{
+				bool bAllowWrite = false;
+				(*Generate)->TryGetBoolField(TEXT("allow_write"), bAllowWrite);
+				if (bAllowWrite && !RequireDestructive()) return false;
+			}
+		}
+		const TSharedPtr<FJsonObject>* HLODObj = nullptr;
+		if (Root->TryGetObjectField(TEXT("hlod"), HLODObj) && HLODObj && HLODObj->IsValid())
+		{
+			const TArray<TSharedPtr<FJsonValue>>* Assignments = nullptr;
+			if ((*HLODObj)->TryGetArrayField(TEXT("actor_assignments"), Assignments) && Assignments)
+			{
+				for (const TSharedPtr<FJsonValue>& Value : *Assignments)
+				{
+					const TSharedPtr<FJsonObject> Item = Value.IsValid() ? Value->AsObject() : nullptr;
+					bool bClear = false;
+					if (Item.IsValid() && Item->TryGetBoolField(TEXT("clear_hlod_layer"), bClear) && bClear && !RequireDestructive()) return false;
+				}
+			}
+			const TSharedPtr<FJsonObject>* Build = nullptr;
+			if ((*HLODObj)->TryGetObjectField(TEXT("build"), Build) && Build && !CheckBuildRequest(*Build)) return false;
+		}
+		if (Root->TryGetArrayField(TEXT("tasks"), Items) && Items)
+		{
+			for (const TSharedPtr<FJsonValue>& Value : *Items)
+			{
+				const TSharedPtr<FJsonObject> Task = Value.IsValid() ? Value->AsObject() : nullptr;
+				FString Type;
+				if (!Task.IsValid() || (!Task->TryGetStringField(TEXT("type"), Type) && !Task->TryGetStringField(TEXT("command"), Type))) continue;
+				if (Type.Equals(TEXT("hlod_build"), ESearchCase::IgnoreCase) && !CheckBuildRequest(Task)) return false;
+				if (Type.Equals(TEXT("world_partition_generate_streaming"), ESearchCase::IgnoreCase))
+				{
+					bool bAllowWrite = false;
+					Task->TryGetBoolField(TEXT("allow_write"), bAllowWrite);
+					if (bAllowWrite && !RequireDestructive()) return false;
+				}
+			}
+		}
+		return true;
+	}
+
 	class FWorldPartitionIssueCollector final : public IStreamingGenerationErrorHandler
 	{
 	public:
@@ -295,25 +523,7 @@ bool FUeAgentHttpServer::CmdWorldPartitionLoadRegion(const FUeAgentRequestContex
 
 bool FUeAgentHttpServer::CmdWorldPartitionUnloadRegion(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
-	FString LoaderId;
-	if (!JsonTryGetString(Ctx.Params, TEXT("loader_id"), LoaderId))
-	{
-		OutError = TEXT("missing_loader_id");
-		return false;
-	}
-	TUniquePtr<FStoredWorldPartitionLoader>* EntryPtr = GetLoaderRegistry().Find(LoaderId);
-	if (!EntryPtr || !EntryPtr->IsValid())
-	{
-		OutData->SetStringField(TEXT("error_code"), TEXT("world_partition_loader_not_found"));
-		OutError = TEXT("world_partition_loader_not_found");
-		return false;
-	}
-	(*EntryPtr)->Adapter->Unload();
-	GetLoaderRegistry().Remove(LoaderId);
-	OutData->SetStringField(TEXT("schema"), TEXT("uai.world_partition.unload_region_result.v1"));
-	OutData->SetStringField(TEXT("loader_id"), LoaderId);
-	OutData->SetBoolField(TEXT("unloaded"), true);
-	return true;
+	return UnloadWorldPartitionLoader(Ctx, TEXT("region"), TEXT("uai.world_partition.unload_region_result.v1"), OutData, OutError);
 }
 
 bool FUeAgentHttpServer::CmdWorldPartitionLoadActors(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
@@ -388,7 +598,7 @@ bool FUeAgentHttpServer::CmdWorldPartitionLoadActors(const FUeAgentRequestContex
 
 bool FUeAgentHttpServer::CmdWorldPartitionUnloadActors(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
-	return CmdWorldPartitionUnloadRegion(Ctx, OutData, OutError);
+	return UnloadWorldPartitionLoader(Ctx, TEXT("actors"), TEXT("uai.world_partition.unload_actors_result.v1"), OutData, OutError);
 }
 
 bool FUeAgentHttpServer::CmdWorldPartitionListLoadedRegions(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
@@ -473,18 +683,27 @@ bool FUeAgentHttpServer::CmdWorldPartitionGenerateStreaming(const FUeAgentReques
 	bool bDryRun = true;
 	bool bAllowWrite = false;
 	bool bAllowCommandlet = false;
+	bool bAllowDestructive = false;
 	double TimeoutSeconds = 600.0;
 	JsonTryGetBool(Ctx.Params, TEXT("dry_run"), bDryRun);
 	JsonTryGetBool(Ctx.Params, TEXT("allow_write"), bAllowWrite);
 	JsonTryGetBool(Ctx.Params, TEXT("allow_commandlet"), bAllowCommandlet);
+	JsonTryGetBool(Ctx.Params, TEXT("allow_destructive"), bAllowDestructive);
 	JsonTryGetNumber(Ctx.Params, TEXT("timeout_seconds"), TimeoutSeconds);
 	OutData->SetStringField(TEXT("schema"), TEXT("uai.world_partition.generate_streaming_result.v1"));
 	OutData->SetBoolField(TEXT("dry_run"), bDryRun);
 	OutData->SetBoolField(TEXT("allow_write"), bAllowWrite);
 	OutData->SetBoolField(TEXT("allow_commandlet"), bAllowCommandlet);
+	OutData->SetBoolField(TEXT("allow_destructive"), bAllowDestructive);
 	OutData->SetNumberField(TEXT("timeout_seconds"), TimeoutSeconds);
 	const FString Args = TEXT("-run=WorldPartitionBuilderCommandlet -Builder=WorldPartitionBuilder -AllowCommandletRendering");
 	OutData->SetStringField(TEXT("commandlet_plan"), Args);
+	if (!FMath::IsFinite(TimeoutSeconds) || TimeoutSeconds <= 0.0)
+	{
+		OutData->SetStringField(TEXT("error_code"), TEXT("timeout_seconds_invalid"));
+		OutError = TEXT("timeout_seconds_invalid");
+		return false;
+	}
 	if (bDryRun || !bAllowWrite)
 	{
 		OutData->SetStringField(TEXT("status"), TEXT("planned"));
@@ -496,37 +715,14 @@ bool FUeAgentHttpServer::CmdWorldPartitionGenerateStreaming(const FUeAgentReques
 		OutError = TEXT("requires_commandlet");
 		return false;
 	}
-	const bool bOk = UeAgentLevelTopology::RunCommandletProcess(Args, TimeoutSeconds, OutData, OutError);
-	OutData->SetStringField(TEXT("status"), bOk ? TEXT("generated") : TEXT("failed"));
-	return bOk;
-}
-
-bool FUeAgentHttpServer::CmdWorldPartitionResaveActors(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
-{
-	bool bExecute = false;
-	bool bAllowCommandlet = false;
-	double TimeoutSeconds = 600.0;
-	JsonTryGetBool(Ctx.Params, TEXT("execute"), bExecute);
-	JsonTryGetBool(Ctx.Params, TEXT("allow_commandlet"), bAllowCommandlet);
-	JsonTryGetNumber(Ctx.Params, TEXT("timeout_seconds"), TimeoutSeconds);
-	const FString Args = TEXT("-run=WorldPartitionBuilderCommandlet -Builder=WorldPartitionResaveActorsBuilder");
-	OutData->SetStringField(TEXT("schema"), TEXT("uai.world_partition.resave_actors_result.v1"));
-	OutData->SetStringField(TEXT("commandlet_plan"), Args);
-	OutData->SetBoolField(TEXT("execute"), bExecute);
-	OutData->SetBoolField(TEXT("allow_commandlet"), bAllowCommandlet);
-	if (!bExecute)
+	if (!bAllowDestructive)
 	{
-		OutData->SetStringField(TEXT("status"), TEXT("planned"));
-		return true;
-	}
-	if (!bAllowCommandlet)
-	{
-		OutData->SetStringField(TEXT("error_code"), TEXT("requires_commandlet"));
-		OutError = TEXT("requires_commandlet");
+		OutData->SetStringField(TEXT("error_code"), TEXT("requires_allow_destructive"));
+		OutError = TEXT("requires_allow_destructive");
 		return false;
 	}
 	const bool bOk = UeAgentLevelTopology::RunCommandletProcess(Args, TimeoutSeconds, OutData, OutError);
-	OutData->SetStringField(TEXT("status"), bOk ? TEXT("resaved") : TEXT("failed"));
+	OutData->SetStringField(TEXT("status"), bOk ? TEXT("generated") : TEXT("failed"));
 	return bOk;
 }
 
@@ -592,16 +788,28 @@ bool FUeAgentHttpServer::CmdHLODLayerApplyJson(const FUeAgentRequestContext& Ctx
 	double CellSize = 0.0;
 	if (Root->TryGetNumberField(TEXT("cell_size"), CellSize))
 	{
-		TSharedPtr<FJsonObject> ImportResult;
-		UeAgentLevelTopology::ImportPropertyText(Layer, TEXT("CellSize"), FString::FromInt(static_cast<int32>(CellSize)), ImportResult);
-		PropertyResults.Add(MakeShared<FJsonValueObject>(ImportResult));
+		TSharedPtr<FJsonObject> Value = MakeShared<FJsonObject>();
+		Value->SetNumberField(TEXT("literal"), static_cast<int32>(CellSize));
+		TSharedPtr<FJsonObject> ApplyResult;
+		if (!UeAgentLevelTopology::ApplyCanonicalProperty(Layer, TEXT("CellSize"), MakeShared<FJsonValueObject>(Value), ApplyResult))
+		{
+			OutError = TEXT("hlod_cell_size_apply_failed");
+			return false;
+		}
+		PropertyResults.Add(MakeShared<FJsonValueObject>(ApplyResult));
 	}
 	double LoadingRange = 0.0;
 	if (Root->TryGetNumberField(TEXT("loading_range"), LoadingRange))
 	{
-		TSharedPtr<FJsonObject> ImportResult;
-		UeAgentLevelTopology::ImportPropertyText(Layer, TEXT("LoadingRange"), FString::SanitizeFloat(LoadingRange), ImportResult);
-		PropertyResults.Add(MakeShared<FJsonValueObject>(ImportResult));
+		TSharedPtr<FJsonObject> Value = MakeShared<FJsonObject>();
+		Value->SetNumberField(TEXT("literal"), LoadingRange);
+		TSharedPtr<FJsonObject> ApplyResult;
+		if (!UeAgentLevelTopology::ApplyCanonicalProperty(Layer, TEXT("LoadingRange"), MakeShared<FJsonValueObject>(Value), ApplyResult))
+		{
+			OutError = TEXT("hlod_loading_range_apply_failed");
+			return false;
+		}
+		PropertyResults.Add(MakeShared<FJsonValueObject>(ApplyResult));
 	}
 	FString ParentLayerPath;
 	if (Root->TryGetStringField(TEXT("parent_layer"), ParentLayerPath) && !ParentLayerPath.IsEmpty())
@@ -719,9 +927,28 @@ bool FUeAgentHttpServer::CmdHLODAssignActors(const FUeAgentRequestContext& Ctx, 
 		return false;
 	}
 	FString HLODLayerPath;
-	JsonTryGetString(Ctx.Params, TEXT("hlod_layer"), HLODLayerPath);
-	UHLODLayer* Layer = HLODLayerPath.IsEmpty() ? nullptr : Cast<UHLODLayer>(UeAgentLevelTopology::LoadObjectByPath(HLODLayerPath));
-	if (!HLODLayerPath.IsEmpty() && !Layer)
+	const bool bHasHLODLayer = JsonTryGetString(Ctx.Params, TEXT("hlod_layer"), HLODLayerPath);
+	bool bClearHLODLayer = false;
+	bool bAllowDestructive = false;
+	JsonTryGetBool(Ctx.Params, TEXT("clear_hlod_layer"), bClearHLODLayer);
+	JsonTryGetBool(Ctx.Params, TEXT("allow_destructive"), bAllowDestructive);
+	if (bHasHLODLayer && bClearHLODLayer)
+	{
+		OutError = TEXT("hlod_layer_assignment_conflict");
+		return false;
+	}
+	if (bHasHLODLayer && HLODLayerPath.TrimStartAndEnd().IsEmpty())
+	{
+		OutError = TEXT("hlod_layer_empty_requires_clear_hlod_layer");
+		return false;
+	}
+	if (bClearHLODLayer && !bAllowDestructive)
+	{
+		OutError = TEXT("requires_allow_destructive");
+		return false;
+	}
+	UHLODLayer* Layer = bHasHLODLayer ? Cast<UHLODLayer>(UeAgentLevelTopology::LoadObjectByPath(HLODLayerPath)) : nullptr;
+	if (bHasHLODLayer && !Layer)
 	{
 		OutError = TEXT("hlod_layer_not_found");
 		return false;
@@ -734,9 +961,14 @@ bool FUeAgentHttpServer::CmdHLODAssignActors(const FUeAgentRequestContext& Ctx, 
 		Transaction = MakeUnique<FScopedTransaction>(NSLOCTEXT("UeAgentInterface", "HLODAssignActors", "UeAgentInterface HLOD Assign Actors"));
 	}
 	FString RuntimeGrid;
-	JsonTryGetString(Ctx.Params, TEXT("runtime_grid"), RuntimeGrid);
+	const bool bSetRuntimeGrid = JsonTryGetString(Ctx.Params, TEXT("runtime_grid"), RuntimeGrid);
 	bool bIsSpatiallyLoaded = true;
 	const bool bSetSpatial = JsonTryGetBool(Ctx.Params, TEXT("is_spatially_loaded"), bIsSpatiallyLoaded);
+	if (!bHasHLODLayer && !bClearHLODLayer && !bSetRuntimeGrid && !bSetSpatial)
+	{
+		OutError = TEXT("missing_hlod_assignment_fields");
+		return false;
+	}
 	TArray<TSharedPtr<FJsonValue>> Results;
 	for (AActor* Actor : Actors)
 	{
@@ -745,9 +977,15 @@ bool FUeAgentHttpServer::CmdHLODAssignActors(const FUeAgentRequestContext& Ctx, 
 		Result->SetStringField(TEXT("label"), Actor ? Actor->GetActorLabel() : FString());
 		if (Actor)
 		{
+			UHLODLayer* BeforeLayer = Actor->GetHLODLayer();
+			const FName BeforeRuntimeGrid = Actor->GetRuntimeGrid();
+			const bool bBeforeSpatiallyLoaded = Actor->GetIsSpatiallyLoaded();
 			Actor->Modify();
-			Actor->SetHLODLayer(Layer);
-			if (!RuntimeGrid.IsEmpty())
+			if (bHasHLODLayer || bClearHLODLayer)
+			{
+				Actor->SetHLODLayer(bClearHLODLayer ? nullptr : Layer);
+			}
+			if (bSetRuntimeGrid)
 			{
 				Actor->SetRuntimeGrid(FName(*RuntimeGrid));
 			}
@@ -755,11 +993,17 @@ bool FUeAgentHttpServer::CmdHLODAssignActors(const FUeAgentRequestContext& Ctx, 
 			{
 				Actor->SetIsSpatiallyLoaded(bIsSpatiallyLoaded);
 			}
-			Actor->MarkPackageDirty();
+			const bool bChanged = BeforeLayer != Actor->GetHLODLayer()
+				|| BeforeRuntimeGrid != Actor->GetRuntimeGrid()
+				|| bBeforeSpatiallyLoaded != Actor->GetIsSpatiallyLoaded();
+			if (bChanged)
+			{
+				Actor->MarkPackageDirty();
+			}
 			Result->SetStringField(TEXT("hlod_layer"), Actor->GetHLODLayer() ? UeAgentLevelTopology::ObjectPackagePath(Actor->GetHLODLayer()) : FString());
 			Result->SetStringField(TEXT("runtime_grid"), Actor->GetRuntimeGrid().ToString());
 			Result->SetBoolField(TEXT("is_spatially_loaded"), Actor->GetIsSpatiallyLoaded());
-			Result->SetBoolField(TEXT("changed"), true);
+			Result->SetBoolField(TEXT("changed"), bChanged);
 		}
 		Results.Add(MakeShared<FJsonValueObject>(Result));
 	}
@@ -818,15 +1062,21 @@ bool FUeAgentHttpServer::CmdHLODBuild(const FUeAgentRequestContext& Ctx, TShared
 		OutError = TEXT("hlod_build_step_invalid");
 		return false;
 	}
+	bool bDryRun = true;
 	bool bExecute = false;
 	bool bReportOnly = true;
 	bool bAllowCommandlet = false;
 	bool bAllowRHI = false;
+	bool bAllowDestructive = false;
+	bool bAllowDelete = false;
 	double TimeoutSeconds = 1800.0;
+	JsonTryGetBool(Ctx.Params, TEXT("dry_run"), bDryRun);
 	JsonTryGetBool(Ctx.Params, TEXT("execute"), bExecute);
 	JsonTryGetBool(Ctx.Params, TEXT("report_only"), bReportOnly);
 	JsonTryGetBool(Ctx.Params, TEXT("allow_commandlet"), bAllowCommandlet);
 	JsonTryGetBool(Ctx.Params, TEXT("allow_rhi"), bAllowRHI);
+	JsonTryGetBool(Ctx.Params, TEXT("allow_destructive"), bAllowDestructive);
+	JsonTryGetBool(Ctx.Params, TEXT("allow_delete"), bAllowDelete);
 	JsonTryGetNumber(Ctx.Params, TEXT("timeout_seconds"), TimeoutSeconds);
 	FString BuilderFlag = TEXT("-DumpHLODStats");
 	if (Step.Equals(TEXT("setup"), ESearchCase::IgnoreCase)) BuilderFlag = TEXT("-SetupHLODs");
@@ -836,13 +1086,22 @@ bool FUeAgentHttpServer::CmdHLODBuild(const FUeAgentRequestContext& Ctx, TShared
 	const FString Args = FString::Printf(TEXT("-run=WorldPartitionBuilderCommandlet -Builder=WorldPartitionHLODsBuilder %s"), *BuilderFlag);
 	OutData->SetStringField(TEXT("schema"), TEXT("uai.hlod.build_result.v1"));
 	OutData->SetStringField(TEXT("step"), Step);
+	OutData->SetBoolField(TEXT("dry_run"), bDryRun);
 	OutData->SetBoolField(TEXT("execute"), bExecute);
 	OutData->SetBoolField(TEXT("report_only"), bReportOnly);
 	OutData->SetBoolField(TEXT("allow_commandlet"), bAllowCommandlet);
 	OutData->SetBoolField(TEXT("allow_rhi"), bAllowRHI);
+	OutData->SetBoolField(TEXT("allow_destructive"), bAllowDestructive);
+	OutData->SetBoolField(TEXT("allow_delete"), bAllowDelete);
 	OutData->SetNumberField(TEXT("timeout_seconds"), TimeoutSeconds);
 	OutData->SetStringField(TEXT("commandlet_plan"), Args);
-	if (!bExecute || bReportOnly)
+	if (!FMath::IsFinite(TimeoutSeconds) || TimeoutSeconds <= 0.0)
+	{
+		OutData->SetStringField(TEXT("error_code"), TEXT("timeout_seconds_invalid"));
+		OutError = TEXT("timeout_seconds_invalid");
+		return false;
+	}
+	if (bDryRun || !bExecute || bReportOnly)
 	{
 		OutData->SetStringField(TEXT("status"), TEXT("planned"));
 		return true;
@@ -851,6 +1110,18 @@ bool FUeAgentHttpServer::CmdHLODBuild(const FUeAgentRequestContext& Ctx, TShared
 	{
 		OutData->SetStringField(TEXT("error_code"), TEXT("requires_commandlet"));
 		OutError = TEXT("requires_commandlet");
+		return false;
+	}
+	if (!bAllowDestructive)
+	{
+		OutData->SetStringField(TEXT("error_code"), TEXT("requires_allow_destructive"));
+		OutError = TEXT("requires_allow_destructive");
+		return false;
+	}
+	if (Step.Equals(TEXT("delete"), ESearchCase::IgnoreCase) && !bAllowDelete)
+	{
+		OutData->SetStringField(TEXT("error_code"), TEXT("requires_allow_delete"));
+		OutError = TEXT("requires_allow_delete");
 		return false;
 	}
 	if (!bAllowRHI && UeAgentLevelTopology::IsNullRHI() && (Step.Equals(TEXT("build"), ESearchCase::IgnoreCase) || Step.Equals(TEXT("setup"), ESearchCase::IgnoreCase)))
@@ -879,11 +1150,38 @@ bool FUeAgentHttpServer::CmdHLODValidateBuild(const FUeAgentRequestContext& Ctx,
 			++HLODActorCount;
 		}
 	}
+	TArray<TSharedPtr<FJsonValue>> Issues;
+	double ExpectedCountNumber = 0.0;
+	double MinimumCountNumber = 0.0;
+	const bool bHasExpectedCount = JsonTryGetNumber(Ctx.Params, TEXT("expected_hlod_actor_count"), ExpectedCountNumber);
+	const bool bHasMinimumCount = JsonTryGetNumber(Ctx.Params, TEXT("minimum_hlod_actor_count"), MinimumCountNumber);
+	if (!bHasExpectedCount && !bHasMinimumCount)
+	{
+		UeAgentLevelTopology::AddIssue(Issues, TEXT("error"), TEXT("missing_validation_expectation"), TEXT("$"), TEXT("hlod_validate_build requires expected_hlod_actor_count or minimum_hlod_actor_count."));
+	}
+	if (bHasExpectedCount && (!FMath::IsFinite(ExpectedCountNumber) || ExpectedCountNumber < 0.0 || !FMath::IsNearlyEqual(ExpectedCountNumber, FMath::RoundToDouble(ExpectedCountNumber))))
+	{
+		UeAgentLevelTopology::AddIssue(Issues, TEXT("error"), TEXT("expected_hlod_actor_count_invalid"), TEXT("$.expected_hlod_actor_count"), TEXT("Expected HLOD actor count must be a non-negative integer."));
+	}
+	else if (bHasExpectedCount && HLODActorCount != static_cast<int32>(ExpectedCountNumber))
+	{
+		UeAgentLevelTopology::AddIssue(Issues, TEXT("error"), TEXT("hlod_actor_count_mismatch"), TEXT("$.expected_hlod_actor_count"), TEXT("HLOD actor count does not match the expected value."));
+	}
+	if (bHasMinimumCount && (!FMath::IsFinite(MinimumCountNumber) || MinimumCountNumber < 0.0 || !FMath::IsNearlyEqual(MinimumCountNumber, FMath::RoundToDouble(MinimumCountNumber))))
+	{
+		UeAgentLevelTopology::AddIssue(Issues, TEXT("error"), TEXT("minimum_hlod_actor_count_invalid"), TEXT("$.minimum_hlod_actor_count"), TEXT("Minimum HLOD actor count must be a non-negative integer."));
+	}
+	else if (bHasMinimumCount && HLODActorCount < static_cast<int32>(MinimumCountNumber))
+	{
+		UeAgentLevelTopology::AddIssue(Issues, TEXT("error"), TEXT("hlod_actor_count_below_minimum"), TEXT("$.minimum_hlod_actor_count"), TEXT("HLOD actor count is below the required minimum."));
+	}
+	const int32 ErrorCount = UeAgentLevelTopology::CountIssues(Issues, TEXT("error"));
 	OutData->SetStringField(TEXT("schema"), TEXT("uai.hlod.validate_build_result.v1"));
 	OutData->SetNumberField(TEXT("hlod_actor_count"), HLODActorCount);
-	OutData->SetStringField(TEXT("status"), TEXT("checked"));
-	OutData->SetArrayField(TEXT("issues"), TArray<TSharedPtr<FJsonValue>>());
-	return true;
+	OutData->SetStringField(TEXT("status"), ErrorCount == 0 ? TEXT("valid") : TEXT("invalid"));
+	OutData->SetArrayField(TEXT("issues"), Issues);
+	OutData->SetNumberField(TEXT("error_count"), ErrorCount);
+	return ErrorCount == 0;
 }
 
 bool FUeAgentHttpServer::CmdLevelTopologySetActorAssignments(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
@@ -909,6 +1207,8 @@ bool FUeAgentHttpServer::CmdLevelTopologySetActorAssignments(const FUeAgentReque
 		{
 			Params->SetArrayField(TEXT("actor_ids"), Ctx.Params->GetArrayField(TEXT("actor_ids")));
 		}
+		bool bTransaction = true;
+		if (Ctx.Params->TryGetBoolField(TEXT("transaction"), bTransaction)) Params->SetBoolField(TEXT("transaction"), bTransaction);
 		FUeAgentRequestContext SubCtx = Ctx;
 		SubCtx.Params = Params;
 		TSharedPtr<FJsonObject> SubData = MakeShared<FJsonObject>();
@@ -940,6 +1240,8 @@ bool FUeAgentHttpServer::CmdLevelTopologySetActorAssignments(const FUeAgentReque
 		{
 			Params->SetArrayField(TEXT("actor_ids"), Ctx.Params->GetArrayField(TEXT("actor_ids")));
 		}
+		bool bTransaction = true;
+		if (Ctx.Params->TryGetBoolField(TEXT("transaction"), bTransaction)) Params->SetBoolField(TEXT("transaction"), bTransaction);
 		FUeAgentRequestContext SubCtx = Ctx;
 		SubCtx.Params = Params;
 		TSharedPtr<FJsonObject> SubData = MakeShared<FJsonObject>();
@@ -956,7 +1258,7 @@ bool FUeAgentHttpServer::CmdLevelTopologySetActorAssignments(const FUeAgentReque
 			return false;
 		}
 	}
-	if (Assignments->HasField(TEXT("hlod_layer")) || Assignments->HasField(TEXT("world_partition")))
+	if (Assignments->HasField(TEXT("hlod_layer")) || Assignments->HasField(TEXT("clear_hlod_layer")) || Assignments->HasField(TEXT("world_partition")))
 	{
 		TSharedPtr<FJsonObject> Params = MakeShared<FJsonObject>();
 		if (Ctx.Params->HasField(TEXT("actor_ids")))
@@ -968,6 +1270,18 @@ bool FUeAgentHttpServer::CmdLevelTopologySetActorAssignments(const FUeAgentReque
 		{
 			Params->SetStringField(TEXT("hlod_layer"), HLODLayer);
 		}
+		bool bClearHLODLayer = false;
+		if (Assignments->TryGetBoolField(TEXT("clear_hlod_layer"), bClearHLODLayer))
+		{
+			Params->SetBoolField(TEXT("clear_hlod_layer"), bClearHLODLayer);
+		}
+		bool bAllowDestructive = false;
+		if (Ctx.Params->TryGetBoolField(TEXT("allow_destructive"), bAllowDestructive))
+		{
+			Params->SetBoolField(TEXT("allow_destructive"), bAllowDestructive);
+		}
+		bool bTransaction = true;
+		if (Ctx.Params->TryGetBoolField(TEXT("transaction"), bTransaction)) Params->SetBoolField(TEXT("transaction"), bTransaction);
 		TSharedPtr<FJsonObject> WpObj;
 		if (JsonTryGetObject(Assignments, TEXT("world_partition"), WpObj))
 		{
@@ -1070,6 +1384,9 @@ bool FUeAgentHttpServer::CmdLevelTopologyExportJson(const FUeAgentRequestContext
 		{
 			AActor* Actor = *It;
 			TSharedPtr<FJsonObject> Obj = MakeShared<FJsonObject>();
+			TArray<TSharedPtr<FJsonValue>> ActorIds;
+			ActorIds.Add(MakeShared<FJsonValueString>(Actor->GetName()));
+			Obj->SetArrayField(TEXT("actor_ids"), ActorIds);
 			Obj->SetStringField(TEXT("name"), Actor->GetName());
 			Obj->SetStringField(TEXT("label"), Actor->GetActorLabel());
 			Obj->SetStringField(TEXT("level"), Actor->GetLevel() && Actor->GetLevel()->GetOutermost() ? Actor->GetLevel()->GetOutermost()->GetName() : FString());
@@ -1109,6 +1426,16 @@ bool FUeAgentHttpServer::CmdLevelTopologyValidateJson(const FUeAgentRequestConte
 		return false;
 	}
 	TArray<TSharedPtr<FJsonValue>> Issues;
+	const bool bHasExpectation = Root->HasField(TEXT("streaming_levels"))
+		|| Root->HasField(TEXT("data_layers"))
+		|| Root->HasField(TEXT("actor_assignments"))
+		|| Root->HasField(TEXT("world_partition"))
+		|| Root->HasField(TEXT("hlod"))
+		|| Root->HasField(TEXT("tasks"));
+	if (!bHasExpectation)
+	{
+		UeAgentLevelTopology::AddIssue(Issues, TEXT("error"), TEXT("missing_validation_expectation"), TEXT("$"), TEXT("Topology input must contain at least one actionable domain."));
+	}
 	const TArray<TSharedPtr<FJsonValue>>* StreamingLevels = nullptr;
 	if (Root->TryGetArrayField(TEXT("streaming_levels"), StreamingLevels) && StreamingLevels)
 	{
@@ -1123,6 +1450,14 @@ bool FUeAgentHttpServer::CmdLevelTopologyValidateJson(const FUeAgentRequestConte
 			}
 			FString Operation = TEXT("ensure");
 			Item->TryGetStringField(TEXT("operation"), Operation);
+			if (!Operation.Equals(TEXT("ensure"), ESearchCase::IgnoreCase)
+				&& !Operation.Equals(TEXT("create"), ESearchCase::IgnoreCase)
+				&& !Operation.Equals(TEXT("add_existing"), ESearchCase::IgnoreCase)
+				&& !Operation.Equals(TEXT("set_state"), ESearchCase::IgnoreCase)
+				&& !Operation.Equals(TEXT("remove"), ESearchCase::IgnoreCase))
+			{
+				UeAgentLevelTopology::AddIssue(Issues, TEXT("error"), TEXT("streaming_operation_invalid"), FString::Printf(TEXT("$.streaming_levels[%d].operation"), Index), TEXT("Unknown streaming level operation."));
+			}
 			if (Operation.Equals(TEXT("add_existing"), ESearchCase::IgnoreCase) && !UeAgentLevelTopology::AssetExists(LevelPackage))
 			{
 				UeAgentLevelTopology::AddIssue(Issues, TEXT("error"), TEXT("streaming_level_asset_not_found"), FString::Printf(TEXT("$.streaming_levels[%d].level_package"), Index), TEXT("add_existing requires an existing level package."));
@@ -1148,6 +1483,21 @@ bool FUeAgentHttpServer::CmdLevelTopologyValidateJson(const FUeAgentRequestConte
 			if (!UeAgentLevelTopology::IsValidLongPackagePath(AssetPath))
 			{
 				UeAgentLevelTopology::AddIssue(Issues, TEXT("error"), TEXT("data_layer_asset_path_invalid"), FString::Printf(TEXT("$.data_layers[%d].asset_path"), Index), TEXT("DataLayer asset path is not a valid long package name."));
+			}
+			FString Operation = TEXT("ensure");
+			Item->TryGetStringField(TEXT("operation"), Operation);
+			if (!Operation.Equals(TEXT("ensure"), ESearchCase::IgnoreCase) && !Operation.Equals(TEXT("delete"), ESearchCase::IgnoreCase))
+			{
+				UeAgentLevelTopology::AddIssue(Issues, TEXT("error"), TEXT("data_layer_operation_invalid"), FString::Printf(TEXT("$.data_layers[%d].operation"), Index), TEXT("Unknown DataLayer operation."));
+			}
+			FString MembershipMode;
+			if (Item->TryGetStringField(TEXT("membership_mode"), MembershipMode)
+				&& !MembershipMode.Equals(TEXT("add"), ESearchCase::IgnoreCase)
+				&& !MembershipMode.Equals(TEXT("remove"), ESearchCase::IgnoreCase)
+				&& !MembershipMode.Equals(TEXT("replace"), ESearchCase::IgnoreCase)
+				&& !MembershipMode.Equals(TEXT("clear"), ESearchCase::IgnoreCase))
+			{
+				UeAgentLevelTopology::AddIssue(Issues, TEXT("error"), TEXT("data_layer_membership_mode_invalid"), FString::Printf(TEXT("$.data_layers[%d].membership_mode"), Index), TEXT("Unknown DataLayer membership mode."));
 			}
 			bool bCreateInstance = false;
 			Item->TryGetBoolField(TEXT("create_instance"), bCreateInstance);
@@ -1175,7 +1525,9 @@ bool FUeAgentHttpServer::CmdLevelTopologyValidateJson(const FUeAgentRequestConte
 	const TSharedPtr<FJsonObject>* WorldPartitionObj = nullptr;
 	if (Root->TryGetObjectField(TEXT("world_partition"), WorldPartitionObj) && WorldPartitionObj && WorldPartitionObj->IsValid())
 	{
-		const bool bRequestsWpWrite = (*WorldPartitionObj)->HasField(TEXT("streaming_enabled"))
+		bool bDeclaredEnabled = true;
+		const bool bHasDeclaredEnabled = (*WorldPartitionObj)->TryGetBoolField(TEXT("enabled"), bDeclaredEnabled);
+		const bool bRequestsWpWrite = ((*WorldPartitionObj)->HasField(TEXT("streaming_enabled")) && (!bHasDeclaredEnabled || bDeclaredEnabled))
 			|| (*WorldPartitionObj)->HasField(TEXT("load_regions"))
 			|| (*WorldPartitionObj)->HasField(TEXT("load_actors"))
 			|| (*WorldPartitionObj)->HasField(TEXT("generate_streaming"));
@@ -1222,8 +1574,7 @@ bool FUeAgentHttpServer::CmdLevelTopologyValidateJson(const FUeAgentRequestConte
 				UeAgentLevelTopology::AddIssue(Issues, TEXT("error"), TEXT("task_type_missing"), FString::Printf(TEXT("$.tasks[%d]"), Index), TEXT("Topology task requires type or command."));
 			}
 			else if (!Type.Equals(TEXT("hlod_build"), ESearchCase::IgnoreCase)
-				&& !Type.Equals(TEXT("world_partition_generate_streaming"), ESearchCase::IgnoreCase)
-				&& !Type.Equals(TEXT("world_partition_resave_actors"), ESearchCase::IgnoreCase))
+				&& !Type.Equals(TEXT("world_partition_generate_streaming"), ESearchCase::IgnoreCase))
 			{
 				UeAgentLevelTopology::AddIssue(Issues, TEXT("error"), TEXT("task_type_unsupported"), FString::Printf(TEXT("$.tasks[%d].type"), Index), TEXT("Unsupported topology task type."));
 			}
@@ -1556,14 +1907,53 @@ bool FUeAgentHttpServer::CmdLevelTopologyApplyJson(const FUeAgentRequestContext&
 	{
 		return false;
 	}
-	bool bDryRun = false;
+	bool bDryRun = true;
+	bool bAllowDestructive = false;
+	bool bAllowDelete = false;
 	JsonTryGetBool(Ctx.Params, TEXT("dry_run"), bDryRun);
+	JsonTryGetBool(Ctx.Params, TEXT("allow_destructive"), bAllowDestructive);
+	JsonTryGetBool(Ctx.Params, TEXT("allow_delete"), bAllowDelete);
 	TArray<TSharedPtr<FJsonValue>> Results;
+	TSharedPtr<FJsonObject> PreflightData = MakeShared<FJsonObject>();
+	FString PreflightError;
+	const bool bPreflightOk = CmdLevelTopologyValidateJson(Ctx, PreflightData, PreflightError);
+	if (!bPreflightOk)
+	{
+		OutData->SetStringField(TEXT("schema"), TEXT("uai.level_topology.apply_result.v1"));
+		OutData->SetStringField(TEXT("source"), Source);
+		OutData->SetStringField(TEXT("status"), TEXT("preflight_failed"));
+		OutData->SetBoolField(TEXT("dry_run"), bDryRun);
+		OutData->SetBoolField(TEXT("partial_commit"), false);
+		OutData->SetBoolField(TEXT("partial_commit_possible"), false);
+		OutData->SetObjectField(TEXT("preflight"), PreflightData);
+		OutData->SetArrayField(TEXT("results"), Results);
+		OutError = PreflightError.IsEmpty() ? TEXT("topology_preflight_failed") : PreflightError;
+		return false;
+	}
+	if (!bDryRun && !ValidateTopologyDestructiveAuthorization(Root, bAllowDestructive, bAllowDelete, PreflightError))
+	{
+		OutData->SetStringField(TEXT("schema"), TEXT("uai.level_topology.apply_result.v1"));
+		OutData->SetStringField(TEXT("source"), Source);
+		OutData->SetStringField(TEXT("status"), TEXT("preflight_failed"));
+		OutData->SetBoolField(TEXT("dry_run"), false);
+		OutData->SetBoolField(TEXT("partial_commit"), false);
+		OutData->SetBoolField(TEXT("partial_commit_possible"), false);
+		OutData->SetStringField(TEXT("preflight_error"), PreflightError);
+		OutData->SetObjectField(TEXT("preflight"), PreflightData);
+		OutData->SetArrayField(TEXT("results"), Results);
+		OutError = PreflightError;
+		return false;
+	}
 	if (bDryRun)
 	{
 		OutData->SetStringField(TEXT("schema"), TEXT("uai.level_topology.apply_result.v1"));
+		OutData->SetStringField(TEXT("source"), Source);
 		OutData->SetStringField(TEXT("status"), TEXT("planned"));
 		OutData->SetBoolField(TEXT("dry_run"), true);
+		OutData->SetBoolField(TEXT("changed"), false);
+		OutData->SetBoolField(TEXT("partial_commit"), false);
+		OutData->SetBoolField(TEXT("partial_commit_possible"), false);
+		OutData->SetObjectField(TEXT("preflight"), PreflightData);
 		OutData->SetArrayField(TEXT("results"), Results);
 		return true;
 	}
@@ -1572,6 +1962,38 @@ bool FUeAgentHttpServer::CmdLevelTopologyApplyJson(const FUeAgentRequestContext&
 	{
 		return false;
 	}
+	auto FailApply = [&OutData, &OutError, &Results, &Source, &PreflightData](const FString& Error)
+	{
+		int32 CompletedCount = 0;
+		FString FailedOperation;
+		for (const TSharedPtr<FJsonValue>& Value : Results)
+		{
+			const TSharedPtr<FJsonObject> Result = Value.IsValid() ? Value->AsObject() : nullptr;
+			bool bOk = false;
+			if (Result.IsValid() && Result->TryGetBoolField(TEXT("ok"), bOk) && bOk)
+			{
+				++CompletedCount;
+			}
+			else if (Result.IsValid())
+			{
+				Result->TryGetStringField(TEXT("operation"), FailedOperation);
+			}
+		}
+		OutData->SetStringField(TEXT("schema"), TEXT("uai.level_topology.apply_result.v1"));
+		OutData->SetStringField(TEXT("source"), Source);
+		OutData->SetStringField(TEXT("status"), CompletedCount > 0 ? TEXT("partial_failure") : TEXT("failed"));
+		OutData->SetBoolField(TEXT("dry_run"), false);
+		OutData->SetBoolField(TEXT("changed"), CompletedCount > 0);
+		OutData->SetBoolField(TEXT("partial_commit"), CompletedCount > 0);
+		OutData->SetBoolField(TEXT("partial_commit_possible"), true);
+		OutData->SetNumberField(TEXT("completed_count"), CompletedCount);
+		OutData->SetStringField(TEXT("failed_operation"), FailedOperation);
+		OutData->SetStringField(TEXT("failed_error"), Error);
+		OutData->SetObjectField(TEXT("preflight"), PreflightData);
+		OutData->SetArrayField(TEXT("results"), Results);
+		OutError = Error.IsEmpty() ? TEXT("topology_apply_failed") : Error;
+		return false;
+	};
 	const TArray<TSharedPtr<FJsonValue>>* StreamingLevels = nullptr;
 	if (Root->TryGetArrayField(TEXT("streaming_levels"), StreamingLevels) && StreamingLevels)
 	{
@@ -1583,7 +2005,7 @@ bool FUeAgentHttpServer::CmdLevelTopologyApplyJson(const FUeAgentRequestContext&
 				continue;
 			}
 			FUeAgentRequestContext SubCtx = Ctx;
-			SubCtx.Params = Item;
+			SubCtx.Params = CopyParamsWithExecutionAuthorization(Item, bAllowDestructive, bAllowDelete);
 			TSharedPtr<FJsonObject> SubData = MakeShared<FJsonObject>();
 			FString SubError;
 			FString Operation = TEXT("ensure");
@@ -1637,9 +2059,7 @@ bool FUeAgentHttpServer::CmdLevelTopologyApplyJson(const FUeAgentRequestContext&
 			Results.Add(MakeShared<FJsonValueObject>(SubData));
 			if (!bOk)
 			{
-				OutError = SubError;
-				OutData->SetArrayField(TEXT("results"), Results);
-				return false;
+				return FailApply(SubError);
 			}
 		}
 	}
@@ -1654,7 +2074,7 @@ bool FUeAgentHttpServer::CmdLevelTopologyApplyJson(const FUeAgentRequestContext&
 				continue;
 			}
 			FUeAgentRequestContext SubCtx = Ctx;
-			SubCtx.Params = Item;
+			SubCtx.Params = CopyParamsWithExecutionAuthorization(Item, bAllowDestructive, bAllowDelete);
 			TSharedPtr<FJsonObject> SubData = MakeShared<FJsonObject>();
 			FString SubError;
 			bool bOk = true;
@@ -1741,9 +2161,7 @@ bool FUeAgentHttpServer::CmdLevelTopologyApplyJson(const FUeAgentRequestContext&
 			Results.Add(MakeShared<FJsonValueObject>(SubData));
 			if (!bOk)
 			{
-				OutError = SubError;
-				OutData->SetArrayField(TEXT("results"), Results);
-				return false;
+				return FailApply(SubError);
 			}
 		}
 	}
@@ -1758,7 +2176,7 @@ bool FUeAgentHttpServer::CmdLevelTopologyApplyJson(const FUeAgentRequestContext&
 				continue;
 			}
 			FUeAgentRequestContext SubCtx = Ctx;
-			SubCtx.Params = Item;
+			SubCtx.Params = CopyParamsWithExecutionAuthorization(Item, bAllowDestructive, bAllowDelete);
 			TSharedPtr<FJsonObject> SubData = MakeShared<FJsonObject>();
 			FString SubError;
 			const bool bOk = CmdLevelTopologySetActorAssignments(SubCtx, SubData, SubError);
@@ -1768,9 +2186,7 @@ bool FUeAgentHttpServer::CmdLevelTopologyApplyJson(const FUeAgentRequestContext&
 			Results.Add(MakeShared<FJsonValueObject>(SubData));
 			if (!bOk)
 			{
-				OutError = SubError;
-				OutData->SetArrayField(TEXT("results"), Results);
-				return false;
+				return FailApply(SubError);
 			}
 		}
 	}
@@ -1780,7 +2196,7 @@ bool FUeAgentHttpServer::CmdLevelTopologyApplyJson(const FUeAgentRequestContext&
 		if ((*WorldPartitionObj)->HasField(TEXT("streaming_enabled")))
 		{
 			FUeAgentRequestContext SubCtx = Ctx;
-			SubCtx.Params = *WorldPartitionObj;
+		SubCtx.Params = CopyParamsWithExecutionAuthorization(*WorldPartitionObj, bAllowDestructive, bAllowDelete);
 			TSharedPtr<FJsonObject> SubData = MakeShared<FJsonObject>();
 			FString SubError;
 			const bool bOk = CmdWorldPartitionSetStreamingEnabled(SubCtx, SubData, SubError);
@@ -1790,9 +2206,7 @@ bool FUeAgentHttpServer::CmdLevelTopologyApplyJson(const FUeAgentRequestContext&
 			Results.Add(MakeShared<FJsonValueObject>(SubData));
 			if (!bOk)
 			{
-				OutError = SubError;
-				OutData->SetArrayField(TEXT("results"), Results);
-				return false;
+				return FailApply(SubError);
 			}
 		}
 		const TArray<TSharedPtr<FJsonValue>>* LoadRegions = nullptr;
@@ -1806,7 +2220,7 @@ bool FUeAgentHttpServer::CmdLevelTopologyApplyJson(const FUeAgentRequestContext&
 					continue;
 				}
 				FUeAgentRequestContext SubCtx = Ctx;
-				SubCtx.Params = Item;
+				SubCtx.Params = CopyParamsWithExecutionAuthorization(Item, bAllowDestructive, bAllowDelete);
 				TSharedPtr<FJsonObject> SubData = MakeShared<FJsonObject>();
 				FString SubError;
 				const bool bOk = CmdWorldPartitionLoadRegion(SubCtx, SubData, SubError);
@@ -1816,9 +2230,7 @@ bool FUeAgentHttpServer::CmdLevelTopologyApplyJson(const FUeAgentRequestContext&
 				Results.Add(MakeShared<FJsonValueObject>(SubData));
 				if (!bOk)
 				{
-					OutError = SubError;
-					OutData->SetArrayField(TEXT("results"), Results);
-					return false;
+					return FailApply(SubError);
 				}
 			}
 		}
@@ -1833,7 +2245,7 @@ bool FUeAgentHttpServer::CmdLevelTopologyApplyJson(const FUeAgentRequestContext&
 					continue;
 				}
 				FUeAgentRequestContext SubCtx = Ctx;
-				SubCtx.Params = Item;
+				SubCtx.Params = CopyParamsWithExecutionAuthorization(Item, bAllowDestructive, bAllowDelete);
 				TSharedPtr<FJsonObject> SubData = MakeShared<FJsonObject>();
 				FString SubError;
 				const bool bOk = CmdWorldPartitionLoadActors(SubCtx, SubData, SubError);
@@ -1843,9 +2255,7 @@ bool FUeAgentHttpServer::CmdLevelTopologyApplyJson(const FUeAgentRequestContext&
 				Results.Add(MakeShared<FJsonValueObject>(SubData));
 				if (!bOk)
 				{
-					OutError = SubError;
-					OutData->SetArrayField(TEXT("results"), Results);
-					return false;
+					return FailApply(SubError);
 				}
 			}
 		}
@@ -1860,7 +2270,7 @@ bool FUeAgentHttpServer::CmdLevelTopologyApplyJson(const FUeAgentRequestContext&
 					continue;
 				}
 				FUeAgentRequestContext SubCtx = Ctx;
-				SubCtx.Params = Item;
+				SubCtx.Params = CopyParamsWithExecutionAuthorization(Item, bAllowDestructive, bAllowDelete);
 				TSharedPtr<FJsonObject> SubData = MakeShared<FJsonObject>();
 				FString SubError;
 				const bool bOk = CmdWorldPartitionUnloadRegion(SubCtx, SubData, SubError);
@@ -1870,9 +2280,7 @@ bool FUeAgentHttpServer::CmdLevelTopologyApplyJson(const FUeAgentRequestContext&
 				Results.Add(MakeShared<FJsonValueObject>(SubData));
 				if (!bOk)
 				{
-					OutError = SubError;
-					OutData->SetArrayField(TEXT("results"), Results);
-					return false;
+					return FailApply(SubError);
 				}
 			}
 		}
@@ -1887,7 +2295,7 @@ bool FUeAgentHttpServer::CmdLevelTopologyApplyJson(const FUeAgentRequestContext&
 					continue;
 				}
 				FUeAgentRequestContext SubCtx = Ctx;
-				SubCtx.Params = Item;
+				SubCtx.Params = CopyParamsWithExecutionAuthorization(Item, bAllowDestructive, bAllowDelete);
 				TSharedPtr<FJsonObject> SubData = MakeShared<FJsonObject>();
 				FString SubError;
 				const bool bOk = CmdWorldPartitionUnloadActors(SubCtx, SubData, SubError);
@@ -1897,9 +2305,7 @@ bool FUeAgentHttpServer::CmdLevelTopologyApplyJson(const FUeAgentRequestContext&
 				Results.Add(MakeShared<FJsonValueObject>(SubData));
 				if (!bOk)
 				{
-					OutError = SubError;
-					OutData->SetArrayField(TEXT("results"), Results);
-					return false;
+					return FailApply(SubError);
 				}
 			}
 		}
@@ -1907,7 +2313,7 @@ bool FUeAgentHttpServer::CmdLevelTopologyApplyJson(const FUeAgentRequestContext&
 		if ((*WorldPartitionObj)->TryGetObjectField(TEXT("generate_streaming"), GenerateStreaming) && GenerateStreaming && GenerateStreaming->IsValid())
 		{
 			FUeAgentRequestContext SubCtx = Ctx;
-			SubCtx.Params = *GenerateStreaming;
+			SubCtx.Params = CopyParamsWithExecutionAuthorization(*GenerateStreaming, bAllowDestructive, bAllowDelete);
 			TSharedPtr<FJsonObject> SubData = MakeShared<FJsonObject>();
 			FString SubError;
 			const bool bOk = CmdWorldPartitionGenerateStreaming(SubCtx, SubData, SubError);
@@ -1917,9 +2323,7 @@ bool FUeAgentHttpServer::CmdLevelTopologyApplyJson(const FUeAgentRequestContext&
 			Results.Add(MakeShared<FJsonValueObject>(SubData));
 			if (!bOk)
 			{
-				OutError = SubError;
-				OutData->SetArrayField(TEXT("results"), Results);
-				return false;
+				return FailApply(SubError);
 			}
 		}
 	}
@@ -1954,9 +2358,7 @@ bool FUeAgentHttpServer::CmdLevelTopologyApplyJson(const FUeAgentRequestContext&
 				Results.Add(MakeShared<FJsonValueObject>(SubData));
 				if (!bOk)
 				{
-					OutError = SubError;
-					OutData->SetArrayField(TEXT("results"), Results);
-					return false;
+					return FailApply(SubError);
 				}
 			}
 		}
@@ -1971,7 +2373,7 @@ bool FUeAgentHttpServer::CmdLevelTopologyApplyJson(const FUeAgentRequestContext&
 					continue;
 				}
 				FUeAgentRequestContext SubCtx = Ctx;
-				SubCtx.Params = Item;
+				SubCtx.Params = CopyParamsWithExecutionAuthorization(Item, bAllowDestructive, bAllowDelete);
 				TSharedPtr<FJsonObject> SubData = MakeShared<FJsonObject>();
 				FString SubError;
 				const bool bOk = CmdHLODAssignActors(SubCtx, SubData, SubError);
@@ -1981,9 +2383,7 @@ bool FUeAgentHttpServer::CmdLevelTopologyApplyJson(const FUeAgentRequestContext&
 				Results.Add(MakeShared<FJsonValueObject>(SubData));
 				if (!bOk)
 				{
-					OutError = SubError;
-					OutData->SetArrayField(TEXT("results"), Results);
-					return false;
+					return FailApply(SubError);
 				}
 			}
 		}
@@ -1991,7 +2391,7 @@ bool FUeAgentHttpServer::CmdLevelTopologyApplyJson(const FUeAgentRequestContext&
 		if ((*HLODObj)->TryGetObjectField(TEXT("build"), HLODBuild) && HLODBuild && HLODBuild->IsValid())
 		{
 			FUeAgentRequestContext SubCtx = Ctx;
-			SubCtx.Params = *HLODBuild;
+			SubCtx.Params = CopyParamsWithExecutionAuthorization(*HLODBuild, bAllowDestructive, bAllowDelete);
 			TSharedPtr<FJsonObject> SubData = MakeShared<FJsonObject>();
 			FString SubError;
 			const bool bOk = CmdHLODBuild(SubCtx, SubData, SubError);
@@ -2001,9 +2401,7 @@ bool FUeAgentHttpServer::CmdLevelTopologyApplyJson(const FUeAgentRequestContext&
 			Results.Add(MakeShared<FJsonValueObject>(SubData));
 			if (!bOk)
 			{
-				OutError = SubError;
-				OutData->SetArrayField(TEXT("results"), Results);
-				return false;
+				return FailApply(SubError);
 			}
 		}
 	}
@@ -2024,7 +2422,7 @@ bool FUeAgentHttpServer::CmdLevelTopologyApplyJson(const FUeAgentRequestContext&
 				Task->TryGetStringField(TEXT("command"), Type);
 			}
 			FUeAgentRequestContext SubCtx = Ctx;
-			SubCtx.Params = Task;
+			SubCtx.Params = CopyParamsWithExecutionAuthorization(Task, bAllowDestructive, bAllowDelete);
 			TSharedPtr<FJsonObject> SubData = MakeShared<FJsonObject>();
 			FString SubError;
 			bool bOk = false;
@@ -2036,10 +2434,6 @@ bool FUeAgentHttpServer::CmdLevelTopologyApplyJson(const FUeAgentRequestContext&
 			{
 				bOk = CmdWorldPartitionGenerateStreaming(SubCtx, SubData, SubError);
 			}
-			else if (Type.Equals(TEXT("world_partition_resave_actors"), ESearchCase::IgnoreCase))
-			{
-				bOk = CmdWorldPartitionResaveActors(SubCtx, SubData, SubError);
-			}
 			else
 			{
 				SubError = TEXT("task_type_unsupported");
@@ -2050,9 +2444,7 @@ bool FUeAgentHttpServer::CmdLevelTopologyApplyJson(const FUeAgentRequestContext&
 			Results.Add(MakeShared<FJsonValueObject>(SubData));
 			if (!bOk)
 			{
-				OutError = SubError;
-				OutData->SetArrayField(TEXT("results"), Results);
-				return false;
+				return FailApply(SubError);
 			}
 		}
 	}
@@ -2062,5 +2454,9 @@ bool FUeAgentHttpServer::CmdLevelTopologyApplyJson(const FUeAgentRequestContext&
 	OutData->SetBoolField(TEXT("dry_run"), false);
 	OutData->SetArrayField(TEXT("results"), Results);
 	OutData->SetBoolField(TEXT("changed"), Results.Num() > 0);
+	OutData->SetBoolField(TEXT("partial_commit"), false);
+	OutData->SetBoolField(TEXT("partial_commit_possible"), false);
+	OutData->SetNumberField(TEXT("completed_count"), Results.Num());
+	OutData->SetObjectField(TEXT("preflight"), PreflightData);
 	return true;
 }

@@ -1,0 +1,85 @@
+authoring: { reason: command_has_no_registered_folder_authoring_profile, state: none }
+category: pcg
+command: pcg_generate
+deprecation: { reason: command_is_active, state: none }
+discovery: { aliases: [], keywords_en: [pcg, generate], keywords_zh: [pcg_generate], summary_en: "Execute pcg_generate with a verified implementation contract", summary_zh: "调度 PCG 生成", tags: [pcg, p2-005] }
+errors: {
+  codes: [
+    { code: actor_not_found, description_zh: "C++ 实现返回错误码 actor_not_found", retry_safe: false, stage: execution, wire_match: exact }
+    { code: invalid_generation_trigger, description_zh: "C++ 实现返回错误码 invalid_generation_trigger", retry_safe: true, stage: preflight, wire_match: exact }
+    { code: pcg_component_not_found, description_zh: "C++ 实现返回错误码 pcg_component_not_found", retry_safe: false, stage: execution, wire_match: exact }
+  ]
+}
+evidence: {
+  docs: [
+    { path: "Plugins/UeAgentInterface/docs/commands/pcg/pcg_generate.md", purpose: "user documentation cross-check; C++ implementation remains authoritative" }
+  ]
+  implementation: [
+    { line_hint: 3976, path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Commands/PCG/UeAgentHttpServer_PCG.cpp", purpose: "command handler, parameter and return evidence", symbol: CmdPCGGenerate }
+  ]
+  tests: [
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterfaceTests/Private/Smoke/PCG/UeAgentInterfacePCGSmokeTests.cpp", purpose: "smoke or negative-path evidence cross-checked for the verified contract" }
+  ]
+}
+execution: {
+  destructive: false
+  editor_state: required
+  game_thread: required
+  idempotent: false
+  kind: write
+  overwrite_behavior: none
+  pie_state: allowed
+  retry_safe: false
+  save_behavior: none
+  side_effects: [modifies_level, starts_runtime]
+  ui_effect: none
+}
+maturity: verified
+params: {
+  constraints: []
+  fields: {
+    actor: { default_state: none, description_zh: "C++ 实现读取的 actor 参数", required: false, type: string }
+    actor_label: { default_state: none, description_zh: "C++ 实现读取的 actor_label 参数", required: false, type: string }
+    actor_name: { default_state: none, description_zh: "C++ 实现读取的 actor_name 参数", required: false, type: string }
+    component: { default_state: none, description_zh: "C++ 实现读取的 component 参数", required: false, type: string }
+    component_name: { default_state: none, description_zh: "C++ 实现读取的 component_name 参数", required: false, type: string }
+    force: { default: true, default_state: defined, description_zh: "C++ 实现读取的 force 参数", required: false, type: bool }
+    generation_trigger: { default_state: none, description_zh: "C++ 实现读取的 generation_trigger 参数", required: false, type: string }
+    pcg_component: { default_state: none, description_zh: "C++ 实现读取的 pcg_component 参数", required: false, type: string }
+    timeout_seconds: { default: 10, default_state: defined, description_zh: "C++ 实现读取的 timeout_seconds 参数", required: false, type: number }
+    wait: { default: false, default_state: defined, description_zh: "C++ 实现读取的 wait 参数", required: false, type: bool }
+  }
+  state: defined
+}
+response: { artifact_fields: [component, wait], compact_fields: [task_id, schema], failure_fields: [params.actor, params.actor_label, params.actor_name, params.component, params.component_name, params.pcg_component], max_items_policy: { fields: [], mode: none } }
+returns: {
+  fields: {
+    component: { description_zh: "C++ 实现返回的 component 字段；是否出现取决于执行分支", required: false, type: json_value }
+    schema: { description_zh: "C++ 实现返回的 schema 字段；是否出现取决于执行分支", required: false, type: string }
+    task_id: { description_zh: "C++ 实现返回的 task_id 字段；是否出现取决于执行分支", required: false, type: number }
+    wait: { description_zh: "C++ 实现返回的 wait 字段；是否出现取决于执行分支", required: false, type: json_value }
+  }
+  state: defined
+}
+schema: uai.command_spec.v1
+status: active
+types: {}
+verification: {
+  assertions: [
+    { id: result_present, operator: exists, source: returns.task_id }
+    { id: state_readback_present, operator: exists, source: methods.state_readback.component_path }
+  ]
+  failure_policy: fail_overall
+  methods: [
+    { id: result, kind: result_assertion }
+    {
+      command: pcg_component_query
+      id: state_readback
+      kind: command_readback
+      params_mapping: { actor: params.actor, actor_label: params.actor_label, actor_name: params.actor_name, component: params.component, component_name: params.component_name, pcg_component: params.pcg_component }
+    }
+  ]
+  required: true
+  state: defined
+}
+version: 1

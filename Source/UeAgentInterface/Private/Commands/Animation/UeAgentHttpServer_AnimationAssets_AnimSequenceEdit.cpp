@@ -2,7 +2,7 @@
 
 #include "UeAgentHttpServer_AnimationAssets.h"
 
-#include "UeAgentHttpServer_AnimationAssetOps.h"
+#include "Domains/Animation/UeAgentAnimationAssetDomainBackend.h"
 
 #include "Utilities/UeAgentCurveJson.h"
 #include "Utilities/UeAgentJsonDiagnostics.h"

@@ -12,12 +12,12 @@ namespace UeAgentLevelFolderApply
 		FApplyOptions();
 
 		FString InputFolder;
-		bool bCreateMissingActors;
 	};
 
 	UEAGENTINTERFACE_API bool ApplyLevelFolder(
 		UWorld* World,
 		const FApplyOptions& Options,
 		TSharedPtr<FJsonObject>& OutSummary,
-		FString& OutError);
+		FString& OutError,
+		const FString& RequestId = FString());
 }

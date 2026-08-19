@@ -1,0 +1,97 @@
+authoring: { reason: command_has_no_registered_folder_authoring_profile, state: none }
+category: ikrig_ikretargeter
+command: ik_rig_preview_solve
+deprecation: { reason: command_is_active, state: none }
+discovery: { aliases: [], keywords_en: [ik, rig, preview, solve, ikrig_ikretargeter], keywords_zh: [ik_rig_preview_solve], summary_en: "Execute ik_rig_preview_solve with a verified implementation contract", summary_zh: "不进 PIE 的 IK Rig 预览求解探针", tags: [ikrig_ikretargeter, p2-006] }
+errors: {
+  codes: [
+    { code: ik_rig_controller_not_available, description_zh: "C++ 实现返回错误码 ik_rig_controller_not_available", retry_safe: false, stage: execution, wire_match: exact }
+    { code: ik_rig_not_found, description_zh: "C++ 实现返回错误码 ik_rig_not_found", retry_safe: false, stage: execution, wire_match: exact }
+    { code: ik_rig_preview_solve_initialize_failed, description_zh: "C++ 实现返回错误码 ik_rig_preview_solve_initialize_failed", retry_safe: false, stage: execution, wire_match: exact }
+    { code: invalid_goal_entry, description_zh: "C++ 实现返回错误码 invalid_goal_entry", retry_safe: true, stage: preflight, wire_match: exact }
+    { code: invalid_position_space, description_zh: "C++ 实现返回错误码 invalid_position_space", retry_safe: true, stage: preflight, wire_match: exact }
+    { code: invalid_rotation_space, description_zh: "C++ 实现返回错误码 invalid_rotation_space", retry_safe: true, stage: preflight, wire_match: exact }
+    { code: missing_asset_path, description_zh: "C++ 实现返回错误码 missing_asset_path", retry_safe: true, stage: preflight, wire_match: exact }
+    { code: missing_goal_bone_name, description_zh: "C++ 实现返回错误码 missing_goal_bone_name", retry_safe: true, stage: preflight, wire_match: exact }
+    { code: missing_goal_name, description_zh: "C++ 实现返回错误码 missing_goal_name", retry_safe: true, stage: preflight, wire_match: exact }
+    { code: missing_preview_skeletal_mesh, description_zh: "C++ 实现返回错误码 missing_preview_skeletal_mesh", retry_safe: true, stage: preflight, wire_match: exact }
+    { code: skeletal_mesh_not_found, description_zh: "C++ 实现返回错误码 skeletal_mesh_not_found", retry_safe: false, stage: execution, wire_match: exact }
+  ]
+}
+evidence: {
+  docs: [
+    { path: "Plugins/UeAgentInterface/docs/commands/ikrig_ikretargeter/ik_rig_preview_solve.md", purpose: "user documentation cross-check; C++ implementation remains authoritative" }
+  ]
+  implementation: [
+    { line_hint: 1102, path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Commands/IK/UeAgentHttpServer_IKAssets.cpp", purpose: "command handler, parameter and return evidence", symbol: CmdIKRigPreviewSolve }
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Server/UeAgentHttpServer.cpp", purpose: "transitive helper evidence used by the command handler" }
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Utilities/UeAgentJsonDiagnostics.cpp", purpose: "transitive helper evidence used by the command handler" }
+  ]
+  tests: [
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterfaceTests/Private/Smoke/UeAgentInterfaceSmoke_Coverage.cpp", purpose: "smoke or negative-path evidence cross-checked for the verified contract" }
+  ]
+}
+execution: {
+  destructive: false
+  editor_state: required
+  game_thread: required
+  idempotent: true
+  kind: read_only
+  overwrite_behavior: none
+  pie_state: allowed
+  retry_safe: true
+  save_behavior: none
+  side_effects: []
+  ui_effect: none
+}
+maturity: verified
+params: {
+  constraints: []
+  fields: {
+    asset_path: { default_state: none, description_zh: "C++ 实现读取的 asset_path 参数", path_semantics: { access_scope: mounted_read, kind: ue_asset }, required: true, type: ue_asset_path }
+    goals: { default_state: none, description_zh: "C++ 实现读取的 goals 参数", item_type: object, item_type_ref: "shared:IKRigGoalOverride", required: false, type: array }
+    include_all_bones: { default: false, default_state: defined, description_zh: "C++ 实现读取的 include_all_bones 参数", required: false, type: bool }
+    max_output_bones: {
+      default: 64
+      default_state: defined
+      description_zh: "C++ 实现读取的 max_output_bones 参数"
+      maximum: 512
+      minimum: 1
+      required: false
+      type: integer
+    }
+    sample_bones: { default_state: none, description_zh: "C++ 实现读取的 sample_bones 参数", item_type: string, required: false, type: array }
+    skeletal_mesh_path: { default_state: none, description_zh: "C++ 实现读取的 skeletal_mesh_path 参数", required: false, type: string }
+  }
+  state: defined
+}
+response: { artifact_fields: [errors, errors_after_solve, goals, messages, messages_after_solve, missing_sample_bones, output_pose_sample, warnings, warnings_after_solve], compact_fields: [asset_path, skeletal_mesh, initialized, solved, goal_count, output_pose_sample_count], failure_fields: [params.asset_path], max_items_policy: { fields: [], mode: none } }
+returns: {
+  fields: {
+    asset_path: { description_zh: "C++ 实现返回的 asset_path 字段；是否出现取决于执行分支", required: false, type: ue_asset_path }
+    errors: { description_zh: "C++ 实现返回的 errors 字段；是否出现取决于执行分支", item_type: json_value, required: false, type: array }
+    errors_after_solve: { description_zh: "C++ 实现返回的 errors_after_solve 字段；是否出现取决于执行分支", item_type: json_value, required: false, type: array }
+    goal_count: { description_zh: "C++ 实现返回的 goal_count 字段；是否出现取决于执行分支", required: false, type: integer }
+    goals: { description_zh: "C++ 实现返回的 goals 字段；是否出现取决于执行分支", item_type: object, item_type_ref: "shared:IKRigGoalResult", required: false, type: array }
+    initialized: { description_zh: "C++ 实现返回的 initialized 字段；是否出现取决于执行分支", required: false, type: bool }
+    messages: { description_zh: "C++ 实现返回的 messages 字段；是否出现取决于执行分支", item_type: json_value, required: false, type: array }
+    messages_after_solve: { description_zh: "C++ 实现返回的 messages_after_solve 字段；是否出现取决于执行分支", item_type: json_value, required: false, type: array }
+    missing_sample_bones: { description_zh: "C++ 实现返回的 missing_sample_bones 字段；是否出现取决于执行分支", item_type: json_value, required: false, type: array }
+    object_path: { description_zh: "C++ 实现返回的 object_path 字段；是否出现取决于执行分支", required: false, type: ue_object_path }
+    output_bone_count: { description_zh: "C++ 实现返回的 output_bone_count 字段；是否出现取决于执行分支", required: false, type: integer }
+    output_pose_sample: { description_zh: "C++ 实现返回的 output_pose_sample 字段；是否出现取决于执行分支", item_type: object, item_type_ref: "shared:IKRigOutputBoneSample", required: false, type: array }
+    output_pose_sample_count: { description_zh: "C++ 实现返回的 output_pose_sample_count 字段；是否出现取决于执行分支", required: false, type: integer }
+    skeletal_mesh: { description_zh: "C++ 实现返回的 skeletal_mesh 字段；是否出现取决于执行分支", required: false, type: string }
+    solved: { description_zh: "C++ 实现返回的 solved 字段；是否出现取决于执行分支", required: false, type: bool }
+    solver_count: { description_zh: "C++ 实现返回的 solver_count 字段；是否出现取决于执行分支", required: false, type: integer }
+    used_goal_overrides: { description_zh: "C++ 实现返回的 used_goal_overrides 字段；是否出现取决于执行分支", required: false, type: bool }
+    warnings: { description_zh: "C++ 实现返回的 warnings 字段；是否出现取决于执行分支", item_type: json_value, required: false, type: array }
+    warnings_after_solve: { description_zh: "C++ 实现返回的 warnings_after_solve 字段；是否出现取决于执行分支", item_type: json_value, required: false, type: array }
+  }
+  state: defined
+}
+schema: uai.command_spec.v1
+status: active
+types: {}
+verification: { reason: read_only_command_has_no_post_write_verification, state: none }
+version: 1

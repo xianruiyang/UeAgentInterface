@@ -1,0 +1,115 @@
+authoring: { reason: command_has_no_registered_folder_authoring_profile, state: none }
+category: animation_assets_skeleton
+command: anim_sequence_set_notify
+deprecation: { reason: command_is_active, state: none }
+discovery: { aliases: [], keywords_en: [anim, sequence, set, notify, animation_assets_skeleton], keywords_zh: [anim_sequence_set_notify], summary_en: "Execute anim_sequence_set_notify with a verified implementation contract", summary_zh: "新增 / 更新 / 删除单条 notify", tags: [animation_assets_skeleton, p2-006] }
+errors: {
+  codes: [
+    { code: add_notify_failed, description_zh: "C++ 实现返回错误码 add_notify_failed", retry_safe: false, stage: execution, wire_match: exact }
+    { code: add_notify_state_failed, description_zh: "C++ 实现返回错误码 add_notify_state_failed", retry_safe: false, stage: execution, wire_match: exact }
+    { code: anim_sequence_not_found, description_zh: "C++ 实现返回错误码 anim_sequence_not_found", retry_safe: false, stage: execution, wire_match: exact }
+    { code: asset_not_found, description_zh: "C++ 实现返回错误码 asset_not_found", retry_safe: false, stage: execution, wire_match: exact }
+    { code: ensure_notify_track_failed, description_zh: "C++ 实现返回错误码 ensure_notify_track_failed", retry_safe: false, stage: execution, wire_match: exact }
+    { code: invalid_duration_seconds, description_zh: "C++ 实现返回错误码 invalid_duration_seconds", retry_safe: true, stage: preflight, wire_match: exact }
+    { code: invalid_notify_class, description_zh: "C++ 实现返回错误码 invalid_notify_class", retry_safe: true, stage: preflight, wire_match: exact }
+    { code: invalid_notify_filter_lod, description_zh: "C++ 实现返回错误码 invalid_notify_filter_lod", retry_safe: true, stage: preflight, wire_match: exact }
+    { code: invalid_notify_filter_type, description_zh: "C++ 实现返回错误码 invalid_notify_filter_type", retry_safe: true, stage: preflight, wire_match: exact }
+    { code: invalid_notify_state_class, description_zh: "C++ 实现返回错误码 invalid_notify_state_class", retry_safe: true, stage: preflight, wire_match: exact }
+    { code: invalid_notify_trigger_chance, description_zh: "C++ 实现返回错误码 invalid_notify_trigger_chance", retry_safe: true, stage: preflight, wire_match: exact }
+    { code: invalid_tick_type, description_zh: "C++ 实现返回错误码 invalid_tick_type", retry_safe: true, stage: preflight, wire_match: exact }
+    { code: invalid_time_seconds, description_zh: "C++ 实现返回错误码 invalid_time_seconds", retry_safe: true, stage: preflight, wire_match: exact }
+    { code: invalid_trigger_weight_threshold, description_zh: "C++ 实现返回错误码 invalid_trigger_weight_threshold", retry_safe: true, stage: preflight, wire_match: exact }
+    { code: missing_asset_path, description_zh: "C++ 实现返回错误码 missing_asset_path", retry_safe: true, stage: preflight, wire_match: exact }
+    { code: missing_duration_seconds, description_zh: "C++ 实现返回错误码 missing_duration_seconds", retry_safe: true, stage: preflight, wire_match: exact }
+    { code: missing_notify_index, description_zh: "C++ 实现返回错误码 missing_notify_index", retry_safe: true, stage: preflight, wire_match: exact }
+    { code: notify_not_found, description_zh: "C++ 实现返回错误码 notify_not_found", retry_safe: false, stage: execution, wire_match: exact }
+    { code: resolve_created_notify_failed, description_zh: "C++ 实现返回错误码 resolve_created_notify_failed", retry_safe: false, stage: execution, wire_match: exact }
+    { code: save_asset_failed, description_zh: "C++ 实现返回错误码 save_asset_failed", retry_safe: false, stage: execution, wire_match: exact }
+  ]
+}
+evidence: {
+  docs: [
+    { path: "Plugins/UeAgentInterface/docs/commands/animation_assets_skeleton/anim_sequence_set_notify.md", purpose: "user documentation cross-check; C++ implementation remains authoritative" }
+  ]
+  implementation: [
+    { line_hint: 191, path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Commands/Animation/UeAgentHttpServer_AnimationAssets_AnimSequenceEdit.cpp", purpose: "command handler, parameter and return evidence", symbol: CmdAnimSequenceSetNotify }
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Commands/Animation/UeAgentHttpServer_AnimationAssets.cpp", purpose: "transitive helper evidence used by the command handler" }
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Server/UeAgentHttpServer.cpp", purpose: "transitive helper evidence used by the command handler" }
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Utilities/UeAgentJsonDiagnostics.cpp", purpose: "transitive helper evidence used by the command handler" }
+  ]
+  tests: [
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterfaceTests/Private/Smoke/UeAgentInterfaceSmoke_AnimationIKNiagara.cpp", purpose: "smoke or negative-path evidence cross-checked for the verified contract" }
+  ]
+}
+execution: {
+  destructive: false
+  editor_state: required
+  game_thread: required
+  idempotent: false
+  kind: write
+  overwrite_behavior: none
+  pie_state: allowed
+  retry_safe: false
+  save_behavior: caller_controlled
+  side_effects: [modifies_asset]
+  ui_effect: none
+}
+maturity: verified
+params: {
+  constraints: [
+    { fields: [notify_index], kind: requires_when, when: { remove: true } }
+    { fields: [duration_seconds], kind: requires_when, when: { notify_state_class: present } }
+  ]
+  fields: {
+    asset_path: { default_state: none, description_zh: "C++ 实现读取的 asset_path 参数", path_semantics: { access_scope: project_write, kind: ue_asset }, required: true, type: ue_asset_path }
+    branching_point: { default_state: none, description_zh: "C++ 实现读取的 branching_point 参数", required: false, type: bool }
+    can_be_filtered_via_request: { default: false, default_state: defined, description_zh: "C++ 实现读取的 can_be_filtered_via_request 参数", required: false, type: bool }
+    duration_seconds: { default_state: none, description_zh: "C++ 实现读取的 duration_seconds 参数", minimum: 0, required: false, type: number }
+    notify_class: { default_state: none, description_zh: "C++ 实现读取的 notify_class 参数", required: false, type: string }
+    notify_filter_lod: { default: 0, default_state: defined, description_zh: "C++ 实现读取的 notify_filter_lod 参数", required: false, type: number }
+    notify_filter_type: { default_state: none, description_zh: "C++ 实现读取的 notify_filter_type 参数", required: false, type: string }
+    notify_index: { default_state: none, description_zh: "C++ 实现读取的 notify_index 参数", minimum: 0, required: false, type: integer }
+    notify_name: { default_state: none, description_zh: "C++ 实现读取的 notify_name 参数", required: false, type: string }
+    notify_state_class: { default_state: none, description_zh: "C++ 实现读取的 notify_state_class 参数", required: false, type: string }
+    notify_trigger_chance: { default: 0, default_state: defined, description_zh: "C++ 实现读取的 notify_trigger_chance 参数", required: false, type: number }
+    remove: { default: false, default_state: defined, description_zh: "C++ 实现读取的 remove 参数", required: false, type: bool }
+    save_after_set: { default: false, default_state: defined, description_zh: "C++ 实现读取的 save_after_set 参数", required: false, type: bool }
+    tick_type: { default_state: none, description_zh: "C++ 实现读取的 tick_type 参数", required: false, type: string }
+    time_seconds: { default_state: none, description_zh: "新增 notify 时必填；更新已有 notify 时省略表示保留原时间", minimum: 0, required: false, type: number }
+    track_name: { default: "1", default_state: defined, description_zh: "C++ 实现读取的 track_name 参数", required: false, type: string }
+    trigger_on_dedicated_server: { default: false, default_state: defined, description_zh: "C++ 实现读取的 trigger_on_dedicated_server 参数", required: false, type: bool }
+    trigger_on_follower: { default: false, default_state: defined, description_zh: "C++ 实现读取的 trigger_on_follower 参数", required: false, type: bool }
+    trigger_weight_threshold: { default: 0, default_state: defined, description_zh: "C++ 实现读取的 trigger_weight_threshold 参数", required: false, type: number }
+  }
+  state: defined
+}
+response: { artifact_fields: [notify], compact_fields: [saved, asset_path, added, notify_count, removed], failure_fields: [params.asset_path], max_items_policy: { fields: [], mode: none } }
+returns: {
+  fields: {
+    added: { description_zh: "C++ 实现返回的 added 字段；是否出现取决于执行分支", required: false, type: bool }
+    asset_path: { description_zh: "C++ 实现返回的 asset_path 字段；是否出现取决于执行分支", required: false, type: ue_asset_path }
+    notify: { description_zh: "C++ 实现返回的 notify 字段；是否出现取决于执行分支", required: false, type: json_value }
+    notify_count: { description_zh: "C++ 实现返回的 notify_count 字段；是否出现取决于执行分支", required: false, type: integer }
+    removed: { description_zh: "C++ 实现返回的 removed 字段；是否出现取决于执行分支", required: false, type: bool }
+    removed_notify_index: { description_zh: "C++ 实现返回的 removed_notify_index 字段；是否出现取决于执行分支", required: false, type: integer }
+    saved: { description_zh: "C++ 实现返回的 saved 字段；是否出现取决于执行分支", required: false, type: bool }
+  }
+  state: defined
+}
+schema: uai.command_spec.v1
+status: active
+types: {}
+verification: {
+  assertions: [
+    { id: result_present, operator: exists, source: returns.saved }
+    { id: state_readback_present, operator: exists, source: methods.state_readback.asset_path }
+  ]
+  failure_policy: fail_overall
+  methods: [
+    { id: result, kind: result_assertion }
+    { command: anim_sequence_get_info, id: state_readback, kind: command_readback, params_mapping: { asset_path: params.asset_path } }
+  ]
+  required: true
+  state: defined
+}
+version: 1

@@ -3,6 +3,8 @@
 #pragma once
 
 #include "CoreMinimal.h"
+#include "Utilities/AuthoringCore/UeAgentAuthoringIdentity.h"
+#include "Utilities/AuthoringCore/UeAgentAuthoringTargetLocator.h"
 
 class FJsonObject;
 
@@ -32,22 +34,19 @@ namespace UeAgentPaletteSearch
 		bool bIncludeGroups;
 		bool bIncludeCategoryTree;
 		bool bContextSensitive;
-		bool bIncludeLegacyAuthoring;
 		bool bIncludeDebugFields;
 		int32 Limit;
 		int32 Offset;
 	};
 
-	struct FCandidate
+	struct UEAGENTINTERFACE_API FCandidate
 	{
 		FCandidate();
 
-		FString CandidateId;
 		FString Kind;
 		FString Name;
 		FString FullName;
-		FString StableId;
-		FString CanonicalKey;
+		FString SearchKey;
 		FString DisplayName;
 		FString Tooltip;
 		FString Keywords;
@@ -65,8 +64,11 @@ namespace UeAgentPaletteSearch
 		bool bSupportedInContext;
 		int32 UiOrder;
 		double Score;
-		TSharedPtr<FJsonObject> JsonAuthoring;
-		TSharedPtr<FJsonObject> LegacyAuthoring;
+		TMap<FString, FString> AuthoringSelectors;
+		UeAgentAuthoringIdentity::FCanonicalIdentity Identity;
+
+		FString GetCandidateId() const;
+		FString GetStableId() const;
 	};
 
 	struct FSearchResult
@@ -75,11 +77,19 @@ namespace UeAgentPaletteSearch
 
 		int32 TotalRaw;
 		int32 TotalMatching;
+		bool bHasTargetResolution;
+		UeAgentAuthoringTargetLocator::FResolveResult TargetResolution;
 		TArray<FCandidate> MatchingCandidates;
 		TArray<FString> Warnings;
 	};
 
 	bool ParseSearchParams(const TSharedPtr<FJsonObject>& Params, FSearchParams& OutParams, FString& OutError);
+	bool SetCandidateIdentity(
+		const FString& CatalogType,
+		const FString& StableId,
+		const FString& SearchKey,
+		FCandidate& InOutCandidate,
+		FString& OutError);
 	bool ExecuteSearch(const FSearchParams& Params, FSearchResult& OutResult, FString& OutError);
 	TSharedRef<FJsonObject> BuildSearchResponse(const FSearchParams& Params, const FSearchResult& Result);
 	TSharedRef<FJsonObject> BuildCategoriesResponse(const FSearchParams& Params, const FSearchResult& Result);

@@ -1,0 +1,89 @@
+authoring: { reason: command_has_no_registered_folder_authoring_profile, state: none }
+category: texture_render_target_media
+command: media_runtime_probe
+deprecation: { reason: command_is_active, state: none }
+discovery: { aliases: [], keywords_en: [media, runtime, probe, texture_render_target_media], keywords_zh: [media_runtime_probe], summary_en: "Execute media_runtime_probe with a verified implementation contract", summary_zh: "校验 MediaPlayer 能否播放指定 MediaSource，可选尝试打开。", tags: [texture_render_target_media, p2-004] }
+errors: {
+  codes: [
+    { code: invalid_, description_zh: "C++ 实现返回错误码 invalid_", retry_safe: true, stage: preflight, wire_match: prefix }
+    { code: media_player_not_found, description_zh: "C++ 实现返回错误码 media_player_not_found", retry_safe: false, stage: execution, wire_match: exact }
+    { code: media_source_not_found, description_zh: "C++ 实现返回错误码 media_source_not_found", retry_safe: false, stage: execution, wire_match: exact }
+    { code: missing_, description_zh: "C++ 实现返回错误码 missing_", retry_safe: true, stage: preflight, wire_match: prefix }
+  ]
+}
+evidence: {
+  docs: [
+    { path: "Plugins/UeAgentInterface/docs/commands/texture_render_target_media/media_runtime_probe.md", purpose: "user documentation cross-check; C++ implementation remains authoritative" }
+  ]
+  implementation: [
+    { line_hint: 534, path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Commands/TextureRenderTarget/UeAgentHttpServer_TextureRenderTarget_MediaAndSpecializedAssets.cpp", purpose: "command handler, parameter and return evidence", symbol: CmdMediaRuntimeProbe }
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Commands/TextureRenderTarget/UeAgentHttpServer_TextureRenderTarget_TextureAssets.inl", purpose: "transitive helper evidence used by the command handler" }
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Server/UeAgentHttpServer.cpp", purpose: "transitive helper evidence used by the command handler" }
+  ]
+  tests: [
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterfaceTests/Private/Smoke/UeAgentInterfaceTextureRenderTargetSmokeTests.cpp", purpose: "smoke or negative-path evidence cross-checked for the verified contract" }
+  ]
+}
+execution: {
+  destructive: false
+  editor_state: required
+  game_thread: required
+  idempotent: false
+  kind: session_control
+  overwrite_behavior: none
+  pie_state: allowed
+  retry_safe: false
+  save_behavior: none
+  side_effects: [modifies_editor_session]
+  ui_effect: none
+}
+maturity: verified
+params: {
+  constraints: []
+  fields: {
+    attempt_open: { default: true, default_state: defined, description_zh: "C++ 实现读取的 attempt_open 参数", required: false, type: bool }
+    cleanup: { default: false, default_state: defined, description_zh: "C++ 实现读取的 cleanup 参数", required: false, type: bool }
+    duration: { default_state: none, description_zh: "C++ 实现读取的 duration 参数", required: false, type: number }
+    expected_min_frame_changes: { default: 0, default_state: defined, description_zh: "C++ 实现读取的 expected_min_frame_changes 参数", required: false, type: number }
+    media_player: { default_state: none, description_zh: "C++ 实现读取的 media_player 参数", required: true, type: string }
+    media_source: { default_state: none, description_zh: "C++ 实现读取的 media_source 参数", required: true, type: string }
+    media_texture: { default_state: none, description_zh: "C++ 实现读取的 media_texture 参数", required: false, type: string }
+  }
+  state: defined
+}
+response: { artifact_fields: [frame_samples], compact_fields: [asset_path, can_play_source, class, class_path, cleanup, duration], failure_fields: [params.media_player, params.media_source], max_items_policy: { fields: [], mode: none } }
+returns: {
+  fields: {
+    asset_path: { description_zh: "C++ 实现返回的 asset_path 字段；是否出现取决于执行分支", required: false, type: ue_asset_path }
+    can_play_source: { description_zh: "C++ 实现返回的 can_play_source 字段；是否出现取决于执行分支", required: false, type: bool }
+    class: { description_zh: "C++ 实现返回的 class 字段；是否出现取决于执行分支", required: false, type: string }
+    class_path: { description_zh: "C++ 实现返回的 class_path 字段；是否出现取决于执行分支", required: false, type: string }
+    cleanup: { description_zh: "C++ 实现返回的 cleanup 字段；是否出现取决于执行分支", required: false, type: bool }
+    duration: { description_zh: "C++ 实现返回的 duration 字段；是否出现取决于执行分支", required: false, type: number }
+    expected_min_frame_changes: { description_zh: "C++ 实现返回的 expected_min_frame_changes 字段；是否出现取决于执行分支", required: false, type: number }
+    frame_samples: { description_zh: "C++ 实现返回的 frame_samples 字段；是否出现取决于执行分支", item_type: json_value, required: false, type: array }
+    media_source: { description_zh: "C++ 实现返回的 media_source 字段；是否出现取决于执行分支", required: false, type: string }
+    object_path: { description_zh: "C++ 实现返回的 object_path 字段；是否出现取决于执行分支", required: false, type: ue_object_path }
+    open_source_result: { description_zh: "C++ 实现返回的 open_source_result 字段；是否出现取决于执行分支", required: false, type: bool }
+    opened: { description_zh: "C++ 实现返回的 opened 字段；是否出现取决于执行分支", required: false, type: bool }
+    probe_passed: { description_zh: "C++ 实现返回的 probe_passed 字段；是否出现取决于执行分支", required: false, type: bool }
+    texture_stats: { description_zh: "C++ 实现返回的 texture_stats 字段；是否出现取决于执行分支", required: false, type: json_value }
+    texture_stats_error: { description_zh: "C++ 实现返回的 texture_stats_error 字段；是否出现取决于执行分支", required: false, type: string }
+  }
+  state: defined
+}
+schema: uai.command_spec.v1
+status: active
+types: {}
+verification: {
+  assertions: [
+    { id: result_present, operator: exists, source: returns.asset_path }
+  ]
+  failure_policy: fail_overall
+  methods: [
+    { id: result, kind: result_assertion }
+  ]
+  required: true
+  state: defined
+}
+version: 1

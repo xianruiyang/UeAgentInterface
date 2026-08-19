@@ -1,0 +1,57 @@
+authoring: { reason: command_has_no_registered_folder_authoring_profile, state: none }
+category: ai_behavior_blackboard_statetree_eqs_navigation_smartobject
+command: navigation_runtime_snapshot
+deprecation: { reason: command_is_active, state: none }
+discovery: { aliases: [], keywords_en: [navigation, runtime, snapshot, ai_behavior_blackboard_statetree_eqs_navigation_smartobject], keywords_zh: [navigation_runtime_snapshot], summary_en: "Execute navigation_runtime_snapshot with a verified implementation contract", summary_zh: "runtime 导航快照", tags: [ai_behavior_blackboard_statetree_eqs_navigation_smartobject, p2-007] }
+errors: {
+  codes: [
+    { code: navigation_system_not_found, description_zh: "C++ 实现返回错误码 navigation_system_not_found", retry_safe: false, stage: execution, wire_match: exact }
+    { code: no_editor_world, description_zh: "C++ 实现返回错误码 no_editor_world", retry_safe: false, stage: execution, wire_match: exact }
+    { code: no_geditor, description_zh: "C++ 实现返回错误码 no_geditor", retry_safe: false, stage: execution, wire_match: exact }
+  ]
+}
+evidence: {
+  docs: [
+    { path: "Plugins/UeAgentInterface/docs/commands/ai_behavior_blackboard_statetree_eqs_navigation_smartobject/navigation_runtime_snapshot.md", purpose: "user documentation cross-check; C++ implementation remains authoritative" }
+  ]
+  implementation: [
+    { line_hint: 562, path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Commands/AI/UeAgentHttpServer_AI_PerceptionNavigation.cpp", purpose: "command handler, parameter and return evidence", symbol: CmdNavigationRuntimeSnapshot }
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Commands/Level/UeAgentHttpServer_Level_CaptureAndPersistence.cpp", purpose: "transitive helper evidence used by the command handler" }
+  ]
+  tests: [
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterfaceTests/Private/Smoke/UeAgentInterfaceAISmokeTests.cpp", purpose: "smoke or negative-path evidence cross-checked for the verified contract" }
+  ]
+}
+execution: {
+  destructive: false
+  editor_state: required
+  game_thread: required
+  idempotent: true
+  kind: read_only
+  overwrite_behavior: none
+  pie_state: allowed
+  retry_safe: true
+  save_behavior: none
+  side_effects: []
+  ui_effect: none
+}
+maturity: verified
+params: { reason: implementation_reads_no_command_parameters, state: none }
+response: { artifact_fields: [bounds_volumes, nav_data], compact_fields: [status, world, bounds_volume_count, build_in_progress], failure_fields: [], max_items_policy: { fields: [], mode: none } }
+returns: {
+  fields: {
+    bounds_volume_count: { description_zh: "C++ 实现返回的 bounds_volume_count 字段；是否出现取决于执行分支", required: false, type: integer }
+    bounds_volumes: { description_zh: "C++ 实现返回的 bounds_volumes 字段；是否出现取决于执行分支", item_type: json_value, required: false, type: array }
+    build_in_progress: { description_zh: "C++ 实现返回的 build_in_progress 字段；是否出现取决于执行分支", required: false, type: bool }
+    nav_data: { description_zh: "C++ 实现返回的 nav_data 字段；是否出现取决于执行分支", item_type: json_value, required: false, type: array }
+    nav_data_count: { description_zh: "C++ 实现返回的 nav_data_count 字段；是否出现取决于执行分支", required: false, type: integer }
+    status: { description_zh: "C++ 实现返回的 status 字段；是否出现取决于执行分支", required: false, type: string }
+    world: { description_zh: "C++ 实现返回的 world 字段；是否出现取决于执行分支", required: false, type: string }
+  }
+  state: defined
+}
+schema: uai.command_spec.v1
+status: active
+types: {}
+verification: { reason: read_only_command_has_no_post_write_verification, state: none }
+version: 1

@@ -1,0 +1,42 @@
+authoring: { reason: command_has_no_registered_folder_authoring_profile, state: none }
+category: deformer_mldeformer_geometry_cache
+command: ml_deformer_preview
+deprecation: { reason: command_is_active, state: none }
+discovery: { aliases: [], keywords_en: [ml, deformer, preview, deformer_mldeformer_geometry_cache], keywords_zh: [ml_deformer_preview], summary_en: "Execute ml_deformer_preview with a verified implementation contract", summary_zh: "返回当前 preview adapter 状态", tags: [deformer_mldeformer_geometry_cache, p2-006] }
+errors: { codes: [] }
+evidence: {
+  docs: [
+    { path: "Plugins/UeAgentInterface/docs/commands/deformer_mldeformer_geometry_cache/ml_deformer_preview.md", purpose: "user documentation cross-check; C++ implementation remains authoritative" }
+  ]
+  implementation: [
+    { line_hint: 2760, path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Commands/Deformer/UeAgentHttpServer_Deformer.cpp", purpose: "command handler, parameter and return evidence", symbol: CmdMLDeformerPreview }
+  ]
+  tests: [
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterfaceTests/Private/Smoke/UeAgentInterfaceSmoke_MaterialStaticDeformerInput.cpp", purpose: "smoke or negative-path evidence cross-checked for the verified contract" }
+  ]
+}
+execution: {
+  destructive: false
+  editor_state: required
+  game_thread: required
+  idempotent: true
+  kind: read_only
+  overwrite_behavior: none
+  pie_state: allowed
+  retry_safe: true
+  save_behavior: none
+  side_effects: []
+  ui_effect: none
+}
+maturity: verified
+params: { reason: implementation_reads_no_command_parameters, state: none }
+response: { artifact_fields: [plugin_status], compact_fields: [status], failure_fields: [], max_items_policy: { fields: [], mode: none } }
+returns: {
+  fields: { plugin_status: { description_zh: "C++ 实现返回的 plugin_status 字段；是否出现取决于执行分支", required: false, type: json_value }, status: { description_zh: "C++ 实现返回的 status 字段；是否出现取决于执行分支", required: false, type: string } }
+  state: defined
+}
+schema: uai.command_spec.v1
+status: active
+types: {}
+verification: { reason: read_only_command_has_no_post_write_verification, state: none }
+version: 1

@@ -1,0 +1,14 @@
+definition: {
+  additional_fields: false
+  fields: {
+    center: { default_state: none, description_zh: "AABB 中心；frame 由包含字段声明", required: false, type: object, type_ref: "shared:Vector3" }
+    extent: { default_state: none, description_zh: "AABB half extent；frame 由包含字段声明", required: false, type: object, type_ref: "shared:Vector3" }
+    max: { default_state: none, description_zh: "AABB 最大点；frame 由包含字段声明", required: false, type: object, type_ref: "shared:Vector3" }
+    min: { default_state: none, description_zh: "AABB 最小点；frame 由包含字段声明", required: false, type: object, type_ref: "shared:Vector3" }
+    valid: { default_state: none, description_zh: "边界是否有效", required: false, type: bool }
+  }
+  kind: object
+}
+schema: uai.command_spec.shared_type.v1
+type_id: Box3D
+version: 1

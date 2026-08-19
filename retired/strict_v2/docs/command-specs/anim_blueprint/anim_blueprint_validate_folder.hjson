@@ -1,0 +1,42 @@
+authoring: { operation: validate, profile_ref: "contracts/field_contracts/anim_blueprint.hjson", state: defined, type_id: anim_blueprint }
+category: anim_blueprint
+command: anim_blueprint_validate_folder
+deprecation: { reason: command_is_active, state: none }
+discovery: { aliases: [], keywords_en: [anim_blueprint, validate, folder, hjson], keywords_zh: ["Animation Blueprint", "校验", HJSON], summary_en: "Validate one Animation Blueprint index.hjson through shared Animation preflight", summary_zh: "通过统一预检校验单个 Animation Blueprint index.hjson", tags: [anim_blueprint, animation, authoring, validate, unified_contract] }
+errors: { codes: [
+  { code: folder_path_required, description_zh: "缺少 workspace 根目录", retry_safe: true, stage: preflight, wire_match: exact }
+  { code: animation_workspace_, description_zh: "统一 workspace 加载、身份或依赖检查失败", retry_safe: true, stage: preflight, wire_match: prefix }
+  { code: animation_document_, description_zh: "Animation Blueprint 文档或只读边界预检失败", retry_safe: true, stage: preflight, wire_match: prefix }
+] }
+evidence: {
+  docs: [{ path: "Plugins/UeAgentInterface/docs/commands/anim_blueprint/anim_blueprint_validate_folder.md", purpose: "正式命令文档" }]
+  implementation: [
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Commands/AnimBlueprint/UeAgentHttpServer_AnimBlueprint_FolderFormat.cpp", purpose: "HTTP 参数与结果薄适配器", symbol: CmdAnimBlueprintValidateFolder }
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Domains/Animation/Authoring/UeAgentAnimationAuthoringApplyProvider.cpp", purpose: "统一 Animation 预检权威实现" }
+  ]
+  tests: [{ path: "Plugins/UeAgentInterface/Source/UeAgentInterfaceTests/Private/UeAgentInterfaceAnimationAuthoringTests.cpp", purpose: "workspace exact-file、身份和只读边界预检" }]
+}
+execution: { destructive: false, editor_state: required, game_thread: required, idempotent: true, kind: read_only, overwrite_behavior: none, pie_state: allowed, retry_safe: true, save_behavior: none, side_effects: [], ui_effect: none }
+maturity: verified
+params: { constraints: [], fields: {
+  asset_path: { default_state: none, description_zh: "可选目标身份断言", required: false, type: ue_asset_path }
+  folder_path: { default_state: none, description_zh: "只允许一个 index.hjson 的 workspace 根目录", path_semantics: { kind: filesystem_directory, must_exist: true, writable: false }, required: true, type: filesystem_path }
+}, state: defined }
+response: { artifact_fields: [], compact_fields: [status, asset_path, requested_operation, units_checked, no_op], failure_fields: [params.folder_path, params.asset_path], max_items_policy: { fields: [], mode: none } }
+returns: { fields: {
+  asset_exists: { description_zh: "目标是否存在", required: true, type: bool }
+  asset_path: { description_zh: "目标 Animation Blueprint", required: false, type: ue_asset_path }
+  error_code: { description_zh: "稳定错误码", required: false, type: string }
+  error_detail: { description_zh: "错误详情", required: false, type: string }
+  no_op: { description_zh: "是否无状态变化", required: true, type: bool }
+  planned: { description_zh: "领域 mutation 计划统计", required: true, type: json_value }
+  requested_operation: { description_zh: "请求操作", required: false, type: string }
+  status: { description_zh: "ready 或 failed", required: true, type: string }
+  units_checked: { description_zh: "预检单元数", required: true, type: integer }
+  would_create: { description_zh: "是否将创建资产", required: true, type: bool }
+}, state: defined }
+schema: uai.command_spec.v1
+status: active
+types: {}
+verification: { reason: read_only_preflight_has_no_post_write_verification, state: none }
+version: 1

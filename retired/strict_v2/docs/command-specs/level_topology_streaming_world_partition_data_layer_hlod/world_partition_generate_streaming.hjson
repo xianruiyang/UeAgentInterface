@@ -1,0 +1,94 @@
+authoring: { reason: command_has_no_registered_folder_authoring_profile, state: none }
+category: level_topology_streaming_world_partition_data_layer_hlod
+command: world_partition_generate_streaming
+deprecation: { reason: command_is_active, state: none }
+discovery: { aliases: [], keywords_en: [world, partition, generate, streaming, level_topology_streaming_world_partition_data_layer_hlod], keywords_zh: [world_partition_generate_streaming], summary_en: "Execute world_partition_generate_streaming with a verified implementation contract", summary_zh: "生成 streaming 数据，默认只返回计划", tags: [level_topology_streaming_world_partition_data_layer_hlod, p2-002] }
+errors: {
+  codes: [
+    { code: commandlet_failed, description_zh: "C++ 实现返回错误码 commandlet_failed", retry_safe: false, stage: execution, wire_match: exact }
+    { code: commandlet_start_failed, description_zh: "C++ 实现返回错误码 commandlet_start_failed", retry_safe: false, stage: execution, wire_match: exact }
+    { code: long_task_timeout, description_zh: "C++ 实现返回错误码 long_task_timeout", retry_safe: false, stage: execution, wire_match: exact }
+    { code: no_editor_world, description_zh: "C++ 实现返回错误码 no_editor_world", retry_safe: false, stage: execution, wire_match: exact }
+    { code: no_geditor, description_zh: "C++ 实现返回错误码 no_geditor", retry_safe: false, stage: execution, wire_match: exact }
+    { code: requires_allow_destructive, description_zh: "C++ 实现返回错误码 requires_allow_destructive", retry_safe: false, stage: execution, wire_match: exact }
+    { code: requires_commandlet, description_zh: "C++ 实现返回错误码 requires_commandlet", retry_safe: false, stage: execution, wire_match: exact }
+    { code: timeout_seconds_invalid, description_zh: "C++ 实现返回错误码 timeout_seconds_invalid", retry_safe: true, stage: preflight, wire_match: exact }
+    { code: world_partition_not_enabled, description_zh: "C++ 实现返回错误码 world_partition_not_enabled", retry_safe: false, stage: execution, wire_match: exact }
+  ]
+}
+evidence: {
+  docs: [
+    { path: "Plugins/UeAgentInterface/docs/commands/level_topology_streaming_world_partition_data_layer_hlod/world_partition_generate_streaming.md", purpose: "user documentation cross-check; C++ implementation remains authoritative" }
+  ]
+  implementation: [
+    { line_hint: 675, path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Commands/LevelTopology/UeAgentHttpServer_LevelTopology_WorldPartitionHlodAndJson.cpp", purpose: "command handler, parameter and return evidence", symbol: CmdWorldPartitionGenerateStreaming }
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Commands/Level/UeAgentHttpServer_Level_CaptureAndPersistence.cpp", purpose: "transitive helper evidence used by the command handler" }
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Commands/LevelTopology/UeAgentHttpServer_LevelTopology.cpp", purpose: "transitive helper evidence used by the command handler" }
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Server/UeAgentHttpServer.cpp", purpose: "transitive helper evidence used by the command handler" }
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Utilities/UeAgentJsonDiagnostics.cpp", purpose: "transitive helper evidence used by the command handler" }
+  ]
+  tests: [
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterfaceTests/Private/Smoke/LevelTopology/UeAgentInterfaceLevelTopologySmokeTests.cpp", purpose: "smoke or negative-path evidence cross-checked for the verified contract" }
+  ]
+}
+execution: {
+  destructive: false
+  editor_state: required
+  game_thread: required
+  idempotent: false
+  kind: write
+  overwrite_behavior: none
+  pie_state: allowed
+  retry_safe: false
+  save_behavior: none
+  side_effects: [modifies_level]
+  ui_effect: none
+}
+maturity: verified
+params: {
+  constraints: []
+  fields: {
+    allow_commandlet: { default: false, default_state: defined, description_zh: "C++ 实现读取的 allow_commandlet 参数", required: false, type: bool }
+    allow_destructive: { default: false, default_state: defined, description_zh: "C++ 实现读取的 allow_destructive 参数", required: false, type: bool }
+    allow_write: { default: false, default_state: defined, description_zh: "C++ 实现读取的 allow_write 参数", required: false, type: bool }
+    dry_run: { default: true, default_state: defined, description_zh: "C++ 实现读取的 dry_run 参数", required: false, type: bool }
+    timeout_seconds: { default: 600, default_state: defined, description_zh: "C++ 实现读取的 timeout_seconds 参数", minimum: 0.001, required: false, type: number }
+  }
+  state: defined
+}
+response: { artifact_fields: [], compact_fields: [status, allow_commandlet, allow_destructive, allow_write, commandlet_args, commandlet_exe], failure_fields: [], max_items_policy: { fields: [], mode: none } }
+returns: {
+  fields: {
+    allow_commandlet: { description_zh: "C++ 实现返回的 allow_commandlet 字段；是否出现取决于执行分支", required: false, type: bool }
+    allow_destructive: { description_zh: "C++ 实现返回的 allow_destructive 字段；是否出现取决于执行分支", required: false, type: bool }
+    allow_write: { description_zh: "C++ 实现返回的 allow_write 字段；是否出现取决于执行分支", required: false, type: bool }
+    commandlet_args: { description_zh: "C++ 实现返回的 commandlet_args 字段；是否出现取决于执行分支", required: false, type: string }
+    commandlet_exe: { description_zh: "C++ 实现返回的 commandlet_exe 字段；是否出现取决于执行分支", required: false, type: string }
+    commandlet_plan: { description_zh: "C++ 实现返回的 commandlet_plan 字段；是否出现取决于执行分支", required: false, type: string }
+    dry_run: { description_zh: "C++ 实现返回的 dry_run 字段；是否出现取决于执行分支", required: false, type: bool }
+    error_code: { description_zh: "C++ 实现返回的 error_code 字段；是否出现取决于执行分支", required: false, type: string }
+    log_file: { description_zh: "C++ 实现返回的 log_file 字段；是否出现取决于执行分支", required: false, type: filesystem_path }
+    return_code: { description_zh: "C++ 实现返回的 return_code 字段；是否出现取决于执行分支", required: false, type: number }
+    schema: { description_zh: "C++ 实现返回的 schema 字段；是否出现取决于执行分支", required: false, type: string }
+    status: { description_zh: "C++ 实现返回的 status 字段；是否出现取决于执行分支", required: false, type: string }
+    stdout_tail: { description_zh: "C++ 实现返回的 stdout_tail 字段；是否出现取决于执行分支", required: false, type: string }
+    timed_out: { description_zh: "C++ 实现返回的 timed_out 字段；是否出现取决于执行分支", required: false, type: bool }
+    timeout_seconds: { description_zh: "C++ 实现返回的 timeout_seconds 字段；是否出现取决于执行分支", required: false, type: number }
+  }
+  state: defined
+}
+schema: uai.command_spec.v1
+status: active
+types: {}
+verification: {
+  assertions: [
+    { id: result_present, operator: exists, source: returns.status }
+  ]
+  failure_policy: fail_overall
+  methods: [
+    { id: result, kind: result_assertion }
+  ]
+  required: true
+  state: defined
+}
+version: 1

@@ -1,0 +1,110 @@
+authoring: { reason: command_has_no_registered_folder_authoring_profile, state: none }
+category: level_topology_streaming_world_partition_data_layer_hlod
+command: hlod_layer_apply_json
+deprecation: { reason: command_is_active, state: none }
+discovery: { aliases: [], keywords_en: [hlod, layer, apply, json, level_topology_streaming_world_partition_data_layer_hlod], keywords_zh: [hlod_layer_apply_json], summary_en: "Execute hlod_layer_apply_json with a verified implementation contract", summary_zh: "按 JSON 创建或回写 HLOD Layer", tags: [level_topology_streaming_world_partition_data_layer_hlod, p2-002] }
+errors: {
+  codes: [
+    { code: asset_already_exists, description_zh: "C++ 实现返回错误码 asset_already_exists", retry_safe: false, stage: execution, wire_match: exact }
+    { code: asset_create_failed, description_zh: "C++ 实现返回错误码 asset_create_failed", retry_safe: false, stage: execution, wire_match: exact }
+    { code: asset_path_invalid, description_zh: "C++ 实现返回错误码 asset_path_invalid", retry_safe: true, stage: preflight, wire_match: exact }
+    { code: existing_asset_class_mismatch, description_zh: "C++ 实现返回错误码 existing_asset_class_mismatch", retry_safe: false, stage: execution, wire_match: exact }
+    { code: hjson_file_not_found, description_zh: "C++ 实现返回错误码 hjson_file_not_found", retry_safe: false, stage: execution, wire_match: prefix }
+    { code: hlod_layer_create_failed, description_zh: "C++ 实现返回错误码 hlod_layer_create_failed", retry_safe: false, stage: execution, wire_match: exact }
+    { code: hlod_layer_type_invalid, description_zh: "C++ 实现返回错误码 hlod_layer_type_invalid", retry_safe: true, stage: preflight, wire_match: exact }
+    { code: missing_asset_path, description_zh: "C++ 实现返回错误码 missing_asset_path", retry_safe: true, stage: preflight, wire_match: exact }
+    { code: missing_json_or_json_file, description_zh: "C++ 实现返回错误码 missing_json_or_json_file", retry_safe: true, stage: preflight, wire_match: exact }
+    { code: missing_params, description_zh: "C++ 实现返回错误码 missing_params", retry_safe: true, stage: preflight, wire_match: exact }
+    { code: overwrite_policy_invalid, description_zh: "C++ 实现返回错误码 overwrite_policy_invalid", retry_safe: true, stage: preflight, wire_match: exact }
+    { code: save_packages_failed, description_zh: "C++ 实现返回错误码 save_packages_failed", retry_safe: false, stage: execution, wire_match: exact }
+  ]
+}
+evidence: {
+  docs: [
+    { path: "Plugins/UeAgentInterface/docs/commands/level_topology_streaming_world_partition_data_layer_hlod/hlod_layer_apply_json.md", purpose: "user documentation cross-check; C++ implementation remains authoritative" }
+  ]
+  implementation: [
+    { line_hint: 783, path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Commands/LevelTopology/UeAgentHttpServer_LevelTopology_WorldPartitionHlodAndJson.cpp", purpose: "command handler, parameter and return evidence", symbol: CmdHLODLayerApplyJson }
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Commands/LevelTopology/UeAgentHttpServer_LevelTopology.cpp", purpose: "transitive helper evidence used by the command handler" }
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Commands/ProductionPipeline/UeAgentHttpServer_ProductionPipeline.cpp", purpose: "transitive helper evidence used by the command handler" }
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Server/UeAgentHttpServer.cpp", purpose: "transitive helper evidence used by the command handler" }
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Utilities/UeAgentStructuredAuthoringIO.cpp", purpose: "transitive helper evidence used by the command handler" }
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Utilities/UeAgentStructuredHjsonFormatter.cpp", purpose: "transitive helper evidence used by the command handler" }
+  ]
+  tests: [
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterfaceTests/Private/Smoke/LevelTopology/UeAgentInterfaceLevelTopologySmokeTests.cpp", purpose: "smoke or negative-path evidence cross-checked for the verified contract" }
+  ]
+}
+execution: {
+  destructive: true
+  editor_state: required
+  game_thread: required
+  idempotent: false
+  kind: write
+  overwrite_behavior: target_asset
+  pie_state: allowed
+  retry_safe: false
+  save_behavior: caller_controlled
+  side_effects: [modifies_asset]
+  ui_effect: none
+}
+maturity: verified
+params: {
+  constraints: [
+    { fields: [json, json_file], kind: one_of }
+  ]
+  fields: {
+    asset_path: { default_state: none, description_zh: "C++ 实现读取的 asset_path 参数", path_semantics: { access_scope: project_write, kind: ue_asset }, required: true, type: ue_asset_path }
+    json: { default_state: none, description_zh: "C++ 实现读取的 json 参数", required: false, type: json_value }
+    json_file: {
+      default_state: none
+      description_zh: "C++ 实现读取的 json_file 参数"
+      path_semantics: { kind: filesystem_file, must_exist: false, writable: false }
+      required: false
+      type: filesystem_path
+    }
+    overwrite_policy: { default: replace, default_state: defined, description_zh: "C++ 实现读取的 overwrite_policy 参数", enum_values: [fail, replace], required: false, type: enum }
+    save_after_apply: { default: false, default_state: defined, description_zh: "C++ 实现读取的 save_after_apply 参数", required: false, type: bool }
+    transaction: { default: true, default_state: defined, description_zh: "C++ 实现读取的 transaction 参数", required: false, type: bool }
+  }
+  state: defined
+}
+response: { artifact_fields: [], compact_fields: [status, saved, asset_path, cell_size, hlod_actor_class, hlod_builder_class], failure_fields: [params.asset_path], max_items_policy: { fields: [], mode: none } }
+returns: {
+  fields: {
+    asset_path: { description_zh: "C++ 实现返回的 asset_path 字段；是否出现取决于执行分支", required: false, type: ue_asset_path }
+    cell_size: { description_zh: "C++ 实现返回的 cell_size 字段；是否出现取决于执行分支", required: false, type: number }
+    hlod_actor_class: { description_zh: "C++ 实现返回的 hlod_actor_class 字段；是否出现取决于执行分支", required: false, type: string }
+    hlod_builder_class: { description_zh: "C++ 实现返回的 hlod_builder_class 字段；是否出现取决于执行分支", required: false, type: string }
+    hlod_modifier_class: { description_zh: "C++ 实现返回的 hlod_modifier_class 字段；是否出现取决于执行分支", required: false, type: string }
+    is_spatially_loaded: { description_zh: "C++ 实现返回的 is_spatially_loaded 字段；是否出现取决于执行分支", required: false, type: bool }
+    layer_type: { description_zh: "C++ 实现返回的 layer_type 字段；是否出现取决于执行分支", required: false, type: string }
+    loading_range: { description_zh: "C++ 实现返回的 loading_range 字段；是否出现取决于执行分支", required: false, type: number }
+    object_path: { description_zh: "C++ 实现返回的 object_path 字段；是否出现取决于执行分支", required: false, type: ue_object_path }
+    parent_layer: { description_zh: "C++ 实现返回的 parent_layer 字段；是否出现取决于执行分支", required: false, type: string }
+    property_results: { description_zh: "C++ 实现返回的 property_results 字段；是否出现取决于执行分支", item_type: json_value, required: false, type: array }
+    saved: { description_zh: "C++ 实现返回的 saved 字段；是否出现取决于执行分支", required: false, type: bool }
+    schema: { description_zh: "C++ 实现返回的 schema 字段；是否出现取决于执行分支", required: false, type: string }
+    source: { description_zh: "C++ 实现返回的 source 字段；是否出现取决于执行分支", required: false, type: string }
+    status: { description_zh: "C++ 实现返回的 status 字段；是否出现取决于执行分支", required: false, type: string }
+    transaction: { description_zh: "C++ 实现返回的 transaction 字段；是否出现取决于执行分支", required: false, type: bool }
+  }
+  state: defined
+}
+schema: uai.command_spec.v1
+status: active
+types: {}
+verification: {
+  assertions: [
+    { id: result_present, operator: exists, source: returns.status }
+    { id: state_readback_present, operator: exists, source: methods.state_readback.asset_path }
+  ]
+  failure_policy: fail_overall
+  methods: [
+    { id: result, kind: result_assertion }
+    { command: hlod_layer_export_json, id: state_readback, kind: command_readback, params_mapping: { asset_path: returns.asset_path } }
+  ]
+  required: true
+  state: defined
+}
+version: 1

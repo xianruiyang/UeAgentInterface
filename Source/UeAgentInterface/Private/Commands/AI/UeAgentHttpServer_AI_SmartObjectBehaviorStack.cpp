@@ -1,5 +1,7 @@
 #include "Server/UeAgentHttpServer.h"
 
+#include "Utilities/UeAgentAuthoringFolderIO.h"
+
 #include "UeAgentHttpServer_AIOps.h"
 
 #include "Utilities/UeAgentAuthoringJson.h"
@@ -106,30 +108,28 @@ namespace UeAgentAIOps
 					continue;
 				}
 				FString PropertyName;
-				if (!(*PropObjPtr)->TryGetStringField(TEXT("property_name"), PropertyName))
-				{
-					(*PropObjPtr)->TryGetStringField(TEXT("name"), PropertyName);
-				}
-				FString ValueText;
-				if (!(*PropObjPtr)->TryGetStringField(TEXT("value_text"), ValueText))
-				{
-					(*PropObjPtr)->TryGetStringField(TEXT("value"), ValueText);
-				}
+				(*PropObjPtr)->TryGetStringField(TEXT("property_path"), PropertyName);
+				const TSharedPtr<FJsonValue> CanonicalValue = (*PropObjPtr)->TryGetField(TEXT("value"));
 				if (PropertyName.IsEmpty())
 				{
 					OutError = TEXT("missing_smart_object_behavior_property_name");
 					return false;
 				}
 				FString ImportError;
-				if (!ValueText.IsEmpty() && !ImportPropertyValue(OutBehavior->GetClass(), OutBehavior, OutBehavior, PropertyName, ValueText, ImportError))
+				if (!CanonicalValue.IsValid())
+				{
+					OutError = TEXT("missing_smart_object_behavior_property_value");
+					return false;
+				}
+				if (!ImportPropertyValue(OutBehavior->GetClass(), OutBehavior, OutBehavior, PropertyName, *PropObjPtr, ImportError))
 				{
 					OutError = ImportError;
 					return false;
 				}
 				TSharedPtr<FJsonObject> Result = MakeShared<FJsonObject>();
 				Result->SetStringField(TEXT("owner"), OutBehavior->GetName());
-				Result->SetStringField(TEXT("property_name"), PropertyName);
-				Result->SetStringField(TEXT("requested_value_text"), ValueText);
+				Result->SetStringField(TEXT("property_path"), PropertyName);
+				Result->SetField(TEXT("requested_value"), CanonicalValue);
 				Result->SetStringField(TEXT("status"), TEXT("applied"));
 				PropertyResults.Add(MakeShared<FJsonValueObject>(Result));
 			}
@@ -522,7 +522,7 @@ bool FUeAgentHttpServer::CmdSmartObjectDefinitionExportJson(const FUeAgentReques
 	if (!OutputFile.TrimStartAndEnd().IsEmpty())
 	{
 		FString SavedPath;
-		if (!UeAgentAIOps::SaveJsonFile(OutputFile, OutData, SavedPath, OutError))
+		if (!UeAgentAIOps::SaveAuthoringFile(OutputFile, OutData, SavedPath, OutError))
 		{
 			return false;
 		}
@@ -542,7 +542,7 @@ bool FUeAgentHttpServer::CmdSmartObjectDefinitionValidateJson(const FUeAgentRequ
 	}
 	TSharedPtr<FJsonObject> Root;
 	FString ResolvedPath;
-	if (!UeAgentAIOps::LoadJsonFile(JsonFile, Root, ResolvedPath, OutError))
+	if (!UeAgentAIOps::LoadAuthoringFile(JsonFile, Root, ResolvedPath, OutError))
 	{
 		return false;
 	}
@@ -563,7 +563,7 @@ bool FUeAgentHttpServer::CmdSmartObjectDefinitionApplyJson(const FUeAgentRequest
 	FString ResolvedPath;
 	if (!JsonFile.IsEmpty())
 	{
-		if (!UeAgentAIOps::LoadJsonFile(JsonFile, Root, ResolvedPath, OutError))
+		if (!UeAgentAIOps::LoadAuthoringFile(JsonFile, Root, ResolvedPath, OutError))
 		{
 			return false;
 		}
@@ -1131,13 +1131,10 @@ bool FUeAgentHttpServer::CmdAIBehaviorStackExportFolder(const FUeAgentRequestCon
 		FolderInput = FPaths::Combine(FPaths::ProjectSavedDir(), TEXT("UeAssetFolders"), TEXT("AIBehaviorStack"), FGuid::NewGuid().ToString(EGuidFormats::Digits));
 	}
 	const FString FolderPath = UeAgentJsonDiagnostics::ResolveProjectRelativeFilePath(FolderInput);
-	bool bClean = false;
-	JsonTryGetBool(Ctx.Params, TEXT("clean_output_dir"), bClean);
-	if (bClean && IFileManager::Get().DirectoryExists(*FolderPath))
+	if (!UeAgentAuthoringFolderIO::ResetExportFolder(FolderPath, OutError))
 	{
-		IFileManager::Get().DeleteDirectory(*FolderPath, false, true);
+		return false;
 	}
-	IFileManager::Get().MakeDirectory(*FolderPath, true);
 
 	TSharedPtr<FJsonObject> Manifest;
 	FString ManifestFile;
@@ -1145,7 +1142,7 @@ bool FUeAgentHttpServer::CmdAIBehaviorStackExportFolder(const FUeAgentRequestCon
 	JsonTryGetString(Ctx.Params, TEXT("manifest_file"), ManifestFile);
 	if (!ManifestFile.IsEmpty())
 	{
-		if (!UeAgentAIOps::LoadJsonFile(ManifestFile, Manifest, ManifestResolvedPath, OutError))
+		if (!UeAgentAIOps::LoadAuthoringFile(ManifestFile, Manifest, ManifestResolvedPath, OutError))
 		{
 			return false;
 		}
@@ -1220,7 +1217,7 @@ bool FUeAgentHttpServer::CmdAIBehaviorStackExportFolder(const FUeAgentRequestCon
 	};
 	auto SaveStackJson = [&](const FString& RelativeFile, const TSharedPtr<FJsonObject>& Root, TArray<TSharedPtr<FJsonValue>>& WrittenFiles)
 	{
-		return UeAgentAIOps::SaveTrackedFolderJson(FolderPath, RelativeFile, Root, WrittenFiles, OutError);
+		return UeAgentAIOps::SaveTrackedFolderAuthoringFile(FolderPath, RelativeFile, Root, WrittenFiles, OutError);
 	};
 
 	TArray<TSharedPtr<FJsonValue>> WrittenFiles;
@@ -1263,7 +1260,7 @@ bool FUeAgentHttpServer::CmdAIBehaviorStackExportFolder(const FUeAgentRequestCon
 			OutError = TEXT("blackboard_not_found");
 			return false;
 		}
-		const FString RelativeFile = FPaths::Combine(TEXT("blackboard"), UeAgentAIOps::AssetFolderNameFromPath(BlackboardPath) + TEXT(".json")).Replace(TEXT("\\"), TEXT("/"));
+		const FString RelativeFile = FPaths::Combine(TEXT("blackboard"), UeAgentAIOps::AssetFolderNameFromPath(BlackboardPath) + TEXT(".hjson")).Replace(TEXT("\\"), TEXT("/"));
 		if (!SaveStackJson(RelativeFile, UeAgentAIOps::ExportBlackboard(Blackboard, true), WrittenFiles))
 		{
 			return false;
@@ -1328,7 +1325,7 @@ bool FUeAgentHttpServer::CmdAIBehaviorStackExportFolder(const FUeAgentRequestCon
 			OutError = TEXT("smart_object_definition_not_found");
 			return false;
 		}
-		const FString RelativeFile = FPaths::Combine(TEXT("smart_objects"), UeAgentAIOps::AssetFolderNameFromPath(DefinitionPath) + TEXT(".json")).Replace(TEXT("\\"), TEXT("/"));
+		const FString RelativeFile = FPaths::Combine(TEXT("smart_objects"), UeAgentAIOps::AssetFolderNameFromPath(DefinitionPath) + TEXT(".hjson")).Replace(TEXT("\\"), TEXT("/"));
 		const FString SmartObjectEntryDirectory = FPaths::Combine(FolderPath, TEXT("smart_objects"));
 		OutError.Reset();
 		TSharedPtr<FJsonObject> DefinitionJson = UeAgentAIOps::ExportSmartObjectDefinition(Definition, true, &SmartObjectEntryDirectory, &OutError);
@@ -1369,7 +1366,7 @@ bool FUeAgentHttpServer::CmdAIBehaviorStackExportFolder(const FUeAgentRequestCon
 			Summary->SetStringField(TEXT("object_path"), Asset->GetPathName());
 			Summary->SetStringField(TEXT("generated_class"), GeneratedClass ? GeneratedClass->GetPathName() : FString());
 			Summary->SetStringField(TEXT("parent_class"), (GeneratedClass && GeneratedClass->GetSuperClass()) ? GeneratedClass->GetSuperClass()->GetPathName() : FString());
-			const FString RelativeFile = FPaths::Combine(RelativeFolder, UeAgentAIOps::AssetFolderNameFromPath(AssetPath) + TEXT(".summary.json")).Replace(TEXT("\\"), TEXT("/"));
+			const FString RelativeFile = FPaths::Combine(RelativeFolder, UeAgentAIOps::AssetFolderNameFromPath(AssetPath) + TEXT(".summary.hjson")).Replace(TEXT("\\"), TEXT("/"));
 			if (!SaveStackJson(RelativeFile, Summary, WrittenFiles))
 			{
 				return false;
@@ -1387,7 +1384,7 @@ bool FUeAgentHttpServer::CmdAIBehaviorStackExportFolder(const FUeAgentRequestCon
 	PerceptionSetup->SetStringField(TEXT("profile"), TEXT("ue_agent_interface.ai_perception_setup.v1"));
 	PerceptionSetup->SetNumberField(TEXT("schema_version"), 1);
 	PerceptionSetup->SetArrayField(TEXT("stimuli_sources"), TArray<TSharedPtr<FJsonValue>>());
-	if (!SaveStackJson(TEXT("perception/perception_setup.json"), PerceptionSetup, WrittenFiles))
+	if (!SaveStackJson(TEXT("perception/perception_setup.hjson"), PerceptionSetup, WrittenFiles))
 	{
 		return false;
 	}
@@ -1395,7 +1392,7 @@ bool FUeAgentHttpServer::CmdAIBehaviorStackExportFolder(const FUeAgentRequestCon
 	NavigationValidation->SetStringField(TEXT("profile"), TEXT("ue_agent_interface.navigation_validation.v1"));
 	NavigationValidation->SetNumberField(TEXT("schema_version"), 1);
 	NavigationValidation->SetArrayField(TEXT("path_probes"), TArray<TSharedPtr<FJsonValue>>());
-	if (!SaveStackJson(TEXT("navigation/navigation_validation.json"), NavigationValidation, WrittenFiles))
+	if (!SaveStackJson(TEXT("navigation/navigation_validation.hjson"), NavigationValidation, WrittenFiles))
 	{
 		return false;
 	}
@@ -1404,23 +1401,23 @@ bool FUeAgentHttpServer::CmdAIBehaviorStackExportFolder(const FUeAgentRequestCon
 	SmartObjectSetup->SetNumberField(TEXT("schema_version"), 1);
 	SmartObjectSetup->SetArrayField(TEXT("definitions"), SmartObjectDefinitionValues);
 	SmartObjectSetup->SetArrayField(TEXT("components"), TArray<TSharedPtr<FJsonValue>>());
-	if (!SaveStackJson(TEXT("smart_objects/smart_object_setup.json"), SmartObjectSetup, WrittenFiles))
+	if (!SaveStackJson(TEXT("smart_objects/smart_object_setup.hjson"), SmartObjectSetup, WrittenFiles))
 	{
 		return false;
 	}
 
 	TArray<TSharedPtr<FJsonValue>> Issues;
-	if (!SaveStackJson(TEXT("validation/checks.json"), UeAgentAIOps::MakeValidationChecks(Issues), WrittenFiles))
+	if (!SaveStackJson(TEXT("validation/checks.hjson"), UeAgentAIOps::MakeValidationChecks(Issues), WrittenFiles))
 	{
 		return false;
 	}
-	if (!SaveStackJson(TEXT("validation/coverage_report.json"), UeAgentAIOps::MakeCoverageReport(), WrittenFiles))
+	if (!SaveStackJson(TEXT("validation/coverage_report.hjson"), UeAgentAIOps::MakeCoverageReport(), WrittenFiles))
 	{
 		return false;
 	}
-	WrittenFiles.Insert(MakeShared<FJsonValueString>(TEXT("manifest.json")), 0);
+	WrittenFiles.Insert(MakeShared<FJsonValueString>(TEXT("manifest.hjson")), 0);
 	Manifest->SetArrayField(TEXT("written_files"), WrittenFiles);
-	if (!UeAgentAIOps::SaveFolderJson(FolderPath, TEXT("manifest.json"), Manifest, OutError))
+	if (!UeAgentAIOps::SaveFolderAuthoringFile(FolderPath, TEXT("manifest.hjson"), Manifest, OutError))
 	{
 		return false;
 	}
@@ -1440,21 +1437,21 @@ bool FUeAgentHttpServer::CmdAIBehaviorStackValidateFolder(const FUeAgentRequestC
 		return false;
 	}
 	const FString FolderPath = UeAgentJsonDiagnostics::ResolveProjectRelativeFilePath(FolderInput);
-	TSharedPtr<FJsonObject> LegacyRejection;
-	FString LegacyError;
-	if (UeAgentDetailsAuthoring::BuildLegacyPropertiesFolderRejectionIfPresent(
+	TSharedPtr<FJsonObject> AuthoringRejection;
+	FString AuthoringError;
+	if (UeAgentDetailsAuthoring::BuildAuthoringPropertiesFolderRejectionIfPresent(
 		FolderPath,
 		UeAgentDetailsAuthoring::MakeOwnerInfoForObject(nullptr, TEXT("ai_behavior_stack_folder"), FString(), TEXT("ai_behavior_stack_validate_folder")),
 		TEXT("details.index_file"),
-		LegacyRejection,
-		LegacyError))
+		AuthoringRejection,
+		AuthoringError))
 	{
-		OutData = LegacyRejection;
-		OutError = LegacyError.IsEmpty() ? FString(TEXT("legacy_properties_not_supported")) : LegacyError;
+		OutData = AuthoringRejection;
+		OutError = AuthoringError.IsEmpty() ? FString(TEXT("authoring_properties_rejected")) : AuthoringError;
 		return false;
 	}
 	TSharedPtr<FJsonObject> Manifest;
-	if (!UeAgentAIOps::LoadFolderJson(FolderPath, TEXT("manifest.json"), Manifest, OutError))
+	if (!UeAgentAIOps::LoadFolderAuthoringFile(FolderPath, TEXT("manifest.hjson"), Manifest, OutError))
 	{
 		return false;
 	}

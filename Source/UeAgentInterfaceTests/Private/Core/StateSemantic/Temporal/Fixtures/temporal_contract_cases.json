@@ -1,0 +1,120 @@
+{
+  "schema": "uai.state_semantic.temporal.test_fixture.v1",
+  "contract_id": "uai.temporal_contract.v1",
+  "rounding_policies": [
+    "exact",
+    "floor",
+    "ceiling",
+    "nearest_ties_to_even"
+  ],
+  "bound_kinds": [
+    "open",
+    "inclusive",
+    "exclusive"
+  ],
+  "scenarios": [
+    {
+      "scenario_id": "sequence_display_to_tick_exact",
+      "source_clock": "sequence:/Game/Test/LS_Temporal",
+      "target_clock": "sequence:/Game/Test/LS_Temporal",
+      "source_rate": ["24", "1"],
+      "target_rate": ["48", "1"],
+      "source_tick": "12",
+      "scale": ["1", "1"],
+      "offset_target_ticks": ["0", "1"],
+      "rounding": "exact",
+      "expected_tick": "24"
+    },
+    {
+      "scenario_id": "ntsc_identity_without_float_drift",
+      "source_clock": "sequence:/Game/Test/LS_Ntsc",
+      "target_clock": "sequence:/Game/Test/LS_Ntsc",
+      "source_rate": ["30000", "1001"],
+      "target_rate": ["1", "1"],
+      "source_tick": "30000",
+      "scale": ["1", "1"],
+      "offset_target_ticks": ["0", "1"],
+      "rounding": "exact",
+      "expected_tick": "1001"
+    },
+    {
+      "scenario_id": "non_integral_requires_declared_rounding",
+      "source_clock": "sequence:/Game/Test/LS_Rounding",
+      "target_clock": "sequence:/Game/Test/LS_Rounding",
+      "source_rate": ["24", "1"],
+      "target_rate": ["30", "1"],
+      "source_tick": "1",
+      "scale": ["1", "1"],
+      "offset_target_ticks": ["0", "1"],
+      "exact_error": "temporal_conversion_inexact",
+      "floor_tick": "1",
+      "ceiling_tick": "2",
+      "nearest_ties_to_even_tick": "1"
+    },
+    {
+      "scenario_id": "montage_to_animation_affine_clock",
+      "source_clock": "montage:/Game/Test/AM_Test:slot:segment-1",
+      "target_clock": "animation:/Game/Test/A_Test",
+      "source_rate": ["30", "1"],
+      "target_rate": ["60", "1"],
+      "source_tick": "30",
+      "scale": ["2", "1"],
+      "offset_target_ticks": ["30", "1"],
+      "rounding": "exact",
+      "expected_tick": "150"
+    },
+    {
+      "scenario_id": "inclusive_exclusive_range_preserved",
+      "source_clock": "sequence:/Game/Test/LS_Range",
+      "target_clock": "sequence:/Game/Test/LS_Range",
+      "source_rate": ["24", "1"],
+      "target_rate": ["48", "1"],
+      "lower_kind": "inclusive",
+      "lower_tick": "0",
+      "upper_kind": "exclusive",
+      "upper_tick": "24",
+      "expected_lower_kind": "inclusive",
+      "expected_lower_tick": "0",
+      "expected_upper_kind": "exclusive",
+      "expected_upper_tick": "48"
+    },
+    {
+      "scenario_id": "open_upper_range_preserved",
+      "source_clock": "animation:/Game/Test/A_Open",
+      "target_clock": "animation:/Game/Test/A_Open",
+      "source_rate": ["30", "1"],
+      "target_rate": ["60", "1"],
+      "lower_kind": "inclusive",
+      "lower_tick": "15",
+      "upper_kind": "open",
+      "expected_lower_kind": "inclusive",
+      "expected_lower_tick": "30",
+      "expected_upper_kind": "open"
+    },
+    {
+      "scenario_id": "reverse_range_swaps_bound_positions",
+      "source_clock": "animation:/Game/Test/A_Reverse",
+      "target_clock": "animation:/Game/Test/A_Reverse:reversed",
+      "source_rate": ["24", "1"],
+      "target_rate": ["24", "1"],
+      "scale": ["-1", "1"],
+      "offset_target_ticks": ["24", "1"],
+      "lower_kind": "inclusive",
+      "lower_tick": "0",
+      "upper_kind": "exclusive",
+      "upper_tick": "24",
+      "expected_lower_kind": "exclusive",
+      "expected_lower_tick": "0",
+      "expected_upper_kind": "inclusive",
+      "expected_upper_tick": "24"
+    }
+  ],
+  "forbidden_implicit_behaviors": [
+    "double_identity",
+    "implicit_30fps_fallback",
+    "handler_local_rounding",
+    "open_bound_defaulting",
+    "captured_time_as_authored_time",
+    "cross_clock_compare_without_conversion"
+  ]
+}

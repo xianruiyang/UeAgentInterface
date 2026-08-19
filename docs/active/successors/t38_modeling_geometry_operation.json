@@ -1,0 +1,1414 @@
+{
+  "schema": "uai.historical_successor.v2",
+  "owner_task_id": "T38-MODELING-GEOMETRY-OPERATION",
+  "commands": [
+    {
+      "historical_command_id": "modeling_accept_tool",
+      "approval": "1)",
+      "historical_source": "docs/commands/10_Modeling.md",
+      "historical_contract": {
+        "inputs": "asset_path, properties, selection, target_actor, tool_name",
+        "outputs": "errors, success, warnings",
+        "purpose": "**原子/兼容**：控制 Modeling Mode 工具、选择或网格编辑动作"
+      },
+      "resolved_from_contract_id": "uai.historical_capability.t38.modeling.geometry.operation.modeling_accept_tool/1",
+      "successor": {
+        "kind": "exact_command_set",
+        "command_ids": [
+          "mesh.modeling_session"
+        ]
+      },
+      "semantic_coverage": {
+        "purpose": {
+          "status": "covered",
+          "by": [
+            "mesh.modeling_session"
+          ],
+          "explanation": "The exact current command set preserves the frozen Modeling Mode purpose: **原子/兼容**：控制 Modeling Mode 工具、选择或网格编辑动作"
+        },
+        "inputs": {
+          "status": "covered",
+          "by": [
+            "mesh.modeling_session"
+          ],
+          "explanation": "The selected exact command contract carries the applicable target, tool, property and selection inputs: asset_path, properties, selection, target_actor, tool_name"
+        },
+        "outputs": {
+          "status": "covered",
+          "by": [
+            "mesh.modeling_session"
+          ],
+          "explanation": "The selected exact command returns structured terminal observation, errors and warnings covering: errors, success, warnings"
+        }
+      },
+      "product_evidence": {
+        "test_id": "UAI.StrictV2.T38.MODELING.GEOMETRY.OPERATION",
+        "public_command_ids": [
+          "mesh.modeling_session"
+        ],
+        "architecture_contract_ids": [],
+        "required_claims": [
+          "public_entry",
+          "behavior",
+          "readback",
+          "terminal_state",
+          "failure_semantics",
+          "cleanup",
+          "legacy_exit",
+          "documentation"
+        ]
+      },
+      "old_id_exit": {
+        "public_executable": false,
+        "manifest_active": false,
+        "sdk_binding_active": false,
+        "compatibility_alias": false
+      },
+      "final_lifecycle": "deprecated_replaced"
+    },
+    {
+      "historical_command_id": "modeling_activate_mode",
+      "approval": "1)",
+      "historical_source": "docs/commands/10_Modeling.md",
+      "historical_contract": {
+        "inputs": "asset_path, properties, selection, target_actor, tool_name",
+        "outputs": "errors, success, warnings",
+        "purpose": "**原子/兼容**：控制 Modeling Mode 工具、选择或网格编辑动作"
+      },
+      "resolved_from_contract_id": "uai.historical_capability.t38.modeling.geometry.operation.modeling_activate_mode/1",
+      "successor": {
+        "kind": "exact_command_set",
+        "command_ids": [
+          "mesh.modeling_session"
+        ]
+      },
+      "semantic_coverage": {
+        "purpose": {
+          "status": "covered",
+          "by": [
+            "mesh.modeling_session"
+          ],
+          "explanation": "The exact current command set preserves the frozen Modeling Mode purpose: **原子/兼容**：控制 Modeling Mode 工具、选择或网格编辑动作"
+        },
+        "inputs": {
+          "status": "covered",
+          "by": [
+            "mesh.modeling_session"
+          ],
+          "explanation": "The selected exact command contract carries the applicable target, tool, property and selection inputs: asset_path, properties, selection, target_actor, tool_name"
+        },
+        "outputs": {
+          "status": "covered",
+          "by": [
+            "mesh.modeling_session"
+          ],
+          "explanation": "The selected exact command returns structured terminal observation, errors and warnings covering: errors, success, warnings"
+        }
+      },
+      "product_evidence": {
+        "test_id": "UAI.StrictV2.T38.MODELING.GEOMETRY.OPERATION",
+        "public_command_ids": [
+          "mesh.modeling_session"
+        ],
+        "architecture_contract_ids": [],
+        "required_claims": [
+          "public_entry",
+          "behavior",
+          "readback",
+          "terminal_state",
+          "failure_semantics",
+          "cleanup",
+          "legacy_exit",
+          "documentation"
+        ]
+      },
+      "old_id_exit": {
+        "public_executable": false,
+        "manifest_active": false,
+        "sdk_binding_active": false,
+        "compatibility_alias": false
+      },
+      "final_lifecycle": "deprecated_replaced"
+    },
+    {
+      "historical_command_id": "modeling_bevel_edges",
+      "approval": "1)",
+      "historical_source": "docs/commands/10_Modeling.md",
+      "historical_contract": {
+        "inputs": "asset_path, properties, selection, target_actor, tool_name",
+        "outputs": "errors, success, warnings",
+        "purpose": "**原子/兼容**：控制 Modeling Mode 工具、选择或网格编辑动作"
+      },
+      "resolved_from_contract_id": "uai.historical_capability.t38.modeling.geometry.operation.modeling_bevel_edges/1",
+      "successor": {
+        "kind": "exact_command_set",
+        "command_ids": [
+          "mesh.topology.edges.bevel"
+        ]
+      },
+      "semantic_coverage": {
+        "purpose": {
+          "status": "covered",
+          "by": [
+            "mesh.topology.edges.bevel"
+          ],
+          "explanation": "The exact current command set preserves the frozen Modeling Mode purpose: **原子/兼容**：控制 Modeling Mode 工具、选择或网格编辑动作"
+        },
+        "inputs": {
+          "status": "covered",
+          "by": [
+            "mesh.topology.edges.bevel"
+          ],
+          "explanation": "The selected exact command contract carries the applicable target, tool, property and selection inputs: asset_path, properties, selection, target_actor, tool_name"
+        },
+        "outputs": {
+          "status": "covered",
+          "by": [
+            "mesh.topology.edges.bevel"
+          ],
+          "explanation": "The selected exact command returns structured terminal observation, errors and warnings covering: errors, success, warnings"
+        }
+      },
+      "product_evidence": {
+        "test_id": "UAI.StrictV2.T38.MODELING.GEOMETRY.OPERATION",
+        "public_command_ids": [
+          "mesh.topology.edges.bevel"
+        ],
+        "architecture_contract_ids": [],
+        "required_claims": [
+          "public_entry",
+          "behavior",
+          "readback",
+          "terminal_state",
+          "failure_semantics",
+          "cleanup",
+          "legacy_exit",
+          "documentation"
+        ]
+      },
+      "old_id_exit": {
+        "public_executable": false,
+        "manifest_active": false,
+        "sdk_binding_active": false,
+        "compatibility_alias": false
+      },
+      "final_lifecycle": "deprecated_replaced"
+    },
+    {
+      "historical_command_id": "modeling_cancel_tool",
+      "approval": "1)",
+      "historical_source": "docs/commands/10_Modeling.md",
+      "historical_contract": {
+        "inputs": "asset_path, properties, selection, target_actor, tool_name",
+        "outputs": "errors, success, warnings",
+        "purpose": "**原子/兼容**：控制 Modeling Mode 工具、选择或网格编辑动作"
+      },
+      "resolved_from_contract_id": "uai.historical_capability.t38.modeling.geometry.operation.modeling_cancel_tool/1",
+      "successor": {
+        "kind": "exact_command_set",
+        "command_ids": [
+          "mesh.modeling_session"
+        ]
+      },
+      "semantic_coverage": {
+        "purpose": {
+          "status": "covered",
+          "by": [
+            "mesh.modeling_session"
+          ],
+          "explanation": "The exact current command set preserves the frozen Modeling Mode purpose: **原子/兼容**：控制 Modeling Mode 工具、选择或网格编辑动作"
+        },
+        "inputs": {
+          "status": "covered",
+          "by": [
+            "mesh.modeling_session"
+          ],
+          "explanation": "The selected exact command contract carries the applicable target, tool, property and selection inputs: asset_path, properties, selection, target_actor, tool_name"
+        },
+        "outputs": {
+          "status": "covered",
+          "by": [
+            "mesh.modeling_session"
+          ],
+          "explanation": "The selected exact command returns structured terminal observation, errors and warnings covering: errors, success, warnings"
+        }
+      },
+      "product_evidence": {
+        "test_id": "UAI.StrictV2.T38.MODELING.GEOMETRY.OPERATION",
+        "public_command_ids": [
+          "mesh.modeling_session"
+        ],
+        "architecture_contract_ids": [],
+        "required_claims": [
+          "public_entry",
+          "behavior",
+          "readback",
+          "terminal_state",
+          "failure_semantics",
+          "cleanup",
+          "legacy_exit",
+          "documentation"
+        ]
+      },
+      "old_id_exit": {
+        "public_executable": false,
+        "manifest_active": false,
+        "sdk_binding_active": false,
+        "compatibility_alias": false
+      },
+      "final_lifecycle": "deprecated_replaced"
+    },
+    {
+      "historical_command_id": "modeling_clear_mesh_selection",
+      "approval": "1)",
+      "historical_source": "docs/commands/10_Modeling.md",
+      "historical_contract": {
+        "inputs": "asset_path, properties, selection, target_actor, tool_name",
+        "outputs": "errors, success, warnings",
+        "purpose": "**原子/兼容**：控制 Modeling Mode 工具、选择或网格编辑动作"
+      },
+      "resolved_from_contract_id": "uai.historical_capability.t38.modeling.geometry.operation.modeling_clear_mesh_selection/1",
+      "successor": {
+        "kind": "exact_command_set",
+        "command_ids": [
+          "mesh.modeling_session"
+        ]
+      },
+      "semantic_coverage": {
+        "purpose": {
+          "status": "covered",
+          "by": [
+            "mesh.modeling_session"
+          ],
+          "explanation": "The exact current command set preserves the frozen Modeling Mode purpose: **原子/兼容**：控制 Modeling Mode 工具、选择或网格编辑动作"
+        },
+        "inputs": {
+          "status": "covered",
+          "by": [
+            "mesh.modeling_session"
+          ],
+          "explanation": "The selected exact command contract carries the applicable target, tool, property and selection inputs: asset_path, properties, selection, target_actor, tool_name"
+        },
+        "outputs": {
+          "status": "covered",
+          "by": [
+            "mesh.modeling_session"
+          ],
+          "explanation": "The selected exact command returns structured terminal observation, errors and warnings covering: errors, success, warnings"
+        }
+      },
+      "product_evidence": {
+        "test_id": "UAI.StrictV2.T38.MODELING.GEOMETRY.OPERATION",
+        "public_command_ids": [
+          "mesh.modeling_session"
+        ],
+        "architecture_contract_ids": [],
+        "required_claims": [
+          "public_entry",
+          "behavior",
+          "readback",
+          "terminal_state",
+          "failure_semantics",
+          "cleanup",
+          "legacy_exit",
+          "documentation"
+        ]
+      },
+      "old_id_exit": {
+        "public_executable": false,
+        "manifest_active": false,
+        "sdk_binding_active": false,
+        "compatibility_alias": false
+      },
+      "final_lifecycle": "deprecated_replaced"
+    },
+    {
+      "historical_command_id": "modeling_duplicate_faces",
+      "approval": "1)",
+      "historical_source": "docs/commands/10_Modeling.md",
+      "historical_contract": {
+        "inputs": "asset_path, properties, selection, target_actor, tool_name",
+        "outputs": "errors, success, warnings",
+        "purpose": "**原子/兼容**：控制 Modeling Mode 工具、选择或网格编辑动作"
+      },
+      "resolved_from_contract_id": "uai.historical_capability.t38.modeling.geometry.operation.modeling_duplicate_faces/1",
+      "successor": {
+        "kind": "exact_command_set",
+        "command_ids": [
+          "mesh.topology.faces.duplicate"
+        ]
+      },
+      "semantic_coverage": {
+        "purpose": {
+          "status": "covered",
+          "by": [
+            "mesh.topology.faces.duplicate"
+          ],
+          "explanation": "The exact current command set preserves the frozen Modeling Mode purpose: **原子/兼容**：控制 Modeling Mode 工具、选择或网格编辑动作"
+        },
+        "inputs": {
+          "status": "covered",
+          "by": [
+            "mesh.topology.faces.duplicate"
+          ],
+          "explanation": "The selected exact command contract carries the applicable target, tool, property and selection inputs: asset_path, properties, selection, target_actor, tool_name"
+        },
+        "outputs": {
+          "status": "covered",
+          "by": [
+            "mesh.topology.faces.duplicate"
+          ],
+          "explanation": "The selected exact command returns structured terminal observation, errors and warnings covering: errors, success, warnings"
+        }
+      },
+      "product_evidence": {
+        "test_id": "UAI.StrictV2.T38.MODELING.GEOMETRY.OPERATION",
+        "public_command_ids": [
+          "mesh.topology.faces.duplicate"
+        ],
+        "architecture_contract_ids": [],
+        "required_claims": [
+          "public_entry",
+          "behavior",
+          "readback",
+          "terminal_state",
+          "failure_semantics",
+          "cleanup",
+          "legacy_exit",
+          "documentation"
+        ]
+      },
+      "old_id_exit": {
+        "public_executable": false,
+        "manifest_active": false,
+        "sdk_binding_active": false,
+        "compatibility_alias": false
+      },
+      "final_lifecycle": "deprecated_replaced"
+    },
+    {
+      "historical_command_id": "modeling_get_active_tool",
+      "approval": "1)",
+      "historical_source": "docs/commands/10_Modeling.md",
+      "historical_contract": {
+        "inputs": "asset_path, properties, selection, target_actor, tool_name",
+        "outputs": "errors, success, warnings",
+        "purpose": "**原子/兼容**：控制 Modeling Mode 工具、选择或网格编辑动作"
+      },
+      "resolved_from_contract_id": "uai.historical_capability.t38.modeling.geometry.operation.modeling_get_active_tool/1",
+      "successor": {
+        "kind": "exact_command_set",
+        "command_ids": [
+          "mesh.modeling_session"
+        ]
+      },
+      "semantic_coverage": {
+        "purpose": {
+          "status": "covered",
+          "by": [
+            "mesh.modeling_session"
+          ],
+          "explanation": "The exact current command set preserves the frozen Modeling Mode purpose: **原子/兼容**：控制 Modeling Mode 工具、选择或网格编辑动作"
+        },
+        "inputs": {
+          "status": "covered",
+          "by": [
+            "mesh.modeling_session"
+          ],
+          "explanation": "The selected exact command contract carries the applicable target, tool, property and selection inputs: asset_path, properties, selection, target_actor, tool_name"
+        },
+        "outputs": {
+          "status": "covered",
+          "by": [
+            "mesh.modeling_session"
+          ],
+          "explanation": "The selected exact command returns structured terminal observation, errors and warnings covering: errors, success, warnings"
+        }
+      },
+      "product_evidence": {
+        "test_id": "UAI.StrictV2.T38.MODELING.GEOMETRY.OPERATION",
+        "public_command_ids": [
+          "mesh.modeling_session"
+        ],
+        "architecture_contract_ids": [],
+        "required_claims": [
+          "public_entry",
+          "behavior",
+          "readback",
+          "terminal_state",
+          "failure_semantics",
+          "cleanup",
+          "legacy_exit",
+          "documentation"
+        ]
+      },
+      "old_id_exit": {
+        "public_executable": false,
+        "manifest_active": false,
+        "sdk_binding_active": false,
+        "compatibility_alias": false
+      },
+      "final_lifecycle": "deprecated_replaced"
+    },
+    {
+      "historical_command_id": "modeling_get_active_tool_properties",
+      "approval": "1)",
+      "historical_source": "docs/commands/10_Modeling.md",
+      "historical_contract": {
+        "inputs": "asset_path, properties, selection, target_actor, tool_name",
+        "outputs": "errors, success, warnings",
+        "purpose": "**原子/兼容**：控制 Modeling Mode 工具、选择或网格编辑动作"
+      },
+      "resolved_from_contract_id": "uai.historical_capability.t38.modeling.geometry.operation.modeling_get_active_tool_properties/1",
+      "successor": {
+        "kind": "exact_command_set",
+        "command_ids": [
+          "mesh.modeling_session"
+        ]
+      },
+      "semantic_coverage": {
+        "purpose": {
+          "status": "covered",
+          "by": [
+            "mesh.modeling_session"
+          ],
+          "explanation": "The exact current command set preserves the frozen Modeling Mode purpose: **原子/兼容**：控制 Modeling Mode 工具、选择或网格编辑动作"
+        },
+        "inputs": {
+          "status": "covered",
+          "by": [
+            "mesh.modeling_session"
+          ],
+          "explanation": "The selected exact command contract carries the applicable target, tool, property and selection inputs: asset_path, properties, selection, target_actor, tool_name"
+        },
+        "outputs": {
+          "status": "covered",
+          "by": [
+            "mesh.modeling_session"
+          ],
+          "explanation": "The selected exact command returns structured terminal observation, errors and warnings covering: errors, success, warnings"
+        }
+      },
+      "product_evidence": {
+        "test_id": "UAI.StrictV2.T38.MODELING.GEOMETRY.OPERATION",
+        "public_command_ids": [
+          "mesh.modeling_session"
+        ],
+        "architecture_contract_ids": [],
+        "required_claims": [
+          "public_entry",
+          "behavior",
+          "readback",
+          "terminal_state",
+          "failure_semantics",
+          "cleanup",
+          "legacy_exit",
+          "documentation"
+        ]
+      },
+      "old_id_exit": {
+        "public_executable": false,
+        "manifest_active": false,
+        "sdk_binding_active": false,
+        "compatibility_alias": false
+      },
+      "final_lifecycle": "deprecated_replaced"
+    },
+    {
+      "historical_command_id": "modeling_get_mesh_selection_info",
+      "approval": "1)",
+      "historical_source": "docs/commands/10_Modeling.md",
+      "historical_contract": {
+        "inputs": "asset_path, properties, selection, target_actor, tool_name",
+        "outputs": "errors, success, warnings",
+        "purpose": "**原子/兼容**：控制 Modeling Mode 工具、选择或网格编辑动作"
+      },
+      "resolved_from_contract_id": "uai.historical_capability.t38.modeling.geometry.operation.modeling_get_mesh_selection_info/1",
+      "successor": {
+        "kind": "exact_command_set",
+        "command_ids": [
+          "mesh.modeling_session"
+        ]
+      },
+      "semantic_coverage": {
+        "purpose": {
+          "status": "covered",
+          "by": [
+            "mesh.modeling_session"
+          ],
+          "explanation": "The exact current command set preserves the frozen Modeling Mode purpose: **原子/兼容**：控制 Modeling Mode 工具、选择或网格编辑动作"
+        },
+        "inputs": {
+          "status": "covered",
+          "by": [
+            "mesh.modeling_session"
+          ],
+          "explanation": "The selected exact command contract carries the applicable target, tool, property and selection inputs: asset_path, properties, selection, target_actor, tool_name"
+        },
+        "outputs": {
+          "status": "covered",
+          "by": [
+            "mesh.modeling_session"
+          ],
+          "explanation": "The selected exact command returns structured terminal observation, errors and warnings covering: errors, success, warnings"
+        }
+      },
+      "product_evidence": {
+        "test_id": "UAI.StrictV2.T38.MODELING.GEOMETRY.OPERATION",
+        "public_command_ids": [
+          "mesh.modeling_session"
+        ],
+        "architecture_contract_ids": [],
+        "required_claims": [
+          "public_entry",
+          "behavior",
+          "readback",
+          "terminal_state",
+          "failure_semantics",
+          "cleanup",
+          "legacy_exit",
+          "documentation"
+        ]
+      },
+      "old_id_exit": {
+        "public_executable": false,
+        "manifest_active": false,
+        "sdk_binding_active": false,
+        "compatibility_alias": false
+      },
+      "final_lifecycle": "deprecated_replaced"
+    },
+    {
+      "historical_command_id": "modeling_get_selection",
+      "approval": "1)",
+      "historical_source": "docs/commands/10_Modeling.md",
+      "historical_contract": {
+        "inputs": "asset_path, properties, selection, target_actor, tool_name",
+        "outputs": "errors, success, warnings",
+        "purpose": "**原子/兼容**：控制 Modeling Mode 工具、选择或网格编辑动作"
+      },
+      "resolved_from_contract_id": "uai.historical_capability.t38.modeling.geometry.operation.modeling_get_selection/1",
+      "successor": {
+        "kind": "exact_command_set",
+        "command_ids": [
+          "mesh.modeling_session"
+        ]
+      },
+      "semantic_coverage": {
+        "purpose": {
+          "status": "covered",
+          "by": [
+            "mesh.modeling_session"
+          ],
+          "explanation": "The exact current command set preserves the frozen Modeling Mode purpose: **原子/兼容**：控制 Modeling Mode 工具、选择或网格编辑动作"
+        },
+        "inputs": {
+          "status": "covered",
+          "by": [
+            "mesh.modeling_session"
+          ],
+          "explanation": "The selected exact command contract carries the applicable target, tool, property and selection inputs: asset_path, properties, selection, target_actor, tool_name"
+        },
+        "outputs": {
+          "status": "covered",
+          "by": [
+            "mesh.modeling_session"
+          ],
+          "explanation": "The selected exact command returns structured terminal observation, errors and warnings covering: errors, success, warnings"
+        }
+      },
+      "product_evidence": {
+        "test_id": "UAI.StrictV2.T38.MODELING.GEOMETRY.OPERATION",
+        "public_command_ids": [
+          "mesh.modeling_session"
+        ],
+        "architecture_contract_ids": [],
+        "required_claims": [
+          "public_entry",
+          "behavior",
+          "readback",
+          "terminal_state",
+          "failure_semantics",
+          "cleanup",
+          "legacy_exit",
+          "documentation"
+        ]
+      },
+      "old_id_exit": {
+        "public_executable": false,
+        "manifest_active": false,
+        "sdk_binding_active": false,
+        "compatibility_alias": false
+      },
+      "final_lifecycle": "deprecated_replaced"
+    },
+    {
+      "historical_command_id": "modeling_inset_faces",
+      "approval": "1)",
+      "historical_source": "docs/commands/10_Modeling.md",
+      "historical_contract": {
+        "inputs": "asset_path, properties, selection, target_actor, tool_name",
+        "outputs": "errors, success, warnings",
+        "purpose": "**原子/兼容**：控制 Modeling Mode 工具、选择或网格编辑动作"
+      },
+      "resolved_from_contract_id": "uai.historical_capability.t38.modeling.geometry.operation.modeling_inset_faces/1",
+      "successor": {
+        "kind": "exact_command_set",
+        "command_ids": [
+          "mesh.topology.faces.inset"
+        ]
+      },
+      "semantic_coverage": {
+        "purpose": {
+          "status": "covered",
+          "by": [
+            "mesh.topology.faces.inset"
+          ],
+          "explanation": "The exact current command set preserves the frozen Modeling Mode purpose: **原子/兼容**：控制 Modeling Mode 工具、选择或网格编辑动作"
+        },
+        "inputs": {
+          "status": "covered",
+          "by": [
+            "mesh.topology.faces.inset"
+          ],
+          "explanation": "The selected exact command contract carries the applicable target, tool, property and selection inputs: asset_path, properties, selection, target_actor, tool_name"
+        },
+        "outputs": {
+          "status": "covered",
+          "by": [
+            "mesh.topology.faces.inset"
+          ],
+          "explanation": "The selected exact command returns structured terminal observation, errors and warnings covering: errors, success, warnings"
+        }
+      },
+      "product_evidence": {
+        "test_id": "UAI.StrictV2.T38.MODELING.GEOMETRY.OPERATION",
+        "public_command_ids": [
+          "mesh.topology.faces.inset"
+        ],
+        "architecture_contract_ids": [],
+        "required_claims": [
+          "public_entry",
+          "behavior",
+          "readback",
+          "terminal_state",
+          "failure_semantics",
+          "cleanup",
+          "legacy_exit",
+          "documentation"
+        ]
+      },
+      "old_id_exit": {
+        "public_executable": false,
+        "manifest_active": false,
+        "sdk_binding_active": false,
+        "compatibility_alias": false
+      },
+      "final_lifecycle": "deprecated_replaced"
+    },
+    {
+      "historical_command_id": "modeling_invoke_active_tool_action",
+      "approval": "1)",
+      "historical_source": "docs/commands/10_Modeling.md",
+      "historical_contract": {
+        "inputs": "asset_path, properties, selection, target_actor, tool_name",
+        "outputs": "errors, success, warnings",
+        "purpose": "**原子/兼容**：控制 Modeling Mode 工具、选择或网格编辑动作"
+      },
+      "resolved_from_contract_id": "uai.historical_capability.t38.modeling.geometry.operation.modeling_invoke_active_tool_action/1",
+      "successor": {
+        "kind": "exact_command_set",
+        "command_ids": [
+          "mesh.modeling_session"
+        ]
+      },
+      "semantic_coverage": {
+        "purpose": {
+          "status": "covered",
+          "by": [
+            "mesh.modeling_session"
+          ],
+          "explanation": "The exact current command set preserves the frozen Modeling Mode purpose: **原子/兼容**：控制 Modeling Mode 工具、选择或网格编辑动作"
+        },
+        "inputs": {
+          "status": "covered",
+          "by": [
+            "mesh.modeling_session"
+          ],
+          "explanation": "The selected exact command contract carries the applicable target, tool, property and selection inputs: asset_path, properties, selection, target_actor, tool_name"
+        },
+        "outputs": {
+          "status": "covered",
+          "by": [
+            "mesh.modeling_session"
+          ],
+          "explanation": "The selected exact command returns structured terminal observation, errors and warnings covering: errors, success, warnings"
+        }
+      },
+      "product_evidence": {
+        "test_id": "UAI.StrictV2.T38.MODELING.GEOMETRY.OPERATION",
+        "public_command_ids": [
+          "mesh.modeling_session"
+        ],
+        "architecture_contract_ids": [],
+        "required_claims": [
+          "public_entry",
+          "behavior",
+          "readback",
+          "terminal_state",
+          "failure_semantics",
+          "cleanup",
+          "legacy_exit",
+          "documentation"
+        ]
+      },
+      "old_id_exit": {
+        "public_executable": false,
+        "manifest_active": false,
+        "sdk_binding_active": false,
+        "compatibility_alias": false
+      },
+      "final_lifecycle": "deprecated_replaced"
+    },
+    {
+      "historical_command_id": "modeling_push_pull",
+      "approval": "1)",
+      "historical_source": "docs/commands/10_Modeling.md",
+      "historical_contract": {
+        "inputs": "asset_path, properties, selection, target_actor, tool_name",
+        "outputs": "errors, success, warnings",
+        "purpose": "**原子/兼容**：控制 Modeling Mode 工具、选择或网格编辑动作"
+      },
+      "resolved_from_contract_id": "uai.historical_capability.t38.modeling.geometry.operation.modeling_push_pull/1",
+      "successor": {
+        "kind": "exact_command_set",
+        "command_ids": [
+          "mesh.topology.faces.push_pull"
+        ]
+      },
+      "semantic_coverage": {
+        "purpose": {
+          "status": "covered",
+          "by": [
+            "mesh.topology.faces.push_pull"
+          ],
+          "explanation": "The exact current command set preserves the frozen Modeling Mode purpose: **原子/兼容**：控制 Modeling Mode 工具、选择或网格编辑动作"
+        },
+        "inputs": {
+          "status": "covered",
+          "by": [
+            "mesh.topology.faces.push_pull"
+          ],
+          "explanation": "The selected exact command contract carries the applicable target, tool, property and selection inputs: asset_path, properties, selection, target_actor, tool_name"
+        },
+        "outputs": {
+          "status": "covered",
+          "by": [
+            "mesh.topology.faces.push_pull"
+          ],
+          "explanation": "The selected exact command returns structured terminal observation, errors and warnings covering: errors, success, warnings"
+        }
+      },
+      "product_evidence": {
+        "test_id": "UAI.StrictV2.T38.MODELING.GEOMETRY.OPERATION",
+        "public_command_ids": [
+          "mesh.topology.faces.push_pull"
+        ],
+        "architecture_contract_ids": [],
+        "required_claims": [
+          "public_entry",
+          "behavior",
+          "readback",
+          "terminal_state",
+          "failure_semantics",
+          "cleanup",
+          "legacy_exit",
+          "documentation"
+        ]
+      },
+      "old_id_exit": {
+        "public_executable": false,
+        "manifest_active": false,
+        "sdk_binding_active": false,
+        "compatibility_alias": false
+      },
+      "final_lifecycle": "deprecated_replaced"
+    },
+    {
+      "historical_command_id": "modeling_replace_actor_mesh",
+      "approval": "1)",
+      "historical_source": "docs/commands/10_Modeling.md",
+      "historical_contract": {
+        "inputs": "asset_path, properties, selection, target_actor, tool_name",
+        "outputs": "errors, success, warnings",
+        "purpose": "**原子/兼容**：控制 Modeling Mode 工具、选择或网格编辑动作"
+      },
+      "resolved_from_contract_id": "uai.historical_capability.t38.modeling.geometry.operation.modeling_replace_actor_mesh/1",
+      "successor": {
+        "kind": "exact_command_set",
+        "command_ids": [
+          "modeling.actor.mesh.replace"
+        ]
+      },
+      "semantic_coverage": {
+        "purpose": {
+          "status": "covered",
+          "by": [
+            "modeling.actor.mesh.replace"
+          ],
+          "explanation": "The exact current command set preserves the frozen Modeling Mode purpose: **原子/兼容**：控制 Modeling Mode 工具、选择或网格编辑动作"
+        },
+        "inputs": {
+          "status": "covered",
+          "by": [
+            "modeling.actor.mesh.replace"
+          ],
+          "explanation": "The selected exact command contract carries the applicable target, tool, property and selection inputs: asset_path, properties, selection, target_actor, tool_name"
+        },
+        "outputs": {
+          "status": "covered",
+          "by": [
+            "modeling.actor.mesh.replace"
+          ],
+          "explanation": "The selected exact command returns structured terminal observation, errors and warnings covering: errors, success, warnings"
+        }
+      },
+      "product_evidence": {
+        "test_id": "UAI.StrictV2.T38.MODELING.GEOMETRY.OPERATION",
+        "public_command_ids": [
+          "modeling.actor.mesh.replace"
+        ],
+        "architecture_contract_ids": [],
+        "required_claims": [
+          "public_entry",
+          "behavior",
+          "readback",
+          "terminal_state",
+          "failure_semantics",
+          "cleanup",
+          "legacy_exit",
+          "documentation"
+        ]
+      },
+      "old_id_exit": {
+        "public_executable": false,
+        "manifest_active": false,
+        "sdk_binding_active": false,
+        "compatibility_alias": false
+      },
+      "final_lifecycle": "deprecated_replaced"
+    },
+    {
+      "historical_command_id": "modeling_save_mesh_asset",
+      "approval": "1)",
+      "historical_source": "docs/commands/10_Modeling.md",
+      "historical_contract": {
+        "inputs": "asset_path, properties, selection, target_actor, tool_name",
+        "outputs": "errors, success, warnings",
+        "purpose": "**原子/兼容**：控制 Modeling Mode 工具、选择或网格编辑动作"
+      },
+      "resolved_from_contract_id": "uai.historical_capability.t38.modeling.geometry.operation.modeling_save_mesh_asset/1",
+      "successor": {
+        "kind": "exact_command_set",
+        "command_ids": [
+          "mesh.modeling_session"
+        ]
+      },
+      "semantic_coverage": {
+        "purpose": {
+          "status": "covered",
+          "by": [
+            "mesh.modeling_session"
+          ],
+          "explanation": "The exact current command set preserves the frozen Modeling Mode purpose: **原子/兼容**：控制 Modeling Mode 工具、选择或网格编辑动作"
+        },
+        "inputs": {
+          "status": "covered",
+          "by": [
+            "mesh.modeling_session"
+          ],
+          "explanation": "The selected exact command contract carries the applicable target, tool, property and selection inputs: asset_path, properties, selection, target_actor, tool_name"
+        },
+        "outputs": {
+          "status": "covered",
+          "by": [
+            "mesh.modeling_session"
+          ],
+          "explanation": "The selected exact command returns structured terminal observation, errors and warnings covering: errors, success, warnings"
+        }
+      },
+      "product_evidence": {
+        "test_id": "UAI.StrictV2.T38.MODELING.GEOMETRY.OPERATION",
+        "public_command_ids": [
+          "mesh.modeling_session"
+        ],
+        "architecture_contract_ids": [],
+        "required_claims": [
+          "public_entry",
+          "behavior",
+          "readback",
+          "terminal_state",
+          "failure_semantics",
+          "cleanup",
+          "legacy_exit",
+          "documentation"
+        ]
+      },
+      "old_id_exit": {
+        "public_executable": false,
+        "manifest_active": false,
+        "sdk_binding_active": false,
+        "compatibility_alias": false
+      },
+      "final_lifecycle": "deprecated_replaced"
+    },
+    {
+      "historical_command_id": "modeling_select_mesh_elements_via_screen",
+      "approval": "1)",
+      "historical_source": "docs/commands/10_Modeling.md",
+      "historical_contract": {
+        "inputs": "asset_path, properties, selection, target_actor, tool_name",
+        "outputs": "errors, success, warnings",
+        "purpose": "**原子/兼容**：控制 Modeling Mode 工具、选择或网格编辑动作"
+      },
+      "resolved_from_contract_id": "uai.historical_capability.t38.modeling.geometry.operation.modeling_select_mesh_elements_via_screen/1",
+      "successor": {
+        "kind": "exact_command_set",
+        "command_ids": [
+          "mesh.modeling_session"
+        ]
+      },
+      "semantic_coverage": {
+        "purpose": {
+          "status": "covered",
+          "by": [
+            "mesh.modeling_session"
+          ],
+          "explanation": "The exact current command set preserves the frozen Modeling Mode purpose: **原子/兼容**：控制 Modeling Mode 工具、选择或网格编辑动作"
+        },
+        "inputs": {
+          "status": "covered",
+          "by": [
+            "mesh.modeling_session"
+          ],
+          "explanation": "The selected exact command contract carries the applicable target, tool, property and selection inputs: asset_path, properties, selection, target_actor, tool_name"
+        },
+        "outputs": {
+          "status": "covered",
+          "by": [
+            "mesh.modeling_session"
+          ],
+          "explanation": "The selected exact command returns structured terminal observation, errors and warnings covering: errors, success, warnings"
+        }
+      },
+      "product_evidence": {
+        "test_id": "UAI.StrictV2.T38.MODELING.GEOMETRY.OPERATION",
+        "public_command_ids": [
+          "mesh.modeling_session"
+        ],
+        "architecture_contract_ids": [],
+        "required_claims": [
+          "public_entry",
+          "behavior",
+          "readback",
+          "terminal_state",
+          "failure_semantics",
+          "cleanup",
+          "legacy_exit",
+          "documentation"
+        ]
+      },
+      "old_id_exit": {
+        "public_executable": false,
+        "manifest_active": false,
+        "sdk_binding_active": false,
+        "compatibility_alias": false
+      },
+      "final_lifecycle": "deprecated_replaced"
+    },
+    {
+      "historical_command_id": "modeling_select_mesh_elements_via_world_ray",
+      "approval": "1)",
+      "historical_source": "docs/commands/10_Modeling.md",
+      "historical_contract": {
+        "inputs": "asset_path, properties, selection, target_actor, tool_name",
+        "outputs": "errors, success, warnings",
+        "purpose": "**原子/兼容**：控制 Modeling Mode 工具、选择或网格编辑动作"
+      },
+      "resolved_from_contract_id": "uai.historical_capability.t38.modeling.geometry.operation.modeling_select_mesh_elements_via_world_ray/1",
+      "successor": {
+        "kind": "exact_command_set",
+        "command_ids": [
+          "mesh.element.select_by_ray"
+        ]
+      },
+      "semantic_coverage": {
+        "purpose": {
+          "status": "covered",
+          "by": [
+            "mesh.element.select_by_ray"
+          ],
+          "explanation": "The exact current command set preserves the frozen Modeling Mode purpose: **原子/兼容**：控制 Modeling Mode 工具、选择或网格编辑动作"
+        },
+        "inputs": {
+          "status": "covered",
+          "by": [
+            "mesh.element.select_by_ray"
+          ],
+          "explanation": "The selected exact command contract carries the applicable target, tool, property and selection inputs: asset_path, properties, selection, target_actor, tool_name"
+        },
+        "outputs": {
+          "status": "covered",
+          "by": [
+            "mesh.element.select_by_ray"
+          ],
+          "explanation": "The selected exact command returns structured terminal observation, errors and warnings covering: errors, success, warnings"
+        }
+      },
+      "product_evidence": {
+        "test_id": "UAI.StrictV2.T38.MODELING.GEOMETRY.OPERATION",
+        "public_command_ids": [
+          "mesh.element.select_by_ray"
+        ],
+        "architecture_contract_ids": [],
+        "required_claims": [
+          "public_entry",
+          "behavior",
+          "readback",
+          "terminal_state",
+          "failure_semantics",
+          "cleanup",
+          "legacy_exit",
+          "documentation"
+        ]
+      },
+      "old_id_exit": {
+        "public_executable": false,
+        "manifest_active": false,
+        "sdk_binding_active": false,
+        "compatibility_alias": false
+      },
+      "final_lifecycle": "deprecated_replaced"
+    },
+    {
+      "historical_command_id": "modeling_set_active_tool_property",
+      "approval": "1)",
+      "historical_source": "docs/commands/10_Modeling.md",
+      "historical_contract": {
+        "inputs": "asset_path, properties, selection, target_actor, tool_name",
+        "outputs": "errors, success, warnings",
+        "purpose": "**原子/兼容**：控制 Modeling Mode 工具、选择或网格编辑动作"
+      },
+      "resolved_from_contract_id": "uai.historical_capability.t38.modeling.geometry.operation.modeling_set_active_tool_property/1",
+      "successor": {
+        "kind": "exact_command_set",
+        "command_ids": [
+          "mesh.modeling_session"
+        ]
+      },
+      "semantic_coverage": {
+        "purpose": {
+          "status": "covered",
+          "by": [
+            "mesh.modeling_session"
+          ],
+          "explanation": "The exact current command set preserves the frozen Modeling Mode purpose: **原子/兼容**：控制 Modeling Mode 工具、选择或网格编辑动作"
+        },
+        "inputs": {
+          "status": "covered",
+          "by": [
+            "mesh.modeling_session"
+          ],
+          "explanation": "The selected exact command contract carries the applicable target, tool, property and selection inputs: asset_path, properties, selection, target_actor, tool_name"
+        },
+        "outputs": {
+          "status": "covered",
+          "by": [
+            "mesh.modeling_session"
+          ],
+          "explanation": "The selected exact command returns structured terminal observation, errors and warnings covering: errors, success, warnings"
+        }
+      },
+      "product_evidence": {
+        "test_id": "UAI.StrictV2.T38.MODELING.GEOMETRY.OPERATION",
+        "public_command_ids": [
+          "mesh.modeling_session"
+        ],
+        "architecture_contract_ids": [],
+        "required_claims": [
+          "public_entry",
+          "behavior",
+          "readback",
+          "terminal_state",
+          "failure_semantics",
+          "cleanup",
+          "legacy_exit",
+          "documentation"
+        ]
+      },
+      "old_id_exit": {
+        "public_executable": false,
+        "manifest_active": false,
+        "sdk_binding_active": false,
+        "compatibility_alias": false
+      },
+      "final_lifecycle": "deprecated_replaced"
+    },
+    {
+      "historical_command_id": "modeling_set_mesh_selection_mode",
+      "approval": "1)",
+      "historical_source": "docs/commands/10_Modeling.md",
+      "historical_contract": {
+        "inputs": "asset_path, properties, selection, target_actor, tool_name",
+        "outputs": "errors, success, warnings",
+        "purpose": "**原子/兼容**：控制 Modeling Mode 工具、选择或网格编辑动作"
+      },
+      "resolved_from_contract_id": "uai.historical_capability.t38.modeling.geometry.operation.modeling_set_mesh_selection_mode/1",
+      "successor": {
+        "kind": "exact_command_set",
+        "command_ids": [
+          "mesh.modeling_session"
+        ]
+      },
+      "semantic_coverage": {
+        "purpose": {
+          "status": "covered",
+          "by": [
+            "mesh.modeling_session"
+          ],
+          "explanation": "The exact current command set preserves the frozen Modeling Mode purpose: **原子/兼容**：控制 Modeling Mode 工具、选择或网格编辑动作"
+        },
+        "inputs": {
+          "status": "covered",
+          "by": [
+            "mesh.modeling_session"
+          ],
+          "explanation": "The selected exact command contract carries the applicable target, tool, property and selection inputs: asset_path, properties, selection, target_actor, tool_name"
+        },
+        "outputs": {
+          "status": "covered",
+          "by": [
+            "mesh.modeling_session"
+          ],
+          "explanation": "The selected exact command returns structured terminal observation, errors and warnings covering: errors, success, warnings"
+        }
+      },
+      "product_evidence": {
+        "test_id": "UAI.StrictV2.T38.MODELING.GEOMETRY.OPERATION",
+        "public_command_ids": [
+          "mesh.modeling_session"
+        ],
+        "architecture_contract_ids": [],
+        "required_claims": [
+          "public_entry",
+          "behavior",
+          "readback",
+          "terminal_state",
+          "failure_semantics",
+          "cleanup",
+          "legacy_exit",
+          "documentation"
+        ]
+      },
+      "old_id_exit": {
+        "public_executable": false,
+        "manifest_active": false,
+        "sdk_binding_active": false,
+        "compatibility_alias": false
+      },
+      "final_lifecycle": "deprecated_replaced"
+    },
+    {
+      "historical_command_id": "modeling_set_selection",
+      "approval": "1)",
+      "historical_source": "docs/commands/10_Modeling.md",
+      "historical_contract": {
+        "inputs": "asset_path, properties, selection, target_actor, tool_name",
+        "outputs": "errors, success, warnings",
+        "purpose": "**原子/兼容**：控制 Modeling Mode 工具、选择或网格编辑动作"
+      },
+      "resolved_from_contract_id": "uai.historical_capability.t38.modeling.geometry.operation.modeling_set_selection/1",
+      "successor": {
+        "kind": "exact_command_set",
+        "command_ids": [
+          "mesh.modeling_session"
+        ]
+      },
+      "semantic_coverage": {
+        "purpose": {
+          "status": "covered",
+          "by": [
+            "mesh.modeling_session"
+          ],
+          "explanation": "The exact current command set preserves the frozen Modeling Mode purpose: **原子/兼容**：控制 Modeling Mode 工具、选择或网格编辑动作"
+        },
+        "inputs": {
+          "status": "covered",
+          "by": [
+            "mesh.modeling_session"
+          ],
+          "explanation": "The selected exact command contract carries the applicable target, tool, property and selection inputs: asset_path, properties, selection, target_actor, tool_name"
+        },
+        "outputs": {
+          "status": "covered",
+          "by": [
+            "mesh.modeling_session"
+          ],
+          "explanation": "The selected exact command returns structured terminal observation, errors and warnings covering: errors, success, warnings"
+        }
+      },
+      "product_evidence": {
+        "test_id": "UAI.StrictV2.T38.MODELING.GEOMETRY.OPERATION",
+        "public_command_ids": [
+          "mesh.modeling_session"
+        ],
+        "architecture_contract_ids": [],
+        "required_claims": [
+          "public_entry",
+          "behavior",
+          "readback",
+          "terminal_state",
+          "failure_semantics",
+          "cleanup",
+          "legacy_exit",
+          "documentation"
+        ]
+      },
+      "old_id_exit": {
+        "public_executable": false,
+        "manifest_active": false,
+        "sdk_binding_active": false,
+        "compatibility_alias": false
+      },
+      "final_lifecycle": "deprecated_replaced"
+    },
+    {
+      "historical_command_id": "modeling_snap_to_ground",
+      "approval": "1)",
+      "historical_source": "docs/commands/10_Modeling.md",
+      "historical_contract": {
+        "inputs": "asset_path, properties, selection, target_actor, tool_name",
+        "outputs": "errors, success, warnings",
+        "purpose": "**原子/兼容**：控制 Modeling Mode 工具、选择或网格编辑动作"
+      },
+      "resolved_from_contract_id": "uai.historical_capability.t38.modeling.geometry.operation.modeling_snap_to_ground/1",
+      "successor": {
+        "kind": "exact_command_set",
+        "command_ids": [
+          "world.object_snap_to_surface"
+        ]
+      },
+      "semantic_coverage": {
+        "purpose": {
+          "status": "covered",
+          "by": [
+            "world.object_snap_to_surface"
+          ],
+          "explanation": "The exact current command set preserves the frozen Modeling Mode purpose: **原子/兼容**：控制 Modeling Mode 工具、选择或网格编辑动作"
+        },
+        "inputs": {
+          "status": "covered",
+          "by": [
+            "world.object_snap_to_surface"
+          ],
+          "explanation": "The selected exact command contract carries the applicable target, tool, property and selection inputs: asset_path, properties, selection, target_actor, tool_name"
+        },
+        "outputs": {
+          "status": "covered",
+          "by": [
+            "world.object_snap_to_surface"
+          ],
+          "explanation": "The selected exact command returns structured terminal observation, errors and warnings covering: errors, success, warnings"
+        }
+      },
+      "product_evidence": {
+        "test_id": "UAI.StrictV2.T38.MODELING.GEOMETRY.OPERATION",
+        "public_command_ids": [
+          "world.object_snap_to_surface"
+        ],
+        "architecture_contract_ids": [],
+        "required_claims": [
+          "public_entry",
+          "behavior",
+          "readback",
+          "terminal_state",
+          "failure_semantics",
+          "cleanup",
+          "legacy_exit",
+          "documentation"
+        ]
+      },
+      "old_id_exit": {
+        "public_executable": false,
+        "manifest_active": false,
+        "sdk_binding_active": false,
+        "compatibility_alias": false
+      },
+      "final_lifecycle": "deprecated_replaced"
+    },
+    {
+      "historical_command_id": "modeling_start_tool",
+      "approval": "1)",
+      "historical_source": "docs/commands/10_Modeling.md",
+      "historical_contract": {
+        "inputs": "asset_path, properties, selection, target_actor, tool_name",
+        "outputs": "errors, success, warnings",
+        "purpose": "**原子/兼容**：控制 Modeling Mode 工具、选择或网格编辑动作"
+      },
+      "resolved_from_contract_id": "uai.historical_capability.t38.modeling.geometry.operation.modeling_start_tool/1",
+      "successor": {
+        "kind": "exact_command_set",
+        "command_ids": [
+          "mesh.modeling_session"
+        ]
+      },
+      "semantic_coverage": {
+        "purpose": {
+          "status": "covered",
+          "by": [
+            "mesh.modeling_session"
+          ],
+          "explanation": "The exact current command set preserves the frozen Modeling Mode purpose: **原子/兼容**：控制 Modeling Mode 工具、选择或网格编辑动作"
+        },
+        "inputs": {
+          "status": "covered",
+          "by": [
+            "mesh.modeling_session"
+          ],
+          "explanation": "The selected exact command contract carries the applicable target, tool, property and selection inputs: asset_path, properties, selection, target_actor, tool_name"
+        },
+        "outputs": {
+          "status": "covered",
+          "by": [
+            "mesh.modeling_session"
+          ],
+          "explanation": "The selected exact command returns structured terminal observation, errors and warnings covering: errors, success, warnings"
+        }
+      },
+      "product_evidence": {
+        "test_id": "UAI.StrictV2.T38.MODELING.GEOMETRY.OPERATION",
+        "public_command_ids": [
+          "mesh.modeling_session"
+        ],
+        "architecture_contract_ids": [],
+        "required_claims": [
+          "public_entry",
+          "behavior",
+          "readback",
+          "terminal_state",
+          "failure_semantics",
+          "cleanup",
+          "legacy_exit",
+          "documentation"
+        ]
+      },
+      "old_id_exit": {
+        "public_executable": false,
+        "manifest_active": false,
+        "sdk_binding_active": false,
+        "compatibility_alias": false
+      },
+      "final_lifecycle": "deprecated_replaced"
+    }
+  ]
+}

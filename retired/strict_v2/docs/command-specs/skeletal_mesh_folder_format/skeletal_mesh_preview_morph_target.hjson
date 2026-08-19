@@ -1,0 +1,65 @@
+authoring: { reason: command_has_no_registered_folder_authoring_profile, state: none }
+category: skeletal_mesh_folder_format
+command: skeletal_mesh_preview_morph_target
+deprecation: { reason: command_is_active, state: none }
+discovery: { aliases: [], keywords_en: [skeletal, mesh, preview, morph, target, skeletal_mesh_folder_format], keywords_zh: [skeletal_mesh_preview_morph_target], summary_en: "Execute skeletal_mesh_preview_morph_target with a verified implementation contract", summary_zh: "用临时 SkeletalMeshComponent 设置 Morph 权重做无 UI 预览校验", tags: [skeletal_mesh_folder_format, p2-006] }
+errors: {
+  codes: [
+    { code: missing_asset_path, description_zh: "C++ 实现返回错误码 missing_asset_path", retry_safe: true, stage: preflight, wire_match: exact }
+    { code: missing_morph_target, description_zh: "C++ 实现返回错误码 missing_morph_target", retry_safe: true, stage: preflight, wire_match: exact }
+    { code: morph_target_not_found, description_zh: "C++ 实现返回错误码 morph_target_not_found", retry_safe: false, stage: execution, wire_match: exact }
+    { code: skeletal_mesh_not_found, description_zh: "C++ 实现返回错误码 skeletal_mesh_not_found", retry_safe: false, stage: execution, wire_match: exact }
+  ]
+}
+evidence: {
+  docs: [
+    { path: "Plugins/UeAgentInterface/docs/commands/skeletal_mesh_folder_format/skeletal_mesh_preview_morph_target.md", purpose: "user documentation cross-check; C++ implementation remains authoritative" }
+  ]
+  implementation: [
+    { line_hint: 1225, path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Commands/Animation/UeAgentHttpServer_SkeletalMesh.cpp", purpose: "command handler, parameter and return evidence", symbol: CmdSkeletalMeshPreviewMorphTarget }
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Server/UeAgentHttpServer.cpp", purpose: "transitive helper evidence used by the command handler" }
+  ]
+  tests: [
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterfaceTests/Private/Smoke/UeAgentInterfaceSmoke_MaterialStaticDeformerInput.cpp", purpose: "smoke or negative-path evidence cross-checked for the verified contract" }
+  ]
+}
+execution: {
+  destructive: false
+  editor_state: required
+  game_thread: required
+  idempotent: true
+  kind: read_only
+  overwrite_behavior: none
+  pie_state: allowed
+  retry_safe: true
+  save_behavior: none
+  side_effects: []
+  ui_effect: none
+}
+maturity: verified
+params: {
+  constraints: []
+  fields: {
+    asset_path: { default_state: none, description_zh: "C++ 实现读取的 asset_path 参数", path_semantics: { access_scope: mounted_read, kind: ue_asset }, required: true, type: ue_asset_path }
+    morph_target: { default_state: none, description_zh: "C++ 实现读取的 morph_target 参数", required: true, type: string }
+    name: { default_state: none, description_zh: "C++ 实现读取的 name 参数", required: false, type: string }
+    weight: { default: 1, default_state: defined, description_zh: "C++ 实现读取的 weight 参数", required: false, type: number }
+  }
+  state: defined
+}
+response: { artifact_fields: [morph_target_summary], compact_fields: [asset_path, morph_target, preview_status, requested_weight], failure_fields: [params.asset_path, params.morph_target], max_items_policy: { fields: [], mode: none } }
+returns: {
+  fields: {
+    asset_path: { description_zh: "C++ 实现返回的 asset_path 字段；是否出现取决于执行分支", required: false, type: ue_asset_path }
+    morph_target: { description_zh: "C++ 实现返回的 morph_target 字段；是否出现取决于执行分支", required: false, type: string }
+    morph_target_summary: { description_zh: "C++ 实现返回的 morph_target_summary 字段；是否出现取决于执行分支", required: false, type: json_value }
+    preview_status: { description_zh: "C++ 实现返回的 preview_status 字段；是否出现取决于执行分支", required: false, type: string }
+    requested_weight: { description_zh: "C++ 实现返回的 requested_weight 字段；是否出现取决于执行分支", required: false, type: number }
+  }
+  state: defined
+}
+schema: uai.command_spec.v1
+status: active
+types: {}
+verification: { reason: read_only_command_has_no_post_write_verification, state: none }
+version: 1

@@ -1,0 +1,110 @@
+authoring: { reason: command_has_no_registered_folder_authoring_profile, state: none }
+category: core_level
+command: asset_move
+deprecation: { reason: command_is_active, state: none }
+discovery: { aliases: [], keywords_en: [asset, move, core_level], keywords_zh: [asset_move], summary_en: "Execute asset_move with a verified implementation contract", summary_zh: "通过 UE AssetTools 移动或重命名资产", tags: [core_level, p2-002] }
+errors: {
+  codes: [
+    { code: allow_destructive_required, description_zh: "C++ 实现返回错误码 allow_destructive_required", retry_safe: true, stage: preflight, wire_match: exact }
+    { code: asset_not_found, description_zh: "C++ 实现返回错误码 asset_not_found", retry_safe: false, stage: execution, wire_match: exact }
+    { code: destination_asset_already_exists, description_zh: "C++ 实现返回错误码 destination_asset_already_exists", retry_safe: false, stage: execution, wire_match: exact }
+    { code: invalid_, description_zh: "C++ 实现返回错误码 invalid_", retry_safe: true, stage: preflight, wire_match: prefix }
+    { code: invalid_destination_asset_path, description_zh: "C++ 实现返回错误码 invalid_destination_asset_path", retry_safe: true, stage: preflight, wire_match: exact }
+    { code: missing_destination_asset_path_or_folder, description_zh: "C++ 实现返回错误码 missing_destination_asset_path_or_folder", retry_safe: true, stage: preflight, wire_match: exact }
+    { code: missing_source_asset_path, description_zh: "C++ 实现返回错误码 missing_source_asset_path", retry_safe: true, stage: preflight, wire_match: exact }
+    { code: moved_asset_not_found_after_rename, description_zh: "C++ 实现返回错误码 moved_asset_not_found_after_rename", retry_safe: false, stage: execution, wire_match: exact }
+    { code: rename_asset_failed, description_zh: "C++ 实现返回错误码 rename_asset_failed", retry_safe: false, stage: execution, wire_match: exact }
+    { code: save_asset_failed, description_zh: "C++ 实现返回错误码 save_asset_failed", retry_safe: false, stage: execution, wire_match: exact }
+    { code: source_asset_not_found, description_zh: "C++ 实现返回错误码 source_asset_not_found", retry_safe: false, stage: execution, wire_match: exact }
+  ]
+}
+evidence: {
+  docs: [
+    { path: "Plugins/UeAgentInterface/docs/commands/core_level/asset_move.md", purpose: "user documentation cross-check; C++ implementation remains authoritative" }
+  ]
+  implementation: [
+    { line_hint: 748, path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Commands/Assets/UeAgentHttpServer_Assets.cpp", purpose: "command handler, parameter and return evidence", symbol: CmdAssetMove }
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Commands/Level/UeAgentCommandSafety.h", purpose: "transitive helper evidence used by the command handler" }
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Commands/Sequence/UeAgentHttpServer_Sequence.cpp", purpose: "transitive helper evidence used by the command handler" }
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Server/UeAgentHttpServer.cpp", purpose: "transitive helper evidence used by the command handler" }
+  ]
+  tests: [
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterfaceTests/Private/Smoke/UeAgentInterfaceSmoke_Core.cpp", purpose: "smoke or negative-path evidence cross-checked for the verified contract" }
+  ]
+}
+execution: {
+  destructive: true
+  editor_state: required
+  game_thread: required
+  idempotent: false
+  kind: write
+  overwrite_behavior: target_asset
+  pie_state: allowed
+  retry_safe: false
+  save_behavior: caller_controlled
+  side_effects: [modifies_asset, renames_asset]
+  ui_effect: none
+}
+maturity: verified
+params: {
+  constraints: [
+    { fields: [source_asset_path, asset_path], kind: one_of }
+    { fields: [destination_asset_path, destination_folder], kind: one_of }
+  ]
+  fields: {
+    allow_destructive: { default: false, default_state: defined, description_zh: "C++ 实现读取的 allow_destructive 参数", required: false, type: bool }
+    asset_path: { default_state: none, description_zh: "C++ 实现读取的 asset_path 参数", path_semantics: { access_scope: project_write, kind: ue_asset }, required: false, type: ue_asset_path }
+    destination_asset_path: { default_state: none, description_zh: "C++ 实现读取的 destination_asset_path 参数", path_semantics: { access_scope: project_write, kind: ue_asset }, required: false, type: ue_asset_path }
+    destination_folder: {
+      default_state: none
+      description_zh: "C++ 实现读取的 destination_folder 参数"
+      path_semantics: { allowed_roots: ["/Game"], kind: folder_package, must_exist: false, writable: true }
+      required: false
+      type: folder_package_path
+    }
+    destination_name: { default_state: none, description_zh: "C++ 实现读取的 destination_name 参数", required: false, type: string }
+    dry_run: { default: true, default_state: defined, description_zh: "C++ 实现读取的 dry_run 参数", required: false, type: bool }
+    overwrite_existing: { default: false, default_state: defined, description_zh: "C++ 实现读取的 overwrite_existing 参数", required: false, type: bool }
+    save_after_move: { default: true, default_state: defined, description_zh: "C++ 实现读取的 save_after_move 参数", required: false, type: bool }
+    source_asset_path: { default_state: none, description_zh: "C++ 实现读取的 source_asset_path 参数", path_semantics: { access_scope: project_write, kind: ue_asset }, required: false, type: ue_asset_path }
+  }
+  state: defined
+}
+response: { artifact_fields: [], compact_fields: [saved, changed, asset_path, allow_destructive, class, destination_folder], failure_fields: [params.source_asset_path], max_items_policy: { fields: [], mode: none } }
+returns: {
+  fields: {
+    allow_destructive: { description_zh: "C++ 实现返回的 allow_destructive 字段；是否出现取决于执行分支", required: false, type: bool }
+    asset_path: { description_zh: "C++ 实现返回的 asset_path 字段；是否出现取决于执行分支", required: false, type: ue_asset_path }
+    changed: { description_zh: "C++ 实现返回的 changed 字段；是否出现取决于执行分支", required: false, type: bool }
+    class: { description_zh: "C++ 实现返回的 class 字段；是否出现取决于执行分支", required: false, type: string }
+    destination_folder: { description_zh: "C++ 实现返回的 destination_folder 字段；是否出现取决于执行分支", required: false, type: folder_package_path }
+    destination_name: { description_zh: "C++ 实现返回的 destination_name 字段；是否出现取决于执行分支", required: false, type: string }
+    dry_run: { description_zh: "C++ 实现返回的 dry_run 字段；是否出现取决于执行分支", required: false, type: bool }
+    object_path: { description_zh: "C++ 实现返回的 object_path 字段；是否出现取决于执行分支", required: false, type: ue_object_path }
+    overwrite_existing: { description_zh: "C++ 实现返回的 overwrite_existing 字段；是否出现取决于执行分支", required: false, type: bool }
+    saved: { description_zh: "C++ 实现返回的 saved 字段；是否出现取决于执行分支", required: false, type: bool }
+    source_asset_exists_after: { description_zh: "C++ 实现返回的 source_asset_exists_after 字段；是否出现取决于执行分支", required: false, type: bool }
+    source_asset_path: { description_zh: "C++ 实现返回的 source_asset_path 字段；是否出现取决于执行分支", required: false, type: ue_asset_path }
+    source_redirector_exists_after: { description_zh: "C++ 实现返回的 source_redirector_exists_after 字段；是否出现取决于执行分支", required: false, type: bool }
+    target_asset_exists_after: { description_zh: "C++ 实现返回的 target_asset_exists_after 字段；是否出现取决于执行分支", required: false, type: bool }
+    would_move: { description_zh: "C++ 实现返回的 would_move 字段；是否出现取决于执行分支", required: false, type: bool }
+  }
+  state: defined
+}
+schema: uai.command_spec.v1
+status: active
+types: {}
+verification: {
+  assertions: [
+    { id: result_present, operator: exists, source: returns.saved }
+    { id: state_readback_present, operator: exists, source: methods.state_readback.nodes }
+  ]
+  failure_policy: fail_overall
+  methods: [
+    { id: result, kind: result_assertion }
+    { command: asset_reference_graph, id: state_readback, kind: command_readback, params_mapping: { asset_path: returns.asset_path } }
+  ]
+  required: true
+  state: defined
+}
+version: 1

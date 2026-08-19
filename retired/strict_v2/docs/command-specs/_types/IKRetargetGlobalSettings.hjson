@@ -1,0 +1,23 @@
+definition: {
+  additional_fields: false
+  fields: {
+    copy_base_pose: { default_state: none, description_zh: "复制 base pose", required: false, type: bool }
+    copy_base_pose_root: { default_state: none, description_zh: "复制 base pose 的 root bone", required: false, type: string }
+    direction_chain: { default_state: none, description_zh: "direction chain 名", required: false, type: string }
+    direction_source: { default_state: none, description_zh: "warping direction source", required: false, type: string }
+    enable_fk: { default_state: none, description_zh: "启用 FK retarget", required: false, type: bool }
+    enable_ik: { default_state: none, description_zh: "启用 IK retarget", required: false, type: bool }
+    enable_post: { default_state: none, description_zh: "启用 post retarget", required: false, type: bool }
+    enable_root: { default_state: none, description_zh: "启用 root retarget", required: false, type: bool }
+    forward_direction: { default_state: none, description_zh: "角色 forward axis", required: false, type: string }
+    sideways_offset: { default_state: none, description_zh: "sideways offset", required: false, type: number }
+    source_scale_factor: { default_state: none, description_zh: "source scale factor", required: false, type: number }
+    warp_forwards: { default_state: none, description_zh: "forward warping", required: false, type: number }
+    warp_splay: { default_state: none, description_zh: "warp splay", required: false, type: number }
+    warping: { default_state: none, description_zh: "启用 IK warping", required: false, type: bool }
+  }
+  kind: object
+}
+schema: uai.command_spec.shared_type.v1
+type_id: IKRetargetGlobalSettings
+version: 1

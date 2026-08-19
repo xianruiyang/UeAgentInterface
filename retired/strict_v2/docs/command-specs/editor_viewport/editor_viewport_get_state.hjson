@@ -1,0 +1,66 @@
+authoring: { reason: command_has_no_registered_folder_authoring_profile, state: none }
+category: editor_viewport
+command: editor_viewport_get_state
+deprecation: { reason: command_is_active, state: none }
+discovery: { aliases: [], keywords_en: [editor, viewport, get, state, editor_viewport], keywords_zh: [editor_viewport_get_state], summary_en: "Execute editor_viewport_get_state with a verified implementation contract", summary_zh: "读取指定视口状态", tags: [editor_viewport, p2-003] }
+errors: {
+  codes: [
+    { code: ambiguous_viewport_target, description_zh: "C++ 实现返回错误码 ambiguous_viewport_target", retry_safe: false, stage: execution, wire_match: exact }
+    { code: asset_editor, description_zh: "C++ 实现返回错误码 asset_editor", retry_safe: false, stage: execution, wire_match: exact }
+    { code: invalid_persona_viewport, description_zh: "C++ 实现返回错误码 invalid_persona_viewport", retry_safe: true, stage: preflight, wire_match: exact }
+    { code: unsupported_asset_editor_viewport, description_zh: "C++ 实现返回错误码 unsupported_asset_editor_viewport", retry_safe: false, stage: execution, wire_match: exact }
+    { code: unsupported_editor_viewport_target, description_zh: "C++ 实现返回错误码 unsupported_editor_viewport_target", retry_safe: false, stage: execution, wire_match: exact }
+  ]
+}
+evidence: {
+  docs: [
+    { path: "Plugins/UeAgentInterface/docs/commands/editor_viewport/editor_viewport_get_state.md", purpose: "user documentation cross-check; C++ implementation remains authoritative" }
+  ]
+  implementation: [
+    { line_hint: 156, path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Commands/EditorViewport/UeAgentHttpServer_EditorViewportDispatch.cpp", purpose: "command handler, parameter and return evidence", symbol: "FUeAgentHttpServer::ExecuteEditorViewportCommand__command_editor_viewport_get_state" }
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Commands/EditorViewport/UeAgentEditorViewportTypes.cpp", purpose: "transitive helper evidence used by the command handler" }
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Commands/EditorViewport/UeAgentHttpServer_EditorViewportCore.cpp", purpose: "transitive helper evidence used by the command handler" }
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Commands/EditorViewport/UeAgentHttpServer_EditorViewportPersona.cpp", purpose: "transitive helper evidence used by the command handler" }
+  ]
+  tests: [
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterfaceTests/Private/Smoke/UeAgentInterfaceSmoke_EditorViewport.cpp", purpose: "smoke or negative-path evidence cross-checked for the verified contract" }
+  ]
+}
+execution: {
+  destructive: false
+  editor_state: required
+  game_thread: required
+  idempotent: true
+  kind: read_only
+  overwrite_behavior: none
+  pie_state: allowed
+  retry_safe: true
+  save_behavior: none
+  side_effects: []
+  ui_effect: none
+}
+maturity: verified
+params: {
+  constraints: []
+  fields: { target: { default_state: none, description_zh: "C++ 实现读取的 target 参数", required: false, type: object, type_ref: "shared:EditorViewportTarget" } }
+  state: defined
+}
+response: { artifact_fields: [], compact_fields: [adapter, camera, capabilities, client_class, preview_state, schema], failure_fields: [], max_items_policy: { fields: [], mode: none } }
+returns: {
+  fields: {
+    adapter: { description_zh: "C++ 实现返回的 adapter 字段；是否出现取决于执行分支", required: false, type: string }
+    camera: { description_zh: "C++ 实现返回的 camera 字段；是否出现取决于执行分支", required: false, type: object, type_ref: "shared:EditorViewportCamera" }
+    capabilities: { description_zh: "C++ 实现返回的 capabilities 字段；是否出现取决于执行分支", required: false, type: json_value }
+    client_class: { description_zh: "C++ 实现返回的 client_class 字段；是否出现取决于执行分支", required: false, type: string }
+    preview_state: { description_zh: "C++ 实现返回的 preview_state 字段；是否出现取决于执行分支", required: false, type: object, type_ref: "shared:EditorViewportPreviewState" }
+    schema: { description_zh: "C++ 实现返回的 schema 字段；是否出现取决于执行分支", required: false, type: string }
+    target: { description_zh: "C++ 实现返回的 target 字段；是否出现取决于执行分支", required: false, type: object, type_ref: "shared:EditorViewportTarget" }
+    visual_options: { description_zh: "C++ 实现返回的 visual_options 字段；是否出现取决于执行分支", required: false, type: object, type_ref: "shared:EditorViewportVisualOptions" }
+  }
+  state: defined
+}
+schema: uai.command_spec.v1
+status: active
+types: {}
+verification: { reason: read_only_command_has_no_post_write_verification, state: none }
+version: 1

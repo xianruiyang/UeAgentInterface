@@ -1,0 +1,68 @@
+authoring: { reason: command_has_no_registered_folder_authoring_profile, state: none }
+category: localization_packaging_platform_profiles
+command: packaging_parse_log
+deprecation: { reason: command_is_active, state: none }
+discovery: { aliases: [], keywords_en: [packaging, parse, log, localization_packaging_platform_profiles], keywords_zh: [packaging_parse_log], summary_en: "Execute packaging_parse_log with a verified implementation contract", summary_zh: "解析 UAT/cook log 的 error/warning", tags: [localization_packaging_platform_profiles, p2-002] }
+errors: {
+  codes: [
+    { code: log_file_not_found, description_zh: "C++ 实现返回错误码 log_file_not_found", retry_safe: false, stage: execution, wire_match: exact }
+    { code: log_file_not_uai_owned, description_zh: "C++ 实现返回错误码 log_file_not_uai_owned", retry_safe: false, stage: execution, wire_match: exact }
+    { code: missing_log_file, description_zh: "C++ 实现返回错误码 missing_log_file", retry_safe: true, stage: preflight, wire_match: exact }
+  ]
+}
+evidence: {
+  docs: [
+    { path: "Plugins/UeAgentInterface/docs/commands/localization_packaging_platform_profiles/packaging_parse_log.md", purpose: "user documentation cross-check; C++ implementation remains authoritative" }
+  ]
+  implementation: [
+    { line_hint: 3388, path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Commands/ProductionPipeline/UeAgentHttpServer_ProductionPipeline.cpp", purpose: "command handler, parameter and return evidence", symbol: CmdPackagingParseLog }
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Server/UeAgentHttpServer.cpp", purpose: "transitive helper evidence used by the command handler" }
+  ]
+  tests: [
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterfaceTests/Private/Smoke/ProductionPipeline/UeAgentInterfaceProductionPipelineSmokeTests.cpp", purpose: "smoke or negative-path evidence cross-checked for the verified contract" }
+  ]
+}
+execution: {
+  destructive: false
+  editor_state: required
+  game_thread: required
+  idempotent: true
+  kind: read_only
+  overwrite_behavior: none
+  pie_state: allowed
+  retry_safe: true
+  save_behavior: none
+  side_effects: []
+  ui_effect: none
+}
+maturity: verified
+params: {
+  constraints: []
+  fields: {
+    classify_errors: { default: true, default_state: defined, description_zh: "C++ 实现读取的 classify_errors 参数", required: false, type: bool }
+    log_file: {
+      default_state: none
+      description_zh: "C++ 实现读取的 log_file 参数"
+      path_semantics: { kind: filesystem_file, must_exist: false, writable: false }
+      required: true
+      type: filesystem_path
+    }
+  }
+  state: defined
+}
+response: { artifact_fields: [], compact_fields: [errors, log_file, phase_summary, schema, warnings], failure_fields: [params.log_file], max_items_policy: { fields: [], mode: none } }
+returns: {
+  fields: {
+    errors: { description_zh: "C++ 实现返回的 errors 字段；是否出现取决于执行分支", item_type: json_value, required: false, type: array }
+    log_file: { description_zh: "C++ 实现返回的 log_file 字段；是否出现取决于执行分支", required: false, type: filesystem_path }
+    phase_summary: { description_zh: "C++ 实现返回的 phase_summary 字段；是否出现取决于执行分支", required: false, type: json_value }
+    schema: { description_zh: "C++ 实现返回的 schema 字段；是否出现取决于执行分支", required: false, type: string }
+    warnings: { description_zh: "C++ 实现返回的 warnings 字段；是否出现取决于执行分支", item_type: json_value, required: false, type: array }
+  }
+  state: defined
+}
+schema: uai.command_spec.v1
+status: active
+types: {}
+verification: { reason: read_only_command_has_no_post_write_verification, state: none }
+version: 1

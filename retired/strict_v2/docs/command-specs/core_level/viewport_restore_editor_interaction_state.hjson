@@ -1,0 +1,81 @@
+authoring: { reason: command_has_no_registered_folder_authoring_profile, state: none }
+category: core_level
+command: viewport_restore_editor_interaction_state
+deprecation: { reason: command_is_active, state: none }
+discovery: { aliases: [], keywords_en: [viewport, restore, editor, interaction, state, core_level], keywords_zh: [viewport_restore_editor_interaction_state], summary_en: "Execute viewport_restore_editor_interaction_state with a verified implementation contract", summary_zh: "恢复 Level Viewport 编辑器交互状态", tags: [core_level, p2-002] }
+errors: {
+  codes: [
+    { code: no_level_editor_viewport, description_zh: "C++ 实现返回错误码 no_level_editor_viewport", retry_safe: false, stage: execution, wire_match: exact }
+  ]
+}
+evidence: {
+  docs: [
+    { path: "Plugins/UeAgentInterface/docs/commands/core_level/viewport_restore_editor_interaction_state.md", purpose: "user documentation cross-check; C++ implementation remains authoritative" }
+  ]
+  implementation: [
+    { line_hint: 485, path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Commands/Level/UeAgentHttpServer_Level_ViewportTrace.cpp", purpose: "command handler, parameter and return evidence", symbol: CmdViewportRestoreEditorInteractionState }
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Server/UeAgentHttpServer.cpp", purpose: "transitive helper evidence used by the command handler" }
+  ]
+  tests: [
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterfaceTests/Private/Smoke/UeAgentInterfaceSmoke_LevelViewportModeling.cpp", purpose: "smoke or negative-path evidence cross-checked for the verified contract" }
+  ]
+}
+execution: {
+  destructive: false
+  editor_state: required
+  game_thread: required
+  idempotent: false
+  kind: session_control
+  overwrite_behavior: none
+  pie_state: allowed
+  retry_safe: false
+  save_behavior: none
+  side_effects: [modifies_editor_session]
+  ui_effect: none
+}
+maturity: verified
+params: {
+  constraints: []
+  fields: {
+    all_viewports: { default: true, default_state: defined, description_zh: "C++ 实现读取的 all_viewports 参数", required: false, type: bool }
+    game_view: { default: false, default_state: defined, description_zh: "C++ 实现读取的 game_view 参数", required: false, type: bool }
+    mode_widgets: { default: true, default_state: defined, description_zh: "C++ 实现读取的 mode_widgets 参数", required: false, type: bool }
+    pivot: { default: true, default_state: defined, description_zh: "C++ 实现读取的 pivot 参数", required: false, type: bool }
+    redraw: { default: true, default_state: defined, description_zh: "C++ 实现读取的 redraw 参数", required: false, type: bool }
+    selection: { default: true, default_state: defined, description_zh: "C++ 实现读取的 selection 参数", required: false, type: bool }
+    widget_mode: { default: translate_if_none, default_state: defined, description_zh: "C++ 实现读取的 widget_mode 参数", required: false, type: string }
+  }
+  state: defined
+}
+response: { artifact_fields: [], compact_fields: [all_viewports, game_view, mode_widgets, pivot, selection, target_client_count], failure_fields: [], max_items_policy: { fields: [], mode: none } }
+returns: {
+  fields: {
+    all_viewports: { description_zh: "C++ 实现返回的 all_viewports 字段；是否出现取决于执行分支", required: false, type: bool }
+    game_view: { description_zh: "C++ 实现返回的 game_view 字段；是否出现取决于执行分支", required: false, type: bool }
+    mode_widgets: { description_zh: "C++ 实现返回的 mode_widgets 字段；是否出现取决于执行分支", required: false, type: bool }
+    pivot: { description_zh: "C++ 实现返回的 pivot 字段；是否出现取决于执行分支", required: false, type: bool }
+    selection: { description_zh: "C++ 实现返回的 selection 字段；是否出现取决于执行分支", required: false, type: bool }
+    target_client_count: { description_zh: "C++ 实现返回的 target_client_count 字段；是否出现取决于执行分支", required: false, type: integer }
+    viewport: { description_zh: "C++ 实现返回的 viewport 字段；是否出现取决于执行分支", required: false, type: json_value }
+    viewports: { description_zh: "C++ 实现返回的 viewports 字段；是否出现取决于执行分支", item_type: json_value, required: false, type: array }
+    widget_mode: { description_zh: "C++ 实现返回的 widget_mode 字段；是否出现取决于执行分支", required: false, type: string }
+  }
+  state: defined
+}
+schema: uai.command_spec.v1
+status: active
+types: {}
+verification: {
+  assertions: [
+    { id: result_present, operator: exists, source: returns.all_viewports }
+    { id: state_readback_present, operator: exists, source: methods.state_readback.viewports }
+  ]
+  failure_policy: fail_overall
+  methods: [
+    { id: result, kind: result_assertion }
+    { command: viewport_get_editor_interaction_state, id: state_readback, kind: command_readback, params_mapping: {} }
+  ]
+  required: true
+  state: defined
+}
+version: 1

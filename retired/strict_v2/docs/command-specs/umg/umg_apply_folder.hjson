@@ -1,0 +1,113 @@
+schema: uai.command_spec.v1
+version: 1
+maturity: verified
+command: umg_apply_folder
+category: umg
+status: active
+discovery: {
+  summary_zh: "应用 Widget Blueprint 统一 index.hjson workspace"
+  summary_en: "Apply a Widget Blueprint through the unified index.hjson workspace"
+  aliases: []
+  keywords_zh: [UMG, WidgetBlueprint, HJSON, workspace, "应用"]
+  keywords_en: [umg, widget_blueprint, hjson, workspace, apply]
+  tags: [umg, authoring, apply, unified_contract]
+}
+types: {}
+execution: {
+  kind: write
+  side_effects: [modifies_asset]
+  destructive: true
+  idempotent: false
+  retry_safe: false
+  editor_state: required
+  pie_state: allowed
+  game_thread: required
+  ui_effect: none
+  save_behavior: caller_controlled
+  overwrite_behavior: target_asset
+}
+params: {
+  state: defined
+  fields: {
+    asset_path: { type: ue_asset_path, required: true, default_state: none, description_zh: "外部目标约束；必须与 index.hjson target 一致", path_semantics: { kind: ue_asset, access_scope: project_write } }
+    folder_path: { type: filesystem_path, required: false, default_state: none, description_zh: "包含 index.hjson 的 workspace；省略时使用资产默认目录", path_semantics: { kind: filesystem_directory, must_exist: true, writable: false } }
+  }
+  constraints: []
+}
+returns: {
+  state: defined
+  fields: {
+    status: { type: string, required: true, description_zh: "applied" }
+    phase: { type: string, required: true, description_zh: "complete" }
+    resolved_operation: { type: string, required: true, description_zh: "解析后的 create/update/upsert/remove/clone" }
+    asset_path: { type: ue_asset_path, required: true, description_zh: "实际目标资产路径" }
+    object_path: { type: string, required: true, description_zh: "实际 UObject path" }
+    folder_path: { type: filesystem_path, required: true, description_zh: "workspace 根目录" }
+    units_checked: { type: integer, required: true, description_zh: "preflight 检查单元数" }
+    mutations_applied: { type: integer, required: true, description_zh: "事务 mutation 数" }
+    rollback_attempted: { type: bool, required: true, description_zh: "是否尝试回滚" }
+    rollback_succeeded: { type: bool, required: true, description_zh: "回滚是否成功" }
+    widgets_added: { type: integer, required: true, description_zh: "新增 Widget 数" }
+    widgets_updated: { type: integer, required: true, description_zh: "更新 Widget 数" }
+    widgets_removed: { type: integer, required: true, description_zh: "删除 Widget 数" }
+    widget_properties_applied: { type: integer, required: true, description_zh: "Widget 属性写入数" }
+    slot_properties_applied: { type: integer, required: true, description_zh: "native PanelSlot 属性写入数" }
+    bindings_added: { type: integer, required: true, description_zh: "新增 binding 数" }
+    bindings_updated: { type: integer, required: true, description_zh: "更新 binding 数" }
+    bindings_removed: { type: integer, required: true, description_zh: "删除 binding 数" }
+    animations_added: { type: integer, required: true, description_zh: "新增 animation 数" }
+    animations_updated: { type: integer, required: true, description_zh: "更新 animation 数" }
+    animations_removed: { type: integer, required: true, description_zh: "删除 animation 数" }
+    animation_keys_applied: { type: integer, required: true, description_zh: "写入 animation key 数" }
+    variables_added: { type: integer, required: true, description_zh: "新增 Blueprint variable 数" }
+    variables_updated: { type: integer, required: true, description_zh: "更新 Blueprint variable 数" }
+    variables_removed: { type: integer, required: true, description_zh: "删除 Blueprint variable 数" }
+    graphs_added: { type: integer, required: true, description_zh: "新增 graph 数" }
+    graphs_updated: { type: integer, required: true, description_zh: "更新 graph 数" }
+    graphs_removed: { type: integer, required: true, description_zh: "删除 graph 数" }
+  }
+}
+response: {
+  compact_fields: [status, phase, asset_path, folder_path, resolved_operation, units_checked, mutations_applied]
+  failure_fields: ["params.folder_path", "params.asset_path"]
+  artifact_fields: []
+  max_items_policy: { mode: none, fields: [] }
+}
+errors: {
+  codes: [
+    { code: missing_asset_path, wire_match: exact, stage: preflight, retry_safe: true, description_zh: "缺少 asset_path" }
+    { code: umg_workspace_, wire_match: prefix, stage: preflight, retry_safe: true, description_zh: "index.hjson、target 或 workspace 约束失败" }
+    { code: umg_widget_, wire_match: prefix, stage: preflight, retry_safe: true, description_zh: "Widget identity、class、parent 或层级校验失败" }
+    { code: umg_native_slot_, wire_match: prefix, stage: preflight, retry_safe: true, description_zh: "UE 原生创建的 PanelSlot 与输入断言冲突" }
+    { code: umg_, wire_match: prefix, stage: execution, retry_safe: false, description_zh: "UMG provider、compile、save、rollback 或 verification 失败" }
+    { code: workspace_, wire_match: prefix, stage: preflight, retry_safe: true, description_zh: "共享 workspace load/dependency 失败" }
+  ]
+}
+verification: {
+  assertions: [
+    { expected: applied, id: status_applied, operator: equals, source: returns.status }
+    { expected: complete, id: phase_complete, operator: equals, source: returns.phase }
+    { expected_ref: returns.asset_path, id: readback_asset_matches, operator: equals, source: methods.export_readback.asset_path }
+  ]
+  failure_policy: fail_overall
+  methods: [
+    { id: result_fields, kind: result_assertion }
+    { command: umg_export_folder, id: export_readback, kind: command_readback, output_override_param: folder_path, params_mapping: { asset_path: returns.asset_path } }
+  ]
+  required: true
+  state: defined
+}
+authoring: { state: defined, type_id: umg, operation: apply, profile_ref: "contracts/field_contracts/umg.hjson" }
+deprecation: { state: none, reason: command_is_active }
+evidence: {
+  implementation: [
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Commands/UMG/UeAgentHttpServer_UMG_FolderFormat.cpp", symbol: CmdUmgApplyFolder, purpose: "统一命令适配器" }
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Domains/UMG/Authoring/UeAgentUmgAuthoringApplyProvider.cpp", purpose: "统一 workspace Apply provider" }
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Domains/UMG/Authoring/UeAgentUmgMutationModel.cpp", purpose: "Widget tree、native slot、binding 和 animation mutation" }
+  ]
+  tests: [
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterfaceTests/Private/UeAgentInterfaceUmgAuthoringTests.cpp", purpose: "provider、preflight、native slot 与 roundtrip" }
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterfaceTests/Private/Smoke/UeAgentInterfaceSmoke_BlueprintUmg.cpp", purpose: "真实 HTTP workspace smoke" }
+  ]
+  docs: [{ path: "Plugins/UeAgentInterface/docs/commands/umg/umg_apply_folder.md", purpose: "正式命令文档" }]
+}

@@ -1,0 +1,49 @@
+{
+  "schema": "uai.domain_conformance.calibration.v1",
+  "calibrations": [
+    {
+      "domain_id": "uobject-dataasset",
+      "public_route_id": "content_graph.import_workspace",
+      "evidence_ref": "runtimeLogs/strict_v2_r26/T13/verification/public_vertical_receipt.json",
+      "bounded_claim": "Only the completed T13 UObject/DataAsset public import route calibrates public route, persistence/reload, independent readback, failure cleanup, and legacy-exit evidence shapes.",
+      "required_equals": [
+        {"path": "status", "value": "passed"},
+        {"path": "cleanup_status", "value": "passed"},
+        {"path": "cases.1.public_entry.command_id", "value": "content_graph.import_workspace"},
+        {"path": "cases.1.persistence.reloaded", "value": true},
+        {"path": "cases.1.readback.independent", "value": true},
+        {"path": "cases.1.legacy_exit.verified", "value": true}
+      ]
+    },
+    {
+      "domain_id": "datatable-curvetable",
+      "public_route_id": "content_graph.import_workspace",
+      "evidence_ref": "runtimeLogs/delivery_workflow/T27/public_verification/public_vertical_receipt.json",
+      "bounded_claim": "Only the completed T27 DataTable/CurveTable routes calibrate inline/single-file source, stale rejection, persist/reload/readback, cleanup, and legacy-exit evidence shapes.",
+      "required_equals": [
+        {"path": "status", "value": "passed"},
+        {"path": "cleanup_status", "value": "passed"},
+        {"path": "inline_and_single_file_source", "value": true},
+        {"path": "saved_reloaded_independently_read", "value": true},
+        {"path": "stale_revision_no_mutation", "value": true},
+        {"path": "legacy_exit_four_surfaces", "value": true}
+      ]
+    },
+    {
+      "domain_id": "localization-string-table",
+      "public_route_id": "content_graph.import_workspace",
+      "evidence_ref": "docs/plan/20260806_UAI_REQUIREMENT_DESIGN_REALIGNMENT/evidence/T30-EXTERNAL-LOCALIZATION-IMPORT-current-verification.json",
+      "bounded_claim": "Only the completed T30 Localization/StringTable route calibrates current public-UAI observation, independent post-terminal readback, failure semantics, cleanup, and historical evidence references.",
+      "required_equals": [
+        {"path": "public_uai.transport", "value": "public import uai SDK"},
+        {"path": "cleanup.temporary_test_asset_active", "value": false},
+        {"path": "cleanup.interactive_editor_left_running", "value": false}
+      ],
+      "required_contains": [
+        {"path": "public_uai.observations", "value": "content_graph.import_workspace created"},
+        {"path": "public_uai.observations", "value": "independent post-terminal culture readback"},
+        {"path": "public_uai.observations", "value": "typed terminal failure"}
+      ]
+    }
+  ]
+}

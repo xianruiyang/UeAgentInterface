@@ -1,0 +1,103 @@
+authoring: { reason: command_has_no_registered_folder_authoring_profile, state: none }
+category: core_level
+command: asset_reference_graph
+deprecation: { reason: command_is_active, state: none }
+discovery: { aliases: [], keywords_en: [asset, reference, graph, core_level], keywords_zh: [asset_reference_graph], summary_en: "Execute asset_reference_graph with a verified implementation contract", summary_zh: "查询任意资产的 AssetRegistry 引用关系", tags: [core_level, p2-002] }
+errors: {
+  codes: [
+    { code: asset_not_found, description_zh: "C++ 实现返回错误码 asset_not_found", retry_safe: false, stage: execution, wire_match: exact }
+    { code: invalid_asset_path, description_zh: "C++ 实现返回错误码 invalid_asset_path", retry_safe: true, stage: preflight, wire_match: exact }
+    { code: invalid_direction, description_zh: "C++ 实现返回错误码 invalid_direction", retry_safe: true, stage: preflight, wire_match: exact }
+    { code: missing_asset_path, description_zh: "C++ 实现返回错误码 missing_asset_path", retry_safe: true, stage: preflight, wire_match: exact }
+  ]
+}
+evidence: {
+  docs: [
+    { path: "Plugins/UeAgentInterface/docs/commands/core_level/asset_reference_graph.md", purpose: "user documentation cross-check; C++ implementation remains authoritative" }
+  ]
+  implementation: [
+    { line_hint: 1235, path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Commands/Assets/UeAgentHttpServer_Assets.cpp", purpose: "command handler, parameter and return evidence", symbol: CmdAssetReferenceGraph }
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Server/UeAgentHttpServer.cpp", purpose: "transitive helper evidence used by the command handler" }
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Utilities/UeAgentJsonDiagnostics.cpp", purpose: "transitive helper evidence used by the command handler" }
+  ]
+  tests: [
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterfaceTests/Private/Smoke/UeAgentInterfaceSmoke_Core.cpp", purpose: "smoke or negative-path evidence cross-checked for the verified contract" }
+  ]
+}
+execution: {
+  destructive: false
+  editor_state: required
+  game_thread: required
+  idempotent: false
+  kind: write
+  overwrite_behavior: none
+  pie_state: allowed
+  retry_safe: false
+  save_behavior: none
+  side_effects: [modifies_asset]
+  ui_effect: none
+}
+maturity: verified
+params: {
+  constraints: []
+  fields: {
+    allow_missing: { default: false, default_state: defined, description_zh: "C++ 实现读取的 allow_missing 参数", required: false, type: bool }
+    asset_path: { default_state: none, description_zh: "C++ 实现读取的 asset_path 参数", path_semantics: { access_scope: project_write, kind: ue_asset }, required: true, type: ue_asset_path }
+    direction: { default: both, default_state: defined, description_zh: "C++ 实现读取的 direction 参数", required: false, type: string }
+    force_scan: { default: false, default_state: defined, description_zh: "C++ 实现读取的 force_scan 参数", required: false, type: bool }
+    include_hard: { default: true, default_state: defined, description_zh: "C++ 实现读取的 include_hard 参数", required: false, type: bool }
+    include_manage: { default: true, default_state: defined, description_zh: "C++ 实现读取的 include_manage 参数", required: false, type: bool }
+    include_path_string_hits: { default: false, default_state: defined, description_zh: "C++ 实现读取的 include_path_string_hits 参数", required: false, type: bool }
+    include_searchable_names: { default: true, default_state: defined, description_zh: "C++ 实现读取的 include_searchable_names 参数", required: false, type: bool }
+    include_soft: { default: true, default_state: defined, description_zh: "C++ 实现读取的 include_soft 参数", required: false, type: bool }
+    max_depth: { default_state: none, description_zh: "C++ 实现读取的 max_depth 参数", required: false, type: integer }
+    max_nodes: { default: 1024, default_state: defined, description_zh: "C++ 实现读取的 max_nodes 参数", required: false, type: integer }
+    max_path_string_hits: { default: 200, default_state: defined, description_zh: "C++ 实现读取的 max_path_string_hits 参数", required: false, type: number }
+    object_path: { default_state: none, description_zh: "C++ 实现读取的 object_path 参数", path_semantics: { access_scope: mounted_read, kind: ue_object }, required: false, type: ue_object_path }
+    package_name: { default_state: none, description_zh: "C++ 实现读取的 package_name 参数", required: false, type: string }
+    recursive: { default: false, default_state: defined, description_zh: "C++ 实现读取的 recursive 参数", required: false, type: bool }
+  }
+  state: defined
+}
+response: { artifact_fields: [], compact_fields: [asset_path, asset_found, dependencies, dependency_count, direction, edge_count], failure_fields: [params.asset_path], max_items_policy: { fields: [], mode: none } }
+returns: {
+  fields: {
+    asset_found: { description_zh: "C++ 实现返回的 asset_found 字段；是否出现取决于执行分支", required: false, type: bool }
+    asset_path: { description_zh: "C++ 实现返回的 asset_path 字段；是否出现取决于执行分支", required: false, type: ue_asset_path }
+    dependencies: { description_zh: "C++ 实现返回的 dependencies 字段；是否出现取决于执行分支", item_type: json_value, required: false, type: array }
+    dependency_count: { description_zh: "C++ 实现返回的 dependency_count 字段；是否出现取决于执行分支", required: false, type: integer }
+    direction: { description_zh: "C++ 实现返回的 direction 字段；是否出现取决于执行分支", required: false, type: string }
+    edge_count: { description_zh: "C++ 实现返回的 edge_count 字段；是否出现取决于执行分支", required: false, type: integer }
+    edges: { description_zh: "C++ 实现返回的 edges 字段；是否出现取决于执行分支", item_type: json_value, required: false, type: array }
+    input_asset_path: { description_zh: "C++ 实现返回的 input_asset_path 字段；是否出现取决于执行分支", required: false, type: ue_asset_path }
+    max_depth: { description_zh: "C++ 实现返回的 max_depth 字段；是否出现取决于执行分支", required: false, type: integer }
+    max_nodes: { description_zh: "C++ 实现返回的 max_nodes 字段；是否出现取决于执行分支", required: false, type: integer }
+    node_count: { description_zh: "C++ 实现返回的 node_count 字段；是否出现取决于执行分支", required: false, type: integer }
+    nodes: { description_zh: "C++ 实现返回的 nodes 字段；是否出现取决于执行分支", item_type: json_value, required: false, type: array }
+    options: { description_zh: "C++ 实现返回的 options 字段；是否出现取决于执行分支", required: false, type: json_value }
+    package_name: { description_zh: "C++ 实现返回的 package_name 字段；是否出现取决于执行分支", required: false, type: string }
+    path_string_hit_count: { description_zh: "C++ 实现返回的 path_string_hit_count 字段；是否出现取决于执行分支", required: false, type: integer }
+    path_string_hits: { description_zh: "C++ 实现返回的 path_string_hits 字段；是否出现取决于执行分支", item_type: json_value, required: false, type: array }
+    recursive: { description_zh: "C++ 实现返回的 recursive 字段；是否出现取决于执行分支", required: false, type: bool }
+    referencer_count: { description_zh: "C++ 实现返回的 referencer_count 字段；是否出现取决于执行分支", required: false, type: integer }
+    referencers: { description_zh: "C++ 实现返回的 referencers 字段；是否出现取决于执行分支", item_type: json_value, required: false, type: array }
+    root_asset_data_count: { description_zh: "C++ 实现返回的 root_asset_data_count 字段；是否出现取决于执行分支", required: false, type: integer }
+    truncated: { description_zh: "C++ 实现返回的 truncated 字段；是否出现取决于执行分支", required: false, type: bool }
+  }
+  state: defined
+}
+schema: uai.command_spec.v1
+status: active
+types: {}
+verification: {
+  assertions: [
+    { id: result_present, operator: exists, source: returns.asset_found }
+  ]
+  failure_policy: fail_overall
+  methods: [
+    { id: result, kind: result_assertion }
+  ]
+  required: true
+  state: defined
+}
+version: 1

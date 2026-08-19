@@ -1,0 +1,70 @@
+authoring: { reason: command_has_no_registered_folder_authoring_profile, state: none }
+category: ai_behavior_blackboard_statetree_eqs_navigation_smartobject
+command: ai_perception_runtime_snapshot
+deprecation: { reason: command_is_active, state: none }
+discovery: { aliases: [], keywords_en: [ai, perception, runtime, snapshot, ai_behavior_blackboard_statetree_eqs_navigation_smartobject], keywords_zh: [ai_perception_runtime_snapshot], summary_en: "Execute ai_perception_runtime_snapshot with a verified implementation contract", summary_zh: "当前感知状态快照", tags: [ai_behavior_blackboard_statetree_eqs_navigation_smartobject, p2-007] }
+errors: {
+  codes: [
+    { code: ai_perception_component_not_found, description_zh: "C++ 实现返回错误码 ai_perception_component_not_found", retry_safe: false, stage: execution, wire_match: exact }
+    { code: no_editor_world, description_zh: "C++ 实现返回错误码 no_editor_world", retry_safe: false, stage: execution, wire_match: exact }
+    { code: no_geditor, description_zh: "C++ 实现返回错误码 no_geditor", retry_safe: false, stage: execution, wire_match: exact }
+  ]
+}
+evidence: {
+  docs: [
+    { path: "Plugins/UeAgentInterface/docs/commands/ai_behavior_blackboard_statetree_eqs_navigation_smartobject/ai_perception_runtime_snapshot.md", purpose: "user documentation cross-check; C++ implementation remains authoritative" }
+  ]
+  implementation: [
+    { line_hint: 222, path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Commands/AI/UeAgentHttpServer_AI_PerceptionNavigation.cpp", purpose: "command handler, parameter and return evidence", symbol: CmdAIPerceptionRuntimeSnapshot }
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Commands/Level/UeAgentHttpServer_Level_CaptureAndPersistence.cpp", purpose: "transitive helper evidence used by the command handler" }
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Server/UeAgentHttpServer.cpp", purpose: "transitive helper evidence used by the command handler" }
+  ]
+  tests: [
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterfaceTests/Private/Smoke/UeAgentInterfaceAISmokeTests.cpp", purpose: "smoke or negative-path evidence cross-checked for the verified contract" }
+  ]
+}
+execution: {
+  destructive: false
+  editor_state: required
+  game_thread: required
+  idempotent: true
+  kind: read_only
+  overwrite_behavior: none
+  pie_state: allowed
+  retry_safe: true
+  save_behavior: none
+  side_effects: []
+  ui_effect: none
+}
+maturity: verified
+params: {
+  constraints: []
+  fields: {
+    controller: { default_state: none, description_zh: "C++ 实现读取的 controller 参数", required: false, type: string }
+    pawn: { default_state: none, description_zh: "C++ 实现读取的 pawn 参数", required: false, type: string }
+  }
+  state: defined
+}
+response: { artifact_fields: [currently_perceived_actors, known_actors, senses], compact_fields: [status, class, component, currently_perceived_actor_count, dominant_sense], failure_fields: [], max_items_policy: { fields: [], mode: none } }
+returns: {
+  fields: {
+    class: { description_zh: "C++ 实现返回的 class 字段；是否出现取决于执行分支", required: false, type: string }
+    component: { description_zh: "C++ 实现返回的 component 字段；是否出现取决于执行分支", required: false, type: string }
+    currently_perceived_actor_count: { description_zh: "C++ 实现返回的 currently_perceived_actor_count 字段；是否出现取决于执行分支", required: false, type: integer }
+    currently_perceived_actors: { description_zh: "C++ 实现返回的 currently_perceived_actors 字段；是否出现取决于执行分支", item_type: json_value, required: false, type: array }
+    dominant_sense: { description_zh: "C++ 实现返回的 dominant_sense 字段；是否出现取决于执行分支", required: false, type: string }
+    known_actor_count: { description_zh: "C++ 实现返回的 known_actor_count 字段；是否出现取决于执行分支", required: false, type: integer }
+    known_actors: { description_zh: "C++ 实现返回的 known_actors 字段；是否出现取决于执行分支", item_type: json_value, required: false, type: array }
+    owner: { description_zh: "C++ 实现返回的 owner 字段；是否出现取决于执行分支", required: false, type: string }
+    sense_count: { description_zh: "C++ 实现返回的 sense_count 字段；是否出现取决于执行分支", required: false, type: integer }
+    senses: { description_zh: "C++ 实现返回的 senses 字段；是否出现取决于执行分支", item_type: json_value, required: false, type: array }
+    snapshot_owner: { description_zh: "C++ 实现返回的 snapshot_owner 字段；是否出现取决于执行分支", required: false, type: string }
+    status: { description_zh: "C++ 实现返回的 status 字段；是否出现取决于执行分支", required: false, type: string }
+  }
+  state: defined
+}
+schema: uai.command_spec.v1
+status: active
+types: {}
+verification: { reason: read_only_command_has_no_post_write_verification, state: none }
+version: 1

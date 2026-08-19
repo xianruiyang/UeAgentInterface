@@ -1,0 +1,129 @@
+authoring: { reason: command_has_no_registered_folder_authoring_profile, state: none }
+category: niagara_system
+command: niagara_preview_advance
+deprecation: { reason: command_is_active, state: none }
+discovery: { aliases: [], keywords_en: [niagara, preview, advance, niagara_system], keywords_zh: [niagara_preview_advance], summary_en: "Execute niagara_preview_advance with a verified implementation contract", summary_zh: "连续推进 Niagara 编辑器预览并暂停", tags: [niagara_system, p2-005] }
+errors: {
+  codes: [
+    { code: asset_editor_subsystem_unavailable, description_zh: "C++ 实现返回错误码 asset_editor_subsystem_unavailable", retry_safe: false, stage: execution, wire_match: exact }
+    { code: asset_is_not_niagara_system, description_zh: "C++ 实现返回错误码 asset_is_not_niagara_system", retry_safe: false, stage: execution, wire_match: exact }
+    { code: asset_not_found, description_zh: "C++ 实现返回错误码 asset_not_found", retry_safe: false, stage: execution, wire_match: exact }
+    { code: editor_unavailable, description_zh: "C++ 实现返回错误码 editor_unavailable", retry_safe: false, stage: execution, wire_match: exact }
+    { code: missing_asset_path, description_zh: "C++ 实现返回错误码 missing_asset_path", retry_safe: true, stage: preflight, wire_match: exact }
+    { code: missing_target_frame, description_zh: "C++ 实现返回错误码 missing_target_frame", retry_safe: true, stage: preflight, wire_match: exact }
+    { code: niagara_editor_module_not_loaded, description_zh: "C++ 实现返回错误码 niagara_editor_module_not_loaded", retry_safe: false, stage: execution, wire_match: exact }
+    { code: niagara_editor_not_opened, description_zh: "C++ 实现返回错误码 niagara_editor_not_opened", retry_safe: false, stage: execution, wire_match: exact }
+    { code: niagara_editor_open_failed, description_zh: "C++ 实现返回错误码 niagara_editor_open_failed", retry_safe: false, stage: execution, wire_match: exact }
+    { code: niagara_preview_component_missing_after_reset, description_zh: "C++ 实现返回错误码 niagara_preview_component_missing_after_reset", retry_safe: true, stage: preflight, wire_match: exact }
+    { code: niagara_preview_component_not_found, description_zh: "C++ 实现返回错误码 niagara_preview_component_not_found", retry_safe: false, stage: execution, wire_match: exact }
+    { code: niagara_system_view_model_not_found, description_zh: "C++ 实现返回错误码 niagara_system_view_model_not_found", retry_safe: false, stage: execution, wire_match: exact }
+    { code: preview_advance_no_system_instance, description_zh: "C++ 实现返回错误码 preview_advance_no_system_instance", retry_safe: false, stage: execution, wire_match: exact }
+    { code: reset_preview_requires_start_frame_zero, description_zh: "C++ 实现返回错误码 reset_preview_requires_start_frame_zero", retry_safe: false, stage: execution, wire_match: exact }
+    { code: start_frame_after_target_frame, description_zh: "C++ 实现返回错误码 start_frame_after_target_frame", retry_safe: false, stage: execution, wire_match: exact }
+    { code: unsafe_niagara_system_graph_missing_output_nodes, description_zh: "C++ 实现返回错误码 unsafe_niagara_system_graph_missing_output_nodes", retry_safe: true, stage: preflight, wire_match: prefix }
+    { code: unsupported_continuous_advance_mode, description_zh: "C++ 实现返回错误码 unsupported_continuous_advance_mode", retry_safe: false, stage: execution, wire_match: exact }
+  ]
+}
+evidence: {
+  docs: [
+    { path: "Plugins/UeAgentInterface/docs/commands/niagara_system/niagara_preview_advance.md", purpose: "user documentation cross-check; C++ implementation remains authoritative" }
+  ]
+  implementation: [
+    { line_hint: 4721, path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Commands/Niagara/UeAgentHttpServer_Niagara.cpp", purpose: "command handler, parameter and return evidence", symbol: CmdNiagaraPreviewAdvance }
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Commands/Niagara/UeAgentHttpServer_Niagara_UtilityCore.inl", purpose: "transitive helper evidence used by the command handler" }
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Server/UeAgentHttpServer.cpp", purpose: "transitive helper evidence used by the command handler" }
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Utilities/UeAgentJsonDiagnostics.cpp", purpose: "transitive helper evidence used by the command handler" }
+  ]
+  tests: [
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterfaceTests/Private/Smoke/UeAgentInterfaceSmoke_Coverage.cpp", purpose: "smoke or negative-path evidence cross-checked for the verified contract" }
+  ]
+}
+execution: {
+  destructive: false
+  editor_state: required
+  game_thread: required
+  idempotent: false
+  kind: session_control
+  overwrite_behavior: none
+  pie_state: allowed
+  retry_safe: false
+  save_behavior: none
+  side_effects: [modifies_editor_session, opens_window]
+  ui_effect: opens_editor
+}
+maturity: verified
+params: {
+  constraints: []
+  fields: {
+    advance_frames: { default: -1, default_state: defined, description_zh: "C++ 实现读取的 advance_frames 参数", required: false, type: number }
+    advance_mode: { default: tick_component, default_state: defined, description_zh: "C++ 实现读取的 advance_mode 参数", required: false, type: string }
+    asset_path: { default_state: none, description_zh: "C++ 实现读取的 asset_path 参数", path_semantics: { access_scope: mounted_read, kind: ue_asset }, required: true, type: ue_asset_path }
+    deactivate_before_reset: { default: true, default_state: defined, description_zh: "C++ 实现读取的 deactivate_before_reset 参数", required: false, type: bool }
+    frame: { default: -1, default_state: defined, description_zh: "C++ 实现读取的 frame 参数", required: false, type: number }
+    open_editor_if_needed: { default: false, default_state: defined, description_zh: "C++ 实现读取的 open_editor_if_needed 参数", required: false, type: bool }
+    pause_after_advance: { default: true, default_state: defined, description_zh: "C++ 实现读取的 pause_after_advance 参数", required: false, type: bool }
+    pause_preview_after_advance: { default: true, default_state: defined, description_zh: "C++ 实现读取的 pause_preview_after_advance 参数", required: false, type: bool }
+    preview_advance_frames: { default: -1, default_state: defined, description_zh: "C++ 实现读取的 preview_advance_frames 参数", required: false, type: number }
+    preview_advance_mode: { default: tick_component, default_state: defined, description_zh: "C++ 实现读取的 preview_advance_mode 参数", required: false, type: string }
+    preview_advance_seconds: { default: -1, default_state: defined, description_zh: "C++ 实现读取的 preview_advance_seconds 参数", required: false, type: number }
+    preview_tick_delta_seconds: { default_state: none, description_zh: "C++ 实现读取的 preview_tick_delta_seconds 参数", required: false, type: number }
+    reset_preview: { default: true, default_state: defined, description_zh: "C++ 实现读取的 reset_preview 参数", required: false, type: bool }
+    start_frame: { default: 0, default_state: defined, description_zh: "C++ 实现读取的 start_frame 参数", required: false, type: number }
+    target_frame: { default: -1, default_state: defined, description_zh: "C++ 实现读取的 target_frame 参数", required: false, type: number }
+    target_time_seconds: { default: -1, default_state: defined, description_zh: "C++ 实现读取的 target_time_seconds 参数", required: false, type: number }
+    tick_delta_seconds: { default_state: none, description_zh: "C++ 实现读取的 tick_delta_seconds 参数", required: false, type: number }
+  }
+  state: defined
+}
+response: { artifact_fields: [preview_restore, stats], compact_fields: [asset_path, advance_mode, advance_semantics, advanced_frame_count, component_active_before_activation, component_name], failure_fields: [params.asset_path], max_items_policy: { fields: [], mode: none } }
+returns: {
+  fields: {
+    advance_mode: { description_zh: "C++ 实现返回的 advance_mode 字段；是否出现取决于执行分支", required: false, type: string }
+    advance_semantics: { description_zh: "C++ 实现返回的 advance_semantics 字段；是否出现取决于执行分支", required: false, type: string }
+    advanced_frame_count: { description_zh: "C++ 实现返回的 advanced_frame_count 字段；是否出现取决于执行分支", required: false, type: integer }
+    asset_path: { description_zh: "C++ 实现返回的 asset_path 字段；是否出现取决于执行分支", required: false, type: ue_asset_path }
+    component_active_before_activation: { description_zh: "C++ 实现返回的 component_active_before_activation 字段；是否出现取决于执行分支", required: false, type: bool }
+    component_name: { description_zh: "C++ 实现返回的 component_name 字段；是否出现取决于执行分支", required: false, type: string }
+    component_path: { description_zh: "C++ 实现返回的 component_path 字段；是否出现取决于执行分支", required: false, type: string }
+    component_paused: { description_zh: "C++ 实现返回的 component_paused 字段；是否出现取决于执行分支", required: false, type: bool }
+    component_source: { description_zh: "C++ 实现返回的 component_source 字段；是否出现取决于执行分支", required: false, type: string }
+    component_world: { description_zh: "C++ 实现返回的 component_world 字段；是否出现取决于执行分支", required: false, type: string }
+    current_frame_estimate: { description_zh: "C++ 实现返回的 current_frame_estimate 字段；是否出现取决于执行分支", required: false, type: number }
+    deactivate_before_reset: { description_zh: "C++ 实现返回的 deactivate_before_reset 字段；是否出现取决于执行分支", required: false, type: bool }
+    has_runtime_position: { description_zh: "C++ 实现返回的 has_runtime_position 字段；是否出现取决于执行分支", required: false, type: bool }
+    mutated_preview_component: { description_zh: "C++ 实现返回的 mutated_preview_component 字段；是否出现取决于执行分支", required: false, type: bool }
+    object_path: { description_zh: "C++ 实现返回的 object_path 字段；是否出现取决于执行分支", required: false, type: ue_object_path }
+    pause_after_advance: { description_zh: "C++ 实现返回的 pause_after_advance 字段；是否出现取决于执行分支", required: false, type: bool }
+    preview_restore: { description_zh: "C++ 实现返回的 preview_restore 字段；是否出现取决于执行分支", required: false, type: json_value }
+    preview_state_token: { description_zh: "C++ 实现返回的 preview_state_token 字段；是否出现取决于执行分支", required: false, type: string }
+    preview_state_token_invalidated_by_restore: { description_zh: "C++ 实现返回的 preview_state_token_invalidated_by_restore 字段；是否出现取决于执行分支", required: false, type: bool }
+    reset_preview: { description_zh: "C++ 实现返回的 reset_preview 字段；是否出现取决于执行分支", required: false, type: bool }
+    restore_preview_after_advance: { description_zh: "C++ 实现返回的 restore_preview_after_advance 字段；是否出现取决于执行分支", required: false, type: bool }
+    restored_dirty_state: { description_zh: "C++ 实现返回的 restored_dirty_state 字段；是否出现取决于执行分支", required: false, type: bool }
+    start_frame: { description_zh: "C++ 实现返回的 start_frame 字段；是否出现取决于执行分支", required: false, type: number }
+    stats: { description_zh: "C++ 实现返回的 stats 字段；是否出现取决于执行分支", required: false, type: json_value }
+    stats_error: { description_zh: "C++ 实现返回的 stats_error 字段；是否出现取决于执行分支", required: false, type: string }
+    system_age: { description_zh: "C++ 实现返回的 system_age 字段；是否出现取决于执行分支", required: false, type: number }
+    system_tick_count: { description_zh: "C++ 实现返回的 system_tick_count 字段；是否出现取决于执行分支", required: false, type: integer }
+    target_frame: { description_zh: "C++ 实现返回的 target_frame 字段；是否出现取决于执行分支", required: false, type: number }
+    tick_delta_seconds: { description_zh: "C++ 实现返回的 tick_delta_seconds 字段；是否出现取决于执行分支", required: false, type: number }
+    used_seek: { description_zh: "C++ 实现返回的 used_seek 字段；是否出现取决于执行分支", required: false, type: bool }
+    was_package_dirty_before_advance: { description_zh: "C++ 实现返回的 was_package_dirty_before_advance 字段；是否出现取决于执行分支", required: false, type: bool }
+  }
+  state: defined
+}
+schema: uai.command_spec.v1
+status: active
+types: {}
+verification: {
+  assertions: [
+    { id: result_present, operator: exists, source: returns.advance_mode }
+  ]
+  failure_policy: fail_overall
+  methods: [
+    { id: result, kind: result_assertion }
+  ]
+  required: true
+  state: defined
+}
+version: 1

@@ -68,16 +68,7 @@ bool FUeAgentHttpServer::CmdLandscapeCreate(const FUeAgentRequestContext& Ctx, T
 	const FVector CenteringOffset = FTransform(Rotation, FVector::ZeroVector, Scale).TransformVector(
 		FVector(-ComponentCountX * QuadsPerComponent / 2.0, -ComponentCountY * QuadsPerComponent / 2.0, 0.0));
 
-	const bool bUseAutoTx = [&]()
-	{
-		FScopeLock Lock(&TransactionMutex);
-		return ActiveTransactionIndex == INDEX_NONE;
-	}();
-	TOptional<FScopedTransaction> AutoTx;
-	if (bUseAutoTx)
-	{
-		AutoTx.Emplace(NSLOCTEXT("UeAgentInterface", "LandscapeCreateTx", "UeAgentInterface Create Landscape"));
-	}
+	FScopedTransaction Transaction(NSLOCTEXT("UeAgentInterface", "LandscapeCreateTx", "UeAgentInterface Create Landscape"));
 
 	FActorSpawnParameters SpawnParams;
 	SpawnParams.SpawnCollisionHandlingOverride = ESpawnActorCollisionHandlingMethod::AlwaysSpawn;
@@ -191,16 +182,7 @@ bool FUeAgentHttpServer::CmdLandscapeRaiseCircle(const FUeAgentRequestContext& C
 		return false;
 	}
 
-	const bool bUseAutoTx = [&]()
-	{
-		FScopeLock Lock(&TransactionMutex);
-		return ActiveTransactionIndex == INDEX_NONE;
-	}();
-	TOptional<FScopedTransaction> AutoTx;
-	if (bUseAutoTx)
-	{
-		AutoTx.Emplace(NSLOCTEXT("UeAgentInterface", "LandscapeSculptTx", "UeAgentInterface Sculpt Landscape"));
-	}
+	FScopedTransaction Transaction(NSLOCTEXT("UeAgentInterface", "LandscapeSculptTx", "UeAgentInterface Sculpt Landscape"));
 
 	FLandscapeEditDataInterface Edit(Info);
 	TArray<uint16> Heights;

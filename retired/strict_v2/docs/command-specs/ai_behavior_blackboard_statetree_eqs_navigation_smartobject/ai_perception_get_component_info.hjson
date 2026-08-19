@@ -1,0 +1,68 @@
+authoring: { reason: command_has_no_registered_folder_authoring_profile, state: none }
+category: ai_behavior_blackboard_statetree_eqs_navigation_smartobject
+command: ai_perception_get_component_info
+deprecation: { reason: command_is_active, state: none }
+discovery: { aliases: [], keywords_en: [ai, perception, get, component, info, ai_behavior_blackboard_statetree_eqs_navigation_smartobject], keywords_zh: [ai_perception_get_component_info], summary_en: "Execute ai_perception_get_component_info with a verified implementation contract", summary_zh: "读取 Perception listener / stimuli source 组件", tags: [ai_behavior_blackboard_statetree_eqs_navigation_smartobject, p2-007] }
+errors: {
+  codes: [
+    { code: actor_not_found, description_zh: "C++ 实现返回错误码 actor_not_found", retry_safe: false, stage: execution, wire_match: exact }
+    { code: ai_perception_component_not_found, description_zh: "C++ 实现返回错误码 ai_perception_component_not_found", retry_safe: false, stage: execution, wire_match: exact }
+    { code: blueprint_asset_not_found, description_zh: "C++ 实现返回错误码 blueprint_asset_not_found", retry_safe: false, stage: execution, wire_match: exact }
+    { code: missing_actor_or_blueprint_asset, description_zh: "C++ 实现返回错误码 missing_actor_or_blueprint_asset", retry_safe: true, stage: preflight, wire_match: exact }
+    { code: no_editor_world, description_zh: "C++ 实现返回错误码 no_editor_world", retry_safe: false, stage: execution, wire_match: exact }
+    { code: no_geditor, description_zh: "C++ 实现返回错误码 no_geditor", retry_safe: false, stage: execution, wire_match: exact }
+  ]
+}
+evidence: {
+  docs: [
+    { path: "Plugins/UeAgentInterface/docs/commands/ai_behavior_blackboard_statetree_eqs_navigation_smartobject/ai_perception_get_component_info.md", purpose: "user documentation cross-check; C++ implementation remains authoritative" }
+  ]
+  implementation: [
+    { line_hint: 129, path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Commands/AI/UeAgentHttpServer_AI_PerceptionNavigation.cpp", purpose: "command handler, parameter and return evidence", symbol: CmdAIPerceptionGetComponentInfo }
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Commands/Level/UeAgentHttpServer_Level_CaptureAndPersistence.cpp", purpose: "transitive helper evidence used by the command handler" }
+  ]
+  tests: [
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterfaceTests/Private/Smoke/UeAgentInterfaceAISmokeTests.cpp", purpose: "smoke or negative-path evidence cross-checked for the verified contract" }
+  ]
+}
+execution: {
+  destructive: false
+  editor_state: required
+  game_thread: required
+  idempotent: true
+  kind: read_only
+  overwrite_behavior: none
+  pie_state: allowed
+  retry_safe: true
+  save_behavior: none
+  side_effects: []
+  ui_effect: none
+}
+maturity: verified
+params: {
+  constraints: []
+  fields: {
+    actor: { default_state: none, description_zh: "C++ 实现读取的 actor 参数", required: false, type: string }
+    blueprint_asset: { default_state: none, description_zh: "C++ 实现读取的 blueprint_asset 参数", required: false, type: string }
+  }
+  state: defined
+}
+response: { artifact_fields: [senses], compact_fields: [status, class, component, dominant_sense, owner, sense_count], failure_fields: [], max_items_policy: { fields: [], mode: none } }
+returns: {
+  fields: {
+    class: { description_zh: "C++ 实现返回的 class 字段；是否出现取决于执行分支", required: false, type: string }
+    component: { description_zh: "C++ 实现返回的 component 字段；是否出现取决于执行分支", required: false, type: string }
+    dominant_sense: { description_zh: "C++ 实现返回的 dominant_sense 字段；是否出现取决于执行分支", required: false, type: string }
+    owner: { description_zh: "C++ 实现返回的 owner 字段；是否出现取决于执行分支", required: false, type: string }
+    sense_count: { description_zh: "C++ 实现返回的 sense_count 字段；是否出现取决于执行分支", required: false, type: integer }
+    senses: { description_zh: "C++ 实现返回的 senses 字段；是否出现取决于执行分支", item_type: json_value, required: false, type: array }
+    source_owner: { description_zh: "C++ 实现返回的 source_owner 字段；是否出现取决于执行分支", required: false, type: string }
+    status: { description_zh: "C++ 实现返回的 status 字段；是否出现取决于执行分支", required: false, type: string }
+  }
+  state: defined
+}
+schema: uai.command_spec.v1
+status: active
+types: {}
+verification: { reason: read_only_command_has_no_post_write_verification, state: none }
+version: 1

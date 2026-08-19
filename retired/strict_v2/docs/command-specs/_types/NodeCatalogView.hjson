@@ -1,0 +1,13 @@
+definition: {
+  additional_fields: false
+  fields: {
+    include_category_tree: { default: true, default_state: defined, description_zh: "返回分类树", required: false, type: bool }
+    include_debug_fields: { default: false, default_state: defined, description_zh: "返回 debug 字段", required: false, type: bool }
+    include_groups: { default: true, default_state: defined, description_zh: "返回分组", required: false, type: bool }
+    include_items: { default: true, default_state: defined, description_zh: "返回候选 TSV", required: false, type: bool }
+  }
+  kind: object
+}
+schema: uai.command_spec.shared_type.v1
+type_id: NodeCatalogView
+version: 1

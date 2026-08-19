@@ -1,0 +1,105 @@
+authoring: { reason: command_has_no_registered_folder_authoring_profile, state: none }
+category: ikrig_ikretargeter
+command: ik_retargeter_set_settings
+deprecation: { reason: command_is_active, state: none }
+discovery: { aliases: [], keywords_en: [ik, retargeter, set, settings, ikrig_ikretargeter], keywords_zh: [ik_retargeter_set_settings], summary_en: "Execute ik_retargeter_set_settings with a verified implementation contract", summary_zh: "设置 global / root / chain settings", tags: [ikrig_ikretargeter, p2-006] }
+errors: {
+  codes: [
+    { code: asset_not_found, description_zh: "C++ 实现返回错误码 asset_not_found", retry_safe: false, stage: execution, wire_match: exact }
+    { code: ik_retargeter_controller_not_available, description_zh: "C++ 实现返回错误码 ik_retargeter_controller_not_available", retry_safe: false, stage: execution, wire_match: exact }
+    { code: ik_retargeter_not_found, description_zh: "C++ 实现返回错误码 ik_retargeter_not_found", retry_safe: false, stage: execution, wire_match: exact }
+    { code: invalid_forward_direction, description_zh: "C++ 实现返回错误码 invalid_forward_direction", retry_safe: true, stage: preflight, wire_match: exact }
+    { code: invalid_retarget_rotation_mode, description_zh: "C++ 实现返回错误码 invalid_retarget_rotation_mode", retry_safe: true, stage: preflight, wire_match: exact }
+    { code: invalid_retarget_translation_mode, description_zh: "C++ 实现返回错误码 invalid_retarget_translation_mode", retry_safe: true, stage: preflight, wire_match: exact }
+    { code: invalid_warping_direction_source, description_zh: "C++ 实现返回错误码 invalid_warping_direction_source", retry_safe: true, stage: preflight, wire_match: exact }
+    { code: missing_asset_path, description_zh: "C++ 实现返回错误码 missing_asset_path", retry_safe: true, stage: preflight, wire_match: exact }
+    { code: missing_target_chain_name, description_zh: "C++ 实现返回错误码 missing_target_chain_name", retry_safe: true, stage: preflight, wire_match: exact }
+    { code: no_settings_requested, description_zh: "C++ 实现返回错误码 no_settings_requested", retry_safe: false, stage: execution, wire_match: exact }
+    { code: retarget_chain_settings_not_found, description_zh: "C++ 实现返回错误码 retarget_chain_settings_not_found", retry_safe: false, stage: execution, wire_match: exact }
+    { code: save_asset_failed, description_zh: "C++ 实现返回错误码 save_asset_failed", retry_safe: false, stage: execution, wire_match: exact }
+    { code: set_retarget_chain_settings_failed, description_zh: "C++ 实现返回错误码 set_retarget_chain_settings_failed", retry_safe: false, stage: execution, wire_match: exact }
+  ]
+}
+evidence: {
+  docs: [
+    { path: "Plugins/UeAgentInterface/docs/commands/ikrig_ikretargeter/ik_retargeter_set_settings.md", purpose: "user documentation cross-check; C++ implementation remains authoritative" }
+  ]
+  implementation: [
+    { line_hint: 1631, path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Commands/IK/UeAgentHttpServer_IKAssets.cpp", purpose: "command handler, parameter and return evidence", symbol: CmdIKRetargeterSetSettings }
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Commands/IK/UeAgentHttpServer_IKAssets.cpp", purpose: "current command handler implementation" }
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Server/UeAgentHttpServer.cpp", purpose: "transitive helper evidence used by the command handler" }
+  ]
+  tests: [
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterfaceTests/Private/Smoke/UeAgentInterfaceSmoke_AnimationIKNiagara.cpp", purpose: "smoke or negative-path evidence cross-checked for the verified contract" }
+  ]
+}
+execution: {
+  destructive: false
+  editor_state: required
+  game_thread: required
+  idempotent: false
+  kind: write
+  overwrite_behavior: none
+  pie_state: allowed
+  retry_safe: false
+  save_behavior: caller_controlled
+  side_effects: [modifies_asset]
+  ui_effect: none
+}
+maturity: verified
+params: {
+  constraints: []
+  fields: {
+    asset_path: { default_state: none, description_zh: "C++ 实现读取的 asset_path 参数", path_semantics: { access_scope: project_write, kind: ue_asset }, required: true, type: ue_asset_path }
+    chain_settings: { default_state: none, description_zh: "C++ 实现读取的 chain_settings 参数", required: false, type: object, type_ref: "shared:IKRetargetChainSettings" }
+    global_settings: { default_state: none, description_zh: "C++ 实现读取的 global_settings 参数", required: false, type: object, type_ref: "shared:IKRetargetGlobalSettings" }
+    reset_chain_to_default: { default: false, default_state: defined, description_zh: "C++ 实现读取的 reset_chain_to_default 参数", required: false, type: bool }
+    root_settings: { default_state: none, description_zh: "C++ 实现读取的 root_settings 参数", required: false, type: object, type_ref: "shared:IKRetargetRootSettings" }
+    save_after_set: { default: false, default_state: defined, description_zh: "C++ 实现读取的 save_after_set 参数", required: false, type: bool }
+    target_chain_name: { default_state: none, description_zh: "C++ 实现读取的 target_chain_name 参数", required: false, type: string }
+  }
+  state: defined
+}
+response: { artifact_fields: [chain_mappings, chain_settings, source_pose_names, target_pose_names, current_source_pose, current_target_pose, global_settings, root_settings], compact_fields: [asset_path, chain_mapping_count, chain_mapping_ready, chain_settings_count], failure_fields: [params.asset_path], max_items_policy: { fields: [], mode: none } }
+returns: {
+  fields: {
+    asset_path: { description_zh: "C++ 实现返回的 asset_path 字段；是否出现取决于执行分支", required: false, type: ue_asset_path }
+    chain_mapping_count: { description_zh: "C++ 实现返回的 chain_mapping_count 字段；是否出现取决于执行分支", required: false, type: integer }
+    chain_mapping_ready: { description_zh: "C++ 实现返回的 chain_mapping_ready 字段；是否出现取决于执行分支", required: false, type: bool }
+    chain_mappings: { description_zh: "C++ 实现返回的 chain_mappings 字段；是否出现取决于执行分支", item_type: json_value, required: false, type: array }
+    chain_settings: { description_zh: "C++ 实现返回的 chain_settings 字段；是否出现取决于执行分支", item_type: json_value, required: false, type: array }
+    chain_settings_count: { description_zh: "C++ 实现返回的 chain_settings_count 字段；是否出现取决于执行分支", required: false, type: integer }
+    current_source_pose: { description_zh: "C++ 实现返回的 current_source_pose 字段；是否出现取决于执行分支", required: false, type: json_value }
+    current_target_pose: { description_zh: "C++ 实现返回的 current_target_pose 字段；是否出现取决于执行分支", required: false, type: json_value }
+    global_settings: { description_zh: "C++ 实现返回的 global_settings 字段；是否出现取决于执行分支", required: false, type: json_value }
+    object_path: { description_zh: "C++ 实现返回的 object_path 字段；是否出现取决于执行分支", required: false, type: ue_object_path }
+    retarget_op_count: { description_zh: "C++ 实现返回的 retarget_op_count 字段；是否出现取决于执行分支", required: false, type: integer }
+    root_settings: { description_zh: "C++ 实现返回的 root_settings 字段；是否出现取决于执行分支", required: false, type: json_value }
+    source_ik_rig: { description_zh: "C++ 实现返回的 source_ik_rig 字段；是否出现取决于执行分支", required: false, type: string }
+    source_pose_names: { description_zh: "C++ 实现返回的 source_pose_names 字段；是否出现取决于执行分支", item_type: json_value, required: false, type: array }
+    source_preview_mesh: { description_zh: "C++ 实现返回的 source_preview_mesh 字段；是否出现取决于执行分支", required: false, type: string }
+    source_retarget_pose: { description_zh: "C++ 实现返回的 source_retarget_pose 字段；是否出现取决于执行分支", required: false, type: string }
+    target_ik_rig: { description_zh: "C++ 实现返回的 target_ik_rig 字段；是否出现取决于执行分支", required: false, type: string }
+    target_pose_names: { description_zh: "C++ 实现返回的 target_pose_names 字段；是否出现取决于执行分支", item_type: json_value, required: false, type: array }
+    target_preview_mesh: { description_zh: "C++ 实现返回的 target_preview_mesh 字段；是否出现取决于执行分支", required: false, type: string }
+    target_retarget_pose: { description_zh: "C++ 实现返回的 target_retarget_pose 字段；是否出现取决于执行分支", required: false, type: string }
+  }
+  state: defined
+}
+schema: uai.command_spec.v1
+status: active
+types: {}
+verification: {
+  assertions: [
+    { id: result_present, operator: exists, source: returns.asset_path }
+    { id: state_readback_present, operator: exists, source: methods.state_readback.asset_path }
+  ]
+  failure_policy: fail_overall
+  methods: [
+    { id: result, kind: result_assertion }
+    { command: ik_retargeter_get_info, id: state_readback, kind: command_readback, params_mapping: { asset_path: params.asset_path } }
+  ]
+  required: true
+  state: defined
+}
+version: 1

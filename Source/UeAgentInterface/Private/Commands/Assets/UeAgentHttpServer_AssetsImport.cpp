@@ -2,6 +2,7 @@
 
 #include "UeAgentHttpServer_Assets.h"
 #include "UeAgentHttpServer_AssetsOps.h"
+#include "Commands/Level/UeAgentCommandSafety.h"
 #include "Utilities/UeAgentCurveJson.h"
 #include "Utilities/UeAgentJsonDiagnostics.h"
 #include "Module/UeAgentInterfaceLogger.h"
@@ -363,10 +364,15 @@ bool FUeAgentHttpServer::CmdAssetImportTexture(const FUeAgentRequestContext& Ctx
 		}
 	}
 
-	bool bReplaceExisting = true;
-	if (Ctx.Params.IsValid() && Ctx.Params->HasField(TEXT("replace_existing")) && !JsonTryGetBool(Ctx.Params, TEXT("replace_existing"), bReplaceExisting))
+	bool bReplaceExisting = false;
+	bool bAllowOverwrite = false;
+	if (!UeAgentCommandSafety::ResolveOverwriteConfirmation(Ctx.Params, bReplaceExisting, bAllowOverwrite, OutError))
 	{
-		OutError = TEXT("invalid_replace_existing");
+		return false;
+	}
+	if (!UeAgentCommandSafety::EnsureImportTargetCanBeWritten(
+		DestinationPath, DestinationName, SourceFilename, bReplaceExisting, OutError))
+	{
 		return false;
 	}
 
@@ -611,6 +617,7 @@ bool FUeAgentHttpServer::CmdAssetImportTexture(const FUeAgentRequestContext& Ctx
 	OutData->SetStringField(TEXT("destination_path"), DestinationPath);
 	OutData->SetStringField(TEXT("destination_name"), DestinationName);
 	OutData->SetBoolField(TEXT("replace_existing"), bReplaceExisting);
+	OutData->SetBoolField(TEXT("allow_overwrite"), bAllowOverwrite);
 	OutData->SetBoolField(TEXT("replace_existing_settings"), bReplaceExistingSettings);
 	OutData->SetBoolField(TEXT("save_after_import"), bSaveAfterImport);
 	OutData->SetBoolField(TEXT("factory_can_import"), true);
@@ -690,8 +697,17 @@ bool FUeAgentHttpServer::CmdAssetImportFbxSkeletalMesh(const FUeAgentRequestCont
 	JsonTryGetString(Ctx.Params, TEXT("destination_name"), DestinationName);
 	DestinationName.TrimStartAndEndInline();
 
-	bool bReplaceExisting = true;
-	JsonTryGetBool(Ctx.Params, TEXT("replace_existing"), bReplaceExisting);
+	bool bReplaceExisting = false;
+	bool bAllowOverwrite = false;
+	if (!UeAgentCommandSafety::ResolveOverwriteConfirmation(Ctx.Params, bReplaceExisting, bAllowOverwrite, OutError))
+	{
+		return false;
+	}
+	if (!UeAgentCommandSafety::EnsureImportTargetCanBeWritten(
+		DestinationPath, DestinationName, SourceFilename, bReplaceExisting, OutError))
+	{
+		return false;
+	}
 
 	bool bReplaceExistingSettings = true;
 	JsonTryGetBool(Ctx.Params, TEXT("replace_existing_settings"), bReplaceExistingSettings);
@@ -868,6 +884,7 @@ bool FUeAgentHttpServer::CmdAssetImportFbxSkeletalMesh(const FUeAgentRequestCont
 	OutData->SetStringField(TEXT("destination_name"), DestinationName);
 	OutData->SetBoolField(TEXT("replace_existing_settings"), bReplaceExistingSettings);
 	OutData->SetBoolField(TEXT("replace_existing"), bReplaceExisting);
+	OutData->SetBoolField(TEXT("allow_overwrite"), bAllowOverwrite);
 	OutData->SetBoolField(TEXT("save_after_import"), bSaveAfterImport);
 	OutData->SetBoolField(TEXT("import_morph_targets"), bImportMorphTargets);
 	OutData->SetBoolField(TEXT("import_skin_weight_profiles"), bImportSkinWeightProfiles);
@@ -1134,8 +1151,17 @@ bool FUeAgentHttpServer::CmdAssetImportFbxAnimation(const FUeAgentRequestContext
 	JsonTryGetString(Ctx.Params, TEXT("destination_name"), DestinationName);
 	DestinationName.TrimStartAndEndInline();
 
-	bool bReplaceExisting = true;
-	JsonTryGetBool(Ctx.Params, TEXT("replace_existing"), bReplaceExisting);
+	bool bReplaceExisting = false;
+	bool bAllowOverwrite = false;
+	if (!UeAgentCommandSafety::ResolveOverwriteConfirmation(Ctx.Params, bReplaceExisting, bAllowOverwrite, OutError))
+	{
+		return false;
+	}
+	if (!UeAgentCommandSafety::EnsureImportTargetCanBeWritten(
+		DestinationPath, DestinationName, SourceFilename, bReplaceExisting, OutError))
+	{
+		return false;
+	}
 
 	bool bReplaceExistingSettings = true;
 	JsonTryGetBool(Ctx.Params, TEXT("replace_existing_settings"), bReplaceExistingSettings);
@@ -1218,6 +1244,7 @@ bool FUeAgentHttpServer::CmdAssetImportFbxAnimation(const FUeAgentRequestContext
 	}
 	OutData->SetBoolField(TEXT("replace_existing_settings"), bReplaceExistingSettings);
 	OutData->SetBoolField(TEXT("replace_existing"), bReplaceExisting);
+	OutData->SetBoolField(TEXT("allow_overwrite"), bAllowOverwrite);
 	OutData->SetBoolField(TEXT("save_after_import"), bSaveAfterImport);
 
 	if (OutData->GetIntegerField(TEXT("imported_object_count")) <= 0)

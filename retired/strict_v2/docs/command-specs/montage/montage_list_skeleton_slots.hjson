@@ -1,0 +1,59 @@
+authoring: { reason: command_has_no_registered_folder_authoring_profile, state: none }
+category: montage
+command: montage_list_skeleton_slots
+deprecation: { reason: command_is_active, state: none }
+discovery: { aliases: [], keywords_en: [montage, list, skeleton, slots], keywords_zh: [montage_list_skeleton_slots], summary_en: "Execute montage_list_skeleton_slots with a verified implementation contract", summary_zh: "列出 Skeleton 上的 Slot/Group", tags: [montage, p2-006] }
+errors: {
+  codes: [
+    { code: skeleton_not_found, description_zh: "C++ 实现返回错误码 skeleton_not_found", retry_safe: false, stage: execution, wire_match: exact }
+  ]
+}
+evidence: {
+  docs: [
+    { path: "Plugins/UeAgentInterface/docs/commands/montage/montage_list_skeleton_slots.md", purpose: "user documentation cross-check; C++ implementation remains authoritative" }
+  ]
+  implementation: [
+    { line_hint: 2303, path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Commands/Montage/UeAgentHttpServer_Montage.cpp", purpose: "command handler, parameter and return evidence", symbol: CmdMontageListSkeletonSlots }
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Server/UeAgentHttpServer.cpp", purpose: "transitive helper evidence used by the command handler" }
+  ]
+  tests: [
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterfaceTests/Private/Smoke/UeAgentInterfaceSmoke_AnimationIKNiagara.cpp", purpose: "smoke or negative-path evidence cross-checked for the verified contract" }
+  ]
+}
+execution: {
+  destructive: false
+  editor_state: required
+  game_thread: required
+  idempotent: true
+  kind: read_only
+  overwrite_behavior: none
+  pie_state: allowed
+  retry_safe: true
+  save_behavior: none
+  side_effects: []
+  ui_effect: none
+}
+maturity: verified
+params: {
+  constraints: []
+  fields: {
+    asset_path: { default_state: none, description_zh: "C++ 实现读取的 asset_path 参数", path_semantics: { access_scope: mounted_read, kind: ue_asset }, required: false, type: ue_asset_path }
+    skeleton_path: { default_state: none, description_zh: "C++ 实现读取的 skeleton_path 参数", required: false, type: string }
+  }
+  state: defined
+}
+response: { artifact_fields: [slot_groups], compact_fields: [skeleton_path, slot_group_count, source_field], failure_fields: [], max_items_policy: { fields: [], mode: none } }
+returns: {
+  fields: {
+    skeleton_path: { description_zh: "C++ 实现返回的 skeleton_path 字段；是否出现取决于执行分支", required: false, type: string }
+    slot_group_count: { description_zh: "C++ 实现返回的 slot_group_count 字段；是否出现取决于执行分支", required: false, type: integer }
+    slot_groups: { description_zh: "C++ 实现返回的 slot_groups 字段；是否出现取决于执行分支", item_type: json_value, required: false, type: array }
+    source_field: { description_zh: "C++ 实现返回的 source_field 字段；是否出现取决于执行分支", required: false, type: string }
+  }
+  state: defined
+}
+schema: uai.command_spec.v1
+status: active
+types: {}
+verification: { reason: read_only_command_has_no_post_write_verification, state: none }
+version: 1

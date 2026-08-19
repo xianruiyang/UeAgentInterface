@@ -3,6 +3,7 @@
 #include "UeAgentHttpServer_Sequence.h"
 #include "UeAgentHttpServer_SequenceOps.h"
 
+#include "Commands/Assets/UeAgentReflectionAuthoringCommandBridge.h"
 #include "Commands/EditorViewport/UeAgentEditorViewportSequenceFrameOptions.h"
 #include "Utilities/UeAgentAuthoringJson.h"
 #include "Utilities/UeAgentDetailsAuthoring.h"
@@ -113,8 +114,8 @@ bool FUeAgentHttpServer::ExecuteSequenceCommand(const FString& CommandLower, con
 	if (CommandLower == TEXT("sequence_open_level_sequence")) return CmdSequenceOpenLevelSequence(Ctx, OutData, OutError);
 	if (CommandLower == TEXT("sequence_get_level_sequence_info")) return CmdSequenceGetLevelSequenceInfo(Ctx, OutData, OutError);
 	if (CommandLower == TEXT("sequence_screenshot")) return CmdSequenceScreenshot(Ctx, OutData, OutError);
-	if (CommandLower == TEXT("sequence_export_folder")) return CmdSequenceExportFolder(Ctx, OutData, OutError);
-	if (CommandLower == TEXT("sequence_apply_folder")) return CmdSequenceApplyFolder(Ctx, OutData, OutError);
+	if (CommandLower == TEXT("sequence_export_folder")) return UeAgentReflectionAuthoringCommandBridge::Export(TEXT("sequence"), Ctx.Params, OutData, OutError);
+	if (CommandLower == TEXT("sequence_apply_folder")) return UeAgentReflectionAuthoringCommandBridge::Apply(TEXT("sequence"), Ctx.Params, OutData, OutError, Ctx.RequestId);
 	if (CommandLower == TEXT("sequence_set_level_sequence_playback_range")) return CmdSequenceSetLevelSequencePlaybackRange(Ctx, OutData, OutError);
 	if (CommandLower == TEXT("sequence_set_level_sequence_display_rate")) return CmdSequenceSetLevelSequenceDisplayRate(Ctx, OutData, OutError);
 	if (CommandLower == TEXT("sequence_add_actor_binding")) return CmdSequenceAddActorBinding(Ctx, OutData, OutError);
@@ -138,16 +139,6 @@ bool FUeAgentHttpServer::ExecuteSequenceCommand(const FString& CommandLower, con
 
 	if (CommandLower == TEXT("sequence_list_umg_animations")) return CmdSequenceListUmgAnimations(Ctx, OutData, OutError);
 	if (CommandLower == TEXT("sequence_get_umg_animation_info")) return CmdSequenceGetUmgAnimationInfo(Ctx, OutData, OutError);
-	if (CommandLower == TEXT("sequence_create_umg_animation")) return CmdSequenceCreateUmgAnimation(Ctx, OutData, OutError);
-	if (CommandLower == TEXT("sequence_rename_umg_animation")) return CmdSequenceRenameUmgAnimation(Ctx, OutData, OutError);
-	if (CommandLower == TEXT("sequence_remove_umg_animation")) return CmdSequenceRemoveUmgAnimation(Ctx, OutData, OutError);
-	if (CommandLower == TEXT("sequence_set_umg_animation_playback_range")) return CmdSequenceSetUmgAnimationPlaybackRange(Ctx, OutData, OutError);
-	if (CommandLower == TEXT("sequence_set_umg_animation_display_rate")) return CmdSequenceSetUmgAnimationDisplayRate(Ctx, OutData, OutError);
-	if (CommandLower == TEXT("sequence_add_umg_widget_transform_key")) return CmdSequenceAddUmgWidgetTransformKey(Ctx, OutData, OutError);
-	if (CommandLower == TEXT("sequence_add_umg_widget_translation_key")) return CmdSequenceAddUmgWidgetTranslationKey(Ctx, OutData, OutError);
-	if (CommandLower == TEXT("sequence_add_umg_widget_opacity_key")) return CmdSequenceAddUmgWidgetOpacityKey(Ctx, OutData, OutError);
-	if (CommandLower == TEXT("sequence_add_umg_widget_float_key")) return CmdSequenceAddUmgWidgetFloatKey(Ctx, OutData, OutError);
-	if (CommandLower == TEXT("sequence_add_umg_widget_color_key")) return CmdSequenceAddUmgWidgetColorKey(Ctx, OutData, OutError);
 
 	OutError = TEXT("unknown_sequence_command");
 	return false;

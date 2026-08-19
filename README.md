@@ -44,8 +44,9 @@
 - `Config/`：插件配置。
 - `docs/UeAgentInterface_Usage.md`：总使用说明。
 - `docs/UeAgentInterface_Status.md`：能力状态记录。
-- `docs/commands/`：命令分册。
-- `docs/commands/deprecatedCommand/`：已被 JSON / folder workflow 覆盖的兼容写入命令归档。
+- `Resources/UaiCommandManifest.json`：正式命令集合与参数合同真源。
+- `docs/active/`：统一架构各任务的当前实现与验证边界。
+- `UeAgentInterfaceCMD/cli/uai/commands/generated.pyi`：由正式 manifest 生成的 Python 签名。
 
 ## 构建与验证
 

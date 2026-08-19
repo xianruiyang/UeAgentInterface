@@ -1,0 +1,67 @@
+authoring: { reason: command_has_no_registered_folder_authoring_profile, state: none }
+category: static_mesh_enhanced_input
+command: static_mesh_get_info
+deprecation: { reason: command_is_active, state: none }
+discovery: { aliases: [], keywords_en: [static, mesh, get, info, static_mesh_enhanced_input], keywords_zh: [static_mesh_get_info], summary_en: "Execute static_mesh_get_info with a verified implementation contract", summary_zh: "读取网格信息（含 bounds / socket / 碰撞 / 预览）", tags: [static_mesh_enhanced_input, p2-006] }
+errors: {
+  codes: [
+    { code: missing_asset_path, description_zh: "C++ 实现返回错误码 missing_asset_path", retry_safe: true, stage: preflight, wire_match: exact }
+    { code: static_mesh_not_found, description_zh: "C++ 实现返回错误码 static_mesh_not_found", retry_safe: false, stage: execution, wire_match: exact }
+  ]
+}
+evidence: {
+  docs: [
+    { path: "Plugins/UeAgentInterface/docs/commands/static_mesh_enhanced_input/static_mesh_get_info.md", purpose: "user documentation cross-check; C++ implementation remains authoritative" }
+  ]
+  implementation: [
+    { line_hint: 872, path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Commands/StaticMesh/UeAgentHttpServer_StaticMesh.cpp", purpose: "command handler, parameter and return evidence", symbol: CmdStaticMeshGetInfo }
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Server/UeAgentHttpServer.cpp", purpose: "transitive helper evidence used by the command handler" }
+  ]
+  tests: [
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterfaceTests/Private/Smoke/UeAgentInterfaceSmoke_MaterialStaticDeformerInput.cpp", purpose: "smoke or negative-path evidence cross-checked for the verified contract" }
+  ]
+}
+execution: {
+  destructive: false
+  editor_state: required
+  game_thread: required
+  idempotent: true
+  kind: read_only
+  overwrite_behavior: none
+  pie_state: allowed
+  retry_safe: true
+  save_behavior: none
+  side_effects: []
+  ui_effect: none
+}
+maturity: verified
+params: {
+  constraints: []
+  fields: { asset_path: { default_state: none, description_zh: "C++ 实现读取的 asset_path 参数", path_semantics: { access_scope: mounted_read, kind: ue_asset }, required: true, type: ue_asset_path } }
+  state: defined
+}
+response: { artifact_fields: [material_slots, sockets, bounds_extent, bounds_max, bounds_min, bounds_origin, collision, editor_camera], compact_fields: [asset_path, bounds_sphere_radius], failure_fields: [params.asset_path], max_items_policy: { fields: [], mode: none } }
+returns: {
+  fields: {
+    asset_path: { description_zh: "C++ 实现返回的 asset_path 字段；是否出现取决于执行分支", required: false, type: ue_asset_path }
+    bounds_extent: { description_zh: "Static Mesh 资产局部空间坐标，不是组件或 world space", required: false, type: object, type_ref: "shared:Vector3" }
+    bounds_max: { description_zh: "Static Mesh 资产局部空间坐标，不是组件或 world space", required: false, type: object, type_ref: "shared:Vector3" }
+    bounds_min: { description_zh: "Static Mesh 资产局部空间坐标，不是组件或 world space", required: false, type: object, type_ref: "shared:Vector3" }
+    bounds_origin: { description_zh: "Static Mesh 资产局部空间坐标，不是组件或 world space", required: false, type: object, type_ref: "shared:Vector3" }
+    bounds_sphere_radius: { description_zh: "C++ 实现返回的 bounds_sphere_radius 字段；是否出现取决于执行分支", required: false, type: number }
+    collision: { description_zh: "C++ 实现返回的 collision 字段；是否出现取决于执行分支", required: false, type: json_value }
+    dirty: { description_zh: "C++ 实现返回的 dirty 字段；是否出现取决于执行分支", required: false, type: bool }
+    editor_camera: { description_zh: "C++ 实现返回的 editor_camera 字段；是否出现取决于执行分支", required: false, type: json_value }
+    material_slot_count: { description_zh: "C++ 实现返回的 material_slot_count 字段；是否出现取决于执行分支", required: false, type: integer }
+    material_slots: { description_zh: "C++ 实现返回的 material_slots 字段；是否出现取决于执行分支", item_type: json_value, required: false, type: array }
+    object_path: { description_zh: "C++ 实现返回的 object_path 字段；是否出现取决于执行分支", required: false, type: ue_object_path }
+    socket_count: { description_zh: "C++ 实现返回的 socket_count 字段；是否出现取决于执行分支", required: false, type: integer }
+    sockets: { description_zh: "C++ 实现返回的 sockets 字段；是否出现取决于执行分支", item_type: json_value, required: false, type: array }
+  }
+  state: defined
+}
+schema: uai.command_spec.v1
+status: active
+types: {}
+verification: { reason: read_only_command_has_no_post_write_verification, state: none }
+version: 1

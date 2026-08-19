@@ -1,0 +1,89 @@
+schema: uai.command_spec.v1
+version: 1
+maturity: verified
+command: level_apply_folder
+category: level_content
+status: active
+discovery: {
+  summary_zh: "通过统一 Level HJSON workspace 原子创建、更新、克隆或删除 Actor 与 Component"
+  summary_en: "Atomically create, update, clone, or remove Actors and Components through the unified Level HJSON workspace"
+  aliases: []
+  keywords_zh: [Level, HJSON, workspace, Actor, Component, "应用"]
+  keywords_en: [level, hjson, workspace, actor, component, apply]
+  tags: [level_content, authoring, apply, unified_contract]
+}
+types: {}
+execution: {
+  kind: write
+  side_effects: [modifies_level]
+  destructive: true
+  idempotent: false
+  retry_safe: false
+  editor_state: required
+  pie_state: allowed
+  game_thread: required
+  ui_effect: none
+  save_behavior: caller_controlled
+  overwrite_behavior: target_level
+}
+params: {
+  state: defined
+  fields: {
+    input_folder: { type: filesystem_path, required: false, default_state: none, description_zh: "包含 index.hjson 的 Level workspace", path_semantics: { kind: filesystem_directory, must_exist: true, writable: false } }
+    folder_path: { type: filesystem_path, required: false, default_state: none, description_zh: "input_folder 别名", path_semantics: { kind: filesystem_directory, must_exist: true, writable: false } }
+    dry_run: { type: bool, required: false, default: true, default_state: defined, description_zh: "true 仅执行完整 preflight；false 执行原子 mutation 与读回验证" }
+  }
+  constraints: [{ kind: one_of, fields: [input_folder, folder_path] }]
+}
+returns: {
+  state: defined
+  fields: {
+    status: { type: string, required: true, description_zh: "ready、applied 或 failed" }
+    phase: { type: string, required: true, description_zh: "registration/load/preflight/mutation/verification/complete" }
+    dry_run: { type: bool, required: true, description_zh: "本次是否仅 preflight" }
+    units_checked: { type: integer, required: true, description_zh: "完成 preflight 的 workspace unit 数" }
+    mutations_applied: { type: integer, required: true, description_zh: "完成的 mutation 数" }
+    actors_created: { type: integer, required: true, description_zh: "新增 Actor 数" }
+    actors_updated: { type: integer, required: true, description_zh: "更新 Actor 数" }
+    actors_removed: { type: integer, required: true, description_zh: "删除 Actor 数" }
+    components_created: { type: integer, required: true, description_zh: "新增 Component 数" }
+    components_updated: { type: integer, required: true, description_zh: "更新 Component 数" }
+    components_removed: { type: integer, required: true, description_zh: "删除 Component 数" }
+    rollback_attempted: { type: bool, required: true, description_zh: "失败后是否尝试回滚" }
+    rollback_succeeded: { type: bool, required: true, description_zh: "回滚是否成功" }
+    error_code: { type: string, required: false, description_zh: "失败阶段的稳定错误码" }
+    error_detail: { type: string, required: false, description_zh: "失败上下文" }
+  }
+}
+response: { compact_fields: [status, phase, dry_run, units_checked, mutations_applied, actors_created, actors_updated, actors_removed, components_created, components_updated, components_removed], failure_fields: [params.input_folder, returns.error_code, returns.error_detail, returns.rollback_attempted, returns.rollback_succeeded], artifact_fields: [], max_items_policy: { mode: none, fields: [] } }
+errors: { codes: [
+  { code: no_editor_world, wire_match: exact, stage: preflight, retry_safe: false, description_zh: "当前 Editor World 不可用" }
+  { code: level_workspace_, wire_match: prefix, stage: preflight, retry_safe: true, description_zh: "Level workspace、引用、依赖或 identity 不合法" }
+  { code: level_actor_, wire_match: prefix, stage: execution, retry_safe: false, description_zh: "Actor lifecycle、类型、transform 或属性失败" }
+  { code: level_component_, wire_match: prefix, stage: execution, retry_safe: false, description_zh: "Component lifecycle、attachment、transform 或属性失败" }
+  { code: workspace_, wire_match: prefix, stage: preflight, retry_safe: true, description_zh: "共享 workspace loader/router/dependency 失败" }
+] }
+verification: {
+  assertions: [
+    { expected: applied, id: status_applied, operator: equals, source: returns.status }
+    { expected: complete, id: phase_complete, operator: equals, source: returns.phase }
+    { expected: written, id: readback_status_written, operator: equals, source: methods.export_readback.status }
+  ]
+  failure_policy: fail_overall
+  methods: [
+    { id: result, kind: result_assertion }
+    { command: level_export_folder, id: export_readback, kind: command_readback, output_override_param: output_folder, params_mapping: {} }
+  ]
+  required: true
+  state: defined
+}
+authoring: { state: defined, type_id: level, operation: apply, profile_ref: "contracts/field_contracts/level.hjson" }
+deprecation: { state: none, reason: command_is_active }
+evidence: {
+  implementation: [
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Commands/LevelContentJson/UeAgentLevelContentJsonCommands_Tail.cpp", symbol: CmdLevelApplyFolder, purpose: "命令适配器" }
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Domains/Level/Authoring/UeAgentLevelAuthoringApplyProvider.cpp", purpose: "统一 workspace contract、provider、transaction 和 verification" }
+  ]
+  tests: [{ path: "Plugins/UeAgentInterface/Source/UeAgentInterfaceTests/Private/Smoke/UeAgentInterfaceLevelFolderApplySmokeTests.cpp", purpose: "真实 UE Actor/Component roundtrip smoke" }]
+  docs: [{ path: "Plugins/UeAgentInterface/docs/commands/level_content/level_apply_folder.md", purpose: "正式命令文档" }]
+}

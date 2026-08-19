@@ -1,0 +1,93 @@
+schema: uai.command_spec.v1
+version: 1
+maturity: verified
+command: umg_export_folder
+category: umg
+status: active
+discovery: {
+  summary_zh: "通过统一只读快照契约导出 Widget Blueprint index.hjson workspace"
+  summary_en: "Export a Widget Blueprint through the unified read-only snapshot workspace"
+  aliases: []
+  keywords_zh: [UMG, WidgetBlueprint, HJSON, workspace, "导出"]
+  keywords_en: [umg, widget_blueprint, hjson, workspace, export]
+  tags: [umg, authoring, export, unified_contract]
+}
+types: {}
+execution: {
+  kind: read_only_export
+  side_effects: [writes_files, deletes_owned_files]
+  destructive: false
+  idempotent: true
+  retry_safe: true
+  editor_state: required
+  pie_state: allowed
+  game_thread: required
+  ui_effect: none
+  save_behavior: none
+  overwrite_behavior: owned_artifacts_only
+}
+params: {
+  state: defined
+  fields: {
+    asset_path: { type: ue_asset_path, required: true, default_state: none, description_zh: "要导出的 Widget Blueprint 资产路径", path_semantics: { kind: ue_asset, access_scope: mounted_read } }
+    folder_path: { type: filesystem_path, required: false, default_state: none, description_zh: "输出 workspace；省略时按资产路径解析默认目录", path_semantics: { kind: filesystem_directory, must_exist: false, writable: true } }
+    profile: { type: enum, enum_values: [llm_authoring, readback, debug, validation], required: false, default_state: defined, default: llm_authoring, description_zh: "共享 Export profile" }
+  }
+  constraints: []
+}
+returns: {
+  state: defined
+  fields: {
+    asset_path: { description_zh: "规范化资产路径", required: true, type: ue_asset_path }
+    character_count: { description_zh: "HJSON 字符数", required: true, type: integer }
+    entry_file: { description_zh: "workspace-relative canonical 入口文件", required: true, type: string }
+    estimated_tokens: { description_zh: "共享 writer token proxy", required: true, type: integer }
+    file_count: { description_zh: "写出的 HJSON 文件数；当前为 1", required: true, type: integer }
+    folder_path: { description_zh: "导出目录", required: true, type: filesystem_path }
+    profile: { description_zh: "实际 profile", required: true, type: string }
+    publisher: { description_zh: "共享 Export publisher transaction receipt", required: true, type: json_value }
+    root_path: { description_zh: "默认 UMG workspace 根目录", required: true, type: filesystem_path }
+    schema: { description_zh: "结构化 Export workspace result schema；固定为 uai.export_workspace_result.v1", required: true, type: string }
+    written_relative_files: { description_zh: "最终 artifact 的完整 workspace-relative 文件集合", item_type: string, required: true, type: array }
+  }
+}
+response: {
+  compact_fields: [asset_path, folder_path, profile, file_count, estimated_tokens]
+  failure_fields: ["params.asset_path", "params.folder_path"]
+  artifact_fields: []
+  max_items_policy: { mode: none, fields: [] }
+}
+errors: {
+  codes: [
+    { code: missing_asset_path, wire_match: exact, stage: preflight, retry_safe: true, description_zh: "缺少 asset_path" }
+    { code: widget_blueprint_not_found, wire_match: exact, stage: execution, retry_safe: true, description_zh: "找不到 Widget Blueprint 或 WidgetTree" }
+    { code: umg_export_, wire_match: prefix, stage: execution, retry_safe: true, description_zh: "UMG Export contract 或快照构建失败" }
+    { code: export_, wire_match: prefix, stage: execution, retry_safe: true, description_zh: "共享 projector/writer 失败" }
+  ]
+}
+verification: {
+  assertions: [
+    { expected: 1, id: one_file_written, operator: equals, source: returns.file_count }
+    { id: folder_present, operator: exists, source: returns.folder_path }
+  ]
+  failure_policy: fail_overall
+  methods: [
+    { id: result_fields, kind: result_assertion }
+    { artifact_field: folder_path, id: exported_workspace, kind: filesystem_artifact, receipt_source: structured_result }
+  ]
+  required: true
+  state: defined
+}
+authoring: { state: defined, type_id: umg, operation: export, profile_ref: "contracts/field_contracts/umg.hjson" }
+deprecation: { state: none, reason: command_is_active }
+evidence: {
+  implementation: [
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Commands/UMG/UeAgentHttpServer_UMG_FolderFormat.cpp", symbol: CmdUmgExportFolder, purpose: "统一命令适配器" }
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Domains/UMG/Authoring/UeAgentUmgAuthoringExport.cpp", purpose: "快照、projection 与 shared writer 入口" }
+  ]
+  tests: [
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterfaceTests/Private/UeAgentInterfaceUmgAuthoringTests.cpp", purpose: "只读、native slot 与 roundtrip" }
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterfaceTests/Private/Smoke/UeAgentInterfaceSmoke_BlueprintUmg.cpp", purpose: "真实 HTTP workspace smoke" }
+  ]
+  docs: [{ path: "Plugins/UeAgentInterface/docs/commands/umg/umg_export_folder.md", purpose: "正式命令文档" }]
+}

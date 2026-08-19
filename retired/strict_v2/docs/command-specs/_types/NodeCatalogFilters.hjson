@@ -1,0 +1,17 @@
+definition: {
+  additional_fields: false
+  fields: {
+    categories: { default_state: none, description_zh: "分类过滤器", item_type: string, required: false, type: array }
+    category_paths: { default_state: none, description_zh: "分类路径过滤器", item_type: string, required: false, type: array }
+    context_sensitive: { default: true, default_state: defined, description_zh: "启用上下文过滤", required: false, type: bool }
+    library_only: { default: true, default_state: defined, description_zh: "只返回 library 候选", required: false, type: bool }
+    sources: { default_state: none, description_zh: "来源过滤器", item_type: string, required: false, type: array }
+    suggested_filter: { default: all, default_state: defined, description_zh: "suggested 过滤器", required: false, type: string }
+    target_usage: { default_state: none, description_zh: "目标用途过滤器", required: false, type: string }
+    types: { default_state: none, description_zh: "类型过滤器", item_type: string, required: false, type: array }
+  }
+  kind: object
+}
+schema: uai.command_spec.shared_type.v1
+type_id: NodeCatalogFilters
+version: 1

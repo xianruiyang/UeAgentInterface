@@ -1,0 +1,87 @@
+#pragma once
+
+#include "CommandEdge/UeAgentCommandDispatch.h"
+#include "Composition/SimpleAuthoring/UeAgentSimpleAuthoringApplication.h"
+#include "Core/BindingGateway/Ticket/UeAgentBindingTicket.h"
+#include "Core/Contract/UeAgentCommandContract.h"
+#include "Core/Discovery/UeAgentDiscovery.h"
+#include "Core/Projection/UeAgentProjection.h"
+#include "Templates/SharedPointer.h"
+
+#define UAI_SIMPLE_AUTHORING_RUNTIME_V1 1
+
+class UWorld;
+
+namespace UE::UAI::Composition::SimpleAuthoring
+{
+	struct UEAGENTINTERFACE_API FUeAgentSimpleAuthoringRuntimeConfig
+	{
+		FString ProjectInstanceId;
+		FString EditorInstanceId;
+		FString ServerSessionId;
+		int64 RegistryEpoch = 0;
+		double TimeoutSeconds = 0.0;
+		int64 MaxFrameBytes = 0;
+		FString JournalRoot;
+
+		bool IsValid() const;
+	};
+
+	struct UEAGENTINTERFACE_API FUeAgentSimpleAuthoringRuntimeError
+	{
+		FString Code;
+		FString SubjectId;
+		FString Detail;
+
+		bool IsValid() const
+		{
+			return !Code.IsEmpty();
+		}
+	};
+
+	class UEAGENTINTERFACE_API FUeAgentSimpleAuthoringRuntime final
+	{
+	public:
+		static bool TryCreate(
+			const FUeAgentSimpleAuthoringRuntimeConfig& Config,
+			UWorld& ExplicitWorld,
+			TSharedRef<const BindingGateway::Ticket::
+				FUeAgentOperationTicketService> TicketService,
+			TSharedRef<const Projection::FUeAgentResponseProjector>
+				Projector,
+			TSharedPtr<FUeAgentSimpleAuthoringRuntime>& OutRuntime,
+			FUeAgentSimpleAuthoringRuntimeError& OutError);
+
+		TSharedRef<const CommandContract::
+			FUeAgentCommandContractRegistry> GetCommandRegistry() const;
+		TSharedRef<FUeAgentSimpleAuthoringApplication>
+			GetApplication() const;
+		const TArray<TSharedRef<CommandEdge::IUeAgentCommandHandler>>&
+			GetCommandHandlers() const;
+		const TArray<TSharedRef<Discovery::IUeAgentCatalogSource>>&
+			GetCatalogSources() const;
+		const TArray<FString>& GetFamilyIds() const;
+		const TArray<FString>& GetAuthorityScopes() const;
+
+	private:
+		FUeAgentSimpleAuthoringRuntime(
+			TSharedRef<const CommandContract::
+				FUeAgentCommandContractRegistry> InCommandRegistry,
+			TSharedRef<FUeAgentSimpleAuthoringApplication> InApplication,
+			TArray<TSharedRef<CommandEdge::IUeAgentCommandHandler>>
+				InCommandHandlers,
+			TArray<TSharedRef<Discovery::IUeAgentCatalogSource>>
+				InCatalogSources,
+			TArray<FString> InFamilyIds,
+			TArray<FString> InAuthorityScopes);
+
+		TSharedRef<const CommandContract::FUeAgentCommandContractRegistry>
+			CommandRegistry;
+		TSharedRef<FUeAgentSimpleAuthoringApplication> Application;
+		TArray<TSharedRef<CommandEdge::IUeAgentCommandHandler>>
+			CommandHandlers;
+		TArray<TSharedRef<Discovery::IUeAgentCatalogSource>> CatalogSources;
+		TArray<FString> FamilyIds;
+		TArray<FString> AuthorityScopes;
+	};
+}

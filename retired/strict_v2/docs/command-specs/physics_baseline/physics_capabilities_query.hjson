@@ -1,0 +1,61 @@
+authoring: { reason: command_has_no_registered_folder_authoring_profile, state: none }
+category: physics_baseline
+command: physics_capabilities_query
+deprecation: { reason: command_is_active, state: none }
+discovery: { aliases: [], keywords_en: [physics, capabilities, query, physics_baseline], keywords_zh: [physics_capabilities_query], summary_en: "Execute physics_capabilities_query with a verified implementation contract", summary_zh: "查询基础物理可用性、碰撞 profile/channel、项目物理设置摘要和排除的可选插件", tags: [physics_baseline, p2-006] }
+errors: { codes: [] }
+evidence: {
+  docs: [
+    { path: "Plugins/UeAgentInterface/docs/commands/physics_baseline/physics_capabilities_query.md", purpose: "user documentation cross-check; C++ implementation remains authoritative" }
+  ]
+  implementation: [
+    { line_hint: 478, path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Commands/Physics/UeAgentHttpServer_Physics.cpp", purpose: "command handler, parameter and return evidence", symbol: CmdPhysicsCapabilitiesQuery }
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Server/UeAgentHttpServer.cpp", purpose: "transitive helper evidence used by the command handler" }
+  ]
+  tests: [
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterfaceTests/Private/Smoke/Physics/UeAgentInterfacePhysicsSmokeTests.cpp", purpose: "smoke or negative-path evidence cross-checked for the verified contract" }
+  ]
+}
+execution: {
+  destructive: false
+  editor_state: required
+  game_thread: required
+  idempotent: true
+  kind: read_only
+  overwrite_behavior: none
+  pie_state: allowed
+  retry_safe: true
+  save_behavior: none
+  side_effects: []
+  ui_effect: none
+}
+maturity: verified
+params: {
+  constraints: []
+  fields: {
+    include_collision_profiles: { default: true, default_state: defined, description_zh: "C++ 实现读取的 include_collision_profiles 参数", required: false, type: bool }
+    include_optional_plugin_status: { default: true, default_state: defined, description_zh: "C++ 实现读取的 include_optional_plugin_status 参数", required: false, type: bool }
+    include_project_settings: { default: true, default_state: defined, description_zh: "C++ 实现读取的 include_project_settings 参数", required: false, type: bool }
+  }
+  state: defined
+}
+response: { artifact_fields: [available_classes, collision_channels, collision_profiles, excluded_optional_plugins, warnings, physics_settings_summary], compact_fields: [baseline_physics_available, engine_version], failure_fields: [], max_items_policy: { fields: [], mode: none } }
+returns: {
+  fields: {
+    available_classes: { description_zh: "C++ 实现返回的 available_classes 字段；是否出现取决于执行分支", item_type: json_value, required: false, type: array }
+    baseline_physics_available: { description_zh: "C++ 实现返回的 baseline_physics_available 字段；是否出现取决于执行分支", required: false, type: bool }
+    collision_channels: { description_zh: "C++ 实现返回的 collision_channels 字段；是否出现取决于执行分支", item_type: json_value, required: false, type: array }
+    collision_profiles: { description_zh: "C++ 实现返回的 collision_profiles 字段；是否出现取决于执行分支", item_type: json_value, required: false, type: array }
+    engine_version: { description_zh: "C++ 实现返回的 engine_version 字段；是否出现取决于执行分支", required: false, type: string }
+    excluded_optional_plugins: { description_zh: "C++ 实现返回的 excluded_optional_plugins 字段；是否出现取决于执行分支", item_type: json_value, required: false, type: array }
+    physics_settings_summary: { description_zh: "C++ 实现返回的 physics_settings_summary 字段；是否出现取决于执行分支", required: false, type: json_value }
+    schema: { description_zh: "C++ 实现返回的 schema 字段；是否出现取决于执行分支", required: false, type: string }
+    warnings: { description_zh: "C++ 实现返回的 warnings 字段；是否出现取决于执行分支", item_type: json_value, required: false, type: array }
+  }
+  state: defined
+}
+schema: uai.command_spec.v1
+status: active
+types: {}
+verification: { reason: read_only_command_has_no_post_write_verification, state: none }
+version: 1

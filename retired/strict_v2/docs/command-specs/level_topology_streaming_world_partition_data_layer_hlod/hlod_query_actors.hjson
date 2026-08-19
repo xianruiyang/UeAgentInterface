@@ -1,0 +1,72 @@
+authoring: { reason: command_has_no_registered_folder_authoring_profile, state: none }
+category: level_topology_streaming_world_partition_data_layer_hlod
+command: hlod_query_actors
+deprecation: { reason: command_is_active, state: none }
+discovery: { aliases: [], keywords_en: [hlod, query, actors, level_topology_streaming_world_partition_data_layer_hlod], keywords_zh: [hlod_query_actors], summary_en: "Execute hlod_query_actors with a verified implementation contract", summary_zh: "查询 Actor 的 HLOD/WP 分配", tags: [level_topology_streaming_world_partition_data_layer_hlod, p2-002] }
+errors: {
+  codes: [
+    { code: actor_selection_empty, description_zh: "C++ 实现返回错误码 actor_selection_empty", retry_safe: false, stage: execution, wire_match: exact }
+    { code: actor_selection_exceeds_max_actors, description_zh: "C++ 实现返回错误码 actor_selection_exceeds_max_actors", retry_safe: false, stage: execution, wire_match: exact }
+    { code: missing_actor_selection, description_zh: "C++ 实现返回错误码 missing_actor_selection", retry_safe: true, stage: preflight, wire_match: exact }
+    { code: missing_world_or_params, description_zh: "C++ 实现返回错误码 missing_world_or_params", retry_safe: true, stage: preflight, wire_match: exact }
+    { code: no_editor_world, description_zh: "C++ 实现返回错误码 no_editor_world", retry_safe: false, stage: execution, wire_match: exact }
+    { code: no_geditor, description_zh: "C++ 实现返回错误码 no_geditor", retry_safe: false, stage: execution, wire_match: exact }
+  ]
+}
+evidence: {
+  docs: [
+    { path: "Plugins/UeAgentInterface/docs/commands/level_topology_streaming_world_partition_data_layer_hlod/hlod_query_actors.md", purpose: "user documentation cross-check; C++ implementation remains authoritative" }
+  ]
+  implementation: [
+    { line_hint: 1060, path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Commands/LevelTopology/UeAgentHttpServer_LevelTopology_WorldPartitionHlodAndJson.cpp", purpose: "command handler, parameter and return evidence", symbol: CmdHLODQueryActors }
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Commands/Level/UeAgentHttpServer_Level_CaptureAndPersistence.cpp", purpose: "transitive helper evidence used by the command handler" }
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Commands/LevelTopology/UeAgentHttpServer_LevelTopology.cpp", purpose: "transitive helper evidence used by the command handler" }
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Commands/TextureRenderTarget/UeAgentHttpServer_TextureRenderTarget_TextureAssets.inl", purpose: "transitive helper evidence used by the command handler" }
+  ]
+  tests: [
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterfaceTests/Private/Smoke/LevelTopology/UeAgentInterfaceLevelTopologySmokeTests.cpp", purpose: "smoke or negative-path evidence cross-checked for the verified contract" }
+  ]
+}
+execution: {
+  destructive: false
+  editor_state: required
+  game_thread: required
+  idempotent: true
+  kind: read_only
+  overwrite_behavior: none
+  pie_state: allowed
+  retry_safe: true
+  save_behavior: none
+  side_effects: []
+  ui_effect: none
+}
+maturity: verified
+params: {
+  constraints: []
+  fields: {
+    actor: { default_state: none, description_zh: "C++ 实现读取的 actor 参数", required: false, type: string }
+    actor_id: { default_state: none, description_zh: "C++ 实现读取的 actor_id 参数", required: false, type: string }
+    actor_ids: { default_state: none, description_zh: "C++ 实现读取的 actor_ids 参数", item_type: json_value, required: false, type: array }
+    actor_selection: { default_state: none, description_zh: "C++ 实现读取的 actor_selection 参数", required: true, type: json_value }
+    actors: { default_state: none, description_zh: "C++ 实现读取的 actors 参数", item_type: json_value, required: false, type: array }
+    folder_root: { default_state: none, description_zh: "C++ 实现读取的 folder_root 参数", required: false, type: string }
+    managed_tag: { default_state: none, description_zh: "C++ 实现读取的 managed_tag 参数", required: false, type: string }
+    max_actors: { default: 0, default_state: defined, description_zh: "C++ 实现读取的 max_actors 参数", required: false, type: number }
+  }
+  state: defined
+}
+response: { artifact_fields: [], compact_fields: [count, actor_results, actors, schema], failure_fields: [params.actor_selection], max_items_policy: { fields: [], mode: none } }
+returns: {
+  fields: {
+    actor_results: { description_zh: "C++ 实现返回的 actor_results 字段；是否出现取决于执行分支", item_type: json_value, required: false, type: array }
+    actors: { description_zh: "C++ 实现返回的 actors 字段；是否出现取决于执行分支", item_type: json_value, required: false, type: array }
+    count: { description_zh: "C++ 实现返回的 count 字段；是否出现取决于执行分支", required: false, type: integer }
+    schema: { description_zh: "C++ 实现返回的 schema 字段；是否出现取决于执行分支", required: false, type: string }
+  }
+  state: defined
+}
+schema: uai.command_spec.v1
+status: active
+types: {}
+verification: { reason: read_only_command_has_no_post_write_verification, state: none }
+version: 1

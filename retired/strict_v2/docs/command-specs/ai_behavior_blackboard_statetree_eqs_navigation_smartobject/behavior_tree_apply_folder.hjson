@@ -1,0 +1,124 @@
+authoring: { operation: apply, profile_ref: "contracts/field_contracts/behavior_tree.hjson", state: defined, type_id: behavior_tree }
+category: ai_behavior_blackboard_statetree_eqs_navigation_smartobject
+command: behavior_tree_apply_folder
+deprecation: { reason: command_is_active, state: none }
+discovery: { aliases: [], keywords_en: [behavior, tree, apply, folder, ai_behavior_blackboard_statetree_eqs_navigation_smartobject], keywords_zh: [behavior_tree_apply_folder], summary_en: "Apply behavior_tree through the unified Reflection HJSON authoring domain", summary_zh: "通过统一 Reflection HJSON authoring 域执行 `behavior_tree` 的 apply", tags: [ai_behavior_blackboard_statetree_eqs_navigation_smartobject, reflection_authoring, p5-005] }
+errors: {
+  codes: [
+    { code: folder_path_or_input_file_required, description_zh: "必须提供目录或单文件 source。", retry_safe: true, stage: preflight, wire_match: exact }
+    { code: reflection_workspace_asset_path_conflict, description_zh: "命令 expected asset_path 与 source target 冲突。", retry_safe: true, stage: preflight, wire_match: exact }
+    { code: invalid_asset_path, description_zh: "source target 不是合法 /Game package path。", retry_safe: true, stage: preflight, wire_match: exact }
+    { code: reflection_asset_class_, description_zh: "class_path 不可用、不在 profile 范围内或与真实类冲突。", retry_safe: true, stage: preflight, wire_match: prefix }
+    { code: asset_not_found, description_zh: "update/remove 目标不存在。", retry_safe: false, stage: preflight, wire_match: exact }
+    { code: asset_already_exists, description_zh: "create/clone 目标已存在。", retry_safe: false, stage: preflight, wire_match: exact }
+    { code: reflection_, description_zh: "Reflection lifecycle、workspace 或 verification 失败。", retry_safe: false, stage: execution, wire_match: prefix }
+  ]
+}
+evidence: {
+  docs: [
+    { path: "Plugins/UeAgentInterface/docs/commands/ai_behavior_blackboard_statetree_eqs_navigation_smartobject/behavior_tree_apply_folder.md", purpose: "user documentation cross-check; C++ implementation remains authoritative" }
+  ]
+  implementation: [
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Commands/Assets/UeAgentReflectionAuthoringCommandBridge.cpp", purpose: "all command parameter routing and result mapping", symbol: Apply }
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Domains/Reflection/Authoring/", purpose: "shared profile, contract, lifecycle, snapshot and export owner" }
+  ]
+  tests: [
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterfaceTests/Private/UeAgentInterfaceReflectionAuthoringTests.cpp", purpose: "25-profile registration/class coverage and real render-target round trip" }
+  ]
+}
+execution: {
+  destructive: true
+  editor_state: required
+  game_thread: required
+  idempotent: false
+  kind: write
+  overwrite_behavior: target_asset
+  pie_state: allowed
+  retry_safe: false
+  save_behavior: caller_controlled
+  side_effects: [modifies_asset]
+  ui_effect: none
+}
+maturity: verified
+params: {
+  constraints: [
+    { fields: [folder_path, input_folder, json_folder, json_file, input_file], kind: one_of }
+  ]
+  fields: {
+    asset_path: { default_state: none, description_zh: "可选 expected identity；与 source target 冲突时失败。", path_semantics: { access_scope: project_write, kind: ue_asset }, required: false, type: ue_asset_path }
+    folder_path: {
+      default_state: none
+      description_zh: "目录 source；目录只允许 index.hjson。"
+      path_semantics: { kind: filesystem_directory, must_exist: true, writable: false }
+      required: false
+      type: filesystem_path
+    }
+    input_file: {
+      default_state: none
+      description_zh: "显式单 HJSON source。"
+      path_semantics: { kind: filesystem_file, must_exist: true, writable: false }
+      required: false
+      type: filesystem_path
+    }
+    input_folder: {
+      default_state: none
+      description_zh: "显式目录 source。"
+      path_semantics: { kind: filesystem_directory, must_exist: true, writable: false }
+      required: false
+      type: filesystem_path
+    }
+    json_file: {
+      default_state: none
+      description_zh: "单 HJSON source。"
+      path_semantics: { kind: filesystem_file, must_exist: true, writable: false }
+      required: false
+      type: filesystem_path
+    }
+    json_folder: {
+      default_state: none
+      description_zh: "目录 source 的 JSON 命令前端字段。"
+      path_semantics: { kind: filesystem_directory, must_exist: true, writable: false }
+      required: false
+      type: filesystem_path
+    }
+    save: { default: false, default_state: defined, description_zh: "覆盖 source provider_extension.save。", required: false, type: bool }
+  }
+  state: defined
+}
+response: { artifact_fields: [], compact_fields: [status, phase, profile, asset_path, resolved_operation, mutations_applied, created, removed, no_op], failure_fields: [returns.error_code, returns.error_detail], max_items_policy: { fields: [], mode: none } }
+returns: {
+  fields: {
+    asset_path: { description_zh: "canonical target path。", required: false, type: ue_asset_path }
+    created: { description_zh: "是否创建。", required: false, type: bool }
+    error_code: { description_zh: "稳定错误码。", required: false, type: string }
+    error_detail: { description_zh: "错误详情。", required: false, type: string }
+    mutations_applied: { description_zh: "已应用 mutation 数。", required: false, type: integer }
+    no_op: { description_zh: "是否无状态变更。", required: false, type: bool }
+    phase: { description_zh: "失败或完成阶段。", required: false, type: string }
+    profile: { description_zh: "Reflection profile ID。", required: false, type: string }
+    removed: { description_zh: "是否删除。", required: false, type: bool }
+    resolved_operation: { description_zh: "upsert 解析后的实际 operation。", required: false, type: string }
+    rollback_attempted: { description_zh: "失败时是否尝试回滚。", required: false, type: bool }
+    rollback_succeeded: { description_zh: "回滚是否成功。", required: false, type: bool }
+    status: { description_zh: "ok 或 failed。", required: false, type: string }
+    units_checked: { description_zh: "preflight 单元数。", required: false, type: integer }
+  }
+  state: defined
+}
+schema: uai.command_spec.v1
+status: active
+types: {}
+verification: {
+  assertions: [
+    { id: status_present, operator: exists, source: returns.status }
+    { expected_ref: returns.asset_path, id: readback_asset_matches, operator: equals, source: methods.state_readback.asset_path }
+  ]
+  failure_policy: fail_overall
+  methods: [
+    { id: result, kind: result_assertion }
+    { command: behavior_tree_export_folder, id: state_readback, kind: command_readback, output_override_param: output_folder, params_mapping: { asset_path: returns.asset_path } }
+  ]
+  required: true
+  state: defined
+}
+version: 1

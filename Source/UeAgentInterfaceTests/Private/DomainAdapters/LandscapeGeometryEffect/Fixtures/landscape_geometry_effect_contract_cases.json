@@ -1,0 +1,420 @@
+{
+  "schema": "uai.domain_adapter.landscape_geometry_effect.test_fixture.v1",
+  "descriptor_count": 2,
+  "native_operation_types": [
+    "landscape.geometry.create",
+    "landscape.geometry.height_delta"
+  ],
+  "descriptors": [
+    {
+      "descriptor_id": "uai.operation.landscape.create",
+      "version": 1,
+      "descriptor_hash": "sha256:237659fc6faffd0b1d9b475624939f0140ff45417ef2654601a8618be58fd7eb",
+      "capability_id": "landscape.create",
+      "native_operation_type": "landscape.geometry.create",
+      "required_context_facets": ["level", "world"],
+      "allowed_state_planes": ["authoring_memory"],
+      "space_contract": {
+        "subject": "new Landscape actor, its sample origin, and full initial sample region",
+        "dimension": 3,
+        "semantic_frame": "declared_ue_world",
+        "write_frame": "ue_landscape_actor_and_local_sample_grid",
+        "read_frame": "ue_landscape_actor_and_local_sample_grid",
+        "verify_frame": "declared_ue_world",
+        "conversion_chain": "declared UE world placement -> C4 canonical transform -> Landscape actor/sample-grid write -> independent transform, extent, and height readback -> declared UE world verification"
+      },
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "target_ref": {"type": "string", "minLength": 1},
+          "topology": {
+            "type": "object",
+            "properties": {
+              "quads_per_section": {"type": "number", "enum": [7, 15, 31, 63, 127, 255]},
+              "sections_per_component": {"type": "number", "enum": [1, 2]},
+              "component_count": {
+                "type": "array",
+                "items": {"type": "number", "minimum": 1, "maximum": 64},
+                "minItems": 2,
+                "maxItems": 2
+              }
+            },
+            "required": ["quads_per_section", "sections_per_component", "component_count"],
+            "additionalProperties": false
+          },
+          "placement": {
+            "type": "object",
+            "properties": {
+              "subject_point": {"const": "sample_origin"},
+              "frame_id": {"type": "string", "minLength": 1},
+              "unit": {"type": "string", "enum": ["centimeter", "meter"]},
+              "translation": {
+                "type": "array",
+                "items": {"type": "number"},
+                "minItems": 3,
+                "maxItems": 3
+              },
+              "rotation_quaternion_xyzw": {
+                "type": "array",
+                "items": {"type": "number"},
+                "minItems": 4,
+                "maxItems": 4
+              },
+              "scale": {
+                "type": "array",
+                "items": {"type": "number", "exclusiveMinimum": 0},
+                "minItems": 3,
+                "maxItems": 3
+              },
+              "basis_evidence": {"type": "string", "minLength": 1}
+            },
+            "required": [
+              "subject_point",
+              "frame_id",
+              "unit",
+              "translation",
+              "rotation_quaternion_xyzw",
+              "scale",
+              "basis_evidence"
+            ],
+            "additionalProperties": false
+          },
+          "sample_region": {
+            "type": "object",
+            "properties": {
+              "frame_id": {"const": "ue.landscape.local_sample_grid"},
+              "min_inclusive": {
+                "type": "array",
+                "items": {"type": "number"},
+                "minItems": 2,
+                "maxItems": 2
+              },
+              "max_inclusive": {
+                "type": "array",
+                "items": {"type": "number"},
+                "minItems": 2,
+                "maxItems": 2
+              },
+              "basis_evidence": {"type": "string", "minLength": 1}
+            },
+            "required": ["frame_id", "min_inclusive", "max_inclusive", "basis_evidence"],
+            "additionalProperties": false
+          },
+          "initial_height": {
+            "type": "object",
+            "properties": {
+              "encoding": {"const": "landscape_local_height"},
+              "value": {"type": "number"}
+            },
+            "required": ["encoding", "value"],
+            "additionalProperties": false
+          }
+        },
+        "required": ["target_ref", "topology", "placement", "sample_region", "initial_height"],
+        "additionalProperties": false
+      },
+      "result_schema": {
+        "type": "object",
+        "properties": {
+          "operation_id": {"type": "string", "minLength": 1},
+          "outcome": {"type": "string", "enum": ["complete", "partial", "rolled_back", "state_unknown"]},
+          "target_refs": {
+            "type": "array",
+            "items": {"type": "string", "minLength": 1},
+            "uniqueItems": true
+          },
+          "evidence_refs": {
+            "type": "array",
+            "items": {"type": "string", "minLength": 1},
+            "uniqueItems": true
+          }
+        },
+        "required": ["operation_id", "outcome", "target_refs"],
+        "additionalProperties": false
+      }
+    },
+    {
+      "descriptor_id": "uai.operation.landscape.height_delta",
+      "version": 1,
+      "descriptor_hash": "sha256:cfca3d633f0fde98f4299fd6c1cf6f0a974f1a72448ba9e63938da8c66d6acff",
+      "capability_id": "landscape.height_delta",
+      "native_operation_type": "landscape.geometry.height_delta",
+      "required_context_facets": ["level", "world"],
+      "allowed_state_planes": ["authoring_memory"],
+      "space_contract": {
+        "subject": "one exact Landscape and an explicit rectangular height-sample region",
+        "dimension": 3,
+        "semantic_frame": "declared_ue_world",
+        "write_frame": "ue_landscape_local_sample_grid",
+        "read_frame": "ue_landscape_local_sample_grid",
+        "verify_frame": "declared_ue_world",
+        "conversion_chain": "declared UE world contract plus independent Landscape transform/scale/extent -> C4 canonical local sample region and local-height deltas -> Landscape edit API -> independent height readback -> declared UE world verification"
+      },
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "target_ref": {"type": "string", "minLength": 1},
+          "space_contract": {
+            "type": "object",
+            "properties": {
+              "semantic_frame_id": {"type": "string", "minLength": 1},
+              "write_frame_id": {"const": "ue.landscape.local_sample_grid"},
+              "read_frame_id": {"const": "ue.landscape.local_sample_grid"},
+              "verify_frame_id": {"type": "string", "minLength": 1},
+              "unit": {"type": "string", "enum": ["centimeter", "meter"]},
+              "expected_scale": {
+                "type": "array",
+                "items": {"type": "number", "exclusiveMinimum": 0},
+                "minItems": 3,
+                "maxItems": 3
+              },
+              "basis_evidence": {"type": "string", "minLength": 1},
+              "conversion_chain": {"type": "string", "minLength": 1}
+            },
+            "required": [
+              "semantic_frame_id",
+              "write_frame_id",
+              "read_frame_id",
+              "verify_frame_id",
+              "unit",
+              "expected_scale",
+              "basis_evidence",
+              "conversion_chain"
+            ],
+            "additionalProperties": false
+          },
+          "region": {
+            "type": "object",
+            "properties": {
+              "frame_id": {"const": "ue.landscape.local_sample_grid"},
+              "min_inclusive": {
+                "type": "array",
+                "items": {"type": "number"},
+                "minItems": 2,
+                "maxItems": 2
+              },
+              "max_inclusive": {
+                "type": "array",
+                "items": {"type": "number"},
+                "minItems": 2,
+                "maxItems": 2
+              }
+            },
+            "required": ["frame_id", "min_inclusive", "max_inclusive"],
+            "additionalProperties": false
+          },
+          "delta": {
+            "type": "object",
+            "properties": {
+              "encoding": {"const": "landscape_local_height_delta"},
+              "row_stride": {"type": "number", "minimum": 1},
+              "values": {
+                "type": "array",
+                "items": {"type": "number"},
+                "minItems": 1
+              }
+            },
+            "required": ["encoding", "row_stride", "values"],
+            "additionalProperties": false
+          }
+        },
+        "required": ["target_ref", "space_contract", "region", "delta"],
+        "additionalProperties": false
+      },
+      "result_schema": {
+        "type": "object",
+        "properties": {
+          "operation_id": {"type": "string", "minLength": 1},
+          "outcome": {"type": "string", "enum": ["complete", "partial", "rolled_back", "state_unknown"]},
+          "target_refs": {
+            "type": "array",
+            "items": {"type": "string", "minLength": 1},
+            "uniqueItems": true
+          },
+          "evidence_refs": {
+            "type": "array",
+            "items": {"type": "string", "minLength": 1},
+            "uniqueItems": true
+          }
+        },
+        "required": ["operation_id", "outcome", "target_refs"],
+        "additionalProperties": false
+      }
+    }
+  ],
+  "contract_cases": [
+    {
+      "descriptor_id": "uai.operation.landscape.create",
+      "valid_input": {
+        "target_ref": "uai://landscape/new-owned",
+        "topology": {
+          "quads_per_section": 7,
+          "sections_per_component": 1,
+          "component_count": [1, 1]
+        },
+        "placement": {
+          "subject_point": "sample_origin",
+          "frame_id": "ue.world",
+          "unit": "centimeter",
+          "translation": [1000, 2000, 300],
+          "rotation_quaternion_xyzw": [0, 0, 0.7071067811865476, 0.7071067811865476],
+          "scale": [100, 200, 50],
+          "basis_evidence": "explicit UE world frame and sample-origin placement"
+        },
+        "sample_region": {
+          "frame_id": "ue.landscape.local_sample_grid",
+          "min_inclusive": [0, 0],
+          "max_inclusive": [7, 7],
+          "basis_evidence": "one component, one section, seven quads produces an eight by eight sample grid"
+        },
+        "initial_height": {
+          "encoding": "landscape_local_height",
+          "value": 0
+        }
+      },
+      "invalid_input": {
+        "target_ref": "uai://landscape/new-owned",
+        "topology": {
+          "quads_per_section": 7,
+          "sections_per_component": 1,
+          "component_count": [1, 1]
+        },
+        "placement": {
+          "subject_point": "sample_origin",
+          "frame_id": "ue.world",
+          "unit": "centimeter",
+          "translation": [1000, 2000, 300],
+          "rotation_quaternion_xyzw": [0, 0, 0, 1],
+          "basis_evidence": "scale intentionally omitted"
+        },
+        "sample_region": {
+          "frame_id": "ue.landscape.local_sample_grid",
+          "min_inclusive": [0, 0],
+          "max_inclusive": [7, 7],
+          "basis_evidence": "topology-derived region"
+        },
+        "initial_height": {
+          "encoding": "landscape_local_height",
+          "value": 0
+        }
+      }
+    },
+    {
+      "descriptor_id": "uai.operation.landscape.height_delta",
+      "valid_input": {
+        "target_ref": "uai://landscape/owned",
+        "space_contract": {
+          "semantic_frame_id": "ue.world",
+          "write_frame_id": "ue.landscape.local_sample_grid",
+          "read_frame_id": "ue.landscape.local_sample_grid",
+          "verify_frame_id": "ue.world",
+          "unit": "centimeter",
+          "expected_scale": [100, 200, 50],
+          "basis_evidence": "independent Landscape transform, scale, extent, and revision",
+          "conversion_chain": "UE world intent -> observed Landscape transform -> local sample grid -> Landscape edit API -> independent readback -> UE world"
+        },
+        "region": {
+          "frame_id": "ue.landscape.local_sample_grid",
+          "min_inclusive": [2, 1],
+          "max_inclusive": [4, 2]
+        },
+        "delta": {
+          "encoding": "landscape_local_height_delta",
+          "row_stride": 3,
+          "values": [1, 2, 3, 4, 5, 6]
+        }
+      },
+      "invalid_input": {
+        "target_ref": "uai://landscape/owned",
+        "space_contract": {
+          "semantic_frame_id": "ue.world",
+          "write_frame_id": "ue.landscape.local_sample_grid",
+          "read_frame_id": "ue.landscape.local_sample_grid",
+          "verify_frame_id": "ue.world",
+          "unit": "centimeter",
+          "basis_evidence": "expected scale intentionally omitted",
+          "conversion_chain": "incomplete"
+        },
+        "region": {
+          "frame_id": "ue.landscape.local_sample_grid",
+          "min_inclusive": [2, 1],
+          "max_inclusive": [4, 2]
+        },
+        "delta": {
+          "encoding": "landscape_local_height_delta",
+          "row_stride": 3,
+          "values": [1, 2, 3, 4, 5, 6]
+        }
+      }
+    }
+  ],
+  "e1_negative_cases": [
+    {
+      "case_id": "landscape-create-region-topology-mismatch",
+      "descriptor_id": "uai.operation.landscape.create",
+      "expected_error": "landscape_create_region_topology_mismatch",
+      "mutation_count": 0
+    },
+    {
+      "case_id": "landscape-height-delta-sample-count-mismatch",
+      "descriptor_id": "uai.operation.landscape.height_delta",
+      "expected_error": "landscape_height_delta_sample_count_mismatch",
+      "mutation_count": 0
+    },
+    {
+      "case_id": "landscape-height-delta-scale-stale",
+      "descriptor_id": "uai.operation.landscape.height_delta",
+      "expected_error": "landscape_height_delta_scale_stale",
+      "mutation_count": 0
+    },
+    {
+      "case_id": "landscape-height-delta-region-out-of-bounds",
+      "descriptor_id": "uai.operation.landscape.height_delta",
+      "expected_error": "landscape_height_delta_region_out_of_bounds",
+      "mutation_count": 0
+    },
+    {
+      "case_id": "landscape-height-delta-target-unresolved",
+      "descriptor_id": "uai.operation.landscape.height_delta",
+      "expected_error": "landscape_geometry_reference_unresolved",
+      "mutation_count": 0
+    }
+  ],
+  "e2_scenarios": [
+    {
+      "descriptor_id": "uai.operation.landscape.create",
+      "oracle": "independent ALandscape identity, actor transform, component topology, sample extent, and initial height readback",
+      "rollback_oracle": "created ALandscape and generated components are absent from the owned world",
+      "negative_oracle": "invalid topology/region or duplicate target performs zero SpawnActor/Import mutation"
+    },
+    {
+      "descriptor_id": "uai.operation.landscape.height_delta",
+      "oracle": "independent FLandscapeEditDataInterface readback matches every changed local-height sample and leaves every sample outside the explicit region unchanged",
+      "rollback_oracle": "full pre-mutation height sample set is restored",
+      "negative_oracle": "unresolved identity, stale scale/revision, invalid region, or sample-count mismatch performs zero height write"
+    }
+  ],
+  "legacy_sources": [
+    {
+      "legacy_command_id": "landscape_create",
+      "terminal": "ADAPT_THEN_DELETE",
+      "capability_ids": ["landscape.create"],
+      "consumer": "SA-003F/SA-008",
+      "reason": "Spawn/Import mechanics are candidate implementation evidence; current-world selection, hidden defaults, handler transaction/save, and response-echo validation are rejected."
+    },
+    {
+      "legacy_command_id": "landscape_raise_circle",
+      "terminal": "ADAPT_THEN_DELETE",
+      "capability_ids": ["landscape.height_delta"],
+      "consumer": "SA-003F/SA-008",
+      "reason": "Landscape edit API use is candidate implementation evidence; first-Landscape selection, Scale.X-only conversion, circle-specific public shape, handler transaction/save, and missing independent readback are rejected."
+    },
+    {
+      "legacy_test_id": "GptProjectTest.UeAgentInterface.Smoke.LandscapeWorkflow",
+      "terminal": "DELETE",
+      "capability_ids": [],
+      "consumer": "SA-003E",
+      "reason": "The monolithic /api/exec smoke reuses an arbitrary current-world Landscape and proves only response fields, so it cannot define or validate the new family."
+    }
+  ]
+}

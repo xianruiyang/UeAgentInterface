@@ -1,0 +1,100 @@
+schema: uai.command_spec.v1
+version: 1
+maturity: verified
+command: material_function_export_folder
+category: material
+status: active
+discovery: {
+  summary_zh: "通过统一只读快照契约导出 Material Function index.hjson workspace"
+  summary_en: "Export a Material Function through the unified read-only snapshot workspace"
+  aliases: []
+  keywords_zh: [MaterialFunction, HJSON, workspace, "导出"]
+  keywords_en: [material_function, hjson, workspace, export]
+  tags: [material, authoring, export, unified_contract]
+}
+types: {}
+execution: {
+  kind: read_only_export
+  side_effects: [writes_files, deletes_owned_files]
+  destructive: false
+  idempotent: true
+  retry_safe: true
+  editor_state: required
+  pie_state: allowed
+  game_thread: required
+  ui_effect: none
+  save_behavior: none
+  overwrite_behavior: owned_artifacts_only
+}
+params: {
+  state: defined
+  fields: {
+    asset_path: { type: ue_asset_path, required: true, default_state: none, description_zh: "要导出的 UMaterialFunction 资产路径", path_semantics: { kind: ue_asset, access_scope: mounted_read } }
+    output_folder: { type: filesystem_path, required: false, default_state: none, description_zh: "可选输出 workspace；verification readback 必须使用 request-owned 路径", path_semantics: { kind: filesystem_directory, must_exist: false, writable: true } }
+    profile: { type: enum, enum_values: [llm_authoring, readback, debug, validation], required: false, default_state: defined, default: llm_authoring, description_zh: "共享 Export profile" }
+  }
+  constraints: []
+}
+returns: {
+  state: defined
+  fields: {
+    asset_kind: { description_zh: material_function, required: true, type: string }
+    asset_path: { description_zh: "规范化资产路径", required: true, type: ue_asset_path }
+    contract_id: { description_zh: uai.export.material.function, required: true, type: string }
+    contract_version: { description_zh: "Export contract 版本", required: true, type: string }
+    entry_file: { description_zh: "workspace-relative canonical 入口文件", required: true, type: string }
+    file_count: { description_zh: "写出的 HJSON 文件数；当前为 1", required: true, type: integer }
+    files: { description_zh: "规划文件", item_type: json_value, required: true, type: array }
+    folder_path: { description_zh: "导出目录", required: true, type: filesystem_path }
+    metrics: { description_zh: "HJSON 文本指标", required: true, type: json_value }
+    profile_id: { description_zh: "实际 profile", required: true, type: string }
+    publisher: { description_zh: "共享 Export publisher transaction receipt", required: true, type: json_value }
+    schema: { description_zh: uai.export_workspace_result.v1, required: true, type: string }
+    status: { description_zh: written, required: true, type: string }
+    token_budget: { description_zh: "profile token budget", required: true, type: integer }
+    workspace_root: { description_zh: "规范化 workspace 根目录", required: true, type: filesystem_path }
+    written_files: { description_zh: "已写文件", item_type: filesystem_path, required: true, type: array }
+    written_relative_files: { description_zh: "最终 artifact 的完整 workspace-relative 文件集合", item_type: string, required: true, type: array }
+  }
+}
+response: {
+  compact_fields: [status, asset_path, asset_kind, folder_path, file_count, profile_id]
+  failure_fields: ["params.asset_path"]
+  artifact_fields: [written_files]
+  max_items_policy: { mode: none, fields: [] }
+}
+errors: {
+  codes: [
+    { code: missing_asset_path, wire_match: exact, stage: preflight, retry_safe: true, description_zh: "缺少 asset_path" }
+    { code: material_function_not_found, wire_match: exact, stage: execution, retry_safe: true, description_zh: "找不到目标 UMaterialFunction" }
+    { code: material_export_, wire_match: prefix, stage: execution, retry_safe: true, description_zh: "Material Export Contract 或快照构建失败" }
+    { code: export_, wire_match: prefix, stage: execution, retry_safe: true, description_zh: "共享 Export projector/writer 失败" }
+  ]
+}
+verification: {
+  assertions: [
+    { expected: written, id: status_written, operator: equals, source: returns.status }
+    { expected: 1, id: one_file_written, operator: equals, source: returns.file_count }
+    { id: artifact_present, operator: not_empty, source: returns.written_files }
+  ]
+  failure_policy: fail_overall
+  methods: [
+    { id: result_fields, kind: result_assertion }
+    { artifact_field: folder_path, id: exported_workspace, kind: filesystem_artifact, receipt_source: structured_result }
+  ]
+  required: true
+  state: defined
+}
+authoring: { state: defined, type_id: material_function, operation: export, profile_ref: "contracts/field_contracts/material_function.hjson" }
+deprecation: { state: none, reason: command_is_active }
+evidence: {
+  implementation: [
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Commands/Material/UeAgentHttpServer_Material_FolderFormat.cpp", symbol: CmdMaterialFunctionExportFolder, purpose: "统一命令适配器" }
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Domains/Material/Authoring/UeAgentMaterialAuthoringExport.cpp", purpose: "快照、projection 与 shared writer 入口" }
+  ]
+  tests: [
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterfaceTests/Private/UeAgentInterfaceMaterialAuthoringApplyTests.cpp", purpose: "只读、roundtrip 与 golden" }
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterfaceTests/Private/Smoke/UeAgentInterfaceSmoke_MaterialStaticDeformerInput.cpp", purpose: "真实 HTTP folder workflow smoke" }
+  ]
+  docs: [{ path: "Plugins/UeAgentInterface/docs/commands/material/material_function_export_folder.md", purpose: "正式命令文档" }]
+}

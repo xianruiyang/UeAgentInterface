@@ -1,0 +1,19 @@
+definition: {
+  additional_fields: true
+  fields: {
+    absolute_transform: { default_state: none, description_zh: "Control Rig control-local 绝对 transform", required: false, type: object, type_ref: "shared:Transform3D" }
+    control: { default_state: none, description_zh: "可包含上述 transform 字段的 control 包装对象", required: false, type: json_value }
+    delta_transform: { default_state: none, description_zh: "relative_transform 别名", required: false, type: object, type_ref: "shared:Transform3D" }
+    goal: { default_state: none, description_zh: "control 包装对象的 goal 别名", required: false, type: json_value }
+    label: { default_state: none, description_zh: "候选显示标签", required: false, type: string }
+    mode: { default_state: none, description_zh: "候选 transform 解释模式", enum_values: [relative, delta, relative_transform, absolute, absolute_transform], required: false, type: enum }
+    relative: { default_state: none, description_zh: "是否相对当前 sequence frame 的原始 control-local transform", required: false, type: bool }
+    relative_to_original: { default_state: none, description_zh: "relative 别名", required: false, type: bool }
+    relative_transform: { default_state: none, description_zh: "control-local 相对 transform", required: false, type: object, type_ref: "shared:Transform3D" }
+    transform: { default_state: none, description_zh: "缺省按 control-local 相对 transform 解释", required: false, type: object, type_ref: "shared:Transform3D" }
+  }
+  kind: object
+}
+schema: uai.command_spec.shared_type.v1
+type_id: ProbeIKGoalCandidate
+version: 1

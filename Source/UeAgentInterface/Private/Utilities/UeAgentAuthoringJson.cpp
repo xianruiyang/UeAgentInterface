@@ -2,7 +2,7 @@
 
 #include "Dom/JsonObject.h"
 #include "Dom/JsonValue.h"
-#include "UObject/UnrealType.h"
+#include "UObject/Class.h"
 
 namespace UeAgentAuthoringJson
 {
@@ -32,106 +32,6 @@ namespace UeAgentAuthoringJson
 			Availability->SetStringField(TEXT("reason"), Reason);
 		}
 		return Availability;
-	}
-
-	FString GetReflectedPropertyCategoryPath(const FProperty* Property)
-	{
-		return Property ? Property->GetMetaData(TEXT("Category")) : FString();
-	}
-
-	FString GetReflectedPropertyControlType(const FProperty* Property)
-	{
-		if (!Property)
-		{
-			return TEXT("text");
-		}
-		if (CastField<FBoolProperty>(Property))
-		{
-			return TEXT("checkbox");
-		}
-		if (const FEnumProperty* EnumProperty = CastField<FEnumProperty>(Property))
-		{
-			return EnumProperty->GetEnum() ? TEXT("enum") : TEXT("text");
-		}
-		if (const FByteProperty* ByteProperty = CastField<FByteProperty>(Property))
-		{
-			return ByteProperty->Enum ? TEXT("enum") : TEXT("number");
-		}
-		if (CastField<FNumericProperty>(Property))
-		{
-			return TEXT("number");
-		}
-		if (CastField<FObjectPropertyBase>(Property) || CastField<FClassProperty>(Property) || CastField<FSoftObjectProperty>(Property) || CastField<FSoftClassProperty>(Property))
-		{
-			return TEXT("object_picker");
-		}
-		if (CastField<FArrayProperty>(Property) || CastField<FSetProperty>(Property) || CastField<FMapProperty>(Property))
-		{
-			return TEXT("collection");
-		}
-		if (CastField<FStructProperty>(Property))
-		{
-			return TEXT("struct");
-		}
-		return TEXT("text");
-	}
-
-	FString GetReflectedPropertyValueKind(const FProperty* Property)
-	{
-		if (!Property)
-		{
-			return TEXT("text");
-		}
-		if (CastField<FBoolProperty>(Property))
-		{
-			return TEXT("bool");
-		}
-		if (const FEnumProperty* EnumProperty = CastField<FEnumProperty>(Property))
-		{
-			return EnumProperty->GetEnum() ? TEXT("enum") : TEXT("text");
-		}
-		if (const FByteProperty* ByteProperty = CastField<FByteProperty>(Property))
-		{
-			return ByteProperty->Enum ? TEXT("enum") : TEXT("number");
-		}
-		if (CastField<FNumericProperty>(Property))
-		{
-			return TEXT("number");
-		}
-		if (CastField<FObjectPropertyBase>(Property) || CastField<FClassProperty>(Property) || CastField<FSoftObjectProperty>(Property) || CastField<FSoftClassProperty>(Property))
-		{
-			return TEXT("asset_path");
-		}
-		if (CastField<FArrayProperty>(Property))
-		{
-			return TEXT("array");
-		}
-		if (CastField<FSetProperty>(Property))
-		{
-			return TEXT("set");
-		}
-		if (CastField<FMapProperty>(Property))
-		{
-			return TEXT("map");
-		}
-		if (CastField<FStructProperty>(Property))
-		{
-			return TEXT("struct");
-		}
-		return TEXT("text");
-	}
-
-	const UEnum* GetReflectedPropertyEnum(const FProperty* Property)
-	{
-		if (const FEnumProperty* EnumProperty = CastField<FEnumProperty>(Property))
-		{
-			return EnumProperty->GetEnum();
-		}
-		if (const FByteProperty* ByteProperty = CastField<FByteProperty>(Property))
-		{
-			return ByteProperty->Enum;
-		}
-		return nullptr;
 	}
 
 	TArray<TSharedPtr<FJsonValue>> MakeEnumCandidates(const UEnum* Enum)
@@ -176,9 +76,7 @@ namespace UeAgentAuthoringJson
 		const FString& SelectorValue,
 		const FString& DisplayName,
 		const FString& CategoryPath,
-		const FString& ControlType,
 		const FString& ValueKind,
-		std::initializer_list<FString> Operations,
 		const bool bEditable)
 	{
 		if (!Obj.IsValid())
@@ -195,10 +93,8 @@ namespace UeAgentAuthoringJson
 		{
 			Obj->SetStringField(TEXT("category_path"), CategoryPath);
 		}
-		Obj->SetStringField(TEXT("control_type"), ControlType);
 		Obj->SetStringField(TEXT("value_kind"), ValueKind);
 		Obj->SetObjectField(TEXT("availability"), MakeAvailability(bEditable));
-		Obj->SetArrayField(TEXT("operations"), MakeStringArray(Operations));
 	}
 
 	void ApplyPropertyMetadata(
@@ -214,39 +110,7 @@ namespace UeAgentAuthoringJson
 			PropertyPath,
 			DisplayName.IsEmpty() ? PropertyPath : DisplayName,
 			CategoryPath,
-			TEXT("property_text"),
-			ValueKind,
-			{ TEXT("set") });
+			ValueKind);
 	}
 
-	void ApplyReflectedPropertyMetadata(const TSharedPtr<FJsonObject>& Obj, const FProperty* Property, const FString& PropertyPath)
-	{
-		if (!Obj.IsValid() || !Property)
-		{
-			return;
-		}
-
-		const FString DisplayName = Property->GetDisplayNameText().ToString();
-		Obj->SetStringField(TEXT("property_path"), PropertyPath);
-		ApplyAuthoringMetadata(
-			Obj,
-			TEXT("property_path"),
-			PropertyPath,
-			DisplayName.IsEmpty() ? PropertyPath : DisplayName,
-			GetReflectedPropertyCategoryPath(Property),
-			GetReflectedPropertyControlType(Property),
-			GetReflectedPropertyValueKind(Property),
-			{ TEXT("set") },
-			Property->HasAnyPropertyFlags(CPF_Edit));
-
-		const FString Tooltip = Property->GetToolTipText().ToString();
-		if (!Tooltip.IsEmpty())
-		{
-			Obj->SetStringField(TEXT("tooltip"), Tooltip);
-		}
-		if (const UEnum* Enum = GetReflectedPropertyEnum(Property))
-		{
-			Obj->SetArrayField(TEXT("candidates"), MakeEnumCandidates(Enum));
-		}
-	}
 }

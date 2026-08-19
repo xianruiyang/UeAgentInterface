@@ -1,0 +1,29 @@
+definition: {
+  additional_fields: true
+  fields: {
+    allow_stretch: { default_state: none, description_zh: "FBIK 是否允许 stretch", required: false, type: bool }
+    global_pull_chain_alpha: { default_state: none, description_zh: "FBIK global pull-chain alpha", required: false, type: number }
+    iterations: { default_state: none, description_zh: "FBIK iteration count", minimum: 0, required: false, type: integer }
+    mass_multiplier: { default_state: none, description_zh: "FBIK mass multiplier", required: false, type: number }
+    max_angle: { default_state: none, description_zh: "FBIK 最大角度（度）", required: false, type: number }
+    over_relaxation: { default_state: none, description_zh: "FBIK over-relaxation", required: false, type: number }
+    position_alpha: { default_state: none, description_zh: "BodyMover position alpha", required: false, type: number }
+    position_negative_x: { default_state: none, description_zh: "BodyMover -X 权重", required: false, type: number }
+    position_negative_y: { default_state: none, description_zh: "BodyMover -Y 权重", required: false, type: number }
+    position_negative_z: { default_state: none, description_zh: "BodyMover -Z 权重", required: false, type: number }
+    position_positive_x: { default_state: none, description_zh: "BodyMover +X 权重", required: false, type: number }
+    position_positive_y: { default_state: none, description_zh: "BodyMover +Y 权重", required: false, type: number }
+    position_positive_z: { default_state: none, description_zh: "BodyMover +Z 权重", required: false, type: number }
+    pre_pull_root_settings: { default_state: none, description_zh: "FBIK root pre-pull 分轴权重对象", required: false, type: json_value }
+    root_behavior: { default_state: none, description_zh: "FBIK root behavior", required: false, type: string }
+    rotate_x_alpha: { default_state: none, description_zh: "BodyMover X rotation alpha", required: false, type: number }
+    rotate_y_alpha: { default_state: none, description_zh: "BodyMover Y rotation alpha", required: false, type: number }
+    rotate_z_alpha: { default_state: none, description_zh: "BodyMover Z rotation alpha", required: false, type: number }
+    rotation_alpha: { default_state: none, description_zh: "BodyMover rotation alpha", required: false, type: number }
+    sub_iterations: { default_state: none, description_zh: "FBIK sub-iteration count", minimum: 0, required: false, type: integer }
+  }
+  kind: object
+}
+schema: uai.command_spec.shared_type.v1
+type_id: IKRigSolverSettings
+version: 1

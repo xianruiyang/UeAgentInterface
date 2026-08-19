@@ -1,0 +1,128 @@
+authoring: { reason: command_has_no_registered_folder_authoring_profile, state: none }
+category: core_level
+command: level_sweep_capsule
+deprecation: { reason: command_is_active, state: none }
+discovery: { aliases: [], keywords_en: [level, sweep, capsule, core_level], keywords_zh: [level_sweep_capsule], summary_en: "Execute level_sweep_capsule with a verified implementation contract", summary_zh: "胶囊 Sweep 通行性检测", tags: [core_level, p2-002] }
+errors: {
+  codes: [
+    { code: missing_end, description_zh: "C++ 实现返回错误码 missing_end", retry_safe: true, stage: preflight, wire_match: exact }
+    { code: missing_half_height_cm, description_zh: "C++ 实现返回错误码 missing_half_height_cm", retry_safe: true, stage: preflight, wire_match: exact }
+    { code: missing_radius_cm, description_zh: "C++ 实现返回错误码 missing_radius_cm", retry_safe: true, stage: preflight, wire_match: exact }
+    { code: missing_start, description_zh: "C++ 实现返回错误码 missing_start", retry_safe: true, stage: preflight, wire_match: exact }
+    { code: no_editor_world, description_zh: "C++ 实现返回错误码 no_editor_world", retry_safe: false, stage: execution, wire_match: exact }
+    { code: no_geditor, description_zh: "C++ 实现返回错误码 no_geditor", retry_safe: false, stage: execution, wire_match: exact }
+    { code: sweeps_invalid_item, description_zh: "C++ 实现返回错误码 sweeps_invalid_item", retry_safe: true, stage: preflight, wire_match: exact }
+    { code: unsupported_trace_channel, description_zh: "C++ 实现返回错误码 unsupported_trace_channel", retry_safe: false, stage: execution, wire_match: exact }
+  ]
+}
+evidence: {
+  docs: [
+    { path: "Plugins/UeAgentInterface/docs/commands/core_level/level_sweep_capsule.md", purpose: "user documentation cross-check; C++ implementation remains authoritative" }
+  ]
+  implementation: [
+    { line_hint: 1104, path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Commands/Level/UeAgentHttpServer_Level_ProjectionAndTrace.cpp", purpose: "command handler, parameter and return evidence", symbol: CmdLevelSweepCapsule }
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Commands/AI/UeAgentHttpServer_AI_Blackboard.cpp", purpose: "transitive helper evidence used by the command handler" }
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Commands/Level/UeAgentHttpServer_Level.cpp", purpose: "transitive helper evidence used by the command handler" }
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Commands/Level/UeAgentHttpServer_Level_CaptureAndPersistence.cpp", purpose: "transitive helper evidence used by the command handler" }
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Commands/UMG/UeAgentHttpServer_UMG_FolderFormat.cpp", purpose: "transitive helper evidence used by the command handler" }
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Server/UeAgentHttpServer.cpp", purpose: "transitive helper evidence used by the command handler" }
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Utilities/UeAgentJsonDiagnostics.cpp", purpose: "transitive helper evidence used by the command handler" }
+  ]
+  tests: [
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterfaceTests/Private/Smoke/UeAgentInterfaceSmoke_LevelViewportModeling.cpp", purpose: "smoke or negative-path evidence cross-checked for the verified contract" }
+  ]
+}
+execution: {
+  destructive: false
+  editor_state: required
+  game_thread: required
+  idempotent: true
+  kind: read_only
+  overwrite_behavior: none
+  pie_state: allowed
+  retry_safe: true
+  save_behavior: none
+  side_effects: []
+  ui_effect: none
+}
+maturity: verified
+params: {
+  constraints: [
+    { fields: [sweeps, start], kind: one_of }
+    { fields: [end, half_height_cm, radius_cm], kind: requires_when, when: { start: present } }
+  ]
+  fields: {
+    continue_on_error: { default: false, default_state: defined, description_zh: "C++ 实现读取的 continue_on_error 参数", required: false, type: bool }
+    end: { default_state: none, description_zh: "C++ 实现读取的 end 参数", required: false, type: json_value }
+    find_initial_overlaps: { default: true, default_state: defined, description_zh: "C++ 实现读取的 find_initial_overlaps 参数", required: false, type: bool }
+    half_height_cm: { default_state: none, description_zh: "C++ 实现读取的 half_height_cm 参数", required: false, type: integer }
+    ignore_actor_ids: { default_state: none, description_zh: "C++ 实现读取的 ignore_actor_ids 参数", item_type: json_value, required: false, type: array }
+    ignore_folder_path_prefix: { default_state: none, description_zh: "C++ 实现读取的 ignore_folder_path_prefix 参数", required: false, type: string }
+    include_actor_folder_tags: { default: false, default_state: defined, description_zh: "C++ 实现读取的 include_actor_folder_tags 参数", required: false, type: bool }
+    include_all_hits: { default: false, default_state: defined, description_zh: "C++ 实现读取的 include_all_hits 参数", required: false, type: bool }
+    max_hits: { default_state: none, description_zh: "C++ 实现读取的 max_hits 参数", required: false, type: number }
+    max_items: { default_state: none, description_zh: "C++ 实现读取的 max_items 参数", required: false, type: integer }
+    radius_cm: { default_state: none, description_zh: "C++ 实现读取的 radius_cm 参数", required: false, type: number }
+    return_penetration_depth: { default: false, default_state: defined, description_zh: "C++ 实现读取的 return_penetration_depth 参数", required: false, type: bool }
+    start: { default_state: none, description_zh: "C++ 实现读取的 start 参数", required: false, type: json_value }
+    stop_on_blocking_hit: { default: false, default_state: defined, description_zh: "C++ 实现读取的 stop_on_blocking_hit 参数", required: false, type: bool }
+    sweeps: { default_state: none, description_zh: "C++ 实现读取的 sweeps 参数", item_type: json_value, required: false, type: array }
+    trace_channel: { default_state: none, description_zh: "C++ 实现读取的 trace_channel 参数", required: false, type: string }
+    trace_complex: { default: false, default_state: defined, description_zh: "C++ 实现读取的 trace_complex 参数", required: false, type: bool }
+  }
+  state: defined
+}
+response: { artifact_fields: [], compact_fields: [actor_id, actor_name, blocking_hit, blocking_hit_count, bone_name, component_name], failure_fields: [params.end, params.half_height_cm, params.radius_cm, params.start], max_items_policy: { fields: [], mode: none } }
+returns: {
+  fields: {
+    actor_id: { description_zh: "C++ 实现返回的 actor_id 字段；是否出现取决于执行分支", required: false, type: string }
+    actor_name: { description_zh: "C++ 实现返回的 actor_name 字段；是否出现取决于执行分支", required: false, type: string }
+    blocking_hit: { description_zh: "C++ 实现返回的 blocking_hit 字段；是否出现取决于执行分支", required: false, type: bool }
+    blocking_hit_count: { description_zh: "C++ 实现返回的 blocking_hit_count 字段；是否出现取决于执行分支", required: false, type: integer }
+    bone_name: { description_zh: "C++ 实现返回的 bone_name 字段；是否出现取决于执行分支", required: false, type: string }
+    component_name: { description_zh: "C++ 实现返回的 component_name 字段；是否出现取决于执行分支", required: false, type: string }
+    component_path: { description_zh: "C++ 实现返回的 component_path 字段；是否出现取决于执行分支", required: false, type: string }
+    continue_on_error: { description_zh: "C++ 实现返回的 continue_on_error 字段；是否出现取决于执行分支", required: false, type: bool }
+    distance: { description_zh: "C++ 实现返回的 distance 字段；是否出现取决于执行分支", required: false, type: number }
+    end: { description_zh: "C++ 实现返回的 end 字段；是否出现取决于执行分支", required: false, type: json_value }
+    error_count: { description_zh: "C++ 实现返回的 error_count 字段；是否出现取决于执行分支", required: false, type: integer }
+    face_index: { description_zh: "C++ 实现返回的 face_index 字段；是否出现取决于执行分支", required: false, type: string }
+    find_initial_overlaps: { description_zh: "C++ 实现返回的 find_initial_overlaps 字段；是否出现取决于执行分支", required: false, type: bool }
+    first_blocking_index: { description_zh: "C++ 实现返回的 first_blocking_index 字段；是否出现取决于执行分支", required: false, type: integer }
+    first_error: { description_zh: "C++ 实现返回的 first_error 字段；是否出现取决于执行分支", required: false, type: string }
+    first_error_index: { description_zh: "C++ 实现返回的 first_error_index 字段；是否出现取决于执行分支", required: false, type: integer }
+    half_height_cm: { description_zh: "C++ 实现返回的 half_height_cm 字段；是否出现取决于执行分支", required: false, type: integer }
+    hit: { description_zh: "C++ 实现返回的 hit 字段；是否出现取决于执行分支", required: false, type: bool }
+    hit_actor_folder_path: { description_zh: "命中 Actor 的 World Outliner 相对文件夹路径", required: false, type: actor_folder_path }
+    hit_actor_tags: { description_zh: "C++ 实现返回的 hit_actor_tags 字段；是否出现取决于执行分支", item_type: json_value, required: false, type: array }
+    hit_count: { description_zh: "C++ 实现返回的 hit_count 字段；是否出现取决于执行分支", required: false, type: integer }
+    hits: { description_zh: "C++ 实现返回的 hits 字段；是否出现取决于执行分支", item_type: json_value, required: false, type: array }
+    hits_truncated: { description_zh: "C++ 实现返回的 hits_truncated 字段；是否出现取决于执行分支", required: false, type: bool }
+    include_actor_folder_tags: { description_zh: "C++ 实现返回的 include_actor_folder_tags 字段；是否出现取决于执行分支", required: false, type: bool }
+    include_all_hits: { description_zh: "C++ 实现返回的 include_all_hits 字段；是否出现取决于执行分支", required: false, type: bool }
+    input_sweep_count: { description_zh: "C++ 实现返回的 input_sweep_count 字段；是否出现取决于执行分支", required: false, type: integer }
+    location: { description_zh: "C++ 实现返回的 location 字段；是否出现取决于执行分支", required: false, type: json_value }
+    max_hits: { description_zh: "C++ 实现返回的 max_hits 字段；是否出现取决于执行分支", required: false, type: number }
+    max_items: { description_zh: "C++ 实现返回的 max_items 字段；是否出现取决于执行分支", required: false, type: integer }
+    mode: { description_zh: "C++ 实现返回的 mode 字段；是否出现取决于执行分支", required: false, type: string }
+    normal: { description_zh: "C++ 实现返回的 normal 字段；是否出现取决于执行分支", required: false, type: json_value }
+    penetration_depth_cm: { description_zh: "C++ 实现返回的 penetration_depth_cm 字段；是否出现取决于执行分支", required: false, type: integer }
+    radius_cm: { description_zh: "C++ 实现返回的 radius_cm 字段；是否出现取决于执行分支", required: false, type: number }
+    return_penetration_depth: { description_zh: "C++ 实现返回的 return_penetration_depth 字段；是否出现取决于执行分支", required: false, type: bool }
+    start: { description_zh: "C++ 实现返回的 start 字段；是否出现取决于执行分支", required: false, type: json_value }
+    start_penetrating: { description_zh: "C++ 实现返回的 start_penetrating 字段；是否出现取决于执行分支", required: false, type: bool }
+    start_penetrating_advice: { description_zh: "C++ 实现返回的 start_penetrating_advice 字段；是否出现取决于执行分支", required: false, type: json_value }
+    stop_on_blocking_hit: { description_zh: "C++ 实现返回的 stop_on_blocking_hit 字段；是否出现取决于执行分支", required: false, type: bool }
+    sweep_count: { description_zh: "C++ 实现返回的 sweep_count 字段；是否出现取决于执行分支", required: false, type: integer }
+    sweeps: { description_zh: "C++ 实现返回的 sweeps 字段；是否出现取决于执行分支", item_type: json_value, required: false, type: array }
+    trace_channel: { description_zh: "C++ 实现返回的 trace_channel 字段；是否出现取决于执行分支", required: false, type: string }
+    trace_complex: { description_zh: "C++ 实现返回的 trace_complex 字段；是否出现取决于执行分支", required: false, type: bool }
+    truncated: { description_zh: "C++ 实现返回的 truncated 字段；是否出现取决于执行分支", required: false, type: bool }
+  }
+  state: defined
+}
+schema: uai.command_spec.v1
+status: active
+types: {}
+verification: { reason: read_only_command_has_no_post_write_verification, state: none }
+version: 1

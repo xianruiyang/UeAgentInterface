@@ -2,11 +2,8 @@
 
 #include "Commands/PaletteSearch/UeAgentPaletteSearchTypes.h"
 
-#include "Commands/PaletteSearch/UeAgentPaletteSearchAuthoring.h"
 #include "Commands/PaletteSearch/UeAgentPaletteSearchNaming.h"
 #include "AssetRegistry/AssetData.h"
-#include "Dom/JsonObject.h"
-#include "Dom/JsonValue.h"
 #include "NiagaraActions.h"
 #include "NiagaraCommon.h"
 #include "NiagaraEditorUtilities.h"
@@ -19,6 +16,15 @@ namespace
 	static FString NormalizeFilterToken(const FString& InValue)
 	{
 		return InValue.TrimStartAndEnd().ToLower();
+	}
+
+	static FString NormalizeUsageToken(const FString& InValue)
+	{
+		FString Token = NormalizeFilterToken(InValue);
+		Token.ReplaceInline(TEXT("_"), TEXT(""));
+		Token.ReplaceInline(TEXT("-"), TEXT(""));
+		Token.ReplaceInline(TEXT(" "), TEXT(""));
+		return Token;
 	}
 
 	static bool IsNiagaraModuleCatalog(const FString& CatalogType)
@@ -60,10 +66,25 @@ namespace
 
 	static bool ParseNiagaraTargetUsage(const FString& Text, ENiagaraScriptUsage& OutUsage)
 	{
-		const FString Token = NormalizeFilterToken(Text);
+		const FString Token = NormalizeUsageToken(Text);
 		if (Token.IsEmpty())
 		{
 			return false;
+		}
+
+		const UEnum* UsageEnum = StaticEnum<ENiagaraScriptUsage>();
+		if (UsageEnum)
+		{
+			for (int32 Index = 0; Index < UsageEnum->NumEnums(); ++Index)
+			{
+				const int64 Value = UsageEnum->GetValueByIndex(Index);
+				if (Value == INDEX_NONE || UsageEnum->HasMetaData(TEXT("Hidden"), Index)) continue;
+				if (Token == NormalizeUsageToken(UsageEnum->GetNameStringByIndex(Index)))
+				{
+					OutUsage = static_cast<ENiagaraScriptUsage>(Value);
+					return true;
+				}
+			}
 		}
 
 		static const TPair<const TCHAR*, ENiagaraScriptUsage> UsageMap[] = {
@@ -89,7 +110,7 @@ namespace
 
 		for (const TPair<const TCHAR*, ENiagaraScriptUsage>& Pair : UsageMap)
 		{
-			if (Token.Equals(Pair.Key))
+			if (Token == NormalizeUsageToken(Pair.Key))
 			{
 				OutUsage = Pair.Value;
 				return true;
@@ -180,40 +201,6 @@ namespace
 		return RootCategory + TEXT("/") + Category;
 	}
 
-	static TSharedRef<FJsonObject> BuildNiagaraLegacyAuthoring(const FString& CandidateType, const FString& PackagePath, const FString& ObjectPath, const FString& DisplayName)
-	{
-		TSharedRef<FJsonObject> Obj = MakeShared<FJsonObject>();
-		if (CandidateType.Equals(TEXT("niagara_module")))
-		{
-			Obj->SetStringField(TEXT("operation"), TEXT("add_module"));
-			Obj->SetStringField(TEXT("module_name"), DisplayName);
-			Obj->SetStringField(TEXT("module_script_path"), PackagePath);
-			Obj->SetStringField(TEXT("module_script_asset_path"), ObjectPath.IsEmpty() ? PackagePath : ObjectPath);
-			Obj->SetStringField(TEXT("object_path"), ObjectPath);
-		}
-		else if (CandidateType.Equals(TEXT("niagara_graph_function")))
-		{
-			Obj->SetStringField(TEXT("operation"), TEXT("add_function_call_node"));
-			Obj->SetStringField(TEXT("node_type"), TEXT("function_call"));
-			Obj->SetStringField(TEXT("node_class"), TEXT("/Script/NiagaraEditor.NiagaraNodeFunctionCall"));
-			Obj->SetStringField(TEXT("function_name"), DisplayName);
-			Obj->SetStringField(TEXT("function_script_path"), PackagePath);
-			Obj->SetStringField(TEXT("function_script_asset_path"), ObjectPath.IsEmpty() ? PackagePath : ObjectPath);
-			Obj->SetStringField(TEXT("object_path"), ObjectPath);
-			Obj->SetStringField(TEXT("target_folder_json"), TEXT("graph/nodes.json"));
-		}
-		else
-		{
-			Obj->SetStringField(TEXT("operation"), TEXT("set_value_source"));
-			Obj->SetStringField(TEXT("value_source"), TEXT("dynamic_input"));
-			Obj->SetStringField(TEXT("script_asset_path"), PackagePath);
-			Obj->SetStringField(TEXT("dynamic_input_script_asset_path"), ObjectPath.IsEmpty() ? PackagePath : ObjectPath);
-			Obj->SetStringField(TEXT("object_path"), ObjectPath);
-			Obj->SetArrayField(TEXT("inputs"), TArray<TSharedPtr<FJsonValue>>());
-		}
-		return Obj;
-	}
-
 	static FString GetTextTag(const FAssetData& AssetData, FName TagName)
 	{
 		FText TextValue;
@@ -247,9 +234,6 @@ namespace
 		Candidate.Kind = TEXT("niagara_input_value_source");
 		Candidate.Name = Name;
 		Candidate.FullName = StableId;
-		Candidate.CandidateId = Candidate.Kind + TEXT(":") + StableId;
-		Candidate.StableId = StableId;
-		Candidate.CanonicalKey = StableId;
 		Candidate.DisplayName = Name;
 		Candidate.Tooltip = Tooltip;
 		Candidate.CategoryPath = TEXT("Input Value Sources");
@@ -262,7 +246,8 @@ namespace
 		Candidate.bInLibrary = true;
 		Candidate.bSupportedInContext = true;
 		Candidate.UiOrder = UiOrder;
-		Candidate.JsonAuthoring = BuildJsonAuthoringPatch(Candidate);
+		FString IdentityError;
+		ensureAlwaysMsgf(SetCandidateIdentity(TEXT("niagara_input_value_source"), StableId, StableId, Candidate, IdentityError), TEXT("Niagara catalog identity failed: %s"), *IdentityError);
 		OutCandidates.Add(MoveTemp(Candidate));
 	}
 }
@@ -342,9 +327,6 @@ bool CollectNiagaraCandidates(const FSearchParams& Params, TArray<FCandidate>& O
 		Candidate.Kind = CandidateType;
 		Candidate.Name = DisplayName;
 		Candidate.FullName = ObjectPathOrPackagePath(ObjectPath, PackagePath);
-		Candidate.CandidateId = Candidate.Kind + TEXT(":") + Candidate.FullName;
-		Candidate.StableId = PackagePath;
-		Candidate.CanonicalKey = ScriptAsset.AssetName.ToString();
 		Candidate.DisplayName = DisplayName;
 		Candidate.Tooltip = FNiagaraEditorUtilities::FormatScriptDescription(FText::FromString(Description), ScriptAsset.GetSoftObjectPath(), bInLibrary).ToString();
 		Candidate.Keywords = Keywords;
@@ -355,6 +337,10 @@ bool CollectNiagaraCandidates(const FSearchParams& Params, TArray<FCandidate>& O
 		Candidate.SourceLabel = Source.Value.ToString();
 		Candidate.PackagePath = PackagePath;
 		Candidate.ObjectPath = ObjectPath;
+		if (CandidateType.Equals(TEXT("niagara_module")) || CandidateType.Equals(TEXT("niagara_dynamic_input")))
+		{
+			Candidate.AuthoringSelectors.Add(TEXT("path"), ObjectPathOrPackagePath(ObjectPath, PackagePath));
+		}
 		if (CandidateType.Equals(TEXT("niagara_module")))
 		{
 			Candidate.WriteSupport = TEXT("stack_module_folder_json");
@@ -363,7 +349,7 @@ bool CollectNiagaraCandidates(const FSearchParams& Params, TArray<FCandidate>& O
 		else if (CandidateType.Equals(TEXT("niagara_graph_function")))
 		{
 			Candidate.WriteSupport = TEXT("niagara_script_graph_folder_json");
-			Candidate.SupportReason = TEXT("Can be referenced by Niagara script graph folder JSON as a UNiagaraNodeFunctionCall; edit graph/nodes.json and graph/links.json through niagara_script_export_folder/apply_folder.");
+			Candidate.SupportReason = TEXT("Can be referenced by Niagara script graph folder HJSON as a UNiagaraNodeFunctionCall; edit graph/nodes.hjson and graph/links.hjson through niagara_script_export_folder/apply_folder.");
 		}
 		else
 		{
@@ -374,8 +360,8 @@ bool CollectNiagaraCandidates(const FSearchParams& Params, TArray<FCandidate>& O
 		Candidate.bSuggested = bSuggested;
 		Candidate.bSupportedInContext = true;
 		Candidate.UiOrder = UiOrder++;
-		Candidate.JsonAuthoring = BuildJsonAuthoringPatch(Candidate);
-		Candidate.LegacyAuthoring = BuildNiagaraLegacyAuthoring(CandidateType, PackagePath, ObjectPath, DisplayName);
+		FString IdentityError;
+		ensureAlwaysMsgf(SetCandidateIdentity(Params.CatalogType, PackagePath, ScriptAsset.AssetName.ToString(), Candidate, IdentityError), TEXT("Niagara catalog identity failed: %s"), *IdentityError);
 		OutCandidates.Add(MoveTemp(Candidate));
 	}
 

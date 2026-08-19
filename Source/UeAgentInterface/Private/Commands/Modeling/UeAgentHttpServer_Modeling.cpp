@@ -4,6 +4,8 @@
 #include "UeAgentHttpServer_ModelingOps.h"
 
 #include "Utilities/UeAgentJsonDiagnostics.h"
+#include "Utilities/UeAgentPropertyValueCodec.h"
+#include "Utilities/UeAgentUObjectProperties.h"
 #include "Module/UeAgentInterfaceLogger.h"
 
 #include "AssetRegistry/AssetRegistryModule.h"
@@ -192,60 +194,82 @@ namespace UeAgentModelingOps
 		return true;
 	}
 
-	TSharedPtr<FJsonValueObject> MakeToolPropertyEntry(const FString& PropertySet, const FString& PropertyName, const FString& ValueText)
+	TSharedPtr<FJsonValueObject> MakeToolPropertyLiteralEntry(const FString& PropertySet, const FString& PropertyPath, const FString& ValueKind, const TSharedPtr<FJsonValue>& Literal)
 	{
 		TSharedPtr<FJsonObject> Obj = MakeShared<FJsonObject>();
 		Obj->SetStringField(TEXT("property_set"), PropertySet);
-		Obj->SetStringField(TEXT("property_name"), PropertyName);
-		Obj->SetStringField(TEXT("value_text"), ValueText);
+		Obj->SetStringField(TEXT("property_path"), PropertyPath);
+		Obj->SetStringField(TEXT("value_kind"), ValueKind);
+		TSharedPtr<FJsonObject> Value = MakeShared<FJsonObject>();
+		Value->SetField(TEXT("literal"), Literal);
+		Obj->SetObjectField(TEXT("value"), Value);
 		return MakeShared<FJsonValueObject>(Obj);
 	}
 
-	bool TryGetExplicitToolPropertyValue(const TSharedPtr<FJsonObject>& Params, const FString& PropertySet, const FString& PropertyName, FString& OutValueText)
+	TSharedPtr<FJsonValueObject> MakeToolPropertySelectionEntry(const FString& PropertySet, const FString& PropertyPath, const FString& Selected)
+	{
+		TSharedPtr<FJsonObject> Obj = MakeShared<FJsonObject>();
+		Obj->SetStringField(TEXT("property_set"), PropertySet);
+		Obj->SetStringField(TEXT("property_path"), PropertyPath);
+		Obj->SetStringField(TEXT("value_kind"), TEXT("enum"));
+		TSharedPtr<FJsonObject> Value = MakeShared<FJsonObject>();
+		Value->SetStringField(TEXT("selected"), Selected);
+		Obj->SetObjectField(TEXT("value"), Value);
+		return MakeShared<FJsonValueObject>(Obj);
+	}
+
+	TSharedPtr<FJsonObject> FindExplicitToolProperty(const TSharedPtr<FJsonObject>& Params, const FString& PropertySet, const FString& PropertyPath)
 	{
 		const TArray<TSharedPtr<FJsonValue>>* PropertiesArray = nullptr;
 		if (!Params.IsValid() || !Params->TryGetArrayField(TEXT("tool_properties"), PropertiesArray) || !PropertiesArray)
 		{
-			return false;
+			return nullptr;
 		}
 
 		for (const TSharedPtr<FJsonValue>& EntryValue : *PropertiesArray)
 		{
 			const TSharedPtr<FJsonObject> Entry = EntryValue.IsValid() ? EntryValue->AsObject() : nullptr;
-			if (!Entry.IsValid())
-			{
-				continue;
-			}
-
+			if (!Entry.IsValid()) continue;
 			FString EntrySet;
-			FString EntryName;
-			FString EntryValueText;
+			FString EntryPath;
 			Entry->TryGetStringField(TEXT("property_set"), EntrySet);
-			Entry->TryGetStringField(TEXT("property_name"), EntryName);
-			Entry->TryGetStringField(TEXT("value_text"), EntryValueText);
-
-			if (EntryName.Equals(PropertyName, ESearchCase::IgnoreCase) &&
-				(PropertySet.IsEmpty() || EntrySet.Equals(PropertySet, ESearchCase::IgnoreCase)))
+			Entry->TryGetStringField(TEXT("property_path"), EntryPath);
+			if (EntryPath.Equals(PropertyPath, ESearchCase::IgnoreCase)
+				&& (PropertySet.IsEmpty() || EntrySet.Equals(PropertySet, ESearchCase::IgnoreCase)))
 			{
-				OutValueText = EntryValueText;
-				return true;
+				return Entry;
 			}
 		}
-		return false;
+		return nullptr;
 	}
 
-	bool TryGetExplicitToolPropertyNumber(const TSharedPtr<FJsonObject>& Params, const FString& PropertySet, const FString& PropertyName, double& OutValue)
+	TSharedPtr<FJsonValue> FindExplicitToolPropertyLiteral(const TSharedPtr<FJsonObject>& Params, const FString& PropertySet, const FString& PropertyPath)
 	{
-		FString ValueText;
-		return TryGetExplicitToolPropertyValue(Params, PropertySet, PropertyName, ValueText) && LexTryParseString(OutValue, *ValueText);
+		const TSharedPtr<FJsonObject> Entry = FindExplicitToolProperty(Params, PropertySet, PropertyPath);
+		const TSharedPtr<FJsonObject>* Value = nullptr;
+		if (Entry.IsValid() && Entry->TryGetObjectField(TEXT("value"), Value) && Value && Value->IsValid())
+		{
+			return (*Value)->TryGetField(TEXT("literal"));
+		}
+		return nullptr;
 	}
 
-	bool TryGetExplicitToolPropertyInt(const TSharedPtr<FJsonObject>& Params, const FString& PropertySet, const FString& PropertyName, int32& OutValue)
+	bool TryGetExplicitToolPropertyNumber(const TSharedPtr<FJsonObject>& Params, const FString& PropertySet, const FString& PropertyPath, double& OutValue)
 	{
-		FString ValueText;
-		return TryGetExplicitToolPropertyValue(Params, PropertySet, PropertyName, ValueText) && LexTryParseString(OutValue, *ValueText);
+		const TSharedPtr<FJsonValue> Literal = FindExplicitToolPropertyLiteral(Params, PropertySet, PropertyPath);
+		if (!Literal.IsValid() || Literal->Type != EJson::Number || !FMath::IsFinite(Literal->AsNumber())) return false;
+		OutValue = Literal->AsNumber();
+		return true;
 	}
 
+	bool TryGetExplicitToolPropertyInt(const TSharedPtr<FJsonObject>& Params, const FString& PropertySet, const FString& PropertyPath, int32& OutValue)
+	{
+		double Number = 0.0;
+		if (!TryGetExplicitToolPropertyNumber(Params, PropertySet, PropertyPath, Number)
+			|| FMath::TruncToDouble(Number) != Number || Number < MIN_int32 || Number > MAX_int32) return false;
+		OutValue = static_cast<int32>(Number);
+		return true;
+	}
 	void GetSelectedActors(TArray<AActor*>& OutActors)
 	{
 		OutActors.Reset();
@@ -325,8 +349,8 @@ namespace UeAgentModelingOps
 		OutParams->SetBoolField(TEXT("accept"), true);
 
 		TArray<TSharedPtr<FJsonValue>> ComputedProperties;
-		ComputedProperties.Add(MakeToolPropertyEntry(TEXT("ShapeSettings"), TEXT("TargetSurface"), TEXT("AtOrigin")));
-		ComputedProperties.Add(MakeToolPropertyEntry(TEXT("ShapeSettings"), TEXT("PivotLocation"), TEXT("Centered")));
+		ComputedProperties.Add(MakeToolPropertySelectionEntry(TEXT("ShapeSettings"), TEXT("TargetSurface"), TEXT("AtOrigin")));
+		ComputedProperties.Add(MakeToolPropertySelectionEntry(TEXT("ShapeSettings"), TEXT("PivotLocation"), TEXT("Centered")));
 
 		const FVector FullSize = OutPlacement.Extent * 2.0f;
 		TSharedPtr<FJsonObject> DerivedData = MakeShared<FJsonObject>();
@@ -338,7 +362,7 @@ namespace UeAgentModelingOps
 
 		auto AddDerivedNumber = [&ComputedProperties, &DerivedData](const TCHAR* PropertyName, double Value)
 		{
-			ComputedProperties.Add(MakeToolPropertyEntry(TEXT("ShapeSettings"), PropertyName, FString::SanitizeFloat(Value)));
+			ComputedProperties.Add(MakeToolPropertyLiteralEntry(TEXT("ShapeSettings"), PropertyName, TEXT("float"), MakeShared<FJsonValueNumber>(Value)));
 			DerivedData->SetNumberField(PropertyName, Value);
 		};
 
@@ -402,7 +426,7 @@ namespace UeAgentModelingOps
 			AddDerivedNumber(TEXT("StepWidth"), StepWidth);
 			AddDerivedNumber(TEXT("StepHeight"), StepHeight);
 			AddDerivedNumber(TEXT("StepDepth"), StepDepth);
-			ComputedProperties.Add(MakeToolPropertyEntry(TEXT("ShapeSettings"), TEXT("NumSteps"), FString::FromInt(NumSteps)));
+			ComputedProperties.Add(MakeToolPropertyLiteralEntry(TEXT("ShapeSettings"), TEXT("NumSteps"), TEXT("int32"), MakeShared<FJsonValueNumber>(NumSteps)));
 			DerivedData->SetNumberField(TEXT("NumSteps"), NumSteps);
 		}
 		else if (ToolIdentifier == TEXT("BeginAddRampPrimitiveTool") || ToolIdentifier == TEXT("BeginAddRampCornerPrimitiveTool"))
@@ -1211,6 +1235,69 @@ namespace UeAgentModelingOps
 		return Normalized;
 	}
 
+	const TMap<FString, FModelingToolWrapperDefinition>& GetModelingToolWrapperRegistry()
+	{
+		static const TMap<FString, FModelingToolWrapperDefinition> Registry = {
+			{TEXT("modeling_convert_actor_to_dynamic_mesh"), {TEXT("BeginConvertMeshesTool"), TEXT(""), TEXT(""), true, false, EModelingOutputTypePolicy::DynamicMeshActorRequired}},
+			{TEXT("modeling_duplicate_to_new_static_mesh"), {TEXT("BeginDuplicateMeshesTool"), TEXT(""), TEXT(""), true, false, EModelingOutputTypePolicy::StaticMeshRequired}},
+			{TEXT("modeling_create_box"), {TEXT("BeginAddBoxPrimitiveTool"), TEXT(""), TEXT(""), true, true}},
+			{TEXT("modeling_create_cylinder"), {TEXT("BeginAddCylinderPrimitiveTool"), TEXT(""), TEXT(""), true, true}},
+			{TEXT("modeling_create_sphere"), {TEXT("BeginAddSpherePrimitiveTool"), TEXT(""), TEXT(""), true, true}},
+			{TEXT("modeling_create_plane"), {TEXT("BeginAddRectanglePrimitiveTool"), TEXT(""), TEXT(""), true, true}},
+			{TEXT("modeling_create_stairs"), {TEXT("BeginAddStairsPrimitiveTool"), TEXT(""), TEXT(""), true, true}},
+			{TEXT("modeling_create_ramp"), {TEXT("BeginAddRampPrimitiveTool"), TEXT(""), TEXT(""), true, true}},
+			{TEXT("modeling_create_ramp_corner"), {TEXT("BeginAddRampCornerPrimitiveTool"), TEXT(""), TEXT(""), true, true}},
+			{TEXT("modeling_extrude_faces"), {TEXT("BeginSelectionExtrudeTool"), TEXT(""), TEXT(""), true, false}},
+			{TEXT("modeling_inset_faces"), {TEXT("BeginPolyEditTool"), TEXT("Inset"), TEXT(""), true, false}},
+			{TEXT("modeling_bevel_edges"), {TEXT("BeginPolyEditTool"), TEXT("Bevel"), TEXT(""), true, false}},
+			{TEXT("modeling_offset"), {TEXT("BeginSelectionOffsetTool"), TEXT(""), TEXT(""), true, false}},
+			{TEXT("modeling_push_pull"), {TEXT("BeginPolyEditTool"), TEXT("PushPull"), TEXT(""), true, false}},
+			{TEXT("modeling_mirror"), {TEXT("BeginMirrorTool"), TEXT(""), TEXT(""), true, false}},
+			{TEXT("modeling_duplicate_faces"), {TEXT("BeginPolyEditTool"), TEXT("Duplicate"), TEXT(""), true, false}},
+			{TEXT("modeling_boolean"), {TEXT("BeginMeshBooleanTool"), TEXT(""), TEXT(""), true, false}},
+			{TEXT("modeling_trim"), {TEXT("BeginMeshTrimTool"), TEXT(""), TEXT(""), true, false}},
+			{TEXT("modeling_plane_cut"), {TEXT("BeginPlaneCutTool"), TEXT(""), TEXT(""), true, false}},
+			{TEXT("modeling_mesh_cut"), {TEXT("BeginCutMeshWithMeshTool"), TEXT(""), TEXT(""), true, false}},
+			{TEXT("modeling_voxel_boolean"), {TEXT("BeginVoxelBooleanTool"), TEXT(""), TEXT(""), true, false}},
+			{TEXT("modeling_remesh"), {TEXT("BeginRemeshMeshTool"), TEXT(""), TEXT(""), true, false}},
+			{TEXT("modeling_simplify"), {TEXT("BeginSimplifyMeshTool"), TEXT(""), TEXT(""), true, false}},
+			{TEXT("modeling_subdivide"), {TEXT("BeginSubdividePolyTool"), TEXT(""), TEXT(""), true, false}},
+			{TEXT("modeling_weld_edges"), {TEXT("BeginWeldEdgesTool"), TEXT(""), TEXT(""), true, false}},
+			{TEXT("modeling_fill_holes"), {TEXT("BeginHoleFillTool"), TEXT(""), TEXT(""), true, false}},
+			{TEXT("modeling_recompute_normals"), {TEXT("BeginEditNormalsTool"), TEXT(""), TEXT(""), true, false}},
+			{TEXT("modeling_bake_transform"), {TEXT("BeginBakeTransformTool"), TEXT(""), TEXT(""), true, false}},
+			{TEXT("modeling_align_to_world"), {TEXT("BeginAlignObjectsTool"), TEXT(""), TEXT(""), true, false}},
+			{TEXT("modeling_auto_uv"), {TEXT("BeginGlobalUVGenerateTool"), TEXT(""), TEXT(""), true, false}},
+			{TEXT("modeling_project_uv"), {TEXT("BeginUVProjectionTool"), TEXT(""), TEXT(""), true, false}},
+			{TEXT("modeling_set_material_slot"), {TEXT("BeginEditMeshMaterialsTool"), TEXT("AssignActiveMaterial"), TEXT("modeling_set_material_slot_action_unsupported"), true, false}},
+			{TEXT("modeling_add_material_slot"), {TEXT("BeginEditMeshMaterialsTool"), TEXT("AddMaterialSlot"), TEXT("modeling_add_material_slot_action_unsupported"), false, false}},
+			{TEXT("modeling_remove_material_slot"), {TEXT("BeginEditMeshMaterialsTool"), TEXT("RemoveMaterialSlot"), TEXT("modeling_remove_material_slot_action_unsupported"), false, false}},
+			{TEXT("modeling_generate_simple_collision"), {TEXT("BeginSimpleCollisionEditorTool"), TEXT(""), TEXT(""), true, false}},
+			{TEXT("modeling_generate_convex_collision"), {TEXT("BeginSetCollisionGeometryTool"), TEXT(""), TEXT(""), true, false}}
+		};
+		return Registry;
+	}
+
+	bool ResolveAllowedModelingToolIdentifier(const FString& InValue, FString& OutToolIdentifier)
+	{
+		OutToolIdentifier = ResolveToolIdentifierAlias(InValue);
+		if (OutToolIdentifier.IsEmpty())
+		{
+			return false;
+		}
+
+		for (const TPair<FString, FModelingToolWrapperDefinition>& Pair : GetModelingToolWrapperRegistry())
+		{
+			if (Pair.Value.ToolIdentifier.Equals(OutToolIdentifier, ESearchCase::CaseSensitive))
+			{
+				return true;
+			}
+		}
+
+		OutToolIdentifier.Reset();
+		return false;
+	}
+
 	FString ToObjectPath(const FString& InPath)
 	{
 		FString ObjectPath = InPath.TrimStartAndEnd();
@@ -1521,109 +1608,6 @@ namespace UeAgentModelingOps
 		OutData->SetBoolField(TEXT("has_active_targets"), SelectionManager ? SelectionManager->HasActiveTargets() : false);
 	}
 
-	FProperty* FindPropertyByNameLoose(UStruct* StructType, const FString& Segment)
-	{
-		if (!StructType || Segment.IsEmpty())
-		{
-			return nullptr;
-		}
-
-		const FString Normalized = Segment.TrimStartAndEnd();
-		const FString NormalizedWithoutB = Normalized.StartsWith(TEXT("b")) ? Normalized.Mid(1) : Normalized;
-		for (TFieldIterator<FProperty> It(StructType, EFieldIterationFlags::IncludeSuper); It; ++It)
-		{
-			FProperty* Property = *It;
-			const FString PropertyName = Property->GetName();
-			const FString PropertyNameWithoutB = PropertyName.StartsWith(TEXT("b")) ? PropertyName.Mid(1) : PropertyName;
-			if (PropertyName.Equals(Normalized, ESearchCase::IgnoreCase) ||
-				PropertyNameWithoutB.Equals(NormalizedWithoutB, ESearchCase::IgnoreCase) ||
-				Property->GetAuthoredName().Equals(Normalized, ESearchCase::IgnoreCase))
-			{
-				return Property;
-			}
-		}
-		return nullptr;
-	}
-
-	bool ResolvePropertyPath(UObject* Obj, const FString& PropertyPath, FProperty*& OutProperty, void*& OutValuePtr)
-	{
-		OutProperty = nullptr;
-		OutValuePtr = nullptr;
-		if (!Obj || PropertyPath.IsEmpty())
-		{
-			return false;
-		}
-
-		TArray<FString> Segments;
-		PropertyPath.ParseIntoArray(Segments, TEXT("."), true);
-		if (Segments.Num() == 0)
-		{
-			return false;
-		}
-
-		UStruct* CurrentStruct = Obj->GetClass();
-		void* CurrentContainer = Obj;
-		for (int32 Index = 0; Index < Segments.Num(); ++Index)
-		{
-			FProperty* Property = FindPropertyByNameLoose(CurrentStruct, Segments[Index]);
-			if (!Property)
-			{
-				return false;
-			}
-
-			void* ValuePtr = Property->ContainerPtrToValuePtr<void>(CurrentContainer);
-			if (Index == Segments.Num() - 1)
-			{
-				OutProperty = Property;
-				OutValuePtr = ValuePtr;
-				return true;
-			}
-
-			FStructProperty* StructProperty = CastField<FStructProperty>(Property);
-			if (!StructProperty)
-			{
-				return false;
-			}
-
-			CurrentStruct = StructProperty->Struct;
-			CurrentContainer = ValuePtr;
-		}
-		return false;
-	}
-
-	bool ImportResolvedProperty(UObject* Object, const FString& PropertyPath, const FString& ValueText, FString& OutError, FString* OutAppliedValueText, FString* OutCppType)
-	{
-		FProperty* Property = nullptr;
-		void* ValuePtr = nullptr;
-		if (!ResolvePropertyPath(Object, PropertyPath, Property, ValuePtr) || !Property || !ValuePtr)
-		{
-			OutError = TEXT("property_not_found");
-			return false;
-		}
-
-		if (OutCppType)
-		{
-			*OutCppType = Property->GetCPPType();
-		}
-		Object->Modify();
-		Object->PreEditChange(Property);
-		const TCHAR* Buffer = *ValueText;
-		if (!Property->ImportText_Direct(Buffer, ValuePtr, Object, PPF_None))
-		{
-			OutError = FString::Printf(TEXT("property_import_failed:%s:%s"), *PropertyPath, *ValueText);
-			return false;
-		}
-
-		FPropertyChangedEvent ChangedEvent(Property, EPropertyChangeType::ValueSet);
-		Object->PostEditChangeProperty(ChangedEvent);
-		Object->MarkPackageDirty();
-		if (OutAppliedValueText)
-		{
-			Property->ExportTextItem_Direct(*OutAppliedValueText, ValuePtr, nullptr, Object, PPF_None);
-		}
-		return true;
-	}
-
 	void NotifyToolPropertySetUpdated(UInteractiveTool* Tool, UObject* PropertySet)
 	{
 		if (!Tool || !PropertySet)
@@ -1679,31 +1663,11 @@ namespace UeAgentModelingOps
 			return;
 		}
 
-		TSharedPtr<FJsonObject> PropertySetObj = MakeShared<FJsonObject>();
+		UeAgentUObjectProperties::FExportOptions Options;
+		Options.Profile = UeAgentUObjectProperties::EExportProfile::Authoring;
+		TSharedPtr<FJsonObject> PropertySetObj = UeAgentUObjectProperties::ExportObjectProperties(PropertySet, Options);
 		PropertySetObj->SetStringField(TEXT("name"), PropertySet->GetName());
 		PropertySetObj->SetStringField(TEXT("class"), PropertySet->GetClass()->GetPathName());
-
-		TArray<TSharedPtr<FJsonValue>> Properties;
-		for (TFieldIterator<FProperty> It(PropertySet->GetClass(), EFieldIterationFlags::IncludeSuper); It; ++It)
-		{
-			FProperty* Property = *It;
-			if (!Property || Property->HasAnyPropertyFlags(CPF_Transient | CPF_DisableEditOnInstance))
-			{
-				continue;
-			}
-
-			FString ValueText;
-			Property->ExportTextItem_Direct(ValueText, Property->ContainerPtrToValuePtr<void>(PropertySet), nullptr, PropertySet, PPF_None);
-
-			TSharedPtr<FJsonObject> PropertyObj = MakeShared<FJsonObject>();
-			PropertyObj->SetStringField(TEXT("name"), Property->GetName());
-			PropertyObj->SetStringField(TEXT("display_name"), Property->GetAuthoredName());
-			PropertyObj->SetStringField(TEXT("property_class"), Property->GetClass()->GetName());
-			PropertyObj->SetStringField(TEXT("value_text"), ValueText);
-			Properties.Add(MakeShared<FJsonValueObject>(PropertyObj));
-		}
-
-		PropertySetObj->SetArrayField(TEXT("properties"), Properties);
 		OutPropertySets.Add(MakeShared<FJsonValueObject>(PropertySetObj));
 	}
 
@@ -1959,23 +1923,36 @@ namespace UeAgentModelingOps
 			return false;
 		}
 
-		FString PropertySet;
-		FString PropertyName;
-		if (Params->TryGetStringField(TEXT("property_set"), PropertySet) && Params->TryGetStringField(TEXT("property_name"), PropertyName))
-		{
-			return PropertySet.Equals(TEXT("ShapeSettings"), ESearchCase::IgnoreCase)
-				&& PropertyName.Equals(TEXT("TargetSurface"), ESearchCase::IgnoreCase);
-		}
-
-		FString IgnoredValue;
-		return TryGetExplicitToolPropertyValue(Params, TEXT("ShapeSettings"), TEXT("TargetSurface"), IgnoredValue);
+		return FindExplicitToolProperty(Params, TEXT("ShapeSettings"), TEXT("TargetSurface")).IsValid();
 	}
 
-	void ConfigureDefaultModelingOutputType()
+	FString GetModelingOutputTypeIdentifier(EModelingOutputTypePolicy Policy)
+	{
+		return Policy == EModelingOutputTypePolicy::StaticMeshRequired
+			? UCreateMeshObjectTypeProperties::StaticMeshIdentifier
+			: UCreateMeshObjectTypeProperties::DynamicMeshActorIdentifier;
+	}
+
+	FString GetModelingOutputTypePolicyName(EModelingOutputTypePolicy Policy)
+	{
+		switch (Policy)
+		{
+		case EModelingOutputTypePolicy::DynamicMeshActorRequired:
+			return TEXT("dynamic_mesh_actor_required");
+		case EModelingOutputTypePolicy::StaticMeshRequired:
+			return TEXT("static_mesh_required");
+		default:
+			return TEXT("dynamic_mesh_actor_default");
+		}
+	}
+
+	void ConfigureDefaultModelingOutputType(EModelingOutputTypePolicy Policy)
 	{
 		UCreateMeshObjectTypeProperties::bEnableDynamicMeshActorSupport = true;
-		UCreateMeshObjectTypeProperties::DefaultObjectTypeIdentifier = UCreateMeshObjectTypeProperties::DynamicMeshActorIdentifier;
+		UCreateMeshObjectTypeProperties::DefaultObjectTypeIdentifier = GetModelingOutputTypeIdentifier(Policy);
 	}
+
+	bool ApplyInternalTextProperty(UObject* Object, const FString& PropertyPath, const FString& TextValue, FString& OutError, TSharedPtr<FJsonValue>* OutReadback = nullptr);
 
 	bool IsCreateMeshObjectTypePropertySetSelector(const FString& Selector)
 	{
@@ -1991,14 +1968,6 @@ namespace UeAgentModelingOps
 		if (!Params.IsValid())
 		{
 			return false;
-		}
-
-		FString PropertySet;
-		FString PropertyName;
-		if (Params->TryGetStringField(TEXT("property_set"), PropertySet) && Params->TryGetStringField(TEXT("property_name"), PropertyName))
-		{
-			return PropertyName.Equals(TEXT("OutputType"), ESearchCase::IgnoreCase)
-				&& IsCreateMeshObjectTypePropertySetSelector(PropertySet);
 		}
 
 		const TArray<TSharedPtr<FJsonValue>>* PropertiesArray = nullptr;
@@ -2018,7 +1987,7 @@ namespace UeAgentModelingOps
 			FString EntrySet;
 			FString EntryName;
 			Entry->TryGetStringField(TEXT("property_set"), EntrySet);
-			Entry->TryGetStringField(TEXT("property_name"), EntryName);
+			Entry->TryGetStringField(TEXT("property_path"), EntryName);
 			if (EntryName.Equals(TEXT("OutputType"), ESearchCase::IgnoreCase) && IsCreateMeshObjectTypePropertySetSelector(EntrySet))
 			{
 				return true;
@@ -2027,16 +1996,36 @@ namespace UeAgentModelingOps
 		return false;
 	}
 
-	bool AutoPrepareModelingOutputType(const TSharedPtr<FJsonObject>& Params, UInteractiveTool* Tool, FString& OutError, TSharedPtr<FJsonObject>& OutData)
+	bool AutoPrepareModelingOutputType(const TSharedPtr<FJsonObject>& Params, UInteractiveTool* Tool, EModelingOutputTypePolicy Policy, FString& OutError, TSharedPtr<FJsonObject>& OutData)
 	{
-		if (!Tool || HasExplicitOutputTypeOverride(Params))
+		if (!Tool)
 		{
+			return true;
+		}
+
+		const bool bRequiredPolicy = Policy != EModelingOutputTypePolicy::DynamicMeshActorDefault;
+		if (OutData.IsValid())
+		{
+			OutData->SetStringField(TEXT("output_type_policy"), GetModelingOutputTypePolicyName(Policy));
+		}
+		if (HasExplicitOutputTypeOverride(Params))
+		{
+			if (bRequiredPolicy)
+			{
+				OutError = TEXT("modeling_required_output_type_override_forbidden");
+				return false;
+			}
 			return true;
 		}
 
 		UObject* PropertySet = FindToolPropertySet(Tool, TEXT("CreateMeshObjectTypeProperties"));
 		if (!PropertySet)
 		{
+			if (bRequiredPolicy)
+			{
+				OutError = TEXT("modeling_required_output_type_property_set_missing");
+				return false;
+			}
 			if (OutData.IsValid())
 			{
 				OutData->SetBoolField(TEXT("default_output_type_applied"), false);
@@ -2045,15 +2034,13 @@ namespace UeAgentModelingOps
 			return true;
 		}
 
-		FString AppliedValueText;
-		FString CppType;
-		if (!ImportResolvedProperty(
+		TSharedPtr<FJsonValue> ReadbackValue;
+		if (!ApplyInternalTextProperty(
 			PropertySet,
 			TEXT("OutputType"),
-			UCreateMeshObjectTypeProperties::DynamicMeshActorIdentifier,
+			GetModelingOutputTypeIdentifier(Policy),
 			OutError,
-			&AppliedValueText,
-			&CppType))
+			&ReadbackValue))
 		{
 			return false;
 		}
@@ -2062,9 +2049,82 @@ namespace UeAgentModelingOps
 		if (OutData.IsValid())
 		{
 			OutData->SetBoolField(TEXT("default_output_type_applied"), true);
-			OutData->SetStringField(TEXT("default_output_type"), UCreateMeshObjectTypeProperties::DynamicMeshActorIdentifier);
-			OutData->SetStringField(TEXT("default_output_type_applied_value"), AppliedValueText);
-			OutData->SetStringField(TEXT("default_output_type_cpp_type"), CppType);
+			OutData->SetStringField(TEXT("default_output_type"), GetModelingOutputTypeIdentifier(Policy));
+			OutData->SetField(TEXT("default_output_type_readback"), ReadbackValue);
+		}
+		return true;
+	}
+
+	FString ResolveAcceptedOutputAssetPath(AActor* Actor)
+	{
+		if (!Actor)
+		{
+			return FString();
+		}
+
+		TArray<UStaticMeshComponent*> Components;
+		Actor->GetComponents<UStaticMeshComponent>(Components);
+		for (UStaticMeshComponent* Component : Components)
+		{
+			if (Component && Component->GetStaticMesh())
+			{
+				return FPackageName::ObjectPathToPackageName(Component->GetStaticMesh()->GetPathName());
+			}
+		}
+		return FString();
+	}
+
+	bool IsAcceptedDynamicMeshOutput(AActor* Actor)
+	{
+		return Actor && Actor->FindComponentByClass<UDynamicMeshComponent>() != nullptr;
+	}
+
+	bool ApplyInternalTextProperty(UObject* Object, const FString& PropertyPath, const FString& TextValue, FString& OutError, TSharedPtr<FJsonValue>* OutReadback)
+	{
+		FProperty* Property = Object && Object->GetClass() ? FindFProperty<FProperty>(Object->GetClass(), *PropertyPath) : nullptr;
+		if (!Property)
+		{
+			OutError = TEXT("property_not_found");
+			return false;
+		}
+		TSharedPtr<FJsonObject> Descriptor = MakeShared<FJsonObject>();
+		Descriptor->SetStringField(TEXT("property_path"), PropertyPath);
+		const FString ValueKind = UeAgentPropertyValueCodec::GetValueKind(Property);
+		Descriptor->SetStringField(TEXT("value_kind"), ValueKind);
+		UeAgentPropertyValueCodec::AddTypeMetadata(Property, Descriptor);
+		TSharedPtr<FJsonObject> Value = MakeShared<FJsonObject>();
+		if (ValueKind == TEXT("enum"))
+		{
+			Value->SetStringField(TEXT("selected"), TextValue);
+		}
+		else if (ValueKind == TEXT("string") || ValueKind == TEXT("name"))
+		{
+			Value->SetStringField(TEXT("literal"), TextValue);
+		}
+		else
+		{
+			OutError = TEXT("internal_text_value_kind_unsupported");
+			return false;
+		}
+		Descriptor->SetObjectField(TEXT("value"), Value);
+		TSharedPtr<FJsonObject> Payload = MakeShared<FJsonObject>();
+		Payload->SetStringField(TEXT("schema"), TEXT("uai.uobject_properties.v2"));
+		Payload->SetArrayField(TEXT("properties"), { MakeShared<FJsonValueObject>(Descriptor) });
+		UeAgentUObjectProperties::FApplyOptions ApplyOptions;
+		ApplyOptions.bAllowReadOnly = true;
+		const TSharedPtr<FJsonObject> Summary = UeAgentUObjectProperties::ApplyObjectProperties(Object, Payload, ApplyOptions);
+		FString Status;
+		Summary->TryGetStringField(TEXT("status"), Status);
+		if (Status != TEXT("applied"))
+		{
+			Summary->TryGetStringField(TEXT("reason"), OutError);
+			if (OutError.IsEmpty()) OutError = TEXT("internal_property_apply_failed");
+			return false;
+		}
+		if (OutReadback)
+		{
+			UeAgentPropertyValueCodec::FOptions CodecOptions;
+			*OutReadback = UeAgentPropertyValueCodec::Encode(Property, Property->ContainerPtrToValuePtr<void>(Object), Object, CodecOptions);
 		}
 		return true;
 	}
@@ -2082,7 +2142,7 @@ namespace UeAgentModelingOps
 			return true;
 		}
 
-		if (!ImportResolvedProperty(PropertySet, TEXT("TargetSurface"), TEXT("AtOrigin"), OutError, nullptr, nullptr))
+		if (!ApplyInternalTextProperty(PropertySet, TEXT("TargetSurface"), TEXT("AtOrigin"), OutError))
 		{
 			return false;
 		}
@@ -2359,108 +2419,74 @@ namespace UeAgentModelingOps
 			return true;
 		}
 
+		struct FPropertyGroup
+		{
+			UObject* Owner = nullptr;
+			FString Selector;
+			TArray<TSharedPtr<FJsonValue>> Descriptors;
+		};
+		TArray<FPropertyGroup> Groups;
+		TMap<UObject*, int32> GroupByOwner;
 		for (const TSharedPtr<FJsonValue>& EntryValue : *PropertiesArray)
 		{
 			const TSharedPtr<FJsonObject> Entry = EntryValue.IsValid() ? EntryValue->AsObject() : nullptr;
 			if (!Entry.IsValid())
 			{
-				continue;
+				OutError = TEXT("invalid_tool_property_descriptor");
+				return false;
 			}
-
 			FString Selector;
 			Entry->TryGetStringField(TEXT("property_set"), Selector);
-
-			FString PropertyName;
-			if (!Entry->TryGetStringField(TEXT("property_name"), PropertyName) || PropertyName.IsEmpty())
-			{
-				if (OutPropertyResults)
-				{
-					TSharedPtr<FJsonObject> ResultObj = MakeShared<FJsonObject>();
-					ResultObj->SetStringField(TEXT("property_set"), Selector);
-					ResultObj->SetStringField(TEXT("property_name"), TEXT(""));
-					ResultObj->SetStringField(TEXT("property_import_status"), TEXT("missing_property_name"));
-					ResultObj->SetBoolField(TEXT("property_import_verified"), false);
-					OutPropertyResults->Add(MakeShared<FJsonValueObject>(ResultObj));
-				}
-				OutError = TEXT("tool_property_name_missing");
-				return false;
-			}
-
-			FString ValueText;
-			if (!Entry->TryGetStringField(TEXT("value_text"), ValueText))
-			{
-				if (OutPropertyResults)
-				{
-					TSharedPtr<FJsonObject> ResultObj = MakeShared<FJsonObject>();
-					ResultObj->SetStringField(TEXT("property_set"), Selector);
-					ResultObj->SetStringField(TEXT("property_name"), PropertyName);
-					ResultObj->SetStringField(TEXT("property_import_status"), TEXT("missing_value_text"));
-					ResultObj->SetBoolField(TEXT("property_import_verified"), false);
-					OutPropertyResults->Add(MakeShared<FJsonValueObject>(ResultObj));
-				}
-				OutError = TEXT("tool_property_value_missing");
-				return false;
-			}
-
 			UObject* PropertySet = FindToolPropertySet(Tool, Selector);
 			if (!PropertySet)
 			{
 				OutError = TEXT("tool_property_set_not_found");
 				return false;
 			}
-
-			FString AppliedValueText;
-			FString CppType;
-			if (!ImportResolvedProperty(PropertySet, PropertyName, ValueText, OutError, &AppliedValueText, &CppType))
+			TSharedPtr<FJsonObject> Descriptor = MakeShared<FJsonObject>();
+			for (const TPair<FString, TSharedPtr<FJsonValue>>& Pair : Entry->Values)
 			{
-				const FString ImportStatus = OutError.Equals(TEXT("property_not_found"), ESearchCase::CaseSensitive) ? TEXT("property_not_found") : TEXT("import_failed");
-				if (OutPropertyResults)
-				{
-					TSharedPtr<FJsonObject> ResultObj = MakeShared<FJsonObject>();
-					ResultObj->SetStringField(TEXT("property_set"), Selector);
-					ResultObj->SetStringField(TEXT("property_name"), PropertyName);
-					ResultObj->SetStringField(TEXT("requested_value_text"), ValueText);
-					ResultObj->SetStringField(TEXT("applied_value_text"), TEXT(""));
-					ResultObj->SetBoolField(TEXT("property_value_read_back"), false);
-					ResultObj->SetBoolField(TEXT("value_text_exact_match"), false);
-					ResultObj->SetBoolField(TEXT("value_text_changed_after_import"), false);
-					ResultObj->SetStringField(TEXT("property_import_status"), ImportStatus);
-					ResultObj->SetBoolField(TEXT("property_import_verified"), false);
-					ResultObj->SetStringField(TEXT("property_import_error"), OutError);
-					ResultObj->SetStringField(TEXT("cpp_type"), CppType);
-					OutPropertyResults->Add(MakeShared<FJsonValueObject>(ResultObj));
-				}
-				return false;
+				if (Pair.Key != TEXT("property_set")) Descriptor->SetField(Pair.Key, Pair.Value);
 			}
+			int32* ExistingGroup = GroupByOwner.Find(PropertySet);
+			if (!ExistingGroup)
+			{
+				const int32 NewIndex = Groups.Add({ PropertySet, Selector, {} });
+				GroupByOwner.Add(PropertySet, NewIndex);
+				ExistingGroup = GroupByOwner.Find(PropertySet);
+			}
+			Groups[*ExistingGroup].Descriptors.Add(MakeShared<FJsonValueObject>(Descriptor));
+		}
+
+		for (FPropertyGroup& Group : Groups)
+		{
+			TSharedPtr<FJsonObject> Payload = MakeShared<FJsonObject>();
+			Payload->SetStringField(TEXT("schema"), TEXT("uai.uobject_properties.v2"));
+			Payload->SetArrayField(TEXT("properties"), Group.Descriptors);
+			UeAgentUObjectProperties::FApplyOptions ApplyOptions;
+			const TSharedPtr<FJsonObject> Summary = UeAgentUObjectProperties::ApplyObjectProperties(Group.Owner, Payload, ApplyOptions);
+			FString Status;
+			Summary->TryGetStringField(TEXT("status"), Status);
 			if (OutPropertyResults)
 			{
-				const bool bExactMatch = AppliedValueText.Equals(ValueText, ESearchCase::CaseSensitive);
-				TSharedPtr<FJsonObject> ResultObj = MakeShared<FJsonObject>();
-				ResultObj->SetStringField(TEXT("property_set"), Selector);
-				ResultObj->SetStringField(TEXT("property_name"), PropertyName);
-				ResultObj->SetStringField(TEXT("requested_value_text"), ValueText);
-				ResultObj->SetStringField(TEXT("applied_value_text"), AppliedValueText);
-				ResultObj->SetStringField(TEXT("property_import_status"), TEXT("imported_and_read_back"));
-				ResultObj->SetStringField(TEXT("property_import_error"), TEXT(""));
-				ResultObj->SetBoolField(TEXT("property_value_read_back"), true);
-				ResultObj->SetBoolField(TEXT("property_import_verified"), true);
-				ResultObj->SetBoolField(TEXT("value_text_exact_match"), bExactMatch);
-				ResultObj->SetBoolField(TEXT("value_text_changed_after_import"), !bExactMatch);
-				ResultObj->SetStringField(TEXT("cpp_type"), CppType);
-				OutPropertyResults->Add(MakeShared<FJsonValueObject>(ResultObj));
+				const TArray<TSharedPtr<FJsonValue>>* Results = nullptr;
+				if (Summary->TryGetArrayField(TEXT("properties"), Results) && Results)
+				{
+					for (const TSharedPtr<FJsonValue>& ResultValue : *Results)
+					{
+						TSharedPtr<FJsonObject> Result = ResultValue.IsValid() ? ResultValue->AsObject() : nullptr;
+						if (Result.IsValid()) Result->SetStringField(TEXT("property_set"), Group.Selector);
+						OutPropertyResults->Add(ResultValue);
+					}
+				}
 			}
-
-			NotifyToolPropertySetUpdated(Tool, PropertySet);
-
-			FUeAgentInterfaceLogger::Log(TEXT("ModelingToolProperty req=%s tool=%s set=%s property=%s requested=%s applied=%s cpp_type=%s exact=%s"),
-				TEXT("tool_properties"),
-				*Tool->GetName(),
-				*PropertySet->GetName(),
-				*PropertyName,
-				*ValueText,
-				*AppliedValueText,
-				*CppType,
-				AppliedValueText.Equals(ValueText, ESearchCase::CaseSensitive) ? TEXT("true") : TEXT("false"));
+			if (Status != TEXT("applied"))
+			{
+				Summary->TryGetStringField(TEXT("reason"), OutError);
+				if (OutError.IsEmpty()) OutError = TEXT("tool_property_apply_failed");
+				return false;
+			}
+			NotifyToolPropertySetUpdated(Tool, Group.Owner);
 		}
 
 		return true;
@@ -2531,9 +2557,9 @@ namespace UeAgentModelingOps
 		return true;
 	}
 
-	bool SaveActorStaticMeshes(const TArray<AActor*>& Actors, int32& OutSavedCount)
+	bool SaveActorStaticMeshes(const TArray<AActor*>& Actors, TArray<FString>& OutSavedPackagePaths)
 	{
-		OutSavedCount = 0;
+		OutSavedPackagePaths.Reset();
 		TArray<UPackage*> PackagesToSave;
 
 		for (AActor* Actor : Actors)
@@ -2571,7 +2597,14 @@ namespace UeAgentModelingOps
 			return false;
 		}
 
-		OutSavedCount = PackagesToSave.Num();
+		for (const UPackage* Package : PackagesToSave)
+		{
+			if (Package)
+			{
+				OutSavedPackagePaths.Add(Package->GetName());
+			}
+		}
+		OutSavedPackagePaths.Sort();
 		return true;
 	}
 }

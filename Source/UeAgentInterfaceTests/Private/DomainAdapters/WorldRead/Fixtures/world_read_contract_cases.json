@@ -1,0 +1,938 @@
+{
+  "schema": "uai.domain_adapter.world_read.test_fixture.v1",
+  "descriptor_count": 23,
+  "required_families": [
+    "object",
+    "content",
+    "spatial",
+    "mesh",
+    "navigation",
+    "topology",
+    "physics"
+  ],
+  "descriptors": [
+    {
+      "descriptor_id": "uai.query.world.summary",
+      "version": 1,
+      "descriptor_hash": "sha256:0c8c315c7e3f6d714fd0ee10c9fe14342917408f095d6d0da55c72fd4741234f",
+      "capability_id": "world.summary.read",
+      "provider_binding": "world.read.summary",
+      "family": "object",
+      "query_kind": "state",
+      "required_context_facets": ["world"],
+      "allowed_state_planes": ["authoring_memory"],
+      "requires_target": false,
+      "input_schema": {
+        "type": "object",
+        "properties": {},
+        "additionalProperties": false
+      },
+      "result_schema": {"type": "object"}
+    },
+    {
+      "descriptor_id": "uai.query.world.actors",
+      "version": 1,
+      "descriptor_hash": "sha256:1a4c1b9fa68e2bad414de0f57869ccbf98029caa510cdd278891d63166933102",
+      "capability_id": "world.actors.read",
+      "provider_binding": "world.read.actors",
+      "family": "object",
+      "query_kind": "state",
+      "required_context_facets": ["world"],
+      "allowed_state_planes": ["authoring_memory", "runtime_instance"],
+      "requires_target": false,
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "class_paths": {
+            "type": "array",
+            "items": {"type": "string", "minLength": 1},
+            "uniqueItems": true
+          },
+          "folder_path_prefix": {"type": "string"},
+          "tags": {
+            "type": "array",
+            "items": {"type": "string", "minLength": 1},
+            "uniqueItems": true
+          }
+        },
+        "additionalProperties": false
+      },
+      "result_schema": {"type": "object"}
+    },
+    {
+      "descriptor_id": "uai.query.world.actor_components",
+      "version": 1,
+      "descriptor_hash": "sha256:72992b27afa74cc3c2d5b604d502ab2dd2e2612928c7358691922222f6fa42d0",
+      "capability_id": "world.actor_components.read",
+      "provider_binding": "world.read.actor_components",
+      "family": "object",
+      "query_kind": "state",
+      "required_context_facets": ["world"],
+      "allowed_state_planes": ["authoring_memory", "runtime_instance"],
+      "requires_target": true,
+      "target_kinds": ["actor"],
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "include_non_scene": {"type": "boolean"}
+        },
+        "additionalProperties": false
+      },
+      "result_schema": {"type": "object"}
+    },
+    {
+      "descriptor_id": "uai.query.world.selection",
+      "version": 1,
+      "descriptor_hash": "sha256:e5052956111d5a033fabac404bda9b04a6ab4ba1c371ec770e39d14e950edbf8",
+      "capability_id": "world.selection.read",
+      "provider_binding": "world.read.selection",
+      "family": "object",
+      "query_kind": "state",
+      "required_context_facets": ["world", "selection"],
+      "allowed_state_planes": ["authoring_memory"],
+      "requires_target": false,
+      "input_schema": {
+        "type": "object",
+        "properties": {},
+        "additionalProperties": false
+      },
+      "result_schema": {"type": "object"}
+    },
+    {
+      "descriptor_id": "uai.query.world.property",
+      "version": 1,
+      "descriptor_hash": "sha256:87f836780eed9a42654d2865889c74b0212a532eafcc86d3f4615e4931e6ac6e",
+      "capability_id": "world.property.read",
+      "provider_binding": "world.read.property",
+      "family": "object",
+      "query_kind": "state",
+      "required_context_facets": ["world"],
+      "allowed_state_planes": ["authoring_memory", "runtime_instance"],
+      "requires_target": true,
+      "target_kinds": ["actor", "component"],
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "property_path": {"type": "string", "minLength": 1}
+        },
+        "required": ["property_path"],
+        "additionalProperties": false
+      },
+      "result_schema": {"type": "object"}
+    },
+    {
+      "descriptor_id": "uai.query.world.content",
+      "version": 1,
+      "descriptor_hash": "sha256:f31e1b14ba2556edfc9914f8c93cd2c3b56b164703637ee6f2eb8ae03dce8933",
+      "capability_id": "world.content.read",
+      "provider_binding": "world.read.content",
+      "family": "content",
+      "query_kind": "state",
+      "required_context_facets": ["world"],
+      "allowed_state_planes": ["authoring_memory", "runtime_instance"],
+      "requires_target": false,
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "scope": {"type": "string", "enum": ["world", "selection", "target"]},
+          "include_bounds": {"type": "boolean"},
+          "include_components": {"type": "boolean"},
+          "sections": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "enum": [
+                "actors",
+                "attachments",
+                "components",
+                "folders",
+                "world_settings"
+              ]
+            },
+            "uniqueItems": true
+          }
+        },
+        "additionalProperties": false
+      },
+      "result_schema": {"type": "object"}
+    },
+    {
+      "descriptor_id": "uai.query.world.ray_trace",
+      "version": 1,
+      "descriptor_hash": "sha256:40abdbe0435cbf04cf7f2c8f856d85b7127c7a3b534bf36e3e8cb5a59f832922",
+      "capability_id": "world.ray_trace.read",
+      "provider_binding": "world.read.ray_trace",
+      "family": "spatial",
+      "query_kind": "runtime_probe",
+      "required_context_facets": ["world"],
+      "allowed_state_planes": ["authoring_memory", "runtime_instance"],
+      "requires_target": false,
+      "space_contract": {
+        "subject": "ray and hit targets",
+        "dimension": 3,
+        "semantic_frame": "ue_world",
+        "write_frame": "not_applicable",
+        "read_frame": "ue_world",
+        "verify_frame": "ue_world",
+        "conversion_chain": "input ue_world -> UE world trace -> hit ue_world"
+      },
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "start": {
+            "type": "object",
+            "properties": {
+              "frame_id": {"type": "string", "const": "ue.world"},
+              "unit": {"type": "string", "const": "centimeter"},
+              "components": {
+                "type": "array",
+                "items": {"type": "number"},
+                "minItems": 3,
+                "maxItems": 3
+              }
+            },
+            "required": ["frame_id", "unit", "components"],
+            "additionalProperties": false
+          },
+          "direction": {
+            "type": "object",
+            "properties": {
+              "frame_id": {"type": "string", "const": "ue.world"},
+              "components": {
+                "type": "array",
+                "items": {"type": "number"},
+                "minItems": 3,
+                "maxItems": 3
+              }
+            },
+            "required": ["frame_id", "components"],
+            "additionalProperties": false
+          },
+          "distance_cm": {"type": "number", "exclusiveMinimum": 0},
+          "trace_channel": {"type": "string", "minLength": 1},
+          "trace_complex": {"type": "boolean"},
+          "ignore_target_refs": {
+            "type": "array",
+            "items": {"type": "string", "minLength": 1},
+            "uniqueItems": true
+          }
+        },
+        "required": ["start", "direction", "distance_cm"],
+        "additionalProperties": false
+      },
+      "result_schema": {"type": "object"}
+    },
+    {
+      "descriptor_id": "uai.query.world.overlap",
+      "version": 1,
+      "descriptor_hash": "sha256:63fbf20fa3085d13ac96c2dddd55e755063251099c04ef8eff872bff93f742eb",
+      "capability_id": "world.overlap.read",
+      "provider_binding": "world.read.overlap",
+      "family": "spatial",
+      "query_kind": "runtime_probe",
+      "required_context_facets": ["world"],
+      "allowed_state_planes": ["authoring_memory", "runtime_instance"],
+      "requires_target": false,
+      "space_contract": {
+        "subject": "overlap volume and overlapped targets",
+        "dimension": 3,
+        "semantic_frame": "ue_world",
+        "write_frame": "not_applicable",
+        "read_frame": "ue_world",
+        "verify_frame": "ue_world",
+        "conversion_chain": "input ue_world volume -> UE overlap -> target bounds ue_world"
+      },
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "shape": {"type": "string", "enum": ["box", "sphere", "capsule"]},
+          "center": {
+            "type": "object",
+            "properties": {
+              "frame_id": {"type": "string", "const": "ue.world"},
+              "unit": {"type": "string", "const": "centimeter"},
+              "components": {
+                "type": "array",
+                "items": {"type": "number"},
+                "minItems": 3,
+                "maxItems": 3
+              }
+            },
+            "required": ["frame_id", "unit", "components"],
+            "additionalProperties": false
+          },
+          "half_extents_cm": {
+            "type": "array",
+            "items": {"type": "number", "minimum": 0},
+            "minItems": 3,
+            "maxItems": 3
+          },
+          "radius_cm": {"type": "number", "minimum": 0},
+          "half_height_cm": {"type": "number", "minimum": 0},
+          "trace_channel": {"type": "string", "minLength": 1},
+          "trace_complex": {"type": "boolean"},
+          "ignore_target_refs": {
+            "type": "array",
+            "items": {"type": "string", "minLength": 1},
+            "uniqueItems": true
+          }
+        },
+        "required": ["shape", "center"],
+        "additionalProperties": false
+      },
+      "result_schema": {"type": "object"}
+    },
+    {
+      "descriptor_id": "uai.query.world.capsule_sweep",
+      "version": 1,
+      "descriptor_hash": "sha256:6cb40b6352fa8bdee487b33318b811c0fde347e6b0b16ac5e8af4939fc71a232",
+      "capability_id": "world.capsule_sweep.read",
+      "provider_binding": "world.read.capsule_sweep",
+      "family": "spatial",
+      "query_kind": "runtime_probe",
+      "required_context_facets": ["world"],
+      "allowed_state_planes": ["authoring_memory", "runtime_instance"],
+      "requires_target": false,
+      "space_contract": {
+        "subject": "capsule path segment and collision hits",
+        "dimension": 3,
+        "semantic_frame": "ue_world",
+        "write_frame": "not_applicable",
+        "read_frame": "ue_world",
+        "verify_frame": "ue_world",
+        "conversion_chain": "input ue_world segment -> UE capsule sweep -> hit ue_world"
+      },
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "start": {
+            "type": "object",
+            "properties": {
+              "frame_id": {"type": "string", "const": "ue.world"},
+              "unit": {"type": "string", "const": "centimeter"},
+              "components": {
+                "type": "array",
+                "items": {"type": "number"},
+                "minItems": 3,
+                "maxItems": 3
+              }
+            },
+            "required": ["frame_id", "unit", "components"],
+            "additionalProperties": false
+          },
+          "end": {
+            "type": "object",
+            "properties": {
+              "frame_id": {"type": "string", "const": "ue.world"},
+              "unit": {"type": "string", "const": "centimeter"},
+              "components": {
+                "type": "array",
+                "items": {"type": "number"},
+                "minItems": 3,
+                "maxItems": 3
+              }
+            },
+            "required": ["frame_id", "unit", "components"],
+            "additionalProperties": false
+          },
+          "radius_cm": {"type": "number", "exclusiveMinimum": 0},
+          "half_height_cm": {"type": "number", "exclusiveMinimum": 0},
+          "trace_channel": {"type": "string", "minLength": 1},
+          "trace_complex": {"type": "boolean"},
+          "find_initial_overlaps": {"type": "boolean"},
+          "return_penetration_depth": {"type": "boolean"},
+          "ignore_target_refs": {
+            "type": "array",
+            "items": {"type": "string", "minLength": 1},
+            "uniqueItems": true
+          }
+        },
+        "required": ["start", "end", "radius_cm", "half_height_cm"],
+        "additionalProperties": false
+      },
+      "result_schema": {"type": "object"}
+    },
+    {
+      "descriptor_id": "uai.query.world.capsule_path",
+      "version": 1,
+      "descriptor_hash": "sha256:23f139aae58ab8c2a4864fa429f5ec110f750e668019cf84ffdf41e1f7681fed",
+      "capability_id": "world.capsule_path.read",
+      "provider_binding": "world.read.capsule_path",
+      "family": "spatial",
+      "query_kind": "runtime_probe",
+      "required_context_facets": ["world"],
+      "allowed_state_planes": ["authoring_memory", "runtime_instance"],
+      "requires_target": false,
+      "space_contract": {
+        "subject": "piecewise capsule path and floor clearance",
+        "dimension": 3,
+        "semantic_frame": "ue_world",
+        "write_frame": "not_applicable",
+        "read_frame": "ue_world",
+        "verify_frame": "ue_world",
+        "conversion_chain": "input ue_world polyline -> UE sweeps/floor traces -> segment facts ue_world"
+      },
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "points": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "frame_id": {"type": "string", "const": "ue.world"},
+                "unit": {"type": "string", "const": "centimeter"},
+                "components": {
+                  "type": "array",
+                  "items": {"type": "number"},
+                  "minItems": 3,
+                  "maxItems": 3
+                }
+              },
+              "required": ["frame_id", "unit", "components"],
+              "additionalProperties": false
+            },
+            "minItems": 2
+          },
+          "radius_cm": {"type": "number", "exclusiveMinimum": 0},
+          "half_height_cm": {"type": "number", "exclusiveMinimum": 0},
+          "step_cm": {"type": "number", "exclusiveMinimum": 0},
+          "trace_channel": {"type": "string", "minLength": 1},
+          "trace_complex": {"type": "boolean"},
+          "require_floor": {"type": "boolean"},
+          "snap_to_floor": {"type": "boolean"},
+          "floor_trace_channel": {"type": "string", "minLength": 1},
+          "floor_trace_up_cm": {"type": "number", "minimum": 0},
+          "floor_trace_down_cm": {"type": "number", "minimum": 0},
+          "floor_clearance_cm": {"type": "number", "minimum": 0},
+          "max_walkable_slope_deg": {
+            "type": "number",
+            "minimum": 0,
+            "maximum": 90
+          }
+        },
+        "required": ["points", "radius_cm", "half_height_cm", "step_cm"],
+        "additionalProperties": false
+      },
+      "result_schema": {"type": "object"}
+    },
+    {
+      "descriptor_id": "uai.query.world.nearby_shapes",
+      "version": 1,
+      "descriptor_hash": "sha256:c00aecd11cc68be751776bcce5cb468f09aa3a10447af67ea0485723c064707b",
+      "capability_id": "world.nearby_shapes.read",
+      "provider_binding": "world.read.nearby_shapes",
+      "family": "spatial",
+      "query_kind": "runtime_probe",
+      "required_context_facets": ["world"],
+      "allowed_state_planes": ["authoring_memory", "runtime_instance"],
+      "requires_target": false,
+      "space_contract": {
+        "subject": "query region and component collision shapes",
+        "dimension": 3,
+        "semantic_frame": "ue_world",
+        "write_frame": "not_applicable",
+        "read_frame": "component_local and ue_world",
+        "verify_frame": "ue_world",
+        "conversion_chain": "component local shape -> component transform -> ue_world"
+      },
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "center": {
+            "type": "object",
+            "properties": {
+              "frame_id": {"type": "string", "const": "ue.world"},
+              "unit": {"type": "string", "const": "centimeter"},
+              "components": {
+                "type": "array",
+                "items": {"type": "number"},
+                "minItems": 3,
+                "maxItems": 3
+              }
+            },
+            "required": ["frame_id", "unit", "components"],
+            "additionalProperties": false
+          },
+          "half_extents_cm": {
+            "type": "array",
+            "items": {"type": "number", "minimum": 0},
+            "minItems": 3,
+            "maxItems": 3
+          },
+          "radius_cm": {"type": "number", "minimum": 0},
+          "component_classes": {
+            "type": "array",
+            "items": {"type": "string", "minLength": 1},
+            "uniqueItems": true
+          },
+          "folder_path_prefix": {"type": "string"},
+          "ignore_folder_path_prefix": {"type": "string"},
+          "include_visual_fallback": {"type": "boolean"},
+          "detail_level": {"type": "string", "enum": ["summary", "shape"]}
+        },
+        "required": ["center"],
+        "additionalProperties": false
+      },
+      "result_schema": {"type": "object"}
+    },
+    {
+      "descriptor_id": "uai.query.world.mesh_closest_vertex",
+      "version": 1,
+      "descriptor_hash": "sha256:708d8ded16d9dc7430c6f4b8367950be500a1becfbbbe8fc63c7433cead7e5e5",
+      "capability_id": "world.mesh_closest_vertex.read",
+      "provider_binding": "world.read.mesh_closest_vertex",
+      "family": "mesh",
+      "query_kind": "runtime_probe",
+      "required_context_facets": ["world"],
+      "allowed_state_planes": ["authoring_memory", "runtime_instance"],
+      "requires_target": true,
+      "target_kinds": ["static_mesh_component", "skeletal_mesh_component"],
+      "space_contract": {
+        "subject": "mesh vertices and query point",
+        "dimension": 3,
+        "semantic_frame": "ue_world",
+        "write_frame": "not_applicable",
+        "read_frame": "mesh_local",
+        "verify_frame": "ue_world",
+        "conversion_chain": "mesh local vertex -> component transform -> ue_world"
+      },
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "world_point": {
+            "type": "object",
+            "properties": {
+              "frame_id": {"type": "string", "const": "ue.world"},
+              "unit": {"type": "string", "const": "centimeter"},
+              "components": {
+                "type": "array",
+                "items": {"type": "number"},
+                "minItems": 3,
+                "maxItems": 3
+              }
+            },
+            "required": ["frame_id", "unit", "components"],
+            "additionalProperties": false
+          }
+        },
+        "required": ["world_point"],
+        "additionalProperties": false
+      },
+      "result_schema": {"type": "object"}
+    },
+    {
+      "descriptor_id": "uai.query.world.mesh_vertex_position",
+      "version": 1,
+      "descriptor_hash": "sha256:345ba8f9c81478ee39ae4fe35249acc957e42f515c808da50e260e5abd239e11",
+      "capability_id": "world.mesh_vertex_position.read",
+      "provider_binding": "world.read.mesh_vertex_position",
+      "family": "mesh",
+      "query_kind": "state",
+      "required_context_facets": ["world"],
+      "allowed_state_planes": ["authoring_memory", "runtime_instance"],
+      "requires_target": true,
+      "target_kinds": ["static_mesh_component", "skeletal_mesh_component"],
+      "space_contract": {
+        "subject": "selected mesh vertex",
+        "dimension": 3,
+        "semantic_frame": "ue_world",
+        "write_frame": "not_applicable",
+        "read_frame": "mesh_local",
+        "verify_frame": "ue_world",
+        "conversion_chain": "mesh local vertex -> component transform -> ue_world"
+      },
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "vertex_index": {"type": "integer", "minimum": 0}
+        },
+        "required": ["vertex_index"],
+        "additionalProperties": false
+      },
+      "result_schema": {"type": "object"}
+    },
+    {
+      "descriptor_id": "uai.query.world.nav_project_point",
+      "version": 1,
+      "descriptor_hash": "sha256:15717c38f15bebf7333fd5be32b31d79bafa1cf2ed80468e9425f73b9fd72d44",
+      "capability_id": "world.nav_project_point.read",
+      "provider_binding": "world.read.nav_project_point",
+      "family": "navigation",
+      "query_kind": "runtime_probe",
+      "required_context_facets": ["world"],
+      "allowed_state_planes": ["authoring_memory", "runtime_instance"],
+      "requires_target": false,
+      "space_contract": {
+        "subject": "navigation query point",
+        "dimension": 3,
+        "semantic_frame": "ue_world",
+        "write_frame": "not_applicable",
+        "read_frame": "ue_world_navmesh",
+        "verify_frame": "ue_world",
+        "conversion_chain": "input ue_world -> nav projection -> projected ue_world"
+      },
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "point": {
+            "type": "object",
+            "properties": {
+              "frame_id": {"type": "string", "const": "ue.world"},
+              "unit": {"type": "string", "const": "centimeter"},
+              "components": {
+                "type": "array",
+                "items": {"type": "number"},
+                "minItems": 3,
+                "maxItems": 3
+              }
+            },
+            "required": ["frame_id", "unit", "components"],
+            "additionalProperties": false
+          },
+          "query_extent_cm": {
+            "type": "array",
+            "items": {"type": "number", "minimum": 0},
+            "minItems": 3,
+            "maxItems": 3
+          }
+        },
+        "required": ["point"],
+        "additionalProperties": false
+      },
+      "result_schema": {"type": "object"}
+    },
+    {
+      "descriptor_id": "uai.query.world.nav_find_path",
+      "version": 1,
+      "descriptor_hash": "sha256:a7f385ab9d197393c8ece37f40f2fc3157d9aea6f36ebbe698aa6ccc9add86da",
+      "capability_id": "world.nav_find_path.read",
+      "provider_binding": "world.read.nav_find_path",
+      "family": "navigation",
+      "query_kind": "runtime_probe",
+      "required_context_facets": ["world"],
+      "allowed_state_planes": ["authoring_memory", "runtime_instance"],
+      "requires_target": false,
+      "space_contract": {
+        "subject": "navigation path between two points",
+        "dimension": 3,
+        "semantic_frame": "ue_world",
+        "write_frame": "not_applicable",
+        "read_frame": "ue_world_navmesh",
+        "verify_frame": "ue_world",
+        "conversion_chain": "input ue_world endpoints -> nav query -> path points ue_world"
+      },
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "start": {
+            "type": "object",
+            "properties": {
+              "frame_id": {"type": "string", "const": "ue.world"},
+              "unit": {"type": "string", "const": "centimeter"},
+              "components": {
+                "type": "array",
+                "items": {"type": "number"},
+                "minItems": 3,
+                "maxItems": 3
+              }
+            },
+            "required": ["frame_id", "unit", "components"],
+            "additionalProperties": false
+          },
+          "end": {
+            "type": "object",
+            "properties": {
+              "frame_id": {"type": "string", "const": "ue.world"},
+              "unit": {"type": "string", "const": "centimeter"},
+              "components": {
+                "type": "array",
+                "items": {"type": "number"},
+                "minItems": 3,
+                "maxItems": 3
+              }
+            },
+            "required": ["frame_id", "unit", "components"],
+            "additionalProperties": false
+          },
+          "project_to_nav": {"type": "boolean"},
+          "allow_projection_failure": {"type": "boolean"},
+          "allow_partial": {"type": "boolean"},
+          "query_extent_cm": {
+            "type": "array",
+            "items": {"type": "number", "minimum": 0},
+            "minItems": 3,
+            "maxItems": 3
+          }
+        },
+        "required": ["start", "end"],
+        "additionalProperties": false
+      },
+      "result_schema": {"type": "object"}
+    },
+    {
+      "descriptor_id": "uai.query.world.nav_connectivity",
+      "version": 1,
+      "descriptor_hash": "sha256:24e8a35b076afb6cf2c731b1df5f5717a388552db1bd3dcaa9bdf3a7f57b7652",
+      "capability_id": "world.nav_connectivity.read",
+      "provider_binding": "world.read.nav_connectivity",
+      "family": "navigation",
+      "query_kind": "runtime_probe",
+      "required_context_facets": ["world"],
+      "allowed_state_planes": ["authoring_memory", "runtime_instance"],
+      "requires_target": false,
+      "space_contract": {
+        "subject": "navigation point graph",
+        "dimension": 3,
+        "semantic_frame": "ue_world",
+        "write_frame": "not_applicable",
+        "read_frame": "ue_world_navmesh",
+        "verify_frame": "ue_world",
+        "conversion_chain": "input ue_world graph -> nav queries -> connectivity/path facts ue_world"
+      },
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "points": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "frame_id": {"type": "string", "const": "ue.world"},
+                "unit": {"type": "string", "const": "centimeter"},
+                "components": {
+                  "type": "array",
+                  "items": {"type": "number"},
+                  "minItems": 3,
+                  "maxItems": 3
+                }
+              },
+              "required": ["frame_id", "unit", "components"],
+              "additionalProperties": false
+            },
+            "minItems": 2
+          },
+          "pairs": {
+            "type": "array",
+            "items": {
+              "type": "array",
+              "items": {"type": "integer", "minimum": 0},
+              "minItems": 2,
+              "maxItems": 2
+            }
+          },
+          "project_to_nav": {"type": "boolean"},
+          "allow_partial": {"type": "boolean"},
+          "include_path_points": {"type": "boolean"},
+          "query_extent_cm": {
+            "type": "array",
+            "items": {"type": "number", "minimum": 0},
+            "minItems": 3,
+            "maxItems": 3
+          }
+        },
+        "required": ["points"],
+        "additionalProperties": false
+      },
+      "result_schema": {"type": "object"}
+    },
+    {
+      "descriptor_id": "uai.query.world.data_layers",
+      "version": 1,
+      "descriptor_hash": "sha256:2846909763f242c7f5d084e77a1af3d6478246d1cc1511267aaa61a113e6982f",
+      "capability_id": "world.data_layers.read",
+      "provider_binding": "world.read.data_layers",
+      "family": "topology",
+      "query_kind": "state",
+      "required_context_facets": ["world"],
+      "allowed_state_planes": ["authoring_memory", "runtime_instance"],
+      "requires_target": false,
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "scope": {"type": "string", "enum": ["world", "selection"]},
+          "include_actor_membership": {"type": "boolean"}
+        },
+        "additionalProperties": false
+      },
+      "result_schema": {"type": "object"}
+    },
+    {
+      "descriptor_id": "uai.query.world.hlod_assignments",
+      "version": 1,
+      "descriptor_hash": "sha256:26cdee2d8823b369e95b10dcf8abc69dcb148113f26d99e45c86034a6cabf8d5",
+      "capability_id": "world.hlod_assignments.read",
+      "provider_binding": "world.read.hlod_assignments",
+      "family": "topology",
+      "query_kind": "state",
+      "required_context_facets": ["world"],
+      "allowed_state_planes": ["authoring_memory"],
+      "requires_target": false,
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "scope": {"type": "string", "enum": ["world", "selection"]},
+          "folder_path_prefix": {"type": "string"},
+          "managed_tag": {"type": "string"}
+        },
+        "additionalProperties": false
+      },
+      "result_schema": {"type": "object"}
+    },
+    {
+      "descriptor_id": "uai.query.world.streaming_levels",
+      "version": 1,
+      "descriptor_hash": "sha256:8805bbe7dd2243fcca8a90eceda5e0e43c36285def0a95847efa8a5f2b9df93b",
+      "capability_id": "world.streaming_levels.read",
+      "provider_binding": "world.read.streaming_levels",
+      "family": "topology",
+      "query_kind": "state",
+      "required_context_facets": ["world"],
+      "allowed_state_planes": ["authoring_memory", "runtime_instance"],
+      "requires_target": false,
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "level_packages": {
+            "type": "array",
+            "items": {"type": "string", "minLength": 1},
+            "uniqueItems": true
+          },
+          "scope": {"type": "string", "enum": ["world", "selection"]}
+        },
+        "additionalProperties": false
+      },
+      "result_schema": {"type": "object"}
+    },
+    {
+      "descriptor_id": "uai.query.world.partition",
+      "version": 1,
+      "descriptor_hash": "sha256:8b1a726d0d8387887d797908477a2fd164c081b817f9fc21a4460ce148dce6df",
+      "capability_id": "world.partition.read",
+      "provider_binding": "world.read.partition",
+      "family": "topology",
+      "query_kind": "state",
+      "required_context_facets": ["world"],
+      "allowed_state_planes": ["authoring_memory", "runtime_instance"],
+      "requires_target": false,
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "include_loaded_regions": {"type": "boolean"}
+        },
+        "additionalProperties": false
+      },
+      "result_schema": {"type": "object"}
+    },
+    {
+      "descriptor_id": "uai.query.world.partition_health",
+      "version": 1,
+      "descriptor_hash": "sha256:4acdb35c196d9a7237e5438a55d77aa221042ecc076fd4c172c8dcdf97064e95",
+      "capability_id": "world.partition_health.read",
+      "provider_binding": "world.read.partition_health",
+      "family": "topology",
+      "query_kind": "runtime_probe",
+      "required_context_facets": ["world"],
+      "allowed_state_planes": ["authoring_memory"],
+      "requires_target": false,
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "enable_streaming": {"type": "boolean"}
+        },
+        "additionalProperties": false
+      },
+      "result_schema": {"type": "object"}
+    },
+    {
+      "descriptor_id": "uai.query.world.physics_component",
+      "version": 1,
+      "descriptor_hash": "sha256:e93cf11fe378e554d8c9a61ac41e3145aa3c53365f8e60f4d100b64f979cd9b0",
+      "capability_id": "world.physics_component.read",
+      "provider_binding": "world.read.physics_component",
+      "family": "physics",
+      "query_kind": "state",
+      "required_context_facets": ["world"],
+      "allowed_state_planes": ["authoring_memory", "runtime_instance"],
+      "requires_target": true,
+      "target_kinds": ["primitive_component"],
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "include_collision_responses": {"type": "boolean"},
+          "include_material": {"type": "boolean"},
+          "include_runtime_state": {"type": "boolean"}
+        },
+        "additionalProperties": false
+      },
+      "result_schema": {"type": "object"}
+    },
+    {
+      "descriptor_id": "uai.query.world.physics_constraint",
+      "version": 1,
+      "descriptor_hash": "sha256:181cb31c54cd3619c0df954a83414e7c8d81ffa2330628479cb0c1b20ce147bc",
+      "capability_id": "world.physics_constraint.read",
+      "provider_binding": "world.read.physics_constraint",
+      "family": "physics",
+      "query_kind": "state",
+      "required_context_facets": ["world"],
+      "allowed_state_planes": ["authoring_memory", "runtime_instance"],
+      "requires_target": true,
+      "target_kinds": ["physics_constraint_component"],
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "include_endpoints": {"type": "boolean"},
+          "include_limits": {"type": "boolean"},
+          "include_runtime_state": {"type": "boolean"}
+        },
+        "additionalProperties": false
+      },
+      "result_schema": {"type": "object"}
+    }
+  ],
+  "e2_scenarios": [
+    {
+      "case_id": "world_read.object_context",
+      "family": "object",
+      "provider_binding": "world.read.summary",
+      "oracle": "snapshot world identity and dirty state come from the environment-resolved UWorld package"
+    },
+    {
+      "case_id": "world_read.content_actor_component",
+      "family": "content",
+      "provider_binding": "world.read.content",
+      "oracle": "spawned actor/component identities and values are read back from the owned worker world"
+    },
+    {
+      "case_id": "world_read.spatial_hit",
+      "family": "spatial",
+      "provider_binding": "world.read.ray_trace",
+      "oracle": "known collision primitive produces a hit in ue.world without viewport conversion"
+    },
+    {
+      "case_id": "world_read.mesh_transform",
+      "family": "mesh",
+      "provider_binding": "world.read.mesh_vertex_position",
+      "oracle": "mesh-local vertex is transformed through the component transform and verified in ue.world"
+    },
+    {
+      "case_id": "world_read.navigation_unavailable",
+      "family": "navigation",
+      "provider_binding": "world.read.nav_project_point",
+      "oracle": "owned world without navigation data returns typed navigation-unavailable without mutation"
+    },
+    {
+      "case_id": "world_read.topology_empty",
+      "family": "topology",
+      "provider_binding": "world.read.streaming_levels",
+      "oracle": "owned empty world returns a complete empty topology snapshot rather than cached server state"
+    },
+    {
+      "case_id": "world_read.physics_component",
+      "family": "physics",
+      "provider_binding": "world.read.physics_component",
+      "oracle": "known primitive component collision and gravity settings are read from the real component"
+    }
+  ]
+}

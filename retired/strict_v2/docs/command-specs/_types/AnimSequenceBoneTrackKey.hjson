@@ -1,0 +1,23 @@
+definition: {
+  additional_fields: true
+  fields: {
+    frame: { default_state: none, description_zh: "目标 frame index；未提供 frame/time 时使用 key 的顺序索引", minimum: 0, required: false, type: integer }
+    frame_index: { default_state: none, description_zh: "frame 别名", minimum: 0, required: false, type: integer }
+    key_index: { default_state: none, description_zh: "frame 别名", minimum: 0, required: false, type: integer }
+    location: { default_state: none, description_zh: "相对父骨骼的 bone-local 平移", required: false, type: object, type_ref: "shared:Vector3" }
+    position: { default_state: none, description_zh: "location 别名", required: false, type: object, type_ref: "shared:Vector3" }
+    quat: { default_state: none, description_zh: "bone-local 四元数", required: false, type: object, type_ref: "shared:Quaternion" }
+    quaternion: { default_state: none, description_zh: "quat 别名", required: false, type: object, type_ref: "shared:Quaternion" }
+    rotation: { default_state: none, description_zh: "相对父骨骼的 bone-local 旋转（度）", required: false, type: object, type_ref: "shared:Rotator3D" }
+    rotator: { default_state: none, description_zh: "rotation 别名", required: false, type: object, type_ref: "shared:Rotator3D" }
+    scale: { default_state: none, description_zh: "bone-local 缩放", required: false, type: object, type_ref: "shared:Vector3" }
+    scale3d: { default_state: none, description_zh: "scale 别名", required: false, type: object, type_ref: "shared:Vector3" }
+    time: { default_state: none, description_zh: "time_seconds 别名", minimum: 0, required: false, type: number }
+    time_seconds: { default_state: none, description_zh: "目标动画时间（秒）", minimum: 0, required: false, type: number }
+    translation: { default_state: none, description_zh: "location 别名", required: false, type: object, type_ref: "shared:Vector3" }
+  }
+  kind: object
+}
+schema: uai.command_spec.shared_type.v1
+type_id: AnimSequenceBoneTrackKey
+version: 1

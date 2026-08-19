@@ -230,7 +230,7 @@ bool FUeAgentHttpServer::CmdMaterialSetProperty(const FUeAgentRequestContext& Ct
 	FString AppliedValueText;
 	FString CppType;
 	FString ImportError;
-	if (!UeAgentMaterialOps::SetObjectPropertyText(Asset, PropertyName, ValueText, &AppliedValueText, &CppType, &ImportError))
+	if (!UeAgentMaterialOps::SetDeprecatedObjectPropertyText(Asset, PropertyName, ValueText, &AppliedValueText, &CppType, &ImportError))
 	{
 		const FString ImportStatus = ImportError.Equals(TEXT("property_not_found"), ESearchCase::CaseSensitive) ? TEXT("property_not_found") : TEXT("import_failed");
 		TSharedPtr<FJsonObject> ResultObj = FUeAgentHttpServer::MakePropertyImportResultJson(PropertyName, nullptr, ValueText, TEXT(""), ImportStatus, ImportError);

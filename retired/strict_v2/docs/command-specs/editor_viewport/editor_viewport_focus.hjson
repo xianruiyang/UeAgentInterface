@@ -1,0 +1,98 @@
+authoring: { reason: command_has_no_registered_folder_authoring_profile, state: none }
+category: editor_viewport
+command: editor_viewport_focus
+deprecation: { reason: command_is_active, state: none }
+discovery: { aliases: [], keywords_en: [editor, viewport, focus, editor_viewport], keywords_zh: [editor_viewport_focus], summary_en: "Execute editor_viewport_focus with a verified implementation contract", summary_zh: "聚焦目标并读回视口状态", tags: [editor_viewport, p2-003] }
+errors: {
+  codes: [
+    { code: ambiguous_viewport_target, description_zh: "C++ 实现返回错误码 ambiguous_viewport_target", retry_safe: false, stage: execution, wire_match: exact }
+    { code: asset_editor, description_zh: "C++ 实现返回错误码 asset_editor", retry_safe: false, stage: execution, wire_match: exact }
+    { code: control_rig_asset_not_found, description_zh: "C++ 实现返回错误码 control_rig_asset_not_found", retry_safe: false, stage: execution, wire_match: exact }
+    { code: control_rig_control_not_found, description_zh: "C++ 实现返回错误码 control_rig_control_not_found", retry_safe: false, stage: execution, wire_match: exact }
+    { code: control_rig_hierarchy_not_found, description_zh: "C++ 实现返回错误码 control_rig_hierarchy_not_found", retry_safe: false, stage: execution, wire_match: exact }
+    { code: control_rig_null_not_found, description_zh: "C++ 实现返回错误码 control_rig_null_not_found", retry_safe: false, stage: execution, wire_match: exact }
+    { code: control_rig_space_not_found, description_zh: "C++ 实现返回错误码 control_rig_space_not_found", retry_safe: false, stage: execution, wire_match: exact }
+    { code: invalid_focus_bounds, description_zh: "C++ 实现返回错误码 invalid_focus_bounds", retry_safe: true, stage: preflight, wire_match: exact }
+    { code: invalid_persona_viewport, description_zh: "C++ 实现返回错误码 invalid_persona_viewport", retry_safe: true, stage: preflight, wire_match: exact }
+    { code: missing_, description_zh: "C++ 实现返回错误码 missing_", retry_safe: true, stage: preflight, wire_match: prefix }
+    { code: missing_bone_name, description_zh: "C++ 实现返回错误码 missing_bone_name", retry_safe: true, stage: preflight, wire_match: exact }
+    { code: missing_custom_bounds, description_zh: "C++ 实现返回错误码 missing_custom_bounds", retry_safe: true, stage: preflight, wire_match: exact }
+    { code: missing_custom_point, description_zh: "C++ 实现返回错误码 missing_custom_point", retry_safe: true, stage: preflight, wire_match: exact }
+    { code: missing_persona_preview_component, description_zh: "C++ 实现返回错误码 missing_persona_preview_component", retry_safe: true, stage: preflight, wire_match: exact }
+    { code: missing_socket_name, description_zh: "C++ 实现返回错误码 missing_socket_name", retry_safe: true, stage: preflight, wire_match: exact }
+    { code: persona_bone_not_found, description_zh: "C++ 实现返回错误码 persona_bone_not_found", retry_safe: false, stage: execution, wire_match: exact }
+    { code: persona_socket_not_found, description_zh: "C++ 实现返回错误码 persona_socket_not_found", retry_safe: false, stage: execution, wire_match: exact }
+    { code: space, description_zh: "C++ 实现返回错误码 space", retry_safe: false, stage: execution, wire_match: exact }
+    { code: unsupported_asset_editor_viewport, description_zh: "C++ 实现返回错误码 unsupported_asset_editor_viewport", retry_safe: false, stage: execution, wire_match: exact }
+    { code: unsupported_editor_viewport_target, description_zh: "C++ 实现返回错误码 unsupported_editor_viewport_target", retry_safe: false, stage: execution, wire_match: exact }
+    { code: unsupported_focus_mode, description_zh: "C++ 实现返回错误码 unsupported_focus_mode", retry_safe: false, stage: execution, wire_match: exact }
+  ]
+}
+evidence: {
+  docs: [
+    { path: "Plugins/UeAgentInterface/docs/commands/editor_viewport/editor_viewport_focus.md", purpose: "user documentation cross-check; C++ implementation remains authoritative" }
+  ]
+  implementation: [
+    { line_hint: 156, path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Commands/EditorViewport/UeAgentHttpServer_EditorViewportDispatch.cpp", purpose: "command handler, parameter and return evidence", symbol: "FUeAgentHttpServer::ExecuteEditorViewportCommand__command_editor_viewport_focus" }
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Commands/EditorViewport/UeAgentEditorViewportTypes.cpp", purpose: "transitive helper evidence used by the command handler" }
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Commands/EditorViewport/UeAgentHttpServer_EditorViewportCore.cpp", purpose: "transitive helper evidence used by the command handler" }
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Commands/EditorViewport/UeAgentHttpServer_EditorViewportPersona.cpp", purpose: "transitive helper evidence used by the command handler" }
+  ]
+  tests: [
+    { path: "Plugins/UeAgentInterface/Source/UeAgentInterfaceTests/Private/Smoke/UeAgentInterfaceSmoke_EditorViewport.cpp", purpose: "smoke or negative-path evidence cross-checked for the verified contract" }
+  ]
+}
+execution: {
+  destructive: false
+  editor_state: required
+  game_thread: required
+  idempotent: false
+  kind: session_control
+  overwrite_behavior: none
+  pie_state: allowed
+  retry_safe: false
+  save_behavior: none
+  side_effects: [modifies_editor_session, opens_window]
+  ui_effect: window_mutation
+}
+maturity: verified
+params: {
+  constraints: []
+  fields: {
+    focus: { default_state: none, description_zh: "C++ 实现读取的 focus 参数", required: true, type: object, type_ref: "shared:EditorViewportFocus" }
+    target: { default_state: none, description_zh: "C++ 实现读取的 target 参数", required: false, type: object, type_ref: "shared:EditorViewportTarget" }
+  }
+  state: defined
+}
+response: { artifact_fields: [], compact_fields: [adapter, camera, capabilities, client_class, focus_result, preview_state], failure_fields: [params.focus], max_items_policy: { fields: [], mode: none } }
+returns: {
+  fields: {
+    adapter: { description_zh: "C++ 实现返回的 adapter 字段；是否出现取决于执行分支", required: false, type: string }
+    camera: { description_zh: "C++ 实现返回的 camera 字段；是否出现取决于执行分支", required: false, type: object, type_ref: "shared:EditorViewportCamera" }
+    capabilities: { description_zh: "C++ 实现返回的 capabilities 字段；是否出现取决于执行分支", required: false, type: json_value }
+    client_class: { description_zh: "C++ 实现返回的 client_class 字段；是否出现取决于执行分支", required: false, type: string }
+    focus_result: { description_zh: "C++ 实现返回的 focus_result 字段；是否出现取决于执行分支", required: false, type: json_value }
+    preview_state: { description_zh: "C++ 实现返回的 preview_state 字段；是否出现取决于执行分支", required: false, type: object, type_ref: "shared:EditorViewportPreviewState" }
+    schema: { description_zh: "C++ 实现返回的 schema 字段；是否出现取决于执行分支", required: false, type: string }
+    target: { description_zh: "C++ 实现返回的 target 字段；是否出现取决于执行分支", required: false, type: object, type_ref: "shared:EditorViewportTarget" }
+    visual_options: { description_zh: "C++ 实现返回的 visual_options 字段；是否出现取决于执行分支", required: false, type: object, type_ref: "shared:EditorViewportVisualOptions" }
+  }
+  state: defined
+}
+schema: uai.command_spec.v1
+status: active
+types: {}
+verification: {
+  assertions: [
+    { id: result_present, operator: exists, source: returns.adapter }
+    { id: state_readback_present, operator: exists, source: methods.state_readback.camera }
+  ]
+  failure_policy: fail_overall
+  methods: [
+    { id: result, kind: result_assertion }
+    { command: editor_viewport_get_state, id: state_readback, kind: command_readback, params_mapping: { target: params.target } }
+  ]
+  required: true
+  state: defined
+}
+version: 1
