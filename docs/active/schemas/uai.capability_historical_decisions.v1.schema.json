@@ -1,0 +1,53 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "uai.capability_historical_decisions.v1",
+  "title": "UAI current decisions for historical public identities",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema", "catalog_id", "source", "approval_source", "policy", "decisions"],
+  "properties": {
+    "schema": {"const": "uai.capability_historical_decisions.v1"},
+    "catalog_id": {"type": "string", "minLength": 1},
+    "source": {"type": "object"},
+    "approval_source": {"type": "object"},
+    "policy": {"type": "object"},
+    "decisions": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "historical_command_id",
+          "capability_unit_id",
+          "current_disposition",
+          "candidate_resolution_kind",
+          "candidate_successor",
+          "candidate_authority",
+          "current_successor_status",
+          "current_exact_ingress_status",
+          "compiled_legacy_guard_status",
+          "physical_exit_status",
+          "next_task_id"
+        ],
+        "properties": {
+          "historical_command_id": {"type": "string", "minLength": 1},
+          "capability_unit_id": {"pattern": "^CU-[A-Z0-9-]+$", "type": "string"},
+          "current_disposition": {
+            "enum": ["required_capability_contract", "explicit_non_support", "retire_public_capability"]
+          },
+          "candidate_resolution_kind": {"type": "string", "minLength": 1},
+          "candidate_successor": {"type": "object"},
+          "candidate_authority": {"const": "historical_evidence_only"},
+          "current_successor_status": {"type": "string", "minLength": 1},
+          "current_exact_ingress_status": {"const": "absent_from_current_manifest"},
+          "compiled_legacy_guard_status": {
+            "enum": ["explicitly_retired", "not_listed_in_retired_guard"]
+          },
+          "physical_exit_status": {"const": "requires_legacy_surface_exit_audit"},
+          "next_task_id": {"pattern": "^TROOT-UAI-[0-9]+-[A-Z0-9-]+$", "type": "string"}
+        }
+      }
+    }
+  }
+}

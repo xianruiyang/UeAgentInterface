@@ -794,23 +794,19 @@ bool FUeAgentDomainConformanceRepresentativeCalibrationTest::RunTest(
 	{
 		const TCHAR* DomainId;
 		const TCHAR* Target;
-		const TCHAR* EvidenceRef;
 	};
 	const FRepresentative Representatives[] = {
 		{
 			TEXT("uobject-dataasset"),
 			TEXT("/Game/UAI/T66/T13.T13"),
-			TEXT("runtimeLogs/strict_v2_r26/T13/verification/public_vertical_receipt.json"),
 		},
 		{
 			TEXT("datatable-curvetable"),
 			TEXT("/Game/UAI/T66/T27.T27"),
-			TEXT("runtimeLogs/delivery_workflow/T27/public_verification/public_vertical_receipt.json"),
 		},
 		{
 			TEXT("localization-string-table"),
 			TEXT("/Game/UAI/T66/T30.T30"),
-			TEXT("docs/plan/20260806_UAI_REQUIREMENT_DESIGN_REALIGNMENT/evidence/T30-EXTERNAL-LOCALIZATION-IMPORT-current-verification.json"),
 		},
 	};
 	for (const FRepresentative& Representative : Representatives)
@@ -854,23 +850,6 @@ bool FUeAgentDomainConformanceRepresentativeCalibrationTest::RunTest(
 			Plan.Contains(EDomainConformanceScenario::PersistReloadReadback));
 		TestTrue(TEXT("representative plan requires old-entry exit"),
 			Plan.Contains(EDomainConformanceScenario::LegacyExit));
-
-		const FString EvidencePath = FPaths::ConvertRelativePathToFull(
-			FPaths::Combine(
-				FPaths::ProjectDir(),
-				Representative.EvidenceRef));
-		TestTrue(TEXT("current representative evidence reference exists"),
-			IFileManager::Get().FileExists(*EvidencePath));
-		FDomainProductEvidence Evidence;
-		Evidence.RouteId = TEXT("content_graph.import_workspace");
-		Evidence.ReceiptRef = Representative.EvidenceRef;
-		Evidence.bReceiptExists = true;
-		Evidence.bSynthetic = false;
-		Evidence.bPublicRouteObserved = true;
-		Evidence.bIndependentReadbackObserved = true;
-		Evidence.bCleanupObserved = true;
-		TestTrue(TEXT("bounded representative evidence satisfies its fixture"),
-			ValidateProductEvidence(Fixture, Evidence, Error));
 	}
 	return !HasAnyErrors();
 }

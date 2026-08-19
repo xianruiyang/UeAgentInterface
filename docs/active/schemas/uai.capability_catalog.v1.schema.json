@@ -1,0 +1,130 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "uai.capability_catalog.v1",
+  "title": "UAI current capability catalog",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "catalog_id",
+    "authority",
+    "source_ids",
+    "command_manifest",
+    "historical_sources",
+    "evidence_levels",
+    "catalog_policy",
+    "units",
+    "retired_candidate_current_identities",
+    "recovered_historical_identities",
+    "delivery_tasks"
+  ],
+  "properties": {
+    "schema": {"const": "uai.capability_catalog.v1"},
+    "catalog_id": {"$ref": "#/$defs/nonEmptyString"},
+    "authority": {"type": "object"},
+    "source_ids": {"$ref": "#/$defs/nonEmptyUniqueStrings"},
+    "command_manifest": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["path", "file_sha256", "registry_hash", "command_count"],
+      "properties": {
+        "path": {"$ref": "#/$defs/nonEmptyString"},
+        "file_sha256": {"$ref": "#/$defs/sha256"},
+        "registry_hash": {"$ref": "#/$defs/sha256"},
+        "command_count": {"type": "integer", "minimum": 1}
+      }
+    },
+    "historical_sources": {"type": "object"},
+    "evidence_levels": {"$ref": "#/$defs/nonEmptyUniqueStrings"},
+    "catalog_policy": {"type": "object"},
+    "units": {
+      "type": "array",
+      "minItems": 1,
+      "items": {"$ref": "#/$defs/unit"}
+    },
+    "retired_candidate_current_identities": {
+      "type": "array",
+      "items": {"type": "object"}
+    },
+    "recovered_historical_identities": {
+      "type": "array",
+      "items": {"type": "object"}
+    },
+    "delivery_tasks": {
+      "type": "array",
+      "minItems": 1,
+      "items": {"type": "object"}
+    }
+  },
+  "$defs": {
+    "nonEmptyString": {"type": "string", "minLength": 1},
+    "sha256": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+    "nonEmptyUniqueStrings": {
+      "type": "array",
+      "minItems": 1,
+      "uniqueItems": true,
+      "items": {"$ref": "#/$defs/nonEmptyString"}
+    },
+    "uniqueStrings": {
+      "type": "array",
+      "uniqueItems": true,
+      "items": {"$ref": "#/$defs/nonEmptyString"}
+    },
+    "evidence": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["highest_verified_layer", "delivery_state", "evidence_refs", "not_proven"],
+      "properties": {
+        "highest_verified_layer": {"$ref": "#/$defs/nonEmptyString"},
+        "delivery_state": {"$ref": "#/$defs/nonEmptyString"},
+        "evidence_refs": {"$ref": "#/$defs/nonEmptyUniqueStrings"},
+        "not_proven": {"$ref": "#/$defs/nonEmptyUniqueStrings"}
+      }
+    },
+    "unit": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "title",
+        "source_ids",
+        "activation_contribution_ids",
+        "current_command_ids",
+        "focus_command_ids",
+        "object_types",
+        "authoring_surfaces",
+        "operations",
+        "lifecycles",
+        "command_contract_state",
+        "implementation_state",
+        "evidence",
+        "historical_obligation_count",
+        "legacy_candidate_task_ids",
+        "next_task_id",
+        "blockers"
+      ],
+      "properties": {
+        "id": {"pattern": "^CU-[A-Z0-9-]+$", "type": "string"},
+        "title": {"$ref": "#/$defs/nonEmptyString"},
+        "source_ids": {"$ref": "#/$defs/nonEmptyUniqueStrings"},
+        "activation_contribution_ids": {"$ref": "#/$defs/uniqueStrings"},
+        "current_command_ids": {"$ref": "#/$defs/uniqueStrings"},
+        "focus_command_ids": {"$ref": "#/$defs/uniqueStrings"},
+        "historical_command_ids": {"$ref": "#/$defs/uniqueStrings"},
+        "object_types": {"$ref": "#/$defs/nonEmptyUniqueStrings"},
+        "authoring_surfaces": {"$ref": "#/$defs/nonEmptyUniqueStrings"},
+        "operations": {"$ref": "#/$defs/nonEmptyUniqueStrings"},
+        "lifecycles": {"$ref": "#/$defs/nonEmptyUniqueStrings"},
+        "command_contract_state": {"$ref": "#/$defs/nonEmptyString"},
+        "implementation_state": {"$ref": "#/$defs/nonEmptyString"},
+        "evidence": {"$ref": "#/$defs/evidence"},
+        "historical_obligation_count": {"type": "integer", "minimum": 0},
+        "pre_refactor_inventory_obligation_count": {"type": "integer", "minimum": 0},
+        "additional_recovered_obligation_count": {"type": "integer", "minimum": 0},
+        "legacy_candidate_task_ids": {"$ref": "#/$defs/nonEmptyUniqueStrings"},
+        "next_task_id": {"pattern": "^TROOT-UAI-[0-9]+-[A-Z0-9-]+$", "type": "string"},
+        "blockers": {"$ref": "#/$defs/uniqueStrings"}
+      }
+    }
+  }
+}

@@ -1,0 +1,3460 @@
+{
+  "schema": "uai.capability_catalog.v1",
+  "catalog_id": "uai-current-capability-units",
+  "authority": {
+    "semantic_owner": "docs/active/capability-catalog/catalog.json",
+    "command_contract_owner": "Resources/UaiCommandManifest.json",
+    "activation_owner": "DomainCapability frozen process authority",
+    "catalog_role": "delivery, evidence and migration classification only; never runtime dispatch input"
+  },
+  "source_ids": [
+    "REQ-UAI-ROOT-01",
+    "REQ-UAI-ROOT-02",
+    "AC-UAI-ROOT-02-COVERAGE-CONTRACT",
+    "REQ-UAI-ROOT-15",
+    "AC-UAI-ROOT-15-INTEGRATED-RESTORATION",
+    "UDES-UAI-ROOT-18",
+    "UDES-UAI-ROOT-19",
+    "DES-UAI-ROOT-INTEGRATED-CAPABILITY-ARCHITECTURE",
+    "DES-UAI-PRODUCTION-EVIDENCE",
+    "SOL-UAI-ROOT-08-INTEGRATED-AUTHORITY-RESTORATION"
+  ],
+  "command_manifest": {
+    "path": "Resources/UaiCommandManifest.json",
+    "file_sha256": "sha256:54558513a205cf999b18cb2925c6824334b264f820cd5139a46753972d3d4321",
+    "registry_hash": "sha256:4070c2612dac492c2c1231a32c9bc5076f79646d26fe2128e41d1f1a8becc400",
+    "command_count": 342
+  },
+  "historical_sources": {
+    "candidate_current_inventory": {
+      "path": "docs/plan/20260806_UAI_REQUIREMENT_DESIGN_REALIGNMENT/UAI_COMMAND_TASK_INVENTORY.json",
+      "sha256": "sha256:f729b99069e251710e026a851005365f0e637620b83674a27c0888c39d030a95",
+      "authority": "historical_evidence_only"
+    },
+    "pre_refactor_inventory": {
+      "path": "docs/plan/20260806_UAI_REQUIREMENT_DESIGN_REALIGNMENT/UAI_PRE_REFACTOR_COMMAND_TASK_INVENTORY.json",
+      "sha256": "sha256:b5887838be49ec59435b8272e913149718876c268fd92a7ca2210422ed24ee48",
+      "identity_count": 939,
+      "authority": "historical_contract_source_only"
+    },
+    "approval": {
+      "path": "docs/plan/20260806_UAI_REQUIREMENT_DESIGN_REALIGNMENT/UAI_PRE_REFACTOR_COMMAND_APPROVAL.md",
+      "sha256": "sha256:3972f62273a13c8c8a971d7e31924e08c8fc59dad9f35abbb87089728c1c265e",
+      "authority": "historical_user-approval_source"
+    },
+    "current_decisions": {
+      "path": "docs/active/capability-catalog/historical-decisions.json",
+      "authority": "current T34 disposition overlay"
+    }
+  },
+  "evidence_levels": [
+    "identity_contract",
+    "activation_and_public_contract",
+    "development_build",
+    "owned_automation",
+    "public_sdk_real_ue",
+    "persistence_independent_readback",
+    "real_content_quality"
+  ],
+  "catalog_policy": {
+    "command_count_is_completion": false,
+    "old_task_done_is_current_evidence": false,
+    "historical_exact_successor_is_current_without_revalidation": false,
+    "unit_completion_requires": [
+      "exact public ingress",
+      "unique mechanics owner",
+      "real UE mechanics",
+      "applicable settle and persistence",
+      "independent readback",
+      "failure and cleanup",
+      "current documentation and distribution"
+    ]
+  },
+  "units": [
+    {
+      "id": "CU-AI-COMMANDS",
+      "title": "AI behavior, schema and hierarchy authoring",
+      "source_ids": [
+        "REQ-UAI-ROOT-01",
+        "REQ-UAI-ROOT-02",
+        "AC-UAI-ROOT-02-COVERAGE-CONTRACT",
+        "REQ-UAI-ROOT-15",
+        "AC-UAI-ROOT-15-INTEGRATED-RESTORATION",
+        "UDES-UAI-ROOT-18",
+        "UDES-UAI-ROOT-19",
+        "DES-UAI-ROOT-INTEGRATED-CAPABILITY-ARCHITECTURE",
+        "DES-UAI-PRODUCTION-EVIDENCE",
+        "SOL-UAI-ROOT-08-INTEGRATED-AUTHORITY-RESTORATION"
+      ],
+      "activation_contribution_ids": [
+        "ai-command-migration"
+      ],
+      "current_command_ids": [
+        "ai.behavior_tree.asset.create",
+        "ai.behavior_tree.graph.apply",
+        "ai.blackboard.asset.create",
+        "ai.blackboard.schema.apply",
+        "ai.eqs.asset.create",
+        "ai.eqs.graph.apply",
+        "ai.smart_object_definition.apply",
+        "ai.smart_object_definition.asset.create",
+        "ai.state_tree.asset.create",
+        "ai.state_tree.hierarchy.apply"
+      ],
+      "focus_command_ids": [],
+      "object_types": [
+        "BehaviorTree",
+        "Blackboard",
+        "EQS",
+        "StateTree",
+        "SmartObjectDefinition"
+      ],
+      "authoring_surfaces": [
+        "graph",
+        "schema",
+        "hierarchy"
+      ],
+      "operations": [
+        "create",
+        "apply"
+      ],
+      "lifecycles": [
+        "request",
+        "compile/settle",
+        "save",
+        "readback",
+        "cleanup"
+      ],
+      "command_contract_state": "registered_exact_contract",
+      "implementation_state": "registered_mechanics_candidate",
+      "evidence": {
+        "highest_verified_layer": "activation_and_public_contract",
+        "delivery_state": "requires_vertical_revalidation",
+        "evidence_refs": [
+          "TROOT-UAI-32-INTEGRATED-ACTIVATION-AUTHORITY",
+          "TROOT-UAI-33-PUBLIC-CONTRACT-ORACLE-REALIGNMENT"
+        ],
+        "not_proven": [
+          "real UE mechanics for every command",
+          "required persistence and independent readback",
+          "public SDK execution for every object/surface/operation",
+          "failure cleanup and content quality"
+        ]
+      },
+      "historical_obligation_count": 54,
+      "legacy_candidate_task_ids": [
+        "T20-AI-BEHAVIOR-DOMAIN",
+        "T53-AI-COMMAND-MIGRATION"
+      ],
+      "next_task_id": "TROOT-UAI-39-NIAGARA-PCG-AI-VERTICAL",
+      "blockers": []
+    },
+    {
+      "id": "CU-AI-DISCOVERY",
+      "title": "AI behavior candidate discovery",
+      "source_ids": [
+        "REQ-UAI-ROOT-01",
+        "REQ-UAI-ROOT-02",
+        "AC-UAI-ROOT-02-COVERAGE-CONTRACT",
+        "REQ-UAI-ROOT-15",
+        "AC-UAI-ROOT-15-INTEGRATED-RESTORATION",
+        "UDES-UAI-ROOT-18",
+        "UDES-UAI-ROOT-19",
+        "DES-UAI-ROOT-INTEGRATED-CAPABILITY-ARCHITECTURE",
+        "DES-UAI-PRODUCTION-EVIDENCE",
+        "SOL-UAI-ROOT-08-INTEGRATED-AUTHORITY-RESTORATION"
+      ],
+      "activation_contribution_ids": [
+        "ai-behavior-domain-candidates"
+      ],
+      "current_command_ids": [
+        "ai.behavior.candidates"
+      ],
+      "focus_command_ids": [],
+      "object_types": [
+        "BehaviorTree",
+        "Blackboard",
+        "StateTree",
+        "EQS"
+      ],
+      "authoring_surfaces": [
+        "candidate discovery",
+        "HJSON binding"
+      ],
+      "operations": [
+        "search",
+        "bind"
+      ],
+      "lifecycles": [
+        "request",
+        "persisted AI asset"
+      ],
+      "command_contract_state": "registered_exact_contract",
+      "implementation_state": "registered_mechanics_candidate",
+      "evidence": {
+        "highest_verified_layer": "activation_and_public_contract",
+        "delivery_state": "requires_vertical_revalidation",
+        "evidence_refs": [
+          "TROOT-UAI-32-INTEGRATED-ACTIVATION-AUTHORITY",
+          "TROOT-UAI-33-PUBLIC-CONTRACT-ORACLE-REALIGNMENT"
+        ],
+        "not_proven": [
+          "real UE mechanics for every command",
+          "required persistence and independent readback",
+          "public SDK execution for every object/surface/operation",
+          "failure cleanup and content quality"
+        ]
+      },
+      "historical_obligation_count": 0,
+      "legacy_candidate_task_ids": [
+        "T20-AI-BEHAVIOR-DOMAIN"
+      ],
+      "next_task_id": "TROOT-UAI-35-DISCOVERY-IDENTITY-VERTICAL",
+      "blockers": []
+    },
+    {
+      "id": "CU-ANIMATION-BLUEPRINT-COMMANDS",
+      "title": "Animation Blueprint creation and graph authoring",
+      "source_ids": [
+        "REQ-UAI-ROOT-01",
+        "REQ-UAI-ROOT-02",
+        "AC-UAI-ROOT-02-COVERAGE-CONTRACT",
+        "REQ-UAI-ROOT-15",
+        "AC-UAI-ROOT-15-INTEGRATED-RESTORATION",
+        "UDES-UAI-ROOT-18",
+        "UDES-UAI-ROOT-19",
+        "DES-UAI-ROOT-INTEGRATED-CAPABILITY-ARCHITECTURE",
+        "DES-UAI-PRODUCTION-EVIDENCE",
+        "SOL-UAI-ROOT-08-INTEGRATED-AUTHORITY-RESTORATION"
+      ],
+      "activation_contribution_ids": [
+        "animation-blueprint-command-migration"
+      ],
+      "current_command_ids": [
+        "animation.anim_blueprint.asset.create",
+        "animation.anim_blueprint.graph.apply",
+        "animation.anim_blueprint.layer_interface.asset.create"
+      ],
+      "focus_command_ids": [],
+      "object_types": [
+        "AnimBlueprint",
+        "AnimLayerInterface"
+      ],
+      "authoring_surfaces": [
+        "asset",
+        "graph",
+        "layer"
+      ],
+      "operations": [
+        "create",
+        "apply"
+      ],
+      "lifecycles": [
+        "request",
+        "compile/settle",
+        "save",
+        "readback",
+        "cleanup"
+      ],
+      "command_contract_state": "registered_exact_contract",
+      "implementation_state": "registered_mechanics_candidate",
+      "evidence": {
+        "highest_verified_layer": "activation_and_public_contract",
+        "delivery_state": "requires_vertical_revalidation",
+        "evidence_refs": [
+          "TROOT-UAI-32-INTEGRATED-ACTIVATION-AUTHORITY",
+          "TROOT-UAI-33-PUBLIC-CONTRACT-ORACLE-REALIGNMENT"
+        ],
+        "not_proven": [
+          "real UE mechanics for every command",
+          "required persistence and independent readback",
+          "public SDK execution for every object/surface/operation",
+          "failure cleanup and content quality"
+        ]
+      },
+      "historical_obligation_count": 17,
+      "legacy_candidate_task_ids": [
+        "T16-ANIMATION-BLUEPRINT-DOMAIN",
+        "T49-ANIMATION-BLUEPRINT-COMMAND-MIGRATION"
+      ],
+      "next_task_id": "TROOT-UAI-37-BLUEPRINT-UMG-GRAPH-VERTICAL",
+      "blockers": []
+    },
+    {
+      "id": "CU-ANIMATION-CURVE",
+      "title": "Animation sequence, montage and blend-space authoring",
+      "source_ids": [
+        "REQ-UAI-ROOT-01",
+        "REQ-UAI-ROOT-02",
+        "AC-UAI-ROOT-02-COVERAGE-CONTRACT",
+        "REQ-UAI-ROOT-15",
+        "AC-UAI-ROOT-15-INTEGRATED-RESTORATION",
+        "UDES-UAI-ROOT-18",
+        "UDES-UAI-ROOT-19",
+        "DES-UAI-ROOT-INTEGRATED-CAPABILITY-ARCHITECTURE",
+        "DES-UAI-PRODUCTION-EVIDENCE",
+        "SOL-UAI-ROOT-08-INTEGRATED-AUTHORITY-RESTORATION"
+      ],
+      "activation_contribution_ids": [
+        "animation-curve-command-migration"
+      ],
+      "current_command_ids": [
+        "animation.blend_space.asset.create",
+        "animation.blend_space.definition.apply",
+        "animation.blend_space.sample",
+        "animation.montage.create",
+        "animation.montage.read",
+        "animation.montage.structure.replace",
+        "animation.sequence.bone_tracks.replace",
+        "animation.sequence.curves.update",
+        "animation.sequence.events.update",
+        "animation.sequence.metadata.update",
+        "animation.sequence.pose.sample",
+        "animation.sequence.read",
+        "animation.sequence.root_motion.analyze"
+      ],
+      "focus_command_ids": [],
+      "object_types": [
+        "AnimSequence",
+        "AnimMontage",
+        "BlendSpace"
+      ],
+      "authoring_surfaces": [
+        "curve",
+        "event",
+        "track",
+        "section",
+        "sample"
+      ],
+      "operations": [
+        "create",
+        "read",
+        "replace",
+        "update",
+        "analyze"
+      ],
+      "lifecycles": [
+        "request",
+        "compile/settle",
+        "save",
+        "readback",
+        "cleanup"
+      ],
+      "command_contract_state": "registered_exact_contract",
+      "implementation_state": "registered_mechanics_candidate",
+      "evidence": {
+        "highest_verified_layer": "activation_and_public_contract",
+        "delivery_state": "requires_vertical_revalidation",
+        "evidence_refs": [
+          "TROOT-UAI-32-INTEGRATED-ACTIVATION-AUTHORITY",
+          "TROOT-UAI-33-PUBLIC-CONTRACT-ORACLE-REALIGNMENT"
+        ],
+        "not_proven": [
+          "real UE mechanics for every command",
+          "required persistence and independent readback",
+          "public SDK execution for every object/surface/operation",
+          "failure cleanup and content quality"
+        ]
+      },
+      "historical_obligation_count": 32,
+      "legacy_candidate_task_ids": [
+        "T23-ANIMATION-CURVE-DOMAIN",
+        "T56-ANIMATION-CURVE-COMMAND-MIGRATION"
+      ],
+      "next_task_id": "TROOT-UAI-40-ANIMATION-RIG-AUDIO-VERTICAL",
+      "blockers": []
+    },
+    {
+      "id": "CU-ANIMATION-RIG",
+      "title": "Control Rig, IK and skeleton authoring",
+      "source_ids": [
+        "REQ-UAI-ROOT-01",
+        "REQ-UAI-ROOT-02",
+        "AC-UAI-ROOT-02-COVERAGE-CONTRACT",
+        "REQ-UAI-ROOT-15",
+        "AC-UAI-ROOT-15-INTEGRATED-RESTORATION",
+        "UDES-UAI-ROOT-18",
+        "UDES-UAI-ROOT-19",
+        "DES-UAI-ROOT-INTEGRATED-CAPABILITY-ARCHITECTURE",
+        "DES-UAI-PRODUCTION-EVIDENCE",
+        "SOL-UAI-ROOT-08-INTEGRATED-AUTHORITY-RESTORATION"
+      ],
+      "activation_contribution_ids": [
+        "animation-rig-command-migration"
+      ],
+      "current_command_ids": [
+        "animation.control_rig.asset.create",
+        "animation.control_rig.hierarchy_graph.apply",
+        "animation.control_rig.shape_library.apply",
+        "animation.control_rig.shape_library.asset.create",
+        "animation.ik_retargeter.asset.create",
+        "animation.ik_retargeter.definition.apply",
+        "animation.ik_retargeter.settings.apply",
+        "animation.ik_rig.asset.create",
+        "animation.ik_rig.definition.apply",
+        "animation.ik_rig.definition.auto_generate",
+        "animation.skeleton.compatibility.apply",
+        "animation.skeleton.definition.apply",
+        "animation.skeleton.slots.read",
+        "animation.skeleton.virtual_bone.apply"
+      ],
+      "focus_command_ids": [],
+      "object_types": [
+        "ControlRig",
+        "IKRig",
+        "IKRetargeter",
+        "Skeleton",
+        "ShapeLibrary"
+      ],
+      "authoring_surfaces": [
+        "hierarchy",
+        "graph",
+        "definition",
+        "slot",
+        "virtual bone"
+      ],
+      "operations": [
+        "create",
+        "apply",
+        "generate",
+        "read"
+      ],
+      "lifecycles": [
+        "request",
+        "compile/settle",
+        "save",
+        "readback",
+        "cleanup"
+      ],
+      "command_contract_state": "registered_exact_contract",
+      "implementation_state": "registered_mechanics_candidate",
+      "evidence": {
+        "highest_verified_layer": "activation_and_public_contract",
+        "delivery_state": "requires_vertical_revalidation",
+        "evidence_refs": [
+          "TROOT-UAI-32-INTEGRATED-ACTIVATION-AUTHORITY",
+          "TROOT-UAI-33-PUBLIC-CONTRACT-ORACLE-REALIGNMENT"
+        ],
+        "not_proven": [
+          "real UE mechanics for every command",
+          "required persistence and independent readback",
+          "public SDK execution for every object/surface/operation",
+          "failure cleanup and content quality"
+        ]
+      },
+      "historical_obligation_count": 57,
+      "legacy_candidate_task_ids": [
+        "T24-ANIMATION-RIG-GRAPH-DOMAIN",
+        "T57-ANIMATION-RIG-COMMAND-MIGRATION"
+      ],
+      "next_task_id": "TROOT-UAI-40-ANIMATION-RIG-AUDIO-VERTICAL",
+      "blockers": []
+    },
+    {
+      "id": "CU-ANIMATION-RIG-DISCOVERY",
+      "title": "Animation and rig graph candidate discovery",
+      "source_ids": [
+        "REQ-UAI-ROOT-01",
+        "REQ-UAI-ROOT-02",
+        "AC-UAI-ROOT-02-COVERAGE-CONTRACT",
+        "REQ-UAI-ROOT-15",
+        "AC-UAI-ROOT-15-INTEGRATED-RESTORATION",
+        "UDES-UAI-ROOT-18",
+        "UDES-UAI-ROOT-19",
+        "DES-UAI-ROOT-INTEGRATED-CAPABILITY-ARCHITECTURE",
+        "DES-UAI-PRODUCTION-EVIDENCE",
+        "SOL-UAI-ROOT-08-INTEGRATED-AUTHORITY-RESTORATION"
+      ],
+      "activation_contribution_ids": [
+        "animation-rig-graph-domain-candidates"
+      ],
+      "current_command_ids": [
+        "animation_rig_graph.candidates"
+      ],
+      "focus_command_ids": [],
+      "object_types": [
+        "AnimBlueprint",
+        "ControlRig",
+        "IK graph"
+      ],
+      "authoring_surfaces": [
+        "candidate discovery",
+        "HJSON binding"
+      ],
+      "operations": [
+        "search",
+        "bind"
+      ],
+      "lifecycles": [
+        "request",
+        "persisted animation asset"
+      ],
+      "command_contract_state": "registered_exact_contract",
+      "implementation_state": "registered_mechanics_candidate",
+      "evidence": {
+        "highest_verified_layer": "activation_and_public_contract",
+        "delivery_state": "requires_vertical_revalidation",
+        "evidence_refs": [
+          "TROOT-UAI-32-INTEGRATED-ACTIVATION-AUTHORITY",
+          "TROOT-UAI-33-PUBLIC-CONTRACT-ORACLE-REALIGNMENT"
+        ],
+        "not_proven": [
+          "real UE mechanics for every command",
+          "required persistence and independent readback",
+          "public SDK execution for every object/surface/operation",
+          "failure cleanup and content quality"
+        ]
+      },
+      "historical_obligation_count": 0,
+      "legacy_candidate_task_ids": [
+        "T24-ANIMATION-RIG-GRAPH-DOMAIN"
+      ],
+      "next_task_id": "TROOT-UAI-35-DISCOVERY-IDENTITY-VERTICAL",
+      "blockers": []
+    },
+    {
+      "id": "CU-ASSET-SIMPLE",
+      "title": "Typed simple asset authoring including Paper2D and media",
+      "source_ids": [
+        "REQ-UAI-ROOT-01",
+        "REQ-UAI-ROOT-02",
+        "AC-UAI-ROOT-02-COVERAGE-CONTRACT",
+        "REQ-UAI-ROOT-15",
+        "AC-UAI-ROOT-15-INTEGRATED-RESTORATION",
+        "UDES-UAI-ROOT-18",
+        "UDES-UAI-ROOT-19",
+        "DES-UAI-ROOT-INTEGRATED-CAPABILITY-ARCHITECTURE",
+        "DES-UAI-PRODUCTION-EVIDENCE",
+        "SOL-UAI-ROOT-08-INTEGRATED-AUTHORITY-RESTORATION"
+      ],
+      "activation_contribution_ids": [
+        "asset-simple-operation"
+      ],
+      "current_command_ids": [
+        "asset.audio_effect_preset.create",
+        "asset.audio_effect_preset.update",
+        "asset.curve.update",
+        "asset.data_layer.create",
+        "asset.data_object.create",
+        "asset.data_object.update",
+        "asset.data_table.replace",
+        "asset.input_action.create",
+        "asset.input_action.update",
+        "asset.input_mapping_context.create",
+        "asset.input_mapping_context.update",
+        "asset.media_player.create",
+        "asset.media_player.update",
+        "asset.media_source.create",
+        "asset.media_source.update",
+        "asset.media_texture.create",
+        "asset.media_texture.update",
+        "asset.paper_flipbook.create",
+        "asset.paper_flipbook.update",
+        "asset.paper_sprite.create",
+        "asset.paper_sprite.update",
+        "asset.paper_tilemap.update",
+        "asset.paper_tileset.update",
+        "asset.render_target.create",
+        "asset.render_target.update",
+        "asset.runtime_virtual_texture.create",
+        "asset.runtime_virtual_texture.update",
+        "asset.skeletal_mesh.update",
+        "asset.sound_attenuation.create",
+        "asset.sound_attenuation.update",
+        "asset.sound_class.create",
+        "asset.sound_class.update",
+        "asset.sound_concurrency.create",
+        "asset.sound_concurrency.update",
+        "asset.sound_mix.create",
+        "asset.sound_mix.update",
+        "asset.sound_submix.create",
+        "asset.sound_submix.update",
+        "asset.sparse_volume_texture.update",
+        "asset.static_mesh.update",
+        "asset.subuv_animation.create",
+        "asset.subuv_animation.update",
+        "asset.texture_array.create",
+        "asset.texture_array.replace",
+        "asset.texture_collection.create",
+        "asset.texture_collection.update",
+        "asset.texture_cube.create",
+        "asset.texture_cube.replace",
+        "asset.texture_cube_array.create",
+        "asset.texture_cube_array.replace",
+        "asset.volume_texture.create",
+        "asset.volume_texture.replace"
+      ],
+      "focus_command_ids": [
+        "asset.paper_sprite.create",
+        "asset.paper_flipbook.create",
+        "asset.paper_tileset.update",
+        "asset.paper_tilemap.update"
+      ],
+      "object_types": [
+        "data asset",
+        "mesh",
+        "texture",
+        "media",
+        "audio",
+        "input",
+        "Paper2D"
+      ],
+      "authoring_surfaces": [
+        "typed property",
+        "typed structure"
+      ],
+      "operations": [
+        "create",
+        "update",
+        "replace"
+      ],
+      "lifecycles": [
+        "request",
+        "transaction",
+        "save",
+        "independent readback",
+        "cleanup"
+      ],
+      "command_contract_state": "registered_exact_contract",
+      "implementation_state": "registered_mechanics_candidate",
+      "evidence": {
+        "highest_verified_layer": "activation_and_public_contract",
+        "delivery_state": "requires_vertical_revalidation",
+        "evidence_refs": [
+          "TROOT-UAI-32-INTEGRATED-ACTIVATION-AUTHORITY",
+          "TROOT-UAI-33-PUBLIC-CONTRACT-ORACLE-REALIGNMENT"
+        ],
+        "not_proven": [
+          "real UE mechanics for every command",
+          "required persistence and independent readback",
+          "public SDK execution for every object/surface/operation",
+          "failure cleanup and content quality"
+        ]
+      },
+      "historical_obligation_count": 109,
+      "legacy_candidate_task_ids": [
+        "T37-ASSET-SIMPLE-OPERATION"
+      ],
+      "next_task_id": "TROOT-UAI-38-ASSET-MATERIAL-TEXTURE-MEDIA-VERTICAL",
+      "blockers": []
+    },
+    {
+      "id": "CU-AUDIO-COMMANDS",
+      "title": "MetaSound, SoundCue and audio-media graph authoring",
+      "source_ids": [
+        "REQ-UAI-ROOT-01",
+        "REQ-UAI-ROOT-02",
+        "AC-UAI-ROOT-02-COVERAGE-CONTRACT",
+        "REQ-UAI-ROOT-15",
+        "AC-UAI-ROOT-15-INTEGRATED-RESTORATION",
+        "UDES-UAI-ROOT-18",
+        "UDES-UAI-ROOT-19",
+        "DES-UAI-ROOT-INTEGRATED-CAPABILITY-ARCHITECTURE",
+        "DES-UAI-PRODUCTION-EVIDENCE",
+        "SOL-UAI-ROOT-08-INTEGRATED-AUTHORITY-RESTORATION"
+      ],
+      "activation_contribution_ids": [
+        "audio-command-migration"
+      ],
+      "current_command_ids": [
+        "audio_media.asset.create",
+        "metasound.graph.compile_settle",
+        "metasound.graph.default.mutate",
+        "metasound.graph.interface.mutate",
+        "metasound.graph.link.mutate",
+        "metasound.graph.node.mutate",
+        "sound_cue.graph.compile_settle",
+        "sound_cue.graph.node.mutate",
+        "sound_cue.graph.relation.mutate",
+        "sound_cue.graph.root.mutate"
+      ],
+      "focus_command_ids": [],
+      "object_types": [
+        "MetaSound",
+        "SoundCue",
+        "audio media"
+      ],
+      "authoring_surfaces": [
+        "graph",
+        "interface",
+        "node",
+        "relation"
+      ],
+      "operations": [
+        "create",
+        "mutate",
+        "settle"
+      ],
+      "lifecycles": [
+        "request",
+        "compile/settle",
+        "save",
+        "readback",
+        "cleanup"
+      ],
+      "command_contract_state": "registered_exact_contract",
+      "implementation_state": "registered_mechanics_candidate",
+      "evidence": {
+        "highest_verified_layer": "activation_and_public_contract",
+        "delivery_state": "requires_vertical_revalidation",
+        "evidence_refs": [
+          "TROOT-UAI-32-INTEGRATED-ACTIVATION-AUTHORITY",
+          "TROOT-UAI-33-PUBLIC-CONTRACT-ORACLE-REALIGNMENT"
+        ],
+        "not_proven": [
+          "real UE mechanics for every command",
+          "required persistence and independent readback",
+          "public SDK execution for every object/surface/operation",
+          "failure cleanup and content quality"
+        ]
+      },
+      "historical_obligation_count": 56,
+      "legacy_candidate_task_ids": [
+        "T21-AUDIO-DOMAIN",
+        "T54-AUDIO-COMMAND-MIGRATION"
+      ],
+      "next_task_id": "TROOT-UAI-40-ANIMATION-RIG-AUDIO-VERTICAL",
+      "blockers": []
+    },
+    {
+      "id": "CU-AUDIO-DISCOVERY",
+      "title": "Audio graph candidate discovery",
+      "source_ids": [
+        "REQ-UAI-ROOT-01",
+        "REQ-UAI-ROOT-02",
+        "AC-UAI-ROOT-02-COVERAGE-CONTRACT",
+        "REQ-UAI-ROOT-15",
+        "AC-UAI-ROOT-15-INTEGRATED-RESTORATION",
+        "UDES-UAI-ROOT-18",
+        "UDES-UAI-ROOT-19",
+        "DES-UAI-ROOT-INTEGRATED-CAPABILITY-ARCHITECTURE",
+        "DES-UAI-PRODUCTION-EVIDENCE",
+        "SOL-UAI-ROOT-08-INTEGRATED-AUTHORITY-RESTORATION"
+      ],
+      "activation_contribution_ids": [
+        "audio-graph-domain-candidates"
+      ],
+      "current_command_ids": [
+        "audio.graph.candidates"
+      ],
+      "focus_command_ids": [],
+      "object_types": [
+        "MetaSound",
+        "SoundCue"
+      ],
+      "authoring_surfaces": [
+        "candidate discovery",
+        "HJSON binding"
+      ],
+      "operations": [
+        "search",
+        "bind"
+      ],
+      "lifecycles": [
+        "request",
+        "persisted audio graph"
+      ],
+      "command_contract_state": "registered_exact_contract",
+      "implementation_state": "registered_mechanics_candidate",
+      "evidence": {
+        "highest_verified_layer": "activation_and_public_contract",
+        "delivery_state": "requires_vertical_revalidation",
+        "evidence_refs": [
+          "TROOT-UAI-32-INTEGRATED-ACTIVATION-AUTHORITY",
+          "TROOT-UAI-33-PUBLIC-CONTRACT-ORACLE-REALIGNMENT"
+        ],
+        "not_proven": [
+          "real UE mechanics for every command",
+          "required persistence and independent readback",
+          "public SDK execution for every object/surface/operation",
+          "failure cleanup and content quality"
+        ]
+      },
+      "historical_obligation_count": 0,
+      "legacy_candidate_task_ids": [
+        "T21-AUDIO-DOMAIN"
+      ],
+      "next_task_id": "TROOT-UAI-35-DISCOVERY-IDENTITY-VERTICAL",
+      "blockers": []
+    },
+    {
+      "id": "CU-BLUEPRINT-COMMANDS",
+      "title": "Blueprint creation and event discovery",
+      "source_ids": [
+        "REQ-UAI-ROOT-01",
+        "REQ-UAI-ROOT-02",
+        "AC-UAI-ROOT-02-COVERAGE-CONTRACT",
+        "REQ-UAI-ROOT-15",
+        "AC-UAI-ROOT-15-INTEGRATED-RESTORATION",
+        "UDES-UAI-ROOT-18",
+        "UDES-UAI-ROOT-19",
+        "DES-UAI-ROOT-INTEGRATED-CAPABILITY-ARCHITECTURE",
+        "DES-UAI-PRODUCTION-EVIDENCE",
+        "SOL-UAI-ROOT-08-INTEGRATED-AUTHORITY-RESTORATION"
+      ],
+      "activation_contribution_ids": [
+        "blueprint-command-migration"
+      ],
+      "current_command_ids": [
+        "blueprint.asset.create",
+        "blueprint.component.events.discover"
+      ],
+      "focus_command_ids": [
+        "blueprint.asset.create",
+        "blueprint.component.events.discover"
+      ],
+      "object_types": [
+        "Blueprint",
+        "component event"
+      ],
+      "authoring_surfaces": [
+        "asset",
+        "event",
+        "graph"
+      ],
+      "operations": [
+        "create",
+        "discover"
+      ],
+      "lifecycles": [
+        "request",
+        "compile/settle",
+        "save",
+        "readback",
+        "cleanup"
+      ],
+      "command_contract_state": "registered_exact_contract",
+      "implementation_state": "registered_mechanics_candidate",
+      "evidence": {
+        "highest_verified_layer": "activation_and_public_contract",
+        "delivery_state": "requires_vertical_revalidation",
+        "evidence_refs": [
+          "TROOT-UAI-32-INTEGRATED-ACTIVATION-AUTHORITY",
+          "TROOT-UAI-33-PUBLIC-CONTRACT-ORACLE-REALIGNMENT"
+        ],
+        "not_proven": [
+          "real UE mechanics for every command",
+          "required persistence and independent readback",
+          "public SDK execution for every object/surface/operation",
+          "failure cleanup and content quality"
+        ]
+      },
+      "historical_obligation_count": 14,
+      "legacy_candidate_task_ids": [
+        "T14-BLUEPRINT-SURFACES",
+        "T47-BLUEPRINT-COMMAND-MIGRATION"
+      ],
+      "next_task_id": "TROOT-UAI-37-BLUEPRINT-UMG-GRAPH-VERTICAL",
+      "blockers": []
+    },
+    {
+      "id": "CU-BLUEPRINT-COMPONENT-DISCOVERY",
+      "title": "Blueprint component candidate discovery",
+      "source_ids": [
+        "REQ-UAI-ROOT-01",
+        "REQ-UAI-ROOT-02",
+        "AC-UAI-ROOT-02-COVERAGE-CONTRACT",
+        "REQ-UAI-ROOT-15",
+        "AC-UAI-ROOT-15-INTEGRATED-RESTORATION",
+        "UDES-UAI-ROOT-18",
+        "UDES-UAI-ROOT-19",
+        "DES-UAI-ROOT-INTEGRATED-CAPABILITY-ARCHITECTURE",
+        "DES-UAI-PRODUCTION-EVIDENCE",
+        "SOL-UAI-ROOT-08-INTEGRATED-AUTHORITY-RESTORATION"
+      ],
+      "activation_contribution_ids": [
+        "blueprint-component"
+      ],
+      "current_command_ids": [
+        "blueprint.component.candidates"
+      ],
+      "focus_command_ids": [],
+      "object_types": [
+        "ActorComponent class"
+      ],
+      "authoring_surfaces": [
+        "candidate discovery",
+        "HJSON binding"
+      ],
+      "operations": [
+        "search",
+        "bind"
+      ],
+      "lifecycles": [
+        "request",
+        "persisted Blueprint"
+      ],
+      "command_contract_state": "registered_exact_contract",
+      "implementation_state": "registered_mechanics_candidate",
+      "evidence": {
+        "highest_verified_layer": "activation_and_public_contract",
+        "delivery_state": "requires_vertical_revalidation",
+        "evidence_refs": [
+          "TROOT-UAI-32-INTEGRATED-ACTIVATION-AUTHORITY",
+          "TROOT-UAI-33-PUBLIC-CONTRACT-ORACLE-REALIGNMENT"
+        ],
+        "not_proven": [
+          "real UE mechanics for every command",
+          "required persistence and independent readback",
+          "public SDK execution for every object/surface/operation",
+          "failure cleanup and content quality"
+        ]
+      },
+      "historical_obligation_count": 0,
+      "legacy_candidate_task_ids": [
+        "T12-BLUEPRINT-COMPONENT"
+      ],
+      "next_task_id": "TROOT-UAI-35-DISCOVERY-IDENTITY-VERTICAL",
+      "blockers": []
+    },
+    {
+      "id": "CU-BLUEPRINT-NODE-DISCOVERY",
+      "title": "Blueprint node candidate discovery",
+      "source_ids": [
+        "REQ-UAI-ROOT-01",
+        "REQ-UAI-ROOT-02",
+        "AC-UAI-ROOT-02-COVERAGE-CONTRACT",
+        "REQ-UAI-ROOT-15",
+        "AC-UAI-ROOT-15-INTEGRATED-RESTORATION",
+        "UDES-UAI-ROOT-18",
+        "UDES-UAI-ROOT-19",
+        "DES-UAI-ROOT-INTEGRATED-CAPABILITY-ARCHITECTURE",
+        "DES-UAI-PRODUCTION-EVIDENCE",
+        "SOL-UAI-ROOT-08-INTEGRATED-AUTHORITY-RESTORATION"
+      ],
+      "activation_contribution_ids": [
+        "blueprint-node"
+      ],
+      "current_command_ids": [
+        "blueprint.node.candidates"
+      ],
+      "focus_command_ids": [],
+      "object_types": [
+        "Blueprint node class"
+      ],
+      "authoring_surfaces": [
+        "candidate discovery",
+        "HJSON binding"
+      ],
+      "operations": [
+        "search",
+        "bind"
+      ],
+      "lifecycles": [
+        "request",
+        "persisted Blueprint"
+      ],
+      "command_contract_state": "registered_exact_contract",
+      "implementation_state": "registered_mechanics_candidate",
+      "evidence": {
+        "highest_verified_layer": "activation_and_public_contract",
+        "delivery_state": "requires_vertical_revalidation",
+        "evidence_refs": [
+          "TROOT-UAI-32-INTEGRATED-ACTIVATION-AUTHORITY",
+          "TROOT-UAI-33-PUBLIC-CONTRACT-ORACLE-REALIGNMENT"
+        ],
+        "not_proven": [
+          "real UE mechanics for every command",
+          "required persistence and independent readback",
+          "public SDK execution for every object/surface/operation",
+          "failure cleanup and content quality"
+        ]
+      },
+      "historical_obligation_count": 0,
+      "legacy_candidate_task_ids": [
+        "T11-BLUEPRINT-NODE"
+      ],
+      "next_task_id": "TROOT-UAI-35-DISCOVERY-IDENTITY-VERTICAL",
+      "blockers": []
+    },
+    {
+      "id": "CU-CAPTURE-MEDIA",
+      "title": "Image, media and sequence-frame capture",
+      "source_ids": [
+        "REQ-UAI-ROOT-01",
+        "REQ-UAI-ROOT-02",
+        "AC-UAI-ROOT-02-COVERAGE-CONTRACT",
+        "REQ-UAI-ROOT-15",
+        "AC-UAI-ROOT-15-INTEGRATED-RESTORATION",
+        "UDES-UAI-ROOT-18",
+        "UDES-UAI-ROOT-19",
+        "DES-UAI-ROOT-INTEGRATED-CAPABILITY-ARCHITECTURE",
+        "DES-UAI-PRODUCTION-EVIDENCE",
+        "SOL-UAI-ROOT-08-INTEGRATED-AUTHORITY-RESTORATION"
+      ],
+      "activation_contribution_ids": [
+        "capture-media-operation"
+      ],
+      "current_command_ids": [
+        "capture.image.execute",
+        "capture.media.execute",
+        "capture.render.execute"
+      ],
+      "focus_command_ids": [
+        "capture.image.execute",
+        "capture.media.execute",
+        "capture.render.execute"
+      ],
+      "object_types": [
+        "viewport",
+        "asset editor",
+        "sequence",
+        "render target"
+      ],
+      "authoring_surfaces": [
+        "image",
+        "media",
+        "frame sequence"
+      ],
+      "operations": [
+        "capture",
+        "render"
+      ],
+      "lifecycles": [
+        "request",
+        "job",
+        "artifact",
+        "cleanup"
+      ],
+      "command_contract_state": "registered_exact_contract",
+      "implementation_state": "registered_mechanics_candidate",
+      "evidence": {
+        "highest_verified_layer": "activation_and_public_contract",
+        "delivery_state": "requires_vertical_revalidation",
+        "evidence_refs": [
+          "TROOT-UAI-32-INTEGRATED-ACTIVATION-AUTHORITY",
+          "TROOT-UAI-33-PUBLIC-CONTRACT-ORACLE-REALIGNMENT"
+        ],
+        "not_proven": [
+          "real UE mechanics for every command",
+          "required persistence and independent readback",
+          "public SDK execution for every object/surface/operation",
+          "failure cleanup and content quality"
+        ]
+      },
+      "historical_obligation_count": 15,
+      "legacy_candidate_task_ids": [
+        "T44-CAPTURE-MEDIA-OPERATION"
+      ],
+      "next_task_id": "TROOT-UAI-42-WORLD-VIEWPORT-SPATIAL-VERTICAL",
+      "blockers": []
+    },
+    {
+      "id": "CU-COMMAND-DISCOVERY",
+      "title": "Command discovery and exact contract detail",
+      "source_ids": [
+        "REQ-UAI-ROOT-01",
+        "REQ-UAI-ROOT-02",
+        "AC-UAI-ROOT-02-COVERAGE-CONTRACT",
+        "REQ-UAI-ROOT-15",
+        "AC-UAI-ROOT-15-INTEGRATED-RESTORATION",
+        "UDES-UAI-ROOT-18",
+        "UDES-UAI-ROOT-19",
+        "DES-UAI-ROOT-INTEGRATED-CAPABILITY-ARCHITECTURE",
+        "DES-UAI-PRODUCTION-EVIDENCE",
+        "SOL-UAI-ROOT-08-INTEGRATED-AUTHORITY-RESTORATION"
+      ],
+      "activation_contribution_ids": [
+        "query-calibration"
+      ],
+      "current_command_ids": [
+        "query.calibration.read",
+        "query.command.detail",
+        "query.command.search"
+      ],
+      "focus_command_ids": [],
+      "object_types": [
+        "command contract"
+      ],
+      "authoring_surfaces": [
+        "search",
+        "detail",
+        "calibration"
+      ],
+      "operations": [
+        "read"
+      ],
+      "lifecycles": [
+        "request"
+      ],
+      "command_contract_state": "registered_exact_contract",
+      "implementation_state": "registered_mechanics_candidate",
+      "evidence": {
+        "highest_verified_layer": "activation_and_public_contract",
+        "delivery_state": "requires_vertical_revalidation",
+        "evidence_refs": [
+          "TROOT-UAI-32-INTEGRATED-ACTIVATION-AUTHORITY",
+          "TROOT-UAI-33-PUBLIC-CONTRACT-ORACLE-REALIGNMENT"
+        ],
+        "not_proven": [
+          "real UE mechanics for every command",
+          "required persistence and independent readback",
+          "public SDK execution for every object/surface/operation",
+          "failure cleanup and content quality"
+        ]
+      },
+      "historical_obligation_count": 0,
+      "legacy_candidate_task_ids": [
+        "T05-QUERY-PUBLIC-CALIBRATION"
+      ],
+      "next_task_id": "TROOT-UAI-35-DISCOVERY-IDENTITY-VERTICAL",
+      "blockers": []
+    },
+    {
+      "id": "CU-CONTENT-GRAPH",
+      "title": "Unified structured HJSON content graph",
+      "source_ids": [
+        "REQ-UAI-ROOT-01",
+        "REQ-UAI-ROOT-02",
+        "AC-UAI-ROOT-02-COVERAGE-CONTRACT",
+        "REQ-UAI-ROOT-15",
+        "AC-UAI-ROOT-15-INTEGRATED-RESTORATION",
+        "UDES-UAI-ROOT-18",
+        "UDES-UAI-ROOT-19",
+        "DES-UAI-ROOT-INTEGRATED-CAPABILITY-ARCHITECTURE",
+        "DES-UAI-PRODUCTION-EVIDENCE",
+        "SOL-UAI-ROOT-08-INTEGRATED-AUTHORITY-RESTORATION"
+      ],
+      "activation_contribution_ids": [
+        "uobject-dataasset"
+      ],
+      "current_command_ids": [
+        "content_graph.compound",
+        "content_graph.diagnostics",
+        "content_graph.export_workspace",
+        "content_graph.import_workspace",
+        "content_graph.items",
+        "content_graph.properties",
+        "content_graph.relations",
+        "content_graph.structure",
+        "content_graph.summary"
+      ],
+      "focus_command_ids": [
+        "content_graph.import_workspace",
+        "content_graph.export_workspace",
+        "content_graph.structure",
+        "content_graph.relations"
+      ],
+      "object_types": [
+        "UObject",
+        "DataAsset",
+        "domain HJSON targets"
+      ],
+      "authoring_surfaces": [
+        "property",
+        "structure",
+        "relation",
+        "compound",
+        "workspace"
+      ],
+      "operations": [
+        "export",
+        "validate",
+        "import",
+        "read",
+        "diff"
+      ],
+      "lifecycles": [
+        "request",
+        "transaction",
+        "compile/settle",
+        "save",
+        "unload/reload",
+        "cleanup"
+      ],
+      "command_contract_state": "registered_exact_contract",
+      "implementation_state": "registered_mechanics_candidate",
+      "evidence": {
+        "highest_verified_layer": "activation_and_public_contract",
+        "delivery_state": "requires_vertical_revalidation",
+        "evidence_refs": [
+          "TROOT-UAI-32-INTEGRATED-ACTIVATION-AUTHORITY",
+          "TROOT-UAI-33-PUBLIC-CONTRACT-ORACLE-REALIGNMENT"
+        ],
+        "not_proven": [
+          "real UE mechanics for every command",
+          "required persistence and independent readback",
+          "public SDK execution for every object/surface/operation",
+          "failure cleanup and content quality"
+        ]
+      },
+      "historical_obligation_count": 11,
+      "legacy_candidate_task_ids": [
+        "T13-UOBJECT-RECURSIVE-INIT",
+        "T27-DATATABLE-CURVETABLE-DOMAIN"
+      ],
+      "next_task_id": "TROOT-UAI-36-STRUCTURED-HJSON-VERTICAL",
+      "blockers": []
+    },
+    {
+      "id": "CU-DESTRUCTIVE-CONTENT",
+      "title": "Authorized destructive content operations",
+      "source_ids": [
+        "REQ-UAI-ROOT-01",
+        "REQ-UAI-ROOT-02",
+        "AC-UAI-ROOT-02-COVERAGE-CONTRACT",
+        "REQ-UAI-ROOT-15",
+        "AC-UAI-ROOT-15-INTEGRATED-RESTORATION",
+        "UDES-UAI-ROOT-18",
+        "UDES-UAI-ROOT-19",
+        "DES-UAI-ROOT-INTEGRATED-CAPABILITY-ARCHITECTURE",
+        "DES-UAI-PRODUCTION-EVIDENCE",
+        "SOL-UAI-ROOT-08-INTEGRATED-AUTHORITY-RESTORATION"
+      ],
+      "activation_contribution_ids": [
+        "destructive-content"
+      ],
+      "current_command_ids": [
+        "asset.delete",
+        "asset.fixup_redirectors",
+        "asset.move",
+        "asset.object.clone",
+        "modeling.actor.mesh.replace",
+        "modeling.asset.material_slot.remove",
+        "modeling.voxel.bounds.remove",
+        "skeletal_mesh.remove_morph_target",
+        "skeletal_mesh.remove_skin_weight_profile",
+        "world.data_layer.delete",
+        "world.level_content.delete_scope",
+        "world.level_streaming.move_actors",
+        "world.level_streaming.remove",
+        "world.pcg.cleanup"
+      ],
+      "focus_command_ids": [],
+      "object_types": [
+        "asset",
+        "world content",
+        "streaming relation",
+        "data layer"
+      ],
+      "authoring_surfaces": [
+        "content identity"
+      ],
+      "operations": [
+        "delete",
+        "move",
+        "cleanup",
+        "fixup"
+      ],
+      "lifecycles": [
+        "authorization",
+        "transaction",
+        "save",
+        "failure",
+        "cleanup"
+      ],
+      "command_contract_state": "registered_exact_contract",
+      "implementation_state": "registered_mechanics_candidate",
+      "evidence": {
+        "highest_verified_layer": "activation_and_public_contract",
+        "delivery_state": "requires_vertical_revalidation",
+        "evidence_refs": [
+          "TROOT-UAI-32-INTEGRATED-ACTIVATION-AUTHORITY",
+          "TROOT-UAI-33-PUBLIC-CONTRACT-ORACLE-REALIGNMENT"
+        ],
+        "not_proven": [
+          "real UE mechanics for every command",
+          "required persistence and independent readback",
+          "public SDK execution for every object/surface/operation",
+          "failure cleanup and content quality"
+        ]
+      },
+      "historical_obligation_count": 6,
+      "legacy_candidate_task_ids": [
+        "T31-DESTRUCTIVE-CONTENT-OPS"
+      ],
+      "next_task_id": "TROOT-UAI-43-EDITOR-IMPORT-LIFECYCLE-VERTICAL",
+      "blockers": []
+    },
+    {
+      "id": "CU-EDITOR-PROJECT",
+      "title": "Project, platform, configuration and localization authoring",
+      "source_ids": [
+        "REQ-UAI-ROOT-01",
+        "REQ-UAI-ROOT-02",
+        "AC-UAI-ROOT-02-COVERAGE-CONTRACT",
+        "REQ-UAI-ROOT-15",
+        "AC-UAI-ROOT-15-INTEGRATED-RESTORATION",
+        "UDES-UAI-ROOT-18",
+        "UDES-UAI-ROOT-19",
+        "DES-UAI-ROOT-INTEGRATED-CAPABILITY-ARCHITECTURE",
+        "DES-UAI-PRODUCTION-EVIDENCE",
+        "SOL-UAI-ROOT-08-INTEGRATED-AUTHORITY-RESTORATION"
+      ],
+      "activation_contribution_ids": [
+        "editor-project-operation"
+      ],
+      "current_command_ids": [
+        "editor_project.config_section.update",
+        "editor_project.device_profile.update",
+        "editor_project.localization_target.update",
+        "editor_project.platform_config.update",
+        "editor_project.project_settings.update",
+        "editor_project.scalability_group.update",
+        "editor_project.string_table.update"
+      ],
+      "focus_command_ids": [],
+      "object_types": [
+        "project settings",
+        "config",
+        "platform",
+        "localization"
+      ],
+      "authoring_surfaces": [
+        "settings page",
+        "config section"
+      ],
+      "operations": [
+        "apply",
+        "validate",
+        "build"
+      ],
+      "lifecycles": [
+        "request",
+        "operation",
+        "persist",
+        "readback",
+        "cleanup"
+      ],
+      "command_contract_state": "registered_exact_contract",
+      "implementation_state": "registered_mechanics_candidate",
+      "evidence": {
+        "highest_verified_layer": "activation_and_public_contract",
+        "delivery_state": "requires_vertical_revalidation",
+        "evidence_refs": [
+          "TROOT-UAI-32-INTEGRATED-ACTIVATION-AUTHORITY",
+          "TROOT-UAI-33-PUBLIC-CONTRACT-ORACLE-REALIGNMENT"
+        ],
+        "not_proven": [
+          "real UE mechanics for every command",
+          "required persistence and independent readback",
+          "public SDK execution for every object/surface/operation",
+          "failure cleanup and content quality"
+        ]
+      },
+      "historical_obligation_count": 20,
+      "legacy_candidate_task_ids": [
+        "T39-EDITOR-PROJECT-OPERATION"
+      ],
+      "next_task_id": "TROOT-UAI-43-EDITOR-IMPORT-LIFECYCLE-VERTICAL",
+      "blockers": []
+    },
+    {
+      "id": "CU-EDITOR-SESSION-BUILD",
+      "title": "Editor session, safe exit and build control",
+      "source_ids": [
+        "REQ-UAI-ROOT-01",
+        "REQ-UAI-ROOT-02",
+        "AC-UAI-ROOT-02-COVERAGE-CONTRACT",
+        "REQ-UAI-ROOT-15",
+        "AC-UAI-ROOT-15-INTEGRATED-RESTORATION",
+        "UDES-UAI-ROOT-18",
+        "UDES-UAI-ROOT-19",
+        "DES-UAI-ROOT-INTEGRATED-CAPABILITY-ARCHITECTURE",
+        "DES-UAI-PRODUCTION-EVIDENCE",
+        "SOL-UAI-ROOT-08-INTEGRATED-AUTHORITY-RESTORATION"
+      ],
+      "activation_contribution_ids": [
+        "editor-session-build-command-migration"
+      ],
+      "current_command_ids": [
+        "editor.safe_exit",
+        "editor.session",
+        "job.compile_build",
+        "operation.plan.execute"
+      ],
+      "focus_command_ids": [],
+      "object_types": [
+        "Editor session",
+        "dirty resource",
+        "build job"
+      ],
+      "authoring_surfaces": [
+        "editor control"
+      ],
+      "operations": [
+        "plan",
+        "prepare",
+        "resolve",
+        "build"
+      ],
+      "lifecycles": [
+        "request",
+        "dirty check",
+        "terminal",
+        "cleanup"
+      ],
+      "command_contract_state": "registered_exact_contract",
+      "implementation_state": "registered_mechanics_candidate",
+      "evidence": {
+        "highest_verified_layer": "activation_and_public_contract",
+        "delivery_state": "requires_vertical_revalidation",
+        "evidence_refs": [
+          "TROOT-UAI-32-INTEGRATED-ACTIVATION-AUTHORITY",
+          "TROOT-UAI-33-PUBLIC-CONTRACT-ORACLE-REALIGNMENT"
+        ],
+        "not_proven": [
+          "real UE mechanics for every command",
+          "required persistence and independent readback",
+          "public SDK execution for every object/surface/operation",
+          "failure cleanup and content quality"
+        ]
+      },
+      "historical_obligation_count": 19,
+      "legacy_candidate_task_ids": [
+        "T34-CONTROL-COMMAND-MIGRATION"
+      ],
+      "next_task_id": "TROOT-UAI-43-EDITOR-IMPORT-LIFECYCLE-VERTICAL",
+      "blockers": []
+    },
+    {
+      "id": "CU-EXTERNAL-FACTORY-IMPORT",
+      "title": "Factory-backed external asset import and reimport",
+      "source_ids": [
+        "REQ-UAI-ROOT-01",
+        "REQ-UAI-ROOT-02",
+        "AC-UAI-ROOT-02-COVERAGE-CONTRACT",
+        "REQ-UAI-ROOT-15",
+        "AC-UAI-ROOT-15-INTEGRATED-RESTORATION",
+        "UDES-UAI-ROOT-18",
+        "UDES-UAI-ROOT-19",
+        "DES-UAI-ROOT-INTEGRATED-CAPABILITY-ARCHITECTURE",
+        "DES-UAI-PRODUCTION-EVIDENCE",
+        "SOL-UAI-ROOT-08-INTEGRATED-AUTHORITY-RESTORATION"
+      ],
+      "activation_contribution_ids": [
+        "external-import-factory"
+      ],
+      "current_command_ids": [
+        "asset.reimport_sound_wave",
+        "asset.reimport_sparse_volume_texture",
+        "asset.reimport_static_mesh",
+        "asset.reimport_texture",
+        "external.fbx.animation.import",
+        "external.fbx.skeletal_mesh.import",
+        "external.geometry_cache.import",
+        "external.light_profile.import",
+        "external.sound_wave.import",
+        "external.sparse_volume_texture.import",
+        "external.texture.import"
+      ],
+      "focus_command_ids": [],
+      "object_types": [
+        "texture",
+        "audio",
+        "mesh",
+        "geometry cache",
+        "sparse volume texture",
+        "light profile"
+      ],
+      "authoring_surfaces": [
+        "external source"
+      ],
+      "operations": [
+        "import",
+        "reimport"
+      ],
+      "lifecycles": [
+        "request",
+        "transaction",
+        "save",
+        "readback",
+        "cleanup"
+      ],
+      "command_contract_state": "registered_exact_contract",
+      "implementation_state": "registered_mechanics_candidate",
+      "evidence": {
+        "highest_verified_layer": "activation_and_public_contract",
+        "delivery_state": "requires_vertical_revalidation",
+        "evidence_refs": [
+          "TROOT-UAI-32-INTEGRATED-ACTIVATION-AUTHORITY",
+          "TROOT-UAI-33-PUBLIC-CONTRACT-ORACLE-REALIGNMENT"
+        ],
+        "not_proven": [
+          "real UE mechanics for every command",
+          "required persistence and independent readback",
+          "public SDK execution for every object/surface/operation",
+          "failure cleanup and content quality"
+        ]
+      },
+      "historical_obligation_count": 11,
+      "legacy_candidate_task_ids": [
+        "T28-EXTERNAL-FACTORY-IMPORT"
+      ],
+      "next_task_id": "TROOT-UAI-43-EDITOR-IMPORT-LIFECYCLE-VERTICAL",
+      "blockers": []
+    },
+    {
+      "id": "CU-GRAPH-LAYOUT",
+      "title": "Unified graph layout",
+      "source_ids": [
+        "REQ-UAI-ROOT-01",
+        "REQ-UAI-ROOT-02",
+        "AC-UAI-ROOT-02-COVERAGE-CONTRACT",
+        "REQ-UAI-ROOT-15",
+        "AC-UAI-ROOT-15-INTEGRATED-RESTORATION",
+        "UDES-UAI-ROOT-18",
+        "UDES-UAI-ROOT-19",
+        "DES-UAI-ROOT-INTEGRATED-CAPABILITY-ARCHITECTURE",
+        "DES-UAI-PRODUCTION-EVIDENCE",
+        "SOL-UAI-ROOT-08-INTEGRATED-AUTHORITY-RESTORATION"
+      ],
+      "activation_contribution_ids": [
+        "unified-graph-layout"
+      ],
+      "current_command_ids": [
+        "graph.layout.apply"
+      ],
+      "focus_command_ids": [],
+      "object_types": [
+        "Blueprint graph",
+        "Material graph",
+        "Niagara graph",
+        "PCG graph",
+        "audio graph"
+      ],
+      "authoring_surfaces": [
+        "node layout"
+      ],
+      "operations": [
+        "apply"
+      ],
+      "lifecycles": [
+        "request",
+        "transaction",
+        "save",
+        "readback",
+        "cleanup"
+      ],
+      "command_contract_state": "registered_exact_contract",
+      "implementation_state": "registered_mechanics_candidate",
+      "evidence": {
+        "highest_verified_layer": "activation_and_public_contract",
+        "delivery_state": "requires_vertical_revalidation",
+        "evidence_refs": [
+          "TROOT-UAI-32-INTEGRATED-ACTIVATION-AUTHORITY",
+          "TROOT-UAI-33-PUBLIC-CONTRACT-ORACLE-REALIGNMENT"
+        ],
+        "not_proven": [
+          "real UE mechanics for every command",
+          "required persistence and independent readback",
+          "public SDK execution for every object/surface/operation",
+          "failure cleanup and content quality"
+        ]
+      },
+      "historical_obligation_count": 6,
+      "legacy_candidate_task_ids": [
+        "T62-UNIFIED-GRAPH-LAYOUT"
+      ],
+      "next_task_id": "TROOT-UAI-37-BLUEPRINT-UMG-GRAPH-VERTICAL",
+      "blockers": []
+    },
+    {
+      "id": "CU-LANDSCAPE",
+      "title": "Landscape authoring",
+      "source_ids": [
+        "REQ-UAI-ROOT-01",
+        "REQ-UAI-ROOT-02",
+        "AC-UAI-ROOT-02-COVERAGE-CONTRACT",
+        "REQ-UAI-ROOT-15",
+        "AC-UAI-ROOT-15-INTEGRATED-RESTORATION",
+        "UDES-UAI-ROOT-18",
+        "UDES-UAI-ROOT-19",
+        "DES-UAI-ROOT-INTEGRATED-CAPABILITY-ARCHITECTURE",
+        "DES-UAI-PRODUCTION-EVIDENCE",
+        "SOL-UAI-ROOT-08-INTEGRATED-AUTHORITY-RESTORATION"
+      ],
+      "activation_contribution_ids": [
+        "landscape"
+      ],
+      "current_command_ids": [
+        "landscape.create",
+        "landscape.height_delta"
+      ],
+      "focus_command_ids": [],
+      "object_types": [
+        "Landscape"
+      ],
+      "authoring_surfaces": [
+        "heightfield",
+        "region"
+      ],
+      "operations": [
+        "create",
+        "raise"
+      ],
+      "lifecycles": [
+        "request",
+        "transaction",
+        "settle",
+        "readback",
+        "cleanup"
+      ],
+      "command_contract_state": "registered_exact_contract",
+      "implementation_state": "registered_mechanics_candidate",
+      "evidence": {
+        "highest_verified_layer": "activation_and_public_contract",
+        "delivery_state": "requires_vertical_revalidation",
+        "evidence_refs": [
+          "TROOT-UAI-32-INTEGRATED-ACTIVATION-AUTHORITY",
+          "TROOT-UAI-33-PUBLIC-CONTRACT-ORACLE-REALIGNMENT"
+        ],
+        "not_proven": [
+          "real UE mechanics for every command",
+          "required persistence and independent readback",
+          "public SDK execution for every object/surface/operation",
+          "failure cleanup and content quality"
+        ]
+      },
+      "historical_obligation_count": 2,
+      "legacy_candidate_task_ids": [
+        "T41-LANDSCAPE-OPERATION"
+      ],
+      "next_task_id": "TROOT-UAI-41-MODELING-WHITEBOX-PHYSICS-VERTICAL",
+      "blockers": []
+    },
+    {
+      "id": "CU-LEGACY-DEPRECATED-EXIT",
+      "title": "Deprecated historical public identity exit",
+      "source_ids": [
+        "REQ-UAI-ROOT-01",
+        "REQ-UAI-ROOT-02",
+        "AC-UAI-ROOT-02-COVERAGE-CONTRACT",
+        "REQ-UAI-ROOT-15",
+        "AC-UAI-ROOT-15-INTEGRATED-RESTORATION",
+        "UDES-UAI-ROOT-18",
+        "UDES-UAI-ROOT-19",
+        "DES-UAI-ROOT-INTEGRATED-CAPABILITY-ARCHITECTURE",
+        "DES-UAI-PRODUCTION-EVIDENCE",
+        "SOL-UAI-ROOT-08-INTEGRATED-AUTHORITY-RESTORATION",
+        "UDES-UAI-ROOT-19"
+      ],
+      "activation_contribution_ids": [],
+      "current_command_ids": [],
+      "focus_command_ids": [],
+      "object_types": [
+        "historical public command identity"
+      ],
+      "authoring_surfaces": [
+        "manifest",
+        "binding",
+        "dispatch",
+        "compiled legacy registry",
+        "docs",
+        "tests"
+      ],
+      "operations": [
+        "retire",
+        "reject",
+        "remove or isolate"
+      ],
+      "lifecycles": [
+        "migration",
+        "physical exit"
+      ],
+      "command_contract_state": "absent_from_current_manifest",
+      "implementation_state": "partial_compiled_legacy_guard",
+      "evidence": {
+        "highest_verified_layer": "manifest_absence_and_partial_guard",
+        "delivery_state": "requires_exit_audit",
+        "evidence_refs": [
+          "TROOT-UAI-33-PUBLIC-CONTRACT-ORACLE-REALIGNMENT"
+        ],
+        "not_proven": [
+          "all compiled legacy paths, tests and documentation physically exited"
+        ]
+      },
+      "historical_obligation_count": 202,
+      "legacy_candidate_task_ids": [
+        "T61-PRE-REFACTOR-PUBLIC-SURFACE-RECONCILIATION",
+        "T90-LEGACY-ASSET-RETIREMENT"
+      ],
+      "next_task_id": "TROOT-UAI-44-LEGACY-SURFACE-EXIT",
+      "blockers": []
+    },
+    {
+      "id": "CU-LOCALIZATION-IMPORT",
+      "title": "Localization PO import",
+      "source_ids": [
+        "REQ-UAI-ROOT-01",
+        "REQ-UAI-ROOT-02",
+        "AC-UAI-ROOT-02-COVERAGE-CONTRACT",
+        "REQ-UAI-ROOT-15",
+        "AC-UAI-ROOT-15-INTEGRATED-RESTORATION",
+        "UDES-UAI-ROOT-18",
+        "UDES-UAI-ROOT-19",
+        "DES-UAI-ROOT-INTEGRATED-CAPABILITY-ARCHITECTURE",
+        "DES-UAI-PRODUCTION-EVIDENCE",
+        "SOL-UAI-ROOT-08-INTEGRATED-AUTHORITY-RESTORATION"
+      ],
+      "activation_contribution_ids": [
+        "external-import-localization"
+      ],
+      "current_command_ids": [
+        "external.localization.po.import"
+      ],
+      "focus_command_ids": [],
+      "object_types": [
+        "localization target",
+        "StringTable"
+      ],
+      "authoring_surfaces": [
+        "external source"
+      ],
+      "operations": [
+        "import"
+      ],
+      "lifecycles": [
+        "request",
+        "operation",
+        "readback",
+        "cleanup"
+      ],
+      "command_contract_state": "registered_exact_contract",
+      "implementation_state": "registered_mechanics_candidate",
+      "evidence": {
+        "highest_verified_layer": "activation_and_public_contract",
+        "delivery_state": "requires_vertical_revalidation",
+        "evidence_refs": [
+          "TROOT-UAI-32-INTEGRATED-ACTIVATION-AUTHORITY",
+          "TROOT-UAI-33-PUBLIC-CONTRACT-ORACLE-REALIGNMENT"
+        ],
+        "not_proven": [
+          "real UE mechanics for every command",
+          "required persistence and independent readback",
+          "public SDK execution for every object/surface/operation",
+          "failure cleanup and content quality"
+        ]
+      },
+      "historical_obligation_count": 15,
+      "legacy_candidate_task_ids": [
+        "T30-EXTERNAL-LOCALIZATION-IMPORT"
+      ],
+      "next_task_id": "TROOT-UAI-43-EDITOR-IMPORT-LIFECYCLE-VERTICAL",
+      "blockers": []
+    },
+    {
+      "id": "CU-MATERIAL-COMMANDS",
+      "title": "Material, Material Function and instance authoring",
+      "source_ids": [
+        "REQ-UAI-ROOT-01",
+        "REQ-UAI-ROOT-02",
+        "AC-UAI-ROOT-02-COVERAGE-CONTRACT",
+        "REQ-UAI-ROOT-15",
+        "AC-UAI-ROOT-15-INTEGRATED-RESTORATION",
+        "UDES-UAI-ROOT-18",
+        "UDES-UAI-ROOT-19",
+        "DES-UAI-ROOT-INTEGRATED-CAPABILITY-ARCHITECTURE",
+        "DES-UAI-PRODUCTION-EVIDENCE",
+        "SOL-UAI-ROOT-08-INTEGRATED-AUTHORITY-RESTORATION"
+      ],
+      "activation_contribution_ids": [
+        "material-command-migration"
+      ],
+      "current_command_ids": [
+        "material.asset.create",
+        "material.function.graph.apply",
+        "material.graph.apply",
+        "material_instance.asset.create",
+        "material_instance.parameters.apply"
+      ],
+      "focus_command_ids": [],
+      "object_types": [
+        "Material",
+        "MaterialFunction",
+        "MaterialInstance"
+      ],
+      "authoring_surfaces": [
+        "graph",
+        "parameter"
+      ],
+      "operations": [
+        "create",
+        "apply"
+      ],
+      "lifecycles": [
+        "request",
+        "compile/settle",
+        "save",
+        "readback",
+        "cleanup"
+      ],
+      "command_contract_state": "registered_exact_contract",
+      "implementation_state": "registered_mechanics_candidate",
+      "evidence": {
+        "highest_verified_layer": "activation_and_public_contract",
+        "delivery_state": "requires_vertical_revalidation",
+        "evidence_refs": [
+          "TROOT-UAI-32-INTEGRATED-ACTIVATION-AUTHORITY",
+          "TROOT-UAI-33-PUBLIC-CONTRACT-ORACLE-REALIGNMENT"
+        ],
+        "not_proven": [
+          "real UE mechanics for every command",
+          "required persistence and independent readback",
+          "public SDK execution for every object/surface/operation",
+          "failure cleanup and content quality"
+        ]
+      },
+      "historical_obligation_count": 13,
+      "legacy_candidate_task_ids": [
+        "T17-MATERIAL-DOMAIN",
+        "T50-MATERIAL-COMMAND-MIGRATION"
+      ],
+      "next_task_id": "TROOT-UAI-38-ASSET-MATERIAL-TEXTURE-MEDIA-VERTICAL",
+      "blockers": []
+    },
+    {
+      "id": "CU-MATERIAL-DISCOVERY",
+      "title": "Material expression candidate discovery",
+      "source_ids": [
+        "REQ-UAI-ROOT-01",
+        "REQ-UAI-ROOT-02",
+        "AC-UAI-ROOT-02-COVERAGE-CONTRACT",
+        "REQ-UAI-ROOT-15",
+        "AC-UAI-ROOT-15-INTEGRATED-RESTORATION",
+        "UDES-UAI-ROOT-18",
+        "UDES-UAI-ROOT-19",
+        "DES-UAI-ROOT-INTEGRATED-CAPABILITY-ARCHITECTURE",
+        "DES-UAI-PRODUCTION-EVIDENCE",
+        "SOL-UAI-ROOT-08-INTEGRATED-AUTHORITY-RESTORATION"
+      ],
+      "activation_contribution_ids": [
+        "material-domain-candidates"
+      ],
+      "current_command_ids": [
+        "material.expression.candidates"
+      ],
+      "focus_command_ids": [],
+      "object_types": [
+        "Material expression"
+      ],
+      "authoring_surfaces": [
+        "candidate discovery",
+        "HJSON binding"
+      ],
+      "operations": [
+        "search",
+        "bind"
+      ],
+      "lifecycles": [
+        "request",
+        "persisted material"
+      ],
+      "command_contract_state": "registered_exact_contract",
+      "implementation_state": "registered_mechanics_candidate",
+      "evidence": {
+        "highest_verified_layer": "activation_and_public_contract",
+        "delivery_state": "requires_vertical_revalidation",
+        "evidence_refs": [
+          "TROOT-UAI-32-INTEGRATED-ACTIVATION-AUTHORITY",
+          "TROOT-UAI-33-PUBLIC-CONTRACT-ORACLE-REALIGNMENT"
+        ],
+        "not_proven": [
+          "real UE mechanics for every command",
+          "required persistence and independent readback",
+          "public SDK execution for every object/surface/operation",
+          "failure cleanup and content quality"
+        ]
+      },
+      "historical_obligation_count": 0,
+      "legacy_candidate_task_ids": [
+        "T17-MATERIAL-DOMAIN"
+      ],
+      "next_task_id": "TROOT-UAI-35-DISCOVERY-IDENTITY-VERTICAL",
+      "blockers": []
+    },
+    {
+      "id": "CU-MODELING-GEOMETRY",
+      "title": "Mesh modeling and whitebox geometry",
+      "source_ids": [
+        "REQ-UAI-ROOT-01",
+        "REQ-UAI-ROOT-02",
+        "AC-UAI-ROOT-02-COVERAGE-CONTRACT",
+        "REQ-UAI-ROOT-15",
+        "AC-UAI-ROOT-15-INTEGRATED-RESTORATION",
+        "UDES-UAI-ROOT-18",
+        "UDES-UAI-ROOT-19",
+        "DES-UAI-ROOT-INTEGRATED-CAPABILITY-ARCHITECTURE",
+        "DES-UAI-PRODUCTION-EVIDENCE",
+        "SOL-UAI-ROOT-08-INTEGRATED-AUTHORITY-RESTORATION"
+      ],
+      "activation_contribution_ids": [
+        "modeling-geometry"
+      ],
+      "current_command_ids": [
+        "mesh.attribute.material_slot.add",
+        "mesh.attribute.material_slot.assign",
+        "mesh.attribute.normals.recompute",
+        "mesh.attribute.uv.auto",
+        "mesh.attribute.uv.project",
+        "mesh.collision.convex.generate",
+        "mesh.collision.simple.generate",
+        "mesh.modeling_session",
+        "mesh.primitive.box.create",
+        "mesh.primitive.cylinder.create",
+        "mesh.primitive.plane.create",
+        "mesh.primitive.ramp.create",
+        "mesh.primitive.ramp_corner.create",
+        "mesh.primitive.sphere.create",
+        "mesh.primitive.stairs.create",
+        "mesh.topology.boolean",
+        "mesh.topology.edges.bevel",
+        "mesh.topology.edges.weld",
+        "mesh.topology.faces.duplicate",
+        "mesh.topology.faces.extrude",
+        "mesh.topology.faces.inset",
+        "mesh.topology.faces.offset",
+        "mesh.topology.faces.push_pull",
+        "mesh.topology.holes.fill",
+        "mesh.topology.mesh_cut",
+        "mesh.topology.mirror",
+        "mesh.topology.plane_cut",
+        "mesh.topology.remesh",
+        "mesh.topology.simplify",
+        "mesh.topology.subdivide",
+        "mesh.topology.trim",
+        "mesh.topology.voxel_boolean"
+      ],
+      "focus_command_ids": [],
+      "object_types": [
+        "DynamicMesh",
+        "StaticMesh",
+        "modeling selection"
+      ],
+      "authoring_surfaces": [
+        "primitive",
+        "topology",
+        "attribute",
+        "collision",
+        "session"
+      ],
+      "operations": [
+        "create",
+        "mutate",
+        "generate",
+        "bake"
+      ],
+      "lifecycles": [
+        "request",
+        "modeling session",
+        "save",
+        "readback",
+        "cleanup"
+      ],
+      "command_contract_state": "registered_exact_contract",
+      "implementation_state": "registered_mechanics_candidate",
+      "evidence": {
+        "highest_verified_layer": "activation_and_public_contract",
+        "delivery_state": "requires_vertical_revalidation",
+        "evidence_refs": [
+          "TROOT-UAI-32-INTEGRATED-ACTIVATION-AUTHORITY",
+          "TROOT-UAI-33-PUBLIC-CONTRACT-ORACLE-REALIGNMENT"
+        ],
+        "not_proven": [
+          "real UE mechanics for every command",
+          "required persistence and independent readback",
+          "public SDK execution for every object/surface/operation",
+          "failure cleanup and content quality"
+        ]
+      },
+      "historical_obligation_count": 22,
+      "legacy_candidate_task_ids": [
+        "T38-MODELING-GEOMETRY-OPERATION"
+      ],
+      "next_task_id": "TROOT-UAI-41-MODELING-WHITEBOX-PHYSICS-VERTICAL",
+      "blockers": []
+    },
+    {
+      "id": "CU-MODELING-VOXEL-GRID",
+      "title": "CubeGrid-style voxel whitebox authoring",
+      "source_ids": [
+        "REQ-UAI-ROOT-01",
+        "REQ-UAI-ROOT-02",
+        "AC-UAI-ROOT-02-COVERAGE-CONTRACT",
+        "REQ-UAI-ROOT-15",
+        "AC-UAI-ROOT-15-INTEGRATED-RESTORATION",
+        "UDES-UAI-ROOT-18",
+        "UDES-UAI-ROOT-19",
+        "DES-UAI-ROOT-INTEGRATED-CAPABILITY-ARCHITECTURE",
+        "DES-UAI-PRODUCTION-EVIDENCE",
+        "SOL-UAI-ROOT-08-INTEGRATED-AUTHORITY-RESTORATION",
+        "REQ-UAI-ROOT-07",
+        "GAP-UAI-ROOT-REFACTOR-PRESERVATION"
+      ],
+      "activation_contribution_ids": [],
+      "current_command_ids": [],
+      "focus_command_ids": [],
+      "historical_command_ids": [
+        "modeling_voxel_grid_add_bounds",
+        "modeling_voxel_grid_apply",
+        "modeling_voxel_grid_begin",
+        "modeling_voxel_grid_remove_bounds"
+      ],
+      "object_types": [
+        "DynamicMeshActor",
+        "voxel-grid session"
+      ],
+      "authoring_surfaces": [
+        "voxel cells",
+        "bounds",
+        "collision",
+        "sidecar"
+      ],
+      "operations": [
+        "begin",
+        "add",
+        "remove",
+        "apply"
+      ],
+      "lifecycles": [
+        "session",
+        "revision",
+        "apply",
+        "save",
+        "reload",
+        "cleanup"
+      ],
+      "command_contract_state": "missing_after_refactor",
+      "implementation_state": "removed_from_current_tree",
+      "evidence": {
+        "highest_verified_layer": "historical_mechanics_and_smoke_only",
+        "delivery_state": "requires_restoration_and_vertical_revalidation",
+        "evidence_refs": [
+          "git:c6c2141dd096c0ef4c059bbaf8d96cc646751458",
+          "git:52dfadb40216f3094eb853318b66719f556533dd",
+          "git:52dfadb^:docs/commands/modeling/modeling_voxel_grid_apply.md"
+        ],
+        "not_proven": [
+          "current command contract",
+          "current implementation",
+          "current product evidence"
+        ]
+      },
+      "historical_obligation_count": 4,
+      "pre_refactor_inventory_obligation_count": 0,
+      "additional_recovered_obligation_count": 4,
+      "legacy_candidate_task_ids": [
+        "T38-MODELING-GEOMETRY-OPERATION"
+      ],
+      "next_task_id": "TROOT-UAI-41-MODELING-WHITEBOX-PHYSICS-VERTICAL",
+      "blockers": [
+        "current contract and mechanics are absent"
+      ]
+    },
+    {
+      "id": "CU-NIAGARA-COMMANDS",
+      "title": "Niagara system, emitter, stack and compound authoring",
+      "source_ids": [
+        "REQ-UAI-ROOT-01",
+        "REQ-UAI-ROOT-02",
+        "AC-UAI-ROOT-02-COVERAGE-CONTRACT",
+        "REQ-UAI-ROOT-15",
+        "AC-UAI-ROOT-15-INTEGRATED-RESTORATION",
+        "UDES-UAI-ROOT-18",
+        "UDES-UAI-ROOT-19",
+        "DES-UAI-ROOT-INTEGRATED-CAPABILITY-ARCHITECTURE",
+        "DES-UAI-PRODUCTION-EVIDENCE",
+        "SOL-UAI-ROOT-08-INTEGRATED-AUTHORITY-RESTORATION"
+      ],
+      "activation_contribution_ids": [
+        "niagara-command-migration"
+      ],
+      "current_command_ids": [
+        "niagara.asset.duplicate",
+        "niagara.compile_refresh_settle",
+        "niagara.compound.apply",
+        "niagara.emitter.asset.create",
+        "niagara.renderer_event_parameter.apply",
+        "niagara.stack.issue_fix",
+        "niagara.stack.reorder",
+        "niagara.system.asset.create"
+      ],
+      "focus_command_ids": [],
+      "object_types": [
+        "NiagaraSystem",
+        "NiagaraEmitter",
+        "NiagaraScript"
+      ],
+      "authoring_surfaces": [
+        "stack",
+        "graph",
+        "renderer",
+        "parameter",
+        "compound"
+      ],
+      "operations": [
+        "create",
+        "duplicate",
+        "apply",
+        "reorder",
+        "fix",
+        "settle"
+      ],
+      "lifecycles": [
+        "request",
+        "compile/settle",
+        "save",
+        "readback",
+        "cleanup"
+      ],
+      "command_contract_state": "registered_exact_contract",
+      "implementation_state": "registered_mechanics_candidate",
+      "evidence": {
+        "highest_verified_layer": "activation_and_public_contract",
+        "delivery_state": "requires_vertical_revalidation",
+        "evidence_refs": [
+          "TROOT-UAI-32-INTEGRATED-ACTIVATION-AUTHORITY",
+          "TROOT-UAI-33-PUBLIC-CONTRACT-ORACLE-REALIGNMENT"
+        ],
+        "not_proven": [
+          "real UE mechanics for every command",
+          "required persistence and independent readback",
+          "public SDK execution for every object/surface/operation",
+          "failure cleanup and content quality"
+        ]
+      },
+      "historical_obligation_count": 41,
+      "legacy_candidate_task_ids": [
+        "T18-NIAGARA-DOMAIN",
+        "T51-NIAGARA-COMMAND-MIGRATION"
+      ],
+      "next_task_id": "TROOT-UAI-39-NIAGARA-PCG-AI-VERTICAL",
+      "blockers": []
+    },
+    {
+      "id": "CU-NIAGARA-DISCOVERY",
+      "title": "Niagara module candidate discovery",
+      "source_ids": [
+        "REQ-UAI-ROOT-01",
+        "REQ-UAI-ROOT-02",
+        "AC-UAI-ROOT-02-COVERAGE-CONTRACT",
+        "REQ-UAI-ROOT-15",
+        "AC-UAI-ROOT-15-INTEGRATED-RESTORATION",
+        "UDES-UAI-ROOT-18",
+        "UDES-UAI-ROOT-19",
+        "DES-UAI-ROOT-INTEGRATED-CAPABILITY-ARCHITECTURE",
+        "DES-UAI-PRODUCTION-EVIDENCE",
+        "SOL-UAI-ROOT-08-INTEGRATED-AUTHORITY-RESTORATION"
+      ],
+      "activation_contribution_ids": [
+        "niagara-domain-candidates"
+      ],
+      "current_command_ids": [
+        "niagara.module.candidates"
+      ],
+      "focus_command_ids": [],
+      "object_types": [
+        "Niagara module"
+      ],
+      "authoring_surfaces": [
+        "candidate discovery",
+        "HJSON binding"
+      ],
+      "operations": [
+        "search",
+        "bind"
+      ],
+      "lifecycles": [
+        "request",
+        "persisted Niagara asset"
+      ],
+      "command_contract_state": "registered_exact_contract",
+      "implementation_state": "registered_mechanics_candidate",
+      "evidence": {
+        "highest_verified_layer": "activation_and_public_contract",
+        "delivery_state": "requires_vertical_revalidation",
+        "evidence_refs": [
+          "TROOT-UAI-32-INTEGRATED-ACTIVATION-AUTHORITY",
+          "TROOT-UAI-33-PUBLIC-CONTRACT-ORACLE-REALIGNMENT"
+        ],
+        "not_proven": [
+          "real UE mechanics for every command",
+          "required persistence and independent readback",
+          "public SDK execution for every object/surface/operation",
+          "failure cleanup and content quality"
+        ]
+      },
+      "historical_obligation_count": 0,
+      "legacy_candidate_task_ids": [
+        "T18-NIAGARA-DOMAIN"
+      ],
+      "next_task_id": "TROOT-UAI-35-DISCOVERY-IDENTITY-VERTICAL",
+      "blockers": []
+    },
+    {
+      "id": "CU-OPERATION-LIFECYCLE",
+      "title": "Long-running operation lifecycle",
+      "source_ids": [
+        "REQ-UAI-ROOT-01",
+        "REQ-UAI-ROOT-02",
+        "AC-UAI-ROOT-02-COVERAGE-CONTRACT",
+        "REQ-UAI-ROOT-15",
+        "AC-UAI-ROOT-15-INTEGRATED-RESTORATION",
+        "UDES-UAI-ROOT-18",
+        "UDES-UAI-ROOT-19",
+        "DES-UAI-ROOT-INTEGRATED-CAPABILITY-ARCHITECTURE",
+        "DES-UAI-PRODUCTION-EVIDENCE",
+        "SOL-UAI-ROOT-08-INTEGRATED-AUTHORITY-RESTORATION"
+      ],
+      "activation_contribution_ids": [
+        "long-running-lifecycle"
+      ],
+      "current_command_ids": [
+        "operation.cancel",
+        "operation.receipt",
+        "operation.reconcile",
+        "operation.release",
+        "operation.resume",
+        "operation.status"
+      ],
+      "focus_command_ids": [],
+      "object_types": [
+        "operation",
+        "job"
+      ],
+      "authoring_surfaces": [
+        "operation state",
+        "artifact"
+      ],
+      "operations": [
+        "start",
+        "read",
+        "cancel",
+        "artifact read"
+      ],
+      "lifecycles": [
+        "request",
+        "running",
+        "terminal",
+        "cleanup"
+      ],
+      "command_contract_state": "registered_exact_contract",
+      "implementation_state": "registered_mechanics_candidate",
+      "evidence": {
+        "highest_verified_layer": "activation_and_public_contract",
+        "delivery_state": "requires_vertical_revalidation",
+        "evidence_refs": [
+          "TROOT-UAI-32-INTEGRATED-ACTIVATION-AUTHORITY",
+          "TROOT-UAI-33-PUBLIC-CONTRACT-ORACLE-REALIGNMENT"
+        ],
+        "not_proven": [
+          "real UE mechanics for every command",
+          "required persistence and independent readback",
+          "public SDK execution for every object/surface/operation",
+          "failure cleanup and content quality"
+        ]
+      },
+      "historical_obligation_count": 4,
+      "legacy_candidate_task_ids": [
+        "T10-OPERATION-LIFECYCLE-CORE",
+        "T32-LONG-RUNNING"
+      ],
+      "next_task_id": "TROOT-UAI-43-EDITOR-IMPORT-LIFECYCLE-VERTICAL",
+      "blockers": []
+    },
+    {
+      "id": "CU-PCG-COMMANDS",
+      "title": "PCG graph, component, data and runtime authoring",
+      "source_ids": [
+        "REQ-UAI-ROOT-01",
+        "REQ-UAI-ROOT-02",
+        "AC-UAI-ROOT-02-COVERAGE-CONTRACT",
+        "REQ-UAI-ROOT-15",
+        "AC-UAI-ROOT-15-INTEGRATED-RESTORATION",
+        "UDES-UAI-ROOT-18",
+        "UDES-UAI-ROOT-19",
+        "DES-UAI-ROOT-INTEGRATED-CAPABILITY-ARCHITECTURE",
+        "DES-UAI-PRODUCTION-EVIDENCE",
+        "SOL-UAI-ROOT-08-INTEGRATED-AUTHORITY-RESTORATION"
+      ],
+      "activation_contribution_ids": [
+        "pcg-command-migration"
+      ],
+      "current_command_ids": [
+        "pcg.component.apply",
+        "pcg.component.world_binding.apply",
+        "pcg.data_asset.apply",
+        "pcg.data_asset.create_from_level",
+        "pcg.generated_spatial_data.read",
+        "pcg.graph.apply",
+        "pcg.graph_instance.apply",
+        "pcg.graph_parameters.apply",
+        "pcg.partition.spatial_state.read"
+      ],
+      "focus_command_ids": [
+        "pcg.graph.apply",
+        "pcg.component.apply",
+        "pcg.generated_spatial_data.read"
+      ],
+      "object_types": [
+        "PCGGraph",
+        "PCGComponent",
+        "PCGDataAsset",
+        "PCGGraphInstance"
+      ],
+      "authoring_surfaces": [
+        "graph",
+        "component",
+        "parameter",
+        "generated data"
+      ],
+      "operations": [
+        "create",
+        "apply",
+        "read",
+        "probe"
+      ],
+      "lifecycles": [
+        "request",
+        "generate/settle",
+        "save",
+        "readback",
+        "cleanup"
+      ],
+      "command_contract_state": "registered_exact_contract",
+      "implementation_state": "registered_mechanics_candidate",
+      "evidence": {
+        "highest_verified_layer": "activation_and_public_contract",
+        "delivery_state": "requires_vertical_revalidation",
+        "evidence_refs": [
+          "TROOT-UAI-32-INTEGRATED-ACTIVATION-AUTHORITY",
+          "TROOT-UAI-33-PUBLIC-CONTRACT-ORACLE-REALIGNMENT"
+        ],
+        "not_proven": [
+          "real UE mechanics for every command",
+          "required persistence and independent readback",
+          "public SDK execution for every object/surface/operation",
+          "failure cleanup and content quality"
+        ]
+      },
+      "historical_obligation_count": 38,
+      "legacy_candidate_task_ids": [
+        "T19-PCG-DOMAIN",
+        "T52-PCG-COMMAND-MIGRATION"
+      ],
+      "next_task_id": "TROOT-UAI-39-NIAGARA-PCG-AI-VERTICAL",
+      "blockers": []
+    },
+    {
+      "id": "CU-PCG-DISCOVERY",
+      "title": "PCG node candidate discovery",
+      "source_ids": [
+        "REQ-UAI-ROOT-01",
+        "REQ-UAI-ROOT-02",
+        "AC-UAI-ROOT-02-COVERAGE-CONTRACT",
+        "REQ-UAI-ROOT-15",
+        "AC-UAI-ROOT-15-INTEGRATED-RESTORATION",
+        "UDES-UAI-ROOT-18",
+        "UDES-UAI-ROOT-19",
+        "DES-UAI-ROOT-INTEGRATED-CAPABILITY-ARCHITECTURE",
+        "DES-UAI-PRODUCTION-EVIDENCE",
+        "SOL-UAI-ROOT-08-INTEGRATED-AUTHORITY-RESTORATION"
+      ],
+      "activation_contribution_ids": [
+        "pcg-domain-candidates"
+      ],
+      "current_command_ids": [
+        "pcg.node.candidates"
+      ],
+      "focus_command_ids": [],
+      "object_types": [
+        "PCG node"
+      ],
+      "authoring_surfaces": [
+        "candidate discovery",
+        "HJSON binding"
+      ],
+      "operations": [
+        "search",
+        "bind"
+      ],
+      "lifecycles": [
+        "request",
+        "persisted PCG graph"
+      ],
+      "command_contract_state": "registered_exact_contract",
+      "implementation_state": "registered_mechanics_candidate",
+      "evidence": {
+        "highest_verified_layer": "activation_and_public_contract",
+        "delivery_state": "requires_vertical_revalidation",
+        "evidence_refs": [
+          "TROOT-UAI-32-INTEGRATED-ACTIVATION-AUTHORITY",
+          "TROOT-UAI-33-PUBLIC-CONTRACT-ORACLE-REALIGNMENT"
+        ],
+        "not_proven": [
+          "real UE mechanics for every command",
+          "required persistence and independent readback",
+          "public SDK execution for every object/surface/operation",
+          "failure cleanup and content quality"
+        ]
+      },
+      "historical_obligation_count": 0,
+      "legacy_candidate_task_ids": [
+        "T19-PCG-DOMAIN"
+      ],
+      "next_task_id": "TROOT-UAI-35-DISCOVERY-IDENTITY-VERTICAL",
+      "blockers": []
+    },
+    {
+      "id": "CU-PHYSICS-DEFORMER",
+      "title": "Physics, collision and deformer authoring",
+      "source_ids": [
+        "REQ-UAI-ROOT-01",
+        "REQ-UAI-ROOT-02",
+        "AC-UAI-ROOT-02-COVERAGE-CONTRACT",
+        "REQ-UAI-ROOT-15",
+        "AC-UAI-ROOT-15-INTEGRATED-RESTORATION",
+        "UDES-UAI-ROOT-18",
+        "UDES-UAI-ROOT-19",
+        "DES-UAI-ROOT-INTEGRATED-CAPABILITY-ARCHITECTURE",
+        "DES-UAI-PRODUCTION-EVIDENCE",
+        "SOL-UAI-ROOT-08-INTEGRATED-AUTHORITY-RESTORATION"
+      ],
+      "activation_contribution_ids": [
+        "physics_deformer"
+      ],
+      "current_command_ids": [
+        "animation.deformer_graph.asset.create",
+        "animation.deformer_graph.topology.apply",
+        "animation.deformer_source_library.asset.create",
+        "animation.deformer_source_library.bindings.apply",
+        "animation.mesh_deformer_collection.asset.create",
+        "animation.mesh_deformer_collection.entries.apply",
+        "animation.ml_deformer.asset.create",
+        "animation.ml_deformer.configuration.apply",
+        "deformer.evaluation.sample",
+        "deformer.geometry.sample",
+        "deformer.training_inputs.validate",
+        "physics.asset.structure.replace",
+        "physics.constraint.update",
+        "physics.material.update",
+        "physics.simulation.probe"
+      ],
+      "focus_command_ids": [],
+      "object_types": [
+        "physics asset",
+        "constraint",
+        "deformer",
+        "geometry cache",
+        "skeletal mesh"
+      ],
+      "authoring_surfaces": [
+        "body",
+        "constraint",
+        "graph",
+        "runtime probe"
+      ],
+      "operations": [
+        "create",
+        "update",
+        "simulate",
+        "read"
+      ],
+      "lifecycles": [
+        "request",
+        "compile/settle",
+        "save",
+        "probe",
+        "cleanup"
+      ],
+      "command_contract_state": "registered_exact_contract",
+      "implementation_state": "registered_mechanics_candidate",
+      "evidence": {
+        "highest_verified_layer": "activation_and_public_contract",
+        "delivery_state": "requires_vertical_revalidation",
+        "evidence_refs": [
+          "TROOT-UAI-32-INTEGRATED-ACTIVATION-AUTHORITY",
+          "TROOT-UAI-33-PUBLIC-CONTRACT-ORACLE-REALIGNMENT"
+        ],
+        "not_proven": [
+          "real UE mechanics for every command",
+          "required persistence and independent readback",
+          "public SDK execution for every object/surface/operation",
+          "failure cleanup and content quality"
+        ]
+      },
+      "historical_obligation_count": 41,
+      "legacy_candidate_task_ids": [
+        "T42-PHYSICS-DEFORMER-OPERATION"
+      ],
+      "next_task_id": "TROOT-UAI-41-MODELING-WHITEBOX-PHYSICS-VERTICAL",
+      "blockers": []
+    },
+    {
+      "id": "CU-READ-QUERY",
+      "title": "Bounded project, asset, world, editor, config and reference reads",
+      "source_ids": [
+        "REQ-UAI-ROOT-01",
+        "REQ-UAI-ROOT-02",
+        "AC-UAI-ROOT-02-COVERAGE-CONTRACT",
+        "REQ-UAI-ROOT-15",
+        "AC-UAI-ROOT-15-INTEGRATED-RESTORATION",
+        "UDES-UAI-ROOT-18",
+        "UDES-UAI-ROOT-19",
+        "DES-UAI-ROOT-INTEGRATED-CAPABILITY-ARCHITECTURE",
+        "DES-UAI-PRODUCTION-EVIDENCE",
+        "SOL-UAI-ROOT-08-INTEGRATED-AUTHORITY-RESTORATION"
+      ],
+      "activation_contribution_ids": [
+        "query"
+      ],
+      "current_command_ids": [
+        "asset.collection",
+        "asset.properties",
+        "asset.registry_record",
+        "asset.registry_relations",
+        "asset.relations",
+        "asset.sample",
+        "asset.summary",
+        "asset.validation",
+        "config.resolved_value",
+        "config.section",
+        "editor.dirty_resources",
+        "editor.open_assets",
+        "project.platform",
+        "project.settings",
+        "project.summary",
+        "project.validation",
+        "reference.asset_read",
+        "world.actor_components",
+        "world.actors",
+        "world.capsule_path",
+        "world.capsule_sweep",
+        "world.content",
+        "world.data_layers",
+        "world.hlod_assignments",
+        "world.mesh_closest_vertex",
+        "world.mesh_vertex_position",
+        "world.nav_connectivity",
+        "world.nav_find_path",
+        "world.nav_project_point",
+        "world.nearby_shapes",
+        "world.overlap",
+        "world.partition",
+        "world.partition_health",
+        "world.physics_component",
+        "world.physics_constraint",
+        "world.property",
+        "world.ray_trace",
+        "world.selection",
+        "world.streaming_levels",
+        "world.summary"
+      ],
+      "focus_command_ids": [],
+      "object_types": [
+        "project",
+        "asset",
+        "world",
+        "editor state",
+        "config",
+        "reference"
+      ],
+      "authoring_surfaces": [
+        "query",
+        "readback",
+        "spatial probe"
+      ],
+      "operations": [
+        "read",
+        "search"
+      ],
+      "lifecycles": [
+        "request",
+        "persisted state"
+      ],
+      "command_contract_state": "registered_exact_contract",
+      "implementation_state": "registered_mechanics_candidate",
+      "evidence": {
+        "highest_verified_layer": "activation_and_public_contract",
+        "delivery_state": "requires_vertical_revalidation",
+        "evidence_refs": [
+          "TROOT-UAI-32-INTEGRATED-ACTIVATION-AUTHORITY",
+          "TROOT-UAI-33-PUBLIC-CONTRACT-ORACLE-REALIGNMENT"
+        ],
+        "not_proven": [
+          "real UE mechanics for every command",
+          "required persistence and independent readback",
+          "public SDK execution for every object/surface/operation",
+          "failure cleanup and content quality"
+        ]
+      },
+      "historical_obligation_count": 21,
+      "legacy_candidate_task_ids": [
+        "T06-NON-HJSON-QUERY-MIGRATION"
+      ],
+      "next_task_id": "TROOT-UAI-35-DISCOVERY-IDENTITY-VERTICAL",
+      "blockers": []
+    },
+    {
+      "id": "CU-REFERENCE",
+      "title": "Reference graph read, apply and origin resolution",
+      "source_ids": [
+        "REQ-UAI-ROOT-01",
+        "REQ-UAI-ROOT-02",
+        "AC-UAI-ROOT-02-COVERAGE-CONTRACT",
+        "REQ-UAI-ROOT-15",
+        "AC-UAI-ROOT-15-INTEGRATED-RESTORATION",
+        "UDES-UAI-ROOT-18",
+        "UDES-UAI-ROOT-19",
+        "DES-UAI-ROOT-INTEGRATED-CAPABILITY-ARCHITECTURE",
+        "DES-UAI-PRODUCTION-EVIDENCE",
+        "SOL-UAI-ROOT-08-INTEGRATED-AUTHORITY-RESTORATION"
+      ],
+      "activation_contribution_ids": [
+        "reference-operation"
+      ],
+      "current_command_ids": [
+        "reference.asset_apply",
+        "reference.origin.resolve"
+      ],
+      "focus_command_ids": [],
+      "object_types": [
+        "asset reference",
+        "source origin"
+      ],
+      "authoring_surfaces": [
+        "reference graph"
+      ],
+      "operations": [
+        "read",
+        "apply",
+        "resolve"
+      ],
+      "lifecycles": [
+        "request",
+        "persisted state",
+        "readback"
+      ],
+      "command_contract_state": "registered_exact_contract",
+      "implementation_state": "registered_mechanics_candidate",
+      "evidence": {
+        "highest_verified_layer": "activation_and_public_contract",
+        "delivery_state": "requires_vertical_revalidation",
+        "evidence_refs": [
+          "TROOT-UAI-32-INTEGRATED-ACTIVATION-AUTHORITY",
+          "TROOT-UAI-33-PUBLIC-CONTRACT-ORACLE-REALIGNMENT"
+        ],
+        "not_proven": [
+          "real UE mechanics for every command",
+          "required persistence and independent readback",
+          "public SDK execution for every object/surface/operation",
+          "failure cleanup and content quality"
+        ]
+      },
+      "historical_obligation_count": 0,
+      "legacy_candidate_task_ids": [
+        "T43-REFERENCE-OPERATION"
+      ],
+      "next_task_id": "TROOT-UAI-35-DISCOVERY-IDENTITY-VERTICAL",
+      "blockers": []
+    },
+    {
+      "id": "CU-RIG-SPATIAL",
+      "title": "Rig control, retarget, pose and skeletal spatial operations",
+      "source_ids": [
+        "REQ-UAI-ROOT-01",
+        "REQ-UAI-ROOT-02",
+        "AC-UAI-ROOT-02-COVERAGE-CONTRACT",
+        "REQ-UAI-ROOT-15",
+        "AC-UAI-ROOT-15-INTEGRATED-RESTORATION",
+        "UDES-UAI-ROOT-18",
+        "UDES-UAI-ROOT-19",
+        "DES-UAI-ROOT-INTEGRATED-CAPABILITY-ARCHITECTURE",
+        "DES-UAI-PRODUCTION-EVIDENCE",
+        "SOL-UAI-ROOT-08-INTEGRATED-AUTHORITY-RESTORATION"
+      ],
+      "activation_contribution_ids": [
+        "rig-spatial-command-migration"
+      ],
+      "current_command_ids": [
+        "animation.ik_probe_candidate.apply",
+        "animation.subject.morph_weights.update",
+        "animation.subject.pose.update",
+        "rig.control.bake.animation",
+        "rig.control.bake.controls",
+        "rig.ik.definition.update",
+        "rig.retarget.assets.generate",
+        "rig.retarget.definition.update",
+        "rig.retarget.pose.auto_align",
+        "rig.retarget.pose.update",
+        "rig.skeleton.preview_mesh.bind",
+        "rig.skeleton.socket.update"
+      ],
+      "focus_command_ids": [],
+      "object_types": [
+        "ControlRig",
+        "IKRetargeter",
+        "Skeleton",
+        "animation subject"
+      ],
+      "authoring_surfaces": [
+        "control",
+        "pose",
+        "socket",
+        "preview mesh"
+      ],
+      "operations": [
+        "update",
+        "bake",
+        "generate",
+        "align",
+        "bind"
+      ],
+      "lifecycles": [
+        "request",
+        "settle",
+        "save",
+        "readback",
+        "cleanup"
+      ],
+      "command_contract_state": "registered_exact_contract",
+      "implementation_state": "registered_mechanics_candidate",
+      "evidence": {
+        "highest_verified_layer": "activation_and_public_contract",
+        "delivery_state": "requires_vertical_revalidation",
+        "evidence_refs": [
+          "TROOT-UAI-32-INTEGRATED-ACTIVATION-AUTHORITY",
+          "TROOT-UAI-33-PUBLIC-CONTRACT-ORACLE-REALIGNMENT"
+        ],
+        "not_proven": [
+          "real UE mechanics for every command",
+          "required persistence and independent readback",
+          "public SDK execution for every object/surface/operation",
+          "failure cleanup and content quality"
+        ]
+      },
+      "historical_obligation_count": 7,
+      "legacy_candidate_task_ids": [
+        "T58-RIG-SPATIAL-COMMAND-MIGRATION"
+      ],
+      "next_task_id": "TROOT-UAI-40-ANIMATION-RIG-AUDIO-VERTICAL",
+      "blockers": []
+    },
+    {
+      "id": "CU-SKIN-WEIGHT-IMPORT",
+      "title": "Skeletal mesh skin-weight profile import",
+      "source_ids": [
+        "REQ-UAI-ROOT-01",
+        "REQ-UAI-ROOT-02",
+        "AC-UAI-ROOT-02-COVERAGE-CONTRACT",
+        "REQ-UAI-ROOT-15",
+        "AC-UAI-ROOT-15-INTEGRATED-RESTORATION",
+        "UDES-UAI-ROOT-18",
+        "UDES-UAI-ROOT-19",
+        "DES-UAI-ROOT-INTEGRATED-CAPABILITY-ARCHITECTURE",
+        "DES-UAI-PRODUCTION-EVIDENCE",
+        "SOL-UAI-ROOT-08-INTEGRATED-AUTHORITY-RESTORATION"
+      ],
+      "activation_contribution_ids": [
+        "external-import-skin-weight"
+      ],
+      "current_command_ids": [
+        "external.skin_weight_profile.import"
+      ],
+      "focus_command_ids": [],
+      "object_types": [
+        "SkeletalMesh skin-weight profile"
+      ],
+      "authoring_surfaces": [
+        "external source"
+      ],
+      "operations": [
+        "import"
+      ],
+      "lifecycles": [
+        "request",
+        "transaction",
+        "save",
+        "readback",
+        "cleanup"
+      ],
+      "command_contract_state": "registered_exact_contract",
+      "implementation_state": "registered_mechanics_candidate",
+      "evidence": {
+        "highest_verified_layer": "activation_and_public_contract",
+        "delivery_state": "requires_vertical_revalidation",
+        "evidence_refs": [
+          "TROOT-UAI-32-INTEGRATED-ACTIVATION-AUTHORITY",
+          "TROOT-UAI-33-PUBLIC-CONTRACT-ORACLE-REALIGNMENT"
+        ],
+        "not_proven": [
+          "real UE mechanics for every command",
+          "required persistence and independent readback",
+          "public SDK execution for every object/surface/operation",
+          "failure cleanup and content quality"
+        ]
+      },
+      "historical_obligation_count": 1,
+      "legacy_candidate_task_ids": [
+        "T29-EXTERNAL-SKIN-WEIGHT-IMPORT"
+      ],
+      "next_task_id": "TROOT-UAI-43-EDITOR-IMPORT-LIFECYCLE-VERTICAL",
+      "blockers": []
+    },
+    {
+      "id": "CU-SPATIAL-CONTENT",
+      "title": "Spatial transform, snapping, pivot and mesh selection",
+      "source_ids": [
+        "REQ-UAI-ROOT-01",
+        "REQ-UAI-ROOT-02",
+        "AC-UAI-ROOT-02-COVERAGE-CONTRACT",
+        "REQ-UAI-ROOT-15",
+        "AC-UAI-ROOT-15-INTEGRATED-RESTORATION",
+        "UDES-UAI-ROOT-18",
+        "UDES-UAI-ROOT-19",
+        "DES-UAI-ROOT-INTEGRATED-CAPABILITY-ARCHITECTURE",
+        "DES-UAI-PRODUCTION-EVIDENCE",
+        "SOL-UAI-ROOT-08-INTEGRATED-AUTHORITY-RESTORATION"
+      ],
+      "activation_contribution_ids": [
+        "spatial-content-operation"
+      ],
+      "current_command_ids": [
+        "mesh.element.select_by_ray",
+        "mesh.pivot.update",
+        "mesh.transform.bake",
+        "world.object_align",
+        "world.object_snap_to_surface",
+        "world.object_transform.read",
+        "world.transform_candidates.evaluate"
+      ],
+      "focus_command_ids": [],
+      "object_types": [
+        "actor",
+        "mesh",
+        "surface"
+      ],
+      "authoring_surfaces": [
+        "transform",
+        "pivot",
+        "selection"
+      ],
+      "operations": [
+        "read",
+        "evaluate",
+        "align",
+        "snap",
+        "bake"
+      ],
+      "lifecycles": [
+        "request",
+        "transaction",
+        "readback",
+        "cleanup"
+      ],
+      "command_contract_state": "registered_exact_contract",
+      "implementation_state": "registered_mechanics_candidate",
+      "evidence": {
+        "highest_verified_layer": "activation_and_public_contract",
+        "delivery_state": "requires_vertical_revalidation",
+        "evidence_refs": [
+          "TROOT-UAI-32-INTEGRATED-ACTIVATION-AUTHORITY",
+          "TROOT-UAI-33-PUBLIC-CONTRACT-ORACLE-REALIGNMENT"
+        ],
+        "not_proven": [
+          "real UE mechanics for every command",
+          "required persistence and independent readback",
+          "public SDK execution for every object/surface/operation",
+          "failure cleanup and content quality"
+        ]
+      },
+      "historical_obligation_count": 5,
+      "legacy_candidate_task_ids": [
+        "T46-SPATIAL-CONTENT-OPERATION"
+      ],
+      "next_task_id": "TROOT-UAI-42-WORLD-VIEWPORT-SPATIAL-VERTICAL",
+      "blockers": []
+    },
+    {
+      "id": "CU-TEXTURE-GRAPH",
+      "title": "Texture graph authoring, bake, capture and runtime probe",
+      "source_ids": [
+        "REQ-UAI-ROOT-01",
+        "REQ-UAI-ROOT-02",
+        "AC-UAI-ROOT-02-COVERAGE-CONTRACT",
+        "REQ-UAI-ROOT-15",
+        "AC-UAI-ROOT-15-INTEGRATED-RESTORATION",
+        "UDES-UAI-ROOT-18",
+        "UDES-UAI-ROOT-19",
+        "DES-UAI-ROOT-INTEGRATED-CAPABILITY-ARCHITECTURE",
+        "DES-UAI-PRODUCTION-EVIDENCE",
+        "SOL-UAI-ROOT-08-INTEGRATED-AUTHORITY-RESTORATION"
+      ],
+      "activation_contribution_ids": [
+        "texture-graph"
+      ],
+      "current_command_ids": [
+        "texture_graph.artifact.bake",
+        "texture_graph.artifact.capture",
+        "texture_graph.graph.link.mutate",
+        "texture_graph.graph.node.mutate",
+        "texture_graph.graph.parameter.mutate",
+        "texture_graph.graph.validate_evaluate_settle",
+        "texture_graph.runtime.probe"
+      ],
+      "focus_command_ids": [],
+      "object_types": [
+        "TextureGraph",
+        "texture artifact"
+      ],
+      "authoring_surfaces": [
+        "graph",
+        "artifact",
+        "runtime"
+      ],
+      "operations": [
+        "create",
+        "update",
+        "bake",
+        "capture",
+        "probe"
+      ],
+      "lifecycles": [
+        "request",
+        "compile/settle",
+        "save",
+        "readback",
+        "cleanup"
+      ],
+      "command_contract_state": "registered_exact_contract",
+      "implementation_state": "registered_mechanics_candidate",
+      "evidence": {
+        "highest_verified_layer": "activation_and_public_contract",
+        "delivery_state": "requires_vertical_revalidation",
+        "evidence_refs": [
+          "TROOT-UAI-32-INTEGRATED-ACTIVATION-AUTHORITY",
+          "TROOT-UAI-33-PUBLIC-CONTRACT-ORACLE-REALIGNMENT"
+        ],
+        "not_proven": [
+          "real UE mechanics for every command",
+          "required persistence and independent readback",
+          "public SDK execution for every object/surface/operation",
+          "failure cleanup and content quality"
+        ]
+      },
+      "historical_obligation_count": 7,
+      "legacy_candidate_task_ids": [
+        "T40-TEXTURE-GRAPH-OPERATION"
+      ],
+      "next_task_id": "TROOT-UAI-38-ASSET-MATERIAL-TEXTURE-MEDIA-VERTICAL",
+      "blockers": []
+    },
+    {
+      "id": "CU-TIMELINE-SEQUENCE",
+      "title": "Level Sequence and widget animation authoring",
+      "source_ids": [
+        "REQ-UAI-ROOT-01",
+        "REQ-UAI-ROOT-02",
+        "AC-UAI-ROOT-02-COVERAGE-CONTRACT",
+        "REQ-UAI-ROOT-15",
+        "AC-UAI-ROOT-15-INTEGRATED-RESTORATION",
+        "UDES-UAI-ROOT-18",
+        "UDES-UAI-ROOT-19",
+        "DES-UAI-ROOT-INTEGRATED-CAPABILITY-ARCHITECTURE",
+        "DES-UAI-PRODUCTION-EVIDENCE",
+        "SOL-UAI-ROOT-08-INTEGRATED-AUTHORITY-RESTORATION"
+      ],
+      "activation_contribution_ids": [
+        "timeline-sequence-command-migration"
+      ],
+      "current_command_ids": [
+        "timeline.sequence.create",
+        "timeline.sequence.read",
+        "timeline.sequence.structure.replace",
+        "timeline.widget_animation.read"
+      ],
+      "focus_command_ids": [],
+      "object_types": [
+        "LevelSequence",
+        "WidgetAnimation"
+      ],
+      "authoring_surfaces": [
+        "timeline",
+        "track",
+        "section",
+        "binding"
+      ],
+      "operations": [
+        "create",
+        "read",
+        "replace"
+      ],
+      "lifecycles": [
+        "request",
+        "compile/settle",
+        "save",
+        "readback",
+        "cleanup"
+      ],
+      "command_contract_state": "registered_exact_contract",
+      "implementation_state": "registered_mechanics_candidate",
+      "evidence": {
+        "highest_verified_layer": "activation_and_public_contract",
+        "delivery_state": "requires_vertical_revalidation",
+        "evidence_refs": [
+          "TROOT-UAI-32-INTEGRATED-ACTIVATION-AUTHORITY",
+          "TROOT-UAI-33-PUBLIC-CONTRACT-ORACLE-REALIGNMENT"
+        ],
+        "not_proven": [
+          "real UE mechanics for every command",
+          "required persistence and independent readback",
+          "public SDK execution for every object/surface/operation",
+          "failure cleanup and content quality"
+        ]
+      },
+      "historical_obligation_count": 8,
+      "legacy_candidate_task_ids": [
+        "T22-SEQUENCE-DOMAIN",
+        "T55-TIMELINE-SEQUENCE-COMMAND-MIGRATION"
+      ],
+      "next_task_id": "TROOT-UAI-42-WORLD-VIEWPORT-SPATIAL-VERTICAL",
+      "blockers": []
+    },
+    {
+      "id": "CU-UMG-COMMANDS",
+      "title": "UMG widget creation and event discovery",
+      "source_ids": [
+        "REQ-UAI-ROOT-01",
+        "REQ-UAI-ROOT-02",
+        "AC-UAI-ROOT-02-COVERAGE-CONTRACT",
+        "REQ-UAI-ROOT-15",
+        "AC-UAI-ROOT-15-INTEGRATED-RESTORATION",
+        "UDES-UAI-ROOT-18",
+        "UDES-UAI-ROOT-19",
+        "DES-UAI-ROOT-INTEGRATED-CAPABILITY-ARCHITECTURE",
+        "DES-UAI-PRODUCTION-EVIDENCE",
+        "SOL-UAI-ROOT-08-INTEGRATED-AUTHORITY-RESTORATION"
+      ],
+      "activation_contribution_ids": [
+        "umg-command-migration"
+      ],
+      "current_command_ids": [
+        "umg.asset.create",
+        "umg.widget.events.discover"
+      ],
+      "focus_command_ids": [],
+      "object_types": [
+        "WidgetBlueprint",
+        "widget event"
+      ],
+      "authoring_surfaces": [
+        "asset",
+        "widget tree",
+        "event"
+      ],
+      "operations": [
+        "create",
+        "discover"
+      ],
+      "lifecycles": [
+        "request",
+        "compile/settle",
+        "save",
+        "readback",
+        "cleanup"
+      ],
+      "command_contract_state": "registered_exact_contract",
+      "implementation_state": "registered_mechanics_candidate",
+      "evidence": {
+        "highest_verified_layer": "activation_and_public_contract",
+        "delivery_state": "requires_vertical_revalidation",
+        "evidence_refs": [
+          "TROOT-UAI-32-INTEGRATED-ACTIVATION-AUTHORITY",
+          "TROOT-UAI-33-PUBLIC-CONTRACT-ORACLE-REALIGNMENT"
+        ],
+        "not_proven": [
+          "real UE mechanics for every command",
+          "required persistence and independent readback",
+          "public SDK execution for every object/surface/operation",
+          "failure cleanup and content quality"
+        ]
+      },
+      "historical_obligation_count": 7,
+      "legacy_candidate_task_ids": [
+        "T15-UMG-WIDGET-DOMAIN",
+        "T48-UMG-COMMAND-MIGRATION"
+      ],
+      "next_task_id": "TROOT-UAI-37-BLUEPRINT-UMG-GRAPH-VERTICAL",
+      "blockers": []
+    },
+    {
+      "id": "CU-UNIFIED-CONTENT-DISCOVERY",
+      "title": "Unified content, actor, component and creation-candidate discovery",
+      "source_ids": [
+        "REQ-UAI-ROOT-01",
+        "REQ-UAI-ROOT-02",
+        "AC-UAI-ROOT-02-COVERAGE-CONTRACT",
+        "REQ-UAI-ROOT-15",
+        "AC-UAI-ROOT-15-INTEGRATED-RESTORATION",
+        "UDES-UAI-ROOT-18",
+        "UDES-UAI-ROOT-19",
+        "DES-UAI-ROOT-INTEGRATED-CAPABILITY-ARCHITECTURE",
+        "DES-UAI-PRODUCTION-EVIDENCE",
+        "SOL-UAI-ROOT-08-INTEGRATED-AUTHORITY-RESTORATION",
+        "REQ-UAI-ROOT-05"
+      ],
+      "activation_contribution_ids": [],
+      "current_command_ids": [],
+      "focus_command_ids": [],
+      "object_types": [
+        "content",
+        "actor",
+        "component",
+        "creation candidate"
+      ],
+      "authoring_surfaces": [
+        "search result identity",
+        "downstream binding"
+      ],
+      "operations": [
+        "search",
+        "select",
+        "bind"
+      ],
+      "lifecycles": [
+        "request",
+        "downstream use"
+      ],
+      "command_contract_state": "required_capability_without_current_unified_contract",
+      "implementation_state": "partial_domain_queries_only",
+      "evidence": {
+        "highest_verified_layer": "historical_requirement_and_partial_current_queries",
+        "delivery_state": "requires_contract_and_vertical_revalidation",
+        "evidence_refs": [
+          "historical:T63-UNIFIED-CONTENT-SEARCH"
+        ],
+        "not_proven": [
+          "one current unified search contract",
+          "identity reuse through downstream authoring"
+        ]
+      },
+      "historical_obligation_count": 3,
+      "legacy_candidate_task_ids": [
+        "T63-UNIFIED-CONTENT-SEARCH"
+      ],
+      "next_task_id": "TROOT-UAI-35-DISCOVERY-IDENTITY-VERTICAL",
+      "blockers": [
+        "current unified contract is absent"
+      ]
+    },
+    {
+      "id": "CU-VIEWPORT-GRAPH",
+      "title": "Viewport camera, framing, picking and graph view control",
+      "source_ids": [
+        "REQ-UAI-ROOT-01",
+        "REQ-UAI-ROOT-02",
+        "AC-UAI-ROOT-02-COVERAGE-CONTRACT",
+        "REQ-UAI-ROOT-15",
+        "AC-UAI-ROOT-15-INTEGRATED-RESTORATION",
+        "UDES-UAI-ROOT-18",
+        "UDES-UAI-ROOT-19",
+        "DES-UAI-ROOT-INTEGRATED-CAPABILITY-ARCHITECTURE",
+        "DES-UAI-PRODUCTION-EVIDENCE",
+        "SOL-UAI-ROOT-08-INTEGRATED-AUTHORITY-RESTORATION"
+      ],
+      "activation_contribution_ids": [
+        "viewport-graph-control"
+      ],
+      "current_command_ids": [
+        "graph.view.read",
+        "graph.view.update",
+        "viewport.actor.pick",
+        "viewport.actor.select",
+        "viewport.camera.frame",
+        "viewport.instance.list",
+        "viewport.pixel_scale.read",
+        "viewport.ray.deproject",
+        "viewport.ray.trace",
+        "viewport.state.read",
+        "viewport.state.restore",
+        "viewport.state.update",
+        "viewport.view_mode.list",
+        "viewport.warning.list"
+      ],
+      "focus_command_ids": [
+        "viewport.camera.frame",
+        "viewport.state.read",
+        "viewport.state.update",
+        "viewport.state.restore"
+      ],
+      "object_types": [
+        "viewport",
+        "camera",
+        "actor",
+        "graph editor"
+      ],
+      "authoring_surfaces": [
+        "state",
+        "camera",
+        "selection",
+        "ray",
+        "graph view"
+      ],
+      "operations": [
+        "read",
+        "update",
+        "restore",
+        "frame",
+        "pick"
+      ],
+      "lifecycles": [
+        "request",
+        "editor state",
+        "restore",
+        "cleanup"
+      ],
+      "command_contract_state": "registered_exact_contract",
+      "implementation_state": "registered_mechanics_candidate",
+      "evidence": {
+        "highest_verified_layer": "activation_and_public_contract",
+        "delivery_state": "requires_vertical_revalidation",
+        "evidence_refs": [
+          "TROOT-UAI-32-INTEGRATED-ACTIVATION-AUTHORITY",
+          "TROOT-UAI-33-PUBLIC-CONTRACT-ORACLE-REALIGNMENT"
+        ],
+        "not_proven": [
+          "real UE mechanics for every command",
+          "required persistence and independent readback",
+          "public SDK execution for every object/surface/operation",
+          "failure cleanup and content quality"
+        ]
+      },
+      "historical_obligation_count": 19,
+      "legacy_candidate_task_ids": [
+        "T45-VIEWPORT-GRAPH-CONTROL"
+      ],
+      "next_task_id": "TROOT-UAI-42-WORLD-VIEWPORT-SPATIAL-VERTICAL",
+      "blockers": []
+    },
+    {
+      "id": "CU-WORLD-MUTATION",
+      "title": "World, actor, data-layer, HLOD and streaming authoring",
+      "source_ids": [
+        "REQ-UAI-ROOT-01",
+        "REQ-UAI-ROOT-02",
+        "AC-UAI-ROOT-02-COVERAGE-CONTRACT",
+        "REQ-UAI-ROOT-15",
+        "AC-UAI-ROOT-15-INTEGRATED-RESTORATION",
+        "UDES-UAI-ROOT-18",
+        "UDES-UAI-ROOT-19",
+        "DES-UAI-ROOT-INTEGRATED-CAPABILITY-ARCHITECTURE",
+        "DES-UAI-PRODUCTION-EVIDENCE",
+        "SOL-UAI-ROOT-08-INTEGRATED-AUTHORITY-RESTORATION"
+      ],
+      "activation_contribution_ids": [
+        "world_commands"
+      ],
+      "current_command_ids": [
+        "world.actor.create",
+        "world.actor_hlod_layer.update",
+        "world.actor_streaming_policy.update",
+        "world.data_layer_instance.create",
+        "world.data_layer_relation.update",
+        "world.data_layer_state.update",
+        "world.level_game_mode.update",
+        "world.streaming_relation.create",
+        "world.streaming_relation.state.update",
+        "world.wall.create_with_opening",
+        "world.world_partition_streaming.update"
+      ],
+      "focus_command_ids": [],
+      "object_types": [
+        "World",
+        "Actor",
+        "DataLayer",
+        "HLODLayer",
+        "streaming level"
+      ],
+      "authoring_surfaces": [
+        "actor",
+        "relation",
+        "state",
+        "wall opening"
+      ],
+      "operations": [
+        "create",
+        "update"
+      ],
+      "lifecycles": [
+        "request",
+        "transaction",
+        "save",
+        "readback",
+        "cleanup"
+      ],
+      "command_contract_state": "registered_exact_contract",
+      "implementation_state": "registered_mechanics_candidate",
+      "evidence": {
+        "highest_verified_layer": "activation_and_public_contract",
+        "delivery_state": "requires_vertical_revalidation",
+        "evidence_refs": [
+          "TROOT-UAI-32-INTEGRATED-ACTIVATION-AUTHORITY",
+          "TROOT-UAI-33-PUBLIC-CONTRACT-ORACLE-REALIGNMENT"
+        ],
+        "not_proven": [
+          "real UE mechanics for every command",
+          "required persistence and independent readback",
+          "public SDK execution for every object/surface/operation",
+          "failure cleanup and content quality"
+        ]
+      },
+      "historical_obligation_count": 56,
+      "legacy_candidate_task_ids": [
+        "T26-LEVEL-WORLD-DOMAIN",
+        "T59-WORLD-COMMAND-MIGRATION"
+      ],
+      "next_task_id": "TROOT-UAI-42-WORLD-VIEWPORT-SPATIAL-VERTICAL",
+      "blockers": []
+    }
+  ],
+  "retired_candidate_current_identities": [
+    {
+      "command_id": "animation_blueprint.authoring.apply",
+      "current_status": "absent_from_current_manifest",
+      "successor_status": "required_capability_contract_not_exact_successor",
+      "next_task_id": "TROOT-UAI-37-BLUEPRINT-UMG-GRAPH-VERTICAL"
+    },
+    {
+      "command_id": "blueprint.authoring.apply",
+      "current_status": "absent_from_current_manifest",
+      "successor_status": "required_capability_contract_not_exact_successor",
+      "next_task_id": "TROOT-UAI-37-BLUEPRINT-UMG-GRAPH-VERTICAL"
+    },
+    {
+      "command_id": "niagara.script.graph.apply",
+      "current_status": "absent_from_current_manifest",
+      "successor_status": "required_capability_contract_not_exact_successor",
+      "next_task_id": "TROOT-UAI-39-NIAGARA-PCG-AI-VERTICAL"
+    },
+    {
+      "command_id": "niagara.stack.apply",
+      "current_status": "absent_from_current_manifest",
+      "successor_status": "required_capability_contract_not_exact_successor",
+      "next_task_id": "TROOT-UAI-39-NIAGARA-PCG-AI-VERTICAL"
+    },
+    {
+      "command_id": "umg.authoring.apply",
+      "current_status": "absent_from_current_manifest",
+      "successor_status": "required_capability_contract_not_exact_successor",
+      "next_task_id": "TROOT-UAI-37-BLUEPRINT-UMG-GRAPH-VERTICAL"
+    }
+  ],
+  "recovered_historical_identities": [
+    {
+      "historical_command_id": "modeling_voxel_grid_add_bounds",
+      "capability_unit_id": "CU-MODELING-VOXEL-GRID",
+      "current_disposition": "required_capability_contract",
+      "source_authority": "recovered_plugin_history_outside_939_inventory",
+      "source_refs": [
+        "git:c6c2141dd096c0ef4c059bbaf8d96cc646751458",
+        "git:52dfadb40216f3094eb853318b66719f556533dd^:Source/UeAgentInterface/Private/Commands/Modeling/UeAgentHttpServer_Modeling_VoxelGrid.cpp",
+        "git:52dfadb40216f3094eb853318b66719f556533dd^:docs/commands/modeling/modeling_voxel_grid_apply.md",
+        "retired/strict_v2/docs/commands/_legacy_big_docs/active/10_Modeling.md"
+      ],
+      "current_exact_ingress_status": "absent_from_current_manifest",
+      "compiled_legacy_guard_status": "explicitly_retired",
+      "physical_exit_status": "implementation_removed_but_capability_not_replaced",
+      "next_task_id": "TROOT-UAI-41-MODELING-WHITEBOX-PHYSICS-VERTICAL"
+    },
+    {
+      "historical_command_id": "modeling_voxel_grid_apply",
+      "capability_unit_id": "CU-MODELING-VOXEL-GRID",
+      "current_disposition": "required_capability_contract",
+      "source_authority": "recovered_plugin_history_outside_939_inventory",
+      "source_refs": [
+        "git:c6c2141dd096c0ef4c059bbaf8d96cc646751458",
+        "git:52dfadb40216f3094eb853318b66719f556533dd^:Source/UeAgentInterface/Private/Commands/Modeling/UeAgentHttpServer_Modeling_VoxelGrid.cpp",
+        "git:52dfadb40216f3094eb853318b66719f556533dd^:docs/commands/modeling/modeling_voxel_grid_apply.md",
+        "retired/strict_v2/docs/commands/_legacy_big_docs/active/10_Modeling.md"
+      ],
+      "current_exact_ingress_status": "absent_from_current_manifest",
+      "compiled_legacy_guard_status": "explicitly_retired",
+      "physical_exit_status": "implementation_removed_but_capability_not_replaced",
+      "next_task_id": "TROOT-UAI-41-MODELING-WHITEBOX-PHYSICS-VERTICAL"
+    },
+    {
+      "historical_command_id": "modeling_voxel_grid_begin",
+      "capability_unit_id": "CU-MODELING-VOXEL-GRID",
+      "current_disposition": "required_capability_contract",
+      "source_authority": "recovered_plugin_history_outside_939_inventory",
+      "source_refs": [
+        "git:c6c2141dd096c0ef4c059bbaf8d96cc646751458",
+        "git:52dfadb40216f3094eb853318b66719f556533dd^:Source/UeAgentInterface/Private/Commands/Modeling/UeAgentHttpServer_Modeling_VoxelGrid.cpp",
+        "git:52dfadb40216f3094eb853318b66719f556533dd^:docs/commands/modeling/modeling_voxel_grid_apply.md",
+        "retired/strict_v2/docs/commands/_legacy_big_docs/active/10_Modeling.md"
+      ],
+      "current_exact_ingress_status": "absent_from_current_manifest",
+      "compiled_legacy_guard_status": "explicitly_retired",
+      "physical_exit_status": "implementation_removed_but_capability_not_replaced",
+      "next_task_id": "TROOT-UAI-41-MODELING-WHITEBOX-PHYSICS-VERTICAL"
+    },
+    {
+      "historical_command_id": "modeling_voxel_grid_remove_bounds",
+      "capability_unit_id": "CU-MODELING-VOXEL-GRID",
+      "current_disposition": "required_capability_contract",
+      "source_authority": "recovered_plugin_history_outside_939_inventory",
+      "source_refs": [
+        "git:c6c2141dd096c0ef4c059bbaf8d96cc646751458",
+        "git:52dfadb40216f3094eb853318b66719f556533dd^:Source/UeAgentInterface/Private/Commands/Modeling/UeAgentHttpServer_Modeling_VoxelGrid.cpp",
+        "git:52dfadb40216f3094eb853318b66719f556533dd^:docs/commands/modeling/modeling_voxel_grid_apply.md",
+        "retired/strict_v2/docs/commands/_legacy_big_docs/active/10_Modeling.md"
+      ],
+      "current_exact_ingress_status": "absent_from_current_manifest",
+      "compiled_legacy_guard_status": "explicitly_retired",
+      "physical_exit_status": "implementation_removed_but_capability_not_replaced",
+      "next_task_id": "TROOT-UAI-41-MODELING-WHITEBOX-PHYSICS-VERTICAL"
+    }
+  ],
+  "delivery_tasks": [
+    {
+      "id": "TROOT-UAI-35-DISCOVERY-IDENTITY-VERTICAL",
+      "lane": "discovery",
+      "catalog_role": "vertical implementation and current evidence consumer"
+    },
+    {
+      "id": "TROOT-UAI-36-STRUCTURED-HJSON-VERTICAL",
+      "lane": "hjson",
+      "catalog_role": "vertical implementation and current evidence consumer"
+    },
+    {
+      "id": "TROOT-UAI-37-BLUEPRINT-UMG-GRAPH-VERTICAL",
+      "lane": "blueprint",
+      "catalog_role": "vertical implementation and current evidence consumer"
+    },
+    {
+      "id": "TROOT-UAI-38-ASSET-MATERIAL-TEXTURE-MEDIA-VERTICAL",
+      "lane": "asset",
+      "catalog_role": "vertical implementation and current evidence consumer"
+    },
+    {
+      "id": "TROOT-UAI-39-NIAGARA-PCG-AI-VERTICAL",
+      "lane": "simulation",
+      "catalog_role": "vertical implementation and current evidence consumer"
+    },
+    {
+      "id": "TROOT-UAI-40-ANIMATION-RIG-AUDIO-VERTICAL",
+      "lane": "animation",
+      "catalog_role": "vertical implementation and current evidence consumer"
+    },
+    {
+      "id": "TROOT-UAI-41-MODELING-WHITEBOX-PHYSICS-VERTICAL",
+      "lane": "modeling",
+      "catalog_role": "vertical implementation and current evidence consumer"
+    },
+    {
+      "id": "TROOT-UAI-42-WORLD-VIEWPORT-SPATIAL-VERTICAL",
+      "lane": "world",
+      "catalog_role": "vertical implementation and current evidence consumer"
+    },
+    {
+      "id": "TROOT-UAI-43-EDITOR-IMPORT-LIFECYCLE-VERTICAL",
+      "lane": "editor",
+      "catalog_role": "vertical implementation and current evidence consumer"
+    },
+    {
+      "id": "TROOT-UAI-44-LEGACY-SURFACE-EXIT",
+      "lane": "legacy_exit",
+      "catalog_role": "vertical implementation and current evidence consumer"
+    }
+  ]
+}
