@@ -176,6 +176,7 @@ namespace UE::UAI::OperationOwners::BlueprintComponent
 
 		const FImportInitializationDomainProviderFactoryRegistration
 			BlueprintComponentDomainProviderRegistration(
+				TEXT("blueprint-component"),
 				TEXT("blueprint-component-domain-provider"),
 				&TryCreateBlueprintComponentDomainProvider);
 	}

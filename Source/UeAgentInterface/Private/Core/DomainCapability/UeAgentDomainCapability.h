@@ -386,7 +386,22 @@ namespace UE::UAI::DomainCapability
 			FDomainCapabilityContributionFactory Factory);
 	};
 
+	UEAGENTINTERFACE_API bool RegisterProcessDomainCommandCapabilityFactory(
+		const FString& DomainId,
+		const FString& ContributionId,
+		Module::CommandRegistration::Active::
+			FUeAgentActiveCommandContributionFactory Factory);
+
+	UEAGENTINTERFACE_API bool RegisterProcessDomainHjsonCapabilityFactory(
+		const FString& DomainId,
+		const FString& ProviderId,
+		HjsonWorkspace::FImportInitializationDomainProviderFactory Factory);
+
 	UEAGENTINTERFACE_API bool TryFreezeProcessDomainCapabilities(
 		TSharedPtr<const FFrozenDomainCapabilitySet>& OutFrozen,
+		FString& OutError);
+
+	UEAGENTINTERFACE_API bool TryGetOrBuildProcessDomainCapabilityAuthorities(
+		FDomainCapabilityAuthorities& OutAuthorities,
 		FString& OutError);
 }

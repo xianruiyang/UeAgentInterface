@@ -20,6 +20,7 @@ namespace UE::UAI::Module::CommandRegistration::Niagara
 		const FString CandidateCommandId = TEXT("niagara.module.candidates");
 		const FString CandidateOwner = TEXT("niagara-domain-owner");
 		const HjsonWorkspace::FImportInitializationDomainProviderFactoryRegistration ProviderRegistration(
+			TEXT("niagara-domain-candidates"),
 			TEXT("niagara-domain-provider"),
 			&OperationOwners::Niagara::TryCreateNiagaraDomainProvider);
 

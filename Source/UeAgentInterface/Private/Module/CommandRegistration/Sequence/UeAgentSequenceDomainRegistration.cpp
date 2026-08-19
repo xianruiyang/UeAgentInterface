@@ -10,6 +10,7 @@ namespace UE::UAI::Module::CommandRegistration::Sequence
 		const FString ProviderRegistrationId = TEXT("sequence-domain-provider");
 		const HjsonWorkspace::FImportInitializationDomainProviderFactoryRegistration
 			Registration(
+				TEXT("timeline-sequence-command-migration"),
 				TEXT("sequence-domain-provider"),
 				&OperationOwners::Sequence::TryCreateSequenceDomainProvider);
 	}

@@ -19,11 +19,6 @@ namespace UE::UAI::Module::CommandRegistration::TextureGraph
 	namespace
 	{
 		const FString Owner = TEXT("texture-graph-operation-owner");
-		const HjsonWorkspace::FImportInitializationDomainProviderFactoryRegistration
-			ProviderRegistration(
-				TEXT("texture-graph-domain-provider"),
-				&OperationOwners::TextureGraph::
-					TryCreateTextureGraphDomainProvider);
 
 		FString WireType(EUeAgentCommandWireType Type)
 		{
@@ -206,9 +201,6 @@ namespace UE::UAI::Module::CommandRegistration::TextureGraph
 			TSharedRef<const DomainCapability::
 				IDomainOperationInvocationFactory> BakeFactory;
 		};
-
-		const FUeAgentActiveCommandContributionFactoryRegistration Registration(
-			TEXT("texture-graph-operation"), &TryCreateContribution);
 
 		bool TryCreateDomainCapability(
 			TSharedPtr<const DomainCapability::FDomainCapabilityContribution>&

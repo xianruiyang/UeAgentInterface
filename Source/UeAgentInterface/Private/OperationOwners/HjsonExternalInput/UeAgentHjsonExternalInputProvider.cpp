@@ -361,6 +361,7 @@ namespace UE::UAI::OperationOwners::HjsonExternalInput
 		const FImportInitializationDomainProviderFactoryRegistration
 			HjsonExternalInputDomainProviderRegistration(
 				TEXT("hjson-external-input-domain-provider"),
+				TEXT("hjson-external-input-domain-provider"),
 				&TryCreateRegisteredProvider);
 	}
 

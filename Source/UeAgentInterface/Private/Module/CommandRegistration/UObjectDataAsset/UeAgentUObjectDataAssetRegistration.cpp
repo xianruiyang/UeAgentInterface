@@ -186,9 +186,38 @@ namespace UE::UAI::Module::CommandRegistration::UObjectDataAsset
 			return Result;
 		}
 
+		class FLazyProductionService final
+			: public IUeAgentUObjectDataAssetCommandService
+		{
+		public:
+			bool Execute(
+				const FUeAgentUObjectDataAssetCommandRequest& Request,
+				FUeAgentUObjectDataAssetCommandResponse& OutResponse,
+				FUeAgentUObjectDataAssetCommandError& OutError) override
+			{
+				TSharedPtr<IUeAgentUObjectDataAssetCommandService> Service;
+				FString CreationError;
+				if (!TryCreateProductionUObjectDataAssetCommandService(
+						Service,
+						CreationError)
+					|| !Service.IsValid())
+				{
+					OutResponse = {};
+					OutError = {
+						TEXT("uobject_dataasset_service_unavailable"),
+						Request.CommandId,
+						CreationError,
+					};
+					return false;
+				}
+				return Service->Execute(Request, OutResponse, OutError);
+			}
+		};
+
 		class FContribution final : public IUeAgentActiveCommandContribution
 		{
 		public:
+			FContribution() = default;
 			explicit FContribution(
 				TSharedRef<IUeAgentUObjectDataAssetCommandService> InService)
 				: Service(MoveTemp(InService))
@@ -217,9 +246,15 @@ namespace UE::UAI::Module::CommandRegistration::UObjectDataAsset
 				TArray<TSharedRef<IUeAgentExactCommandHandler>>& OutHandlers,
 				FString& OutError) const override
 			{
+				TSharedPtr<IUeAgentUObjectDataAssetCommandService> CommandService =
+					Service;
+				if (!CommandService.IsValid())
+				{
+					CommandService = MakeShared<FLazyProductionService>();
+				}
 				TArray<TSharedRef<IUeAgentExactCommandHandler>> Handlers;
 				if (!TryCreateUObjectDataAssetCommandHandlers(
-						Service, Handlers, OutError))
+						CommandService.ToSharedRef(), Handlers, OutError))
 				{
 					return false;
 				}
@@ -228,13 +263,8 @@ namespace UE::UAI::Module::CommandRegistration::UObjectDataAsset
 			}
 
 		private:
-			TSharedRef<IUeAgentUObjectDataAssetCommandService> Service;
+			TSharedPtr<IUeAgentUObjectDataAssetCommandService> Service;
 		};
-
-		const FUeAgentActiveCommandContributionFactoryRegistration
-			GUObjectDataAssetContributionRegistration(
-				TEXT("uobject-dataasset"),
-				&TryCreateProductionUObjectDataAssetContribution);
 
 		bool TryCreateDomainCapability(
 			TSharedPtr<const DomainCapability::
@@ -315,14 +345,9 @@ namespace UE::UAI::Module::CommandRegistration::UObjectDataAsset
 		FString& OutError)
 	{
 		OutContribution.Reset();
-		TSharedPtr<IUeAgentUObjectDataAssetCommandService> Service;
-		if (!TryCreateProductionUObjectDataAssetCommandService(
-				Service, OutError))
-		{
-			return false;
-		}
-		return TryCreateUObjectDataAssetContribution(
-			Service.ToSharedRef(), OutContribution, OutError);
+		OutError.Reset();
+		OutContribution = MakeShared<FContribution>();
+		return true;
 	}
 
 	bool TryCreateUObjectDataAssetRegistration(

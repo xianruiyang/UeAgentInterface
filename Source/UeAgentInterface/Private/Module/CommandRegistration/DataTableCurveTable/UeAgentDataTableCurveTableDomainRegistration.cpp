@@ -10,12 +10,6 @@ namespace UE::UAI::Module::CommandRegistration::DataTableCurveTable
 	{
 		const FString ProviderRegistrationId =
 			TEXT("datatable-curvetable-domain-provider");
-		const HjsonWorkspace::FImportInitializationDomainProviderFactoryRegistration
-			Registration(
-				TEXT("datatable-curvetable-domain-provider"),
-				&OperationOwners::DataTableCurveTable::
-					TryCreateDataTableCurveTableDomainProvider);
-
 		bool TryCreateDomainCapability(
 			TSharedPtr<const DomainCapability::
 				FDomainCapabilityContribution>& OutContribution,

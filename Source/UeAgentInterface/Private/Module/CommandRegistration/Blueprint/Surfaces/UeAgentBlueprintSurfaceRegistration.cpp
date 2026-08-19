@@ -11,6 +11,7 @@ namespace UE::UAI::Module::CommandRegistration::Blueprint::Surfaces
 			TEXT("blueprint-surface-domain-provider");
 		const HjsonWorkspace::FImportInitializationDomainProviderFactoryRegistration
 			ProviderRegistration(
+				TEXT("blueprint-command-migration"),
 				TEXT("blueprint-surface-domain-provider"),
 				&OperationOwners::Blueprint::Surfaces::
 					TryCreateBlueprintSurfaceDomainProvider);

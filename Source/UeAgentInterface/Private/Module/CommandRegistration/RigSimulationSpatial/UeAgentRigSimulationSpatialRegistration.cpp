@@ -11,6 +11,7 @@ namespace UE::UAI::Module::CommandRegistration::RigSimulationSpatial
 			TEXT("rig-simulation-spatial-domain-provider");
 		const HjsonWorkspace::FImportInitializationDomainProviderFactoryRegistration
 			Registration(
+				TEXT("rig-spatial-command-migration"),
 				TEXT("rig-simulation-spatial-domain-provider"),
 				&OperationOwners::RigSimulationSpatial::
 					TryCreateRigSimulationSpatialDomainProvider);

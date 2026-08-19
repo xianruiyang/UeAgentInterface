@@ -20,6 +20,7 @@ namespace UE::UAI::Module::CommandRegistration::AiBehavior
 		const FString CandidateCommandId = TEXT("ai.behavior.candidates");
 		const FString CandidateOwner = TEXT("ai-behavior-domain-owner");
 		const HjsonWorkspace::FImportInitializationDomainProviderFactoryRegistration ProviderRegistration(
+			TEXT("ai-behavior-domain-candidates"),
 			TEXT("ai-behavior-domain-provider"),
 			&OperationOwners::AiBehavior::TryCreateAiBehaviorDomainProvider);
 

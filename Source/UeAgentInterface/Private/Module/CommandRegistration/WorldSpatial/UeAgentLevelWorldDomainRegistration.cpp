@@ -10,6 +10,7 @@ namespace UE::UAI::Module::CommandRegistration::WorldSpatial
 		const FString ProviderRegistrationId = TEXT("level-world-domain-provider");
 		const HjsonWorkspace::FImportInitializationDomainProviderFactoryRegistration
 			Registration(
+				TEXT("spatial-content-operation"),
 				TEXT("level-world-domain-provider"),
 				&OperationOwners::WorldSpatial::TryCreateLevelWorldDomainProvider);
 	}

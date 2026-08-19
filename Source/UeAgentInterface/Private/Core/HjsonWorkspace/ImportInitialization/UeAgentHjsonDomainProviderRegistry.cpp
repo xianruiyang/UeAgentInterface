@@ -1,7 +1,6 @@
 #include "Core/HjsonWorkspace/ImportInitialization/UeAgentHjsonDomainProviderRegistry.h"
 
-#include "HAL/CriticalSection.h"
-#include "Misc/ScopeLock.h"
+#include "Core/DomainCapability/UeAgentDomainCapability.h"
 
 namespace UE::UAI::HjsonWorkspace
 {
@@ -14,59 +13,6 @@ namespace UE::UAI::HjsonWorkspace
 			return !Normalized.IsEmpty() && Normalized == Value;
 		}
 
-		struct FFactoryEntry final
-		{
-			FString ProviderId;
-			FImportInitializationDomainProviderFactory Factory = nullptr;
-		};
-
-		struct FProcessCatalog final
-		{
-			FCriticalSection Mutex;
-			bool bSealed = false;
-			TArray<FFactoryEntry> Entries;
-			TArray<FString> RegistrationErrors;
-			TSharedPtr<const FImportInitializationDomainProviderRegistry>
-				InstalledAuthority;
-		};
-
-		FProcessCatalog& ProcessCatalog()
-		{
-			static FProcessCatalog Catalog;
-			return Catalog;
-		}
-
-		bool RegisterFactory(
-			const FString& ProviderId,
-			const FImportInitializationDomainProviderFactory Factory)
-		{
-			FProcessCatalog& Catalog = ProcessCatalog();
-			FScopeLock Lock(&Catalog.Mutex);
-			if (Catalog.bSealed)
-			{
-				Catalog.RegistrationErrors.AddUnique(
-					TEXT("hjson_domain_provider_catalog_sealed:") + ProviderId);
-				return false;
-			}
-			if (!IsExactIdentity(ProviderId) || !Factory)
-			{
-				Catalog.RegistrationErrors.AddUnique(
-					TEXT("hjson_domain_provider_factory_invalid:") + ProviderId);
-				return false;
-			}
-			if (Catalog.Entries.ContainsByPredicate(
-				[&ProviderId](const FFactoryEntry& Entry)
-				{
-					return Entry.ProviderId == ProviderId;
-				}))
-			{
-				Catalog.RegistrationErrors.AddUnique(
-					TEXT("hjson_domain_provider_duplicate:") + ProviderId);
-				return false;
-			}
-			Catalog.Entries.Add({ProviderId, Factory});
-			return true;
-		}
 	}
 
 	FImportInitializationDomainRequest::
@@ -311,114 +257,44 @@ namespace UE::UAI::HjsonWorkspace
 		FImportInitializationDomainProviderFactoryRegistration(
 			const TCHAR* ProviderId,
 			const FImportInitializationDomainProviderFactory Factory)
+		: FImportInitializationDomainProviderFactoryRegistration(
+			ProviderId,
+			ProviderId,
+			Factory)
 	{
-		RegisterFactory(
+	}
+
+	FImportInitializationDomainProviderFactoryRegistration::
+		FImportInitializationDomainProviderFactoryRegistration(
+			const TCHAR* DomainId,
+			const TCHAR* ProviderId,
+			const FImportInitializationDomainProviderFactory Factory)
+	{
+		DomainCapability::RegisterProcessDomainHjsonCapabilityFactory(
+			DomainId ? FString(DomainId) : FString(),
 			ProviderId ? FString(ProviderId) : FString(),
 			Factory);
 	}
 
-	bool TryFreezeProcessImportInitializationDomainProviders(
+	bool TryFreezeImportInitializationDomainProviders(
 		const TArray<TSharedRef<IImportInitializationDomainProvider>>&
-			DomainOverrides,
-		const bool bInstallAsProcessAuthority,
+			ExactProviders,
 		TSharedPtr<const FImportInitializationDomainProviderRegistry>&
 			OutRegistry,
 		FWorkspaceError& OutError)
 	{
 		OutRegistry.Reset();
 		OutError.Reset();
-		TArray<FFactoryEntry> Entries;
-		{
-			FProcessCatalog& Catalog = ProcessCatalog();
-			FScopeLock Lock(&Catalog.Mutex);
-			if (Catalog.InstalledAuthority.IsValid())
-			{
-				OutRegistry = Catalog.InstalledAuthority;
-				return true;
-			}
-			Catalog.bSealed = true;
-			if (!Catalog.RegistrationErrors.IsEmpty())
-			{
-				OutError.Set(
-					TEXT("hjson_domain_provider_registration_failed"),
-					Catalog.RegistrationErrors[0]);
-				return false;
-			}
-			Entries = Catalog.Entries;
-		}
-		Entries.Sort(
-			[](const FFactoryEntry& Left, const FFactoryEntry& Right)
-			{
-				return Left.ProviderId < Right.ProviderId;
-			});
-		TMap<FString, TSharedRef<IImportInitializationDomainProvider>>
-			OverridesById;
-		for (const TSharedRef<IImportInitializationDomainProvider>& Override :
-			DomainOverrides)
-		{
-			const FString& OverrideId = Override->GetProviderId();
-			if (!IsExactIdentity(OverrideId))
-			{
-				OutError.Set(
-					TEXT("hjson_domain_provider_override_identity_invalid"),
-					OverrideId);
-				return false;
-			}
-			if (OverridesById.Contains(OverrideId))
-			{
-				OutError.Set(
-					TEXT("hjson_domain_provider_override_duplicate"),
-					OverrideId);
-				return false;
-			}
-			OverridesById.Add(OverrideId, Override);
-		}
-		TArray<TSharedRef<IImportInitializationDomainProvider>> Providers;
-		for (const FFactoryEntry& Entry : Entries)
-		{
-			if (const TSharedRef<IImportInitializationDomainProvider>* Override =
-				OverridesById.Find(Entry.ProviderId))
-			{
-				Providers.Add(*Override);
-				OverridesById.Remove(Entry.ProviderId);
-				continue;
-			}
-			TSharedPtr<IImportInitializationDomainProvider> Provider;
-			FWorkspaceError FactoryError;
-			if (!Entry.Factory(Provider, FactoryError)
-				|| !Provider.IsValid()
-				|| Provider->GetProviderId() != Entry.ProviderId)
-			{
-				OutError.Set(
-					TEXT("hjson_domain_provider_factory_failed"),
-					Entry.ProviderId + TEXT(":") + FactoryError.GetCode());
-				return false;
-			}
-			Providers.Add(Provider.ToSharedRef());
-		}
-		TArray<FString> RemainingOverrideIds;
-		OverridesById.GetKeys(RemainingOverrideIds);
-		RemainingOverrideIds.Sort();
-		for (const FString& OverrideId : RemainingOverrideIds)
-		{
-			Providers.Add(OverridesById.FindChecked(OverrideId));
-		}
+		TArray<TSharedRef<IImportInitializationDomainProvider>> Providers =
+			ExactProviders;
 		TSharedPtr<const FImportInitializationDomainProviderRegistry>
 			BuiltRegistry;
 		if (!FImportInitializationDomainProviderRegistry::TryFreeze(
-			MoveTemp(Providers), BuiltRegistry, OutError))
+			MoveTemp(Providers),
+			BuiltRegistry,
+			OutError))
 		{
 			return false;
-		}
-		if (bInstallAsProcessAuthority)
-		{
-			FProcessCatalog& Catalog = ProcessCatalog();
-			FScopeLock Lock(&Catalog.Mutex);
-			if (!Catalog.InstalledAuthority.IsValid())
-			{
-				Catalog.InstalledAuthority = BuiltRegistry;
-			}
-			BuiltRegistry = Catalog.InstalledAuthority;
 		}
 		OutRegistry = MoveTemp(BuiltRegistry);
 		return true;
@@ -429,10 +305,21 @@ namespace UE::UAI::HjsonWorkspace
 			OutRegistry,
 		FWorkspaceError& OutError)
 	{
-		return TryFreezeProcessImportInitializationDomainProviders(
-			{},
-			false,
-			OutRegistry,
-			OutError);
+		OutRegistry.Reset();
+		OutError.Reset();
+		FString CapabilityError;
+		DomainCapability::FDomainCapabilityAuthorities Authorities;
+		if (!DomainCapability::TryGetOrBuildProcessDomainCapabilityAuthorities(
+				Authorities,
+				CapabilityError)
+			|| !Authorities.GetHjsonRegistry().IsValid())
+		{
+			OutError.Set(
+				TEXT("hjson_domain_provider_authority_unavailable"),
+				CapabilityError);
+			return false;
+		}
+		OutRegistry = Authorities.GetHjsonRegistry();
+		return true;
 	}
 }

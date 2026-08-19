@@ -11,6 +11,7 @@ namespace UE::UAI::Module::CommandRegistration::AnimationBlueprint
 			TEXT("animation-blueprint-domain-provider");
 		const HjsonWorkspace::FImportInitializationDomainProviderFactoryRegistration
 			ProviderRegistration(
+				TEXT("animation-blueprint-command-migration"),
 				TEXT("animation-blueprint-domain-provider"),
 				&OperationOwners::AnimationBlueprint::
 					TryCreateAnimationBlueprintDomainProvider);

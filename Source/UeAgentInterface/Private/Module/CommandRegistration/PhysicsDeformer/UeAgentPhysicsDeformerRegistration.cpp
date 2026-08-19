@@ -149,9 +149,6 @@ namespace UE::UAI::Module::CommandRegistration::PhysicsDeformer
 			TArray<FUeAgentCommandDeclaration> Declarations;
 		};
 
-		const FUeAgentActiveCommandContributionFactoryRegistration Registration(
-			TEXT("physics-deformer-operation"), &TryCreateContribution);
-
 		bool TryCreateDomainCapability(
 			TSharedPtr<const DomainCapability::FDomainCapabilityContribution>&
 				OutContribution,

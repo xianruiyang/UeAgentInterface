@@ -483,16 +483,11 @@ bool FUeAgentInterfaceModule::StartServerInternal()
 		MakeShared<
 				FModuleRequestContextInvalidator,
 				ESPMode::ThreadSafe>();
-	TSharedPtr<const UE::UAI::DomainCapability::
-		FFrozenDomainCapabilitySet> FrozenDomainCapabilities;
 	UE::UAI::DomainCapability::FDomainCapabilityAuthorities
 		DomainCapabilityPreflight;
 	FString DomainCapabilityError;
-	if (!UE::UAI::DomainCapability::TryFreezeProcessDomainCapabilities(
-			FrozenDomainCapabilities,
-			DomainCapabilityError)
-		|| !FrozenDomainCapabilities.IsValid()
-		|| !FrozenDomainCapabilities->TryBuildAuthorities(
+	if (!UE::UAI::DomainCapability::
+		TryGetOrBuildProcessDomainCapabilityAuthorities(
 			DomainCapabilityPreflight,
 			DomainCapabilityError))
 	{

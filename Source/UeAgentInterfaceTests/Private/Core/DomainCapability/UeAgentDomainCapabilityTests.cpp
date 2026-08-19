@@ -693,23 +693,67 @@ bool FUeAgentDomainCapabilityExistingAuthorityProjectionTest::RunTest(
 {
 	FString Error;
 	TSharedPtr<const FFrozenDomainCapabilitySet> Frozen;
+	const bool bProcessFrozen = TryFreezeProcessDomainCapabilities(
+		Frozen,
+		Error);
 	TestTrue(
 		TEXT("freeze self-registered representative domains without a central list"),
-		TryFreezeProcessDomainCapabilities(Frozen, Error));
+		bProcessFrozen);
+	if (!bProcessFrozen)
+	{
+		AddError(TEXT("process domain capability freeze failed: ") + Error);
+	}
 	TestTrue(TEXT("representative frozen set returned"), Frozen.IsValid());
 	if (!Frozen.IsValid())
 	{
 		return false;
 	}
 	TSet<FString> DomainIds;
+	int32 DeclaredCommandCount = 0;
+	int32 DeclaredHjsonProviderCount = 0;
 	for (const TSharedRef<const FDomainCapabilityContribution>& Contribution :
 		Frozen->GetContributions())
 	{
 		DomainIds.Add(Contribution->GetDomainId());
+		for (const TSharedRef<Module::CommandRegistration::Active::
+			IUeAgentActiveCommandContribution>& CommandContribution :
+			Contribution->GetDeclaration().Command.Contributions)
+		{
+			TArray<CommandContract::FUeAgentCommandDeclaration> Declarations;
+			CommandContribution->CollectDeclarations(Declarations);
+			DeclaredCommandCount += Declarations.Num();
+		}
+		DeclaredHjsonProviderCount +=
+			Contribution->GetDeclaration().Hjson.Providers.Num();
 	}
 	TestTrue(TEXT("T13 self-registers"), DomainIds.Contains(TEXT("uobject-dataasset")));
 	TestTrue(TEXT("T27 self-registers"), DomainIds.Contains(TEXT("datatable-curvetable")));
 	TestTrue(TEXT("T30 self-registers"), DomainIds.Contains(TEXT("localization-string-table")));
+	TestTrue(
+		TEXT("a command-only domain is owned by the frozen domain catalog"),
+		DomainIds.Contains(TEXT("query")));
+	TestTrue(
+		TEXT("a paired command and HJSON domain is owned atomically"),
+		DomainIds.Contains(TEXT("niagara-domain-candidates")));
+	const TSharedRef<const FDomainCapabilityContribution>* Niagara =
+		Frozen->GetContributions().FindByPredicate(
+			[](const TSharedRef<const FDomainCapabilityContribution>& Item)
+			{
+				return Item->GetDomainId()
+					== TEXT("niagara-domain-candidates");
+			});
+	TestNotNull(TEXT("the paired Niagara domain is addressable"), Niagara);
+	if (Niagara)
+	{
+		TestEqual(
+			TEXT("the paired Niagara domain owns its command contribution"),
+			(*Niagara)->GetDeclaration().Command.Contributions.Num(),
+			1);
+		TestEqual(
+			TEXT("the paired Niagara domain owns its HJSON provider"),
+			(*Niagara)->GetDeclaration().Hjson.Providers.Num(),
+			1);
+	}
 	const TSharedRef<const FDomainCapabilityContribution>* T13 =
 		Frozen->GetContributions().FindByPredicate(
 			[](const TSharedRef<const FDomainCapabilityContribution>& Item)
@@ -735,8 +779,8 @@ bool FUeAgentDomainCapabilityExistingAuthorityProjectionTest::RunTest(
 
 	FDomainCapabilityAuthorities Authorities;
 	TestTrue(
-		TEXT("project only into existing authorities"),
-		Frozen->TryBuildAuthorities(Authorities, Error));
+		TEXT("build one process authority from the frozen domain catalog"),
+		TryGetOrBuildProcessDomainCapabilityAuthorities(Authorities, Error));
 	TestTrue(
 		TEXT("T13 projected to immutable command registry"),
 		Authorities.GetCommandRegistry().IsValid());
@@ -758,11 +802,15 @@ bool FUeAgentDomainCapabilityExistingAuthorityProjectionTest::RunTest(
 				ProcessCommandDispatch,
 				Error));
 	TestTrue(
-		TEXT("domain activation returns the process command authority"),
+		TEXT("domain activation returns the identical process command authority"),
 		ProcessCommandRegistry.IsValid()
 			&& Authorities.GetCommandRegistry().IsValid()
-			&& ProcessCommandRegistry->GetContracts().Num()
-				== Authorities.GetCommandRegistry()->GetContracts().Num());
+			&& ProcessCommandRegistry.Get()
+				== Authorities.GetCommandRegistry().Get());
+	TestEqual(
+		TEXT("the command authority contains exactly the domain-declared commands"),
+		Authorities.GetCommandRegistry()->GetContracts().Num(),
+		DeclaredCommandCount);
 	TSharedPtr<const HjsonWorkspace::
 		FImportInitializationDomainProviderRegistry> ProcessHjsonRegistry;
 	HjsonWorkspace::FWorkspaceError WorkspaceError;
@@ -772,17 +820,47 @@ bool FUeAgentDomainCapabilityExistingAuthorityProjectionTest::RunTest(
 			ProcessHjsonRegistry,
 			WorkspaceError));
 	TestTrue(
-		TEXT("domain activation returns the process HJSON authority"),
+		TEXT("domain activation returns the identical process HJSON authority"),
 		ProcessHjsonRegistry.IsValid()
 			&& Authorities.GetHjsonRegistry().IsValid()
-			&& ProcessHjsonRegistry->Num()
-				== Authorities.GetHjsonRegistry()->Num());
+			&& ProcessHjsonRegistry.Get()
+				== Authorities.GetHjsonRegistry().Get());
 	if (Authorities.GetHjsonRegistry().IsValid())
 	{
-		TestTrue(
-			TEXT("the process authority retains providers outside the three adopters"),
-			Authorities.GetHjsonRegistry()->Num() > 3);
+		TestEqual(
+			TEXT("the HJSON authority contains exactly the domain-declared providers"),
+			Authorities.GetHjsonRegistry()->Num(),
+			DeclaredHjsonProviderCount);
 	}
+	TSharedPtr<Module::CommandRegistration::Active::
+		IUeAgentActiveCommandContribution> ExactContribution;
+	TestTrue(
+		TEXT("create one exact contribution for the no-fallback oracle"),
+		Module::CommandRegistration::UObjectDataAsset::
+			TryCreateProductionUObjectDataAssetContribution(
+				ExactContribution,
+				Error));
+	if (!ExactContribution.IsValid())
+	{
+		return false;
+	}
+	TArray<CommandContract::FUeAgentCommandDeclaration> ExactDeclarations;
+	ExactContribution->CollectDeclarations(ExactDeclarations);
+	TSharedPtr<const CommandRegistry::FUeAgentImmutableCommandRegistry>
+		ExactRegistry;
+	TSharedPtr<const CommandEdge::FUeAgentExactCommandDispatch> ExactDispatch;
+	TestTrue(
+		TEXT("the pure composer accepts only the exact supplied contribution"),
+		Module::CommandRegistration::Active::
+			TryComposeActiveCommandContributions(
+				{ExactContribution.ToSharedRef()},
+				ExactRegistry,
+				ExactDispatch,
+				Error));
+	TestEqual(
+		TEXT("the pure composer cannot refill omitted process contributions"),
+		ExactRegistry->GetContracts().Num(),
+		ExactDeclarations.Num());
 	FDomainCapabilityDeclaration DeclaredRoute =
 		MakeExplicitlyUnsupported(TEXT("fixture-declared-route"));
 	DeclaredRoute.Composition.Support = EDomainCapabilitySupport::Supported;

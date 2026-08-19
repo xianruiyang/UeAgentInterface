@@ -20,6 +20,7 @@ namespace UE::UAI::Module::CommandRegistration::AudioGraph
 		const FString CandidateCommandId = TEXT("audio.graph.candidates");
 		const FString CandidateOwner = TEXT("audio-graph-domain-owner");
 		const HjsonWorkspace::FImportInitializationDomainProviderFactoryRegistration ProviderRegistration(
+			TEXT("audio-graph-domain-candidates"),
 			TEXT("audio-graph-domain-provider"),
 			&OperationOwners::AudioGraph::TryCreateAudioGraphDomainProvider);
 

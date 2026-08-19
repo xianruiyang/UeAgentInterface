@@ -37,6 +37,10 @@ namespace UE::UAI::Module::CommandRegistration::Active
 		FUeAgentActiveCommandContributionFactoryRegistration(
 			const TCHAR* ContributionId,
 			FUeAgentActiveCommandContributionFactory Factory);
+		FUeAgentActiveCommandContributionFactoryRegistration(
+			const TCHAR* DomainId,
+			const TCHAR* ContributionId,
+			FUeAgentActiveCommandContributionFactory Factory);
 	};
 
 	class UEAGENTINTERFACE_API FUeAgentActiveCommandComposition final
@@ -71,13 +75,14 @@ namespace UE::UAI::Module::CommandRegistration::Active
 			OutDispatch,
 		FString& OutError);
 
-	UEAGENTINTERFACE_API bool TryComposeProcessActiveCommandComposition(
+	UEAGENTINTERFACE_API bool TryComposeActiveCommandContributions(
 		const TArray<TSharedRef<IUeAgentActiveCommandContribution>>&
-			DomainOverrides,
+			Contributions,
 		TSharedPtr<
 			const CommandRegistry::FUeAgentImmutableCommandRegistry>&
 			OutRegistry,
 		TSharedPtr<const CommandEdge::FUeAgentExactCommandDispatch>&
 			OutDispatch,
 		FString& OutError);
+
 }

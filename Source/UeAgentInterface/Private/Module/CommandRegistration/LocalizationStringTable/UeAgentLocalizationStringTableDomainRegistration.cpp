@@ -9,9 +9,6 @@ namespace UE::UAI::Module::CommandRegistration::LocalizationStringTable
 	namespace
 	{
 		const FString ProviderRegistrationId = TEXT("localization-string-table-hjson-provider");
-		const HjsonWorkspace::FImportInitializationDomainProviderFactoryRegistration Registration(
-			TEXT("localization-string-table-hjson-provider"),
-			&OperationOwners::LocalizationStringTable::TryCreateLocalizationStringTableDomainProvider);
 
 		bool TryCreateDomainCapability(
 			TSharedPtr<const DomainCapability::

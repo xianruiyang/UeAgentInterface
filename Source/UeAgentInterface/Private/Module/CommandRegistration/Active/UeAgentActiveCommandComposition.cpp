@@ -1,7 +1,6 @@
 #include "Module/CommandRegistration/Active/UeAgentActiveCommandComposition.h"
 
-#include "HAL/CriticalSection.h"
-#include "Misc/ScopeLock.h"
+#include "Core/DomainCapability/UeAgentDomainCapability.h"
 
 namespace UE::UAI::Module::CommandRegistration::Active
 {
@@ -11,26 +10,6 @@ namespace UE::UAI::Module::CommandRegistration::Active
 
 	namespace
 	{
-		struct FProcessContributionFactoryEntry final
-		{
-			FString ContributionId;
-			FUeAgentActiveCommandContributionFactory Factory = nullptr;
-		};
-
-		struct FProcessContributionCatalog final
-		{
-			FCriticalSection Mutex;
-			bool bSealed = false;
-			TArray<FProcessContributionFactoryEntry> Entries;
-			TArray<FString> RegistrationErrors;
-		};
-
-		FProcessContributionCatalog& GetProcessContributionCatalog()
-		{
-			static FProcessContributionCatalog Catalog;
-			return Catalog;
-		}
-
 		void AssignCanonicalPythonBinding(
 			CommandContract::FUeAgentCommandDeclaration& Declaration)
 		{
@@ -51,49 +30,27 @@ namespace UE::UAI::Module::CommandRegistration::Active
 				TEXT("_"));
 		}
 
-		bool RegisterProcessContributionFactory(
-			const FString& ContributionId,
-			const FUeAgentActiveCommandContributionFactory Factory)
-		{
-			FProcessContributionCatalog& Catalog =
-				GetProcessContributionCatalog();
-			FScopeLock Lock(&Catalog.Mutex);
-			if (Catalog.bSealed)
-			{
-				Catalog.RegistrationErrors.AddUnique(
-					TEXT("active_command_composition_sealed:")
-					+ ContributionId);
-				return false;
-			}
-			if (ContributionId.IsEmpty() || !Factory)
-			{
-				Catalog.RegistrationErrors.AddUnique(
-					TEXT("active_command_contribution_factory_invalid:")
-					+ ContributionId);
-				return false;
-			}
-			for (const FProcessContributionFactoryEntry& Entry :
-				Catalog.Entries)
-			{
-				if (Entry.ContributionId == ContributionId)
-				{
-					Catalog.RegistrationErrors.AddUnique(
-						TEXT("active_command_contribution_duplicate:")
-						+ ContributionId);
-					return false;
-				}
-			}
-			Catalog.Entries.Add({ContributionId, Factory});
-			return true;
-		}
 	}
 
 	FUeAgentActiveCommandContributionFactoryRegistration::
 		FUeAgentActiveCommandContributionFactoryRegistration(
 			const TCHAR* ContributionId,
 			const FUeAgentActiveCommandContributionFactory Factory)
+		: FUeAgentActiveCommandContributionFactoryRegistration(
+			ContributionId,
+			ContributionId,
+			Factory)
 	{
-		RegisterProcessContributionFactory(
+	}
+
+	FUeAgentActiveCommandContributionFactoryRegistration::
+		FUeAgentActiveCommandContributionFactoryRegistration(
+			const TCHAR* DomainId,
+			const TCHAR* ContributionId,
+			const FUeAgentActiveCommandContributionFactory Factory)
+	{
+		DomainCapability::RegisterProcessDomainCommandCapabilityFactory(
+			DomainId ? FString(DomainId) : FString(),
 			ContributionId ? FString(ContributionId) : FString(),
 			Factory);
 	}
@@ -221,9 +178,9 @@ namespace UE::UAI::Module::CommandRegistration::Active
 		return bSealed;
 	}
 
-	bool TryComposeProcessActiveCommandComposition(
+	bool TryComposeActiveCommandContributions(
 		const TArray<TSharedRef<IUeAgentActiveCommandContribution>>&
-			DomainOverrides,
+			ExactContributions,
 		TSharedPtr<const FUeAgentImmutableCommandRegistry>& OutRegistry,
 		TSharedPtr<const FUeAgentExactCommandDispatch>& OutDispatch,
 		FString& OutError)
@@ -232,99 +189,11 @@ namespace UE::UAI::Module::CommandRegistration::Active
 		OutDispatch.Reset();
 		OutError.Reset();
 
-		TArray<FProcessContributionFactoryEntry> Entries;
-		{
-			FProcessContributionCatalog& Catalog =
-				GetProcessContributionCatalog();
-			FScopeLock Lock(&Catalog.Mutex);
-			Catalog.bSealed = true;
-			if (!Catalog.RegistrationErrors.IsEmpty())
-			{
-				OutError = Catalog.RegistrationErrors[0];
-				return false;
-			}
-			Entries = Catalog.Entries;
-		}
-
-		Entries.Sort(
-			[](const FProcessContributionFactoryEntry& Left,
-			   const FProcessContributionFactoryEntry& Right)
-			{
-				return Left.ContributionId < Right.ContributionId;
-			});
-
-		TMap<FString, TSharedRef<IUeAgentActiveCommandContribution>>
-			OverridesById;
-		for (const TSharedRef<IUeAgentActiveCommandContribution>& Override :
-			DomainOverrides)
-		{
-			const FString& OverrideId = Override->GetContributionId();
-			FString NormalizedId = OverrideId;
-			NormalizedId.TrimStartAndEndInline();
-			if (NormalizedId.IsEmpty() || NormalizedId != OverrideId)
-			{
-				OutError = TEXT("active_command_override_identity_invalid:")
-					+ OverrideId;
-				return false;
-			}
-			if (OverridesById.Contains(OverrideId))
-			{
-				OutError = TEXT("active_command_override_duplicate:")
-					+ OverrideId;
-				return false;
-			}
-			OverridesById.Add(OverrideId, Override);
-		}
-
 		FUeAgentActiveCommandComposition Composition;
-		for (const FProcessContributionFactoryEntry& Entry : Entries)
+		for (const TSharedRef<IUeAgentActiveCommandContribution>& Contribution :
+			ExactContributions)
 		{
-			if (const TSharedRef<IUeAgentActiveCommandContribution>* Override =
-				OverridesById.Find(Entry.ContributionId))
-			{
-				if (!Composition.TryAdd(*Override, OutError))
-				{
-					return false;
-				}
-				OverridesById.Remove(Entry.ContributionId);
-				continue;
-			}
-			TSharedPtr<IUeAgentActiveCommandContribution> Contribution;
-			FString FactoryError;
-			if (!Entry.Factory(Contribution, FactoryError)
-				|| !Contribution.IsValid())
-			{
-				OutError = TEXT("active_command_contribution_factory_failed:")
-					+ Entry.ContributionId
-					+ TEXT(":")
-					+ FactoryError;
-				return false;
-			}
-			if (Contribution->GetContributionId()
-				!= Entry.ContributionId)
-			{
-				OutError =
-					TEXT("active_command_contribution_identity_mismatch:")
-					+ Entry.ContributionId
-					+ TEXT(":")
-					+ Contribution->GetContributionId();
-				return false;
-			}
-			if (!Composition.TryAdd(
-				Contribution.ToSharedRef(),
-				OutError))
-			{
-				return false;
-			}
-		}
-		TArray<FString> RemainingOverrideIds;
-		OverridesById.GetKeys(RemainingOverrideIds);
-		RemainingOverrideIds.Sort();
-		for (const FString& OverrideId : RemainingOverrideIds)
-		{
-			if (!Composition.TryAdd(
-				OverridesById.FindChecked(OverrideId),
-				OutError))
+			if (!Composition.TryAdd(Contribution, OutError))
 			{
 				return false;
 			}
@@ -340,10 +209,18 @@ namespace UE::UAI::Module::CommandRegistration::Active
 		TSharedPtr<const FUeAgentExactCommandDispatch>& OutDispatch,
 		FString& OutError)
 	{
-		return TryComposeProcessActiveCommandComposition(
-			{},
-			OutRegistry,
-			OutDispatch,
-			OutError);
+		OutRegistry.Reset();
+		OutDispatch.Reset();
+		OutError.Reset();
+		DomainCapability::FDomainCapabilityAuthorities Authorities;
+		if (!DomainCapability::TryGetOrBuildProcessDomainCapabilityAuthorities(
+				Authorities,
+				OutError))
+		{
+			return false;
+		}
+		OutRegistry = Authorities.GetCommandRegistry();
+		OutDispatch = Authorities.GetCommandDispatch();
+		return OutRegistry.IsValid() && OutDispatch.IsValid();
 	}
 }

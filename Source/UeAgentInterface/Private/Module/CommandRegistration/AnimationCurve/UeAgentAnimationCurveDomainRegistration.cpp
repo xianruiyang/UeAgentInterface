@@ -11,6 +11,7 @@ namespace UE::UAI::Module::CommandRegistration::AnimationCurve
 			TEXT("animation-curve-domain-provider");
 		const HjsonWorkspace::FImportInitializationDomainProviderFactoryRegistration
 			Registration(
+				TEXT("animation-curve-command-migration"),
 				TEXT("animation-curve-domain-provider"),
 				&OperationOwners::AnimationCurve::
 					TryCreateAnimationCurveDomainProvider);

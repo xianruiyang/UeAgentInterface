@@ -21,6 +21,7 @@ namespace UE::UAI::Module::CommandRegistration::Material
 		const FString CandidateOwner = TEXT("material-domain-owner");
 		const HjsonWorkspace::FImportInitializationDomainProviderFactoryRegistration
 			ProviderRegistration(
+			TEXT("material-domain-candidates"),
 			TEXT("material-domain-provider"),
 			&OperationOwners::Material::TryCreateMaterialDomainProvider);
 

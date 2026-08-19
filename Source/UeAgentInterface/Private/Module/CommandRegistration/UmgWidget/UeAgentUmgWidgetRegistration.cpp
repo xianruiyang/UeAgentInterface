@@ -10,6 +10,7 @@ namespace UE::UAI::Module::CommandRegistration::UmgWidget
 		const FString ProviderRegistrationId = TEXT("umg-widget-domain-provider");
 		const HjsonWorkspace::FImportInitializationDomainProviderFactoryRegistration
 			ProviderRegistration(
+				TEXT("umg-command-migration"),
 				TEXT("umg-widget-domain-provider"),
 				&OperationOwners::UmgWidget::TryCreateUmgWidgetDomainProvider);
 	}

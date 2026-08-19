@@ -1919,11 +1919,6 @@ namespace UE::UAI::OperationOwners::UObjectDataAsset
 			return true;
 		}
 
-		const FImportInitializationDomainProviderFactoryRegistration
-			UObjectDataAssetDomainProviderRegistration(
-				TEXT("uobject-dataasset-domain-provider"),
-				&TryCreateUObjectDataAssetDomainProviderInternal);
-
 		class FRegistryRoutedProductionService final
 			: public IUeAgentUObjectDataAssetCommandService
 		{

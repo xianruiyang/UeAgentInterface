@@ -205,9 +205,6 @@ namespace UE::UAI::Module::CommandRegistration::ViewportGraph
 				MoveTemp(Declaration), OutContribution, OutError);
 		}
 
-		const FUeAgentActiveCommandContributionFactoryRegistration Registration(
-			TEXT("viewport-graph-control"),
-			&TryCreateContribution);
 		const DomainCapability::
 			FDomainCapabilityContributionFactoryRegistration
 			DomainCapabilityRegistration(

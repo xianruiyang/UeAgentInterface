@@ -162,9 +162,6 @@ namespace UE::UAI::Module::CommandRegistration::Landscape
 			TArray<FUeAgentSimpleAuthoringCommandRoute> Routes;
 		};
 
-		const FUeAgentActiveCommandContributionFactoryRegistration Registration(
-			TEXT("landscape-operation"), &TryCreateContribution);
-
 		bool TryCreateDomainCapability(
 			TSharedPtr<const DomainCapability::FDomainCapabilityContribution>&
 				OutContribution,

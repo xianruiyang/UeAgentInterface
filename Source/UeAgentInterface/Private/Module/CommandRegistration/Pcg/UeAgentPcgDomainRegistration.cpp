@@ -23,6 +23,7 @@ namespace UE::UAI::Module::CommandRegistration::Pcg
 		const FString CandidateOwner = TEXT("pcg-domain-owner");
 	#if !UAI_T19_EXPECTED_RED_PROVIDER_DISABLED
 		const HjsonWorkspace::FImportInitializationDomainProviderFactoryRegistration ProviderRegistration(
+			TEXT("pcg-domain-candidates"),
 			TEXT("pcg-domain-provider"),
 			&OperationOwners::Pcg::TryCreatePcgDomainProvider);
 	#endif

@@ -166,6 +166,7 @@ namespace UE::UAI::OperationOwners::BlueprintNode
 
 		const FImportInitializationDomainProviderFactoryRegistration
 			BlueprintNodeDomainProviderRegistration(
+				TEXT("blueprint-node"),
 				TEXT("blueprint-node-domain-provider"),
 				&TryCreateBlueprintNodeDomainProvider);
 	}

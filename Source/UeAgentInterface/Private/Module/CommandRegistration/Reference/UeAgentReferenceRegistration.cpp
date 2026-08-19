@@ -140,10 +140,6 @@ namespace UE::UAI::Module::CommandRegistration::Reference
 			FUeAgentCommandDeclaration Declaration;
 		};
 
-		const FUeAgentActiveCommandContributionFactoryRegistration Registration(
-			TEXT("reference-operation"),
-			&TryCreateContribution);
-
 		bool TryCreateDomainCapability(
 			TSharedPtr<const DomainCapability::FDomainCapabilityContribution>&
 				OutContribution,

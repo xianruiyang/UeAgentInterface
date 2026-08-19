@@ -18,10 +18,6 @@ namespace UE::UAI::Module::CommandRegistration::WorldCommands
 	namespace
 	{
 		const FString Owner(TEXT("world-command-owner"));
-		const HjsonWorkspace::FImportInitializationDomainProviderFactoryRegistration
-			HlodProviderRegistration(
-				TEXT("world-hlod-domain-provider"),
-				&OperationOwners::WorldCommands::TryCreateWorldHlodDomainProvider);
 
 		FString WireType(const EUeAgentCommandWireType Type)
 		{
@@ -140,9 +136,6 @@ namespace UE::UAI::Module::CommandRegistration::WorldCommands
 		private:
 			TArray<FUeAgentCommandDeclaration> Declarations;
 		};
-
-		const FUeAgentActiveCommandContributionFactoryRegistration Registration(
-			TEXT("world-command-migration"), &TryCreateContribution);
 
 		bool TryCreateDomainCapability(
 			TSharedPtr<const DomainCapability::FDomainCapabilityContribution>&

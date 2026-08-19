@@ -21,6 +21,7 @@ namespace UE::UAI::Module::CommandRegistration::AnimationRigGraph
 			TEXT("animation_rig_graph.candidates");
 		const FString CandidateOwner = TEXT("animation-rig-graph-domain-owner");
 		const HjsonWorkspace::FImportInitializationDomainProviderFactoryRegistration ProviderRegistration(
+			TEXT("animation-rig-graph-domain-candidates"),
 			TEXT("animation-rig-graph-domain-provider"),
 			&OperationOwners::AnimationRigGraph::TryCreateAnimationRigGraphDomainProvider);
 

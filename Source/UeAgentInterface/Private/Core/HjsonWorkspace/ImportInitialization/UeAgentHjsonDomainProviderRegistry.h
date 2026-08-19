@@ -129,6 +129,10 @@ namespace UE::UAI::HjsonWorkspace
 		FImportInitializationDomainProviderFactoryRegistration(
 			const TCHAR* ProviderId,
 			FImportInitializationDomainProviderFactory Factory);
+		FImportInitializationDomainProviderFactoryRegistration(
+			const TCHAR* DomainId,
+			const TCHAR* ProviderId,
+			FImportInitializationDomainProviderFactory Factory);
 	};
 
 	UEAGENTINTERFACE_API bool
@@ -138,10 +142,8 @@ namespace UE::UAI::HjsonWorkspace
 		FWorkspaceError& OutError);
 
 	UEAGENTINTERFACE_API bool
-	TryFreezeProcessImportInitializationDomainProviders(
-		const TArray<TSharedRef<IImportInitializationDomainProvider>>&
-			DomainOverrides,
-		bool bInstallAsProcessAuthority,
+	TryFreezeImportInitializationDomainProviders(
+		const TArray<TSharedRef<IImportInitializationDomainProvider>>& Providers,
 		TSharedPtr<const FImportInitializationDomainProviderRegistry>&
 			OutRegistry,
 		FWorkspaceError& OutError);

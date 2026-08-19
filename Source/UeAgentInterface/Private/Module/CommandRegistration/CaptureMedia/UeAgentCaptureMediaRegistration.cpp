@@ -151,8 +151,6 @@ namespace UE::UAI::Module::CommandRegistration::CaptureMedia
 				MoveTemp(Declaration), OutContribution, OutError);
 		}
 
-		const FUeAgentActiveCommandContributionFactoryRegistration Registration(
-			TEXT("capture-media-operation-migration"), &TryCreateContribution);
 		const DomainCapability::
 			FDomainCapabilityContributionFactoryRegistration
 			DomainCapabilityRegistration(

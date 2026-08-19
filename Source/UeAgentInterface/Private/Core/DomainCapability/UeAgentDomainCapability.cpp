@@ -555,21 +555,55 @@ namespace UE::UAI::DomainCapability
 		struct FProcessFactoryEntry final
 		{
 			FString DomainId;
-			FDomainCapabilityContributionFactory Factory = nullptr;
+			FDomainCapabilityContributionFactory DomainFactory = nullptr;
+			struct FCommandFactoryEntry final
+			{
+				FString ContributionId;
+				Active::FUeAgentActiveCommandContributionFactory Factory = nullptr;
+			};
+			struct FHjsonFactoryEntry final
+			{
+				FString ProviderId;
+				HjsonWorkspace::FImportInitializationDomainProviderFactory
+					Factory = nullptr;
+			};
+			TArray<FCommandFactoryEntry> CommandFactories;
+			TArray<FHjsonFactoryEntry> HjsonFactories;
 		};
 
 		struct FProcessCatalog final
 		{
 			FCriticalSection Mutex;
 			bool bSealed = false;
+			bool bAuthorityBuildInProgress = false;
 			TArray<FProcessFactoryEntry> Entries;
 			TArray<FString> Errors;
+			TSharedPtr<const FFrozenDomainCapabilitySet> Frozen;
+			TSharedPtr<const FDomainCapabilityAuthorities> Authorities;
 		};
 
 		FProcessCatalog& ProcessCatalog()
 		{
 			static FProcessCatalog Catalog;
 			return Catalog;
+		}
+
+		FProcessFactoryEntry& FindOrAddProcessDomain(
+			FProcessCatalog& Catalog,
+			const FString& DomainId)
+		{
+			if (FProcessFactoryEntry* Existing =
+				Catalog.Entries.FindByPredicate(
+					[&DomainId](const FProcessFactoryEntry& Entry)
+					{
+						return Entry.DomainId == DomainId;
+					}))
+			{
+				return *Existing;
+			}
+			FProcessFactoryEntry& Added = Catalog.Entries.AddDefaulted_GetRef();
+			Added.DomainId = DomainId;
+			return Added;
 		}
 
 		bool RegisterProcessFactory(
@@ -591,17 +625,108 @@ namespace UE::UAI::DomainCapability
 					TEXT("domain_capability_factory_invalid:") + DomainId);
 				return false;
 			}
-			if (Catalog.Entries.ContainsByPredicate(
-				[&DomainId](const FProcessFactoryEntry& Entry)
-				{
-					return Entry.DomainId == DomainId;
-				}))
+			FProcessFactoryEntry& Entry =
+				FindOrAddProcessDomain(Catalog, DomainId);
+			if (Entry.DomainFactory)
 			{
 				Catalog.Errors.AddUnique(
 					TEXT("domain_capability_factory_duplicate:") + DomainId);
 				return false;
 			}
-			Catalog.Entries.Add({DomainId, Factory});
+			Entry.DomainFactory = Factory;
+			return true;
+		}
+
+		bool RegisterProcessCommandFactory(
+			const FString& DomainId,
+			const FString& ContributionId,
+			const Active::FUeAgentActiveCommandContributionFactory Factory)
+		{
+			FProcessCatalog& Catalog = ProcessCatalog();
+			FScopeLock Lock(&Catalog.Mutex);
+			if (Catalog.bSealed)
+			{
+				Catalog.Errors.AddUnique(
+					TEXT("domain_capability_process_catalog_sealed:")
+						+ DomainId);
+				return false;
+			}
+			if (!IsExactIdentity(DomainId)
+				|| !IsExactIdentity(ContributionId)
+				|| !Factory)
+			{
+				Catalog.Errors.AddUnique(
+					TEXT("domain_capability_command_factory_invalid:")
+						+ DomainId + TEXT(":") + ContributionId);
+				return false;
+			}
+			for (const FProcessFactoryEntry& Entry : Catalog.Entries)
+			{
+				if (Entry.CommandFactories.ContainsByPredicate(
+					[&ContributionId](
+						const FProcessFactoryEntry::FCommandFactoryEntry& Item)
+					{
+						return Item.ContributionId == ContributionId;
+					}))
+				{
+					Catalog.Errors.AddUnique(
+						TEXT("domain_capability_command_factory_duplicate:")
+							+ ContributionId);
+					return false;
+				}
+			}
+			FProcessFactoryEntry::FCommandFactoryEntry Added;
+			Added.ContributionId = ContributionId;
+			Added.Factory = Factory;
+			FindOrAddProcessDomain(Catalog, DomainId).CommandFactories.Add(
+				MoveTemp(Added));
+			return true;
+		}
+
+		bool RegisterProcessHjsonFactory(
+			const FString& DomainId,
+			const FString& ProviderId,
+			const HjsonWorkspace::
+				FImportInitializationDomainProviderFactory Factory)
+		{
+			FProcessCatalog& Catalog = ProcessCatalog();
+			FScopeLock Lock(&Catalog.Mutex);
+			if (Catalog.bSealed)
+			{
+				Catalog.Errors.AddUnique(
+					TEXT("domain_capability_process_catalog_sealed:")
+						+ DomainId);
+				return false;
+			}
+			if (!IsExactIdentity(DomainId)
+				|| !IsExactIdentity(ProviderId)
+				|| !Factory)
+			{
+				Catalog.Errors.AddUnique(
+					TEXT("domain_capability_hjson_factory_invalid:")
+						+ DomainId + TEXT(":") + ProviderId);
+				return false;
+			}
+			for (const FProcessFactoryEntry& Entry : Catalog.Entries)
+			{
+				if (Entry.HjsonFactories.ContainsByPredicate(
+					[&ProviderId](
+						const FProcessFactoryEntry::FHjsonFactoryEntry& Item)
+					{
+						return Item.ProviderId == ProviderId;
+					}))
+				{
+					Catalog.Errors.AddUnique(
+						TEXT("domain_capability_hjson_factory_duplicate:")
+							+ ProviderId);
+					return false;
+				}
+			}
+			FProcessFactoryEntry::FHjsonFactoryEntry Added;
+			Added.ProviderId = ProviderId;
+			Added.Factory = Factory;
+			FindOrAddProcessDomain(Catalog, DomainId).HjsonFactories.Add(
+				MoveTemp(Added));
 			return true;
 		}
 	}
@@ -875,27 +1000,30 @@ namespace UE::UAI::DomainCapability
 				TEXT("domain_capability_discovery_projection_not_connected"));
 		}
 
-		if (!Active::TryComposeProcessActiveCommandComposition(
-			CommandContributions,
-			Built.CommandRegistry,
-			Built.CommandDispatch,
-			OutError))
+		if (!HjsonProviders.IsEmpty())
 		{
-			return false;
+			HjsonWorkspace::FWorkspaceError WorkspaceError;
+			if (!HjsonWorkspace::
+				TryFreezeImportInitializationDomainProviders(
+					HjsonProviders,
+					Built.HjsonRegistry,
+					WorkspaceError))
+			{
+				return Fail(
+					OutError,
+					TEXT("domain_capability_hjson_projection_failed:")
+						+ WorkspaceError.GetCode());
+			}
 		}
 
-		HjsonWorkspace::FWorkspaceError WorkspaceError;
-		if (!HjsonWorkspace::
-			TryFreezeProcessImportInitializationDomainProviders(
-				HjsonProviders,
-				true,
-				Built.HjsonRegistry,
-				WorkspaceError))
+		if (!CommandContributions.IsEmpty()
+			&& !Active::TryComposeActiveCommandContributions(
+				CommandContributions,
+				Built.CommandRegistry,
+				Built.CommandDispatch,
+				OutError))
 		{
-			return Fail(
-				OutError,
-				TEXT("domain_capability_hjson_projection_failed:")
-					+ WorkspaceError.GetCode());
+			return false;
 		}
 
 		if (!CompositionContracts.IsEmpty()
@@ -1163,6 +1291,26 @@ namespace UE::UAI::DomainCapability
 			Factory);
 	}
 
+	bool RegisterProcessDomainCommandCapabilityFactory(
+		const FString& DomainId,
+		const FString& ContributionId,
+		const Active::FUeAgentActiveCommandContributionFactory Factory)
+	{
+		return RegisterProcessCommandFactory(
+			DomainId,
+			ContributionId,
+			Factory);
+	}
+
+	bool RegisterProcessDomainHjsonCapabilityFactory(
+		const FString& DomainId,
+		const FString& ProviderId,
+		const HjsonWorkspace::
+			FImportInitializationDomainProviderFactory Factory)
+	{
+		return RegisterProcessHjsonFactory(DomainId, ProviderId, Factory);
+	}
+
 	bool TryFreezeProcessDomainCapabilities(
 		TSharedPtr<const FFrozenDomainCapabilitySet>& OutFrozen,
 		FString& OutError)
@@ -1173,6 +1321,11 @@ namespace UE::UAI::DomainCapability
 		{
 			FProcessCatalog& Catalog = ProcessCatalog();
 			FScopeLock Lock(&Catalog.Mutex);
+			if (Catalog.Frozen.IsValid())
+			{
+				OutFrozen = Catalog.Frozen;
+				return true;
+			}
 			Catalog.bSealed = true;
 			if (!Catalog.Errors.IsEmpty())
 			{
@@ -1190,29 +1343,204 @@ namespace UE::UAI::DomainCapability
 		FDomainCapabilityComposition Composition;
 		for (const FProcessFactoryEntry& Entry : Entries)
 		{
-			TSharedPtr<const FDomainCapabilityContribution> Contribution;
-			FString FactoryError;
-			if (!Entry.Factory(Contribution, FactoryError)
-				|| !Contribution.IsValid())
+			FDomainCapabilityDeclaration Declaration =
+				MakeExplicitlyUnsupportedDomainCapabilityDeclaration(
+					Entry.DomainId);
+			if (Entry.DomainFactory)
 			{
-				return Fail(
-					OutError,
-					TEXT("domain_capability_factory_failed:") + Entry.DomainId
-						+ TEXT(":") + FactoryError);
+				TSharedPtr<const FDomainCapabilityContribution> BaseContribution;
+				FString FactoryError;
+				if (!Entry.DomainFactory(BaseContribution, FactoryError)
+					|| !BaseContribution.IsValid())
+				{
+					return Fail(
+						OutError,
+						TEXT("domain_capability_factory_failed:")
+							+ Entry.DomainId + TEXT(":") + FactoryError);
+				}
+				if (BaseContribution->GetDomainId() != Entry.DomainId)
+				{
+					return Fail(
+						OutError,
+						TEXT("domain_capability_factory_identity_mismatch:")
+							+ Entry.DomainId + TEXT(":")
+							+ BaseContribution->GetDomainId());
+				}
+				Declaration = BaseContribution->GetDeclaration();
 			}
-			if (Contribution->GetDomainId() != Entry.DomainId)
+
+			TArray<FProcessFactoryEntry::FCommandFactoryEntry> CommandFactories =
+				Entry.CommandFactories;
+			CommandFactories.Sort(
+				[](const FProcessFactoryEntry::FCommandFactoryEntry& Left,
+				   const FProcessFactoryEntry::FCommandFactoryEntry& Right)
+				{
+					return Left.ContributionId < Right.ContributionId;
+				});
+			for (const FProcessFactoryEntry::FCommandFactoryEntry& CommandFactory :
+				CommandFactories)
 			{
-				return Fail(
-					OutError,
-					TEXT("domain_capability_factory_identity_mismatch:")
-						+ Entry.DomainId + TEXT(":")
-						+ Contribution->GetDomainId());
+				TSharedPtr<Active::IUeAgentActiveCommandContribution>
+					CommandContribution;
+				FString FactoryError;
+				if (!CommandFactory.Factory(CommandContribution, FactoryError)
+					|| !CommandContribution.IsValid())
+				{
+					return Fail(
+						OutError,
+						TEXT("domain_capability_command_factory_failed:")
+							+ CommandFactory.ContributionId + TEXT(":")
+							+ FactoryError);
+				}
+				if (CommandContribution->GetContributionId()
+					!= CommandFactory.ContributionId)
+				{
+					return Fail(
+						OutError,
+						TEXT("domain_capability_command_factory_identity_mismatch:")
+							+ CommandFactory.ContributionId + TEXT(":")
+							+ CommandContribution->GetContributionId());
+				}
+				if (Declaration.Command.Contributions.ContainsByPredicate(
+					[&CommandFactory](
+						const TSharedRef<Active::
+							IUeAgentActiveCommandContribution>& Existing)
+					{
+						return Existing->GetContributionId()
+							== CommandFactory.ContributionId;
+					}))
+				{
+					return Fail(
+						OutError,
+						TEXT("domain_capability_command_factory_duplicate:")
+							+ CommandFactory.ContributionId);
+				}
+				Declaration.Command.Support = EDomainCapabilitySupport::Supported;
+				Declaration.Command.Contributions.Add(
+					CommandContribution.ToSharedRef());
+			}
+
+			TArray<FProcessFactoryEntry::FHjsonFactoryEntry> HjsonFactories =
+				Entry.HjsonFactories;
+			HjsonFactories.Sort(
+				[](const FProcessFactoryEntry::FHjsonFactoryEntry& Left,
+				   const FProcessFactoryEntry::FHjsonFactoryEntry& Right)
+				{
+					return Left.ProviderId < Right.ProviderId;
+				});
+			for (const FProcessFactoryEntry::FHjsonFactoryEntry& HjsonFactory :
+				HjsonFactories)
+			{
+				TSharedPtr<HjsonWorkspace::IImportInitializationDomainProvider>
+					Provider;
+				HjsonWorkspace::FWorkspaceError FactoryError;
+				if (!HjsonFactory.Factory(Provider, FactoryError)
+					|| !Provider.IsValid())
+				{
+					return Fail(
+						OutError,
+						TEXT("domain_capability_hjson_factory_failed:")
+							+ HjsonFactory.ProviderId + TEXT(":")
+							+ FactoryError.GetCode());
+				}
+				if (Provider->GetProviderId() != HjsonFactory.ProviderId)
+				{
+					return Fail(
+						OutError,
+						TEXT("domain_capability_hjson_factory_identity_mismatch:")
+							+ HjsonFactory.ProviderId + TEXT(":")
+							+ Provider->GetProviderId());
+				}
+				if (Declaration.Hjson.Providers.ContainsByPredicate(
+					[&HjsonFactory](
+						const TSharedRef<HjsonWorkspace::
+							IImportInitializationDomainProvider>& Existing)
+					{
+						return Existing->GetProviderId()
+							== HjsonFactory.ProviderId;
+					}))
+				{
+					return Fail(
+						OutError,
+						TEXT("domain_capability_hjson_factory_duplicate:")
+							+ HjsonFactory.ProviderId);
+				}
+				Declaration.Hjson.Support = EDomainCapabilitySupport::Supported;
+				Declaration.Hjson.Providers.Add(Provider.ToSharedRef());
+			}
+
+			TSharedPtr<const FDomainCapabilityContribution> Contribution;
+			if (!FDomainCapabilityContribution::TryCreate(
+					MoveTemp(Declaration),
+					Contribution,
+					OutError))
+			{
+				return false;
 			}
 			if (!Composition.TryAdd(Contribution.ToSharedRef(), OutError))
 			{
 				return false;
 			}
 		}
-		return Composition.TryFreeze(OutFrozen, OutError);
+		TSharedPtr<const FFrozenDomainCapabilitySet> BuiltFrozen;
+		if (!Composition.TryFreeze(BuiltFrozen, OutError))
+		{
+			return false;
+		}
+		FProcessCatalog& Catalog = ProcessCatalog();
+		FScopeLock Lock(&Catalog.Mutex);
+		if (!Catalog.Frozen.IsValid())
+		{
+			Catalog.Frozen = BuiltFrozen;
+		}
+		OutFrozen = Catalog.Frozen;
+		return true;
+	}
+
+	bool TryGetOrBuildProcessDomainCapabilityAuthorities(
+		FDomainCapabilityAuthorities& OutAuthorities,
+		FString& OutError)
+	{
+		OutAuthorities = FDomainCapabilityAuthorities();
+		OutError.Reset();
+		{
+			FProcessCatalog& Catalog = ProcessCatalog();
+			FScopeLock Lock(&Catalog.Mutex);
+			if (Catalog.Authorities.IsValid())
+			{
+				OutAuthorities = *Catalog.Authorities;
+				return true;
+			}
+			if (Catalog.bAuthorityBuildInProgress)
+			{
+				return Fail(
+					OutError,
+					TEXT("domain_capability_process_authority_reentrant"));
+			}
+			Catalog.bAuthorityBuildInProgress = true;
+		}
+
+		TSharedPtr<const FFrozenDomainCapabilitySet> Frozen;
+		FDomainCapabilityAuthorities BuiltAuthorities;
+		const bool bBuilt = TryFreezeProcessDomainCapabilities(
+				Frozen,
+				OutError)
+			&& Frozen.IsValid()
+			&& Frozen->TryBuildAuthorities(BuiltAuthorities, OutError);
+
+		FProcessCatalog& Catalog = ProcessCatalog();
+		FScopeLock Lock(&Catalog.Mutex);
+		Catalog.bAuthorityBuildInProgress = false;
+		if (!bBuilt)
+		{
+			return false;
+		}
+		if (!Catalog.Authorities.IsValid())
+		{
+			Catalog.Authorities =
+				MakeShared<const FDomainCapabilityAuthorities>(BuiltAuthorities);
+		}
+		OutAuthorities = *Catalog.Authorities;
+		return true;
 	}
 }
