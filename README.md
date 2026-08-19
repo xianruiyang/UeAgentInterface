@@ -54,12 +54,14 @@ Manifest、generated binding、handler forwarding、mock 或测试发现只证�
 ## 目录生命周期
 
 - `Config/`、`Resources/`、`Source/` 和上述活动文档是正常实现与维护入口。
-- `Tests/Fixtures/` 当前按受保护候选处理；修改、移动或删除前必须先识别实际 consumer，目录或 manifest
-  自称 truth 不能单独取得活动测试权威。
+- 当前没有活动 `Tests/Fixtures/` root。原五个不完整且无 consumer 的 manifest 已等形移到
+  `retired/strict_v2/audit-fixtures/unbound_contract_manifests/`；该位置只保存最小失败设计证据，不是
+  fixture truth 或自动发现入口。
 - `retired/strict_v2/` 只保留历史迁移与审计证据，不是活动需求、任务状态、生成入口、runtime owner 或
   发布真源。普通实现发现默认排除该目录；只有历史审计、迁移或 T99 工作才按精确路径读取。
-- 活动 `UAI.StrictV2.T99.FINAL.AUDIT` 当前仍检查历史隔离根；在替代 audit oracle 和等价证据完成前，
-  不得删除整个 `retired/strict_v2/`。
+- 现有 `UAI.StrictV2.T99.FINAL.AUDIT` source 仍检查历史隔离根存在，但其静态 oracle 已包含过期的固定
+  command 数量和缺失文档文本；在独立任务替代该 oracle、保存等价证据并完成构建/Automation 前，
+  不得删除整个 `retired/strict_v2/`，也不得把它当作当前完成门禁。
 
 仓库文本由根 `.gitattributes` 统一为 LF；不要依赖单台机器的 `core.autocrlf`，也不要把无关全树
 renormalize 混入业务提交。
