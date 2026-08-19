@@ -1,14 +1,15 @@
 #include "Misc/AutomationTest.h"
 
-#include "Composition/ReadExportCommand/UeAgentReadExportCommandHandlers.h"
-#include "Core/Contract/UeAgentCommandContract.h"
-#include "Core/Contract/UeAgentDescriptorRegistry.h"
+#include "CommandEdge/UeAgentExactCommandDispatch.h"
+#include "CommandRegistry/UeAgentImmutableCommandRegistry.h"
+#include "Module/CommandRegistration/Active/UeAgentActiveCommandComposition.h"
 
 namespace
 {
+	using namespace UE::UAI::CommandEdge;
+	using namespace UE::UAI::CommandRegistry;
 	using namespace UE::UAI::CommandContract;
-	using namespace UE::UAI::Composition::ReadExportCommand;
-	using namespace UE::UAI::Contract;
+	using namespace UE::UAI::Module::CommandRegistration::Active;
 }
 
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(
@@ -20,70 +21,68 @@ IMPLEMENT_SIMPLE_AUTOMATION_TEST(
 bool FUeAgentReadExportCommandContractTest::RunTest(
 	const FString& Parameters)
 {
-	const TSharedRef<const FUeAgentCommandContractRegistry>
-		CommandRegistry = GetDefaultCommandContractRegistry();
-	const TArray<FUeAgentReadExportCommandRoute>& Routes =
-		GetReadExportQueryCommandRoutes();
-	TestEqual(
-		TEXT("collapsed read inventory exposes 46 query commands"),
-		Routes.Num(),
-		46);
-	TestEqual(
-		TEXT("default manifest has 3 reference, 46 query and 1 export commands"),
-		CommandRegistry->GetContracts().Num(),
-		50);
-
-	TSharedPtr<const FUeAgentDescriptorRegistry> DescriptorRegistry;
+	(void)Parameters;
+	TSharedPtr<const FUeAgentImmutableCommandRegistry> CommandRegistry;
+	TSharedPtr<const FUeAgentExactCommandDispatch> CommandDispatch;
 	FString Error;
-	TestTrue(
-		TEXT("read/export descriptor registry composes once"),
-		TryCreateReadExportDescriptorRegistry(
-			DescriptorRegistry,
-			Error));
-	TestTrue(
-		TEXT("read/export descriptor registry exists"),
-		DescriptorRegistry.IsValid());
-	if (!DescriptorRegistry.IsValid())
+	if (!TestTrue(
+			TEXT("read/export consumes the process immutable command authority"),
+			TryComposeProcessActiveCommandComposition(
+				CommandRegistry,
+				CommandDispatch,
+				Error))
+		|| !CommandRegistry.IsValid()
+		|| !CommandDispatch.IsValid())
+	{
+		AddError(Error);
+		return false;
+	}
+
+	const TArray<FString> RequiredReadExportCommandIds{
+		TEXT("query.calibration.read"),
+		TEXT("query.command.search"),
+		TEXT("query.command.detail"),
+		TEXT("content_graph.compound"),
+		TEXT("content_graph.diagnostics"),
+		TEXT("content_graph.export_workspace"),
+		TEXT("content_graph.import_workspace"),
+		TEXT("content_graph.items"),
+		TEXT("content_graph.properties"),
+		TEXT("content_graph.relations"),
+		TEXT("content_graph.structure"),
+		TEXT("content_graph.summary"),
+		TEXT("reference.asset_apply"),
+		TEXT("reference.asset_read"),
+		TEXT("reference.origin.resolve"),
+	};
+	for (const FString& CommandId : RequiredReadExportCommandIds)
+	{
+		TestNotNull(
+			TEXT("current read/export command is exact: ") + CommandId,
+			CommandRegistry->FindExact(CommandId));
+	}
+	TestNull(
+		TEXT("retired global reference catalog is absent"),
+		CommandRegistry->FindExact(TEXT("reference.catalog_search")));
+	TestNull(
+		TEXT("legacy export route is not a public command"),
+		CommandRegistry->FindExact(TEXT("/api/uai/export")));
+
+	const FUeAgentFrozenCommandContract* Export =
+		CommandRegistry->FindExact(TEXT("content_graph.export_workspace"));
+	const FUeAgentFrozenCommandContract* Read =
+		CommandRegistry->FindExact(TEXT("reference.asset_read"));
+	if (!Export || !Read)
 	{
 		return false;
 	}
 	TestEqual(
-		TEXT("descriptor inventory stays collapsed"),
-		DescriptorRegistry->GetDescriptors().Num(),
-		46);
-
-	TSet<FString> CommandIds;
-	TSet<FString> DescriptorIds;
-	for (const FUeAgentReadExportCommandRoute& Route : Routes)
-	{
-		TestTrue(TEXT("route is valid"), Route.IsValid());
-		TestFalse(
-			TEXT("public command has one route"),
-			CommandIds.Contains(Route.CommandId));
-		TestFalse(
-			TEXT("descriptor has one public query route"),
-			DescriptorIds.Contains(
-				Route.DescriptorIdentity.GetDescriptorId()));
-		CommandIds.Add(Route.CommandId);
-		DescriptorIds.Add(
-			Route.DescriptorIdentity.GetDescriptorId());
-		TestNotNull(
-			TEXT("command is in the formal C++ registry"),
-			CommandRegistry->FindExact(Route.CommandId));
-		TestNotNull(
-			TEXT("route resolves an exact production descriptor"),
-			DescriptorRegistry->FindExact(
-				Route.DescriptorIdentity));
-	}
-	const FUeAgentCommandContract* Export =
-		CommandRegistry->FindExact(
-			GetSemanticExportCommandId());
-	TestNotNull(
-		TEXT("semantic export command is formal"),
-		Export);
-	TestTrue(
-		TEXT("legacy export route is not a public command"),
-		CommandRegistry->FindExact(TEXT("/api/uai/export"))
-			== nullptr);
+		TEXT("workspace export has target, path, and profile inputs"),
+		Export->GetInputFields().Num(),
+		3);
+	TestEqual(
+		TEXT("asset read has object, context, and projection inputs"),
+		Read->GetInputFields().Num(),
+		3);
 	return true;
 }
