@@ -223,7 +223,7 @@ static UAnimSequence* CreateAnimSequenceAssetForBake(const FString& OutputAssetP
 	return AnimSequence;
 }
 
-bool FUeAgentHttpServer::CmdControlRigBakeToAnimation(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdControlRigBakeToAnimation(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	FString SequencePath;
 	FString OutputAnimSequencePath;
@@ -391,7 +391,7 @@ bool FUeAgentHttpServer::CmdControlRigBakeToAnimation(const FUeAgentRequestConte
 	return bExported;
 }
 
-bool FUeAgentHttpServer::CmdControlRigBakeToControlRig(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdControlRigBakeToControlRig(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	FString SequencePath;
 	FString ControlRigClassPath;

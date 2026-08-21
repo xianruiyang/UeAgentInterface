@@ -3,10 +3,11 @@
 #include "CommandEdge/UeAgentExactCommandDispatch.h"
 #include "CommandRegistry/UeAgentActiveCommandManifest.h"
 #include "CommandRegistry/UeAgentImmutableCommandRegistry.h"
+#include "HAL/FileManager.h"
+#include "HAL/PlatformMisc.h"
 #include "Misc/FileHelper.h"
 #include "Misc/Paths.h"
 #include "Module/CommandRegistration/Active/UeAgentActiveCommandComposition.h"
-#include "Server/UeAgentCommandRegistry.h"
 
 namespace
 {
@@ -38,6 +39,24 @@ namespace
 		TEXT("ik_rig_apply_folder"),
 		TEXT("niagara_emitter_add_renderer"),
 		TEXT("audio_submix_record_start"),
+	};
+
+	const TArray<FString> RemovedLegacySurfaceFiles{
+		TEXT("Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Server/UeAgentCommandRegistry.h"),
+		TEXT("Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Server/UeAgentCommandRegistry.cpp"),
+		TEXT("Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Server/Generated/UeAgentCommandRegistry_NodeGraphExact.h"),
+		TEXT("Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Server/Generated/UeAgentHttpServerCommandMembers.h"),
+		TEXT("Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Server/UeAgentHttpServer.h"),
+		TEXT("Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Server/UeAgentHttpServer.cpp"),
+		TEXT("Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Server/UeAgentHttpServerTypes.h"),
+		TEXT("Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Composition/UeAgentQueryServiceComposition.h"),
+		TEXT("Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Composition/UeAgentQueryServiceComposition.cpp"),
+		TEXT("Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Composition/ReferenceCommand/UeAgentReferenceCommandHandlers.h"),
+		TEXT("Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Composition/ReferenceCommand/UeAgentReferenceCommandHandlers.cpp"),
+		TEXT("Plugins/UeAgentInterface/Source/UeAgentInterfaceTests/Private/Composition/UeAgentQueryServiceCompositionTests.cpp"),
+		TEXT("Plugins/UeAgentInterface/Source/UeAgentInterfaceTests/Private/StrictV2/t99_final_audit_spec.cpp"),
+		TEXT("Plugins/UeAgentInterface/docs/active/t99_final_audit.md"),
+		TEXT("Plugins/UeAgentInterface/docs/active/legacy_asset_retirement_manifest.json"),
 	};
 
 	bool ReadProjectFile(const FString& Relative, FString& Out)
@@ -80,16 +99,6 @@ bool FUeAgentActiveFrameworkResidualZeroTest::RunTest(
 		Registry->GetContracts())
 	{
 		CommandIds.Add(Contract.GetCommandId());
-		TestNull(
-			TEXT("canonical command has no legacy exact co-owner: ")
-				+ Contract.GetCommandId(),
-			UeAgentCommandRegistry::FindExactCommandInvoker(
-				Contract.GetCommandId()));
-		TestNull(
-			TEXT("canonical command has no legacy prefix co-owner: ")
-				+ Contract.GetCommandId(),
-			UeAgentCommandRegistry::FindPrefixedCommandInvoker(
-				Contract.GetCommandId()));
 	}
 	TestEqual(
 		TEXT("formal command IDs are unique"),
@@ -105,6 +114,21 @@ bool FUeAgentActiveFrameworkResidualZeroTest::RunTest(
 		TEXT("command discovery detail is active"),
 		Registry->FindExact(TEXT("query.command.detail")));
 
+	const bool bUpdateManifest =
+		FPlatformMisc::GetEnvironmentVariable(
+			TEXT("UAI_UPDATE_COMMAND_MANIFEST")) == TEXT("1");
+	if (bUpdateManifest)
+	{
+		TestTrue(
+			TEXT("the explicit development update path writes the active registry projection"),
+			FUeAgentActiveCommandManifest::TryWrite(
+				Registry.ToSharedRef(),
+				GetUaiCommandManifestPluginVersion(),
+				GetUaiCommandManifestBuildId(),
+				GetDefaultCommandManifestPath(),
+				Error));
+	}
+	Error.Reset();
 	TestTrue(
 		TEXT("committed manifest has no generated second truth"),
 		FUeAgentActiveCommandManifest::TryVerify(
@@ -121,14 +145,9 @@ bool FUeAgentActiveFrameworkResidualZeroTest::RunTest(
 	for (const FString& LegacyId : RetiredLegacyIds)
 	{
 		TestNull(
-			TEXT("retired exact ingress is absent: ") + LegacyId,
-			UeAgentCommandRegistry::FindExactCommandInvoker(LegacyId));
-		TestNull(
-			TEXT("retired prefix ingress is absent: ") + LegacyId,
-			UeAgentCommandRegistry::FindPrefixedCommandInvoker(LegacyId));
-		TestTrue(
-			TEXT("retired ingress fails closed: ") + LegacyId,
-			UeAgentCommandRegistry::IsExplicitlyUnsupportedCommand(LegacyId));
+			TEXT("retired identity is absent from the sole current registry: ")
+				+ LegacyId,
+			Registry->FindExact(LegacyId));
 	}
 
 	FString ModuleSource;
@@ -148,17 +167,24 @@ bool FUeAgentActiveFrameworkResidualZeroTest::RunTest(
 		TEXT("module does not activate the old query composition"),
 		ModuleSource.Contains(TEXT("FUeAgentQueryServiceComposition")));
 
-	FString LegacyServerSource;
+	for (const FString& RelativePath : RemovedLegacySurfaceFiles)
+	{
+		TestFalse(
+			TEXT("legacy compiled public surface is physically absent: ")
+				+ RelativePath,
+			IFileManager::Get().FileExists(
+				*(FPaths::ProjectDir() / RelativePath)));
+	}
 	TestTrue(
-		TEXT("legacy server source is inspectable"),
-		ReadProjectFile(
-			TEXT("Plugins/UeAgentInterface/Source/UeAgentInterface/Private/Server/UeAgentHttpServer.cpp"),
-			LegacyServerSource));
-	TestFalse(
-		TEXT("legacy /api/exec ingress is not bound"),
-		LegacyServerSource.Contains(
-			TEXT("BindCheckedRoute(TEXT(\"/api/exec\")"),
-			ESearchCase::CaseSensitive));
+		TEXT("retained internal mechanics has an explicit non-server owner"),
+		IFileManager::Get().FileExists(
+			*(FPaths::ProjectDir()
+				/ TEXT("Plugins/UeAgentInterface/Source/UeAgentInterface/Private/LegacyMechanics/UeAgentLegacyMechanics.h"))));
+	TestTrue(
+		TEXT("retired final-audit evidence bundle is explicitly isolated"),
+		IFileManager::Get().FileExists(
+			*(FPaths::ProjectDir()
+				/ TEXT("Plugins/UeAgentInterface/retired/strict_v2/final-audit/README.md"))));
 
 	FString GeneratedBinding;
 	TestTrue(

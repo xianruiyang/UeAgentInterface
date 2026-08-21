@@ -97,7 +97,7 @@
 #include "UeAgentInterfaceSettings.h"
 #include "WidgetBlueprint.h"
 
-bool FUeAgentHttpServer::CmdSequenceAddPropertyKey(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdSequenceAddPropertyKey(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	FString PropertyTypeText;
 	if (!JsonTryGetString(Ctx.Params, TEXT("property_type"), PropertyTypeText) || PropertyTypeText.TrimStartAndEnd().IsEmpty())

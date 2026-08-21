@@ -112,6 +112,7 @@ namespace UE::UAI::CommandHandlers::AiBehavior
 		bool bReadOnly = false;
 		if (!DomainAdapters::AiBehavior::TryExecuteContentGraph(
 			Request.GetCommandId(), Request.GetTargetIdentity(),
+			Request.GetRootTypeIdentity(),
 			Request.GetCanonicalParamsJson(), Payload, bReadOnly, OutError))
 		{
 			return false;

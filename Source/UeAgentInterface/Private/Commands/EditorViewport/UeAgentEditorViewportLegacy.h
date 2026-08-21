@@ -4,7 +4,7 @@
 
 #include "CoreMinimal.h"
 #include "Dom/JsonObject.h"
-#include "Server/UeAgentHttpServer.h"
+#include "LegacyMechanics/UeAgentLegacyMechanics.h"
 
 namespace UeAgentEditorViewportLegacy
 {
@@ -17,21 +17,21 @@ namespace UeAgentEditorViewportLegacy
 	void MergeFocusResultIntoLegacyFields(const TSharedPtr<FJsonObject>& Data);
 
 	bool ExecuteCameraGet(
-		const FUeAgentHttpServer& Server,
+		const FUeAgentLegacyMechanics& Server,
 		const FUeAgentRequestContext& Ctx,
 		const TSharedPtr<FJsonObject>& Target,
 		TSharedPtr<FJsonObject>& OutData,
 		FString& OutError);
 
 	bool ExecuteCameraSet(
-		const FUeAgentHttpServer& Server,
+		const FUeAgentLegacyMechanics& Server,
 		const FUeAgentRequestContext& Ctx,
 		const TSharedPtr<FJsonObject>& Target,
 		TSharedPtr<FJsonObject>& OutData,
 		FString& OutError);
 
 	bool ExecuteFocus(
-		const FUeAgentHttpServer& Server,
+		const FUeAgentLegacyMechanics& Server,
 		const FUeAgentRequestContext& Ctx,
 		const TSharedPtr<FJsonObject>& Target,
 		const TSharedPtr<FJsonObject>& Focus,

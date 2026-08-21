@@ -65,7 +65,7 @@
 #include "UObject/Package.h"
 #include "UObject/UObjectIterator.h"
 
-bool FUeAgentHttpServer::ExecuteControlRigShapeLibraryCommand(const FString& CommandLower, const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::ExecuteControlRigShapeLibraryCommand(const FString& CommandLower, const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	if (CommandLower == TEXT("control_rig_shape_library_create"))
 	{
@@ -91,7 +91,7 @@ bool FUeAgentHttpServer::ExecuteControlRigShapeLibraryCommand(const FString& Com
 	return false;
 }
 
-bool FUeAgentHttpServer::ExecuteControlRigCommand(const FString& CommandLower, const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::ExecuteControlRigCommand(const FString& CommandLower, const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	if (CommandLower == TEXT("control_rig_create"))
 	{
@@ -153,7 +153,7 @@ bool FUeAgentHttpServer::ExecuteControlRigCommand(const FString& CommandLower, c
 	return false;
 }
 
-bool FUeAgentHttpServer::CmdControlRigCreate(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdControlRigCreate(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	FString AssetPath;
 	if (!JsonTryGetString(Ctx.Params, TEXT("asset_path"), AssetPath) || AssetPath.TrimStartAndEnd().IsEmpty())
@@ -204,7 +204,7 @@ bool FUeAgentHttpServer::CmdControlRigCreate(const FUeAgentRequestContext& Ctx, 
 	return true;
 }
 
-bool FUeAgentHttpServer::CmdControlRigGetInfo(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdControlRigGetInfo(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	FString AssetPath;
 	if (!JsonTryGetString(Ctx.Params, TEXT("asset_path"), AssetPath) || AssetPath.TrimStartAndEnd().IsEmpty())

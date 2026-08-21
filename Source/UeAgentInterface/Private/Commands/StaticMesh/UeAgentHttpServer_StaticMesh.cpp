@@ -793,7 +793,7 @@ namespace UeAgentStaticMeshOps
 	}
 }
 
-bool FUeAgentHttpServer::ExecuteStaticMeshCommand(const FString& CommandLower, const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::ExecuteStaticMeshCommand(const FString& CommandLower, const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	if (CommandLower == TEXT("static_mesh_open_editor")) return CmdStaticMeshOpenEditor(Ctx, OutData, OutError);
 	if (CommandLower == TEXT("static_mesh_get_info")) return CmdStaticMeshGetInfo(Ctx, OutData, OutError);
@@ -815,7 +815,7 @@ bool FUeAgentHttpServer::ExecuteStaticMeshCommand(const FString& CommandLower, c
 	return false;
 }
 
-bool FUeAgentHttpServer::CmdStaticMeshOpenEditor(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdStaticMeshOpenEditor(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	FString AssetPathInput;
 	if (!JsonTryGetString(Ctx.Params, TEXT("asset_path"), AssetPathInput) || AssetPathInput.IsEmpty())
@@ -849,7 +849,7 @@ bool FUeAgentHttpServer::CmdStaticMeshOpenEditor(const FUeAgentRequestContext& C
 	return true;
 }
 
-bool FUeAgentHttpServer::CmdStaticMeshGetInfo(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdStaticMeshGetInfo(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	FString AssetPathInput;
 	if (!JsonTryGetString(Ctx.Params, TEXT("asset_path"), AssetPathInput) || AssetPathInput.IsEmpty())
@@ -952,7 +952,7 @@ bool FUeAgentHttpServer::CmdStaticMeshGetInfo(const FUeAgentRequestContext& Ctx,
 	return true;
 }
 
-bool FUeAgentHttpServer::CmdStaticMeshGetBounds(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdStaticMeshGetBounds(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	FString AssetPathInput;
 	if (!JsonTryGetString(Ctx.Params, TEXT("asset_path"), AssetPathInput) || AssetPathInput.IsEmpty())
@@ -975,7 +975,7 @@ bool FUeAgentHttpServer::CmdStaticMeshGetBounds(const FUeAgentRequestContext& Ct
 	return true;
 }
 
-bool FUeAgentHttpServer::CmdStaticMeshGetLocalCorners(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdStaticMeshGetLocalCorners(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	FString AssetPathInput;
 	if (!JsonTryGetString(Ctx.Params, TEXT("asset_path"), AssetPathInput) || AssetPathInput.IsEmpty())
@@ -999,7 +999,7 @@ bool FUeAgentHttpServer::CmdStaticMeshGetLocalCorners(const FUeAgentRequestConte
 	return true;
 }
 
-bool FUeAgentHttpServer::CmdStaticMeshSetPreviewView(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdStaticMeshSetPreviewView(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	FString AssetPathInput;
 	if (!JsonTryGetString(Ctx.Params, TEXT("asset_path"), AssetPathInput) || AssetPathInput.IsEmpty())
@@ -1096,7 +1096,7 @@ bool FUeAgentHttpServer::CmdStaticMeshSetPreviewView(const FUeAgentRequestContex
 	return true;
 }
 
-bool FUeAgentHttpServer::CmdStaticMeshSetProperty(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdStaticMeshSetProperty(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	FString AssetPathInput;
 	if (!JsonTryGetString(Ctx.Params, TEXT("asset_path"), AssetPathInput) || AssetPathInput.IsEmpty())
@@ -1163,7 +1163,7 @@ bool FUeAgentHttpServer::CmdStaticMeshSetProperty(const FUeAgentRequestContext& 
 	return true;
 }
 
-bool FUeAgentHttpServer::CmdStaticMeshSetMaterialSlot(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdStaticMeshSetMaterialSlot(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	FString AssetPathInput;
 	if (!JsonTryGetString(Ctx.Params, TEXT("asset_path"), AssetPathInput) || AssetPathInput.IsEmpty())
@@ -1216,7 +1216,7 @@ bool FUeAgentHttpServer::CmdStaticMeshSetMaterialSlot(const FUeAgentRequestConte
 	return true;
 }
 
-bool FUeAgentHttpServer::CmdStaticMeshSetCollisionBoxes(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdStaticMeshSetCollisionBoxes(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	FString AssetPathInput;
 	if (!JsonTryGetString(Ctx.Params, TEXT("asset_path"), AssetPathInput) || AssetPathInput.IsEmpty())
@@ -1314,7 +1314,7 @@ bool FUeAgentHttpServer::CmdStaticMeshSetCollisionBoxes(const FUeAgentRequestCon
 	return true;
 }
 
-bool FUeAgentHttpServer::CmdStaticMeshSetCollisionSpheres(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdStaticMeshSetCollisionSpheres(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	FString AssetPathInput;
 	if (!JsonTryGetString(Ctx.Params, TEXT("asset_path"), AssetPathInput) || AssetPathInput.IsEmpty())
@@ -1397,7 +1397,7 @@ bool FUeAgentHttpServer::CmdStaticMeshSetCollisionSpheres(const FUeAgentRequestC
 	return true;
 }
 
-bool FUeAgentHttpServer::CmdStaticMeshSetCollisionCapsules(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdStaticMeshSetCollisionCapsules(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	FString AssetPathInput;
 	if (!JsonTryGetString(Ctx.Params, TEXT("asset_path"), AssetPathInput) || AssetPathInput.IsEmpty())
@@ -1489,7 +1489,7 @@ bool FUeAgentHttpServer::CmdStaticMeshSetCollisionCapsules(const FUeAgentRequest
 	return true;
 }
 
-bool FUeAgentHttpServer::CmdStaticMeshAddSocket(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdStaticMeshAddSocket(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	FString AssetPathInput;
 	if (!JsonTryGetString(Ctx.Params, TEXT("asset_path"), AssetPathInput) || AssetPathInput.IsEmpty())
@@ -1548,7 +1548,7 @@ bool FUeAgentHttpServer::CmdStaticMeshAddSocket(const FUeAgentRequestContext& Ct
 	return true;
 }
 
-bool FUeAgentHttpServer::CmdStaticMeshUpdateSocket(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdStaticMeshUpdateSocket(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	FString AssetPathInput;
 	if (!JsonTryGetString(Ctx.Params, TEXT("asset_path"), AssetPathInput) || AssetPathInput.IsEmpty())
@@ -1612,7 +1612,7 @@ bool FUeAgentHttpServer::CmdStaticMeshUpdateSocket(const FUeAgentRequestContext&
 	return true;
 }
 
-bool FUeAgentHttpServer::CmdStaticMeshRemoveSocket(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdStaticMeshRemoveSocket(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	FString AssetPathInput;
 	if (!JsonTryGetString(Ctx.Params, TEXT("asset_path"), AssetPathInput) || AssetPathInput.IsEmpty())
@@ -1658,22 +1658,22 @@ bool FUeAgentHttpServer::CmdStaticMeshRemoveSocket(const FUeAgentRequestContext&
 	return true;
 }
 
-bool FUeAgentHttpServer::CmdStaticMeshExportFolder(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdStaticMeshExportFolder(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	return UeAgentReflectionAuthoringCommandBridge::Export(TEXT("static_mesh"), Ctx.Params, OutData, OutError);
 }
 
-bool FUeAgentHttpServer::CmdStaticMeshApplyFolder(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdStaticMeshApplyFolder(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	return UeAgentReflectionAuthoringCommandBridge::Apply(TEXT("static_mesh"), Ctx.Params, OutData, OutError, Ctx.RequestId);
 }
 
-bool FUeAgentHttpServer::CmdStaticMeshValidateFolder(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdStaticMeshValidateFolder(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	return UeAgentReflectionAuthoringCommandBridge::Validate(TEXT("static_mesh"), Ctx.Params, OutData, OutError);
 }
 
-bool FUeAgentHttpServer::CmdStaticMeshValidateGeometry(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdStaticMeshValidateGeometry(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	FString AssetPathInput;
 	if (!JsonTryGetString(Ctx.Params, TEXT("asset_path"), AssetPathInput) || AssetPathInput.IsEmpty())
@@ -1694,7 +1694,7 @@ bool FUeAgentHttpServer::CmdStaticMeshValidateGeometry(const FUeAgentRequestCont
 	return true;
 }
 
-bool FUeAgentHttpServer::CmdStaticMeshValidateUvs(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdStaticMeshValidateUvs(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	FString AssetPathInput;
 	if (!JsonTryGetString(Ctx.Params, TEXT("asset_path"), AssetPathInput) || AssetPathInput.IsEmpty())
@@ -1714,7 +1714,7 @@ bool FUeAgentHttpServer::CmdStaticMeshValidateUvs(const FUeAgentRequestContext& 
 	return true;
 }
 
-bool FUeAgentHttpServer::CmdStaticMeshBuild(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdStaticMeshBuild(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	FString AssetPathInput;
 	if (!JsonTryGetString(Ctx.Params, TEXT("asset_path"), AssetPathInput) || AssetPathInput.IsEmpty())
@@ -1743,7 +1743,7 @@ bool FUeAgentHttpServer::CmdStaticMeshBuild(const FUeAgentRequestContext& Ctx, T
 	return BuildErrors.Num() == 0;
 }
 
-bool FUeAgentHttpServer::CmdStaticMeshReimport(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdStaticMeshReimport(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	FString AssetPathInput;
 	if (!JsonTryGetString(Ctx.Params, TEXT("asset_path"), AssetPathInput) || AssetPathInput.IsEmpty())
@@ -1841,7 +1841,7 @@ bool FUeAgentHttpServer::CmdStaticMeshReimport(const FUeAgentRequestContext& Ctx
 	return true;
 }
 
-bool FUeAgentHttpServer::CmdStaticMeshPreviewCollision(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdStaticMeshPreviewCollision(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	FString AssetPathInput;
 	if (!JsonTryGetString(Ctx.Params, TEXT("asset_path"), AssetPathInput) || AssetPathInput.IsEmpty())

@@ -1,4 +1,4 @@
-#include "Server/UeAgentHttpServer.h"
+#include "LegacyMechanics/UeAgentLegacyMechanics.h"
 
 #include "Utilities/UeAgentAuthoringFolderIO.h"
 
@@ -382,7 +382,7 @@ namespace UeAgentAIOps
 	}
 }
 
-bool FUeAgentHttpServer::CmdSmartObjectDefinitionCreate(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdSmartObjectDefinitionCreate(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	FString AssetPath;
 	if (!JsonTryGetString(Ctx.Params, TEXT("asset_path"), AssetPath) || AssetPath.IsEmpty())
@@ -492,7 +492,7 @@ bool FUeAgentHttpServer::CmdSmartObjectDefinitionCreate(const FUeAgentRequestCon
 	return true;
 }
 
-bool FUeAgentHttpServer::CmdSmartObjectDefinitionGetInfo(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdSmartObjectDefinitionGetInfo(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	FString AssetPath;
 	if (!JsonTryGetString(Ctx.Params, TEXT("asset_path"), AssetPath) || AssetPath.IsEmpty())
@@ -511,7 +511,7 @@ bool FUeAgentHttpServer::CmdSmartObjectDefinitionGetInfo(const FUeAgentRequestCo
 	return true;
 }
 
-bool FUeAgentHttpServer::CmdSmartObjectDefinitionExportJson(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdSmartObjectDefinitionExportJson(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	if (!CmdSmartObjectDefinitionGetInfo(Ctx, OutData, OutError))
 	{
@@ -532,7 +532,7 @@ bool FUeAgentHttpServer::CmdSmartObjectDefinitionExportJson(const FUeAgentReques
 	return true;
 }
 
-bool FUeAgentHttpServer::CmdSmartObjectDefinitionValidateJson(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdSmartObjectDefinitionValidateJson(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	FString JsonFile;
 	if (!JsonTryGetString(Ctx.Params, TEXT("json_file"), JsonFile) || JsonFile.IsEmpty())
@@ -555,7 +555,7 @@ bool FUeAgentHttpServer::CmdSmartObjectDefinitionValidateJson(const FUeAgentRequ
 	return Issues.Num() == 0;
 }
 
-bool FUeAgentHttpServer::CmdSmartObjectDefinitionApplyJson(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdSmartObjectDefinitionApplyJson(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	FString JsonFile;
 	JsonTryGetString(Ctx.Params, TEXT("json_file"), JsonFile);
@@ -729,7 +729,7 @@ bool FUeAgentHttpServer::CmdSmartObjectDefinitionApplyJson(const FUeAgentRequest
 	return true;
 }
 
-bool FUeAgentHttpServer::CmdSmartObjectValidateSetup(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdSmartObjectValidateSetup(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	OutData = MakeShared<FJsonObject>();
 	TArray<TSharedPtr<FJsonValue>> Issues;
@@ -781,7 +781,7 @@ bool FUeAgentHttpServer::CmdSmartObjectValidateSetup(const FUeAgentRequestContex
 	return Issues.Num() == 0;
 }
 
-bool FUeAgentHttpServer::CmdSmartObjectFind(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdSmartObjectFind(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	UWorld* World = GetEditorWorld(OutError);
 	if (!World)
@@ -859,7 +859,7 @@ bool FUeAgentHttpServer::CmdSmartObjectFind(const FUeAgentRequestContext& Ctx, T
 	return true;
 }
 
-bool FUeAgentHttpServer::CmdSmartObjectClaim(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdSmartObjectClaim(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	UWorld* World = GetEditorWorld(OutError);
 	if (!World)
@@ -917,7 +917,7 @@ bool FUeAgentHttpServer::CmdSmartObjectClaim(const FUeAgentRequestContext& Ctx, 
 	return true;
 }
 
-bool FUeAgentHttpServer::CmdSmartObjectRelease(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdSmartObjectRelease(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	UWorld* World = GetEditorWorld(OutError);
 	if (!World)
@@ -950,7 +950,7 @@ bool FUeAgentHttpServer::CmdSmartObjectRelease(const FUeAgentRequestContext& Ctx
 	return bReleased;
 }
 
-bool FUeAgentHttpServer::CmdSmartObjectRuntimeSnapshot(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdSmartObjectRuntimeSnapshot(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	UWorld* World = GetEditorWorld(OutError);
 	if (!World)
@@ -985,7 +985,7 @@ bool FUeAgentHttpServer::CmdSmartObjectRuntimeSnapshot(const FUeAgentRequestCont
 	return true;
 }
 
-bool FUeAgentHttpServer::CmdSmartObjectRuntimeProbe(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdSmartObjectRuntimeProbe(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	TSharedPtr<FJsonObject> FindData;
 	if (!CmdSmartObjectFind(Ctx, FindData, OutError))
@@ -1123,7 +1123,7 @@ bool FUeAgentHttpServer::CmdSmartObjectRuntimeProbe(const FUeAgentRequestContext
 	return true;
 }
 
-bool FUeAgentHttpServer::CmdAIBehaviorStackExportFolder(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdAIBehaviorStackExportFolder(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	FString FolderInput;
 	if (!JsonTryGetString(Ctx.Params, TEXT("folder_path"), FolderInput) || FolderInput.IsEmpty())
@@ -1428,7 +1428,7 @@ bool FUeAgentHttpServer::CmdAIBehaviorStackExportFolder(const FUeAgentRequestCon
 	return true;
 }
 
-bool FUeAgentHttpServer::CmdAIBehaviorStackValidateFolder(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdAIBehaviorStackValidateFolder(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	FString FolderInput;
 	if (!JsonTryGetString(Ctx.Params, TEXT("folder_path"), FolderInput) || FolderInput.IsEmpty())
@@ -1540,7 +1540,7 @@ bool FUeAgentHttpServer::CmdAIBehaviorStackValidateFolder(const FUeAgentRequestC
 	return Issues.Num() == 0;
 }
 
-bool FUeAgentHttpServer::CmdAIBehaviorStackRuntimeProbe(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdAIBehaviorStackRuntimeProbe(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	OutData = MakeShared<FJsonObject>();
 	double DurationSeconds = 0.0;

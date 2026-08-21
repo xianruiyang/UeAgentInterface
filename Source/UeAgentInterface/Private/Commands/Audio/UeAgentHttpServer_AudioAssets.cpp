@@ -1,6 +1,6 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
-#include "Server/UeAgentHttpServer.h"
+#include "LegacyMechanics/UeAgentLegacyMechanics.h"
 #include "Commands/Audio/UeAgentAudioFolderCommandBridge.h"
 #include "Commands/Audio/UeAgentHttpServer_AudioOps.h"
 #include "Dom/JsonObject.h"
@@ -16,7 +16,7 @@
 #include "Sound/SoundSubmixSend.h"
 #include "SubmixEffects/AudioMixerSubmixEffectDynamicsProcessor.h"
 
-bool FUeAgentHttpServer::CmdSoundAttenuationCreate(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdSoundAttenuationCreate(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	using namespace UeAgentAudioOps;
 	FString AssetPath;
@@ -54,7 +54,7 @@ bool FUeAgentHttpServer::CmdSoundAttenuationCreate(const FUeAgentRequestContext&
 	OutData->SetObjectField(TEXT("coverage_report"), MakeCoverageReport(SoundAttenuationProfile));
 	return true;
 }
-bool FUeAgentHttpServer::CmdSoundAttenuationGetInfo(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdSoundAttenuationGetInfo(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	using namespace UeAgentAudioOps;
 	FString AssetPath;
@@ -73,7 +73,7 @@ bool FUeAgentHttpServer::CmdSoundAttenuationGetInfo(const FUeAgentRequestContext
 	OutData = BuildSoundAttenuationInfo(Asset, bIncludeRaw);
 	return true;
 }
-bool FUeAgentHttpServer::CmdSoundAttenuationExportJson(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdSoundAttenuationExportJson(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	using namespace UeAgentAudioOps;
 	FString AssetPath;
@@ -100,7 +100,7 @@ bool FUeAgentHttpServer::CmdSoundAttenuationExportJson(const FUeAgentRequestCont
 	OutData->SetStringField(TEXT("output_file"), SavedPath);
 	return true;
 }
-bool FUeAgentHttpServer::CmdSoundAttenuationValidateJson(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdSoundAttenuationValidateJson(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	using namespace UeAgentAudioOps;
 	FString JsonFile;
@@ -131,7 +131,7 @@ bool FUeAgentHttpServer::CmdSoundAttenuationValidateJson(const FUeAgentRequestCo
 	OutData->SetObjectField(TEXT("coverage_report"), MakeCoverageReport(SoundAttenuationProfile));
 	return true;
 }
-bool FUeAgentHttpServer::CmdSoundAttenuationApplyJson(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdSoundAttenuationApplyJson(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	using namespace UeAgentAudioOps;
 	FString JsonFile;
@@ -203,7 +203,7 @@ bool FUeAgentHttpServer::CmdSoundAttenuationApplyJson(const FUeAgentRequestConte
 	OutData->SetObjectField(TEXT("coverage_report"), MakeCoverageReport(SoundAttenuationProfile));
 	return true;
 }
-bool FUeAgentHttpServer::CmdSoundConcurrencyCreate(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdSoundConcurrencyCreate(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	using namespace UeAgentAudioOps;
 	FString AssetPath;
@@ -234,7 +234,7 @@ bool FUeAgentHttpServer::CmdSoundConcurrencyCreate(const FUeAgentRequestContext&
 	OutData->SetObjectField(TEXT("coverage_report"), MakeCoverageReport(SoundConcurrencyProfile));
 	return true;
 }
-bool FUeAgentHttpServer::CmdSoundConcurrencyGetInfo(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdSoundConcurrencyGetInfo(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	using namespace UeAgentAudioOps;
 	FString AssetPath;
@@ -253,7 +253,7 @@ bool FUeAgentHttpServer::CmdSoundConcurrencyGetInfo(const FUeAgentRequestContext
 	OutData = BuildSoundConcurrencyInfo(Asset, bIncludeRaw);
 	return true;
 }
-bool FUeAgentHttpServer::CmdSoundConcurrencyExportJson(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdSoundConcurrencyExportJson(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	using namespace UeAgentAudioOps;
 	FString AssetPath;
@@ -290,7 +290,7 @@ bool FUeAgentHttpServer::CmdSoundConcurrencyExportJson(const FUeAgentRequestCont
 	OutData->SetStringField(TEXT("output_file"), SavedPath);
 	return true;
 }
-bool FUeAgentHttpServer::CmdSoundConcurrencyValidateJson(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdSoundConcurrencyValidateJson(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	using namespace UeAgentAudioOps;
 	FString JsonFile;
@@ -326,7 +326,7 @@ bool FUeAgentHttpServer::CmdSoundConcurrencyValidateJson(const FUeAgentRequestCo
 	OutData->SetObjectField(TEXT("coverage_report"), MakeCoverageReport(SoundConcurrencyProfile));
 	return true;
 }
-bool FUeAgentHttpServer::CmdSoundConcurrencyApplyJson(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdSoundConcurrencyApplyJson(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	using namespace UeAgentAudioOps;
 	FString JsonFile;
@@ -397,7 +397,7 @@ bool FUeAgentHttpServer::CmdSoundConcurrencyApplyJson(const FUeAgentRequestConte
 	OutData->SetObjectField(TEXT("coverage_report"), MakeCoverageReport(SoundConcurrencyProfile));
 	return true;
 }
-bool FUeAgentHttpServer::CmdSoundClassCreate(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdSoundClassCreate(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	using namespace UeAgentAudioOps;
 	FString AssetPath;
@@ -434,7 +434,7 @@ bool FUeAgentHttpServer::CmdSoundClassCreate(const FUeAgentRequestContext& Ctx, 
 	OutData->SetObjectField(TEXT("coverage_report"), MakeCoverageReport(SoundClassProfile));
 	return true;
 }
-bool FUeAgentHttpServer::CmdSoundClassGetInfo(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdSoundClassGetInfo(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	using namespace UeAgentAudioOps;
 	FString AssetPath;
@@ -455,7 +455,7 @@ bool FUeAgentHttpServer::CmdSoundClassGetInfo(const FUeAgentRequestContext& Ctx,
 	OutData = BuildSoundClassInfo(Asset, bIncludeChildren, bIncludeRaw);
 	return true;
 }
-bool FUeAgentHttpServer::CmdSoundClassExportJson(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdSoundClassExportJson(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	using namespace UeAgentAudioOps;
 	FString AssetPath;
@@ -487,7 +487,7 @@ bool FUeAgentHttpServer::CmdSoundClassExportJson(const FUeAgentRequestContext& C
 	OutData->SetStringField(TEXT("output_file"), SavedPath);
 	return true;
 }
-bool FUeAgentHttpServer::CmdSoundClassValidateJson(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdSoundClassValidateJson(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	using namespace UeAgentAudioOps;
 	FString JsonFile;
@@ -518,7 +518,7 @@ bool FUeAgentHttpServer::CmdSoundClassValidateJson(const FUeAgentRequestContext&
 	OutData->SetObjectField(TEXT("coverage_report"), MakeCoverageReport(SoundClassProfile));
 	return true;
 }
-bool FUeAgentHttpServer::CmdSoundClassApplyJson(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdSoundClassApplyJson(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	using namespace UeAgentAudioOps;
 	FString JsonFile;
@@ -596,7 +596,7 @@ bool FUeAgentHttpServer::CmdSoundClassApplyJson(const FUeAgentRequestContext& Ct
 	OutData->SetObjectField(TEXT("coverage_report"), MakeCoverageReport(SoundClassProfile));
 	return true;
 }
-bool FUeAgentHttpServer::CmdSoundMixCreate(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdSoundMixCreate(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	using namespace UeAgentAudioOps;
 	FString AssetPath;
@@ -622,7 +622,7 @@ bool FUeAgentHttpServer::CmdSoundMixCreate(const FUeAgentRequestContext& Ctx, TS
 	OutData->SetObjectField(TEXT("coverage_report"), MakeCoverageReport(SoundMixProfile));
 	return true;
 }
-bool FUeAgentHttpServer::CmdSoundMixExportJson(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdSoundMixExportJson(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	using namespace UeAgentAudioOps;
 	FString AssetPath;
@@ -649,7 +649,7 @@ bool FUeAgentHttpServer::CmdSoundMixExportJson(const FUeAgentRequestContext& Ctx
 	OutData->SetStringField(TEXT("output_file"), SavedPath);
 	return true;
 }
-bool FUeAgentHttpServer::CmdSoundMixApplyJson(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdSoundMixApplyJson(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	using namespace UeAgentAudioOps;
 	FString JsonFile;
@@ -755,11 +755,11 @@ bool FUeAgentHttpServer::CmdSoundMixApplyJson(const FUeAgentRequestContext& Ctx,
 	OutData->SetObjectField(TEXT("coverage_report"), MakeCoverageReport(SoundMixProfile));
 	return true;
 }
-bool FUeAgentHttpServer::CmdSoundSubmixCreate(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdSoundSubmixCreate(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	return UeAgentAudioFolderCommandBridge::CreateSoundSubmix(Ctx.Params, OutData, OutError, Ctx.RequestId);
 }
-bool FUeAgentHttpServer::CmdSoundSubmixGetInfo(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdSoundSubmixGetInfo(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	using namespace UeAgentAudioOps;
 	FString AssetPath;
@@ -782,19 +782,19 @@ bool FUeAgentHttpServer::CmdSoundSubmixGetInfo(const FUeAgentRequestContext& Ctx
 	OutData = BuildSoundSubmixInfo(Asset, bIncludeChildren, bIncludeEffectChain, bIncludeRaw);
 	return true;
 }
-bool FUeAgentHttpServer::CmdSoundSubmixExportFolder(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdSoundSubmixExportFolder(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	return UeAgentAudioFolderCommandBridge::Export(UeAgentAudioAuthoring::EAssetKind::SoundSubmix, Ctx.Params, OutData, OutError);
 }
-bool FUeAgentHttpServer::CmdSoundSubmixValidateFolder(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdSoundSubmixValidateFolder(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	return UeAgentAudioFolderCommandBridge::Validate(UeAgentAudioAuthoring::EAssetKind::SoundSubmix, Ctx.Params, OutData, OutError);
 }
-bool FUeAgentHttpServer::CmdSoundSubmixApplyFolder(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdSoundSubmixApplyFolder(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	return UeAgentAudioFolderCommandBridge::Apply(UeAgentAudioAuthoring::EAssetKind::SoundSubmix, Ctx.Params, OutData, OutError, Ctx.RequestId);
 }
-bool FUeAgentHttpServer::CmdAudioEffectPresetCreate(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdAudioEffectPresetCreate(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	using namespace UeAgentAudioOps;
 	FString AssetPath;
@@ -828,7 +828,7 @@ bool FUeAgentHttpServer::CmdAudioEffectPresetCreate(const FUeAgentRequestContext
 	OutData->SetStringField(TEXT("preset_kind"), Preset->IsA<USoundEffectSubmixPreset>() ? TEXT("submix") : TEXT("source"));
 	return true;
 }
-bool FUeAgentHttpServer::CmdAudioEffectPresetExportJson(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdAudioEffectPresetExportJson(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	using namespace UeAgentAudioOps;
 	FString AssetPath;
@@ -854,7 +854,7 @@ bool FUeAgentHttpServer::CmdAudioEffectPresetExportJson(const FUeAgentRequestCon
 	OutData->SetStringField(TEXT("output_file"), SavedPath);
 	return true;
 }
-bool FUeAgentHttpServer::CmdAudioEffectPresetApplyJson(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdAudioEffectPresetApplyJson(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	using namespace UeAgentAudioOps;
 	FString JsonFile;

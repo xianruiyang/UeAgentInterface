@@ -7,9 +7,10 @@
 #include "AssetRegistry/AssetRegistryModule.h"
 #include "CommandHandlers/TextureGraph/UeAgentTextureGraphCommandHandlers.h"
 #include "CommandEdge/UeAgentCommandProtocol.h"
+#include "Core/AssetDurable/UeAgentAssetDurable.h"
+#include "Core/AssetDurable/UeAgentPackageAssetRevision.h"
 #include "Core/Contract/UeAgentCommandJson.h"
 #include "Core/Contract/UeAgentContract.h"
-#include "DomainAdapters/ContentGraphRead/UeAgentContentGraphReadProductionEnvironment.h"
 #include "Editor.h"
 #include "Expressions/Input/TG_Expression_Scalar.h"
 #include "Expressions/Output/TG_Expression_Output.h"
@@ -22,6 +23,7 @@
 #include "TG_Node.h"
 #include "TextureGraph.h"
 #include "UObject/Package.h"
+#include "UObject/SavePackage.h"
 #include "UObject/StrongObjectPtr.h"
 
 namespace
@@ -192,16 +194,22 @@ bool FUeAgentAudioMediaGraphTextureGraphRealRenderReadbackTest::RunTest(
 	{
 		return false;
 	}
-	UPackage* Package = CreatePackage(*FString::Printf(
-		TEXT("/Temp/UAI/AudioMediaGraph/TextureGraphRender/%s"),
-		*FGuid::NewGuid().ToString(EGuidFormats::Digits)));
+	const FString Suffix = FGuid::NewGuid().ToString(EGuidFormats::Digits);
+	const FString SourcePackage =
+		TEXT("/Game/UAI/Tests/T40/Source_") + Suffix;
+	const FString SourceAssetName =
+		FPackageName::GetLongPackageAssetName(SourcePackage);
+	UPackage* Package = CreatePackage(*SourcePackage);
 	TStrongObjectPtr<UTextureGraph> Graph(NewObject<UTextureGraph>(
-		Package, TEXT("TG_RenderEvidence"), RF_Transactional));
+		Package,
+		*SourceAssetName,
+		RF_Public | RF_Standalone | RF_Transactional));
 	if (!TestNotNull(TEXT("render TextureGraph exists"), Graph.Get()))
 	{
 		return false;
 	}
-	Graph->Construct(TEXT("TG_RenderEvidence"));
+	Graph->Construct(SourceAssetName);
+	FAssetRegistryModule::AssetCreated(Graph.Get());
 
 	FAudioMediaGraphTextureGraphNativeHook Hook;
 	FAudioMediaGraphTextureGraphScenarioResult Scenario;
@@ -319,6 +327,29 @@ bool FUeAgentAudioMediaGraphTextureGraphRealRenderReadbackTest::RunTest(
 		TestTrue(TEXT("pixel statistics include at least one unique color"),
 			Stats.GetUniqueColorEstimate() > 0);
 	}
+	Graph->MarkPackageDirty();
+	const FString SourceFilename =
+		FPackageName::LongPackageNameToFilename(
+			SourcePackage, FPackageName::GetAssetPackageExtension());
+	FSavePackageArgs SourceSaveArgs;
+	SourceSaveArgs.TopLevelFlags = RF_Public | RF_Standalone;
+	SourceSaveArgs.SaveFlags = SAVE_NoError;
+	if (!TestTrue(
+			TEXT("the settled TextureGraph source is durably saved"),
+			UPackage::SavePackage(
+				Package, Graph.Get(), *SourceFilename, SourceSaveArgs)))
+	{
+		return false;
+	}
+	Package->SetDirtyFlag(false);
+	const FString SourceRevision =
+		AssetDurable::ReadPackageAssetRevision(Graph->GetPathName());
+	if (!TestTrue(
+			TEXT("the durable source exposes the shared package revision"),
+			SourceRevision.StartsWith(TEXT("package-md5:"))))
+	{
+		return false;
+	}
 
 	TArray<TSharedRef<CommandEdge::IUeAgentExactCommandHandler>> PublicHandlers;
 	FString HandlerError;
@@ -338,17 +369,6 @@ bool FUeAgentAudioMediaGraphTextureGraphRealRenderReadbackTest::RunTest(
 		: PublicHandlers)
 	{
 		Handlers.Add(Handler->GetCommandId(), Handler);
-	}
-	DomainAdapters::ContentGraphRead::FUeAgentContentGraphCapture Capture;
-	DomainAdapters::ContentGraphRead::FUeAgentContentGraphReadError ReadError;
-	if (!TestTrue(
-			TEXT("the source revision is read from current ContentGraphRead"),
-			DomainAdapters::ContentGraphRead::
-				FUeAgentContentGraphReadProductionEnvironment::TryCaptureOwner(
-					*Graph, Capture, ReadError)))
-	{
-		AddError(ReadError.Code);
-		return false;
 	}
 	const Contract::FUeAgentCallerContext Caller(
 		TEXT("t40-artifact-test"),
@@ -396,7 +416,6 @@ bool FUeAgentAudioMediaGraphTextureGraphRealRenderReadbackTest::RunTest(
 		ProbePayload.IsValid()
 			&& ProbePayload->HasTypedField<EJson::Object>(TEXT("pixel_stats")));
 
-	const FString Suffix = FGuid::NewGuid().ToString(EGuidFormats::Digits);
 	const FString BakePackage =
 		TEXT("/Game/UAI/Tests/T40/Baked_") + Suffix;
 	TOptional<CommandEdge::FUeAgentCommandRequest> BakeRequest;
@@ -404,7 +423,7 @@ bool FUeAgentAudioMediaGraphTextureGraphRealRenderReadbackTest::RunTest(
 		TEXT("{\"target\":\"%s\",\"expected_revision\":\"%s\",")
 		TEXT("\"outputs\":[{\"render_output_index\":0,")
 		TEXT("\"destination\":\"%s\"}]}"),
-		*Graph->GetPathName(), *Capture.Revision, *BakePackage);
+		*Graph->GetPathName(), *SourceRevision, *BakePackage);
 	if (!TestTrue(
 			TEXT("the bake request decodes"),
 			DecodeArtifactRequest(
@@ -455,7 +474,7 @@ bool FUeAgentAudioMediaGraphTextureGraphRealRenderReadbackTest::RunTest(
 		TEXT("{\"render_output_index\":0,\"destination\":\"%s\"},")
 		TEXT("{\"render_output_index\":1,\"destination\":\"%s\"}]}"),
 		*Graph->GetPathName(),
-		*Capture.Revision,
+		*SourceRevision,
 		*RollbackFirst,
 		*RollbackBlocked);
 	TestTrue(
@@ -491,7 +510,8 @@ bool FUeAgentAudioMediaGraphTextureGraphRealRenderReadbackTest::RunTest(
 		CleanupAssetPackage(BakePackage));
 	CleanupAssetPackage(RollbackFirst);
 	CleanupAssetPackage(RollbackBlocked);
-	Package->SetDirtyFlag(false);
-	Package->MarkAsGarbage();
+	Graph.Reset();
+	TestTrue(TEXT("the durable TextureGraph source fixture is cleaned up"),
+		CleanupAssetPackage(SourcePackage));
 	return !HasAnyErrors();
 }

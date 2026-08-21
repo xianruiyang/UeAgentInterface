@@ -481,7 +481,7 @@ namespace UeAgentUmgOps
 	}
 }
 
-bool FUeAgentHttpServer::ExecuteUmgCommand(const FString& CommandLower, const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::ExecuteUmgCommand(const FString& CommandLower, const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	if (CommandLower == TEXT("umg_create_widget_blueprint")) return CmdUmgCreateWidgetBlueprint(Ctx, OutData, OutError);
 	if (CommandLower == TEXT("umg_compile")) return CmdUmgCompile(Ctx, OutData, OutError);
@@ -496,7 +496,7 @@ bool FUeAgentHttpServer::ExecuteUmgCommand(const FString& CommandLower, const FU
 	return false;
 }
 
-bool FUeAgentHttpServer::CmdUmgCreateWidgetBlueprint(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdUmgCreateWidgetBlueprint(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	FString AssetPathInput;
 	if (!JsonTryGetString(Ctx.Params, TEXT("asset_path"), AssetPathInput) || AssetPathInput.IsEmpty())
@@ -607,7 +607,7 @@ bool FUeAgentHttpServer::CmdUmgCreateWidgetBlueprint(const FUeAgentRequestContex
 	return true;
 }
 
-bool FUeAgentHttpServer::CmdUmgCompile(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdUmgCompile(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	FString AssetPathInput;
 	if (!JsonTryGetString(Ctx.Params, TEXT("asset_path"), AssetPathInput) || AssetPathInput.IsEmpty())
@@ -683,7 +683,7 @@ bool FUeAgentHttpServer::CmdUmgCompile(const FUeAgentRequestContext& Ctx, TShare
 	return true;
 }
 
-bool FUeAgentHttpServer::CmdUmgGetCompileLog(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdUmgGetCompileLog(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	FString AssetPathInput;
 	if (!JsonTryGetString(Ctx.Params, TEXT("asset_path"), AssetPathInput) || AssetPathInput.IsEmpty())
@@ -753,7 +753,7 @@ bool FUeAgentHttpServer::CmdUmgGetCompileLog(const FUeAgentRequestContext& Ctx, 
 	return true;
 }
 
-bool FUeAgentHttpServer::CmdUmgGetInfo(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdUmgGetInfo(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	FString AssetPathInput;
 	if (!JsonTryGetString(Ctx.Params, TEXT("asset_path"), AssetPathInput) || AssetPathInput.IsEmpty())
@@ -813,7 +813,7 @@ bool FUeAgentHttpServer::CmdUmgGetInfo(const FUeAgentRequestContext& Ctx, TShare
 	return true;
 }
 
-bool FUeAgentHttpServer::CmdUmgAddWidget(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdUmgAddWidget(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	FString AssetPathInput;
 	if (!JsonTryGetString(Ctx.Params, TEXT("asset_path"), AssetPathInput) || AssetPathInput.IsEmpty())
@@ -957,7 +957,7 @@ bool FUeAgentHttpServer::CmdUmgAddWidget(const FUeAgentRequestContext& Ctx, TSha
 	return true;
 }
 
-bool FUeAgentHttpServer::CmdUmgRemoveWidget(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdUmgRemoveWidget(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	FString AssetPathInput;
 	if (!JsonTryGetString(Ctx.Params, TEXT("asset_path"), AssetPathInput) || AssetPathInput.IsEmpty())
@@ -1045,7 +1045,7 @@ bool FUeAgentHttpServer::CmdUmgRemoveWidget(const FUeAgentRequestContext& Ctx, T
 	return true;
 }
 
-bool FUeAgentHttpServer::CmdUmgSetWidgetProperty(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdUmgSetWidgetProperty(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	FString AssetPathInput;
 	if (!JsonTryGetString(Ctx.Params, TEXT("asset_path"), AssetPathInput) || AssetPathInput.IsEmpty())
@@ -1134,7 +1134,7 @@ bool FUeAgentHttpServer::CmdUmgSetWidgetProperty(const FUeAgentRequestContext& C
 	return true;
 }
 
-bool FUeAgentHttpServer::CmdUmgSetSlotProperty(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdUmgSetSlotProperty(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	FString AssetPathInput;
 	if (!JsonTryGetString(Ctx.Params, TEXT("asset_path"), AssetPathInput) || AssetPathInput.IsEmpty())
@@ -1229,7 +1229,7 @@ bool FUeAgentHttpServer::CmdUmgSetSlotProperty(const FUeAgentRequestContext& Ctx
 	return true;
 }
 
-bool FUeAgentHttpServer::CmdUmgRenameWidget(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdUmgRenameWidget(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	FString AssetPathInput;
 	if (!JsonTryGetString(Ctx.Params, TEXT("asset_path"), AssetPathInput) || AssetPathInput.IsEmpty())
@@ -1319,7 +1319,7 @@ bool FUeAgentHttpServer::CmdUmgRenameWidget(const FUeAgentRequestContext& Ctx, T
 	return true;
 }
 
-bool FUeAgentHttpServer::CmdUmgBindWidgetPropertyToVariable(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdUmgBindWidgetPropertyToVariable(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	FString AssetPathInput;
 	if (!JsonTryGetString(Ctx.Params, TEXT("asset_path"), AssetPathInput) || AssetPathInput.IsEmpty())

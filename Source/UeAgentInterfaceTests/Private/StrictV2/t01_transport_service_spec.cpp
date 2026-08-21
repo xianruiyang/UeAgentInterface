@@ -362,7 +362,7 @@ bool FUaiStrictV2T01ActiveHttpBoundaryTest::RunTest(
 		ModuleSource.Contains(TEXT("FUeAgentCommandService")));
 	TestFalse(
 		TEXT("legacy HTTP server is unreachable from module startup"),
-		ModuleSource.Contains(TEXT("FUeAgentHttpServer")));
+		ModuleSource.Contains(TEXT("FUeAgentLegacyMechanics")));
 	TestFalse(
 		TEXT("legacy query composition is unreachable from module startup"),
 		ModuleSource.Contains(TEXT("FUeAgentQueryServiceComposition")));

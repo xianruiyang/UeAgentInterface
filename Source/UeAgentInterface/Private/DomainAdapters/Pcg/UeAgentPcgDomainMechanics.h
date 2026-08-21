@@ -8,6 +8,7 @@ namespace UE::UAI::DomainAdapters::Pcg
 	UEAGENTINTERFACE_API bool TryExecuteContentGraph(
 		const FString& CommandId,
 		const FString& TargetIdentity,
+		const FString& RootTypeIdentity,
 		const FString& CanonicalParamsJson,
 		FString& OutPayloadJson,
 		bool& bOutReadOnly,

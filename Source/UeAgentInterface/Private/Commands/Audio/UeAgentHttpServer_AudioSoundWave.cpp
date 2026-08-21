@@ -1,6 +1,6 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
-#include "Server/UeAgentHttpServer.h"
+#include "LegacyMechanics/UeAgentLegacyMechanics.h"
 #include "Commands/Audio/UeAgentHttpServer_AudioOps.h"
 #include "Dom/JsonObject.h"
 #include "Dom/JsonValue.h"
@@ -13,7 +13,7 @@
 #include "Sound/SoundConcurrency.h"
 #include "Sound/SoundWave.h"
 
-bool FUeAgentHttpServer::CmdSoundWaveImport(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdSoundWaveImport(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	using namespace UeAgentAudioOps;
 	FString SourceFileInput;
@@ -59,7 +59,7 @@ bool FUeAgentHttpServer::CmdSoundWaveImport(const FUeAgentRequestContext& Ctx, T
 	OutData->SetArrayField(TEXT("warnings"), {});
 	return true;
 }
-bool FUeAgentHttpServer::CmdSoundWaveReimport(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdSoundWaveReimport(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	using namespace UeAgentAudioOps;
 	FString AssetPath;
@@ -121,7 +121,7 @@ bool FUeAgentHttpServer::CmdSoundWaveReimport(const FUeAgentRequestContext& Ctx,
 	OutData->SetArrayField(TEXT("warnings"), {});
 	return true;
 }
-bool FUeAgentHttpServer::CmdSoundWaveGetInfo(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdSoundWaveGetInfo(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	using namespace UeAgentAudioOps;
 	FString AssetPath;
@@ -147,7 +147,7 @@ bool FUeAgentHttpServer::CmdSoundWaveGetInfo(const FUeAgentRequestContext& Ctx, 
 	OutData = BuildSoundWaveInfo(Wave, bIncludeProperties, bIncludeCuePoints, bIncludeAnalysis);
 	return true;
 }
-bool FUeAgentHttpServer::CmdSoundWaveValidateSetup(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdSoundWaveValidateSetup(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	using namespace UeAgentAudioOps;
 	FString AssetPath;
@@ -195,7 +195,7 @@ bool FUeAgentHttpServer::CmdSoundWaveValidateSetup(const FUeAgentRequestContext&
 	OutData->SetObjectField(TEXT("coverage_report"), MakeCoverageReport(SoundWaveProfile));
 	return true;
 }
-bool FUeAgentHttpServer::CmdSoundWavePreview(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdSoundWavePreview(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	FUeAgentRequestContext RuntimeCtx = Ctx;
 	return CmdAudioRuntimeProbe(RuntimeCtx, OutData, OutError);

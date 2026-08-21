@@ -4,7 +4,7 @@
 
 #include "CoreMinimal.h"
 #include "EdGraph/EdGraphPin.h"
-#include "Server/UeAgentHttpServerTypes.h"
+#include "LegacyMechanics/UeAgentLegacyMechanicsTypes.h"
 #include "Engine/Blueprint.h"
 #include "Kismet2/CompilerResultsLog.h"
 

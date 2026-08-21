@@ -8,8 +8,6 @@
 #include "Composition/SimpleAuthoring/UeAgentSimpleAuthoringCommandHandlers.h"
 #include "CommandEdge/UeAgentCommandProtocol.h"
 
-#include "Server/UeAgentCommandRegistry.h"
-
 #include "HAL/PlatformMisc.h"
 #include "Misc/CommandLine.h"
 #include "Misc/Parse.h"
@@ -384,21 +382,17 @@ bool FUeAgentSimpleAuthoringLegacyTerminalStateTest::RunTest(
 		TEXT("scalability_apply_json"),
 		TEXT("string_table_apply_json"),
 	};
-	for (const FString& CommandId : RetiredIds)
-	{
-		TestNull(
-			TEXT("retired legacy exact owner is absent"),
-			UeAgentCommandRegistry::FindExactCommandInvoker(CommandId));
-		TestNull(
-			TEXT("retired legacy prefix owner is absent"),
-			UeAgentCommandRegistry::FindPrefixedCommandInvoker(CommandId));
-	}
-
 	TSharedPtr<const FUeAgentCommandContractRegistry> Commands;
 	FString Error;
 	TestTrue(
 		TEXT("production registry composes for terminal-state checks"),
 		TryCreateProductionCommandContractRegistry(Commands, Error));
+	for (const FString& CommandId : RetiredIds)
+	{
+		TestNull(
+			TEXT("retired identity is absent from the sole production registry"),
+			Commands.IsValid() ? Commands->FindExact(CommandId) : nullptr);
+	}
 	const TArray<FString> MigratedIds{
 		TEXT("editor_project.config_section.update"),
 		TEXT("editor_project.project_settings.update"),

@@ -1,4 +1,6 @@
 #include "Composition/GraphCompound/UeAgentGraphCompoundAudioMediaRoutes.h"
+#include "Composition/GraphCompound/UeAgentGraphCompoundAudioMediaIdentity.h"
+#include "Composition/GraphCompound/UeAgentGraphCompoundLifecycleResultContract.h"
 
 #include "Core/Contract/UeAgentContractJson.h"
 #include "Core/Contract/UeAgentContractSchema.h"
@@ -113,7 +115,7 @@ namespace UE::UAI::Composition::GraphCompound
 			{
 				return CanonicalSchema(TEXT("{\"additionalProperties\":false,\"properties\":{\"outputs\":{\"items\":{\"additionalProperties\":false,\"properties\":{\"evaluated_value_type\":{\"type\":\"string\"},\"expression_object_path\":{\"type\":\"string\"},\"node_index\":{\"type\":\"integer\"},\"output_name\":{\"type\":\"string\"},\"pin_index\":{\"type\":\"integer\"},\"settings_fingerprint\":{\"type\":\"string\"}},\"required\":[\"evaluated_value_type\",\"expression_object_path\",\"node_index\",\"output_name\",\"pin_index\",\"settings_fingerprint\"],\"type\":\"object\"},\"type\":\"array\"},\"published\":{\"enum\":[false]},\"settled_revision\":{\"type\":\"string\"},\"target_ref\":{\"type\":\"string\"}},\"required\":[\"outputs\",\"published\",\"settled_revision\",\"target_ref\"],\"type\":\"object\"}"));
 			}
-			return CanonicalSchema(TEXT("{\"additionalProperties\":false,\"properties\":{\"revision\":{\"type\":\"string\"},\"target_ref\":{\"type\":\"string\"}},\"required\":[\"target_ref\",\"revision\"],\"type\":\"object\"}"));
+			return LifecycleResultContract::BuildMutationLifecycleResultSchema(false);
 		}
 
 		TSharedPtr<FJsonObject> DescriptorObject(
@@ -405,11 +407,16 @@ namespace UE::UAI::Composition::GraphCompound
 			const FString& SemanticId,
 			const FString& TargetKind,
 			const FString& OwnerId,
-			const FString& Generation)
+			const FString& Generation,
+			TMap<FString, FString> Selectors = {})
 		{
-			return FUeAgentCanonicalIdentity(
-				SemanticId, TargetKind, OwnerId, SemanticId,
-				TEXT("graph_compound"), Generation);
+			return AudioMediaIdentity::MakeIdentity(
+				SemanticId,
+				TargetKind,
+				OwnerId,
+				TEXT("graph_compound"),
+				Generation,
+				MoveTemp(Selectors));
 		}
 
 		bool TryCanonical(
@@ -689,17 +696,24 @@ namespace UE::UAI::Composition::GraphCompound
 		const FString Evidence = TEXT("request:") + Profile.GetCapabilityId();
 		TArray<FGraphCompoundCanonicalEdit> Edits;
 
-		auto MakeIdentity = [&](const FString& SemanticId)
+		auto MakeIdentity = [&] (
+			const FString& SemanticId,
+			TMap<FString, FString> Selectors = {})
 		{
 			return Identity(
-				SemanticId, IdentityTargetKind, TargetRef, Generation);
+				SemanticId,
+				IdentityTargetKind,
+				TargetRef,
+				Generation,
+				MoveTemp(Selectors));
 		};
 		auto AddEdit = [&] (
 			const FString& SemanticId,
 			const EGraphCompoundElementKind ElementKind,
 			const EChangeIntent Intent,
 			const TSharedPtr<FJsonValue>& JsonValue,
-			TArray<FUeAgentCanonicalIdentity> Dependencies = {})
+			TArray<FUeAgentCanonicalIdentity> Dependencies = {},
+			TMap<FString, FString> Selectors = {})
 		{
 			FUeAgentCanonicalValuePtr Proposed;
 			if (Intent != EChangeIntent::Delete
@@ -709,7 +723,7 @@ namespace UE::UAI::Composition::GraphCompound
 				return false;
 			}
 			const FUeAgentCanonicalIdentity EditIdentity =
-				MakeIdentity(SemanticId);
+				MakeIdentity(SemanticId, MoveTemp(Selectors));
 			Edits.Emplace(
 				EditIdentity, ElementKind, Intent, Proposed,
 				MoveTemp(Dependencies), Authority, Evidence,
@@ -756,7 +770,11 @@ namespace UE::UAI::Composition::GraphCompound
 					*Change->GetStringField(TEXT("name")));
 				if (!AddEdit(
 						SemanticId, EGraphCompoundElementKind::Input, Intent,
-						ObjectWithout(*Change, {TEXT("intent")})))
+						ObjectWithout(*Change, {TEXT("intent")}),
+						{},
+						AudioMediaIdentity::MetaSoundInterface(
+							Change->GetStringField(TEXT("interface_kind")),
+							Change->GetStringField(TEXT("name")))))
 				{
 					return false;
 				}
@@ -774,11 +792,14 @@ namespace UE::UAI::Composition::GraphCompound
 					SetError(OutError, TEXT("audio_media_graph_node_invalid"));
 					return false;
 				}
+				const FString NodeGuid =
+					Node->GetStringField(TEXT("node_guid"));
 				if (!AddEdit(
-						TEXT("item:metasound_node:")
-							+ Node->GetStringField(TEXT("node_guid")),
+						TEXT("item:metasound_node:") + NodeGuid,
 						EGraphCompoundElementKind::Item, Intent,
-						ObjectWithout(*Node, {TEXT("intent")})))
+						ObjectWithout(*Node, {TEXT("intent")}),
+						{},
+						AudioMediaIdentity::MetaSoundNode(NodeGuid)))
 				{
 					return false;
 				}
@@ -807,14 +828,29 @@ namespace UE::UAI::Composition::GraphCompound
 					*To->GetStringField(TEXT("node_guid")),
 					*To->GetStringField(TEXT("vertex_guid")),
 					*From->GetStringField(TEXT("data_type_ref")));
+				const FString FromNodeGuid =
+					From->GetStringField(TEXT("node_guid"));
+				const FString FromVertexGuid =
+					From->GetStringField(TEXT("vertex_guid"));
+				const FString ToNodeGuid =
+					To->GetStringField(TEXT("node_guid"));
+				const FString ToVertexGuid =
+					To->GetStringField(TEXT("vertex_guid"));
 				const TArray<FUeAgentCanonicalIdentity> Dependencies = {
-					MakeIdentity(TEXT("item:metasound_node:")
-						+ From->GetStringField(TEXT("node_guid"))),
-					MakeIdentity(TEXT("item:metasound_node:")
-						+ To->GetStringField(TEXT("node_guid")))};
+					MakeIdentity(
+						TEXT("item:metasound_node:") + FromNodeGuid,
+						AudioMediaIdentity::MetaSoundNode(FromNodeGuid)),
+					MakeIdentity(
+						TEXT("item:metasound_node:") + ToNodeGuid,
+						AudioMediaIdentity::MetaSoundNode(ToNodeGuid))};
 				if (!AddEdit(
 						SemanticId, EGraphCompoundElementKind::Relation, Intent,
-						ObjectWithout(*Link, {TEXT("intent")}), Dependencies))
+						ObjectWithout(*Link, {TEXT("intent")}), Dependencies,
+						AudioMediaIdentity::MetaSoundLink(
+							FromNodeGuid,
+							FromVertexGuid,
+							ToNodeGuid,
+							ToVertexGuid)))
 				{
 					return false;
 				}
@@ -832,8 +868,14 @@ namespace UE::UAI::Composition::GraphCompound
 			if (!AddEdit(
 					SemanticId, EGraphCompoundElementKind::Input, Intent,
 					ObjectWithout(*Object, {TEXT("intent"), TEXT("target_ref")}),
-					{MakeIdentity(TEXT("item:metasound_node:")
-						+ Object->GetStringField(TEXT("node_guid"))) }))
+					{MakeIdentity(
+						TEXT("item:metasound_node:")
+							+ Object->GetStringField(TEXT("node_guid")),
+						AudioMediaIdentity::MetaSoundNode(
+							Object->GetStringField(TEXT("node_guid"))))},
+					AudioMediaIdentity::MetaSoundDefault(
+						Object->GetStringField(TEXT("node_guid")),
+						Object->GetStringField(TEXT("vertex_guid")))))
 			{
 				return false;
 			}
@@ -861,11 +903,14 @@ namespace UE::UAI::Composition::GraphCompound
 					SetError(OutError, TEXT("audio_media_graph_node_invalid"));
 					return false;
 				}
+				const FString ObjectPath =
+					Node->GetStringField(TEXT("object_path"));
 				if (!AddEdit(
-						TEXT("item:sound_node:")
-							+ Node->GetStringField(TEXT("object_path")),
+						TEXT("item:sound_node:") + ObjectPath,
 						EGraphCompoundElementKind::Item, Intent,
-						ObjectWithout(*Node, {TEXT("intent")})))
+						ObjectWithout(*Node, {TEXT("intent")}),
+						{},
+						AudioMediaIdentity::SoundCueNode(ObjectPath)))
 				{
 					return false;
 				}
@@ -892,8 +937,13 @@ namespace UE::UAI::Composition::GraphCompound
 							*Parent, *Child),
 						EGraphCompoundElementKind::Relation, Intent,
 						ObjectWithout(*Relation, {TEXT("intent")}),
-						{MakeIdentity(TEXT("item:sound_node:") + Parent),
-						 MakeIdentity(TEXT("item:sound_node:") + Child)}))
+						{MakeIdentity(
+							TEXT("item:sound_node:") + Parent,
+							AudioMediaIdentity::SoundCueNode(Parent)),
+						 MakeIdentity(
+							TEXT("item:sound_node:") + Child,
+							AudioMediaIdentity::SoundCueNode(Child))},
+						AudioMediaIdentity::SoundCueRelation(Parent, Child)))
 				{
 					return false;
 				}
@@ -910,7 +960,9 @@ namespace UE::UAI::Composition::GraphCompound
 					TEXT("binding:sound_root"),
 					EGraphCompoundElementKind::Binding, Intent,
 					MakeShared<FJsonValueObject>(RootValue),
-					{MakeIdentity(TEXT("item:sound_node:") + Root)}))
+					{MakeIdentity(
+						TEXT("item:sound_node:") + Root,
+						AudioMediaIdentity::SoundCueNode(Root))}))
 			{
 				return false;
 			}
@@ -938,11 +990,15 @@ namespace UE::UAI::Composition::GraphCompound
 					SetError(OutError, TEXT("audio_media_graph_node_invalid"));
 					return false;
 				}
-				const FString SemanticId = TEXT("item:texture_expression:")
-					+ Node->GetStringField(TEXT("element_id"));
+				const FString ElementId =
+					Node->GetStringField(TEXT("element_id"));
+				const FString SemanticId =
+					TEXT("item:texture_expression:") + ElementId;
 				if (!AddEdit(
 						SemanticId, EGraphCompoundElementKind::Item, Intent,
-						ObjectWithout(*Node, {TEXT("intent")})))
+						ObjectWithout(*Node, {TEXT("intent")}),
+						{},
+						AudioMediaIdentity::TextureGraphNode(ElementId)))
 				{
 					return false;
 				}
@@ -966,11 +1022,31 @@ namespace UE::UAI::Composition::GraphCompound
 				}
 				const FString FromId = TexturePinSemanticId(*From);
 				const FString ToId = TexturePinSemanticId(*To);
+				const FString FromElementId =
+					From->GetStringField(TEXT("element_id"));
+				const FString FromPinName =
+					From->GetStringField(TEXT("pin_name"));
+				const FString ToElementId =
+					To->GetStringField(TEXT("element_id"));
+				const FString ToPinName =
+					To->GetStringField(TEXT("pin_name"));
 				if (!AddEdit(
 						TEXT("relation:texture_link:") + FromId + TEXT("->") + ToId,
 						EGraphCompoundElementKind::Relation, Intent,
 						ObjectWithout(*Link, {TEXT("intent")}),
-						{MakeIdentity(FromId), MakeIdentity(ToId)}))
+						{MakeIdentity(
+							FromId,
+							AudioMediaIdentity::TextureGraphPin(
+								FromElementId, TEXT("output"), FromPinName)),
+						 MakeIdentity(
+							ToId,
+							AudioMediaIdentity::TextureGraphPin(
+								ToElementId, TEXT("input"), ToPinName))},
+						AudioMediaIdentity::TextureGraphLink(
+							FromElementId,
+							FromPinName,
+							ToElementId,
+							ToPinName)))
 				{
 					return false;
 				}
@@ -988,18 +1064,27 @@ namespace UE::UAI::Composition::GraphCompound
 					SetError(OutError, TEXT("audio_media_graph_parameter_invalid"));
 					return false;
 				}
+				const FString ElementId =
+					Parameter->GetStringField(TEXT("element_id"));
+				const FString PinName =
+					Parameter->GetStringField(TEXT("pin_name"));
 				const FString PinId = FString::Printf(
 					TEXT("pin:texture:%s:input:%s"),
-					*Parameter->GetStringField(TEXT("element_id")),
-					*Parameter->GetStringField(TEXT("pin_name")));
+					*ElementId,
+					*PinName);
 				const FString SemanticId = FString::Printf(
 					TEXT("input:texture_parameter:%s:%s"),
-					*Parameter->GetStringField(TEXT("element_id")),
-					*Parameter->GetStringField(TEXT("pin_name")));
+					*ElementId,
+					*PinName);
 				if (!AddEdit(
 						SemanticId, EGraphCompoundElementKind::Input, Intent,
 						ObjectWithout(*Parameter, {TEXT("intent")}),
-						{MakeIdentity(PinId)}))
+						{MakeIdentity(
+							PinId,
+							AudioMediaIdentity::TextureGraphPin(
+								ElementId, TEXT("input"), PinName))},
+						AudioMediaIdentity::TextureGraphParameter(
+							ElementId, PinName)))
 				{
 					return false;
 				}

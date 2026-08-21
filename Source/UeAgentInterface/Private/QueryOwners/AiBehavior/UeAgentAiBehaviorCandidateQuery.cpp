@@ -5,10 +5,15 @@
 #include "BehaviorTree/Blackboard/BlackboardKeyType.h"
 #include "BehaviorTree/BlackboardData.h"
 #include "BehaviorTree/BTDecorator.h"
+#include "BehaviorTree/BTCompositeNode.h"
 #include "BehaviorTree/BTNode.h"
 #include "BehaviorTree/BTService.h"
+#include "BehaviorTree/BTTaskNode.h"
 #include "Blueprint/StateTreeNodeBlueprintBase.h"
 #include "DomainAdapters/ContentGraphRead/UeAgentContentGraphReadProductionEnvironment.h"
+#include "EnvironmentQuery/EnvQuery.h"
+#include "EnvironmentQuery/EnvQueryGenerator.h"
+#include "SmartObjectDefinition.h"
 #include "StateTree.h"
 #include "StateTreeConditionBase.h"
 #include "StateTreeEvaluatorBase.h"
@@ -63,16 +68,21 @@ namespace UE::UAI::QueryOwners::AiBehavior
 		{
 			return Target.GetClass() == UBehaviorTree::StaticClass()
 				|| Target.GetClass() == UBlackboardData::StaticClass()
-				|| Target.GetClass() == UStateTree::StaticClass();
+				|| Target.GetClass() == UStateTree::StaticClass()
+				|| Target.GetClass() == UEnvQuery::StaticClass()
+				|| Target.GetClass() == USmartObjectDefinition::StaticClass();
 		}
 
 		FString KindForClass(const UClass& Class)
 		{
 			if (Class.IsChildOf(UBTService::StaticClass())) return TEXT("behavior_service");
 			if (Class.IsChildOf(UBTDecorator::StaticClass())) return TEXT("behavior_decorator");
-			if (Class.IsChildOf(UBTNode::StaticClass())) return TEXT("behavior_node");
+			if (Class.IsChildOf(UBTCompositeNode::StaticClass())) return TEXT("behavior_composite");
+			if (Class.IsChildOf(UBTTaskNode::StaticClass())) return TEXT("behavior_task");
 			if (Class.IsChildOf(UStateTreeNodeBlueprintBase::StaticClass())) return TEXT("state_tree_node");
 			if (Class.IsChildOf(UBlackboardKeyType::StaticClass())) return TEXT("blackboard_key");
+			if (Class.IsChildOf(UEnvQueryGenerator::StaticClass())) return TEXT("eqs_generator");
+			if (Class.IsChildOf(USmartObjectBehaviorDefinition::StaticClass())) return TEXT("smart_object_behavior");
 			return FString();
 		}
 
@@ -103,22 +113,37 @@ namespace UE::UAI::QueryOwners::AiBehavior
 			{
 				return Class.IsChildOf(UStateTreeNodeBlueprintBase::StaticClass());
 			}
+			if (Target.GetClass() == UEnvQuery::StaticClass())
+			{
+				return Class.IsChildOf(UEnvQueryGenerator::StaticClass());
+			}
+			if (Target.GetClass() == USmartObjectDefinition::StaticClass())
+			{
+				return Class.IsChildOf(
+					USmartObjectBehaviorDefinition::StaticClass());
+			}
 			return Class.IsChildOf(UBlackboardKeyType::StaticClass());
 		}
 
 		FString InputContract(const FString& Kind)
 		{
+			if (Kind == TEXT("behavior_composite")) return TEXT("uai.ai.behavior_composite.create/1");
+			if (Kind == TEXT("behavior_task")) return TEXT("uai.ai.behavior_task.create/1");
 			if (Kind == TEXT("behavior_service")) return TEXT("uai.ai.behavior_service.create/1");
 			if (Kind == TEXT("behavior_decorator")) return TEXT("uai.ai.behavior_decorator.create/1");
 			if (Kind.StartsWith(TEXT("state_tree_"))) return TEXT("uai.ai.state_tree_node.create/1");
 			if (Kind == TEXT("blackboard_key")) return TEXT("uai.ai.blackboard_entry.create/1");
-			return TEXT("uai.ai.behavior_node.create/1");
+			if (Kind == TEXT("eqs_generator")) return TEXT("uai.ai.eqs_option.create/1");
+			if (Kind == TEXT("smart_object_behavior")) return TEXT("uai.ai.smart_object_slot.create/1");
+			return FString();
 		}
 
 		FString PlacementContract(const FString& Kind)
 		{
 			if (Kind == TEXT("blackboard_key")) return TEXT("uai.ai.blackboard-entry-placement/1");
 			if (Kind.StartsWith(TEXT("state_tree_"))) return TEXT("uai.ai.state-tree-placement/1");
+			if (Kind == TEXT("eqs_generator")) return TEXT("uai.ai.eqs-graph-placement/1");
+			if (Kind == TEXT("smart_object_behavior")) return TEXT("uai.ai.smart-object-slot-placement/1");
 			return TEXT("uai.ai.behavior-tree-placement/1");
 		}
 
@@ -126,7 +151,24 @@ namespace UE::UAI::QueryOwners::AiBehavior
 		{
 			if (Kind == TEXT("blackboard_key")) return TEXT("target_ref:entry_name:key_type_ref");
 			if (Kind.StartsWith(TEXT("state_tree_"))) return TEXT("target_ref:owner_state:node_type_ref:placement");
+			if (Kind == TEXT("eqs_generator")) return TEXT("target_ref:option_guid:generator_type_ref");
+			if (Kind == TEXT("smart_object_behavior")) return TEXT("target_ref:slot_guid:behavior_type_ref");
 			return TEXT("target_ref:owner_node:node_class:placement");
+		}
+
+		FString CandidateRevision(
+			const UObject& Target,
+			const FString& CandidateName,
+			const FString& CandidateKind)
+		{
+			const FString CandidateInput = InputContract(CandidateKind);
+			const FString CandidatePlacement = PlacementContract(CandidateKind);
+			const FString CandidateContext = RequiredContext(CandidateKind);
+			return Sha256(
+				CandidateName + TEXT("|") + CandidateKind + TEXT("|")
+					+ CandidateInput + TEXT("|") + CandidatePlacement
+					+ TEXT("|") + CandidateContext + TEXT("|")
+					+ Target.GetClass()->GetPathName());
 		}
 
 		bool ReadTargetRevision(
@@ -189,7 +231,8 @@ namespace UE::UAI::QueryOwners::AiBehavior
 		for (TObjectIterator<UClass> It; It; ++It)
 		{
 			UClass* Class = *It;
-			if (!Class || !MatchesTarget(Target, *Class)
+			const FString Kind = Class ? KindForClass(*Class) : FString();
+			if (!Class || Kind.IsEmpty() || !MatchesTarget(Target, *Class)
 				|| Class->HasAnyClassFlags(CLASS_Abstract | CLASS_Deprecated | CLASS_NewerVersionExists))
 			{
 				continue;
@@ -251,16 +294,82 @@ namespace UE::UAI::QueryOwners::AiBehavior
 			Candidate.InputContract = InputContract(Candidate.Kind);
 			Candidate.PlacementContract = PlacementContract(Candidate.Kind);
 			Candidate.RequiredContext = RequiredContext(Candidate.Kind);
-			Candidate.BindingRevision = Sha256(
-				Candidate.Name + TEXT("|") + Candidate.Kind + TEXT("|")
-				+ Candidate.InputContract + TEXT("|") + Candidate.PlacementContract
-				+ TEXT("|") + Candidate.RequiredContext + TEXT("|")
-				+ Target.GetClass()->GetPathName());
+			Candidate.BindingRevision = CandidateRevision(
+				Target, Candidate.Name, Candidate.Kind);
 			OutResult.Candidates.Add(MoveTemp(Candidate));
 		}
 		OutResult.bHasMore = End < OutResult.TotalMatches;
 		OutResult.bComplete = !OutResult.bHasMore;
 		OutResult.NextCursor = OutResult.bHasMore ? End : INDEX_NONE;
+		return true;
+	}
+
+	bool IsCurrentAiBehaviorCandidateBinding(
+		UObject& Target,
+		const FString& CandidateName,
+		const FString& CandidateKind,
+		const TArray<FString>& SupportedOperations,
+		const FString& InputContractValue,
+		const FString& PlacementContractValue,
+		const FString& RequiredContextValue,
+		const FString& BindingRevision,
+		FAiBehaviorCandidateQueryError& OutError)
+	{
+		OutError = {};
+		if (!IsInGameThread())
+		{
+			return Fail(
+				OutError, TEXT("ai_behavior_candidate_game_thread_required"),
+				Target.GetPathName());
+		}
+		if (!IsSupportedTarget(Target))
+		{
+			return Fail(
+				OutError, TEXT("ai_behavior_candidate_target_type_unsupported"),
+				Target.GetClass()->GetPathName());
+		}
+
+		const UObject* CandidateType = LoadObject<UClass>(nullptr, *CandidateName);
+		if (!CandidateType && Target.GetClass() == UStateTree::StaticClass())
+		{
+			CandidateType = LoadObject<UScriptStruct>(nullptr, *CandidateName);
+		}
+		const UClass* Class = Cast<UClass>(CandidateType);
+		const UScriptStruct* Struct = Cast<UScriptStruct>(CandidateType);
+		const FString CurrentKind = Class
+			? KindForClass(*Class)
+			: (Struct ? KindForStruct(*Struct) : FString());
+		const bool bMatchesTarget = Class
+			? MatchesTarget(Target, *Class)
+			: (Struct && Target.GetClass() == UStateTree::StaticClass()
+				&& !CurrentKind.IsEmpty());
+		if (!CandidateType || CurrentKind.IsEmpty() || !bMatchesTarget
+			|| (Class && Class->HasAnyClassFlags(
+				CLASS_Abstract | CLASS_Deprecated | CLASS_NewerVersionExists)))
+		{
+			return Fail(
+				OutError, TEXT("ai_behavior_candidate_name_unresolved"),
+				CandidateName);
+		}
+		const TArray<FString> ExpectedOperations = {TEXT("create")};
+		if (CandidateKind != CurrentKind
+			|| SupportedOperations != ExpectedOperations
+			|| InputContractValue != InputContract(CurrentKind)
+			|| PlacementContractValue != PlacementContract(CurrentKind)
+			|| RequiredContextValue != RequiredContext(CurrentKind))
+		{
+			return Fail(
+				OutError, TEXT("ai_behavior_candidate_contract_mismatch"),
+				CandidateName);
+		}
+		const FString CurrentRevision = CandidateRevision(
+			Target, CandidateName, CurrentKind);
+		if (BindingRevision != CurrentRevision)
+		{
+			return Fail(
+				OutError, TEXT("ai_behavior_candidate_binding_stale"),
+				CandidateName, CurrentRevision);
+		}
 		return true;
 	}
 }

@@ -1,6 +1,6 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
-#include "Server/UeAgentHttpServer.h"
+#include "LegacyMechanics/UeAgentLegacyMechanics.h"
 #include "Commands/Audio/UeAgentHttpServer_AudioOps.h"
 #include "Dom/JsonObject.h"
 #include "Dom/JsonValue.h"
@@ -16,7 +16,7 @@
 #include "Sound/SoundSubmix.h"
 #include "UObject/UObjectIterator.h"
 
-bool FUeAgentHttpServer::CmdAudioComponentValidateSetup(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdAudioComponentValidateSetup(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	using namespace UeAgentAudioOps;
 	UWorld* World = GetEditorWorldDirect();
@@ -38,7 +38,7 @@ bool FUeAgentHttpServer::CmdAudioComponentValidateSetup(const FUeAgentRequestCon
 	OutData->SetObjectField(TEXT("coverage_report"), MakeCoverageReport(AudioRuntimeProfile));
 	return true;
 }
-bool FUeAgentHttpServer::CmdAudioComponentRuntimeSnapshot(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdAudioComponentRuntimeSnapshot(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	using namespace UeAgentAudioOps;
 	UWorld* World = GetEditorWorldDirect();
@@ -52,7 +52,7 @@ bool FUeAgentHttpServer::CmdAudioComponentRuntimeSnapshot(const FUeAgentRequestC
 	OutData->SetBoolField(TEXT("audio_device_available"), World && World->GetAudioDeviceRaw() != nullptr);
 	return true;
 }
-bool FUeAgentHttpServer::CmdAudioComponentRuntimeProbe(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdAudioComponentRuntimeProbe(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	using namespace UeAgentAudioOps;
 	UWorld* World = GetEditorWorldDirect();
@@ -109,7 +109,7 @@ bool FUeAgentHttpServer::CmdAudioComponentRuntimeProbe(const FUeAgentRequestCont
 	}
 	return true;
 }
-bool FUeAgentHttpServer::CmdAudioVolumeValidateSetup(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdAudioVolumeValidateSetup(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	using namespace UeAgentAudioOps;
 	UWorld* World = GetEditorWorldDirect();
@@ -134,7 +134,7 @@ bool FUeAgentHttpServer::CmdAudioVolumeValidateSetup(const FUeAgentRequestContex
 	OutData->SetObjectField(TEXT("coverage_report"), MakeCoverageReport(AudioRuntimeProfile));
 	return true;
 }
-bool FUeAgentHttpServer::CmdAmbientSoundValidateSetup(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdAmbientSoundValidateSetup(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	using namespace UeAgentAudioOps;
 	UWorld* World = GetEditorWorldDirect();
@@ -158,7 +158,7 @@ bool FUeAgentHttpServer::CmdAmbientSoundValidateSetup(const FUeAgentRequestConte
 	OutData->SetObjectField(TEXT("coverage_report"), MakeCoverageReport(AudioRuntimeProfile));
 	return true;
 }
-bool FUeAgentHttpServer::CmdAudioRuntimeSnapshot(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdAudioRuntimeSnapshot(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	using namespace UeAgentAudioOps;
 	UWorld* World = GetEditorWorldDirect();
@@ -197,7 +197,7 @@ bool FUeAgentHttpServer::CmdAudioRuntimeSnapshot(const FUeAgentRequestContext& C
 	OutData->SetObjectField(TEXT("coverage_report"), MakeCoverageReport(AudioRuntimeProfile));
 	return true;
 }
-bool FUeAgentHttpServer::CmdAudioRuntimeProbe(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdAudioRuntimeProbe(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	using namespace UeAgentAudioOps;
 	UWorld* World = GetEditorWorldDirect();
@@ -271,7 +271,7 @@ bool FUeAgentHttpServer::CmdAudioRuntimeProbe(const FUeAgentRequestContext& Ctx,
 	}
 	return true;
 }
-bool FUeAgentHttpServer::CmdAudioSubmixMeterProbe(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdAudioSubmixMeterProbe(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	using namespace UeAgentAudioOps;
 	UWorld* World = GetEditorWorldDirect();

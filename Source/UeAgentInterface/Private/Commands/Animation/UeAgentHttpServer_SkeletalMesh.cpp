@@ -1,6 +1,6 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
-#include "Server/UeAgentHttpServer.h"
+#include "LegacyMechanics/UeAgentLegacyMechanics.h"
 
 #include "Commands/Animation/UeAgentAnimationFolderCommandBridge.h"
 #include "Utilities/UeAgentAuthoringJson.h"
@@ -336,7 +336,7 @@ static TSharedPtr<FJsonObject> BuildSocketsJson(USkeletalMesh *Mesh) {
 }
 } // namespace UeAgentSkeletalMeshOps
 
-bool FUeAgentHttpServer::ExecuteSkeletalMeshCommand(
+bool FUeAgentLegacyMechanics::ExecuteSkeletalMeshCommand(
     const FString &CommandLower, const FUeAgentRequestContext &Ctx,
     TSharedPtr<FJsonObject> &OutData, FString &OutError) const {
   if (CommandLower == TEXT("skeletal_mesh_get_info"))
@@ -366,7 +366,7 @@ bool FUeAgentHttpServer::ExecuteSkeletalMeshCommand(
   return false;
 }
 
-bool FUeAgentHttpServer::CmdSkeletalMeshGetInfo(
+bool FUeAgentLegacyMechanics::CmdSkeletalMeshGetInfo(
     const FUeAgentRequestContext &Ctx, TSharedPtr<FJsonObject> &OutData,
     FString &OutError) const {
   FString AssetPath;
@@ -401,7 +401,7 @@ bool FUeAgentHttpServer::CmdSkeletalMeshGetInfo(
   return true;
 }
 
-bool FUeAgentHttpServer::CmdSkeletalMeshExportFolder(
+bool FUeAgentLegacyMechanics::CmdSkeletalMeshExportFolder(
     const FUeAgentRequestContext &Ctx, TSharedPtr<FJsonObject> &OutData,
     FString &OutError) const {
   return UeAgentAnimationFolderCommandBridge::Export(
@@ -409,7 +409,7 @@ bool FUeAgentHttpServer::CmdSkeletalMeshExportFolder(
       OutError);
 }
 
-bool FUeAgentHttpServer::CmdSkeletalMeshApplyFolder(
+bool FUeAgentLegacyMechanics::CmdSkeletalMeshApplyFolder(
     const FUeAgentRequestContext &Ctx, TSharedPtr<FJsonObject> &OutData,
     FString &OutError) const {
   return UeAgentAnimationFolderCommandBridge::Apply(
@@ -417,14 +417,14 @@ bool FUeAgentHttpServer::CmdSkeletalMeshApplyFolder(
       OutError, Ctx.RequestId);
 }
 
-bool FUeAgentHttpServer::CmdSkeletalMeshValidateFolder(
+bool FUeAgentLegacyMechanics::CmdSkeletalMeshValidateFolder(
     const FUeAgentRequestContext &Ctx, TSharedPtr<FJsonObject> &OutData,
     FString &OutError) const {
   return UeAgentAnimationFolderCommandBridge::Validate(
       UeAgentAnimationAuthoring::EAssetKind::SkeletalMesh, Ctx.Params, OutData,
       OutError);
 }
-bool FUeAgentHttpServer::CmdSkeletalMeshGetMorphTargets(
+bool FUeAgentLegacyMechanics::CmdSkeletalMeshGetMorphTargets(
     const FUeAgentRequestContext &Ctx, TSharedPtr<FJsonObject> &OutData,
     FString &OutError) const {
   FString AssetPath;
@@ -445,7 +445,7 @@ bool FUeAgentHttpServer::CmdSkeletalMeshGetMorphTargets(
   return true;
 }
 
-bool FUeAgentHttpServer::CmdSkeletalMeshValidateMorphTargets(
+bool FUeAgentLegacyMechanics::CmdSkeletalMeshValidateMorphTargets(
     const FUeAgentRequestContext &Ctx, TSharedPtr<FJsonObject> &OutData,
     FString &OutError) const {
   if (!CmdSkeletalMeshGetMorphTargets(Ctx, OutData, OutError)) {
@@ -480,7 +480,7 @@ bool FUeAgentHttpServer::CmdSkeletalMeshValidateMorphTargets(
   return true;
 }
 
-bool FUeAgentHttpServer::CmdSkeletalMeshPreviewMorphTarget(
+bool FUeAgentLegacyMechanics::CmdSkeletalMeshPreviewMorphTarget(
     const FUeAgentRequestContext &Ctx, TSharedPtr<FJsonObject> &OutData,
     FString &OutError) const {
   FString AssetPath;
@@ -544,7 +544,7 @@ bool FUeAgentHttpServer::CmdSkeletalMeshPreviewMorphTarget(
   return true;
 }
 
-bool FUeAgentHttpServer::CmdSkeletalMeshRemoveMorphTarget(
+bool FUeAgentLegacyMechanics::CmdSkeletalMeshRemoveMorphTarget(
     const FUeAgentRequestContext &Ctx, TSharedPtr<FJsonObject> &OutData,
     FString &OutError) const {
   FString AssetPath;
@@ -603,7 +603,7 @@ bool FUeAgentHttpServer::CmdSkeletalMeshRemoveMorphTarget(
   return true;
 }
 
-bool FUeAgentHttpServer::CmdSkeletalMeshImportSkinWeightProfile(
+bool FUeAgentLegacyMechanics::CmdSkeletalMeshImportSkinWeightProfile(
     const FUeAgentRequestContext &Ctx, TSharedPtr<FJsonObject> &OutData,
     FString &OutError) const {
   FString AssetPath;
@@ -690,7 +690,7 @@ bool FUeAgentHttpServer::CmdSkeletalMeshImportSkinWeightProfile(
   return true;
 }
 
-bool FUeAgentHttpServer::CmdSkeletalMeshRemoveSkinWeightProfile(
+bool FUeAgentLegacyMechanics::CmdSkeletalMeshRemoveSkinWeightProfile(
     const FUeAgentRequestContext &Ctx, TSharedPtr<FJsonObject> &OutData,
     FString &OutError) const {
   FString AssetPath;
@@ -793,7 +793,7 @@ bool FUeAgentHttpServer::CmdSkeletalMeshRemoveSkinWeightProfile(
   return true;
 }
 
-bool FUeAgentHttpServer::CmdSkeletalMeshPreviewSkinWeightProfile(
+bool FUeAgentLegacyMechanics::CmdSkeletalMeshPreviewSkinWeightProfile(
     const FUeAgentRequestContext &Ctx, TSharedPtr<FJsonObject> &OutData,
     FString &OutError) const {
   FString AssetPath;

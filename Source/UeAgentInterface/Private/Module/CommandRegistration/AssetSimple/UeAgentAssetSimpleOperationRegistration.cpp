@@ -2,6 +2,7 @@
 
 #include "CommandHandlers/AssetSimple/UeAgentAssetSimpleOperationCommandHandlers.h"
 #include "Core/Contract/UeAgentCommandContract.h"
+#include "Core/DomainCapability/UeAgentDomainCapability.h"
 #include "OperationOwners/AssetSimple/UeAgentAssetSimpleOperationOwner.h"
 
 namespace UE::UAI::Module::CommandRegistration::AssetSimple
@@ -57,8 +58,9 @@ namespace UE::UAI::Module::CommandRegistration::AssetSimple
 
 			FUeAgentCommandDeclaration Result;
 			Result.CommandId = Route.CommandId;
-			Result.PythonNamespace = TEXT("t37_asset_simple_operation");
-			Result.PythonFunction = Route.CommandId.Replace(TEXT("."), TEXT("_"));
+			Result.PythonNamespace = TEXT("asset");
+			Result.PythonFunction = Route.CommandId.Mid(6).Replace(
+				TEXT("."), TEXT("_"));
 			Result.ContractVersion = 1;
 			Result.PublicOwner = Owner;
 			Result.Availability = EUeAgentCommandAvailability::Enabled;
@@ -166,6 +168,63 @@ namespace UE::UAI::Module::CommandRegistration::AssetSimple
 			GAssetSimpleOperationContributionRegistration(
 				TEXT("asset-simple-operation"),
 				&TryCreateAssetSimpleOperationContribution);
+
+		bool TryCreateDomainCapability(
+			TSharedPtr<const DomainCapability::FDomainCapabilityContribution>&
+				OutContribution,
+			FString& OutError)
+		{
+			DomainCapability::FDomainCapabilityDeclaration Declaration =
+				DomainCapability::MakeExplicitlyUnsupportedDomainCapabilityDeclaration(
+					TEXT("asset-simple"));
+			Declaration.Operation.Support =
+				DomainCapability::EDomainCapabilitySupport::Supported;
+			for (const FUeAgentSimpleAuthoringCommandRoute& Route
+				: GetAssetSimpleOperationRoutes())
+			{
+				const TSharedPtr<const DomainCapability::
+					IDomainOperationInvocationFactory> Factory =
+						FindOperationInvocationFactory(Route.CommandId);
+				if (!Factory.IsValid())
+				{
+					OutError = TEXT("asset_simple_operation_factory_missing:")
+						+ Route.CommandId;
+					return false;
+				}
+				DomainCapability::FDomainOperationEntry Operation;
+				Operation.OperationId = Route.CommandId;
+				Operation.Kind = Route.CommandId.EndsWith(TEXT(".create"))
+					? DomainCapability::EDomainOperationKind::Create
+					: DomainCapability::EDomainOperationKind::Write;
+				Operation.TerminalPolicy = DomainCapability::
+					EDomainOperationTerminalPolicy::
+						SucceededRejectedRolledBackOrStateUnknown;
+				Operation.ExecutionPolicy = DomainCapability::
+					EDomainOperationExecutionPolicy::Immediate;
+				Operation.TransientStatePolicy = DomainCapability::
+					EDomainTransientStatePolicy::None;
+				Operation.bPersists = true;
+				Operation.bIndependentReadback = true;
+				Operation.InvocationFactory = Factory;
+				Declaration.Operation.Operations.Add(MoveTemp(Operation));
+			}
+			Declaration.State.Support =
+				DomainCapability::EDomainCapabilitySupport::Supported;
+			Declaration.State.Planes = {
+				StateSemantic::EUeAgentStatePlane::AuthoringMemory,
+				StateSemantic::EUeAgentStatePlane::Persisted,
+			};
+			Declaration.Migration.Support =
+				DomainCapability::EDomainCapabilitySupport::Supported;
+			Declaration.Migration.OwnerId =
+				TEXT("TROOT-UAI-38-ASSET-MATERIAL-TEXTURE-MEDIA-VERTICAL");
+			return DomainCapability::FDomainCapabilityContribution::TryCreate(
+				MoveTemp(Declaration), OutContribution, OutError);
+		}
+
+		const DomainCapability::FDomainCapabilityContributionFactoryRegistration
+			DomainCapabilityRegistration(
+				TEXT("asset-simple"), &TryCreateDomainCapability);
 	}
 
 	bool TryCreateAssetSimpleOperationContribution(

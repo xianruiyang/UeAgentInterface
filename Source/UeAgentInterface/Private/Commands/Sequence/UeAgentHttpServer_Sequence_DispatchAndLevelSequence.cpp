@@ -98,7 +98,7 @@
 #include "UeAgentInterfaceSettings.h"
 #include "WidgetBlueprint.h"
 
-bool FUeAgentHttpServer::ExecuteSequenceCommand(const FString& CommandLower, const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::ExecuteSequenceCommand(const FString& CommandLower, const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	if (!OutData.IsValid())
 	{
@@ -144,7 +144,7 @@ bool FUeAgentHttpServer::ExecuteSequenceCommand(const FString& CommandLower, con
 	return false;
 }
 
-bool FUeAgentHttpServer::CmdSequenceListLevelSequences(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdSequenceListLevelSequences(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	FString RootPath = TEXT("/Game");
 	JsonTryGetString(Ctx.Params, TEXT("root_path"), RootPath);
@@ -205,7 +205,7 @@ bool FUeAgentHttpServer::CmdSequenceListLevelSequences(const FUeAgentRequestCont
 	return true;
 }
 
-bool FUeAgentHttpServer::CmdSequenceCreateLevelSequence(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdSequenceCreateLevelSequence(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	if (!OutData.IsValid())
 	{
@@ -319,7 +319,7 @@ bool FUeAgentHttpServer::CmdSequenceCreateLevelSequence(const FUeAgentRequestCon
 	return true;
 }
 
-bool FUeAgentHttpServer::CmdSequenceOpenLevelSequence(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdSequenceOpenLevelSequence(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	FString AssetPath;
 	if (!JsonTryGetString(Ctx.Params, TEXT("asset_path"), AssetPath) || AssetPath.IsEmpty())
@@ -360,7 +360,7 @@ bool FUeAgentHttpServer::CmdSequenceOpenLevelSequence(const FUeAgentRequestConte
 	return true;
 }
 
-bool FUeAgentHttpServer::CmdSequenceGetLevelSequenceInfo(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdSequenceGetLevelSequenceInfo(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	FString AssetPath;
 	if (!JsonTryGetString(Ctx.Params, TEXT("asset_path"), AssetPath) || AssetPath.IsEmpty())
@@ -409,7 +409,7 @@ bool FUeAgentHttpServer::CmdSequenceGetLevelSequenceInfo(const FUeAgentRequestCo
 	return true;
 }
 
-bool FUeAgentHttpServer::CmdSequenceScreenshot(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdSequenceScreenshot(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	if (!OutData.IsValid())
 	{
@@ -883,7 +883,7 @@ bool FUeAgentHttpServer::CmdSequenceScreenshot(const FUeAgentRequestContext& Ctx
 	return true;
 }
 
-bool FUeAgentHttpServer::CmdSequenceSetLevelSequencePlaybackRange(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdSequenceSetLevelSequencePlaybackRange(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	FString AssetPath;
 	if (!JsonTryGetString(Ctx.Params, TEXT("asset_path"), AssetPath) || AssetPath.IsEmpty())
@@ -949,7 +949,7 @@ bool FUeAgentHttpServer::CmdSequenceSetLevelSequencePlaybackRange(const FUeAgent
 	return true;
 }
 
-bool FUeAgentHttpServer::CmdSequenceSetLevelSequenceDisplayRate(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdSequenceSetLevelSequenceDisplayRate(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	FString AssetPath;
 	if (!JsonTryGetString(Ctx.Params, TEXT("asset_path"), AssetPath) || AssetPath.IsEmpty())

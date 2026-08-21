@@ -475,6 +475,8 @@ namespace UE::UAI::Composition::SimpleAuthoring::OperationHost
 			FCriticalSection Mutex;
 			TSharedPtr<FUeAgentSimpleAuthoringRuntime> Runtime;
 			TMap<FString, TSharedRef<IUeAgentCommandHandler>> Handlers;
+			TMap<FString, TSharedRef<Discovery::IUeAgentCatalogSource>>
+				CatalogSourcesByKind;
 			TMap<FString, TSharedRef<const DomainCapability::
 				IDomainOperationInvocationFactory>> OperationFactories;
 #if WITH_DEV_AUTOMATION_TESTS
@@ -573,6 +575,7 @@ namespace UE::UAI::Composition::SimpleAuthoring::OperationHost
 			}
 
 			Host.Handlers.Reset();
+			Host.CatalogSourcesByKind.Reset();
 			for (const TSharedRef<IUeAgentCommandHandler>& Handler
 				: Host.Runtime->GetCommandHandlers())
 			{
@@ -585,6 +588,24 @@ namespace UE::UAI::Composition::SimpleAuthoring::OperationHost
 					return false;
 				}
 				Host.Handlers.Add(Handler->GetCommandId(), Handler);
+			}
+			for (const TSharedRef<Discovery::IUeAgentCatalogSource>& Source
+				: Host.Runtime->GetCatalogSources())
+			{
+				for (const FString& Kind : Source->GetCatalogKinds())
+				{
+					if (Kind.IsEmpty()
+						|| Host.CatalogSourcesByKind.Contains(Kind))
+					{
+						Host.Handlers.Reset();
+						Host.CatalogSourcesByKind.Reset();
+						Host.Runtime.Reset();
+						OutError = TEXT("simple_authoring_catalog_kind_duplicate:")
+							+ Kind;
+						return false;
+					}
+					Host.CatalogSourcesByKind.Add(Kind, Source);
+				}
 			}
 			return true;
 		}
@@ -622,6 +643,31 @@ namespace UE::UAI::Composition::SimpleAuthoring::OperationHost
 		return true;
 	}
 
+	bool TryResolveCatalogSource(
+		const FString& CatalogKind,
+		TSharedPtr<Discovery::IUeAgentCatalogSource>& OutSource,
+		FString& OutError)
+	{
+		OutSource.Reset();
+		OutError.Reset();
+		FProcessHost& Host = ProcessHost();
+		FScopeLock Lock(&Host.Mutex);
+		if (!TryCreateRuntimeLocked(Host, OutError))
+		{
+			return false;
+		}
+		const TSharedRef<Discovery::IUeAgentCatalogSource>* Found =
+			Host.CatalogSourcesByKind.Find(CatalogKind);
+		if (!Found)
+		{
+			OutError = TEXT("simple_authoring_catalog_kind_missing:")
+				+ CatalogKind;
+			return false;
+		}
+		OutSource = *Found;
+		return true;
+	}
+
 	TSharedRef<const DomainCapability::IDomainOperationInvocationFactory>
 	GetOperationInvocationFactory(const FString& CommandId)
 	{
@@ -646,6 +692,7 @@ namespace UE::UAI::Composition::SimpleAuthoring::OperationHost
 		FProcessHost& Host = ProcessHost();
 		FScopeLock Lock(&Host.Mutex);
 		Host.Handlers.Reset();
+		Host.CatalogSourcesByKind.Reset();
 		Host.Runtime.Reset();
 		Host.AutomationWorld = World;
 	}

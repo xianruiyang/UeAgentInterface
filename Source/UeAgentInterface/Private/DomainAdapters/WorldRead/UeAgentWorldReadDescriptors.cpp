@@ -122,15 +122,12 @@ namespace UE::UAI::DomainAdapters::WorldRead
 			Add(
 				Descriptors,
 				TEXT("uai.query.world.selection"),
-				TEXT("sha256:e5052956111d5a033fabac404bda9b04a6ab4ba1c371ec770e39d14e950edbf8"),
+				TEXT("sha256:8e498e351b0cb08a1e9e78f7596af6117dd66fce8b6257aac2e70ed114615126"),
 				TEXT("world.selection.read"),
 				TEXT("world.read.selection"),
 				EUeAgentQueryKind::State,
 				Authoring(),
-				{
-					EUeAgentExecutionContextFacet::World,
-					EUeAgentExecutionContextFacet::Selection,
-				},
+				WorldFacet(),
 				TEXT(R"json({"type":"object","properties":{},"additionalProperties":false})json"));
 			Add(
 				Descriptors,

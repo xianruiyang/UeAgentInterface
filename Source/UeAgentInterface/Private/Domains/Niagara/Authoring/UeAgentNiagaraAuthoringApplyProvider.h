@@ -6,6 +6,7 @@
 #include "Utilities/AuthoringOperationApply/UeAgentApplyInputContract.h"
 
 class FJsonValue;
+class FJsonObject;
 class UObject;
 
 namespace UeAgentAuthoringOperationApply
@@ -92,6 +93,12 @@ namespace UeAgentNiagaraAuthoring
 		const FString& RequestId = FString());
 	UEAGENTINTERFACE_API bool ApplyAssetWorkspace(
 		const FString& WorkspaceRoot,
+		const FString& ExpectedAssetKind,
+		const FString& ExpectedAssetPath,
+		FAssetApplyResult& OutResult,
+		const FString& RequestId = FString());
+	UEAGENTINTERFACE_API bool ApplyAssetInlineDocument(
+		const TSharedPtr<const FJsonObject>& Document,
 		const FString& ExpectedAssetKind,
 		const FString& ExpectedAssetPath,
 		FAssetApplyResult& OutResult,

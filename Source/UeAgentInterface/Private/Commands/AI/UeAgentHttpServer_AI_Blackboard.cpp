@@ -1,4 +1,4 @@
-#include "Server/UeAgentHttpServer.h"
+#include "LegacyMechanics/UeAgentLegacyMechanics.h"
 
 #include "Commands/Assets/UeAgentReflectionAuthoringCommandBridge.h"
 #include "UeAgentHttpServer_AIOps.h"
@@ -1212,7 +1212,7 @@ namespace UeAgentAIOps
 	}
 }
 
-bool FUeAgentHttpServer::ExecuteAICommand(const FString& CommandLower, const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::ExecuteAICommand(const FString& CommandLower, const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	if (CommandLower == TEXT("blackboard_create")) return CmdBlackboardCreate(Ctx, OutData, OutError);
 	if (CommandLower == TEXT("blackboard_get_info")) return CmdBlackboardGetInfo(Ctx, OutData, OutError);
@@ -1278,7 +1278,7 @@ bool FUeAgentHttpServer::ExecuteAICommand(const FString& CommandLower, const FUe
 	return false;
 }
 
-bool FUeAgentHttpServer::CmdBlackboardCreate(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdBlackboardCreate(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	FString AssetPath;
 	if (!JsonTryGetString(Ctx.Params, TEXT("asset_path"), AssetPath) || AssetPath.IsEmpty())
@@ -1337,7 +1337,7 @@ bool FUeAgentHttpServer::CmdBlackboardCreate(const FUeAgentRequestContext& Ctx, 
 	return true;
 }
 
-bool FUeAgentHttpServer::CmdBlackboardGetInfo(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdBlackboardGetInfo(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	FString AssetPath;
 	if (!JsonTryGetString(Ctx.Params, TEXT("asset_path"), AssetPath) || AssetPath.IsEmpty())
@@ -1358,7 +1358,7 @@ bool FUeAgentHttpServer::CmdBlackboardGetInfo(const FUeAgentRequestContext& Ctx,
 	return true;
 }
 
-bool FUeAgentHttpServer::CmdBlackboardExportJson(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdBlackboardExportJson(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	if (!CmdBlackboardGetInfo(Ctx, OutData, OutError))
 	{
@@ -1380,7 +1380,7 @@ bool FUeAgentHttpServer::CmdBlackboardExportJson(const FUeAgentRequestContext& C
 	return true;
 }
 
-bool FUeAgentHttpServer::CmdBlackboardValidateJson(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdBlackboardValidateJson(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	TSharedPtr<FJsonObject> Root;
 	FString JsonFile;
@@ -1406,7 +1406,7 @@ bool FUeAgentHttpServer::CmdBlackboardValidateJson(const FUeAgentRequestContext&
 	return bValid;
 }
 
-bool FUeAgentHttpServer::CmdBlackboardApplyJson(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdBlackboardApplyJson(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	TSharedPtr<FJsonObject> Root;
 	FString JsonFile;

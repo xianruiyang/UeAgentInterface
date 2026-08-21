@@ -37,15 +37,10 @@ namespace UE::UAI::CommandHandlers::Blueprint::Surfaces
 				Request, TEXT("{}"), MoveTemp(ErrorJson));
 		}
 
-		class FBlueprintSurfaceHandler final : public IUeAgentExactCommandHandler
+		class FRetiredBlueprintSurfaceHandler final
+			: public IUeAgentExactCommandHandler
 		{
 		public:
-			explicit FBlueprintSurfaceHandler(
-				TSharedRef<IUeAgentBlueprintSurfaceCommandService> InService)
-				: Service(MoveTemp(InService))
-			{
-			}
-
 			virtual const FString& GetCommandId() const override
 			{
 				return CommandId;
@@ -61,68 +56,14 @@ namespace UE::UAI::CommandHandlers::Blueprint::Surfaces
 				const FUeAgentCallerContext& Caller,
 				const TSharedRef<IUeAgentCancellationSignal>& Cancellation) override
 			{
-				if (!Caller.IsValid()
-					|| !Caller.GetAuthorityScopes().Contains(TEXT("uai:operate")))
-				{
-					return Failure(Request,
-						TEXT("blueprint_surface_authority_required"),
-						Request.GetCommandId(),
-						TEXT("the uai:operate authority is required"));
-				}
-				if (!IsInGameThread())
-				{
-					return Failure(Request,
-						TEXT("blueprint_surface_game_thread_required"),
-						Request.GetCommandId(),
-						TEXT("Blueprint mechanics run on the UE game thread"));
-				}
-
-				FBlueprintSurfaceCommandRequest ServiceRequest;
-				ServiceRequest.CommandId = Request.GetCommandId();
-				ServiceRequest.RequestId = Request.GetRequestId();
-				ServiceRequest.CanonicalParamsJson = Request.GetParamsJson();
-				ServiceRequest.CallerId = Caller.GetCallerId();
-				ServiceRequest.AuthorityScopes = Caller.GetAuthorityScopes();
-				ServiceRequest.CorrelationId = Caller.GetCorrelationId();
-				ServiceRequest.bCancellationRequested = Cancellation->IsCancelled();
-				FBlueprintSurfaceCommandResponse Response;
-				FBlueprintSurfaceCommandError Error;
-				if (!Service->Execute(ServiceRequest, Response, Error))
-				{
-					return Failure(Request,
-						Error.Code.IsEmpty()
-							? FString(TEXT("blueprint_surface_execution_failed"))
-							: Error.Code,
-						Error.SubjectId,
-						Error.Detail);
-				}
-				if (Response.bReadOnly)
-				{
-					return Failure(Request,
-						TEXT("blueprint_surface_mutation_reported_read_only"),
-						Request.GetCommandId(),
-						TEXT("the Blueprint authoring service violated its mutation contract"));
-				}
-				TSharedPtr<FJsonObject> Payload;
-				FString JsonError;
-				if (!Json::TryParseObject(Response.PayloadJson, Payload, JsonError)
-					|| !Payload.IsValid())
-				{
-					return Failure(Request, TEXT("blueprint_surface_result_invalid"),
-						Request.GetCommandId(), JsonError);
-				}
-				FString CanonicalPayload;
-				if (!Json::TryCanonicalize(Payload, CanonicalPayload, JsonError))
-				{
-					return Failure(Request, TEXT("blueprint_surface_result_invalid"),
-						Request.GetCommandId(), JsonError);
-				}
-				return FUeAgentCommandResult::Success(
-					Request, MoveTemp(CanonicalPayload));
+				(void)Caller;
+				(void)Cancellation;
+				return Failure(
+					Request,
+					TEXT("blueprint_legacy_authoring_retired"),
+					Request.GetCommandId(),
+					TEXT("use content_graph.import_workspace"));
 			}
-
-		private:
-			TSharedRef<IUeAgentBlueprintSurfaceCommandService> Service;
 		};
 	}
 
@@ -156,9 +97,10 @@ namespace UE::UAI::CommandHandlers::Blueprint::Surfaces
 		TArray<TSharedRef<IUeAgentExactCommandHandler>>& OutHandlers,
 		FString& OutError)
 	{
+		(void)Service;
 		OutHandlers.Reset();
 		OutError.Reset();
-		OutHandlers.Add(MakeShared<FBlueprintSurfaceHandler>(MoveTemp(Service)));
+		OutHandlers.Add(MakeShared<FRetiredBlueprintSurfaceHandler>());
 		return true;
 	}
 }

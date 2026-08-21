@@ -198,11 +198,34 @@ namespace
 		TSharedPtr<FJsonObject> Root;
 		const TSharedRef<TJsonReader<>> Reader =
 			TJsonReaderFactory<>::Create(Result.GetValue().GetJsonValue());
+		FString TerminalStatus;
+		FString PersistenceReceiptId;
+		bool bMutationApplied = false;
+		bool bCompileSettled = false;
+		bool bSaved = false;
+		bool bReloaded = false;
 		const bool bExact = Result.IsValid()
 			&& FJsonSerializer::Deserialize(Reader, Root) && Root.IsValid()
 			&& Root->TryGetStringField(TEXT("revision"), OutRevision)
-			&& !OutRevision.IsEmpty();
-		return Test.TestTrue(*FString::Printf(TEXT("%s returns real revision"),
+			&& !OutRevision.IsEmpty()
+			&& Root->TryGetStringField(
+				TEXT("terminal_status"), TerminalStatus)
+			&& TerminalStatus == TEXT("succeeded")
+			&& Root->TryGetBoolField(
+				TEXT("mutation_applied"), bMutationApplied)
+			&& bMutationApplied
+			&& Root->TryGetBoolField(
+				TEXT("compile_settled"), bCompileSettled)
+			&& bCompileSettled
+			&& Root->TryGetBoolField(TEXT("saved"), bSaved)
+			&& bSaved
+			&& Root->TryGetBoolField(TEXT("reloaded"), bReloaded)
+			&& bReloaded
+			&& Root->TryGetStringField(
+				TEXT("persistence_receipt_id"), PersistenceReceiptId)
+			&& !PersistenceReceiptId.IsEmpty();
+		return Test.TestTrue(*FString::Printf(
+			TEXT("%s returns real revision and lifecycle receipt"),
 			*CapabilityId), bExact);
 	}
 

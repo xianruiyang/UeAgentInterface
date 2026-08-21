@@ -14,7 +14,6 @@
 #include "RigEditor/IKRigController.h"
 #include "Serialization/JsonSerializer.h"
 #include "Serialization/JsonWriter.h"
-#include "Server/UeAgentCommandRegistry.h"
 #include "UObject/Package.h"
 #include "UObject/SavePackage.h"
 #include "UObject/StrongObjectPtr.h"
@@ -289,17 +288,8 @@ bool FUeAgentGraphCompoundPublicRigIkVerticalSliceTest::RunTest(
 	}
 
 	TestNull(
-		TEXT("retired exact legacy IKRig owner is absent"),
-		UeAgentCommandRegistry::FindExactCommandInvoker(
-			TEXT("ik_rig_apply_folder")));
-	TestNull(
-		TEXT("retired prefix legacy IKRig owner is absent"),
-		UeAgentCommandRegistry::FindPrefixedCommandInvoker(
-			TEXT("ik_rig_apply_folder")));
-	TestTrue(
-		TEXT("retired legacy IKRig command fails closed"),
-		UeAgentCommandRegistry::IsExplicitlyUnsupportedCommand(
-			TEXT("ik_rig_apply_folder")));
+		TEXT("retired IKRig identity is absent from the sole current registry"),
+		Registry->FindExact(TEXT("ik_rig_apply_folder")));
 
 	const FUeAgentCommandResult Result = SubmitPublic(
 		Registry,

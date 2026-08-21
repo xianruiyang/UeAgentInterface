@@ -967,7 +967,7 @@ bool FUeAgentStrictV2T09ParserResourceTest::RunTest(
 
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(
 	FUeAgentStrictV2T09CarrierEquivalenceTest,
-	"UAI.StrictV2.T09.HJSON.IMPORT.CORE.CarrierEquivalenceAndExplicitChanges",
+	"UAI.Root.T36.HjsonPlanning.CarrierSemanticEquivalence",
 	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
 
 bool FUeAgentStrictV2T09CarrierEquivalenceTest::RunTest(const FString& Parameters)

@@ -1,0 +1,51 @@
+#pragma once
+
+#include "CommandEdge/UeAgentCommandDispatch.h"
+#include "CoreMinimal.h"
+
+namespace UE::UAI::DomainAdapters::ModelingGeometry::VoxelGrid
+{
+	struct FVoxelGridCellRange final
+	{
+		FIntVector Min = FIntVector::ZeroValue;
+		FIntVector MaxExclusive = FIntVector::ZeroValue;
+
+		bool IsValid() const;
+		int64 NumCells() const;
+	};
+
+	struct FVoxelGridCollisionBox final
+	{
+		FIntVector Min = FIntVector::ZeroValue;
+		FIntVector MaxExclusive = FIntVector::ZeroValue;
+
+		bool IsValid() const;
+		int64 NumCells() const;
+	};
+
+	UEAGENTINTERFACE_API const FString& GetSessionCommandId();
+	UEAGENTINTERFACE_API const FString& GetApplyCommandId();
+	UEAGENTINTERFACE_API const TArray<FString>& GetCommandIds();
+	UEAGENTINTERFACE_API bool IsCommand(const FString& CommandId);
+
+	UEAGENTINTERFACE_API bool TryConvertBoundsToCellRange(
+		const FBox& Bounds,
+		const FString& InputSpace,
+		const FTransform& GridToWorld,
+		const FVector& AnchorLocal,
+		double CellSize,
+		FVoxelGridCellRange& OutRange,
+		FString& OutError);
+
+	UEAGENTINTERFACE_API TArray<FVoxelGridCollisionBox>
+		BuildExactCoverBoxes(const TSet<FIntVector>& Cells);
+
+	UEAGENTINTERFACE_API bool TryCreateMechanicsHandler(
+		const FString& CommandId,
+		TSharedPtr<CommandEdge::IUeAgentCommandHandler>& OutHandler,
+		FString& OutError);
+
+#if WITH_DEV_AUTOMATION_TESTS
+	UEAGENTINTERFACE_API void ResetProcessSessionsForAutomation();
+#endif
+}

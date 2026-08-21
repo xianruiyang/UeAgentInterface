@@ -1582,6 +1582,7 @@ namespace UE::UAI::DomainAdapters::TimelineAnimation
 				UObject* Object = Environment->FindMutation(Mutation.GetOperationId());
 				if (!IsValid(Object)) return Fail(OutError,
 					TEXT("timeline_animation_settle_target_unavailable"), Mutation.GetOperationId());
+				Object->PostEditChange();
 				if (UAnimSequence* Sequence = Cast<UAnimSequence>(Object))
 					Sequence->RefreshCacheData();
 				else if (UAnimMontage* Montage = Cast<UAnimMontage>(Object))
@@ -1597,7 +1598,6 @@ namespace UE::UAI::DomainAdapters::TimelineAnimation
 					Pose->RefreshBoneTransforms();
 				else if (USkeletalMeshComponent* Mesh = Cast<USkeletalMeshComponent>(Object))
 					Mesh->RefreshBoneTransforms();
-				Object->PostEditChange();
 				if (Object->IsAsset())
 				{
 					UPackage* Package = Object->GetOutermost();
@@ -1630,6 +1630,12 @@ namespace UE::UAI::DomainAdapters::TimelineAnimation
 					{
 						return Fail(OutError,
 							TEXT("timeline_animation_package_reload_failed"), ObjectPath);
+					}
+					if (ULevelSequence* const ReloadedLevelSequence =
+							Cast<ULevelSequence>(Reloaded))
+					{
+						UMovieSceneCompiledDataManager::GetPrecompiledData()
+							->Compile(ReloadedLevelSequence);
 					}
 					if (!Environment->TryRebindReloadedAsset(ObjectPath, Reloaded, OutError))
 						return false;

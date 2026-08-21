@@ -252,7 +252,7 @@ bool UeAgentLevelOps::BuildViewportWarnings(
 	return true;
 }
 
-bool FUeAgentHttpServer::CmdViewportGetWarnings(
+bool FUeAgentLegacyMechanics::CmdViewportGetWarnings(
 	const FUeAgentRequestContext& Ctx,
 	TSharedPtr<FJsonObject>& OutData,
 	FString& OutError) const
@@ -268,7 +268,7 @@ bool FUeAgentHttpServer::CmdViewportGetWarnings(
 		World, bIncludeSuppressed, OutData, OutError);
 }
 
-bool FUeAgentHttpServer::CmdViewportGetCamera(TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdViewportGetCamera(TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	FUeAgentRequestContext CompatCtx;
 	CompatCtx.Command = TEXT("viewport_get_camera");
@@ -286,7 +286,7 @@ bool FUeAgentHttpServer::CmdViewportGetCamera(TSharedPtr<FJsonObject>& OutData, 
 	return true;
 }
 
-bool FUeAgentHttpServer::CmdViewportSetCamera(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdViewportSetCamera(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	if (!UeAgentEditorViewportLegacy::ExecuteCameraSet(*this, Ctx, UeAgentEditorViewportLegacy::MakeLevelTarget(), OutData, OutError))
 	{
@@ -300,7 +300,7 @@ bool FUeAgentHttpServer::CmdViewportSetCamera(const FUeAgentRequestContext& Ctx,
 	return true;
 }
 
-bool FUeAgentHttpServer::CmdViewportSetRealtime(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdViewportSetRealtime(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	FLevelEditorViewportClient* LVC = UeAgentLevelOps::GetPreferredLevelViewportClient();
 	if (!LVC)
@@ -381,7 +381,7 @@ bool FUeAgentHttpServer::CmdViewportSetRealtime(const FUeAgentRequestContext& Ct
 	return true;
 }
 
-bool FUeAgentHttpServer::CmdViewportSetGameView(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdViewportSetGameView(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	FLevelEditorViewportClient* LVC = UeAgentLevelOps::GetPreferredLevelViewportClient();
 	if (!LVC)
@@ -458,7 +458,7 @@ bool FUeAgentHttpServer::CmdViewportSetGameView(const FUeAgentRequestContext& Ct
 	return true;
 }
 
-bool FUeAgentHttpServer::CmdViewportGetEditorInteractionState(TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdViewportGetEditorInteractionState(TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	FString SelectionReason;
 	FLevelEditorViewportClient* LVC = UeAgentLevelOps::GetPreferredLevelViewportClient(&SelectionReason);
@@ -503,7 +503,7 @@ bool FUeAgentHttpServer::CmdViewportGetEditorInteractionState(TSharedPtr<FJsonOb
 	return true;
 }
 
-bool FUeAgentHttpServer::CmdViewportRestoreEditorInteractionState(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdViewportRestoreEditorInteractionState(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	FString SelectionReason;
 	FLevelEditorViewportClient* LVC = UeAgentLevelOps::GetPreferredLevelViewportClient(&SelectionReason);
@@ -577,7 +577,7 @@ bool FUeAgentHttpServer::CmdViewportRestoreEditorInteractionState(const FUeAgent
 	return true;
 }
 
-bool FUeAgentHttpServer::CmdViewportListViewModes(TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdViewportListViewModes(TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	FString SelectionReason;
 	FLevelEditorViewportClient* LVC = UeAgentLevelOps::GetPreferredLevelViewportClient(&SelectionReason);
@@ -597,7 +597,7 @@ bool FUeAgentHttpServer::CmdViewportListViewModes(TSharedPtr<FJsonObject>& OutDa
 	return true;
 }
 
-bool FUeAgentHttpServer::CmdViewportFocusActor(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdViewportFocusActor(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	FString Id;
 	if (!JsonTryGetString(Ctx.Params, TEXT("id"), Id) || Id.IsEmpty())
@@ -622,7 +622,7 @@ bool FUeAgentHttpServer::CmdViewportFocusActor(const FUeAgentRequestContext& Ctx
 	return UeAgentEditorViewportLegacy::ExecuteFocus(*this, Ctx, UeAgentEditorViewportLegacy::MakeLevelTarget(), Focus, OutData, OutError);
 }
 
-bool FUeAgentHttpServer::CmdViewportFocusActorSafe(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdViewportFocusActorSafe(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	// `viewport_focus_actor` uses the editor's FocusViewportOnBox, which is convenient but not collision-aware.
 	// This "safe" variant delegates to `viewport_frame_actor` with better defaults for indoor whitebox validation.
@@ -650,7 +650,7 @@ bool FUeAgentHttpServer::CmdViewportFocusActorSafe(const FUeAgentRequestContext&
 	return CmdViewportFrameActor(NewCtx, OutData, OutError);
 }
 
-bool FUeAgentHttpServer::CmdViewportFrameActor(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdViewportFrameActor(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	FString Id;
 	if (!JsonTryGetString(Ctx.Params, TEXT("id"), Id) || Id.IsEmpty())
@@ -669,7 +669,7 @@ bool FUeAgentHttpServer::CmdViewportFrameActor(const FUeAgentRequestContext& Ctx
 	return UeAgentEditorViewportLegacy::ExecuteFocus(*this, Ctx, UeAgentEditorViewportLegacy::MakeLevelTarget(), Focus, OutData, OutError);
 }
 
-bool FUeAgentHttpServer::CmdViewportFrameActorCore(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdViewportFrameActorCore(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	if (!OutData.IsValid())
 	{
@@ -940,7 +940,7 @@ bool FUeAgentHttpServer::CmdViewportFrameActorCore(const FUeAgentRequestContext&
 	return true;
 }
 
-bool FUeAgentHttpServer::CmdViewportFrameSelection(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdViewportFrameSelection(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	TSharedPtr<FJsonObject> Focus = MakeShared<FJsonObject>();
 	if (Ctx.Params.IsValid())
@@ -951,7 +951,7 @@ bool FUeAgentHttpServer::CmdViewportFrameSelection(const FUeAgentRequestContext&
 	return UeAgentEditorViewportLegacy::ExecuteFocus(*this, Ctx, UeAgentEditorViewportLegacy::MakeLevelTarget(), Focus, OutData, OutError);
 }
 
-bool FUeAgentHttpServer::CmdViewportFrameSelectionCore(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdViewportFrameSelectionCore(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	FLevelEditorViewportClient* LVC = UeAgentLevelOps::GetPreferredLevelViewportClient();
 	if (!LVC)
@@ -1014,7 +1014,7 @@ bool FUeAgentHttpServer::CmdViewportFrameSelectionCore(const FUeAgentRequestCont
 	return true;
 }
 
-bool FUeAgentHttpServer::CmdViewportFrameActors(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdViewportFrameActors(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	const TArray<TSharedPtr<FJsonValue>>* ActorIds = nullptr;
 	if (!Ctx.Params.IsValid() || !Ctx.Params->TryGetArrayField(TEXT("actor_ids"), ActorIds) || !ActorIds || ActorIds->Num() <= 0)
@@ -1033,7 +1033,7 @@ bool FUeAgentHttpServer::CmdViewportFrameActors(const FUeAgentRequestContext& Ct
 	return UeAgentEditorViewportLegacy::ExecuteFocus(*this, Ctx, UeAgentEditorViewportLegacy::MakeLevelTarget(), Focus, OutData, OutError);
 }
 
-bool FUeAgentHttpServer::CmdViewportFrameActorsCore(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdViewportFrameActorsCore(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	UWorld* World = GetEditorWorld(OutError);
 	if (!World)
@@ -1308,7 +1308,7 @@ bool FUeAgentHttpServer::CmdViewportFrameActorsCore(const FUeAgentRequestContext
 	return true;
 }
 
-bool FUeAgentHttpServer::CmdViewportFrameFolder(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdViewportFrameFolder(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	UWorld* World = GetEditorWorld(OutError);
 	if (!World)

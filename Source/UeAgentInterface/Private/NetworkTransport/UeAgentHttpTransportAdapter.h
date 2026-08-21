@@ -9,6 +9,7 @@
 namespace UE::UAI::NetworkTransport
 {
 	UEAGENTINTERFACE_API const FString& GetUaiHttpCommandRoutePath();
+	UEAGENTINTERFACE_API const FString& GetUaiHttpProbeRoutePath();
 
 	inline const FString& GetUaiCommandRoutePath()
 	{
@@ -57,6 +58,7 @@ namespace UE::UAI::NetworkTransport
 		FString InstanceId;
 		FString Method;
 		FString RoutePath;
+		FString ProbeRoutePath;
 		FString AuthHeader;
 		FString AuthToken;
 		FString Channel;
@@ -87,6 +89,9 @@ namespace UE::UAI::NetworkTransport
 			const FUeAgentHttpRequest& Request) const;
 
 	private:
+		FString ProbeBindingId() const;
+		FUeAgentHttpResponse HandleProbeRequest(
+			const FUeAgentHttpRequest& Request) const;
 		bool ValidateConfig(FUeAgentTransportDiagnostic& OutDiagnostic) const;
 		FUeAgentHttpResponse MakeFailure(
 			int32 StatusCode,
@@ -99,6 +104,8 @@ namespace UE::UAI::NetworkTransport
 		FUeAgentHttpAdapterConfig Config;
 		TSharedRef<IUeAgentHttpRouteHost, ESPMode::ThreadSafe> RouteHost;
 		TSharedRef<IUeAgentTransportRequestHandler, ESPMode::ThreadSafe> Handler;
+		bool bCommandRouteBound = false;
+		bool bProbeRouteBound = false;
 		bool bRunning = false;
 	};
 

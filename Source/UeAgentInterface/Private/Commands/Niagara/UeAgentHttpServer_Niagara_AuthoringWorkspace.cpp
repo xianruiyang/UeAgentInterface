@@ -191,7 +191,7 @@ namespace
 	}
 }
 
-bool FUeAgentHttpServer::CmdNiagaraExportFolder(
+bool FUeAgentLegacyMechanics::CmdNiagaraExportFolder(
 	const FUeAgentRequestContext& Context,
 	TSharedPtr<FJsonObject>& OutData,
 	FString& OutError) const
@@ -199,7 +199,7 @@ bool FUeAgentHttpServer::CmdNiagaraExportFolder(
 	return ExportWorkspaceCommand(Context, TEXT("asset_path"), TEXT("system"), OutData, OutError);
 }
 
-bool FUeAgentHttpServer::CmdNiagaraApplyFolder(
+bool FUeAgentLegacyMechanics::CmdNiagaraApplyFolder(
 	const FUeAgentRequestContext& Context,
 	TSharedPtr<FJsonObject>& OutData,
 	FString& OutError) const
@@ -207,7 +207,7 @@ bool FUeAgentHttpServer::CmdNiagaraApplyFolder(
 	return ApplyWorkspaceCommand(Context, TEXT("asset_path"), TEXT("system"), OutData, OutError);
 }
 
-bool FUeAgentHttpServer::CmdNiagaraEmitterExportFolder(
+bool FUeAgentLegacyMechanics::CmdNiagaraEmitterExportFolder(
 	const FUeAgentRequestContext& Context,
 	TSharedPtr<FJsonObject>& OutData,
 	FString& OutError) const
@@ -215,7 +215,7 @@ bool FUeAgentHttpServer::CmdNiagaraEmitterExportFolder(
 	return ExportWorkspaceCommand(Context, TEXT("emitter_asset_path"), TEXT("emitter"), OutData, OutError);
 }
 
-bool FUeAgentHttpServer::CmdNiagaraEmitterApplyFolder(
+bool FUeAgentLegacyMechanics::CmdNiagaraEmitterApplyFolder(
 	const FUeAgentRequestContext& Context,
 	TSharedPtr<FJsonObject>& OutData,
 	FString& OutError) const
@@ -223,7 +223,7 @@ bool FUeAgentHttpServer::CmdNiagaraEmitterApplyFolder(
 	return ApplyWorkspaceCommand(Context, TEXT("emitter_asset_path"), TEXT("emitter"), OutData, OutError);
 }
 
-bool FUeAgentHttpServer::CmdNiagaraScriptExportFolder(
+bool FUeAgentLegacyMechanics::CmdNiagaraScriptExportFolder(
 	const FUeAgentRequestContext& Context,
 	TSharedPtr<FJsonObject>& OutData,
 	FString& OutError) const
@@ -231,7 +231,7 @@ bool FUeAgentHttpServer::CmdNiagaraScriptExportFolder(
 	return ExportWorkspaceCommand(Context, TEXT("script_asset_path"), TEXT("script"), OutData, OutError);
 }
 
-bool FUeAgentHttpServer::CmdNiagaraScriptApplyFolder(
+bool FUeAgentLegacyMechanics::CmdNiagaraScriptApplyFolder(
 	const FUeAgentRequestContext& Context,
 	TSharedPtr<FJsonObject>& OutData,
 	FString& OutError) const

@@ -165,7 +165,7 @@ namespace UeAgentBlueprintOps
 	}
 }
 
-bool FUeAgentHttpServer::CmdBlueprintInspectComponents(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdBlueprintInspectComponents(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	FString AssetPathInput;
 	if (!JsonTryGetString(Ctx.Params, TEXT("asset_path"), AssetPathInput) || AssetPathInput.IsEmpty())
@@ -210,7 +210,7 @@ bool FUeAgentHttpServer::CmdBlueprintInspectComponents(const FUeAgentRequestCont
 	return true;
 }
 
-bool FUeAgentHttpServer::CmdBlueprintInspectNodes(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdBlueprintInspectNodes(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	FString AssetPathInput;
 	if (!JsonTryGetString(Ctx.Params, TEXT("asset_path"), AssetPathInput) || AssetPathInput.IsEmpty())
@@ -359,7 +359,7 @@ bool FUeAgentHttpServer::CmdBlueprintInspectNodes(const FUeAgentRequestContext& 
 	return true;
 }
 
-bool FUeAgentHttpServer::CmdBlueprintAddComponent(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdBlueprintAddComponent(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	FString AssetPathInput;
 	if (!JsonTryGetString(Ctx.Params, TEXT("asset_path"), AssetPathInput) || AssetPathInput.IsEmpty())
@@ -444,7 +444,7 @@ bool FUeAgentHttpServer::CmdBlueprintAddComponent(const FUeAgentRequestContext& 
 	return true;
 }
 
-bool FUeAgentHttpServer::CmdBlueprintSetComponentProperty(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdBlueprintSetComponentProperty(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	FString AssetPathInput;
 	if (!JsonTryGetString(Ctx.Params, TEXT("asset_path"), AssetPathInput) || AssetPathInput.IsEmpty())

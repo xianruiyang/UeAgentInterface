@@ -7,6 +7,7 @@
 #include "Animation/BlendSpace.h"
 #include "Animation/Skeleton.h"
 #include "Animation/WidgetAnimation.h"
+#include "AssetRegistry/AssetRegistryModule.h"
 #include "Components/PoseableMeshComponent.h"
 #include "Components/SkeletalMeshComponent.h"
 #include "ControlRig.h"
@@ -17,8 +18,11 @@
 #include "DomainAdapters/TimelineAnimation/UeAgentTimelineAnimationProductionRuntime.h"
 #include "Dom/JsonObject.h"
 #include "Engine/SkeletalMesh.h"
+#include "HAL/FileManager.h"
 #include "LevelSequence.h"
+#include "Misc/PackageName.h"
 #include "MovieScene.h"
+#include "PackageTools.h"
 #include "PreviewScene.h"
 #include "Sequencer/MovieSceneControlRigParameterTrack.h"
 #include "Serialization/JsonSerializer.h"
@@ -26,6 +30,8 @@
 #include "Rigs/RigHierarchy.h"
 #include "Rigs/RigHierarchyController.h"
 #include "Rigs/AdditiveControlRig.h"
+#include "UObject/Package.h"
+#include "UObject/SavePackage.h"
 
 namespace
 {
@@ -43,6 +49,99 @@ namespace
 
 	struct FFixture
 	{
+		FFixture()
+			: PackageRoot(TEXT("/Game/UAI/Tests/TimelineAnimation/TS010A_")
+				+ FGuid::NewGuid().ToString(EGuidFormats::Digits))
+		{
+		}
+
+		FString AddPackage(const FString& Stem)
+		{
+			const FString PackageName = PackageRoot + TEXT("/") + Stem;
+			PackageNames.AddUnique(PackageName);
+			return PackageName;
+		}
+
+		FString ObjectPath(const FString& PackageName) const
+		{
+			return PackageName + TEXT(".")
+				+ FPackageName::GetLongPackageAssetName(PackageName);
+		}
+
+		bool Save(UObject& Asset) const
+		{
+			UPackage* const Package = Asset.GetOutermost();
+			if (!Package || !PackageNames.Contains(Package->GetName()))
+			{
+				return false;
+			}
+			Asset.SetFlags(RF_Public | RF_Standalone | RF_Transactional);
+			FAssetRegistryModule::AssetCreated(&Asset);
+			Package->MarkPackageDirty();
+			FSavePackageArgs Args;
+			Args.TopLevelFlags = RF_Public | RF_Standalone;
+			Args.SaveFlags = SAVE_NoError;
+			const FString Filename = FPackageName::LongPackageNameToFilename(
+				Package->GetName(), FPackageName::GetAssetPackageExtension());
+			const bool bSaved = UPackage::SavePackage(
+				Package, &Asset, *Filename, Args);
+			Package->SetDirtyFlag(false);
+			return bSaved;
+		}
+
+		bool Cleanup()
+		{
+			PreviewScene.Reset();
+			Mesh = nullptr;
+			Skeleton = nullptr;
+			Sequence = nullptr;
+			BlendSpace = nullptr;
+			Montage = nullptr;
+			LevelSequence = nullptr;
+			WidgetAnimation = nullptr;
+			PoseComponent = nullptr;
+			MorphComponent = nullptr;
+			RigSequence = nullptr;
+			Rig = nullptr;
+			CollectGarbage(RF_NoFlags, true);
+
+			bool bClean = true;
+			for (const FString& PackageName : PackageNames)
+			{
+				if (UPackage* const Package = FindPackage(nullptr, *PackageName))
+				{
+					if (UObject* const Asset = FindObject<UObject>(
+							Package,
+							*FPackageName::GetLongPackageAssetName(PackageName)))
+					{
+						FAssetRegistryModule::AssetDeleted(Asset);
+					}
+					Package->SetDirtyFlag(false);
+					FText UnloadError;
+					bClean = UPackageTools::UnloadPackages(
+						{Package}, UnloadError, true) && bClean;
+				}
+				CollectGarbage(RF_NoFlags, true);
+				const FString Filename = FPackageName::LongPackageNameToFilename(
+					PackageName, FPackageName::GetAssetPackageExtension());
+				if (IFileManager::Get().FileExists(*Filename))
+				{
+					bClean = IFileManager::Get().Delete(
+						*Filename, false, true) && bClean;
+				}
+				bClean = !IFileManager::Get().FileExists(*Filename)
+					&& !FindPackage(nullptr, *PackageName) && bClean;
+			}
+			return bClean;
+		}
+
+		~FFixture()
+		{
+			Cleanup();
+		}
+
+		FString PackageRoot;
+		TArray<FString> PackageNames;
 		TUniquePtr<FPreviewScene> PreviewScene;
 		USkeletalMesh* Mesh = nullptr;
 		USkeleton* Skeleton = nullptr;
@@ -59,7 +158,13 @@ namespace
 		FName MorphName = TEXT("TS010A_Morph");
 		FName ControlName = TEXT("Goal");
 		FString SubjectIdentity = TEXT("subject:ts010a");
-		FString RigIdentity = TEXT("rig-candidate:ts010a");
+		FString RigCandidateRef;
+		FString SequenceRef;
+		FString BlendSpaceRef;
+		FString MontageRef;
+		FString LevelSequenceRef;
+		FString WidgetAnimationRef;
+		FString RigRef;
 	};
 
 	FUeAgentResourceTrackerOwner MakeResources()
@@ -609,9 +714,11 @@ namespace
 		if (!Test.TestNotNull(TEXT("real skeleton exists"), Out.Skeleton)) return false;
 		Out.RootBone = Out.Skeleton->GetReferenceSkeleton().GetBoneName(0);
 
-		UPackage* SequencePackage = CreatePackage(TEXT("/Game/__UAI_TS010A/Sequence"));
+		const FString SequencePackageName = Out.AddPackage(TEXT("Sequence"));
+		UPackage* SequencePackage = CreatePackage(*SequencePackageName);
 		Out.Sequence = NewObject<UAnimSequence>(SequencePackage, TEXT("Sequence"),
 			RF_Public | RF_Standalone | RF_Transactional);
+		Out.SequenceRef = Out.ObjectPath(SequencePackageName);
 		Out.Sequence->SetSkeleton(Out.Skeleton);
 		IAnimationDataController& Controller = Out.Sequence->GetController();
 		Controller.InitializeModel();
@@ -623,37 +730,68 @@ namespace
 			{FQuat::Identity, FQuat::Identity},
 			{FVector::OneVector, FVector::OneVector}, false);
 		Controller.NotifyPopulated();
+		if (!Test.TestTrue(TEXT("save sequence fixture"), Out.Save(*Out.Sequence)))
+		{
+			return false;
+		}
 
-		UPackage* BlendPackage = CreatePackage(TEXT("/Game/__UAI_TS010A/BlendSpace"));
+		const FString BlendPackageName = Out.AddPackage(TEXT("BlendSpace"));
+		UPackage* BlendPackage = CreatePackage(*BlendPackageName);
 		Out.BlendSpace = NewObject<UBlendSpace>(BlendPackage, TEXT("BlendSpace"),
 			RF_Public | RF_Standalone | RF_Transactional);
+		Out.BlendSpaceRef = Out.ObjectPath(BlendPackageName);
 		Out.BlendSpace->SetSkeleton(Out.Skeleton);
 		Out.BlendSpace->AddSample(Out.Sequence, FVector::ZeroVector);
 		Out.BlendSpace->ValidateSampleData();
 		Out.BlendSpace->ResampleData();
+		if (!Test.TestTrue(TEXT("save BlendSpace fixture"),
+				Out.Save(*Out.BlendSpace)))
+		{
+			return false;
+		}
 
-		UPackage* MontagePackage = CreatePackage(TEXT("/Game/__UAI_TS010A/Montage"));
+		const FString MontagePackageName = Out.AddPackage(TEXT("Montage"));
+		UPackage* MontagePackage = CreatePackage(*MontagePackageName);
 		Out.Montage = NewObject<UAnimMontage>(MontagePackage, TEXT("Montage"),
 			RF_Public | RF_Standalone | RF_Transactional);
+		Out.MontageRef = Out.ObjectPath(MontagePackageName);
 		Out.Montage->SetSkeleton(Out.Skeleton);
 		Out.Montage->SetCompositeLength(1.0f);
 		Out.Montage->AddAnimCompositeSection(TEXT("Initial"), 0.0f);
+		if (!Test.TestTrue(TEXT("save Montage fixture"), Out.Save(*Out.Montage)))
+		{
+			return false;
+		}
 
-		UPackage* LevelPackage = CreatePackage(TEXT("/Game/__UAI_TS010A/Level"));
+		const FString LevelPackageName = Out.AddPackage(TEXT("Level"));
+		UPackage* LevelPackage = CreatePackage(*LevelPackageName);
 		Out.LevelSequence = NewObject<ULevelSequence>(LevelPackage, TEXT("Level"),
 			RF_Public | RF_Standalone | RF_Transactional);
+		Out.LevelSequenceRef = Out.ObjectPath(LevelPackageName);
 		Out.LevelSequence->Initialize();
 		Out.LevelSequence->GetMovieScene()->SetDisplayRate(FFrameRate(30, 1));
 		Out.LevelSequence->GetMovieScene()->SetTickResolutionDirectly(FFrameRate(30, 1));
 		Out.LevelSequence->GetMovieScene()->SetPlaybackRange(0, 30);
+		if (!Test.TestTrue(TEXT("save LevelSequence fixture"),
+				Out.Save(*Out.LevelSequence)))
+		{
+			return false;
+		}
 
-		UPackage* WidgetPackage = CreatePackage(TEXT("/Game/__UAI_TS010A/Widget"));
+		const FString WidgetPackageName = Out.AddPackage(TEXT("Widget"));
+		UPackage* WidgetPackage = CreatePackage(*WidgetPackageName);
 		Out.WidgetAnimation = NewObject<UWidgetAnimation>(WidgetPackage,
 			TEXT("Widget"), RF_Public | RF_Standalone | RF_Transactional);
+		Out.WidgetAnimationRef = Out.ObjectPath(WidgetPackageName);
 		Out.WidgetAnimation->MovieScene = NewObject<UMovieScene>(Out.WidgetAnimation,
 			TEXT("MovieScene"), RF_Transactional);
 		Out.WidgetAnimation->MovieScene->SetDisplayRate(FFrameRate(30, 1));
 		Out.WidgetAnimation->MovieScene->SetTickResolutionDirectly(FFrameRate(30, 1));
+		if (!Test.TestTrue(TEXT("save WidgetAnimation fixture"),
+				Out.Save(*Out.WidgetAnimation)))
+		{
+			return false;
+		}
 
 		Out.PreviewScene = MakeUnique<FPreviewScene>(FPreviewScene::ConstructionValues()
 			.SetCreateDefaultLighting(false)
@@ -673,7 +811,9 @@ namespace
 		Out.PreviewScene->AddComponent(Out.MorphComponent, FTransform::Identity);
 		Out.MorphComponent->SetSkeletalMeshAsset(Out.Mesh);
 
-		UPackage* RigSequencePackage = CreatePackage(TEXT("/Game/__UAI_TS010A/RigSequence"));
+		const FString RigSequencePackageName = Out.AddPackage(TEXT("RigSequence"));
+		Out.RigCandidateRef = Out.ObjectPath(RigSequencePackageName);
+		UPackage* RigSequencePackage = CreatePackage(*RigSequencePackageName);
 		Out.RigSequence = NewObject<ULevelSequence>(RigSequencePackage,
 			TEXT("RigSequence"), RF_Public | RF_Standalone | RF_Transactional);
 		Out.RigSequence->Initialize();
@@ -690,7 +830,17 @@ namespace
 		UMovieSceneControlRigParameterTrack* RigTrack =
 			Out.RigSequence->GetMovieScene()->AddTrack<UMovieSceneControlRigParameterTrack>();
 		if (!Test.TestNotNull(TEXT("create real ControlRig sequence track"), RigTrack)) return false;
-		RigTrack->CreateControlRigSection(0, Out.Rig, false);
+		if (!Test.TestNotNull(TEXT("create real ControlRig sequence section"),
+				RigTrack->CreateControlRigSection(0, Out.Rig, false)))
+		{
+			return false;
+		}
+		Out.RigRef = Out.Rig->GetPathName();
+		if (!Test.TestTrue(TEXT("save ControlRig sequence fixture"),
+				Out.Save(*Out.RigSequence)))
+		{
+			return false;
+		}
 		return true;
 	}
 
@@ -813,9 +963,10 @@ bool FUeAgentTimelineAnimationProductionNativeCapabilitiesTest::RunTest(
 	Subject.EvaluationRateDenominator = TEXT("1");
 	Config.SubjectBindings.Add(Subject);
 	FUeAgentTimelineAnimationRigCandidateBinding Rig;
-	Rig.Identity = Fixture.RigIdentity;
+	Rig.Identity = Fixture.RigCandidateRef;
 	Rig.Sequence = Fixture.RigSequence;
 	Rig.Rig = Fixture.Rig;
+	Rig.RigIdentity = Fixture.RigRef;
 	Rig.ControlName = Fixture.ControlName;
 	Rig.NativeFrameId = TEXT("control:ts010a-goal");
 	Rig.AuthoredClockId = TEXT("rig-clock");
@@ -828,9 +979,14 @@ bool FUeAgentTimelineAnimationProductionNativeCapabilitiesTest::RunTest(
 			FUeAgentTimelineAnimationProductionRuntime::TryCreate(
 				Config, Runtime, Error)) || !Runtime.IsValid()) return false;
 	const auto Resources = MakeResources();
-	const FString SequenceRef = Fixture.Sequence->GetPathName();
+	const FString SequenceRef = Fixture.SequenceRef;
 	const FString SequenceClock = TEXT("animation_sequence:") + SequenceRef;
-	const FString LevelRef = Fixture.LevelSequence->GetPathName();
+	const FString BlendSpaceRef = Fixture.BlendSpaceRef;
+	const FString MontageRef = Fixture.MontageRef;
+	const FString SkeletonRef = Fixture.Skeleton->GetPathName();
+	const FString LevelRef = Fixture.LevelSequenceRef;
+	const FString WidgetAnimationRef = Fixture.WidgetAnimationRef;
+	const FString RigRef = Fixture.RigRef;
 
 	FTimelineAnimationRequestData Data;
 	Data.IncludeTracks = true;
@@ -855,20 +1011,20 @@ bool FUeAgentTimelineAnimationProductionNativeCapabilitiesTest::RunTest(
 	ExecuteQuery(*this, *Runtime,
 		TEXT("animation.blend_space.sample"),
 		EUeAgentTimelineAnimationRequestKind::BlendSpaceSample,
-		Data, Fixture.BlendSpace->GetPathName(), Resources);
+		Data, BlendSpaceRef, Resources);
 	ExecuteQuery(*this, *Runtime, TEXT("animation.montage.read"),
 		EUeAgentTimelineAnimationRequestKind::MontageRead, {},
-		Fixture.Montage->GetPathName(), Resources);
+		MontageRef, Resources);
 	ExecuteQuery(*this, *Runtime,
 		TEXT("animation.skeleton.slots.read"),
 		EUeAgentTimelineAnimationRequestKind::SkeletonSlotsRead, {},
-		Fixture.Skeleton->GetPathName(), Resources);
+		SkeletonRef, Resources);
 	ExecuteQuery(*this, *Runtime, TEXT("timeline.sequence.read"),
 		EUeAgentTimelineAnimationRequestKind::LevelSequenceRead, {}, LevelRef, Resources);
 	ExecuteQuery(*this, *Runtime,
 		TEXT("timeline.widget_animation.read"),
 		EUeAgentTimelineAnimationRequestKind::WidgetAnimationRead, {},
-		Fixture.WidgetAnimation->GetPathName(), Resources);
+		WidgetAnimationRef, Resources);
 
 	FTimelineAnimationRevision Revision;
 	Runtime->TryReadRevision(SequenceRef, Revision, Error);
@@ -927,31 +1083,37 @@ bool FUeAgentTimelineAnimationProductionNativeCapabilitiesTest::RunTest(
 		EUeAgentTimelineAnimationRequestKind::SequenceEventsUpdate,
 		Data, SequenceRef, Resources);
 
+	const FString CreatedMontagePackage = Fixture.AddPackage(
+		TEXT("CreatedMontage"));
+	const FString CreatedMontageRef = Fixture.ObjectPath(CreatedMontagePackage);
 	Data = {};
-	Data.DestinationRef = TEXT("/Game/__UAI_TS010A/CreatedMontage.CreatedMontage");
-	Data.SkeletonRef = Fixture.Skeleton->GetPathName();
-	Data.Structure = Structure(TEXT("animation_montage:/Game/__UAI_TS010A/CreatedMontage.CreatedMontage"), 60);
+	Data.DestinationRef = CreatedMontageRef;
+	Data.SkeletonRef = SkeletonRef;
+	Data.Structure = Structure(TEXT("animation_montage:")
+		+ CreatedMontageRef, 60);
 	ExecuteOperation(*this, *Runtime, TEXT("animation.montage.create"),
 		EUeAgentTimelineAnimationRequestKind::MontageCreate, Data, FString(), Resources);
 
-	Runtime->TryReadRevision(Fixture.Montage->GetPathName(), Revision, Error);
+	Runtime->TryReadRevision(MontageRef, Revision, Error);
 	Data = {};
 	Data.ExpectedRevision = Revision;
 	Data.Structure = Structure(TEXT("animation_montage:")
-		+ Fixture.Montage->GetPathName(), 90);
+		+ MontageRef, 90);
 	ExecuteOperation(*this, *Runtime,
 		TEXT("animation.montage.structure.replace"),
 		EUeAgentTimelineAnimationRequestKind::MontageStructureReplace,
-		Data, Fixture.Montage->GetPathName(), Resources);
+		Data, MontageRef, Resources);
 
+	const FString CreatedLevelPackage = Fixture.AddPackage(TEXT("CreatedLevel"));
+	const FString CreatedLevelRef = Fixture.ObjectPath(CreatedLevelPackage);
 	Data = {};
-	Data.DestinationRef = TEXT("/Game/__UAI_TS010A/CreatedLevel.CreatedLevel");
-	Data.Structure = Structure(TEXT("level_sequence:/Game/__UAI_TS010A/CreatedLevel.CreatedLevel"), 60);
+	Data.DestinationRef = CreatedLevelRef;
+	Data.Structure = Structure(TEXT("level_sequence:") + CreatedLevelRef, 60);
 	ExecuteOperation(*this, *Runtime, TEXT("timeline.sequence.create"),
 		EUeAgentTimelineAnimationRequestKind::LevelSequenceCreate,
 		Data, FString(), Resources);
 	ULevelSequence* CreatedLevel = FindObject<ULevelSequence>(nullptr,
-		TEXT("/Game/__UAI_TS010A/CreatedLevel.CreatedLevel"));
+		*CreatedLevelRef);
 	TestNotNull(TEXT("level sequence create produced the requested asset"), CreatedLevel);
 	if (CreatedLevel)
 	{
@@ -968,9 +1130,13 @@ bool FUeAgentTimelineAnimationProductionNativeCapabilitiesTest::RunTest(
 		TEXT("timeline.sequence.structure.replace"),
 		EUeAgentTimelineAnimationRequestKind::LevelSequenceStructureReplace,
 		Data, LevelRef, Resources);
+	ULevelSequence* const ReloadedLevel = LoadObject<ULevelSequence>(
+		nullptr, *LevelRef);
+	TestNotNull(TEXT("level sequence replace reloads its target"), ReloadedLevel);
 	TestTrue(TEXT("level sequence replace settled compiled data"),
-		UMovieSceneCompiledDataManager::GetPrecompiledData()
-			->FindDataID(Fixture.LevelSequence).IsValid());
+		ReloadedLevel
+			&& UMovieSceneCompiledDataManager::GetPrecompiledData()
+				->FindDataID(ReloadedLevel).IsValid());
 
 	Data = {};
 	Data.EvaluationPoint = Point(TEXT("subject-clock"), 0);
@@ -991,9 +1157,9 @@ bool FUeAgentTimelineAnimationProductionNativeCapabilitiesTest::RunTest(
 		EUeAgentTimelineAnimationRequestKind::SubjectMorphWeightsUpdate,
 		Data, Fixture.SubjectIdentity, Resources);
 
-	Runtime->TryReadRevision(Fixture.RigIdentity, Revision, Error);
+	Runtime->TryReadRevision(Fixture.RigCandidateRef, Revision, Error);
 	Data = {};
-	Data.RigRef = Fixture.Rig->GetPathName();
+	Data.RigRef = RigRef;
 	Data.GoalRef = Fixture.ControlName.ToString();
 	Data.Candidate = Transform(Data.GoalRef, TEXT("control:ts010a-goal"), 25.0);
 	Data.AuthoredTime = Point(TEXT("rig-clock"), 5);
@@ -1001,7 +1167,10 @@ bool FUeAgentTimelineAnimationProductionNativeCapabilitiesTest::RunTest(
 	ExecuteOperation(*this, *Runtime,
 		TEXT("animation.ik_probe_candidate.apply"),
 		EUeAgentTimelineAnimationRequestKind::IkProbeCandidateApply,
-		Data, Fixture.RigIdentity, Resources);
+		Data, Fixture.RigCandidateRef, Resources);
 
+	Runtime.Reset();
+	TestTrue(TEXT("all owned TimelineAnimation fixtures clean up"),
+		Fixture.Cleanup());
 	return !HasAnyErrors();
 }

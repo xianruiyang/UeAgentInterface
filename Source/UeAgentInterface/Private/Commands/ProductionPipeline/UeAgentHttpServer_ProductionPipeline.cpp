@@ -1,6 +1,6 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
-#include "Server/UeAgentHttpServer.h"
+#include "LegacyMechanics/UeAgentLegacyMechanics.h"
 
 #include "Utilities/UeAgentAuthoringFileIO.h"
 #include "Utilities/UeAgentAuthoringJson.h"
@@ -2151,7 +2151,7 @@ namespace UeAgentProductionPipelineOps
 	}
 }
 
-bool FUeAgentHttpServer::ExecuteProductionPipelineCommand(const FString& CommandLower, const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::ExecuteProductionPipelineCommand(const FString& CommandLower, const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	if (CommandLower == TEXT("localization_query_targets")) return CmdLocalizationQueryTargets(Ctx, OutData, OutError);
 	if (CommandLower == TEXT("localization_export_json")) return CmdLocalizationExportJson(Ctx, OutData, OutError);
@@ -2187,7 +2187,7 @@ bool FUeAgentHttpServer::ExecuteProductionPipelineCommand(const FString& Command
 	return false;
 }
 
-bool FUeAgentHttpServer::CmdLocalizationQueryTargets(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdLocalizationQueryTargets(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	using namespace UeAgentProductionPipelineOps;
 	bool bIncludeStats = false;
@@ -2200,7 +2200,7 @@ bool FUeAgentHttpServer::CmdLocalizationQueryTargets(const FUeAgentRequestContex
 	return true;
 }
 
-bool FUeAgentHttpServer::CmdLocalizationExportJson(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdLocalizationExportJson(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	using namespace UeAgentProductionPipelineOps;
 	FString Target;
@@ -2224,7 +2224,7 @@ bool FUeAgentHttpServer::CmdLocalizationExportJson(const FUeAgentRequestContext&
 	return true;
 }
 
-bool FUeAgentHttpServer::CmdLocalizationValidateJson(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdLocalizationValidateJson(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	using namespace UeAgentProductionPipelineOps;
 	TSharedPtr<FJsonObject> Root;
@@ -2254,7 +2254,7 @@ bool FUeAgentHttpServer::CmdLocalizationValidateJson(const FUeAgentRequestContex
 	return true;
 }
 
-bool FUeAgentHttpServer::CmdLocalizationDiffJson(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdLocalizationDiffJson(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	using namespace UeAgentProductionPipelineOps;
 	TSharedPtr<FJsonObject> Desired;
@@ -2296,7 +2296,7 @@ bool FUeAgentHttpServer::CmdLocalizationDiffJson(const FUeAgentRequestContext& C
 	return true;
 }
 
-bool FUeAgentHttpServer::CmdLocalizationApplyJson(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdLocalizationApplyJson(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	using namespace UeAgentProductionPipelineOps;
 	TSharedPtr<FJsonObject> Root;
@@ -2402,7 +2402,7 @@ bool FUeAgentHttpServer::CmdLocalizationApplyJson(const FUeAgentRequestContext& 
 	return true;
 }
 
-bool FUeAgentHttpServer::CmdLocalizationExportPo(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdLocalizationExportPo(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	using namespace UeAgentProductionPipelineOps;
 	FString Target = TEXT("Game");
@@ -2464,7 +2464,7 @@ bool FUeAgentHttpServer::CmdLocalizationExportPo(const FUeAgentRequestContext& C
 	return true;
 }
 
-bool FUeAgentHttpServer::CmdLocalizationImportPo(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdLocalizationImportPo(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	using namespace UeAgentProductionPipelineOps;
 	FString Target = TEXT("Game");
@@ -2512,7 +2512,7 @@ bool FUeAgentHttpServer::CmdLocalizationImportPo(const FUeAgentRequestContext& C
 	return true;
 }
 
-bool FUeAgentHttpServer::CmdLocalizationReport(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdLocalizationReport(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	using namespace UeAgentProductionPipelineOps;
 	FString Target;
@@ -2550,7 +2550,7 @@ bool FUeAgentHttpServer::CmdLocalizationReport(const FUeAgentRequestContext& Ctx
 	return true;
 }
 
-bool FUeAgentHttpServer::CmdLocalizationPreviewCulture(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdLocalizationPreviewCulture(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	using namespace UeAgentProductionPipelineOps;
 	FString Culture;
@@ -2579,7 +2579,7 @@ bool FUeAgentHttpServer::CmdLocalizationPreviewCulture(const FUeAgentRequestCont
 	return bSet;
 }
 
-bool FUeAgentHttpServer::CmdStringTableExportJson(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdStringTableExportJson(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	using namespace UeAgentProductionPipelineOps;
 	FString AssetPath;
@@ -2605,7 +2605,7 @@ bool FUeAgentHttpServer::CmdStringTableExportJson(const FUeAgentRequestContext& 
 	return true;
 }
 
-bool FUeAgentHttpServer::CmdStringTableValidateJson(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdStringTableValidateJson(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	using namespace UeAgentProductionPipelineOps;
 	TSharedPtr<FJsonObject> Root;
@@ -2628,7 +2628,7 @@ bool FUeAgentHttpServer::CmdStringTableValidateJson(const FUeAgentRequestContext
 	return true;
 }
 
-bool FUeAgentHttpServer::CmdStringTableDiffJson(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdStringTableDiffJson(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	using namespace UeAgentProductionPipelineOps;
 	TSharedPtr<FJsonObject> Root;
@@ -2683,7 +2683,7 @@ bool FUeAgentHttpServer::CmdStringTableDiffJson(const FUeAgentRequestContext& Ct
 	return true;
 }
 
-bool FUeAgentHttpServer::CmdStringTableApplyJson(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdStringTableApplyJson(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	using namespace UeAgentProductionPipelineOps;
 	TSharedPtr<FJsonObject> Root;
@@ -2718,7 +2718,7 @@ bool FUeAgentHttpServer::CmdStringTableApplyJson(const FUeAgentRequestContext& C
 	return true;
 }
 
-bool FUeAgentHttpServer::CmdPackagingQueryEnvironment(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdPackagingQueryEnvironment(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	using namespace UeAgentProductionPipelineOps;
 	bool bIncludeSdks = true;
@@ -2730,7 +2730,7 @@ bool FUeAgentHttpServer::CmdPackagingQueryEnvironment(const FUeAgentRequestConte
 	return true;
 }
 
-bool FUeAgentHttpServer::CmdPackagingExportProfileJson(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdPackagingExportProfileJson(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	using namespace UeAgentProductionPipelineOps;
 	FString OutputFile;
@@ -2753,7 +2753,7 @@ bool FUeAgentHttpServer::CmdPackagingExportProfileJson(const FUeAgentRequestCont
 	return true;
 }
 
-bool FUeAgentHttpServer::CmdPackagingValidateProfileJson(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdPackagingValidateProfileJson(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	using namespace UeAgentProductionPipelineOps;
 	TSharedPtr<FJsonObject> Root;
@@ -2780,7 +2780,7 @@ bool FUeAgentHttpServer::CmdPackagingValidateProfileJson(const FUeAgentRequestCo
 	return true;
 }
 
-bool FUeAgentHttpServer::CmdPackagingDiffProfileJson(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdPackagingDiffProfileJson(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	using namespace UeAgentProductionPipelineOps;
 	TSharedPtr<FJsonObject> Root;
@@ -2809,7 +2809,7 @@ bool FUeAgentHttpServer::CmdPackagingDiffProfileJson(const FUeAgentRequestContex
 	return true;
 }
 
-bool FUeAgentHttpServer::CmdPackagingPlanBuild(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdPackagingPlanBuild(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	using namespace UeAgentProductionPipelineOps;
 	TSharedPtr<FJsonObject> Root;
@@ -2833,7 +2833,7 @@ bool FUeAgentHttpServer::CmdPackagingPlanBuild(const FUeAgentRequestContext& Ctx
 	return true;
 }
 
-bool FUeAgentHttpServer::CmdPackagingParseLog(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdPackagingParseLog(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	using namespace UeAgentProductionPipelineOps;
 	FString LogFile;
@@ -2874,7 +2874,7 @@ bool FUeAgentHttpServer::CmdPackagingParseLog(const FUeAgentRequestContext& Ctx,
 	return true;
 }
 
-bool FUeAgentHttpServer::CmdPackagingReportArtifacts(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdPackagingReportArtifacts(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	using namespace UeAgentProductionPipelineOps;
 	FString ArchiveDir = FPaths::Combine(FPaths::ProjectSavedDir(), TEXT("UeAgentInterface/Packages"));
@@ -2918,7 +2918,7 @@ bool FUeAgentHttpServer::CmdPackagingReportArtifacts(const FUeAgentRequestContex
 	return true;
 }
 
-bool FUeAgentHttpServer::CmdPackagingCleanArtifacts(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdPackagingCleanArtifacts(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	using namespace UeAgentProductionPipelineOps;
 	FString ArchiveDir;
@@ -2979,7 +2979,7 @@ bool FUeAgentHttpServer::CmdPackagingCleanArtifacts(const FUeAgentRequestContext
 	return true;
 }
 
-bool FUeAgentHttpServer::CmdTargetPlatformQuery(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdTargetPlatformQuery(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	using namespace UeAgentProductionPipelineOps;
 	bool bIncludeSdk = true;
@@ -2993,7 +2993,7 @@ bool FUeAgentHttpServer::CmdTargetPlatformQuery(const FUeAgentRequestContext& Ct
 	return true;
 }
 
-bool FUeAgentHttpServer::CmdPlatformConfigExportJson(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdPlatformConfigExportJson(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	using namespace UeAgentProductionPipelineOps;
 	FString Platform = TEXT("Windows");
@@ -3017,7 +3017,7 @@ bool FUeAgentHttpServer::CmdPlatformConfigExportJson(const FUeAgentRequestContex
 	return true;
 }
 
-bool FUeAgentHttpServer::CmdPlatformConfigValidateJson(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdPlatformConfigValidateJson(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	using namespace UeAgentProductionPipelineOps;
 	TSharedPtr<FJsonObject> Root;
@@ -3040,7 +3040,7 @@ bool FUeAgentHttpServer::CmdPlatformConfigValidateJson(const FUeAgentRequestCont
 	return true;
 }
 
-bool FUeAgentHttpServer::CmdPlatformConfigApplyJson(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdPlatformConfigApplyJson(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	using namespace UeAgentProductionPipelineOps;
 	TSharedPtr<FJsonObject> Root;
@@ -3067,7 +3067,7 @@ bool FUeAgentHttpServer::CmdPlatformConfigApplyJson(const FUeAgentRequestContext
 	return true;
 }
 
-bool FUeAgentHttpServer::CmdDeviceProfileQuery(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdDeviceProfileQuery(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	using namespace UeAgentProductionPipelineOps;
 	FString Profile;
@@ -3087,7 +3087,7 @@ bool FUeAgentHttpServer::CmdDeviceProfileQuery(const FUeAgentRequestContext& Ctx
 	return true;
 }
 
-bool FUeAgentHttpServer::CmdDeviceProfileExportJson(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdDeviceProfileExportJson(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	using namespace UeAgentProductionPipelineOps;
 	FString Profile;
@@ -3109,7 +3109,7 @@ bool FUeAgentHttpServer::CmdDeviceProfileExportJson(const FUeAgentRequestContext
 	return true;
 }
 
-bool FUeAgentHttpServer::CmdDeviceProfileValidateJson(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdDeviceProfileValidateJson(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	using namespace UeAgentProductionPipelineOps;
 	TSharedPtr<FJsonObject> Root;
@@ -3132,7 +3132,7 @@ bool FUeAgentHttpServer::CmdDeviceProfileValidateJson(const FUeAgentRequestConte
 	return true;
 }
 
-bool FUeAgentHttpServer::CmdDeviceProfileDiffJson(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdDeviceProfileDiffJson(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	using namespace UeAgentProductionPipelineOps;
 	TSharedPtr<FJsonObject> Root;
@@ -3191,7 +3191,7 @@ bool FUeAgentHttpServer::CmdDeviceProfileDiffJson(const FUeAgentRequestContext& 
 	return true;
 }
 
-bool FUeAgentHttpServer::CmdDeviceProfileApplyJson(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdDeviceProfileApplyJson(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	using namespace UeAgentProductionPipelineOps;
 	TSharedPtr<FJsonObject> Root;
@@ -3225,7 +3225,7 @@ bool FUeAgentHttpServer::CmdDeviceProfileApplyJson(const FUeAgentRequestContext&
 	return true;
 }
 
-bool FUeAgentHttpServer::CmdDeviceProfileResolveCVars(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdDeviceProfileResolveCVars(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	using namespace UeAgentProductionPipelineOps;
 	FString Profile;
@@ -3266,7 +3266,7 @@ bool FUeAgentHttpServer::CmdDeviceProfileResolveCVars(const FUeAgentRequestConte
 	return true;
 }
 
-bool FUeAgentHttpServer::CmdScalabilityExportJson(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdScalabilityExportJson(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	using namespace UeAgentProductionPipelineOps;
 	FString Platform;
@@ -3287,7 +3287,7 @@ bool FUeAgentHttpServer::CmdScalabilityExportJson(const FUeAgentRequestContext& 
 	return true;
 }
 
-bool FUeAgentHttpServer::CmdScalabilityValidateJson(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdScalabilityValidateJson(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	using namespace UeAgentProductionPipelineOps;
 	TSharedPtr<FJsonObject> Root;
@@ -3310,7 +3310,7 @@ bool FUeAgentHttpServer::CmdScalabilityValidateJson(const FUeAgentRequestContext
 	return true;
 }
 
-bool FUeAgentHttpServer::CmdScalabilityApplyJson(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdScalabilityApplyJson(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	using namespace UeAgentProductionPipelineOps;
 	TSharedPtr<FJsonObject> Root;
@@ -3338,7 +3338,7 @@ bool FUeAgentHttpServer::CmdScalabilityApplyJson(const FUeAgentRequestContext& C
 	return true;
 }
 
-bool FUeAgentHttpServer::CmdPlatformProfileValidatePackaging(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdPlatformProfileValidatePackaging(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	using namespace UeAgentProductionPipelineOps;
 	TSharedPtr<FJsonObject> Root;

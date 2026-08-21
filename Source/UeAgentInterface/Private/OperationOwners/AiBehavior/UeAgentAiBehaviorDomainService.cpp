@@ -19,6 +19,9 @@ namespace UE::UAI::OperationOwners::AiBehavior
 		const FString SchemaId = TEXT("uai.ai_behavior.edit/1");
 		const FString BehaviorTreeType = TEXT("/Script/AIModule.BehaviorTree");
 		const FString BlackboardType = TEXT("/Script/AIModule.BlackboardData");
+		const FString EqsType = TEXT("/Script/AIModule.EnvQuery");
+		const FString SmartObjectType =
+			TEXT("/Script/SmartObjectsModule.SmartObjectDefinition");
 		const FString StateTreeType = TEXT("/Script/StateTreeModule.StateTree");
 		const FString BehaviorNodeType = TEXT("/Script/AIModule.BTNode");
 		const FString BehaviorServiceType = TEXT("/Script/AIModule.BTService");
@@ -37,6 +40,11 @@ namespace UE::UAI::OperationOwners::AiBehavior
 			{
 				if (Type == BehaviorTreeType) return TEXT("uai.init.ai.behavior_tree.root/1");
 				if (Type == BlackboardType) return TEXT("uai.init.ai.blackboard.root/1");
+				if (Type == EqsType) return TEXT("uai.init.ai.eqs.root/1");
+				if (Type == SmartObjectType)
+				{
+					return TEXT("uai.init.ai.smart_object_definition.root/1");
+				}
 				if (Type == StateTreeType) return TEXT("uai.init.ai.state_tree.root/1");
 			}
 			if (Role == EInitializationNodeRole::OwnedObject)

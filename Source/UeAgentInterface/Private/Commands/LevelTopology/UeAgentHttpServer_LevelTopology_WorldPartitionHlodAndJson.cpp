@@ -1,4 +1,4 @@
-#include "Server/UeAgentHttpServer.h"
+#include "LegacyMechanics/UeAgentLegacyMechanics.h"
 
 #include "UeAgentHttpServer_LevelTopologyOps.h"
 
@@ -395,7 +395,7 @@ namespace
 	};
 }
 
-bool FUeAgentHttpServer::CmdWorldPartitionQuery(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdWorldPartitionQuery(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	UWorld* World = GetEditorWorld(OutError);
 	if (!World)
@@ -427,7 +427,7 @@ bool FUeAgentHttpServer::CmdWorldPartitionQuery(const FUeAgentRequestContext& Ct
 	return true;
 }
 
-bool FUeAgentHttpServer::CmdWorldPartitionSetStreamingEnabled(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdWorldPartitionSetStreamingEnabled(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	UWorld* World = GetEditorWorld(OutError);
 	if (!World)
@@ -464,7 +464,7 @@ bool FUeAgentHttpServer::CmdWorldPartitionSetStreamingEnabled(const FUeAgentRequ
 	return true;
 }
 
-bool FUeAgentHttpServer::CmdWorldPartitionLoadRegion(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdWorldPartitionLoadRegion(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	UWorld* World = GetEditorWorld(OutError);
 	if (!World)
@@ -521,12 +521,12 @@ bool FUeAgentHttpServer::CmdWorldPartitionLoadRegion(const FUeAgentRequestContex
 	return true;
 }
 
-bool FUeAgentHttpServer::CmdWorldPartitionUnloadRegion(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdWorldPartitionUnloadRegion(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	return UnloadWorldPartitionLoader(Ctx, TEXT("region"), TEXT("uai.world_partition.unload_region_result.v1"), OutData, OutError);
 }
 
-bool FUeAgentHttpServer::CmdWorldPartitionLoadActors(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdWorldPartitionLoadActors(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	UWorld* World = GetEditorWorld(OutError);
 	if (!World)
@@ -596,12 +596,12 @@ bool FUeAgentHttpServer::CmdWorldPartitionLoadActors(const FUeAgentRequestContex
 	return true;
 }
 
-bool FUeAgentHttpServer::CmdWorldPartitionUnloadActors(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdWorldPartitionUnloadActors(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	return UnloadWorldPartitionLoader(Ctx, TEXT("actors"), TEXT("uai.world_partition.unload_actors_result.v1"), OutData, OutError);
 }
 
-bool FUeAgentHttpServer::CmdWorldPartitionListLoadedRegions(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdWorldPartitionListLoadedRegions(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	UWorld* World = GetEditorWorld(OutError);
 	if (!World)
@@ -637,7 +637,7 @@ bool FUeAgentHttpServer::CmdWorldPartitionListLoadedRegions(const FUeAgentReques
 	return true;
 }
 
-bool FUeAgentHttpServer::CmdWorldPartitionCheckErrors(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdWorldPartitionCheckErrors(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	UWorld* World = GetEditorWorld(OutError);
 	if (!World)
@@ -666,7 +666,7 @@ bool FUeAgentHttpServer::CmdWorldPartitionCheckErrors(const FUeAgentRequestConte
 	return true;
 }
 
-bool FUeAgentHttpServer::CmdWorldPartitionGenerateStreaming(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdWorldPartitionGenerateStreaming(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	UWorld* World = GetEditorWorld(OutError);
 	if (!World)
@@ -726,7 +726,7 @@ bool FUeAgentHttpServer::CmdWorldPartitionGenerateStreaming(const FUeAgentReques
 	return bOk;
 }
 
-bool FUeAgentHttpServer::CmdHLODLayerApplyJson(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdHLODLayerApplyJson(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	TSharedPtr<FJsonObject> Root;
 	FString Source;
@@ -837,12 +837,12 @@ bool FUeAgentHttpServer::CmdHLODLayerApplyJson(const FUeAgentRequestContext& Ctx
 	return true;
 }
 
-bool FUeAgentHttpServer::CmdHLODLayerCreateJson(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdHLODLayerCreateJson(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	return CmdHLODLayerApplyJson(Ctx, OutData, OutError);
 }
 
-bool FUeAgentHttpServer::CmdHLODLayerExportJson(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdHLODLayerExportJson(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	FString AssetPath;
 	if (!JsonTryGetString(Ctx.Params, TEXT("asset_path"), AssetPath))
@@ -860,7 +860,7 @@ bool FUeAgentHttpServer::CmdHLODLayerExportJson(const FUeAgentRequestContext& Ct
 	return UeAgentLevelTopology::SaveJsonIfRequested(OutData, Ctx.Params, OutData, OutError);
 }
 
-bool FUeAgentHttpServer::CmdHLODLayerValidateJson(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdHLODLayerValidateJson(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	TSharedPtr<FJsonObject> Root;
 	FString Source;
@@ -913,7 +913,7 @@ bool FUeAgentHttpServer::CmdHLODLayerValidateJson(const FUeAgentRequestContext& 
 	return ErrorCount == 0;
 }
 
-bool FUeAgentHttpServer::CmdHLODAssignActors(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdHLODAssignActors(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	UWorld* World = GetEditorWorld(OutError);
 	if (!World)
@@ -1015,7 +1015,7 @@ bool FUeAgentHttpServer::CmdHLODAssignActors(const FUeAgentRequestContext& Ctx, 
 	return true;
 }
 
-bool FUeAgentHttpServer::CmdHLODQueryActors(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdHLODQueryActors(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	UWorld* World = GetEditorWorld(OutError);
 	if (!World)
@@ -1046,7 +1046,7 @@ bool FUeAgentHttpServer::CmdHLODQueryActors(const FUeAgentRequestContext& Ctx, T
 	return true;
 }
 
-bool FUeAgentHttpServer::CmdHLODBuild(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdHLODBuild(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	FString Step = TEXT("stats");
 	JsonTryGetString(Ctx.Params, TEXT("step"), Step);
@@ -1135,7 +1135,7 @@ bool FUeAgentHttpServer::CmdHLODBuild(const FUeAgentRequestContext& Ctx, TShared
 	return bOk;
 }
 
-bool FUeAgentHttpServer::CmdHLODValidateBuild(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdHLODValidateBuild(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	UWorld* World = GetEditorWorld(OutError);
 	if (!World)
@@ -1184,7 +1184,7 @@ bool FUeAgentHttpServer::CmdHLODValidateBuild(const FUeAgentRequestContext& Ctx,
 	return ErrorCount == 0;
 }
 
-bool FUeAgentHttpServer::CmdLevelTopologySetActorAssignments(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdLevelTopologySetActorAssignments(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	UWorld* World = GetEditorWorld(OutError);
 	if (!World)
@@ -1318,7 +1318,7 @@ bool FUeAgentHttpServer::CmdLevelTopologySetActorAssignments(const FUeAgentReque
 	return true;
 }
 
-bool FUeAgentHttpServer::CmdLevelTopologyExportJson(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdLevelTopologyExportJson(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	UWorld* World = GetEditorWorld(OutError);
 	if (!World)
@@ -1412,7 +1412,7 @@ bool FUeAgentHttpServer::CmdLevelTopologyExportJson(const FUeAgentRequestContext
 	return UeAgentLevelTopology::SaveJsonIfRequested(OutData, Ctx.Params, OutData, OutError);
 }
 
-bool FUeAgentHttpServer::CmdLevelTopologyValidateJson(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdLevelTopologyValidateJson(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	TSharedPtr<FJsonObject> Root;
 	FString Source;
@@ -1589,7 +1589,7 @@ bool FUeAgentHttpServer::CmdLevelTopologyValidateJson(const FUeAgentRequestConte
 	return ErrorCount == 0;
 }
 
-bool FUeAgentHttpServer::CmdLevelTopologyDiffJson(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdLevelTopologyDiffJson(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	TSharedPtr<FJsonObject> Root;
 	FString Source;
@@ -1899,7 +1899,7 @@ bool FUeAgentHttpServer::CmdLevelTopologyDiffJson(const FUeAgentRequestContext& 
 	return true;
 }
 
-bool FUeAgentHttpServer::CmdLevelTopologyApplyJson(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdLevelTopologyApplyJson(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	TSharedPtr<FJsonObject> Root;
 	FString Source;

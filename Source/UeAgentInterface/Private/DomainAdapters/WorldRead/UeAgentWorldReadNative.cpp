@@ -625,15 +625,6 @@ namespace UE::UAI::DomainAdapters::WorldRead
 					const TArray<FString>& Selection =
 						Context.GetExecutionContext()
 							.GetSelectionIdentities();
-					if (Selection.IsEmpty())
-					{
-						return Fail(
-							OutError,
-							TEXT("world_read_selection_unavailable"),
-							Context.GetExecutionContext()
-								.GetWorldIdentity(),
-							TEXT("selection is absent from the frozen execution context"));
-					}
 					for (const FString& Identity : Selection)
 					{
 						if (!AddString(

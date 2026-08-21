@@ -743,7 +743,7 @@ namespace UeAgentMontageOps
 	}
 }
 
-bool FUeAgentHttpServer::ExecuteMontageCommand(const FString& CommandLower, const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::ExecuteMontageCommand(const FString& CommandLower, const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	if (!OutData.IsValid())
 	{
@@ -789,7 +789,7 @@ bool FUeAgentHttpServer::ExecuteMontageCommand(const FString& CommandLower, cons
 	return false;
 }
 
-bool FUeAgentHttpServer::CmdMontageListMontages(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdMontageListMontages(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	FString RootPath = TEXT("/Game");
 	JsonTryGetString(Ctx.Params, TEXT("root_path"), RootPath);
@@ -849,7 +849,7 @@ bool FUeAgentHttpServer::CmdMontageListMontages(const FUeAgentRequestContext& Ct
 	return true;
 }
 
-bool FUeAgentHttpServer::CmdMontageCreate(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdMontageCreate(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	if (!OutData.IsValid())
 	{
@@ -1001,7 +1001,7 @@ bool FUeAgentHttpServer::CmdMontageCreate(const FUeAgentRequestContext& Ctx, TSh
 	return true;
 }
 
-bool FUeAgentHttpServer::CmdMontageGetInfo(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdMontageGetInfo(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	if (!OutData.IsValid())
 	{
@@ -1093,7 +1093,7 @@ bool FUeAgentHttpServer::CmdMontageGetInfo(const FUeAgentRequestContext& Ctx, TS
 	return true;
 }
 
-bool FUeAgentHttpServer::CmdMontageExportJson(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdMontageExportJson(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	FString AssetPathInput;
 	if (!JsonTryGetString(Ctx.Params, TEXT("asset_path"), AssetPathInput) || AssetPathInput.IsEmpty())
@@ -1255,7 +1255,7 @@ bool FUeAgentHttpServer::CmdMontageExportJson(const FUeAgentRequestContext& Ctx,
 	return true;
 }
 
-bool FUeAgentHttpServer::CmdMontageApplyJson(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdMontageApplyJson(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	TSharedPtr<FJsonObject> JsonRoot;
 	FString JsonFile;
@@ -2059,7 +2059,7 @@ bool FUeAgentHttpServer::CmdMontageApplyJson(const FUeAgentRequestContext& Ctx, 
 	return true;
 }
 
-bool FUeAgentHttpServer::CmdMontageSetPreviewMesh(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdMontageSetPreviewMesh(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	FString AssetPath;
 	if (!JsonTryGetString(Ctx.Params, TEXT("asset_path"), AssetPath) || AssetPath.IsEmpty())
@@ -2122,7 +2122,7 @@ bool FUeAgentHttpServer::CmdMontageSetPreviewMesh(const FUeAgentRequestContext& 
 	return true;
 }
 
-bool FUeAgentHttpServer::CmdMontageSetBlendOptions(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdMontageSetBlendOptions(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	FString AssetPath;
 	if (!JsonTryGetString(Ctx.Params, TEXT("asset_path"), AssetPath) || AssetPath.IsEmpty())
@@ -2240,7 +2240,7 @@ bool FUeAgentHttpServer::CmdMontageSetBlendOptions(const FUeAgentRequestContext&
 	return true;
 }
 
-bool FUeAgentHttpServer::CmdMontageSetSyncGroup(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdMontageSetSyncGroup(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	FString AssetPath;
 	if (!JsonTryGetString(Ctx.Params, TEXT("asset_path"), AssetPath) || AssetPath.IsEmpty())
@@ -2300,7 +2300,7 @@ bool FUeAgentHttpServer::CmdMontageSetSyncGroup(const FUeAgentRequestContext& Ct
 	return true;
 }
 
-bool FUeAgentHttpServer::CmdMontageListSkeletonSlots(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdMontageListSkeletonSlots(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	if (!OutData.IsValid())
 	{
@@ -2347,7 +2347,7 @@ bool FUeAgentHttpServer::CmdMontageListSkeletonSlots(const FUeAgentRequestContex
 	return true;
 }
 
-bool FUeAgentHttpServer::CmdMontageSetSkeletonSlotGroup(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdMontageSetSkeletonSlotGroup(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	FString SlotNameText;
 	if (!JsonTryGetString(Ctx.Params, TEXT("slot_name"), SlotNameText) || SlotNameText.TrimStartAndEnd().IsEmpty())
@@ -2408,7 +2408,7 @@ bool FUeAgentHttpServer::CmdMontageSetSkeletonSlotGroup(const FUeAgentRequestCon
 	return true;
 }
 
-bool FUeAgentHttpServer::CmdMontageRenameSkeletonSlot(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdMontageRenameSkeletonSlot(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	FString SlotNameText;
 	if (!JsonTryGetString(Ctx.Params, TEXT("slot_name"), SlotNameText) || SlotNameText.TrimStartAndEnd().IsEmpty())
@@ -2475,7 +2475,7 @@ bool FUeAgentHttpServer::CmdMontageRenameSkeletonSlot(const FUeAgentRequestConte
 	return true;
 }
 
-bool FUeAgentHttpServer::CmdMontageRemoveSkeletonSlot(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdMontageRemoveSkeletonSlot(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	FString SlotNameText;
 	if (!JsonTryGetString(Ctx.Params, TEXT("slot_name"), SlotNameText) || SlotNameText.TrimStartAndEnd().IsEmpty())
@@ -2528,7 +2528,7 @@ bool FUeAgentHttpServer::CmdMontageRemoveSkeletonSlot(const FUeAgentRequestConte
 	return true;
 }
 
-bool FUeAgentHttpServer::CmdMontageAddNotifyTrack(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdMontageAddNotifyTrack(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	FString AssetPath;
 	if (!JsonTryGetString(Ctx.Params, TEXT("asset_path"), AssetPath) || AssetPath.IsEmpty())
@@ -2618,7 +2618,7 @@ bool FUeAgentHttpServer::CmdMontageAddNotifyTrack(const FUeAgentRequestContext& 
 	return true;
 }
 
-bool FUeAgentHttpServer::CmdMontageRemoveNotifyTrack(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdMontageRemoveNotifyTrack(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	FString AssetPath;
 	if (!JsonTryGetString(Ctx.Params, TEXT("asset_path"), AssetPath) || AssetPath.IsEmpty())
@@ -2692,7 +2692,7 @@ bool FUeAgentHttpServer::CmdMontageRemoveNotifyTrack(const FUeAgentRequestContex
 	return true;
 }
 
-bool FUeAgentHttpServer::CmdMontageAddNotify(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdMontageAddNotify(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	FString AssetPath;
 	if (!JsonTryGetString(Ctx.Params, TEXT("asset_path"), AssetPath) || AssetPath.IsEmpty())
@@ -2848,7 +2848,7 @@ bool FUeAgentHttpServer::CmdMontageAddNotify(const FUeAgentRequestContext& Ctx, 
 	return true;
 }
 
-bool FUeAgentHttpServer::CmdMontageAddNotifyState(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdMontageAddNotifyState(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	FString AssetPath;
 	if (!JsonTryGetString(Ctx.Params, TEXT("asset_path"), AssetPath) || AssetPath.IsEmpty())
@@ -2992,7 +2992,7 @@ bool FUeAgentHttpServer::CmdMontageAddNotifyState(const FUeAgentRequestContext& 
 	return true;
 }
 
-bool FUeAgentHttpServer::CmdMontageUpdateNotify(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdMontageUpdateNotify(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	FString AssetPath;
 	if (!JsonTryGetString(Ctx.Params, TEXT("asset_path"), AssetPath) || AssetPath.IsEmpty())
@@ -3147,7 +3147,7 @@ bool FUeAgentHttpServer::CmdMontageUpdateNotify(const FUeAgentRequestContext& Ct
 	return true;
 }
 
-bool FUeAgentHttpServer::CmdMontageRemoveNotify(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdMontageRemoveNotify(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	FString AssetPath;
 	if (!JsonTryGetString(Ctx.Params, TEXT("asset_path"), AssetPath) || AssetPath.IsEmpty())
@@ -3194,7 +3194,7 @@ bool FUeAgentHttpServer::CmdMontageRemoveNotify(const FUeAgentRequestContext& Ct
 	return true;
 }
 
-bool FUeAgentHttpServer::CmdMontageAddSlotTrack(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdMontageAddSlotTrack(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	FString AssetPath;
 	if (!JsonTryGetString(Ctx.Params, TEXT("asset_path"), AssetPath) || AssetPath.IsEmpty())
@@ -3247,7 +3247,7 @@ bool FUeAgentHttpServer::CmdMontageAddSlotTrack(const FUeAgentRequestContext& Ct
 	return true;
 }
 
-bool FUeAgentHttpServer::CmdMontageRenameSlotTrack(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdMontageRenameSlotTrack(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	FString AssetPath;
 	if (!JsonTryGetString(Ctx.Params, TEXT("asset_path"), AssetPath) || AssetPath.IsEmpty())
@@ -3310,7 +3310,7 @@ bool FUeAgentHttpServer::CmdMontageRenameSlotTrack(const FUeAgentRequestContext&
 	return true;
 }
 
-bool FUeAgentHttpServer::CmdMontageRemoveSlotTrack(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdMontageRemoveSlotTrack(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	FString AssetPath;
 	if (!JsonTryGetString(Ctx.Params, TEXT("asset_path"), AssetPath) || AssetPath.IsEmpty())
@@ -3374,7 +3374,7 @@ bool FUeAgentHttpServer::CmdMontageRemoveSlotTrack(const FUeAgentRequestContext&
 	return true;
 }
 
-bool FUeAgentHttpServer::CmdMontageAddSegment(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdMontageAddSegment(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	FString AssetPath;
 	if (!JsonTryGetString(Ctx.Params, TEXT("asset_path"), AssetPath) || AssetPath.IsEmpty())
@@ -3504,7 +3504,7 @@ bool FUeAgentHttpServer::CmdMontageAddSegment(const FUeAgentRequestContext& Ctx,
 	return true;
 }
 
-bool FUeAgentHttpServer::CmdMontageUpdateSegment(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdMontageUpdateSegment(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	FString AssetPath;
 	if (!JsonTryGetString(Ctx.Params, TEXT("asset_path"), AssetPath) || AssetPath.IsEmpty())
@@ -3636,7 +3636,7 @@ bool FUeAgentHttpServer::CmdMontageUpdateSegment(const FUeAgentRequestContext& C
 	return true;
 }
 
-bool FUeAgentHttpServer::CmdMontageRemoveSegment(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdMontageRemoveSegment(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	FString AssetPath;
 	if (!JsonTryGetString(Ctx.Params, TEXT("asset_path"), AssetPath) || AssetPath.IsEmpty())
@@ -3703,7 +3703,7 @@ bool FUeAgentHttpServer::CmdMontageRemoveSegment(const FUeAgentRequestContext& C
 	return true;
 }
 
-bool FUeAgentHttpServer::CmdMontageAddSection(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdMontageAddSection(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	FString AssetPath;
 	if (!JsonTryGetString(Ctx.Params, TEXT("asset_path"), AssetPath) || AssetPath.IsEmpty())
@@ -3768,7 +3768,7 @@ bool FUeAgentHttpServer::CmdMontageAddSection(const FUeAgentRequestContext& Ctx,
 	return true;
 }
 
-bool FUeAgentHttpServer::CmdMontageRenameSection(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdMontageRenameSection(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	FString AssetPath;
 	if (!JsonTryGetString(Ctx.Params, TEXT("asset_path"), AssetPath) || AssetPath.IsEmpty())
@@ -3836,7 +3836,7 @@ bool FUeAgentHttpServer::CmdMontageRenameSection(const FUeAgentRequestContext& C
 	return true;
 }
 
-bool FUeAgentHttpServer::CmdMontageSetSectionTime(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdMontageSetSectionTime(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	FString AssetPath;
 	if (!JsonTryGetString(Ctx.Params, TEXT("asset_path"), AssetPath) || AssetPath.IsEmpty())
@@ -3891,7 +3891,7 @@ bool FUeAgentHttpServer::CmdMontageSetSectionTime(const FUeAgentRequestContext& 
 	return true;
 }
 
-bool FUeAgentHttpServer::CmdMontageRemoveSection(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdMontageRemoveSection(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	FString AssetPath;
 	if (!JsonTryGetString(Ctx.Params, TEXT("asset_path"), AssetPath) || AssetPath.IsEmpty())
@@ -3955,7 +3955,7 @@ bool FUeAgentHttpServer::CmdMontageRemoveSection(const FUeAgentRequestContext& C
 	return true;
 }
 
-bool FUeAgentHttpServer::CmdMontageSetNextSection(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdMontageSetNextSection(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	FString AssetPath;
 	if (!JsonTryGetString(Ctx.Params, TEXT("asset_path"), AssetPath) || AssetPath.IsEmpty())

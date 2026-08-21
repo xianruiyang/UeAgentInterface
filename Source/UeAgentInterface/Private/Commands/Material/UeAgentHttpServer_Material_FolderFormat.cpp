@@ -121,7 +121,7 @@ namespace UeAgentMaterialFolderOps
 	}
 }
 
-bool FUeAgentHttpServer::CmdMaterialExportFolder(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdMaterialExportFolder(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	FString AssetPathInput;
 	if (!JsonTryGetString(Ctx.Params, TEXT("asset_path"), AssetPathInput) || AssetPathInput.IsEmpty())
@@ -162,7 +162,7 @@ bool FUeAgentHttpServer::CmdMaterialExportFolder(const FUeAgentRequestContext& C
 	return true;
 }
 
-bool FUeAgentHttpServer::CmdMaterialApplyFolder(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdMaterialApplyFolder(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	if (!OutData.IsValid()) OutData = MakeShared<FJsonObject>();
 
@@ -363,12 +363,12 @@ namespace UeAgentMaterialInstanceFolderOps
 	}
 }
 
-bool FUeAgentHttpServer::CmdMaterialInstanceExportFolder(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdMaterialInstanceExportFolder(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	return UeAgentReflectionAuthoringCommandBridge::Export(TEXT("material_instance"), Ctx.Params, OutData, OutError);
 }
 
-bool FUeAgentHttpServer::CmdMaterialInstanceApplyFolder(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdMaterialInstanceApplyFolder(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	return UeAgentReflectionAuthoringCommandBridge::Apply(TEXT("material_instance"), Ctx.Params, OutData, OutError, Ctx.RequestId);
 }
@@ -394,7 +394,7 @@ namespace UeAgentMaterialFunctionFolderOps
 	}
 }
 
-bool FUeAgentHttpServer::CmdMaterialFunctionExportFolder(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdMaterialFunctionExportFolder(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	FString AssetPathInput;
 	if (!JsonTryGetString(Ctx.Params, TEXT("asset_path"), AssetPathInput) || AssetPathInput.IsEmpty())
@@ -435,7 +435,7 @@ bool FUeAgentHttpServer::CmdMaterialFunctionExportFolder(const FUeAgentRequestCo
 	return true;
 }
 
-bool FUeAgentHttpServer::CmdMaterialFunctionApplyFolder(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdMaterialFunctionApplyFolder(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	if (!OutData.IsValid()) OutData = MakeShared<FJsonObject>();
 

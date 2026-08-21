@@ -43,6 +43,7 @@ namespace UE::UAI::Composition::GraphCompound
 		FString TargetRigRef;
 		FString Preset;
 		TArray<FAnimationRigGraphControlMutation> Controls;
+		TArray<FAnimationRigGraphUnitMutation> Units;
 		TArray<FAnimationRigGraphShapeMutation> Shapes;
 		FName RetargetRoot;
 		TArray<FAnimationRigGraphIkGoalMutation> Goals;

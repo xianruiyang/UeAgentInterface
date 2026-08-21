@@ -3,6 +3,7 @@
 #include "CommandEdge/UeAgentCommandProtocol.h"
 #include "CommandRegistry/UeAgentImmutableCommandRegistry.h"
 #include "Core/Contract/UeAgentCommandJson.h"
+#include "Core/DomainCapability/OfficialPluginAvailability/UeAgentOfficialPluginAvailability.h"
 #include "Core/StateSemantic/UeAgentCanonicalValueJson.h"
 #include "DomainAdapters/ContentGraphRead/UeAgentContentGraphReadProductionEnvironment.h"
 #include "Dom/JsonObject.h"
@@ -657,6 +658,18 @@ namespace UE::UAI::DomainAdapters::TextureGraph
 		OutPayloadJson.Reset();
 		bOutReadOnly = false;
 		OutError.Reset();
+		const DomainCapability::OfficialPluginAvailability::
+			FOfficialPluginAvailabilityObservation Availability =
+				DomainCapability::OfficialPluginAvailability::Inspect(
+					TEXT("TextureGraph"));
+		if (!Availability.IsAvailable())
+		{
+			return Fail(
+				OutError,
+				TEXT("texture_graph_official_plugin_unavailable"),
+				TEXT("TextureGraph"),
+				Availability.GetReason());
+		}
 		TSharedPtr<FJsonObject> Params;
 		FString JsonError;
 		if (!Json::TryParseObject(

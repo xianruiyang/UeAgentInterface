@@ -118,7 +118,8 @@ namespace UE::UAI::DomainCapability
 					TEXT("discovery"),
 					Declaration.Discovery.Support,
 					Declaration.Discovery.Sources.Num()
-						+ Declaration.Discovery.ReadPorts.Num() > 0,
+						+ Declaration.Discovery.ReadPorts.Num()
+						+ Declaration.Discovery.ContentProviders.Num() > 0,
 					OutError))
 			{
 				return false;
@@ -464,6 +465,39 @@ namespace UE::UAI::DomainCapability
 						OutError,
 						TEXT("domain_capability_candidate_read_port_missing:")
 							+ Source.ReadPortId);
+				}
+			}
+			TSet<FString> ContentProviderIds;
+			for (const TSharedRef<ContentDiscovery::
+				IUeAgentContentDiscoveryProvider>& Provider :
+				Declaration.Discovery.ContentProviders)
+			{
+				if (!AddUniqueIdentity(
+						ContentProviderIds,
+						Provider->GetProviderId(),
+						TEXT("domain_capability_content_discovery_provider"),
+						OutError)
+					|| Provider->GetContentKinds().IsEmpty())
+				{
+					if (OutError.IsEmpty())
+					{
+						OutError =
+							TEXT("domain_capability_content_discovery_kind_missing:")
+							+ Provider->GetProviderId();
+					}
+					return false;
+				}
+				TSet<FString> ProviderKinds;
+				for (const FString& Kind : Provider->GetContentKinds())
+				{
+					if (!AddUniqueIdentity(
+							ProviderKinds,
+							Kind,
+							TEXT("domain_capability_content_discovery_kind"),
+							OutError))
+					{
+						return false;
+					}
 				}
 			}
 
@@ -907,6 +941,26 @@ namespace UE::UAI::DomainCapability
 		return CommandDispatch;
 	}
 
+	const TSharedPtr<const BindingGateway::Query::
+		FUeAgentDomainQueryProviderRegistry>&
+	FDomainCapabilityAuthorities::GetQueryProviderRegistry() const
+	{
+		return QueryProviderRegistry;
+	}
+
+	const TSharedPtr<const Discovery::FUeAgentDiscoveryService>&
+	FDomainCapabilityAuthorities::GetDiscoveryService() const
+	{
+		return DiscoveryService;
+	}
+
+	const TSharedPtr<const ContentDiscovery::
+		FUeAgentContentDiscoveryService>&
+	FDomainCapabilityAuthorities::GetContentDiscoveryService() const
+	{
+		return ContentDiscoveryService;
+	}
+
 	const TSharedPtr<const HjsonWorkspace::
 		FImportInitializationDomainProviderRegistry>&
 	FDomainCapabilityAuthorities::GetHjsonRegistry() const
@@ -964,6 +1018,8 @@ namespace UE::UAI::DomainCapability
 			QueryProviders;
 		TArray<TSharedRef<Discovery::IUeAgentCatalogSource>> CatalogSources;
 		TArray<TSharedRef<Discovery::IUeAgentStateReadPort>> ReadPorts;
+		TArray<TSharedRef<ContentDiscovery::
+			IUeAgentContentDiscoveryProvider>> ContentProviders;
 		TArray<TSharedRef<
 			HjsonWorkspace::IImportInitializationDomainProvider>>
 			HjsonProviders;
@@ -983,21 +1039,55 @@ namespace UE::UAI::DomainCapability
 				CatalogSources.Add(Source.Source);
 			}
 			ReadPorts.Append(Declaration.Discovery.ReadPorts);
+			ContentProviders.Append(
+				Declaration.Discovery.ContentProviders);
 			HjsonProviders.Append(Declaration.Hjson.Providers);
 			CompositionContracts.Append(Declaration.Composition.Contracts);
 		}
 
 		if (!QueryProviders.IsEmpty())
 		{
-			return Fail(
-				OutError,
-				TEXT("domain_capability_query_projection_not_connected"));
+			BindingGateway::Query::FUeAgentQueryBindingError QueryError;
+			if (!BindingGateway::Query::
+				FUeAgentDomainQueryProviderRegistry::TryCreate(
+					MoveTemp(QueryProviders),
+					Built.QueryProviderRegistry,
+					QueryError))
+			{
+				return Fail(
+					OutError,
+					TEXT("domain_capability_query_projection_failed:")
+						+ QueryError.Code);
+			}
 		}
 		if (!CatalogSources.IsEmpty() || !ReadPorts.IsEmpty())
 		{
-			return Fail(
-				OutError,
-				TEXT("domain_capability_discovery_projection_not_connected"));
+			Discovery::FUeAgentDiscoveryError DiscoveryError;
+			if (!Discovery::FUeAgentDiscoveryService::TryCreate(
+					CatalogSources,
+					ReadPorts,
+					Built.DiscoveryService,
+					DiscoveryError))
+			{
+				return Fail(
+					OutError,
+					TEXT("domain_capability_discovery_projection_failed:")
+						+ DiscoveryError.Code);
+			}
+		}
+		if (!ContentProviders.IsEmpty())
+		{
+			ContentDiscovery::FContentDiscoveryError DiscoveryError;
+			if (!ContentDiscovery::FUeAgentContentDiscoveryService::TryCreate(
+					MoveTemp(ContentProviders),
+					Built.ContentDiscoveryService,
+					DiscoveryError))
+			{
+				return Fail(
+					OutError,
+					TEXT("domain_capability_content_discovery_projection_failed:")
+						+ DiscoveryError.Code);
+			}
 		}
 
 		if (!HjsonProviders.IsEmpty())
@@ -1085,6 +1175,7 @@ namespace UE::UAI::DomainCapability
 		TSet<FString> CatalogSourceIds;
 		TSet<FString> CatalogKinds;
 		TSet<FString> ReadPortIds;
+		TSet<FString> ContentDiscoveryProviderIds;
 		TSet<FString> HjsonProviderIds;
 		TSet<FString> HjsonRouteIds;
 		TSet<FString> CompositionTargets;
@@ -1169,6 +1260,19 @@ namespace UE::UAI::DomainCapability
 					ReadPort->GetPortId(),
 					TEXT("domain_capability_read_port"),
 					OutError))
+				{
+					return false;
+				}
+			}
+			for (const TSharedRef<ContentDiscovery::
+				IUeAgentContentDiscoveryProvider>& Provider :
+				Declaration.Discovery.ContentProviders)
+			{
+				if (!AddUniqueIdentity(
+						ContentDiscoveryProviderIds,
+						Provider->GetProviderId(),
+						TEXT("domain_capability_content_discovery_provider"),
+						OutError))
 				{
 					return false;
 				}

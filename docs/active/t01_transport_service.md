@@ -21,10 +21,13 @@ request-context invalidator. An Editor map event advances only the context
 generation and invalidates the observed World identity; it does not rebuild the
 ingress, listener, handlers, or session owners.
 
-The former module-owned `FUeAgentHttpServer`, World-bound query composition,
-and startup Authoring registrations are no longer reachable from module startup.
-Their source remains legacy material pending the task-owned migrations and the
-final zero-reference retirement task; it is not an active public authority.
+The former module-owned `FUeAgentHttpServer`, its compiled registry, World-bound
+query composition, and startup Authoring registrations are physically absent
+from the active composition tree. UE mechanics still required by current
+EditorProject, ModelingGeometry, and CaptureMedia consumers live behind the
+private `FUeAgentLegacyMechanics` implementation boundary. That boundary owns no
+listener, route, authentication, registry, or command dispatch and cannot be
+constructed by module startup.
 
 Until T02 activates the audited immutable command contracts, the composition
 root installs an explicit `command_service_unavailable` protocol response. This

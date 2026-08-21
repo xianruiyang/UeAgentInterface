@@ -22,6 +22,7 @@
 #include "Components/StateTreeAIComponentSchema.h"
 #include "Core/AssetDurable/UeAgentAssetDurable.h"
 #include "Core/Contract/UeAgentContractJson.h"
+#include "Core/HjsonWorkspace/DomainAuthoring/UeAgentDomainHjsonAuthoringKit.h"
 #include "Core/PlanningPreflight/UeAgentPlanningPreflight.h"
 #include "Core/StateSemantic/UeAgentCanonicalValueJson.h"
 #include "Core/StateSemantic/UeAgentStateSemantic.h"
@@ -41,7 +42,6 @@
 #include "Engine/World.h"
 #include "Factories/Factory.h"
 #include "GameFramework/Actor.h"
-#include "HAL/FileManager.h"
 #include "InstancedStruct.h"
 #include "Misc/DateTime.h"
 #include "Misc/Guid.h"
@@ -115,6 +115,10 @@ namespace UE::UAI::Composition::GraphCompound
 					TEXT("state_tree"),
 					TEXT("/Script/StateTreeEditorModule.StateTreeFactory"),
 					UStateTree::StaticClass(), true},
+				{TEXT("pcg.graph.asset.create"),
+					TEXT("pcg_graph"),
+					TEXT("/Script/PCGEditor.PCGGraphFactory"),
+					UPCGGraph::StaticClass(), false},
 			};
 			return Specs;
 		}
@@ -266,8 +270,17 @@ namespace UE::UAI::Composition::GraphCompound
 					Request.GetTargetRef());
 				return false;
 			}
-			if (FindPackage(nullptr, *Request.GetTargetRef())
-				|| IFileManager::Get().FileExists(*OutFilename))
+			bool bTargetPresent = false;
+			if (!HjsonWorkspace::DomainAuthoring::
+					TryInspectObjectTargetPresence(
+						Request.GetTargetRef(), bTargetPresent))
+			{
+				SetError(OutError,
+					TEXT("graph_compound_pcg_ai_target_invalid"),
+					Request.GetTargetRef());
+				return false;
+			}
+			if (bTargetPresent)
 			{
 				SetError(OutError,
 					TEXT("graph_compound_pcg_ai_target_already_exists"),
@@ -4199,12 +4212,18 @@ namespace UE::UAI::Composition::GraphCompound
 		bool TrySerializeResult(
 			const FString& TargetRef,
 			const FString& Revision,
+			const FString& PersistenceReceiptId,
 			FUeAgentContractValue& OutResult,
 			FGraphCompoundRuntimeError& OutError)
 		{
 			const TSharedRef<FJsonObject> Root = MakeShared<FJsonObject>();
 			Root->SetStringField(TEXT("revision"), Revision);
 			Root->SetStringField(TEXT("target_ref"), TargetRef);
+			if (!PersistenceReceiptId.IsEmpty())
+			{
+				Root->SetStringField(
+					TEXT("persistence_receipt_id"), PersistenceReceiptId);
+			}
 			FString Canonical;
 			FString JsonError;
 			if (!Json::TryCanonicalize(Root, Canonical, JsonError))
@@ -4216,6 +4235,16 @@ namespace UE::UAI::Composition::GraphCompound
 			}
 			OutResult = FUeAgentContractValue(MoveTemp(Canonical));
 			return true;
+		}
+
+		bool TrySerializeResult(
+			const FString& TargetRef,
+			const FString& Revision,
+			FUeAgentContractValue& OutResult,
+			FGraphCompoundRuntimeError& OutError)
+		{
+			return TrySerializeResult(
+				TargetRef, Revision, FString(), OutResult, OutError);
 		}
 
 		bool TryRestorePcgComponentMutation(
@@ -4558,7 +4587,8 @@ namespace UE::UAI::Composition::GraphCompound
 				return false;
 			}
 			return TrySerializeResult(
-				Request.GetTargetRef(), Revision, OutResult, OutError);
+				Request.GetTargetRef(), Revision, Outcome.GetEvidenceId(),
+				OutResult, OutError);
 		}
 
 		const FString PcgLevelDataAssetReadbackOracleId =
@@ -4936,7 +4966,8 @@ namespace UE::UAI::Composition::GraphCompound
 				*(Request.GetTargetRef() + TEXT("|") + SourceRef
 					+ TEXT("|") + DataTypeRef));
 			return TrySerializeResult(
-				Request.GetTargetRef(), Revision, OutResult, OutError);
+				Request.GetTargetRef(), Revision, Outcome.GetEvidenceId(),
+				OutResult, OutError);
 		}
 
 		class FPcgAiProductionEnvironment final
@@ -5230,6 +5261,7 @@ namespace UE::UAI::Composition::GraphCompound
 				}
 				return TrySerializeResult(
 					Request.GetTargetRef(), NativeRevision,
+					Outcome.GetEvidenceId(),
 					OutResult, OutError);
 			}
 

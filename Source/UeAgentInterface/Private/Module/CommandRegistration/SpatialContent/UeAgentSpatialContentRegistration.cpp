@@ -2,6 +2,8 @@
 
 #include "CommandHandlers/SpatialContent/UeAgentSpatialContentCommandHandlers.h"
 #include "Composition/TimelineSpatial/UeAgentTimelineSpatialActivation.h"
+#include "Core/DomainCapability/UeAgentDomainCapability.h"
+#include "OperationOwners/SpatialContent/UeAgentSpatialContentOperationOwner.h"
 #include "QueryOwners/SpatialContent/UeAgentSpatialContentQueryOwner.h"
 
 namespace UE::UAI::Module::CommandRegistration::SpatialContent
@@ -53,8 +55,11 @@ namespace UE::UAI::Module::CommandRegistration::SpatialContent
 				? EUeAgentCommandSideEffect::None
 				: EUeAgentCommandSideEffect::EditorState;
 			Result.StateLayers = {
-				bQuery ? FString(TEXT("editor_current_state"))
-					: FString(TEXT("authoring_memory")),
+				bQuery
+					? FString(TEXT("editor_current_state"))
+					: OperationOwners::SpatialContent::IsDurableMutation(CommandId)
+						? FString(TEXT("persisted"))
+						: FString(TEXT("authoring_memory")),
 			};
 			for (const FUeAgentCommandParameter& Parameter : Contract->GetParameters())
 			{
@@ -138,9 +143,80 @@ namespace UE::UAI::Module::CommandRegistration::SpatialContent
 			TArray<FUeAgentCommandDeclaration> Declarations;
 		};
 
-		const FUeAgentActiveCommandContributionFactoryRegistration Registration(
-			TEXT("spatial-content-operation"),
-			&TryCreateContribution);
+		bool TryCreateDomainCapability(
+			TSharedPtr<const DomainCapability::FDomainCapabilityContribution>&
+				OutContribution,
+			FString& OutError)
+		{
+			TSharedPtr<IUeAgentActiveCommandContribution> CommandContribution;
+			if (!TryCreateContribution(CommandContribution, OutError)
+				|| !CommandContribution.IsValid())
+			{
+				return false;
+			}
+			DomainCapability::FDomainCapabilityDeclaration Declaration =
+				DomainCapability::MakeExplicitlyUnsupportedDomainCapabilityDeclaration(
+					TEXT("spatial-content-operation"));
+			Declaration.Command.Support =
+				DomainCapability::EDomainCapabilitySupport::Supported;
+			Declaration.Command.Contributions.Add(
+				CommandContribution.ToSharedRef());
+			Declaration.Operation.Support =
+				DomainCapability::EDomainCapabilitySupport::Supported;
+			for (const FString& CommandId
+				: QueryOwners::SpatialContent::GetCommandIds())
+			{
+				if (QueryOwners::SpatialContent::IsQuery(CommandId))
+				{
+					continue;
+				}
+				const TSharedPtr<const DomainCapability::
+					IDomainOperationInvocationFactory> Factory =
+					OperationOwners::SpatialContent::
+						FindOperationInvocationFactory(CommandId);
+				if (!Factory.IsValid())
+				{
+					OutError = TEXT("spatial_content_operation_factory_missing:")
+						+ CommandId;
+					return false;
+				}
+				DomainCapability::FDomainOperationEntry Operation;
+				Operation.OperationId = CommandId;
+				Operation.Kind = DomainCapability::EDomainOperationKind::Write;
+				Operation.TerminalPolicy = DomainCapability::
+					EDomainOperationTerminalPolicy::
+						SucceededRejectedRolledBackOrStateUnknown;
+				Operation.ExecutionPolicy = DomainCapability::
+					EDomainOperationExecutionPolicy::Immediate;
+				Operation.bPersists = OperationOwners::SpatialContent::
+					IsDurableMutation(CommandId);
+				Operation.TransientStatePolicy = Operation.bPersists
+					? DomainCapability::EDomainTransientStatePolicy::None
+					: DomainCapability::EDomainTransientStatePolicy::
+						RecoverableSession;
+				Operation.bIndependentReadback = true;
+				Operation.InvocationFactory = Factory;
+				Declaration.Operation.Operations.Add(MoveTemp(Operation));
+			}
+			Declaration.State.Support =
+				DomainCapability::EDomainCapabilitySupport::Supported;
+			Declaration.State.Planes.Add(
+				StateSemantic::EUeAgentStatePlane::AuthoringMemory);
+			Declaration.State.Planes.Add(
+				StateSemantic::EUeAgentStatePlane::Persisted);
+			Declaration.Migration.Support =
+				DomainCapability::EDomainCapabilitySupport::Supported;
+			Declaration.Migration.OwnerId =
+				TEXT("T46-SPATIAL-CONTENT-OPERATION");
+			return DomainCapability::FDomainCapabilityContribution::TryCreate(
+				MoveTemp(Declaration), OutContribution, OutError);
+		}
+
+		const DomainCapability::
+			FDomainCapabilityContributionFactoryRegistration
+			DomainCapabilityRegistration(
+				TEXT("spatial-content-operation"),
+				&TryCreateDomainCapability);
 	}
 
 	bool TryCreateContribution(

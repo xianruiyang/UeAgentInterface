@@ -27,7 +27,7 @@
 #include "Misc/PackageName.h"
 #include "Subsystems/AssetEditorSubsystem.h"
 #include "UObject/UnrealType.h"
-bool FUeAgentHttpServer::CmdMaterialCompile(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdMaterialCompile(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	FString AssetPathInput;
 	if (!JsonTryGetString(Ctx.Params, TEXT("asset_path"), AssetPathInput) || AssetPathInput.IsEmpty())
@@ -115,7 +115,7 @@ bool FUeAgentHttpServer::CmdMaterialCompile(const FUeAgentRequestContext& Ctx, T
 	return true;
 }
 
-bool FUeAgentHttpServer::CmdMaterialGetCompileLog(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdMaterialGetCompileLog(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	FString AssetPathInput;
 	if (!JsonTryGetString(Ctx.Params, TEXT("asset_path"), AssetPathInput) || AssetPathInput.IsEmpty())
@@ -199,7 +199,7 @@ bool FUeAgentHttpServer::CmdMaterialGetCompileLog(const FUeAgentRequestContext& 
 	return true;
 }
 
-bool FUeAgentHttpServer::CmdMaterialSetProperty(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdMaterialSetProperty(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	FString AssetPathInput;
 	if (!JsonTryGetString(Ctx.Params, TEXT("asset_path"), AssetPathInput) || AssetPathInput.IsEmpty())
@@ -233,7 +233,7 @@ bool FUeAgentHttpServer::CmdMaterialSetProperty(const FUeAgentRequestContext& Ct
 	if (!UeAgentMaterialOps::SetDeprecatedObjectPropertyText(Asset, PropertyName, ValueText, &AppliedValueText, &CppType, &ImportError))
 	{
 		const FString ImportStatus = ImportError.Equals(TEXT("property_not_found"), ESearchCase::CaseSensitive) ? TEXT("property_not_found") : TEXT("import_failed");
-		TSharedPtr<FJsonObject> ResultObj = FUeAgentHttpServer::MakePropertyImportResultJson(PropertyName, nullptr, ValueText, TEXT(""), ImportStatus, ImportError);
+		TSharedPtr<FJsonObject> ResultObj = FUeAgentLegacyMechanics::MakePropertyImportResultJson(PropertyName, nullptr, ValueText, TEXT(""), ImportStatus, ImportError);
 		ResultObj->SetStringField(TEXT("cpp_type"), CppType);
 		OutData->SetStringField(TEXT("property_name"), PropertyName);
 		OutData->SetStringField(TEXT("value_text"), ValueText);
@@ -296,7 +296,7 @@ bool FUeAgentHttpServer::CmdMaterialSetProperty(const FUeAgentRequestContext& Ct
 	return true;
 }
 
-bool FUeAgentHttpServer::CmdMaterialSetInstanceParent(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdMaterialSetInstanceParent(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	FString AssetPathInput;
 	if (!JsonTryGetString(Ctx.Params, TEXT("asset_path"), AssetPathInput) || AssetPathInput.IsEmpty())
@@ -343,7 +343,7 @@ bool FUeAgentHttpServer::CmdMaterialSetInstanceParent(const FUeAgentRequestConte
 	return true;
 }
 
-bool FUeAgentHttpServer::CmdMaterialSetParameter(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdMaterialSetParameter(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	FString ParameterTypeText;
 	if (!JsonTryGetString(Ctx.Params, TEXT("parameter_type"), ParameterTypeText) || ParameterTypeText.TrimStartAndEnd().IsEmpty())
@@ -506,7 +506,7 @@ bool FUeAgentHttpServer::CmdMaterialSetParameter(const FUeAgentRequestContext& C
 	return true;
 }
 
-bool FUeAgentHttpServer::CmdMaterialSetScalarParameter(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdMaterialSetScalarParameter(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	FString AssetPathInput;
 	if (!JsonTryGetString(Ctx.Params, TEXT("asset_path"), AssetPathInput) || AssetPathInput.IsEmpty())
@@ -554,7 +554,7 @@ bool FUeAgentHttpServer::CmdMaterialSetScalarParameter(const FUeAgentRequestCont
 	return true;
 }
 
-bool FUeAgentHttpServer::CmdMaterialSetVectorParameter(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdMaterialSetVectorParameter(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	FString AssetPathInput;
 	if (!JsonTryGetString(Ctx.Params, TEXT("asset_path"), AssetPathInput) || AssetPathInput.IsEmpty())
@@ -613,7 +613,7 @@ bool FUeAgentHttpServer::CmdMaterialSetVectorParameter(const FUeAgentRequestCont
 	return true;
 }
 
-bool FUeAgentHttpServer::CmdMaterialSetTextureParameter(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdMaterialSetTextureParameter(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	FString AssetPathInput;
 	if (!JsonTryGetString(Ctx.Params, TEXT("asset_path"), AssetPathInput) || AssetPathInput.IsEmpty())
@@ -668,7 +668,7 @@ bool FUeAgentHttpServer::CmdMaterialSetTextureParameter(const FUeAgentRequestCon
 	return true;
 }
 
-bool FUeAgentHttpServer::CmdMaterialSetStaticSwitchParameter(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdMaterialSetStaticSwitchParameter(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	FString AssetPathInput;
 	if (!JsonTryGetString(Ctx.Params, TEXT("asset_path"), AssetPathInput) || AssetPathInput.IsEmpty())

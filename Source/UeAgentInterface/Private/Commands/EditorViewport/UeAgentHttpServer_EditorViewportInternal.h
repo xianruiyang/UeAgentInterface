@@ -7,7 +7,7 @@
 
 class FEditorViewportClient;
 class FLevelEditorViewportClient;
-class FUeAgentHttpServer;
+class FUeAgentLegacyMechanics;
 class SWidget;
 
 namespace UeAgentEditorViewport
@@ -31,5 +31,5 @@ namespace UeAgentEditorViewport
 
 	TSharedRef<IViewportAdapter> MakePersonaViewportAdapter();
 	TSharedRef<IViewportAdapter> MakeControlRigPersonaViewportAdapter();
-	TSharedRef<IViewportAdapter> MakeLevelViewportAdapter(const FUeAgentHttpServer& Server);
+	TSharedRef<IViewportAdapter> MakeLevelViewportAdapter(const FUeAgentLegacyMechanics& Server);
 }

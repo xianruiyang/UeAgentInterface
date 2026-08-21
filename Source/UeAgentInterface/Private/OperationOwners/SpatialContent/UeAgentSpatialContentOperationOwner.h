@@ -1,6 +1,7 @@
 #pragma once
 
 #include "CommandEdge/UeAgentCommandDispatch.h"
+#include "Core/DomainCapability/UeAgentDomainCapability.h"
 
 namespace UE::UAI::OperationOwners::SpatialContent
 {
@@ -10,8 +11,13 @@ namespace UE::UAI::OperationOwners::SpatialContent
 		TArray<FString>& OutAuthorityScopes,
 		FString& OutError);
 
+	UEAGENTINTERFACE_API bool IsDurableMutation(const FString& CommandId);
+
+	UEAGENTINTERFACE_API TSharedPtr<const DomainCapability::
+		IDomainOperationInvocationFactory> FindOperationInvocationFactory(
+			const FString& CommandId);
+
 	UEAGENTINTERFACE_API CommandEdge::FUeAgentCommandResult Submit(
-		const TSharedRef<CommandEdge::IUeAgentCommandHandler>& Mechanics,
 		const CommandEdge::FUeAgentCommandRequest& Request,
 		const Contract::FUeAgentCallerContext& Caller,
 		const TSharedRef<Contract::IUeAgentCancellationSignal>& Cancellation);

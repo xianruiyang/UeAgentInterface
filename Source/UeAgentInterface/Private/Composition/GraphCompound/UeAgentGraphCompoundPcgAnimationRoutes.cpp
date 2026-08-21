@@ -1,4 +1,5 @@
 #include "Composition/GraphCompound/UeAgentGraphCompoundPcgAnimationRoutes.h"
+#include "Composition/GraphCompound/UeAgentGraphCompoundLifecycleResultContract.h"
 
 #include "Core/Contract/UeAgentContractJson.h"
 #include "Core/Contract/UeAgentContractSchema.h"
@@ -43,6 +44,7 @@ namespace UE::UAI::Composition::GraphCompound
 				{TEXT("ai.smart_object_definition.apply"), TEXT("uai.operation.ai.smart_object_definition.apply"), TEXT("pcg_ai_node_graph"), TEXT("smart_object_definition_mutation"), E::SmartObjectDefinition, TEXT("smart_object_definition"), {}, TEXT("domain_validate_settle")},
 				{TEXT("ai.state_tree.asset.create"), TEXT("uai.operation.ai.state_tree.asset.create"), TEXT("pcg_ai_node_graph"), TEXT("asset_lifecycle"), E::AssetCreateSimple, TEXT("state_tree"), {}, TEXT("domain_refresh_settle")},
 				{TEXT("ai.state_tree.hierarchy.apply"), TEXT("uai.operation.ai.state_tree.hierarchy.apply"), TEXT("pcg_ai_node_graph"), TEXT("state_tree_hierarchy_mutation"), E::GraphEdits, TEXT("state_tree"), {TEXT("item"), TEXT("relation"), TEXT("hierarchy"), TEXT("order"), TEXT("property")}, TEXT("domain_compile_settle")},
+				{TEXT("pcg.graph.asset.create"), TEXT("uai.operation.pcg.graph.asset.create"), TEXT("pcg_ai_node_graph"), TEXT("asset_lifecycle"), E::AssetCreateSimple, TEXT("pcg_graph"), {}, TEXT("domain_refresh_settle")},
 				{TEXT("pcg.graph.apply"), TEXT("uai.operation.pcg.graph.apply"), TEXT("pcg_ai_node_graph"), TEXT("pcg_graph_topology_mutation"), E::GraphEdits, TEXT("pcg_graph"), {TEXT("item"), TEXT("pin"), TEXT("relation"), TEXT("property")}, TEXT("domain_compile_settle")},
 				{TEXT("pcg.graph_instance.apply"), TEXT("uai.operation.pcg.graph_instance.apply"), TEXT("pcg_ai_node_graph"), TEXT("pcg_parameter_binding_mutation"), E::PcgGraphInstance, TEXT("pcg_graph_instance"), {}, TEXT("domain_refresh_settle")},
 				{TEXT("pcg.graph_parameters.apply"), TEXT("uai.operation.pcg.graph_parameters.apply"), TEXT("pcg_ai_node_graph"), TEXT("pcg_parameter_binding_mutation"), E::PcgParameters, TEXT("pcg_graph"), {}, TEXT("domain_refresh_settle")},
@@ -213,7 +215,7 @@ namespace UE::UAI::Composition::GraphCompound
 			case E::IkRigAutoGenerate:
 				return CanonicalSchema(TEXT("{\"additionalProperties\":false,\"properties\":{\"preset\":{\"enum\":[\"humanoid\",\"quadruped\",\"custom\"],\"type\":\"string\"},\"skeletal_mesh_ref\":{\"minLength\":1,\"type\":\"string\"},\"target_ref\":{\"minLength\":1,\"type\":\"string\"}},\"required\":[\"preset\",\"skeletal_mesh_ref\",\"target_ref\"],\"type\":\"object\"}"));
 			case E::IkRetargeterDefinition:
-				return CanonicalSchema(TEXT("{\"additionalProperties\":false,\"properties\":{\"chain_mappings\":{\"items\":{\"additionalProperties\":false,\"properties\":{\"intent\":{\"enum\":[\"create\",\"update\",\"replace\",\"delete\"],\"type\":\"string\"},\"operation_ref\":{\"minLength\":1,\"type\":\"string\"},\"order_index\":{\"minimum\":0,\"type\":\"integer\"},\"source_chain\":{\"minLength\":1,\"type\":\"string\"},\"target_chain\":{\"minLength\":1,\"type\":\"string\"}},\"required\":[\"intent\",\"operation_ref\",\"order_index\",\"source_chain\",\"target_chain\"],\"type\":\"object\"},\"type\":\"array\"},\"source_ik_rig_ref\":{\"minLength\":1,\"type\":\"string\"},\"target_ik_rig_ref\":{\"minLength\":1,\"type\":\"string\"},\"target_ref\":{\"minLength\":1,\"type\":\"string\"}},\"required\":[\"chain_mappings\",\"source_ik_rig_ref\",\"target_ik_rig_ref\",\"target_ref\"],\"type\":\"object\"}"));
+				return CanonicalSchema(TEXT("{\"additionalProperties\":false,\"properties\":{\"chain_mappings\":{\"items\":{\"additionalProperties\":false,\"properties\":{\"intent\":{\"enum\":[\"create\",\"update\",\"replace\",\"delete\"],\"type\":\"string\"},\"operation_ref\":{\"minLength\":1,\"type\":\"string\"},\"order_index\":{\"minimum\":0,\"type\":\"integer\"},\"source_chain\":{\"minLength\":1,\"type\":\"string\"},\"target_chain\":{\"minLength\":1,\"type\":\"string\"}},\"required\":[\"intent\",\"operation_ref\",\"order_index\",\"source_chain\",\"target_chain\"],\"type\":\"object\"},\"minItems\":1,\"type\":\"array\"},\"source_ik_rig_ref\":{\"minLength\":1,\"type\":\"string\"},\"target_ik_rig_ref\":{\"minLength\":1,\"type\":\"string\"},\"target_ref\":{\"minLength\":1,\"type\":\"string\"}},\"required\":[\"chain_mappings\",\"source_ik_rig_ref\",\"target_ik_rig_ref\",\"target_ref\"],\"type\":\"object\"}"));
 			case E::IkRetargeterSettings:
 				return CanonicalSchema(TEXT("{\"additionalProperties\":false,\"properties\":{\"settings\":{\"items\":{\"additionalProperties\":false,\"properties\":{\"chain_name\":{\"type\":\"string\"},\"scope\":{\"enum\":[\"global\",\"root\",\"chain\"],\"type\":\"string\"},\"setting_name\":{\"minLength\":1,\"type\":\"string\"},\"value\":{}},\"required\":[\"chain_name\",\"scope\",\"setting_name\",\"value\"],\"type\":\"object\"},\"minItems\":1,\"type\":\"array\"},\"target_ref\":{\"minLength\":1,\"type\":\"string\"}},\"required\":[\"settings\",\"target_ref\"],\"type\":\"object\"}"));
 			default:
@@ -221,9 +223,15 @@ namespace UE::UAI::Composition::GraphCompound
 			}
 		}
 
-		FString ResultSchema()
+		FString ResultSchema(const FRouteSpec& Spec)
 		{
-			return CanonicalSchema(TEXT("{\"additionalProperties\":false,\"properties\":{\"revision\":{\"type\":\"string\"},\"target_ref\":{\"type\":\"string\"}},\"required\":[\"target_ref\",\"revision\"],\"type\":\"object\"}"));
+			if (FCString::Strcmp(
+					Spec.DomainId, TEXT("animation_rig_graph")) == 0)
+			{
+				return LifecycleResultContract::
+					BuildMutationLifecycleResultSchema(true);
+			}
+			return CanonicalSchema(TEXT("{\"additionalProperties\":false,\"properties\":{\"persistence_receipt_id\":{\"minLength\":1,\"type\":\"string\"},\"revision\":{\"type\":\"string\"},\"target_ref\":{\"type\":\"string\"}},\"required\":[\"target_ref\",\"revision\"],\"type\":\"object\"}"));
 		}
 
 		TSharedPtr<FJsonObject> DescriptorObject(
@@ -277,10 +285,10 @@ namespace UE::UAI::Composition::GraphCompound
 		{
 			FRouteBundle Bundle;
 			TArray<FUeAgentOperationDescriptor> Descriptors;
-			const FString Result = ResultSchema();
 			for (const FRouteSpec& Spec : RouteSpecs())
 			{
 				const FString Input = InputSchema(Spec);
+				const FString Result = ResultSchema(Spec);
 				TSharedPtr<FJsonObject> Object =
 					DescriptorObject(Spec, Input, Result, Bundle.Error);
 				FString CanonicalDescriptor;

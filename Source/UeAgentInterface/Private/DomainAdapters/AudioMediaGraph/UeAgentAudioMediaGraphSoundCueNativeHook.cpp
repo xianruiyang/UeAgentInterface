@@ -63,13 +63,10 @@ namespace UE::UAI::DomainAdapters::AudioMediaGraph
 		{
 			const FString Name = OwnedNodeName(Cue, Mutation.GetObjectPath());
 			USoundNode* Existing = FindOwnedNode(Cue, Mutation.GetObjectPath());
-			UClass* NativeClass = LoadObject<UClass>(
-				nullptr, *Mutation.GetNativeClassRef());
-			if (Name.IsEmpty() || NativeClass == nullptr
-				|| !NativeClass->IsChildOf(USoundNode::StaticClass()))
+			if (Name.IsEmpty())
 			{
-				OutError.Set(TEXT("audio_media_graph_sound_cue_class_invalid"),
-					Mutation.GetNativeClassRef());
+				OutError.Set(TEXT("audio_media_graph_sound_cue_node_path_invalid"),
+					Mutation.GetObjectPath());
 				return false;
 			}
 			if (Mutation.GetIntent() == EAudioMediaGraphMutationIntent::Delete)
@@ -85,6 +82,15 @@ namespace UE::UAI::DomainAdapters::AudioMediaGraph
 					REN_DontCreateRedirectors | REN_NonTransactional);
 				Existing->MarkAsGarbage();
 				continue;
+			}
+			UClass* NativeClass = LoadObject<UClass>(
+				nullptr, *Mutation.GetNativeClassRef());
+			if (NativeClass == nullptr
+				|| !NativeClass->IsChildOf(USoundNode::StaticClass()))
+			{
+				OutError.Set(TEXT("audio_media_graph_sound_cue_class_invalid"),
+					Mutation.GetNativeClassRef());
+				return false;
 			}
 			if (Mutation.GetIntent() == EAudioMediaGraphMutationIntent::Update)
 			{
@@ -134,7 +140,7 @@ namespace UE::UAI::DomainAdapters::AudioMediaGraph
 		{
 			USoundNode* Parent = FindOwnedNode(Cue, Mutation.GetParentObjectPath());
 			USoundNode* Child = FindOwnedNode(Cue, Mutation.GetChildObjectPath());
-			if (Parent == nullptr || Child == nullptr || Mutation.GetOrder() < 0)
+			if (Parent == nullptr || Child == nullptr)
 			{
 				OutError.Set(TEXT("audio_media_graph_sound_cue_relation_invalid"),
 					Mutation.GetParentObjectPath());
@@ -153,6 +159,13 @@ namespace UE::UAI::DomainAdapters::AudioMediaGraph
 			}
 			else
 			{
+				if (Mutation.GetOrder() < 0)
+				{
+					OutError.Set(
+						TEXT("audio_media_graph_sound_cue_relation_order_invalid"),
+						Mutation.GetParentObjectPath());
+					return false;
+				}
 				if (Mutation.GetIntent() == EAudioMediaGraphMutationIntent::Create
 					&& ExistingIndex != INDEX_NONE)
 				{

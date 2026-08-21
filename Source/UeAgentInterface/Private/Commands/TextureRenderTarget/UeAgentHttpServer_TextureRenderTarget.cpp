@@ -1,6 +1,6 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
-#include "Server/UeAgentHttpServer.h"
+#include "LegacyMechanics/UeAgentLegacyMechanics.h"
 
 #include "Commands/Assets/UeAgentReflectionAuthoringCommandBridge.h"
 #include "Utilities/UeAgentAuthoringFileIO.h"

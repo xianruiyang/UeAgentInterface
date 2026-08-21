@@ -227,6 +227,7 @@ namespace
 			TEXT("ai.smart_object_definition.apply"),
 			TEXT("ai.state_tree.asset.create"),
 			TEXT("ai.state_tree.hierarchy.apply"),
+			TEXT("pcg.graph.asset.create"),
 			TEXT("pcg.graph.apply"),
 			TEXT("pcg.graph_instance.apply"),
 			TEXT("pcg.graph_parameters.apply"),
@@ -309,7 +310,7 @@ bool FUeAgentGraphCompoundActivationExpectedTest::RunTest(
 	const TMap<FString, FExpectedCapability> ExpectedContracts =
 		ExpectedCapabilityContracts();
 	TestEqual(TEXT("Graph/Compound capability count is fixed"),
-		Expected.Num(), 77);
+		Expected.Num(), 78);
 	TestEqual(TEXT("Graph/Compound capability contracts are unique"),
 		ExpectedContracts.Num(), Expected.Num());
 	TestEqual(TEXT("Blueprint/UMG capability count"),
@@ -320,7 +321,7 @@ bool FUeAgentGraphCompoundActivationExpectedTest::RunTest(
 			GetMaterialNiagaraGraphCapabilityContracts().Num(), 13);
 	TestEqual(TEXT("PCG/AI capability count"),
 		DomainAdapters::PcgAiNodeGraph::
-			GetPcgAiNodeGraphCapabilityContracts().Num(), 17);
+			GetPcgAiNodeGraphCapabilityContracts().Num(), 18);
 	TestEqual(TEXT("Animation/Rig capability count"),
 		DomainAdapters::AnimationRigGraph::
 			GetAnimationRigGraphCapabilityContracts().Num(), 26);
@@ -448,8 +449,8 @@ bool FUeAgentGraphCompoundActivationExpectedTest::RunTest(
 	}
 	if (Commands.IsValid())
 	{
-		TestEqual(TEXT("outer production registry includes 185 base and 77 Graph commands"),
-			Commands->GetContracts().Num(), 262);
+		TestEqual(TEXT("outer production registry includes 185 base and 78 Graph commands"),
+			Commands->GetContracts().Num(), 263);
 		FString Manifest;
 		Error.Reset();
 		TestTrue(TEXT("production registry builds the formal manifest"),
@@ -540,14 +541,14 @@ bool FUeAgentGraphCompoundPublicCommandHandlersExpectedTest::RunTest(
 			OperationPort,
 			Handlers,
 			Error));
-	TestEqual(TEXT("public handler count"), Handlers.Num(), 77);
+	TestEqual(TEXT("public handler count"), Handlers.Num(), 78);
 
 	TSharedPtr<const CommandContract::FUeAgentCommandContractRegistry>
 		Commands;
 	TestTrue(TEXT("production command registry composes"),
 		TryCreateGraphCompoundProductionCommandContractRegistry(
 			Commands, Error));
-	if (!Commands.IsValid() || Handlers.Num() != 77)
+	if (!Commands.IsValid() || Handlers.Num() != 78)
 	{
 		AddError(TEXT("graph_compound_public_handlers_unavailable:") + Error);
 		return false;

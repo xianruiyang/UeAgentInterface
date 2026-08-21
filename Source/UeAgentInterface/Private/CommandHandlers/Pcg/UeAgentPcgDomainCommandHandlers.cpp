@@ -112,6 +112,7 @@ namespace UE::UAI::CommandHandlers::Pcg
 		bool bReadOnly = false;
 		if (!DomainAdapters::Pcg::TryExecuteContentGraph(
 				Request.GetCommandId(), Request.GetTargetIdentity(),
+				Request.GetRootTypeIdentity(),
 				Request.GetCanonicalParamsJson(), Payload, bReadOnly, OutError))
 		{
 			return false;

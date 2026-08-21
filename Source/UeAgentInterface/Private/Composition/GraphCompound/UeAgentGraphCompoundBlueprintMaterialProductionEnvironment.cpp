@@ -15,13 +15,13 @@
 #include "DomainAdapters/BlueprintCommands/UeAgentBlueprintCommandMechanicsBoundary.h"
 #include "DomainAdapters/BlueprintUmgGraph/UeAgentBlueprintUmgGraphNativeHook.h"
 #include "DomainAdapters/MaterialNiagaraGraph/UeAgentMaterialNiagaraGraphNativeHook.h"
+#include "Domains/Material/Authoring/UeAgentMaterialAuthoringState.h"
 #include "Domains/Material/Authoring/UeAgentMaterialGraphAuthoring.h"
 #include "Dom/JsonObject.h"
 #include "Dom/JsonValue.h"
 #include "Engine/Blueprint.h"
 #include "Engine/SCS_Node.h"
 #include "Engine/SimpleConstructionScript.h"
-#include "Factories/MaterialFactoryNew.h"
 #include "Factories/MaterialInstanceConstantFactoryNew.h"
 #include "HAL/FileManager.h"
 #include "HAL/PlatformTime.h"
@@ -320,7 +320,7 @@ namespace UE::UAI::Composition::GraphCompound
 			case EGraphCompoundTypedInputKind::UmgAssetCreate:
 				return TEXT("widget_blueprint");
 			case EGraphCompoundTypedInputKind::MaterialAssetCreate:
-				return TEXT("material");
+				return Request.GetMaterialKind();
 			case EGraphCompoundTypedInputKind::MaterialInstanceAssetCreate:
 				return TEXT("material_instance:")
 					+ Request.GetParentMaterialRef();
@@ -350,7 +350,11 @@ namespace UE::UAI::Composition::GraphCompound
 			if (Request.GetInputKind()
 				== EGraphCompoundTypedInputKind::MaterialAssetCreate)
 			{
-				if (Asset->GetClass() != UMaterial::StaticClass())
+				const UClass* const ExpectedClass =
+					Request.GetMaterialKind() == TEXT("material_function")
+						? UMaterialFunction::StaticClass()
+						: UMaterial::StaticClass();
+				if (Asset->GetClass() != ExpectedClass)
 				{
 					OutDiagnostic =
 						TEXT("graph_compound_asset_reload_class_mismatch");
@@ -2833,21 +2837,27 @@ namespace UE::UAI::Composition::GraphCompound
 					}
 					case EGraphCompoundTypedInputKind::MaterialAssetCreate:
 					{
-						UMaterialFactoryNew* const Factory =
-							NewObject<UMaterialFactoryNew>();
-						CreatedAsset = Factory
-							? Factory->FactoryCreateNew(
-								UMaterial::StaticClass(), Package,
-								*Request.GetAssetName(),
-								RF_Public | RF_Standalone | RF_Transactional,
-								nullptr, GWarn)
-							: nullptr;
+						CreatedAsset = UeAgentMaterialAuthoring::CreateFactorySeed(
+							Request.GetMaterialKind(),
+							Package,
+							*Request.GetAssetName(),
+							RF_Public | RF_Standalone | RF_Transactional,
+							NativeErrorDetail);
+						const UClass* const ExpectedClass =
+							Request.GetMaterialKind() == TEXT("material_function")
+								? UMaterialFunction::StaticClass()
+								: UMaterial::StaticClass();
 						bCreated = CreatedAsset
-							&& CreatedAsset->GetClass() == UMaterial::StaticClass();
+							&& CreatedAsset->GetClass() == ExpectedClass;
 						if (!bCreated)
 						{
 							NativeErrorCode =
-								TEXT("graph_compound_material_factory_failed");
+								Request.GetMaterialKind()
+									== TEXT("material_function")
+									? FString(TEXT(
+										"graph_compound_material_function_factory_failed"))
+									: FString(TEXT(
+										"graph_compound_material_factory_failed"));
 						}
 						break;
 					}

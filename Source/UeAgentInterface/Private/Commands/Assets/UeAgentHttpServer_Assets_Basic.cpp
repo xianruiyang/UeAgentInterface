@@ -11,7 +11,7 @@
 #include "Subsystems/AssetEditorSubsystem.h"
 #include "UObject/Package.h"
 
-bool FUeAgentHttpServer::CmdEditorGetOpenAssets(TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdEditorGetOpenAssets(TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	UAssetEditorSubsystem* AssetEditorSubsystem = GEditor ? GEditor->GetEditorSubsystem<UAssetEditorSubsystem>() : nullptr;
 	if (!AssetEditorSubsystem)
@@ -38,7 +38,7 @@ bool FUeAgentHttpServer::CmdEditorGetOpenAssets(TSharedPtr<FJsonObject>& OutData
 	return true;
 }
 
-bool FUeAgentHttpServer::CmdOpenAssetEditor(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdOpenAssetEditor(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	FString AssetPathInput;
 	if (!JsonTryGetString(Ctx.Params, TEXT("asset_path"), AssetPathInput) || AssetPathInput.IsEmpty())
@@ -68,7 +68,7 @@ bool FUeAgentHttpServer::CmdOpenAssetEditor(const FUeAgentRequestContext& Ctx, T
 	return true;
 }
 
-bool FUeAgentHttpServer::CmdSaveAsset(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdSaveAsset(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	FString AssetPathInput;
 	if (!JsonTryGetString(Ctx.Params, TEXT("asset_path"), AssetPathInput) || AssetPathInput.IsEmpty())
@@ -118,7 +118,7 @@ bool FUeAgentHttpServer::CmdSaveAsset(const FUeAgentRequestContext& Ctx, TShared
 	return true;
 }
 
-bool FUeAgentHttpServer::CmdAssetDuplicate(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdAssetDuplicate(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	FString SourceAssetPath;
 	if (!JsonTryGetString(Ctx.Params, TEXT("source_asset_path"), SourceAssetPath) || SourceAssetPath.IsEmpty())

@@ -1,14 +1,7 @@
 #include "DomainAdapters/UmgWidget/UeAgentUmgWidgetMechanics.h"
 
 #include "Core/Contract/UeAgentCommandJson.h"
-#include "Core/ContextResource/UeAgentContextResource.h"
-#include "Core/StateSemantic/UeAgentCanonicalValueJson.h"
-#include "DomainAdapters/ContentGraphRead/UeAgentContentGraphReadProductionEnvironment.h"
-#include "Animation/WidgetAnimation.h"
-#include "Blueprint/WidgetTree.h"
-#include "Components/PanelSlot.h"
-#include "Components/Widget.h"
-#include "Domains/Blueprint/Authoring/UeAgentBlueprintAssetLifecycle.h"
+#include "Core/HjsonWorkspace/DomainAuthoring/UeAgentDomainHjsonAuthoringKit.h"
 #include "Domains/Blueprint/Authoring/UeAgentBlueprintAuthoringRegistration.h"
 #include "Domains/UMG/Authoring/UeAgentUmgAuthoringApplyProvider.h"
 #include "Domains/UMG/Authoring/UeAgentUmgAuthoringExport.h"
@@ -24,10 +17,8 @@
 namespace UE::UAI::DomainAdapters::UmgWidget
 {
 	using namespace CommandContract;
-	using namespace ContextResource;
-	using namespace DomainAdapters::ContentGraphRead;
 	using namespace HjsonWorkspace;
-	using namespace StateSemantic;
+	using namespace HjsonWorkspace::DomainAuthoring;
 
 	namespace
 	{
@@ -59,75 +50,12 @@ namespace UE::UAI::DomainAdapters::UmgWidget
 			return Name.IsEmpty() ? Target : Target + TEXT(".") + Name;
 		}
 
-		FUeAgentResourceTracker MakeResources()
-		{
-			return FUeAgentResourceTracker(FUeAgentResourceBudget({
-				{EUeAgentResourceDimension::InputBytes, 16 * 1024 * 1024},
-				{EUeAgentResourceDimension::OutputBytes, 16 * 1024 * 1024},
-				{EUeAgentResourceDimension::StringBytes, 16 * 1024 * 1024},
-				{EUeAgentResourceDimension::Nodes, 65536},
-				{EUeAgentResourceDimension::Items, 262144},
-				{EUeAgentResourceDimension::Files, 4096},
-				{EUeAgentResourceDimension::ReferenceEdges, 262144},
-				{EUeAgentResourceDimension::WorkUnits, 1048576},
-				{EUeAgentResourceDimension::EstimatedMemoryBytes, 512 * 1024 * 1024},
-			}));
-		}
-
-		TSharedPtr<FJsonValue> JsonValueFromHjson(
-			const FHjsonNode& Node,
-			FWorkspaceError& OutError)
-		{
-			switch (Node.GetKind())
-			{
-			case EHjsonNodeKind::Null:
-				return MakeShared<FJsonValueNull>();
-			case EHjsonNodeKind::Boolean:
-				return MakeShared<FJsonValueBoolean>(Node.GetBoolean());
-			case EHjsonNodeKind::String:
-				return MakeShared<FJsonValueString>(Node.GetText());
-			case EHjsonNodeKind::Integer:
-			case EHjsonNodeKind::Decimal:
-				return MakeShared<FJsonValueNumber>(FCString::Atod(*Node.GetLexeme()));
-			case EHjsonNodeKind::Array:
-			{
-				TArray<TSharedPtr<FJsonValue>> Items;
-				for (const FHjsonNodeRef& Item : Node.GetItems())
-				{
-					TSharedPtr<FJsonValue> Converted = JsonValueFromHjson(*Item, OutError);
-					if (!Converted.IsValid()) return nullptr;
-					Items.Add(MoveTemp(Converted));
-				}
-				return MakeShared<FJsonValueArray>(MoveTemp(Items));
-			}
-			case EHjsonNodeKind::Object:
-			{
-				const TSharedPtr<FJsonObject> Object = MakeShared<FJsonObject>();
-				for (const TPair<FString, FHjsonNodeRef>& Entry : Node.GetEntries())
-				{
-					TSharedPtr<FJsonValue> Converted = JsonValueFromHjson(*Entry.Value, OutError);
-					if (!Converted.IsValid()) return nullptr;
-					Object->SetField(Entry.Key, MoveTemp(Converted));
-				}
-				return MakeShared<FJsonValueObject>(Object);
-			}
-			default:
-				Fail(OutError, TEXT("umg_widget_hjson_node_invalid"));
-				return nullptr;
-			}
-		}
-
 		bool CanonicalObject(
 			const TSharedPtr<FJsonObject>& Object,
 			FString& Out,
 			FWorkspaceError& OutError)
 		{
-			FString Error;
-			if (!Object.IsValid() || !Json::TryCanonicalize(Object, Out, Error))
-			{
-				return Fail(OutError, TEXT("umg_widget_json_invalid"), Error);
-			}
-			return true;
+			return TryCanonicalizeObject(Object, Out, OutError);
 		}
 
 		bool EnsureAuthoringRegistered(FWorkspaceError& OutError)
@@ -154,312 +82,27 @@ namespace UE::UAI::DomainAdapters::UmgWidget
 				UWidgetBlueprint::StaticClass(), nullptr, *ObjectPath(Target)));
 		}
 
-		bool TryCapture(
-			const FString& Target,
-			FUeAgentContentGraphCapture& OutCapture,
-			FWorkspaceError& OutError)
-		{
-			UObject* Object = StaticLoadObject(
-				UObject::StaticClass(), nullptr, *ObjectPath(Target));
-			UWidgetBlueprint* Blueprint = Cast<UWidgetBlueprint>(Object);
-			if (!Blueprint)
-			{
-				return Fail(OutError, TEXT("umg_widget_target_unresolved"), Target);
-			}
-			if (Blueprint->GetClass() != UWidgetBlueprint::StaticClass())
-			{
-				return Fail(OutError, TEXT("umg_widget_target_type_unsupported"),
-					Blueprint->GetClass()->GetPathName());
-			}
-			FUeAgentContentGraphReadError CaptureError;
-			if (!FUeAgentContentGraphReadProductionEnvironment::TryCaptureOwner(
-					*Blueprint, OutCapture, CaptureError))
-			{
-				return Fail(OutError,
-					CaptureError.Code.IsEmpty()
-						? FString(TEXT("umg_widget_readback_failed"))
-						: CaptureError.Code,
-					CaptureError.SubjectId, CaptureError.Detail);
-			}
-			return true;
-		}
-
-		void AddCanonicalState(
-			const FUeAgentCanonicalValuePtr& State,
-			const TSharedPtr<FJsonObject>& Object)
-		{
-			if (!State.IsValid() || !Object.IsValid()) return;
-			TSharedPtr<FJsonValue> JsonValue;
-			FString Error;
-			if (CanonicalJson::TryToJsonValue(*State, JsonValue, Error)
-				&& JsonValue.IsValid())
-			{
-				Object->SetField(TEXT("state"), JsonValue);
-			}
-		}
-
-		TSharedPtr<FJsonObject> CaptureJson(
-			const FString& Target,
-			const FUeAgentContentGraphCapture& Capture)
-		{
-			const TSharedPtr<FJsonObject> Result = MakeShared<FJsonObject>();
-			Result->SetStringField(TEXT("target"), Target);
-			Result->SetStringField(TEXT("root_type"), WidgetBlueprintType);
-			Result->SetStringField(TEXT("domain_id"), TEXT("umg_widget"));
-			Result->SetStringField(TEXT("revision"), Capture.Revision);
-			Result->SetBoolField(TEXT("complete"), true);
-			Result->SetBoolField(TEXT("has_more"), false);
-
-			TArray<TSharedPtr<FJsonValue>> Containers;
-			for (const FUeAgentContentGraphContainer& Container : Capture.Containers)
-			{
-				const TSharedPtr<FJsonObject> Value = MakeShared<FJsonObject>();
-				Value->SetStringField(TEXT("id"), Container.ContainerId);
-				Value->SetStringField(TEXT("kind"), Container.ContainerKind);
-				Value->SetStringField(TEXT("owner"), Container.OwnerId);
-				Value->SetStringField(TEXT("parent"), Container.ParentContainerId);
-				Value->SetNumberField(TEXT("order"), Container.Order);
-				AddCanonicalState(Container.State, Value);
-				Containers.Add(MakeShared<FJsonValueObject>(Value));
-			}
-			Result->SetArrayField(TEXT("containers"), MoveTemp(Containers));
-
-			TArray<TSharedPtr<FJsonValue>> Items;
-			for (const FUeAgentContentGraphItem& Item : Capture.Items)
-			{
-				const TSharedPtr<FJsonObject> Value = MakeShared<FJsonObject>();
-				Value->SetStringField(TEXT("id"), Item.ItemId);
-				Value->SetStringField(TEXT("kind"), Item.ItemKind);
-				Value->SetStringField(TEXT("class_path"), Item.ClassPath);
-				Value->SetStringField(TEXT("container_id"), Item.ContainerId);
-				Value->SetNumberField(TEXT("order"), Item.Order);
-				AddCanonicalState(Item.State, Value);
-				Items.Add(MakeShared<FJsonValueObject>(Value));
-			}
-			if (UWidgetBlueprint* Blueprint = LoadWidgetBlueprint(Target))
-			{
-				if (Blueprint->WidgetTree)
-				{
-					Blueprint->WidgetTree->ForEachWidget(
-						[&Items](UWidget* Widget)
-						{
-							if (!Widget || !Widget->Slot) return;
-							const TSharedPtr<FJsonObject> Value = MakeShared<FJsonObject>();
-							Value->SetStringField(TEXT("id"),
-								TEXT("slot:") + Widget->GetName());
-							Value->SetStringField(TEXT("kind"), TEXT("slot"));
-							Value->SetStringField(TEXT("class_path"),
-								Widget->Slot->GetClass()->GetPathName());
-							Value->SetStringField(TEXT("container_id"),
-								TEXT("tree:WidgetTree"));
-							Value->SetNumberField(TEXT("order"), Items.Num());
-							const TSharedPtr<FJsonObject> State = MakeShared<FJsonObject>();
-							State->SetStringField(TEXT("owner_widget"),
-								TEXT("widget:") + Widget->GetName());
-							State->SetStringField(TEXT("class"),
-								Widget->Slot->GetClass()->GetPathName());
-							Value->SetObjectField(TEXT("state"), State);
-							Items.Add(MakeShared<FJsonValueObject>(Value));
-						});
-				}
-				for (const FDelegateEditorBinding& Binding : Blueprint->Bindings)
-				{
-					const TSharedPtr<FJsonObject> Value = MakeShared<FJsonObject>();
-					Value->SetStringField(TEXT("id"), FString::Printf(
-						TEXT("binding:%s:%s"), *Binding.ObjectName,
-						*Binding.PropertyName.ToString()));
-					Value->SetStringField(TEXT("kind"), TEXT("binding"));
-					Value->SetStringField(TEXT("class_path"), TEXT("uai.umg.binding"));
-					Value->SetStringField(TEXT("container_id"),
-						TEXT("tree:WidgetTree"));
-					Value->SetNumberField(TEXT("order"), Items.Num());
-					const TSharedPtr<FJsonObject> State = MakeShared<FJsonObject>();
-					State->SetStringField(TEXT("widget_name"), Binding.ObjectName);
-					State->SetStringField(TEXT("property_name"),
-						Binding.PropertyName.ToString());
-					State->SetStringField(TEXT("function_name"),
-						Binding.FunctionName.ToString());
-					State->SetStringField(TEXT("binding_kind"),
-						Binding.Kind == EBindingKind::Property
-							? TEXT("property_variable") : TEXT("function"));
-					Value->SetObjectField(TEXT("state"), State);
-					Items.Add(MakeShared<FJsonValueObject>(Value));
-				}
-				for (UWidgetAnimation* Animation : Blueprint->Animations)
-				{
-					if (!Animation) continue;
-					const TSharedPtr<FJsonObject> Value = MakeShared<FJsonObject>();
-					Value->SetStringField(TEXT("id"),
-						TEXT("animation:") + Animation->GetName());
-					Value->SetStringField(TEXT("kind"), TEXT("animation"));
-					Value->SetStringField(TEXT("class_path"),
-						Animation->GetClass()->GetPathName());
-					Value->SetStringField(TEXT("container_id"),
-						TEXT("tree:WidgetTree"));
-					Value->SetNumberField(TEXT("order"), Items.Num());
-					const TSharedPtr<FJsonObject> State = MakeShared<FJsonObject>();
-					State->SetStringField(TEXT("name"), Animation->GetName());
-					State->SetStringField(TEXT("display_label"),
-						Animation->GetDisplayLabel());
-					State->SetNumberField(TEXT("start_seconds"),
-						Animation->GetStartTime());
-					State->SetNumberField(TEXT("end_seconds"),
-						Animation->GetEndTime());
-					Value->SetObjectField(TEXT("state"), State);
-					Items.Add(MakeShared<FJsonValueObject>(Value));
-				}
-			}
-			Result->SetArrayField(TEXT("items"), MoveTemp(Items));
-
-			TArray<TSharedPtr<FJsonValue>> Relations;
-			for (const FUeAgentContentGraphRelation& Relation : Capture.Relations)
-			{
-				const TSharedPtr<FJsonObject> Value = MakeShared<FJsonObject>();
-				Value->SetStringField(TEXT("id"), Relation.RelationId);
-				Value->SetStringField(TEXT("kind"), Relation.RelationKind);
-				Value->SetStringField(TEXT("source"), Relation.SourceItemId);
-				Value->SetStringField(TEXT("target"), Relation.TargetItemId);
-				AddCanonicalState(Relation.State, Value);
-				Relations.Add(MakeShared<FJsonValueObject>(Value));
-			}
-			Result->SetArrayField(TEXT("relations"), MoveTemp(Relations));
-
-			TArray<TSharedPtr<FJsonValue>> Properties;
-			for (const FUeAgentContentGraphProperty& Property : Capture.Properties)
-			{
-				const TSharedPtr<FJsonObject> Value = MakeShared<FJsonObject>();
-				Value->SetStringField(TEXT("owner"), Property.OwnerId);
-				Value->SetStringField(TEXT("field"), Property.FieldId);
-				AddCanonicalState(Property.State.Value, Value);
-				Properties.Add(MakeShared<FJsonValueObject>(Value));
-			}
-			Result->SetArrayField(TEXT("properties"), MoveTemp(Properties));
-			Result->SetNumberField(TEXT("property_count"), Capture.Properties.Num());
-
-			bool bCompileValid = true;
-			TArray<TSharedPtr<FJsonValue>> Diagnostics;
-			for (const FUeAgentContentGraphDiagnostic& Diagnostic : Capture.Diagnostics)
-			{
-				const TSharedPtr<FJsonObject> Value = MakeShared<FJsonObject>();
-				Value->SetStringField(TEXT("severity"), Diagnostic.Severity);
-				Value->SetStringField(TEXT("code"), Diagnostic.Code);
-				Value->SetBoolField(TEXT("resolved"), Diagnostic.bResolved);
-				Diagnostics.Add(MakeShared<FJsonValueObject>(Value));
-				if (!Diagnostic.bResolved
-					&& Diagnostic.Severity.Equals(TEXT("error"), ESearchCase::IgnoreCase))
-				{
-					bCompileValid = false;
-				}
-			}
-			Result->SetArrayField(TEXT("diagnostics"), MoveTemp(Diagnostics));
-			Result->SetStringField(TEXT("compile_status"),
-				bCompileValid ? TEXT("valid") : TEXT("error"));
-			return Result;
-		}
-
 		bool TryRead(
 			const FString& Target,
 			FString& OutPayload,
 			FString& OutRevision,
 			FWorkspaceError& OutError)
 		{
-			FUeAgentContentGraphCapture Capture;
-			if (!TryCapture(Target, Capture, OutError)) return false;
-			OutRevision = Capture.Revision;
-			return CanonicalObject(CaptureJson(Target, Capture), OutPayload, OutError);
-		}
-
-		bool ParseDocument(
-			const TSharedPtr<FJsonObject>& Params,
-			TSharedPtr<FJsonObject>& OutDocument,
-			FWorkspaceError& OutError)
-		{
-			OutDocument.Reset();
-			if (!Params.IsValid()
-				|| Params->HasField(TEXT("carrier"))
-				|| Params->HasField(TEXT("hjson_document")))
-			{
-				return Fail(
-					OutError,
-					TEXT("umg_widget_legacy_source_contract_rejected"));
-			}
-			FString Target;
-			const TSharedPtr<FJsonObject>* Source = nullptr;
-			FString Kind;
-			FString TargetIdentity;
-			FString EntryFile;
-			const TArray<TSharedPtr<FJsonValue>>* Documents = nullptr;
-			if (!Params->TryGetStringField(TEXT("target"), Target)
-				|| Target.IsEmpty()
-				|| !Params->TryGetObjectField(TEXT("source"), Source)
-				|| !Source || !Source->IsValid()
-				|| !(*Source)->TryGetStringField(TEXT("kind"), Kind)
-				|| Kind != TEXT("resolved")
-				|| !(*Source)->TryGetStringField(TEXT("target_identity"), TargetIdentity)
-				|| TargetIdentity != Target
-				|| !(*Source)->TryGetStringField(TEXT("entry_file"), EntryFile)
-				|| EntryFile.IsEmpty()
-				|| !(*Source)->TryGetArrayField(TEXT("documents"), Documents)
-				|| !Documents || Documents->IsEmpty())
-			{
-				return Fail(OutError, TEXT("umg_widget_resolved_source_invalid"));
-			}
-			FString Text;
-			int32 EntryMatches = 0;
-			for (const TSharedPtr<FJsonValue>& Value : *Documents)
-			{
-				const TSharedPtr<FJsonObject> DocumentObject = Value.IsValid()
-					? Value->AsObject() : nullptr;
-				FString RelativePath;
-				FString DocumentText;
-				if (!DocumentObject.IsValid()
-					|| !DocumentObject->TryGetStringField(TEXT("path"), RelativePath)
-					|| !DocumentObject->TryGetStringField(TEXT("document"), DocumentText))
-				{
-					return Fail(OutError, TEXT("umg_widget_resolved_source_invalid"));
-				}
-				if (RelativePath == EntryFile)
-				{
-					Text = MoveTemp(DocumentText);
-					++EntryMatches;
-				}
-			}
-			if (EntryMatches != 1 || Text.IsEmpty())
-			{
-				return Fail(
-					OutError,
-					TEXT("umg_widget_resolved_source_invalid"),
-					EntryFile);
-			}
-			FUeAgentResourceTracker Resources = MakeResources();
-			FHjsonDocumentPtr Parsed;
-			if (!TryParseHjsonDocument(Text, TEXT("inline:umg-widget-domain"),
-				Resources, Parsed, OutError)
-				|| !Parsed.IsValid())
+			UObject* Object = nullptr;
+			DomainAdapters::ContentGraphRead::FUeAgentContentGraphCapture Capture;
+			if (!TryCaptureObject(
+					Target, WidgetBlueprintType, Object, Capture, OutError))
 			{
 				return false;
 			}
-			TSharedPtr<FJsonValue> Converted = JsonValueFromHjson(*Parsed->GetRoot(), OutError);
-			const TSharedPtr<FJsonObject> Root = Converted.IsValid()
-				? Converted->AsObject() : nullptr;
-			FString Schema;
-			const TSharedPtr<FJsonObject>* DomainRoot = nullptr;
-			const TSharedPtr<FJsonObject>* Document = nullptr;
-			FString Type;
-			if (!Root.IsValid()
-				|| !Root->TryGetStringField(TEXT("schema"), Schema)
-				|| Schema != SchemaId
-				|| !Root->TryGetObjectField(TEXT("root"), DomainRoot)
-				|| !DomainRoot || !DomainRoot->IsValid()
-				|| !(*DomainRoot)->TryGetStringField(TEXT("type"), Type)
-				|| Type != WidgetBlueprintType
-				|| !(*DomainRoot)->TryGetObjectField(TEXT("document"), Document)
-				|| !Document || !Document->IsValid())
+			TSharedPtr<FJsonObject> Snapshot;
+			if (!TryBuildCaptureSnapshot(
+					Target, WidgetBlueprintType, Capture, Snapshot, OutError))
 			{
-				return Fail(OutError, TEXT("umg_widget_schema_or_type_invalid"), Type);
+				return false;
 			}
-			OutDocument = *Document;
-			return true;
+			OutRevision = Capture.Revision;
+			return TryCanonicalizeObject(Snapshot, OutPayload, OutError);
 		}
 
 		bool TryOperation(
@@ -492,14 +135,32 @@ namespace UE::UAI::DomainAdapters::UmgWidget
 			FString& OutPayload,
 			FWorkspaceError& OutError)
 		{
-			TSharedPtr<FJsonObject> Document;
-			if (!ParseDocument(Params, Document, OutError)) return false;
-			FString ExpectedRevision;
-			if (!Params->TryGetStringField(TEXT("expected_revision"), ExpectedRevision)
-				|| ExpectedRevision.IsEmpty())
+			FString CanonicalParamsJson;
+			if (!TryCanonicalizeObject(Params, CanonicalParamsJson, OutError))
 			{
-				return Fail(OutError, TEXT("umg_widget_expected_revision_required"));
+				return false;
 			}
+			FResolvedDomainHjsonDocument Resolved;
+			if (!TryDecodeResolvedDocument(
+					Target,
+					CanonicalParamsJson,
+					FDomainHjsonDocumentContract(
+						TEXT("umg"), SchemaId, WidgetBlueprintType),
+					Resolved,
+					OutError))
+			{
+				return false;
+			}
+			const TSharedPtr<FJsonObject>* DocumentField = nullptr;
+			if (!Resolved.Root.IsValid()
+				|| !Resolved.Root->TryGetObjectField(
+					TEXT("document"), DocumentField)
+				|| !DocumentField || !DocumentField->IsValid())
+			{
+				return Fail(OutError, TEXT("umg_widget_document_required"));
+			}
+			const TSharedPtr<FJsonObject> Document = *DocumentField;
+			const FString& ExpectedRevision = Resolved.ExpectedRevision;
 
 			FString OperationText;
 			UeAgentApplyInputContract::EOperation Operation =
@@ -617,6 +278,17 @@ namespace UE::UAI::DomainAdapters::UmgWidget
 				return Fail(OutError, TEXT("umg_widget_readback_payload_invalid"),
 					Target, JsonError);
 			}
+			FString CompileStatus;
+			if (!Readback->TryGetStringField(
+					TEXT("compile_status"), CompileStatus)
+				|| CompileStatus != TEXT("valid"))
+			{
+				return Fail(
+					OutError,
+					TEXT("umg_widget_compile_not_settled"),
+					Target,
+					CompileStatus);
+			}
 
 			const TSharedPtr<FJsonObject> Mutation = MakeShared<FJsonObject>();
 			Mutation->SetStringField(TEXT("operation"), ApplyResult.ResolvedOperation);
@@ -632,16 +304,22 @@ namespace UE::UAI::DomainAdapters::UmgWidget
 			Mutation->SetNumberField(TEXT("animations_updated"), ApplyResult.Domain.AnimationsUpdated);
 			Mutation->SetNumberField(TEXT("animation_keys_applied"), ApplyResult.Domain.AnimationKeysApplied);
 
-			const TSharedPtr<FJsonObject> Result = MakeShared<FJsonObject>();
-			Result->SetStringField(TEXT("terminal_status"), TEXT("succeeded"));
-			Result->SetStringField(TEXT("provider_id"), TEXT("umg-widget-domain-provider"));
-			Result->SetStringField(TEXT("target"), Target);
-			Result->SetStringField(TEXT("revision"), Revision);
-			Result->SetBoolField(TEXT("saved"), true);
-			Result->SetBoolField(TEXT("reloaded"), true);
-			Result->SetObjectField(TEXT("independent_readback"), Readback);
-			Result->SetObjectField(TEXT("mutation"), Mutation);
-			return CanonicalObject(Result, OutPayload, OutError);
+			FDomainHjsonImportLifecycleReceipt LifecycleReceipt;
+			LifecycleReceipt.bMutationApplied = true;
+			LifecycleReceipt.bCompileSettled = true;
+			LifecycleReceipt.bPackageSaved = true;
+			LifecycleReceipt.bUnloadedReloaded = true;
+			LifecycleReceipt.PersistenceReceiptId = TEXT("reload:")
+				+ ObjectPath(Target) + TEXT(":") + Revision;
+			return TryBuildImportSuccessPayload(
+				TEXT("umg-widget-domain-provider"),
+				Target,
+				Revision,
+				LifecycleReceipt,
+				Readback,
+				Mutation,
+				OutPayload,
+				OutError);
 		}
 
 		bool TryExport(

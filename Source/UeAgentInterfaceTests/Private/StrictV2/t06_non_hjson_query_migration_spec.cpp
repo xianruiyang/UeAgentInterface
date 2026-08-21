@@ -9,6 +9,9 @@
 #include "Composition/ReadExportCommand/UeAgentReadExportCommandHandlers.h"
 #include "Core/Contract/UeAgentCommandJson.h"
 #include "DomainAdapters/Query/UeAgentQueryService.h"
+#include "Editor.h"
+#include "Engine/Selection.h"
+#include "GameFramework/Actor.h"
 #include "Module/CommandRegistration/Query/UeAgentQueryRegistration.h"
 #else
 #define UAI_T06_NON_HJSON_QUERY_AVAILABLE 0
@@ -457,6 +460,74 @@ bool FUeAgentStrictV2T06ProductionReadbackTest::RunTest(
 		TestEqual(TEXT("real mechanics identity is explicit"), Payload->GetStringField(TEXT("mechanics_command_id")), FString(TEXT("project.summary")));
 		TestTrue(TEXT("production response attests read-only"), Payload->GetBoolField(TEXT("read_only")));
 		TestTrue(TEXT("real projection payload is returned"), Payload->HasTypedField<EJson::Object>(TEXT("query_result")));
+	}
+
+	TArray<TWeakObjectPtr<AActor>> OriginalSelection;
+	if (GEditor && GEditor->GetSelectedActors())
+	{
+		for (FSelectionIterator It(*GEditor->GetSelectedActors()); It; ++It)
+		{
+			if (AActor* Actor = Cast<AActor>(*It))
+			{
+				OriginalSelection.Add(Actor);
+			}
+		}
+		GEditor->SelectNone(false, true, false);
+	}
+
+	const FUeAgentCommandResult EmptySelection = Submit(
+		Public,
+		TEXT("world.selection"),
+		TEXT("{}"));
+	TestTrue(
+		TEXT("an empty current selection is a successful public readback"),
+		EmptySelection.IsOk());
+	if (!EmptySelection.IsOk())
+	{
+		AddError(EmptySelection.GetErrorJson());
+	}
+	else
+	{
+		TSharedPtr<FJsonObject> SelectionPayload;
+		const TSharedPtr<FJsonObject>* QueryResult = nullptr;
+		const TSharedPtr<FJsonObject>* Projection = nullptr;
+		const TSharedPtr<FJsonObject>* ProjectionPayload = nullptr;
+		const TSharedPtr<FJsonObject>* Snapshot = nullptr;
+		const TArray<TSharedPtr<FJsonValue>>* Entries = nullptr;
+		TestTrue(
+			TEXT("empty selection response exposes a complete snapshot"),
+			UE::UAI::CommandContract::Json::TryParseObject(
+				EmptySelection.GetPayloadJson(),
+				SelectionPayload,
+				JsonError)
+				&& SelectionPayload.IsValid()
+				&& SelectionPayload->TryGetObjectField(
+					TEXT("query_result"), QueryResult)
+				&& QueryResult && QueryResult->IsValid()
+				&& (*QueryResult)->TryGetObjectField(
+					TEXT("projection"), Projection)
+				&& Projection && Projection->IsValid()
+				&& (*Projection)->TryGetObjectField(
+					TEXT("payload"), ProjectionPayload)
+				&& ProjectionPayload && ProjectionPayload->IsValid()
+				&& (*ProjectionPayload)->TryGetObjectField(
+					TEXT("snapshot"), Snapshot)
+				&& Snapshot && Snapshot->IsValid()
+				&& (*Snapshot)->TryGetArrayField(TEXT("entries"), Entries)
+				&& Entries
+				&& Entries->IsEmpty());
+	}
+
+	if (GEditor)
+	{
+		GEditor->SelectNone(false, true, false);
+		for (const TWeakObjectPtr<AActor>& Actor : OriginalSelection)
+		{
+			if (Actor.IsValid())
+			{
+				GEditor->SelectActor(Actor.Get(), true, false, true);
+			}
+		}
 	}
 	return true;
 #endif

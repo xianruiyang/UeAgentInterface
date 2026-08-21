@@ -4,7 +4,7 @@
 
 #include "Commands/Animation/UeAgentAnimationFolderCommandBridge.h"
 
-bool FUeAgentHttpServer::CmdSkeletonExportFolder(
+bool FUeAgentLegacyMechanics::CmdSkeletonExportFolder(
     const FUeAgentRequestContext &Ctx, TSharedPtr<FJsonObject> &OutData,
     FString &OutError) const {
   return UeAgentAnimationFolderCommandBridge::Export(
@@ -12,7 +12,7 @@ bool FUeAgentHttpServer::CmdSkeletonExportFolder(
       OutError);
 }
 
-bool FUeAgentHttpServer::CmdSkeletonApplyFolder(
+bool FUeAgentLegacyMechanics::CmdSkeletonApplyFolder(
     const FUeAgentRequestContext &Ctx, TSharedPtr<FJsonObject> &OutData,
     FString &OutError) const {
   return UeAgentAnimationFolderCommandBridge::Apply(
@@ -20,7 +20,7 @@ bool FUeAgentHttpServer::CmdSkeletonApplyFolder(
       OutError, Ctx.RequestId);
 }
 
-bool FUeAgentHttpServer::CmdSkeletonValidateFolder(
+bool FUeAgentLegacyMechanics::CmdSkeletonValidateFolder(
     const FUeAgentRequestContext &Ctx, TSharedPtr<FJsonObject> &OutData,
     FString &OutError) const {
   return UeAgentAnimationFolderCommandBridge::Validate(

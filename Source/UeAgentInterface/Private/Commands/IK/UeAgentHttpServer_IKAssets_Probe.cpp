@@ -2095,7 +2095,7 @@ namespace
 	}
 }
 
-bool FUeAgentHttpServer::CmdProbeIKGoalCandidates(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, TArray<TSharedPtr<FJsonValue>>& OutArtifacts, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdProbeIKGoalCandidates(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, TArray<TSharedPtr<FJsonValue>>& OutArtifacts, FString& OutError) const
 {
 	if (!OutData.IsValid())
 	{
@@ -2742,7 +2742,7 @@ bool FUeAgentHttpServer::CmdProbeIKGoalCandidates(const FUeAgentRequestContext& 
 	return true;
 }
 
-bool FUeAgentHttpServer::CmdProbeIKGoalReviewFrames(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, TArray<TSharedPtr<FJsonValue>>& OutArtifacts, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdProbeIKGoalReviewFrames(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, TArray<TSharedPtr<FJsonValue>>& OutArtifacts, FString& OutError) const
 {
 	UeAgentEditorViewportSequenceFrameOptions::FUnifiedSequenceFrameOptionsReport UnifiedOptionsReport;
 	UeAgentEditorViewportSequenceFrameOptions::ApplyUnifiedSequenceFrameOptionsToParams(
@@ -3192,7 +3192,7 @@ bool FUeAgentHttpServer::CmdProbeIKGoalReviewFrames(const FUeAgentRequestContext
 	return true;
 }
 
-bool FUeAgentHttpServer::CmdProbeIKGoalApplyCandidate(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdProbeIKGoalApplyCandidate(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	FString ProbeRequestId;
 	JsonTryGetString(Ctx.Params, TEXT("probe_request_id"), ProbeRequestId);

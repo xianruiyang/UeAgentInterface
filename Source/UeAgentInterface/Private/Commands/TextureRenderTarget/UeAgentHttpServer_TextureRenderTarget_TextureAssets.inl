@@ -916,7 +916,7 @@ namespace UeAgentTextureOps
 
 namespace
 {
-	using FTextureCommandHandler = bool (FUeAgentHttpServer::*)(const FUeAgentRequestContext&, TSharedPtr<FJsonObject>&, FString&) const;
+	using FTextureCommandHandler = bool (FUeAgentLegacyMechanics::*)(const FUeAgentRequestContext&, TSharedPtr<FJsonObject>&, FString&) const;
 
 	struct FTextureCommandEntry
 	{
@@ -925,65 +925,65 @@ namespace
 	};
 
 	static const FTextureCommandEntry GTextureCommandEntries[] = {
-		{ TEXT("texture_reimport"), &FUeAgentHttpServer::CmdTextureReimport },
-		{ TEXT("texture_get_info"), &FUeAgentHttpServer::CmdTextureGetInfo },
-		{ TEXT("texture_validate_settings"), &FUeAgentHttpServer::CmdTextureValidateSettings },
-		{ TEXT("texture_export_image"), &FUeAgentHttpServer::CmdTextureExportImage },
-		{ TEXT("texture_pixel_probe"), &FUeAgentHttpServer::CmdTexturePixelProbe },
-		{ TEXT("texture_screenshot"), &FUeAgentHttpServer::CmdTextureScreenshot },
-		{ TEXT("texture_array_create"), &FUeAgentHttpServer::CmdTextureArrayCreate },
-		{ TEXT("texture_cube_create"), &FUeAgentHttpServer::CmdTextureCubeCreate },
-		{ TEXT("texture_cube_array_create"), &FUeAgentHttpServer::CmdTextureCubeArrayCreate },
-		{ TEXT("volume_texture_create"), &FUeAgentHttpServer::CmdVolumeTextureCreate },
-		{ TEXT("virtual_texture_get_info"), &FUeAgentHttpServer::CmdVirtualTextureGetInfo },
-		{ TEXT("virtual_texture_validate_setup"), &FUeAgentHttpServer::CmdVirtualTextureValidateSetup },
-		{ TEXT("runtime_virtual_texture_create"), &FUeAgentHttpServer::CmdRuntimeVirtualTextureCreate },
-		{ TEXT("runtime_virtual_texture_get_info"), &FUeAgentHttpServer::CmdRuntimeVirtualTextureGetInfo },
-		{ TEXT("runtime_virtual_texture_validate_setup"), &FUeAgentHttpServer::CmdRuntimeVirtualTextureValidateSetup },
-		{ TEXT("render_target_create"), &FUeAgentHttpServer::CmdRenderTargetCreate },
-		{ TEXT("render_target_get_info"), &FUeAgentHttpServer::CmdRenderTargetGetInfo },
-		{ TEXT("render_target_resize"), &FUeAgentHttpServer::CmdRenderTargetResize },
-		{ TEXT("render_target_clear"), &FUeAgentHttpServer::CmdRenderTargetClear },
-		{ TEXT("render_target_draw_material"), &FUeAgentHttpServer::CmdRenderTargetDrawMaterial },
-		{ TEXT("render_target_copy_texture"), &FUeAgentHttpServer::CmdRenderTargetCopyTexture },
-		{ TEXT("render_target_capture_scene"), &FUeAgentHttpServer::CmdRenderTargetCaptureScene },
-		{ TEXT("render_target_read_pixels"), &FUeAgentHttpServer::CmdRenderTargetReadPixels },
-		{ TEXT("render_target_sample_uv"), &FUeAgentHttpServer::CmdRenderTargetSampleUv },
-		{ TEXT("render_target_export_image"), &FUeAgentHttpServer::CmdRenderTargetExportImage },
-		{ TEXT("render_target_create_static_texture"), &FUeAgentHttpServer::CmdRenderTargetCreateStaticTexture },
-		{ TEXT("render_target_probe"), &FUeAgentHttpServer::CmdRenderTargetProbe },
-		{ TEXT("scene_capture_validate_render_target"), &FUeAgentHttpServer::CmdSceneCaptureValidateRenderTarget },
-		{ TEXT("scene_capture_runtime_probe"), &FUeAgentHttpServer::CmdSceneCaptureRuntimeProbe },
-		{ TEXT("media_source_create"), &FUeAgentHttpServer::CmdMediaSourceCreate },
-		{ TEXT("media_source_get_info"), &FUeAgentHttpServer::CmdMediaSourceGetInfo },
-		{ TEXT("media_player_create"), &FUeAgentHttpServer::CmdMediaPlayerCreate },
-		{ TEXT("media_texture_create"), &FUeAgentHttpServer::CmdMediaTextureCreate },
-		{ TEXT("media_runtime_probe"), &FUeAgentHttpServer::CmdMediaRuntimeProbe },
-		{ TEXT("sparse_volume_texture_import"), &FUeAgentHttpServer::CmdSparseVolumeTextureImport },
-		{ TEXT("sparse_volume_texture_reimport"), &FUeAgentHttpServer::CmdSparseVolumeTextureReimport },
-		{ TEXT("sparse_volume_texture_get_info"), &FUeAgentHttpServer::CmdSparseVolumeTextureGetInfo },
-		{ TEXT("sparse_volume_texture_preview_probe"), &FUeAgentHttpServer::CmdSparseVolumeTexturePreviewProbe },
-		{ TEXT("sparse_volume_texture_validate_setup"), &FUeAgentHttpServer::CmdSparseVolumeTextureValidateSetup },
-		{ TEXT("texture_graph_create"), &FUeAgentHttpServer::CmdTextureGraphCreate },
-		{ TEXT("texture_graph_get_info"), &FUeAgentHttpServer::CmdTextureGraphGetInfo },
-		{ TEXT("texture_graph_bake_outputs"), &FUeAgentHttpServer::CmdTextureGraphBakeOutputs },
-		{ TEXT("texture_graph_runtime_probe"), &FUeAgentHttpServer::CmdTextureGraphRuntimeProbe },
-		{ TEXT("subuv_animation_create"), &FUeAgentHttpServer::CmdSubUVAnimationCreate },
-		{ TEXT("subuv_animation_get_info"), &FUeAgentHttpServer::CmdSubUVAnimationGetInfo },
-		{ TEXT("subuv_animation_preview_probe"), &FUeAgentHttpServer::CmdSubUVAnimationPreviewProbe },
-		{ TEXT("paper_sprite_create"), &FUeAgentHttpServer::CmdPaperSpriteCreate },
-		{ TEXT("paper_flipbook_create"), &FUeAgentHttpServer::CmdPaperFlipbookCreate },
-		{ TEXT("paper2d_preview_probe"), &FUeAgentHttpServer::CmdPaper2DPreviewProbe },
-		{ TEXT("light_profile_texture_import"), &FUeAgentHttpServer::CmdLightProfileTextureImport },
-		{ TEXT("light_profile_texture_get_info"), &FUeAgentHttpServer::CmdLightProfileTextureGetInfo },
-		{ TEXT("light_profile_validate_setup"), &FUeAgentHttpServer::CmdLightProfileValidateSetup },
-		{ TEXT("texture_collection_create"), &FUeAgentHttpServer::CmdTextureCollectionCreate },
-		{ TEXT("texture_collection_get_info"), &FUeAgentHttpServer::CmdTextureCollectionGetInfo },
-		{ TEXT("texture_collection_validate_usage"), &FUeAgentHttpServer::CmdTextureCollectionValidateUsage },
-		{ TEXT("texture_usage_validate"), &FUeAgentHttpServer::CmdTextureUsageValidate },
-		{ TEXT("texture_usage_get_references"), &FUeAgentHttpServer::CmdTextureUsageGetReferences },
-		{ TEXT("texture_usage_probe_media"), &FUeAgentHttpServer::CmdTextureUsageProbeMedia },
-		{ TEXT("texture_usage_probe_sparse_volume"), &FUeAgentHttpServer::CmdTextureUsageProbeSparseVolume },
+		{ TEXT("texture_reimport"), &FUeAgentLegacyMechanics::CmdTextureReimport },
+		{ TEXT("texture_get_info"), &FUeAgentLegacyMechanics::CmdTextureGetInfo },
+		{ TEXT("texture_validate_settings"), &FUeAgentLegacyMechanics::CmdTextureValidateSettings },
+		{ TEXT("texture_export_image"), &FUeAgentLegacyMechanics::CmdTextureExportImage },
+		{ TEXT("texture_pixel_probe"), &FUeAgentLegacyMechanics::CmdTexturePixelProbe },
+		{ TEXT("texture_screenshot"), &FUeAgentLegacyMechanics::CmdTextureScreenshot },
+		{ TEXT("texture_array_create"), &FUeAgentLegacyMechanics::CmdTextureArrayCreate },
+		{ TEXT("texture_cube_create"), &FUeAgentLegacyMechanics::CmdTextureCubeCreate },
+		{ TEXT("texture_cube_array_create"), &FUeAgentLegacyMechanics::CmdTextureCubeArrayCreate },
+		{ TEXT("volume_texture_create"), &FUeAgentLegacyMechanics::CmdVolumeTextureCreate },
+		{ TEXT("virtual_texture_get_info"), &FUeAgentLegacyMechanics::CmdVirtualTextureGetInfo },
+		{ TEXT("virtual_texture_validate_setup"), &FUeAgentLegacyMechanics::CmdVirtualTextureValidateSetup },
+		{ TEXT("runtime_virtual_texture_create"), &FUeAgentLegacyMechanics::CmdRuntimeVirtualTextureCreate },
+		{ TEXT("runtime_virtual_texture_get_info"), &FUeAgentLegacyMechanics::CmdRuntimeVirtualTextureGetInfo },
+		{ TEXT("runtime_virtual_texture_validate_setup"), &FUeAgentLegacyMechanics::CmdRuntimeVirtualTextureValidateSetup },
+		{ TEXT("render_target_create"), &FUeAgentLegacyMechanics::CmdRenderTargetCreate },
+		{ TEXT("render_target_get_info"), &FUeAgentLegacyMechanics::CmdRenderTargetGetInfo },
+		{ TEXT("render_target_resize"), &FUeAgentLegacyMechanics::CmdRenderTargetResize },
+		{ TEXT("render_target_clear"), &FUeAgentLegacyMechanics::CmdRenderTargetClear },
+		{ TEXT("render_target_draw_material"), &FUeAgentLegacyMechanics::CmdRenderTargetDrawMaterial },
+		{ TEXT("render_target_copy_texture"), &FUeAgentLegacyMechanics::CmdRenderTargetCopyTexture },
+		{ TEXT("render_target_capture_scene"), &FUeAgentLegacyMechanics::CmdRenderTargetCaptureScene },
+		{ TEXT("render_target_read_pixels"), &FUeAgentLegacyMechanics::CmdRenderTargetReadPixels },
+		{ TEXT("render_target_sample_uv"), &FUeAgentLegacyMechanics::CmdRenderTargetSampleUv },
+		{ TEXT("render_target_export_image"), &FUeAgentLegacyMechanics::CmdRenderTargetExportImage },
+		{ TEXT("render_target_create_static_texture"), &FUeAgentLegacyMechanics::CmdRenderTargetCreateStaticTexture },
+		{ TEXT("render_target_probe"), &FUeAgentLegacyMechanics::CmdRenderTargetProbe },
+		{ TEXT("scene_capture_validate_render_target"), &FUeAgentLegacyMechanics::CmdSceneCaptureValidateRenderTarget },
+		{ TEXT("scene_capture_runtime_probe"), &FUeAgentLegacyMechanics::CmdSceneCaptureRuntimeProbe },
+		{ TEXT("media_source_create"), &FUeAgentLegacyMechanics::CmdMediaSourceCreate },
+		{ TEXT("media_source_get_info"), &FUeAgentLegacyMechanics::CmdMediaSourceGetInfo },
+		{ TEXT("media_player_create"), &FUeAgentLegacyMechanics::CmdMediaPlayerCreate },
+		{ TEXT("media_texture_create"), &FUeAgentLegacyMechanics::CmdMediaTextureCreate },
+		{ TEXT("media_runtime_probe"), &FUeAgentLegacyMechanics::CmdMediaRuntimeProbe },
+		{ TEXT("sparse_volume_texture_import"), &FUeAgentLegacyMechanics::CmdSparseVolumeTextureImport },
+		{ TEXT("sparse_volume_texture_reimport"), &FUeAgentLegacyMechanics::CmdSparseVolumeTextureReimport },
+		{ TEXT("sparse_volume_texture_get_info"), &FUeAgentLegacyMechanics::CmdSparseVolumeTextureGetInfo },
+		{ TEXT("sparse_volume_texture_preview_probe"), &FUeAgentLegacyMechanics::CmdSparseVolumeTexturePreviewProbe },
+		{ TEXT("sparse_volume_texture_validate_setup"), &FUeAgentLegacyMechanics::CmdSparseVolumeTextureValidateSetup },
+		{ TEXT("texture_graph_create"), &FUeAgentLegacyMechanics::CmdTextureGraphCreate },
+		{ TEXT("texture_graph_get_info"), &FUeAgentLegacyMechanics::CmdTextureGraphGetInfo },
+		{ TEXT("texture_graph_bake_outputs"), &FUeAgentLegacyMechanics::CmdTextureGraphBakeOutputs },
+		{ TEXT("texture_graph_runtime_probe"), &FUeAgentLegacyMechanics::CmdTextureGraphRuntimeProbe },
+		{ TEXT("subuv_animation_create"), &FUeAgentLegacyMechanics::CmdSubUVAnimationCreate },
+		{ TEXT("subuv_animation_get_info"), &FUeAgentLegacyMechanics::CmdSubUVAnimationGetInfo },
+		{ TEXT("subuv_animation_preview_probe"), &FUeAgentLegacyMechanics::CmdSubUVAnimationPreviewProbe },
+		{ TEXT("paper_sprite_create"), &FUeAgentLegacyMechanics::CmdPaperSpriteCreate },
+		{ TEXT("paper_flipbook_create"), &FUeAgentLegacyMechanics::CmdPaperFlipbookCreate },
+		{ TEXT("paper2d_preview_probe"), &FUeAgentLegacyMechanics::CmdPaper2DPreviewProbe },
+		{ TEXT("light_profile_texture_import"), &FUeAgentLegacyMechanics::CmdLightProfileTextureImport },
+		{ TEXT("light_profile_texture_get_info"), &FUeAgentLegacyMechanics::CmdLightProfileTextureGetInfo },
+		{ TEXT("light_profile_validate_setup"), &FUeAgentLegacyMechanics::CmdLightProfileValidateSetup },
+		{ TEXT("texture_collection_create"), &FUeAgentLegacyMechanics::CmdTextureCollectionCreate },
+		{ TEXT("texture_collection_get_info"), &FUeAgentLegacyMechanics::CmdTextureCollectionGetInfo },
+		{ TEXT("texture_collection_validate_usage"), &FUeAgentLegacyMechanics::CmdTextureCollectionValidateUsage },
+		{ TEXT("texture_usage_validate"), &FUeAgentLegacyMechanics::CmdTextureUsageValidate },
+		{ TEXT("texture_usage_get_references"), &FUeAgentLegacyMechanics::CmdTextureUsageGetReferences },
+		{ TEXT("texture_usage_probe_media"), &FUeAgentLegacyMechanics::CmdTextureUsageProbeMedia },
+		{ TEXT("texture_usage_probe_sparse_volume"), &FUeAgentLegacyMechanics::CmdTextureUsageProbeSparseVolume },
 	};
 
 	static FTextureCommandHandler FindTextureCommandHandler(const FString& CommandLower)
@@ -1067,7 +1067,7 @@ namespace
 
 bool GetReferencesForAsset(const FString& AssetPath, TArray<TSharedPtr<FJsonValue>>& OutReferencers);
 
-bool FUeAgentHttpServer::ExecuteTextureRenderTargetCommand(const FString& CommandLower, const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::ExecuteTextureRenderTargetCommand(const FString& CommandLower, const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	if (const FReflectionAuthoringCommandEntry* Entry = FindReflectionAuthoringCommand(CommandLower))
 	{
@@ -1092,7 +1092,7 @@ bool FUeAgentHttpServer::ExecuteTextureRenderTargetCommand(const FString& Comman
 	return false;
 }
 
-bool FUeAgentHttpServer::CmdTextureGetInfo(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdTextureGetInfo(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	using namespace UeAgentTextureOps;
 	FString AssetPath;
@@ -1120,7 +1120,7 @@ bool FUeAgentHttpServer::CmdTextureGetInfo(const FUeAgentRequestContext& Ctx, TS
 	return true;
 }
 
-bool FUeAgentHttpServer::CmdTextureReimport(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdTextureReimport(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	using namespace UeAgentTextureOps;
 	FString AssetPath;
@@ -1200,7 +1200,7 @@ bool FUeAgentHttpServer::CmdTextureReimport(const FUeAgentRequestContext& Ctx, T
 	return true;
 }
 
-bool FUeAgentHttpServer::CmdTextureValidateSettings(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdTextureValidateSettings(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	using namespace UeAgentTextureOps;
 	FString AssetPath;
@@ -1293,7 +1293,7 @@ bool FUeAgentHttpServer::CmdTextureValidateSettings(const FUeAgentRequestContext
 	return true;
 }
 
-bool FUeAgentHttpServer::CmdTexturePixelProbe(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdTexturePixelProbe(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	using namespace UeAgentTextureOps;
 	FString AssetPath;
@@ -1404,7 +1404,7 @@ bool FUeAgentHttpServer::CmdTexturePixelProbe(const FUeAgentRequestContext& Ctx,
 	return true;
 }
 
-bool FUeAgentHttpServer::CmdTextureExportImage(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdTextureExportImage(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	using namespace UeAgentTextureOps;
 	FString AssetPath;
@@ -1460,7 +1460,7 @@ bool FUeAgentHttpServer::CmdTextureExportImage(const FUeAgentRequestContext& Ctx
 	return true;
 }
 
-bool FUeAgentHttpServer::CmdTextureScreenshot(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdTextureScreenshot(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	if (!CmdTextureExportImage(Ctx, OutData, OutError))
 	{
@@ -1503,7 +1503,7 @@ bool FUeAgentHttpServer::CmdTextureScreenshot(const FUeAgentRequestContext& Ctx,
 	return true;
 }
 
-bool FUeAgentHttpServer::CmdTextureArrayCreate(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdTextureArrayCreate(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	using namespace UeAgentTextureOps;
 	FString AssetPath;
@@ -1565,17 +1565,17 @@ bool FUeAgentHttpServer::CmdTextureArrayCreate(const FUeAgentRequestContext& Ctx
 	return true;
 }
 
-bool FUeAgentHttpServer::CmdTextureArrayExportFolder(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdTextureArrayExportFolder(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	return UeAgentReflectionAuthoringCommandBridge::Export(TEXT("texture_array"), Ctx.Params, OutData, OutError);
 }
 
-bool FUeAgentHttpServer::CmdTextureArrayApplyFolder(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdTextureArrayApplyFolder(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	return UeAgentReflectionAuthoringCommandBridge::Apply(TEXT("texture_array"), Ctx.Params, OutData, OutError, Ctx.RequestId);
 }
 
-bool FUeAgentHttpServer::CmdTextureCubeCreate(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdTextureCubeCreate(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	using namespace UeAgentTextureOps;
 	FString AssetPath;
@@ -1684,17 +1684,17 @@ bool FUeAgentHttpServer::CmdTextureCubeCreate(const FUeAgentRequestContext& Ctx,
 	return true;
 }
 
-bool FUeAgentHttpServer::CmdTextureCubeExportFolder(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdTextureCubeExportFolder(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	return UeAgentReflectionAuthoringCommandBridge::Export(TEXT("texture_cube"), Ctx.Params, OutData, OutError);
 }
 
-bool FUeAgentHttpServer::CmdTextureCubeApplyFolder(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdTextureCubeApplyFolder(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	return UeAgentReflectionAuthoringCommandBridge::Apply(TEXT("texture_cube"), Ctx.Params, OutData, OutError, Ctx.RequestId);
 }
 
-bool FUeAgentHttpServer::CmdTextureCubeArrayCreate(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdTextureCubeArrayCreate(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	using namespace UeAgentTextureOps;
 	FString AssetPath;
@@ -1746,17 +1746,17 @@ bool FUeAgentHttpServer::CmdTextureCubeArrayCreate(const FUeAgentRequestContext&
 	return true;
 }
 
-bool FUeAgentHttpServer::CmdTextureCubeArrayExportFolder(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdTextureCubeArrayExportFolder(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	return UeAgentReflectionAuthoringCommandBridge::Export(TEXT("texture_cube_array"), Ctx.Params, OutData, OutError);
 }
 
-bool FUeAgentHttpServer::CmdTextureCubeArrayApplyFolder(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdTextureCubeArrayApplyFolder(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	return UeAgentReflectionAuthoringCommandBridge::Apply(TEXT("texture_cube_array"), Ctx.Params, OutData, OutError, Ctx.RequestId);
 }
 
-bool FUeAgentHttpServer::CmdVolumeTextureCreate(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdVolumeTextureCreate(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	using namespace UeAgentTextureOps;
 	FString AssetPath;
@@ -1890,17 +1890,17 @@ bool FUeAgentHttpServer::CmdVolumeTextureCreate(const FUeAgentRequestContext& Ct
 	return true;
 }
 
-bool FUeAgentHttpServer::CmdVolumeTextureExportFolder(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdVolumeTextureExportFolder(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	return UeAgentReflectionAuthoringCommandBridge::Export(TEXT("volume_texture"), Ctx.Params, OutData, OutError);
 }
 
-bool FUeAgentHttpServer::CmdVolumeTextureApplyFolder(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdVolumeTextureApplyFolder(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	return UeAgentReflectionAuthoringCommandBridge::Apply(TEXT("volume_texture"), Ctx.Params, OutData, OutError, Ctx.RequestId);
 }
 
-bool FUeAgentHttpServer::CmdVirtualTextureGetInfo(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdVirtualTextureGetInfo(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	using namespace UeAgentTextureOps;
 	if (!CmdTextureGetInfo(Ctx, OutData, OutError))
@@ -1918,7 +1918,7 @@ bool FUeAgentHttpServer::CmdVirtualTextureGetInfo(const FUeAgentRequestContext& 
 	return true;
 }
 
-bool FUeAgentHttpServer::CmdVirtualTextureValidateSetup(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdVirtualTextureValidateSetup(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	using namespace UeAgentTextureOps;
 	FString AssetPath;
@@ -1978,7 +1978,7 @@ bool FUeAgentHttpServer::CmdVirtualTextureValidateSetup(const FUeAgentRequestCon
 	return true;
 }
 
-bool FUeAgentHttpServer::CmdRuntimeVirtualTextureCreate(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdRuntimeVirtualTextureCreate(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	using namespace UeAgentTextureOps;
 	FString AssetPath;
@@ -2010,7 +2010,7 @@ bool FUeAgentHttpServer::CmdRuntimeVirtualTextureCreate(const FUeAgentRequestCon
 	return CmdRuntimeVirtualTextureGetInfo(Ctx, OutData, OutError);
 }
 
-bool FUeAgentHttpServer::CmdRuntimeVirtualTextureGetInfo(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdRuntimeVirtualTextureGetInfo(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	using namespace UeAgentTextureOps;
 	FString AssetPath;
@@ -2039,17 +2039,17 @@ bool FUeAgentHttpServer::CmdRuntimeVirtualTextureGetInfo(const FUeAgentRequestCo
 	return true;
 }
 
-bool FUeAgentHttpServer::CmdRuntimeVirtualTextureExportJson(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdRuntimeVirtualTextureExportJson(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	return UeAgentReflectionAuthoringCommandBridge::Export(TEXT("runtime_virtual_texture"), Ctx.Params, OutData, OutError);
 }
 
-bool FUeAgentHttpServer::CmdRuntimeVirtualTextureApplyJson(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdRuntimeVirtualTextureApplyJson(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	return UeAgentReflectionAuthoringCommandBridge::Apply(TEXT("runtime_virtual_texture"), Ctx.Params, OutData, OutError, Ctx.RequestId);
 }
 
-bool FUeAgentHttpServer::CmdRuntimeVirtualTextureValidateSetup(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdRuntimeVirtualTextureValidateSetup(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	using namespace UeAgentTextureOps;
 	if (!CmdRuntimeVirtualTextureGetInfo(Ctx, OutData, OutError))

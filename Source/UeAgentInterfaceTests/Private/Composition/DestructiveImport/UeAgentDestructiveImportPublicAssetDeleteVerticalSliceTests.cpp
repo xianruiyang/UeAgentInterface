@@ -14,7 +14,6 @@
 #include "ObjectTools.h"
 #include "Serialization/JsonSerializer.h"
 #include "Serialization/JsonWriter.h"
-#include "Server/UeAgentCommandRegistry.h"
 #include "TestSupport/UeAgentPublicCommandTestHarness.h"
 #include "UObject/Package.h"
 #include "UObject/SavePackage.h"
@@ -215,9 +214,15 @@ namespace
 		FString AssetName;
 	};
 
-	FString DeleteParams(const FString& TargetRef)
+	FString DeleteParams(
+		const FString& TargetRef,
+		const FString& AuthorizationId = FString())
 	{
-		return TEXT("{\"target_ref\":\"") + TargetRef + TEXT("\"}");
+		return TEXT("{\"target_ref\":\"") + TargetRef
+			+ (AuthorizationId.IsEmpty()
+				? TEXT("\"}")
+				: TEXT("\",\"destructive_authorization_id\":\"")
+					+ AuthorizationId + TEXT("\"}"));
 	}
 
 	bool TryParsePayload(
@@ -228,6 +233,40 @@ namespace
 			TJsonReaderFactory<>::Create(Result.GetPayloadJson());
 		return FJsonSerializer::Deserialize(Reader, OutPayload)
 			&& OutPayload.IsValid();
+	}
+
+	bool TryPlanAndInvokeDelete(
+		const FScopedPublicCommandComposition& Harness,
+		const FString& TargetRef,
+		TOptional<FUeAgentCommandResult>& OutResult,
+		FString& OutError)
+	{
+		if (!TryInvokeCommand(
+				Harness.GetRouteHost(), Harness.GetConfig(), TEXT("asset.delete"),
+				DeleteParams(TargetRef), OutResult, OutError)
+			|| !OutResult.IsSet()
+			|| !OutResult->IsOk())
+		{
+			return false;
+		}
+		TSharedPtr<FJsonObject> PlanPayload;
+		FString TerminalStatus;
+		FString AuthorizationId;
+		if (!TryParsePayload(OutResult.GetValue(), PlanPayload)
+			|| !PlanPayload->TryGetStringField(
+				TEXT("terminal_status"), TerminalStatus)
+			|| TerminalStatus != TEXT("planned")
+			|| !PlanPayload->TryGetStringField(
+				TEXT("destructive_authorization_id"), AuthorizationId)
+			|| AuthorizationId.IsEmpty())
+		{
+			OutError = TEXT("asset_delete_plan_contract_invalid");
+			return false;
+		}
+		return TryInvokeCommand(
+			Harness.GetRouteHost(), Harness.GetConfig(), TEXT("asset.delete"),
+			DeleteParams(TargetRef, AuthorizationId), OutResult, OutError)
+			&& OutResult.IsSet();
 	}
 }
 
@@ -263,19 +302,14 @@ bool FUeAgentDestructiveImportPublicAssetDeleteVerticalSliceTest::RunTest(
 		return false;
 	}
 
-	TestNull(TEXT("retired exact legacy asset-delete owner is absent"),
-		UeAgentCommandRegistry::FindExactCommandInvoker(TEXT("asset_delete")));
-	TestNull(TEXT("retired prefix legacy asset-delete owner is absent"),
-		UeAgentCommandRegistry::FindPrefixedCommandInvoker(TEXT("asset_delete")));
-	TestTrue(TEXT("retired legacy asset-delete command fails closed"),
-		UeAgentCommandRegistry::IsExplicitlyUnsupportedCommand(TEXT("asset_delete")));
+	TestNull(TEXT("retired asset-delete command is absent from formal registry"),
+		Harness.GetCommandRegistry()->FindExact(TEXT("asset_delete")));
 
 	TOptional<FUeAgentCommandResult> MissingResult;
 	const FString MissingTarget = Fixture.GetPackageName() + TEXT("_Missing");
 	if (!TestTrue(TEXT("missing target reaches the formal asset-delete handler"),
-			TryInvokeCommand(
-				Harness.GetRouteHost(), Harness.GetConfig(), TEXT("asset.delete"),
-				DeleteParams(MissingTarget), MissingResult, Error))
+			TryPlanAndInvokeDelete(
+				Harness, MissingTarget, MissingResult, Error))
 		|| !MissingResult.IsSet())
 	{
 		AddError(Error);
@@ -286,9 +320,8 @@ bool FUeAgentDestructiveImportPublicAssetDeleteVerticalSliceTest::RunTest(
 		MissingResult->IsOk());
 	TestTrue(TEXT("missing target reports rolled_back terminal state"),
 		TryParsePayload(MissingResult.GetValue(), MissingPayload)
-			&& MissingPayload->GetStringField(TEXT("terminal_state"))
+			&& MissingPayload->GetStringField(TEXT("terminal_status"))
 				== TEXT("rolled_back")
-			&& MissingPayload->GetStringField(TEXT("target_ref")) == MissingTarget
 			&& MissingResult->GetErrorJson().Contains(
 				TEXT("asset_delete_target_missing")));
 	TestTrue(TEXT("failed delete leaves the owned fixture durably unchanged"),
@@ -296,9 +329,8 @@ bool FUeAgentDestructiveImportPublicAssetDeleteVerticalSliceTest::RunTest(
 
 	TOptional<FUeAgentCommandResult> DeleteResult;
 	if (!TestTrue(TEXT("public asset-delete enters the formal command service"),
-			TryInvokeCommand(
-				Harness.GetRouteHost(), Harness.GetConfig(), TEXT("asset.delete"),
-				DeleteParams(Fixture.GetPackageName()), DeleteResult, Error))
+			TryPlanAndInvokeDelete(
+				Harness, Fixture.GetPackageName(), DeleteResult, Error))
 		|| !DeleteResult.IsSet())
 	{
 		AddError(Error);
@@ -308,11 +340,10 @@ bool FUeAgentDestructiveImportPublicAssetDeleteVerticalSliceTest::RunTest(
 	if (!TestTrue(TEXT("public asset-delete commits exactly one owned target"),
 			DeleteResult->IsOk()
 				&& TryParsePayload(DeleteResult.GetValue(), DeletePayload)
-				&& DeletePayload->GetBoolField(TEXT("deleted"))
-				&& DeletePayload->GetStringField(TEXT("terminal_state"))
+				&& DeletePayload->GetStringField(TEXT("terminal_status"))
 					== TEXT("committed")
-				&& DeletePayload->GetStringField(TEXT("target_ref"))
-					== Fixture.GetPackageName()))
+				&& !DeletePayload->GetStringField(
+					TEXT("plan_fingerprint")).IsEmpty()))
 	{
 		AddError(DeleteResult->GetErrorJson());
 		return false;

@@ -1,4 +1,4 @@
-#include "Server/UeAgentHttpServer.h"
+#include "LegacyMechanics/UeAgentLegacyMechanics.h"
 
 #include "UeAgentHttpServer_AIOps.h"
 
@@ -126,7 +126,7 @@ namespace UeAgentAIOps
 	}
 }
 
-bool FUeAgentHttpServer::CmdAIPerceptionGetComponentInfo(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdAIPerceptionGetComponentInfo(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	UWorld* World = GetEditorWorld(OutError);
 	if (!World)
@@ -149,7 +149,7 @@ bool FUeAgentHttpServer::CmdAIPerceptionGetComponentInfo(const FUeAgentRequestCo
 	return true;
 }
 
-bool FUeAgentHttpServer::CmdAIPerceptionValidateSetup(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdAIPerceptionValidateSetup(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	OutData = MakeShared<FJsonObject>();
 	TArray<TSharedPtr<FJsonValue>> Issues;
@@ -219,7 +219,7 @@ bool FUeAgentHttpServer::CmdAIPerceptionValidateSetup(const FUeAgentRequestConte
 	return Issues.Num() == 0;
 }
 
-bool FUeAgentHttpServer::CmdAIPerceptionRuntimeSnapshot(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdAIPerceptionRuntimeSnapshot(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	UWorld* World = GetEditorWorld(OutError);
 	if (!World)
@@ -280,7 +280,7 @@ bool FUeAgentHttpServer::CmdAIPerceptionRuntimeSnapshot(const FUeAgentRequestCon
 	return true;
 }
 
-bool FUeAgentHttpServer::CmdAIPerceptionRuntimeProbe(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdAIPerceptionRuntimeProbe(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	if (!CmdAIPerceptionRuntimeSnapshot(Ctx, OutData, OutError))
 	{
@@ -348,7 +348,7 @@ bool FUeAgentHttpServer::CmdAIPerceptionRuntimeProbe(const FUeAgentRequestContex
 	return true;
 }
 
-bool FUeAgentHttpServer::CmdNavigationGetInfo(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdNavigationGetInfo(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	UWorld* World = GetEditorWorld(OutError);
 	if (!World)
@@ -397,7 +397,7 @@ bool FUeAgentHttpServer::CmdNavigationGetInfo(const FUeAgentRequestContext& Ctx,
 	return true;
 }
 
-bool FUeAgentHttpServer::CmdNavigationExportConfigJson(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdNavigationExportConfigJson(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	if (!CmdNavigationGetInfo(Ctx, OutData, OutError))
 	{
@@ -418,7 +418,7 @@ bool FUeAgentHttpServer::CmdNavigationExportConfigJson(const FUeAgentRequestCont
 	return true;
 }
 
-bool FUeAgentHttpServer::CmdNavigationValidateLevel(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdNavigationValidateLevel(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	const TArray<TSharedPtr<FJsonValue>>* SamplePoints = nullptr;
 	if (Ctx.Params->TryGetArrayField(TEXT("points"), SamplePoints) || Ctx.Params->TryGetArrayField(TEXT("nodes"), SamplePoints) || Ctx.Params->TryGetArrayField(TEXT("sample_points"), SamplePoints))
@@ -458,7 +458,7 @@ bool FUeAgentHttpServer::CmdNavigationValidateLevel(const FUeAgentRequestContext
 	return Issues.Num() == 0;
 }
 
-bool FUeAgentHttpServer::CmdNavigationPathProbe(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdNavigationPathProbe(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	const TArray<TSharedPtr<FJsonValue>>* Targets = nullptr;
 	if (!Ctx.Params->TryGetArrayField(TEXT("targets"), Targets) || !Targets)
@@ -514,7 +514,7 @@ bool FUeAgentHttpServer::CmdNavigationPathProbe(const FUeAgentRequestContext& Ct
 	return true;
 }
 
-bool FUeAgentHttpServer::CmdNavigationAreaCostProbe(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdNavigationAreaCostProbe(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	bool bRunPathProbe = Ctx.Params->HasField(TEXT("start")) && (Ctx.Params->HasField(TEXT("end")) || Ctx.Params->HasField(TEXT("target")));
 	JsonTryGetBool(Ctx.Params, TEXT("run_path_probe"), bRunPathProbe);
@@ -559,7 +559,7 @@ bool FUeAgentHttpServer::CmdNavigationAreaCostProbe(const FUeAgentRequestContext
 	return true;
 }
 
-bool FUeAgentHttpServer::CmdNavigationRuntimeSnapshot(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdNavigationRuntimeSnapshot(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	return CmdNavigationGetInfo(Ctx, OutData, OutError);
 }

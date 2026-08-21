@@ -1,5 +1,6 @@
 #include "Core/HjsonWorkspace/DomainAuthoring/UeAgentDomainHjsonAuthoringKit.h"
 
+#include "Algo/Unique.h"
 #include "Core/Contract/UeAgentCommandJson.h"
 #include "Core/StateSemantic/UeAgentCanonicalValueJson.h"
 #include "DomainAdapters/ContentGraphRead/UeAgentContentGraphReadProductionEnvironment.h"
@@ -21,6 +22,22 @@ namespace UE::UAI::HjsonWorkspace::DomainAuthoring
 		{
 			OutError.Set(MoveTemp(Code), MoveTemp(Source), MoveTemp(Pointer));
 			return false;
+		}
+
+		bool IsSha256(const FString& Value)
+		{
+			if (!Value.StartsWith(TEXT("sha256:")) || Value.Len() != 71)
+			{
+				return false;
+			}
+			for (int32 Index = 7; Index < Value.Len(); ++Index)
+			{
+				if (!FChar::IsHexDigit(Value[Index]))
+				{
+					return false;
+				}
+			}
+			return true;
 		}
 
 		FUeAgentResourceTracker MakeResources()
@@ -112,6 +129,21 @@ namespace UE::UAI::HjsonWorkspace::DomainAuthoring
 				State.AuthoredPresence
 					== StateSemantic::EUeAgentAuthoredPresence::Present);
 		}
+
+		void AddCanonicalState(
+			const StateSemantic::FUeAgentCanonicalValuePtr& State,
+			const TSharedPtr<FJsonObject>& Value)
+		{
+			FString ConversionError;
+			TSharedPtr<FJsonValue> StateValue;
+			if (State.IsValid()
+				&& StateSemantic::CanonicalJson::TryToJsonValue(
+					*State, StateValue, ConversionError)
+				&& StateValue.IsValid())
+			{
+				Value->SetField(TEXT("value"), StateValue);
+			}
+		}
 	}
 
 	FDomainHjsonDocumentContract::FDomainHjsonDocumentContract(
@@ -122,13 +154,68 @@ namespace UE::UAI::HjsonWorkspace::DomainAuthoring
 		, SchemaId(MoveTemp(InSchemaId))
 		, RootTypeIdentity(MoveTemp(InRootTypeIdentity))
 	{
+		RootTypeIdentities.Add(RootTypeIdentity);
+	}
+
+	FDomainHjsonDocumentContract::FDomainHjsonDocumentContract(
+		FString InDomainId,
+		FString InSchemaId,
+		TArray<FString> InRootTypeIdentities)
+		: DomainId(MoveTemp(InDomainId))
+		, SchemaId(MoveTemp(InSchemaId))
+		, RootTypeIdentities(MoveTemp(InRootTypeIdentities))
+	{
+		RootTypeIdentities.RemoveAll(
+			[](const FString& Identity)
+			{
+				return Identity.TrimStartAndEnd().IsEmpty();
+			});
+		RootTypeIdentities.Sort();
+		RootTypeIdentities.SetNum(
+			Algo::Unique(RootTypeIdentities), EAllowShrinking::No);
+		if (!RootTypeIdentities.IsEmpty())
+		{
+			RootTypeIdentity = RootTypeIdentities[0];
+		}
 	}
 
 	bool FDomainHjsonDocumentContract::IsValid() const
 	{
 		return !DomainId.IsEmpty()
 			&& !SchemaId.IsEmpty()
-			&& !RootTypeIdentity.IsEmpty();
+			&& !RootTypeIdentities.IsEmpty();
+	}
+
+	bool FDomainHjsonDocumentContract::SupportsRootType(
+		const FString& InRootTypeIdentity) const
+	{
+		return RootTypeIdentities.Contains(InRootTypeIdentity);
+	}
+
+	bool FDomainHjsonImportLifecycleReceipt::IsComplete() const
+	{
+		return bMutationApplied
+			&& bCompileSettled
+			&& bPackageSaved
+			&& bUnloadedReloaded
+			&& !PersistenceReceiptId.TrimStartAndEnd().IsEmpty();
+	}
+
+	bool FDomainHjsonCandidateBinding::IsValid() const
+	{
+		return !Name.TrimStartAndEnd().IsEmpty()
+			&& !Kind.TrimStartAndEnd().IsEmpty()
+			&& !SupportedOperations.IsEmpty()
+			&& !InputContract.TrimStartAndEnd().IsEmpty()
+			&& !PlacementContract.TrimStartAndEnd().IsEmpty()
+			&& !RequiredContext.TrimStartAndEnd().IsEmpty()
+			&& !BindingRevision.TrimStartAndEnd().IsEmpty();
+	}
+
+	bool FDomainHjsonCandidateBinding::SupportsOperation(
+		const FString& Operation) const
+	{
+		return SupportedOperations.Contains(Operation);
 	}
 
 	bool TryDecodeResolvedDocument(
@@ -162,8 +249,13 @@ namespace UE::UAI::HjsonWorkspace::DomainAuthoring
 		FString ExpectedRevision;
 		const TSharedPtr<FJsonObject>* Source = nullptr;
 		FString Kind;
+		FString Carrier;
+		FString SourceUnit;
 		FString SourceTarget;
+		FString BaseRevision;
 		FString EntryFile;
+		FString SourceFingerprint;
+		FString SemanticFingerprint;
 		const TArray<TSharedPtr<FJsonValue>>* Documents = nullptr;
 		if (!Params->TryGetStringField(TEXT("target"), Target)
 			|| Target.IsEmpty()
@@ -179,9 +271,19 @@ namespace UE::UAI::HjsonWorkspace::DomainAuthoring
 			|| !Source || !Source->IsValid()
 			|| !(*Source)->TryGetStringField(TEXT("kind"), Kind)
 			|| Kind != TEXT("resolved")
+			|| !(*Source)->TryGetStringField(TEXT("carrier"), Carrier)
+			|| !(*Source)->TryGetStringField(TEXT("source_unit"), SourceUnit)
+			|| SourceUnit.IsEmpty()
 			|| !(*Source)->TryGetStringField(TEXT("target_identity"), SourceTarget)
+			|| !(*Source)->TryGetStringField(TEXT("base_revision"), BaseRevision)
 			|| !(*Source)->TryGetStringField(TEXT("entry_file"), EntryFile)
 			|| EntryFile.IsEmpty()
+			|| !(*Source)->TryGetStringField(
+				TEXT("source_fingerprint"), SourceFingerprint)
+			|| !(*Source)->TryGetStringField(
+				TEXT("semantic_fingerprint"), SemanticFingerprint)
+			|| !IsSha256(SourceFingerprint)
+			|| !IsSha256(SemanticFingerprint)
 			|| !(*Source)->TryGetArrayField(TEXT("documents"), Documents)
 			|| !Documents || Documents->IsEmpty())
 		{
@@ -192,6 +294,23 @@ namespace UE::UAI::HjsonWorkspace::DomainAuthoring
 			return Fail(
 				OutError, TEXT("domain_hjson_target_identity_mismatch"), SourceTarget);
 		}
+		if (Carrier == TEXT("directory"))
+		{
+			if (BaseRevision != ExpectedRevision)
+			{
+				return Fail(
+					OutError,
+					TEXT("domain_hjson_base_revision_mismatch"),
+					BaseRevision);
+			}
+		}
+		else if ((Carrier != TEXT("inline")
+				&& Carrier != TEXT("single_file"))
+			|| !BaseRevision.IsEmpty())
+		{
+			return Fail(
+				OutError, TEXT("domain_hjson_resolved_source_invalid"), Carrier);
+		}
 		FString DocumentText;
 		int32 EntryMatches = 0;
 		for (const TSharedPtr<FJsonValue>& Value : *Documents)
@@ -200,14 +319,17 @@ namespace UE::UAI::HjsonWorkspace::DomainAuthoring
 				Value.IsValid() ? Value->AsObject() : nullptr;
 			FString Path;
 			FString Text;
+			FString ContentHash;
 			if (!Document.IsValid()
 				|| !Document->TryGetStringField(TEXT("path"), Path)
-				|| !Document->TryGetStringField(TEXT("document"), Text))
+				|| !Document->TryGetStringField(TEXT("document"), Text)
+				|| !Document->TryGetStringField(TEXT("content_hash"), ContentHash)
+				|| !IsSha256(ContentHash))
 			{
 				return Fail(
 					OutError, TEXT("domain_hjson_resolved_source_invalid"));
 			}
-			if (Path == EntryFile)
+			if (Path.Equals(EntryFile, ESearchCase::IgnoreCase))
 			{
 				DocumentText = MoveTemp(Text);
 				++EntryMatches;
@@ -258,14 +380,19 @@ namespace UE::UAI::HjsonWorkspace::DomainAuthoring
 		{
 			return Fail(OutError, TEXT("domain_hjson_root_missing"));
 		}
-		if (RootType != Contract.RootTypeIdentity)
+		if (!Contract.SupportsRootType(RootType))
 		{
 			return Fail(
 				OutError, TEXT("domain_hjson_root_type_mismatch"), RootType);
 		}
 		OutDocument.TargetIdentity = MoveTemp(Target);
 		OutDocument.ExpectedRevision = MoveTemp(ExpectedRevision);
+		OutDocument.Carrier = MoveTemp(Carrier);
+		OutDocument.SourceUnit = MoveTemp(SourceUnit);
+		OutDocument.BaseRevision = MoveTemp(BaseRevision);
 		OutDocument.EntryFile = MoveTemp(EntryFile);
+		OutDocument.SourceFingerprint = MoveTemp(SourceFingerprint);
+		OutDocument.SemanticFingerprint = MoveTemp(SemanticFingerprint);
 		OutDocument.Params = MoveTemp(Params);
 		OutDocument.Root = *Root;
 		return true;
@@ -281,9 +408,45 @@ namespace UE::UAI::HjsonWorkspace::DomainAuthoring
 			: TargetIdentity + TEXT(".") + AssetName;
 	}
 
+	bool TryInspectObjectTargetPresence(
+		const FString& TargetIdentity,
+		bool& bOutPresent)
+	{
+		bOutPresent = false;
+		const FString PackageIdentity = TargetIdentity.Contains(TEXT("."))
+			? FPackageName::ObjectPathToPackageName(TargetIdentity)
+			: TargetIdentity;
+		if (!FPackageName::IsValidLongPackageName(PackageIdentity))
+		{
+			return false;
+		}
+
+		bOutPresent = StaticFindObject(
+			UObject::StaticClass(),
+			nullptr,
+			*ObjectPathFromPackageIdentity(TargetIdentity)) != nullptr
+			|| FPackageName::DoesPackageExist(PackageIdentity);
+		return true;
+	}
+
 	bool TryCaptureObject(
 		const FString& TargetIdentity,
 		const FString& ExpectedRootTypeIdentity,
+		UObject*& OutObject,
+		FUeAgentContentGraphCapture& OutCapture,
+		FWorkspaceError& OutError)
+	{
+		return TryCaptureObject(
+			TargetIdentity,
+			TArray<FString>{ExpectedRootTypeIdentity},
+			OutObject,
+			OutCapture,
+			OutError);
+	}
+
+	bool TryCaptureObject(
+		const FString& TargetIdentity,
+		const TArray<FString>& ExpectedRootTypeIdentities,
 		UObject*& OutObject,
 		FUeAgentContentGraphCapture& OutCapture,
 		FWorkspaceError& OutError)
@@ -297,7 +460,8 @@ namespace UE::UAI::HjsonWorkspace::DomainAuthoring
 				OutError, TEXT("domain_hjson_target_unresolved"), TargetIdentity);
 		}
 		if (!OutObject->GetClass()
-			|| OutObject->GetClass()->GetPathName() != ExpectedRootTypeIdentity)
+			|| !ExpectedRootTypeIdentities.Contains(
+				OutObject->GetClass()->GetPathName()))
 		{
 			return Fail(
 				OutError, TEXT("domain_hjson_target_type_mismatch"),
@@ -363,6 +527,7 @@ namespace UE::UAI::HjsonWorkspace::DomainAuthoring
 			Value->SetStringField(TEXT("class_path"), Item.ClassPath);
 			Value->SetStringField(TEXT("container_id"), Item.ContainerId);
 			Value->SetNumberField(TEXT("order"), Item.Order);
+			AddCanonicalState(Item.State, Value);
 			Items.Add(MakeShared<FJsonValueObject>(Value));
 		}
 		Result->SetArrayField(TEXT("items"), MoveTemp(Items));
@@ -443,10 +608,48 @@ namespace UE::UAI::HjsonWorkspace::DomainAuthoring
 		return true;
 	}
 
+	void SetWorkspaceErrorFromCommandFailure(
+		const FString& ErrorJson,
+		FString FallbackCode,
+		FString FallbackSubject,
+		FWorkspaceError& OutError)
+	{
+		TSharedPtr<FJsonObject> ErrorObject;
+		FString ParseError;
+		if (CommandContract::Json::TryParseObject(
+				ErrorJson, ErrorObject, ParseError)
+			&& ErrorObject.IsValid())
+		{
+			FString Code;
+			FString Subject;
+			FString Detail;
+			ErrorObject->TryGetStringField(TEXT("code"), Code);
+			ErrorObject->TryGetStringField(TEXT("subject_id"), Subject);
+			ErrorObject->TryGetStringField(TEXT("detail"), Detail);
+			Code.TrimStartAndEndInline();
+			Subject.TrimStartAndEndInline();
+			if (!Code.IsEmpty())
+			{
+				OutError.Set(
+					MoveTemp(Code),
+					Subject.IsEmpty()
+						? MoveTemp(FallbackSubject)
+						: MoveTemp(Subject),
+					Detail.IsEmpty() ? TEXT("/") : MoveTemp(Detail));
+				return;
+			}
+		}
+		OutError.Set(
+			MoveTemp(FallbackCode),
+			MoveTemp(FallbackSubject),
+			ErrorJson.IsEmpty() ? MoveTemp(ParseError) : ErrorJson);
+	}
+
 	bool TryBuildImportSuccessPayload(
 		const FString& ProviderId,
 		const FString& TargetIdentity,
 		const FString& Revision,
+		const FDomainHjsonImportLifecycleReceipt& LifecycleReceipt,
 		const TSharedPtr<FJsonObject>& IndependentReadback,
 		const TSharedPtr<FJsonObject>& Mutation,
 		FString& OutPayloadJson,
@@ -459,18 +662,90 @@ namespace UE::UAI::HjsonWorkspace::DomainAuthoring
 		{
 			return Fail(OutError, TEXT("domain_hjson_result_identity_invalid"));
 		}
+		if (!LifecycleReceipt.IsComplete())
+		{
+			return Fail(
+				OutError, TEXT("domain_hjson_lifecycle_receipt_incomplete"));
+		}
 		const TSharedPtr<FJsonObject> Result = MakeShared<FJsonObject>();
+		Result->SetStringField(
+			TEXT("command_id"), TEXT("content_graph.import_workspace"));
 		Result->SetStringField(TEXT("terminal_status"), TEXT("succeeded"));
 		Result->SetStringField(TEXT("provider_id"), ProviderId);
 		Result->SetStringField(TEXT("target"), TargetIdentity);
 		Result->SetStringField(TEXT("revision"), Revision);
-		Result->SetBoolField(TEXT("saved"), true);
-		Result->SetBoolField(TEXT("reloaded"), true);
+		Result->SetBoolField(
+			TEXT("mutation_applied"), LifecycleReceipt.bMutationApplied);
+		Result->SetBoolField(
+			TEXT("compile_settled"), LifecycleReceipt.bCompileSettled);
+		Result->SetBoolField(TEXT("saved"), LifecycleReceipt.bPackageSaved);
+		Result->SetBoolField(
+			TEXT("reloaded"), LifecycleReceipt.bUnloadedReloaded);
+		Result->SetStringField(
+			TEXT("persistence_receipt_id"),
+			LifecycleReceipt.PersistenceReceiptId);
 		Result->SetObjectField(TEXT("independent_readback"), IndependentReadback);
 		if (Mutation.IsValid())
 		{
 			Result->SetObjectField(TEXT("mutation"), Mutation);
 		}
 		return TryCanonicalizeObject(Result, OutPayloadJson, OutError);
+	}
+
+	bool TryReadCandidateBinding(
+		const TSharedPtr<FJsonObject>& Candidate,
+		const FString& JsonPointer,
+		FDomainHjsonCandidateBinding& OutBinding,
+		FWorkspaceError& OutError)
+	{
+		OutBinding = {};
+		const TArray<TSharedPtr<FJsonValue>>* Operations = nullptr;
+		if (!Candidate.IsValid()
+			|| !Candidate->TryGetStringField(TEXT("name"), OutBinding.Name)
+			|| !Candidate->TryGetStringField(TEXT("kind"), OutBinding.Kind)
+			|| !Candidate->TryGetArrayField(
+				TEXT("supported_operations"), Operations)
+			|| !Operations
+			|| !Candidate->TryGetStringField(
+				TEXT("input_contract"), OutBinding.InputContract)
+			|| !Candidate->TryGetStringField(
+				TEXT("placement_contract"), OutBinding.PlacementContract)
+			|| !Candidate->TryGetStringField(
+				TEXT("required_context"), OutBinding.RequiredContext)
+			|| !Candidate->TryGetStringField(
+				TEXT("binding_revision"), OutBinding.BindingRevision))
+		{
+			return Fail(
+				OutError,
+				TEXT("domain_hjson_candidate_binding_invalid"),
+				FString(),
+				JsonPointer);
+		}
+		for (const TSharedPtr<FJsonValue>& Value : *Operations)
+		{
+			FString Operation;
+			if (!Value.IsValid()
+				|| !Value->TryGetString(Operation)
+				|| Operation.TrimStartAndEnd().IsEmpty()
+				|| OutBinding.SupportedOperations.Contains(Operation))
+			{
+				return Fail(
+					OutError,
+					TEXT("domain_hjson_candidate_binding_invalid"),
+					OutBinding.Name,
+					JsonPointer + TEXT("/supported_operations"));
+			}
+			OutBinding.SupportedOperations.Add(MoveTemp(Operation));
+		}
+		if (!OutBinding.IsValid())
+		{
+			return Fail(
+				OutError,
+				TEXT("domain_hjson_candidate_binding_invalid"),
+				OutBinding.Name,
+				JsonPointer);
+		}
+		OutError.Reset();
+		return true;
 	}
 }

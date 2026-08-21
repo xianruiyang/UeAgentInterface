@@ -1,8 +1,8 @@
 #include "DomainAdapters/Reference/UeAgentReferenceMechanicsBoundary.h"
 
-#include "Composition/UeAgentQueryServiceComposition.h"
-#include "Core/Contract/UeAgentCommandJson.h"
 #include "Core/BindingGateway/Ticket/UeAgentBindingTicket.h"
+#include "Core/Contract/UeAgentCommandJson.h"
+#include "Core/Contract/UeAgentDescriptorRegistry.h"
 #include "DomainAdapters/GenericRead/UeAgentGenericReadAdapter.h"
 #include "DomainAdapters/ReferenceAsset/UeAgentReferenceAssetAdapter.h"
 #include "Dom/JsonObject.h"
@@ -19,14 +19,48 @@ namespace UE::UAI::DomainAdapters::Reference
 	using namespace CommandEdge;
 	using namespace BindingGateway::Ticket;
 	using namespace Composition::ReferenceCrud;
-	using namespace ContextResource;
 	using namespace Contract;
 	using namespace DomainAdapters::GenericRead;
 	using namespace DomainAdapters::ReferenceAsset;
-	using namespace Composition::ReferenceCrud;
 
 	namespace
 	{
+		const FString ReferenceOperationDescriptorId =
+			TEXT("uai.operation.reference.crud");
+		const FString ReferenceOperationDescriptorHash =
+			TEXT("sha256:fbde900ec387e61915a21e97ae5575a85337b3866d4299be961f75a5fc888491");
+
+		FUeAgentDescriptorIdentity GetReferenceOperationDescriptorIdentity()
+		{
+			return FUeAgentDescriptorIdentity(
+				ReferenceOperationDescriptorId,
+				1,
+				ReferenceOperationDescriptorHash);
+		}
+
+		bool TryCreateReferenceOperationDescriptorRegistry(
+			TSharedPtr<const FUeAgentDescriptorRegistry>& OutRegistry,
+			FString& OutError)
+		{
+			return FUeAgentDescriptorRegistry::TryCreate(
+				{
+					FUeAgentOperationDescriptor(
+						GetReferenceOperationDescriptorIdentity(),
+						TEXT("reference.asset_apply"),
+						TEXT("reference"),
+						EUeAgentDescriptorOperationKind::Operation,
+						FUeAgentExecutionContextPolicy(
+							{EUeAgentStatePlane::Persisted},
+							{},
+							EUeAgentContextResolutionPolicy::ExplicitOnly,
+							EUeAgentTransientContextPolicy::ReadOnly),
+						FUeAgentContractValue(TEXT("{\"type\":\"object\"}")),
+						FUeAgentContractValue(TEXT("{\"type\":\"object\"}"))),
+				},
+				OutRegistry,
+				OutError);
+		}
+
 		FString ErrorJson(
 			const FString& Code,
 			const FString& Subject,
@@ -138,7 +172,7 @@ namespace UE::UAI::DomainAdapters::Reference
 		OutApplication.Reset();
 		OutError.Reset();
 		TSharedPtr<const FUeAgentDescriptorRegistry> Descriptors;
-		if (!Composition::TryCreateReferenceOperationDescriptorRegistry(
+		if (!TryCreateReferenceOperationDescriptorRegistry(
 				Descriptors,
 				OutError)
 			|| !Descriptors.IsValid())
@@ -171,8 +205,7 @@ namespace UE::UAI::DomainAdapters::Reference
 				ReadHook);
 
 		FUeAgentReferenceCrudApplicationConfig Config;
-		Config.OperationDescriptor =
-			Composition::GetReferenceOperationDescriptorIdentity();
+		Config.OperationDescriptor = GetReferenceOperationDescriptorIdentity();
 		Config.OperationDescriptorRegistry = Descriptors;
 		Config.ExecutionContext.ProjectInstanceId = TEXT("project:")
 			+ FString(FApp::GetProjectName());

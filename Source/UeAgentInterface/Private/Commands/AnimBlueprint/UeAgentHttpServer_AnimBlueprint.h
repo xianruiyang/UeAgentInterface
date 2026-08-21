@@ -6,5 +6,5 @@
 // The actual member declarations live in `UeAgentHttpServer_AnimBlueprintMembers.h`
 // and are included from within `UeAgentHttpServer.h`.
 
-#include "Server/UeAgentHttpServer.h"
+#include "LegacyMechanics/UeAgentLegacyMechanics.h"
 

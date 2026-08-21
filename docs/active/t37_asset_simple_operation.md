@@ -10,9 +10,10 @@ scope declared by this adapter, and forwards one request to the
 process-owned SimpleAuthoring Operation application. That lazy host creates at
 most one runtime after the Editor world exists and survives transport or
 CommandService reconstruction. The existing AssetData simple-effect code is an
-internal UE-mechanics dependency only; it is no longer a public route, registry,
-handler, contract, test, or documentation authority and is physically considered
-for removal only by `T90` after all consumers have exited.
+internal UE-mechanics dependency of the current owner only; it is not a public
+route, registry, handler, contract, test, or documentation authority. T44 removed
+the compiled legacy registry/HTTP handler and verified that this retained
+mechanics dependency cannot be reached through an old public identity.
 
 This scope mapping is not destructive authorization and cannot authorize a
 delete, move, cleanup or any command outside the exact 52-command slice.

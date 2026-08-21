@@ -13,7 +13,7 @@
 #include "Dom/JsonObject.h"
 #include "Dom/JsonValue.h"
 
-bool FUeAgentHttpServer::CmdLevelContentMergeJson(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdLevelContentMergeJson(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	TSharedPtr<FJsonObject> Base;
 	TSharedPtr<FJsonObject> Current;
@@ -31,7 +31,7 @@ bool FUeAgentHttpServer::CmdLevelContentMergeJson(const FUeAgentRequestContext& 
 	return true;
 }
 
-bool FUeAgentHttpServer::CmdLevelContentRepairJson(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdLevelContentRepairJson(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	UWorld* World = GetEditorWorld(OutError);
 	if (!World)
@@ -63,32 +63,32 @@ bool FUeAgentHttpServer::CmdLevelContentRepairJson(const FUeAgentRequestContext&
 	return true;
 }
 
-bool FUeAgentHttpServer::CmdLevelContentQueryJson(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdLevelContentQueryJson(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	return ExecuteLevelContentQueryJsonInternal(Ctx, OutData, OutError, false);
 }
 
-bool FUeAgentHttpServer::CmdLevelContentValidateJson(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdLevelContentValidateJson(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	return ExecuteLevelContentValidateJsonInternal(Ctx, OutData, OutError, false);
 }
 
-bool FUeAgentHttpServer::CmdLevelContentApplyJson(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdLevelContentApplyJson(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	return ExecuteLevelContentApplyJsonInternal(Ctx, OutData, OutError, false);
 }
 
-bool FUeAgentHttpServer::CmdLevelContentDiffJson(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdLevelContentDiffJson(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	return ExecuteLevelContentDiffJsonInternal(Ctx, OutData, OutError, false);
 }
 
-bool FUeAgentHttpServer::CmdLevelContentSnapshotJson(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdLevelContentSnapshotJson(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	return ExecuteLevelContentSnapshotJsonInternal(Ctx, OutData, OutError, false);
 }
 
-bool FUeAgentHttpServer::CmdLevelExportFolder(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdLevelExportFolder(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	OutData = MakeShared<FJsonObject>();
 	UWorld* World = GetEditorWorld(OutError);
@@ -133,7 +133,7 @@ bool FUeAgentHttpServer::CmdLevelExportFolder(const FUeAgentRequestContext& Ctx,
 	return bExported;
 }
 
-bool FUeAgentHttpServer::CmdLevelApplyFolder(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdLevelApplyFolder(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	OutData = MakeShared<FJsonObject>();
 	UWorld* World = GetEditorWorld(OutError);
@@ -171,7 +171,7 @@ bool FUeAgentHttpServer::CmdLevelApplyFolder(const FUeAgentRequestContext& Ctx, 
 	return bApplied;
 }
 
-bool FUeAgentHttpServer::CmdLevelValidateFolder(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdLevelValidateFolder(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	UeAgentLevelFolderValidate::FValidateOptions Options;
 	if (Ctx.Params.IsValid())
@@ -185,7 +185,7 @@ bool FUeAgentHttpServer::CmdLevelValidateFolder(const FUeAgentRequestContext& Ct
 	return UeAgentLevelFolderValidate::ValidateLevelFolder(Options, OutData, OutError);
 }
 
-bool FUeAgentHttpServer::CmdLevelDiffFolder(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdLevelDiffFolder(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	UeAgentLevelFolderDiff::FDiffOptions Options;
 	if (Ctx.Params.IsValid())
@@ -208,27 +208,27 @@ bool FUeAgentHttpServer::CmdLevelDiffFolder(const FUeAgentRequestContext& Ctx, T
 	return UeAgentLevelFolderDiff::DiffLevelFolders(Options, OutData, OutError);
 }
 
-bool FUeAgentHttpServer::CmdLevelActorExportJson(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdLevelActorExportJson(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	return ExecuteLevelContentQueryJsonInternal(Ctx, OutData, OutError, true);
 }
 
-bool FUeAgentHttpServer::CmdLevelActorValidateJson(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdLevelActorValidateJson(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	return ExecuteLevelContentValidateJsonInternal(Ctx, OutData, OutError, true);
 }
 
-bool FUeAgentHttpServer::CmdLevelActorApplyJson(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdLevelActorApplyJson(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	return ExecuteLevelContentApplyJsonInternal(Ctx, OutData, OutError, true);
 }
 
-bool FUeAgentHttpServer::CmdLevelActorDiffJson(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdLevelActorDiffJson(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	return ExecuteLevelContentDiffJsonInternal(Ctx, OutData, OutError, true);
 }
 
-bool FUeAgentHttpServer::CmdLevelActorSnapshotJson(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdLevelActorSnapshotJson(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	return ExecuteLevelContentSnapshotJsonInternal(Ctx, OutData, OutError, true);
 }

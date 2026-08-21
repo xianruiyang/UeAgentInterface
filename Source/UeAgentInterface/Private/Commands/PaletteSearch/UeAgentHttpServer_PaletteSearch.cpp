@@ -1,11 +1,11 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
-#include "Server/UeAgentHttpServer.h"
+#include "LegacyMechanics/UeAgentLegacyMechanics.h"
 
 #include "Commands/PaletteSearch/UeAgentPaletteSearchTypes.h"
 #include "Dom/JsonObject.h"
 
-bool FUeAgentHttpServer::CmdNodeCatalogSearch(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdNodeCatalogSearch(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	UeAgentPaletteSearch::FSearchParams Params;
 	if (!UeAgentPaletteSearch::ParseSearchParams(Ctx.Params, Params, OutError))
@@ -23,7 +23,7 @@ bool FUeAgentHttpServer::CmdNodeCatalogSearch(const FUeAgentRequestContext& Ctx,
 	return true;
 }
 
-bool FUeAgentHttpServer::CmdNodeCatalogCategories(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdNodeCatalogCategories(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	UeAgentPaletteSearch::FSearchParams Params;
 	if (!UeAgentPaletteSearch::ParseSearchParams(Ctx.Params, Params, OutError))

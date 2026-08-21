@@ -7,6 +7,7 @@
 #include "ControlRigGizmoLibrary.h"
 #include "Engine/SkeletalMesh.h"
 #include "Engine/StaticMesh.h"
+#include "DomainAdapters/AnimationRigGraph/UeAgentAnimationRigGraphStructureCapture.h"
 #include "Factories/Factory.h"
 #include "Materials/Material.h"
 #include "Misc/PackageName.h"
@@ -20,6 +21,8 @@
 #include "RigEditor/IKRigDefinitionFactory.h"
 #include "Rigs/RigHierarchy.h"
 #include "Rigs/RigHierarchyController.h"
+#include "RigVMModel/Nodes/RigVMUnitNode.h"
+#include "RigVMModel/RigVMGraph.h"
 #include "UObject/Package.h"
 #include "UObject/UnrealType.h"
 
@@ -120,6 +123,41 @@ namespace UE::UAI::Composition::GraphCompound
 			return true;
 		}
 
+		bool TryNumberField(
+			const FUeAgentCanonicalValue& Object,
+			const FString& Name,
+			double& OutValue)
+		{
+			const FUeAgentCanonicalValue* Value = FindField(Object, Name);
+			if (!Value
+				|| (Value->GetKind() != EUeAgentValueKind::Integer
+					&& Value->GetKind() != EUeAgentValueKind::Decimal)
+				|| !LexTryParseString(OutValue, *Value->GetLexeme())
+				|| !FMath::IsFinite(OutValue))
+			{
+				return false;
+			}
+			return true;
+		}
+
+		bool TryPositionField(
+			const FUeAgentCanonicalValue& Object,
+			const FString& Name,
+			FVector2D& OutPosition)
+		{
+			const FUeAgentCanonicalValue* Value = FindField(Object, Name);
+			double X = 0.0;
+			double Y = 0.0;
+			if (!Value || Value->GetKind() != EUeAgentValueKind::Object
+				|| !TryNumberField(*Value, TEXT("x"), X)
+				|| !TryNumberField(*Value, TEXT("y"), Y))
+			{
+				return false;
+			}
+			OutPosition = FVector2D(X, Y);
+			return true;
+		}
+
 		bool TryScalarText(const FUeAgentCanonicalValue& Value, FString& OutValue)
 		{
 			switch (Value.GetKind())
@@ -173,6 +211,14 @@ namespace UE::UAI::Composition::GraphCompound
 		{
 			return MakeShared<FJsonValueString>(Value);
 		}
+
+		TSharedRef<FJsonObject> PositionJson(const FVector2D& Position)
+		{
+			const TSharedRef<FJsonObject> Value = MakeShared<FJsonObject>();
+			Value->SetNumberField(TEXT("x"), Position.X);
+			Value->SetNumberField(TEXT("y"), Position.Y);
+			return Value;
+		}
 	}
 
 	bool IsRigIkCreateProfile(const FPcgAnimationGraphRouteProfile& Profile)
@@ -202,190 +248,90 @@ namespace UE::UAI::Composition::GraphCompound
 		FGraphCompoundRuntimeError& OutError)
 	{
 		OutValues.Reset();
+		TArray<FAnimationRigGraphStructureValue> CapturedValues;
+		FAnimationRigGraphAdapterError CaptureError;
+		if (!TryCaptureAnimationRigGraphStructure(
+				Target, CapturedValues, CaptureError))
+		{
+			SetError(
+				OutError,
+				CaptureError.GetCode(),
+				Target.GetPathName(),
+				CaptureError.GetDetail());
+			return false;
+		}
+
 		const FString& Capability = Profile.GetCapabilityId();
-		if (Capability == TEXT("animation.control_rig.hierarchy_graph.apply"))
+		if (Capability == TEXT("animation.ik_rig.definition.auto_generate"))
 		{
-			UControlRigBlueprint* Blueprint = Cast<UControlRigBlueprint>(&Target);
-			URigHierarchy* Hierarchy = Blueprint ? Blueprint->GetHierarchy() : nullptr;
-			if (!Hierarchy)
+			const FAnimationRigGraphStructureValue* Mesh =
+				CapturedValues.FindByPredicate(
+					[](const FAnimationRigGraphStructureValue& Value)
+					{
+						return Value.SemanticId
+							== TEXT("binding:skeletal_mesh");
+					});
+			if (!Mesh)
 			{
-				SetError(OutError, TEXT("graph_compound_animation_target_class_mismatch"),
+				SetError(
+					OutError,
+					TEXT("animation_rig_graph_structure_mesh_binding_missing"),
 					Target.GetPathName());
 				return false;
 			}
-			for (int32 Index = 0; Index < Hierarchy->Num(); ++Index)
-			{
-				const FRigElementKey Key = Hierarchy->GetKey(Index);
-				if (Key.Type != ERigElementType::Control)
-				{
-					continue;
-				}
-				const FRigControlElement* Control = Hierarchy->Find<FRigControlElement>(Key);
-				const FRigElementKey Parent = Hierarchy->GetFirstParent(Key);
-				if (!Control)
-				{
-					continue;
-				}
-				const TSharedRef<FJsonObject> Value = MakeShared<FJsonObject>();
-				Value->SetStringField(TEXT("native_key"),
-					TEXT("Control:") + Key.Name.ToString());
-				Value->SetStringField(TEXT("parent_native_key"),
-					Parent.IsValid() ? TEXT("Bone:") + Parent.Name.ToString() : FString());
-				Value->SetStringField(TEXT("control_type_ref"),
-					ControlTypeText(Control->Settings.ControlType));
-				OutValues.Add({TEXT("rig_element:control:") + Key.Name.ToString(), Value});
-			}
-			return true;
-		}
-		if (Capability == TEXT("animation.control_rig.shape_library.apply"))
-		{
-			UControlRigShapeLibrary* Library = Cast<UControlRigShapeLibrary>(&Target);
-			if (!Library)
-			{
-				SetError(OutError, TEXT("graph_compound_animation_target_class_mismatch"),
-					Target.GetPathName());
-				return false;
-			}
-			for (int32 Index = 0; Index < Library->Shapes.Num(); ++Index)
-			{
-				const FControlRigShapeDefinition& Shape = Library->Shapes[Index];
-				const TSharedRef<FJsonObject> Value = MakeShared<FJsonObject>();
-				Value->SetStringField(TEXT("mesh_ref"),
-					Shape.StaticMesh.ToSoftObjectPath().ToString());
-				Value->SetStringField(TEXT("material_ref"),
-					Library->DefaultMaterial.ToSoftObjectPath().ToString());
-				Value->SetNumberField(TEXT("order_index"), Index);
-				OutValues.Add({TEXT("item:shape:") + Shape.ShapeName.ToString(), Value});
-			}
-			return true;
-		}
-		if (Capability == TEXT("animation.ik_rig.definition.apply")
-			|| Capability == TEXT("animation.ik_rig.definition.auto_generate"))
-		{
-			UIKRigDefinition* Rig = Cast<UIKRigDefinition>(&Target);
-			UIKRigController* Controller = Rig
-				? UIKRigController::GetController(Rig) : nullptr;
-			if (!Controller)
-			{
-				SetError(OutError, TEXT("graph_compound_animation_target_class_mismatch"),
-					Target.GetPathName());
-				return false;
-			}
-			if (Capability == TEXT("animation.ik_rig.definition.auto_generate"))
-			{
-				const TSharedRef<FJsonObject> Value = MakeShared<FJsonObject>();
-				Value->SetStringField(TEXT("skeletal_mesh_ref"),
-					Controller->GetSkeletalMesh()
-						? Controller->GetSkeletalMesh()->GetPathName() : FString());
-				// The preset is an operation input, not persisted UE state. Leaving the
-				// observed value empty prevents read-before-plan from inventing a preset
-				// and incorrectly collapsing an explicit auto-generate request to no-op.
-				Value->SetStringField(TEXT("preset"), FString());
-				OutValues.Add({TEXT("property:definition:auto_generate"), Value});
-				return true;
-			}
-			OutValues.Add({TEXT("property:retarget_root"),
-				MakeShared<FJsonObject>()});
-			OutValues.Last().Value->SetStringField(
-				TEXT("value"), Controller->GetRetargetRoot().ToString());
-			for (UIKRigEffectorGoal* Goal : Controller->GetAllGoals())
-			{
-				if (!Goal)
-				{
-					continue;
-				}
-				const TSharedRef<FJsonObject> Value = MakeShared<FJsonObject>();
-				Value->SetStringField(TEXT("bone_name"),
-					Controller->GetBoneForGoal(Goal->GoalName).ToString());
-				OutValues.Add({TEXT("item:ik_goal:") + Goal->GoalName.ToString(), Value});
-			}
-			for (int32 Index = 0; Index < Controller->GetNumSolvers(); ++Index)
-			{
-				const FInstancedStruct* Solver = Controller->GetSolverStructAtIndex(Index);
-				const TSharedRef<FJsonObject> Value = MakeShared<FJsonObject>();
-				Value->SetStringField(TEXT("solver_class_ref"),
-					Solver && Solver->GetScriptStruct()
-						? Solver->GetScriptStruct()->GetPathName() : FString());
-				Value->SetNumberField(TEXT("order_index"), Index);
-				OutValues.Add({FString::Printf(TEXT("order:ik_solver:solver:%d"), Index),
-					Value});
-			}
-			for (const FBoneChain& Chain : Controller->GetRetargetChains())
-			{
-				const TSharedRef<FJsonObject> Value = MakeShared<FJsonObject>();
-				Value->SetStringField(TEXT("start_bone"), Chain.StartBone.BoneName.ToString());
-				Value->SetStringField(TEXT("end_bone"), Chain.EndBone.BoneName.ToString());
-				Value->SetStringField(TEXT("goal_name"), Chain.IKGoalName.ToString());
-				OutValues.Add({TEXT("hierarchy:ik_chain:") + Chain.ChainName.ToString(),
-					Value});
-			}
+			const TSharedRef<FJsonObject> Value =
+				MakeShared<FJsonObject>(*Mesh->Value);
+			// The preset is an operation input, not persisted UE state. Leaving the
+			// observed value empty prevents read-before-plan from inventing a preset
+			// and incorrectly collapsing an explicit auto-generate request to no-op.
+			Value->SetStringField(TEXT("preset"), FString());
+			OutValues.Add({
+				TEXT("property:definition:auto_generate"),
+				Value,
+			});
 			return true;
 		}
 
-		UIKRetargeter* Retargeter = Cast<UIKRetargeter>(&Target);
-		UIKRetargeterController* Controller = Retargeter
-			? UIKRetargeterController::GetController(Retargeter) : nullptr;
-		if (!Controller)
-		{
-			SetError(OutError, TEXT("graph_compound_animation_target_class_mismatch"),
-				Target.GetPathName());
-			return false;
-		}
-		if (Capability == TEXT("animation.ik_retargeter.definition.apply"))
-		{
-			const UIKRigDefinition* Source =
-				Controller->GetIKRig(ERetargetSourceOrTarget::Source);
-			const UIKRigDefinition* TargetRig =
-				Controller->GetIKRig(ERetargetSourceOrTarget::Target);
-			const TSharedRef<FJsonObject> SourceValue = MakeShared<FJsonObject>();
-			SourceValue->SetStringField(TEXT("value"), Source ? Source->GetPathName() : FString());
-			OutValues.Add({TEXT("binding:source_ik_rig"), SourceValue});
-			const TSharedRef<FJsonObject> TargetValue = MakeShared<FJsonObject>();
-			TargetValue->SetStringField(TEXT("value"), TargetRig ? TargetRig->GetPathName() : FString());
-			OutValues.Add({TEXT("binding:target_ik_rig"), TargetValue});
-			const FRetargetChainMapping* Mapping = Controller->GetChainMapping(NAME_None);
-			if (Mapping && Mapping->IsReady())
+		auto IsApplicable =
+			[&Capability](const FString& SemanticId)
 			{
-				for (const FName& TargetChain : Mapping->GetChainNames(
-					ERetargetSourceOrTarget::Target))
+				if (Capability
+					== TEXT("animation.control_rig.hierarchy_graph.apply"))
 				{
-					const TSharedRef<FJsonObject> Value = MakeShared<FJsonObject>();
-					Value->SetStringField(TEXT("source_chain"), Mapping->GetChainMappedTo(
-						TargetChain, ERetargetSourceOrTarget::Target).ToString());
-					Value->SetStringField(TEXT("operation_ref"),
-						TEXT("/Script/IKRig.IKRetargetFKChainsOp"));
-					Value->SetNumberField(TEXT("order_index"), 0);
-					OutValues.Add({TEXT("binding:chain_mapping:")
-						+ TargetChain.ToString(), Value});
+					return SemanticId.StartsWith(TEXT("rig_element:control:"))
+						|| SemanticId.StartsWith(TEXT("rigvm_node:"));
 				}
-			}
-			return true;
-		}
-		UIKRetargetFKChainsController* OpController = Cast<UIKRetargetFKChainsController>(
-			Controller->GetOpController(0));
-		if (!OpController)
-		{
-			return true;
-		}
-		const FIKRetargetFKChainsOpSettings Settings = OpController->GetSettings();
-		for (const FRetargetFKChainSettings& Chain : Settings.ChainsToRetarget)
-		{
-			auto AddSetting = [&](const FString& Name, const FString& Value)
-			{
-				const TSharedRef<FJsonObject> Object = MakeShared<FJsonObject>();
-				Object->SetStringField(TEXT("value"), Value);
-				OutValues.Add({TEXT("property:setting:chain:")
-					+ Chain.TargetChainName.ToString() + TEXT(":") + Name, Object});
+				if (Capability
+					== TEXT("animation.control_rig.shape_library.apply"))
+				{
+					return SemanticId.StartsWith(TEXT("item:shape:"));
+				}
+				if (Capability == TEXT("animation.ik_rig.definition.apply"))
+				{
+					return SemanticId == TEXT("property:retarget_root")
+						|| SemanticId.StartsWith(TEXT("item:ik_goal:"))
+						|| SemanticId.StartsWith(TEXT("order:ik_solver:"))
+						|| SemanticId.StartsWith(TEXT("hierarchy:ik_chain:"));
+				}
+				if (Capability
+					== TEXT("animation.ik_retargeter.definition.apply"))
+				{
+					return SemanticId == TEXT("binding:source_ik_rig")
+						|| SemanticId == TEXT("binding:target_ik_rig")
+						|| SemanticId.StartsWith(
+							TEXT("binding:chain_mapping:"));
+				}
+				return Capability
+						== TEXT("animation.ik_retargeter.settings.apply")
+					&& SemanticId.StartsWith(
+						TEXT("property:setting:"));
 			};
-			AddSetting(TEXT("RotationMode"),
-				StaticEnum<EFKChainRotationMode>()->GetNameStringByValue(
-					static_cast<int64>(Chain.RotationMode)));
-			AddSetting(TEXT("TranslationMode"),
-				StaticEnum<EFKChainTranslationMode>()->GetNameStringByValue(
-					static_cast<int64>(Chain.TranslationMode)));
-			AddSetting(TEXT("RotationAlpha"), FString::SanitizeFloat(Chain.RotationAlpha));
-			AddSetting(TEXT("TranslationAlpha"), FString::SanitizeFloat(Chain.TranslationAlpha));
-			AddSetting(TEXT("EnableFK"), Chain.EnableFK ? TEXT("true") : TEXT("false"));
+		for (const FAnimationRigGraphStructureValue& Captured : CapturedValues)
+		{
+			if (IsApplicable(Captured.SemanticId))
+			{
+				OutValues.Add({Captured.SemanticId, Captured.Value});
+			}
 		}
 		return true;
 	}
@@ -460,37 +406,79 @@ namespace UE::UAI::Composition::GraphCompound
 		{
 			OutSpec.Kind = ERigIkReadbackKind::ControlRigDefinition;
 			OutSpec.NativeClassPath = UControlRigBlueprint::StaticClass()->GetPathName();
-			const FString Prefix = TEXT("rig_element:control:");
 			for (const FGraphCompoundCanonicalEdit& Edit : Edits)
 			{
-				if (!Edit.GetIdentity().GetSemanticId().StartsWith(Prefix))
+				const FString& SemanticId = Edit.GetIdentity().GetSemanticId();
+				if (SemanticId.StartsWith(TEXT("rig_element:control:")))
 				{
-					SetError(OutError, TEXT("graph_compound_control_rig_identity_unsupported"),
-						Edit.GetIdentity().GetSemanticId());
-					return false;
-				}
-				FAnimationRigGraphControlMutation Mutation;
-				Mutation.Name = *Edit.GetIdentity().GetSemanticId().Mid(Prefix.Len());
-				Mutation.Intent = NativeIntent(Edit.GetIntent());
-				if (Mutation.Intent != EAnimationRigGraphMutationIntent::Delete)
-				{
-					FString ParentKey;
-					if (!Edit.GetProposedAfter().IsValid()
-						|| !TryStringField(*Edit.GetProposedAfter(), TEXT("parent_native_key"),
-							ParentKey)
-						|| !ParentKey.StartsWith(TEXT("Bone:"))
-						|| !TryStringField(*Edit.GetProposedAfter(), TEXT("control_type_ref"),
-							Mutation.ControlTypeRef))
+					FAnimationRigGraphControlMutation Mutation;
+					Mutation.Name = *SemanticId.Mid(20);
+					Mutation.Intent = NativeIntent(Edit.GetIntent());
+					if (Mutation.Intent != EAnimationRigGraphMutationIntent::Delete)
 					{
-						SetError(OutError, TEXT("graph_compound_control_rig_edit_invalid"),
-							Mutation.Name.ToString());
-						return false;
+						FString ParentKey;
+						if (!Edit.GetProposedAfter().IsValid()
+							|| !TryStringField(
+								*Edit.GetProposedAfter(),
+								TEXT("parent_native_key"),
+								ParentKey)
+							|| !ParentKey.StartsWith(TEXT("Bone:"))
+							|| !TryStringField(
+								*Edit.GetProposedAfter(),
+								TEXT("control_type_ref"),
+								Mutation.ControlTypeRef))
+						{
+							SetError(
+								OutError,
+								TEXT("graph_compound_control_rig_edit_invalid"),
+								Mutation.Name.ToString());
+							return false;
+						}
+						Mutation.ParentBone = *ParentKey.Mid(5);
 					}
-					Mutation.ParentBone = *ParentKey.Mid(5);
+					OutSpec.Controls.Add(MoveTemp(Mutation));
+					continue;
 				}
-				OutSpec.Controls.Add(MoveTemp(Mutation));
+				if (SemanticId.StartsWith(TEXT("rigvm_node:")))
+				{
+					FAnimationRigGraphUnitMutation Mutation;
+					Mutation.NodeName = *SemanticId.Mid(11);
+					Mutation.Intent = NativeIntent(Edit.GetIntent());
+					if (Mutation.Intent != EAnimationRigGraphMutationIntent::Delete)
+					{
+						FString Method;
+						if (!Edit.GetProposedAfter().IsValid()
+							|| !TryStringField(
+								*Edit.GetProposedAfter(),
+								TEXT("script_struct_ref"),
+								Mutation.ScriptStructRef)
+							|| !TryPositionField(
+								*Edit.GetProposedAfter(),
+								TEXT("position"),
+								Mutation.Position))
+						{
+							SetError(
+								OutError,
+								TEXT("graph_compound_control_rig_unit_edit_invalid"),
+								Mutation.NodeName.ToString());
+							return false;
+						}
+						if (TryStringField(
+								*Edit.GetProposedAfter(), TEXT("method"), Method))
+						{
+							Mutation.MethodName = *Method;
+						}
+					}
+					OutSpec.Units.Add(MoveTemp(Mutation));
+					continue;
+				}
+				SetError(
+					OutError,
+					TEXT("graph_compound_control_rig_identity_unsupported"),
+					SemanticId);
+				return false;
 			}
-			return true;
+			return !OutSpec.Controls.IsEmpty() || !OutSpec.Units.IsEmpty();
 		}
 		if (Capability == TEXT("animation.control_rig.shape_library.apply"))
 		{
@@ -680,8 +668,21 @@ namespace UE::UAI::Composition::GraphCompound
 					OutSpec.Mappings.Add(MoveTemp(Mapping));
 				}
 			}
-			return !OutSpec.SourceRigRef.IsEmpty() && !OutSpec.TargetRigRef.IsEmpty()
-				&& !OutSpec.Mappings.IsEmpty();
+			if (OutSpec.SourceRigRef.IsEmpty() || OutSpec.TargetRigRef.IsEmpty())
+			{
+				SetError(
+					OutError,
+					TEXT("graph_compound_retarget_rig_ref_required"));
+				return false;
+			}
+			if (OutSpec.Mappings.IsEmpty())
+			{
+				SetError(
+					OutError,
+					TEXT("graph_compound_retarget_mapping_required"));
+				return false;
+			}
+			return true;
 		}
 
 		OutSpec.Kind = ERigIkReadbackKind::IkRetargeterSettings;
@@ -737,6 +738,24 @@ namespace UE::UAI::Composition::GraphCompound
 				Values.Add(MakeShared<FJsonValueObject>(Value));
 			}
 			Root->SetArrayField(TEXT("controls"), MoveTemp(Values));
+			TArray<TSharedPtr<FJsonValue>> Units;
+			for (const FAnimationRigGraphUnitMutation& Unit : Spec.Units)
+			{
+				const TSharedRef<FJsonObject> Value = Observation(
+					TEXT("rigvm_node:") + Unit.NodeName.ToString(),
+					Unit.Intent != EAnimationRigGraphMutationIntent::Delete);
+				if (Unit.Intent != EAnimationRigGraphMutationIntent::Delete)
+				{
+					Value->SetStringField(
+						TEXT("script_struct_ref"), Unit.ScriptStructRef);
+					Value->SetStringField(
+						TEXT("method"), Unit.MethodName.ToString());
+					Value->SetObjectField(
+						TEXT("position"), PositionJson(Unit.Position));
+				}
+				Units.Add(MakeShared<FJsonValueObject>(Value));
+			}
+			Root->SetArrayField(TEXT("units"), MoveTemp(Units));
 			break;
 		}
 		case ERigIkReadbackKind::ShapeLibraryCreate:
@@ -909,6 +928,38 @@ namespace UE::UAI::Composition::GraphCompound
 				Values.Add(MakeShared<FJsonValueObject>(Value));
 			}
 			OutRoot->SetArrayField(TEXT("controls"), MoveTemp(Values));
+			const URigVMGraph* const Graph = Blueprint->GetDefaultModel();
+			TArray<TSharedPtr<FJsonValue>> Units;
+			for (const FAnimationRigGraphUnitMutation& Requested : Spec.Units)
+			{
+				const URigVMUnitNode* Unit = nullptr;
+				if (Graph)
+				{
+					for (const URigVMNode* Node : Graph->GetNodes())
+					{
+						if (Node && Node->GetFName() == Requested.NodeName)
+						{
+							Unit = Cast<URigVMUnitNode>(Node);
+							break;
+						}
+					}
+				}
+				const TSharedRef<FJsonObject> Value = Observation(
+					TEXT("rigvm_node:") + Requested.NodeName.ToString(),
+					Unit != nullptr);
+				if (Unit && Unit->GetScriptStruct())
+				{
+					Value->SetStringField(
+						TEXT("script_struct_ref"),
+						Unit->GetScriptStruct()->GetPathName());
+					Value->SetStringField(
+						TEXT("method"), Unit->GetMethodName().ToString());
+					Value->SetObjectField(
+						TEXT("position"), PositionJson(Unit->GetPosition()));
+				}
+				Units.Add(MakeShared<FJsonValueObject>(Value));
+			}
+			OutRoot->SetArrayField(TEXT("units"), MoveTemp(Units));
 			return true;
 		}
 		if (Spec.Kind == ERigIkReadbackKind::ShapeLibraryCreate
@@ -1251,7 +1302,8 @@ namespace UE::UAI::Composition::GraphCompound
 			if (UControlRigBlueprint* const Blueprint = Cast<UControlRigBlueprint>(&Target))
 			{
 				bApplied = Hook.TryApplyAndCaptureControlRigDefinition(
-					*Blueprint, Spec.Controls, Apply, Barrier, Topology,
+					*Blueprint, Spec.Controls, Spec.Units,
+					Apply, Barrier, Topology,
 					OutRevision, Evidence, NativeError);
 			}
 		}

@@ -3,6 +3,8 @@
 #include "CommandEdge/UeAgentCommandProtocol.h"
 #include "CommandRegistry/UeAgentImmutableCommandRegistry.h"
 #include "Core/Contract/UeAgentCommandJson.h"
+#include "Core/HjsonWorkspace/DomainAuthoring/UeAgentDomainHjsonAuthoringKit.h"
+#include "DomainAdapters/AnimationRigGraph/UeAgentAnimationRigGraphCandidateBindingNormalizer.h"
 #include "DomainAdapters/ContentGraphRead/UeAgentContentGraphReadProductionEnvironment.h"
 #include "Dom/JsonObject.h"
 #include "Misc/PackageName.h"
@@ -17,6 +19,7 @@ namespace UE::UAI::DomainAdapters::AnimationRigGraph
 	using namespace ContextResource;
 	using namespace DomainAdapters::ContentGraphRead;
 	using namespace HjsonWorkspace;
+	using namespace HjsonWorkspace::DomainAuthoring;
 
 	namespace
 	{
@@ -50,83 +53,11 @@ namespace UE::UAI::DomainAdapters::AnimationRigGraph
 				|| Type == SkeletonType;
 		}
 
-		FString ObjectPathFromPackage(const FString& Target)
+		FString PackageIdentity(const FString& Target)
 		{
-			int32 Dot = INDEX_NONE;
-			if (Target.FindLastChar(TEXT('.'), Dot)) return Target;
-			const FString AssetName = FPackageName::GetLongPackageAssetName(Target);
-			return AssetName.IsEmpty() ? Target : Target + TEXT(".") + AssetName;
-		}
-
-		FUeAgentResourceTracker MakeResources()
-		{
-			return FUeAgentResourceTracker(FUeAgentResourceBudget({
-				{EUeAgentResourceDimension::InputBytes, 16 * 1024 * 1024},
-				{EUeAgentResourceDimension::OutputBytes, 16 * 1024 * 1024},
-				{EUeAgentResourceDimension::StringBytes, 16 * 1024 * 1024},
-				{EUeAgentResourceDimension::Nodes, 16384},
-				{EUeAgentResourceDimension::Items, 65536},
-				{EUeAgentResourceDimension::Files, 4096},
-				{EUeAgentResourceDimension::ReferenceEdges, 65536},
-				{EUeAgentResourceDimension::WorkUnits, 262144},
-				{EUeAgentResourceDimension::EstimatedMemoryBytes, 256 * 1024 * 1024},
-			}));
-		}
-
-		TSharedPtr<FJsonValue> JsonValueFromHjson(
-			const FHjsonNode& Node,
-			FWorkspaceError& OutError)
-		{
-			switch (Node.GetKind())
-			{
-			case EHjsonNodeKind::Null:
-				return MakeShared<FJsonValueNull>();
-			case EHjsonNodeKind::Boolean:
-				return MakeShared<FJsonValueBoolean>(Node.GetBoolean());
-			case EHjsonNodeKind::String:
-				return MakeShared<FJsonValueString>(Node.GetText());
-			case EHjsonNodeKind::Integer:
-			case EHjsonNodeKind::Decimal:
-				return MakeShared<FJsonValueNumber>(FCString::Atod(*Node.GetLexeme()));
-			case EHjsonNodeKind::Array:
-			{
-				TArray<TSharedPtr<FJsonValue>> Items;
-				for (const FHjsonNodeRef& Item : Node.GetItems())
-				{
-					TSharedPtr<FJsonValue> Converted = JsonValueFromHjson(*Item, OutError);
-					if (!Converted.IsValid()) return nullptr;
-					Items.Add(MoveTemp(Converted));
-				}
-				return MakeShared<FJsonValueArray>(MoveTemp(Items));
-			}
-			case EHjsonNodeKind::Object:
-			{
-				const TSharedPtr<FJsonObject> Object = MakeShared<FJsonObject>();
-				for (const TPair<FString, FHjsonNodeRef>& Entry : Node.GetEntries())
-				{
-					TSharedPtr<FJsonValue> Converted = JsonValueFromHjson(*Entry.Value, OutError);
-					if (!Converted.IsValid()) return nullptr;
-					Object->SetField(Entry.Key, MoveTemp(Converted));
-				}
-				return MakeShared<FJsonValueObject>(Object);
-			}
-			default:
-				Fail(OutError, TEXT("animation_rig_graph_domain_hjson_node_invalid"));
-				return nullptr;
-			}
-		}
-
-		bool CanonicalObject(
-			const TSharedPtr<FJsonObject>& Object,
-			FString& Out,
-			FWorkspaceError& OutError)
-		{
-			FString Error;
-			if (!Object.IsValid() || !Json::TryCanonicalize(Object, Out, Error))
-			{
-				return Fail(OutError, TEXT("animation_rig_graph_domain_json_invalid"), Error);
-			}
-			return true;
+			return Target.Contains(TEXT("."))
+				? FPackageName::ObjectPathToPackageName(Target)
+				: Target;
 		}
 
 		bool DecodeRequest(
@@ -178,7 +109,7 @@ namespace UE::UAI::DomainAdapters::AnimationRigGraph
 				return Fail(OutError, TEXT("animation_rig_graph_domain_command_missing"), CommandId);
 			}
 			FString ParamsJson;
-			if (!CanonicalObject(Params, ParamsJson, OutError)) return false;
+			if (!TryCanonicalizeObject(Params, ParamsJson, OutError)) return false;
 			TOptional<FUeAgentCommandRequest> Request;
 			if (!DecodeRequest(CommandId, Contract->GetContractHash(), ParamsJson, Request, OutError)) return false;
 
@@ -199,203 +130,193 @@ namespace UE::UAI::DomainAdapters::AnimationRigGraph
 				MakeShared<FNeverCancelled>());
 			if (!Result.IsOk())
 			{
-				return Fail(OutError, TEXT("animation_rig_graph_domain_native_command_failed"), CommandId, Result.GetErrorJson());
+				SetWorkspaceErrorFromCommandFailure(
+					Result.GetErrorJson(),
+					TEXT("animation_rig_graph_domain_native_command_failed"),
+					CommandId,
+					OutError);
+				return false;
 			}
 			OutPayload = Result.GetPayloadJson();
 			return true;
-		}
-
-		bool TryCapture(
-			const FString& Target,
-			FString& OutType,
-			FUeAgentContentGraphCapture& OutCapture,
-			FWorkspaceError& OutError)
-		{
-			UObject* Owner = StaticLoadObject(UObject::StaticClass(), nullptr, *ObjectPathFromPackage(Target));
-			if (!Owner)
-			{
-				return Fail(OutError, TEXT("animation_rig_graph_domain_target_unresolved"), Target);
-			}
-			OutType = Owner->GetClass()->GetPathName();
-			if (!IsSupportedRootType(OutType))
-			{
-				return Fail(OutError, TEXT("animation_rig_graph_domain_target_type_invalid"), OutType);
-			}
-			FUeAgentContentGraphReadError CaptureError;
-			if (!FUeAgentContentGraphReadProductionEnvironment::TryCaptureOwner(
-					*Owner, OutCapture, CaptureError))
-			{
-				return Fail(
-					OutError,
-					CaptureError.Code.IsEmpty()
-						? FString(TEXT("animation_rig_graph_domain_readback_failed"))
-						: CaptureError.Code,
-					CaptureError.SubjectId,
-					CaptureError.Detail);
-			}
-			return true;
-		}
-
-		TSharedPtr<FJsonObject> CaptureJson(
-			const FString& Target,
-			const FString& Type,
-			const FUeAgentContentGraphCapture& Capture)
-		{
-			const TSharedPtr<FJsonObject> Result = MakeShared<FJsonObject>();
-			Result->SetStringField(TEXT("target"), Target);
-			Result->SetStringField(TEXT("root_type"), Type);
-			Result->SetStringField(TEXT("domain_id"), Capture.DomainId);
-			Result->SetStringField(TEXT("revision"), Capture.Revision);
-			Result->SetBoolField(TEXT("complete"), true);
-			Result->SetBoolField(TEXT("has_more"), false);
-			TArray<TSharedPtr<FJsonValue>> Items;
-			for (const FUeAgentContentGraphItem& Item : Capture.Items)
-			{
-				const TSharedPtr<FJsonObject> Value = MakeShared<FJsonObject>();
-				Value->SetStringField(TEXT("id"), Item.ItemId);
-				Value->SetStringField(TEXT("kind"), Item.ItemKind);
-				Value->SetStringField(TEXT("class_path"), Item.ClassPath);
-				Value->SetStringField(TEXT("container_id"), Item.ContainerId);
-				Value->SetNumberField(TEXT("order"), Item.Order);
-				Items.Add(MakeShared<FJsonValueObject>(Value));
-			}
-			Result->SetArrayField(TEXT("items"), MoveTemp(Items));
-			TArray<TSharedPtr<FJsonValue>> Relations;
-			for (const FUeAgentContentGraphRelation& Relation : Capture.Relations)
-			{
-				const TSharedPtr<FJsonObject> Value = MakeShared<FJsonObject>();
-				Value->SetStringField(TEXT("id"), Relation.RelationId);
-				Value->SetStringField(TEXT("kind"), Relation.RelationKind);
-				Value->SetStringField(TEXT("source"), Relation.SourceItemId);
-				Value->SetStringField(TEXT("target"), Relation.TargetItemId);
-				Relations.Add(MakeShared<FJsonValueObject>(Value));
-			}
-			Result->SetArrayField(TEXT("relations"), MoveTemp(Relations));
-			Result->SetNumberField(TEXT("property_count"), Capture.Properties.Num());
-			Result->SetNumberField(TEXT("parameter_count"), Capture.Parameters.Num());
-			bool bCompileValid = true;
-			TArray<TSharedPtr<FJsonValue>> Diagnostics;
-			for (const FUeAgentContentGraphDiagnostic& Diagnostic : Capture.Diagnostics)
-			{
-				const TSharedPtr<FJsonObject> Value = MakeShared<FJsonObject>();
-				Value->SetStringField(TEXT("id"), Diagnostic.DiagnosticId);
-				Value->SetStringField(TEXT("severity"), Diagnostic.Severity);
-				Value->SetStringField(TEXT("code"), Diagnostic.Code);
-				Value->SetBoolField(TEXT("resolved"), Diagnostic.bResolved);
-				Diagnostics.Add(MakeShared<FJsonValueObject>(Value));
-				if (!Diagnostic.bResolved && Diagnostic.Severity.Equals(TEXT("error"), ESearchCase::IgnoreCase))
-				{
-					bCompileValid = false;
-				}
-			}
-			Result->SetArrayField(TEXT("diagnostics"), MoveTemp(Diagnostics));
-			Result->SetStringField(TEXT("compile_status"), bCompileValid ? TEXT("valid") : TEXT("error"));
-			return Result;
 		}
 
 		bool TryRead(
 			const FString& Target,
 			FString& OutPayload,
 			FString& OutRevision,
+			TSharedPtr<FJsonObject>* OutSnapshot,
 			FWorkspaceError& OutError)
 		{
-			FString Type;
+			UObject* Owner = nullptr;
 			FUeAgentContentGraphCapture Capture;
-			if (!TryCapture(Target, Type, Capture, OutError)) return false;
-			OutRevision = Capture.Revision;
-			return CanonicalObject(CaptureJson(Target, Type, Capture), OutPayload, OutError);
-		}
-
-		bool ParseDocument(
-			const TSharedPtr<FJsonObject>& Params,
-			TSharedPtr<FJsonObject>& OutRoot,
-			FString& OutType,
-			FWorkspaceError& OutError)
-		{
-			OutRoot.Reset();
-			OutType.Reset();
-			if (!Params.IsValid()
-				|| Params->HasField(TEXT("carrier"))
-				|| Params->HasField(TEXT("hjson_document")))
-			{
-				return Fail(
-					OutError,
-					TEXT("animation_rig_graph_domain_legacy_source_contract_rejected"));
-			}
-			FString Target;
-			const TSharedPtr<FJsonObject>* Source = nullptr;
-			FString Kind;
-			FString TargetIdentity;
-			FString EntryFile;
-			const TArray<TSharedPtr<FJsonValue>>* Documents = nullptr;
-			if (!Params->TryGetStringField(TEXT("target"), Target)
-				|| Target.IsEmpty()
-				|| !Params->TryGetObjectField(TEXT("source"), Source)
-				|| !Source || !Source->IsValid()
-				|| !(*Source)->TryGetStringField(TEXT("kind"), Kind)
-				|| Kind != TEXT("resolved")
-				|| !(*Source)->TryGetStringField(TEXT("target_identity"), TargetIdentity)
-				|| TargetIdentity != Target
-				|| !(*Source)->TryGetStringField(TEXT("entry_file"), EntryFile)
-				|| EntryFile.IsEmpty()
-				|| !(*Source)->TryGetArrayField(TEXT("documents"), Documents)
-				|| !Documents || Documents->IsEmpty())
-			{
-				return Fail(
-					OutError,
-					TEXT("animation_rig_graph_domain_resolved_source_invalid"));
-			}
-			FString Text;
-			int32 EntryMatches = 0;
-			for (const TSharedPtr<FJsonValue>& Value : *Documents)
-			{
-				const TSharedPtr<FJsonObject> DocumentObject = Value.IsValid()
-					? Value->AsObject() : nullptr;
-				FString RelativePath;
-				FString DocumentText;
-				if (!DocumentObject.IsValid()
-					|| !DocumentObject->TryGetStringField(TEXT("path"), RelativePath)
-					|| !DocumentObject->TryGetStringField(TEXT("document"), DocumentText))
-				{
-					return Fail(
-						OutError,
-						TEXT("animation_rig_graph_domain_resolved_source_invalid"));
-				}
-				if (RelativePath == EntryFile)
-				{
-					Text = MoveTemp(DocumentText);
-					++EntryMatches;
-				}
-			}
-			if (EntryMatches != 1 || Text.IsEmpty())
-			{
-				return Fail(
-					OutError,
-					TEXT("animation_rig_graph_domain_resolved_source_invalid"),
-					EntryFile);
-			}
-			FUeAgentResourceTracker Resources = MakeResources();
-			FHjsonDocumentPtr Document;
-			if (!TryParseHjsonDocument(Text, TEXT("inline:animation-rig-graph-domain"), Resources, Document, OutError)
-				|| !Document.IsValid())
+			if (!TryCaptureObject(
+					Target,
+					TArray<FString>{ControlRigBlueprintType, IKRigDefinitionType,
+						IKRetargeterType, SkeletonType},
+					Owner,
+					Capture,
+					OutError))
 			{
 				return false;
 			}
-			TSharedPtr<FJsonValue> Converted = JsonValueFromHjson(*Document->GetRoot(), OutError);
-			const TSharedPtr<FJsonObject> Canonical = Converted.IsValid() ? Converted->AsObject() : nullptr;
-			FString Schema;
-			const TSharedPtr<FJsonObject>* Root = nullptr;
-			if (!Canonical.IsValid()
-				|| !Canonical->TryGetStringField(TEXT("schema"), Schema)
-				|| Schema != SchemaId
-				|| !Canonical->TryGetObjectField(TEXT("root"), Root)
-				|| !Root || !Root->IsValid()
-				|| !(*Root)->TryGetStringField(TEXT("type"), OutType)
-				|| !IsSupportedRootType(OutType))
+			const FString RootType = Owner->GetClass()->GetPathName();
+			TSharedPtr<FJsonObject> Snapshot;
+			if (!TryBuildCaptureSnapshot(
+					Target, RootType, Capture, Snapshot, OutError))
 			{
-				return Fail(OutError, TEXT("animation_rig_graph_domain_schema_or_type_invalid"), OutType);
+				return false;
 			}
-			OutRoot = *Root;
+			OutRevision = Capture.Revision;
+			if (OutSnapshot) *OutSnapshot = Snapshot;
+			return TryCanonicalizeObject(Snapshot, OutPayload, OutError);
+		}
+
+		bool ValidateMissingTarget(
+			const FString& Target,
+			FWorkspaceError& OutError)
+		{
+			bool bPresent = false;
+			if (!TryInspectObjectTargetPresence(Target, bPresent))
+			{
+				return Fail(
+					OutError, TEXT("animation_rig_graph_domain_target_invalid"),
+					Target);
+			}
+			if (bPresent)
+			{
+				return Fail(
+					OutError, TEXT("animation_rig_graph_domain_stale_revision"),
+					Target, TEXT("existing"));
+			}
+			return true;
+		}
+
+		bool TryBuildCreateParams(
+			const FString& Target,
+			const FString& RootType,
+			const TSharedPtr<FJsonObject>& Create,
+			FString& OutCommandId,
+			TSharedPtr<FJsonObject>& OutNative,
+			FWorkspaceError& OutError)
+		{
+			if (RootType == SkeletonType)
+			{
+				return Fail(
+					OutError,
+					TEXT("animation_rig_graph_domain_skeleton_create_not_supported"),
+					Target);
+			}
+			if (RootType == ControlRigBlueprintType)
+			{
+				OutCommandId = TEXT("animation.control_rig.asset.create");
+			}
+			else if (RootType == IKRigDefinitionType)
+			{
+				OutCommandId = TEXT("animation.ik_rig.asset.create");
+			}
+			else if (RootType == IKRetargeterType)
+			{
+				OutCommandId = TEXT("animation.ik_retargeter.asset.create");
+			}
+			else
+			{
+				return Fail(
+					OutError, TEXT("animation_rig_graph_domain_create_type_invalid"),
+					RootType);
+			}
+			const FString Package = PackageIdentity(Target);
+			const FString ExpectedName =
+				FPackageName::GetLongPackageAssetName(Package);
+			const FString ExpectedPath =
+				FPackageName::GetLongPackagePath(Package);
+			if (!Create.IsValid()
+				|| ExpectedName.IsEmpty()
+				|| ExpectedPath.IsEmpty()
+				|| !FPackageName::IsValidLongPackageName(Package))
+			{
+				return Fail(
+					OutError, TEXT("animation_rig_graph_domain_create_contract_invalid"),
+					Target);
+			}
+			FString Declared;
+			if (Create->TryGetStringField(TEXT("asset_name"), Declared)
+				&& Declared != ExpectedName)
+			{
+				return Fail(
+					OutError, TEXT("animation_rig_graph_domain_create_name_mismatch"),
+					Declared, ExpectedName);
+			}
+			if (Create->TryGetStringField(TEXT("package_path"), Declared))
+			{
+				while (Declared.EndsWith(TEXT("/")))
+				{
+					Declared.LeftChopInline(1);
+				}
+				if (Declared != ExpectedPath)
+				{
+					return Fail(
+						OutError, TEXT("animation_rig_graph_domain_create_path_mismatch"),
+						Declared, ExpectedPath);
+				}
+			}
+			OutNative = MakeShared<FJsonObject>(*Create);
+			OutNative->SetStringField(TEXT("asset_name"), ExpectedName);
+			OutNative->SetStringField(TEXT("package_path"), ExpectedPath);
+			return true;
+		}
+
+		bool ParseLifecycleMutation(
+			const FString& Target,
+			const FString& MutationPayload,
+			TSharedPtr<FJsonObject>& OutMutation,
+			FDomainHjsonImportLifecycleReceipt& OutReceipt,
+			FWorkspaceError& OutError)
+		{
+			FString JsonError;
+			FString TerminalStatus;
+			FString MutationTarget;
+			FString MutationRevision;
+			FString ReceiptId;
+			bool bMutationApplied = false;
+			bool bCompileSettled = false;
+			bool bSaved = false;
+			bool bReloaded = false;
+			if (!Json::TryParseObject(
+					MutationPayload, OutMutation, JsonError)
+				|| !OutMutation.IsValid()
+				|| !OutMutation->TryGetStringField(
+					TEXT("terminal_status"), TerminalStatus)
+				|| TerminalStatus != TEXT("succeeded")
+				|| !OutMutation->TryGetStringField(
+					TEXT("target_ref"), MutationTarget)
+				|| ObjectPathFromPackageIdentity(MutationTarget)
+					!= ObjectPathFromPackageIdentity(Target)
+				|| !OutMutation->TryGetStringField(
+					TEXT("revision"), MutationRevision)
+				|| MutationRevision.IsEmpty()
+				|| !OutMutation->TryGetBoolField(
+					TEXT("mutation_applied"), bMutationApplied)
+				|| !OutMutation->TryGetBoolField(
+					TEXT("compile_settled"), bCompileSettled)
+				|| !OutMutation->TryGetBoolField(TEXT("saved"), bSaved)
+				|| !OutMutation->TryGetBoolField(TEXT("reloaded"), bReloaded)
+				|| !OutMutation->TryGetStringField(
+					TEXT("persistence_receipt_id"), ReceiptId)
+				|| ReceiptId.IsEmpty()
+				|| !bMutationApplied || !bCompileSettled || !bSaved || !bReloaded)
+			{
+				return Fail(
+					OutError,
+					TEXT("animation_rig_graph_domain_lifecycle_receipt_invalid"),
+					MutationTarget,
+					JsonError);
+			}
+			OutReceipt.bMutationApplied = bMutationApplied;
+			OutReceipt.bCompileSettled = bCompileSettled;
+			OutReceipt.bPackageSaved = bSaved;
+			OutReceipt.bUnloadedReloaded = bReloaded;
+			OutReceipt.PersistenceReceiptId = MoveTemp(ReceiptId);
 			return true;
 		}
 
@@ -456,6 +377,37 @@ namespace UE::UAI::DomainAdapters::AnimationRigGraph
 			{
 				return true;
 			}
+			const TArray<TSharedPtr<FJsonValue>>* Edits = nullptr;
+			if (!NativeParams.IsValid()
+				|| !NativeParams->TryGetArrayField(TEXT("edits"), Edits)
+				|| !Edits || Edits->IsEmpty())
+			{
+				return Fail(OutError,
+					TEXT("animation_rig_graph_domain_space_edit_required"),
+					CommandId);
+			}
+			bool bNeedsHierarchySpace = false;
+			for (const TSharedPtr<FJsonValue>& EditValue : *Edits)
+			{
+				const TSharedPtr<FJsonObject> Edit = EditValue.IsValid()
+					? EditValue->AsObject() : nullptr;
+				FString Intent;
+				FString SemanticId;
+				if (!Edit.IsValid()
+					|| !Edit->TryGetStringField(TEXT("intent"), Intent)
+					|| !Edit->TryGetStringField(TEXT("semantic_id"), SemanticId))
+				{
+					return Fail(OutError,
+						TEXT("animation_rig_graph_domain_space_edit_invalid"),
+						CommandId);
+				}
+				bNeedsHierarchySpace |= Intent != TEXT("delete")
+					&& SemanticId.StartsWith(TEXT("rig_element:control:"));
+			}
+			if (!bNeedsHierarchySpace)
+			{
+				return true;
+			}
 			const TSharedPtr<FJsonObject>* Space = nullptr;
 			const TSharedPtr<FJsonObject>* Transform = nullptr;
 			FString SubjectRef;
@@ -491,28 +443,25 @@ namespace UE::UAI::DomainAdapters::AnimationRigGraph
 					TEXT("animation_rig_graph_domain_space_transform_unsupported"),
 					SubjectRef);
 			}
-			const TArray<TSharedPtr<FJsonValue>>* Edits = nullptr;
-			if (!NativeParams.IsValid()
-				|| !NativeParams->TryGetArrayField(TEXT("edits"), Edits)
-				|| !Edits || Edits->IsEmpty())
-			{
-				return Fail(OutError,
-					TEXT("animation_rig_graph_domain_space_edit_required"),
-					CommandId);
-			}
 			for (const TSharedPtr<FJsonValue>& EditValue : *Edits)
 			{
 				const TSharedPtr<FJsonObject> Edit = EditValue.IsValid()
 					? EditValue->AsObject() : nullptr;
 				FString Intent;
+				FString SemanticId;
 				if (!Edit.IsValid()
-					|| !Edit->TryGetStringField(TEXT("intent"), Intent))
+					|| !Edit->TryGetStringField(TEXT("intent"), Intent)
+					|| !Edit->TryGetStringField(TEXT("semantic_id"), SemanticId))
 				{
 					return Fail(OutError,
 						TEXT("animation_rig_graph_domain_space_edit_invalid"),
 						CommandId);
 				}
-				if (Intent == TEXT("delete")) continue;
+				if (Intent == TEXT("delete")
+					|| !SemanticId.StartsWith(TEXT("rig_element:control:")))
+				{
+					continue;
+				}
 				const TSharedPtr<FJsonObject>* Value = nullptr;
 				FString ParentKey;
 				if (!Edit->TryGetObjectField(TEXT("value"), Value)
@@ -531,81 +480,172 @@ namespace UE::UAI::DomainAdapters::AnimationRigGraph
 
 		bool TryImport(
 			const FString& Target,
-			const TSharedPtr<FJsonObject>& Params,
+			const FString& CanonicalParamsJson,
 			FString& OutPayload,
 			FWorkspaceError& OutError)
 		{
-			TSharedPtr<FJsonObject> Root;
-			FString RootType;
-			if (!ParseDocument(Params, Root, RootType, OutError)) return false;
-			FString ExpectedRevision;
-			if (!Params->TryGetStringField(TEXT("expected_revision"), ExpectedRevision))
-			{
-				return Fail(OutError, TEXT("animation_rig_graph_domain_expected_revision_required"));
-			}
-			if (ExpectedRevision == TEXT("missing"))
-			{
-				return Fail(OutError, TEXT("animation_rig_graph_domain_root_create_not_registered"), Target);
-			}
-			FString BeforePayload;
-			FString CurrentRevision;
-			if (!TryRead(Target, BeforePayload, CurrentRevision, OutError)) return false;
-			if (ExpectedRevision != CurrentRevision)
-			{
-				return Fail(OutError, TEXT("animation_rig_graph_domain_stale_revision"), Target, CurrentRevision);
-			}
-			const TSharedPtr<FJsonObject>* Operation = nullptr;
-			const TSharedPtr<FJsonObject>* NativeParams = nullptr;
-			FString CommandId;
-			if (!Root->TryGetObjectField(TEXT("operation"), Operation)
-				|| !Operation || !Operation->IsValid()
-				|| !(*Operation)->TryGetStringField(TEXT("command_id"), CommandId)
-				|| !(*Operation)->TryGetObjectField(TEXT("params"), NativeParams)
-				|| !NativeParams || !NativeParams->IsValid())
-			{
-				return Fail(OutError, TEXT("animation_rig_graph_domain_operation_contract_required"));
-			}
-			if (!IsAllowedOperation(RootType, CommandId))
-			{
-				return Fail(OutError, TEXT("animation_rig_graph_domain_operation_not_supported"), CommandId);
-			}
-			if (!ValidateExplicitSpaceContract(
-					Root, CommandId, *NativeParams, OutError))
+			FResolvedDomainHjsonDocument Document;
+			if (!TryDecodeResolvedDocument(
+					Target,
+					CanonicalParamsJson,
+					FDomainHjsonDocumentContract(
+						TEXT("animation_rig_graph"),
+						SchemaId,
+						TArray<FString>{ControlRigBlueprintType,
+							IKRigDefinitionType, IKRetargeterType, SkeletonType}),
+					Document,
+					OutError))
 			{
 				return false;
 			}
-			FString NativeTarget;
-			if (!(*NativeParams)->TryGetStringField(TEXT("target_ref"), NativeTarget)
-				|| ObjectPathFromPackage(NativeTarget) != ObjectPathFromPackage(Target))
+			FString RootType;
+			if (!Document.Root.IsValid()
+				|| !Document.Root->TryGetStringField(TEXT("type"), RootType)
+				|| !IsSupportedRootType(RootType))
 			{
-				return Fail(OutError, TEXT("animation_rig_graph_domain_operation_target_mismatch"), CommandId);
+				return Fail(
+					OutError,
+					TEXT("animation_rig_graph_domain_schema_or_type_invalid"),
+					RootType);
 			}
-			FString MutationPayload;
-			if (!SubmitAnimationRigCommand(CommandId, *NativeParams, MutationPayload, OutError)) return false;
 
+			FString MutationPayload;
+			if (Document.ExpectedRevision == TEXT("missing"))
+			{
+				if (!ValidateMissingTarget(Target, OutError)) return false;
+				const TSharedPtr<FJsonObject>* Create = nullptr;
+				if (!Document.Root->TryGetObjectField(TEXT("create"), Create)
+					|| !Create || !Create->IsValid())
+				{
+					return Fail(
+						OutError,
+						TEXT("animation_rig_graph_domain_create_contract_required"));
+				}
+				if (Document.Root->HasField(TEXT("operation")))
+				{
+					return Fail(
+						OutError,
+						TEXT("animation_rig_graph_domain_create_then_edit_not_atomic"));
+				}
+				FString CreateCommandId;
+				TSharedPtr<FJsonObject> Native;
+				if (!TryBuildCreateParams(
+						Target, RootType, *Create,
+						CreateCommandId, Native, OutError)
+					|| !SubmitAnimationRigCommand(
+						CreateCommandId, Native, MutationPayload, OutError))
+				{
+					return false;
+				}
+			}
+			else
+			{
+				FString BeforePayload;
+				FString CurrentRevision;
+				if (!TryRead(
+						Target, BeforePayload, CurrentRevision, nullptr, OutError))
+				{
+					return false;
+				}
+				if (Document.ExpectedRevision != CurrentRevision)
+				{
+					return Fail(
+						OutError,
+						TEXT("animation_rig_graph_domain_stale_revision"),
+						Target,
+						CurrentRevision);
+				}
+				if (Document.Root->HasField(TEXT("create")))
+				{
+					return Fail(
+						OutError,
+						TEXT("animation_rig_graph_domain_create_requires_missing"));
+				}
+				const TSharedPtr<FJsonObject>* Operation = nullptr;
+				const TSharedPtr<FJsonObject>* NativeParams = nullptr;
+				FString CommandId;
+				if (!Document.Root->TryGetObjectField(
+						TEXT("operation"), Operation)
+					|| !Operation || !Operation->IsValid()
+					|| !(*Operation)->TryGetStringField(
+						TEXT("command_id"), CommandId)
+					|| !(*Operation)->TryGetObjectField(
+						TEXT("params"), NativeParams)
+					|| !NativeParams || !NativeParams->IsValid())
+				{
+					return Fail(
+						OutError,
+						TEXT("animation_rig_graph_domain_operation_contract_required"));
+				}
+				if (!IsAllowedOperation(RootType, CommandId))
+				{
+					return Fail(
+						OutError,
+						TEXT("animation_rig_graph_domain_operation_not_supported"),
+						CommandId);
+				}
+				const TSharedPtr<FJsonObject> Native =
+					MakeShared<FJsonObject>(**NativeParams);
+				FString NativeTarget;
+				if (Native->TryGetStringField(TEXT("target_ref"), NativeTarget)
+					&& ObjectPathFromPackageIdentity(NativeTarget)
+						!= ObjectPathFromPackageIdentity(Target))
+				{
+					return Fail(
+						OutError,
+						TEXT("animation_rig_graph_domain_operation_target_mismatch"),
+						CommandId);
+				}
+				Native->SetStringField(
+					TEXT("target_ref"), ObjectPathFromPackageIdentity(Target));
+				if (!ValidateExplicitSpaceContract(
+						Document.Root, CommandId, Native, OutError)
+					|| !TryNormalizeAnimationRigGraphCandidateBindings(
+						Target, Native, OutError)
+					|| !SubmitAnimationRigCommand(
+						CommandId, Native, MutationPayload, OutError))
+				{
+					return false;
+				}
+			}
+
+			TSharedPtr<FJsonObject> Mutation;
+			FDomainHjsonImportLifecycleReceipt LifecycleReceipt;
+			if (!ParseLifecycleMutation(
+					Target, MutationPayload, Mutation,
+					LifecycleReceipt, OutError))
+			{
+				return false;
+			}
 			FString AfterPayload;
 			FString AfterRevision;
-			if (!TryRead(Target, AfterPayload, AfterRevision, OutError)) return false;
-			TSharedPtr<FJsonObject> AfterObject;
-			FString JsonError;
-			if (!Json::TryParseObject(AfterPayload, AfterObject, JsonError) || !AfterObject.IsValid())
+			TSharedPtr<FJsonObject> AfterSnapshot;
+			if (!TryRead(
+					Target, AfterPayload, AfterRevision, &AfterSnapshot, OutError))
 			{
-				return Fail(OutError, TEXT("animation_rig_graph_domain_readback_payload_invalid"), JsonError);
+				return false;
 			}
-			const TSharedPtr<FJsonObject> Result = MakeShared<FJsonObject>();
-			Result->SetStringField(TEXT("terminal_status"), TEXT("succeeded"));
-			Result->SetStringField(TEXT("provider_id"), TEXT("animation-rig-graph-domain-provider"));
-			Result->SetStringField(TEXT("target"), Target);
-			Result->SetStringField(TEXT("revision"), AfterRevision);
-			Result->SetBoolField(TEXT("saved"), true);
-			Result->SetBoolField(TEXT("reloaded"), true);
-			Result->SetObjectField(TEXT("independent_readback"), AfterObject);
-			TSharedPtr<FJsonObject> Mutation;
-			if (Json::TryParseObject(MutationPayload, Mutation, JsonError) && Mutation.IsValid())
+			FString CompileStatus;
+			if (!AfterSnapshot.IsValid()
+				|| !AfterSnapshot->TryGetStringField(
+					TEXT("compile_status"), CompileStatus)
+				|| CompileStatus != TEXT("valid"))
 			{
-				Result->SetObjectField(TEXT("mutation"), Mutation);
+				return Fail(
+					OutError,
+					TEXT("animation_rig_graph_domain_compile_not_settled"),
+					Target,
+					CompileStatus);
 			}
-			return CanonicalObject(Result, OutPayload, OutError);
+			return TryBuildImportSuccessPayload(
+				TEXT("animation-rig-graph-domain-provider"),
+				Target,
+				AfterRevision,
+				LifecycleReceipt,
+				AfterSnapshot,
+				Mutation,
+				OutPayload,
+				OutError);
 		}
 	}
 
@@ -633,7 +673,7 @@ namespace UE::UAI::DomainAdapters::AnimationRigGraph
 		}
 		if (CommandId == TEXT("content_graph.import_workspace"))
 		{
-			return TryImport(Target, Params, OutPayloadJson, OutError);
+			return TryImport(Target, CanonicalParamsJson, OutPayloadJson, OutError);
 		}
 		if (CommandId == TEXT("content_graph.export_workspace"))
 		{
@@ -643,7 +683,7 @@ namespace UE::UAI::DomainAdapters::AnimationRigGraph
 		{
 			FString Revision;
 			bOutReadOnly = true;
-			return TryRead(Target, OutPayloadJson, Revision, OutError);
+			return TryRead(Target, OutPayloadJson, Revision, nullptr, OutError);
 		}
 		return Fail(OutError, TEXT("animation_rig_graph_domain_command_not_supported"), CommandId);
 	}

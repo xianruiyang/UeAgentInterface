@@ -43,4 +43,15 @@ namespace UE::UAI::QueryOwners::Pcg
 		FPcgNodeCandidateQueryError& OutError,
 		int32 Limit = 64,
 		int32 Cursor = 0);
+
+	UEAGENTINTERFACE_API bool IsCurrentPcgNodeCandidateBinding(
+		UObject& Target,
+		const FString& CandidateName,
+		const FString& CandidateKind,
+		const TArray<FString>& SupportedOperations,
+		const FString& InputContract,
+		const FString& PlacementContract,
+		const FString& RequiredContext,
+		const FString& BindingRevision,
+		FPcgNodeCandidateQueryError& OutError);
 }

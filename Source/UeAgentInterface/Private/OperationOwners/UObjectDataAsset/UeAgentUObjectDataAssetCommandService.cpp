@@ -291,6 +291,7 @@ namespace UE::UAI::OperationOwners::UObjectDataAsset
 			FString AssetName;
 			FString AuthorizationId;
 			FString SourceFingerprint;
+			FString SemanticFingerprint;
 			EImportSourceCarrier SourceCarrier = EImportSourceCarrier::Inline;
 			TArray<FNodeSpec> Nodes;
 			TMap<FString, int32> NodeIndexById;
@@ -306,12 +307,14 @@ namespace UE::UAI::OperationOwners::UObjectDataAsset
 			FString& OutDocument,
 			FString& OutSourceUnit,
 			FString& OutSourceFingerprint,
+			FString& OutSemanticFingerprint,
 			EImportSourceCarrier& OutCarrier,
 			FUeAgentUObjectDataAssetCommandError& OutError)
 		{
 			OutDocument.Reset();
 			OutSourceUnit.Reset();
 			OutSourceFingerprint.Reset();
+			OutSemanticFingerprint.Reset();
 			OutCarrier = EImportSourceCarrier::Inline;
 			if (!Params.IsValid()
 				|| Params->HasField(TEXT("carrier"))
@@ -346,6 +349,9 @@ namespace UE::UAI::OperationOwners::UObjectDataAsset
 				|| !(*Source)->TryGetStringField(
 					TEXT("source_fingerprint"),
 					OutSourceFingerprint)
+				|| !(*Source)->TryGetStringField(
+					TEXT("semantic_fingerprint"),
+					OutSemanticFingerprint)
 				|| TargetIdentity != ExpectedTarget
 				|| (Carrier == TEXT("directory")
 					&& BaseRevision != ExpectedRevision))
@@ -625,6 +631,7 @@ namespace UE::UAI::OperationOwners::UObjectDataAsset
 					DocumentText,
 					SourceUnit,
 					OutPrepared.SourceFingerprint,
+					OutPrepared.SemanticFingerprint,
 					OutPrepared.SourceCarrier,
 					OutError))
 			{
@@ -887,7 +894,7 @@ namespace UE::UAI::OperationOwners::UObjectDataAsset
 				Model.ToSharedRef(),
 				OutPrepared.Target,
 				FUeAgentStateRevision(TEXT("uobject-dataasset"), TEXT("absent"), 0),
-				OutPrepared.SourceFingerprint,
+				OutPrepared.SemanticFingerprint,
 				Sha256(ContractId + TEXT("|") + OutPrepared.Target),
 				MoveTemp(Changes),
 				MoveTemp(InitializationNodes),
@@ -2114,7 +2121,7 @@ namespace UE::UAI::OperationOwners::UObjectDataAsset
 				const Contract::FUeAgentDescriptorIdentity DescriptorIdentity(
 					TEXT("uai.query.content_graph.compound"),
 					1,
-					TEXT("sha256:18e5a1357c045a15637fce2f530a7b1d337a5b6cd8d2aac08c958e106d810065"));
+					TEXT("sha256:bbba63c3a8e78c2421a0ee18417cae4e0e03f354bbf076e64ad7c866fe92978a"));
 
 				const FUeAgentResourceTrackerOwner Resources =
 					MakeShared<FUeAgentResourceTracker, ESPMode::ThreadSafe>(

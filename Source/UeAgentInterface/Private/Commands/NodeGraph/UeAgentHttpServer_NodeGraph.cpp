@@ -1,6 +1,6 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
-#include "Server/UeAgentHttpServer.h"
+#include "LegacyMechanics/UeAgentLegacyMechanics.h"
 #include "UeAgentHttpServer_NodeGraphOps.h"
 
 #include "ControlRigBlueprint.h"
@@ -8,7 +8,7 @@
 #include "Materials/Material.h"
 #include "Materials/MaterialFunctionInterface.h"
 
-bool FUeAgentHttpServer::CmdNodeGraphList(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdNodeGraphList(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	FString AssetPathInput;
 	if (!JsonTryGetString(Ctx.Params, TEXT("asset_path"), AssetPathInput) || AssetPathInput.IsEmpty())
@@ -77,7 +77,7 @@ bool FUeAgentHttpServer::CmdNodeGraphList(const FUeAgentRequestContext& Ctx, TSh
 	return true;
 }
 
-bool FUeAgentHttpServer::CmdNodeGraphLayout(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdNodeGraphLayout(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	if (UeAgentNodeGraphOps::HasRemovedDryRunParameter(Ctx.Params))
 	{

@@ -112,6 +112,7 @@ namespace UE::UAI::CommandHandlers::Niagara
 		bool bReadOnly = false;
 		if (!DomainAdapters::Niagara::TryExecuteContentGraph(
 				Request.GetCommandId(), Request.GetTargetIdentity(),
+				Request.GetRootTypeIdentity(),
 				Request.GetCanonicalParamsJson(), Payload, bReadOnly, OutError))
 		{
 			return false;

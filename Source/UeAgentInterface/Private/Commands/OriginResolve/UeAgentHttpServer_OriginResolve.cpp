@@ -1,11 +1,11 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
-#include "Server/UeAgentHttpServer.h"
+#include "LegacyMechanics/UeAgentLegacyMechanics.h"
 
 #include "Commands/OriginResolve/UeAgentOriginResolveTypes.h"
 #include "Dom/JsonObject.h"
 
-bool FUeAgentHttpServer::CmdNodeOriginResolve(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdNodeOriginResolve(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	UeAgentOriginResolve::FResolveParams Params;
 	if (!UeAgentOriginResolve::ParseResolveParams(Ctx.Params, Params, OutError))

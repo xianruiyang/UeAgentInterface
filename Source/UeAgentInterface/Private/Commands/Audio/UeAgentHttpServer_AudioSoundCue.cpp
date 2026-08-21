@@ -1,6 +1,6 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
-#include "Server/UeAgentHttpServer.h"
+#include "LegacyMechanics/UeAgentLegacyMechanics.h"
 #include "Commands/Audio/UeAgentAudioFolderCommandBridge.h"
 #include "Commands/Audio/UeAgentHttpServer_AudioOps.h"
 #include "Dom/JsonObject.h"
@@ -8,11 +8,11 @@
 #include "Sound/SoundCue.h"
 #include "Subsystems/AssetEditorSubsystem.h"
 
-bool FUeAgentHttpServer::CmdSoundCueCreate(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdSoundCueCreate(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	return UeAgentAudioFolderCommandBridge::CreateSoundCue(Ctx.Params, OutData, OutError, Ctx.RequestId);
 }
-bool FUeAgentHttpServer::CmdSoundCueGetInfo(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdSoundCueGetInfo(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	using namespace UeAgentAudioOps;
 	FString AssetPath;
@@ -35,19 +35,19 @@ bool FUeAgentHttpServer::CmdSoundCueGetInfo(const FUeAgentRequestContext& Ctx, T
 	OutData = BuildSoundCueInfo(Cue, bIncludeNodes, bIncludeProperties, bIncludeValidation);
 	return true;
 }
-bool FUeAgentHttpServer::CmdSoundCueExportFolder(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdSoundCueExportFolder(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	return UeAgentAudioFolderCommandBridge::Export(UeAgentAudioAuthoring::EAssetKind::SoundCue, Ctx.Params, OutData, OutError);
 }
-bool FUeAgentHttpServer::CmdSoundCueValidateFolder(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdSoundCueValidateFolder(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	return UeAgentAudioFolderCommandBridge::Validate(UeAgentAudioAuthoring::EAssetKind::SoundCue, Ctx.Params, OutData, OutError);
 }
-bool FUeAgentHttpServer::CmdSoundCueApplyFolder(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdSoundCueApplyFolder(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	return UeAgentAudioFolderCommandBridge::Apply(UeAgentAudioAuthoring::EAssetKind::SoundCue, Ctx.Params, OutData, OutError, Ctx.RequestId);
 }
-bool FUeAgentHttpServer::CmdSoundCueOpenEditor(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdSoundCueOpenEditor(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	using namespace UeAgentAudioOps;
 	FString AssetPath;
@@ -78,7 +78,7 @@ bool FUeAgentHttpServer::CmdSoundCueOpenEditor(const FUeAgentRequestContext& Ctx
 	OutData->SetBoolField(TEXT("opened"), true);
 	return true;
 }
-bool FUeAgentHttpServer::CmdSoundCueScreenshot(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdSoundCueScreenshot(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	using namespace UeAgentAudioOps;
 	FString AssetPath;
@@ -122,7 +122,7 @@ bool FUeAgentHttpServer::CmdSoundCueScreenshot(const FUeAgentRequestContext& Ctx
 	OutData->SetNumberField(TEXT("node_count"), Cue->AllNodes.Num());
 	return true;
 }
-bool FUeAgentHttpServer::CmdSoundCuePreview(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdSoundCuePreview(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	FUeAgentRequestContext RuntimeCtx = Ctx;
 	return CmdAudioRuntimeProbe(RuntimeCtx, OutData, OutError);

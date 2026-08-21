@@ -59,7 +59,7 @@ namespace
 	}
 }
 
-bool FUeAgentHttpServer::CmdUmgExportFolder(
+bool FUeAgentLegacyMechanics::CmdUmgExportFolder(
 	const FUeAgentRequestContext& Ctx,
 	TSharedPtr<FJsonObject>& OutData,
 	FString& OutError) const
@@ -105,7 +105,7 @@ bool FUeAgentHttpServer::CmdUmgExportFolder(
 	return true;
 }
 
-bool FUeAgentHttpServer::CmdUmgApplyFolder(
+bool FUeAgentLegacyMechanics::CmdUmgApplyFolder(
 	const FUeAgentRequestContext& Ctx,
 	TSharedPtr<FJsonObject>& OutData,
 	FString& OutError) const

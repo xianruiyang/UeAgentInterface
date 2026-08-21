@@ -185,7 +185,7 @@
     {
       "descriptor_id": "uai.query.content_graph.compound",
       "version": 1,
-      "descriptor_hash": "sha256:5115bd528cefb896dccc1a6f5861f0e2fe99d12ce218790184c16571903a2f36",
+      "descriptor_hash": "sha256:bbba63c3a8e78c2421a0ee18417cae4e0e03f354bbf076e64ad7c866fe92978a",
       "capability_id": "content_graph.compound.read",
       "provider_binding": "content_graph.read.compound",
       "query_kind": "state",
@@ -208,9 +208,22 @@
             "items": {"type": "string", "minLength": 1},
             "uniqueItems": true
           },
-          "include_closure": {"type": "boolean"}
+          "include_closure": {"type": "boolean"},
+          "localization_capability": {
+            "type": "string",
+            "enum": [
+              "localization.diff",
+              "localization.target.read",
+              "localization.culture.read",
+              "localization.query_targets",
+              "localization.report",
+              "localization.validate",
+              "string_table.diff",
+              "string_table.validate"
+            ]
+          },
+          "parameters": {"type": "object"}
         },
-        "required": ["sections"],
         "additionalProperties": false
       },
       "result_schema": {"type": "object"}

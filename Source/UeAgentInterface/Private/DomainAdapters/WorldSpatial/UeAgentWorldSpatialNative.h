@@ -10,7 +10,7 @@ class UObject;
 class UGeometrySelectionManager;
 class UPrimitiveComponent;
 
-#define UAI_WORLD_SPATIAL_NATIVE_PORTS_V1 1
+#define UAI_WORLD_SPATIAL_NATIVE_PORTS_V2 1
 
 namespace UE::UAI::DomainAdapters::WorldSpatial
 {
@@ -46,6 +46,10 @@ namespace UE::UAI::DomainAdapters::WorldSpatial
 		virtual bool TryGetExplicitObjectRef(
 			const UObject* Object,
 			FString& OutExplicitRef,
+			FUeAgentWorldSpatialExecutionError& OutError) = 0;
+
+		virtual bool TryPersistObject(
+			UObject& Object,
 			FUeAgentWorldSpatialExecutionError& OutError) = 0;
 
 		virtual bool TryResolveMeshSelectionSession(

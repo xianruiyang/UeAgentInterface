@@ -373,7 +373,7 @@ namespace UeAgentUmgScreenshotOps
 	}
 }
 
-bool FUeAgentHttpServer::CmdUmgScreenshot(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdUmgScreenshot(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	using namespace UeAgentUmgScreenshotOps;
 

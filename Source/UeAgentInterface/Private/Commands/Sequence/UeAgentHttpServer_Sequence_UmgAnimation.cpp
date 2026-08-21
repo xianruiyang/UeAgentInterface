@@ -97,7 +97,7 @@
 #include "UeAgentInterfaceSettings.h"
 #include "WidgetBlueprint.h"
 
-bool FUeAgentHttpServer::CmdSequenceListUmgAnimations(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdSequenceListUmgAnimations(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	FString AssetPath;
 	if (!JsonTryGetString(Ctx.Params, TEXT("asset_path"), AssetPath) || AssetPath.IsEmpty())
@@ -144,7 +144,7 @@ bool FUeAgentHttpServer::CmdSequenceListUmgAnimations(const FUeAgentRequestConte
 	return true;
 }
 
-bool FUeAgentHttpServer::CmdSequenceGetUmgAnimationInfo(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdSequenceGetUmgAnimationInfo(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	FString AssetPath;
 	if (!JsonTryGetString(Ctx.Params, TEXT("asset_path"), AssetPath) || AssetPath.IsEmpty())
@@ -231,7 +231,7 @@ bool FUeAgentHttpServer::CmdSequenceGetUmgAnimationInfo(const FUeAgentRequestCon
 	return true;
 }
 
-bool FUeAgentHttpServer::CmdSequenceCreateUmgAnimation(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdSequenceCreateUmgAnimation(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	FString AssetPath;
 	if (!JsonTryGetString(Ctx.Params, TEXT("asset_path"), AssetPath) || AssetPath.IsEmpty())
@@ -314,7 +314,7 @@ bool FUeAgentHttpServer::CmdSequenceCreateUmgAnimation(const FUeAgentRequestCont
 	return true;
 }
 
-bool FUeAgentHttpServer::CmdSequenceRenameUmgAnimation(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdSequenceRenameUmgAnimation(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	FString AssetPath;
 	if (!JsonTryGetString(Ctx.Params, TEXT("asset_path"), AssetPath) || AssetPath.IsEmpty())
@@ -406,7 +406,7 @@ bool FUeAgentHttpServer::CmdSequenceRenameUmgAnimation(const FUeAgentRequestCont
 	return true;
 }
 
-bool FUeAgentHttpServer::CmdSequenceRemoveUmgAnimation(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdSequenceRemoveUmgAnimation(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	FString AssetPath;
 	if (!JsonTryGetString(Ctx.Params, TEXT("asset_path"), AssetPath) || AssetPath.IsEmpty())
@@ -468,7 +468,7 @@ bool FUeAgentHttpServer::CmdSequenceRemoveUmgAnimation(const FUeAgentRequestCont
 	return true;
 }
 
-bool FUeAgentHttpServer::CmdSequenceSetUmgAnimationPlaybackRange(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdSequenceSetUmgAnimationPlaybackRange(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	FString AssetPath;
 	if (!JsonTryGetString(Ctx.Params, TEXT("asset_path"), AssetPath) || AssetPath.IsEmpty())
@@ -549,7 +549,7 @@ bool FUeAgentHttpServer::CmdSequenceSetUmgAnimationPlaybackRange(const FUeAgentR
 	return true;
 }
 
-bool FUeAgentHttpServer::CmdSequenceSetUmgAnimationDisplayRate(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdSequenceSetUmgAnimationDisplayRate(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	FString AssetPath;
 	if (!JsonTryGetString(Ctx.Params, TEXT("asset_path"), AssetPath) || AssetPath.IsEmpty())
@@ -627,7 +627,7 @@ bool FUeAgentHttpServer::CmdSequenceSetUmgAnimationDisplayRate(const FUeAgentReq
 	return true;
 }
 
-bool FUeAgentHttpServer::CmdSequenceAddUmgWidgetTransformKey(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdSequenceAddUmgWidgetTransformKey(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	FString AssetPath;
 	if (!JsonTryGetString(Ctx.Params, TEXT("asset_path"), AssetPath) || AssetPath.IsEmpty())
@@ -809,7 +809,7 @@ bool FUeAgentHttpServer::CmdSequenceAddUmgWidgetTransformKey(const FUeAgentReque
 	return true;
 }
 
-bool FUeAgentHttpServer::CmdSequenceAddUmgWidgetTranslationKey(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdSequenceAddUmgWidgetTranslationKey(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	FString AssetPath;
 	if (!JsonTryGetString(Ctx.Params, TEXT("asset_path"), AssetPath) || AssetPath.IsEmpty())
@@ -991,7 +991,7 @@ bool FUeAgentHttpServer::CmdSequenceAddUmgWidgetTranslationKey(const FUeAgentReq
 	return true;
 }
 
-bool FUeAgentHttpServer::CmdSequenceAddUmgWidgetOpacityKey(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdSequenceAddUmgWidgetOpacityKey(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	FString AssetPath;
 	if (!JsonTryGetString(Ctx.Params, TEXT("asset_path"), AssetPath) || AssetPath.IsEmpty())
@@ -1110,7 +1110,7 @@ bool FUeAgentHttpServer::CmdSequenceAddUmgWidgetOpacityKey(const FUeAgentRequest
 	return true;
 }
 
-bool FUeAgentHttpServer::CmdSequenceAddUmgWidgetFloatKey(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdSequenceAddUmgWidgetFloatKey(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	FString AssetPath;
 	if (!JsonTryGetString(Ctx.Params, TEXT("asset_path"), AssetPath) || AssetPath.IsEmpty())
@@ -1247,7 +1247,7 @@ bool FUeAgentHttpServer::CmdSequenceAddUmgWidgetFloatKey(const FUeAgentRequestCo
 	return true;
 }
 
-bool FUeAgentHttpServer::CmdSequenceAddUmgWidgetColorKey(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdSequenceAddUmgWidgetColorKey(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	FString AssetPath;
 	if (!JsonTryGetString(Ctx.Params, TEXT("asset_path"), AssetPath) || AssetPath.IsEmpty())

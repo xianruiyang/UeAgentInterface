@@ -1548,7 +1548,7 @@ namespace UeAgentDeformerOps
 	}
 }
 
-bool FUeAgentHttpServer::ExecuteGeometryCacheCommand(const FString& CommandLower, const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::ExecuteGeometryCacheCommand(const FString& CommandLower, const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	if (CommandLower == TEXT("geometry_cache_get_info")) return CmdGeometryCacheGetInfo(Ctx, OutData, OutError);
 	if (CommandLower == TEXT("geometry_cache_validate_against_skeletal_mesh")) return CmdGeometryCacheValidateAgainstSkeletalMesh(Ctx, OutData, OutError);
@@ -1557,7 +1557,7 @@ bool FUeAgentHttpServer::ExecuteGeometryCacheCommand(const FString& CommandLower
 	return false;
 }
 
-bool FUeAgentHttpServer::ExecuteDeformerGraphCommand(const FString& CommandLower, const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::ExecuteDeformerGraphCommand(const FString& CommandLower, const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	if (CommandLower == TEXT("deformer_graph_create")) return CmdDeformerGraphCreate(Ctx, OutData, OutError);
 	if (CommandLower == TEXT("deformer_graph_get_info")) return CmdDeformerGraphGetInfo(Ctx, OutData, OutError);
@@ -1570,7 +1570,7 @@ bool FUeAgentHttpServer::ExecuteDeformerGraphCommand(const FString& CommandLower
 	return false;
 }
 
-bool FUeAgentHttpServer::ExecuteDeformerSourceLibraryCommand(const FString& CommandLower, const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::ExecuteDeformerSourceLibraryCommand(const FString& CommandLower, const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	if (CommandLower == TEXT("deformer_source_library_create")) return CmdDeformerSourceLibraryCreate(Ctx, OutData, OutError);
 	if (CommandLower == TEXT("deformer_source_library_export_json")) return CmdDeformerSourceLibraryExportJson(Ctx, OutData, OutError);
@@ -1580,7 +1580,7 @@ bool FUeAgentHttpServer::ExecuteDeformerSourceLibraryCommand(const FString& Comm
 	return false;
 }
 
-bool FUeAgentHttpServer::ExecuteMeshDeformerCollectionCommand(const FString& CommandLower, const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::ExecuteMeshDeformerCollectionCommand(const FString& CommandLower, const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	if (CommandLower == TEXT("mesh_deformer_collection_create")) return CmdMeshDeformerCollectionCreate(Ctx, OutData, OutError);
 	if (CommandLower == TEXT("mesh_deformer_collection_export_json")) return CmdMeshDeformerCollectionExportJson(Ctx, OutData, OutError);
@@ -1590,7 +1590,7 @@ bool FUeAgentHttpServer::ExecuteMeshDeformerCollectionCommand(const FString& Com
 	return false;
 }
 
-bool FUeAgentHttpServer::ExecuteMLDeformerCommand(const FString& CommandLower, const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::ExecuteMLDeformerCommand(const FString& CommandLower, const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	if (CommandLower == TEXT("ml_deformer_create")) return CmdMLDeformerCreate(Ctx, OutData, OutError);
 	if (CommandLower == TEXT("ml_deformer_get_info")) return CmdMLDeformerGetInfo(Ctx, OutData, OutError);
@@ -1605,7 +1605,7 @@ bool FUeAgentHttpServer::ExecuteMLDeformerCommand(const FString& CommandLower, c
 	return false;
 }
 
-bool FUeAgentHttpServer::CmdAssetImportGeometryCache(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdAssetImportGeometryCache(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	bool bReplaceExisting = false;
 	bool bAllowOverwrite = false;
@@ -1667,7 +1667,7 @@ bool FUeAgentHttpServer::CmdAssetImportGeometryCache(const FUeAgentRequestContex
 	return Imported.Num() > 0;
 }
 
-bool FUeAgentHttpServer::CmdGeometryCacheGetInfo(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdGeometryCacheGetInfo(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	FString AssetPath;
 	if (!JsonTryGetString(Ctx.Params, TEXT("asset_path"), AssetPath) || AssetPath.TrimStartAndEnd().IsEmpty())
@@ -1699,7 +1699,7 @@ bool FUeAgentHttpServer::CmdGeometryCacheGetInfo(const FUeAgentRequestContext& C
 	return true;
 }
 
-bool FUeAgentHttpServer::CmdGeometryCacheValidateAgainstSkeletalMesh(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdGeometryCacheValidateAgainstSkeletalMesh(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	FString GeometryCachePath;
 	FString SkeletalMeshPath;
@@ -1770,7 +1770,7 @@ bool FUeAgentHttpServer::CmdGeometryCacheValidateAgainstSkeletalMesh(const FUeAg
 	return GeometryCache && SkeletalMesh;
 }
 
-bool FUeAgentHttpServer::CmdGeometryCacheScreenshotFrame(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdGeometryCacheScreenshotFrame(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	FString AssetPath;
 	if (!JsonTryGetString(Ctx.Params, TEXT("asset_path"), AssetPath) || AssetPath.TrimStartAndEnd().IsEmpty())
@@ -1835,7 +1835,7 @@ bool FUeAgentHttpServer::CmdGeometryCacheScreenshotFrame(const FUeAgentRequestCo
 	return true;
 }
 
-bool FUeAgentHttpServer::CmdDeformerGraphCreate(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdDeformerGraphCreate(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	TArray<TSharedPtr<FJsonValue>> Classes;
 	const FString DefaultClassPath = UeAgentDeformerOps::ResolveFirstAvailableClassPath(TEXT("deformer_graph"), Classes);
@@ -1844,7 +1844,7 @@ bool FUeAgentHttpServer::CmdDeformerGraphCreate(const FUeAgentRequestContext& Ct
 	return bOk;
 }
 
-bool FUeAgentHttpServer::CmdDeformerGraphGetInfo(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdDeformerGraphGetInfo(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	FString AssetPath;
 	if (!JsonTryGetString(Ctx.Params, TEXT("asset_path"), AssetPath) || AssetPath.TrimStartAndEnd().IsEmpty())
@@ -1872,22 +1872,22 @@ bool FUeAgentHttpServer::CmdDeformerGraphGetInfo(const FUeAgentRequestContext& C
 	return true;
 }
 
-bool FUeAgentHttpServer::CmdDeformerGraphExportFolder(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdDeformerGraphExportFolder(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	return UeAgentReflectionAuthoringCommandBridge::Export(TEXT("deformer_graph"), Ctx.Params, OutData, OutError);
 }
 
-bool FUeAgentHttpServer::CmdDeformerGraphValidateFolder(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdDeformerGraphValidateFolder(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	return UeAgentReflectionAuthoringCommandBridge::Validate(TEXT("deformer_graph"), Ctx.Params, OutData, OutError);
 }
 
-bool FUeAgentHttpServer::CmdDeformerGraphApplyFolder(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdDeformerGraphApplyFolder(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	return UeAgentReflectionAuthoringCommandBridge::Apply(TEXT("deformer_graph"), Ctx.Params, OutData, OutError, Ctx.RequestId);
 }
 
-bool FUeAgentHttpServer::CmdDeformerGraphCompile(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdDeformerGraphCompile(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	if (!CmdDeformerGraphGetInfo(Ctx, OutData, OutError))
 	{
@@ -1924,7 +1924,7 @@ bool FUeAgentHttpServer::CmdDeformerGraphCompile(const FUeAgentRequestContext& C
 	return bCompileOk;
 }
 
-bool FUeAgentHttpServer::CmdDeformerGraphGetCompileLog(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdDeformerGraphGetCompileLog(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	if (!CmdDeformerGraphGetInfo(Ctx, OutData, OutError))
 	{
@@ -1940,7 +1940,7 @@ bool FUeAgentHttpServer::CmdDeformerGraphGetCompileLog(const FUeAgentRequestCont
 	return Deformer != nullptr;
 }
 
-bool FUeAgentHttpServer::CmdDeformerSourceLibraryCreate(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdDeformerSourceLibraryCreate(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	FString ClassPath;
 	JsonTryGetString(Ctx.Params, TEXT("class_path"), ClassPath);
@@ -1954,7 +1954,7 @@ bool FUeAgentHttpServer::CmdDeformerSourceLibraryCreate(const FUeAgentRequestCon
 	return UeAgentDeformerOps::CreateAssetByClassPath(Ctx, TEXT("deformer_source_library"), ClassPath, OutData, OutError);
 }
 
-bool FUeAgentHttpServer::CmdDeformerSourceLibraryExportJson(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdDeformerSourceLibraryExportJson(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	FString AssetPath;
 	if (!JsonTryGetString(Ctx.Params, TEXT("asset_path"), AssetPath) || AssetPath.TrimStartAndEnd().IsEmpty()) { OutError = TEXT("missing_asset_path"); return false; }
@@ -1976,7 +1976,7 @@ bool FUeAgentHttpServer::CmdDeformerSourceLibraryExportJson(const FUeAgentReques
 	return true;
 }
 
-bool FUeAgentHttpServer::CmdDeformerSourceLibraryValidateJson(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdDeformerSourceLibraryValidateJson(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	TArray<TSharedPtr<FJsonValue>> Issues;
 	TSharedPtr<FJsonObject> JsonRoot;
@@ -2005,7 +2005,7 @@ bool FUeAgentHttpServer::CmdDeformerSourceLibraryValidateJson(const FUeAgentRequ
 	return bOk;
 }
 
-bool FUeAgentHttpServer::CmdDeformerSourceLibraryApplyJson(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdDeformerSourceLibraryApplyJson(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	TArray<TSharedPtr<FJsonValue>> Issues;
 	TSharedPtr<FJsonObject> JsonRoot;
@@ -2073,7 +2073,7 @@ bool FUeAgentHttpServer::CmdDeformerSourceLibraryApplyJson(const FUeAgentRequest
 	return true;
 }
 
-bool FUeAgentHttpServer::CmdMeshDeformerCollectionCreate(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdMeshDeformerCollectionCreate(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	TArray<TSharedPtr<FJsonValue>> Classes;
 	const FString DefaultClassPath = UeAgentDeformerOps::ResolveFirstAvailableClassPath(TEXT("mesh_deformer_collection"), Classes);
@@ -2082,7 +2082,7 @@ bool FUeAgentHttpServer::CmdMeshDeformerCollectionCreate(const FUeAgentRequestCo
 	return bOk;
 }
 
-bool FUeAgentHttpServer::CmdMeshDeformerCollectionExportJson(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdMeshDeformerCollectionExportJson(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	FString AssetPath;
 	if (!JsonTryGetString(Ctx.Params, TEXT("asset_path"), AssetPath) || AssetPath.TrimStartAndEnd().IsEmpty()) { OutError = TEXT("missing_asset_path"); return false; }
@@ -2104,17 +2104,17 @@ bool FUeAgentHttpServer::CmdMeshDeformerCollectionExportJson(const FUeAgentReque
 	return true;
 }
 
-bool FUeAgentHttpServer::CmdMeshDeformerCollectionValidateJson(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdMeshDeformerCollectionValidateJson(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	return CmdDeformerSourceLibraryValidateJson(Ctx, OutData, OutError);
 }
 
-bool FUeAgentHttpServer::CmdMeshDeformerCollectionApplyJson(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdMeshDeformerCollectionApplyJson(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	return CmdDeformerSourceLibraryApplyJson(Ctx, OutData, OutError);
 }
 
-bool FUeAgentHttpServer::CmdMLDeformerCreate(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdMLDeformerCreate(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	TArray<TSharedPtr<FJsonValue>> Classes;
 	const FString DefaultClassPath = UeAgentDeformerOps::ResolveFirstAvailableClassPath(TEXT("ml_deformer"), Classes);
@@ -2123,7 +2123,7 @@ bool FUeAgentHttpServer::CmdMLDeformerCreate(const FUeAgentRequestContext& Ctx, 
 	return bOk;
 }
 
-bool FUeAgentHttpServer::CmdMLDeformerGetInfo(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdMLDeformerGetInfo(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	FString AssetPath;
 	if (!JsonTryGetString(Ctx.Params, TEXT("asset_path"), AssetPath) || AssetPath.TrimStartAndEnd().IsEmpty()) { OutError = TEXT("missing_asset_path"); return false; }
@@ -2133,7 +2133,7 @@ bool FUeAgentHttpServer::CmdMLDeformerGetInfo(const FUeAgentRequestContext& Ctx,
 	return true;
 }
 
-bool FUeAgentHttpServer::CmdMLDeformerExportJson(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdMLDeformerExportJson(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	FString AssetPath;
 	if (!JsonTryGetString(Ctx.Params, TEXT("asset_path"), AssetPath) || AssetPath.TrimStartAndEnd().IsEmpty()) { OutError = TEXT("missing_asset_path"); return false; }
@@ -2171,7 +2171,7 @@ bool FUeAgentHttpServer::CmdMLDeformerExportJson(const FUeAgentRequestContext& C
 	return true;
 }
 
-bool FUeAgentHttpServer::CmdMLDeformerValidateJson(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdMLDeformerValidateJson(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	TArray<TSharedPtr<FJsonValue>> Issues;
 	TSharedPtr<FJsonObject> JsonRoot;
@@ -2200,7 +2200,7 @@ bool FUeAgentHttpServer::CmdMLDeformerValidateJson(const FUeAgentRequestContext&
 	return bOk;
 }
 
-bool FUeAgentHttpServer::CmdMLDeformerApplyJson(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdMLDeformerApplyJson(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	const bool bOk = CmdDeformerSourceLibraryApplyJson(Ctx, OutData, OutError);
 	OutData->SetStringField(TEXT("training_status"), TEXT("no_training_started"));
@@ -2208,7 +2208,7 @@ bool FUeAgentHttpServer::CmdMLDeformerApplyJson(const FUeAgentRequestContext& Ct
 	return bOk;
 }
 
-bool FUeAgentHttpServer::CmdMLDeformerValidateTrainingInputs(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdMLDeformerValidateTrainingInputs(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	auto ReadStringAlias = [this, &Ctx](std::initializer_list<const TCHAR*> Aliases, FString& OutValue) -> bool
 	{
@@ -2369,7 +2369,7 @@ bool FUeAgentHttpServer::CmdMLDeformerValidateTrainingInputs(const FUeAgentReque
 	return true;
 }
 
-bool FUeAgentHttpServer::CmdMLDeformerGetTrainingLog(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdMLDeformerGetTrainingLog(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	FString LogFile;
 	if (JsonTryGetString(Ctx.Params, TEXT("log_file"), LogFile) && !LogFile.TrimStartAndEnd().IsEmpty())
@@ -2387,7 +2387,7 @@ bool FUeAgentHttpServer::CmdMLDeformerGetTrainingLog(const FUeAgentRequestContex
 	return true;
 }
 
-bool FUeAgentHttpServer::CmdMLDeformerTrain(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdMLDeformerTrain(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	bool bExplicitConfirm = false;
 	JsonTryGetBool(Ctx.Params, TEXT("confirm_long_running_training"), bExplicitConfirm);
@@ -2398,7 +2398,7 @@ bool FUeAgentHttpServer::CmdMLDeformerTrain(const FUeAgentRequestContext& Ctx, T
 	return true;
 }
 
-bool FUeAgentHttpServer::CmdMLDeformerPreview(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdMLDeformerPreview(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	OutData->SetObjectField(TEXT("plugin_status"), UeAgentDeformerOps::MakePluginStatusJson());
 	OutData->SetStringField(TEXT("status"), TEXT("preview_adapter_not_available"));

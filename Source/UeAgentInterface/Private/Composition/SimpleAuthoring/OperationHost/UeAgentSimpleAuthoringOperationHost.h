@@ -2,6 +2,7 @@
 
 #include "CommandEdge/UeAgentCommandDispatch.h"
 #include "Core/DomainCapability/UeAgentDomainCapability.h"
+#include "Core/Discovery/UeAgentDiscovery.h"
 
 class UWorld;
 
@@ -15,6 +16,16 @@ namespace UE::UAI::Composition::SimpleAuthoring::OperationHost
 	UEAGENTINTERFACE_API bool TryResolveHandler(
 		const FString& CommandId,
 		TSharedPtr<CommandEdge::IUeAgentCommandHandler>& OutHandler,
+		FString& OutError);
+
+	/**
+	 * Resolves one catalog kind from the same process-owned SimpleAuthoring
+	 * runtime used by mutation planning. Query owners may project that catalog,
+	 * but may not construct or cache a second catalog owner.
+	 */
+	UEAGENTINTERFACE_API bool TryResolveCatalogSource(
+		const FString& CatalogKind,
+		TSharedPtr<Discovery::IUeAgentCatalogSource>& OutSource,
 		FString& OutError);
 
 	/**

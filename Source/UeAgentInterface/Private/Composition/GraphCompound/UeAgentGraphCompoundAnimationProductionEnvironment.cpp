@@ -1496,12 +1496,34 @@ namespace UE::UAI::Composition::GraphCompound
 		bool TrySerializeResult(
 			const FString& TargetRef,
 			const FString& Revision,
+			const FString& PersistenceReceiptId,
+			const FString& ReadbackEvidenceId,
 			FUeAgentContractValue& OutResult,
 			FGraphCompoundRuntimeError& OutError)
 		{
+			if (TargetRef.IsEmpty()
+				|| Revision.IsEmpty()
+				|| PersistenceReceiptId.IsEmpty()
+				|| ReadbackEvidenceId.IsEmpty())
+			{
+				SetError(
+					OutError,
+					TEXT("graph_compound_animation_lifecycle_receipt_invalid"),
+					TargetRef);
+				return false;
+			}
 			const TSharedRef<FJsonObject> Object = MakeShared<FJsonObject>();
+			Object->SetStringField(TEXT("terminal_status"), TEXT("succeeded"));
 			Object->SetStringField(TEXT("target_ref"), TargetRef);
 			Object->SetStringField(TEXT("revision"), Revision);
+			Object->SetBoolField(TEXT("mutation_applied"), true);
+			Object->SetBoolField(TEXT("compile_settled"), true);
+			Object->SetBoolField(TEXT("saved"), true);
+			Object->SetBoolField(TEXT("reloaded"), true);
+			Object->SetStringField(
+				TEXT("persistence_receipt_id"), PersistenceReceiptId);
+			Object->SetStringField(
+				TEXT("independent_readback_evidence_id"), ReadbackEvidenceId);
 			FString Canonical;
 			FString JsonError;
 			if (!Json::TryCanonicalize(Object, Canonical, JsonError))
@@ -1801,7 +1823,9 @@ namespace UE::UAI::Composition::GraphCompound
 					return false;
 				}
 				return TrySerializeResult(
-					Request.GetTargetRef(), Revision, OutResult, OutError);
+					Request.GetTargetRef(), Revision,
+					DurableReceipt.GetJournalId(), Outcome.GetEvidenceId(),
+					OutResult, OutError);
 			}
 
 		private:

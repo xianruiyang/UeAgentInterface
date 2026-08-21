@@ -46,19 +46,14 @@ namespace UE::UAI::Composition::TimelineSpatial
 			FCriticalSection Mutex;
 			TMap<FString, TSharedRef<IUeAgentCommandHandler>> Handlers;
 			TArray<FString> AuthorityScopes;
+			TWeakObjectPtr<UWorld> BoundWorld;
+			FString SessionId;
 		};
 
 		FProcessHost& ProcessHost()
 		{
 			static FProcessHost Host;
 			return Host;
-		}
-
-		const FString& ProcessMechanicsSessionId()
-		{
-			static const FString SessionId = TEXT("timeline-spatial-mechanics-session:")
-				+ FGuid::NewGuid().ToString(EGuidFormats::DigitsWithHyphensLower);
-			return SessionId;
 		}
 
 		class FConservativeTokenEstimator final : public IUeAgentTokenEstimator
@@ -821,6 +816,8 @@ namespace UE::UAI::Composition::TimelineSpatial
 		}
 
 		bool TryCreateMechanics(
+			UWorld& World,
+			const FString& SessionId,
 			TMap<FString, TSharedRef<IUeAgentCommandHandler>>& OutHandlers,
 			TArray<FString>& OutScopes,
 			FString& OutError,
@@ -834,14 +831,12 @@ namespace UE::UAI::Composition::TimelineSpatial
 				OutError = TEXT("timeline_spatial_mechanics_game_thread_required");
 				return false;
 			}
-			UWorld* const World = GEditor ? GEditor->GetEditorWorldContext().World() : nullptr;
-			if (!World)
+			if (!IsValid(&World) || SessionId.IsEmpty())
 			{
-				OutError = TEXT("timeline_spatial_mechanics_editor_world_unavailable");
+				OutError = TEXT("timeline_spatial_mechanics_context_invalid");
 				return false;
 			}
 
-			const FString& SessionId = ProcessMechanicsSessionId();
 			TSharedPtr<const FUeAgentOperationTicketService> Tickets;
 			FUeAgentOperationTicketError TicketError;
 			if (!FUeAgentOperationTicketService::TryCreate(
@@ -876,7 +871,7 @@ namespace UE::UAI::Composition::TimelineSpatial
 			TSharedPtr<FUeAgentSimpleAuthoringRuntime> SimpleRuntime;
 			FUeAgentSimpleAuthoringRuntimeError SimpleError;
 			if (!FUeAgentSimpleAuthoringRuntime::TryCreate(
-					SimpleConfig, *World, Tickets.ToSharedRef(), Projector.ToSharedRef(),
+					SimpleConfig, World, Tickets.ToSharedRef(), Projector.ToSharedRef(),
 					SimpleRuntime, SimpleError)
 				|| !SimpleRuntime.IsValid())
 			{
@@ -901,14 +896,14 @@ namespace UE::UAI::Composition::TimelineSpatial
 			RuntimeConfig.TimeoutSeconds = 120.0;
 			RuntimeConfig.MaxFrameBytes = 16 * 1024 * 1024;
 			if (BoundRequest
-				&& !ConfigureRequestBindings(*BoundRequest, *World, RuntimeConfig, OutError))
+				&& !ConfigureRequestBindings(*BoundRequest, World, RuntimeConfig, OutError))
 			{
 				return false;
 			}
 			TSharedPtr<FUeAgentTimelineSpatialRuntime> Runtime;
 			FUeAgentTimelineSpatialRuntimeError RuntimeError;
 			if (!FUeAgentTimelineSpatialRuntime::TryCreate(
-					RuntimeConfig, *World, Tickets.ToSharedRef(), Discovery.ToSharedRef(),
+					RuntimeConfig, World, Tickets.ToSharedRef(), Discovery.ToSharedRef(),
 					Projector.ToSharedRef(), Runtime, RuntimeError)
 				|| !Runtime.IsValid())
 			{
@@ -973,8 +968,15 @@ namespace UE::UAI::Composition::TimelineSpatial
 		class FRequestBoundMechanicsHandler final : public IUeAgentCommandHandler
 		{
 		public:
-			explicit FRequestBoundMechanicsHandler(FString InCommandId)
-				: CommandId(MoveTemp(InCommandId)) {}
+			FRequestBoundMechanicsHandler(
+				FString InCommandId,
+				UWorld& InWorld,
+				FString InSessionId)
+				: CommandId(MoveTemp(InCommandId))
+				, BoundWorld(&InWorld)
+				, SessionId(MoveTemp(InSessionId))
+			{
+			}
 
 			const FString& GetCommandId() const override { return CommandId; }
 
@@ -986,8 +988,25 @@ namespace UE::UAI::Composition::TimelineSpatial
 				TMap<FString, TSharedRef<IUeAgentCommandHandler>> Handlers;
 				TArray<FString> Scopes;
 				FString Error;
+				UWorld* const World = BoundWorld.Get();
+				UWorld* const CurrentWorld = IsInGameThread() && GEditor
+					? GEditor->GetEditorWorldContext().World()
+					: nullptr;
 				if (Request.GetCommandId() != CommandId
-					|| !TryCreateMechanics(Handlers, Scopes, Error, &Request))
+					|| !World
+					|| CurrentWorld != World)
+				{
+					return RequestBindingFailure(
+						Request,
+						TEXT("timeline_spatial_request_bound_world_changed"));
+				}
+				if (!TryCreateMechanics(
+						*World,
+						SessionId,
+						Handlers,
+						Scopes,
+						Error,
+						&Request))
 				{
 					return RequestBindingFailure(Request, Error);
 				}
@@ -1000,6 +1019,8 @@ namespace UE::UAI::Composition::TimelineSpatial
 
 		private:
 			FString CommandId;
+			TWeakObjectPtr<UWorld> BoundWorld;
+			FString SessionId;
 		};
 	}
 
@@ -1012,16 +1033,52 @@ namespace UE::UAI::Composition::TimelineSpatial
 		OutHandler.Reset();
 		OutAuthorityScopes.Reset();
 		OutError.Reset();
+		if (!IsInGameThread())
+		{
+			OutError = TEXT("timeline_spatial_mechanics_game_thread_required");
+			return false;
+		}
+		UWorld* const World = GEditor
+			? GEditor->GetEditorWorldContext().World()
+			: nullptr;
+		if (!World)
+		{
+			OutError = TEXT("timeline_spatial_mechanics_editor_world_unavailable");
+			return false;
+		}
 		FProcessHost& Host = ProcessHost();
 		FScopeLock Lock(&Host.Mutex);
-		if (Host.Handlers.IsEmpty()
-			&& !TryCreateMechanics(Host.Handlers, Host.AuthorityScopes, OutError))
+		if (Host.Handlers.IsEmpty() || Host.BoundWorld.Get() != World)
 		{
-			return false;
+			TMap<FString, TSharedRef<IUeAgentCommandHandler>> NewHandlers;
+			TArray<FString> NewScopes;
+			const FString NewSessionId =
+				TEXT("timeline-spatial-mechanics-session:")
+				+ FGuid::NewGuid().ToString(EGuidFormats::DigitsWithHyphensLower);
+			if (!TryCreateMechanics(
+					*World,
+					NewSessionId,
+					NewHandlers,
+					NewScopes,
+					OutError))
+			{
+				Host.Handlers.Reset();
+				Host.AuthorityScopes.Reset();
+				Host.BoundWorld.Reset();
+				Host.SessionId.Reset();
+				return false;
+			}
+			Host.Handlers = MoveTemp(NewHandlers);
+			Host.AuthorityScopes = MoveTemp(NewScopes);
+			Host.BoundWorld = World;
+			Host.SessionId = NewSessionId;
 		}
 		if (IsRequestBoundRigSpatialCommand(CommandId))
 		{
-			OutHandler = MakeShared<FRequestBoundMechanicsHandler>(CommandId);
+			OutHandler = MakeShared<FRequestBoundMechanicsHandler>(
+				CommandId,
+				*World,
+				Host.SessionId);
 			OutAuthorityScopes = Host.AuthorityScopes;
 			return true;
 		}

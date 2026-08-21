@@ -394,26 +394,30 @@ namespace
 	bool CreatePublicHarness(
 		TSharedPtr<IUeAgentCommandHandler>& OutHandler,
 		FString& OutBindingHash,
-		FString& OutError)
+		FString& OutError,
+		const bool bRequirePublicContract = true)
 	{
 		OutHandler.Reset();
 		OutBindingHash.Reset();
-		TSharedPtr<const FUeAgentCommandContractRegistry> Commands;
-		if (!TryCreateTimelineSpatialProductionCommandContractRegistry(
-				Commands,
-				OutError)
-			|| !Commands.IsValid())
+		if (bRequirePublicContract)
 		{
-			return false;
+			TSharedPtr<const FUeAgentCommandContractRegistry> Commands;
+			if (!TryCreateTimelineSpatialProductionCommandContractRegistry(
+					Commands,
+					OutError)
+				|| !Commands.IsValid())
+			{
+				return false;
+			}
+			const FUeAgentCommandContract* Contract = Commands->FindExact(
+				TEXT("content_graph.import_workspace"));
+			if (!Contract)
+			{
+				OutError = TEXT("public_hjson_contract_missing");
+				return false;
+			}
+			OutBindingHash = Contract->GetBindingHash();
 		}
-		const FUeAgentCommandContract* Contract = Commands->FindExact(
-			TEXT("content_graph.import_workspace"));
-		if (!Contract)
-		{
-			OutError = TEXT("public_hjson_contract_missing");
-			return false;
-		}
-		OutBindingHash = Contract->GetBindingHash();
 		TSharedPtr<const UE::UAI::BindingGateway::Ticket::
 			FUeAgentOperationTicketService> TicketService;
 		UE::UAI::BindingGateway::Ticket::FUeAgentOperationTicketError
@@ -651,6 +655,27 @@ namespace
 				TEXT("verification_status"), VerificationStatus)
 			&& VerificationStatus == TEXT("verified");
 	}
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(
+	FUeAgentT36LegacyHjsonHandlerFailClosedTest,
+	"UAI.Root.T36.LegacyHjsonHandler.FailClosed",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FUeAgentT36LegacyHjsonHandlerFailClosedTest::RunTest(
+	const FString& Parameters)
+{
+	(void)Parameters;
+	TSharedPtr<IUeAgentCommandHandler> Handler;
+	FString BindingHash;
+	FString ErrorText;
+	TestFalse(
+		TEXT("the retired timeline/spatial HJSON handler cannot compose"),
+		CreatePublicHarness(Handler, BindingHash, ErrorText, false));
+	TestFalse(TEXT("the retired handler is not returned"), Handler.IsValid());
+	TestEqual(TEXT("the retirement failure is exact"),
+		ErrorText, FString(TEXT("legacy_hjson_import_retired")));
+	return !HasAnyErrors();
 }
 
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(

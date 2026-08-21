@@ -35,6 +35,6 @@ uai-cli --connection connection.toml exec external.texture.import --params-json 
 
 ## Legacy exit
 
-The module server activates these commands only through the process-wide exact contribution and does not invoke the historical `ExternalDataImport` or `AssetDestructiveImport` compositions. Those sources remain non-active migration inventory until the plan's `T90-LEGACY-ASSET-RETIREMENT` physical retirement; they are not fallback owners for any T28 command.
+The module activates these commands only through the process-wide exact contribution and does not expose the historical public routes from `ExternalDataImport` or `AssetDestructiveImport`. T44 removed the compiled legacy registry/HTTP handler; any retained implementation mechanics are private dependencies of current owners and cannot act as fallback owners for a T28 command.
 
 The active historical identities `asset_import_fbx_animation`, `asset_import_fbx_skeletal_mesh`, and `asset_import_texture` are non-executable. Their exact successor and field-by-field semantic decisions are recorded in `successors/t28_external_factory_import.json`; none is present in the active manifest, SDK catalog, or compatibility alias table.

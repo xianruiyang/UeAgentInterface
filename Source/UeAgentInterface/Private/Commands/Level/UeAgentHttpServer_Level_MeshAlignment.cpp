@@ -14,7 +14,7 @@
 #include "Selection.h"
 #include "StaticMeshAttributes.h"
 
-bool FUeAgentHttpServer::CmdViewportPickActorAtScreen(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdViewportPickActorAtScreen(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	UWorld* World = GetEditorWorld(OutError);
 	if (!World)
@@ -71,7 +71,7 @@ bool FUeAgentHttpServer::CmdViewportPickActorAtScreen(const FUeAgentRequestConte
 	return true;
 }
 
-bool FUeAgentHttpServer::CmdViewportSelectActorAtScreen(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdViewportSelectActorAtScreen(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	UWorld* World = GetEditorWorld(OutError);
 	if (!World)
@@ -166,7 +166,7 @@ bool FUeAgentHttpServer::CmdViewportSelectActorAtScreen(const FUeAgentRequestCon
 	return CmdLevelGetSelection(OutData, OutError);
 }
 
-bool FUeAgentHttpServer::CmdLevelGetNearbyActorObbs(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdLevelGetNearbyActorObbs(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	UWorld* World = GetEditorWorld(OutError);
 	if (!World)
@@ -474,7 +474,7 @@ bool FUeAgentHttpServer::CmdLevelGetNearbyActorObbs(const FUeAgentRequestContext
 	return true;
 }
 
-bool FUeAgentHttpServer::CmdMeshGetClosestVertex(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdMeshGetClosestVertex(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	UWorld* World = GetEditorWorld(OutError);
 	if (!World)
@@ -540,7 +540,7 @@ bool FUeAgentHttpServer::CmdMeshGetClosestVertex(const FUeAgentRequestContext& C
 	return true;
 }
 
-bool FUeAgentHttpServer::CmdMeshGetVertexWorldPosition(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdMeshGetVertexWorldPosition(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	UWorld* World = GetEditorWorld(OutError);
 	if (!World)
@@ -591,7 +591,7 @@ bool FUeAgentHttpServer::CmdMeshGetVertexWorldPosition(const FUeAgentRequestCont
 	return true;
 }
 
-bool FUeAgentHttpServer::CmdLevelAlignActorVertexToVertex(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdLevelAlignActorVertexToVertex(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	UWorld* World = GetEditorWorld(OutError);
 	if (!World)
@@ -714,7 +714,7 @@ bool FUeAgentHttpServer::CmdLevelAlignActorVertexToVertex(const FUeAgentRequestC
 	return true;
 }
 
-bool FUeAgentHttpServer::CmdLevelAlignActorByBounds(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdLevelAlignActorByBounds(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	UWorld* World = GetEditorWorld(OutError);
 	if (!World)
@@ -827,7 +827,7 @@ bool FUeAgentHttpServer::CmdLevelAlignActorByBounds(const FUeAgentRequestContext
 	return true;
 }
 
-bool FUeAgentHttpServer::CmdLevelAlignFaceToFace(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdLevelAlignFaceToFace(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	FString SourceActorId;
 	FString TargetActorId;

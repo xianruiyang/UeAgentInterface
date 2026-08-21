@@ -139,7 +139,7 @@ namespace UE::UAI::DomainAdapters::ContentGraphRead
 		Add(
 			Descriptors,
 			TEXT("uai.query.content_graph.compound"),
-			TEXT("sha256:18e5a1357c045a15637fce2f530a7b1d337a5b6cd8d2aac08c958e106d810065"),
+			TEXT("sha256:bbba63c3a8e78c2421a0ee18417cae4e0e03f354bbf076e64ad7c866fe92978a"),
 			TEXT("content_graph.compound.read"),
 			TEXT("content_graph.read.compound"),
 			EUeAgentQueryKind::State,

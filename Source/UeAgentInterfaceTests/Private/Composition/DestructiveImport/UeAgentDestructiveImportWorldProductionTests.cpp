@@ -1,6 +1,7 @@
 #include "Misc/AutomationTest.h"
 
 #include "Composition/DestructiveImport/UeAgentDestructiveImportActivation.h"
+#include "Editor.h"
 #include "EditorLevelUtils.h"
 #include "Components/InstancedStaticMeshComponent.h"
 #include "Engine/LevelStreaming.h"
@@ -20,7 +21,6 @@
 #include "PCGComponent.h"
 #include "Serialization/JsonSerializer.h"
 #include "Serialization/JsonWriter.h"
-#include "Server/UeAgentCommandRegistry.h"
 #include "TestSupport/UeAgentPublicCommandTestHarness.h"
 #include "UObject/Package.h"
 #include "UObject/SavePackage.h"
@@ -129,24 +129,22 @@ namespace
 		OutResult.Reset();
 		OutPayload.Reset();
 		OutError.Reset();
-		TSharedPtr<const FUeAgentCommandContractRegistry> Registry;
-		if (!TryCreateDestructiveImportProductionCommandContractRegistry(
-				Registry, OutError)
-			|| !Registry.IsValid())
-		{
-			return false;
-		}
-		const FUeAgentCommandContract Expected = ExpectedContract(CommandId);
-		const FUeAgentCommandContract* Contract = Registry->FindExact(CommandId);
+		const TSharedPtr<const UE::UAI::CommandRegistry::
+			FUeAgentImmutableCommandRegistry>& Registry =
+				Harness.GetCommandRegistry();
+		const UE::UAI::CommandContract::FUeAgentFrozenCommandContract*
+			const Contract = Registry.IsValid()
+				? Registry->FindExact(CommandId) : nullptr;
 		if (!Contract)
 		{
-			Contract = &Expected;
+			OutError = TEXT("command_contract_missing");
+			return false;
 		}
 		const FString RequestId = TEXT("world-production-")
 			+ FGuid::NewGuid().ToString(EGuidFormats::Digits);
 		const FString CorrelationId = RequestId + TEXT("-correlation");
 		const FString Body =
-			TEXT("{\"command_binding_hash\":\"") + Contract->GetBindingHash()
+			TEXT("{\"command_binding_hash\":\"") + Contract->GetContractHash()
 			+ TEXT("\",\"command_id\":\"") + CommandId
 			+ TEXT("\",\"correlation_id\":\"") + CorrelationId
 			+ TEXT("\",\"message_kind\":\"command_request\",\"params\":")
@@ -197,10 +195,11 @@ namespace
 			World = UWorld::CreateWorld(
 				EWorldType::EditorPreview, false,
 				FName(TEXT("UAIWorldDestructive")), Package);
-			if (World && GEngine)
+			if (World && GEditor)
 			{
-				GEngine->CreateNewWorldContext(EWorldType::EditorPreview)
-					.SetCurrentWorld(World);
+				PreviousEditorWorld =
+					GEditor->GetEditorWorldContext().World();
+				GEditor->GetEditorWorldContext().SetCurrentWorld(World);
 				bWorldContextRegistered = true;
 			}
 			if (!World || !World->PersistentLevel)
@@ -325,9 +324,10 @@ namespace
 			}
 			if (World)
 			{
-				if (bWorldContextRegistered && GEngine)
+				if (bWorldContextRegistered && GEditor)
 				{
-					GEngine->DestroyWorldContext(World);
+					GEditor->GetEditorWorldContext().SetCurrentWorld(
+						PreviousEditorWorld);
 					bWorldContextRegistered = false;
 				}
 				World->DestroyWorld(false);
@@ -418,6 +418,7 @@ namespace
 		bool bMeshSaved = false;
 		int32 OwnedMeshInitialSlotCount = 0;
 		bool bWorldContextRegistered = false;
+		UWorld* PreviousEditorWorld = nullptr;
 		AActor* VoxelActor = nullptr;
 		UInstancedStaticMeshComponent* VoxelComponent = nullptr;
 		FString VoxelActorPath;
@@ -492,10 +493,11 @@ bool FUeAgentDestructiveImportWorldProductionTest::RunTest(
 	auto Invoke = [this, &Harness, &Error](
 		const FString& CommandId,
 		const TSharedRef<FJsonObject>& Input,
-		TSharedPtr<FJsonObject>& OutPayload)
+		TSharedPtr<FJsonObject>& OutPayload,
+		const bool bExpectedSuccess)
 	{
 		TOptional<FUeAgentCommandResult> Result;
-		const bool bInvoked = TryInvoke(
+		bool bInvoked = TryInvoke(
 			Harness, CommandId, Input, Result, OutPayload, Error);
 		TestTrue(TEXT("formal route executes: ") + CommandId,
 			bInvoked && Result.IsSet());
@@ -504,14 +506,47 @@ bool FUeAgentDestructiveImportWorldProductionTest::RunTest(
 			AddError(CommandId + TEXT(":") + Error);
 			return false;
 		}
-		if (!Result->IsOk())
+		if (Result->IsOk())
+		{
+			FString TerminalStatus;
+			FString AuthorizationId;
+			if (!OutPayload.IsValid()
+				|| !OutPayload->TryGetStringField(
+					TEXT("terminal_status"), TerminalStatus)
+				|| TerminalStatus != TEXT("planned")
+				|| !OutPayload->TryGetStringField(
+					TEXT("destructive_authorization_id"), AuthorizationId)
+				|| AuthorizationId.IsEmpty())
+			{
+				AddError(CommandId + TEXT(":destructive_plan_invalid"));
+				return false;
+			}
+			Input->SetStringField(
+				TEXT("destructive_authorization_id"), AuthorizationId);
+			bInvoked = TryInvoke(
+				Harness, CommandId, Input, Result, OutPayload, Error);
+			if (!bInvoked || !Result.IsSet())
+			{
+				AddError(CommandId + TEXT(":") + Error);
+				return false;
+			}
+		}
+		TestEqual(TEXT("authorized result state: ") + CommandId,
+			Result->IsOk(), bExpectedSuccess);
+		FString TerminalStatus;
+		TestTrue(TEXT("authorized terminal status: ") + CommandId,
+			OutPayload.IsValid()
+				&& OutPayload->TryGetStringField(
+					TEXT("terminal_status"), TerminalStatus)
+				&& (bExpectedSuccess
+					? TerminalStatus == TEXT("committed")
+					: !TerminalStatus.IsEmpty()
+						&& TerminalStatus != TEXT("state_unknown")));
+		if (Result->IsOk() != bExpectedSuccess)
 		{
 			AddError(CommandId + TEXT(":") + Result->GetErrorJson());
-			return false;
 		}
-		TestEqual(TEXT("terminal state committed: ") + CommandId,
-			OutPayload->GetStringField(TEXT("terminal_state")), TEXT("committed"));
-		return true;
+		return Result->IsOk() == bExpectedSuccess;
 	};
 
 	TSharedPtr<FJsonObject> Payload;
@@ -519,7 +554,7 @@ bool FUeAgentDestructiveImportWorldProductionTest::RunTest(
 		const TSharedRef<FJsonObject> Input = Params();
 		Input->SetStringField(
 			TEXT("layer"), Fixture.DataLayer->GetDataLayerFName().ToString());
-		Invoke(TEXT("world.data_layer.delete"), Input, Payload);
+		Invoke(TEXT("world.data_layer.delete"), Input, Payload, true);
 		TestNull(TEXT("DataLayer independent absence readback"),
 			Fixture.WorldDataLayers->GetDataLayerInstance(
 				Fixture.DataLayer->GetDataLayerFName()));
@@ -527,7 +562,7 @@ bool FUeAgentDestructiveImportWorldProductionTest::RunTest(
 	{
 		const TSharedRef<FJsonObject> Input = Params();
 		Input->SetStringField(TEXT("folder_path"), TEXT("UAI/W08/Delete"));
-		Invoke(TEXT("world.level_content.delete_scope"), Input, Payload);
+		Invoke(TEXT("world.level_content.delete_scope"), Input, Payload, true);
 		bool bFound = false;
 		for (TActorIterator<AActor> It(Fixture.World); It; ++It)
 		{
@@ -540,7 +575,7 @@ bool FUeAgentDestructiveImportWorldProductionTest::RunTest(
 		Input->SetStringField(TEXT("actor_ref"), Fixture.PcgActor->GetPathName());
 		Input->SetStringField(
 			TEXT("component_name"), Fixture.PcgComponent->GetName());
-		Invoke(TEXT("world.pcg.cleanup"), Input, Payload);
+		Invoke(TEXT("world.pcg.cleanup"), Input, Payload, true);
 		TestFalse(TEXT("PCG component is not generating after cleanup"),
 			Fixture.PcgComponent->IsGenerating());
 	}
@@ -549,7 +584,7 @@ bool FUeAgentDestructiveImportWorldProductionTest::RunTest(
 		Input->SetStringField(TEXT("actor_ref"), Fixture.MoveActor->GetPathName());
 		Input->SetStringField(TEXT("level_package"),
 			Fixture.StreamingLevel->GetWorldAssetPackageName());
-		Invoke(TEXT("world.level_streaming.move_actors"), Input, Payload);
+		Invoke(TEXT("world.level_streaming.move_actors"), Input, Payload, true);
 		AActor* const MovedActor = Fixture.FindMoveActor();
 		TestTrue(TEXT("actor relation readback points at target level"),
 			MovedActor
@@ -567,7 +602,7 @@ bool FUeAgentDestructiveImportWorldProductionTest::RunTest(
 		const TSharedRef<FJsonObject> Input = Params();
 		Input->SetStringField(TEXT("actor_ref"), Fixture.MeshActorPath);
 		Input->SetStringField(TEXT("mesh_ref"), Fixture.SpherePath);
-		Invoke(TEXT("modeling.actor.mesh.replace"), Input, Payload);
+		Invoke(TEXT("modeling.actor.mesh.replace"), Input, Payload, true);
 		AStaticMeshActor* const ReadbackActor = Fixture.FindMeshActor();
 		TestTrue(TEXT("actor mesh readback uses replacement"),
 			ReadbackActor && ReadbackActor->GetStaticMeshComponent()
@@ -579,29 +614,18 @@ bool FUeAgentDestructiveImportWorldProductionTest::RunTest(
 		const TSharedRef<FJsonObject> Invalid = Params();
 		Invalid->SetStringField(TEXT("target_ref"), Fixture.OwnedMeshPath);
 		Invalid->SetNumberField(TEXT("index"), Before + 10);
-		TOptional<FUeAgentCommandResult> FailedResult;
 		TSharedPtr<FJsonObject> FailedPayload;
-		TestTrue(TEXT("invalid material removal reaches formal route"),
-			TryInvoke(
-				Harness, TEXT("modeling.asset.material_slot.remove"),
-				Invalid, FailedResult, FailedPayload, Error));
-		TestTrue(TEXT("invalid material removal returns a result"),
-			FailedResult.IsSet() && FailedPayload.IsValid());
-		if (FailedResult.IsSet() && FailedPayload.IsValid())
-		{
-			TestFalse(TEXT("invalid material removal fails closed"),
-				FailedResult->IsOk());
-			TestEqual(TEXT("pre-mutation failure is rolled_back"),
-				FailedPayload->GetStringField(TEXT("terminal_state")),
-				TEXT("rolled_back"));
-		}
+		TestTrue(TEXT("invalid material removal reaches authorized formal route"),
+			Invoke(TEXT("modeling.asset.material_slot.remove"),
+				Invalid, FailedPayload, false));
 		TestEqual(TEXT("failed removal leaves durable asset unchanged"),
 			Fixture.ReloadedMaterialSlotCount(), Before);
 
 		const TSharedRef<FJsonObject> Input = Params();
 		Input->SetStringField(TEXT("target_ref"), Fixture.OwnedMeshPath);
 		Input->SetNumberField(TEXT("index"), Before - 1);
-		Invoke(TEXT("modeling.asset.material_slot.remove"), Input, Payload);
+		Invoke(TEXT("modeling.asset.material_slot.remove"),
+			Input, Payload, true);
 		TestEqual(TEXT("material slot durable independent reload readback"),
 			Fixture.ReloadedMaterialSlotCount(), Before - 1);
 	}
@@ -623,7 +647,7 @@ bool FUeAgentDestructiveImportWorldProductionTest::RunTest(
 		Input->SetNumberField(TEXT("max_x"), 150);
 		Input->SetNumberField(TEXT("max_y"), 1);
 		Input->SetNumberField(TEXT("max_z"), 1);
-		Invoke(TEXT("modeling.voxel.bounds.remove"), Input, Payload);
+		Invoke(TEXT("modeling.voxel.bounds.remove"), Input, Payload, true);
 		UInstancedStaticMeshComponent* const ReadbackVoxel =
 			Fixture.FindVoxelComponent();
 		TestEqual(TEXT("component-local voxel absence readback"),
@@ -634,7 +658,7 @@ bool FUeAgentDestructiveImportWorldProductionTest::RunTest(
 			Fixture.StreamingLevel->GetWorldAssetPackageName();
 		const TSharedRef<FJsonObject> Input = Params();
 		Input->SetStringField(TEXT("level_package"), LevelPackage);
-		Invoke(TEXT("world.level_streaming.remove"), Input, Payload);
+		Invoke(TEXT("world.level_streaming.remove"), Input, Payload, true);
 		bool bPresent = false;
 		for (ULevelStreaming* const Streaming : Fixture.World->GetStreamingLevels())
 		{
@@ -657,12 +681,8 @@ bool FUeAgentDestructiveImportWorldProductionTest::RunTest(
 	};
 	for (const FString& LegacyId : RetiredLegacyIds)
 	{
-		TestNull(TEXT("retired exact world owner absent: ") + LegacyId,
-			UeAgentCommandRegistry::FindExactCommandInvoker(LegacyId));
-		TestNull(TEXT("retired prefix world owner absent: ") + LegacyId,
-			UeAgentCommandRegistry::FindPrefixedCommandInvoker(LegacyId));
-		TestTrue(TEXT("retired world ID fails closed: ") + LegacyId,
-			UeAgentCommandRegistry::IsExplicitlyUnsupportedCommand(LegacyId));
+		TestNull(TEXT("retired world command is absent from formal registry: ")
+			+ LegacyId, Harness.GetCommandRegistry()->FindExact(LegacyId));
 	}
 	TestTrue(TEXT("formal public composition stops"), Harness.Stop());
 	TestEqual(TEXT("public route cleanup"),

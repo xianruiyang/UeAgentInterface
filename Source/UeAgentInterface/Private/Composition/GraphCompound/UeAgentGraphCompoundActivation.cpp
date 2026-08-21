@@ -15,6 +15,8 @@ namespace UE::UAI::Composition::GraphCompound
 
 	namespace
 	{
+		constexpr int32 ExpectedGraphCompoundProfileCount = 78;
+
 		void PublicRoute(
 			const FString& CommandId,
 			FString& OutNamespace,
@@ -214,7 +216,7 @@ namespace UE::UAI::Composition::GraphCompound
 					return Bundle;
 				}
 			}
-			if (Bundle.Profiles.Num() != 77)
+			if (Bundle.Profiles.Num() != ExpectedGraphCompoundProfileCount)
 			{
 				Bundle.Profiles.Reset();
 				Bundle.Error = TEXT("graph_compound_activation_profile_count_invalid");
@@ -326,7 +328,8 @@ namespace UE::UAI::Composition::GraphCompound
 			return false;
 		}
 		const FActivationBundle& Bundle = ActivationBundle();
-		if (!Bundle.Registry.IsValid() || Bundle.Profiles.Num() != 77
+		if (!Bundle.Registry.IsValid()
+			|| Bundle.Profiles.Num() != ExpectedGraphCompoundProfileCount
 			|| Profiles.IsEmpty())
 		{
 			OutError = Bundle.Error.IsEmpty()

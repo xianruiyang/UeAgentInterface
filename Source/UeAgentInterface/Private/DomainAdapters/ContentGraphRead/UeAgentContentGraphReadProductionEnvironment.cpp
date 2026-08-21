@@ -14,6 +14,7 @@
 #include "ControlRigBlueprint.h"
 #include "Core/Contract/UeAgentCommandJson.h"
 #include "Core/StateSemantic/UeAgentCanonicalValueJson.h"
+#include "DomainAdapters/AnimationRigGraph/UeAgentAnimationRigGraphStructureCapture.h"
 #include "DomainAdapters/BlueprintUmgGraph/UeAgentBlueprintUmgGraphNativeHook.h"
 #include "DomainAdapters/MaterialNiagaraGraph/UeAgentMaterialNiagaraGraphNativeHook.h"
 #include "Domains/Niagara/Authoring/UeAgentNiagaraStageModuleAuthoring.h"
@@ -25,6 +26,11 @@
 #include "Engine/Blueprint.h"
 #include "Engine/SCS_Node.h"
 #include "Engine/SimpleConstructionScript.h"
+#include "EnvironmentQuery/EnvQuery.h"
+#include "EnvironmentQuery/EnvQueryGenerator.h"
+#include "EnvironmentQuery/EnvQueryOption.h"
+#include "EnvironmentQueryGraph.h"
+#include "EnvironmentQueryGraphNode_Option.h"
 #include "Expressions/TG_Expression.h"
 #include "GenericPlatform/GenericPlatformHttp.h"
 #include "Materials/MaterialExpression.h"
@@ -46,6 +52,7 @@
 #include "Rigs/RigHierarchy.h"
 #include "Sound/SoundCue.h"
 #include "Sound/SoundNode.h"
+#include "SmartObjectDefinition.h"
 #include "StateTree.h"
 #include "StateTreeEditorData.h"
 #include "StateTreeEditorNode.h"
@@ -63,6 +70,7 @@
 namespace UE::UAI::DomainAdapters::ContentGraphRead
 {
 	using namespace UE::UAI::ContextResource;
+	using namespace UE::UAI::DomainAdapters::AnimationRigGraph;
 	using namespace UE::UAI::DomainAdapters::BlueprintUmgGraph;
 	using namespace UE::UAI::DomainAdapters::MaterialNiagaraGraph;
 	using namespace UE::UAI::StateSemantic;
@@ -135,6 +143,8 @@ namespace UE::UAI::DomainAdapters::ContentGraphRead
 			}
 			if (Owner.IsA<UBehaviorTree>()
 				|| Owner.IsA<UBlackboardData>()
+				|| Owner.IsA<UEnvQuery>()
+				|| Owner.IsA<USmartObjectDefinition>()
 				|| Owner.IsA<UStateTree>())
 			{
 				return TEXT("ai_behavior");
@@ -770,14 +780,23 @@ namespace UE::UAI::DomainAdapters::ContentGraphRead
 		bool AugmentAnimationRigCapture(
 			UObject& Owner,
 			const FString& RootContainerId,
+			FUeAgentResourceTracker& Resources,
 			FUeAgentContentGraphCapture& OutCapture,
-			FString& OutNativeRevision)
+			FString& OutNativeRevision,
+			FUeAgentContentGraphReadError& OutError)
 		{
+			OutNativeRevision.Reset();
 			TArray<FString> RevisionFacts;
 			if (UControlRigBlueprint* Blueprint = Cast<UControlRigBlueprint>(&Owner))
 			{
 				URigHierarchy* Hierarchy = Blueprint->GetHierarchy();
-				if (!Hierarchy) return false;
+				if (!Hierarchy)
+				{
+					return Fail(
+						OutError,
+						TEXT("content_graph_read_animation_rig_hierarchy_missing"),
+						Owner.GetPathName());
+				}
 				const TArray<FRigElementKey> Keys = Hierarchy->GetAllKeys(
 					false, ERigElementType::All);
 				for (const FRigElementKey& Key : Keys)
@@ -812,7 +831,8 @@ namespace UE::UAI::DomainAdapters::ContentGraphRead
 			}
 			else if (USkeleton* Skeleton = Cast<USkeleton>(&Owner))
 			{
-				const FReferenceSkeleton& Reference = Skeleton->GetReferenceSkeleton();
+				const FReferenceSkeleton& Reference =
+					Skeleton->GetReferenceSkeleton();
 				for (int32 Index = 0; Index < Reference.GetNum(); ++Index)
 				{
 					const FString Name = Reference.GetBoneName(Index).ToString();
@@ -838,6 +858,83 @@ namespace UE::UAI::DomainAdapters::ContentGraphRead
 					});
 					RevisionFacts.Add(ItemId + TEXT("|") + ParentId);
 				}
+				OutNativeRevision =
+					CaptureRevision(Owner, MoveTemp(RevisionFacts));
+				return true;
+			}
+
+			TArray<FAnimationRigGraphStructureValue> Structure;
+			FAnimationRigGraphAdapterError StructureError;
+			if (!TryCaptureAnimationRigGraphStructure(
+					Owner, Structure, StructureError))
+			{
+				return Fail(
+					OutError,
+					StructureError.GetCode(),
+					Owner.GetPathName(),
+					StructureError.GetDetail());
+			}
+			for (const FAnimationRigGraphStructureValue& Captured : Structure)
+			{
+				FUeAgentCanonicalValuePtr State;
+				if (!TryCanonicalObject(
+						Captured.Value, Resources, State, OutError))
+				{
+					return false;
+				}
+				FString Canonical;
+				FString JsonError;
+				if (!CommandContract::Json::TryCanonicalize(
+						Captured.Value, Canonical, JsonError))
+				{
+					return Fail(
+						OutError,
+						TEXT("content_graph_read_animation_rig_state_invalid"),
+						Captured.SemanticId,
+						JsonError);
+				}
+				const FUeAgentContentGraphSemanticIdentity Identity =
+					SemanticIdentity(
+						TEXT("uai.semantic.animation_rig_graph.structure_item"),
+						{{TEXT("asset_path"), Owner.GetPathName()},
+						 {TEXT("item_id"), Captured.SemanticId}},
+						TEXT("item"));
+				FUeAgentContentGraphItem* Existing =
+					OutCapture.Items.FindByPredicate(
+						[&Captured](const FUeAgentContentGraphItem& Item)
+						{
+							return Item.ItemId == Captured.SemanticId;
+						});
+				if (Existing)
+				{
+					Existing->ItemKind = Captured.ItemKind;
+					Existing->ClassPath = Captured.ClassPath;
+					Existing->SemanticIdentity = Identity;
+					Existing->State = State;
+				}
+				else
+				{
+					FUeAgentContentGraphItem Item{
+						Captured.SemanticId,
+						Captured.ItemKind,
+						Owner.GetPathName(),
+						Captured.ClassPath,
+						RootContainerId,
+						OutCapture.Items.Num(),
+						Identity,
+					};
+					Item.State = State;
+					OutCapture.Items.Add(MoveTemp(Item));
+					OutCapture.Relations.Add({
+						TEXT("animation_rig_graph.membership:")
+							+ Captured.SemanticId,
+						TEXT("membership"),
+						RootContainerId,
+						Captured.SemanticId,
+					});
+				}
+				RevisionFacts.Add(
+					Captured.SemanticId + TEXT("|") + Canonical);
 			}
 			OutNativeRevision = CaptureRevision(Owner, MoveTemp(RevisionFacts));
 			return true;
@@ -1765,6 +1862,94 @@ namespace UE::UAI::DomainAdapters::ContentGraphRead
 #if WITH_EDITORONLY_DATA
 				AddEntries(Blackboard->ParentKeys, TEXT("inherited"));
 #endif
+			}
+			else if (UEnvQuery* Query = Cast<UEnvQuery>(&Owner))
+			{
+#if WITH_EDITORONLY_DATA
+				const UEnvironmentQueryGraph* Graph =
+					Cast<UEnvironmentQueryGraph>(Query->EdGraph);
+				const FString GraphId = TEXT("eqs:graph");
+				OutCapture.Containers.Add({
+					GraphId,
+					TEXT("eqs_graph"),
+					Owner.GetPathName(),
+					RootContainerId,
+					OutCapture.Containers.Num(),
+				});
+				if (Graph)
+				{
+					for (int32 Index = 0; Index < Graph->Nodes.Num(); ++Index)
+					{
+						const UEnvironmentQueryGraphNode_Option* OptionNode =
+							Cast<UEnvironmentQueryGraphNode_Option>(
+								Graph->Nodes[Index]);
+						const UEnvQueryOption* Option = OptionNode
+							? Cast<UEnvQueryOption>(
+								OptionNode->NodeInstance.Get())
+							: nullptr;
+						if (!OptionNode || !OptionNode->NodeGuid.IsValid()
+							|| !Option || !Option->Generator)
+						{
+							continue;
+						}
+						const FString ItemId = TEXT("node:")
+							+ OptionNode->NodeGuid.ToString(
+								EGuidFormats::DigitsWithHyphensLower);
+						AddItem(
+							ItemId,
+							TEXT("eqs_option"),
+							GraphId,
+							Option->Generator->GetClass()->GetPathName(),
+							GraphId,
+							Index,
+							TEXT("uai.semantic.ai_behavior.eqs_option"));
+					}
+				}
+#endif
+			}
+			else if (USmartObjectDefinition* Definition =
+				Cast<USmartObjectDefinition>(&Owner))
+			{
+				const FString SlotsId = TEXT("smart_object:slots");
+				OutCapture.Containers.Add({
+					SlotsId,
+					TEXT("smart_object_slots"),
+					Owner.GetPathName(),
+					RootContainerId,
+					OutCapture.Containers.Num(),
+				});
+				const TConstArrayView<FSmartObjectSlotDefinition> Slots =
+					Definition->GetSlots();
+				for (int32 Index = 0; Index < Slots.Num(); ++Index)
+				{
+					const FSmartObjectSlotDefinition& Slot = Slots[Index];
+					FString ItemId;
+#if WITH_EDITORONLY_DATA
+					if (!Slot.ID.IsValid())
+					{
+						continue;
+					}
+					ItemId = TEXT("item:slot:")
+						+ Slot.ID.ToString(
+							EGuidFormats::DigitsWithHyphensLower);
+#else
+					continue;
+#endif
+					const USmartObjectBehaviorDefinition* Behavior =
+						Slot.BehaviorDefinitions.IsEmpty()
+							? nullptr
+							: Slot.BehaviorDefinitions[0].Get();
+					AddItem(
+						ItemId,
+						TEXT("smart_object_slot"),
+						Owner.GetPathName(),
+						Behavior
+							? Behavior->GetClass()->GetPathName()
+							: TEXT("none"),
+						SlotsId,
+						Index,
+						TEXT("uai.semantic.ai_behavior.smart_object_slot"));
+				}
 			}
 			else if (UStateTree* StateTreeAsset = Cast<UStateTree>(&Owner))
 			{
@@ -3205,13 +3390,12 @@ namespace UE::UAI::DomainAdapters::ContentGraphRead
 			&& !AugmentAnimationRigCapture(
 				Owner,
 				RootContainerId,
+				Resources,
 				OutCapture,
-				NativeAnimationRigRevision))
+				NativeAnimationRigRevision,
+				OutError))
 		{
-			return Fail(
-				OutError,
-				TEXT("content_graph_read_animation_rig_capture_failed"),
-				Owner.GetPathName());
+			return false;
 		}
 		if (ResolvedDomain == TEXT("world_hlod"))
 		{

@@ -17,6 +17,7 @@ namespace UE::UAI::NetworkTransport
 	{
 		const FString UaiHttpCommandRoutePath(
 			TEXT("/api/uai/command"));
+		const FString UaiHttpProbeRoutePath(TEXT("/api/ping"));
 
 		static EHttpServerRequestVerbs ParseVerb(const FString& Method)
 		{
@@ -99,6 +100,11 @@ namespace UE::UAI::NetworkTransport
 		return UaiHttpCommandRoutePath;
 	}
 
+	const FString& GetUaiHttpProbeRoutePath()
+	{
+		return UaiHttpProbeRoutePath;
+	}
+
 	FUeAgentHttpTransportAdapter::FUeAgentHttpTransportAdapter(
 		FUeAgentHttpAdapterConfig InConfig,
 		TSharedRef<IUeAgentHttpRouteHost, ESPMode::ThreadSafe> InRouteHost,
@@ -125,8 +131,16 @@ namespace UE::UAI::NetworkTransport
 		OutDiagnostic = {};
 		if (bRunning)
 		{
-			OutIdentity = Identity();
-			return true;
+			if (Health().bRunning)
+			{
+				OutIdentity = Identity();
+				return true;
+			}
+			OutDiagnostic = {
+				TEXT("transport_partial_route_state"),
+				TEXT("owned transport has an incomplete route set"),
+			};
+			return false;
 		}
 		if (!ValidateConfig(OutDiagnostic))
 		{
@@ -143,6 +157,39 @@ namespace UE::UAI::NetworkTransport
 			OutDiagnostic))
 		{
 			return false;
+		}
+		bCommandRouteBound = true;
+		if (!Config.ProbeRoutePath.IsEmpty())
+		{
+			FUeAgentTransportDiagnostic ProbeDiagnostic;
+			if (!RouteHost->Bind(
+					ProbeBindingId(),
+					TEXT("GET"),
+					Config.ProbeRoutePath,
+					[this](const FUeAgentHttpRequest& Request)
+					{
+						return HandleProbeRequest(Request);
+					},
+					ProbeDiagnostic))
+			{
+				FUeAgentTransportDiagnostic RollbackDiagnostic;
+				if (RouteHost->Unbind(Config.InstanceId, RollbackDiagnostic))
+				{
+					bCommandRouteBound = false;
+					OutDiagnostic = MoveTemp(ProbeDiagnostic);
+				}
+				else
+				{
+					bRunning = true;
+					OutDiagnostic = {
+						TEXT("http_probe_route_bind_rollback_failed"),
+						ProbeDiagnostic.Code + TEXT(":")
+							+ RollbackDiagnostic.Code,
+					};
+				}
+				return false;
+			}
+			bProbeRouteBound = true;
 		}
 
 		bRunning = true;
@@ -167,19 +214,48 @@ namespace UE::UAI::NetworkTransport
 		{
 			return true;
 		}
-		if (!RouteHost->Unbind(Config.InstanceId, OutDiagnostic))
+		FUeAgentTransportDiagnostic FirstFailure;
+		if (bProbeRouteBound)
 		{
+			FUeAgentTransportDiagnostic Diagnostic;
+			if (RouteHost->Unbind(ProbeBindingId(), Diagnostic))
+			{
+				bProbeRouteBound = false;
+			}
+			else
+			{
+				FirstFailure = MoveTemp(Diagnostic);
+			}
+		}
+		if (bCommandRouteBound)
+		{
+			FUeAgentTransportDiagnostic Diagnostic;
+			if (RouteHost->Unbind(Config.InstanceId, Diagnostic))
+			{
+				bCommandRouteBound = false;
+			}
+			else if (FirstFailure.Code.IsEmpty())
+			{
+				FirstFailure = MoveTemp(Diagnostic);
+			}
+		}
+		bRunning = bCommandRouteBound || bProbeRouteBound;
+		if (!FirstFailure.Code.IsEmpty())
+		{
+			OutDiagnostic = MoveTemp(FirstFailure);
 			return false;
 		}
-		bRunning = false;
-		return true;
+		return !bRunning;
 	}
 
 	FUeAgentTransportServerHealth FUeAgentHttpTransportAdapter::Health() const
 	{
 		FUeAgentTransportServerHealth Result;
-		Result.bRunning =
-			bRunning && RouteHost->IsBound(Config.InstanceId);
+		const bool bCommandHealthy = bCommandRouteBound
+			&& RouteHost->IsBound(Config.InstanceId);
+		const bool bProbeHealthy = Config.ProbeRoutePath.IsEmpty()
+			|| (bProbeRouteBound && RouteHost->IsBound(ProbeBindingId()));
+		Result.bRunning = bRunning && bCommandHealthy && bProbeHealthy;
 		if (bRunning && !Result.bRunning)
 		{
 			Result.Diagnostic = FUeAgentTransportDiagnostic{
@@ -201,7 +277,8 @@ namespace UE::UAI::NetworkTransport
 	FUeAgentHttpResponse FUeAgentHttpTransportAdapter::HandleRequest(
 		const FUeAgentHttpRequest& Request) const
 	{
-		if (!bRunning || !RouteHost->IsBound(Config.InstanceId))
+		if (!bRunning || !bCommandRouteBound
+			|| !RouteHost->IsBound(Config.InstanceId))
 		{
 			return MakeFailure(
 				503,
@@ -279,6 +356,45 @@ namespace UE::UAI::NetworkTransport
 		return Response;
 	}
 
+	FString FUeAgentHttpTransportAdapter::ProbeBindingId() const
+	{
+		return Config.InstanceId + TEXT(":probe");
+	}
+
+	FUeAgentHttpResponse FUeAgentHttpTransportAdapter::HandleProbeRequest(
+		const FUeAgentHttpRequest& Request) const
+	{
+		if (!bRunning || !bProbeRouteBound
+			|| !RouteHost->IsBound(ProbeBindingId()))
+		{
+			return MakeFailure(
+				503,
+				TEXT("transport_not_running"),
+				TEXT("owned transport instance is not running"));
+		}
+		if (!Request.Method.Equals(TEXT("GET"), ESearchCase::IgnoreCase))
+		{
+			return MakeFailure(
+				405,
+				TEXT("transport_probe_method_mismatch"),
+				TEXT("transport probe requires GET"));
+		}
+		if (Request.RoutePath != Config.ProbeRoutePath)
+		{
+			return MakeFailure(
+				404,
+				TEXT("transport_probe_route_mismatch"),
+				TEXT("request route does not match the owned probe route"));
+		}
+
+		FUeAgentHttpResponse Response;
+		Response.StatusCode = 200;
+		Response.Headers.Add(
+			TEXT("Content-Type"),
+			TEXT("application/octet-stream"));
+		return Response;
+	}
+
 	bool FUeAgentHttpTransportAdapter::ValidateConfig(
 		FUeAgentTransportDiagnostic& OutDiagnostic) const
 	{
@@ -287,6 +403,9 @@ namespace UE::UAI::NetworkTransport
 			|| Config.InstanceId.IsEmpty()
 			|| ParseVerb(Config.Method) == EHttpServerRequestVerbs::VERB_NONE
 			|| !Config.RoutePath.StartsWith(TEXT("/"))
+			|| (!Config.ProbeRoutePath.IsEmpty()
+				&& (!Config.ProbeRoutePath.StartsWith(TEXT("/"))
+					|| Config.ProbeRoutePath == Config.RoutePath))
 			|| Config.AuthHeader.IsEmpty()
 			|| Config.AuthToken.IsEmpty()
 			|| Config.Channel.IsEmpty()

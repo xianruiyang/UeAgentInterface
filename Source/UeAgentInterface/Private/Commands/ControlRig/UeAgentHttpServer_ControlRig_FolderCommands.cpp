@@ -58,7 +58,7 @@ namespace
 	}
 }
 
-bool FUeAgentHttpServer::CmdControlRigExportFolder(
+bool FUeAgentLegacyMechanics::CmdControlRigExportFolder(
 	const FUeAgentRequestContext& Ctx,
 	TSharedPtr<FJsonObject>& OutData,
 	FString& OutError) const
@@ -95,7 +95,7 @@ bool FUeAgentHttpServer::CmdControlRigExportFolder(
 	return true;
 }
 
-bool FUeAgentHttpServer::CmdControlRigValidateFolder(
+bool FUeAgentLegacyMechanics::CmdControlRigValidateFolder(
 	const FUeAgentRequestContext& Ctx,
 	TSharedPtr<FJsonObject>& OutData,
 	FString& OutError) const
@@ -121,7 +121,7 @@ bool FUeAgentHttpServer::CmdControlRigValidateFolder(
 	return bValid;
 }
 
-bool FUeAgentHttpServer::CmdControlRigApplyFolder(
+bool FUeAgentLegacyMechanics::CmdControlRigApplyFolder(
 	const FUeAgentRequestContext& Ctx,
 	TSharedPtr<FJsonObject>& OutData,
 	FString& OutError) const

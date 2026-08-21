@@ -361,9 +361,9 @@ static constexpr ANSICHAR GWorldSpatialDescriptorSpecJson2[] = R"UAIWSD2(ration.
       "result_fields":[{"name":"node_observations","required":true,"schema":{"type":"array","items":{"component":"node_observation"},"minItems":1}},{"name":"observed_revision","required":true,"component":"revision"},{"name":"verification","required":true,"component":"verification"}]
     },
     {
-      "capability_id":"world.object_transform.read","descriptor_id":"uai.query.world.object_transform.read","operation_kind":"query","provider_binding":"world_spatial.object_transform.read","query_kind":"state","state_planes":["authoring_memory"],"required_facets":["world"],"resolution_policy":"explicit_only","transient_access_policy":"read_only","oracle_kind":"independent_target_transform_readback",
+      "capability_id":"world.object_transform.read","descriptor_id":"uai.query.world.object_transform.read","operation_kind":"query","provider_binding":"world_spatial.object_transform.read","query_kind":"state","state_planes":["authoring_memory","persisted"],"required_facets":["world"],"resolution_policy":"explicit_only","transient_access_policy":"read_only","oracle_kind":"independent_target_spatial_readback",
       "input_fields":[{"name":"verify_frame","required":true,"component":"frame_3d"}],
-      "result_fields":[{"name":"transform","required":true,"component":"transform_3d"},{"name":"observed_revision","required":true,"component":"revision"}]
+      "result_fields":[{"name":"spatial_observations","required":true,"schema":{"type":"array","items":{"oneOf":[{"component":"transform_3d"},{"component":"point_3d"}]},"minItems":1}},{"name":"observed_revision","required":true,"component":"revision"}]
     },
     {
       "capability_id":"world.object_align","descriptor_id":"uai.operation.world.object_align","operation_kind":"operation","state_planes":["authoring_memory"],"required_facets":["world"],"resolution_policy":"explicit_only","transient_access_policy":"temporary_mutation_allowed","oracle_kind":"independent_anchor_and_transform_readback",

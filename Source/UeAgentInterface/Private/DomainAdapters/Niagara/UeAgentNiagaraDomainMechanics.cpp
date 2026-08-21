@@ -1,25 +1,22 @@
 #include "DomainAdapters/Niagara/UeAgentNiagaraDomainMechanics.h"
 
-#include "CommandEdge/UeAgentCommandProtocol.h"
-#include "CommandRegistry/UeAgentImmutableCommandRegistry.h"
 #include "Core/Contract/UeAgentCommandJson.h"
-#include "Core/StateSemantic/UeAgentCanonicalValueJson.h"
-#include "DomainAdapters/ContentGraphRead/UeAgentContentGraphReadProductionEnvironment.h"
+#include "Core/HjsonWorkspace/DomainAuthoring/UeAgentDomainHjsonAuthoringKit.h"
+#include "Domains/Niagara/Authoring/UeAgentNiagaraAuthoringApplyProvider.h"
+#include "Domains/Niagara/Authoring/UeAgentNiagaraAuthoringRegistration.h"
 #include "Dom/JsonObject.h"
-#include "HAL/FileManager.h"
 #include "Misc/PackageName.h"
-#include "Module/CommandRegistration/Active/UeAgentActiveCommandComposition.h"
-#include "OperationOwners/NiagaraCommands/UeAgentNiagaraCommandOperationOwner.h"
+#include "PackageTools.h"
+#include "QueryOwners/Niagara/UeAgentNiagaraModuleCandidateQuery.h"
 #include "UObject/Package.h"
+#include "UObject/StrongObjectPtr.h"
 #include "UObject/UObjectGlobals.h"
 
 namespace UE::UAI::DomainAdapters::Niagara
 {
 	using namespace CommandContract;
-	using namespace CommandEdge;
-	using namespace ContextResource;
-	using namespace DomainAdapters::ContentGraphRead;
 	using namespace HjsonWorkspace;
+	using namespace HjsonWorkspace::DomainAuthoring;
 
 	namespace
 	{
@@ -27,12 +24,6 @@ namespace UE::UAI::DomainAdapters::Niagara
 		const FString SystemType = TEXT("/Script/Niagara.NiagaraSystem");
 		const FString EmitterType = TEXT("/Script/Niagara.NiagaraEmitter");
 		const FString ScriptType = TEXT("/Script/Niagara.NiagaraScript");
-
-		class FNeverCancelled final : public Contract::IUeAgentCancellationSignal
-		{
-		public:
-			virtual bool IsCancelled() const override { return false; }
-		};
 
 		bool Fail(
 			FWorkspaceError& OutError,
@@ -44,703 +35,538 @@ namespace UE::UAI::DomainAdapters::Niagara
 			return false;
 		}
 
-		bool IsSupportedRootType(const FString& Type)
+		FString PackageIdentity(const FString& Target)
 		{
-			return Type == SystemType || Type == EmitterType || Type == ScriptType;
+			return Target.Contains(TEXT("."))
+				? FPackageName::ObjectPathToPackageName(Target)
+				: Target;
 		}
 
-		FString ObjectPathFromPackage(const FString& Target)
+		FString ExpectedKind(const FString& RootType)
 		{
-			int32 Dot = INDEX_NONE;
-			if (Target.FindLastChar(TEXT('.'), Dot))
-			{
-				return Target;
-			}
-			const FString AssetName = FPackageName::GetLongPackageAssetName(Target);
-			return AssetName.IsEmpty() ? Target : Target + TEXT(".") + AssetName;
-		}
-
-		FUeAgentResourceTracker MakeResources()
-		{
-			return FUeAgentResourceTracker(FUeAgentResourceBudget({
-				{EUeAgentResourceDimension::InputBytes, 16 * 1024 * 1024},
-				{EUeAgentResourceDimension::OutputBytes, 16 * 1024 * 1024},
-				{EUeAgentResourceDimension::StringBytes, 16 * 1024 * 1024},
-				{EUeAgentResourceDimension::Nodes, 16384},
-				{EUeAgentResourceDimension::Items, 65536},
-				{EUeAgentResourceDimension::Files, 4096},
-				{EUeAgentResourceDimension::ReferenceEdges, 65536},
-				{EUeAgentResourceDimension::WorkUnits, 262144},
-				{EUeAgentResourceDimension::EstimatedMemoryBytes, 256 * 1024 * 1024},
-			}));
-		}
-
-		TSharedPtr<FJsonValue> JsonValueFromHjson(
-			const FHjsonNode& Node,
-			FWorkspaceError& OutError)
-		{
-			switch (Node.GetKind())
-			{
-			case EHjsonNodeKind::Null:
-				return MakeShared<FJsonValueNull>();
-			case EHjsonNodeKind::Boolean:
-				return MakeShared<FJsonValueBoolean>(Node.GetBoolean());
-			case EHjsonNodeKind::String:
-				return MakeShared<FJsonValueString>(Node.GetText());
-			case EHjsonNodeKind::Integer:
-			case EHjsonNodeKind::Decimal:
-				return MakeShared<FJsonValueNumber>(FCString::Atod(*Node.GetLexeme()));
-			case EHjsonNodeKind::Array:
-			{
-				TArray<TSharedPtr<FJsonValue>> Items;
-				for (const FHjsonNodeRef& Item : Node.GetItems())
-				{
-					TSharedPtr<FJsonValue> Converted =
-						JsonValueFromHjson(*Item, OutError);
-					if (!Converted.IsValid()) return nullptr;
-					Items.Add(MoveTemp(Converted));
-				}
-				return MakeShared<FJsonValueArray>(MoveTemp(Items));
-			}
-			case EHjsonNodeKind::Object:
-			{
-				const TSharedPtr<FJsonObject> Object = MakeShared<FJsonObject>();
-				for (const TPair<FString, FHjsonNodeRef>& Entry : Node.GetEntries())
-				{
-					TSharedPtr<FJsonValue> Converted =
-						JsonValueFromHjson(*Entry.Value, OutError);
-					if (!Converted.IsValid()) return nullptr;
-					Object->SetField(Entry.Key, MoveTemp(Converted));
-				}
-				return MakeShared<FJsonValueObject>(Object);
-			}
-			default:
-				Fail(OutError, TEXT("niagara_domain_hjson_node_invalid"));
-				return nullptr;
-			}
-		}
-
-		bool CanonicalObject(
-			const TSharedPtr<FJsonObject>& Object,
-			FString& Out,
-			FWorkspaceError& OutError)
-		{
-			FString Error;
-			if (!Object.IsValid() || !Json::TryCanonicalize(Object, Out, Error))
-			{
-				return Fail(OutError, TEXT("niagara_domain_json_invalid"), Error);
-			}
-			return true;
-		}
-
-		bool DecodeRequest(
-			const FString& CommandId,
-			const FString& ContractHash,
-			const FString& ParamsJson,
-			TOptional<FUeAgentCommandRequest>& OutRequest,
-			FWorkspaceError& OutError)
-		{
-			const FString RequestId = TEXT("niagara-domain-")
-				+ FGuid::NewGuid().ToString(EGuidFormats::DigitsWithHyphensLower);
-			const FString Envelope = FString::Printf(
-				TEXT("{\"schema\":\"uai.command.v1\",\"version\":1,")
-				TEXT("\"message_kind\":\"command_request\",")
-				TEXT("\"correlation_id\":\"%s\",\"request_id\":\"%s\",")
-				TEXT("\"command_id\":\"%s\",\"command_binding_hash\":\"%s\",")
-				TEXT("\"params\":%s}"),
-				*RequestId, *RequestId, *CommandId, *ContractHash, *ParamsJson);
-			FTCHARToUTF8 Encoded(*Envelope);
-			TArray<uint8> Bytes;
-			Bytes.Append(
-				reinterpret_cast<const uint8*>(Encoded.Get()),
-				Encoded.Length());
-			FUeAgentCommandProtocolDiagnostic Diagnostic;
-			if (!FUeAgentCommandProtocolCodec().DecodeRequest(
-					Bytes, OutRequest, Diagnostic)
-				|| !OutRequest.IsSet())
-			{
-				return Fail(
-					OutError,
-					TEXT("niagara_domain_internal_request_invalid"),
-					Diagnostic.Code,
-					Diagnostic.Message);
-			}
-			return true;
-		}
-
-		bool SubmitNiagaraCommand(
-			const FString& CommandId,
-			const TSharedPtr<FJsonObject>& Params,
-			FString& OutPayload,
-			FWorkspaceError& OutError)
-		{
-			TSharedPtr<const CommandRegistry::FUeAgentImmutableCommandRegistry>
-				Registry;
-			TSharedPtr<const FUeAgentExactCommandDispatch> Dispatch;
-			FString CompositionError;
-			if (!Module::CommandRegistration::Active::
-					TryComposeProcessActiveCommandComposition(
-						Registry, Dispatch, CompositionError)
-				|| !Registry.IsValid())
-			{
-				return Fail(
-					OutError,
-					TEXT("niagara_domain_registry_unavailable"),
-					CompositionError);
-			}
-			const CommandContract::FUeAgentFrozenCommandContract* Contract =
-				Registry->FindExact(CommandId);
-			if (!Contract)
-			{
-				return Fail(
-					OutError,
-					TEXT("niagara_domain_command_missing"),
-					CommandId);
-			}
-			FString ParamsJson;
-			if (!CanonicalObject(Params, ParamsJson, OutError)) return false;
-			TOptional<FUeAgentCommandRequest> Request;
-			if (!DecodeRequest(
-					CommandId,
-					Contract->GetContractHash(),
-					ParamsJson,
-					Request,
-					OutError))
-			{
-				return false;
-			}
-			TMap<FString, TSharedRef<IUeAgentCommandHandler>> Mechanics;
-			FString MechanicsError;
-			if (!OperationOwners::NiagaraCommands::TryCreateMechanicsHandlers(
-					Mechanics, MechanicsError))
-			{
-				return Fail(
-					OutError,
-					TEXT("niagara_domain_mechanics_unavailable"),
-					CommandId,
-					MechanicsError);
-			}
-			const TSharedRef<IUeAgentCommandHandler>* Handler = Mechanics.Find(CommandId);
-			if (!Handler)
-			{
-				return Fail(
-					OutError,
-					TEXT("niagara_domain_mechanics_missing"),
-					CommandId);
-			}
-			const FUeAgentCommandResult Result =
-				OperationOwners::NiagaraCommands::Submit(
-					*Handler,
-					Request.GetValue(),
-					Contract::FUeAgentCallerContext(
-						TEXT("niagara-domain-provider"),
-						{TEXT("uai:query"), TEXT("uai:operate"),
-							TEXT("uai:authoring:hjson:import"),
-							TEXT("material_niagara_graph.read"),
-							TEXT("material_niagara_graph.write")},
-						Request->GetCorrelationId()),
-					MakeShared<FNeverCancelled>());
-			if (!Result.IsOk())
-			{
-				return Fail(
-					OutError,
-					TEXT("niagara_domain_native_command_failed"),
-					CommandId,
-					Result.GetErrorJson());
-			}
-			OutPayload = Result.GetPayloadJson();
-			return true;
-		}
-
-		bool ParseDocument(
-			const TSharedPtr<FJsonObject>& Params,
-			TSharedPtr<FJsonObject>& OutRoot,
-			FString& OutType,
-			FWorkspaceError& OutError)
-		{
-			OutRoot.Reset();
-			OutType.Reset();
-			if (!Params.IsValid()
-				|| Params->HasField(TEXT("carrier"))
-				|| Params->HasField(TEXT("hjson_document")))
-			{
-				return Fail(
-					OutError,
-					TEXT("niagara_domain_legacy_source_contract_rejected"));
-			}
-			FString Target;
-			const TSharedPtr<FJsonObject>* Source = nullptr;
-			FString Kind;
-			FString TargetIdentity;
-			FString EntryFile;
-			const TArray<TSharedPtr<FJsonValue>>* Documents = nullptr;
-			if (!Params->TryGetStringField(TEXT("target"), Target)
-				|| Target.IsEmpty()
-				|| !Params->TryGetObjectField(TEXT("source"), Source)
-				|| !Source || !Source->IsValid()
-				|| !(*Source)->TryGetStringField(TEXT("kind"), Kind)
-				|| Kind != TEXT("resolved")
-				|| !(*Source)->TryGetStringField(TEXT("target_identity"), TargetIdentity)
-				|| TargetIdentity != Target
-				|| !(*Source)->TryGetStringField(TEXT("entry_file"), EntryFile)
-				|| EntryFile.IsEmpty()
-				|| !(*Source)->TryGetArrayField(TEXT("documents"), Documents)
-				|| !Documents || Documents->IsEmpty())
-			{
-				return Fail(OutError, TEXT("niagara_domain_resolved_source_invalid"));
-			}
-			FString Text;
-			int32 EntryMatches = 0;
-			for (const TSharedPtr<FJsonValue>& Value : *Documents)
-			{
-				const TSharedPtr<FJsonObject> DocumentObject = Value.IsValid()
-					? Value->AsObject() : nullptr;
-				FString RelativePath;
-				FString DocumentText;
-				if (!DocumentObject.IsValid()
-					|| !DocumentObject->TryGetStringField(TEXT("path"), RelativePath)
-					|| !DocumentObject->TryGetStringField(TEXT("document"), DocumentText))
-				{
-					return Fail(OutError, TEXT("niagara_domain_resolved_source_invalid"));
-				}
-				if (RelativePath == EntryFile)
-				{
-					Text = MoveTemp(DocumentText);
-					++EntryMatches;
-				}
-			}
-			if (EntryMatches != 1 || Text.IsEmpty())
-			{
-				return Fail(OutError, TEXT("niagara_domain_resolved_source_invalid"), EntryFile);
-			}
-			FUeAgentResourceTracker Resources = MakeResources();
-			FHjsonDocumentPtr Document;
-			if (!TryParseHjsonDocument(
-					Text,
-					TEXT("inline:niagara-domain"),
-					Resources,
-					Document,
-					OutError)
-				|| !Document.IsValid())
-			{
-				return false;
-			}
-			TSharedPtr<FJsonValue> Converted =
-				JsonValueFromHjson(*Document->GetRoot(), OutError);
-			const TSharedPtr<FJsonObject> Canonical =
-				Converted.IsValid() ? Converted->AsObject() : nullptr;
-			FString Schema;
-			const TSharedPtr<FJsonObject>* Root = nullptr;
-			if (!Canonical.IsValid()
-				|| !Canonical->TryGetStringField(TEXT("schema"), Schema)
-				|| Schema != SchemaId
-				|| !Canonical->TryGetObjectField(TEXT("root"), Root)
-				|| !Root || !Root->IsValid()
-				|| !(*Root)->TryGetStringField(TEXT("type"), OutType)
-				|| !IsSupportedRootType(OutType))
-			{
-				return Fail(
-					OutError,
-					TEXT("niagara_domain_schema_or_type_invalid"),
-					OutType);
-			}
-			OutRoot = *Root;
-			return true;
-		}
-
-		bool TryCapture(
-			const FString& Target,
-			FString& OutType,
-			FUeAgentContentGraphCapture& OutCapture,
-			FWorkspaceError& OutError)
-		{
-			UObject* Owner = StaticLoadObject(
-				UObject::StaticClass(),
-				nullptr,
-				*ObjectPathFromPackage(Target));
-			if (!Owner)
-			{
-				return Fail(
-					OutError,
-					TEXT("niagara_domain_target_unresolved"),
-					Target);
-			}
-			OutType = Owner->GetClass()->GetPathName();
-			if (!IsSupportedRootType(OutType))
-			{
-				return Fail(
-					OutError,
-					TEXT("niagara_domain_target_type_invalid"),
-					OutType);
-			}
-			FUeAgentContentGraphReadError CaptureError;
-			if (!FUeAgentContentGraphReadProductionEnvironment::TryCaptureOwner(
-					*Owner, OutCapture, CaptureError))
-			{
-				return Fail(
-					OutError,
-					CaptureError.Code.IsEmpty()
-						? FString(TEXT("niagara_domain_readback_failed"))
-						: CaptureError.Code,
-					CaptureError.SubjectId,
-					CaptureError.Detail);
-			}
-			return true;
-		}
-
-		TSharedPtr<FJsonObject> CaptureJson(
-			const FString& Target,
-			const FString& Type,
-			const FUeAgentContentGraphCapture& Capture)
-		{
-			const TSharedPtr<FJsonObject> Result = MakeShared<FJsonObject>();
-			Result->SetStringField(TEXT("target"), Target);
-			Result->SetStringField(TEXT("root_type"), Type);
-			Result->SetStringField(TEXT("domain_id"), Capture.DomainId);
-			Result->SetStringField(TEXT("revision"), Capture.Revision);
-			Result->SetBoolField(TEXT("complete"), true);
-			Result->SetBoolField(TEXT("has_more"), false);
-
-			TArray<TSharedPtr<FJsonValue>> Items;
-			for (const FUeAgentContentGraphItem& Item : Capture.Items)
-			{
-				const TSharedPtr<FJsonObject> Value = MakeShared<FJsonObject>();
-				Value->SetStringField(TEXT("id"), Item.ItemId);
-				Value->SetStringField(TEXT("kind"), Item.ItemKind);
-				Value->SetStringField(TEXT("class_path"), Item.ClassPath);
-				Value->SetStringField(TEXT("container_id"), Item.ContainerId);
-				Value->SetNumberField(TEXT("order"), Item.Order);
-				Items.Add(MakeShared<FJsonValueObject>(Value));
-			}
-			Result->SetArrayField(TEXT("items"), MoveTemp(Items));
-
-			TArray<TSharedPtr<FJsonValue>> Relations;
-			for (const FUeAgentContentGraphRelation& Relation : Capture.Relations)
-			{
-				const TSharedPtr<FJsonObject> Value = MakeShared<FJsonObject>();
-				Value->SetStringField(TEXT("id"), Relation.RelationId);
-				Value->SetStringField(TEXT("kind"), Relation.RelationKind);
-				Value->SetStringField(TEXT("source"), Relation.SourceItemId);
-				Value->SetStringField(TEXT("target"), Relation.TargetItemId);
-				Relations.Add(MakeShared<FJsonValueObject>(Value));
-			}
-			Result->SetArrayField(TEXT("relations"), MoveTemp(Relations));
-
-			auto AddFieldState = [](
-				const FUeAgentContentGraphFieldState& State,
-				const TSharedPtr<FJsonObject>& Value)
-			{
-				FString ConversionError;
-				TSharedPtr<FJsonValue> StateValue;
-				if (State.Value.IsValid()
-					&& StateSemantic::CanonicalJson::TryToJsonValue(
-						*State.Value, StateValue, ConversionError)
-					&& StateValue.IsValid())
-				{
-					Value->SetField(TEXT("value"), StateValue);
-				}
-				const TCHAR* Override = TEXT("none");
-				if (State.OverrideState
-					== StateSemantic::EUeAgentOverrideState::Inherited)
-				{
-					Override = TEXT("inherited");
-				}
-				else if (State.OverrideState
-					== StateSemantic::EUeAgentOverrideState::Overridden)
-				{
-					Override = TEXT("overridden");
-				}
-				Value->SetStringField(TEXT("override_state"), Override);
-				Value->SetBoolField(
-					TEXT("authored"),
-					State.AuthoredPresence
-						== StateSemantic::EUeAgentAuthoredPresence::Present);
-			};
-
-			TArray<TSharedPtr<FJsonValue>> Properties;
-			for (const FUeAgentContentGraphProperty& Property : Capture.Properties)
-			{
-				const TSharedPtr<FJsonObject> Value = MakeShared<FJsonObject>();
-				Value->SetStringField(TEXT("id"), Property.FieldId);
-				Value->SetStringField(TEXT("owner"), Property.OwnerId);
-				AddFieldState(Property.State, Value);
-				Properties.Add(MakeShared<FJsonValueObject>(Value));
-			}
-			Result->SetArrayField(TEXT("properties"), MoveTemp(Properties));
-
-			TArray<TSharedPtr<FJsonValue>> Parameters;
-			for (const FUeAgentContentGraphParameter& Parameter : Capture.Parameters)
-			{
-				const TSharedPtr<FJsonObject> Value = MakeShared<FJsonObject>();
-				Value->SetStringField(TEXT("id"), Parameter.ParameterId);
-				Value->SetStringField(TEXT("owner"), Parameter.OwnerId);
-				for (const TPair<FString, FString>& Selector
-					: Parameter.SemanticIdentity.Selectors)
-				{
-					Value->SetStringField(Selector.Key, Selector.Value);
-				}
-				AddFieldState(Parameter.State, Value);
-				Parameters.Add(MakeShared<FJsonValueObject>(Value));
-			}
-			Result->SetArrayField(TEXT("parameters"), MoveTemp(Parameters));
-
-			bool bCompileValid = true;
-			TArray<TSharedPtr<FJsonValue>> Diagnostics;
-			for (const FUeAgentContentGraphDiagnostic& Diagnostic : Capture.Diagnostics)
-			{
-				const TSharedPtr<FJsonObject> Value = MakeShared<FJsonObject>();
-				Value->SetStringField(TEXT("id"), Diagnostic.DiagnosticId);
-				Value->SetStringField(TEXT("severity"), Diagnostic.Severity);
-				Value->SetStringField(TEXT("code"), Diagnostic.Code);
-				Value->SetBoolField(TEXT("resolved"), Diagnostic.bResolved);
-				Diagnostics.Add(MakeShared<FJsonValueObject>(Value));
-				if (!Diagnostic.bResolved
-					&& Diagnostic.Severity.Equals(
-						TEXT("error"), ESearchCase::IgnoreCase))
-				{
-					bCompileValid = false;
-				}
-			}
-			Result->SetArrayField(TEXT("diagnostics"), MoveTemp(Diagnostics));
-			Result->SetStringField(
-				TEXT("compile_status"),
-				bCompileValid ? TEXT("valid") : TEXT("error"));
-			return Result;
+			if (RootType == SystemType) return TEXT("system");
+			if (RootType == EmitterType) return TEXT("emitter");
+			if (RootType == ScriptType) return TEXT("script");
+			return FString();
 		}
 
 		bool TryRead(
 			const FString& Target,
+			const FString& RootType,
 			FString& OutPayload,
 			FString& OutRevision,
+			TSharedPtr<FJsonObject>* OutSnapshot,
+			UObject** OutObject,
 			FWorkspaceError& OutError)
 		{
-			FString Type;
-			FUeAgentContentGraphCapture Capture;
-			if (!TryCapture(Target, Type, Capture, OutError)) return false;
-			OutRevision = Capture.Revision;
-			return CanonicalObject(
-				CaptureJson(Target, Type, Capture), OutPayload, OutError);
-		}
-
-		bool IsAllowedOperation(
-			const FString& RootType,
-			const FString& CommandId)
-		{
-			if (CommandId == TEXT("niagara.compile_refresh_settle")) return true;
-			if (RootType == ScriptType)
+			UObject* Owner = nullptr;
+			DomainAdapters::ContentGraphRead::FUeAgentContentGraphCapture Capture;
+			if (!TryCaptureObject(
+					Target, RootType, Owner, Capture, OutError))
 			{
-				return CommandId == TEXT("niagara.script.graph.apply");
+				return false;
 			}
-			return CommandId == TEXT("niagara.stack.apply")
-				|| CommandId == TEXT("niagara.stack.reorder")
-				|| CommandId == TEXT("niagara.stack.issue_fix")
-				|| CommandId == TEXT("niagara.compound.apply")
-				|| CommandId == TEXT("niagara.renderer_event_parameter.apply");
+			TSharedPtr<FJsonObject> Snapshot;
+			if (!TryBuildCaptureSnapshot(
+					Target, RootType, Capture, Snapshot, OutError))
+			{
+				return false;
+			}
+			OutRevision = Capture.Revision;
+			if (OutSnapshot) *OutSnapshot = Snapshot;
+			if (OutObject) *OutObject = Owner;
+			return TryCanonicalizeObject(Snapshot, OutPayload, OutError);
 		}
 
-		bool ValidateCreateTarget(
-			const FString& RootType,
+		bool ValidateMissingTarget(
 			const FString& Target,
-			const TSharedPtr<FJsonObject>& Params,
 			FWorkspaceError& OutError)
 		{
-			if (RootType == ScriptType)
+			bool bPresent = false;
+			if (!TryInspectObjectTargetPresence(Target, bPresent))
 			{
-				FString NativeTarget;
-				if (!Params->TryGetStringField(TEXT("target_ref"), NativeTarget)
-					|| ObjectPathFromPackage(NativeTarget)
-						!= ObjectPathFromPackage(Target))
+				return Fail(
+					OutError, TEXT("niagara_domain_target_invalid"), Target);
+			}
+			if (bPresent)
+			{
+				return Fail(
+					OutError, TEXT("niagara_domain_stale_revision"),
+					Target, TEXT("existing"));
+			}
+			return true;
+		}
+
+		bool CandidateObject(
+			const TSharedPtr<FJsonObject>& Module,
+			const FString& Pointer,
+			TSharedPtr<FJsonObject>& OutCandidate,
+			bool& bOutPresent,
+			FWorkspaceError& OutError)
+		{
+			OutCandidate.Reset();
+			bOutPresent = Module.IsValid()
+				&& Module->HasField(TEXT("candidate"));
+			if (!bOutPresent) return true;
+			const TSharedPtr<FJsonObject>* Candidate = nullptr;
+			if (!Module->TryGetObjectField(TEXT("candidate"), Candidate)
+				|| !Candidate || !Candidate->IsValid())
+			{
+				return Fail(
+					OutError, TEXT("domain_hjson_candidate_binding_invalid"),
+					FString(), Pointer);
+			}
+			OutCandidate = *Candidate;
+			return true;
+		}
+
+		bool NormalizeModuleCandidates(
+			UObject& TargetObject,
+			const TSharedPtr<FJsonObject>& ProviderExtension,
+			FWorkspaceError& OutError)
+		{
+			if (!ProviderExtension.IsValid()
+				|| !ProviderExtension->HasField(TEXT("stages")))
+			{
+				return true;
+			}
+			const TSharedPtr<FJsonObject>* Stages = nullptr;
+			if (!ProviderExtension->TryGetObjectField(TEXT("stages"), Stages)
+				|| !Stages || !Stages->IsValid())
+			{
+				return Fail(
+					OutError, TEXT("niagara_domain_stages_invalid"),
+					FString(), TEXT("/root/document/provider_extension/stages"));
+			}
+			for (const TPair<FString, TSharedPtr<FJsonValue>>& StagePair
+				: (*Stages)->Values)
+			{
+				const TSharedPtr<FJsonObject> Stage =
+					StagePair.Value.IsValid()
+						? StagePair.Value->AsObject() : nullptr;
+				const TSharedPtr<FJsonObject>* StageTarget = nullptr;
+				FString Usage;
+				if (!Stage.IsValid()
+					|| !Stage->TryGetObjectField(TEXT("target"), StageTarget)
+					|| !StageTarget || !StageTarget->IsValid()
+					|| !(*StageTarget)->TryGetStringField(TEXT("usage"), Usage)
+					|| Usage.TrimStartAndEnd().IsEmpty())
+				{
+					return Fail(
+						OutError, TEXT("niagara_domain_stage_target_invalid"),
+						StagePair.Key);
+				}
+				if (!Stage->HasField(TEXT("modules"))) continue;
+				const TSharedPtr<FJsonObject>* Modules = nullptr;
+				if (!Stage->TryGetObjectField(TEXT("modules"), Modules)
+					|| !Modules || !Modules->IsValid())
+				{
+					return Fail(
+						OutError, TEXT("niagara_domain_modules_invalid"),
+						StagePair.Key);
+				}
+				for (const TPair<FString, TSharedPtr<FJsonValue>>& ModulePair
+					: (*Modules)->Values)
+				{
+					const TSharedPtr<FJsonObject> Module =
+						ModulePair.Value.IsValid()
+							? ModulePair.Value->AsObject() : nullptr;
+					const FString Pointer =
+						TEXT("/root/document/provider_extension/stages/")
+						+ StagePair.Key + TEXT("/modules/") + ModulePair.Key
+						+ TEXT("/candidate");
+					TSharedPtr<FJsonObject> Candidate;
+					bool bPresent = false;
+					if (!CandidateObject(
+							Module, Pointer, Candidate, bPresent, OutError))
+					{
+						return false;
+					}
+					if (!bPresent) continue;
+					bool bRemove = false;
+					if (Module->TryGetBoolField(TEXT("remove"), bRemove)
+						&& bRemove)
+					{
+						return Fail(
+							OutError,
+							TEXT("niagara_candidate_remove_conflict"),
+							ModulePair.Key,
+							Pointer);
+					}
+					FDomainHjsonCandidateBinding Binding;
+					if (!TryReadCandidateBinding(
+							Candidate, Pointer, Binding, OutError))
+					{
+						return false;
+					}
+					if (!Binding.SupportsOperation(TEXT("create")))
+					{
+						return Fail(
+							OutError,
+							TEXT("niagara_candidate_operation_unsupported"),
+							Binding.Name,
+							Pointer + TEXT("/supported_operations"));
+					}
+					QueryOwners::Niagara::FNiagaraModuleCandidateQueryError
+						CandidateError;
+					if (!QueryOwners::Niagara::
+							IsCurrentNiagaraModuleCandidateBinding(
+								TargetObject,
+								Binding.Name,
+								Binding.Kind,
+								Binding.SupportedOperations,
+								Binding.InputContract,
+								Binding.PlacementContract,
+								Binding.RequiredContext,
+								Usage,
+								Binding.BindingRevision,
+								CandidateError))
+					{
+						return Fail(
+							OutError,
+							CandidateError.Code.IsEmpty()
+								? FString(TEXT("niagara_candidate_binding_invalid"))
+								: CandidateError.Code,
+							CandidateError.SubjectId,
+							CandidateError.Detail);
+					}
+					FString Existing;
+					if (Module->TryGetStringField(
+							TEXT("script_asset_path"), Existing)
+						&& Existing != Binding.Name)
+					{
+						return Fail(
+							OutError, TEXT("niagara_candidate_script_conflict"),
+							Existing, Pointer);
+					}
+					if (Module->TryGetStringField(TEXT("module_kind"), Existing)
+						&& !Existing.IsEmpty()
+						&& !Existing.Equals(
+							TEXT("script_module"), ESearchCase::IgnoreCase))
+					{
+						return Fail(
+							OutError, TEXT("niagara_candidate_kind_conflict"),
+							Existing, Pointer);
+					}
+					Module->SetStringField(
+						TEXT("script_asset_path"), Binding.Name);
+					Module->SetStringField(
+						TEXT("module_kind"), TEXT("script_module"));
+					Module->RemoveField(TEXT("candidate"));
+				}
+			}
+			return true;
+		}
+
+		bool PrepareDocument(
+			const FString& Target,
+			const FString& RootType,
+			const bool bExists,
+			UObject* ExistingTarget,
+			const TSharedPtr<FJsonObject>& Source,
+			TSharedPtr<FJsonObject>& OutDocument,
+			FWorkspaceError& OutError)
+		{
+			OutDocument.Reset();
+			if (!Source.IsValid())
+			{
+				return Fail(
+					OutError, TEXT("niagara_domain_document_required"));
+			}
+			OutDocument = MakeShared<FJsonObject>(*Source);
+			FString Operation;
+			const TSharedPtr<FJsonObject>* SourceTarget = nullptr;
+			FString AssetPath;
+			if (!OutDocument->TryGetStringField(TEXT("operation"), Operation)
+				|| !OutDocument->TryGetObjectField(
+					TEXT("target"), SourceTarget)
+				|| !SourceTarget || !SourceTarget->IsValid()
+				|| !(*SourceTarget)->TryGetStringField(
+					TEXT("asset_path"), AssetPath))
+			{
+				return Fail(
+					OutError, TEXT("niagara_domain_document_identity_required"));
+			}
+			Operation.TrimStartAndEndInline();
+			Operation.ToLowerInline();
+			const bool bOperationValid = bExists
+				? Operation == TEXT("update")
+				: (Operation == TEXT("create") || Operation == TEXT("clone"));
+			if (!bOperationValid)
+			{
+				return Fail(
+					OutError, TEXT("niagara_domain_operation_revision_conflict"),
+					Operation,
+					bExists ? TEXT("update") : TEXT("create|clone"));
+			}
+			if (!PackageIdentity(AssetPath).Equals(
+					PackageIdentity(Target), ESearchCase::IgnoreCase))
+			{
+				return Fail(
+					OutError, TEXT("niagara_domain_target_identity_mismatch"),
+					AssetPath, Target);
+			}
+			const FString Kind = ExpectedKind(RootType);
+			FString DeclaredKind;
+			if ((*SourceTarget)->TryGetStringField(
+					TEXT("asset_kind"), DeclaredKind)
+				&& !DeclaredKind.Equals(Kind, ESearchCase::IgnoreCase))
+			{
+				return Fail(
+					OutError, TEXT("niagara_domain_asset_kind_mismatch"),
+					DeclaredKind, Kind);
+			}
+			const TSharedPtr<FJsonObject> TargetObject =
+				MakeShared<FJsonObject>(**SourceTarget);
+			TargetObject->SetStringField(
+				TEXT("asset_path"), PackageIdentity(Target));
+			TargetObject->SetStringField(TEXT("asset_kind"), Kind);
+			OutDocument->SetObjectField(TEXT("target"), TargetObject);
+
+			TSharedPtr<FJsonObject> Extension = MakeShared<FJsonObject>();
+			const TSharedPtr<FJsonObject>* SourceExtension = nullptr;
+			if (OutDocument->HasField(TEXT("provider_extension")))
+			{
+				if (!OutDocument->TryGetObjectField(
+						TEXT("provider_extension"), SourceExtension)
+					|| !SourceExtension || !SourceExtension->IsValid())
 				{
 					return Fail(
 						OutError,
-						TEXT("niagara_domain_create_target_mismatch"),
-						Target);
+						TEXT("niagara_domain_provider_extension_invalid"));
 				}
-				return true;
+				Extension = MakeShared<FJsonObject>(**SourceExtension);
 			}
-			FString PackagePath;
-			FString AssetName;
-			if (!Params->TryGetStringField(TEXT("package_path"), PackagePath)
-				|| !Params->TryGetStringField(TEXT("asset_name"), AssetName)
-				|| PackagePath / AssetName != Target)
+			bool Flag = false;
+			if ((Extension->TryGetBoolField(TEXT("compile"), Flag) && !Flag)
+				|| (Extension->TryGetBoolField(TEXT("save"), Flag) && !Flag))
 			{
 				return Fail(
 					OutError,
-					TEXT("niagara_domain_create_target_mismatch"),
-					Target);
+					TEXT("niagara_domain_durable_lifecycle_required"));
 			}
+			Extension->SetBoolField(TEXT("compile"), true);
+			Extension->SetBoolField(TEXT("save"), true);
+			if (bExists)
+			{
+				if (!ExistingTarget
+					|| !NormalizeModuleCandidates(
+						*ExistingTarget, Extension, OutError))
+				{
+					return false;
+				}
+			}
+			else if (Extension->HasField(TEXT("stages")))
+			{
+				UClass* const RootClass = LoadObject<UClass>(nullptr, *RootType);
+				TStrongObjectPtr<UObject> CandidateContext(
+					RootClass
+						? NewObject<UObject>(
+							GetTransientPackage(), RootClass, NAME_None,
+							RF_Transient)
+						: nullptr);
+				if (!CandidateContext.IsValid()
+					|| !NormalizeModuleCandidates(
+						*CandidateContext, Extension, OutError))
+				{
+					if (OutError.GetCode().IsEmpty())
+					{
+						return Fail(
+							OutError,
+							TEXT("niagara_candidate_context_create_failed"),
+							RootType);
+					}
+					return false;
+				}
+			}
+			OutDocument->SetObjectField(TEXT("provider_extension"), Extension);
 			return true;
 		}
 
 		bool TryImport(
 			const FString& Target,
-			const TSharedPtr<FJsonObject>& Params,
+			const FString& RootType,
+			const FString& CanonicalParamsJson,
 			FString& OutPayload,
 			FWorkspaceError& OutError)
 		{
-			TSharedPtr<FJsonObject> Root;
-			FString RootType;
-			if (!ParseDocument(Params, Root, RootType, OutError)) return false;
-			FString ExpectedRevision;
-			if (!Params->TryGetStringField(
-					TEXT("expected_revision"), ExpectedRevision))
+			const FString Kind = ExpectedKind(RootType);
+			if (Kind.IsEmpty())
 			{
 				return Fail(
-					OutError,
-					TEXT("niagara_domain_expected_revision_required"));
+					OutError, TEXT("niagara_domain_root_type_invalid"), RootType);
 			}
-
-			FString BeforePayload;
-			FString CurrentRevision;
-			const bool bExists = ExpectedRevision != TEXT("missing");
+			FResolvedDomainHjsonDocument Resolved;
+			if (!TryDecodeResolvedDocument(
+					Target,
+					CanonicalParamsJson,
+					FDomainHjsonDocumentContract(
+						TEXT("niagara"), SchemaId, RootType),
+					Resolved,
+					OutError))
+			{
+				return false;
+			}
+			const bool bExists = Resolved.ExpectedRevision != TEXT("missing");
+			UObject* ExistingTarget = nullptr;
 			if (bExists)
 			{
-				if (!TryRead(Target, BeforePayload, CurrentRevision, OutError))
+				FString BeforePayload;
+				FString CurrentRevision;
+				if (!TryRead(
+						Target, RootType, BeforePayload, CurrentRevision,
+						nullptr, &ExistingTarget, OutError))
 				{
 					return false;
 				}
-				if (ExpectedRevision != CurrentRevision)
+				if (Resolved.ExpectedRevision != CurrentRevision)
 				{
 					return Fail(
-						OutError,
-						TEXT("niagara_domain_stale_revision"),
-						Target,
-						CurrentRevision);
+						OutError, TEXT("niagara_domain_stale_revision"),
+						Target, CurrentRevision);
 				}
 			}
-			else
-			{
-				FString Filename;
-				const bool bValidPackage =
-					FPackageName::IsValidLongPackageName(Target)
-					&& FPackageName::TryConvertLongPackageNameToFilename(
-						Target,
-						Filename,
-						FPackageName::GetAssetPackageExtension());
-				if (!bValidPackage)
-				{
-					return Fail(
-						OutError,
-						TEXT("niagara_domain_target_invalid"),
-						Target);
-				}
-				if (FindPackage(nullptr, *Target)
-					|| IFileManager::Get().FileExists(*Filename))
-				{
-					return Fail(
-						OutError,
-						TEXT("niagara_domain_stale_revision"),
-						Target,
-						TEXT("existing"));
-				}
-			}
-
-			FString CommandId;
-			const TSharedPtr<FJsonObject>* NativeParams = nullptr;
-			if (!bExists)
-			{
-				if (!Root->TryGetObjectField(TEXT("create"), NativeParams)
-					|| !NativeParams || !NativeParams->IsValid())
-				{
-					return Fail(
-						OutError,
-						TEXT("niagara_domain_create_contract_required"));
-				}
-				if (RootType == SystemType)
-				{
-					CommandId = TEXT("niagara.system.asset.create");
-				}
-				else if (RootType == EmitterType)
-				{
-					CommandId = TEXT("niagara.emitter.asset.create");
-				}
-				else
-				{
-					CommandId = TEXT("niagara.asset.duplicate");
-				}
-				if (!ValidateCreateTarget(
-						RootType, Target, *NativeParams, OutError))
-				{
-					return false;
-				}
-			}
-			else
-			{
-				const TSharedPtr<FJsonObject>* Operation = nullptr;
-				if (!Root->TryGetObjectField(TEXT("operation"), Operation)
-					|| !Operation || !Operation->IsValid()
-					|| !(*Operation)->TryGetStringField(
-						TEXT("command_id"), CommandId)
-					|| !(*Operation)->TryGetObjectField(
-						TEXT("params"), NativeParams)
-					|| !NativeParams || !NativeParams->IsValid())
-				{
-					return Fail(
-						OutError,
-						TEXT("niagara_domain_operation_contract_required"));
-				}
-				if (!IsAllowedOperation(RootType, CommandId))
-				{
-					return Fail(
-						OutError,
-						TEXT("niagara_domain_operation_not_supported"),
-						CommandId);
-				}
-				FString NativeTarget;
-				if (!(*NativeParams)->TryGetStringField(
-						TEXT("target_ref"), NativeTarget)
-					|| ObjectPathFromPackage(NativeTarget)
-						!= ObjectPathFromPackage(Target))
-				{
-					return Fail(
-						OutError,
-						TEXT("niagara_domain_operation_target_mismatch"),
-						CommandId);
-				}
-			}
-
-			FString MutationPayload;
-			if (!SubmitNiagaraCommand(
-					CommandId, *NativeParams, MutationPayload, OutError))
+			else if (!ValidateMissingTarget(Target, OutError))
 			{
 				return false;
 			}
 
-			FString AfterPayload;
-			FString AfterRevision;
-			if (!TryRead(Target, AfterPayload, AfterRevision, OutError)) return false;
-			TSharedPtr<FJsonObject> AfterObject;
-			FString JsonError;
-			if (!Json::TryParseObject(AfterPayload, AfterObject, JsonError)
-				|| !AfterObject.IsValid())
+			const TSharedPtr<FJsonObject>* DocumentField = nullptr;
+			if (!Resolved.Root->TryGetObjectField(
+					TEXT("document"), DocumentField)
+				|| !DocumentField || !DocumentField->IsValid())
+			{
+				return Fail(
+					OutError, TEXT("niagara_domain_document_required"));
+			}
+			TSharedPtr<FJsonObject> Document;
+			if (!PrepareDocument(
+					Target, RootType, bExists, ExistingTarget,
+					*DocumentField, Document, OutError))
+			{
+				return false;
+			}
+
+			FString RegistrationError;
+			if (!UeAgentNiagaraAuthoring::RegisterAuthoring(
+					RegistrationError))
 			{
 				return Fail(
 					OutError,
-					TEXT("niagara_domain_readback_payload_invalid"),
-					JsonError);
+					TEXT("niagara_domain_authoring_registration_failed"),
+					RegistrationError);
 			}
-			const TSharedPtr<FJsonObject> Result = MakeShared<FJsonObject>();
-			Result->SetStringField(TEXT("terminal_status"), TEXT("succeeded"));
-			Result->SetStringField(
-				TEXT("provider_id"), TEXT("niagara-domain-provider"));
-			Result->SetStringField(TEXT("target"), Target);
-			Result->SetStringField(TEXT("revision"), AfterRevision);
-			Result->SetBoolField(TEXT("saved"), true);
-			Result->SetBoolField(TEXT("reloaded"), true);
-			Result->SetObjectField(TEXT("independent_readback"), AfterObject);
-			TSharedPtr<FJsonObject> Mutation;
-			if (Json::TryParseObject(MutationPayload, Mutation, JsonError)
-				&& Mutation.IsValid())
+			UeAgentNiagaraAuthoring::FAssetApplyResult ApplyResult;
+			const FString RequestId = TEXT("niagara-domain-")
+				+ FGuid::NewGuid().ToString(EGuidFormats::DigitsWithHyphensLower);
+			if (!UeAgentNiagaraAuthoring::ApplyAssetInlineDocument(
+					Document,
+					Kind,
+					PackageIdentity(Target),
+					ApplyResult,
+					RequestId))
 			{
-				Result->SetObjectField(TEXT("mutation"), Mutation);
+				return Fail(
+					OutError,
+					ApplyResult.ErrorCode.IsEmpty()
+						? FString(TEXT("niagara_domain_authoring_failed"))
+						: ApplyResult.ErrorCode,
+					ApplyResult.Phase,
+					ApplyResult.ErrorDetail);
 			}
-			return CanonicalObject(Result, OutPayload, OutError);
+			if (!ApplyResult.CanReportComplete()
+				|| !ApplyResult.Asset
+				|| !PackageIdentity(ApplyResult.AssetPath).Equals(
+					PackageIdentity(Target), ESearchCase::IgnoreCase))
+			{
+				return Fail(
+					OutError,
+					TEXT("niagara_domain_authoring_receipt_invalid"),
+					ApplyResult.AssetPath,
+					UeAgentNiagaraAuthoring::GetApplyFailureMessage(ApplyResult));
+			}
+
+			UPackage* const Package = ApplyResult.Asset->GetOutermost();
+			ApplyResult.Asset = nullptr;
+			FText UnloadError;
+			if (!Package
+				|| !UPackageTools::UnloadPackages({Package}, UnloadError, true))
+			{
+				return Fail(
+					OutError, TEXT("niagara_domain_unload_failed"),
+					Target, UnloadError.ToString());
+			}
+
+			FString AfterPayload;
+			FString AfterRevision;
+			TSharedPtr<FJsonObject> AfterSnapshot;
+			if (!TryRead(
+					Target, RootType, AfterPayload, AfterRevision,
+					&AfterSnapshot, nullptr, OutError))
+			{
+				return false;
+			}
+			FString CompileStatus;
+			if (!AfterSnapshot.IsValid()
+				|| !AfterSnapshot->TryGetStringField(
+					TEXT("compile_status"), CompileStatus)
+				|| CompileStatus != TEXT("valid"))
+			{
+				return Fail(
+					OutError, TEXT("niagara_domain_compile_not_settled"),
+					Target, CompileStatus);
+			}
+
+			const TSharedPtr<FJsonObject> Mutation = MakeShared<FJsonObject>();
+			Mutation->SetStringField(
+				TEXT("operation"), ApplyResult.ResolvedOperation);
+			Mutation->SetStringField(TEXT("asset_kind"), ApplyResult.AssetKind);
+			Mutation->SetStringField(
+				TEXT("compile_status"), ApplyResult.CompileStatus);
+			Mutation->SetNumberField(
+				TEXT("compile_error_count"), ApplyResult.CompileErrorCount);
+			Mutation->SetNumberField(
+				TEXT("stack_issue_count"), ApplyResult.StackIssueCount);
+			Mutation->SetNumberField(
+				TEXT("mutations_applied"), ApplyResult.MutationsApplied);
+			Mutation->SetBoolField(
+				TEXT("editor_isolation_performed"),
+				ApplyResult.bEditorIsolationPerformed);
+			Mutation->SetNumberField(
+				TEXT("closed_editor_count"), ApplyResult.ClosedEditorCount);
+			TArray<TSharedPtr<FJsonValue>> CompiledTargets;
+			for (const FString& CompiledTarget : ApplyResult.CompiledTargets)
+			{
+				CompiledTargets.Add(
+					MakeShared<FJsonValueString>(CompiledTarget));
+			}
+			Mutation->SetArrayField(
+				TEXT("compiled_targets"), MoveTemp(CompiledTargets));
+
+			FDomainHjsonImportLifecycleReceipt LifecycleReceipt;
+			LifecycleReceipt.bMutationApplied = true;
+			LifecycleReceipt.bCompileSettled = true;
+			LifecycleReceipt.bPackageSaved = true;
+			LifecycleReceipt.bUnloadedReloaded = true;
+			LifecycleReceipt.PersistenceReceiptId = TEXT("reload:")
+				+ ObjectPathFromPackageIdentity(Target)
+				+ TEXT(":") + AfterRevision;
+			return TryBuildImportSuccessPayload(
+				TEXT("niagara-domain-provider"),
+				Target,
+				AfterRevision,
+				LifecycleReceipt,
+				AfterSnapshot,
+				Mutation,
+				OutPayload,
+				OutError);
 		}
 	}
 
 	bool TryExecuteContentGraph(
 		const FString& CommandId,
 		const FString& TargetIdentity,
+		const FString& RootTypeIdentity,
 		const FString& CanonicalParamsJson,
 		FString& OutPayloadJson,
 		bool& bOutReadOnly,
@@ -755,39 +581,44 @@ namespace UE::UAI::DomainAdapters::Niagara
 			|| !Params.IsValid())
 		{
 			return Fail(
-				OutError,
-				TEXT("niagara_domain_params_invalid"),
-				JsonError);
+				OutError, TEXT("niagara_domain_params_invalid"), JsonError);
 		}
 		FString Target;
 		if (!Params->TryGetStringField(TEXT("target"), Target)
-			|| Target != TargetIdentity)
+			|| ObjectPathFromPackageIdentity(Target)
+				!= ObjectPathFromPackageIdentity(TargetIdentity))
 		{
 			return Fail(
-				OutError,
-				TEXT("niagara_domain_target_identity_mismatch"),
-				TargetIdentity);
+				OutError, TEXT("niagara_domain_target_identity_mismatch"),
+				TargetIdentity, Target);
+		}
+		if (ExpectedKind(RootTypeIdentity).IsEmpty())
+		{
+			return Fail(
+				OutError, TEXT("niagara_domain_root_type_invalid"),
+				RootTypeIdentity);
 		}
 		if (CommandId == TEXT("content_graph.import_workspace"))
 		{
-			return TryImport(Target, Params, OutPayloadJson, OutError);
+			return TryImport(
+				Target, RootTypeIdentity, CanonicalParamsJson,
+				OutPayloadJson, OutError);
 		}
 		if (CommandId == TEXT("content_graph.export_workspace"))
 		{
 			return Fail(
-				OutError,
-				TEXT("niagara_domain_export_not_registered"),
-				Target);
+				OutError, TEXT("niagara_domain_export_not_registered"), Target);
 		}
 		if (CommandId.StartsWith(TEXT("content_graph.")))
 		{
 			FString Revision;
 			bOutReadOnly = true;
-			return TryRead(Target, OutPayloadJson, Revision, OutError);
+			return TryRead(
+				Target, RootTypeIdentity, OutPayloadJson, Revision,
+				nullptr, nullptr, OutError);
 		}
 		return Fail(
-			OutError,
-			TEXT("niagara_domain_command_not_supported"),
+			OutError, TEXT("niagara_domain_command_not_supported"),
 			CommandId);
 	}
 }

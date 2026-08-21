@@ -90,6 +90,9 @@ namespace UeAgentPaletteSearch
 		const FString& SearchKey,
 		FCandidate& InOutCandidate,
 		FString& OutError);
+	UEAGENTINTERFACE_API bool TryCanonicalizeNiagaraTargetUsage(
+		const FString& Value,
+		FString& OutCanonicalUsage);
 	bool ExecuteSearch(const FSearchParams& Params, FSearchResult& OutResult, FString& OutError);
 	TSharedRef<FJsonObject> BuildSearchResponse(const FSearchParams& Params, const FSearchResult& Result);
 	TSharedRef<FJsonObject> BuildCategoriesResponse(const FSearchParams& Params, const FSearchResult& Result);

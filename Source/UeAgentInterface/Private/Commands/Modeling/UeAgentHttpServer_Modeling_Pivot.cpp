@@ -1329,7 +1329,7 @@ namespace UeAgentModelingPivot
 	}
 }
 
-bool FUeAgentHttpServer::CmdModelingSetPivot(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdModelingSetPivot(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	using namespace UeAgentModelingPivot;
 	using namespace UeAgentModelingSpatialInfo;

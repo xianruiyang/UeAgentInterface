@@ -73,4 +73,18 @@ namespace UE::UAI::DomainAdapters::AssetSimple
 		};
 		return Scopes;
 	}
+
+	FString GetAssetSimpleRequiredOfficialPlugin(const FString& CommandId)
+	{
+		if (CommandId.StartsWith(TEXT("asset.paper_")))
+		{
+			return TEXT("Paper2D");
+		}
+		if (CommandId.StartsWith(TEXT("asset.input_action."))
+			|| CommandId.StartsWith(TEXT("asset.input_mapping_context.")))
+		{
+			return TEXT("EnhancedInput");
+		}
+		return FString();
+	}
 }

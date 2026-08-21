@@ -31,7 +31,7 @@ namespace UE::UAI::Module::CommandRegistration::UnifiedGraphLayout
 				Declaration.StateLayers = {TEXT("persisted")};
 				Declaration.InputFields = {
 					{TEXT("targets"), TEXT("array"), true, false,
-						TEXT("One or more exact graph identities with expected_revision.")},
+						TEXT("One or more exact graph identities from one owning Blueprint asset, each with that asset's public content_graph revision.")},
 					{TEXT("strategy"), TEXT("string"), true, false,
 						TEXT("The shared layout strategy identity.")},
 					{TEXT("parameters"), TEXT("object"), true, false,
@@ -56,27 +56,42 @@ namespace UE::UAI::Module::CommandRegistration::UnifiedGraphLayout
 						TEXT("A graph identity appears more than once.")},
 					{TEXT("unified_graph_layout_target_unsupported"),
 						TEXT("The exact graph identity is unknown or unsupported.")},
+					{TEXT("unified_graph_layout_provider_unsupported"),
+						TEXT("The graph is not owned by a Blueprint, Widget Blueprint, or Animation Blueprint provider.")},
+					{TEXT("unified_graph_layout_cross_package_atomicity_unsupported"),
+						TEXT("The current atomic write boundary accepts only graphs from one owning asset and package.")},
 					{TEXT("unified_graph_layout_stale_revision"),
 						TEXT("A target revision changed before the first write.")},
+					{TEXT("unified_graph_layout_geometry_unavailable"),
+						TEXT("Exact offscreen graph geometry could not be measured without disturbing the user's editor.")},
+					{TEXT("unified_graph_layout_algorithm_failed"),
+						TEXT("The topology layout algorithm rejected the measured graph.")},
+					{TEXT("unified_graph_layout_compile_failed"),
+						TEXT("The owning Blueprint did not compile after layout and was restored before save.")},
 					{TEXT("unified_graph_layout_save_failed"),
-						TEXT("The shared owner could not persist all target packages.")},
+						TEXT("The shared owner could not persist the owning package and restored in-memory positions.")},
+					{TEXT("unified_graph_layout_reload_failed_state_unknown"),
+						TEXT("The package was saved but the mandatory reload failed; persisted state must be inspected.")},
+					{TEXT("unified_graph_layout_independent_readback_failed"),
+						TEXT("Reloaded graph identities, compile status, revision, or node positions did not match the applied result.")},
 				};
 				Declaration.Purpose.Summary =
-					TEXT("Lay out one or more exact editable graphs through one public owner.");
+					TEXT("Persistently lay out one or more exact graphs from one owning Blueprint asset through one public owner.");
 				Declaration.Purpose.Target =
-					TEXT("Exact Blueprint, Animation Blueprint, Material, Niagara, PCG, AI, Audio, or Control Rig graph identities.");
+					TEXT("Exact Blueprint, Widget Blueprint, or Animation Blueprint graph identities that share one owning asset and package.");
 				Declaration.Purpose.Preconditions = {
-					TEXT("Use graph identities and revisions returned by current query/readback paths."),
+					TEXT("Read the owning asset through content_graph.* and use its returned public revision for every target."),
+					TEXT("Keep every graph in one request within the same owning Blueprint asset and package."),
 					TEXT("Authorize the complete targets array before execution."),
 				};
 				Declaration.Purpose.ParameterGuidance =
-					TEXT("Do not pass provider names; routing is derived from exact graph type.");
+					TEXT("Do not pass provider names; use hierarchical_left_to_right and bounded spacing, padding, or origin parameters.");
 				Declaration.Purpose.ResultGuidance =
-					TEXT("Verify every target in independent_readback and retain the impact plan.");
+					TEXT("Verify the reloaded public revision and every persisted node position in independent_readback; retain the impact and persistence receipts.");
 				Declaration.Purpose.FailureGuidance =
-					TEXT("Unknown, duplicate, unsupported, or stale targets fail before the first write.");
+					TEXT("Unknown, duplicate, cross-package, unsupported, stale, or unmeasurable targets fail before the first write; post-save reload failure is explicitly state-unknown.");
 				Declaration.Purpose.SideEffectGuidance =
-					TEXT("The owner plans all targets, applies provider mechanics, saves packages, and reads positions back.");
+					TEXT("The owner measures graph geometry offscreen, applies the shared topology algorithm, compiles and saves one package, reloads it, then reads positions back.");
 				Declaration.Purpose.MinimumExample =
 					TEXT("client.graph.layout_apply(targets, strategy, parameters, authorization_id)");
 				Declaration.Purpose.RelatedFlows = {

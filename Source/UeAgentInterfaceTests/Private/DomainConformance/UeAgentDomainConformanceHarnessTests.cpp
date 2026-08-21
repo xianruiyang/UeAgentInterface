@@ -619,7 +619,7 @@ bool FUeAgentDomainConformanceOperationFactoryTest::RunTest(
 
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(
 	FUeAgentDomainConformanceWorkspaceFixtureTest,
-	"UeAgentInterface.DomainConformance.WorkspaceFixture",
+	"UAI.Root.T36.HjsonSource.SemanticCarrierIdentity",
 	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
 
 bool FUeAgentDomainConformanceWorkspaceFixtureTest::RunTest(
@@ -640,10 +640,18 @@ bool FUeAgentDomainConformanceWorkspaceFixtureTest::RunTest(
 		return false;
 	}
 	TestTrue(TEXT("workspace fixture is valid"), Workspace.IsValid());
+	FDomainWorkspaceFixture Formatted = Workspace;
+	TestTrue(TEXT("single-file carrier can vary formatting without semantic drift"),
+		Formatted.TryOverwriteSingleFileForTest(
+			Fixture.CanonicalDocument.Replace(
+				TEXT("  schema:"), TEXT("schema:")),
+			Error));
 
 	TArray<FString> Documents;
+	TArray<FString> SourceFingerprints;
+	TArray<FString> SemanticFingerprints;
 	TArray<HjsonWorkspace::EWorkspaceSourceKind> Kinds;
-	for (const FDomainWorkspaceCarrier& Carrier : Workspace.GetCarriers())
+	for (const FDomainWorkspaceCarrier& Carrier : Formatted.GetCarriers())
 	{
 		ContextResource::FUeAgentResourceTracker Resources = MakeResources();
 		HjsonWorkspace::FResolvedContentGraphImportSourcePtr Resolved;
@@ -661,15 +669,27 @@ bool FUeAgentDomainConformanceWorkspaceFixtureTest::RunTest(
 		{
 			Kinds.Add(Resolved->GetKind());
 			Documents.Add(Resolved->GetEntryDocument()->GetDocument());
+			SourceFingerprints.Add(Resolved->GetSourceFingerprint());
+			SemanticFingerprints.Add(Resolved->GetSemanticFingerprint());
 		}
 	}
 	TestEqual(TEXT("three carriers resolve"), Documents.Num(), 3);
-	if (Documents.Num() == 3)
+	if (SemanticFingerprints.Num() == 3)
 	{
-		TestEqual(TEXT("inline and single-file semantics match"),
-			Documents[0], Documents[1]);
+		TestEqual(TEXT("inline and formatted single-file semantics match"),
+			SemanticFingerprints[0], SemanticFingerprints[1]);
 		TestEqual(TEXT("inline and directory semantics match"),
-			Documents[0], Documents[2]);
+			SemanticFingerprints[0], SemanticFingerprints[2]);
+	}
+	if (SourceFingerprints.Num() == 3)
+	{
+		TSet<FString> ProvenanceIdentities;
+		for (const FString& Fingerprint : SourceFingerprints)
+		{
+			ProvenanceIdentities.Add(Fingerprint);
+		}
+		TestEqual(TEXT("carrier provenance remains independently identifiable"),
+			ProvenanceIdentities.Num(), 3);
 	}
 	TestTrue(TEXT("inline carrier is explicit"),
 		Kinds.Contains(HjsonWorkspace::EWorkspaceSourceKind::Inline));
@@ -692,6 +712,44 @@ bool FUeAgentDomainConformanceWorkspaceFixtureTest::RunTest(
 
 	IFileManager::Get().DeleteDirectory(*Root, false, true);
 	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(
+	FUeAgentT36HjsonSourceResourceBudgetTest,
+	"UAI.Root.T36.HjsonSource.ResourceBudget",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FUeAgentT36HjsonSourceResourceBudgetTest::RunTest(
+	const FString& Parameters)
+{
+	(void)Parameters;
+	using namespace UE::UAI;
+	const TSharedRef<FJsonObject> Source = MakeShared<FJsonObject>();
+	Source->SetStringField(TEXT("kind"), TEXT("inline"));
+	Source->SetStringField(
+		TEXT("document"),
+		TEXT("{schema:uai.fixture/1,root:{type:/Script/CoreUObject.Object}}"));
+	ContextResource::FUeAgentResourceTracker Resources(
+		ContextResource::FUeAgentResourceBudget({
+			{ContextResource::EUeAgentResourceDimension::InputBytes, 1},
+			{ContextResource::EUeAgentResourceDimension::StringBytes, 1},
+			{ContextResource::EUeAgentResourceDimension::WorkUnits, 1},
+			{ContextResource::EUeAgentResourceDimension::EstimatedMemoryBytes, 1},
+		}));
+	HjsonWorkspace::FResolvedContentGraphImportSourcePtr Resolved;
+	HjsonWorkspace::FWorkspaceError Error;
+	TestFalse(TEXT("the source loader stops before parsing beyond its budget"),
+		HjsonWorkspace::TryLoadContentGraphImportSource(
+			Source,
+			TEXT("/Game/UAI/T36/Fixture.Fixture"),
+			Resources,
+			Resolved,
+			Error));
+	TestEqual(TEXT("the resource failure remains typed"),
+		Error.GetCode(), FString(TEXT("resource_budget_exceeded")));
+	TestFalse(TEXT("no resolved source escapes the failed gate"),
+		Resolved.IsValid());
+	return !HasAnyErrors();
 }
 
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(

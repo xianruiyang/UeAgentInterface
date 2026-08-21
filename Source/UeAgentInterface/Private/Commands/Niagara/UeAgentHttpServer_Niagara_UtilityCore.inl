@@ -1135,7 +1135,7 @@
 		OutPath.TrimStartAndEndInline();
 		if (OutPath.IsEmpty())
 		{
-			return FUeAgentHttpServer::MakeShotPath(Format);
+			return FUeAgentLegacyMechanics::MakeShotPath(Format);
 		}
 		if (FPaths::IsRelative(OutPath))
 		{

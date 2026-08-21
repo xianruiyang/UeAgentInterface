@@ -268,7 +268,7 @@ namespace UeAgentComponentEventQuery
 	}
 }
 
-bool FUeAgentHttpServer::CmdBlueprintListComponentEvents(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdBlueprintListComponentEvents(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	using namespace UeAgentComponentEventQuery;
 
@@ -343,7 +343,7 @@ bool FUeAgentHttpServer::CmdBlueprintListComponentEvents(const FUeAgentRequestCo
 	return true;
 }
 
-bool FUeAgentHttpServer::CmdUmgListWidgetEvents(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdUmgListWidgetEvents(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	using namespace UeAgentComponentEventQuery;
 

@@ -184,11 +184,34 @@ namespace
 		const TSharedRef<TJsonReader<>> Reader =
 			TJsonReaderFactory<>::Create(Result.GetValue().GetJsonValue());
 		FString TargetRef;
+		FString TerminalStatus;
+		FString PersistenceReceiptId;
+		FString ReadbackEvidenceId;
+		bool bMutationApplied = false;
+		bool bCompileSettled = false;
+		bool bSaved = false;
+		bool bReloaded = false;
 		const bool bExact = FJsonSerializer::Deserialize(Reader, Root)
 			&& Root.IsValid()
 			&& Root->TryGetStringField(TEXT("target_ref"), TargetRef)
-			&& TargetRef == ExpectedTarget;
-		return Test.TestTrue(*(Label + TEXT(" returns exact target_ref")), bExact);
+			&& TargetRef == ExpectedTarget
+			&& Root->TryGetStringField(TEXT("terminal_status"), TerminalStatus)
+			&& TerminalStatus == TEXT("succeeded")
+			&& Root->TryGetBoolField(TEXT("mutation_applied"), bMutationApplied)
+			&& bMutationApplied
+			&& Root->TryGetBoolField(TEXT("compile_settled"), bCompileSettled)
+			&& bCompileSettled
+			&& Root->TryGetBoolField(TEXT("saved"), bSaved) && bSaved
+			&& Root->TryGetBoolField(TEXT("reloaded"), bReloaded) && bReloaded
+			&& Root->TryGetStringField(
+				TEXT("persistence_receipt_id"), PersistenceReceiptId)
+			&& !PersistenceReceiptId.IsEmpty()
+			&& Root->TryGetStringField(
+				TEXT("independent_readback_evidence_id"), ReadbackEvidenceId)
+			&& !ReadbackEvidenceId.IsEmpty();
+		return Test.TestTrue(
+			*(Label + TEXT(" returns exact target and lifecycle receipt")),
+			bExact);
 	}
 
 	TSharedRef<FJsonObject> AssetCreate(const FString& PackageName)

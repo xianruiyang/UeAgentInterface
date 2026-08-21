@@ -1,6 +1,6 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
-#include "Server/UeAgentHttpServer.h"
+#include "LegacyMechanics/UeAgentLegacyMechanics.h"
 
 #include "Utilities/AuthoringCore/UeAgentAuthoringSemanticCompare.h"
 #include "Utilities/UeAgentAuthoringFileIO.h"
@@ -1803,7 +1803,7 @@ namespace UeAgentProjectSettingsOps
 
 using namespace UeAgentProjectSettingsOps;
 
-bool FUeAgentHttpServer::CmdProjectSettingsExportIndex(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdProjectSettingsExportIndex(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	TArray<FPageRef> Pages;
 	EnumeratePages(Pages, OutError);
@@ -1969,7 +1969,7 @@ bool FUeAgentHttpServer::CmdProjectSettingsExportIndex(const FUeAgentRequestCont
 	return true;
 }
 
-bool FUeAgentHttpServer::CmdProjectSettingsExportPage(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdProjectSettingsExportPage(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	FPageRef Page;
 	if (!FindPage(Ctx.Params, Page, OutError))
@@ -2026,7 +2026,7 @@ bool FUeAgentHttpServer::CmdProjectSettingsExportPage(const FUeAgentRequestConte
 	return true;
 }
 
-bool FUeAgentHttpServer::CmdProjectSettingsValidatePage(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdProjectSettingsValidatePage(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	FPageRef Page;
 	if (!FindPage(Ctx.Params, Page, OutError))
@@ -2044,7 +2044,7 @@ bool FUeAgentHttpServer::CmdProjectSettingsValidatePage(const FUeAgentRequestCon
 	return true;
 }
 
-bool FUeAgentHttpServer::CmdProjectSettingsApplyPage(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdProjectSettingsApplyPage(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	FPageRef Page;
 	if (!FindPage(Ctx.Params, Page, OutError))
@@ -2065,7 +2065,7 @@ bool FUeAgentHttpServer::CmdProjectSettingsApplyPage(const FUeAgentRequestContex
 	return true;
 }
 
-bool FUeAgentHttpServer::CmdProjectSettingsDiffPage(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdProjectSettingsDiffPage(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	FPageRef Page;
 	if (!FindPage(Ctx.Params, Page, OutError))
@@ -2076,7 +2076,7 @@ bool FUeAgentHttpServer::CmdProjectSettingsDiffPage(const FUeAgentRequestContext
 	return ApplyOrValidatePage(Page, Ctx.Params, false, true, OutData, OutError);
 }
 
-bool FUeAgentHttpServer::CmdConfigExportSection(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdConfigExportSection(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	FString ConfigFileInput;
 	FString SectionName;
@@ -2111,7 +2111,7 @@ bool FUeAgentHttpServer::CmdConfigExportSection(const FUeAgentRequestContext& Ct
 	return true;
 }
 
-bool FUeAgentHttpServer::CmdConfigApplySection(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdConfigApplySection(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	FString JsonFile;
 	TSharedPtr<FJsonObject> JsonRoot;

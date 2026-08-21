@@ -2,17 +2,17 @@
 
 ## Active ownership boundary
 
-The `query` process contribution publishes exactly forty non-HJSON read commands through `query-command-owner`. They join the one process-level immutable registry and exact dispatch owned by the active command composition; the contribution does not create a private registry or a second public route.
+The `query` process contribution publishes exactly forty-one non-HJSON read commands through `query-command-owner`. They join the one process-level immutable registry and exact dispatch owned by the active command composition; the contribution does not create a private registry or a second public route.
 
 The inventory is:
 
 - asset state: `asset.collection`, `asset.properties`, `asset.registry_record`, `asset.registry_relations`, `asset.relations`, `asset.sample`, `asset.summary`, `asset.validation`;
 - configuration and Editor state: `config.resolved_value`, `config.section`, `editor.dirty_resources`, `editor.open_assets`;
 - project state: `project.platform`, `project.settings`, `project.summary`, `project.validation`;
-- reference state: `reference.asset_read`;
+- reference state: `reference.asset_read`, `reference.origin.resolve`;
 - world state and runtime probes: `world.actor_components`, `world.actors`, `world.capsule_path`, `world.capsule_sweep`, `world.content`, `world.data_layers`, `world.hlod_assignments`, `world.mesh_closest_vertex`, `world.mesh_vertex_position`, `world.nav_connectivity`, `world.nav_find_path`, `world.nav_project_point`, `world.nearby_shapes`, `world.overlap`, `world.partition`, `world.partition_health`, `world.physics_component`, `world.physics_constraint`, `world.property`, `world.ray_trace`, `world.selection`, `world.streaming_levels`, `world.summary`.
 
-Thirty-nine public IDs select the descriptor with the same mechanics ID. `reference.asset_read` is a separate exact public contract whose server-owned route selects `asset.properties` mechanics and freezes `BlueprintDisplayName`, the persisted property written by `reference.asset_apply`. The SDK does not translate it into `asset.properties`, and callers cannot substitute one identity for the other.
+Forty public IDs select the descriptor with the same mechanics ID. `reference.asset_read` is a separate exact public contract whose server-owned route selects `asset.properties` mechanics and freezes `BlueprintDisplayName`, the persisted property written by `reference.asset_apply`. The SDK does not translate it into `asset.properties`, and callers cannot substitute one identity for the other.
 
 ## Request, mechanics and result
 
@@ -21,6 +21,8 @@ Every request enters `/api/uai/command`, passes the exact command contract, and 
 Commands that address one object require `target`; `reference.asset_read` instead requires `object_path` and the server supplies the exact `BlueprintDisplayName` property selection. Optional `input` contains only descriptor-specific query fields, `context` selects an allowed current state plane and execution context, and `projection` controls fields, provenance and bounded paging. The service does not use HJSON and does not perform alias guessing.
 
 The production service composes the audited Asset/Project and World descriptor registries, one provider for each exact mechanics binding, real native UE read hooks, current Editor/World context, a bounded resource tracker, and the shared response projector. Real mechanics execute on the game thread. They are read-only and do not save or mutate assets. Projection may page or report partial/degraded source state; it is not rejected solely because an estimated total token count is large.
+
+`world.selection` freezes the current actor selection at the public Query boundary. The world facet is required, but a selection is a collection result rather than a required non-empty context identity: no selected actors therefore returns a successful complete snapshot with zero entries. It must not fail with `execution_context_required_facet_missing` or synthesize a placeholder identity.
 
 A successful response contains:
 
@@ -49,9 +51,9 @@ uai-cli --connection connection.toml exec project.summary --params-json {"projec
 
 ## Legacy exit and evidence boundary
 
-The old read/export contract and handler registry no longer publish any route. T13 moved the former `content_graph.*` routes into its active contribution, so neither those routes nor any of the forty T06 IDs remains in the legacy registry. The reference command handler factory no longer publishes `reference.asset_read`; its dormant `reference.asset_apply` implementation is not registered by the process active composition and is retained only as internal mechanics pending T90 physical retirement. `reference.asset_read` therefore has one active public owner and composes the shared asset mechanics only behind the new Query service.
+The old read/export contract and handler registry no longer exist in the active compiled tree. T13 moved the former `content_graph.*` routes into its current contribution, so neither those routes nor any of the forty-one T06 IDs is present in the sole immutable registry. T44 also isolated the obsolete module-owned Query-service composition and its `ReferenceCommand` handler. `reference.asset_read` therefore has one active public owner and composes shared asset mechanics only behind the current Query service.
 
-T06 Automation verifies the exact forty-command inventory, unique owner, legacy-route exit, exact dispatch, typed failures and a real production `project.summary` readback. The public SDK evidence additionally discovers all forty current contract hashes through `query.command.search`, executes `client.project.summary` through the live Editor, and uses `client.reference.asset_read` to read the exact persisted `BlueprintDisplayName` of a targeted reference Blueprint. It also observes `query_target_required` for a targetless `asset.summary`. These claims do not cover HJSON authoring, mutation, persistence or any Query command outside the inventory above.
+T06 Automation verifies the exact forty-one-command inventory, unique owner, legacy-route exit, exact dispatch, typed failures, a real production `project.summary` readback, and the complete zero-entry result of an empty current `world.selection`. The public SDK evidence additionally discovers all forty-one current contract hashes through `query.command.search`, executes `client.project.summary` through the live Editor, and uses `client.reference.asset_read` to read the exact persisted `BlueprintDisplayName` of a targeted reference Blueprint. It also observes `query_target_required` for a targetless `asset.summary`. These claims do not cover HJSON authoring, mutation, persistence or any Query command outside the inventory above.
 
 The authoritative historical mapping is the adjacent
 `successors/t06_non_hjson_query_migration.json` v2 record. It consumes all 21

@@ -1,5 +1,6 @@
 #include "DomainAdapters/WorldSpatial/UeAgentWorldSpatialNativeTestSupport.h"
 
+#include "AssetRegistry/AssetRegistryModule.h"
 #include "Components/BoxComponent.h"
 #include "Components/SceneComponent.h"
 #include "Components/StaticMeshComponent.h"
@@ -7,10 +8,13 @@
 #include "Engine/StaticMesh.h"
 #include "Engine/World.h"
 #include "GameFramework/Actor.h"
+#include "HAL/FileManager.h"
 #include "MeshDescription.h"
+#include "Misc/PackageName.h"
 #include "Serialization/JsonReader.h"
 #include "Serialization/JsonSerializer.h"
 #include "StaticMeshAttributes.h"
+#include "UObject/GarbageCollection.h"
 #include "UObject/Package.h"
 
 namespace
@@ -23,10 +27,19 @@ namespace
 	public:
 		FOwnedWorldMeshFixture()
 		{
+			const FString Suffix =
+				FGuid::NewGuid().ToString(EGuidFormats::Digits);
 			const FString PackageName = FString::Printf(
 				TEXT("/Temp/UAI/WorldSpatial/%s"),
-				*FGuid::NewGuid().ToString(EGuidFormats::Digits));
+				*Suffix);
 			Package = CreatePackage(*PackageName);
+			MeshPackageName = FString::Printf(
+				TEXT("/Game/UAI/Tests/WorldSpatial/SM_WorldSpatialOwned_%s"),
+				*Suffix);
+			MeshPackage = CreatePackage(*MeshPackageName);
+			MeshFilename = FPackageName::LongPackageNameToFilename(
+				MeshPackageName,
+				FPackageName::GetAssetPackageExtension());
 			World = UWorld::CreateWorld(
 				EWorldType::EditorPreview,
 				false,
@@ -85,14 +98,17 @@ namespace
 			SurfaceCollision->RegisterComponentWithWorld(World);
 			SurfaceCollision->SetWorldLocation(FVector(0.0, 0.0, -10.0));
 
-			Mesh = NewObject<UStaticMesh>(
-				Package,
-				TEXT("SM_WorldSpatialOwned"),
-				RF_Transient);
+			Mesh = MeshPackage
+				? NewObject<UStaticMesh>(
+					MeshPackage,
+					*FPackageName::GetLongPackageAssetName(MeshPackageName),
+					RF_Public | RF_Standalone)
+				: nullptr;
 			if (!Mesh)
 			{
 				return;
 			}
+			FAssetRegistryModule::AssetCreated(Mesh);
 			FMeshDescription Description;
 			FStaticMeshAttributes Attributes(Description);
 			Attributes.Register();
@@ -136,6 +152,10 @@ namespace
 
 		~FOwnedWorldMeshFixture()
 		{
+			if (Mesh)
+			{
+				FAssetRegistryModule::AssetDeleted(Mesh);
+			}
 			if (Package)
 			{
 				Package->SetDirtyFlag(false);
@@ -145,15 +165,26 @@ namespace
 				World->DestroyWorld(false);
 				World->MarkAsGarbage();
 			}
+			if (MeshPackage)
+			{
+				MeshPackage->SetDirtyFlag(false);
+				MeshPackage->MarkAsGarbage();
+			}
 			if (Package)
 			{
 				Package->MarkAsGarbage();
+			}
+			CollectGarbage(RF_NoFlags, true);
+			if (!MeshFilename.IsEmpty()
+				&& IFileManager::Get().FileExists(*MeshFilename))
+			{
+				IFileManager::Get().Delete(*MeshFilename, false, true);
 			}
 		}
 
 		bool IsValid() const
 		{
-			return Package && World && Subject && Anchor && Surface
+			return Package && MeshPackage && World && Subject && Anchor && Surface
 				&& SubjectRoot && AnchorRoot && SurfaceCollision && Mesh
 				&& SubjectMeshComponent && AnchorMeshComponent;
 		}
@@ -228,6 +259,9 @@ namespace
 		}
 
 		UPackage* Package = nullptr;
+		UPackage* MeshPackage = nullptr;
+		FString MeshPackageName;
+		FString MeshFilename;
 		UWorld* World = nullptr;
 		AActor* Subject = nullptr;
 		AActor* Anchor = nullptr;
@@ -488,6 +522,16 @@ bool FUeAgentWorldSpatialProductionMeshGeometryC3Test::RunTest(
 				Test.TestTrue(TEXT("production C3 updates real mesh pivot"),
 					FirstVertex.Equals(
 						FVector3f(0.0f, 20.0f, 30.0f), 0.01f));
+			}
+			if (CapabilityId == TEXT("mesh.transform.bake")
+				|| CapabilityId == TEXT("mesh.pivot.update"))
+			{
+				Test.TestFalse(
+					TEXT("production C3 leaves the exact mesh package clean after save"),
+					Fixture.MeshPackage->IsDirty());
+				Test.TestTrue(
+					TEXT("production C3 writes the exact owned mesh package"),
+					IFileManager::Get().FileExists(*Fixture.MeshFilename));
 			}
 		});
 }

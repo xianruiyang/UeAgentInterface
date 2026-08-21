@@ -1,0 +1,94 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "uai.capability_historical_decisions.v2",
+  "title": "UAI current dispositions for historical public identities",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "catalog_id",
+    "source",
+    "approval_source",
+    "policy",
+    "legacy_public_surface_exit",
+    "decisions"
+  ],
+  "properties": {
+    "schema": {"const": "uai.capability_historical_decisions.v2"},
+    "catalog_id": {"type": "string", "minLength": 1},
+    "source": {"type": "object"},
+    "approval_source": {"type": "object"},
+    "policy": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "candidate_resolution_is_not_current_successor_proof",
+        "current_disposition_is_final_resolution",
+        "required_capability_contract_does_not_claim_exact_successor",
+        "required_capability_contract_does_not_claim_full_implementation",
+        "implementation_and_product_evidence_owner"
+      ],
+      "properties": {
+        "candidate_resolution_is_not_current_successor_proof": {"const": true},
+        "current_disposition_is_final_resolution": {"const": true},
+        "required_capability_contract_does_not_claim_exact_successor": {"const": true},
+        "required_capability_contract_does_not_claim_full_implementation": {"const": true},
+        "implementation_and_product_evidence_owner": {
+          "const": "catalog_units_and_task_results"
+        }
+      }
+    },
+    "legacy_public_surface_exit": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "historical_identity_count",
+        "current_manifest_status",
+        "compiled_public_surface_status",
+        "active_consumer_status",
+        "retained_mechanics_status",
+        "evidence_task_id"
+      ],
+      "properties": {
+        "historical_identity_count": {"const": 939},
+        "current_manifest_status": {"const": "all_historical_identities_absent"},
+        "compiled_public_surface_status": {
+          "const": "legacy_registry_and_http_handler_removed"
+        },
+        "active_consumer_status": {"const": "legacy_public_consumers_removed"},
+        "retained_mechanics_status": {"const": "private_current_owner_only"},
+        "evidence_task_id": {"const": "TROOT-UAI-44-LEGACY-SURFACE-EXIT"}
+      }
+    },
+    "decisions": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "historical_command_id",
+          "capability_unit_id",
+          "current_disposition",
+          "candidate_resolution_kind",
+          "candidate_successor",
+          "candidate_authority"
+        ],
+        "properties": {
+          "historical_command_id": {"type": "string", "minLength": 1},
+          "capability_unit_id": {"pattern": "^CU-[A-Z0-9-]+$", "type": "string"},
+          "current_disposition": {
+            "enum": [
+              "required_capability_contract",
+              "explicit_non_support",
+              "retire_public_capability"
+            ]
+          },
+          "candidate_resolution_kind": {"type": "string", "minLength": 1},
+          "candidate_successor": {"type": "object"},
+          "candidate_authority": {"const": "historical_evidence_only"}
+        }
+      }
+    }
+  }
+}

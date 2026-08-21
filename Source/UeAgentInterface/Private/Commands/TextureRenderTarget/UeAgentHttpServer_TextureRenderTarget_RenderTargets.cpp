@@ -1,6 +1,6 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
-#include "Server/UeAgentHttpServer.h"
+#include "LegacyMechanics/UeAgentLegacyMechanics.h"
 
 #include "Commands/Assets/UeAgentReflectionAuthoringCommandBridge.h"
 #include "UeAgentHttpServer_TextureRenderTargetOps.h"
@@ -40,7 +40,7 @@
 #include "UObject/Package.h"
 #include "UObject/UnrealType.h"
 
-bool FUeAgentHttpServer::CmdRenderTargetCreate(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdRenderTargetCreate(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	using namespace UeAgentTextureOps;
 	FString AssetPath;
@@ -144,7 +144,7 @@ bool FUeAgentHttpServer::CmdRenderTargetCreate(const FUeAgentRequestContext& Ctx
 	return true;
 }
 
-bool FUeAgentHttpServer::CmdRenderTargetGetInfo(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdRenderTargetGetInfo(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	using namespace UeAgentTextureOps;
 	FString AssetPath;
@@ -188,22 +188,22 @@ bool FUeAgentHttpServer::CmdRenderTargetGetInfo(const FUeAgentRequestContext& Ct
 	return true;
 }
 
-bool FUeAgentHttpServer::CmdRenderTargetExportJson(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdRenderTargetExportJson(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	return UeAgentReflectionAuthoringCommandBridge::Export(TEXT("render_target"), Ctx.Params, OutData, OutError);
 }
 
-bool FUeAgentHttpServer::CmdRenderTargetValidateJson(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdRenderTargetValidateJson(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	return UeAgentReflectionAuthoringCommandBridge::Validate(TEXT("render_target"), Ctx.Params, OutData, OutError);
 }
 
-bool FUeAgentHttpServer::CmdRenderTargetApplyJson(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdRenderTargetApplyJson(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	return UeAgentReflectionAuthoringCommandBridge::Apply(TEXT("render_target"), Ctx.Params, OutData, OutError, Ctx.RequestId);
 }
 
-bool FUeAgentHttpServer::CmdRenderTargetResize(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdRenderTargetResize(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	using namespace UeAgentTextureOps;
 	bool bAllowResize = false;
@@ -262,7 +262,7 @@ bool FUeAgentHttpServer::CmdRenderTargetResize(const FUeAgentRequestContext& Ctx
 	return true;
 }
 
-bool FUeAgentHttpServer::CmdRenderTargetClear(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdRenderTargetClear(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	using namespace UeAgentTextureOps;
 	FString AssetPath;
@@ -305,7 +305,7 @@ bool FUeAgentHttpServer::CmdRenderTargetClear(const FUeAgentRequestContext& Ctx,
 	return true;
 }
 
-bool FUeAgentHttpServer::CmdRenderTargetDrawMaterial(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdRenderTargetDrawMaterial(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	using namespace UeAgentTextureOps;
 	FString AssetPath;
@@ -394,7 +394,7 @@ bool FUeAgentHttpServer::CmdRenderTargetDrawMaterial(const FUeAgentRequestContex
 	return true;
 }
 
-bool FUeAgentHttpServer::CmdRenderTargetCopyTexture(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdRenderTargetCopyTexture(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	using namespace UeAgentTextureOps;
 	FString AssetPath;
@@ -454,7 +454,7 @@ bool FUeAgentHttpServer::CmdRenderTargetCopyTexture(const FUeAgentRequestContext
 	return true;
 }
 
-bool FUeAgentHttpServer::CmdRenderTargetCaptureScene(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdRenderTargetCaptureScene(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	using namespace UeAgentTextureOps;
 	FString AssetPath;
@@ -583,7 +583,7 @@ bool FUeAgentHttpServer::CmdRenderTargetCaptureScene(const FUeAgentRequestContex
 	return true;
 }
 
-bool FUeAgentHttpServer::CmdRenderTargetReadPixels(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdRenderTargetReadPixels(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	using namespace UeAgentTextureOps;
 	FString AssetPath;
@@ -660,7 +660,7 @@ bool FUeAgentHttpServer::CmdRenderTargetReadPixels(const FUeAgentRequestContext&
 	return true;
 }
 
-bool FUeAgentHttpServer::CmdRenderTargetSampleUv(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdRenderTargetSampleUv(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	using namespace UeAgentTextureOps;
 	FString AssetPath;
@@ -734,7 +734,7 @@ bool FUeAgentHttpServer::CmdRenderTargetSampleUv(const FUeAgentRequestContext& C
 	return true;
 }
 
-bool FUeAgentHttpServer::CmdRenderTargetExportImage(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdRenderTargetExportImage(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	using namespace UeAgentTextureOps;
 	FString AssetPath;
@@ -781,7 +781,7 @@ bool FUeAgentHttpServer::CmdRenderTargetExportImage(const FUeAgentRequestContext
 	return true;
 }
 
-bool FUeAgentHttpServer::CmdRenderTargetCreateStaticTexture(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdRenderTargetCreateStaticTexture(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	using namespace UeAgentTextureOps;
 	FString AssetPath;
@@ -881,7 +881,7 @@ bool FUeAgentHttpServer::CmdRenderTargetCreateStaticTexture(const FUeAgentReques
 	return true;
 }
 
-bool FUeAgentHttpServer::CmdRenderTargetProbe(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdRenderTargetProbe(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	using namespace UeAgentTextureOps;
 	if (!CmdRenderTargetReadPixels(Ctx, OutData, OutError))
@@ -918,7 +918,7 @@ bool FUeAgentHttpServer::CmdRenderTargetProbe(const FUeAgentRequestContext& Ctx,
 	return true;
 }
 
-bool FUeAgentHttpServer::CmdSceneCaptureValidateRenderTarget(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdSceneCaptureValidateRenderTarget(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	using namespace UeAgentTextureOps;
 	FString AssetPath;
@@ -971,7 +971,7 @@ bool FUeAgentHttpServer::CmdSceneCaptureValidateRenderTarget(const FUeAgentReque
 	return true;
 }
 
-bool FUeAgentHttpServer::CmdSceneCaptureRuntimeProbe(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdSceneCaptureRuntimeProbe(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	FString RenderTargetPath;
 	if (!UeAgentTextureOps::GetRequiredStringAny(Ctx, { TEXT("render_target"), TEXT("asset_path") }, RenderTargetPath, OutError))

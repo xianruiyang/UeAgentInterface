@@ -115,11 +115,31 @@ bool FUeAgentStrictV2T24AnimationRigGraphDomainTest::RunTest(
 	{
 		TestEqual(TEXT("candidate kind is rig_unit_struct"), Candidate.Kind,
 			FString(TEXT("rig_unit_struct")));
+		TestEqual(TEXT("candidate is bound to the queried target"),
+			Candidate.TargetRef, Result.Target);
+		TestEqual(TEXT("candidate carries the queried target revision"),
+			Candidate.TargetRevision, Result.TargetRevision);
 		TestTrue(TEXT("candidate binding revision is sha256"),
 			Candidate.BindingRevision.StartsWith(TEXT("sha256:")));
-		TestTrue(TEXT("candidate declares explicit space context"),
-			Candidate.RequiredContext.Contains(TEXT("space_ref"))
-				&& Candidate.RequiredContext.Contains(TEXT("transform")));
+		TestEqual(TEXT("candidate declares native graph placement"),
+			Candidate.PlacementContract,
+			FString(TEXT("uai.rig.graph-placement/1")));
+		TestEqual(TEXT("candidate declares direct-use node context"),
+			Candidate.RequiredContext,
+			FString(TEXT("target_ref:node_id:position")));
+		TestTrue(TEXT("candidate binding is current and directly usable"),
+			IsCurrentAnimationRigGraphCandidateBinding(
+				*Target,
+				Candidate.TargetRef,
+				Candidate.TargetRevision,
+				Candidate.Name,
+				Candidate.Kind,
+				Candidate.SupportedOperations,
+				Candidate.InputContract,
+				Candidate.PlacementContract,
+				Candidate.RequiredContext,
+				Candidate.BindingRevision,
+				QueryError));
 	}
 	TestEqual(TEXT("complete is the inverse of has_more"),
 		Result.bComplete, !Result.bHasMore);

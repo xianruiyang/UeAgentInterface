@@ -7,7 +7,6 @@
 #include "CommandEdge/UeAgentExactCommandDispatch.h"
 #include "CommandRegistry/UeAgentImmutableCommandRegistry.h"
 #include "Module/CommandRegistration/Active/UeAgentActiveCommandComposition.h"
-#include "Server/UeAgentCommandRegistry.h"
 
 namespace
 {
@@ -29,11 +28,11 @@ bool FUeAgentGraphCompoundPublicActivationAndLegacyAbsenceTest::RunTest(
 	(void)Parameters;
 	const TArray<FUeAgentGraphCompoundActivationProfile>& Profiles =
 		GetGraphCompoundActivationProfiles();
-	TestEqual(TEXT("all canonical Graph profiles exist"), Profiles.Num(), 77);
+	TestEqual(TEXT("all canonical Graph profiles exist"), Profiles.Num(), 78);
 	TestEqual(TEXT("Blueprint/Material route owners"),
 		GetBlueprintMaterialGraphRouteProfiles().Num(), 19);
 	TestEqual(TEXT("PCG/Animation route owners"),
-		GetPcgAnimationGraphRouteProfiles().Num(), 43);
+		GetPcgAnimationGraphRouteProfiles().Num(), 44);
 	TestEqual(TEXT("Audio/Media route owners"),
 		GetAudioMediaGraphRouteProfiles().Num(), 15);
 
@@ -107,12 +106,6 @@ bool FUeAgentGraphCompoundPublicActivationAndLegacyAbsenceTest::RunTest(
 	{
 		TestNull(TEXT("retired Graph contract is absent: ") + LegacyId,
 			Registry->FindExact(LegacyId));
-		TestNull(TEXT("retired exact Graph owner is absent: ") + LegacyId,
-			UeAgentCommandRegistry::FindExactCommandInvoker(LegacyId));
-		TestNull(TEXT("retired prefix Graph owner is absent: ") + LegacyId,
-			UeAgentCommandRegistry::FindPrefixedCommandInvoker(LegacyId));
-		TestTrue(TEXT("retired Graph command fails closed: ") + LegacyId,
-			UeAgentCommandRegistry::IsExplicitlyUnsupportedCommand(LegacyId));
 	}
 
 	const TArray<FString> ReplacedNiagaraIds{
@@ -123,10 +116,6 @@ bool FUeAgentGraphCompoundPublicActivationAndLegacyAbsenceTest::RunTest(
 	{
 		TestNull(TEXT("replaced Niagara contract is absent: ") + CommandId,
 			Registry->FindExact(CommandId));
-		TestNull(TEXT("replaced Niagara exact owner is absent: ") + CommandId,
-			UeAgentCommandRegistry::FindExactCommandInvoker(CommandId));
-		TestNull(TEXT("replaced Niagara prefix owner is absent: ") + CommandId,
-			UeAgentCommandRegistry::FindPrefixedCommandInvoker(CommandId));
 	}
 
 	return !HasAnyErrors();

@@ -693,7 +693,7 @@ namespace UeAgentAssetOps
 
 }
 
-bool FUeAgentHttpServer::CmdAssetMove(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdAssetMove(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	FString SourceAssetPath;
 	if (!JsonTryGetString(Ctx.Params, TEXT("source_asset_path"), SourceAssetPath) || SourceAssetPath.IsEmpty())
@@ -896,7 +896,7 @@ bool FUeAgentHttpServer::CmdAssetMove(const FUeAgentRequestContext& Ctx, TShared
 	return true;
 }
 
-bool FUeAgentHttpServer::CmdAssetFixupRedirectors(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdAssetFixupRedirectors(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	TArray<FString> RequestedAssetPaths;
 	auto AddStringField = [&Ctx, &RequestedAssetPaths](const TCHAR* Key)
@@ -1180,7 +1180,7 @@ bool FUeAgentHttpServer::CmdAssetFixupRedirectors(const FUeAgentRequestContext& 
 	return true;
 }
 
-bool FUeAgentHttpServer::CmdAssetReferenceGraph(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdAssetReferenceGraph(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	using namespace UeAgentAssetOps;
 	using UE::AssetRegistry::EDependencyCategory;
@@ -1445,7 +1445,7 @@ bool FUeAgentHttpServer::CmdAssetReferenceGraph(const FUeAgentRequestContext& Ct
 	return true;
 }
 
-bool FUeAgentHttpServer::CmdAssetExportPropertyJson(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdAssetExportPropertyJson(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	FString AssetPathInput;
 	if (!JsonTryGetString(Ctx.Params, TEXT("asset_path"), AssetPathInput) || AssetPathInput.IsEmpty())
@@ -1566,7 +1566,7 @@ bool FUeAgentHttpServer::CmdAssetExportPropertyJson(const FUeAgentRequestContext
 	return true;
 }
 
-bool FUeAgentHttpServer::CmdAssetApplyPropertyJson(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdAssetApplyPropertyJson(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	TSharedPtr<FJsonObject> JsonRoot;
 	FString JsonFile;
@@ -1660,7 +1660,7 @@ bool FUeAgentHttpServer::CmdAssetApplyPropertyJson(const FUeAgentRequestContext&
 	return true;
 }
 
-bool FUeAgentHttpServer::CmdCurveExportJson(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdCurveExportJson(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	FString AssetPathInput;
 	if (!JsonTryGetString(Ctx.Params, TEXT("asset_path"), AssetPathInput) || AssetPathInput.TrimStartAndEnd().IsEmpty())
@@ -1703,7 +1703,7 @@ bool FUeAgentHttpServer::CmdCurveExportJson(const FUeAgentRequestContext& Ctx, T
 	return true;
 }
 
-bool FUeAgentHttpServer::CmdCurveApplyJson(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdCurveApplyJson(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	TSharedPtr<FJsonObject> JsonRoot;
 	FString JsonFile;

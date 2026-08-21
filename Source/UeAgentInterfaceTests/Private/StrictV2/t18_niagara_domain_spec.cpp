@@ -106,8 +106,29 @@ bool FUeAgentStrictV2T18NiagaraDomainTest::RunTest(const FString& Parameters)
 		AddError(CompositionError);
 		return false;
 	}
-	TestNotNull(TEXT("the shared HJSON ingress remains active"),
-		Registry->FindExact(TEXT("content_graph.import_workspace")));
+	const auto* const ImportContract =
+		Registry->FindExact(TEXT("content_graph.import_workspace"));
+	if (TestNotNull(TEXT("the shared HJSON ingress remains active"),
+		ImportContract))
+	{
+		const auto* const ExpectedRevisionField =
+			ImportContract->GetInputFields().FindByPredicate(
+				[](const auto& Field)
+				{
+					return Field.Name == TEXT("expected_revision");
+				});
+		if (TestNotNull(
+			TEXT("the shared HJSON ingress documents expected_revision"),
+			ExpectedRevisionField))
+		{
+			TestTrue(
+				TEXT("the generic recursive create token remains explicit"),
+				ExpectedRevisionField->Description.Contains(TEXT("absent")));
+			TestTrue(
+				TEXT("the registered domain create token remains explicit"),
+				ExpectedRevisionField->Description.Contains(TEXT("missing")));
+		}
+	}
 	TestNull(TEXT("the replaced Niagara script HJSON command is inactive"),
 		Registry->FindExact(TEXT("niagara.script.graph.apply")));
 	TestNull(TEXT("the replaced Niagara stack HJSON command is inactive"),
@@ -149,6 +170,24 @@ bool FUeAgentStrictV2T18NiagaraDomainTest::RunTest(const FString& Parameters)
 		Candidate.RequiredContext.IsEmpty());
 	TestTrue(TEXT("candidate binding revision is a sha256 identity"),
 		Candidate.BindingRevision.StartsWith(TEXT("sha256:")));
+	FNiagaraModuleCandidateQueryError BindingError;
+	TestTrue(
+		TEXT("the public target usage binding remains valid for the exact UE stage identity"),
+		IsCurrentNiagaraModuleCandidateBinding(
+			*CandidateTarget,
+			Candidate.Name,
+			Candidate.Kind,
+			Candidate.SupportedOperations,
+			Candidate.InputContract,
+			Candidate.PlacementContract,
+			Candidate.RequiredContext,
+			TEXT("ParticleSpawnScript"),
+			Candidate.BindingRevision,
+			BindingError));
+	if (!BindingError.Code.IsEmpty())
+	{
+		AddError(BindingError.Code + TEXT(":") + BindingError.Detail);
+	}
 	TestTrue(TEXT("candidate query reports complete bounded results"),
 		CandidateResult.bComplete && !CandidateResult.bHasMore);
 	return !HasAnyErrors();

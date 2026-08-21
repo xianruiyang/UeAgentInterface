@@ -25,7 +25,7 @@
 #include "Misc/Paths.h"
 #include "PreviewScene.h"
 #include "SEditorViewport.h"
-#include "Server/UeAgentHttpServer.h"
+#include "LegacyMechanics/UeAgentLegacyMechanics.h"
 #include "ShowFlags.h"
 #include "Slate/SceneViewport.h"
 #include "Subsystems/AssetEditorSubsystem.h"

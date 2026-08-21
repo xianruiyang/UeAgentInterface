@@ -1,31 +1,41 @@
-# T11 Blueprint node authority
+# T11 Blueprint node candidate authority
 
-The only public SDK binding is
-`client.blueprint.node_candidates(...)`; `uai-cli ... exec
-blueprint.node.candidates` exposes the same exact command. Callers use
-`command_search` and `command_detail` to obtain its current fields and hash.
-There is no task-specific generated projection or independent SDK authority.
+`blueprint.node.candidates` is the sole public candidate query for the current
+Blueprint node authoring surface. It resolves one existing Blueprint and one
+exact graph identity against Unreal's `FBlueprintActionDatabase`. The response
+contains the public graph object, a read-only `graph_revision`, and a bounded
+`candidates` array. Each candidate currently has this executable shape:
 
-`blueprint-node-authoring-owner` owns the exact read-only
-`blueprint.node.candidates` public command. It resolves one existing Blueprint
-and one stable graph identity against Unreal's real `FBlueprintActionDatabase`;
-the returned `candidate.name`, `binding_revision`, `graph.id`, and
-`graph_revision` are opaque exact identities and are copied unchanged into the
-HJSON authoring request.
+The public call is `client.blueprint.node_candidates(...)`. When its method or
+hash is not already known, use `client.command_search(...)` followed by
+`client.command_detail(...)`; `uai-cli` exposes the same exact contract.
 
-Blueprint HJSON uses `uai.blueprint.node.edit/1`. The process-frozen common
-domain registry resolves the Blueprint root to
-`uai.init.blueprint.graph/1` and each graph-owned Branch entry to
-`uai.init.blueprint.node/1`. The provider performs complete preflight before
-write, invokes the resolved `UBlueprintNodeSpawner`, creates normal Pins and
-connections, compiles, saves, unloads, reloads, and returns an independent
-readback. Stale revisions, changed candidate bindings, unsupported node types,
-wrong graphs, incompatible connections, compile failures, save failures, and
-reload failures are terminal typed failures; they do not fall back to a legacy
-node owner.
+```json
+{
+  "name": "/Script/BlueprintGraph.K2Node_IfThenElse",
+  "binding_revision": "sha256:...",
+  "display_name": "Branch",
+  "graph_id": "graph:..."
+}
+```
 
-The same provider serves the shared `content_graph.*` query, import, and export
-contracts for Blueprint targets. Export uses the common verified staging and
-atomic publisher. Query commands are read-only and report complete bounded
-results. This provider does not own or duplicate the shared public
-`content_graph.*` command declarations.
+The candidate object is an opaque, server-issued binding and is copied
+unchanged to
+`provider_extension.graphs.<stable-graph-key>.nodes.<stable-node-id>.candidate`
+inside the Blueprint-root `uai.blueprint.edit/1` document. There is no active
+`uai.blueprint.node.edit/1` root and no node-specific public apply command. The
+graph map key remains the Blueprint HJSON stable identity (for example
+`event_graph:EventGraph`); it is not replaced by `candidate.graph_id`.
+
+Before any persistent write, the Blueprint Surfaces provider re-runs the same
+candidate mechanics for the exact target, graph, executable name, and binding
+revision. It verifies that `candidate.graph_id` identifies the owning graph and
+then expands the internal mutation fields `node_type="node_by_class"` and
+`node_class=candidate.name`. Callers neither reconstruct nor duplicate those
+fields. If callers provide them, they must match the candidate exactly.
+
+Changed graph context, executable identity, or binding revision fails with a
+typed candidate-binding error before mutation; a stale binding specifically
+returns `blueprint_surface_node_candidate_binding_stale`. Candidate discovery
+does not select a result, mutate Unreal state, or substitute the public
+content-graph revision required by `content_graph.import_workspace`.

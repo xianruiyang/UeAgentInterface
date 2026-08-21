@@ -3,27 +3,68 @@
 #include "CommandEdge/UeAgentCommandProtocol.h"
 #include "CommandRegistry/UeAgentImmutableCommandRegistry.h"
 #include "Core/Contract/UeAgentCommandJson.h"
-#include "DomainAdapters/ContentGraphRead/UeAgentContentGraphReadProductionEnvironment.h"
+#include "Core/HjsonWorkspace/DomainAuthoring/UeAgentDomainHjsonAuthoringKit.h"
 #include "Dom/JsonObject.h"
 #include "Misc/PackageName.h"
 #include "Module/CommandRegistration/Active/UeAgentActiveCommandComposition.h"
 #include "OperationOwners/AiCommands/UeAgentAiCommandOperationOwner.h"
+#include "QueryOwners/AiBehavior/UeAgentAiBehaviorCandidateQuery.h"
+#include "SmartObjectDefinition.h"
+#include "UObject/Package.h"
 #include "UObject/UObjectGlobals.h"
 
 namespace UE::UAI::DomainAdapters::AiBehavior
 {
 	using namespace CommandContract;
 	using namespace CommandEdge;
-	using namespace ContextResource;
-	using namespace DomainAdapters::ContentGraphRead;
 	using namespace HjsonWorkspace;
+	using namespace HjsonWorkspace::DomainAuthoring;
 
 	namespace
 	{
 		const FString SchemaId = TEXT("uai.ai_behavior.edit/1");
 		const FString BehaviorTreeType = TEXT("/Script/AIModule.BehaviorTree");
 		const FString BlackboardType = TEXT("/Script/AIModule.BlackboardData");
+		const FString EqsType = TEXT("/Script/AIModule.EnvQuery");
 		const FString StateTreeType = TEXT("/Script/StateTreeModule.StateTree");
+		const FString SmartObjectType =
+			TEXT("/Script/SmartObjectsModule.SmartObjectDefinition");
+		const FString EqsCarrierType =
+			TEXT("/Script/EnvironmentQueryEditor.EnvironmentQueryGraphNode_Option");
+
+		struct FRootSpec final
+		{
+			FString Type;
+			FString CreateCommand;
+			FString MutationCommand;
+		};
+
+		const TArray<FRootSpec>& RootSpecs()
+		{
+			static const TArray<FRootSpec> Values = {
+				{BehaviorTreeType, TEXT("ai.behavior_tree.asset.create"),
+					TEXT("ai.behavior_tree.graph.apply")},
+				{BlackboardType, TEXT("ai.blackboard.asset.create"),
+					TEXT("ai.blackboard.schema.apply")},
+				{EqsType, TEXT("ai.eqs.asset.create"),
+					TEXT("ai.eqs.graph.apply")},
+				{StateTreeType, TEXT("ai.state_tree.asset.create"),
+					TEXT("ai.state_tree.hierarchy.apply")},
+				{SmartObjectType,
+					TEXT("ai.smart_object_definition.asset.create"),
+					TEXT("ai.smart_object_definition.apply")},
+			};
+			return Values;
+		}
+
+		const FRootSpec* FindRootSpec(const FString& RootType)
+		{
+			return RootSpecs().FindByPredicate(
+				[&RootType](const FRootSpec& Spec)
+				{
+					return Spec.Type == RootType;
+				});
+		}
 
 		class FNeverCancelled final : public Contract::IUeAgentCancellationSignal
 		{
@@ -41,90 +82,11 @@ namespace UE::UAI::DomainAdapters::AiBehavior
 			return false;
 		}
 
-		bool IsSupportedRootType(const FString& Type)
+		FString PackageIdentity(const FString& Target)
 		{
-			return Type == BehaviorTreeType
-				|| Type == BlackboardType
-				|| Type == StateTreeType;
-		}
-
-		FString ObjectPathFromPackage(const FString& Target)
-		{
-			int32 Dot = INDEX_NONE;
-			if (Target.FindLastChar(TEXT('.'), Dot)) return Target;
-			const FString AssetName = FPackageName::GetLongPackageAssetName(Target);
-			return AssetName.IsEmpty() ? Target : Target + TEXT(".") + AssetName;
-		}
-
-		FUeAgentResourceTracker MakeResources()
-		{
-			return FUeAgentResourceTracker(FUeAgentResourceBudget({
-				{EUeAgentResourceDimension::InputBytes, 16 * 1024 * 1024},
-				{EUeAgentResourceDimension::OutputBytes, 16 * 1024 * 1024},
-				{EUeAgentResourceDimension::StringBytes, 16 * 1024 * 1024},
-				{EUeAgentResourceDimension::Nodes, 16384},
-				{EUeAgentResourceDimension::Items, 65536},
-				{EUeAgentResourceDimension::Files, 4096},
-				{EUeAgentResourceDimension::ReferenceEdges, 65536},
-				{EUeAgentResourceDimension::WorkUnits, 262144},
-				{EUeAgentResourceDimension::EstimatedMemoryBytes, 256 * 1024 * 1024},
-			}));
-		}
-
-		TSharedPtr<FJsonValue> JsonValueFromHjson(
-			const FHjsonNode& Node,
-			FWorkspaceError& OutError)
-		{
-			switch (Node.GetKind())
-			{
-			case EHjsonNodeKind::Null:
-				return MakeShared<FJsonValueNull>();
-			case EHjsonNodeKind::Boolean:
-				return MakeShared<FJsonValueBoolean>(Node.GetBoolean());
-			case EHjsonNodeKind::String:
-				return MakeShared<FJsonValueString>(Node.GetText());
-			case EHjsonNodeKind::Integer:
-			case EHjsonNodeKind::Decimal:
-				return MakeShared<FJsonValueNumber>(FCString::Atod(*Node.GetLexeme()));
-			case EHjsonNodeKind::Array:
-			{
-				TArray<TSharedPtr<FJsonValue>> Items;
-				for (const FHjsonNodeRef& Item : Node.GetItems())
-				{
-					TSharedPtr<FJsonValue> Converted = JsonValueFromHjson(*Item, OutError);
-					if (!Converted.IsValid()) return nullptr;
-					Items.Add(MoveTemp(Converted));
-				}
-				return MakeShared<FJsonValueArray>(MoveTemp(Items));
-			}
-			case EHjsonNodeKind::Object:
-			{
-				const TSharedPtr<FJsonObject> Object = MakeShared<FJsonObject>();
-				for (const TPair<FString, FHjsonNodeRef>& Entry : Node.GetEntries())
-				{
-					TSharedPtr<FJsonValue> Converted = JsonValueFromHjson(*Entry.Value, OutError);
-					if (!Converted.IsValid()) return nullptr;
-					Object->SetField(Entry.Key, MoveTemp(Converted));
-				}
-				return MakeShared<FJsonValueObject>(Object);
-			}
-			default:
-				Fail(OutError, TEXT("ai_behavior_domain_hjson_node_invalid"));
-				return nullptr;
-			}
-		}
-
-		bool CanonicalObject(
-			const TSharedPtr<FJsonObject>& Object,
-			FString& Out,
-			FWorkspaceError& OutError)
-		{
-			FString Error;
-			if (!Object.IsValid() || !Json::TryCanonicalize(Object, Out, Error))
-			{
-				return Fail(OutError, TEXT("ai_behavior_domain_json_invalid"), Error);
-			}
-			return true;
+			return Target.Contains(TEXT("."))
+				? FPackageName::ObjectPathToPackageName(Target)
+				: Target;
 		}
 
 		bool DecodeRequest(
@@ -145,12 +107,18 @@ namespace UE::UAI::DomainAdapters::AiBehavior
 				*RequestId, *RequestId, *CommandId, *ContractHash, *ParamsJson);
 			FTCHARToUTF8 Encoded(*Envelope);
 			TArray<uint8> Bytes;
-			Bytes.Append(reinterpret_cast<const uint8*>(Encoded.Get()), Encoded.Length());
+			Bytes.Append(
+				reinterpret_cast<const uint8*>(Encoded.Get()), Encoded.Length());
 			FUeAgentCommandProtocolDiagnostic Diagnostic;
-			if (!FUeAgentCommandProtocolCodec().DecodeRequest(Bytes, OutRequest, Diagnostic)
+			if (!FUeAgentCommandProtocolCodec().DecodeRequest(
+					Bytes, OutRequest, Diagnostic)
 				|| !OutRequest.IsSet())
 			{
-				return Fail(OutError, TEXT("ai_behavior_domain_internal_request_invalid"), Diagnostic.Code, Diagnostic.Message);
+				return Fail(
+					OutError,
+					TEXT("ai_behavior_domain_internal_request_invalid"),
+					Diagnostic.Code,
+					Diagnostic.Message);
 			}
 			return true;
 		}
@@ -161,35 +129,52 @@ namespace UE::UAI::DomainAdapters::AiBehavior
 			FString& OutPayload,
 			FWorkspaceError& OutError)
 		{
-			TSharedPtr<const CommandRegistry::FUeAgentImmutableCommandRegistry> Registry;
+			TSharedPtr<const CommandRegistry::FUeAgentImmutableCommandRegistry>
+				Registry;
 			TSharedPtr<const FUeAgentExactCommandDispatch> Dispatch;
 			FString CompositionError;
-			if (!Module::CommandRegistration::Active::TryComposeProcessActiveCommandComposition(
-					Registry, Dispatch, CompositionError)
+			if (!Module::CommandRegistration::Active::
+					TryComposeProcessActiveCommandComposition(
+						Registry, Dispatch, CompositionError)
 				|| !Registry.IsValid())
 			{
-				return Fail(OutError, TEXT("ai_behavior_domain_registry_unavailable"), CompositionError);
+				return Fail(
+					OutError, TEXT("ai_behavior_domain_registry_unavailable"),
+					CompositionError);
 			}
-			const FUeAgentFrozenCommandContract* Contract = Registry->FindExact(CommandId);
+			const FUeAgentFrozenCommandContract* Contract =
+				Registry->FindExact(CommandId);
 			if (!Contract)
 			{
-				return Fail(OutError, TEXT("ai_behavior_domain_command_missing"), CommandId);
+				return Fail(
+					OutError, TEXT("ai_behavior_domain_command_missing"),
+					CommandId);
 			}
 			FString ParamsJson;
-			if (!CanonicalObject(Params, ParamsJson, OutError)) return false;
+			if (!TryCanonicalizeObject(Params, ParamsJson, OutError)) return false;
 			TOptional<FUeAgentCommandRequest> Request;
-			if (!DecodeRequest(CommandId, Contract->GetContractHash(), ParamsJson, Request, OutError)) return false;
-
+			if (!DecodeRequest(
+					CommandId, Contract->GetContractHash(), ParamsJson,
+					Request, OutError))
+			{
+				return false;
+			}
 			TMap<FString, TSharedRef<IUeAgentCommandHandler>> Mechanics;
 			FString MechanicsError;
-			if (!OperationOwners::AiCommands::TryCreateMechanicsHandlers(Mechanics, MechanicsError))
+			if (!OperationOwners::AiCommands::TryCreateMechanicsHandlers(
+					Mechanics, MechanicsError))
 			{
-				return Fail(OutError, TEXT("ai_behavior_domain_mechanics_unavailable"), CommandId, MechanicsError);
+				return Fail(
+					OutError, TEXT("ai_behavior_domain_mechanics_unavailable"),
+					CommandId, MechanicsError);
 			}
-			const TSharedRef<IUeAgentCommandHandler>* Handler = Mechanics.Find(CommandId);
+			const TSharedRef<IUeAgentCommandHandler>* Handler =
+				Mechanics.Find(CommandId);
 			if (!Handler)
 			{
-				return Fail(OutError, TEXT("ai_behavior_domain_mechanics_unavailable"), CommandId);
+				return Fail(
+					OutError, TEXT("ai_behavior_domain_mechanics_unavailable"),
+					CommandId);
 			}
 			const TArray<FString> AuthorityScopes = {
 				TEXT("uai:query"),
@@ -197,295 +182,656 @@ namespace UE::UAI::DomainAdapters::AiBehavior
 				TEXT("uai:authoring:hjson:import"),
 				TEXT("pcg_ai_node_graph.write"),
 			};
-			const FUeAgentCommandResult Result = OperationOwners::AiCommands::Submit(
-				*Handler,
-				Request.GetValue(),
-				Contract::FUeAgentCallerContext(
-					TEXT("ai-behavior-domain-provider"), AuthorityScopes, Request->GetCorrelationId()),
-				MakeShared<FNeverCancelled>());
+			const FUeAgentCommandResult Result =
+				OperationOwners::AiCommands::Submit(
+					*Handler,
+					Request.GetValue(),
+					Contract::FUeAgentCallerContext(
+						TEXT("ai-behavior-domain-provider"),
+						AuthorityScopes,
+						Request->GetCorrelationId()),
+					MakeShared<FNeverCancelled>());
 			if (!Result.IsOk())
 			{
-				return Fail(OutError, TEXT("ai_behavior_domain_native_command_failed"), CommandId, Result.GetErrorJson());
+				return Fail(
+					OutError, TEXT("ai_behavior_domain_native_command_failed"),
+					CommandId, Result.GetErrorJson());
 			}
 			OutPayload = Result.GetPayloadJson();
 			return true;
 		}
 
-		bool TryCapture(
-			const FString& Target,
-			FString& OutType,
-			FUeAgentContentGraphCapture& OutCapture,
-			FWorkspaceError& OutError)
-		{
-			UObject* Owner = StaticLoadObject(UObject::StaticClass(), nullptr, *ObjectPathFromPackage(Target));
-			if (!Owner)
-			{
-				return Fail(OutError, TEXT("ai_behavior_domain_target_unresolved"), Target);
-			}
-			OutType = Owner->GetClass()->GetPathName();
-			if (!IsSupportedRootType(OutType))
-			{
-				return Fail(OutError, TEXT("ai_behavior_domain_target_type_invalid"), OutType);
-			}
-			FUeAgentContentGraphReadError CaptureError;
-			if (!FUeAgentContentGraphReadProductionEnvironment::TryCaptureOwner(
-					*Owner, OutCapture, CaptureError))
-			{
-				return Fail(
-					OutError,
-					CaptureError.Code.IsEmpty()
-						? FString(TEXT("ai_behavior_domain_readback_failed"))
-						: CaptureError.Code,
-					CaptureError.SubjectId,
-					CaptureError.Detail);
-			}
-			return true;
-		}
-
-		TSharedPtr<FJsonObject> CaptureJson(
-			const FString& Target,
-			const FString& Type,
-			const FUeAgentContentGraphCapture& Capture)
-		{
-			const TSharedPtr<FJsonObject> Result = MakeShared<FJsonObject>();
-			Result->SetStringField(TEXT("target"), Target);
-			Result->SetStringField(TEXT("root_type"), Type);
-			Result->SetStringField(TEXT("domain_id"), Capture.DomainId);
-			Result->SetStringField(TEXT("revision"), Capture.Revision);
-			Result->SetBoolField(TEXT("complete"), true);
-			Result->SetBoolField(TEXT("has_more"), false);
-			TArray<TSharedPtr<FJsonValue>> Items;
-			for (const FUeAgentContentGraphItem& Item : Capture.Items)
-			{
-				const TSharedPtr<FJsonObject> Value = MakeShared<FJsonObject>();
-				Value->SetStringField(TEXT("id"), Item.ItemId);
-				Value->SetStringField(TEXT("kind"), Item.ItemKind);
-				Value->SetStringField(TEXT("class_path"), Item.ClassPath);
-				Value->SetStringField(TEXT("container_id"), Item.ContainerId);
-				Value->SetNumberField(TEXT("order"), Item.Order);
-				Items.Add(MakeShared<FJsonValueObject>(Value));
-			}
-			Result->SetArrayField(TEXT("items"), MoveTemp(Items));
-			TArray<TSharedPtr<FJsonValue>> Relations;
-			for (const FUeAgentContentGraphRelation& Relation : Capture.Relations)
-			{
-				const TSharedPtr<FJsonObject> Value = MakeShared<FJsonObject>();
-				Value->SetStringField(TEXT("id"), Relation.RelationId);
-				Value->SetStringField(TEXT("kind"), Relation.RelationKind);
-				Value->SetStringField(TEXT("source"), Relation.SourceItemId);
-				Value->SetStringField(TEXT("target"), Relation.TargetItemId);
-				Relations.Add(MakeShared<FJsonValueObject>(Value));
-			}
-			Result->SetArrayField(TEXT("relations"), MoveTemp(Relations));
-			Result->SetNumberField(TEXT("property_count"), Capture.Properties.Num());
-			Result->SetNumberField(TEXT("parameter_count"), Capture.Parameters.Num());
-			bool bCompileValid = true;
-			TArray<TSharedPtr<FJsonValue>> Diagnostics;
-			for (const FUeAgentContentGraphDiagnostic& Diagnostic : Capture.Diagnostics)
-			{
-				const TSharedPtr<FJsonObject> Value = MakeShared<FJsonObject>();
-				Value->SetStringField(TEXT("id"), Diagnostic.DiagnosticId);
-				Value->SetStringField(TEXT("severity"), Diagnostic.Severity);
-				Value->SetStringField(TEXT("code"), Diagnostic.Code);
-				Value->SetBoolField(TEXT("resolved"), Diagnostic.bResolved);
-				Diagnostics.Add(MakeShared<FJsonValueObject>(Value));
-				if (!Diagnostic.bResolved && Diagnostic.Severity.Equals(TEXT("error"), ESearchCase::IgnoreCase))
-				{
-					bCompileValid = false;
-				}
-			}
-			Result->SetArrayField(TEXT("diagnostics"), MoveTemp(Diagnostics));
-			Result->SetStringField(TEXT("compile_status"), bCompileValid ? TEXT("valid") : TEXT("error"));
-			return Result;
-		}
-
 		bool TryRead(
 			const FString& Target,
+			const FString& RootType,
 			FString& OutPayload,
 			FString& OutRevision,
+			TSharedPtr<FJsonObject>* OutSnapshot,
+			UObject** OutObject,
 			FWorkspaceError& OutError)
 		{
-			FString Type;
-			FUeAgentContentGraphCapture Capture;
-			if (!TryCapture(Target, Type, Capture, OutError)) return false;
-			OutRevision = Capture.Revision;
-			return CanonicalObject(CaptureJson(Target, Type, Capture), OutPayload, OutError);
-		}
-
-		bool ParseDocument(
-			const TSharedPtr<FJsonObject>& Params,
-			TSharedPtr<FJsonObject>& OutRoot,
-			FString& OutType,
-			FWorkspaceError& OutError)
-		{
-			OutRoot.Reset();
-			OutType.Reset();
-			if (!Params.IsValid()
-				|| Params->HasField(TEXT("carrier"))
-				|| Params->HasField(TEXT("hjson_document")))
-			{
-				return Fail(
-					OutError,
-					TEXT("ai_behavior_domain_legacy_source_contract_rejected"));
-			}
-			FString Target;
-			const TSharedPtr<FJsonObject>* Source = nullptr;
-			FString Kind;
-			FString TargetIdentity;
-			FString EntryFile;
-			const TArray<TSharedPtr<FJsonValue>>* Documents = nullptr;
-			if (!Params->TryGetStringField(TEXT("target"), Target)
-				|| Target.IsEmpty()
-				|| !Params->TryGetObjectField(TEXT("source"), Source)
-				|| !Source || !Source->IsValid()
-				|| !(*Source)->TryGetStringField(TEXT("kind"), Kind)
-				|| Kind != TEXT("resolved")
-				|| !(*Source)->TryGetStringField(TEXT("target_identity"), TargetIdentity)
-				|| TargetIdentity != Target
-				|| !(*Source)->TryGetStringField(TEXT("entry_file"), EntryFile)
-				|| EntryFile.IsEmpty()
-				|| !(*Source)->TryGetArrayField(TEXT("documents"), Documents)
-				|| !Documents || Documents->IsEmpty())
-			{
-				return Fail(OutError, TEXT("ai_behavior_domain_resolved_source_invalid"));
-			}
-			FString Text;
-			int32 EntryMatches = 0;
-			for (const TSharedPtr<FJsonValue>& Value : *Documents)
-			{
-				const TSharedPtr<FJsonObject> DocumentObject = Value.IsValid()
-					? Value->AsObject() : nullptr;
-				FString RelativePath;
-				FString DocumentText;
-				if (!DocumentObject.IsValid()
-					|| !DocumentObject->TryGetStringField(TEXT("path"), RelativePath)
-					|| !DocumentObject->TryGetStringField(TEXT("document"), DocumentText))
-				{
-					return Fail(OutError, TEXT("ai_behavior_domain_resolved_source_invalid"));
-				}
-				if (RelativePath == EntryFile)
-				{
-					Text = MoveTemp(DocumentText);
-					++EntryMatches;
-				}
-			}
-			if (EntryMatches != 1 || Text.IsEmpty())
-			{
-				return Fail(
-					OutError,
-					TEXT("ai_behavior_domain_resolved_source_invalid"),
-					EntryFile);
-			}
-			FUeAgentResourceTracker Resources = MakeResources();
-			FHjsonDocumentPtr Document;
-			if (!TryParseHjsonDocument(Text, TEXT("inline:ai-behavior-domain"), Resources, Document, OutError)
-				|| !Document.IsValid())
+			UObject* Owner = nullptr;
+			DomainAdapters::ContentGraphRead::FUeAgentContentGraphCapture Capture;
+			if (!TryCaptureObject(
+					Target, RootType, Owner, Capture, OutError))
 			{
 				return false;
 			}
-			TSharedPtr<FJsonValue> Converted = JsonValueFromHjson(*Document->GetRoot(), OutError);
-			const TSharedPtr<FJsonObject> Canonical = Converted.IsValid() ? Converted->AsObject() : nullptr;
-			FString Schema;
-			const TSharedPtr<FJsonObject>* Root = nullptr;
-			if (!Canonical.IsValid()
-				|| !Canonical->TryGetStringField(TEXT("schema"), Schema)
-				|| Schema != SchemaId
-				|| !Canonical->TryGetObjectField(TEXT("root"), Root)
-				|| !Root || !Root->IsValid()
-				|| !(*Root)->TryGetStringField(TEXT("type"), OutType)
-				|| !IsSupportedRootType(OutType))
+			TSharedPtr<FJsonObject> Snapshot;
+			if (!TryBuildCaptureSnapshot(
+					Target, RootType, Capture, Snapshot, OutError))
 			{
-				return Fail(OutError, TEXT("ai_behavior_domain_schema_or_type_invalid"), OutType);
+				return false;
 			}
-			OutRoot = *Root;
+			OutRevision = Capture.Revision;
+			if (OutSnapshot) *OutSnapshot = Snapshot;
+			if (OutObject) *OutObject = Owner;
+			return TryCanonicalizeObject(Snapshot, OutPayload, OutError);
+		}
+
+		bool ValidateMissingTarget(
+			const FString& Target,
+			FWorkspaceError& OutError)
+		{
+			bool bPresent = false;
+			if (!TryInspectObjectTargetPresence(Target, bPresent))
+			{
+				return Fail(
+					OutError, TEXT("ai_behavior_domain_target_invalid"), Target);
+			}
+			if (bPresent)
+			{
+				return Fail(
+					OutError, TEXT("ai_behavior_domain_stale_revision"),
+					Target, TEXT("existing"));
+			}
 			return true;
 		}
 
-		bool IsAllowedOperation(const FString& RootType, const FString& CommandId)
+		bool ReadCurrentCandidate(
+			UObject& TargetObject,
+			const TSharedPtr<FJsonObject>& Candidate,
+			const FString& Pointer,
+			FDomainHjsonCandidateBinding& OutBinding,
+			FWorkspaceError& OutError)
 		{
-			return (RootType == BehaviorTreeType && CommandId == TEXT("ai.behavior_tree.graph.apply"))
-				|| (RootType == BlackboardType && CommandId == TEXT("ai.blackboard.schema.apply"))
-				|| (RootType == StateTreeType && CommandId == TEXT("ai.state_tree.hierarchy.apply"));
+			if (!TryReadCandidateBinding(
+					Candidate, Pointer, OutBinding, OutError))
+			{
+				return false;
+			}
+			if (!OutBinding.SupportsOperation(TEXT("create")))
+			{
+				return Fail(
+					OutError, TEXT("ai_behavior_candidate_operation_unsupported"),
+					OutBinding.Name,
+					Pointer + TEXT("/supported_operations"));
+			}
+			QueryOwners::AiBehavior::FAiBehaviorCandidateQueryError CandidateError;
+			if (!QueryOwners::AiBehavior::IsCurrentAiBehaviorCandidateBinding(
+					TargetObject,
+					OutBinding.Name,
+					OutBinding.Kind,
+					OutBinding.SupportedOperations,
+					OutBinding.InputContract,
+					OutBinding.PlacementContract,
+					OutBinding.RequiredContext,
+					OutBinding.BindingRevision,
+					CandidateError))
+			{
+				return Fail(
+					OutError,
+					CandidateError.Code.IsEmpty()
+						? FString(TEXT("ai_behavior_candidate_binding_invalid"))
+						: CandidateError.Code,
+					CandidateError.SubjectId,
+					CandidateError.Detail);
+			}
+			return true;
+		}
+
+		bool CandidateObject(
+			const TSharedPtr<FJsonObject>& Value,
+			const FString& Pointer,
+			TSharedPtr<FJsonObject>& OutCandidate,
+			bool& bOutPresent,
+			FWorkspaceError& OutError)
+		{
+			OutCandidate.Reset();
+			bOutPresent = Value.IsValid() && Value->HasField(TEXT("candidate"));
+			if (!bOutPresent) return true;
+			const TSharedPtr<FJsonObject>* Candidate = nullptr;
+			if (!Value->TryGetObjectField(TEXT("candidate"), Candidate)
+				|| !Candidate || !Candidate->IsValid())
+			{
+				return Fail(
+					OutError, TEXT("domain_hjson_candidate_binding_invalid"),
+					FString(), Pointer);
+			}
+			OutCandidate = *Candidate;
+			return true;
+		}
+
+		bool RejectConflict(
+			const TSharedPtr<FJsonObject>& Value,
+			const FString& Field,
+			const FString& Expected,
+			const FString& Pointer,
+			FWorkspaceError& OutError)
+		{
+			FString Existing;
+			if (Value->TryGetStringField(Field, Existing)
+				&& Existing != Expected)
+			{
+				return Fail(
+					OutError, TEXT("ai_behavior_candidate_field_conflict"),
+					Existing, Pointer + TEXT("/") + Field);
+			}
+			return true;
+		}
+
+		FString BehaviorCarrier(const FString& Kind)
+		{
+			if (Kind == TEXT("behavior_composite"))
+			{
+				return TEXT("/Script/BehaviorTreeEditor.BehaviorTreeGraphNode_Composite");
+			}
+			if (Kind == TEXT("behavior_task"))
+			{
+				return TEXT("/Script/BehaviorTreeEditor.BehaviorTreeGraphNode_Task");
+			}
+			if (Kind == TEXT("behavior_service"))
+			{
+				return TEXT("/Script/BehaviorTreeEditor.BehaviorTreeGraphNode_Service");
+			}
+			if (Kind == TEXT("behavior_decorator"))
+			{
+				return TEXT("/Script/BehaviorTreeEditor.BehaviorTreeGraphNode_Decorator");
+			}
+			return FString();
+		}
+
+		bool NormalizeGraphCandidates(
+			const FString& RootType,
+			UObject& TargetObject,
+			const TArray<TSharedPtr<FJsonValue>>& Edits,
+			FWorkspaceError& OutError)
+		{
+			for (int32 Index = 0; Index < Edits.Num(); ++Index)
+			{
+				const TSharedPtr<FJsonObject> Edit =
+					Edits[Index].IsValid() ? Edits[Index]->AsObject() : nullptr;
+				FString Intent;
+				FString ElementKind;
+				const TSharedPtr<FJsonObject>* ValuePtr = nullptr;
+				if (!Edit.IsValid()
+					|| !Edit->TryGetStringField(TEXT("intent"), Intent)
+					|| Intent != TEXT("create")
+					|| !Edit->TryGetObjectField(TEXT("value"), ValuePtr)
+					|| !ValuePtr || !ValuePtr->IsValid())
+				{
+					continue;
+				}
+				const TSharedPtr<FJsonObject> Value = *ValuePtr;
+				const FString Pointer = FString::Printf(
+					TEXT("/root/operation/params/edits/%d/value/candidate"),
+					Index);
+				TSharedPtr<FJsonObject> Candidate;
+				bool bPresent = false;
+				if (!CandidateObject(
+						Value, Pointer, Candidate, bPresent, OutError))
+				{
+					return false;
+				}
+				if (!bPresent) continue;
+				if (!Edit->TryGetStringField(TEXT("element_kind"), ElementKind)
+					|| ElementKind != TEXT("item"))
+				{
+					return Fail(
+						OutError, TEXT("ai_behavior_candidate_placement_invalid"),
+						ElementKind, Pointer);
+				}
+				FDomainHjsonCandidateBinding Binding;
+				if (!ReadCurrentCandidate(
+						TargetObject, Candidate, Pointer, Binding, OutError))
+				{
+					return false;
+				}
+
+				if (RootType == BehaviorTreeType)
+				{
+					const FString Carrier = BehaviorCarrier(Binding.Kind);
+					if (Carrier.IsEmpty())
+					{
+						return Fail(
+							OutError, TEXT("ai_behavior_candidate_kind_invalid"),
+							Binding.Kind, Pointer);
+					}
+					if (!RejectConflict(
+							Value, TEXT("carrier_type_ref"), Carrier,
+							Pointer, OutError)
+						|| !RejectConflict(
+							Value, TEXT("payload_type_ref"), Binding.Name,
+							Pointer, OutError))
+					{
+						return false;
+					}
+					Value->SetStringField(TEXT("carrier_type_ref"), Carrier);
+					Value->SetStringField(TEXT("payload_type_ref"), Binding.Name);
+				}
+				else if (RootType == EqsType)
+				{
+					if (Binding.Kind != TEXT("eqs_generator"))
+					{
+						return Fail(
+							OutError, TEXT("ai_behavior_candidate_kind_invalid"),
+							Binding.Kind, Pointer);
+					}
+					if (!RejectConflict(
+							Value, TEXT("carrier_type_ref"), EqsCarrierType,
+							Pointer, OutError)
+						|| !RejectConflict(
+							Value, TEXT("payload_type_ref"), Binding.Name,
+							Pointer, OutError))
+					{
+						return false;
+					}
+					Value->SetStringField(TEXT("carrier_type_ref"), EqsCarrierType);
+					Value->SetStringField(TEXT("payload_type_ref"), Binding.Name);
+				}
+				else if (RootType == StateTreeType)
+				{
+					if (!Binding.Kind.StartsWith(TEXT("state_tree_")))
+					{
+						return Fail(
+							OutError, TEXT("ai_behavior_candidate_kind_invalid"),
+							Binding.Kind, Pointer);
+					}
+					if (!RejectConflict(
+							Value, TEXT("node_class_ref"), Binding.Name,
+							Pointer, OutError))
+					{
+						return false;
+					}
+					Value->SetStringField(TEXT("node_class_ref"), Binding.Name);
+				}
+				else
+				{
+					return Fail(
+						OutError, TEXT("ai_behavior_candidate_shape_invalid"),
+						RootType, Pointer);
+				}
+				Value->RemoveField(TEXT("candidate"));
+			}
+			return true;
+		}
+
+		bool NormalizeBlackboardCandidates(
+			UObject& TargetObject,
+			const TArray<TSharedPtr<FJsonValue>>& Entries,
+			FWorkspaceError& OutError)
+		{
+			for (int32 Index = 0; Index < Entries.Num(); ++Index)
+			{
+				const TSharedPtr<FJsonObject> Entry = Entries[Index].IsValid()
+					? Entries[Index]->AsObject() : nullptr;
+				if (!Entry.IsValid()) continue;
+				const FString Pointer = FString::Printf(
+					TEXT("/root/operation/params/entries/%d/candidate"), Index);
+				TSharedPtr<FJsonObject> Candidate;
+				bool bPresent = false;
+				if (!CandidateObject(
+						Entry, Pointer, Candidate, bPresent, OutError))
+				{
+					return false;
+				}
+				if (!bPresent) continue;
+				FDomainHjsonCandidateBinding Binding;
+				if (!ReadCurrentCandidate(
+						TargetObject, Candidate, Pointer, Binding, OutError))
+				{
+					return false;
+				}
+				if (Binding.Kind != TEXT("blackboard_key"))
+				{
+					return Fail(
+						OutError, TEXT("ai_behavior_candidate_kind_invalid"),
+						Binding.Kind, Pointer);
+				}
+				if (!RejectConflict(
+						Entry, TEXT("key_type_ref"), Binding.Name,
+						Pointer, OutError))
+				{
+					return false;
+				}
+				Entry->SetStringField(TEXT("key_type_ref"), Binding.Name);
+				Entry->RemoveField(TEXT("candidate"));
+			}
+			return true;
+		}
+
+		bool NormalizeSmartObjectCandidates(
+			UObject& TargetObject,
+			const TArray<TSharedPtr<FJsonValue>>& Slots,
+			FWorkspaceError& OutError)
+		{
+			const FString SlotDataType =
+				FSmartObjectSlotDefinition::StaticStruct()->GetPathName();
+			for (int32 Index = 0; Index < Slots.Num(); ++Index)
+			{
+				const TSharedPtr<FJsonObject> Slot = Slots[Index].IsValid()
+					? Slots[Index]->AsObject() : nullptr;
+				if (!Slot.IsValid()) continue;
+				const FString Pointer = FString::Printf(
+					TEXT("/root/operation/params/slots/%d/candidate"), Index);
+				TSharedPtr<FJsonObject> Candidate;
+				bool bPresent = false;
+				if (!CandidateObject(
+						Slot, Pointer, Candidate, bPresent, OutError))
+				{
+					return false;
+				}
+				if (!bPresent) continue;
+				FDomainHjsonCandidateBinding Binding;
+				if (!ReadCurrentCandidate(
+						TargetObject, Candidate, Pointer, Binding, OutError))
+				{
+					return false;
+				}
+				if (Binding.Kind != TEXT("smart_object_behavior"))
+				{
+					return Fail(
+						OutError, TEXT("ai_behavior_candidate_kind_invalid"),
+						Binding.Kind, Pointer);
+				}
+				if (!RejectConflict(
+						Slot, TEXT("behavior_type_ref"), Binding.Name,
+						Pointer, OutError)
+					|| !RejectConflict(
+						Slot, TEXT("data_type_ref"), SlotDataType,
+						Pointer, OutError))
+				{
+					return false;
+				}
+				Slot->SetStringField(TEXT("behavior_type_ref"), Binding.Name);
+				Slot->SetStringField(TEXT("data_type_ref"), SlotDataType);
+				Slot->RemoveField(TEXT("candidate"));
+			}
+			return true;
+		}
+
+		bool NormalizeCandidates(
+			const FString& RootType,
+			UObject& TargetObject,
+			const TSharedPtr<FJsonObject>& Native,
+			FWorkspaceError& OutError)
+		{
+			const TArray<TSharedPtr<FJsonValue>>* Values = nullptr;
+			if (RootType == BlackboardType)
+			{
+				return Native->TryGetArrayField(TEXT("entries"), Values)
+					&& Values
+					? NormalizeBlackboardCandidates(
+						TargetObject, *Values, OutError)
+					: Fail(OutError, TEXT("ai_behavior_domain_entries_required"));
+			}
+			if (RootType == SmartObjectType)
+			{
+				return Native->TryGetArrayField(TEXT("slots"), Values)
+					&& Values
+					? NormalizeSmartObjectCandidates(
+						TargetObject, *Values, OutError)
+					: Fail(OutError, TEXT("ai_behavior_domain_slots_required"));
+			}
+			return Native->TryGetArrayField(TEXT("edits"), Values)
+				&& Values
+				? NormalizeGraphCandidates(
+					RootType, TargetObject, *Values, OutError)
+				: Fail(OutError, TEXT("ai_behavior_domain_edits_required"));
+		}
+
+		bool ParseLifecycleMutation(
+			const FString& Target,
+			const FString& MutationPayload,
+			TSharedPtr<FJsonObject>& OutMutation,
+			FDomainHjsonImportLifecycleReceipt& OutReceipt,
+			FWorkspaceError& OutError)
+		{
+			FString JsonError;
+			FString MutationTarget;
+			FString MutationRevision;
+			FString ReceiptId;
+			if (!Json::TryParseObject(
+					MutationPayload, OutMutation, JsonError)
+				|| !OutMutation.IsValid()
+				|| !OutMutation->TryGetStringField(
+					TEXT("target_ref"), MutationTarget)
+				|| ObjectPathFromPackageIdentity(MutationTarget)
+					!= ObjectPathFromPackageIdentity(Target)
+				|| !OutMutation->TryGetStringField(
+					TEXT("revision"), MutationRevision)
+				|| MutationRevision.IsEmpty()
+				|| !OutMutation->TryGetStringField(
+					TEXT("persistence_receipt_id"), ReceiptId)
+				|| !ReceiptId.StartsWith(TEXT("reload:")))
+			{
+				return Fail(
+					OutError,
+					TEXT("ai_behavior_domain_lifecycle_receipt_invalid"),
+					MutationTarget,
+					JsonError);
+			}
+			OutReceipt.bMutationApplied = true;
+			OutReceipt.bCompileSettled = true;
+			OutReceipt.bPackageSaved = true;
+			OutReceipt.bUnloadedReloaded = true;
+			OutReceipt.PersistenceReceiptId = MoveTemp(ReceiptId);
+			return true;
 		}
 
 		bool TryImport(
 			const FString& Target,
-			const TSharedPtr<FJsonObject>& Params,
+			const FString& RootType,
+			const FString& CanonicalParamsJson,
 			FString& OutPayload,
 			FWorkspaceError& OutError)
 		{
-			TSharedPtr<FJsonObject> Root;
-			FString RootType;
-			if (!ParseDocument(Params, Root, RootType, OutError)) return false;
-			FString ExpectedRevision;
-			if (!Params->TryGetStringField(TEXT("expected_revision"), ExpectedRevision))
+			const FRootSpec* const Spec = FindRootSpec(RootType);
+			if (!Spec)
 			{
-				return Fail(OutError, TEXT("ai_behavior_domain_expected_revision_required"));
+				return Fail(
+					OutError, TEXT("ai_behavior_domain_root_type_invalid"),
+					RootType);
 			}
-			if (ExpectedRevision == TEXT("missing"))
+			FResolvedDomainHjsonDocument Document;
+			if (!TryDecodeResolvedDocument(
+					Target,
+					CanonicalParamsJson,
+					FDomainHjsonDocumentContract(
+						TEXT("ai_behavior"), SchemaId, RootType),
+					Document,
+					OutError))
 			{
-				return Fail(OutError, TEXT("ai_behavior_domain_root_create_not_registered"), Target);
+				return false;
 			}
-			FString BeforePayload;
-			FString CurrentRevision;
-			if (!TryRead(Target, BeforePayload, CurrentRevision, OutError)) return false;
-			if (ExpectedRevision != CurrentRevision)
-			{
-				return Fail(OutError, TEXT("ai_behavior_domain_stale_revision"), Target, CurrentRevision);
-			}
-			const TSharedPtr<FJsonObject>* Operation = nullptr;
-			const TSharedPtr<FJsonObject>* NativeParams = nullptr;
-			FString CommandId;
-			if (!Root->TryGetObjectField(TEXT("operation"), Operation)
-				|| !Operation || !Operation->IsValid()
-				|| !(*Operation)->TryGetStringField(TEXT("command_id"), CommandId)
-				|| !(*Operation)->TryGetObjectField(TEXT("params"), NativeParams)
-				|| !NativeParams || !NativeParams->IsValid())
-			{
-				return Fail(OutError, TEXT("ai_behavior_domain_operation_contract_required"));
-			}
-			if (!IsAllowedOperation(RootType, CommandId))
-			{
-				return Fail(OutError, TEXT("ai_behavior_domain_operation_not_supported"), CommandId);
-			}
-			FString NativeTarget;
-			if (!(*NativeParams)->TryGetStringField(TEXT("target_ref"), NativeTarget)
-				|| ObjectPathFromPackage(NativeTarget) != ObjectPathFromPackage(Target))
-			{
-				return Fail(OutError, TEXT("ai_behavior_domain_operation_target_mismatch"), CommandId);
-			}
-			FString MutationPayload;
-			if (!SubmitAiCommand(CommandId, *NativeParams, MutationPayload, OutError)) return false;
 
+			FString MutationPayload;
+			if (Document.ExpectedRevision == TEXT("missing"))
+			{
+				if (!ValidateMissingTarget(Target, OutError)) return false;
+				const TSharedPtr<FJsonObject>* Create = nullptr;
+				if (!Document.Root->TryGetObjectField(TEXT("create"), Create)
+					|| !Create || !Create->IsValid())
+				{
+					return Fail(
+						OutError,
+						TEXT("ai_behavior_domain_create_contract_required"));
+				}
+				if (Document.Root->HasField(TEXT("operation")))
+				{
+					return Fail(
+						OutError,
+						TEXT("ai_behavior_domain_create_then_edit_not_atomic"));
+				}
+				const FString Package = PackageIdentity(Target);
+				const FString ExpectedName =
+					FPackageName::GetLongPackageAssetName(Package);
+				const FString ExpectedPath =
+					FPackageName::GetLongPackagePath(Package);
+				FString Declared;
+				if ((*Create)->TryGetStringField(TEXT("asset_name"), Declared)
+					&& Declared != ExpectedName)
+				{
+					return Fail(
+						OutError,
+						TEXT("ai_behavior_domain_create_name_mismatch"),
+						Declared,
+						ExpectedName);
+				}
+				if ((*Create)->TryGetStringField(TEXT("package_path"), Declared))
+				{
+					while (Declared.EndsWith(TEXT("/")))
+					{
+						Declared.LeftChopInline(1);
+					}
+					if (Declared != ExpectedPath)
+					{
+						return Fail(
+							OutError,
+							TEXT("ai_behavior_domain_create_path_mismatch"),
+							Declared,
+							ExpectedPath);
+					}
+				}
+				const TSharedPtr<FJsonObject> Native =
+					MakeShared<FJsonObject>(**Create);
+				Native->SetStringField(TEXT("asset_name"), ExpectedName);
+				Native->SetStringField(TEXT("package_path"), ExpectedPath);
+				if (!SubmitAiCommand(
+						Spec->CreateCommand, Native, MutationPayload, OutError))
+				{
+					return false;
+				}
+			}
+			else
+			{
+				FString BeforePayload;
+				FString CurrentRevision;
+				UObject* TargetObject = nullptr;
+				if (!TryRead(
+						Target, RootType, BeforePayload, CurrentRevision,
+						nullptr, &TargetObject, OutError))
+				{
+					return false;
+				}
+				if (Document.ExpectedRevision != CurrentRevision)
+				{
+					return Fail(
+						OutError, TEXT("ai_behavior_domain_stale_revision"),
+						Target, CurrentRevision);
+				}
+				if (Document.Root->HasField(TEXT("create")))
+				{
+					return Fail(
+						OutError,
+						TEXT("ai_behavior_domain_create_requires_missing"));
+				}
+				const TSharedPtr<FJsonObject>* Operation = nullptr;
+				const TSharedPtr<FJsonObject>* Params = nullptr;
+				FString CommandId;
+				if (!Document.Root->TryGetObjectField(
+						TEXT("operation"), Operation)
+					|| !Operation || !Operation->IsValid()
+					|| !(*Operation)->TryGetStringField(
+						TEXT("command_id"), CommandId)
+					|| !(*Operation)->TryGetObjectField(TEXT("params"), Params)
+					|| !Params || !Params->IsValid())
+				{
+					return Fail(
+						OutError,
+						TEXT("ai_behavior_domain_operation_contract_required"));
+				}
+				if (CommandId != Spec->MutationCommand)
+				{
+					return Fail(
+						OutError,
+						TEXT("ai_behavior_domain_operation_not_supported"),
+						CommandId,
+						Spec->MutationCommand);
+				}
+				const TSharedPtr<FJsonObject> Native =
+					MakeShared<FJsonObject>(**Params);
+				FString NativeTarget;
+				if (Native->TryGetStringField(TEXT("target_ref"), NativeTarget)
+					&& ObjectPathFromPackageIdentity(NativeTarget)
+						!= ObjectPathFromPackageIdentity(Target))
+				{
+					return Fail(
+						OutError,
+						TEXT("ai_behavior_domain_operation_target_mismatch"),
+						NativeTarget,
+						Target);
+				}
+				Native->SetStringField(
+					TEXT("target_ref"), ObjectPathFromPackageIdentity(Target));
+				if (!TargetObject
+					|| !NormalizeCandidates(
+						RootType, *TargetObject, Native, OutError))
+				{
+					return false;
+				}
+				if (!SubmitAiCommand(
+						CommandId, Native, MutationPayload, OutError))
+				{
+					return false;
+				}
+			}
+
+			TSharedPtr<FJsonObject> Mutation;
+			FDomainHjsonImportLifecycleReceipt LifecycleReceipt;
+			if (!ParseLifecycleMutation(
+					Target, MutationPayload, Mutation,
+					LifecycleReceipt, OutError))
+			{
+				return false;
+			}
 			FString AfterPayload;
 			FString AfterRevision;
-			if (!TryRead(Target, AfterPayload, AfterRevision, OutError)) return false;
-			TSharedPtr<FJsonObject> AfterObject;
-			FString JsonError;
-			if (!Json::TryParseObject(AfterPayload, AfterObject, JsonError) || !AfterObject.IsValid())
+			TSharedPtr<FJsonObject> AfterSnapshot;
+			if (!TryRead(
+					Target, RootType, AfterPayload, AfterRevision,
+					&AfterSnapshot, nullptr, OutError))
 			{
-				return Fail(OutError, TEXT("ai_behavior_domain_readback_payload_invalid"), JsonError);
+				return false;
 			}
-			const TSharedPtr<FJsonObject> Result = MakeShared<FJsonObject>();
-			Result->SetStringField(TEXT("terminal_status"), TEXT("succeeded"));
-			Result->SetStringField(TEXT("provider_id"), TEXT("ai-behavior-domain-provider"));
-			Result->SetStringField(TEXT("target"), Target);
-			Result->SetStringField(TEXT("revision"), AfterRevision);
-			Result->SetBoolField(TEXT("saved"), true);
-			Result->SetBoolField(TEXT("reloaded"), true);
-			Result->SetObjectField(TEXT("independent_readback"), AfterObject);
-			TSharedPtr<FJsonObject> Mutation;
-			if (Json::TryParseObject(MutationPayload, Mutation, JsonError) && Mutation.IsValid())
+			FString CompileStatus;
+			if (!AfterSnapshot.IsValid()
+				|| !AfterSnapshot->TryGetStringField(
+					TEXT("compile_status"), CompileStatus)
+				|| CompileStatus != TEXT("valid"))
 			{
-				Result->SetObjectField(TEXT("mutation"), Mutation);
+				return Fail(
+					OutError,
+					TEXT("ai_behavior_domain_compile_not_settled"),
+					Target,
+					CompileStatus);
 			}
-			return CanonicalObject(Result, OutPayload, OutError);
+			return TryBuildImportSuccessPayload(
+				TEXT("ai-behavior-domain-provider"),
+				Target,
+				AfterRevision,
+				LifecycleReceipt,
+				AfterSnapshot,
+				Mutation,
+				OutPayload,
+				OutError);
 		}
 	}
 
 	bool TryExecuteContentGraph(
 		const FString& CommandId,
 		const FString& TargetIdentity,
+		const FString& RootTypeIdentity,
 		const FString& CanonicalParamsJson,
 		FString& OutPayloadJson,
 		bool& bOutReadOnly,
@@ -496,29 +842,51 @@ namespace UE::UAI::DomainAdapters::AiBehavior
 		OutError.Reset();
 		TSharedPtr<FJsonObject> Params;
 		FString JsonError;
-		if (!Json::TryParseObject(CanonicalParamsJson, Params, JsonError) || !Params.IsValid())
+		if (!Json::TryParseObject(CanonicalParamsJson, Params, JsonError)
+			|| !Params.IsValid())
 		{
-			return Fail(OutError, TEXT("ai_behavior_domain_params_invalid"), JsonError);
+			return Fail(
+				OutError, TEXT("ai_behavior_domain_params_invalid"), JsonError);
 		}
 		FString Target;
-		if (!Params->TryGetStringField(TEXT("target"), Target) || Target != TargetIdentity)
+		if (!Params->TryGetStringField(TEXT("target"), Target)
+			|| ObjectPathFromPackageIdentity(Target)
+				!= ObjectPathFromPackageIdentity(TargetIdentity))
 		{
-			return Fail(OutError, TEXT("ai_behavior_domain_target_identity_mismatch"), TargetIdentity);
+			return Fail(
+				OutError,
+				TEXT("ai_behavior_domain_target_identity_mismatch"),
+				TargetIdentity,
+				Target);
+		}
+		if (!FindRootSpec(RootTypeIdentity))
+		{
+			return Fail(
+				OutError, TEXT("ai_behavior_domain_root_type_invalid"),
+				RootTypeIdentity);
 		}
 		if (CommandId == TEXT("content_graph.import_workspace"))
 		{
-			return TryImport(Target, Params, OutPayloadJson, OutError);
+			return TryImport(
+				Target, RootTypeIdentity, CanonicalParamsJson,
+				OutPayloadJson, OutError);
 		}
 		if (CommandId == TEXT("content_graph.export_workspace"))
 		{
-			return Fail(OutError, TEXT("ai_behavior_domain_export_not_registered"), Target);
+			return Fail(
+				OutError, TEXT("ai_behavior_domain_export_not_registered"),
+				Target);
 		}
 		if (CommandId.StartsWith(TEXT("content_graph.")))
 		{
 			FString Revision;
 			bOutReadOnly = true;
-			return TryRead(Target, OutPayloadJson, Revision, OutError);
+			return TryRead(
+				Target, RootTypeIdentity, OutPayloadJson, Revision,
+				nullptr, nullptr, OutError);
 		}
-		return Fail(OutError, TEXT("ai_behavior_domain_command_not_supported"), CommandId);
+		return Fail(
+			OutError, TEXT("ai_behavior_domain_command_not_supported"),
+			CommandId);
 	}
 }

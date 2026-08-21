@@ -1,6 +1,6 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
-#include "Server/UeAgentHttpServer.h"
+#include "LegacyMechanics/UeAgentLegacyMechanics.h"
 
 #include "Commands/Assets/UeAgentReflectionAuthoringCommandBridge.h"
 #include "UeAgentHttpServer_TextureRenderTargetOps.h"
@@ -44,7 +44,7 @@
 #include "UObject/UnrealType.h"
 #include "VT/RuntimeVirtualTexture.h"
 
-bool FUeAgentHttpServer::CmdMediaSourceCreate(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdMediaSourceCreate(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	using namespace UeAgentTextureOps;
 	FString AssetPath;
@@ -94,7 +94,7 @@ bool FUeAgentHttpServer::CmdMediaSourceCreate(const FUeAgentRequestContext& Ctx,
 	return CmdMediaSourceGetInfo(Ctx, OutData, OutError);
 }
 
-bool FUeAgentHttpServer::CmdMediaSourceGetInfo(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdMediaSourceGetInfo(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	using namespace UeAgentTextureOps;
 	FString AssetPath;
@@ -127,17 +127,17 @@ bool FUeAgentHttpServer::CmdMediaSourceGetInfo(const FUeAgentRequestContext& Ctx
 	return true;
 }
 
-bool FUeAgentHttpServer::CmdMediaSourceExportJson(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdMediaSourceExportJson(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	return UeAgentReflectionAuthoringCommandBridge::Export(TEXT("media_source"), Ctx.Params, OutData, OutError);
 }
 
-bool FUeAgentHttpServer::CmdMediaSourceApplyJson(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdMediaSourceApplyJson(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	return UeAgentReflectionAuthoringCommandBridge::Apply(TEXT("media_source"), Ctx.Params, OutData, OutError, Ctx.RequestId);
 }
 
-bool FUeAgentHttpServer::CmdMediaPlayerCreate(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdMediaPlayerCreate(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	using namespace UeAgentTextureOps;
 	FString AssetPath;
@@ -187,17 +187,17 @@ bool FUeAgentHttpServer::CmdMediaPlayerCreate(const FUeAgentRequestContext& Ctx,
 	return true;
 }
 
-bool FUeAgentHttpServer::CmdMediaPlayerExportJson(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdMediaPlayerExportJson(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	return UeAgentReflectionAuthoringCommandBridge::Export(TEXT("media_player"), Ctx.Params, OutData, OutError);
 }
 
-bool FUeAgentHttpServer::CmdMediaPlayerApplyJson(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdMediaPlayerApplyJson(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	return UeAgentReflectionAuthoringCommandBridge::Apply(TEXT("media_player"), Ctx.Params, OutData, OutError, Ctx.RequestId);
 }
 
-bool FUeAgentHttpServer::CmdMediaTextureCreate(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdMediaTextureCreate(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	using namespace UeAgentTextureOps;
 	FString AssetPath;
@@ -291,17 +291,17 @@ bool FUeAgentHttpServer::CmdMediaTextureCreate(const FUeAgentRequestContext& Ctx
 	return true;
 }
 
-bool FUeAgentHttpServer::CmdMediaTextureExportJson(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdMediaTextureExportJson(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	return UeAgentReflectionAuthoringCommandBridge::Export(TEXT("media_texture"), Ctx.Params, OutData, OutError);
 }
 
-bool FUeAgentHttpServer::CmdMediaTextureApplyJson(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdMediaTextureApplyJson(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	return UeAgentReflectionAuthoringCommandBridge::Apply(TEXT("media_texture"), Ctx.Params, OutData, OutError, Ctx.RequestId);
 }
 
-bool FUeAgentHttpServer::CmdMediaRuntimeProbe(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdMediaRuntimeProbe(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	using namespace UeAgentTextureOps;
 	FString PlayerPath;
@@ -364,7 +364,7 @@ bool FUeAgentHttpServer::CmdMediaRuntimeProbe(const FUeAgentRequestContext& Ctx,
 	return true;
 }
 
-bool FUeAgentHttpServer::CmdSparseVolumeTextureImport(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdSparseVolumeTextureImport(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	using namespace UeAgentTextureOps;
 	FString SourceFile;
@@ -455,7 +455,7 @@ bool FUeAgentHttpServer::CmdSparseVolumeTextureImport(const FUeAgentRequestConte
 	return true;
 }
 
-bool FUeAgentHttpServer::CmdSparseVolumeTextureReimport(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdSparseVolumeTextureReimport(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	using namespace UeAgentTextureOps;
 	FString AssetPath;
@@ -511,7 +511,7 @@ bool FUeAgentHttpServer::CmdSparseVolumeTextureReimport(const FUeAgentRequestCon
 	return true;
 }
 
-bool FUeAgentHttpServer::CmdSparseVolumeTextureGetInfo(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdSparseVolumeTextureGetInfo(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	using namespace UeAgentTextureOps;
 	FString AssetPath;
@@ -541,17 +541,17 @@ bool FUeAgentHttpServer::CmdSparseVolumeTextureGetInfo(const FUeAgentRequestCont
 	return true;
 }
 
-bool FUeAgentHttpServer::CmdSparseVolumeTextureExportJson(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdSparseVolumeTextureExportJson(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	return UeAgentReflectionAuthoringCommandBridge::Export(TEXT("sparse_volume_texture"), Ctx.Params, OutData, OutError);
 }
 
-bool FUeAgentHttpServer::CmdSparseVolumeTextureApplyJson(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdSparseVolumeTextureApplyJson(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	return UeAgentReflectionAuthoringCommandBridge::Apply(TEXT("sparse_volume_texture"), Ctx.Params, OutData, OutError, Ctx.RequestId);
 }
 
-bool FUeAgentHttpServer::CmdSparseVolumeTexturePreviewProbe(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdSparseVolumeTexturePreviewProbe(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	using namespace UeAgentTextureOps;
 	if (!CmdSparseVolumeTextureGetInfo(Ctx, OutData, OutError))
@@ -574,7 +574,7 @@ bool FUeAgentHttpServer::CmdSparseVolumeTexturePreviewProbe(const FUeAgentReques
 	return true;
 }
 
-bool FUeAgentHttpServer::CmdSparseVolumeTextureValidateSetup(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdSparseVolumeTextureValidateSetup(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	using namespace UeAgentTextureOps;
 	if (!CmdSparseVolumeTextureGetInfo(Ctx, OutData, OutError))
@@ -592,7 +592,7 @@ bool FUeAgentHttpServer::CmdSparseVolumeTextureValidateSetup(const FUeAgentReque
 	return true;
 }
 
-bool FUeAgentHttpServer::CmdTextureGraphCreate(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdTextureGraphCreate(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	using namespace UeAgentTextureOps;
 	FString AssetPath;
@@ -625,7 +625,7 @@ bool FUeAgentHttpServer::CmdTextureGraphCreate(const FUeAgentRequestContext& Ctx
 	return true;
 }
 
-bool FUeAgentHttpServer::CmdTextureGraphGetInfo(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdTextureGraphGetInfo(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	using namespace UeAgentTextureOps;
 	FString AssetPath;
@@ -651,22 +651,22 @@ bool FUeAgentHttpServer::CmdTextureGraphGetInfo(const FUeAgentRequestContext& Ct
 	return true;
 }
 
-bool FUeAgentHttpServer::CmdTextureGraphExportFolder(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdTextureGraphExportFolder(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	return UeAgentReflectionAuthoringCommandBridge::Export(TEXT("texture_graph"), Ctx.Params, OutData, OutError);
 }
 
-bool FUeAgentHttpServer::CmdTextureGraphValidateFolder(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdTextureGraphValidateFolder(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	return UeAgentReflectionAuthoringCommandBridge::Validate(TEXT("texture_graph"), Ctx.Params, OutData, OutError);
 }
 
-bool FUeAgentHttpServer::CmdTextureGraphApplyFolder(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdTextureGraphApplyFolder(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	return UeAgentReflectionAuthoringCommandBridge::Apply(TEXT("texture_graph"), Ctx.Params, OutData, OutError, Ctx.RequestId);
 }
 
-bool FUeAgentHttpServer::CmdTextureGraphBakeOutputs(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdTextureGraphBakeOutputs(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	using namespace UeAgentTextureOps;
 	FString AssetPath;
@@ -732,7 +732,7 @@ bool FUeAgentHttpServer::CmdTextureGraphBakeOutputs(const FUeAgentRequestContext
 	return true;
 }
 
-bool FUeAgentHttpServer::CmdTextureGraphRuntimeProbe(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdTextureGraphRuntimeProbe(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	using namespace UeAgentTextureOps;
 	FString AssetPath;
@@ -795,7 +795,7 @@ bool FUeAgentHttpServer::CmdTextureGraphRuntimeProbe(const FUeAgentRequestContex
 	return true;
 }
 
-bool FUeAgentHttpServer::CmdSubUVAnimationCreate(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdSubUVAnimationCreate(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	using namespace UeAgentTextureOps;
 	FString AssetPath;
@@ -835,7 +835,7 @@ bool FUeAgentHttpServer::CmdSubUVAnimationCreate(const FUeAgentRequestContext& C
 	return CmdSubUVAnimationGetInfo(Ctx, OutData, OutError);
 }
 
-bool FUeAgentHttpServer::CmdSubUVAnimationGetInfo(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdSubUVAnimationGetInfo(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	using namespace UeAgentTextureOps;
 	FString AssetPath;
@@ -860,17 +860,17 @@ bool FUeAgentHttpServer::CmdSubUVAnimationGetInfo(const FUeAgentRequestContext& 
 	return true;
 }
 
-bool FUeAgentHttpServer::CmdSubUVAnimationExportJson(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdSubUVAnimationExportJson(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	return UeAgentReflectionAuthoringCommandBridge::Export(TEXT("subuv_animation"), Ctx.Params, OutData, OutError);
 }
 
-bool FUeAgentHttpServer::CmdSubUVAnimationApplyJson(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdSubUVAnimationApplyJson(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	return UeAgentReflectionAuthoringCommandBridge::Apply(TEXT("subuv_animation"), Ctx.Params, OutData, OutError, Ctx.RequestId);
 }
 
-bool FUeAgentHttpServer::CmdSubUVAnimationPreviewProbe(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdSubUVAnimationPreviewProbe(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	using namespace UeAgentTextureOps;
 	if (!CmdSubUVAnimationGetInfo(Ctx, OutData, OutError))
@@ -890,7 +890,7 @@ bool FUeAgentHttpServer::CmdSubUVAnimationPreviewProbe(const FUeAgentRequestCont
 	return true;
 }
 
-bool FUeAgentHttpServer::CmdPaperSpriteCreate(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdPaperSpriteCreate(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	using namespace UeAgentTextureOps;
 	FString AssetPath;
@@ -979,17 +979,17 @@ bool FUeAgentHttpServer::CmdPaperSpriteCreate(const FUeAgentRequestContext& Ctx,
 	return true;
 }
 
-bool FUeAgentHttpServer::CmdPaperSpriteExportJson(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdPaperSpriteExportJson(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	return UeAgentReflectionAuthoringCommandBridge::Export(TEXT("paper_sprite"), Ctx.Params, OutData, OutError);
 }
 
-bool FUeAgentHttpServer::CmdPaperSpriteApplyJson(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdPaperSpriteApplyJson(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	return UeAgentReflectionAuthoringCommandBridge::Apply(TEXT("paper_sprite"), Ctx.Params, OutData, OutError, Ctx.RequestId);
 }
 
-bool FUeAgentHttpServer::CmdPaperFlipbookCreate(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdPaperFlipbookCreate(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	using namespace UeAgentTextureOps;
 	FString AssetPath;
@@ -1028,12 +1028,12 @@ bool FUeAgentHttpServer::CmdPaperFlipbookCreate(const FUeAgentRequestContext& Ct
 	return true;
 }
 
-bool FUeAgentHttpServer::CmdPaperFlipbookExportJson(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdPaperFlipbookExportJson(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	return UeAgentReflectionAuthoringCommandBridge::Export(TEXT("paper_flipbook"), Ctx.Params, OutData, OutError);
 }
 
-bool FUeAgentHttpServer::CmdPaperFlipbookApplyJson(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdPaperFlipbookApplyJson(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	return UeAgentReflectionAuthoringCommandBridge::Apply(TEXT("paper_flipbook"), Ctx.Params, OutData, OutError, Ctx.RequestId);
 }
@@ -1151,27 +1151,27 @@ static bool ApplyGenericPaperFolder(const FUeAgentRequestContext& Ctx, const FSt
 	return true;
 }
 
-bool FUeAgentHttpServer::CmdPaperTileSetExportFolder(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdPaperTileSetExportFolder(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	return UeAgentReflectionAuthoringCommandBridge::Export(TEXT("paper_tileset"), Ctx.Params, OutData, OutError);
 }
 
-bool FUeAgentHttpServer::CmdPaperTileSetApplyFolder(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdPaperTileSetApplyFolder(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	return UeAgentReflectionAuthoringCommandBridge::Apply(TEXT("paper_tileset"), Ctx.Params, OutData, OutError, Ctx.RequestId);
 }
 
-bool FUeAgentHttpServer::CmdPaperTileMapExportFolder(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdPaperTileMapExportFolder(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	return UeAgentReflectionAuthoringCommandBridge::Export(TEXT("paper_tilemap"), Ctx.Params, OutData, OutError);
 }
 
-bool FUeAgentHttpServer::CmdPaperTileMapApplyFolder(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdPaperTileMapApplyFolder(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	return UeAgentReflectionAuthoringCommandBridge::Apply(TEXT("paper_tilemap"), Ctx.Params, OutData, OutError, Ctx.RequestId);
 }
 
-bool FUeAgentHttpServer::CmdPaper2DPreviewProbe(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdPaper2DPreviewProbe(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	using namespace UeAgentTextureOps;
 	FString AssetPath;
@@ -1203,7 +1203,7 @@ bool FUeAgentHttpServer::CmdPaper2DPreviewProbe(const FUeAgentRequestContext& Ct
 	return true;
 }
 
-bool FUeAgentHttpServer::CmdLightProfileTextureImport(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdLightProfileTextureImport(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	using namespace UeAgentTextureOps;
 	FString SourceFile;
@@ -1279,7 +1279,7 @@ bool FUeAgentHttpServer::CmdLightProfileTextureImport(const FUeAgentRequestConte
 	return true;
 }
 
-bool FUeAgentHttpServer::CmdLightProfileTextureGetInfo(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdLightProfileTextureGetInfo(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	using namespace UeAgentTextureOps;
 	FString AssetPath;
@@ -1305,7 +1305,7 @@ bool FUeAgentHttpServer::CmdLightProfileTextureGetInfo(const FUeAgentRequestCont
 	return true;
 }
 
-bool FUeAgentHttpServer::CmdLightProfileValidateSetup(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdLightProfileValidateSetup(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	using namespace UeAgentTextureOps;
 	FString ExpectedProfilePath;
@@ -1349,7 +1349,7 @@ bool FUeAgentHttpServer::CmdLightProfileValidateSetup(const FUeAgentRequestConte
 	return true;
 }
 
-bool FUeAgentHttpServer::CmdTextureCollectionCreate(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdTextureCollectionCreate(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	using namespace UeAgentTextureOps;
 	FString AssetPath;
@@ -1393,7 +1393,7 @@ bool FUeAgentHttpServer::CmdTextureCollectionCreate(const FUeAgentRequestContext
 	return true;
 }
 
-bool FUeAgentHttpServer::CmdTextureCollectionGetInfo(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdTextureCollectionGetInfo(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	using namespace UeAgentTextureOps;
 	FString AssetPath;
@@ -1425,12 +1425,12 @@ bool FUeAgentHttpServer::CmdTextureCollectionGetInfo(const FUeAgentRequestContex
 	return true;
 }
 
-bool FUeAgentHttpServer::CmdTextureCollectionExportJson(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdTextureCollectionExportJson(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	return UeAgentReflectionAuthoringCommandBridge::Export(TEXT("texture_collection"), Ctx.Params, OutData, OutError);
 }
 
-bool FUeAgentHttpServer::CmdTextureCollectionApplyJson(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdTextureCollectionApplyJson(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	return UeAgentReflectionAuthoringCommandBridge::Apply(TEXT("texture_collection"), Ctx.Params, OutData, OutError, Ctx.RequestId);
 }
@@ -1451,7 +1451,7 @@ bool GetReferencesForAsset(const FString& AssetPath, TArray<TSharedPtr<FJsonValu
 	return true;
 }
 
-bool FUeAgentHttpServer::CmdTextureUsageGetReferences(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdTextureUsageGetReferences(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	using namespace UeAgentTextureOps;
 	FString TextureAsset;
@@ -1480,7 +1480,7 @@ bool FUeAgentHttpServer::CmdTextureUsageGetReferences(const FUeAgentRequestConte
 	return true;
 }
 
-bool FUeAgentHttpServer::CmdTextureUsageValidate(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdTextureUsageValidate(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	using namespace UeAgentTextureOps;
 	if (!CmdTextureUsageGetReferences(Ctx, OutData, OutError))
@@ -1530,7 +1530,7 @@ bool FUeAgentHttpServer::CmdTextureUsageValidate(const FUeAgentRequestContext& C
 	return true;
 }
 
-bool FUeAgentHttpServer::CmdTextureUsageProbeMedia(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdTextureUsageProbeMedia(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	using namespace UeAgentTextureOps;
 	FString AssetPath;
@@ -1555,7 +1555,7 @@ bool FUeAgentHttpServer::CmdTextureUsageProbeMedia(const FUeAgentRequestContext&
 	return true;
 }
 
-bool FUeAgentHttpServer::CmdTextureUsageProbeSparseVolume(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdTextureUsageProbeSparseVolume(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	using namespace UeAgentTextureOps;
 	FString AssetPath;
@@ -1577,7 +1577,7 @@ bool FUeAgentHttpServer::CmdTextureUsageProbeSparseVolume(const FUeAgentRequestC
 	return true;
 }
 
-bool FUeAgentHttpServer::CmdTextureCollectionValidateUsage(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdTextureCollectionValidateUsage(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	using namespace UeAgentTextureOps;
 	TSharedPtr<FJsonObject> Params = MakeShared<FJsonObject>();

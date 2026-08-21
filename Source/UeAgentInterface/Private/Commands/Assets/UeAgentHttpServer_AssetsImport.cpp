@@ -313,7 +313,7 @@ namespace UeAgentAssetOps
 	}
 
 }
-bool FUeAgentHttpServer::CmdAssetImportTexture(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdAssetImportTexture(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	FString SourceFilenameInput;
 	if (!JsonTryGetString(Ctx.Params, TEXT("source_filename"), SourceFilenameInput) || SourceFilenameInput.IsEmpty())
@@ -665,7 +665,7 @@ bool FUeAgentHttpServer::CmdAssetImportTexture(const FUeAgentRequestContext& Ctx
 	return true;
 }
 
-bool FUeAgentHttpServer::CmdAssetImportFbxSkeletalMesh(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdAssetImportFbxSkeletalMesh(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	FString SourceFilenameInput;
 	if (!JsonTryGetString(Ctx.Params, TEXT("source_filename"), SourceFilenameInput) || SourceFilenameInput.IsEmpty())
@@ -1083,7 +1083,7 @@ bool FUeAgentHttpServer::CmdAssetImportFbxSkeletalMesh(const FUeAgentRequestCont
 	return true;
 }
 
-bool FUeAgentHttpServer::CmdAssetImportFbxAnimation(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdAssetImportFbxAnimation(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	FString SourceFilenameInput;
 	if (!JsonTryGetString(Ctx.Params, TEXT("source_filename"), SourceFilenameInput) || SourceFilenameInput.IsEmpty())

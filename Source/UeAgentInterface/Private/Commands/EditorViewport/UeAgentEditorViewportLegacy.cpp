@@ -59,7 +59,7 @@ namespace UeAgentEditorViewportLegacy
 		}
 
 		static bool ExecuteCompatCommand(
-			const FUeAgentHttpServer& Server,
+			const FUeAgentLegacyMechanics& Server,
 			const FUeAgentRequestContext& Ctx,
 			const FString& ReplacementCommand,
 			const TSharedPtr<FJsonObject>& Params,
@@ -199,7 +199,7 @@ namespace UeAgentEditorViewportLegacy
 	}
 
 	bool ExecuteCameraGet(
-		const FUeAgentHttpServer& Server,
+		const FUeAgentLegacyMechanics& Server,
 		const FUeAgentRequestContext& Ctx,
 		const TSharedPtr<FJsonObject>& Target,
 		TSharedPtr<FJsonObject>& OutData,
@@ -216,7 +216,7 @@ namespace UeAgentEditorViewportLegacy
 	}
 
 	bool ExecuteCameraSet(
-		const FUeAgentHttpServer& Server,
+		const FUeAgentLegacyMechanics& Server,
 		const FUeAgentRequestContext& Ctx,
 		const TSharedPtr<FJsonObject>& Target,
 		TSharedPtr<FJsonObject>& OutData,
@@ -233,7 +233,7 @@ namespace UeAgentEditorViewportLegacy
 	}
 
 	bool ExecuteFocus(
-		const FUeAgentHttpServer& Server,
+		const FUeAgentLegacyMechanics& Server,
 		const FUeAgentRequestContext& Ctx,
 		const TSharedPtr<FJsonObject>& Target,
 		const TSharedPtr<FJsonObject>& Focus,

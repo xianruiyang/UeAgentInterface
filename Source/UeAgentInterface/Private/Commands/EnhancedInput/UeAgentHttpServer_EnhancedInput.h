@@ -7,4 +7,4 @@
 // `UeAgentHttpServer_EnhancedInputMembers.h` and are included from within
 // `UeAgentHttpServer.h`.
 
-#include "Server/UeAgentHttpServer.h"
+#include "LegacyMechanics/UeAgentLegacyMechanics.h"

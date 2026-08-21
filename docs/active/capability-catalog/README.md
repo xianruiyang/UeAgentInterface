@@ -21,24 +21,34 @@ It is deliberately not a runtime registry:
 ## Evidence semantics
 
 A registered command is not a delivered capability. Every unit records the
-highest layer directly supported by current evidence. The initial T34 catalog
-can claim activation and public-contract alignment for the 342 exact command
-identities, but it intentionally leaves real UE mechanics, applicable
-compile/settle and persistence, independent readback, failure cleanup,
-distribution and content quality to the referenced vertical task.
+highest layer directly supported by current evidence. The current catalog owns
+347 exact command identities. T35 through T43 provide representative current UE
+verticals across the registered domains, but they do not prove every command ×
+object/type × surface × operation × lifecycle cell. Uncovered cells,
+distribution and real-content quality remain explicit in each unit's
+`not_proven` list and delivery chain.
 
 Historical `exact_command_set` and `architecture_contract` values are retained
-under `candidate_successor`; they do not become current exact successors until
-the owning vertical task proves purpose, input, output and product equivalence.
-The 202 historically deprecated identities remain explicit non-support, while
-the single public self-test retirement remains a retirement decision. All still
-require the physical legacy-surface exit audit.
+under `candidate_successor`; they do not become current exact successors without
+direct purpose, input, output and product equivalence. In the v2 overlay,
+`current_disposition` is the final resolution for every row: 736 required
+capability contracts, 202 explicit non-support decisions and one public
+retirement. A required capability contract is an obligation classification,
+not an implementation or exact-successor claim.
+
+The identical public-exit fact is stored once in
+`legacy_public_surface_exit`, rather than copied into 939 rows. It records that
+all old identities are absent from the current manifest, the compiled legacy
+registry and HTTP handler are physically removed, and retained mechanics are a
+private implementation boundary consumed only by current domain owners. The
+architecture and CMD tests are the executable evidence for that contract.
 
 CubeGrid is intentionally represented outside the 939-row inventory. Git
-history proves that four voxel-grid commands, persistent sidecar/revision
-mechanics and UE smoke tests existed and were removed by the recovery-baseline
-commit. The catalog therefore records a missing capability contract; it does not
-restore the split legacy implementation or claim current support.
+history proves that four voxel-grid commands and their sidecar/revision
+mechanics existed. T41 restored the required capability through the current
+`mesh.voxel_grid.session` and `mesh.voxel_grid.apply` contracts and public SDK
+product evidence. The four old identities remain absent; the catalog records a
+non-exact capability resolution and does not restore their split dispatch.
 
 ## Maintenance workflow
 
@@ -46,9 +56,10 @@ restore the split legacy implementation or claim current support.
    regenerate the formal manifest/binding through their existing owner.
 2. Update the affected capability unit in `catalog.json`; every manifest command
    must appear in exactly one unit.
-3. When historical semantics are resolved, update the matching row in
-   `historical-decisions.json`; never edit the old inventory to change a current
-   decision.
+3. Change a historical row only when its final disposition changes. Keep
+   candidate mappings historical-only, and update the single
+   `legacy_public_surface_exit` object when the shared exit mechanism changes;
+   never edit the old inventory to change a current decision.
 4. Advance `highest_verified_layer` only with direct evidence for the exact
    command × object/type × surface × operation × lifecycle slice.
 5. Run the CMD capability-catalog tests. Schema, manifest hash/set, uniqueness,

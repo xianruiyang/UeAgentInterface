@@ -3,6 +3,7 @@
 #include "CommandEdge/UeAgentCommandProtocol.h"
 #include "CommandRegistry/UeAgentImmutableCommandRegistry.h"
 #include "Core/Contract/UeAgentCommandJson.h"
+#include "Core/HjsonWorkspace/DomainAuthoring/UeAgentDomainHjsonAuthoringKit.h"
 #include "DomainAdapters/AnimationCurveCommands/UeAgentAnimationCurveCommandMechanicsBoundary.h"
 #include "Dom/JsonObject.h"
 #include "Misc/FileHelper.h"
@@ -18,7 +19,9 @@ namespace UE::UAI::DomainAdapters::AnimationCurve
 	using namespace CommandEdge;
 	using namespace CommandContract;
 	using namespace ContextResource;
+	using namespace DomainAdapters::ContentGraphRead;
 	using namespace HjsonWorkspace;
+	using namespace HjsonWorkspace::DomainAuthoring;
 
 	namespace
 	{
@@ -72,83 +75,6 @@ namespace UE::UAI::DomainAdapters::AnimationCurve
 				Result += FString::Printf(TEXT("%02x"), Byte);
 			}
 			return Result;
-		}
-
-		FUeAgentResourceTracker MakeResources()
-		{
-			return FUeAgentResourceTracker(FUeAgentResourceBudget({
-				{EUeAgentResourceDimension::InputBytes, 16 * 1024 * 1024},
-				{EUeAgentResourceDimension::OutputBytes, 16 * 1024 * 1024},
-				{EUeAgentResourceDimension::StringBytes, 16 * 1024 * 1024},
-				{EUeAgentResourceDimension::Nodes, 16384},
-				{EUeAgentResourceDimension::Items, 65536},
-				{EUeAgentResourceDimension::Files, 4096},
-				{EUeAgentResourceDimension::ReferenceEdges, 65536},
-				{EUeAgentResourceDimension::WorkUnits, 262144},
-				{EUeAgentResourceDimension::EstimatedMemoryBytes, 256 * 1024 * 1024},
-			}));
-		}
-
-		TSharedPtr<FJsonValue> JsonValueFromHjson(
-			const FHjsonNode& Node,
-			FWorkspaceError& OutError)
-		{
-			switch (Node.GetKind())
-			{
-			case EHjsonNodeKind::Null:
-				return MakeShared<FJsonValueNull>();
-			case EHjsonNodeKind::Boolean:
-				return MakeShared<FJsonValueBoolean>(Node.GetBoolean());
-			case EHjsonNodeKind::String:
-				return MakeShared<FJsonValueString>(Node.GetText());
-			case EHjsonNodeKind::Integer:
-			case EHjsonNodeKind::Decimal:
-				return MakeShared<FJsonValueNumber>(
-					FCString::Atod(*Node.GetLexeme()));
-			case EHjsonNodeKind::Array:
-			{
-				TArray<TSharedPtr<FJsonValue>> Items;
-				for (const FHjsonNodeRef& Item : Node.GetItems())
-				{
-					TSharedPtr<FJsonValue> Converted =
-						JsonValueFromHjson(*Item, OutError);
-					if (!Converted.IsValid()) return nullptr;
-					Items.Add(MoveTemp(Converted));
-				}
-				return MakeShared<FJsonValueArray>(MoveTemp(Items));
-			}
-			case EHjsonNodeKind::Object:
-			{
-				const TSharedPtr<FJsonObject> Object = MakeShared<FJsonObject>();
-				for (const TPair<FString, FHjsonNodeRef>& Entry : Node.GetEntries())
-				{
-					TSharedPtr<FJsonValue> Converted =
-						JsonValueFromHjson(*Entry.Value, OutError);
-					if (!Converted.IsValid()) return nullptr;
-					Object->SetField(Entry.Key, MoveTemp(Converted));
-				}
-				return MakeShared<FJsonValueObject>(Object);
-			}
-			default:
-				Fail(OutError, TEXT("animation_curve_domain_hjson_node_invalid"));
-				return nullptr;
-			}
-		}
-
-		bool CanonicalObject(
-			const TSharedPtr<FJsonObject>& Object,
-			FString& Out,
-			FWorkspaceError& OutError)
-		{
-			FString Error;
-			if (!Object.IsValid() || !Json::TryCanonicalize(Object, Out, Error))
-			{
-				return Fail(
-					OutError,
-					TEXT("animation_curve_domain_json_canonicalization_failed"),
-					Error);
-			}
-			return true;
 		}
 
 		bool DecodeRequest(
@@ -220,7 +146,7 @@ namespace UE::UAI::DomainAdapters::AnimationCurve
 					CommandId);
 			}
 			FString ParamsJson;
-			if (!CanonicalObject(Params, ParamsJson, OutError)) return false;
+			if (!TryCanonicalizeObject(Params, ParamsJson, OutError)) return false;
 			TOptional<FUeAgentCommandRequest> Request;
 			if (!DecodeRequest(
 					CommandId,
@@ -256,11 +182,12 @@ namespace UE::UAI::DomainAdapters::AnimationCurve
 				MakeShared<FNeverCancelled>());
 			if (!Result.IsOk())
 			{
-				return Fail(
-					OutError,
+				SetWorkspaceErrorFromCommandFailure(
+					Result.GetErrorJson(),
 					TEXT("animation_curve_domain_native_command_failed"),
 					CommandId,
-					Result.GetErrorJson());
+					OutError);
+				return false;
 			}
 			OutPayload = Result.GetPayloadJson();
 			return true;
@@ -281,160 +208,6 @@ namespace UE::UAI::DomainAdapters::AnimationCurve
 			}
 			return true;
 		}
-
-		bool ParseDocument(
-			const TSharedPtr<FJsonObject>& Params,
-			TSharedPtr<FJsonObject>& OutRoot,
-			FWorkspaceError& OutError)
-		{
-			OutRoot.Reset();
-			FString DocumentText;
-			if (!Params.IsValid()
-				|| Params->HasField(TEXT("carrier"))
-				|| Params->HasField(TEXT("hjson_document")))
-			{
-				return Fail(
-					OutError,
-					TEXT("animation_curve_domain_legacy_source_contract_rejected"));
-			}
-			FString Target;
-			const TSharedPtr<FJsonObject>* Source = nullptr;
-			if (!Params->TryGetStringField(TEXT("target"), Target)
-				|| Target.IsEmpty()
-				|| !Params->TryGetObjectField(TEXT("source"), Source)
-				|| !Source || !Source->IsValid())
-			{
-				return Fail(
-					OutError,
-					TEXT("animation_curve_domain_resolved_source_required"));
-			}
-			FString Kind;
-			FString TargetIdentity;
-			FString EntryFile;
-			const TArray<TSharedPtr<FJsonValue>>* Documents = nullptr;
-			if (!(*Source)->TryGetStringField(TEXT("kind"), Kind)
-				|| Kind != TEXT("resolved")
-				|| !(*Source)->TryGetStringField(
-					TEXT("target_identity"), TargetIdentity)
-				|| TargetIdentity != Target
-				|| !(*Source)->TryGetStringField(TEXT("entry_file"), EntryFile)
-				|| EntryFile.IsEmpty()
-				|| !(*Source)->TryGetArrayField(TEXT("documents"), Documents)
-				|| !Documents || Documents->IsEmpty())
-			{
-				return Fail(
-					OutError,
-					TEXT("animation_curve_domain_resolved_source_invalid"));
-			}
-			int32 EntryMatches = 0;
-			for (const TSharedPtr<FJsonValue>& Value : *Documents)
-			{
-				const TSharedPtr<FJsonObject> DocumentObject = Value.IsValid()
-					? Value->AsObject()
-					: nullptr;
-				FString RelativePath;
-				FString Text;
-				if (!DocumentObject.IsValid()
-					|| !DocumentObject->TryGetStringField(
-						TEXT("path"), RelativePath)
-					|| !DocumentObject->TryGetStringField(
-						TEXT("document"), Text))
-				{
-					return Fail(
-						OutError,
-						TEXT("animation_curve_domain_resolved_source_invalid"));
-				}
-				if (RelativePath == EntryFile)
-				{
-					DocumentText = MoveTemp(Text);
-					++EntryMatches;
-				}
-			}
-			if (EntryMatches != 1 || DocumentText.IsEmpty())
-			{
-				return Fail(
-					OutError,
-					TEXT("animation_curve_domain_resolved_source_invalid"),
-					EntryFile);
-			}
-			FUeAgentResourceTracker Resources = MakeResources();
-			FHjsonDocumentPtr Document;
-			if (!TryParseHjsonDocument(
-					DocumentText,
-					TEXT("inline:animation-curve-domain"),
-					Resources,
-					Document,
-					OutError)
-				|| !Document.IsValid())
-			{
-				return false;
-			}
-			TSharedPtr<FJsonValue> Value =
-				JsonValueFromHjson(*Document->GetRoot(), OutError);
-			const TSharedPtr<FJsonObject> Parsed =
-				Value.IsValid() ? Value->AsObject() : nullptr;
-			FString Schema;
-			const TSharedPtr<FJsonObject>* Root = nullptr;
-			if (!Parsed.IsValid()
-				|| !Parsed->TryGetStringField(TEXT("schema"), Schema)
-				|| Schema != SchemaId
-				|| !Parsed->TryGetObjectField(TEXT("root"), Root)
-				|| !Root || !Root->IsValid())
-			{
-				return Fail(
-					OutError, TEXT("animation_curve_domain_document_invalid"));
-			}
-			OutRoot = *Root;
-			return true;
-		}
-
-		bool ObservedState(
-			const TSharedPtr<FJsonObject>& Read,
-			FString& OutState,
-			FWorkspaceError& OutError)
-		{
-			OutState.Reset();
-			const TSharedPtr<FJsonObject>* Projection = nullptr;
-			const TSharedPtr<FJsonObject>* Payload = nullptr;
-			const TSharedPtr<FJsonObject>* Snapshot = nullptr;
-			const TArray<TSharedPtr<FJsonValue>>* Entries = nullptr;
-			if (!Read.IsValid()
-				|| !Read->TryGetObjectField(TEXT("projection"), Projection)
-				|| !Projection || !Projection->IsValid()
-				|| !(*Projection)->TryGetObjectField(TEXT("payload"), Payload)
-				|| !Payload || !Payload->IsValid()
-				|| !(*Payload)->TryGetObjectField(TEXT("snapshot"), Snapshot)
-				|| !Snapshot || !Snapshot->IsValid()
-				|| !(*Snapshot)->TryGetArrayField(TEXT("entries"), Entries)
-				|| !Entries || Entries->IsEmpty())
-			{
-				return Fail(
-					OutError, TEXT("animation_curve_domain_observed_state_missing"));
-			}
-			const TSharedPtr<FJsonObject> Entry = (*Entries)[0]->AsObject();
-			const TSharedPtr<FJsonObject>* EntryValue = nullptr;
-			const TSharedPtr<FJsonObject>* Fields = nullptr;
-			const TSharedPtr<FJsonObject>* State = nullptr;
-			if (!Entry.IsValid()
-				|| !Entry->TryGetObjectField(TEXT("value"), EntryValue)
-				|| !EntryValue || !EntryValue->IsValid()
-				|| !(*EntryValue)->TryGetObjectField(TEXT("fields"), Fields)
-				|| !Fields || !Fields->IsValid()
-				|| !(*Fields)->TryGetObjectField(TEXT("observed_state"), State)
-				|| !State || !State->IsValid()
-				|| !(*State)->TryGetStringField(TEXT("text"), OutState)
-				|| OutState.IsEmpty())
-			{
-				return Fail(
-					OutError, TEXT("animation_curve_domain_observed_state_missing"));
-			}
-			return true;
-		}
-
-		bool NativeRevision(
-			const TSharedPtr<FJsonObject>& Read,
-			TSharedPtr<FJsonObject>& OutRevision,
-			FWorkspaceError& OutError);
 
 		bool StableRevision(
 			const FString& Target,
@@ -539,25 +312,21 @@ namespace UE::UAI::DomainAdapters::AnimationCurve
 			TSharedPtr<FJsonObject>& OutObject,
 			FWorkspaceError& OutError)
 		{
-			TArray<TSharedPtr<FJsonValue>> BlendParameters;
-			for (const FString& Axis : {FString(TEXT("Speed")), FString(TEXT("Direction"))})
-			{
-				const TSharedPtr<FJsonObject> Parameter = MakeShared<FJsonObject>();
-				Parameter->SetStringField(TEXT("axis_ref"), Axis);
-				Parameter->SetNumberField(TEXT("value"), 0.0);
-				BlendParameters.Add(MakeShared<FJsonValueObject>(Parameter));
-			}
-			const TSharedPtr<FJsonObject> Input = MakeShared<FJsonObject>();
-			Input->SetArrayField(TEXT("blend_parameters"), BlendParameters);
-			const TSharedPtr<FJsonObject> Params = MakeShared<FJsonObject>();
-			Params->SetStringField(TEXT("target"), Target);
-			Params->SetObjectField(TEXT("input"), Input);
-			return SubmitAnimationCommand(
-					TEXT("animation.blend_space.sample"),
-					Params,
-					OutPayload,
+			UObject* Object = nullptr;
+			FUeAgentContentGraphCapture Capture;
+			return TryCaptureObject(
+					Target,
+					BlendSpaceType,
+					Object,
+					Capture,
 					OutError)
-				&& ParsePayload(OutPayload, OutObject, OutError);
+				&& TryBuildCaptureSnapshot(
+					Target,
+					BlendSpaceType,
+					Capture,
+					OutObject,
+					OutError)
+				&& TryCanonicalizeObject(OutObject, OutPayload, OutError);
 		}
 
 		bool ReadForType(
@@ -572,46 +341,130 @@ namespace UE::UAI::DomainAdapters::AnimationCurve
 				: ReadSequence(Target, OutPayload, OutObject, OutError);
 		}
 
+		FString PackageIdentity(const FString& Target)
+		{
+			return Target.Contains(TEXT("."))
+				? FPackageName::ObjectPathToPackageName(Target)
+				: Target;
+		}
+
 		FString PackagePath(const FString& Target)
 		{
-			FString Package;
-			FString Object;
-			Target.Split(TEXT("."), &Package, &Object);
-			FString Path;
-			FString Asset;
-			Package.Split(TEXT("/"), &Path, &Asset, ESearchCase::CaseSensitive,
-				ESearchDir::FromEnd);
-			return Path;
+			return FPackageName::GetLongPackagePath(PackageIdentity(Target));
 		}
 
 		FString AssetName(const FString& Target)
 		{
-			FString Package;
-			FString Object;
-			Target.Split(TEXT("."), &Package, &Object);
-			return Object;
+			return FPackageName::GetLongPackageAssetName(PackageIdentity(Target));
+		}
+
+		bool ParseLifecycleMutation(
+			const FString& Target,
+			const FString& MutationPayload,
+			TSharedPtr<FJsonObject>& OutMutation,
+			FDomainHjsonImportLifecycleReceipt& OutReceipt,
+			FWorkspaceError& OutError)
+		{
+			FString JsonError;
+			if (!Json::TryParseObject(
+					MutationPayload, OutMutation, JsonError)
+				|| !OutMutation.IsValid())
+			{
+				return Fail(
+					OutError,
+					TEXT("animation_curve_domain_lifecycle_receipt_invalid"),
+					Target,
+					JsonError);
+			}
+			FString TerminalStatus;
+			FString MutationTarget;
+			FString ReceiptId;
+			bool bMutationApplied = false;
+			bool bCompileSettled = false;
+			bool bSaved = false;
+			bool bReloaded = false;
+			if (OutMutation->TryGetStringField(
+					TEXT("terminal_status"), TerminalStatus))
+			{
+				if (TerminalStatus != TEXT("succeeded")
+					|| !OutMutation->TryGetStringField(
+						TEXT("target_ref"), MutationTarget)
+					|| ObjectPathFromPackageIdentity(MutationTarget)
+						!= ObjectPathFromPackageIdentity(Target)
+					|| !OutMutation->TryGetBoolField(
+						TEXT("mutation_applied"), bMutationApplied)
+					|| !OutMutation->TryGetBoolField(
+						TEXT("compile_settled"), bCompileSettled)
+					|| !OutMutation->TryGetBoolField(TEXT("saved"), bSaved)
+					|| !OutMutation->TryGetBoolField(TEXT("reloaded"), bReloaded)
+					|| !OutMutation->TryGetStringField(
+						TEXT("persistence_receipt_id"), ReceiptId)
+					|| ReceiptId.IsEmpty()
+					|| !bMutationApplied || !bCompileSettled
+					|| !bSaved || !bReloaded)
+				{
+					return Fail(
+						OutError,
+						TEXT("animation_curve_domain_lifecycle_receipt_invalid"),
+						MutationTarget);
+				}
+			}
+			else
+			{
+				FString OperationId;
+				FString ProfileId;
+				const TSharedPtr<FJsonObject>* Projection = nullptr;
+				const TSharedPtr<FJsonObject>* Payload = nullptr;
+				if (!OutMutation->TryGetStringField(
+						TEXT("operation_id"), OperationId)
+					|| OperationId.IsEmpty()
+					|| !OutMutation->TryGetObjectField(
+						TEXT("projection"), Projection)
+					|| !Projection || !Projection->IsValid()
+					|| !(*Projection)->TryGetStringField(
+						TEXT("profile_id"), ProfileId)
+					|| ProfileId.IsEmpty()
+					|| !(*Projection)->TryGetObjectField(TEXT("payload"), Payload)
+					|| !Payload || !Payload->IsValid())
+				{
+					return Fail(
+						OutError,
+						TEXT("animation_curve_domain_lifecycle_receipt_invalid"),
+						OperationId);
+				}
+				bMutationApplied = true;
+				bCompileSettled = true;
+				bSaved = true;
+				bReloaded = true;
+				ReceiptId = TEXT("timeline-operation:") + OperationId;
+			}
+			OutReceipt.bMutationApplied = bMutationApplied;
+			OutReceipt.bCompileSettled = bCompileSettled;
+			OutReceipt.bPackageSaved = bSaved;
+			OutReceipt.bUnloadedReloaded = bReloaded;
+			OutReceipt.PersistenceReceiptId = MoveTemp(ReceiptId);
+			return true;
 		}
 
 		bool BuildWriteResponse(
 			const FString& Target,
-			const FString& RootType,
 			const TSharedPtr<FJsonObject>& Read,
+			const TSharedPtr<FJsonObject>& Mutation,
+			const FDomainHjsonImportLifecycleReceipt& LifecycleReceipt,
 			FString& OutPayload,
 			FWorkspaceError& OutError)
 		{
 			FString Revision;
 			if (!StableRevision(Target, Read, Revision, OutError)) return false;
-			const TSharedPtr<FJsonObject> Response = MakeShared<FJsonObject>();
-			Response->SetStringField(TEXT("terminal_status"), TEXT("succeeded"));
-			Response->SetStringField(
-				TEXT("provider_id"), TEXT("animation-curve-domain-provider"));
-			Response->SetStringField(TEXT("target"), Target);
-			Response->SetStringField(TEXT("root_type"), RootType);
-			Response->SetStringField(TEXT("revision"), Revision);
-			Response->SetBoolField(TEXT("saved"), true);
-			Response->SetBoolField(TEXT("reloaded"), true);
-			Response->SetObjectField(TEXT("independent_readback"), Read);
-			return CanonicalObject(Response, OutPayload, OutError);
+			return TryBuildImportSuccessPayload(
+				TEXT("animation-curve-domain-provider"),
+				Target,
+				Revision,
+				LifecycleReceipt,
+				Read,
+				Mutation,
+				OutPayload,
+				OutError);
 		}
 
 		bool ImportBlendSpace(
@@ -621,8 +474,113 @@ namespace UE::UAI::DomainAdapters::AnimationCurve
 			FString& OutPayload,
 			FWorkspaceError& OutError)
 		{
-			if (ExpectedRevision != TEXT("missing"))
+			bool bPresent = false;
+			if (!TryInspectObjectTargetPresence(Target, bPresent))
 			{
+				return Fail(
+					OutError,
+					TEXT("animation_curve_domain_target_invalid"),
+					Target);
+			}
+			FString MutationPayload;
+			if (ExpectedRevision == TEXT("missing"))
+			{
+				if (bPresent)
+				{
+					return Fail(
+						OutError,
+						TEXT("animation_curve_domain_stale_revision"),
+						Target,
+						TEXT("existing"));
+				}
+				const TSharedPtr<FJsonObject>* CreateSpec = nullptr;
+				if (!Root->TryGetObjectField(TEXT("create"), CreateSpec)
+					|| !CreateSpec || !CreateSpec->IsValid())
+				{
+					return Fail(
+						OutError,
+						TEXT("animation_curve_domain_blend_space_create_required"));
+				}
+				if (Root->HasField(TEXT("axes"))
+					|| Root->HasField(TEXT("samples"))
+					|| Root->HasField(TEXT("operation")))
+				{
+					return Fail(
+						OutError,
+						TEXT("animation_curve_domain_create_then_edit_not_atomic"));
+				}
+				FString Skeleton;
+				double Dimension = 0.0;
+				if (!(*CreateSpec)->TryGetStringField(
+						TEXT("skeleton_ref"), Skeleton)
+					|| !(*CreateSpec)->TryGetNumberField(
+						TEXT("dimension"), Dimension)
+					|| (Dimension != 1.0 && Dimension != 2.0)
+					|| AssetName(Target).IsEmpty()
+					|| PackagePath(Target).IsEmpty())
+				{
+					return Fail(
+						OutError,
+						TEXT("animation_curve_domain_blend_space_create_invalid"));
+				}
+				FString Declared;
+				if ((*CreateSpec)->TryGetStringField(
+						TEXT("asset_name"), Declared)
+					&& Declared != AssetName(Target))
+				{
+					return Fail(
+						OutError,
+						TEXT("animation_curve_domain_create_name_mismatch"),
+						Declared,
+						AssetName(Target));
+				}
+				if ((*CreateSpec)->TryGetStringField(
+						TEXT("package_path"), Declared))
+				{
+					while (Declared.EndsWith(TEXT("/")))
+					{
+						Declared.LeftChopInline(1);
+					}
+					if (Declared != PackagePath(Target))
+					{
+						return Fail(
+							OutError,
+							TEXT("animation_curve_domain_create_path_mismatch"),
+							Declared,
+							PackagePath(Target));
+					}
+				}
+				const TSharedPtr<FJsonObject> Create =
+					MakeShared<FJsonObject>(**CreateSpec);
+				Create->SetStringField(TEXT("asset_name"), AssetName(Target));
+				Create->SetNumberField(TEXT("dimension"), Dimension);
+				Create->SetStringField(TEXT("package_path"), PackagePath(Target));
+				Create->SetStringField(TEXT("skeleton_ref"), Skeleton);
+				if (!SubmitAnimationCommand(
+						TEXT("animation.blend_space.asset.create"),
+						Create,
+						MutationPayload,
+						OutError))
+				{
+					return false;
+				}
+			}
+			else
+			{
+				if (!bPresent)
+				{
+					return Fail(
+						OutError,
+						TEXT("animation_curve_domain_stale_revision"),
+						Target,
+						TEXT("missing"));
+				}
+				if (Root->HasField(TEXT("create")))
+				{
+					return Fail(
+						OutError,
+						TEXT("animation_curve_domain_create_requires_missing"));
+				}
 				FString BeforePayload;
 				TSharedPtr<FJsonObject> Before;
 				FString Current;
@@ -639,53 +597,39 @@ namespace UE::UAI::DomainAdapters::AnimationCurve
 						Target,
 						Current);
 				}
-			}
-			else
-			{
-				FString Skeleton;
-				double Dimension = 0.0;
-				if (!Root->TryGetStringField(TEXT("skeleton_ref"), Skeleton)
-					|| !Root->TryGetNumberField(TEXT("dimension"), Dimension)
-					|| (Dimension != 1.0 && Dimension != 2.0))
+				const TArray<TSharedPtr<FJsonValue>>* Axes = nullptr;
+				const TArray<TSharedPtr<FJsonValue>>* Samples = nullptr;
+				if (!Root->TryGetArrayField(TEXT("axes"), Axes)
+					|| !Axes
+					|| !Root->TryGetArrayField(TEXT("samples"), Samples)
+					|| !Samples)
 				{
 					return Fail(
 						OutError,
-						TEXT("animation_curve_domain_blend_space_create_invalid"));
+						TEXT("animation_curve_domain_blend_space_definition_invalid"));
 				}
-				const TSharedPtr<FJsonObject> Create = MakeShared<FJsonObject>();
-				Create->SetStringField(TEXT("asset_name"), AssetName(Target));
-				Create->SetNumberField(TEXT("dimension"), Dimension);
-				Create->SetStringField(TEXT("package_path"), PackagePath(Target));
-				Create->SetStringField(TEXT("skeleton_ref"), Skeleton);
-				FString Ignored;
+				const TSharedPtr<FJsonObject> Apply = MakeShared<FJsonObject>();
+				Apply->SetStringField(
+					TEXT("target_ref"), ObjectPathFromPackageIdentity(Target));
+				Apply->SetArrayField(TEXT("axes"), *Axes);
+				Apply->SetArrayField(TEXT("samples"), *Samples);
 				if (!SubmitAnimationCommand(
-						TEXT("animation.blend_space.asset.create"),
-						Create,
-						Ignored,
+						TEXT("animation.blend_space.definition.apply"),
+						Apply,
+						MutationPayload,
 						OutError))
 				{
 					return false;
 				}
 			}
-			const TArray<TSharedPtr<FJsonValue>>* Axes = nullptr;
-			const TArray<TSharedPtr<FJsonValue>>* Samples = nullptr;
-			if (!Root->TryGetArrayField(TEXT("axes"), Axes)
-				|| !Axes
-				|| !Root->TryGetArrayField(TEXT("samples"), Samples)
-				|| !Samples)
-			{
-				return Fail(
-					OutError, TEXT("animation_curve_domain_blend_space_definition_invalid"));
-			}
-			const TSharedPtr<FJsonObject> Apply = MakeShared<FJsonObject>();
-			Apply->SetStringField(TEXT("target_ref"), Target);
-			Apply->SetArrayField(TEXT("axes"), *Axes);
-			Apply->SetArrayField(TEXT("samples"), *Samples);
-			FString Ignored;
-			if (!SubmitAnimationCommand(
-					TEXT("animation.blend_space.definition.apply"),
-					Apply,
-					Ignored,
+
+			TSharedPtr<FJsonObject> Mutation;
+			FDomainHjsonImportLifecycleReceipt LifecycleReceipt;
+			if (!ParseLifecycleMutation(
+					Target,
+					MutationPayload,
+					Mutation,
+					LifecycleReceipt,
 					OutError))
 			{
 				return false;
@@ -694,7 +638,12 @@ namespace UE::UAI::DomainAdapters::AnimationCurve
 			TSharedPtr<FJsonObject> After;
 			return ReadBlendSpace(Target, AfterPayload, After, OutError)
 				&& BuildWriteResponse(
-					Target, BlendSpaceType, After, OutPayload, OutError);
+					Target,
+					After,
+					Mutation,
+					LifecycleReceipt,
+					OutPayload,
+					OutError);
 		}
 
 		bool ImportSequence(
@@ -705,6 +654,13 @@ namespace UE::UAI::DomainAdapters::AnimationCurve
 			FWorkspaceError& OutError)
 		{
 			if (ExpectedRevision == TEXT("missing"))
+			{
+				return Fail(
+					OutError,
+					TEXT("animation_curve_domain_sequence_creation_not_supported"),
+					Target);
+			}
+			if (Root->HasField(TEXT("create")))
 			{
 				return Fail(
 					OutError,
@@ -738,7 +694,8 @@ namespace UE::UAI::DomainAdapters::AnimationCurve
 				{TEXT("curve_changes"), TEXT("animation.sequence.curves.update")},
 				{TEXT("event_changes"), TEXT("animation.sequence.events.update")},
 			};
-			bool bChanged = false;
+			TArray<TSharedPtr<FJsonValue>> MutationValues;
+			FString ReceiptSeed;
 			for (const FChange& Change : Changes)
 			{
 				const TArray<TSharedPtr<FJsonValue>>* Values = nullptr;
@@ -754,22 +711,51 @@ namespace UE::UAI::DomainAdapters::AnimationCurve
 				const TSharedPtr<FJsonObject> Params = MakeShared<FJsonObject>();
 				Params->SetStringField(TEXT("target"), Target);
 				Params->SetObjectField(TEXT("input"), Input);
-				FString Mutation;
+				FString MutationPayload;
 				if (!SubmitAnimationCommand(
-						Change.Command, Params, Mutation, OutError)
+						Change.Command, Params, MutationPayload, OutError))
+				{
+					return false;
+				}
+				TSharedPtr<FJsonObject> Mutation;
+				FDomainHjsonImportLifecycleReceipt CommandReceipt;
+				if (!ParseLifecycleMutation(
+						Target,
+						MutationPayload,
+						Mutation,
+						CommandReceipt,
+						OutError)
 					|| !ReadSequence(Target, ReadPayload, Read, OutError))
 				{
 					return false;
 				}
-				bChanged = true;
+				MutationValues.Add(MakeShared<FJsonValueObject>(Mutation));
+				ReceiptSeed += CommandReceipt.PersistenceReceiptId + TEXT("|");
 			}
-			if (!bChanged)
+			if (MutationValues.IsEmpty())
 			{
 				return Fail(
-					OutError, TEXT("animation_curve_domain_sequence_changes_required"));
+					OutError,
+					TEXT("animation_curve_domain_sequence_changes_required"));
 			}
+			const TSharedPtr<FJsonObject> MutationBatch =
+				MakeShared<FJsonObject>();
+			MutationBatch->SetArrayField(
+				TEXT("operations"), MoveTemp(MutationValues));
+			FDomainHjsonImportLifecycleReceipt BatchReceipt;
+			BatchReceipt.bMutationApplied = true;
+			BatchReceipt.bCompileSettled = true;
+			BatchReceipt.bPackageSaved = true;
+			BatchReceipt.bUnloadedReloaded = true;
+			BatchReceipt.PersistenceReceiptId =
+				TEXT("animation-curve-batch:") + Sha256(ReceiptSeed);
 			return BuildWriteResponse(
-				Target, SequenceType, Read, OutPayload, OutError);
+				Target,
+				Read,
+				MutationBatch,
+				BatchReceipt,
+				OutPayload,
+				OutError);
 		}
 	}
 
@@ -812,30 +798,32 @@ namespace UE::UAI::DomainAdapters::AnimationCurve
 		}
 		if (CommandId == TEXT("content_graph.import_workspace"))
 		{
-			FString ExpectedRevision;
-			if (!Params->TryGetStringField(
-					TEXT("expected_revision"), ExpectedRevision))
+			FResolvedDomainHjsonDocument Document;
+			if (!TryDecodeResolvedDocument(
+					Target,
+					CanonicalParamsJson,
+					FDomainHjsonDocumentContract(
+						TEXT("animation_curve"),
+						SchemaId,
+						RootTypeIdentity),
+					Document,
+					OutError))
 			{
-				return Fail(
-					OutError,
-					TEXT("animation_curve_domain_expected_revision_required"));
-			}
-			TSharedPtr<FJsonObject> Root;
-			if (!ParseDocument(Params, Root, OutError)) return false;
-			FString DocumentType;
-			if (!Root->TryGetStringField(TEXT("type"), DocumentType)
-				|| DocumentType != RootTypeIdentity)
-			{
-				return Fail(
-					OutError,
-					TEXT("animation_curve_domain_document_type_mismatch"),
-					DocumentType);
+				return false;
 			}
 			return RootTypeIdentity == BlendSpaceType
 				? ImportBlendSpace(
-					Target, ExpectedRevision, Root, OutPayloadJson, OutError)
+					Target,
+					Document.ExpectedRevision,
+					Document.Root,
+					OutPayloadJson,
+					OutError)
 				: ImportSequence(
-					Target, ExpectedRevision, Root, OutPayloadJson, OutError);
+					Target,
+					Document.ExpectedRevision,
+					Document.Root,
+					OutPayloadJson,
+					OutError);
 		}
 		if (CommandId == TEXT("content_graph.export_workspace"))
 		{
@@ -867,7 +855,7 @@ namespace UE::UAI::DomainAdapters::AnimationCurve
 			Response->SetBoolField(TEXT("has_more"), false);
 			Response->SetObjectField(TEXT("query_result"), Read);
 			bOutReadOnly = true;
-			return CanonicalObject(Response, OutPayloadJson, OutError);
+			return TryCanonicalizeObject(Response, OutPayloadJson, OutError);
 		}
 		return Fail(
 			OutError,

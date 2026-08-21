@@ -1,6 +1,6 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
-#include "Server/UeAgentHttpServer.h"
+#include "LegacyMechanics/UeAgentLegacyMechanics.h"
 
 #include "Commands/Assets/UeAgentReflectionAuthoringCommandBridge.h"
 #include "Utilities/UeAgentAuthoringFileIO.h"
@@ -455,7 +455,7 @@ namespace UeAgentPhysicsOps
 	}
 }
 
-bool FUeAgentHttpServer::ExecutePhysicsCommand(const FString& CommandLower, const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::ExecutePhysicsCommand(const FString& CommandLower, const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	if (CommandLower == TEXT("physics_capabilities_query")) return CmdPhysicsCapabilitiesQuery(Ctx, OutData, OutError);
 	if (CommandLower == TEXT("physics_component_query")) return CmdPhysicsComponentQuery(Ctx, OutData, OutError);
@@ -476,7 +476,7 @@ bool FUeAgentHttpServer::ExecutePhysicsCommand(const FString& CommandLower, cons
 	return false;
 }
 
-bool FUeAgentHttpServer::CmdPhysicsCapabilitiesQuery(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdPhysicsCapabilitiesQuery(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	bool bIncludeProjectSettings = true;
 	bool bIncludeCollisionProfiles = true;
@@ -622,7 +622,7 @@ static TSharedPtr<FJsonObject> UeAgentPhysicsPrimitiveToJson(UPrimitiveComponent
 	return Obj;
 }
 
-bool FUeAgentHttpServer::CmdPhysicsComponentQuery(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdPhysicsComponentQuery(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	FString ActorId;
 	if (!JsonTryGetString(Ctx.Params, TEXT("actor_id"), ActorId) || ActorId.TrimStartAndEnd().IsEmpty())
@@ -660,7 +660,7 @@ bool FUeAgentHttpServer::CmdPhysicsComponentQuery(const FUeAgentRequestContext& 
 	return true;
 }
 
-bool FUeAgentHttpServer::CmdPhysicsComponentValidate(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdPhysicsComponentValidate(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	TSharedPtr<FJsonObject> QueryData = MakeShared<FJsonObject>();
 	if (!CmdPhysicsComponentQuery(Ctx, QueryData, OutError))
@@ -732,7 +732,7 @@ bool FUeAgentHttpServer::CmdPhysicsComponentValidate(const FUeAgentRequestContex
 	return true;
 }
 
-bool FUeAgentHttpServer::CmdPhysicsComponentPlanPatch(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdPhysicsComponentPlanPatch(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	FString ActorId;
 	if (!JsonTryGetString(Ctx.Params, TEXT("actor_id"), ActorId) || ActorId.TrimStartAndEnd().IsEmpty())
@@ -1002,7 +1002,7 @@ static bool UeAgentPhysicsApplyPhysicalMaterialProps(UPhysicalMaterial* Material
 	return true;
 }
 
-bool FUeAgentHttpServer::CmdPhysicalMaterialExportJson(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdPhysicalMaterialExportJson(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	FString AssetPath;
 	if (!JsonTryGetString(Ctx.Params, TEXT("asset_path"), AssetPath) || AssetPath.TrimStartAndEnd().IsEmpty())
@@ -1030,7 +1030,7 @@ bool FUeAgentHttpServer::CmdPhysicalMaterialExportJson(const FUeAgentRequestCont
 	return true;
 }
 
-bool FUeAgentHttpServer::CmdPhysicalMaterialValidateJson(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdPhysicalMaterialValidateJson(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	TSharedPtr<FJsonObject> Root;
 	FString Source;
@@ -1056,7 +1056,7 @@ bool FUeAgentHttpServer::CmdPhysicalMaterialValidateJson(const FUeAgentRequestCo
 	return true;
 }
 
-bool FUeAgentHttpServer::CmdPhysicalMaterialApplyJson(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdPhysicalMaterialApplyJson(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	TSharedPtr<FJsonObject> Root;
 	FString Source;
@@ -1498,7 +1498,7 @@ namespace
 	}
 }
 
-bool FUeAgentHttpServer::CmdPhysicsConstraintExportJson(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdPhysicsConstraintExportJson(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	FString ActorId;
 	if (!JsonTryGetString(Ctx.Params, TEXT("actor_id"), ActorId) || ActorId.TrimStartAndEnd().IsEmpty())
@@ -1539,7 +1539,7 @@ bool FUeAgentHttpServer::CmdPhysicsConstraintExportJson(const FUeAgentRequestCon
 	return true;
 }
 
-bool FUeAgentHttpServer::CmdPhysicsConstraintValidateJson(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdPhysicsConstraintValidateJson(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	TSharedPtr<FJsonObject> Root;
 	FString Source;
@@ -1604,7 +1604,7 @@ bool FUeAgentHttpServer::CmdPhysicsConstraintValidateJson(const FUeAgentRequestC
 	return true;
 }
 
-bool FUeAgentHttpServer::CmdPhysicsConstraintApplyJson(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdPhysicsConstraintApplyJson(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	TSharedPtr<FJsonObject> Root;
 	FString Source;
@@ -2415,22 +2415,22 @@ namespace
 	}
 }
 
-bool FUeAgentHttpServer::CmdPhysicsAssetExportFolder(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdPhysicsAssetExportFolder(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	return UeAgentReflectionAuthoringCommandBridge::Export(TEXT("physics_asset"), Ctx.Params, OutData, OutError);
 }
 
-bool FUeAgentHttpServer::CmdPhysicsAssetValidateFolder(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdPhysicsAssetValidateFolder(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	return UeAgentReflectionAuthoringCommandBridge::Validate(TEXT("physics_asset"), Ctx.Params, OutData, OutError);
 }
 
-bool FUeAgentHttpServer::CmdPhysicsAssetApplyFolder(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdPhysicsAssetApplyFolder(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	return UeAgentReflectionAuthoringCommandBridge::Apply(TEXT("physics_asset"), Ctx.Params, OutData, OutError, Ctx.RequestId);
 }
 
-bool FUeAgentHttpServer::CmdPhysicsRuntimeProbe(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdPhysicsRuntimeProbe(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	UWorld* World = GetEditorWorld(OutError);
 	if (!World)

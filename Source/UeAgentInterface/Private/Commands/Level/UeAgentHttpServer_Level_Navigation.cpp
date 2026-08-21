@@ -18,7 +18,7 @@
 #include "NavigationSystem.h"
 #include "Utilities/UeAgentJsonDiagnostics.h"
 
-bool FUeAgentHttpServer::CmdNavmeshBuild(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdNavmeshBuild(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	UWorld* World = GetEditorWorld(OutError);
 	if (!World)
@@ -83,7 +83,7 @@ bool FUeAgentHttpServer::CmdNavmeshBuild(const FUeAgentRequestContext& Ctx, TSha
 	return true;
 }
 
-bool FUeAgentHttpServer::CmdNavmeshProjectPoint(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdNavmeshProjectPoint(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	UWorld* World = GetEditorWorld(OutError);
 	if (!World)
@@ -140,7 +140,7 @@ bool FUeAgentHttpServer::CmdNavmeshProjectPoint(const FUeAgentRequestContext& Ct
 	return true;
 }
 
-bool FUeAgentHttpServer::CmdNavmeshFindPath(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdNavmeshFindPath(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	UWorld* World = GetEditorWorld(OutError);
 	if (!World)
@@ -325,7 +325,7 @@ bool FUeAgentHttpServer::CmdNavmeshFindPath(const FUeAgentRequestContext& Ctx, T
 	return true;
 }
 
-bool FUeAgentHttpServer::CmdLevelValidateConnectivity(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdLevelValidateConnectivity(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	UWorld* World = GetEditorWorld(OutError);
 	if (!World)
@@ -870,7 +870,7 @@ bool FUeAgentHttpServer::CmdLevelValidateConnectivity(const FUeAgentRequestConte
 	return true;
 }
 
-bool FUeAgentHttpServer::CmdNavmeshSpawnBoundsVolume(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdNavmeshSpawnBoundsVolume(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	OutData = MakeShared<FJsonObject>();
 

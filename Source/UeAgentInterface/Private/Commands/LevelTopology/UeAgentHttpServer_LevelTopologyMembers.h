@@ -2,10 +2,10 @@
 
 #pragma once
 
-// NOTE: This header is included inside `FUeAgentHttpServer`'s class declaration.
+// NOTE: This header is included inside `FUeAgentLegacyMechanics`'s class declaration.
 // It must only contain member declarations.
 #if !defined(UEAGENT_HTTP_SERVER_MEMBER_DECL)
-#error "UeAgentHttpServer_LevelTopologyMembers.h must be included from UeAgentHttpServer.h inside FUeAgentHttpServer."
+#error "UeAgentHttpServer_LevelTopologyMembers.h must be included from UeAgentHttpServer.h inside FUeAgentLegacyMechanics."
 #endif
 
 	bool ExecuteLevelTopologyCommand(const FString& CommandLower, const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const;

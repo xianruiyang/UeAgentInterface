@@ -27,7 +27,7 @@
 #include "Misc/Guid.h"
 #include "ScopedTransaction.h"
 
-bool FUeAgentHttpServer::CmdBlueprintAddEventNode(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdBlueprintAddEventNode(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 
 {
 
@@ -211,7 +211,7 @@ bool FUeAgentHttpServer::CmdBlueprintAddEventNode(const FUeAgentRequestContext& 
 
 
 
-bool FUeAgentHttpServer::CmdBlueprintAddCustomEventNode(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdBlueprintAddCustomEventNode(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 
 {
 
@@ -373,7 +373,7 @@ bool FUeAgentHttpServer::CmdBlueprintAddCustomEventNode(const FUeAgentRequestCon
 
 
 
-bool FUeAgentHttpServer::CmdBlueprintAddCallFunctionNode(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdBlueprintAddCallFunctionNode(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 
 {
 
@@ -627,7 +627,7 @@ bool FUeAgentHttpServer::CmdBlueprintAddCallFunctionNode(const FUeAgentRequestCo
 
 
 
-bool FUeAgentHttpServer::CmdBlueprintConnectPins(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdBlueprintConnectPins(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 
 {
 
@@ -852,7 +852,7 @@ bool FUeAgentHttpServer::CmdBlueprintConnectPins(const FUeAgentRequestContext& C
 
 }
 
-bool FUeAgentHttpServer::CmdBlueprintDisconnectPins(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdBlueprintDisconnectPins(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 
 {
 
@@ -1112,7 +1112,7 @@ bool FUeAgentHttpServer::CmdBlueprintDisconnectPins(const FUeAgentRequestContext
 
 
 
-bool FUeAgentHttpServer::CmdBlueprintSetPinDefaultValue(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdBlueprintSetPinDefaultValue(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 
 {
 
@@ -1280,7 +1280,7 @@ bool FUeAgentHttpServer::CmdBlueprintSetPinDefaultValue(const FUeAgentRequestCon
 
 
 
-bool FUeAgentHttpServer::CmdBlueprintRemoveNode(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdBlueprintRemoveNode(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 
 {
 
@@ -1400,7 +1400,7 @@ bool FUeAgentHttpServer::CmdBlueprintRemoveNode(const FUeAgentRequestContext& Ct
 
 
 
-bool FUeAgentHttpServer::CmdBlueprintAddVariable(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdBlueprintAddVariable(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 
 {
 
@@ -1618,7 +1618,7 @@ bool FUeAgentHttpServer::CmdBlueprintAddVariable(const FUeAgentRequestContext& C
 
 
 
-bool FUeAgentHttpServer::CmdBlueprintRemoveVariable(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdBlueprintRemoveVariable(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 
 {
 
@@ -1714,7 +1714,7 @@ bool FUeAgentHttpServer::CmdBlueprintRemoveVariable(const FUeAgentRequestContext
 
 }
 
-bool FUeAgentHttpServer::CmdBlueprintAddNodeByClass(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdBlueprintAddNodeByClass(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 
 {
 	FString AssetPathInput;
@@ -1924,7 +1924,7 @@ bool FUeAgentHttpServer::CmdBlueprintAddNodeByClass(const FUeAgentRequestContext
 
 
 
-bool FUeAgentHttpServer::CmdBlueprintAddVariableNode(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdBlueprintAddVariableNode(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 
 {
 

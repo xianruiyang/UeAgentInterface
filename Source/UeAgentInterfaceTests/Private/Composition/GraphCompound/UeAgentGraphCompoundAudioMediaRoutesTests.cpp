@@ -304,6 +304,33 @@ bool FUeAgentGraphCompoundAudioMediaExactContractTest::RunTest(
 					Descriptor.GetResultSchema().GetJsonValue().Contains(
 						TEXT("\"published\"")));
 			}
+			else
+			{
+				const FUeAgentContractSchema* ResultSchema =
+					Registry->FindCompiledResultSchemaExact(
+						Descriptor.GetIdentity());
+				TestNotNull(TEXT("mutation result schema compiles"), ResultSchema);
+				if (ResultSchema)
+				{
+					TOptional<FUeAgentContractValue> Canonical;
+					FUeAgentContractSchemaError SchemaError;
+					TestTrue(TEXT("audio mutation result requires a real lifecycle receipt"),
+						ResultSchema->TryValidateAndCanonicalize(
+							FUeAgentContractValue(TEXT(
+								"{\"compile_settled\":true,\"mutation_applied\":true,"
+								"\"persistence_receipt_id\":\"receipt:1\","
+								"\"reloaded\":true,\"revision\":\"sha256:1\","
+								"\"saved\":true,\"target_ref\":\"/Game/T.T\","
+								"\"terminal_status\":\"succeeded\"}")),
+							[](int64, const FString&,
+								FUeAgentContractSchemaError&)
+							{
+								return true;
+							},
+							Canonical,
+							SchemaError));
+				}
+			}
 		}
 		TestEqual(TEXT("descriptor hashes are exact and unique"), Hashes.Num(), 15);
 	}
@@ -496,6 +523,107 @@ bool FUeAgentGraphCompoundAudioMediaAllRoutesTest::RunTest(
 		{
 			TestEqual(TEXT("per-identity cardinality is preserved"),
 				Draft->GetChanges().Num(), Payload.GetEdits().Num());
+		}
+	}
+	return !HasAnyErrors();
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(
+	FUeAgentGraphCompoundAudioMediaDeleteSelectorsTest,
+	"UeAgentInterface.Composition.GraphCompound.AudioMedia.DeleteSelectors",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FUeAgentGraphCompoundAudioMediaDeleteSelectorsTest::RunTest(
+	const FString& Parameters)
+{
+	(void)Parameters;
+	const TMap<FString, FString> Cases = {
+		{TEXT("metasound.graph.interface.mutate"),
+			TEXT("{\"changes\":[{\"access_type\":\"value\",\"data_type_ref\":\"Float\",\"default_value\":0.5,\"intent\":\"delete\",\"interface_kind\":\"input\",\"name\":\"Gain\"}],\"target_ref\":\"/Game/UAI/MS_Delete\"}")},
+		{TEXT("metasound.graph.node.mutate"),
+			TEXT("{\"nodes\":[{\"class_name\":\"UE.Sine.Audio\",\"intent\":\"delete\",\"major_version\":1,\"minor_version\":1,\"node_guid\":\"11111111-1111-1111-1111-111111111111\"}],\"target_ref\":\"/Game/UAI/MS_Delete\"}")},
+		{TEXT("metasound.graph.link.mutate"),
+			TEXT("{\"links\":[{\"from\":{\"data_type_ref\":\"Float\",\"direction\":\"output\",\"node_guid\":\"11111111-1111-1111-1111-111111111111\",\"vertex_guid\":\"22222222-2222-2222-2222-222222222222\"},\"intent\":\"delete\",\"to\":{\"data_type_ref\":\"Float\",\"direction\":\"input\",\"node_guid\":\"33333333-3333-3333-3333-333333333333\",\"vertex_guid\":\"44444444-4444-4444-4444-444444444444\"}}],\"target_ref\":\"/Game/UAI/MS_Delete\"}")},
+		{TEXT("sound_cue.graph.node.mutate"),
+			TEXT("{\"nodes\":[{\"intent\":\"delete\",\"native_class_ref\":\"/Script/Engine.SoundNodeMixer\",\"object_path\":\"/Game/UAI/SC_Delete.SC_Delete:SoundNodeMixer_0\"}],\"target_ref\":\"/Game/UAI/SC_Delete\"}")},
+		{TEXT("sound_cue.graph.relation.mutate"),
+			TEXT("{\"relations\":[{\"child_object_path\":\"/Game/UAI/SC_Delete.SC_Delete:Child\",\"intent\":\"delete\",\"order_index\":0,\"parent_object_path\":\"/Game/UAI/SC_Delete.SC_Delete:Parent\"}],\"target_ref\":\"/Game/UAI/SC_Delete\"}")},
+		{TEXT("texture_graph.graph.node.mutate"),
+			TEXT("{\"nodes\":[{\"element_id\":\"delete_me\",\"expression_class_ref\":\"/Script/TextureGraph.TG_Expression_Scalar\",\"intent\":\"delete\"}],\"target_ref\":\"/Game/UAI/TG_Delete\"}")},
+		{TEXT("texture_graph.graph.link.mutate"),
+			TEXT("{\"links\":[{\"from\":{\"direction\":\"output\",\"element_id\":\"delete_me\",\"pin_name\":\"ValueOut\"},\"intent\":\"delete\",\"to\":{\"direction\":\"input\",\"element_id\":\"builtin_output\",\"pin_name\":\"Source\"}}],\"target_ref\":\"/Game/UAI/TG_Delete\"}")},
+	};
+
+	for (const TPair<FString, FString>& Case : Cases)
+	{
+		FUeAgentResourceTracker Resources = MakeTracker();
+		const FUeAgentCanonicalSnapshotRef Empty = MakeSnapshot(Resources, {});
+		const FAudioMediaGraphRouteProfile* Profile =
+			FindAudioMediaGraphRouteProfile(Case.Key);
+		TestNotNull(TEXT("delete route exists: ") + Case.Key, Profile);
+		if (!Profile)
+		{
+			continue;
+		}
+		FGraphCompoundCanonicalPayload Payload(
+			GetGraphCompoundCanonicalSchemaId(), {});
+		FGraphCompoundRouteError Error;
+		if (!TestTrue(
+				TEXT("delete route normalizes: ") + Case.Key,
+				TryDecodeAudioMediaGraphTypedOperation(
+					*Profile,
+					FUeAgentContractValue(Case.Value),
+					Empty,
+					Resources,
+					Payload,
+					Error)))
+		{
+			continue;
+		}
+		for (const FGraphCompoundCanonicalEdit& Edit : Payload.GetEdits())
+		{
+			TestEqual(
+				TEXT("delete intent remains canonical"),
+				Edit.GetIntent(),
+				EChangeIntent::Delete);
+			TestFalse(
+				TEXT("delete carries no proposed-after state"),
+				Edit.GetProposedAfter().IsValid());
+			TestFalse(
+				TEXT("delete identity owns typed native selectors"),
+				Edit.GetIdentity().GetSelectors().IsEmpty());
+			TestFalse(
+				TEXT("delete identity does not fall back to one opaque selector"),
+				Edit.GetIdentity().GetSelectors().Contains(TEXT("selector")));
+		}
+		const FUeAgentCanonicalSnapshotRef Before =
+			MakeSnapshot(Resources, ExistingFor(Payload));
+		TSharedPtr<const FUeAgentDescriptorRegistry> Registry;
+		FString RegistryError;
+		TestTrue(
+			TEXT("delete descriptor registry builds"),
+			TryCreateAudioMediaGraphRouteDescriptorRegistry(
+				Registry, RegistryError));
+		const FUeAgentOperationDescriptor* Descriptor = Registry.IsValid()
+			? Registry->FindByDescriptorId(Profile->GetDescriptorId())
+			: nullptr;
+		TestNotNull(TEXT("delete descriptor exists"), Descriptor);
+		if (Descriptor)
+		{
+			TOptional<FChangeSetDraft> Draft;
+			TestTrue(
+				TEXT("delete selector identity builds one C6 draft"),
+				TryBuildAudioMediaGraphTypedOperationDraft(
+					*Profile,
+					Descriptor->GetIdentity(),
+					FUeAgentContractValue(Case.Value),
+					Before,
+					TEXT("request:gc017:delete"),
+					TEXT("idempotency:gc017:delete"),
+					Resources,
+					Draft,
+					Error));
+			TestTrue(TEXT("delete draft exists"), Draft.IsSet());
 		}
 	}
 	return !HasAnyErrors();

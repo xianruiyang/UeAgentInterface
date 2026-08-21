@@ -487,7 +487,7 @@ bool FUeAgentStrictV2T13InventoryAndLegacyExitTest::RunTest(
 
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(
 	FUeAgentStrictV2T13ExactDispatchTest,
-	"UAI.StrictV2.T13.UOBJECT.RECURSIVE.INIT.ExactDispatchAndTypedFailure",
+	"UAI.Root.T36.PublicIngress.AuthorityGate",
 	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
 
 bool FUeAgentStrictV2T13ExactDispatchTest::RunTest(const FString& Parameters)

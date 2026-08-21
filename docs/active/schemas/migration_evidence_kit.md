@@ -27,9 +27,11 @@ The normal owner flow is:
    representative commands and product receipt remain subject to current-manifest validation. The
    validator reports mechanical validity only; it does not change a
    disposition, runtime, task state or completion result.
-6. Give T61 the validated row aggregate. Give T90/T99 explicit `LegacyReferenceSpec` inputs for old
-   command, provider, handler, test, Gate and documentation identities, then require a zero-active-
-   reference scan. Historical evidence roots may be declared as allowed but never count as active.
+6. Record the validated aggregate in the current capability catalog. Public-surface exit uses the
+   v2 historical-disposition overlay plus current architecture/CMD oracles for old command,
+   provider, handler, test, Gate and documentation identities. Historical evidence roots may be
+   declared as allowed but never count as active; retired T61/T90/T99 task identities are not
+   execution or completion authorities.
 
 Changing any field of an assigned inventory row, its owner/lifecycle, the active command manifest or
 a bound receipt invalidates the corresponding fingerprint/hash and requires the business owner to

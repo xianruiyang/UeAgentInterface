@@ -44,7 +44,7 @@ namespace UE::UAI::Composition::GraphCompound
 		TSharedPtr<const Contract::FUeAgentDescriptorRegistry>& OutRegistry,
 		FString& OutError);
 
-	/** Builds the outermost production registry: 185 base + 77 Graph commands. */
+	/** Builds the outermost production registry: 185 base + 78 Graph commands. */
 	UEAGENTINTERFACE_API bool
 	TryCreateGraphCompoundProductionCommandContractRegistry(
 		TSharedPtr<const CommandContract::FUeAgentCommandContractRegistry>&

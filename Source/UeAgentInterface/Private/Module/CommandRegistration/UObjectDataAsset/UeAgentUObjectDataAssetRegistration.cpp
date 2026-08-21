@@ -63,7 +63,7 @@ namespace UE::UAI::Module::CommandRegistration::UObjectDataAsset
 					Field(TEXT("source"), TEXT("object"), true,
 						TEXT("Exact discriminated source: {kind:inline,document} or {kind:single_file|directory,path}.")),
 					Field(TEXT("expected_revision"), TEXT("string"), true,
-						TEXT("Expected persisted target revision; create uses absent.")),
+						TEXT("Expected persisted target revision: recursive UObject/DataAsset creation uses absent, registered domain HJSON creation uses missing, and updates use the exact current content_graph revision.")),
 					Field(TEXT("authorization_id"), TEXT("string"), true,
 						TEXT("Explicit impact authorization for the exact target.")),
 					Field(TEXT("limits"), TEXT("object"), false,
@@ -141,12 +141,12 @@ namespace UE::UAI::Module::CommandRegistration::UObjectDataAsset
 			};
 			Result.Purpose.Summary = Route.Kind ==
 					EUeAgentUObjectDataAssetRouteKind::Import
-				? TEXT("Create a recursive UObject/DataAsset graph through unified HJSON initialization.")
+				? TEXT("Create or update one recursive or registered domain asset through unified HJSON initialization.")
 				: Route.Kind == EUeAgentUObjectDataAssetRouteKind::Export
 					? TEXT("Publish a semantically verified HJSON workspace for a recursive UObject/DataAsset graph.")
 					: TEXT("Read one exact facet of a persisted recursive UObject/DataAsset graph.");
 			Result.Purpose.Target =
-				TEXT("One exact recursive UObject/DataAsset package.object identity.");
+				TEXT("One exact supported content graph package.object identity.");
 			Result.Purpose.Preconditions = {
 				TEXT("Use the public exact command identity and contract hash unchanged."),
 				TEXT("The Editor service dispatches the request on the UE game thread."),
@@ -159,13 +159,13 @@ namespace UE::UAI::Module::CommandRegistration::UObjectDataAsset
 				TEXT("Typed validation and lifecycle failures never fall back to a legacy provider or partial success.");
 			Result.Purpose.SideEffectGuidance = Route.Kind ==
 					EUeAgentUObjectDataAssetRouteKind::Import
-				? TEXT("Creates and saves one authorized asset; confirmed rollback removes partial work.")
+				? TEXT("Creates or updates and saves one authorized asset; confirmed rollback restores or removes partial work.")
 				: Route.Kind == EUeAgentUObjectDataAssetRouteKind::Export
 					? TEXT("Writes only the requested verified external workspace.")
 					: TEXT("Read-only with respect to UE and external state.");
 			Result.Purpose.MinimumExample = Route.Kind ==
 					EUeAgentUObjectDataAssetRouteKind::Import
-				? TEXT("content_graph_import_workspace(client, target, {'kind':'inline','document':document}, 'absent', authorization_id)")
+				? TEXT("content_graph_import_workspace(client, target, {'kind':'inline','document':document}, expected_revision, authorization_id)")
 				: Route.Kind == EUeAgentUObjectDataAssetRouteKind::Export
 					? TEXT("content_graph_export_workspace(client, target, workspace_path)")
 					: Route.PythonFunction + TEXT("(client, target)");

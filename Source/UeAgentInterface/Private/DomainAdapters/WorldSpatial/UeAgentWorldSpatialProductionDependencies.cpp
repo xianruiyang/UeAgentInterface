@@ -11,6 +11,7 @@
 #include "Engine/Blueprint.h"
 #include "Engine/StaticMesh.h"
 #include "Engine/World.h"
+#include "FileHelpers.h"
 #include "GameFramework/Actor.h"
 #include "LevelEditorViewport.h"
 #include "MeshDescription.h"
@@ -333,6 +334,30 @@ namespace UE::UAI::DomainAdapters::WorldSpatial
 						ScopedWorld->GetPathName());
 				}
 				return true;
+			}
+
+			bool TryPersistObject(
+				UObject& Object,
+				FUeAgentWorldSpatialExecutionError& OutError) override
+			{
+				OutError = {};
+				UPackage* const Package = Object.GetOutermost();
+				if (!Package || Object.HasAnyFlags(RF_Transient))
+				{
+					return Fail(
+						OutError,
+						TEXT("world_spatial_persistence_target_invalid"),
+						Object.GetPathName());
+				}
+				Object.MarkPackageDirty();
+				return UEditorLoadingAndSavingUtils::SavePackages(
+						{Package},
+						false)
+					? true
+					: Fail(
+						OutError,
+						TEXT("world_spatial_object_persistence_failed"),
+						Object.GetPathName());
 			}
 
 			bool TryResolveGraphEditor(

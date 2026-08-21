@@ -1,6 +1,6 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
-#include "Server/UeAgentHttpServer.h"
+#include "LegacyMechanics/UeAgentLegacyMechanics.h"
 #include "Domains/PCG/Authoring/UeAgentPCGAuthoringApplyProvider.h"
 #include "Domains/PCG/Authoring/UeAgentPCGAuthoringExport.h"
 #include "Domains/PCG/UeAgentPCGDomainBackend.h"
@@ -66,54 +66,54 @@
 #include "UObject/UObjectGlobals.h"
 #include "UObject/UnrealType.h"
 
-bool FUeAgentHttpServer::ExecutePCGCommand(const FString& CommandLower, const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::ExecutePCGCommand(const FString& CommandLower, const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	struct FEntry
 	{
 		const TCHAR* Name;
-		bool (FUeAgentHttpServer::*Method)(const FUeAgentRequestContext&, TSharedPtr<FJsonObject>&, FString&) const;
+		bool (FUeAgentLegacyMechanics::*Method)(const FUeAgentRequestContext&, TSharedPtr<FJsonObject>&, FString&) const;
 	};
 
 	static const FEntry Entries[] = {
-		{ TEXT("pcg_capabilities_query"), &FUeAgentHttpServer::CmdPCGCapabilitiesQuery },
-		{ TEXT("pcg_node_catalog_export"), &FUeAgentHttpServer::CmdPCGNodeCatalogExport },
-		{ TEXT("pcg_asset_info"), &FUeAgentHttpServer::CmdPCGAssetInfo },
-		{ TEXT("pcg_graph_export_folder"), &FUeAgentHttpServer::CmdPCGGraphExportFolder },
-		{ TEXT("pcg_graph_validate_folder"), &FUeAgentHttpServer::CmdPCGGraphValidateFolder },
-		{ TEXT("pcg_graph_plan_folder"), &FUeAgentHttpServer::CmdPCGGraphPlanFolder },
-		{ TEXT("pcg_graph_diff_folder"), &FUeAgentHttpServer::CmdPCGGraphDiffFolder },
-		{ TEXT("pcg_graph_apply_folder"), &FUeAgentHttpServer::CmdPCGGraphApplyFolder },
-		{ TEXT("pcg_graph_compile"), &FUeAgentHttpServer::CmdPCGGraphCompile },
-		{ TEXT("pcg_graph_snapshot"), &FUeAgentHttpServer::CmdPCGGraphSnapshot },
-		{ TEXT("pcg_graph_layout"), &FUeAgentHttpServer::CmdPCGGraphLayout },
-		{ TEXT("pcg_graph_instance_json"), &FUeAgentHttpServer::CmdPCGGraphInstanceJson },
-		{ TEXT("pcg_graph_parameters_query"), &FUeAgentHttpServer::CmdPCGGraphParametersQuery },
-		{ TEXT("pcg_graph_parameters_apply_json"), &FUeAgentHttpServer::CmdPCGGraphParametersApplyJson },
-		{ TEXT("pcg_component_query"), &FUeAgentHttpServer::CmdPCGComponentQuery },
-		{ TEXT("pcg_component_apply_json"), &FUeAgentHttpServer::CmdPCGComponentApplyJson },
-		{ TEXT("pcg_component_snapshot_json"), &FUeAgentHttpServer::CmdPCGComponentSnapshotJson },
-		{ TEXT("pcg_world_actor_query"), &FUeAgentHttpServer::CmdPCGWorldActorQuery },
-		{ TEXT("pcg_world_actor_apply_json"), &FUeAgentHttpServer::CmdPCGWorldActorApplyJson },
-		{ TEXT("pcg_partition_probe"), &FUeAgentHttpServer::CmdPCGPartitionProbe },
-		{ TEXT("pcg_generate"), &FUeAgentHttpServer::CmdPCGGenerate },
-		{ TEXT("pcg_cleanup"), &FUeAgentHttpServer::CmdPCGCleanup },
-		{ TEXT("pcg_regenerate"), &FUeAgentHttpServer::CmdPCGRegenerate },
-		{ TEXT("pcg_cancel_generation"), &FUeAgentHttpServer::CmdPCGCancelGeneration },
-		{ TEXT("pcg_generation_status"), &FUeAgentHttpServer::CmdPCGGenerationStatus },
-		{ TEXT("pcg_wait"), &FUeAgentHttpServer::CmdPCGWait },
-		{ TEXT("pcg_runtime_generation_probe"), &FUeAgentHttpServer::CmdPCGRuntimeGenerationProbe },
-		{ TEXT("pcg_inspection_set"), &FUeAgentHttpServer::CmdPCGInspectionSet },
-		{ TEXT("pcg_node_inspect"), &FUeAgentHttpServer::CmdPCGNodeInspect },
-		{ TEXT("pcg_data_export_json"), &FUeAgentHttpServer::CmdPCGDataExportJson },
-		{ TEXT("pcg_data_assert_json"), &FUeAgentHttpServer::CmdPCGDataAssertJson },
-		{ TEXT("pcg_component_runtime_probe"), &FUeAgentHttpServer::CmdPCGComponentRuntimeProbe },
-		{ TEXT("pcg_profile_report"), &FUeAgentHttpServer::CmdPCGProfileReport },
-		{ TEXT("pcg_gpu_capabilities_query"), &FUeAgentHttpServer::CmdPCGGPUCapabilitiesQuery },
-		{ TEXT("pcg_compute_graph_validate"), &FUeAgentHttpServer::CmdPCGComputeGraphValidate },
-		{ TEXT("pcg_hlsl_validate"), &FUeAgentHttpServer::CmdPCGHLSLValidate },
-		{ TEXT("pcg_data_asset_export_json"), &FUeAgentHttpServer::CmdPCGDataAssetExportJson },
-		{ TEXT("pcg_data_asset_apply_json"), &FUeAgentHttpServer::CmdPCGDataAssetApplyJson },
-		{ TEXT("pcg_level_to_asset_export"), &FUeAgentHttpServer::CmdPCGLevelToAssetExport },
+		{ TEXT("pcg_capabilities_query"), &FUeAgentLegacyMechanics::CmdPCGCapabilitiesQuery },
+		{ TEXT("pcg_node_catalog_export"), &FUeAgentLegacyMechanics::CmdPCGNodeCatalogExport },
+		{ TEXT("pcg_asset_info"), &FUeAgentLegacyMechanics::CmdPCGAssetInfo },
+		{ TEXT("pcg_graph_export_folder"), &FUeAgentLegacyMechanics::CmdPCGGraphExportFolder },
+		{ TEXT("pcg_graph_validate_folder"), &FUeAgentLegacyMechanics::CmdPCGGraphValidateFolder },
+		{ TEXT("pcg_graph_plan_folder"), &FUeAgentLegacyMechanics::CmdPCGGraphPlanFolder },
+		{ TEXT("pcg_graph_diff_folder"), &FUeAgentLegacyMechanics::CmdPCGGraphDiffFolder },
+		{ TEXT("pcg_graph_apply_folder"), &FUeAgentLegacyMechanics::CmdPCGGraphApplyFolder },
+		{ TEXT("pcg_graph_compile"), &FUeAgentLegacyMechanics::CmdPCGGraphCompile },
+		{ TEXT("pcg_graph_snapshot"), &FUeAgentLegacyMechanics::CmdPCGGraphSnapshot },
+		{ TEXT("pcg_graph_layout"), &FUeAgentLegacyMechanics::CmdPCGGraphLayout },
+		{ TEXT("pcg_graph_instance_json"), &FUeAgentLegacyMechanics::CmdPCGGraphInstanceJson },
+		{ TEXT("pcg_graph_parameters_query"), &FUeAgentLegacyMechanics::CmdPCGGraphParametersQuery },
+		{ TEXT("pcg_graph_parameters_apply_json"), &FUeAgentLegacyMechanics::CmdPCGGraphParametersApplyJson },
+		{ TEXT("pcg_component_query"), &FUeAgentLegacyMechanics::CmdPCGComponentQuery },
+		{ TEXT("pcg_component_apply_json"), &FUeAgentLegacyMechanics::CmdPCGComponentApplyJson },
+		{ TEXT("pcg_component_snapshot_json"), &FUeAgentLegacyMechanics::CmdPCGComponentSnapshotJson },
+		{ TEXT("pcg_world_actor_query"), &FUeAgentLegacyMechanics::CmdPCGWorldActorQuery },
+		{ TEXT("pcg_world_actor_apply_json"), &FUeAgentLegacyMechanics::CmdPCGWorldActorApplyJson },
+		{ TEXT("pcg_partition_probe"), &FUeAgentLegacyMechanics::CmdPCGPartitionProbe },
+		{ TEXT("pcg_generate"), &FUeAgentLegacyMechanics::CmdPCGGenerate },
+		{ TEXT("pcg_cleanup"), &FUeAgentLegacyMechanics::CmdPCGCleanup },
+		{ TEXT("pcg_regenerate"), &FUeAgentLegacyMechanics::CmdPCGRegenerate },
+		{ TEXT("pcg_cancel_generation"), &FUeAgentLegacyMechanics::CmdPCGCancelGeneration },
+		{ TEXT("pcg_generation_status"), &FUeAgentLegacyMechanics::CmdPCGGenerationStatus },
+		{ TEXT("pcg_wait"), &FUeAgentLegacyMechanics::CmdPCGWait },
+		{ TEXT("pcg_runtime_generation_probe"), &FUeAgentLegacyMechanics::CmdPCGRuntimeGenerationProbe },
+		{ TEXT("pcg_inspection_set"), &FUeAgentLegacyMechanics::CmdPCGInspectionSet },
+		{ TEXT("pcg_node_inspect"), &FUeAgentLegacyMechanics::CmdPCGNodeInspect },
+		{ TEXT("pcg_data_export_json"), &FUeAgentLegacyMechanics::CmdPCGDataExportJson },
+		{ TEXT("pcg_data_assert_json"), &FUeAgentLegacyMechanics::CmdPCGDataAssertJson },
+		{ TEXT("pcg_component_runtime_probe"), &FUeAgentLegacyMechanics::CmdPCGComponentRuntimeProbe },
+		{ TEXT("pcg_profile_report"), &FUeAgentLegacyMechanics::CmdPCGProfileReport },
+		{ TEXT("pcg_gpu_capabilities_query"), &FUeAgentLegacyMechanics::CmdPCGGPUCapabilitiesQuery },
+		{ TEXT("pcg_compute_graph_validate"), &FUeAgentLegacyMechanics::CmdPCGComputeGraphValidate },
+		{ TEXT("pcg_hlsl_validate"), &FUeAgentLegacyMechanics::CmdPCGHLSLValidate },
+		{ TEXT("pcg_data_asset_export_json"), &FUeAgentLegacyMechanics::CmdPCGDataAssetExportJson },
+		{ TEXT("pcg_data_asset_apply_json"), &FUeAgentLegacyMechanics::CmdPCGDataAssetApplyJson },
+		{ TEXT("pcg_level_to_asset_export"), &FUeAgentLegacyMechanics::CmdPCGLevelToAssetExport },
 	};
 
 	for (const FEntry& Entry : Entries)
@@ -128,7 +128,7 @@ bool FUeAgentHttpServer::ExecutePCGCommand(const FString& CommandLower, const FU
 	return false;
 }
 
-bool FUeAgentHttpServer::CmdPCGCapabilitiesQuery(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdPCGCapabilitiesQuery(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	using namespace UeAgentPCG;
 	OutData = MakeShared<FJsonObject>();
@@ -168,7 +168,7 @@ bool FUeAgentHttpServer::CmdPCGCapabilitiesQuery(const FUeAgentRequestContext& C
 	return true;
 }
 
-bool FUeAgentHttpServer::CmdPCGNodeCatalogExport(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdPCGNodeCatalogExport(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	using namespace UeAgentPCG;
 	OutData = MakeShared<FJsonObject>();
@@ -232,7 +232,7 @@ bool FUeAgentHttpServer::CmdPCGNodeCatalogExport(const FUeAgentRequestContext& C
 	return true;
 }
 
-bool FUeAgentHttpServer::CmdPCGAssetInfo(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdPCGAssetInfo(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	using namespace UeAgentPCG;
 	FString AssetPath;
@@ -273,7 +273,7 @@ bool FUeAgentHttpServer::CmdPCGAssetInfo(const FUeAgentRequestContext& Ctx, TSha
 	return true;
 }
 
-bool FUeAgentHttpServer::CmdPCGGraphExportFolder(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdPCGGraphExportFolder(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	using namespace UeAgentPCG;
 	FString AssetPath;
@@ -309,7 +309,7 @@ bool FUeAgentHttpServer::CmdPCGGraphExportFolder(const FUeAgentRequestContext& C
 	return true;
 }
 
-bool FUeAgentHttpServer::CmdPCGGraphValidateFolder(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdPCGGraphValidateFolder(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	using namespace UeAgentPCG;
 	FString FolderPathInput;
@@ -340,7 +340,7 @@ bool FUeAgentHttpServer::CmdPCGGraphValidateFolder(const FUeAgentRequestContext&
 	return true;
 }
 
-bool FUeAgentHttpServer::CmdPCGGraphPlanFolder(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdPCGGraphPlanFolder(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	using namespace UeAgentPCG;
 	FString FolderPathInput;
@@ -377,7 +377,7 @@ bool FUeAgentHttpServer::CmdPCGGraphPlanFolder(const FUeAgentRequestContext& Ctx
 	return true;
 }
 
-bool FUeAgentHttpServer::CmdPCGGraphDiffFolder(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdPCGGraphDiffFolder(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	using namespace UeAgentPCG;
 	FString FolderPathInput;
@@ -409,7 +409,7 @@ bool FUeAgentHttpServer::CmdPCGGraphDiffFolder(const FUeAgentRequestContext& Ctx
 	return true;
 }
 
-bool FUeAgentHttpServer::CmdPCGGraphApplyFolder(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdPCGGraphApplyFolder(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	using namespace UeAgentPCG;
 	FString FolderPathInput;
@@ -479,7 +479,7 @@ bool FUeAgentHttpServer::CmdPCGGraphApplyFolder(const FUeAgentRequestContext& Ct
 	return true;
 }
 
-bool FUeAgentHttpServer::CmdPCGGraphCompile(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdPCGGraphCompile(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	using namespace UeAgentPCG;
 	FString AssetPath;
@@ -506,7 +506,7 @@ bool FUeAgentHttpServer::CmdPCGGraphCompile(const FUeAgentRequestContext& Ctx, T
 	return true;
 }
 
-bool FUeAgentHttpServer::CmdPCGGraphSnapshot(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdPCGGraphSnapshot(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	using namespace UeAgentPCG;
 	FString AssetPath;
@@ -525,7 +525,7 @@ bool FUeAgentHttpServer::CmdPCGGraphSnapshot(const FUeAgentRequestContext& Ctx, 
 	return true;
 }
 
-bool FUeAgentHttpServer::CmdPCGGraphLayout(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdPCGGraphLayout(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	using namespace UeAgentPCG;
 	FString AssetPath;
@@ -700,7 +700,7 @@ bool FUeAgentHttpServer::CmdPCGGraphLayout(const FUeAgentRequestContext& Ctx, TS
 	return true;
 }
 
-bool FUeAgentHttpServer::CmdPCGGraphInstanceJson(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdPCGGraphInstanceJson(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	using namespace UeAgentPCG;
 	FString AssetPath;
@@ -839,7 +839,7 @@ bool FUeAgentHttpServer::CmdPCGGraphInstanceJson(const FUeAgentRequestContext& C
 	return true;
 }
 
-bool FUeAgentHttpServer::CmdPCGGraphParametersQuery(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdPCGGraphParametersQuery(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	using namespace UeAgentPCG;
 	FString AssetPath;
@@ -863,7 +863,7 @@ bool FUeAgentHttpServer::CmdPCGGraphParametersQuery(const FUeAgentRequestContext
 	return true;
 }
 
-bool FUeAgentHttpServer::CmdPCGGraphParametersApplyJson(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdPCGGraphParametersApplyJson(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	using namespace UeAgentPCG;
 	FString AssetPath;
@@ -968,7 +968,7 @@ bool FUeAgentHttpServer::CmdPCGGraphParametersApplyJson(const FUeAgentRequestCon
 	return CountErrors(Issues) == 0;
 }
 
-bool FUeAgentHttpServer::CmdPCGComponentQuery(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdPCGComponentQuery(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	using namespace UeAgentPCG;
 	FString WorldError;
@@ -987,7 +987,7 @@ bool FUeAgentHttpServer::CmdPCGComponentQuery(const FUeAgentRequestContext& Ctx,
 	return true;
 }
 
-bool FUeAgentHttpServer::CmdPCGComponentApplyJson(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdPCGComponentApplyJson(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	using namespace UeAgentPCG;
 	FString WorldError;
@@ -1152,12 +1152,12 @@ bool FUeAgentHttpServer::CmdPCGComponentApplyJson(const FUeAgentRequestContext& 
 	return CountErrors(Issues) == 0;
 }
 
-bool FUeAgentHttpServer::CmdPCGComponentSnapshotJson(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdPCGComponentSnapshotJson(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	return CmdPCGComponentQuery(Ctx, OutData, OutError);
 }
 
-bool FUeAgentHttpServer::CmdPCGWorldActorQuery(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdPCGWorldActorQuery(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	using namespace UeAgentPCG;
 	FString WorldError;
@@ -1190,7 +1190,7 @@ bool FUeAgentHttpServer::CmdPCGWorldActorQuery(const FUeAgentRequestContext& Ctx
 	return true;
 }
 
-bool FUeAgentHttpServer::CmdPCGWorldActorApplyJson(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdPCGWorldActorApplyJson(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	using namespace UeAgentPCG;
 	FString WorldError;
@@ -1260,7 +1260,7 @@ bool FUeAgentHttpServer::CmdPCGWorldActorApplyJson(const FUeAgentRequestContext&
 	return true;
 }
 
-bool FUeAgentHttpServer::CmdPCGPartitionProbe(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdPCGPartitionProbe(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	using namespace UeAgentPCG;
 	FString WorldError;
@@ -1296,7 +1296,7 @@ bool FUeAgentHttpServer::CmdPCGPartitionProbe(const FUeAgentRequestContext& Ctx,
 	return true;
 }
 
-bool FUeAgentHttpServer::CmdPCGGenerate(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdPCGGenerate(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	using namespace UeAgentPCG;
 	FString WorldError;
@@ -1338,7 +1338,7 @@ bool FUeAgentHttpServer::CmdPCGGenerate(const FUeAgentRequestContext& Ctx, TShar
 	return true;
 }
 
-bool FUeAgentHttpServer::CmdPCGCleanup(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdPCGCleanup(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	using namespace UeAgentPCG;
 	FString WorldError;
@@ -1364,7 +1364,7 @@ bool FUeAgentHttpServer::CmdPCGCleanup(const FUeAgentRequestContext& Ctx, TShare
 	return true;
 }
 
-bool FUeAgentHttpServer::CmdPCGRegenerate(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdPCGRegenerate(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	TSharedPtr<FJsonObject> CleanupData;
 	if (!CmdPCGCleanup(Ctx, CleanupData, OutError))
@@ -1383,7 +1383,7 @@ bool FUeAgentHttpServer::CmdPCGRegenerate(const FUeAgentRequestContext& Ctx, TSh
 	return true;
 }
 
-bool FUeAgentHttpServer::CmdPCGCancelGeneration(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdPCGCancelGeneration(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	using namespace UeAgentPCG;
 	FString WorldError;
@@ -1405,12 +1405,12 @@ bool FUeAgentHttpServer::CmdPCGCancelGeneration(const FUeAgentRequestContext& Ct
 	return true;
 }
 
-bool FUeAgentHttpServer::CmdPCGGenerationStatus(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdPCGGenerationStatus(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	return CmdPCGComponentQuery(Ctx, OutData, OutError);
 }
 
-bool FUeAgentHttpServer::CmdPCGWait(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdPCGWait(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	using namespace UeAgentPCG;
 	FString WorldError;
@@ -1455,7 +1455,7 @@ bool FUeAgentHttpServer::CmdPCGWait(const FUeAgentRequestContext& Ctx, TSharedPt
 	return !bTimedOut;
 }
 
-bool FUeAgentHttpServer::CmdPCGRuntimeGenerationProbe(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdPCGRuntimeGenerationProbe(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	using namespace UeAgentPCG;
 	TSharedPtr<FJsonObject> ComponentData;
@@ -1468,7 +1468,7 @@ bool FUeAgentHttpServer::CmdPCGRuntimeGenerationProbe(const FUeAgentRequestConte
 	return true;
 }
 
-bool FUeAgentHttpServer::CmdPCGInspectionSet(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdPCGInspectionSet(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	using namespace UeAgentPCG;
 	FString WorldError;
@@ -1506,7 +1506,7 @@ bool FUeAgentHttpServer::CmdPCGInspectionSet(const FUeAgentRequestContext& Ctx, 
 	return true;
 }
 
-bool FUeAgentHttpServer::CmdPCGNodeInspect(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdPCGNodeInspect(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	using namespace UeAgentPCG;
 	FString WorldError;
@@ -1557,7 +1557,7 @@ bool FUeAgentHttpServer::CmdPCGNodeInspect(const FUeAgentRequestContext& Ctx, TS
 	return true;
 }
 
-bool FUeAgentHttpServer::CmdPCGDataExportJson(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdPCGDataExportJson(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	using namespace UeAgentPCG;
 	FString WorldError;
@@ -1590,7 +1590,7 @@ bool FUeAgentHttpServer::CmdPCGDataExportJson(const FUeAgentRequestContext& Ctx,
 	return true;
 }
 
-bool FUeAgentHttpServer::CmdPCGDataAssertJson(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdPCGDataAssertJson(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	using namespace UeAgentPCG;
 	TSharedPtr<FJsonObject> Data;
@@ -1617,12 +1617,12 @@ bool FUeAgentHttpServer::CmdPCGDataAssertJson(const FUeAgentRequestContext& Ctx,
 	return CountErrors(Issues) == 0;
 }
 
-bool FUeAgentHttpServer::CmdPCGComponentRuntimeProbe(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdPCGComponentRuntimeProbe(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	return CmdPCGRuntimeGenerationProbe(Ctx, OutData, OutError);
 }
 
-bool FUeAgentHttpServer::CmdPCGScreenshot(
+bool FUeAgentLegacyMechanics::CmdPCGScreenshot(
 	const FUeAgentRequestContext& Ctx,
 	TSharedPtr<FJsonObject>& OutData,
 	FString& OutError) const
@@ -1680,7 +1680,7 @@ bool FUeAgentHttpServer::CmdPCGScreenshot(
 	return true;
 }
 
-bool FUeAgentHttpServer::CmdPCGProfileReport(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdPCGProfileReport(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	using namespace UeAgentPCG;
 	FString AssetPath;
@@ -1714,7 +1714,7 @@ bool FUeAgentHttpServer::CmdPCGProfileReport(const FUeAgentRequestContext& Ctx, 
 	return true;
 }
 
-bool FUeAgentHttpServer::CmdPCGGPUCapabilitiesQuery(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdPCGGPUCapabilitiesQuery(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	using namespace UeAgentPCG;
 	TSharedPtr<FJsonObject> Catalog;
@@ -1743,7 +1743,7 @@ bool FUeAgentHttpServer::CmdPCGGPUCapabilitiesQuery(const FUeAgentRequestContext
 	return true;
 }
 
-bool FUeAgentHttpServer::CmdPCGComputeGraphValidate(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdPCGComputeGraphValidate(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	using namespace UeAgentPCG;
 	FString AssetPath;
@@ -1779,7 +1779,7 @@ bool FUeAgentHttpServer::CmdPCGComputeGraphValidate(const FUeAgentRequestContext
 	return true;
 }
 
-bool FUeAgentHttpServer::CmdPCGHLSLValidate(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdPCGHLSLValidate(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	using namespace UeAgentPCG;
 	FString AssetPath;
@@ -1821,7 +1821,7 @@ bool FUeAgentHttpServer::CmdPCGHLSLValidate(const FUeAgentRequestContext& Ctx, T
 	return true;
 }
 
-bool FUeAgentHttpServer::CmdPCGDataAssetExportJson(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdPCGDataAssetExportJson(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	using namespace UeAgentPCG;
 	FString AssetPath;
@@ -1851,7 +1851,7 @@ bool FUeAgentHttpServer::CmdPCGDataAssetExportJson(const FUeAgentRequestContext&
 	return true;
 }
 
-bool FUeAgentHttpServer::CmdPCGDataAssetApplyJson(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdPCGDataAssetApplyJson(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	using namespace UeAgentPCG;
 	FString AssetPath;
@@ -1934,7 +1934,7 @@ bool FUeAgentHttpServer::CmdPCGDataAssetApplyJson(const FUeAgentRequestContext& 
 	return true;
 }
 
-bool FUeAgentHttpServer::CmdPCGLevelToAssetExport(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdPCGLevelToAssetExport(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	using namespace UeAgentPCG;
 	FString WorldError;

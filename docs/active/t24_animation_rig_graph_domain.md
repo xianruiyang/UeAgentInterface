@@ -12,7 +12,11 @@ registry is authoritative.
 persisted ControlRigBlueprint, IKRigDefinition, IKRetargeter, and Skeleton
 targets. It returns concrete native RigUnit struct identities with opaque
 binding revisions, explicit placement-space requirements, and truthful bounded
-paging.
+paging. For candidate-backed Control Rig edits, copy the complete candidate,
+including `target_ref`, `target_revision`, supported operations, input and
+placement contracts, required context, and binding revision. The adapter
+normalizes that transport binding into the native identity; callers must not
+guess a RigUnit struct or reuse a stale candidate.
 
 The `uai.animation_rig_graph.edit/1` provider is a thin adapter over the shared
 HJSON import lifecycle. It owns only classification, initialization-contract
@@ -27,14 +31,33 @@ and rejects legacy top-level `carrier` and `hjson_document` fields.
 Writes delegate unchanged to the AnimationRig command owner for Control Rig
 hierarchy and shape-library application, IK Rig definition and auto-generation,
 IK Retargeter definition and settings, and Skeleton definition, compatibility,
-and virtual-bone application. Every placement-bearing document carries the
-exact `space_ref`, parent, and transform context required by the selected
-native contract. The domain does not add a second asset factory, recursive
-initializer, RigVM writer, compiler, persistence path, readback authority, or
-cleanup path.
+and virtual-bone application. RigVM unit placement is a two-dimensional graph
+position and does not require a three-dimensional hierarchy-space contract.
+Creating or updating Control Rig hierarchy controls does require the explicit
+parent-space contract and transform required by the native command. The domain
+does not add a second asset factory, recursive initializer, RigVM writer,
+compiler, persistence path, readback authority, or cleanup path.
+
+Missing-root creation is supported for
+`/Script/ControlRigDeveloper.ControlRigBlueprint`,
+`/Script/IKRig.IKRigDefinition`, and `/Script/IKRig.IKRetargeter` through their
+existing native asset owners. `/Script/Engine.Skeleton` is an editable existing
+root but is not created by this provider. Creation and definition editing are
+separate revision-guarded imports.
+
+IK Rig readback exposes skeletal-mesh binding, retarget root, goals, solvers,
+and exact retarget-chain names. IK Retargeter readback exposes source and target
+rig bindings, chain mappings, and settings. These projections and Control Rig
+controls/RigVM units share one native structure-capture owner, so candidate,
+mutation, HJSON readback, and generic ContentGraph readback do not maintain
+separate topology models. Retarget definition imports require at least one
+explicit mapping; obtain source and target chain names from the two IK Rig
+readbacks instead of guessing them.
 
 Successful import compiles or validates through the native owner, saves,
 reloads, and returns independent `content_graph.*` readback. Missing roots,
 stale revisions, target mismatch, invalid candidates or spaces, unsupported
 root creation, or unregistered operations fail before write or roll back
-without residue.
+without residue. Native input-contract failures retain their actionable typed
+error code at the HJSON boundary instead of being collapsed into a generic
+domain failure.

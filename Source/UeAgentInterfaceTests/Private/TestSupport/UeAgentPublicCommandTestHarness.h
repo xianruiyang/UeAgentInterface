@@ -3,21 +3,109 @@
 #include "CoreMinimal.h"
 
 #include "CommandEdge/UeAgentCommandProtocol.h"
+#include "CommandRegistry/UeAgentActiveCommandManifest.h"
 #include "Composition/UeAgentCommandServiceComposition.h"
 #include "Composition/LongRunningSession/UeAgentLongRunningSessionActivation.h"
 #include "Composition/GraphCompound/UeAgentGraphCompoundActivation.h"
-#include "Composition/UeAgentQueryServiceComposition.h"
 #include "Core/Contract/UeAgentCommandContract.h"
+#include "Core/Contract/UeAgentContractJson.h"
+#include "Core/DomainCapability/UeAgentDomainCapability.h"
 #include "GameFramework/WorldSettings.h"
 #include "Misc/Guid.h"
+#include "Module/CommandRegistration/Active/UeAgentActiveCommandComposition.h"
 #include "NetworkTransport/UeAgentHttpTransportAdapter.h"
+#include "ServiceComposition/CommandService/UeAgentCommandService.h"
+#include "ServiceComposition/Query/UeAgentQueryCommandIngress.h"
 
 namespace UE::UAI::Tests::PublicCommand
 {
 	using namespace UE::UAI::CommandContract;
 	using namespace UE::UAI::CommandEdge;
+	using namespace UE::UAI::CommandRegistry;
 	using namespace UE::UAI::Composition;
 	using namespace UE::UAI::NetworkTransport;
+
+	class FActiveCommandNeverCancelled final
+		: public UE::UAI::Contract::IUeAgentCancellationSignal
+	{
+	public:
+		bool IsCancelled() const override { return false; }
+	};
+
+	inline FUeAgentCommandResult SubmitActiveCommand(
+		const TSharedPtr<const FUeAgentImmutableCommandRegistry>& Registry,
+		const TSharedPtr<const FUeAgentExactCommandDispatch>& Dispatch,
+		const FString& CommandId,
+		const TSharedRef<FJsonObject>& Params,
+		const FString& TestScope)
+	{
+		const auto* Contract = Registry.IsValid()
+			? Registry->FindExact(CommandId)
+			: nullptr;
+		const FString CorrelationId = TestScope + TEXT("-correlation");
+		const FString RequestId = TestScope + TEXT("-")
+			+ FGuid::NewGuid().ToString(EGuidFormats::Digits);
+		if (!Contract || !Dispatch.IsValid())
+		{
+			return FUeAgentCommandResult::ProtocolError(
+				CorrelationId,
+				RequestId,
+				CommandId,
+				TEXT("sha256:0000000000000000000000000000000000000000000000000000000000000000"),
+				TEXT("active_public_contract_missing"),
+				CommandId);
+		}
+		FString ParamsJson;
+		FString CanonicalError;
+		if (!UE::UAI::Contract::Json::TryCanonicalize(
+				Params, ParamsJson, CanonicalError))
+		{
+			return FUeAgentCommandResult::ProtocolError(
+				CorrelationId,
+				RequestId,
+				CommandId,
+				Contract->GetContractHash(),
+				TEXT("active_public_params_invalid"),
+				CanonicalError);
+		}
+		const FString Envelope = FString::Printf(
+			TEXT("{\"schema\":\"uai.command.v1\",\"version\":1,")
+			TEXT("\"message_kind\":\"command_request\",")
+			TEXT("\"correlation_id\":\"%s\",\"request_id\":\"%s\",")
+			TEXT("\"command_id\":\"%s\",\"command_binding_hash\":\"%s\",")
+			TEXT("\"params\":%s}"),
+			*CorrelationId,
+			*RequestId,
+			*CommandId,
+			*Contract->GetContractHash(),
+			*ParamsJson);
+		const FTCHARToUTF8 Encoded(*Envelope);
+		TArray<uint8> Bytes;
+		Bytes.Append(
+			reinterpret_cast<const uint8*>(Encoded.Get()),
+			Encoded.Length());
+		TOptional<FUeAgentCommandRequest> Request;
+		FUeAgentCommandProtocolDiagnostic Diagnostic;
+		if (!FUeAgentCommandProtocolCodec().DecodeRequest(
+				Bytes, Request, Diagnostic)
+			|| !Request.IsSet())
+		{
+			return FUeAgentCommandResult::ProtocolError(
+				CorrelationId,
+				RequestId,
+				CommandId,
+				Contract->GetContractHash(),
+				Diagnostic.Code,
+				Diagnostic.Message);
+		}
+		return Dispatch->Submit(
+			Request.GetValue(),
+			UE::UAI::Contract::FUeAgentCallerContext(
+				TestScope,
+				{TEXT("uai:query"), TEXT("uai:operate")},
+				CorrelationId),
+			MakeShared<FActiveCommandNeverCancelled>());
+	}
 
 	class FFakeRouteHost final : public IUeAgentHttpRouteHost
 	{
@@ -82,10 +170,23 @@ namespace UE::UAI::Tests::PublicCommand
 		TMap<FString, FUeAgentHttpRequestHandler> Handlers;
 	};
 
-	inline FUeAgentQueryServiceConfig MakeConfig(
+	struct FPublicCommandTransportConfig
+	{
+		FString OwnerId;
+		FString InstanceId;
+		FString ServerSessionId;
+		int64 RegistryEpoch = 0;
+		FString AuthToken;
+		FString TicketIntegrityKey;
+		double QueryTimeoutSeconds = 0.0;
+		double TicketTtlSeconds = 0.0;
+		int64 MaxFrameBytes = 0;
+	};
+
+	inline FPublicCommandTransportConfig MakeConfig(
 		const FString& Scope = TEXT("read-export-e3"))
 	{
-		FUeAgentQueryServiceConfig Result;
+		FPublicCommandTransportConfig Result;
 		Result.OwnerId = Scope + TEXT("-owner");
 		Result.InstanceId = Scope + TEXT("-instance");
 		Result.ServerSessionId = Scope + TEXT("-session");
@@ -108,6 +209,19 @@ namespace UE::UAI::Tests::PublicCommand
 		return Result;
 	}
 
+	class FPublicCommandTestContextInvalidator final
+		: public ServiceComposition::CommandService::
+			IUeAgentRequestContextInvalidator
+	{
+	public:
+		void InvalidateWorld(const FString& WorldIdentity) override
+		{
+			LastWorldIdentity = WorldIdentity;
+		}
+
+		FString LastWorldIdentity;
+	};
+
 	class FScopedPublicCommandComposition final
 	{
 	public:
@@ -124,25 +238,94 @@ namespace UE::UAI::Tests::PublicCommand
 
 		bool TryStart(AWorldSettings& WorldSettings, FString& OutError)
 		{
+			(void)WorldSettings;
 			OutError.Reset();
-			FUeAgentQueryServiceError ServiceError;
-			if (!FUeAgentQueryServiceComposition::TryCreateReference(
-					Config,
-					WorldSettings,
-					RouteHost.ToSharedRef(),
-					Composition,
-					ServiceError)
-				|| !Composition)
+			DomainCapability::FDomainCapabilityAuthorities Authorities;
+			if (!DomainCapability::
+					TryGetOrBuildProcessDomainCapabilityAuthorities(
+						Authorities,
+						OutError))
 			{
-				OutError = ServiceError.Code + TEXT(":") + ServiceError.Detail;
 				return false;
 			}
+			Registry = Authorities.GetCommandRegistry();
+			Dispatch = Authorities.GetCommandDispatch();
+			if (!Registry.IsValid() || !Dispatch.IsValid())
+			{
+				OutError = TEXT("active_public_command_authority_missing");
+				return false;
+			}
+			if (!FUeAgentActiveCommandManifest::TryVerify(
+					Registry.ToSharedRef(),
+					GetUaiCommandManifestPluginVersion(),
+					GetUaiCommandManifestBuildId(),
+					GetDefaultCommandManifestPath(),
+					OutError))
+			{
+				Registry.Reset();
+				Dispatch.Reset();
+				return false;
+			}
+
+			TSharedPtr<
+				IUeAgentTransportRequestHandler,
+				ESPMode::ThreadSafe> Ingress;
+			if (!ServiceComposition::Query::TryCreateQueryCommandIngress(
+					Dispatch.ToSharedRef(),
+					TEXT("uai-public-command-test-client"),
+					{TEXT("uai:query"), TEXT("uai:export"),
+						TEXT("uai:operate")},
+					Ingress,
+					OutError)
+				|| !Ingress.IsValid())
+			{
+				Registry.Reset();
+				Dispatch.Reset();
+				return false;
+			}
+			ContextInvalidator = MakeShared<
+				FPublicCommandTestContextInvalidator,
+				ESPMode::ThreadSafe>();
+			if (!ServiceComposition::CommandService::FUeAgentCommandService::
+					TryCreate(
+						Ingress.ToSharedRef(),
+						ContextInvalidator.ToSharedRef(),
+						CommandService,
+						OutError)
+				|| !CommandService)
+			{
+				Registry.Reset();
+				Dispatch.Reset();
+				ContextInvalidator.Reset();
+				return false;
+			}
+
+			FUeAgentHttpAdapterConfig HttpConfig;
+			HttpConfig.OwnerId = Config.OwnerId;
+			HttpConfig.InstanceId = Config.InstanceId;
+			HttpConfig.Method = TEXT("POST");
+			HttpConfig.RoutePath = GetUaiHttpCommandRoutePath();
+			HttpConfig.AuthHeader = TEXT("X-UeAgentInterface-Token");
+			HttpConfig.AuthToken = Config.AuthToken;
+			HttpConfig.Channel = TEXT("uai.command.v1");
+			HttpConfig.PrincipalSubject =
+				TEXT("uai-public-command-test-client");
+			HttpConfig.MaxFrameBytes = Config.MaxFrameBytes;
+			ServerControl = MakeUnique<FUeAgentHttpTransportAdapter>(
+				MoveTemp(HttpConfig),
+				RouteHost.ToSharedRef(),
+				CommandService->GetIngressHandler());
+			FUeAgentTransportServerIdentity Identity;
 			FUeAgentTransportDiagnostic TransportError;
-			if (!Composition->Start(TransportError))
+			if (!ServerControl->Start(Identity, TransportError))
 			{
 				OutError = TransportError.Code + TEXT(":")
 					+ TransportError.Message;
-				Composition.Reset();
+				ServerControl.Reset();
+				CommandService.Reset();
+				ContextInvalidator.Reset();
+				Registry.Reset();
+				Dispatch.Reset();
 				return false;
 			}
 			bStarted = true;
@@ -151,15 +334,24 @@ namespace UE::UAI::Tests::PublicCommand
 
 		bool Stop()
 		{
-			if (!bStarted || !Composition)
+			if (!bStarted || !ServerControl)
 			{
-				Composition.Reset();
+				ServerControl.Reset();
+				CommandService.Reset();
+				ContextInvalidator.Reset();
+				Registry.Reset();
+				Dispatch.Reset();
 				bStarted = false;
 				return true;
 			}
 			FUeAgentTransportDiagnostic TransportError;
-			const bool bStopped = Composition->Stop(TransportError);
-			Composition.Reset();
+			const bool bStopped = ServerControl->Stop(
+				Config.OwnerId, TransportError);
+			ServerControl.Reset();
+			CommandService.Reset();
+			ContextInvalidator.Reset();
+			Registry.Reset();
+			Dispatch.Reset();
 			bStarted = false;
 			return bStopped;
 		}
@@ -169,21 +361,35 @@ namespace UE::UAI::Tests::PublicCommand
 			return *RouteHost;
 		}
 
-		const FUeAgentQueryServiceConfig& GetConfig() const
+		const FPublicCommandTransportConfig& GetConfig() const
 		{
 			return Config;
 		}
 
+		const TSharedPtr<const FUeAgentImmutableCommandRegistry>&
+		GetCommandRegistry() const
+		{
+			return Registry;
+		}
+
 	private:
 		TSharedPtr<FFakeRouteHost, ESPMode::ThreadSafe> RouteHost;
-		FUeAgentQueryServiceConfig Config;
-		TUniquePtr<FUeAgentQueryServiceComposition> Composition;
+		FPublicCommandTransportConfig Config;
+		TSharedPtr<const FUeAgentImmutableCommandRegistry> Registry;
+		TSharedPtr<const FUeAgentExactCommandDispatch> Dispatch;
+		TSharedPtr<
+			FPublicCommandTestContextInvalidator,
+			ESPMode::ThreadSafe> ContextInvalidator;
+		TUniquePtr<
+			ServiceComposition::CommandService::
+				FUeAgentCommandService> CommandService;
+		TUniquePtr<IUeAgentNetworkServerControl> ServerControl;
 		bool bStarted = false;
 	};
 
 	inline bool TryInvokeCommand(
 		const FFakeRouteHost& RouteHost,
-		const FUeAgentQueryServiceConfig& ServiceConfig,
+		const FPublicCommandTransportConfig& ServiceConfig,
 		const FString& CommandId,
 		const FString& ParamsJson,
 		TOptional<FUeAgentCommandResult>& OutResult,
@@ -191,35 +397,18 @@ namespace UE::UAI::Tests::PublicCommand
 	{
 		OutResult.Reset();
 		OutError.Reset();
-		TSharedPtr<const FUeAgentCommandContractRegistry> Registry;
-		if (!GraphCompound::
-				TryCreateGraphCompoundProductionCommandContractRegistry(
-					Registry,
-					OutError)
-			|| !Registry.IsValid())
+		DomainCapability::FDomainCapabilityAuthorities Authorities;
+		if (!DomainCapability::
+				TryGetOrBuildProcessDomainCapabilityAuthorities(
+					Authorities,
+					OutError))
 		{
 			return false;
 		}
-		const FUeAgentCommandContract* Contract = Registry->FindExact(CommandId);
-		TOptional<FUeAgentCommandContract> ExpectedContract;
-		if (!Contract && CommandId == TEXT("asset.delete"))
-		{
-			TArray<FUeAgentCommandParameter> Parameters;
-			Parameters.Emplace(
-				TEXT("target_ref"),
-				EUeAgentCommandWireType::String,
-				true,
-				false);
-			ExpectedContract.Emplace(
-				TEXT("asset.delete"),
-				TEXT("asset"),
-				TEXT("delete"),
-				MoveTemp(Parameters),
-				1,
-				1,
-				EUeAgentCommandStatus::Active);
-			Contract = &ExpectedContract.GetValue();
-		}
+		const TSharedPtr<const FUeAgentImmutableCommandRegistry> Registry =
+			Authorities.GetCommandRegistry();
+		const FUeAgentFrozenCommandContract* Contract = Registry.IsValid()
+			? Registry->FindExact(CommandId) : nullptr;
 		if (!Contract)
 		{
 			OutError = TEXT("command_contract_missing");
@@ -231,7 +420,7 @@ namespace UE::UAI::Tests::PublicCommand
 		const FString CorrelationId = RequestId + TEXT("-correlation");
 		const FString Body =
 			TEXT("{\"command_binding_hash\":\"")
-			+ Contract->GetBindingHash()
+			+ Contract->GetContractHash()
 			+ TEXT("\",\"command_id\":\"")
 			+ CommandId
 			+ TEXT("\",\"correlation_id\":\"")

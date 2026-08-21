@@ -31,6 +31,10 @@
 #include "RigEditor/IKRigController.h"
 #include "Rigs/RigHierarchy.h"
 #include "Rigs/RigHierarchyController.h"
+#include "RigVMModel/Nodes/RigVMUnitNode.h"
+#include "RigVMModel/RigVMController.h"
+#include "RigVMModel/RigVMGraph.h"
+#include "Units/RigUnit.h"
 #include "Engine/StaticMesh.h"
 #include "UObject/UObjectGlobals.h"
 
@@ -899,6 +903,7 @@ namespace UE::UAI::DomainAdapters::AnimationRigGraph
 	bool FAnimationRigGraphNativeHook::TryApplyAndCaptureControlRigDefinition(
 		UControlRigBlueprint& Blueprint,
 		const TArray<FAnimationRigGraphControlMutation>& Mutations,
+		const TArray<FAnimationRigGraphUnitMutation>& UnitMutations,
 		FAnimationRigGraphNativeMutationReceipt& OutApplyReceipt,
 		FAnimationRigGraphBarrierReceipt& OutBarrierReceipt,
 		FAnimationRigGraphTopology& OutTopology,
@@ -909,7 +914,8 @@ namespace UE::UAI::DomainAdapters::AnimationRigGraph
 		OutError.Reset();
 		URigHierarchy* Hierarchy = Blueprint.GetHierarchy();
 		URigHierarchyController* Controller = Blueprint.GetHierarchyController();
-		if (!Hierarchy || !Controller || Mutations.IsEmpty())
+		if (!Hierarchy || !Controller
+			|| (Mutations.IsEmpty() && UnitMutations.IsEmpty()))
 		{
 			OutError.Set(TEXT("animation_rig_graph_control_rig_controller_unavailable"));
 			return false;
@@ -962,6 +968,116 @@ namespace UE::UAI::DomainAdapters::AnimationRigGraph
 				return false;
 			}
 		}
+
+		URigVMGraph* const RigGraph = Blueprint.GetDefaultModel();
+		URigVMController* const RigController = RigGraph
+			? Blueprint.GetController(RigGraph) : nullptr;
+		if (!UnitMutations.IsEmpty() && (!RigGraph || !RigController))
+		{
+			OutError.Set(TEXT("animation_rig_graph_rigvm_controller_unavailable"));
+			return false;
+		}
+		auto FindRigNode = [RigGraph](const FName Name) -> URigVMNode*
+		{
+			if (!RigGraph) return nullptr;
+			for (URigVMNode* Node : RigGraph->GetNodes())
+			{
+				if (Node && Node->GetFName() == Name)
+				{
+					return Node;
+				}
+			}
+			return nullptr;
+		};
+		for (const FAnimationRigGraphUnitMutation& Mutation : UnitMutations)
+		{
+			if (Mutation.NodeName.IsNone())
+			{
+				OutError.Set(TEXT("animation_rig_graph_rigvm_unit_name_invalid"));
+				return false;
+			}
+			URigVMNode* Existing = FindRigNode(Mutation.NodeName);
+			if (Mutation.Intent == EAnimationRigGraphMutationIntent::Delete)
+			{
+				if (!Existing
+					|| !RigController->RemoveNode(Existing, true, false))
+				{
+					OutError.Set(
+						TEXT("animation_rig_graph_rigvm_unit_remove_failed"),
+						Mutation.NodeName.ToString());
+					return false;
+				}
+				continue;
+			}
+			UScriptStruct* const UnitStruct = LoadObject<UScriptStruct>(
+				nullptr, *Mutation.ScriptStructRef);
+			if (!UnitStruct
+				|| UnitStruct == FRigUnit::StaticStruct()
+				|| !UnitStruct->IsChildOf(FRigUnit::StaticStruct())
+				|| UnitStruct->HasMetaData(TEXT("Abstract"))
+				|| Mutation.MethodName.IsNone()
+				|| !FMath::IsFinite(Mutation.Position.X)
+				|| !FMath::IsFinite(Mutation.Position.Y))
+			{
+				OutError.Set(
+					TEXT("animation_rig_graph_rigvm_unit_definition_invalid"),
+					Mutation.NodeName.ToString());
+				return false;
+			}
+			if (Mutation.Intent == EAnimationRigGraphMutationIntent::Create
+				&& Existing)
+			{
+				OutError.Set(
+					TEXT("animation_rig_graph_rigvm_unit_already_exists"),
+					Mutation.NodeName.ToString());
+				return false;
+			}
+			if (Mutation.Intent == EAnimationRigGraphMutationIntent::Replace
+				&& Existing)
+			{
+				if (!RigController->RemoveNode(Existing, true, false))
+				{
+					OutError.Set(
+						TEXT("animation_rig_graph_rigvm_unit_replace_failed"),
+						Mutation.NodeName.ToString());
+					return false;
+				}
+				Existing = nullptr;
+			}
+			if (Mutation.Intent == EAnimationRigGraphMutationIntent::Update)
+			{
+				const URigVMUnitNode* const ExistingUnit =
+					Cast<URigVMUnitNode>(Existing);
+				if (!ExistingUnit
+					|| !ExistingUnit->GetScriptStruct()
+					|| ExistingUnit->GetScriptStruct()->GetPathName()
+						!= Mutation.ScriptStructRef
+					|| ExistingUnit->GetMethodName() != Mutation.MethodName
+					|| !RigController->SetNodePosition(
+						Existing, Mutation.Position, true, false, false))
+				{
+					OutError.Set(
+						TEXT("animation_rig_graph_rigvm_unit_update_failed"),
+						Mutation.NodeName.ToString());
+					return false;
+				}
+				continue;
+			}
+			URigVMNode* const Added = RigController->AddUnitNodeFromStructPath(
+				Mutation.ScriptStructRef,
+				Mutation.MethodName,
+				Mutation.Position,
+				Mutation.NodeName.ToString(),
+				true,
+				false);
+			if (!Added || Added->GetFName() != Mutation.NodeName)
+			{
+				OutError.Set(
+					TEXT("animation_rig_graph_rigvm_unit_add_failed"),
+					Mutation.NodeName.ToString());
+				return false;
+			}
+		}
 		FBlueprintEditorUtils::MarkBlueprintAsStructurallyModified(&Blueprint);
 		FCompilerResultsLog CompilerLog;
 		FKismetEditorUtilities::CompileBlueprint(
@@ -1007,6 +1123,23 @@ namespace UE::UAI::DomainAdapters::AnimationRigGraph
 				TEXT("hierarchy_child"), Mutation.Name.ToString(),
 				ParentItemKey,
 				ItemKey, INDEX_NONE);
+		}
+		for (const FAnimationRigGraphUnitMutation& Mutation : UnitMutations)
+		{
+			URigVMNode* const Node = FindRigNode(Mutation.NodeName);
+			const URigVMUnitNode* const Unit = Cast<URigVMUnitNode>(Node);
+			if (!Unit || !Unit->GetScriptStruct())
+			{
+				continue;
+			}
+			Items.Emplace(
+				TEXT("rigvm_node:") + Mutation.NodeName.ToString(),
+				TEXT("native_object_path"),
+				Unit->GetPathName(),
+				FString(),
+				Unit->GetClass()->GetPathName(),
+				Unit->GetScriptStruct()->GetPathName(),
+				TEXT("rig_unit"));
 		}
 		OutTopology = FAnimationRigGraphTopology(MoveTemp(Items), {}, MoveTemp(Relations));
 		return FinalizeTopologyCapture(

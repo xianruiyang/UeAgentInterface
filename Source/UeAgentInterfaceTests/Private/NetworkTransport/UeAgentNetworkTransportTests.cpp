@@ -174,6 +174,97 @@ namespace
 		FUeAgentHttpRequestHandler Handler;
 	};
 
+	class FProbeHttpRouteHost final : public IUeAgentHttpRouteHost
+	{
+	public:
+		struct FRoute
+		{
+			FString Method;
+			FString RoutePath;
+			FUeAgentHttpRequestHandler Handler;
+		};
+
+		virtual bool Bind(
+			const FString& InstanceId,
+			const FString& Method,
+			const FString& RoutePath,
+			FUeAgentHttpRequestHandler InHandler,
+			FUeAgentTransportDiagnostic& OutDiagnostic) override
+		{
+			bool bRoutePathBound = false;
+			for (const TPair<FString, FRoute>& Pair : Routes)
+			{
+				bRoutePathBound |= Pair.Value.RoutePath == RoutePath;
+			}
+			if (Routes.Contains(InstanceId) || bRoutePathBound)
+			{
+				OutDiagnostic = {
+					TEXT("route_already_bound"),
+					TEXT("fixture route is already bound"),
+				};
+				return false;
+			}
+			Routes.Add(
+				InstanceId,
+				FRoute{Method, RoutePath, MoveTemp(InHandler)});
+			return true;
+		}
+
+		virtual bool Unbind(
+			const FString& InstanceId,
+			FUeAgentTransportDiagnostic& OutDiagnostic) override
+		{
+			if (Routes.Remove(InstanceId) != 1)
+			{
+				OutDiagnostic = {
+					TEXT("transport_server_instance_mismatch"),
+					TEXT("fixture refuses to unbind a different instance"),
+				};
+				return false;
+			}
+			return true;
+		}
+
+		virtual bool IsBound(const FString& InstanceId) const override
+		{
+			return Routes.Contains(InstanceId);
+		}
+
+		bool HasRoute(const FString& RoutePath) const
+		{
+			for (const TPair<FString, FRoute>& Pair : Routes)
+			{
+				if (Pair.Value.RoutePath == RoutePath)
+				{
+					return true;
+				}
+			}
+			return false;
+		}
+
+		FUeAgentHttpResponse Dispatch(FUeAgentHttpRequest Request) const
+		{
+			const FRoute* Route = nullptr;
+			for (const TPair<FString, FRoute>& Pair : Routes)
+			{
+				if (Pair.Value.RoutePath == Request.RoutePath)
+				{
+					Route = &Pair.Value;
+					break;
+				}
+			}
+			if (!Route || !Route->Handler)
+			{
+				FUeAgentHttpResponse Missing;
+				Missing.StatusCode = 404;
+				return Missing;
+			}
+			return Route->Handler(Request);
+		}
+
+		TMap<FString, FRoute> Routes;
+	};
+
 	static FUeAgentHttpAdapterConfig MakeAdapterConfig()
 	{
 		FUeAgentHttpAdapterConfig Config;
@@ -188,6 +279,50 @@ namespace
 		Config.MaxFrameBytes = 64;
 		return Config;
 	}
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(
+	FUeAgentNetworkTransportProbeLifecycleTest,
+	"UeAgentInterface.NetworkTransport.ProbeLifecycle",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FUeAgentNetworkTransportProbeLifecycleTest::RunTest(
+	const FString& Parameters)
+{
+	using namespace UE::UAI::NetworkTransport;
+
+	const TSharedRef<FProbeHttpRouteHost, ESPMode::ThreadSafe> RouteHost =
+		MakeShared<FProbeHttpRouteHost, ESPMode::ThreadSafe>();
+	const TSharedRef<FRecordingHandler, ESPMode::ThreadSafe> Handler =
+		MakeShared<FRecordingHandler, ESPMode::ThreadSafe>();
+	FUeAgentHttpAdapterConfig Config = MakeAdapterConfig();
+	Config.ProbeRoutePath = TEXT("/probe");
+	FUeAgentHttpTransportAdapter Adapter(
+		MoveTemp(Config),
+		RouteHost,
+		Handler);
+
+	FUeAgentTransportServerIdentity Identity;
+	FUeAgentTransportDiagnostic Diagnostic;
+	TestTrue(TEXT("adapter starts with command and probe routes"),
+		Adapter.Start(Identity, Diagnostic));
+	TestTrue(TEXT("command route is owned"),
+		RouteHost->HasRoute(TEXT("/transport")));
+	TestTrue(TEXT("probe route is owned"),
+		RouteHost->HasRoute(TEXT("/probe")));
+
+	FUeAgentHttpRequest Probe;
+	Probe.Method = TEXT("GET");
+	Probe.RoutePath = TEXT("/probe");
+	const FUeAgentHttpResponse ProbeResponse = RouteHost->Dispatch(Probe);
+	TestEqual(TEXT("probe reports transport liveness"),
+		ProbeResponse.StatusCode, 200);
+	TestEqual(TEXT("probe bypasses command ingress"), Handler->Calls, 0);
+
+	TestTrue(TEXT("owner stops command and probe routes"),
+		Adapter.Stop(TEXT("owner-a"), Diagnostic));
+	TestEqual(TEXT("all owned routes are unbound"), RouteHost->Routes.Num(), 0);
+	return !HasAnyErrors();
 }
 
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(

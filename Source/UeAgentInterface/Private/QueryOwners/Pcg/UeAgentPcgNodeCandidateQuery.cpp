@@ -172,4 +172,62 @@ namespace UE::UAI::QueryOwners::Pcg
 		OutResult.NextCursor = OutResult.bHasMore ? End : INDEX_NONE;
 		return true;
 	}
+
+	bool IsCurrentPcgNodeCandidateBinding(
+		UObject& Target,
+		const FString& CandidateName,
+		const FString& CandidateKindValue,
+		const TArray<FString>& SupportedOperations,
+		const FString& InputContractValue,
+		const FString& PlacementContractValue,
+		const FString& RequiredContextValue,
+		const FString& BindingRevision,
+		FPcgNodeCandidateQueryError& OutError)
+	{
+		OutError = {};
+		if (!IsInGameThread())
+		{
+			return Fail(
+				OutError, TEXT("pcg_candidate_game_thread_required"),
+				Target.GetPathName());
+		}
+		if (!IsSupportedTarget(Target))
+		{
+			return Fail(
+				OutError, TEXT("pcg_candidate_target_type_unsupported"),
+				Target.GetClass()->GetPathName());
+		}
+		UClass* const CandidateClass = LoadObject<UClass>(
+			nullptr, *CandidateName);
+		if (!CandidateClass
+			|| CandidateClass == UPCGSettings::StaticClass()
+			|| !CandidateClass->IsChildOf(UPCGSettings::StaticClass())
+			|| CandidateClass->HasAnyClassFlags(
+				CLASS_Abstract | CLASS_Deprecated | CLASS_NewerVersionExists)
+			|| !CandidateClass->GetPathName().StartsWith(TEXT("/Script/")))
+		{
+			return Fail(
+				OutError, TEXT("pcg_candidate_name_unresolved"),
+				CandidateName);
+		}
+		const TArray<FString> ExpectedOperations = {TEXT("create")};
+		if (CandidateKindValue != CandidateKind
+			|| SupportedOperations != ExpectedOperations
+			|| InputContractValue != InputContract
+			|| PlacementContractValue != PlacementContract
+			|| RequiredContextValue != RequiredContext)
+		{
+			return Fail(
+				OutError, TEXT("pcg_candidate_contract_mismatch"),
+				CandidateName);
+		}
+		const FString CurrentRevision = CandidateRevision(Target, CandidateName);
+		if (BindingRevision != CurrentRevision)
+		{
+			return Fail(
+				OutError, TEXT("pcg_candidate_binding_stale"),
+				CandidateName, CurrentRevision);
+		}
+		return true;
+	}
 }

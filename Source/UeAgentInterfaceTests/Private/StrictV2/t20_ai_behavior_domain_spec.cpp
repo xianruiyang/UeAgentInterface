@@ -2,6 +2,10 @@
 
 #include "BehaviorTree/BehaviorTree.h"
 #include "Core/HjsonWorkspace/ImportInitialization/UeAgentHjsonDomainProviderRegistry.h"
+#include "EnvironmentQuery/EnvQuery.h"
+#include "EnvironmentQuery/Generators/EnvQueryGenerator_ActorsOfClass.h"
+#include "GameplayInteractionSmartObjectBehaviorDefinition.h"
+#include "SmartObjectDefinition.h"
 
 #if __has_include("OperationOwners/AiBehavior/UeAgentAiBehaviorDomainService.h")
 #define UAI_T20_AI_BEHAVIOR_DOMAIN_AVAILABLE 1
@@ -57,8 +61,13 @@ bool FUeAgentStrictV2T20AiBehaviorDomainTest::RunTest(const FString& Parameters)
 			TEXT("uai.init.ai.behavior_tree.root/1")},
 		{TEXT("/Script/AIModule.BlackboardData"), EInitializationNodeRole::RootTarget,
 			TEXT("uai.init.ai.blackboard.root/1")},
+		{TEXT("/Script/AIModule.EnvQuery"), EInitializationNodeRole::RootTarget,
+			TEXT("uai.init.ai.eqs.root/1")},
 		{TEXT("/Script/StateTreeModule.StateTree"), EInitializationNodeRole::RootTarget,
 			TEXT("uai.init.ai.state_tree.root/1")},
+		{TEXT("/Script/SmartObjectsModule.SmartObjectDefinition"),
+			EInitializationNodeRole::RootTarget,
+			TEXT("uai.init.ai.smart_object_definition.root/1")},
 		{TEXT("/Script/AIModule.BTNode"), EInitializationNodeRole::OwnedObject,
 			TEXT("uai.init.ai.behavior_node/1")},
 		{TEXT("/Script/AIModule.BTService"), EInitializationNodeRole::OwnedObject,
@@ -124,12 +133,15 @@ bool FUeAgentStrictV2T20AiBehaviorDomainTest::RunTest(const FString& Parameters)
 	const FAiBehaviorCandidate& Candidate = CandidateResult.Candidates[0];
 	TestTrue(TEXT("candidate.name is an exact class identity"),
 		Candidate.Name.StartsWith(TEXT("/Script/")));
-	TestTrue(TEXT("candidate kind identifies node, service, decorator, state node, or key"),
-		Candidate.Kind == TEXT("behavior_node")
+	TestTrue(TEXT("candidate kind identifies the exact behavior surface"),
+		Candidate.Kind == TEXT("behavior_composite")
+			|| Candidate.Kind == TEXT("behavior_task")
 			|| Candidate.Kind == TEXT("behavior_service")
 			|| Candidate.Kind == TEXT("behavior_decorator")
 			|| Candidate.Kind == TEXT("state_tree_node")
-			|| Candidate.Kind == TEXT("blackboard_key"));
+			|| Candidate.Kind == TEXT("blackboard_key")
+			|| Candidate.Kind == TEXT("eqs_generator")
+			|| Candidate.Kind == TEXT("smart_object_behavior"));
 	TestTrue(TEXT("candidate declares create support"),
 		Candidate.SupportedOperations.Contains(TEXT("create")));
 	TestFalse(TEXT("candidate input contract is present"),
@@ -142,6 +154,63 @@ bool FUeAgentStrictV2T20AiBehaviorDomainTest::RunTest(const FString& Parameters)
 		Candidate.BindingRevision.StartsWith(TEXT("sha256:")));
 	TestTrue(TEXT("candidate query reports complete bounded results"),
 		CandidateResult.bComplete && !CandidateResult.bHasMore);
+
+	auto ResolvesExactCandidate = [this](
+		UObject& Target,
+		const FString& Query,
+		const FString& ExpectedName,
+		const FString& ExpectedKind)
+	{
+		using namespace UE::UAI::QueryOwners::AiBehavior;
+		FAiBehaviorCandidateQueryResult Result;
+		FAiBehaviorCandidateQueryError QueryError;
+		if (!TestTrue(
+				*FString::Printf(TEXT("%s candidate query succeeds"), *ExpectedKind),
+				TryQueryAiBehaviorCandidates(
+					Target, Query, Result, QueryError)))
+		{
+			AddError(QueryError.Code + TEXT(":") + QueryError.Detail);
+			return false;
+		}
+		const FAiBehaviorCandidate* Match = Result.Candidates.FindByPredicate(
+			[&](const FAiBehaviorCandidate& Item)
+			{
+				return Item.Name == ExpectedName && Item.Kind == ExpectedKind;
+			});
+		if (!TestNotNull(
+				*FString::Printf(TEXT("%s exact candidate is returned"), *ExpectedKind),
+				Match))
+		{
+			return false;
+		}
+		TestTrue(
+			*FString::Printf(TEXT("%s binding validates without remapping"), *ExpectedKind),
+			IsCurrentAiBehaviorCandidateBinding(
+				Target,
+				Match->Name,
+				Match->Kind,
+				Match->SupportedOperations,
+				Match->InputContract,
+				Match->PlacementContract,
+				Match->RequiredContext,
+				Match->BindingRevision,
+				QueryError));
+		return true;
+	};
+
+	UEnvQuery* EqsTarget = NewObject<UEnvQuery>(GetTransientPackage());
+	ResolvesExactCandidate(
+		*EqsTarget,
+		TEXT("EnvQueryGenerator_ActorsOfClass"),
+		UEnvQueryGenerator_ActorsOfClass::StaticClass()->GetPathName(),
+		TEXT("eqs_generator"));
+	USmartObjectDefinition* SmartObjectTarget =
+		NewObject<USmartObjectDefinition>(GetTransientPackage());
+	ResolvesExactCandidate(
+		*SmartObjectTarget,
+		TEXT("GameplayInteractionSmartObjectBehaviorDefinition"),
+		UGameplayInteractionSmartObjectBehaviorDefinition::StaticClass()->GetPathName(),
+		TEXT("smart_object_behavior"));
 	return !HasAnyErrors();
 #endif
 }

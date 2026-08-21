@@ -1,6 +1,6 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
-#include "Server/UeAgentHttpServer.h"
+#include "LegacyMechanics/UeAgentLegacyMechanics.h"
 
 #include "Utilities/AuthoringCore/UeAgentAuthoringSemanticCompare.h"
 #include "Utilities/UeAgentAuthoringFileIO.h"
@@ -1365,7 +1365,7 @@ namespace UeAgentDataDrivenOps
 	}
 }
 
-bool FUeAgentHttpServer::ExecuteDataDrivenCommand(const FString& CommandLower, const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::ExecuteDataDrivenCommand(const FString& CommandLower, const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	if (CommandLower == TEXT("data_asset_create")) return CmdDataAssetCreate(Ctx, OutData, OutError);
 	if (CommandLower == TEXT("data_asset_export_json")) return CmdDataAssetExportJson(Ctx, OutData, OutError);
@@ -1385,7 +1385,7 @@ bool FUeAgentHttpServer::ExecuteDataDrivenCommand(const FString& CommandLower, c
 	return false;
 }
 
-bool FUeAgentHttpServer::CmdDataAssetCreate(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdDataAssetCreate(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	FString AssetPath;
 	if (!JsonTryGetString(Ctx.Params, TEXT("asset_path"), AssetPath) || AssetPath.TrimStartAndEnd().IsEmpty())
@@ -1449,7 +1449,7 @@ bool FUeAgentHttpServer::CmdDataAssetCreate(const FUeAgentRequestContext& Ctx, T
 	return true;
 }
 
-bool FUeAgentHttpServer::CmdDataAssetExportJson(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdDataAssetExportJson(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	FString AssetPath;
 	if (!JsonTryGetString(Ctx.Params, TEXT("asset_path"), AssetPath) || AssetPath.TrimStartAndEnd().IsEmpty())
@@ -1481,7 +1481,7 @@ bool FUeAgentHttpServer::CmdDataAssetExportJson(const FUeAgentRequestContext& Ct
 	return true;
 }
 
-bool FUeAgentHttpServer::CmdDataAssetValidateJson(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdDataAssetValidateJson(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	TSharedPtr<FJsonObject> Root;
 	FString JsonFile;
@@ -1536,7 +1536,7 @@ bool FUeAgentHttpServer::CmdDataAssetValidateJson(const FUeAgentRequestContext& 
 	return bValid;
 }
 
-bool FUeAgentHttpServer::CmdDataAssetDiffJson(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdDataAssetDiffJson(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	TSharedPtr<FJsonObject> Root;
 	FString JsonFile;
@@ -1602,7 +1602,7 @@ bool FUeAgentHttpServer::CmdDataAssetDiffJson(const FUeAgentRequestContext& Ctx,
 	return UeAgentDataDrivenOps::CountErrors(Issues) == 0;
 }
 
-bool FUeAgentHttpServer::CmdDataAssetApplyJson(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdDataAssetApplyJson(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	TSharedPtr<FJsonObject> Root;
 	FString JsonFile;
@@ -1748,7 +1748,7 @@ bool FUeAgentHttpServer::CmdDataAssetApplyJson(const FUeAgentRequestContext& Ctx
 	return true;
 }
 
-bool FUeAgentHttpServer::CmdPrimaryAssetValidateAsset(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdPrimaryAssetValidateAsset(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	FString AssetPath;
 	if (!JsonTryGetString(Ctx.Params, TEXT("asset_path"), AssetPath) || AssetPath.TrimStartAndEnd().IsEmpty())
@@ -1847,7 +1847,7 @@ bool FUeAgentHttpServer::CmdPrimaryAssetValidateAsset(const FUeAgentRequestConte
 	return true;
 }
 
-bool FUeAgentHttpServer::CmdPrimaryAssetScanAssets(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdPrimaryAssetScanAssets(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	FString TypeText;
 	if (!JsonTryGetString(Ctx.Params, TEXT("primary_asset_type"), TypeText) || TypeText.TrimStartAndEnd().IsEmpty())
@@ -1916,7 +1916,7 @@ bool FUeAgentHttpServer::CmdPrimaryAssetScanAssets(const FUeAgentRequestContext&
 	return true;
 }
 
-bool FUeAgentHttpServer::CmdDataTableExportJson(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdDataTableExportJson(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	FString AssetPath;
 	if (!JsonTryGetString(Ctx.Params, TEXT("asset_path"), AssetPath) || AssetPath.TrimStartAndEnd().IsEmpty())
@@ -1945,7 +1945,7 @@ bool FUeAgentHttpServer::CmdDataTableExportJson(const FUeAgentRequestContext& Ct
 	return true;
 }
 
-bool FUeAgentHttpServer::CmdDataTableValidateJson(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdDataTableValidateJson(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	TSharedPtr<FJsonObject> Root;
 	FString JsonFile;
@@ -1987,7 +1987,7 @@ bool FUeAgentHttpServer::CmdDataTableValidateJson(const FUeAgentRequestContext& 
 	return bValid;
 }
 
-bool FUeAgentHttpServer::CmdDataTableDiffJson(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdDataTableDiffJson(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	TSharedPtr<FJsonObject> Root;
 	FString JsonFile;
@@ -2134,7 +2134,7 @@ bool FUeAgentHttpServer::CmdDataTableDiffJson(const FUeAgentRequestContext& Ctx,
 	return UeAgentDataDrivenOps::CountErrors(Issues) == 0;
 }
 
-bool FUeAgentHttpServer::CmdDataTableApplyJson(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdDataTableApplyJson(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	TSharedPtr<FJsonObject> Root;
 	FString JsonFile;
@@ -2291,7 +2291,7 @@ bool FUeAgentHttpServer::CmdDataTableApplyJson(const FUeAgentRequestContext& Ctx
 	return true;
 }
 
-bool FUeAgentHttpServer::CmdDataTableQueryRows(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdDataTableQueryRows(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	FString AssetPath;
 	if (!JsonTryGetString(Ctx.Params, TEXT("asset_path"), AssetPath) || AssetPath.TrimStartAndEnd().IsEmpty())
@@ -2420,7 +2420,7 @@ bool FUeAgentHttpServer::CmdDataTableQueryRows(const FUeAgentRequestContext& Ctx
 	return true;
 }
 
-bool FUeAgentHttpServer::CmdDataTableSampleRows(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdDataTableSampleRows(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	FString AssetPath;
 	if (!JsonTryGetString(Ctx.Params, TEXT("asset_path"), AssetPath) || AssetPath.TrimStartAndEnd().IsEmpty())

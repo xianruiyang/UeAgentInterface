@@ -2,7 +2,7 @@
 
 #include "Commands/EditorViewport/UeAgentHttpServer_EditorViewportInternal.h"
 
-#include "Server/UeAgentHttpServer.h"
+#include "LegacyMechanics/UeAgentLegacyMechanics.h"
 #include "UeAgentInterfaceSettings.h"
 
 #include "Animation/AnimBlueprint.h"

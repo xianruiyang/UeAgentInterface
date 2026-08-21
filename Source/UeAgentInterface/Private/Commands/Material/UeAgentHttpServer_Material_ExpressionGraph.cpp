@@ -163,7 +163,7 @@ namespace
 	}
 }
 
-bool FUeAgentHttpServer::CmdMaterialListExpressions(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdMaterialListExpressions(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	FString AssetPathInput;
 	if (!JsonTryGetString(Ctx.Params, TEXT("asset_path"), AssetPathInput) || AssetPathInput.IsEmpty())
@@ -195,7 +195,7 @@ bool FUeAgentHttpServer::CmdMaterialListExpressions(const FUeAgentRequestContext
 	return true;
 }
 
-bool FUeAgentHttpServer::CmdMaterialAddExpression(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdMaterialAddExpression(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	FString AssetPathInput;
 	if (!JsonTryGetString(Ctx.Params, TEXT("asset_path"), AssetPathInput) || AssetPathInput.IsEmpty())
@@ -260,7 +260,7 @@ bool FUeAgentHttpServer::CmdMaterialAddExpression(const FUeAgentRequestContext& 
 	return true;
 }
 
-bool FUeAgentHttpServer::CmdMaterialSetExpressionProperty(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdMaterialSetExpressionProperty(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	FString AssetPathInput;
 	if (!JsonTryGetString(Ctx.Params, TEXT("asset_path"), AssetPathInput) || AssetPathInput.IsEmpty())
@@ -348,7 +348,7 @@ bool FUeAgentHttpServer::CmdMaterialSetExpressionProperty(const FUeAgentRequestC
 	return true;
 }
 
-bool FUeAgentHttpServer::CmdMaterialConnectExpressions(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdMaterialConnectExpressions(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	FString AssetPathInput;
 	if (!JsonTryGetString(Ctx.Params, TEXT("asset_path"), AssetPathInput) || AssetPathInput.IsEmpty())
@@ -403,7 +403,7 @@ bool FUeAgentHttpServer::CmdMaterialConnectExpressions(const FUeAgentRequestCont
 	return true;
 }
 
-bool FUeAgentHttpServer::CmdMaterialConnectExpressionToProperty(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdMaterialConnectExpressionToProperty(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	FString AssetPathInput;
 	if (!JsonTryGetString(Ctx.Params, TEXT("asset_path"), AssetPathInput) || AssetPathInput.IsEmpty())
@@ -458,7 +458,7 @@ bool FUeAgentHttpServer::CmdMaterialConnectExpressionToProperty(const FUeAgentRe
 	return true;
 }
 
-bool FUeAgentHttpServer::CmdMaterialDeleteExpression(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdMaterialDeleteExpression(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	FString AssetPathInput;
 	if (!JsonTryGetString(Ctx.Params, TEXT("asset_path"), AssetPathInput) || AssetPathInput.IsEmpty())

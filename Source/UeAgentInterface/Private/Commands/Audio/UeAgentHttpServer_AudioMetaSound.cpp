@@ -1,6 +1,6 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
-#include "Server/UeAgentHttpServer.h"
+#include "LegacyMechanics/UeAgentLegacyMechanics.h"
 #include "Commands/Audio/UeAgentAudioFolderCommandBridge.h"
 #include "Commands/Audio/UeAgentHttpServer_AudioOps.h"
 #include "Dom/JsonObject.h"
@@ -12,11 +12,11 @@
 #include "MetasoundSource.h"
 #include "Subsystems/AssetEditorSubsystem.h"
 
-bool FUeAgentHttpServer::CmdMetaSoundCreate(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdMetaSoundCreate(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	return UeAgentAudioFolderCommandBridge::CreateMetaSound(Ctx.Params, OutData, OutError, Ctx.RequestId);
 }
-bool FUeAgentHttpServer::CmdMetaSoundGetInfo(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdMetaSoundGetInfo(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	using namespace UeAgentAudioOps;
 	FString AssetPath;
@@ -39,19 +39,19 @@ bool FUeAgentHttpServer::CmdMetaSoundGetInfo(const FUeAgentRequestContext& Ctx, 
 	OutData = BuildMetaSoundInfo(Asset, bIncludeGraph, bIncludeInterfaces, bIncludeValidation);
 	return true;
 }
-bool FUeAgentHttpServer::CmdMetaSoundExportFolder(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdMetaSoundExportFolder(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	return UeAgentAudioFolderCommandBridge::Export(UeAgentAudioAuthoring::EAssetKind::MetaSound, Ctx.Params, OutData, OutError);
 }
-bool FUeAgentHttpServer::CmdMetaSoundValidateFolder(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdMetaSoundValidateFolder(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	return UeAgentAudioFolderCommandBridge::Validate(UeAgentAudioAuthoring::EAssetKind::MetaSound, Ctx.Params, OutData, OutError);
 }
-bool FUeAgentHttpServer::CmdMetaSoundApplyFolder(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdMetaSoundApplyFolder(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	return UeAgentAudioFolderCommandBridge::Apply(UeAgentAudioAuthoring::EAssetKind::MetaSound, Ctx.Params, OutData, OutError, Ctx.RequestId);
 }
-bool FUeAgentHttpServer::CmdMetaSoundCompile(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdMetaSoundCompile(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	using namespace UeAgentAudioOps;
 	FString AssetPath;
@@ -81,7 +81,7 @@ bool FUeAgentHttpServer::CmdMetaSoundCompile(const FUeAgentRequestContext& Ctx, 
 	OutData->SetBoolField(TEXT("saved"), bSave);
 	return true;
 }
-bool FUeAgentHttpServer::CmdMetaSoundOpenEditor(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdMetaSoundOpenEditor(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	using namespace UeAgentAudioOps;
 	FString AssetPath;
@@ -112,7 +112,7 @@ bool FUeAgentHttpServer::CmdMetaSoundOpenEditor(const FUeAgentRequestContext& Ct
 	OutData->SetBoolField(TEXT("opened"), true);
 	return true;
 }
-bool FUeAgentHttpServer::CmdMetaSoundScreenshot(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdMetaSoundScreenshot(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	using namespace UeAgentAudioOps;
 	FString AssetPath;
@@ -155,7 +155,7 @@ bool FUeAgentHttpServer::CmdMetaSoundScreenshot(const FUeAgentRequestContext& Ct
 	OutData->SetStringField(TEXT("capture_mode"), TEXT("offscreen_diagnostic_graph"));
 	return true;
 }
-bool FUeAgentHttpServer::CmdMetaSoundPreview(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdMetaSoundPreview(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	return CmdAudioRuntimeProbe(Ctx, OutData, OutError);
 }

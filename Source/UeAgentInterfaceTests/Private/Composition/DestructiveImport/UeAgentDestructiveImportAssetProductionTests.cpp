@@ -19,7 +19,8 @@
 #include "Modules/ModuleManager.h"
 #include "ObjectTools.h"
 #include "Rendering/SkeletalMeshModel.h"
-#include "Server/UeAgentCommandRegistry.h"
+#include "Serialization/JsonSerializer.h"
+#include "Serialization/JsonWriter.h"
 #include "Sound/SoundWave.h"
 #include "TestSupport/UeAgentPublicCommandTestHarness.h"
 #include "UObject/Package.h"
@@ -51,6 +52,34 @@ namespace
 			AName, *EscapeJson(AValue), BName, *EscapeJson(BValue));
 	}
 
+	bool IsPlanAuthorizedCommand(const FString& CommandId)
+	{
+		return CommandId == TEXT("asset.move")
+			|| CommandId == TEXT("asset.fixup_redirectors")
+			|| CommandId == TEXT("skeletal_mesh.remove_morph_target")
+			|| CommandId == TEXT("skeletal_mesh.remove_skin_weight_profile");
+	}
+
+	bool TryAddDestructiveAuthorization(
+		const FString& Params,
+		const FString& AuthorizationId,
+		FString& OutParams)
+	{
+		TSharedPtr<FJsonObject> Object;
+		const TSharedRef<TJsonReader<>> Reader =
+			TJsonReaderFactory<>::Create(Params);
+		if (!FJsonSerializer::Deserialize(Reader, Object) || !Object.IsValid())
+		{
+			return false;
+		}
+		Object->SetStringField(
+			TEXT("destructive_authorization_id"), AuthorizationId);
+		const TSharedRef<TJsonWriter<TCHAR, TCondensedJsonPrintPolicy<TCHAR>>>
+			Writer = TJsonWriterFactory<
+				TCHAR, TCondensedJsonPrintPolicy<TCHAR>>::Create(&OutParams);
+		return FJsonSerializer::Serialize(Object.ToSharedRef(), Writer);
+	}
+
 	bool TryInvoke(
 		const FScopedPublicCommandComposition& Harness,
 		const FString& CommandId,
@@ -62,16 +91,12 @@ namespace
 		OutPayload.Reset();
 		OutResult.Reset();
 		OutError.Reset();
-		TSharedPtr<const FUeAgentCommandContractRegistry> Registry;
-		if (!UE::UAI::Composition::DestructiveImport::
-				TryCreateDestructiveImportProductionCommandContractRegistry(
-					Registry, OutError)
-			|| !Registry.IsValid())
-		{
-			return false;
-		}
-		const FUeAgentCommandContract* const Contract =
-			Registry->FindExact(CommandId);
+		const TSharedPtr<const UE::UAI::CommandRegistry::
+			FUeAgentImmutableCommandRegistry>& Registry =
+				Harness.GetCommandRegistry();
+		const UE::UAI::CommandContract::FUeAgentFrozenCommandContract*
+			const Contract = Registry.IsValid()
+				? Registry->FindExact(CommandId) : nullptr;
 		if (!Contract)
 		{
 			OutError = TEXT("command_contract_missing");
@@ -82,7 +107,7 @@ namespace
 		const FString CorrelationId = RequestId + TEXT("-correlation");
 		const FString Body =
 			TEXT("{\"command_binding_hash\":\"")
-			+ Contract->GetBindingHash()
+			+ Contract->GetContractHash()
 			+ TEXT("\",\"command_id\":\"") + CommandId
 			+ TEXT("\",\"correlation_id\":\"") + CorrelationId
 			+ TEXT("\",\"message_kind\":\"command_request\",\"params\":")
@@ -437,12 +462,10 @@ bool FUeAgentDestructiveImportAssetProductionTest::RunTest(
 	};
 	for (const FString& LegacyId : RetiredLegacyIds)
 	{
-		TestNull(*FString::Printf(TEXT("legacy exact owner retired: %s"), *LegacyId),
-			UeAgentCommandRegistry::FindExactCommandInvoker(LegacyId));
-		TestNull(*FString::Printf(TEXT("legacy prefix owner retired: %s"), *LegacyId),
-			UeAgentCommandRegistry::FindPrefixedCommandInvoker(LegacyId));
-		TestTrue(*FString::Printf(TEXT("legacy ID fails closed: %s"), *LegacyId),
-			UeAgentCommandRegistry::IsExplicitlyUnsupportedCommand(LegacyId));
+		TestNull(*FString::Printf(
+			TEXT("legacy command is absent from the formal registry: %s"),
+			*LegacyId),
+			Harness.GetCommandRegistry()->FindExact(LegacyId));
 	}
 
 	auto Invoke = [this, &Harness, &Error](
@@ -461,12 +484,57 @@ bool FUeAgentDestructiveImportAssetProductionTest::RunTest(
 			AddError(Error);
 			return false;
 		}
+		if (IsPlanAuthorizedCommand(CommandId) && Result->IsOk())
+		{
+			FString AuthorizationId;
+			FString TerminalStatus;
+			FString AuthorizedParams;
+			if (!OutPayload.IsValid()
+				|| !OutPayload->TryGetStringField(
+					TEXT("terminal_status"), TerminalStatus)
+				|| TerminalStatus != TEXT("planned")
+				|| !OutPayload->TryGetStringField(
+					TEXT("destructive_authorization_id"), AuthorizationId)
+				|| AuthorizationId.IsEmpty()
+				|| !TryAddDestructiveAuthorization(
+					Params, AuthorizationId, AuthorizedParams)
+				|| !TryInvoke(
+					Harness, CommandId, AuthorizedParams,
+					Result, OutPayload, Error)
+				|| !Result.IsSet())
+			{
+				AddError(CommandId + TEXT(":destructive_authorization_failed:")
+					+ Error);
+				return false;
+			}
+		}
 		TestEqual(*FString::Printf(TEXT("%s success state"), *CommandId),
 			Result->IsOk(), bExpectedSuccess);
-		TestTrue(*FString::Printf(TEXT("%s terminal state"), *CommandId),
-			OutPayload.IsValid()
-				&& OutPayload->GetStringField(TEXT("terminal_state"))
-					== (bExpectedSuccess ? TEXT("committed") : TEXT("rolled_back")));
+		FString TerminalStatus;
+		if (Result->IsOk())
+		{
+			TestTrue(*FString::Printf(TEXT("%s success terminal status"),
+					*CommandId),
+				OutPayload.IsValid()
+					&& OutPayload->TryGetStringField(
+						TEXT("terminal_status"), TerminalStatus)
+					&& TerminalStatus == (IsPlanAuthorizedCommand(CommandId)
+						? TEXT("committed") : TEXT("succeeded")));
+		}
+		else
+		{
+			TSharedPtr<FJsonObject> ErrorObject;
+			const TSharedRef<TJsonReader<>> Reader =
+				TJsonReaderFactory<>::Create(Result->GetErrorJson());
+			TestTrue(*FString::Printf(TEXT("%s typed terminal failure"),
+					*CommandId),
+				FJsonSerializer::Deserialize(Reader, ErrorObject)
+					&& ErrorObject.IsValid()
+					&& ErrorObject->TryGetStringField(
+						TEXT("terminal_status"), TerminalStatus)
+					&& !TerminalStatus.IsEmpty()
+					&& TerminalStatus != TEXT("state_unknown"));
+		}
 		if (Result->IsOk() != bExpectedSuccess)
 		{
 			AddError(FString::Printf(

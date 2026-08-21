@@ -73,7 +73,7 @@
 #include "Widgets/SWindow.h"
 #include "Widgets/SWidget.h"
 
-bool FUeAgentHttpServer::ExecuteAnimSequenceCommand(const FString& CommandLower, const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::ExecuteAnimSequenceCommand(const FString& CommandLower, const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	if (CommandLower == TEXT("anim_sequence_get_info")) return CmdAnimSequenceGetInfo(Ctx, OutData, OutError);
 	if (CommandLower == TEXT("anim_sequence_analyze_root_motion")) return CmdAnimSequenceAnalyzeRootMotion(Ctx, OutData, OutError);
@@ -91,7 +91,7 @@ bool FUeAgentHttpServer::ExecuteAnimSequenceCommand(const FString& CommandLower,
 	return false;
 }
 
-bool FUeAgentHttpServer::ExecuteBlendSpaceCommand(const FString& CommandLower, const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::ExecuteBlendSpaceCommand(const FString& CommandLower, const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	if (CommandLower == TEXT("blendspace_create")) return CmdBlendSpaceCreate(Ctx, OutData, OutError);
 	if (CommandLower == TEXT("blendspace_get_info")) return CmdBlendSpaceGetInfo(Ctx, OutData, OutError);
@@ -104,7 +104,7 @@ bool FUeAgentHttpServer::ExecuteBlendSpaceCommand(const FString& CommandLower, c
 	return false;
 }
 
-bool FUeAgentHttpServer::ExecuteSkeletonCommand(const FString& CommandLower, const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::ExecuteSkeletonCommand(const FString& CommandLower, const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	if (CommandLower == TEXT("skeleton_get_info")) return CmdSkeletonGetInfo(Ctx, OutData, OutError);
 	if (CommandLower == TEXT("skeleton_list_bones")) return CmdSkeletonListBones(Ctx, OutData, OutError);
@@ -120,7 +120,7 @@ bool FUeAgentHttpServer::ExecuteSkeletonCommand(const FString& CommandLower, con
 	return false;
 }
 
-bool FUeAgentHttpServer::CmdBlendSpaceCreate(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdBlendSpaceCreate(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	FString AssetPath;
 	if (!JsonTryGetString(Ctx.Params, TEXT("asset_path"), AssetPath) || AssetPath.TrimStartAndEnd().IsEmpty())
@@ -196,7 +196,7 @@ bool FUeAgentHttpServer::CmdBlendSpaceCreate(const FUeAgentRequestContext& Ctx, 
 	return true;
 }
 
-bool FUeAgentHttpServer::CmdBlendSpaceGetInfo(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdBlendSpaceGetInfo(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	FString AssetPath;
 	if (!JsonTryGetString(Ctx.Params, TEXT("asset_path"), AssetPath) || AssetPath.TrimStartAndEnd().IsEmpty())
@@ -215,7 +215,7 @@ bool FUeAgentHttpServer::CmdBlendSpaceGetInfo(const FUeAgentRequestContext& Ctx,
 	return true;
 }
 
-bool FUeAgentHttpServer::CmdBlendSpaceExportJson(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdBlendSpaceExportJson(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	if (!CmdBlendSpaceGetInfo(Ctx, OutData, OutError))
 	{
@@ -234,7 +234,7 @@ bool FUeAgentHttpServer::CmdBlendSpaceExportJson(const FUeAgentRequestContext& C
 	return true;
 }
 
-bool FUeAgentHttpServer::CmdBlendSpaceValidateJson(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdBlendSpaceValidateJson(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	TSharedPtr<FJsonObject> Params = MakeShared<FJsonObject>();
 	for (const TPair<FString, TSharedPtr<FJsonValue>>& Pair : Ctx.Params->Values)
@@ -250,7 +250,7 @@ bool FUeAgentHttpServer::CmdBlendSpaceValidateJson(const FUeAgentRequestContext&
 	return CmdBlendSpaceApplyJson(SubCtx, OutData, OutError);
 }
 
-bool FUeAgentHttpServer::CmdBlendSpaceApplyJson(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdBlendSpaceApplyJson(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	TSharedPtr<FJsonObject> JsonObj;
 	TArray<TSharedPtr<FJsonValue>> Issues;
@@ -406,7 +406,7 @@ bool FUeAgentHttpServer::CmdBlendSpaceApplyJson(const FUeAgentRequestContext& Ct
 	return true;
 }
 
-bool FUeAgentHttpServer::CmdBlendSpacePreviewSample(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdBlendSpacePreviewSample(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	FString AssetPath;
 	if (!JsonTryGetString(Ctx.Params, TEXT("asset_path"), AssetPath) || AssetPath.TrimStartAndEnd().IsEmpty())
@@ -442,7 +442,7 @@ bool FUeAgentHttpServer::CmdBlendSpacePreviewSample(const FUeAgentRequestContext
 	return true;
 }
 
-bool FUeAgentHttpServer::CmdAnimSequenceGetInfo(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdAnimSequenceGetInfo(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	FString AssetPath;
 	if (!JsonTryGetString(Ctx.Params, TEXT("asset_path"), AssetPath) || AssetPath.IsEmpty())
@@ -585,7 +585,7 @@ bool FUeAgentHttpServer::CmdAnimSequenceGetInfo(const FUeAgentRequestContext& Ct
 	return true;
 }
 
-bool FUeAgentHttpServer::CmdAnimSequenceAnalyzeRootMotion(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdAnimSequenceAnalyzeRootMotion(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	FString AssetPath;
 	if (!JsonTryGetString(Ctx.Params, TEXT("asset_path"), AssetPath) || AssetPath.IsEmpty())
@@ -907,7 +907,7 @@ bool FUeAgentHttpServer::CmdAnimSequenceAnalyzeRootMotion(const FUeAgentRequestC
 	return true;
 }
 
-bool FUeAgentHttpServer::CmdAnimSequenceSamplePose(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdAnimSequenceSamplePose(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	FString AssetPath;
 	if (!JsonTryGetString(Ctx.Params, TEXT("asset_path"), AssetPath) || AssetPath.TrimStartAndEnd().IsEmpty())
@@ -1251,7 +1251,7 @@ bool FUeAgentHttpServer::CmdAnimSequenceSamplePose(const FUeAgentRequestContext&
 	return true;
 }
 
-bool FUeAgentHttpServer::CmdAnimSequenceScreenshot(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdAnimSequenceScreenshot(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	if (!OutData.IsValid())
 	{
@@ -1807,7 +1807,7 @@ bool FUeAgentHttpServer::CmdAnimSequenceScreenshot(const FUeAgentRequestContext&
 	return true;
 }
 
-bool FUeAgentHttpServer::CmdAnimSequenceApplyBoneTracks(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdAnimSequenceApplyBoneTracks(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	FString AssetPath;
 	if (!JsonTryGetString(Ctx.Params, TEXT("asset_path"), AssetPath) || AssetPath.TrimStartAndEnd().IsEmpty())

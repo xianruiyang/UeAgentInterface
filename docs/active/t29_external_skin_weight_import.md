@@ -30,4 +30,4 @@ references before executing the selected exact identity.
 
 ## Legacy exit
 
-The process composition activates this command only through the T29 contribution. Historical `ExternalDataImport` and destructive-import routes remain inactive migration inventory until `T90-LEGACY-ASSET-RETIREMENT`; they are not fallback owners.
+The process composition activates this command only through the current external-import contribution. Historical `ExternalDataImport` and destructive-import public routes are absent from the immutable registry, and T44 removed the compiled legacy registry/HTTP handler. Retained private mechanics are not fallback owners.

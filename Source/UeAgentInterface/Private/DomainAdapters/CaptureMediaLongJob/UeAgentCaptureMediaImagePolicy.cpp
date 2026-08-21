@@ -3,13 +3,14 @@
 #include "Core/StateSemantic/UeAgentCanonicalValueJson.h"
 #include "Dom/JsonObject.h"
 #include "HAL/FileManager.h"
+#include "Misc/App.h"
 #include "Misc/Paths.h"
-#include "Server/UeAgentHttpServer.h"
+#include "LegacyMechanics/UeAgentLegacyMechanics.h"
 #include "Utilities/UeAgentJsonDiagnostics.h"
 
 namespace UE::UAI::DomainAdapters::CaptureMediaLongJob
 {
-	using FMechanics = bool (FUeAgentHttpServer::*)(
+	using FMechanics = bool (FUeAgentLegacyMechanics::*)(
 		const FUeAgentRequestContext&,
 		TSharedPtr<FJsonObject>&,
 		FString&) const;
@@ -29,63 +30,63 @@ namespace UE::UAI::DomainAdapters::CaptureMediaLongJob
 				{{TEXT("policy:image-capture:anim-blueprint/v1"),
 					TEXT("mechanics:capture:anim-blueprint-editor/v1")},
 					TEXT("anim_blueprint_screenshot"),
-					&FUeAgentHttpServer::CmdBlueprintScreenshot},
+					&FUeAgentLegacyMechanics::CmdBlueprintScreenshot},
 				{{TEXT("policy:image-capture:anim-sequence/v1"),
 					TEXT("mechanics:capture:anim-sequence-preview/v1")},
 					TEXT("anim_sequence_screenshot"),
-					&FUeAgentHttpServer::CmdAnimSequenceScreenshot},
+					&FUeAgentLegacyMechanics::CmdAnimSequenceScreenshot},
 				{{TEXT("policy:image-capture:behavior-tree/v1"),
 					TEXT("mechanics:capture:behavior-tree-widget/v1")},
 					TEXT("behavior_tree_screenshot"),
-					&FUeAgentHttpServer::CmdBehaviorTreeScreenshot},
+					&FUeAgentLegacyMechanics::CmdBehaviorTreeScreenshot},
 				{{TEXT("policy:image-capture:blueprint/v1"),
 					TEXT("mechanics:capture:blueprint-editor/v1")},
 					TEXT("blueprint_screenshot"),
-					&FUeAgentHttpServer::CmdBlueprintScreenshot},
+					&FUeAgentLegacyMechanics::CmdBlueprintScreenshot},
 				{{TEXT("policy:image-capture:control-rig/v1"),
 					TEXT("mechanics:capture:control-rig-editor/v1")},
 					TEXT("control_rig_screenshot"),
-					&FUeAgentHttpServer::CmdControlRigScreenshot},
+					&FUeAgentLegacyMechanics::CmdControlRigScreenshot},
 				{{TEXT("policy:image-capture:level-sequence/v1"),
 					TEXT("mechanics:capture:level-sequence-evaluation/v1")},
 					TEXT("sequence_screenshot"),
-					&FUeAgentHttpServer::CmdSequenceScreenshot},
+					&FUeAgentLegacyMechanics::CmdSequenceScreenshot},
 				{{TEXT("policy:image-capture:metasound/v1"),
 					TEXT("mechanics:capture:metasound-graph-widget/v1")},
 					TEXT("metasound_screenshot"),
-					&FUeAgentHttpServer::CmdMetaSoundScreenshot},
+					&FUeAgentLegacyMechanics::CmdMetaSoundScreenshot},
 				{{TEXT("policy:image-capture:niagara/v1"),
 					TEXT("mechanics:capture:niagara-preview/v1")},
 					TEXT("niagara_screenshot"),
-					&FUeAgentHttpServer::CmdNiagaraScreenshot},
+					&FUeAgentLegacyMechanics::CmdNiagaraScreenshot},
 				{{TEXT("policy:image-capture:pcg-viewport/v1"),
 					TEXT("mechanics:capture:pcg-framed-viewport/v1")},
 					TEXT("pcg_screenshot"),
-					&FUeAgentHttpServer::CmdPCGScreenshot},
+					&FUeAgentLegacyMechanics::CmdPCGScreenshot},
 				{{TEXT("policy:image-capture:sound-cue/v1"),
 					TEXT("mechanics:capture:sound-cue-graph-widget/v1")},
 					TEXT("sound_cue_screenshot"),
-					&FUeAgentHttpServer::CmdSoundCueScreenshot},
+					&FUeAgentLegacyMechanics::CmdSoundCueScreenshot},
 				{{TEXT("policy:image-capture:state-tree/v1"),
 					TEXT("mechanics:capture:state-tree-widget/v1")},
 					TEXT("state_tree_screenshot"),
-					&FUeAgentHttpServer::CmdStateTreeScreenshot},
+					&FUeAgentLegacyMechanics::CmdStateTreeScreenshot},
 				{{TEXT("policy:image-capture:texture/v1"),
 					TEXT("mechanics:capture:texture-source/v1")},
 					TEXT("texture_screenshot"),
-					&FUeAgentHttpServer::CmdTextureScreenshot},
+					&FUeAgentLegacyMechanics::CmdTextureScreenshot},
 				{{TEXT("policy:image-capture:umg/v1"),
 					TEXT("mechanics:capture:umg-offscreen-widget/v1")},
 					TEXT("umg_screenshot"),
-					&FUeAgentHttpServer::CmdUmgScreenshot},
+					&FUeAgentLegacyMechanics::CmdUmgScreenshot},
 				{{TEXT("policy:image-capture:viewport-buffer/v1"),
 					TEXT("mechanics:capture:level-viewport-buffer/v1")},
 					TEXT("screenshot_viewport_buffer"),
-					&FUeAgentHttpServer::CmdScreenshotViewportBuffer},
+					&FUeAgentLegacyMechanics::CmdScreenshotViewportBuffer},
 				{{TEXT("policy:image-capture:viewport/v1"),
 					TEXT("mechanics:capture:level-viewport-visualization/v1")},
 					TEXT("screenshot_viewport"),
-					&FUeAgentHttpServer::CmdScreenshotViewport},
+					&FUeAgentLegacyMechanics::CmdScreenshotViewport},
 			};
 			return Value;
 		}
@@ -272,6 +273,12 @@ namespace UE::UAI::DomainAdapters::CaptureMediaLongJob
 				+ Request.GetPolicyId();
 			return false;
 		}
+		if (!FApp::CanEverRender())
+		{
+			OutError = TEXT("capture_image_rhi_unavailable:")
+				+ Request.GetPolicyId();
+			return false;
+		}
 		TSharedPtr<FJsonObject> Parameters;
 		if (!TryProjectParameters(
 				Request,
@@ -288,7 +295,7 @@ namespace UE::UAI::DomainAdapters::CaptureMediaLongJob
 		Context.Command = Route->InternalCommandId;
 		Context.Params = Parameters;
 		TSharedPtr<FJsonObject> Result;
-		const FUeAgentHttpServer MechanicsOwner;
+		const FUeAgentLegacyMechanics MechanicsOwner;
 		if (!(MechanicsOwner.*Route->Mechanics)(Context, Result, OutError))
 		{
 			OutError = Route->Descriptor.GetMechanicsId() + TEXT(":") + OutError;

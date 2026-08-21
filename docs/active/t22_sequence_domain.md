@@ -1,6 +1,6 @@
-# T22 Sequence HJSON domain
+# T22 Sequence HJSON Domain
 
-The only Sequence authoring ingress is
+The only Sequence **HJSON** authoring ingress is
 `client.content_graph.import_workspace(...)`, with
 `client.content_graph.structure(...)` for independent readback. The shared SDK
 also exposes `client.content_graph.export_workspace(...)`, but T22 does not
@@ -27,3 +27,16 @@ tracks, sections, channels, and keys. Missing targets require
 `expected_revision: missing`; existing targets require the revision returned by
 the previous independent structure or import readback. Validation completes
 before delegated mutation.
+
+For a missing `/Script/LevelSequence.LevelSequence` target, `root.structure`
+must include `display_rate` and `tick_resolution`; the import creates the asset
+through `timeline.sequence.create`. A missing-root document cannot also contain
+`root.operation`, so creation and later structural replacement remain separate,
+revision-guarded transactions. For an existing target, the same structure is
+applied through `timeline.sequence.structure.replace` with the native revision
+captured by the preceding readback.
+
+Successful imports return mutation, compile/settle, save, reload, persistence,
+and independent-readback evidence. Direct `timeline.sequence.*` commands remain
+the native public command family; this document defines their HJSON projection,
+not a replacement owner or a second Sequence implementation.

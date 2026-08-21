@@ -1429,10 +1429,24 @@ namespace UE::UAI::Composition
 			AnimationProfiles;
 		TArray<GraphCompound::FUeAgentGraphCompoundActivationProfile>
 			AudioMediaProfiles;
+		TSet<FString> GraphCapabilityIds;
+		TArray<FString> InvalidProfileMemberships;
 		for (const GraphCompound::FUeAgentGraphCompoundActivationProfile& Profile
 			: GraphProfiles)
 		{
 			const FString& CapabilityId = Profile.GetCapabilityId();
+			GraphCapabilityIds.Add(CapabilityId);
+			const int32 MembershipCount =
+				(BlueprintMaterialCapabilities.Contains(CapabilityId) ? 1 : 0)
+				+ (PcgAiCapabilities.Contains(CapabilityId) ? 1 : 0)
+				+ (AnimationCapabilities.Contains(CapabilityId) ? 1 : 0)
+				+ (AudioMediaCapabilities.Contains(CapabilityId) ? 1 : 0);
+			if (MembershipCount != 1)
+			{
+				InvalidProfileMemberships.Add(FString::Printf(
+					TEXT("%s:%d"), *CapabilityId, MembershipCount));
+				continue;
+			}
 			if (BlueprintMaterialCapabilities.Contains(CapabilityId))
 			{
 				BlueprintMaterialProfiles.Add(Profile);
@@ -1450,19 +1464,43 @@ namespace UE::UAI::Composition
 				AudioMediaProfiles.Add(Profile);
 			}
 		}
-		if (GraphProfiles.Num() != 77
-			|| BlueprintMaterialProfiles.Num() != 19
-			|| PcgAiProfiles.Num() != 17
-			|| AnimationProfiles.Num() != 26
-			|| AudioMediaProfiles.Num() != 15)
+		TSet<FString> DeclaredCapabilityIds = BlueprintMaterialCapabilities;
+		DeclaredCapabilityIds.Append(PcgAiCapabilities);
+		DeclaredCapabilityIds.Append(AnimationCapabilities);
+		DeclaredCapabilityIds.Append(AudioMediaCapabilities);
+		TArray<FString> MissingActivationCapabilities;
+		for (const FString& CapabilityId : DeclaredCapabilityIds)
+		{
+			if (!GraphCapabilityIds.Contains(CapabilityId))
+			{
+				MissingActivationCapabilities.Add(CapabilityId);
+			}
+		}
+		InvalidProfileMemberships.Sort();
+		MissingActivationCapabilities.Sort();
+		const int32 PartitionedProfileCount =
+			BlueprintMaterialProfiles.Num()
+			+ PcgAiProfiles.Num()
+			+ AnimationProfiles.Num()
+			+ AudioMediaProfiles.Num();
+		if (GraphProfiles.IsEmpty()
+			|| BlueprintMaterialProfiles.IsEmpty()
+			|| PcgAiProfiles.IsEmpty()
+			|| AnimationProfiles.IsEmpty()
+			|| AudioMediaProfiles.IsEmpty()
+			|| PartitionedProfileCount != GraphProfiles.Num()
+			|| !InvalidProfileMemberships.IsEmpty()
+			|| !MissingActivationCapabilities.IsEmpty())
 		{
 			SetError(OutError,
 				TEXT("graph_compound_public_profile_invalid"),
 				FString::Printf(
-					TEXT("all=%d blueprint_material=%d pcg_ai=%d animation=%d audio_media=%d"),
-					GraphProfiles.Num(), BlueprintMaterialProfiles.Num(),
-					PcgAiProfiles.Num(), AnimationProfiles.Num(),
-					AudioMediaProfiles.Num()));
+					TEXT("all=%d partitioned=%d blueprint_material=%d pcg_ai=%d animation=%d audio_media=%d invalid_memberships=%s missing_activation=%s"),
+					GraphProfiles.Num(), PartitionedProfileCount,
+					BlueprintMaterialProfiles.Num(), PcgAiProfiles.Num(),
+					AnimationProfiles.Num(), AudioMediaProfiles.Num(),
+					*FString::Join(InvalidProfileMemberships, TEXT(",")),
+					*FString::Join(MissingActivationCapabilities, TEXT(","))));
 			return false;
 		}
 		GraphCompound::FGraphCompoundRuntimeConfig GraphRuntimeConfig;

@@ -97,7 +97,7 @@
 #include "UeAgentInterfaceSettings.h"
 #include "WidgetBlueprint.h"
 
-bool FUeAgentHttpServer::CmdSequenceAddActorBinding(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdSequenceAddActorBinding(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	FString AssetPath;
 	if (!JsonTryGetString(Ctx.Params, TEXT("asset_path"), AssetPath) || AssetPath.IsEmpty())
@@ -182,7 +182,7 @@ bool FUeAgentHttpServer::CmdSequenceAddActorBinding(const FUeAgentRequestContext
 	return true;
 }
 
-bool FUeAgentHttpServer::CmdSequenceRemoveActorBinding(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdSequenceRemoveActorBinding(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	FString AssetPath;
 	if (!JsonTryGetString(Ctx.Params, TEXT("asset_path"), AssetPath) || AssetPath.IsEmpty())
@@ -260,7 +260,7 @@ bool FUeAgentHttpServer::CmdSequenceRemoveActorBinding(const FUeAgentRequestCont
 	return true;
 }
 
-bool FUeAgentHttpServer::CmdSequenceAddTransformTrack(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdSequenceAddTransformTrack(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	FString AssetPath;
 	if (!JsonTryGetString(Ctx.Params, TEXT("asset_path"), AssetPath) || AssetPath.IsEmpty())
@@ -351,7 +351,7 @@ bool FUeAgentHttpServer::CmdSequenceAddTransformTrack(const FUeAgentRequestConte
 	return true;
 }
 
-bool FUeAgentHttpServer::CmdSequenceAddVisibilityTrack(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdSequenceAddVisibilityTrack(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	FString AssetPath;
 	if (!JsonTryGetString(Ctx.Params, TEXT("asset_path"), AssetPath) || AssetPath.IsEmpty())
@@ -429,7 +429,7 @@ bool FUeAgentHttpServer::CmdSequenceAddVisibilityTrack(const FUeAgentRequestCont
 	return true;
 }
 
-bool FUeAgentHttpServer::CmdSequenceAddVisibilityKey(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdSequenceAddVisibilityKey(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	FString AssetPath;
 	if (!JsonTryGetString(Ctx.Params, TEXT("asset_path"), AssetPath) || AssetPath.IsEmpty())
@@ -558,7 +558,7 @@ bool FUeAgentHttpServer::CmdSequenceAddVisibilityKey(const FUeAgentRequestContex
 	return true;
 }
 
-bool FUeAgentHttpServer::CmdSequenceAddPropertyTrack(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdSequenceAddPropertyTrack(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	FString PropertyTypeText;
 	if (!JsonTryGetString(Ctx.Params, TEXT("property_type"), PropertyTypeText) || PropertyTypeText.TrimStartAndEnd().IsEmpty())
@@ -1335,7 +1335,7 @@ bool FUeAgentHttpServer::CmdSequenceAddPropertyTrack(const FUeAgentRequestContex
 	return true;
 }
 
-bool FUeAgentHttpServer::CmdSequenceAddBoolPropertyTrack(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdSequenceAddBoolPropertyTrack(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	FString AssetPath;
 	if (!JsonTryGetString(Ctx.Params, TEXT("asset_path"), AssetPath) || AssetPath.IsEmpty())
@@ -1447,7 +1447,7 @@ bool FUeAgentHttpServer::CmdSequenceAddBoolPropertyTrack(const FUeAgentRequestCo
 	return true;
 }
 
-bool FUeAgentHttpServer::CmdSequenceAddBoolPropertyKey(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdSequenceAddBoolPropertyKey(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	FString AssetPath;
 	if (!JsonTryGetString(Ctx.Params, TEXT("asset_path"), AssetPath) || AssetPath.IsEmpty())
@@ -1592,7 +1592,7 @@ bool FUeAgentHttpServer::CmdSequenceAddBoolPropertyKey(const FUeAgentRequestCont
 	return true;
 }
 
-bool FUeAgentHttpServer::CmdSequenceAddFloatPropertyTrack(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdSequenceAddFloatPropertyTrack(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	FString AssetPath;
 	if (!JsonTryGetString(Ctx.Params, TEXT("asset_path"), AssetPath) || AssetPath.IsEmpty())
@@ -1704,7 +1704,7 @@ bool FUeAgentHttpServer::CmdSequenceAddFloatPropertyTrack(const FUeAgentRequestC
 	return true;
 }
 
-bool FUeAgentHttpServer::CmdSequenceAddFloatPropertyKey(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdSequenceAddFloatPropertyKey(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	FString AssetPath;
 	if (!JsonTryGetString(Ctx.Params, TEXT("asset_path"), AssetPath) || AssetPath.IsEmpty())
@@ -1849,7 +1849,7 @@ bool FUeAgentHttpServer::CmdSequenceAddFloatPropertyKey(const FUeAgentRequestCon
 	return true;
 }
 
-bool FUeAgentHttpServer::CmdSequenceAddIntegerPropertyTrack(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdSequenceAddIntegerPropertyTrack(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	FString AssetPath;
 	if (!JsonTryGetString(Ctx.Params, TEXT("asset_path"), AssetPath) || AssetPath.IsEmpty())
@@ -1961,7 +1961,7 @@ bool FUeAgentHttpServer::CmdSequenceAddIntegerPropertyTrack(const FUeAgentReques
 	return true;
 }
 
-bool FUeAgentHttpServer::CmdSequenceAddIntegerPropertyKey(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdSequenceAddIntegerPropertyKey(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	FString AssetPath;
 	if (!JsonTryGetString(Ctx.Params, TEXT("asset_path"), AssetPath) || AssetPath.IsEmpty())
@@ -2112,7 +2112,7 @@ bool FUeAgentHttpServer::CmdSequenceAddIntegerPropertyKey(const FUeAgentRequestC
 	return true;
 }
 
-bool FUeAgentHttpServer::CmdSequenceAddTransformKey(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdSequenceAddTransformKey(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	FString AssetPath;
 	if (!JsonTryGetString(Ctx.Params, TEXT("asset_path"), AssetPath) || AssetPath.IsEmpty())
@@ -2249,7 +2249,7 @@ bool FUeAgentHttpServer::CmdSequenceAddTransformKey(const FUeAgentRequestContext
 	return true;
 }
 
-bool FUeAgentHttpServer::CmdSequenceAddSkeletalAnimationTrack(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdSequenceAddSkeletalAnimationTrack(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	FString AssetPath;
 	if (!JsonTryGetString(Ctx.Params, TEXT("asset_path"), AssetPath) || AssetPath.IsEmpty())
@@ -2323,7 +2323,7 @@ bool FUeAgentHttpServer::CmdSequenceAddSkeletalAnimationTrack(const FUeAgentRequ
 	return true;
 }
 
-bool FUeAgentHttpServer::CmdSequenceAddSkeletalAnimationSection(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdSequenceAddSkeletalAnimationSection(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	FString AssetPath;
 	if (!JsonTryGetString(Ctx.Params, TEXT("asset_path"), AssetPath) || AssetPath.IsEmpty())
@@ -2493,7 +2493,7 @@ bool FUeAgentHttpServer::CmdSequenceAddSkeletalAnimationSection(const FUeAgentRe
 	return true;
 }
 
-bool FUeAgentHttpServer::CmdSequenceUpdateSkeletalAnimationSection(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdSequenceUpdateSkeletalAnimationSection(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	FString AssetPath;
 	if (!JsonTryGetString(Ctx.Params, TEXT("asset_path"), AssetPath) || AssetPath.IsEmpty())
@@ -2713,7 +2713,7 @@ bool FUeAgentHttpServer::CmdSequenceUpdateSkeletalAnimationSection(const FUeAgen
 	return true;
 }
 
-bool FUeAgentHttpServer::CmdSequenceRemoveSkeletalAnimationSection(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdSequenceRemoveSkeletalAnimationSection(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	FString AssetPath;
 	if (!JsonTryGetString(Ctx.Params, TEXT("asset_path"), AssetPath) || AssetPath.IsEmpty())

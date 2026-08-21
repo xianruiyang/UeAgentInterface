@@ -5,6 +5,7 @@
 #include "CommandRegistry/UeAgentImmutableCommandRegistry.h"
 #include "Core/BindingGateway/Operation/UeAgentOperationLifecycleService.h"
 #include "Core/BindingGateway/Query/UeAgentDomainQuery.h"
+#include "Core/ContentDiscovery/UeAgentContentDiscovery.h"
 #include "Core/Discovery/UeAgentDiscovery.h"
 #include "Core/HjsonWorkspace/ImportInitialization/UeAgentHjsonDomainProviderRegistry.h"
 #include "Core/HjsonWorkspace/UeAgentAuthoringComposition.h"
@@ -166,6 +167,8 @@ namespace UE::UAI::DomainCapability
 			EDomainCapabilitySupport::Undeclared;
 		TArray<FDomainDiscoverySource> Sources;
 		TArray<TSharedRef<Discovery::IUeAgentStateReadPort>> ReadPorts;
+		TArray<TSharedRef<ContentDiscovery::
+			IUeAgentContentDiscoveryProvider>> ContentProviders;
 	};
 
 	struct UEAGENTINTERFACE_API FDomainHjsonRoute
@@ -318,6 +321,12 @@ namespace UE::UAI::DomainCapability
 			FUeAgentImmutableCommandRegistry>& GetCommandRegistry() const;
 		const TSharedPtr<const CommandEdge::FUeAgentExactCommandDispatch>&
 			GetCommandDispatch() const;
+		const TSharedPtr<const BindingGateway::Query::
+			FUeAgentDomainQueryProviderRegistry>& GetQueryProviderRegistry() const;
+		const TSharedPtr<const Discovery::FUeAgentDiscoveryService>&
+			GetDiscoveryService() const;
+		const TSharedPtr<const ContentDiscovery::
+			FUeAgentContentDiscoveryService>& GetContentDiscoveryService() const;
 		const TSharedPtr<const HjsonWorkspace::
 			FImportInitializationDomainProviderRegistry>&
 			GetHjsonRegistry() const;
@@ -329,6 +338,12 @@ namespace UE::UAI::DomainCapability
 			CommandRegistry;
 		TSharedPtr<const CommandEdge::FUeAgentExactCommandDispatch>
 			CommandDispatch;
+		TSharedPtr<const BindingGateway::Query::
+			FUeAgentDomainQueryProviderRegistry> QueryProviderRegistry;
+		TSharedPtr<const Discovery::FUeAgentDiscoveryService>
+			DiscoveryService;
+		TSharedPtr<const ContentDiscovery::FUeAgentContentDiscoveryService>
+			ContentDiscoveryService;
 		TSharedPtr<const HjsonWorkspace::
 			FImportInitializationDomainProviderRegistry> HjsonRegistry;
 	};

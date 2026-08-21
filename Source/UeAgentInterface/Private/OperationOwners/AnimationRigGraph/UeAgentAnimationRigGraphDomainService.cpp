@@ -196,6 +196,9 @@ namespace UE::UAI::OperationOwners::AnimationRigGraph
 				for (const FAnimationRigGraphCandidate& Candidate : QueryResult.Candidates)
 				{
 					const TSharedPtr<FJsonObject> Value = MakeShared<FJsonObject>();
+					Value->SetStringField(TEXT("target_ref"), Candidate.TargetRef);
+					Value->SetStringField(
+						TEXT("target_revision"), Candidate.TargetRevision);
 					Value->SetStringField(TEXT("name"), Candidate.Name);
 					Value->SetStringField(TEXT("label"), Candidate.Label);
 					Value->SetStringField(TEXT("kind"), Candidate.Kind);

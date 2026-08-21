@@ -544,7 +544,7 @@ namespace UeAgentAssetOps
 		return true;
 	}
 }
-bool FUeAgentHttpServer::CmdEditorListDirtyResources(TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdEditorListDirtyResources(TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	UWorld* EditorWorld = GEditor ? GEditor->GetEditorWorldContext().World() : nullptr;
 	UAssetEditorSubsystem* AssetEditorSubsystem = GEditor ? GEditor->GetEditorSubsystem<UAssetEditorSubsystem>() : nullptr;
@@ -561,7 +561,7 @@ bool FUeAgentHttpServer::CmdEditorListDirtyResources(TSharedPtr<FJsonObject>& Ou
 	return true;
 }
 
-bool FUeAgentHttpServer::CmdEditorResolveDirtyResources(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdEditorResolveDirtyResources(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	UWorld* EditorWorld = GEditor ? GEditor->GetEditorWorldContext().World() : nullptr;
 	UAssetEditorSubsystem* AssetEditorSubsystem = GEditor ? GEditor->GetEditorSubsystem<UAssetEditorSubsystem>() : nullptr;
@@ -619,7 +619,7 @@ bool FUeAgentHttpServer::CmdEditorResolveDirtyResources(const FUeAgentRequestCon
 	return true;
 }
 
-bool FUeAgentHttpServer::CmdEditorClose(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdEditorClose(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	UWorld* EditorWorld = GEditor ? GEditor->GetEditorWorldContext().World() : nullptr;
 	UAssetEditorSubsystem* AssetEditorSubsystem = GEditor ? GEditor->GetEditorSubsystem<UAssetEditorSubsystem>() : nullptr;
@@ -720,7 +720,7 @@ bool FUeAgentHttpServer::CmdEditorClose(const FUeAgentRequestContext& Ctx, TShar
 	return true;
 }
 
-bool FUeAgentHttpServer::CmdEditorPrepareExit(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdEditorPrepareExit(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	bool bSaveCurrentLevel = false;
 	if (!UeAgentCommandSafety::ReadStrictBool(Ctx.Params, TEXT("save_current_level"), false, bSaveCurrentLevel, OutError))

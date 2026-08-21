@@ -64,34 +64,9 @@ namespace UE::UAI::CommandHandlers::SpatialContent
 						TEXT("spatial_content_game_thread_required"),
 						TEXT("native spatial mechanics must run on the game thread"));
 				}
-				TSharedPtr<IUeAgentCommandHandler> Mechanics;
-				TArray<FString> MechanicsScopes;
-				FString Error;
-				if (!OperationOwners::SpatialContent::TryResolveMechanics(
-						CommandId,
-						Mechanics,
-						MechanicsScopes,
-						Error)
-					|| !Mechanics.IsValid())
-				{
-					return Failure(
-						Request,
-						TEXT("spatial_content_runtime_unavailable"),
-						Error);
-				}
-				TArray<FString> Scopes = Caller.GetAuthorityScopes();
-				for (const FString& Scope : MechanicsScopes)
-				{
-					Scopes.AddUnique(Scope);
-				}
-				const Contract::FUeAgentCallerContext EffectiveCaller(
-					Caller.GetCallerId(),
-					MoveTemp(Scopes),
-					Caller.GetCorrelationId());
 				return OperationOwners::SpatialContent::Submit(
-					Mechanics.ToSharedRef(),
 					Request,
-					EffectiveCaller,
+					Caller,
 					Cancellation);
 			}
 		private:

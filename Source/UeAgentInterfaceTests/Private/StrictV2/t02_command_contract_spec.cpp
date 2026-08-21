@@ -458,25 +458,9 @@ bool FUaiStrictV2T02ActiveAuthorityBoundaryTest::RunTest(const FString& Paramete
 		TEXT("core registration consumes the exact dispatcher"),
 		Registration.Contains(TEXT("FUeAgentExactCommandDispatch")));
 	TestFalse(
-		TEXT("core registration cannot depend on the old server registry"),
-		Registration.Contains(TEXT("Server/UeAgentCommandRegistry"))
-			|| Registration.Contains(TEXT("FUeAgentCommandRegistry")));
-	TestFalse(
 		TEXT("core registration has no prefix, fallback, or alias execution path"),
 		Registration.Contains(TEXT("StartsWith"))
 			|| Registration.Contains(TEXT("fallback"))
 			|| Registration.Contains(TEXT("alias")));
-
-	FString Module;
-	if (LoadSource(
-		*this,
-		TEXT("Private/Module/UeAgentInterfaceModule.cpp"),
-		Module))
-	{
-		TestFalse(
-			TEXT("active module does not reactivate the old server registry"),
-			Module.Contains(TEXT("Server/UeAgentCommandRegistry"))
-				|| Module.Contains(TEXT("FUeAgentCommandRegistry")));
-	}
 	return !HasAnyErrors();
 }

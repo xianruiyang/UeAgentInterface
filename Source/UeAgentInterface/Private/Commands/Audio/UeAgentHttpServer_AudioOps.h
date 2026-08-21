@@ -4,7 +4,7 @@
 
 #include "CoreMinimal.h"
 #include "Dom/JsonObject.h"
-#include "Server/UeAgentHttpServerTypes.h"
+#include "LegacyMechanics/UeAgentLegacyMechanicsTypes.h"
 
 class AActor;
 class UAudioComponent;

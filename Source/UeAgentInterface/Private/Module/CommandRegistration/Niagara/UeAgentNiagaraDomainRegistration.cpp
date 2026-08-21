@@ -87,7 +87,7 @@ namespace UE::UAI::Module::CommandRegistration::Niagara
 				TEXT("query.command.detail"),
 				TEXT("content_graph.summary"),
 				TEXT("content_graph.import_workspace"),
-				TEXT("niagara.stack.apply"),
+				TEXT("content_graph.items"),
 			};
 			Result.Purpose.Keywords = {TEXT("niagara"), TEXT("module"), TEXT("candidate"), TEXT("stack"), TEXT("hjson")};
 			Result.Purpose.Synonyms = {TEXT("find niagara module"), TEXT("resolve niagara stack module")};

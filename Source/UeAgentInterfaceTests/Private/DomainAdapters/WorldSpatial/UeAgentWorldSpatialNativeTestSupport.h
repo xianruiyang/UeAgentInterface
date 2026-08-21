@@ -96,6 +96,15 @@ namespace UE::UAI::Tests::WorldSpatial
 			return false;
 		}
 
+		bool TryPersistObject(
+			UObject& Object,
+			UE::UAI::DomainAdapters::WorldSpatial::
+				FUeAgentWorldSpatialExecutionError& OutError) override
+		{
+			OutError = {};
+			return IsValid(&Object);
+		}
+
 		bool TryResolveMeshSelectionSession(
 			const FString& ViewportIdentity,
 			const TArray<FString>& SelectionIdentities,

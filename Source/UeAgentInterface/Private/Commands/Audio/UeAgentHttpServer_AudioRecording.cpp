@@ -1,12 +1,12 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
-#include "Server/UeAgentHttpServer.h"
+#include "LegacyMechanics/UeAgentLegacyMechanics.h"
 #include "Commands/Audio/UeAgentHttpServer_AudioOps.h"
 
 #include "Components/AudioComponent.h"
 #include "Dom/JsonObject.h"
 
-bool FUeAgentHttpServer::CmdAudioStopAllPreviewSounds(
+bool FUeAgentLegacyMechanics::CmdAudioStopAllPreviewSounds(
 	const FUeAgentRequestContext& Ctx,
 	TSharedPtr<FJsonObject>& OutData,
 	FString& OutError) const

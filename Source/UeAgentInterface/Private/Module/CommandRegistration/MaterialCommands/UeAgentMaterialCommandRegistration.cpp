@@ -3,7 +3,9 @@
 #include "CommandHandlers/MaterialCommands/UeAgentMaterialCommandHandlers.h"
 #include "Composition/GraphCompound/UeAgentGraphCompoundActivation.h"
 #include "Core/Contract/UeAgentCommandContract.h"
+#include "Core/DomainCapability/UeAgentDomainCapability.h"
 #include "DomainAdapters/MaterialCommands/UeAgentMaterialCommandMechanicsBoundary.h"
+#include "OperationOwners/MaterialCommands/UeAgentMaterialCommandOperationOwner.h"
 
 namespace UE::UAI::Module::CommandRegistration::MaterialCommands
 {
@@ -44,8 +46,11 @@ namespace UE::UAI::Module::CommandRegistration::MaterialCommands
 			const bool bQuery = DomainAdapters::MaterialCommands::IsQuery(Id);
 			FUeAgentCommandDeclaration Result;
 			Result.CommandId = Id;
-			Result.PythonNamespace = TEXT("t50_material_command_migration");
-			Result.PythonFunction = Id.Replace(TEXT("."), TEXT("_"));
+			const int32 Dot = Id.Find(TEXT("."));
+			Result.PythonNamespace = Dot == INDEX_NONE ? Id : Id.Left(Dot);
+			Result.PythonFunction = Dot == INDEX_NONE
+				? Id
+				: Id.Mid(Dot + 1).Replace(TEXT("."), TEXT("_"));
 			Result.ContractVersion = 1;
 			Result.PublicOwner = Owner;
 			Result.Availability = EUeAgentCommandAvailability::Enabled;
@@ -127,6 +132,64 @@ namespace UE::UAI::Module::CommandRegistration::MaterialCommands
 
 		const FUeAgentActiveCommandContributionFactoryRegistration Registration(
 			TEXT("material-command-migration"), &TryCreateContribution);
+
+		bool TryCreateDomainCapability(
+			TSharedPtr<const DomainCapability::FDomainCapabilityContribution>&
+				OutContribution,
+			FString& OutError)
+		{
+			DomainCapability::FDomainCapabilityDeclaration Declaration =
+				DomainCapability::MakeExplicitlyUnsupportedDomainCapabilityDeclaration(
+					TEXT("material-commands"));
+			Declaration.Operation.Support =
+				DomainCapability::EDomainCapabilitySupport::Supported;
+			for (const FString& OperationId
+				: DomainAdapters::MaterialCommands::GetCommandIds())
+			{
+				const TSharedPtr<const DomainCapability::
+					IDomainOperationInvocationFactory> Factory =
+						OperationOwners::MaterialCommands::
+							FindOperationInvocationFactory(OperationId);
+				if (!Factory.IsValid())
+				{
+					OutError = TEXT("material_command_operation_factory_missing:")
+						+ OperationId;
+					return false;
+				}
+				DomainCapability::FDomainOperationEntry Operation;
+				Operation.OperationId = OperationId;
+				Operation.Kind = OperationId.EndsWith(TEXT(".create"))
+					? DomainCapability::EDomainOperationKind::Create
+					: DomainCapability::EDomainOperationKind::Write;
+				Operation.TerminalPolicy = DomainCapability::
+					EDomainOperationTerminalPolicy::
+						SucceededRejectedRolledBackOrStateUnknown;
+				Operation.ExecutionPolicy = DomainCapability::
+					EDomainOperationExecutionPolicy::Immediate;
+				Operation.TransientStatePolicy = DomainCapability::
+					EDomainTransientStatePolicy::None;
+				Operation.bPersists = true;
+				Operation.bIndependentReadback = true;
+				Operation.InvocationFactory = Factory;
+				Declaration.Operation.Operations.Add(MoveTemp(Operation));
+			}
+			Declaration.State.Support =
+				DomainCapability::EDomainCapabilitySupport::Supported;
+			Declaration.State.Planes = {
+				StateSemantic::EUeAgentStatePlane::AuthoringMemory,
+				StateSemantic::EUeAgentStatePlane::Persisted,
+			};
+			Declaration.Migration.Support =
+				DomainCapability::EDomainCapabilitySupport::Supported;
+			Declaration.Migration.OwnerId =
+				TEXT("TROOT-UAI-38-ASSET-MATERIAL-TEXTURE-MEDIA-VERTICAL");
+			return DomainCapability::FDomainCapabilityContribution::TryCreate(
+				MoveTemp(Declaration), OutContribution, OutError);
+		}
+
+		const DomainCapability::FDomainCapabilityContributionFactoryRegistration
+			DomainCapabilityRegistration(
+				TEXT("material-commands"), &TryCreateDomainCapability);
 	}
 
 	bool TryCreateContribution(

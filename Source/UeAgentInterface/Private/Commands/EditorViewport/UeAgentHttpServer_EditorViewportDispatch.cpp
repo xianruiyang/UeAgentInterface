@@ -19,7 +19,7 @@
 
 namespace UeAgentEditorViewport
 {
-	void MakeAdapters(const FUeAgentHttpServer& Server, TArray<TSharedRef<IViewportAdapter>>& OutAdapters)
+	void MakeAdapters(const FUeAgentLegacyMechanics& Server, TArray<TSharedRef<IViewportAdapter>>& OutAdapters)
 	{
 		OutAdapters.Add(MakeLevelViewportAdapter(Server));
 		OutAdapters.Add(MakeStaticMeshViewportAdapter());
@@ -34,7 +34,7 @@ namespace UeAgentEditorViewport
 		OutAdapters.Add(MakeMaterialViewportAdapter());
 	}
 
-	bool ResolveAdapter(const FUeAgentHttpServer& Server, const TSharedPtr<FJsonObject>& Params, TSharedRef<IViewportAdapter>& OutAdapter, FResolvedViewport& OutViewport, FString& OutError)
+	bool ResolveAdapter(const FUeAgentLegacyMechanics& Server, const TSharedPtr<FJsonObject>& Params, TSharedRef<IViewportAdapter>& OutAdapter, FResolvedViewport& OutViewport, FString& OutError)
 	{
 		const FViewportTarget Target = ParseTarget(Params);
 		FResolveRequest Request;
@@ -153,7 +153,7 @@ namespace UeAgentEditorViewport
 	}
 }
 
-bool FUeAgentHttpServer::ExecuteEditorViewportCommand(const FString& CommandLower, const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::ExecuteEditorViewportCommand(const FString& CommandLower, const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	using namespace UeAgentEditorViewport;
 

@@ -3,7 +3,7 @@
 #include "Composition/SimpleAuthoring/UeAgentSimpleAuthoringRuntimeResolvers.h"
 #include "Dom/JsonObject.h"
 #include "Misc/ConfigCacheIni.h"
-#include "Server/UeAgentHttpServer.h"
+#include "LegacyMechanics/UeAgentLegacyMechanics.h"
 
 namespace UE::UAI::DomainAdapters::EditorProject
 {
@@ -188,7 +188,7 @@ namespace UE::UAI::DomainAdapters::EditorProject
 			}
 
 		private:
-			FUeAgentHttpServer Mechanics;
+			FUeAgentLegacyMechanics Mechanics;
 		};
 	}
 

@@ -76,6 +76,16 @@ namespace UE::UAI::DomainAdapters::AnimationRigGraph
 			EAnimationRigGraphMutationIntent::Create;
 	};
 
+	struct FAnimationRigGraphUnitMutation final
+	{
+		FName NodeName;
+		FString ScriptStructRef;
+		FName MethodName = TEXT("Execute");
+		FVector2D Position = FVector2D::ZeroVector;
+		EAnimationRigGraphMutationIntent Intent =
+			EAnimationRigGraphMutationIntent::Create;
+	};
+
 	struct FAnimationRigGraphShapeMutation final
 	{
 		FName Name;
@@ -294,6 +304,7 @@ namespace UE::UAI::DomainAdapters::AnimationRigGraph
 		bool TryApplyAndCaptureControlRigDefinition(
 			UControlRigBlueprint& Blueprint,
 			const TArray<FAnimationRigGraphControlMutation>& Mutations,
+			const TArray<FAnimationRigGraphUnitMutation>& UnitMutations,
 			FAnimationRigGraphNativeMutationReceipt& OutApplyReceipt,
 			FAnimationRigGraphBarrierReceipt& OutBarrierReceipt,
 			FAnimationRigGraphTopology& OutTopology,

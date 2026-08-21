@@ -26,7 +26,7 @@
 
 #include <atomic>
 
-bool FUeAgentHttpServer::TrySaveCurrentLevelWithGuard(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::TrySaveCurrentLevelWithGuard(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	UWorld* World = GetEditorWorld(OutError);
 	if (!World)
@@ -77,12 +77,12 @@ bool FUeAgentHttpServer::TrySaveCurrentLevelWithGuard(const FUeAgentRequestConte
 	return true;
 }
 
-bool FUeAgentHttpServer::CmdSaveCurrentLevel(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdSaveCurrentLevel(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	return TrySaveCurrentLevelWithGuard(Ctx, OutData, OutError);
 }
 
-bool FUeAgentHttpServer::CmdLevelCreateBlank(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdLevelCreateBlank(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	FString PackagePath;
 	if (!UeAgentLevelOps::TryGetLevelPackagePath(Ctx.Params, PackagePath))
@@ -157,7 +157,7 @@ bool FUeAgentHttpServer::CmdLevelCreateBlank(const FUeAgentRequestContext& Ctx, 
 	return true;
 }
 
-bool FUeAgentHttpServer::CmdLevelOpen(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdLevelOpen(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	FString PackagePath;
 	if (!UeAgentLevelOps::TryGetLevelPackagePath(Ctx.Params, PackagePath))
@@ -201,7 +201,7 @@ bool FUeAgentHttpServer::CmdLevelOpen(const FUeAgentRequestContext& Ctx, TShared
 	return true;
 }
 
-UWorld* FUeAgentHttpServer::GetEditorWorld(FString& OutError)
+UWorld* FUeAgentLegacyMechanics::GetEditorWorld(FString& OutError)
 {
 	if (!GEditor)
 	{
@@ -217,7 +217,7 @@ UWorld* FUeAgentHttpServer::GetEditorWorld(FString& OutError)
 	return World;
 }
 
-AActor* FUeAgentHttpServer::FindActorByNameOrLabel(UWorld* World, const FString& NameOrLabel)
+AActor* FUeAgentLegacyMechanics::FindActorByNameOrLabel(UWorld* World, const FString& NameOrLabel)
 {
 	for (TActorIterator<AActor> It(World); It; ++It)
 	{
@@ -234,13 +234,13 @@ AActor* FUeAgentHttpServer::FindActorByNameOrLabel(UWorld* World, const FString&
 	return nullptr;
 }
 
-bool FUeAgentHttpServer::TakeActiveViewportScreenshot(TArray<FColor>& OutPixels, FIntPoint& OutSize, FString& OutError)
+bool FUeAgentLegacyMechanics::TakeActiveViewportScreenshot(TArray<FColor>& OutPixels, FIntPoint& OutSize, FString& OutError)
 {
 	TSharedPtr<FJsonObject> CaptureInfo;
 	return TakeActiveViewportScreenshotWithOptions(0, false, 0, 1.0f / 60.0f, OutPixels, OutSize, CaptureInfo, OutError);
 }
 
-bool FUeAgentHttpServer::TakeActiveViewportScreenshotWithOptions(int32 WarmupFrames, bool bTickEditorWorld, int32 EditorWorldTickFrames, float EditorWorldTickDeltaSeconds, TArray<FColor>& OutPixels, FIntPoint& OutSize, TSharedPtr<FJsonObject>& OutCaptureInfo, FString& OutError)
+bool FUeAgentLegacyMechanics::TakeActiveViewportScreenshotWithOptions(int32 WarmupFrames, bool bTickEditorWorld, int32 EditorWorldTickFrames, float EditorWorldTickDeltaSeconds, TArray<FColor>& OutPixels, FIntPoint& OutSize, TSharedPtr<FJsonObject>& OutCaptureInfo, FString& OutError)
 {
 	WarmupFrames = FMath::Clamp(WarmupFrames, 0, 8);
 	EditorWorldTickFrames = bTickEditorWorld ? FMath::Clamp(EditorWorldTickFrames, 0, 240) : 0;
@@ -343,7 +343,7 @@ bool FUeAgentHttpServer::TakeActiveViewportScreenshotWithOptions(int32 WarmupFra
 	return true;
 }
 
-bool FUeAgentHttpServer::ResizePixelsMaxSize(const TArray<FColor>& InPixels, const FIntPoint& InSize, int32 MaxSize, TArray<FColor>& OutPixels, FIntPoint& OutSize, FString& OutError)
+bool FUeAgentLegacyMechanics::ResizePixelsMaxSize(const TArray<FColor>& InPixels, const FIntPoint& InSize, int32 MaxSize, TArray<FColor>& OutPixels, FIntPoint& OutSize, FString& OutError)
 {
 	if (InSize.X <= 0 || InSize.Y <= 0 || InPixels.Num() != InSize.X * InSize.Y)
 	{
@@ -370,7 +370,7 @@ bool FUeAgentHttpServer::ResizePixelsMaxSize(const TArray<FColor>& InPixels, con
 	return true;
 }
 
-bool FUeAgentHttpServer::WriteCompressedImage(const TArray<FColor>& Pixels, const FIntPoint& Size, const FString& Format, int32 Quality, const FString& OutFilePath, FString& OutError, bool bForceOpaqueAlpha)
+bool FUeAgentLegacyMechanics::WriteCompressedImage(const TArray<FColor>& Pixels, const FIntPoint& Size, const FString& Format, int32 Quality, const FString& OutFilePath, FString& OutError, bool bForceOpaqueAlpha)
 {
 	if (Size.X <= 0 || Size.Y <= 0 || Pixels.Num() != Size.X * Size.Y)
 	{
@@ -410,7 +410,7 @@ bool FUeAgentHttpServer::WriteCompressedImage(const TArray<FColor>& Pixels, cons
 	return true;
 }
 
-bool FUeAgentHttpServer::WriteFrameSequenceSheetImage(const TArray<TArray<FColor>>& FramePixels, const TArray<FString>& FrameLabels, const FIntPoint& FrameSize, const TSharedPtr<FJsonObject>& Params, const FString& Format, int32 Quality, FString& OutFilePath, TSharedPtr<FJsonObject>& OutSheetData, FString& OutError)
+bool FUeAgentLegacyMechanics::WriteFrameSequenceSheetImage(const TArray<TArray<FColor>>& FramePixels, const TArray<FString>& FrameLabels, const FIntPoint& FrameSize, const TSharedPtr<FJsonObject>& Params, const FString& Format, int32 Quality, FString& OutFilePath, TSharedPtr<FJsonObject>& OutSheetData, FString& OutError)
 {
 	if (FramePixels.Num() <= 0 || FrameSize.X <= 0 || FrameSize.Y <= 0)
 	{
@@ -599,7 +599,7 @@ bool FUeAgentHttpServer::WriteFrameSequenceSheetImage(const TArray<TArray<FColor
 	return true;
 }
 
-FString FUeAgentHttpServer::MakeShotPath(const FString& Ext)
+FString FUeAgentLegacyMechanics::MakeShotPath(const FString& Ext)
 {
 	const UUeAgentInterfaceSettings* Settings = UUeAgentInterfaceSettings::Get();
 	const FString Hostname = FPlatformProcess::ComputerName();
@@ -610,7 +610,7 @@ FString FUeAgentHttpServer::MakeShotPath(const FString& Ext)
 	return FPaths::Combine(ShotsDir, FString::Printf(TEXT("shot_%s_%s.%s"), *Hostname, *Ts, *Ext));
 }
 
-bool FUeAgentHttpServer::CmdScreenshotViewport(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdScreenshotViewport(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	TArray<TSharedPtr<FJsonValue>> OutArtifacts;
 	if (!OutData.IsValid())
@@ -854,7 +854,7 @@ bool FUeAgentHttpServer::CmdScreenshotViewport(const FUeAgentRequestContext& Ctx
 	return true;
 }
 
-bool FUeAgentHttpServer::CmdScreenshotViewportBuffer(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdScreenshotViewportBuffer(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	TArray<TSharedPtr<FJsonValue>> OutArtifacts;
 	if (!OutData.IsValid())

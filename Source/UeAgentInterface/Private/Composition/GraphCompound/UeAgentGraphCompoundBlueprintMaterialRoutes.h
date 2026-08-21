@@ -155,6 +155,7 @@ namespace UE::UAI::Composition::GraphCompound
 			FString InAssetName,
 			FString InPackagePath,
 			FString InTargetRef,
+			FString InMaterialKind,
 			FString InParentClassRef,
 			FString InParentMaterialRef,
 			FString InSourceRef);
@@ -163,6 +164,7 @@ namespace UE::UAI::Composition::GraphCompound
 		const FString& GetAssetName() const;
 		const FString& GetPackagePath() const;
 		const FString& GetTargetRef() const;
+		const FString& GetMaterialKind() const;
 		const FString& GetParentClassRef() const;
 		const FString& GetParentMaterialRef() const;
 		const FString& GetSourceRef() const;
@@ -174,6 +176,7 @@ namespace UE::UAI::Composition::GraphCompound
 		FString AssetName;
 		FString PackagePath;
 		FString TargetRef;
+		FString MaterialKind;
 		FString ParentClassRef;
 		FString ParentMaterialRef;
 		FString SourceRef;

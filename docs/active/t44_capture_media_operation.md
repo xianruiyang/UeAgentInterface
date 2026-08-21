@@ -43,6 +43,14 @@ The asset and actor subject forms are `capture-subject:asset:<object-path>` and
 `capture-subject:actor:<actor-name-or-label>`. Supplying `asset_path` or `actor`
 inside `parameters` is allowed only when it identifies the same subject.
 
+All image policies require an Editor process that can render. When
+`FApp::CanEverRender()` is false, including `-NullRHI`, the operation fails
+closed with `capture_image_rhi_unavailable:<policy_id>` before parameter
+projection, screenshot mechanics, or asset-editor opening. There is no
+non-rendering fallback and no image artifact. Use a rendering-capable owned
+worker for image-product verification; NullRHI is valid only for the explicit
+failure contract and for capture mechanics that do not require rendering.
+
 ## Lifecycle and evidence
 
 The three commands share the T32 process-owned session registry while each
@@ -54,4 +62,3 @@ session, then call `operation.release`. Unknown state forbids replay. Release
 removes only operation-owned staging and releases the lease; the published
 artifact remains independently readable until explicitly cleaned up by its
 owner.
-

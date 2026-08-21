@@ -31,4 +31,4 @@ uai-cli --connection connection.toml exec operation.status --params-json {"opera
 
 ## Legacy exit
 
-The historical `Composition/LongRunningSession` code remains a mechanics dependency and T90 migration inventory, not a public fallback authority. Its six start commands are inactive until their assigned tasks, and its lifecycle handlers are not installed by the active exact registry.
+`Composition/LongRunningSession` is a current internal owner behind the exact long-running command contracts; it is not a second public registry or transport. The six start commands and their lifecycle handlers are installed only through their frozen current contribution. T44 removed the old compiled registry/HTTP handler, so no legacy prefix, alias, or fallback route can activate this owner.

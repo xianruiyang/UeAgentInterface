@@ -4894,7 +4894,7 @@ namespace UeAgentNiagaraOps
 #include "Commands/EditorViewport/UeAgentEditorViewportLegacy.h"
 #include "Commands/EditorViewport/UeAgentEditorViewportSequenceFrameOptions.h"
 
-bool FUeAgentHttpServer::CmdNiagaraListAssets(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdNiagaraListAssets(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	FString RootPath = TEXT("/Game");
 	JsonTryGetString(Ctx.Params, TEXT("root_path"), RootPath);
@@ -4958,7 +4958,7 @@ bool FUeAgentHttpServer::CmdNiagaraListAssets(const FUeAgentRequestContext& Ctx,
 	return true;
 }
 
-bool FUeAgentHttpServer::CmdNiagaraListModuleLibrary(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdNiagaraListModuleLibrary(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	FString RootPath = TEXT("/Niagara/Modules");
 	JsonTryGetString(Ctx.Params, TEXT("root_path"), RootPath);
@@ -5092,7 +5092,7 @@ bool FUeAgentHttpServer::CmdNiagaraListModuleLibrary(const FUeAgentRequestContex
 	return true;
 }
 
-bool FUeAgentHttpServer::CmdNiagaraCreateSystem(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdNiagaraCreateSystem(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	FString AssetPathInput;
 	if (!JsonTryGetString(Ctx.Params, TEXT("asset_path"), AssetPathInput) || AssetPathInput.IsEmpty())
@@ -5151,7 +5151,7 @@ bool FUeAgentHttpServer::CmdNiagaraCreateSystem(const FUeAgentRequestContext& Ct
 	return true;
 }
 
-bool FUeAgentHttpServer::CmdNiagaraCreateEmitter(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdNiagaraCreateEmitter(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	FString AssetPathInput;
 	if (!JsonTryGetString(Ctx.Params, TEXT("asset_path"), AssetPathInput) || AssetPathInput.IsEmpty())
@@ -5206,7 +5206,7 @@ bool FUeAgentHttpServer::CmdNiagaraCreateEmitter(const FUeAgentRequestContext& C
 	return true;
 }
 
-bool FUeAgentHttpServer::CmdNiagaraDeleteAsset(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdNiagaraDeleteAsset(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	FString AssetPathInput;
 	if (!JsonTryGetString(Ctx.Params, TEXT("asset_path"), AssetPathInput) || AssetPathInput.IsEmpty())
@@ -5264,7 +5264,7 @@ bool FUeAgentHttpServer::CmdNiagaraDeleteAsset(const FUeAgentRequestContext& Ctx
 	return true;
 }
 
-bool FUeAgentHttpServer::CmdNiagaraDuplicateAsset(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdNiagaraDuplicateAsset(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	FString SourceAssetPathInput;
 	if (!JsonTryGetString(Ctx.Params, TEXT("source_asset_path"), SourceAssetPathInput) || SourceAssetPathInput.IsEmpty())
@@ -5336,7 +5336,7 @@ bool FUeAgentHttpServer::CmdNiagaraDuplicateAsset(const FUeAgentRequestContext& 
 	return true;
 }
 
-bool FUeAgentHttpServer::CmdNiagaraOpenEditor(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdNiagaraOpenEditor(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	FString AssetPathInput;
 	if (!JsonTryGetString(Ctx.Params, TEXT("asset_path"), AssetPathInput) || AssetPathInput.IsEmpty())
@@ -5372,7 +5372,7 @@ bool FUeAgentHttpServer::CmdNiagaraOpenEditor(const FUeAgentRequestContext& Ctx,
 	return true;
 }
 
-bool FUeAgentHttpServer::CmdNiagaraPreviewAdvance(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdNiagaraPreviewAdvance(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	if (!OutData.IsValid())
 	{
@@ -5638,7 +5638,7 @@ bool FUeAgentHttpServer::CmdNiagaraPreviewAdvance(const FUeAgentRequestContext& 
 	return true;
 }
 
-bool FUeAgentHttpServer::CmdNiagaraScreenshot(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdNiagaraScreenshot(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	if (!OutData.IsValid())
 	{
@@ -6467,7 +6467,7 @@ bool FUeAgentHttpServer::CmdNiagaraScreenshot(const FUeAgentRequestContext& Ctx,
 }
 
 
-bool FUeAgentHttpServer::CmdNiagaraSystemRuntimeProbe(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdNiagaraSystemRuntimeProbe(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	if (!OutData.IsValid())
 	{
@@ -7261,7 +7261,7 @@ bool FUeAgentHttpServer::CmdNiagaraSystemRuntimeProbe(const FUeAgentRequestConte
 	return true;
 }
 
-bool FUeAgentHttpServer::CmdNiagaraGetStackIssues(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdNiagaraGetStackIssues(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	if (!OutData.IsValid())
 	{
@@ -7506,7 +7506,7 @@ bool FUeAgentHttpServer::CmdNiagaraGetStackIssues(const FUeAgentRequestContext& 
 	return true;
 }
 
-bool FUeAgentHttpServer::CmdNiagaraApplyStackIssueFix(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdNiagaraApplyStackIssueFix(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	if (!OutData.IsValid())
 	{
@@ -7984,7 +7984,7 @@ bool FUeAgentHttpServer::CmdNiagaraApplyStackIssueFix(const FUeAgentRequestConte
 	return true;
 }
 
-bool FUeAgentHttpServer::CmdNiagaraEmitterClearParent(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdNiagaraEmitterClearParent(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	if (!OutData.IsValid())
 	{
@@ -8159,7 +8159,7 @@ bool FUeAgentHttpServer::CmdNiagaraEmitterClearParent(const FUeAgentRequestConte
 	return true;
 }
 
-bool FUeAgentHttpServer::CmdNiagaraGetInfo(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdNiagaraGetInfo(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	FString AssetPathInput;
 	if (!JsonTryGetString(Ctx.Params, TEXT("asset_path"), AssetPathInput) || AssetPathInput.IsEmpty())
@@ -8236,7 +8236,7 @@ bool FUeAgentHttpServer::CmdNiagaraGetInfo(const FUeAgentRequestContext& Ctx, TS
 	return true;
 }
 
-bool FUeAgentHttpServer::CmdNiagaraSystemGetProperty(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdNiagaraSystemGetProperty(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	FString AssetPathInput;
 	if (!JsonTryGetString(Ctx.Params, TEXT("asset_path"), AssetPathInput) || AssetPathInput.IsEmpty())
@@ -8280,7 +8280,7 @@ bool FUeAgentHttpServer::CmdNiagaraSystemGetProperty(const FUeAgentRequestContex
 	return true;
 }
 
-bool FUeAgentHttpServer::CmdNiagaraSetProperty(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdNiagaraSetProperty(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	FString AssetPathInput;
 	if (!JsonTryGetString(Ctx.Params, TEXT("asset_path"), AssetPathInput) || AssetPathInput.IsEmpty())
@@ -8321,7 +8321,7 @@ bool FUeAgentHttpServer::CmdNiagaraSetProperty(const FUeAgentRequestContext& Ctx
 	if (!UeAgentNiagaraOps::SetDeprecatedObjectPropertyText(Asset, PropertyName, ValueText, &AppliedValueText, &CppType, &ImportError))
 	{
 		const FString ImportStatus = ImportError.Equals(TEXT("property_not_found"), ESearchCase::CaseSensitive) ? TEXT("property_not_found") : TEXT("import_failed");
-		TSharedPtr<FJsonObject> ResultObj = FUeAgentHttpServer::MakePropertyImportResultJson(PropertyName, nullptr, ValueText, TEXT(""), ImportStatus, ImportError);
+		TSharedPtr<FJsonObject> ResultObj = FUeAgentLegacyMechanics::MakePropertyImportResultJson(PropertyName, nullptr, ValueText, TEXT(""), ImportStatus, ImportError);
 		ResultObj->SetStringField(TEXT("cpp_type"), CppType);
 		OutData->SetStringField(TEXT("property_name"), PropertyName);
 		OutData->SetStringField(TEXT("value_text"), ValueText);
@@ -8355,7 +8355,7 @@ bool FUeAgentHttpServer::CmdNiagaraSetProperty(const FUeAgentRequestContext& Ctx
 	return true;
 }
 
-bool FUeAgentHttpServer::CmdNiagaraRefreshSystem(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdNiagaraRefreshSystem(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	if (!OutData.IsValid())
 	{
@@ -8455,7 +8455,7 @@ bool FUeAgentHttpServer::CmdNiagaraRefreshSystem(const FUeAgentRequestContext& C
 	return true;
 }
 
-bool FUeAgentHttpServer::CmdNiagaraCompileSystem(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdNiagaraCompileSystem(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	FString AssetPathInput;
 	if (!JsonTryGetString(Ctx.Params, TEXT("asset_path"), AssetPathInput) || AssetPathInput.IsEmpty())
@@ -8573,7 +8573,7 @@ bool FUeAgentHttpServer::CmdNiagaraCompileSystem(const FUeAgentRequestContext& C
 	return true;
 }
 
-bool FUeAgentHttpServer::CmdNiagaraGetCompileLog(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdNiagaraGetCompileLog(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	FString AssetPathInput;
 	if ((!JsonTryGetString(Ctx.Params, TEXT("asset_path"), AssetPathInput) || AssetPathInput.IsEmpty())
@@ -8919,7 +8919,7 @@ bool FUeAgentHttpServer::CmdNiagaraGetCompileLog(const FUeAgentRequestContext& C
 
 
 
-bool FUeAgentHttpServer::CmdNiagaraUserParameterList(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdNiagaraUserParameterList(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	FString AssetPathInput;
 	if (!JsonTryGetString(Ctx.Params, TEXT("asset_path"), AssetPathInput) || AssetPathInput.IsEmpty())
@@ -8958,7 +8958,7 @@ bool FUeAgentHttpServer::CmdNiagaraUserParameterList(const FUeAgentRequestContex
 	return true;
 }
 
-bool FUeAgentHttpServer::CmdNiagaraUserParameterAdd(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdNiagaraUserParameterAdd(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	FString AssetPathInput;
 	if (!JsonTryGetString(Ctx.Params, TEXT("asset_path"), AssetPathInput) || AssetPathInput.IsEmpty())
@@ -9058,7 +9058,7 @@ bool FUeAgentHttpServer::CmdNiagaraUserParameterAdd(const FUeAgentRequestContext
 	return true;
 }
 
-bool FUeAgentHttpServer::CmdNiagaraUserParameterRemove(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdNiagaraUserParameterRemove(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	FString AssetPathInput;
 	if (!JsonTryGetString(Ctx.Params, TEXT("asset_path"), AssetPathInput) || AssetPathInput.IsEmpty())
@@ -9121,7 +9121,7 @@ bool FUeAgentHttpServer::CmdNiagaraUserParameterRemove(const FUeAgentRequestCont
 	return true;
 }
 
-bool FUeAgentHttpServer::CmdNiagaraUserParameterGet(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdNiagaraUserParameterGet(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	FString AssetPathInput;
 	if (!JsonTryGetString(Ctx.Params, TEXT("asset_path"), AssetPathInput) || AssetPathInput.IsEmpty())
@@ -9157,7 +9157,7 @@ bool FUeAgentHttpServer::CmdNiagaraUserParameterGet(const FUeAgentRequestContext
 	return true;
 }
 
-bool FUeAgentHttpServer::CmdNiagaraUserParameterSet(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdNiagaraUserParameterSet(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	FString AssetPathInput;
 	if (!JsonTryGetString(Ctx.Params, TEXT("asset_path"), AssetPathInput) || AssetPathInput.IsEmpty())
@@ -9225,7 +9225,7 @@ bool FUeAgentHttpServer::CmdNiagaraUserParameterSet(const FUeAgentRequestContext
 	return true;
 }
 
-bool FUeAgentHttpServer::CmdNiagaraEmitterParameterList(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdNiagaraEmitterParameterList(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	UeAgentNiagaraOps::FNiagaraEmitterEditContext EditContext;
 	if (!UeAgentNiagaraOps::GetEmitterEditContext(Ctx.Params, EditContext, OutError, true))
@@ -9262,7 +9262,7 @@ bool FUeAgentHttpServer::CmdNiagaraEmitterParameterList(const FUeAgentRequestCon
 	return true;
 }
 
-bool FUeAgentHttpServer::CmdNiagaraEmitterParameterAdd(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdNiagaraEmitterParameterAdd(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	UeAgentNiagaraOps::FNiagaraEmitterEditContext EditContext;
 	if (!UeAgentNiagaraOps::GetEmitterEditContext(Ctx.Params, EditContext, OutError, true))
@@ -9349,7 +9349,7 @@ bool FUeAgentHttpServer::CmdNiagaraEmitterParameterAdd(const FUeAgentRequestCont
 	return true;
 }
 
-bool FUeAgentHttpServer::CmdNiagaraEmitterParameterRemove(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdNiagaraEmitterParameterRemove(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	UeAgentNiagaraOps::FNiagaraEmitterEditContext EditContext;
 	if (!UeAgentNiagaraOps::GetEmitterEditContext(Ctx.Params, EditContext, OutError, true))
@@ -9404,7 +9404,7 @@ bool FUeAgentHttpServer::CmdNiagaraEmitterParameterRemove(const FUeAgentRequestC
 	return true;
 }
 
-bool FUeAgentHttpServer::CmdNiagaraEmitterParameterGet(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdNiagaraEmitterParameterGet(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	UeAgentNiagaraOps::FNiagaraEmitterEditContext EditContext;
 	if (!UeAgentNiagaraOps::GetEmitterEditContext(Ctx.Params, EditContext, OutError, true))
@@ -9434,7 +9434,7 @@ bool FUeAgentHttpServer::CmdNiagaraEmitterParameterGet(const FUeAgentRequestCont
 	return true;
 }
 
-bool FUeAgentHttpServer::CmdNiagaraEmitterParameterSet(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdNiagaraEmitterParameterSet(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	UeAgentNiagaraOps::FNiagaraEmitterEditContext EditContext;
 	if (!UeAgentNiagaraOps::GetEmitterEditContext(Ctx.Params, EditContext, OutError, true))
@@ -9555,7 +9555,7 @@ bool FUeAgentHttpServer::CmdNiagaraEmitterParameterSet(const FUeAgentRequestCont
 	return true;
 }
 
-bool FUeAgentHttpServer::CmdNiagaraSystemListEmitters(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdNiagaraSystemListEmitters(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	FString AssetPathInput;
 	if (!JsonTryGetString(Ctx.Params, TEXT("asset_path"), AssetPathInput) || AssetPathInput.IsEmpty())
@@ -9611,7 +9611,7 @@ bool FUeAgentHttpServer::CmdNiagaraSystemListEmitters(const FUeAgentRequestConte
 	return true;
 }
 
-bool FUeAgentHttpServer::CmdNiagaraSystemAddEmitter(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdNiagaraSystemAddEmitter(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	FString SystemAssetPathInput;
 	if (!JsonTryGetString(Ctx.Params, TEXT("system_asset_path"), SystemAssetPathInput) || SystemAssetPathInput.IsEmpty())
@@ -9708,7 +9708,7 @@ bool FUeAgentHttpServer::CmdNiagaraSystemAddEmitter(const FUeAgentRequestContext
 	return true;
 }
 
-bool FUeAgentHttpServer::CmdNiagaraSystemRemoveEmitter(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdNiagaraSystemRemoveEmitter(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	FString SystemAssetPathInput;
 	if (!JsonTryGetString(Ctx.Params, TEXT("system_asset_path"), SystemAssetPathInput) || SystemAssetPathInput.IsEmpty())
@@ -9773,7 +9773,7 @@ bool FUeAgentHttpServer::CmdNiagaraSystemRemoveEmitter(const FUeAgentRequestCont
 	return true;
 }
 
-bool FUeAgentHttpServer::CmdNiagaraSystemMoveEmitter(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdNiagaraSystemMoveEmitter(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	FString SystemAssetPathInput;
 	if (!JsonTryGetString(Ctx.Params, TEXT("system_asset_path"), SystemAssetPathInput) || SystemAssetPathInput.IsEmpty())
@@ -9853,7 +9853,7 @@ bool FUeAgentHttpServer::CmdNiagaraSystemMoveEmitter(const FUeAgentRequestContex
 	return true;
 }
 
-bool FUeAgentHttpServer::CmdNiagaraSystemSetEmitterEnabled(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdNiagaraSystemSetEmitterEnabled(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	FString SystemAssetPathInput;
 	if (!JsonTryGetString(Ctx.Params, TEXT("system_asset_path"), SystemAssetPathInput) || SystemAssetPathInput.IsEmpty())
@@ -9928,7 +9928,7 @@ bool FUeAgentHttpServer::CmdNiagaraSystemSetEmitterEnabled(const FUeAgentRequest
 	return true;
 }
 
-bool FUeAgentHttpServer::CmdNiagaraSystemSetEmitterVersion(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdNiagaraSystemSetEmitterVersion(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	FString SystemAssetPathInput;
 	if (!JsonTryGetString(Ctx.Params, TEXT("system_asset_path"), SystemAssetPathInput) || SystemAssetPathInput.IsEmpty())
@@ -10035,7 +10035,7 @@ bool FUeAgentHttpServer::CmdNiagaraSystemSetEmitterVersion(const FUeAgentRequest
 	return true;
 }
 
-bool FUeAgentHttpServer::CmdNiagaraEmitterGetProperty(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdNiagaraEmitterGetProperty(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	UeAgentNiagaraOps::FNiagaraEmitterEditContext EditContext;
 	if (!UeAgentNiagaraOps::GetEmitterEditContext(Ctx.Params, EditContext, OutError, false))
@@ -10069,7 +10069,7 @@ bool FUeAgentHttpServer::CmdNiagaraEmitterGetProperty(const FUeAgentRequestConte
 	return true;
 }
 
-bool FUeAgentHttpServer::CmdNiagaraEmitterSetProperty(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdNiagaraEmitterSetProperty(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	UeAgentNiagaraOps::FNiagaraEmitterEditContext EditContext;
 	if (!UeAgentNiagaraOps::GetEmitterEditContext(Ctx.Params, EditContext, OutError, false))
@@ -10167,7 +10167,7 @@ bool FUeAgentHttpServer::CmdNiagaraEmitterSetProperty(const FUeAgentRequestConte
 }
 
 
-bool FUeAgentHttpServer::CmdNiagaraEmitterListRenderers(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdNiagaraEmitterListRenderers(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	UeAgentNiagaraOps::FNiagaraEmitterEditContext EditContext;
 	if (!UeAgentNiagaraOps::GetEmitterEditContext(Ctx.Params, EditContext, OutError, false))
@@ -10218,7 +10218,7 @@ bool FUeAgentHttpServer::CmdNiagaraEmitterListRenderers(const FUeAgentRequestCon
 	return true;
 }
 
-bool FUeAgentHttpServer::CmdNiagaraEmitterAddRenderer(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdNiagaraEmitterAddRenderer(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	UeAgentNiagaraOps::FNiagaraEmitterEditContext EditContext;
 	if (!UeAgentNiagaraOps::GetEmitterEditContext(Ctx.Params, EditContext, OutError, false))
@@ -10285,7 +10285,7 @@ bool FUeAgentHttpServer::CmdNiagaraEmitterAddRenderer(const FUeAgentRequestConte
 			return false;
 		}
 
-		InitialPropertyResult = FUeAgentHttpServer::MakePropertyImportResultJson(PropertyName, nullptr, ValueText, AppliedValueText, TEXT("imported_and_read_back"));
+		InitialPropertyResult = FUeAgentLegacyMechanics::MakePropertyImportResultJson(PropertyName, nullptr, ValueText, AppliedValueText, TEXT("imported_and_read_back"));
 		InitialPropertyResult->SetStringField(TEXT("cpp_type"), CppType);
 	}
 
@@ -10326,7 +10326,7 @@ bool FUeAgentHttpServer::CmdNiagaraEmitterAddRenderer(const FUeAgentRequestConte
 	return true;
 }
 
-bool FUeAgentHttpServer::CmdNiagaraEmitterRemoveRenderer(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdNiagaraEmitterRemoveRenderer(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	UeAgentNiagaraOps::FNiagaraEmitterEditContext EditContext;
 	if (!UeAgentNiagaraOps::GetEmitterEditContext(Ctx.Params, EditContext, OutError, false))
@@ -10371,7 +10371,7 @@ bool FUeAgentHttpServer::CmdNiagaraEmitterRemoveRenderer(const FUeAgentRequestCo
 	return true;
 }
 
-bool FUeAgentHttpServer::CmdNiagaraEmitterMoveRenderer(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdNiagaraEmitterMoveRenderer(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	UeAgentNiagaraOps::FNiagaraEmitterEditContext EditContext;
 	if (!UeAgentNiagaraOps::GetEmitterEditContext(Ctx.Params, EditContext, OutError, false))
@@ -10455,7 +10455,7 @@ bool FUeAgentHttpServer::CmdNiagaraEmitterMoveRenderer(const FUeAgentRequestCont
 	return true;
 }
 
-bool FUeAgentHttpServer::CmdNiagaraEmitterGetRendererProperty(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdNiagaraEmitterGetRendererProperty(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	UeAgentNiagaraOps::FNiagaraEmitterEditContext EditContext;
 	if (!UeAgentNiagaraOps::GetEmitterEditContext(Ctx.Params, EditContext, OutError, false))
@@ -10500,7 +10500,7 @@ bool FUeAgentHttpServer::CmdNiagaraEmitterGetRendererProperty(const FUeAgentRequ
 	return true;
 }
 
-bool FUeAgentHttpServer::CmdNiagaraEmitterSetRendererProperty(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdNiagaraEmitterSetRendererProperty(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	UeAgentNiagaraOps::FNiagaraEmitterEditContext EditContext;
 	if (!UeAgentNiagaraOps::GetEmitterEditContext(Ctx.Params, EditContext, OutError, false))
@@ -10574,7 +10574,7 @@ bool FUeAgentHttpServer::CmdNiagaraEmitterSetRendererProperty(const FUeAgentRequ
 	return true;
 }
 
-bool FUeAgentHttpServer::CmdNiagaraEmitterListEventHandlers(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdNiagaraEmitterListEventHandlers(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	UeAgentNiagaraOps::FNiagaraEmitterEditContext EditContext;
 	if (!UeAgentNiagaraOps::GetEmitterEditContext(Ctx.Params, EditContext, OutError, false))
@@ -10598,7 +10598,7 @@ bool FUeAgentHttpServer::CmdNiagaraEmitterListEventHandlers(const FUeAgentReques
 	return true;
 }
 
-bool FUeAgentHttpServer::CmdNiagaraEmitterAddEventHandler(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdNiagaraEmitterAddEventHandler(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	UeAgentNiagaraOps::FNiagaraEmitterEditContext EditContext;
 	if (!UeAgentNiagaraOps::GetEmitterEditContext(Ctx.Params, EditContext, OutError, true))
@@ -10740,7 +10740,7 @@ bool FUeAgentHttpServer::CmdNiagaraEmitterAddEventHandler(const FUeAgentRequestC
 	return true;
 }
 
-bool FUeAgentHttpServer::CmdNiagaraEmitterRemoveEventHandler(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdNiagaraEmitterRemoveEventHandler(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	UeAgentNiagaraOps::FNiagaraEmitterEditContext EditContext;
 	if (!UeAgentNiagaraOps::GetEmitterEditContext(Ctx.Params, EditContext, OutError, true))
@@ -10790,7 +10790,7 @@ bool FUeAgentHttpServer::CmdNiagaraEmitterRemoveEventHandler(const FUeAgentReque
 	return true;
 }
 
-bool FUeAgentHttpServer::CmdNiagaraEmitterGetEventHandlerProperty(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdNiagaraEmitterGetEventHandlerProperty(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	UeAgentNiagaraOps::FNiagaraEmitterEditContext EditContext;
 	if (!UeAgentNiagaraOps::GetEmitterEditContext(Ctx.Params, EditContext, OutError, false))
@@ -10831,7 +10831,7 @@ bool FUeAgentHttpServer::CmdNiagaraEmitterGetEventHandlerProperty(const FUeAgent
 	return true;
 }
 
-bool FUeAgentHttpServer::CmdNiagaraEmitterSetEventHandlerProperty(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdNiagaraEmitterSetEventHandlerProperty(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	UeAgentNiagaraOps::FNiagaraEmitterEditContext EditContext;
 	if (!UeAgentNiagaraOps::GetEmitterEditContext(Ctx.Params, EditContext, OutError, true))
@@ -10917,7 +10917,7 @@ bool FUeAgentHttpServer::CmdNiagaraEmitterSetEventHandlerProperty(const FUeAgent
 }
 
 
-bool FUeAgentHttpServer::CmdNiagaraEmitterListStages(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdNiagaraEmitterListStages(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	UeAgentNiagaraOps::FNiagaraEmitterEditContext EditContext;
 	if (!UeAgentNiagaraOps::GetEmitterEditContext(Ctx.Params, EditContext, OutError, true))
@@ -11025,7 +11025,7 @@ bool FUeAgentHttpServer::CmdNiagaraEmitterListStages(const FUeAgentRequestContex
 	return true;
 }
 
-bool FUeAgentHttpServer::CmdNiagaraEmitterAddSimulationStage(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdNiagaraEmitterAddSimulationStage(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	UeAgentNiagaraOps::FNiagaraEmitterEditContext EditContext;
 	if (!UeAgentNiagaraOps::GetEmitterEditContext(Ctx.Params, EditContext, OutError, true))
@@ -11143,7 +11143,7 @@ bool FUeAgentHttpServer::CmdNiagaraEmitterAddSimulationStage(const FUeAgentReque
 	return true;
 }
 
-bool FUeAgentHttpServer::CmdNiagaraEmitterRemoveStage(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdNiagaraEmitterRemoveStage(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	UeAgentNiagaraOps::FNiagaraEmitterEditContext EditContext;
 	if (!UeAgentNiagaraOps::GetEmitterEditContext(Ctx.Params, EditContext, OutError, true))
@@ -11215,7 +11215,7 @@ bool FUeAgentHttpServer::CmdNiagaraEmitterRemoveStage(const FUeAgentRequestConte
 	return true;
 }
 
-bool FUeAgentHttpServer::CmdNiagaraEmitterSetStageProperty(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdNiagaraEmitterSetStageProperty(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	UeAgentNiagaraOps::FNiagaraEmitterEditContext EditContext;
 	if (!UeAgentNiagaraOps::GetEmitterEditContext(Ctx.Params, EditContext, OutError, true))
@@ -11302,7 +11302,7 @@ bool FUeAgentHttpServer::CmdNiagaraEmitterSetStageProperty(const FUeAgentRequest
 	return true;
 }
 
-bool FUeAgentHttpServer::CmdNiagaraEmitterListStageModules(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdNiagaraEmitterListStageModules(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	UeAgentNiagaraOps::FNiagaraEmitterEditContext EditContext;
 	if (!UeAgentNiagaraOps::GetEmitterEditContext(Ctx.Params, EditContext, OutError, true))
@@ -11363,7 +11363,7 @@ bool FUeAgentHttpServer::CmdNiagaraEmitterListStageModules(const FUeAgentRequest
 	return true;
 }
 
-bool FUeAgentHttpServer::CmdNiagaraSystemListStageModules(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdNiagaraSystemListStageModules(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	UeAgentNiagaraOps::FNiagaraSystemEditContext EditContext;
 	if (!UeAgentNiagaraOps::GetSystemEditContext(Ctx.Params, EditContext, OutError, true))
@@ -11429,7 +11429,7 @@ bool FUeAgentHttpServer::CmdNiagaraSystemListStageModules(const FUeAgentRequestC
 	return true;
 }
 
-bool FUeAgentHttpServer::CmdNiagaraEmitterAddStageModule(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdNiagaraEmitterAddStageModule(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	UeAgentNiagaraOps::FNiagaraEmitterEditContext EditContext;
 	if (!UeAgentNiagaraOps::GetEmitterEditContext(Ctx.Params, EditContext, OutError, true))
@@ -11483,7 +11483,7 @@ bool FUeAgentHttpServer::CmdNiagaraEmitterAddStageModule(const FUeAgentRequestCo
 	return true;
 }
 
-bool FUeAgentHttpServer::CmdNiagaraEmitterRemoveStageModule(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdNiagaraEmitterRemoveStageModule(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	UeAgentNiagaraOps::FNiagaraEmitterEditContext EditContext;
 	if (!UeAgentNiagaraOps::GetEmitterEditContext(Ctx.Params, EditContext, OutError, true))
@@ -11610,7 +11610,7 @@ bool FUeAgentHttpServer::CmdNiagaraEmitterRemoveStageModule(const FUeAgentReques
 	return true;
 }
 
-bool FUeAgentHttpServer::CmdNiagaraEmitterMoveStageModule(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdNiagaraEmitterMoveStageModule(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	UeAgentNiagaraOps::FNiagaraEmitterEditContext EditContext;
 	if (!UeAgentNiagaraOps::GetEmitterEditContext(Ctx.Params, EditContext, OutError, true))
@@ -11747,7 +11747,7 @@ bool FUeAgentHttpServer::CmdNiagaraEmitterMoveStageModule(const FUeAgentRequestC
 	return true;
 }
 
-bool FUeAgentHttpServer::CmdNiagaraEmitterListStageNodes(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdNiagaraEmitterListStageNodes(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	UeAgentNiagaraOps::FNiagaraEmitterEditContext EditContext;
 	if (!UeAgentNiagaraOps::GetEmitterEditContext(Ctx.Params, EditContext, OutError, true))
@@ -11820,7 +11820,7 @@ bool FUeAgentHttpServer::CmdNiagaraEmitterListStageNodes(const FUeAgentRequestCo
 	return true;
 }
 
-bool FUeAgentHttpServer::CmdNiagaraEmitterGetStageNodeProperty(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdNiagaraEmitterGetStageNodeProperty(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	UeAgentNiagaraOps::FNiagaraEmitterEditContext EditContext;
 	if (!UeAgentNiagaraOps::GetEmitterEditContext(Ctx.Params, EditContext, OutError, true))
@@ -11858,7 +11858,7 @@ bool FUeAgentHttpServer::CmdNiagaraEmitterGetStageNodeProperty(const FUeAgentReq
 	return true;
 }
 
-bool FUeAgentHttpServer::CmdNiagaraEmitterSetStageNodeProperty(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdNiagaraEmitterSetStageNodeProperty(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	UeAgentNiagaraOps::FNiagaraEmitterEditContext EditContext;
 	if (!UeAgentNiagaraOps::GetEmitterEditContext(Ctx.Params, EditContext, OutError, true))
@@ -11929,7 +11929,7 @@ bool FUeAgentHttpServer::CmdNiagaraEmitterSetStageNodeProperty(const FUeAgentReq
 	return true;
 }
 
-bool FUeAgentHttpServer::CmdNiagaraEmitterRemoveStageNode(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdNiagaraEmitterRemoveStageNode(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	UeAgentNiagaraOps::FNiagaraEmitterEditContext EditContext;
 	if (!UeAgentNiagaraOps::GetEmitterEditContext(Ctx.Params, EditContext, OutError, true))
@@ -12015,7 +12015,7 @@ bool FUeAgentHttpServer::CmdNiagaraEmitterRemoveStageNode(const FUeAgentRequestC
 	return true;
 }
 
-bool FUeAgentHttpServer::CmdNiagaraEmitterSetStageModuleEnabled(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdNiagaraEmitterSetStageModuleEnabled(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	UeAgentNiagaraOps::FNiagaraEmitterEditContext EditContext;
 	if (!UeAgentNiagaraOps::GetEmitterEditContext(Ctx.Params, EditContext, OutError, true))
@@ -12077,7 +12077,7 @@ bool FUeAgentHttpServer::CmdNiagaraEmitterSetStageModuleEnabled(const FUeAgentRe
 	return true;
 }
 
-bool FUeAgentHttpServer::CmdNiagaraEmitterListModuleInputs(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdNiagaraEmitterListModuleInputs(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	UeAgentNiagaraOps::FNiagaraEmitterEditContext EditContext;
 	if (!UeAgentNiagaraOps::GetEmitterEditContext(Ctx.Params, EditContext, OutError, true))
@@ -12132,7 +12132,7 @@ bool FUeAgentHttpServer::CmdNiagaraEmitterListModuleInputs(const FUeAgentRequest
 	return true;
 }
 
-bool FUeAgentHttpServer::CmdNiagaraSystemListModuleInputs(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdNiagaraSystemListModuleInputs(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	UeAgentNiagaraOps::FNiagaraSystemEditContext EditContext;
 	if (!UeAgentNiagaraOps::GetSystemEditContext(Ctx.Params, EditContext, OutError, true))
@@ -12230,7 +12230,7 @@ bool FUeAgentHttpServer::CmdNiagaraSystemListModuleInputs(const FUeAgentRequestC
 	return true;
 }
 
-bool FUeAgentHttpServer::CmdNiagaraEmitterSetModuleInput(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdNiagaraEmitterSetModuleInput(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	UeAgentNiagaraOps::FNiagaraEmitterEditContext EditContext;
 	if (!UeAgentNiagaraOps::GetEmitterEditContext(Ctx.Params, EditContext, OutError, true))
@@ -12755,7 +12755,7 @@ bool FUeAgentHttpServer::CmdNiagaraEmitterSetModuleInput(const FUeAgentRequestCo
 	return true;
 }
 
-bool FUeAgentHttpServer::CmdNiagaraSystemSetModuleInput(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdNiagaraSystemSetModuleInput(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	UeAgentNiagaraOps::FNiagaraSystemEditContext EditContext;
 	if (!UeAgentNiagaraOps::GetSystemEditContext(Ctx.Params, EditContext, OutError, true))
@@ -13029,7 +13029,7 @@ bool FUeAgentHttpServer::CmdNiagaraSystemSetModuleInput(const FUeAgentRequestCon
 	return true;
 }
 
-bool FUeAgentHttpServer::CmdNiagaraEmitterClearModuleInput(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdNiagaraEmitterClearModuleInput(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	UeAgentNiagaraOps::FNiagaraEmitterEditContext EditContext;
 	if (!UeAgentNiagaraOps::GetEmitterEditContext(Ctx.Params, EditContext, OutError, true))
@@ -13153,7 +13153,7 @@ bool FUeAgentHttpServer::CmdNiagaraEmitterClearModuleInput(const FUeAgentRequest
 	return true;
 }
 
-bool FUeAgentHttpServer::CmdNiagaraEmitterAddStageNode(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdNiagaraEmitterAddStageNode(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	UeAgentNiagaraOps::FNiagaraEmitterEditContext EditContext;
 	if (!UeAgentNiagaraOps::GetEmitterEditContext(Ctx.Params, EditContext, OutError, true))
@@ -13307,7 +13307,7 @@ bool FUeAgentHttpServer::CmdNiagaraEmitterAddStageNode(const FUeAgentRequestCont
 	return true;
 }
 
-bool FUeAgentHttpServer::CmdNiagaraEmitterConnectStageNodes(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdNiagaraEmitterConnectStageNodes(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	UeAgentNiagaraOps::FNiagaraEmitterEditContext EditContext;
 	if (!UeAgentNiagaraOps::GetEmitterEditContext(Ctx.Params, EditContext, OutError, true))
@@ -13427,7 +13427,7 @@ bool FUeAgentHttpServer::CmdNiagaraEmitterConnectStageNodes(const FUeAgentReques
 	return true;
 }
 
-bool FUeAgentHttpServer::CmdNiagaraEmitterDisconnectStageNodes(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdNiagaraEmitterDisconnectStageNodes(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	UeAgentNiagaraOps::FNiagaraEmitterEditContext EditContext;
 	if (!UeAgentNiagaraOps::GetEmitterEditContext(Ctx.Params, EditContext, OutError, true))

@@ -21,7 +21,7 @@ Prewrite intent or target rejection leaves no residue;
 `operation_state_unknown` requires reconciliation. Cleanup is bounded to the
 owned reference fixture and verified by an independent absence read.
 
-The process active composition does not register the former
-`Composition/ReferenceCommand` apply handler. Its dormant source is not a
-formal entry or a second public owner and remains only until T90 performs the
-separately gated physical retirement.
+T44 physically isolated the former module-owned Query-service composition and
+its `Composition/ReferenceCommand` apply handler. Neither source is compiled or
+discoverable as an active test, so the current T43 handler is the only executable
+public owner.

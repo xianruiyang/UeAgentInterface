@@ -130,6 +130,9 @@ bool FUeAgentStrictV2T21AudioDomainTest::RunTest(const FString& Parameters)
 
 	for (const FAudioGraphCandidateQueryResult* Result : {&SoundCueResult, &MetaSoundResult})
 	{
+		UObject& BoundTarget = Result == &SoundCueResult
+			? static_cast<UObject&>(*SoundCueTarget)
+			: static_cast<UObject&>(*MetaSoundTarget);
 		for (const FAudioGraphCandidate& Candidate : Result->Candidates)
 		{
 			TestFalse(TEXT("candidate name is present"), Candidate.Name.IsEmpty());
@@ -140,12 +143,39 @@ bool FUeAgentStrictV2T21AudioDomainTest::RunTest(const FString& Parameters)
 				Candidate.SupportedOperations.Contains(TEXT("create")));
 			TestFalse(TEXT("candidate input contract is present"),
 				Candidate.InputContract.IsEmpty());
-			TestFalse(TEXT("candidate placement contract is present"),
-				Candidate.PlacementContract.IsEmpty());
-			TestFalse(TEXT("candidate required context is present"),
-				Candidate.RequiredContext.IsEmpty());
+			const bool bSoundCueCandidate =
+				Candidate.Kind == TEXT("sound_cue_node");
+			TestEqual(TEXT("candidate placement contract matches its native graph"),
+				Candidate.PlacementContract,
+				bSoundCueCandidate
+					? FString(TEXT("uai.audio.sound-cue-node-identity/1"))
+					: FString(TEXT("uai.audio.metasound-node-identity/1")));
+			TestEqual(TEXT("candidate required context matches its native identity"),
+				Candidate.RequiredContext,
+				bSoundCueCandidate
+					? FString(TEXT("target_ref:object_path"))
+					: FString(TEXT("target_ref:node_guid")));
+			TestEqual(TEXT("candidate is bound to the queried target"),
+				Candidate.TargetRef, Result->Target);
+			TestEqual(TEXT("candidate carries the queried target revision"),
+				Candidate.TargetRevision, Result->TargetRevision);
 			TestTrue(TEXT("candidate binding revision is a sha256 identity"),
 				Candidate.BindingRevision.StartsWith(TEXT("sha256:")));
+			TestTrue(TEXT("candidate binding is current and directly usable"),
+				IsCurrentAudioGraphCandidateBinding(
+					BoundTarget,
+					Candidate.TargetRef,
+					Candidate.TargetRevision,
+					Candidate.Name,
+					Candidate.Kind,
+					Candidate.SupportedOperations,
+					Candidate.InputContract,
+					Candidate.PlacementContract,
+					Candidate.RequiredContext,
+					Candidate.MajorVersion,
+					Candidate.MinorVersion,
+					Candidate.BindingRevision,
+					CandidateError));
 		}
 		TestEqual(TEXT("complete is the inverse of has_more"),
 			Result->bComplete, !Result->bHasMore);

@@ -1,7 +1,6 @@
 #include "Misc/AutomationTest.h"
 
 #include "Composition/DestructiveImport/UeAgentDestructiveImportActivation.h"
-#include "Server/UeAgentCommandRegistry.h"
 
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(
 	FUeAgentWorldDestructiveBoundaryTest,
@@ -45,12 +44,8 @@ bool FUeAgentWorldDestructiveBoundaryTest::RunTest(const FString& Parameters)
 	};
 	for (const FString& LegacyId : LegacyIds)
 	{
-		TestNull(TEXT("legacy exact owner is absent: ") + LegacyId,
-			UeAgentCommandRegistry::FindExactCommandInvoker(LegacyId));
-		TestNull(TEXT("legacy prefix owner is absent: ") + LegacyId,
-			UeAgentCommandRegistry::FindPrefixedCommandInvoker(LegacyId));
-		TestTrue(TEXT("legacy route fails closed: ") + LegacyId,
-			UeAgentCommandRegistry::IsExplicitlyUnsupportedCommand(LegacyId));
+		TestNull(TEXT("legacy identity is absent: ") + LegacyId,
+			Registry.IsValid() ? Registry->FindExact(LegacyId) : nullptr);
 	}
 	return !HasAnyErrors();
 }

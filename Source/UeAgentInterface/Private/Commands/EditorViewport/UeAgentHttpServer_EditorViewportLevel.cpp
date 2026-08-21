@@ -3,7 +3,7 @@
 #include "Commands/EditorViewport/UeAgentHttpServer_EditorViewportInternal.h"
 #include "Commands/Level/UeAgentHttpServer_LevelOps.h"
 
-#include "Server/UeAgentHttpServer.h"
+#include "LegacyMechanics/UeAgentLegacyMechanics.h"
 #include "UeAgentInterfaceSettings.h"
 
 #include "Editor.h"
@@ -20,7 +20,7 @@ namespace UeAgentEditorViewport
 	class FLevelViewportAdapter final : public IViewportAdapter
 	{
 	public:
-		explicit FLevelViewportAdapter(const FUeAgentHttpServer& InServer)
+		explicit FLevelViewportAdapter(const FUeAgentLegacyMechanics& InServer)
 			: Server(InServer)
 		{
 		}
@@ -564,7 +564,7 @@ namespace UeAgentEditorViewport
 			bool bValid = false;
 		};
 
-		const FUeAgentHttpServer& Server;
+		const FUeAgentLegacyMechanics& Server;
 		mutable FNiagaraPreviewRestoreState NiagaraPreviewRestoreState;
 
 		static float GetNiagaraComponentActualAge(UNiagaraComponent* Component)
@@ -863,7 +863,7 @@ namespace UeAgentEditorViewport
 		}
 	};
 
-	TSharedRef<IViewportAdapter> MakeLevelViewportAdapter(const FUeAgentHttpServer& Server)
+	TSharedRef<IViewportAdapter> MakeLevelViewportAdapter(const FUeAgentLegacyMechanics& Server)
 	{
 		return MakeShared<FLevelViewportAdapter>(Server);
 	}

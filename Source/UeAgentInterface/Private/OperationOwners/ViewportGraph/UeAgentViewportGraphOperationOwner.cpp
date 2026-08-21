@@ -1,28 +1,15 @@
 #include "OperationOwners/ViewportGraph/UeAgentViewportGraphOperationOwner.h"
 
-#include "Composition/SimpleAuthoring/UeAgentSimpleAuthoringRuntime.h"
-#include "Composition/TimelineSpatial/UeAgentTimelineSpatialRuntime.h"
-#include "Core/BindingGateway/Ticket/UeAgentBindingTicket.h"
-#include "Core/Discovery/UeAgentDiscovery.h"
+#include "Composition/TimelineSpatial/UeAgentTimelineSpatialMechanicsHost.h"
 #include "Core/DomainCapability/DelegatedCommandOperation/UeAgentDelegatedCommandOperation.h"
-#include "Core/Projection/UeAgentProjection.h"
-#include "Editor.h"
-#include "HAL/PlatformProcess.h"
-#include "Misc/App.h"
-#include "Misc/Guid.h"
-#include "Misc/Paths.h"
-#include "Misc/ScopeLock.h"
+#include "Dom/JsonObject.h"
 #include "QueryOwners/ViewportGraph/UeAgentViewportGraphQueryOwner.h"
+#include "Serialization/JsonSerializer.h"
+#include "Serialization/JsonWriter.h"
 
 namespace UE::UAI::OperationOwners::ViewportGraph
 {
-	using namespace BindingGateway::Ticket;
 	using namespace CommandEdge;
-	using namespace Composition::SimpleAuthoring;
-	using namespace Composition::TimelineSpatial;
-	using namespace ContextResource;
-	using namespace Discovery;
-	using namespace Projection;
 
 	namespace
 	{
@@ -44,211 +31,6 @@ namespace UE::UAI::OperationOwners::ViewportGraph
 				TCondensedJsonPrintPolicy<TCHAR>>::Create(&Text);
 			FJsonSerializer::Serialize(Error, Writer);
 			return Text;
-		}
-
-		struct FProcessHost final
-		{
-			FCriticalSection Mutex;
-			TMap<FString, TSharedRef<IUeAgentCommandHandler>> Handlers;
-			TArray<FString> AuthorityScopes;
-		};
-
-		FProcessHost& ProcessHost()
-		{
-			static FProcessHost Host;
-			return Host;
-		}
-
-		class FConservativeTokenEstimator final : public IUeAgentTokenEstimator
-		{
-		public:
-			bool TryEstimate(
-				const FUeAgentProjectedPayload& Payload,
-				const TArray<FUeAgentArtifactDescriptor>& Artifacts,
-				const TArray<FUeAgentProjectionDiagnostic>& Diagnostics,
-				FUeAgentResourceTracker& Resources,
-				const FUeAgentOperationDeadline& Deadline,
-				const FUeAgentCancellationToken& Cancellation,
-				FUeAgentTokenEstimate& OutEstimate,
-				FUeAgentProjectionError& OutError) override
-			{
-				OutError = {};
-				FUeAgentCancellationRequested Cancelled;
-				if (!Cancellation.TryCheckpoint(Cancelled))
-				{
-					OutError.Code = Cancelled.Code;
-					OutError.SubjectId = Cancelled.Reason;
-					OutError.Detail = TEXT("ViewportGraph projection cancelled");
-					return false;
-				}
-				FUeAgentOperationDeadlineExceeded Expired;
-				if (!Deadline.TryCheckpoint(TEXT("viewport_graph.projection"), Expired))
-				{
-					OutError.Code = Expired.Code;
-					OutError.SubjectId = Expired.Stage;
-					OutError.Detail = TEXT("ViewportGraph projection deadline expired");
-					return false;
-				}
-				FUeAgentResourceBudgetExceeded BudgetError;
-				if (!Resources.TryCharge(
-						EUeAgentResourceDimension::WorkUnits,
-						1,
-						TEXT("viewport_graph.projection"),
-						BudgetError))
-				{
-					OutError.Code = BudgetError.Code;
-					OutError.SubjectId = BudgetError.Path;
-					OutError.Detail = TEXT("ViewportGraph projection budget exceeded");
-					OutError.ResourceDimension = BudgetError.Dimension;
-					OutError.ResourceLimit = BudgetError.Limit;
-					OutError.ResourceObserved = BudgetError.Observed;
-					return false;
-				}
-				int64 Bytes = 512 + Artifacts.Num() * 512 + Diagnostics.Num() * 256;
-				if (Payload.GetSnapshot().IsValid())
-				{
-					Bytes += Payload.GetSnapshot()->GetEntries().Num() * 2048;
-				}
-				OutEstimate = FUeAgentTokenEstimate(
-					EUeAgentTokenEstimateKind::Conservative,
-					FMath::Max<int64>(1, (Bytes + 2) / 3),
-					Bytes);
-				return true;
-			}
-		};
-
-		bool TryCreateMechanics(
-			TMap<FString, TSharedRef<IUeAgentCommandHandler>>& OutHandlers,
-			TArray<FString>& OutScopes,
-			FString& OutError)
-		{
-			OutHandlers.Reset();
-			OutScopes.Reset();
-			OutError.Reset();
-			if (!IsInGameThread())
-			{
-				OutError = TEXT("viewport_graph_game_thread_required");
-				return false;
-			}
-			UWorld* const World = GEditor
-				? GEditor->GetEditorWorldContext().World()
-				: nullptr;
-			if (!World)
-			{
-				OutError = TEXT("viewport_graph_editor_world_unavailable");
-				return false;
-			}
-
-			const FString SessionId = TEXT("viewport-graph-session:")
-				+ FGuid::NewGuid().ToString(EGuidFormats::DigitsWithHyphensLower);
-			TSharedPtr<const FUeAgentOperationTicketService> Tickets;
-			FUeAgentOperationTicketError TicketError;
-			if (!FUeAgentOperationTicketService::TryCreate(
-					FGuid::NewGuid().ToString(EGuidFormats::DigitsWithHyphensLower),
-					300.0,
-					[]() { return FPlatformTime::Seconds(); },
-					[]() { return FGuid::NewGuid().ToString(EGuidFormats::Digits); },
-					Tickets,
-					TicketError))
-			{
-				OutError = TicketError.Code + TEXT(":") + TicketError.Detail;
-				return false;
-			}
-			TSharedPtr<const FUeAgentResponseProjector> Projector;
-			FUeAgentProjectionError ProjectionError;
-			if (!FUeAgentResponseProjector::TryCreate(
-					MakeShared<FConservativeTokenEstimator>(),
-					Projector,
-					ProjectionError))
-			{
-				OutError = ProjectionError.Code + TEXT(":") + ProjectionError.Detail;
-				return false;
-			}
-
-			FUeAgentSimpleAuthoringRuntimeConfig SimpleConfig;
-			SimpleConfig.ProjectInstanceId = TEXT("project:")
-				+ FString(FApp::GetProjectName());
-			SimpleConfig.EditorInstanceId = FString::Printf(
-				TEXT("editor-process:%u"), FPlatformProcess::GetCurrentProcessId());
-			SimpleConfig.ServerSessionId = SessionId;
-			SimpleConfig.RegistryEpoch = 1;
-			SimpleConfig.TimeoutSeconds = 120.0;
-			SimpleConfig.MaxFrameBytes = 16 * 1024 * 1024;
-			SimpleConfig.JournalRoot = FPaths::ProjectSavedDir()
-				/ TEXT("UeAgentInterface/SimpleAuthoring/ViewportGraphFoundation");
-			TSharedPtr<FUeAgentSimpleAuthoringRuntime> SimpleRuntime;
-			FUeAgentSimpleAuthoringRuntimeError SimpleError;
-			if (!FUeAgentSimpleAuthoringRuntime::TryCreate(
-					SimpleConfig,
-					*World,
-					Tickets.ToSharedRef(),
-					Projector.ToSharedRef(),
-					SimpleRuntime,
-					SimpleError)
-				|| !SimpleRuntime.IsValid())
-			{
-				OutError = SimpleError.Code + TEXT(":") + SimpleError.Detail;
-				return false;
-			}
-			TSharedPtr<const FUeAgentDiscoveryService> Discovery;
-			FUeAgentDiscoveryError DiscoveryError;
-			if (!FUeAgentDiscoveryService::TryCreate(
-					SimpleRuntime->GetCatalogSources(),
-					{},
-					Discovery,
-					DiscoveryError)
-				|| !Discovery.IsValid())
-			{
-				OutError = DiscoveryError.Code + TEXT(":") + DiscoveryError.Detail;
-				return false;
-			}
-
-			FUeAgentTimelineSpatialRuntimeConfig RuntimeConfig;
-			RuntimeConfig.ProjectInstanceId = SimpleConfig.ProjectInstanceId;
-			RuntimeConfig.EditorInstanceId = SimpleConfig.EditorInstanceId;
-			RuntimeConfig.ServerSessionId = SessionId;
-			RuntimeConfig.RegistryEpoch = 1;
-			RuntimeConfig.TimeoutSeconds = 120.0;
-			RuntimeConfig.MaxFrameBytes = 16 * 1024 * 1024;
-			TSharedPtr<FUeAgentTimelineSpatialRuntime> Runtime;
-			FUeAgentTimelineSpatialRuntimeError RuntimeError;
-			if (!FUeAgentTimelineSpatialRuntime::TryCreate(
-					RuntimeConfig,
-					*World,
-					Tickets.ToSharedRef(),
-					Discovery.ToSharedRef(),
-					Projector.ToSharedRef(),
-					Runtime,
-					RuntimeError)
-				|| !Runtime.IsValid())
-			{
-				OutError = RuntimeError.Code + TEXT(":") + RuntimeError.Detail;
-				return false;
-			}
-			for (const TSharedRef<IUeAgentCommandHandler>& Handler
-				: Runtime->GetCommandHandlers())
-			{
-				if (!QueryOwners::ViewportGraph::IsCommand(Handler->GetCommandId()))
-				{
-					continue;
-				}
-				if (OutHandlers.Contains(Handler->GetCommandId()))
-				{
-					OutHandlers.Reset();
-					OutError = TEXT("viewport_graph_mechanics_duplicate:")
-						+ Handler->GetCommandId();
-					return false;
-				}
-				OutHandlers.Add(Handler->GetCommandId(), Handler);
-			}
-			OutScopes = Runtime->GetAuthorityScopes();
-			if (OutHandlers.Num() != QueryOwners::ViewportGraph::GetCommandIds().Num())
-			{
-				OutHandlers.Reset();
-				OutError = TEXT("viewport_graph_mechanics_count_mismatch");
-				return false;
-			}
-			return true;
 		}
 	}
 
@@ -282,26 +64,11 @@ namespace UE::UAI::OperationOwners::ViewportGraph
 		TArray<FString>& OutAuthorityScopes,
 		FString& OutError)
 	{
-		OutHandler.Reset();
-		OutAuthorityScopes.Reset();
-		OutError.Reset();
-		FProcessHost& Host = ProcessHost();
-		FScopeLock Lock(&Host.Mutex);
-		if (Host.Handlers.IsEmpty()
-			&& !TryCreateMechanics(Host.Handlers, Host.AuthorityScopes, OutError))
-		{
-			return false;
-		}
-		const TSharedRef<IUeAgentCommandHandler>* Found =
-			Host.Handlers.Find(CommandId);
-		if (!Found)
-		{
-			OutError = TEXT("viewport_graph_mechanics_missing:") + CommandId;
-			return false;
-		}
-		OutHandler = *Found;
-		OutAuthorityScopes = Host.AuthorityScopes;
-		return true;
+		return Composition::TimelineSpatial::TryResolveTimelineSpatialMechanics(
+			CommandId,
+			OutHandler,
+			OutAuthorityScopes,
+			OutError);
 	}
 
 	FUeAgentCommandResult Submit(
@@ -359,7 +126,7 @@ namespace UE::UAI::OperationOwners::ViewportGraph
 		DomainCapability::FDomainOperationInvocation Invocation;
 		DomainCapability::FDomainOperationInvocationError InvocationError;
 		if (!Factory->TryCreate(
-				Request, Caller, Cancellation, Invocation, InvocationError))
+			Request, Caller, Cancellation, Invocation, InvocationError))
 		{
 			return FUeAgentCommandResult::Failure(
 				Request,
@@ -393,7 +160,7 @@ namespace UE::UAI::OperationOwners::ViewportGraph
 		FString Payload;
 		FString PayloadError;
 		if (!Invocation.GetContext()->TryBuildSuccessPayload(
-				Receipt, Payload, PayloadError))
+			Receipt, Payload, PayloadError))
 		{
 			return FUeAgentCommandResult::ProtocolError(
 				Request.GetCorrelationId(),

@@ -9,9 +9,9 @@
 #include "Misc/Paths.h"
 #include "Serialization/JsonReader.h"
 #include "Serialization/JsonSerializer.h"
-#include "Server/UeAgentCommandRegistry.h"
 
 #include "Composition/LongRunningSession/UeAgentLongRunningSessionActivation.h"
+#include "Composition/TimelineSpatial/UeAgentTimelineSpatialActivation.h"
 #include "Core/Contract/UeAgentCommandContract.h"
 #include "Core/Contract/UeAgentDescriptorRegistry.h"
 
@@ -646,7 +646,21 @@ bool FUeAgentLongRunningSessionPublicActivationContractTest::RunTest(
 
 	TSharedPtr<const UE::UAI::CommandContract::
 		FUeAgentCommandContractRegistry> Registry;
+	TSharedPtr<const UE::UAI::CommandContract::
+		FUeAgentCommandContractRegistry> BaseRegistry;
 	FString RegistryError;
+	TestTrue(
+		TEXT("timeline/spatial base command registry composes"),
+		UE::UAI::Composition::TimelineSpatial::
+			TryCreateTimelineSpatialProductionCommandContractRegistry(
+				BaseRegistry, RegistryError));
+	if (!BaseRegistry.IsValid())
+	{
+		AddError(TEXT("long_running_session_base_registry_missing:")
+			+ RegistryError);
+		return false;
+	}
+	RegistryError.Reset();
 	TestTrue(TEXT("production command registry composes"),
 		TryCreateLongRunningSessionProductionCommandContractRegistry(
 			Registry, RegistryError));
@@ -657,9 +671,9 @@ bool FUeAgentLongRunningSessionPublicActivationContractTest::RunTest(
 	else
 	{
 		TestEqual(
-			TEXT("complete production command count"),
+			TEXT("long-running composition adds its exact contracts to the current base"),
 			Registry->GetContracts().Num(),
-			224);
+			BaseRegistry->GetContracts().Num() + ExpectedCommandIds.Num());
 		for (const FString& CommandId : ExpectedCommandIds)
 		{
 			TestNotNull(TEXT("public command registered: ") + CommandId,
@@ -680,8 +694,8 @@ bool FUeAgentLongRunningSessionPublicActivationContractTest::RunTest(
 			Manifest.Contains(TEXT("operation.reconcile"),
 				ESearchCase::CaseSensitive));
 		// The committed formal manifest is owned by the current outermost
-		// activation registry. LongRunningSession remains a stable 224-command
-		// compositional base and only proves its own in-memory manifest here.
+		// activation registry. LongRunningSession proves only its additive
+		// in-memory composition over the current TimelineSpatial base here.
 	}
 	return !HasAnyErrors();
 }
@@ -1284,11 +1298,9 @@ bool FUeAgentLongRunningSessionPublicCommandHandlersTest::RunTest(
 	for (const FString& CommandId : RetiredOwnerCommands)
 	{
 		TestNull(
-			TEXT("legacy owner command has no exact route: ") + CommandId,
-			UeAgentCommandRegistry::FindExactCommandInvoker(CommandId));
-		TestNull(
-			TEXT("legacy owner command has no prefix route: ") + CommandId,
-			UeAgentCommandRegistry::FindPrefixedCommandInvoker(CommandId));
+			TEXT("legacy identity is absent from the sole production registry: ")
+				+ CommandId,
+			Registry.IsValid() ? Registry->FindExact(CommandId) : nullptr);
 	}
 	return !HasAnyErrors();
 }

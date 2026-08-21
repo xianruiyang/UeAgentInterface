@@ -8,6 +8,8 @@ namespace UE::UAI::QueryOwners::AudioGraph
 {
 	struct UEAGENTINTERFACE_API FAudioGraphCandidate
 	{
+		FString TargetRef;
+		FString TargetRevision;
 		FString Name;
 		FString Label;
 		FString Kind;
@@ -45,4 +47,19 @@ namespace UE::UAI::QueryOwners::AudioGraph
 		FAudioGraphCandidateQueryError& OutError,
 		int32 Limit = 64,
 		int32 Cursor = 0);
+
+	UEAGENTINTERFACE_API bool IsCurrentAudioGraphCandidateBinding(
+		UObject& Target,
+		const FString& CandidateTargetRef,
+		const FString& CandidateTargetRevision,
+		const FString& CandidateName,
+		const FString& CandidateKind,
+		const TArray<FString>& SupportedOperations,
+		const FString& InputContract,
+		const FString& PlacementContract,
+		const FString& RequiredContext,
+		int32 MajorVersion,
+		int32 MinorVersion,
+		const FString& BindingRevision,
+		FAudioGraphCandidateQueryError& OutError);
 }

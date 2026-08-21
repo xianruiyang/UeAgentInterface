@@ -83,12 +83,12 @@
     {
       "descriptor_id": "uai.query.world.selection",
       "version": 1,
-      "descriptor_hash": "sha256:e5052956111d5a033fabac404bda9b04a6ab4ba1c371ec770e39d14e950edbf8",
+      "descriptor_hash": "sha256:8e498e351b0cb08a1e9e78f7596af6117dd66fce8b6257aac2e70ed114615126",
       "capability_id": "world.selection.read",
       "provider_binding": "world.read.selection",
       "family": "object",
       "query_kind": "state",
-      "required_context_facets": ["world", "selection"],
+      "required_context_facets": ["world"],
       "allowed_state_planes": ["authoring_memory"],
       "requires_target": false,
       "input_schema": {

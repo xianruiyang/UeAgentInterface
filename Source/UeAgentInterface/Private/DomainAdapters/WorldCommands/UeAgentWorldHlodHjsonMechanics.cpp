@@ -309,8 +309,14 @@ namespace UE::UAI::DomainAdapters::WorldCommands
 			Mutation->SetStringField(
 				TEXT("kind"), bCreated ? TEXT("created") : TEXT("updated"));
 			Mutation->SetStringField(TEXT("root_type"), RootType);
+			FDomainHjsonImportLifecycleReceipt LifecycleReceipt;
+			LifecycleReceipt.bMutationApplied = true;
+			LifecycleReceipt.bCompileSettled = true;
+			LifecycleReceipt.bPackageSaved = true;
+			LifecycleReceipt.bUnloadedReloaded = true;
+			LifecycleReceipt.PersistenceReceiptId = Revision;
 			return TryBuildImportSuccessPayload(
-				ProviderId, Target, Revision, Readback, Mutation,
+				ProviderId, Target, Revision, LifecycleReceipt, Readback, Mutation,
 				OutPayload, OutError);
 		}
 	}

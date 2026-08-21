@@ -10,6 +10,7 @@ namespace UE::UAI::DomainAdapters::PcgCommands
 			TEXT("pcg.data_asset.apply"),
 			TEXT("pcg.data_asset.create_from_level"),
 			TEXT("pcg.generated_spatial_data.read"),
+			TEXT("pcg.graph.asset.create"),
 			TEXT("pcg.graph.apply"),
 			TEXT("pcg.graph_instance.apply"),
 			TEXT("pcg.graph_parameters.apply"),
@@ -57,7 +58,7 @@ namespace UE::UAI::DomainAdapters::PcgCommands
 			}
 			OutProfiles.Add(*Match);
 		}
-		return OutProfiles.Num() == 7;
+		return OutProfiles.Num() == 8;
 	}
 
 	bool TryGetTimelineProfiles(

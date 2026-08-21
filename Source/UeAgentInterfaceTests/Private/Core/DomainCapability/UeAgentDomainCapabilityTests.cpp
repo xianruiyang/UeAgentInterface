@@ -1,6 +1,7 @@
 #include "Misc/AutomationTest.h"
 
 #include "Core/DomainCapability/UeAgentDomainCapability.h"
+#include "Core/BindingGateway/Query/UeAgentQueryBindingError.h"
 #include "Module/CommandRegistration/UObjectDataAsset/UeAgentUObjectDataAssetRegistration.h"
 #include "OperationOwners/DataTableCurveTable/UeAgentDataTableCurveTableDomainService.h"
 
@@ -121,6 +122,49 @@ namespace
 	private:
 		FString SourceId = TEXT("fixture-catalog-source");
 		TArray<FString> Kinds;
+	};
+
+	class FDummyReadPort final : public Discovery::IUeAgentStateReadPort
+	{
+	public:
+		const FString& GetPortId() const override
+		{
+			return PortId;
+		}
+
+		bool TryRead(
+			const Discovery::FUeAgentStateReadRequest&,
+			ContextResource::FUeAgentResourceTracker&,
+			const ContextResource::FUeAgentOperationDeadline&,
+			const ContextResource::FUeAgentCancellationToken&,
+			TSharedPtr<const StateSemantic::FUeAgentCanonicalSnapshot>& OutSnapshot,
+			Discovery::FUeAgentDiscoveryError& OutError) override
+		{
+			OutSnapshot.Reset();
+			OutError.Code = TEXT("fixture_not_called");
+			return false;
+		}
+
+	private:
+		FString PortId = TEXT("fixture-read-port");
+	};
+
+	class FDummyDomainQueryProvider final
+		: public BindingGateway::Query::IUeAgentDomainQueryProvider
+	{
+	public:
+		bool TryQuery(
+			const Contract::FUeAgentQueryDescriptor&,
+			const Contract::FUeAgentContractValue&,
+			const TOptional<Discovery::FUeAgentCandidateBinding>&,
+			const ContextResource::FUeAgentOperationContext&,
+			TSharedPtr<const Projection::FUeAgentProjectionSourceValue>& OutSource,
+			BindingGateway::Query::FUeAgentQueryBindingError& OutError) override
+		{
+			OutSource.Reset();
+			OutError.Code = TEXT("fixture_not_called");
+			return false;
+		}
 	};
 
 	class FRenamedCommandContribution final
@@ -684,6 +728,74 @@ bool FUeAgentDomainCapabilityFreezeTest::RunTest(const FString& Parameters)
 }
 
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(
+	FUeAgentDomainCapabilityQueryDiscoveryProjectionTest,
+	"UeAgentInterface.Core.DomainCapability.QueryDiscoveryProjection",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FUeAgentDomainCapabilityQueryDiscoveryProjectionTest::RunTest(
+	const FString& Parameters)
+{
+	FDomainCapabilityDeclaration Declaration =
+		MakeExplicitlyUnsupported(TEXT("fixture-query-discovery"));
+	Declaration.Query.Support = EDomainCapabilitySupport::Supported;
+	Declaration.Query.Providers.Emplace(
+		TEXT("fixture-query-provider"),
+		MakeShared<FDummyDomainQueryProvider>());
+	const TSharedRef<FDummyReadPort> ReadPort = MakeShared<FDummyReadPort>();
+	Declaration.Discovery.Support = EDomainCapabilitySupport::Supported;
+	Declaration.Discovery.ReadPorts.Add(ReadPort);
+	Declaration.Discovery.Sources.Add({
+		MakeShared<FDummyCatalogSource>(),
+		ReadPort->GetPortId(),
+	});
+
+	FString Error;
+	TSharedPtr<const FDomainCapabilityContribution> Contribution;
+	TestTrue(
+		TEXT("query and discovery declaration is locally valid"),
+		FDomainCapabilityContribution::TryCreate(
+			MoveTemp(Declaration),
+			Contribution,
+			Error));
+	if (!Contribution.IsValid())
+	{
+		AddError(TEXT("projection declaration failed: ") + Error);
+		return false;
+	}
+	FDomainCapabilityComposition Composition;
+	TestTrue(
+		TEXT("add projection declaration"),
+		Composition.TryAdd(Contribution.ToSharedRef(), Error));
+	TSharedPtr<const FFrozenDomainCapabilitySet> Frozen;
+	TestTrue(
+		TEXT("freeze projection declaration"),
+		Composition.TryFreeze(Frozen, Error));
+	if (!Frozen.IsValid())
+	{
+		AddError(TEXT("projection freeze failed: ") + Error);
+		return false;
+	}
+	FDomainCapabilityAuthorities Authorities;
+	TestTrue(
+		TEXT("build query and discovery authorities"),
+		Frozen->TryBuildAuthorities(Authorities, Error));
+	TestTrue(
+		TEXT("query provider registry is projected"),
+		Authorities.GetQueryProviderRegistry().IsValid());
+	TestTrue(
+		TEXT("generic discovery service is projected"),
+		Authorities.GetDiscoveryService().IsValid());
+	if (Authorities.GetQueryProviderRegistry().IsValid())
+	{
+		TestTrue(
+			TEXT("exact query provider binding is addressable"),
+			Authorities.GetQueryProviderRegistry()->FindExact(
+				TEXT("fixture-query-provider")).IsValid());
+	}
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(
 	FUeAgentDomainCapabilityExistingAuthorityProjectionTest,
 	"UeAgentInterface.Core.DomainCapability.ExistingAuthorityProjection",
 	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
@@ -790,6 +902,16 @@ bool FUeAgentDomainCapabilityExistingAuthorityProjectionTest::RunTest(
 	TestTrue(
 		TEXT("T27 and T30 projected to HJSON provider registry"),
 		Authorities.GetHjsonRegistry().IsValid());
+	TestTrue(
+		TEXT("T35 projected unified content discovery authority"),
+		Authorities.GetContentDiscoveryService().IsValid());
+	if (Authorities.GetContentDiscoveryService().IsValid())
+	{
+		TestEqual(
+			TEXT("T35 publishes the two current content providers"),
+			Authorities.GetContentDiscoveryService()->GetProviderIds().Num(),
+			2);
+	}
 	TSharedPtr<const CommandRegistry::FUeAgentImmutableCommandRegistry>
 		ProcessCommandRegistry;
 	TSharedPtr<const CommandEdge::FUeAgentExactCommandDispatch>

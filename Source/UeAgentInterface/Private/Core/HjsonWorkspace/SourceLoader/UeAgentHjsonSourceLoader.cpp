@@ -103,6 +103,84 @@ namespace UE::UAI::HjsonWorkspace
 			return Sha256(Bytes);
 		}
 
+		bool TryBuildSemanticFingerprint(
+			const TArray<FContentGraphImportDocument>& Documents,
+			const FString& EntryFile,
+			FUeAgentResourceTracker& Resources,
+			FString& OutFingerprint,
+			FWorkspaceError& OutError)
+		{
+			OutFingerprint.Reset();
+			if (Documents.IsEmpty() || EntryFile.IsEmpty())
+			{
+				return Fail(
+					OutError,
+					TEXT("content_graph_semantic_source_invalid"),
+					EntryFile);
+			}
+			TArray<TPair<FString, FString>> CanonicalDocuments;
+			CanonicalDocuments.Reserve(Documents.Num());
+			int32 EntryMatches = 0;
+			for (const FContentGraphImportDocument& SourceDocument : Documents)
+			{
+				FHjsonDocumentPtr Parsed;
+				if (!TryParseHjsonDocument(
+						SourceDocument.GetDocument(),
+						SourceDocument.GetRelativePath(),
+						Resources,
+						Parsed,
+						OutError)
+					|| !Parsed.IsValid())
+				{
+					return false;
+				}
+				TArray<uint8> CanonicalUtf8;
+				if (!TryWriteHjsonDocument(
+						Parsed.ToSharedRef(),
+						Resources,
+						CanonicalUtf8,
+						OutError))
+				{
+					return false;
+				}
+				const FString RelativeIdentity =
+					SourceDocument.GetRelativePath().ToLower();
+				CanonicalDocuments.Emplace(
+					RelativeIdentity,
+					Sha256(CanonicalUtf8));
+				EntryMatches += SourceDocument.GetRelativePath().Equals(
+					EntryFile,
+					ESearchCase::IgnoreCase)
+					? 1
+					: 0;
+			}
+			if (EntryMatches != 1)
+			{
+				return Fail(
+					OutError,
+					TEXT("content_graph_semantic_entry_invalid"),
+					EntryFile);
+			}
+			if (CanonicalDocuments.Num() == 1)
+			{
+				OutFingerprint = CanonicalDocuments[0].Value;
+				return true;
+			}
+			CanonicalDocuments.Sort([](
+				const TPair<FString, FString>& Left,
+				const TPair<FString, FString>& Right)
+			{
+				return Left.Key < Right.Key;
+			});
+			FString Material = TEXT("entry|") + EntryFile.ToLower();
+			for (const TPair<FString, FString>& Document : CanonicalDocuments)
+			{
+				Material += TEXT("|") + Document.Key + TEXT("|") + Document.Value;
+			}
+			OutFingerprint = Sha256Text(Material);
+			return true;
+		}
+
 		bool IsReparsePoint(const FString& Path)
 		{
 			return FPlatformFileManager::Get()
@@ -686,6 +764,16 @@ namespace UE::UAI::HjsonWorkspace
 					TEXT("workspace_source_version_changed"),
 					Root);
 			}
+			FString SemanticFingerprint;
+			if (!TryBuildSemanticFingerprint(
+					Documents,
+					EntryFile,
+					Resources,
+					SemanticFingerprint,
+					OutError))
+			{
+				return false;
+			}
 			OutSource = MakeShared<FResolvedContentGraphImportSource>(
 				EWorkspaceSourceKind::Directory,
 				Root,
@@ -693,6 +781,7 @@ namespace UE::UAI::HjsonWorkspace
 				MoveTemp(BaseRevision),
 				MoveTemp(EntryFile),
 				Sha256Text(FingerprintMaterial),
+				MoveTemp(SemanticFingerprint),
 				MoveTemp(Documents));
 			return true;
 		}
@@ -736,6 +825,22 @@ namespace UE::UAI::HjsonWorkspace
 					Path);
 			}
 			const FString Hash = Sha256(Bytes);
+			TArray<FContentGraphImportDocument> Documents{
+				FContentGraphImportDocument(
+					FPaths::GetCleanFilename(Path),
+					MoveTemp(Document),
+					Hash),
+			};
+			FString SemanticFingerprint;
+			if (!TryBuildSemanticFingerprint(
+					Documents,
+					FPaths::GetCleanFilename(Path),
+					Resources,
+					SemanticFingerprint,
+					OutError))
+			{
+				return false;
+			}
 			OutSource = MakeShared<FResolvedContentGraphImportSource>(
 				EWorkspaceSourceKind::SingleFile,
 				Path,
@@ -743,12 +848,8 @@ namespace UE::UAI::HjsonWorkspace
 				FString(),
 				FPaths::GetCleanFilename(Path),
 				Hash,
-				TArray<FContentGraphImportDocument>{
-					FContentGraphImportDocument(
-						FPaths::GetCleanFilename(Path),
-						MoveTemp(Document),
-						Hash),
-				});
+				MoveTemp(SemanticFingerprint),
+				MoveTemp(Documents));
 			return true;
 		}
 	}
@@ -785,6 +886,7 @@ namespace UE::UAI::HjsonWorkspace
 		FString InBaseRevision,
 		FString InEntryFile,
 		FString InSourceFingerprint,
+		FString InSemanticFingerprint,
 		TArray<FContentGraphImportDocument> InDocuments)
 		: Kind(InKind)
 		, SourceUnit(MoveTemp(InSourceUnit))
@@ -792,6 +894,7 @@ namespace UE::UAI::HjsonWorkspace
 		, BaseRevision(MoveTemp(InBaseRevision))
 		, EntryFile(MoveTemp(InEntryFile))
 		, SourceFingerprint(MoveTemp(InSourceFingerprint))
+		, SemanticFingerprint(MoveTemp(InSemanticFingerprint))
 		, Documents(MoveTemp(InDocuments))
 	{
 	}
@@ -824,6 +927,11 @@ namespace UE::UAI::HjsonWorkspace
 	const FString& FResolvedContentGraphImportSource::GetSourceFingerprint() const
 	{
 		return SourceFingerprint;
+	}
+
+	const FString& FResolvedContentGraphImportSource::GetSemanticFingerprint() const
+	{
+		return SemanticFingerprint;
 	}
 
 	const TArray<FContentGraphImportDocument>&
@@ -861,6 +969,7 @@ namespace UE::UAI::HjsonWorkspace
 		Result->SetStringField(TEXT("base_revision"), BaseRevision);
 		Result->SetStringField(TEXT("entry_file"), EntryFile);
 		Result->SetStringField(TEXT("source_fingerprint"), SourceFingerprint);
+		Result->SetStringField(TEXT("semantic_fingerprint"), SemanticFingerprint);
 		TArray<TSharedPtr<FJsonValue>> Values;
 		for (const FContentGraphImportDocument& Document : Documents)
 		{
@@ -926,6 +1035,22 @@ namespace UE::UAI::HjsonWorkspace
 				return false;
 			}
 			const FString Hash = Sha256Text(Document);
+			TArray<FContentGraphImportDocument> Documents{
+				FContentGraphImportDocument(
+					TEXT("inline.hjson"),
+					MoveTemp(Document),
+					Hash),
+			};
+			FString SemanticFingerprint;
+			if (!TryBuildSemanticFingerprint(
+					Documents,
+					TEXT("inline.hjson"),
+					Resources,
+					SemanticFingerprint,
+					OutError))
+			{
+				return false;
+			}
 			OutSource = MakeShared<FResolvedContentGraphImportSource>(
 				EWorkspaceSourceKind::Inline,
 				TEXT("inline:content-graph-import"),
@@ -933,12 +1058,8 @@ namespace UE::UAI::HjsonWorkspace
 				FString(),
 				TEXT("inline.hjson"),
 				Hash,
-				TArray<FContentGraphImportDocument>{
-					FContentGraphImportDocument(
-						TEXT("inline.hjson"),
-						MoveTemp(Document),
-						Hash),
-				});
+				MoveTemp(SemanticFingerprint),
+				MoveTemp(Documents));
 			return true;
 		}
 		FString Path;

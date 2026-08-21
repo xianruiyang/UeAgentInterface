@@ -67,7 +67,7 @@ and Localization remain import-only in T60 because their current public target
 identities do not provide the same general asset-provenance export contract.
 This is an explicit unsupported surface, not a fallback or inferred export.
 
-Historical HJSON parser branches and historical external-import owners are not
-fallbacks. T60 delegates only to the active T28-T30 command services; physical
-legacy source retirement remains T90's responsibility after zero-reference
-evidence.
+Historical HJSON parser branches and historical external-import public owners
+are not fallbacks. T60 delegates only to the current T28-T30 command services;
+T44 removed the old compiled registry/HTTP handler and isolated obsolete public
+composition seams after zero-active-reference verification.

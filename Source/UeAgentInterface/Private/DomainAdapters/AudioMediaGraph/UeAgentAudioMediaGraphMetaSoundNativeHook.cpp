@@ -244,32 +244,10 @@ namespace UE::UAI::DomainAdapters::AudioMediaGraph
 		FMetaSoundBuilderLease Lease(*Builder);
 		for (const FAudioMediaGraphMetaSoundNodeMutation& Mutation : Mutations)
 		{
-			FMetasoundFrontendClassName ClassName;
-			if (!Mutation.GetNodeId().IsValid()
-				|| !FMetasoundFrontendClassName::Parse(
-					Mutation.GetClassName(), ClassName))
+			if (!Mutation.GetNodeId().IsValid())
 			{
 				OutError.Set(TEXT("audio_media_graph_metasound_node_spec_invalid"));
 				return false;
-			}
-			if (Mutation.GetIntent() != EAudioMediaGraphMutationIntent::Delete)
-			{
-				FMetasoundFrontendClass RegisteredClass;
-				if (!Metasound::Frontend::ISearchEngine::Get()
-						.FindClassWithHighestMinorVersion(
-							ClassName, Mutation.GetMajorVersion(), RegisteredClass))
-				{
-					OutError.Set(TEXT("audio_media_graph_metasound_node_class_missing"),
-						Mutation.GetClassName());
-					return false;
-				}
-				if (RegisteredClass.Metadata.GetVersion().Minor
-					!= Mutation.GetMinorVersion())
-				{
-					OutError.Set(TEXT("audio_media_graph_metasound_node_version_mismatch"),
-						Mutation.GetClassName());
-					return false;
-				}
 			}
 			const bool bExists = Builder->GetBuilder().FindNode(
 				Mutation.GetNodeId()) != nullptr;
@@ -289,6 +267,30 @@ namespace UE::UAI::DomainAdapters::AudioMediaGraph
 					return false;
 				}
 				continue;
+			}
+
+			FMetasoundFrontendClassName ClassName;
+			if (!FMetasoundFrontendClassName::Parse(
+					Mutation.GetClassName(), ClassName))
+			{
+				OutError.Set(TEXT("audio_media_graph_metasound_node_spec_invalid"));
+				return false;
+			}
+			FMetasoundFrontendClass RegisteredClass;
+			if (!Metasound::Frontend::ISearchEngine::Get()
+					.FindClassWithHighestMinorVersion(
+						ClassName, Mutation.GetMajorVersion(), RegisteredClass))
+			{
+				OutError.Set(TEXT("audio_media_graph_metasound_node_class_missing"),
+					Mutation.GetClassName());
+				return false;
+			}
+			if (RegisteredClass.Metadata.GetVersion().Minor
+				!= Mutation.GetMinorVersion())
+			{
+				OutError.Set(TEXT("audio_media_graph_metasound_node_version_mismatch"),
+					Mutation.GetClassName());
+				return false;
 			}
 			if (Mutation.GetIntent() == EAudioMediaGraphMutationIntent::Update)
 			{

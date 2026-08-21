@@ -51,4 +51,16 @@ namespace UE::UAI::QueryOwners::Niagara
 		const FString& TargetUsage,
 		const FString& BindingRevision,
 		FNiagaraModuleCandidateQueryError& OutError);
+
+	UEAGENTINTERFACE_API bool IsCurrentNiagaraModuleCandidateBinding(
+		UObject& Target,
+		const FString& CandidateName,
+		const FString& CandidateKind,
+		const TArray<FString>& SupportedOperations,
+		const FString& InputContract,
+		const FString& PlacementContract,
+		const FString& RequiredContext,
+		const FString& TargetUsage,
+		const FString& BindingRevision,
+		FNiagaraModuleCandidateQueryError& OutError);
 }

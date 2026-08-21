@@ -1,7 +1,7 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "Commands/Audio/UeAgentHttpServer_AudioOps.h"
-#include "Server/UeAgentHttpServer.h"
+#include "LegacyMechanics/UeAgentLegacyMechanics.h"
 #include "Utilities/UeAgentAuthoringFileIO.h"
 #include "Utilities/UeAgentUObjectProperties.h"
 #include "Utilities/UeAgentDetailsAuthoring.h"

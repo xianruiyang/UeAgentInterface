@@ -14,4 +14,8 @@ namespace UE::UAI::DomainAdapters::AssetSimple
 	/** Domain capability granted only after the public uai:operate check. */
 	UEAGENTINTERFACE_API const TArray<FString>&
 	GetAssetSimpleRequiredAuthorityScopes();
+
+	/** Returns the official plugin required by this exact command, if any. */
+	UEAGENTINTERFACE_API FString GetAssetSimpleRequiredOfficialPlugin(
+		const FString& CommandId);
 }

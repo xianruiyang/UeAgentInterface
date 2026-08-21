@@ -8,6 +8,8 @@ namespace UE::UAI::QueryOwners::AnimationRigGraph
 {
 	struct UEAGENTINTERFACE_API FAnimationRigGraphCandidate
 	{
+		FString TargetRef;
+		FString TargetRevision;
 		FString Name;
 		FString Label;
 		FString Kind;
@@ -45,4 +47,17 @@ namespace UE::UAI::QueryOwners::AnimationRigGraph
 		FAnimationRigGraphCandidateQueryError& OutError,
 		int32 Limit = 64,
 		int32 Cursor = 0);
+
+	UEAGENTINTERFACE_API bool IsCurrentAnimationRigGraphCandidateBinding(
+		UObject& Target,
+		const FString& CandidateTargetRef,
+		const FString& CandidateTargetRevision,
+		const FString& CandidateName,
+		const FString& CandidateKind,
+		const TArray<FString>& SupportedOperations,
+		const FString& InputContract,
+		const FString& PlacementContract,
+		const FString& RequiredContext,
+		const FString& BindingRevision,
+		FAnimationRigGraphCandidateQueryError& OutError);
 }

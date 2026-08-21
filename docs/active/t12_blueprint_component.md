@@ -1,42 +1,45 @@
-# T12 Blueprint Component authority
+# T12 Blueprint Component candidate authority
 
-`blueprint.component.candidates` is the sole public candidate authority for the
-T12 Blueprint Simple Construction Script creation surface. It accepts one exact
-Blueprint object identity, one registered Component class, and one proposed
-Component variable name. A returned `candidate.name` is copied unchanged into
-the `uai.blueprint.component.edit/1` HJSON document together with its exact
-`component_class`, `binding_revision`, and the returned `scs_revision`.
+`blueprint.component.candidates` is the sole public candidate query for the
+current Blueprint Simple Construction Script creation surface. It accepts one
+exact Blueprint target, one supported Component class, and one proposed
+variable name. The response contains the read-only `scs_revision`, current SCS
+readback, and a bounded `candidates` array. An available candidate has this
+executable shape:
 
-The public SDK ingress is
-`client.blueprint.component_candidates(target=..., component_class=...,
-requested_name=...)`. If the method is not already known, locate it with
-`client.command_search(...)`, inspect its live contract with
-`client.command_detail(...)`, and use the equivalent discovery flow in
-`uai-cli`. Tutorials do not carry a separate task helper or command catalog.
+The public call is `client.blueprint.component_candidates(...)`. When its
+method or hash is not already known, use `client.command_search(...)` followed
+by `client.command_detail(...)`; `uai-cli` exposes the same exact contract.
 
-The T12 HJSON root uses `/Script/Engine.Blueprint` and a non-empty
-`components` array. Each entry has a unique logical `id`, an exact `candidate`,
-an optional `parent` logical id (or `null`), a non-negative sibling `order`, and
-registered properties. The bounded production set is
-`/Script/Engine.SceneComponent` with `relative_location`, and
-`/Script/Engine.PointLightComponent` with `relative_location` and `intensity`.
-Every owned entry resolves the common
-`uai.init.blueprint.scs_component/1` recursion contract before mutation. T13 is
-the sole source-carrier and common recursive initialization authority; T12
-consumes T13's normalized `source.kind=resolved` document set, registers only
-the Blueprint Component domain contract, and consumes that common seam.
+```json
+{
+  "name": "PointLight",
+  "component_class": "/Script/Engine.PointLightComponent",
+  "binding_revision": "sha256:..."
+}
+```
 
-The domain provider matches only `content_graph.import_workspace` with the T12
-schema. T11 remains the independent Blueprint node authority and is not
-reimplemented here. Unsupported classes, unknown properties, stale revisions,
-changed candidate bindings, duplicate names, missing parents, and parent cycles
-fail before the SCS is changed. Successful imports use the shared native SCS
-hook, compile and settle the Blueprint, save, unload, reload, and return the
-reloaded SCS readback. A later candidate query exposes current
-`existing_components` as an independent persisted readback.
+Copy the complete candidate object unchanged to
+`provider_extension.components.<stable-component-key>.candidate` inside the
+Blueprint-root `uai.blueprint.edit/1` document. There is no active
+`uai.blueprint.component.edit/1` root and no Component-specific public apply
+command. The HJSON entry still owns operation, stable map identity, parent, and
+properties; the candidate does not invent those authoring decisions.
 
-The retired public command ids `blueprint_add_component`,
-`blueprint_remove_component`, and `blueprint_set_component_property` are not
-registered or discoverable. No legacy Component selector, runner, or Python UE
-business owner is part of this surface. The default generated binding only
-forwards the exact registered command and contract hash.
+Before any persistent write, the Blueprint Surfaces provider re-runs the same
+candidate mechanics for the exact target, class, requested name, and binding
+revision. It then expands the internal mutation fields
+`name=candidate.name` and `class=candidate.component_class`. Callers neither
+reconstruct nor duplicate those fields. If callers provide them, they must
+match the candidate exactly.
+
+Changed SCS state, name availability, class, or binding revision fails before
+mutation; a stale binding specifically returns
+`blueprint_surface_component_candidate_binding_stale`. The query-level
+`scs_revision` remains read-only evidence and does not replace the public
+content-graph revision required by `content_graph.import_workspace`.
+Successful Blueprint-root import compiles, saves, unloads, reloads, and reads
+back the persisted SCS through the shared T36 lifecycle seam.
+T13 remains the sole source-carrier and common recursive initialization
+authority; this candidate surface neither reloads documents nor registers a
+parallel recursion owner.

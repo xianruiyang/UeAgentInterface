@@ -1,6 +1,7 @@
 #include "CommandHandlers/TextureGraph/UeAgentTextureGraphCommandHandlers.h"
 
 #include "DomainAdapters/TextureGraph/UeAgentTextureGraphMechanicsBoundary.h"
+#include "Core/DomainCapability/OfficialPluginAvailability/UeAgentOfficialPluginAvailability.h"
 #include "Dom/JsonObject.h"
 #include "OperationOwners/TextureGraph/UeAgentTextureGraphOperationOwner.h"
 #include "QueryOwners/TextureGraph/UeAgentTextureGraphQueryOwner.h"
@@ -36,6 +37,31 @@ namespace UE::UAI::CommandHandlers::TextureGraph
 			return FUeAgentCommandResult::Failure(Request, TEXT("{}"), Text);
 		}
 
+		TOptional<FUeAgentCommandResult> RequireOfficialPlugin(
+			const FUeAgentCommandRequest& Request)
+		{
+			const DomainCapability::OfficialPluginAvailability::
+				FOfficialPluginAvailabilityObservation Availability =
+					DomainCapability::OfficialPluginAvailability::Inspect(
+						TEXT("TextureGraph"));
+			if (Availability.IsAvailable())
+			{
+				return {};
+			}
+			const TSharedRef<FJsonObject> Error = MakeShared<FJsonObject>();
+			Error->SetStringField(
+				TEXT("code"), TEXT("texture_graph_official_plugin_unavailable"));
+			Error->SetStringField(TEXT("subject_id"), TEXT("TextureGraph"));
+			Error->SetStringField(TEXT("detail"), Availability.GetReason());
+			Error->SetStringField(TEXT("terminal_status"), TEXT("not_started"));
+			Error->SetBoolField(TEXT("retry_safe"), true);
+			FString Text;
+			const auto Writer = TJsonWriterFactory<TCHAR,
+				TCondensedJsonPrintPolicy<TCHAR>>::Create(&Text);
+			FJsonSerializer::Serialize(Error, Writer);
+			return FUeAgentCommandResult::Failure(Request, TEXT("{}"), Text);
+		}
+
 		class FHandler final : public IUeAgentExactCommandHandler
 		{
 		public:
@@ -59,6 +85,11 @@ namespace UE::UAI::CommandHandlers::TextureGraph
 					|| !Caller.GetAuthorityScopes().Contains(RequiredScope))
 				{
 					return Unauthorized(Request);
+				}
+				if (TOptional<FUeAgentCommandResult> Unavailable =
+						RequireOfficialPlugin(Request))
+				{
+					return MoveTemp(Unavailable.GetValue());
 				}
 				TArray<FString> Scopes = Caller.GetAuthorityScopes();
 				Scopes.AddUnique(TEXT("audio_media_graph.read"));
@@ -105,6 +136,11 @@ namespace UE::UAI::CommandHandlers::TextureGraph
 					|| !Caller.GetAuthorityScopes().Contains(TEXT("uai:operate")))
 				{
 					return Unauthorized(Request);
+				}
+				if (TOptional<FUeAgentCommandResult> Unavailable =
+						RequireOfficialPlugin(Request))
+				{
+					return MoveTemp(Unavailable.GetValue());
 				}
 				DomainCapability::FDomainOperationInvocation Invocation;
 				DomainCapability::FDomainOperationInvocationError InvocationError;

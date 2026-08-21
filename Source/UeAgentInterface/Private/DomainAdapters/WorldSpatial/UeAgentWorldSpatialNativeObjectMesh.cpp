@@ -386,7 +386,8 @@ namespace UE::UAI::DomainAdapters::WorldSpatial::Private
 						Phase,
 						Context,
 						OutSnapshot,
-						OutError);
+						OutError,
+						false);
 				}
 				if (Request.GetPayload().IsType<FMeshPivotUpdateRequestInput>())
 				{
@@ -396,7 +397,8 @@ namespace UE::UAI::DomainAdapters::WorldSpatial::Private
 						Phase,
 						Context,
 						OutSnapshot,
-						OutError);
+						OutError,
+						false);
 				}
 
 				TArray<FString> SubjectRefs;
@@ -411,9 +413,44 @@ namespace UE::UAI::DomainAdapters::WorldSpatial::Private
 							TEXT("world_spatial_object_query_target_missing"),
 							Contract.GetCapabilityId());
 					}
+					const FObjectTransformReadRequestInput& Input = Request.GetPayload()
+						.Get<FObjectTransformReadRequestInput>();
+					UObject* TargetObject = nullptr;
+					if (!Environment->TryResolveObject(
+							Target->GetPublicRef(), TargetObject, OutError))
+					{
+						return false;
+					}
+					if (Cast<UStaticMesh>(TargetObject))
+					{
+						if (Input.VerifyFrame.FrameId != TEXT("mesh.geometry.local")
+							|| Input.VerifyFrame.BasisFrameId != TEXT("mesh.geometry.local")
+							|| Input.VerifyFrame.Dimension != 3
+							|| Input.VerifyFrame.Unit != TEXT("centimeter"))
+						{
+							return Fail(
+								OutError,
+								TEXT("world_spatial_mesh_query_frame_invalid"),
+								Input.VerifyFrame.FrameId);
+						}
+						return TryReadMesh(
+							Contract,
+							Target->GetPublicRef(),
+							Phase,
+							Context,
+							OutSnapshot,
+							OutError,
+							true);
+					}
+					if (!Cast<AActor>(TargetObject))
+					{
+						return Fail(
+							OutError,
+							TEXT("world_spatial_object_query_target_type_unsupported"),
+							Target->GetPublicRef());
+					}
 					SubjectRefs.Add(Target->GetPublicRef());
-					QueryFrame = &Request.GetPayload()
-						.Get<FObjectTransformReadRequestInput>().VerifyFrame;
+					QueryFrame = &Input.VerifyFrame;
 				}
 				else if (Request.GetPayload().IsType<FWorldObjectAlignRequestInput>())
 				{
@@ -696,7 +733,8 @@ namespace UE::UAI::DomainAdapters::WorldSpatial::Private
 				EUeAgentWorldSpatialReadPhase Phase,
 				const FUeAgentOperationContext& Context,
 				TSharedPtr<const FUeAgentCanonicalSnapshot>& OutSnapshot,
-				FUeAgentWorldSpatialExecutionError& OutError)
+				FUeAgentWorldSpatialExecutionError& OutError,
+				const bool bProjectTargetRevision)
 			{
 				UStaticMesh* Mesh = nullptr;
 				if (!TryResolveMesh(*Environment, MeshRef, Mesh, OutError))
@@ -775,6 +813,19 @@ namespace UE::UAI::DomainAdapters::WorldSpatial::Private
 					});
 					Fingerprint += TEXT("|") + Component->GetComponentTransform().ToHumanReadableString();
 				}
+				TOptional<FUeAgentStateRevision> TargetRevision;
+				if (bProjectTargetRevision)
+				{
+					FWorldSpatialRevision Revision;
+					if (!RevisionSource->TryReadRevision(MeshRef, Revision, OutError))
+					{
+						return false;
+					}
+					TargetRevision.Emplace(
+						Revision.SourceId,
+						Revision.Generation,
+						Revision.Sequence);
+				}
 				return TryMakeSnapshot(
 					Contract,
 					Phase,
@@ -782,7 +833,8 @@ namespace UE::UAI::DomainAdapters::WorldSpatial::Private
 					Entries,
 					Context,
 					OutSnapshot,
-					OutError);
+					OutError,
+					TargetRevision.IsSet() ? &TargetRevision.GetValue() : nullptr);
 			}
 
 			bool TryAlign(
@@ -1011,6 +1063,25 @@ namespace UE::UAI::DomainAdapters::WorldSpatial::Private
 				return true;
 			}
 
+			bool TryPersistMesh(
+				UStaticMesh& Mesh,
+				const FString& MeshRef,
+				FUeAgentWorldSpatialExecutionError& OutError)
+			{
+				if (Environment->TryPersistObject(Mesh, OutError))
+				{
+					return true;
+				}
+				if (!OutError.IsValid())
+				{
+					return Fail(
+						OutError,
+						TEXT("world_spatial_mesh_persistence_failed"),
+						MeshRef);
+				}
+				return false;
+			}
+
 			bool TryBake(
 				const FMeshTransformBakeRequestInput& Input,
 				FUeAgentWorldSpatialExecutionError& OutError)
@@ -1054,6 +1125,7 @@ namespace UE::UAI::DomainAdapters::WorldSpatial::Private
 						Compiled.Components[7], Compiled.Components[8], Compiled.Components[9]));
 				FStaticMeshAttributes Attributes(*Description);
 				TVertexAttributesRef<FVector3f> Positions = Attributes.GetVertexPositions();
+				Mesh->Modify();
 				for (const FVertexID VertexId : Description->Vertices().GetElementIDs())
 				{
 					Positions[VertexId] = FVector3f(
@@ -1061,7 +1133,14 @@ namespace UE::UAI::DomainAdapters::WorldSpatial::Private
 				}
 				Mesh->CommitMeshDescription(0);
 				Mesh->PostEditChange();
-				return Mesh->GetMeshDescription(0) != nullptr;
+				if (Mesh->GetMeshDescription(0) == nullptr)
+				{
+					return Fail(
+						OutError,
+						TEXT("world_spatial_mesh_post_edit_invalid"),
+						MeshRef);
+				}
+				return TryPersistMesh(*Mesh, MeshRef, OutError);
 			}
 
 			bool TryPivot(
@@ -1106,19 +1185,32 @@ namespace UE::UAI::DomainAdapters::WorldSpatial::Private
 				}
 				FStaticMeshAttributes Attributes(*Description);
 				TVertexAttributesRef<FVector3f> Positions = Attributes.GetVertexPositions();
+				Mesh->Modify();
 				for (const FVertexID VertexId : Description->Vertices().GetElementIDs())
 				{
 					Positions[VertexId] -= FVector3f(Pivot);
 				}
 				Mesh->CommitMeshDescription(0);
 				Mesh->PostEditChange();
+				if (Mesh->GetMeshDescription(0) == nullptr)
+				{
+					return Fail(
+						OutError,
+						TEXT("world_spatial_mesh_post_edit_invalid"),
+						MeshRef);
+				}
+				if (!TryPersistMesh(*Mesh, MeshRef, OutError))
+				{
+					return false;
+				}
 				for (UStaticMeshComponent* Component : Components)
 				{
+					Component->Modify();
 					const FTransform Transform = Component->GetComponentTransform();
 					Component->SetWorldLocation(
 						Transform.GetLocation() + Transform.TransformVector(Pivot));
 				}
-				return Mesh->GetMeshDescription(0) != nullptr;
+				return true;
 			}
 
 			bool CompareAlign(

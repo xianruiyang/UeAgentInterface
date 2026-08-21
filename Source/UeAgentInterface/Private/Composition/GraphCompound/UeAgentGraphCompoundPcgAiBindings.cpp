@@ -33,6 +33,7 @@ namespace UE::UAI::Composition::GraphCompound
 				{TEXT("ai.smart_object_definition.asset.create"),
 					TEXT("smart_object_definition")},
 				{TEXT("ai.state_tree.asset.create"), TEXT("state_tree")},
+				{TEXT("pcg.graph.asset.create"), TEXT("pcg_graph")},
 			};
 			return Profiles;
 		}
@@ -577,7 +578,7 @@ namespace UE::UAI::Composition::GraphCompound
 				Descriptors.Add(Descriptor);
 			}
 		}
-		if (Descriptors.Num() != 17)
+		if (Descriptors.Num() != 18)
 		{
 			OutError = FString::Printf(
 				TEXT("Expected 17 PCG/AI descriptors, found %d."),
@@ -613,7 +614,7 @@ namespace UE::UAI::Composition::GraphCompound
 			OutBindings.Add(MakeShared<FPcgAiOperationBinding>(
 				Profile, Environment));
 		}
-		if (OutBindings.Num() != 17)
+		if (OutBindings.Num() != 18)
 		{
 			SetError(OutError,
 				TEXT("graph_compound_binding_count_invalid"),

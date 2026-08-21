@@ -563,7 +563,7 @@ namespace UeAgentEnhancedInputOps
 	}
 }
 
-bool FUeAgentHttpServer::ExecuteEnhancedInputCommand(const FString& CommandLower, const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::ExecuteEnhancedInputCommand(const FString& CommandLower, const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	if (CommandLower == TEXT("enhanced_input_create_action")) return CmdEnhancedInputCreateAction(Ctx, OutData, OutError);
 	if (CommandLower == TEXT("enhanced_input_get_action_info")) return CmdEnhancedInputGetActionInfo(Ctx, OutData, OutError);
@@ -581,7 +581,7 @@ bool FUeAgentHttpServer::ExecuteEnhancedInputCommand(const FString& CommandLower
 	return false;
 }
 
-bool FUeAgentHttpServer::CmdEnhancedInputCreateAction(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdEnhancedInputCreateAction(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	FString AssetPathInput;
 	if (!JsonTryGetString(Ctx.Params, TEXT("asset_path"), AssetPathInput) || AssetPathInput.IsEmpty())
@@ -624,7 +624,7 @@ bool FUeAgentHttpServer::CmdEnhancedInputCreateAction(const FUeAgentRequestConte
 	return true;
 }
 
-bool FUeAgentHttpServer::CmdEnhancedInputGetActionInfo(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdEnhancedInputGetActionInfo(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	FString AssetPathInput;
 	if (!JsonTryGetString(Ctx.Params, TEXT("asset_path"), AssetPathInput) || AssetPathInput.IsEmpty())
@@ -650,7 +650,7 @@ bool FUeAgentHttpServer::CmdEnhancedInputGetActionInfo(const FUeAgentRequestCont
 	return true;
 }
 
-bool FUeAgentHttpServer::CmdEnhancedInputSetActionProperty(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdEnhancedInputSetActionProperty(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	FString AssetPathInput;
 	if (!JsonTryGetString(Ctx.Params, TEXT("asset_path"), AssetPathInput) || AssetPathInput.IsEmpty())
@@ -709,7 +709,7 @@ bool FUeAgentHttpServer::CmdEnhancedInputSetActionProperty(const FUeAgentRequest
 	return true;
 }
 
-bool FUeAgentHttpServer::CmdEnhancedInputExportActionJson(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdEnhancedInputExportActionJson(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	FString AssetPathInput;
 	if (!JsonTryGetString(Ctx.Params, TEXT("asset_path"), AssetPathInput) || AssetPathInput.IsEmpty())
@@ -743,7 +743,7 @@ bool FUeAgentHttpServer::CmdEnhancedInputExportActionJson(const FUeAgentRequestC
 	return true;
 }
 
-bool FUeAgentHttpServer::CmdEnhancedInputApplyActionJson(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdEnhancedInputApplyActionJson(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	TSharedPtr<FJsonObject> JsonRoot;
 	FString JsonFile;
@@ -863,7 +863,7 @@ bool FUeAgentHttpServer::CmdEnhancedInputApplyActionJson(const FUeAgentRequestCo
 	return true;
 }
 
-bool FUeAgentHttpServer::CmdEnhancedInputCreateMappingContext(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdEnhancedInputCreateMappingContext(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	FString AssetPathInput;
 	if (!JsonTryGetString(Ctx.Params, TEXT("asset_path"), AssetPathInput) || AssetPathInput.IsEmpty())
@@ -894,7 +894,7 @@ bool FUeAgentHttpServer::CmdEnhancedInputCreateMappingContext(const FUeAgentRequ
 	return true;
 }
 
-bool FUeAgentHttpServer::CmdEnhancedInputGetMappingContextInfo(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdEnhancedInputGetMappingContextInfo(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	FString AssetPathInput;
 	if (!JsonTryGetString(Ctx.Params, TEXT("asset_path"), AssetPathInput) || AssetPathInput.IsEmpty())
@@ -925,7 +925,7 @@ bool FUeAgentHttpServer::CmdEnhancedInputGetMappingContextInfo(const FUeAgentReq
 	return true;
 }
 
-bool FUeAgentHttpServer::CmdEnhancedInputSetMappingContextProperty(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdEnhancedInputSetMappingContextProperty(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	FString AssetPathInput;
 	if (!JsonTryGetString(Ctx.Params, TEXT("asset_path"), AssetPathInput) || AssetPathInput.IsEmpty())
@@ -984,7 +984,7 @@ bool FUeAgentHttpServer::CmdEnhancedInputSetMappingContextProperty(const FUeAgen
 	return true;
 }
 
-bool FUeAgentHttpServer::CmdEnhancedInputAddMapping(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdEnhancedInputAddMapping(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	FString ContextPath;
 	if (!JsonTryGetString(Ctx.Params, TEXT("mapping_context_path"), ContextPath) || ContextPath.IsEmpty())
@@ -1111,7 +1111,7 @@ bool FUeAgentHttpServer::CmdEnhancedInputAddMapping(const FUeAgentRequestContext
 	return true;
 }
 
-bool FUeAgentHttpServer::CmdEnhancedInputRemoveMapping(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdEnhancedInputRemoveMapping(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	FString ContextPath;
 	if (!JsonTryGetString(Ctx.Params, TEXT("mapping_context_path"), ContextPath) || ContextPath.IsEmpty())
@@ -1174,7 +1174,7 @@ bool FUeAgentHttpServer::CmdEnhancedInputRemoveMapping(const FUeAgentRequestCont
 	return true;
 }
 
-bool FUeAgentHttpServer::CmdEnhancedInputClearMappings(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdEnhancedInputClearMappings(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	FString ContextPath;
 	if (!JsonTryGetString(Ctx.Params, TEXT("mapping_context_path"), ContextPath) || ContextPath.IsEmpty())
@@ -1208,7 +1208,7 @@ bool FUeAgentHttpServer::CmdEnhancedInputClearMappings(const FUeAgentRequestCont
 	return true;
 }
 
-bool FUeAgentHttpServer::CmdEnhancedInputExportMappingContextJson(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdEnhancedInputExportMappingContextJson(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	FString AssetPathInput;
 	if (!JsonTryGetString(Ctx.Params, TEXT("asset_path"), AssetPathInput) || AssetPathInput.IsEmpty())
@@ -1242,7 +1242,7 @@ bool FUeAgentHttpServer::CmdEnhancedInputExportMappingContextJson(const FUeAgent
 	return true;
 }
 
-bool FUeAgentHttpServer::CmdEnhancedInputApplyMappingContextJson(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdEnhancedInputApplyMappingContextJson(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	TSharedPtr<FJsonObject> JsonRoot;
 	FString JsonFile;

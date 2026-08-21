@@ -1,6 +1,6 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
-#include "Server/UeAgentHttpServer.h"
+#include "LegacyMechanics/UeAgentLegacyMechanics.h"
 #include "Commands/Level/UeAgentCommandSafety.h"
 #include "UeAgentLevelContentJsonApply.h"
 #include "UeAgentLevelContentJsonCore.h"
@@ -74,7 +74,7 @@ namespace
 	}
 }
 
-bool FUeAgentHttpServer::ExecuteLevelContentQueryJsonInternal(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError, bool bActorOnly) const
+bool FUeAgentLegacyMechanics::ExecuteLevelContentQueryJsonInternal(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError, bool bActorOnly) const
 {
 	UWorld* World = GetEditorWorld(OutError);
 	if (!World)
@@ -91,7 +91,7 @@ bool FUeAgentHttpServer::ExecuteLevelContentQueryJsonInternal(const FUeAgentRequ
 	return UeAgentLevelContentJson::SaveJsonIfRequested(Query, Ctx.Params, OutData, OutError);
 }
 
-bool FUeAgentHttpServer::ExecuteLevelContentSnapshotJsonInternal(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError, bool bActorOnly) const
+bool FUeAgentLegacyMechanics::ExecuteLevelContentSnapshotJsonInternal(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError, bool bActorOnly) const
 {
 	UWorld* World = GetEditorWorld(OutError);
 	if (!World)
@@ -108,7 +108,7 @@ bool FUeAgentHttpServer::ExecuteLevelContentSnapshotJsonInternal(const FUeAgentR
 	return UeAgentLevelContentJson::SaveJsonIfRequested(Snapshot, Ctx.Params, OutData, OutError);
 }
 
-bool FUeAgentHttpServer::ExecuteLevelContentValidateJsonInternal(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError, bool bActorOnly) const
+bool FUeAgentLegacyMechanics::ExecuteLevelContentValidateJsonInternal(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError, bool bActorOnly) const
 {
 	UWorld* World = GetEditorWorld(OutError);
 	if (!World)
@@ -126,7 +126,7 @@ bool FUeAgentHttpServer::ExecuteLevelContentValidateJsonInternal(const FUeAgentR
 	return true;
 }
 
-bool FUeAgentHttpServer::CmdLevelContentPlanJson(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdLevelContentPlanJson(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	UWorld* World = GetEditorWorld(OutError);
 	if (!World)
@@ -148,7 +148,7 @@ bool FUeAgentHttpServer::CmdLevelContentPlanJson(const FUeAgentRequestContext& C
 	return true;
 }
 
-bool FUeAgentHttpServer::ExecuteLevelContentApplyJsonInternal(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError, bool bActorOnly) const
+bool FUeAgentLegacyMechanics::ExecuteLevelContentApplyJsonInternal(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError, bool bActorOnly) const
 {
 	UWorld* World = GetEditorWorld(OutError);
 	if (!World)
@@ -389,7 +389,7 @@ bool FUeAgentHttpServer::ExecuteLevelContentApplyJsonInternal(const FUeAgentRequ
 	return true;
 }
 
-bool FUeAgentHttpServer::ExecuteLevelContentDiffJsonInternal(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError, bool bActorOnly) const
+bool FUeAgentLegacyMechanics::ExecuteLevelContentDiffJsonInternal(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError, bool bActorOnly) const
 {
 	UWorld* World = GetEditorWorld(OutError);
 	if (!World)
@@ -407,7 +407,7 @@ bool FUeAgentHttpServer::ExecuteLevelContentDiffJsonInternal(const FUeAgentReque
 	return true;
 }
 
-bool FUeAgentHttpServer::CmdLevelContentDeleteScope(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdLevelContentDeleteScope(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	UWorld* World = GetEditorWorld(OutError);
 	if (!World)

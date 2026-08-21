@@ -14,7 +14,7 @@
 #include "Selection/GeometrySelector.h"
 #include "Tools/EdModeInteractiveToolsContext.h"
 
-bool FUeAgentHttpServer::ExecuteModelingCommand(const FString& CommandLower, const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::ExecuteModelingCommand(const FString& CommandLower, const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	using namespace UeAgentModelingOps;
 
@@ -48,7 +48,7 @@ bool FUeAgentHttpServer::ExecuteModelingCommand(const FString& CommandLower, con
 	return false;
 }
 
-bool FUeAgentHttpServer::CmdModelingActivateMode(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdModelingActivateMode(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	using namespace UeAgentModelingOps;
 	OutData = MakeShared<FJsonObject>();
@@ -66,7 +66,7 @@ bool FUeAgentHttpServer::CmdModelingActivateMode(const FUeAgentRequestContext& C
 	return true;
 }
 
-bool FUeAgentHttpServer::CmdModelingGetSelection(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdModelingGetSelection(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	using namespace UeAgentModelingOps;
 	OutData = MakeShared<FJsonObject>();
@@ -107,7 +107,7 @@ bool FUeAgentHttpServer::CmdModelingGetSelection(const FUeAgentRequestContext& C
 	return true;
 }
 
-bool FUeAgentHttpServer::CmdModelingSetSelection(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdModelingSetSelection(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	using namespace UeAgentModelingOps;
 	OutData = MakeShared<FJsonObject>();
@@ -153,7 +153,7 @@ bool FUeAgentHttpServer::CmdModelingSetSelection(const FUeAgentRequestContext& C
 	return true;
 }
 
-bool FUeAgentHttpServer::CmdModelingSetMeshSelectionMode(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdModelingSetMeshSelectionMode(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	using namespace UeAgentModelingOps;
 	OutData = MakeShared<FJsonObject>();
@@ -191,7 +191,7 @@ bool FUeAgentHttpServer::CmdModelingSetMeshSelectionMode(const FUeAgentRequestCo
 	return true;
 }
 
-bool FUeAgentHttpServer::CmdModelingGetMeshSelectionInfo(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdModelingGetMeshSelectionInfo(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	using namespace UeAgentModelingOps;
 	OutData = MakeShared<FJsonObject>();
@@ -223,7 +223,7 @@ bool FUeAgentHttpServer::CmdModelingGetMeshSelectionInfo(const FUeAgentRequestCo
 	return true;
 }
 
-bool FUeAgentHttpServer::CmdModelingClearMeshSelection(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdModelingClearMeshSelection(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	using namespace UeAgentModelingOps;
 	OutData = MakeShared<FJsonObject>();
@@ -270,7 +270,7 @@ bool FUeAgentHttpServer::CmdModelingClearMeshSelection(const FUeAgentRequestCont
 	return true;
 }
 
-bool FUeAgentHttpServer::CmdModelingSelectMeshElementsViaScreen(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdModelingSelectMeshElementsViaScreen(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	using namespace UeAgentModelingOps;
 	OutData = MakeShared<FJsonObject>();
@@ -339,7 +339,7 @@ bool FUeAgentHttpServer::CmdModelingSelectMeshElementsViaScreen(const FUeAgentRe
 	return true;
 }
 
-bool FUeAgentHttpServer::CmdModelingSelectMeshElementsViaWorldRay(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdModelingSelectMeshElementsViaWorldRay(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	using namespace UeAgentModelingOps;
 	OutData = MakeShared<FJsonObject>();

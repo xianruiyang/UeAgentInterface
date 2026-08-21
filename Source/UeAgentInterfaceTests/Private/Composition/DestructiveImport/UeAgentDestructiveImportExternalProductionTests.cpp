@@ -17,7 +17,6 @@
 #include "PackageTools.h"
 #include "Serialization/JsonSerializer.h"
 #include "Serialization/JsonWriter.h"
-#include "Server/UeAgentCommandRegistry.h"
 #include "Sound/SoundWave.h"
 #include "TestSupport/UeAgentPublicCommandTestHarness.h"
 #include "UObject/GarbageCollection.h"
@@ -101,24 +100,22 @@ namespace
 		OutResult.Reset();
 		OutPayload.Reset();
 		OutError.Reset();
-		TSharedPtr<const FUeAgentCommandContractRegistry> Registry;
-		if (!TryCreateDestructiveImportProductionCommandContractRegistry(
-				Registry, OutError)
-			|| !Registry.IsValid())
-		{
-			return false;
-		}
-		const FUeAgentCommandContract Expected = ExpectedContract(CommandId);
-		const FUeAgentCommandContract* Contract = Registry->FindExact(CommandId);
+		const TSharedPtr<const UE::UAI::CommandRegistry::
+			FUeAgentImmutableCommandRegistry>& Registry =
+				Harness.GetCommandRegistry();
+		const UE::UAI::CommandContract::FUeAgentFrozenCommandContract*
+			const Contract = Registry.IsValid()
+				? Registry->FindExact(CommandId) : nullptr;
 		if (!Contract)
 		{
-			Contract = &Expected;
+			OutError = TEXT("command_contract_missing");
+			return false;
 		}
 		const FString RequestId = TEXT("external-production-")
 			+ FGuid::NewGuid().ToString(EGuidFormats::Digits);
 		const FString CorrelationId = RequestId + TEXT("-correlation");
 		const FString Body =
-			TEXT("{\"command_binding_hash\":\"") + Contract->GetBindingHash()
+			TEXT("{\"command_binding_hash\":\"") + Contract->GetContractHash()
 			+ TEXT("\",\"command_id\":\"") + CommandId
 			+ TEXT("\",\"correlation_id\":\"") + CorrelationId
 			+ TEXT("\",\"message_kind\":\"command_request\",\"params\":")
@@ -328,9 +325,25 @@ bool FUeAgentDestructiveImportExternalProductionTest::RunTest(
 		{
 			TestFalse(TEXT("missing source fails closed: ") + CommandId,
 				Result->IsOk());
-			TestEqual(TEXT("missing source rolls back: ") + CommandId,
-				Payload->GetStringField(TEXT("terminal_state")),
-				TEXT("rolled_back"));
+			TSharedPtr<FJsonObject> ErrorObject;
+			const TSharedRef<TJsonReader<>> Reader =
+				TJsonReaderFactory<>::Create(Result->GetErrorJson());
+			FString TerminalStatus;
+			bool bMutationStarted = true;
+			bool bRetrySafe = false;
+			TestTrue(TEXT("missing source has typed pre-mutation failure: ")
+					+ CommandId,
+				FJsonSerializer::Deserialize(Reader, ErrorObject)
+					&& ErrorObject.IsValid()
+					&& ErrorObject->TryGetStringField(
+						TEXT("terminal_status"), TerminalStatus)
+					&& TerminalStatus == TEXT("rejected")
+					&& ErrorObject->TryGetBoolField(
+						TEXT("mutation_started"), bMutationStarted)
+					&& !bMutationStarted
+					&& ErrorObject->TryGetBoolField(
+						TEXT("retry_safe"), bRetrySafe)
+					&& bRetrySafe);
 		}
 		if (CommandId != TEXT("external.localization.po.import")
 			&& CommandId != TEXT("external.skin_weight_profile.import"))
@@ -369,10 +382,24 @@ bool FUeAgentDestructiveImportExternalProductionTest::RunTest(
 		if (bInvoked && Result.IsSet() && Payload.IsValid())
 		{
 			TestEqual(TEXT("real import commits: ") + Positive.CommandId,
-				Payload->GetStringField(TEXT("terminal_state")), TEXT("committed"));
-			TestTrue(TEXT("source provenance retained: ") + Positive.CommandId,
-				Payload->GetStringField(TEXT("source_ref")) == Positive.Source
-				&& !Payload->GetStringField(TEXT("source_sha256")).IsEmpty());
+				Payload->GetStringField(TEXT("terminal_status")), TEXT("succeeded"));
+			const TSharedPtr<FJsonObject>* Readback = nullptr;
+			FString SourceRef;
+			FString SourceHash;
+			bool bReloaded = false;
+			TestTrue(TEXT("source provenance retained by independent readback: ")
+					+ Positive.CommandId,
+				Payload->TryGetObjectField(TEXT("independent_readback"), Readback)
+					&& Readback && Readback->IsValid()
+					&& (*Readback)->TryGetStringField(
+						TEXT("source_ref"), SourceRef)
+					&& SourceRef == Positive.Source
+					&& (*Readback)->TryGetStringField(
+						TEXT("source_sha256"), SourceHash)
+					&& !SourceHash.IsEmpty()
+					&& (*Readback)->TryGetBoolField(
+						TEXT("reloaded"), bReloaded)
+					&& bReloaded);
 		}
 		UObject* const Reloaded = Fixture.Reload(Positive.PackageName);
 		TestTrue(TEXT("durable class reload readback: ") + Positive.CommandId,

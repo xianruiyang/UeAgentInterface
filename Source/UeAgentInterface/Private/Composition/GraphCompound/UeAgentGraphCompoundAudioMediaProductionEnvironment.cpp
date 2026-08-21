@@ -1,7 +1,9 @@
 #include "Composition/GraphCompound/UeAgentGraphCompoundAudioMediaBindings.h"
+#include "Composition/GraphCompound/UeAgentGraphCompoundAudioMediaIdentity.h"
 
 #include "AssetRegistry/AssetRegistryModule.h"
 #include "Core/AssetDurable/UeAgentAssetDurable.h"
+#include "Core/AssetDurable/UeAgentPackageAssetRevision.h"
 #include "Core/Contract/UeAgentContractJson.h"
 #include "Core/StateSemantic/UeAgentCanonicalValueJson.h"
 #include "Core/Verification/UeAgentIndependentReadback.h"
@@ -20,7 +22,6 @@
 #include "Misc/DateTime.h"
 #include "Misc/PackageName.h"
 #include "Misc/Paths.h"
-#include "Misc/SecureHash.h"
 #include "PackageTools.h"
 #include "Sound/SoundCue.h"
 #include "Sound/SoundNode.h"
@@ -110,31 +111,6 @@ namespace UE::UAI::Composition::GraphCompound
 			const FString PackageName = TargetPackageName(TargetRef);
 			return PackageName + TEXT(".")
 				+ FPackageName::GetLongPackageAssetName(PackageName);
-		}
-
-		bool TryPackageFilename(
-			const FString& TargetRef,
-			FString& OutFilename)
-		{
-			OutFilename.Reset();
-			const FString PackageName = TargetPackageName(TargetRef);
-			return FPackageName::IsValidLongPackageName(PackageName)
-				&& !FPackageName::GetPackageMountPoint(PackageName).IsNone()
-				&& FPackageName::TryConvertLongPackageNameToFilename(
-					PackageName, OutFilename,
-					FPackageName::GetAssetPackageExtension());
-		}
-
-		FString PackageRevision(const FString& TargetRef)
-		{
-			FString Filename;
-			if (!TryPackageFilename(TargetRef, Filename)
-				|| !IFileManager::Get().FileExists(*Filename))
-			{
-				return FString();
-			}
-			return TEXT("package-md5:")
-				+ LexToString(FMD5Hash::HashFile(*Filename)).ToLower();
 		}
 
 		bool TryUnloadTarget(
@@ -421,6 +397,25 @@ namespace UE::UAI::Composition::GraphCompound
 			return EAudioMediaGraphMutationIntent::Update;
 		}
 
+		bool TryIdentitySelector(
+			const FGraphCompoundCanonicalEdit& Edit,
+			const FString& Name,
+			FString& OutValue)
+		{
+			OutValue = Edit.GetIdentity().GetSelector(Name);
+			return !OutValue.IsEmpty();
+		}
+
+		bool TryIdentityGuid(
+			const FGraphCompoundCanonicalEdit& Edit,
+			const FString& Name,
+			FGuid& OutValue)
+		{
+			FString Text;
+			return TryIdentitySelector(Edit, Name, Text)
+				&& FGuid::Parse(Text, OutValue);
+		}
+
 		bool TryParseReadbackSpec(
 			const FAudioMediaGraphRouteProfile& Profile,
 			const FGraphCompoundAudioMediaOperationRequest& Request,
@@ -460,6 +455,28 @@ namespace UE::UAI::Composition::GraphCompound
 				OutSpec.Kind = EAudioMediaReadbackKind::MetaSoundInterface;
 				for (const FGraphCompoundCanonicalEdit& Edit : Edits)
 				{
+					if (Edit.GetIntent() == EChangeIntent::Delete)
+					{
+						FString InterfaceKind;
+						FString Name;
+						if (!TryIdentitySelector(
+								Edit, TEXT("interface_kind"), InterfaceKind)
+							|| !TryIdentitySelector(Edit, TEXT("name"), Name))
+						{
+							SetError(OutError,
+								TEXT("graph_compound_audio_media_metasound_interface_delete_selector_invalid"),
+								Edit.GetIdentity().GetSemanticId());
+							return false;
+						}
+						OutSpec.MetaInterfaces.Emplace(
+							MoveTemp(InterfaceKind),
+							FName(*Name),
+							NAME_None,
+							false,
+							FMetasoundFrontendLiteral(),
+							EAudioMediaGraphMutationIntent::Delete);
+						continue;
+					}
 					const FUeAgentCanonicalValuePtr& Value = Edit.GetProposedAfter();
 					FString InterfaceKind;
 					FString Name;
@@ -489,6 +506,24 @@ namespace UE::UAI::Composition::GraphCompound
 				OutSpec.Kind = EAudioMediaReadbackKind::MetaSoundNodes;
 				for (const FGraphCompoundCanonicalEdit& Edit : Edits)
 				{
+					if (Edit.GetIntent() == EChangeIntent::Delete)
+					{
+						FGuid NodeId;
+						if (!TryIdentityGuid(Edit, TEXT("node_guid"), NodeId))
+						{
+							SetError(OutError,
+								TEXT("graph_compound_audio_media_metasound_node_delete_selector_invalid"),
+								Edit.GetIdentity().GetSemanticId());
+							return false;
+						}
+						OutSpec.MetaNodes.Emplace(
+							NodeId,
+							FString(),
+							0,
+							0,
+							EAudioMediaGraphMutationIntent::Delete);
+						continue;
+					}
 					const FUeAgentCanonicalValuePtr& Value = Edit.GetProposedAfter();
 					FGuid NodeId;
 					FString ClassName;
@@ -514,6 +549,33 @@ namespace UE::UAI::Composition::GraphCompound
 				OutSpec.Kind = EAudioMediaReadbackKind::MetaSoundLinks;
 				for (const FGraphCompoundCanonicalEdit& Edit : Edits)
 				{
+					if (Edit.GetIntent() == EChangeIntent::Delete)
+					{
+						FGuid FromNode;
+						FGuid FromVertex;
+						FGuid ToNode;
+						FGuid ToVertex;
+						if (!TryIdentityGuid(
+								Edit, TEXT("from_node_guid"), FromNode)
+							|| !TryIdentityGuid(
+								Edit, TEXT("from_vertex_guid"), FromVertex)
+							|| !TryIdentityGuid(Edit, TEXT("to_node_guid"), ToNode)
+							|| !TryIdentityGuid(
+								Edit, TEXT("to_vertex_guid"), ToVertex))
+						{
+							SetError(OutError,
+								TEXT("graph_compound_audio_media_metasound_link_delete_selector_invalid"),
+								Edit.GetIdentity().GetSemanticId());
+							return false;
+						}
+						OutSpec.MetaLinks.Emplace(
+							FromNode,
+							FromVertex,
+							ToNode,
+							ToVertex,
+							EAudioMediaGraphMutationIntent::Delete);
+						continue;
+					}
 					const FUeAgentCanonicalValuePtr& Value = Edit.GetProposedAfter();
 					const FUeAgentCanonicalValue* const From = Value.IsValid()
 						? FindField(*Value, TEXT("from")) : nullptr;
@@ -578,6 +640,23 @@ namespace UE::UAI::Composition::GraphCompound
 				OutSpec.Kind = EAudioMediaReadbackKind::SoundCueNodes;
 				for (const FGraphCompoundCanonicalEdit& Edit : Edits)
 				{
+					if (Edit.GetIntent() == EChangeIntent::Delete)
+					{
+						FString ObjectPath;
+						if (!TryIdentitySelector(
+								Edit, TEXT("object_path"), ObjectPath))
+						{
+							SetError(OutError,
+								TEXT("graph_compound_audio_media_sound_node_delete_selector_invalid"),
+								Edit.GetIdentity().GetSemanticId());
+							return false;
+						}
+						OutSpec.SoundNodes.Emplace(
+							MoveTemp(ObjectPath),
+							FString(),
+							EAudioMediaGraphMutationIntent::Delete);
+						continue;
+					}
 					FString ObjectPath;
 					FString ClassRef;
 					const FUeAgentCanonicalValuePtr& Value = Edit.GetProposedAfter();
@@ -599,6 +678,27 @@ namespace UE::UAI::Composition::GraphCompound
 				OutSpec.Kind = EAudioMediaReadbackKind::SoundCueRelations;
 				for (const FGraphCompoundCanonicalEdit& Edit : Edits)
 				{
+					if (Edit.GetIntent() == EChangeIntent::Delete)
+					{
+						FString Parent;
+						FString Child;
+						if (!TryIdentitySelector(
+								Edit, TEXT("parent_object_path"), Parent)
+							|| !TryIdentitySelector(
+								Edit, TEXT("child_object_path"), Child))
+						{
+							SetError(OutError,
+								TEXT("graph_compound_audio_media_sound_relation_delete_selector_invalid"),
+								Edit.GetIdentity().GetSemanticId());
+							return false;
+						}
+						OutSpec.SoundRelations.Emplace(
+							MoveTemp(Parent),
+							MoveTemp(Child),
+							INDEX_NONE,
+							EAudioMediaGraphMutationIntent::Delete);
+						continue;
+					}
 					FString Parent;
 					FString Child;
 					int32 Order = INDEX_NONE;
@@ -646,6 +746,23 @@ namespace UE::UAI::Composition::GraphCompound
 				OutSpec.Kind = EAudioMediaReadbackKind::TextureGraphNodes;
 				for (const FGraphCompoundCanonicalEdit& Edit : Edits)
 				{
+					if (Edit.GetIntent() == EChangeIntent::Delete)
+					{
+						FString ElementId;
+						if (!TryIdentitySelector(
+								Edit, TEXT("element_id"), ElementId))
+						{
+							SetError(OutError,
+								TEXT("graph_compound_audio_media_texture_node_delete_selector_invalid"),
+								Edit.GetIdentity().GetSemanticId());
+							return false;
+						}
+						OutSpec.TextureNodes.Emplace(
+							MoveTemp(ElementId),
+							FString(),
+							EAudioMediaGraphMutationIntent::Delete);
+						continue;
+					}
 					const FUeAgentCanonicalValuePtr& Value = Edit.GetProposedAfter();
 					FString ElementId;
 					FString ClassRef;
@@ -667,6 +784,34 @@ namespace UE::UAI::Composition::GraphCompound
 				OutSpec.Kind = EAudioMediaReadbackKind::TextureGraphLinks;
 				for (const FGraphCompoundCanonicalEdit& Edit : Edits)
 				{
+					if (Edit.GetIntent() == EChangeIntent::Delete)
+					{
+						FString FromElement;
+						FString FromPin;
+						FString ToElement;
+						FString ToPin;
+						if (!TryIdentitySelector(
+								Edit, TEXT("from_element_id"), FromElement)
+							|| !TryIdentitySelector(
+								Edit, TEXT("from_pin_name"), FromPin)
+							|| !TryIdentitySelector(
+								Edit, TEXT("to_element_id"), ToElement)
+							|| !TryIdentitySelector(
+								Edit, TEXT("to_pin_name"), ToPin))
+						{
+							SetError(OutError,
+								TEXT("graph_compound_audio_media_texture_link_delete_selector_invalid"),
+								Edit.GetIdentity().GetSemanticId());
+							return false;
+						}
+						OutSpec.TextureLinks.Emplace(
+							FAudioMediaGraphTextureGraphEndpoint(
+								MoveTemp(FromElement), MoveTemp(FromPin)),
+							FAudioMediaGraphTextureGraphEndpoint(
+								MoveTemp(ToElement), MoveTemp(ToPin)),
+							EAudioMediaGraphMutationIntent::Delete);
+						continue;
+					}
 					const FUeAgentCanonicalValuePtr& Value = Edit.GetProposedAfter();
 					const FUeAgentCanonicalValue* const From = Value.IsValid()
 						? FindField(*Value, TEXT("from")) : nullptr;
@@ -750,7 +895,7 @@ namespace UE::UAI::Composition::GraphCompound
 		{
 			OutSnapshot.Reset();
 			FString Filename;
-			if (!TryPackageFilename(Request.GetTargetRef(), Filename))
+			if (!TryResolvePackageAssetFilename(Request.GetTargetRef(), Filename))
 			{
 				SetError(OutError,
 					TEXT("graph_compound_audio_media_target_invalid"),
@@ -800,7 +945,7 @@ namespace UE::UAI::Composition::GraphCompound
 				nullptr, *TargetObjectPath(Request.GetTargetRef()));
 			const IMetaSoundDocumentInterface* const Interface =
 				Cast<IMetaSoundDocumentInterface>(Source);
-			const FString Revision = PackageRevision(Request.GetTargetRef());
+			const FString Revision = ReadPackageAssetRevision(Request.GetTargetRef());
 			if (Source == nullptr || Interface == nullptr || Revision.IsEmpty())
 			{
 				SetError(OutError,
@@ -813,34 +958,44 @@ namespace UE::UAI::Composition::GraphCompound
 				Interface->GetConstDocument();
 			const FMetasoundFrontendGraph& Graph =
 				Document.RootGraph.GetConstDefaultGraph();
-			TSet<FString> SemanticIds;
+			TMap<FString, TMap<FString, FString>> Identities;
 			for (const FMetasoundFrontendClassInput& Input
 				: Document.RootGraph.GetDefaultInterface().Inputs)
 			{
-				SemanticIds.Add(FString::Printf(
-					TEXT("input:metasound_interface:input:%s"),
-					*Input.Name.ToString()));
+				const FString Name = Input.Name.ToString();
+				Identities.Add(
+					FString::Printf(
+						TEXT("input:metasound_interface:input:%s"), *Name),
+					AudioMediaIdentity::MetaSoundInterface(
+						TEXT("input"), Name));
 			}
 			for (const FMetasoundFrontendClassOutput& Output
 				: Document.RootGraph.GetDefaultInterface().Outputs)
 			{
-				SemanticIds.Add(FString::Printf(
-					TEXT("input:metasound_interface:output:%s"),
-					*Output.Name.ToString()));
+				const FString Name = Output.Name.ToString();
+				Identities.Add(
+					FString::Printf(
+						TEXT("input:metasound_interface:output:%s"), *Name),
+					AudioMediaIdentity::MetaSoundInterface(
+						TEXT("output"), Name));
 			}
 			for (const FMetasoundFrontendNode& Node : Graph.Nodes)
 			{
 				const FString NodeId = Node.GetID().ToString(
 					EGuidFormats::DigitsWithHyphensLower);
-				SemanticIds.Add(TEXT("item:metasound_node:") + NodeId);
+				Identities.Add(
+					TEXT("item:metasound_node:") + NodeId,
+					AudioMediaIdentity::MetaSoundNode(NodeId));
 				for (const FMetasoundFrontendVertex& Input : Node.Interface.Inputs)
 				{
-					SemanticIds.Add(FString::Printf(
-						TEXT("input:metasound_default:%s:%s:%s"),
-						*NodeId,
-						*Input.VertexID.ToString(
-							EGuidFormats::DigitsWithHyphensLower),
-						*Input.TypeName.ToString()));
+					const FString VertexId = Input.VertexID.ToString(
+						EGuidFormats::DigitsWithHyphensLower);
+					Identities.Add(
+						FString::Printf(
+							TEXT("input:metasound_default:%s:%s:%s"),
+							*NodeId, *VertexId, *Input.TypeName.ToString()),
+						AudioMediaIdentity::MetaSoundDefault(
+							NodeId, VertexId));
 				}
 			}
 			for (const FMetasoundFrontendEdge& Edge : Graph.Edges)
@@ -858,16 +1013,24 @@ namespace UE::UAI::Composition::GraphCompound
 						}) : nullptr;
 				if (FromVertex != nullptr)
 				{
-					SemanticIds.Add(FString::Printf(
-						TEXT("relation:metasound_link:%s:%s->%s:%s:%s"),
-						*Edge.FromNodeID.ToString(EGuidFormats::DigitsWithHyphensLower),
-						*Edge.FromVertexID.ToString(EGuidFormats::DigitsWithHyphensLower),
-						*Edge.ToNodeID.ToString(EGuidFormats::DigitsWithHyphensLower),
-						*Edge.ToVertexID.ToString(EGuidFormats::DigitsWithHyphensLower),
-						*FromVertex->TypeName.ToString()));
+					const FString FromNodeId = Edge.FromNodeID.ToString(
+						EGuidFormats::DigitsWithHyphensLower);
+					const FString FromVertexId = Edge.FromVertexID.ToString(
+						EGuidFormats::DigitsWithHyphensLower);
+					const FString ToNodeId = Edge.ToNodeID.ToString(
+						EGuidFormats::DigitsWithHyphensLower);
+					const FString ToVertexId = Edge.ToVertexID.ToString(
+						EGuidFormats::DigitsWithHyphensLower);
+					Identities.Add(
+						FString::Printf(
+							TEXT("relation:metasound_link:%s:%s->%s:%s:%s"),
+							*FromNodeId, *FromVertexId, *ToNodeId,
+							*ToVertexId, *FromVertex->TypeName.ToString()),
+						AudioMediaIdentity::MetaSoundLink(
+							FromNodeId, FromVertexId, ToNodeId, ToVertexId));
 				}
 			}
-			SemanticIds.Add(TEXT("dependency:metasound_compile_settle"));
+			Identities.Add(TEXT("dependency:metasound_compile_settle"), {});
 
 			FUeAgentCanonicalValuePtr Present;
 			FUeAgentStateSemanticError StateError;
@@ -881,12 +1044,17 @@ namespace UE::UAI::Composition::GraphCompound
 			const FUeAgentStateRevision StateRevision(
 				TEXT("graph-compound:audio-media:metasound"), Revision, 0);
 			TArray<FUeAgentStateEntry> Entries;
-			for (const FString& SemanticId : SemanticIds)
+			for (const TPair<FString, TMap<FString, FString>>& Identity
+				: Identities)
 			{
 				Entries.Emplace(
-					FUeAgentCanonicalIdentity(
-						SemanticId, Request.GetTargetKind(), Request.GetTargetRef(),
-						SemanticId, TEXT("graph_compound"), Revision),
+					AudioMediaIdentity::MakeIdentity(
+						Identity.Key,
+						Request.GetTargetKind(),
+						Request.GetTargetRef(),
+						TEXT("graph_compound"),
+						Revision,
+						Identity.Value),
 					FUeAgentCanonicalType(
 						TEXT("uai.graph_compound.audio_media.present.v1"),
 						EUeAgentValueKind::String, false, TEXT("scalar")),
@@ -896,7 +1064,7 @@ namespace UE::UAI::Composition::GraphCompound
 						Request.GetTargetRef(), TEXT("native MetaSound readback"),
 						Present.ToSharedRef()),
 					FUeAgentStateDetails(
-						SemanticId, TEXT("MetaSound persisted state"),
+						Identity.Key, TEXT("MetaSound persisted state"),
 						{TEXT("GraphCompound")}, true, TEXT("available"), {}),
 					StateRevision,
 					EUeAgentAuthoredPresence::Present,
@@ -957,7 +1125,7 @@ namespace UE::UAI::Composition::GraphCompound
 			UTextureGraph* const Asset = LoadObject<UTextureGraph>(
 				nullptr, *TargetObjectPath(Request.GetTargetRef()));
 			UTG_Graph* const Graph = Asset ? Asset->Graph() : nullptr;
-			const FString Revision = PackageRevision(Request.GetTargetRef());
+			const FString Revision = ReadPackageAssetRevision(Request.GetTargetRef());
 			if (Graph == nullptr || Revision.IsEmpty())
 			{
 				SetError(OutError,
@@ -965,16 +1133,18 @@ namespace UE::UAI::Composition::GraphCompound
 					Request.GetTargetRef());
 				return false;
 			}
-			TSet<FString> SemanticIds;
+			TMap<FString, TMap<FString, FString>> Identities;
 			Graph->ForEachNodes(
-				[&SemanticIds](const UTG_Node* Node, const uint32)
+				[&Identities](const UTG_Node* Node, const uint32)
 				{
 					if (Node == nullptr || Node->GetExpression() == nullptr)
 					{
 						return;
 					}
 					const FString ElementId = TextureElementId(*Node);
-					SemanticIds.Add(TEXT("item:texture_expression:") + ElementId);
+					Identities.Add(
+						TEXT("item:texture_expression:") + ElementId,
+						AudioMediaIdentity::TextureGraphNode(ElementId));
 					for (const UTG_Pin* Pin : Node->Pins)
 					{
 						if (Pin == nullptr)
@@ -986,17 +1156,25 @@ namespace UE::UAI::Composition::GraphCompound
 						const FString PinId = FString::Printf(
 							TEXT("pin:texture:%s:%s:%s"), *ElementId,
 							*Direction, *Pin->GetArgumentName().ToString());
-						SemanticIds.Add(PinId);
+						const FString PinName =
+							Pin->GetArgumentName().ToString();
+						Identities.Add(
+							PinId,
+							AudioMediaIdentity::TextureGraphPin(
+								ElementId, Direction, PinName));
 						if (Pin->IsInput())
 						{
-							SemanticIds.Add(FString::Printf(
-								TEXT("input:texture_parameter:%s:%s"),
-								*ElementId, *Pin->GetArgumentName().ToString()));
+							Identities.Add(
+								FString::Printf(
+									TEXT("input:texture_parameter:%s:%s"),
+									*ElementId, *PinName),
+								AudioMediaIdentity::TextureGraphParameter(
+									ElementId, PinName));
 						}
 					}
 				});
 			Graph->ForEachPins(
-				[Graph, &SemanticIds](const UTG_Pin* Pin, const uint32, const uint32)
+				[Graph, &Identities](const UTG_Pin* Pin, const uint32, const uint32)
 				{
 					if (Pin == nullptr || !Pin->IsOutput() || Pin->GetNodePtr() == nullptr)
 					{
@@ -1017,11 +1195,24 @@ namespace UE::UAI::Composition::GraphCompound
 							TEXT("pin:texture:%s:input:%s"),
 							*TextureElementId(*ToPin->GetNodePtr()),
 							*ToPin->GetArgumentName().ToString());
-						SemanticIds.Add(
-							TEXT("relation:texture_link:") + FromId + TEXT("->") + ToId);
+						const FString FromElementId =
+							TextureElementId(*Pin->GetNodePtr());
+						const FString FromPinName =
+							Pin->GetArgumentName().ToString();
+						const FString ToElementId =
+							TextureElementId(*ToPin->GetNodePtr());
+						const FString ToPinName =
+							ToPin->GetArgumentName().ToString();
+						Identities.Add(
+							TEXT("relation:texture_link:") + FromId + TEXT("->") + ToId,
+							AudioMediaIdentity::TextureGraphLink(
+								FromElementId,
+								FromPinName,
+								ToElementId,
+								ToPinName));
 					}
 				});
-			SemanticIds.Add(TEXT("dependency:texture_graph_settle"));
+			Identities.Add(TEXT("dependency:texture_graph_settle"), {});
 
 			FUeAgentCanonicalValuePtr Present;
 			FUeAgentStateSemanticError StateError;
@@ -1035,12 +1226,17 @@ namespace UE::UAI::Composition::GraphCompound
 			const FUeAgentStateRevision StateRevision(
 				TEXT("graph-compound:audio-media:texture-graph"), Revision, 0);
 			TArray<FUeAgentStateEntry> Entries;
-			for (const FString& SemanticId : SemanticIds)
+			for (const TPair<FString, TMap<FString, FString>>& Identity
+				: Identities)
 			{
 				Entries.Emplace(
-					FUeAgentCanonicalIdentity(
-						SemanticId, Request.GetTargetKind(), Request.GetTargetRef(),
-						SemanticId, TEXT("graph_compound"), Revision),
+					AudioMediaIdentity::MakeIdentity(
+						Identity.Key,
+						Request.GetTargetKind(),
+						Request.GetTargetRef(),
+						TEXT("graph_compound"),
+						Revision,
+						Identity.Value),
 					FUeAgentCanonicalType(
 						TEXT("uai.graph_compound.audio_media.present.v1"),
 						EUeAgentValueKind::String, false, TEXT("scalar")),
@@ -1050,7 +1246,7 @@ namespace UE::UAI::Composition::GraphCompound
 						Request.GetTargetRef(), TEXT("native TextureGraph readback"),
 						Present.ToSharedRef()),
 					FUeAgentStateDetails(
-						SemanticId, TEXT("TextureGraph persisted state"),
+						Identity.Key, TEXT("TextureGraph persisted state"),
 						{TEXT("GraphCompound")}, true, TEXT("available"), {}),
 					StateRevision,
 					EUeAgentAuthoredPresence::Present,
@@ -1085,7 +1281,7 @@ namespace UE::UAI::Composition::GraphCompound
 			OutSnapshot.Reset();
 			USoundCue* const Cue = LoadObject<USoundCue>(
 				nullptr, *TargetObjectPath(Request.GetTargetRef()));
-			const FString Revision = PackageRevision(Request.GetTargetRef());
+			const FString Revision = ReadPackageAssetRevision(Request.GetTargetRef());
 			if (Cue == nullptr || Revision.IsEmpty())
 			{
 				SetError(OutError,
@@ -1094,26 +1290,33 @@ namespace UE::UAI::Composition::GraphCompound
 				return false;
 			}
 
-			TSet<FString> SemanticIds;
+			TMap<FString, TMap<FString, FString>> Identities;
 			for (USoundNode* Node : Cue->AllNodes)
 			{
 				if (Node == nullptr)
 				{
 					continue;
 				}
-				SemanticIds.Add(TEXT("item:sound_node:") + Node->GetPathName());
+				const FString ParentPath = Node->GetPathName();
+				Identities.Add(
+					TEXT("item:sound_node:") + ParentPath,
+					AudioMediaIdentity::SoundCueNode(ParentPath));
 				for (USoundNode* Child : Node->ChildNodes)
 				{
 					if (Child != nullptr)
 					{
-						SemanticIds.Add(FString::Printf(
-							TEXT("relation:sound_child:%s->%s"),
-							*Node->GetPathName(), *Child->GetPathName()));
+						const FString ChildPath = Child->GetPathName();
+						Identities.Add(
+							FString::Printf(
+								TEXT("relation:sound_child:%s->%s"),
+								*ParentPath, *ChildPath),
+							AudioMediaIdentity::SoundCueRelation(
+								ParentPath, ChildPath));
 					}
 				}
 			}
-			SemanticIds.Add(TEXT("binding:sound_root"));
-			SemanticIds.Add(TEXT("dependency:sound_compile_settle"));
+			Identities.Add(TEXT("binding:sound_root"), {});
+			Identities.Add(TEXT("dependency:sound_compile_settle"), {});
 
 			FUeAgentCanonicalValuePtr Present;
 			FUeAgentStateSemanticError StateError;
@@ -1127,12 +1330,17 @@ namespace UE::UAI::Composition::GraphCompound
 			const FUeAgentStateRevision StateRevision(
 				TEXT("graph-compound:audio-media:sound-cue"), Revision, 0);
 			TArray<FUeAgentStateEntry> Entries;
-			for (const FString& SemanticId : SemanticIds)
+			for (const TPair<FString, TMap<FString, FString>>& Identity
+				: Identities)
 			{
 				Entries.Emplace(
-					FUeAgentCanonicalIdentity(
-						SemanticId, Request.GetTargetKind(), Request.GetTargetRef(),
-						SemanticId, TEXT("graph_compound"), Revision),
+					AudioMediaIdentity::MakeIdentity(
+						Identity.Key,
+						Request.GetTargetKind(),
+						Request.GetTargetRef(),
+						TEXT("graph_compound"),
+						Revision,
+						Identity.Value),
 					FUeAgentCanonicalType(
 						TEXT("uai.graph_compound.audio_media.present.v1"),
 						EUeAgentValueKind::String, false, TEXT("scalar")),
@@ -1142,7 +1350,7 @@ namespace UE::UAI::Composition::GraphCompound
 						Request.GetTargetRef(), TEXT("native sound cue readback"),
 						Present.ToSharedRef()),
 					FUeAgentStateDetails(
-						SemanticId, TEXT("SoundCue persisted state"),
+						Identity.Key, TEXT("SoundCue persisted state"),
 						{TEXT("GraphCompound")}, true, TEXT("available"), {}),
 					StateRevision,
 					EUeAgentAuthoredPresence::Present,
@@ -1567,8 +1775,18 @@ namespace UE::UAI::Composition::GraphCompound
 						&& Parent->ChildNodes[Mutation.GetOrder()] != nullptr
 						&& Parent->ChildNodes[Mutation.GetOrder()]->GetPathName()
 							== Mutation.GetChildObjectPath();
-					if ((Mutation.GetIntent()
-						== EAudioMediaGraphMutationIntent::Delete) ? bExact : !bExact)
+					const bool bPresent = Parent != nullptr
+						&& Parent->ChildNodes.ContainsByPredicate(
+							[&Mutation](const USoundNode* Child)
+							{
+								return Child != nullptr
+									&& Child->GetPathName()
+										== Mutation.GetChildObjectPath();
+							});
+					if (Mutation.GetIntent()
+							== EAudioMediaGraphMutationIntent::Delete
+						? bPresent
+						: !bExact)
 					{
 						OutDetail = TEXT("sound relation native readback mismatch");
 						return false;
@@ -1823,7 +2041,8 @@ namespace UE::UAI::Composition::GraphCompound
 				}
 				const TSharedRef<FJsonObject> Actual = MakeShared<FJsonObject>();
 				Actual->SetBoolField(TEXT("verified"), true);
-				Actual->SetStringField(TEXT("revision"), PackageRevision(TargetRef));
+				Actual->SetStringField(
+					TEXT("revision"), ReadPackageAssetRevision(TargetRef));
 				FUeAgentCanonicalValuePtr ActualValue;
 				FGraphCompoundRuntimeError CanonicalError;
 				if (!TryCanonicalObject(
@@ -1849,12 +2068,44 @@ namespace UE::UAI::Composition::GraphCompound
 		bool TrySerializeResult(
 			const FString& TargetRef,
 			const FString& Revision,
+			const FOperationLifecycleReceipt& Receipt,
 			FUeAgentContractValue& OutResult,
 			FGraphCompoundRuntimeError& OutError)
 		{
+			const TArray<FString>& Phases = Receipt.GetPhaseHistory();
+			const bool bMutationApplied = Receipt.DidMutationStart()
+				&& Phases.Contains(LexToString(
+					EOperationLifecycleStage::DomainExecute));
+			const bool bCompileSettled = Phases.Contains(LexToString(
+				EOperationLifecycleStage::Settle));
+			const bool bSaved = Phases.Contains(LexToString(
+				EOperationLifecycleStage::Persist));
+			const bool bReloaded = Phases.Contains(LexToString(
+				EOperationLifecycleStage::IndependentVerify));
+			if (Receipt.GetStatus() != EOperationLifecycleStatus::Succeeded
+				|| !bMutationApplied
+				|| !bCompileSettled
+				|| !bSaved
+				|| !bReloaded
+				|| Receipt.GetPersistenceReceiptId().IsEmpty())
+			{
+				SetError(
+					OutError,
+					TEXT("graph_compound_audio_media_lifecycle_receipt_invalid"),
+					TargetRef);
+				return false;
+			}
 			const TSharedRef<FJsonObject> Object = MakeShared<FJsonObject>();
+			Object->SetStringField(TEXT("terminal_status"), TEXT("succeeded"));
 			Object->SetStringField(TEXT("target_ref"), TargetRef);
 			Object->SetStringField(TEXT("revision"), Revision);
+			Object->SetBoolField(TEXT("mutation_applied"), bMutationApplied);
+			Object->SetBoolField(TEXT("compile_settled"), bCompileSettled);
+			Object->SetBoolField(TEXT("saved"), bSaved);
+			Object->SetBoolField(TEXT("reloaded"), bReloaded);
+			Object->SetStringField(
+				TEXT("persistence_receipt_id"),
+				Receipt.GetPersistenceReceiptId());
 			FString Canonical;
 			FString JsonError;
 			if (!Json::TryCanonicalize(Object, Canonical, JsonError))
@@ -1969,7 +2220,8 @@ namespace UE::UAI::Composition::GraphCompound
 					return false;
 				}
 				return TrySerializeResult(
-					Request.GetTargetRef(), Revision, OutResult, OutError);
+					Request.GetTargetRef(), Revision, Receipt,
+					OutResult, OutError);
 			}
 
 			FAudioMediaGraphRouteProfile Profile;
@@ -2298,7 +2550,7 @@ namespace UE::UAI::Composition::GraphCompound
 				Context->Package->SetDirtyFlag(false);
 				Context->Target = nullptr;
 				Context->Package = nullptr;
-				Context->Revision = PackageRevision(
+				Context->Revision = ReadPackageAssetRevision(
 					Context->Request.GetTargetRef());
 				Context->DurableSession = PersistedSession(
 					Prepared, Context->DurableReceipt);
@@ -2644,7 +2896,8 @@ namespace UE::UAI::Composition::GraphCompound
 						Profile.GetCapabilityId(), Request.GetTargetRef());
 					return false;
 				}
-				const FString Revision = PackageRevision(Request.GetTargetRef());
+				const FString Revision =
+					ReadPackageAssetRevision(Request.GetTargetRef());
 				if (Revision.IsEmpty()
 					|| Revision != Request.GetExpectedSettledRevision())
 				{

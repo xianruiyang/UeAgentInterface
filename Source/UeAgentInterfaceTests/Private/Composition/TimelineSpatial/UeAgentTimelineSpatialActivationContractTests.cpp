@@ -264,9 +264,9 @@ namespace
 			OutActivation->GetNumberField(TEXT("hjson_command_count")));
 		const int32 FinalCommandCount = static_cast<int32>(
 			OutActivation->GetNumberField(TEXT("final_command_count")));
-		Test->TestEqual(TEXT("base command inventory"), BaseCommandCount, 154);
-		Test->TestEqual(TEXT("TimelineSpatial capability inventory"), CapabilityCount, 59);
-		Test->TestEqual(TEXT("HJSON public command inventory"), HjsonCommandCount, 1);
+	Test->TestEqual(TEXT("base command inventory"), BaseCommandCount, 114);
+	Test->TestEqual(TEXT("TimelineSpatial capability inventory"), CapabilityCount, 59);
+	Test->TestEqual(TEXT("TimelineSpatial HJSON ownership remains absent"), HjsonCommandCount, 0);
 		Test->TestEqual(
 			TEXT("final command inventory is additive"),
 			FinalCommandCount,
@@ -564,13 +564,13 @@ bool FUeAgentTimelineSpatialActivationContractTest::RunTest(
 		FUeAgentCommandContractRegistry> Commands;
 	FString Error;
 	const bool bCommandsCreated = TestTrue(
-		TEXT("base, TimelineSpatial and HJSON command contracts compose"),
+		TEXT("base and TimelineSpatial command contracts compose"),
 		TryCreateTimelineSpatialProductionCommandContractRegistry(
 			Commands,
 			Error));
 	if (bCommandsCreated && Commands.IsValid())
 	{
-		TestEqual(TEXT("production command count"), Commands->GetContracts().Num(), 214);
+		TestEqual(TEXT("production command count"), Commands->GetContracts().Num(), 173);
 		for (const FUeAgentTimelineSpatialActivationProfile& Route : Routes)
 		{
 			const UE::UAI::CommandContract::FUeAgentCommandContract* Command =
@@ -615,8 +615,8 @@ bool FUeAgentTimelineSpatialActivationContractTest::RunTest(
 				CommandParameters.Contains(TEXT("projection")),
 				Route.bSupportsProjection);
 		}
-		TestNotNull(
-			TEXT("one generic HJSON import command is registered"),
+		TestNull(
+			TEXT("TimelineSpatial does not re-own the active HJSON command"),
 			Commands->FindExact(TEXT("content_graph.import_workspace")));
 
 		FString Manifest;
@@ -628,8 +628,8 @@ bool FUeAgentTimelineSpatialActivationContractTest::RunTest(
 				GetUaiCommandManifestBuildId(),
 				Manifest,
 				Error));
-		TestTrue(
-			TEXT("formal manifest contains generic HJSON import"),
+		TestFalse(
+			TEXT("TimelineSpatial-local manifest omits the outer active HJSON command"),
 			Manifest.Contains(
 				TEXT("content_graph.import_workspace"),
 				ESearchCase::CaseSensitive));
@@ -640,9 +640,10 @@ bool FUeAgentTimelineSpatialActivationContractTest::RunTest(
 			TEXT("formal manifest does not expose family routing"),
 			Manifest.Contains(TEXT("family"), ESearchCase::IgnoreCase));
 
-		// This registry is now the 214-command base consumed by the
-		// LongRunningSession production registry.  The complete committed
-		// manifest is owned and verified by the outermost activation test.
+		// This local registry is the 173-command base consumed by the
+		// LongRunningSession legacy-layer contract. The current HJSON command
+		// and complete committed manifest are owned by the outer active
+		// composition and verified there.
 	}
 
 	Error.Reset();

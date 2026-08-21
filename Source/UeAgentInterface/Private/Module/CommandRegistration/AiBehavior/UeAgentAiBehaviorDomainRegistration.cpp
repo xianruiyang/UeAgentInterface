@@ -45,7 +45,7 @@ namespace UE::UAI::Module::CommandRegistration::AiBehavior
 			Result.SideEffect = EUeAgentCommandSideEffect::None;
 			Result.StateLayers = {TEXT("asset_persisted_state")};
 			Result.InputFields = {
-				Field(TEXT("target"), TEXT("string"), true, TEXT("Exact persisted BehaviorTree, BlackboardData, or StateTree package.object identity.")),
+				Field(TEXT("target"), TEXT("string"), true, TEXT("Exact persisted BehaviorTree, BlackboardData, EnvQuery, StateTree, or SmartObjectDefinition package.object identity.")),
 				Field(TEXT("query"), TEXT("string"), false, TEXT("Optional bounded class identity filter.")),
 				Field(TEXT("limit"), TEXT("integer"), false, TEXT("Optional page size from 1 through 64; defaults to 64.")),
 				Field(TEXT("cursor"), TEXT("integer"), false, TEXT("Optional non-negative result offset; defaults to zero.")),
@@ -55,7 +55,7 @@ namespace UE::UAI::Module::CommandRegistration::AiBehavior
 				Field(TEXT("read_only"), TEXT("boolean"), true, TEXT("Always true.")),
 				Field(TEXT("target"), TEXT("string"), true, TEXT("The unchanged exact target identity.")),
 				Field(TEXT("target_revision"), TEXT("string"), true, TEXT("The current persisted target revision.")),
-				Field(TEXT("candidates"), TEXT("array"), true, TEXT("Exact non-abstract AI node, service, decorator, Blackboard key classes, or StateTree Blueprint classes and native node structs.")),
+				Field(TEXT("candidates"), TEXT("array"), true, TEXT("Exact non-abstract BehaviorTree node/service/decorator, Blackboard key, EQS generator, StateTree node, or SmartObject behavior class and struct identities.")),
 				Field(TEXT("total_matches"), TEXT("integer"), true, TEXT("Total candidates matching this query.")),
 				Field(TEXT("next_cursor"), TEXT("integer"), true, TEXT("Next result offset, or -1 when complete.")),
 				Field(TEXT("complete"), TEXT("boolean"), true, TEXT("True only on the final page.")),
@@ -67,8 +67,8 @@ namespace UE::UAI::Module::CommandRegistration::AiBehavior
 				{TEXT("ai_behavior_candidate_target_type_unsupported"), TEXT("The target is not an exact supported AI behavior root.")},
 				{TEXT("ai_behavior_candidate_page_invalid"), TEXT("The requested page is outside the bounded contract.")},
 			};
-			Result.Purpose.Summary = TEXT("Resolve exact BehaviorTree, StateTree, and Blackboard creation candidates from loaded concrete UE class and struct identities.");
-			Result.Purpose.Target = TEXT("One exact persisted BehaviorTree, BlackboardData, or StateTree.");
+			Result.Purpose.Summary = TEXT("Resolve exact BehaviorTree, Blackboard, EQS, StateTree, and SmartObject creation candidates from loaded concrete UE class and struct identities.");
+			Result.Purpose.Target = TEXT("One exact persisted BehaviorTree, BlackboardData, EnvQuery, StateTree, or SmartObjectDefinition.");
 			Result.Purpose.Preconditions = {
 				TEXT("Copy the target unchanged from public content search or readback."),
 				TEXT("Run in the Editor on the UE game thread with uai:query."),
@@ -83,12 +83,10 @@ namespace UE::UAI::Module::CommandRegistration::AiBehavior
 				TEXT("query.command.detail"),
 				TEXT("content_graph.summary"),
 				TEXT("content_graph.import_workspace"),
-				TEXT("ai.behavior_tree.graph.apply"),
-				TEXT("ai.blackboard.schema.apply"),
-				TEXT("ai.state_tree.hierarchy.apply"),
+				TEXT("content_graph.items"),
 			};
-			Result.Purpose.Keywords = {TEXT("ai"), TEXT("behavior tree"), TEXT("state tree"), TEXT("blackboard"), TEXT("candidate"), TEXT("hjson")};
-			Result.Purpose.Synonyms = {TEXT("find behavior node"), TEXT("resolve state tree node"), TEXT("resolve blackboard key")};
+			Result.Purpose.Keywords = {TEXT("ai"), TEXT("behavior tree"), TEXT("state tree"), TEXT("blackboard"), TEXT("eqs"), TEXT("smart object"), TEXT("candidate"), TEXT("hjson")};
+			Result.Purpose.Synonyms = {TEXT("find behavior node"), TEXT("resolve state tree node"), TEXT("resolve blackboard key"), TEXT("resolve eqs generator"), TEXT("resolve smart object behavior")};
 			return Result;
 		}
 

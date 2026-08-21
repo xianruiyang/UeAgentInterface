@@ -18,7 +18,7 @@ namespace
 	}
 }
 
-bool FUeAgentHttpServer::CmdControlRigShapeLibraryCreate(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdControlRigShapeLibraryCreate(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	FString AssetPath;
 	if (!JsonTryGetString(Ctx.Params, TEXT("asset_path"), AssetPath) || AssetPath.TrimStartAndEnd().IsEmpty())
@@ -46,7 +46,7 @@ bool FUeAgentHttpServer::CmdControlRigShapeLibraryCreate(const FUeAgentRequestCo
 	return true;
 }
 
-bool FUeAgentHttpServer::CmdControlRigShapeLibraryGetInfo(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdControlRigShapeLibraryGetInfo(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	FString AssetPath;
 	if (!JsonTryGetString(Ctx.Params, TEXT("asset_path"), AssetPath) || AssetPath.TrimStartAndEnd().IsEmpty())
@@ -66,7 +66,7 @@ bool FUeAgentHttpServer::CmdControlRigShapeLibraryGetInfo(const FUeAgentRequestC
 	return true;
 }
 
-bool FUeAgentHttpServer::CmdControlRigShapeLibraryExportJson(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdControlRigShapeLibraryExportJson(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	if (!CmdControlRigShapeLibraryGetInfo(Ctx, OutData, OutError))
 	{
@@ -94,7 +94,7 @@ bool FUeAgentHttpServer::CmdControlRigShapeLibraryExportJson(const FUeAgentReque
 	return true;
 }
 
-bool FUeAgentHttpServer::CmdControlRigShapeLibraryValidateJson(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdControlRigShapeLibraryValidateJson(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	FString JsonFile;
 	if (!JsonTryGetString(Ctx.Params, TEXT("json_file"), JsonFile) || JsonFile.TrimStartAndEnd().IsEmpty())
@@ -141,7 +141,7 @@ bool FUeAgentHttpServer::CmdControlRigShapeLibraryValidateJson(const FUeAgentReq
 	return true;
 }
 
-bool FUeAgentHttpServer::CmdControlRigShapeLibraryApplyJson(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdControlRigShapeLibraryApplyJson(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	FString JsonFile;
 	if (!JsonTryGetString(Ctx.Params, TEXT("json_file"), JsonFile) || JsonFile.TrimStartAndEnd().IsEmpty())

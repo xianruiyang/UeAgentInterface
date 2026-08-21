@@ -52,7 +52,7 @@ namespace
 	}
 }
 
-bool FUeAgentHttpServer::CmdModelingStartTool(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdModelingStartTool(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	using namespace UeAgentModelingOps;
 	OutData = MakeShared<FJsonObject>();
@@ -275,7 +275,7 @@ bool FUeAgentHttpServer::CmdModelingStartTool(const FUeAgentRequestContext& Ctx,
 	return true;
 }
 
-bool FUeAgentHttpServer::CmdModelingGetActiveTool(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdModelingGetActiveTool(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	using namespace UeAgentModelingOps;
 	OutData = MakeShared<FJsonObject>();
@@ -290,12 +290,12 @@ bool FUeAgentHttpServer::CmdModelingGetActiveTool(const FUeAgentRequestContext& 
 	return true;
 }
 
-bool FUeAgentHttpServer::CmdModelingGetActiveToolProperties(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdModelingGetActiveToolProperties(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	return CmdModelingGetActiveTool(Ctx, OutData, OutError);
 }
 
-bool FUeAgentHttpServer::CmdModelingSetActiveToolProperty(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdModelingSetActiveToolProperty(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	using namespace UeAgentModelingOps;
 	OutData = MakeShared<FJsonObject>();
@@ -332,7 +332,7 @@ bool FUeAgentHttpServer::CmdModelingSetActiveToolProperty(const FUeAgentRequestC
 	return true;
 }
 
-bool FUeAgentHttpServer::CmdModelingInvokeActiveToolAction(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdModelingInvokeActiveToolAction(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	using namespace UeAgentModelingOps;
 	OutData = MakeShared<FJsonObject>();
@@ -370,7 +370,7 @@ bool FUeAgentHttpServer::CmdModelingInvokeActiveToolAction(const FUeAgentRequest
 	return true;
 }
 
-bool FUeAgentHttpServer::CmdModelingAcceptTool(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdModelingAcceptTool(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	using namespace UeAgentModelingOps;
 	OutData = MakeShared<FJsonObject>();
@@ -392,7 +392,7 @@ bool FUeAgentHttpServer::CmdModelingAcceptTool(const FUeAgentRequestContext& Ctx
 	return true;
 }
 
-bool FUeAgentHttpServer::CmdModelingCancelTool(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdModelingCancelTool(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	using namespace UeAgentModelingOps;
 	OutData = MakeShared<FJsonObject>();

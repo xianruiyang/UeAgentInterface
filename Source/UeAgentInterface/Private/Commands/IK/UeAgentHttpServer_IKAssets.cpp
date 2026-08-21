@@ -70,7 +70,7 @@
 #include "RigEditor/IKRigController.h"
 #include "RigEditor/IKRigDefinitionFactory.h"
 
-bool FUeAgentHttpServer::ExecuteIKRigCommand(const FString& CommandLower, const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::ExecuteIKRigCommand(const FString& CommandLower, const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	if (CommandLower == TEXT("ik_rig_create")) return CmdIKRigCreate(Ctx, OutData, OutError);
 	if (CommandLower == TEXT("ik_rig_get_info")) return CmdIKRigGetInfo(Ctx, OutData, OutError);
@@ -89,7 +89,7 @@ bool FUeAgentHttpServer::ExecuteIKRigCommand(const FString& CommandLower, const 
 	return false;
 }
 
-bool FUeAgentHttpServer::ExecuteIKRetargeterCommand(const FString& CommandLower, const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::ExecuteIKRetargeterCommand(const FString& CommandLower, const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	if (CommandLower == TEXT("ik_retargeter_create")) return CmdIKRetargeterCreate(Ctx, OutData, OutError);
 	if (CommandLower == TEXT("ik_retargeter_get_info")) return CmdIKRetargeterGetInfo(Ctx, OutData, OutError);
@@ -108,7 +108,7 @@ bool FUeAgentHttpServer::ExecuteIKRetargeterCommand(const FString& CommandLower,
 	return false;
 }
 
-bool FUeAgentHttpServer::ExecuteRetargetBatchCommand(const FString& CommandLower, const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::ExecuteRetargetBatchCommand(const FString& CommandLower, const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	if (CommandLower == TEXT("retarget_batch_export_json")) return CmdRetargetBatchExportJson(Ctx, OutData, OutError);
 	if (CommandLower == TEXT("retarget_batch_apply_json")) return CmdRetargetBatchApplyJson(Ctx, OutData, OutError);
@@ -118,7 +118,7 @@ bool FUeAgentHttpServer::ExecuteRetargetBatchCommand(const FString& CommandLower
 	return false;
 }
 
-bool FUeAgentHttpServer::CmdIKRigCreate(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdIKRigCreate(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	FString AssetPath;
 	if (!JsonTryGetString(Ctx.Params, TEXT("asset_path"), AssetPath) || AssetPath.IsEmpty())
@@ -182,7 +182,7 @@ bool FUeAgentHttpServer::CmdIKRigCreate(const FUeAgentRequestContext& Ctx, TShar
 	return true;
 }
 
-bool FUeAgentHttpServer::CmdIKRigGetInfo(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdIKRigGetInfo(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	FString AssetPath;
 	if (!JsonTryGetString(Ctx.Params, TEXT("asset_path"), AssetPath) || AssetPath.IsEmpty())
@@ -286,7 +286,7 @@ bool FUeAgentHttpServer::CmdIKRigGetInfo(const FUeAgentRequestContext& Ctx, TSha
 	return true;
 }
 
-bool FUeAgentHttpServer::CmdIKRigSetSolver(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdIKRigSetSolver(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	FString AssetPath;
 	if (!JsonTryGetString(Ctx.Params, TEXT("asset_path"), AssetPath) || AssetPath.IsEmpty())
@@ -650,7 +650,7 @@ bool FUeAgentHttpServer::CmdIKRigSetSolver(const FUeAgentRequestContext& Ctx, TS
 	return true;
 }
 
-bool FUeAgentHttpServer::CmdIKRigSetPreviewMesh(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdIKRigSetPreviewMesh(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	FString AssetPath;
 	if (!JsonTryGetString(Ctx.Params, TEXT("asset_path"), AssetPath) || AssetPath.IsEmpty())
@@ -711,7 +711,7 @@ bool FUeAgentHttpServer::CmdIKRigSetPreviewMesh(const FUeAgentRequestContext& Ct
 	return true;
 }
 
-bool FUeAgentHttpServer::CmdIKRigSetGoal(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdIKRigSetGoal(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	FString AssetPath;
 	if (!JsonTryGetString(Ctx.Params, TEXT("asset_path"), AssetPath) || AssetPath.IsEmpty())
@@ -904,7 +904,7 @@ bool FUeAgentHttpServer::CmdIKRigSetGoal(const FUeAgentRequestContext& Ctx, TSha
 	return true;
 }
 
-bool FUeAgentHttpServer::CmdIKRigSetRetargetRoot(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdIKRigSetRetargetRoot(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	FString AssetPath;
 	if (!JsonTryGetString(Ctx.Params, TEXT("asset_path"), AssetPath) || AssetPath.IsEmpty())
@@ -947,7 +947,7 @@ bool FUeAgentHttpServer::CmdIKRigSetRetargetRoot(const FUeAgentRequestContext& C
 	return true;
 }
 
-bool FUeAgentHttpServer::CmdIKRigSetRetargetChain(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdIKRigSetRetargetChain(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	FString AssetPath;
 	if (!JsonTryGetString(Ctx.Params, TEXT("asset_path"), AssetPath) || AssetPath.IsEmpty())
@@ -1059,7 +1059,7 @@ bool FUeAgentHttpServer::CmdIKRigSetRetargetChain(const FUeAgentRequestContext& 
 	return true;
 }
 
-bool FUeAgentHttpServer::CmdIKRigApplyAutoRetargetDefinition(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdIKRigApplyAutoRetargetDefinition(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	FString AssetPath;
 	if (!JsonTryGetString(Ctx.Params, TEXT("asset_path"), AssetPath) || AssetPath.IsEmpty())
@@ -1099,7 +1099,7 @@ bool FUeAgentHttpServer::CmdIKRigApplyAutoRetargetDefinition(const FUeAgentReque
 	return true;
 }
 
-bool FUeAgentHttpServer::CmdIKRigPreviewSolve(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdIKRigPreviewSolve(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	FString AssetPath;
 	if (!JsonTryGetString(Ctx.Params, TEXT("asset_path"), AssetPath) || AssetPath.IsEmpty())
@@ -1347,7 +1347,7 @@ bool FUeAgentHttpServer::CmdIKRigPreviewSolve(const FUeAgentRequestContext& Ctx,
 	return true;
 }
 
-bool FUeAgentHttpServer::CmdIKRetargeterCreate(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdIKRetargeterCreate(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	FString AssetPath;
 	if (!JsonTryGetString(Ctx.Params, TEXT("asset_path"), AssetPath) || AssetPath.IsEmpty())
@@ -1445,7 +1445,7 @@ bool FUeAgentHttpServer::CmdIKRetargeterCreate(const FUeAgentRequestContext& Ctx
 	return true;
 }
 
-bool FUeAgentHttpServer::CmdIKRetargeterGetInfo(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdIKRetargeterGetInfo(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	FString AssetPath;
 	if (!JsonTryGetString(Ctx.Params, TEXT("asset_path"), AssetPath) || AssetPath.IsEmpty())
@@ -1553,7 +1553,7 @@ PRAGMA_ENABLE_DEPRECATION_WARNINGS
 	return true;
 }
 
-bool FUeAgentHttpServer::CmdIKRetargeterSetIKRig(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdIKRetargeterSetIKRig(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	FString AssetPath;
 	if (!JsonTryGetString(Ctx.Params, TEXT("asset_path"), AssetPath) || AssetPath.IsEmpty())
@@ -1628,7 +1628,7 @@ bool FUeAgentHttpServer::CmdIKRetargeterSetIKRig(const FUeAgentRequestContext& C
 	return true;
 }
 
-bool FUeAgentHttpServer::CmdIKRetargeterSetSettings(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdIKRetargeterSetSettings(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	FString AssetPath;
 	if (!JsonTryGetString(Ctx.Params, TEXT("asset_path"), AssetPath) || AssetPath.IsEmpty())
@@ -1763,7 +1763,7 @@ PRAGMA_ENABLE_DEPRECATION_WARNINGS
 	return CmdIKRetargeterGetInfo(Ctx, OutData, OutError);
 }
 
-bool FUeAgentHttpServer::CmdIKRetargeterSetPose(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdIKRetargeterSetPose(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	FString AssetPath;
 	if (!JsonTryGetString(Ctx.Params, TEXT("asset_path"), AssetPath) || AssetPath.IsEmpty())
@@ -2052,7 +2052,7 @@ bool FUeAgentHttpServer::CmdIKRetargeterSetPose(const FUeAgentRequestContext& Ct
 	return true;
 }
 
-bool FUeAgentHttpServer::CmdIKRetargeterAutoAlignPose(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdIKRetargeterAutoAlignPose(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	FString AssetPath;
 	if (!JsonTryGetString(Ctx.Params, TEXT("asset_path"), AssetPath) || AssetPath.IsEmpty())
@@ -2129,7 +2129,7 @@ bool FUeAgentHttpServer::CmdIKRetargeterAutoAlignPose(const FUeAgentRequestConte
 	return true;
 }
 
-bool FUeAgentHttpServer::CmdIKRetargeterSetPreviewMesh(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdIKRetargeterSetPreviewMesh(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	FString AssetPath;
 	if (!JsonTryGetString(Ctx.Params, TEXT("asset_path"), AssetPath) || AssetPath.IsEmpty())
@@ -2202,7 +2202,7 @@ bool FUeAgentHttpServer::CmdIKRetargeterSetPreviewMesh(const FUeAgentRequestCont
 	return true;
 }
 
-bool FUeAgentHttpServer::CmdIKRetargeterAutoMapChains(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdIKRetargeterAutoMapChains(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	FString AssetPath;
 	if (!JsonTryGetString(Ctx.Params, TEXT("asset_path"), AssetPath) || AssetPath.IsEmpty())
@@ -2257,7 +2257,7 @@ bool FUeAgentHttpServer::CmdIKRetargeterAutoMapChains(const FUeAgentRequestConte
 	return true;
 }
 
-bool FUeAgentHttpServer::CmdIKRetargeterDuplicateAndRetarget(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdIKRetargeterDuplicateAndRetarget(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	FString AssetPath;
 	if (!JsonTryGetString(Ctx.Params, TEXT("asset_path"), AssetPath) || AssetPath.IsEmpty())

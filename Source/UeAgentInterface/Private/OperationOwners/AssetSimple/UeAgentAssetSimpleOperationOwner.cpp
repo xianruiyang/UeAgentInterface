@@ -1,6 +1,7 @@
 #include "OperationOwners/AssetSimple/UeAgentAssetSimpleOperationOwner.h"
 
 #include "Composition/SimpleAuthoring/OperationHost/UeAgentSimpleAuthoringOperationHost.h"
+#include "Core/DomainCapability/OfficialPluginAvailability/UeAgentOfficialPluginAvailability.h"
 #include "DomainAdapters/AssetSimple/UeAgentAssetSimpleMechanicsBoundary.h"
 #include "Dom/JsonObject.h"
 #include "Serialization/JsonSerializer.h"
@@ -8,6 +9,7 @@
 
 namespace UE::UAI::OperationOwners::AssetSimple
 {
+	using namespace BindingGateway::Operation;
 	using namespace CommandEdge;
 	using namespace Composition::SimpleAuthoring;
 
@@ -59,27 +61,119 @@ namespace UE::UAI::OperationOwners::AssetSimple
 		return Routes;
 	}
 
+	TSharedPtr<const DomainCapability::IDomainOperationInvocationFactory>
+	FindOperationInvocationFactory(const FString& OperationId)
+	{
+		const TArray<FUeAgentSimpleAuthoringCommandRoute>& Routes =
+			GetAssetSimpleOperationRoutes();
+		if (!Routes.ContainsByPredicate(
+				[&OperationId](const FUeAgentSimpleAuthoringCommandRoute& Route)
+				{
+					return Route.CommandId == OperationId;
+				}))
+		{
+			return nullptr;
+		}
+		return OperationHost::GetOperationInvocationFactory(OperationId);
+	}
+
 	FUeAgentCommandResult SubmitProductionAssetSimpleOperation(
 		const FUeAgentCommandRequest& Request,
 		const Contract::FUeAgentCallerContext& CallerContext,
 		const TSharedRef<Contract::IUeAgentCancellationSignal>& Cancellation)
 	{
-		TSharedPtr<IUeAgentCommandHandler> Handler;
-		FString Error;
-		if (!OperationHost::TryResolveHandler(
-				Request.GetCommandId(), Handler, Error)
-			|| !Handler.IsValid())
+		const FString RequiredPlugin = DomainAdapters::AssetSimple::
+			GetAssetSimpleRequiredOfficialPlugin(Request.GetCommandId());
+		if (!RequiredPlugin.IsEmpty())
+		{
+			const DomainCapability::OfficialPluginAvailability::
+				FOfficialPluginAvailabilityObservation Availability =
+					DomainCapability::OfficialPluginAvailability::Inspect(
+						RequiredPlugin);
+			if (!Availability.IsAvailable())
+			{
+				return FUeAgentCommandResult::Failure(
+					Request,
+					TEXT("{}"),
+					ErrorJson(
+						TEXT("asset_simple_official_plugin_unavailable"),
+						RequiredPlugin,
+						Availability.GetReason()));
+			}
+		}
+		const TSharedPtr<const DomainCapability::
+			IDomainOperationInvocationFactory> Factory =
+				FindOperationInvocationFactory(Request.GetCommandId());
+		if (!Factory.IsValid())
 		{
 			return FUeAgentCommandResult::Failure(
 				Request,
 				TEXT("{}"),
 				ErrorJson(
-					Error.StartsWith(TEXT("simple_authoring_handler_missing:"))
-						? FString(TEXT("asset_simple_command_not_bound"))
-						: FString(TEXT("asset_simple_runtime_unavailable")),
+					TEXT("asset_simple_operation_factory_missing"),
 					Request.GetCommandId(),
-					Error));
+					TEXT("the exact AssetSimple operation has no lifecycle factory")));
 		}
-		return Handler->Submit(Request, CallerContext, Cancellation);
+
+		DomainCapability::FDomainOperationInvocation Invocation;
+		DomainCapability::FDomainOperationInvocationError InvocationError;
+		if (!Factory->TryCreate(
+				Request,
+				CallerContext,
+				Cancellation,
+				Invocation,
+				InvocationError))
+		{
+			return FUeAgentCommandResult::Failure(
+				Request,
+				TEXT("{}"),
+				ErrorJson(
+					TEXT("asset_simple_runtime_unavailable"),
+					Request.GetCommandId(),
+					InvocationError.GetCode() + TEXT(":")
+						+ InvocationError.GetDetail()));
+		}
+
+		FOperationLifecycleReceipt Receipt;
+		if (!Invocation.GetService()->Run(
+				*Invocation.GetPlan(), *Invocation.GetAuthorization(), Receipt))
+		{
+			FString Detail = Invocation.GetContext()->GetFailureDetail();
+			if (Detail.IsEmpty())
+			{
+				Detail = TEXT("phase_history:")
+					+ FString::Join(Receipt.GetPhaseHistory(), TEXT(","));
+			}
+			const TSharedRef<FJsonObject> Error = MakeShared<FJsonObject>();
+			Error->SetStringField(TEXT("code"), Receipt.GetErrorCode());
+			Error->SetStringField(TEXT("subject_id"), Request.GetCommandId());
+			Error->SetStringField(TEXT("detail"), Detail);
+			Error->SetStringField(
+				TEXT("terminal_status"), LexToString(Receipt.GetStatus()));
+			Error->SetBoolField(TEXT("retry_safe"), Receipt.IsRetrySafe());
+			FString Text;
+			const TSharedRef<TJsonWriter<TCHAR,
+				TCondensedJsonPrintPolicy<TCHAR>>> Writer =
+					TJsonWriterFactory<TCHAR,
+						TCondensedJsonPrintPolicy<TCHAR>>::Create(&Text);
+			FJsonSerializer::Serialize(Error, Writer);
+			return FUeAgentCommandResult::Failure(
+				Request, TEXT("{}"), MoveTemp(Text));
+		}
+
+		FString Payload;
+		FString PayloadError;
+		if (!Invocation.GetContext()->TryBuildSuccessPayload(
+				Receipt, Payload, PayloadError))
+		{
+			return FUeAgentCommandResult::ProtocolError(
+				Request.GetCorrelationId(),
+				Request.GetRequestId(),
+				Request.GetCommandId(),
+				Request.GetCommandBindingHash(),
+				TEXT("asset_simple_operation_result_invalid"),
+				PayloadError);
+		}
+		return FUeAgentCommandResult::Success(Request, MoveTemp(Payload));
 	}
 }

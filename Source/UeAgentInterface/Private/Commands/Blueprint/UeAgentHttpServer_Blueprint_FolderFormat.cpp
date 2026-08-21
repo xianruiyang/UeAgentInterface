@@ -56,7 +56,7 @@ namespace
 	}
 }
 
-bool FUeAgentHttpServer::CmdBlueprintExportFolder(
+bool FUeAgentLegacyMechanics::CmdBlueprintExportFolder(
 	const FUeAgentRequestContext& Ctx,
 	TSharedPtr<FJsonObject>& OutData,
 	FString& OutError) const
@@ -101,7 +101,7 @@ bool FUeAgentHttpServer::CmdBlueprintExportFolder(
 	return true;
 }
 
-bool FUeAgentHttpServer::CmdBlueprintApplyFolder(
+bool FUeAgentLegacyMechanics::CmdBlueprintApplyFolder(
 	const FUeAgentRequestContext& Ctx,
 	TSharedPtr<FJsonObject>& OutData,
 	FString& OutError) const

@@ -2,11 +2,11 @@
 
 #include "AssetRegistry/AssetRegistryModule.h"
 #include "Core/AssetDurable/UeAgentAssetDurable.h"
+#include "Core/AssetDurable/UeAgentPackageAssetRevision.h"
 #include "Core/BindingGateway/Operation/UeAgentOperationLifecycleService.h"
 #include "Core/Contract/UeAgentCommandJson.h"
 #include "Core/PlanningPreflight/UeAgentPlanningPreflight.h"
 #include "DomainAdapters/AudioMediaGraph/UeAgentAudioMediaGraphTextureGraphNativeHook.h"
-#include "DomainAdapters/ContentGraphRead/UeAgentContentGraphReadProductionEnvironment.h"
 #include "Dom/JsonObject.h"
 #include "Editor.h"
 #include "Engine/Texture2D.h"
@@ -26,7 +26,6 @@ namespace UE::UAI::OperationOwners::TextureGraph
 	using namespace ContextResource;
 	using namespace DomainCapability;
 	using namespace DomainAdapters::AudioMediaGraph;
-	using namespace DomainAdapters::ContentGraphRead;
 	using namespace PlanningPreflight;
 	using namespace StateSemantic;
 
@@ -159,16 +158,18 @@ namespace UE::UAI::OperationOwners::TextureGraph
 			return CommandContract::Json::TryCanonicalize(Object, OutJson, Error);
 		}
 
-		bool CurrentRevision(UTextureGraph& Graph, FString& OutRevision)
+		bool CurrentRevision(
+			UTextureGraph& Graph,
+			const FString& TargetRef,
+			FString& OutRevision)
 		{
-			FUeAgentContentGraphCapture Capture;
-			FUeAgentContentGraphReadError Error;
-			if (!FUeAgentContentGraphReadProductionEnvironment::TryCaptureOwner(
-				Graph, Capture, Error))
+			UPackage* const Package = Graph.GetOutermost();
+			if (Package == nullptr || Package->IsDirty())
 			{
+				OutRevision = TEXT("authoring-state-dirty");
 				return false;
 			}
-			OutRevision = Capture.Revision;
+			OutRevision = ReadPackageAssetRevision(TargetRef);
 			return !OutRevision.IsEmpty();
 		}
 
@@ -339,7 +340,8 @@ namespace UE::UAI::OperationOwners::TextureGraph
 				return false;
 			}
 			FString Revision;
-			if (!CurrentRevision(*Context->Graph, Revision)
+			if (!CurrentRevision(
+					*Context->Graph, Context->Target, Revision)
 				|| Revision != Context->ExpectedRevision)
 			{
 				OutCode = TEXT("texture_graph_bake_revision_conflict");
@@ -404,7 +406,8 @@ namespace UE::UAI::OperationOwners::TextureGraph
 			{
 				FString Revision;
 				bOutCurrent = Context->Graph
-					&& CurrentRevision(*Context->Graph, Revision)
+					&& CurrentRevision(
+						*Context->Graph, Context->Target, Revision)
 					&& Revision == Context->ExpectedRevision;
 				if (bOutCurrent
 					&& Stage == EOperationLifecycleStage::PrePersistFence)

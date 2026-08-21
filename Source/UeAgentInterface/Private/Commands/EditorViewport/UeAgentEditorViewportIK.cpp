@@ -3,7 +3,7 @@
 #include "Commands/EditorViewport/UeAgentEditorViewportIK.h"
 
 #include "Commands/EditorViewport/UeAgentEditorViewportResolver.h"
-#include "Server/UeAgentHttpServer.h"
+#include "LegacyMechanics/UeAgentLegacyMechanics.h"
 #include "Utilities/UeAgentJsonDiagnostics.h"
 #include "UeAgentInterfaceSettings.h"
 

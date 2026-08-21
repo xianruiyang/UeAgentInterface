@@ -4593,4 +4593,14 @@ bool ApplyAssetWorkspace(const FString &WorkspaceRoot,
           WorkspaceRoot),
       ExpectedAssetKind, ExpectedAssetPath, OutResult, RequestId);
 }
+
+bool ApplyAssetInlineDocument(
+    const TSharedPtr<const FJsonObject> &Document,
+    const FString &ExpectedAssetKind, const FString &ExpectedAssetPath,
+    FAssetApplyResult &OutResult, const FString &RequestId) {
+  return ExecuteAssetWorkspaceSource(
+      UeAgentAuthoringWorkspaceLoader::FSourceRequest::MakeInlineObject(
+          Document, TEXT("inline://niagara-domain-authoring")),
+      ExpectedAssetKind, ExpectedAssetPath, OutResult, RequestId);
+}
 } // namespace UeAgentNiagaraAuthoring

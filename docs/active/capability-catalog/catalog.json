@@ -21,9 +21,9 @@
   ],
   "command_manifest": {
     "path": "Resources/UaiCommandManifest.json",
-    "file_sha256": "sha256:54558513a205cf999b18cb2925c6824334b264f820cd5139a46753972d3d4321",
-    "registry_hash": "sha256:4070c2612dac492c2c1231a32c9bc5076f79646d26fe2128e41d1f1a8becc400",
-    "command_count": 342
+    "file_sha256": "sha256:12eb39d20d6f93cee47c1f1c7fae84c31c1ab87ccfc3268bdeb117ab25161bdb",
+    "registry_hash": "sha256:64b16c7eaace79ca8b5d5c344fea41a255d0808f9e9d895b57383c178b30986b",
+    "command_count": 347
   },
   "historical_sources": {
     "candidate_current_inventory": {
@@ -44,7 +44,7 @@
     },
     "current_decisions": {
       "path": "docs/active/capability-catalog/historical-decisions.json",
-      "authority": "current T34 disposition overlay"
+      "authority": "current disposition authority; candidate mappings remain historical evidence only"
     }
   },
   "evidence_levels": [
@@ -126,19 +126,24 @@
         "cleanup"
       ],
       "command_contract_state": "registered_exact_contract",
-      "implementation_state": "registered_mechanics_candidate",
+      "implementation_state": "five_ai_hjson_roots_and_representative_candidate_edits_product_verified_direct_exact_command_matrix_pending",
       "evidence": {
-        "highest_verified_layer": "activation_and_public_contract",
-        "delivery_state": "requires_vertical_revalidation",
+        "highest_verified_layer": "persistence_independent_readback",
+        "delivery_state": "behavior_tree_blackboard_eqs_state_tree_and_smart_object_hjson_vertical_verified",
         "evidence_refs": [
           "TROOT-UAI-32-INTEGRATED-ACTIVATION-AUTHORITY",
-          "TROOT-UAI-33-PUBLIC-CONTRACT-ORACLE-REALIGNMENT"
+          "TROOT-UAI-33-PUBLIC-CONTRACT-ORACLE-REALIGNMENT",
+          "TROOT-UAI-39-NIAGARA-PCG-AI-VERTICAL",
+          "runtimeLogs/delivery_workflow/TROOT-UAI-39-NIAGARA-PCG-AI-VERTICAL/20260821-product-r4/ai-behavior_tree-independent-summary.json",
+          "runtimeLogs/delivery_workflow/TROOT-UAI-39-NIAGARA-PCG-AI-VERTICAL/20260821-product-r4/ai-blackboard-independent-summary.json",
+          "runtimeLogs/delivery_workflow/TROOT-UAI-39-NIAGARA-PCG-AI-VERTICAL/20260821-product-r4/ai-eqs-independent-summary.json",
+          "runtimeLogs/delivery_workflow/TROOT-UAI-39-NIAGARA-PCG-AI-VERTICAL/20260821-product-r4/ai-state_tree-independent-summary.json",
+          "runtimeLogs/delivery_workflow/TROOT-UAI-39-NIAGARA-PCG-AI-VERTICAL/20260821-product-r4/ai-smart_object-independent-summary.json"
         ],
         "not_proven": [
-          "real UE mechanics for every command",
-          "required persistence and independent readback",
-          "public SDK execution for every object/surface/operation",
-          "failure cleanup and content quality"
+          "direct public SDK product execution of every standalone AI exact command outside the unified HJSON ingress",
+          "exhaustive node and field variants beyond the representative edit for each root",
+          "real-content quality acceptance"
         ]
       },
       "historical_obligation_count": 54,
@@ -146,7 +151,7 @@
         "T20-AI-BEHAVIOR-DOMAIN",
         "T53-AI-COMMAND-MIGRATION"
       ],
-      "next_task_id": "TROOT-UAI-39-NIAGARA-PCG-AI-VERTICAL",
+      "next_task_id": "TROOT-UAI-45-PUBLIC-DISTRIBUTION-PARITY",
       "blockers": []
     },
     {
@@ -175,7 +180,8 @@
         "BehaviorTree",
         "Blackboard",
         "StateTree",
-        "EQS"
+        "EQS",
+        "SmartObjectDefinition"
       ],
       "authoring_surfaces": [
         "candidate discovery",
@@ -190,26 +196,28 @@
         "persisted AI asset"
       ],
       "command_contract_state": "registered_exact_contract",
-      "implementation_state": "registered_mechanics_candidate",
+      "implementation_state": "five_ai_candidate_families_bound_unchanged_through_hjson_and_product_verified",
       "evidence": {
-        "highest_verified_layer": "activation_and_public_contract",
-        "delivery_state": "requires_vertical_revalidation",
+        "highest_verified_layer": "persistence_independent_readback",
+        "delivery_state": "target_sensitive_candidate_to_authoring_chain_verified_for_all_supported_ai_roots",
         "evidence_refs": [
           "TROOT-UAI-32-INTEGRATED-ACTIVATION-AUTHORITY",
-          "TROOT-UAI-33-PUBLIC-CONTRACT-ORACLE-REALIGNMENT"
+          "TROOT-UAI-33-PUBLIC-CONTRACT-ORACLE-REALIGNMENT",
+          "TROOT-UAI-39-NIAGARA-PCG-AI-VERTICAL",
+          "runtimeLogs/delivery_workflow/TROOT-UAI-39-NIAGARA-PCG-AI-VERTICAL/20260821-contract/receipts/t39-ai-niagara-public-contract-r3.json",
+          "runtimeLogs/delivery_workflow/TROOT-UAI-39-NIAGARA-PCG-AI-VERTICAL/20260821-product-r4/ai-blackboard-stale-candidate-negative.json",
+          "runtimeLogs/delivery_workflow/TROOT-UAI-39-NIAGARA-PCG-AI-VERTICAL/20260821-product-r4/ai-smart-object-candidate-apply.json"
         ],
         "not_proven": [
-          "real UE mechanics for every command",
-          "required persistence and independent readback",
-          "public SDK execution for every object/surface/operation",
-          "failure cleanup and content quality"
+          "exhaustive availability and authoring quality of every concrete candidate class",
+          "all target-state and plugin-configuration variants"
         ]
       },
       "historical_obligation_count": 0,
       "legacy_candidate_task_ids": [
         "T20-AI-BEHAVIOR-DOMAIN"
       ],
-      "next_task_id": "TROOT-UAI-35-DISCOVERY-IDENTITY-VERTICAL",
+      "next_task_id": "TROOT-UAI-45-PUBLIC-DISTRIBUTION-PARITY",
       "blockers": []
     },
     {
@@ -257,19 +265,20 @@
         "cleanup"
       ],
       "command_contract_state": "registered_exact_contract",
-      "implementation_state": "registered_mechanics_candidate",
+      "implementation_state": "blueprint_family_hjson_and_layout_product_verified_other_exact_commands_pending",
       "evidence": {
-        "highest_verified_layer": "activation_and_public_contract",
-        "delivery_state": "requires_vertical_revalidation",
+        "highest_verified_layer": "public_sdk_real_ue_vertical",
+        "delivery_state": "representative_anim_blueprint_hjson_and_layout_verified_exact_command_matrix_pending",
         "evidence_refs": [
           "TROOT-UAI-32-INTEGRATED-ACTIVATION-AUTHORITY",
-          "TROOT-UAI-33-PUBLIC-CONTRACT-ORACLE-REALIGNMENT"
+          "TROOT-UAI-33-PUBLIC-CONTRACT-ORACLE-REALIGNMENT",
+          "TROOT-UAI-37-BLUEPRINT-UMG-GRAPH-VERTICAL",
+          "runtimeLogs/uai-development/TROOT-UAI-37-BLUEPRINT-UMG-GRAPH-VERTICAL/20260821-r11/automation/report/index.json",
+          "runtimeLogs/uai-development/TROOT-UAI-37-BLUEPRINT-UMG-GRAPH-VERTICAL/20260821-r9/public_sdk_product/receipt.json"
         ],
         "not_proven": [
-          "real UE mechanics for every command",
-          "required persistence and independent readback",
-          "public SDK execution for every object/surface/operation",
-          "failure cleanup and content quality"
+          "public product execution of animation.anim_blueprint.layer_interface.asset.create and every independent Animation Blueprint exact command",
+          "content quality beyond the representative state machine and AnimGraph layout"
         ]
       },
       "historical_obligation_count": 17,
@@ -277,7 +286,7 @@
         "T16-ANIMATION-BLUEPRINT-DOMAIN",
         "T49-ANIMATION-BLUEPRINT-COMMAND-MIGRATION"
       ],
-      "next_task_id": "TROOT-UAI-37-BLUEPRINT-UMG-GRAPH-VERTICAL",
+      "next_task_id": "TROOT-UAI-45-PUBLIC-DISTRIBUTION-PARITY",
       "blockers": []
     },
     {
@@ -293,7 +302,8 @@
         "UDES-UAI-ROOT-19",
         "DES-UAI-ROOT-INTEGRATED-CAPABILITY-ARCHITECTURE",
         "DES-UAI-PRODUCTION-EVIDENCE",
-        "SOL-UAI-ROOT-08-INTEGRATED-AUTHORITY-RESTORATION"
+        "SOL-UAI-ROOT-08-INTEGRATED-AUTHORITY-RESTORATION",
+        "SOL-UAI-ROOT-14-ANIMATION-RIG-AUDIO-VERTICAL"
       ],
       "activation_contribution_ids": [
         "animation-curve-command-migration"
@@ -341,19 +351,22 @@
         "cleanup"
       ],
       "command_contract_state": "registered_exact_contract",
-      "implementation_state": "registered_mechanics_candidate",
+      "implementation_state": "blend_space_hjson_and_sequence_montage_blendspace_native_lifecycles_product_verified_direct_exact_matrix_pending",
       "evidence": {
-        "highest_verified_layer": "activation_and_public_contract",
-        "delivery_state": "requires_vertical_revalidation",
+        "highest_verified_layer": "persistence_independent_readback",
+        "delivery_state": "blend_space_hjson_and_sequence_montage_blendspace_native_lifecycles_verified",
         "evidence_refs": [
           "TROOT-UAI-32-INTEGRATED-ACTIVATION-AUTHORITY",
-          "TROOT-UAI-33-PUBLIC-CONTRACT-ORACLE-REALIGNMENT"
+          "TROOT-UAI-33-PUBLIC-CONTRACT-ORACLE-REALIGNMENT",
+          "TROOT-UAI-40-ANIMATION-RIG-AUDIO-VERTICAL",
+          "runtimeLogs/delivery_workflow/TROOT-UAI-40-ANIMATION-RIG-AUDIO-VERTICAL/20260821-product/automation/t40-animation-rig-audio-complete-v6.receipt.json",
+          "runtimeLogs/delivery_workflow/TROOT-UAI-40-ANIMATION-RIG-AUDIO-VERTICAL/20260821-product/create-blend-space.result.json",
+          "runtimeLogs/delivery_workflow/TROOT-UAI-40-ANIMATION-RIG-AUDIO-VERTICAL/20260821-product/readback-blend-space-after-error-propagation-build.result.json"
         ],
         "not_proven": [
-          "real UE mechanics for every command",
-          "required persistence and independent readback",
-          "public SDK execution for every object/surface/operation",
-          "failure cleanup and content quality"
+          "direct public SDK product execution of every standalone AnimSequence, Montage and BlendSpace exact command",
+          "AnimSequence root creation, which remains unsupported by the current public contract",
+          "exhaustive curve, event, bone-track and sample variants and real-content quality"
         ]
       },
       "historical_obligation_count": 32,
@@ -361,7 +374,7 @@
         "T23-ANIMATION-CURVE-DOMAIN",
         "T56-ANIMATION-CURVE-COMMAND-MIGRATION"
       ],
-      "next_task_id": "TROOT-UAI-40-ANIMATION-RIG-AUDIO-VERTICAL",
+      "next_task_id": "TROOT-UAI-45-PUBLIC-DISTRIBUTION-PARITY",
       "blockers": []
     },
     {
@@ -377,7 +390,8 @@
         "UDES-UAI-ROOT-19",
         "DES-UAI-ROOT-INTEGRATED-CAPABILITY-ARCHITECTURE",
         "DES-UAI-PRODUCTION-EVIDENCE",
-        "SOL-UAI-ROOT-08-INTEGRATED-AUTHORITY-RESTORATION"
+        "SOL-UAI-ROOT-08-INTEGRATED-AUTHORITY-RESTORATION",
+        "SOL-UAI-ROOT-14-ANIMATION-RIG-AUDIO-VERTICAL"
       ],
       "activation_contribution_ids": [
         "animation-rig-command-migration"
@@ -427,19 +441,26 @@
         "cleanup"
       ],
       "command_contract_state": "registered_exact_contract",
-      "implementation_state": "registered_mechanics_candidate",
+      "implementation_state": "control_rig_ikrig_and_ikretargeter_hjson_product_verified_shared_structure_owner_direct_exact_matrix_pending",
       "evidence": {
-        "highest_verified_layer": "activation_and_public_contract",
-        "delivery_state": "requires_vertical_revalidation",
+        "highest_verified_layer": "persistence_independent_readback",
+        "delivery_state": "control_rig_rigvm_ikrig_and_ikretargeter_representative_vertical_verified",
         "evidence_refs": [
           "TROOT-UAI-32-INTEGRATED-ACTIVATION-AUTHORITY",
-          "TROOT-UAI-33-PUBLIC-CONTRACT-ORACLE-REALIGNMENT"
+          "TROOT-UAI-33-PUBLIC-CONTRACT-ORACLE-REALIGNMENT",
+          "TROOT-UAI-40-ANIMATION-RIG-AUDIO-VERTICAL",
+          "runtimeLogs/delivery_workflow/TROOT-UAI-40-ANIMATION-RIG-AUDIO-VERTICAL/20260821-product/automation/t40-animation-rig-audio-complete-v6.receipt.json",
+          "runtimeLogs/delivery_workflow/TROOT-UAI-40-ANIMATION-RIG-AUDIO-VERTICAL/20260821-product/edit-control-rig-valid.result.json",
+          "runtimeLogs/delivery_workflow/TROOT-UAI-40-ANIMATION-RIG-AUDIO-VERTICAL/20260821-product/readback-control-rig-after.result.json",
+          "runtimeLogs/delivery_workflow/TROOT-UAI-40-ANIMATION-RIG-AUDIO-VERTICAL/20260821-product/readback-ik-rig-source.result.json",
+          "runtimeLogs/delivery_workflow/TROOT-UAI-40-ANIMATION-RIG-AUDIO-VERTICAL/20260821-product/readback-ik-rig-target.result.json",
+          "runtimeLogs/delivery_workflow/TROOT-UAI-40-ANIMATION-RIG-AUDIO-VERTICAL/20260821-product/edit-ik-retargeter-valid.result.json",
+          "runtimeLogs/delivery_workflow/TROOT-UAI-40-ANIMATION-RIG-AUDIO-VERTICAL/20260821-product/reject-empty-ik-retargeter-after-fix.result.json"
         ],
         "not_proven": [
-          "real UE mechanics for every command",
-          "required persistence and independent readback",
-          "public SDK execution for every object/surface/operation",
-          "failure cleanup and content quality"
+          "direct public SDK product execution of every standalone ControlRig, IKRig, IKRetargeter, Skeleton and ShapeLibrary exact command",
+          "Skeleton root creation, which remains unsupported by the current public contract",
+          "exhaustive hierarchy, RigVM unit, solver, chain, mapping and settings variants and real-content quality"
         ]
       },
       "historical_obligation_count": 57,
@@ -447,7 +468,7 @@
         "T24-ANIMATION-RIG-GRAPH-DOMAIN",
         "T57-ANIMATION-RIG-COMMAND-MIGRATION"
       ],
-      "next_task_id": "TROOT-UAI-40-ANIMATION-RIG-AUDIO-VERTICAL",
+      "next_task_id": "TROOT-UAI-45-PUBLIC-DISTRIBUTION-PARITY",
       "blockers": []
     },
     {
@@ -463,7 +484,8 @@
         "UDES-UAI-ROOT-19",
         "DES-UAI-ROOT-INTEGRATED-CAPABILITY-ARCHITECTURE",
         "DES-UAI-PRODUCTION-EVIDENCE",
-        "SOL-UAI-ROOT-08-INTEGRATED-AUTHORITY-RESTORATION"
+        "SOL-UAI-ROOT-08-INTEGRATED-AUTHORITY-RESTORATION",
+        "SOL-UAI-ROOT-14-ANIMATION-RIG-AUDIO-VERTICAL"
       ],
       "activation_contribution_ids": [
         "animation-rig-graph-domain-candidates"
@@ -490,26 +512,28 @@
         "persisted animation asset"
       ],
       "command_contract_state": "registered_exact_contract",
-      "implementation_state": "registered_mechanics_candidate",
+      "implementation_state": "control_rig_candidate_bound_unchanged_through_hjson_and_product_verified",
       "evidence": {
-        "highest_verified_layer": "activation_and_public_contract",
-        "delivery_state": "requires_vertical_revalidation",
+        "highest_verified_layer": "persistence_independent_readback",
+        "delivery_state": "current_binding_candidate_to_rigvm_authoring_chain_verified",
         "evidence_refs": [
           "TROOT-UAI-32-INTEGRATED-ACTIVATION-AUTHORITY",
-          "TROOT-UAI-33-PUBLIC-CONTRACT-ORACLE-REALIGNMENT"
+          "TROOT-UAI-33-PUBLIC-CONTRACT-ORACLE-REALIGNMENT",
+          "TROOT-UAI-40-ANIMATION-RIG-AUDIO-VERTICAL",
+          "runtimeLogs/delivery_workflow/TROOT-UAI-40-ANIMATION-RIG-AUDIO-VERTICAL/20260821-product/control-rig-candidates-current.result.json",
+          "runtimeLogs/delivery_workflow/TROOT-UAI-40-ANIMATION-RIG-AUDIO-VERTICAL/20260821-product/edit-control-rig-valid.result.json",
+          "runtimeLogs/delivery_workflow/TROOT-UAI-40-ANIMATION-RIG-AUDIO-VERTICAL/20260821-product/readback-control-rig-after.result.json"
         ],
         "not_proven": [
-          "real UE mechanics for every command",
-          "required persistence and independent readback",
-          "public SDK execution for every object/surface/operation",
-          "failure cleanup and content quality"
+          "exhaustive candidate availability for every concrete RigVM unit and animation graph type",
+          "all target-state, plugin-configuration and stale-candidate variants beyond the verified representative chain"
         ]
       },
       "historical_obligation_count": 0,
       "legacy_candidate_task_ids": [
         "T24-ANIMATION-RIG-GRAPH-DOMAIN"
       ],
-      "next_task_id": "TROOT-UAI-35-DISCOVERY-IDENTITY-VERTICAL",
+      "next_task_id": "TROOT-UAI-45-PUBLIC-DISTRIBUTION-PARITY",
       "blockers": []
     },
     {
@@ -538,6 +562,7 @@
         "asset.data_object.create",
         "asset.data_object.update",
         "asset.data_table.replace",
+        "asset.factory.candidates",
         "asset.input_action.create",
         "asset.input_action.update",
         "asset.input_mapping_context.create",
@@ -635,7 +660,7 @@
       "legacy_candidate_task_ids": [
         "T37-ASSET-SIMPLE-OPERATION"
       ],
-      "next_task_id": "TROOT-UAI-38-ASSET-MATERIAL-TEXTURE-MEDIA-VERTICAL",
+      "next_task_id": "TROOT-UAI-45-PUBLIC-DISTRIBUTION-PARITY",
       "blockers": []
     },
     {
@@ -651,7 +676,8 @@
         "UDES-UAI-ROOT-19",
         "DES-UAI-ROOT-INTEGRATED-CAPABILITY-ARCHITECTURE",
         "DES-UAI-PRODUCTION-EVIDENCE",
-        "SOL-UAI-ROOT-08-INTEGRATED-AUTHORITY-RESTORATION"
+        "SOL-UAI-ROOT-08-INTEGRATED-AUTHORITY-RESTORATION",
+        "SOL-UAI-ROOT-14-ANIMATION-RIG-AUDIO-VERTICAL"
       ],
       "activation_contribution_ids": [
         "audio-command-migration"
@@ -693,19 +719,23 @@
         "cleanup"
       ],
       "command_contract_state": "registered_exact_contract",
-      "implementation_state": "registered_mechanics_candidate",
+      "implementation_state": "metasound_and_soundcue_hjson_product_verified_direct_exact_command_matrix_pending",
       "evidence": {
-        "highest_verified_layer": "activation_and_public_contract",
-        "delivery_state": "requires_vertical_revalidation",
+        "highest_verified_layer": "persistence_independent_readback",
+        "delivery_state": "representative_metasound_and_soundcue_candidate_hjson_vertical_verified",
         "evidence_refs": [
           "TROOT-UAI-32-INTEGRATED-ACTIVATION-AUTHORITY",
-          "TROOT-UAI-33-PUBLIC-CONTRACT-ORACLE-REALIGNMENT"
+          "TROOT-UAI-33-PUBLIC-CONTRACT-ORACLE-REALIGNMENT",
+          "TROOT-UAI-40-ANIMATION-RIG-AUDIO-VERTICAL",
+          "runtimeLogs/delivery_workflow/TROOT-UAI-40-ANIMATION-RIG-AUDIO-VERTICAL/20260821-product/automation/t40-animation-rig-audio-complete-v6.receipt.json",
+          "runtimeLogs/delivery_workflow/TROOT-UAI-40-ANIMATION-RIG-AUDIO-VERTICAL/20260821-product/create-metasound.result.json",
+          "runtimeLogs/delivery_workflow/TROOT-UAI-40-ANIMATION-RIG-AUDIO-VERTICAL/20260821-product/edit-metasound.result.json",
+          "runtimeLogs/delivery_workflow/TROOT-UAI-40-ANIMATION-RIG-AUDIO-VERTICAL/20260821-product/edit-sound-cue.result.json"
         ],
         "not_proven": [
-          "real UE mechanics for every command",
-          "required persistence and independent readback",
-          "public SDK execution for every object/surface/operation",
-          "failure cleanup and content quality"
+          "direct public SDK product execution of every standalone MetaSound, SoundCue and audio-media exact command",
+          "exhaustive graph, interface, node, relation and default variants",
+          "audible output and real-content quality acceptance"
         ]
       },
       "historical_obligation_count": 56,
@@ -713,7 +743,7 @@
         "T21-AUDIO-DOMAIN",
         "T54-AUDIO-COMMAND-MIGRATION"
       ],
-      "next_task_id": "TROOT-UAI-40-ANIMATION-RIG-AUDIO-VERTICAL",
+      "next_task_id": "TROOT-UAI-45-PUBLIC-DISTRIBUTION-PARITY",
       "blockers": []
     },
     {
@@ -729,7 +759,8 @@
         "UDES-UAI-ROOT-19",
         "DES-UAI-ROOT-INTEGRATED-CAPABILITY-ARCHITECTURE",
         "DES-UAI-PRODUCTION-EVIDENCE",
-        "SOL-UAI-ROOT-08-INTEGRATED-AUTHORITY-RESTORATION"
+        "SOL-UAI-ROOT-08-INTEGRATED-AUTHORITY-RESTORATION",
+        "SOL-UAI-ROOT-14-ANIMATION-RIG-AUDIO-VERTICAL"
       ],
       "activation_contribution_ids": [
         "audio-graph-domain-candidates"
@@ -755,26 +786,29 @@
         "persisted audio graph"
       ],
       "command_contract_state": "registered_exact_contract",
-      "implementation_state": "registered_mechanics_candidate",
+      "implementation_state": "metasound_and_soundcue_candidates_bound_unchanged_through_hjson_and_product_verified",
       "evidence": {
-        "highest_verified_layer": "activation_and_public_contract",
-        "delivery_state": "requires_vertical_revalidation",
+        "highest_verified_layer": "persistence_independent_readback",
+        "delivery_state": "current_binding_candidate_to_audio_graph_authoring_chain_verified",
         "evidence_refs": [
           "TROOT-UAI-32-INTEGRATED-ACTIVATION-AUTHORITY",
-          "TROOT-UAI-33-PUBLIC-CONTRACT-ORACLE-REALIGNMENT"
+          "TROOT-UAI-33-PUBLIC-CONTRACT-ORACLE-REALIGNMENT",
+          "TROOT-UAI-40-ANIMATION-RIG-AUDIO-VERTICAL",
+          "runtimeLogs/delivery_workflow/TROOT-UAI-40-ANIMATION-RIG-AUDIO-VERTICAL/20260821-product/metasound-candidates.result.json",
+          "runtimeLogs/delivery_workflow/TROOT-UAI-40-ANIMATION-RIG-AUDIO-VERTICAL/20260821-product/sound-cue-candidates.result.json",
+          "runtimeLogs/delivery_workflow/TROOT-UAI-40-ANIMATION-RIG-AUDIO-VERTICAL/20260821-product/edit-metasound.result.json",
+          "runtimeLogs/delivery_workflow/TROOT-UAI-40-ANIMATION-RIG-AUDIO-VERTICAL/20260821-product/edit-sound-cue.result.json"
         ],
         "not_proven": [
-          "real UE mechanics for every command",
-          "required persistence and independent readback",
-          "public SDK execution for every object/surface/operation",
-          "failure cleanup and content quality"
+          "exhaustive candidate availability for every concrete MetaSound and SoundCue node class",
+          "all plugin-configuration, target-state and stale-candidate variants beyond the verified representative chains"
         ]
       },
       "historical_obligation_count": 0,
       "legacy_candidate_task_ids": [
         "T21-AUDIO-DOMAIN"
       ],
-      "next_task_id": "TROOT-UAI-35-DISCOVERY-IDENTITY-VERTICAL",
+      "next_task_id": "TROOT-UAI-45-PUBLIC-DISTRIBUTION-PARITY",
       "blockers": []
     },
     {
@@ -824,19 +858,20 @@
         "cleanup"
       ],
       "command_contract_state": "registered_exact_contract",
-      "implementation_state": "registered_mechanics_candidate",
+      "implementation_state": "blueprint_hjson_candidate_and_layout_product_verified_event_discovery_pending",
       "evidence": {
-        "highest_verified_layer": "activation_and_public_contract",
-        "delivery_state": "requires_vertical_revalidation",
+        "highest_verified_layer": "public_sdk_real_ue_vertical",
+        "delivery_state": "representative_blueprint_hjson_and_layout_verified_exact_command_matrix_pending",
         "evidence_refs": [
           "TROOT-UAI-32-INTEGRATED-ACTIVATION-AUTHORITY",
-          "TROOT-UAI-33-PUBLIC-CONTRACT-ORACLE-REALIGNMENT"
+          "TROOT-UAI-33-PUBLIC-CONTRACT-ORACLE-REALIGNMENT",
+          "TROOT-UAI-37-BLUEPRINT-UMG-GRAPH-VERTICAL",
+          "runtimeLogs/uai-development/TROOT-UAI-37-BLUEPRINT-UMG-GRAPH-VERTICAL/20260821-r11/automation/report/index.json",
+          "runtimeLogs/uai-development/TROOT-UAI-37-BLUEPRINT-UMG-GRAPH-VERTICAL/20260821-r9/public_sdk_product/receipt.json"
         ],
         "not_proven": [
-          "real UE mechanics for every command",
-          "required persistence and independent readback",
-          "public SDK execution for every object/surface/operation",
-          "failure cleanup and content quality"
+          "public product execution of blueprint.component.events.discover",
+          "content quality beyond the representative Branch, PointLightComponent, and EventGraph layout"
         ]
       },
       "historical_obligation_count": 14,
@@ -844,7 +879,7 @@
         "T14-BLUEPRINT-SURFACES",
         "T47-BLUEPRINT-COMMAND-MIGRATION"
       ],
-      "next_task_id": "TROOT-UAI-37-BLUEPRINT-UMG-GRAPH-VERTICAL",
+      "next_task_id": "TROOT-UAI-45-PUBLIC-DISTRIBUTION-PARITY",
       "blockers": []
     },
     {
@@ -885,26 +920,26 @@
         "persisted Blueprint"
       ],
       "command_contract_state": "registered_exact_contract",
-      "implementation_state": "registered_mechanics_candidate",
+      "implementation_state": "candidate_binding_and_persisted_blueprint_product_verified",
       "evidence": {
-        "highest_verified_layer": "activation_and_public_contract",
-        "delivery_state": "requires_vertical_revalidation",
+        "highest_verified_layer": "public_sdk_real_ue_hjson_vertical",
+        "delivery_state": "current_candidate_to_hjson_vertical_verified",
         "evidence_refs": [
           "TROOT-UAI-32-INTEGRATED-ACTIVATION-AUTHORITY",
-          "TROOT-UAI-33-PUBLIC-CONTRACT-ORACLE-REALIGNMENT"
+          "TROOT-UAI-33-PUBLIC-CONTRACT-ORACLE-REALIGNMENT",
+          "TROOT-UAI-37-BLUEPRINT-UMG-GRAPH-VERTICAL",
+          "runtimeLogs/uai-development/TROOT-UAI-37-BLUEPRINT-UMG-GRAPH-VERTICAL/20260821-r11/automation/report/index.json",
+          "runtimeLogs/uai-development/TROOT-UAI-37-BLUEPRINT-UMG-GRAPH-VERTICAL/20260821-r9/public_sdk_product/receipt.json"
         ],
         "not_proven": [
-          "real UE mechanics for every command",
-          "required persistence and independent readback",
-          "public SDK execution for every object/surface/operation",
-          "failure cleanup and content quality"
+          "every ActorComponent class; the current bounded candidate set is SceneComponent and PointLightComponent"
         ]
       },
       "historical_obligation_count": 0,
       "legacy_candidate_task_ids": [
         "T12-BLUEPRINT-COMPONENT"
       ],
-      "next_task_id": "TROOT-UAI-35-DISCOVERY-IDENTITY-VERTICAL",
+      "next_task_id": "TROOT-UAI-45-PUBLIC-DISTRIBUTION-PARITY",
       "blockers": []
     },
     {
@@ -945,26 +980,26 @@
         "persisted Blueprint"
       ],
       "command_contract_state": "registered_exact_contract",
-      "implementation_state": "registered_mechanics_candidate",
+      "implementation_state": "candidate_binding_and_persisted_blueprint_product_verified",
       "evidence": {
-        "highest_verified_layer": "activation_and_public_contract",
-        "delivery_state": "requires_vertical_revalidation",
+        "highest_verified_layer": "public_sdk_real_ue_hjson_vertical",
+        "delivery_state": "current_candidate_to_hjson_vertical_verified",
         "evidence_refs": [
           "TROOT-UAI-32-INTEGRATED-ACTIVATION-AUTHORITY",
-          "TROOT-UAI-33-PUBLIC-CONTRACT-ORACLE-REALIGNMENT"
+          "TROOT-UAI-33-PUBLIC-CONTRACT-ORACLE-REALIGNMENT",
+          "TROOT-UAI-37-BLUEPRINT-UMG-GRAPH-VERTICAL",
+          "runtimeLogs/uai-development/TROOT-UAI-37-BLUEPRINT-UMG-GRAPH-VERTICAL/20260821-r11/automation/report/index.json",
+          "runtimeLogs/uai-development/TROOT-UAI-37-BLUEPRINT-UMG-GRAPH-VERTICAL/20260821-r9/public_sdk_product/receipt.json"
         ],
         "not_proven": [
-          "real UE mechanics for every command",
-          "required persistence and independent readback",
-          "public SDK execution for every object/surface/operation",
-          "failure cleanup and content quality"
+          "every Blueprint action and palette context; the current executable candidate set is the Branch node"
         ]
       },
       "historical_obligation_count": 0,
       "legacy_candidate_task_ids": [
         "T11-BLUEPRINT-NODE"
       ],
-      "next_task_id": "TROOT-UAI-35-DISCOVERY-IDENTITY-VERTICAL",
+      "next_task_id": "TROOT-UAI-45-PUBLIC-DISTRIBUTION-PARITY",
       "blockers": []
     },
     {
@@ -1036,7 +1071,7 @@
       "legacy_candidate_task_ids": [
         "T44-CAPTURE-MEDIA-OPERATION"
       ],
-      "next_task_id": "TROOT-UAI-42-WORLD-VIEWPORT-SPATIAL-VERTICAL",
+      "next_task_id": "TROOT-UAI-45-PUBLIC-DISTRIBUTION-PARITY",
       "blockers": []
     },
     {
@@ -1078,26 +1113,25 @@
         "request"
       ],
       "command_contract_state": "registered_exact_contract",
-      "implementation_state": "registered_mechanics_candidate",
+      "implementation_state": "current_immutable_registry_discovery",
       "evidence": {
-        "highest_verified_layer": "activation_and_public_contract",
-        "delivery_state": "requires_vertical_revalidation",
+        "highest_verified_layer": "public_sdk_real_ue_vertical",
+        "delivery_state": "current_discovery_vertical_verified",
         "evidence_refs": [
           "TROOT-UAI-32-INTEGRATED-ACTIVATION-AUTHORITY",
-          "TROOT-UAI-33-PUBLIC-CONTRACT-ORACLE-REALIGNMENT"
+          "TROOT-UAI-33-PUBLIC-CONTRACT-ORACLE-REALIGNMENT",
+          "TROOT-UAI-35-DISCOVERY-IDENTITY-VERTICAL",
+          "runtimeLogs/uai-development/TROOT-UAI-35-DISCOVERY-IDENTITY-VERTICAL/20260820-r3/public_sdk_product/receipt.json"
         ],
         "not_proven": [
-          "real UE mechanics for every command",
-          "required persistence and independent readback",
-          "public SDK execution for every object/surface/operation",
-          "failure cleanup and content quality"
+          "free-text relevance quality for every possible intent across all current commands"
         ]
       },
       "historical_obligation_count": 0,
       "legacy_candidate_task_ids": [
         "T05-QUERY-PUBLIC-CALIBRATION"
       ],
-      "next_task_id": "TROOT-UAI-35-DISCOVERY-IDENTITY-VERTICAL",
+      "next_task_id": "TROOT-UAI-45-PUBLIC-DISTRIBUTION-PARITY",
       "blockers": []
     },
     {
@@ -1163,19 +1197,24 @@
         "cleanup"
       ],
       "command_contract_state": "registered_exact_contract",
-      "implementation_state": "registered_mechanics_candidate",
+      "implementation_state": "shared_hjson_seam_with_material_and_blueprint_family_products",
       "evidence": {
-        "highest_verified_layer": "activation_and_public_contract",
-        "delivery_state": "requires_vertical_revalidation",
+        "highest_verified_layer": "public_sdk_real_ue_vertical",
+        "delivery_state": "material_and_blueprint_family_import_verticals_verified_domain_matrix_pending",
         "evidence_refs": [
           "TROOT-UAI-32-INTEGRATED-ACTIVATION-AUTHORITY",
-          "TROOT-UAI-33-PUBLIC-CONTRACT-ORACLE-REALIGNMENT"
+          "TROOT-UAI-33-PUBLIC-CONTRACT-ORACLE-REALIGNMENT",
+          "TROOT-UAI-36-STRUCTURED-HJSON-VERTICAL",
+          "runtimeLogs/uai-development/TROOT-UAI-36-STRUCTURED-HJSON-VERTICAL/20260821-r6/automation/report/index.json",
+          "runtimeLogs/uai-development/TROOT-UAI-36-STRUCTURED-HJSON-VERTICAL/20260821-r5/public_sdk_product/receipt.json",
+          "TROOT-UAI-37-BLUEPRINT-UMG-GRAPH-VERTICAL",
+          "runtimeLogs/uai-development/TROOT-UAI-37-BLUEPRINT-UMG-GRAPH-VERTICAL/20260821-r11/automation/report/index.json",
+          "runtimeLogs/uai-development/TROOT-UAI-37-BLUEPRINT-UMG-GRAPH-VERTICAL/20260821-r9/public_sdk_product/receipt.json"
         ],
         "not_proven": [
-          "real UE mechanics for every command",
-          "required persistence and independent readback",
-          "public SDK execution for every object/surface/operation",
-          "failure cleanup and content quality"
+          "real UE mechanics for the remaining asset, Niagara, PCG, AI, animation, rig, and audio domain providers",
+          "public SDK execution for every object, surface and operation",
+          "failure cleanup and content quality across the remaining T38-T40 domain matrix"
         ]
       },
       "historical_obligation_count": 11,
@@ -1183,7 +1222,7 @@
         "T13-UOBJECT-RECURSIVE-INIT",
         "T27-DATATABLE-CURVETABLE-DOMAIN"
       ],
-      "next_task_id": "TROOT-UAI-36-STRUCTURED-HJSON-VERTICAL",
+      "next_task_id": "TROOT-UAI-45-PUBLIC-DISTRIBUTION-PARITY",
       "blockers": []
     },
     {
@@ -1263,7 +1302,7 @@
       "legacy_candidate_task_ids": [
         "T31-DESTRUCTIVE-CONTENT-OPS"
       ],
-      "next_task_id": "TROOT-UAI-43-EDITOR-IMPORT-LIFECYCLE-VERTICAL",
+      "next_task_id": "TROOT-UAI-45-PUBLIC-DISTRIBUTION-PARITY",
       "blockers": []
     },
     {
@@ -1336,7 +1375,7 @@
       "legacy_candidate_task_ids": [
         "T39-EDITOR-PROJECT-OPERATION"
       ],
-      "next_task_id": "TROOT-UAI-43-EDITOR-IMPORT-LIFECYCLE-VERTICAL",
+      "next_task_id": "TROOT-UAI-45-PUBLIC-DISTRIBUTION-PARITY",
       "blockers": []
     },
     {
@@ -1404,7 +1443,7 @@
       "legacy_candidate_task_ids": [
         "T34-CONTROL-COMMAND-MIGRATION"
       ],
-      "next_task_id": "TROOT-UAI-43-EDITOR-IMPORT-LIFECYCLE-VERTICAL",
+      "next_task_id": "TROOT-UAI-45-PUBLIC-DISTRIBUTION-PARITY",
       "blockers": []
     },
     {
@@ -1481,7 +1520,7 @@
       "legacy_candidate_task_ids": [
         "T28-EXTERNAL-FACTORY-IMPORT"
       ],
-      "next_task_id": "TROOT-UAI-43-EDITOR-IMPORT-LIFECYCLE-VERTICAL",
+      "next_task_id": "TROOT-UAI-45-PUBLIC-DISTRIBUTION-PARITY",
       "blockers": []
     },
     {
@@ -1527,26 +1566,27 @@
         "cleanup"
       ],
       "command_contract_state": "registered_exact_contract",
-      "implementation_state": "registered_mechanics_candidate",
+      "implementation_state": "blueprint_family_persisted_layout_product_verified_other_providers_pending",
       "evidence": {
-        "highest_verified_layer": "activation_and_public_contract",
-        "delivery_state": "requires_vertical_revalidation",
+        "highest_verified_layer": "public_sdk_real_ue_persisted_vertical",
+        "delivery_state": "blueprint_widget_and_animation_blueprint_layout_verified_domain_matrix_pending",
         "evidence_refs": [
           "TROOT-UAI-32-INTEGRATED-ACTIVATION-AUTHORITY",
-          "TROOT-UAI-33-PUBLIC-CONTRACT-ORACLE-REALIGNMENT"
+          "TROOT-UAI-33-PUBLIC-CONTRACT-ORACLE-REALIGNMENT",
+          "TROOT-UAI-37-BLUEPRINT-UMG-GRAPH-VERTICAL",
+          "runtimeLogs/uai-development/TROOT-UAI-37-BLUEPRINT-UMG-GRAPH-VERTICAL/20260821-r11/automation/report/index.json",
+          "runtimeLogs/uai-development/TROOT-UAI-37-BLUEPRINT-UMG-GRAPH-VERTICAL/20260821-r9/public_sdk_product/receipt.json"
         ],
         "not_proven": [
-          "real UE mechanics for every command",
-          "required persistence and independent readback",
-          "public SDK execution for every object/surface/operation",
-          "failure cleanup and content quality"
+          "Material, Niagara, PCG, AI, Audio, and Control Rig graph providers",
+          "cross-package atomic layout, which is explicitly unsupported"
         ]
       },
       "historical_obligation_count": 6,
       "legacy_candidate_task_ids": [
         "T62-UNIFIED-GRAPH-LAYOUT"
       ],
-      "next_task_id": "TROOT-UAI-37-BLUEPRINT-UMG-GRAPH-VERTICAL",
+      "next_task_id": "TROOT-UAI-45-PUBLIC-DISTRIBUTION-PARITY",
       "blockers": []
     },
     {
@@ -1610,7 +1650,7 @@
       "legacy_candidate_task_ids": [
         "T41-LANDSCAPE-OPERATION"
       ],
-      "next_task_id": "TROOT-UAI-41-MODELING-WHITEBOX-PHYSICS-VERTICAL",
+      "next_task_id": "TROOT-UAI-45-PUBLIC-DISTRIBUTION-PARITY",
       "blockers": []
     },
     {
@@ -1626,8 +1666,7 @@
         "UDES-UAI-ROOT-19",
         "DES-UAI-ROOT-INTEGRATED-CAPABILITY-ARCHITECTURE",
         "DES-UAI-PRODUCTION-EVIDENCE",
-        "SOL-UAI-ROOT-08-INTEGRATED-AUTHORITY-RESTORATION",
-        "UDES-UAI-ROOT-19"
+        "SOL-UAI-ROOT-08-INTEGRATED-AUTHORITY-RESTORATION"
       ],
       "activation_contribution_ids": [],
       "current_command_ids": [],
@@ -1636,32 +1675,34 @@
         "historical public command identity"
       ],
       "authoring_surfaces": [
-        "manifest",
-        "binding",
-        "dispatch",
-        "compiled legacy registry",
-        "docs",
-        "tests"
+        "current manifest",
+        "current binding",
+        "exact dispatch absence",
+        "compiled public surface",
+        "active docs and tests"
       ],
       "operations": [
-        "retire",
-        "reject",
-        "remove or isolate"
+        "resolve",
+        "remove or isolate",
+        "verify absence"
       ],
       "lifecycles": [
         "migration",
         "physical exit"
       ],
       "command_contract_state": "absent_from_current_manifest",
-      "implementation_state": "partial_compiled_legacy_guard",
+      "implementation_state": "compiled_legacy_public_surface_removed",
       "evidence": {
-        "highest_verified_layer": "manifest_absence_and_partial_guard",
-        "delivery_state": "requires_exit_audit",
+        "highest_verified_layer": "active_public_surface_exit",
+        "delivery_state": "legacy_public_and_compiled_surface_exit_verified",
         "evidence_refs": [
-          "TROOT-UAI-33-PUBLIC-CONTRACT-ORACLE-REALIGNMENT"
+          "TROOT-UAI-33-PUBLIC-CONTRACT-ORACLE-REALIGNMENT",
+          "TROOT-UAI-44-LEGACY-SURFACE-EXIT",
+          "runtimeLogs/delivery_workflow/TROOT-UAI-44-LEGACY-SURFACE-EXIT/20260821-green-r2/automation/t44-legacy-surface-green.receipt.discovery-set.json",
+          "runtimeLogs/delivery_workflow/TROOT-UAI-44-LEGACY-SURFACE-EXIT/20260821-affected-r2/automation/t44-affected-consumers.receipt.discovery-set.json"
         ],
         "not_proven": [
-          "all compiled legacy paths, tests and documentation physically exited"
+          "Plugin/CMD/Pak/installed distribution parity before T45"
         ]
       },
       "historical_obligation_count": 202,
@@ -1669,7 +1710,7 @@
         "T61-PRE-REFACTOR-PUBLIC-SURFACE-RECONCILIATION",
         "T90-LEGACY-ASSET-RETIREMENT"
       ],
-      "next_task_id": "TROOT-UAI-44-LEGACY-SURFACE-EXIT",
+      "next_task_id": "TROOT-UAI-45-PUBLIC-DISTRIBUTION-PARITY",
       "blockers": []
     },
     {
@@ -1730,7 +1771,7 @@
       "legacy_candidate_task_ids": [
         "T30-EXTERNAL-LOCALIZATION-IMPORT"
       ],
-      "next_task_id": "TROOT-UAI-43-EDITOR-IMPORT-LIFECYCLE-VERTICAL",
+      "next_task_id": "TROOT-UAI-45-PUBLIC-DISTRIBUTION-PARITY",
       "blockers": []
     },
     {
@@ -1800,7 +1841,7 @@
         "T17-MATERIAL-DOMAIN",
         "T50-MATERIAL-COMMAND-MIGRATION"
       ],
-      "next_task_id": "TROOT-UAI-38-ASSET-MATERIAL-TEXTURE-MEDIA-VERTICAL",
+      "next_task_id": "TROOT-UAI-45-PUBLIC-DISTRIBUTION-PARITY",
       "blockers": []
     },
     {
@@ -1841,26 +1882,25 @@
         "persisted material"
       ],
       "command_contract_state": "registered_exact_contract",
-      "implementation_state": "registered_mechanics_candidate",
+      "implementation_state": "current_material_palette_candidate_owner",
       "evidence": {
-        "highest_verified_layer": "activation_and_public_contract",
-        "delivery_state": "requires_vertical_revalidation",
+        "highest_verified_layer": "public_sdk_real_ue_hjson_vertical",
+        "delivery_state": "representative_candidate_identity_vertical_verified",
         "evidence_refs": [
           "TROOT-UAI-32-INTEGRATED-ACTIVATION-AUTHORITY",
-          "TROOT-UAI-33-PUBLIC-CONTRACT-ORACLE-REALIGNMENT"
+          "TROOT-UAI-33-PUBLIC-CONTRACT-ORACLE-REALIGNMENT",
+          "TROOT-UAI-35-DISCOVERY-IDENTITY-VERTICAL",
+          "runtimeLogs/uai-development/TROOT-UAI-35-DISCOVERY-IDENTITY-VERTICAL/20260820-r3/public_sdk_product/receipt.json"
         ],
         "not_proven": [
-          "real UE mechanics for every command",
-          "required persistence and independent readback",
-          "public SDK execution for every object/surface/operation",
-          "failure cleanup and content quality"
+          "every Material and Material Function expression class and palette context"
         ]
       },
       "historical_obligation_count": 0,
       "legacy_candidate_task_ids": [
         "T17-MATERIAL-DOMAIN"
       ],
-      "next_task_id": "TROOT-UAI-35-DISCOVERY-IDENTITY-VERTICAL",
+      "next_task_id": "TROOT-UAI-45-PUBLIC-DISTRIBUTION-PARITY",
       "blockers": []
     },
     {
@@ -1961,7 +2001,7 @@
       "legacy_candidate_task_ids": [
         "T38-MODELING-GEOMETRY-OPERATION"
       ],
-      "next_task_id": "TROOT-UAI-41-MODELING-WHITEBOX-PHYSICS-VERTICAL",
+      "next_task_id": "TROOT-UAI-45-PUBLIC-DISTRIBUTION-PARITY",
       "blockers": []
     },
     {
@@ -1981,9 +2021,17 @@
         "REQ-UAI-ROOT-07",
         "GAP-UAI-ROOT-REFACTOR-PRESERVATION"
       ],
-      "activation_contribution_ids": [],
-      "current_command_ids": [],
-      "focus_command_ids": [],
+      "activation_contribution_ids": [
+        "modeling-geometry"
+      ],
+      "current_command_ids": [
+        "mesh.voxel_grid.apply",
+        "mesh.voxel_grid.session"
+      ],
+      "focus_command_ids": [
+        "mesh.voxel_grid.apply",
+        "mesh.voxel_grid.session"
+      ],
       "historical_command_ids": [
         "modeling_voxel_grid_add_bounds",
         "modeling_voxel_grid_apply",
@@ -2014,20 +2062,18 @@
         "reload",
         "cleanup"
       ],
-      "command_contract_state": "missing_after_refactor",
-      "implementation_state": "removed_from_current_tree",
+      "command_contract_state": "registered_exact_contract",
+      "implementation_state": "current_shared_modeling_operation_vertical",
       "evidence": {
-        "highest_verified_layer": "historical_mechanics_and_smoke_only",
-        "delivery_state": "requires_restoration_and_vertical_revalidation",
+        "highest_verified_layer": "public_sdk_real_ue_persisted_vertical",
+        "delivery_state": "current_vertical_verified",
         "evidence_refs": [
-          "git:c6c2141dd096c0ef4c059bbaf8d96cc646751458",
-          "git:52dfadb40216f3094eb853318b66719f556533dd",
-          "git:52dfadb^:docs/commands/modeling/modeling_voxel_grid_apply.md"
+          "TROOT-UAI-41-MODELING-WHITEBOX-PHYSICS-VERTICAL",
+          "runtimeLogs/receipts/troot-uai-41-public-sdk-product.json",
+          "runtimeLogs/receipts/troot-uai-41-modeling-regression.json"
         ],
         "not_proven": [
-          "current command contract",
-          "current implementation",
-          "current product evidence"
+          "every Modeling Tools mode and every runtime collision profile"
         ]
       },
       "historical_obligation_count": 4,
@@ -2036,10 +2082,8 @@
       "legacy_candidate_task_ids": [
         "T38-MODELING-GEOMETRY-OPERATION"
       ],
-      "next_task_id": "TROOT-UAI-41-MODELING-WHITEBOX-PHYSICS-VERTICAL",
-      "blockers": [
-        "current contract and mechanics are absent"
-      ]
+      "next_task_id": "TROOT-UAI-45-PUBLIC-DISTRIBUTION-PARITY",
+      "blockers": []
     },
     {
       "id": "CU-NIAGARA-COMMANDS",
@@ -2098,19 +2142,24 @@
         "cleanup"
       ],
       "command_contract_state": "registered_exact_contract",
-      "implementation_state": "registered_mechanics_candidate",
+      "implementation_state": "system_and_emitter_hjson_roots_with_representative_module_edit_product_verified_other_exact_commands_pending",
       "evidence": {
-        "highest_verified_layer": "activation_and_public_contract",
-        "delivery_state": "requires_vertical_revalidation",
+        "highest_verified_layer": "persistence_independent_readback",
+        "delivery_state": "representative_system_emitter_and_module_hjson_vertical_verified",
         "evidence_refs": [
           "TROOT-UAI-32-INTEGRATED-ACTIVATION-AUTHORITY",
-          "TROOT-UAI-33-PUBLIC-CONTRACT-ORACLE-REALIGNMENT"
+          "TROOT-UAI-33-PUBLIC-CONTRACT-ORACLE-REALIGNMENT",
+          "TROOT-UAI-39-NIAGARA-PCG-AI-VERTICAL",
+          "runtimeLogs/delivery_workflow/TROOT-UAI-39-NIAGARA-PCG-AI-VERTICAL/20260821-contract/receipts/t39-niagara-candidate-binding.json",
+          "runtimeLogs/delivery_workflow/TROOT-UAI-39-NIAGARA-PCG-AI-VERTICAL/20260821-product-r4/niagara-system-root-create.json",
+          "runtimeLogs/delivery_workflow/TROOT-UAI-39-NIAGARA-PCG-AI-VERTICAL/20260821-product-r4/niagara-emitter-independent-summary-after-module.json",
+          "runtimeLogs/delivery_workflow/TROOT-UAI-39-NIAGARA-PCG-AI-VERTICAL/20260821-product-r4/niagara-emitter-summary-after-negative.json"
         ],
         "not_proven": [
-          "real UE mechanics for every command",
-          "required persistence and independent readback",
-          "public SDK execution for every object/surface/operation",
-          "failure cleanup and content quality"
+          "standalone NiagaraScript root product execution",
+          "direct public SDK product execution of every standalone Niagara exact command outside the unified HJSON ingress",
+          "renderer event compound reorder fix and duplicate variants beyond the representative module edit",
+          "real-content quality acceptance"
         ]
       },
       "historical_obligation_count": 41,
@@ -2118,7 +2167,7 @@
         "T18-NIAGARA-DOMAIN",
         "T51-NIAGARA-COMMAND-MIGRATION"
       ],
-      "next_task_id": "TROOT-UAI-39-NIAGARA-PCG-AI-VERTICAL",
+      "next_task_id": "TROOT-UAI-45-PUBLIC-DISTRIBUTION-PARITY",
       "blockers": []
     },
     {
@@ -2159,26 +2208,29 @@
         "persisted Niagara asset"
       ],
       "command_contract_state": "registered_exact_contract",
-      "implementation_state": "registered_mechanics_candidate",
+      "implementation_state": "canonical_target_usage_candidate_binding_product_verified_for_representative_emitter_stage",
       "evidence": {
-        "highest_verified_layer": "activation_and_public_contract",
-        "delivery_state": "requires_vertical_revalidation",
+        "highest_verified_layer": "persistence_independent_readback",
+        "delivery_state": "representative_niagara_candidate_to_authoring_chain_and_stale_failure_verified",
         "evidence_refs": [
           "TROOT-UAI-32-INTEGRATED-ACTIVATION-AUTHORITY",
-          "TROOT-UAI-33-PUBLIC-CONTRACT-ORACLE-REALIGNMENT"
+          "TROOT-UAI-33-PUBLIC-CONTRACT-ORACLE-REALIGNMENT",
+          "TROOT-UAI-39-NIAGARA-PCG-AI-VERTICAL",
+          "runtimeLogs/delivery_workflow/TROOT-UAI-39-NIAGARA-PCG-AI-VERTICAL/20260821-contract/receipts/t39-niagara-candidate-binding.json",
+          "runtimeLogs/delivery_workflow/TROOT-UAI-39-NIAGARA-PCG-AI-VERTICAL/20260821-product-r4/niagara-emitter-jitter-candidates-r2.json",
+          "runtimeLogs/delivery_workflow/TROOT-UAI-39-NIAGARA-PCG-AI-VERTICAL/20260821-product-r4/niagara-emitter-candidate-apply-r2.json",
+          "runtimeLogs/delivery_workflow/TROOT-UAI-39-NIAGARA-PCG-AI-VERTICAL/20260821-product-r4/niagara-emitter-stale-candidate-negative.json"
         ],
         "not_proven": [
-          "real UE mechanics for every command",
-          "required persistence and independent readback",
-          "public SDK execution for every object/surface/operation",
-          "failure cleanup and content quality"
+          "candidate availability and binding across every Niagara stage usage and root kind",
+          "exhaustive module input and placement variants"
         ]
       },
       "historical_obligation_count": 0,
       "legacy_candidate_task_ids": [
         "T18-NIAGARA-DOMAIN"
       ],
-      "next_task_id": "TROOT-UAI-35-DISCOVERY-IDENTITY-VERTICAL",
+      "next_task_id": "TROOT-UAI-45-PUBLIC-DISTRIBUTION-PARITY",
       "blockers": []
     },
     {
@@ -2249,7 +2301,7 @@
         "T10-OPERATION-LIFECYCLE-CORE",
         "T32-LONG-RUNNING"
       ],
-      "next_task_id": "TROOT-UAI-43-EDITOR-IMPORT-LIFECYCLE-VERTICAL",
+      "next_task_id": "TROOT-UAI-45-PUBLIC-DISTRIBUTION-PARITY",
       "blockers": []
     },
     {
@@ -2276,12 +2328,14 @@
         "pcg.data_asset.apply",
         "pcg.data_asset.create_from_level",
         "pcg.generated_spatial_data.read",
+        "pcg.graph.asset.create",
         "pcg.graph.apply",
         "pcg.graph_instance.apply",
         "pcg.graph_parameters.apply",
         "pcg.partition.spatial_state.read"
       ],
       "focus_command_ids": [
+        "pcg.graph.asset.create",
         "pcg.graph.apply",
         "pcg.component.apply",
         "pcg.generated_spatial_data.read"
@@ -2312,19 +2366,23 @@
         "cleanup"
       ],
       "command_contract_state": "registered_exact_contract",
-      "implementation_state": "registered_mechanics_candidate",
+      "implementation_state": "pcg_graph_hjson_root_and_representative_candidate_node_product_verified_other_exact_commands_pending",
       "evidence": {
-        "highest_verified_layer": "activation_and_public_contract",
-        "delivery_state": "requires_vertical_revalidation",
+        "highest_verified_layer": "persistence_independent_readback",
+        "delivery_state": "representative_pcg_graph_create_edit_and_failure_vertical_verified",
         "evidence_refs": [
           "TROOT-UAI-32-INTEGRATED-ACTIVATION-AUTHORITY",
-          "TROOT-UAI-33-PUBLIC-CONTRACT-ORACLE-REALIGNMENT"
+          "TROOT-UAI-33-PUBLIC-CONTRACT-ORACLE-REALIGNMENT",
+          "TROOT-UAI-39-NIAGARA-PCG-AI-VERTICAL",
+          "runtimeLogs/delivery_workflow/TROOT-UAI-39-NIAGARA-PCG-AI-VERTICAL/20260821-contract/receipts/t39-niagara-pcg-ai-contract-r2.json",
+          "runtimeLogs/delivery_workflow/TROOT-UAI-39-NIAGARA-PCG-AI-VERTICAL/20260821-product-r4/pcg-root-create.json",
+          "runtimeLogs/delivery_workflow/TROOT-UAI-39-NIAGARA-PCG-AI-VERTICAL/20260821-product-r4/pcg-independent-summary-after-node.json",
+          "runtimeLogs/delivery_workflow/TROOT-UAI-39-NIAGARA-PCG-AI-VERTICAL/20260821-product-r4/pcg-independent-summary-after-negatives.json"
         ],
         "not_proven": [
-          "real UE mechanics for every command",
-          "required persistence and independent readback",
-          "public SDK execution for every object/surface/operation",
-          "failure cleanup and content quality"
+          "PCG component data asset graph instance partition and generated-spatial-data product execution",
+          "direct public SDK product execution of every standalone PCG exact command outside the unified HJSON ingress",
+          "real generated-world content quality acceptance"
         ]
       },
       "historical_obligation_count": 38,
@@ -2332,7 +2390,7 @@
         "T19-PCG-DOMAIN",
         "T52-PCG-COMMAND-MIGRATION"
       ],
-      "next_task_id": "TROOT-UAI-39-NIAGARA-PCG-AI-VERTICAL",
+      "next_task_id": "TROOT-UAI-45-PUBLIC-DISTRIBUTION-PARITY",
       "blockers": []
     },
     {
@@ -2373,26 +2431,28 @@
         "persisted PCG graph"
       ],
       "command_contract_state": "registered_exact_contract",
-      "implementation_state": "registered_mechanics_candidate",
+      "implementation_state": "pcg_settings_candidate_bound_unchanged_through_hjson_and_product_verified",
       "evidence": {
-        "highest_verified_layer": "activation_and_public_contract",
-        "delivery_state": "requires_vertical_revalidation",
+        "highest_verified_layer": "persistence_independent_readback",
+        "delivery_state": "representative_pcg_candidate_to_authoring_chain_and_stale_failure_verified",
         "evidence_refs": [
           "TROOT-UAI-32-INTEGRATED-ACTIVATION-AUTHORITY",
-          "TROOT-UAI-33-PUBLIC-CONTRACT-ORACLE-REALIGNMENT"
+          "TROOT-UAI-33-PUBLIC-CONTRACT-ORACLE-REALIGNMENT",
+          "TROOT-UAI-39-NIAGARA-PCG-AI-VERTICAL",
+          "runtimeLogs/delivery_workflow/TROOT-UAI-39-NIAGARA-PCG-AI-VERTICAL/20260821-product-r4/pcg-node-candidates.json",
+          "runtimeLogs/delivery_workflow/TROOT-UAI-39-NIAGARA-PCG-AI-VERTICAL/20260821-product-r4/pcg-node-create-from-candidate.json",
+          "runtimeLogs/delivery_workflow/TROOT-UAI-39-NIAGARA-PCG-AI-VERTICAL/20260821-product-r4/pcg-stale-candidate-negative.json"
         ],
         "not_proven": [
-          "real UE mechanics for every command",
-          "required persistence and independent readback",
-          "public SDK execution for every object/surface/operation",
-          "failure cleanup and content quality"
+          "candidate availability and binding for every concrete PCG settings class",
+          "all graph-state and plugin-configuration variants"
         ]
       },
       "historical_obligation_count": 0,
       "legacy_candidate_task_ids": [
         "T19-PCG-DOMAIN"
       ],
-      "next_task_id": "TROOT-UAI-35-DISCOVERY-IDENTITY-VERTICAL",
+      "next_task_id": "TROOT-UAI-45-PUBLIC-DISTRIBUTION-PARITY",
       "blockers": []
     },
     {
@@ -2477,7 +2537,7 @@
       "legacy_candidate_task_ids": [
         "T42-PHYSICS-DEFORMER-OPERATION"
       ],
-      "next_task_id": "TROOT-UAI-41-MODELING-WHITEBOX-PHYSICS-VERTICAL",
+      "next_task_id": "TROOT-UAI-45-PUBLIC-DISTRIBUTION-PARITY",
       "blockers": []
     },
     {
@@ -2563,26 +2623,25 @@
         "persisted state"
       ],
       "command_contract_state": "registered_exact_contract",
-      "implementation_state": "registered_mechanics_candidate",
+      "implementation_state": "current_query_owner_with_representative_identity_vertical",
       "evidence": {
-        "highest_verified_layer": "activation_and_public_contract",
-        "delivery_state": "requires_vertical_revalidation",
+        "highest_verified_layer": "public_sdk_real_ue_representative_vertical",
+        "delivery_state": "asset_actor_component_identity_readback_verified",
         "evidence_refs": [
           "TROOT-UAI-32-INTEGRATED-ACTIVATION-AUTHORITY",
-          "TROOT-UAI-33-PUBLIC-CONTRACT-ORACLE-REALIGNMENT"
+          "TROOT-UAI-33-PUBLIC-CONTRACT-ORACLE-REALIGNMENT",
+          "TROOT-UAI-35-DISCOVERY-IDENTITY-VERTICAL",
+          "runtimeLogs/uai-development/TROOT-UAI-35-DISCOVERY-IDENTITY-VERTICAL/20260820-r3/public_sdk_product/receipt.json"
         ],
         "not_proven": [
-          "real UE mechanics for every command",
-          "required persistence and independent readback",
-          "public SDK execution for every object/surface/operation",
-          "failure cleanup and content quality"
+          "real UE mechanics and product readback for every command in this broad query unit"
         ]
       },
       "historical_obligation_count": 21,
       "legacy_candidate_task_ids": [
         "T06-NON-HJSON-QUERY-MIGRATION"
       ],
-      "next_task_id": "TROOT-UAI-35-DISCOVERY-IDENTITY-VERTICAL",
+      "next_task_id": "TROOT-UAI-45-PUBLIC-DISTRIBUTION-PARITY",
       "blockers": []
     },
     {
@@ -2645,7 +2704,7 @@
       "legacy_candidate_task_ids": [
         "T43-REFERENCE-OPERATION"
       ],
-      "next_task_id": "TROOT-UAI-35-DISCOVERY-IDENTITY-VERTICAL",
+      "next_task_id": "TROOT-UAI-45-PUBLIC-DISTRIBUTION-PARITY",
       "blockers": []
     },
     {
@@ -2661,7 +2720,8 @@
         "UDES-UAI-ROOT-19",
         "DES-UAI-ROOT-INTEGRATED-CAPABILITY-ARCHITECTURE",
         "DES-UAI-PRODUCTION-EVIDENCE",
-        "SOL-UAI-ROOT-08-INTEGRATED-AUTHORITY-RESTORATION"
+        "SOL-UAI-ROOT-08-INTEGRATED-AUTHORITY-RESTORATION",
+        "SOL-UAI-ROOT-14-ANIMATION-RIG-AUDIO-VERTICAL"
       ],
       "activation_contribution_ids": [
         "rig-spatial-command-migration"
@@ -2708,26 +2768,27 @@
         "cleanup"
       ],
       "command_contract_state": "registered_exact_contract",
-      "implementation_state": "registered_mechanics_candidate",
+      "implementation_state": "ik_probe_production_lifecycle_verified_remaining_rig_spatial_exact_commands_pending",
       "evidence": {
-        "highest_verified_layer": "activation_and_public_contract",
-        "delivery_state": "requires_vertical_revalidation",
+        "highest_verified_layer": "persistence_independent_readback",
+        "delivery_state": "animation_ik_probe_candidate_apply_verified_other_rig_spatial_commands_require_product_revalidation",
         "evidence_refs": [
           "TROOT-UAI-32-INTEGRATED-ACTIVATION-AUTHORITY",
-          "TROOT-UAI-33-PUBLIC-CONTRACT-ORACLE-REALIGNMENT"
+          "TROOT-UAI-33-PUBLIC-CONTRACT-ORACLE-REALIGNMENT",
+          "TROOT-UAI-40-ANIMATION-RIG-AUDIO-VERTICAL",
+          "runtimeLogs/delivery_workflow/TROOT-UAI-40-ANIMATION-RIG-AUDIO-VERTICAL/20260821-product/automation/t40-animation-rig-audio-complete-v6.receipt.json"
         ],
         "not_proven": [
-          "real UE mechanics for every command",
-          "required persistence and independent readback",
-          "public SDK execution for every object/surface/operation",
-          "failure cleanup and content quality"
+          "public SDK product execution of the remaining rig control, retarget, skeleton and subject exact commands",
+          "required persistence and independent readback for every remaining object, surface and operation",
+          "exhaustive spatial variants, failure cleanup and real-content quality"
         ]
       },
       "historical_obligation_count": 7,
       "legacy_candidate_task_ids": [
         "T58-RIG-SPATIAL-COMMAND-MIGRATION"
       ],
-      "next_task_id": "TROOT-UAI-40-ANIMATION-RIG-AUDIO-VERTICAL",
+      "next_task_id": "TROOT-UAI-45-PUBLIC-DISTRIBUTION-PARITY",
       "blockers": []
     },
     {
@@ -2788,7 +2849,7 @@
       "legacy_candidate_task_ids": [
         "T29-EXTERNAL-SKIN-WEIGHT-IMPORT"
       ],
-      "next_task_id": "TROOT-UAI-43-EDITOR-IMPORT-LIFECYCLE-VERTICAL",
+      "next_task_id": "TROOT-UAI-45-PUBLIC-DISTRIBUTION-PARITY",
       "blockers": []
     },
     {
@@ -2862,7 +2923,7 @@
       "legacy_candidate_task_ids": [
         "T46-SPATIAL-CONTENT-OPERATION"
       ],
-      "next_task_id": "TROOT-UAI-42-WORLD-VIEWPORT-SPATIAL-VERTICAL",
+      "next_task_id": "TROOT-UAI-45-PUBLIC-DISTRIBUTION-PARITY",
       "blockers": []
     },
     {
@@ -2936,12 +2997,12 @@
       "legacy_candidate_task_ids": [
         "T40-TEXTURE-GRAPH-OPERATION"
       ],
-      "next_task_id": "TROOT-UAI-38-ASSET-MATERIAL-TEXTURE-MEDIA-VERTICAL",
+      "next_task_id": "TROOT-UAI-45-PUBLIC-DISTRIBUTION-PARITY",
       "blockers": []
     },
     {
       "id": "CU-TIMELINE-SEQUENCE",
-      "title": "Level Sequence and widget animation authoring",
+      "title": "Level Sequence authoring and WidgetAnimation readback",
       "source_ids": [
         "REQ-UAI-ROOT-01",
         "REQ-UAI-ROOT-02",
@@ -2952,7 +3013,8 @@
         "UDES-UAI-ROOT-19",
         "DES-UAI-ROOT-INTEGRATED-CAPABILITY-ARCHITECTURE",
         "DES-UAI-PRODUCTION-EVIDENCE",
-        "SOL-UAI-ROOT-08-INTEGRATED-AUTHORITY-RESTORATION"
+        "SOL-UAI-ROOT-08-INTEGRATED-AUTHORITY-RESTORATION",
+        "SOL-UAI-ROOT-14-ANIMATION-RIG-AUDIO-VERTICAL"
       ],
       "activation_contribution_ids": [
         "timeline-sequence-command-migration"
@@ -2987,19 +3049,21 @@
         "cleanup"
       ],
       "command_contract_state": "registered_exact_contract",
-      "implementation_state": "registered_mechanics_candidate",
+      "implementation_state": "level_sequence_hjson_product_and_all_timeline_native_lifecycles_verified_widget_read_only",
       "evidence": {
-        "highest_verified_layer": "activation_and_public_contract",
-        "delivery_state": "requires_vertical_revalidation",
+        "highest_verified_layer": "persistence_independent_readback",
+        "delivery_state": "level_sequence_create_read_replace_and_widget_read_native_lifecycles_verified",
         "evidence_refs": [
           "TROOT-UAI-32-INTEGRATED-ACTIVATION-AUTHORITY",
-          "TROOT-UAI-33-PUBLIC-CONTRACT-ORACLE-REALIGNMENT"
+          "TROOT-UAI-33-PUBLIC-CONTRACT-ORACLE-REALIGNMENT",
+          "TROOT-UAI-40-ANIMATION-RIG-AUDIO-VERTICAL",
+          "runtimeLogs/delivery_workflow/TROOT-UAI-40-ANIMATION-RIG-AUDIO-VERTICAL/20260821-product/automation/t40-animation-rig-audio-complete-v6.receipt.json",
+          "runtimeLogs/delivery_workflow/TROOT-UAI-40-ANIMATION-RIG-AUDIO-VERTICAL/20260821-product/cleanup-level-sequence-apply.result.json"
         ],
         "not_proven": [
-          "real UE mechanics for every command",
-          "required persistence and independent readback",
-          "public SDK execution for every object/surface/operation",
-          "failure cleanup and content quality"
+          "direct public SDK product execution of every standalone timeline exact command beyond the representative HJSON chain",
+          "WidgetAnimation authoring, which is not part of the current read-only public contract",
+          "exhaustive track, section, binding and real-content quality variants"
         ]
       },
       "historical_obligation_count": 8,
@@ -3007,7 +3071,7 @@
         "T22-SEQUENCE-DOMAIN",
         "T55-TIMELINE-SEQUENCE-COMMAND-MIGRATION"
       ],
-      "next_task_id": "TROOT-UAI-42-WORLD-VIEWPORT-SPATIAL-VERTICAL",
+      "next_task_id": "TROOT-UAI-45-PUBLIC-DISTRIBUTION-PARITY",
       "blockers": []
     },
     {
@@ -3054,19 +3118,20 @@
         "cleanup"
       ],
       "command_contract_state": "registered_exact_contract",
-      "implementation_state": "registered_mechanics_candidate",
+      "implementation_state": "umg_hjson_widget_tree_and_layout_product_verified_event_discovery_pending",
       "evidence": {
-        "highest_verified_layer": "activation_and_public_contract",
-        "delivery_state": "requires_vertical_revalidation",
+        "highest_verified_layer": "public_sdk_real_ue_vertical",
+        "delivery_state": "representative_umg_hjson_and_layout_verified_exact_command_matrix_pending",
         "evidence_refs": [
           "TROOT-UAI-32-INTEGRATED-ACTIVATION-AUTHORITY",
-          "TROOT-UAI-33-PUBLIC-CONTRACT-ORACLE-REALIGNMENT"
+          "TROOT-UAI-33-PUBLIC-CONTRACT-ORACLE-REALIGNMENT",
+          "TROOT-UAI-37-BLUEPRINT-UMG-GRAPH-VERTICAL",
+          "runtimeLogs/uai-development/TROOT-UAI-37-BLUEPRINT-UMG-GRAPH-VERTICAL/20260821-r11/automation/report/index.json",
+          "runtimeLogs/uai-development/TROOT-UAI-37-BLUEPRINT-UMG-GRAPH-VERTICAL/20260821-r9/public_sdk_product/receipt.json"
         ],
         "not_proven": [
-          "real UE mechanics for every command",
-          "required persistence and independent readback",
-          "public SDK execution for every object/surface/operation",
-          "failure cleanup and content quality"
+          "public product execution of umg.widget.events.discover",
+          "every Widget class, slot contract, animation, and binding surface"
         ]
       },
       "historical_obligation_count": 7,
@@ -3074,12 +3139,12 @@
         "T15-UMG-WIDGET-DOMAIN",
         "T48-UMG-COMMAND-MIGRATION"
       ],
-      "next_task_id": "TROOT-UAI-37-BLUEPRINT-UMG-GRAPH-VERTICAL",
+      "next_task_id": "TROOT-UAI-45-PUBLIC-DISTRIBUTION-PARITY",
       "blockers": []
     },
     {
       "id": "CU-UNIFIED-CONTENT-DISCOVERY",
-      "title": "Unified content, actor, component and creation-candidate discovery",
+      "title": "Unified existing-content discovery and domain candidate routing",
       "source_ids": [
         "REQ-UAI-ROOT-01",
         "REQ-UAI-ROOT-02",
@@ -3093,9 +3158,15 @@
         "SOL-UAI-ROOT-08-INTEGRATED-AUTHORITY-RESTORATION",
         "REQ-UAI-ROOT-05"
       ],
-      "activation_contribution_ids": [],
-      "current_command_ids": [],
-      "focus_command_ids": [],
+      "activation_contribution_ids": [
+        "unified-content-search"
+      ],
+      "current_command_ids": [
+        "query.content.search"
+      ],
+      "focus_command_ids": [
+        "query.content.search"
+      ],
       "object_types": [
         "content",
         "actor",
@@ -3115,27 +3186,28 @@
         "request",
         "downstream use"
       ],
-      "command_contract_state": "required_capability_without_current_unified_contract",
-      "implementation_state": "partial_domain_queries_only",
+      "command_contract_state": "registered_exact_contract",
+      "implementation_state": "current_provider_based_existing_content_search",
       "evidence": {
-        "highest_verified_layer": "historical_requirement_and_partial_current_queries",
-        "delivery_state": "requires_contract_and_vertical_revalidation",
+        "highest_verified_layer": "public_sdk_real_ue_identity_vertical",
+        "delivery_state": "current_asset_actor_component_vertical_verified",
         "evidence_refs": [
-          "historical:T63-UNIFIED-CONTENT-SEARCH"
+          "historical:T63-UNIFIED-CONTENT-SEARCH",
+          "TROOT-UAI-35-DISCOVERY-IDENTITY-VERTICAL",
+          "runtimeLogs/uai-development/TROOT-UAI-35-DISCOVERY-IDENTITY-VERTICAL/20260820-r3/owned_automation/receipts/t35_owned_automation.json",
+          "runtimeLogs/uai-development/TROOT-UAI-35-DISCOVERY-IDENTITY-VERTICAL/20260820-r3/public_sdk_product/receipt.json"
         ],
         "not_proven": [
-          "one current unified search contract",
-          "identity reuse through downstream authoring"
+          "future content providers beyond current Asset Registry and Editor World",
+          "a universal creation-candidate result shape, which is intentionally not claimed"
         ]
       },
       "historical_obligation_count": 3,
       "legacy_candidate_task_ids": [
         "T63-UNIFIED-CONTENT-SEARCH"
       ],
-      "next_task_id": "TROOT-UAI-35-DISCOVERY-IDENTITY-VERTICAL",
-      "blockers": [
-        "current unified contract is absent"
-      ]
+      "next_task_id": "TROOT-UAI-45-PUBLIC-DISTRIBUTION-PARITY",
+      "blockers": []
     },
     {
       "id": "CU-VIEWPORT-GRAPH",
@@ -3223,7 +3295,7 @@
       "legacy_candidate_task_ids": [
         "T45-VIEWPORT-GRAPH-CONTROL"
       ],
-      "next_task_id": "TROOT-UAI-42-WORLD-VIEWPORT-SPATIAL-VERTICAL",
+      "next_task_id": "TROOT-UAI-45-PUBLIC-DISTRIBUTION-PARITY",
       "blockers": []
     },
     {
@@ -3303,40 +3375,50 @@
         "T26-LEVEL-WORLD-DOMAIN",
         "T59-WORLD-COMMAND-MIGRATION"
       ],
-      "next_task_id": "TROOT-UAI-42-WORLD-VIEWPORT-SPATIAL-VERTICAL",
+      "next_task_id": "TROOT-UAI-45-PUBLIC-DISTRIBUTION-PARITY",
       "blockers": []
     }
   ],
   "retired_candidate_current_identities": [
     {
       "command_id": "animation_blueprint.authoring.apply",
+      "capability_unit_id": "CU-ANIMATION-BLUEPRINT-COMMANDS",
       "current_status": "absent_from_current_manifest",
-      "successor_status": "required_capability_contract_not_exact_successor",
-      "next_task_id": "TROOT-UAI-37-BLUEPRINT-UMG-GRAPH-VERTICAL"
+      "current_resolution_status": "required_capability_contract_recorded_no_exact_successor_claim",
+      "resolution_evidence_task_id": "TROOT-UAI-37-BLUEPRINT-UMG-GRAPH-VERTICAL",
+      "next_task_id": "TROOT-UAI-45-PUBLIC-DISTRIBUTION-PARITY"
     },
     {
       "command_id": "blueprint.authoring.apply",
+      "capability_unit_id": "CU-BLUEPRINT-COMMANDS",
       "current_status": "absent_from_current_manifest",
-      "successor_status": "required_capability_contract_not_exact_successor",
-      "next_task_id": "TROOT-UAI-37-BLUEPRINT-UMG-GRAPH-VERTICAL"
+      "current_resolution_status": "required_capability_contract_recorded_no_exact_successor_claim",
+      "resolution_evidence_task_id": "TROOT-UAI-37-BLUEPRINT-UMG-GRAPH-VERTICAL",
+      "next_task_id": "TROOT-UAI-45-PUBLIC-DISTRIBUTION-PARITY"
     },
     {
       "command_id": "niagara.script.graph.apply",
+      "capability_unit_id": "CU-NIAGARA-COMMANDS",
       "current_status": "absent_from_current_manifest",
-      "successor_status": "required_capability_contract_not_exact_successor",
-      "next_task_id": "TROOT-UAI-39-NIAGARA-PCG-AI-VERTICAL"
+      "current_resolution_status": "required_capability_contract_recorded_no_exact_successor_claim",
+      "resolution_evidence_task_id": "TROOT-UAI-39-NIAGARA-PCG-AI-VERTICAL",
+      "next_task_id": "TROOT-UAI-45-PUBLIC-DISTRIBUTION-PARITY"
     },
     {
       "command_id": "niagara.stack.apply",
+      "capability_unit_id": "CU-NIAGARA-COMMANDS",
       "current_status": "absent_from_current_manifest",
-      "successor_status": "required_capability_contract_not_exact_successor",
-      "next_task_id": "TROOT-UAI-39-NIAGARA-PCG-AI-VERTICAL"
+      "current_resolution_status": "required_capability_contract_recorded_no_exact_successor_claim",
+      "resolution_evidence_task_id": "TROOT-UAI-39-NIAGARA-PCG-AI-VERTICAL",
+      "next_task_id": "TROOT-UAI-45-PUBLIC-DISTRIBUTION-PARITY"
     },
     {
       "command_id": "umg.authoring.apply",
+      "capability_unit_id": "CU-UMG-COMMANDS",
       "current_status": "absent_from_current_manifest",
-      "successor_status": "required_capability_contract_not_exact_successor",
-      "next_task_id": "TROOT-UAI-37-BLUEPRINT-UMG-GRAPH-VERTICAL"
+      "current_resolution_status": "required_capability_contract_recorded_no_exact_successor_claim",
+      "resolution_evidence_task_id": "TROOT-UAI-37-BLUEPRINT-UMG-GRAPH-VERTICAL",
+      "next_task_id": "TROOT-UAI-45-PUBLIC-DISTRIBUTION-PARITY"
     }
   ],
   "recovered_historical_identities": [
@@ -3352,9 +3434,16 @@
         "retired/strict_v2/docs/commands/_legacy_big_docs/active/10_Modeling.md"
       ],
       "current_exact_ingress_status": "absent_from_current_manifest",
-      "compiled_legacy_guard_status": "explicitly_retired",
-      "physical_exit_status": "implementation_removed_but_capability_not_replaced",
-      "next_task_id": "TROOT-UAI-41-MODELING-WHITEBOX-PHYSICS-VERTICAL"
+      "current_resolution_status": "required_capability_contract_recorded",
+      "current_capability_ids": [
+        "mesh.voxel_grid.apply",
+        "mesh.voxel_grid.session"
+      ],
+      "successor_equivalence": "non_exact",
+      "current_capability_evidence_status": "public_sdk_product_verified",
+      "legacy_compiled_surface_status": "historical_identity_absent_from_current_compiled_registry",
+      "resolution_evidence_task_id": "TROOT-UAI-41-MODELING-WHITEBOX-PHYSICS-VERTICAL",
+      "next_task_id": "TROOT-UAI-45-PUBLIC-DISTRIBUTION-PARITY"
     },
     {
       "historical_command_id": "modeling_voxel_grid_apply",
@@ -3368,9 +3457,16 @@
         "retired/strict_v2/docs/commands/_legacy_big_docs/active/10_Modeling.md"
       ],
       "current_exact_ingress_status": "absent_from_current_manifest",
-      "compiled_legacy_guard_status": "explicitly_retired",
-      "physical_exit_status": "implementation_removed_but_capability_not_replaced",
-      "next_task_id": "TROOT-UAI-41-MODELING-WHITEBOX-PHYSICS-VERTICAL"
+      "current_resolution_status": "required_capability_contract_recorded",
+      "current_capability_ids": [
+        "mesh.voxel_grid.apply",
+        "mesh.voxel_grid.session"
+      ],
+      "successor_equivalence": "non_exact",
+      "current_capability_evidence_status": "public_sdk_product_verified",
+      "legacy_compiled_surface_status": "historical_identity_absent_from_current_compiled_registry",
+      "resolution_evidence_task_id": "TROOT-UAI-41-MODELING-WHITEBOX-PHYSICS-VERTICAL",
+      "next_task_id": "TROOT-UAI-45-PUBLIC-DISTRIBUTION-PARITY"
     },
     {
       "historical_command_id": "modeling_voxel_grid_begin",
@@ -3384,9 +3480,16 @@
         "retired/strict_v2/docs/commands/_legacy_big_docs/active/10_Modeling.md"
       ],
       "current_exact_ingress_status": "absent_from_current_manifest",
-      "compiled_legacy_guard_status": "explicitly_retired",
-      "physical_exit_status": "implementation_removed_but_capability_not_replaced",
-      "next_task_id": "TROOT-UAI-41-MODELING-WHITEBOX-PHYSICS-VERTICAL"
+      "current_resolution_status": "required_capability_contract_recorded",
+      "current_capability_ids": [
+        "mesh.voxel_grid.apply",
+        "mesh.voxel_grid.session"
+      ],
+      "successor_equivalence": "non_exact",
+      "current_capability_evidence_status": "public_sdk_product_verified",
+      "legacy_compiled_surface_status": "historical_identity_absent_from_current_compiled_registry",
+      "resolution_evidence_task_id": "TROOT-UAI-41-MODELING-WHITEBOX-PHYSICS-VERTICAL",
+      "next_task_id": "TROOT-UAI-45-PUBLIC-DISTRIBUTION-PARITY"
     },
     {
       "historical_command_id": "modeling_voxel_grid_remove_bounds",
@@ -3400,9 +3503,16 @@
         "retired/strict_v2/docs/commands/_legacy_big_docs/active/10_Modeling.md"
       ],
       "current_exact_ingress_status": "absent_from_current_manifest",
-      "compiled_legacy_guard_status": "explicitly_retired",
-      "physical_exit_status": "implementation_removed_but_capability_not_replaced",
-      "next_task_id": "TROOT-UAI-41-MODELING-WHITEBOX-PHYSICS-VERTICAL"
+      "current_resolution_status": "required_capability_contract_recorded",
+      "current_capability_ids": [
+        "mesh.voxel_grid.apply",
+        "mesh.voxel_grid.session"
+      ],
+      "successor_equivalence": "non_exact",
+      "current_capability_evidence_status": "public_sdk_product_verified",
+      "legacy_compiled_surface_status": "historical_identity_absent_from_current_compiled_registry",
+      "resolution_evidence_task_id": "TROOT-UAI-41-MODELING-WHITEBOX-PHYSICS-VERTICAL",
+      "next_task_id": "TROOT-UAI-45-PUBLIC-DISTRIBUTION-PARITY"
     }
   ],
   "delivery_tasks": [
@@ -3455,6 +3565,16 @@
       "id": "TROOT-UAI-44-LEGACY-SURFACE-EXIT",
       "lane": "legacy_exit",
       "catalog_role": "vertical implementation and current evidence consumer"
+    },
+    {
+      "id": "TROOT-UAI-45-PUBLIC-DISTRIBUTION-PARITY",
+      "lane": "distribution",
+      "catalog_role": "cross-repository distribution evidence consumer"
+    },
+    {
+      "id": "TROOT-UAI-46-REAL-CONTENT-ACCEPTANCE",
+      "lane": "acceptance",
+      "catalog_role": "real-content quality and final coverage evidence consumer"
     }
   ]
 }

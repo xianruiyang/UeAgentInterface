@@ -574,6 +574,7 @@ bool FUeAgentInterfaceModule::StartServerInternal()
 		+ FGuid::NewGuid().ToString(EGuidFormats::DigitsWithHyphensLower);
 	AdapterConfig.Method = TEXT("POST");
 	AdapterConfig.RoutePath = GetUaiHttpCommandRoutePath();
+	AdapterConfig.ProbeRoutePath = GetUaiHttpProbeRoutePath();
 	AdapterConfig.AuthHeader = TEXT("X-UeAgentInterface-Token");
 	AdapterConfig.AuthToken = Settings->AuthToken;
 	AdapterConfig.Channel = TEXT("uai.command.v1");
@@ -627,8 +628,9 @@ bool FUeAgentInterfaceModule::StartServerInternal()
 	TransportService = MoveTemp(NewTransportService);
 
 	FUeAgentInterfaceLogger::Log(
-		TEXT("StartServerInternal: ok=true command_route=%s instance=%s registry=%s"),
+		TEXT("StartServerInternal: ok=true command_route=%s probe_route=%s instance=%s registry=%s"),
 		*GetUaiHttpCommandRoutePath(),
+		*GetUaiHttpProbeRoutePath(),
 		*TransportService->GetIdentity().InstanceId,
 		*ActiveRegistry->GetRegistryHash());
 	return true;

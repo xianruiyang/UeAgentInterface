@@ -252,6 +252,26 @@ namespace
 	}
 }
 
+bool TryCanonicalizeNiagaraTargetUsage(
+	const FString& Value,
+	FString& OutCanonicalUsage)
+{
+	OutCanonicalUsage.Reset();
+	ENiagaraScriptUsage Usage = ENiagaraScriptUsage::Module;
+	if (!ParseNiagaraTargetUsage(Value, Usage))
+	{
+		return false;
+	}
+	const UEnum* const UsageEnum = StaticEnum<ENiagaraScriptUsage>();
+	if (!UsageEnum)
+	{
+		return false;
+	}
+	OutCanonicalUsage = UsageEnum->GetNameStringByValue(
+		static_cast<int64>(Usage));
+	return !OutCanonicalUsage.IsEmpty();
+}
+
 bool CollectNiagaraCandidates(const FSearchParams& Params, TArray<FCandidate>& OutCandidates, TArray<FString>& OutWarnings, FString& OutError)
 {
 	if (IsNiagaraInputValueSourceCatalog(Params.CatalogType))

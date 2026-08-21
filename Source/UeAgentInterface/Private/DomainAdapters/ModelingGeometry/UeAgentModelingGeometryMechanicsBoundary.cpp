@@ -1,6 +1,8 @@
 #include "DomainAdapters/ModelingGeometry/UeAgentModelingGeometryMechanicsBoundary.h"
 
-#include "Server/UeAgentHttpServer.h"
+#include "DomainAdapters/ModelingGeometry/UeAgentModelingVoxelGrid.h"
+
+#include "LegacyMechanics/UeAgentLegacyMechanics.h"
 
 namespace UE::UAI::DomainAdapters::ModelingGeometry
 {
@@ -43,7 +45,7 @@ namespace UE::UAI::DomainAdapters::ModelingGeometry
 			}
 
 		private:
-			FUeAgentHttpServer Mechanics;
+			FUeAgentLegacyMechanics Mechanics;
 		};
 	}
 
@@ -51,6 +53,8 @@ namespace UE::UAI::DomainAdapters::ModelingGeometry
 	{
 		static const TArray<FString> Ids = {
 			TEXT("mesh.modeling_session"),
+			VoxelGrid::GetSessionCommandId(),
+			VoxelGrid::GetApplyCommandId(),
 			TEXT("mesh.attribute.material_slot.add"), TEXT("mesh.attribute.material_slot.assign"),
 			TEXT("mesh.attribute.normals.recompute"), TEXT("mesh.attribute.uv.auto"),
 			TEXT("mesh.attribute.uv.project"), TEXT("mesh.collision.convex.generate"),

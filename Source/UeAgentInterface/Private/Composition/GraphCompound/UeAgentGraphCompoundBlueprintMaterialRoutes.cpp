@@ -182,8 +182,9 @@ namespace UE::UAI::Composition::GraphCompound
 			case EGraphCompoundTypedInputKind::BlueprintAssetCreate:
 				return CanonicalSchema(TEXT("{\"additionalProperties\":false,\"properties\":{\"asset_name\":{\"minLength\":1,\"type\":\"string\"},\"package_path\":{\"minLength\":1,\"type\":\"string\"},\"parent_class_ref\":{\"minLength\":1,\"type\":\"string\"}},\"required\":[\"asset_name\",\"package_path\",\"parent_class_ref\"],\"type\":\"object\"}"));
 			case EGraphCompoundTypedInputKind::UmgAssetCreate:
-			case EGraphCompoundTypedInputKind::MaterialAssetCreate:
 				return CanonicalSchema(TEXT("{\"additionalProperties\":false,\"properties\":{\"asset_name\":{\"minLength\":1,\"type\":\"string\"},\"package_path\":{\"minLength\":1,\"type\":\"string\"}},\"required\":[\"asset_name\",\"package_path\"],\"type\":\"object\"}"));
+			case EGraphCompoundTypedInputKind::MaterialAssetCreate:
+				return CanonicalSchema(TEXT("{\"additionalProperties\":false,\"properties\":{\"asset_name\":{\"minLength\":1,\"type\":\"string\"},\"material_kind\":{\"enum\":[\"material\",\"material_function\"],\"type\":\"string\"},\"package_path\":{\"minLength\":1,\"type\":\"string\"}},\"required\":[\"asset_name\",\"package_path\"],\"type\":\"object\"}"));
 			case EGraphCompoundTypedInputKind::MaterialInstanceAssetCreate:
 				return CanonicalSchema(TEXT("{\"additionalProperties\":false,\"properties\":{\"asset_name\":{\"minLength\":1,\"type\":\"string\"},\"package_path\":{\"minLength\":1,\"type\":\"string\"},\"parent_material_ref\":{\"minLength\":1,\"type\":\"string\"}},\"required\":[\"asset_name\",\"package_path\",\"parent_material_ref\"],\"type\":\"object\"}"));
 			case EGraphCompoundTypedInputKind::NiagaraEmitterAssetCreate:
@@ -925,6 +926,7 @@ namespace UE::UAI::Composition::GraphCompound
 		FString InAssetName,
 		FString InPackagePath,
 		FString InTargetRef,
+		FString InMaterialKind,
 		FString InParentClassRef,
 		FString InParentMaterialRef,
 		FString InSourceRef)
@@ -932,12 +934,13 @@ namespace UE::UAI::Composition::GraphCompound
 		, AssetName(MoveTemp(InAssetName))
 		, PackagePath(MoveTemp(InPackagePath))
 		, TargetRef(MoveTemp(InTargetRef))
+		, MaterialKind(MoveTemp(InMaterialKind))
 		, ParentClassRef(MoveTemp(InParentClassRef))
 		, ParentMaterialRef(MoveTemp(InParentMaterialRef))
 		, SourceRef(MoveTemp(InSourceRef))
 	{
 		for (FString* Value : {
-			&AssetName, &PackagePath, &TargetRef, &ParentClassRef,
+			&AssetName, &PackagePath, &TargetRef, &MaterialKind, &ParentClassRef,
 			&ParentMaterialRef, &SourceRef})
 		{
 			Value->TrimStartAndEndInline();
@@ -950,9 +953,12 @@ namespace UE::UAI::Composition::GraphCompound
 			(InputKind == EGraphCompoundTypedInputKind::BlueprintAssetCreate
 				&& !ParentClassRef.IsEmpty()
 				&& ParentMaterialRef.IsEmpty() && SourceRef.IsEmpty())
-			|| ((InputKind == EGraphCompoundTypedInputKind::UmgAssetCreate
-					|| InputKind
-						== EGraphCompoundTypedInputKind::MaterialAssetCreate)
+			|| (((InputKind == EGraphCompoundTypedInputKind::UmgAssetCreate
+						&& MaterialKind.IsEmpty())
+					|| (InputKind
+							== EGraphCompoundTypedInputKind::MaterialAssetCreate
+						&& (MaterialKind == TEXT("material")
+							|| MaterialKind == TEXT("material_function"))))
 				&& ParentClassRef.IsEmpty()
 				&& ParentMaterialRef.IsEmpty() && SourceRef.IsEmpty())
 			|| (InputKind
@@ -991,6 +997,11 @@ namespace UE::UAI::Composition::GraphCompound
 	const FString& FGraphCompoundAssetCreateRequest::GetTargetRef() const
 	{
 		return TargetRef;
+	}
+
+	const FString& FGraphCompoundAssetCreateRequest::GetMaterialKind() const
+	{
+		return MaterialKind;
 	}
 
 	const FString&
@@ -1075,6 +1086,11 @@ namespace UE::UAI::Composition::GraphCompound
 				? FPackageName::GetLongPackagePath(TargetRef)
 				: Object->GetStringField(TEXT("package_path")),
 			TargetRef,
+			InputKind == EGraphCompoundTypedInputKind::MaterialAssetCreate
+				? (Object->HasField(TEXT("material_kind"))
+					? Object->GetStringField(TEXT("material_kind"))
+					: FString(TEXT("material")))
+				: FString(),
 			OptionalString(TEXT("parent_class_ref")),
 			OptionalString(TEXT("parent_material_ref")),
 			OptionalString(TEXT("source_ref")));
@@ -1395,6 +1411,15 @@ namespace UE::UAI::Composition::GraphCompound
 		{
 			const FString TargetRef = AssetTargetRef(*Object);
 			FString Definition = Profile.GetTargetKind();
+			if (Profile.GetTypedInputKind()
+				== EGraphCompoundTypedInputKind::MaterialAssetCreate)
+			{
+				Object->TryGetStringField(TEXT("material_kind"), Definition);
+				if (Definition.IsEmpty())
+				{
+					Definition = TEXT("material");
+				}
+			}
 			for (const TCHAR* Field : {
 				TEXT("parent_class_ref"), TEXT("parent_material_ref"),
 				TEXT("source_ref")})

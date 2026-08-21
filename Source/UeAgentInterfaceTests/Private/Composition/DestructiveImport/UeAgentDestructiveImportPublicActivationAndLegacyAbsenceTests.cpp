@@ -1,22 +1,16 @@
 #include "Misc/AutomationTest.h"
 
-#include "Composition/DestructiveImport/UeAgentDestructiveImportActivation.h"
 #include "Core/Contract/UeAgentContractJson.h"
 #include "Editor.h"
 #include "GameFramework/WorldSettings.h"
-#include "HAL/PlatformMisc.h"
-#include "Misc/CommandLine.h"
-#include "Misc/Parse.h"
 #include "Serialization/JsonSerializer.h"
 #include "Serialization/JsonWriter.h"
-#include "Server/UeAgentCommandRegistry.h"
 #include "TestSupport/UeAgentPublicCommandTestHarness.h"
 
 namespace
 {
 	using namespace UE::UAI::CommandContract;
 	using namespace UE::UAI::CommandEdge;
-	using namespace UE::UAI::Composition::DestructiveImport;
 	using namespace UE::UAI::Contract;
 	using namespace UE::UAI::NetworkTransport;
 	using namespace UE::UAI::Tests::PublicCommand;
@@ -25,6 +19,7 @@ namespace
 		TEXT("asset.delete"),
 		TEXT("asset.move"),
 		TEXT("asset.fixup_redirectors"),
+		TEXT("asset.object.clone"),
 		TEXT("asset.reimport_texture"),
 		TEXT("asset.reimport_sound_wave"),
 		TEXT("asset.reimport_static_mesh"),
@@ -89,35 +84,54 @@ namespace
 		return Text;
 	}
 
-	FString InvalidButWellTypedParams(const FUeAgentCommandContract& Contract)
+	FString ExpectedOwner(const FString& CommandId)
+	{
+		if (CommandId == TEXT("external.localization.po.import"))
+		{
+			return TEXT("localization-import-owner");
+		}
+		if (CommandId == TEXT("external.skin_weight_profile.import"))
+		{
+			return TEXT("skin-weight-import-owner");
+		}
+		if (CommandId.StartsWith(TEXT("external."))
+			|| CommandId.StartsWith(TEXT("asset.reimport_")))
+		{
+			return TEXT("factory-external-import-owner");
+		}
+		return TEXT("destructive-content-owner");
+	}
+
+	FString InvalidButWellTypedParams(
+		const FUeAgentFrozenCommandContract& Contract)
 	{
 		const TSharedRef<FJsonObject> Params = MakeShared<FJsonObject>();
-		for (const FUeAgentCommandParameter& Parameter : Contract.GetParameters())
+		for (const FUeAgentCommandFieldDeclaration& Field
+			: Contract.GetInputFields())
 		{
-			if (!Parameter.IsRequired()) continue;
-			switch (Parameter.GetWireType())
+			if (!Field.bRequired) continue;
+			if (Field.WireType == TEXT("boolean"))
 			{
-			case EUeAgentCommandWireType::Boolean:
-				Params->SetBoolField(Parameter.GetName(), false);
-				break;
-			case EUeAgentCommandWireType::Integer:
-			case EUeAgentCommandWireType::Number:
-				Params->SetNumberField(Parameter.GetName(), 0.0);
-				break;
-			case EUeAgentCommandWireType::String:
-				Params->SetStringField(Parameter.GetName(), TEXT("invalid"));
-				break;
-			case EUeAgentCommandWireType::Array:
-				Params->SetArrayField(Parameter.GetName(), {});
-				break;
-			case EUeAgentCommandWireType::Object:
-			case EUeAgentCommandWireType::Any:
+				Params->SetBoolField(Field.Name, false);
+			}
+			else if (Field.WireType == TEXT("integer")
+				|| Field.WireType == TEXT("number"))
+			{
+				Params->SetNumberField(Field.Name, 0.0);
+			}
+			else if (Field.WireType == TEXT("array"))
+			{
+				Params->SetArrayField(Field.Name, {});
+			}
+			else if (Field.WireType == TEXT("object")
+				|| Field.WireType == TEXT("any"))
+			{
 				Params->SetObjectField(
-					Parameter.GetName(), MakeShared<FJsonObject>());
-				break;
-			default:
-				checkNoEntry();
-				break;
+					Field.Name, MakeShared<FJsonObject>());
+			}
+			else
+			{
+				Params->SetStringField(Field.Name, TEXT("invalid"));
 			}
 		}
 		return Serialize(Params);
@@ -125,7 +139,7 @@ namespace
 
 	bool TryInvoke(
 		const FScopedPublicCommandComposition& Harness,
-		const FUeAgentCommandContract& Contract,
+		const FUeAgentFrozenCommandContract& Contract,
 		TOptional<FUeAgentCommandResult>& OutResult,
 		FString& OutError)
 	{
@@ -136,7 +150,7 @@ namespace
 			+ TEXT("-") + FGuid::NewGuid().ToString(EGuidFormats::Digits);
 		const FString CorrelationId = RequestId + TEXT("-correlation");
 		const FString Body =
-			TEXT("{\"command_binding_hash\":\"") + Contract.GetBindingHash()
+			TEXT("{\"command_binding_hash\":\"") + Contract.GetContractHash()
 			+ TEXT("\",\"command_id\":\"") + Contract.GetCommandId()
 			+ TEXT("\",\"correlation_id\":\"") + CorrelationId
 			+ TEXT("\",\"message_kind\":\"command_request\",\"params\":")
@@ -189,22 +203,10 @@ bool FUeAgentDestructiveImportPublicActivationAndLegacyAbsenceTest::RunTest(
 {
 	(void)Parameters;
 	TestEqual(TEXT("destructive/import canonical command count"),
-		CanonicalIds.Num(), 26);
+		CanonicalIds.Num(), 27);
 	TestEqual(TEXT("destructive/import retired legacy command count"),
 		LegacyIds.Num(), 26);
-	TSharedPtr<const FUeAgentCommandContractRegistry> Registry;
 	FString Error;
-	if (!TestTrue(TEXT("outer destructive/import registry is available"),
-			TryCreateDestructiveImportProductionCommandContractRegistry(
-				Registry, Error))
-		|| !Registry.IsValid())
-	{
-		AddError(Error);
-		return false;
-	}
-	TestEqual(TEXT("outer production registry contains 329 commands"),
-		Registry->GetContracts().Num(), 329);
-
 	AWorldSettings* const WorldSettings = GEditor
 		? GEditor->GetEditorWorldContext().World()->GetWorldSettings() : nullptr;
 	if (!TestNotNull(TEXT("editor world settings"), WorldSettings)) return false;
@@ -215,14 +217,29 @@ bool FUeAgentDestructiveImportPublicActivationAndLegacyAbsenceTest::RunTest(
 		AddError(Error);
 		return false;
 	}
+	const TSharedPtr<const UE::UAI::CommandRegistry::
+		FUeAgentImmutableCommandRegistry>& Registry =
+			Harness.GetCommandRegistry();
+	if (!TestTrue(TEXT("current immutable command registry is available"),
+			Registry.IsValid()))
+	{
+		return false;
+	}
 
 	TArray<FString> MissingOwners;
 	for (const FString& CommandId : CanonicalIds)
 	{
-		const FUeAgentCommandContract* const Contract = Registry->FindExact(CommandId);
+		const FUeAgentFrozenCommandContract* const Contract =
+			Registry->FindExact(CommandId);
 		if (!Contract)
 		{
 			MissingOwners.Add(CommandId + TEXT(":manifest"));
+			continue;
+		}
+		if (Contract->GetPublicOwner() != ExpectedOwner(CommandId))
+		{
+			MissingOwners.Add(CommandId + TEXT(":owner=")
+				+ Contract->GetPublicOwner());
 			continue;
 		}
 		TOptional<FUeAgentCommandResult> Result;
@@ -236,14 +253,36 @@ bool FUeAgentDestructiveImportPublicActivationAndLegacyAbsenceTest::RunTest(
 			MissingOwners.Add(CommandId + TEXT(":") + Result->GetErrorJson());
 			continue;
 		}
-		TSharedPtr<FJsonObject> Payload;
+		if (Result->IsOk())
+		{
+			TSharedPtr<FJsonObject> Payload;
+			const TSharedRef<TJsonReader<>> Reader =
+				TJsonReaderFactory<>::Create(Result->GetPayloadJson());
+			FString TerminalStatus;
+			FString AuthorizationId;
+			if (ExpectedOwner(CommandId) != TEXT("destructive-content-owner")
+				|| !FJsonSerializer::Deserialize(Reader, Payload)
+				|| !Payload.IsValid()
+				|| !Payload->TryGetStringField(
+					TEXT("terminal_status"), TerminalStatus)
+				|| TerminalStatus != TEXT("planned")
+				|| !Payload->TryGetStringField(
+					TEXT("destructive_authorization_id"), AuthorizationId)
+				|| AuthorizationId.IsEmpty())
+			{
+				MissingOwners.Add(CommandId + TEXT(":planning_semantics"));
+			}
+			continue;
+		}
+
+		TSharedPtr<FJsonObject> ErrorObject;
 		const TSharedRef<TJsonReader<>> Reader =
-			TJsonReaderFactory<>::Create(Result->GetPayloadJson());
-		if (Result->IsOk()
-			|| !FJsonSerializer::Deserialize(Reader, Payload)
-			|| !Payload.IsValid()
-			|| Payload->GetStringField(TEXT("terminal_state"))
-				!= TEXT("rolled_back"))
+			TJsonReaderFactory<>::Create(Result->GetErrorJson());
+		FString ErrorCode;
+		if (!FJsonSerializer::Deserialize(Reader, ErrorObject)
+			|| !ErrorObject.IsValid()
+			|| !ErrorObject->TryGetStringField(TEXT("code"), ErrorCode)
+			|| ErrorCode.IsEmpty())
 		{
 			MissingOwners.Add(CommandId + TEXT(":failure_semantics"));
 		}
@@ -251,41 +290,17 @@ bool FUeAgentDestructiveImportPublicActivationAndLegacyAbsenceTest::RunTest(
 	if (!MissingOwners.IsEmpty())
 	{
 		AddError(FString::Printf(
-			TEXT("%d destructive/import commands lack one formal owner or rolled-back failure semantics: %s"),
+			TEXT("%d destructive/import commands lack their current formal owner or typed pre-mutation failure semantics: %s"),
 			MissingOwners.Num(), *FString::Join(MissingOwners, TEXT(" | "))));
 	}
-	TestEqual(TEXT("all 26 commands enter one formal public owner"),
+	TestEqual(TEXT("all 27 commands enter their declared formal public owner"),
 		MissingOwners.Num(), 0);
 
 	for (const FString& LegacyId : LegacyIds)
 	{
-		TestNull(TEXT("retired exact owner is absent: ") + LegacyId,
-			UeAgentCommandRegistry::FindExactCommandInvoker(LegacyId));
-		TestNull(TEXT("retired prefix owner is absent: ") + LegacyId,
-			UeAgentCommandRegistry::FindPrefixedCommandInvoker(LegacyId));
-		TestTrue(TEXT("retired route fails closed: ") + LegacyId,
-			UeAgentCommandRegistry::IsExplicitlyUnsupportedCommand(LegacyId));
+		TestNull(TEXT("retired command is absent from formal registry: ")
+			+ LegacyId, Registry->FindExact(LegacyId));
 	}
-
-	const FString ManifestPath = GetDefaultCommandManifestPath();
-	const bool bUpdateManifest = FParse::Param(
-		FCommandLine::Get(), TEXT("UaiUpdateCommandManifest"))
-		|| FPlatformMisc::GetEnvironmentVariable(
-			TEXT("UAI_UPDATE_COMMAND_MANIFEST")) == TEXT("1");
-	if (bUpdateManifest)
-	{
-		Error.Reset();
-		TestTrue(TEXT("outer C++ owner writes the 329-command manifest"),
-			FUeAgentCommandManifestExporter::TryWrite(
-				*Registry, GetUaiCommandManifestPluginVersion(),
-				GetUaiCommandManifestBuildId(), ManifestPath, Error));
-	}
-	Error.Reset();
-	TestTrue(TEXT("committed manifest matches outer destructive/import registry"),
-		FUeAgentCommandManifestExporter::TryVerify(
-			*Registry, GetUaiCommandManifestPluginVersion(),
-			GetUaiCommandManifestBuildId(), ManifestPath, Error));
-	if (!Error.IsEmpty()) AddError(Error);
 
 	TestTrue(TEXT("formal public composition stops"), Harness.Stop());
 	TestEqual(TEXT("command route is released on stop"),

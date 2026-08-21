@@ -8,7 +8,7 @@
 #include "Kismet2/CompilerResultsLog.h"
 #include "Kismet2/KismetEditorUtilities.h"
 
-bool FUeAgentHttpServer::CmdControlRigCompile(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdControlRigCompile(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	FString AssetPath;
 	if (!JsonTryGetString(Ctx.Params, TEXT("asset_path"), AssetPath) || AssetPath.TrimStartAndEnd().IsEmpty())
@@ -37,7 +37,7 @@ bool FUeAgentHttpServer::CmdControlRigCompile(const FUeAgentRequestContext& Ctx,
 	return Blueprint->Status != BS_Error;
 }
 
-bool FUeAgentHttpServer::CmdControlRigGetCompileLog(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdControlRigGetCompileLog(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	if (!CmdControlRigCompile(Ctx, OutData, OutError))
 	{
@@ -47,7 +47,7 @@ bool FUeAgentHttpServer::CmdControlRigGetCompileLog(const FUeAgentRequestContext
 	return true;
 }
 
-bool FUeAgentHttpServer::CmdControlRigOpenEditor(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdControlRigOpenEditor(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	FString AssetPath;
 	if (!JsonTryGetString(Ctx.Params, TEXT("asset_path"), AssetPath) || AssetPath.TrimStartAndEnd().IsEmpty())
@@ -88,7 +88,7 @@ static FUeAgentRequestContext MakeControlRigBlueprintProxyContext(const FUeAgent
 	return Proxy;
 }
 
-bool FUeAgentHttpServer::CmdControlRigGraphGetView(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdControlRigGraphGetView(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	FUeAgentRequestContext Proxy = MakeControlRigBlueprintProxyContext(Ctx);
 	if (!CmdBlueprintGraphGetView(Proxy, OutData, OutError))
@@ -99,7 +99,7 @@ bool FUeAgentHttpServer::CmdControlRigGraphGetView(const FUeAgentRequestContext&
 	return true;
 }
 
-bool FUeAgentHttpServer::CmdControlRigGraphSetView(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdControlRigGraphSetView(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	FUeAgentRequestContext Proxy = MakeControlRigBlueprintProxyContext(Ctx);
 	if (!CmdBlueprintGraphSetView(Proxy, OutData, OutError))
@@ -110,7 +110,7 @@ bool FUeAgentHttpServer::CmdControlRigGraphSetView(const FUeAgentRequestContext&
 	return true;
 }
 
-bool FUeAgentHttpServer::CmdControlRigViewportGetCamera(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdControlRigViewportGetCamera(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	FString AssetPath;
 	if (!JsonTryGetString(Ctx.Params, TEXT("asset_path"), AssetPath) || AssetPath.TrimStartAndEnd().IsEmpty())
@@ -140,7 +140,7 @@ bool FUeAgentHttpServer::CmdControlRigViewportGetCamera(const FUeAgentRequestCon
 	return true;
 }
 
-bool FUeAgentHttpServer::CmdControlRigViewportSetCamera(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdControlRigViewportSetCamera(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	FString AssetPath;
 	if (!JsonTryGetString(Ctx.Params, TEXT("asset_path"), AssetPath) || AssetPath.TrimStartAndEnd().IsEmpty())
@@ -170,7 +170,7 @@ bool FUeAgentHttpServer::CmdControlRigViewportSetCamera(const FUeAgentRequestCon
 	return true;
 }
 
-bool FUeAgentHttpServer::CmdControlRigScreenshot(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdControlRigScreenshot(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	FUeAgentRequestContext Proxy = MakeControlRigBlueprintProxyContext(Ctx);
 	if (!CmdBlueprintScreenshot(Proxy, OutData, OutError))

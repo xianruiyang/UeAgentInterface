@@ -3,7 +3,6 @@
 #include "DomainAdapters/MaterialCommands/UeAgentMaterialCommandMechanicsBoundary.h"
 #include "Dom/JsonObject.h"
 #include "OperationOwners/MaterialCommands/UeAgentMaterialCommandOperationOwner.h"
-#include "QueryOwners/MaterialCommands/UeAgentMaterialCommandQueryOwner.h"
 #include "Serialization/JsonSerializer.h"
 #include "Serialization/JsonWriter.h"
 
@@ -73,8 +72,8 @@ namespace UE::UAI::CommandHandlers::MaterialCommands
 		class FHandler final : public IUeAgentExactCommandHandler
 		{
 		public:
-			FHandler(FString InId, TSharedRef<IUeAgentCommandHandler> InMechanics)
-				: Id(MoveTemp(InId)), Mechanics(MoveTemp(InMechanics))
+			explicit FHandler(FString InId)
+				: Id(MoveTemp(InId))
 			{
 			}
 			const FString& GetCommandId() const override { return Id; }
@@ -104,16 +103,13 @@ namespace UE::UAI::CommandHandlers::MaterialCommands
 				const Contract::FUeAgentCallerContext EffectiveCaller(
 					Caller.GetCallerId(), MoveTemp(Scopes),
 					Caller.GetCorrelationId());
-				FUeAgentCommandResult Result = bQuery
-					? QueryOwners::MaterialCommands::Submit(
-						Mechanics, Request, EffectiveCaller, Cancellation)
-					: OperationOwners::MaterialCommands::Submit(
-						Mechanics, Request, EffectiveCaller, Cancellation);
+				FUeAgentCommandResult Result =
+					OperationOwners::MaterialCommands::Submit(
+						Request, EffectiveCaller, Cancellation);
 				return NormalizeFailure(Request, MoveTemp(Result));
 			}
 		private:
 			FString Id;
-			TSharedRef<IUeAgentCommandHandler> Mechanics;
 		};
 	}
 
@@ -122,23 +118,11 @@ namespace UE::UAI::CommandHandlers::MaterialCommands
 		FString& OutError)
 	{
 		OutHandlers.Reset();
-		TMap<FString, TSharedRef<IUeAgentCommandHandler>> Mechanics;
-		if (!OperationOwners::MaterialCommands::TryCreateMechanicsHandlers(
-				Mechanics, OutError))
-		{
-			return false;
-		}
+		OutError.Reset();
 		for (const FString& Id
 			: DomainAdapters::MaterialCommands::GetCommandIds())
 		{
-			const TSharedRef<IUeAgentCommandHandler>* Match = Mechanics.Find(Id);
-			if (!Match)
-			{
-				OutHandlers.Reset();
-				OutError = TEXT("material_command_mechanics_handler_missing:") + Id;
-				return false;
-			}
-			OutHandlers.Add(MakeShared<FHandler>(Id, *Match));
+			OutHandlers.Add(MakeShared<FHandler>(Id));
 		}
 		return OutHandlers.Num()
 			== DomainAdapters::MaterialCommands::GetCommandIds().Num();

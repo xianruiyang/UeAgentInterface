@@ -9,6 +9,7 @@
 #include "AssetRegistry/AssetRegistryModule.h"
 #include "Composition/GraphCompound/UeAgentGraphCompoundAnimationBindings.h"
 #include "Core/Contract/UeAgentContractJson.h"
+#include "DomainAdapters/AnimationCurve/UeAgentAnimationCurveDomainMechanics.h"
 #include "HAL/FileManager.h"
 #include "Misc/Guid.h"
 #include "Misc/PackageName.h"
@@ -201,11 +202,34 @@ namespace
 		const TSharedRef<TJsonReader<>> Reader =
 			TJsonReaderFactory<>::Create(Result.GetValue().GetJsonValue());
 		FString TargetRef;
+		FString TerminalStatus;
+		FString PersistenceReceiptId;
+		FString ReadbackEvidenceId;
+		bool bMutationApplied = false;
+		bool bCompileSettled = false;
+		bool bSaved = false;
+		bool bReloaded = false;
 		const bool bExact = FJsonSerializer::Deserialize(Reader, Root)
 			&& Root.IsValid()
 			&& Root->TryGetStringField(TEXT("target_ref"), TargetRef)
-			&& TargetRef == ExpectedTarget;
-		return Test.TestTrue(*(Label + TEXT(" returns exact target_ref")), bExact);
+			&& TargetRef == ExpectedTarget
+			&& Root->TryGetStringField(TEXT("terminal_status"), TerminalStatus)
+			&& TerminalStatus == TEXT("succeeded")
+			&& Root->TryGetBoolField(TEXT("mutation_applied"), bMutationApplied)
+			&& bMutationApplied
+			&& Root->TryGetBoolField(TEXT("compile_settled"), bCompileSettled)
+			&& bCompileSettled
+			&& Root->TryGetBoolField(TEXT("saved"), bSaved) && bSaved
+			&& Root->TryGetBoolField(TEXT("reloaded"), bReloaded) && bReloaded
+			&& Root->TryGetStringField(
+				TEXT("persistence_receipt_id"), PersistenceReceiptId)
+			&& !PersistenceReceiptId.IsEmpty()
+			&& Root->TryGetStringField(
+				TEXT("independent_readback_evidence_id"), ReadbackEvidenceId)
+			&& !ReadbackEvidenceId.IsEmpty();
+		return Test.TestTrue(
+			*(Label + TEXT(" returns exact target and lifecycle receipt")),
+			bExact);
 	}
 
 	TSharedRef<FJsonObject> AssetCreate(
@@ -362,6 +386,35 @@ bool FUeAgentGraphCompoundAnimationAssetsProductionTest::RunTest(
 			BlendSpace->GetSkeleton(), EngineSkeleton);
 	}
 	Assets.Unload(BlendPackage);
+
+	FString EmptyBlendReadback;
+	bool bEmptyBlendReadOnly = false;
+	UE::UAI::HjsonWorkspace::FWorkspaceError EmptyBlendReadError;
+	const FString EmptyBlendParams =
+		TEXT("{\"target\":\"") + Assets.ObjectPath(BlendPackage) + TEXT("\"}");
+	TestTrue(
+		TEXT("an empty persisted BlendSpace has structural content-graph readback"),
+		UE::UAI::DomainAdapters::AnimationCurve::TryExecuteContentGraph(
+			TEXT("content_graph.items"),
+			Assets.ObjectPath(BlendPackage),
+			TEXT("/Script/Engine.BlendSpace"),
+			EmptyBlendParams,
+			EmptyBlendReadback,
+			bEmptyBlendReadOnly,
+			EmptyBlendReadError));
+	if (!EmptyBlendReadError.GetCode().IsEmpty())
+	{
+		AddError(
+			EmptyBlendReadError.GetCode() + TEXT(":")
+				+ EmptyBlendReadError.GetSourceUnit() + TEXT(":")
+				+ EmptyBlendReadError.GetJsonPointer());
+	}
+	TestTrue(
+		TEXT("empty BlendSpace structural readback is read-only"),
+		bEmptyBlendReadOnly);
+	TestTrue(
+		TEXT("empty BlendSpace structural readback retains its exact target"),
+		EmptyBlendReadback.Contains(Assets.ObjectPath(BlendPackage)));
 
 	const FString SequencePackage = Assets.Add(TEXT("AS_W02"));
 	UPackage* SequenceOuter = CreatePackage(*SequencePackage);

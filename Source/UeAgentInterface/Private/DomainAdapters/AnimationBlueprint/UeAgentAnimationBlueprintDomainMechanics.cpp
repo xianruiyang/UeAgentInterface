@@ -13,7 +13,7 @@
 #include "AnimationStateMachineGraph.h"
 #include "AssetRegistry/AssetRegistryModule.h"
 #include "Core/Contract/UeAgentCommandJson.h"
-#include "Core/ContextResource/UeAgentContextResource.h"
+#include "Core/HjsonWorkspace/DomainAuthoring/UeAgentDomainHjsonAuthoringKit.h"
 #include "Domains/Animation/Authoring/UeAgentAnimationAuthoringApplyProvider.h"
 #include "Domains/Animation/Authoring/UeAgentAnimationAuthoringDocuments.h"
 #include "Domains/Animation/Authoring/UeAgentAnimationAuthoringRegistration.h"
@@ -36,8 +36,8 @@
 namespace UE::UAI::DomainAdapters::AnimationBlueprint
 {
 	using namespace CommandContract;
-	using namespace ContextResource;
 	using namespace HjsonWorkspace;
+	using namespace HjsonWorkspace::DomainAuthoring;
 
 	namespace
 	{
@@ -69,79 +69,12 @@ namespace UE::UAI::DomainAdapters::AnimationBlueprint
 			return Name.IsEmpty() ? Target : Target + TEXT(".") + Name;
 		}
 
-		FUeAgentResourceTracker MakeResources()
-		{
-			return FUeAgentResourceTracker(FUeAgentResourceBudget({
-				{EUeAgentResourceDimension::InputBytes, 16 * 1024 * 1024},
-				{EUeAgentResourceDimension::OutputBytes, 16 * 1024 * 1024},
-				{EUeAgentResourceDimension::StringBytes, 16 * 1024 * 1024},
-				{EUeAgentResourceDimension::Nodes, 65536},
-				{EUeAgentResourceDimension::Items, 262144},
-				{EUeAgentResourceDimension::Files, 4096},
-				{EUeAgentResourceDimension::ReferenceEdges, 262144},
-				{EUeAgentResourceDimension::WorkUnits, 1048576},
-				{EUeAgentResourceDimension::EstimatedMemoryBytes,
-					512 * 1024 * 1024},
-			}));
-		}
-
-		TSharedPtr<FJsonValue> JsonValueFromHjson(
-			const FHjsonNode& Node,
-			FWorkspaceError& OutError)
-		{
-			switch (Node.GetKind())
-			{
-			case EHjsonNodeKind::Null:
-				return MakeShared<FJsonValueNull>();
-			case EHjsonNodeKind::Boolean:
-				return MakeShared<FJsonValueBoolean>(Node.GetBoolean());
-			case EHjsonNodeKind::String:
-				return MakeShared<FJsonValueString>(Node.GetText());
-			case EHjsonNodeKind::Integer:
-			case EHjsonNodeKind::Decimal:
-				return MakeShared<FJsonValueNumber>(FCString::Atod(*Node.GetLexeme()));
-			case EHjsonNodeKind::Array:
-			{
-				TArray<TSharedPtr<FJsonValue>> Items;
-				for (const FHjsonNodeRef& Item : Node.GetItems())
-				{
-					TSharedPtr<FJsonValue> Converted =
-						JsonValueFromHjson(*Item, OutError);
-					if (!Converted.IsValid()) return nullptr;
-					Items.Add(MoveTemp(Converted));
-				}
-				return MakeShared<FJsonValueArray>(MoveTemp(Items));
-			}
-			case EHjsonNodeKind::Object:
-			{
-				const TSharedPtr<FJsonObject> Object = MakeShared<FJsonObject>();
-				for (const TPair<FString, FHjsonNodeRef>& Entry : Node.GetEntries())
-				{
-					TSharedPtr<FJsonValue> Converted =
-						JsonValueFromHjson(*Entry.Value, OutError);
-					if (!Converted.IsValid()) return nullptr;
-					Object->SetField(Entry.Key, MoveTemp(Converted));
-				}
-				return MakeShared<FJsonValueObject>(Object);
-			}
-			default:
-				Fail(OutError, TEXT("animation_blueprint_hjson_node_invalid"));
-				return nullptr;
-			}
-		}
-
 		bool CanonicalObject(
 			const TSharedPtr<FJsonObject>& Object,
 			FString& Out,
 			FWorkspaceError& OutError)
 		{
-			FString Error;
-			if (!Object.IsValid() || !Json::TryCanonicalize(Object, Out, Error))
-			{
-				return Fail(OutError,
-					TEXT("animation_blueprint_json_invalid"), Error);
-			}
-			return true;
+			return TryCanonicalizeObject(Object, Out, OutError);
 		}
 
 		bool EnsureAuthoringRegistered(FWorkspaceError& OutError)
@@ -302,104 +235,6 @@ namespace UE::UAI::DomainAdapters::AnimationBlueprint
 			TSharedPtr<FJsonObject> Capture;
 			if (!TryCapture(Target, Capture, OutRevision, OutError)) return false;
 			return CanonicalObject(Capture, OutPayload, OutError);
-		}
-
-		bool ParseDocument(
-			const TSharedPtr<FJsonObject>& Params,
-			TSharedPtr<FJsonObject>& OutDocument,
-			FWorkspaceError& OutError)
-		{
-			OutDocument.Reset();
-			if (!Params.IsValid()
-				|| Params->HasField(TEXT("carrier"))
-				|| Params->HasField(TEXT("hjson_document")))
-			{
-				return Fail(OutError,
-					TEXT("animation_blueprint_legacy_source_contract_rejected"));
-			}
-			FString Target;
-			const TSharedPtr<FJsonObject>* Source = nullptr;
-			FString Kind;
-			FString TargetIdentity;
-			FString EntryFile;
-			const TArray<TSharedPtr<FJsonValue>>* Documents = nullptr;
-			if (!Params->TryGetStringField(TEXT("target"), Target)
-				|| Target.IsEmpty()
-				|| !Params->TryGetObjectField(TEXT("source"), Source)
-				|| !Source || !Source->IsValid()
-				|| !(*Source)->TryGetStringField(TEXT("kind"), Kind)
-				|| Kind != TEXT("resolved")
-				|| !(*Source)->TryGetStringField(
-					TEXT("target_identity"), TargetIdentity)
-				|| TargetIdentity != Target
-				|| !(*Source)->TryGetStringField(TEXT("entry_file"), EntryFile)
-				|| EntryFile.IsEmpty()
-				|| !(*Source)->TryGetArrayField(TEXT("documents"), Documents)
-				|| !Documents || Documents->IsEmpty())
-			{
-				return Fail(OutError,
-					TEXT("animation_blueprint_resolved_source_invalid"));
-			}
-			FString Text;
-			int32 EntryMatches = 0;
-			for (const TSharedPtr<FJsonValue>& Value : *Documents)
-			{
-				const TSharedPtr<FJsonObject> DocumentObject = Value.IsValid()
-					? Value->AsObject() : nullptr;
-				FString RelativePath;
-				FString DocumentText;
-				if (!DocumentObject.IsValid()
-					|| !DocumentObject->TryGetStringField(
-						TEXT("path"), RelativePath)
-					|| !DocumentObject->TryGetStringField(
-						TEXT("document"), DocumentText))
-				{
-					return Fail(OutError,
-						TEXT("animation_blueprint_resolved_source_invalid"));
-				}
-				if (RelativePath == EntryFile)
-				{
-					Text = MoveTemp(DocumentText);
-					++EntryMatches;
-				}
-			}
-			if (EntryMatches != 1 || Text.IsEmpty())
-			{
-				return Fail(OutError,
-					TEXT("animation_blueprint_resolved_entry_invalid"));
-			}
-			FUeAgentResourceTracker Resources = MakeResources();
-			FHjsonDocumentPtr Parsed;
-			if (!TryParseHjsonDocument(
-				Text, TEXT("inline:animation-blueprint-domain"),
-				Resources, Parsed, OutError)
-				|| !Parsed.IsValid())
-			{
-				return false;
-			}
-			TSharedPtr<FJsonValue> Converted =
-				JsonValueFromHjson(*Parsed->GetRoot(), OutError);
-			const TSharedPtr<FJsonObject> Root =
-				Converted.IsValid() ? Converted->AsObject() : nullptr;
-			FString Schema;
-			const TSharedPtr<FJsonObject>* DomainRoot = nullptr;
-			const TSharedPtr<FJsonObject>* Document = nullptr;
-			FString Type;
-			if (!Root.IsValid()
-				|| !Root->TryGetStringField(TEXT("schema"), Schema)
-				|| Schema != SchemaId
-				|| !Root->TryGetObjectField(TEXT("root"), DomainRoot)
-				|| !DomainRoot || !DomainRoot->IsValid()
-				|| !(*DomainRoot)->TryGetStringField(TEXT("type"), Type)
-				|| Type != RootType
-				|| !(*DomainRoot)->TryGetObjectField(TEXT("document"), Document)
-				|| !Document || !Document->IsValid())
-			{
-				return Fail(OutError,
-					TEXT("animation_blueprint_schema_or_type_invalid"), Type);
-			}
-			OutDocument = *Document;
-			return true;
 		}
 
 		bool ArrayObjects(
@@ -681,16 +516,34 @@ namespace UE::UAI::DomainAdapters::AnimationBlueprint
 			FString& OutPayload,
 			FWorkspaceError& OutError)
 		{
-			TSharedPtr<FJsonObject> Document;
-			if (!ParseDocument(Params, Document, OutError)) return false;
-			FString ExpectedRevision;
-			if (!Params->TryGetStringField(
-				TEXT("expected_revision"), ExpectedRevision)
-				|| ExpectedRevision.IsEmpty())
+			FString CanonicalParamsJson;
+			if (!TryCanonicalizeObject(Params, CanonicalParamsJson, OutError))
 			{
-				return Fail(OutError,
-					TEXT("animation_blueprint_expected_revision_required"));
+				return false;
 			}
+			FResolvedDomainHjsonDocument Resolved;
+			if (!TryDecodeResolvedDocument(
+					Target,
+					CanonicalParamsJson,
+					FDomainHjsonDocumentContract(
+						TEXT("animation_blueprint"), SchemaId, RootType),
+					Resolved,
+					OutError))
+			{
+				return false;
+			}
+			const TSharedPtr<FJsonObject>* DocumentField = nullptr;
+			if (!Resolved.Root.IsValid()
+				|| !Resolved.Root->TryGetObjectField(
+					TEXT("document"), DocumentField)
+				|| !DocumentField || !DocumentField->IsValid())
+			{
+				return Fail(
+					OutError,
+					TEXT("animation_blueprint_document_required"));
+			}
+			const TSharedPtr<FJsonObject> Document = *DocumentField;
+			const FString& ExpectedRevision = Resolved.ExpectedRevision;
 			FString Operation;
 			const TSharedPtr<FJsonObject>* DocumentTarget = nullptr;
 			FString AssetPath;
@@ -762,6 +615,9 @@ namespace UE::UAI::DomainAdapters::AnimationBlueprint
 
 			if (!EnsureAuthoringRegistered(OutError)) return false;
 			FString NativeError;
+			const TSharedPtr<FJsonObject> ScratchSeedDocument =
+				MakeShared<FJsonObject>();
+			ScratchSeedDocument->SetObjectField(TEXT("settings"), Settings);
 			UObject* ScratchObject =
 				UeAgentAnimationAuthoring::CreateFactorySeed(
 					UeAgentAnimationAuthoring::EAssetKind::AnimBlueprint,
@@ -769,7 +625,7 @@ namespace UE::UAI::DomainAdapters::AnimationBlueprint
 					*FString(TEXT("ABP_T16_Preflight_")
 						+ FGuid::NewGuid().ToString(EGuidFormats::Digits)),
 					RF_Transient,
-					Settings,
+					ScratchSeedDocument,
 					NativeError);
 			TStrongObjectPtr<UAnimBlueprint> Scratch(
 				Cast<UAnimBlueprint>(ScratchObject));
@@ -939,6 +795,17 @@ namespace UE::UAI::DomainAdapters::AnimationBlueprint
 					TEXT("animation_blueprint_readback_payload_invalid"),
 					Target, JsonError);
 			}
+			FString CompileStatus;
+			if (!Readback->TryGetStringField(
+					TEXT("compile_status"), CompileStatus)
+				|| CompileStatus != TEXT("valid"))
+			{
+				return Fail(
+					OutError,
+					TEXT("animation_blueprint_compile_not_settled"),
+					Target,
+					CompileStatus);
+			}
 
 			const TSharedPtr<FJsonObject> Mutation = MakeShared<FJsonObject>();
 			Mutation->SetStringField(TEXT("operation"), TEXT("create"));
@@ -955,17 +822,22 @@ namespace UE::UAI::DomainAdapters::AnimationBlueprint
 			Mutation->SetNumberField(TEXT("blueprint_nodes_added"),
 				AppliedCounters.NodesAdded);
 
-			const TSharedPtr<FJsonObject> Result = MakeShared<FJsonObject>();
-			Result->SetStringField(TEXT("terminal_status"), TEXT("succeeded"));
-			Result->SetStringField(TEXT("provider_id"),
-				TEXT("animation-blueprint-domain-provider"));
-			Result->SetStringField(TEXT("target"), Target);
-			Result->SetStringField(TEXT("revision"), Revision);
-			Result->SetBoolField(TEXT("saved"), true);
-			Result->SetBoolField(TEXT("reloaded"), true);
-			Result->SetObjectField(TEXT("independent_readback"), Readback);
-			Result->SetObjectField(TEXT("mutation"), Mutation);
-			return CanonicalObject(Result, OutPayload, OutError);
+			FDomainHjsonImportLifecycleReceipt LifecycleReceipt;
+			LifecycleReceipt.bMutationApplied = true;
+			LifecycleReceipt.bCompileSettled = true;
+			LifecycleReceipt.bPackageSaved = true;
+			LifecycleReceipt.bUnloadedReloaded = true;
+			LifecycleReceipt.PersistenceReceiptId = TEXT("reload:")
+				+ ObjectPath(Target) + TEXT(":") + Revision;
+			return TryBuildImportSuccessPayload(
+				TEXT("animation-blueprint-domain-provider"),
+				Target,
+				Revision,
+				LifecycleReceipt,
+				Readback,
+				Mutation,
+				OutPayload,
+				OutError);
 		}
 	}
 

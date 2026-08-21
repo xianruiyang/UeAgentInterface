@@ -150,6 +150,7 @@ namespace UE::UAI::CommandHandlers::Material
 		bool bReadOnly = false;
 		if (!DomainAdapters::Material::TryExecuteContentGraph(
 				Request.GetCommandId(), Request.GetTargetIdentity(),
+				Request.GetRootTypeIdentity(),
 				Request.GetCanonicalParamsJson(), Payload, bReadOnly, OutError))
 		{
 			return false;

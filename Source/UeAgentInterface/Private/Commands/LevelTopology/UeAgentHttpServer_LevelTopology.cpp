@@ -1,6 +1,6 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
-#include "Server/UeAgentHttpServer.h"
+#include "LegacyMechanics/UeAgentLegacyMechanics.h"
 
 #include "UeAgentHttpServer_LevelTopologyOps.h"
 #include "Utilities/UeAgentAuthoringFileIO.h"
@@ -1317,7 +1317,7 @@ namespace UeAgentLevelTopology
 
 }
 
-bool FUeAgentHttpServer::ExecuteLevelTopologyCommand(const FString& CommandLower, const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::ExecuteLevelTopologyCommand(const FString& CommandLower, const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	if (CommandLower == TEXT("level_topology_export_json")) return CmdLevelTopologyExportJson(Ctx, OutData, OutError);
 	if (CommandLower == TEXT("level_topology_validate_json")) return CmdLevelTopologyValidateJson(Ctx, OutData, OutError);
@@ -1360,7 +1360,7 @@ bool FUeAgentHttpServer::ExecuteLevelTopologyCommand(const FString& CommandLower
 	return false;
 }
 
-bool FUeAgentHttpServer::CmdLevelStreamingQuery(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdLevelStreamingQuery(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	UWorld* World = GetEditorWorld(OutError);
 	if (!World)
@@ -1389,7 +1389,7 @@ bool FUeAgentHttpServer::CmdLevelStreamingQuery(const FUeAgentRequestContext& Ct
 	return true;
 }
 
-bool FUeAgentHttpServer::CmdLevelStreamingCreateLevel(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdLevelStreamingCreateLevel(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	UWorld* World = GetEditorWorld(OutError);
 	if (!World)
@@ -1489,7 +1489,7 @@ bool FUeAgentHttpServer::CmdLevelStreamingCreateLevel(const FUeAgentRequestConte
 	return true;
 }
 
-bool FUeAgentHttpServer::CmdLevelStreamingAddExisting(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdLevelStreamingAddExisting(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	UWorld* World = GetEditorWorld(OutError);
 	if (!World)
@@ -1539,7 +1539,7 @@ bool FUeAgentHttpServer::CmdLevelStreamingAddExisting(const FUeAgentRequestConte
 	return true;
 }
 
-bool FUeAgentHttpServer::CmdLevelStreamingRemove(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdLevelStreamingRemove(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	UWorld* World = GetEditorWorld(OutError);
 	if (!World)
@@ -1644,7 +1644,7 @@ bool FUeAgentHttpServer::CmdLevelStreamingRemove(const FUeAgentRequestContext& C
 	return true;
 }
 
-bool FUeAgentHttpServer::CmdLevelStreamingSetState(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdLevelStreamingSetState(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	UWorld* World = GetEditorWorld(OutError);
 	if (!World)
@@ -1708,7 +1708,7 @@ bool FUeAgentHttpServer::CmdLevelStreamingSetState(const FUeAgentRequestContext&
 	return true;
 }
 
-bool FUeAgentHttpServer::CmdLevelStreamingMoveActors(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdLevelStreamingMoveActors(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	UWorld* World = GetEditorWorld(OutError);
 	if (!World)
@@ -1767,7 +1767,7 @@ bool FUeAgentHttpServer::CmdLevelStreamingMoveActors(const FUeAgentRequestContex
 	return MovedCount > 0 || Actors.IsEmpty();
 }
 
-bool FUeAgentHttpServer::CmdLevelStreamingSave(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdLevelStreamingSave(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	UWorld* World = GetEditorWorld(OutError);
 	if (!World)
@@ -1815,7 +1815,7 @@ bool FUeAgentHttpServer::CmdLevelStreamingSave(const FUeAgentRequestContext& Ctx
 	return true;
 }
 
-bool FUeAgentHttpServer::CmdLevelStreamingValidate(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdLevelStreamingValidate(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	UWorld* World = GetEditorWorld(OutError);
 	if (!World)
@@ -1866,7 +1866,7 @@ bool FUeAgentHttpServer::CmdLevelStreamingValidate(const FUeAgentRequestContext&
 	return ErrorCount == 0;
 }
 
-bool FUeAgentHttpServer::CmdDataLayerCreateAsset(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdDataLayerCreateAsset(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	FString AssetPath;
 	if (!JsonTryGetString(Ctx.Params, TEXT("asset_path"), AssetPath))
@@ -1951,7 +1951,7 @@ bool FUeAgentHttpServer::CmdDataLayerCreateAsset(const FUeAgentRequestContext& C
 	return true;
 }
 
-bool FUeAgentHttpServer::CmdDataLayerApplyAssetJson(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdDataLayerApplyAssetJson(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	TSharedPtr<FJsonObject> Root;
 	FString Source;
@@ -2010,7 +2010,7 @@ bool FUeAgentHttpServer::CmdDataLayerApplyAssetJson(const FUeAgentRequestContext
 	return bOk;
 }
 
-bool FUeAgentHttpServer::CmdDataLayerCreateInstance(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdDataLayerCreateInstance(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	UWorld* World = GetEditorWorld(OutError);
 	if (!World)
@@ -2102,7 +2102,7 @@ bool FUeAgentHttpServer::CmdDataLayerCreateInstance(const FUeAgentRequestContext
 	return true;
 }
 
-bool FUeAgentHttpServer::CmdDataLayerDeleteInstance(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdDataLayerDeleteInstance(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	UWorld* World = GetEditorWorld(OutError);
 	if (!World)
@@ -2218,7 +2218,7 @@ bool FUeAgentHttpServer::CmdDataLayerDeleteInstance(const FUeAgentRequestContext
 	return true;
 }
 
-bool FUeAgentHttpServer::CmdDataLayerSetState(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdDataLayerSetState(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	UWorld* World = GetEditorWorld(OutError);
 	if (!World)
@@ -2260,7 +2260,7 @@ bool FUeAgentHttpServer::CmdDataLayerSetState(const FUeAgentRequestContext& Ctx,
 	return true;
 }
 
-bool FUeAgentHttpServer::CmdDataLayerSetActorMembership(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdDataLayerSetActorMembership(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	UWorld* World = GetEditorWorld(OutError);
 	if (!World)
@@ -2499,7 +2499,7 @@ bool FUeAgentHttpServer::CmdDataLayerSetActorMembership(const FUeAgentRequestCon
 	return true;
 }
 
-bool FUeAgentHttpServer::CmdDataLayerQuery(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdDataLayerQuery(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	UWorld* World = GetEditorWorld(OutError);
 	if (!World)
@@ -2526,7 +2526,7 @@ bool FUeAgentHttpServer::CmdDataLayerQuery(const FUeAgentRequestContext& Ctx, TS
 	return true;
 }
 
-bool FUeAgentHttpServer::CmdDataLayerValidate(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdDataLayerValidate(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	UWorld* World = GetEditorWorld(OutError);
 	if (!World)

@@ -41,6 +41,25 @@ Non-anchor modes require the exact `anchor_ref`. Every write supplies
 transform readback. Invalid frames, stale revisions, missing geometry,
 ambiguous nearest vertices, or incomplete mode fields fail before mutation.
 
+## Actor and StaticMesh readback
+
+`world.object_transform.read` is the single revision-bearing read entry for the
+WorldSpatial operation family. Its exact target union is an Actor or a
+StaticMesh asset:
+
+- an Actor target returns its independently observed transform in the requested
+  convertible three-dimensional frame;
+- a StaticMesh target requires the identity `mesh.geometry.local`,
+  three-dimensional, centimeter frame and returns its real mesh-description
+  vertices plus any live component-placement observations.
+
+Both branches return the revision produced by the same WorldSpatial runtime and
+session that validates subsequent writes. A client can therefore pass that
+revision unchanged to the target's `expected_revision` entry. Other UObject
+types and non-local StaticMesh verify frames fail before any mutation. Durable
+`mesh.transform.bake` and `mesh.pivot.update` success includes package save;
+reloading the asset must preserve the observed geometry.
+
 ## Origin resolution
 
 `reference.origin.resolve` is the sole current origin-query command and belongs
@@ -68,7 +87,7 @@ selection, trace, pivot, transform, or origin business logic.
 
 Selection is Editor-transient and cleanup restores only the owned selection.
 Actor and mesh mutations reach success only after the declared mechanics and
-independent readback agree. Tests use owned actors, mesh assets, graph nodes,
+independent readback agree. Tests use owned actors, saved mesh assets, graph nodes,
 JSON files, catalog identities, and transient packages, then remove or restore
 only those fixtures while preserving the user's Editor.
 

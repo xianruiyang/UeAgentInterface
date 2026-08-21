@@ -10,7 +10,7 @@
 #include "Engine/World.h"
 #include "GameFramework/Actor.h"
 
-bool FUeAgentHttpServer::CmdModelingSaveMeshAsset(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdModelingSaveMeshAsset(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	using namespace UeAgentModelingOps;
 	OutData = MakeShared<FJsonObject>();
@@ -46,7 +46,7 @@ bool FUeAgentHttpServer::CmdModelingSaveMeshAsset(const FUeAgentRequestContext& 
 	return true;
 }
 
-bool FUeAgentHttpServer::CmdModelingReplaceActorMesh(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdModelingReplaceActorMesh(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	using namespace UeAgentModelingOps;
 	OutData = MakeShared<FJsonObject>();
@@ -108,7 +108,7 @@ bool FUeAgentHttpServer::CmdModelingReplaceActorMesh(const FUeAgentRequestContex
 	return true;
 }
 
-bool FUeAgentHttpServer::CmdModelingSnapToGround(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdModelingSnapToGround(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	using namespace UeAgentModelingOps;
 	OutData = MakeShared<FJsonObject>();

@@ -13,7 +13,7 @@
 #include "UObject/GarbageCollection.h"
 #include "UObject/Package.h"
 
-bool FUeAgentHttpServer::CmdAssetDelete(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdAssetDelete(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	using namespace UeAgentAssetOps;
 	using UE::AssetRegistry::EDependencyCategory;

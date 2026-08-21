@@ -122,7 +122,7 @@ namespace UeAgentIKFolderOps
 	}
 }
 
-bool FUeAgentHttpServer::CmdIKRigExportFolder(
+bool FUeAgentLegacyMechanics::CmdIKRigExportFolder(
 	const FUeAgentRequestContext& Ctx,
 	TSharedPtr<FJsonObject>& OutData,
 	FString& OutError) const
@@ -157,7 +157,7 @@ bool FUeAgentHttpServer::CmdIKRigExportFolder(
 	return true;
 }
 
-bool FUeAgentHttpServer::CmdIKRigApplyFolder(
+bool FUeAgentLegacyMechanics::CmdIKRigApplyFolder(
 	const FUeAgentRequestContext& Ctx,
 	TSharedPtr<FJsonObject>& OutData,
 	FString& OutError) const
@@ -185,7 +185,7 @@ bool FUeAgentHttpServer::CmdIKRigApplyFolder(
 	return bApplied;
 }
 
-bool FUeAgentHttpServer::CmdIKRigValidateFolder(
+bool FUeAgentLegacyMechanics::CmdIKRigValidateFolder(
 	const FUeAgentRequestContext& Ctx,
 	TSharedPtr<FJsonObject>& OutData,
 	FString& OutError) const
@@ -213,7 +213,7 @@ bool FUeAgentHttpServer::CmdIKRigValidateFolder(
 	return bValid;
 }
 
-bool FUeAgentHttpServer::CmdIKRetargeterExportFolder(
+bool FUeAgentLegacyMechanics::CmdIKRetargeterExportFolder(
 	const FUeAgentRequestContext& Ctx,
 	TSharedPtr<FJsonObject>& OutData,
 	FString& OutError) const
@@ -248,7 +248,7 @@ bool FUeAgentHttpServer::CmdIKRetargeterExportFolder(
 	return true;
 }
 
-bool FUeAgentHttpServer::CmdIKRetargeterApplyFolder(
+bool FUeAgentLegacyMechanics::CmdIKRetargeterApplyFolder(
 	const FUeAgentRequestContext& Ctx,
 	TSharedPtr<FJsonObject>& OutData,
 	FString& OutError) const
@@ -276,7 +276,7 @@ bool FUeAgentHttpServer::CmdIKRetargeterApplyFolder(
 	return bApplied;
 }
 
-bool FUeAgentHttpServer::CmdIKRetargeterValidateFolder(
+bool FUeAgentLegacyMechanics::CmdIKRetargeterValidateFolder(
 	const FUeAgentRequestContext& Ctx,
 	TSharedPtr<FJsonObject>& OutData,
 	FString& OutError) const
@@ -304,7 +304,7 @@ bool FUeAgentHttpServer::CmdIKRetargeterValidateFolder(
 	return bValid;
 }
 
-bool FUeAgentHttpServer::CmdRetargetBatchExportJson(
+bool FUeAgentLegacyMechanics::CmdRetargetBatchExportJson(
 	const FUeAgentRequestContext& Ctx,
 	TSharedPtr<FJsonObject>& OutData,
 	FString& OutError) const
@@ -347,7 +347,7 @@ bool FUeAgentHttpServer::CmdRetargetBatchExportJson(
 	return true;
 }
 
-bool FUeAgentHttpServer::CmdRetargetBatchApplyJson(
+bool FUeAgentLegacyMechanics::CmdRetargetBatchApplyJson(
 	const FUeAgentRequestContext& Ctx,
 	TSharedPtr<FJsonObject>& OutData,
 	FString& OutError) const
@@ -425,7 +425,7 @@ bool FUeAgentHttpServer::CmdRetargetBatchApplyJson(
 	return true;
 }
 
-bool FUeAgentHttpServer::CmdRetargetBatchValidateJson(
+bool FUeAgentLegacyMechanics::CmdRetargetBatchValidateJson(
 	const FUeAgentRequestContext& Ctx,
 	TSharedPtr<FJsonObject>& OutData,
 	FString& OutError) const

@@ -36,7 +36,7 @@
 #include "Misc/PackageName.h"
 #include "Subsystems/AssetEditorSubsystem.h"
 
-bool FUeAgentHttpServer::ExecuteAnimBlueprintCommand(const FString& CommandLower, const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::ExecuteAnimBlueprintCommand(const FString& CommandLower, const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	if (CommandLower == TEXT("anim_blueprint_create")) return CmdAnimBlueprintCreate(Ctx, OutData, OutError);
 	if (CommandLower == TEXT("anim_blueprint_create_layer_interface")) return CmdAnimBlueprintCreateLayerInterface(Ctx, OutData, OutError);
@@ -61,7 +61,7 @@ bool FUeAgentHttpServer::ExecuteAnimBlueprintCommand(const FString& CommandLower
 	return false;
 }
 
-bool FUeAgentHttpServer::CmdAnimBlueprintCreate(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdAnimBlueprintCreate(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	FString AssetPathInput;
 	if (!JsonTryGetString(Ctx.Params, TEXT("asset_path"), AssetPathInput) || AssetPathInput.IsEmpty())
@@ -218,7 +218,7 @@ bool FUeAgentHttpServer::CmdAnimBlueprintCreate(const FUeAgentRequestContext& Ct
 	return true;
 }
 
-bool FUeAgentHttpServer::CmdAnimBlueprintCompile(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdAnimBlueprintCompile(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	FString AssetPathInput;
 	if (!JsonTryGetString(Ctx.Params, TEXT("asset_path"), AssetPathInput) || AssetPathInput.IsEmpty())
@@ -293,7 +293,7 @@ bool FUeAgentHttpServer::CmdAnimBlueprintCompile(const FUeAgentRequestContext& C
 	return true;
 }
 
-bool FUeAgentHttpServer::CmdAnimBlueprintGetCompileLog(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdAnimBlueprintGetCompileLog(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	FString AssetPathInput;
 	if (!JsonTryGetString(Ctx.Params, TEXT("asset_path"), AssetPathInput) || AssetPathInput.IsEmpty())
@@ -361,7 +361,7 @@ bool FUeAgentHttpServer::CmdAnimBlueprintGetCompileLog(const FUeAgentRequestCont
 	return true;
 }
 
-bool FUeAgentHttpServer::CmdAnimBlueprintGetInfo(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdAnimBlueprintGetInfo(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	FString AssetPathInput;
 	if (!JsonTryGetString(Ctx.Params, TEXT("asset_path"), AssetPathInput) || AssetPathInput.IsEmpty())
@@ -412,7 +412,7 @@ bool FUeAgentHttpServer::CmdAnimBlueprintGetInfo(const FUeAgentRequestContext& C
 	return true;
 }
 
-bool FUeAgentHttpServer::CmdAnimBlueprintListGraphs(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdAnimBlueprintListGraphs(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	FString AssetPathInput;
 	if (!JsonTryGetString(Ctx.Params, TEXT("asset_path"), AssetPathInput) || AssetPathInput.IsEmpty())
@@ -441,7 +441,7 @@ bool FUeAgentHttpServer::CmdAnimBlueprintListGraphs(const FUeAgentRequestContext
 	return true;
 }
 
-bool FUeAgentHttpServer::CmdAnimBlueprintListStateMachines(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdAnimBlueprintListStateMachines(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	FString AssetPathInput;
 	if (!JsonTryGetString(Ctx.Params, TEXT("asset_path"), AssetPathInput) || AssetPathInput.IsEmpty())
@@ -616,7 +616,7 @@ bool FUeAgentHttpServer::CmdAnimBlueprintListStateMachines(const FUeAgentRequest
 	return true;
 }
 
-bool FUeAgentHttpServer::CmdAnimBlueprintListAnimLayers(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdAnimBlueprintListAnimLayers(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	FString AssetPathInput;
 	if (!JsonTryGetString(Ctx.Params, TEXT("asset_path"), AssetPathInput) || AssetPathInput.IsEmpty())
@@ -781,7 +781,7 @@ bool FUeAgentHttpServer::CmdAnimBlueprintListAnimLayers(const FUeAgentRequestCon
 	return true;
 }
 
-bool FUeAgentHttpServer::CmdAnimBlueprintCreateLayerInterface(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdAnimBlueprintCreateLayerInterface(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	FString AssetPathInput;
 	if (!JsonTryGetString(Ctx.Params, TEXT("asset_path"), AssetPathInput) || AssetPathInput.IsEmpty())
@@ -871,7 +871,7 @@ bool FUeAgentHttpServer::CmdAnimBlueprintCreateLayerInterface(const FUeAgentRequ
 	return true;
 }
 
-bool FUeAgentHttpServer::CmdAnimBlueprintListLayerInterfaces(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdAnimBlueprintListLayerInterfaces(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	FString AssetPathInput;
 	if (!JsonTryGetString(Ctx.Params, TEXT("asset_path"), AssetPathInput) || AssetPathInput.IsEmpty())
@@ -925,7 +925,7 @@ bool FUeAgentHttpServer::CmdAnimBlueprintListLayerInterfaces(const FUeAgentReque
 	return true;
 }
 
-bool FUeAgentHttpServer::CmdAnimBlueprintImplementLayerInterface(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdAnimBlueprintImplementLayerInterface(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	FString AssetPathInput;
 	if (!JsonTryGetString(Ctx.Params, TEXT("asset_path"), AssetPathInput) || AssetPathInput.IsEmpty())
@@ -1014,7 +1014,7 @@ bool FUeAgentHttpServer::CmdAnimBlueprintImplementLayerInterface(const FUeAgentR
 	return true;
 }
 
-bool FUeAgentHttpServer::CmdAnimBlueprintRemoveLayerInterface(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdAnimBlueprintRemoveLayerInterface(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	FString AssetPathInput;
 	if (!JsonTryGetString(Ctx.Params, TEXT("asset_path"), AssetPathInput) || AssetPathInput.IsEmpty())
@@ -1085,7 +1085,7 @@ bool FUeAgentHttpServer::CmdAnimBlueprintRemoveLayerInterface(const FUeAgentRequ
 	return true;
 }
 
-bool FUeAgentHttpServer::CmdAnimBlueprintAddAnimLayer(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdAnimBlueprintAddAnimLayer(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	FString AssetPathInput;
 	if (!JsonTryGetString(Ctx.Params, TEXT("asset_path"), AssetPathInput) || AssetPathInput.IsEmpty())
@@ -1150,7 +1150,7 @@ bool FUeAgentHttpServer::CmdAnimBlueprintAddAnimLayer(const FUeAgentRequestConte
 	return true;
 }
 
-bool FUeAgentHttpServer::CmdAnimBlueprintRemoveAnimLayer(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdAnimBlueprintRemoveAnimLayer(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	FString AssetPathInput;
 	if (!JsonTryGetString(Ctx.Params, TEXT("asset_path"), AssetPathInput) || AssetPathInput.IsEmpty())
@@ -1213,7 +1213,7 @@ bool FUeAgentHttpServer::CmdAnimBlueprintRemoveAnimLayer(const FUeAgentRequestCo
 	return true;
 }
 
-bool FUeAgentHttpServer::CmdAnimBlueprintRenameAnimLayer(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdAnimBlueprintRenameAnimLayer(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	FString AssetPathInput;
 	if (!JsonTryGetString(Ctx.Params, TEXT("asset_path"), AssetPathInput) || AssetPathInput.IsEmpty())
@@ -1288,7 +1288,7 @@ bool FUeAgentHttpServer::CmdAnimBlueprintRenameAnimLayer(const FUeAgentRequestCo
 	return true;
 }
 
-bool FUeAgentHttpServer::CmdAnimBlueprintAddStateMachine(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdAnimBlueprintAddStateMachine(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	FString AssetPathInput;
 	if (!JsonTryGetString(Ctx.Params, TEXT("asset_path"), AssetPathInput) || AssetPathInput.IsEmpty())
@@ -1373,7 +1373,7 @@ bool FUeAgentHttpServer::CmdAnimBlueprintAddStateMachine(const FUeAgentRequestCo
 	return true;
 }
 
-bool FUeAgentHttpServer::CmdAnimBlueprintRemoveStateMachine(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdAnimBlueprintRemoveStateMachine(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	FString AssetPathInput;
 	if (!JsonTryGetString(Ctx.Params, TEXT("asset_path"), AssetPathInput) || AssetPathInput.IsEmpty())
@@ -1421,7 +1421,7 @@ bool FUeAgentHttpServer::CmdAnimBlueprintRemoveStateMachine(const FUeAgentReques
 	return true;
 }
 
-bool FUeAgentHttpServer::CmdAnimBlueprintRenameStateMachine(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdAnimBlueprintRenameStateMachine(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	FString AssetPathInput;
 	if (!JsonTryGetString(Ctx.Params, TEXT("asset_path"), AssetPathInput) || AssetPathInput.IsEmpty())
@@ -1486,7 +1486,7 @@ bool FUeAgentHttpServer::CmdAnimBlueprintRenameStateMachine(const FUeAgentReques
 	return true;
 }
 
-bool FUeAgentHttpServer::CmdAnimBlueprintSetEntryState(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdAnimBlueprintSetEntryState(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	FString AssetPathInput;
 	if (!JsonTryGetString(Ctx.Params, TEXT("asset_path"), AssetPathInput) || AssetPathInput.IsEmpty())
@@ -1572,7 +1572,7 @@ bool FUeAgentHttpServer::CmdAnimBlueprintSetEntryState(const FUeAgentRequestCont
 	return true;
 }
 
-bool FUeAgentHttpServer::CmdAnimBlueprintClearEntryState(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdAnimBlueprintClearEntryState(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	FString AssetPathInput;
 	if (!JsonTryGetString(Ctx.Params, TEXT("asset_path"), AssetPathInput) || AssetPathInput.IsEmpty())
@@ -1629,7 +1629,7 @@ bool FUeAgentHttpServer::CmdAnimBlueprintClearEntryState(const FUeAgentRequestCo
 	return true;
 }
 
-bool FUeAgentHttpServer::CmdAnimBlueprintAddState(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdAnimBlueprintAddState(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	FString AssetPathInput;
 	if (!JsonTryGetString(Ctx.Params, TEXT("asset_path"), AssetPathInput) || AssetPathInput.IsEmpty())
@@ -1731,7 +1731,7 @@ bool FUeAgentHttpServer::CmdAnimBlueprintAddState(const FUeAgentRequestContext& 
 	return true;
 }
 
-bool FUeAgentHttpServer::CmdAnimBlueprintSetStateProperties(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdAnimBlueprintSetStateProperties(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	FString AssetPathInput;
 	if (!JsonTryGetString(Ctx.Params, TEXT("asset_path"), AssetPathInput) || AssetPathInput.IsEmpty())
@@ -1875,7 +1875,7 @@ bool FUeAgentHttpServer::CmdAnimBlueprintSetStateProperties(const FUeAgentReques
 	return true;
 }
 
-bool FUeAgentHttpServer::CmdAnimBlueprintAddConduit(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdAnimBlueprintAddConduit(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	FString AssetPathInput;
 	if (!JsonTryGetString(Ctx.Params, TEXT("asset_path"), AssetPathInput) || AssetPathInput.IsEmpty())
@@ -1961,7 +1961,7 @@ bool FUeAgentHttpServer::CmdAnimBlueprintAddConduit(const FUeAgentRequestContext
 	return true;
 }
 
-bool FUeAgentHttpServer::CmdAnimBlueprintAddStateAlias(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdAnimBlueprintAddStateAlias(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	FString AssetPathInput;
 	if (!JsonTryGetString(Ctx.Params, TEXT("asset_path"), AssetPathInput) || AssetPathInput.IsEmpty())
@@ -2072,7 +2072,7 @@ bool FUeAgentHttpServer::CmdAnimBlueprintAddStateAlias(const FUeAgentRequestCont
 	return true;
 }
 
-bool FUeAgentHttpServer::CmdAnimBlueprintRemoveStateNode(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdAnimBlueprintRemoveStateNode(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	FString AssetPathInput;
 	if (!JsonTryGetString(Ctx.Params, TEXT("asset_path"), AssetPathInput) || AssetPathInput.IsEmpty())
@@ -2154,7 +2154,7 @@ bool FUeAgentHttpServer::CmdAnimBlueprintRemoveStateNode(const FUeAgentRequestCo
 	return true;
 }
 
-bool FUeAgentHttpServer::CmdAnimBlueprintRenameStateNode(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdAnimBlueprintRenameStateNode(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	FString AssetPathInput;
 	if (!JsonTryGetString(Ctx.Params, TEXT("asset_path"), AssetPathInput) || AssetPathInput.IsEmpty())
@@ -2272,7 +2272,7 @@ bool FUeAgentHttpServer::CmdAnimBlueprintRenameStateNode(const FUeAgentRequestCo
 	return true;
 }
 
-bool FUeAgentHttpServer::CmdAnimBlueprintSetStateAliasTargets(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdAnimBlueprintSetStateAliasTargets(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	FString AssetPathInput;
 	if (!JsonTryGetString(Ctx.Params, TEXT("asset_path"), AssetPathInput) || AssetPathInput.IsEmpty())
@@ -2380,7 +2380,7 @@ bool FUeAgentHttpServer::CmdAnimBlueprintSetStateAliasTargets(const FUeAgentRequ
 	return true;
 }
 
-bool FUeAgentHttpServer::CmdAnimBlueprintAddTransition(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdAnimBlueprintAddTransition(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	FString AssetPathInput;
 	if (!JsonTryGetString(Ctx.Params, TEXT("asset_path"), AssetPathInput) || AssetPathInput.IsEmpty())
@@ -2500,7 +2500,7 @@ bool FUeAgentHttpServer::CmdAnimBlueprintAddTransition(const FUeAgentRequestCont
 	return true;
 }
 
-bool FUeAgentHttpServer::CmdAnimBlueprintSetTransitionProperties(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdAnimBlueprintSetTransitionProperties(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	FString AssetPathInput;
 	if (!JsonTryGetString(Ctx.Params, TEXT("asset_path"), AssetPathInput) || AssetPathInput.IsEmpty())
@@ -2669,7 +2669,7 @@ bool FUeAgentHttpServer::CmdAnimBlueprintSetTransitionProperties(const FUeAgentR
 	return true;
 }
 
-bool FUeAgentHttpServer::CmdAnimBlueprintRemoveTransition(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdAnimBlueprintRemoveTransition(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	FString AssetPathInput;
 	if (!JsonTryGetString(Ctx.Params, TEXT("asset_path"), AssetPathInput) || AssetPathInput.IsEmpty())
@@ -2760,7 +2760,7 @@ bool FUeAgentHttpServer::CmdAnimBlueprintRemoveTransition(const FUeAgentRequestC
 	return true;
 }
 
-bool FUeAgentHttpServer::CmdAnimBlueprintSetPreviewMesh(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdAnimBlueprintSetPreviewMesh(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	FString AssetPathInput;
 	if (!JsonTryGetString(Ctx.Params, TEXT("asset_path"), AssetPathInput) || AssetPathInput.IsEmpty())
@@ -2822,7 +2822,7 @@ bool FUeAgentHttpServer::CmdAnimBlueprintSetPreviewMesh(const FUeAgentRequestCon
 	return true;
 }
 
-bool FUeAgentHttpServer::CmdAnimBlueprintSetPreviewAnimationBlueprint(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdAnimBlueprintSetPreviewAnimationBlueprint(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	FString AssetPathInput;
 	if (!JsonTryGetString(Ctx.Params, TEXT("asset_path"), AssetPathInput) || AssetPathInput.IsEmpty())
@@ -2909,7 +2909,7 @@ bool FUeAgentHttpServer::CmdAnimBlueprintSetPreviewAnimationBlueprint(const FUeA
 	return true;
 }
 
-bool FUeAgentHttpServer::CmdAnimBlueprintReparent(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdAnimBlueprintReparent(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	FString AssetPathInput;
 	if (!JsonTryGetString(Ctx.Params, TEXT("asset_path"), AssetPathInput) || AssetPathInput.IsEmpty())

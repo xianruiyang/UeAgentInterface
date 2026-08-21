@@ -304,6 +304,6 @@ namespace UE::UAI::CommandHandlers::ModelingGeometry
 					MakeShared<FModelingSessionHandler>(NativeMechanicsPort))
 				: StaticCastSharedRef<IUeAgentExactCommandHandler>(MakeShared<FHandler>(Id)));
 		}
-		return OutHandlers.Num() == 32;
+		return OutHandlers.Num() == 34;
 	}
 }

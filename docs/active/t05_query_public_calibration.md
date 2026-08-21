@@ -36,8 +36,8 @@ The active chain is HTTP transport → `FUeAgentCommandService` → process exac
 ingress → `FUeAgentExactCommandDispatch` → one of the three T05 handlers → the
 same final registry or production Query source. The module no longer installs
 `MakeUnavailableCommandIngress()` and does not activate the legacy aggregate
-`FUeAgentQueryServiceComposition`. Older Query providers remain source
-inventory for T06 only and are not reachable through the active process
-registry.
+`FUeAgentQueryServiceComposition`. Current domain Query providers are reachable
+only through the active command registration and exact process registry; the
+retired aggregate is historical evidence and is not compiled or test-discovered.
 
 T05 does not claim that every historical Query command has migrated. Its production claim is limited to command discovery plus the six calibrated representative source categories above.

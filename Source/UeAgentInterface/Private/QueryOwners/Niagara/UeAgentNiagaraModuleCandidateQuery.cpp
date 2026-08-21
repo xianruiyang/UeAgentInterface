@@ -80,12 +80,18 @@ namespace UE::UAI::QueryOwners::Niagara
 			const FString& CandidateName,
 			const FString& TargetUsage)
 		{
+			FString CanonicalUsage;
+			if (!UeAgentPaletteSearch::TryCanonicalizeNiagaraTargetUsage(
+					TargetUsage, CanonicalUsage))
+			{
+				CanonicalUsage = NormalizeUsage(TargetUsage);
+			}
 			return Sha256(
 				CandidateName + TEXT("|") + CandidateKind + TEXT("|")
 					+ InputContract + TEXT("|") + PlacementContract + TEXT("|")
 					+ RequiredContext + TEXT("|")
 					+ Target.GetClass()->GetPathName() + TEXT("|")
-					+ NormalizeUsage(TargetUsage));
+					+ CanonicalUsage);
 		}
 
 		bool ReadTargetRevision(
@@ -246,5 +252,37 @@ namespace UE::UAI::QueryOwners::Niagara
 			return Fail(OutError, TEXT("niagara_candidate_binding_stale"), CandidateName, Candidate->BindingRevision);
 		}
 		return true;
+	}
+
+	bool IsCurrentNiagaraModuleCandidateBinding(
+		UObject& Target,
+		const FString& CandidateName,
+		const FString& CandidateKindValue,
+		const TArray<FString>& SupportedOperations,
+		const FString& InputContractValue,
+		const FString& PlacementContractValue,
+		const FString& RequiredContextValue,
+		const FString& TargetUsage,
+		const FString& BindingRevision,
+		FNiagaraModuleCandidateQueryError& OutError)
+	{
+		const TArray<FString> ExpectedOperations = {TEXT("create")};
+		if (CandidateKindValue != CandidateKind
+			|| SupportedOperations != ExpectedOperations
+			|| InputContractValue != InputContract
+			|| PlacementContractValue != PlacementContract
+			|| RequiredContextValue != RequiredContext)
+		{
+			return Fail(
+				OutError,
+				TEXT("niagara_candidate_contract_mismatch"),
+				CandidateName);
+		}
+		return IsCurrentNiagaraModuleCandidateBinding(
+			Target,
+			CandidateName,
+			TargetUsage,
+			BindingRevision,
+			OutError);
 	}
 }

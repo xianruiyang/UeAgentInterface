@@ -12,6 +12,10 @@ registry is authoritative.
 returns concrete node classes; for a MetaSoundSource it returns registered
 frontend class names and versions. Candidate name, kind, version, binding
 revision, target revision, and placement contract are exact opaque identities.
+Copy the complete selected candidate into the HJSON operation, including its
+`target_ref`, `target_revision`, supported operations, input and placement
+contracts, required context, binding revision, and MetaSound version fields.
+Do not reconstruct a candidate from a display label or class name.
 
 The `uai.audio_graph.edit/1` provider is a thin adapter over the shared HJSON
 import lifecycle. It owns only classification, initialization-contract
@@ -31,9 +35,16 @@ Writes delegate unchanged to `metasound.graph.interface.mutate`,
 does not introduce a second asset factory, recursive initializer, graph
 compiler, persistence path, readback authority, or cleanup path.
 
-Existing-root import requires the current content-graph revision. Successful
-import compiles or validates through the domain owner, saves, reloads, and
-returns independent `content_graph.*` readback. Missing roots, stale revisions,
-target mismatch, invalid candidates, unsupported root creation, or unregistered
-operations fail before write or roll back without residue. Export remains
-unsupported until a complete-workspace contract is registered.
+The provider supports both missing-root creation and existing-root editing for
+`/Script/Engine.SoundCue` and
+`/Script/MetasoundEngine.MetaSoundSource`. Missing-root creation uses
+`expected_revision: "missing"` and a root `create` object; creation and graph
+editing are separate imports. Existing-root import requires the exact current
+content-graph revision and must not carry `create`.
+
+Successful import compiles or validates through the domain owner, saves,
+reloads, and returns independent `content_graph.*` readback with a native
+lifecycle receipt. Stale revisions, target mismatch, invalid or stale
+candidates, unsupported operations, and native contract failures are returned
+as actionable typed errors before write or after rollback without residue.
+Export remains unsupported until a complete-workspace contract is registered.

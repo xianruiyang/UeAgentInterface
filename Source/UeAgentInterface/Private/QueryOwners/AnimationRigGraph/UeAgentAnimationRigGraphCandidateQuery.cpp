@@ -14,6 +14,11 @@ namespace UE::UAI::QueryOwners::AnimationRigGraph
 
 	namespace
 	{
+		const FString CandidateKind = TEXT("rig_unit_struct");
+		const FString InputContract = TEXT("uai.rig.unit.create/1");
+		const FString PlacementContract = TEXT("uai.rig.graph-placement/1");
+		const FString RequiredContext = TEXT("target_ref:node_id:position");
+
 		bool Fail(
 			FAnimationRigGraphCandidateQueryError& OutError,
 			FString Code,
@@ -58,6 +63,18 @@ namespace UE::UAI::QueryOwners::AnimationRigGraph
 				TEXT("/Script/Engine.Skeleton"),
 			};
 			return Supported.Contains(Target.GetClass()->GetPathName());
+		}
+
+		FString CandidateRevision(
+			const FString& TargetRef,
+			const FString& TargetRevision,
+			const FString& Name)
+		{
+			return Sha256(
+				TargetRef + TEXT("|") + TargetRevision + TEXT("|") + Name
+					+ TEXT("|") + CandidateKind + TEXT("|") + InputContract
+					+ TEXT("|") + PlacementContract + TEXT("|")
+					+ RequiredContext);
 		}
 
 		bool ReadTargetRevision(
@@ -150,19 +167,19 @@ namespace UE::UAI::QueryOwners::AnimationRigGraph
 				continue;
 			}
 			FAnimationRigGraphCandidate Candidate;
+			Candidate.TargetRef = OutResult.Target;
+			Candidate.TargetRevision = OutResult.TargetRevision;
 			Candidate.Name = Identity;
 			Candidate.Label = Struct->GetDisplayNameText().ToString();
-			Candidate.Kind = TEXT("rig_unit_struct");
+			Candidate.Kind = CandidateKind;
 			Candidate.SupportedOperations = {TEXT("create")};
-			Candidate.InputContract = TEXT("uai.rig.unit.create/1");
-			Candidate.PlacementContract =
-				TEXT("uai.rig.explicit-space-placement/1");
-			Candidate.RequiredContext =
-				TEXT("target_ref:unit_id:space_ref:parent_ref:transform");
-			Candidate.BindingRevision = Sha256(Candidate.Name + TEXT("|")
-				+ Candidate.InputContract + TEXT("|")
-				+ Candidate.PlacementContract + TEXT("|")
-				+ Candidate.RequiredContext);
+			Candidate.InputContract = InputContract;
+			Candidate.PlacementContract = PlacementContract;
+			Candidate.RequiredContext = RequiredContext;
+			Candidate.BindingRevision = CandidateRevision(
+				Candidate.TargetRef,
+				Candidate.TargetRevision,
+				Candidate.Name);
 			Matches.Add(MoveTemp(Candidate));
 		}
 
@@ -181,6 +198,87 @@ namespace UE::UAI::QueryOwners::AnimationRigGraph
 		OutResult.bHasMore = End < OutResult.TotalMatches;
 		OutResult.bComplete = !OutResult.bHasMore;
 		OutResult.NextCursor = OutResult.bHasMore ? End : INDEX_NONE;
+		return true;
+	}
+
+	bool IsCurrentAnimationRigGraphCandidateBinding(
+		UObject& Target,
+		const FString& CandidateTargetRef,
+		const FString& CandidateTargetRevision,
+		const FString& CandidateName,
+		const FString& CandidateKindValue,
+		const TArray<FString>& SupportedOperations,
+		const FString& InputContractValue,
+		const FString& PlacementContractValue,
+		const FString& RequiredContextValue,
+		const FString& BindingRevision,
+		FAnimationRigGraphCandidateQueryError& OutError)
+	{
+		OutError = {};
+		if (!IsInGameThread())
+		{
+			return Fail(
+				OutError,
+				TEXT("animation_rig_graph_candidate_game_thread_required"),
+				Target.GetPathName());
+		}
+		if (!IsSupportedTarget(Target))
+		{
+			return Fail(
+				OutError,
+				TEXT("animation_rig_graph_candidate_target_type_unsupported"),
+				Target.GetClass()->GetPathName());
+		}
+		FString CurrentTargetRevision;
+		if (CandidateTargetRef != Target.GetPathName()
+			|| !ReadTargetRevision(Target, CurrentTargetRevision, OutError)
+			|| CandidateTargetRevision != CurrentTargetRevision)
+		{
+			if (!OutError.Code.IsEmpty())
+			{
+				return false;
+			}
+			return Fail(
+				OutError,
+				TEXT("animation_rig_graph_candidate_target_stale"),
+				CandidateTargetRef,
+				CurrentTargetRevision);
+		}
+		UScriptStruct* const CandidateStruct =
+			LoadObject<UScriptStruct>(nullptr, *CandidateName);
+		if (!CandidateStruct
+			|| CandidateStruct == FRigUnit::StaticStruct()
+			|| !CandidateStruct->IsChildOf(FRigUnit::StaticStruct())
+			|| CandidateStruct->HasMetaData(TEXT("Abstract"))
+			|| !CandidateStruct->GetPathName().StartsWith(TEXT("/Script/")))
+		{
+			return Fail(
+				OutError,
+				TEXT("animation_rig_graph_candidate_name_unresolved"),
+				CandidateName);
+		}
+		const TArray<FString> ExpectedOperations = {TEXT("create")};
+		if (CandidateKindValue != CandidateKind
+			|| SupportedOperations != ExpectedOperations
+			|| InputContractValue != InputContract
+			|| PlacementContractValue != PlacementContract
+			|| RequiredContextValue != RequiredContext)
+		{
+			return Fail(
+				OutError,
+				TEXT("animation_rig_graph_candidate_contract_mismatch"),
+				CandidateName);
+		}
+		const FString CurrentRevision = CandidateRevision(
+			CandidateTargetRef, CandidateTargetRevision, CandidateName);
+		if (BindingRevision != CurrentRevision)
+		{
+			return Fail(
+				OutError,
+				TEXT("animation_rig_graph_candidate_binding_stale"),
+				CandidateName,
+				CurrentRevision);
+		}
 		return true;
 	}
 }

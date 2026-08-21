@@ -310,7 +310,7 @@ namespace UeAgentModelingSpatialInfo
 	}
 }
 
-bool FUeAgentHttpServer::CmdModelingGetMeshSpatialInfo(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdModelingGetMeshSpatialInfo(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	using namespace UeAgentModelingSpatialInfo;
 

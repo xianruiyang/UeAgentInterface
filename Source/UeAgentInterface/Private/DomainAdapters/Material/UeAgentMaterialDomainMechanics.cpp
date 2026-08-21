@@ -3,8 +3,7 @@
 #include "CommandEdge/UeAgentCommandProtocol.h"
 #include "CommandRegistry/UeAgentImmutableCommandRegistry.h"
 #include "Core/Contract/UeAgentCommandJson.h"
-#include "Core/StateSemantic/UeAgentCanonicalValueJson.h"
-#include "DomainAdapters/ContentGraphRead/UeAgentContentGraphReadProductionEnvironment.h"
+#include "Core/HjsonWorkspace/DomainAuthoring/UeAgentDomainHjsonAuthoringKit.h"
 #include "Dom/JsonObject.h"
 #include "HAL/FileManager.h"
 #include "Misc/PackageName.h"
@@ -21,6 +20,7 @@ namespace UE::UAI::DomainAdapters::Material
 	using namespace CommandContract;
 	using namespace ContextResource;
 	using namespace HjsonWorkspace;
+	using namespace HjsonWorkspace::DomainAuthoring;
 	using namespace DomainAdapters::ContentGraphRead;
 
 	namespace
@@ -61,64 +61,6 @@ namespace UE::UAI::DomainAdapters::Material
 			}
 			const FString AssetName = FPackageName::GetLongPackageAssetName(Target);
 			return AssetName.IsEmpty() ? Target : Target + TEXT(".") + AssetName;
-		}
-
-		FUeAgentResourceTracker MakeResources()
-		{
-			return FUeAgentResourceTracker(FUeAgentResourceBudget({
-				{EUeAgentResourceDimension::InputBytes, 16 * 1024 * 1024},
-				{EUeAgentResourceDimension::OutputBytes, 16 * 1024 * 1024},
-				{EUeAgentResourceDimension::StringBytes, 16 * 1024 * 1024},
-				{EUeAgentResourceDimension::Nodes, 16384},
-				{EUeAgentResourceDimension::Items, 65536},
-				{EUeAgentResourceDimension::Files, 4096},
-				{EUeAgentResourceDimension::ReferenceEdges, 65536},
-				{EUeAgentResourceDimension::WorkUnits, 262144},
-				{EUeAgentResourceDimension::EstimatedMemoryBytes, 256 * 1024 * 1024},
-			}));
-		}
-
-		TSharedPtr<FJsonValue> JsonValueFromHjson(
-			const FHjsonNode& Node,
-			FWorkspaceError& OutError)
-		{
-			switch (Node.GetKind())
-			{
-			case EHjsonNodeKind::Null:
-				return MakeShared<FJsonValueNull>();
-			case EHjsonNodeKind::Boolean:
-				return MakeShared<FJsonValueBoolean>(Node.GetBoolean());
-			case EHjsonNodeKind::String:
-				return MakeShared<FJsonValueString>(Node.GetText());
-			case EHjsonNodeKind::Integer:
-			case EHjsonNodeKind::Decimal:
-				return MakeShared<FJsonValueNumber>(FCString::Atod(*Node.GetLexeme()));
-			case EHjsonNodeKind::Array:
-			{
-				TArray<TSharedPtr<FJsonValue>> Items;
-				for (const FHjsonNodeRef& Item : Node.GetItems())
-				{
-					TSharedPtr<FJsonValue> Converted = JsonValueFromHjson(*Item, OutError);
-					if (!Converted.IsValid()) return nullptr;
-					Items.Add(MoveTemp(Converted));
-				}
-				return MakeShared<FJsonValueArray>(MoveTemp(Items));
-			}
-			case EHjsonNodeKind::Object:
-			{
-				const TSharedPtr<FJsonObject> Object = MakeShared<FJsonObject>();
-				for (const TPair<FString, FHjsonNodeRef>& Entry : Node.GetEntries())
-				{
-					TSharedPtr<FJsonValue> Converted = JsonValueFromHjson(*Entry.Value, OutError);
-					if (!Converted.IsValid()) return nullptr;
-					Object->SetField(Entry.Key, MoveTemp(Converted));
-				}
-				return MakeShared<FJsonValueObject>(Object);
-			}
-			default:
-				Fail(OutError, TEXT("material_domain_hjson_node_invalid"));
-				return nullptr;
-			}
 		}
 
 		bool CanonicalObject(
@@ -194,20 +136,15 @@ namespace UE::UAI::DomainAdapters::Material
 			{
 				return false;
 			}
-			TMap<FString, TSharedRef<IUeAgentCommandHandler>> Mechanics;
+			TSharedPtr<IUeAgentCommandHandler> Mechanics;
 			FString MechanicsError;
-			if (!OperationOwners::MaterialCommands::TryCreateMechanicsHandlers(
-					Mechanics, MechanicsError))
+			if (!OperationOwners::MaterialCommands::TryResolveMechanicsHandler(
+					CommandId, Mechanics, MechanicsError)
+				|| !Mechanics.IsValid())
 			{
 				return Fail(OutError, TEXT("material_domain_mechanics_unavailable"), CommandId, MechanicsError);
 			}
-			const TSharedRef<IUeAgentCommandHandler>* Handler = Mechanics.Find(CommandId);
-			if (!Handler)
-			{
-				return Fail(OutError, TEXT("material_domain_mechanics_missing"), CommandId);
-			}
-			const FUeAgentCommandResult Result = OperationOwners::MaterialCommands::Submit(
-				*Handler,
+			const FUeAgentCommandResult Result = Mechanics->Submit(
 				Request.GetValue(),
 				Contract::FUeAgentCallerContext(
 					TEXT("material-domain-provider"),
@@ -228,252 +165,33 @@ namespace UE::UAI::DomainAdapters::Material
 			return true;
 		}
 
-		bool ParseDocument(
-			const TSharedPtr<FJsonObject>& Params,
-			TSharedPtr<FJsonObject>& OutRoot,
-			FString& OutType,
+		bool TryRead(
+			const FString& Target,
+			const FString& RootType,
+			FString& OutPayload,
+			FString& OutRevision,
+			TSharedPtr<FJsonObject>* OutSnapshot,
 			FWorkspaceError& OutError)
 		{
-			OutRoot.Reset();
-			OutType.Reset();
-			if (!Params.IsValid()
-				|| Params->HasField(TEXT("carrier"))
-				|| Params->HasField(TEXT("hjson_document")))
-			{
-				return Fail(OutError, TEXT("material_domain_legacy_source_contract_rejected"));
-			}
-			FString Target;
-			const TSharedPtr<FJsonObject>* Source = nullptr;
-			FString Kind;
-			FString TargetIdentity;
-			FString EntryFile;
-			const TArray<TSharedPtr<FJsonValue>>* Documents = nullptr;
-			if (!Params->TryGetStringField(TEXT("target"), Target)
-				|| Target.IsEmpty()
-				|| !Params->TryGetObjectField(TEXT("source"), Source)
-				|| !Source || !Source->IsValid()
-				|| !(*Source)->TryGetStringField(TEXT("kind"), Kind)
-				|| Kind != TEXT("resolved")
-				|| !(*Source)->TryGetStringField(TEXT("target_identity"), TargetIdentity)
-				|| TargetIdentity != Target
-				|| !(*Source)->TryGetStringField(TEXT("entry_file"), EntryFile)
-				|| EntryFile.IsEmpty()
-				|| !(*Source)->TryGetArrayField(TEXT("documents"), Documents)
-				|| !Documents || Documents->IsEmpty())
-			{
-				return Fail(OutError, TEXT("material_domain_resolved_source_invalid"));
-			}
-			FString Text;
-			int32 EntryMatches = 0;
-			for (const TSharedPtr<FJsonValue>& Value : *Documents)
-			{
-				const TSharedPtr<FJsonObject> DocumentObject = Value.IsValid()
-					? Value->AsObject() : nullptr;
-				FString RelativePath;
-				FString DocumentText;
-				if (!DocumentObject.IsValid()
-					|| !DocumentObject->TryGetStringField(TEXT("path"), RelativePath)
-					|| !DocumentObject->TryGetStringField(TEXT("document"), DocumentText))
-				{
-					return Fail(OutError, TEXT("material_domain_resolved_source_invalid"));
-				}
-				if (RelativePath == EntryFile)
-				{
-					Text = MoveTemp(DocumentText);
-					++EntryMatches;
-				}
-			}
-			if (EntryMatches != 1 || Text.IsEmpty())
-			{
-				return Fail(OutError, TEXT("material_domain_resolved_source_invalid"), EntryFile);
-			}
-			FUeAgentResourceTracker Resources = MakeResources();
-			FHjsonDocumentPtr Document;
-			if (!TryParseHjsonDocument(
-					Text, TEXT("inline:material-domain"), Resources, Document, OutError)
-				|| !Document.IsValid())
+			UObject* Owner = nullptr;
+			FUeAgentContentGraphCapture Capture;
+			if (!TryCaptureObject(
+					Target, RootType, Owner, Capture, OutError))
 			{
 				return false;
 			}
-			TSharedPtr<FJsonValue> Converted = JsonValueFromHjson(*Document->GetRoot(), OutError);
-			const TSharedPtr<FJsonObject> Canonical =
-				Converted.IsValid() ? Converted->AsObject() : nullptr;
-			FString Schema;
-			const TSharedPtr<FJsonObject>* Root = nullptr;
-			if (!Canonical.IsValid()
-				|| !Canonical->TryGetStringField(TEXT("schema"), Schema)
-				|| Schema != SchemaId
-				|| !Canonical->TryGetObjectField(TEXT("root"), Root)
-				|| !Root || !Root->IsValid()
-				|| !(*Root)->TryGetStringField(TEXT("type"), OutType)
-				|| !IsSupportedRootType(OutType))
+			TSharedPtr<FJsonObject> Snapshot;
+			if (!TryBuildCaptureSnapshot(
+					Target, RootType, Capture, Snapshot, OutError))
 			{
-				return Fail(OutError, TEXT("material_domain_schema_or_type_invalid"), OutType);
+				return false;
 			}
-			OutRoot = *Root;
-			return true;
-		}
-
-		bool TryCapture(
-			const FString& Target,
-			FString& OutType,
-			FUeAgentContentGraphCapture& OutCapture,
-			FWorkspaceError& OutError)
-		{
-			UObject* Owner = StaticLoadObject(UObject::StaticClass(), nullptr, *Target);
-			if (!Owner)
-			{
-				return Fail(OutError, TEXT("material_domain_target_unresolved"), Target);
-			}
-			OutType = Owner->GetClass()->GetPathName();
-			if (!IsSupportedRootType(OutType))
-			{
-				return Fail(OutError, TEXT("material_domain_target_type_invalid"), OutType);
-			}
-			FUeAgentContentGraphReadError CaptureError;
-			if (!FUeAgentContentGraphReadProductionEnvironment::TryCaptureOwner(
-					*Owner, OutCapture, CaptureError))
-			{
-				return Fail(
-					OutError,
-					CaptureError.Code.IsEmpty()
-						? FString(TEXT("material_domain_readback_failed"))
-						: CaptureError.Code,
-					CaptureError.SubjectId,
-					CaptureError.Detail);
-			}
-			return true;
-		}
-
-		TSharedPtr<FJsonObject> CaptureJson(
-			const FString& Target,
-			const FString& Type,
-			const FUeAgentContentGraphCapture& Capture)
-		{
-			const TSharedPtr<FJsonObject> Result = MakeShared<FJsonObject>();
-			Result->SetStringField(TEXT("target"), Target);
-			Result->SetStringField(TEXT("root_type"), Type);
-			Result->SetStringField(TEXT("domain_id"), Capture.DomainId);
-			Result->SetStringField(TEXT("revision"), Capture.Revision);
-			Result->SetBoolField(TEXT("complete"), true);
-			Result->SetBoolField(TEXT("has_more"), false);
-
-			TArray<TSharedPtr<FJsonValue>> Items;
-			for (const FUeAgentContentGraphItem& Item : Capture.Items)
-			{
-				const TSharedPtr<FJsonObject> Value = MakeShared<FJsonObject>();
-				Value->SetStringField(TEXT("id"), Item.ItemId);
-				Value->SetStringField(TEXT("kind"), Item.ItemKind);
-				Value->SetStringField(TEXT("class_path"), Item.ClassPath);
-				Value->SetStringField(TEXT("container_id"), Item.ContainerId);
-				Value->SetNumberField(TEXT("order"), Item.Order);
-				Items.Add(MakeShared<FJsonValueObject>(Value));
-			}
-			Result->SetArrayField(TEXT("items"), MoveTemp(Items));
-
-			TArray<TSharedPtr<FJsonValue>> Relations;
-			for (const FUeAgentContentGraphRelation& Relation : Capture.Relations)
-			{
-				const TSharedPtr<FJsonObject> Value = MakeShared<FJsonObject>();
-				Value->SetStringField(TEXT("id"), Relation.RelationId);
-				Value->SetStringField(TEXT("kind"), Relation.RelationKind);
-				Value->SetStringField(TEXT("source"), Relation.SourceItemId);
-				Value->SetStringField(TEXT("target"), Relation.TargetItemId);
-				Relations.Add(MakeShared<FJsonValueObject>(Value));
-			}
-			Result->SetArrayField(TEXT("relations"), MoveTemp(Relations));
-
-			auto AddFieldState = [](
-				const FUeAgentContentGraphFieldState& State,
-				const TSharedPtr<FJsonObject>& Value)
-			{
-				FString ConversionError;
-				TSharedPtr<FJsonValue> StateValue;
-				if (State.Value.IsValid()
-					&& StateSemantic::CanonicalJson::TryToJsonValue(
-						*State.Value, StateValue, ConversionError)
-					&& StateValue.IsValid())
-				{
-					Value->SetField(TEXT("value"), StateValue);
-				}
-				const TCHAR* Override = TEXT("none");
-				if (State.OverrideState
-					== StateSemantic::EUeAgentOverrideState::Inherited)
-				{
-					Override = TEXT("inherited");
-				}
-				else if (State.OverrideState
-					== StateSemantic::EUeAgentOverrideState::Overridden)
-				{
-					Override = TEXT("overridden");
-				}
-				Value->SetStringField(TEXT("override_state"), Override);
-				Value->SetBoolField(
-					TEXT("authored"),
-					State.AuthoredPresence
-						== StateSemantic::EUeAgentAuthoredPresence::Present);
-			};
-
-			TArray<TSharedPtr<FJsonValue>> Properties;
-			for (const FUeAgentContentGraphProperty& Property : Capture.Properties)
-			{
-				const TSharedPtr<FJsonObject> Value = MakeShared<FJsonObject>();
-				Value->SetStringField(TEXT("id"), Property.FieldId);
-				Value->SetStringField(TEXT("owner"), Property.OwnerId);
-				AddFieldState(Property.State, Value);
-				Properties.Add(MakeShared<FJsonValueObject>(Value));
-			}
-			Result->SetArrayField(TEXT("properties"), MoveTemp(Properties));
-
-			TArray<TSharedPtr<FJsonValue>> Parameters;
-			for (const FUeAgentContentGraphParameter& Parameter : Capture.Parameters)
-			{
-				const TSharedPtr<FJsonObject> Value = MakeShared<FJsonObject>();
-				Value->SetStringField(TEXT("id"), Parameter.ParameterId);
-				Value->SetStringField(TEXT("owner"), Parameter.OwnerId);
-				for (const TPair<FString, FString>& Selector
-					: Parameter.SemanticIdentity.Selectors)
-				{
-					Value->SetStringField(Selector.Key, Selector.Value);
-				}
-				AddFieldState(Parameter.State, Value);
-				Parameters.Add(MakeShared<FJsonValueObject>(Value));
-			}
-			Result->SetArrayField(TEXT("parameters"), MoveTemp(Parameters));
-
-			bool bCompileValid = true;
-			TArray<TSharedPtr<FJsonValue>> Diagnostics;
-			for (const FUeAgentContentGraphDiagnostic& Diagnostic : Capture.Diagnostics)
-			{
-				const TSharedPtr<FJsonObject> Value = MakeShared<FJsonObject>();
-				Value->SetStringField(TEXT("id"), Diagnostic.DiagnosticId);
-				Value->SetStringField(TEXT("severity"), Diagnostic.Severity);
-				Value->SetStringField(TEXT("code"), Diagnostic.Code);
-				Value->SetBoolField(TEXT("resolved"), Diagnostic.bResolved);
-				Diagnostics.Add(MakeShared<FJsonValueObject>(Value));
-				if (!Diagnostic.bResolved && Diagnostic.Severity.Equals(
-						TEXT("error"), ESearchCase::IgnoreCase))
-				{
-					bCompileValid = false;
-				}
-			}
-			Result->SetArrayField(TEXT("diagnostics"), MoveTemp(Diagnostics));
-			Result->SetStringField(
-				TEXT("compile_status"), bCompileValid ? TEXT("valid") : TEXT("error"));
-			return Result;
-		}
-
-		bool TryRead(
-			const FString& Target,
-			FString& OutPayload,
-			FString& OutRevision,
-			FWorkspaceError& OutError)
-		{
-			FString Type;
-			FUeAgentContentGraphCapture Capture;
-			if (!TryCapture(Target, Type, Capture, OutError)) return false;
 			OutRevision = Capture.Revision;
-			return CanonicalObject(CaptureJson(Target, Type, Capture), OutPayload, OutError);
+			if (OutSnapshot)
+			{
+				*OutSnapshot = Snapshot;
+			}
+			return TryCanonicalizeObject(Snapshot, OutPayload, OutError);
 		}
 
 		bool ValidateAndStripExpressionCandidates(
@@ -556,25 +274,33 @@ namespace UE::UAI::DomainAdapters::Material
 
 		bool TryImport(
 			const FString& Target,
-			const TSharedPtr<FJsonObject>& Params,
+			const FString& RootType,
+			const FString& CanonicalParamsJson,
 			FString& OutPayload,
 			FWorkspaceError& OutError)
 		{
-			TSharedPtr<FJsonObject> Root;
-			FString RootType;
-			if (!ParseDocument(Params, Root, RootType, OutError)) return false;
-			FString ExpectedRevision;
-			if (!Params->TryGetStringField(TEXT("expected_revision"), ExpectedRevision))
+			FResolvedDomainHjsonDocument Document;
+			if (!TryDecodeResolvedDocument(
+					Target,
+					CanonicalParamsJson,
+					FDomainHjsonDocumentContract(
+						TEXT("material"), SchemaId, RootType),
+					Document,
+					OutError))
 			{
-				return Fail(OutError, TEXT("material_domain_expected_revision_required"));
+				return false;
 			}
+			const TSharedPtr<FJsonObject>& Root = Document.Root;
+			const FString& ExpectedRevision = Document.ExpectedRevision;
 
 			FString BeforePayload;
 			FString CurrentRevision;
 			bool bExists = ExpectedRevision != TEXT("missing");
 			if (bExists)
 			{
-				if (!TryRead(Target, BeforePayload, CurrentRevision, OutError))
+				if (!TryRead(
+						Target, RootType, BeforePayload, CurrentRevision,
+						nullptr, OutError))
 				{
 					return false;
 				}
@@ -607,13 +333,31 @@ namespace UE::UAI::DomainAdapters::Material
 				{
 					return Fail(OutError, TEXT("material_domain_create_contract_required"));
 				}
-				if (RootType == MaterialType)
+				if (RootType == MaterialType || RootType == FunctionType)
 				{
 					if (Root->HasField(TEXT("edits")))
 					{
 						return Fail(OutError, TEXT("material_domain_create_then_edit_not_atomic"));
 					}
-					if (!SubmitMaterialCommand(TEXT("material.asset.create"), *Create,
+					const FString ExpectedKind = RootType == FunctionType
+						? FString(TEXT("material_function"))
+						: FString(TEXT("material"));
+					FString DeclaredKind;
+					if ((*Create)->TryGetStringField(
+							TEXT("material_kind"), DeclaredKind)
+						&& DeclaredKind != ExpectedKind)
+					{
+						return Fail(
+							OutError,
+							TEXT("material_domain_create_kind_mismatch"),
+							DeclaredKind,
+							ExpectedKind);
+					}
+					const TSharedPtr<FJsonObject> NativeCreate =
+						MakeShared<FJsonObject>(**Create);
+					NativeCreate->SetStringField(
+						TEXT("material_kind"), ExpectedKind);
+					if (!SubmitMaterialCommand(TEXT("material.asset.create"), NativeCreate,
 							MutationPayload, OutError)) return false;
 				}
 				else if (RootType == InstanceType)
@@ -624,10 +368,6 @@ namespace UE::UAI::DomainAdapters::Material
 					}
 					if (!SubmitMaterialCommand(TEXT("material_instance.asset.create"), *Create,
 							MutationPayload, OutError)) return false;
-				}
-				else
-				{
-					return Fail(OutError, TEXT("material_function_create_not_registered"));
 				}
 			}
 			else
@@ -675,34 +415,64 @@ namespace UE::UAI::DomainAdapters::Material
 
 			FString AfterPayload;
 			FString AfterRevision;
-			if (!TryRead(Target, AfterPayload, AfterRevision, OutError)) return false;
 			TSharedPtr<FJsonObject> AfterObject;
-			FString JsonError;
-			if (!Json::TryParseObject(AfterPayload, AfterObject, JsonError)
-				|| !AfterObject.IsValid())
+			if (!TryRead(
+					Target, RootType, AfterPayload, AfterRevision,
+					&AfterObject, OutError))
 			{
-				return Fail(OutError, TEXT("material_domain_readback_payload_invalid"), JsonError);
+				return false;
 			}
-			const TSharedPtr<FJsonObject> Result = MakeShared<FJsonObject>();
-			Result->SetStringField(TEXT("terminal_status"), TEXT("succeeded"));
-			Result->SetStringField(TEXT("provider_id"), TEXT("material-domain-provider"));
-			Result->SetStringField(TEXT("target"), Target);
-			Result->SetStringField(TEXT("revision"), AfterRevision);
-			Result->SetBoolField(TEXT("saved"), true);
-			Result->SetBoolField(TEXT("reloaded"), true);
-			Result->SetObjectField(TEXT("independent_readback"), AfterObject);
+			FString CompileStatus;
+			if (!AfterObject.IsValid()
+				|| !AfterObject->TryGetStringField(
+					TEXT("compile_status"), CompileStatus)
+				|| CompileStatus != TEXT("valid"))
+			{
+				return Fail(
+					OutError, TEXT("material_domain_compile_not_settled"), Target);
+			}
 			TSharedPtr<FJsonObject> Mutation;
-			if (Json::TryParseObject(MutationPayload, Mutation, JsonError) && Mutation.IsValid())
+			FString JsonError;
+			FString MutationTarget;
+			FString PersistenceReceiptId;
+			if (!Json::TryParseObject(MutationPayload, Mutation, JsonError)
+				|| !Mutation.IsValid()
+				|| !Mutation->TryGetStringField(
+					TEXT("target_ref"), MutationTarget)
+				|| (MutationTarget != Target
+					&& MutationTarget != ObjectPathFromPackage(Target))
+				|| !Mutation->TryGetStringField(
+					TEXT("revision"), PersistenceReceiptId)
+				|| !PersistenceReceiptId.StartsWith(TEXT("reload:")))
 			{
-				Result->SetObjectField(TEXT("mutation"), Mutation);
+				return Fail(
+					OutError,
+					TEXT("material_domain_lifecycle_receipt_invalid"),
+					MutationTarget,
+					JsonError);
 			}
-			return CanonicalObject(Result, OutPayload, OutError);
+			FDomainHjsonImportLifecycleReceipt LifecycleReceipt;
+			LifecycleReceipt.bMutationApplied = true;
+			LifecycleReceipt.bCompileSettled = true;
+			LifecycleReceipt.bPackageSaved = true;
+			LifecycleReceipt.bUnloadedReloaded = true;
+			LifecycleReceipt.PersistenceReceiptId = PersistenceReceiptId;
+			return TryBuildImportSuccessPayload(
+				TEXT("material-domain-provider"),
+				Target,
+				AfterRevision,
+				LifecycleReceipt,
+				AfterObject,
+				Mutation,
+				OutPayload,
+				OutError);
 		}
 	}
 
 	bool TryExecuteContentGraph(
 		const FString& CommandId,
 		const FString& TargetIdentity,
+		const FString& RootTypeIdentity,
 		const FString& CanonicalParamsJson,
 		FString& OutPayloadJson,
 		bool& bOutReadOnly,
@@ -724,9 +494,19 @@ namespace UE::UAI::DomainAdapters::Material
 		{
 			return Fail(OutError, TEXT("material_domain_target_identity_mismatch"), TargetIdentity);
 		}
+		if (!IsSupportedRootType(RootTypeIdentity))
+		{
+			return Fail(
+				OutError, TEXT("material_domain_root_type_invalid"), RootTypeIdentity);
+		}
 		if (CommandId == TEXT("content_graph.import_workspace"))
 		{
-			return TryImport(Target, Params, OutPayloadJson, OutError);
+			return TryImport(
+				Target,
+				RootTypeIdentity,
+				CanonicalParamsJson,
+				OutPayloadJson,
+				OutError);
 		}
 		if (CommandId == TEXT("content_graph.export_workspace"))
 		{
@@ -739,7 +519,9 @@ namespace UE::UAI::DomainAdapters::Material
 		{
 			FString Revision;
 			bOutReadOnly = true;
-			return TryRead(Target, OutPayloadJson, Revision, OutError);
+			return TryRead(
+				Target, RootTypeIdentity, OutPayloadJson, Revision,
+				nullptr, OutError);
 		}
 		return Fail(OutError, TEXT("material_domain_command_not_supported"), CommandId);
 	}

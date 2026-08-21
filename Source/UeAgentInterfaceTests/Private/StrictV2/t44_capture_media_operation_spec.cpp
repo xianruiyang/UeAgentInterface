@@ -27,13 +27,13 @@
 #include "Kismet2/KismetEditorUtilities.h"
 #include "LevelSequence.h"
 #include "MetasoundSource.h"
+#include "Misc/App.h"
 #include "Misc/Paths.h"
 #include "Module/CommandRegistration/Active/UeAgentActiveCommandComposition.h"
 #include "MovieScene.h"
 #include "NiagaraSystem.h"
 #include "NiagaraSystemFactoryNew.h"
 #include "OperationOwners/CaptureMedia/UeAgentCaptureMediaOwner.h"
-#include "Server/UeAgentCommandRegistry.h"
 #include "Sound/SoundCue.h"
 #include "StateTree.h"
 #include "StateTreeEditorData.h"
@@ -347,7 +347,7 @@ namespace UE::UAI::Tests::StrictV2::T44
 
 		void Cleanup()
 		{
-			if (GEditor)
+			if (FApp::CanEverRender() && GEditor)
 			{
 				if (UAssetEditorSubsystem* Editors =
 					GEditor->GetEditorSubsystem<UAssetEditorSubsystem>())
@@ -383,6 +383,28 @@ namespace UE::UAI::Tests::StrictV2::T44
 			return {Blueprint, AnimBlueprint, AnimSequence, BehaviorTree,
 				ControlRig, LevelSequence, MetaSound, Niagara, SoundCue,
 				StateTree, Texture, WidgetBlueprint};
+		}
+
+		bool HasOpenAssetEditor() const
+		{
+			if (!GEditor)
+			{
+				return false;
+			}
+			UAssetEditorSubsystem* Editors =
+				GEditor->GetEditorSubsystem<UAssetEditorSubsystem>();
+			if (!Editors)
+			{
+				return false;
+			}
+			for (UObject* Asset : Assets())
+			{
+				if (Asset && Editors->FindEditorForAsset(Asset, false))
+				{
+					return true;
+				}
+			}
+			return false;
 		}
 
 		void BuildCases(const FString& SkeletalMeshPath)
@@ -620,14 +642,38 @@ namespace UE::UAI::Tests::StrictV2::T44
 			{
 				TSharedPtr<FJsonObject> Status;
 				bool bFinished = false;
+				const FImagePolicyCase& Case = Fixture.Cases[ImageIndex];
+				if (!FApp::CanEverRender())
+				{
+					if (!AdvanceToTerminal(Case.Label, true, bFinished, Status))
+					{
+						return Finish();
+					}
+					if (!bFinished) return false;
+					FString ErrorCode;
+					Status->TryGetStringField(TEXT("error_code"), ErrorCode);
+					const FString ExpectedError =
+						TEXT("capture_image_rhi_unavailable:") + Case.PolicyId;
+					if (!Test->TestEqual(
+							TEXT("NullRHI image capture fails closed before rendering"),
+							ErrorCode, ExpectedError)
+						|| !Test->TestFalse(
+							TEXT("NullRHI image capture does not open an asset editor"),
+							Fixture.HasOpenAssetEditor())
+						|| !VerifyReceiptAndRelease(Case.Label, Status, false))
+					{
+						return Finish();
+					}
+					OperationRef.Reset();
+					return Finish();
+				}
 				if (!AdvanceToTerminal(
-						Fixture.Cases[ImageIndex].Label,
+						Case.Label,
 						false, bFinished, Status))
 				{
 					return Finish();
 				}
 				if (!bFinished) return false;
-				const FImagePolicyCase& Case = Fixture.Cases[ImageIndex];
 				if (!Test->TestTrue(
 						*FString::Printf(TEXT("%s publishes its requested image artifact"),
 							*Case.Label),
@@ -1038,9 +1084,10 @@ bool FUeAgentStrictV2T44CaptureMediaOperationTest::RunTest(
 		ActualPolicies, ExpectedImagePolicies());
 	for (const FString& HistoricalId : HistoricalIds())
 	{
-		TestTrue(*FString::Printf(TEXT("%s is explicitly non-executable"),
+		TestNull(*FString::Printf(
+			TEXT("%s is absent from the sole current registry"),
 			*HistoricalId),
-			UeAgentCommandRegistry::IsExplicitlyUnsupportedCommand(HistoricalId));
+			Registry->FindExact(HistoricalId));
 	}
 	return !HasAnyErrors();
 }

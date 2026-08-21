@@ -12,21 +12,57 @@ namespace UE::UAI::HjsonWorkspace::DomainAuthoring
 			FString InDomainId,
 			FString InSchemaId,
 			FString InRootTypeIdentity);
+		FDomainHjsonDocumentContract(
+			FString InDomainId,
+			FString InSchemaId,
+			TArray<FString> InRootTypeIdentities);
 
 		bool IsValid() const;
+		bool SupportsRootType(const FString& RootTypeIdentity) const;
 
 		FString DomainId;
 		FString SchemaId;
 		FString RootTypeIdentity;
+		TArray<FString> RootTypeIdentities;
 	};
 
 	struct UEAGENTINTERFACE_API FResolvedDomainHjsonDocument final
 	{
 		FString TargetIdentity;
 		FString ExpectedRevision;
+		FString Carrier;
+		FString SourceUnit;
+		FString BaseRevision;
 		FString EntryFile;
+		FString SourceFingerprint;
+		FString SemanticFingerprint;
 		TSharedPtr<FJsonObject> Params;
 		TSharedPtr<FJsonObject> Root;
+	};
+
+	struct UEAGENTINTERFACE_API FDomainHjsonImportLifecycleReceipt final
+	{
+		bool IsComplete() const;
+
+		bool bMutationApplied = false;
+		bool bCompileSettled = false;
+		bool bPackageSaved = false;
+		bool bUnloadedReloaded = false;
+		FString PersistenceReceiptId;
+	};
+
+	struct UEAGENTINTERFACE_API FDomainHjsonCandidateBinding final
+	{
+		bool IsValid() const;
+		bool SupportsOperation(const FString& Operation) const;
+
+		FString Name;
+		FString Kind;
+		TArray<FString> SupportedOperations;
+		FString InputContract;
+		FString PlacementContract;
+		FString RequiredContext;
+		FString BindingRevision;
 	};
 
 	UEAGENTINTERFACE_API bool TryDecodeResolvedDocument(
@@ -39,9 +75,20 @@ namespace UE::UAI::HjsonWorkspace::DomainAuthoring
 	UEAGENTINTERFACE_API FString ObjectPathFromPackageIdentity(
 		const FString& TargetIdentity);
 
+	UEAGENTINTERFACE_API bool TryInspectObjectTargetPresence(
+		const FString& TargetIdentity,
+		bool& bOutPresent);
+
 	UEAGENTINTERFACE_API bool TryCaptureObject(
 		const FString& TargetIdentity,
 		const FString& ExpectedRootTypeIdentity,
+		UObject*& OutObject,
+		DomainAdapters::ContentGraphRead::FUeAgentContentGraphCapture& OutCapture,
+		FWorkspaceError& OutError);
+
+	UEAGENTINTERFACE_API bool TryCaptureObject(
+		const FString& TargetIdentity,
+		const TArray<FString>& ExpectedRootTypeIdentities,
 		UObject*& OutObject,
 		DomainAdapters::ContentGraphRead::FUeAgentContentGraphCapture& OutCapture,
 		FWorkspaceError& OutError);
@@ -58,12 +105,25 @@ namespace UE::UAI::HjsonWorkspace::DomainAuthoring
 		FString& OutJson,
 		FWorkspaceError& OutError);
 
+	UEAGENTINTERFACE_API void SetWorkspaceErrorFromCommandFailure(
+		const FString& ErrorJson,
+		FString FallbackCode,
+		FString FallbackSubject,
+		FWorkspaceError& OutError);
+
 	UEAGENTINTERFACE_API bool TryBuildImportSuccessPayload(
 		const FString& ProviderId,
 		const FString& TargetIdentity,
 		const FString& Revision,
+		const FDomainHjsonImportLifecycleReceipt& LifecycleReceipt,
 		const TSharedPtr<FJsonObject>& IndependentReadback,
 		const TSharedPtr<FJsonObject>& Mutation,
 		FString& OutPayloadJson,
+		FWorkspaceError& OutError);
+
+	UEAGENTINTERFACE_API bool TryReadCandidateBinding(
+		const TSharedPtr<FJsonObject>& Candidate,
+		const FString& JsonPointer,
+		FDomainHjsonCandidateBinding& OutBinding,
 		FWorkspaceError& OutError);
 }

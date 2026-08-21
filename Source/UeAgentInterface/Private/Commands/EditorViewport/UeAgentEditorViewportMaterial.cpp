@@ -4,7 +4,7 @@
 
 #include "Utilities/UeAgentJsonDiagnostics.h"
 #include "UeAgentInterfaceSettings.h"
-#include "Server/UeAgentHttpServer.h"
+#include "LegacyMechanics/UeAgentLegacyMechanics.h"
 
 #include "AdvancedPreviewScene.h"
 #include "Components/MeshComponent.h"

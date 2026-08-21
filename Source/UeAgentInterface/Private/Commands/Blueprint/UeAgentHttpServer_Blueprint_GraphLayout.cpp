@@ -14,7 +14,7 @@
 #include "ScopedTransaction.h"
 #include "Module/UeAgentInterfaceLogger.h"
 
-bool FUeAgentHttpServer::CmdBlueprintLayoutGraphSelfTest(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdBlueprintLayoutGraphSelfTest(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	(void)Ctx;
 	UeAgentBlueprintAutoLayout::FSelfTestResult Result = UeAgentBlueprintAutoLayout::RunSelfTest();
@@ -34,7 +34,7 @@ bool FUeAgentHttpServer::CmdBlueprintLayoutGraphSelfTest(const FUeAgentRequestCo
 	return true;
 }
 
-bool FUeAgentHttpServer::CmdBlueprintLayoutGraph(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdBlueprintLayoutGraph(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	if (Ctx.Params.IsValid() && Ctx.Params->HasField(TEXT("dry_run")))
 	{

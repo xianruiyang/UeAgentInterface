@@ -1010,7 +1010,7 @@ namespace UeAgentLevelMeshShapes
 	}
 }
 
-bool FUeAgentHttpServer::CmdLevelGetNearbyMeshShapes(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::CmdLevelGetNearbyMeshShapes(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	using namespace UeAgentLevelMeshShapes;
 

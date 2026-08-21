@@ -4,7 +4,7 @@
 
 namespace
 {
-	using FNiagaraCommandHandler = bool (FUeAgentHttpServer::*)(const FUeAgentRequestContext&, TSharedPtr<FJsonObject>&, FString&) const;
+	using FNiagaraCommandHandler = bool (FUeAgentLegacyMechanics::*)(const FUeAgentRequestContext&, TSharedPtr<FJsonObject>&, FString&) const;
 
 	struct FNiagaraCommandEntry
 	{
@@ -13,46 +13,46 @@ namespace
 	};
 
 	static const FNiagaraCommandEntry GNiagaraCommandEntries[] = {
-		{ TEXT("niagara_list_assets"), &FUeAgentHttpServer::CmdNiagaraListAssets },
-		{ TEXT("niagara_list_module_library"), &FUeAgentHttpServer::CmdNiagaraListModuleLibrary },
-		{ TEXT("niagara_create_system"), &FUeAgentHttpServer::CmdNiagaraCreateSystem },
-		{ TEXT("niagara_create_emitter"), &FUeAgentHttpServer::CmdNiagaraCreateEmitter },
-		{ TEXT("niagara_duplicate_asset"), &FUeAgentHttpServer::CmdNiagaraDuplicateAsset },
-		{ TEXT("niagara_open_editor"), &FUeAgentHttpServer::CmdNiagaraOpenEditor },
-		{ TEXT("niagara_preview_advance"), &FUeAgentHttpServer::CmdNiagaraPreviewAdvance },
-		{ TEXT("niagara_system_runtime_probe"), &FUeAgentHttpServer::CmdNiagaraSystemRuntimeProbe },
-		{ TEXT("niagara_get_stack_issues"), &FUeAgentHttpServer::CmdNiagaraGetStackIssues },
-		{ TEXT("niagara_apply_stack_issue_fix"), &FUeAgentHttpServer::CmdNiagaraApplyStackIssueFix },
-		{ TEXT("niagara_get_info"), &FUeAgentHttpServer::CmdNiagaraGetInfo },
-		{ TEXT("niagara_export_folder"), &FUeAgentHttpServer::CmdNiagaraExportFolder },
-		{ TEXT("niagara_apply_folder"), &FUeAgentHttpServer::CmdNiagaraApplyFolder },
-		{ TEXT("niagara_emitter_export_folder"), &FUeAgentHttpServer::CmdNiagaraEmitterExportFolder },
-		{ TEXT("niagara_emitter_apply_folder"), &FUeAgentHttpServer::CmdNiagaraEmitterApplyFolder },
-		{ TEXT("niagara_script_export_folder"), &FUeAgentHttpServer::CmdNiagaraScriptExportFolder },
-		{ TEXT("niagara_script_apply_folder"), &FUeAgentHttpServer::CmdNiagaraScriptApplyFolder },
-		{ TEXT("niagara_system_get_property"), &FUeAgentHttpServer::CmdNiagaraSystemGetProperty },
-		{ TEXT("niagara_refresh_system"), &FUeAgentHttpServer::CmdNiagaraRefreshSystem },
-		{ TEXT("niagara_compile_system"), &FUeAgentHttpServer::CmdNiagaraCompileSystem },
-		{ TEXT("niagara_get_compile_log"), &FUeAgentHttpServer::CmdNiagaraGetCompileLog },
-		{ TEXT("niagara_user_parameter_list"), &FUeAgentHttpServer::CmdNiagaraUserParameterList },
-		{ TEXT("niagara_user_parameter_get"), &FUeAgentHttpServer::CmdNiagaraUserParameterGet },
-		{ TEXT("niagara_system_list_emitters"), &FUeAgentHttpServer::CmdNiagaraSystemListEmitters },
-		{ TEXT("niagara_system_list_stage_modules"), &FUeAgentHttpServer::CmdNiagaraSystemListStageModules },
-		{ TEXT("niagara_system_list_module_inputs"), &FUeAgentHttpServer::CmdNiagaraSystemListModuleInputs },
-		{ TEXT("niagara_emitter_get_property"), &FUeAgentHttpServer::CmdNiagaraEmitterGetProperty },
-		{ TEXT("niagara_emitter_list_renderers"), &FUeAgentHttpServer::CmdNiagaraEmitterListRenderers },
-		{ TEXT("niagara_emitter_move_renderer"), &FUeAgentHttpServer::CmdNiagaraEmitterMoveRenderer },
-		{ TEXT("niagara_emitter_get_renderer_property"), &FUeAgentHttpServer::CmdNiagaraEmitterGetRendererProperty },
-		{ TEXT("niagara_emitter_list_event_handlers"), &FUeAgentHttpServer::CmdNiagaraEmitterListEventHandlers },
-		{ TEXT("niagara_emitter_get_event_handler_property"), &FUeAgentHttpServer::CmdNiagaraEmitterGetEventHandlerProperty },
-		{ TEXT("niagara_emitter_parameter_list"), &FUeAgentHttpServer::CmdNiagaraEmitterParameterList },
-		{ TEXT("niagara_emitter_parameter_get"), &FUeAgentHttpServer::CmdNiagaraEmitterParameterGet },
-		{ TEXT("niagara_emitter_list_stages"), &FUeAgentHttpServer::CmdNiagaraEmitterListStages },
-		{ TEXT("niagara_emitter_list_stage_modules"), &FUeAgentHttpServer::CmdNiagaraEmitterListStageModules },
-		{ TEXT("niagara_emitter_move_stage_module"), &FUeAgentHttpServer::CmdNiagaraEmitterMoveStageModule },
-		{ TEXT("niagara_emitter_list_stage_nodes"), &FUeAgentHttpServer::CmdNiagaraEmitterListStageNodes },
-		{ TEXT("niagara_emitter_get_stage_node_property"), &FUeAgentHttpServer::CmdNiagaraEmitterGetStageNodeProperty },
-		{ TEXT("niagara_emitter_list_module_inputs"), &FUeAgentHttpServer::CmdNiagaraEmitterListModuleInputs },
+		{ TEXT("niagara_list_assets"), &FUeAgentLegacyMechanics::CmdNiagaraListAssets },
+		{ TEXT("niagara_list_module_library"), &FUeAgentLegacyMechanics::CmdNiagaraListModuleLibrary },
+		{ TEXT("niagara_create_system"), &FUeAgentLegacyMechanics::CmdNiagaraCreateSystem },
+		{ TEXT("niagara_create_emitter"), &FUeAgentLegacyMechanics::CmdNiagaraCreateEmitter },
+		{ TEXT("niagara_duplicate_asset"), &FUeAgentLegacyMechanics::CmdNiagaraDuplicateAsset },
+		{ TEXT("niagara_open_editor"), &FUeAgentLegacyMechanics::CmdNiagaraOpenEditor },
+		{ TEXT("niagara_preview_advance"), &FUeAgentLegacyMechanics::CmdNiagaraPreviewAdvance },
+		{ TEXT("niagara_system_runtime_probe"), &FUeAgentLegacyMechanics::CmdNiagaraSystemRuntimeProbe },
+		{ TEXT("niagara_get_stack_issues"), &FUeAgentLegacyMechanics::CmdNiagaraGetStackIssues },
+		{ TEXT("niagara_apply_stack_issue_fix"), &FUeAgentLegacyMechanics::CmdNiagaraApplyStackIssueFix },
+		{ TEXT("niagara_get_info"), &FUeAgentLegacyMechanics::CmdNiagaraGetInfo },
+		{ TEXT("niagara_export_folder"), &FUeAgentLegacyMechanics::CmdNiagaraExportFolder },
+		{ TEXT("niagara_apply_folder"), &FUeAgentLegacyMechanics::CmdNiagaraApplyFolder },
+		{ TEXT("niagara_emitter_export_folder"), &FUeAgentLegacyMechanics::CmdNiagaraEmitterExportFolder },
+		{ TEXT("niagara_emitter_apply_folder"), &FUeAgentLegacyMechanics::CmdNiagaraEmitterApplyFolder },
+		{ TEXT("niagara_script_export_folder"), &FUeAgentLegacyMechanics::CmdNiagaraScriptExportFolder },
+		{ TEXT("niagara_script_apply_folder"), &FUeAgentLegacyMechanics::CmdNiagaraScriptApplyFolder },
+		{ TEXT("niagara_system_get_property"), &FUeAgentLegacyMechanics::CmdNiagaraSystemGetProperty },
+		{ TEXT("niagara_refresh_system"), &FUeAgentLegacyMechanics::CmdNiagaraRefreshSystem },
+		{ TEXT("niagara_compile_system"), &FUeAgentLegacyMechanics::CmdNiagaraCompileSystem },
+		{ TEXT("niagara_get_compile_log"), &FUeAgentLegacyMechanics::CmdNiagaraGetCompileLog },
+		{ TEXT("niagara_user_parameter_list"), &FUeAgentLegacyMechanics::CmdNiagaraUserParameterList },
+		{ TEXT("niagara_user_parameter_get"), &FUeAgentLegacyMechanics::CmdNiagaraUserParameterGet },
+		{ TEXT("niagara_system_list_emitters"), &FUeAgentLegacyMechanics::CmdNiagaraSystemListEmitters },
+		{ TEXT("niagara_system_list_stage_modules"), &FUeAgentLegacyMechanics::CmdNiagaraSystemListStageModules },
+		{ TEXT("niagara_system_list_module_inputs"), &FUeAgentLegacyMechanics::CmdNiagaraSystemListModuleInputs },
+		{ TEXT("niagara_emitter_get_property"), &FUeAgentLegacyMechanics::CmdNiagaraEmitterGetProperty },
+		{ TEXT("niagara_emitter_list_renderers"), &FUeAgentLegacyMechanics::CmdNiagaraEmitterListRenderers },
+		{ TEXT("niagara_emitter_move_renderer"), &FUeAgentLegacyMechanics::CmdNiagaraEmitterMoveRenderer },
+		{ TEXT("niagara_emitter_get_renderer_property"), &FUeAgentLegacyMechanics::CmdNiagaraEmitterGetRendererProperty },
+		{ TEXT("niagara_emitter_list_event_handlers"), &FUeAgentLegacyMechanics::CmdNiagaraEmitterListEventHandlers },
+		{ TEXT("niagara_emitter_get_event_handler_property"), &FUeAgentLegacyMechanics::CmdNiagaraEmitterGetEventHandlerProperty },
+		{ TEXT("niagara_emitter_parameter_list"), &FUeAgentLegacyMechanics::CmdNiagaraEmitterParameterList },
+		{ TEXT("niagara_emitter_parameter_get"), &FUeAgentLegacyMechanics::CmdNiagaraEmitterParameterGet },
+		{ TEXT("niagara_emitter_list_stages"), &FUeAgentLegacyMechanics::CmdNiagaraEmitterListStages },
+		{ TEXT("niagara_emitter_list_stage_modules"), &FUeAgentLegacyMechanics::CmdNiagaraEmitterListStageModules },
+		{ TEXT("niagara_emitter_move_stage_module"), &FUeAgentLegacyMechanics::CmdNiagaraEmitterMoveStageModule },
+		{ TEXT("niagara_emitter_list_stage_nodes"), &FUeAgentLegacyMechanics::CmdNiagaraEmitterListStageNodes },
+		{ TEXT("niagara_emitter_get_stage_node_property"), &FUeAgentLegacyMechanics::CmdNiagaraEmitterGetStageNodeProperty },
+		{ TEXT("niagara_emitter_list_module_inputs"), &FUeAgentLegacyMechanics::CmdNiagaraEmitterListModuleInputs },
 	};
 
 	static FNiagaraCommandHandler FindNiagaraCommandHandler(const FString& CommandLower)
@@ -68,7 +68,7 @@ namespace
 	}
 }
 
-bool FUeAgentHttpServer::ExecuteNiagaraCommand(const FString& CommandLower, const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
+bool FUeAgentLegacyMechanics::ExecuteNiagaraCommand(const FString& CommandLower, const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
 {
 	if (const FNiagaraCommandHandler Handler = FindNiagaraCommandHandler(CommandLower))
 	{

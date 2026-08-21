@@ -42,6 +42,7 @@ namespace UE::UAI::HjsonWorkspace
 			FString InBaseRevision,
 			FString InEntryFile,
 			FString InSourceFingerprint,
+			FString InSemanticFingerprint,
 			TArray<FContentGraphImportDocument> InDocuments);
 
 		EWorkspaceSourceKind GetKind() const;
@@ -50,6 +51,7 @@ namespace UE::UAI::HjsonWorkspace
 		const FString& GetBaseRevision() const;
 		const FString& GetEntryFile() const;
 		const FString& GetSourceFingerprint() const;
+		const FString& GetSemanticFingerprint() const;
 		const TArray<FContentGraphImportDocument>& GetDocuments() const;
 		const FContentGraphImportDocument* GetEntryDocument() const;
 		TSharedRef<FJsonObject> MakeNormalizedSourceObject() const;
@@ -61,6 +63,7 @@ namespace UE::UAI::HjsonWorkspace
 		FString BaseRevision;
 		FString EntryFile;
 		FString SourceFingerprint;
+		FString SemanticFingerprint;
 		TArray<FContentGraphImportDocument> Documents;
 	};
 
