@@ -618,6 +618,23 @@ namespace
 				&& OutSession->GetInventory().IsValid();
 		}
 
+		bool TryEnlist(
+			const FAssetDurableSessionRef& Session,
+			const TArray<FAssetDurableTarget>& MutationTargets,
+			int64 CurrentFencingToken,
+			FUeAgentResourceTracker& Resources,
+			FAssetDurableSessionPtr& OutSession,
+			FAssetDurableError& OutError) override
+		{
+			Trace->Add(TEXT("durable-enlist"));
+			++EnlistCount;
+			OutError = FAssetDurableError();
+			OutSession = Session;
+			return MutationTargets.IsEmpty()
+				&& CurrentFencingToken
+					== Session->GetRequest().GetFencingToken();
+		}
+
 		bool TryPersist(
 			const FAssetDurableSessionRef& Session,
 			int64 CurrentFencingToken,
@@ -673,6 +690,7 @@ namespace
 		}
 
 		int32 PrepareCount = 0;
+		int32 EnlistCount = 0;
 		int32 PersistCount = 0;
 		int32 AcknowledgeCount = 0;
 		EDurableArtifactKind SeenArtifactKind =
@@ -901,6 +919,8 @@ namespace
 		TSharedPtr<FRecordingTargetResolver> Resolver;
 		TSharedPtr<FRecordingStateReadPort> PreRead;
 		TSharedPtr<FRecordingStateReadPort> PersistedRead;
+		TSharedPtr<FStateReadPortPersistedStateOracle>
+			PersistedOracle;
 		TSharedPtr<FRecordingDraftBuilder> DraftBuilder;
 		TSharedPtr<FRecordingChangeTargetProjector>
 			ChangeTargetProjector;
@@ -938,6 +958,9 @@ namespace
 				true,
 				bPersistedReadAvailable,
 				OutScenario.Trace.ToSharedRef());
+		OutScenario.PersistedOracle = MakeShared<
+			FStateReadPortPersistedStateOracle>(
+			OutScenario.PersistedRead.ToSharedRef());
 		OutScenario.DraftBuilder =
 			MakeShared<FRecordingDraftBuilder>(
 				OutScenario.Trace.ToSharedRef());
@@ -991,8 +1014,8 @@ namespace
 		ProviderConfig.UeHook = OutScenario.UeHook;
 		ProviderConfig.ExpectedStateProjector =
 			OutScenario.ExpectedProjector;
-		ProviderConfig.PersistedStateReadPort =
-			OutScenario.PersistedRead;
+		ProviderConfig.PersistedStateOracle =
+			OutScenario.PersistedOracle;
 		ProviderConfig.AbsenceOracle =
 			MakeShared<FUnusedAbsenceOracle>();
 		ProviderConfig.ReferenceOracle =
@@ -1136,7 +1159,7 @@ bool FUeAgentSimpleAuthoringProductionProviderContractTest::RunTest(
 	FUeAgentSimpleAuthoringProductionProviderConfig
 		AliasedReadConfig = Success.ProviderConfig;
 	AliasedReadConfig.PreStateReadPort =
-		AliasedReadConfig.PersistedStateReadPort;
+		Success.PersistedRead;
 	TSharedPtr<IUeAgentSimpleAuthoringCapabilityProvider>
 		AliasedProvider;
 	FUeAgentSimpleAuthoringProductionError AliasedError;
@@ -1182,6 +1205,10 @@ bool FUeAgentSimpleAuthoringProductionProviderContractTest::RunTest(
 		Success.DurableService->PersistCount,
 		1);
 	TestEqual(
+		TEXT("C8D evaluates mutation-produced targets once"),
+		Success.DurableService->EnlistCount,
+		1);
+	TestEqual(
 		TEXT("C9 performs one independent readback"),
 		Success.PersistedRead->CallCount,
 		1);
@@ -1210,8 +1237,12 @@ bool FUeAgentSimpleAuthoringProductionProviderContractTest::RunTest(
 		Success.Trace->Index(TEXT("durable-prepare"))
 			< Success.Trace->Index(TEXT("effect-apply")));
 	TestTrue(
-		TEXT("mutation settles before C8D publish"),
+		TEXT("mutation settles before dynamic inventory enrollment"),
 		Success.Trace->Index(TEXT("effect-settle"))
+			< Success.Trace->Index(TEXT("durable-enlist")));
+	TestTrue(
+		TEXT("dynamic inventory enrollment precedes C8D publish"),
+		Success.Trace->Index(TEXT("durable-enlist"))
 			< Success.Trace->Index(TEXT("durable-persist")));
 	TestTrue(
 		TEXT("expected state is projected after persistence"),

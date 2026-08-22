@@ -14,6 +14,7 @@ namespace UE::UAI::DomainAdapters::WorldDestructive
 		FString CommandId;
 		FString TargetRef;
 		FString OperandRef;
+		FString ManagedId;
 		FString ComponentName;
 		FString Space;
 		FString CallerId;

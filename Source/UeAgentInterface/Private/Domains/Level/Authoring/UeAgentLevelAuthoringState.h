@@ -16,6 +16,20 @@ namespace UeAgentLevelAuthoring
 	UEAGENTINTERFACE_API FString GetWorldPath(const UWorld& World);
 	UEAGENTINTERFACE_API FString GetManagedActorId(const AActor& Actor);
 	UEAGENTINTERFACE_API FString MakeManagedActorTag(const FString& ManagedId);
+	UEAGENTINTERFACE_API FName GetManagedActorMarkerTag();
+	UEAGENTINTERFACE_API FString MakeManagedActorFolderPath(
+		const FString& OwnerId);
+	UEAGENTINTERFACE_API bool TryBindManagedActorOwnership(
+		AActor& Actor,
+		const FString& ManagedId,
+		const FString& OwnerId,
+		FString& OutError);
+	UEAGENTINTERFACE_API bool TryFindManagedActorExact(
+		UWorld& World,
+		const FString& ManagedId,
+		const FString& ExpectedFolderPath,
+		AActor*& OutActor,
+		FString& OutError);
 	UEAGENTINTERFACE_API FString GetActorFolderPathText(const AActor& Actor);
 	UEAGENTINTERFACE_API UWorld* FindEditorWorldByPath(const FString& WorldPath);
 	UEAGENTINTERFACE_API AActor* FindActorExact(

@@ -50,13 +50,17 @@ namespace UE::UAI::DomainAdapters::GenericEffect
 			TArray<FString> InRequiredBarrierSignals,
 			bool bInRollbackSupported,
 			FString InRollbackToken,
-			bool bInMutationStarted);
+			bool bInMutationStarted,
+			TArray<AssetDurable::FAssetDurableTarget>
+				InDurableTargets = {});
 
 		int64 GetSubjectGeneration() const;
 		const TArray<FString>& GetMutatedIdentityKeys() const;
 		const TArray<FString>& GetRequiredBarrierSignals() const;
 		bool IsRollbackSupported() const;
 		const FString& GetRollbackToken() const;
+		const TArray<AssetDurable::FAssetDurableTarget>&
+			GetDurableTargets() const;
 		bool DidMutationStart() const;
 		bool IsValid() const;
 
@@ -66,6 +70,7 @@ namespace UE::UAI::DomainAdapters::GenericEffect
 		TArray<FString> RequiredBarrierSignals;
 		bool bRollbackSupported = false;
 		FString RollbackToken;
+		TArray<AssetDurable::FAssetDurableTarget> DurableTargets;
 		bool bMutationStarted = false;
 		bool bValid = false;
 	};

@@ -15,6 +15,7 @@
 #include "GameFramework/Actor.h"
 #include "MeshDescription.h"
 #include "Misc/ScopeExit.h"
+#include "PhysicsEngine/PhysicsConstraintComponent.h"
 #include "StaticMeshAttributes.h"
 #include "UObject/Package.h"
 
@@ -68,6 +69,31 @@ namespace
 			Actor->AddInstanceComponent(Collision);
 			Collision->RegisterComponentWithWorld(World);
 			Collision->SetWorldLocation(FVector::ZeroVector);
+
+			CollisionB = NewObject<UBoxComponent>(
+				Actor,
+				TEXT("WorldReadCollisionB"));
+			CollisionB->InitBoxExtent(FVector(15.0, 15.0, 15.0));
+			CollisionB->SetCollisionEnabled(
+				ECollisionEnabled::QueryAndPhysics);
+			CollisionB->SetSimulatePhysics(false);
+			Actor->AddInstanceComponent(CollisionB);
+			CollisionB->RegisterComponentWithWorld(World);
+			CollisionB->SetWorldLocation(FVector(100.0, 0.0, 0.0));
+
+			Constraint = NewObject<UPhysicsConstraintComponent>(
+				Actor,
+				TEXT("WorldReadConstraint"));
+			Actor->AddInstanceComponent(Constraint);
+			Constraint->RegisterComponentWithWorld(World);
+			Constraint->SetConstrainedComponents(
+				Collision,
+				NAME_None,
+				CollisionB,
+				NAME_None);
+			Constraint->ConstraintInstance.SetLinearXLimit(
+				ELinearConstraintMotion::LCM_Limited,
+				25.0f);
 
 			Mesh = NewObject<UStaticMesh>(
 				Package,
@@ -129,6 +155,8 @@ namespace
 				&& World
 				&& Actor
 				&& Collision
+				&& CollisionB
+				&& Constraint
 				&& Mesh
 				&& MeshComponent;
 		}
@@ -137,6 +165,8 @@ namespace
 		UWorld* World = nullptr;
 		AActor* Actor = nullptr;
 		UBoxComponent* Collision = nullptr;
+		UBoxComponent* CollisionB = nullptr;
+		UPhysicsConstraintComponent* Constraint = nullptr;
 		UStaticMesh* Mesh = nullptr;
 		UStaticMeshComponent* MeshComponent = nullptr;
 	};
@@ -277,6 +307,9 @@ namespace
 			Targets.Add(
 				TEXT("target-physics"),
 				Owner.Collision);
+			Targets.Add(
+				TEXT("target-constraint"),
+				Owner.Constraint);
 		}
 
 		bool TryResolveWorld(
@@ -365,6 +398,18 @@ namespace
 				{
 					return Entry.GetIdentity().GetOwnerId()
 						.Contains(OwnerId);
+				});
+	}
+
+	bool SnapshotHasSelector(
+		const TSharedPtr<const FUeAgentCanonicalSnapshot>& Snapshot,
+		const FString& Selector)
+	{
+		return Snapshot.IsValid()
+			&& Snapshot->GetEntries().ContainsByPredicate(
+				[&Selector](const FUeAgentStateEntry& Entry)
+				{
+					return Entry.GetIdentity().GetSelector() == Selector;
 				});
 	}
 
@@ -626,6 +671,23 @@ bool FUeAgentWorldReadNativeOwnedWorldTest::RunTest(
 		TEXT("topology snapshot is real and typed"),
 		Snapshot.IsValid());
 
+	Snapshot.Reset();
+	TestTrue(
+		TEXT("data layer query reads Data Layer facts rather than streaming levels"),
+		CaptureNative(
+			this,
+			TEXT("world.read.data_layers"),
+			FUeAgentContractValue(TEXT(
+				"{\"scope\":\"world\",\"include_actor_membership\":true}")),
+			{},
+			Environment,
+			*Context,
+			Snapshot,
+			Error));
+	TestTrue(
+		TEXT("data layer query publishes the real layer count"),
+		SnapshotHasSelector(Snapshot, TEXT("data_layer_count")));
+
 	const FUeAgentCandidateBinding PhysicsTarget =
 		NativeTarget(
 			TEXT("target-physics"),
@@ -651,6 +713,36 @@ bool FUeAgentWorldReadNativeOwnedWorldTest::RunTest(
 			Snapshot,
 			Owner.Collision->GetPathName()));
 
+	const FUeAgentCandidateBinding ConstraintTarget =
+		NativeTarget(
+			TEXT("target-constraint"),
+			TEXT("physics_constraint_component"),
+			Owner.Constraint->GetPathName());
+	Snapshot.Reset();
+	Error = {};
+	TestTrue(
+		TEXT("physics constraint query reads the exact constraint component"),
+		CaptureNative(
+			this,
+			TEXT("world.read.physics_constraint"),
+			FUeAgentContractValue(TEXT(
+				"{\"include_endpoints\":true,\"include_limits\":true,"
+				"\"include_runtime_state\":true}")),
+			ConstraintTarget,
+			Environment,
+			*Context,
+			Snapshot,
+			Error));
+	TestTrue(
+		TEXT("constraint query publishes an endpoint"),
+		SnapshotHasSelector(Snapshot, TEXT("constraint_component_1")));
+	TestTrue(
+		TEXT("constraint query publishes the configured linear limit"),
+		SnapshotHasSelector(Snapshot, TEXT("linear_limit_cm")));
+	TestTrue(
+		TEXT("constraint query publishes runtime broken state"),
+		SnapshotHasSelector(Snapshot, TEXT("constraint_broken")));
+
 	TestFalse(
 		TEXT("WorldRead leaves the owned package clean"),
 		Owner.Package->IsDirty());
@@ -665,10 +757,10 @@ bool FUeAgentWorldReadNativeOwnedWorldTest::RunTest(
 	TestEqual(
 		TEXT("one environment owns all world resolution"),
 		Environment->WorldCalls,
-		11);
+		13);
 	TestEqual(
 		TEXT("only target-bearing families resolve targets"),
 		Environment->TargetCalls,
-		2);
+		3);
 	return true;
 }

@@ -398,9 +398,9 @@ bool FUeAgentModelingGeometryEffectTypedPlanningTest::RunTest(
 		Fixture->GetArrayField(TEXT("e1_negative_cases"));
 	TestEqual(TEXT("31 typed draft sources"), Rows.Num(), 31);
 	TestEqual(
-		TEXT("14 preflight-negative contracts"),
+		TEXT("13 preflight-negative contracts"),
 		NegativeCases.Num(),
-		14);
+		13);
 
 	TSet<FString> OperationKeys;
 	TSet<FString> DescriptorIds;

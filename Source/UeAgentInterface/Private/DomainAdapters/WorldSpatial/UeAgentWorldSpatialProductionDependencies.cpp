@@ -4,6 +4,7 @@
 #include "BlueprintEditorTabs.h"
 #include "Components/ActorComponent.h"
 #include "Components/PrimitiveComponent.h"
+#include "Core/AssetDurable/UeAgentPackageHeader.h"
 #include "EdGraph/EdGraph.h"
 #include "EdGraph/EdGraphNode.h"
 #include "Editor.h"
@@ -16,7 +17,9 @@
 #include "LevelEditorViewport.h"
 #include "MeshDescription.h"
 #include "Misc/Crc.h"
+#include "DomainAdapters/ModelingGeometryEffect/UeAgentModelingGeometryEffectCarrierRevision.h"
 #include "GraphEditor.h"
+#include "HAL/FileManager.h"
 #include "Selection/GeometrySelectionManager.h"
 #include "Selections/GeometrySelection.h"
 #include "SEditorViewport.h"
@@ -305,7 +308,8 @@ namespace UE::UAI::DomainAdapters::WorldSpatial
 						OutObject = SoftPath.TryLoad();
 					}
 				}
-				if (!OutObject || OutObject->GetPathName() != ExplicitRef)
+				if (!IsValid(OutObject)
+					|| OutObject->GetPathName() != ExplicitRef)
 				{
 					OutObject = nullptr;
 					return Fail(
@@ -315,23 +319,58 @@ namespace UE::UAI::DomainAdapters::WorldSpatial
 				}
 
 				const UWorld* ObjectWorld = nullptr;
-				if (const AActor* Actor = Cast<AActor>(OutObject))
+				if (AActor* Actor = Cast<AActor>(OutObject))
 				{
 					ObjectWorld = Actor->GetWorld();
+					if (ObjectWorld && ObjectWorld != ScopedWorld)
+					{
+						OutObject = nullptr;
+						return Fail(
+							OutError,
+							TEXT("world_spatial_object_world_mismatch"),
+							ExplicitRef,
+							ScopedWorld->GetPathName());
+					}
+					if (Actor->IsActorBeingDestroyed()
+						|| !ScopedWorld->ContainsActor(Actor))
+					{
+						OutObject = nullptr;
+						return Fail(
+							OutError,
+							TEXT(
+								"world_spatial_explicit_object_unresolved"),
+							ExplicitRef,
+							TEXT(
+								"actor is no longer part of the scoped world"));
+					}
 				}
-				else if (const UActorComponent* Component =
+				else if (UActorComponent* Component =
 					Cast<UActorComponent>(OutObject))
 				{
 					ObjectWorld = Component->GetWorld();
-				}
-				if (ObjectWorld && ObjectWorld != ScopedWorld)
-				{
-					OutObject = nullptr;
-					return Fail(
-						OutError,
-						TEXT("world_spatial_object_world_mismatch"),
-						ExplicitRef,
-						ScopedWorld->GetPathName());
+					if (ObjectWorld && ObjectWorld != ScopedWorld)
+					{
+						OutObject = nullptr;
+						return Fail(
+							OutError,
+							TEXT("world_spatial_object_world_mismatch"),
+							ExplicitRef,
+							ScopedWorld->GetPathName());
+					}
+					AActor* Owner = Component->GetOwner();
+					if (Owner
+						&& (Owner->IsActorBeingDestroyed()
+							|| !ScopedWorld->ContainsActor(Owner)))
+					{
+						OutObject = nullptr;
+						return Fail(
+							OutError,
+							TEXT(
+								"world_spatial_explicit_object_unresolved"),
+							ExplicitRef,
+							TEXT(
+								"component owner is no longer part of the scoped world"));
+					}
 				}
 				return true;
 			}
@@ -349,15 +388,58 @@ namespace UE::UAI::DomainAdapters::WorldSpatial
 						TEXT("world_spatial_persistence_target_invalid"),
 						Object.GetPathName());
 				}
+				FString PackageHeaderFilename;
+				FString PackageHeaderErrorCode;
+				UObject* PackageTopLevelAsset =
+					Package->FindAssetInPackage();
+				if (!UE::UAI::AssetDurable::
+					TryPrepareLoadedPackageHeaderForSave(
+						*Package,
+						PackageTopLevelAsset,
+						PackageHeaderFilename,
+						PackageHeaderErrorCode))
+				{
+					return Fail(
+						OutError,
+						PackageHeaderErrorCode.IsEmpty()
+							? TEXT(
+								"world_spatial_package_header_unavailable")
+							: PackageHeaderErrorCode,
+						Object.GetPathName());
+				}
 				Object.MarkPackageDirty();
-				return UEditorLoadingAndSavingUtils::SavePackages(
-						{Package},
-						false)
-					? true
-					: Fail(
+				if (!UEditorLoadingAndSavingUtils::SavePackages(
+						{Package}, false))
+				{
+					return Fail(
 						OutError,
 						TEXT("world_spatial_object_persistence_failed"),
 						Object.GetPathName());
+				}
+				FString ObservedHeaderFilename;
+				PackageHeaderErrorCode.Reset();
+				if (!UE::UAI::AssetDurable::
+						TryResolvePackageHeaderFilename(
+							Package->GetName(),
+							ObservedHeaderFilename,
+							PackageHeaderErrorCode)
+					|| !ObservedHeaderFilename.Equals(
+						PackageHeaderFilename,
+						ESearchCase::IgnoreCase)
+					|| !IFileManager::Get().FileExists(
+						*ObservedHeaderFilename)
+					|| Package->IsDirty())
+				{
+					return Fail(
+						OutError,
+						PackageHeaderErrorCode.IsEmpty()
+							? TEXT(
+								"world_spatial_object_persistence_readback_failed")
+							: PackageHeaderErrorCode,
+						Object.GetPathName(),
+						ObservedHeaderFilename);
+				}
+				return true;
 			}
 
 			bool TryResolveGraphEditor(
@@ -740,6 +822,34 @@ namespace UE::UAI::DomainAdapters::WorldSpatial
 							ExplicitRef, Object, OutError))
 					{
 						return false;
+					}
+					if (UE::UAI::DomainAdapters::ModelingGeometryEffect::
+						IsModelingGeometryCarrier(*Object))
+					{
+						TOptional<StateSemantic::FUeAgentStateRevision>
+							CarrierRevision;
+						ExecutionMutation::FExecutionMutationError
+							CarrierError;
+						if (!UE::UAI::DomainAdapters::ModelingGeometryEffect::
+								TryReadModelingGeometryCarrierRevision(
+									ExplicitRef,
+									*Object,
+									CarrierRevision,
+									CarrierError))
+						{
+							return Fail(
+								OutError,
+								CarrierError.GetCode(),
+								ExplicitRef,
+								CarrierError.GetDetail());
+						}
+						OutRevision.SourceId =
+							CarrierRevision->GetSourceId();
+						OutRevision.Generation =
+							CarrierRevision->GetGeneration();
+						OutRevision.Sequence =
+							CarrierRevision->GetSequence();
+						return OutRevision.IsValid();
 					}
 					Hash = HashObjectSpatialState(*Object);
 				}

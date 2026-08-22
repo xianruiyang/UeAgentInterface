@@ -1,5 +1,8 @@
 #include "DomainAdapters/WorldSimpleEffect/UeAgentWorldSimpleEffectCapabilities.h"
 
+#include "ActorFactories/ActorFactory.h"
+#include "Builders/CubeBuilder.h"
+#include "Core/AssetDurable/UeAgentAssetDurable.h"
 #include "DataLayer/DataLayerEditorSubsystem.h"
 #include "Editor.h"
 #include "EditorLevelUtils.h"
@@ -7,11 +10,12 @@
 #include "Engine/LevelStreaming.h"
 #include "Engine/StaticMesh.h"
 #include "Engine/StaticMeshActor.h"
+#include "GameFramework/Volume.h"
 #include "Engine/World.h"
-#include "FileHelpers.h"
 #include "GameFramework/Actor.h"
 #include "GameFramework/GameModeBase.h"
 #include "GameFramework/WorldSettings.h"
+#include "Misc/PackageName.h"
 #include "Misc/ScopeLock.h"
 #include "WorldPartition/DataLayer/DataLayerAsset.h"
 #include "WorldPartition/DataLayer/DataLayerInstance.h"
@@ -25,6 +29,7 @@
 namespace UE::UAI::DomainAdapters::WorldSimpleEffect
 {
 	using namespace ContextResource;
+	using namespace AssetDurable;
 	using namespace ExecutionMutation;
 	using namespace PlanningPreflight;
 	using namespace StateSemantic;
@@ -74,6 +79,74 @@ namespace UE::UAI::DomainAdapters::WorldSimpleEffect
 				MoveTemp(Code),
 				MoveTemp(Detail));
 			return false;
+		}
+
+		bool AppendDurableTargets(
+			const FPlannedChange& Change,
+			const TArray<FRollbackAction>& Rollback,
+			const int32 FirstAction,
+			TArray<FAssetDurableTarget>& OutTargets,
+			FExecutionMutationError& OutError)
+		{
+			const EAssetDurableIntent Intent =
+				Change.GetIntent() == EChangeIntent::Delete
+					? EAssetDurableIntent::Delete
+					: EAssetDurableIntent::Save;
+			for (int32 Index = FirstAction;
+				Index < Rollback.Num();
+				++Index)
+			{
+				UObject* const MutatedObject =
+					Rollback[Index].Primary.Get();
+				if (!MutatedObject)
+				{
+					continue;
+				}
+				UPackage* Package =
+					MutatedObject->GetExternalPackage();
+				if (!Package)
+				{
+					Package = MutatedObject->GetOutermost();
+				}
+				if (!Package
+					|| Package == GetTransientPackage()
+					|| !FPackageName::IsValidLongPackageName(
+						Package->GetName()))
+				{
+					return Fail(
+						OutError,
+						TEXT("world_simple_durable_package_invalid"),
+						MutatedObject->GetPathName());
+				}
+				const FAssetDurableTarget Candidate(
+					Change.GetIdentity(),
+					Package->GetName(),
+					Intent,
+					ERollbackGrade::DurableBackup);
+				const FString CandidateKey =
+					Candidate.GetDurableTargetKey();
+				const FAssetDurableTarget* Existing =
+					OutTargets.FindByPredicate(
+						[&CandidateKey](
+							const FAssetDurableTarget& Target)
+						{
+							return Target.GetDurableTargetKey()
+								== CandidateKey;
+						});
+				if (Existing)
+				{
+					if (Existing->GetIntent() != Candidate.GetIntent())
+					{
+						return Fail(
+							OutError,
+							TEXT("world_simple_durable_package_conflict"),
+							CandidateKey);
+					}
+					continue;
+				}
+				OutTargets.Add(Candidate);
+			}
+			return true;
 		}
 
 		FUeAgentCanonicalValuePtr FindField(
@@ -1182,20 +1255,6 @@ namespace UE::UAI::DomainAdapters::WorldSimpleEffect
 				{
 					return false;
 				}
-				bool bSaveLevel = false;
-				bool bSaveLevelPresent = false;
-				if (!ReadBool(
-						After,
-						TEXT("save_level"),
-						bSaveLevel,
-						bSaveLevelPresent,
-						OutError)
-					|| !bSaveLevelPresent)
-				{
-					return Fail(
-						OutError,
-						TEXT("world_simple_actor_save_level_missing"));
-				}
 				const FTransform Transform = ReadTransform(After, OutError);
 				if (OutError.IsPresent())
 				{
@@ -1214,6 +1273,40 @@ namespace UE::UAI::DomainAdapters::WorldSimpleEffect
 				{
 					return Fail(OutError, TEXT("world_simple_actor_spawn_failed"));
 				}
+				if (AVolume* Volume = Cast<AVolume>(Actor))
+				{
+					UCubeBuilder* Builder = NewObject<UCubeBuilder>(
+						GetTransientPackage(),
+						NAME_None,
+						RF_Transactional);
+					if (!Builder)
+					{
+						const FString ClassPath =
+							Actor->GetClass()->GetPathName();
+						World.DestroyActor(Actor);
+						return Fail(
+							OutError,
+							TEXT("world_simple_volume_brush_builder_unavailable"),
+							ClassPath);
+					}
+					UActorFactory::CreateBrushForVolumeActor(
+						Volume,
+						Builder);
+					const FBox Bounds =
+						Volume->GetComponentsBoundingBox(true);
+					if (!Bounds.IsValid
+						|| Bounds.GetExtent().GetMin()
+							<= UE_KINDA_SMALL_NUMBER)
+					{
+						const FString ClassPath =
+							Actor->GetClass()->GetPathName();
+						World.DestroyActor(Actor);
+						return Fail(
+							OutError,
+							TEXT("world_simple_volume_brush_initialization_failed"),
+							ClassPath);
+					}
+				}
 				Actor->Modify();
 				Actor->SetActorLabel(Label);
 				if (!Folder.IsEmpty())
@@ -1229,20 +1322,7 @@ namespace UE::UAI::DomainAdapters::WorldSimpleEffect
 				FRollbackAction Rollback;
 				Rollback.Kind = ERollbackKind::DestroyActor;
 				Rollback.Primary = Actor;
-				Rollback.bValueA = bSaveLevel;
 				OutRollback.Add(Rollback);
-				if (bSaveLevel
-					&& !UEditorLoadingAndSavingUtils::SaveMap(
-						&World,
-						World.GetOutermost()->GetName()))
-				{
-					OutRollback.Pop();
-					World.DestroyActor(Actor);
-					return Fail(
-						OutError,
-						TEXT("world_simple_actor_save_failed"),
-						World.GetOutermost()->GetName());
-				}
 				return true;
 			}
 			if (Kind == TEXT("data_layer_instance"))
@@ -1610,21 +1690,12 @@ namespace UE::UAI::DomainAdapters::WorldSimpleEffect
 			if (Kind == TEXT("level_game_mode"))
 			{
 				FString GameModeClassRef;
-				bool bSaveLevel = false;
-				bool bSaveLevelPresent = false;
 				if (!ReadString(
 						After,
 						TEXT("game_mode_class_ref"),
 						GameModeClassRef,
 						true,
-						OutError)
-					|| !ReadBool(
-						After,
-						TEXT("save_level"),
-						bSaveLevel,
-						bSaveLevelPresent,
-						OutError)
-					|| !bSaveLevelPresent)
+						OutError))
 				{
 					return Fail(
 						OutError,
@@ -1643,26 +1714,10 @@ namespace UE::UAI::DomainAdapters::WorldSimpleEffect
 				Rollback.Kind = ERollbackKind::RestoreLevelGameMode;
 				Rollback.Primary = WorldSettings;
 				Rollback.Secondary = WorldSettings->DefaultGameMode.Get();
-				Rollback.bValueA = bSaveLevel;
 				Rollback.bValueB = World.GetOutermost()->IsDirty();
 				WorldSettings->DefaultGameMode = GameModeClass;
 				WorldSettings->MarkPackageDirty();
 				OutRollback.Add(Rollback);
-				if (bSaveLevel
-					&& !UEditorLoadingAndSavingUtils::SaveMap(
-						&World,
-						World.GetOutermost()->GetName()))
-				{
-					OutRollback.Pop();
-					WorldSettings->DefaultGameMode = Cast<UClass>(
-						Rollback.Secondary.Get());
-					World.GetOutermost()->SetDirtyFlag(
-						Rollback.bValueB);
-					return Fail(
-						OutError,
-						TEXT("world_simple_level_game_mode_save_failed"),
-						World.GetOutermost()->GetName());
-				}
 				return true;
 			}
 
@@ -1854,10 +1909,7 @@ namespace UE::UAI::DomainAdapters::WorldSimpleEffect
 					{
 						return false;
 					}
-					return !Action.bValueA
-						|| UEditorLoadingAndSavingUtils::SaveMap(
-							&World,
-							World.GetOutermost()->GetName());
+					return true;
 				}
 				return true;
 			case ERollbackKind::RemoveDataLayerInstance:
@@ -1987,12 +2039,6 @@ namespace UE::UAI::DomainAdapters::WorldSimpleEffect
 					WorldSettings->DefaultGameMode = Cast<UClass>(
 						Action.Secondary.Get());
 					WorldSettings->MarkPackageDirty();
-					if (Action.bValueA)
-					{
-						return UEditorLoadingAndSavingUtils::SaveMap(
-							&World,
-							World.GetOutermost()->GetName());
-					}
 					World.GetOutermost()->SetDirtyFlag(Action.bValueB);
 				}
 				return true;
@@ -2106,13 +2152,26 @@ namespace UE::UAI::DomainAdapters::WorldSimpleEffect
 
 				TArray<FRollbackAction> Rollback;
 				TArray<FString> MutatedKeys;
+				TArray<FAssetDurableTarget> DurableTargets;
 				for (const FPlannedChange& Change : Changes)
 				{
+					const int32 FirstRollbackAction =
+						Rollback.Num();
 					if (!ApplyChange(
 							World,
 							Change,
 							Resolved,
 							Rollback,
+							OutError))
+					{
+						RollbackAll(World, Rollback);
+						return false;
+					}
+					if (!AppendDurableTargets(
+							Change,
+							Rollback,
+							FirstRollbackAction,
+							DurableTargets,
 							OutError))
 					{
 						RollbackAll(World, Rollback);
@@ -2138,7 +2197,8 @@ namespace UE::UAI::DomainAdapters::WorldSimpleEffect
 					{TEXT("world.authoring.memory")},
 					true,
 					Token,
-					true);
+					true,
+					MoveTemp(DurableTargets));
 				return OutResult.IsValid()
 					|| Fail(
 						OutError,

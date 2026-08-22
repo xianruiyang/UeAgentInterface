@@ -162,6 +162,15 @@ namespace UE::UAI::DomainAdapters::AssetProjectRead
 				TEXT(R"json({"type":"object","properties":{"target":{"type":"object","properties":{"source":{"type":"string","enum":["catalog_candidate","json_reference","ue_object","graph_node","name_reference"]},"candidate_id":{"type":"string","minLength":1},"json_file":{"type":"string","minLength":1},"json_pointer":{"type":"string","minLength":1},"kind":{"type":"string","minLength":1},"name":{"type":"string","minLength":1},"full_name":{"type":"string","minLength":1},"asset_path":{"type":"string","minLength":1},"graph_name":{"type":"string","minLength":1},"node_guid":{"type":"string","minLength":1}},"required":["source"],"additionalProperties":false}},"required":["target"],"additionalProperties":false})json"));
 			Add(
 				Descriptors,
+				TEXT("uai.query.reference.read"),
+				TEXT("sha256:ec85d816c17212cf7911440546134a94f86933b230abce221b9300e32c2e7dcf"),
+				TEXT("reference.asset.read"),
+				TEXT("asset_project.read.reference_asset"),
+				EUeAgentQueryKind::State,
+				AssetPlanes(),
+				TEXT(R"json({"type":"object","properties":{"field_ids":{"type":"array","items":{"type":"string","minLength":1},"uniqueItems":true}},"additionalProperties":false})json"));
+			Add(
+				Descriptors,
 				TEXT("uai.query.asset.registry_record"),
 				TEXT("sha256:1395062a9c39e7bfecf28142732c13c126aaff4d49568c5aefe6df02dddf659f"),
 				TEXT("asset.registry_record.read"),
@@ -263,11 +272,11 @@ namespace UE::UAI::DomainAdapters::AssetProjectRead
 		FString& OutError)
 	{
 		TArray<FUeAgentOperationDescriptor> Descriptors;
-		Descriptors.Reserve(17);
+		Descriptors.Reserve(18);
 		AddAssetDescriptors(Descriptors);
 		AddRegistryEditorDescriptors(Descriptors);
 		AddProjectConfigDescriptors(Descriptors);
-		if (Descriptors.Num() != 17)
+		if (Descriptors.Num() != 18)
 		{
 			OutRegistry.Reset();
 			OutError =

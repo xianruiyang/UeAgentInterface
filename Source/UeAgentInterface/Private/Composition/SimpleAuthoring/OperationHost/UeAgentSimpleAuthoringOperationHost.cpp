@@ -474,6 +474,7 @@ namespace UE::UAI::Composition::SimpleAuthoring::OperationHost
 		{
 			FCriticalSection Mutex;
 			TSharedPtr<FUeAgentSimpleAuthoringRuntime> Runtime;
+			TWeakObjectPtr<UWorld> RuntimeWorld;
 			TMap<FString, TSharedRef<IUeAgentCommandHandler>> Handlers;
 			TMap<FString, TSharedRef<Discovery::IUeAgentCatalogSource>>
 				CatalogSourcesByKind;
@@ -496,28 +497,43 @@ namespace UE::UAI::Composition::SimpleAuthoring::OperationHost
 			return Host;
 		}
 
+		void ResetRuntimeLocked(FProcessHost& Host)
+		{
+			Host.Handlers.Reset();
+			Host.CatalogSourcesByKind.Reset();
+			Host.Runtime.Reset();
+			Host.RuntimeWorld.Reset();
+		}
+
+		UWorld* ResolveDesiredWorldLocked(FProcessHost& Host)
+		{
+#if WITH_DEV_AUTOMATION_TESTS
+			if (UWorld* AutomationWorld = Host.AutomationWorld.Get())
+			{
+				return AutomationWorld;
+			}
+#endif
+			return GEditor
+				? GEditor->GetEditorWorldContext().World()
+				: nullptr;
+		}
+
 		bool TryCreateRuntimeLocked(FProcessHost& Host, FString& OutError)
 		{
 			OutError.Reset();
-			if (Host.Runtime.IsValid())
-			{
-				return true;
-			}
 			if (!IsInGameThread())
 			{
 				OutError = TEXT("simple_authoring_game_thread_required");
 				return false;
 			}
-			UWorld* World = nullptr;
-#if WITH_DEV_AUTOMATION_TESTS
-			World = Host.AutomationWorld.Get();
-#endif
-			if (!World)
+			UWorld* World = ResolveDesiredWorldLocked(Host);
+			if (Host.Runtime.IsValid()
+				&& Host.RuntimeWorld.Get() == World
+				&& World)
 			{
-				World = GEditor
-					? GEditor->GetEditorWorldContext().World()
-					: nullptr;
+				return true;
 			}
+			ResetRuntimeLocked(Host);
 			if (!World)
 			{
 				OutError = TEXT("simple_authoring_editor_world_unavailable");
@@ -569,20 +585,17 @@ namespace UE::UAI::Composition::SimpleAuthoring::OperationHost
 					RuntimeError)
 				|| !Host.Runtime.IsValid())
 			{
-				Host.Runtime.Reset();
+				ResetRuntimeLocked(Host);
 				OutError = RuntimeError.Code + TEXT(":") + RuntimeError.Detail;
 				return false;
 			}
 
-			Host.Handlers.Reset();
-			Host.CatalogSourcesByKind.Reset();
 			for (const TSharedRef<IUeAgentCommandHandler>& Handler
 				: Host.Runtime->GetCommandHandlers())
 			{
 				if (Host.Handlers.Contains(Handler->GetCommandId()))
 				{
-					Host.Handlers.Reset();
-					Host.Runtime.Reset();
+					ResetRuntimeLocked(Host);
 					OutError = TEXT("simple_authoring_handler_duplicate:")
 						+ Handler->GetCommandId();
 					return false;
@@ -597,9 +610,7 @@ namespace UE::UAI::Composition::SimpleAuthoring::OperationHost
 					if (Kind.IsEmpty()
 						|| Host.CatalogSourcesByKind.Contains(Kind))
 					{
-						Host.Handlers.Reset();
-						Host.CatalogSourcesByKind.Reset();
-						Host.Runtime.Reset();
+						ResetRuntimeLocked(Host);
 						OutError = TEXT("simple_authoring_catalog_kind_duplicate:")
 							+ Kind;
 						return false;
@@ -607,6 +618,7 @@ namespace UE::UAI::Composition::SimpleAuthoring::OperationHost
 					Host.CatalogSourcesByKind.Add(Kind, Source);
 				}
 			}
+			Host.RuntimeWorld = World;
 			return true;
 		}
 	}
@@ -687,13 +699,16 @@ namespace UE::UAI::Composition::SimpleAuthoring::OperationHost
 	}
 
 #if WITH_DEV_AUTOMATION_TESTS
-	void SetAutomationWorldOverride(UWorld* World)
+	void SetAutomationWorldOverride(
+		UWorld* World,
+		const bool bInvalidateRuntime)
 	{
 		FProcessHost& Host = ProcessHost();
 		FScopeLock Lock(&Host.Mutex);
-		Host.Handlers.Reset();
-		Host.CatalogSourcesByKind.Reset();
-		Host.Runtime.Reset();
+		if (bInvalidateRuntime)
+		{
+			ResetRuntimeLocked(Host);
+		}
 		Host.AutomationWorld = World;
 	}
 

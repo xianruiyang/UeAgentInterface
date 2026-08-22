@@ -52,6 +52,32 @@ namespace UE::UAI::Composition::SimpleAuthoring
 					OutError);
 			}
 
+			bool TryEnlist(
+				const FAssetDurableSessionRef& Session,
+				const TArray<FAssetDurableTarget>& MutationTargets,
+				const int64 CurrentFencingToken,
+				FUeAgentResourceTracker& Resources,
+				FAssetDurableSessionPtr& OutSession,
+				FAssetDurableError& OutError) override
+			{
+				IAssetDurableBackend* Backend = nullptr;
+				if (!TrySelectBackend(
+						Session->GetRequest(),
+						Backend,
+						OutError))
+				{
+					return false;
+				}
+				return TryEnlistAssetDurableTargets(
+					Session,
+					MutationTargets,
+					*Backend,
+					CurrentFencingToken,
+					Resources,
+					OutSession,
+					OutError);
+			}
+
 			bool TryPersist(
 				const FAssetDurableSessionRef& Session,
 				const int64 CurrentFencingToken,

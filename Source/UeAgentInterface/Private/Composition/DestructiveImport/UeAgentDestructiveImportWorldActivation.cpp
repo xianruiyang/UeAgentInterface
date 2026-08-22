@@ -22,6 +22,11 @@ namespace UE::UAI::Composition::DestructiveImport
 			return FUeAgentCommandParameter(
 				Name, EUeAgentCommandWireType::String, true, false);
 		};
+		auto OptionalString = [](const TCHAR* Name)
+		{
+			return FUeAgentCommandParameter(
+				Name, EUeAgentCommandWireType::String, false, false);
+		};
 		auto Integer = [](const TCHAR* Name)
 		{
 			return FUeAgentCommandParameter(
@@ -31,7 +36,10 @@ namespace UE::UAI::Composition::DestructiveImport
 			TEXT("data_layer_delete"), {String(TEXT("layer"))});
 		Add(TEXT("world.level_content.delete_scope"), TEXT("world"),
 			TEXT("level_content_delete_scope"),
-			{String(TEXT("folder_path"))});
+			{
+				String(TEXT("folder_path")),
+				OptionalString(TEXT("managed_id")),
+			});
 		Add(TEXT("world.pcg.cleanup"), TEXT("world"), TEXT("pcg_cleanup"),
 			{String(TEXT("actor_ref")), String(TEXT("component_name"))});
 		Add(TEXT("world.level_streaming.move_actors"), TEXT("world"),

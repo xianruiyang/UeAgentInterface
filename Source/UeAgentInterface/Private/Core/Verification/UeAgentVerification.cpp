@@ -131,7 +131,8 @@ namespace UE::UAI::Verification
 			TArray<FTargetVerification> Targets = {},
 			TArray<FString> EvidenceIds = {},
 			TOptional<FVerificationAcknowledgement> Acknowledgement =
-				TOptional<FVerificationAcknowledgement>())
+				TOptional<FVerificationAcknowledgement>(),
+			FString DiagnosticDetail = FString())
 		{
 			NormalizeTextArray(EvidenceIds);
 			return FVerificationOutcome(
@@ -142,7 +143,86 @@ namespace UE::UAI::Verification
 				false,
 				MoveTemp(Targets),
 				MoveTemp(EvidenceIds),
-				MoveTemp(Acknowledgement));
+				MoveTemp(Acknowledgement),
+				MoveTemp(DiagnosticDetail));
+		}
+
+		FString OracleDiagnosticDetail(
+			const FString& Stage,
+			const FString& Code,
+			const FString& Detail = FString())
+		{
+			FString Result = TEXT("stage=") + Stage;
+			if (!Code.IsEmpty())
+			{
+				Result += TEXT("; oracle_code=") + Code;
+			}
+			if (!Detail.IsEmpty())
+			{
+				Result += TEXT("; oracle_detail=") + Detail;
+			}
+			return Result;
+		}
+
+		FString CanonicalValueDiagnostic(
+			const StateSemantic::FUeAgentCanonicalValuePtr& Value)
+		{
+			if (!Value.IsValid())
+			{
+				return TEXT("<missing>");
+			}
+			switch (Value->GetKind())
+			{
+			case StateSemantic::EUeAgentValueKind::Null:
+				return TEXT("null");
+			case StateSemantic::EUeAgentValueKind::Boolean:
+				return Value->GetBoolean() ? TEXT("true") : TEXT("false");
+			case StateSemantic::EUeAgentValueKind::String:
+				return Value->GetText().Left(160);
+			case StateSemantic::EUeAgentValueKind::Integer:
+			case StateSemantic::EUeAgentValueKind::Decimal:
+				return Value->GetLexeme();
+			case StateSemantic::EUeAgentValueKind::Array:
+				return FString::Printf(
+					TEXT("array[%d]"),
+					Value->GetArrayItems().Num());
+			case StateSemantic::EUeAgentValueKind::Object:
+				return FString::Printf(
+					TEXT("object[%d]"),
+					Value->GetObjectItems().Num());
+			case StateSemantic::EUeAgentValueKind::Temporal:
+				return TEXT("temporal");
+			case StateSemantic::EUeAgentValueKind::Spatial:
+				return TEXT("spatial");
+			default:
+				return TEXT("unknown");
+			}
+		}
+
+		FString ComparisonDiagnosticDetail(
+			const FUeAgentSemanticComparison& Comparison)
+		{
+			const TArray<StateSemantic::FUeAgentSemanticDifference>&
+				Differences =
+				Comparison.GetDifferences();
+			FString Result = FString::Printf(
+				TEXT("difference_count=%d"),
+				Differences.Num());
+			const int32 Limit =
+				FMath::Min<int32>(Differences.Num(), 8);
+			for (int32 Index = 0; Index < Limit; ++Index)
+			{
+				const StateSemantic::FUeAgentSemanticDifference&
+					Difference =
+					Differences[Index];
+				Result += FString::Printf(
+					TEXT("; difference[%d].path=%s; left=%s; right=%s"),
+					Index,
+					*Difference.GetPath(),
+					*CanonicalValueDiagnostic(Difference.GetLeft()),
+					*CanonicalValueDiagnostic(Difference.GetRight()));
+			}
+			return Result;
 		}
 
 		bool CanContinue(
@@ -611,13 +691,16 @@ namespace UE::UAI::Verification
 		const bool bInRetrySafe,
 		TArray<FTargetVerification> InTargets,
 		TArray<FString> InEvidenceIds,
-		TOptional<FVerificationAcknowledgement> InAcknowledgement)
+		TOptional<FVerificationAcknowledgement> InAcknowledgement,
+		FString InDiagnosticDetail)
 		: VerificationId(
 			NormalizedText(MoveTemp(InVerificationId)))
 		, Status(InStatus)
 		, EffectOutcome(InEffectOutcome)
 		, DiagnosticCode(
 			NormalizedText(MoveTemp(InDiagnosticCode)))
+		, DiagnosticDetail(
+			NormalizedText(MoveTemp(InDiagnosticDetail)))
 		, bRetrySafe(bInRetrySafe)
 		, Targets(MoveTemp(InTargets))
 		, EvidenceIds(MoveTemp(InEvidenceIds))
@@ -646,6 +729,11 @@ namespace UE::UAI::Verification
 		return DiagnosticCode;
 	}
 
+	const FString& FVerificationOutcome::GetDiagnosticDetail() const
+	{
+		return DiagnosticDetail;
+	}
+
 	bool FVerificationOutcome::IsRetrySafe() const
 	{
 		return bRetrySafe;
@@ -671,12 +759,78 @@ namespace UE::UAI::Verification
 			: nullptr;
 	}
 
+	FStateReadPortPersistedStateOracle::
+	FStateReadPortPersistedStateOracle(
+		IUeAgentStateReadPort& InStateReadPort)
+		: StateReadPort(&InStateReadPort)
+	{
+	}
+
+	FStateReadPortPersistedStateOracle::
+	FStateReadPortPersistedStateOracle(
+		TSharedRef<
+			IUeAgentStateReadPort,
+			ESPMode::ThreadSafe> InStateReadPort)
+		: OwnedStateReadPort(MoveTemp(InStateReadPort))
+		, StateReadPort(OwnedStateReadPort.Get())
+	{
+	}
+
+	const FString& FStateReadPortPersistedStateOracle::
+	GetReadPortId() const
+	{
+		check(StateReadPort);
+		return StateReadPort->GetPortId();
+	}
+
+	bool FStateReadPortPersistedStateOracle::TryObserve(
+		const FVerificationTarget& Target,
+		const TArray<FDurableArtifact>& Artifacts,
+		FUeAgentResourceTracker& Resources,
+		const FUeAgentOperationDeadline& Deadline,
+		const FUeAgentCancellationToken& Cancellation,
+		FUeAgentCanonicalSnapshotPtr& OutSnapshot,
+		FVerificationError& OutError)
+	{
+		OutSnapshot.Reset();
+		OutError = FVerificationError();
+		if (!StateReadPort
+			|| !Target.IsValid()
+			|| Artifacts.IsEmpty()
+			|| StateReadPort->GetPortId()
+				!= Target.GetBinding().GetReadPortId())
+		{
+			OutError = FVerificationError(
+				TEXT("persisted_state_oracle_request_invalid"));
+			return false;
+		}
+		FUeAgentDiscoveryError ReadError;
+		if (!StateReadPort->TryRead(
+				FUeAgentStateReadRequest(
+					Target.GetBinding(),
+					EUeAgentStatePlane::Persisted),
+				Resources,
+				Deadline,
+				Cancellation,
+				OutSnapshot,
+				ReadError))
+		{
+			OutError = FVerificationError(
+				ReadError.Code.IsEmpty()
+					? TEXT("persisted_state_oracle_read_failed")
+					: ReadError.Code,
+				ReadError.Detail);
+			return false;
+		}
+		return true;
+	}
+
 	FVerificationService::FVerificationService(
-		IUeAgentStateReadPort& InStateReadPort,
+		IPersistedStateOracle& InPersistedStateOracle,
 		IAbsenceOracle& InAbsenceOracle,
 		IReferenceOracle& InReferenceOracle,
 		IDurableVerificationAcknowledger& InAcknowledger)
-		: StateReadPort(&InStateReadPort)
+		: PersistedStateOracle(&InPersistedStateOracle)
 		, AbsenceOracle(&InAbsenceOracle)
 		, ReferenceOracle(&InReferenceOracle)
 		, Acknowledger(&InAcknowledger)
@@ -693,7 +847,7 @@ namespace UE::UAI::Verification
 	{
 		OutError = FVerificationError();
 		if (!Request.IsValid()
-			|| StateReadPort == nullptr
+			|| PersistedStateOracle == nullptr
 			|| AbsenceOracle == nullptr
 			|| ReferenceOracle == nullptr
 			|| Acknowledger == nullptr)
@@ -743,6 +897,8 @@ namespace UE::UAI::Verification
 
 		TArray<FTargetVerification> TargetResults;
 		TArray<FString> EvidenceIds;
+		FString UnavailableDetail;
+		FString MismatchDetail;
 		bool bUnavailable = false;
 		bool bMismatch = false;
 		for (const FVerificationTarget& Target : Request.GetTargets())
@@ -767,23 +923,42 @@ namespace UE::UAI::Verification
 				== EVerificationOracleKind::Persisted)
 			{
 				FUeAgentCanonicalSnapshotPtr Actual;
-				FUeAgentDiscoveryError ReadError;
-				const FUeAgentStateReadRequest ReadRequest(
-					Target.GetBinding(),
-					EUeAgentStatePlane::Persisted);
-				if (StateReadPort->GetPortId()
-						!= Target.GetBinding().GetReadPortId()
-					|| !StateReadPort->TryRead(
-						ReadRequest,
+				FVerificationError OracleError;
+				if (PersistedStateOracle->GetReadPortId()
+					!= Target.GetBinding().GetReadPortId())
+				{
+					UnavailableDetail = OracleDiagnosticDetail(
+						TEXT("persisted_read_port"),
+						TEXT("verification_oracle_read_port_mismatch"),
+						PersistedStateOracle->GetReadPortId()
+							+ TEXT(" != ")
+							+ Target.GetBinding().GetReadPortId());
+					bUnavailable = true;
+					break;
+				}
+				if (!PersistedStateOracle->TryObserve(
+						Target,
+						ArtifactsFor(Request, Target),
 						Resources,
 						Deadline,
 						Cancellation,
 						Actual,
-						ReadError)
-					|| !Actual.IsValid()
+						OracleError))
+				{
+					UnavailableDetail = OracleDiagnosticDetail(
+						TEXT("persisted_observe"),
+						OracleError.GetCode(),
+						OracleError.GetDetail());
+					bUnavailable = true;
+					break;
+				}
+				if (!Actual.IsValid()
 					|| Actual->GetProvenance().GetSourceKind()
 						!= TEXT("independent_readback"))
 				{
+					UnavailableDetail = OracleDiagnosticDetail(
+						TEXT("persisted_snapshot"),
+						TEXT("verification_oracle_snapshot_invalid"));
 					bUnavailable = true;
 					break;
 				}
@@ -795,6 +970,9 @@ namespace UE::UAI::Verification
 					|| Actual->GetProvenance().GetEvidenceId()
 						== Expected->GetProvenance().GetEvidenceId())
 				{
+					UnavailableDetail = OracleDiagnosticDetail(
+						TEXT("persisted_independence"),
+						TEXT("verification_oracle_evidence_not_independent"));
 					bUnavailable = true;
 					break;
 				}
@@ -807,6 +985,10 @@ namespace UE::UAI::Verification
 					Comparison,
 					CompareError))
 				{
+					UnavailableDetail = OracleDiagnosticDetail(
+						TEXT("persisted_compare"),
+						CompareError.Code,
+						CompareError.Detail);
 					bUnavailable = true;
 					break;
 				}
@@ -814,6 +996,12 @@ namespace UE::UAI::Verification
 					Comparison.IsEquivalent()
 						? EVerificationStatus::Verified
 						: EVerificationStatus::Mismatch;
+				if (TargetStatus == EVerificationStatus::Mismatch
+					&& MismatchDetail.IsEmpty())
+				{
+					MismatchDetail =
+						ComparisonDiagnosticDetail(Comparison);
+				}
 				bMismatch = bMismatch
 					|| TargetStatus == EVerificationStatus::Mismatch;
 				const FString EvidenceId =
@@ -848,6 +1036,12 @@ namespace UE::UAI::Verification
 					|| !(Observation.GetIdentity()
 						== Target.GetIdentity()))
 				{
+					UnavailableDetail = OracleDiagnosticDetail(
+						TEXT("absence_observe"),
+						OracleError.IsPresent()
+							? OracleError.GetCode()
+							: TEXT("verification_absence_observation_invalid"),
+						OracleError.GetDetail());
 					bUnavailable = true;
 					break;
 				}
@@ -887,6 +1081,12 @@ namespace UE::UAI::Verification
 				|| !(Observation.GetIdentity()
 					== Target.GetIdentity()))
 			{
+				UnavailableDetail = OracleDiagnosticDetail(
+					TEXT("reference_observe"),
+					OracleError.IsPresent()
+						? OracleError.GetCode()
+						: TEXT("verification_reference_observation_invalid"),
+					OracleError.GetDetail());
 				bUnavailable = true;
 				break;
 			}
@@ -921,7 +1121,9 @@ namespace UE::UAI::Verification
 				EEffectOutcome::StateUnknown,
 				TEXT("verification_oracle_unavailable"),
 				MoveTemp(TargetResults),
-				MoveTemp(EvidenceIds));
+				MoveTemp(EvidenceIds),
+				TOptional<FVerificationAcknowledgement>(),
+				MoveTemp(UnavailableDetail));
 			return true;
 		}
 		if (bMismatch)
@@ -932,7 +1134,9 @@ namespace UE::UAI::Verification
 				EEffectOutcome::Partial,
 				TEXT("verification_semantic_mismatch"),
 				MoveTemp(TargetResults),
-				MoveTemp(EvidenceIds));
+				MoveTemp(EvidenceIds),
+				TOptional<FVerificationAcknowledgement>(),
+				MoveTemp(MismatchDetail));
 			return true;
 		}
 

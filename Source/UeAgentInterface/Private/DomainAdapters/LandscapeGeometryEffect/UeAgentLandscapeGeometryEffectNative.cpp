@@ -1,5 +1,7 @@
 #include "DomainAdapters/LandscapeGeometryEffect/UeAgentLandscapeGeometryEffectCapabilities.h"
 
+#include "DomainAdapters/Landscape/UeAgentLandscapeHeightState.h"
+#include "Domains/Level/Authoring/UeAgentLevelAuthoringState.h"
 #include "Engine/Level.h"
 #include "Engine/World.h"
 #include "EngineUtils.h"
@@ -520,23 +522,24 @@ namespace UE::UAI::DomainAdapters::LandscapeGeometryEffect
 				return false;
 			}
 
-			UObject* ResolvedObject = nullptr;
-			if (!Resolver.TryResolveReference(
-					World,
-					OutAction.TargetRef,
-					ResolvedObject,
-					OutError))
-			{
-				return false;
-			}
-			ALandscape* Landscape = Cast<ALandscape>(ResolvedObject);
-			if (!Landscape || Landscape->GetWorld() != &World)
+			ALandscape* Landscape = nullptr;
+			DomainAdapters::Landscape::
+				FLandscapeHeightStateError TargetError;
+			if (!DomainAdapters::Landscape::
+					TryResolveLandscapeHeightTarget(
+						World,
+						OutAction.TargetRef,
+						&Resolver,
+						Landscape,
+						TargetError))
 			{
 				return Fail(
 					OutError,
-					TEXT(
-						"landscape_geometry_reference_type_invalid"),
-					OutAction.TargetRef);
+					TargetError.Code,
+					TargetError.SubjectId
+						+ (TargetError.Detail.IsEmpty()
+							? FString()
+							: TEXT(":") + TargetError.Detail));
 			}
 
 			int32 LiveMinX = 0;
@@ -693,6 +696,25 @@ namespace UE::UAI::DomainAdapters::LandscapeGeometryEffect
 			Action.Landscape = Landscape;
 			Landscape->SetActorScale3D(Action.Scale);
 			Landscape->SetActorLabel(TargetLabel);
+			FString OwnershipError;
+			if (!UeAgentLevelAuthoring::TryBindManagedActorOwnership(
+					*Landscape,
+					Action.TargetRef,
+					TEXT("landscape"),
+					OwnershipError))
+			{
+				World.DestroyActor(Landscape);
+				Action.Landscape.Reset();
+				if (Package)
+				{
+					Package->SetDirtyFlag(Action.bPackageWasDirty);
+				}
+				return Fail(
+					OutError,
+					TEXT(
+						"landscape_geometry_managed_ownership_failed"),
+					OwnershipError);
+			}
 
 			const int64 Width =
 				static_cast<int64>(Action.MaxX)

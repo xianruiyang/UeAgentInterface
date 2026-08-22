@@ -325,7 +325,7 @@ namespace UE::UAI::Tests::StrictV2::T59
 					TEXT("\"placement\":{\"basis_evidence\":\"explicit UE world frame\",")
 					TEXT("\"frame_id\":\"ue.world\",\"rotation_quaternion_xyzw\":[0,0,0,1],")
 					TEXT("\"scale\":[1,1,1],\"translation\":[0,0,0],")
-					TEXT("\"unit\":\"centimeter\"},\"save_level\":true,")
+					TEXT("\"unit\":\"centimeter\"},")
 					TEXT("\"tags\":[\"T59ResaveFixture\"]}"));
 				if (!Test->TestTrue(
 						TEXT("resave fixture is created through the public World command"),

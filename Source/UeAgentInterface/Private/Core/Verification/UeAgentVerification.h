@@ -232,12 +232,14 @@ namespace UE::UAI::Verification
 			bool bInRetrySafe,
 			TArray<FTargetVerification> InTargets,
 			TArray<FString> InEvidenceIds,
-			TOptional<FVerificationAcknowledgement> InAcknowledgement);
+			TOptional<FVerificationAcknowledgement> InAcknowledgement,
+			FString InDiagnosticDetail = FString());
 
 		const FString& GetVerificationId() const;
 		EVerificationStatus GetStatus() const;
 		EEffectOutcome GetEffectOutcome() const;
 		const FString& GetDiagnosticCode() const;
+		const FString& GetDiagnosticDetail() const;
 		bool IsRetrySafe() const;
 		const TArray<FTargetVerification>& GetTargets() const;
 		const TArray<FString>& GetEvidenceIds() const;
@@ -250,6 +252,7 @@ namespace UE::UAI::Verification
 		EEffectOutcome EffectOutcome =
 			EEffectOutcome::StateUnknown;
 		FString DiagnosticCode;
+		FString DiagnosticDetail;
 		bool bRetrySafe = false;
 		TArray<FTargetVerification> Targets;
 		TArray<FString> EvidenceIds;
@@ -285,11 +288,56 @@ namespace UE::UAI::Verification
 			FVerificationError& OutError) = 0;
 	};
 
+	class UEAGENTINTERFACE_API IPersistedStateOracle
+	{
+	public:
+		virtual ~IPersistedStateOracle() = default;
+
+		virtual const FString& GetReadPortId() const = 0;
+		virtual bool TryObserve(
+			const FVerificationTarget& Target,
+			const TArray<FDurableArtifact>& Artifacts,
+			FUeAgentResourceTracker& Resources,
+			const FUeAgentOperationDeadline& Deadline,
+			const FUeAgentCancellationToken& Cancellation,
+			FUeAgentCanonicalSnapshotPtr& OutSnapshot,
+			FVerificationError& OutError) = 0;
+	};
+
+	class UEAGENTINTERFACE_API
+		FStateReadPortPersistedStateOracle final
+		: public IPersistedStateOracle
+	{
+	public:
+		explicit FStateReadPortPersistedStateOracle(
+			IUeAgentStateReadPort& InStateReadPort);
+		explicit FStateReadPortPersistedStateOracle(
+			TSharedRef<
+				IUeAgentStateReadPort,
+				ESPMode::ThreadSafe> InStateReadPort);
+
+		const FString& GetReadPortId() const override;
+		bool TryObserve(
+			const FVerificationTarget& Target,
+			const TArray<FDurableArtifact>& Artifacts,
+			FUeAgentResourceTracker& Resources,
+			const FUeAgentOperationDeadline& Deadline,
+			const FUeAgentCancellationToken& Cancellation,
+			FUeAgentCanonicalSnapshotPtr& OutSnapshot,
+			FVerificationError& OutError) override;
+
+	private:
+		TSharedPtr<
+			IUeAgentStateReadPort,
+			ESPMode::ThreadSafe> OwnedStateReadPort;
+		IUeAgentStateReadPort* StateReadPort = nullptr;
+	};
+
 	class UEAGENTINTERFACE_API FVerificationService final
 	{
 	public:
 		FVerificationService(
-			IUeAgentStateReadPort& InStateReadPort,
+			IPersistedStateOracle& InPersistedStateOracle,
 			IAbsenceOracle& InAbsenceOracle,
 			IReferenceOracle& InReferenceOracle,
 			IDurableVerificationAcknowledger& InAcknowledger);
@@ -303,7 +351,7 @@ namespace UE::UAI::Verification
 			FVerificationError& OutError) const;
 
 	private:
-		IUeAgentStateReadPort* StateReadPort = nullptr;
+		IPersistedStateOracle* PersistedStateOracle = nullptr;
 		IAbsenceOracle* AbsenceOracle = nullptr;
 		IReferenceOracle* ReferenceOracle = nullptr;
 		IDurableVerificationAcknowledger* Acknowledger = nullptr;

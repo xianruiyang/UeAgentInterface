@@ -1,6 +1,7 @@
 #include "Module/CommandRegistration/Query/UeAgentQueryRegistration.h"
 
 #include "CommandHandlers/Query/UeAgentQueryHandlers.h"
+#include "Core/DomainCapability/UeAgentDomainCapability.h"
 
 namespace UE::UAI::Module::CommandRegistration::Query
 {
@@ -168,6 +169,42 @@ namespace UE::UAI::Module::CommandRegistration::Query
 		private:
 			TSharedRef<IUeAgentQueryService> Service;
 		};
+
+		bool TryCreateDomainCapability(
+			TSharedPtr<
+				const DomainCapability::FDomainCapabilityContribution>&
+					OutContribution,
+			FString& OutError)
+		{
+			TArray<
+				BindingGateway::Query::
+					FUeAgentDomainQueryProviderRegistration> Providers;
+			if (!TryCreateProductionQueryProviderRegistrations(
+					Providers,
+					OutError))
+			{
+				OutContribution.Reset();
+				return false;
+			}
+			DomainCapability::FDomainCapabilityDeclaration Declaration =
+				DomainCapability::
+					MakeExplicitlyUnsupportedDomainCapabilityDeclaration(
+						TEXT("query"));
+			Declaration.Query.Support =
+				DomainCapability::EDomainCapabilitySupport::Supported;
+			Declaration.Query.Providers = MoveTemp(Providers);
+			return DomainCapability::FDomainCapabilityContribution::
+				TryCreate(
+					MoveTemp(Declaration),
+					OutContribution,
+					OutError);
+		}
+
+		const DomainCapability::
+			FDomainCapabilityContributionFactoryRegistration
+				GQueryDomainCapabilityRegistration(
+					TEXT("query"),
+					&TryCreateDomainCapability);
 
 		const FUeAgentActiveCommandContributionFactoryRegistration
 			GQueryContributionRegistration(

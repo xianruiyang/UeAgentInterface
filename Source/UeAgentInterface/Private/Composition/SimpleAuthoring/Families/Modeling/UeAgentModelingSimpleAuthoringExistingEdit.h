@@ -1,6 +1,7 @@
 #pragma once
 
 #include "CoreMinimal.h"
+#include "Core/StateSemantic/UeAgentStateSemantic.h"
 #include "Dom/JsonObject.h"
 #include "Templates/SharedPointer.h"
 
@@ -16,7 +17,7 @@ namespace UE::UAI::Composition::SimpleAuthoring::Modeling::ExistingEdit
 	struct FCarrierState
 	{
 		FString TargetRef;
-		FString TargetRevision;
+		TOptional<StateSemantic::FUeAgentStateRevision> TargetRevision;
 		FString CarrierKind;
 		FString GeometryFingerprint;
 		TArray<int32> VertexIds;
@@ -55,7 +56,6 @@ namespace UE::UAI::Composition::SimpleAuthoring::Modeling::ExistingEdit
 		DomainAdapters::ModelingGeometryEffect::
 			IUeAgentModelingGeometryEffectReferenceResolver& Resolver,
 		const FString& TargetRef,
-		const FString& TargetRevision,
 		FCarrierState& OutState,
 		FString& OutErrorCode,
 		FString& OutErrorDetail);

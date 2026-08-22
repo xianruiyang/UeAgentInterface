@@ -12,7 +12,7 @@ namespace UE::UAI::QueryOwners::Landscape
 	{
 		static const TArray<FString> Flows = {
 			TEXT("query.command.detail"),
-			TEXT("world actor and landscape persisted-state query"),
+			TEXT("landscape.height.read"),
 		};
 		return Flows;
 	}

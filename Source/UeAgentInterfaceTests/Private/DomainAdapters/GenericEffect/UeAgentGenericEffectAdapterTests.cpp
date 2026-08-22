@@ -478,6 +478,23 @@ bool FUeAgentGenericEffectFactsRollbackTest::RunTest(
 		MakeShared<
 			FRecordingGenericEffectUeHook,
 			ESPMode::ThreadSafe>();
+	UeHook->ApplyResult = FUeAgentGenericEffectApplyResult(
+		91,
+		{Identity.GetCanonicalKey()},
+		{
+			TEXT("property_notifications_flushed"),
+			TEXT("generated_state_settled"),
+		},
+		true,
+		TEXT("rollback:p4-007:reference-title"),
+		true,
+		{
+			UE::UAI::AssetDurable::FAssetDurableTarget(
+				Identity,
+				TEXT("/Game/UAI/P4_007"),
+				UE::UAI::AssetDurable::EAssetDurableIntent::Save,
+				UE::UAI::AssetDurable::ERollbackGrade::DurableBackup),
+		});
 	const TSharedRef<
 		FUeAgentGenericEffectMutationHook,
 		ESPMode::ThreadSafe> Hook =
@@ -511,6 +528,17 @@ bool FUeAgentGenericEffectFactsRollbackTest::RunTest(
 	TestTrue(
 		TEXT("rollback support comes from UE hook"),
 		Facts.IsRollbackSupported());
+	TestEqual(
+		TEXT("mutation-produced durable targets cross the generic adapter"),
+		Facts.GetDurableTargets().Num(),
+		1);
+	if (Facts.GetDurableTargets().Num() == 1)
+	{
+		TestEqual(
+			TEXT("the durable package identity is unchanged"),
+			Facts.GetDurableTargets()[0].GetDurableLocation(),
+			FString(TEXT("/Game/UAI/P4_007")));
+	}
 
 	bool bConfirmed = false;
 	const bool bRolledBack = Hook->Rollback(

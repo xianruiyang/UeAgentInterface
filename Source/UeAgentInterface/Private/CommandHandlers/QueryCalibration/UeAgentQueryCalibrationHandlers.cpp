@@ -107,6 +107,19 @@ namespace UE::UAI::CommandHandlers::QueryCalibration
 			Result->SetBoolField(TEXT("required"), Field.bRequired);
 			Result->SetBoolField(TEXT("nullable"), Field.bNullable);
 			Result->SetStringField(TEXT("description"), Field.Description);
+			if (!Field.SchemaJson.IsEmpty())
+			{
+				TSharedPtr<FJsonObject> Schema;
+				FString Error;
+				if (Json::TryParseObject(
+						Field.SchemaJson,
+						Schema,
+						Error)
+					&& Schema.IsValid())
+				{
+					Result->SetObjectField(TEXT("schema"), Schema);
+				}
+			}
 			return Result;
 		}
 

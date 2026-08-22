@@ -5,9 +5,14 @@
 #include "DomainAdapters/EditorProject/UeAgentEditorProjectMechanicsBoundary.h"
 #include "Dom/JsonObject.h"
 #include "Dom/JsonValue.h"
+#include "Engine/DataTable.h"
+#include "Engine/SkeletalMesh.h"
+#include "Engine/StaticMesh.h"
+#include "MeshDescription.h"
 #include "Misc/ConfigCacheIni.h"
 #include "Serialization/JsonReader.h"
 #include "Serialization/JsonSerializer.h"
+#include "StaticMeshAttributes.h"
 #include "UObject/Package.h"
 #include "UObject/UnrealType.h"
 
@@ -249,6 +254,43 @@ namespace UE::UAI::DomainAdapters::AssetProjectRead
 				Selector,
 				TEXT("core.integer"),
 				EUeAgentValueKind::Integer,
+				Value,
+				Context,
+				OutEntries,
+				OutError);
+		}
+
+		bool AddDecimal(
+			const FString& SemanticId,
+			const FString& TargetKind,
+			const FString& OwnerId,
+			const FString& Selector,
+			const double Number,
+			const FUeAgentOperationContext& Context,
+			TArray<FUeAgentStateEntry>& OutEntries,
+			FUeAgentAssetProjectReadError& OutError)
+		{
+			FUeAgentCanonicalValuePtr Value;
+			FUeAgentStateSemanticError StateError;
+			if (!FUeAgentCanonicalValue::TryDecimal(
+					FString::SanitizeFloat(Number, 0),
+					Context.GetResourceTracker(),
+					Value,
+					StateError))
+			{
+				return Fail(
+					OutError,
+					StateError.Code,
+					StateError.Path,
+					StateError.Detail);
+			}
+			return AddValueEntry(
+				SemanticId,
+				TargetKind,
+				OwnerId,
+				Selector,
+				TEXT("core.decimal"),
+				EUeAgentValueKind::Decimal,
 				Value,
 				Context,
 				OutEntries,
@@ -566,6 +608,501 @@ namespace UE::UAI::DomainAdapters::AssetProjectRead
 			return true;
 		}
 
+		bool MatchesCollectionKey(
+			const FString& Key,
+			const TArray<FString>& RequestedKeys,
+			const FString& KeyPrefix)
+		{
+			return (RequestedKeys.IsEmpty() || RequestedKeys.Contains(Key))
+				&& (KeyPrefix.IsEmpty() || Key.StartsWith(KeyPrefix));
+		}
+
+		bool AddCollectionCount(
+			UObject* Asset,
+			const FString& CollectionKind,
+			const int64 Count,
+			const FUeAgentOperationContext& Context,
+			TArray<FUeAgentStateEntry>& Entries,
+			FUeAgentAssetProjectReadError& OutError)
+		{
+			return AddString(
+				TEXT("asset.collection:kind"),
+				TEXT("asset"),
+				Asset->GetPathName(),
+				TEXT("collection_kind"),
+				CollectionKind,
+				Context,
+				Entries,
+				OutError)
+				&& AddInteger(
+					TEXT("asset.collection:count"),
+					TEXT("asset"),
+					Asset->GetPathName(),
+					TEXT("collection_count"),
+					Count,
+					Context,
+					Entries,
+					OutError);
+		}
+
+		bool TryAddDataTableRows(
+			UObject* Asset,
+			const TSharedPtr<FJsonObject>& Input,
+			const FUeAgentOperationContext& Context,
+			TArray<FUeAgentStateEntry>& Entries,
+			FUeAgentAssetProjectReadError& OutError)
+		{
+			const UDataTable* Table = Cast<UDataTable>(Asset);
+			if (!Table || !Table->GetRowStruct())
+			{
+				return Fail(
+					OutError,
+					TEXT("asset_project_read_collection_kind_unsupported"),
+					Asset->GetPathName(),
+					TEXT("rows requires a DataTable with a row struct"));
+			}
+			const TArray<FString> RequestedKeys =
+				ReadStringArray(Input, TEXT("keys"));
+			const TArray<FString> FieldIds =
+				ReadStringArray(Input, TEXT("field_ids"));
+			FString KeyPrefix;
+			Input->TryGetStringField(TEXT("key_prefix"), KeyPrefix);
+			TSet<FString> MatchedKeys;
+			int64 Count = 0;
+			TArray<FName> RowNames = Table->GetRowNames();
+			RowNames.Sort(FNameLexicalLess());
+			for (const FName RowName : RowNames)
+			{
+				const FString Key = RowName.ToString();
+				if (!MatchesCollectionKey(Key, RequestedKeys, KeyPrefix))
+				{
+					continue;
+				}
+				uint8* const* RowData = Table->GetRowMap().Find(RowName);
+				if (!RowData || !*RowData)
+				{
+					return Fail(
+						OutError,
+						TEXT("asset_project_read_collection_row_unavailable"),
+						Asset->GetPathName(),
+						Key);
+				}
+				MatchedKeys.Add(Key);
+				++Count;
+				const FString RowOwner = Asset->GetPathName()
+					+ TEXT("#row:") + Key;
+				if (!AddString(
+						TEXT("asset.collection:row:") + Key,
+						TEXT("data_table_row"),
+						RowOwner,
+						TEXT("row_key"),
+						Key,
+						Context,
+						Entries,
+						OutError))
+				{
+					return false;
+				}
+				for (const FString& FieldId : FieldIds)
+				{
+					FProperty* Property = FindFProperty<FProperty>(
+						Table->GetRowStruct(), *FieldId);
+					if (!Property)
+					{
+						return Fail(
+							OutError,
+							TEXT("asset_project_read_collection_field_not_found"),
+							RowOwner,
+							FieldId);
+					}
+					FString ValueText;
+					const void* ValuePtr = Property->ContainerPtrToValuePtr<void>(
+						*RowData);
+					Property->ExportTextItem_Direct(
+						ValueText, ValuePtr, nullptr, Asset, PPF_None);
+					const FString FieldOwner = RowOwner
+						+ TEXT("#field:") + FieldId;
+					if (!AddString(
+							TEXT("asset.collection:row_field:")
+								+ Key + TEXT(":") + FieldId,
+							TEXT("data_table_field"),
+							FieldOwner,
+							TEXT("field_id"),
+							FieldId,
+							Context,
+							Entries,
+							OutError)
+						|| !AddString(
+							TEXT("asset.collection:row_value:")
+								+ Key + TEXT(":") + FieldId,
+							TEXT("data_table_field"),
+							FieldOwner,
+							TEXT("field_value_text"),
+							ValueText,
+							Context,
+							Entries,
+							OutError))
+					{
+						return false;
+					}
+				}
+			}
+			for (const FString& RequestedKey : RequestedKeys)
+			{
+				if (!MatchedKeys.Contains(RequestedKey))
+				{
+					return Fail(
+						OutError,
+						TEXT("asset_project_read_collection_key_not_found"),
+						Asset->GetPathName(),
+						RequestedKey);
+				}
+			}
+			return AddCollectionCount(
+				Asset, TEXT("rows"), Count, Context, Entries, OutError);
+		}
+
+		bool TryAddReflectedCollection(
+			UObject* Asset,
+			const FString& CollectionKind,
+			const TSharedPtr<FJsonObject>& Input,
+			const FUeAgentOperationContext& Context,
+			TArray<FUeAgentStateEntry>& Entries,
+			FUeAgentAssetProjectReadError& OutError)
+		{
+			const TArray<FString> RequestedKeys =
+				ReadStringArray(Input, TEXT("keys"));
+			const TArray<FString> FieldIds =
+				ReadStringArray(Input, TEXT("field_ids"));
+			FString KeyPrefix;
+			Input->TryGetStringField(TEXT("key_prefix"), KeyPrefix);
+			TArray<FProperty*> Properties;
+			if (FieldIds.IsEmpty())
+			{
+				for (TFieldIterator<FProperty> It(Asset->GetClass()); It; ++It)
+				{
+					FProperty* Property = *It;
+					if ((CollectionKind == TEXT("items")
+							&& (Property->IsA<FArrayProperty>()
+								|| Property->IsA<FSetProperty>()))
+						|| (CollectionKind == TEXT("entries")
+							&& Property->IsA<FMapProperty>()))
+					{
+						Properties.Add(Property);
+					}
+				}
+				Properties.Sort(
+					[](const FProperty& Left, const FProperty& Right)
+					{
+						return Left.GetName() < Right.GetName();
+					});
+			}
+			else
+			{
+				for (const FString& FieldId : FieldIds)
+				{
+					FProperty* Property = FindFProperty<FProperty>(
+						Asset->GetClass(), *FieldId);
+					const bool bCompatible = Property
+						&& ((CollectionKind == TEXT("items")
+								&& (Property->IsA<FArrayProperty>()
+									|| Property->IsA<FSetProperty>()))
+							|| (CollectionKind == TEXT("entries")
+								&& Property->IsA<FMapProperty>()));
+					if (!bCompatible)
+					{
+						return Fail(
+							OutError,
+							TEXT("asset_project_read_collection_field_kind_mismatch"),
+							Asset->GetPathName(),
+							FieldId);
+					}
+					Properties.Add(Property);
+				}
+			}
+
+			int64 Count = 0;
+			for (FProperty* Property : Properties)
+			{
+				void* Container = Property->ContainerPtrToValuePtr<void>(Asset);
+				if (FArrayProperty* Array = CastField<FArrayProperty>(Property))
+				{
+					FScriptArrayHelper Helper(Array, Container);
+					for (int32 Index = 0; Index < Helper.Num(); ++Index)
+					{
+						const FString Key = LexToString(Index);
+						if (!MatchesCollectionKey(Key, RequestedKeys, KeyPrefix))
+						{
+							continue;
+						}
+						FString ValueText;
+						Array->Inner->ExportTextItem_Direct(
+							ValueText, Helper.GetRawPtr(Index), nullptr,
+							Asset, PPF_None);
+						const FString Owner = Asset->GetPathName()
+							+ TEXT("#") + Property->GetName()
+							+ TEXT("[") + Key + TEXT("]");
+						if (!AddString(
+								TEXT("asset.collection:item_field:") + Owner,
+								TEXT("collection_item"), Owner,
+								TEXT("collection_field_id"), Property->GetName(),
+								Context, Entries, OutError)
+							|| !AddInteger(
+								TEXT("asset.collection:item_index:") + Owner,
+								TEXT("collection_item"), Owner,
+								TEXT("item_index"), Index,
+								Context, Entries, OutError)
+							|| !AddString(
+								TEXT("asset.collection:item_value:") + Owner,
+								TEXT("collection_item"), Owner,
+								TEXT("item_value_text"), ValueText,
+								Context, Entries, OutError))
+						{
+							return false;
+						}
+						++Count;
+					}
+				}
+				else if (FSetProperty* Set = CastField<FSetProperty>(Property))
+				{
+					FScriptSetHelper Helper(Set, Container);
+					int32 ItemIndex = 0;
+					for (int32 InternalIndex = 0;
+						InternalIndex < Helper.GetMaxIndex(); ++InternalIndex)
+					{
+						if (!Helper.IsValidIndex(InternalIndex))
+						{
+							continue;
+						}
+						FString ValueText;
+						Set->ElementProp->ExportTextItem_Direct(
+							ValueText, Helper.GetElementPtr(InternalIndex),
+							nullptr, Asset, PPF_None);
+						const FString Key = LexToString(ItemIndex++);
+						if (!MatchesCollectionKey(Key, RequestedKeys, KeyPrefix))
+						{
+							continue;
+						}
+						const FString Owner = Asset->GetPathName()
+							+ TEXT("#") + Property->GetName()
+							+ TEXT("{") + Key + TEXT("}");
+						if (!AddString(
+								TEXT("asset.collection:set_field:") + Owner,
+								TEXT("collection_item"), Owner,
+								TEXT("collection_field_id"), Property->GetName(),
+								Context, Entries, OutError)
+							|| !AddInteger(
+								TEXT("asset.collection:set_index:") + Owner,
+								TEXT("collection_item"), Owner,
+								TEXT("item_index"), FCString::Atoi(*Key),
+								Context, Entries, OutError)
+							|| !AddString(
+								TEXT("asset.collection:set_value:") + Owner,
+								TEXT("collection_item"), Owner,
+								TEXT("item_value_text"), ValueText,
+								Context, Entries, OutError))
+						{
+							return false;
+						}
+						++Count;
+					}
+				}
+				else if (FMapProperty* Map = CastField<FMapProperty>(Property))
+				{
+					FScriptMapHelper Helper(Map, Container);
+					for (int32 Index = 0; Index < Helper.GetMaxIndex(); ++Index)
+					{
+						if (!Helper.IsValidIndex(Index))
+						{
+							continue;
+						}
+						FString Key;
+						Map->KeyProp->ExportTextItem_Direct(
+							Key, Helper.GetKeyPtr(Index), nullptr,
+							Asset, PPF_None);
+						if (!MatchesCollectionKey(Key, RequestedKeys, KeyPrefix))
+						{
+							continue;
+						}
+						FString ValueText;
+						Map->ValueProp->ExportTextItem_Direct(
+							ValueText, Helper.GetValuePtr(Index), nullptr,
+							Asset, PPF_None);
+						const FString Owner = Asset->GetPathName()
+							+ TEXT("#") + Property->GetName()
+							+ TEXT("{") + Key + TEXT("}");
+						if (!AddString(
+								TEXT("asset.collection:entry_field:") + Owner,
+								TEXT("collection_entry"), Owner,
+								TEXT("collection_field_id"), Property->GetName(),
+								Context, Entries, OutError)
+							|| !AddString(
+								TEXT("asset.collection:entry_key:") + Owner,
+								TEXT("collection_entry"), Owner,
+								TEXT("entry_key"), Key,
+								Context, Entries, OutError)
+							|| !AddString(
+								TEXT("asset.collection:entry_value:") + Owner,
+								TEXT("collection_entry"), Owner,
+								TEXT("entry_value_text"), ValueText,
+								Context, Entries, OutError))
+						{
+							return false;
+						}
+						++Count;
+					}
+				}
+			}
+			return AddCollectionCount(
+				Asset, CollectionKind, Count, Context, Entries, OutError);
+		}
+
+		bool TryAddAssetSample(
+			UObject* Asset,
+			const TSharedPtr<FJsonObject>& Input,
+			const FUeAgentOperationContext& Context,
+			TArray<FUeAgentStateEntry>& Entries,
+			FUeAgentAssetProjectReadError& OutError)
+		{
+			FString SampleKind;
+			if (!Input->TryGetStringField(TEXT("sample_kind"), SampleKind))
+			{
+				return Fail(
+					OutError,
+					TEXT("asset_project_read_sample_kind_missing"),
+					Asset->GetPathName());
+			}
+			if (SampleKind == TEXT("bounds"))
+			{
+				if (Input->HasField(TEXT("coordinates"))
+					|| Input->HasField(TEXT("index"))
+					|| Input->HasField(TEXT("channel")))
+				{
+					return Fail(
+						OutError,
+						TEXT("asset_project_read_sample_selector_unsupported"),
+						Asset->GetPathName(),
+						SampleKind);
+				}
+				FBoxSphereBounds Bounds;
+				if (const UStaticMesh* StaticMesh = Cast<UStaticMesh>(Asset))
+				{
+					Bounds = StaticMesh->GetBounds();
+				}
+				else if (const USkeletalMesh* SkeletalMesh =
+					Cast<USkeletalMesh>(Asset))
+				{
+					Bounds = SkeletalMesh->GetBounds();
+				}
+				else
+				{
+					return Fail(
+						OutError,
+						TEXT("asset_project_read_sample_target_unsupported"),
+						Asset->GetPathName(),
+						SampleKind);
+				}
+				const FString Owner = Asset->GetPathName();
+				return AddString(
+						TEXT("asset.sample:kind"), TEXT("asset"), Owner,
+						TEXT("sample_kind"), SampleKind,
+						Context, Entries, OutError)
+					&& AddDecimal(
+						TEXT("asset.sample:bounds_origin_x"), TEXT("asset"), Owner,
+						TEXT("bounds_origin_x_cm"), Bounds.Origin.X,
+						Context, Entries, OutError)
+					&& AddDecimal(
+						TEXT("asset.sample:bounds_origin_y"), TEXT("asset"), Owner,
+						TEXT("bounds_origin_y_cm"), Bounds.Origin.Y,
+						Context, Entries, OutError)
+					&& AddDecimal(
+						TEXT("asset.sample:bounds_origin_z"), TEXT("asset"), Owner,
+						TEXT("bounds_origin_z_cm"), Bounds.Origin.Z,
+						Context, Entries, OutError)
+					&& AddDecimal(
+						TEXT("asset.sample:bounds_extent_x"), TEXT("asset"), Owner,
+						TEXT("bounds_extent_x_cm"), Bounds.BoxExtent.X,
+						Context, Entries, OutError)
+					&& AddDecimal(
+						TEXT("asset.sample:bounds_extent_y"), TEXT("asset"), Owner,
+						TEXT("bounds_extent_y_cm"), Bounds.BoxExtent.Y,
+						Context, Entries, OutError)
+					&& AddDecimal(
+						TEXT("asset.sample:bounds_extent_z"), TEXT("asset"), Owner,
+						TEXT("bounds_extent_z_cm"), Bounds.BoxExtent.Z,
+						Context, Entries, OutError)
+					&& AddDecimal(
+						TEXT("asset.sample:bounds_radius"), TEXT("asset"), Owner,
+						TEXT("bounds_sphere_radius_cm"), Bounds.SphereRadius,
+						Context, Entries, OutError);
+			}
+			if (SampleKind == TEXT("vertex"))
+			{
+				if (!Input->HasField(TEXT("index"))
+					|| Input->HasField(TEXT("coordinates"))
+					|| Input->HasField(TEXT("channel")))
+				{
+					return Fail(
+						OutError,
+						TEXT("asset_project_read_sample_selector_unsupported"),
+						Asset->GetPathName(),
+						SampleKind);
+				}
+				const UStaticMesh* StaticMesh = Cast<UStaticMesh>(Asset);
+				const FMeshDescription* Description = StaticMesh
+					? StaticMesh->GetMeshDescription(0) : nullptr;
+				if (!Description)
+				{
+					return Fail(
+						OutError,
+						TEXT("asset_project_read_sample_target_unsupported"),
+						Asset->GetPathName(),
+						SampleKind);
+				}
+				const int32 Index = static_cast<int32>(
+					Input->GetIntegerField(TEXT("index")));
+				const FVertexID VertexId(Index);
+				if (!Description->IsVertexValid(VertexId))
+				{
+					return Fail(
+						OutError,
+						TEXT("asset_project_read_sample_index_out_of_range"),
+						Asset->GetPathName(),
+						LexToString(Index));
+				}
+				const FStaticMeshConstAttributes Attributes(*Description);
+				const TVertexAttributesConstRef<FVector3f> Positions =
+					Attributes.GetVertexPositions();
+				const FVector3f Position = Positions[VertexId];
+				const FString Owner = Asset->GetPathName();
+				return AddString(
+						TEXT("asset.sample:kind"), TEXT("asset"), Owner,
+						TEXT("sample_kind"), SampleKind,
+						Context, Entries, OutError)
+					&& AddInteger(
+						TEXT("asset.sample:vertex_index"), TEXT("asset"), Owner,
+						TEXT("vertex_index"), Index,
+						Context, Entries, OutError)
+					&& AddDecimal(
+						TEXT("asset.sample:vertex_x"), TEXT("asset"), Owner,
+						TEXT("vertex_x_cm"), Position.X,
+						Context, Entries, OutError)
+					&& AddDecimal(
+						TEXT("asset.sample:vertex_y"), TEXT("asset"), Owner,
+						TEXT("vertex_y_cm"), Position.Y,
+						Context, Entries, OutError)
+					&& AddDecimal(
+						TEXT("asset.sample:vertex_z"), TEXT("asset"), Owner,
+						TEXT("vertex_z_cm"), Position.Z,
+						Context, Entries, OutError);
+			}
+			return Fail(
+				OutError,
+				TEXT("asset_project_read_sample_kind_unsupported"),
+				Asset->GetPathName(),
+				SampleKind);
+		}
+
 		class FHookBase : public IUeAgentAssetProjectReadHook
 		{
 		public:
@@ -753,12 +1290,25 @@ namespace UE::UAI::DomainAdapters::AssetProjectRead
 				{
 					return false;
 				}
+				TArray<FUeAgentStateEntry> Entries;
 				UObject* Asset = nullptr;
 				if (!ResolveAsset(Target, Asset, OutError))
 				{
-					return false;
+					if (ProviderBinding
+							!= TEXT("asset_project.read.reference_asset")
+						|| OutError.Code
+							!= TEXT("asset_project_read_asset_unresolved"))
+					{
+						return false;
+					}
+					OutError = {};
+					return BuildSnapshot(
+						ProviderBinding,
+						Context,
+						MoveTemp(Entries),
+						OutSnapshot,
+						OutError);
 				}
-				TArray<FUeAgentStateEntry> Entries;
 				if (!AddObjectIdentity(
 						Asset,
 						TEXT("asset"),
@@ -770,7 +1320,9 @@ namespace UE::UAI::DomainAdapters::AssetProjectRead
 				}
 
 				if (ProviderBinding
-					== TEXT("asset_project.read.asset_properties"))
+						== TEXT("asset_project.read.asset_properties")
+					|| ProviderBinding
+						== TEXT("asset_project.read.reference_asset"))
 				{
 					if (!AddRequestedProperties(
 							Asset,
@@ -788,9 +1340,39 @@ namespace UE::UAI::DomainAdapters::AssetProjectRead
 					== TEXT("asset_project.read.asset_relations"))
 				{
 					FString Direction;
-					Input->TryGetStringField(
-						TEXT("direction"),
-						Direction);
+					if (!Input->TryGetStringField(
+							TEXT("direction"), Direction))
+					{
+						return Fail(
+							OutError,
+							TEXT("asset_project_read_relation_direction_missing"),
+							Asset->GetPathName());
+					}
+					FAssetData Record;
+					if (!Target.IsSet()
+						|| !Environment->TryResolveRegistryRecord(
+							Target.GetValue(), Record, OutError)
+						|| !Record.IsValid())
+					{
+						return OutError.Code.IsEmpty()
+							? Fail(
+								OutError,
+								TEXT("asset_project_read_registry_unresolved"),
+								Asset->GetPathName())
+							: false;
+					}
+					TArray<FString> Dependencies;
+					TArray<FString> Referencers;
+					if (!Environment->TryResolveRegistryRelations(
+							Record,
+							Direction,
+							ReadStringArray(Input, TEXT("relation_kinds")),
+							Dependencies,
+							Referencers,
+							OutError))
+					{
+						return false;
+					}
 					if (!AddString(
 							TEXT("asset.relations:direction"),
 							TEXT("asset"),
@@ -803,16 +1385,117 @@ namespace UE::UAI::DomainAdapters::AssetProjectRead
 					{
 						return false;
 					}
+					for (const FString& Dependency : Dependencies)
+					{
+						if (!AddString(
+								TEXT("asset.relations:dependency:") + Dependency,
+								TEXT("asset"),
+								Asset->GetPathName(),
+								TEXT("dependency"),
+								Dependency,
+								Context,
+								Entries,
+								OutError))
+						{
+							return false;
+						}
+					}
+					for (const FString& Referencer : Referencers)
+					{
+						if (!AddString(
+								TEXT("asset.relations:referencer:") + Referencer,
+								TEXT("asset"),
+								Asset->GetPathName(),
+								TEXT("referencer"),
+								Referencer,
+								Context,
+								Entries,
+								OutError))
+						{
+							return false;
+						}
+					}
 				}
 				else if (ProviderBinding
 					== TEXT("asset_project.read.asset_validation"))
 				{
+					TArray<FString> RuleIds =
+						ReadStringArray(Input, TEXT("rule_ids"));
+					if (RuleIds.IsEmpty())
+					{
+						RuleIds = {TEXT("object.valid")};
+					}
+					bool bIncludePassed = false;
+					Input->TryGetBoolField(
+						TEXT("include_passed"), bIncludePassed);
+					bool bOverallValid = true;
+					for (const FString& RuleId : RuleIds)
+					{
+						bool bPassed = false;
+						if (RuleId == TEXT("object.valid"))
+						{
+							bPassed = IsValid(Asset);
+						}
+						else if (RuleId == TEXT("package.present"))
+						{
+							bPassed = IsValid(Asset->GetOutermost());
+						}
+						else if (RuleId == TEXT("package.not_dirty"))
+						{
+							bPassed = IsValid(Asset->GetOutermost())
+								&& !Asset->GetOutermost()->IsDirty();
+						}
+						else if (RuleId == TEXT("registry_record.present"))
+						{
+							FAssetData Record;
+							FUeAgentAssetProjectReadError IgnoredError;
+							bPassed = Target.IsSet()
+								&& Environment->TryResolveRegistryRecord(
+									Target.GetValue(), Record, IgnoredError)
+								&& Record.IsValid();
+						}
+						else
+						{
+							return Fail(
+								OutError,
+								TEXT("asset_project_read_validation_rule_unsupported"),
+								Asset->GetPathName(),
+								RuleId);
+						}
+						bOverallValid = bOverallValid && bPassed;
+						if (!bPassed || bIncludePassed)
+						{
+							const FString RuleOwner = Asset->GetPathName()
+								+ TEXT("#validation:") + RuleId;
+							if (!AddString(
+									TEXT("asset.validation:rule:") + RuleId,
+									TEXT("validation_rule"),
+									RuleOwner,
+									TEXT("validation_rule_id"),
+									RuleId,
+									Context,
+									Entries,
+									OutError)
+								|| !AddBoolean(
+									TEXT("asset.validation:passed:") + RuleId,
+									TEXT("validation_rule"),
+									RuleOwner,
+									TEXT("validation_rule_passed"),
+									bPassed,
+									Context,
+									Entries,
+									OutError))
+							{
+								return false;
+							}
+						}
+					}
 					if (!AddBoolean(
 							TEXT("asset.validation:valid"),
 							TEXT("asset"),
 							Asset->GetPathName(),
 							TEXT("is_valid"),
-							IsValid(Asset),
+							bOverallValid,
 							Context,
 							Entries,
 							OutError))
@@ -824,26 +1507,28 @@ namespace UE::UAI::DomainAdapters::AssetProjectRead
 					== TEXT("asset_project.read.asset_collection"))
 				{
 					FString CollectionKind;
-					Input->TryGetStringField(
-						TEXT("collection_kind"),
-						CollectionKind);
-					if (!AddString(
-							TEXT("asset.collection:kind"),
-							TEXT("asset"),
-							Asset->GetPathName(),
-							TEXT("collection_kind"),
-							CollectionKind,
-							Context,
-							Entries,
-							OutError)
-						|| !AddRequestedProperties(
-							Asset,
-							ReadStringArray(
-								Input,
-								TEXT("field_ids")),
-							Context,
-							Entries,
-							OutError))
+					if (!Input->TryGetStringField(
+							TEXT("collection_kind"), CollectionKind))
+					{
+						return Fail(
+							OutError,
+							TEXT("asset_project_read_collection_kind_missing"),
+							Asset->GetPathName());
+					}
+					const bool bCaptured = CollectionKind == TEXT("rows")
+						? TryAddDataTableRows(
+							Asset, Input, Context, Entries, OutError)
+						: (CollectionKind == TEXT("items")
+								|| CollectionKind == TEXT("entries"))
+							? TryAddReflectedCollection(
+								Asset, CollectionKind, Input,
+								Context, Entries, OutError)
+							: Fail(
+								OutError,
+								TEXT("asset_project_read_collection_kind_unsupported"),
+								Asset->GetPathName(),
+								CollectionKind);
+					if (!bCaptured)
 					{
 						return false;
 					}
@@ -851,19 +1536,8 @@ namespace UE::UAI::DomainAdapters::AssetProjectRead
 				else if (ProviderBinding
 					== TEXT("asset_project.read.asset_sample"))
 				{
-					FString SampleKind;
-					Input->TryGetStringField(
-						TEXT("sample_kind"),
-						SampleKind);
-					if (!AddString(
-							TEXT("asset.sample:kind"),
-							TEXT("asset"),
-							Asset->GetPathName(),
-							TEXT("sample_kind"),
-							SampleKind,
-							Context,
-							Entries,
-							OutError))
+					if (!TryAddAssetSample(
+							Asset, Input, Context, Entries, OutError))
 					{
 						return false;
 					}
@@ -1149,41 +1823,100 @@ namespace UE::UAI::DomainAdapters::AssetProjectRead
 						OutSnapshot,
 						OutError);
 				}
-				TArray<UPackage*> Packages;
-				if (!Environment->TryResolveEditorResources(
+				TArray<FUeAgentEditorResourceObservation> Resources;
+				bool bIncludeEditorIdentity = false;
+				Input->TryGetBoolField(
+					TEXT("include_editor_identity"),
+					bIncludeEditorIdentity);
+				const bool bResolved = ProviderBinding
+						== TEXT("asset_project.read.editor_open_assets")
+					? Environment->TryResolveOpenAssets(
 						Context.GetExecutionContext(),
-						Packages,
-						OutError))
+						bIncludeEditorIdentity,
+						Resources,
+						OutError)
+					: Environment->TryResolveDirtyResources(
+						Context.GetExecutionContext(),
+						ReadStringArray(Input, TEXT("resource_kinds")),
+						Resources,
+						OutError);
+				if (!bResolved)
 				{
 					return false;
 				}
-				for (UPackage* Package : Packages)
+				for (const FUeAgentEditorResourceObservation& Resource : Resources)
 				{
-					if (!Package)
+					if (Resource.ResourceId.IsEmpty()
+						|| Resource.ResourceKind.IsEmpty())
 					{
-						continue;
+						return Fail(
+							OutError,
+							TEXT("asset_project_read_editor_resource_invalid"),
+							ProviderBinding);
 					}
-					const FString OwnerId = Package->GetName();
+					const FString& OwnerId = Resource.ResourceId;
 					if (!AddString(
-							TEXT("editor.resource:path:")
+							TEXT("editor.resource:ref:")
 								+ OwnerId,
-							TEXT("package"),
+							TEXT("editor_resource"),
 							OwnerId,
-							TEXT("package_name"),
+							TEXT("resource_ref"),
 							OwnerId,
+							Context,
+							Entries,
+							OutError)
+						|| !AddString(
+							TEXT("editor.resource:kind:") + OwnerId,
+							TEXT("editor_resource"),
+							OwnerId,
+							TEXT("resource_kind"),
+							Resource.ResourceKind,
 							Context,
 							Entries,
 							OutError)
 						|| !AddBoolean(
 							TEXT("editor.resource:dirty:")
 								+ OwnerId,
-							TEXT("package"),
+							TEXT("editor_resource"),
 							OwnerId,
-							TEXT("package_dirty"),
-							Package->IsDirty(),
+							TEXT("resource_dirty"),
+							Resource.bDirty,
 							Context,
 							Entries,
 							OutError))
+					{
+						return false;
+					}
+					auto AddOptional = [&](const TCHAR* Semantic,
+						const TCHAR* Selector, const FString& Value)
+					{
+						return Value.IsEmpty()
+							|| AddString(
+								FString(Semantic) + OwnerId,
+								TEXT("editor_resource"),
+								OwnerId,
+								Selector,
+								Value,
+								Context,
+								Entries,
+								OutError);
+					};
+					if (!AddOptional(
+							TEXT("editor.resource:package:"),
+							TEXT("package_name"),
+							Resource.PackageName)
+						|| !AddOptional(
+							TEXT("editor.resource:object:"),
+							TEXT("object_path"),
+							Resource.ObjectPath)
+						|| !AddOptional(
+							TEXT("editor.resource:class:"),
+							TEXT("class_path"),
+							Resource.ClassPath)
+						|| !AddOptional(
+							TEXT("editor.resource:editor:"),
+							TEXT("editor_identity"),
+							Resource.EditorIdentity))
 					{
 						return false;
 					}
@@ -1237,6 +1970,115 @@ namespace UE::UAI::DomainAdapters::AssetProjectRead
 						OutSnapshot,
 						OutError);
 				}
+				if (ProviderBinding
+					== TEXT("asset_project.read.project_platform"))
+				{
+					const TArray<FString> PlatformIds =
+						ReadStringArray(Input, TEXT("platform_ids"));
+					const TArray<FString> FieldIds =
+						ReadStringArray(Input, TEXT("field_ids"));
+					static const TArray<FString> SupportedFields = {
+						TEXT("platform_name"),
+						TEXT("ini_platform_name"),
+						TEXT("display_name"),
+						TEXT("running_platform"),
+						TEXT("sdk_installed"),
+						TEXT("sdk_documentation_path"),
+					};
+					for (const FString& FieldId : FieldIds)
+					{
+						if (!SupportedFields.Contains(FieldId))
+						{
+							return Fail(
+								OutError,
+								TEXT("asset_project_read_platform_field_unsupported"),
+								FieldId);
+						}
+					}
+					TArray<FUeAgentProjectPlatformObservation> Platforms;
+					if (!Environment->TryResolveProjectPlatforms(
+							Context.GetExecutionContext(),
+							PlatformIds,
+							Platforms,
+							OutError))
+					{
+						return false;
+					}
+					bool bResolveInheritance = false;
+					Input->TryGetBoolField(
+						TEXT("resolve_inheritance"), bResolveInheritance);
+					auto Includes = [&FieldIds](const TCHAR* Field)
+					{
+						return FieldIds.IsEmpty()
+							|| FieldIds.Contains(Field);
+					};
+					for (const FUeAgentProjectPlatformObservation& Platform
+						: Platforms)
+					{
+						if (Platform.PlatformName.IsEmpty())
+						{
+							return Fail(
+								OutError,
+								TEXT("asset_project_read_platform_observation_invalid"),
+								Context.GetExecutionContext()
+									.GetProjectInstanceId());
+						}
+						const FString Owner = TEXT("platform:")
+							+ Platform.PlatformName;
+						if (!AddBoolean(
+								TEXT("project.platform:resolve_inheritance:") + Owner,
+								TEXT("target_platform"), Owner,
+								TEXT("resolve_inheritance"), bResolveInheritance,
+								Context, Entries, OutError))
+						{
+							return false;
+						}
+						auto AddSelectedString = [&](const TCHAR* Field,
+							const FString& Value)
+						{
+							return !Includes(Field)
+								|| AddString(
+									FString(TEXT("project.platform:"))
+										+ Field + TEXT(":") + Owner,
+									TEXT("target_platform"), Owner,
+									Field, Value,
+									Context, Entries, OutError);
+						};
+						auto AddSelectedBoolean = [&](const TCHAR* Field,
+							const bool Value)
+						{
+							return !Includes(Field)
+								|| AddBoolean(
+									FString(TEXT("project.platform:"))
+										+ Field + TEXT(":") + Owner,
+									TEXT("target_platform"), Owner,
+									Field, Value,
+									Context, Entries, OutError);
+						};
+						if (!AddSelectedString(
+								TEXT("platform_name"), Platform.PlatformName)
+							|| !AddSelectedString(
+								TEXT("ini_platform_name"), Platform.IniPlatformName)
+							|| !AddSelectedString(
+								TEXT("display_name"), Platform.DisplayName)
+							|| !AddSelectedBoolean(
+								TEXT("running_platform"), Platform.bRunningPlatform)
+							|| !AddSelectedBoolean(
+								TEXT("sdk_installed"), Platform.bSdkInstalled)
+							|| !AddSelectedString(
+								TEXT("sdk_documentation_path"),
+								Platform.SdkDocumentationPath))
+						{
+							return false;
+						}
+					}
+					return BuildSnapshot(
+						ProviderBinding,
+						Context,
+						MoveTemp(Entries),
+						OutSnapshot,
+						OutError);
+				}
 				UObject* ProjectObject = nullptr;
 				if (!Environment->TryResolveProjectObject(
 						Context.GetExecutionContext(),
@@ -1264,10 +2106,7 @@ namespace UE::UAI::DomainAdapters::AssetProjectRead
 					return false;
 				}
 				if (ProviderBinding
-					== TEXT("asset_project.read.project_settings")
-					|| ProviderBinding
-						== TEXT(
-							"asset_project.read.project_platform"))
+					== TEXT("asset_project.read.project_settings"))
 				{
 					if (!AddRequestedProperties(
 							ProjectObject,
@@ -1284,12 +2123,65 @@ namespace UE::UAI::DomainAdapters::AssetProjectRead
 				else if (ProviderBinding
 					== TEXT("asset_project.read.project_validation"))
 				{
+					const TArray<FString> SectionIds =
+						ReadStringArray(Input, TEXT("section_ids"));
+					for (const FString& SectionId : SectionIds)
+					{
+						if (SectionId != TEXT("project"))
+						{
+							return Fail(
+								OutError,
+								TEXT("asset_project_read_validation_section_unsupported"),
+								SectionId);
+						}
+					}
+					TArray<FString> RuleIds =
+						ReadStringArray(Input, TEXT("rule_ids"));
+					if (RuleIds.IsEmpty())
+					{
+						RuleIds = {TEXT("project_object.valid")};
+					}
+					bool bIncludePassed = false;
+					Input->TryGetBoolField(
+						TEXT("include_passed"), bIncludePassed);
+					bool bOverallValid = true;
+					for (const FString& RuleId : RuleIds)
+					{
+						if (RuleId != TEXT("project_object.valid"))
+						{
+							return Fail(
+								OutError,
+								TEXT("asset_project_read_validation_rule_unsupported"),
+								ProjectObject->GetPathName(),
+								RuleId);
+						}
+						const bool bPassed = IsValid(ProjectObject);
+						bOverallValid = bOverallValid && bPassed;
+						if (!bPassed || bIncludePassed)
+						{
+							const FString RuleOwner = ProjectObject->GetPathName()
+								+ TEXT("#validation:") + RuleId;
+							if (!AddString(
+									TEXT("project.validation:rule:") + RuleId,
+									TEXT("validation_rule"), RuleOwner,
+									TEXT("validation_rule_id"), RuleId,
+									Context, Entries, OutError)
+								|| !AddBoolean(
+									TEXT("project.validation:passed:") + RuleId,
+									TEXT("validation_rule"), RuleOwner,
+									TEXT("validation_rule_passed"), bPassed,
+									Context, Entries, OutError))
+							{
+								return false;
+							}
+						}
+					}
 					if (!AddBoolean(
 							TEXT("project.validation:valid"),
 							TEXT("project"),
 							ProjectObject->GetPathName(),
 							TEXT("is_valid"),
-							IsValid(ProjectObject),
+							bOverallValid,
 							Context,
 							Entries,
 							OutError))
@@ -1524,6 +2416,7 @@ namespace UE::UAI::DomainAdapters::AssetProjectRead
 				{
 					TEXT("asset_project.read.asset_summary"),
 					TEXT("asset_project.read.asset_properties"),
+					TEXT("asset_project.read.reference_asset"),
 					TEXT("asset_project.read.asset_relations"),
 					TEXT("asset_project.read.asset_validation"),
 					TEXT("asset_project.read.asset_collection"),

@@ -325,7 +325,6 @@ namespace UE::UAI::Composition::SimpleAuthoring
 		World::FUeAgentWorldSimpleAuthoringProviderConfig WorldConfig;
 		WorldConfig.DescriptorRegistry = Descriptors;
 		WorldConfig.WorldCatalog = WorldCatalog;
-		WorldConfig.PersistedWorldCatalog = PersistedWorldCatalog;
 		WorldConfig.ReferenceResolver = WorldReferenceResolver;
 		WorldConfig.DurableService = DurableService;
 		WorldConfig.AbsenceOracle = AbsenceOracle;

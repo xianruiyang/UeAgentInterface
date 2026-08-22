@@ -1,5 +1,7 @@
 #include "Misc/AutomationTest.h"
 
+#include "Core/Contract/UeAgentCommandJson.h"
+#include "Dom/JsonObject.h"
 #include "Module/CommandRegistration/Active/UeAgentActiveCommandComposition.h"
 
 namespace UE::UAI::Tests::StrictV2::T38
@@ -85,6 +87,67 @@ bool FUeAgentStrictV2T38ModelingGeometryInventoryTest::RunTest(
 			Session->GetInputFields().Num(), 5);
 		TestEqual(TEXT("modeling session action is required"),
 			Session->GetInputFields()[0].Name, FString(TEXT("action")));
+	}
+	for (const FString& CommandId : ExpectedCommands())
+	{
+		if (CommandId == TEXT("mesh.modeling_session"))
+		{
+			continue;
+		}
+		const auto* Contract = Registry->FindExact(CommandId);
+		if (!Contract)
+		{
+			continue;
+		}
+		for (const CommandContract::FUeAgentCommandFieldDeclaration& Field :
+			Contract->GetInputFields())
+		{
+			TestTrue(
+				*FString::Printf(
+					TEXT("%s.%s publishes its exact parameter schema"),
+					*CommandId,
+					*Field.Name),
+				!Field.SchemaJson.IsEmpty());
+		}
+	}
+
+	const auto* Normals = Registry->FindExact(
+		TEXT("mesh.attribute.normals.recompute"));
+	if (Normals)
+	{
+		const CommandContract::FUeAgentCommandFieldDeclaration* Mode =
+			Normals->GetInputFields().FindByPredicate(
+				[](const CommandContract::FUeAgentCommandFieldDeclaration& Field)
+				{
+					return Field.Name == TEXT("mode");
+				});
+		TestNotNull(TEXT("normals mode field exists"), Mode);
+		if (Mode)
+		{
+			TSharedPtr<FJsonObject> Schema;
+			FString SchemaError;
+			TestTrue(
+				TEXT("normals mode schema is public canonical JSON"),
+				CommandContract::Json::TryParseObject(
+					Mode->SchemaJson,
+					Schema,
+					SchemaError));
+			if (Schema.IsValid())
+			{
+				TSet<FString> Values;
+				for (const TSharedPtr<FJsonValue>& Value :
+					Schema->GetArrayField(TEXT("enum")))
+				{
+					Values.Add(Value->AsString());
+				}
+				TestTrue(
+					TEXT("normals mode exposes every accepted exact value"),
+					Values.Num() == 3
+						&& Values.Contains(TEXT("area_angle_weighted"))
+						&& Values.Contains(TEXT("face"))
+						&& Values.Contains(TEXT("angle_threshold")));
+			}
+		}
 	}
 	return !HasAnyErrors();
 }

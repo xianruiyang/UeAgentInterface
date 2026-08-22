@@ -97,7 +97,7 @@ namespace UE::UAI::Module::CommandRegistration::QueryCalibration
 			};
 			Result.ResultFields = {
 				Field(TEXT("purpose"), TEXT("object"), true, TEXT("Complete purpose, preconditions, guidance, example and related flows.")),
-				Field(TEXT("input_fields"), TEXT("array"), true, TEXT("Exact public input field declarations.")),
+				Field(TEXT("input_fields"), TEXT("array"), true, TEXT("Exact public input field declarations; schema-capable owners attach a machine-readable JSON Schema to each field.")),
 				Field(TEXT("result_fields"), TEXT("array"), true, TEXT("Exact public result field declarations.")),
 				Field(TEXT("tutorial_references"), TEXT("array"), true, TEXT("Stable public SDK and installed-skill tutorial references.")),
 				Field(TEXT("invocation"), TEXT("object"), true, TEXT("Named, generic, exact and CLI invocation templates for this exact identity.")),
@@ -111,7 +111,7 @@ namespace UE::UAI::Module::CommandRegistration::QueryCalibration
 			Result.Purpose.Target = TEXT("One immutable command_id and contract_hash pair returned by public discovery.");
 			Result.Purpose.Preconditions = {TEXT("Use both identity fields exactly as returned by query.command.search.")};
 			Result.Purpose.ParameterGuidance = TEXT("Do not rewrite, alias or infer either identity field.");
-			Result.Purpose.ResultGuidance = TEXT("Pass the same identity and declared parameters to SDK execute_exact or a named wrapper.");
+			Result.Purpose.ResultGuidance = TEXT("Pass the same identity and parameters admitted by each input_fields[].schema to SDK execute_exact or a named wrapper; never guess values outside a published schema.");
 			Result.Purpose.FailureGuidance = TEXT("Unknown and stale identities fail with distinct typed codes and never fall back.");
 			Result.Purpose.SideEffectGuidance = TEXT("Read-only registry lookup; no persistent or transient UE mutation.");
 			Result.Purpose.MinimumExample = TEXT("client.query.command_detail(command_id, contract_hash)");

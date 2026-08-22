@@ -320,8 +320,11 @@ bool FUeAgentStrictV2T43ReferenceOperationPublicProductTest::RunTest(
 		return false;
 	}
 	const auto DeletedRead = Read();
-	TestFalse(TEXT("public read no longer resolves the deleted asset"),
+	TestTrue(TEXT("public read returns a valid empty snapshot after delete"),
 		DeletedRead.IsOk());
+	TestTrue(TEXT("deleted readback contains no persisted target entry"),
+		DeletedRead.GetPayloadJson().Contains(TEXT("\"entries\":[]"))
+			&& !DeletedRead.GetPayloadJson().Contains(*ObjectPath));
 	TestFalse(TEXT("delete removes the package artifact"),
 		!Filename.IsEmpty() && IFileManager::Get().FileExists(*Filename));
 	CleanupOwnedFixture(ObjectPath);

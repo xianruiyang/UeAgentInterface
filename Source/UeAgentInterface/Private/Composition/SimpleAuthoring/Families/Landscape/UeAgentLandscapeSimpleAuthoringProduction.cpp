@@ -1,16 +1,14 @@
 #include "Composition/SimpleAuthoring/Families/Landscape/UeAgentLandscapeSimpleAuthoringProduction.h"
 
 #include "Core/StateSemantic/UeAgentStateSemantic.h"
+#include "DomainAdapters/Landscape/UeAgentLandscapeHeightState.h"
 #include "Dom/JsonObject.h"
 #include "Dom/JsonValue.h"
+#include "Domains/Level/Authoring/UeAgentLevelAuthoringState.h"
 #include "Engine/Level.h"
 #include "Engine/World.h"
-#include "EngineUtils.h"
 #include "Landscape.h"
 #include "LandscapeDataAccess.h"
-#include "LandscapeEdit.h"
-#include "LandscapeInfo.h"
-#include "Misc/Paths.h"
 #include "Serialization/JsonReader.h"
 #include "Serialization/JsonSerializer.h"
 
@@ -597,95 +595,6 @@ namespace UE::UAI::Composition::SimpleAuthoring::Landscape
 			return true;
 		}
 
-		ALandscape* FindLandscapeByLabel(
-			UWorld& World,
-			const FString& Label,
-			bool& bOutAmbiguous)
-		{
-			bOutAmbiguous = false;
-			ALandscape* Match = nullptr;
-			for (TActorIterator<ALandscape> It(&World); It; ++It)
-			{
-				if (It->GetActorLabel() != Label)
-				{
-					continue;
-				}
-				if (Match)
-				{
-					bOutAmbiguous = true;
-					return nullptr;
-				}
-				Match = *It;
-			}
-			return Match;
-		}
-
-		bool TryReadExtent(
-			ALandscape& Landscape,
-			TArray<int32>& OutMin,
-			TArray<int32>& OutMax)
-		{
-			int32 MinX = 0;
-			int32 MinY = 0;
-			int32 MaxX = 0;
-			int32 MaxY = 0;
-			ULandscapeInfo* Info = Landscape.GetLandscapeInfo();
-			if (!Info
-				|| !Info->GetLandscapeExtent(
-					MinX,
-					MinY,
-					MaxX,
-					MaxY))
-			{
-				return false;
-			}
-			OutMin = {MinX, MinY};
-			OutMax = {MaxX, MaxY};
-			return true;
-		}
-
-		bool TryReadHeights(
-			ALandscape& Landscape,
-			const TArray<int32>& RegionMin,
-			const TArray<int32>& RegionMax,
-			TArray<double>& OutHeights)
-		{
-			OutHeights.Reset();
-			ULandscapeInfo* Info = Landscape.GetLandscapeInfo();
-			if (!Info
-				|| RegionMin.Num() != 2
-				|| RegionMax.Num() != 2)
-			{
-				return false;
-			}
-			const int32 Width =
-				RegionMax[0] - RegionMin[0] + 1;
-			const int32 Height =
-				RegionMax[1] - RegionMin[1] + 1;
-			if (Width <= 0 || Height <= 0)
-			{
-				return false;
-			}
-			TArray<uint16> Encoded;
-			Encoded.SetNumUninitialized(Width * Height);
-			FLandscapeEditDataInterface Edit(Info);
-			Edit.GetHeightDataFast(
-				RegionMin[0],
-				RegionMin[1],
-				RegionMax[0],
-				RegionMax[1],
-				Encoded.GetData(),
-				Width,
-				nullptr);
-			OutHeights.Reserve(Encoded.Num());
-			for (const uint16 Value : Encoded)
-			{
-				OutHeights.Add(
-					LandscapeDataAccess::GetLocalHeight(Value));
-			}
-			return true;
-		}
-
 		TSharedPtr<FJsonObject> MakeRegion(
 			const TArray<int32>& Min,
 			const TArray<int32>& Max)
@@ -730,9 +639,6 @@ namespace UE::UAI::Composition::SimpleAuthoring::Landscape
 			}
 			TArray<int32> RegionMin;
 			TArray<int32> RegionMax;
-			TArray<int32> ExtentMin;
-			TArray<int32> ExtentMax;
-			TArray<double> Heights;
 			if (!TryReadIntegerArray(
 					*Region,
 					TEXT("min_inclusive"),
@@ -742,20 +648,7 @@ namespace UE::UAI::Composition::SimpleAuthoring::Landscape
 					*Region,
 					TEXT("max_inclusive"),
 					2,
-					RegionMax)
-				|| !TryReadExtent(
-					Landscape,
-					ExtentMin,
-					ExtentMax)
-				|| RegionMin[0] < ExtentMin[0]
-				|| RegionMin[1] < ExtentMin[1]
-				|| RegionMax[0] > ExtentMax[0]
-				|| RegionMax[1] > ExtentMax[1]
-				|| !TryReadHeights(
-					Landscape,
-					RegionMin,
-					RegionMax,
-					Heights))
+					RegionMax))
 			{
 				OutError.Code =
 					TEXT(
@@ -764,38 +657,73 @@ namespace UE::UAI::Composition::SimpleAuthoring::Landscape
 				return false;
 			}
 
-			const FVector Scale = Landscape.GetActorScale3D();
+			DomainAdapters::Landscape::FLandscapeHeightState
+				HeightState;
+			DomainAdapters::Landscape::FLandscapeHeightStateError
+				HeightError;
+			if (!DomainAdapters::Landscape::
+				TryReadLandscapeHeightState(
+					Landscape,
+					FIntPoint(RegionMin[0], RegionMin[1]),
+					FIntPoint(RegionMax[0], RegionMax[1]),
+					MAX_int32,
+					HeightState,
+					HeightError))
+			{
+				OutError.Code = TEXT("landscape_geometry_state_read_failed");
+				OutError.SubjectId = TargetRef;
+				OutError.Detail = HeightError.Code + TEXT(":")
+					+ HeightError.Detail;
+				return false;
+			}
+
+			const FVector Scale = HeightState.Scale;
 			const TSharedPtr<FJsonObject> State =
 				MakeShared<FJsonObject>();
-			State->SetStringField(
-				TEXT("target_ref"),
-				TargetRef);
+			State->SetStringField(TEXT("target_ref"), TargetRef);
 			State->SetBoolField(
 				TEXT("identity_bound"),
 				true);
 			State->SetObjectField(
 				TEXT("extent"),
-				MakeRegion(ExtentMin, ExtentMax));
+				MakeRegion(
+					{
+						HeightState.ExtentMinInclusive.X,
+						HeightState.ExtentMinInclusive.Y,
+					},
+					{
+						HeightState.ExtentMaxInclusive.X,
+						HeightState.ExtentMaxInclusive.Y,
+					}));
 			State->SetObjectField(
 				TEXT("region"),
 				MakeRegion(RegionMin, RegionMax));
 			State->SetArrayField(
 				TEXT("scale"),
-				NumberArray({
-					Scale.X,
-					Scale.Y,
-					Scale.Z,
-				}));
+				NumberArray({Scale.X, Scale.Y, Scale.Z}));
 			State->SetStringField(
 				TEXT("height_encoding"),
 				TEXT("landscape_local_height"));
 			State->SetArrayField(
 				TEXT("heights"),
-				NumberArray(Heights));
+				NumberArray(HeightState.Heights));
 
 			if (Profile.Mechanic
 				== ELandscapeProfileMechanic::Create)
 			{
+				State->SetStringField(
+					TEXT("managed_id"),
+					UeAgentLevelAuthoring::GetManagedActorId(
+						Landscape));
+				State->SetStringField(
+					TEXT("managed_folder"),
+					UeAgentLevelAuthoring::GetActorFolderPathText(
+						Landscape));
+				State->SetBoolField(
+					TEXT("managed_tag_present"),
+					Landscape.ActorHasTag(
+						UeAgentLevelAuthoring::
+							GetManagedActorMarkerTag()));
 				const TSharedPtr<FJsonObject>* Placement = nullptr;
 				TArray<double> Translation;
 				TArray<double> Rotation;
@@ -966,6 +894,16 @@ namespace UE::UAI::Composition::SimpleAuthoring::Landscape
 				NumberArray(Heights));
 			State->SetBoolField(
 				TEXT("placement_matches"),
+				true);
+			State->SetStringField(
+				TEXT("managed_id"),
+				TargetRef);
+			State->SetStringField(
+				TEXT("managed_folder"),
+				UeAgentLevelAuthoring::MakeManagedActorFolderPath(
+					TEXT("landscape")));
+			State->SetBoolField(
+				TEXT("managed_tag_present"),
 				true);
 			FUeAgentStateSemanticError StateError;
 			if (!TryCanonicalObject(
@@ -1323,18 +1261,23 @@ namespace UE::UAI::Composition::SimpleAuthoring::Landscape
 				}
 
 				ALandscape* Landscape = nullptr;
+				DomainAdapters::Landscape::
+					FLandscapeHeightStateError TargetError;
+				const bool bTargetResolved =
+					DomainAdapters::Landscape::
+						TryResolveLandscapeHeightTarget(
+							*World,
+							TargetRef,
+							&ReferenceResolver.Get(),
+							Landscape,
+							TargetError);
 				if (Profile->Mechanic
 					== ELandscapeProfileMechanic::Create)
 				{
-					bool bAmbiguous = false;
-					Landscape = FindLandscapeByLabel(
-						*World,
-						FPaths::GetBaseFilename(TargetRef),
-						bAmbiguous);
 					if (RequiredPlane
 						== EUeAgentStatePlane::AuthoringMemory)
 					{
-						if (Landscape || bAmbiguous)
+						if (bTargetResolved)
 						{
 							OutError.Code =
 								TEXT(
@@ -1342,43 +1285,34 @@ namespace UE::UAI::Composition::SimpleAuthoring::Landscape
 							OutError.SubjectId = TargetRef;
 							return false;
 						}
+						if (TargetError.Code
+							!= TEXT("landscape_height_target_not_found"))
+						{
+							OutError.Code = TargetError.Code;
+							OutError.SubjectId = TargetRef;
+							OutError.Detail = TargetError.Detail;
+							return false;
+						}
+						Landscape = nullptr;
 					}
-					else if (!Landscape || bAmbiguous)
+					else if (!bTargetResolved)
 					{
-						OutError.Code = bAmbiguous
-							? TEXT(
-								"landscape_geometry_created_target_ambiguous")
-							: TEXT(
-								"landscape_geometry_created_target_missing");
+						OutError.Code = TargetError.Code
+							== TEXT("landscape_height_target_not_found")
+							? FString(TEXT(
+								"landscape_geometry_created_target_missing"))
+							: TargetError.Code;
 						OutError.SubjectId = TargetRef;
+						OutError.Detail = TargetError.Detail;
 						return false;
 					}
 				}
-				else
+				else if (!bTargetResolved)
 				{
-					UObject* Object = nullptr;
-					FExecutionMutationError Error;
-					if (!ReferenceResolver->TryResolveReference(
-							*World,
-							TargetRef,
-							Object,
-							Error))
-					{
-						OutError.Code = Error.GetCode();
-						OutError.SubjectId = TargetRef;
-						OutError.Detail = Error.GetDetail();
-						return false;
-					}
-					Landscape = Cast<ALandscape>(Object);
-					if (!Landscape
-						|| Landscape->GetWorld() != World)
-					{
-						OutError.Code =
-							TEXT(
-								"landscape_geometry_reference_type_invalid");
-						OutError.SubjectId = TargetRef;
-						return false;
-					}
+					OutError.Code = TargetError.Code;
+					OutError.SubjectId = TargetRef;
+					OutError.Detail = TargetError.Detail;
+					return false;
 				}
 
 				FUeAgentCanonicalValuePtr DefaultValue;
@@ -2080,13 +2014,16 @@ namespace UE::UAI::Composition::SimpleAuthoring::Landscape
 				NativeHook.ToSharedRef());
 		ProviderConfig.ExpectedStateProjector =
 			MakeShared<FLandscapeExpectedStateProjector>();
-		ProviderConfig.PersistedStateReadPort =
-			MakeShared<FLandscapeStateReadPort>(
+		const TSharedRef<IUeAgentStateReadPort, ESPMode::ThreadSafe>
+			PersistedStateReadPort = MakeShared<FLandscapeStateReadPort>(
 				PersistedStatePortId,
 				EUeAgentStatePlane::Persisted,
 				PersistedCatalog,
 				PersistedReferenceResolver,
 				false);
+		ProviderConfig.PersistedStateOracle = MakeShared<
+			FStateReadPortPersistedStateOracle,
+			ESPMode::ThreadSafe>(PersistedStateReadPort);
 		ProviderConfig.AbsenceOracle = Config.AbsenceOracle;
 		ProviderConfig.ReferenceOracle = Config.ReferenceOracle;
 

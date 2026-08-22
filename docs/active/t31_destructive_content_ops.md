@@ -20,3 +20,14 @@ missing, stale, mismatched, or replayed authorization before write. A success
 is terminal only after native mechanics, persistence, independent readback,
 and cleanup are complete. The SDK and CLI contain no selection, authorization,
 Unreal mutation, rollback, retry, or cleanup business logic.
+
+`world.level_content.delete_scope` keeps `folder_path` as the required scope
+boundary. Without `managed_id`, it is the explicit broad operation and includes
+actors in that folder and its descendants. With `managed_id`, planning and
+execution use the same exact managed-actor resolver: the world must contain
+exactly one actor carrying both `UAI.Managed` and the canonical
+`UAI.Id=<managed_id>` tag, and that actor must be in the exact `folder_path`.
+Missing, duplicate, ambiguous, marker-less, or folder-mismatched identities
+fail before mutation. The destructive plan projects that actor path rather than
+the whole folder, so a same-folder sibling with a different managed identity is
+outside the authorization and remains untouched.

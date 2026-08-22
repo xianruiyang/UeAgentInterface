@@ -88,6 +88,21 @@ bool FUeAgentWorldSpatialProductionExactWorldBoundaryTest::RunTest(
 			TEXT("cross-world rejection is explicit"),
 			Error.Code,
 			FString(TEXT("world_spatial_object_world_mismatch")));
+
+		const FString DestroyedActorPath = OwnedActor->GetPathName();
+		TestTrue(
+			TEXT("owned actor is removed from the scoped world"),
+			OwnedWorld->DestroyActor(OwnedActor));
+		Resolved = nullptr;
+		Error = {};
+		TestFalse(
+			TEXT("destroyed actor cannot resolve before garbage collection"),
+			Dependencies.Environment->TryResolveObject(
+				DestroyedActorPath, Resolved, Error));
+		TestEqual(
+			TEXT("destroyed actor rejection is explicit"),
+			Error.Code,
+			FString(TEXT("world_spatial_explicit_object_unresolved")));
 	}
 
 	OtherWorld->DestroyWorld(false);

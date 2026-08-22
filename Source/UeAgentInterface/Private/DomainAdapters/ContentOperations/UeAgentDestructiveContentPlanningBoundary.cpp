@@ -4,7 +4,10 @@
 #include "Core/Contract/UeAgentContractJson.h"
 #include "Dom/JsonObject.h"
 #include "Dom/JsonValue.h"
+#include "Domains/Level/Authoring/UeAgentLevelAuthoringState.h"
 #include "Engine/World.h"
+#include "EngineUtils.h"
+#include "GameFramework/Actor.h"
 #include "HAL/FileManager.h"
 #include "Misc/PackageName.h"
 #include "UObject/Package.h"
@@ -120,6 +123,122 @@ namespace UE::UAI::DomainAdapters::ContentOperations
 				static_cast<long long>(Timestamp)));
 			return true;
 		}
+
+		bool TryCollectLevelContentActorScope(
+			const TSharedPtr<FJsonObject>& Params,
+			UWorld* World,
+			TSet<FString>& OutPackageRefs,
+			TArray<FString>& OutImpacts,
+			TArray<FString>& OutRevisions,
+			FString& OutError)
+		{
+			if (!Params.IsValid() || !World)
+			{
+				OutError = TEXT("destructive_world_scope_unavailable");
+				return false;
+			}
+			FString FolderPath;
+			if (!Params->TryGetStringField(TEXT("folder_path"), FolderPath))
+			{
+				OutError = TEXT("destructive_world_folder_path_required");
+				return false;
+			}
+			FolderPath.TrimStartAndEndInline();
+			if (FolderPath.IsEmpty())
+			{
+				OutError = TEXT("destructive_world_folder_path_required");
+				return false;
+			}
+
+			FString ManagedId;
+			const bool bHasManagedId = Params->HasField(TEXT("managed_id"));
+			if (bHasManagedId)
+			{
+				if (!Params->TryGetStringField(TEXT("managed_id"), ManagedId))
+				{
+					OutError = TEXT("destructive_world_managed_id_invalid");
+					return false;
+				}
+				ManagedId.TrimStartAndEndInline();
+				if (ManagedId.IsEmpty())
+				{
+					OutError = TEXT("destructive_world_managed_id_required");
+					return false;
+				}
+			}
+
+			TArray<AActor*> Actors;
+			if (bHasManagedId)
+			{
+				AActor* Actor = nullptr;
+				FString ResolveError;
+				if (!UeAgentLevelAuthoring::TryFindManagedActorExact(
+						*World,
+						ManagedId,
+						FolderPath,
+						Actor,
+						ResolveError)
+					|| !Actor)
+				{
+					OutError = TEXT("destructive_world_exact_actor_unavailable:")
+						+ ResolveError;
+					return false;
+				}
+				Actors.Add(Actor);
+			}
+			else
+			{
+				for (TActorIterator<AActor> It(World); It; ++It)
+				{
+					AActor* const Actor = *It;
+					if (!Actor || Actor->IsActorBeingDestroyed())
+					{
+						continue;
+					}
+					const FString ActorFolder =
+						UeAgentLevelAuthoring::GetActorFolderPathText(*Actor);
+					if (ActorFolder == FolderPath
+						|| ActorFolder.StartsWith(FolderPath + TEXT("/")))
+					{
+						Actors.Add(Actor);
+					}
+				}
+				if (Actors.IsEmpty())
+				{
+					OutError = TEXT("destructive_world_folder_scope_empty");
+					return false;
+				}
+			}
+
+			Actors.Sort([](const AActor& Left, const AActor& Right)
+			{
+				return Left.GetPathName() < Right.GetPathName();
+			});
+			if (Actors.Num() > MaxImpactedPackages)
+			{
+				OutError = TEXT("destructive_impact_scope_exceeded");
+				return false;
+			}
+			for (const AActor* const Actor : Actors)
+			{
+				const FString ActorPath = Actor->GetPathName();
+				const FString ActorFolder =
+					UeAgentLevelAuthoring::GetActorFolderPathText(*Actor);
+				const FString ActorManagedId =
+					UeAgentLevelAuthoring::GetManagedActorId(*Actor);
+				OutImpacts.Add(TEXT("actor:") + ActorPath);
+				OutRevisions.Add(
+					TEXT("actor:") + ActorPath
+					+ TEXT("=folder:") + ActorFolder
+					+ TEXT(";managed_id:") + ActorManagedId);
+				const FString ActorPackage = Actor->GetOutermost()->GetName();
+				if (ActorPackage.StartsWith(TEXT("/Game/")))
+				{
+					OutPackageRefs.Add(ActorPackage);
+				}
+			}
+			return true;
+		}
 	}
 
 	bool FUeAgentDestructiveContentPlan::IsValid() const
@@ -205,6 +324,19 @@ namespace UE::UAI::DomainAdapters::ContentOperations
 		{
 			return false;
 		}
+		TArray<FString> WorldObjectImpacts;
+		TArray<FString> WorldObjectRevisions;
+		if (CommandId == TEXT("world.level_content.delete_scope")
+			&& !TryCollectLevelContentActorScope(
+				Params,
+				ExplicitWorld,
+				PackageRefs,
+				WorldObjectImpacts,
+				WorldObjectRevisions,
+				OutError))
+		{
+			return false;
+		}
 
 		if ((CommandId.StartsWith(TEXT("world."))
 				|| CommandId.StartsWith(TEXT("modeling.")))
@@ -244,6 +376,11 @@ namespace UE::UAI::DomainAdapters::ContentOperations
 
 		TSet<FString> Impacts;
 		Impacts.Add(TEXT("command:") + CommandId);
+		for (const FString& ActorImpact : WorldObjectImpacts)
+		{
+			Impacts.Add(ActorImpact);
+		}
+		OutPlan.RevisionSnapshot.Append(WorldObjectRevisions);
 		IAssetRegistry& Registry = FAssetRegistryModule::GetRegistry();
 		for (const FString& PackageName : SortedPackages)
 		{

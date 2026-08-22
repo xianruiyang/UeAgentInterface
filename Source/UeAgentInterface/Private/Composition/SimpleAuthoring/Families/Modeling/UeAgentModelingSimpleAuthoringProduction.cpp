@@ -2,6 +2,7 @@
 #include "Composition/SimpleAuthoring/Families/Modeling/UeAgentModelingSimpleAuthoringExistingEdit.h"
 
 #include "Components/DynamicMeshComponent.h"
+#include "Core/StateSemantic/UeAgentStateRevisionJson.h"
 #include "Core/StateSemantic/UeAgentStateSemantic.h"
 #include "Dom/JsonObject.h"
 #include "Dom/JsonValue.h"
@@ -163,6 +164,48 @@ namespace UE::UAI::Composition::SimpleAuthoring::Modeling
 			return FJsonSerializer::Serialize(
 				Object.ToSharedRef(),
 				Writer);
+		}
+
+		bool TryReadPayloadRevision(
+			const TSharedPtr<FJsonObject>& Payload,
+			const TCHAR* Field,
+			TOptional<FUeAgentStateRevision>& OutRevision)
+		{
+			OutRevision.Reset();
+			const TSharedPtr<FJsonObject>* Revision = nullptr;
+			return Payload.IsValid()
+				&& Payload->TryGetObjectField(Field, Revision)
+				&& Revision
+				&& FUeAgentStateRevisionJson::TryParse(
+					*Revision,
+					OutRevision);
+		}
+
+		FString RevisionMismatchDetail(
+			const FUeAgentStateRevision& Expected,
+			const TOptional<FUeAgentStateRevision>& Actual)
+		{
+			if (!Actual.IsSet())
+			{
+				return FString::Printf(
+					TEXT(
+						"expected_source=%s;expected_generation=%s;"
+						"expected_sequence=%lld;actual=missing"),
+					*Expected.GetSourceId(),
+					*Expected.GetGeneration(),
+					Expected.GetSequence());
+			}
+			return FString::Printf(
+				TEXT(
+					"expected_source=%s;expected_generation=%s;"
+					"expected_sequence=%lld;actual_source=%s;"
+					"actual_generation=%s;actual_sequence=%lld"),
+				*Expected.GetSourceId(),
+				*Expected.GetGeneration(),
+				Expected.GetSequence(),
+				*Actual->GetSourceId(),
+				*Actual->GetGeneration(),
+				Actual->GetSequence());
 		}
 
 		bool TryParseRequestEvidence(
@@ -836,30 +879,49 @@ namespace UE::UAI::Composition::SimpleAuthoring::Modeling
 					CanonicalRequest.GetPayload().GetJsonValue();
 				if (IsExistingEditProfile(*Profile))
 				{
-					FString TargetRevision;
+					TOptional<FUeAgentStateRevision> ExpectedRevision;
 					ExistingEdit::FCarrierState Baseline;
 					FString ErrorCode;
 					FString ErrorDetail;
-					if (!Payload->TryGetStringField(
+					if (!TryReadPayloadRevision(
+							Payload,
 							TEXT("target_revision"),
-							TargetRevision)
-						|| !ExistingEdit::TryReadCarrier(
+							ExpectedRevision))
+					{
+						SetProductionError(
+							OutError,
+							TEXT(
+								"modeling_geometry_target_revision_missing"),
+							TargetRef);
+						return false;
+					}
+					if (!ExistingEdit::TryReadCarrier(
 							*World,
 							*ReferenceResolver,
 							TargetRef,
-							TargetRevision,
 							Baseline,
 							ErrorCode,
 							ErrorDetail))
 					{
 						SetProductionError(
 							OutError,
-							ErrorCode.IsEmpty()
-								? TEXT(
-									"modeling_geometry_target_revision_missing")
-								: ErrorCode,
+							ErrorCode,
 							TargetRef,
 							ErrorDetail);
+						return false;
+					}
+					if (!Baseline.TargetRevision.IsSet()
+						|| Baseline.TargetRevision.GetValue()
+							!= ExpectedRevision.GetValue())
+					{
+						SetProductionError(
+							OutError,
+							TEXT(
+								"modeling_geometry_target_revision_stale"),
+							TargetRef,
+							RevisionMismatchDetail(
+								ExpectedRevision.GetValue(),
+								Baseline.TargetRevision));
 						return false;
 					}
 					if (!ExistingEdit::TryAttachBaselineEvidence(
@@ -1148,18 +1210,13 @@ namespace UE::UAI::Composition::SimpleAuthoring::Modeling
 				else if (RequiredPlane
 					== EUeAgentStatePlane::AuthoringMemory)
 				{
-					FString TargetRevision;
 					ExistingEdit::FCarrierState TargetState;
 					FString ErrorCode;
 					FString ErrorDetail;
-					if (!Payload->TryGetStringField(
-							TEXT("target_revision"),
-							TargetRevision)
-						|| !ExistingEdit::TryReadCarrier(
+					if (!ExistingEdit::TryReadCarrier(
 							*World,
 							*ReferenceResolver,
 							TargetRef,
-							TargetRevision,
 							TargetState,
 							ErrorCode,
 							ErrorDetail)
@@ -1188,16 +1245,11 @@ namespace UE::UAI::Composition::SimpleAuthoring::Modeling
 							TEXT("operand_ref"),
 							OperandRef))
 					{
-						FString OperandRevision;
 						ExistingEdit::FCarrierState OperandState;
-						if (!Payload->TryGetStringField(
-								TEXT("operand_revision"),
-								OperandRevision)
-							|| !ExistingEdit::TryReadCarrier(
+						if (!ExistingEdit::TryReadCarrier(
 								*World,
 								*ReferenceResolver,
 								OperandRef,
-								OperandRevision,
 								OperandState,
 								ErrorCode,
 								ErrorDetail)
@@ -1237,7 +1289,6 @@ namespace UE::UAI::Composition::SimpleAuthoring::Modeling
 							*World,
 							*ReferenceResolver,
 							TargetRef,
-							Baseline.TargetRevision,
 							Actual,
 							ErrorCode,
 							ErrorDetail)
@@ -1995,13 +2046,16 @@ namespace UE::UAI::Composition::SimpleAuthoring::Modeling
 				NativeHook.ToSharedRef());
 		ProviderConfig.ExpectedStateProjector =
 			MakeShared<FModelingExpectedStateProjector>();
-		ProviderConfig.PersistedStateReadPort =
-			MakeShared<FModelingStateReadPort>(
+		const TSharedRef<IUeAgentStateReadPort, ESPMode::ThreadSafe>
+			PersistedStateReadPort = MakeShared<FModelingStateReadPort>(
 				PersistedStatePortId,
 				EUeAgentStatePlane::Persisted,
 				PersistedCatalog,
 				PersistedReferenceResolver,
 				false);
+		ProviderConfig.PersistedStateOracle = MakeShared<
+			FStateReadPortPersistedStateOracle,
+			ESPMode::ThreadSafe>(PersistedStateReadPort);
 		ProviderConfig.AbsenceOracle = Config.AbsenceOracle;
 		ProviderConfig.ReferenceOracle = Config.ReferenceOracle;
 

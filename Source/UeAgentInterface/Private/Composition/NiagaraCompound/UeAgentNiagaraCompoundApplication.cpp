@@ -231,10 +231,12 @@ namespace UE::UAI::Composition::NiagaraCompound
 			bool Persist(
 				const FExecutionDurableSessionRef& Session,
 				int64 FencingToken,
+				const FMutationFacts& Facts,
 				FUeAgentResourceTracker& Resources,
 				FDurableReceipt& OutReceipt,
 				FExecutionMutationError& OutError) override
 			{
+				(void)Facts;
 				const TSharedRef<FNiagaraDurableSession> Typed =
 					StaticCastSharedRef<
 						FNiagaraDurableSession>(Session);
@@ -829,8 +831,10 @@ namespace UE::UAI::Composition::NiagaraCompound
 						MoveTemp(ArtifactIds),
 						TArray<FString>());
 				}
+				FStateReadPortPersistedStateOracle PersistedOracle(
+					*ReadPort);
 				FVerificationService Service(
-					*ReadPort,
+					PersistedOracle,
 					Absence,
 					Reference,
 					*Durable);

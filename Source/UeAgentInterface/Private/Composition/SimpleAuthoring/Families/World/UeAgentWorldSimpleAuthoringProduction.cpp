@@ -1,6 +1,8 @@
 #include "Composition/SimpleAuthoring/Families/World/UeAgentWorldSimpleAuthoringProduction.h"
 
+#include "Components/SceneComponent.h"
 #include "Components/StaticMeshComponent.h"
+#include "Core/AssetDurable/UeAgentPersistedWorld.h"
 #include "Core/StateSemantic/UeAgentStateSemantic.h"
 #include "Dom/JsonObject.h"
 #include "Engine/Level.h"
@@ -8,7 +10,6 @@
 #include "Engine/StaticMesh.h"
 #include "Engine/StaticMeshActor.h"
 #include "Engine/World.h"
-#include "EngineUtils.h"
 #include "GameFramework/Actor.h"
 #include "GameFramework/GameModeBase.h"
 #include "GameFramework/WorldSettings.h"
@@ -521,7 +522,6 @@ namespace UE::UAI::Composition::SimpleAuthoring::World
 
 		bool TryMakeLevelGameModeValue(
 			const UWorld& World,
-			const TSharedPtr<FJsonObject>& Payload,
 			FUeAgentResourceTracker& Resources,
 			FUeAgentCanonicalValuePtr& OutValue,
 			FUeAgentStateSemanticError& OutError)
@@ -532,14 +532,11 @@ namespace UE::UAI::Composition::SimpleAuthoring::World
 				OutError.Code = TEXT("world_simple_world_settings_missing");
 				return false;
 			}
-			bool bSaveLevel = false;
-			Payload->TryGetBoolField(TEXT("save_level"), bSaveLevel);
 			const FString GameModeClassRef = WorldSettings->DefaultGameMode
 				? WorldSettings->DefaultGameMode->GetPathName()
 				: FString();
 			FUeAgentCanonicalValuePtr Kind;
 			FUeAgentCanonicalValuePtr ClassRef;
-			FUeAgentCanonicalValuePtr SaveLevel;
 			if (!FUeAgentCanonicalValue::TryString(
 					TEXT("level_game_mode"),
 					Resources,
@@ -549,11 +546,6 @@ namespace UE::UAI::Composition::SimpleAuthoring::World
 					GameModeClassRef,
 					Resources,
 					ClassRef,
-					OutError)
-				|| !FUeAgentCanonicalValue::TryBoolean(
-					bSaveLevel,
-					Resources,
-					SaveLevel,
 					OutError))
 			{
 				return false;
@@ -561,7 +553,6 @@ namespace UE::UAI::Composition::SimpleAuthoring::World
 			return FUeAgentCanonicalValue::TryObject(
 				{
 					{TEXT("game_mode_class_ref"), ClassRef.ToSharedRef()},
-					{TEXT("save_level"), SaveLevel.ToSharedRef()},
 					{TEXT("state_kind"), Kind.ToSharedRef()},
 				},
 				Resources,
@@ -977,15 +968,48 @@ namespace UE::UAI::Composition::SimpleAuthoring::World
 		{
 			AActor* Match = nullptr;
 			OutMatchCount = 0;
-			for (TActorIterator<AActor> It(&World); It; ++It)
+			TSet<AActor*> SeenActors;
+			const auto VisitLevel =
+				[&Label, &Match, &OutMatchCount, &SeenActors](
+					ULevel* Level)
 			{
-				if (It->GetActorLabel() == Label)
+				if (!Level)
 				{
-					Match = *It;
-					++OutMatchCount;
+					return;
 				}
+				for (AActor* Actor : Level->Actors)
+				{
+					if (!IsValid(Actor)
+						|| Actor->IsTemplate()
+						|| SeenActors.Contains(Actor))
+					{
+						continue;
+					}
+					SeenActors.Add(Actor);
+					if (Actor->GetActorLabel() == Label)
+					{
+						Match = Actor;
+						++OutMatchCount;
+					}
+				}
+			};
+			VisitLevel(World.PersistentLevel);
+			for (ULevel* Level : World.GetLevels())
+			{
+				VisitLevel(Level);
 			}
 			return Match;
+		}
+
+		FTransform ReadAuthoredActorTransform(const AActor& Actor)
+		{
+			const USceneComponent* RootComponent =
+				Actor.GetRootComponent();
+			if (RootComponent && !RootComponent->GetAttachParent())
+			{
+				return RootComponent->GetRelativeTransform();
+			}
+			return Actor.GetActorTransform();
 		}
 
 		UDataLayerInstance* FindPrivateDataLayerByShortName(
@@ -1377,7 +1401,7 @@ namespace UE::UAI::Composition::SimpleAuthoring::World
 			}
 
 			const FTransform ActualTransform =
-				Actor->GetActorTransform();
+				ReadAuthoredActorTransform(*Actor);
 			const double TranslationScale =
 				Unit == TEXT("meter") ? 0.01 : 1.0;
 			const FVector Translation =
@@ -1414,9 +1438,6 @@ namespace UE::UAI::Composition::SimpleAuthoring::World
 				}
 				Value->SetArrayField(TEXT("tags"), ActualTags);
 			}
-			bool bSaveLevel = false;
-			Payload->TryGetBoolField(TEXT("save_level"), bSaveLevel);
-			Value->SetBoolField(TEXT("save_level"), bSaveLevel);
 			Value->SetArrayField(
 				TEXT("translation"),
 				MakeNumberArray({
@@ -1546,11 +1567,12 @@ namespace UE::UAI::Composition::SimpleAuthoring::World
 						->GetStaticMesh();
 			}
 			const FTransform Transform =
-				Actor->GetActorTransform();
+				ReadAuthoredActorTransform(*Actor);
 			const FVector Location = Transform.GetLocation();
 			const FVector Normal =
-				Actor->GetActorForwardVector();
-			const FVector Up = Actor->GetActorUpVector();
+				Transform.GetRotation().GetForwardVector();
+			const FVector Up =
+				Transform.GetRotation().GetUpVector();
 			const FVector Dimensions =
 				Transform.GetScale3D() * 100.0;
 			const TSharedRef<FJsonObject> Value =
@@ -2513,7 +2535,6 @@ namespace UE::UAI::Composition::SimpleAuthoring::World
 					FUeAgentCanonicalValuePtr CurrentValue;
 					if (!TryMakeLevelGameModeValue(
 							*ResolvedWorld,
-							Payload,
 							Resources,
 							CurrentValue,
 							StateError))
@@ -3092,6 +3113,200 @@ namespace UE::UAI::Composition::SimpleAuthoring::World
 			bool bRequireSourceInstance = true;
 		};
 
+		FString WorldPersistedErrorCode(const FString& SharedCode)
+		{
+			if (SharedCode == TEXT("persisted_world_artifact_invalid"))
+				return TEXT("world_simple_persisted_artifact_invalid");
+			if (SharedCode == TEXT("persisted_world_ambiguous"))
+				return TEXT("world_simple_persisted_world_ambiguous");
+			if (SharedCode == TEXT("persisted_world_map_missing"))
+				return TEXT("world_simple_persisted_world_missing");
+			if (SharedCode == TEXT("persisted_world_package_create_failed"))
+				return TEXT("world_simple_persisted_package_create_failed");
+			if (SharedCode == TEXT("persisted_world_load_failed"))
+				return TEXT("world_simple_persisted_world_load_failed");
+			if (SharedCode == TEXT("persisted_world_artifact_load_failed"))
+				return TEXT("world_simple_persisted_artifact_load_failed");
+			if (SharedCode == TEXT("persisted_world_cleanup_failed"))
+				return TEXT("world_simple_persisted_cleanup_failed");
+			return SharedCode.IsEmpty()
+				? FString(TEXT("world_simple_persisted_state_read_failed"))
+				: SharedCode;
+		}
+
+		class FPersistedWorldCatalog final
+			: public IUeAgentWorldSimpleEffectWorldCatalog
+		{
+		public:
+			FPersistedWorldCatalog(
+				UWorld& InWorld,
+				FString InWorldIdentity,
+				FString InContextRevision)
+				: World(&InWorld)
+				, WorldIdentity(MoveTemp(InWorldIdentity))
+				, ContextRevision(MoveTemp(InContextRevision))
+			{
+			}
+
+			bool TryEnumerate(
+				TArray<FUeAgentWorldSimpleEffectWorldCandidate>&
+					OutCandidates,
+				FExecutionMutationError& OutError) override
+			{
+				OutCandidates.Reset();
+				OutError = FExecutionMutationError();
+				if (!World.IsValid()
+					|| !World->PersistentLevel
+					|| WorldIdentity.IsEmpty()
+					|| ContextRevision.IsEmpty())
+				{
+					OutError = FExecutionMutationError(
+						TEXT("world_simple_persisted_catalog_invalid"));
+					return false;
+				}
+				OutCandidates.Emplace(
+					World.Get(),
+					WorldIdentity,
+					World->PersistentLevel->GetPathName(),
+					EUeAgentExecutionWorldType::Preview,
+					TOptional<int32>(),
+					ContextRevision);
+				return OutCandidates.Last().IsValid();
+			}
+
+		private:
+			TWeakObjectPtr<UWorld> World;
+			FString WorldIdentity;
+			FString ContextRevision;
+		};
+
+		class FWorldArtifactPersistedStateOracle final
+			: public IPersistedStateOracle
+		{
+		public:
+			explicit FWorldArtifactPersistedStateOracle(
+				TSharedRef<
+					IUeAgentWorldSimpleEffectReferenceResolver,
+					ESPMode::ThreadSafe> InReferenceResolver)
+				: ReferenceResolver(MoveTemp(InReferenceResolver))
+			{
+			}
+
+			const FString& GetReadPortId() const override
+			{
+				return ReadPortId;
+			}
+
+			bool TryObserve(
+				const FVerificationTarget& Target,
+				const TArray<FDurableArtifact>& Artifacts,
+				FUeAgentResourceTracker& Resources,
+				const FUeAgentOperationDeadline& Deadline,
+				const FUeAgentCancellationToken& Cancellation,
+				FUeAgentCanonicalSnapshotPtr& OutSnapshot,
+				FVerificationError& OutError) override
+			{
+				OutSnapshot.Reset();
+				OutError = FVerificationError();
+				if (!Target.IsValid()
+					|| Artifacts.IsEmpty()
+					|| Target.GetBinding().GetReadPortId()
+						!= ReadPortId
+					|| !Deadline.CanContinue()
+					|| Cancellation.IsCancelled())
+				{
+					OutError = FVerificationError(
+						TEXT("world_simple_persisted_read_request_invalid"));
+					return false;
+				}
+
+				FUeAgentCanonicalSnapshotPtr Snapshot;
+				FPersistedWorldLoadError LoadError;
+				const bool bObserved = TryObservePersistedWorld(
+					Artifacts,
+					[&](UWorld& SnapshotWorld,
+						FPersistedWorldLoadError& ObserverError)
+					{
+						if (!Deadline.CanContinue()
+							|| Cancellation.IsCancelled())
+						{
+							ObserverError.Code =
+								TEXT("world_simple_persisted_read_cancelled");
+							return false;
+						}
+
+						const FUeAgentCandidateBinding& SourceBinding =
+							Target.GetBinding();
+						const FString SnapshotWorldPackage =
+							SnapshotWorld.GetOutermost()->GetName();
+						const FString SnapshotToken =
+							FGuid::NewGuid().ToString(EGuidFormats::Digits);
+						const FUeAgentCandidateBinding SnapshotBinding(
+							SourceBinding.GetBindingId()
+								+ TEXT(":artifact:")
+								+ SnapshotToken,
+							SourceBinding.GetSummary(),
+							SourceBinding.GetCatalogRevision(),
+							SnapshotWorldPackage,
+							ReadPortId,
+							SourceBinding.GetSupportedOperations(),
+							SourceBinding.GetBindingEvidence());
+						const TSharedRef<FPersistedWorldCatalog,
+							ESPMode::ThreadSafe> Catalog = MakeShared<
+								FPersistedWorldCatalog,
+								ESPMode::ThreadSafe>(
+								SnapshotWorld,
+								SourceBinding.GetSummary()
+									.GetIdentity()
+									.GetOwnerId(),
+								SourceBinding.GetSummary()
+									.GetIdentity()
+									.GetGeneration());
+						FWorldStateReadPort Reader(
+							ReadPortId,
+							EUeAgentStatePlane::Persisted,
+							Catalog,
+							ReferenceResolver,
+							false);
+						FUeAgentDiscoveryError ReadError;
+						if (!Reader.TryRead(
+								FUeAgentStateReadRequest(
+									SnapshotBinding,
+									EUeAgentStatePlane::Persisted),
+								Resources,
+								Deadline,
+								Cancellation,
+								Snapshot,
+								ReadError))
+						{
+							ObserverError.Code = ReadError.Code.IsEmpty()
+								? TEXT("world_simple_persisted_state_read_failed")
+								: ReadError.Code;
+							ObserverError.Detail = ReadError.Detail;
+							return false;
+						}
+						return Snapshot.IsValid();
+					},
+					LoadError);
+				if (!bObserved)
+				{
+					OutError = FVerificationError(
+						WorldPersistedErrorCode(LoadError.Code),
+						LoadError.Detail);
+					return false;
+				}
+
+				OutSnapshot = MoveTemp(Snapshot);
+				return OutSnapshot.IsValid();
+			}
+
+		private:
+			FString ReadPortId = PersistedStatePortId;
+			TSharedRef<
+				IUeAgentWorldSimpleEffectReferenceResolver,
+				ESPMode::ThreadSafe> ReferenceResolver;
+		};
+
 		class FWorldDraftBuilder final
 			: public IUeAgentSimpleAuthoringDraftBuilder
 		{
@@ -3579,13 +3794,27 @@ namespace UE::UAI::Composition::SimpleAuthoring::World
 				NativeHook.ToSharedRef());
 		ProviderConfig.ExpectedStateProjector =
 			MakeShared<FWorldExpectedStateProjector>();
-		ProviderConfig.PersistedStateReadPort =
-			MakeShared<FWorldStateReadPort>(
-				PersistedStatePortId,
-				EUeAgentStatePlane::Persisted,
-				PersistedCatalog,
-				Config.ReferenceResolver.ToSharedRef(),
-				false);
+		if (Config.PersistedWorldCatalog.IsValid())
+		{
+			const TSharedRef<IUeAgentStateReadPort,
+				ESPMode::ThreadSafe> PersistedStateReadPort =
+					MakeShared<FWorldStateReadPort>(
+						PersistedStatePortId,
+						EUeAgentStatePlane::Persisted,
+						PersistedCatalog,
+						Config.ReferenceResolver.ToSharedRef(),
+						false);
+			ProviderConfig.PersistedStateOracle = MakeShared<
+				FStateReadPortPersistedStateOracle,
+				ESPMode::ThreadSafe>(PersistedStateReadPort);
+		}
+		else
+		{
+			ProviderConfig.PersistedStateOracle = MakeShared<
+				FWorldArtifactPersistedStateOracle,
+				ESPMode::ThreadSafe>(
+				Config.ReferenceResolver.ToSharedRef());
+		}
 		ProviderConfig.AbsenceOracle = Config.AbsenceOracle;
 		ProviderConfig.ReferenceOracle = Config.ReferenceOracle;
 

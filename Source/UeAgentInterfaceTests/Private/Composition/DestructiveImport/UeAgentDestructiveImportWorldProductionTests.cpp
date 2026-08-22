@@ -1,6 +1,7 @@
 #include "Misc/AutomationTest.h"
 
 #include "Composition/DestructiveImport/UeAgentDestructiveImportActivation.h"
+#include "Domains/Level/Authoring/UeAgentLevelAuthoringState.h"
 #include "Editor.h"
 #include "EditorLevelUtils.h"
 #include "Components/InstancedStaticMeshComponent.h"
@@ -60,6 +61,11 @@ namespace
 			Parameters.Emplace(
 				Name, EUeAgentCommandWireType::String, true, false);
 		};
+		auto OptionalString = [&Parameters](const TCHAR* Name)
+		{
+			Parameters.Emplace(
+				Name, EUeAgentCommandWireType::String, false, false);
+		};
 		auto Integer = [&Parameters](const TCHAR* Name)
 		{
 			Parameters.Emplace(
@@ -72,6 +78,7 @@ namespace
 		else if (CommandId == TEXT("world.level_content.delete_scope"))
 		{
 			String(TEXT("folder_path"));
+			OptionalString(TEXT("managed_id"));
 		}
 		else if (CommandId == TEXT("world.pcg.cleanup"))
 		{
@@ -226,10 +233,33 @@ namespace
 				DataLayer = WorldDataLayers->CreateDataLayer<
 					UDataLayerInstanceWithAsset>(DataLayerAsset);
 			}
+			DeleteFolder =
+				UeAgentLevelAuthoring::MakeManagedActorFolderPath(
+					TEXT("world-destructive-test"));
+			DeleteManagedId = TEXT("uai://world-destructive/delete/") + FixtureId;
+			DeleteSiblingManagedId =
+				TEXT("uai://world-destructive/sibling/") + FixtureId;
 			DeleteActor = World->SpawnActor<AActor>();
+			DeleteSiblingActor = World->SpawnActor<AActor>();
+			FString BindError;
+			bDeleteActorsBound = DeleteActor && DeleteSiblingActor
+				&& UeAgentLevelAuthoring::TryBindManagedActorOwnership(
+					*DeleteActor,
+					DeleteManagedId,
+					TEXT("world-destructive-test"),
+					BindError)
+				&& UeAgentLevelAuthoring::TryBindManagedActorOwnership(
+					*DeleteSiblingActor,
+					DeleteSiblingManagedId,
+					TEXT("world-destructive-test"),
+					BindError);
 			if (DeleteActor)
 			{
-				DeleteActor->SetFolderPath(TEXT("UAI/W08/Delete"));
+				DeleteActorPath = DeleteActor->GetPathName();
+			}
+			if (DeleteSiblingActor)
+			{
+				DeleteSiblingActorPath = DeleteSiblingActor->GetPathName();
 			}
 			PcgActor = World->SpawnActor<AActor>();
 			if (PcgActor)
@@ -343,7 +373,8 @@ namespace
 		{
 			return Package && World && bWorldContextRegistered
 				&& WorldPartition && DataLayer
-				&& DeleteActor && PcgActor && PcgComponent && MoveActor
+				&& DeleteActor && DeleteSiblingActor && bDeleteActorsBound
+				&& PcgActor && PcgComponent && MoveActor
 				&& StreamingLevel && StreamingLevel->GetLoadedLevel()
 				&& MeshActor && Cube && Sphere && OwnedMesh && bMeshSaved
 				&& VoxelActor && VoxelComponent
@@ -393,6 +424,22 @@ namespace
 				: nullptr;
 		}
 
+		AActor* FindActorByPath(const FString& ObjectPath) const
+		{
+			if (!World)
+			{
+				return nullptr;
+			}
+			for (TActorIterator<AActor> It(World); It; ++It)
+			{
+				if (It->GetPathName() == ObjectPath)
+				{
+					return *It;
+				}
+			}
+			return nullptr;
+		}
+
 		UPackage* Package = nullptr;
 		UWorld* World = nullptr;
 		UWorldPartition* WorldPartition = nullptr;
@@ -400,6 +447,13 @@ namespace
 		UDataLayerAsset* DataLayerAsset = nullptr;
 		UDataLayerInstance* DataLayer = nullptr;
 		AActor* DeleteActor = nullptr;
+		AActor* DeleteSiblingActor = nullptr;
+		FString DeleteFolder;
+		FString DeleteManagedId;
+		FString DeleteSiblingManagedId;
+		FString DeleteActorPath;
+		FString DeleteSiblingActorPath;
+		bool bDeleteActorsBound = false;
 		AActor* PcgActor = nullptr;
 		UPCGComponent* PcgComponent = nullptr;
 		AActor* MoveActor = nullptr;
@@ -490,7 +544,7 @@ bool FUeAgentDestructiveImportWorldProductionTest::RunTest(
 		return false;
 	}
 
-	auto Invoke = [this, &Harness, &Error](
+	auto Invoke = [this, &Harness, &Fixture, &Error](
 		const FString& CommandId,
 		const TSharedRef<FJsonObject>& Input,
 		TSharedPtr<FJsonObject>& OutPayload,
@@ -520,6 +574,22 @@ bool FUeAgentDestructiveImportWorldProductionTest::RunTest(
 			{
 				AddError(CommandId + TEXT(":destructive_plan_invalid"));
 				return false;
+			}
+			if (CommandId == TEXT("world.level_content.delete_scope")
+				&& Input->HasField(TEXT("managed_id")))
+			{
+				TArray<FString> ImpactScope;
+				if (!OutPayload->TryGetStringArrayField(
+						TEXT("impact_scope"), ImpactScope)
+					|| !ImpactScope.Contains(
+						TEXT("actor:") + Fixture.DeleteActorPath)
+					|| ImpactScope.Contains(
+						TEXT("actor:") + Fixture.DeleteSiblingActorPath))
+				{
+					AddError(
+						CommandId + TEXT(":exact_actor_impact_scope_invalid"));
+					return false;
+				}
 			}
 			Input->SetStringField(
 				TEXT("destructive_authorization_id"), AuthorizationId);
@@ -561,14 +631,15 @@ bool FUeAgentDestructiveImportWorldProductionTest::RunTest(
 	}
 	{
 		const TSharedRef<FJsonObject> Input = Params();
-		Input->SetStringField(TEXT("folder_path"), TEXT("UAI/W08/Delete"));
+		Input->SetStringField(TEXT("folder_path"), Fixture.DeleteFolder);
+		Input->SetStringField(TEXT("managed_id"), Fixture.DeleteManagedId);
 		Invoke(TEXT("world.level_content.delete_scope"), Input, Payload, true);
-		bool bFound = false;
-		for (TActorIterator<AActor> It(Fixture.World); It; ++It)
-		{
-			bFound |= It->GetFolderPath() == FName(TEXT("UAI/W08/Delete"));
-		}
-		TestFalse(TEXT("folder actors are absent after independent scan"), bFound);
+		TestNull(
+			TEXT("exact managed actor is absent after independent scan"),
+			Fixture.FindActorByPath(Fixture.DeleteActorPath));
+		TestNotNull(
+			TEXT("same-folder managed sibling survives exact deletion"),
+			Fixture.FindActorByPath(Fixture.DeleteSiblingActorPath));
 	}
 	{
 		const TSharedRef<FJsonObject> Input = Params();

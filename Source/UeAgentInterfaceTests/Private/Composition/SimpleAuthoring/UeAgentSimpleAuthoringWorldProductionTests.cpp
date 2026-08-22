@@ -61,7 +61,7 @@ namespace
 		FOwnedWorld()
 		{
 			Package = CreatePackage(
-				*(TEXT("/Temp/UAI/SA008/WorldProduction/")
+				*(TEXT("/Game/UAI_Automation/SA008/WorldProduction_")
 					+ FGuid::NewGuid().ToString(
 						EGuidFormats::Digits)));
 			World = UWorld::CreateWorld(
@@ -664,6 +664,21 @@ namespace
 			return OutSession.IsValid();
 		}
 
+		bool TryEnlist(
+			const FAssetDurableSessionRef& Session,
+			const TArray<FAssetDurableTarget>& MutationTargets,
+			const int64 CurrentFencingToken,
+			FUeAgentResourceTracker& Resources,
+			FAssetDurableSessionPtr& OutSession,
+			FAssetDurableError& OutError) override
+		{
+			++EnlistCount;
+			OutError = FAssetDurableError();
+			OutSession = Session;
+			return CurrentFencingToken
+				== Session->GetRequest().GetFencingToken();
+		}
+
 		bool TryPersist(
 			const FAssetDurableSessionRef& Session,
 			const int64 CurrentFencingToken,
@@ -716,6 +731,7 @@ namespace
 		}
 
 		int32 PrepareCount = 0;
+		int32 EnlistCount = 0;
 		int32 PersistCount = 0;
 		int32 AcknowledgeCount = 0;
 		FString SeenPackageName;
@@ -1058,6 +1074,7 @@ bool FUeAgentSimpleAuthoringWorldProductionContractTest::RunTest(
 	FUeAgentWorldSimpleAuthoringProviderConfig ProviderConfig;
 	ProviderConfig.DescriptorRegistry = Registry;
 	ProviderConfig.WorldCatalog = Catalog;
+	ProviderConfig.PersistedWorldCatalog = Catalog;
 	ProviderConfig.ReferenceResolver = ReferenceResolver;
 	ProviderConfig.DurableService = Durable;
 	ProviderConfig.AbsenceOracle =
@@ -1476,7 +1493,6 @@ bool FUeAgentSimpleAuthoringWorldProductionContractTest::RunTest(
 			"\"scale\":[1,1,1],"
 			"\"translation\":[125,-75,50],"
 			"\"unit\":\"centimeter\"},"
-			"\"save_level\":false,"
 			"\"tags\":[\"SA008ActorCreate\"]}");
 	SubmitWorldProfile(
 		*ActorCreateRoute,

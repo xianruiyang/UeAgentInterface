@@ -110,6 +110,7 @@ namespace UE::UAI::AssetDurable
 		EDurableArtifactKind GetArtifactKind() const;
 		const FString& GetDurableLocation() const;
 		const FString& GetPackageName() const;
+		FString GetDurableTargetKey() const;
 		EAssetDurableIntent GetIntent() const;
 		ERollbackGrade GetRollbackGrade() const;
 		bool IsValid() const;
@@ -485,6 +486,15 @@ namespace UE::UAI::AssetDurable
 		int64 CurrentFencingToken,
 		FUeAgentResourceTracker& Resources,
 		FDurableReceipt& OutReceipt,
+		FAssetDurableError& OutError);
+
+	UEAGENTINTERFACE_API bool TryEnlistAssetDurableTargets(
+		const FAssetDurableSessionRef& Session,
+		const TArray<FAssetDurableTarget>& MutationTargets,
+		IAssetDurableBackend& Backend,
+		int64 CurrentFencingToken,
+		FUeAgentResourceTracker& Resources,
+		FAssetDurableSessionPtr& OutSession,
 		FAssetDurableError& OutError);
 
 	UEAGENTINTERFACE_API bool TryRollbackAssetDurability(

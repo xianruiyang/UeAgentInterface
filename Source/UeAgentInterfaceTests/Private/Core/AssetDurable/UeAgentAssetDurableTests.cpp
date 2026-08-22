@@ -1,11 +1,13 @@
 #include "Misc/AutomationTest.h"
 
 #include "Core/AssetDurable/UeAgentAssetDurable.h"
+#include "Core/AssetDurable/UeAgentPackageHeader.h"
 #include "Core/ContextResource/UeAgentContextResource.h"
 #include "Core/Contract/UeAgentContract.h"
 #include "Core/PlanningPreflight/UeAgentPlanningPreflight.h"
 #include "Core/StateSemantic/UeAgentStateSemantic.h"
 #include "Engine/Texture2D.h"
+#include "Engine/World.h"
 #include "HAL/FileManager.h"
 #include "Misc/FileHelper.h"
 #include "Misc/PackageName.h"
@@ -188,6 +190,9 @@ namespace
 			SavePayload = FinalRoot / TEXT("save_asset.upayload");
 			DeleteHeader = FinalRoot / TEXT("delete_asset.uasset");
 			DeletePayload = FinalRoot / TEXT("delete_asset.upayload");
+			ExternalHeader = FinalRoot / TEXT("external_actor.uasset");
+			ExternalPayload = FinalRoot / TEXT("external_actor.upayload");
+			UnrelatedHeader = FinalRoot / TEXT("unrelated.uasset");
 			FFileHelper::SaveStringToFile(TEXT("old-save-header"), *SaveHeader);
 			FFileHelper::SaveStringToFile(TEXT("old-save-payload"), *SavePayload);
 			FFileHelper::SaveStringToFile(
@@ -196,6 +201,9 @@ namespace
 			FFileHelper::SaveStringToFile(
 				TEXT("old-delete-payload"),
 				*DeletePayload);
+			FFileHelper::SaveStringToFile(
+				TEXT("unrelated"),
+				*UnrelatedHeader);
 		}
 
 		~FOwnedDiskFixture()
@@ -210,18 +218,23 @@ namespace
 		FString SavePayload;
 		FString DeleteHeader;
 		FString DeletePayload;
+		FString ExternalHeader;
+		FString ExternalPayload;
+		FString UnrelatedHeader;
 	};
 
 	struct FNativePackageFixture
 	{
-		FNativePackageFixture()
+		explicit FNativePackageFixture(
+			const bool bUseDifferentAssetName = false)
 		{
 			const FString Suffix =
 				FGuid::NewGuid().ToString(EGuidFormats::Digits);
 			PackageName =
 				TEXT("/Game/UAI/P4_010/Native_") + Suffix;
-			AssetName =
-				FPackageName::GetLongPackageAssetName(PackageName);
+			AssetName = bUseDifferentAssetName
+				? TEXT("ExternalActorLike_") + Suffix
+				: FPackageName::GetLongPackageAssetName(PackageName);
 			Root = FPaths::ConvertRelativePathToFull(
 				FPaths::ProjectIntermediateDir()
 					/ TEXT("UAI/P4_010/native")
@@ -326,13 +339,32 @@ namespace
 			TArray<FDurableArtifact> Artifacts;
 			for (const FAssetDurableTarget& Target : Request.GetTargets())
 			{
-				const bool bDelete =
-					Target.GetIntent() == EAssetDurableIntent::Delete;
-				const FString Prefix = bDelete
-					? TEXT("delete_asset")
-					: TEXT("save_asset");
-				Artifacts.Emplace(
+				FString Prefix;
+				if (Target.GetPackageName().EndsWith(TEXT("/SaveAsset")))
+				{
+					Prefix = TEXT("save_asset");
+				}
+				else if (Target.GetPackageName().EndsWith(
+					TEXT("/DeleteAsset")))
+				{
+					Prefix = TEXT("delete_asset");
+				}
+				else if (Target.GetPackageName().EndsWith(
+					TEXT("/ExternalActor")))
+				{
+					Prefix = TEXT("external_actor");
+				}
+				else
+				{
+					Prefix = FPackageName::GetLongPackageAssetName(
+						Target.GetPackageName()).ToLower();
+				}
+				const FString ArtifactIdPrefix =
 					Target.GetIdentity().GetCanonicalKey()
+					+ TEXT(":")
+					+ Target.GetDurableTargetKey();
+				Artifacts.Emplace(
+					ArtifactIdPrefix
 						+ TEXT(":package_header"),
 					Target.GetIdentity(),
 					Target.GetPackageName(),
@@ -340,7 +372,7 @@ namespace
 					Target.GetIntent(),
 					TEXT("package_header"));
 				Artifacts.Emplace(
-					Target.GetIdentity().GetCanonicalKey()
+					ArtifactIdPrefix
 						+ TEXT(":package_payload"),
 					Target.GetIdentity(),
 					Target.GetPackageName(),
@@ -460,6 +492,12 @@ namespace
 					return false;
 				}
 			}
+			if (bFailPublishAfterMutation)
+			{
+				OutError = FAssetDurableError(
+					TEXT("fixture_publish_failed_after_mutation"));
+				return false;
+			}
 			return true;
 		}
 
@@ -507,6 +545,7 @@ namespace
 		TArray<FString> MutationEvents;
 		TMap<FString, TOptional<FString>> Backups;
 		bool bFailPublish = false;
+		bool bFailPublishAfterMutation = false;
 		bool bRestoreConfirmed = true;
 		bool bEscapeArtifactPath = false;
 		bool bSupportsAtomicity = true;
@@ -586,6 +625,97 @@ bool FUeAgentAssetDurableModuleAvailableTest::RunTest(
 }
 
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(
+	FUeAgentAssetDurablePackageHeaderExtensionTest,
+	"UeAgentInterface.Core.AssetDurable.PackageHeaderExtension",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FUeAgentAssetDurablePackageHeaderExtensionTest::RunTest(
+	const FString& Parameters)
+{
+	const FString PackageName = TEXT("/Game/UAI/P4_010/MapHeader_")
+		+ FGuid::NewGuid().ToString(EGuidFormats::Digits);
+	FString MapPath;
+	FString AssetPath;
+	TestTrue(
+		TEXT("resolve map test path"),
+		FPackageName::TryConvertLongPackageNameToFilename(
+			PackageName,
+			MapPath,
+			FPackageName::GetMapPackageExtension()));
+	TestTrue(
+		TEXT("resolve asset test path"),
+		FPackageName::TryConvertLongPackageNameToFilename(
+			PackageName,
+			AssetPath,
+			FPackageName::GetAssetPackageExtension()));
+	IFileManager::Get().MakeDirectory(*FPaths::GetPath(MapPath), true);
+	IFileManager::Get().Delete(*MapPath, false, true, true);
+	IFileManager::Get().Delete(*AssetPath, false, true, true);
+	TestTrue(
+		TEXT("create exact map-header witness"),
+		FFileHelper::SaveStringToFile(TEXT("map"), *MapPath));
+
+	FString ResolvedPath;
+	FString ErrorCode;
+	TestTrue(
+		TEXT("an unloaded package reuses its existing map extension"),
+		TryResolvePackageHeaderFilename(
+			PackageName,
+			ResolvedPath,
+			ErrorCode));
+	TestEqual(
+		TEXT("map header is selected exactly"),
+		ResolvedPath,
+		MapPath);
+
+	UPackage* const LoadedPackage = CreatePackage(*PackageName);
+	UWorld* const LoadedWorld = NewObject<UWorld>(
+		LoadedPackage,
+		*FPackageName::GetLongPackageAssetName(PackageName),
+		RF_Public | RF_Standalone);
+	LoadedPackage->ClearPackageFlags(PKG_ContainsMap);
+	ResolvedPath.Reset();
+	ErrorCode.Reset();
+	UObject* PreparedTopLevelAsset = LoadedWorld;
+	TestTrue(
+		TEXT("save preflight recognizes a loaded UWorld as a map"),
+		TryPrepareLoadedPackageHeaderForSave(
+			*LoadedPackage,
+			PreparedTopLevelAsset,
+			ResolvedPath,
+			ErrorCode));
+	TestTrue(
+		TEXT("save preflight repairs missing map package metadata"),
+		LoadedPackage->ContainsMap());
+	TestEqual(
+		TEXT("save preflight preserves the map header"),
+		ResolvedPath,
+		MapPath);
+
+	TestTrue(
+		TEXT("create conflicting asset-header witness"),
+		FFileHelper::SaveStringToFile(TEXT("asset"), *AssetPath));
+	ResolvedPath.Reset();
+	ErrorCode.Reset();
+	TestFalse(
+		TEXT("two extensions for one package fail closed"),
+		TryResolvePackageHeaderFilename(
+			PackageName,
+			ResolvedPath,
+			ErrorCode));
+	TestEqual(
+		TEXT("extension ambiguity is explicit"),
+		ErrorCode,
+		FString(TEXT("durable_package_extension_ambiguous")));
+
+	IFileManager::Get().Delete(*MapPath, false, true, true);
+	IFileManager::Get().Delete(*AssetPath, false, true, true);
+	LoadedWorld->MarkAsGarbage();
+	LoadedPackage->MarkAsGarbage();
+	return !HasAnyErrors();
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(
 	FUeAgentAssetDurablePrepareJournalTest,
 	"UeAgentInterface.Core.AssetDurable.PrepareJournal",
 	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
@@ -642,6 +772,206 @@ bool FUeAgentAssetDurablePrepareJournalTest::RunTest(
 		Backend.MutationEvents.Num(),
 		0);
 	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(
+	FUeAgentAssetDurableDynamicEnrollmentTest,
+	"UeAgentInterface.Core.AssetDurable.DynamicEnrollment",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FUeAgentAssetDurableDynamicEnrollmentTest::RunTest(
+	const FString& Parameters)
+{
+	(void)Parameters;
+	FOwnedDiskFixture Fixture(TEXT("dynamic_enrollment"));
+	FRecordingAssetBackend Backend(Fixture);
+	FUeAgentResourceTracker Tracker = MakeTracker();
+	FAssetDurableSessionPtr Session;
+	FAssetDurableError Error;
+	if (!TestTrue(
+		TEXT("the frozen request prepares its original inventory"),
+		TryPrepareAssetDurability(
+			MakeRequest(Tracker),
+			Backend,
+			Fixture.JournalRoot,
+			Tracker,
+			Session,
+			Error)))
+	{
+		AddError(Error.GetCode() + TEXT(":") + Error.GetDetail());
+		return false;
+	}
+
+	const FAssetDurableTarget ExternalTarget(
+		MakeIdentity(false),
+		TEXT("/Game/UAI/P4_009/ExternalActor"),
+		EAssetDurableIntent::Save,
+		ERollbackGrade::DurableBackup);
+	FAssetDurableSessionPtr Rejected;
+	TestFalse(
+		TEXT("dynamic enrollment rechecks the fencing token"),
+		TryEnlistAssetDurableTargets(
+			Session.ToSharedRef(),
+			{ExternalTarget},
+			Backend,
+			40,
+			Tracker,
+			Rejected,
+			Error));
+	TestEqual(
+		TEXT("stale dynamic enrollment has a typed failure"),
+		Error.GetCode(),
+		FString(TEXT("durable_fence_stale")));
+
+	const FUeAgentCanonicalIdentity UnknownIdentity(
+		TEXT("uai.reference.asset.title"),
+		TEXT("reference_asset"),
+		TEXT("/Game/UAI/P4_009/Unknown"),
+		TEXT("title"),
+		TEXT("asset_property"),
+		TEXT("editor-session-21"));
+	TestFalse(
+		TEXT("a mutation package cannot escape the frozen plan"),
+		TryEnlistAssetDurableTargets(
+			Session.ToSharedRef(),
+			{
+				FAssetDurableTarget(
+					UnknownIdentity,
+					TEXT("/Game/UAI/P4_009/Unknown"),
+					EAssetDurableIntent::Save,
+					ERollbackGrade::DurableBackup),
+			},
+			Backend,
+			41,
+			Tracker,
+			Rejected,
+			Error));
+	TestEqual(
+		TEXT("out-of-plan enrollment has a typed failure"),
+		Error.GetCode(),
+		FString(TEXT("durable_target_not_in_plan")));
+
+	TestFalse(
+		TEXT("one physical package cannot carry conflicting intents"),
+		TryEnlistAssetDurableTargets(
+			Session.ToSharedRef(),
+			{
+				FAssetDurableTarget(
+					MakeIdentity(true),
+					TEXT("/Game/UAI/P4_009/SaveAsset"),
+					EAssetDurableIntent::Delete,
+					ERollbackGrade::DurableBackup),
+			},
+			Backend,
+			41,
+			Tracker,
+			Rejected,
+			Error));
+	TestEqual(
+		TEXT("physical intent conflicts are typed"),
+		Error.GetCode(),
+		FString(TEXT("durable_enlist_target_conflict")));
+
+	FAssetDurableSessionPtr Extended;
+	if (!TestTrue(
+		TEXT("a new package for an existing planned change is enlisted"),
+		TryEnlistAssetDurableTargets(
+			Session.ToSharedRef(),
+			{ExternalTarget},
+			Backend,
+			41,
+			Tracker,
+			Extended,
+			Error)))
+	{
+		AddError(Error.GetCode() + TEXT(":") + Error.GetDetail());
+		return false;
+	}
+	if (!Extended.IsValid())
+	{
+		AddError(TEXT("the extended durable session is missing"));
+		return false;
+	}
+	TestEqual(
+		TEXT("dynamic enrollment preserves the journal identity"),
+		Extended->GetJournalId(),
+		Session->GetJournalId());
+	TestEqual(
+		TEXT("dynamic enrollment preserves the transaction root"),
+		Extended->GetTransactionRoot(),
+		Session->GetTransactionRoot());
+	TestEqual(
+		TEXT("the extended request contains three physical packages"),
+		Extended->GetRequest().GetTargets().Num(),
+		3);
+	TestEqual(
+		TEXT("the extended inventory contains every header and payload"),
+		Extended->GetInventory().GetArtifacts().Num(),
+		6);
+	TestEqual(
+		TEXT("the journal records the inventory extension phase"),
+		Extended->GetCurrentPhase(),
+		FString(TEXT("inventory_extended")));
+	const TOptional<FString>* ExternalHeaderBackup =
+		Backend.Backups.Find(Fixture.ExternalHeader);
+	TestNotNull(
+		TEXT("the new external actor header receives a backup marker"),
+		ExternalHeaderBackup);
+	if (ExternalHeaderBackup)
+	{
+		TestFalse(
+			TEXT("a newly created package is backed up as absent"),
+			ExternalHeaderBackup->IsSet());
+	}
+	TestFalse(
+		TEXT("an unrelated file is not absorbed into the transaction"),
+		Backend.Backups.Contains(Fixture.UnrelatedHeader));
+
+	Backend.bFailPublishAfterMutation = true;
+	FDurableReceipt Receipt;
+	TestTrue(
+		TEXT("a post-mutation publish failure is represented by rollback"),
+		TryPersistAssetDurability(
+			Extended.ToSharedRef(),
+			Backend,
+			41,
+			Tracker,
+			Receipt,
+			Error));
+	TestEqual(
+		TEXT("the extended transaction rolls back as one unit"),
+		Receipt.GetStatus(),
+		EDurableStatus::RolledBack);
+	TestFalse(
+		TEXT("rollback removes the newly published external actor header"),
+		IFileManager::Get().FileExists(*Fixture.ExternalHeader));
+	FString RestoredSave;
+	FString RestoredDelete;
+	FString Unrelated;
+	TestTrue(
+		TEXT("the original save header remains readable"),
+		FFileHelper::LoadFileToString(RestoredSave, *Fixture.SaveHeader));
+	TestTrue(
+		TEXT("the original delete header remains readable"),
+		FFileHelper::LoadFileToString(
+			RestoredDelete,
+			*Fixture.DeleteHeader));
+	TestTrue(
+		TEXT("the unrelated file remains readable"),
+		FFileHelper::LoadFileToString(Unrelated, *Fixture.UnrelatedHeader));
+	TestEqual(
+		TEXT("rollback restores the original save header"),
+		RestoredSave,
+		FString(TEXT("old-save-header")));
+	TestEqual(
+		TEXT("rollback restores the original delete header"),
+		RestoredDelete,
+		FString(TEXT("old-delete-header")));
+	TestEqual(
+		TEXT("unrelated state is unchanged"),
+		Unrelated,
+		FString(TEXT("unrelated")));
+	return !HasAnyErrors();
 }
 
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(
@@ -1201,5 +1531,43 @@ bool FUeAgentAssetDurableNativePackageBackendTest::RunTest(
 	TestFalse(
 		TEXT("native package header is deleted"),
 		IFileManager::Get().FileExists(*Fixture.HeaderPath));
+
+	FNativePackageFixture DifferentNameFixture(true);
+	TestNotEqual(
+		TEXT("the regression fixture does not mirror its package name"),
+		DifferentNameFixture.AssetName,
+		FPackageName::GetLongPackageAssetName(
+			DifferentNameFixture.PackageName));
+	FAssetDurableSessionPtr DifferentNameSession;
+	if (!TestTrue(
+		TEXT("a package whose top-level asset has a different name prepares"),
+		TryPrepareAssetDurability(
+			MakeNativeRequest(DifferentNameFixture, false, Tracker),
+			Backend,
+			DifferentNameFixture.Root / TEXT("save_journal"),
+			Tracker,
+			DifferentNameSession,
+			Error)))
+	{
+		AddError(Error.GetCode() + TEXT(":") + Error.GetDetail());
+		return false;
+	}
+	FDurableReceipt DifferentNameReceipt;
+	if (!TestTrue(
+		TEXT("package-owned asset discovery persists the different-name asset"),
+		TryPersistAssetDurability(
+			DifferentNameSession.ToSharedRef(),
+			Backend,
+			41,
+			Tracker,
+			DifferentNameReceipt,
+			Error)))
+	{
+		AddError(Error.GetCode() + TEXT(":") + Error.GetDetail());
+		return false;
+	}
+	TestTrue(
+		TEXT("the different-name package header is written"),
+		IFileManager::Get().FileExists(*DifferentNameFixture.HeaderPath));
 	return true;
 }

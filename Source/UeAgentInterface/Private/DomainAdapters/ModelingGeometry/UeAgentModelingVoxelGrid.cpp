@@ -1,29 +1,49 @@
 #include "DomainAdapters/ModelingGeometry/UeAgentModelingVoxelGrid.h"
 
+#include "DomainAdapters/ModelingGeometry/UeAgentModelingVoxelGridState.h"
+
 #include "Components/BoxComponent.h"
 #include "Components/DynamicMeshComponent.h"
+#include "Core/AssetDurable/UeAgentAssetDurable.h"
+#include "Core/AssetDurable/UeAgentPersistedWorld.h"
+#include "Core/ContextResource/UeAgentContextResource.h"
+#include "Core/PlanningPreflight/UeAgentPlanningPreflight.h"
+#include "Core/StateSemantic/UeAgentStateSemantic.h"
 #include "DynamicMesh/DynamicMesh3.h"
 #include "DynamicMesh/DynamicMeshAttributeSet.h"
 #include "DynamicMesh/DynamicMeshOverlay.h"
 #include "DynamicMeshActor.h"
 #include "Editor.h"
+#include "Engine/Level.h"
 #include "Engine/World.h"
 #include "EngineUtils.h"
 #include "HAL/FileManager.h"
 #include "Materials/MaterialInterface.h"
 #include "Misc/FileHelper.h"
 #include "Misc/Guid.h"
+#include "Misc/PackageName.h"
 #include "Misc/Paths.h"
+#include "Misc/SecureHash.h"
 #include "Misc/ScopeLock.h"
 #include "Serialization/JsonReader.h"
 #include "Serialization/JsonSerializer.h"
 #include "Serialization/JsonWriter.h"
 #include "UDynamicMesh.h"
+#include "UObject/Package.h"
 #include "UObject/UObjectGlobals.h"
+#include "Domains/Level/Authoring/UeAgentLevelAuthoringState.h"
+
+THIRD_PARTY_INCLUDES_START
+#include <openssl/sha.h>
+THIRD_PARTY_INCLUDES_END
 
 namespace UE::UAI::DomainAdapters::ModelingGeometry::VoxelGrid
 {
 	using namespace CommandEdge;
+	using namespace AssetDurable;
+	using namespace ContextResource;
+	using namespace PlanningPreflight;
+	using namespace StateSemantic;
 	using UE::Geometry::FDynamicMesh3;
 	using UE::Geometry::FDynamicMeshMaterialAttribute;
 	using UE::Geometry::FDynamicMeshNormalOverlay;
@@ -37,13 +57,18 @@ namespace UE::UAI::DomainAdapters::ModelingGeometry::VoxelGrid
 			TEXT("UAIEditableVoxelGridCollision:");
 		constexpr const TCHAR* CollisionGenerationTagPrefix =
 			TEXT("UAIEditableVoxelGridCollisionGeneration:");
-		constexpr const TCHAR* SidecarSchema = TEXT("uai.modeling.voxel_grid.v2");
+		constexpr const TCHAR* LegacySidecarSchemaV2 =
+			TEXT("uai.modeling.voxel_grid.v2");
 		constexpr const TCHAR* LegacySidecarSchema =
 			TEXT("uai_editable_voxel_grid_v1");
 		constexpr int64 MaxOperationCells = 200000;
 		constexpr int64 MaxSessionCells = 500000;
 		constexpr int32 MaxSessions = 64;
 		constexpr int32 MaxCollisionBoxes = 2048;
+
+#if WITH_DEV_AUTOMATION_TESTS
+		TWeakObjectPtr<UWorld> GAutomationWorldOverride;
+#endif
 
 		struct FFailure final
 		{
@@ -67,15 +92,106 @@ namespace UE::UAI::DomainAdapters::ModelingGeometry::VoxelGrid
 			bool bDirty = false;
 			bool bCreatedActor = false;
 			bool bCommitted = false;
-			FString SidecarPath;
+			bool bStateUnknown = false;
+			FString LegacySidecarPath;
+			bool bLegacySidecarImported = false;
 			FString CollisionGeneration;
 			FString CollisionMode = TEXT("none");
+			FAssetDurableSessionPtr DurableSession;
+			TSharedPtr<FUeAgentResourceTracker> DurableResources;
+			int64 FencingToken = -1;
+			FString DurablePlanFingerprint;
+			FString DurableJournalOwnerId;
+			FString DurableReceiptId;
 		};
 
 		FString MakeGuid(const TCHAR* Prefix)
 		{
 			return FString(Prefix)
 				+ FGuid::NewGuid().ToString(EGuidFormats::Digits).Left(16);
+		}
+
+		FString Sha256(const FString& Value)
+		{
+			const FTCHARToUTF8 Utf8(*Value);
+			FSHA256Signature Signature{};
+			const uint8 Empty = 0;
+			const uint8* Data = Utf8.Length() > 0
+				? reinterpret_cast<const uint8*>(Utf8.Get()) : &Empty;
+			if (!SHA256(
+					Data,
+					static_cast<size_t>(Utf8.Length()),
+					Signature.Signature))
+			{
+				return FString();
+			}
+			return TEXT("sha256:") + Signature.ToString().ToLower();
+		}
+
+		TSharedRef<FUeAgentResourceTracker> MakeDurableResources()
+		{
+			return MakeShared<FUeAgentResourceTracker>(FUeAgentResourceBudget({
+				{EUeAgentResourceDimension::InputBytes, 128ll * 1024 * 1024},
+				{EUeAgentResourceDimension::OutputBytes, 128ll * 1024 * 1024},
+				{EUeAgentResourceDimension::StringBytes, 128ll * 1024 * 1024},
+				{EUeAgentResourceDimension::Nodes, 262144},
+				{EUeAgentResourceDimension::Items, 262144},
+				{EUeAgentResourceDimension::Files, 8192},
+				{EUeAgentResourceDimension::ReferenceEdges, 262144},
+				{EUeAgentResourceDimension::WorkUnits, 1048576},
+				{EUeAgentResourceDimension::EstimatedMemoryBytes,
+					1024ll * 1024 * 1024},
+			}));
+		}
+
+		FUeAgentCanonicalIdentity DurableIdentity(const FSession& Session)
+		{
+			return FUeAgentCanonicalIdentity(
+				TEXT("uai.semantic.modeling.voxel_grid"),
+				TEXT("ue.dynamic_mesh_actor"),
+				Session.GridId,
+				{{TEXT("grid_id"), Session.GridId}},
+				TEXT("world_actor"),
+				TEXT("modeling-voxel-grid"));
+		}
+
+		FPlanningPreflightPlanRef MakeDurablePlan(
+			const FUeAgentCommandRequest& Request,
+			const FSession& Session,
+			const bool bCreate)
+		{
+			const FUeAgentCanonicalIdentity Identity = DurableIdentity(Session);
+			TArray<FPlannedChange> Changes;
+			Changes.Emplace(
+				Identity,
+				bCreate ? EChangeIntent::Create : EChangeIntent::Update,
+				FUeAgentCanonicalValuePtr(),
+				FUeAgentCanonicalValuePtr(),
+				TArray<FString>{TEXT("uai:operate")},
+				TEXT("modeling-voxel-grid-durable"));
+			const FString Fingerprint = Sha256(
+				Request.GetCommandId() + TEXT("\n")
+				+ Request.GetCommandBindingHash() + TEXT("\n")
+				+ Request.GetRequestId() + TEXT("\n")
+				+ Session.SessionId + TEXT("\n")
+				+ Session.GridId);
+			return MakeShared<const FPlanningPreflightPlan>(
+				Contract::FUeAgentDescriptorIdentity(
+					Request.GetCommandId(), 1, Request.GetCommandBindingHash()),
+				Request.GetRequestId(),
+				Session.SessionId,
+				TEXT("modeling-voxel-grid"),
+				TArray<FString>{TEXT("uai:operate")},
+				TEXT("voxel-grid:") + Session.GridId,
+				FUeAgentStateRevision(
+					TEXT("modeling_voxel_grid"),
+					Session.GridId,
+					Session.Revision),
+				TEXT("modeling-voxel-grid-session"),
+				FChangeSet(MoveTemp(Changes)),
+				FImpactSet(),
+				TArray<FPrecondition>{},
+				Fingerprint);
 		}
 
 		void SetFailure(
@@ -264,7 +380,7 @@ namespace UE::UAI::DomainAdapters::ModelingGeometry::VoxelGrid
 				+ GridId + TEXT(":") + Generation;
 		}
 
-		FString SidecarPath(const FString& GridId)
+		FString LegacySidecarPath(const FString& GridId)
 		{
 			return FPaths::Combine(
 				FPaths::ProjectSavedDir(),
@@ -484,93 +600,6 @@ namespace UE::UAI::DomainAdapters::ModelingGeometry::VoxelGrid
 			return FaceCount;
 		}
 
-		bool SerializeSidecar(
-			const FSession& Session,
-			FString& OutText,
-			FString& OutError)
-		{
-			OutText.Reset();
-			const TSharedRef<FJsonObject> Root = MakeShared<FJsonObject>();
-			Root->SetStringField(TEXT("schema"), SidecarSchema);
-			Root->SetStringField(TEXT("grid_id"), Session.GridId);
-			Root->SetNumberField(TEXT("cell_size"), Session.CellSize);
-			Root->SetObjectField(
-				TEXT("grid_origin"), VectorJson(Session.GridToWorld.GetLocation()));
-			Root->SetObjectField(
-				TEXT("grid_rotation"), RotatorJson(Session.GridToWorld.Rotator()));
-			Root->SetObjectField(TEXT("anchor"), VectorJson(Session.AnchorLocal));
-			Root->SetNumberField(TEXT("revision"), Session.Revision);
-			Root->SetStringField(
-				TEXT("collision_generation"), Session.CollisionGeneration);
-			Root->SetStringField(TEXT("collision_mode"), Session.CollisionMode);
-			if (const ADynamicMeshActor* Actor = Session.Actor.Get())
-			{
-				Root->SetStringField(TEXT("actor_path"), Actor->GetPathName());
-			}
-			TArray<TSharedPtr<FJsonValue>> Cells;
-			Cells.Reserve(Session.Cells.Num());
-			for (const FIntVector& Cell : SortedCells(Session.Cells))
-			{
-				Cells.Add(MakeShared<FJsonValueObject>(IntVectorJson(Cell)));
-			}
-			Root->SetArrayField(TEXT("cells"), MoveTemp(Cells));
-			const TSharedRef<TJsonWriter<TCHAR, TCondensedJsonPrintPolicy<TCHAR>>>
-				Writer = TJsonWriterFactory<TCHAR,
-					TCondensedJsonPrintPolicy<TCHAR>>::Create(&OutText);
-			if (!FJsonSerializer::Serialize(Root, Writer) || OutText.IsEmpty())
-			{
-				OutError = TEXT("voxel_grid_sidecar_serialize_failed");
-				return false;
-			}
-			return true;
-		}
-
-		bool CommitTextFile(
-			const FString& Path,
-			const FString& Text,
-			FString& OutError)
-		{
-			const FString Directory = FPaths::GetPath(Path);
-			if (!IFileManager::Get().MakeDirectory(*Directory, true)
-				&& !IFileManager::Get().DirectoryExists(*Directory))
-			{
-				OutError = TEXT("voxel_grid_sidecar_directory_failed");
-				return false;
-			}
-			const FString Temporary = Path + TEXT(".tmp.")
-				+ FGuid::NewGuid().ToString(EGuidFormats::Digits);
-			if (!FFileHelper::SaveStringToFile(
-				Text,
-				*Temporary,
-				FFileHelper::EEncodingOptions::ForceUTF8WithoutBOM))
-			{
-				OutError = TEXT("voxel_grid_sidecar_stage_failed");
-				return false;
-			}
-			if (!IFileManager::Get().Move(
-				*Path, *Temporary, true, true, false, true))
-			{
-				IFileManager::Get().Delete(*Temporary, false, true, true);
-				OutError = TEXT("voxel_grid_sidecar_commit_failed");
-				return false;
-			}
-			return true;
-		}
-
-		bool RestoreSidecar(
-			const FString& Path,
-			const bool bHadPrevious,
-			const FString& Previous)
-		{
-			if (bHadPrevious)
-			{
-				FString Ignored;
-				return CommitTextFile(Path, Previous, Ignored);
-			}
-			return !IFileManager::Get().FileExists(*Path)
-				|| IFileManager::Get().Delete(*Path, false, true, true);
-		}
-
 		bool TryReadCellValue(
 			const TSharedPtr<FJsonValue>& Value,
 			FIntVector& OutCell)
@@ -596,12 +625,12 @@ namespace UE::UAI::DomainAdapters::ModelingGeometry::VoxelGrid
 			return true;
 		}
 
-		bool LoadSidecar(
+		bool LoadLegacySidecar(
 			FSession& Session,
 			FString& OutError)
 		{
 			FString Text;
-			if (!FFileHelper::LoadFileToString(Text, *Session.SidecarPath))
+			if (!FFileHelper::LoadFileToString(Text, *Session.LegacySidecarPath))
 			{
 				OutError = TEXT("voxel_grid_sidecar_missing");
 				return false;
@@ -622,7 +651,8 @@ namespace UE::UAI::DomainAdapters::ModelingGeometry::VoxelGrid
 			FRotator Rotation = FRotator::ZeroRotator;
 			FVector Anchor = FVector::ZeroVector;
 			if (!Root->TryGetStringField(TEXT("schema"), Schema)
-				|| (Schema != SidecarSchema && Schema != LegacySidecarSchema)
+				|| (Schema != LegacySidecarSchemaV2
+					&& Schema != LegacySidecarSchema)
 				|| !Root->TryGetStringField(TEXT("grid_id"), GridId)
 				|| GridId != Session.GridId
 				|| !Root->TryGetNumberField(TEXT("cell_size"), CellSize)
@@ -668,6 +698,7 @@ namespace UE::UAI::DomainAdapters::ModelingGeometry::VoxelGrid
 			Session.Revision = Revision;
 			Session.bDirty = false;
 			Session.bCommitted = true;
+			Session.bLegacySidecarImported = true;
 			Root->TryGetStringField(
 				TEXT("collision_generation"), Session.CollisionGeneration);
 			Root->TryGetStringField(TEXT("collision_mode"), Session.CollisionMode);
@@ -682,8 +713,13 @@ namespace UE::UAI::DomainAdapters::ModelingGeometry::VoxelGrid
 					OutFailure, TEXT("voxel_grid_game_thread_required"));
 				return nullptr;
 			}
-			UWorld* const World = GEditor
-				? GEditor->GetEditorWorldContext().World() : nullptr;
+			UWorld* const World =
+#if WITH_DEV_AUTOMATION_TESTS
+				GAutomationWorldOverride.IsValid()
+					? GAutomationWorldOverride.Get()
+					:
+#endif
+					(GEditor ? GEditor->GetEditorWorldContext().World() : nullptr);
 			if (!World)
 			{
 				SetFailure(
@@ -876,12 +912,21 @@ namespace UE::UAI::DomainAdapters::ModelingGeometry::VoxelGrid
 			Result->SetNumberField(TEXT("occupied_cell_count"), Session.Cells.Num());
 			Result->SetBoolField(TEXT("dirty"), Session.bDirty);
 			Result->SetBoolField(TEXT("committed"), Session.bCommitted);
+			Result->SetBoolField(TEXT("state_unknown"), Session.bStateUnknown);
 			Result->SetObjectField(
 				TEXT("grid_origin"), VectorJson(Session.GridToWorld.GetLocation()));
 			Result->SetObjectField(
 				TEXT("grid_rotation"), RotatorJson(Session.GridToWorld.Rotator()));
 			Result->SetObjectField(TEXT("anchor"), VectorJson(Session.AnchorLocal));
-			Result->SetStringField(TEXT("sidecar_path"), Session.SidecarPath);
+			const TSharedRef<FJsonObject> StateOwner = MakeShared<FJsonObject>();
+			StateOwner->SetStringField(TEXT("kind"), TEXT("actor_component"));
+			StateOwner->SetStringField(
+				TEXT("schema"), GetAuthoringStateSchema());
+			StateOwner->SetStringField(
+				TEXT("component_name"), GetAuthoringStateComponentName().ToString());
+			StateOwner->SetBoolField(
+				TEXT("legacy_sidecar_imported"), Session.bLegacySidecarImported);
+			Result->SetObjectField(TEXT("authoring_state"), StateOwner);
 			Result->SetStringField(
 				TEXT("collision_generation"), Session.CollisionGeneration);
 			Result->SetStringField(TEXT("collision_mode"), Session.CollisionMode);
@@ -948,7 +993,15 @@ namespace UE::UAI::DomainAdapters::ModelingGeometry::VoxelGrid
 			}
 		}
 
-		void RemoveOldCollisionComponents(
+		struct FStagedCollisionComponent final
+		{
+			TWeakObjectPtr<UBoxComponent> Component;
+			ECollisionEnabled::Type CollisionEnabled =
+				ECollisionEnabled::NoCollision;
+			bool bWasTransient = false;
+		};
+
+		TArray<FStagedCollisionComponent> StageOldCollisionComponents(
 			ADynamicMeshActor& Actor,
 			const FString& GridId,
 			const TArray<UBoxComponent*>& Keep)
@@ -957,17 +1010,47 @@ namespace UE::UAI::DomainAdapters::ModelingGeometry::VoxelGrid
 			for (const UBoxComponent* Component : Keep) Kept.Add(Component);
 			TArray<UActorComponent*> Components;
 			Actor.GetComponents(UBoxComponent::StaticClass(), Components);
-			TArray<UBoxComponent*> Remove;
-			for (UActorComponent* Component : Components)
+			TArray<FStagedCollisionComponent> Staged;
+			for (UActorComponent* Item : Components)
 			{
-				UBoxComponent* const Box = Cast<UBoxComponent>(Component);
-				if (Box && !Kept.Contains(Box)
-					&& ComponentHasTag(*Box, CollisionTag(GridId)))
+				UBoxComponent* const Box = Cast<UBoxComponent>(Item);
+				if (!Box || Kept.Contains(Box)
+					|| !ComponentHasTag(*Box, CollisionTag(GridId)))
 				{
-					Remove.Add(Box);
+					continue;
+				}
+				FStagedCollisionComponent& Snapshot = Staged.AddDefaulted_GetRef();
+				Snapshot.Component = Box;
+				Snapshot.CollisionEnabled = Box->GetCollisionEnabled();
+				Snapshot.bWasTransient = Box->HasAnyFlags(RF_Transient);
+				Box->SetCollisionEnabled(ECollisionEnabled::NoCollision);
+				Box->SetFlags(RF_Transient);
+			}
+			return Staged;
+		}
+
+		void RestoreStagedCollisionComponents(
+			const TArray<FStagedCollisionComponent>& Staged)
+		{
+			for (const FStagedCollisionComponent& Snapshot : Staged)
+			{
+				UBoxComponent* const Box = Snapshot.Component.Get();
+				if (!IsValid(Box)) continue;
+				if (!Snapshot.bWasTransient) Box->ClearFlags(RF_Transient);
+				Box->SetCollisionEnabled(Snapshot.CollisionEnabled);
+			}
+		}
+
+		void DestroyStagedCollisionComponents(
+			const TArray<FStagedCollisionComponent>& Staged)
+		{
+			for (const FStagedCollisionComponent& Snapshot : Staged)
+			{
+				if (UBoxComponent* const Box = Snapshot.Component.Get())
+				{
+					Box->DestroyComponent();
 				}
 			}
-			DestroyComponents(Remove);
 		}
 
 		bool PrepareCollisionComponents(
@@ -1087,24 +1170,71 @@ namespace UE::UAI::DomainAdapters::ModelingGeometry::VoxelGrid
 			return OutRange.IsValid();
 		}
 
+		FVoxelGridAuthoringState AuthoringStateFor(
+			const FSession& Session,
+			const FString& MaterialPath)
+		{
+			FVoxelGridAuthoringState State;
+			State.GridId = Session.GridId;
+			State.CellSize = Session.CellSize;
+			State.GridToWorld = Session.GridToWorld;
+			State.AnchorLocal = Session.AnchorLocal;
+			State.Cells = Session.Cells;
+			State.Revision = Session.Revision;
+			State.CollisionGeneration = Session.CollisionGeneration;
+			State.CollisionMode = Session.CollisionMode;
+			State.MaterialRef = MaterialPath;
+			return State;
+		}
+
+		void ApplyAuthoringStateToSession(
+			const FVoxelGridAuthoringState& State,
+			FSession& Session)
+		{
+			Session.GridId = State.GridId;
+			Session.CellSize = State.CellSize;
+			Session.GridToWorld = State.GridToWorld;
+			Session.AnchorLocal = State.AnchorLocal;
+			Session.Cells = State.Cells;
+			Session.Revision = State.Revision;
+			Session.CollisionGeneration = State.CollisionGeneration;
+			Session.CollisionMode = State.CollisionMode;
+			Session.bDirty = false;
+			Session.bCommitted = true;
+		}
+
 		bool VerifyAppliedState(
 			const FSession& Expected,
+			ADynamicMeshActor& Actor,
 			const FString& MaterialPath,
 			TSharedRef<FJsonObject>& OutReadback,
 			FString& OutError)
 		{
 			OutReadback = MakeShared<FJsonObject>();
-			ADynamicMeshActor* const Actor = Expected.Actor.Get();
-			UDynamicMeshComponent* const Component = DynamicMeshComponent(Actor);
-			if (!Actor || !Component || !Component->GetDynamicMesh())
+			UDynamicMeshComponent* const Component = DynamicMeshComponent(&Actor);
+			if (!Component || !Component->GetDynamicMesh())
 			{
 				OutError = TEXT("voxel_grid_readback_actor_missing");
 				return false;
 			}
-			FSession Persisted = Expected;
-			Persisted.Cells.Reset();
-			if (!LoadSidecar(Persisted, OutError)) return false;
-			const bool bSidecarEquivalent =
+			if (USceneComponent* const Root = Actor.GetRootComponent())
+			{
+				Root->UpdateComponentToWorld();
+			}
+			UUeAgentModelingVoxelGridStateComponent* StateComponent = nullptr;
+			if (!TryFindAuthoringStateComponent(
+					Actor, StateComponent, OutError)
+				|| !StateComponent)
+			{
+				return false;
+			}
+			FVoxelGridAuthoringState Persisted;
+			if (!TryReadAuthoringState(
+					*StateComponent, MaxSessionCells, Persisted, OutError))
+			{
+				return false;
+			}
+			const bool bAuthoringStateEquivalent =
 				Persisted.GridId == Expected.GridId
 				&& Persisted.Revision == Expected.Revision
 				&& FMath::IsNearlyEqual(
@@ -1113,6 +1243,7 @@ namespace UE::UAI::DomainAdapters::ModelingGeometry::VoxelGrid
 				&& Persisted.AnchorLocal.Equals(Expected.AnchorLocal, 0.001)
 				&& Persisted.CollisionGeneration == Expected.CollisionGeneration
 				&& Persisted.CollisionMode == Expected.CollisionMode
+				&& Persisted.MaterialRef == MaterialPath
 				&& SameCells(Persisted.Cells, Expected.Cells);
 
 			int32 VertexCount = 0;
@@ -1130,15 +1261,22 @@ namespace UE::UAI::DomainAdapters::ModelingGeometry::VoxelGrid
 
 			TSet<FIntVector> Covered;
 			bool bCollisionShapeValid = true;
+			bool bNoStaleOwnedCollision = true;
 			int32 CollisionBoxCount = 0;
 			TArray<UActorComponent*> Components;
-			Actor->GetComponents(UBoxComponent::StaticClass(), Components);
+			Actor.GetComponents(UBoxComponent::StaticClass(), Components);
 			const FString GenerationTag = CollisionGenerationTag(
 				Expected.GridId, Expected.CollisionGeneration);
 			for (UActorComponent* Item : Components)
 			{
 				UBoxComponent* const Box = Cast<UBoxComponent>(Item);
-				if (!Box || !ComponentHasTag(*Box, GenerationTag)) continue;
+				if (!Box) continue;
+				if (ComponentHasTag(*Box, CollisionTag(Expected.GridId))
+					&& !ComponentHasTag(*Box, GenerationTag))
+				{
+					bNoStaleOwnedCollision = false;
+				}
+				if (!ComponentHasTag(*Box, GenerationTag)) continue;
 				++CollisionBoxCount;
 				FVoxelGridCollisionBox Range;
 				if (!TryRangeFromComponent(*Box, Expected, Range))
@@ -1160,23 +1298,45 @@ namespace UE::UAI::DomainAdapters::ModelingGeometry::VoxelGrid
 				}
 			}
 			const bool bCollisionEquivalent = Expected.CollisionMode == TEXT("none")
-				? CollisionBoxCount == 0
-				: bCollisionShapeValid && SameCells(Covered, Expected.Cells);
+				? CollisionBoxCount == 0 && bNoStaleOwnedCollision
+				: bNoStaleOwnedCollision
+					&& bCollisionShapeValid && SameCells(Covered, Expected.Cells);
 			const UMaterialInterface* const Material = Component->GetMaterial(0);
 			const FString ObservedMaterial = Material ? Material->GetPathName() : FString();
 			const bool bMaterialEquivalent = ObservedMaterial == MaterialPath;
 			const bool bTransformEquivalent =
-				Actor->GetActorTransform().Equals(ActorTransform(Expected), 0.001);
+				Actor.GetActorTransform().Equals(ActorTransform(Expected), 0.001);
+			const FString ExpectedFolder =
+				UeAgentLevelAuthoring::MakeManagedActorFolderPath(
+					TEXT("modeling-voxel-grid"));
+			const bool bManagedIdentityEquivalent =
+				UeAgentLevelAuthoring::GetManagedActorId(Actor) == Expected.GridId
+				&& UeAgentLevelAuthoring::GetActorFolderPathText(Actor)
+					== ExpectedFolder
+				&& Actor.ActorHasTag(
+					UeAgentLevelAuthoring::GetManagedActorMarkerTag())
+				&& Actor.ActorHasTag(FName(*UeAgentLevelAuthoring::
+					MakeManagedActorTag(Expected.GridId)));
 
 			OutReadback->SetBoolField(
-				TEXT("sidecar_equivalent"), bSidecarEquivalent);
+				TEXT("authoring_state_equivalent"), bAuthoringStateEquivalent);
 			OutReadback->SetBoolField(TEXT("mesh_equivalent"), bMeshEquivalent);
 			OutReadback->SetBoolField(
 				TEXT("collision_exact_cover"), bCollisionEquivalent);
 			OutReadback->SetBoolField(
+				TEXT("no_stale_owned_collision"), bNoStaleOwnedCollision);
+			OutReadback->SetBoolField(
 				TEXT("material_equivalent"), bMaterialEquivalent);
 			OutReadback->SetBoolField(
 				TEXT("transform_equivalent"), bTransformEquivalent);
+			OutReadback->SetStringField(
+				TEXT("expected_actor_transform"),
+				ActorTransform(Expected).ToHumanReadableString());
+			OutReadback->SetStringField(
+				TEXT("observed_actor_transform"),
+				Actor.GetActorTransform().ToHumanReadableString());
+			OutReadback->SetBoolField(
+				TEXT("managed_identity_equivalent"), bManagedIdentityEquivalent);
 			OutReadback->SetNumberField(TEXT("vertex_count"), VertexCount);
 			OutReadback->SetNumberField(TEXT("triangle_count"), TriangleCount);
 			OutReadback->SetNumberField(TEXT("exposed_face_count"), FaceCount);
@@ -1184,11 +1344,12 @@ namespace UE::UAI::DomainAdapters::ModelingGeometry::VoxelGrid
 				TEXT("collision_box_count"), CollisionBoxCount);
 			OutReadback->SetNumberField(
 				TEXT("covered_cell_count"), Covered.Num());
-			const bool bEquivalent = bSidecarEquivalent
+			const bool bEquivalent = bAuthoringStateEquivalent
 				&& bMeshEquivalent
 				&& bCollisionEquivalent
 				&& bMaterialEquivalent
-				&& bTransformEquivalent;
+				&& bTransformEquivalent
+				&& bManagedIdentityEquivalent;
 			OutReadback->SetBoolField(TEXT("equivalent"), bEquivalent);
 			if (!bEquivalent)
 			{
@@ -1248,6 +1409,17 @@ namespace UE::UAI::DomainAdapters::ModelingGeometry::VoxelGrid
 						Request, Action, SessionObservation(*Session, Params));
 					return true;
 				}
+				if (Session->bStateUnknown && Action != TEXT("cancel"))
+				{
+					SetFailure(
+						OutFailure,
+						TEXT("voxel_grid_session_state_unknown"),
+						TEXT("cancel and reconcile the persisted actor before continuing"),
+						TEXT("state_unknown"),
+						false,
+						true);
+					return false;
+				}
 				if (Action == TEXT("add_bounds")
 					|| Action == TEXT("remove_bounds"))
 				{
@@ -1285,6 +1457,17 @@ namespace UE::UAI::DomainAdapters::ModelingGeometry::VoxelGrid
 				if (!Session || !Session->Actor.IsValid())
 				{
 					SetFailure(OutFailure, TEXT("voxel_grid_session_not_found"));
+					return false;
+				}
+				if (Session->bStateUnknown)
+				{
+					SetFailure(
+						OutFailure,
+						TEXT("voxel_grid_session_state_unknown"),
+						TEXT("cancel and reconcile the persisted actor before continuing"),
+						TEXT("state_unknown"),
+						false,
+						true);
 					return false;
 				}
 				if (!CheckRevision(Params, *Session, Error))
@@ -1406,6 +1589,76 @@ namespace UE::UAI::DomainAdapters::ModelingGeometry::VoxelGrid
 				const ECollisionEnabled::Type OldCollisionEnabled =
 					Component->GetCollisionEnabled();
 				const FTransform OldActorTransform = Actor->GetActorTransform();
+				const TArray<FName> OldActorTags = Actor->Tags;
+				const FName OldActorFolder = Actor->GetFolderPath();
+				if (!Session->DurableSession.IsValid())
+				{
+					UWorld* const ActorWorld = Actor->GetWorld();
+					if (!ActorWorld
+						|| !TryPrepareDurability(
+							Request,
+							*ActorWorld,
+							Actor,
+							Session->bCreatedActor && !Session->bCommitted,
+							*Session,
+							Error))
+					{
+						SetFailure(
+							OutFailure,
+							ActorWorld ? Error
+								: FString(TEXT("voxel_grid_actor_world_missing")));
+						return false;
+					}
+				}
+				if (!TryEnlistActorPackage(*Session, *Actor, Error))
+				{
+					const FString EnlistError = Error;
+					FString RollbackError;
+					const bool bRolledBack = TryRollbackDurability(
+						*Session, true, RollbackError);
+					Session->bStateUnknown = !bRolledBack;
+					SetFailure(
+						OutFailure,
+						EnlistError,
+						RollbackError,
+						bRolledBack ? FString(TEXT("rolled_back"))
+							: FString(TEXT("state_unknown")),
+						bRolledBack,
+						true);
+					return false;
+				}
+				if (!UeAgentLevelAuthoring::TryBindManagedActorOwnership(
+						*Actor,
+						Session->GridId,
+						TEXT("modeling-voxel-grid"),
+						Error))
+				{
+					SetFailure(OutFailure, Error);
+					return false;
+				}
+				UUeAgentModelingVoxelGridStateComponent* StateComponent = nullptr;
+				TOptional<FVoxelGridAuthoringState> PreviousAuthoringState;
+				FString StateError;
+				if (TryFindAuthoringStateComponent(
+						*Actor, StateComponent, StateError))
+				{
+					FVoxelGridAuthoringState ExistingState;
+					if (!TryReadAuthoringState(
+							*StateComponent,
+							MaxSessionCells,
+							ExistingState,
+							StateError))
+					{
+						SetFailure(OutFailure, StateError);
+						return false;
+					}
+					PreviousAuthoringState = MoveTemp(ExistingState);
+				}
+				else if (StateError != TEXT("voxel_grid_authoring_state_missing"))
+				{
+					SetFailure(OutFailure, StateError);
+					return false;
+				}
 
 				const FString Generation = MakeGuid(TEXT("GEN_"));
 				const ECollisionEnabled::Type Enabled =
@@ -1433,37 +1686,20 @@ namespace UE::UAI::DomainAdapters::ModelingGeometry::VoxelGrid
 					return false;
 				}
 
-				FString PreviousSidecar;
-				const bool bHadPreviousSidecar =
-					FFileHelper::LoadFileToString(
-						PreviousSidecar, *Session->SidecarPath);
 				FSession Intended = *Session;
 				Intended.CollisionGeneration = Generation;
 				Intended.CollisionMode = CollisionMode;
-				FString SidecarText;
-				if (!SerializeSidecar(Intended, SidecarText, Error)
-					|| !CommitTextFile(Session->SidecarPath, SidecarText, Error))
-				{
-					DestroyComponents(NewCollisionComponents);
-					SetFailure(OutFailure, Error);
-					return false;
-				}
 
 				if (!ActivateCollisionComponents(
 					*Actor, NewCollisionComponents, Error))
 				{
 					DestroyComponents(NewCollisionComponents);
-					const bool bRestored = RestoreSidecar(
-						Session->SidecarPath,
-						bHadPreviousSidecar,
-						PreviousSidecar);
 					SetFailure(
 						OutFailure,
 						Error,
 						TEXT("collision activation failed"),
-						bRestored ? FString(TEXT("rolled_back"))
-							: FString(TEXT("state_unknown")),
-						bRestored,
+						TEXT("rolled_back"),
+						true,
 						true);
 					return false;
 				}
@@ -1479,8 +1715,38 @@ namespace UE::UAI::DomainAdapters::ModelingGeometry::VoxelGrid
 					ETeleportType::TeleportPhysics);
 				Actor->Tags.AddUnique(FName(*ActorTag(Session->GridId)));
 				Intended.Actor = Actor;
-				TSharedRef<FJsonObject> Readback = MakeShared<FJsonObject>();
-				if (!VerifyAppliedState(Intended, MaterialPath, Readback, Error))
+				bool bCreatedStateComponent = false;
+				if (!StateComponent)
+				{
+					if (!TryCreateAuthoringStateComponent(
+							*Actor, StateComponent, Error))
+					{
+						Component->SetMesh(MoveTemp(OldMesh));
+						Component->SetMaterial(0, OldMaterial);
+						Component->SetCollisionEnabled(OldCollisionEnabled);
+						Component->MarkRenderStateDirty();
+						Actor->SetActorTransform(
+							OldActorTransform, false, nullptr,
+							ETeleportType::TeleportPhysics);
+						Actor->Tags = OldActorTags;
+						Actor->SetFolderPath(OldActorFolder);
+						DestroyComponents(NewCollisionComponents);
+						SetFailure(
+							OutFailure,
+							Error,
+							TEXT("authoring state create failed"),
+							TEXT("rolled_back"),
+							true,
+							true);
+						return false;
+					}
+					bCreatedStateComponent = true;
+				}
+				if (!TryWriteAuthoringState(
+						*StateComponent,
+						AuthoringStateFor(Intended, MaterialPath),
+						MaxSessionCells,
+						Error))
 				{
 					Component->SetMesh(MoveTemp(OldMesh));
 					Component->SetMaterial(0, OldMaterial);
@@ -1489,29 +1755,129 @@ namespace UE::UAI::DomainAdapters::ModelingGeometry::VoxelGrid
 					Actor->SetActorTransform(
 						OldActorTransform, false, nullptr,
 						ETeleportType::TeleportPhysics);
+					Actor->Tags = OldActorTags;
+					Actor->SetFolderPath(OldActorFolder);
 					DestroyComponents(NewCollisionComponents);
-					const bool bRestored = RestoreSidecar(
-						Session->SidecarPath,
-						bHadPreviousSidecar,
-						PreviousSidecar);
+					if (bCreatedStateComponent)
+					{
+						StateComponent->DestroyComponent();
+					}
+					SetFailure(
+						OutFailure,
+						Error,
+						TEXT("authoring state write failed"),
+						TEXT("rolled_back"),
+						true,
+						true);
+					return false;
+				}
+				TSharedRef<FJsonObject> Readback = MakeShared<FJsonObject>();
+				if (!VerifyAppliedState(
+						Intended, *Actor, MaterialPath, Readback, Error))
+				{
+					Component->SetMesh(MoveTemp(OldMesh));
+					Component->SetMaterial(0, OldMaterial);
+					Component->SetCollisionEnabled(OldCollisionEnabled);
+					Component->MarkRenderStateDirty();
+					Actor->SetActorTransform(
+						OldActorTransform, false, nullptr,
+						ETeleportType::TeleportPhysics);
+					Actor->Tags = OldActorTags;
+					Actor->SetFolderPath(OldActorFolder);
+					DestroyComponents(NewCollisionComponents);
+					bool bStateRestored = true;
+					if (PreviousAuthoringState.IsSet())
+					{
+						bStateRestored = TryWriteAuthoringState(
+							*StateComponent,
+							PreviousAuthoringState.GetValue(),
+							MaxSessionCells,
+							StateError);
+					}
+					else if (bCreatedStateComponent)
+					{
+						StateComponent->DestroyComponent();
+					}
 					SetFailure(
 						OutFailure,
 						Error,
 						TEXT("independent readback failed"),
-						bRestored ? FString(TEXT("rolled_back"))
+						bStateRestored ? FString(TEXT("rolled_back"))
 							: FString(TEXT("state_unknown")),
-						bRestored,
+						bStateRestored,
 						true);
 					return false;
 				}
 
-				RemoveOldCollisionComponents(
-					*Actor, Session->GridId, NewCollisionComponents);
+				const TArray<FStagedCollisionComponent> StagedOldCollision =
+					StageOldCollisionComponents(
+						*Actor, Session->GridId, NewCollisionComponents);
 				Actor->MarkPackageDirty();
+				TSharedRef<FJsonObject> PersistedReadback =
+					MakeShared<FJsonObject>();
+				if (!TryPersistAndVerify(
+						*Session,
+						Intended,
+						MaterialPath,
+						PersistedReadback,
+						Error))
+				{
+					const FString PersistError = Error;
+					Component->SetMesh(MoveTemp(OldMesh));
+					Component->SetMaterial(0, OldMaterial);
+					Component->SetCollisionEnabled(OldCollisionEnabled);
+					Component->MarkRenderStateDirty();
+					Actor->SetActorTransform(
+						OldActorTransform, false, nullptr,
+						ETeleportType::TeleportPhysics);
+					Actor->Tags = OldActorTags;
+					Actor->SetFolderPath(OldActorFolder);
+					DestroyComponents(NewCollisionComponents);
+					RestoreStagedCollisionComponents(StagedOldCollision);
+					bool bStateRestored = true;
+					if (PreviousAuthoringState.IsSet())
+					{
+						bStateRestored = TryWriteAuthoringState(
+							*StateComponent,
+							PreviousAuthoringState.GetValue(),
+							MaxSessionCells,
+							StateError);
+					}
+					else if (bCreatedStateComponent)
+					{
+						StateComponent->DestroyComponent();
+					}
+					FString RollbackError;
+					const bool bRolledBack = TryRollbackDurability(
+						*Session, bStateRestored, RollbackError);
+					Session->bStateUnknown = !bRolledBack;
+					SetFailure(
+						OutFailure,
+						PersistError,
+						RollbackError,
+						bRolledBack ? FString(TEXT("rolled_back"))
+							: FString(TEXT("state_unknown")),
+						bRolledBack,
+						true);
+					return false;
+				}
+				DestroyStagedCollisionComponents(StagedOldCollision);
+				if (UPackage* ActorPackage = Actor->GetOutermost())
+				{
+					ActorPackage->SetDirtyFlag(false);
+				}
+				if (UWorld* ActorWorld = Actor->GetWorld())
+				{
+					if (UPackage* WorldPackage = ActorWorld->GetOutermost())
+					{
+						WorldPackage->SetDirtyFlag(false);
+					}
+				}
 				Session->CollisionGeneration = Generation;
 				Session->CollisionMode = CollisionMode;
 				Session->bDirty = false;
 				Session->bCommitted = true;
+				Session->bStateUnknown = false;
 				bool bKeepSession = false;
 				Params->TryGetBoolField(TEXT("keep_session"), bKeepSession);
 
@@ -1543,12 +1909,24 @@ namespace UE::UAI::DomainAdapters::ModelingGeometry::VoxelGrid
 					TEXT("exact_cover"), CollisionMode == TEXT("none")
 						? Boxes.IsEmpty() : true);
 				Payload->SetObjectField(TEXT("collision"), CollisionResult);
-				Payload->SetStringField(TEXT("sidecar_path"), Session->SidecarPath);
-				Payload->SetObjectField(TEXT("readback"), Readback);
+				const TSharedRef<FJsonObject> StateOwner = MakeShared<FJsonObject>();
+				StateOwner->SetStringField(TEXT("kind"), TEXT("actor_component"));
+				StateOwner->SetStringField(
+					TEXT("schema"), GetAuthoringStateSchema());
+				StateOwner->SetStringField(
+					TEXT("component_path"), StateComponent->GetPathName());
+				Payload->SetObjectField(TEXT("authoring_state"), StateOwner);
+				const TSharedRef<FJsonObject> Durability = MakeShared<FJsonObject>();
+				Durability->SetStringField(
+					TEXT("receipt_id"), Session->DurableReceiptId);
+				Durability->SetStringField(
+					TEXT("atomicity"), TEXT("compensated_saga"));
+				Durability->SetBoolField(
+					TEXT("persisted_readback_verified"), true);
+				Payload->SetObjectField(TEXT("durability"), Durability);
+				Payload->SetObjectField(TEXT("readback"), PersistedReadback);
 				Payload->SetArrayField(TEXT("errors"), {});
-				Payload->SetArrayField(TEXT("warnings"), {
-					MakeShared<FJsonValueString>(
-						TEXT("level_package_dirty_not_implicitly_saved"))});
+				Payload->SetArrayField(TEXT("warnings"), {});
 				OutPayload = Payload;
 				if (!bKeepSession) Sessions.Remove(SessionId);
 				return true;
@@ -1561,13 +1939,18 @@ namespace UE::UAI::DomainAdapters::ModelingGeometry::VoxelGrid
 				for (TPair<FString, FSession>& Pair : Sessions)
 				{
 					FSession& Session = Pair.Value;
+					bool bActorReleased = true;
 					if (Session.bCreatedActor && !Session.bCommitted)
 					{
 						if (ADynamicMeshActor* Actor = Session.Actor.Get())
 						{
-							if (UWorld* World = Actor->GetWorld()) World->DestroyActor(Actor);
+							bActorReleased = Actor->GetWorld()
+								? Actor->GetWorld()->DestroyActor(Actor) : false;
 						}
 					}
+					FString RollbackError;
+					TryRollbackDurability(
+						Session, bActorReleased, RollbackError);
 				}
 				Sessions.Reset();
 			}
@@ -1589,6 +1972,402 @@ namespace UE::UAI::DomainAdapters::ModelingGeometry::VoxelGrid
 				Payload->SetArrayField(TEXT("errors"), {});
 				Payload->SetArrayField(TEXT("warnings"), {});
 				return Payload;
+			}
+
+			bool TryPrepareDurability(
+				const FUeAgentCommandRequest& Request,
+				UWorld& World,
+				ADynamicMeshActor* Actor,
+				const bool bCreate,
+				FSession& Session,
+				FString& OutError)
+			{
+				OutError.Reset();
+				Session.DurableSession.Reset();
+				Session.DurableResources = MakeDurableResources();
+				Session.FencingToken = ++NextFencingToken;
+				Session.DurableJournalOwnerId =
+					TEXT("modeling-voxel-grid:") + Session.SessionId;
+				const FPlanningPreflightPlanRef Plan =
+					MakeDurablePlan(Request, Session, bCreate);
+				Session.DurablePlanFingerprint = Plan->GetFingerprint();
+				if (Session.DurablePlanFingerprint.IsEmpty())
+				{
+					OutError = TEXT("voxel_grid_durable_fingerprint_failed");
+					return false;
+				}
+
+				TArray<FString> PackageNames;
+				if (UPackage* WorldPackage = World.GetOutermost())
+				{
+					PackageNames.Add(WorldPackage->GetName());
+				}
+				if (Actor && Actor->GetOutermost())
+				{
+					PackageNames.AddUnique(Actor->GetOutermost()->GetName());
+				}
+				if (PackageNames.IsEmpty())
+				{
+					OutError = TEXT("voxel_grid_durable_package_missing");
+					return false;
+				}
+				for (const FString& PackageName : PackageNames)
+				{
+					if (!FPackageName::IsValidLongPackageName(PackageName))
+					{
+						OutError = TEXT("voxel_grid_durable_package_invalid:")
+							+ PackageName;
+						return false;
+					}
+					if (UPackage* Package = FindPackage(nullptr, *PackageName))
+					{
+						if (Package->IsDirty())
+						{
+							OutError = TEXT("voxel_grid_target_package_dirty:")
+								+ PackageName;
+							return false;
+						}
+					}
+				}
+
+				const FUeAgentCanonicalIdentity Identity = DurableIdentity(Session);
+				TArray<FAssetDurableTarget> Targets;
+				for (const FString& PackageName : PackageNames)
+				{
+					Targets.Emplace(
+						Identity,
+						PackageName,
+						EAssetDurableIntent::Save,
+						ERollbackGrade::DurableBackup);
+				}
+				FAssetDurableError DurableError;
+				if (!TryPrepareAssetDurability(
+						FAssetDurableRequest(
+							Plan,
+							MoveTemp(Targets),
+							Session.FencingToken,
+							Session.DurableJournalOwnerId,
+							EAtomicityMode::CompensatedSaga),
+						DurableBackend,
+						FPaths::ProjectSavedDir()
+							/ TEXT("UeAgentInterface/VoxelGrid/Durable"),
+						*Session.DurableResources,
+						Session.DurableSession,
+						DurableError)
+					|| !Session.DurableSession.IsValid())
+				{
+					OutError = DurableError.GetCode() + TEXT(":")
+						+ DurableError.GetDetail();
+					return false;
+				}
+				return true;
+			}
+
+			bool TryEnlistActorPackage(
+				FSession& Session,
+				ADynamicMeshActor& Actor,
+				FString& OutError)
+			{
+				OutError.Reset();
+				if (!Session.DurableSession.IsValid()
+					|| !Session.DurableResources.IsValid()
+					|| !Actor.GetOutermost())
+				{
+					OutError = TEXT("voxel_grid_durable_session_missing");
+					return false;
+				}
+				const FString PackageName = Actor.GetOutermost()->GetName();
+				const bool bAlreadyPresent = Session.DurableSession->GetRequest()
+					.GetTargets().ContainsByPredicate(
+						[&PackageName](const FAssetDurableTarget& Target)
+						{
+							return Target.GetPackageName() == PackageName;
+						});
+				if (bAlreadyPresent) return true;
+				FAssetDurableSessionPtr Extended;
+				FAssetDurableError DurableError;
+				if (!TryEnlistAssetDurableTargets(
+						Session.DurableSession.ToSharedRef(),
+						TArray<FAssetDurableTarget>{
+							FAssetDurableTarget(
+								DurableIdentity(Session),
+								PackageName,
+								EAssetDurableIntent::Save,
+								ERollbackGrade::DurableBackup)},
+						DurableBackend,
+						Session.FencingToken,
+						*Session.DurableResources,
+						Extended,
+						DurableError)
+					|| !Extended.IsValid())
+				{
+					OutError = DurableError.GetCode() + TEXT(":")
+						+ DurableError.GetDetail();
+					return false;
+				}
+				Session.DurableSession = MoveTemp(Extended);
+				return true;
+			}
+
+			bool TryRollbackDurability(
+				FSession& Session,
+				const bool bMemoryRollbackConfirmed,
+				FString& OutError)
+			{
+				OutError.Reset();
+				if (!Session.DurableSession.IsValid())
+				{
+					return bMemoryRollbackConfirmed;
+				}
+				if (!Session.DurableResources.IsValid())
+				{
+					OutError = TEXT("voxel_grid_durable_resources_missing");
+					return false;
+				}
+				FDurableReceipt Receipt;
+				FAssetDurableError DurableError;
+				const bool bRolledBack = TryRollbackAssetDurability(
+					Session.DurableSession.ToSharedRef(),
+					DurableBackend,
+					Session.FencingToken,
+					bMemoryRollbackConfirmed,
+					*Session.DurableResources,
+					Receipt,
+					DurableError);
+				if (!bRolledBack
+					|| Receipt.GetStatus() != EDurableStatus::RolledBack)
+				{
+					OutError = DurableError.GetCode() + TEXT(":")
+						+ DurableError.GetDetail();
+					return false;
+				}
+				for (const FAssetDurableTarget& Target
+					: Session.DurableSession->GetRequest().GetTargets())
+				{
+					if (UPackage* Package = FindPackage(
+							nullptr, *Target.GetPackageName()))
+					{
+						Package->SetDirtyFlag(false);
+					}
+				}
+				Session.DurableSession.Reset();
+				Session.DurableResources.Reset();
+				return true;
+			}
+
+			bool TryMoveLegacySidecarToTombstone(
+				FSession& Session,
+				FString& OutTombstonePath,
+				FString& OutError)
+			{
+				OutTombstonePath.Reset();
+				OutError.Reset();
+				if (!Session.bLegacySidecarImported) return true;
+				if (!IFileManager::Get().FileExists(*Session.LegacySidecarPath)
+					|| Session.DurableReceiptId.IsEmpty())
+				{
+					OutError = TEXT("voxel_grid_legacy_sidecar_migration_source_missing");
+					return false;
+				}
+				const FString TombstoneRoot = FPaths::ProjectSavedDir()
+					/ TEXT("UeAgentInterface/VoxelGridMigrationTombstones")
+					/ Session.DurableReceiptId;
+				if (!IFileManager::Get().MakeDirectory(*TombstoneRoot, true)
+					&& !IFileManager::Get().DirectoryExists(*TombstoneRoot))
+				{
+					OutError = TEXT("voxel_grid_legacy_sidecar_tombstone_directory_failed");
+					return false;
+				}
+				OutTombstonePath = TombstoneRoot
+					/ FPaths::GetCleanFilename(Session.LegacySidecarPath);
+				if (!IFileManager::Get().Move(
+						*OutTombstonePath,
+						*Session.LegacySidecarPath,
+						false,
+						true,
+						false,
+						true))
+				{
+					OutError = TEXT("voxel_grid_legacy_sidecar_tombstone_move_failed");
+					OutTombstonePath.Reset();
+					return false;
+				}
+				return true;
+			}
+
+			bool TryPersistAndVerify(
+				FSession& Session,
+				const FSession& Intended,
+				const FString& MaterialPath,
+				TSharedRef<FJsonObject>& OutPersistedReadback,
+				FString& OutError)
+			{
+				OutPersistedReadback = MakeShared<FJsonObject>();
+				OutError.Reset();
+				if (!Session.DurableSession.IsValid()
+					|| !Session.DurableResources.IsValid())
+				{
+					OutError = TEXT("voxel_grid_durable_session_missing");
+					return false;
+				}
+				const FAssetDurableSessionRef Prepared =
+					Session.DurableSession.ToSharedRef();
+				FDurableReceipt Receipt;
+				FAssetDurableError DurableError;
+				if (!TryPersistAssetDurability(
+						Prepared,
+						DurableBackend,
+						Session.FencingToken,
+						*Session.DurableResources,
+						Receipt,
+						DurableError)
+					|| Receipt.GetStatus()
+						!= EDurableStatus::PersistedUnverified)
+				{
+					OutError = DurableError.GetCode() + TEXT(":")
+						+ DurableError.GetDetail();
+					return false;
+				}
+				Session.DurableReceiptId = Receipt.GetJournalId();
+				Session.DurableSession = MakeShared<const FAssetDurableSession>(
+					Prepared->GetRequest(),
+					Prepared->GetInventory(),
+					Prepared->GetJournalId(),
+					Prepared->GetJournalPath(),
+					Prepared->GetJournalRoot(),
+					Prepared->GetTransactionRoot(),
+					Prepared->GetStagingRoot(),
+					Receipt.GetPhaseHistory());
+
+				FPersistedWorldLoadError LoadError;
+				const bool bObserved = TryObservePersistedWorld(
+					Session.DurableSession->GetInventory().GetArtifacts(),
+					[&](UWorld& PersistedWorld,
+						FPersistedWorldLoadError& ObserverError)
+					{
+						AActor* PersistedActor = nullptr;
+						FString ResolveError;
+						if (!UeAgentLevelAuthoring::TryFindManagedActorExact(
+								PersistedWorld,
+								Intended.GridId,
+								UeAgentLevelAuthoring::MakeManagedActorFolderPath(
+									TEXT("modeling-voxel-grid")),
+								PersistedActor,
+								ResolveError))
+						{
+							TArray<FString> ObservedActors;
+							for (AActor* Candidate
+								: PersistedWorld.PersistentLevel->Actors)
+							{
+								if (!Candidate || Candidate->IsTemplate()) continue;
+								ObservedActors.Add(FString::Printf(
+									TEXT("%s{id=%s,folder=%s,tags=%s}"),
+									*Candidate->GetName(),
+									*UeAgentLevelAuthoring::GetManagedActorId(*Candidate),
+									*UeAgentLevelAuthoring::GetActorFolderPathText(*Candidate),
+									*FString::JoinBy(
+										Candidate->Tags,
+										TEXT("|"),
+										[](const FName Tag)
+										{
+											return Tag.ToString();
+										})));
+								if (ObservedActors.Num() >= 16) break;
+							}
+							ObserverError.Code =
+								TEXT("voxel_grid_persisted_actor_not_found");
+							ObserverError.Detail = MoveTemp(ResolveError)
+								+ TEXT("; observed=")
+								+ FString::Join(ObservedActors, TEXT(","));
+							return false;
+						}
+						ADynamicMeshActor* PersistedDynamic =
+							Cast<ADynamicMeshActor>(PersistedActor);
+						FString VerifyError;
+						if (!PersistedDynamic
+							|| !VerifyAppliedState(
+								Intended,
+								*PersistedDynamic,
+								MaterialPath,
+								OutPersistedReadback,
+								VerifyError))
+						{
+							ObserverError.Code =
+								TEXT("voxel_grid_persisted_readback_mismatch");
+							ObserverError.Detail = MoveTemp(VerifyError)
+								+ TEXT("; expected_transform=")
+								+ ActorTransform(Intended).ToHumanReadableString()
+								+ TEXT("; observed_transform=")
+								+ PersistedDynamic->GetActorTransform()
+									.ToHumanReadableString()
+								+ TEXT("; readback=")
+								+ JsonText(OutPersistedReadback);
+							return false;
+						}
+						return true;
+					},
+					LoadError);
+				if (!bObserved)
+				{
+					OutError = LoadError.Code + TEXT(":") + LoadError.Detail;
+					return false;
+				}
+
+				FString TombstonePath;
+				if (!TryMoveLegacySidecarToTombstone(
+						Session, TombstonePath, OutError))
+				{
+					return false;
+				}
+				const FDurableVerificationAcknowledgement Acknowledgement(
+					Session.DurableReceiptId,
+					Session.DurablePlanFingerprint,
+					Session.DurableSession->GetInventory().GetInventoryHash(),
+					TEXT("voxel-grid-persisted-readback:") + Session.GridId,
+					Session.DurableJournalOwnerId,
+					Session.FencingToken);
+				if (!TryAcknowledgeAssetDurability(
+						Session.DurableSession.ToSharedRef(),
+						Acknowledgement,
+						Session.FencingToken,
+						*Session.DurableResources,
+						DurableError))
+				{
+					if (!TombstonePath.IsEmpty())
+					{
+						IFileManager::Get().Move(
+							*Session.LegacySidecarPath,
+							*TombstonePath,
+							true,
+							true,
+							false,
+							true);
+					}
+					OutError = DurableError.GetCode() + TEXT(":")
+						+ DurableError.GetDetail();
+					return false;
+				}
+
+				for (const FAssetDurableTarget& Target
+					: Session.DurableSession->GetRequest().GetTargets())
+				{
+					if (UPackage* Package = FindPackage(
+							nullptr, *Target.GetPackageName()))
+					{
+						Package->SetDirtyFlag(false);
+					}
+				}
+				OutPersistedReadback->SetStringField(
+					TEXT("receipt_id"), Session.DurableReceiptId);
+				OutPersistedReadback->SetBoolField(
+					TEXT("persisted_readback_verified"), true);
+				OutPersistedReadback->SetNumberField(
+					TEXT("artifact_count"),
+					Session.DurableSession->GetInventory().GetArtifacts().Num());
+				Session.DurableSession.Reset();
+				Session.DurableResources.Reset();
+				Session.bLegacySidecarImported = false;
+				return true;
 			}
 
 			bool Begin(
@@ -1637,7 +2416,8 @@ namespace UE::UAI::DomainAdapters::ModelingGeometry::VoxelGrid
 				{
 					if (Session.GridId.IsEmpty()) Session.GridId = MakeGuid(TEXT("VG_"));
 					if (!IsSafeIdentity(Session.GridId)
-						|| IFileManager::Get().FileExists(*SidecarPath(Session.GridId))
+						|| IFileManager::Get().FileExists(
+							*LegacySidecarPath(Session.GridId))
 						|| HasActorForGrid(World, Session.GridId))
 					{
 						SetFailure(OutFailure, TEXT("voxel_grid_grid_id_conflict"));
@@ -1676,6 +2456,12 @@ namespace UE::UAI::DomainAdapters::ModelingGeometry::VoxelGrid
 					Session.GridToWorld = FTransform(
 						Rotation, Origin, FVector::OneVector);
 					Session.AnchorLocal = Anchor;
+					if (!TryPrepareDurability(
+							Request, World, nullptr, true, Session, Error))
+					{
+						SetFailure(OutFailure, Error);
+						return false;
+					}
 					FActorSpawnParameters Spawn;
 					Spawn.ObjectFlags = RF_Transactional;
 					Spawn.Name = MakeUniqueObjectName(
@@ -1690,20 +2476,65 @@ namespace UE::UAI::DomainAdapters::ModelingGeometry::VoxelGrid
 						Spawn);
 					if (!Actor)
 					{
-						SetFailure(OutFailure, TEXT("voxel_grid_actor_spawn_failed"));
+						FString RollbackError;
+						const bool bRolledBack = TryRollbackDurability(
+							Session, true, RollbackError);
+						SetFailure(
+							OutFailure,
+							TEXT("voxel_grid_actor_spawn_failed"),
+							RollbackError,
+							bRolledBack ? FString(TEXT("rolled_back"))
+								: FString(TEXT("state_unknown")),
+							bRolledBack,
+							true);
 						return false;
 					}
 					Session.Actor = Actor;
 					Session.bCreatedActor = true;
 					Session.bDirty = true;
 					Session.bCommitted = false;
+					if (!TryEnlistActorPackage(Session, *Actor, Error))
+					{
+						const FString EnlistError = Error;
+						const bool bActorReleased = World.DestroyActor(Actor);
+						FString RollbackError;
+						const bool bRolledBack = TryRollbackDurability(
+							Session, bActorReleased, RollbackError);
+						SetFailure(
+							OutFailure,
+							EnlistError,
+							RollbackError,
+							bRolledBack ? FString(TEXT("rolled_back"))
+								: FString(TEXT("state_unknown")),
+							bRolledBack,
+							true);
+						return false;
+					}
 					FString Label;
 					if (Params->TryGetStringField(TEXT("label"), Label)
 						&& !Label.IsEmpty()) Actor->SetActorLabel(Label);
-					FString Folder;
-					if (Params->TryGetStringField(TEXT("folder_path"), Folder)
-						&& !Folder.IsEmpty()) Actor->SetFolderPath(FName(*Folder));
 					Actor->Tags.AddUnique(FName(*ActorTag(Session.GridId)));
+					if (!UeAgentLevelAuthoring::TryBindManagedActorOwnership(
+							*Actor,
+							Session.GridId,
+							TEXT("modeling-voxel-grid"),
+							Error))
+					{
+						const FString OwnershipError = Error;
+						const bool bActorReleased = World.DestroyActor(Actor);
+						FString RollbackError;
+						const bool bRolledBack = TryRollbackDurability(
+							Session, bActorReleased, RollbackError);
+						SetFailure(
+							OutFailure,
+							OwnershipError,
+							RollbackError,
+							bRolledBack ? FString(TEXT("rolled_back"))
+								: FString(TEXT("state_unknown")),
+							bRolledBack,
+							true);
+						return false;
+					}
 					if (UDynamicMeshComponent* Component = DynamicMeshComponent(Actor))
 					{
 						Component->SetCollisionEnabled(ECollisionEnabled::NoCollision);
@@ -1737,14 +2568,60 @@ namespace UE::UAI::DomainAdapters::ModelingGeometry::VoxelGrid
 						return false;
 					}
 					Session.Actor = Actor;
-					Session.SidecarPath = SidecarPath(Session.GridId);
-					if (!LoadSidecar(Session, Error))
+					Session.LegacySidecarPath = LegacySidecarPath(Session.GridId);
+					UUeAgentModelingVoxelGridStateComponent* StateComponent = nullptr;
+					FString StateError;
+					if (TryFindAuthoringStateComponent(
+							*Actor, StateComponent, StateError))
+					{
+						if (IFileManager::Get().FileExists(
+								*Session.LegacySidecarPath))
+						{
+							SetFailure(
+								OutFailure,
+								TEXT("voxel_grid_authoring_state_conflict"));
+							return false;
+						}
+						FVoxelGridAuthoringState State;
+						if (!TryReadAuthoringState(
+								*StateComponent,
+								MaxSessionCells,
+								State,
+								StateError)
+							|| State.GridId != Session.GridId)
+						{
+							SetFailure(
+								OutFailure,
+								StateError.IsEmpty()
+									? FString(TEXT("voxel_grid_authoring_state_identity_mismatch"))
+									: StateError);
+							return false;
+						}
+						ApplyAuthoringStateToSession(State, Session);
+					}
+					else if (StateError == TEXT("voxel_grid_authoring_state_missing")
+						&& IFileManager::Get().FileExists(
+							*Session.LegacySidecarPath))
+					{
+						if (!LoadLegacySidecar(Session, Error))
+						{
+							SetFailure(OutFailure, Error);
+							return false;
+						}
+					}
+					else
+					{
+						SetFailure(OutFailure, StateError);
+						return false;
+					}
+					if (!TryPrepareDurability(
+							Request, World, Actor, false, Session, Error))
 					{
 						SetFailure(OutFailure, Error);
 						return false;
 					}
 				}
-				Session.SidecarPath = SidecarPath(Session.GridId);
+				Session.LegacySidecarPath = LegacySidecarPath(Session.GridId);
 				Sessions.Add(SessionId, MoveTemp(Session));
 				FSession& Stored = Sessions.FindChecked(SessionId);
 				OutPayload = SuccessPayload(
@@ -1856,28 +2733,37 @@ namespace UE::UAI::DomainAdapters::ModelingGeometry::VoxelGrid
 					bActorReleased = Actor && Actor->GetWorld()
 						? Actor->GetWorld()->DestroyActor(Actor) : false;
 				}
+				FString RollbackError;
+				const bool bDurabilityReleased = TryRollbackDurability(
+					Session, bActorReleased, RollbackError);
 				const TSharedRef<FJsonObject> Readback = MakeShared<FJsonObject>();
 				Readback->SetStringField(TEXT("session_id"), SessionId);
 				Readback->SetBoolField(TEXT("released"), true);
 				Readback->SetBoolField(TEXT("actor_destroyed"), bDestroyActor);
 				Readback->SetBoolField(TEXT("actor_release_confirmed"), bActorReleased);
-				Sessions.Remove(SessionId);
-				if (!bActorReleased)
+				Readback->SetBoolField(
+					TEXT("durability_release_confirmed"), bDurabilityReleased);
+				if (!bActorReleased || !bDurabilityReleased)
 				{
+					Session.bStateUnknown = true;
+					if (bActorReleased) Sessions.Remove(SessionId);
 					SetFailure(
 						OutFailure,
 						TEXT("voxel_grid_cancel_cleanup_unconfirmed"),
-						SessionId,
+						RollbackError.IsEmpty() ? SessionId : RollbackError,
 						TEXT("state_unknown"),
 						false,
 						true);
 					return false;
 				}
+				Sessions.Remove(SessionId);
 				OutPayload = SuccessPayload(Request, Action, Readback);
 				return true;
 			}
 
 			FCriticalSection Mutex;
+			FPackageAssetDurableBackend DurableBackend{FPaths::ProjectContentDir()};
+			int64 NextFencingToken = 2000;
 			TMap<FString, FSession> Sessions;
 		};
 
@@ -2136,6 +3022,11 @@ namespace UE::UAI::DomainAdapters::ModelingGeometry::VoxelGrid
 	void ResetProcessSessionsForAutomation()
 	{
 		ProcessRegistry().Reset();
+	}
+
+	void SetAutomationWorldOverride(UWorld* World)
+	{
+		GAutomationWorldOverride = World;
 	}
 #endif
 }

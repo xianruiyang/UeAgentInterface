@@ -112,10 +112,25 @@ namespace
 			MakeShared<FJsonObject>();
 		Value->SetStringField(TEXT("element_kind"), Kind);
 		Value->SetArrayField(TEXT("element_ids"), Numbers({0.0}));
-		Value->SetStringField(
-			TEXT("mesh_revision"),
-			TEXT("rev:fixture:1"));
 		return Value;
+	}
+
+	TSharedPtr<FJsonObject> TopologyRevision(
+		const FString& SourceId,
+		UObject& Carrier)
+	{
+		TOptional<FUeAgentStateRevision> Revision;
+		FExecutionMutationError Error;
+		if (!TryReadModelingGeometryCarrierRevision(
+				SourceId,
+				Carrier,
+				Revision,
+				Error))
+		{
+			return nullptr;
+		}
+		return FUeAgentStateRevisionJson::ToJson(
+			Revision.GetValue());
 	}
 
 	TSharedPtr<FJsonObject> TopologyOperandTransform()
@@ -178,16 +193,26 @@ namespace
 	}
 
 	TSharedPtr<FJsonObject> BuildTopologyPayload(
-		const TSharedPtr<FJsonObject>& Row)
+		const TSharedPtr<FJsonObject>& Row,
+		UObject& TargetCarrier,
+		UObject* OperandCarrier)
 	{
 		const TSharedPtr<FJsonObject> Input =
 			MakeShared<FJsonObject>();
 		Input->SetStringField(
 			TEXT("target_ref"),
 			TEXT("uai://mesh/fixture-target"));
-		Input->SetStringField(
+		const TSharedPtr<FJsonObject> TargetRevision =
+			TopologyRevision(
+				TEXT("uai://mesh/fixture-target"),
+				TargetCarrier);
+		if (!TargetRevision.IsValid())
+		{
+			return nullptr;
+		}
+		Input->SetObjectField(
 			TEXT("target_revision"),
-			TEXT("rev:fixture:1"));
+			TargetRevision);
 
 		bool bValue = false;
 		if (Row->TryGetBoolField(TEXT("space_contract"), bValue)
@@ -209,12 +234,24 @@ namespace
 		if (Row->TryGetBoolField(TEXT("operand"), bValue)
 			&& bValue)
 		{
+			if (!OperandCarrier)
+			{
+				return nullptr;
+			}
 			Input->SetStringField(
 				TEXT("operand_ref"),
 				TEXT("uai://mesh/fixture-operand"));
-			Input->SetStringField(
+			const TSharedPtr<FJsonObject> OperandRevision =
+				TopologyRevision(
+					TEXT("uai://mesh/fixture-operand"),
+					*OperandCarrier);
+			if (!OperandRevision.IsValid())
+			{
+				return nullptr;
+			}
+			Input->SetObjectField(
 				TEXT("operand_revision"),
-				TEXT("rev:operand:1"));
+				OperandRevision);
 			Input->SetObjectField(
 				TEXT("operand_to_target"),
 				TopologyOperandTransform());
@@ -1025,8 +1062,54 @@ FUeAgentSimpleAuthoringModelingTopologyProductionContractTest::
 				Operand);
 		}
 
+		UObject* TargetCarrier = bStaticCarrier
+			? static_cast<UObject*>(StaticTarget)
+			: static_cast<UObject*>(Target);
 		const TSharedPtr<FJsonObject> PayloadObject =
-			BuildTopologyPayload(Row);
+			TargetCarrier
+				? BuildTopologyPayload(
+					Row,
+					*TargetCarrier,
+					Operand)
+				: nullptr;
+		if (!TestNotNull(
+				*(DescriptorId + TEXT(" carrier revision reads")),
+				PayloadObject.Get()))
+		{
+			continue;
+		}
+		TOptional<FUeAgentStateRevision> CarrierRevisionBefore;
+		FExecutionMutationError CarrierRevisionError;
+		if (!TestTrue(
+				*(DescriptorId
+					+ TEXT(" reads exact pre-write carrier revision")),
+				TryReadModelingGeometryCarrierRevision(
+					TEXT("uai://mesh/fixture-target"),
+					*TargetCarrier,
+					CarrierRevisionBefore,
+					CarrierRevisionError)))
+		{
+			continue;
+		}
+		const TSharedPtr<FJsonObject>* PayloadRevisionJson = nullptr;
+		TOptional<FUeAgentStateRevision> PayloadCarrierRevision;
+		if (!TestTrue(
+				*(DescriptorId
+					+ TEXT(" preserves the carrier revision across reads")),
+				PayloadObject->TryGetObjectField(
+					TEXT("target_revision"),
+					PayloadRevisionJson)
+				&& PayloadRevisionJson
+				&& FUeAgentStateRevisionJson::TryParse(
+					*PayloadRevisionJson,
+					PayloadCarrierRevision)
+				&& PayloadCarrierRevision.IsSet()
+				&& CarrierRevisionBefore.IsSet()
+				&& PayloadCarrierRevision.GetValue()
+					== CarrierRevisionBefore.GetValue()))
+		{
+			continue;
+		}
 		PatchTopologySelection(Row, PayloadObject, *TargetMesh);
 		FString PayloadJson;
 		TestTrue(
@@ -1113,6 +1196,23 @@ FUeAgentSimpleAuthoringModelingTopologyProductionContractTest::
 		TestFalse(
 			*(DescriptorId + TEXT(" changes exact carrier state")),
 			After == Before);
+		TOptional<FUeAgentStateRevision> CarrierRevisionAfter;
+		CarrierRevisionError = FExecutionMutationError();
+		TestTrue(
+			*(DescriptorId
+				+ TEXT(" rereads exact post-write carrier revision")),
+			TryReadModelingGeometryCarrierRevision(
+				TEXT("uai://mesh/fixture-target"),
+				*TargetCarrier,
+				CarrierRevisionAfter,
+				CarrierRevisionError));
+		TestTrue(
+			*(DescriptorId
+				+ TEXT(" advances the carrier revision")),
+			CarrierRevisionBefore.IsSet()
+				&& CarrierRevisionAfter.IsSet()
+				&& CarrierRevisionBefore.GetValue()
+					!= CarrierRevisionAfter.GetValue());
 		VerifyTopologyResult(
 			this,
 			DescriptorId,

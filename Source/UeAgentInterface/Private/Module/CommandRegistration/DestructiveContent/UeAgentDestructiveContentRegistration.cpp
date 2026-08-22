@@ -66,12 +66,15 @@ namespace UE::UAI::Module::CommandRegistration::DestructiveContent
 			Result.StateLayers = {TEXT("asset_persisted_state")};
 			for (const FUeAgentCommandParameter& Parameter : Legacy->GetParameters())
 			{
+				const FString Description = Parameter.GetName() == TEXT("managed_id")
+					? TEXT("Optional exact UAI managed actor identity; when present, folder_path and managed_id must resolve one actor and broad folder deletion is forbidden.")
+					: TEXT("Exact destructive-content mechanics parameter.");
 				Result.InputFields.Add({
 					Parameter.GetName(),
 					WireType(Parameter.GetWireType()),
 					Parameter.IsRequired(),
 					Parameter.IsNullable(),
-					TEXT("Exact destructive-content mechanics parameter."),
+					Description,
 				});
 			}
 			if (!Legacy->GetParameters().ContainsByPredicate(

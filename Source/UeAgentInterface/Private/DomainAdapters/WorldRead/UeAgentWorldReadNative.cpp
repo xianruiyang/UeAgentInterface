@@ -3,6 +3,8 @@
 #include "Components/PrimitiveComponent.h"
 #include "Components/SceneComponent.h"
 #include "Components/StaticMeshComponent.h"
+#include "Core/StateSemantic/UeAgentCanonicalValueJson.h"
+#include "DomainAdapters/Landscape/UeAgentLandscapeHeightState.h"
 #include "Dom/JsonObject.h"
 #include "Dom/JsonValue.h"
 #include "Engine/LevelStreaming.h"
@@ -12,9 +14,12 @@
 #include "Engine/World.h"
 #include "EngineUtils.h"
 #include "GameFramework/Actor.h"
+#include "Landscape.h"
+#include "Materials/MaterialInterface.h"
 #include "MeshDescription.h"
 #include "NavigationPath.h"
 #include "NavigationSystem.h"
+#include "PhysicsEngine/PhysicsConstraintComponent.h"
 #include "Serialization/JsonReader.h"
 #include "Serialization/JsonSerializer.h"
 #include "StaticMeshAttributes.h"
@@ -281,7 +286,11 @@ namespace UE::UAI::DomainAdapters::WorldRead
 					TypeId,
 					Kind,
 					false,
-					TEXT("scalar")),
+					Kind == EUeAgentValueKind::Object
+						? TEXT("object")
+						: Kind == EUeAgentValueKind::Array
+							? TEXT("array")
+							: TEXT("scalar")),
 				Value.ToSharedRef(),
 				FUeAgentDefaultValue(
 					EUeAgentDefaultSourceKind::DomainNative,
@@ -407,6 +416,43 @@ namespace UE::UAI::DomainAdapters::WorldRead
 				Selector,
 				TEXT("core.integer"),
 				EUeAgentValueKind::Integer,
+				Value,
+				Context,
+				OutEntries,
+				OutError);
+		}
+
+		bool AddDecimal(
+			const FString& SemanticId,
+			const FString& TargetKind,
+			const FString& OwnerId,
+			const FString& Selector,
+			const double NumberValue,
+			const FUeAgentOperationContext& Context,
+			TArray<FUeAgentStateEntry>& OutEntries,
+			FUeAgentWorldReadError& OutError)
+		{
+			FUeAgentCanonicalValuePtr Value;
+			FUeAgentStateSemanticError StateError;
+			if (!FUeAgentCanonicalValue::TryDecimal(
+					Number(NumberValue),
+					Context.GetResourceTracker(),
+					Value,
+					StateError))
+			{
+				return Fail(
+					OutError,
+					StateError.Code,
+					StateError.Path,
+					StateError.Detail);
+			}
+			return AddValueEntry(
+				SemanticId,
+				TargetKind,
+				OwnerId,
+				Selector,
+				TEXT("core.decimal"),
+				EUeAgentValueKind::Decimal,
 				Value,
 				Context,
 				OutEntries,
@@ -1509,6 +1555,20 @@ namespace UE::UAI::DomainAdapters::WorldRead
 				{
 					return false;
 				}
+				FVector QueryExtent = INVALID_NAVEXTENT;
+				const bool bHasQueryExtent = ReadNumberArray3(
+					Input, TEXT("query_extent_cm"), QueryExtent);
+				auto TryProjectPoint = [&](const FVector& Point,
+					FVector& OutPoint)
+				{
+					FNavLocation Projected;
+					const bool bProjected = Navigation->ProjectPointToNavigation(
+						Point,
+						Projected,
+						bHasQueryExtent ? QueryExtent : INVALID_NAVEXTENT);
+					OutPoint = bProjected ? Projected.Location : Point;
+					return bProjected;
+				};
 				TArray<FUeAgentStateEntry> Entries;
 				if (ProviderBinding
 					== TEXT("world.read.nav_project_point"))
@@ -1518,8 +1578,8 @@ namespace UE::UAI::DomainAdapters::WorldRead
 					{
 						return false;
 					}
-					FNavLocation Projected;
-					if (!Navigation->ProjectPointToNavigation(Point, Projected))
+					FVector Projected;
+					if (!TryProjectPoint(Point, Projected))
 					{
 						return Fail(
 							OutError,
@@ -1531,7 +1591,7 @@ namespace UE::UAI::DomainAdapters::WorldRead
 							World->GetPathName(),
 							TEXT("projected_point"),
 							ProviderBinding,
-							Projected.Location,
+							Projected,
 							{},
 							Context,
 							Entries,
@@ -1544,7 +1604,9 @@ namespace UE::UAI::DomainAdapters::WorldRead
 				{
 					TArray<FVector> Points;
 					TArray<TPair<int32, int32>> Pairs;
-					if (ProviderBinding == TEXT("world.read.nav_find_path"))
+					const bool bFindPath = ProviderBinding
+						== TEXT("world.read.nav_find_path");
+					if (bFindPath)
 					{
 						FVector Start;
 						FVector End;
@@ -1596,8 +1658,67 @@ namespace UE::UAI::DomainAdapters::WorldRead
 							}
 						}
 					}
+					bool bProjectToNav = false;
+					Input->TryGetBoolField(
+						TEXT("project_to_nav"), bProjectToNav);
+					bool bAllowProjectionFailure = false;
+					Input->TryGetBoolField(
+						TEXT("allow_projection_failure"),
+						bAllowProjectionFailure);
+					if (!bProjectToNav
+						&& (bHasQueryExtent || bAllowProjectionFailure))
+					{
+						return Fail(
+							OutError,
+							TEXT("world_read_navigation_projection_policy_invalid"),
+							ProviderBinding,
+							TEXT("projection selectors require project_to_nav=true"));
+					}
+					if (bProjectToNav)
+					{
+						for (int32 PointIndex = 0;
+							PointIndex < Points.Num(); ++PointIndex)
+						{
+							FVector ProjectedPoint;
+							const bool bProjected = TryProjectPoint(
+								Points[PointIndex], ProjectedPoint);
+							if (!bProjected && !bAllowProjectionFailure)
+							{
+								return Fail(
+									OutError,
+									TEXT("world_read_navigation_projection_failed"),
+									FString::Printf(
+										TEXT("%s:point_%d"),
+										*World->GetPathName(), PointIndex));
+							}
+							Points[PointIndex] = ProjectedPoint;
+							if (!AddBoolean(
+									FString::Printf(
+										TEXT("world.navigation:projection:%d"),
+										PointIndex),
+									TEXT("world"),
+									World->GetPathName(),
+									FString::Printf(
+										TEXT("point_%d_projection_succeeded"),
+										PointIndex),
+									bProjected,
+									Context,
+									Entries,
+									OutError))
+							{
+								return false;
+							}
+						}
+					}
 					bool bAllowPartial = false;
 					Input->TryGetBoolField(TEXT("allow_partial"), bAllowPartial);
+					bool bIncludePathPoints = bFindPath;
+					if (!bFindPath)
+					{
+						Input->TryGetBoolField(
+							TEXT("include_path_points"),
+							bIncludePathPoints);
+					}
 					for (int32 PairIndex = 0; PairIndex < Pairs.Num(); ++PairIndex)
 					{
 						const TPair<int32, int32>& Pair = Pairs[PairIndex];
@@ -1629,7 +1750,7 @@ namespace UE::UAI::DomainAdapters::WorldRead
 						{
 							return false;
 						}
-						if (IsValid(Path))
+						if (bIncludePathPoints && IsValid(Path))
 						{
 							for (int32 PointIndex = 0;
 								PointIndex < Path->PathPoints.Num();
@@ -2007,6 +2128,188 @@ namespace UE::UAI::DomainAdapters::WorldRead
 						ProviderBinding, Context, MoveTemp(Entries),
 						OutSnapshot, OutError);
 				}
+				if (ProviderBinding == TEXT("world.read.data_layers"))
+				{
+					FString Scope = TEXT("world");
+					Input->TryGetStringField(TEXT("scope"), Scope);
+					if (Scope != TEXT("world") && Scope != TEXT("selection"))
+					{
+						return Fail(
+							OutError,
+							TEXT("world_read_data_layer_scope_invalid"),
+							Scope);
+					}
+					TArray<AActor*> ActorsInScope;
+					const TArray<FString>& SelectionIdentities =
+						Context.GetExecutionContext().GetSelectionIdentities();
+					for (TActorIterator<AActor> It(World); It; ++It)
+					{
+						AActor* Actor = *It;
+						if (Scope == TEXT("world")
+							|| SelectionIdentities.Contains(Actor->GetPathName()))
+						{
+							ActorsInScope.Add(Actor);
+						}
+					}
+
+					TArray<const UDataLayerInstance*> Layers;
+					if (Scope == TEXT("selection"))
+					{
+						TSet<const UDataLayerInstance*> UniqueLayers;
+						for (const AActor* Actor : ActorsInScope)
+						{
+							UniqueLayers.Append(Actor->GetDataLayerInstances());
+						}
+						Layers = UniqueLayers.Array();
+					}
+					else if (const AWorldDataLayers* WorldDataLayers =
+						World->GetWorldDataLayers())
+					{
+						WorldDataLayers->ForEachDataLayerInstance(
+							[&Layers](UDataLayerInstance* Layer)
+							{
+								if (Layer)
+								{
+									Layers.Add(Layer);
+								}
+								return true;
+							});
+					}
+					Layers.Sort(
+						[](const UDataLayerInstance& Left,
+							const UDataLayerInstance& Right)
+						{
+							return Left.GetDataLayerFullName()
+								< Right.GetDataLayerFullName();
+						});
+					if (!AddInteger(
+							TEXT("world.data_layers:count"),
+							TEXT("world"),
+							World->GetPathName(),
+							TEXT("data_layer_count"),
+							Layers.Num(),
+							Context,
+							Entries,
+							OutError))
+					{
+						return false;
+					}
+					bool bIncludeMembership = false;
+					Input->TryGetBoolField(
+						TEXT("include_actor_membership"),
+						bIncludeMembership);
+					for (const UDataLayerInstance* Layer : Layers)
+					{
+						if (!Layer)
+						{
+							continue;
+						}
+						const FString Owner = Layer->GetPathName();
+						const UDataLayerAsset* Asset = Layer->GetAsset();
+						if (!AddString(
+								TEXT("world.data_layers:short_name:") + Owner,
+								TEXT("data_layer"), Owner,
+								TEXT("data_layer_short_name"),
+								Layer->GetDataLayerShortName(),
+								Context, Entries, OutError)
+							|| !AddString(
+								TEXT("world.data_layers:full_name:") + Owner,
+								TEXT("data_layer"), Owner,
+								TEXT("data_layer_full_name"),
+								Layer->GetDataLayerFullName(),
+								Context, Entries, OutError)
+							|| !AddString(
+								TEXT("world.data_layers:asset:") + Owner,
+								TEXT("data_layer"), Owner,
+								TEXT("data_layer_asset_path"),
+								Asset ? Asset->GetPathName() : FString(),
+								Context, Entries, OutError)
+							|| !AddBoolean(
+								TEXT("world.data_layers:runtime:") + Owner,
+								TEXT("data_layer"), Owner,
+								TEXT("data_layer_runtime"), Layer->IsRuntime(),
+								Context, Entries, OutError)
+							|| !AddString(
+								TEXT("world.data_layers:runtime_state:") + Owner,
+								TEXT("data_layer"), Owner,
+								TEXT("data_layer_runtime_state"),
+								LexToString(static_cast<int32>(Layer->GetRuntimeState())),
+								Context, Entries, OutError)
+							|| !AddString(
+								TEXT("world.data_layers:effective_runtime_state:") + Owner,
+								TEXT("data_layer"), Owner,
+								TEXT("data_layer_effective_runtime_state"),
+								LexToString(static_cast<int32>(
+									Layer->GetEffectiveRuntimeState())),
+								Context, Entries, OutError))
+						{
+							return false;
+						}
+#if WITH_EDITOR
+						if (!AddBoolean(
+								TEXT("world.data_layers:loaded:") + Owner,
+								TEXT("data_layer"), Owner,
+								TEXT("data_layer_loaded_in_editor"),
+								Layer->IsLoadedInEditor(),
+								Context, Entries, OutError)
+							|| !AddBoolean(
+								TEXT("world.data_layers:effective_loaded:") + Owner,
+								TEXT("data_layer"), Owner,
+								TEXT("data_layer_effective_loaded_in_editor"),
+								Layer->IsEffectiveLoadedInEditor(),
+								Context, Entries, OutError)
+							|| !AddBoolean(
+								TEXT("world.data_layers:visible:") + Owner,
+								TEXT("data_layer"), Owner,
+								TEXT("data_layer_visible"), Layer->IsVisible(),
+								Context, Entries, OutError)
+							|| !AddBoolean(
+								TEXT("world.data_layers:effective_visible:") + Owner,
+								TEXT("data_layer"), Owner,
+								TEXT("data_layer_effective_visible"),
+								Layer->IsEffectiveVisible(),
+								Context, Entries, OutError))
+						{
+							return false;
+						}
+#endif
+						if (bIncludeMembership)
+						{
+							int64 MembershipCount = 0;
+							for (const AActor* Actor : ActorsInScope)
+							{
+								if (!Actor->ContainsDataLayer(Layer))
+								{
+									continue;
+								}
+								++MembershipCount;
+								if (!AddString(
+										TEXT("world.data_layers:actor:")
+											+ Owner + TEXT(":")
+											+ Actor->GetPathName(),
+										TEXT("data_layer"), Owner,
+										TEXT("data_layer_actor_member"),
+										Actor->GetPathName(),
+										Context, Entries, OutError))
+								{
+									return false;
+								}
+							}
+							if (!AddInteger(
+									TEXT("world.data_layers:membership_count:") + Owner,
+									TEXT("data_layer"), Owner,
+									TEXT("data_layer_actor_membership_count"),
+									MembershipCount,
+									Context, Entries, OutError))
+							{
+								return false;
+							}
+						}
+					}
+					return BuildSnapshot(
+						ProviderBinding, Context, MoveTemp(Entries),
+						OutSnapshot, OutError);
+				}
 				const TArray<ULevelStreaming*>& StreamingLevels =
 					World->GetStreamingLevels();
 				for (const ULevelStreaming* Level : StreamingLevels)
@@ -2079,33 +2382,399 @@ namespace UE::UAI::DomainAdapters::WorldRead
 				{
 					return false;
 				}
-				const UPrimitiveComponent* Primitive =
-					Cast<UPrimitiveComponent>(Object);
-				if (!Primitive)
+				TArray<FUeAgentStateEntry> Entries;
+				if (ProviderBinding == TEXT("world.read.physics_constraint"))
+				{
+					UPhysicsConstraintComponent* Constraint =
+						Cast<UPhysicsConstraintComponent>(Object);
+					if (!Constraint)
+					{
+						return Fail(
+							OutError,
+							TEXT("world_read_target_kind_mismatch"),
+							Object->GetPathName(),
+							ProviderBinding);
+					}
+					const FString Owner = Constraint->GetPathName();
+					if (!AddString(
+							TEXT("world.physics_constraint:path"),
+							TEXT("physics_constraint_component"), Owner,
+							TEXT("constraint_path"), Owner,
+							Context, Entries, OutError))
+					{
+						return false;
+					}
+					bool bIncludeEndpoints = false;
+					bool bIncludeLimits = false;
+					bool bIncludeRuntimeState = false;
+					Input->TryGetBoolField(
+						TEXT("include_endpoints"), bIncludeEndpoints);
+					Input->TryGetBoolField(
+						TEXT("include_limits"), bIncludeLimits);
+					Input->TryGetBoolField(
+						TEXT("include_runtime_state"), bIncludeRuntimeState);
+					if (bIncludeEndpoints)
+					{
+						UPrimitiveComponent* Component1 = nullptr;
+						UPrimitiveComponent* Component2 = nullptr;
+						FName Bone1;
+						FName Bone2;
+						Constraint->GetConstrainedComponents(
+							Component1, Bone1, Component2, Bone2);
+						if (!AddString(
+								TEXT("world.physics_constraint:component_1"),
+								TEXT("physics_constraint_component"), Owner,
+								TEXT("constraint_component_1"),
+								Component1 ? Component1->GetPathName() : FString(),
+								Context, Entries, OutError)
+							|| !AddString(
+								TEXT("world.physics_constraint:bone_1"),
+								TEXT("physics_constraint_component"), Owner,
+								TEXT("constraint_bone_1"), Bone1.ToString(),
+								Context, Entries, OutError)
+							|| !AddString(
+								TEXT("world.physics_constraint:component_2"),
+								TEXT("physics_constraint_component"), Owner,
+								TEXT("constraint_component_2"),
+								Component2 ? Component2->GetPathName() : FString(),
+								Context, Entries, OutError)
+							|| !AddString(
+								TEXT("world.physics_constraint:bone_2"),
+								TEXT("physics_constraint_component"), Owner,
+								TEXT("constraint_bone_2"), Bone2.ToString(),
+								Context, Entries, OutError))
+						{
+							return false;
+						}
+					}
+					const FConstraintInstance& Instance =
+						Constraint->ConstraintInstance;
+					if (bIncludeLimits
+						&& (!AddDecimal(
+								TEXT("world.physics_constraint:linear_limit"),
+								TEXT("physics_constraint_component"), Owner,
+								TEXT("linear_limit_cm"), Instance.GetLinearLimit(),
+								Context, Entries, OutError)
+							|| !AddString(
+								TEXT("world.physics_constraint:linear_x_motion"),
+								TEXT("physics_constraint_component"), Owner,
+								TEXT("linear_x_motion"),
+								LexToString(static_cast<int32>(Instance.GetLinearXMotion())),
+								Context, Entries, OutError)
+							|| !AddString(
+								TEXT("world.physics_constraint:linear_y_motion"),
+								TEXT("physics_constraint_component"), Owner,
+								TEXT("linear_y_motion"),
+								LexToString(static_cast<int32>(Instance.GetLinearYMotion())),
+								Context, Entries, OutError)
+							|| !AddString(
+								TEXT("world.physics_constraint:linear_z_motion"),
+								TEXT("physics_constraint_component"), Owner,
+								TEXT("linear_z_motion"),
+								LexToString(static_cast<int32>(Instance.GetLinearZMotion())),
+								Context, Entries, OutError)
+							|| !AddDecimal(
+								TEXT("world.physics_constraint:swing_1_limit"),
+								TEXT("physics_constraint_component"), Owner,
+								TEXT("angular_swing_1_limit_degrees"),
+								Instance.GetAngularSwing1Limit(),
+								Context, Entries, OutError)
+							|| !AddDecimal(
+								TEXT("world.physics_constraint:swing_2_limit"),
+								TEXT("physics_constraint_component"), Owner,
+								TEXT("angular_swing_2_limit_degrees"),
+								Instance.GetAngularSwing2Limit(),
+								Context, Entries, OutError)
+							|| !AddDecimal(
+								TEXT("world.physics_constraint:twist_limit"),
+								TEXT("physics_constraint_component"), Owner,
+								TEXT("angular_twist_limit_degrees"),
+								Instance.GetAngularTwistLimit(),
+								Context, Entries, OutError)))
+					{
+						return false;
+					}
+					if (bIncludeRuntimeState
+						&& (!AddBoolean(
+								TEXT("world.physics_constraint:broken"),
+								TEXT("physics_constraint_component"), Owner,
+								TEXT("constraint_broken"), Constraint->IsBroken(),
+								Context, Entries, OutError)
+							|| !AddDecimal(
+								TEXT("world.physics_constraint:current_twist"),
+								TEXT("physics_constraint_component"), Owner,
+								TEXT("current_twist_degrees"),
+								Constraint->GetCurrentTwist(),
+								Context, Entries, OutError)
+							|| !AddDecimal(
+								TEXT("world.physics_constraint:current_swing_1"),
+								TEXT("physics_constraint_component"), Owner,
+								TEXT("current_swing_1_degrees"),
+								Constraint->GetCurrentSwing1(),
+								Context, Entries, OutError)
+							|| !AddDecimal(
+								TEXT("world.physics_constraint:current_swing_2"),
+								TEXT("physics_constraint_component"), Owner,
+								TEXT("current_swing_2_degrees"),
+								Constraint->GetCurrentSwing2(),
+								Context, Entries, OutError)))
+					{
+						return false;
+					}
+				}
+				else
+				{
+					const UPrimitiveComponent* Primitive =
+						Cast<UPrimitiveComponent>(Object);
+					if (!Primitive)
+					{
+						return Fail(
+							OutError,
+							TEXT("world_read_target_kind_mismatch"),
+							Object->GetPathName(),
+							ProviderBinding);
+					}
+					const FString Owner = Primitive->GetPathName();
+					if (!AddString(
+							TEXT("world.physics:collision_enabled"),
+							TEXT("primitive_component"), Owner,
+							TEXT("collision_enabled"),
+							LexToString(static_cast<int32>(
+								Primitive->GetCollisionEnabled())),
+							Context, Entries, OutError))
+					{
+						return false;
+					}
+					bool bIncludeCollisionResponses = false;
+					bool bIncludeMaterial = false;
+					bool bIncludeRuntimeState = false;
+					Input->TryGetBoolField(
+						TEXT("include_collision_responses"),
+						bIncludeCollisionResponses);
+					Input->TryGetBoolField(
+						TEXT("include_material"), bIncludeMaterial);
+					Input->TryGetBoolField(
+						TEXT("include_runtime_state"), bIncludeRuntimeState);
+					if (bIncludeCollisionResponses)
+					{
+						for (int32 Channel = 0; Channel < ECC_MAX; ++Channel)
+						{
+							if (!AddString(
+									FString::Printf(
+										TEXT("world.physics:response:%d"), Channel),
+									TEXT("primitive_component"), Owner,
+									FString::Printf(
+										TEXT("collision_response_%d"), Channel),
+									LexToString(static_cast<int32>(
+										Primitive->GetCollisionResponseToChannel(
+											static_cast<ECollisionChannel>(Channel)))),
+									Context, Entries, OutError))
+							{
+								return false;
+							}
+						}
+					}
+					if (bIncludeMaterial)
+					{
+						const UMaterialInterface* Material =
+							Primitive->GetMaterial(0);
+						if (!AddString(
+								TEXT("world.physics:material"),
+								TEXT("primitive_component"), Owner,
+								TEXT("material_path"),
+								Material ? Material->GetPathName() : FString(),
+								Context, Entries, OutError))
+						{
+							return false;
+						}
+					}
+					if (bIncludeRuntimeState
+						&& (!AddBoolean(
+								TEXT("world.physics:gravity_enabled"),
+								TEXT("primitive_component"), Owner,
+								TEXT("gravity_enabled"),
+								Primitive->IsGravityEnabled(),
+								Context, Entries, OutError)
+							|| !AddBoolean(
+								TEXT("world.physics:simulating"),
+								TEXT("primitive_component"), Owner,
+								TEXT("simulating_physics"),
+								Primitive->IsSimulatingPhysics(),
+								Context, Entries, OutError)))
+					{
+						return false;
+					}
+				}
+				return BuildSnapshot(
+					ProviderBinding,
+					Context,
+					MoveTemp(Entries),
+					OutSnapshot,
+					OutError);
+			}
+		};
+
+		class FLandscapeHeightHook final : public FWorldReadHookBase
+		{
+		public:
+			using FWorldReadHookBase::FWorldReadHookBase;
+
+			bool TryCapture(
+				const FUeAgentContractValue& CanonicalInput,
+				const TOptional<FUeAgentCandidateBinding>& Target,
+				const FUeAgentOperationContext& Context,
+				TSharedPtr<const FUeAgentCanonicalSnapshot>& OutSnapshot,
+				FUeAgentWorldReadError& OutError) override
+			{
+				OutSnapshot.Reset();
+				OutError = {};
+				UWorld* World = nullptr;
+				if (!ResolveWorld(Context, World, OutError))
+				{
+					return false;
+				}
+				if (!Target.IsSet())
 				{
 					return Fail(
 						OutError,
-						TEXT("world_read_target_kind_mismatch"),
-						Object->GetPathName(),
+						TEXT("landscape_height_target_required"),
 						ProviderBinding);
 				}
+
+				TSharedPtr<FJsonObject> Input;
+				if (!ParseInput(CanonicalInput, Input, OutError))
+				{
+					return false;
+				}
+				const TSharedPtr<FJsonObject>* Region = nullptr;
+				const TSharedPtr<FJsonObject>* SpaceContract = nullptr;
+				if (!Input->TryGetObjectField(TEXT("region"), Region)
+					|| !Region
+					|| !Region->IsValid()
+					|| !Input->TryGetObjectField(
+						TEXT("space_contract"),
+						SpaceContract)
+					|| !SpaceContract
+					|| !SpaceContract->IsValid())
+				{
+					return Fail(
+						OutError,
+						TEXT("landscape_height_space_contract_invalid"),
+						Target->GetPublicRef());
+				}
+				FString RegionFrame;
+				FString SpaceFrame;
+				FString Unit;
+				FString BasisEvidence;
+				(*Region)->TryGetStringField(
+					TEXT("frame_id"),
+					RegionFrame);
+				(*SpaceContract)->TryGetStringField(
+					TEXT("frame_id"),
+					SpaceFrame);
+				(*SpaceContract)->TryGetStringField(
+					TEXT("unit"),
+					Unit);
+				(*SpaceContract)->TryGetStringField(
+					TEXT("basis_evidence"),
+					BasisEvidence);
+				if (RegionFrame
+						!= TEXT("ue.landscape.local_sample_grid")
+					|| SpaceFrame
+						!= TEXT("ue.landscape.local_sample_grid")
+					|| Unit != TEXT("sample")
+					|| BasisEvidence.TrimStartAndEnd().IsEmpty())
+				{
+					return Fail(
+						OutError,
+						TEXT("landscape_height_space_contract_invalid"),
+						Target->GetPublicRef());
+				}
+
+				FIntPoint MinInclusive;
+				FIntPoint MaxInclusive;
+				if (!TryReadIntegerPoint(
+						*Region,
+						TEXT("min_inclusive"),
+						MinInclusive)
+					|| !TryReadIntegerPoint(
+						*Region,
+						TEXT("max_inclusive"),
+						MaxInclusive))
+				{
+					return Fail(
+						OutError,
+						TEXT("landscape_height_region_invalid"),
+						Target->GetPublicRef());
+				}
+
+				ALandscape* Landscape = nullptr;
+				DomainAdapters::Landscape::
+					FLandscapeHeightStateError StateError;
+				if (!DomainAdapters::Landscape::
+					TryResolveLandscapeHeightTarget(
+						*World,
+						Target->GetPublicRef(),
+						nullptr,
+						Landscape,
+						StateError)
+					|| !Landscape)
+				{
+					return Fail(
+						OutError,
+						StateError.Code.IsEmpty()
+							? FString(TEXT("landscape_height_target_unresolved"))
+							: StateError.Code,
+						StateError.SubjectId,
+						StateError.Detail);
+				}
+
+				DomainAdapters::Landscape::FLandscapeHeightState State;
+				if (!DomainAdapters::Landscape::
+					TryReadLandscapeHeightState(
+						*Landscape,
+						MinInclusive,
+						MaxInclusive,
+						16384,
+						State,
+						StateError))
+				{
+					return Fail(
+						OutError,
+						StateError.Code,
+						StateError.SubjectId,
+						StateError.Detail);
+				}
+
+				FUeAgentCanonicalValuePtr Value;
+				FString CanonicalError;
+				if (!CanonicalJson::TryFromJsonValue(
+						MakeShared<FJsonValueObject>(
+							DomainAdapters::Landscape::
+								BuildLandscapeHeightStateObject(
+									Target->GetPublicRef(),
+									State)),
+						Context.GetResourceTracker(),
+						Value,
+						CanonicalError)
+					|| !Value.IsValid())
+				{
+					return Fail(
+						OutError,
+						TEXT("landscape_height_state_encoding_failed"),
+						Target->GetPublicRef(),
+						CanonicalError);
+				}
 				TArray<FUeAgentStateEntry> Entries;
-				if (!AddString(
-						TEXT("world.physics:collision_enabled"),
-						TEXT("primitive_component"),
-						Primitive->GetPathName(),
-						TEXT("collision_enabled"),
-						FString::FromInt(static_cast<int32>(
-							Primitive->GetCollisionEnabled())),
-						Context,
-						Entries,
-						OutError)
-					|| !AddBoolean(
-						TEXT("world.physics:gravity_enabled"),
-						TEXT("primitive_component"),
-						Primitive->GetPathName(),
-						TEXT("gravity_enabled"),
-						Primitive->IsGravityEnabled(),
+				if (!AddValueEntry(
+						TEXT("landscape.height.read:")
+							+ State.ActorPath,
+						TEXT("landscape_height_state"),
+						State.ActorPath,
+						TEXT("height_state"),
+						TEXT("ue.landscape.height_state"),
+						EUeAgentValueKind::Object,
+						Value,
 						Context,
 						Entries,
 						OutError))
@@ -2118,6 +2787,42 @@ namespace UE::UAI::DomainAdapters::WorldRead
 					MoveTemp(Entries),
 					OutSnapshot,
 					OutError);
+			}
+
+		private:
+			static bool TryReadIntegerPoint(
+				const TSharedPtr<FJsonObject>& Object,
+				const TCHAR* Field,
+				FIntPoint& OutPoint)
+			{
+				const TArray<TSharedPtr<FJsonValue>>* Values = nullptr;
+				if (!Object.IsValid()
+					|| !Object->TryGetArrayField(Field, Values)
+					|| !Values
+					|| Values->Num() != 2)
+				{
+					return false;
+				}
+				int32 Components[2] = {};
+				for (int32 Index = 0; Index < 2; ++Index)
+				{
+					const TSharedPtr<FJsonValue>& Value = (*Values)[Index];
+					if (!Value.IsValid() || Value->Type != EJson::Number)
+					{
+						return false;
+					}
+					const double NumberValue = Value->AsNumber();
+					if (!FMath::IsFinite(NumberValue)
+						|| NumberValue != FMath::FloorToDouble(NumberValue)
+						|| NumberValue < MIN_int32
+						|| NumberValue > MAX_int32)
+					{
+						return false;
+					}
+					Components[Index] = static_cast<int32>(NumberValue);
+				}
+				OutPoint = FIntPoint(Components[0], Components[1]);
+				return true;
 			}
 		};
 
@@ -2230,6 +2935,13 @@ namespace UE::UAI::DomainAdapters::WorldRead
 		{
 			OutHook =
 				MakeShared<FPhysicsHook>(
+					ProviderBinding,
+					MoveTemp(Environment));
+		}
+		else if (ProviderBinding == TEXT("landscape.read.height"))
+		{
+			OutHook =
+				MakeShared<FLandscapeHeightHook>(
 					ProviderBinding,
 					MoveTemp(Environment));
 		}

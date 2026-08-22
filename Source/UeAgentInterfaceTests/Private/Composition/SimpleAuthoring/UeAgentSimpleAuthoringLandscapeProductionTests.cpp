@@ -6,6 +6,7 @@
 #include "Core/BindingGateway/Ticket/UeAgentBindingTicket.h"
 #include "Core/Projection/UeAgentProjection.h"
 #include "DomainAdapters/LandscapeGeometryEffect/UeAgentLandscapeGeometryEffectCapabilities.h"
+#include "Domains/Level/Authoring/UeAgentLevelAuthoringState.h"
 #include "Engine/World.h"
 #include "EngineUtils.h"
 #include "EditorValidatorSubsystem.h"
@@ -412,6 +413,21 @@ namespace
 			return OutSession.IsValid();
 		}
 
+		bool TryEnlist(
+			const FAssetDurableSessionRef& Session,
+			const TArray<FAssetDurableTarget>& MutationTargets,
+			const int64 CurrentFencingToken,
+			FUeAgentResourceTracker& Resources,
+			FAssetDurableSessionPtr& OutSession,
+			FAssetDurableError& OutError) override
+		{
+			OutError = FAssetDurableError();
+			OutSession = Session;
+			return MutationTargets.IsEmpty()
+				&& CurrentFencingToken
+					== Session->GetRequest().GetFencingToken();
+		}
+
 		bool TryPersist(
 			const FAssetDurableSessionRef& Session,
 			const int64 CurrentFencingToken,
@@ -779,6 +795,19 @@ bool FUeAgentSimpleAuthoringLandscapeProductionContractTest::RunTest(
 			TEXT("created non-uniform scale is real UE state"),
 			Created->GetActorScale3D().Equals(
 				FVector(100.0, 200.0, 50.0)));
+		TestEqual(
+			TEXT("created Landscape binds the exact managed id"),
+			UeAgentLevelAuthoring::GetManagedActorId(*Created),
+			FString(TEXT("uai://landscape/sa008-created")));
+		TestEqual(
+			TEXT("created Landscape uses the shared managed folder"),
+			UeAgentLevelAuthoring::GetActorFolderPathText(*Created),
+			UeAgentLevelAuthoring::MakeManagedActorFolderPath(
+				TEXT("landscape")));
+		TestTrue(
+			TEXT("created Landscape carries the managed marker"),
+			Created->ActorHasTag(
+				UeAgentLevelAuthoring::GetManagedActorMarkerTag()));
 	}
 	TestEqual(
 		TEXT("create prepares durability once"),
@@ -1045,7 +1074,8 @@ namespace
 
 	ALandscape* CreateE4Landscape(
 		FOwnedReloadableWorldPackage& Owner,
-		const FString& Label)
+		const FString& Label,
+		const FString& ManagedId)
 	{
 		if (!Owner.World.IsValid())
 		{
@@ -1066,6 +1096,16 @@ namespace
 		}
 		Created->SetActorScale3D(FVector(100.0, 200.0, 50.0));
 		Created->SetActorLabel(Label);
+		FString OwnershipError;
+		if (!UeAgentLevelAuthoring::TryBindManagedActorOwnership(
+				*Created,
+				ManagedId,
+				TEXT("landscape"),
+				OwnershipError))
+		{
+			Owner.World->DestroyActor(Created);
+			return nullptr;
+		}
 		TArray<uint16> Heights;
 		Heights.Init(
 			LandscapeDataAccess::GetTexHeight(0.0f),
@@ -1191,6 +1231,291 @@ namespace
 }
 
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(
+	FUeAgentSimpleAuthoringLandscapeCreateOwnedPackageTest,
+	"UeAgentInterface.Composition.SimpleAuthoring.E4."
+		"LandscapeCreateOwnedPackage",
+	EAutomationTestFlags::EditorContext
+		| EAutomationTestFlags::EngineFilter)
+
+bool FUeAgentSimpleAuthoringLandscapeCreateOwnedPackageTest::RunTest(
+	const FString& Parameters)
+{
+	const FString TargetRef =
+		TEXT("uai://landscape/sa008-e4-created");
+	const FString TargetLabel = FPaths::GetBaseFilename(TargetRef);
+	FString OwnedRoot;
+	{
+		FOwnedReloadableWorldPackage Owner(
+			TEXT("LandscapeCreateE4"),
+			TEXT("LandscapeCreateE4"));
+		OwnedRoot = Owner.Root;
+		if (!TestTrue(
+				TEXT("owned create Landscape world is valid"),
+				Owner.IsValid()))
+		{
+			return false;
+		}
+		Owner.Package->SetDirtyFlag(false);
+
+		FUeAgentSimpleAuthoringDurableServiceConfig DurableConfig;
+		DurableConfig.JournalRoot = Owner.JournalRoot;
+		DurableConfig.PackageBackend = MakeShared<
+			FPackageAssetDurableBackend,
+			ESPMode::ThreadSafe>(Owner.PackageRoot);
+		TSharedPtr<IUeAgentSimpleAuthoringAssetDurableService>
+			Durable;
+		FUeAgentSimpleAuthoringProductionError DurableError;
+		if (!TestTrue(
+				TEXT("real Landscape create package C8D service composes"),
+				FUeAgentSimpleAuthoringDurableServiceFactory::TryCreate(
+					DurableConfig,
+					Durable,
+					DurableError))
+			|| !Durable.IsValid())
+		{
+			AddError(
+				TEXT("sa008_landscape_create_e4_durable_invalid:")
+					+ DurableError.Code);
+			return false;
+		}
+
+		TSharedPtr<const FUeAgentDescriptorRegistry> Registry;
+		FString RegistryError;
+		const FUeAgentSimpleAuthoringCommandRoute* Route =
+			FindRoute(TEXT("landscape.create"));
+		if (!TestTrue(
+				TEXT("Simple Authoring descriptors compose for Landscape create E4"),
+				TryCreateSimpleAuthoringDescriptorRegistry(
+					Registry,
+					RegistryError))
+			|| !TestNotNull(
+				TEXT("Landscape create has one E4 route"),
+				Route)
+			|| !Registry.IsValid())
+		{
+			return false;
+		}
+
+		const TSharedRef<
+			FOwnedReloadableWorldCatalog,
+			ESPMode::ThreadSafe> SourceCatalog = MakeShared<
+				FOwnedReloadableWorldCatalog,
+				ESPMode::ThreadSafe>(Owner, false);
+		const TSharedRef<
+			FOwnedReloadableWorldCatalog,
+			ESPMode::ThreadSafe> ReloadCatalog = MakeShared<
+				FOwnedReloadableWorldCatalog,
+				ESPMode::ThreadSafe>(Owner, true);
+		const TSharedRef<
+			FReloadedLandscapeReferenceResolver,
+			ESPMode::ThreadSafe> ReferenceResolver = MakeShared<
+				FReloadedLandscapeReferenceResolver,
+				ESPMode::ThreadSafe>(TargetRef);
+
+		FUeAgentLandscapeSimpleAuthoringProviderConfig ProviderConfig;
+		ProviderConfig.DescriptorRegistry = Registry;
+		ProviderConfig.WorldCatalog = SourceCatalog;
+		ProviderConfig.PersistedWorldCatalog = ReloadCatalog;
+		ProviderConfig.ReferenceResolver = ReferenceResolver;
+		ProviderConfig.PersistedReferenceResolver =
+			ReferenceResolver;
+		ProviderConfig.DurableService = Durable;
+		ProviderConfig.AbsenceOracle =
+			MakeShared<FUnusedAbsenceOracle>();
+		ProviderConfig.ReferenceOracle =
+			MakeShared<FUnusedReferenceOracle>();
+		ProviderConfig.OwnerLeaseId =
+			TEXT("owner:sa008-landscape-create-e4");
+		ProviderConfig.Projection.Emplace(
+			FUeAgentProjectionProfile(
+				TEXT("compact"),
+				false,
+				false,
+				false),
+			FUeAgentPageRequest(),
+			TOptional<int64>(),
+			TArray<FUeAgentArtifactDescriptor>(),
+			TArray<FUeAgentProjectionDiagnostic>());
+		TSharedPtr<IUeAgentSimpleAuthoringCapabilityProvider> Provider;
+		FUeAgentLandscapeSimpleAuthoringError ProviderError;
+		if (!TestTrue(
+				TEXT("Landscape create E4 family composes"),
+				FUeAgentLandscapeSimpleAuthoringProviderFactory::TryCreate(
+					ProviderConfig,
+					Provider,
+					ProviderError))
+			|| !Provider.IsValid())
+		{
+			return false;
+		}
+
+		TSharedPtr<const FUeAgentOperationTicketService> TicketService;
+		FUeAgentOperationTicketError TicketError;
+		FUeAgentOperationTicketService::TryCreate(
+			TEXT("sa008-landscape-create-e4-integrity"),
+			60.0,
+			[]() { return 100.0; },
+			[]()
+			{
+				return FString(
+					TEXT("ticket:sa008-landscape-create-e4"));
+			},
+			TicketService,
+			TicketError);
+		TSharedPtr<const FUeAgentResponseProjector> Projector;
+		FUeAgentProjectionError ProjectionError;
+		FUeAgentResponseProjector::TryCreate(
+			MakeShared<FTokenEstimator>(),
+			Projector,
+			ProjectionError);
+		if (!TicketService.IsValid() || !Projector.IsValid())
+		{
+			return false;
+		}
+
+		FUeAgentSimpleAuthoringApplicationConfig ApplicationConfig;
+		ApplicationConfig.DescriptorRegistry = Registry;
+		ApplicationConfig.ExecutionContext.ProjectInstanceId =
+			TEXT("project:sa008-landscape-create-e4");
+		ApplicationConfig.ExecutionContext.EditorInstanceId =
+			TEXT("editor:sa008-landscape-create-e4");
+		ApplicationConfig.ExecutionContext.StatePlane =
+			EUeAgentStatePlane::AuthoringMemory;
+		ApplicationConfig.ExecutionContext.WorldType =
+			EUeAgentExecutionWorldType::Preview;
+		ApplicationConfig.ExecutionContext.WorldIdentity =
+			Owner.WorldIdentity;
+		ApplicationConfig.ExecutionContext.LevelIdentity =
+			Owner.LevelIdentity;
+		ApplicationConfig.ExecutionContext.ContextRevision =
+			Owner.ContextRevision;
+		ApplicationConfig.ExecutionContext.bResolvedFromCurrent = false;
+		ApplicationConfig.ServerSessionId =
+			TEXT("session:sa008-landscape-create-e4");
+		ApplicationConfig.RegistryEpoch = 1;
+		ApplicationConfig.TimeoutSeconds = 60.0;
+		ApplicationConfig.MaxFrameBytes = 4 * 1024 * 1024;
+		TSharedPtr<FUeAgentSimpleAuthoringApplication> Application;
+		FUeAgentSimpleAuthoringApplicationError ApplicationError;
+		if (!TestTrue(
+				TEXT("application accepts Landscape create E4 route"),
+				FUeAgentSimpleAuthoringApplication::TryCreate(
+					ApplicationConfig,
+					{*Route},
+					{Provider.ToSharedRef()},
+					TicketService.ToSharedRef(),
+					Projector.ToSharedRef(),
+					Application,
+					ApplicationError))
+			|| !Application.IsValid())
+		{
+			return false;
+		}
+
+		FString Payload(CreateInput);
+		Payload.ReplaceInline(
+			TEXT("sa008-created"),
+			TEXT("sa008-e4-created"));
+		const FUeAgentOperationResult Result = Application->Submit(
+			FUeAgentOperationRequest(
+				Route->DescriptorIdentity,
+				TEXT("request:sa008-landscape-create-e4"),
+				TEXT("idempotency:sa008-landscape-create-e4"),
+				FUeAgentContractValue(Payload)),
+			FUeAgentCallerContext(
+				TEXT("caller:sa008-landscape-create-e4"),
+				{TEXT("uai:landscape:write")},
+				TEXT("correlation:sa008-landscape-create-e4")),
+			MakeShared<FNeverCancelled>());
+		if (!TestTrue(
+				TEXT("Landscape create E4 completes after reload readback"),
+				IsComplete(Result)))
+		{
+			AddError(Result.GetValue().GetJsonValue());
+			return false;
+		}
+
+		ALandscape* ReloadedLandscape = Owner.World.IsValid()
+			? FindE4Landscape(*Owner.World, TargetLabel)
+			: nullptr;
+		TestTrue(
+			TEXT("Landscape create E4 uses a reloaded world owner"),
+			Owner.WasReloaded());
+		TestTrue(
+			TEXT("Landscape create E4 collects the original world"),
+			Owner.WasOriginalWorldCollected());
+		TestTrue(
+			TEXT("Landscape create E4 publishes one map"),
+			IFileManager::Get().FileExists(*Owner.HeaderPath()));
+		if (TestNotNull(
+				TEXT("reloaded created Landscape is independently found"),
+				ReloadedLandscape))
+		{
+			TArray<float> ReloadedHeights;
+			TestTrue(
+				TEXT("reloaded created Landscape heights are readable"),
+				ReadE4LandscapeHeights(
+					*ReloadedLandscape,
+					ReloadedHeights));
+			for (int32 Index = 0; Index < ReloadedHeights.Num(); ++Index)
+			{
+				TestTrue(
+					*FString::Printf(
+						TEXT("created Landscape height %d persists"),
+						Index),
+					FMath::IsNearlyEqual(
+						ReloadedHeights[Index],
+						3.0f,
+						0.01f));
+			}
+			TestTrue(
+				TEXT("created Landscape placement persists"),
+				ReloadedLandscape->GetActorLocation().Equals(
+						FVector(1000.0, 2000.0, 300.0),
+						0.01)
+					&& ReloadedLandscape->GetActorRotation().Equals(
+						FRotator(0.0, 90.0, 0.0),
+						0.01)
+					&& ReloadedLandscape->GetActorScale3D().Equals(
+						FVector(100.0, 200.0, 50.0),
+						0.01));
+			TestEqual(
+				TEXT("created Landscape managed id persists"),
+				UeAgentLevelAuthoring::GetManagedActorId(
+					*ReloadedLandscape),
+				TargetRef);
+			TestEqual(
+				TEXT("created Landscape managed folder persists"),
+				UeAgentLevelAuthoring::GetActorFolderPathText(
+					*ReloadedLandscape),
+				UeAgentLevelAuthoring::MakeManagedActorFolderPath(
+					TEXT("landscape")));
+			TestTrue(
+				TEXT("created Landscape managed marker persists"),
+				ReloadedLandscape->ActorHasTag(
+					UeAgentLevelAuthoring::
+						GetManagedActorMarkerTag()));
+		}
+		TestEqual(
+			TEXT("Landscape create E4 C9 reloads exactly once"),
+			ReloadCatalog->EnumerateCount,
+			1);
+		TestEqual(
+			TEXT("Landscape create E4 archives one verified journal"),
+			CountCompletedJournals(Owner.JournalRoot),
+			1);
+		TestEqual(
+			TEXT("Landscape create E4 leaves no active transaction"),
+			CountActiveTransactions(Owner.JournalRoot),
+			0);
+	}
+	TestFalse(
+		TEXT("Landscape create E4 removes all owned disk artifacts"),
+		IFileManager::Get().DirectoryExists(*OwnedRoot));
+	return !HasAnyErrors();
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(
 	FUeAgentSimpleAuthoringLandscapeOwnedPackageTest,
 	"UeAgentInterface.Composition.SimpleAuthoring.E4."
 		"LandscapeOwnedPackage",
@@ -1210,7 +1535,10 @@ bool FUeAgentSimpleAuthoringLandscapeOwnedPackageTest::RunTest(
 			TEXT("LandscapeE4"));
 		OwnedRoot = Owner.Root;
 		ALandscape* InitialLandscape =
-			CreateE4Landscape(Owner, TargetLabel);
+			CreateE4Landscape(
+				Owner,
+				TargetLabel,
+				TargetRef);
 		if (!TestTrue(
 				TEXT("owned durable Landscape world is valid"),
 				Owner.IsValid()
@@ -1437,7 +1765,18 @@ bool FUeAgentSimpleAuthoringLandscapeOwnedPackageTest::RunTest(
 					0.01f));
 		}
 		TestEqual(TEXT("Landscape E4 C9 reloads exactly once"), ReloadCatalog->EnumerateCount, 1);
-		TestTrue(TEXT("Landscape E4 C9 re-resolves the target"), ReloadResolver->ResolveCount >= 1);
+		if (ReloadedLandscape)
+		{
+			TestEqual(
+				TEXT("Landscape E4 C9 preserves the exact managed identity"),
+				UeAgentLevelAuthoring::GetManagedActorId(
+					*ReloadedLandscape),
+				TargetRef);
+		}
+		TestEqual(
+			TEXT("Landscape E4 C9 does not require the legacy reference fallback"),
+			ReloadResolver->ResolveCount,
+			0);
 		TestEqual(TEXT("Landscape E4 archives one verified journal"), CountCompletedJournals(Owner.JournalRoot), 1);
 		TestEqual(TEXT("Landscape E4 leaves no active transaction"), CountActiveTransactions(Owner.JournalRoot), 0);
 	}

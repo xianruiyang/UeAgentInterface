@@ -562,7 +562,9 @@ namespace UE::UAI::DomainAdapters::GenericEffect
 		TArray<FString> InRequiredBarrierSignals,
 		const bool bInRollbackSupported,
 		FString InRollbackToken,
-		const bool bInMutationStarted)
+		const bool bInMutationStarted,
+		TArray<AssetDurable::FAssetDurableTarget>
+			InDurableTargets)
 		: SubjectGeneration(InSubjectGeneration)
 		, MutatedIdentityKeys(
 			NormalizeStringSet(MoveTemp(InMutatedIdentityKeys)))
@@ -570,6 +572,7 @@ namespace UE::UAI::DomainAdapters::GenericEffect
 			NormalizeStringSet(MoveTemp(InRequiredBarrierSignals)))
 		, bRollbackSupported(bInRollbackSupported)
 		, RollbackToken(NormalizeText(MoveTemp(InRollbackToken)))
+		, DurableTargets(MoveTemp(InDurableTargets))
 		, bMutationStarted(bInMutationStarted)
 	{
 		bValid = bMutationStarted
@@ -578,6 +581,11 @@ namespace UE::UAI::DomainAdapters::GenericEffect
 			&& HasNonEmptyStrings(MutatedIdentityKeys)
 			&& HasNonEmptyStrings(RequiredBarrierSignals)
 			&& (!bRollbackSupported || !RollbackToken.IsEmpty());
+		for (const AssetDurable::FAssetDurableTarget& Target :
+			DurableTargets)
+		{
+			bValid = bValid && Target.IsValid();
+		}
 	}
 
 	int64 FUeAgentGenericEffectApplyResult::GetSubjectGeneration() const
@@ -606,6 +614,12 @@ namespace UE::UAI::DomainAdapters::GenericEffect
 	FUeAgentGenericEffectApplyResult::GetRollbackToken() const
 	{
 		return RollbackToken;
+	}
+
+	const TArray<AssetDurable::FAssetDurableTarget>&
+	FUeAgentGenericEffectApplyResult::GetDurableTargets() const
+	{
+		return DurableTargets;
 	}
 
 	bool FUeAgentGenericEffectApplyResult::DidMutationStart() const
@@ -672,7 +686,8 @@ namespace UE::UAI::DomainAdapters::GenericEffect
 				Result.GetSubjectGeneration(),
 				Result.GetMutatedIdentityKeys(),
 				Result.GetRequiredBarrierSignals(),
-				Result.IsRollbackSupported());
+				Result.IsRollbackSupported(),
+				Result.GetDurableTargets());
 			FScopeLock Lock(&StateMutex);
 			AppliedOperationId = Request.GetOperationId();
 			AppliedResult = Result;

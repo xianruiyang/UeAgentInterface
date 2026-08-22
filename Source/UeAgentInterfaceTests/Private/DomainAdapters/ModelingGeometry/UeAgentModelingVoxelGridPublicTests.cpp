@@ -3,18 +3,26 @@
 #include "CommandEdge/UeAgentCommandProtocol.h"
 #include "CommandRegistry/UeAgentImmutableCommandRegistry.h"
 #include "DomainAdapters/ModelingGeometry/UeAgentModelingVoxelGrid.h"
+#include "DomainAdapters/ModelingGeometry/UeAgentModelingVoxelGridState.h"
 #include "DynamicMeshActor.h"
 #include "Editor.h"
+#include "Engine/Engine.h"
+#include "Engine/Level.h"
 #include "Engine/World.h"
 #include "EngineUtils.h"
 #include "HAL/FileManager.h"
+#include "Misc/FileHelper.h"
 #include "Misc/Guid.h"
+#include "Misc/PackageName.h"
 #include "Misc/Paths.h"
 #include "Module/CommandRegistration/Active/UeAgentActiveCommandComposition.h"
+#include "PackageTools.h"
 #include "Serialization/JsonReader.h"
 #include "Serialization/JsonSerializer.h"
 #include "Serialization/JsonWriter.h"
+#include "UObject/GarbageCollection.h"
 #include "UObject/Package.h"
+#include "UObject/SavePackage.h"
 
 namespace
 {
@@ -154,12 +162,37 @@ namespace
 	class FScopedVoxelGridFixture final
 	{
 	public:
-		explicit FScopedVoxelGridFixture(FString InGridId)
-			: GridId(MoveTemp(InGridId))
-			, World(GEditor ? GEditor->GetEditorWorldContext().World() : nullptr)
-			, WorldPackage(World ? World->GetOutermost() : nullptr)
-			, bWorldPackageWasDirty(WorldPackage && WorldPackage->IsDirty())
+		explicit FScopedVoxelGridFixture(const FString& Suffix)
+			: PackageName(
+				TEXT("/Game/UAI_Automation/VoxelGrid/Public_") + Suffix)
+			, Filename(FPackageName::LongPackageNameToFilename(
+				PackageName, FPackageName::GetMapPackageExtension()))
 		{
+			Package = CreatePackage(*PackageName);
+			World = Package
+				? UWorld::CreateWorld(
+					EWorldType::EditorPreview,
+					false,
+					FName(*FPackageName::GetLongPackageAssetName(PackageName)),
+					Package,
+					false)
+				: nullptr;
+			if (!World || !World->PersistentLevel) return;
+			World->SetFlags(RF_Public | RF_Standalone);
+			World->PersistentLevel->SetUseExternalActors(false);
+			World->SetCurrentLevel(World->PersistentLevel);
+			FWorldContext& Context =
+				GEngine->CreateNewWorldContext(EWorldType::EditorPreview);
+			Context.SetCurrentWorld(World);
+			bWorldContextCreated = true;
+			Package->MarkPackageDirty();
+			FSavePackageArgs Args;
+			Args.TopLevelFlags = RF_Public | RF_Standalone;
+			Args.SaveFlags = SAVE_NoError;
+			bInitialSaveSucceeded = UPackage::SavePackage(
+				Package, World, *Filename, Args);
+			Package->SetDirtyFlag(false);
+			SetAutomationWorldOverride(World);
 		}
 
 		~FScopedVoxelGridFixture()
@@ -167,49 +200,158 @@ namespace
 			Cleanup();
 		}
 
+		bool IsValid() const
+		{
+			return Package && World && World->PersistentLevel
+				&& bWorldContextCreated && bInitialSaveSucceeded
+				&& IFileManager::Get().FileExists(*Filename);
+		}
+
 		UWorld* GetWorld() const { return World; }
+		UPackage* GetPackage() const { return Package; }
+		const FString& GetFilename() const { return Filename; }
+
+		FString LegacySidecarPath(const FString& GridId) const
+		{
+			return FPaths::ProjectSavedDir()
+				/ TEXT("UeAgentInterface/VoxelGrids")
+				/ (GridId + TEXT(".json"));
+		}
+
+		bool Save()
+		{
+			if (!Package || !World) return false;
+			Package->MarkPackageDirty();
+			FSavePackageArgs Args;
+			Args.TopLevelFlags = RF_Public | RF_Standalone;
+			Args.SaveFlags = SAVE_NoError;
+			const bool bSaved = UPackage::SavePackage(
+				Package, World, *Filename, Args);
+			Package->SetDirtyFlag(false);
+			return bSaved;
+		}
 
 		bool Cleanup()
 		{
+			if (bCleaned) return bCleanupSucceeded;
+			bCleaned = true;
 			ResetProcessSessionsForAutomation();
-			bool bActorRemoved = true;
+			SetAutomationWorldOverride(nullptr);
+			if (Package) Package->SetDirtyFlag(false);
+			if (World && bWorldContextCreated)
+			{
+				GEngine->DestroyWorldContext(World);
+				bWorldContextCreated = false;
+			}
 			if (World)
 			{
-				const FName GridTag(*(TEXT("UAIEditableVoxelGrid:") + GridId));
-				TArray<ADynamicMeshActor*> Actors;
-				for (TActorIterator<ADynamicMeshActor> It(World); It; ++It)
-				{
-					if (It->Tags.Contains(GridTag)) Actors.Add(*It);
-				}
-				for (ADynamicMeshActor* Actor : Actors)
-				{
-					bActorRemoved = World->DestroyActor(Actor) && bActorRemoved;
-				}
+				World->DestroyWorld(false);
+				World->MarkAsGarbage();
 			}
-			const FString Sidecar = FPaths::Combine(
-				FPaths::ProjectSavedDir(),
-				TEXT("UeAgentInterface"),
-				TEXT("VoxelGrids"),
-				GridId + TEXT(".json"));
-			bool bSidecarRemoved = true;
-			if (IFileManager::Get().FileExists(*Sidecar))
+			if (Package) Package->MarkAsGarbage();
+			if (IFileManager::Get().FileExists(*Filename))
 			{
-				bSidecarRemoved = IFileManager::Get().Delete(*Sidecar, false, true);
+				IFileManager::Get().Delete(*Filename, false, true);
 			}
-			if (WorldPackage)
+			if (Package)
 			{
-				WorldPackage->SetDirtyFlag(bWorldPackageWasDirty);
+				FText UnloadError;
+				UPackageTools::UnloadPackages({Package}, UnloadError, true);
 			}
-			return bActorRemoved
-				&& bSidecarRemoved
-				&& !IFileManager::Get().FileExists(*Sidecar);
+			CollectGarbage(RF_NoFlags, true);
+			if (IFileManager::Get().FileExists(*Filename))
+			{
+				IFileManager::Get().Delete(*Filename, false, true);
+			}
+			bCleanupSucceeded =
+				!IFileManager::Get().FileExists(*Filename)
+				&& !FindPackage(nullptr, *PackageName);
+			World = nullptr;
+			Package = nullptr;
+			return bCleanupSucceeded;
+		}
+
+	private:
+		FString PackageName;
+		FString Filename;
+		UPackage* Package = nullptr;
+		UWorld* World = nullptr;
+		bool bWorldContextCreated = false;
+		bool bInitialSaveSucceeded = false;
+		bool bCleaned = false;
+		bool bCleanupSucceeded = false;
+	};
+
+	class FScopedLegacySidecar final
+	{
+	public:
+		explicit FScopedLegacySidecar(FString InGridId)
+			: GridId(MoveTemp(InGridId))
+			, SourcePath(FPaths::ProjectSavedDir()
+				/ TEXT("UeAgentInterface/VoxelGrids")
+				/ (GridId + TEXT(".json")))
+		{
+		}
+
+		~FScopedLegacySidecar()
+		{
+			IFileManager::Get().Delete(*SourcePath, false, true);
+			if (!TombstoneDirectory.IsEmpty())
+			{
+				IFileManager::Get().DeleteDirectory(
+					*TombstoneDirectory, false, true);
+			}
+		}
+
+		bool Write() const
+		{
+			const FString Parent = FPaths::GetPath(SourcePath);
+			if (!IFileManager::Get().MakeDirectory(*Parent, true)
+				&& !IFileManager::Get().DirectoryExists(*Parent))
+			{
+				return false;
+			}
+			const TSharedRef<FJsonObject> Root = MakeShared<FJsonObject>();
+			Root->SetStringField(
+				TEXT("schema"), TEXT("uai.modeling.voxel_grid.v2"));
+			Root->SetStringField(TEXT("grid_id"), GridId);
+			Root->SetNumberField(TEXT("cell_size"), 75.0);
+			Root->SetObjectField(TEXT("grid_origin"), Vector(300.0, 40.0, 20.0));
+			Root->SetObjectField(TEXT("grid_rotation"), Rotator(0.0, 15.0, 0.0));
+			Root->SetObjectField(TEXT("anchor"), Vector(0.0, 0.0, 37.5));
+			Root->SetNumberField(TEXT("revision"), 4);
+			Root->SetArrayField(TEXT("cells"), {
+				MakeShared<FJsonValueObject>(Vector(0.0, 0.0, 0.0)),
+				MakeShared<FJsonValueObject>(Vector(0.0, 0.0, 1.0)),
+			});
+			Root->SetStringField(TEXT("collision_generation"), FString());
+			Root->SetStringField(TEXT("collision_mode"), TEXT("none"));
+			return FFileHelper::SaveStringToFile(
+				Serialize(Root),
+				*SourcePath,
+				FFileHelper::EEncodingOptions::ForceUTF8WithoutBOM);
+		}
+
+		void BindReceipt(const FString& ReceiptId)
+		{
+			TombstoneDirectory = FPaths::ProjectSavedDir()
+				/ TEXT("UeAgentInterface/VoxelGridMigrationTombstones")
+				/ ReceiptId;
+		}
+
+		const FString& GetSourcePath() const { return SourcePath; }
+
+		FString GetTombstonePath() const
+		{
+			return TombstoneDirectory.IsEmpty()
+				? FString()
+				: TombstoneDirectory / FPaths::GetCleanFilename(SourcePath);
 		}
 
 	private:
 		FString GridId;
-		UWorld* World = nullptr;
-		UPackage* WorldPackage = nullptr;
-		bool bWorldPackageWasDirty = false;
+		FString SourcePath;
+		FString TombstoneDirectory;
 	};
 }
 
@@ -225,8 +367,8 @@ bool FUeAgentModelingVoxelGridPublicVerticalTest::RunTest(
 	const FString Suffix = FGuid::NewGuid().ToString(EGuidFormats::Digits).Left(16);
 	const FString GridId = TEXT("VG_TEST_") + Suffix;
 	const FString SessionId = TEXT("VGS_TEST_") + Suffix;
-	FScopedVoxelGridFixture Fixture(GridId);
-	if (!TestNotNull(TEXT("editor world exists"), Fixture.GetWorld()))
+	FScopedVoxelGridFixture Fixture(Suffix);
+	if (!TestTrue(TEXT("owned persisted editor world exists"), Fixture.IsValid()))
 	{
 		return false;
 	}
@@ -345,12 +487,16 @@ bool FUeAgentModelingVoxelGridPublicVerticalTest::RunTest(
 	const TSharedPtr<FJsonObject>* Mesh = nullptr;
 	const TSharedPtr<FJsonObject>* CollisionReadback = nullptr;
 	const TSharedPtr<FJsonObject>* IndependentReadback = nullptr;
+	const TSharedPtr<FJsonObject>* AuthoringState = nullptr;
+	const TSharedPtr<FJsonObject>* Durability = nullptr;
 	double ExposedFaces = -1.0;
 	double CollisionBoxes = -1.0;
 	bool bEquivalent = false;
-	FString SidecarPath;
+	bool bManagedIdentityEquivalent = false;
+	bool bPersistedReadbackVerified = false;
+	FString ReceiptId;
 	TestTrue(
-		TEXT("apply verifies mesh, exact-cover collision, and sidecar"),
+		TEXT("apply verifies UE-owned state and durable persisted readback"),
 		ApplyPayload->TryGetObjectField(TEXT("mesh"), Mesh)
 			&& Mesh && Mesh->IsValid()
 			&& (*Mesh)->TryGetNumberField(TEXT("exposed_face_count"), ExposedFaces)
@@ -366,8 +512,24 @@ bool FUeAgentModelingVoxelGridPublicVerticalTest::RunTest(
 			&& (*IndependentReadback)->TryGetBoolField(
 				TEXT("equivalent"), bEquivalent)
 			&& bEquivalent
-			&& ApplyPayload->TryGetStringField(TEXT("sidecar_path"), SidecarPath)
-			&& IFileManager::Get().FileExists(*SidecarPath));
+			&& (*IndependentReadback)->TryGetBoolField(
+				TEXT("managed_identity_equivalent"),
+				bManagedIdentityEquivalent)
+			&& bManagedIdentityEquivalent
+			&& (*IndependentReadback)->TryGetBoolField(
+				TEXT("persisted_readback_verified"),
+				bPersistedReadbackVerified)
+			&& bPersistedReadbackVerified
+			&& ApplyPayload->TryGetObjectField(
+				TEXT("authoring_state"), AuthoringState)
+			&& AuthoringState && AuthoringState->IsValid()
+			&& ApplyPayload->TryGetObjectField(TEXT("durability"), Durability)
+			&& Durability && Durability->IsValid()
+			&& (*Durability)->TryGetStringField(TEXT("receipt_id"), ReceiptId)
+			&& !ReceiptId.IsEmpty()
+			&& !Fixture.GetPackage()->IsDirty()
+			&& !IFileManager::Get().FileExists(
+				*Fixture.LegacySidecarPath(GridId)));
 
 	const TSharedRef<FJsonObject> Read = MakeShared<FJsonObject>();
 	Read->SetStringField(TEXT("action"), TEXT("read"));
@@ -413,6 +575,24 @@ bool FUeAgentModelingVoxelGridPublicVerticalTest::RunTest(
 	}
 
 	ResetProcessSessionsForAutomation();
+	Fixture.GetPackage()->SetDirtyFlag(true);
+	const TSharedRef<FJsonObject> DirtyEdit = MakeShared<FJsonObject>();
+	DirtyEdit->SetStringField(TEXT("action"), TEXT("begin"));
+	DirtyEdit->SetStringField(TEXT("mode"), TEXT("edit"));
+	DirtyEdit->SetStringField(TEXT("session_id"), TEXT("VGS_DIRTY_") + Suffix);
+	DirtyEdit->SetStringField(TEXT("grid_id"), GridId);
+	DirtyEdit->SetStringField(TEXT("actor_ref"), ActorRef);
+	const FUeAgentCommandResult DirtyEditResult = SubmitPublic(
+		Registry, Dispatch, GetSessionCommandId(), DirtyEdit);
+	TestFalse(
+		TEXT("pre-existing dirty target package is rejected"),
+		DirtyEditResult.IsOk());
+	TestTrue(
+		TEXT("dirty target rejection exposes the stable C8D error"),
+		DirtyEditResult.GetErrorJson().Contains(
+			TEXT("voxel_grid_target_package_dirty")));
+	Fixture.GetPackage()->SetDirtyFlag(false);
+
 	const FString EditSessionId = TEXT("VGS_EDIT_") + Suffix;
 	const TSharedRef<FJsonObject> Edit = MakeShared<FJsonObject>();
 	Edit->SetStringField(TEXT("action"), TEXT("begin"));
@@ -424,7 +604,7 @@ bool FUeAgentModelingVoxelGridPublicVerticalTest::RunTest(
 	TSharedPtr<FJsonObject> EditPayload;
 	if (!ParsePayload(
 			*this,
-			TEXT("edit session reloads from the committed sidecar"),
+			TEXT("edit session reloads from the UE-owned authoring component"),
 			SubmitPublic(Registry, Dispatch, GetSessionCommandId(), Edit),
 			EditPayload))
 	{
@@ -434,7 +614,7 @@ bool FUeAgentModelingVoxelGridPublicVerticalTest::RunTest(
 	Revision = -1.0;
 	OccupiedCells = -1.0;
 	TestTrue(
-		TEXT("sidecar reload restores revision and occupied cells"),
+		TEXT("component reload restores revision and occupied cells"),
 		EditPayload->TryGetObjectField(TEXT("readback"), EditReadback)
 			&& EditReadback && EditReadback->IsValid()
 			&& (*EditReadback)->TryGetNumberField(TEXT("revision"), Revision)
@@ -458,6 +638,185 @@ bool FUeAgentModelingVoxelGridPublicVerticalTest::RunTest(
 		return false;
 	}
 
-	TestTrue(TEXT("owned actor and sidecar are fully cleaned"), Fixture.Cleanup());
+	const FString CancelGridId = TEXT("VG_CANCEL_") + Suffix;
+	const FString CancelSessionId = TEXT("VGS_CANCEL_") + Suffix;
+	const TSharedRef<FJsonObject> CancelBegin = MakeShared<FJsonObject>();
+	CancelBegin->SetStringField(TEXT("action"), TEXT("begin"));
+	CancelBegin->SetStringField(TEXT("mode"), TEXT("create"));
+	CancelBegin->SetStringField(TEXT("session_id"), CancelSessionId);
+	CancelBegin->SetStringField(TEXT("grid_id"), CancelGridId);
+	TSharedPtr<FJsonObject> CancelBeginPayload;
+	if (!ParsePayload(
+			*this,
+			TEXT("second create session begins for cancellation"),
+			SubmitPublic(
+				Registry, Dispatch, GetSessionCommandId(), CancelBegin),
+			CancelBeginPayload))
+	{
+		return false;
+	}
+	const TSharedRef<FJsonObject> Cancel = MakeShared<FJsonObject>();
+	Cancel->SetStringField(TEXT("action"), TEXT("cancel"));
+	Cancel->SetStringField(TEXT("session_id"), CancelSessionId);
+	Cancel->SetNumberField(TEXT("expected_revision"), 0);
+	TSharedPtr<FJsonObject> CancelPayload;
+	if (!ParsePayload(
+			*this,
+			TEXT("uncommitted create session cancels with durable rollback"),
+			SubmitPublic(Registry, Dispatch, GetSessionCommandId(), Cancel),
+			CancelPayload))
+	{
+		return false;
+	}
+	bool bCancelledActorPresent = false;
+	const FName CancelTag(*(TEXT("UAIEditableVoxelGrid:") + CancelGridId));
+	for (TActorIterator<ADynamicMeshActor> It(Fixture.GetWorld()); It; ++It)
+	{
+		if (It->ActorHasTag(CancelTag))
+		{
+			bCancelledActorPresent = true;
+			break;
+		}
+	}
+	TestFalse(
+		TEXT("cancel removes the uncommitted actor"), bCancelledActorPresent);
+	TestFalse(
+		TEXT("cancel leaves the owned map package clean"),
+		Fixture.GetPackage()->IsDirty());
+
+	TestTrue(TEXT("owned persisted map fixture is fully cleaned"), Fixture.Cleanup());
+	return !HasAnyErrors();
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(
+	FUeAgentModelingVoxelGridLegacyMigrationTest,
+	"UeAgentInterface.ModelingGeometry.VoxelGrid.LegacySidecarMigration",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FUeAgentModelingVoxelGridLegacyMigrationTest::RunTest(
+	const FString& Parameters)
+{
+	(void)Parameters;
+	const FString Suffix = FGuid::NewGuid().ToString(EGuidFormats::Digits).Left(16);
+	const FString GridId = TEXT("VG_LEGACY_") + Suffix;
+	const FString SessionId = TEXT("VGS_LEGACY_") + Suffix;
+	FScopedVoxelGridFixture Fixture(TEXT("Legacy_") + Suffix);
+	FScopedLegacySidecar Legacy(GridId);
+	if (!TestTrue(TEXT("legacy migration owns a persisted map"), Fixture.IsValid()))
+	{
+		return false;
+	}
+
+	FActorSpawnParameters Spawn;
+	Spawn.ObjectFlags = RF_Transactional;
+	ADynamicMeshActor* const Actor = Fixture.GetWorld()->SpawnActor<ADynamicMeshActor>(
+		ADynamicMeshActor::StaticClass(),
+		FVector::ZeroVector,
+		FRotator::ZeroRotator,
+		Spawn);
+	if (!TestNotNull(TEXT("legacy fixture actor exists"), Actor))
+	{
+		return false;
+	}
+	Actor->Tags.AddUnique(FName(*(TEXT("UAIEditableVoxelGrid:") + GridId)));
+	if (!TestTrue(TEXT("legacy fixture map persists"), Fixture.Save())
+		|| !TestTrue(TEXT("legacy sidecar is written"), Legacy.Write()))
+	{
+		return false;
+	}
+
+	ResetProcessSessionsForAutomation();
+	TSharedPtr<const FUeAgentImmutableCommandRegistry> Registry;
+	TSharedPtr<const FUeAgentExactCommandDispatch> Dispatch;
+	FString Error;
+	if (!TestTrue(
+			TEXT("legacy migration public composition starts"),
+			UE::UAI::Module::CommandRegistration::Active::
+				TryComposeProcessActiveCommandComposition(
+					Registry, Dispatch, Error))
+		|| !Registry.IsValid() || !Dispatch.IsValid())
+	{
+		AddError(Error);
+		return false;
+	}
+
+	const TSharedRef<FJsonObject> Begin = MakeShared<FJsonObject>();
+	Begin->SetStringField(TEXT("action"), TEXT("begin"));
+	Begin->SetStringField(TEXT("mode"), TEXT("edit"));
+	Begin->SetStringField(TEXT("session_id"), SessionId);
+	Begin->SetStringField(TEXT("grid_id"), GridId);
+	Begin->SetStringField(TEXT("actor_ref"), Actor->GetPathName());
+	TSharedPtr<FJsonObject> BeginPayload;
+	if (!ParsePayload(
+			*this,
+			TEXT("legacy edit imports the one-time sidecar"),
+			SubmitPublic(Registry, Dispatch, GetSessionCommandId(), Begin),
+			BeginPayload))
+	{
+		return false;
+	}
+	const TSharedPtr<FJsonObject>* BeginReadback = nullptr;
+	const TSharedPtr<FJsonObject>* StateOwner = nullptr;
+	bool bLegacyImported = false;
+	double Revision = -1.0;
+	TestTrue(
+		TEXT("legacy import is explicit and preserves revision"),
+		BeginPayload->TryGetObjectField(TEXT("readback"), BeginReadback)
+			&& BeginReadback && BeginReadback->IsValid()
+			&& (*BeginReadback)->TryGetNumberField(TEXT("revision"), Revision)
+			&& Revision == 4.0
+			&& (*BeginReadback)->TryGetObjectField(
+				TEXT("authoring_state"), StateOwner)
+			&& StateOwner && StateOwner->IsValid()
+			&& (*StateOwner)->TryGetBoolField(
+				TEXT("legacy_sidecar_imported"), bLegacyImported)
+			&& bLegacyImported);
+
+	const TSharedRef<FJsonObject> Apply = MakeShared<FJsonObject>();
+	Apply->SetStringField(TEXT("session_id"), SessionId);
+	Apply->SetNumberField(TEXT("expected_revision"), 4);
+	const TSharedRef<FJsonObject> Collision = MakeShared<FJsonObject>();
+	Collision->SetStringField(TEXT("mode"), TEXT("none"));
+	Apply->SetObjectField(TEXT("collision"), Collision);
+	TSharedPtr<FJsonObject> ApplyPayload;
+	if (!ParsePayload(
+			*this,
+			TEXT("legacy import persists through the canonical UE owner"),
+			SubmitPublic(Registry, Dispatch, GetApplyCommandId(), Apply),
+			ApplyPayload))
+	{
+		return false;
+	}
+	const TSharedPtr<FJsonObject>* Durability = nullptr;
+	FString ReceiptId;
+	if (!TestTrue(
+			TEXT("legacy migration returns the durable receipt"),
+			ApplyPayload->TryGetObjectField(TEXT("durability"), Durability)
+				&& Durability && Durability->IsValid()
+				&& (*Durability)->TryGetStringField(
+					TEXT("receipt_id"), ReceiptId)
+				&& !ReceiptId.IsEmpty()))
+	{
+		return false;
+	}
+	Legacy.BindReceipt(ReceiptId);
+	UUeAgentModelingVoxelGridStateComponent* Component = nullptr;
+	FVoxelGridAuthoringState State;
+	FString StateError;
+	TestTrue(
+		TEXT("legacy state now has one UE-owned serialized component"),
+		TryFindAuthoringStateComponent(*Actor, Component, StateError)
+			&& Component
+			&& TryReadAuthoringState(*Component, 16, State, StateError)
+			&& State.GridId == GridId
+			&& State.Revision == 4
+			&& State.Cells.Num() == 2);
+	TestFalse(
+		TEXT("legacy active sidecar exits after C9"),
+		IFileManager::Get().FileExists(*Legacy.GetSourcePath()));
+	TestTrue(
+		TEXT("legacy source is retained only as a recoverable tombstone"),
+		IFileManager::Get().FileExists(*Legacy.GetTombstonePath()));
+	TestTrue(TEXT("legacy migration fixture is fully cleaned"), Fixture.Cleanup());
 	return !HasAnyErrors();
 }

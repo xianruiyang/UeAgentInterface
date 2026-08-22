@@ -673,7 +673,7 @@
     {
       "descriptor_id": "uai.query.world.nav_connectivity",
       "version": 1,
-      "descriptor_hash": "sha256:24e8a35b076afb6cf2c731b1df5f5717a388552db1bd3dcaa9bdf3a7f57b7652",
+      "descriptor_hash": "sha256:19da79214f48d3b858a1c60e64dc578228ddce2f225397d7a01de0c247fc45a7",
       "capability_id": "world.nav_connectivity.read",
       "provider_binding": "world.read.nav_connectivity",
       "family": "navigation",
@@ -722,6 +722,7 @@
             }
           },
           "project_to_nav": {"type": "boolean"},
+          "allow_projection_failure": {"type": "boolean"},
           "allow_partial": {"type": "boolean"},
           "include_path_points": {"type": "boolean"},
           "query_extent_cm": {

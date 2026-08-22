@@ -48,6 +48,29 @@ namespace
 		return Schema;
 	}
 
+	TSharedPtr<FJsonObject> StateRevisionSchema()
+	{
+		const TSharedPtr<FJsonObject> Sequence =
+			MakeShared<FJsonObject>();
+		Sequence->SetStringField(TEXT("type"), TEXT("integer"));
+		Sequence->SetNumberField(TEXT("minimum"), 0);
+		Sequence->SetNumberField(
+			TEXT("maximum"),
+			9007199254740991.0);
+		const TSharedPtr<FJsonObject> Properties =
+			MakeShared<FJsonObject>();
+		Properties->SetObjectField(TEXT("source_id"), StringSchema());
+		Properties->SetObjectField(TEXT("generation"), StringSchema());
+		Properties->SetObjectField(TEXT("sequence"), Sequence);
+		return ObjectSchema(
+			Properties,
+			{
+				TEXT("source_id"),
+				TEXT("generation"),
+				TEXT("sequence"),
+			});
+	}
+
 	TSharedPtr<FJsonObject> ConstStringSchema(
 		const FString& Value)
 	{
@@ -292,15 +315,11 @@ namespace
 			TEXT("element_kind"),
 			ConstStringSchema(ElementKind));
 		Properties->SetObjectField(TEXT("element_ids"), Ids);
-		Properties->SetObjectField(
-			TEXT("mesh_revision"),
-			StringSchema());
 		return ObjectSchema(
 			Properties,
 			{
 				TEXT("element_kind"),
 				TEXT("element_ids"),
-				TEXT("mesh_revision"),
 			});
 	}
 
@@ -495,7 +514,9 @@ namespace
 			&& bValue)
 		{
 			AddRequired(TEXT("target_ref"), StringSchema());
-			AddRequired(TEXT("target_revision"), StringSchema());
+			AddRequired(
+				TEXT("target_revision"),
+				StateRevisionSchema());
 		}
 		if (Row->TryGetBoolField(TEXT("placement"), bValue)
 			&& bValue)
@@ -526,7 +547,7 @@ namespace
 			AddRequired(TEXT("operand_ref"), StringSchema());
 			AddRequired(
 				TEXT("operand_revision"),
-				StringSchema());
+				StateRevisionSchema());
 			AddRequired(
 				TEXT("operand_to_target"),
 				TransformSchema());
@@ -597,7 +618,7 @@ namespace
 			StringSchema());
 		RevisionProperties->SetObjectField(
 			TEXT("revision"),
-			StringSchema());
+			StateRevisionSchema());
 		const TSharedPtr<FJsonObject> RevisionSchema =
 			ObjectSchema(
 				RevisionProperties,
@@ -660,6 +681,22 @@ namespace
 			Result.Add(MakeShared<FJsonValueNumber>(Value));
 		}
 		return Result;
+	}
+
+	TSharedPtr<FJsonObject> ValidRevision(
+		const FString& SourceId,
+		const int64 Sequence = 1)
+	{
+		const TSharedPtr<FJsonObject> Revision =
+			MakeShared<FJsonObject>();
+		Revision->SetStringField(TEXT("source_id"), SourceId);
+		Revision->SetStringField(
+			TEXT("generation"),
+			TEXT("fixture-generation"));
+		Revision->SetNumberField(
+			TEXT("sequence"),
+			static_cast<double>(Sequence));
+		return Revision;
 	}
 
 	TSharedPtr<FJsonObject> ValidPlacement()
@@ -765,9 +802,6 @@ namespace
 		Value->SetArrayField(
 			TEXT("element_ids"),
 			NumberValues({0.0}));
-		Value->SetStringField(
-			TEXT("mesh_revision"),
-			TEXT("rev:fixture:1"));
 		return Value;
 	}
 
@@ -847,9 +881,9 @@ namespace
 				bValue)
 			&& bValue)
 		{
-			Input->SetStringField(
+			Input->SetObjectField(
 				TEXT("target_revision"),
-				TEXT("rev:fixture:1"));
+				ValidRevision(TEXT("uai://mesh/fixture-target")));
 		}
 		if (Row->TryGetBoolField(TEXT("placement"), bValue)
 			&& bValue)
@@ -882,9 +916,9 @@ namespace
 			Input->SetStringField(
 				TEXT("operand_ref"),
 				TEXT("uai://mesh/fixture-operand"));
-			Input->SetStringField(
+			Input->SetObjectField(
 				TEXT("operand_revision"),
-				TEXT("rev:operand:1"));
+				ValidRevision(TEXT("uai://mesh/fixture-operand")));
 			Input->SetObjectField(
 				TEXT("operand_to_target"),
 				ValidTransform());
@@ -1535,9 +1569,9 @@ bool FUeAgentModelingGeometryEffectCapabilityContractTest::RunTest(
 				TEXT("expected_error")).IsEmpty());
 	}
 	TestEqual(
-		TEXT("14 semantic negative cases"),
+		TEXT("13 semantic negative cases"),
 		NegativeIds.Num(),
-		14);
+		13);
 
 	TSharedPtr<const FUeAgentDescriptorRegistry> Registry;
 	FString RegistryError;

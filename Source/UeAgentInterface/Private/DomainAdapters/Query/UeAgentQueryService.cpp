@@ -5,11 +5,13 @@
 #include "Core/Contract/UeAgentCommandJson.h"
 #include "Core/Contract/UeAgentContract.h"
 #include "Core/Discovery/UeAgentDiscovery.h"
+#include "Core/DomainCapability/UeAgentDomainCapability.h"
 #include "Core/Projection/UeAgentProjection.h"
 #include "DomainAdapters/AssetProjectRead/UeAgentAssetProjectReadDescriptors.h"
 #include "DomainAdapters/AssetProjectRead/UeAgentAssetProjectReadNative.h"
 #include "DomainAdapters/AssetProjectRead/UeAgentAssetProjectReadProductionEnvironment.h"
 #include "DomainAdapters/AssetProjectRead/UeAgentAssetProjectReadProvider.h"
+#include "DomainAdapters/Landscape/UeAgentLandscapeHeightQuery.h"
 #include "DomainAdapters/WorldRead/UeAgentWorldReadDescriptors.h"
 #include "DomainAdapters/WorldRead/UeAgentWorldReadNative.h"
 #include "DomainAdapters/WorldRead/UeAgentWorldReadProductionEnvironment.h"
@@ -25,6 +27,7 @@
 #include "Misc/App.h"
 #include "Misc/Guid.h"
 #include "Misc/Paths.h"
+#include "Misc/ScopeLock.h"
 
 namespace UE::UAI::DomainAdapters::Query
 {
@@ -51,11 +54,12 @@ namespace UE::UAI::DomainAdapters::Query
 			{TEXT("config.section"), TEXT("config.section"), TEXT("config_section"), false, false},
 			{TEXT("editor.dirty_resources"), TEXT("editor.dirty_resources"), TEXT("editor_dirty_resources"), false, false},
 			{TEXT("editor.open_assets"), TEXT("editor.open_assets"), TEXT("editor_open_assets"), false, false},
+			{TEXT("landscape.height.read"), TEXT("landscape.height.read"), TEXT("landscape_height_read"), true, false},
 			{TEXT("project.platform"), TEXT("project.platform"), TEXT("project_platform"), false, false},
 			{TEXT("project.settings"), TEXT("project.settings"), TEXT("project_settings"), false, false},
 			{TEXT("project.summary"), TEXT("project.summary"), TEXT("project_summary"), false, false},
 			{TEXT("project.validation"), TEXT("project.validation"), TEXT("project_validation"), false, false},
-			{TEXT("reference.asset_read"), TEXT("asset.properties"), TEXT("reference_asset_read"), true, true, TEXT("BlueprintDisplayName")},
+			{TEXT("reference.asset_read"), TEXT("reference.read"), TEXT("reference_asset_read"), true, true, TEXT("BlueprintDisplayName")},
 			{TEXT("reference.origin.resolve"), TEXT("reference.origin.resolve"), TEXT("reference_origin_resolve"), false, false},
 			{TEXT("world.actor_components"), TEXT("world.actor_components"), TEXT("world_actor_components"), true, false},
 			{TEXT("world.actors"), TEXT("world.actors"), TEXT("world_actors"), false, false},
@@ -389,11 +393,13 @@ namespace UE::UAI::DomainAdapters::Query
 		public:
 			FProductionQueryService(
 				TSharedRef<const FUeAgentDescriptorRegistry> InDescriptors,
-				TSharedRef<const BindingGateway::Query::FUeAgentQueryBinding> InBinding,
+				TSharedRef<const FUeAgentDiscoveryService> InDiscovery,
+				TSharedRef<const FUeAgentResponseProjector> InProjector,
 				TSharedRef<IUeAgentQuerySessionSource> InSessions,
 				TSharedRef<const FUeAgentQueryTicketService> InTickets)
 				: Descriptors(MoveTemp(InDescriptors))
-				, Binding(MoveTemp(InBinding))
+				, Discovery(MoveTemp(InDiscovery))
+				, Projector(MoveTemp(InProjector))
 				, Sessions(MoveTemp(InSessions))
 				, Tickets(MoveTemp(InTickets))
 			{
@@ -569,7 +575,13 @@ namespace UE::UAI::DomainAdapters::Query
 							ESPMode::ThreadSafe>(QueryBudget());
 				TSharedPtr<const FUeAgentQueryBindingResult> Result;
 				FUeAgentQueryBindingError QueryError;
-				if (!Binding->TrySubmit(
+				TSharedPtr<const BindingGateway::Query::FUeAgentQueryBinding>
+					QueryBinding;
+				if (!TryGetBinding(QueryBinding, OutError))
+				{
+					return false;
+				}
+				if (!QueryBinding->TrySubmit(
 						BindingRequest,
 						Caller,
 						Resources,
@@ -630,10 +642,70 @@ namespace UE::UAI::DomainAdapters::Query
 			}
 
 		private:
+			bool TryGetBinding(
+				TSharedPtr<
+					const BindingGateway::Query::FUeAgentQueryBinding>&
+						OutBinding,
+				FQueryServiceError& OutError) const
+			{
+				OutBinding.Reset();
+				FScopeLock Lock(&BindingMutex);
+				if (Binding.IsValid())
+				{
+					OutBinding = Binding;
+					return true;
+				}
+
+				DomainCapability::FDomainCapabilityAuthorities Authorities;
+				FString AuthorityError;
+				if (!DomainCapability::
+					TryGetOrBuildProcessDomainCapabilityAuthorities(
+						Authorities,
+						AuthorityError)
+					|| !Authorities.GetQueryProviderRegistry().IsValid())
+				{
+					OutError.Code =
+						TEXT("query_provider_authority_unavailable");
+					OutError.SubjectId = TEXT("domain-capability");
+					OutError.Detail = AuthorityError;
+					return false;
+				}
+
+				FUeAgentQueryBindingError QueryError;
+				TSharedPtr<
+					const BindingGateway::Query::FUeAgentQueryBinding>
+						Built;
+				if (!BindingGateway::Query::FUeAgentQueryBinding::TryCreate(
+						Descriptors,
+						Authorities.GetQueryProviderRegistry().ToSharedRef(),
+						Discovery,
+						Projector,
+						Sessions,
+						Tickets,
+						Built,
+						QueryError)
+					|| !Built.IsValid())
+				{
+					OutError.Code = QueryError.Code.IsEmpty()
+						? FString(TEXT("query_binding_unavailable"))
+						: QueryError.Code;
+					OutError.SubjectId = QueryError.SubjectId;
+					OutError.Detail = QueryError.Detail;
+					return false;
+				}
+				Binding = MoveTemp(Built);
+				OutBinding = Binding;
+				return true;
+			}
+
 			TSharedRef<const FUeAgentDescriptorRegistry> Descriptors;
-			TSharedRef<const BindingGateway::Query::FUeAgentQueryBinding> Binding;
+			TSharedRef<const FUeAgentDiscoveryService> Discovery;
+			TSharedRef<const FUeAgentResponseProjector> Projector;
 			TSharedRef<IUeAgentQuerySessionSource> Sessions;
 			TSharedRef<const FUeAgentQueryTicketService> Tickets;
+			mutable FCriticalSection BindingMutex;
+			mutable TSharedPtr<
+				const BindingGateway::Query::FUeAgentQueryBinding> Binding;
 		};
 	}
 
@@ -651,57 +723,41 @@ namespace UE::UAI::DomainAdapters::Query
 		return Routes;
 	}
 
-	bool TryCreateProductionQueryService(
-		TSharedPtr<IUeAgentQueryService>& OutService,
+	bool TryCreateProductionQueryProviderRegistrations(
+		TArray<FUeAgentDomainQueryProviderRegistration>&
+			OutRegistrations,
 		FString& OutError)
 	{
-		OutService.Reset();
+		OutRegistrations.Reset();
 		OutError.Reset();
-
 		TSharedPtr<const FUeAgentDescriptorRegistry> WorldDescriptors;
 		TSharedPtr<const FUeAgentDescriptorRegistry> AssetDescriptors;
 		if (!DomainAdapters::WorldRead::TryCreateWorldReadDescriptorRegistry(
 				WorldDescriptors,
 				OutError)
-			|| !DomainAdapters::AssetProjectRead::TryCreateAssetProjectReadDescriptorRegistry(
-				AssetDescriptors,
-				OutError))
+			|| !DomainAdapters::AssetProjectRead::
+				TryCreateAssetProjectReadDescriptorRegistry(
+					AssetDescriptors,
+					OutError))
 		{
-			return false;
-		}
-		TArray<FUeAgentOperationDescriptor> Descriptors;
-		Descriptors.Reserve(40);
-		if (!MergeDescriptors(WorldDescriptors, Descriptors, OutError)
-			|| !MergeDescriptors(AssetDescriptors, Descriptors, OutError))
-		{
-			return false;
-		}
-		TSharedPtr<const FUeAgentDescriptorRegistry> DescriptorRegistry;
-		if (!FUeAgentDescriptorRegistry::TryCreate(
-				MoveTemp(Descriptors),
-				DescriptorRegistry,
-				OutError)
-			|| !DescriptorRegistry.IsValid()
-			|| DescriptorRegistry->GetDescriptors().Num() != 40)
-		{
-			if (OutError.IsEmpty())
-			{
-				OutError = TEXT("query_descriptor_inventory_invalid");
-			}
 			return false;
 		}
 
-		const TSharedRef<DomainAdapters::WorldRead::FUeAgentWorldReadProductionEnvironment>
-			WorldEnvironment = MakeShared<
-				DomainAdapters::WorldRead::FUeAgentWorldReadProductionEnvironment>();
 		const TSharedRef<
-			DomainAdapters::AssetProjectRead::FUeAgentAssetProjectReadProductionEnvironment>
+			DomainAdapters::WorldRead::
+				FUeAgentWorldReadProductionEnvironment>
+			WorldEnvironment = MakeShared<
+				DomainAdapters::WorldRead::
+					FUeAgentWorldReadProductionEnvironment>();
+		const TSharedRef<
+			DomainAdapters::AssetProjectRead::
+				FUeAgentAssetProjectReadProductionEnvironment>
 			AssetEnvironment = MakeShared<
-				DomainAdapters::AssetProjectRead::FUeAgentAssetProjectReadProductionEnvironment>();
-		TArray<FUeAgentDomainQueryProviderRegistration> ProviderRegistrations;
-		ProviderRegistrations.Reserve(40);
+				DomainAdapters::AssetProjectRead::
+					FUeAgentAssetProjectReadProductionEnvironment>();
+		OutRegistrations.Reserve(41);
 		for (const FUeAgentOperationDescriptor& Descriptor
-			: DescriptorRegistry->GetDescriptors())
+			: WorldDescriptors->GetDescriptors())
 		{
 			if (!Descriptor.GetQueryBinding().IsSet())
 			{
@@ -711,60 +767,121 @@ namespace UE::UAI::DomainAdapters::Query
 			}
 			const FString ProviderBinding =
 				Descriptor.GetQueryBinding()->GetProviderBinding();
-			if (Descriptor.GetIdentity().GetDescriptorId().StartsWith(TEXT("uai.query.world.")))
-			{
-				TSharedPtr<DomainAdapters::WorldRead::IUeAgentWorldReadHook> Hook;
-				DomainAdapters::WorldRead::FUeAgentWorldReadError Error;
-				if (!DomainAdapters::WorldRead::FUeAgentWorldReadNativeHookFactory::TryCreate(
-						ProviderBinding,
-						WorldEnvironment,
-						Hook,
-						Error)
-					|| !Hook.IsValid())
-				{
-					OutError = Error.Code + TEXT(":") + Error.Detail;
-					return false;
-				}
-				ProviderRegistrations.Emplace(
+			TSharedPtr<
+				DomainAdapters::WorldRead::IUeAgentWorldReadHook> Hook;
+			DomainAdapters::WorldRead::FUeAgentWorldReadError Error;
+			if (!DomainAdapters::WorldRead::
+				FUeAgentWorldReadNativeHookFactory::TryCreate(
 					ProviderBinding,
-					MakeShared<DomainAdapters::WorldRead::FUeAgentWorldReadProvider>(
+					WorldEnvironment,
+					Hook,
+					Error)
+				|| !Hook.IsValid())
+			{
+				OutError = Error.Code + TEXT(":") + Error.Detail;
+				return false;
+			}
+			OutRegistrations.Emplace(
+				ProviderBinding,
+				MakeShared<
+					DomainAdapters::WorldRead::FUeAgentWorldReadProvider>(
 						ProviderBinding,
 						Hook.ToSharedRef()));
-			}
-			else
+		}
+		for (const FUeAgentOperationDescriptor& Descriptor
+			: AssetDescriptors->GetDescriptors())
+		{
+			if (!Descriptor.GetQueryBinding().IsSet())
 			{
-				TSharedPtr<DomainAdapters::AssetProjectRead::IUeAgentAssetProjectReadHook> Hook;
-				DomainAdapters::AssetProjectRead::FUeAgentAssetProjectReadError Error;
-				if (!DomainAdapters::AssetProjectRead::FUeAgentAssetProjectReadNativeHookFactory::TryCreate(
-						ProviderBinding,
-						AssetEnvironment,
-						Hook,
-						Error)
-					|| !Hook.IsValid())
-				{
-					OutError = Error.Code + TEXT(":") + Error.Detail;
-					return false;
-				}
-				ProviderRegistrations.Emplace(
+				OutError = TEXT("query_provider_binding_missing:")
+					+ Descriptor.GetIdentity().GetDescriptorId();
+				return false;
+			}
+			const FString ProviderBinding =
+				Descriptor.GetQueryBinding()->GetProviderBinding();
+			TSharedPtr<
+				DomainAdapters::AssetProjectRead::
+					IUeAgentAssetProjectReadHook> Hook;
+			DomainAdapters::AssetProjectRead::
+				FUeAgentAssetProjectReadError Error;
+			if (!DomainAdapters::AssetProjectRead::
+				FUeAgentAssetProjectReadNativeHookFactory::TryCreate(
 					ProviderBinding,
-					MakeShared<
-						DomainAdapters::AssetProjectRead::FUeAgentAssetProjectReadProvider>(
+					AssetEnvironment,
+					Hook,
+					Error)
+				|| !Hook.IsValid())
+			{
+				OutError = Error.Code + TEXT(":") + Error.Detail;
+				return false;
+			}
+			OutRegistrations.Emplace(
+				ProviderBinding,
+				MakeShared<
+					DomainAdapters::AssetProjectRead::
+						FUeAgentAssetProjectReadProvider>(
 							ProviderBinding,
 							Hook.ToSharedRef()));
-			}
 		}
-		FUeAgentQueryBindingError QueryError;
-		TSharedPtr<const FUeAgentDomainQueryProviderRegistry> Providers;
-		if (!FUeAgentDomainQueryProviderRegistry::TryCreate(
-				MoveTemp(ProviderRegistrations),
-				Providers,
-				QueryError)
-			|| !Providers.IsValid())
+		if (OutRegistrations.Num() != 41)
 		{
-			OutError = QueryError.Code + TEXT(":") + QueryError.Detail;
+			OutRegistrations.Reset();
+			OutError = TEXT("query_provider_inventory_invalid");
+			return false;
+		}
+		return true;
+	}
+
+	bool TryCreateProductionQueryService(
+		TSharedPtr<IUeAgentQueryService>& OutService,
+		FString& OutError)
+	{
+		OutService.Reset();
+		OutError.Reset();
+
+		TSharedPtr<const FUeAgentDescriptorRegistry> WorldDescriptors;
+		TSharedPtr<const FUeAgentDescriptorRegistry> AssetDescriptors;
+		TSharedPtr<const FUeAgentDescriptorRegistry> LandscapeDescriptors;
+		if (!DomainAdapters::WorldRead::TryCreateWorldReadDescriptorRegistry(
+				WorldDescriptors,
+				OutError)
+			|| !DomainAdapters::AssetProjectRead::TryCreateAssetProjectReadDescriptorRegistry(
+				AssetDescriptors,
+				OutError)
+			|| !DomainAdapters::Landscape::
+				TryCreateLandscapeHeightReadDescriptorRegistry(
+					LandscapeDescriptors,
+				OutError))
+		{
+			return false;
+		}
+		TArray<FUeAgentOperationDescriptor> Descriptors;
+		Descriptors.Reserve(42);
+		if (!MergeDescriptors(WorldDescriptors, Descriptors, OutError)
+			|| !MergeDescriptors(AssetDescriptors, Descriptors, OutError)
+			|| !MergeDescriptors(
+				LandscapeDescriptors,
+				Descriptors,
+				OutError))
+		{
+			return false;
+		}
+		TSharedPtr<const FUeAgentDescriptorRegistry> DescriptorRegistry;
+		if (!FUeAgentDescriptorRegistry::TryCreate(
+				MoveTemp(Descriptors),
+				DescriptorRegistry,
+				OutError)
+			|| !DescriptorRegistry.IsValid()
+			|| DescriptorRegistry->GetDescriptors().Num() != 42)
+		{
+			if (OutError.IsEmpty())
+			{
+				OutError = TEXT("query_descriptor_inventory_invalid");
+			}
 			return false;
 		}
 
+		FUeAgentQueryBindingError QueryError;
 		TSharedPtr<const FUeAgentDiscoveryService> DiscoveryService;
 		FUeAgentDiscoveryError DiscoveryError;
 		if (!FUeAgentDiscoveryService::TryCreate(
@@ -811,24 +928,10 @@ namespace UE::UAI::DomainAdapters::Query
 			OutError = QueryError.Code + TEXT(":") + QueryError.Detail;
 			return false;
 		}
-		TSharedPtr<const BindingGateway::Query::FUeAgentQueryBinding> Binding;
-		if (!BindingGateway::Query::FUeAgentQueryBinding::TryCreate(
-				DescriptorRegistry.ToSharedRef(),
-				Providers.ToSharedRef(),
-				DiscoveryService.ToSharedRef(),
-				Projector.ToSharedRef(),
-				Sessions,
-				Tickets.ToSharedRef(),
-				Binding,
-				QueryError)
-			|| !Binding.IsValid())
-		{
-			OutError = QueryError.Code + TEXT(":") + QueryError.Detail;
-			return false;
-		}
 		OutService = MakeShared<FProductionQueryService>(
 			DescriptorRegistry.ToSharedRef(),
-			Binding.ToSharedRef(),
+			DiscoveryService.ToSharedRef(),
+			Projector.ToSharedRef(),
 			Sessions,
 			Tickets.ToSharedRef());
 		return true;

@@ -31,10 +31,10 @@ namespace UE::UAI::DomainAdapters::WorldSimpleEffect
 		const FDescriptorSpec DescriptorSpecs[] = {
 			{
 				TEXT("uai.operation.world.actor.create"),
-				TEXT("sha256:ef48592d995cc18cfbe112bac443db7ff7f047a82e126b3a90df0623ca128fc5"),
+				TEXT("sha256:7ee82512ce0c69025653e38cac976c1aa55d529e8e053c81da8a6c6f0fdc8619"),
 				TEXT("world.actor.create"),
 				TEXT("world.entity.create"),
-				TEXT(R"json({"type":"object","properties":{"actor_class_ref":{"type":"string","minLength":1},"placement":{"type":"object","properties":{"frame_id":{"type":"string","minLength":1},"unit":{"type":"string","enum":["centimeter","meter"]},"translation":{"type":"array","items":{"type":"number"},"minItems":3,"maxItems":3},"rotation_quaternion_xyzw":{"type":"array","items":{"type":"number"},"minItems":4,"maxItems":4},"scale":{"type":"array","items":{"type":"number"},"minItems":3,"maxItems":3},"basis_evidence":{"type":"string","minLength":1}},"required":["frame_id","unit","translation","rotation_quaternion_xyzw","scale","basis_evidence"],"additionalProperties":false},"label":{"type":"string","minLength":1},"folder_path":{"type":"string"},"tags":{"type":"array","items":{"type":"string","minLength":1},"uniqueItems":true},"save_level":{"type":"boolean"}},"required":["actor_class_ref","placement","label","save_level"],"additionalProperties":false})json"),
+				TEXT(R"json({"type":"object","properties":{"actor_class_ref":{"type":"string","minLength":1},"placement":{"type":"object","properties":{"frame_id":{"type":"string","minLength":1},"unit":{"type":"string","enum":["centimeter","meter"]},"translation":{"type":"array","items":{"type":"number"},"minItems":3,"maxItems":3},"rotation_quaternion_xyzw":{"type":"array","items":{"type":"number"},"minItems":4,"maxItems":4},"scale":{"type":"array","items":{"type":"number"},"minItems":3,"maxItems":3},"basis_evidence":{"type":"string","minLength":1}},"required":["frame_id","unit","translation","rotation_quaternion_xyzw","scale","basis_evidence"],"additionalProperties":false},"label":{"type":"string","minLength":1},"folder_path":{"type":"string"},"tags":{"type":"array","items":{"type":"string","minLength":1},"uniqueItems":true}},"required":["actor_class_ref","placement","label"],"additionalProperties":false})json"),
 			},
 			{
 				TEXT("uai.operation.world.wall.create_with_opening"),
@@ -101,10 +101,10 @@ namespace UE::UAI::DomainAdapters::WorldSimpleEffect
 			},
 			{
 				TEXT("uai.operation.world.level_game_mode.update"),
-				TEXT("sha256:86238f06501f0d6a34297302dd18e57ee4602f2efcb52dbf326370ae2e3eb23d"),
+				TEXT("sha256:49c9cf01c69ba7ada6d488bbcb69c1fcc32a09a4360f1076e83942f116fc4774"),
 				TEXT("world.level_game_mode.update"),
 				TEXT("world.state.update"),
-				TEXT(R"json({"type":"object","properties":{"game_mode_class_ref":{"type":"string","minLength":1},"save_level":{"type":"boolean"}},"required":["game_mode_class_ref","save_level"],"additionalProperties":false})json"),
+				TEXT(R"json({"type":"object","properties":{"game_mode_class_ref":{"type":"string","minLength":1}},"required":["game_mode_class_ref"],"additionalProperties":false})json"),
 			},
 		};
 
@@ -676,8 +676,7 @@ namespace UE::UAI::DomainAdapters::WorldSimpleEffect
 					TEXT("actor_class_ref"),
 					TEXT("label"),
 					TEXT("folder_path"),
-					TEXT("tags"),
-					TEXT("save_level")})
+					TEXT("tags")})
 				{
 					CopyOptionalField(Payload, Field, After, Field);
 				}
@@ -1119,11 +1118,6 @@ namespace UE::UAI::DomainAdapters::WorldSimpleEffect
 						TEXT("game_mode_class_ref"),
 						After,
 						TEXT("game_mode_class_ref"));
-					CopyOptionalField(
-						Payload,
-						TEXT("save_level"),
-						After,
-						TEXT("save_level"));
 				}
 				else
 				{

@@ -6,11 +6,31 @@
 
 class FConfigFile;
 class UObject;
-class UPackage;
 struct FAssetData;
 
 namespace UE::UAI::DomainAdapters::AssetProjectRead
 {
+	struct FUeAgentEditorResourceObservation
+	{
+		FString ResourceId;
+		FString ResourceKind;
+		FString PackageName;
+		FString ObjectPath;
+		FString ClassPath;
+		FString EditorIdentity;
+		bool bDirty = false;
+	};
+
+	struct FUeAgentProjectPlatformObservation
+	{
+		FString PlatformName;
+		FString IniPlatformName;
+		FString DisplayName;
+		FString SdkDocumentationPath;
+		bool bRunningPlatform = false;
+		bool bSdkInstalled = false;
+	};
+
 	class UEAGENTINTERFACE_API
 		IUeAgentAssetProjectReadEnvironment
 	{
@@ -37,10 +57,25 @@ namespace UE::UAI::DomainAdapters::AssetProjectRead
 			TArray<FString>& OutReferencers,
 			FUeAgentAssetProjectReadError& OutError) = 0;
 
-		virtual bool TryResolveEditorResources(
+		virtual bool TryResolveOpenAssets(
 			const UE::UAI::ContextResource::
 				FUeAgentExecutionContextRef& Context,
-			TArray<UPackage*>& OutPackages,
+			bool bIncludeEditorIdentity,
+			TArray<FUeAgentEditorResourceObservation>& OutResources,
+			FUeAgentAssetProjectReadError& OutError) = 0;
+
+		virtual bool TryResolveDirtyResources(
+			const UE::UAI::ContextResource::
+				FUeAgentExecutionContextRef& Context,
+			const TArray<FString>& ResourceKinds,
+			TArray<FUeAgentEditorResourceObservation>& OutResources,
+			FUeAgentAssetProjectReadError& OutError) = 0;
+
+		virtual bool TryResolveProjectPlatforms(
+			const UE::UAI::ContextResource::
+				FUeAgentExecutionContextRef& Context,
+			const TArray<FString>& PlatformIds,
+			TArray<FUeAgentProjectPlatformObservation>& OutPlatforms,
 			FUeAgentAssetProjectReadError& OutError) = 0;
 
 		virtual bool TryResolveProjectObject(

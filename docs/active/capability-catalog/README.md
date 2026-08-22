@@ -22,11 +22,22 @@ It is deliberately not a runtime registry:
 
 A registered command is not a delivered capability. Every unit records the
 highest layer directly supported by current evidence. The current catalog owns
-347 exact command identities. T35 through T43 provide representative current UE
-verticals across the registered domains, but they do not prove every command ×
-object/type × surface × operation × lifecycle cell. Uncovered cells,
-distribution and real-content quality remain explicit in each unit's
-`not_proven` list and delivery chain.
+348 exact command identities. T35 through T43 provide representative current UE
+verticals across the registered domains, T44 proves legacy public/compiled
+surface exit, and T45 proves the Plugin/CMD/Pak/installed distribution contract.
+T46 additionally proves a maintained seven-Actor whitebox/spatial real-content
+slice while preserving and restoring the user's minimized main Editor. These
+results still do not prove every command × object/type × surface × operation ×
+lifecycle cell or final visual/content quality. T47 executes the current 54
+command discovery/candidate/read/reference slice through the public SDK, closes
+the persisted Reference CRUD/readback defect, and records exact typed failures.
+That same matrix proves that several successful read envelopes do not yet carry
+the domain fact selected by their public input. `CU-READ-QUERY` therefore routes
+through T47A before downstream authoring matrices consume it; discovery units
+route to their actual domain consumer, while command/content discovery and the
+closed Reference unit route to final audit. Every uncovered cell and exact
+recovery task remains explicit in the unit's `not_proven` and `next_task_id`
+fields.
 
 Historical `exact_command_set` and `architecture_contract` values are retained
 under `candidate_successor`; they do not become current exact successors without
@@ -45,10 +56,14 @@ architecture and CMD tests are the executable evidence for that contract.
 
 CubeGrid is intentionally represented outside the 939-row inventory. Git
 history proves that four voxel-grid commands and their sidecar/revision
-mechanics existed. T41 restored the required capability through the current
-`mesh.voxel_grid.session` and `mesh.voxel_grid.apply` contracts and public SDK
-product evidence. The four old identities remain absent; the catalog records a
-non-exact capability resolution and does not restore their split dispatch.
+mechanics existed. T41 first restored the required capability through the
+current `mesh.voxel_grid.session` and `mesh.voxel_grid.apply` contracts. T50
+replaced the active sidecar state with one serialized editor-only Actor
+component, verified C8D persistence and C9 isolated-package equivalence through
+the public SDK, and retained the old sidecar only as an import-once source moved
+to a recoverable tombstone. The four old identities remain absent; the catalog
+records a non-exact capability resolution and does not restore their split
+dispatch.
 
 ## Maintenance workflow
 

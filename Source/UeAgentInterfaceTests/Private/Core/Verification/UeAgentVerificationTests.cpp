@@ -181,6 +181,13 @@ namespace
 					TEXT("/Game/UAI/P4_011/SaveAsset"),
 					TEXT("D:/owned/save.uasset"),
 					EAssetDurableIntent::Save,
+					TEXT("package_header")),
+				FDurableArtifact(
+					TEXT("artifact:p4-011:unrelated:header"),
+					MakeIdentity(TEXT("references")),
+					TEXT("/Game/UAI/P4_011/UnrelatedAsset"),
+					TEXT("D:/owned/unrelated.uasset"),
+					EAssetDurableIntent::Save,
 					TEXT("package_header"))
 			},
 			TEXT(
@@ -246,6 +253,78 @@ namespace
 
 	private:
 		FUeAgentCanonicalSnapshotRef Snapshot;
+	};
+
+	class FRecordingPersistedStateOracle final
+		: public IPersistedStateOracle
+	{
+	public:
+		explicit FRecordingPersistedStateOracle(
+			FUeAgentCanonicalSnapshotRef InSnapshot)
+			: Snapshot(MoveTemp(InSnapshot))
+		{
+		}
+
+		const FString& GetReadPortId() const override
+		{
+			static const FString Id =
+				TEXT("read-port:reference-asset");
+			return Id;
+		}
+
+		bool TryObserve(
+			const FVerificationTarget& Target,
+			const TArray<FDurableArtifact>& Artifacts,
+			FUeAgentResourceTracker& Resources,
+			const FUeAgentOperationDeadline& Deadline,
+			const FUeAgentCancellationToken& Cancellation,
+			FUeAgentCanonicalSnapshotPtr& OutSnapshot,
+			FVerificationError& OutError) override
+		{
+			++CallCount;
+			LastArtifactIds.Reset();
+			for (const FDurableArtifact& Artifact : Artifacts)
+			{
+				LastArtifactIds.Add(Artifact.GetArtifactId());
+			}
+			OutSnapshot = Snapshot;
+			OutError = FVerificationError();
+			return true;
+		}
+
+		int32 CallCount = 0;
+		TArray<FString> LastArtifactIds;
+
+	private:
+		FUeAgentCanonicalSnapshotRef Snapshot;
+	};
+
+	class FFailingPersistedStateOracle final
+		: public IPersistedStateOracle
+	{
+	public:
+		const FString& GetReadPortId() const override
+		{
+			static const FString Id =
+				TEXT("read-port:reference-asset");
+			return Id;
+		}
+
+		bool TryObserve(
+			const FVerificationTarget& Target,
+			const TArray<FDurableArtifact>& Artifacts,
+			FUeAgentResourceTracker& Resources,
+			const FUeAgentOperationDeadline& Deadline,
+			const FUeAgentCancellationToken& Cancellation,
+			FUeAgentCanonicalSnapshotPtr& OutSnapshot,
+			FVerificationError& OutError) override
+		{
+			OutSnapshot.Reset();
+			OutError = FVerificationError(
+				TEXT("world_simple_persisted_world_load_failed"),
+				TEXT("/Game/UAI/Worlds/OwnedWorld"));
+			return false;
+		}
 	};
 
 	class FRecordingAbsenceOracle final : public IAbsenceOracle
@@ -357,8 +436,10 @@ namespace
 				[&Now]() { return Now; });
 		FUeAgentCancellationSource Cancellation(
 			[&Now]() { return Now; });
+		FStateReadPortPersistedStateOracle PersistedOracle(
+			ReadPort);
 		FVerificationService Service(
-			ReadPort,
+			PersistedOracle,
 			Absence,
 			References,
 			Acknowledger);
@@ -445,6 +526,146 @@ bool FUeAgentVerificationIndependentReadbackTest::RunTest(
 }
 
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(
+	FUeAgentVerificationArtifactBoundPersistedOracleTest,
+	"UeAgentInterface.Core.Verification.StateVerifier."
+	"ArtifactBoundPersistedOracle",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FUeAgentVerificationArtifactBoundPersistedOracleTest::RunTest(
+	const FString& Parameters)
+{
+	FUeAgentResourceTracker Tracker = MakeTracker();
+	const FUeAgentCanonicalSnapshotRef Expected = MakeSnapshot(
+		TEXT("snapshot:c9:expected:artifact-bound"),
+		TEXT("evidence:c9:expected:artifact-bound"),
+		TEXT("new-title"),
+		93,
+		Tracker,
+		true);
+	FRecordingPersistedStateOracle PersistedOracle(MakeSnapshot(
+		TEXT("snapshot:c9:actual:artifact-bound"),
+		TEXT("evidence:c9:actual:artifact-bound"),
+		TEXT("new-title"),
+		94,
+		Tracker));
+	FRecordingAbsenceOracle Absence;
+	FRecordingReferenceOracle References;
+	FRecordingAcknowledger Acknowledger;
+	double Now = 100.0;
+	const FUeAgentOperationDeadline Deadline =
+		FUeAgentOperationDeadline::FromTimeout(
+			30.0,
+			[&Now]() { return Now; });
+	FUeAgentCancellationSource Cancellation(
+		[&Now]() { return Now; });
+	FVerificationService Service(
+		PersistedOracle,
+		Absence,
+		References,
+		Acknowledger);
+	FVerificationOutcome Outcome;
+	FVerificationError Error;
+
+	TestTrue(
+		TEXT("persisted oracle receives a verifiable request"),
+		Service.TryVerify(
+			MakeRequest(Expected),
+			Tracker,
+			Deadline,
+			Cancellation.GetToken(),
+			Outcome,
+			Error));
+	TestEqual(
+		TEXT("persisted oracle is called exactly once"),
+		PersistedOracle.CallCount,
+		1);
+	TestEqual(
+		TEXT("persisted oracle receives only target artifacts"),
+		PersistedOracle.LastArtifactIds.Num(),
+		1);
+	if (PersistedOracle.LastArtifactIds.Num() == 1)
+	{
+		TestEqual(
+			TEXT("persisted oracle receives the declared artifact"),
+			PersistedOracle.LastArtifactIds[0],
+			FString(TEXT("artifact:p4-011:save:header")));
+	}
+	TestEqual(
+		TEXT("artifact-bound equality can complete"),
+		Outcome.GetEffectOutcome(),
+		EEffectOutcome::Complete);
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(
+	FUeAgentVerificationPersistedOracleDiagnosticTest,
+	"UeAgentInterface.Core.Verification.StateVerifier."
+	"PersistedOracleDiagnostic",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FUeAgentVerificationPersistedOracleDiagnosticTest::RunTest(
+	const FString& Parameters)
+{
+	FUeAgentResourceTracker Tracker = MakeTracker();
+	const FUeAgentCanonicalSnapshotRef Expected = MakeSnapshot(
+		TEXT("snapshot:c9:expected:oracle-error"),
+		TEXT("evidence:c9:expected:oracle-error"),
+		TEXT("new-title"),
+		95,
+		Tracker,
+		true);
+	FFailingPersistedStateOracle PersistedOracle;
+	FRecordingAbsenceOracle Absence;
+	FRecordingReferenceOracle References;
+	FRecordingAcknowledger Acknowledger;
+	double Now = 100.0;
+	const FUeAgentOperationDeadline Deadline =
+		FUeAgentOperationDeadline::FromTimeout(
+			30.0,
+			[&Now]() { return Now; });
+	FUeAgentCancellationSource Cancellation(
+		[&Now]() { return Now; });
+	FVerificationService Service(
+		PersistedOracle,
+		Absence,
+		References,
+		Acknowledger);
+	FVerificationOutcome Outcome;
+	FVerificationError Error;
+
+	TestTrue(
+		TEXT("oracle unavailability remains a typed outcome"),
+		Service.TryVerify(
+			MakeRequest(Expected),
+			Tracker,
+			Deadline,
+			Cancellation.GetToken(),
+			Outcome,
+			Error));
+	TestEqual(
+		TEXT("shared unavailable diagnostic stays stable"),
+		Outcome.GetDiagnosticCode(),
+		FString(TEXT("verification_oracle_unavailable")));
+	TestTrue(
+		TEXT("oracle cause is preserved"),
+		Outcome.GetDiagnosticDetail().Contains(
+			TEXT("world_simple_persisted_world_load_failed")));
+	TestTrue(
+		TEXT("oracle subject is preserved"),
+		Outcome.GetDiagnosticDetail().Contains(
+			TEXT("/Game/UAI/Worlds/OwnedWorld")));
+	TestEqual(
+		TEXT("unavailable oracle is state unknown"),
+		Outcome.GetEffectOutcome(),
+		EEffectOutcome::StateUnknown);
+	TestEqual(
+		TEXT("unavailable oracle is not acknowledged"),
+		Acknowledger.CallCount,
+		0);
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(
 	FUeAgentVerificationMismatchTest,
 	"UeAgentInterface.Core.Verification.StateVerifier.TypedMismatch",
 	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
@@ -482,6 +703,10 @@ bool FUeAgentVerificationMismatchTest::RunTest(
 		TEXT("known persisted mismatch is partial"),
 		Outcome.GetEffectOutcome(),
 		EEffectOutcome::Partial);
+	TestTrue(
+		TEXT("known mismatch preserves its semantic difference"),
+		Outcome.GetDiagnosticDetail().Contains(
+			TEXT("difference_count=")));
 	TestEqual(
 		TEXT("mismatch is not acknowledged"),
 		Acknowledger.CallCount,

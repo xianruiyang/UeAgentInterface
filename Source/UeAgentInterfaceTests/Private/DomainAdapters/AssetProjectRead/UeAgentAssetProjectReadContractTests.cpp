@@ -295,14 +295,14 @@ bool FUeAgentAssetProjectReadContractFixtureTest::RunTest(
 	}
 	TestEqual(TEXT("six semantic families"), RequiredFamilies.Num(), 6);
 	TestEqual(
-		TEXT("seventeen descriptors"),
+		TEXT("eighteen descriptors"),
 		DescriptorValues->Num(),
-		17);
+		18);
 	TestEqual(
 		TEXT("declared descriptor count"),
 		static_cast<int32>(
 			Fixture->GetNumberField(TEXT("descriptor_count"))),
-		17);
+		18);
 
 	TSet<FString> DescriptorIds;
 	TSet<FString> ProviderBindings;
@@ -399,7 +399,7 @@ bool FUeAgentAssetProjectReadContractFixtureTest::RunTest(
 	TestEqual(
 		TEXT("production registry owns all frozen descriptors"),
 		ProductionRegistry->GetDescriptors().Num(),
-		17);
+		18);
 	for (const TSharedPtr<FJsonValue>& Value : *DescriptorValues)
 	{
 		const TSharedPtr<FJsonObject> Row = Value->AsObject();

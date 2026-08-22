@@ -4,6 +4,7 @@
 
 #include "Commands/EditorViewport/UeAgentEditorViewportSequenceFrameOptions.h"
 #include "Commands/EditorViewport/UeAgentEditorViewportLegacy.h"
+#include "Core/AssetDurable/UeAgentPackageHeader.h"
 #include "Module/UeAgentInterfaceLogger.h"
 #include "UeAgentInterfaceSettings.h"
 #include "Utilities/UeAgentJsonDiagnostics.h"
@@ -17,6 +18,7 @@
 #include "EngineUtils.h"
 #include "FileHelpers.h"
 #include "Framework/Application/SlateApplication.h"
+#include "HAL/FileManager.h"
 #include "ImageUtils.h"
 #include "LevelEditorViewport.h"
 #include "Misc/FileHelper.h"
@@ -67,6 +69,29 @@ bool FUeAgentLegacyMechanics::TrySaveCurrentLevelWithGuard(const FUeAgentRequest
 		return true;
 	}
 
+	FString PackageHeaderFilename;
+	FString PackageHeaderErrorCode;
+	UObject* PackageTopLevelAsset = World;
+	if (!Pkg
+		|| !UE::UAI::AssetDurable::TryPrepareLoadedPackageHeaderForSave(
+			*Pkg,
+			PackageTopLevelAsset,
+			PackageHeaderFilename,
+			PackageHeaderErrorCode))
+	{
+		OutData->SetBoolField(TEXT("saved"), false);
+		OutData->SetStringField(
+			TEXT("package_header_error"),
+			PackageHeaderErrorCode);
+		OutError = PackageHeaderErrorCode.IsEmpty()
+			? TEXT("save_current_level_package_header_unavailable")
+			: PackageHeaderErrorCode;
+		return false;
+	}
+	OutData->SetStringField(
+		TEXT("package_header_filename"),
+		PackageHeaderFilename);
+
 	const bool bSaved = UEditorLoadingAndSavingUtils::SaveCurrentLevel();
 	OutData->SetBoolField(TEXT("saved"), bSaved);
 	if (!bSaved)
@@ -74,6 +99,32 @@ bool FUeAgentLegacyMechanics::TrySaveCurrentLevelWithGuard(const FUeAgentRequest
 		OutError = TEXT("save_failed");
 		return false;
 	}
+
+	FString ObservedHeaderFilename;
+	PackageHeaderErrorCode.Reset();
+	if (!UE::UAI::AssetDurable::TryResolvePackageHeaderFilename(
+			Pkg->GetName(),
+			ObservedHeaderFilename,
+			PackageHeaderErrorCode)
+		|| !ObservedHeaderFilename.Equals(
+			PackageHeaderFilename,
+			ESearchCase::IgnoreCase)
+		|| !IFileManager::Get().FileExists(*ObservedHeaderFilename)
+		|| Pkg->IsDirty())
+	{
+		OutData->SetBoolField(TEXT("saved"), false);
+		OutData->SetStringField(
+			TEXT("package_header_readback"),
+			ObservedHeaderFilename);
+		OutData->SetStringField(
+			TEXT("package_header_error"),
+			PackageHeaderErrorCode);
+		OutError = PackageHeaderErrorCode.IsEmpty()
+			? TEXT("save_current_level_readback_failed")
+			: PackageHeaderErrorCode;
+		return false;
+	}
+	OutData->SetBoolField(TEXT("package_header_verified"), true);
 	return true;
 }
 

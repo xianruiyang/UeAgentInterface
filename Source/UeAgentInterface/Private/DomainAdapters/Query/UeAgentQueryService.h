@@ -1,6 +1,7 @@
 #pragma once
 
 #include "CoreMinimal.h"
+#include "Core/BindingGateway/Query/UeAgentDomainQuery.h"
 #include "Templates/SharedPointer.h"
 
 namespace UE::UAI::DomainAdapters::Query
@@ -57,5 +58,14 @@ namespace UE::UAI::DomainAdapters::Query
 
 	UEAGENTINTERFACE_API bool TryCreateProductionQueryService(
 		TSharedPtr<IUeAgentQueryService>& OutService,
+		FString& OutError);
+
+	/** Provider contribution owned by the query domain capability. */
+	UEAGENTINTERFACE_API bool
+	TryCreateProductionQueryProviderRegistrations(
+		TArray<
+			UE::UAI::BindingGateway::Query::
+				FUeAgentDomainQueryProviderRegistration>&
+					OutRegistrations,
 		FString& OutError);
 }

@@ -71,7 +71,16 @@ namespace UE::UAI::Composition::DestructiveImport
 			}
 			if (Out.CommandId == TEXT("world.level_content.delete_scope"))
 			{
-				return TryString(Params, TEXT("folder_path"), Out.TargetRef);
+				if (!TryString(Params, TEXT("folder_path"), Out.TargetRef))
+				{
+					return false;
+				}
+				if (Params->HasField(TEXT("managed_id"))
+					&& !TryString(Params, TEXT("managed_id"), Out.ManagedId))
+				{
+					return false;
+				}
+				return true;
 			}
 			if (Out.CommandId == TEXT("world.pcg.cleanup"))
 			{

@@ -40,6 +40,7 @@ namespace
 		TEXT("config.section"),
 		TEXT("editor.dirty_resources"),
 		TEXT("editor.open_assets"),
+		TEXT("landscape.height.read"),
 		TEXT("project.platform"),
 		TEXT("project.settings"),
 		TEXT("project.summary"),
@@ -253,8 +254,8 @@ bool FUeAgentStrictV2T06InventoryAndLegacyExitTest::RunTest(
 		TestTrue(TEXT("every T06 route has a mechanics command"), !Route.MechanicsCommandId.IsEmpty());
 	}
 	Actual.Sort();
-	TestEqual(TEXT("QueryService exposes the audited T06 base plus the T46 reference extension"), Actual, ExpectedCommandIds);
-	TestEqual(TEXT("QueryService routes remain unique"), TSet<FString>(Actual).Num(), 41);
+	TestEqual(TEXT("QueryService exposes the audited base plus reference and Landscape extensions"), Actual, ExpectedCommandIds);
+	TestEqual(TEXT("QueryService routes remain unique"), TSet<FString>(Actual).Num(), 42);
 	TestEqual(TEXT("T06 freezes all twenty-one historical obligations"), HistoricalSuccessors.Num(), 21);
 	for (const TPair<FString, FString>& Pair : HistoricalSuccessors)
 	{
@@ -272,9 +273,9 @@ bool FUeAgentStrictV2T06InventoryAndLegacyExitTest::RunTest(
 	if (Reference)
 	{
 		TestEqual(
-			TEXT("reference asset read composes the exact persisted property mechanics"),
+			TEXT("reference asset read composes its dedicated persisted readback mechanics"),
 			Reference->MechanicsCommandId,
-			FString(TEXT("asset.properties")));
+			FString(TEXT("reference.read")));
 		TestTrue(TEXT("reference asset read requires one exact target"), Reference->bRequiresTarget);
 		TestEqual(
 			TEXT("reference asset read freezes the property written by reference.asset_apply"),
@@ -314,7 +315,7 @@ bool FUeAgentStrictV2T06ExactDispatchTest::RunTest(
 	{
 		return false;
 	}
-	TestEqual(TEXT("isolated QueryService registry contains forty-one contracts"), Fixture.Registry->GetContracts().Num(), 41);
+	TestEqual(TEXT("isolated QueryService registry contains forty-two contracts"), Fixture.Registry->GetContracts().Num(), 42);
 	for (const FString& CommandId : ExpectedCommandIds)
 	{
 		const auto* Contract = Fixture.Registry->FindExact(CommandId);

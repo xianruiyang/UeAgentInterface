@@ -1,6 +1,7 @@
 #include "DomainAdapters/ModelingGeometryEffect/UeAgentModelingGeometryEffectCapabilities.h"
 
 #include "Core/Contract/UeAgentContractJson.h"
+#include "Core/StateSemantic/UeAgentStateRevisionJson.h"
 #include "Dom/JsonObject.h"
 #include "Dom/JsonValue.h"
 #include "Serialization/JsonReader.h"
@@ -69,6 +70,30 @@ namespace UE::UAI::DomainAdapters::ModelingGeometryEffect
 			Schema->SetStringField(TEXT("type"), TEXT("string"));
 			Schema->SetNumberField(TEXT("minLength"), 1);
 			return Schema;
+		}
+
+		TSharedPtr<FJsonObject> StateRevisionSchema()
+		{
+			const TSharedPtr<FJsonObject> Sequence =
+				MakeShared<FJsonObject>();
+			Sequence->SetStringField(TEXT("type"), TEXT("integer"));
+			Sequence->SetNumberField(TEXT("minimum"), 0);
+			Sequence->SetNumberField(
+				TEXT("maximum"),
+				static_cast<double>(
+					FUeAgentStateRevisionJson::MaxExactJsonSequence));
+			const TSharedPtr<FJsonObject> Properties =
+				MakeShared<FJsonObject>();
+			Properties->SetObjectField(TEXT("source_id"), StringSchema());
+			Properties->SetObjectField(TEXT("generation"), StringSchema());
+			Properties->SetObjectField(TEXT("sequence"), Sequence);
+			return ObjectSchema(
+				Properties,
+				{
+					TEXT("source_id"),
+					TEXT("generation"),
+					TEXT("sequence"),
+				});
 		}
 
 		TSharedPtr<FJsonObject> ConstStringSchema(
@@ -313,15 +338,11 @@ namespace UE::UAI::DomainAdapters::ModelingGeometryEffect
 				TEXT("element_kind"),
 				ConstStringSchema(ElementKind));
 			Properties->SetObjectField(TEXT("element_ids"), Ids);
-			Properties->SetObjectField(
-				TEXT("mesh_revision"),
-				StringSchema());
 			return ObjectSchema(
 				Properties,
 				{
 					TEXT("element_kind"),
 					TEXT("element_ids"),
-					TEXT("mesh_revision"),
 				});
 		}
 
@@ -515,7 +536,9 @@ namespace UE::UAI::DomainAdapters::ModelingGeometryEffect
 				&& bValue)
 			{
 				AddRequired(TEXT("target_ref"), StringSchema());
-				AddRequired(TEXT("target_revision"), StringSchema());
+				AddRequired(
+					TEXT("target_revision"),
+					StateRevisionSchema());
 			}
 			if (Row->TryGetBoolField(TEXT("placement"), bValue)
 				&& bValue)
@@ -544,7 +567,9 @@ namespace UE::UAI::DomainAdapters::ModelingGeometryEffect
 				&& bValue)
 			{
 				AddRequired(TEXT("operand_ref"), StringSchema());
-				AddRequired(TEXT("operand_revision"), StringSchema());
+				AddRequired(
+					TEXT("operand_revision"),
+					StateRevisionSchema());
 				AddRequired(
 					TEXT("operand_to_target"),
 					TransformSchema());
@@ -611,7 +636,7 @@ namespace UE::UAI::DomainAdapters::ModelingGeometryEffect
 				StringSchema());
 			RevisionProperties->SetObjectField(
 				TEXT("revision"),
-				StringSchema());
+				StateRevisionSchema());
 			const TSharedPtr<FJsonObject> RevisionSchema =
 				ObjectSchema(
 					RevisionProperties,
@@ -1084,22 +1109,6 @@ namespace UE::UAI::DomainAdapters::ModelingGeometryEffect
 					OutError,
 					TEXT("modeling_geometry_selection_element_invalid"));
 			}
-			FString TargetRevision;
-			FString SelectionRevision;
-			if (!ReadCanonicalString(
-					Current,
-					TEXT("target_revision"),
-					TargetRevision)
-				|| !(*Selection)->TryGetStringField(
-					TEXT("mesh_revision"),
-					SelectionRevision)
-				|| SelectionRevision != TargetRevision)
-			{
-				return Fail(
-					OutError,
-					TEXT(
-						"modeling_geometry_selection_revision_mismatch"));
-			}
 			const TCHAR* SnapshotField =
 				SelectionKind == TEXT("vertex")
 					? TEXT("vertex_ids")
@@ -1491,16 +1500,23 @@ namespace UE::UAI::DomainAdapters::ModelingGeometryEffect
 					TEXT("modeling_geometry_reference_unresolved"));
 			}
 			Current = FUeAgentCanonicalValuePtr(Target->GetValue());
-			FString ExpectedRevision;
-			FString ActualRevision;
-			Payload->TryGetStringField(
-				TEXT("target_revision"),
-				ExpectedRevision);
-			if (!ReadCanonicalString(
-					Current,
+			const TSharedPtr<FJsonObject>* ExpectedRevisionJson = nullptr;
+			TOptional<FUeAgentStateRevision> ExpectedRevision;
+			TOptional<FUeAgentStateRevision> ActualRevision;
+			if (!Payload->TryGetObjectField(
 					TEXT("target_revision"),
+					ExpectedRevisionJson)
+				|| !ExpectedRevisionJson
+				|| !FUeAgentStateRevisionJson::TryParse(
+					*ExpectedRevisionJson,
+					ExpectedRevision)
+				|| !FUeAgentStateRevisionJson::TryReadCanonical(
+					FindCanonicalField(
+						Current,
+						TEXT("target_revision")),
 					ActualRevision)
-				|| ExpectedRevision != ActualRevision)
+				|| ExpectedRevision.GetValue()
+					!= ActualRevision.GetValue())
 			{
 				return Fail(
 					OutError,
@@ -1553,13 +1569,9 @@ namespace UE::UAI::DomainAdapters::ModelingGeometryEffect
 				bOperand)
 			&& bOperand)
 		{
-			FString OperandRevision;
 			Payload->TryGetStringField(
 				TEXT("operand_ref"),
 				OperandRef);
-			Payload->TryGetStringField(
-				TEXT("operand_revision"),
-				OperandRevision);
 			const FUeAgentStateEntry* Operand =
 				FindSnapshotTarget(CurrentSnapshot, OperandRef);
 			if (!Operand)
@@ -1570,12 +1582,23 @@ namespace UE::UAI::DomainAdapters::ModelingGeometryEffect
 			}
 			const FUeAgentCanonicalValuePtr OperandCurrent(
 				Operand->GetValue());
-			FString ActualRevision;
-			if (!ReadCanonicalString(
-					OperandCurrent,
-					TEXT("target_revision"),
+			const TSharedPtr<FJsonObject>* OperandRevisionJson = nullptr;
+			TOptional<FUeAgentStateRevision> OperandRevision;
+			TOptional<FUeAgentStateRevision> ActualRevision;
+			if (!Payload->TryGetObjectField(
+					TEXT("operand_revision"),
+					OperandRevisionJson)
+				|| !OperandRevisionJson
+				|| !FUeAgentStateRevisionJson::TryParse(
+					*OperandRevisionJson,
+					OperandRevision)
+				|| !FUeAgentStateRevisionJson::TryReadCanonical(
+					FindCanonicalField(
+						OperandCurrent,
+						TEXT("target_revision")),
 					ActualRevision)
-				|| ActualRevision != OperandRevision)
+				|| ActualRevision.GetValue()
+					!= OperandRevision.GetValue())
 			{
 				return Fail(
 					OutError,

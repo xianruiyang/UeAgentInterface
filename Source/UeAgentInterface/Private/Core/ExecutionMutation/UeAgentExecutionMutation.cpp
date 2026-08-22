@@ -316,16 +316,22 @@ namespace UE::UAI::ExecutionMutation
 		const int64 InSubjectGeneration,
 		TArray<FString> InMutatedIdentityKeys,
 		TArray<FString> InRequiredBarrierSignals,
-		const bool bInRollbackSupported)
+		const bool bInRollbackSupported,
+		TArray<FAssetDurableTarget> InDurableTargets)
 		: SubjectGeneration(InSubjectGeneration)
 		, MutatedIdentityKeys(NormalizeStrings(
 			MoveTemp(InMutatedIdentityKeys)))
 		, RequiredBarrierSignals(NormalizeStrings(
 			MoveTemp(InRequiredBarrierSignals)))
+		, DurableTargets(MoveTemp(InDurableTargets))
 		, bRollbackSupported(bInRollbackSupported)
 	{
 		bValid = SubjectGeneration >= 0
 			&& MutatedIdentityKeys.Num() > 0;
+		for (const FAssetDurableTarget& Target : DurableTargets)
+		{
+			bValid = bValid && Target.IsValid();
+		}
 	}
 
 	int64 FMutationFacts::GetSubjectGeneration() const
@@ -342,6 +348,12 @@ namespace UE::UAI::ExecutionMutation
 	FMutationFacts::GetRequiredBarrierSignals() const
 	{
 		return RequiredBarrierSignals;
+	}
+
+	const TArray<FAssetDurableTarget>&
+	FMutationFacts::GetDurableTargets() const
+	{
+		return DurableTargets;
 	}
 
 	bool FMutationFacts::IsRollbackSupported() const
@@ -1365,6 +1377,7 @@ namespace UE::UAI::ExecutionMutation
 			if (!Durable->Persist(
 				Operation->DurableSession.ToSharedRef(),
 				FencingToken,
+				Facts,
 				Operation->Request.GetResources(),
 				DurableReceipt,
 				Error))

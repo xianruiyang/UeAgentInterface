@@ -2,6 +2,9 @@
 
 #include "Core/DomainCapability/UeAgentDomainCapability.h"
 #include "DomainAdapters/ModelingGeometry/UeAgentModelingVoxelGrid.h"
+#include "DomainAdapters/ModelingGeometry/UeAgentModelingVoxelGridState.h"
+#include "DynamicMeshActor.h"
+#include "Engine/World.h"
 #include "Module/CommandRegistration/Active/UeAgentActiveCommandComposition.h"
 #include "OperationOwners/ModelingGeometry/UeAgentModelingGeometryOperationOwner.h"
 
@@ -199,5 +202,90 @@ bool FUeAgentModelingVoxelGridContractAndAlgorithmsTest::RunTest(
 				&& FrozenBox.Get() == PublicBox.Get());
 	}
 
+	return !HasAnyErrors();
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(
+	FUeAgentModelingVoxelGridAuthoringStateTest,
+	"UeAgentInterface.ModelingGeometry.VoxelGrid.AuthoringState",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FUeAgentModelingVoxelGridAuthoringStateTest::RunTest(
+	const FString& Parameters)
+{
+	(void)Parameters;
+	UWorld* const World = UWorld::CreateWorld(
+		EWorldType::EditorPreview, false, NAME_None, nullptr, false);
+	if (!TestNotNull(TEXT("state test owns a preview world"), World))
+	{
+		return false;
+	}
+	ADynamicMeshActor* const Actor = World->SpawnActor<ADynamicMeshActor>();
+	if (!TestNotNull(TEXT("state test owns a dynamic mesh actor"), Actor))
+	{
+		World->DestroyWorld(false);
+		World->MarkAsGarbage();
+		return false;
+	}
+
+	UUeAgentModelingVoxelGridStateComponent* Component = nullptr;
+	FString Error;
+	TestTrue(
+		TEXT("one editor-only authoring component is created"),
+		TryCreateAuthoringStateComponent(*Actor, Component, Error));
+	TestNotNull(TEXT("authoring component exists"), Component);
+	UUeAgentModelingVoxelGridStateComponent* Reused = nullptr;
+	TestTrue(
+		TEXT("component creation reuses the unique owner"),
+		TryCreateAuthoringStateComponent(*Actor, Reused, Error));
+	TestTrue(TEXT("component owner is unique"), Reused == Component);
+
+	FVoxelGridAuthoringState Expected;
+	Expected.GridId = TEXT("VG_STATE_TEST");
+	Expected.CellSize = 80.0;
+	Expected.GridToWorld = FTransform(
+		FRotator(0.0, 25.0, 0.0),
+		FVector(100.0, 200.0, 300.0),
+		FVector::OneVector);
+	Expected.AnchorLocal = FVector(40.0);
+	Expected.Cells = {FIntVector(0, 0, 0), FIntVector(1, 2, 3)};
+	Expected.Revision = 7;
+	Expected.CollisionGeneration = TEXT("GEN_STATE_TEST");
+	Expected.CollisionMode = TEXT("exact_box_components");
+	Expected.MaterialRef = TEXT("/Engine/BasicShapes/BasicShapeMaterial");
+	TestTrue(
+		TEXT("valid authoring state writes"),
+		Component && TryWriteAuthoringState(*Component, Expected, 16, Error));
+	FVoxelGridAuthoringState Observed;
+	TestTrue(
+		TEXT("serialized state reads through the canonical helper"),
+		Component && TryReadAuthoringState(*Component, 16, Observed, Error));
+	TestTrue(
+		TEXT("authoring state round-trips exactly"),
+		Observed.GridId == Expected.GridId
+			&& Observed.CellSize == Expected.CellSize
+			&& Observed.GridToWorld.Equals(Expected.GridToWorld, 0.001)
+			&& Observed.AnchorLocal.Equals(Expected.AnchorLocal, 0.001)
+			&& SameCells(Observed.Cells, Expected.Cells)
+			&& Observed.Revision == Expected.Revision
+			&& Observed.CollisionGeneration == Expected.CollisionGeneration
+			&& Observed.CollisionMode == Expected.CollisionMode
+			&& Observed.MaterialRef == Expected.MaterialRef);
+
+	FVoxelGridAuthoringState Invalid = Expected;
+	Invalid.Revision = -1;
+	TestFalse(
+		TEXT("invalid replacement fails closed"),
+		TryWriteAuthoringState(*Component, Invalid, 16, Error));
+	FVoxelGridAuthoringState AfterRejectedWrite;
+	TestTrue(
+		TEXT("failed replacement preserves the previous authoritative state"),
+		TryReadAuthoringState(
+			*Component, 16, AfterRejectedWrite, Error)
+			&& AfterRejectedWrite.Revision == Expected.Revision
+			&& SameCells(AfterRejectedWrite.Cells, Expected.Cells));
+
+	World->DestroyWorld(false);
+	World->MarkAsGarbage();
 	return !HasAnyErrors();
 }

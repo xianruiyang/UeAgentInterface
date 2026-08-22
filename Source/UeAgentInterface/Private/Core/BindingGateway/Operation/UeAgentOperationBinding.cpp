@@ -1082,16 +1082,22 @@ namespace UE::UAI::BindingGateway::Operation
 		if (Outcome.GetStatus() != EVerificationStatus::Verified
 			|| Outcome.GetEffectOutcome() != EEffectOutcome::Complete)
 		{
+			FString FailureDetail = FString::Printf(
+				TEXT("status=%s; effect_outcome=%s"),
+				*LexToString(Outcome.GetStatus()),
+				*LexToString(Outcome.GetEffectOutcome()));
+			if (!Outcome.GetDiagnosticDetail().IsEmpty())
+			{
+				FailureDetail += TEXT("; diagnostic_detail=")
+					+ Outcome.GetDiagnosticDetail();
+			}
 			SetError(
 				OutError,
 				Outcome.GetDiagnosticCode().IsEmpty()
 					? TEXT("operation_verification_failed")
 					: Outcome.GetDiagnosticCode(),
 				Receipt.GetOperationId(),
-				FString::Printf(
-					TEXT("status=%s; effect_outcome=%s"),
-					*LexToString(Outcome.GetStatus()),
-					*LexToString(Outcome.GetEffectOutcome())));
+				MoveTemp(FailureDetail));
 			return false;
 		}
 		FUeAgentCanonicalValuePtr View;

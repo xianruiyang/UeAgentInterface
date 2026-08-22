@@ -225,7 +225,8 @@ namespace
 					TEXT("domain_hook_complete"),
 					TEXT("generated_state_settled")
 				},
-				true);
+				true,
+				DurableTargets);
 			return true;
 		}
 
@@ -244,6 +245,7 @@ namespace
 		int32 ExecuteCalls = 0;
 		int32 RollbackCalls = 0;
 		TArray<int64> ObservedTokens;
+		TArray<FAssetDurableTarget> DurableTargets;
 		TFunction<void()> OnExecute;
 	};
 
@@ -301,12 +303,15 @@ namespace
 		virtual bool Persist(
 			const FExecutionDurableSessionRef& Session,
 			const int64 FencingToken,
+			const FMutationFacts& Facts,
 			FUeAgentResourceTracker& Resources,
 			FDurableReceipt& OutReceipt,
 			FExecutionMutationError& OutError) override
 		{
 			++PersistCalls;
 			ObservedTokens.Add(FencingToken);
+			ObservedDurableTargetCounts.Add(
+				Facts.GetDurableTargets().Num());
 			OutReceipt = MakeReceipt(Status);
 			return true;
 		}
@@ -359,6 +364,7 @@ namespace
 		EDurableStatus Status =
 			EDurableStatus::PersistedUnverified;
 		TArray<int64> ObservedTokens;
+		TArray<int32> ObservedDurableTargetCounts;
 	};
 
 	struct FFixture
@@ -481,6 +487,11 @@ bool FUeAgentExecutionMutationQueueFenceTest::RunTest(
 	FCoordinatorFixture Ports;
 	const TSharedRef<FFakeMutationHook, ESPMode::ThreadSafe> FirstHook =
 		MakeShared<FFakeMutationHook, ESPMode::ThreadSafe>();
+	FirstHook->DurableTargets.Emplace(
+		MakeIdentity(TEXT("TargetA")),
+		TEXT("/Game/UAI/P4_006"),
+		EAssetDurableIntent::Save,
+		ERollbackGrade::DurableBackup);
 	FString FirstId;
 	FExecutionMutationError Error;
 	TestTrue(
@@ -519,6 +530,10 @@ bool FUeAgentExecutionMutationQueueFenceTest::RunTest(
 	TestEqual(TEXT("mutation executes once"), FirstHook->ExecuteCalls, 1);
 	TestEqual(TEXT("durable prepare once"), Ports.Durable->PrepareCalls, 1);
 	TestEqual(TEXT("durable persist once"), Ports.Durable->PersistCalls, 1);
+	TestEqual(
+		TEXT("persist receives one mutation-produced durable target"),
+		Ports.Durable->ObservedDurableTargetCounts,
+		TArray<int32>{1});
 	TestEqual(TEXT("two fence observations"), Ports.Durable->ObservedTokens.Num(), 2);
 	TestEqual(TEXT("prepare fence"), Ports.Durable->ObservedTokens[0], static_cast<int64>(41));
 	TestEqual(TEXT("persist fence"), Ports.Durable->ObservedTokens[1], static_cast<int64>(41));

@@ -10,7 +10,7 @@
     {
       "descriptor_id": "uai.operation.world.actor.create",
       "version": 1,
-      "descriptor_hash": "sha256:ef48592d995cc18cfbe112bac443db7ff7f047a82e126b3a90df0623ca128fc5",
+      "descriptor_hash": "sha256:7ee82512ce0c69025653e38cac976c1aa55d529e8e053c81da8a6c6f0fdc8619",
       "capability_id": "world.actor.create",
       "native_operation_type": "world.entity.create",
       "required_context_facets": ["level", "world"],
@@ -62,10 +62,9 @@
             "type": "array",
             "items": {"type": "string", "minLength": 1},
             "uniqueItems": true
-          },
-          "save_level": {"type": "boolean"}
+          }
         },
-        "required": ["actor_class_ref", "placement", "label", "save_level"],
+        "required": ["actor_class_ref", "placement", "label"],
         "additionalProperties": false
       },
       "result_schema": {
@@ -729,7 +728,7 @@
     {
       "descriptor_id": "uai.operation.world.level_game_mode.update",
       "version": 1,
-      "descriptor_hash": "sha256:86238f06501f0d6a34297302dd18e57ee4602f2efcb52dbf326370ae2e3eb23d",
+      "descriptor_hash": "sha256:49c9cf01c69ba7ada6d488bbcb69c1fcc32a09a4360f1076e83942f116fc4774",
       "capability_id": "world.level_game_mode.update",
       "native_operation_type": "world.state.update",
       "required_context_facets": ["level", "world"],
@@ -737,10 +736,9 @@
       "input_schema": {
         "type": "object",
         "properties": {
-          "game_mode_class_ref": {"type": "string", "minLength": 1},
-          "save_level": {"type": "boolean"}
+          "game_mode_class_ref": {"type": "string", "minLength": 1}
         },
-        "required": ["game_mode_class_ref", "save_level"],
+        "required": ["game_mode_class_ref"],
         "additionalProperties": false
       },
       "result_schema": {
@@ -779,15 +777,14 @@
         },
         "label": "WorldSimpleActorCreate",
         "folder_path": "UAI/Tests",
-        "tags": ["UAIActorCreateTest"],
-        "save_level": false
+        "tags": ["UAIActorCreateTest"]
       },
       "invalid_input": {
         "actor_class_ref": "/Script/Engine.StaticMeshActor",
         "placement": {
           "frame_id": "ue.world",
           "unit": "centimeter",
-          "translation": [125, -75],
+          "translation": [125, -75, 50],
           "rotation_quaternion_xyzw": [0, 0, 0, 1],
           "scale": [1, 1, 1],
           "basis_evidence": "explicit UE world frame"
@@ -946,11 +943,10 @@
     {
       "descriptor_id": "uai.operation.world.level_game_mode.update",
       "valid_input": {
-        "game_mode_class_ref": "/Script/Engine.GameModeBase",
-        "save_level": true
+        "game_mode_class_ref": "/Script/Engine.GameModeBase"
       },
       "invalid_input": {
-        "game_mode_class_ref": "",
+        "game_mode_class_ref": "/Script/Engine.GameModeBase",
         "save_level": true
       }
     }

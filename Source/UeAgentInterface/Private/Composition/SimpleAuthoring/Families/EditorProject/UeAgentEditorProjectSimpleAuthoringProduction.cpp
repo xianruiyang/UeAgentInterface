@@ -1419,11 +1419,15 @@ namespace UE::UAI::Composition::SimpleAuthoring::EditorProject
 			NativeHook.ToSharedRef());
 		ProviderConfig.ExpectedStateProjector =
 			MakeShared<FEditorProjectExpectedStateProjector>();
-		ProviderConfig.PersistedStateReadPort =
-			MakeShared<FEditorProjectStateReadPort>(
+		const TSharedRef<IUeAgentStateReadPort, ESPMode::ThreadSafe>
+			PersistedStateReadPort =
+				MakeShared<FEditorProjectStateReadPort>(
 				PersistedStatePortId,
 				EUeAgentStatePlane::Persisted,
 				PersistedResolver);
+		ProviderConfig.PersistedStateOracle = MakeShared<
+			FStateReadPortPersistedStateOracle,
+			ESPMode::ThreadSafe>(PersistedStateReadPort);
 		ProviderConfig.AbsenceOracle = Config.AbsenceOracle;
 		ProviderConfig.ReferenceOracle = Config.ReferenceOracle;
 

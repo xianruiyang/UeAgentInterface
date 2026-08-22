@@ -39,8 +39,14 @@ namespace UE::UAI::Composition::SimpleAuthoring::OperationHost
 			const FString& CommandId);
 
 #if WITH_DEV_AUTOMATION_TESTS
-	/** Rebinds only the owned automation process to a test-owned real UWorld. */
-	UEAGENTINTERFACE_API void SetAutomationWorldOverride(UWorld* World);
+	/**
+	 * Rebinds only the owned automation process to a test-owned real UWorld.
+	 * Tests that exercise production world-change detection may preserve the
+	 * cached runtime while changing the desired world.
+	 */
+	UEAGENTINTERFACE_API void SetAutomationWorldOverride(
+		UWorld* World,
+		bool bInvalidateRuntime = true);
 
 	/**
 	 * Replaces one delegated mechanics handler inside the owned automation

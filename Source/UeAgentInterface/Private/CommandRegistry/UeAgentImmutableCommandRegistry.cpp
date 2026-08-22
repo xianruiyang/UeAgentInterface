@@ -107,6 +107,24 @@ namespace UE::UAI::CommandRegistry
 			}
 		}
 
+		void NormalizeSchema(FString& SchemaJson)
+		{
+			SchemaJson = Clean(MoveTemp(SchemaJson));
+			if (SchemaJson.IsEmpty())
+			{
+				return;
+			}
+			TSharedPtr<FJsonObject> Schema;
+			FString Error;
+			FString Canonical;
+			if (Json::TryParseObject(SchemaJson, Schema, Error)
+				&& Schema.IsValid()
+				&& Json::TryCanonicalize(Schema, Canonical, Error))
+			{
+				SchemaJson = MoveTemp(Canonical);
+			}
+		}
+
 		void Normalize(FUeAgentCommandDeclaration& Declaration)
 		{
 			Declaration.CommandId =
@@ -124,6 +142,7 @@ namespace UE::UAI::CommandRegistry
 				Field.Name = Clean(MoveTemp(Field.Name));
 				Field.WireType = Clean(MoveTemp(Field.WireType));
 				Field.Description = Clean(MoveTemp(Field.Description));
+				NormalizeSchema(Field.SchemaJson);
 			}
 			for (FUeAgentCommandFieldDeclaration& Field :
 				Declaration.ResultFields)
@@ -131,6 +150,7 @@ namespace UE::UAI::CommandRegistry
 				Field.Name = Clean(MoveTemp(Field.Name));
 				Field.WireType = Clean(MoveTemp(Field.WireType));
 				Field.Description = Clean(MoveTemp(Field.Description));
+				NormalizeSchema(Field.SchemaJson);
 			}
 			for (FUeAgentCommandErrorDeclaration& Error :
 				Declaration.Errors)
@@ -171,6 +191,20 @@ namespace UE::UAI::CommandRegistry
 				{
 					OutError = TEXT("command_contract_incomplete");
 					return false;
+				}
+				if (!Field.SchemaJson.IsEmpty())
+				{
+					TSharedPtr<FJsonObject> Schema;
+					FString SchemaError;
+					if (!Json::TryParseObject(
+							Field.SchemaJson,
+							Schema,
+							SchemaError)
+						|| !Schema.IsValid())
+					{
+						OutError = TEXT("command_contract_field_schema_invalid");
+						return false;
+					}
 				}
 				if (Names.Contains(Field.Name))
 				{
@@ -305,6 +339,19 @@ namespace UE::UAI::CommandRegistry
 			Result->SetStringField(
 				TEXT("description"),
 				Field.Description);
+			if (!Field.SchemaJson.IsEmpty())
+			{
+				TSharedPtr<FJsonObject> Schema;
+				FString Error;
+				if (Json::TryParseObject(
+						Field.SchemaJson,
+						Schema,
+						Error)
+					&& Schema.IsValid())
+				{
+					Result->SetObjectField(TEXT("schema"), Schema);
+				}
+			}
 			return Result;
 		}
 

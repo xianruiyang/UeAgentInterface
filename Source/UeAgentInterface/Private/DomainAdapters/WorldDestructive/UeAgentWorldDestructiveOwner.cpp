@@ -3,10 +3,12 @@
 #include "Components/InstancedStaticMeshComponent.h"
 #include "Components/StaticMeshComponent.h"
 #include "Core/AssetDurable/UeAgentAssetDurable.h"
+#include "Core/AssetDurable/UeAgentPackageHeader.h"
 #include "Core/ContextResource/UeAgentContextResource.h"
 #include "Core/Contract/UeAgentContractJson.h"
 #include "Core/PlanningPreflight/UeAgentPlanningPreflight.h"
 #include "Core/StateSemantic/UeAgentStateSemantic.h"
+#include "Domains/Level/Authoring/UeAgentLevelAuthoringState.h"
 #include "EditorLevelUtils.h"
 #include "Engine/LevelStreaming.h"
 #include "Engine/StaticMesh.h"
@@ -14,6 +16,7 @@
 #include "Engine/World.h"
 #include "EngineUtils.h"
 #include "GameFramework/Actor.h"
+#include "HAL/FileManager.h"
 #include "HAL/ThreadSafeCounter.h"
 #include "Misc/PackageName.h"
 #include "PCGComponent.h"
@@ -272,16 +275,52 @@ namespace UE::UAI::DomainAdapters::WorldDestructive
 				{
 					continue;
 				}
-				const FString Filename = FPackageName::LongPackageNameToFilename(
-					PackageName, FPackageName::GetAssetPackageExtension());
+				UObject* TopLevelAsset = Package->FindAssetInPackage();
+				FString Filename;
+				FString HeaderErrorCode;
+				if (!TryPrepareLoadedPackageHeaderForSave(
+						*Package,
+						TopLevelAsset,
+						Filename,
+						HeaderErrorCode))
+				{
+					OutError = (HeaderErrorCode.IsEmpty()
+						? TEXT("world_destructive_package_header_unavailable")
+						: HeaderErrorCode)
+						+ TEXT(":") + PackageName;
+					return false;
+				}
 				FSavePackageArgs Args;
 				Args.TopLevelFlags = RF_Public | RF_Standalone;
-				if (!UPackage::SavePackage(Package, nullptr, *Filename, Args))
+				if (!UPackage::SavePackage(
+						Package,
+						TopLevelAsset,
+						*Filename,
+						Args))
 				{
 					OutError = TEXT("world_destructive_package_save_failed:")
 						+ PackageName;
 					return false;
 				}
+				FString ObservedFilename;
+				HeaderErrorCode.Reset();
+				if (!TryResolvePackageHeaderFilename(
+						PackageName,
+						ObservedFilename,
+						HeaderErrorCode)
+					|| !ObservedFilename.Equals(
+						Filename,
+						ESearchCase::IgnoreCase)
+					|| !IFileManager::Get().FileExists(*ObservedFilename))
+				{
+					OutError = (HeaderErrorCode.IsEmpty()
+						? TEXT(
+							"world_destructive_package_save_readback_failed")
+						: HeaderErrorCode)
+						+ TEXT(":") + PackageName;
+					return false;
+				}
+				Package->SetDirtyFlag(false);
 				bOutPersisted = true;
 			}
 			return true;
@@ -417,18 +456,42 @@ namespace UE::UAI::DomainAdapters::WorldDestructive
 			{
 				FUeAgentWorldDestructiveResult Result = Base(Request);
 				const FString Root = Request.TargetRef.TrimStartAndEnd();
+				const FString ManagedId = Request.ManagedId.TrimStartAndEnd();
 				if (Root.IsEmpty())
 				{
 					Result.ErrorCode = TEXT("world_folder_path_required");
 					return Result;
 				}
 				TArray<AActor*> Actors;
-				for (TActorIterator<AActor> It(World.Get()); It; ++It)
+				if (!ManagedId.IsEmpty())
 				{
-					const FString Folder = It->GetFolderPath().ToString();
-					if (Folder == Root || Folder.StartsWith(Root + TEXT("/")))
+					AActor* Actor = nullptr;
+					FString ResolveError;
+					if (!UeAgentLevelAuthoring::TryFindManagedActorExact(
+							*World,
+							ManagedId,
+							Root,
+							Actor,
+							ResolveError)
+						|| !Actor)
 					{
-						Actors.Add(*It);
+						Result.ErrorCode =
+							TEXT("world_exact_managed_actor_unavailable");
+						Result.ErrorDetail = ResolveError;
+						return Result;
+					}
+					Result.ResultRef = Actor->GetPathName();
+					Actors.Add(Actor);
+				}
+				else
+				{
+					for (TActorIterator<AActor> It(World.Get()); It; ++It)
+					{
+						const FString Folder = It->GetFolderPath().ToString();
+						if (Folder == Root || Folder.StartsWith(Root + TEXT("/")))
+						{
+							Actors.Add(*It);
+						}
 					}
 				}
 				if (Actors.IsEmpty())
@@ -451,8 +514,17 @@ namespace UE::UAI::DomainAdapters::WorldDestructive
 				bool bAbsent = true;
 				for (TActorIterator<AActor> It(World.Get()); It; ++It)
 				{
-					const FString Folder = It->GetFolderPath().ToString();
-					bAbsent &= Folder != Root && !Folder.StartsWith(Root + TEXT("/"));
+					if (!ManagedId.IsEmpty())
+					{
+						bAbsent &= !UeAgentLevelAuthoring::GetManagedActorId(**It)
+							.Equals(ManagedId, ESearchCase::CaseSensitive);
+					}
+					else
+					{
+						const FString Folder = It->GetFolderPath().ToString();
+						bAbsent &= Folder != Root
+							&& !Folder.StartsWith(Root + TEXT("/"));
+					}
 				}
 				return CommitWorld(
 					Request, {World->GetOutermost()}, true, bAbsent);

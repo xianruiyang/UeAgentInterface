@@ -19,6 +19,20 @@
 
 namespace UeAgentLevelAuthoring {
 namespace {
+bool IsManagedActorIdTag(const FName &Tag) {
+  const FString Text = Tag.ToString();
+  return Text.StartsWith(TEXT("UAI.Id=")) || Text.StartsWith(TEXT("UAI.Id:"));
+}
+
+TArray<FString> GetManagedActorIds(const AActor &Actor) {
+  TArray<FString> Result;
+  for (const FName &Tag : Actor.Tags) {
+    if (IsManagedActorIdTag(Tag))
+      Result.Add(Tag.ToString().Mid(7));
+  }
+  return Result;
+}
+
 FString GuidText(const FGuid &Guid) {
   return Guid.IsValid() ? Guid.ToString(EGuidFormats::DigitsWithHyphensLower)
                         : FString();
@@ -329,6 +343,140 @@ FString GetWorldPath(const UWorld &World) {
 
 FString MakeManagedActorTag(const FString &ManagedId) {
   return FString::Printf(TEXT("UAI.Id=%s"), *ManagedId);
+}
+
+FName GetManagedActorMarkerTag() { return FName(TEXT("UAI.Managed")); }
+
+FString MakeManagedActorFolderPath(const FString &OwnerId) {
+  const FString CleanOwnerId = OwnerId.TrimStartAndEnd();
+  if (CleanOwnerId.IsEmpty())
+    return FString();
+  for (const TCHAR Character : CleanOwnerId) {
+    if (!FChar::IsAlnum(Character) && Character != TEXT('_') &&
+        Character != TEXT('-'))
+      return FString();
+  }
+  return TEXT("UAI/Managed/") + CleanOwnerId;
+}
+
+bool TryBindManagedActorOwnership(AActor &Actor, const FString &ManagedId,
+                                  const FString &OwnerId,
+                                  FString &OutError) {
+  OutError.Reset();
+  const FString CleanManagedId = ManagedId.TrimStartAndEnd();
+  const FString FolderPath = MakeManagedActorFolderPath(OwnerId);
+  if (CleanManagedId.IsEmpty()) {
+    OutError = TEXT("level_managed_actor_id_missing");
+    return false;
+  }
+  if (FolderPath.IsEmpty()) {
+    OutError = TEXT("level_managed_actor_owner_invalid:") + OwnerId;
+    return false;
+  }
+  UWorld *const World = Actor.GetWorld();
+  if (!World) {
+    OutError = TEXT("level_managed_actor_world_unavailable");
+    return false;
+  }
+  for (const FString &ExistingManagedId : GetManagedActorIds(Actor)) {
+    if (ExistingManagedId.IsEmpty() ||
+        !ExistingManagedId.Equals(CleanManagedId,
+                                  ESearchCase::CaseSensitive)) {
+      OutError = TEXT("level_managed_actor_id_conflict:") + ExistingManagedId;
+      return false;
+    }
+  }
+  for (TActorIterator<AActor> It(World); It; ++It) {
+    AActor *const Candidate = *It;
+    if (!Candidate || Candidate == &Actor || Candidate->IsActorBeingDestroyed())
+      continue;
+    for (const FString &ExistingManagedId : GetManagedActorIds(*Candidate)) {
+      if (ExistingManagedId.Equals(CleanManagedId,
+                                   ESearchCase::CaseSensitive)) {
+        OutError = TEXT("level_managed_actor_id_duplicate:") + CleanManagedId;
+        return false;
+      }
+    }
+  }
+
+  const TArray<FName> OriginalTags = Actor.Tags;
+  const FName OriginalFolder = Actor.GetFolderPath();
+  Actor.Modify();
+  Actor.Tags.RemoveAll(
+      [](const FName &Tag) { return IsManagedActorIdTag(Tag); });
+  Actor.Tags.AddUnique(GetManagedActorMarkerTag());
+  Actor.Tags.AddUnique(FName(*MakeManagedActorTag(CleanManagedId)));
+  Actor.SetFolderPath(FName(*FolderPath));
+  const TArray<FString> AppliedManagedIds = GetManagedActorIds(Actor);
+  if (!Actor.ActorHasTag(GetManagedActorMarkerTag()) ||
+      AppliedManagedIds.Num() != 1 ||
+      !AppliedManagedIds[0].Equals(CleanManagedId,
+                                   ESearchCase::CaseSensitive) ||
+      !GetActorFolderPathText(Actor).Equals(FolderPath,
+                                            ESearchCase::CaseSensitive)) {
+    Actor.Tags = OriginalTags;
+    Actor.SetFolderPath(OriginalFolder);
+    OutError = TEXT("level_managed_actor_ownership_apply_failed");
+    return false;
+  }
+  return true;
+}
+
+bool TryFindManagedActorExact(UWorld &World, const FString &ManagedId,
+                              const FString &ExpectedFolderPath,
+                              AActor *&OutActor, FString &OutError) {
+  OutActor = nullptr;
+  OutError.Reset();
+  const FString CleanManagedId = ManagedId.TrimStartAndEnd();
+  const FString CleanFolderPath = ExpectedFolderPath.TrimStartAndEnd();
+  if (CleanManagedId.IsEmpty()) {
+    OutError = TEXT("level_managed_actor_id_missing");
+    return false;
+  }
+  if (CleanFolderPath.IsEmpty()) {
+    OutError = TEXT("level_managed_actor_folder_missing");
+    return false;
+  }
+
+  TArray<AActor *> Matches;
+  for (TActorIterator<AActor> It(&World); It; ++It) {
+    AActor *const Candidate = *It;
+    if (!Candidate || Candidate->IsActorBeingDestroyed())
+      continue;
+    const TArray<FString> CandidateIds = GetManagedActorIds(*Candidate);
+    if (CandidateIds.ContainsByPredicate([&CleanManagedId](const FString &Id) {
+          return Id.Equals(CleanManagedId, ESearchCase::CaseSensitive);
+        }))
+      Matches.Add(Candidate);
+  }
+  if (Matches.IsEmpty()) {
+    OutError = TEXT("level_managed_actor_not_found:") + CleanManagedId;
+    return false;
+  }
+  if (Matches.Num() != 1) {
+    OutError = TEXT("level_managed_actor_id_duplicate:") + CleanManagedId;
+    return false;
+  }
+
+  AActor *const Candidate = Matches[0];
+  const TArray<FString> CandidateIds = GetManagedActorIds(*Candidate);
+  if (CandidateIds.Num() != 1) {
+    OutError = TEXT("level_managed_actor_identity_ambiguous:")
+        + Candidate->GetPathName();
+    return false;
+  }
+  if (!Candidate->ActorHasTag(GetManagedActorMarkerTag())) {
+    OutError = TEXT("level_managed_actor_marker_missing:")
+        + Candidate->GetPathName();
+    return false;
+  }
+  const FString ObservedFolder = GetActorFolderPathText(*Candidate);
+  if (!ObservedFolder.Equals(CleanFolderPath, ESearchCase::CaseSensitive)) {
+    OutError = TEXT("level_managed_actor_folder_mismatch:") + ObservedFolder;
+    return false;
+  }
+  OutActor = Candidate;
+  return true;
 }
 
 FString GetManagedActorId(const AActor &Actor) {

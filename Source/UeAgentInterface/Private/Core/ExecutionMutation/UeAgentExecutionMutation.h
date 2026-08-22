@@ -11,6 +11,7 @@
 namespace UE::UAI::ExecutionMutation
 {
 	using AssetDurable::FDurableReceipt;
+	using AssetDurable::FAssetDurableTarget;
 	using ContextResource::EUeAgentRequestKind;
 	using ContextResource::FUeAgentCancellationToken;
 	using ContextResource::FUeAgentExecutionContextRef;
@@ -154,11 +155,13 @@ namespace UE::UAI::ExecutionMutation
 			int64 InSubjectGeneration,
 			TArray<FString> InMutatedIdentityKeys,
 			TArray<FString> InRequiredBarrierSignals,
-			bool bInRollbackSupported);
+			bool bInRollbackSupported,
+			TArray<FAssetDurableTarget> InDurableTargets = {});
 
 		int64 GetSubjectGeneration() const;
 		const TArray<FString>& GetMutatedIdentityKeys() const;
 		const TArray<FString>& GetRequiredBarrierSignals() const;
+		const TArray<FAssetDurableTarget>& GetDurableTargets() const;
 		bool IsRollbackSupported() const;
 		bool IsValid() const;
 
@@ -166,6 +169,7 @@ namespace UE::UAI::ExecutionMutation
 		int64 SubjectGeneration = -1;
 		TArray<FString> MutatedIdentityKeys;
 		TArray<FString> RequiredBarrierSignals;
+		TArray<FAssetDurableTarget> DurableTargets;
 		bool bRollbackSupported = false;
 		bool bValid = false;
 	};
@@ -388,6 +392,7 @@ namespace UE::UAI::ExecutionMutation
 		virtual bool Persist(
 			const FExecutionDurableSessionRef& Session,
 			int64 FencingToken,
+			const FMutationFacts& Facts,
 			FUeAgentResourceTracker& Resources,
 			FDurableReceipt& OutReceipt,
 			FExecutionMutationError& OutError) = 0;

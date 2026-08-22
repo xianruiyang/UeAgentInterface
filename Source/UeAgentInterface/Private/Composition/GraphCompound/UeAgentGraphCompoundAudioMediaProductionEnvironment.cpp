@@ -4,6 +4,7 @@
 #include "AssetRegistry/AssetRegistryModule.h"
 #include "Core/AssetDurable/UeAgentAssetDurable.h"
 #include "Core/AssetDurable/UeAgentPackageAssetRevision.h"
+#include "Core/AssetDurable/UeAgentPackageHeader.h"
 #include "Core/Contract/UeAgentContractJson.h"
 #include "Core/StateSemantic/UeAgentCanonicalValueJson.h"
 #include "Core/Verification/UeAgentIndependentReadback.h"
@@ -895,7 +896,11 @@ namespace UE::UAI::Composition::GraphCompound
 		{
 			OutSnapshot.Reset();
 			FString Filename;
-			if (!TryResolvePackageAssetFilename(Request.GetTargetRef(), Filename))
+			FString HeaderErrorCode;
+			if (!TryResolvePackageHeaderFilename(
+					Request.GetTargetRef(),
+					Filename,
+					HeaderErrorCode))
 			{
 				SetError(OutError,
 					TEXT("graph_compound_audio_media_target_invalid"),

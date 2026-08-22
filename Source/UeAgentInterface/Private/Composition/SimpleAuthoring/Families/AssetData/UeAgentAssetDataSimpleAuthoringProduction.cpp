@@ -2474,11 +2474,14 @@ namespace UE::UAI::Composition::SimpleAuthoring::AssetData
 		ProviderConfig.ExpectedStateProjector =
 			MakeShared<FAssetDataExpectedStateProjector>(
 				PreStateResolver);
-		ProviderConfig.PersistedStateReadPort =
-			MakeShared<FAssetDataStateReadPort>(
+		const TSharedRef<IUeAgentStateReadPort, ESPMode::ThreadSafe>
+			PersistedStateReadPort = MakeShared<FAssetDataStateReadPort>(
 				PersistedStatePortId,
 				EUeAgentStatePlane::Persisted,
 				PersistedResolver);
+		ProviderConfig.PersistedStateOracle = MakeShared<
+			FStateReadPortPersistedStateOracle,
+			ESPMode::ThreadSafe>(PersistedStateReadPort);
 		ProviderConfig.AbsenceOracle = Config.AbsenceOracle;
 		ProviderConfig.ReferenceOracle = Config.ReferenceOracle;
 

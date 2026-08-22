@@ -1,4 +1,5 @@
 #include "Core/AssetDurable/UeAgentAssetDurable.h"
+#include "Core/AssetDurable/UeAgentPackageHeader.h"
 
 #include "Core/Contract/UeAgentContract.h"
 #include "Dom/JsonObject.h"
@@ -24,6 +25,7 @@ namespace UE::UAI::AssetDurable
 	using UE::UAI::Contract::FUeAgentDescriptorIdentity;
 	using UE::UAI::PlanningPreflight::FChangeSet;
 	using UE::UAI::PlanningPreflight::FImpactSet;
+	using UE::UAI::PlanningPreflight::FPlannedChange;
 	using UE::UAI::PlanningPreflight::FPlanningPreflightPlan;
 	using UE::UAI::StateSemantic::FUeAgentStateRevision;
 
@@ -85,6 +87,17 @@ namespace UE::UAI::AssetDurable
 			return Digest.Mid(7);
 		}
 
+		FString DurableArtifactId(
+			const FAssetDurableTarget& Target,
+			const FString& Role)
+		{
+			return Target.GetIdentity().GetCanonicalKey()
+				+ TEXT(":")
+				+ ArtifactToken(Target.GetDurableTargetKey())
+				+ TEXT(":")
+				+ Role;
+		}
+
 		FString BackupDataPath(
 			const FAssetDurableSessionRef& Session,
 			const FDurableArtifact& Artifact)
@@ -118,19 +131,39 @@ namespace UE::UAI::AssetDurable
 
 		const FDurableArtifact* FindArtifact(
 			const FAssetDurableSessionRef& Session,
-			const FString& IdentityKey,
+			const FAssetDurableTarget& Target,
 			const FString& Role)
 		{
 			return Session->GetInventory().GetArtifacts()
 				.FindByPredicate(
-					[&IdentityKey, &Role](
+					[&Target, &Role](
 						const FDurableArtifact& Artifact)
 					{
 						return Artifact.GetTargetIdentity()
 								.GetCanonicalKey()
-								== IdentityKey
+								== Target.GetIdentity()
+									.GetCanonicalKey()
+							&& Artifact.GetArtifactKind()
+								== Target.GetArtifactKind()
+							&& Artifact.GetDurableLocation()
+								== Target.GetDurableLocation()
 							&& Artifact.GetRole() == Role;
 					});
+		}
+
+		bool AreSameArtifact(
+			const FDurableArtifact& Left,
+			const FDurableArtifact& Right)
+		{
+			return Left.GetArtifactId() == Right.GetArtifactId()
+				&& Left.GetTargetIdentity().GetCanonicalKey()
+					== Right.GetTargetIdentity().GetCanonicalKey()
+				&& Left.GetArtifactKind() == Right.GetArtifactKind()
+				&& Left.GetDurableLocation()
+					== Right.GetDurableLocation()
+				&& Left.GetFinalPath() == Right.GetFinalPath()
+				&& Left.GetIntent() == Right.GetIntent()
+				&& Left.GetRole() == Right.GetRole();
 		}
 
 		bool FilesEqual(
@@ -210,6 +243,7 @@ namespace UE::UAI::AssetDurable
 			return Phase == TEXT("inventory_ready")
 				|| Phase == TEXT("backups_ready")
 				|| Phase == TEXT("prepared")
+				|| Phase == TEXT("inventory_extended")
 				|| Phase == TEXT("staged")
 				|| Phase == TEXT("published")
 				|| Phase == TEXT("persisted_unverified")
@@ -503,6 +537,42 @@ namespace UE::UAI::AssetDurable
 			return true;
 		}
 
+		bool TryValidateTargetAgainstPlan(
+			const FPlanningPreflightPlanRef& Plan,
+			const FAssetDurableTarget& Target,
+			FAssetDurableError& OutError)
+		{
+			const FString& IdentityKey =
+				Target.GetIdentity().GetCanonicalKey();
+			const FPlannedChange* PlannedChange =
+				Plan->GetChangeSet().GetChanges().FindByPredicate(
+					[&IdentityKey](const FPlannedChange& Change)
+					{
+						return Change.GetIdentity().GetCanonicalKey()
+							== IdentityKey;
+					});
+			if (!PlannedChange)
+			{
+				OutError = FAssetDurableError(
+					TEXT("durable_target_not_in_plan"),
+					IdentityKey);
+				return false;
+			}
+			const bool bTargetDeletes =
+				Target.GetIntent() == EAssetDurableIntent::Delete;
+			const bool bPlanDeletes =
+				PlannedChange->GetIntent()
+				== UE::UAI::PlanningPreflight::EChangeIntent::Delete;
+			if (bTargetDeletes != bPlanDeletes)
+			{
+				OutError = FAssetDurableError(
+					TEXT("durable_intent_plan_mismatch"),
+					IdentityKey);
+				return false;
+			}
+			return true;
+		}
+
 		bool TryValidateRequest(
 			const FAssetDurableRequest& Request,
 			FAssetDurableError& OutError)
@@ -513,42 +583,17 @@ namespace UE::UAI::AssetDurable
 					TEXT("durable_request_invalid"));
 				return false;
 			}
-			TMap<
-				FString,
-				UE::UAI::PlanningPreflight::EChangeIntent> Planned;
-			for (const auto& Change :
-				Request.GetPlan()->GetChangeSet().GetChanges())
-			{
-				Planned.Add(
-					Change.GetIdentity().GetCanonicalKey(),
-					Change.GetIntent());
-			}
 			TSet<FString> Seen;
 			TSet<FString> Owners;
 			for (const FAssetDurableTarget& Target :
 				Request.GetTargets())
 			{
-				const FString& Key =
-					Target.GetIdentity().GetCanonicalKey();
-				const UE::UAI::PlanningPreflight::EChangeIntent*
-					PlannedIntent = Planned.Find(Key);
-				if (!PlannedIntent)
+				const FString Key = Target.GetDurableTargetKey();
+				if (!TryValidateTargetAgainstPlan(
+						Request.GetPlan(),
+						Target,
+						OutError))
 				{
-					OutError = FAssetDurableError(
-						TEXT("durable_target_not_in_plan"),
-						Key);
-					return false;
-				}
-				const bool bTargetDeletes =
-					Target.GetIntent() == EAssetDurableIntent::Delete;
-				const bool bPlanDeletes =
-					*PlannedIntent
-					== UE::UAI::PlanningPreflight::EChangeIntent::Delete;
-				if (bTargetDeletes != bPlanDeletes)
-				{
-					OutError = FAssetDurableError(
-						TEXT("durable_intent_plan_mismatch"),
-						Key);
 					return false;
 				}
 				if (Seen.Contains(Key))
@@ -622,7 +667,7 @@ namespace UE::UAI::AssetDurable
 				Request.GetTargets())
 			{
 				Targets.Add(
-					Target.GetIdentity().GetCanonicalKey(),
+					Target.GetDurableTargetKey(),
 					&Target);
 			}
 			FString PreviousId;
@@ -630,12 +675,17 @@ namespace UE::UAI::AssetDurable
 			for (const FDurableArtifact& Artifact :
 				Inventory.GetArtifacts())
 			{
-				const FString& Key =
-					Artifact.GetTargetIdentity().GetCanonicalKey();
+				const FString Key =
+					LexToString(Artifact.GetArtifactKind())
+					+ TEXT(":")
+					+ Artifact.GetDurableLocation().ToLower();
 				const FAssetDurableTarget* const* TargetPtr =
 					Targets.Find(Key);
 				if (!Artifact.IsValid()
 					|| !TargetPtr
+					|| (*TargetPtr)->GetIdentity().GetCanonicalKey()
+						!= Artifact.GetTargetIdentity()
+							.GetCanonicalKey()
 					|| (*TargetPtr)->GetArtifactKind()
 						!= Artifact.GetArtifactKind()
 					|| (*TargetPtr)->GetDurableLocation()
@@ -1161,10 +1211,21 @@ namespace UE::UAI::AssetDurable
 						TEXT("artifact inventory is not canonical"));
 					return false;
 				}
+				const FAssetDurableTarget ParsedTarget(
+					Identity,
+					ArtifactKind,
+					DurableLocation,
+					Intent,
+					ERollbackGrade::DurableBackup);
+				const FString TargetKey =
+					ParsedTarget.GetDurableTargetKey();
 				const FAssetDurableTarget* ExistingTarget =
-					TargetsByKey.Find(Identity.GetCanonicalKey());
+					TargetsByKey.Find(TargetKey);
 				if (ExistingTarget
-					&& (ExistingTarget->GetArtifactKind()
+					&& (ExistingTarget->GetIdentity()
+							.GetCanonicalKey()
+							!= Identity.GetCanonicalKey()
+						|| ExistingTarget->GetArtifactKind()
 							!= ArtifactKind
 						|| ExistingTarget->GetDurableLocation()
 							!= DurableLocation
@@ -1186,13 +1247,8 @@ namespace UE::UAI::AssetDurable
 				ArtifactIds.Add(ArtifactId);
 				PreviousArtifactId = ArtifactId;
 				TargetsByKey.Add(
-					Identity.GetCanonicalKey(),
-					FAssetDurableTarget(
-						Identity,
-						ArtifactKind,
-						DurableLocation,
-						Intent,
-						ERollbackGrade::DurableBackup));
+					TargetKey,
+					ParsedTarget);
 			}
 			if (Artifacts.IsEmpty())
 			{
@@ -1224,8 +1280,8 @@ namespace UE::UAI::AssetDurable
 				[](const FAssetDurableTarget& Left,
 					const FAssetDurableTarget& Right)
 				{
-					return Left.GetIdentity().GetCanonicalKey()
-						< Right.GetIdentity().GetCanonicalKey();
+					return Left.GetDurableTargetKey()
+						< Right.GetDurableTargetKey();
 				});
 			const FAssetDurableRequest Request(
 				RecoveryPlan(JournalId, Fingerprint),
@@ -1576,6 +1632,13 @@ namespace UE::UAI::AssetDurable
 	const FString& FAssetDurableTarget::GetPackageName() const
 	{
 		return PackageName;
+	}
+
+	FString FAssetDurableTarget::GetDurableTargetKey() const
+	{
+		return LexToString(ArtifactKind)
+			+ TEXT(":")
+			+ DurableLocation.ToLower();
 	}
 
 	EAssetDurableIntent FAssetDurableTarget::GetIntent() const
@@ -2030,36 +2093,19 @@ namespace UE::UAI::AssetDurable
 					PackageName);
 				return false;
 			}
-			UPackage* const LoadedPackage =
-				FindPackage(nullptr, *PackageName);
-			const bool bMapPackage =
-				LoadedPackage && LoadedPackage->ContainsMap();
-			const FString Extension = bMapPackage
-				? FPackageName::GetMapPackageExtension()
-				: FPackageName::GetAssetPackageExtension();
 			FString HeaderPath;
-			if (!FPackageName::TryConvertLongPackageNameToFilename(
-				PackageName,
-				HeaderPath,
-				Extension))
+			FString HeaderErrorCode;
+			if (!TryResolvePackageHeaderFilename(
+					PackageName,
+					HeaderPath,
+					HeaderErrorCode))
 			{
 				OutError = FAssetDurableError(
-					TEXT("durable_package_path_unavailable"),
+					HeaderErrorCode.IsEmpty()
+						? TEXT("durable_package_path_unavailable")
+						: HeaderErrorCode,
 					PackageName);
 				return false;
-			}
-			if (!LoadedPackage)
-			{
-				FString MapPath;
-				if (FPackageName::TryConvertLongPackageNameToFilename(
-						PackageName,
-						MapPath,
-						FPackageName::GetMapPackageExtension())
-					&& IFileManager::Get().FileExists(*MapPath)
-					&& !IFileManager::Get().FileExists(*HeaderPath))
-				{
-					HeaderPath = MoveTemp(MapPath);
-				}
 			}
 			HeaderPath = FullPath(HeaderPath);
 			const FString FoldedPath = HeaderPath.ToLower();
@@ -2075,17 +2121,15 @@ namespace UE::UAI::AssetDurable
 				FPaths::ChangeExtension(
 					HeaderPath,
 					TEXT("upayload"));
-			const FString& IdentityKey =
-				Target.GetIdentity().GetCanonicalKey();
 			Artifacts.Emplace(
-				IdentityKey + TEXT(":package_header"),
+				DurableArtifactId(Target, TEXT("package_header")),
 				Target.GetIdentity(),
 				PackageName,
 				HeaderPath,
 				Target.GetIntent(),
 				TEXT("package_header"));
 			Artifacts.Emplace(
-				IdentityKey + TEXT(":package_payload"),
+				DurableArtifactId(Target, TEXT("package_payload")),
 				Target.GetIdentity(),
 				PackageName,
 				PayloadPath,
@@ -2210,35 +2254,46 @@ namespace UE::UAI::AssetDurable
 					Target.GetPackageName());
 				return false;
 			}
-			const FString AssetName =
-				FPackageName::GetLongPackageAssetName(
-					Target.GetPackageName());
-			UObject* const TopLevelAsset =
-				FindObject<UObject>(Package, *AssetName);
-			if (!TopLevelAsset
-				|| TopLevelAsset->GetOutermost() != Package)
-			{
-				OutError = FAssetDurableError(
-					TEXT("durable_package_top_level_asset_missing"),
-					Target.GetPackageName());
-				return false;
-			}
-			const FString& Key =
-				Target.GetIdentity().GetCanonicalKey();
+			UObject* TopLevelAsset =
+				Package->FindAssetInPackage();
 			const FDurableArtifact* Header =
 				FindArtifact(
 					Session,
-					Key,
+					Target,
 					TEXT("package_header"));
 			const FDurableArtifact* Payload =
 				FindArtifact(
 					Session,
-					Key,
+					Target,
 					TEXT("package_payload"));
 			if (!Header || !Payload)
 			{
 				OutError = FAssetDurableError(
 					TEXT("durable_inventory_invalid"),
+					Target.GetPackageName());
+				return false;
+			}
+			FString PreparedHeaderPath;
+			FString HeaderErrorCode;
+			if (!TryPrepareLoadedPackageHeaderForSave(
+					*Package,
+					TopLevelAsset,
+					PreparedHeaderPath,
+					HeaderErrorCode))
+			{
+				OutError = FAssetDurableError(
+					HeaderErrorCode.IsEmpty()
+						? TEXT("durable_package_header_prepare_failed")
+						: HeaderErrorCode,
+					Target.GetPackageName());
+				return false;
+			}
+			if (!FullPath(PreparedHeaderPath).Equals(
+					FullPath(Header->GetFinalPath()),
+					ESearchCase::IgnoreCase))
+			{
+				OutError = FAssetDurableError(
+					TEXT("durable_package_inventory_header_mismatch"),
 					Target.GetPackageName());
 				return false;
 			}
@@ -2612,8 +2667,9 @@ namespace UE::UAI::AssetDurable
 			}
 			FinalPaths.Add(FoldedPath);
 			Artifacts.Emplace(
-				Target.GetIdentity().GetCanonicalKey()
-					+ TEXT(":project_config_document"),
+				DurableArtifactId(
+					Target,
+					TEXT("project_config_document")),
 				Target.GetIdentity(),
 				EDurableArtifactKind::ProjectConfig,
 				Target.GetDurableLocation(),
@@ -2738,7 +2794,7 @@ namespace UE::UAI::AssetDurable
 			const FDurableArtifact* Artifact =
 				FindArtifact(
 					Session,
-					Target.GetIdentity().GetCanonicalKey(),
+					Target,
 					TEXT("project_config_document"));
 			if (!Artifact)
 			{
@@ -3117,6 +3173,233 @@ namespace UE::UAI::AssetDurable
 		return true;
 	}
 
+	bool TryEnlistAssetDurableTargets(
+		const FAssetDurableSessionRef& Session,
+		const TArray<FAssetDurableTarget>& MutationTargets,
+		IAssetDurableBackend& Backend,
+		const int64 CurrentFencingToken,
+		FUeAgentResourceTracker& Resources,
+		FAssetDurableSessionPtr& OutSession,
+		FAssetDurableError& OutError)
+	{
+		OutSession.Reset();
+		OutError = FAssetDurableError();
+		const FString& CurrentPhase = Session->GetCurrentPhase();
+		if ((CurrentPhase != TEXT("prepared")
+				&& CurrentPhase != TEXT("inventory_extended"))
+			|| !TryCheckFence(
+				Session,
+				CurrentFencingToken,
+				OutError))
+		{
+			if (!OutError.IsPresent())
+			{
+				OutError = FAssetDurableError(
+					TEXT("durable_enlist_phase_invalid"),
+					CurrentPhase);
+			}
+			return false;
+		}
+		if (MutationTargets.IsEmpty())
+		{
+			OutSession = Session;
+			return true;
+		}
+
+		TArray<FAssetDurableTarget> CombinedTargets =
+			Session->GetRequest().GetTargets();
+		for (const FAssetDurableTarget& Candidate : MutationTargets)
+		{
+			if (!Candidate.IsValid()
+				|| Candidate.GetRollbackGrade() == ERollbackGrade::None
+				|| !TryValidateTargetAgainstPlan(
+					Session->GetRequest().GetPlan(),
+					Candidate,
+					OutError))
+			{
+				if (!OutError.IsPresent())
+				{
+					OutError = FAssetDurableError(
+						TEXT("durable_enlist_target_invalid"),
+						Candidate.GetDurableTargetKey());
+				}
+				return false;
+			}
+			const FString CandidateKey =
+				Candidate.GetDurableTargetKey();
+			const FAssetDurableTarget* Existing =
+				CombinedTargets.FindByPredicate(
+					[&CandidateKey](
+						const FAssetDurableTarget& Target)
+					{
+						return Target.GetDurableTargetKey()
+							== CandidateKey;
+					});
+			if (Existing)
+			{
+				if (Existing->GetIntent() != Candidate.GetIntent())
+				{
+					OutError = FAssetDurableError(
+						TEXT("durable_enlist_target_conflict"),
+						CandidateKey);
+					return false;
+				}
+				continue;
+			}
+			CombinedTargets.Add(Candidate);
+		}
+
+		if (CombinedTargets.Num()
+			== Session->GetRequest().GetTargets().Num())
+		{
+			OutSession = Session;
+			return true;
+		}
+		if (!TryCharge(
+				Resources,
+				TEXT("/c8d/enlist/inventory"),
+				1,
+				CombinedTargets.Num(),
+				0,
+				0,
+				CombinedTargets.Num() + 1,
+				OutError))
+		{
+			return false;
+		}
+		const FAssetDurableRequest CombinedRequest(
+			Session->GetRequest().GetPlan(),
+			MoveTemp(CombinedTargets),
+			Session->GetRequest().GetFencingToken(),
+			Session->GetRequest().GetJournalOwnerId(),
+			Session->GetRequest().GetAtomicityMode());
+		FDurableInventory CombinedInventory;
+		if (!TryValidateRequest(CombinedRequest, OutError)
+			|| !Backend.SupportsAtomicity(
+				CombinedRequest.GetAtomicityMode())
+			|| !Backend.BuildInventory(
+				CombinedRequest,
+				Resources,
+				CombinedInventory,
+				OutError)
+			|| !TryValidateInventory(
+				CombinedRequest,
+				CombinedInventory,
+				Backend.GetAllowedArtifactRoots(),
+				Resources,
+				OutError))
+		{
+			if (!OutError.IsPresent())
+			{
+				OutError = FAssetDurableError(
+					TEXT("durable_enlist_inventory_failed"));
+			}
+			return false;
+		}
+
+		TArray<FDurableArtifact> NewArtifacts;
+		for (const FDurableArtifact& ExistingArtifact :
+			Session->GetInventory().GetArtifacts())
+		{
+			const FDurableArtifact* CombinedArtifact =
+				CombinedInventory.GetArtifacts().FindByPredicate(
+					[&ExistingArtifact](
+						const FDurableArtifact& Artifact)
+					{
+						return Artifact.GetArtifactId()
+							== ExistingArtifact.GetArtifactId();
+					});
+			if (!CombinedArtifact
+				|| !AreSameArtifact(
+					ExistingArtifact,
+					*CombinedArtifact))
+			{
+				OutError = FAssetDurableError(
+					TEXT("durable_enlist_inventory_conflict"),
+					ExistingArtifact.GetArtifactId());
+				return false;
+			}
+		}
+		for (const FDurableArtifact& Artifact :
+			CombinedInventory.GetArtifacts())
+		{
+			const bool bExisting = Session->GetInventory()
+				.GetArtifacts().ContainsByPredicate(
+					[&Artifact](const FDurableArtifact& Existing)
+					{
+						return Existing.GetArtifactId()
+							== Artifact.GetArtifactId();
+					});
+			if (!bExisting)
+			{
+				NewArtifacts.Add(Artifact);
+			}
+		}
+		if (NewArtifacts.IsEmpty())
+		{
+			OutError = FAssetDurableError(
+				TEXT("durable_enlist_inventory_unchanged"));
+			return false;
+		}
+
+		FString DeltaInventoryHash;
+		if (!TryComputeDurableInventoryHash(
+				NewArtifacts,
+				Resources,
+				DeltaInventoryHash,
+				OutError))
+		{
+			return false;
+		}
+		const FAssetDurableSessionRef DeltaSession =
+			MakeShared<const FAssetDurableSession>(
+				CombinedRequest,
+				FDurableInventory(
+					MoveTemp(NewArtifacts),
+					MoveTemp(DeltaInventoryHash)),
+				Session->GetJournalId(),
+				Session->GetJournalPath(),
+				Session->GetJournalRoot(),
+				Session->GetTransactionRoot(),
+				Session->GetStagingRoot(),
+				Session->GetPhaseHistory());
+		if (!Backend.CaptureBackups(
+				DeltaSession,
+				Resources,
+				OutError))
+		{
+			if (!OutError.IsPresent())
+			{
+				OutError = FAssetDurableError(
+					TEXT("durable_enlist_backup_failed"));
+			}
+			return false;
+		}
+
+		FAssetDurableSessionRef ExtendedSession =
+			MakeShared<const FAssetDurableSession>(
+				CombinedRequest,
+				MoveTemp(CombinedInventory),
+				Session->GetJournalId(),
+				Session->GetJournalPath(),
+				Session->GetJournalRoot(),
+				Session->GetTransactionRoot(),
+				Session->GetStagingRoot(),
+				Session->GetPhaseHistory());
+		ExtendedSession = Advance(
+			ExtendedSession,
+			TEXT("inventory_extended"));
+		if (!TryWriteJournal(
+				ExtendedSession,
+				Resources,
+				OutError))
+		{
+			return false;
+		}
+		OutSession = ExtendedSession;
+		return true;
+	}
+
 	bool TryPersistAssetDurability(
 		const FAssetDurableSessionRef& Session,
 		IAssetDurableBackend& Backend,
@@ -3385,7 +3668,8 @@ namespace UE::UAI::AssetDurable
 			FDurableReceipt Current;
 			if (Phase == TEXT("inventory_ready")
 				|| Phase == TEXT("backups_ready")
-				|| Phase == TEXT("prepared"))
+				|| Phase == TEXT("prepared")
+				|| Phase == TEXT("inventory_extended"))
 			{
 				const FAssetDurableSessionRef RolledBack =
 					Advance(Ref, TEXT("rolled_back"));

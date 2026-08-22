@@ -80,21 +80,52 @@ terminal report 使用 `uai.localization.owned_tool_report.v1`：compile 提供
 - `runtime_preview` + `policy:runtime-session:pie/v1`
 - `runtime_preview` + `policy:runtime-session:culture-preview/v1`
 - `world_context` + `policy:world-context:set-current/v1`
+- `world_context` + `policy:world-context:create-blank/v1`
+- `world_context` + `policy:world-context:partition-region-loader/v1`
+- `world_context` + `policy:world-context:partition-actor-loader/v1`
 - `modeling_tool` + `policy:modeling-tool:invoke-action/v1`
 - `voxel_grid` + `policy:voxel-session:apply/v1`
 - `host_lifecycle` + `policy:host-lifecycle:prepare-safe-exit/v1`
 
+World-context policies use subject `world:/Game/...` and never infer a map from
+the current selection. `set-current/v1` opens one existing map and accepts only
+optional `save_existing_map` (default `true`). `create-blank/v1` creates and
+persists one map; `overwrite_policy` is `fail`, `reuse`, or `replace` (default
+`fail`), `save_existing_map` defaults to `true`, and
+`create_world_partition=true` enables External Actors and initializes World
+Partition before the map is saved.
+
+Both partition loader policies require that the subject is the exact current
+World Partition map. The region loader takes `bounds.center[3]`,
+`bounds.extent[3]`, an optional non-empty `label`, and optional `dry_run`; the
+actor loader takes at least one `actor_guids[]` or currently resolvable
+`actor_ids[]`, plus optional `dry_run`. A non-dry loader remains owned by its
+operation after publishing a `world-partition-loader:*` session ref. The caller
+must use `operation.cancel`, advance to the cancelled terminal state, and then
+`operation.release`; switching maps or dropping the Python object is not a
+cleanup contract.
+
 `modeling_tool` 只接受 subject `modeling-session:operation-local`、参数 `action_id`
 取值 `spawn_transient_box`，以及可选的正数 `size_x/size_y/size_z`；缺省尺寸为 100，单轴上限
-为 100000。`voxel_grid` 只接受 subject `voxel-session:operation-local`，以及正数
-`cell_size` 和整数 `cells_x/cells_y/cells_z`；各轴 cell 数不得超过 1024，最终尺寸同样
-不得超过 100000。两者都创建 operation-owned transient `ADynamicMeshActor`，不写入旧
-static session registry；cancel/release 只销毁该 operation 的 actor。
+为 100000。它创建 operation-owned transient `ADynamicMeshActor`，不写入旧 static session
+registry；cancel/release 只销毁该 operation 的 actor。
 
-调用方通过 typed signal 的 `session_ref` 取得 actor path，再用 `world.actor_components`
-确认唯一 `DynamicMeshComponent`，并用 `world.property(..., property_path="Bounds")` 独立
-读回非零几何边界。对 `UPrimitiveComponent`，`Bounds` 是 WorldRead 提供的通用计算属性，
-返回 origin、extent 与 sphere radius；它不依赖 session 自报成功。
+`voxel_grid` 只接受 subject `voxel-session:operation-local`。`begin` 通过显式 `mode=create|edit`
+创建或解析一个 managed `ADynamicMeshActor`，并以该 Actor 上唯一的 editor-only serialized
+component 作为 active grid-state owner；session memory 只保存当前 fenced revision，不成为第二
+持久真源。每次 bounds 修改都要求 `expected_revision` 和显式坐标空间。`apply` 生成 exposed-face
+mesh 与可选 exact-cover collision，并在 C8D prepare/enlist/persist/verify/acknowledge 合同内只保存
+预检为 clean 的目标 Map/External Actor packages；成功结果必须包含 C9 isolated-package 等价读回。
+`cancel` 只移除尚未提交的 create Actor，`close` 只释放 clean session，二者都不得改变 viewport
+或窗口。旧 sidecar 仅在 component 不存在时允许导入一次，随后移动到可恢复 tombstone，不再参与
+active read 或 write。
+
+调用方从 session/apply readback 取得 actor path 和 revision，再用 `world.actor_components`
+确认唯一 `DynamicMeshComponent` 与 authoring-state component，并用
+`world.property(..., property_path="Bounds")` 独立读回非零几何边界。对
+`UPrimitiveComponent`，`Bounds` 是 WorldRead 提供的通用计算属性，返回 origin、extent 与
+sphere radius；它不依赖 session 自报成功。持久完成则以 apply 返回的 durability receipt 与 C9
+readback 为准，不以当前内存 Actor 或 package dirty 标志代替。
 
 `editor.safe_exit` 先按 `dirty_resolution` 处理 dirty resource，再由 operation-owned ticker
 请求退出；`RequestExit` 返回仍是非终态，真正关闭必须由进程外 witness 验证。

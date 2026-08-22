@@ -652,6 +652,21 @@ namespace UE::UAI::Tests::SimpleAuthoring::EditorProject
 			return OutSession.IsValid();
 		}
 
+		bool TryEnlist(
+			const FAssetDurableSessionRef& Session,
+			const TArray<FAssetDurableTarget>& MutationTargets,
+			const int64 CurrentFencingToken,
+			FUeAgentResourceTracker& Resources,
+			FAssetDurableSessionPtr& OutSession,
+			FAssetDurableError& OutError) override
+		{
+			OutError = FAssetDurableError();
+			OutSession = Session;
+			return MutationTargets.IsEmpty()
+				&& CurrentFencingToken
+					== Session->GetRequest().GetFencingToken();
+		}
+
 		bool TryPersist(
 			const FAssetDurableSessionRef& Session,
 			const int64 CurrentFencingToken,

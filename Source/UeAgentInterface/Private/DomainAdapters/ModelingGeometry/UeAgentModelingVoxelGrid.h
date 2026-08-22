@@ -3,6 +3,8 @@
 #include "CommandEdge/UeAgentCommandDispatch.h"
 #include "CoreMinimal.h"
 
+class UWorld;
+
 namespace UE::UAI::DomainAdapters::ModelingGeometry::VoxelGrid
 {
 	struct FVoxelGridCellRange final
@@ -47,5 +49,6 @@ namespace UE::UAI::DomainAdapters::ModelingGeometry::VoxelGrid
 
 #if WITH_DEV_AUTOMATION_TESTS
 	UEAGENTINTERFACE_API void ResetProcessSessionsForAutomation();
+	UEAGENTINTERFACE_API void SetAutomationWorldOverride(UWorld* World);
 #endif
 }

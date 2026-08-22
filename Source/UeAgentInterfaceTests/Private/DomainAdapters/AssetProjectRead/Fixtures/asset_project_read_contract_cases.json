@@ -1,6 +1,6 @@
 {
   "schema": "uai.domain_adapter.asset_project_read.test_fixture.v1",
-  "descriptor_count": 17,
+  "descriptor_count": 18,
   "required_families": [
     "asset",
     "registry",
@@ -219,6 +219,31 @@
           }
         },
         "required": ["target"],
+        "additionalProperties": false
+      },
+      "result_schema": {"type": "object"}
+    },
+    {
+      "descriptor_id": "uai.query.reference.read",
+      "version": 1,
+      "descriptor_hash": "sha256:ec85d816c17212cf7911440546134a94f86933b230abce221b9300e32c2e7dcf",
+      "capability_id": "reference.asset.read",
+      "provider_binding": "asset_project.read.reference_asset",
+      "family": "reference",
+      "query_kind": "state",
+      "allowed_state_planes": ["authoring_memory", "persisted", "compiled_generated"],
+      "required_context_facets": [],
+      "requires_target": true,
+      "target_kinds": ["asset"],
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "field_ids": {
+            "type": "array",
+            "items": {"type": "string", "minLength": 1},
+            "uniqueItems": true
+          }
+        },
         "additionalProperties": false
       },
       "result_schema": {"type": "object"}

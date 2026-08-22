@@ -252,13 +252,13 @@ namespace UE::UAI::DomainAdapters::WorldRead
 			Add(
 				Descriptors,
 				TEXT("uai.query.world.nav_connectivity"),
-				TEXT("sha256:24e8a35b076afb6cf2c731b1df5f5717a388552db1bd3dcaa9bdf3a7f57b7652"),
+				TEXT("sha256:19da79214f48d3b858a1c60e64dc578228ddce2f225397d7a01de0c247fc45a7"),
 				TEXT("world.nav_connectivity.read"),
 				TEXT("world.read.nav_connectivity"),
 				EUeAgentQueryKind::RuntimeProbe,
 				AuthoringAndRuntime(),
 				WorldFacet(),
-				TEXT(R"json({"type":"object","properties":{"points":{"type":"array","items":{"type":"object","properties":{"frame_id":{"type":"string","const":"ue.world"},"unit":{"type":"string","const":"centimeter"},"components":{"type":"array","items":{"type":"number"},"minItems":3,"maxItems":3}},"required":["frame_id","unit","components"],"additionalProperties":false},"minItems":2},"pairs":{"type":"array","items":{"type":"array","items":{"type":"integer","minimum":0},"minItems":2,"maxItems":2}},"project_to_nav":{"type":"boolean"},"allow_partial":{"type":"boolean"},"include_path_points":{"type":"boolean"},"query_extent_cm":{"type":"array","items":{"type":"number","minimum":0},"minItems":3,"maxItems":3}},"required":["points"],"additionalProperties":false})json"));
+				TEXT(R"json({"type":"object","properties":{"points":{"type":"array","items":{"type":"object","properties":{"frame_id":{"type":"string","const":"ue.world"},"unit":{"type":"string","const":"centimeter"},"components":{"type":"array","items":{"type":"number"},"minItems":3,"maxItems":3}},"required":["frame_id","unit","components"],"additionalProperties":false},"minItems":2},"pairs":{"type":"array","items":{"type":"array","items":{"type":"integer","minimum":0},"minItems":2,"maxItems":2}},"project_to_nav":{"type":"boolean"},"allow_projection_failure":{"type":"boolean"},"allow_partial":{"type":"boolean"},"include_path_points":{"type":"boolean"},"query_extent_cm":{"type":"array","items":{"type":"number","minimum":0},"minItems":3,"maxItems":3}},"required":["points"],"additionalProperties":false})json"));
 		}
 
 		void AddTopologyPhysicsDescriptors(

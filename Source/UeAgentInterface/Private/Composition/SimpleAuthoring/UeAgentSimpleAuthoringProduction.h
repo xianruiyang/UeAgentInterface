@@ -155,6 +155,14 @@ namespace UE::UAI::Composition::SimpleAuthoring
 			ContextResource::FUeAgentResourceTracker& Resources,
 			AssetDurable::FDurableReceipt& OutReceipt,
 			AssetDurable::FAssetDurableError& OutError) = 0;
+		virtual bool TryEnlist(
+			const AssetDurable::FAssetDurableSessionRef& Session,
+			const TArray<AssetDurable::FAssetDurableTarget>&
+				MutationTargets,
+			int64 CurrentFencingToken,
+			ContextResource::FUeAgentResourceTracker& Resources,
+			AssetDurable::FAssetDurableSessionPtr& OutSession,
+			AssetDurable::FAssetDurableError& OutError) = 0;
 		virtual bool TryRollback(
 			const AssetDurable::FAssetDurableSessionRef& Session,
 			int64 CurrentFencingToken,
@@ -210,8 +218,8 @@ namespace UE::UAI::Composition::SimpleAuthoring
 			IUeAgentSimpleAuthoringExpectedStateProjector,
 			ESPMode::ThreadSafe> ExpectedStateProjector;
 		TSharedPtr<
-			Discovery::IUeAgentStateReadPort,
-			ESPMode::ThreadSafe> PersistedStateReadPort;
+			Verification::IPersistedStateOracle,
+			ESPMode::ThreadSafe> PersistedStateOracle;
 		TSharedPtr<
 			Verification::IAbsenceOracle,
 			ESPMode::ThreadSafe> AbsenceOracle;

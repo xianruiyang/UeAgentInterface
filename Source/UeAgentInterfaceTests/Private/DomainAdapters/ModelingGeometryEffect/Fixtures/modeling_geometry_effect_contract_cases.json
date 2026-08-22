@@ -339,7 +339,6 @@
       "existing_target": true,
       "edge_pairs": true,
       "parameters": [
-        {"name": "mesh_revision", "kind": "string"},
         {"name": "tolerance_cm", "kind": "number", "minimum": 0}
       ]
     },
@@ -438,7 +437,6 @@
     {"case_id": "primitive-output-key-already-exists", "descriptor_id": "uai.operation.mesh.primitive.box.create", "expected_error": "modeling_geometry_output_already_exists", "mutation_count": 0},
     {"case_id": "target-unresolved", "descriptor_id": "uai.operation.mesh.topology.subdivide", "expected_error": "modeling_geometry_reference_unresolved", "mutation_count": 0},
     {"case_id": "target-revision-stale", "descriptor_id": "uai.operation.mesh.topology.simplify", "expected_error": "modeling_geometry_target_revision_stale", "mutation_count": 0},
-    {"case_id": "selection-revision-mismatch", "descriptor_id": "uai.operation.mesh.topology.edges.bevel", "expected_error": "modeling_geometry_selection_revision_mismatch", "mutation_count": 0},
     {"case_id": "selection-element-invalid", "descriptor_id": "uai.operation.mesh.topology.faces.extrude", "expected_error": "modeling_geometry_selection_element_invalid", "mutation_count": 0},
     {"case_id": "boundary-edge-no-longer-boundary", "descriptor_id": "uai.operation.mesh.topology.holes.fill", "expected_error": "modeling_geometry_boundary_edge_invalid", "mutation_count": 0},
     {"case_id": "operand-unresolved", "descriptor_id": "uai.operation.mesh.topology.boolean", "expected_error": "modeling_geometry_operand_unresolved", "mutation_count": 0},

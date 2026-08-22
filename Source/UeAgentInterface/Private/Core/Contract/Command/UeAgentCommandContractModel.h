@@ -31,6 +31,7 @@ namespace UE::UAI::CommandContract
 		bool bRequired = false;
 		bool bNullable = false;
 		FString Description;
+		FString SchemaJson;
 	};
 
 	struct UEAGENTINTERFACE_API FUeAgentCommandErrorDeclaration final

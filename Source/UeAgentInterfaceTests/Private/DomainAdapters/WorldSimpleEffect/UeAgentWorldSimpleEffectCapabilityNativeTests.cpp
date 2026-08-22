@@ -1077,7 +1077,6 @@ bool FUeAgentWorldSimpleEffectTenCapabilitiesOwnedWorldTest::RunTest(
 				"\"rotation_quaternion_xyzw\":[0,0,0,1],"
 				"\"scale\":[1,1,1],\"translation\":[125,-75,50],"
 				"\"unit\":\"centimeter\"},"
-				"\"save_level\":false,"
 				"\"tags\":[\"UAIActorCreateTest\"]}"),
 			FString(),
 			Applied))
@@ -1605,11 +1604,9 @@ bool FUeAgentWorldSimpleEffectTenCapabilitiesOwnedWorldTest::RunTest(
 			TEXT("uai.operation.world.level_game_mode.update"),
 			TEXT(
 				"{\"game_mode_class_ref\":"
-				"\"/Script/Engine.GameModeBase\","
-				"\"save_level\":false}"),
+				"\"/Script/Engine.GameModeBase\"}"),
 			TEXT(
 				"{\"game_mode_class_ref\":\"\","
-				"\"save_level\":false,"
 				"\"state_kind\":\"level_game_mode\"}"),
 			Applied))
 	{

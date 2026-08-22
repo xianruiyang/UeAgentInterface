@@ -18,6 +18,21 @@ TArray<TSharedPtr<FJsonValue>> ModelingNumberValues(
 	return Result;
 }
 
+TSharedPtr<FJsonObject> ModelingRevision(
+	const FString& SourceId,
+	const int64 Sequence = 1)
+{
+	const TSharedPtr<FJsonObject> Revision = MakeShared<FJsonObject>();
+	Revision->SetStringField(TEXT("source_id"), SourceId);
+	Revision->SetStringField(
+		TEXT("generation"),
+		TEXT("fixture-generation"));
+	Revision->SetNumberField(
+		TEXT("sequence"),
+		static_cast<double>(Sequence));
+	return Revision;
+}
+
 TSharedPtr<FJsonObject> ModelingPlacement()
 {
 	const TSharedPtr<FJsonObject> Value = MakeShared<FJsonObject>();
@@ -110,9 +125,6 @@ TSharedPtr<FJsonObject> ModelingSelection(const FString& Kind)
 	Value->SetArrayField(
 		TEXT("element_ids"),
 		ModelingNumberValues({0.0}));
-	Value->SetStringField(
-		TEXT("mesh_revision"),
-		TEXT("rev:fixture:1"));
 	return Value;
 }
 
@@ -186,9 +198,9 @@ TSharedPtr<FJsonObject> BuildModelingValidInput(
 	bool bValue = false;
 	if (Row->TryGetBoolField(TEXT("existing_target"), bValue) && bValue)
 	{
-		Input->SetStringField(
+		Input->SetObjectField(
 			TEXT("target_revision"),
-			TEXT("rev:fixture:1"));
+			ModelingRevision(TEXT("uai://mesh/fixture-target")));
 	}
 	if (Row->TryGetBoolField(TEXT("placement"), bValue) && bValue)
 	{
@@ -212,9 +224,9 @@ TSharedPtr<FJsonObject> BuildModelingValidInput(
 		Input->SetStringField(
 			TEXT("operand_ref"),
 			TEXT("uai://mesh/fixture-operand"));
-		Input->SetStringField(
+		Input->SetObjectField(
 			TEXT("operand_revision"),
-			TEXT("rev:operand:1"));
+			ModelingRevision(TEXT("uai://mesh/fixture-operand")));
 		Input->SetObjectField(
 			TEXT("operand_to_target"),
 			ModelingOperandTransform());
@@ -254,9 +266,7 @@ TSharedPtr<FJsonObject> BuildModelingValidInput(
 		if (Kind == TEXT("string"))
 		{
 			const FString StringValue =
-				Name == TEXT("mesh_revision")
-					? TEXT("rev:fixture:1")
-					: Name == TEXT("material_ref")
+				Name == TEXT("material_ref")
 						? TEXT("uai://material/default")
 						: TEXT("fixture");
 			Input->SetStringField(Name, StringValue);
@@ -630,13 +640,13 @@ void SetIntegerArray(
 TSharedPtr<FJsonObject> MakeModelingMeshState(
 	UDynamicMesh& DynamicMesh,
 	const FString& TargetRef,
-	const FString& Revision,
+	const TSharedPtr<FJsonObject>& Revision,
 	const FString& CarrierKind,
 	const bool bDeclareBoundaryEdges)
 {
 	const TSharedPtr<FJsonObject> State = MakeShared<FJsonObject>();
 	State->SetStringField(TEXT("target_ref"), TargetRef);
-	State->SetStringField(TEXT("target_revision"), Revision);
+	State->SetObjectField(TEXT("target_revision"), Revision);
 	State->SetStringField(TEXT("carrier_kind"), CarrierKind);
 
 	TArray<int32> VertexIds;
@@ -720,7 +730,7 @@ FUeAgentCanonicalSnapshotPtr MakeModelingSnapshot(
 		[&](
 			ADynamicMeshActor& Actor,
 			const FString& Ref,
-			const FString& Revision,
+			const int64 RevisionSequence,
 			const FString& CarrierKind,
 			const bool bDeclareBoundaryEdges)
 		{
@@ -736,7 +746,7 @@ FUeAgentCanonicalSnapshotPtr MakeModelingSnapshot(
 				MakeModelingMeshState(
 					*DynamicMesh,
 					Ref,
-					Revision,
+					ModelingRevision(Ref, RevisionSequence),
 					CarrierKind,
 					bDeclareBoundaryEdges);
 			FUeAgentCanonicalValuePtr Current;
@@ -807,7 +817,7 @@ FUeAgentCanonicalSnapshotPtr MakeModelingSnapshot(
 		&& !AppendState(
 			*Owner.Actor,
 			TEXT("uai://mesh/fixture-target"),
-			TEXT("rev:fixture:1"),
+			1,
 			Options.CarrierKind,
 			Options.bDeclareBoundaryEdges))
 	{
@@ -819,7 +829,7 @@ FUeAgentCanonicalSnapshotPtr MakeModelingSnapshot(
 			|| !AppendState(
 				*Operand,
 				TEXT("uai://mesh/fixture-operand"),
-				TEXT("rev:operand:1"),
+				1,
 				TEXT("dynamic_mesh_actor"),
 				false)))
 	{
@@ -1219,16 +1229,11 @@ bool RunModelingProductionPlanningTests(
 		}
 		else if (CaseId == TEXT("target-revision-stale"))
 		{
-			Input->SetStringField(
+			Input->SetObjectField(
 				TEXT("target_revision"),
-				TEXT("rev:stale"));
-		}
-		else if (CaseId == TEXT("selection-revision-mismatch"))
-		{
-			Input->GetObjectField(TEXT("selection"))
-				->SetStringField(
-					TEXT("mesh_revision"),
-					TEXT("rev:stale"));
+				ModelingRevision(
+					TEXT("uai://mesh/fixture-target"),
+					2));
 		}
 		else if (CaseId == TEXT("selection-element-invalid"))
 		{
@@ -1248,9 +1253,11 @@ bool RunModelingProductionPlanningTests(
 		}
 		else if (CaseId == TEXT("operand-revision-stale"))
 		{
-			Input->SetStringField(
+			Input->SetObjectField(
 				TEXT("operand_revision"),
-				TEXT("rev:stale"));
+				ModelingRevision(
+					TEXT("uai://mesh/fixture-operand"),
+					2));
 		}
 		else if (CaseId == TEXT("operand-transform-singular"))
 		{

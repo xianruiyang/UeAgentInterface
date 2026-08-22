@@ -6,7 +6,9 @@
 #include "Components/DynamicMeshComponent.h"
 #include "Core/BindingGateway/Ticket/UeAgentBindingTicket.h"
 #include "Core/Projection/UeAgentProjection.h"
+#include "Core/StateSemantic/UeAgentStateRevisionJson.h"
 #include "DomainAdapters/ModelingGeometryEffect/UeAgentModelingGeometryEffectCapabilities.h"
+#include "DomainAdapters/ModelingGeometryEffect/UeAgentModelingGeometryEffectCarrierRevision.h"
 #include "DomainAdapters/WorldSimpleEffect/UeAgentWorldSimpleEffectProduction.h"
 #include "DynamicMesh/DynamicMesh3.h"
 #include "DynamicMesh/DynamicMeshAttributeSet.h"
@@ -42,8 +44,12 @@ namespace
 	using namespace UE::UAI::DomainAdapters::WorldSimpleEffect;
 	using namespace UE::UAI::ExecutionMutation;
 	using namespace UE::UAI::Projection;
+	using namespace UE::UAI::StateSemantic;
 	using namespace UE::UAI::Verification;
+	using UE::Geometry::FDynamicMeshAttributeSet;
 	using UE::Geometry::FDynamicMesh3;
+	using UE::Geometry::FDynamicMeshNormalOverlay;
+	using UE::Geometry::FDynamicMeshUVOverlay;
 
 	static_assert(
 		UAI_MODELING_SIMPLE_AUTHORING_PRODUCTION_V1 == 1,
@@ -507,6 +513,21 @@ namespace
 					"runtimeLogs/SA008ModelingProduction/staging"),
 				TArray<FString>{TEXT("prepared")});
 			return OutSession.IsValid();
+		}
+
+		bool TryEnlist(
+			const FAssetDurableSessionRef& Session,
+			const TArray<FAssetDurableTarget>& MutationTargets,
+			const int64 CurrentFencingToken,
+			FUeAgentResourceTracker& Resources,
+			FAssetDurableSessionPtr& OutSession,
+			FAssetDurableError& OutError) override
+		{
+			OutError = FAssetDurableError();
+			OutSession = Session;
+			return MutationTargets.IsEmpty()
+				&& CurrentFencingToken
+					== Session->GetRequest().GetFencingToken();
 		}
 
 		bool TryPersist(
@@ -1023,6 +1044,261 @@ FUeAgentSimpleAuthoringModelingPrimitiveProductionContractTest::
 		TEXT("duplicate primitive does not spawn an actor"),
 		Owner.CountActors(),
 		7);
+	return !HasAnyErrors();
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(
+	FUeAgentModelingCarrierRevisionTracksMutableStateTest,
+	"UeAgentInterface.Composition.SimpleAuthoring.Modeling."
+	"CarrierRevisionTracksMutableState",
+	EAutomationTestFlags::EditorContext
+		| EAutomationTestFlags::EngineFilter)
+
+bool FUeAgentModelingCarrierRevisionTracksMutableStateTest::RunTest(
+	const FString& Parameters)
+{
+	FOwnedModelingWorld Owner;
+	if (!TestTrue(TEXT("create owned Modeling world"), Owner.IsValid()))
+	{
+		return false;
+	}
+	ADynamicMeshActor* Actor = Owner.SpawnCubeActor(
+		TEXT("SA008_CarrierRevision"),
+		FVector::ZeroVector);
+	if (!TestNotNull(TEXT("spawn revision carrier"), Actor))
+	{
+		return false;
+	}
+	const FString SourceId = TEXT("uai://mesh/revision-carrier");
+	auto ReadRevision =
+		[&]() -> TOptional<FUeAgentStateRevision>
+		{
+			TOptional<FUeAgentStateRevision> Revision;
+			FExecutionMutationError Error;
+			TestTrue(
+				TEXT("read Modeling carrier revision"),
+				TryReadModelingGeometryCarrierRevision(
+					SourceId,
+					*Actor,
+					Revision,
+					Error));
+			return Revision;
+		};
+
+	const TOptional<FUeAgentStateRevision> Initial = ReadRevision();
+	const TOptional<FUeAgentStateRevision> StableRead = ReadRevision();
+	if (!Initial.IsSet() || !StableRead.IsSet())
+	{
+		return false;
+	}
+	TestTrue(
+		TEXT("unchanged carrier has a stable revision"),
+		StableRead.GetValue() == Initial.GetValue());
+	TestEqual(
+		TEXT("revision preserves the public source id"),
+		Initial->GetSourceId(),
+		SourceId);
+	TestTrue(
+		TEXT("revision sequence is exactly representable in JSON"),
+		Initial->GetSequence()
+			<= FUeAgentStateRevisionJson::MaxExactJsonSequence);
+
+	Actor->SetActorLocation(FVector(25.0, 0.0, 0.0));
+	const TOptional<FUeAgentStateRevision> AfterTransform =
+		ReadRevision();
+	if (!AfterTransform.IsSet())
+	{
+		return false;
+	}
+	TestEqual(
+		TEXT("transform change preserves carrier generation"),
+		AfterTransform->GetGeneration(),
+		Initial->GetGeneration());
+	TestNotEqual(
+		TEXT("transform change advances semantic revision"),
+		AfterTransform->GetSequence(),
+		Initial->GetSequence());
+
+	UDynamicMeshComponent* Component =
+		Actor->GetDynamicMeshComponent();
+	UDynamicMesh* DynamicMesh =
+		Component ? Component->GetDynamicMesh() : nullptr;
+	if (!TestNotNull(TEXT("carrier dynamic mesh exists"), DynamicMesh))
+	{
+		return false;
+	}
+	DynamicMesh->EditMesh(
+		[](FDynamicMesh3& Mesh)
+		{
+			Mesh.SetVertex(
+				0,
+				Mesh.GetVertex(0) + FVector3d(1.0, 0.0, 0.0));
+		});
+	const TOptional<FUeAgentStateRevision> AfterGeometry =
+		ReadRevision();
+	if (!AfterGeometry.IsSet())
+	{
+		return false;
+	}
+	TestNotEqual(
+		TEXT("geometry change advances semantic revision"),
+		AfterGeometry->GetSequence(),
+		AfterTransform->GetSequence());
+
+	DynamicMesh->EditMesh(
+		[](FDynamicMesh3& Mesh)
+		{
+			Mesh.RemoveTriangle(0, false, false);
+		});
+	const TOptional<FUeAgentStateRevision> AfterTopology =
+		ReadRevision();
+	if (!AfterTopology.IsSet())
+	{
+		return false;
+	}
+	TestNotEqual(
+		TEXT("topology change advances semantic revision"),
+		AfterTopology->GetSequence(),
+		AfterGeometry->GetSequence());
+
+	DynamicMesh->EditMesh(
+		[](FDynamicMesh3& Mesh)
+		{
+			FDynamicMeshAttributeSet* Attributes = Mesh.Attributes();
+			Attributes->SetNumUVLayers(1);
+			FDynamicMeshUVOverlay* Uv = Attributes->PrimaryUV();
+			for (const int32 TriangleId : Mesh.TriangleIndicesItr())
+			{
+				const UE::Geometry::FIndex3i Triangle =
+					Mesh.GetTriangle(TriangleId);
+				UE::Geometry::FIndex3i Elements;
+				for (int32 Corner = 0; Corner < 3; ++Corner)
+				{
+					const int32 ElementId = Uv->AppendElement(
+						FVector2f(
+							static_cast<float>(Corner) * 0.25f,
+							0.5f));
+					Uv->SetParentVertex(
+						ElementId,
+						Triangle[Corner]);
+					Elements[Corner] = ElementId;
+				}
+				Uv->SetTriangle(TriangleId, Elements);
+				break;
+			}
+		});
+	const TOptional<FUeAgentStateRevision> AfterUv = ReadRevision();
+	if (!AfterUv.IsSet())
+	{
+		return false;
+	}
+	TestNotEqual(
+		TEXT("UV change advances semantic revision"),
+		AfterUv->GetSequence(),
+		AfterTopology->GetSequence());
+
+	DynamicMesh->EditMesh(
+		[](FDynamicMesh3& Mesh)
+		{
+			FDynamicMeshNormalOverlay* Normals =
+				Mesh.Attributes()->PrimaryNormals();
+			for (const int32 TriangleId : Mesh.TriangleIndicesItr())
+			{
+				const UE::Geometry::FIndex3i Triangle =
+					Mesh.GetTriangle(TriangleId);
+				UE::Geometry::FIndex3i Elements;
+				for (int32 Corner = 0; Corner < 3; ++Corner)
+				{
+					const int32 ElementId = Normals->AppendElement(
+						FVector3f(0.0f, 0.0f, 1.0f));
+					Normals->SetParentVertex(
+						ElementId,
+						Triangle[Corner]);
+					Elements[Corner] = ElementId;
+				}
+				Normals->SetTriangle(TriangleId, Elements);
+				break;
+			}
+		});
+	const TOptional<FUeAgentStateRevision> AfterNormals =
+		ReadRevision();
+	if (!AfterNormals.IsSet())
+	{
+		return false;
+	}
+	TestNotEqual(
+		TEXT("normal change advances semantic revision"),
+		AfterNormals->GetSequence(),
+		AfterUv->GetSequence());
+
+	DynamicMesh->EditMesh(
+		[](FDynamicMesh3& Mesh)
+		{
+			FDynamicMeshAttributeSet* Attributes = Mesh.Attributes();
+			Attributes->EnableMaterialID();
+			for (const int32 TriangleId : Mesh.TriangleIndicesItr())
+			{
+				Attributes->GetMaterialID()->SetValue(TriangleId, 1);
+				break;
+			}
+		});
+	const TOptional<FUeAgentStateRevision> AfterMaterialAssignment =
+		ReadRevision();
+	if (!AfterMaterialAssignment.IsSet())
+	{
+		return false;
+	}
+	TestNotEqual(
+		TEXT("material assignment advances semantic revision"),
+		AfterMaterialAssignment->GetSequence(),
+		AfterNormals->GetSequence());
+
+	UMaterial* Material = NewObject<UMaterial>(
+		Owner.Package,
+		TEXT("M_SA008_CarrierRevision"),
+		RF_Transactional);
+	Component->SetMaterial(0, Material);
+	const TOptional<FUeAgentStateRevision> AfterMaterial =
+		ReadRevision();
+	if (!AfterMaterial.IsSet())
+	{
+		return false;
+	}
+	TestNotEqual(
+		TEXT("material change advances semantic revision"),
+		AfterMaterial->GetSequence(),
+		AfterMaterialAssignment->GetSequence());
+
+	UBodySetup* BodySetup = Component->GetBodySetup();
+	if (!TestNotNull(TEXT("carrier body setup exists"), BodySetup))
+	{
+		return false;
+	}
+	BodySetup->AggGeom.BoxElems.Add(FKBoxElem(10.0f));
+	const TOptional<FUeAgentStateRevision> AfterCollision =
+		ReadRevision();
+	if (!AfterCollision.IsSet())
+	{
+		return false;
+	}
+	TestNotEqual(
+		TEXT("collision change advances semantic revision"),
+		AfterCollision->GetSequence(),
+		AfterMaterial->GetSequence());
+
+	TOptional<FUeAgentStateRevision> UnsupportedRevision;
+	FExecutionMutationError UnsupportedError;
+	TestFalse(
+		TEXT("non-carrier revision is explicitly unsupported"),
+		TryReadModelingGeometryCarrierRevision(
+			SourceId,
+			*Material,
+			UnsupportedRevision,
+			UnsupportedError));
+	TestEqual(
+		TEXT("non-carrier revision returns a stable error"),
+		UnsupportedError.GetCode(),
+		FString(TEXT("modeling_geometry_carrier_kind_unsupported")));
 	return !HasAnyErrors();
 }
 

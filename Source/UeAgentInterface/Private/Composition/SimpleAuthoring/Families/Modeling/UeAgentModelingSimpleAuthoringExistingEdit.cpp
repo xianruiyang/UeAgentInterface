@@ -1,7 +1,9 @@
 #include "Composition/SimpleAuthoring/Families/Modeling/UeAgentModelingSimpleAuthoringExistingEdit.h"
 
 #include "Components/DynamicMeshComponent.h"
+#include "Core/StateSemantic/UeAgentStateRevisionJson.h"
 #include "DomainAdapters/ModelingGeometryEffect/UeAgentModelingGeometryEffectCapabilities.h"
+#include "DomainAdapters/ModelingGeometryEffect/UeAgentModelingGeometryEffectCarrierRevision.h"
 #include "DynamicMesh/DynamicMesh3.h"
 #include "DynamicMesh/DynamicMeshAttributeSet.h"
 #include "DynamicMeshActor.h"
@@ -255,11 +257,12 @@ namespace UE::UAI::Composition::SimpleAuthoring::Modeling::ExistingEdit
 				TEXT("target_ref"),
 				State.TargetRef);
 			Baseline->SetStringField(
-				TEXT("target_revision"),
-				State.TargetRevision);
-			Baseline->SetStringField(
 				TEXT("carrier_kind"),
 				State.CarrierKind);
+			Baseline->SetObjectField(
+				TEXT("target_revision"),
+				StateSemantic::FUeAgentStateRevisionJson::ToJson(
+					State.TargetRevision.GetValue()));
 			Baseline->SetStringField(
 				TEXT("geometry_fingerprint"),
 				State.GeometryFingerprint);
@@ -724,7 +727,8 @@ namespace UE::UAI::Composition::SimpleAuthoring::Modeling::ExistingEdit
 	bool FCarrierState::IsValid() const
 	{
 		return !TargetRef.IsEmpty()
-			&& !TargetRevision.IsEmpty()
+			&& TargetRevision.IsSet()
+			&& TargetRevision->IsValid()
 			&& !CarrierKind.IsEmpty()
 			&& !GeometryFingerprint.IsEmpty()
 			&& Bounds.IsValid
@@ -736,7 +740,6 @@ namespace UE::UAI::Composition::SimpleAuthoring::Modeling::ExistingEdit
 		UWorld& World,
 		IUeAgentModelingGeometryEffectReferenceResolver& Resolver,
 		const FString& TargetRef,
-		const FString& TargetRevision,
 		FCarrierState& OutState,
 		FString& OutErrorCode,
 		FString& OutErrorDetail)
@@ -747,7 +750,6 @@ namespace UE::UAI::Composition::SimpleAuthoring::Modeling::ExistingEdit
 		UObject* Object = nullptr;
 		FExecutionMutationError Error;
 		if (TargetRef.IsEmpty()
-			|| TargetRevision.IsEmpty()
 			|| !Resolver.TryResolveReference(
 				World,
 				TargetRef,
@@ -763,7 +765,16 @@ namespace UE::UAI::Composition::SimpleAuthoring::Modeling::ExistingEdit
 		}
 
 		OutState.TargetRef = TargetRef;
-		OutState.TargetRevision = TargetRevision;
+		if (!TryReadModelingGeometryCarrierRevision(
+				TargetRef,
+				*Object,
+				OutState.TargetRevision,
+				Error))
+		{
+			OutErrorCode = Error.GetCode();
+			OutErrorDetail = Error.GetDetail();
+			return false;
+		}
 		if (ADynamicMeshActor* Actor =
 			Cast<ADynamicMeshActor>(Object))
 		{
@@ -865,9 +876,10 @@ namespace UE::UAI::Composition::SimpleAuthoring::Modeling::ExistingEdit
 		Object->SetStringField(
 			TEXT("target_ref"),
 			State.TargetRef);
-		Object->SetStringField(
+		Object->SetObjectField(
 			TEXT("target_revision"),
-			State.TargetRevision);
+			StateSemantic::FUeAgentStateRevisionJson::ToJson(
+				State.TargetRevision.GetValue()));
 		Object->SetStringField(
 			TEXT("carrier_kind"),
 			State.CarrierKind);
@@ -955,6 +967,7 @@ namespace UE::UAI::Composition::SimpleAuthoring::Modeling::ExistingEdit
 		TArray<double> BoundsMax;
 		TArray<double> CollisionBoundsMin;
 		TArray<double> CollisionBoundsMax;
+		const TSharedPtr<FJsonObject>* TargetRevision = nullptr;
 		bool bCollisionBoundsValid = false;
 		double VertexChecksum = 0.0;
 		if (!Payload.IsValid()
@@ -966,8 +979,12 @@ namespace UE::UAI::Composition::SimpleAuthoring::Modeling::ExistingEdit
 			|| !(*Baseline)->TryGetStringField(
 				TEXT("target_ref"),
 				OutState.TargetRef)
-			|| !(*Baseline)->TryGetStringField(
+			|| !(*Baseline)->TryGetObjectField(
 				TEXT("target_revision"),
+				TargetRevision)
+			|| !TargetRevision
+			|| !StateSemantic::FUeAgentStateRevisionJson::TryParse(
+				*TargetRevision,
 				OutState.TargetRevision)
 			|| !(*Baseline)->TryGetStringField(
 				TEXT("carrier_kind"),

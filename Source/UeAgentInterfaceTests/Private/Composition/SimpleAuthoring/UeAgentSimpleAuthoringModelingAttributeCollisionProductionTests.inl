@@ -215,10 +215,11 @@ namespace
 	}
 
 	TSharedPtr<FJsonObject> BuildAttributeCollisionPayload(
-		const TSharedPtr<FJsonObject>& Row)
+		const TSharedPtr<FJsonObject>& Row,
+		UObject& TargetCarrier)
 	{
 		const TSharedPtr<FJsonObject> Input =
-			BuildTopologyPayload(Row);
+			BuildTopologyPayload(Row, TargetCarrier, nullptr);
 		const FString OperationKey =
 			Row->GetStringField(TEXT("operation_key"));
 		if (OperationKey == TEXT("add_material_slot"))
@@ -504,8 +505,21 @@ FUeAgentSimpleAuthoringModelingAttributeCollisionProductionContractTest::
 			TEXT("uai://material/default"),
 			UMaterial::GetDefaultMaterial(MD_Surface));
 
+		UObject* TargetCarrier = bStaticCarrier
+			? static_cast<UObject*>(StaticTarget)
+			: static_cast<UObject*>(Target);
 		const TSharedPtr<FJsonObject> PayloadObject =
-			BuildAttributeCollisionPayload(Row);
+			TargetCarrier
+				? BuildAttributeCollisionPayload(
+					Row,
+					*TargetCarrier)
+				: nullptr;
+		if (!TestNotNull(
+				*(DescriptorId + TEXT(" carrier revision reads")),
+				PayloadObject.Get()))
+		{
+			continue;
+		}
 		PatchTopologySelection(Row, PayloadObject, *TargetMesh);
 		FString PayloadJson;
 		TestTrue(

@@ -418,6 +418,7 @@ namespace UE::UAI::Composition::SimpleAuthoring
 			bool Persist(
 				const FExecutionDurableSessionRef& Session,
 				int64 FencingToken,
+				const FMutationFacts& Facts,
 				FUeAgentResourceTracker& Resources,
 				FDurableReceipt& OutReceipt,
 				FExecutionMutationError& OutError) override
@@ -426,6 +427,28 @@ namespace UE::UAI::Composition::SimpleAuthoring
 					StaticCastSharedRef<
 						FProductionDurableSession>(Session);
 				FAssetDurableError Error;
+				FAssetDurableSessionPtr Enlisted;
+				if (!Service->TryEnlist(
+						Typed->Session,
+						Facts.GetDurableTargets(),
+						FencingToken,
+						Resources,
+						Enlisted,
+						Error)
+					|| !Enlisted.IsValid())
+				{
+					OutError = FExecutionMutationError(
+						Error.IsPresent()
+							? Error.GetCode()
+							: TEXT(
+								"simple_authoring_durable_enlist_failed"),
+						Error.IsPresent()
+							? Error.GetDetail()
+							: FString());
+					return false;
+				}
+				Typed->Session = Enlisted.ToSharedRef();
+				Error = FAssetDurableError();
 				if (!Service->TryPersist(
 					Typed->Session,
 					FencingToken,
@@ -747,8 +770,8 @@ namespace UE::UAI::Composition::SimpleAuthoring
 					IUeAgentSimpleAuthoringExpectedStateProjector,
 					ESPMode::ThreadSafe> InExpectedStateProjector,
 				TSharedRef<
-					IUeAgentStateReadPort,
-					ESPMode::ThreadSafe> InPersistedStateReadPort,
+					IPersistedStateOracle,
+					ESPMode::ThreadSafe> InPersistedStateOracle,
 				TSharedRef<
 					IAbsenceOracle,
 					ESPMode::ThreadSafe> InAbsenceOracle,
@@ -762,8 +785,8 @@ namespace UE::UAI::Composition::SimpleAuthoring
 				, Durable(MoveTemp(InDurable))
 				, ExpectedStateProjector(
 					MoveTemp(InExpectedStateProjector))
-				, PersistedStateReadPort(
-					MoveTemp(InPersistedStateReadPort))
+				, PersistedStateOracle(
+					MoveTemp(InPersistedStateOracle))
 				, AbsenceOracle(MoveTemp(InAbsenceOracle))
 				, ReferenceOracle(MoveTemp(InReferenceOracle))
 				, UeHook(MoveTemp(InUeHook))
@@ -835,7 +858,7 @@ namespace UE::UAI::Composition::SimpleAuthoring
 				}
 
 				FVerificationService Service(
-					*PersistedStateReadPort,
+					*PersistedStateOracle,
 					*AbsenceOracle,
 					*ReferenceOracle,
 					*Durable);
@@ -875,8 +898,8 @@ namespace UE::UAI::Composition::SimpleAuthoring
 				IUeAgentSimpleAuthoringExpectedStateProjector,
 				ESPMode::ThreadSafe> ExpectedStateProjector;
 			TSharedRef<
-				IUeAgentStateReadPort,
-				ESPMode::ThreadSafe> PersistedStateReadPort;
+				IPersistedStateOracle,
+				ESPMode::ThreadSafe> PersistedStateOracle;
 			TSharedRef<
 				IAbsenceOracle,
 				ESPMode::ThreadSafe> AbsenceOracle;
@@ -976,8 +999,8 @@ namespace UE::UAI::Composition::SimpleAuthoring
 				if (!(Target->GetSummary().GetDescriptorIdentity()
 						== CanonicalRequest.GetDescriptorIdentity())
 					|| Target->GetReadPortId()
-						!= Config.PersistedStateReadPort
-							->GetPortId())
+						!= Config.PersistedStateOracle
+							->GetReadPortId())
 				{
 					OutError.Code =
 						TEXT(
@@ -1053,8 +1076,8 @@ namespace UE::UAI::Composition::SimpleAuthoring
 					|| !ValidateChangeTargets(
 						Draft.GetValue(),
 						CanonicalRequest.GetDescriptorIdentity(),
-						Config.PersistedStateReadPort
-							->GetPortId(),
+						Config.PersistedStateOracle
+							->GetReadPortId(),
 						ChangeTargets,
 						Error))
 				{
@@ -1195,7 +1218,7 @@ namespace UE::UAI::Composition::SimpleAuthoring
 				return false;
 			}
 			if (!Config.ExpectedStateProjector.IsValid()
-				|| !Config.PersistedStateReadPort.IsValid()
+				|| !Config.PersistedStateOracle.IsValid()
 				|| !Config.AbsenceOracle.IsValid()
 				|| !Config.ReferenceOracle.IsValid())
 			{
@@ -1206,15 +1229,13 @@ namespace UE::UAI::Composition::SimpleAuthoring
 					Config.FamilyId);
 				return false;
 			}
-			if (Config.PreStateReadPort
-					== Config.PersistedStateReadPort
-				|| Config.PreStateReadPort->GetPortId().IsEmpty()
-				|| Config.PersistedStateReadPort
-					->GetPortId()
+			if (Config.PreStateReadPort->GetPortId().IsEmpty()
+				|| Config.PersistedStateOracle
+					->GetReadPortId()
 					.IsEmpty()
 				|| Config.PreStateReadPort->GetPortId()
-					== Config.PersistedStateReadPort
-						->GetPortId())
+					== Config.PersistedStateOracle
+						->GetReadPortId())
 			{
 				SetError(
 					OutError,
@@ -1291,7 +1312,7 @@ namespace UE::UAI::Composition::SimpleAuthoring
 					Durable,
 					Config.ExpectedStateProjector
 						.ToSharedRef(),
-					Config.PersistedStateReadPort
+					Config.PersistedStateOracle
 						.ToSharedRef(),
 					Config.AbsenceOracle.ToSharedRef(),
 					Config.ReferenceOracle.ToSharedRef(),

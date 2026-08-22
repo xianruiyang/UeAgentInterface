@@ -3,6 +3,7 @@
 #include "CommandHandlers/Landscape/UeAgentLandscapeCommandHandlers.h"
 #include "Core/Contract/UeAgentCommandContract.h"
 #include "Core/DomainCapability/UeAgentDomainCapability.h"
+#include "DomainAdapters/Landscape/UeAgentLandscapeHeightQuery.h"
 #include "DomainAdapters/Landscape/UeAgentLandscapeMechanicsBoundary.h"
 #include "OperationOwners/Landscape/UeAgentLandscapeOperationOwner.h"
 #include "QueryOwners/Landscape/UeAgentLandscapeQueryOwner.h"
@@ -180,6 +181,19 @@ namespace UE::UAI::Module::CommandRegistration::Landscape
 				DomainCapability::EDomainCapabilitySupport::Supported;
 			Declaration.Command.Contributions.Add(
 				CommandContribution.ToSharedRef());
+			TArray<
+				BindingGateway::Query::
+					FUeAgentDomainQueryProviderRegistration> QueryProviders;
+			if (!DomainAdapters::Landscape::
+				TryCreateLandscapeHeightReadProviderRegistrations(
+					QueryProviders,
+					OutError))
+			{
+				return false;
+			}
+			Declaration.Query.Support =
+				DomainCapability::EDomainCapabilitySupport::Supported;
+			Declaration.Query.Providers = MoveTemp(QueryProviders);
 			Declaration.Operation.Support =
 				DomainCapability::EDomainCapabilitySupport::Supported;
 			for (const FString& OperationId

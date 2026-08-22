@@ -12,10 +12,14 @@
 #include "Curves/CurveFloat.h"
 #include "EdGraph/EdGraph.h"
 #include "EdGraph/EdGraphNode.h"
+#include "Engine/DataTable.h"
+#include "Engine/StaticMesh.h"
 #include "HAL/FileManager.h"
+#include "MeshDescription.h"
 #include "Misc/ConfigCacheIni.h"
 #include "Misc/FileHelper.h"
 #include "Misc/Paths.h"
+#include "StaticMeshAttributes.h"
 #include "UObject/Package.h"
 #include "Utilities/AuthoringCore/UeAgentAuthoringIdentity.h"
 
@@ -59,16 +63,75 @@ namespace
 			}
 			Asset->FloatCurve.AddKey(0.0f, 37.0f);
 			ProjectObject->FloatCurve.AddKey(0.0f, 91.0f);
+
+			Table = NewObject<UDataTable>(
+				Package,
+				TEXT("OwnedTable"),
+				RF_Public | RF_Standalone);
+			if (Table)
+			{
+				Table->RowStruct = FTableRowBase::StaticStruct();
+				Table->AddRow(TEXT("Alpha"), FTableRowBase());
+			}
+
+			Mesh = NewObject<UStaticMesh>(
+				Package,
+				TEXT("OwnedMesh"),
+				RF_Public | RF_Standalone);
+			if (Mesh)
+			{
+				FMeshDescription Description;
+				FStaticMeshAttributes Attributes(Description);
+				Attributes.Register();
+				TVertexAttributesRef<FVector3f> Positions =
+					Attributes.GetVertexPositions();
+				const FVertexID V0 = Description.CreateVertex();
+				const FVertexID V1 = Description.CreateVertex();
+				const FVertexID V2 = Description.CreateVertex();
+				Positions[V0] = FVector3f(-10.0f, -20.0f, 0.0f);
+				Positions[V1] = FVector3f(30.0f, -20.0f, 0.0f);
+				Positions[V2] = FVector3f(-10.0f, 40.0f, 50.0f);
+				const FVertexInstanceID I0 =
+					Description.CreateVertexInstance(V0);
+				const FVertexInstanceID I1 =
+					Description.CreateVertexInstance(V1);
+				const FVertexInstanceID I2 =
+					Description.CreateVertexInstance(V2);
+				const FPolygonGroupID Group =
+					Description.CreatePolygonGroup();
+				Description.CreatePolygon(Group, {I0, I1, I2});
+				Mesh->BuildFromMeshDescriptions({&Description});
+			}
+
+			DirtyPackage = CreatePackage(*(PackageName + TEXT("_Dirty")));
+			DirtyAsset = NewObject<UCurveFloat>(
+				DirtyPackage,
+				TEXT("OwnedDirtyAsset"),
+				RF_Public | RF_Standalone);
+			MapPackage = CreatePackage(*(PackageName + TEXT("_Map")));
+			MapPackage->SetPackageFlags(PKG_ContainsMap);
 			RegistryRecord = FAssetData(Asset);
 			Config.SetString(
 				TEXT("UAI.AssetProjectRead"),
 				TEXT("KnownValue"),
 				TEXT("fixture-value"));
 			Package->SetDirtyFlag(false);
+			DirtyPackage->SetDirtyFlag(true);
+			MapPackage->SetDirtyFlag(true);
 		}
 
 		~FOwnedAssetProjectRead()
 		{
+			if (DirtyPackage)
+			{
+				DirtyPackage->SetDirtyFlag(false);
+				DirtyPackage->MarkAsGarbage();
+			}
+			if (MapPackage)
+			{
+				MapPackage->SetDirtyFlag(false);
+				MapPackage->MarkAsGarbage();
+			}
 			if (Package)
 			{
 				Package->SetDirtyFlag(false);
@@ -79,6 +142,11 @@ namespace
 		UPackage* Package = nullptr;
 		UCurveFloat* Asset = nullptr;
 		UCurveFloat* ProjectObject = nullptr;
+		UDataTable* Table = nullptr;
+		UStaticMesh* Mesh = nullptr;
+		UPackage* DirtyPackage = nullptr;
+		UCurveFloat* DirtyAsset = nullptr;
+		UPackage* MapPackage = nullptr;
 		UEdGraph* Graph = nullptr;
 		UEdGraphNode* GraphNode = nullptr;
 		FAssetData RegistryRecord;
@@ -216,14 +284,25 @@ namespace
 			FUeAgentAssetProjectReadError& OutError) override
 		{
 			++AssetCalls;
-			if (InTarget.GetBindingId() != TEXT("owned-asset"))
+			if (InTarget.GetBindingId() == TEXT("owned-asset"))
 			{
-				OutError.Code = TEXT("asset_project_read_asset_unresolved");
-				OutError.SubjectId = InTarget.GetBindingId();
-				return false;
+				OutAsset = Owner.Asset;
+				return true;
 			}
-			OutAsset = Owner.Asset;
-			return true;
+			if (InTarget.GetBindingId() == TEXT("owned-table"))
+			{
+				OutAsset = Owner.Table;
+				return true;
+			}
+			if (InTarget.GetBindingId() == TEXT("owned-mesh"))
+			{
+				OutAsset = Owner.Mesh;
+				return true;
+			}
+			OutAsset = nullptr;
+			OutError.Code = TEXT("asset_project_read_asset_unresolved");
+			OutError.SubjectId = InTarget.GetBindingId();
+			return false;
 		}
 
 		bool TryResolveRegistryRecord(
@@ -257,13 +336,72 @@ namespace
 			return true;
 		}
 
-		bool TryResolveEditorResources(
+		bool TryResolveOpenAssets(
 			const FUeAgentExecutionContextRef& InContext,
-			TArray<UPackage*>& OutPackages,
+			const bool bIncludeEditorIdentity,
+			TArray<FUeAgentEditorResourceObservation>& OutResources,
 			FUeAgentAssetProjectReadError& OutError) override
 		{
 			++EditorCalls;
-			OutPackages = {Owner.Package};
+			FUeAgentEditorResourceObservation Observation;
+			Observation.ResourceId = Owner.Package->GetName();
+			Observation.ResourceKind = TEXT("asset");
+			Observation.PackageName = Owner.Package->GetName();
+			Observation.ObjectPath = Owner.Asset->GetPathName();
+			Observation.ClassPath = Owner.Asset->GetClass()->GetPathName();
+			Observation.EditorIdentity = bIncludeEditorIdentity
+				? InContext.GetEditorInstanceId() : FString();
+			Observation.bDirty = Owner.Package->IsDirty();
+			OutResources = {MoveTemp(Observation)};
+			return InContext.GetProjectInstanceId() == TEXT("owned-project");
+		}
+
+		bool TryResolveDirtyResources(
+			const FUeAgentExecutionContextRef& InContext,
+			const TArray<FString>& ResourceKinds,
+			TArray<FUeAgentEditorResourceObservation>& OutResources,
+			FUeAgentAssetProjectReadError& OutError) override
+		{
+			++EditorCalls;
+			OutResources.Reset();
+			auto Add = [&](UPackage* Package, const FString& Kind)
+			{
+				if (!ResourceKinds.IsEmpty() && !ResourceKinds.Contains(Kind))
+				{
+					return;
+				}
+				FUeAgentEditorResourceObservation Observation;
+				Observation.ResourceId = Package->GetName();
+				Observation.ResourceKind = Kind;
+				Observation.PackageName = Package->GetName();
+				Observation.bDirty = Package->IsDirty();
+				OutResources.Add(MoveTemp(Observation));
+			};
+			Add(Owner.DirtyPackage, TEXT("asset"));
+			Add(Owner.MapPackage, TEXT("map"));
+			return InContext.GetProjectInstanceId() == TEXT("owned-project");
+		}
+
+		bool TryResolveProjectPlatforms(
+			const FUeAgentExecutionContextRef& InContext,
+			const TArray<FString>& PlatformIds,
+			TArray<FUeAgentProjectPlatformObservation>& OutPlatforms,
+			FUeAgentAssetProjectReadError& OutError) override
+		{
+			++PlatformCalls;
+			if (!PlatformIds.IsEmpty()
+				&& !PlatformIds.Contains(TEXT("Windows")))
+			{
+				OutError.Code = TEXT("asset_project_read_platform_unresolved");
+				return false;
+			}
+			FUeAgentProjectPlatformObservation Observation;
+			Observation.PlatformName = TEXT("Windows");
+			Observation.IniPlatformName = TEXT("Windows");
+			Observation.DisplayName = TEXT("Windows");
+			Observation.bRunningPlatform = true;
+			Observation.bSdkInstalled = true;
+			OutPlatforms = {MoveTemp(Observation)};
 			return InContext.GetProjectInstanceId() == TEXT("owned-project");
 		}
 
@@ -295,6 +433,7 @@ namespace
 		int32 RegistryCalls = 0;
 		int32 RelationCalls = 0;
 		int32 EditorCalls = 0;
+		int32 PlatformCalls = 0;
 		int32 ProjectCalls = 0;
 		int32 ConfigCalls = 0;
 
@@ -341,6 +480,18 @@ namespace
 				[&OwnerId](const FUeAgentStateEntry& Entry)
 				{
 					return Entry.GetIdentity().GetOwnerId().Contains(OwnerId);
+				});
+	}
+
+	bool HasSelector(
+		const TSharedPtr<const FUeAgentCanonicalSnapshot>& Snapshot,
+		const FString& Selector)
+	{
+		return Snapshot.IsValid()
+			&& Snapshot->GetEntries().ContainsByPredicate(
+				[&Selector](const FUeAgentStateEntry& Entry)
+				{
+					return Entry.GetIdentity().GetSelector() == Selector;
 				});
 	}
 }
@@ -441,7 +592,7 @@ bool FUeAgentAssetProjectReadNativeOwnedFactsTest::RunTest(
 			*OperationContext,
 			Snapshot,
 			Error));
-	TestTrue(TEXT("editor snapshot owns package"), HasOwner(Snapshot, Owner.Package->GetName()));
+	TestTrue(TEXT("editor snapshot owns dirty package"), HasOwner(Snapshot, Owner.DirtyPackage->GetName()));
 
 	Snapshot.Reset();
 	TestTrue(
@@ -626,5 +777,249 @@ bool FUeAgentAssetProjectReadNativeOwnedFactsTest::RunTest(
 	TestEqual(TEXT("editor resolver called once"), Environment->EditorCalls, 1);
 	TestEqual(TEXT("project resolver called once"), Environment->ProjectCalls, 1);
 	TestEqual(TEXT("config resolver called once"), Environment->ConfigCalls, 1);
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(
+	FUeAgentAssetProjectReadReferenceAbsencePolicyTest,
+	"UeAgentInterface.DomainAdapters.AssetProjectRead.E2.Native."
+		"ReferenceAbsenceIsValidOnlyForReferenceReadback",
+	EAutomationTestFlags::EditorContext
+		| EAutomationTestFlags::EngineFilter)
+
+bool FUeAgentAssetProjectReadReferenceAbsencePolicyTest::RunTest(
+	const FString& Parameters)
+{
+	FOwnedAssetProjectRead Owner;
+	const FUeAgentResourceTrackerOwner ResourceTracker = Resources();
+	const TSharedPtr<FUeAgentOperationContext> OperationContext =
+		Context(this, ResourceTracker);
+	if (!OperationContext.IsValid())
+	{
+		return false;
+	}
+	const TSharedRef<FOwnedEnvironment> Environment =
+		MakeShared<FOwnedEnvironment>(Owner);
+	const FUeAgentCandidateBinding MissingTarget = Target(
+		TEXT("missing-asset"),
+		TEXT("/Game/UAI/Reference/Missing.Missing"));
+	TSharedPtr<const FUeAgentCanonicalSnapshot> Snapshot;
+	FUeAgentAssetProjectReadError Error;
+
+	TestTrue(
+		TEXT("reference readback treats an absent exact target as a valid observation"),
+		Capture(
+			this,
+			TEXT("asset_project.read.reference_asset"),
+			TEXT("{\"field_ids\":[\"BlueprintDisplayName\"]}"),
+			MissingTarget,
+			Environment,
+			*OperationContext,
+			Snapshot,
+			Error));
+	TestTrue(TEXT("reference absence returns a canonical snapshot"),
+		Snapshot.IsValid());
+	TestEqual(TEXT("reference absence snapshot has no entries"),
+		Snapshot.IsValid() ? Snapshot->GetEntries().Num() : -1,
+		0);
+	TestTrue(TEXT("reference absence clears the resolver error"),
+		Error.Code.IsEmpty());
+
+	Snapshot.Reset();
+	Error = {};
+	TestFalse(
+		TEXT("generic asset properties still reject an unresolved target"),
+		Capture(
+			this,
+			TEXT("asset_project.read.asset_properties"),
+			TEXT("{\"field_ids\":[\"BlueprintDisplayName\"]}"),
+			MissingTarget,
+			Environment,
+			*OperationContext,
+			Snapshot,
+			Error));
+	TestFalse(TEXT("generic failure does not publish a snapshot"),
+		Snapshot.IsValid());
+	TestEqual(TEXT("generic unresolved target remains typed"),
+		Error.Code,
+		FString(TEXT("asset_project_read_asset_unresolved")));
+	TestEqual(TEXT("both policies use the same environment owner"),
+		Environment->AssetCalls,
+		2);
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(
+	FUeAgentAssetProjectReadSemanticSelectorsTest,
+	"UeAgentInterface.DomainAdapters.AssetProjectRead.E2.Native."
+		"SemanticSelectorsUseDistinctRealObservations",
+	EAutomationTestFlags::EditorContext
+		| EAutomationTestFlags::EngineFilter)
+
+bool FUeAgentAssetProjectReadSemanticSelectorsTest::RunTest(
+	const FString& Parameters)
+{
+	FOwnedAssetProjectRead Owner;
+	if (!TestNotNull(TEXT("owned data table"), Owner.Table)
+		|| !TestNotNull(TEXT("owned static mesh"), Owner.Mesh)
+		|| !TestNotNull(TEXT("owned dirty package"), Owner.DirtyPackage)
+		|| !TestNotNull(TEXT("owned map package"), Owner.MapPackage))
+	{
+		return false;
+	}
+	const FUeAgentResourceTrackerOwner ResourceTracker = Resources();
+	const TSharedPtr<FUeAgentOperationContext> OperationContext =
+		Context(this, ResourceTracker);
+	if (!OperationContext.IsValid())
+	{
+		return false;
+	}
+	const TSharedRef<FOwnedEnvironment> Environment =
+		MakeShared<FOwnedEnvironment>(Owner);
+	const FUeAgentCandidateBinding AssetTarget =
+		Target(TEXT("owned-asset"), Owner.Asset->GetPathName());
+	const FUeAgentCandidateBinding TableTarget =
+		Target(TEXT("owned-table"), Owner.Table->GetPathName());
+	const FUeAgentCandidateBinding MeshTarget =
+		Target(TEXT("owned-mesh"), Owner.Mesh->GetPathName());
+	TSharedPtr<const FUeAgentCanonicalSnapshot> Snapshot;
+	FUeAgentAssetProjectReadError Error;
+
+	TestTrue(
+		TEXT("asset relations use the registry relation owner"),
+		Capture(
+			this,
+			TEXT("asset_project.read.asset_relations"),
+			TEXT("{\"direction\":\"both\",\"relation_kinds\":[\"hard\"]}"),
+			AssetTarget,
+			Environment,
+			*OperationContext,
+			Snapshot,
+			Error));
+	TestTrue(TEXT("asset relation contains a dependency fact"),
+		HasSelector(Snapshot, TEXT("dependency")));
+
+	Snapshot.Reset();
+	Error = {};
+	TestTrue(
+		TEXT("asset validation executes a named rule"),
+		Capture(
+			this,
+			TEXT("asset_project.read.asset_validation"),
+			TEXT("{\"rule_ids\":[\"object.valid\"],\"include_passed\":true}"),
+			AssetTarget,
+			Environment,
+			*OperationContext,
+			Snapshot,
+			Error));
+	TestTrue(TEXT("asset validation publishes the executed rule identity"),
+		HasSelector(Snapshot, TEXT("validation_rule_id")));
+
+	Snapshot.Reset();
+	Error = {};
+	TestTrue(
+		TEXT("data table row collection enumerates real rows"),
+		Capture(
+			this,
+			TEXT("asset_project.read.asset_collection"),
+			TEXT("{\"collection_kind\":\"rows\",\"keys\":[\"Alpha\"]}"),
+			TableTarget,
+			Environment,
+			*OperationContext,
+			Snapshot,
+			Error));
+	TestTrue(TEXT("row collection publishes the real row key"),
+		HasSelector(Snapshot, TEXT("row_key")));
+
+	Snapshot.Reset();
+	Error = {};
+	TestTrue(
+		TEXT("static mesh bounds sample reads geometric bounds"),
+		Capture(
+			this,
+			TEXT("asset_project.read.asset_sample"),
+			TEXT("{\"sample_kind\":\"bounds\"}"),
+			MeshTarget,
+			Environment,
+			*OperationContext,
+			Snapshot,
+			Error));
+	TestTrue(TEXT("bounds sample publishes an extent component"),
+		HasSelector(Snapshot, TEXT("bounds_extent_x_cm")));
+
+	Snapshot.Reset();
+	Error = {};
+	TestTrue(
+		TEXT("open assets query succeeds"),
+		Capture(
+			this,
+			TEXT("asset_project.read.editor_open_assets"),
+			TEXT("{\"include_editor_identity\":true}"),
+			{},
+			Environment,
+			*OperationContext,
+			Snapshot,
+			Error));
+	TestTrue(TEXT("open assets contains the explicitly open fixture asset"),
+		HasOwner(Snapshot, Owner.Package->GetName()));
+	TestFalse(TEXT("open assets excludes a merely dirty package"),
+		HasOwner(Snapshot, Owner.DirtyPackage->GetName()));
+	TestTrue(TEXT("open asset observation carries editor identity when requested"),
+		HasSelector(Snapshot, TEXT("editor_identity")));
+
+	Snapshot.Reset();
+	Error = {};
+	TestTrue(
+		TEXT("dirty resource kind filter succeeds"),
+		Capture(
+			this,
+			TEXT("asset_project.read.editor_dirty_resources"),
+			TEXT("{\"resource_kinds\":[\"map\"]}"),
+			{},
+			Environment,
+			*OperationContext,
+			Snapshot,
+			Error));
+	TestTrue(TEXT("map filter keeps the dirty map package"),
+		HasOwner(Snapshot, Owner.MapPackage->GetName()));
+	TestFalse(TEXT("map filter excludes a dirty asset package"),
+		HasOwner(Snapshot, Owner.DirtyPackage->GetName()));
+	TestTrue(TEXT("dirty resource publishes its classified kind"),
+		HasSelector(Snapshot, TEXT("resource_kind")));
+
+	Snapshot.Reset();
+	Error = {};
+	TestTrue(
+		TEXT("project platform resolves exact platform facts"),
+		Capture(
+			this,
+			TEXT("asset_project.read.project_platform"),
+			TEXT("{\"platform_ids\":[\"Windows\"],\"field_ids\":[\"platform_name\",\"display_name\",\"running_platform\"],\"resolve_inheritance\":true}"),
+			{},
+			Environment,
+			*OperationContext,
+			Snapshot,
+			Error));
+	TestTrue(TEXT("platform query publishes the selected platform identity"),
+		HasSelector(Snapshot, TEXT("platform_name")));
+
+	Snapshot.Reset();
+	Error = {};
+	TestTrue(
+		TEXT("project validation executes a named rule"),
+		Capture(
+			this,
+			TEXT("asset_project.read.project_validation"),
+			TEXT("{\"section_ids\":[\"project\"],\"rule_ids\":[\"project_object.valid\"],\"include_passed\":true}"),
+			{},
+			Environment,
+			*OperationContext,
+			Snapshot,
+			Error));
+	TestTrue(TEXT("project validation publishes the executed rule identity"),
+		HasSelector(Snapshot, TEXT("validation_rule_id")));
+
+	TestFalse(TEXT("semantic read fixtures leave the asset package clean"),
+		Owner.Package->IsDirty());
 	return true;
 }
