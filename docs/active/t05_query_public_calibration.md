@@ -10,7 +10,7 @@ registry:
 | command | contract hash | responsibility |
 |---|---|---|
 | `query.command.search` | `sha256:5e625c558e8ada9eb4e18b1491d31c76c2f4335c52120345ed483e89563787d8` | Rank a bounded set of command candidates from intent and explain each match. |
-| `query.command.detail` | `sha256:78a228528dc0a42590fa51f3b398246448ca7e74a20f7d44442f703a12870022` | Return the complete purpose, field contract, invocation templates and stable tutorial references for one exact candidate identity. |
+| `query.command.detail` | `sha256:e40bc15770b133639104ab89bb09de77c2a19f3a84985aafd02713c3289f2765` | Return the complete purpose, field contract, invocation templates and stable tutorial references for one exact candidate identity. |
 | `query.calibration.read` | `sha256:3bac8ef382dcd4d6a4c631d13de0ea918569f4cb70fefee3ef08de16c30d1349` | Read one representative real UE query source with bounded paging and explicit completeness. |
 
 Search is fuzzy only while producing candidates. Detail and execution require the returned `command_id` and `contract_hash` unchanged. Unknown or stale identities never fall back to prefixes, aliases, another provider, or an SDK mapping.
