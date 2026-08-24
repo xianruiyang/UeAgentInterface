@@ -22,8 +22,8 @@
   ],
   "command_manifest": {
     "path": "Resources/UaiCommandManifest.json",
-    "file_sha256": "sha256:f7900304394c1c401dceeaad27b7e2546c60671d13e996d8548efd5db3db1f7a",
-    "registry_hash": "sha256:ebfd0e0ba4b8df3402ef22fc7ff299d91e301fe6dcea8b83f21fead78340d280",
+    "file_sha256": "sha256:5e6f960aca29c246ac2528dd6e62b35c6841dd00abb1105bdbb5662745656e5c",
+    "registry_hash": "sha256:36c11593999f6006b540e3433de6a546bf7f892035ba2e09d258dd61ae919261",
     "command_count": 352
   },
   "historical_sources": {

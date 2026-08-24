@@ -71,6 +71,10 @@ namespace UE::UAI::CommandContract
 		TArray<FUeAgentCommandFieldDeclaration> ResultFields;
 		TArray<FUeAgentCommandErrorDeclaration> Errors;
 		FUeAgentCommandPurposeDeclaration Purpose;
+		TArray<FString> TutorialReferences = {
+			TEXT("uai-docs:python-sdk-and-cli#command-discovery"),
+			TEXT("uai-skill:public-sdk-playbook#command-discovery"),
+		};
 	};
 
 	class UEAGENTINTERFACE_API FUeAgentFrozenCommandContract final
@@ -100,6 +104,7 @@ namespace UE::UAI::CommandContract
 		GetResultFields() const;
 		const TArray<FUeAgentCommandErrorDeclaration>& GetErrors() const;
 		const FUeAgentCommandPurposeDeclaration& GetPurpose() const;
+		const TArray<FString>& GetTutorialReferences() const;
 
 	private:
 		friend class UE::UAI::CommandRegistry::

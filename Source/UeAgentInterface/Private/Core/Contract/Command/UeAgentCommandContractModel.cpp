@@ -82,4 +82,10 @@ namespace UE::UAI::CommandContract
 	{
 		return Declaration.Purpose;
 	}
+
+	const TArray<FString>&
+	FUeAgentFrozenCommandContract::GetTutorialReferences() const
+	{
+		return Declaration.TutorialReferences;
+	}
 }

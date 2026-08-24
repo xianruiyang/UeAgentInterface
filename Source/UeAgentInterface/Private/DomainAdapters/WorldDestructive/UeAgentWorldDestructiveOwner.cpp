@@ -8,7 +8,9 @@
 #include "Core/Contract/UeAgentContractJson.h"
 #include "Core/PlanningPreflight/UeAgentPlanningPreflight.h"
 #include "Core/StateSemantic/UeAgentStateSemantic.h"
+#include "DataLayer/DataLayerEditorSubsystem.h"
 #include "Domains/Level/Authoring/UeAgentLevelAuthoringState.h"
+#include "Editor.h"
 #include "EditorLevelUtils.h"
 #include "Engine/LevelStreaming.h"
 #include "Engine/StaticMesh.h"
@@ -143,7 +145,7 @@ namespace UE::UAI::DomainAdapters::WorldDestructive
 				const FAssetDurableRequest DurableRequest(
 					Plan.ToSharedRef(),
 					{FAssetDurableTarget(
-						Identity, PackageName, EPackageHeaderKind::Map,
+						Identity, PackageName, EPackageHeaderKind::Asset,
 						EAssetDurableIntent::Save,
 						ERollbackGrade::DurableBackup)},
 					Token, OwnerId, EAtomicityMode::CompensatedSaga);
@@ -332,10 +334,15 @@ namespace UE::UAI::DomainAdapters::WorldDestructive
 		{
 		public:
 			FWorldDestructiveOwner(
-				UWorld& InWorld, FString InJournalRoot, FString InOwnerId)
+				UWorld& InWorld,
+				FString InJournalRoot,
+				FString InOwnerId,
+				TSharedRef<IUeAgentWorldDestructiveDurableRunner>
+					InDurableRunner)
 				: World(&InWorld)
 				, JournalRoot(MoveTemp(InJournalRoot))
 				, OwnerId(MoveTemp(InOwnerId))
+				, DurableRunner(MoveTemp(InDurableRunner))
 			{
 			}
 
@@ -365,7 +372,7 @@ namespace UE::UAI::DomainAdapters::WorldDestructive
 					return Fail(TEXT("world_destructive_cancelled"), Request.RequestId);
 				}
 				if (Request.CommandId == TEXT("world.data_layer.delete"))
-					return DeleteDataLayer(Request);
+					return DeleteDataLayer(Request, Cancellation);
 				if (Request.CommandId == TEXT("world.level_content.delete_scope"))
 					return DeleteFolder(Request);
 				if (Request.CommandId == TEXT("world.pcg.cleanup"))
@@ -425,32 +432,189 @@ namespace UE::UAI::DomainAdapters::WorldDestructive
 				return Result;
 			}
 
+			class FDataLayerDeleteMutation final
+				: public IUeAgentWorldDestructiveDurableMutation
+			{
+			public:
+				FDataLayerDeleteMutation(
+					AWorldDataLayers& InLayers,
+					FName InLayerName,
+					FString InMapPackageName,
+					FString InMutationPackageName,
+					const FString& RequestId)
+					: Layers(&InLayers)
+					, LayerName(InLayerName)
+					, PackageName(MoveTemp(InMapPackageName))
+					, MutationPackageName(
+						MoveTemp(InMutationPackageName))
+					, TransactionTitle(
+						TEXT("UeAgentInterface Delete Data Layer ")
+						+ RequestId)
+				{
+				}
+
+				const FString& GetPackageName() const override
+				{
+					return PackageName;
+				}
+
+				const FString& GetMutationPackageName() const override
+				{
+					return MutationPackageName;
+				}
+
+				const FString& GetPersistenceScope() const override
+				{
+					static const FString Scope =
+						TEXT("world_map_asset_durable");
+					return Scope;
+				}
+
+				bool Apply(FString& OutError) override
+				{
+					AWorldDataLayers* const Current = Layers.Get();
+					const UDataLayerInstance* const Layer = Current
+						? Current->GetDataLayerInstance(LayerName)
+						: nullptr;
+					if (!Current || !Layer)
+					{
+						OutError = TEXT("world_data_layer_missing");
+						return false;
+					}
+					if (!Layer->CanBeRemoved())
+					{
+						OutError = TEXT("world_data_layer_not_removable");
+						return false;
+					}
+					UDataLayerEditorSubsystem* const DataLayerEditor =
+						UDataLayerEditorSubsystem::Get();
+					if (!DataLayerEditor)
+					{
+						OutError = TEXT(
+							"world_data_layer_editor_subsystem_unavailable");
+						return false;
+					}
+					if (!GEditor
+						|| !GEditor->CanTransact()
+						|| GEditor->IsTransactionActive())
+					{
+						OutError = TEXT(
+							"world_data_layer_transaction_unavailable");
+						return false;
+					}
+					{
+						FScopedTransaction Transaction(
+							FText::FromString(TransactionTitle));
+						Current->Modify();
+						DataLayerEditor->DeleteDataLayer(
+							const_cast<UDataLayerInstance*>(Layer));
+					}
+					if (Current->GetDataLayerInstance(LayerName))
+					{
+						OutError = TEXT(
+							"world_data_layer_delete_readback_failed");
+						return false;
+					}
+					return true;
+				}
+
+				bool Rollback(FString& OutError) override
+				{
+					AWorldDataLayers* const Current = Layers.Get();
+					if (!Current || !GEditor
+						|| GEditor->IsTransactionActive())
+					{
+						OutError = TEXT(
+							"world_data_layer_rollback_unavailable");
+						return false;
+					}
+					if (GEditor->GetTransactionName().ToString()
+						!= TransactionTitle)
+					{
+						OutError = TEXT(
+							"world_data_layer_rollback_fence_stale");
+						return false;
+					}
+					if (!GEditor->UndoTransaction(false)
+						|| !Current->GetDataLayerInstance(LayerName))
+					{
+						OutError = TEXT(
+							"world_data_layer_rollback_unconfirmed");
+						return false;
+					}
+					return true;
+				}
+
+				bool VerifyPersisted(
+					UWorld& PersistedWorld,
+					FString& OutError) const override
+				{
+					const AWorldDataLayers* const PersistedLayers =
+						PersistedWorld.GetWorldDataLayers();
+					if (!PersistedLayers)
+					{
+						OutError = TEXT(
+							"world_data_layer_persisted_owner_missing");
+						return false;
+					}
+					if (PersistedLayers->GetDataLayerInstance(LayerName))
+					{
+						OutError = TEXT(
+							"world_data_layer_persisted_instance_present");
+						return false;
+					}
+					return true;
+				}
+
+			private:
+				TWeakObjectPtr<AWorldDataLayers> Layers;
+				FName LayerName;
+				FString PackageName;
+				FString MutationPackageName;
+				FString TransactionTitle;
+			};
+
 			FUeAgentWorldDestructiveResult DeleteDataLayer(
-				const FUeAgentWorldDestructiveRequest& Request)
+				const FUeAgentWorldDestructiveRequest& Request,
+				const TSharedRef<IUeAgentCancellationSignal>& Cancellation)
 			{
 				FUeAgentWorldDestructiveResult Result = Base(Request);
-				AWorldDataLayers* const Layers = World->GetWorldDataLayers();
-				const UDataLayerInstance* const Layer = Layers
-					? Layers->GetDataLayerInstance(FName(*Request.TargetRef)) : nullptr;
-				if (!Layers || !Layer)
+				AWorldDataLayers* const WorldLayers =
+					World->GetWorldDataLayers();
+				UDataLayerInstance* Layer = nullptr;
+				FString ResolveError;
+				if (!WorldLayers
+					|| !UeAgentLevelAuthoring::
+						TryResolveDataLayerInstanceExact(
+							*WorldLayers,
+							Request.TargetRef,
+							Layer,
+							ResolveError))
 				{
-					Result.ErrorCode = TEXT("world_data_layer_missing");
+					Result.ErrorCode = WorldLayers
+						? ResolveError
+						: TEXT("world_data_layers_missing");
+					return Result;
+				}
+				AWorldDataLayers* const MutationLayers =
+					Layer->GetDirectOuterWorldDataLayers();
+				if (!MutationLayers)
+				{
+					Result.ErrorCode =
+						TEXT("world_data_layer_owner_missing");
 					return Result;
 				}
 				const FName LayerName = Layer->GetDataLayerFName();
-				FScopedTransaction Transaction(
-					NSLOCTEXT("UeAgentInterface", "WorldDeleteDataLayer",
-						"UeAgentInterface Delete Data Layer"));
-				Layers->Modify();
-				if (!Layers->RemoveDataLayer(Layer, true))
-				{
-					Transaction.Cancel();
-					Result.ErrorCode = TEXT("world_data_layer_delete_failed");
-					return Result;
-				}
-				return CommitWorld(
-					Request, {Layers->GetOutermost()}, true,
-					Layers->GetDataLayerInstance(LayerName) == nullptr);
+				return DurableRunner->Execute(
+					*World,
+					Request,
+					MakeShared<FDataLayerDeleteMutation>(
+						*MutationLayers,
+						LayerName,
+						World->GetOutermost()->GetName(),
+						MutationLayers->GetOutermost()->GetName(),
+						Request.RequestId),
+					Cancellation);
 			}
 
 			FUeAgentWorldDestructiveResult DeleteFolder(
@@ -819,6 +983,8 @@ namespace UE::UAI::DomainAdapters::WorldDestructive
 			TWeakObjectPtr<UWorld> World;
 			FString JournalRoot;
 			FString OwnerId;
+			TSharedRef<IUeAgentWorldDestructiveDurableRunner>
+				DurableRunner;
 			FThreadSafeCounter Counter;
 		};
 	}
@@ -827,6 +993,7 @@ namespace UE::UAI::DomainAdapters::WorldDestructive
 		UWorld& ExplicitWorld,
 		FString JournalRoot,
 		FString JournalOwnerId,
+		TSharedRef<IUeAgentWorldDestructiveDurableRunner> DurableRunner,
 		TSharedPtr<IUeAgentWorldDestructiveOwner>& OutOwner,
 		FString& OutError)
 	{
@@ -845,7 +1012,10 @@ namespace UE::UAI::DomainAdapters::WorldDestructive
 			return false;
 		}
 		OutOwner = MakeShared<FWorldDestructiveOwner>(
-			ExplicitWorld, MoveTemp(JournalRoot), MoveTemp(JournalOwnerId));
+			ExplicitWorld,
+			MoveTemp(JournalRoot),
+			MoveTemp(JournalOwnerId),
+			MoveTemp(DurableRunner));
 		return true;
 	}
 }

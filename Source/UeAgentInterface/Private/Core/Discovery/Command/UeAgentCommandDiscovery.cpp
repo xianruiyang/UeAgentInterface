@@ -183,10 +183,7 @@ namespace UE::UAI::Discovery::Command
 		OutDetail.InputFields = Contract->GetInputFields();
 		OutDetail.ResultFields = Contract->GetResultFields();
 		OutDetail.Errors = Contract->GetErrors();
-		OutDetail.TutorialReferences = {
-			TEXT("uai-docs:python-sdk-and-cli#command-discovery"),
-			TEXT("uai-skill:public-sdk-playbook#command-discovery"),
-		};
+		OutDetail.TutorialReferences = Contract->GetTutorialReferences();
 		OutDetail.bHasSideEffects =
 			Contract->GetSideEffect() != EUeAgentCommandSideEffect::None;
 		return true;

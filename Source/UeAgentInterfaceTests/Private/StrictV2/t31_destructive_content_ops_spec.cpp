@@ -78,6 +78,27 @@ bool FUeAgentStrictV2T31DestructiveContentInventoryTest::RunTest(
 		AddError(DiscoveryError.Code + TEXT(":") + DiscoveryError.Detail);
 		return false;
 	}
+	const auto* DataLayerContract =
+		Registry->FindExact(TEXT("world.data_layer.delete"));
+	if (DataLayerContract)
+	{
+		Discovery::Command::FCommandDetail Detail;
+		TestTrue(
+			TEXT("data-layer delete detail projects its exact tutorial"),
+			DiscoveryService->GetDetail(
+				DataLayerContract->GetCommandId(),
+				DataLayerContract->GetContractHash(),
+				Detail,
+				DiscoveryError));
+		TestTrue(
+			TEXT("data-layer delete has the destructive workflow tutorial"),
+			Detail.TutorialReferences.Contains(
+				TEXT("uai-docs:t31-destructive-content-ops#destructive-plan-authorize-commit")));
+		TestTrue(
+			TEXT("data-layer delete has command-specific persisted-state tutorial"),
+			Detail.TutorialReferences.Contains(
+				TEXT("uai-docs:t31-destructive-content-ops#world-data-layer-delete")));
+	}
 	for (const FString& Intent : TArray<FString>{
 		TEXT("duplicate asset"),
 		TEXT("clone owned map asset"),

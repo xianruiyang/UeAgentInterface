@@ -11,6 +11,8 @@
 #include "HAL/FileManager.h"
 #include "Misc/PackageName.h"
 #include "UObject/Package.h"
+#include "WorldPartition/DataLayer/DataLayerInstance.h"
+#include "WorldPartition/DataLayer/WorldDataLayers.h"
 
 namespace UE::UAI::DomainAdapters::ContentOperations
 {
@@ -239,6 +241,78 @@ namespace UE::UAI::DomainAdapters::ContentOperations
 			}
 			return true;
 		}
+
+		bool TryCollectDataLayerDeleteScope(
+			const TSharedPtr<FJsonObject>& Params,
+			UWorld* ExplicitWorld,
+			TSet<FString>& InOutPackageRefs,
+			TArray<FString>& OutImpacts,
+			TArray<FString>& OutRevisions,
+			FString& OutError)
+		{
+			if (!Params.IsValid() || !ExplicitWorld)
+			{
+				OutError = TEXT("world_data_layer_context_missing");
+				return false;
+			}
+			FString TargetRef;
+			if (!Params->TryGetStringField(TEXT("layer"), TargetRef)
+				|| TargetRef.TrimStartAndEnd().IsEmpty())
+			{
+				OutError = TEXT("world_data_layer_target_required");
+				return false;
+			}
+			AWorldDataLayers* const WorldDataLayers =
+				ExplicitWorld->GetWorldDataLayers();
+			UDataLayerInstance* Instance = nullptr;
+			if (!WorldDataLayers
+				|| !UeAgentLevelAuthoring::
+					TryResolveDataLayerInstanceExact(
+						*WorldDataLayers,
+						TargetRef,
+						Instance,
+						OutError))
+			{
+				if (!WorldDataLayers)
+				{
+					OutError = TEXT("world_data_layers_missing");
+				}
+				return false;
+			}
+			if (!Instance->CanBeRemoved())
+			{
+				OutError = TEXT("world_data_layer_not_removable");
+				return false;
+			}
+			AWorldDataLayers* const MutationOwner =
+				Instance->GetDirectOuterWorldDataLayers();
+			if (!MutationOwner)
+			{
+				OutError = TEXT("world_data_layer_owner_missing");
+				return false;
+			}
+			const FString MutationPackage =
+				MutationOwner->GetOutermost()->GetName();
+			if (!MutationPackage.StartsWith(TEXT("/Game/"))
+				|| !FPackageName::IsValidLongPackageName(
+					MutationPackage,
+					true))
+			{
+				OutError = TEXT("world_data_layer_package_invalid");
+				return false;
+			}
+			InOutPackageRefs.Add(MutationPackage);
+			OutImpacts.Add(TEXT("data_layer:") + Instance->GetPathName());
+			OutRevisions.Add(
+				TEXT("data_layer=") + Instance->GetPathName()
+				+ TEXT("|f_name=")
+				+ Instance->GetDataLayerFName().ToString()
+				+ TEXT("|short_name=")
+				+ Instance->GetDataLayerShortName()
+				+ TEXT("|owner_package=") + MutationPackage
+				+ TEXT("|removable=true"));
+			return true;
+		}
 	}
 
 	bool FUeAgentDestructiveContentPlan::IsValid() const
@@ -328,6 +402,17 @@ namespace UE::UAI::DomainAdapters::ContentOperations
 		TArray<FString> WorldObjectRevisions;
 		if (CommandId == TEXT("world.level_content.delete_scope")
 			&& !TryCollectLevelContentActorScope(
+				Params,
+				ExplicitWorld,
+				PackageRefs,
+				WorldObjectImpacts,
+				WorldObjectRevisions,
+				OutError))
+		{
+			return false;
+		}
+		if (CommandId == TEXT("world.data_layer.delete")
+			&& !TryCollectDataLayerDeleteScope(
 				Params,
 				ExplicitWorld,
 				PackageRefs,

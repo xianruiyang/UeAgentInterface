@@ -84,6 +84,46 @@ namespace UE::UAI::CommandRegistry
 			return true;
 		}
 
+		bool IsTutorialReference(const FString& Value)
+		{
+			for (const TCHAR Character : Value)
+			{
+				if (FChar::IsWhitespace(Character))
+				{
+					return false;
+				}
+			}
+			TArray<FString> Sections;
+			Value.ParseIntoArray(Sections, TEXT("#"), false);
+			if (Sections.Num() != 2
+				|| Sections[0].IsEmpty()
+				|| Sections[1].IsEmpty())
+			{
+				return false;
+			}
+			const FString& Owner = Sections[0];
+			return (Owner.StartsWith(TEXT("uai-docs:"))
+					&& Owner.Len() > FCString::Strlen(TEXT("uai-docs:")))
+				|| (Owner.StartsWith(TEXT("uai-skill:"))
+					&& Owner.Len() > FCString::Strlen(TEXT("uai-skill:")));
+		}
+
+		bool TutorialReferencesValid(const TArray<FString>& Values)
+		{
+			if (!HasNonEmptyUniqueStrings(Values))
+			{
+				return false;
+			}
+			for (const FString& Value : Values)
+			{
+				if (!IsTutorialReference(Value))
+				{
+					return false;
+				}
+			}
+			return true;
+		}
+
 		bool PurposeComplete(
 			const FUeAgentCommandPurposeDeclaration& Purpose)
 		{
@@ -176,6 +216,7 @@ namespace UE::UAI::CommandRegistry
 			NormalizeStrings(Purpose.RelatedFlows);
 			NormalizeStrings(Purpose.Keywords);
 			NormalizeStrings(Purpose.Synonyms);
+			NormalizeStrings(Declaration.TutorialReferences);
 		}
 
 		bool ValidateFields(
@@ -260,6 +301,11 @@ namespace UE::UAI::CommandRegistry
 			if (!HasNonEmptyUniqueStrings(Declaration.StateLayers))
 			{
 				OutError = TEXT("command_contract_state_layer_invalid");
+				return false;
+			}
+			if (!TutorialReferencesValid(Declaration.TutorialReferences))
+			{
+				OutError = TEXT("command_tutorial_reference_invalid");
 				return false;
 			}
 			if (!ValidateFields(Declaration.InputFields, OutError)
@@ -474,6 +520,18 @@ namespace UE::UAI::CommandRegistry
 			return Result;
 		}
 
+		TSharedPtr<FJsonObject> RegistryCommandObject(
+			const FUeAgentCommandDeclaration& Declaration,
+			const FString& ContractHash)
+		{
+			const TSharedPtr<FJsonObject> Result =
+				ContractObject(Declaration, ContractHash);
+			Result->SetArrayField(
+				TEXT("tutorial_references"),
+				StringArray(Declaration.TutorialReferences));
+			return Result;
+		}
+
 		FString ContractHash(
 			const FUeAgentCommandDeclaration& Declaration)
 		{
@@ -591,8 +649,12 @@ namespace UE::UAI::CommandRegistry
 			Projection.ResultFields = Contract.GetResultFields();
 			Projection.Errors = Contract.GetErrors();
 			Projection.Purpose = Contract.GetPurpose();
+			Projection.TutorialReferences =
+				Contract.GetTutorialReferences();
 			CommandValues.Add(MakeShared<FJsonValueObject>(
-				ContractObject(Projection, Contract.GetContractHash())));
+				RegistryCommandObject(
+					Projection,
+					Contract.GetContractHash())));
 		}
 		FString Canonical;
 		if (!Json::TryCanonicalize(
@@ -658,8 +720,12 @@ namespace UE::UAI::CommandRegistry
 			Declaration.ResultFields = Contract.GetResultFields();
 			Declaration.Errors = Contract.GetErrors();
 			Declaration.Purpose = Contract.GetPurpose();
+			Declaration.TutorialReferences =
+				Contract.GetTutorialReferences();
 			Commands.Add(MakeShared<FJsonValueObject>(
-				ContractObject(Declaration, Contract.GetContractHash())));
+				RegistryCommandObject(
+					Declaration,
+					Contract.GetContractHash())));
 		}
 		const TSharedPtr<FJsonObject> Source = MakeShared<FJsonObject>();
 		Source->SetStringField(

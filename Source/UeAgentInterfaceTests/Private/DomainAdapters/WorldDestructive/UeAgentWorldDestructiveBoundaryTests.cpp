@@ -1,16 +1,27 @@
 #include "Misc/AutomationTest.h"
 
 #include "Composition/DestructiveImport/UeAgentDestructiveImportActivation.h"
+#include "Core/AssetDurable/UeAgentPackageHeader.h"
+#include "DomainAdapters/ContentOperations/UeAgentDestructiveContentPlanningBoundary.h"
 #include "DomainAdapters/WorldDestructive/UeAgentWorldDestructiveOwner.h"
+#include "Dom/JsonObject.h"
 #include "Domains/Level/Authoring/UeAgentLevelAuthoringState.h"
+#include "Engine/Level.h"
 #include "Engine/World.h"
 #include "GameFramework/Actor.h"
 #include "HAL/FileManager.h"
+#include "HAL/PlatformMisc.h"
 #include "Misc/PackageName.h"
 #include "Misc/Paths.h"
+#include "OperationOwners/DestructiveContent/UeAgentWorldDestructiveDurableRunner.h"
 #include "UObject/GarbageCollection.h"
 #include "UObject/Package.h"
+#include "UObject/SavePackage.h"
 #include "UObject/UObjectGlobals.h"
+#include "WorldPartition/DataLayer/DataLayerAsset.h"
+#include "WorldPartition/DataLayer/DataLayerInstanceWithAsset.h"
+#include "WorldPartition/DataLayer/WorldDataLayers.h"
+#include "WorldPartition/WorldPartition.h"
 
 namespace
 {
@@ -20,6 +31,79 @@ namespace
 	public:
 		bool IsCancelled() const override { return false; }
 	};
+
+	class FRollbackAfterApplyRunner final
+		: public UE::UAI::DomainAdapters::WorldDestructive::
+			IUeAgentWorldDestructiveDurableRunner
+	{
+	public:
+		UE::UAI::DomainAdapters::WorldDestructive::
+			FUeAgentWorldDestructiveResult Execute(
+				UWorld& ExplicitWorld,
+				const UE::UAI::DomainAdapters::WorldDestructive::
+					FUeAgentWorldDestructiveRequest& Request,
+				TSharedRef<UE::UAI::DomainAdapters::WorldDestructive::
+					IUeAgentWorldDestructiveDurableMutation> Mutation,
+				const TSharedRef<UE::UAI::Contract::
+					IUeAgentCancellationSignal>& Cancellation) override
+		{
+			(void)ExplicitWorld;
+			(void)Cancellation;
+			using namespace UE::UAI::DomainAdapters::WorldDestructive;
+			FUeAgentWorldDestructiveResult Result;
+			Result.CommandId = Request.CommandId;
+			Result.TargetRef = Request.TargetRef;
+			FString Error;
+			if (!Mutation->Apply(Error))
+			{
+				Result.TerminalState = TEXT("state_unknown");
+				Result.ErrorCode = TEXT("fixture_apply_failed");
+				Result.ErrorDetail = Error;
+				return Result;
+			}
+			bApplyObserved = true;
+			if (!Mutation->Rollback(Error))
+			{
+				Result.TerminalState = TEXT("state_unknown");
+				Result.ErrorCode = TEXT("fixture_rollback_failed");
+				Result.ErrorDetail = Error;
+				return Result;
+			}
+			bRollbackObserved = true;
+			Result.TerminalState = TEXT("rolled_back");
+			Result.ErrorCode = TEXT("fixture_post_mutation_failure");
+			return Result;
+		}
+
+		bool bApplyObserved = false;
+		bool bRollbackObserved = false;
+	};
+
+	bool TryCreateProductionWorldDestructiveOwner(
+		UWorld& World,
+		const FString& JournalRoot,
+		const FString& OwnerId,
+		TSharedPtr<UE::UAI::DomainAdapters::WorldDestructive::
+			IUeAgentWorldDestructiveOwner>& OutOwner,
+		FString& OutError)
+	{
+		using namespace UE::UAI::DomainAdapters::WorldDestructive;
+		TSharedPtr<IUeAgentWorldDestructiveDurableRunner> DurableRunner;
+		return UE::UAI::OperationOwners::DestructiveContent::
+				TryCreateWorldDestructiveDurableRunner(
+					JournalRoot,
+					OwnerId,
+					DurableRunner,
+					OutError)
+			&& DurableRunner.IsValid()
+			&& TryCreateWorldDestructiveOwner(
+				World,
+				JournalRoot,
+				OwnerId,
+				DurableRunner.ToSharedRef(),
+				OutOwner,
+				OutError);
+	}
 }
 
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(
@@ -150,6 +234,39 @@ bool FUeAgentManagedWorldActorIdentityBoundaryTest::RunTest(
 }
 
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(
+	FUeAgentDataLayerExactIdentitySelectionTest,
+	"UeAgentInterface.Domains.Level.DataLayerExactIdentitySelection",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FUeAgentDataLayerExactIdentitySelectionTest::RunTest(
+	const FString& Parameters)
+{
+	(void)Parameters;
+	const TArray<TArray<FString>> CandidateIdentities{
+		{TEXT("First"), TEXT("SharedIdentity")},
+		{TEXT("Second"), TEXT("SharedIdentity")},
+	};
+	int32 CandidateIndex = 7;
+	FString Error;
+	TestFalse(
+		TEXT("two candidates sharing an accepted identity are rejected"),
+		UeAgentLevelAuthoring::TrySelectDataLayerIdentityExact(
+			CandidateIdentities,
+			TEXT("SharedIdentity"),
+			CandidateIndex,
+			Error));
+	TestEqual(
+		TEXT("ambiguous exact identity keeps its stable error"),
+		Error,
+		TEXT("world_data_layer_identity_ambiguous"));
+	TestEqual(
+		TEXT("ambiguous exact identity publishes no candidate"),
+		CandidateIndex,
+		INDEX_NONE);
+	return !HasAnyErrors();
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(
 	FUeAgentWorldDestructiveMapHeaderPersistenceTest,
 	"UeAgentInterface.DomainAdapters.WorldDestructive.MapHeaderPersistence",
 	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
@@ -209,7 +326,7 @@ bool FUeAgentWorldDestructiveMapHeaderPersistenceTest::RunTest(
 	FString Error;
 	TestTrue(
 		TEXT("world destructive owner is created"),
-		TryCreateWorldDestructiveOwner(
+		TryCreateProductionWorldDestructiveOwner(
 			*World,
 			FPaths::ProjectSavedDir()
 				/ TEXT("UeAgentInterface/Tests/WorldDestructive"),
@@ -250,5 +367,385 @@ bool FUeAgentWorldDestructiveMapHeaderPersistenceTest::RunTest(
 	CollectGarbage(RF_NoFlags, true);
 	IFileManager::Get().Delete(*MapFilename, false, true, true);
 	IFileManager::Get().Delete(*AssetFilename, false, true, true);
+	return !HasAnyErrors();
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(
+	FUeAgentWorldDestructiveDataLayerDurableBoundaryTest,
+	"UeAgentInterface.DomainAdapters.WorldDestructive.DataLayerDurableBoundary",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FUeAgentWorldDestructiveDataLayerDurableBoundaryTest::RunTest(
+	const FString& Parameters)
+{
+	(void)Parameters;
+	using namespace UE::UAI::DomainAdapters::WorldDestructive;
+
+	const FString FixtureId =
+		FGuid::NewGuid().ToString(EGuidFormats::Digits);
+	FString RetainedFixturePackage = FPlatformMisc::GetEnvironmentVariable(
+		TEXT("UAI_WORLD_DESTRUCTIVE_PUBLIC_FIXTURE_PACKAGE"));
+	RetainedFixturePackage.TrimStartAndEndInline();
+	const bool bRetainPublicFixture = !RetainedFixturePackage.IsEmpty();
+	if (bRetainPublicFixture
+		&& (!RetainedFixturePackage.StartsWith(TEXT("/Game/UAI/Tests/T65/"))
+			|| !FPackageName::IsValidLongPackageName(
+				RetainedFixturePackage,
+				true)))
+	{
+		AddError(TEXT("retained fixture package must be an exact T65 /Game package"));
+		return false;
+	}
+	const FString PackageName = bRetainPublicFixture
+		? RetainedFixturePackage
+		: TEXT("/Game/UAI/Tests/WorldDestructive/DataLayerDurable_")
+			+ FixtureId;
+	const FString DataLayerPackageName = PackageName + TEXT("_Layer");
+	FString RelativePackageName = PackageName;
+	RelativePackageName.RemoveFromStart(TEXT("/Game/"));
+	const FString ExternalActorDirectory =
+		FPaths::ProjectContentDir()
+		/ TEXT("__ExternalActors__")
+		/ RelativePackageName;
+	FString MapFilename;
+	FString DataLayerFilename;
+	TestTrue(
+		TEXT("resolve owned DataLayer map filename"),
+		FPackageName::TryConvertLongPackageNameToFilename(
+			PackageName,
+			MapFilename,
+			FPackageName::GetMapPackageExtension()));
+	if (bRetainPublicFixture
+		&& (IFileManager::Get().FileExists(*MapFilename)
+			|| IFileManager::Get().DirectoryExists(
+				*ExternalActorDirectory)))
+	{
+		AddError(TEXT("retained public fixture target already exists"));
+		return false;
+	}
+	IFileManager::Get().MakeDirectory(*FPaths::GetPath(MapFilename), true);
+	IFileManager::Get().Delete(*MapFilename, false, true, true);
+	TestTrue(
+		TEXT("resolve owned DataLayer asset filename"),
+		FPackageName::TryConvertLongPackageNameToFilename(
+			DataLayerPackageName,
+			DataLayerFilename,
+			FPackageName::GetAssetPackageExtension()));
+	IFileManager::Get().Delete(*DataLayerFilename, false, true, true);
+
+	UPackage* const Package = CreatePackage(*PackageName);
+	UWorld* const World = UWorld::CreateWorld(
+		EWorldType::EditorPreview,
+		false,
+		FName(*FPackageName::GetLongPackageAssetName(PackageName)),
+		Package);
+	if (World)
+	{
+		World->SetFlags(RF_Public | RF_Standalone | RF_Transactional);
+	}
+	if (World && World->PersistentLevel)
+	{
+		World->PersistentLevel->SetUseExternalActors(true);
+	}
+	UWorldPartition* const WorldPartition = World
+		? UWorldPartition::CreateOrRepairWorldPartition(
+			World->GetWorldSettings())
+		: nullptr;
+	if (WorldPartition && !WorldPartition->IsInitialized())
+	{
+		WorldPartition->Initialize(World, FTransform::Identity);
+	}
+	AWorldDataLayers* const WorldDataLayers = World
+		? World->GetWorldDataLayers()
+		: nullptr;
+	UPackage* const DataLayerPackage = CreatePackage(
+		*DataLayerPackageName);
+	UDataLayerAsset* const DataLayerAsset = DataLayerPackage
+		? NewObject<UDataLayerAsset>(
+			DataLayerPackage,
+			TEXT("OwnedDataLayer"),
+			RF_Public | RF_Standalone | RF_Transactional)
+		: nullptr;
+	if (DataLayerAsset)
+	{
+		DataLayerAsset->SetType(EDataLayerType::Runtime);
+	}
+	UDataLayerInstanceWithAsset* const DataLayer =
+		WorldDataLayers && DataLayerAsset
+			? WorldDataLayers->CreateDataLayer<UDataLayerInstanceWithAsset>(
+				DataLayerAsset)
+			: nullptr;
+	if (!TestNotNull(TEXT("owned DataLayer world exists"), World)
+		|| !TestNotNull(TEXT("owned WorldPartition exists"), WorldPartition)
+		|| !TestNotNull(TEXT("owned WorldDataLayers exists"), WorldDataLayers)
+		|| !TestNotNull(TEXT("owned DataLayer exists"), DataLayer))
+	{
+		return false;
+	}
+	Package->SetPackageFlags(PKG_ContainsMap);
+	FSavePackageArgs InitialSaveArgs;
+	InitialSaveArgs.TopLevelFlags = RF_Public | RF_Standalone;
+	TestTrue(
+		TEXT("persist owned DataLayer asset fixture"),
+		UPackage::SavePackage(
+			DataLayerPackage,
+			DataLayerAsset,
+			*DataLayerFilename,
+			InitialSaveArgs));
+	TestTrue(
+		TEXT("persist owned map fixture with DataLayer present"),
+		UPackage::SavePackage(
+			Package,
+			World,
+			*MapFilename,
+			InitialSaveArgs));
+	Package->SetDirtyFlag(false);
+	DataLayerPackage->SetDirtyFlag(false);
+
+	const FString DurablePackageName =
+		WorldDataLayers->GetOutermost()->GetName();
+	TestNotEqual(
+		TEXT("WorldPartition WorldDataLayers uses its external actor package"),
+		DurablePackageName,
+		PackageName);
+	FString DurableHeaderFilename;
+	FString DurableHeaderError;
+	const bool bDurableHeaderResolved =
+		UE::UAI::AssetDurable::TryResolvePackageHeaderFilename(
+			DurablePackageName,
+			UE::UAI::AssetDurable::EPackageHeaderKind::EvidenceRequired,
+			DurableHeaderFilename,
+			DurableHeaderError);
+	TestTrue(
+		TEXT("WorldDataLayers durable target has exact header evidence: ")
+			+ DurableHeaderError,
+		bDurableHeaderResolved);
+	TestTrue(
+		TEXT("WorldDataLayers external actor durable target is an asset header"),
+		bDurableHeaderResolved
+			&& DurableHeaderFilename.EndsWith(
+				FPackageName::GetAssetPackageExtension(),
+				ESearchCase::IgnoreCase));
+	TestTrue(
+		TEXT("persist the WorldDataLayers carrier before public planning"),
+		bDurableHeaderResolved
+			&& UPackage::SavePackage(
+				WorldDataLayers->GetOutermost(),
+				WorldDataLayers,
+				*DurableHeaderFilename,
+				InitialSaveArgs));
+	WorldDataLayers->GetOutermost()->SetDirtyFlag(false);
+
+	UE::UAI::DomainAdapters::ContentOperations::
+		FUeAgentDestructiveContentPlan PublicPlan;
+	const TSharedRef<FJsonObject> PublicParams = MakeShared<FJsonObject>();
+	PublicParams->SetStringField(
+		TEXT("layer"),
+		DataLayer->GetDataLayerShortName());
+	FString PublicPlanError;
+	const bool bPublicPlanBuilt =
+		UE::UAI::DomainAdapters::ContentOperations::
+			TryBuildDestructiveContentPlan(
+				TEXT("world.data_layer.delete"),
+				PublicParams,
+				World,
+				PublicPlan,
+				PublicPlanError);
+	TestTrue(
+		TEXT("public destructive plan resolves the DataLayer short name: ")
+			+ PublicPlanError,
+		bPublicPlanBuilt);
+	TestTrue(
+		TEXT("public destructive plan protects the primary map package"),
+		PublicPlan.ImpactScope.Contains(TEXT("package:") + PackageName));
+	TestTrue(
+		TEXT("public destructive plan protects the WorldDataLayers carrier"),
+		PublicPlan.ImpactScope.Contains(
+			TEXT("package:") + DurablePackageName));
+	TestTrue(
+		TEXT("public destructive plan binds the resolved DataLayer identity"),
+		PublicPlan.ImpactScope.Contains(
+			TEXT("data_layer:") + DataLayer->GetPathName()));
+
+	TSharedPtr<IUeAgentWorldDestructiveOwner> Owner;
+	FString Error;
+	TestTrue(
+		TEXT("world destructive owner is created"),
+		TryCreateProductionWorldDestructiveOwner(
+			*World,
+			FPaths::ProjectSavedDir()
+				/ TEXT("UeAgentInterface/Tests/WorldDestructive"),
+			TEXT("world-destructive-data-layer-durable-test"),
+			Owner,
+			Error));
+	FUeAgentWorldDestructiveRequest Request;
+	Request.RequestId = TEXT("data-layer-durable-") + FixtureId;
+	Request.CommandId = TEXT("world.data_layer.delete");
+	Request.TargetRef = DataLayer->GetDataLayerShortName();
+	Request.CallerId = TEXT("automation");
+	const FUeAgentWorldDestructiveResult Result = Owner.IsValid()
+		? Owner->Execute(Request, MakeShared<FNeverCancelled>())
+		: FUeAgentWorldDestructiveResult();
+	if (!Result.IsSuccess())
+	{
+		AddError(
+			TEXT("world DataLayer deletion failed before durable oracle: ")
+			+ Result.ErrorCode + TEXT(":") + Result.ErrorDetail);
+	}
+	TestTrue(TEXT("owned DataLayer deletion commits"), Result.IsSuccess());
+	TestTrue(TEXT("owned DataLayer deletion persists"), Result.bPersisted);
+	TestTrue(
+		TEXT("owned DataLayer is absent after command readback"),
+		UeAgentLevelAuthoring::FindDataLayerInstancesExact(
+			*WorldDataLayers,
+			Request.TargetRef).IsEmpty());
+
+	TestFalse(
+		TEXT("successful DataLayer deletion publishes AssetDurable journal id"),
+		Result.JournalId.IsEmpty());
+
+	Owner.Reset();
+	Package->SetDirtyFlag(false);
+	World->DestroyWorld(false);
+	World->MarkAsGarbage();
+	Package->MarkAsGarbage();
+	DataLayerPackage->MarkAsGarbage();
+	CollectGarbage(RF_NoFlags, true);
+	IFileManager::Get().Delete(*DataLayerFilename, false, true, true);
+	if (bRetainPublicFixture)
+	{
+		TestTrue(
+			TEXT("retained public fixture map remains persisted"),
+			IFileManager::Get().FileExists(*MapFilename));
+		TestTrue(
+			TEXT("retained public fixture WorldDataLayers carrier remains persisted"),
+			IFileManager::Get().FileExists(*DurableHeaderFilename));
+	}
+	else
+	{
+		IFileManager::Get().Delete(*MapFilename, false, true, true);
+		if (!DurableHeaderFilename.IsEmpty())
+		{
+			IFileManager::Get().Delete(
+				*DurableHeaderFilename,
+				false,
+				true,
+				true);
+		}
+		IFileManager::Get().DeleteDirectory(
+			*ExternalActorDirectory,
+			false,
+			true);
+	}
+	return !HasAnyErrors();
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(
+	FUeAgentWorldDestructiveDataLayerRollbackBoundaryTest,
+	"UeAgentInterface.DomainAdapters.WorldDestructive.DataLayerRollbackBoundary",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FUeAgentWorldDestructiveDataLayerRollbackBoundaryTest::RunTest(
+	const FString& Parameters)
+{
+	(void)Parameters;
+	using namespace UE::UAI::DomainAdapters::WorldDestructive;
+
+	UPackage* const Package = CreatePackage(
+		*(TEXT("/Temp/UAI/WorldDestructive/DataLayerRollback/")
+			+ FGuid::NewGuid().ToString(EGuidFormats::Digits)));
+	UWorld* const World = UWorld::CreateWorld(
+		EWorldType::EditorPreview,
+		false,
+		FName(TEXT("UAIDataLayerRollback")),
+		Package);
+	if (World)
+	{
+		World->SetFlags(RF_Public | RF_Standalone | RF_Transactional);
+	}
+	if (World && World->PersistentLevel)
+	{
+		World->PersistentLevel->SetUseExternalActors(true);
+	}
+	UWorldPartition* const WorldPartition = World
+		? UWorldPartition::CreateOrRepairWorldPartition(
+			World->GetWorldSettings())
+		: nullptr;
+	if (WorldPartition && !WorldPartition->IsInitialized())
+	{
+		WorldPartition->Initialize(World, FTransform::Identity);
+	}
+	AWorldDataLayers* const WorldDataLayers = World
+		? World->GetWorldDataLayers()
+		: nullptr;
+	UDataLayerAsset* const DataLayerAsset = Package
+		? NewObject<UDataLayerAsset>(
+			Package,
+			TEXT("RollbackDataLayer"),
+			RF_Transactional)
+		: nullptr;
+	UDataLayerInstanceWithAsset* const DataLayer =
+		WorldDataLayers && DataLayerAsset
+		? WorldDataLayers->CreateDataLayer<UDataLayerInstanceWithAsset>(
+			DataLayerAsset)
+		: nullptr;
+	if (!TestNotNull(TEXT("rollback world exists"), World)
+		|| !TestNotNull(TEXT("rollback WorldPartition exists"), WorldPartition)
+		|| !TestNotNull(TEXT("rollback WorldDataLayers exists"), WorldDataLayers)
+		|| !TestNotNull(TEXT("rollback DataLayer exists"), DataLayer))
+	{
+		return false;
+	}
+
+	const TSharedRef<FRollbackAfterApplyRunner> Runner =
+		MakeShared<FRollbackAfterApplyRunner>();
+	TSharedPtr<IUeAgentWorldDestructiveOwner> Owner;
+	FString Error;
+	TestTrue(
+		TEXT("world destructive owner accepts the durable runner port"),
+		TryCreateWorldDestructiveOwner(
+			*World,
+			FPaths::ProjectSavedDir()
+				/ TEXT("UeAgentInterface/Tests/WorldDestructiveRollback"),
+			TEXT("world-destructive-data-layer-rollback-test"),
+			Runner,
+			Owner,
+			Error));
+	FUeAgentWorldDestructiveRequest Request;
+	Request.RequestId = TEXT("data-layer-rollback-")
+		+ FGuid::NewGuid().ToString(EGuidFormats::Digits);
+	Request.CommandId = TEXT("world.data_layer.delete");
+	Request.TargetRef = DataLayer->GetDataLayerShortName();
+	Request.CallerId = TEXT("automation");
+	const FUeAgentWorldDestructiveResult Result = Owner.IsValid()
+		? Owner->Execute(Request, MakeShared<FNeverCancelled>())
+		: FUeAgentWorldDestructiveResult();
+	TestTrue(TEXT("failure probe reached native apply"), Runner->bApplyObserved);
+	TestTrue(
+		TEXT("failure probe used the native rollback callback"),
+		Runner->bRollbackObserved);
+	TestEqual(
+		TEXT("post-mutation failure is explicitly rolled back"),
+		Result.TerminalState,
+		TEXT("rolled_back"));
+	TestEqual(
+		TEXT("post-mutation failure keeps its stable cause"),
+		Result.ErrorCode,
+		TEXT("fixture_post_mutation_failure"));
+	const TArray<UDataLayerInstance*> RestoredDataLayers =
+		UeAgentLevelAuthoring::FindDataLayerInstancesExact(
+			*WorldDataLayers,
+			Request.TargetRef);
+	TestEqual(
+		TEXT("rollback restores exactly one DataLayer in memory"),
+		RestoredDataLayers.Num(),
+		1);
+
+	Owner.Reset();
+	Package->SetDirtyFlag(false);
+	World->DestroyWorld(false);
+	World->MarkAsGarbage();
+	Package->MarkAsGarbage();
+	CollectGarbage(RF_NoFlags, true);
 	return !HasAnyErrors();
 }

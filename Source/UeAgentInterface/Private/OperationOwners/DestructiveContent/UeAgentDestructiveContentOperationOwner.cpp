@@ -15,6 +15,7 @@
 #include "Misc/Paths.h"
 #include "Misc/ScopeLock.h"
 #include "OperationOwners/AssetSimple/UeAgentAssetSimpleOperationOwner.h"
+#include "OperationOwners/DestructiveContent/UeAgentWorldDestructiveDurableRunner.h"
 #include "Serialization/JsonReader.h"
 #include "Serialization/JsonSerializer.h"
 #include "Serialization/JsonWriter.h"
@@ -79,11 +80,24 @@ namespace UE::UAI::OperationOwners::DestructiveContent
 				return false;
 			}
 			TSharedPtr<IUeAgentWorldDestructiveOwner> WorldOwner;
+			TSharedPtr<IUeAgentWorldDestructiveDurableRunner> DurableRunner;
+			const FString WorldJournalRoot = FPaths::ProjectSavedDir()
+				/ TEXT("UeAgentInterface/DestructiveContent/World");
+			const FString WorldOwnerId = OwnerId + TEXT(":world");
+			if (!TryCreateWorldDestructiveDurableRunner(
+					WorldJournalRoot,
+					WorldOwnerId,
+					DurableRunner,
+					OutError)
+				|| !DurableRunner.IsValid())
+			{
+				return false;
+			}
 			if (!TryCreateWorldDestructiveOwner(
 					World,
-					FPaths::ProjectSavedDir()
-						/ TEXT("UeAgentInterface/DestructiveContent/World"),
-					OwnerId + TEXT(":world"),
+					WorldJournalRoot,
+					WorldOwnerId,
+					DurableRunner.ToSharedRef(),
 					WorldOwner,
 					OutError)
 				|| !WorldOwner.IsValid())

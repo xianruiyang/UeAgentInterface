@@ -74,6 +74,18 @@ namespace UE::UAI::CommandRegistry
 			Object->SetStringField(
 				TEXT("binding_hash"),
 				Contract.GetContractHash());
+			TArray<TSharedPtr<FJsonValue>> TutorialReferences;
+			TutorialReferences.Reserve(
+				Contract.GetTutorialReferences().Num());
+			for (const FString& Reference :
+				Contract.GetTutorialReferences())
+			{
+				TutorialReferences.Add(
+					MakeShared<FJsonValueString>(Reference));
+			}
+			Object->SetArrayField(
+				TEXT("tutorial_references"),
+				TutorialReferences);
 			return Object;
 		}
 

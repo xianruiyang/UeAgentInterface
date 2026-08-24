@@ -7,12 +7,20 @@
 #include "Utilities/AuthoringCore/UeAgentAuthoringState.h"
 
 class AActor;
+class AWorldDataLayers;
 class UActorComponent;
+class UDataLayerInstance;
 class UWorld;
 class FJsonObject;
 
 namespace UeAgentLevelAuthoring
 {
+	enum class EDataLayerTargetScope : uint8
+	{
+		Any,
+		PrivateOnly,
+	};
+
 	UEAGENTINTERFACE_API FString GetWorldPath(const UWorld& World);
 	UEAGENTINTERFACE_API FString GetManagedActorId(const AActor& Actor);
 	UEAGENTINTERFACE_API FString MakeManagedActorTag(const FString& ManagedId);
@@ -36,6 +44,22 @@ namespace UeAgentLevelAuthoring
 		UWorld& World,
 		const TSharedPtr<const FJsonObject>& Target,
 		FString& OutError);
+	UEAGENTINTERFACE_API TArray<UDataLayerInstance*>
+	FindDataLayerInstancesExact(
+		AWorldDataLayers& WorldDataLayers,
+		const FString& TargetRef,
+		EDataLayerTargetScope Scope = EDataLayerTargetScope::Any);
+	UEAGENTINTERFACE_API bool TrySelectDataLayerIdentityExact(
+		const TArray<TArray<FString>>& CandidateIdentities,
+		const FString& TargetRef,
+		int32& OutCandidateIndex,
+		FString& OutError);
+	UEAGENTINTERFACE_API bool TryResolveDataLayerInstanceExact(
+		AWorldDataLayers& WorldDataLayers,
+		const FString& TargetRef,
+		UDataLayerInstance*& OutInstance,
+		FString& OutError,
+		EDataLayerTargetScope Scope = EDataLayerTargetScope::Any);
 	UEAGENTINTERFACE_API UActorComponent* FindComponentExact(
 		AActor& Owner,
 		const FString& ComponentName,

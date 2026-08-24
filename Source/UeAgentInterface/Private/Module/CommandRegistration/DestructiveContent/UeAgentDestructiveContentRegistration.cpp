@@ -149,6 +149,13 @@ namespace UE::UAI::Module::CommandRegistration::DestructiveContent
 				TEXT("destructive content operation"),
 				TEXT("plan-bound asset mutation"),
 			};
+			Result.TutorialReferences.Add(
+				TEXT("uai-docs:t31-destructive-content-ops#destructive-plan-authorize-commit"));
+			if (CommandId == TEXT("world.data_layer.delete"))
+			{
+				Result.TutorialReferences.Add(
+					TEXT("uai-docs:t31-destructive-content-ops#world-data-layer-delete"));
+			}
 			if (CommandId == TEXT("asset.object.clone"))
 			{
 				Result.Purpose.Keywords.Append({

@@ -16,6 +16,9 @@
 #include "GameFramework/Actor.h"
 #include "UObject/UObjectGlobals.h"
 #include "Utilities/AuthoringCore/UeAgentAuthoringNativeDefaults.h"
+#include "WorldPartition/DataLayer/DataLayerAsset.h"
+#include "WorldPartition/DataLayer/DataLayerInstance.h"
+#include "WorldPartition/DataLayer/WorldDataLayers.h"
 
 namespace UeAgentLevelAuthoring {
 namespace {
@@ -492,6 +495,119 @@ FString GetManagedActorId(const AActor &Actor) {
 FString GetActorFolderPathText(const AActor &Actor) {
   const FName FolderPath = Actor.GetFolderPath();
   return FolderPath.IsNone() ? FString() : FolderPath.ToString();
+}
+
+namespace {
+void CollectDataLayerIdentityCandidates(
+    AWorldDataLayers &WorldDataLayers, const EDataLayerTargetScope Scope,
+    TArray<UDataLayerInstance *> &OutCandidates,
+    TArray<TArray<FString>> &OutCandidateIdentities) {
+  OutCandidates.Reset();
+  OutCandidateIdentities.Reset();
+  WorldDataLayers.ForEachDataLayerInstance(
+      [&OutCandidates, &OutCandidateIdentities,
+       Scope](UDataLayerInstance *Instance) {
+        if (!Instance)
+          return true;
+        const UDataLayerAsset *const Asset = Instance->GetAsset();
+        if (Scope == EDataLayerTargetScope::PrivateOnly &&
+            (!Asset || !Asset->IsPrivate()))
+          return true;
+        OutCandidates.Add(Instance);
+        OutCandidateIdentities.Add({
+            Instance->GetDataLayerFName().ToString(),
+            Instance->GetDataLayerShortName(),
+            Instance->GetDataLayerFullName(),
+            Instance->GetPathName(),
+            Asset ? Asset->GetPathName() : FString(),
+        });
+        return true;
+      });
+}
+
+TArray<int32> FindExactDataLayerIdentityCandidateIndices(
+    const TArray<TArray<FString>> &CandidateIdentities,
+    const FString &TargetRef) {
+  TArray<int32> Matches;
+  const FString CleanTarget = TargetRef.TrimStartAndEnd();
+  if (CleanTarget.IsEmpty())
+    return Matches;
+  for (int32 CandidateIndex = 0;
+       CandidateIndex < CandidateIdentities.Num(); ++CandidateIndex) {
+    if (CandidateIdentities[CandidateIndex].ContainsByPredicate(
+            [&CleanTarget](const FString &Identity) {
+              return !Identity.IsEmpty() && Identity.Equals(
+                  CleanTarget, ESearchCase::CaseSensitive);
+            }))
+      Matches.Add(CandidateIndex);
+  }
+  return Matches;
+}
+} // namespace
+
+TArray<UDataLayerInstance *> FindDataLayerInstancesExact(
+    AWorldDataLayers &WorldDataLayers, const FString &TargetRef,
+    const EDataLayerTargetScope Scope) {
+  TArray<UDataLayerInstance *> Matches;
+  TArray<UDataLayerInstance *> Candidates;
+  TArray<TArray<FString>> CandidateIdentities;
+  CollectDataLayerIdentityCandidates(
+      WorldDataLayers, Scope, Candidates, CandidateIdentities);
+  for (const int32 CandidateIndex :
+       FindExactDataLayerIdentityCandidateIndices(
+           CandidateIdentities, TargetRef))
+    Matches.Add(Candidates[CandidateIndex]);
+  return Matches;
+}
+
+bool TrySelectDataLayerIdentityExact(
+    const TArray<TArray<FString>> &CandidateIdentities,
+    const FString &TargetRef, int32 &OutCandidateIndex, FString &OutError) {
+  OutCandidateIndex = INDEX_NONE;
+  OutError.Reset();
+  const FString CleanTarget = TargetRef.TrimStartAndEnd();
+  if (CleanTarget.IsEmpty()) {
+    OutError = TEXT("world_data_layer_target_required");
+    return false;
+  }
+
+  const TArray<int32> Matches = FindExactDataLayerIdentityCandidateIndices(
+      CandidateIdentities, CleanTarget);
+  if (Matches.IsEmpty()) {
+    OutError = TEXT("world_data_layer_missing");
+    return false;
+  }
+  if (Matches.Num() != 1) {
+    OutError = TEXT("world_data_layer_identity_ambiguous");
+    return false;
+  }
+  OutCandidateIndex = Matches[0];
+  return true;
+}
+
+bool TryResolveDataLayerInstanceExact(
+    AWorldDataLayers &WorldDataLayers, const FString &TargetRef,
+    UDataLayerInstance *&OutInstance, FString &OutError,
+    const EDataLayerTargetScope Scope) {
+  OutInstance = nullptr;
+  OutError.Reset();
+  const FString CleanTarget = TargetRef.TrimStartAndEnd();
+  if (CleanTarget.IsEmpty()) {
+    OutError = TEXT("world_data_layer_target_required");
+    return false;
+  }
+
+  TArray<UDataLayerInstance *> Candidates;
+  TArray<TArray<FString>> CandidateIdentities;
+  CollectDataLayerIdentityCandidates(
+      WorldDataLayers, Scope, Candidates, CandidateIdentities);
+
+  int32 CandidateIndex = INDEX_NONE;
+  if (!TrySelectDataLayerIdentityExact(
+          CandidateIdentities, CleanTarget, CandidateIndex, OutError))
+    return false;
+  OutInstance = Candidates[CandidateIndex];
+  return true;
 }
 
 UWorld *FindEditorWorldByPath(const FString &WorldPath) {

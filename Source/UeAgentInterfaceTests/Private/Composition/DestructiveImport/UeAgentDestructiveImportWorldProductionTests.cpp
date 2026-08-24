@@ -1,6 +1,7 @@
 #include "Misc/AutomationTest.h"
 
 #include "Composition/DestructiveImport/UeAgentDestructiveImportActivation.h"
+#include "Core/AssetDurable/UeAgentPackageHeader.h"
 #include "Domains/Level/Authoring/UeAgentLevelAuthoringState.h"
 #include "Editor.h"
 #include "EditorLevelUtils.h"
@@ -196,12 +197,48 @@ namespace
 		{
 			const FString FixtureId =
 				FGuid::NewGuid().ToString(EGuidFormats::Digits);
-			Package = CreatePackage(
-				*(TEXT("/Temp/UAI/WorldDestructive/")
-					+ FixtureId));
+			FixturePackageRoot =
+				TEXT("/Game/UAI/Transient/WorldDestructive/") + FixtureId;
+			MapPackageName = FixturePackageRoot + TEXT("/World");
+			DataLayerPackageName = FixturePackageRoot + TEXT("/DataLayer");
+			MeshPackageName = FixturePackageRoot + TEXT("/OwnedMesh");
+			FPackageName::TryConvertLongPackageNameToFilename(
+				MapPackageName,
+				MapFilename,
+				FPackageName::GetMapPackageExtension());
+			FPackageName::TryConvertLongPackageNameToFilename(
+				DataLayerPackageName,
+				DataLayerFilename,
+				FPackageName::GetAssetPackageExtension());
+			FPackageName::TryConvertLongPackageNameToFilename(
+				MeshPackageName,
+				MeshFilename,
+				FPackageName::GetAssetPackageExtension());
+			FixtureContentDirectory = FPaths::GetPath(MapFilename);
+			FString RelativeFixtureRoot = FixturePackageRoot;
+			RelativeFixtureRoot.RemoveFromStart(TEXT("/Game/"));
+			OwnedExternalPackagePrefix =
+				TEXT("/Game/__ExternalActors__/")
+				+ RelativeFixtureRoot
+				+ TEXT("/World/");
+			ExternalActorDirectory =
+				FPaths::ProjectContentDir()
+				/ TEXT("__ExternalActors__")
+				/ RelativeFixtureRoot;
+			bInitialContentAbsent =
+				!IFileManager::Get().FileExists(*MapFilename)
+				&& !IFileManager::Get().FileExists(*DataLayerFilename)
+				&& !IFileManager::Get().FileExists(*MeshFilename)
+				&& !IFileManager::Get().DirectoryExists(
+					*ExternalActorDirectory);
+			Package = CreatePackage(*MapPackageName);
 			World = UWorld::CreateWorld(
 				EWorldType::EditorPreview, false,
-				FName(TEXT("UAIWorldDestructive")), Package);
+				FName(TEXT("World")), Package);
+			if (World)
+			{
+				World->SetFlags(RF_Public | RF_Standalone | RF_Transactional);
+			}
 			if (World && GEditor)
 			{
 				PreviousEditorWorld =
@@ -222,8 +259,13 @@ namespace
 			}
 			World->SetCurrentLevel(World->PersistentLevel);
 			WorldDataLayers = World->GetWorldDataLayers();
-			DataLayerAsset = NewObject<UDataLayerAsset>(
-				Package, TEXT("OwnedDataLayer"), RF_Transactional);
+			DataLayerPackage = CreatePackage(*DataLayerPackageName);
+			DataLayerAsset = DataLayerPackage
+				? NewObject<UDataLayerAsset>(
+					DataLayerPackage,
+					TEXT("OwnedDataLayer"),
+					RF_Public | RF_Standalone | RF_Transactional)
+				: nullptr;
 			if (DataLayerAsset)
 			{
 				DataLayerAsset->SetType(EDataLayerType::Runtime);
@@ -232,6 +274,11 @@ namespace
 			{
 				DataLayer = WorldDataLayers->CreateDataLayer<
 					UDataLayerInstanceWithAsset>(DataLayerAsset);
+				if (DataLayer)
+				{
+					DataLayerName = DataLayer->GetDataLayerFName();
+					DataLayerShortName = DataLayer->GetDataLayerShortName();
+				}
 			}
 			DeleteFolder =
 				UeAgentLevelAuthoring::MakeManagedActorFolderPath(
@@ -300,8 +347,6 @@ namespace
 				MeshActorPath = MeshActor->GetPathName();
 			}
 			SpherePath = Sphere ? Sphere->GetPathName() : FString();
-			MeshPackageName = TEXT("/Game/UAI/Tests/WorldDestructive/")
-				+ FixtureId + TEXT("/OwnedMesh");
 			UPackage* const MeshPackage = CreatePackage(*MeshPackageName);
 			OwnedMesh = Cube && MeshPackage
 				? DuplicateObject<UStaticMesh>(
@@ -342,11 +387,131 @@ namespace
 				VoxelActorPath = VoxelActor->GetPathName();
 				VoxelComponentName = VoxelComponent->GetName();
 			}
+
+			Package->SetPackageFlags(PKG_ContainsMap);
+			FSavePackageArgs SaveArgs;
+			SaveArgs.TopLevelFlags = RF_Public | RF_Standalone;
+			bDataLayerSaved = DataLayerPackage && DataLayerAsset
+				&& UPackage::SavePackage(
+					DataLayerPackage,
+					DataLayerAsset,
+					*DataLayerFilename,
+					SaveArgs);
+			bMapSaved = UPackage::SavePackage(
+				Package,
+				World,
+				*MapFilename,
+				SaveArgs);
+			FString HeaderError;
+			if (WorldDataLayers)
+			{
+				WorldDataLayersPackage = WorldDataLayers->GetOutermost();
+				WorldDataLayersPackageName =
+					WorldDataLayersPackage->GetName();
+				bWorldDataLayersHeaderResolved =
+					UE::UAI::AssetDurable::TryResolvePackageHeaderFilename(
+						WorldDataLayersPackageName,
+						UE::UAI::AssetDurable::EPackageHeaderKind::EvidenceRequired,
+						WorldDataLayersFilename,
+						HeaderError);
+				bWorldDataLayersSaved = bWorldDataLayersHeaderResolved
+					&& UPackage::SavePackage(
+						WorldDataLayersPackage,
+						WorldDataLayers,
+						*WorldDataLayersFilename,
+						SaveArgs);
+			}
+			TSet<UPackage*> ExternalActorPackages;
+			UPackage* const DeleteActorPackage =
+				DeleteActor ? DeleteActor->GetOutermost() : nullptr;
+			for (AActor* const Actor : TArray<AActor*>{
+				DeleteActor,
+				DeleteSiblingActor,
+				PcgActor,
+				MoveActor,
+				MeshActor,
+				VoxelActor,
+			})
+			{
+				if (Actor
+					&& Actor->GetOutermost()->GetName().StartsWith(
+						OwnedExternalPackagePrefix,
+						ESearchCase::CaseSensitive))
+				{
+					ExternalActorPackages.Add(Actor->GetOutermost());
+				}
+			}
+			bExternalActorPackagesSaved =
+				!ExternalActorPackages.IsEmpty();
+			for (UPackage* const ExternalPackage : ExternalActorPackages)
+			{
+				FString ExternalFilename;
+				FString ExternalHeaderError;
+				const bool bHeaderResolved =
+					UE::UAI::AssetDurable::TryResolvePackageHeaderFilename(
+						ExternalPackage->GetName(),
+						UE::UAI::AssetDurable::EPackageHeaderKind::EvidenceRequired,
+						ExternalFilename,
+						ExternalHeaderError);
+				AActor* const ExternalActor =
+					Cast<AActor>(ExternalPackage->FindAssetInPackage());
+				const bool bExternalActorPackageSaved =
+					bHeaderResolved
+					&& ExternalActor
+					&& UPackage::SavePackage(
+						ExternalPackage,
+						ExternalActor,
+						*ExternalFilename,
+						SaveArgs);
+				bExternalActorPackagesSaved =
+					bExternalActorPackagesSaved
+					&& bExternalActorPackageSaved;
+				bDeleteActorExternalPackageSaved =
+					bDeleteActorExternalPackageSaved
+					|| (ExternalPackage == DeleteActorPackage
+						&& bExternalActorPackageSaved);
+				ExternalPackage->SetDirtyFlag(false);
+			}
 			Package->SetDirtyFlag(false);
+			if (DataLayerPackage)
+			{
+				DataLayerPackage->SetDirtyFlag(false);
+			}
+			if (WorldDataLayersPackage)
+			{
+				WorldDataLayersPackage->SetDirtyFlag(false);
+			}
 		}
 
 		~FOwnedWorld()
 		{
+			CleanupOwnedContent();
+		}
+
+		bool IsValid() const
+		{
+			return bInitialContentAbsent
+				&& Package && World && bWorldContextRegistered
+				&& WorldPartition && DataLayer
+				&& DeleteActor && DeleteSiblingActor && bDeleteActorsBound
+				&& PcgActor && PcgComponent && MoveActor
+				&& StreamingLevel && StreamingLevel->GetLoadedLevel()
+				&& MeshActor && Cube && Sphere && OwnedMesh && bMeshSaved
+				&& VoxelActor && VoxelComponent
+				&& VoxelComponent->GetInstanceCount() == 3
+				&& bDataLayerSaved && bMapSaved
+				&& bWorldDataLayersHeaderResolved
+				&& bWorldDataLayersSaved
+				&& bExternalActorPackagesSaved
+				&& bDeleteActorExternalPackageSaved;
+		}
+
+		void CleanupOwnedContent()
+		{
+			if (bContentCleaned)
+			{
+				return;
+			}
 			CleanupMesh();
 			if (Package)
 			{
@@ -362,23 +527,48 @@ namespace
 				}
 				World->DestroyWorld(false);
 				World->MarkAsGarbage();
+				World = nullptr;
 			}
 			if (Package)
 			{
 				Package->MarkAsGarbage();
 			}
+			DataLayerPackage = nullptr;
+			WorldDataLayersPackage = nullptr;
+			CollectGarbage(RF_NoFlags, true);
+			IFileManager::Get().Delete(*MapFilename, false, true, true);
+			IFileManager::Get().Delete(*DataLayerFilename, false, true, true);
+			if (!WorldDataLayersFilename.IsEmpty())
+			{
+				IFileManager::Get().Delete(
+					*WorldDataLayersFilename,
+					false,
+					true,
+					true);
+			}
+			IFileManager::Get().DeleteDirectory(
+				*ExternalActorDirectory,
+				false,
+				true);
+			IFileManager::Get().DeleteDirectory(
+				*FixtureContentDirectory,
+				false,
+				false);
+			bContentCleaned = true;
 		}
 
-		bool IsValid() const
+		bool IsOwnedContentAbsent() const
 		{
-			return Package && World && bWorldContextRegistered
-				&& WorldPartition && DataLayer
-				&& DeleteActor && DeleteSiblingActor && bDeleteActorsBound
-				&& PcgActor && PcgComponent && MoveActor
-				&& StreamingLevel && StreamingLevel->GetLoadedLevel()
-				&& MeshActor && Cube && Sphere && OwnedMesh && bMeshSaved
-				&& VoxelActor && VoxelComponent
-				&& VoxelComponent->GetInstanceCount() == 3;
+			return !IFileManager::Get().FileExists(*MapFilename)
+				&& !IFileManager::Get().FileExists(*DataLayerFilename)
+				&& !IFileManager::Get().FileExists(*MeshFilename)
+				&& (WorldDataLayersFilename.IsEmpty()
+					|| !IFileManager::Get().FileExists(
+						*WorldDataLayersFilename))
+				&& !IFileManager::Get().DirectoryExists(
+					*ExternalActorDirectory)
+				&& !IFileManager::Get().DirectoryExists(
+					*FixtureContentDirectory);
 		}
 
 		int32 ReloadedMaterialSlotCount()
@@ -441,11 +631,15 @@ namespace
 		}
 
 		UPackage* Package = nullptr;
+		UPackage* DataLayerPackage = nullptr;
+		UPackage* WorldDataLayersPackage = nullptr;
 		UWorld* World = nullptr;
 		UWorldPartition* WorldPartition = nullptr;
 		AWorldDataLayers* WorldDataLayers = nullptr;
 		UDataLayerAsset* DataLayerAsset = nullptr;
 		UDataLayerInstance* DataLayer = nullptr;
+		FName DataLayerName;
+		FString DataLayerShortName;
 		AActor* DeleteActor = nullptr;
 		AActor* DeleteSiblingActor = nullptr;
 		FString DeleteFolder;
@@ -468,8 +662,27 @@ namespace
 		FString SpherePath;
 		UStaticMesh* OwnedMesh = nullptr;
 		FString MeshPackageName;
+		FString FixturePackageRoot;
+		FString MapPackageName;
+		FString DataLayerPackageName;
+		FString MapFilename;
+		FString DataLayerFilename;
+		FString MeshFilename;
+		FString WorldDataLayersFilename;
+		FString WorldDataLayersPackageName;
+		FString FixtureContentDirectory;
+		FString ExternalActorDirectory;
+		FString OwnedExternalPackagePrefix;
 		FString OwnedMeshPath;
 		bool bMeshSaved = false;
+		bool bDataLayerSaved = false;
+		bool bMapSaved = false;
+		bool bWorldDataLayersHeaderResolved = false;
+		bool bWorldDataLayersSaved = false;
+		bool bExternalActorPackagesSaved = false;
+		bool bDeleteActorExternalPackageSaved = false;
+		bool bInitialContentAbsent = false;
+		bool bContentCleaned = false;
 		int32 OwnedMeshInitialSlotCount = 0;
 		bool bWorldContextRegistered = false;
 		UWorld* PreviousEditorWorld = nullptr;
@@ -623,11 +836,11 @@ bool FUeAgentDestructiveImportWorldProductionTest::RunTest(
 	{
 		const TSharedRef<FJsonObject> Input = Params();
 		Input->SetStringField(
-			TEXT("layer"), Fixture.DataLayer->GetDataLayerFName().ToString());
+			TEXT("layer"), Fixture.DataLayerShortName);
 		Invoke(TEXT("world.data_layer.delete"), Input, Payload, true);
 		TestNull(TEXT("DataLayer independent absence readback"),
 			Fixture.WorldDataLayers->GetDataLayerInstance(
-				Fixture.DataLayer->GetDataLayerFName()));
+				Fixture.DataLayerName));
 	}
 	{
 		const TSharedRef<FJsonObject> Input = Params();
@@ -758,5 +971,8 @@ bool FUeAgentDestructiveImportWorldProductionTest::RunTest(
 	TestTrue(TEXT("formal public composition stops"), Harness.Stop());
 	TestEqual(TEXT("public route cleanup"),
 		Harness.GetRouteHost().Handlers.Num(), 0);
+	Fixture.CleanupOwnedContent();
+	TestTrue(TEXT("owned durable fixture content is fully removed"),
+		Fixture.IsOwnedContentAbsent());
 	return !HasAnyErrors();
 }

@@ -98,6 +98,8 @@ namespace
 		Result.Purpose.RelatedFlows = {TEXT("sample.discover")};
 		Result.Purpose.Keywords = {TEXT("sample"), TEXT("apply")};
 		Result.Purpose.Synonyms = {TEXT("update sample")};
+		Result.TutorialReferences.Add(
+			TEXT("uai-docs:sample-command#execute"));
 		return Result;
 	}
 
@@ -221,6 +223,41 @@ bool FUaiStrictV2T02RegistryProjectionTest::RunTest(const FString& Parameters)
 		TEXT("purpose contract is owned"),
 		Contract->GetPurpose().MinimumExample,
 		Source.Purpose.MinimumExample);
+	TestEqual(
+		TEXT("tutorial references are owned"),
+		Contract->GetTutorialReferences(),
+		Source.TutorialReferences);
+
+	FUeAgentCommandDeclaration TutorialChanged = Source;
+	TutorialChanged.TutorialReferences.Add(
+		TEXT("uai-docs:sample-command#advanced"));
+	TSharedPtr<const FUeAgentImmutableCommandRegistry>
+		TutorialChangedRegistry;
+	TestTrue(
+		TEXT("tutorial metadata change freezes"),
+		FUeAgentImmutableCommandRegistry::TryFreeze(
+			{TutorialChanged},
+			TutorialChangedRegistry,
+			Error));
+	if (TutorialChangedRegistry.IsValid())
+	{
+		const FUeAgentFrozenCommandContract* TutorialChangedContract =
+			TutorialChangedRegistry->FindExact(TEXT("sample.execute"));
+		TestNotNull(
+			TEXT("tutorial metadata variant remains executable"),
+			TutorialChangedContract);
+		if (TutorialChangedContract)
+		{
+			TestEqual(
+				TEXT("tutorial metadata does not change executable binding hash"),
+				TutorialChangedContract->GetContractHash(),
+				Contract->GetContractHash());
+			TestTrue(
+				TEXT("tutorial metadata changes registry identity"),
+				TutorialChangedRegistry->GetRegistryHash()
+					!= Registry->GetRegistryHash());
+		}
+	}
 
 	Source.CommandId = TEXT("mutated.after.freeze");
 	Source.Purpose.Summary = TEXT("mutated after freeze");
@@ -249,6 +286,8 @@ bool FUaiStrictV2T02RegistryProjectionTest::RunTest(const FString& Parameters)
 		TEXT("state_layers"),
 		TEXT("purpose"),
 		TEXT("minimum_example"),
+		TEXT("tutorial_references"),
+		TEXT("uai-docs:sample-command#execute"),
 	})
 	{
 		TestTrue(
@@ -331,6 +370,30 @@ bool FUaiStrictV2T02ValidationFailuresTest::RunTest(const FString& Parameters)
 		TEXT("unknown side effect has a stable error"),
 		Error,
 		FString(TEXT("command_contract_side_effect_invalid")));
+
+	FUeAgentCommandDeclaration MissingTutorial = MakeDeclaration();
+	MissingTutorial.TutorialReferences.Reset();
+	TestFalse(
+		TEXT("commands without tutorial references are rejected"),
+		FUeAgentImmutableCommandRegistry::TryFreeze(
+			{MissingTutorial}, Rejected, Error));
+	TestEqual(
+		TEXT("missing tutorial reference has a stable error"),
+		Error,
+		FString(TEXT("command_tutorial_reference_invalid")));
+
+	FUeAgentCommandDeclaration MalformedTutorial = MakeDeclaration();
+	MalformedTutorial.TutorialReferences = {
+		TEXT("uai-docs:sample-command"),
+	};
+	TestFalse(
+		TEXT("malformed tutorial references are rejected"),
+		FUeAgentImmutableCommandRegistry::TryFreeze(
+			{MalformedTutorial}, Rejected, Error));
+	TestEqual(
+		TEXT("malformed tutorial reference has a stable error"),
+		Error,
+		FString(TEXT("command_tutorial_reference_invalid")));
 	return !HasAnyErrors();
 #endif
 }

@@ -223,6 +223,38 @@ bool FUeAgentCommandManifestProjectionTest::RunTest(
 	for (const TSharedPtr<FJsonValue>& Value : Commands)
 	{
 		const TSharedPtr<FJsonObject> Command = Value->AsObject();
+		const FString CommandId =
+			Command->GetStringField(TEXT("command_id"));
+		const FUeAgentFrozenCommandContract* Contract =
+			Registry->FindExact(CommandId);
+		TestNotNull(
+			TEXT("manifest command resolves to frozen contract"),
+			Contract);
+		TestTrue(
+			TEXT("manifest command carries tutorial references"),
+			Command->HasTypedField<EJson::Array>(
+				TEXT("tutorial_references")));
+		if (Contract
+			&& Command->HasTypedField<EJson::Array>(
+				TEXT("tutorial_references")))
+		{
+			const TArray<TSharedPtr<FJsonValue>>& References =
+				Command->GetArrayField(TEXT("tutorial_references"));
+			TestEqual(
+				TEXT("manifest tutorial count matches frozen contract"),
+				References.Num(),
+				Contract->GetTutorialReferences().Num());
+			for (int32 Index = 0;
+				Index < References.Num()
+					&& Index < Contract->GetTutorialReferences().Num();
+				++Index)
+			{
+				TestEqual(
+					TEXT("manifest tutorial reference matches frozen contract"),
+					References[Index]->AsString(),
+					Contract->GetTutorialReferences()[Index]);
+			}
+		}
 		for (const FString& Forbidden : ForbiddenFields)
 		{
 			TestFalse(
@@ -232,4 +264,3 @@ bool FUeAgentCommandManifestProjectionTest::RunTest(
 	}
 	return true;
 }
-

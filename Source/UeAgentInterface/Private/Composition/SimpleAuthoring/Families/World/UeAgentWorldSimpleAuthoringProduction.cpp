@@ -5,6 +5,7 @@
 #include "Core/AssetDurable/UeAgentPersistedWorld.h"
 #include "Core/StateSemantic/UeAgentStateSemantic.h"
 #include "Dom/JsonObject.h"
+#include "Domains/Level/Authoring/UeAgentLevelAuthoringState.h"
 #include "Engine/Level.h"
 #include "Engine/LevelStreaming.h"
 #include "Engine/StaticMesh.h"
@@ -1012,31 +1013,6 @@ namespace UE::UAI::Composition::SimpleAuthoring::World
 			return Actor.GetActorTransform();
 		}
 
-		UDataLayerInstance* FindPrivateDataLayerByShortName(
-			AWorldDataLayers& WorldDataLayers,
-			const FString& ShortName,
-			int32& OutMatchCount)
-		{
-			UDataLayerInstance* Match = nullptr;
-			OutMatchCount = 0;
-			WorldDataLayers.ForEachDataLayerInstance(
-				[&Match, &OutMatchCount, &ShortName](
-					UDataLayerInstance* Instance)
-				{
-					if (Instance
-						&& Instance->GetAsset()
-						&& Instance->GetAsset()->IsPrivate()
-						&& Instance->GetDataLayerShortName()
-							== ShortName)
-					{
-						Match = Instance;
-						++OutMatchCount;
-					}
-					return true;
-				});
-			return Match;
-		}
-
 		ULevelStreaming* FindExactStreamingRelation(
 			UWorld& World,
 			const FString& LevelPackage,
@@ -1240,11 +1216,13 @@ namespace UE::UAI::Composition::SimpleAuthoring::World
 					const FString ShortName =
 						Payload->GetStringField(
 							TEXT("short_name"));
-					int32 MatchCount = 0;
-					FindPrivateDataLayerByShortName(
-						*WorldDataLayers,
-						ShortName,
-						MatchCount);
+					const int32 MatchCount = UeAgentLevelAuthoring::
+						FindDataLayerInstancesExact(
+							*WorldDataLayers,
+							ShortName,
+							UeAgentLevelAuthoring::
+								EDataLayerTargetScope::PrivateOnly)
+						.Num();
 					if (MatchCount > 0)
 					{
 						OutError.Code =
@@ -1668,11 +1646,14 @@ namespace UE::UAI::Composition::SimpleAuthoring::World
 			{
 				const FString ShortName =
 					Payload->GetStringField(TEXT("short_name"));
-				int32 MatchCount = 0;
-				Instance = FindPrivateDataLayerByShortName(
-					*WorldDataLayers,
-					ShortName,
-					MatchCount);
+				const TArray<UDataLayerInstance*> Matches =
+					UeAgentLevelAuthoring::FindDataLayerInstancesExact(
+						*WorldDataLayers,
+						ShortName,
+						UeAgentLevelAuthoring::
+							EDataLayerTargetScope::PrivateOnly);
+				const int32 MatchCount = Matches.Num();
+				Instance = MatchCount == 1 ? Matches[0] : nullptr;
 				if (MatchCount != 1)
 				{
 					OutError.Code =

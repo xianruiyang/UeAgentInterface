@@ -46,6 +46,45 @@ namespace UE::UAI::DomainAdapters::WorldDestructive
 		}
 	};
 
+	/**
+	 * Native mutation mechanics supplied by the domain adapter to the
+	 * composition-owned durable runner. Persistence, fencing, journals and
+	 * independent persisted readback do not belong to this interface.
+	 */
+	class UEAGENTINTERFACE_API IUeAgentWorldDestructiveDurableMutation
+	{
+	public:
+		virtual ~IUeAgentWorldDestructiveDurableMutation() = default;
+
+		/** Primary Map package required to reconstruct an isolated world. */
+		virtual const FString& GetPackageName() const = 0;
+		/** Package that actually carries the native mutation. */
+		virtual const FString& GetMutationPackageName() const = 0;
+		virtual const FString& GetPersistenceScope() const = 0;
+		virtual bool Apply(FString& OutError) = 0;
+		virtual bool Rollback(FString& OutError) = 0;
+		virtual bool VerifyPersisted(
+			UWorld& PersistedWorld,
+			FString& OutError) const = 0;
+	};
+
+	/**
+	 * Composition port that owns the durable lifecycle around one native
+	 * WorldDestructive mutation.
+	 */
+	class UEAGENTINTERFACE_API IUeAgentWorldDestructiveDurableRunner
+	{
+	public:
+		virtual ~IUeAgentWorldDestructiveDurableRunner() = default;
+
+		virtual FUeAgentWorldDestructiveResult Execute(
+			UWorld& ExplicitWorld,
+			const FUeAgentWorldDestructiveRequest& Request,
+			TSharedRef<IUeAgentWorldDestructiveDurableMutation> Mutation,
+			const TSharedRef<Contract::IUeAgentCancellationSignal>&
+				Cancellation) = 0;
+	};
+
 	class UEAGENTINTERFACE_API IUeAgentWorldDestructiveOwner
 	{
 	public:
@@ -61,6 +100,7 @@ namespace UE::UAI::DomainAdapters::WorldDestructive
 		UWorld& ExplicitWorld,
 		FString JournalRoot,
 		FString JournalOwnerId,
+		TSharedRef<IUeAgentWorldDestructiveDurableRunner> DurableRunner,
 		TSharedPtr<IUeAgentWorldDestructiveOwner>& OutOwner,
 		FString& OutError);
 }
