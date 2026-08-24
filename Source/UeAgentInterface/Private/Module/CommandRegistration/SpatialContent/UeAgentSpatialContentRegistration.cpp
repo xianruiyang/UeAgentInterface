@@ -31,9 +31,28 @@ namespace UE::UAI::Module::CommandRegistration::SpatialContent
 			}
 		}
 
+		FString OperationProjectionSchema(
+			const Contract::FUeAgentOperationDescriptor& Descriptor)
+		{
+			return FString::Printf(
+				TEXT("{\"type\":\"object\",\"required\":[\"profile_id\",\"payload\"],")
+				TEXT("\"properties\":{\"profile_id\":{\"type\":\"string\",\"minLength\":1},")
+				TEXT("\"payload\":%s},\"additionalProperties\":false}"),
+				*Descriptor.GetResultSchema().GetJsonValue());
+		}
+
+		FString QueryProjectionSchema()
+		{
+			return TEXT("{\"type\":\"object\",\"required\":[\"profile_id\",\"payload\"],")
+				TEXT("\"properties\":{\"profile_id\":{\"type\":\"string\",\"minLength\":1},")
+				TEXT("\"payload\":{\"type\":\"object\",\"required\":[\"kind\"],")
+				TEXT("\"properties\":{\"kind\":{\"type\":\"string\",\"minLength\":1}}}}}");
+		}
+
 		bool TryDeclaration(
 			const FString& CommandId,
 			const FUeAgentCommandContractRegistry& Legacy,
+			const Contract::FUeAgentOperationDescriptor& Descriptor,
 			FUeAgentCommandDeclaration& OutDeclaration,
 			FString& OutError)
 		{
@@ -61,18 +80,49 @@ namespace UE::UAI::Module::CommandRegistration::SpatialContent
 						? FString(TEXT("persisted"))
 						: FString(TEXT("authoring_memory")),
 			};
+			int32 InputSchemaAssignments = 0;
 			for (const FUeAgentCommandParameter& Parameter : Contract->GetParameters())
 			{
-				Result.InputFields.Add({
+				FUeAgentCommandFieldDeclaration Field{
 					Parameter.GetName(), WireType(Parameter.GetWireType()),
 					Parameter.IsRequired(), Parameter.IsNullable(),
 					TEXT("Exact spatial-content mechanics parameter."),
-				});
+				};
+				if (Parameter.GetName() == TEXT("input"))
+				{
+					Field.SchemaJson = Descriptor.GetInputSchema().GetJsonValue();
+					++InputSchemaAssignments;
+				}
+				Result.InputFields.Add(MoveTemp(Field));
 			}
-			Result.ResultFields = {{
-				TEXT("result"), TEXT("object"), true, false,
-				TEXT("Native spatial-content result with state revision."),
-			}};
+			if (InputSchemaAssignments != 1
+				|| Descriptor.GetInputSchema().GetJsonValue().IsEmpty()
+				|| Descriptor.GetResultSchema().GetJsonValue().IsEmpty())
+			{
+				OutError = TEXT("spatial_content_descriptor_schema_projection_invalid:")
+					+ CommandId;
+				return false;
+			}
+			if (bQuery)
+			{
+				Result.ResultFields = {
+					{TEXT("projection"), TEXT("object"), true, false,
+						TEXT("Bounded query projection and native state snapshot."),
+						QueryProjectionSchema()},
+					{TEXT("ticket"), TEXT("object"), true, true,
+						TEXT("Resolved query ticket, or null when no target ticket is required.")},
+				};
+			}
+			else
+			{
+				Result.ResultFields = {
+					{TEXT("operation_id"), TEXT("string"), true, false,
+						TEXT("Stable identity of the completed spatial operation.")},
+					{TEXT("projection"), TEXT("object"), true, false,
+						TEXT("Verified native outcome; descriptor result is projection.payload."),
+						OperationProjectionSchema(Descriptor)},
+				};
+			}
 			Result.Errors = {
 				{TEXT("spatial_content_authority_required"),
 					TEXT("The caller lacks Query or Operation authority.")},
@@ -86,7 +136,7 @@ namespace UE::UAI::Module::CommandRegistration::SpatialContent
 			Result.Purpose.Summary = TEXT("Execute ") + CommandId
 				+ TEXT(" through the common Query/Operation service and native spatial mechanics.");
 			Result.Purpose.Target =
-				TEXT("One exact actor transform, mesh transform, pivot, element selection, or transform candidate set.");
+				TEXT("One exact actor transform, mesh transform, pivot, or element selection.");
 			Result.Purpose.Preconditions = {
 				TEXT("Resolve explicit subject identities and semantic frames before execution."),
 			};
@@ -98,7 +148,9 @@ namespace UE::UAI::Module::CommandRegistration::SpatialContent
 				TEXT("Read failures are side-effect free; mutation failures preserve lifecycle diagnostics.");
 			Result.Purpose.SideEffectGuidance = bQuery
 				? TEXT("Reads only bounded Editor spatial state.")
-				: TEXT("Mutates only the explicitly resolved spatial subject.");
+				: OperationOwners::SpatialContent::IsDurableMutation(CommandId)
+					? TEXT("Mutates and persists only the explicitly resolved spatial subject.")
+					: TEXT("Mutates only the explicitly resolved spatial subject.");
 			Result.Purpose.MinimumExample = Result.PythonFunction
 				+ TEXT("(client, params)");
 			Result.Purpose.RelatedFlows =
@@ -109,8 +161,56 @@ namespace UE::UAI::Module::CommandRegistration::SpatialContent
 			Result.Purpose.Synonyms = {
 				TEXT("object transform"), TEXT("mesh pivot"), TEXT("surface snap"),
 			};
+			if (CommandId == TEXT("world.object_transform.update"))
+			{
+				Result.Purpose.Keywords.Append({
+					TEXT("move"), TEXT("relocate"), TEXT("actor transform"),
+				});
+				Result.Purpose.Synonyms.Append({
+					TEXT("move actor transform"),
+					TEXT("relocate actor"),
+					TEXT("set actor transform"),
+				});
+			}
 			OutDeclaration = MoveTemp(Result);
 			return true;
+		}
+
+		const Contract::FUeAgentOperationDescriptor* FindUniqueDescriptor(
+			const FString& CommandId,
+			const Contract::FUeAgentDescriptorRegistry& Descriptors,
+			FString& OutError)
+		{
+			const Composition::TimelineSpatial::
+				FUeAgentTimelineSpatialActivationProfile* Match = nullptr;
+			for (const Composition::TimelineSpatial::
+				FUeAgentTimelineSpatialActivationProfile& Profile
+				: Composition::TimelineSpatial::GetTimelineSpatialActivationProfiles())
+			{
+				if (Profile.CommandId != CommandId)
+				{
+					continue;
+				}
+				if (Match)
+				{
+					OutError = TEXT("spatial_content_descriptor_ambiguous:") + CommandId;
+					return nullptr;
+				}
+				Match = &Profile;
+			}
+			if (!Match)
+			{
+				OutError = TEXT("spatial_content_descriptor_profile_missing:") + CommandId;
+				return nullptr;
+			}
+			const Contract::FUeAgentOperationDescriptor* Descriptor =
+				Descriptors.FindExact(Match->DescriptorIdentity);
+			if (!Descriptor || Descriptor->GetCapabilityId() != CommandId)
+			{
+				OutError = TEXT("spatial_content_descriptor_missing:") + CommandId;
+				return nullptr;
+			}
+			return Descriptor;
 		}
 
 		class FContribution final : public IUeAgentActiveCommandContribution
@@ -226,19 +326,30 @@ namespace UE::UAI::Module::CommandRegistration::SpatialContent
 		OutContribution.Reset();
 		OutError.Reset();
 		TSharedPtr<const FUeAgentCommandContractRegistry> Legacy;
+		TSharedPtr<const Contract::FUeAgentDescriptorRegistry> Descriptors;
 		if (!Composition::TimelineSpatial::
 				TryCreateTimelineSpatialProductionCommandContractRegistry(
 					Legacy,
 					OutError)
-			|| !Legacy.IsValid())
+			|| !Legacy.IsValid()
+			|| !Composition::TimelineSpatial::
+				TryCreateTimelineSpatialDescriptorRegistry(Descriptors, OutError)
+			|| !Descriptors.IsValid())
 		{
 			return false;
 		}
 		TArray<FUeAgentCommandDeclaration> Declarations;
 		for (const FString& CommandId : QueryOwners::SpatialContent::GetCommandIds())
 		{
+			const Contract::FUeAgentOperationDescriptor* Descriptor =
+				FindUniqueDescriptor(CommandId, *Descriptors, OutError);
+			if (!Descriptor)
+			{
+				return false;
+			}
 			FUeAgentCommandDeclaration Declaration;
-			if (!TryDeclaration(CommandId, *Legacy, Declaration, OutError))
+			if (!TryDeclaration(
+					CommandId, *Legacy, *Descriptor, Declaration, OutError))
 			{
 				return false;
 			}

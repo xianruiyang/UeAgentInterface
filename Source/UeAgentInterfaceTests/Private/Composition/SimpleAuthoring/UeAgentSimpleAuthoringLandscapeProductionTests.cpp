@@ -1259,6 +1259,7 @@ bool FUeAgentSimpleAuthoringLandscapeCreateOwnedPackageTest::RunTest(
 
 		FUeAgentSimpleAuthoringDurableServiceConfig DurableConfig;
 		DurableConfig.JournalRoot = Owner.JournalRoot;
+		DurableConfig.StableJournalOwnerId = TEXT("test:landscape:durable");
 		DurableConfig.PackageBackend = MakeShared<
 			FPackageAssetDurableBackend,
 			ESPMode::ThreadSafe>(Owner.PackageRoot);
@@ -1560,6 +1561,7 @@ bool FUeAgentSimpleAuthoringLandscapeOwnedPackageTest::RunTest(
 
 		FUeAgentSimpleAuthoringDurableServiceConfig DurableConfig;
 		DurableConfig.JournalRoot = Owner.JournalRoot;
+		DurableConfig.StableJournalOwnerId = TEXT("test:landscape:durable");
 		DurableConfig.PackageBackend = MakeShared<
 			FPackageAssetDurableBackend,
 			ESPMode::ThreadSafe>(Owner.PackageRoot);

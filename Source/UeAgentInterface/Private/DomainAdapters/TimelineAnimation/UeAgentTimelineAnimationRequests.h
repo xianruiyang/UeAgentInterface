@@ -230,6 +230,7 @@ namespace UE::UAI::DomainAdapters::TimelineAnimation
 		SkeletonSlotsRead,
 		LevelSequenceRead,
 		LevelSequenceCreate,
+		LevelSequenceSettingsUpdate,
 		LevelSequenceStructureReplace,
 		WidgetAnimationRead,
 		SubjectPoseUpdate,

@@ -930,12 +930,24 @@ namespace UE::UAI::Composition::SimpleAuthoring::EditorProject
 						EvidenceError.Detail);
 					return false;
 				}
-				OutTargets.Emplace(
-					Changes[0].GetIdentity(),
-					Kind,
-					DurableLocation,
-					EAssetDurableIntent::Save,
-					ERollbackGrade::DurableBackup);
+				if (Kind == EDurableArtifactKind::Package)
+				{
+					OutTargets.Emplace(
+						Changes[0].GetIdentity(),
+						DurableLocation,
+						EPackageHeaderKind::Asset,
+						EAssetDurableIntent::Save,
+						ERollbackGrade::DurableBackup);
+				}
+				else
+				{
+					OutTargets.Emplace(
+						Changes[0].GetIdentity(),
+						Kind,
+						DurableLocation,
+						EAssetDurableIntent::Save,
+						ERollbackGrade::DurableBackup);
+				}
 				return OutTargets[0].IsValid();
 			}
 		};

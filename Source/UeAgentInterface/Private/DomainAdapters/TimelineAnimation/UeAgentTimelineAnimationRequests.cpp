@@ -795,6 +795,12 @@ namespace UE::UAI::DomainAdapters::TimelineAnimation
 				}
 				return ParseOptionalRate(Root, TEXT("display_rate"), Data.DisplayRate, Error)
 					&& ParseOptionalRate(Root, TEXT("tick_resolution"), Data.TickResolution, Error);
+			case EUeAgentTimelineAnimationRequestKind::LevelSequenceSettingsUpdate:
+				return ParseOptionalRate(
+						Root, TEXT("display_rate"), Data.DisplayRate, Error)
+					&& ParseOptionalRange(
+						Root, TEXT("playback_range"), Data.TemporalRange, Error)
+					&& ParseRequiredRevision(Root, Data, Error);
 			case EUeAgentTimelineAnimationRequestKind::LevelSequenceStructureReplace:
 				if (!RequiredObject(Root, TEXT("structure"), Object, Error)) return false;
 				{
@@ -870,6 +876,7 @@ namespace UE::UAI::DomainAdapters::TimelineAnimation
 				{TEXT("animation.skeleton.slots.read"), TEXT("timeline_animation.skeleton.slots_read.request.v1"), TEXT("temporal_read"), TEXT("skeleton_slots_read"), EUeAgentTimelineAnimationRequestKind::SkeletonSlotsRead, false},
 				{TEXT("timeline.sequence.read"), TEXT("timeline_animation.level_sequence.read.request.v1"), TEXT("temporal_read"), TEXT("level_sequence_read"), EUeAgentTimelineAnimationRequestKind::LevelSequenceRead, false},
 				{TEXT("timeline.sequence.create"), TEXT("timeline_animation.level_sequence.create.request.v1"), TEXT("timeline_structure"), TEXT("level_sequence_create"), EUeAgentTimelineAnimationRequestKind::LevelSequenceCreate, true},
+				{TEXT("timeline.sequence.settings.update"), TEXT("timeline_animation.level_sequence.settings_update.request.v1"), TEXT("timeline_structure"), TEXT("level_sequence_settings_update"), EUeAgentTimelineAnimationRequestKind::LevelSequenceSettingsUpdate, true},
 				{TEXT("timeline.sequence.structure.replace"), TEXT("timeline_animation.level_sequence.structure_replace.request.v1"), TEXT("timeline_structure"), TEXT("level_sequence_structure_replace"), EUeAgentTimelineAnimationRequestKind::LevelSequenceStructureReplace, true},
 				{TEXT("timeline.widget_animation.read"), TEXT("timeline_animation.widget_animation.read.request.v1"), TEXT("temporal_read"), TEXT("widget_animation_read"), EUeAgentTimelineAnimationRequestKind::WidgetAnimationRead, false},
 				{TEXT("animation.subject.pose.update"), TEXT("timeline_animation.subject.pose_update.request.v1"), TEXT("subject_animation_state"), TEXT("subject_pose_update"), EUeAgentTimelineAnimationRequestKind::SubjectPoseUpdate, true},
@@ -1098,6 +1105,11 @@ namespace UE::UAI::DomainAdapters::TimelineAnimation
 				&& Structure->IsValid()
 				&& (!DisplayRate.IsSet() || DisplayRate->IsValid())
 				&& (!TickResolution.IsSet() || TickResolution->IsValid());
+		case EUeAgentTimelineAnimationRequestKind::LevelSequenceSettingsUpdate:
+			return ExpectedRevision.IsSet() && ExpectedRevision->IsValid()
+				&& (DisplayRate.IsSet() || TemporalRange.IsSet())
+				&& (!DisplayRate.IsSet() || DisplayRate->IsValid())
+				&& (!TemporalRange.IsSet() || TemporalRange->IsValid());
 		case EUeAgentTimelineAnimationRequestKind::SubjectPoseUpdate:
 			return EvaluationPoint.IsSet() && EvaluationPoint->IsValid()
 				&& PoseFrame.IsSet() && PoseFrame->IsValid()
@@ -1204,7 +1216,7 @@ namespace UE::UAI::DomainAdapters::TimelineAnimation
 	{
 		OutDecoder.Reset();
 		OutError = {};
-		if (RequestSpecs().Num() != 19)
+		if (RequestSpecs().Num() != 20)
 		{
 			return Fail(OutError,
 				TEXT("timeline_animation_request_spec_count_invalid"));

@@ -66,6 +66,38 @@ namespace UE::UAI::DomainAdapters::AssetSimple
 		return GetAssetSimpleMechanicsCommandIds().Contains(CommandId);
 	}
 
+	const TArray<FString>& GetAssetSimpleDelegatedLifecycleCommandIds()
+	{
+		static const TArray<FString> Ids = {
+			TEXT("asset.object.clone"),
+		};
+		return Ids;
+	}
+
+	const TArray<FString>& GetAssetSimpleLifecycleCommandIds()
+	{
+		static const TArray<FString> Ids = []
+		{
+			TArray<FString> Result = GetAssetSimpleMechanicsCommandIds();
+			for (const FString& Delegated
+				: GetAssetSimpleDelegatedLifecycleCommandIds())
+			{
+				if (Result.Contains(Delegated))
+				{
+					return TArray<FString>();
+				}
+				Result.Add(Delegated);
+			}
+			return Result;
+		}();
+		return Ids;
+	}
+
+	bool IsAssetSimpleLifecycleCommand(const FString& CommandId)
+	{
+		return GetAssetSimpleLifecycleCommandIds().Contains(CommandId);
+	}
+
 	const TArray<FString>& GetAssetSimpleRequiredAuthorityScopes()
 	{
 		static const TArray<FString> Scopes = {

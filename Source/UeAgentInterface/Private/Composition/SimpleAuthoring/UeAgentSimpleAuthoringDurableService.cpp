@@ -1,5 +1,7 @@
 #include "Composition/SimpleAuthoring/UeAgentSimpleAuthoringDurableService.h"
 
+#include "AssetRegistry/AssetRegistryModule.h"
+#include "Misc/PackageName.h"
 #include "Misc/ScopeLock.h"
 #include "UObject/Package.h"
 
@@ -18,6 +20,115 @@ namespace UE::UAI::Composition::SimpleAuthoring
 			OutError.Code = MoveTemp(Code);
 			OutError.Detail = MoveTemp(Detail);
 		}
+
+		class FSimpleAuthoringReconciliationOracle final
+			: public IAssetDurableReconciliationOracle
+		{
+		public:
+			virtual bool TryConfirm(
+				const FAssetDurableSessionRef& Session,
+				const TArray<FDurableArtifactState>& ObservedStates,
+				const EDurableStatus ProposedStatus,
+				FUeAgentResourceTracker& Resources,
+				FAssetDurableError& OutError) override
+			{
+				OutError = FAssetDurableError();
+				if (ProposedStatus != EDurableStatus::RolledBack
+					&& ProposedStatus != EDurableStatus::Verified)
+				{
+					OutError = FAssetDurableError(
+						TEXT("durable_reconcile_status_invalid"));
+					return false;
+				}
+				TSet<FString> CheckedPackages;
+				for (const FDurableArtifact& Artifact :
+					Session->GetInventory().GetArtifacts())
+				{
+					if (Artifact.GetArtifactKind()
+							!= EDurableArtifactKind::Package
+						|| CheckedPackages.Contains(
+							Artifact.GetDurableLocation()))
+					{
+						continue;
+					}
+					const FString PackageName =
+						Artifact.GetDurableLocation();
+					CheckedPackages.Add(PackageName);
+					const FDurableArtifact* HeaderArtifact =
+						Session->GetInventory().GetArtifacts()
+						.FindByPredicate(
+							[&PackageName](
+								const FDurableArtifact& Candidate)
+							{
+								return Candidate.GetArtifactKind()
+										== EDurableArtifactKind::Package
+									&& Candidate.GetDurableLocation()
+										== PackageName
+									&& Candidate.GetRole().Contains(
+										TEXT("header"));
+							});
+					const FDurableArtifactState* HeaderState =
+						HeaderArtifact
+						? ObservedStates.FindByPredicate(
+							[HeaderArtifact](
+								const FDurableArtifactState& State)
+							{
+								return State.GetArtifactId()
+									== HeaderArtifact->GetArtifactId();
+							})
+						: nullptr;
+					if (!HeaderState || !HeaderState->IsKnown())
+					{
+						OutError = FAssetDurableError(
+							TEXT("durable_reconcile_readback_unconfirmed"),
+							PackageName + TEXT(":header_state"));
+						return false;
+					}
+
+					FString ExistingFilename;
+					const bool bFileExists =
+						FPackageName::DoesPackageExist(
+							PackageName,
+							&ExistingFilename);
+					UPackage* const LoadedPackage =
+						FindPackage(nullptr, *PackageName);
+					TArray<FAssetData> Assets;
+					FAssetRegistryModule::GetRegistry()
+						.GetAssetsByPackageName(
+							FName(*PackageName),
+							Assets,
+							false);
+					const bool bExpectedPresent =
+						HeaderState->GetPresence()
+							== EDurableStatePresence::Present;
+					const bool bRegistryConsistent = bExpectedPresent
+						? !Assets.IsEmpty()
+						: Assets.IsEmpty();
+					const bool bLoadedConsistent = bExpectedPresent
+						? !LoadedPackage
+							|| !LoadedPackage->IsDirty()
+						: LoadedPackage == nullptr;
+					if (bFileExists != bExpectedPresent
+						|| !bRegistryConsistent
+						|| !bLoadedConsistent)
+					{
+						OutError = FAssetDurableError(
+							TEXT("durable_reconcile_readback_unconfirmed"),
+							FString::Printf(
+								TEXT("%s:file=%d,registry=%d,loaded=%d,dirty=%d"),
+								*PackageName,
+								bFileExists ? 1 : 0,
+								Assets.IsEmpty() ? 0 : 1,
+								LoadedPackage ? 1 : 0,
+								LoadedPackage && LoadedPackage->IsDirty()
+									? 1
+									: 0));
+						return false;
+					}
+				}
+				return true;
+			}
+		};
 
 		class FSimpleAuthoringDurableService final
 			: public IUeAgentSimpleAuthoringAssetDurableService
@@ -43,8 +154,27 @@ namespace UE::UAI::Composition::SimpleAuthoring
 				{
 					return false;
 				}
+				int64 DurableFencingToken = -1;
+				{
+					FScopeLock Lock(&Mutex);
+					if (!TryAcquireAssetDurableFence(
+							Config.JournalRoot,
+							Config.StableJournalOwnerId,
+							Resources,
+							DurableFencingToken,
+							OutError))
+					{
+						return false;
+					}
+				}
+				const FAssetDurableRequest DurableRequest(
+					Request.GetPlan(),
+					Request.GetTargets(),
+					DurableFencingToken,
+					Config.StableJournalOwnerId,
+					Request.GetAtomicityMode());
 				return TryPrepareAssetDurability(
-					Request,
+					DurableRequest,
 					*Backend,
 					Config.JournalRoot,
 					Resources,
@@ -64,15 +194,21 @@ namespace UE::UAI::Composition::SimpleAuthoring
 				if (!TrySelectBackend(
 						Session->GetRequest(),
 						Backend,
-						OutError))
+						OutError)
+					|| CurrentFencingToken < 0)
 				{
+					if (!OutError.IsPresent())
+					{
+						OutError = FAssetDurableError(
+							TEXT("simple_authoring_operation_fence_invalid"));
+					}
 					return false;
 				}
 				return TryEnlistAssetDurableTargets(
 					Session,
 					MutationTargets,
 					*Backend,
-					CurrentFencingToken,
+					Session->GetRequest().GetFencingToken(),
 					Resources,
 					OutSession,
 					OutError);
@@ -90,10 +226,11 @@ namespace UE::UAI::Composition::SimpleAuthoring
 						Session->GetRequest(),
 						Backend,
 						OutError)
+					|| CurrentFencingToken < 0
 					|| !TryPersistAssetDurability(
 						Session,
 						*Backend,
-						CurrentFencingToken,
+						Session->GetRequest().GetFencingToken(),
 						Resources,
 						OutReceipt,
 						OutError))
@@ -122,7 +259,9 @@ namespace UE::UAI::Composition::SimpleAuthoring
 						Session->GetJournalRoot(),
 						Session->GetTransactionRoot(),
 						Session->GetStagingRoot(),
-						OutReceipt.GetPhaseHistory());
+						OutReceipt.GetPhaseHistory(),
+						OutReceipt.GetPreMutationStates(),
+						OutReceipt.GetExpectedPersistedStates());
 				{
 					FScopeLock Lock(&Mutex);
 					PersistedByJournal.Add(
@@ -161,10 +300,11 @@ namespace UE::UAI::Composition::SimpleAuthoring
 						Session->GetRequest(),
 						Backend,
 						OutError)
+					|| CurrentFencingToken < 0
 					|| !TryRollbackAssetDurability(
 						Session,
 						*Backend,
-						CurrentFencingToken,
+						Session->GetRequest().GetFencingToken(),
 						bMemoryRollbackConfirmed,
 						Resources,
 						OutReceipt,
@@ -186,6 +326,46 @@ namespace UE::UAI::Composition::SimpleAuthoring
 				PersistedByJournal.Remove(
 					Session->GetJournalId());
 				return true;
+			}
+
+			bool TryInspect(
+				const FString& JournalId,
+				FUeAgentResourceTracker& Resources,
+				FAssetDurableSessionPtr& OutSession,
+				TArray<FDurableArtifactState>& OutObservedStates,
+				FAssetDurableError& OutError) override
+			{
+				return TryInspectAssetDurableJournal(
+					Config.JournalRoot,
+					JournalId,
+					GetAllowedArtifactRoots(),
+					Resources,
+					OutSession,
+					OutObservedStates,
+					OutError);
+			}
+
+			bool TryReconcile(
+				const FString& JournalId,
+				const FString& ExpectedJournalOwnerId,
+				const int64 ExpectedFencingToken,
+				const FString& VerificationId,
+				FUeAgentResourceTracker& Resources,
+				FDurableReceipt& OutReceipt,
+				FAssetDurableError& OutError) override
+			{
+				FSimpleAuthoringReconciliationOracle Oracle;
+				return TryReconcileAssetDurability(
+					Config.JournalRoot,
+					JournalId,
+					GetAllowedArtifactRoots(),
+					ExpectedJournalOwnerId,
+					ExpectedFencingToken,
+					VerificationId,
+					Oracle,
+					Resources,
+					OutReceipt,
+					OutError);
 			}
 
 			bool TryAcknowledge(
@@ -226,6 +406,26 @@ namespace UE::UAI::Composition::SimpleAuthoring
 			}
 
 		private:
+			TArray<FString> GetAllowedArtifactRoots() const
+			{
+				TArray<FString> Result;
+				for (const TSharedPtr<IAssetDurableBackend,
+					ESPMode::ThreadSafe>& Backend :
+					{Config.PackageBackend, Config.ProjectConfigBackend})
+				{
+					if (!Backend.IsValid())
+					{
+						continue;
+					}
+					for (const FString& Root :
+						Backend->GetAllowedArtifactRoots())
+					{
+						Result.AddUnique(Root);
+					}
+				}
+				return Result;
+			}
+
 			bool TrySelectBackend(
 				const FAssetDurableRequest& Request,
 				IAssetDurableBackend*& OutBackend,
@@ -300,6 +500,15 @@ namespace UE::UAI::Composition::SimpleAuthoring
 				TEXT(
 					"simple_authoring_durable_"
 					"journal_root_missing"));
+			return false;
+		}
+		if (Config.StableJournalOwnerId.TrimStartAndEnd().IsEmpty())
+		{
+			SetError(
+				OutError,
+				TEXT(
+					"simple_authoring_durable_"
+					"stable_owner_missing"));
 			return false;
 		}
 		if (!Config.PackageBackend.IsValid()

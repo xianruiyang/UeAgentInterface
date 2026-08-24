@@ -22,6 +22,9 @@
 #include "LevelSequence.h"
 #include "Misc/PackageName.h"
 #include "MovieScene.h"
+#include "Channels/MovieSceneFloatChannel.h"
+#include "Sections/MovieSceneFloatSection.h"
+#include "Tracks/MovieSceneFloatTrack.h"
 #include "PackageTools.h"
 #include "PreviewScene.h"
 #include "Sequencer/MovieSceneControlRigParameterTrack.h"
@@ -459,6 +462,13 @@ namespace
 			if (Data.DisplayRate.IsSet()) Root->SetObjectField(TEXT("display_rate"), JsonRate(*Data.DisplayRate));
 			if (Data.TickResolution.IsSet()) Root->SetObjectField(TEXT("tick_resolution"), JsonRate(*Data.TickResolution));
 			break;
+		case EUeAgentTimelineAnimationRequestKind::LevelSequenceSettingsUpdate:
+			if (Data.DisplayRate.IsSet())
+				Root->SetObjectField(TEXT("display_rate"), JsonRate(*Data.DisplayRate));
+			if (Data.TemporalRange.IsSet())
+				Root->SetObjectField(TEXT("playback_range"), JsonRange(*Data.TemporalRange));
+			SetRevision();
+			break;
 		case EUeAgentTimelineAnimationRequestKind::LevelSequenceStructureReplace:
 			Root->SetObjectField(TEXT("structure"), JsonStructure(*Data.Structure));
 			SetRevision();
@@ -772,6 +782,33 @@ namespace
 		Out.LevelSequence->GetMovieScene()->SetDisplayRate(FFrameRate(30, 1));
 		Out.LevelSequence->GetMovieScene()->SetTickResolutionDirectly(FFrameRate(30, 1));
 		Out.LevelSequence->GetMovieScene()->SetPlaybackRange(0, 30);
+		UMovieSceneFloatTrack* LevelTrack =
+			Out.LevelSequence->GetMovieScene()->AddTrack<UMovieSceneFloatTrack>();
+		if (!Test.TestNotNull(
+			TEXT("create LevelSequence preservation track"), LevelTrack))
+		{
+			return false;
+		}
+		LevelTrack->SetDisplayName(
+			FText::FromString(TEXT("TS010A_PreservedTrack")));
+		UMovieSceneFloatSection* LevelSection = Cast<UMovieSceneFloatSection>(
+			LevelTrack->CreateNewSection());
+		if (!Test.TestNotNull(
+			TEXT("create LevelSequence preservation section"), LevelSection))
+		{
+			return false;
+		}
+		LevelSection->SetRange(TRange<FFrameNumber>(
+			FFrameNumber(0), FFrameNumber(30)));
+		LevelTrack->AddSection(*LevelSection);
+		FMovieSceneFloatChannel* LevelChannel = LevelSection->
+			GetChannelProxy().GetChannel<FMovieSceneFloatChannel>(0);
+		if (!Test.TestNotNull(
+			TEXT("create LevelSequence preservation channel"), LevelChannel))
+		{
+			return false;
+		}
+		LevelChannel->AddLinearKey(FFrameNumber(10), 0.5f);
 		if (!Test.TestTrue(TEXT("save LevelSequence fixture"),
 				Out.Save(*Out.LevelSequence)))
 		{
@@ -940,7 +977,7 @@ namespace
 
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(
 	FUeAgentTimelineAnimationProductionNativeCapabilitiesTest,
-	"UeAgentInterface.DomainAdapters.TimelineAnimation.E2.ProductionNative.All19Capabilities",
+	"UeAgentInterface.DomainAdapters.TimelineAnimation.E2.ProductionNative.All20Capabilities",
 	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
 
 bool FUeAgentTimelineAnimationProductionNativeCapabilitiesTest::RunTest(
@@ -1120,6 +1157,129 @@ bool FUeAgentTimelineAnimationProductionNativeCapabilitiesTest::RunTest(
 		TestTrue(TEXT("level sequence create settled compiled data"),
 			UMovieSceneCompiledDataManager::GetPrecompiledData()
 				->FindDataID(CreatedLevel).IsValid());
+	}
+
+	Runtime->TryReadRevision(LevelRef, Revision, Error);
+	ULevelSequence* const BeforeSettingsLevel = LoadObject<ULevelSequence>(
+		nullptr, *LevelRef);
+	if (!TestNotNull(
+			TEXT("reload live LevelSequence before settings update"),
+			BeforeSettingsLevel))
+	{
+		return false;
+	}
+	const UMovieScene* BeforeSettingsScene =
+		BeforeSettingsLevel->GetMovieScene();
+	const UMovieSceneTrack* BeforeSettingsTrack =
+		BeforeSettingsScene && !BeforeSettingsScene->GetTracks().IsEmpty()
+			? BeforeSettingsScene->GetTracks()[0]
+			: nullptr;
+	const UMovieSceneSection* BeforeSettingsSection =
+		BeforeSettingsTrack && !BeforeSettingsTrack->GetAllSections().IsEmpty()
+			? BeforeSettingsTrack->GetAllSections()[0]
+			: nullptr;
+	const FString PreservedTrackPath = BeforeSettingsTrack
+		? BeforeSettingsTrack->GetPathName()
+		: FString();
+	const FString PreservedSectionPath = BeforeSettingsSection
+		? BeforeSettingsSection->GetPathName()
+		: FString();
+	Data = {};
+	Data.ExpectedRevision = Revision;
+	Data.DisplayRate = FTimelineAnimationRate{TEXT("24"), TEXT("1")};
+	Data.TemporalRange = Range(TEXT("level_sequence:") + LevelRef, 5, 45);
+	ExecuteOperation(*this, *Runtime,
+		TEXT("timeline.sequence.settings.update"),
+		EUeAgentTimelineAnimationRequestKind::LevelSequenceSettingsUpdate,
+		Data, LevelRef, Resources);
+	ULevelSequence* SettingsReloadedLevel = LoadObject<ULevelSequence>(
+		nullptr, *LevelRef);
+	UMovieScene* SettingsReloadedScene = SettingsReloadedLevel
+		? SettingsReloadedLevel->GetMovieScene()
+		: nullptr;
+	TestNotNull(
+		TEXT("level sequence settings update reloads its target"),
+		SettingsReloadedScene);
+	if (SettingsReloadedScene)
+	{
+		TestEqual(
+			TEXT("settings update changes display rate"),
+			SettingsReloadedScene->GetDisplayRate(),
+			FFrameRate(24, 1));
+		TestEqual(
+			TEXT("settings update preserves tick resolution"),
+			SettingsReloadedScene->GetTickResolution(),
+			FFrameRate(30, 1));
+		TestEqual(
+			TEXT("settings update changes playback lower tick"),
+			SettingsReloadedScene->GetPlaybackRange().GetLowerBoundValue().Value,
+			5);
+		TestEqual(
+			TEXT("settings update changes playback upper tick"),
+			SettingsReloadedScene->GetPlaybackRange().GetUpperBoundValue().Value,
+			45);
+		TestEqual(
+			TEXT("settings update preserves root track count"),
+			SettingsReloadedScene->GetTracks().Num(),
+			1);
+		const UMovieSceneTrack* PreservedTrack =
+			SettingsReloadedScene->GetTracks().Num() == 1
+				? SettingsReloadedScene->GetTracks()[0]
+				: nullptr;
+		TestEqual(
+			TEXT("settings update preserves root track identity"),
+			PreservedTrack ? PreservedTrack->GetPathName() : FString(),
+			PreservedTrackPath);
+		const UMovieSceneSection* PreservedSection =
+			PreservedTrack && PreservedTrack->GetAllSections().Num() == 1
+				? PreservedTrack->GetAllSections()[0]
+				: nullptr;
+		TestEqual(
+			TEXT("settings update preserves section identity"),
+			PreservedSection ? PreservedSection->GetPathName() : FString(),
+			PreservedSectionPath);
+		const UMovieSceneFloatSection* PreservedFloatSection =
+			Cast<UMovieSceneFloatSection>(PreservedSection);
+		const FMovieSceneFloatChannel* PreservedChannel =
+			PreservedFloatSection
+				? PreservedFloatSection->GetChannelProxy()
+					.GetChannel<FMovieSceneFloatChannel>(0)
+				: nullptr;
+		TestEqual(
+			TEXT("settings update preserves key count"),
+			PreservedChannel
+				? PreservedChannel->GetData().GetTimes().Num()
+				: -1,
+			1);
+		if (PreservedChannel
+			&& PreservedChannel->GetData().GetTimes().Num() == 1
+			&& PreservedChannel->GetData().GetValues().Num() == 1)
+		{
+			TestEqual(
+				TEXT("settings update preserves key time"),
+				PreservedChannel->GetData().GetTimes()[0].Value,
+				10);
+			TestEqual(
+				TEXT("settings update preserves key value"),
+				PreservedChannel->GetData().GetValues()[0].Value,
+				0.5f);
+		}
+		TestEqual(
+			TEXT("settings update preserves section lower tick"),
+			PreservedSection
+				? PreservedSection->GetRange().GetLowerBoundValue().Value
+				: -1,
+			0);
+		TestEqual(
+			TEXT("settings update preserves section upper tick"),
+			PreservedSection
+				? PreservedSection->GetRange().GetUpperBoundValue().Value
+				: -1,
+			30);
+		TestTrue(
+			TEXT("settings update settles compiled data after formal reload"),
+			UMovieSceneCompiledDataManager::GetPrecompiledData()
+				->FindDataID(SettingsReloadedLevel).IsValid());
 	}
 
 	Runtime->TryReadRevision(LevelRef, Revision, Error);

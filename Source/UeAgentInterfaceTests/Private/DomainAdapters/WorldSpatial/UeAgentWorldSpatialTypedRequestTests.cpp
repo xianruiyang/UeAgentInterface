@@ -114,6 +114,10 @@ namespace
 		{
 			return Payload.IsType<FObjectTransformReadRequestInput>();
 		}
+		if (Kind == TEXT("object_transform_update"))
+		{
+			return Payload.IsType<FWorldObjectTransformUpdateRequestInput>();
+		}
 		if (Kind == TEXT("object_align"))
 		{
 			return Payload.IsType<FWorldObjectAlignRequestInput>();
@@ -129,10 +133,6 @@ namespace
 		if (Kind == TEXT("mesh_pivot_update"))
 		{
 			return Payload.IsType<FMeshPivotUpdateRequestInput>();
-		}
-		if (Kind == TEXT("transform_candidates_evaluate"))
-		{
-			return Payload.IsType<FTransformCandidatesEvaluateRequestInput>();
 		}
 		if (Kind == TEXT("viewport_ray_deproject"))
 		{
@@ -826,6 +826,6 @@ bool FUeAgentWorldSpatialTypedChangeDraftTest::RunTest(
 			Payload && Payload->GetKind() == EUeAgentValueKind::Object
 				&& !Payload->GetObjectItems().IsEmpty());
 	}
-	TestEqual(TEXT("eleven operation C6 drafts covered"), OperationCount, 11);
+	TestEqual(TEXT("twelve operation C6 drafts covered"), OperationCount, 12);
 	return true;
 }

@@ -105,6 +105,27 @@ namespace UE::UAI::HjsonWorkspace::DomainAuthoring
 		FString& OutJson,
 		FWorkspaceError& OutError);
 
+	UEAGENTINTERFACE_API bool TryBuildDomainHjsonDirectoryExportPlan(
+		const FString& TargetIdentity,
+		const FDomainHjsonDocumentContract& Contract,
+		const FString& BaseRevision,
+		const FString& ProfileId,
+		const FString& ProviderId,
+		const FString& EntryFile,
+		const TSharedPtr<FJsonObject>& Document,
+		ContextResource::FUeAgentResourceTracker& Resources,
+		FExportWorkspacePlanPtr& OutPlan,
+		FWorkspaceError& OutError);
+
+	UEAGENTINTERFACE_API bool TryVerifyDomainHjsonStagedWorkspace(
+		const FString& StagedWorkspacePath,
+		const FString& TargetIdentity,
+		const FDomainHjsonDocumentContract& Contract,
+		const FString& BaseRevision,
+		const FString& EntryFile,
+		ContextResource::FUeAgentResourceTracker& Resources,
+		FWorkspaceError& OutError);
+
 	UEAGENTINTERFACE_API void SetWorkspaceErrorFromCommandFailure(
 		const FString& ErrorJson,
 		FString FallbackCode,

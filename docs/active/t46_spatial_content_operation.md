@@ -12,7 +12,7 @@ client.reference.origin_resolve(...)
 client.world.object_align(...)
 client.world.object_snap_to_surface(...)
 client.world.object_transform_read(...)
-client.world.transform_candidates_evaluate(...)
+client.world.object_transform_update(...)
 ```
 
 The same identities are available through `uai-cli ... exec <command-id>`.
@@ -80,15 +80,26 @@ required. Success is verified by an independent readback from that same live
 manager. Invalid or inactive component identities, locked targets, ray misses,
 and occlusion fail without changing the existing mesh-element selection.
 
-## Transform-candidate limitation
+## Durable Actor transform update
 
-`world.transform_candidates.evaluate` is registered but is not currently a
-production-usable evaluator. Its public descriptor requires per-candidate
-`score` results, while the current production reader does not consume the
-`candidates` array and no authoritative scoring objective, units, normalization,
-or ordering has been defined. Do not treat its current transform observations as
-candidate evaluation. The command remains deferred until that result contract is
-resolved; the other spatial commands do not depend on it.
+`world.object_transform.update` is the single direct Actor transform write. Its
+typed input carries one complete `transform` value and the exact revision
+returned by `world.object_transform.read`. The transform subject is the Actor
+identity; the native writer converts it to the `unreal.world` centimeter frame,
+rejects non-finite components, non-normalized rotation, zero scale, unsupported
+targets, and stale revisions before the write, then saves the owning map package.
+Success requires an independent readback of location, quaternion rotation,
+scale, and the new revision. A failed pre-persistence mutation is rolled back;
+unknown persistence state is not replayable.
+
+Candidate comparison is intentionally not a second WorldSpatial command and
+does not invent a generic numerical score. Use `capture.image.execute` with
+`policy:image-capture:transform-candidates/v1`: CaptureMedia temporarily applies
+up to 15 candidates to one exact Actor, captures the baseline and candidates
+from the current Level viewport into one frame sheet, and restores transform,
+package dirty state, selection, and viewport realtime state. The model or user
+compares the frames, then submits the chosen transform through
+`world.object_transform.update`.
 
 ## Origin resolution
 

@@ -641,9 +641,9 @@ bool FUeAgentWorldSpatialExactCapabilityDescriptorsTest::RunTest(
 			++OperationCount;
 		}
 	}
-	TestEqual(TEXT("query descriptor count"), QueryCount, 11);
-	TestEqual(TEXT("operation descriptor count"), OperationCount, 11);
-	TestEqual(TEXT("query provider count"), ProviderBindings.Num(), 11);
+	TestEqual(TEXT("query descriptor count"), QueryCount, 10);
+	TestEqual(TEXT("operation descriptor count"), OperationCount, 12);
+	TestEqual(TEXT("query provider count"), ProviderBindings.Num(), 10);
 
 	using namespace UE::UAI::DomainAdapters::WorldSpatial;
 	TSharedPtr<const FUeAgentDescriptorRegistry> Registry;

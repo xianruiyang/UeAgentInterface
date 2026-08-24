@@ -1,11 +1,18 @@
 #include "Core/HjsonWorkspace/DomainAuthoring/UeAgentDomainHjsonAuthoringKit.h"
 
 #include "Algo/Unique.h"
+#include "Containers/StringConv.h"
 #include "Core/Contract/UeAgentCommandJson.h"
+#include "Core/HjsonWorkspace/SourceLoader/UeAgentHjsonSourceLoader.h"
 #include "Core/StateSemantic/UeAgentCanonicalValueJson.h"
 #include "DomainAdapters/ContentGraphRead/UeAgentContentGraphReadProductionEnvironment.h"
 #include "Misc/PackageName.h"
+#include "Misc/Paths.h"
 #include "UObject/UObjectGlobals.h"
+
+THIRD_PARTY_INCLUDES_START
+#include <openssl/sha.h>
+THIRD_PARTY_INCLUDES_END
 
 namespace UE::UAI::HjsonWorkspace::DomainAuthoring
 {
@@ -33,6 +40,68 @@ namespace UE::UAI::HjsonWorkspace::DomainAuthoring
 			for (int32 Index = 7; Index < Value.Len(); ++Index)
 			{
 				if (!FChar::IsHexDigit(Value[Index]))
+				{
+					return false;
+				}
+			}
+			return true;
+		}
+
+		FString Sha256(const TArray<uint8>& Bytes)
+		{
+			uint8 Digest[SHA256_DIGEST_LENGTH] = {};
+			const uint8 Empty = 0;
+			SHA256(
+				Bytes.IsEmpty() ? &Empty : Bytes.GetData(),
+				static_cast<size_t>(Bytes.Num()),
+				Digest);
+			FString Result(TEXT("sha256:"));
+			for (const uint8 Byte : Digest)
+			{
+				Result += FString::Printf(TEXT("%02x"), Byte);
+			}
+			return Result;
+		}
+
+		TArray<uint8> Utf8(const FString& Text)
+		{
+			const FTCHARToUTF8 Converted(*Text);
+			TArray<uint8> Result;
+			Result.Append(
+				reinterpret_cast<const uint8*>(Converted.Get()),
+				Converted.Length());
+			return Result;
+		}
+
+		FString Sha256Text(const FString& Text)
+		{
+			return Sha256(Utf8(Text));
+		}
+
+		bool IsSafeEntryFile(const FString& EntryFile)
+		{
+			if (EntryFile.IsEmpty()
+				|| !FPaths::IsRelative(EntryFile)
+				|| EntryFile.Contains(TEXT("\\"))
+				|| EntryFile.Contains(TEXT(":"))
+				|| EntryFile.StartsWith(TEXT("/"))
+				|| !EntryFile.EndsWith(TEXT(".hjson"), ESearchCase::IgnoreCase)
+				|| EntryFile.Equals(
+					TEXT(".uai/workspace.hjson"), ESearchCase::IgnoreCase))
+			{
+				return false;
+			}
+			TArray<FString> Segments;
+			EntryFile.ParseIntoArray(Segments, TEXT("/"), false);
+			if (Segments.IsEmpty())
+			{
+				return false;
+			}
+			for (const FString& Segment : Segments)
+			{
+				if (Segment.IsEmpty()
+					|| Segment == TEXT(".")
+					|| Segment == TEXT(".."))
 				{
 					return false;
 				}
@@ -604,6 +673,200 @@ namespace UE::UAI::HjsonWorkspace::DomainAuthoring
 		{
 			return Fail(
 				OutError, TEXT("domain_hjson_json_invalid"), Error);
+		}
+		return true;
+	}
+
+	bool TryBuildDomainHjsonDirectoryExportPlan(
+		const FString& TargetIdentity,
+		const FDomainHjsonDocumentContract& Contract,
+		const FString& BaseRevision,
+		const FString& ProfileId,
+		const FString& ProviderId,
+		const FString& EntryFile,
+		const TSharedPtr<FJsonObject>& Document,
+		FUeAgentResourceTracker& Resources,
+		FExportWorkspacePlanPtr& OutPlan,
+		FWorkspaceError& OutError)
+	{
+		OutPlan.Reset();
+		OutError.Reset();
+		if (TargetIdentity.IsEmpty()
+			|| !Contract.IsValid()
+			|| BaseRevision.IsEmpty()
+			|| ProfileId.IsEmpty()
+			|| ProviderId.IsEmpty()
+			|| !Document.IsValid())
+		{
+			return Fail(OutError, TEXT("domain_hjson_export_identity_invalid"));
+		}
+		if (!IsSafeEntryFile(EntryFile))
+		{
+			return Fail(
+				OutError, TEXT("domain_hjson_export_entry_invalid"), EntryFile);
+		}
+		FString Schema;
+		const TSharedPtr<FJsonObject>* Root = nullptr;
+		FString RootType;
+		if (!Document->TryGetStringField(TEXT("schema"), Schema)
+			|| Schema != Contract.SchemaId)
+		{
+			return Fail(
+				OutError, TEXT("domain_hjson_export_schema_mismatch"), Schema);
+		}
+		if (!Document->TryGetObjectField(TEXT("root"), Root)
+			|| !Root || !Root->IsValid()
+			|| !(*Root)->TryGetStringField(TEXT("type"), RootType)
+			|| !Contract.SupportsRootType(RootType))
+		{
+			return Fail(
+				OutError, TEXT("domain_hjson_export_root_type_mismatch"), RootType);
+		}
+
+		FString CanonicalDocument;
+		if (!TryCanonicalizeObject(Document, CanonicalDocument, OutError))
+		{
+			return false;
+		}
+		TArray<uint8> EntryBytes = Utf8(CanonicalDocument);
+		const FString EntryHash = Sha256(EntryBytes);
+
+		const TSharedRef<FJsonObject> Manifest = MakeShared<FJsonObject>();
+		Manifest->SetStringField(
+			TEXT("workspace_schema"), TEXT("uai.content_graph.workspace/1"));
+		Manifest->SetNumberField(TEXT("format_version"), 1);
+		Manifest->SetStringField(TEXT("target_identity"), TargetIdentity);
+		Manifest->SetStringField(TEXT("base_revision"), BaseRevision);
+		Manifest->SetStringField(TEXT("entry_file"), EntryFile);
+		const TSharedRef<FJsonObject> File = MakeShared<FJsonObject>();
+		File->SetStringField(TEXT("path"), EntryFile);
+		File->SetStringField(TEXT("content_hash"), EntryHash);
+		Manifest->SetArrayField(
+			TEXT("files"), {MakeShared<FJsonValueObject>(File)});
+		Manifest->SetArrayField(
+			TEXT("references"), TArray<TSharedPtr<FJsonValue>>{});
+		FString CanonicalManifest;
+		if (!TryCanonicalizeObject(Manifest, CanonicalManifest, OutError))
+		{
+			return false;
+		}
+		TArray<uint8> ManifestBytes = Utf8(CanonicalManifest);
+		const FString ManifestHash = Sha256(ManifestBytes);
+
+		const FString IdentityMaterial = ProviderId + TEXT("|") + ProfileId
+			+ TEXT("|") + TargetIdentity + TEXT("|") + BaseRevision
+			+ TEXT("|") + Contract.DomainId + TEXT("|") + Contract.SchemaId
+			+ TEXT("|") + RootType + TEXT("|") + EntryFile
+			+ TEXT("|") + EntryHash + TEXT("|") + ManifestHash;
+		const FString IdentityHash = Sha256Text(IdentityMaterial);
+		TArray<FExportFilePlan> Files;
+		Files.Emplace(EntryFile, MoveTemp(EntryBytes), EntryHash);
+		Files.Emplace(
+			TEXT(".uai/workspace.hjson"),
+			MoveTemp(ManifestBytes),
+			ManifestHash);
+		Files.Sort(
+			[](const FExportFilePlan& Left, const FExportFilePlan& Right)
+			{
+				return Left.GetRelativePath() < Right.GetRelativePath();
+			});
+		int64 OutputBytes = 0;
+		for (const FExportFilePlan& PlannedFile : Files)
+		{
+			OutputBytes += PlannedFile.GetCanonicalUtf8().Num();
+		}
+		FUeAgentResourceBudgetExceeded ResourceError;
+		if (!Resources.TryChargeMany(
+			{
+				{EUeAgentResourceDimension::OutputBytes, OutputBytes},
+				{EUeAgentResourceDimension::StringBytes, OutputBytes},
+				{EUeAgentResourceDimension::Files, Files.Num()},
+				{EUeAgentResourceDimension::WorkUnits, Files.Num() + 1},
+				{EUeAgentResourceDimension::EstimatedMemoryBytes, OutputBytes * 2},
+			},
+			TEXT("domain_hjson.export_plan"),
+			ResourceError))
+		{
+			OutError.Set(
+				ResourceError.Code,
+				ResourceError.Path,
+				TEXT("/"),
+				ResourceError.Observed,
+				ResourceError.bStoppedEarly);
+			return false;
+		}
+		OutPlan = MakeShared<FExportWorkspacePlan>(
+			EWorkspaceKind::Directory,
+			EntryFile,
+			TEXT("domain-hjson-snapshot:") + IdentityHash.Right(24),
+			FUeAgentStateRevision(
+				ProviderId,
+				TEXT("domain-hjson-export:") + IdentityHash.Right(24),
+				0),
+			TEXT("domain-hjson-evidence:") + IdentityHash.Right(24),
+			MoveTemp(Files),
+			IdentityHash,
+			(OutputBytes + 3) / 4);
+		return true;
+	}
+
+	bool TryVerifyDomainHjsonStagedWorkspace(
+		const FString& StagedWorkspacePath,
+		const FString& TargetIdentity,
+		const FDomainHjsonDocumentContract& Contract,
+		const FString& BaseRevision,
+		const FString& EntryFile,
+		FUeAgentResourceTracker& Resources,
+		FWorkspaceError& OutError)
+	{
+		OutError.Reset();
+		if (StagedWorkspacePath.IsEmpty()
+			|| TargetIdentity.IsEmpty()
+			|| !Contract.IsValid()
+			|| BaseRevision.IsEmpty()
+			|| !IsSafeEntryFile(EntryFile))
+		{
+			return Fail(OutError, TEXT("domain_hjson_staging_identity_invalid"));
+		}
+		const TSharedRef<FJsonObject> Source = MakeShared<FJsonObject>();
+		Source->SetStringField(TEXT("kind"), TEXT("directory"));
+		Source->SetStringField(
+			TEXT("path"), FPaths::ConvertRelativePathToFull(StagedWorkspacePath));
+		FResolvedContentGraphImportSourcePtr Resolved;
+		if (!TryLoadContentGraphImportSource(
+			Source, TargetIdentity, Resources, Resolved, OutError)
+			|| !Resolved.IsValid())
+		{
+			return false;
+		}
+		if (Resolved->GetKind() != EWorkspaceSourceKind::Directory
+			|| Resolved->GetTargetIdentity() != TargetIdentity
+			|| Resolved->GetBaseRevision() != BaseRevision
+			|| Resolved->GetEntryFile() != EntryFile)
+		{
+			return Fail(
+				OutError, TEXT("domain_hjson_staging_identity_mismatch"));
+		}
+		const TSharedRef<FJsonObject> Params = MakeShared<FJsonObject>();
+		Params->SetStringField(TEXT("target"), TargetIdentity);
+		Params->SetStringField(TEXT("expected_revision"), BaseRevision);
+		Params->SetObjectField(TEXT("source"), Resolved->MakeNormalizedSourceObject());
+		FString CanonicalParams;
+		if (!TryCanonicalizeObject(Params, CanonicalParams, OutError))
+		{
+			return false;
+		}
+		FResolvedDomainHjsonDocument Decoded;
+		if (!TryDecodeResolvedDocument(
+			TargetIdentity, CanonicalParams, Contract, Decoded, OutError))
+		{
+			return false;
+		}
+		if (Decoded.BaseRevision != BaseRevision
+			|| Decoded.EntryFile != EntryFile)
+		{
+			return Fail(
+				OutError, TEXT("domain_hjson_staging_identity_mismatch"));
 		}
 		return true;
 	}

@@ -9,6 +9,7 @@
 #include "Core/Contract/UeAgentCommandJson.h"
 #include "Core/Discovery/Command/UeAgentCommandDiscovery.h"
 #include "DomainAdapters/QueryCalibration/UeAgentQueryCalibrationSource.h"
+#include "Module/CommandRegistration/Active/UeAgentActiveCommandComposition.h"
 #include "Module/CommandRegistration/QueryCalibration/UeAgentQueryCalibrationRegistration.h"
 #else
 #define UAI_T05_QUERY_CALIBRATION_AVAILABLE 0
@@ -23,6 +24,7 @@ namespace
 	using namespace UE::UAI::Contract;
 	using namespace UE::UAI::Discovery::Command;
 	using namespace UE::UAI::DomainAdapters::QueryCalibration;
+	using namespace UE::UAI::Module::CommandRegistration::Active;
 	using namespace UE::UAI::Module::CommandRegistration::QueryCalibration;
 
 	class FNeverCancelled final : public IUeAgentCancellationSignal
@@ -135,8 +137,8 @@ namespace
 			Diagnostic);
 	}
 
-	FUeAgentCommandResult Submit(
-		const FFixtureRegistration& Fixture,
+	FUeAgentCommandResult SubmitExact(
+		const TSharedRef<const FUeAgentExactCommandDispatch>& Dispatch,
 		const FString& CommandId,
 		const FString& ContractHash,
 		const FString& ParamsJson)
@@ -153,13 +155,26 @@ namespace
 				TEXT("test_request_decode_failed"),
 				TEXT("strict_v2 fixture could not decode its request"));
 		}
-		return Fixture.Dispatch->Submit(
+		return Dispatch->Submit(
 			Request.GetValue(),
 			FUeAgentCallerContext(
 				TEXT("strict-v2-t05"),
 				{TEXT("uai:query")},
 				TEXT("corr-t05")),
 			MakeShared<FNeverCancelled>());
+	}
+
+	FUeAgentCommandResult Submit(
+		const FFixtureRegistration& Fixture,
+		const FString& CommandId,
+		const FString& ContractHash,
+		const FString& ParamsJson)
+	{
+		return SubmitExact(
+			Fixture.Dispatch.ToSharedRef(),
+			CommandId,
+			ContractHash,
+			ParamsJson);
 	}
 }
 #endif
@@ -269,6 +284,13 @@ bool FUeAgentStrictV2T05DiscoveryPurposeTest::RunTest(
 		&& DetailResult.GetPayloadJson().Contains(TEXT("python_generic"))
 		&& DetailResult.GetPayloadJson().Contains(TEXT("python_exact"))
 		&& DetailResult.GetPayloadJson().Contains(TEXT("cli_exact")));
+	TestTrue(
+		TEXT("named invocation is projected from the generated namespace and fields"),
+		DetailResult.GetPayloadJson().Contains(
+			TEXT("client.query.calibration_read(")));
+	TestTrue(
+		TEXT("purpose declares the negative scope boundary"),
+		DetailResult.GetPayloadJson().Contains(TEXT("\"non_purpose\"")));
 	TestFalse(
 		TEXT("stale detail identity is rejected"),
 		Discovery->GetDetail(
@@ -278,6 +300,107 @@ bool FUeAgentStrictV2T05DiscoveryPurposeTest::RunTest(
 			Error));
 	TestEqual(TEXT("stale detail failure is typed"), Error.Code, FString(TEXT("command_contract_version_mismatch")));
 	return true;
+#endif
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(
+	FUeAgentStrictV2T05ActiveTutorialCompletenessTest,
+	"UAI.StrictV2.T05.QUERY.PUBLIC.CALIBRATION.ActiveTutorialCompleteness",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FUeAgentStrictV2T05ActiveTutorialCompletenessTest::RunTest(
+	const FString& Parameters)
+{
+#if !UAI_T05_QUERY_CALIBRATION_AVAILABLE
+	TestTrue(TEXT("T05 query calibration is implemented"), false);
+	return false;
+#else
+	TSharedPtr<const FUeAgentImmutableCommandRegistry> Registry;
+	TSharedPtr<const FUeAgentExactCommandDispatch> Dispatch;
+	FString Error;
+	if (!TestTrue(
+			TEXT("the process active command composition freezes"),
+			TryComposeProcessActiveCommandComposition(Registry, Dispatch, Error))
+		|| !Registry.IsValid()
+		|| !Dispatch.IsValid())
+	{
+		AddError(Error);
+		return false;
+	}
+	const FUeAgentFrozenCommandContract* DetailContract =
+		Registry->FindExact(TEXT("query.command.detail"));
+	if (!TestNotNull(
+			TEXT("the active registry exposes exact command detail"),
+			DetailContract))
+	{
+		return false;
+	}
+	for (const FUeAgentFrozenCommandContract& Contract
+		: Registry->GetContracts())
+	{
+		const FString Params = FString::Printf(
+			TEXT("{\"command_id\":\"%s\",\"contract_hash\":\"%s\"}"),
+			*Contract.GetCommandId(),
+			*Contract.GetContractHash());
+		const FUeAgentCommandResult Result = SubmitExact(
+			Dispatch.ToSharedRef(),
+			DetailContract->GetCommandId(),
+			DetailContract->GetContractHash(),
+			Params);
+		TSharedPtr<FJsonObject> Payload;
+		FString JsonError;
+		if (!Result.IsOk()
+			|| !UE::UAI::CommandContract::Json::TryParseObject(
+				Result.GetPayloadJson(), Payload, JsonError)
+			|| !Payload.IsValid())
+		{
+			AddError(TEXT("active command detail failed: ")
+				+ Contract.GetCommandId() + TEXT(":")
+				+ (Result.IsOk() ? JsonError : Result.GetErrorJson()));
+			return false;
+		}
+		const TSharedPtr<FJsonObject>* Purpose = nullptr;
+		const TSharedPtr<FJsonObject>* Invocation = nullptr;
+		FString NonPurpose;
+		FString PythonNamed;
+		FString PythonGeneric;
+		FString PythonExact;
+		FString CliExact;
+		const bool bComplete =
+			Payload->GetStringField(TEXT("command_id"))
+				== Contract.GetCommandId()
+			&& Payload->GetStringField(TEXT("contract_hash"))
+				== Contract.GetContractHash()
+			&& Payload->HasTypedField<EJson::Boolean>(TEXT("read_only"))
+			&& Payload->HasTypedField<EJson::Array>(TEXT("input_fields"))
+			&& Payload->HasTypedField<EJson::Array>(TEXT("result_fields"))
+			&& Payload->HasTypedField<EJson::Array>(TEXT("errors"))
+			&& Payload->HasTypedField<EJson::Array>(TEXT("tutorial_references"))
+			&& Payload->TryGetObjectField(TEXT("purpose"), Purpose)
+			&& Purpose && Purpose->IsValid()
+			&& (*Purpose)->TryGetStringField(TEXT("non_purpose"), NonPurpose)
+			&& !NonPurpose.IsEmpty()
+			&& Payload->TryGetObjectField(TEXT("invocation"), Invocation)
+			&& Invocation && Invocation->IsValid()
+			&& (*Invocation)->TryGetStringField(TEXT("python_named"), PythonNamed)
+			&& !PythonNamed.IsEmpty()
+			&& (*Invocation)->TryGetStringField(TEXT("python_generic"), PythonGeneric)
+			&& !PythonGeneric.IsEmpty()
+			&& (*Invocation)->TryGetStringField(TEXT("python_exact"), PythonExact)
+			&& !PythonExact.IsEmpty()
+			&& (*Invocation)->TryGetStringField(TEXT("cli_exact"), CliExact)
+			&& !CliExact.IsEmpty();
+		if (!bComplete)
+		{
+			AddError(TEXT("active command machine tutorial is incomplete: ")
+				+ Contract.GetCommandId());
+			return false;
+		}
+	}
+	TestTrue(
+		TEXT("every active command exposes one complete machine tutorial"),
+		!Registry->GetContracts().IsEmpty());
+	return !HasAnyErrors();
 #endif
 }
 

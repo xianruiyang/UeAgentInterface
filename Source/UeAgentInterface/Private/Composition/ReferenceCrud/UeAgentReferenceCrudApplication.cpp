@@ -455,6 +455,7 @@ namespace UE::UAI::Composition::ReferenceCrud
 					Targets.Emplace(
 						Change.GetIdentity(),
 						PackageName,
+						EPackageHeaderKind::EvidenceRequired,
 						Change.GetIntent()
 								== EChangeIntent::Delete
 							? EAssetDurableIntent::Delete

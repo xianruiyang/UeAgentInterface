@@ -2137,6 +2137,9 @@ namespace UE::UAI::Composition::SimpleAuthoring::Modeling
 				OutTargets.Emplace(
 					Changes[0].GetIdentity(),
 					MoveTemp(DurablePackageName),
+					IsPrimitiveProfile(*Profile)
+						? EPackageHeaderKind::Map
+						: EPackageHeaderKind::EvidenceRequired,
 					EAssetDurableIntent::Save,
 					ERollbackGrade::DurableBackup);
 				return OutTargets[0].IsValid();

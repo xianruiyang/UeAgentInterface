@@ -42,6 +42,7 @@ namespace
 	using namespace UE::UAI::OperationOwners::UObjectDataAsset;
 
 	const TArray<FString> ExpectedCommandIds = {
+		TEXT("content_graph.authoring_schema"),
 		TEXT("content_graph.compound"),
 		TEXT("content_graph.diagnostics"),
 		TEXT("content_graph.export_workspace"),
@@ -440,10 +441,14 @@ bool FUeAgentStrictV2T13InventoryAndLegacyExitTest::RunTest(
 	{
 		Actual.Add(Route.CommandId);
 		TestTrue(TEXT("every T13 route is valid"), Route.IsValid());
+		TestEqual(
+			TEXT("only authoring-schema requires explicit domain support"),
+			Route.bRequiresExplicitDomainSupport,
+			Route.CommandId == TEXT("content_graph.authoring_schema"));
 	}
 	Actual.Sort();
-	TestEqual(TEXT("T13 owns exactly the audited nine commands"), Actual, ExpectedCommandIds);
-	TestEqual(TEXT("T13 routes remain unique"), TSet<FString>(Actual).Num(), 9);
+	TestEqual(TEXT("T13 owns exactly the audited commands"), Actual, ExpectedCommandIds);
+	TestEqual(TEXT("T13 routes remain unique"), TSet<FString>(Actual).Num(), 10);
 
 	TSet<FString> LegacyReadExport;
 	for (const FUeAgentReadExportCommandRoute& Route

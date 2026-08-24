@@ -5,12 +5,15 @@
 #include "Components/SceneComponent.h"
 #include "Components/StaticMeshComponent.h"
 #include "Dom/JsonObject.h"
+#include "Engine/Engine.h"
 #include "Engine/StaticMesh.h"
 #include "Engine/World.h"
+#include "EngineUtils.h"
 #include "GameFramework/Actor.h"
 #include "HAL/FileManager.h"
 #include "MeshDescription.h"
 #include "Misc/PackageName.h"
+#include "PackageTools.h"
 #include "Serialization/JsonReader.h"
 #include "Serialization/JsonSerializer.h"
 #include "StaticMeshAttributes.h"
@@ -273,6 +276,170 @@ namespace
 		UStaticMeshComponent* AnchorMeshComponent = nullptr;
 		UStaticMesh* Mesh = nullptr;
 		TMap<FString, UObject*> Objects;
+	};
+
+	class FOwnedPersistentTransformWorld final
+	{
+	public:
+		FOwnedPersistentTransformWorld()
+		{
+			const FString Suffix =
+				FGuid::NewGuid().ToString(EGuidFormats::Digits);
+			PackageName = FString(TEXT("/Game/UAI/Tests/WorldSpatial/"))
+				+ TEXT("W_TransformUpdate_") + Suffix;
+			HeaderPath = FPackageName::LongPackageNameToFilename(
+				PackageName,
+				FPackageName::GetMapPackageExtension());
+			Package = CreatePackage(*PackageName);
+			World = Package
+				? UWorld::CreateWorld(
+					EWorldType::EditorPreview,
+					false,
+					FName(*FPackageName::GetLongPackageAssetName(PackageName)),
+					Package)
+				: nullptr;
+			if (!World || !World->PersistentLevel || !GEngine)
+			{
+				return;
+			}
+			World->SetFlags(RF_Public | RF_Standalone | RF_Transactional);
+			World->PersistentLevel->SetUseExternalActors(false);
+			World->SetCurrentLevel(World->PersistentLevel);
+			FWorldContext& WorldContext = GEngine->CreateNewWorldContext(
+				EWorldType::EditorPreview);
+			WorldContext.SetCurrentWorld(World);
+			bHasWorldContext = true;
+
+			Subject = World->SpawnActor<AActor>();
+			if (!Subject)
+			{
+				return;
+			}
+			Subject->Rename(TEXT("WorldSpatialPersistentTransformSubject"));
+			Root = NewObject<USceneComponent>(
+				Subject,
+				TEXT("WorldSpatialPersistentTransformRoot"),
+				RF_Transactional);
+			if (!Root)
+			{
+				return;
+			}
+			Subject->SetRootComponent(Root);
+			Subject->AddInstanceComponent(Root);
+			Root->RegisterComponentWithWorld(World);
+			Subject->SetActorTransform(FTransform::Identity);
+			Package->SetDirtyFlag(false);
+		}
+
+		~FOwnedPersistentTransformWorld()
+		{
+			ReleaseLoadedWorld();
+			for (const FString& Path : {
+				HeaderPath,
+				FPaths::ChangeExtension(HeaderPath, TEXT("uexp")),
+				FPaths::ChangeExtension(HeaderPath, TEXT("ubulk")),
+				FPaths::ChangeExtension(HeaderPath, TEXT("upayload"))})
+			{
+				IFileManager::Get().Delete(*Path, false, true, true);
+			}
+		}
+
+		bool IsValid() const
+		{
+			return Package
+				&& World
+				&& World->PersistentLevel
+				&& Subject
+				&& Root
+				&& bHasWorldContext;
+		}
+
+		bool TryReload(FString& OutError)
+		{
+			OutError.Reset();
+			if (!IsValid())
+			{
+				OutError = TEXT("world_spatial_transform_reload_source_invalid");
+				return false;
+			}
+			const FName SubjectName = Subject->GetFName();
+			const TWeakObjectPtr<UWorld> OriginalWorld(World);
+			ReleaseLoadedWorld();
+			if (OriginalWorld.IsValid())
+			{
+				OutError = TEXT("world_spatial_transform_reload_source_still_live");
+				return false;
+			}
+
+			Package = LoadPackage(nullptr, *PackageName, LOAD_None);
+			World = Package ? UWorld::FindWorldInPackage(Package) : nullptr;
+			if (!World || !World->PersistentLevel || !GEngine)
+			{
+				OutError = TEXT("world_spatial_transform_reload_failed:")
+					+ PackageName;
+				return false;
+			}
+			World->SetCurrentLevel(World->PersistentLevel);
+			FWorldContext& WorldContext = GEngine->CreateNewWorldContext(
+				EWorldType::EditorPreview);
+			WorldContext.SetCurrentWorld(World);
+			bHasWorldContext = true;
+			for (TActorIterator<AActor> It(World); It; ++It)
+			{
+				if (It->GetFName() == SubjectName)
+				{
+					Subject = *It;
+					Root = Subject->GetRootComponent();
+					return true;
+				}
+			}
+			OutError = TEXT("world_spatial_transform_reloaded_actor_missing:")
+				+ SubjectName.ToString();
+			return false;
+		}
+
+		FString PackageName;
+		FString HeaderPath;
+		UPackage* Package = nullptr;
+		UWorld* World = nullptr;
+		AActor* Subject = nullptr;
+		USceneComponent* Root = nullptr;
+
+	private:
+		void ReleaseLoadedWorld()
+		{
+			UPackage* const PackageToUnload = Package;
+			UWorld* const WorldToDestroy = World;
+			Subject = nullptr;
+			Root = nullptr;
+			if (bHasWorldContext && GEngine && WorldToDestroy)
+			{
+				GEngine->DestroyWorldContext(WorldToDestroy);
+				bHasWorldContext = false;
+			}
+			if (PackageToUnload)
+			{
+				PackageToUnload->SetDirtyFlag(false);
+			}
+			if (WorldToDestroy)
+			{
+				WorldToDestroy->DestroyWorld(false);
+				WorldToDestroy->MarkAsGarbage();
+			}
+			World = nullptr;
+			Package = nullptr;
+			if (PackageToUnload)
+			{
+				FText UnloadError;
+				UPackageTools::UnloadPackages(
+					{PackageToUnload},
+					UnloadError,
+					true);
+			}
+			CollectGarbage(RF_NoFlags, true);
+		}
+
+		bool bHasWorldContext = false;
 	};
 
 	TSharedPtr<FJsonObject> MakeAlignmentTypedInputs(
@@ -589,6 +756,133 @@ bool FUeAgentWorldSpatialObjectTransformOwnedEditorWorldTest::RunTest(
 						0.1));
 			}
 		});
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(
+	FUeAgentWorldSpatialObjectTransformUpdateOwnedActorTest,
+	"UeAgentInterface.DomainAdapters.WorldSpatial.E2.Native."
+		"ObjectTransformUpdateOwnedActor",
+	EAutomationTestFlags::EditorContext
+		| EAutomationTestFlags::EngineFilter)
+
+bool FUeAgentWorldSpatialObjectTransformUpdateOwnedActorTest::RunTest(
+	const FString& Parameters)
+{
+	using namespace UE::UAI::Tests::WorldSpatial;
+	(void)Parameters;
+	if (!RequireNativeExecution(
+			*this, TEXT("object_transform_update_owned_actor")))
+	{
+		return false;
+	}
+	FOwnedWorldMeshFixture Fixture;
+	if (!TestTrue(TEXT("owned transform-update actor is valid"), Fixture.IsValid()))
+	{
+		return false;
+	}
+	const FOwnedScenarioContext Context{
+		Fixture.World->GetPathName(),
+		FString(),
+		FString(),
+	};
+	return RunOwnedScenarioThroughC0C3(
+		*this,
+		TEXT("object_transform_update_owned_actor"),
+		MakeShareable(&Fixture, [](FOwnedWorldMeshFixture*) {}),
+		Context,
+		{},
+		[&Fixture](FAutomationTestBase& Test, const FString& CapabilityId)
+		{
+			if (CapabilityId == TEXT("world.object_transform.update"))
+			{
+				Test.TestTrue(
+					TEXT("typed update writes and independently reads all actor transform components"),
+					Fixture.Subject->GetActorTransform().Equals(FTransform(
+						FQuat::Identity,
+						FVector(100.0, 200.0, 300.0),
+						FVector::OneVector),
+						0.001));
+			}
+		});
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(
+	FUeAgentWorldSpatialObjectTransformUpdatePersistenceTest,
+	"UeAgentInterface.DomainAdapters.WorldSpatial.E2.Production.ObjectMesh."
+		"ObjectTransformUpdatePersistence",
+	EAutomationTestFlags::EditorContext
+		| EAutomationTestFlags::EngineFilter)
+
+bool FUeAgentWorldSpatialObjectTransformUpdatePersistenceTest::RunTest(
+	const FString& Parameters)
+{
+	using namespace UE::UAI::Tests::WorldSpatial;
+	(void)Parameters;
+	FOwnedPersistentTransformWorld Fixture;
+	if (!TestTrue(TEXT("persistent transform world is valid"), Fixture.IsValid()))
+	{
+		return false;
+	}
+	TSharedPtr<UE::UAI::DomainAdapters::WorldSpatial::
+		FUeAgentWorldSpatialProductionRuntime> Runtime;
+	if (!TryCreateProductionRuntimeForTest(*this, *Fixture.World, Runtime)
+		|| !Runtime.IsValid())
+	{
+		return false;
+	}
+	FProductionScenarioBindings Bindings;
+	Bindings.ExplicitRefs = {
+		{TEXT("actor:subject"), Fixture.Subject->GetPathName()},
+	};
+	const FOwnedScenarioContext Context{
+		Fixture.World->GetPathName(), FString(), FString(), {}};
+	const bool bExecuted = RunProductionScenarioThroughC0C3(
+		*this,
+		TEXT("object_transform_update_owned_actor"),
+		Runtime.ToSharedRef(),
+		Context,
+		{},
+		[&](FAutomationTestBase& Test, const FString& CapabilityId,
+			const TSharedPtr<FJsonObject>& RawInput)
+		{
+			return PrepareProductionCapabilityInput(
+				Test, CapabilityId, RawInput, *Runtime, Bindings);
+		},
+		[&Fixture](FAutomationTestBase& Test, const FString& CapabilityId)
+		{
+			if (CapabilityId == TEXT("world.object_transform.update"))
+			{
+				Test.TestTrue(
+					TEXT("production update saves the owned map header"),
+					IFileManager::Get().FileExists(*Fixture.HeaderPath));
+				Test.TestFalse(
+					TEXT("production update leaves the owned map clean"),
+					Fixture.Package->IsDirty());
+			}
+		});
+	Runtime.Reset();
+	if (!bExecuted)
+	{
+		return false;
+	}
+	FString ReloadError;
+	if (!TestTrue(
+			TEXT("saved transform world reloads from disk"),
+			Fixture.TryReload(ReloadError)))
+	{
+		AddError(ReloadError);
+		return false;
+	}
+	TestTrue(
+		TEXT("reloaded Actor preserves all persisted transform components"),
+		Fixture.Subject
+			&& Fixture.Subject->GetActorTransform().Equals(
+				FTransform(
+					FQuat::Identity,
+					FVector(100.0, 200.0, 300.0),
+					FVector::OneVector),
+				0.001));
+	return !HasAnyErrors();
 }
 
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(

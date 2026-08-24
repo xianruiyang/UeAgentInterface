@@ -15,8 +15,6 @@ namespace UE::UAI::OperationOwners::AssetSimple
 
 	namespace
 	{
-		constexpr int32 ExpectedRouteCount = 52;
-
 		FString ErrorJson(
 			const FString& Code,
 			const FString& SubjectId,
@@ -47,12 +45,38 @@ namespace UE::UAI::OperationOwners::AssetSimple
 				: GetSimpleAuthoringCommandRoutes())
 			{
 				if (DomainAdapters::AssetSimple::
+					IsAssetSimpleLifecycleCommand(Route.CommandId))
+				{
+					Result.Add(Route);
+				}
+			}
+			if (Result.Num() != DomainAdapters::AssetSimple::
+				GetAssetSimpleLifecycleCommandIds().Num())
+			{
+				Result.Reset();
+			}
+			return Result;
+		}();
+		return Routes;
+	}
+
+	const TArray<FUeAgentSimpleAuthoringCommandRoute>&
+	GetAssetSimplePublicOperationRoutes()
+	{
+		static const TArray<FUeAgentSimpleAuthoringCommandRoute> Routes = []
+		{
+			TArray<FUeAgentSimpleAuthoringCommandRoute> Result;
+			for (const FUeAgentSimpleAuthoringCommandRoute& Route
+				: GetAssetSimpleOperationRoutes())
+			{
+				if (DomainAdapters::AssetSimple::
 					IsAssetSimpleMechanicsCommand(Route.CommandId))
 				{
 					Result.Add(Route);
 				}
 			}
-			if (Result.Num() != ExpectedRouteCount)
+			if (Result.Num() != DomainAdapters::AssetSimple::
+				GetAssetSimpleMechanicsCommandIds().Num())
 			{
 				Result.Reset();
 			}

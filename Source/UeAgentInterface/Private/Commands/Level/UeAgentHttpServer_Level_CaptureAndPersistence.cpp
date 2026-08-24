@@ -104,6 +104,7 @@ bool FUeAgentLegacyMechanics::TrySaveCurrentLevelWithGuard(const FUeAgentRequest
 	PackageHeaderErrorCode.Reset();
 	if (!UE::UAI::AssetDurable::TryResolvePackageHeaderFilename(
 			Pkg->GetName(),
+			UE::UAI::AssetDurable::EPackageHeaderKind::EvidenceRequired,
 			ObservedHeaderFilename,
 			PackageHeaderErrorCode)
 		|| !ObservedHeaderFilename.Equals(
@@ -270,6 +271,16 @@ UWorld* FUeAgentLegacyMechanics::GetEditorWorld(FString& OutError)
 
 AActor* FUeAgentLegacyMechanics::FindActorByNameOrLabel(UWorld* World, const FString& NameOrLabel)
 {
+	FString Identity = NameOrLabel;
+	Identity.RemoveFromStart(TEXT("actor:"));
+	for (TActorIterator<AActor> It(World); It; ++It)
+	{
+		AActor* Actor = *It;
+		if (Actor && Actor->GetPathName() == Identity)
+		{
+			return Actor;
+		}
+	}
 	for (TActorIterator<AActor> It(World); It; ++It)
 	{
 		AActor* A = *It;
@@ -277,7 +288,7 @@ AActor* FUeAgentLegacyMechanics::FindActorByNameOrLabel(UWorld* World, const FSt
 		{
 			continue;
 		}
-		if (A->GetName() == NameOrLabel || A->GetActorLabel() == NameOrLabel)
+		if (A->GetName() == Identity || A->GetActorLabel() == Identity)
 		{
 			return A;
 		}
@@ -309,6 +320,49 @@ bool FUeAgentLegacyMechanics::TakeActiveViewportScreenshotWithOptions(int32 Warm
 	const bool bRealtimeBefore = LVC->IsRealtime();
 	const FText ScreenshotRealtimeOverrideSystem = NSLOCTEXT("UeAgentInterface", "ScreenshotRealtimeOverrideSystem", "UeAgentInterfaceScreenshot");
 	const bool bNeedTemporaryRealtime = !LVC->IsRealtime();
+	const bool bHadRealtimeOverride =
+		LVC->HasRealtimeOverride(ScreenshotRealtimeOverrideSystem);
+	struct FScopedRealtimeStateRestore final
+	{
+		FLevelEditorViewportClient* Client = nullptr;
+		FText System;
+		bool bActive = false;
+		bool bHadOverride = false;
+		bool bRealtimeBefore = false;
+		bool bRestored = false;
+
+		~FScopedRealtimeStateRestore()
+		{
+			RestoreNow();
+		}
+
+		void RestoreNow()
+		{
+			if (!Client || bRestored)
+			{
+				return;
+			}
+			if (bActive)
+			{
+				if (Client->HasRealtimeOverride(System))
+				{
+					Client->RemoveRealtimeOverride(System, false);
+				}
+				if (bHadOverride)
+				{
+					Client->AddRealtimeOverride(bRealtimeBefore, System);
+				}
+			}
+			bRestored = true;
+		}
+	};
+	FScopedRealtimeStateRestore RealtimeRestore{
+		LVC,
+		ScreenshotRealtimeOverrideSystem,
+		bNeedTemporaryRealtime,
+		bHadRealtimeOverride,
+		bRealtimeBefore,
+		false};
 	if (bNeedTemporaryRealtime)
 	{
 		if (LVC->HasRealtimeOverride(ScreenshotRealtimeOverrideSystem))
@@ -354,10 +408,7 @@ bool FUeAgentLegacyMechanics::TakeActiveViewportScreenshotWithOptions(int32 Warm
 	FlushRenderingCommands();
 	DrawsPerformed++;
 
-	if (bNeedTemporaryRealtime && LVC->HasRealtimeOverride(ScreenshotRealtimeOverrideSystem))
-	{
-		LVC->RemoveRealtimeOverride(ScreenshotRealtimeOverrideSystem, false);
-	}
+	RealtimeRestore.RestoreNow();
 
 	const FIntPoint Size = Viewport->GetSizeXY();
 	if (Size.X <= 0 || Size.Y <= 0)
@@ -390,6 +441,11 @@ bool FUeAgentLegacyMechanics::TakeActiveViewportScreenshotWithOptions(int32 Warm
 	OutCaptureInfo->SetNumberField(TEXT("editor_world_tick_delta_seconds"), EditorWorldTickDeltaSeconds);
 	OutCaptureInfo->SetBoolField(TEXT("temporary_realtime_override"), bNeedTemporaryRealtime);
 	OutCaptureInfo->SetBoolField(TEXT("realtime_before_capture"), bRealtimeBefore);
+	OutCaptureInfo->SetBoolField(
+		TEXT("realtime_after_capture"), LVC->IsRealtime());
+	OutCaptureInfo->SetBoolField(
+		TEXT("realtime_state_restored"),
+		LVC->IsRealtime() == bRealtimeBefore);
 	OutCaptureInfo->SetObjectField(TEXT("viewport"), UeAgentLevelOps::MakeViewportClientJson(LVC, SelectionReason));
 	return true;
 }
@@ -623,7 +679,18 @@ bool FUeAgentLegacyMechanics::WriteFrameSequenceSheetImage(const TArray<TArray<F
 		return false;
 	}
 
-	OutFilePath = MakeShotPath(Format);
+	if (!Params.IsValid()
+		|| !Params->TryGetStringField(
+			TEXT("frame_sheet_output_file"), OutFilePath)
+		|| OutFilePath.TrimStartAndEnd().IsEmpty())
+	{
+		OutFilePath = MakeShotPath(Format);
+	}
+	else
+	{
+		OutFilePath = UeAgentJsonDiagnostics::ResolveProjectRelativeFilePath(
+			OutFilePath);
+	}
 	if (!WriteCompressedImage(OutputPixels, OutputSize, Format, Quality, OutFilePath, OutError))
 	{
 		return false;

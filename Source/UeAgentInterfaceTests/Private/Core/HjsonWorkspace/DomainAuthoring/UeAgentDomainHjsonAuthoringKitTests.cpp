@@ -1,8 +1,12 @@
 #include "Misc/AutomationTest.h"
 
+#include "Containers/StringConv.h"
+#include "Core/ArtifactPublisher/UeAgentArtifactPublisher.h"
 #include "Core/HjsonWorkspace/DomainAuthoring/UeAgentDomainHjsonAuthoringKit.h"
 #include "Engine/Texture2D.h"
+#include "HAL/FileManager.h"
 #include "Misc/Guid.h"
+#include "Misc/Paths.h"
 #include "UObject/Package.h"
 #include "UObject/UObjectGlobals.h"
 
@@ -15,6 +19,36 @@ namespace UE::UAI::Tests::DomainHjsonAuthoring
 		TEXT("fixture-domain"),
 		TEXT("uai.fixture.edit/1"),
 		TEXT("/Script/CoreUObject.Object"));
+
+	UE::UAI::ContextResource::FUeAgentResourceTracker MakeExportResources()
+	{
+		using namespace ContextResource;
+		return FUeAgentResourceTracker(FUeAgentResourceBudget({
+			{EUeAgentResourceDimension::InputBytes, 1024 * 1024},
+			{EUeAgentResourceDimension::OutputBytes, 1024 * 1024},
+			{EUeAgentResourceDimension::StringBytes, 1024 * 1024},
+			{EUeAgentResourceDimension::Nodes, 4096},
+			{EUeAgentResourceDimension::Items, 4096},
+			{EUeAgentResourceDimension::Files, 32},
+			{EUeAgentResourceDimension::ReferenceEdges, 4096},
+			{EUeAgentResourceDimension::WorkUnits, 16384},
+			{EUeAgentResourceDimension::EstimatedMemoryBytes, 16 * 1024 * 1024},
+		}));
+	}
+
+	TSharedRef<FJsonObject> ExportDocument(
+		const FString& Schema = TEXT("uai.fixture.edit/1"),
+		const FString& RootType = TEXT("/Script/CoreUObject.Object"))
+	{
+		const TSharedRef<FJsonObject> Root = MakeShared<FJsonObject>();
+		Root->SetStringField(TEXT("type"), RootType);
+		Root->SetArrayField(
+			TEXT("properties"), TArray<TSharedPtr<FJsonValue>>{});
+		const TSharedRef<FJsonObject> Document = MakeShared<FJsonObject>();
+		Document->SetStringField(TEXT("schema"), Schema);
+		Document->SetObjectField(TEXT("root"), Root);
+		return Document;
+	}
 
 	FString Params(
 		const FString& Target = TEXT("/Game/UAI/Fixture"),
@@ -41,6 +75,191 @@ namespace UE::UAI::Tests::DomainHjsonAuthoring
 			*Target, *Carrier, *Carrier, *TargetIdentity, *BaseRevision,
 			*Entry, *Entry, *Schema, *RootType, *ExtraDocument);
 	}
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(
+	FUeAgentDomainHjsonDirectoryExportPlanTest,
+	"UAI.Root.T62.DomainAuthoring.DirectoryExportPlan",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FUeAgentDomainHjsonDirectoryExportPlanTest::RunTest(
+	const FString& Parameters)
+{
+	using namespace UE::UAI::HjsonWorkspace;
+	using namespace UE::UAI::HjsonWorkspace::DomainAuthoring;
+	using namespace UE::UAI::Tests::DomainHjsonAuthoring;
+	(void)Parameters;
+	UE::UAI::ContextResource::FUeAgentResourceTracker Resources =
+		MakeExportResources();
+	FExportWorkspacePlanPtr Plan;
+	FWorkspaceError Error;
+	TestTrue(TEXT("a domain-owned directory export plan builds"),
+		TryBuildDomainHjsonDirectoryExportPlan(
+			TEXT("/Game/UAI/Fixture.Fixture"),
+			FixtureContract,
+			TEXT("rev-1"),
+			TEXT("fixture-profile"),
+			TEXT("fixture-provider"),
+			TEXT("root.hjson"),
+			ExportDocument(),
+			Resources,
+			Plan,
+			Error));
+	if (!Plan.IsValid())
+	{
+		return false;
+	}
+	TestEqual(TEXT("the plan is a directory workspace"),
+		Plan->GetWorkspaceKind(), EWorkspaceKind::Directory);
+	TestEqual(TEXT("the entry identity is exact"),
+		Plan->GetEntryFile(), FString(TEXT("root.hjson")));
+	TestEqual(TEXT("manifest plus one entry are planned"),
+		Plan->GetFiles().Num(), 2);
+	const FExportFilePlan* Manifest = Plan->GetFiles().FindByPredicate(
+		[](const FExportFilePlan& File)
+		{
+			return File.GetRelativePath() == TEXT(".uai/workspace.hjson");
+		});
+	const FExportFilePlan* Entry = Plan->GetFiles().FindByPredicate(
+		[](const FExportFilePlan& File)
+		{
+			return File.GetRelativePath() == TEXT("root.hjson");
+		});
+	TestNotNull(TEXT("the workspace manifest is planned"), Manifest);
+	TestNotNull(TEXT("the unique entry document is planned"), Entry);
+	if (Manifest)
+	{
+		const FUTF8ToTCHAR Text(
+			reinterpret_cast<const ANSICHAR*>(Manifest->GetCanonicalUtf8().GetData()),
+			Manifest->GetCanonicalUtf8().Num());
+		const FString ManifestText(Text.Length(), Text.Get());
+		TestTrue(TEXT("the manifest schema is exact"),
+			ManifestText.Contains(TEXT("uai.content_graph.workspace/1")));
+		TestTrue(TEXT("the manifest target is exact"),
+			ManifestText.Contains(TEXT("/Game/UAI/Fixture.Fixture")));
+		TestTrue(TEXT("the manifest base revision is exact"),
+			ManifestText.Contains(TEXT("\"base_revision\":\"rev-1\"")));
+		TestTrue(TEXT("the manifest entry is exact"),
+			ManifestText.Contains(TEXT("\"entry_file\":\"root.hjson\"")));
+		TestTrue(TEXT("the manifest declares an empty reference set"),
+			ManifestText.Contains(TEXT("\"references\":[]")));
+	}
+	if (Entry)
+	{
+		const FUTF8ToTCHAR Text(
+			reinterpret_cast<const ANSICHAR*>(Entry->GetCanonicalUtf8().GetData()),
+			Entry->GetCanonicalUtf8().Num());
+		const FString EntryText(Text.Length(), Text.Get());
+		TestTrue(TEXT("the entry schema is exact"),
+			EntryText.Contains(TEXT("uai.fixture.edit/1")));
+		TestTrue(TEXT("the entry root type is exact"),
+			EntryText.Contains(TEXT("/Script/CoreUObject.Object")));
+	}
+	TestTrue(TEXT("the plan fingerprint is SHA-256"),
+		Plan->GetPlanFingerprint().StartsWith(TEXT("sha256:")));
+	return !HasAnyErrors();
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(
+	FUeAgentDomainHjsonDirectoryExportFailureTest,
+	"UAI.Root.T62.DomainAuthoring.DirectoryExportFailures",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FUeAgentDomainHjsonDirectoryExportFailureTest::RunTest(
+	const FString& Parameters)
+{
+	using namespace UE::UAI::HjsonWorkspace;
+	using namespace UE::UAI::HjsonWorkspace::DomainAuthoring;
+	using namespace UE::UAI::Tests::DomainHjsonAuthoring;
+	(void)Parameters;
+	auto Rejects = [this](
+		const TSharedPtr<FJsonObject>& Document,
+		const FString& Entry,
+		const FString& ExpectedCode)
+	{
+		UE::UAI::ContextResource::FUeAgentResourceTracker Resources =
+			MakeExportResources();
+		FExportWorkspacePlanPtr Plan;
+		FWorkspaceError Error;
+		TestFalse(*ExpectedCode,
+			TryBuildDomainHjsonDirectoryExportPlan(
+				TEXT("/Game/UAI/Fixture.Fixture"),
+				FixtureContract,
+				TEXT("rev-1"),
+				TEXT("fixture-profile"),
+				TEXT("fixture-provider"),
+				Entry,
+				Document,
+				Resources,
+				Plan,
+				Error));
+		TestEqual(TEXT("the rejection is typed"),
+			Error.GetCode(), ExpectedCode);
+	};
+	Rejects(ExportDocument(TEXT("uai.other/1")), TEXT("root.hjson"),
+		TEXT("domain_hjson_export_schema_mismatch"));
+	Rejects(ExportDocument(TEXT("uai.fixture.edit/1"), TEXT("/Script/Engine.Actor")),
+		TEXT("root.hjson"), TEXT("domain_hjson_export_root_type_mismatch"));
+	Rejects(ExportDocument(), TEXT("../root.hjson"),
+		TEXT("domain_hjson_export_entry_invalid"));
+	return !HasAnyErrors();
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(
+	FUeAgentDomainHjsonDirectoryExportStagingVerifyTest,
+	"UAI.Root.T62.DomainAuthoring.DirectoryExportStagingVerify",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FUeAgentDomainHjsonDirectoryExportStagingVerifyTest::RunTest(
+	const FString& Parameters)
+{
+	using namespace UE::UAI::ArtifactPublisher;
+	using namespace UE::UAI::HjsonWorkspace;
+	using namespace UE::UAI::HjsonWorkspace::DomainAuthoring;
+	using namespace UE::UAI::Tests::DomainHjsonAuthoring;
+	(void)Parameters;
+	const FString Output = FPaths::Combine(
+		FPaths::ProjectSavedDir(),
+		TEXT("UAI/Tests/T62DomainExport_"),
+		FGuid::NewGuid().ToString(EGuidFormats::Digits));
+	IFileManager::Get().DeleteDirectory(*Output, false, true);
+	UE::UAI::ContextResource::FUeAgentResourceTracker BuildResources =
+		MakeExportResources();
+	FExportWorkspacePlanPtr Plan;
+	FWorkspaceError Error;
+	if (!TestTrue(TEXT("the publish fixture plan builds"),
+		TryBuildDomainHjsonDirectoryExportPlan(
+			TEXT("/Game/UAI/Fixture.Fixture"), FixtureContract,
+			TEXT("rev-1"), TEXT("fixture-profile"),
+			TEXT("fixture-provider"), TEXT("root.hjson"),
+			ExportDocument(), BuildResources, Plan, Error))
+		|| !Plan.IsValid())
+	{
+		return false;
+	}
+	UE::UAI::ContextResource::FUeAgentResourceTracker PublishResources =
+		MakeExportResources();
+	FArtifactPublishReceipt Receipt;
+	FArtifactPublishError PublishError;
+	const FArtifactPublishRequest Request(
+		Plan.ToSharedRef(), Output, TEXT("fixture-domain-export"));
+	TestTrue(TEXT("ArtifactPublisher publishes the owned workspace"),
+		TryPublishExportPlan(
+			Request, PublishResources, Receipt, PublishError));
+	UE::UAI::ContextResource::FUeAgentResourceTracker VerifyResources =
+		MakeExportResources();
+	TestTrue(TEXT("active import parser verifies the staged workspace"),
+		TryVerifyDomainHjsonStagedWorkspace(
+			Output,
+			TEXT("/Game/UAI/Fixture.Fixture"),
+			FixtureContract,
+			TEXT("rev-1"),
+			TEXT("root.hjson"),
+			VerifyResources,
+			Error));
+	TestTrue(TEXT("the owned workspace cleanup succeeds"),
+		IFileManager::Get().DeleteDirectory(*Output, false, true));
+	return !HasAnyErrors();
 }
 
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(

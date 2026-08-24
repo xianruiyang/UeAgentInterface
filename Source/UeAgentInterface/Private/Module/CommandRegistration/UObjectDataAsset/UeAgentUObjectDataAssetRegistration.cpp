@@ -2,6 +2,7 @@
 
 #include "CommandHandlers/UObjectDataAsset/UeAgentUObjectDataAssetCommandHandlers.h"
 #include "Core/DomainCapability/UeAgentDomainCapability.h"
+#include "Core/HjsonWorkspace/SourceLoader/UeAgentHjsonSourceLoader.h"
 
 namespace UE::UAI::Module::CommandRegistration::UObjectDataAsset
 {
@@ -21,9 +22,17 @@ namespace UE::UAI::Module::CommandRegistration::UObjectDataAsset
 			const TCHAR* Name,
 			const TCHAR* WireType,
 			const bool bRequired,
-			const TCHAR* Description)
+			const TCHAR* Description,
+			FString SchemaJson = FString())
 		{
-			return {Name, WireType, bRequired, false, Description};
+			return {
+				Name,
+				WireType,
+				bRequired,
+				false,
+				Description,
+				MoveTemp(SchemaJson),
+			};
 		}
 
 		FUeAgentCommandErrorDeclaration Error(
@@ -36,6 +45,8 @@ namespace UE::UAI::Module::CommandRegistration::UObjectDataAsset
 		FUeAgentCommandDeclaration Declaration(
 			const FUeAgentUObjectDataAssetCommandRoute& Route)
 		{
+			const bool bAuthoringSchema =
+				Route.CommandId == TEXT("content_graph.authoring_schema");
 			FUeAgentCommandDeclaration Result;
 			Result.CommandId = Route.CommandId;
 			Result.PythonNamespace = TEXT("uobject_dataasset");
@@ -61,7 +72,8 @@ namespace UE::UAI::Module::CommandRegistration::UObjectDataAsset
 			{
 				Result.InputFields.Append({
 					Field(TEXT("source"), TEXT("object"), true,
-						TEXT("Exact discriminated source: {kind:inline,document} or {kind:single_file|directory,path}.")),
+						TEXT("Exact discriminated source: {kind:inline,document} or {kind:single_file|directory,path}."),
+						HjsonWorkspace::GetContentGraphImportSourceSchemaJson()),
 					Field(TEXT("expected_revision"), TEXT("string"), true,
 						TEXT("Expected persisted target revision: recursive UObject/DataAsset creation uses absent, registered domain HJSON creation uses missing, and updates use the exact current content_graph revision.")),
 					Field(TEXT("authorization_id"), TEXT("string"), true,
@@ -79,7 +91,7 @@ namespace UE::UAI::Module::CommandRegistration::UObjectDataAsset
 						TEXT("Optional export profile identity.")),
 				});
 			}
-			else
+			else if (!bAuthoringSchema)
 			{
 				Result.InputFields.Append({
 					Field(TEXT("input"), TEXT("object"), false,
@@ -110,6 +122,8 @@ namespace UE::UAI::Module::CommandRegistration::UObjectDataAsset
 						TEXT("Published only after semantic verification.")),
 					Field(TEXT("semantic_verification"), TEXT("object"), true,
 						TEXT("Independent staged-workspace semantic verification.")),
+					Field(TEXT("scope"), TEXT("object"), false,
+						TEXT("Domain-owned coverage boundary; inspect it before treating the export as a whole-asset projection.")),
 				});
 			}
 			else
@@ -118,7 +132,9 @@ namespace UE::UAI::Module::CommandRegistration::UObjectDataAsset
 					Field(TEXT("read_only"), TEXT("boolean"), true,
 						TEXT("Always true for content graph queries.")),
 					Field(TEXT("query_result"), TEXT("object"), true,
-						TEXT("Readback from the real persisted UObject/DataAsset graph.")),
+						bAuthoringSchema
+							? TEXT("Domain-owned field contract, current values, and directly reusable minimal HJSON template.")
+							: TEXT("Readback from the real persisted UObject/DataAsset graph.")),
 				});
 			}
 			Result.Errors = {
@@ -128,6 +144,8 @@ namespace UE::UAI::Module::CommandRegistration::UObjectDataAsset
 					TEXT("The public ingress did not enter the UE game thread.")),
 				Error(TEXT("content_graph_read_target_unresolved"),
 					TEXT("The exact persisted target could not be resolved.")),
+				Error(TEXT("hjson_domain_command_capability_unavailable"),
+					TEXT("The target domain does not explicitly support this optional content-graph command.")),
 				Error(TEXT("resource_budget_exceeded"),
 					TEXT("The validated recursive plan exceeds a declared resource bound.")),
 				Error(TEXT("uobject_dataasset_type_unknown"),
@@ -139,22 +157,34 @@ namespace UE::UAI::Module::CommandRegistration::UObjectDataAsset
 				Error(TEXT("workspace_path_invalid"),
 					TEXT("A source path is relative, escapes the workspace root, or is otherwise invalid.")),
 			};
-			Result.Purpose.Summary = Route.Kind ==
+			Result.Purpose.Summary = bAuthoringSchema
+				? TEXT("Discover the domain-owned minimal HJSON authoring contract for one exact persisted target.")
+				: Route.Kind ==
 					EUeAgentUObjectDataAssetRouteKind::Import
 				? TEXT("Create or update one recursive or registered domain asset through unified HJSON initialization.")
 				: Route.Kind == EUeAgentUObjectDataAssetRouteKind::Export
-					? TEXT("Publish a semantically verified HJSON workspace for a recursive UObject/DataAsset graph.")
+					? TEXT("Publish a semantically verified HJSON workspace for one supported content-graph target.")
 					: TEXT("Read one exact facet of a persisted recursive UObject/DataAsset graph.");
-			Result.Purpose.Target =
-				TEXT("One exact supported content graph package.object identity.");
+			Result.Purpose.Target = bAuthoringSchema
+				? TEXT("One existing Level Sequence package.object identity whose Sequence domain provider owns the HJSON field contract.")
+				: TEXT("One exact supported content graph package.object identity.");
 			Result.Purpose.Preconditions = {
 				TEXT("Use the public exact command identity and contract hash unchanged."),
 				TEXT("The Editor service dispatches the request on the UE game thread."),
 			};
-			Result.Purpose.ParameterGuidance =
-				TEXT("Preserve exact type, target, field and candidate identities; do not alias them in the SDK or caller.");
-			Result.Purpose.ResultGuidance =
-				TEXT("Treat persistence, independent readback and semantic verification fields as part of the result contract.");
+			if (bAuthoringSchema)
+			{
+				Result.Purpose.Preconditions.Add(
+					TEXT("The resolved domain provider must explicitly declare authoring-schema support; unsupported target domains fail closed."));
+			}
+			Result.Purpose.ParameterGuidance = bAuthoringSchema
+				? TEXT("Pass only the exact target identity; the active domain provider owns field identifiers, intent support, and the template.")
+				: TEXT("Preserve exact type, target, field and candidate identities; do not alias them in the SDK or caller.");
+			Result.Purpose.ResultGuidance = bAuthoringSchema
+				? TEXT("Reuse query_result.template, current field values, and revision directly; omitted fields preserve current state and unsupported intents fail before write.")
+				: Route.Kind == EUeAgentUObjectDataAssetRouteKind::Export
+					? TEXT("Require semantic verification and inspect scope before editing or re-importing; a domain may export a complete field set without claiming complete asset structure.")
+					: TEXT("Treat persistence and independent readback fields as part of the result contract.");
 			Result.Purpose.FailureGuidance =
 				TEXT("Typed validation and lifecycle failures never fall back to a legacy provider or partial success.");
 			Result.Purpose.SideEffectGuidance = Route.Kind ==
@@ -163,7 +193,9 @@ namespace UE::UAI::Module::CommandRegistration::UObjectDataAsset
 				: Route.Kind == EUeAgentUObjectDataAssetRouteKind::Export
 					? TEXT("Writes only the requested verified external workspace.")
 					: TEXT("Read-only with respect to UE and external state.");
-			Result.Purpose.MinimumExample = Route.Kind ==
+			Result.Purpose.MinimumExample = bAuthoringSchema
+				? TEXT("content_graph_authoring_schema(client, target)")
+				: Route.Kind ==
 					EUeAgentUObjectDataAssetRouteKind::Import
 				? TEXT("content_graph_import_workspace(client, target, {'kind':'inline','document':document}, expected_revision, authorization_id)")
 				: Route.Kind == EUeAgentUObjectDataAssetRouteKind::Export
@@ -172,17 +204,60 @@ namespace UE::UAI::Module::CommandRegistration::UObjectDataAsset
 			Result.Purpose.RelatedFlows = {
 				TEXT("query.command.search"),
 				TEXT("query.command.detail"),
+				TEXT("content_graph.authoring_schema"),
 				TEXT("content_graph.import_workspace"),
 				TEXT("content_graph.export_workspace"),
 			};
 			Result.Purpose.Keywords = {
 				TEXT("uobject"), TEXT("dataasset"), TEXT("recursive"),
-				TEXT("hjson"), TEXT("content graph"),
+				TEXT("content graph"),
 			};
-			Result.Purpose.Synonyms = {
-				TEXT("recursive data asset"),
-				TEXT("initialize nested UObject graph"),
-			};
+			if (bAuthoringSchema)
+			{
+				Result.Purpose.Keywords.Append({
+					TEXT("hjson"), TEXT("schema"), TEXT("template"),
+					TEXT("fields"), TEXT("intent"), TEXT("authoring"),
+				});
+				Result.Purpose.Synonyms = {
+					TEXT("get HJSON field contract"),
+					TEXT("get reusable authoring template"),
+				};
+			}
+			else if (Route.Kind == EUeAgentUObjectDataAssetRouteKind::Import)
+			{
+				Result.Purpose.Keywords.Append({
+					TEXT("hjson"), TEXT("import"), TEXT("initialize"),
+					TEXT("create"), TEXT("update"), TEXT("workspace"),
+					TEXT("nested"),
+				});
+				Result.Purpose.Synonyms = {
+					TEXT("initialize nested UObject graph with HJSON"),
+					TEXT("import HJSON workspace"),
+					TEXT("create recursive data asset object graph"),
+				};
+			}
+			else if (Route.Kind == EUeAgentUObjectDataAssetRouteKind::Export)
+			{
+				Result.Purpose.Keywords.Append({
+					TEXT("hjson"), TEXT("export"), TEXT("publish"),
+					TEXT("workspace"), TEXT("serialize"),
+				});
+				Result.Purpose.Synonyms = {
+					TEXT("export HJSON workspace"),
+					TEXT("publish recursive asset object graph"),
+				};
+			}
+			else
+			{
+				Result.Purpose.Keywords.Append({
+					TEXT("read"), TEXT("query"), TEXT("inspect"),
+					TEXT("properties"), TEXT("relations"),
+				});
+				Result.Purpose.Synonyms = {
+					TEXT("read recursive data asset"),
+					TEXT("inspect persisted UObject graph"),
+				};
+			}
 			return Result;
 		}
 

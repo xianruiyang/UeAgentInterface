@@ -189,7 +189,7 @@ namespace UE::UAI::Composition::TimelineSpatial
 	{
 		OutHandlers.Reset();
 		OutError.Reset();
-		if (Profiles.Num() != 59)
+		if (Profiles.Num() != 60)
 		{
 			OutError = TEXT("timeline_spatial_activation_profile_count_invalid");
 			return false;

@@ -1,6 +1,6 @@
 {
   "schema": "uai.domain_adapter.world_spatial.native_scenario_fixture.v1",
-  "scenario_count": 7,
+  "scenario_count": 8,
   "capability_count": 22,
   "scenarios": [
     {
@@ -71,13 +71,36 @@
       "capabilities": [
         "world.object_transform.read",
         "world.object_align",
-        "world.object_snap_to_surface",
-        "world.transform_candidates.evaluate"
+        "world.object_snap_to_surface"
       ],
       "setup": "create an owned transient editor world with subject, anchor and surface actors; freeze their identities, bounds and revisions",
       "write": "align and snap only the owned subject using explicit anchors, normals, surface query and expected revision",
-      "readback": "read subject transform and surface observation independently, then evaluate candidates without mutation",
+      "readback": "read subject transform and surface observation independently",
       "cleanup": "destroy the owned transient world and actors"
+    },
+    {
+      "scenario_id": "object_transform_update_owned_actor",
+      "test_id": "UeAgentInterface.DomainAdapters.WorldSpatial.E2.Native.ObjectTransformUpdateOwnedActor",
+      "lane": "nullrhi",
+      "family_id": "object_transform",
+      "requires_rhi": false,
+      "subject": "actor:/Game/UAI/Tests/WorldSpatial/WorldSpatialFixture.Subject",
+      "dimension": "3d",
+      "semantic_frame": "fixture_subject_semantic",
+      "write_frame": "unreal_world",
+      "read_frame": "unreal_world",
+      "verify_frame": "fixture_subject_semantic",
+      "conversion_chain": [
+        "fixture_subject_semantic_to_unreal_world",
+        "unreal_world_to_fixture_subject_semantic"
+      ],
+      "capabilities": [
+        "world.object_transform.update"
+      ],
+      "setup": "create one owned actor, freeze its exact identity and current revision",
+      "write": "submit one complete world transform with the matching revision through the object-transform operation",
+      "readback": "read the same actor transform independently after persistence settle and compare all ten components",
+      "cleanup": "restore and destroy only the owned actor fixture"
     },
     {
       "scenario_id": "mesh_geometry_owned_asset",

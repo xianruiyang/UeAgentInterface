@@ -7,6 +7,7 @@
 #include "GameFramework/Actor.h"
 #include "MeshDescription.h"
 #include "StaticMeshAttributes.h"
+#include "UObject/Package.h"
 #include "UObject/UObjectIterator.h"
 
 namespace UE::UAI::DomainAdapters::WorldSpatial::Private
@@ -457,18 +458,18 @@ namespace UE::UAI::DomainAdapters::WorldSpatial::Private
 					SubjectRefs = Request.GetPayload()
 						.Get<FWorldObjectAlignRequestInput>().SubjectRefs;
 				}
+				else if (Request.GetPayload().IsType<
+					FWorldObjectTransformUpdateRequestInput>())
+				{
+					SubjectRefs.Add(Request.GetPayload()
+						.Get<FWorldObjectTransformUpdateRequestInput>()
+						.Transform.Subject);
+				}
 				else if (Request.GetPayload().IsType<FWorldObjectSnapToSurfaceRequestInput>())
 				{
 					Snap = &Request.GetPayload()
 						.Get<FWorldObjectSnapToSurfaceRequestInput>();
 					SubjectRefs = Snap->SubjectRefs;
-				}
-				else if (Request.GetPayload().IsType<FTransformCandidatesEvaluateRequestInput>())
-				{
-					const FTransformCandidatesEvaluateRequestInput& Input = Request.GetPayload()
-						.Get<FTransformCandidatesEvaluateRequestInput>();
-					SubjectRefs = Input.SubjectRefs;
-					QueryFrame = &Input.VerifyFrame;
 				}
 				else
 				{
@@ -482,7 +483,9 @@ namespace UE::UAI::DomainAdapters::WorldSpatial::Private
 				FString Fingerprint;
 				TOptional<FUeAgentStateRevision> TargetRevision;
 				const bool bProjectTargetRevision =
-					Request.GetPayload().IsType<FObjectTransformReadRequestInput>();
+					Request.GetPayload().IsType<FObjectTransformReadRequestInput>()
+					|| Request.GetPayload().IsType<
+						FWorldObjectTransformUpdateRequestInput>();
 				for (const FString& SubjectRef : SubjectRefs)
 				{
 					AActor* Actor = nullptr;
@@ -615,7 +618,15 @@ namespace UE::UAI::DomainAdapters::WorldSpatial::Private
 				FUeAgentWorldSpatialExecutionError& OutError) override
 			{
 				bool bMutated = false;
-				if (Request.GetPayload().IsType<FWorldObjectAlignRequestInput>())
+				if (Request.GetPayload().IsType<
+					FWorldObjectTransformUpdateRequestInput>())
+				{
+					bMutated = TryUpdateTransform(
+						Request.GetPayload().Get<
+							FWorldObjectTransformUpdateRequestInput>(),
+						OutError);
+				}
+				else if (Request.GetPayload().IsType<FWorldObjectAlignRequestInput>())
 				{
 					bMutated = TryAlign(
 						Request.GetPayload().Get<FWorldObjectAlignRequestInput>(), OutError);
@@ -676,7 +687,16 @@ namespace UE::UAI::DomainAdapters::WorldSpatial::Private
 				FUeAgentWorldSpatialExecutionError& OutError) override
 			{
 				bool bMatches = false;
-				if (Request.GetPayload().IsType<FWorldObjectAlignRequestInput>())
+				if (Request.GetPayload().IsType<
+					FWorldObjectTransformUpdateRequestInput>())
+				{
+					bMatches = CompareUpdateTransform(
+						Request.GetPayload().Get<
+							FWorldObjectTransformUpdateRequestInput>(),
+						After,
+						OutError);
+				}
+				else if (Request.GetPayload().IsType<FWorldObjectAlignRequestInput>())
 				{
 					bMatches = CompareAlign(
 						Request.GetPayload().Get<FWorldObjectAlignRequestInput>(),
@@ -835,6 +855,129 @@ namespace UE::UAI::DomainAdapters::WorldSpatial::Private
 					OutSnapshot,
 					OutError,
 					TargetRevision.IsSet() ? &TargetRevision.GetValue() : nullptr);
+			}
+
+			bool TryUpdateTransform(
+				const FWorldObjectTransformUpdateRequestInput& Input,
+				FUeAgentWorldSpatialExecutionError& OutError)
+			{
+				const FString& ActorRef = Input.Transform.Subject;
+				if (Input.Transform.Quantity != TEXT("transform"))
+				{
+					return Fail(
+						OutError,
+						TEXT("world_spatial_object_transform_quantity_invalid"),
+						Input.Transform.Quantity);
+				}
+				if (!TryCheckRevision(
+						*RevisionSource,
+						ActorRef,
+						Input.ExpectedRevision,
+						OutError))
+				{
+					return false;
+				}
+				FUeAgentWorldSpatialCompiledValue Compiled;
+				if (!SpaceCompiler->TryConvertToNative(
+						Input.Transform,
+						TEXT("unreal.world"),
+						TEXT("centimeter"),
+						Compiled,
+						OutError))
+				{
+					return false;
+				}
+				if (Compiled.Components.Num() != 10
+					|| Compiled.Components.ContainsByPredicate(
+						[](const double Value) { return !FMath::IsFinite(Value); }))
+				{
+					return Fail(
+						OutError,
+						TEXT("world_spatial_object_transform_components_invalid"),
+						ActorRef);
+				}
+				const FQuat Rotation(
+					Compiled.Components[3],
+					Compiled.Components[4],
+					Compiled.Components[5],
+					Compiled.Components[6]);
+				const FVector Scale(
+					Compiled.Components[7],
+					Compiled.Components[8],
+					Compiled.Components[9]);
+				if (!Rotation.IsNormalized()
+					|| FMath::IsNearlyZero(Scale.X)
+					|| FMath::IsNearlyZero(Scale.Y)
+					|| FMath::IsNearlyZero(Scale.Z))
+				{
+					return Fail(
+						OutError,
+						TEXT("world_spatial_object_transform_basis_invalid"),
+						ActorRef);
+				}
+				const FTransform Desired(
+					Rotation,
+					FVector(
+						Compiled.Components[0],
+						Compiled.Components[1],
+						Compiled.Components[2]),
+					Scale);
+				AActor* Actor = nullptr;
+				if (!TryResolveActor(*Environment, ActorRef, Actor, OutError))
+				{
+					return false;
+				}
+				struct FScopedActorTransformRollback final
+				{
+					AActor* Actor = nullptr;
+					FTransform Original;
+					UPackage* Package = nullptr;
+					bool bPackageDirty = false;
+					bool bCommitted = false;
+
+					~FScopedActorTransformRollback()
+					{
+						if (!Actor || bCommitted)
+						{
+							return;
+						}
+						Actor->SetActorTransform(
+							Original,
+							false,
+							nullptr,
+							ETeleportType::TeleportPhysics);
+						Actor->PostEditMove(true);
+						if (Package)
+						{
+							Package->SetDirtyFlag(bPackageDirty);
+						}
+					}
+				};
+				FScopedActorTransformRollback Rollback{
+					Actor,
+					Actor->GetActorTransform(),
+					Actor->GetOutermost(),
+					Actor->GetOutermost() && Actor->GetOutermost()->IsDirty(),
+					false};
+				Actor->Modify();
+				if (!Actor->SetActorTransform(
+						Desired,
+						false,
+						nullptr,
+						ETeleportType::TeleportPhysics))
+				{
+					return Fail(
+						OutError,
+						TEXT("world_spatial_object_transform_native_write_failed"),
+						ActorRef);
+				}
+				Actor->PostEditMove(true);
+				if (!Environment->TryPersistObject(*Actor, OutError))
+				{
+					return false;
+				}
+				Rollback.bCommitted = true;
+				return true;
 			}
 
 			bool TryAlign(
@@ -1211,6 +1354,52 @@ namespace UE::UAI::DomainAdapters::WorldSpatial::Private
 						Transform.GetLocation() + Transform.TransformVector(Pivot));
 				}
 				return true;
+			}
+
+			bool CompareUpdateTransform(
+				const FWorldObjectTransformUpdateRequestInput& Input,
+				const FUeAgentCanonicalSnapshot& After,
+				FUeAgentWorldSpatialExecutionError& OutError)
+			{
+				FUeAgentWorldSpatialCompiledValue Expected;
+				FUeAgentWorldSpatialCompiledValue Actual;
+				if (!SpaceCompiler->TryConvertToNative(
+						Input.Transform,
+						TEXT("unreal.world"),
+						TEXT("centimeter"),
+						Expected,
+						OutError)
+					|| !TryReadCompiledValue(
+						After,
+						TEXT("actor_transform:") + Input.Transform.Subject,
+						Actual,
+						OutError)
+					|| Expected.Components.Num() != 10
+					|| Actual.Components.Num() != 10)
+				{
+					return false;
+				}
+				const FTransform ExpectedTransform(
+					FQuat(
+						Expected.Components[3], Expected.Components[4],
+						Expected.Components[5], Expected.Components[6]),
+					FVector(
+						Expected.Components[0], Expected.Components[1],
+						Expected.Components[2]),
+					FVector(
+						Expected.Components[7], Expected.Components[8],
+						Expected.Components[9]));
+				const FTransform ActualTransform(
+					FQuat(
+						Actual.Components[3], Actual.Components[4],
+						Actual.Components[5], Actual.Components[6]),
+					FVector(
+						Actual.Components[0], Actual.Components[1],
+						Actual.Components[2]),
+					FVector(
+						Actual.Components[7], Actual.Components[8],
+						Actual.Components[9]));
+				return ExpectedTransform.Equals(ActualTransform, 0.001);
 			}
 
 			bool CompareAlign(

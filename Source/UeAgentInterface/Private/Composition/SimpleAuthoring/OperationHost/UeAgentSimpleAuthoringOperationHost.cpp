@@ -621,6 +621,33 @@ namespace UE::UAI::Composition::SimpleAuthoring::OperationHost
 			Host.RuntimeWorld = World;
 			return true;
 		}
+
+		bool TryGetDurableService(
+			TSharedPtr<IUeAgentSimpleAuthoringAssetDurableService,
+				ESPMode::ThreadSafe>& OutService,
+			AssetDurable::FAssetDurableError& OutError)
+		{
+			OutService.Reset();
+			FProcessHost& Host = ProcessHost();
+			FScopeLock Lock(&Host.Mutex);
+			FString RuntimeError;
+			if (!TryCreateRuntimeLocked(Host, RuntimeError)
+				|| !Host.Runtime.IsValid())
+			{
+				OutError = AssetDurable::FAssetDurableError(
+					TEXT("simple_authoring_durable_runtime_unavailable"),
+					RuntimeError);
+				return false;
+			}
+			OutService = Host.Runtime->GetDurableService();
+			if (!OutService.IsValid())
+			{
+				OutError = AssetDurable::FAssetDurableError(
+					TEXT("simple_authoring_durable_service_unavailable"));
+				return false;
+			}
+			return true;
+		}
 	}
 
 	bool TryResolveHandler(
@@ -696,6 +723,47 @@ namespace UE::UAI::Composition::SimpleAuthoring::OperationHost
 			MakeShared<const FSimpleAuthoringOperationInvocationFactory>(CommandId);
 		Host.OperationFactories.Add(CommandId, Factory);
 		return Factory;
+	}
+
+	bool TryInspectDurableJournal(
+		const FString& JournalId,
+		ContextResource::FUeAgentResourceTracker& Resources,
+		AssetDurable::FAssetDurableSessionPtr& OutSession,
+		TArray<AssetDurable::FDurableArtifactState>& OutObservedStates,
+		AssetDurable::FAssetDurableError& OutError)
+	{
+		TSharedPtr<IUeAgentSimpleAuthoringAssetDurableService,
+			ESPMode::ThreadSafe> DurableService;
+		return TryGetDurableService(DurableService, OutError)
+			&& DurableService->TryInspect(
+				JournalId,
+				Resources,
+				OutSession,
+				OutObservedStates,
+				OutError);
+	}
+
+	bool TryReconcileDurableJournal(
+		const FString& JournalId,
+		const FString& ExpectedJournalOwnerId,
+		const int64 ExpectedFencingToken,
+		const FString& VerificationId,
+		ContextResource::FUeAgentResourceTracker& Resources,
+		AssetDurable::FDurableReceipt& OutReceipt,
+		AssetDurable::FAssetDurableError& OutError)
+	{
+		TSharedPtr<IUeAgentSimpleAuthoringAssetDurableService,
+			ESPMode::ThreadSafe> DurableService;
+		OutReceipt = AssetDurable::FDurableReceipt();
+		return TryGetDurableService(DurableService, OutError)
+			&& DurableService->TryReconcile(
+				JournalId,
+				ExpectedJournalOwnerId,
+				ExpectedFencingToken,
+				VerificationId,
+				Resources,
+				OutReceipt,
+				OutError);
 	}
 
 #if WITH_DEV_AUTOMATION_TESTS

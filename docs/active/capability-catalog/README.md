@@ -22,7 +22,8 @@ It is deliberately not a runtime registry:
 
 A registered command is not a delivered capability. Every unit records the
 highest layer directly supported by current evidence. The current catalog owns
-348 exact command identities. T35 through T43 provide representative current UE
+352 exact command identities in 45 capability units. T35 through T43 provide
+representative current UE
 verticals across the registered domains, T44 proves legacy public/compiled
 surface exit, and T45 proves the Plugin/CMD/Pak/installed distribution contract.
 T46 additionally proves a maintained seven-Actor whitebox/spatial real-content
@@ -36,6 +37,22 @@ the domain fact selected by their public input. T47A and T47B subsequently close
 the applicable read and durable World package semantics. Every unit retains the
 direct evidence boundary in `not_proven` and any applicable product decision in
 `blockers`; neither field creates an execution task.
+
+T59 closes one transform-candidate visual vertical and its new-map durability,
+but explicitly leaves the historical 7E26 journal to T63 rather than generalize
+that result. T60 restores and verifies the external UE-KB Hybrid query chain; it
+does not add a UAI command identity or advance a catalog unit. T61 proves the
+dynamic tutorial/detail projection for the then-current 348 commands. T62 adds
+`content_graph.authoring_schema` and `timeline.sequence.settings.update`; its
+real product evidence covers the Sequence sparse HJSON export/edit/import path,
+not every provider or a separate exact invocation of the settings command. T63
+adds `asset_durable.journal.read` and `asset_durable.journal.reconcile`, and
+executes their exact public SDK read/reconcile chain for the bound 7E26 terminal
+case without replay. It does not prove that every historical journal is
+recoverable. Those commands belong to the independent
+`CU-DURABLE-MAINTENANCE` unit because their formal owner crosses asset, world,
+modeling and configuration consumers and is distinct from both AssetSimple
+mutation and `operation.reconcile`.
 
 Dynamic task state, dependencies and `next_action` belong only to the outer
 project task table. A new capability task starts from a concrete real UE content

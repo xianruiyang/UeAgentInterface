@@ -12,7 +12,7 @@ namespace UE::UAI::Contract
 
 namespace UE::UAI::DomainAdapters::TimelineAnimation
 {
-	/** Builds the immutable exact C0 descriptor registry for all 19 TimelineAnimation capabilities. */
+	/** Builds the immutable exact C0 descriptor registry for all 20 TimelineAnimation capabilities. */
 	UEAGENTINTERFACE_API bool TryCreateTimelineAnimationDescriptorRegistry(
 		TSharedPtr<const UE::UAI::Contract::FUeAgentDescriptorRegistry>&
 			OutRegistry,

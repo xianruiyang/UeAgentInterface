@@ -3,8 +3,8 @@
   "domain_id": "world_spatial",
   "space_contract_id": "uai.space_contract.v1",
   "descriptor_count": 22,
-  "query_count": 11,
-  "operation_count": 11,
+  "query_count": 10,
+  "operation_count": 12,
   "components": {
     "target_ref": {"type":"string","minLength":1},
     "revision": {
@@ -262,18 +262,6 @@
       "required":["target_ref","transform","observed_revision"],
       "additionalProperties":false
     },
-    "candidate_evaluation": {
-      "type":"object",
-      "properties": {
-        "candidate_index":{"type":"integer","minimum":0},
-        "target_ref":{"component":"target_ref"},
-        "transform":{"component":"transform_3d"},
-        "score":{"type":"number"},
-        "evidence_ids":{"type":"array","items":{"type":"string","minLength":1},"minItems":1,"uniqueItems":true}
-      },
-      "required":["candidate_index","target_ref","transform","score","evidence_ids"],
-      "additionalProperties":false
-    },
     "frame_policy": {
       "type":"object",
       "properties": {
@@ -362,6 +350,11 @@
       "result_fields":[{"name":"spatial_observations","required":true,"schema":{"type":"array","items":{"oneOf":[{"component":"transform_3d"},{"component":"point_3d"}]},"minItems":1}},{"name":"observed_revision","required":true,"component":"revision"}]
     },
     {
+      "capability_id":"world.object_transform.update","descriptor_id":"uai.operation.world.object_transform.update","operation_kind":"operation","state_planes":["authoring_memory","persisted"],"required_facets":["world"],"resolution_policy":"explicit_only","transient_access_policy":"temporary_mutation_allowed","oracle_kind":"independent_persisted_actor_transform_readback",
+      "input_fields":[{"name":"transform","required":true,"component":"transform_3d"},{"name":"expected_revision","required":true,"component":"revision"}],
+      "result_fields":[{"name":"transforms","required":true,"schema":{"type":"array","items":{"component":"target_transform_observation"},"minItems":1,"maxItems":1}},{"name":"observed_revision","required":true,"component":"revision"},{"name":"verification","required":true,"component":"verification"}]
+    },
+    {
       "capability_id":"world.object_align","descriptor_id":"uai.operation.world.object_align","operation_kind":"operation","state_planes":["authoring_memory"],"required_facets":["world"],"resolution_policy":"explicit_only","transient_access_policy":"temporary_mutation_allowed","oracle_kind":"independent_anchor_and_transform_readback",
       "input_fields":[{"name":"subject_refs","required":true,"schema":{"type":"array","items":{"component":"target_ref"},"minItems":1,"uniqueItems":true}},{"name":"alignment","required":true,"component":"alignment"},{"name":"expected_revisions","required":true,"schema":{"type":"array","items":{"component":"expected_revision_entry"},"minItems":1}},{"name":"anchor_ref","required":false,"component":"target_ref"}],
       "result_fields":[{"name":"transforms","required":true,"schema":{"type":"array","items":{"component":"target_transform_observation"},"minItems":1}},{"name":"verification","required":true,"component":"verification"}]
@@ -380,11 +373,6 @@
       "capability_id":"mesh.pivot.update","descriptor_id":"uai.operation.mesh.pivot.update","operation_kind":"operation","state_planes":["persisted"],"required_facets":[],"resolution_policy":"explicit_only","transient_access_policy":"temporary_mutation_allowed","oracle_kind":"independent_pivot_geometry_and_placement_readback",
       "input_fields":[{"name":"pivot","required":true,"component":"point_3d"},{"name":"expected_revision","required":true,"component":"revision"},{"name":"preserve_world_geometry","required":false,"schema":{"type":"boolean"}}],
       "result_fields":[{"name":"pivot","required":true,"component":"point_3d"},{"name":"geometry_revision","required":true,"component":"revision"},{"name":"placement","required":true,"component":"transform_3d"},{"name":"verification","required":true,"component":"verification"}]
-    },
-    {
-      "capability_id":"world.transform_candidates.evaluate","descriptor_id":"uai.query.world.transform_candidates.evaluate","operation_kind":"query","provider_binding":"world_spatial.object_transform.evaluate_candidates","query_kind":"runtime_probe","state_planes":["authoring_memory"],"required_facets":["world"],"resolution_policy":"explicit_only","transient_access_policy":"read_only","oracle_kind":"typed_candidate_observations_without_artifact_oracle",
-      "input_fields":[{"name":"subject_refs","required":true,"schema":{"type":"array","items":{"component":"target_ref"},"minItems":1,"uniqueItems":true}},{"name":"candidates","required":true,"schema":{"type":"array","items":{"component":"transform_3d"},"minItems":1}},{"name":"verify_frame","required":true,"component":"frame_3d"}],
-      "result_fields":[{"name":"evaluations","required":true,"schema":{"type":"array","items":{"component":"candidate_evaluation"},"minItems":1}}]
     },
     {
       "capability_id":"viewport.ray.deproject","descriptor_id":"uai.query.viewport.ray.deproject","operation_kind":"query","provider_binding":"world_spatial.viewport_projection.deproject","query_kind":"runtime_probe","state_planes":["authoring_memory"],"required_facets":["viewport"],"resolution_policy":"explicit_only","transient_access_policy":"read_only","oracle_kind":"camera_projection_reconstruction",

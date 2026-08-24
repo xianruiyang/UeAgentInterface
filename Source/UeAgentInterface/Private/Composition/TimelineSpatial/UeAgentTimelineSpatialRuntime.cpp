@@ -1670,8 +1670,8 @@ namespace UE::UAI::Composition::TimelineSpatial
 				}
 			}
 		}
-		if (QueryRegistrations.Num() != 24
-			|| OperationRoutes.Num() != 35)
+		if (QueryRegistrations.Num() != 23
+			|| OperationRoutes.Num() != 37)
 		{
 			SetError(
 				OutError,
@@ -1807,7 +1807,7 @@ namespace UE::UAI::Composition::TimelineSpatial
 				Profile.DescriptorIdentity.GetDescriptorId(),
 				Binding.ToSharedRef());
 		}
-		if (OperationBindings.Num() != 35)
+		if (OperationBindings.Num() != 37)
 		{
 			SetError(
 				OutError,

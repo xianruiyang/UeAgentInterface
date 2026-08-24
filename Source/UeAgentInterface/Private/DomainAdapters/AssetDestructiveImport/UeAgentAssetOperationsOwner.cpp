@@ -150,7 +150,8 @@ namespace UE::UAI::DomainAdapters::AssetDestructiveImport
 				const FAssetDurableRequest DurableRequest(
 					Plan.ToSharedRef(),
 					{FAssetDurableTarget(
-						Identity, PackageName, DurableIntent,
+						Identity, PackageName,
+						EPackageHeaderKind::EvidenceRequired, DurableIntent,
 						ERollbackGrade::DurableBackup)},
 					Token, OwnerId, EAtomicityMode::CompensatedSaga);
 				FAssetDurableError Error;

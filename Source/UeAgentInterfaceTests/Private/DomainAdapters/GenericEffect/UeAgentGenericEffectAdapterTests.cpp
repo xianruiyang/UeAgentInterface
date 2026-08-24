@@ -492,6 +492,7 @@ bool FUeAgentGenericEffectFactsRollbackTest::RunTest(
 			UE::UAI::AssetDurable::FAssetDurableTarget(
 				Identity,
 				TEXT("/Game/UAI/P4_007"),
+				UE::UAI::AssetDurable::EPackageHeaderKind::EvidenceRequired,
 				UE::UAI::AssetDurable::EAssetDurableIntent::Save,
 				UE::UAI::AssetDurable::ERollbackGrade::DurableBackup),
 		});

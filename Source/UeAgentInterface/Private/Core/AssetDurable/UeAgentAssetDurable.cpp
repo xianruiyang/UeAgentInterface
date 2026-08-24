@@ -35,6 +35,10 @@ namespace UE::UAI::AssetDurable
 			TEXT("uai.c8d.asset_durable.journal.v1");
 		const TCHAR* JournalSchemaV2 =
 			TEXT("uai.c8d.asset_durable.journal.v2");
+		const TCHAR* JournalSchemaV3 =
+			TEXT("uai.c8d.asset_durable.journal.v3");
+		const TCHAR* FenceStateSchemaV1 =
+			TEXT("uai.c8d.asset_durable.fence_state.v1");
 
 		FString NormalizedText(FString Value)
 		{
@@ -72,6 +76,19 @@ namespace UE::UAI::AssetDurable
 				reinterpret_cast<const uint8*>(Utf8.Get()),
 				Utf8.Length(),
 				Digest);
+			FString Hex;
+			Hex.Reserve(SHA256_DIGEST_LENGTH * 2);
+			for (const uint8 Byte : Digest)
+			{
+				Hex += FString::Printf(TEXT("%02x"), Byte);
+			}
+			return TEXT("sha256:") + Hex;
+		}
+
+		FString Sha256Bytes(const TArray<uint8>& Bytes)
+		{
+			uint8 Digest[SHA256_DIGEST_LENGTH];
+			SHA256(Bytes.GetData(), Bytes.Num(), Digest);
 			FString Hex;
 			Hex.Reserve(SHA256_DIGEST_LENGTH * 2);
 			for (const uint8 Byte : Digest)
@@ -248,10 +265,40 @@ namespace UE::UAI::AssetDurable
 				|| Phase == TEXT("published")
 				|| Phase == TEXT("persisted_unverified")
 				|| Phase == TEXT("verified")
+				|| Phase == TEXT("reconciled_original")
 				|| Phase == TEXT("rolled_back")
 				|| Phase == TEXT("recovery_required")
 				|| Phase == TEXT("state_unknown");
 		}
+
+		bool IsPrePublishPhase(const FString& Phase)
+		{
+			return Phase == TEXT("inventory_ready")
+				|| Phase == TEXT("backups_ready")
+				|| Phase == TEXT("prepared")
+				|| Phase == TEXT("inventory_extended")
+				|| Phase == TEXT("staged");
+		}
+
+		bool IsTerminalPhase(const FString& Phase)
+		{
+			return Phase == TEXT("verified")
+				|| Phase == TEXT("reconciled_original")
+				|| Phase == TEXT("rolled_back");
+		}
+
+		struct FBoundTerminalEvidence
+		{
+			bool bPresent = false;
+			FString Phase;
+			TArray<FString> PhaseHistory;
+		};
+
+		bool TryReadBoundCompletedTerminal(
+			const FAssetDurableSessionRef& Session,
+			FUeAgentResourceTracker& Resources,
+			FBoundTerminalEvidence& OutEvidence,
+			FAssetDurableError& OutError);
 
 		FAssetDurableSessionRef Advance(
 			const FAssetDurableSessionRef& Session,
@@ -270,7 +317,228 @@ namespace UE::UAI::AssetDurable
 				Session->GetJournalRoot(),
 				Session->GetTransactionRoot(),
 				Session->GetStagingRoot(),
-				MoveTemp(History));
+				MoveTemp(History),
+				Session->GetPreMutationStates(),
+				Session->GetExpectedPersistedStates());
+		}
+
+		const FDurableArtifactState* FindState(
+			const TArray<FDurableArtifactState>& States,
+			const FString& ArtifactId)
+		{
+			return States.FindByPredicate(
+				[&ArtifactId](const FDurableArtifactState& State)
+				{
+					return State.GetArtifactId() == ArtifactId;
+				});
+		}
+
+		bool TryCaptureArtifactStates(
+			const FDurableInventory& Inventory,
+			const FString& ResourcePath,
+			FUeAgentResourceTracker& Resources,
+			TArray<FDurableArtifactState>& OutStates,
+			FAssetDurableError& OutError)
+		{
+			OutStates.Reset();
+			for (const FDurableArtifact& Artifact : Inventory.GetArtifacts())
+			{
+				const int64 FileSize = IFileManager::Get().FileSize(
+					*Artifact.GetFinalPath());
+				if (!TryCharge(
+						Resources,
+						ResourcePath,
+						1,
+						1,
+						FMath::Max<int64>(0, FileSize),
+						0,
+						1,
+						OutError))
+				{
+					return false;
+				}
+				if (FileSize < 0)
+				{
+					OutStates.Emplace(
+						Artifact.GetArtifactId(),
+						EDurableStatePresence::Absent);
+					continue;
+				}
+				TArray<uint8> Bytes;
+				if (!FFileHelper::LoadFileToArray(
+						Bytes,
+						*Artifact.GetFinalPath()))
+				{
+					OutError = FAssetDurableError(
+						TEXT("durable_artifact_readback_failed"),
+						Artifact.GetArtifactId());
+					return false;
+				}
+				OutStates.Emplace(
+					Artifact.GetArtifactId(),
+					EDurableStatePresence::Present,
+					Sha256Bytes(Bytes));
+			}
+			return true;
+		}
+
+		TSharedRef<FJsonObject> StateObject(
+			const FDurableArtifactState* State,
+			const FString& ArtifactId)
+		{
+			const TSharedRef<FJsonObject> Result = MakeShared<FJsonObject>();
+			Result->SetStringField(TEXT("artifact_id"), ArtifactId);
+			const EDurableStatePresence Presence = State
+				? State->GetPresence()
+				: EDurableStatePresence::Unknown;
+			Result->SetStringField(TEXT("presence"), LexToString(Presence));
+			if (State && !State->GetContentHash().IsEmpty())
+			{
+				Result->SetStringField(
+					TEXT("content_hash"), State->GetContentHash());
+			}
+			return Result;
+		}
+
+		bool TryResolvePreMutationStates(
+			const FAssetDurableSessionRef& Session,
+			FUeAgentResourceTracker& Resources,
+			TArray<FDurableArtifactState>& OutStates,
+			FAssetDurableError& OutError)
+		{
+			OutStates.Reset();
+			for (const FDurableArtifact& Artifact :
+				Session->GetInventory().GetArtifacts())
+			{
+				const FDurableArtifactState* Bound = FindState(
+					Session->GetPreMutationStates(),
+					Artifact.GetArtifactId());
+				if (Bound && Bound->IsKnown())
+				{
+					OutStates.Add(*Bound);
+					continue;
+				}
+
+				const FString MarkerPath =
+					BackupMarkerPath(Session, Artifact);
+				const int64 MarkerSize =
+					IFileManager::Get().FileSize(*MarkerPath);
+				if (!TryCharge(
+						Resources,
+						TEXT("/c8d/reconcile/legacy_pre_state"),
+						0,
+						MarkerSize >= 0 ? 1 : 0,
+						FMath::Max<int64>(0, MarkerSize),
+						0,
+						1,
+						OutError))
+				{
+					return false;
+				}
+				FString Marker;
+				if (MarkerSize < 0
+					|| !FFileHelper::LoadFileToString(
+						Marker,
+						*MarkerPath))
+				{
+					OutStates.Emplace(
+						Artifact.GetArtifactId(),
+						EDurableStatePresence::Unknown);
+					continue;
+				}
+				Marker.TrimStartAndEndInline();
+				if (Marker == TEXT("absent"))
+				{
+					OutStates.Emplace(
+						Artifact.GetArtifactId(),
+						EDurableStatePresence::Absent);
+					continue;
+				}
+				if (Marker != TEXT("present"))
+				{
+					OutStates.Emplace(
+						Artifact.GetArtifactId(),
+						EDurableStatePresence::Unknown);
+					continue;
+				}
+
+				const FString DataPath =
+					BackupDataPath(Session, Artifact);
+				const int64 DataSize =
+					IFileManager::Get().FileSize(*DataPath);
+				TArray<uint8> Bytes;
+				if (!TryCharge(
+						Resources,
+						TEXT("/c8d/reconcile/legacy_pre_state_data"),
+						0,
+						DataSize >= 0 ? 1 : 0,
+						FMath::Max<int64>(0, DataSize),
+						0,
+						1,
+						OutError))
+				{
+					return false;
+				}
+				if (DataSize < 0
+					|| !FFileHelper::LoadFileToArray(Bytes, *DataPath))
+				{
+					OutStates.Emplace(
+						Artifact.GetArtifactId(),
+						EDurableStatePresence::Unknown);
+					continue;
+				}
+				OutStates.Emplace(
+					Artifact.GetArtifactId(),
+					EDurableStatePresence::Present,
+					Sha256Bytes(Bytes));
+			}
+			return true;
+		}
+
+		bool AllStatesMatch(
+			const FDurableInventory& Inventory,
+			const TArray<FDurableArtifactState>& Expected,
+			const TArray<FDurableArtifactState>& Observed)
+		{
+			for (const FDurableArtifact& Artifact :
+				Inventory.GetArtifacts())
+			{
+				const FDurableArtifactState* ExpectedState = FindState(
+					Expected,
+					Artifact.GetArtifactId());
+				const FDurableArtifactState* ObservedState = FindState(
+					Observed,
+					Artifact.GetArtifactId());
+				if (!ExpectedState
+					|| !ObservedState
+					|| !ExpectedState->Matches(*ObservedState))
+				{
+					return false;
+				}
+			}
+			return true;
+		}
+
+		bool IsResourceBudgetError(const FAssetDurableError& Error)
+		{
+			return Error.GetCode() == TEXT("resource_budget_exceeded");
+		}
+
+		FDurableReceipt IsolationReceipt(
+			const FString& JournalPath,
+			const FAssetDurableError& Error)
+		{
+			return FDurableReceipt(
+				FPaths::GetCleanFilename(FPaths::GetPath(JournalPath)),
+				EDurableStatus::StateUnknown,
+				FString(),
+				FString(),
+				{},
+				ERecoveryAction::ManualIntervention,
+				false,
+				true,
+				Error.GetCode(),
+				Error.GetDetail());
 		}
 
 		TSharedRef<FJsonObject> IdentityObject(
@@ -386,6 +654,65 @@ namespace UE::UAI::AssetDurable
 			return false;
 		}
 
+		bool TryStatePresenceFromString(
+			const FString& Value,
+			EDurableStatePresence& OutPresence)
+		{
+			if (Value == TEXT("unknown"))
+			{
+				OutPresence = EDurableStatePresence::Unknown;
+				return true;
+			}
+			if (Value == TEXT("absent"))
+			{
+				OutPresence = EDurableStatePresence::Absent;
+				return true;
+			}
+			if (Value == TEXT("present"))
+			{
+				OutPresence = EDurableStatePresence::Present;
+				return true;
+			}
+			return false;
+		}
+
+		bool TryParseArtifactState(
+			const TSharedPtr<FJsonObject>& Object,
+			const FString& ExpectedArtifactId,
+			FDurableArtifactState& OutState,
+			FAssetDurableError& OutError)
+		{
+			FString ArtifactId;
+			FString PresenceText;
+			FString ContentHash;
+			EDurableStatePresence Presence =
+				EDurableStatePresence::Unknown;
+			if (!Object.IsValid()
+				|| !Object->TryGetStringField(
+					TEXT("artifact_id"), ArtifactId)
+				|| ArtifactId != ExpectedArtifactId
+				|| !Object->TryGetStringField(
+					TEXT("presence"), PresenceText)
+				|| !TryStatePresenceFromString(PresenceText, Presence))
+			{
+				OutError = FAssetDurableError(
+					TEXT("durable_journal_integrity_invalid"),
+					TEXT("artifact state identity is invalid"));
+				return false;
+			}
+			Object->TryGetStringField(TEXT("content_hash"), ContentHash);
+			OutState = FDurableArtifactState(
+				MoveTemp(ArtifactId), Presence, MoveTemp(ContentHash));
+			if (!OutState.IsValid())
+			{
+				OutError = FAssetDurableError(
+					TEXT("durable_journal_integrity_invalid"),
+					TEXT("artifact state is invalid"));
+				return false;
+			}
+			return true;
+		}
+
 		TSharedRef<FJsonObject> BuildPayload(
 			const FAssetDurableSessionRef& Session)
 		{
@@ -393,7 +720,7 @@ namespace UE::UAI::AssetDurable
 				MakeShared<FJsonObject>();
 			Payload->SetStringField(
 				TEXT("schema"),
-				JournalSchemaV2);
+				JournalSchemaV3);
 			Payload->SetStringField(
 				TEXT("journal_id"),
 				Session->GetJournalId());
@@ -457,6 +784,20 @@ namespace UE::UAI::AssetDurable
 				Value->SetStringField(
 					TEXT("role"),
 					Artifact.GetRole());
+				Value->SetObjectField(
+					TEXT("pre_state"),
+					StateObject(
+						FindState(
+							Session->GetPreMutationStates(),
+							Artifact.GetArtifactId()),
+						Artifact.GetArtifactId()));
+				Value->SetObjectField(
+					TEXT("expected_persisted_state"),
+					StateObject(
+						FindState(
+							Session->GetExpectedPersistedStates(),
+							Artifact.GetArtifactId()),
+						Artifact.GetArtifactId()));
 				Artifacts.Add(MakeShared<FJsonValueObject>(Value));
 			}
 			Payload->SetArrayField(
@@ -476,6 +817,23 @@ namespace UE::UAI::AssetDurable
 			{
 				OutError = FAssetDurableError(
 					TEXT("durable_journal_root_invalid"));
+				return false;
+			}
+			FBoundTerminalEvidence TerminalEvidence;
+			if (!TryReadBoundCompletedTerminal(
+					Session,
+					Resources,
+					TerminalEvidence,
+					OutError))
+			{
+				return false;
+			}
+			if (TerminalEvidence.bPresent
+				&& Session->GetCurrentPhase() != TerminalEvidence.Phase)
+			{
+				OutError = FAssetDurableError(
+					TEXT("durable_journal_already_terminal"),
+					TerminalEvidence.Phase);
 				return false;
 			}
 			FString PayloadText;
@@ -770,7 +1128,12 @@ namespace UE::UAI::AssetDurable
 				Session->GetPhaseHistory(),
 				Action,
 				bRequiresIndependent,
-				bReplayed);
+				bReplayed,
+				FString(),
+				FString(),
+				FString(),
+				Session->GetPreMutationStates(),
+				Session->GetExpectedPersistedStates());
 		}
 
 		bool TryArchiveTerminal(
@@ -805,12 +1168,79 @@ namespace UE::UAI::AssetDurable
 				return false;
 			}
 			IFileManager::Get().MakeDirectory(*CompletedRoot, true);
-			if (IFileManager::Get().Copy(
-				*CompletedPath,
-				*Session->GetJournalPath(),
-				true,
-				true)
-				!= COPY_OK
+			FString ArchivePath = CompletedPath;
+			bool bNeedsCopy = true;
+			if (IFileManager::Get().FileExists(*CompletedPath))
+			{
+				TArray<uint8> CurrentBytes;
+				TArray<uint8> CompletedBytes;
+				if (!FFileHelper::LoadFileToArray(
+						CurrentBytes,
+						*Session->GetJournalPath())
+					|| !FFileHelper::LoadFileToArray(
+						CompletedBytes,
+						*CompletedPath)
+					|| !TryCharge(
+						Resources,
+						TEXT("/c8d/journal/archive_collision"),
+						0,
+						2,
+						CurrentBytes.Num() + CompletedBytes.Num(),
+						0,
+						1,
+						OutError))
+				{
+					if (!OutError.IsPresent())
+					{
+						OutError = FAssetDurableError(
+							TEXT("durable_journal_archive_failed"),
+							TEXT("completed receipt comparison failed"));
+					}
+					return false;
+				}
+				if (CurrentBytes == CompletedBytes)
+				{
+					bNeedsCopy = false;
+				}
+				else
+				{
+					FString Hash = Sha256Bytes(CurrentBytes);
+					Hash.RemoveFromStart(TEXT("sha256:"));
+					ArchivePath = CompletedRoot / FString::Printf(
+						TEXT("%s.%s.%s.json"),
+						*Session->GetJournalId(),
+						*Session->GetCurrentPhase(),
+						*Hash.Left(12));
+					if (!IsWithin(ArchivePath, CompletedRoot))
+					{
+						OutError = FAssetDurableError(
+							TEXT("durable_journal_root_invalid"));
+						return false;
+					}
+					if (IFileManager::Get().FileExists(*ArchivePath))
+					{
+						TArray<uint8> ExistingBytes;
+						if (!FFileHelper::LoadFileToArray(
+								ExistingBytes,
+								*ArchivePath)
+							|| ExistingBytes != CurrentBytes)
+						{
+							OutError = FAssetDurableError(
+								TEXT("durable_journal_archive_collision"),
+								ArchivePath);
+							return false;
+						}
+						bNeedsCopy = false;
+					}
+				}
+			}
+			if ((bNeedsCopy
+					&& IFileManager::Get().Copy(
+						*ArchivePath,
+						*Session->GetJournalPath(),
+						false,
+						true)
+						!= COPY_OK)
 				|| !IFileManager::Get().DeleteDirectory(
 					*Session->GetTransactionRoot(),
 					false,
@@ -939,6 +1369,124 @@ namespace UE::UAI::AssetDurable
 			return true;
 		}
 
+		bool TryReadBoundCompletedTerminal(
+			const FAssetDurableSessionRef& Session,
+			FUeAgentResourceTracker& Resources,
+			FBoundTerminalEvidence& OutEvidence,
+			FAssetDurableError& OutError)
+		{
+			OutEvidence = FBoundTerminalEvidence();
+			OutError = FAssetDurableError();
+			const FString CompletedRoot =
+				Session->GetJournalRoot() / TEXT("completed");
+			const FString CompletedPath = CompletedRoot
+				/ (Session->GetJournalId() + TEXT(".json"));
+			if (!IsWithin(CompletedPath, CompletedRoot))
+			{
+				OutError = FAssetDurableError(
+					TEXT("durable_journal_root_invalid"));
+				return false;
+			}
+			if (!IFileManager::Get().FileExists(*CompletedPath))
+			{
+				return true;
+			}
+
+			FString PayloadText;
+			FAssetDurableError ReadError;
+			if (!TryReadOuterJournal(
+					CompletedPath,
+					Resources,
+					PayloadText,
+					ReadError))
+			{
+				if (IsResourceBudgetError(ReadError))
+				{
+					OutError = ReadError;
+					return false;
+				}
+				return true;
+			}
+
+			TSharedPtr<FJsonObject> Payload;
+			const TSharedRef<TJsonReader<>> Reader =
+				TJsonReaderFactory<>::Create(PayloadText);
+			FString Schema;
+			FString JournalId;
+			FString OwnerId;
+			FString Phase;
+			FString Fingerprint;
+			FString InventoryHash;
+			double FencingTokenNumber = -1.0;
+			const TArray<TSharedPtr<FJsonValue>>* HistoryValues = nullptr;
+			if (!FJsonSerializer::Deserialize(Reader, Payload)
+				|| !Payload.IsValid()
+				|| !Payload->TryGetStringField(TEXT("schema"), Schema)
+				|| (Schema != JournalSchemaV1
+					&& Schema != JournalSchemaV2
+					&& Schema != JournalSchemaV3)
+				|| !Payload->TryGetStringField(
+					TEXT("journal_id"),
+					JournalId)
+				|| !Payload->TryGetStringField(
+					TEXT("journal_owner_id"),
+					OwnerId)
+				|| !Payload->TryGetNumberField(
+					TEXT("fencing_token"),
+					FencingTokenNumber)
+				|| !Payload->TryGetStringField(TEXT("phase"), Phase)
+				|| !Payload->TryGetStringField(
+					TEXT("plan_fingerprint"),
+					Fingerprint)
+				|| !Payload->TryGetStringField(
+					TEXT("inventory_hash"),
+					InventoryHash)
+				|| !Payload->TryGetArrayField(
+					TEXT("phase_history"),
+					HistoryValues)
+				|| !FMath::IsFinite(FencingTokenNumber)
+				|| FencingTokenNumber < 0.0
+				|| FMath::FloorToDouble(FencingTokenNumber)
+					!= FencingTokenNumber
+				|| !IsTerminalPhase(Phase))
+			{
+				return true;
+			}
+
+			TArray<FString> History;
+			for (const TSharedPtr<FJsonValue>& Value : *HistoryValues)
+			{
+				FString Item;
+				if (!Value.IsValid()
+					|| !Value->TryGetString(Item)
+					|| !IsKnownPhase(Item))
+				{
+					return true;
+				}
+				History.Add(MoveTemp(Item));
+			}
+			if (History.IsEmpty()
+				|| History.Last() != Phase
+				|| JournalId != Session->GetJournalId()
+				|| OwnerId
+					!= Session->GetRequest().GetJournalOwnerId()
+				|| FencingTokenNumber
+					!= static_cast<double>(
+						Session->GetRequest().GetFencingToken())
+				|| Fingerprint
+					!= Session->GetRequest().GetPlan()->GetFingerprint()
+				|| InventoryHash
+					!= Session->GetInventory().GetInventoryHash())
+			{
+				return true;
+			}
+
+			OutEvidence.bPresent = true;
+			OutEvidence.Phase = MoveTemp(Phase);
+			OutEvidence.PhaseHistory = MoveTemp(History);
+			return true;
+		}
+
 		FPlanningPreflightPlanRef RecoveryPlan(
 			const FString& JournalId,
 			const FString& Fingerprint)
@@ -969,7 +1517,7 @@ namespace UE::UAI::AssetDurable
 			const FString& PayloadText,
 			const FString& JournalPath,
 			const FString& JournalRoot,
-			IAssetDurableBackend& Backend,
+			const TArray<FString>& InAllowedArtifactRoots,
 			FUeAgentResourceTracker& Resources,
 			FAssetDurableSessionPtr& OutSession,
 			FAssetDurableError& OutError)
@@ -998,7 +1546,8 @@ namespace UE::UAI::AssetDurable
 			const TArray<TSharedPtr<FJsonValue>>* ArtifactValues = nullptr;
 			if (!Payload->TryGetStringField(TEXT("schema"), Schema)
 				|| (Schema != JournalSchemaV1
-					&& Schema != JournalSchemaV2)
+					&& Schema != JournalSchemaV2
+					&& Schema != JournalSchemaV3)
 				|| !Payload->TryGetStringField(
 					TEXT("journal_id"),
 					JournalId)
@@ -1040,7 +1589,10 @@ namespace UE::UAI::AssetDurable
 				return false;
 			}
 			const bool bTypedJournal =
-				Schema == JournalSchemaV2;
+				Schema == JournalSchemaV2
+				|| Schema == JournalSchemaV3;
+			const bool bStateBoundJournal =
+				Schema == JournalSchemaV3;
 			TArray<FString> History;
 			for (const TSharedPtr<FJsonValue>& Value : *HistoryValues)
 			{
@@ -1080,8 +1632,7 @@ namespace UE::UAI::AssetDurable
 					TEXT("transaction roots are invalid"));
 				return false;
 			}
-			TArray<FString> AllowedRoots =
-				Backend.GetAllowedArtifactRoots();
+			TArray<FString> AllowedRoots = InAllowedArtifactRoots;
 			if (AllowedRoots.IsEmpty())
 			{
 				OutError = FAssetDurableError(
@@ -1090,6 +1641,8 @@ namespace UE::UAI::AssetDurable
 				return false;
 			}
 			TArray<FDurableArtifact> Artifacts;
+			TArray<FDurableArtifactState> PreMutationStates;
+			TArray<FDurableArtifactState> ExpectedPersistedStates;
 			TMap<FString, FAssetDurableTarget> TargetsByKey;
 			TSet<FString> ArtifactIds;
 			FString PreviousArtifactId;
@@ -1107,6 +1660,8 @@ namespace UE::UAI::AssetDurable
 				FString FinalPathValue;
 				FString IntentText;
 				FString Role;
+				const TSharedPtr<FJsonObject>* PreStatePtr = nullptr;
+				const TSharedPtr<FJsonObject>* ExpectedStatePtr = nullptr;
 				const bool bHasTypedArtifact =
 					bTypedJournal
 					&& ArtifactObject.IsValid()
@@ -1135,6 +1690,12 @@ namespace UE::UAI::AssetDurable
 					|| !ArtifactObject->TryGetStringField(
 						TEXT("role"),
 						Role)
+					|| (bStateBoundJournal
+						&& (!ArtifactObject->TryGetObjectField(
+								TEXT("pre_state"), PreStatePtr)
+							|| !ArtifactObject->TryGetObjectField(
+								TEXT("expected_persisted_state"),
+								ExpectedStatePtr)))
 					|| (bTypedJournal
 						&& !bHasTypedArtifact))
 				{
@@ -1244,6 +1805,27 @@ namespace UE::UAI::AssetDurable
 					FinalPathValue,
 					Intent,
 					Role);
+				if (bStateBoundJournal)
+				{
+					FDurableArtifactState PreState;
+					FDurableArtifactState ExpectedState;
+					if (!TryParseArtifactState(
+							PreStatePtr ? *PreStatePtr : nullptr,
+							ArtifactId,
+							PreState,
+							OutError)
+						|| !TryParseArtifactState(
+							ExpectedStatePtr ? *ExpectedStatePtr : nullptr,
+							ArtifactId,
+							ExpectedState,
+							OutError))
+					{
+						return false;
+					}
+					PreMutationStates.Add(MoveTemp(PreState));
+					ExpectedPersistedStates.Add(
+						MoveTemp(ExpectedState));
+				}
 				ArtifactIds.Add(ArtifactId);
 				PreviousArtifactId = ArtifactId;
 				TargetsByKey.Add(
@@ -1299,14 +1881,16 @@ namespace UE::UAI::AssetDurable
 				FullPath(JournalRoot),
 				FullPath(TransactionRoot),
 				FullPath(StagingRoot),
-				MoveTemp(History));
+				MoveTemp(History),
+				MoveTemp(PreMutationStates),
+				MoveTemp(ExpectedPersistedStates));
 			return true;
 		}
 
 		bool TryLoadSession(
 			const FString& JournalPath,
 			const FString& JournalRoot,
-			IAssetDurableBackend& Backend,
+			const TArray<FString>& AllowedArtifactRoots,
 			FUeAgentResourceTracker& Resources,
 			FAssetDurableSessionPtr& OutSession,
 			FAssetDurableError& OutError)
@@ -1330,7 +1914,7 @@ namespace UE::UAI::AssetDurable
 					PayloadText,
 					JournalPath,
 					JournalRoot,
-					Backend,
+					AllowedArtifactRoots,
 					Resources,
 					OutSession,
 					OutError);
@@ -1551,11 +2135,23 @@ namespace UE::UAI::AssetDurable
 		case EDurableStatus::Prepared: return TEXT("prepared");
 		case EDurableStatus::PersistedUnverified:
 			return TEXT("persisted_unverified");
+		case EDurableStatus::Verified: return TEXT("verified");
 		case EDurableStatus::RolledBack: return TEXT("rolled_back");
 		case EDurableStatus::RecoveryRequired:
 			return TEXT("recovery_required");
 		case EDurableStatus::StateUnknown:
 			return TEXT("state_unknown");
+		default: return TEXT("unknown");
+		}
+	}
+
+	FString LexToString(const EDurableStatePresence Value)
+	{
+		switch (Value)
+		{
+		case EDurableStatePresence::Unknown: return TEXT("unknown");
+		case EDurableStatePresence::Absent: return TEXT("absent");
+		case EDurableStatePresence::Present: return TEXT("present");
 		default: return TEXT("unknown");
 		}
 	}
@@ -1580,6 +2176,7 @@ namespace UE::UAI::AssetDurable
 	FAssetDurableTarget::FAssetDurableTarget(
 		FUeAgentCanonicalIdentity InIdentity,
 		FString InPackageName,
+		const EPackageHeaderKind InHeaderKind,
 		const EAssetDurableIntent InIntent,
 		const ERollbackGrade InRollbackGrade)
 		: FAssetDurableTarget(
@@ -1589,6 +2186,7 @@ namespace UE::UAI::AssetDurable
 			InIntent,
 			InRollbackGrade)
 	{
+		PackageHeaderKind = InHeaderKind;
 	}
 
 	FAssetDurableTarget::FAssetDurableTarget(
@@ -1632,6 +2230,11 @@ namespace UE::UAI::AssetDurable
 	const FString& FAssetDurableTarget::GetPackageName() const
 	{
 		return PackageName;
+	}
+
+	EPackageHeaderKind FAssetDurableTarget::GetPackageHeaderKind() const
+	{
+		return PackageHeaderKind;
 	}
 
 	FString FAssetDurableTarget::GetDurableTargetKey() const
@@ -1803,6 +2406,60 @@ namespace UE::UAI::AssetDurable
 		return bValid;
 	}
 
+	FDurableArtifactState::FDurableArtifactState(
+		FString InArtifactId,
+		const EDurableStatePresence InPresence,
+		FString InContentHash)
+		: ArtifactId(NormalizedText(MoveTemp(InArtifactId)))
+		, Presence(InPresence)
+		, ContentHash(NormalizedText(MoveTemp(InContentHash)))
+	{
+	}
+
+	const FString& FDurableArtifactState::GetArtifactId() const
+	{
+		return ArtifactId;
+	}
+
+	EDurableStatePresence FDurableArtifactState::GetPresence() const
+	{
+		return Presence;
+	}
+
+	const FString& FDurableArtifactState::GetContentHash() const
+	{
+		return ContentHash;
+	}
+
+	bool FDurableArtifactState::IsKnown() const
+	{
+		return Presence != EDurableStatePresence::Unknown;
+	}
+
+	bool FDurableArtifactState::IsValid() const
+	{
+		if (ArtifactId.IsEmpty())
+		{
+			return false;
+		}
+		if (Presence == EDurableStatePresence::Present)
+		{
+			return ContentHash.StartsWith(TEXT("sha256:"));
+		}
+		return ContentHash.IsEmpty();
+	}
+
+	bool FDurableArtifactState::Matches(
+		const FDurableArtifactState& Other) const
+	{
+		return IsKnown()
+			&& Other.IsKnown()
+			&& ArtifactId == Other.ArtifactId
+			&& Presence == Other.Presence
+			&& (Presence != EDurableStatePresence::Present
+				|| ContentHash == Other.ContentHash);
+	}
+
 	FDurableInventory::FDurableInventory(
 		TArray<FDurableArtifact> InArtifacts,
 		FString InInventoryHash)
@@ -1848,7 +2505,9 @@ namespace UE::UAI::AssetDurable
 		FString InJournalRoot,
 		FString InTransactionRoot,
 		FString InStagingRoot,
-		TArray<FString> InPhaseHistory)
+		TArray<FString> InPhaseHistory,
+		TArray<FDurableArtifactState> InPreMutationStates,
+		TArray<FDurableArtifactState> InExpectedPersistedStates)
 		: Request(MoveTemp(InRequest))
 		, Inventory(MoveTemp(InInventory))
 		, JournalId(NormalizedText(MoveTemp(InJournalId)))
@@ -1857,6 +2516,8 @@ namespace UE::UAI::AssetDurable
 		, TransactionRoot(FullPath(InTransactionRoot))
 		, StagingRoot(FullPath(InStagingRoot))
 		, PhaseHistory(MoveTemp(InPhaseHistory))
+		, PreMutationStates(MoveTemp(InPreMutationStates))
+		, ExpectedPersistedStates(MoveTemp(InExpectedPersistedStates))
 	{
 	}
 
@@ -1909,6 +2570,18 @@ namespace UE::UAI::AssetDurable
 		return PhaseHistory.Last();
 	}
 
+	const TArray<FDurableArtifactState>&
+	FAssetDurableSession::GetPreMutationStates() const
+	{
+		return PreMutationStates;
+	}
+
+	const TArray<FDurableArtifactState>&
+	FAssetDurableSession::GetExpectedPersistedStates() const
+	{
+		return ExpectedPersistedStates;
+	}
+
 	FDurableReceipt::FDurableReceipt(
 		FString InJournalId,
 		const EDurableStatus InStatus,
@@ -1917,7 +2590,12 @@ namespace UE::UAI::AssetDurable
 		TArray<FString> InPhaseHistory,
 		const ERecoveryAction InRecoveryAction,
 		const bool bInRequiresIndependentVerification,
-		const bool bInReplayed)
+		const bool bInReplayed,
+		FString InFailureCode,
+		FString InFailureDetail,
+		FString InVerificationId,
+		TArray<FDurableArtifactState> InPreMutationStates,
+		TArray<FDurableArtifactState> InExpectedPersistedStates)
 		: JournalId(NormalizedText(MoveTemp(InJournalId)))
 		, Status(InStatus)
 		, PlanFingerprint(
@@ -1929,6 +2607,11 @@ namespace UE::UAI::AssetDurable
 		, bRequiresIndependentVerification(
 			bInRequiresIndependentVerification)
 		, bReplayed(bInReplayed)
+		, FailureCode(NormalizedText(MoveTemp(InFailureCode)))
+		, FailureDetail(NormalizedText(MoveTemp(InFailureDetail)))
+		, VerificationId(NormalizedText(MoveTemp(InVerificationId)))
+		, PreMutationStates(MoveTemp(InPreMutationStates))
+		, ExpectedPersistedStates(MoveTemp(InExpectedPersistedStates))
 	{
 	}
 
@@ -1970,6 +2653,33 @@ namespace UE::UAI::AssetDurable
 	bool FDurableReceipt::IsReplayed() const
 	{
 		return bReplayed;
+	}
+
+	const FString& FDurableReceipt::GetFailureCode() const
+	{
+		return FailureCode;
+	}
+
+	const FString& FDurableReceipt::GetFailureDetail() const
+	{
+		return FailureDetail;
+	}
+
+	const FString& FDurableReceipt::GetVerificationId() const
+	{
+		return VerificationId;
+	}
+
+	const TArray<FDurableArtifactState>&
+	FDurableReceipt::GetPreMutationStates() const
+	{
+		return PreMutationStates;
+	}
+
+	const TArray<FDurableArtifactState>&
+	FDurableReceipt::GetExpectedPersistedStates() const
+	{
+		return ExpectedPersistedStates;
 	}
 
 	FDurableVerificationAcknowledgement::
@@ -2097,6 +2807,7 @@ namespace UE::UAI::AssetDurable
 			FString HeaderErrorCode;
 			if (!TryResolvePackageHeaderFilename(
 					PackageName,
+					Target.GetPackageHeaderKind(),
 					HeaderPath,
 					HeaderErrorCode))
 			{
@@ -3053,6 +3764,139 @@ namespace UE::UAI::AssetDurable
 			OutError);
 	}
 
+	bool TryAcquireAssetDurableFence(
+		const FString& JournalRoot,
+		const FString& StableJournalOwnerId,
+		FUeAgentResourceTracker& Resources,
+		int64& OutFencingToken,
+		FAssetDurableError& OutError)
+	{
+		OutFencingToken = -1;
+		OutError = FAssetDurableError();
+		const FString OwnerId = NormalizedText(StableJournalOwnerId);
+		const FString Root = FullPath(JournalRoot);
+		const FString StatePath = Root / TEXT("fence-state.json");
+		const FString TemporaryPath = StatePath + TEXT(".tmp");
+		if (OwnerId.IsEmpty()
+			|| !IsWithin(StatePath, Root)
+			|| !IsWithin(TemporaryPath, Root))
+		{
+			OutError = FAssetDurableError(
+				TEXT("durable_fence_store_invalid"));
+			return false;
+		}
+
+		int64 LastToken = -1;
+		if (IFileManager::Get().FileExists(*StatePath))
+		{
+			FString PayloadText;
+			if (!TryReadOuterJournal(
+					StatePath,
+					Resources,
+					PayloadText,
+					OutError))
+			{
+				if (!IsResourceBudgetError(OutError))
+				{
+					OutError = FAssetDurableError(
+						TEXT("durable_fence_store_integrity_invalid"),
+						StatePath);
+				}
+				return false;
+			}
+			TSharedPtr<FJsonObject> Payload;
+			const TSharedRef<TJsonReader<>> Reader =
+				TJsonReaderFactory<>::Create(PayloadText);
+			FString Schema;
+			FString StoredOwnerId;
+			double StoredToken = -1.0;
+			if (!FJsonSerializer::Deserialize(Reader, Payload)
+				|| !Payload.IsValid()
+				|| !Payload->TryGetStringField(TEXT("schema"), Schema)
+				|| Schema != FenceStateSchemaV1
+				|| !Payload->TryGetStringField(
+					TEXT("journal_owner_id"),
+					StoredOwnerId)
+				|| StoredOwnerId != OwnerId
+				|| !Payload->TryGetNumberField(
+					TEXT("last_fencing_token"),
+					StoredToken)
+				|| !FMath::IsFinite(StoredToken)
+				|| StoredToken < 0.0
+				|| StoredToken > 9007199254740990.0
+				|| FMath::FloorToDouble(StoredToken) != StoredToken)
+			{
+				OutError = FAssetDurableError(
+					TEXT("durable_fence_store_integrity_invalid"),
+					StatePath);
+				return false;
+			}
+			LastToken = static_cast<int64>(StoredToken);
+		}
+
+		const int64 NextToken = LastToken + 1;
+		const TSharedRef<FJsonObject> Payload = MakeShared<FJsonObject>();
+		Payload->SetStringField(TEXT("schema"), FenceStateSchemaV1);
+		Payload->SetStringField(TEXT("journal_owner_id"), OwnerId);
+		Payload->SetNumberField(
+			TEXT("last_fencing_token"),
+			static_cast<double>(NextToken));
+		FString PayloadText;
+		if (!TrySerializeObject(Payload, PayloadText))
+		{
+			OutError = FAssetDurableError(
+				TEXT("durable_fence_store_serialize_failed"));
+			return false;
+		}
+		const TSharedRef<FJsonObject> Outer = MakeShared<FJsonObject>();
+		Outer->SetStringField(TEXT("payload"), PayloadText);
+		Outer->SetStringField(
+			TEXT("integrity_sha256"),
+			Sha256(PayloadText));
+		FString Encoded;
+		if (!TrySerializeObject(Outer, Encoded))
+		{
+			OutError = FAssetDurableError(
+				TEXT("durable_fence_store_serialize_failed"));
+			return false;
+		}
+		const FTCHARToUTF8 Utf8(*Encoded);
+		if (!TryCharge(
+				Resources,
+				TEXT("/c8d/fence/acquire"),
+				1,
+				0,
+				0,
+				Utf8.Length(),
+				1,
+				OutError))
+		{
+			return false;
+		}
+		IFileManager::Get().MakeDirectory(*Root, true);
+		IFileManager::Get().Delete(*TemporaryPath, false, true, true);
+		if (!FFileHelper::SaveStringToFile(
+				Encoded,
+				*TemporaryPath,
+				FFileHelper::EEncodingOptions::ForceUTF8WithoutBOM)
+			|| !IFileManager::Get().Move(
+				*StatePath,
+				*TemporaryPath,
+				true,
+				true,
+				false,
+				true))
+		{
+			IFileManager::Get().Delete(*TemporaryPath, false, true, true);
+			OutError = FAssetDurableError(
+				TEXT("durable_fence_store_write_failed"),
+				StatePath);
+			return false;
+		}
+		OutFencingToken = NextToken;
+		return true;
+	}
+
 	bool TryPrepareAssetDurability(
 		const FAssetDurableRequest& Request,
 		IAssetDurableBackend& Backend,
@@ -3109,6 +3953,16 @@ namespace UE::UAI::AssetDurable
 		{
 			return false;
 		}
+		TArray<FDurableArtifactState> PreMutationStates;
+		if (!TryCaptureArtifactStates(
+				Inventory,
+				TEXT("/c8d/prepare/pre_state"),
+				Resources,
+				PreMutationStates,
+				OutError))
+		{
+			return false;
+		}
 		const FString Root = FullPath(JournalRoot);
 		const FString ActiveRoot = Root / TEXT("active");
 		const FString JournalId =
@@ -3142,7 +3996,8 @@ namespace UE::UAI::AssetDurable
 				Root,
 				TransactionRoot,
 				StagingRoot,
-				TArray<FString>{TEXT("inventory_ready")});
+				TArray<FString>{TEXT("inventory_ready")},
+				MoveTemp(PreMutationStates));
 		if (!TryWriteJournal(Session, Resources, OutError))
 		{
 			return false;
@@ -3237,7 +4092,9 @@ namespace UE::UAI::AssetDurable
 					});
 			if (Existing)
 			{
-				if (Existing->GetIntent() != Candidate.GetIntent())
+				if (Existing->GetIntent() != Candidate.GetIntent()
+					|| Existing->GetPackageHeaderKind()
+						!= Candidate.GetPackageHeaderKind())
 				{
 					OutError = FAssetDurableError(
 						TEXT("durable_enlist_target_conflict"),
@@ -3351,18 +4208,33 @@ namespace UE::UAI::AssetDurable
 		{
 			return false;
 		}
+		const FDurableInventory DeltaInventory(
+			NewArtifacts,
+			DeltaInventoryHash);
+		TArray<FDurableArtifactState> DeltaPreMutationStates;
+		if (!TryCaptureArtifactStates(
+				DeltaInventory,
+				TEXT("/c8d/enlist/pre_state"),
+				Resources,
+				DeltaPreMutationStates,
+				OutError))
+		{
+			return false;
+		}
+		TArray<FDurableArtifactState> CombinedPreMutationStates =
+			Session->GetPreMutationStates();
+		CombinedPreMutationStates.Append(DeltaPreMutationStates);
 		const FAssetDurableSessionRef DeltaSession =
 			MakeShared<const FAssetDurableSession>(
 				CombinedRequest,
-				FDurableInventory(
-					MoveTemp(NewArtifacts),
-					MoveTemp(DeltaInventoryHash)),
+				DeltaInventory,
 				Session->GetJournalId(),
 				Session->GetJournalPath(),
 				Session->GetJournalRoot(),
 				Session->GetTransactionRoot(),
 				Session->GetStagingRoot(),
-				Session->GetPhaseHistory());
+				Session->GetPhaseHistory(),
+				MoveTemp(DeltaPreMutationStates));
 		if (!Backend.CaptureBackups(
 				DeltaSession,
 				Resources,
@@ -3385,7 +4257,9 @@ namespace UE::UAI::AssetDurable
 				Session->GetJournalRoot(),
 				Session->GetTransactionRoot(),
 				Session->GetStagingRoot(),
-				Session->GetPhaseHistory());
+				Session->GetPhaseHistory(),
+				MoveTemp(CombinedPreMutationStates),
+				Session->GetExpectedPersistedStates());
 		ExtendedSession = Advance(
 			ExtendedSession,
 			TEXT("inventory_extended"));
@@ -3464,6 +4338,33 @@ namespace UE::UAI::AssetDurable
 				OutReceipt,
 				OutError);
 		}
+		TArray<FDurableArtifactState> ExpectedPersistedStates;
+		if (!TryCaptureArtifactStates(
+				Working->GetInventory(),
+				TEXT("/c8d/persist/expected_state"),
+				Resources,
+				ExpectedPersistedStates,
+				OutError))
+		{
+			return TryRestoreAfterFailure(
+				Working,
+				Backend,
+				Resources,
+				false,
+				OutReceipt,
+				OutError);
+		}
+		Working = MakeShared<const FAssetDurableSession>(
+			Working->GetRequest(),
+			Working->GetInventory(),
+			Working->GetJournalId(),
+			Working->GetJournalPath(),
+			Working->GetJournalRoot(),
+			Working->GetTransactionRoot(),
+			Working->GetStagingRoot(),
+			Working->GetPhaseHistory(),
+			Working->GetPreMutationStates(),
+			MoveTemp(ExpectedPersistedStates));
 		Working = Advance(Working, TEXT("published"));
 		if (!TryWriteJournal(Working, Resources, OutError))
 		{
@@ -3627,6 +4528,8 @@ namespace UE::UAI::AssetDurable
 			return false;
 		}
 		const FString Root = FullPath(JournalRoot);
+		const TArray<FString> AllowedArtifactRoots =
+			Backend.GetAllowedArtifactRoots();
 		TArray<FString> JournalPaths;
 		if (!TryEnumerateJournals(
 			Root / TEXT("active"),
@@ -3639,33 +4542,70 @@ namespace UE::UAI::AssetDurable
 		for (const FString& JournalPath : JournalPaths)
 		{
 			FAssetDurableSessionPtr Session;
+			FAssetDurableError ItemError;
 			if (!TryLoadSession(
 				JournalPath,
 				Root,
-				Backend,
+				AllowedArtifactRoots,
 				Resources,
 				Session,
-				OutError)
-				|| !Session.IsValid()
-				|| !TryCheckFence(
-					Session.ToSharedRef(),
-					CurrentFencingToken,
-					OutError))
+				ItemError)
+				|| !Session.IsValid())
 			{
-				OutReceipts.Reset();
-				return false;
+				if (!ItemError.IsPresent())
+				{
+					ItemError = FAssetDurableError(
+						TEXT("durable_journal_integrity_invalid"),
+						JournalPath);
+				}
+				if (IsResourceBudgetError(ItemError))
+				{
+					OutError = ItemError;
+					return false;
+				}
+				OutReceipts.Add(IsolationReceipt(JournalPath, ItemError));
+				continue;
 			}
 			const FAssetDurableSessionRef Ref =
 				Session.ToSharedRef();
+			if (!TryCheckFence(
+					Ref,
+					CurrentFencingToken,
+					ItemError))
+			{
+				OutReceipts.Emplace(
+					Ref->GetJournalId(),
+					EDurableStatus::StateUnknown,
+					Ref->GetRequest().GetPlan()->GetFingerprint(),
+					Ref->GetInventory().GetInventoryHash(),
+					Ref->GetPhaseHistory(),
+					ERecoveryAction::ManualIntervention,
+					false,
+					true,
+					ItemError.GetCode(),
+					ItemError.GetDetail());
+				continue;
+			}
 			if (Ref->GetRequest().GetJournalOwnerId() != OwnerId)
 			{
-				OutReceipts.Reset();
-				OutError = FAssetDurableError(
+				ItemError = FAssetDurableError(
 					TEXT("durable_journal_owner_mismatch"));
-				return false;
+				OutReceipts.Emplace(
+					Ref->GetJournalId(),
+					EDurableStatus::StateUnknown,
+					Ref->GetRequest().GetPlan()->GetFingerprint(),
+					Ref->GetInventory().GetInventoryHash(),
+					Ref->GetPhaseHistory(),
+					ERecoveryAction::ManualIntervention,
+					false,
+					true,
+					ItemError.GetCode(),
+					ItemError.GetDetail());
+				continue;
 			}
 			const FString& Phase = Ref->GetCurrentPhase();
 			FDurableReceipt Current;
+			bool bProcessed = true;
 			if (Phase == TEXT("inventory_ready")
 				|| Phase == TEXT("backups_ready")
 				|| Phase == TEXT("prepared")
@@ -3676,21 +4616,23 @@ namespace UE::UAI::AssetDurable
 				if (!TryWriteJournal(
 					RolledBack,
 					Resources,
-					OutError)
+					ItemError)
 					|| !TryArchiveTerminal(
 						RolledBack,
 						Resources,
-						OutError))
+						ItemError))
 				{
-					OutReceipts.Reset();
-					return false;
+					bProcessed = false;
 				}
-				Current = Receipt(
-					RolledBack,
-					EDurableStatus::RolledBack,
-					ERecoveryAction::AbortedBeforeMutation,
-					false,
-					true);
+				else
+				{
+					Current = Receipt(
+						RolledBack,
+						EDurableStatus::RolledBack,
+						ERecoveryAction::AbortedBeforeMutation,
+						false,
+						true);
+				}
 			}
 			else if (Phase == TEXT("staged"))
 			{
@@ -3700,10 +4642,9 @@ namespace UE::UAI::AssetDurable
 					Resources,
 					true,
 					Current,
-					OutError))
+					ItemError))
 				{
-					OutReceipts.Reset();
-					return false;
+					bProcessed = false;
 				}
 			}
 			else if (Phase == TEXT("published")
@@ -3723,10 +4664,9 @@ namespace UE::UAI::AssetDurable
 						Resources,
 						true,
 						Current,
-						OutError))
+						ItemError))
 					{
-						OutReceipts.Reset();
-						return false;
+						bProcessed = false;
 					}
 				}
 				else
@@ -3738,17 +4678,19 @@ namespace UE::UAI::AssetDurable
 					if (!TryWriteJournal(
 						Recovery,
 						Resources,
-						OutError))
+						ItemError))
 					{
-						OutReceipts.Reset();
-						return false;
+						bProcessed = false;
 					}
-					Current = Receipt(
-						Recovery,
-						EDurableStatus::RecoveryRequired,
-						ERecoveryAction::VerifyPersisted,
-						true,
-						true);
+					else
+					{
+						Current = Receipt(
+							Recovery,
+							EDurableStatus::RecoveryRequired,
+							ERecoveryAction::VerifyPersisted,
+							true,
+							true);
+					}
 				}
 			}
 			else if (Phase == TEXT("recovery_required"))
@@ -3771,14 +4713,341 @@ namespace UE::UAI::AssetDurable
 			}
 			else
 			{
-				OutReceipts.Reset();
-				OutError = FAssetDurableError(
+				ItemError = FAssetDurableError(
 					TEXT("durable_journal_integrity_invalid"),
 					TEXT("unsupported recovery phase"));
-				return false;
+				bProcessed = false;
+			}
+			if (!bProcessed)
+			{
+				if (IsResourceBudgetError(ItemError))
+				{
+					OutError = ItemError;
+					return false;
+				}
+				OutReceipts.Emplace(
+					Ref->GetJournalId(),
+					EDurableStatus::StateUnknown,
+					Ref->GetRequest().GetPlan()->GetFingerprint(),
+					Ref->GetInventory().GetInventoryHash(),
+					Ref->GetPhaseHistory(),
+					ERecoveryAction::ManualIntervention,
+					false,
+					true,
+					ItemError.GetCode(),
+					ItemError.GetDetail());
+				continue;
 			}
 			OutReceipts.Add(MoveTemp(Current));
 		}
+		return true;
+	}
+
+	bool TryInspectAssetDurableJournal(
+		const FString& JournalRoot,
+		const FString& JournalId,
+		const TArray<FString>& AllowedArtifactRoots,
+		FUeAgentResourceTracker& Resources,
+		FAssetDurableSessionPtr& OutSession,
+		TArray<FDurableArtifactState>& OutObservedStates,
+		FAssetDurableError& OutError)
+	{
+		OutSession.Reset();
+		OutObservedStates.Reset();
+		OutError = FAssetDurableError();
+		const FString NormalizedJournalId = NormalizedText(JournalId);
+		FGuid ParsedJournalId;
+		if (!FGuid::ParseExact(
+				NormalizedJournalId,
+				EGuidFormats::Digits,
+				ParsedJournalId))
+		{
+			OutError = FAssetDurableError(
+				TEXT("durable_journal_id_invalid"));
+			return false;
+		}
+
+		const FString Root = FullPath(JournalRoot);
+		const FString JournalPath = Root
+			/ TEXT("active")
+			/ NormalizedJournalId
+			/ TEXT("journal.json");
+		if (!IsWithin(JournalPath, Root / TEXT("active")))
+		{
+			OutError = FAssetDurableError(
+				TEXT("durable_journal_root_invalid"));
+			return false;
+		}
+		FAssetDurableSessionPtr Loaded;
+		if (!TryLoadSession(
+				JournalPath,
+				Root,
+				AllowedArtifactRoots,
+				Resources,
+				Loaded,
+				OutError)
+			|| !Loaded.IsValid())
+		{
+			if (!OutError.IsPresent())
+			{
+				OutError = FAssetDurableError(
+					TEXT("durable_journal_integrity_invalid"),
+					JournalPath);
+			}
+			return false;
+		}
+		if (Loaded->GetJournalId() != NormalizedJournalId)
+		{
+			OutError = FAssetDurableError(
+				TEXT("durable_journal_identity_mismatch"));
+			return false;
+		}
+
+		TArray<FDurableArtifactState> PreMutationStates;
+		if (!TryResolvePreMutationStates(
+				Loaded.ToSharedRef(),
+				Resources,
+				PreMutationStates,
+				OutError)
+			|| !TryCaptureArtifactStates(
+				Loaded->GetInventory(),
+				TEXT("/c8d/inspect/observed_state"),
+				Resources,
+				OutObservedStates,
+				OutError))
+		{
+			OutObservedStates.Reset();
+			return false;
+		}
+		OutSession = MakeShared<const FAssetDurableSession>(
+			Loaded->GetRequest(),
+			Loaded->GetInventory(),
+			Loaded->GetJournalId(),
+			Loaded->GetJournalPath(),
+			Loaded->GetJournalRoot(),
+			Loaded->GetTransactionRoot(),
+			Loaded->GetStagingRoot(),
+			Loaded->GetPhaseHistory(),
+			MoveTemp(PreMutationStates),
+			Loaded->GetExpectedPersistedStates());
+		return true;
+	}
+
+	bool TryReconcileAssetDurability(
+		const FString& JournalRoot,
+		const FString& JournalId,
+		const TArray<FString>& AllowedArtifactRoots,
+		const FString& ExpectedJournalOwnerId,
+		const int64 ExpectedFencingToken,
+		const FString& VerificationId,
+		IAssetDurableReconciliationOracle& ReconciliationOracle,
+		FUeAgentResourceTracker& Resources,
+		FDurableReceipt& OutReceipt,
+		FAssetDurableError& OutError)
+	{
+		OutReceipt = FDurableReceipt();
+		OutError = FAssetDurableError();
+		const FString NormalizedJournalId = NormalizedText(JournalId);
+		const FString OwnerId = NormalizedText(ExpectedJournalOwnerId);
+		const FString BoundVerificationId = NormalizedText(VerificationId);
+		if (OwnerId.IsEmpty()
+			|| ExpectedFencingToken < 0
+			|| BoundVerificationId.IsEmpty())
+		{
+			OutError = FAssetDurableError(
+				TEXT("durable_reconcile_request_invalid"));
+			return false;
+		}
+
+		FAssetDurableSessionPtr Loaded;
+		TArray<FDurableArtifactState> ObservedStates;
+		if (!TryInspectAssetDurableJournal(
+				JournalRoot,
+				NormalizedJournalId,
+				AllowedArtifactRoots,
+				Resources,
+				Loaded,
+				ObservedStates,
+				OutError))
+		{
+			return false;
+		}
+		FAssetDurableSessionRef Session = Loaded.ToSharedRef();
+		if (Session->GetJournalId() != NormalizedJournalId
+			|| Session->GetRequest().GetJournalOwnerId() != OwnerId
+			|| Session->GetRequest().GetFencingToken()
+				!= ExpectedFencingToken)
+		{
+			OutError = FAssetDurableError(
+				TEXT("durable_reconcile_binding_mismatch"));
+			return false;
+		}
+		const FString& Phase = Session->GetCurrentPhase();
+		const bool bPrePublishPhase = IsPrePublishPhase(Phase);
+		if (!bPrePublishPhase
+			&& Phase != TEXT("published")
+			&& Phase != TEXT("persisted_unverified")
+			&& Phase != TEXT("recovery_required")
+			&& Phase != TEXT("state_unknown"))
+		{
+			OutError = FAssetDurableError(
+				TEXT("durable_reconcile_phase_invalid"),
+				Phase);
+			return false;
+		}
+
+		FBoundTerminalEvidence TerminalEvidence;
+		if (!TryReadBoundCompletedTerminal(
+				Session,
+				Resources,
+				TerminalEvidence,
+				OutError))
+		{
+			return false;
+		}
+		if (TerminalEvidence.bPresent)
+		{
+			const EDurableStatus ProposedStatus =
+				TerminalEvidence.Phase == TEXT("verified")
+					? EDurableStatus::Verified
+					: EDurableStatus::RolledBack;
+			if (!ReconciliationOracle.TryConfirm(
+					Session,
+					ObservedStates,
+					ProposedStatus,
+					Resources,
+					OutError))
+			{
+				if (!OutError.IsPresent())
+				{
+					OutError = FAssetDurableError(
+						TEXT("durable_reconcile_readback_unconfirmed"));
+				}
+				return false;
+			}
+			const FAssetDurableSessionRef Terminal =
+				Advance(Session, TerminalEvidence.Phase);
+			if (!TryWriteJournal(Terminal, Resources, OutError)
+				|| !TryArchiveTerminal(
+					Terminal,
+					Resources,
+					OutError))
+			{
+				return false;
+			}
+			const FString PriorTerminalPhase =
+				TerminalEvidence.PhaseHistory.Num() > 1
+					? TerminalEvidence.PhaseHistory[
+						TerminalEvidence.PhaseHistory.Num() - 2]
+					: FString();
+			const ERecoveryAction RecoveryAction =
+				TerminalEvidence.Phase == TEXT("verified")
+					? ERecoveryAction::VerifyPersisted
+					: TerminalEvidence.Phase == TEXT("rolled_back")
+						&& IsPrePublishPhase(PriorTerminalPhase)
+							? ERecoveryAction::AbortedBeforeMutation
+							: ERecoveryAction::RestoredOriginal;
+			OutReceipt = FDurableReceipt(
+				Terminal->GetJournalId(),
+				ProposedStatus,
+				Terminal->GetRequest().GetPlan()->GetFingerprint(),
+				Terminal->GetInventory().GetInventoryHash(),
+				Terminal->GetPhaseHistory(),
+				RecoveryAction,
+				false,
+				false,
+				FString(),
+				FString(),
+				BoundVerificationId,
+				Terminal->GetPreMutationStates(),
+				Terminal->GetExpectedPersistedStates());
+			return true;
+		}
+
+		const bool bMatchesOriginal = AllStatesMatch(
+			Session->GetInventory(),
+			Session->GetPreMutationStates(),
+			ObservedStates);
+		const bool bMatchesPersisted = AllStatesMatch(
+			Session->GetInventory(),
+			Session->GetExpectedPersistedStates(),
+			ObservedStates);
+		if ((!bPrePublishPhase && bMatchesOriginal == bMatchesPersisted)
+			|| (bPrePublishPhase && !bMatchesOriginal))
+		{
+			const FString FailureCode = bMatchesOriginal
+				? TEXT("durable_reconcile_state_ambiguous")
+				: TEXT("durable_reconcile_evidence_insufficient");
+			const FAssetDurableSessionRef Unknown =
+				Advance(Session, TEXT("state_unknown"));
+			if (!TryWriteJournal(Unknown, Resources, OutError))
+			{
+				return false;
+			}
+			OutReceipt = FDurableReceipt(
+				Unknown->GetJournalId(),
+				EDurableStatus::StateUnknown,
+				Unknown->GetRequest().GetPlan()->GetFingerprint(),
+				Unknown->GetInventory().GetInventoryHash(),
+				Unknown->GetPhaseHistory(),
+				ERecoveryAction::ManualIntervention,
+				false,
+				false,
+				FailureCode,
+				TEXT("observed artifacts do not identify exactly one bound state"),
+				BoundVerificationId,
+				Unknown->GetPreMutationStates(),
+				Unknown->GetExpectedPersistedStates());
+			return true;
+		}
+
+		const FString TerminalPhase = bMatchesOriginal
+			? bPrePublishPhase
+				? TEXT("rolled_back")
+				: TEXT("reconciled_original")
+			: TEXT("verified");
+		const EDurableStatus ProposedStatus = bMatchesOriginal
+			? EDurableStatus::RolledBack
+			: EDurableStatus::Verified;
+		if (!ReconciliationOracle.TryConfirm(
+				Session,
+				ObservedStates,
+				ProposedStatus,
+				Resources,
+				OutError))
+		{
+			if (!OutError.IsPresent())
+			{
+				OutError = FAssetDurableError(
+					TEXT("durable_reconcile_readback_unconfirmed"));
+			}
+			return false;
+		}
+		const FAssetDurableSessionRef Terminal =
+			Advance(Session, TerminalPhase);
+		if (!TryWriteJournal(Terminal, Resources, OutError)
+			|| !TryArchiveTerminal(Terminal, Resources, OutError))
+		{
+			return false;
+		}
+		OutReceipt = FDurableReceipt(
+			Terminal->GetJournalId(),
+			ProposedStatus,
+			Terminal->GetRequest().GetPlan()->GetFingerprint(),
+			Terminal->GetInventory().GetInventoryHash(),
+			Terminal->GetPhaseHistory(),
+			bMatchesOriginal
+				? bPrePublishPhase
+					? ERecoveryAction::AbortedBeforeMutation
+					: ERecoveryAction::RestoredOriginal
+				: ERecoveryAction::VerifyPersisted,
+			false,
+			false,
+			FString(),
+			FString(),
+			BoundVerificationId,
+			Terminal->GetPreMutationStates(),
+			Terminal->GetExpectedPersistedStates());
 		return true;
 	}
 }

@@ -16,6 +16,7 @@ namespace
 			TEXT("mesh.transform.bake"),
 			TEXT("world.object_align"),
 			TEXT("world.object_snap_to_surface"),
+			TEXT("world.object_transform.update"),
 		};
 		return Values;
 	}
@@ -69,7 +70,7 @@ bool FUeAgentWorldSpatialDomainCapabilityAuthorityTest::RunTest(
 		Declaration.Operation.Support,
 		EDomainCapabilitySupport::Supported);
 	TestEqual(
-		TEXT("spatial content declares exactly five mutation operations"),
+		TEXT("spatial content declares exactly six mutation operations"),
 		Declaration.Operation.Operations.Num(),
 		SpatialOperationIds().Num());
 
@@ -138,7 +139,7 @@ bool FUeAgentWorldSpatialDomainCapabilityAuthorityTest::RunTest(
 		Declaration.State.Planes.Contains(
 			UE::UAI::StateSemantic::EUeAgentStatePlane::AuthoringMemory));
 	TestTrue(
-		TEXT("spatial content declares persisted mesh state"),
+		TEXT("spatial content declares persisted actor and mesh state"),
 		Declaration.State.Planes.Contains(
 			UE::UAI::StateSemantic::EUeAgentStatePlane::Persisted));
 	return true;

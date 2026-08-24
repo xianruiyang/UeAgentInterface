@@ -1604,6 +1604,7 @@ namespace UE::UAI::Composition::SimpleAuthoring::Landscape
 				OutTargets.Emplace(
 					Changes[0].GetIdentity(),
 					Target.GetPublicRef(),
+					EPackageHeaderKind::Map,
 					EAssetDurableIntent::Save,
 					ERollbackGrade::DurableBackup);
 				return OutTargets[0].IsValid();

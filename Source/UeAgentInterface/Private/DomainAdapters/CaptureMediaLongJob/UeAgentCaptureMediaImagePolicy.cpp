@@ -1,5 +1,7 @@
 #include "DomainAdapters/CaptureMediaLongJob/UeAgentCaptureMediaImagePolicy.h"
 
+#include <initializer_list>
+
 #include "Core/StateSemantic/UeAgentCanonicalValueJson.h"
 #include "Dom/JsonObject.h"
 #include "HAL/FileManager.h"
@@ -14,6 +16,11 @@ namespace UE::UAI::DomainAdapters::CaptureMediaLongJob
 		const FUeAgentRequestContext&,
 		TSharedPtr<FJsonObject>&,
 		FString&) const;
+	using FArtifactMechanics = bool (FUeAgentLegacyMechanics::*)(
+		const FUeAgentRequestContext&,
+		TSharedPtr<FJsonObject>&,
+		TArray<TSharedPtr<FJsonValue>>&,
+		FString&) const;
 
 	namespace
 	{
@@ -22,7 +29,36 @@ namespace UE::UAI::DomainAdapters::CaptureMediaLongJob
 			FUeAgentCaptureMediaImagePolicyDescriptor Descriptor;
 			FString InternalCommandId;
 			FMechanics Mechanics = nullptr;
+			FArtifactMechanics ArtifactMechanics = nullptr;
 		};
+
+		FString TransformCandidatesParameterSchema()
+		{
+			return TEXT(
+				"{\"$defs\":{\"rotator\":{\"additionalProperties\":false,"
+				"\"properties\":{\"pitch\":{\"type\":\"number\"},"
+				"\"roll\":{\"type\":\"number\"},\"yaw\":{\"type\":\"number\"}},"
+				"\"required\":[\"pitch\",\"yaw\",\"roll\"],\"type\":\"object\"},"
+				"\"vector3\":{\"additionalProperties\":false,\"properties\":{"
+				"\"x\":{\"type\":\"number\"},\"y\":{\"type\":\"number\"},"
+				"\"z\":{\"type\":\"number\"}},\"required\":[\"x\",\"y\",\"z\"],"
+				"\"type\":\"object\"}},\"additionalProperties\":false,\"properties\":{"
+				"\"candidates\":{\"items\":{\"additionalProperties\":false,"
+				"\"properties\":{\"label\":{\"minLength\":1,\"type\":\"string\"},"
+				"\"relative_to_original\":{\"type\":\"boolean\"},\"transform\":{"
+				"\"additionalProperties\":false,\"minProperties\":1,\"properties\":{"
+				"\"location\":{\"$ref\":\"#/$defs/vector3\"},\"rotation\":{"
+				"\"$ref\":\"#/$defs/rotator\"},\"scale\":{\"$ref\":\"#/$defs/vector3\"}},"
+				"\"type\":\"object\"}},\"required\":[\"transform\"],\"type\":\"object\"},"
+				"\"maxItems\":15,\"minItems\":1,\"type\":\"array\"},"
+				"\"format\":{\"enum\":[\"png\",\"jpg\"],\"type\":\"string\"},"
+				"\"frame_sheet_padding\":{\"maximum\":256,\"minimum\":0,\"type\":\"integer\"},"
+				"\"max_size\":{\"maximum\":8192,\"minimum\":64,\"type\":\"integer\"},"
+				"\"output_file\":{\"minLength\":1,\"type\":\"string\"},"
+				"\"quality\":{\"maximum\":100,\"minimum\":1,\"type\":\"integer\"},"
+				"\"warmup_frames\":{\"maximum\":8,\"minimum\":0,\"type\":\"integer\"}},"
+				"\"required\":[\"candidates\"],\"type\":\"object\"}");
+		}
 
 		const TArray<FPolicyRoute>& Routes()
 		{
@@ -75,6 +111,15 @@ namespace UE::UAI::DomainAdapters::CaptureMediaLongJob
 					TEXT("mechanics:capture:texture-source/v1")},
 					TEXT("texture_screenshot"),
 					&FUeAgentLegacyMechanics::CmdTextureScreenshot},
+				{{TEXT("policy:image-capture:transform-candidates/v1"),
+					TEXT("mechanics:capture:transform-candidates-preview/v1"),
+					TransformCandidatesParameterSchema(),
+					TEXT("Use subject_ref capture-subject:actor:<exact Actor object path> and provide 1-15 labeled candidates. The policy captures the original plus each candidate from the current Level Viewport into one frame sheet, restores Actor transform, package dirty state, Actor selection, and viewport realtime state, and does not persist or choose a candidate."),
+					TEXT("Poll operation.status until terminal. Success publishes one frame-sheet artifact and guarantees the preview state was restored; inspect the sheet, then submit the chosen transform separately and release the operation."),
+					TEXT("image_execute(client, {subject_ref, policy_id='policy:image-capture:transform-candidates/v1', parameters={'candidates': [...]}})")},
+					TEXT("probe_actor_transform_candidates"),
+					nullptr,
+					&FUeAgentLegacyMechanics::CmdProbeActorTransformCandidates},
 				{{TEXT("policy:image-capture:umg/v1"),
 					TEXT("mechanics:capture:umg-offscreen-widget/v1")},
 					TEXT("umg_screenshot"),
@@ -101,6 +146,7 @@ namespace UE::UAI::DomainAdapters::CaptureMediaLongJob
 		}
 
 		bool TryProjectParameters(
+			const FPolicyRoute& Route,
 			const FUeAgentCaptureMediaLongJobTypedRequest& Request,
 			const FString& PreferredOutputPath,
 			TSharedPtr<FJsonObject>& OutParameters,
@@ -135,10 +181,22 @@ namespace UE::UAI::DomainAdapters::CaptureMediaLongJob
 				OutParameters->SetStringField(
 					TEXT("asset_path"), Subject.Mid(22));
 			}
-			else if (Subject.StartsWith(TEXT("capture-subject:actor:"))
-				&& !OutParameters->HasField(TEXT("actor")))
+			else if (Subject.StartsWith(TEXT("capture-subject:actor:")))
 			{
-				OutParameters->SetStringField(TEXT("actor"), Subject.Mid(22));
+				const FString ActorRef = Subject.Mid(22);
+				if (Route.Descriptor.GetPolicyId()
+					== TEXT("policy:image-capture:transform-candidates/v1"))
+				{
+					OutParameters->SetStringField(TEXT("id"), ActorRef);
+					OutParameters->SetBoolField(TEXT("create_frame_sheet"), true);
+					OutParameters->SetBoolField(TEXT("write_individual_frames"), false);
+					OutParameters->SetBoolField(TEXT("tick_editor_world"), false);
+					OutParameters->SetNumberField(TEXT("editor_world_tick_frames"), 0);
+				}
+				else if (!OutParameters->HasField(TEXT("actor")))
+				{
+					OutParameters->SetStringField(TEXT("actor"), ActorRef);
+				}
 			}
 			OutFormat = TEXT("png");
 			OutParameters->TryGetStringField(TEXT("format"), OutFormat);
@@ -176,6 +234,18 @@ namespace UE::UAI::DomainAdapters::CaptureMediaLongJob
 			OutParameters->SetStringField(
 				TEXT("output_file"),
 				FPaths::ChangeExtension(PreferredOutputPath, OutFormat));
+			if (Route.Descriptor.GetPolicyId()
+				== TEXT("policy:image-capture:transform-candidates/v1"))
+			{
+				if (!TryNormalizeTransformCandidateParameters(
+						OutParameters, OutError))
+				{
+					return false;
+				}
+				OutParameters->SetStringField(
+					TEXT("frame_sheet_output_file"),
+					FPaths::ChangeExtension(PreferredOutputPath, OutFormat));
+			}
 			return true;
 		}
 
@@ -188,7 +258,8 @@ namespace UE::UAI::DomainAdapters::CaptureMediaLongJob
 			if (Result.IsValid())
 			{
 				for (const TCHAR* Field
-					: {TEXT("file_path"), TEXT("output_file"), TEXT("path")})
+					: {TEXT("frame_sheet_file_path"), TEXT("file_path"),
+						TEXT("output_file"), TEXT("path")})
 				{
 					if (Result->TryGetStringField(Field, OutPath)
 						&& FPaths::FileExists(OutPath))
@@ -206,9 +277,17 @@ namespace UE::UAI::DomainAdapters::CaptureMediaLongJob
 	FUeAgentCaptureMediaImagePolicyDescriptor::
 	FUeAgentCaptureMediaImagePolicyDescriptor(
 		FString InPolicyId,
-		FString InMechanicsId)
+		FString InMechanicsId,
+		FString InParameterSchemaJson,
+		FString InParameterGuidance,
+		FString InResultGuidance,
+		FString InMinimumExample)
 		: PolicyId(MoveTemp(InPolicyId))
 		, MechanicsId(MoveTemp(InMechanicsId))
+		, ParameterSchemaJson(MoveTemp(InParameterSchemaJson))
+		, ParameterGuidance(MoveTemp(InParameterGuidance))
+		, ResultGuidance(MoveTemp(InResultGuidance))
+		, MinimumExample(MoveTemp(InMinimumExample))
 	{
 	}
 
@@ -224,10 +303,47 @@ namespace UE::UAI::DomainAdapters::CaptureMediaLongJob
 		return MechanicsId;
 	}
 
+	const FString& FUeAgentCaptureMediaImagePolicyDescriptor::
+	GetParameterSchemaJson() const
+	{
+		return ParameterSchemaJson;
+	}
+
+	const FString& FUeAgentCaptureMediaImagePolicyDescriptor::
+	GetParameterGuidance() const
+	{
+		return ParameterGuidance;
+	}
+
+	const FString& FUeAgentCaptureMediaImagePolicyDescriptor::
+	GetResultGuidance() const
+	{
+		return ResultGuidance;
+	}
+
+	const FString& FUeAgentCaptureMediaImagePolicyDescriptor::
+	GetMinimumExample() const
+	{
+		return MinimumExample;
+	}
+
+	bool FUeAgentCaptureMediaImagePolicyDescriptor::HasDiscoveryContract() const
+	{
+		return !ParameterSchemaJson.IsEmpty()
+			&& !ParameterGuidance.IsEmpty()
+			&& !ResultGuidance.IsEmpty()
+			&& !MinimumExample.IsEmpty();
+	}
+
 	bool FUeAgentCaptureMediaImagePolicyDescriptor::IsValid() const
 	{
+		const bool bHasAnyDiscoveryField = !ParameterSchemaJson.IsEmpty()
+			|| !ParameterGuidance.IsEmpty()
+			|| !ResultGuidance.IsEmpty()
+			|| !MinimumExample.IsEmpty();
 		return PolicyId.StartsWith(TEXT("policy:image-capture:"))
-			&& MechanicsId.StartsWith(TEXT("mechanics:capture:"));
+			&& MechanicsId.StartsWith(TEXT("mechanics:capture:"))
+			&& (!bHasAnyDiscoveryField || HasDiscoveryContract());
 	}
 
 	const TArray<FUeAgentCaptureMediaImagePolicyDescriptor>&
@@ -249,6 +365,85 @@ namespace UE::UAI::DomainAdapters::CaptureMediaLongJob
 		return Policies;
 	}
 
+	const FUeAgentCaptureMediaImagePolicyDescriptor*
+	FindCaptureMediaImagePolicy(const FString& PolicyId)
+	{
+		return GetCaptureMediaImagePolicies().FindByPredicate(
+			[&PolicyId](const FUeAgentCaptureMediaImagePolicyDescriptor& Policy)
+			{
+				return Policy.GetPolicyId() == PolicyId;
+			});
+	}
+
+	bool TryNormalizeTransformCandidateParameters(
+		const TSharedPtr<FJsonObject>& Parameters,
+		FString& OutError)
+	{
+		OutError.Reset();
+		const TArray<TSharedPtr<FJsonValue>>* Candidates = nullptr;
+		if (!Parameters.IsValid()
+			|| !Parameters->TryGetArrayField(TEXT("candidates"), Candidates)
+			|| !Candidates)
+		{
+			OutError = TEXT("capture_transform_candidates_missing_candidates");
+			return false;
+		}
+		for (const TSharedPtr<FJsonValue>& CandidateValue : *Candidates)
+		{
+			const TSharedPtr<FJsonObject>* Candidate = nullptr;
+			if (!CandidateValue.IsValid()
+				|| !CandidateValue->TryGetObject(Candidate)
+				|| !Candidate || !Candidate->IsValid())
+			{
+				OutError = TEXT("capture_transform_candidate_invalid");
+				return false;
+			}
+			TSharedPtr<FJsonObject> Transform = *Candidate;
+			const TSharedPtr<FJsonObject>* Nested = nullptr;
+			if ((*Candidate)->TryGetObjectField(TEXT("transform"), Nested)
+				&& Nested && Nested->IsValid())
+			{
+				Transform = *Nested;
+			}
+			auto NormalizeField = [&Transform, &OutError](
+				const TCHAR* Field,
+				std::initializer_list<const TCHAR*> ComponentNames)
+			{
+				const TSharedPtr<FJsonObject>* Named = nullptr;
+				if (!Transform->TryGetObjectField(Field, Named)
+					|| !Named || !Named->IsValid()
+					|| (*Named)->HasField(TEXT("components")))
+				{
+					return true;
+				}
+				TArray<TSharedPtr<FJsonValue>> Components;
+				for (const TCHAR* ComponentName : ComponentNames)
+				{
+					double Component = 0.0;
+					if (!(*Named)->TryGetNumberField(ComponentName, Component))
+					{
+						OutError = TEXT("capture_transform_candidate_component_missing:")
+							+ FString(Field) + TEXT(":") + ComponentName;
+						return false;
+					}
+					Components.Add(MakeShared<FJsonValueNumber>(Component));
+				}
+				const TSharedRef<FJsonObject> Canonical = MakeShared<FJsonObject>();
+				Canonical->SetArrayField(TEXT("components"), MoveTemp(Components));
+				Transform->SetObjectField(Field, Canonical);
+				return true;
+			};
+			if (!NormalizeField(TEXT("location"), {TEXT("x"), TEXT("y"), TEXT("z")})
+				|| !NormalizeField(
+					TEXT("rotation"), {TEXT("pitch"), TEXT("yaw"), TEXT("roll")})
+				|| !NormalizeField(TEXT("scale"), {TEXT("x"), TEXT("y"), TEXT("z")}))
+			{
+				return false;
+			}
+		}
+		return true;
+	}
+
 	bool TryExecuteCaptureMediaImagePolicy(
 		const FUeAgentCaptureMediaLongJobTypedRequest& Request,
 		const FString& PreferredOutputPath,
@@ -267,7 +462,9 @@ namespace UE::UAI::DomainAdapters::CaptureMediaLongJob
 			return false;
 		}
 		const FPolicyRoute* Route = FindRoute(Request.GetPolicyId());
-		if (!Route || !Route->Descriptor.IsValid() || !Route->Mechanics)
+		if (!Route
+			|| !Route->Descriptor.IsValid()
+			|| (!Route->Mechanics && !Route->ArtifactMechanics))
 		{
 			OutError = TEXT("capture_image_policy_unsupported:")
 				+ Request.GetPolicyId();
@@ -281,6 +478,7 @@ namespace UE::UAI::DomainAdapters::CaptureMediaLongJob
 		}
 		TSharedPtr<FJsonObject> Parameters;
 		if (!TryProjectParameters(
+				*Route,
 				Request,
 				PreferredOutputPath,
 				Parameters,
@@ -296,10 +494,46 @@ namespace UE::UAI::DomainAdapters::CaptureMediaLongJob
 		Context.Params = Parameters;
 		TSharedPtr<FJsonObject> Result;
 		const FUeAgentLegacyMechanics MechanicsOwner;
-		if (!(MechanicsOwner.*Route->Mechanics)(Context, Result, OutError))
+		bool bExecuted = false;
+		if (Route->Mechanics)
+		{
+			bExecuted = (MechanicsOwner.*Route->Mechanics)(
+				Context, Result, OutError);
+		}
+		else
+		{
+			TArray<TSharedPtr<FJsonValue>> LegacyArtifacts;
+			bExecuted = (MechanicsOwner.*Route->ArtifactMechanics)(
+				Context, Result, LegacyArtifacts, OutError);
+		}
+		if (!bExecuted)
 		{
 			OutError = Route->Descriptor.GetMechanicsId() + TEXT(":") + OutError;
 			return false;
+		}
+		if (Route->Descriptor.GetPolicyId()
+			== TEXT("policy:image-capture:transform-candidates/v1"))
+		{
+			bool bRestored = false;
+			bool bDirtyRestored = false;
+			bool bSelectionRestored = false;
+			bool bViewportRestored = false;
+			if (!Result.IsValid()
+				|| !Result->TryGetBoolField(TEXT("restored"), bRestored)
+				|| !Result->TryGetBoolField(
+					TEXT("dirty_state_restored"), bDirtyRestored)
+				|| !Result->TryGetBoolField(
+					TEXT("selection_restored"), bSelectionRestored)
+				|| !Result->TryGetBoolField(
+					TEXT("viewport_state_restored"), bViewportRestored)
+				|| !bRestored
+				|| !bDirtyRestored
+				|| !bSelectionRestored
+				|| !bViewportRestored)
+			{
+				OutError = TEXT("capture_transform_candidates_restore_unverified");
+				return false;
+			}
 		}
 		if (!TryResolveProducedPath(Result, Parameters, OutProducedPath))
 		{

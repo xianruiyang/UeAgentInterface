@@ -722,6 +722,19 @@ namespace UE::UAI::DomainAdapters::WorldSpatial
 								&& ParseFrame(Frame, P.VerifyFrame, Error);
 						}, Error);
 					}},
+				{TEXT("world.object_transform.update"), TEXT("world_spatial.object_transform.update.request.v1"), TEXT("object_transform"), TEXT("object_transform_update"), true,
+					[](const TSharedPtr<FJsonObject>& Root, FUeAgentWorldSpatialRequestPayload& Out, FUeAgentWorldSpatialExecutionError& Error)
+					{
+						return DecodeAs<FWorldObjectTransformUpdateRequestInput>(Root, Out, [&](FWorldObjectTransformUpdateRequestInput& P)
+						{
+							TSharedPtr<FJsonObject> Transform;
+							TSharedPtr<FJsonObject> Revision;
+							return RequiredObject(Root, TEXT("transform"), Transform, Error)
+								&& ParseSpatialValue(Transform, P.Transform, Error)
+								&& RequiredObject(Root, TEXT("expected_revision"), Revision, Error)
+								&& ParseRevision(Revision, P.ExpectedRevision, Error);
+						}, Error);
+					}},
 				{TEXT("world.object_align"), TEXT("world_spatial.object_transform.align.request.v1"), TEXT("object_transform"), TEXT("object_align"), true,
 					[](const TSharedPtr<FJsonObject>& Root, FUeAgentWorldSpatialRequestPayload& Out, FUeAgentWorldSpatialExecutionError& Error)
 					{
@@ -800,18 +813,6 @@ namespace UE::UAI::DomainAdapters::WorldSpatial
 								P.PreserveWorldGeometry = Preserve;
 							}
 							return true;
-						}, Error);
-					}},
-				{TEXT("world.transform_candidates.evaluate"), TEXT("world_spatial.object_transform.evaluate_candidates.request.v1"), TEXT("object_transform"), TEXT("transform_candidates_evaluate"), false,
-					[](const TSharedPtr<FJsonObject>& Root, FUeAgentWorldSpatialRequestPayload& Out, FUeAgentWorldSpatialExecutionError& Error)
-					{
-						return DecodeAs<FTransformCandidatesEvaluateRequestInput>(Root, Out, [&](FTransformCandidatesEvaluateRequestInput& P)
-						{
-							TSharedPtr<FJsonObject> Frame;
-							return StringArray(Root, TEXT("subject_refs"), P.SubjectRefs, Error)
-								&& ObjectArray(Root, TEXT("candidates"), P.Candidates, ParseSpatialValue, Error)
-								&& RequiredObject(Root, TEXT("verify_frame"), Frame, Error)
-								&& ParseFrame(Frame, P.VerifyFrame, Error);
 						}, Error);
 					}},
 				{TEXT("viewport.ray.deproject"), TEXT("world_spatial.viewport_projection.deproject.request.v1"), TEXT("viewport_projection"), TEXT("viewport_ray_deproject"), false,
@@ -1654,6 +1655,18 @@ namespace UE::UAI::DomainAdapters::WorldSpatial
 					&& Builder.Add(Fields, TEXT("node_placements"), PlacementArray)
 					&& Builder.Add(Fields, TEXT("expected_revision"), Revision)
 					&& Builder.Add(Fields, TEXT("layout_relations"), RelationArray)
+					&& Builder.Object(Fields, Out);
+			}
+			if (Payload.IsType<FWorldObjectTransformUpdateRequestInput>())
+			{
+				const FWorldObjectTransformUpdateRequestInput& Value =
+					Payload.Get<FWorldObjectTransformUpdateRequestInput>();
+				FUeAgentCanonicalValuePtr Transform;
+				FUeAgentCanonicalValuePtr Revision;
+				return Builder.SpatialValue(Value.Transform, Transform)
+					&& Builder.Revision(Value.ExpectedRevision, Revision)
+					&& Builder.Add(Fields, TEXT("transform"), Transform)
+					&& Builder.Add(Fields, TEXT("expected_revision"), Revision)
 					&& Builder.Object(Fields, Out);
 			}
 			if (Payload.IsType<FWorldObjectAlignRequestInput>())

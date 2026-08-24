@@ -121,14 +121,13 @@
       }
     },
     {
-      "capability_id": "world.transform_candidates.evaluate",
+      "capability_id": "world.object_transform.update",
       "family_id": "object_transform",
-      "request_kind": "transform_candidates_evaluate",
-      "typed_request_id": "world_spatial.object_transform.evaluate_candidates.request.v1",
+      "request_kind": "object_transform_update",
+      "typed_request_id": "world_spatial.object_transform.update.request.v1",
       "valid_input": {
-        "subject_refs": ["actor:subject"],
-        "candidates": [{"subject":"actor:subject","quantity":"transform","frame":{"frame_id":"fixture.subject.semantic","basis_frame_id":"unreal.world","dimension":3,"unit":"centimeter","basis_evidence_id":"basis:candidate","observed_at":{"clock_id":"editor","tick":"127","rate_numerator":"60","rate_denominator":"1","state":"frozen"}},"components":["0","0","0","0","0","0","1","1","1","1"],"conversion_evidence_ids":["convert:candidate"]}],
-        "verify_frame": {"frame_id":"fixture.subject.semantic","basis_frame_id":"unreal.world","dimension":3,"unit":"centimeter","basis_evidence_id":"basis:world","observed_at":{"clock_id":"editor","tick":"127","rate_numerator":"60","rate_denominator":"1","state":"frozen"}}
+        "transform": {"subject":"actor:subject","quantity":"transform","frame":{"frame_id":"unreal.world","basis_frame_id":"unreal.world","dimension":3,"unit":"centimeter","basis_evidence_id":"basis:world","observed_at":{"clock_id":"editor","tick":"127","rate_numerator":"60","rate_denominator":"1","state":"frozen"}},"components":["100","200","300","0","0","0","1","1","1","1"],"conversion_evidence_ids":["convert:actor-transform"]},
+        "expected_revision": {"source_id":"actor:subject","generation":"gen-1","sequence":3}
       }
     },
     {

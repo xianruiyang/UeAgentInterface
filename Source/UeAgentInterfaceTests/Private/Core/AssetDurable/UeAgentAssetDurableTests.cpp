@@ -2,6 +2,7 @@
 
 #include "Core/AssetDurable/UeAgentAssetDurable.h"
 #include "Core/AssetDurable/UeAgentPackageHeader.h"
+#include "Core/AssetDurable/UeAgentPackageAssetRevision.h"
 #include "Core/ContextResource/UeAgentContextResource.h"
 #include "Core/Contract/UeAgentContract.h"
 #include "Core/PlanningPreflight/UeAgentPlanningPreflight.h"
@@ -552,6 +553,28 @@ namespace
 		FString ObservedState = TEXT("original");
 	};
 
+	class FAcceptingReconciliationOracle final
+		: public IAssetDurableReconciliationOracle
+	{
+	public:
+		virtual bool TryConfirm(
+			const FAssetDurableSessionRef& Session,
+			const TArray<FDurableArtifactState>& ObservedStates,
+			const EDurableStatus ProposedStatus,
+			FUeAgentResourceTracker& Resources,
+			FAssetDurableError& OutError) override
+		{
+			++ConfirmCount;
+			LastStatus = ProposedStatus;
+			OutError = FAssetDurableError();
+			return Session->GetInventory().GetArtifacts().Num()
+				== ObservedStates.Num();
+		}
+
+		int32 ConfirmCount = 0;
+		EDurableStatus LastStatus = EDurableStatus::StateUnknown;
+	};
+
 	static FAssetDurableRequest MakeRequest(
 		FUeAgentResourceTracker& Tracker,
 		const EAtomicityMode Atomicity =
@@ -563,11 +586,13 @@ namespace
 				FAssetDurableTarget(
 					MakeIdentity(false),
 					TEXT("/Game/UAI/P4_009/SaveAsset"),
+					EPackageHeaderKind::EvidenceRequired,
 					EAssetDurableIntent::Save,
 					ERollbackGrade::DurableBackup),
 				FAssetDurableTarget(
 					MakeIdentity(true),
 					TEXT("/Game/UAI/P4_009/DeleteAsset"),
+					EPackageHeaderKind::EvidenceRequired,
 					EAssetDurableIntent::Delete,
 					ERollbackGrade::DurableBackup)
 			},
@@ -587,6 +612,7 @@ namespace
 				FAssetDurableTarget(
 					MakeIdentity(bDelete),
 					Fixture.PackageName,
+					EPackageHeaderKind::Asset,
 					bDelete
 						? EAssetDurableIntent::Delete
 						: EAssetDurableIntent::Save,
@@ -625,6 +651,146 @@ bool FUeAgentAssetDurableModuleAvailableTest::RunTest(
 }
 
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(
+	FUeAgentAssetDurableAbsentUnloadedMapInitialInventoryTest,
+	"UeAgentInterface.Core.AssetDurable.AbsentUnloadedMapInitialInventory",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FUeAgentAssetDurableAbsentUnloadedMapInitialInventoryTest::RunTest(
+	const FString& Parameters)
+{
+	const FString Suffix = FGuid::NewGuid().ToString(EGuidFormats::Digits);
+	const FString PackageName =
+		TEXT("/Game/UAI/P4_010/AbsentMap_") + Suffix;
+	FString AssetPath;
+	FString MapPath;
+	TestTrue(TEXT("resolve absent asset header path"),
+		FPackageName::TryConvertLongPackageNameToFilename(
+			PackageName,
+			AssetPath,
+			FPackageName::GetAssetPackageExtension()));
+	TestTrue(TEXT("resolve absent map header path"),
+		FPackageName::TryConvertLongPackageNameToFilename(
+			PackageName,
+			MapPath,
+			FPackageName::GetMapPackageExtension()));
+	AssetPath = FPaths::ConvertRelativePathToFull(AssetPath);
+	MapPath = FPaths::ConvertRelativePathToFull(MapPath);
+	IFileManager::Get().Delete(*AssetPath, false, true, true);
+	IFileManager::Get().Delete(*MapPath, false, true, true);
+	TestFalse(TEXT("fixture asset header is absent"),
+		IFileManager::Get().FileExists(*AssetPath));
+	TestFalse(TEXT("fixture map header is absent"),
+		IFileManager::Get().FileExists(*MapPath));
+	TestNull(TEXT("fixture package is not loaded"),
+		FindPackage(nullptr, *PackageName));
+
+	FUeAgentResourceTracker Tracker = MakeTracker();
+	const FAssetDurableRequest Request(
+		MakePlan(Tracker),
+		{FAssetDurableTarget(
+			MakeIdentity(false),
+			PackageName,
+			EPackageHeaderKind::Map,
+			EAssetDurableIntent::Save,
+			ERollbackGrade::DurableBackup)},
+		41,
+		TEXT("owned-worker:p4-010-absent-map"),
+		EAtomicityMode::CompensatedSaga);
+	const FString JournalRoot = FPaths::ConvertRelativePathToFull(
+		FPaths::ProjectIntermediateDir()
+			/ TEXT("UAI/P4_010/absent-map")
+			/ Suffix);
+	FPackageAssetDurableBackend Backend;
+	FAssetDurableSessionPtr Session;
+	FAssetDurableError Error;
+	if (!TestTrue(TEXT("formal prepare builds absent map inventory"),
+		TryPrepareAssetDurability(
+			Request,
+			Backend,
+			JournalRoot,
+			Tracker,
+			Session,
+			Error)))
+	{
+		AddError(Error.GetCode() + TEXT(":") + Error.GetDetail());
+		IFileManager::Get().DeleteDirectory(*JournalRoot, false, true);
+		return false;
+	}
+	if (!TestTrue(TEXT("prepared map session exists"), Session.IsValid()))
+	{
+		IFileManager::Get().DeleteDirectory(*JournalRoot, false, true);
+		return false;
+	}
+	bool bSawMapHeader = false;
+	bool bSawAssetHeader = false;
+	for (const FDurableArtifact& Artifact :
+		Session->GetInventory().GetArtifacts())
+	{
+		if (Artifact.GetRole() != TEXT("package_header"))
+		{
+			continue;
+		}
+		bSawMapHeader |= Artifact.GetFinalPath().Equals(
+			MapPath, ESearchCase::IgnoreCase);
+		bSawAssetHeader |= Artifact.GetFinalPath().Equals(
+			AssetPath, ESearchCase::IgnoreCase);
+	}
+	TestTrue(TEXT("initial inventory registers the explicit map header"),
+		bSawMapHeader);
+	TestFalse(TEXT("initial inventory never invents an asset header"),
+		bSawAssetHeader);
+	TestFalse(TEXT("prepare does not create the map header"),
+		IFileManager::Get().FileExists(*MapPath));
+	TestFalse(TEXT("prepare does not create an asset header"),
+		IFileManager::Get().FileExists(*AssetPath));
+	IFileManager::Get().DeleteDirectory(*JournalRoot, false, true);
+	return !HasAnyErrors();
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(
+	FUeAgentAssetDurableStableRevisionTest,
+	"UeAgentInterface.Core.AssetDurable.StableAssetRevision",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FUeAgentAssetDurableStableRevisionTest::RunTest(
+	const FString& Parameters)
+{
+	const FString Suffix = FGuid::NewGuid().ToString(EGuidFormats::Digits);
+	const FString PackageName = TEXT("/Game/UAI/P4_Revision/Fixture_") + Suffix;
+	FString HeaderPath;
+	TestTrue(TEXT("resolve durable revision fixture path"),
+		FPackageName::TryConvertLongPackageNameToFilename(
+			PackageName,
+			HeaderPath,
+			FPackageName::GetAssetPackageExtension()));
+	IFileManager::Get().MakeDirectory(*FPaths::GetPath(HeaderPath), true);
+	TestTrue(TEXT("write durable revision fixture"),
+		FFileHelper::SaveStringToFile(TEXT("stable-package-bytes"), *HeaderPath));
+	UPackage* const Package = CreatePackage(*PackageName);
+	UTexture2D* const Asset = NewObject<UTexture2D>(
+		Package,
+		*FPackageName::GetLongPackageAssetName(PackageName),
+		RF_Public | RF_Standalone);
+	const FString First = ReadStableAssetRevision(Asset);
+	const FString Second = ReadStableAssetRevision(Asset);
+	TestTrue(TEXT("file-backed object uses durable package revision"),
+		First.StartsWith(TEXT("package-md5:")));
+	TestEqual(TEXT("repeated file-backed reads are stable"), First, Second);
+
+	UTexture2D* const Transient =
+		NewObject<UTexture2D>(GetTransientPackage());
+	const FString TransientRevision = ReadStableAssetRevision(Transient);
+	TestTrue(TEXT("transient object retains CRC fallback"),
+		TransientRevision.StartsWith(TEXT("asset-crc32:")));
+
+	IFileManager::Get().Delete(*HeaderPath, false, true, true);
+	Asset->MarkAsGarbage();
+	Package->MarkAsGarbage();
+	Transient->MarkAsGarbage();
+	return !HasAnyErrors();
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(
 	FUeAgentAssetDurablePackageHeaderExtensionTest,
 	"UeAgentInterface.Core.AssetDurable.PackageHeaderExtension",
 	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
@@ -632,6 +798,31 @@ IMPLEMENT_SIMPLE_AUTOMATION_TEST(
 bool FUeAgentAssetDurablePackageHeaderExtensionTest::RunTest(
 	const FString& Parameters)
 {
+	const FString NoEvidencePackage = TEXT("/Game/UAI/P4_010/NoEvidence_")
+		+ FGuid::NewGuid().ToString(EGuidFormats::Digits);
+	FString ResolvedPath;
+	FString ErrorCode;
+	TestFalse(TEXT("header kind evidence is required when no package evidence exists"),
+		TryResolvePackageHeaderFilename(
+			NoEvidencePackage,
+			EPackageHeaderKind::EvidenceRequired,
+			ResolvedPath,
+			ErrorCode));
+	TestEqual(TEXT("missing header kind evidence is typed"), ErrorCode,
+		FString(TEXT("durable_package_header_kind_evidence_required")));
+	TestTrue(TEXT("explicit asset kind selects uasset without evidence"),
+		TryResolvePackageHeaderFilename(
+			NoEvidencePackage, EPackageHeaderKind::Asset,
+			ResolvedPath, ErrorCode));
+	TestTrue(TEXT("explicit asset extension"),
+		ResolvedPath.EndsWith(FPackageName::GetAssetPackageExtension()));
+	TestTrue(TEXT("explicit map kind selects umap without evidence"),
+		TryResolvePackageHeaderFilename(
+			NoEvidencePackage, EPackageHeaderKind::Map,
+			ResolvedPath, ErrorCode));
+	TestTrue(TEXT("explicit map extension"),
+		ResolvedPath.EndsWith(FPackageName::GetMapPackageExtension()));
+
 	const FString PackageName = TEXT("/Game/UAI/P4_010/MapHeader_")
 		+ FGuid::NewGuid().ToString(EGuidFormats::Digits);
 	FString MapPath;
@@ -655,12 +846,13 @@ bool FUeAgentAssetDurablePackageHeaderExtensionTest::RunTest(
 		TEXT("create exact map-header witness"),
 		FFileHelper::SaveStringToFile(TEXT("map"), *MapPath));
 
-	FString ResolvedPath;
-	FString ErrorCode;
+	ResolvedPath.Reset();
+	ErrorCode.Reset();
 	TestTrue(
 		TEXT("an unloaded package reuses its existing map extension"),
 		TryResolvePackageHeaderFilename(
 			PackageName,
+			EPackageHeaderKind::EvidenceRequired,
 			ResolvedPath,
 			ErrorCode));
 	TestEqual(
@@ -691,6 +883,16 @@ bool FUeAgentAssetDurablePackageHeaderExtensionTest::RunTest(
 		TEXT("save preflight preserves the map header"),
 		ResolvedPath,
 		MapPath);
+	ResolvedPath.Reset();
+	ErrorCode.Reset();
+	TestFalse(TEXT("explicit asset kind conflicts with loaded world evidence"),
+		TryResolvePackageHeaderFilename(
+			PackageName,
+			EPackageHeaderKind::Asset,
+			ResolvedPath,
+			ErrorCode));
+	TestEqual(TEXT("loaded opposite kind conflict is typed"), ErrorCode,
+		FString(TEXT("durable_package_extension_kind_mismatch")));
 
 	TestTrue(
 		TEXT("create conflicting asset-header witness"),
@@ -701,6 +903,7 @@ bool FUeAgentAssetDurablePackageHeaderExtensionTest::RunTest(
 		TEXT("two extensions for one package fail closed"),
 		TryResolvePackageHeaderFilename(
 			PackageName,
+			EPackageHeaderKind::EvidenceRequired,
 			ResolvedPath,
 			ErrorCode));
 	TestEqual(
@@ -726,8 +929,42 @@ bool FUeAgentAssetDurablePrepareJournalTest::RunTest(
 	FOwnedDiskFixture Fixture(TEXT("prepare"));
 	FRecordingAssetBackend Backend(Fixture);
 	FUeAgentResourceTracker Tracker = MakeTracker();
-	FAssetDurableSessionPtr Session;
+	int64 FirstFence = -1;
+	int64 SecondFence = -1;
 	FAssetDurableError Error;
+	TestTrue(
+		TEXT("stable journal owner acquires first durable fence"),
+		TryAcquireAssetDurableFence(
+			Fixture.JournalRoot,
+			TEXT("project:fixture:asset-durable"),
+			Tracker,
+			FirstFence,
+			Error));
+	TestTrue(
+		TEXT("stable journal owner advances durable fence"),
+		TryAcquireAssetDurableFence(
+			Fixture.JournalRoot,
+			TEXT("project:fixture:asset-durable"),
+			Tracker,
+			SecondFence,
+			Error));
+	TestEqual(TEXT("first durable fence starts at zero"), FirstFence, int64(0));
+	TestEqual(TEXT("durable fence is monotonic"), SecondFence, int64(1));
+	int64 ForeignFence = -1;
+	TestFalse(
+		TEXT("same fence store rejects a foreign stable owner"),
+		TryAcquireAssetDurableFence(
+			Fixture.JournalRoot,
+			TEXT("project:other:asset-durable"),
+			Tracker,
+			ForeignFence,
+			Error));
+	TestEqual(
+		TEXT("foreign fence owner failure is typed"),
+		Error.GetCode(),
+		FString(TEXT("durable_fence_store_integrity_invalid")));
+	FAssetDurableSessionPtr Session;
+	Error = FAssetDurableError();
 	TestTrue(
 		TEXT("typed C6 plan prepares C8D"),
 		TryPrepareAssetDurability(
@@ -767,6 +1004,25 @@ bool FUeAgentAssetDurablePrepareJournalTest::RunTest(
 		TEXT("journal binds C6 fingerprint"),
 		JournalText.Contains(
 			Session->GetRequest().GetPlan()->GetFingerprint()));
+	TestTrue(
+		TEXT("journal uses state-bound v3 schema"),
+		JournalText.Contains(
+			TEXT("uai.c8d.asset_durable.journal.v3")));
+	TestEqual(
+		TEXT("prepared session binds one pre-state per artifact"),
+		Session->GetPreMutationStates().Num(),
+		Session->GetInventory().GetArtifacts().Num());
+	TestTrue(
+		TEXT("prepared pre-states are known"),
+		Session->GetPreMutationStates().ContainsByPredicate(
+			[](const FDurableArtifactState& State)
+			{
+				return !State.IsKnown();
+			}) == false);
+	TestEqual(
+		TEXT("persisted evidence is not guessed before publish"),
+		Session->GetExpectedPersistedStates().Num(),
+		0);
 	TestEqual(
 		TEXT("prepare performs no durable mutation"),
 		Backend.MutationEvents.Num(),
@@ -805,8 +1061,12 @@ bool FUeAgentAssetDurableDynamicEnrollmentTest::RunTest(
 	const FAssetDurableTarget ExternalTarget(
 		MakeIdentity(false),
 		TEXT("/Game/UAI/P4_009/ExternalActor"),
+		EPackageHeaderKind::EvidenceRequired,
 		EAssetDurableIntent::Save,
 		ERollbackGrade::DurableBackup);
+	TestEqual(TEXT("package target stores explicit header kind"),
+		ExternalTarget.GetPackageHeaderKind(),
+		EPackageHeaderKind::EvidenceRequired);
 	FAssetDurableSessionPtr Rejected;
 	TestFalse(
 		TEXT("dynamic enrollment rechecks the fencing token"),
@@ -838,6 +1098,7 @@ bool FUeAgentAssetDurableDynamicEnrollmentTest::RunTest(
 				FAssetDurableTarget(
 					UnknownIdentity,
 					TEXT("/Game/UAI/P4_009/Unknown"),
+					EPackageHeaderKind::EvidenceRequired,
 					EAssetDurableIntent::Save,
 					ERollbackGrade::DurableBackup),
 			},
@@ -859,6 +1120,7 @@ bool FUeAgentAssetDurableDynamicEnrollmentTest::RunTest(
 				FAssetDurableTarget(
 					MakeIdentity(true),
 					TEXT("/Game/UAI/P4_009/SaveAsset"),
+					EPackageHeaderKind::EvidenceRequired,
 					EAssetDurableIntent::Delete,
 					ERollbackGrade::DurableBackup),
 			},
@@ -871,6 +1133,23 @@ bool FUeAgentAssetDurableDynamicEnrollmentTest::RunTest(
 		TEXT("physical intent conflicts are typed"),
 		Error.GetCode(),
 		FString(TEXT("durable_enlist_target_conflict")));
+	TestFalse(
+		TEXT("one physical package cannot change header kind while enlisted"),
+		TryEnlistAssetDurableTargets(
+			Session.ToSharedRef(),
+			{FAssetDurableTarget(
+				MakeIdentity(false),
+				TEXT("/Game/UAI/P4_009/SaveAsset"),
+				EPackageHeaderKind::Map,
+				EAssetDurableIntent::Save,
+				ERollbackGrade::DurableBackup)},
+			Backend,
+			41,
+			Tracker,
+			Rejected,
+			Error));
+	TestEqual(TEXT("physical header kind conflicts are typed"),
+		Error.GetCode(), FString(TEXT("durable_enlist_target_conflict")));
 
 	FAssetDurableSessionPtr Extended;
 	if (!TestTrue(
@@ -1256,6 +1535,460 @@ bool FUeAgentAssetDurableRollbackRecoveryTest::RunTest(
 }
 
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(
+	FUeAgentAssetDurableReconciliationTest,
+	"UeAgentInterface.Core.AssetDurable.StateBoundReconciliation",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FUeAgentAssetDurableReconciliationTest::RunTest(
+	const FString& Parameters)
+{
+	(void)Parameters;
+	FUeAgentResourceTracker Tracker = MakeTracker();
+	FAssetDurableError Error;
+	FAcceptingReconciliationOracle ReconciliationOracle;
+
+	FOwnedDiskFixture PersistedFixture(TEXT("reconcile_persisted"));
+	FRecordingAssetBackend PersistedBackend(PersistedFixture);
+	FAssetDurableSessionPtr PersistedSession;
+	if (!TestTrue(
+			TEXT("persisted fixture prepares"),
+			TryPrepareAssetDurability(
+				MakeRequest(Tracker),
+				PersistedBackend,
+				PersistedFixture.JournalRoot,
+				Tracker,
+				PersistedSession,
+				Error)))
+	{
+		return false;
+	}
+	FDurableReceipt PersistReceipt;
+	if (!TestTrue(
+			TEXT("persisted fixture publishes"),
+			TryPersistAssetDurability(
+				PersistedSession.ToSharedRef(),
+				PersistedBackend,
+				41,
+				Tracker,
+				PersistReceipt,
+				Error)))
+	{
+		return false;
+	}
+	const FString CompletedRoot =
+		PersistedFixture.JournalRoot / TEXT("completed");
+	IFileManager::Get().MakeDirectory(*CompletedRoot, true);
+	const FString ExistingCompleted = CompletedRoot
+		/ (PersistedSession->GetJournalId() + TEXT(".json"));
+	TestTrue(
+		TEXT("pre-existing terminal receipt fixture writes"),
+		FFileHelper::SaveStringToFile(
+			TEXT("prior-terminal-receipt"),
+			*ExistingCompleted));
+	const int32 PersistMutationCount =
+		PersistedBackend.MutationEvents.Num();
+	FDurableReceipt VerifiedReceipt;
+	TestTrue(
+		TEXT("bound persisted state reconciles without replay"),
+		TryReconcileAssetDurability(
+			PersistedFixture.JournalRoot,
+			PersistedSession->GetJournalId(),
+			PersistedBackend.GetAllowedArtifactRoots(),
+			TEXT("owned-worker:p4-009"),
+			41,
+			TEXT("verification:persisted"),
+			ReconciliationOracle,
+			Tracker,
+			VerifiedReceipt,
+			Error));
+	TestEqual(
+		TEXT("persisted state becomes verified"),
+		VerifiedReceipt.GetStatus(),
+		EDurableStatus::Verified);
+	TestEqual(
+		TEXT("verification receipt is bound"),
+		VerifiedReceipt.GetVerificationId(),
+		FString(TEXT("verification:persisted")));
+	TestEqual(
+		TEXT("reconciliation never replays mutation"),
+		PersistedBackend.MutationEvents.Num(),
+		PersistMutationCount);
+	TestFalse(
+		TEXT("verified journal leaves active root"),
+		IFileManager::Get().DirectoryExists(
+			*PersistedSession->GetTransactionRoot()));
+	FString ExistingCompletedText;
+	TestTrue(
+		TEXT("pre-existing same-id receipt remains readable"),
+		FFileHelper::LoadFileToString(
+			ExistingCompletedText,
+			*ExistingCompleted));
+	TestEqual(
+		TEXT("same-id receipt is never overwritten"),
+		ExistingCompletedText,
+		FString(TEXT("prior-terminal-receipt")));
+	TArray<FString> CollisionArchives;
+	IFileManager::Get().FindFiles(
+		CollisionArchives,
+		*(CompletedRoot
+			/ (PersistedSession->GetJournalId()
+				+ TEXT(".*.json"))),
+		true,
+		false);
+	TestEqual(
+		TEXT("new terminal evidence receives a collision-safe name"),
+		CollisionArchives.Num(),
+		1);
+
+	FOwnedDiskFixture OriginalFixture(TEXT("reconcile_original"));
+	FRecordingAssetBackend OriginalBackend(OriginalFixture);
+	OriginalBackend.bFailPublishAfterMutation = true;
+	OriginalBackend.bRestoreConfirmed = false;
+	FAssetDurableSessionPtr OriginalSession;
+	TestTrue(
+		TEXT("original fixture prepares"),
+		TryPrepareAssetDurability(
+			MakeRequest(Tracker),
+			OriginalBackend,
+			OriginalFixture.JournalRoot,
+			Tracker,
+			OriginalSession,
+			Error));
+	FDurableReceipt UnknownReceipt;
+	TestTrue(
+		TEXT("unconfirmed restore records state_unknown"),
+		TryPersistAssetDurability(
+			OriginalSession.ToSharedRef(),
+			OriginalBackend,
+			41,
+			Tracker,
+			UnknownReceipt,
+			Error));
+	const int32 OriginalMutationCount =
+		OriginalBackend.MutationEvents.Num();
+	FDurableReceipt OriginalReceipt;
+	TestTrue(
+		TEXT("bound original state reconciles without replay"),
+		TryReconcileAssetDurability(
+			OriginalFixture.JournalRoot,
+			OriginalSession->GetJournalId(),
+			OriginalBackend.GetAllowedArtifactRoots(),
+			TEXT("owned-worker:p4-009"),
+			41,
+			TEXT("verification:original"),
+			ReconciliationOracle,
+			Tracker,
+			OriginalReceipt,
+			Error));
+	TestEqual(
+		TEXT("original state becomes terminal rolled_back"),
+		OriginalReceipt.GetStatus(),
+		EDurableStatus::RolledBack);
+	TestEqual(
+		TEXT("original reconciliation records restoration result"),
+		OriginalReceipt.GetRecoveryAction(),
+		ERecoveryAction::RestoredOriginal);
+	TestEqual(
+		TEXT("original reconciliation does not replay restore"),
+		OriginalBackend.MutationEvents.Num(),
+		OriginalMutationCount);
+
+	FOwnedDiskFixture PreparedFixture(TEXT("reconcile_prepared"));
+	FRecordingAssetBackend PreparedBackend(PreparedFixture);
+	FAssetDurableSessionPtr PreparedSession;
+	TestTrue(
+		TEXT("prepared fixture prepares"),
+		TryPrepareAssetDurability(
+			MakeRequest(Tracker),
+			PreparedBackend,
+			PreparedFixture.JournalRoot,
+			Tracker,
+			PreparedSession,
+			Error));
+	FAssetDurableSessionPtr InspectedPrepared;
+	TArray<FDurableArtifactState> PreparedObservedStates;
+	if (!TestTrue(
+		TEXT("prepared journal can be inspected without its volatile session"),
+		TryInspectAssetDurableJournal(
+			PreparedFixture.JournalRoot,
+			PreparedSession->GetJournalId(),
+			PreparedBackend.GetAllowedArtifactRoots(),
+			Tracker,
+			InspectedPrepared,
+			PreparedObservedStates,
+			Error)))
+	{
+		return false;
+	}
+	TestEqual(
+		TEXT("inspection preserves stable owner binding"),
+		InspectedPrepared->GetRequest().GetJournalOwnerId(),
+		FString(TEXT("owned-worker:p4-009")));
+	TestEqual(
+		TEXT("inspection preserves fence binding"),
+		InspectedPrepared->GetRequest().GetFencingToken(),
+		static_cast<int64>(41));
+	const int32 PreparedMutationCount =
+		PreparedBackend.MutationEvents.Num();
+	FDurableReceipt PreparedReceipt;
+	TestTrue(
+		TEXT("prepared journal aborts from bound original evidence"),
+		TryReconcileAssetDurability(
+			PreparedFixture.JournalRoot,
+			PreparedSession->GetJournalId(),
+			PreparedBackend.GetAllowedArtifactRoots(),
+			TEXT("owned-worker:p4-009"),
+			41,
+			TEXT("verification:prepared"),
+			ReconciliationOracle,
+			Tracker,
+			PreparedReceipt,
+			Error));
+	TestEqual(
+		TEXT("prepared journal becomes terminal rolled_back"),
+		PreparedReceipt.GetStatus(),
+		EDurableStatus::RolledBack);
+	TestEqual(
+		TEXT("prepared journal records no-mutation abort"),
+		PreparedReceipt.GetRecoveryAction(),
+		ERecoveryAction::AbortedBeforeMutation);
+	TestEqual(
+		TEXT("prepared reconciliation never invokes backend mutation"),
+		PreparedBackend.MutationEvents.Num(),
+		PreparedMutationCount);
+
+	FOwnedDiskFixture TerminalForkFixture(TEXT("reconcile_terminal_fork"));
+	FRecordingAssetBackend TerminalForkBackend(TerminalForkFixture);
+	FAssetDurableSessionPtr TerminalForkSession;
+	if (!TestTrue(
+			TEXT("terminal fork fixture prepares"),
+			TryPrepareAssetDurability(
+				MakeRequest(Tracker),
+				TerminalForkBackend,
+				TerminalForkFixture.JournalRoot,
+				Tracker,
+				TerminalForkSession,
+				Error)))
+	{
+		return false;
+	}
+	FString PreparedJournalText;
+	TestTrue(
+		TEXT("prepared journal is retained for historical fork simulation"),
+		FFileHelper::LoadFileToString(
+			PreparedJournalText,
+			*TerminalForkSession->GetJournalPath()));
+	TArray<FDurableReceipt> TerminalForkRecoveryReceipts;
+	TestTrue(
+		TEXT("prepared recovery records a terminal receipt"),
+		TryRecoverAssetDurability(
+			TerminalForkFixture.JournalRoot,
+			TerminalForkBackend,
+			41,
+			TEXT("owned-worker:p4-009"),
+			Tracker,
+			TerminalForkRecoveryReceipts,
+			Error));
+	TestEqual(
+		TEXT("prepared recovery has one terminal result"),
+		TerminalForkRecoveryReceipts.Num(),
+		1);
+	const FString TerminalForkCompletedPath =
+		TerminalForkFixture.JournalRoot
+		/ TEXT("completed")
+		/ (TerminalForkSession->GetJournalId() + TEXT(".json"));
+	FString OriginalTerminalReceipt;
+	TestTrue(
+		TEXT("terminal receipt remains available as durable evidence"),
+		FFileHelper::LoadFileToString(
+			OriginalTerminalReceipt,
+			*TerminalForkCompletedPath));
+
+	TerminalForkBackend.bRestoreConfirmed = false;
+	FDurableReceipt StaleWriterReceipt;
+	TestFalse(
+		TEXT("stale non-terminal writer cannot resurrect completed journal"),
+		TryRollbackAssetDurability(
+			TerminalForkSession.ToSharedRef(),
+			TerminalForkBackend,
+			41,
+			false,
+			Tracker,
+			StaleWriterReceipt,
+			Error));
+	TestEqual(
+		TEXT("stale writer failure is typed"),
+		Error.GetCode(),
+		FString(TEXT("durable_journal_already_terminal")));
+	TestFalse(
+		TEXT("blocked stale writer leaves no active transaction"),
+		IFileManager::Get().DirectoryExists(
+			*TerminalForkSession->GetTransactionRoot()));
+
+	IFileManager::Get().MakeDirectory(
+		*TerminalForkSession->GetTransactionRoot(),
+		true);
+	TestTrue(
+		TEXT("historical active fork fixture is recreated"),
+		FFileHelper::SaveStringToFile(
+			PreparedJournalText,
+			*TerminalForkSession->GetJournalPath(),
+			FFileHelper::EEncodingOptions::ForceUTF8WithoutBOM));
+	const int32 TerminalForkMutationCount =
+		TerminalForkBackend.MutationEvents.Num();
+	FDurableReceipt TerminalForkReceipt;
+	TestTrue(
+		TEXT("bound terminal evidence closes historical active fork"),
+		TryReconcileAssetDurability(
+			TerminalForkFixture.JournalRoot,
+			TerminalForkSession->GetJournalId(),
+			TerminalForkBackend.GetAllowedArtifactRoots(),
+			TEXT("owned-worker:p4-009"),
+			41,
+			TEXT("verification:terminal-fork"),
+			ReconciliationOracle,
+			Tracker,
+			TerminalForkReceipt,
+			Error));
+	TestEqual(
+		TEXT("historical fork preserves the completed rollback result"),
+		TerminalForkReceipt.GetStatus(),
+		EDurableStatus::RolledBack);
+	TestEqual(
+		TEXT("historical pre-publish fork remains an abort"),
+		TerminalForkReceipt.GetRecoveryAction(),
+		ERecoveryAction::AbortedBeforeMutation);
+	TestEqual(
+		TEXT("fork reconciliation never replays a backend mutation"),
+		TerminalForkBackend.MutationEvents.Num(),
+		TerminalForkMutationCount);
+	TestFalse(
+		TEXT("reconciled historical fork leaves the active root"),
+		IFileManager::Get().DirectoryExists(
+			*TerminalForkSession->GetTransactionRoot()));
+	FString PreservedTerminalReceipt;
+	TestTrue(
+		TEXT("original terminal receipt remains readable after fork closure"),
+		FFileHelper::LoadFileToString(
+			PreservedTerminalReceipt,
+			*TerminalForkCompletedPath));
+	TestEqual(
+		TEXT("historical fork closure never overwrites terminal evidence"),
+		PreservedTerminalReceipt,
+		OriginalTerminalReceipt);
+
+	FOwnedDiskFixture AmbiguousFixture(TEXT("reconcile_ambiguous"));
+	FRecordingAssetBackend AmbiguousBackend(AmbiguousFixture);
+	FAssetDurableSessionPtr AmbiguousSession;
+	TestTrue(
+		TEXT("ambiguous fixture prepares"),
+		TryPrepareAssetDurability(
+			MakeRequest(Tracker),
+			AmbiguousBackend,
+			AmbiguousFixture.JournalRoot,
+			Tracker,
+			AmbiguousSession,
+			Error));
+	FDurableReceipt AmbiguousPersistReceipt;
+	TestTrue(
+		TEXT("ambiguous fixture publishes"),
+		TryPersistAssetDurability(
+			AmbiguousSession.ToSharedRef(),
+			AmbiguousBackend,
+			41,
+			Tracker,
+			AmbiguousPersistReceipt,
+			Error));
+	TestTrue(
+		TEXT("third state fixture writes"),
+		FFileHelper::SaveStringToFile(
+			TEXT("neither-original-nor-persisted"),
+			*AmbiguousFixture.SaveHeader));
+	FDurableReceipt AmbiguousReceipt;
+	TestTrue(
+		TEXT("ambiguous observation returns a typed non-terminal receipt"),
+		TryReconcileAssetDurability(
+			AmbiguousFixture.JournalRoot,
+			AmbiguousSession->GetJournalId(),
+			AmbiguousBackend.GetAllowedArtifactRoots(),
+			TEXT("owned-worker:p4-009"),
+			41,
+			TEXT("verification:ambiguous"),
+			ReconciliationOracle,
+			Tracker,
+			AmbiguousReceipt,
+			Error));
+	TestEqual(
+		TEXT("ambiguous observation remains state_unknown"),
+		AmbiguousReceipt.GetStatus(),
+		EDurableStatus::StateUnknown);
+	TestEqual(
+		TEXT("ambiguous observation is typed"),
+		AmbiguousReceipt.GetFailureCode(),
+		FString(TEXT("durable_reconcile_evidence_insufficient")));
+	TestTrue(
+		TEXT("ambiguous journal remains active"),
+		IFileManager::Get().DirectoryExists(
+			*AmbiguousSession->GetTransactionRoot()));
+	TestEqual(
+		TEXT("oracle runs only for the four uniquely classified states"),
+		ReconciliationOracle.ConfirmCount,
+		4);
+
+	FOwnedDiskFixture IsolationFixture(TEXT("recovery_isolation"));
+	FRecordingAssetBackend IsolationBackend(IsolationFixture);
+	FAssetDurableSessionPtr ValidSession;
+	TestTrue(
+		TEXT("valid recovery journal prepares"),
+		TryPrepareAssetDurability(
+			MakeRequest(Tracker),
+			IsolationBackend,
+			IsolationFixture.JournalRoot,
+			Tracker,
+			ValidSession,
+			Error));
+	const FString CorruptPath = IsolationFixture.JournalRoot
+		/ TEXT("active/corrupt/journal.json");
+	IFileManager::Get().MakeDirectory(
+		*FPaths::GetPath(CorruptPath),
+		true);
+	TestTrue(
+		TEXT("corrupt sibling journal fixture writes"),
+		FFileHelper::SaveStringToFile(
+			TEXT("not-a-journal"),
+			*CorruptPath));
+	TArray<FDurableReceipt> IsolationReceipts;
+	TestTrue(
+		TEXT("corrupt sibling does not hide valid recovery"),
+		TryRecoverAssetDurability(
+			IsolationFixture.JournalRoot,
+			IsolationBackend,
+			41,
+			TEXT("owned-worker:p4-009"),
+			Tracker,
+			IsolationReceipts,
+			Error));
+	TestEqual(
+		TEXT("valid and isolated failure receipts are both returned"),
+		IsolationReceipts.Num(),
+		2);
+	TestTrue(
+		TEXT("corrupt journal has a typed isolation receipt"),
+		IsolationReceipts.ContainsByPredicate(
+			[](const FDurableReceipt& Receipt)
+			{
+				return Receipt.GetJournalId() == TEXT("corrupt")
+					&& Receipt.GetFailureCode()
+						== TEXT("durable_journal_integrity_invalid");
+			}));
+	TestFalse(
+		TEXT("valid prepared journal is still recovered"),
+		IFileManager::Get().DirectoryExists(
+			*ValidSession->GetTransactionRoot()));
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(
 	FUeAgentAssetDurableFenceBudgetContainmentTest,
 	"UeAgentInterface.Core.AssetDurable.FenceBudgetContainment",
 	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
@@ -1326,6 +2059,7 @@ bool FUeAgentAssetDurableFenceBudgetContainmentTest::RunTest(
 			FAssetDurableTarget(
 				MakeIdentity(false),
 				TEXT("/Game/UAI/P4_009/SaveAsset"),
+				EPackageHeaderKind::EvidenceRequired,
 				EAssetDurableIntent::Delete,
 				ERollbackGrade::DurableBackup)
 		},
@@ -1401,8 +2135,8 @@ bool FUeAgentAssetDurableFenceBudgetContainmentTest::RunTest(
 			OwnerSession,
 			Error));
 	TArray<FDurableReceipt> OwnerReceipts;
-	TestFalse(
-		TEXT("foreign journal owner fails before recovery mutation"),
+	TestTrue(
+		TEXT("foreign journal owner is isolated before recovery mutation"),
 		TryRecoverAssetDurability(
 			OwnerFixture.JournalRoot,
 			OwnerBackend,
@@ -1411,10 +2145,18 @@ bool FUeAgentAssetDurableFenceBudgetContainmentTest::RunTest(
 			Tracker,
 			OwnerReceipts,
 			Error));
-	TestEqual(
-		TEXT("journal owner failure is typed"),
-		Error.GetCode(),
-		FString(TEXT("durable_journal_owner_mismatch")));
+	TestEqual(TEXT("foreign owner produces one receipt"), OwnerReceipts.Num(), 1);
+	if (OwnerReceipts.Num() == 1)
+	{
+		TestEqual(
+			TEXT("journal owner failure is typed"),
+			OwnerReceipts[0].GetFailureCode(),
+			FString(TEXT("durable_journal_owner_mismatch")));
+		TestEqual(
+			TEXT("foreign owner receipt is non-terminal"),
+			OwnerReceipts[0].GetStatus(),
+			EDurableStatus::StateUnknown);
+	}
 	TestEqual(
 		TEXT("journal owner mismatch performs no mutation"),
 		OwnerBackend.MutationEvents.Num(),

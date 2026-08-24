@@ -2,7 +2,11 @@
 
 #include "CommandHandlers/CaptureMedia/UeAgentCaptureMediaCommandHandlers.h"
 #include "Composition/LongRunningSession/UeAgentLongRunningSessionActivation.h"
+#include "Core/Contract/UeAgentContractJson.h"
 #include "Core/DomainCapability/UeAgentDomainCapability.h"
+#include "DomainAdapters/CaptureMediaLongJob/UeAgentCaptureMediaImagePolicy.h"
+#include "Dom/JsonObject.h"
+#include "Dom/JsonValue.h"
 #include "OperationOwners/CaptureMedia/UeAgentCaptureMediaOwner.h"
 
 namespace UE::UAI::Module::CommandRegistration::CaptureMedia
@@ -15,6 +19,54 @@ namespace UE::UAI::Module::CommandRegistration::CaptureMedia
 	namespace
 	{
 		const FString Owner = TEXT("capture-media-job-owner");
+		bool TryBuildImagePolicyDiscoverySchemas(
+			FString& OutPolicyIdSchema,
+			FString& OutParametersSchema,
+			FString& OutError)
+		{
+			using namespace DomainAdapters::CaptureMediaLongJob;
+			OutPolicyIdSchema.Reset();
+			OutParametersSchema.Reset();
+			const TSharedRef<FJsonObject> PolicySchema = MakeShared<FJsonObject>();
+			TArray<TSharedPtr<FJsonValue>> PolicyIds;
+			const TSharedRef<FJsonObject> PolicyContracts = MakeShared<FJsonObject>();
+			for (const FUeAgentCaptureMediaImagePolicyDescriptor& Policy
+				: GetCaptureMediaImagePolicies())
+			{
+				if (!Policy.IsValid())
+				{
+					OutError = TEXT("capture_image_policy_descriptor_invalid:")
+						+ Policy.GetPolicyId();
+					return false;
+				}
+				PolicyIds.Add(MakeShared<FJsonValueString>(Policy.GetPolicyId()));
+				if (Policy.HasDiscoveryContract())
+				{
+					TSharedPtr<FJsonObject> Parameters;
+					if (!Contract::Json::TryParseObject(
+							Policy.GetParameterSchemaJson(), Parameters, OutError)
+						|| !Parameters.IsValid())
+					{
+						OutError = TEXT("capture_image_policy_schema_invalid:")
+							+ Policy.GetPolicyId() + TEXT(":") + OutError;
+						return false;
+					}
+					PolicyContracts->SetObjectField(
+						Policy.GetPolicyId(), Parameters.ToSharedRef());
+				}
+			}
+			PolicySchema->SetArrayField(TEXT("enum"), MoveTemp(PolicyIds));
+			PolicySchema->SetStringField(TEXT("type"), TEXT("string"));
+			const TSharedRef<FJsonObject> ParametersSchema = MakeShared<FJsonObject>();
+			ParametersSchema->SetStringField(TEXT("type"), TEXT("object"));
+			ParametersSchema->SetObjectField(
+				TEXT("x-uai-policy-contracts"), PolicyContracts);
+			return Contract::Json::TryCanonicalize(
+				PolicySchema, OutPolicyIdSchema, OutError)
+				&& Contract::Json::TryCanonicalize(
+					ParametersSchema, OutParametersSchema, OutError);
+		}
+
 		FString WireType(EUeAgentCommandWireType Type)
 		{
 			switch (Type)
@@ -48,11 +100,41 @@ namespace UE::UAI::Module::CommandRegistration::CaptureMedia
 			Result.SideEffect = EUeAgentCommandSideEffect::EditorState;
 			Result.StateLayers = {TEXT("server_operation_registry"),
 				TEXT("owned_capture_resources"), TEXT("terminal_operation_receipt")};
+			FString PolicyIdSchema;
+			FString ParametersSchema;
+			if (Route.CommandId == TEXT("capture.image.execute")
+				&& !TryBuildImagePolicyDiscoverySchemas(
+					PolicyIdSchema, ParametersSchema, OutError))
+			{
+				return false;
+			}
 			for (const FUeAgentCommandParameter& Parameter : Contract->GetParameters())
 			{
-				Result.InputFields.Add({Parameter.GetName(), WireType(Parameter.GetWireType()),
+				FUeAgentCommandFieldDeclaration Field{
+					Parameter.GetName(), WireType(Parameter.GetWireType()),
 					Parameter.IsRequired(), Parameter.IsNullable(),
-					TEXT("Exact capture operation parameter.")});
+					TEXT("Exact capture operation parameter.")};
+				if (Route.CommandId == TEXT("capture.image.execute")
+					&& Parameter.GetName() == TEXT("policy_id"))
+				{
+					Field.Description = TEXT(
+						"Select one exact image policy from this dynamic catalog.");
+					Field.SchemaJson = PolicyIdSchema;
+				}
+				else if (Route.CommandId == TEXT("capture.image.execute")
+					&& Parameter.GetName() == TEXT("parameters"))
+				{
+					Field.Description = TEXT(
+						"Policy-specific parameters; inspect x-uai-policy-contracts for exact schemas.");
+					Field.SchemaJson = ParametersSchema;
+				}
+				else if (Route.CommandId == TEXT("capture.image.execute")
+					&& Parameter.GetName() == TEXT("subject_ref"))
+				{
+					Field.Description = TEXT(
+						"Exact capture subject. Transform previews use capture-subject:actor:<exact Actor object path>.");
+				}
+				Result.InputFields.Add(MoveTemp(Field));
 			}
 			Result.ResultFields = {{TEXT("result"), TEXT("object"), true, false,
 				TEXT("Long-running capture snapshot and operation reference.")}};
@@ -73,6 +155,34 @@ namespace UE::UAI::Module::CommandRegistration::CaptureMedia
 			Result.Purpose.RelatedFlows = {TEXT("operation.status"), TEXT("operation.cancel"), TEXT("operation.release")};
 			Result.Purpose.Keywords = {TEXT("capture"), TEXT("image"), TEXT("media"), TEXT("render")};
 			Result.Purpose.Synonyms = {TEXT("capture job")};
+			if (Route.CommandId == TEXT("capture.image.execute"))
+			{
+				using namespace DomainAdapters::CaptureMediaLongJob;
+				const FUeAgentCaptureMediaImagePolicyDescriptor* TransformPolicy =
+					FindCaptureMediaImagePolicy(
+						TEXT("policy:image-capture:transform-candidates/v1"));
+				if (!TransformPolicy || !TransformPolicy->HasDiscoveryContract())
+				{
+					OutError = TEXT(
+						"capture_transform_candidates_discovery_contract_missing");
+					return false;
+				}
+				Result.Purpose.ParameterGuidance =
+					TransformPolicy->GetParameterGuidance();
+				Result.Purpose.ResultGuidance =
+					TransformPolicy->GetResultGuidance();
+				Result.Purpose.MinimumExample =
+					TransformPolicy->GetMinimumExample();
+				Result.Purpose.Keywords.Append({
+					TEXT("transform candidates"),
+					TEXT("viewport frame sheet"),
+					TEXT("visual preview"),
+				});
+				Result.Errors.Add({
+					TEXT("capture_transform_candidates_restore_unverified"),
+					TEXT("The preview failed closed because transient editor state restoration could not be proved."),
+				});
+			}
 			Out = MoveTemp(Result);
 			return true;
 		}

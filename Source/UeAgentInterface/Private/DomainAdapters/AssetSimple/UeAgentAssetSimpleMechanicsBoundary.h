@@ -8,7 +8,18 @@ namespace UE::UAI::DomainAdapters::AssetSimple
 	UEAGENTINTERFACE_API const TArray<FString>&
 	GetAssetSimpleMechanicsCommandIds();
 
+	/** Non-public routes delegated into the shared SimpleAuthoring lifecycle. */
+	UEAGENTINTERFACE_API const TArray<FString>&
+	GetAssetSimpleDelegatedLifecycleCommandIds();
+
+	/** Public mechanics plus delegated lifecycle-only identities. */
+	UEAGENTINTERFACE_API const TArray<FString>&
+	GetAssetSimpleLifecycleCommandIds();
+
 	UEAGENTINTERFACE_API bool IsAssetSimpleMechanicsCommand(
+		const FString& CommandId);
+
+	UEAGENTINTERFACE_API bool IsAssetSimpleLifecycleCommand(
 		const FString& CommandId);
 
 	/** Domain capability granted only after the public uai:operate check. */

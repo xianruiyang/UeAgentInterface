@@ -2,6 +2,8 @@
 
 #include "CommandEdge/UeAgentExactCommandDispatch.h"
 #include "CommandRegistry/UeAgentImmutableCommandRegistry.h"
+#include "Core/Contract/UeAgentContractSchema.h"
+#include "Core/Discovery/Command/UeAgentCommandDiscovery.h"
 #include "Module/CommandRegistration/Active/UeAgentActiveCommandComposition.h"
 
 namespace
@@ -9,6 +11,7 @@ namespace
 	using namespace UE::UAI::CommandEdge;
 	using namespace UE::UAI::CommandRegistry;
 	using namespace UE::UAI::CommandContract;
+	using namespace UE::UAI::Discovery::Command;
 	using namespace UE::UAI::Module::CommandRegistration::Active;
 }
 
@@ -70,9 +73,11 @@ bool FUeAgentReadExportCommandContractTest::RunTest(
 
 	const FUeAgentFrozenCommandContract* Export =
 		CommandRegistry->FindExact(TEXT("content_graph.export_workspace"));
+	const FUeAgentFrozenCommandContract* Import =
+		CommandRegistry->FindExact(TEXT("content_graph.import_workspace"));
 	const FUeAgentFrozenCommandContract* Read =
 		CommandRegistry->FindExact(TEXT("reference.asset_read"));
-	if (!Export || !Read)
+	if (!Export || !Import || !Read)
 	{
 		return false;
 	}
@@ -84,5 +89,75 @@ bool FUeAgentReadExportCommandContractTest::RunTest(
 		TEXT("asset read has object, context, and projection inputs"),
 		Read->GetInputFields().Num(),
 		3);
-	return true;
+	const FUeAgentCommandFieldDeclaration* ImportSource =
+		Import->GetInputFields().FindByPredicate(
+			[](const FUeAgentCommandFieldDeclaration& Field)
+			{
+				return Field.Name == TEXT("source");
+			});
+	TestNotNull(
+		TEXT("workspace import exposes the source field"),
+		ImportSource);
+	if (ImportSource)
+	{
+		TestTrue(
+			TEXT("workspace import source schema exposes all public carriers"),
+			ImportSource->SchemaJson.Contains(TEXT("\"oneOf\""))
+				&& ImportSource->SchemaJson.Contains(TEXT("\"inline\""))
+				&& ImportSource->SchemaJson.Contains(TEXT("\"single_file\""))
+				&& ImportSource->SchemaJson.Contains(TEXT("\"directory\""))
+				&& ImportSource->SchemaJson.Contains(TEXT("\"document\""))
+				&& ImportSource->SchemaJson.Contains(TEXT("\"path\"")));
+		TSharedPtr<const UE::UAI::Contract::FUeAgentContractSchema>
+			CompiledSourceSchema;
+		UE::UAI::Contract::FUeAgentContractSchemaError SchemaError;
+		TestTrue(
+			TEXT("workspace import source schema compiles as ContractSchema v1"),
+			UE::UAI::Contract::FUeAgentContractSchema::TryCompile(
+				UE::UAI::Contract::FUeAgentContractValue(
+					ImportSource->SchemaJson),
+				CompiledSourceSchema,
+				SchemaError));
+	}
+	TSharedPtr<const FCommandDiscoveryService> Discovery;
+	FCommandDiscoveryError DiscoveryError;
+	if (!TestTrue(
+		TEXT("active command discovery composes for read/export contracts"),
+		FCommandDiscoveryService::TryCreate(
+			CommandRegistry.ToSharedRef(), Discovery, DiscoveryError))
+		|| !Discovery.IsValid())
+	{
+		AddError(DiscoveryError.Code + TEXT(":") + DiscoveryError.Detail);
+		return false;
+	}
+	FCommandSearchRequest Search;
+	Search.Intent = TEXT("initialize nested UObject graph with hjson");
+	Search.Limit = 3;
+	FCommandSearchPage Page;
+	TestTrue(
+		TEXT("natural recursive initialization intent searches"),
+		Discovery->Search(Search, Page, DiscoveryError));
+	TestTrue(
+		TEXT("natural recursive initialization ranks exact import in top three"),
+		Page.Candidates.ContainsByPredicate(
+			[](const FCommandCandidate& Candidate)
+			{
+				return Candidate.CommandId
+					== TEXT("content_graph.import_workspace");
+			}));
+	const FUeAgentFrozenCommandContract* Compound =
+		CommandRegistry->FindExact(TEXT("content_graph.compound"));
+	TestNotNull(TEXT("one recursive read contract is exact"), Compound);
+	if (Compound)
+	{
+		TestFalse(
+			TEXT("recursive read does not advertise import initialization"),
+			Compound->GetPurpose().Keywords.Contains(TEXT("initialize"))
+				|| Compound->GetPurpose().Keywords.Contains(TEXT("import")));
+	}
+	TestFalse(
+		TEXT("workspace export does not advertise import initialization"),
+		Export->GetPurpose().Keywords.Contains(TEXT("initialize"))
+			|| Export->GetPurpose().Keywords.Contains(TEXT("import")));
+	return !HasAnyErrors();
 }

@@ -312,7 +312,7 @@ namespace UE::UAI::DomainAdapters::TimelineAnimation
 			Root->GetObjectField(TEXT("components"));
 		const TArray<TSharedPtr<FJsonValue>>& Profiles =
 			Root->GetArrayField(TEXT("descriptors"));
-		if (!Components.IsValid() || Profiles.Num() != 19)
+		if (!Components.IsValid() || Profiles.Num() != 20)
 		{
 			OutError = TEXT("timeline_animation_descriptor_spec_incomplete");
 			return false;
@@ -429,4 +429,3 @@ namespace UE::UAI::DomainAdapters::TimelineAnimation
 			MoveTemp(Descriptors), OutRegistry, OutError);
 	}
 }
-

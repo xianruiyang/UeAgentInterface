@@ -278,6 +278,9 @@ namespace UE::UAI::Composition::SimpleAuthoring
 
 		FUeAgentSimpleAuthoringDurableServiceConfig DurableConfig;
 		DurableConfig.JournalRoot = Config.JournalRoot;
+		DurableConfig.StableJournalOwnerId =
+			Config.ProjectInstanceId
+			+ TEXT(":simple-authoring:asset-durable");
 		DurableConfig.PackageBackend = MakeShared<
 			FPackageAssetDurableBackend,
 			ESPMode::ThreadSafe>(FPaths::ProjectContentDir());
@@ -567,6 +570,7 @@ namespace UE::UAI::Composition::SimpleAuthoring
 		OutRuntime = MakeShareable(new FUeAgentSimpleAuthoringRuntime(
 			Registry.ToSharedRef(),
 			Application.ToSharedRef(),
+			DurableService.ToSharedRef(),
 			MoveTemp(Handlers),
 			MoveTemp(CatalogSources),
 			MoveTemp(FamilyIds),
@@ -577,12 +581,15 @@ namespace UE::UAI::Composition::SimpleAuthoring
 	FUeAgentSimpleAuthoringRuntime::FUeAgentSimpleAuthoringRuntime(
 		TSharedRef<const FUeAgentCommandContractRegistry> InCommandRegistry,
 		TSharedRef<FUeAgentSimpleAuthoringApplication> InApplication,
+		TSharedRef<IUeAgentSimpleAuthoringAssetDurableService,
+			ESPMode::ThreadSafe> InDurableService,
 		TArray<TSharedRef<IUeAgentCommandHandler>> InCommandHandlers,
 		TArray<TSharedRef<IUeAgentCatalogSource>> InCatalogSources,
 		TArray<FString> InFamilyIds,
 		TArray<FString> InAuthorityScopes)
 		: CommandRegistry(MoveTemp(InCommandRegistry))
 		, Application(MoveTemp(InApplication))
+		, DurableService(MoveTemp(InDurableService))
 		, CommandHandlers(MoveTemp(InCommandHandlers))
 		, CatalogSources(MoveTemp(InCatalogSources))
 		, FamilyIds(MoveTemp(InFamilyIds))
@@ -600,6 +607,13 @@ namespace UE::UAI::Composition::SimpleAuthoring
 	FUeAgentSimpleAuthoringRuntime::GetApplication() const
 	{
 		return Application;
+	}
+
+	TSharedRef<IUeAgentSimpleAuthoringAssetDurableService,
+		ESPMode::ThreadSafe>
+	FUeAgentSimpleAuthoringRuntime::GetDurableService() const
+	{
+		return DurableService;
 	}
 
 	const TArray<TSharedRef<IUeAgentCommandHandler>>&

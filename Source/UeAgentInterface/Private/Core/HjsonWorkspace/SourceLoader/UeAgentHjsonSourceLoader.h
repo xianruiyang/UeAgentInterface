@@ -72,6 +72,9 @@ namespace UE::UAI::HjsonWorkspace
 	 * without UE mutation. Directory sources use .uai/workspace.hjson with the
 	 * uai.content_graph.workspace/1 integrity contract.
 	 */
+	UEAGENTINTERFACE_API const FString&
+	GetContentGraphImportSourceSchemaJson();
+
 	UEAGENTINTERFACE_API bool TryLoadContentGraphImportSource(
 		const TSharedPtr<FJsonObject>& SourceObject,
 		const FString& ExpectedTargetIdentity,

@@ -143,7 +143,8 @@ namespace UE::UAI::DomainAdapters::WorldDestructive
 				const FAssetDurableRequest DurableRequest(
 					Plan.ToSharedRef(),
 					{FAssetDurableTarget(
-						Identity, PackageName, EAssetDurableIntent::Save,
+						Identity, PackageName, EPackageHeaderKind::Map,
+						EAssetDurableIntent::Save,
 						ERollbackGrade::DurableBackup)},
 					Token, OwnerId, EAtomicityMode::CompensatedSaga);
 				FAssetDurableError Error;
@@ -306,6 +307,7 @@ namespace UE::UAI::DomainAdapters::WorldDestructive
 				HeaderErrorCode.Reset();
 				if (!TryResolvePackageHeaderFilename(
 						PackageName,
+						EPackageHeaderKind::EvidenceRequired,
 						ObservedFilename,
 						HeaderErrorCode)
 					|| !ObservedFilename.Equals(

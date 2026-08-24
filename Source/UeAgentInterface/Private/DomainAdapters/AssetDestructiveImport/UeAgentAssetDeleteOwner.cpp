@@ -406,6 +406,7 @@ namespace UE::UAI::DomainAdapters::AssetDestructiveImport
 							TEXT("asset"),
 							TEXT("asset-delete-v1")),
 						CandidatePackageName,
+						EPackageHeaderKind::EvidenceRequired,
 						EAssetDurableIntent::Delete,
 						ERollbackGrade::DurableBackup);
 				}

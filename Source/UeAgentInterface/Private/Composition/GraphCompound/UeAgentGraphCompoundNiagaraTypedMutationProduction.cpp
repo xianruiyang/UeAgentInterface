@@ -1368,7 +1368,8 @@ namespace UE::UAI::Composition::GraphCompound
 			Plan,
 			{FAssetDurableTarget(
 				Plan->GetChangeSet().GetChanges()[0].GetIdentity(),
-				PackageName, EAssetDurableIntent::Save,
+				PackageName, EPackageHeaderKind::Asset,
+				EAssetDurableIntent::Save,
 				ERollbackGrade::DurableBackup)},
 			FencingToken, JournalOwner, EAtomicityMode::CompensatedSaga);
 		FAssetDurableSessionPtr Prepared;

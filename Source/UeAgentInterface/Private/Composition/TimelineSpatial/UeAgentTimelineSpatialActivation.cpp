@@ -279,7 +279,7 @@ namespace UE::UAI::Composition::TimelineSpatial
 					TryCreateWorldSpatialDescriptorRegistry)
 			|| !AppendRegistry(
 				TEXT("timeline_animation"),
-				19,
+				20,
 				DomainAdapters::TimelineAnimation::
 					TryCreateTimelineAnimationDescriptorRegistry)
 			|| !AppendRegistry(
@@ -328,7 +328,7 @@ namespace UE::UAI::Composition::TimelineSpatial
 					*Descriptors,
 					Result,
 					Error)
-				&& Result.Num() == 59;
+				&& Result.Num() == 60;
 			if (!bCreated)
 			{
 				Result.Reset();
@@ -354,7 +354,7 @@ namespace UE::UAI::Composition::TimelineSpatial
 		}
 		const TArray<FUeAgentTimelineSpatialActivationProfile>& Profiles =
 			GetTimelineSpatialActivationProfiles();
-		if (Profiles.Num() != 59)
+		if (Profiles.Num() != 60)
 		{
 			OutError = TEXT("timeline_spatial_activation_profiles_invalid");
 			return false;

@@ -134,6 +134,8 @@ production-ready 还必须证明正式 public ingress、唯一 C++ owner、真�
 - Python 静态签名：`UeAgentInterfaceCMD/cli/uai/commands/generated.pyi`
 - 当前实现与验证边界：`active/`；该目录只描述产品合同和验证边界，不承担交付工作区的需求、任务状态或最终完成裁判
 - Python SDK 与 CLI：`UeAgentInterfaceCMD/docs/PYTHON_SDK_AND_CLI.md`
+- AssetDurable journal 只读检查、无重放 reconcile 与正式 runner：
+  `contracts/asset_durable_maintenance.md`
 - Read/Export：`contracts/read_export_command_contract.md`
 - Reference CRUD：`contracts/reference_crud_route.md`
 - SimpleAuthoring typed CRUD：`contracts/simple_authoring_typed_crud.md`

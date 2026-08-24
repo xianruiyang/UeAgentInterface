@@ -1,5 +1,6 @@
 #include "Misc/AutomationTest.h"
 
+#include "Core/Contract/UeAgentContractSchema.h"
 #include "Module/CommandRegistration/Active/UeAgentActiveCommandComposition.h"
 
 namespace UE::UAI::Tests::StrictV2::T55
@@ -9,6 +10,7 @@ namespace UE::UAI::Tests::StrictV2::T55
 		static const TArray<FString> Commands = {
 			TEXT("timeline.sequence.create"),
 			TEXT("timeline.sequence.read"),
+			TEXT("timeline.sequence.settings.update"),
 			TEXT("timeline.sequence.structure.replace"),
 			TEXT("timeline.widget_animation.read"),
 		};
@@ -36,7 +38,7 @@ bool FUeAgentStrictV2T55TimelineSequenceCommandMigrationTest::RunTest(const FStr
 		AddError(Error);
 		return false;
 	}
-	TestEqual(TEXT("T55 owns exactly four non-HJSON commands"), ExpectedCommands().Num(), 4);
+	TestEqual(TEXT("T55 owns exactly five non-HJSON commands"), ExpectedCommands().Num(), 5);
 	for (const FString& CommandId : ExpectedCommands())
 	{
 		const auto* Contract = Registry->FindExact(CommandId);
@@ -46,6 +48,36 @@ bool FUeAgentStrictV2T55TimelineSequenceCommandMigrationTest::RunTest(const FStr
 			TestEqual(*FString::Printf(TEXT("%s has one T55 owner"), *CommandId),
 				Contract->GetPublicOwner(), FString(TEXT("timeline-sequence-command-owner")));
 		}
+	}
+	const auto* SettingsUpdate =
+		Registry->FindExact(TEXT("timeline.sequence.settings.update"));
+	const UE::UAI::CommandContract::FUeAgentCommandFieldDeclaration* SettingsInput =
+		SettingsUpdate
+			? SettingsUpdate->GetInputFields().FindByPredicate(
+				[](const UE::UAI::CommandContract::FUeAgentCommandFieldDeclaration& Field)
+				{
+					return Field.Name == TEXT("input");
+				})
+			: nullptr;
+	TestNotNull(
+		TEXT("settings update exposes one model-consumable input schema"),
+		SettingsInput);
+	if (SettingsInput)
+	{
+		TestTrue(
+			TEXT("settings schema exposes only supported mutable settings and revision"),
+			SettingsInput->SchemaJson.Contains(TEXT("\"display_rate\""))
+				&& SettingsInput->SchemaJson.Contains(TEXT("\"playback_range\""))
+				&& SettingsInput->SchemaJson.Contains(TEXT("\"expected_revision\""))
+				&& !SettingsInput->SchemaJson.Contains(TEXT("\"tick_resolution\"")));
+		TSharedPtr<const UE::UAI::Contract::FUeAgentContractSchema> CompiledSchema;
+		UE::UAI::Contract::FUeAgentContractSchemaError SchemaError;
+		TestTrue(
+			TEXT("settings input schema compiles as ContractSchema v1"),
+			UE::UAI::Contract::FUeAgentContractSchema::TryCompile(
+				UE::UAI::Contract::FUeAgentContractValue(SettingsInput->SchemaJson),
+				CompiledSchema,
+				SchemaError));
 	}
 	return !HasAnyErrors();
 }

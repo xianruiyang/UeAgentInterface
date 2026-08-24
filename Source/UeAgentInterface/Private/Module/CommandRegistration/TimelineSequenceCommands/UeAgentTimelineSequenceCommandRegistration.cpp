@@ -28,6 +28,104 @@ namespace UE::UAI::Module::CommandRegistration::TimelineSequenceCommands
 			}
 		}
 
+		const FString& LevelSequenceSettingsInputSchema()
+		{
+			static const FString Schema = TEXT(R"json({
+				"type":"object",
+				"properties":{
+					"display_rate":{
+						"type":"object",
+						"properties":{
+							"numerator":{"type":"string","minLength":1},
+							"denominator":{"type":"string","minLength":1}
+						},
+						"required":["numerator","denominator"],
+						"additionalProperties":false
+					},
+					"playback_range":{
+						"type":"object",
+						"properties":{
+							"clock_id":{"type":"string","minLength":1},
+							"state":{"type":"string","const":"authored"},
+							"lower":{
+								"type":"object",
+								"properties":{
+									"kind":{"type":"string","const":"inclusive"},
+									"point":{
+										"type":"object",
+										"properties":{
+											"clock_id":{"type":"string","minLength":1},
+											"tick":{"type":"string","minLength":1},
+											"rate":{
+												"type":"object",
+												"properties":{
+													"numerator":{"type":"string","minLength":1},
+													"denominator":{"type":"string","minLength":1}
+												},
+												"required":["numerator","denominator"],
+												"additionalProperties":false
+											},
+											"state":{"type":"string","const":"authored"}
+										},
+										"required":["clock_id","tick","rate","state"],
+										"additionalProperties":false
+									}
+								},
+								"required":["kind","point"],
+								"additionalProperties":false
+							},
+							"upper":{
+								"type":"object",
+								"properties":{
+									"kind":{"type":"string","const":"exclusive"},
+									"point":{
+										"type":"object",
+										"properties":{
+											"clock_id":{"type":"string","minLength":1},
+											"tick":{"type":"string","minLength":1},
+											"rate":{
+												"type":"object",
+												"properties":{
+													"numerator":{"type":"string","minLength":1},
+													"denominator":{"type":"string","minLength":1}
+												},
+												"required":["numerator","denominator"],
+												"additionalProperties":false
+											},
+											"state":{"type":"string","const":"authored"}
+										},
+										"required":["clock_id","tick","rate","state"],
+										"additionalProperties":false
+									}
+								},
+								"required":["kind","point"],
+								"additionalProperties":false
+							}
+						},
+						"required":["clock_id","state","lower","upper"],
+						"additionalProperties":false
+					},
+					"expected_revision":{
+						"type":"object",
+						"properties":{
+							"source_id":{"type":"string","minLength":1},
+							"generation":{"type":"string","minLength":1},
+							"sequence":{"type":"string","minLength":1}
+						},
+						"required":["source_id","generation","sequence"],
+						"additionalProperties":false
+					}
+				},
+				"required":["expected_revision"],
+				"anyOf":[
+					{"required":["display_rate"]},
+					{"required":["playback_range"]}
+				],
+				"additionalProperties":false
+			})json");
+			return Schema;
+		}
+
 		bool TryDeclaration(
 			const FString& CommandId,
 			const FUeAgentCommandContractRegistry& Legacy,
@@ -41,6 +139,8 @@ namespace UE::UAI::Module::CommandRegistration::TimelineSequenceCommands
 				return false;
 			}
 			const bool bQuery = QueryOwners::TimelineSequenceCommands::IsQuery(CommandId);
+			const bool bSettingsUpdate =
+				CommandId == TEXT("timeline.sequence.settings.update");
 			FUeAgentCommandDeclaration Result;
 			Result.CommandId = CommandId;
 			Result.PythonNamespace = TEXT("t55_timeline_sequence_command_migration");
@@ -53,11 +153,18 @@ namespace UE::UAI::Module::CommandRegistration::TimelineSequenceCommands
 			Result.StateLayers = {TEXT("asset_persisted_state")};
 			for (const FUeAgentCommandParameter& Parameter : Contract->GetParameters())
 			{
-				Result.InputFields.Add({
+				FUeAgentCommandFieldDeclaration Field{
 					Parameter.GetName(), WireType(Parameter.GetWireType()),
 					Parameter.IsRequired(), Parameter.IsNullable(),
 					TEXT("Exact Timeline/Sequence mechanics parameter."),
-				});
+				};
+				if (bSettingsUpdate && Parameter.GetName() == TEXT("input"))
+				{
+					Field.Description =
+						TEXT("Non-destructive Level Sequence settings patch; use at least one supported setting and the exact native revision.");
+					Field.SchemaJson = LevelSequenceSettingsInputSchema();
+				}
+				Result.InputFields.Add(MoveTemp(Field));
 			}
 			Result.ResultFields = {{
 				TEXT("result"), TEXT("object"), true, false,
@@ -73,22 +180,37 @@ namespace UE::UAI::Module::CommandRegistration::TimelineSequenceCommands
 				{TEXT("operation_state_unknown"),
 					TEXT("The operation requires reconciliation before retry.")},
 			};
-			Result.Purpose.Summary = TEXT("Execute ") + CommandId
-				+ TEXT(" through the common Query/Operation service and native TimelineAnimation mechanics.");
-			Result.Purpose.Target =
-				TEXT("One exact Level Sequence or Widget Blueprint animation target.");
-			Result.Purpose.Preconditions = {
-				TEXT("Resolve the exact target, temporal range, bindings, and expected revision."),
-			};
-			Result.Purpose.ParameterGuidance = TEXT("Use only query.command.detail fields.");
-			Result.Purpose.ResultGuidance =
-				TEXT("Verify writes with timeline.sequence.read or asset readback.");
+			Result.Purpose.Summary = bSettingsUpdate
+				? TEXT("Update Level Sequence display rate or playback range without replacing bindings, tracks, sections, channels, or keys.")
+				: TEXT("Execute ") + CommandId
+					+ TEXT(" through the common Query/Operation service and native TimelineAnimation mechanics.");
+			Result.Purpose.Target = bSettingsUpdate
+				? TEXT("One exact persisted Level Sequence target and its current native revision.")
+				: TEXT("One exact Level Sequence or Widget Blueprint animation target.");
+			Result.Purpose.Preconditions = bSettingsUpdate
+				? TArray<FString>{
+					TEXT("Read the exact target and native expected_revision before mutation."),
+					TEXT("Provide display_rate, playback_range, or both; tick-resolution retiming is not part of this command."),
+				}
+				: TArray<FString>{
+					TEXT("Resolve the exact target, temporal range, bindings, and expected revision."),
+				};
+			Result.Purpose.ParameterGuidance = bSettingsUpdate
+				? TEXT("Copy the nested input schema from query.command.detail; preserve exact clock, rate, bound, and revision identities.")
+				: TEXT("Use only query.command.detail fields.");
+			Result.Purpose.ResultGuidance = bSettingsUpdate
+				? TEXT("Use timeline.sequence.read to verify settings changed and existing structure remained present after save and reload.")
+				: TEXT("Verify writes with timeline.sequence.read or asset readback.");
 			Result.Purpose.FailureGuidance =
 				TEXT("Queries are side-effect free; failed writes preserve lifecycle diagnostics.");
-			Result.Purpose.SideEffectGuidance = bQuery
+			Result.Purpose.SideEffectGuidance = bSettingsUpdate
+				? TEXT("Mutates only display_rate and/or playback_range on the exact asset, then saves, reloads, and reads it back.")
+				: bQuery
 				? TEXT("Reads only persisted timeline state.")
 				: TEXT("Mutates only the explicitly resolved timeline asset.");
-			Result.Purpose.MinimumExample = Result.PythonFunction + TEXT("(client, params)");
+			Result.Purpose.MinimumExample = bSettingsUpdate
+				? TEXT("client.timeline.sequence_settings_update(target, input)")
+				: Result.PythonFunction + TEXT("(client, params)");
 			Result.Purpose.RelatedFlows = QueryOwners::TimelineSequenceCommands::GetReadbackFlows();
 			Result.Purpose.Keywords = {TEXT("timeline"), TEXT("sequence"), TEXT("animation")};
 			Result.Purpose.Synonyms = {TEXT("Sequencer"), TEXT("widget animation")};

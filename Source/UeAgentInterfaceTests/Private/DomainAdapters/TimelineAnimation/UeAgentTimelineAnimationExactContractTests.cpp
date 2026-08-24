@@ -361,12 +361,12 @@ bool FUeAgentTimelineAnimationExactCapabilityDescriptorsTest::RunTest(
 				Profile->GetStringField(TEXT("capability_id")), Profile);
 		}
 	}
-	TestEqual(TEXT("19 activation profiles"), ActivationByCapability.Num(), 19);
+	TestEqual(TEXT("20 activation profiles"), ActivationByCapability.Num(), 20);
 
 	const TSharedPtr<FJsonObject> Components = Fixture->GetObjectField(TEXT("components"));
 	const TArray<TSharedPtr<FJsonValue>>& Profiles =
 		Fixture->GetArrayField(TEXT("descriptors"));
-	TestEqual(TEXT("19 exact descriptor profiles"), Profiles.Num(), 19);
+	TestEqual(TEXT("20 exact descriptor profiles"), Profiles.Num(), 20);
 	TMap<FString, FString> ExpectedInput;
 	TMap<FString, FString> ExpectedResult;
 	TMap<FString, FString> ExpectedHash;
@@ -471,7 +471,7 @@ bool FUeAgentTimelineAnimationExactCapabilityDescriptorsTest::RunTest(
 		}
 	}
 	TestEqual(TEXT("8 exact query descriptors"), QueryCount, 8);
-	TestEqual(TEXT("11 exact operation descriptors"), OperationCount, 11);
+	TestEqual(TEXT("12 exact operation descriptors"), OperationCount, 12);
 	TestEqual(TEXT("8 exact provider bindings"), Providers.Num(), 8);
 
 	using namespace UE::UAI::DomainAdapters::TimelineAnimation;
@@ -485,7 +485,7 @@ bool FUeAgentTimelineAnimationExactCapabilityDescriptorsTest::RunTest(
 		AddError(TEXT("timeline_animation_descriptor_registry_unavailable:") + RegistryError);
 		return false;
 	}
-	TestEqual(TEXT("production descriptor count"), Registry->GetDescriptors().Num(), 19);
+	TestEqual(TEXT("production descriptor count"), Registry->GetDescriptors().Num(), 20);
 	for (const FUeAgentOperationDescriptor& Descriptor : Registry->GetDescriptors())
 	{
 		const FString CapabilityId = Descriptor.GetCapabilityId();
@@ -539,7 +539,7 @@ bool FUeAgentTimelineAnimationExecutionChainContractTest::RunTest(
 		}
 	}
 	const TArray<TSharedPtr<FJsonValue>>& ChainValues = Fixture->GetArrayField(TEXT("chains"));
-	TestEqual(TEXT("19 execution chain rows"), ChainValues.Num(), 19);
+	TestEqual(TEXT("20 execution chain rows"), ChainValues.Num(), 20);
 	TSet<FString> TypedOperations;
 	TSet<FString> TypedRequests;
 	TSet<FString> TypedResults;
@@ -589,12 +589,12 @@ bool FUeAgentTimelineAnimationExecutionChainContractTest::RunTest(
 		}
 	}
 	TestEqual(TEXT("8 C3Q chains"), Queries, 8);
-	TestEqual(TEXT("11 C3O chains"), Operations, 11);
+	TestEqual(TEXT("12 C3O chains"), Operations, 12);
 
 	using namespace UE::UAI::DomainAdapters::TimelineAnimation;
 	const TArray<FUeAgentTimelineAnimationExecutionChainContract>& Contracts =
 		GetTimelineAnimationExecutionChainContracts();
-	TestEqual(TEXT("production chain count"), Contracts.Num(), 19);
+	TestEqual(TEXT("production chain count"), Contracts.Num(), 20);
 	for (const FUeAgentTimelineAnimationExecutionChainContract& Contract : Contracts)
 	{
 		const TSharedPtr<FJsonValue>* Match = ChainValues.FindByPredicate(

@@ -22,9 +22,9 @@
   ],
   "command_manifest": {
     "path": "Resources/UaiCommandManifest.json",
-    "file_sha256": "sha256:98fd21e381a215aef2571b14f43fcbacb7e2a174c2f10503fc09de51b94dd278",
-    "registry_hash": "sha256:ad84ad420e34abc3250b71ee8b3b5b5825c32756d04b80a5fe7dc3c6eff50d4a",
-    "command_count": 348
+    "file_sha256": "sha256:f7900304394c1c401dceeaad27b7e2546c60671d13e996d8548efd5db3db1f7a",
+    "registry_hash": "sha256:ebfd0e0ba4b8df3402ef22fc7ff299d91e301fe6dcea8b83f21fead78340d280",
+    "command_count": 352
   },
   "historical_sources": {
     "candidate_current_inventory": {
@@ -90,7 +90,8 @@
         "UDES-UAI-ROOT-19",
         "DES-UAI-ROOT-INTEGRATED-CAPABILITY-ARCHITECTURE",
         "DES-UAI-PRODUCTION-EVIDENCE",
-        "SOL-UAI-ROOT-08-INTEGRATED-AUTHORITY-RESTORATION"
+        "SOL-UAI-ROOT-08-INTEGRATED-AUTHORITY-RESTORATION",
+        "DCR-UAI-T50-SPATIAL-CANDIDATE-EVALUATION"
       ],
       "activation_contribution_ids": [
         "ai-command-migration"
@@ -1047,6 +1048,7 @@
       ],
       "object_types": [
         "viewport",
+        "actor",
         "asset editor",
         "sequence",
         "render target"
@@ -1054,7 +1056,8 @@
       "authoring_surfaces": [
         "image",
         "media",
-        "frame sequence"
+        "frame sequence",
+        "transform candidate preview"
       ],
       "operations": [
         "capture",
@@ -1067,7 +1070,7 @@
         "cleanup"
       ],
       "command_contract_state": "registered_exact_contract",
-      "implementation_state": "current_capture_owner_rhi_product_verified_exact_command_and_real_scene_matrix_pending",
+      "implementation_state": "current_capture_owner_rhi_product_verified_transform_candidate_policy_pending_vertical",
       "evidence": {
         "highest_verified_layer": "persistence_independent_readback",
         "delivery_state": "rhi_image_policy_and_artifact_vertical_verified_real_scene_visual_pending",
@@ -1078,6 +1081,7 @@
           "TROOT-UAI-45-PUBLIC-DISTRIBUTION-PARITY"
         ],
         "not_proven": [
+          "public SDK transform-candidate frame-sheet execution with full transient-state restoration in the rendering-capable main Editor",
           "direct public SDK product execution of every capture.image, capture.media and capture.render object and policy combination",
           "a scene-image oracle for the T46 real-content scenario while the user main Editor remains minimized",
           "exhaustive asset-editor, sequence, viewport and render-target content quality variants"
@@ -1170,6 +1174,7 @@
         "uobject-dataasset"
       ],
       "current_command_ids": [
+        "content_graph.authoring_schema",
         "content_graph.compound",
         "content_graph.diagnostics",
         "content_graph.export_workspace",
@@ -1196,7 +1201,8 @@
         "structure",
         "relation",
         "compound",
-        "workspace"
+        "workspace",
+        "authoring schema"
       ],
       "operations": [
         "export",
@@ -1214,20 +1220,23 @@
         "cleanup"
       ],
       "command_contract_state": "registered_exact_contract",
-      "implementation_state": "unified_content_graph_owner_consumed_by_current_domain_verticals_exact_provider_matrix_pending",
+      "implementation_state": "unified_content_graph_owner_with_sequence_sparse_authoring_schema_product_verified_exact_provider_matrix_pending",
       "evidence": {
         "highest_verified_layer": "persistence_independent_readback",
-        "delivery_state": "representative_multi_domain_hjson_verticals_verified_exact_provider_matrix_pending",
+        "delivery_state": "representative_multi_domain_hjson_verticals_and_sequence_sparse_authoring_schema_verified_exact_provider_matrix_pending",
         "evidence_refs": [
           "TROOT-UAI-36-STRUCTURED-HJSON-VERTICAL",
           "TROOT-UAI-37-BLUEPRINT-UMG-GRAPH-VERTICAL",
           "TROOT-UAI-38-ASSET-MATERIAL-TEXTURE-MEDIA-VERTICAL",
           "TROOT-UAI-39-NIAGARA-PCG-AI-VERTICAL",
           "TROOT-UAI-40-ANIMATION-RIG-AUDIO-VERTICAL",
-          "TROOT-UAI-45-PUBLIC-DISTRIBUTION-PARITY"
+          "TROOT-UAI-45-PUBLIC-DISTRIBUTION-PARITY",
+          "TROOT-UAI-61-DYNAMIC-COMMAND-TUTORIAL-CHAIN",
+          "TROOT-UAI-62-HJSON-MODEL-INTERACTION-VERTICAL",
+          "runtimeLogs/t62/live_export/receipt.json"
         ],
         "not_proven": [
-          "direct public SDK product execution of every content_graph command across every registered domain provider and source carrier",
+          "direct public SDK product execution of every content_graph command across every registered domain provider and source carrier; authoring_schema product evidence currently covers the Sequence provider",
           "exhaustive structure-item, relation, order, layout, partial-edit and failure variants",
           "real-content quality across the complete domain matrix"
         ]
@@ -1317,6 +1326,71 @@
       "legacy_candidate_task_ids": [
         "T31-DESTRUCTIVE-CONTENT-OPS"
       ],
+      "blockers": []
+    },
+    {
+      "id": "CU-DURABLE-MAINTENANCE",
+      "title": "Cross-domain durable journal inspection and reconciliation",
+      "source_ids": [
+        "REQ-UAI-ROOT-11",
+        "REQ-UAI-ROOT-12",
+        "REQ-UAI-ROOT-13",
+        "REQ-UAI-ROOT-15",
+        "AC-UAI-ROOT-11-NONINTERFERENCE-SAFETY",
+        "AC-UAI-ROOT-13-CLEANLINESS",
+        "AC-UAI-ROOT-15-INTEGRATED-RESTORATION",
+        "SOL-UAI-ROOT-36-DURABLE-JOURNAL-RECOVERY-OWNER"
+      ],
+      "activation_contribution_ids": [
+        "asset-durable-maintenance-owner"
+      ],
+      "current_command_ids": [
+        "asset_durable.journal.read",
+        "asset_durable.journal.reconcile"
+      ],
+      "focus_command_ids": [
+        "asset_durable.journal.read",
+        "asset_durable.journal.reconcile"
+      ],
+      "object_types": [
+        "durable journal",
+        "asset and package artifacts",
+        "world and map artifacts",
+        "modeling artifacts",
+        "configuration artifacts"
+      ],
+      "authoring_surfaces": [
+        "journal inspection",
+        "terminal reconciliation"
+      ],
+      "operations": [
+        "read",
+        "reconcile"
+      ],
+      "lifecycles": [
+        "exact binding",
+        "independent readback",
+        "terminal archive",
+        "active cleanup"
+      ],
+      "command_contract_state": "registered_exact_contract",
+      "implementation_state": "independent_cross_domain_maintenance_owner_with_exact_7e26_terminal_reconciliation_verified",
+      "evidence": {
+        "highest_verified_layer": "persistence_independent_readback",
+        "delivery_state": "exact_7e26_public_read_reconcile_terminal_archive_verified_without_business_replay",
+        "evidence_refs": [
+          "TROOT-UAI-63-DURABLE-JOURNAL-RECOVERY",
+          "runtimeLogs/t63/asset-durable-7e26-terminal-fence.json",
+          "Plugins/UeAgentInterface/docs/contracts/asset_durable_maintenance.md"
+        ],
+        "not_proven": [
+          "recovery of historical durable journals other than the exact 7E26 terminal-bound case",
+          "all durable backends and artifact types across asset, world, modeling and configuration consumers",
+          "business-operation replay, which is intentionally outside this maintenance capability"
+        ]
+      },
+      "historical_obligation_count": 0,
+      "legacy_candidate_task_ids": [],
       "blockers": []
     },
     {
@@ -2975,7 +3049,7 @@
         "world.object_align",
         "world.object_snap_to_surface",
         "world.object_transform.read",
-        "world.transform_candidates.evaluate"
+        "world.object_transform.update"
       ],
       "focus_command_ids": [],
       "object_types": [
@@ -2990,7 +3064,7 @@
       ],
       "operations": [
         "read",
-        "evaluate",
+        "update",
         "align",
         "snap",
         "bake"
@@ -3002,10 +3076,10 @@
         "cleanup"
       ],
       "command_contract_state": "registered_exact_contract",
-      "implementation_state": "six_non_candidate_public_products_verified_transform_candidate_evaluation_semantics_deferred",
+      "implementation_state": "six_existing_public_products_verified_actor_transform_update_registered_pending_vertical",
       "evidence": {
         "highest_verified_layer": "persistence_independent_readback",
-        "delivery_state": "transform_read_align_snap_bake_pivot_and_live_modeling_selection_public_products_verified_candidate_evaluation_deferred",
+        "delivery_state": "transform_read_align_snap_bake_pivot_and_live_modeling_selection_public_products_verified_actor_transform_update_pending_vertical",
         "evidence_refs": [
           "TROOT-UAI-42-WORLD-VIEWPORT-SPATIAL-VERTICAL",
           "runtimeLogs/delivery_workflow/TROOT-UAI-42-WORLD-VIEWPORT-SPATIAL-VERTICAL/20260821-spatial-public-green-r2/automation/t42-world-spatial-public-product-green.receipt.discovery-set.json",
@@ -3016,7 +3090,7 @@
           "runtimeLogs/receipts/t50-world-spatial-public-mesh-selection-r50.json"
         ],
         "not_proven": [
-          "world.transform_candidates.evaluate semantics pending DCR-UAI-T50-SPATIAL-CANDIDATE-EVALUATION",
+          "world.object_transform.update public SDK persistence and reload readback",
           "external SDK replay of the newly verified snap, pivot and live Modeling selection cases",
           "exhaustive anchors, bounds, face, vertex, ray, surface-snap, pivot and supported subject variants",
           "real-content spatial and visual quality beyond the verified Actor/StaticMesh and T46 whitebox slices"
@@ -3026,9 +3100,7 @@
       "legacy_candidate_task_ids": [
         "T46-SPATIAL-CONTENT-OPERATION"
       ],
-      "blockers": [
-        "DCR-UAI-T50-SPATIAL-CANDIDATE-EVALUATION"
-      ]
+      "blockers": []
     },
     {
       "id": "CU-TEXTURE-GRAPH",
@@ -3125,6 +3197,7 @@
       "current_command_ids": [
         "timeline.sequence.create",
         "timeline.sequence.read",
+        "timeline.sequence.settings.update",
         "timeline.sequence.structure.replace",
         "timeline.widget_animation.read"
       ],
@@ -3135,6 +3208,7 @@
       ],
       "authoring_surfaces": [
         "timeline",
+        "settings",
         "track",
         "section",
         "binding"
@@ -3142,6 +3216,7 @@
       "operations": [
         "create",
         "read",
+        "update",
         "replace"
       ],
       "lifecycles": [
@@ -3152,20 +3227,22 @@
         "cleanup"
       ],
       "command_contract_state": "registered_exact_contract",
-      "implementation_state": "level_sequence_hjson_product_and_all_timeline_native_lifecycles_verified_widget_read_only",
+      "implementation_state": "level_sequence_sparse_settings_hjson_product_verified_existing_timeline_native_lifecycles_verified_widget_read_only",
       "evidence": {
         "highest_verified_layer": "persistence_independent_readback",
-        "delivery_state": "level_sequence_create_read_replace_and_widget_read_native_lifecycles_verified",
+        "delivery_state": "level_sequence_create_read_replace_widget_read_and_sparse_settings_hjson_lifecycle_verified",
         "evidence_refs": [
           "TROOT-UAI-32-INTEGRATED-ACTIVATION-AUTHORITY",
           "TROOT-UAI-33-PUBLIC-CONTRACT-ORACLE-REALIGNMENT",
           "TROOT-UAI-40-ANIMATION-RIG-AUDIO-VERTICAL",
           "runtimeLogs/delivery_workflow/TROOT-UAI-40-ANIMATION-RIG-AUDIO-VERTICAL/20260821-product/automation/t40-animation-rig-audio-complete-v6.receipt.json",
           "runtimeLogs/delivery_workflow/TROOT-UAI-40-ANIMATION-RIG-AUDIO-VERTICAL/20260821-product/cleanup-level-sequence-apply.result.json",
-          "TROOT-UAI-45-PUBLIC-DISTRIBUTION-PARITY"
+          "TROOT-UAI-45-PUBLIC-DISTRIBUTION-PARITY",
+          "TROOT-UAI-62-HJSON-MODEL-INTERACTION-VERTICAL",
+          "runtimeLogs/t62/live_export/receipt.json"
         ],
         "not_proven": [
-          "direct public SDK product execution of every standalone timeline exact command beyond the representative HJSON chain",
+          "direct public SDK product execution of every standalone timeline exact command beyond the representative HJSON chain, including standalone timeline.sequence.settings.update",
           "WidgetAnimation authoring, which is not part of the current read-only public contract",
           "exhaustive track, section, binding and real-content quality variants"
         ]

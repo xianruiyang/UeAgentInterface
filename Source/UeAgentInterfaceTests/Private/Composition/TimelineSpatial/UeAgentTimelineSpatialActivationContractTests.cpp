@@ -265,7 +265,7 @@ namespace
 		const int32 FinalCommandCount = static_cast<int32>(
 			OutActivation->GetNumberField(TEXT("final_command_count")));
 	Test->TestEqual(TEXT("base command inventory"), BaseCommandCount, 114);
-	Test->TestEqual(TEXT("TimelineSpatial capability inventory"), CapabilityCount, 59);
+	Test->TestEqual(TEXT("TimelineSpatial capability inventory"), CapabilityCount, 60);
 	Test->TestEqual(TEXT("TimelineSpatial HJSON ownership remains absent"), HjsonCommandCount, 0);
 		Test->TestEqual(
 			TEXT("final command inventory is additive"),
@@ -349,7 +349,7 @@ namespace
 		Test->TestEqual(
 			TEXT("TimelineAnimation activation count"),
 			AdapterCounts.FindRef(TEXT("timeline_animation")),
-			19);
+			20);
 		Test->TestEqual(
 			TEXT("RigSimulationSpatial activation count"),
 			AdapterCounts.FindRef(TEXT("rig_simulation_spatial")),
@@ -477,7 +477,7 @@ bool FUeAgentTimelineSpatialActivationContractTest::RunTest(
 	using namespace UE::UAI::Contract;
 	const TArray<FUeAgentTimelineSpatialActivationProfile>& Routes =
 		GetTimelineSpatialActivationProfiles();
-	TestEqual(TEXT("production activation profile count"), Routes.Num(), 59);
+	TestEqual(TEXT("production activation profile count"), Routes.Num(), 60);
 	TSet<FString> ProductionCapabilities;
 	for (const FUeAgentTimelineSpatialActivationProfile& Route : Routes)
 	{
@@ -570,7 +570,7 @@ bool FUeAgentTimelineSpatialActivationContractTest::RunTest(
 			Error));
 	if (bCommandsCreated && Commands.IsValid())
 	{
-		TestEqual(TEXT("production command count"), Commands->GetContracts().Num(), 173);
+		TestEqual(TEXT("production command count"), Commands->GetContracts().Num(), 174);
 		for (const FUeAgentTimelineSpatialActivationProfile& Route : Routes)
 		{
 			const UE::UAI::CommandContract::FUeAgentCommandContract* Command =
@@ -640,7 +640,7 @@ bool FUeAgentTimelineSpatialActivationContractTest::RunTest(
 			TEXT("formal manifest does not expose family routing"),
 			Manifest.Contains(TEXT("family"), ESearchCase::IgnoreCase));
 
-		// This local registry is the 173-command base consumed by the
+		// This local registry is the 174-command base consumed by the
 		// LongRunningSession legacy-layer contract. The current HJSON command
 		// and complete committed manifest are owned by the outer active
 		// composition and verified there.
@@ -654,7 +654,7 @@ bool FUeAgentTimelineSpatialActivationContractTest::RunTest(
 		AddError(TEXT("timeline_spatial_descriptor_registry_unavailable:") + Error);
 		return true;
 	}
-	TestEqual(TEXT("production descriptor count"), Descriptors->GetDescriptors().Num(), 59);
+	TestEqual(TEXT("production descriptor count"), Descriptors->GetDescriptors().Num(), 60);
 	for (const FUeAgentTimelineSpatialActivationProfile& Route : Routes)
 	{
 		const FUeAgentOperationDescriptor* Descriptor =
@@ -701,7 +701,7 @@ bool FUeAgentTimelineSpatialPublicCommandHandlersTest::RunTest(
 			OperationPort,
 			Handlers,
 			Error));
-	TestEqual(TEXT("public handler count"), Handlers.Num(), 59);
+	TestEqual(TEXT("public handler count"), Handlers.Num(), 60);
 	TSharedPtr<const UE::UAI::CommandContract::
 		FUeAgentCommandContractRegistry> Commands;
 	TestTrue(
@@ -709,7 +709,7 @@ bool FUeAgentTimelineSpatialPublicCommandHandlersTest::RunTest(
 		TryCreateTimelineSpatialProductionCommandContractRegistry(
 			Commands,
 			Error));
-	if (!Commands.IsValid() || Handlers.Num() != 59)
+	if (!Commands.IsValid() || Handlers.Num() != 60)
 	{
 		AddError(TEXT("timeline_spatial_public_handlers_unavailable:") + Error);
 		return false;
@@ -788,10 +788,10 @@ bool FUeAgentTimelineSpatialPublicCommandHandlersTest::RunTest(
 			}
 		}
 	}
-	TestEqual(TEXT("all query routes submit to C3Q application"), QueryPort->Calls, 24);
-	TestEqual(TEXT("all operation routes submit to C3O application"), OperationPort->Calls, 35);
-	TestEqual(TEXT("fixture query count is stable"), ExpectedQueryCalls, 24);
-	TestEqual(TEXT("fixture operation count is stable"), ExpectedOperationCalls, 35);
+	TestEqual(TEXT("all query routes submit to C3Q application"), QueryPort->Calls, 23);
+	TestEqual(TEXT("all operation routes submit to C3O application"), OperationPort->Calls, 37);
+	TestEqual(TEXT("fixture query count is stable"), ExpectedQueryCalls, 23);
+	TestEqual(TEXT("fixture operation count is stable"), ExpectedOperationCalls, 37);
 	return true;
 }
 
@@ -813,7 +813,7 @@ bool FUeAgentTimelineSpatialUnifiedOperationBindingContractTest::RunTest(
 			{
 				return Profile.OperationKind == TEXT("operation");
 			}).Num(),
-		35);
+		37);
 	return true;
 }
 

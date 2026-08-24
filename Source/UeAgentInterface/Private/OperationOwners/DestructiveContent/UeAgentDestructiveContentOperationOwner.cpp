@@ -2,6 +2,7 @@
 
 #include "Composition/DestructiveImport/UeAgentDestructiveImportCommandHandlers.h"
 #include "Composition/DestructiveImport/UeAgentDestructiveImportWorldCommandHandlers.h"
+#include "Core/AssetDurable/UeAgentPackageAssetRevision.h"
 #include "DomainAdapters/AssetDestructiveImport/UeAgentAssetDeleteOwner.h"
 #include "DomainAdapters/AssetDestructiveImport/UeAgentAssetOperationsOwner.h"
 #include "DomainAdapters/AssetSimple/UeAgentAssetSimpleMechanicsBoundary.h"
@@ -14,7 +15,6 @@
 #include "Misc/Paths.h"
 #include "Misc/ScopeLock.h"
 #include "OperationOwners/AssetSimple/UeAgentAssetSimpleOperationOwner.h"
-#include "Serialization/ArchiveObjectCrc32.h"
 #include "Serialization/JsonReader.h"
 #include "Serialization/JsonSerializer.h"
 #include "Serialization/JsonWriter.h"
@@ -263,9 +263,7 @@ namespace UE::UAI::OperationOwners::DestructiveContent
 					{
 						Projection->SetStringField(
 							TEXT("source_revision"),
-							FString::Printf(
-								TEXT("asset-crc32:%08x"),
-								FArchiveObjectCrc32().Crc32(Source)));
+							AssetDurable::ReadStableAssetRevision(Source));
 					}
 				}
 			}

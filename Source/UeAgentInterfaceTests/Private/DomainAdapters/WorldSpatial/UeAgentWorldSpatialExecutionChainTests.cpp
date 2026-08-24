@@ -514,8 +514,8 @@ bool FUeAgentWorldSpatialExactExecutionChainContractsTest::RunTest(
 		}
 	}
 
-	TestEqual(TEXT("query chain count"), QueryCount, 11);
-	TestEqual(TEXT("operation chain count"), OperationCount, 11);
+	TestEqual(TEXT("query chain count"), QueryCount, 10);
+	TestEqual(TEXT("operation chain count"), OperationCount, 12);
 	TestEqual(TEXT("five family contracts are consumed"), FamilyIds.Num(), 5);
 	TestEqual(TEXT("all exact capabilities are covered"), CapabilityIds.Num(), 22);
 	TestEqual(TEXT("all exact bindings are unique"), BindingIds.Num(), 22);

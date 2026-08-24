@@ -4,6 +4,7 @@
 #include "Composition/SimpleAuthoring/UeAgentSimpleAuthoringComposition.h"
 #include "Composition/SimpleAuthoring/UeAgentSimpleAuthoringDurableService.h"
 #include "Core/AssetDurable/UeAgentAssetDurable.h"
+#include "Core/AssetDurable/UeAgentPackageAssetRevision.h"
 #include "Core/BindingGateway/Ticket/UeAgentBindingTicket.h"
 #include "Core/Projection/UeAgentProjection.h"
 #include "DomainAdapters/AssetDataSimpleEffect/UeAgentAssetDataSimpleEffectCapabilities.h"
@@ -48,7 +49,6 @@
 #include "PaperTileSet.h"
 #include "Particles/SubUVAnimation.h"
 #include "PhysicsEngine/BodySetup.h"
-#include "Serialization/ArchiveObjectCrc32.h"
 #include "Serialization/JsonSerializer.h"
 #include "Sound/SoundAttenuation.h"
 #include "Sound/SoundClass.h"
@@ -299,11 +299,7 @@ namespace
 
 	FString BuildAssetRevision(UObject* Object)
 	{
-		return Object
-			? FString::Printf(
-				TEXT("asset-crc32:%08x"),
-				FArchiveObjectCrc32().Crc32(Object))
-			: FString();
+		return ReadStableAssetRevision(Object);
 	}
 
 	TSharedPtr<FJsonObject> BuildClonePayload(
@@ -423,6 +419,8 @@ namespace
 			}
 			SeenPackageNames.Add(
 				Request.GetTargets()[0].GetPackageName());
+			SeenPackageHeaderKinds.Add(
+				Request.GetTargets()[0].GetPackageHeaderKind());
 			TArray<FDurableArtifact> Artifacts;
 			Artifacts.Emplace(
 				TEXT("artifact:sa008-asset-data-create:")
@@ -532,6 +530,7 @@ namespace
 		int32 PersistCount = 0;
 		int32 AcknowledgeCount = 0;
 		TSet<FString> SeenPackageNames;
+		TArray<EPackageHeaderKind> SeenPackageHeaderKinds;
 	};
 
 	class FUnusedAbsenceOracle final : public IAbsenceOracle
@@ -2258,6 +2257,11 @@ FUeAgentSimpleAuthoringAssetDataCloneProductionContractTest::
 		TEXT("clone prepares durable work once"),
 		Durable->PrepareCount,
 		1);
+	TestTrue(
+		TEXT("non-world clone projects an asset package header"),
+		Durable->SeenPackageHeaderKinds.Num() == 1
+			&& Durable->SeenPackageHeaderKinds[0]
+				== EPackageHeaderKind::Asset);
 	TestEqual(
 		TEXT("clone persists durable work once"),
 		Durable->PersistCount,
@@ -7853,6 +7857,7 @@ bool FUeAgentSimpleAuthoringAssetDataOwnedPackageTest::RunTest(
 
 		FUeAgentSimpleAuthoringDurableServiceConfig DurableConfig;
 		DurableConfig.JournalRoot = Owner.JournalRoot;
+		DurableConfig.StableJournalOwnerId = TEXT("test:asset-data:durable");
 		DurableConfig.PackageBackend = MakeShared<
 			FPackageAssetDurableBackend,
 			ESPMode::ThreadSafe>(Owner.PackageRoot);

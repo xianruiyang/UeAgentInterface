@@ -61,6 +61,12 @@ namespace UE::UAI::HjsonWorkspace
 		virtual ~IImportInitializationDomainProvider() = default;
 
 		virtual const FString& GetProviderId() const = 0;
+		virtual bool SupportsExplicitCommand(
+			const FString& CommandId) const
+		{
+			(void)CommandId;
+			return false;
+		}
 		virtual bool Matches(
 			const FImportInitializationDomainRequest& Request) const = 0;
 		virtual bool TryResolveInitializationContract(

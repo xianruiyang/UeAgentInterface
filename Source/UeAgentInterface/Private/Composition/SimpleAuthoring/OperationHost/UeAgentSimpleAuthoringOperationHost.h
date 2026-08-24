@@ -1,6 +1,8 @@
 #pragma once
 
 #include "CommandEdge/UeAgentCommandDispatch.h"
+#include "Composition/SimpleAuthoring/UeAgentSimpleAuthoringProduction.h"
+#include "Core/AssetDurable/UeAgentAssetDurable.h"
 #include "Core/DomainCapability/UeAgentDomainCapability.h"
 #include "Core/Discovery/UeAgentDiscovery.h"
 
@@ -36,7 +38,23 @@ namespace UE::UAI::Composition::SimpleAuthoring::OperationHost
 	 */
 	UEAGENTINTERFACE_API TSharedRef<const DomainCapability::
 		IDomainOperationInvocationFactory> GetOperationInvocationFactory(
-			const FString& CommandId);
+		const FString& CommandId);
+
+	UEAGENTINTERFACE_API bool TryInspectDurableJournal(
+		const FString& JournalId,
+		ContextResource::FUeAgentResourceTracker& Resources,
+		AssetDurable::FAssetDurableSessionPtr& OutSession,
+		TArray<AssetDurable::FDurableArtifactState>& OutObservedStates,
+		AssetDurable::FAssetDurableError& OutError);
+
+	UEAGENTINTERFACE_API bool TryReconcileDurableJournal(
+		const FString& JournalId,
+		const FString& ExpectedJournalOwnerId,
+		int64 ExpectedFencingToken,
+		const FString& VerificationId,
+		ContextResource::FUeAgentResourceTracker& Resources,
+		AssetDurable::FDurableReceipt& OutReceipt,
+		AssetDurable::FAssetDurableError& OutError);
 
 #if WITH_DEV_AUTOMATION_TESTS
 	/**

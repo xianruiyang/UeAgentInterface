@@ -149,6 +149,22 @@ namespace UE::UAI::Module::CommandRegistration::DestructiveContent
 				TEXT("destructive content operation"),
 				TEXT("plan-bound asset mutation"),
 			};
+			if (CommandId == TEXT("asset.object.clone"))
+			{
+				Result.Purpose.Keywords.Append({
+					TEXT("clone"),
+					TEXT("duplicate"),
+					TEXT("copy"),
+					TEXT("asset"),
+					TEXT("object"),
+				});
+				Result.Purpose.Synonyms.Append({
+					TEXT("clone asset object"),
+					TEXT("duplicate asset object"),
+					TEXT("copy asset object"),
+					TEXT("clone duplicate or copy an owned asset object including a map asset"),
+				});
+			}
 			OutDeclaration = MoveTemp(Result);
 			return true;
 		}

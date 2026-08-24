@@ -14,6 +14,8 @@ class UWorld;
 
 namespace UE::UAI::Composition::SimpleAuthoring
 {
+	class IUeAgentSimpleAuthoringAssetDurableService;
+
 	struct UEAGENTINTERFACE_API FUeAgentSimpleAuthoringRuntimeConfig
 	{
 		FString ProjectInstanceId;
@@ -56,6 +58,8 @@ namespace UE::UAI::Composition::SimpleAuthoring
 			FUeAgentCommandContractRegistry> GetCommandRegistry() const;
 		TSharedRef<FUeAgentSimpleAuthoringApplication>
 			GetApplication() const;
+		TSharedRef<IUeAgentSimpleAuthoringAssetDurableService,
+			ESPMode::ThreadSafe> GetDurableService() const;
 		const TArray<TSharedRef<CommandEdge::IUeAgentCommandHandler>>&
 			GetCommandHandlers() const;
 		const TArray<TSharedRef<Discovery::IUeAgentCatalogSource>>&
@@ -68,6 +72,8 @@ namespace UE::UAI::Composition::SimpleAuthoring
 			TSharedRef<const CommandContract::
 				FUeAgentCommandContractRegistry> InCommandRegistry,
 			TSharedRef<FUeAgentSimpleAuthoringApplication> InApplication,
+			TSharedRef<IUeAgentSimpleAuthoringAssetDurableService,
+				ESPMode::ThreadSafe> InDurableService,
 			TArray<TSharedRef<CommandEdge::IUeAgentCommandHandler>>
 				InCommandHandlers,
 			TArray<TSharedRef<Discovery::IUeAgentCatalogSource>>
@@ -78,6 +84,8 @@ namespace UE::UAI::Composition::SimpleAuthoring
 		TSharedRef<const CommandContract::FUeAgentCommandContractRegistry>
 			CommandRegistry;
 		TSharedRef<FUeAgentSimpleAuthoringApplication> Application;
+		TSharedRef<IUeAgentSimpleAuthoringAssetDurableService,
+			ESPMode::ThreadSafe> DurableService;
 		TArray<TSharedRef<CommandEdge::IUeAgentCommandHandler>>
 			CommandHandlers;
 		TArray<TSharedRef<Discovery::IUeAgentCatalogSource>> CatalogSources;

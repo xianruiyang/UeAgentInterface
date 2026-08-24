@@ -129,11 +129,11 @@ bool FUeAgentWorldSpatialNativeScenarioContractTest::RunTest(
 		}
 	}
 	TestEqual(TEXT("five WorldSpatial families covered"), Families.Num(), 5);
-	TestEqual(TEXT("seven executable test identities"), TestIds.Num(), 7);
+	TestEqual(TEXT("eight executable test identities"), TestIds.Num(), 8);
 	TestEqual(TEXT("all 22 capabilities covered"), Capabilities.Num(), 22);
 	TestTrue(
 		TEXT("deprojection scenario names the dimension bridge"),
-		Fixture->GetArrayField(TEXT("scenarios"))[4]
+		Fixture->GetArrayField(TEXT("scenarios"))[5]
 			->AsObject()
 			->GetArrayField(TEXT("conversion_chain"))[1]
 			->AsString()

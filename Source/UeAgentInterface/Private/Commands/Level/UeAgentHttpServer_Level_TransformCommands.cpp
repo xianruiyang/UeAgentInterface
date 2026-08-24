@@ -10,6 +10,7 @@
 #include "GameFramework/Actor.h"
 #include "HAL/FileManager.h"
 #include "Module/UeAgentInterfaceLogger.h"
+#include "UObject/Package.h"
 #include "Utilities/UeAgentJsonDiagnostics.h"
 
 bool FUeAgentLegacyMechanics::CmdLevelGetActorTransform(const FUeAgentRequestContext& Ctx, TSharedPtr<FJsonObject>& OutData, FString& OutError) const
@@ -495,7 +496,7 @@ bool FUeAgentLegacyMechanics::CmdProbeActorTransformCandidates(const FUeAgentReq
 		OutError = TEXT("missing_candidates");
 		return false;
 	}
-	if (CandidateValues->Num() > 64)
+	if (CandidateValues->Num() > 15)
 	{
 		OutError = TEXT("too_many_candidates");
 		return false;
@@ -560,11 +561,26 @@ bool FUeAgentLegacyMechanics::CmdProbeActorTransformCandidates(const FUeAgentReq
 	JsonTryGetBool(Ctx.Params, TEXT("create_sheet"), bCreateFrameSheet);
 
 	const FTransform OriginalTransform = Actor->GetActorTransform();
+	UPackage* const ActorPackage = Actor->GetPackage();
+	UPackage* const WorldPackage = World->GetPackage();
+	const bool bActorPackageDirtyBefore =
+		ActorPackage && ActorPackage->IsDirty();
+	const bool bWorldPackageDirtyBefore =
+		WorldPackage && WorldPackage->IsDirty();
+	const bool bActorSelectedBefore = Actor->IsSelected();
 	struct FScopedActorTransformRestore
 	{
 		AActor* Actor = nullptr;
 		FTransform OriginalTransform;
+		UPackage* ActorPackage = nullptr;
+		UPackage* WorldPackage = nullptr;
+		bool bActorPackageDirtyBefore = false;
+		bool bWorldPackageDirtyBefore = false;
+		bool bActorSelectedBefore = false;
 		bool bRestored = false;
+		bool bTransformRestored = false;
+		bool bDirtyStateRestored = false;
+		bool bSelectionRestored = false;
 
 		~FScopedActorTransformRestore()
 		{
@@ -579,16 +595,46 @@ bool FUeAgentLegacyMechanics::CmdProbeActorTransformCandidates(const FUeAgentReq
 			}
 			Actor->SetActorTransform(OriginalTransform, false, nullptr, ETeleportType::TeleportPhysics);
 			Actor->PostEditMove(false);
+			if (GEditor && Actor->IsSelected() != bActorSelectedBefore)
+			{
+				GEditor->SelectActor(
+					Actor, bActorSelectedBefore, false, true);
+			}
+			if (ActorPackage)
+			{
+				ActorPackage->SetDirtyFlag(bActorPackageDirtyBefore);
+			}
+			if (WorldPackage && WorldPackage != ActorPackage)
+			{
+				WorldPackage->SetDirtyFlag(bWorldPackageDirtyBefore);
+			}
+			bTransformRestored =
+				Actor->GetActorTransform().Equals(OriginalTransform);
+			bDirtyStateRestored =
+				(!ActorPackage
+					|| ActorPackage->IsDirty() == bActorPackageDirtyBefore)
+				&& (!WorldPackage
+					|| WorldPackage->IsDirty() == bWorldPackageDirtyBefore);
+			bSelectionRestored =
+				Actor->IsSelected() == bActorSelectedBefore;
 			bRestored = true;
 		}
 	};
-	FScopedActorTransformRestore RestoreScope{ Actor, OriginalTransform, false };
+	FScopedActorTransformRestore RestoreScope{
+		Actor,
+		OriginalTransform,
+		ActorPackage,
+		WorldPackage,
+		bActorPackageDirtyBefore,
+		bWorldPackageDirtyBefore,
+		bActorSelectedBefore};
 
 	TArray<TArray<FColor>> FramePixels;
 	TArray<FString> FrameLabels;
 	FIntPoint FrameSize(0, 0);
 	TArray<TSharedPtr<FJsonValue>> FrameResults;
 	TArray<TSharedPtr<FJsonValue>> CandidateResults;
+	bool bViewportStateRestored = true;
 
 	auto AddArtifact = [&OutArtifacts, &Format](const FString& Kind, const FString& FilePath, const FIntPoint& Size)
 	{
@@ -646,6 +692,15 @@ bool FUeAgentLegacyMechanics::CmdProbeActorTransformCandidates(const FUeAgentReq
 		if (CaptureInfo.IsValid())
 		{
 			FrameObj->SetObjectField(TEXT("capture"), CaptureInfo);
+			bool bFrameViewportRestored = false;
+			bViewportStateRestored = bViewportStateRestored
+				&& CaptureInfo->TryGetBoolField(
+					TEXT("realtime_state_restored"), bFrameViewportRestored)
+				&& bFrameViewportRestored;
+		}
+		else
+		{
+			bViewportStateRestored = false;
 		}
 
 		if (bWriteIndividualFrames)
@@ -784,7 +839,14 @@ bool FUeAgentLegacyMechanics::CmdProbeActorTransformCandidates(const FUeAgentReq
 	OutData->SetNumberField(TEXT("frame_count"), FramePixels.Num());
 	OutData->SetObjectField(TEXT("original_transform"), UeAgentLevelOps::MakeActorTransformJson(OriginalTransform));
 	OutData->SetObjectField(TEXT("final_transform"), UeAgentLevelOps::MakeActorTransformJson(Actor->GetActorTransform()));
-	OutData->SetBoolField(TEXT("restored"), true);
+	OutData->SetBoolField(
+		TEXT("restored"), RestoreScope.bTransformRestored);
+	OutData->SetBoolField(
+		TEXT("dirty_state_restored"), RestoreScope.bDirtyStateRestored);
+	OutData->SetBoolField(
+		TEXT("selection_restored"), RestoreScope.bSelectionRestored);
+	OutData->SetBoolField(
+		TEXT("viewport_state_restored"), bViewportStateRestored);
 	OutData->SetBoolField(TEXT("write_individual_frames"), bWriteIndividualFrames);
 	OutData->SetBoolField(TEXT("create_frame_sheet"), bCreateFrameSheet);
 	OutData->SetStringField(TEXT("format"), Format);

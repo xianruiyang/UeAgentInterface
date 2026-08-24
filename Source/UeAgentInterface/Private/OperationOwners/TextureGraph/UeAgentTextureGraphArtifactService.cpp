@@ -485,6 +485,7 @@ namespace UE::UAI::OperationOwners::TextureGraph
 					DurableTargets.Emplace(
 						Identities[Index],
 						Context->Targets[Index].PackageName,
+						EPackageHeaderKind::Asset,
 						EAssetDurableIntent::Save,
 						ERollbackGrade::DurableBackup);
 				}

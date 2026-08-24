@@ -2521,7 +2521,8 @@ namespace UE::UAI::Composition::GraphCompound
 					Plan,
 					{FAssetDurableTarget(
 						Plan->GetChangeSet().GetChanges()[0].GetIdentity(),
-						PackageName, EAssetDurableIntent::Save,
+						PackageName, EPackageHeaderKind::Asset,
+						EAssetDurableIntent::Save,
 						ERollbackGrade::DurableBackup)},
 					FencingToken, JournalOwner,
 					EAtomicityMode::CompensatedSaga);
@@ -2785,6 +2786,7 @@ namespace UE::UAI::Composition::GraphCompound
 					{FAssetDurableTarget(
 						Plan->GetChangeSet().GetChanges()[0].GetIdentity(),
 						Request.GetTargetRef(),
+						EPackageHeaderKind::Asset,
 						EAssetDurableIntent::Save,
 						ERollbackGrade::DurableBackup)},
 					FencingToken,

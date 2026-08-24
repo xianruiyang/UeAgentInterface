@@ -2,6 +2,7 @@
 
 #if __has_include("OperationOwners/Sequence/UeAgentSequenceDomainService.h")
 #define UAI_T22_SEQUENCE_DOMAIN_AVAILABLE 1
+#include "Core/DomainCapability/UeAgentDomainCapability.h"
 #include "Core/HjsonWorkspace/ImportInitialization/UeAgentHjsonDomainProviderRegistry.h"
 #include "OperationOwners/Sequence/UeAgentSequenceDomainService.h"
 #else
@@ -21,6 +22,87 @@ bool FUeAgentStrictV2T22SequenceDomainProviderTest::RunTest(
 	return false;
 #else
 	using namespace UE::UAI::HjsonWorkspace;
+	using namespace UE::UAI::DomainCapability;
+	FString CapabilityError;
+	TSharedPtr<const FFrozenDomainCapabilitySet> FrozenCapabilities;
+	if (!TestTrue(
+		TEXT("the process domain capabilities freeze with T22"),
+		TryFreezeProcessDomainCapabilities(
+			FrozenCapabilities, CapabilityError))
+		|| !FrozenCapabilities.IsValid())
+	{
+		AddError(CapabilityError);
+		return false;
+	}
+
+	const FString ExpectedDomainId =
+		TEXT("timeline-sequence-command-migration");
+	TArray<const FDomainCapabilityDeclaration*> SequenceDeclarations;
+	for (const TSharedRef<const FDomainCapabilityContribution>& Contribution
+		: FrozenCapabilities->GetContributions())
+	{
+		if (Contribution->GetDomainId() == ExpectedDomainId)
+		{
+			SequenceDeclarations.Add(&Contribution->GetDeclaration());
+		}
+	}
+	TestEqual(
+		TEXT("the frozen Sequence capability contribution is unique"),
+		SequenceDeclarations.Num(),
+		1);
+	if (SequenceDeclarations.Num() == 1)
+	{
+		const FDomainCapabilityDeclaration& Declaration =
+			*SequenceDeclarations[0];
+		TestEqual(
+			TEXT("the Sequence HJSON capability is supported"),
+			Declaration.Hjson.Support,
+			EDomainCapabilitySupport::Supported);
+		TestEqual(
+			TEXT("the Sequence capability owns one provider"),
+			Declaration.Hjson.Providers.Num(),
+			1);
+		TestEqual(
+			TEXT("the Sequence capability freezes one HJSON route"),
+			Declaration.Hjson.Routes.Num(),
+			1);
+		TestEqual(
+			TEXT("the Sequence initialization capability is supported"),
+			Declaration.Initialization.Support,
+			EDomainCapabilitySupport::Supported);
+		TestEqual(
+			TEXT("the Sequence capability freezes one initialization contract"),
+			Declaration.Initialization.ContractIds.Num(),
+			1);
+		if (Declaration.Initialization.ContractIds.Num() == 1)
+		{
+			TestEqual(
+				TEXT("the Sequence root initialization contract is exact"),
+				Declaration.Initialization.ContractIds[0],
+				FString(TEXT("uai.init.sequence.root/1")));
+		}
+		if (Declaration.Hjson.Routes.Num() == 1)
+		{
+			const FDomainHjsonRoute& Route = Declaration.Hjson.Routes[0];
+			TestEqual(TEXT("route provider"), Route.ProviderId,
+				FString(TEXT("sequence-domain-provider")));
+			TestEqual(TEXT("route command"), Route.CommandId,
+				FString(TEXT("content_graph.import_workspace")));
+			TestEqual(TEXT("route schema"), Route.SchemaId,
+				FString(TEXT("uai.sequence.edit/1")));
+			TestEqual(TEXT("route target kind"), Route.TargetKind,
+				FString(TEXT("ue.level_sequence.asset")));
+			TestEqual(TEXT("route root type"), Route.RootTypeIdentity,
+				FString(TEXT("/Script/LevelSequence.LevelSequence")));
+			TestEqual(TEXT("route root role"), Route.Role,
+				EInitializationNodeRole::RootTarget);
+			TestEqual(TEXT("route initialization contract"),
+				Route.InitializationContractId,
+				FString(TEXT("uai.init.sequence.root/1")));
+			TestTrue(TEXT("route supports create"), Route.bCreate);
+		}
+	}
+
 	FWorkspaceError Error;
 	TSharedPtr<const FImportInitializationDomainProviderRegistry> Registry;
 	if (!TestTrue(
@@ -56,6 +138,14 @@ bool FUeAgentStrictV2T22SequenceDomainProviderTest::RunTest(
 			TEXT("the root initialization contract is provider-owned"),
 			Resolution.GetInitializationContractId(),
 			FString(TEXT("uai.init.sequence.root/1")));
+		TestTrue(
+			TEXT("the Sequence provider explicitly supports authoring-schema discovery"),
+			Resolution.GetProvider()->SupportsExplicitCommand(
+				TEXT("content_graph.authoring_schema")));
+		TestTrue(
+			TEXT("the Sequence provider explicitly owns its round-trip export"),
+			Resolution.GetProvider()->SupportsExplicitCommand(
+				TEXT("content_graph.export_workspace")));
 	}
 	return true;
 #endif

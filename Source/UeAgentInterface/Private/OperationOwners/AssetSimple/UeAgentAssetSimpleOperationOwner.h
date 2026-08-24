@@ -10,6 +10,11 @@ namespace UE::UAI::OperationOwners::AssetSimple
 		FUeAgentSimpleAuthoringCommandRoute>&
 	GetAssetSimpleOperationRoutes();
 
+	/** Public AssetSimple routes used only by declaration/handler/capability. */
+	UEAGENTINTERFACE_API const TArray<Composition::SimpleAuthoring::
+		FUeAgentSimpleAuthoringCommandRoute>&
+	GetAssetSimplePublicOperationRoutes();
+
 	UEAGENTINTERFACE_API TSharedPtr<const DomainCapability::
 		IDomainOperationInvocationFactory> FindOperationInvocationFactory(
 			const FString& OperationId);

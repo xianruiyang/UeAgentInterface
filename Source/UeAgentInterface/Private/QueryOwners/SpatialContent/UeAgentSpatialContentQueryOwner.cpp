@@ -11,7 +11,7 @@ namespace UE::UAI::QueryOwners::SpatialContent
 			TEXT("world.object_align"),
 			TEXT("world.object_snap_to_surface"),
 			TEXT("world.object_transform.read"),
-			TEXT("world.transform_candidates.evaluate"),
+			TEXT("world.object_transform.update"),
 		};
 		return Ids;
 	}
@@ -63,7 +63,6 @@ namespace UE::UAI::QueryOwners::SpatialContent
 	{
 		static const TArray<FString> Values = {
 			TEXT("world.object_transform.read"),
-			TEXT("world.transform_candidates.evaluate"),
 		};
 		return Values;
 	}

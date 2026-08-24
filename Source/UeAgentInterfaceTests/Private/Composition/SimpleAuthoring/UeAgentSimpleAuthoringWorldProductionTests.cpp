@@ -1767,6 +1767,7 @@ bool FUeAgentSimpleAuthoringWorldOwnedPackageTest::RunTest(
 
 		FUeAgentSimpleAuthoringDurableServiceConfig DurableConfig;
 		DurableConfig.JournalRoot = Owner.JournalRoot;
+		DurableConfig.StableJournalOwnerId = TEXT("test:world:durable");
 		DurableConfig.PackageBackend =
 			MakeShared<
 				FPackageAssetDurableBackend,

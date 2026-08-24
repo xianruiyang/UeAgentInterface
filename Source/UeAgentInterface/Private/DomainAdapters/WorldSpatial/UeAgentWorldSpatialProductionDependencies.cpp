@@ -423,6 +423,7 @@ namespace UE::UAI::DomainAdapters::WorldSpatial
 				if (!UE::UAI::AssetDurable::
 						TryResolvePackageHeaderFilename(
 							Package->GetName(),
+							UE::UAI::AssetDurable::EPackageHeaderKind::EvidenceRequired,
 							ObservedHeaderFilename,
 							PackageHeaderErrorCode)
 					|| !ObservedHeaderFilename.Equals(

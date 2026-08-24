@@ -37,13 +37,13 @@ bool FUeAgentTimelineAnimationProductionRuntimeCompositionTest::RunTest(
 	}
 
 	TestEqual(
-		TEXT("all 19 exact descriptors are owned by production runtime"),
+		TEXT("all 20 exact descriptors are owned by production runtime"),
 		Runtime->GetDescriptorRegistry()->GetDescriptors().Num(),
-		19);
+		20);
 	TestEqual(
-		TEXT("all 11 operations have production chains"),
+		TEXT("all 12 operations have production chains"),
 		Runtime->GetOperationChains().Num(),
-		11);
+		12);
 
 	int32 QueryCount = 0;
 	int32 OperationCount = 0;
@@ -77,8 +77,8 @@ bool FUeAgentTimelineAnimationProductionRuntimeCompositionTest::RunTest(
 		}
 	}
 	TestEqual(TEXT("production query count"), QueryCount, 8);
-	TestEqual(TEXT("production operation count"), OperationCount, 11);
-	TestEqual(TEXT("production capability count"), CapabilityIds.Num(), 19);
+	TestEqual(TEXT("production operation count"), OperationCount, 12);
+	TestEqual(TEXT("production capability count"), CapabilityIds.Num(), 20);
 
 	TArray<FString> SubjectIds;
 	Runtime->GetExplicitSubjectIdentities(SubjectIds);

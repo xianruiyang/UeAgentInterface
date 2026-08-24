@@ -553,7 +553,7 @@ bool FUeAgentWorldSpatialC3QueryProviderBehaviorTest::RunTest(
 	TSharedPtr<const FUeAgentDomainQueryProviderRegistry> Providers;
 	FUeAgentWorldSpatialExecutionError FactoryError;
 	if (!TestTrue(
-			TEXT("register eleven exact C3Q providers"),
+			TEXT("register ten exact C3Q providers"),
 			TryCreateWorldSpatialQueryProviderRegistry(
 				Decoder,
 				Readback,
@@ -575,7 +575,7 @@ bool FUeAgentWorldSpatialC3QueryProviderBehaviorTest::RunTest(
 			QueryDescriptors.Add(Query.GetValue());
 		}
 	}
-	TestEqual(TEXT("exact query descriptor count"), QueryDescriptors.Num(), 11);
+	TestEqual(TEXT("exact query descriptor count"), QueryDescriptors.Num(), 10);
 
 	const FUeAgentResourceTrackerOwner Resources = MakeResources();
 	for (int32 Index = 0; Index < QueryDescriptors.Num(); ++Index)
@@ -728,7 +728,7 @@ bool FUeAgentWorldSpatialC3OperationBehaviorTest::RunTest(
 	TArray<TSharedRef<FUeAgentWorldSpatialOperationChain>> Chains;
 	FUeAgentWorldSpatialExecutionError FactoryError;
 	if (!TestTrue(
-			TEXT("create eleven exact C3O chains"),
+			TEXT("create twelve exact C3O chains"),
 			TryCreateWorldSpatialOperationChains(
 				Decoder,
 				Readback,
@@ -740,7 +740,7 @@ bool FUeAgentWorldSpatialC3OperationBehaviorTest::RunTest(
 	{
 		return false;
 	}
-	TestEqual(TEXT("exact operation chain count"), Chains.Num(), 11);
+	TestEqual(TEXT("exact operation chain count"), Chains.Num(), 12);
 
 	const FUeAgentResourceTrackerOwner Resources = MakeResources();
 	for (int32 Index = 0; Index < Chains.Num(); ++Index)

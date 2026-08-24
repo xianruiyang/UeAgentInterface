@@ -2037,6 +2037,7 @@ namespace UE::UAI::DomainAdapters::ModelingGeometry::VoxelGrid
 					Targets.Emplace(
 						Identity,
 						PackageName,
+						EPackageHeaderKind::Map,
 						EAssetDurableIntent::Save,
 						ERollbackGrade::DurableBackup);
 				}
@@ -2092,6 +2093,7 @@ namespace UE::UAI::DomainAdapters::ModelingGeometry::VoxelGrid
 							FAssetDurableTarget(
 								DurableIdentity(Session),
 								PackageName,
+								EPackageHeaderKind::Map,
 								EAssetDurableIntent::Save,
 								ERollbackGrade::DurableBackup)},
 						DurableBackend,

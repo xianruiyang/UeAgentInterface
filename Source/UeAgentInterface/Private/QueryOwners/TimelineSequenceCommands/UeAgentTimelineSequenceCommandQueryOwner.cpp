@@ -7,6 +7,7 @@ namespace UE::UAI::QueryOwners::TimelineSequenceCommands
 		static const TArray<FString> Ids = {
 			TEXT("timeline.sequence.create"),
 			TEXT("timeline.sequence.read"),
+			TEXT("timeline.sequence.settings.update"),
 			TEXT("timeline.sequence.structure.replace"),
 			TEXT("timeline.widget_animation.read"),
 		};

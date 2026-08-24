@@ -929,6 +929,13 @@ namespace UE::UAI::Tests::WorldSpatial
 				RawInput->GetObjectField(TEXT("expected_revision")),
 				RawInput->GetStringField(TEXT("graph_ref")));
 		}
+		if (CapabilityId == TEXT("world.object_transform.update"))
+		{
+			return WriteRevision(
+				RawInput->GetObjectField(TEXT("expected_revision")),
+				RawInput->GetObjectField(TEXT("transform"))
+					->GetStringField(TEXT("subject")));
+		}
 		if (CapabilityId == TEXT("world.object_align")
 			|| CapabilityId == TEXT("world.object_snap_to_surface"))
 		{

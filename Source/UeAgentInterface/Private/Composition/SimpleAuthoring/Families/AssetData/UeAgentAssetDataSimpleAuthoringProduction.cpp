@@ -1,9 +1,10 @@
 #include "Composition/SimpleAuthoring/Families/AssetData/UeAgentAssetDataSimpleAuthoringProduction.h"
 
+#include "Core/AssetDurable/UeAgentPackageAssetRevision.h"
 #include "Core/StateSemantic/UeAgentStateSemantic.h"
 #include "Dom/JsonObject.h"
 #include "Dom/JsonValue.h"
-#include "Serialization/ArchiveObjectCrc32.h"
+#include "Engine/World.h"
 #include "Serialization/JsonReader.h"
 #include "Serialization/JsonSerializer.h"
 #include "UObject/Class.h"
@@ -105,15 +106,6 @@ namespace UE::UAI::Composition::SimpleAuthoring::AssetData
 		{
 			return !Profile.IsCreate() && !Profile.IsClone()
 				&& IsSupportedProductionProfile(Profile);
-		}
-
-		FString BuildAssetRevision(UObject* Object)
-		{
-			return IsValid(Object)
-				? FString::Printf(
-					TEXT("asset-crc32:%08x"),
-					FArchiveObjectCrc32().Crc32(Object))
-				: FString();
 		}
 
 		bool TryResolveCloneSource(
@@ -745,7 +737,7 @@ namespace UE::UAI::Composition::SimpleAuthoring::AssetData
 							ResolveError.GetDetail());
 						return false;
 					}
-					if (BuildAssetRevision(ExistingTarget)
+					if (ReadStableAssetRevision(ExistingTarget)
 						!= ExpectedRevision)
 					{
 						SetProductionError(
@@ -828,7 +820,7 @@ namespace UE::UAI::Composition::SimpleAuthoring::AssetData
 						return false;
 					}
 					SourceRevision =
-						BuildAssetRevision(Source);
+						ReadStableAssetRevision(Source);
 					if (SourceRevision.IsEmpty()
 						|| SourceRevision
 							!= ExpectedSourceRevision)
@@ -1236,7 +1228,7 @@ namespace UE::UAI::Composition::SimpleAuthoring::AssetData
 						if (!Payload->TryGetStringField(
 								TEXT("expected_revision"),
 								ExpectedRevision)
-							|| BuildAssetRevision(Object)
+							|| ReadStableAssetRevision(Object)
 								!= ExpectedRevision)
 						{
 							OutError.Code =
@@ -1315,7 +1307,7 @@ namespace UE::UAI::Composition::SimpleAuthoring::AssetData
 						return false;
 					}
 					CurrentSourceRevision =
-						BuildAssetRevision(SourceObject);
+						ReadStableAssetRevision(SourceObject);
 					if (SourceObject->GetPathName()
 							!= ExpectedSourceObjectPath
 						|| SourceObject->GetClass()
@@ -1445,7 +1437,7 @@ namespace UE::UAI::Composition::SimpleAuthoring::AssetData
 								RequiredPlane
 										== EUeAgentStatePlane::
 											AuthoringMemory
-									? BuildAssetRevision(Object)
+									? ReadStableAssetRevision(Object)
 									: FString(),
 								RequiredPlane
 										== EUeAgentStatePlane::
@@ -1589,7 +1581,7 @@ namespace UE::UAI::Composition::SimpleAuthoring::AssetData
 									RequestedRef,
 									Referenced->GetClass()
 										->GetPathName(),
-									BuildAssetRevision(
+									ReadStableAssetRevision(
 										Referenced)),
 								Resources,
 								ReferenceValue,
@@ -1896,9 +1888,47 @@ namespace UE::UAI::Composition::SimpleAuthoring::AssetData
 						Target.GetBindingId());
 					return false;
 				}
+				TSharedPtr<FJsonObject> Payload;
+				FString TargetRef;
+				FString PackageName;
+				FString ObjectName;
+				FString ObjectPath;
+				FString ExpectedClassPath;
+				FUeAgentDiscoveryError EvidenceError;
+				if (!TryParseRequestEvidence(Target, Payload, EvidenceError)
+					|| !TryReadEvidence(
+						Payload,
+						TargetRef,
+						PackageName,
+						ObjectName,
+						ObjectPath,
+						ExpectedClassPath))
+				{
+					SetProductionError(
+						OutError,
+						EvidenceError.Code.IsEmpty()
+							? TEXT("asset_data_durable_header_kind_evidence_missing")
+							: EvidenceError.Code,
+						Target.GetBindingId(),
+						EvidenceError.Detail);
+					return false;
+				}
+				UClass* const ExpectedClass =
+					LoadObject<UClass>(nullptr, *ExpectedClassPath);
+				if (!ExpectedClass)
+				{
+					SetProductionError(
+						OutError,
+						TEXT("asset_data_durable_expected_class_missing"),
+						ExpectedClassPath);
+					return false;
+				}
 				OutTargets.Emplace(
 					Changes[0].GetIdentity(),
 					Target.GetPublicRef(),
+					ExpectedClass->IsChildOf(UWorld::StaticClass())
+						? EPackageHeaderKind::Map
+						: EPackageHeaderKind::Asset,
 					EAssetDurableIntent::Save,
 					ERollbackGrade::DurableBackup);
 				return OutTargets[0].IsValid();

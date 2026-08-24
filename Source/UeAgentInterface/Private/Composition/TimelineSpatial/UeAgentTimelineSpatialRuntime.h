@@ -61,7 +61,7 @@ namespace UE::UAI::Composition::TimelineSpatial
 	};
 
 	/**
-	 * Production owner for the 59 Timeline/Spatial public capabilities.
+	 * Production owner for the 60 Timeline/Spatial public capabilities.
 	 *
 	 * The runtime composes the three exact domain runtimes once, then exposes
 	 * one C3Q application port and one C3O application port to the command

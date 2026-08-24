@@ -136,6 +136,7 @@ namespace UE::UAI::DomainAdapters::TimelineAnimation
 				{TEXT("animation.skeleton.slots.read"), TEXT("uai.query.animation.skeleton.slots.read"), 1, TEXT("query"), TEXT("read_only"), TEXT("temporal_read")},
 				{TEXT("timeline.sequence.read"), TEXT("uai.query.timeline.sequence.read"), 1, TEXT("query"), TEXT("read_only"), TEXT("temporal_read")},
 				{TEXT("timeline.sequence.create"), TEXT("uai.operation.timeline.sequence.create"), 1, TEXT("operation"), TEXT("write"), TEXT("timeline_structure")},
+				{TEXT("timeline.sequence.settings.update"), TEXT("uai.operation.timeline.sequence.settings.update"), 1, TEXT("operation"), TEXT("write"), TEXT("timeline_structure")},
 				{TEXT("timeline.sequence.structure.replace"), TEXT("uai.operation.timeline.sequence.structure.replace"), 1, TEXT("operation"), TEXT("write"), TEXT("timeline_structure")},
 				{TEXT("timeline.widget_animation.read"), TEXT("uai.query.timeline.widget_animation.read"), 1, TEXT("query"), TEXT("read_only"), TEXT("temporal_read")},
 				{TEXT("animation.subject.pose.update"), TEXT("uai.operation.animation.subject.pose.update"), 1, TEXT("operation"), TEXT("session_control"), TEXT("subject_animation_state")},

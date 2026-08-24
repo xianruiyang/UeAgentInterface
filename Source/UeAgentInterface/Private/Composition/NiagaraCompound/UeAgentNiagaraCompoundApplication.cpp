@@ -196,6 +196,7 @@ namespace UE::UAI::Composition::NiagaraCompound
 					Targets.Emplace(
 						Change.GetIdentity(),
 						PackageName,
+						EPackageHeaderKind::Asset,
 						EAssetDurableIntent::Save,
 						ERollbackGrade::DurableBackup);
 				}

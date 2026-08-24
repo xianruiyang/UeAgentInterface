@@ -176,6 +176,33 @@ namespace UE::UAI::Composition::SimpleAuthoring
 				Acknowledgement,
 			ContextResource::FUeAgentResourceTracker& Resources,
 			AssetDurable::FAssetDurableError& OutError) = 0;
+		virtual bool TryInspect(
+			const FString& JournalId,
+			ContextResource::FUeAgentResourceTracker& Resources,
+			AssetDurable::FAssetDurableSessionPtr& OutSession,
+			TArray<AssetDurable::FDurableArtifactState>& OutObservedStates,
+			AssetDurable::FAssetDurableError& OutError)
+		{
+			OutSession.Reset();
+			OutObservedStates.Reset();
+			OutError = AssetDurable::FAssetDurableError(
+				TEXT("simple_authoring_durable_inspect_unavailable"));
+			return false;
+		}
+		virtual bool TryReconcile(
+			const FString& JournalId,
+			const FString& ExpectedJournalOwnerId,
+			int64 ExpectedFencingToken,
+			const FString& VerificationId,
+			ContextResource::FUeAgentResourceTracker& Resources,
+			AssetDurable::FDurableReceipt& OutReceipt,
+			AssetDurable::FAssetDurableError& OutError)
+		{
+			OutReceipt = AssetDurable::FDurableReceipt();
+			OutError = AssetDurable::FAssetDurableError(
+				TEXT("simple_authoring_durable_reconcile_unavailable"));
+			return false;
+		}
 	};
 
 	struct UEAGENTINTERFACE_API

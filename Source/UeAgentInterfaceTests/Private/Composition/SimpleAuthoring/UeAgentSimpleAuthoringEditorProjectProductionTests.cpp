@@ -185,17 +185,25 @@ namespace
 		const FString& DurableLocation)
 	{
 		const FString TargetRef = TargetRefForProfile(ProfileId);
-		return FAssetDurableTarget(
-			FUeAgentCanonicalIdentity(
+		FUeAgentCanonicalIdentity Identity(
 				TEXT("uai.editor_project:") + TargetRef,
 				TEXT("editor_project.typed_update"),
 				TEXT("project:sa008-editor-project"),
 				TargetRef,
 				ProfileId,
-				TEXT("project:sa008-editor-project:r1")),
-			ProfileId == TEXT("string_table")
-				? EDurableArtifactKind::Package
-				: EDurableArtifactKind::ProjectConfig,
+				TEXT("project:sa008-editor-project:r1"));
+		if (ProfileId == TEXT("string_table"))
+		{
+			return FAssetDurableTarget(
+				MoveTemp(Identity),
+				DurableLocation,
+				EPackageHeaderKind::Asset,
+				EAssetDurableIntent::Save,
+				ERollbackGrade::DurableBackup);
+		}
+		return FAssetDurableTarget(
+			MoveTemp(Identity),
+			EDurableArtifactKind::ProjectConfig,
 			DurableLocation,
 			EAssetDurableIntent::Save,
 			ERollbackGrade::DurableBackup);
@@ -517,6 +525,8 @@ bool FUeAgentSimpleAuthoringEditorProjectOwnedConfigTest::RunTest(
 		DurableConfig.JournalRoot = FPaths::Combine(
 			Owner.TempRoot,
 			TEXT("Journal"));
+		DurableConfig.StableJournalOwnerId =
+			TEXT("test:editor-project:durable");
 		DurableConfig.ProjectConfigBackend = MakeShared<
 			FProjectConfigAssetDurableBackend,
 			ESPMode::ThreadSafe>(

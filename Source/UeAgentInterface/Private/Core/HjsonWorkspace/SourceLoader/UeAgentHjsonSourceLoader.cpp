@@ -983,6 +983,26 @@ namespace UE::UAI::HjsonWorkspace
 		return Result;
 	}
 
+	const FString& GetContentGraphImportSourceSchemaJson()
+	{
+		static const FString Schema = TEXT(
+			"{\"oneOf\":["
+			"{\"additionalProperties\":false,\"properties\":{"
+			"\"document\":{\"minLength\":1,\"type\":\"string\"},"
+			"\"kind\":{\"const\":\"inline\"}},"
+			"\"required\":[\"kind\",\"document\"],\"type\":\"object\"},"
+			"{\"additionalProperties\":false,\"properties\":{"
+			"\"kind\":{\"const\":\"single_file\"},"
+			"\"path\":{\"minLength\":1,\"type\":\"string\"}},"
+			"\"required\":[\"kind\",\"path\"],\"type\":\"object\"},"
+			"{\"additionalProperties\":false,\"properties\":{"
+			"\"kind\":{\"const\":\"directory\"},"
+			"\"path\":{\"minLength\":1,\"type\":\"string\"}},"
+			"\"required\":[\"kind\",\"path\"],\"type\":\"object\"}"
+			"]}");
+		return Schema;
+	}
+
 	bool TryLoadContentGraphImportSource(
 		const TSharedPtr<FJsonObject>& SourceObject,
 		const FString& ExpectedTargetIdentity,

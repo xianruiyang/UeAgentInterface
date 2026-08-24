@@ -1951,11 +1951,6 @@ namespace UE::UAI::OperationOwners::UObjectDataAsset
 						TEXT("uobject_dataasset_cancelled"),
 						Request.CommandId);
 				}
-				if (Request.CommandId == TEXT("content_graph.export_workspace"))
-				{
-					return ExecuteSharedExport(
-						Request, OutResponse, OutError);
-				}
 				TOptional<FImportInitializationDomainRequest> DomainRequest;
 				if (!TryBuildDomainRequest(Request, DomainRequest, OutError)
 					|| !DomainRequest.IsSet())
@@ -1970,6 +1965,14 @@ namespace UE::UAI::OperationOwners::UObjectDataAsset
 						WorkspaceError)
 					|| !Resolution.IsValid())
 				{
+					if (Request.CommandId
+							== TEXT("content_graph.export_workspace")
+						&& WorkspaceError.GetCode()
+							== TEXT("hjson_domain_provider_unresolved"))
+					{
+						return ExecuteSharedExport(
+							Request, OutResponse, OutError);
+					}
 					return Fail(
 						OutError,
 						WorkspaceError.GetCode().IsEmpty()
@@ -1977,6 +1980,36 @@ namespace UE::UAI::OperationOwners::UObjectDataAsset
 							: WorkspaceError.GetCode(),
 						WorkspaceError.GetSourceUnit(),
 						WorkspaceError.GetJsonPointer());
+				}
+				const FUeAgentUObjectDataAssetCommandRoute* ActiveRoute =
+					GetUObjectDataAssetCommandRoutes().FindByPredicate(
+						[&Request](
+							const FUeAgentUObjectDataAssetCommandRoute& Candidate)
+						{
+							return Candidate.CommandId == Request.CommandId;
+						});
+				if (!ActiveRoute)
+				{
+					return Fail(
+						OutError,
+						TEXT("hjson_domain_command_unregistered"),
+						Request.CommandId);
+				}
+				if (ActiveRoute->bRequiresExplicitDomainSupport
+					&& !Resolution.GetProvider()->SupportsExplicitCommand(
+						Request.CommandId))
+				{
+					if (Request.CommandId
+						== TEXT("content_graph.export_workspace"))
+					{
+						return ExecuteSharedExport(
+							Request, OutResponse, OutError);
+					}
+					return Fail(
+						OutError,
+						TEXT("hjson_domain_command_capability_unavailable"),
+						Resolution.GetProvider()->GetProviderId(),
+						Request.CommandId);
 				}
 				FImportInitializationDomainResponse DomainResponse;
 				if (!Resolution.GetProvider()->TryExecute(
@@ -2275,6 +2308,7 @@ namespace UE::UAI::OperationOwners::UObjectDataAsset
 	GetUObjectDataAssetCommandRoutes()
 	{
 		static const TArray<FUeAgentUObjectDataAssetCommandRoute> Routes{
+			{TEXT("content_graph.authoring_schema"), TEXT("content_graph_authoring_schema"), TEXT("content_graph.read.authoring_schema"), EUeAgentUObjectDataAssetRouteKind::Query, true, true},
 			{TEXT("content_graph.compound"), TEXT("content_graph_compound"), TEXT("content_graph.read.compound"), EUeAgentUObjectDataAssetRouteKind::Query, true},
 			{TEXT("content_graph.diagnostics"), TEXT("content_graph_diagnostics"), TEXT("content_graph.read.diagnostics"), EUeAgentUObjectDataAssetRouteKind::Query, true},
 			{TEXT("content_graph.export_workspace"), TEXT("content_graph_export_workspace"), TEXT("content_graph.export.verified"), EUeAgentUObjectDataAssetRouteKind::Export, true},

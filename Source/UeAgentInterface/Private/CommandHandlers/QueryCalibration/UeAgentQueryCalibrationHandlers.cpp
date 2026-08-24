@@ -140,6 +140,9 @@ namespace UE::UAI::CommandHandlers::QueryCalibration
 			const TSharedPtr<FJsonObject> Result = MakeShared<FJsonObject>();
 			Result->SetStringField(TEXT("summary"), Purpose.Summary);
 			Result->SetStringField(TEXT("target"), Purpose.Target);
+			Result->SetStringField(
+				TEXT("non_purpose"),
+				TEXT("Anything outside the declared target or side-effect guidance."));
 			Result->SetArrayField(TEXT("preconditions"), StringValues(Purpose.Preconditions));
 			Result->SetStringField(TEXT("parameter_guidance"), Purpose.ParameterGuidance);
 			Result->SetStringField(TEXT("result_guidance"), Purpose.ResultGuidance);
@@ -150,6 +153,37 @@ namespace UE::UAI::CommandHandlers::QueryCalibration
 			Result->SetArrayField(TEXT("keywords"), StringValues(Purpose.Keywords));
 			Result->SetArrayField(TEXT("synonyms"), StringValues(Purpose.Synonyms));
 			return Result;
+		}
+
+		FString PythonNamedInvocation(const FCommandDetail& Detail)
+		{
+			if (Detail.PythonNamespace.IsEmpty()
+				|| Detail.PythonFunction.IsEmpty())
+			{
+				return Detail.Purpose.MinimumExample;
+			}
+			TArray<FString> Arguments;
+			for (const FUeAgentCommandFieldDeclaration& Field
+				: Detail.InputFields)
+			{
+				if (Field.bRequired)
+				{
+					Arguments.Add(Field.Name);
+				}
+			}
+			for (const FUeAgentCommandFieldDeclaration& Field
+				: Detail.InputFields)
+			{
+				if (!Field.bRequired)
+				{
+					Arguments.Add(Field.Name + TEXT("=") + Field.Name);
+				}
+			}
+			return FString::Printf(
+				TEXT("client.%s.%s(%s)"),
+				*Detail.PythonNamespace,
+				*Detail.PythonFunction,
+				*FString::Join(Arguments, TEXT(", ")));
 		}
 
 		class FCommandSearchHandler final : public IUeAgentExactCommandHandler
@@ -294,7 +328,7 @@ namespace UE::UAI::CommandHandlers::QueryCalibration
 				const TSharedPtr<FJsonObject> Invocation = MakeShared<FJsonObject>();
 				Invocation->SetStringField(
 					TEXT("python_named"),
-					Detail.Purpose.MinimumExample);
+					PythonNamedInvocation(Detail));
 				Invocation->SetStringField(
 					TEXT("python_generic"),
 					FString::Printf(

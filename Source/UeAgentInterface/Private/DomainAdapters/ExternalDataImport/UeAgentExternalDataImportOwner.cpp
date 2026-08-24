@@ -207,7 +207,8 @@ namespace UE::UAI::DomainAdapters::ExternalDataImport
 				const FAssetDurableRequest DurableRequest(
 					Plan.ToSharedRef(),
 					{FAssetDurableTarget(
-						Identity, PackageName, EAssetDurableIntent::Save,
+						Identity, PackageName, EPackageHeaderKind::Asset,
+						EAssetDurableIntent::Save,
 						ERollbackGrade::DurableBackup)},
 					Token, OwnerId, EAtomicityMode::CompensatedSaga);
 				FAssetDurableError Error;

@@ -21,6 +21,7 @@ namespace UE::UAI::OperationOwners::UObjectDataAsset
 		EUeAgentUObjectDataAssetRouteKind Kind =
 			EUeAgentUObjectDataAssetRouteKind::Query;
 		bool bRequiresTarget = true;
+		bool bRequiresExplicitDomainSupport = false;
 
 		bool IsValid() const;
 	};

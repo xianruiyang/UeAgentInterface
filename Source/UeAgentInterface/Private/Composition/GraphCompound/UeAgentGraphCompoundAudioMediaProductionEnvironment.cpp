@@ -899,6 +899,7 @@ namespace UE::UAI::Composition::GraphCompound
 			FString HeaderErrorCode;
 			if (!TryResolvePackageHeaderFilename(
 					Request.GetTargetRef(),
+					EPackageHeaderKind::EvidenceRequired,
 					Filename,
 					HeaderErrorCode))
 			{
@@ -2351,6 +2352,7 @@ namespace UE::UAI::Composition::GraphCompound
 						Context->PlanningPlan->GetChangeSet().GetChanges()[0]
 							.GetIdentity(),
 						PackageName,
+						EPackageHeaderKind::Asset,
 						EAssetDurableIntent::Save,
 						ERollbackGrade::DurableBackup)},
 					Context->FencingToken,

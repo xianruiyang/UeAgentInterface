@@ -19,6 +19,30 @@ Every request has the same envelope:
   artifact path; native capture first writes to operation-owned staging and the
   artifact publisher refuses to overwrite a file not owned by the same owner.
 
+For `capture.image.execute`, `command_detail` derives the `policy_id` enum and
+the policy-specific `parameters.schema.x-uai-policy-contracts` projection from
+the same ImagePolicy registry used for execution. Policy discovery metadata is
+therefore not a second hand-maintained command or tutorial list.
+
+## Transform-candidate visual preview
+
+`policy:image-capture:transform-candidates/v1` is a current non-historical
+policy. Its subject must be
+`capture-subject:actor:<exact-actor-object-path>`, and `parameters.candidates`
+contains 1-15 labeled transforms. Each transform may supply location, rotator,
+scale, and `relative_to_original`; omitted transform components retain the
+corresponding original component.
+
+The policy captures the original plus every temporary candidate from the active
+Level viewport and publishes one operation-owned frame sheet, keeping the total
+at no more than 16 frames. It neither scores nor selects candidates and never
+persists the temporary transforms. The mechanics restores Actor transform,
+package dirty state, Actor selection, and any temporary viewport realtime
+override on success or failure; success fails closed unless each restoration is
+observed. After visual comparison, persist exactly one selected value through
+`world.object_transform.update` and independently read it through
+`world.object_transform.read`.
+
 ## Image policy catalog
 
 | Retired historical identity | Current policy on `capture.image.execute` | Subject and parameter route |

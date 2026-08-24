@@ -12,6 +12,7 @@ namespace UE::UAI::Composition::SimpleAuthoring
 		FUeAgentSimpleAuthoringDurableServiceConfig
 	{
 		FString JournalRoot;
+		FString StableJournalOwnerId;
 		TSharedPtr<
 			AssetDurable::IAssetDurableBackend,
 			ESPMode::ThreadSafe> PackageBackend;

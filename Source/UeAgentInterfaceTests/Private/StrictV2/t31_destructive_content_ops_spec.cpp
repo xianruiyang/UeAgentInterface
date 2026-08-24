@@ -1,6 +1,8 @@
 #include "Misc/AutomationTest.h"
 
+#include "Core/Discovery/Command/UeAgentCommandDiscovery.h"
 #include "Module/CommandRegistration/Active/UeAgentActiveCommandComposition.h"
+#include "OperationOwners/AssetSimple/UeAgentAssetSimpleOperationOwner.h"
 
 namespace UE::UAI::Tests::StrictV2::T31
 {
@@ -59,6 +61,46 @@ bool FUeAgentStrictV2T31DestructiveContentInventoryTest::RunTest(
 				Contract->GetPublicOwner(),
 				FString(TEXT("destructive-content-owner")));
 		}
+	}
+	TestTrue(
+		TEXT("destructive clone delegates mechanics to the shared OperationHost"),
+		OperationOwners::AssetSimple::FindOperationInvocationFactory(
+			TEXT("asset.object.clone")).IsValid());
+	TSharedPtr<const Discovery::Command::FCommandDiscoveryService>
+		DiscoveryService;
+	Discovery::Command::FCommandDiscoveryError DiscoveryError;
+	if (!TestTrue(
+		TEXT("active command discovery composes"),
+		Discovery::Command::FCommandDiscoveryService::TryCreate(
+			Registry.ToSharedRef(), DiscoveryService, DiscoveryError))
+		|| !DiscoveryService.IsValid())
+	{
+		AddError(DiscoveryError.Code + TEXT(":") + DiscoveryError.Detail);
+		return false;
+	}
+	for (const FString& Intent : TArray<FString>{
+		TEXT("duplicate asset"),
+		TEXT("clone owned map asset"),
+	})
+	{
+		Discovery::Command::FCommandSearchRequest Search;
+		Search.Intent = Intent;
+		Search.Limit = 3;
+		Discovery::Command::FCommandSearchPage Page;
+		if (!TestTrue(
+			*FString::Printf(TEXT("natural clone intent searches: %s"), *Intent),
+			DiscoveryService->Search(Search, Page, DiscoveryError)))
+		{
+			AddError(DiscoveryError.Code + TEXT(":") + DiscoveryError.Detail);
+			continue;
+		}
+		TestTrue(
+			*FString::Printf(TEXT("natural clone intent ranks exact clone in top three: %s"), *Intent),
+			Page.Candidates.ContainsByPredicate(
+				[](const Discovery::Command::FCommandCandidate& Candidate)
+				{
+					return Candidate.CommandId == TEXT("asset.object.clone");
+				}));
 	}
 	return !HasAnyErrors();
 }

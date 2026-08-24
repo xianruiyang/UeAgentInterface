@@ -33,6 +33,7 @@
 #include "MovieScene.h"
 #include "NiagaraSystem.h"
 #include "NiagaraSystemFactoryNew.h"
+#include "Utilities/UeAgentJsonDiagnostics.h"
 #include "OperationOwners/CaptureMedia/UeAgentCaptureMediaOwner.h"
 #include "Sound/SoundCue.h"
 #include "StateTree.h"
@@ -72,6 +73,7 @@ namespace UE::UAI::Tests::StrictV2::T44
 			TEXT("policy:image-capture:sound-cue/v1"),
 			TEXT("policy:image-capture:state-tree/v1"),
 			TEXT("policy:image-capture:texture/v1"),
+			TEXT("policy:image-capture:transform-candidates/v1"),
 			TEXT("policy:image-capture:umg/v1"),
 			TEXT("policy:image-capture:viewport-buffer/v1"),
 			TEXT("policy:image-capture:viewport/v1"),
@@ -1080,8 +1082,149 @@ bool FUeAgentStrictV2T44CaptureMediaOperationTest::RunTest(
 			HistoricalIds().Contains(Policy.GetMechanicsId()));
 	}
 	ActualPolicies.Sort();
-	TestEqual(TEXT("T44 exposes exactly the 15 approved image policies"),
+	TestEqual(TEXT("T44 exposes exactly the 16 approved image policies"),
 		ActualPolicies, ExpectedImagePolicies());
+	const DomainAdapters::CaptureMediaLongJob::
+		FUeAgentCaptureMediaImagePolicyDescriptor* TransformCandidatesPolicy =
+		DomainAdapters::CaptureMediaLongJob::FindCaptureMediaImagePolicy(
+			TEXT("policy:image-capture:transform-candidates/v1"));
+	TestNotNull(
+		TEXT("transform-candidates capture policy is registered once"),
+		TransformCandidatesPolicy);
+	if (TransformCandidatesPolicy)
+	{
+		TestTrue(
+			TEXT("transform-candidates owns a discoverable parameter contract"),
+			TransformCandidatesPolicy->HasDiscoveryContract());
+		TestTrue(
+			TEXT("transform-candidates contract bounds the visual sheet to sixteen frames"),
+			TransformCandidatesPolicy->GetParameterSchemaJson().Contains(
+				TEXT("\"maxItems\":15")));
+		TestTrue(
+			TEXT("transform-candidates tutorial states that preview is transient"),
+			TransformCandidatesPolicy->GetParameterGuidance().Contains(
+				TEXT("does not persist")));
+
+		const TSharedRef<FJsonObject> SchemaTransform = MakeShared<FJsonObject>();
+		const TSharedRef<FJsonObject> Location = MakeShared<FJsonObject>();
+		Location->SetNumberField(TEXT("x"), 10.0);
+		Location->SetNumberField(TEXT("y"), -25.0);
+		Location->SetNumberField(TEXT("z"), 30.0);
+		SchemaTransform->SetObjectField(TEXT("location"), Location);
+		const TSharedRef<FJsonObject> Rotation = MakeShared<FJsonObject>();
+		Rotation->SetNumberField(TEXT("pitch"), 5.0);
+		Rotation->SetNumberField(TEXT("yaw"), 15.0);
+		Rotation->SetNumberField(TEXT("roll"), -2.0);
+		SchemaTransform->SetObjectField(TEXT("rotation"), Rotation);
+		const TSharedRef<FJsonObject> Candidate = MakeShared<FJsonObject>();
+		Candidate->SetObjectField(TEXT("transform"), SchemaTransform);
+		const TSharedRef<FJsonObject> NormalizedParameters =
+			MakeShared<FJsonObject>();
+		NormalizedParameters->SetArrayField(
+			TEXT("candidates"), {MakeShared<FJsonValueObject>(Candidate)});
+		FString NormalizeError;
+		TestTrue(
+			TEXT("published named components normalize at policy boundary"),
+			DomainAdapters::CaptureMediaLongJob::
+				TryNormalizeTransformCandidateParameters(
+					NormalizedParameters, NormalizeError));
+		const TSharedPtr<FJsonValue>* NormalizedLocation =
+			SchemaTransform->Values.Find(TEXT("location"));
+		const TSharedPtr<FJsonValue>* NormalizedRotation =
+			SchemaTransform->Values.Find(TEXT("rotation"));
+		FVector DecodedLocation = FVector::ZeroVector;
+		FRotator DecodedRotation = FRotator::ZeroRotator;
+		TestTrue(
+			TEXT("normalized vector is accepted by existing mechanics codec"),
+			NormalizedLocation
+			&& UeAgentJsonDiagnostics::TryReadVectorValue(
+				*NormalizedLocation, DecodedLocation));
+		TestEqual(TEXT("schema vector3 value"),
+			DecodedLocation, FVector(10.0, -25.0, 30.0));
+		TestTrue(
+			TEXT("normalized rotator is accepted by existing mechanics codec"),
+			NormalizedRotation
+			&& UeAgentJsonDiagnostics::TryReadRotatorValue(
+				*NormalizedRotation, DecodedRotation));
+		TestEqual(TEXT("schema rotator value"),
+			DecodedRotation, FRotator(5.0, 15.0, -2.0));
+		const TSharedRef<FJsonObject> CanonicalLocation = MakeShared<FJsonObject>();
+		CanonicalLocation->SetArrayField(TEXT("components"), {
+			MakeShared<FJsonValueNumber>(1.0),
+			MakeShared<FJsonValueNumber>(2.0),
+			MakeShared<FJsonValueNumber>(3.0)});
+		const TSharedRef<FJsonObject> CanonicalTransform = MakeShared<FJsonObject>();
+		CanonicalTransform->SetObjectField(TEXT("location"), CanonicalLocation);
+		const TSharedRef<FJsonObject> CanonicalCandidate = MakeShared<FJsonObject>();
+		CanonicalCandidate->SetObjectField(TEXT("transform"), CanonicalTransform);
+		const TSharedRef<FJsonObject> CanonicalParameters = MakeShared<FJsonObject>();
+		CanonicalParameters->SetArrayField(
+			TEXT("candidates"), {MakeShared<FJsonValueObject>(CanonicalCandidate)});
+		TestTrue(TEXT("existing canonical components remain accepted"),
+			DomainAdapters::CaptureMediaLongJob::
+				TryNormalizeTransformCandidateParameters(
+					CanonicalParameters, NormalizeError));
+		TestTrue(TEXT("canonical object is not rewritten"),
+			CanonicalTransform->GetObjectField(TEXT("location"))
+				== CanonicalLocation);
+		const TSharedRef<FJsonObject> IncompleteTransform = MakeShared<FJsonObject>();
+		const TSharedRef<FJsonObject> IncompleteLocation = MakeShared<FJsonObject>();
+		IncompleteLocation->SetNumberField(TEXT("x"), 1.0);
+		IncompleteLocation->SetNumberField(TEXT("y"), 2.0);
+		IncompleteTransform->SetObjectField(TEXT("location"), IncompleteLocation);
+		const TSharedRef<FJsonObject> IncompleteCandidate = MakeShared<FJsonObject>();
+		IncompleteCandidate->SetObjectField(TEXT("transform"), IncompleteTransform);
+		const TSharedRef<FJsonObject> IncompleteParameters = MakeShared<FJsonObject>();
+		IncompleteParameters->SetArrayField(
+			TEXT("candidates"),
+			{MakeShared<FJsonValueObject>(IncompleteCandidate)});
+		TestFalse(
+			TEXT("incomplete named vector is rejected without fabrication"),
+			DomainAdapters::CaptureMediaLongJob::
+				TryNormalizeTransformCandidateParameters(
+					IncompleteParameters, NormalizeError));
+		TestTrue(
+			TEXT("missing component error identifies z"),
+			NormalizeError.EndsWith(TEXT(":location:z")));
+	}
+	const CommandContract::FUeAgentFrozenCommandContract* CaptureImage =
+		Registry->FindExact(TEXT("capture.image.execute"));
+	TestNotNull(
+		TEXT("capture.image.execute remains the sole public image command"),
+		CaptureImage);
+	if (CaptureImage)
+	{
+		const CommandContract::FUeAgentCommandFieldDeclaration* PolicyField =
+			CaptureImage->GetInputFields().FindByPredicate([](const auto& Field)
+			{
+				return Field.Name == TEXT("policy_id");
+			});
+		const CommandContract::FUeAgentCommandFieldDeclaration* ParametersField =
+			CaptureImage->GetInputFields().FindByPredicate([](const auto& Field)
+			{
+				return Field.Name == TEXT("parameters");
+			});
+		TestNotNull(
+			TEXT("capture image detail exposes the policy catalog"),
+			PolicyField);
+		TestNotNull(
+			TEXT("capture image detail exposes policy-specific parameters"),
+			ParametersField);
+		if (PolicyField)
+		{
+			TestTrue(
+				TEXT("policy field schema includes transform-candidates"),
+				PolicyField->SchemaJson.Contains(
+					TEXT("policy:image-capture:transform-candidates/v1")));
+		}
+		if (ParametersField)
+		{
+			TestTrue(
+				TEXT("parameter field schema is projected from the policy registry"),
+				ParametersField->SchemaJson.Contains(
+					TEXT("policy:image-capture:transform-candidates/v1")));
+		}
+	}
 	for (const FString& HistoricalId : HistoricalIds())
 	{
 		TestNull(*FString::Printf(

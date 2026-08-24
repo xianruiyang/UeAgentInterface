@@ -1683,6 +1683,7 @@ namespace
 
 			FUeAgentSimpleAuthoringDurableServiceConfig DurableConfig;
 			DurableConfig.JournalRoot = AssetOwner.JournalRoot;
+			DurableConfig.StableJournalOwnerId = TEXT("test:modeling:durable");
 			DurableConfig.PackageBackend = MakeShared<
 				FPackageAssetDurableBackend,
 				ESPMode::ThreadSafe>(AssetOwner.PackageRoot);
@@ -1950,6 +1951,7 @@ namespace
 
 			FUeAgentSimpleAuthoringDurableServiceConfig DurableConfig;
 			DurableConfig.JournalRoot = Owner.JournalRoot;
+			DurableConfig.StableJournalOwnerId = TEXT("test:modeling:durable");
 			DurableConfig.PackageBackend = MakeShared<
 				FPackageAssetDurableBackend,
 				ESPMode::ThreadSafe>(Owner.PackageRoot);
@@ -2130,6 +2132,7 @@ bool FUeAgentSimpleAuthoringModelingOwnedPackageTest::RunTest(
 
 		FUeAgentSimpleAuthoringDurableServiceConfig DurableConfig;
 		DurableConfig.JournalRoot = Owner.JournalRoot;
+		DurableConfig.StableJournalOwnerId = TEXT("test:modeling:durable");
 		DurableConfig.PackageBackend = MakeShared<
 			FPackageAssetDurableBackend,
 			ESPMode::ThreadSafe>(Owner.PackageRoot);
@@ -2456,6 +2459,7 @@ FUeAgentSimpleAuthoringModelingStaticMeshFaceNormalsOwnedPackageTest::
 
 		FUeAgentSimpleAuthoringDurableServiceConfig DurableConfig;
 		DurableConfig.JournalRoot = AssetOwner.JournalRoot;
+		DurableConfig.StableJournalOwnerId = TEXT("test:modeling:durable");
 		DurableConfig.PackageBackend = MakeShared<
 			FPackageAssetDurableBackend,
 			ESPMode::ThreadSafe>(AssetOwner.PackageRoot);
@@ -2668,6 +2672,7 @@ FUeAgentSimpleAuthoringModelingDynamicFaceNormalsOwnedWorldTest::
 
 		FUeAgentSimpleAuthoringDurableServiceConfig DurableConfig;
 		DurableConfig.JournalRoot = Owner.JournalRoot;
+		DurableConfig.StableJournalOwnerId = TEXT("test:modeling:durable");
 		DurableConfig.PackageBackend = MakeShared<
 			FPackageAssetDurableBackend,
 			ESPMode::ThreadSafe>(Owner.PackageRoot);

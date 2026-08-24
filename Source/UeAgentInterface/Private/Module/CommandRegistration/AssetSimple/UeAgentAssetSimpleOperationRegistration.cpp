@@ -180,7 +180,7 @@ namespace UE::UAI::Module::CommandRegistration::AssetSimple
 			Declaration.Operation.Support =
 				DomainCapability::EDomainCapabilitySupport::Supported;
 			for (const FUeAgentSimpleAuthoringCommandRoute& Route
-				: GetAssetSimpleOperationRoutes())
+				: GetAssetSimplePublicOperationRoutes())
 			{
 				const TSharedPtr<const DomainCapability::
 					IDomainOperationInvocationFactory> Factory =
@@ -234,7 +234,7 @@ namespace UE::UAI::Module::CommandRegistration::AssetSimple
 		OutContribution.Reset();
 		OutError.Reset();
 		const TArray<FUeAgentSimpleAuthoringCommandRoute>& Routes =
-			GetAssetSimpleOperationRoutes();
+			GetAssetSimplePublicOperationRoutes();
 		if (Routes.Num() != 52)
 		{
 			OutError = TEXT("asset_simple_route_count_mismatch");

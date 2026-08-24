@@ -1,5 +1,9 @@
 #include "Misc/AutomationTest.h"
 
+#include "Composition/SimpleAuthoring/UeAgentSimpleAuthoringComposition.h"
+#include "DomainAdapters/AssetSimple/UeAgentAssetSimpleMechanicsBoundary.h"
+#include "OperationOwners/AssetSimple/UeAgentAssetSimpleOperationOwner.h"
+
 #include "Module/CommandRegistration/Active/UeAgentActiveCommandComposition.h"
 
 namespace UE::UAI::Tests::StrictV2::T37
@@ -97,6 +101,55 @@ bool FUeAgentStrictV2T37AssetSimpleInventoryTest::RunTest(
 				Contract->GetPublicOwner(),
 				FString(TEXT("asset-simple-operation-owner")));
 		}
+	}
+	const TArray<FString>& PublicIds = DomainAdapters::AssetSimple::
+		GetAssetSimpleMechanicsCommandIds();
+	const TArray<FString>& DelegatedIds = DomainAdapters::AssetSimple::
+		GetAssetSimpleDelegatedLifecycleCommandIds();
+	const TArray<FString>& LifecycleIds = DomainAdapters::AssetSimple::
+		GetAssetSimpleLifecycleCommandIds();
+	TestEqual(TEXT("public mechanics remain the T37 inventory"),
+		PublicIds.Num(), 52);
+	TestEqual(TEXT("one lifecycle route is delegated"),
+		DelegatedIds, TArray<FString>{TEXT("asset.object.clone")});
+	TestEqual(TEXT("lifecycle is public plus delegated"),
+		LifecycleIds.Num(), PublicIds.Num() + DelegatedIds.Num());
+	for (const FString& PublicId : PublicIds)
+	{
+		TestTrue(TEXT("every public identity belongs to lifecycle"),
+			LifecycleIds.Contains(PublicId));
+		TestFalse(TEXT("public identity is not delegated"),
+			DelegatedIds.Contains(PublicId));
+	}
+	for (const FString& DelegatedId : DelegatedIds)
+	{
+		TestFalse(TEXT("public and delegated identities are disjoint"),
+			PublicIds.Contains(DelegatedId));
+		TestTrue(TEXT("delegated identity belongs to lifecycle"),
+			LifecycleIds.Contains(DelegatedId));
+	}
+	TestEqual(TEXT("public route projection remains 52"),
+		OperationOwners::AssetSimple::
+			GetAssetSimplePublicOperationRoutes().Num(), 52);
+	TestEqual(TEXT("lifecycle route projection adds delegated clone"),
+		OperationOwners::AssetSimple::GetAssetSimpleOperationRoutes().Num(),
+		LifecycleIds.Num());
+	TestTrue(TEXT("full SimpleAuthoring routes contain delegated clone"),
+		Composition::SimpleAuthoring::GetSimpleAuthoringCommandRoutes().
+			ContainsByPredicate([](const auto& Route)
+			{
+				return Route.CommandId == TEXT("asset.object.clone");
+			}));
+	TestTrue(TEXT("delegated clone reuses the OperationHost factory"),
+		OperationOwners::AssetSimple::FindOperationInvocationFactory(
+			TEXT("asset.object.clone")).IsValid());
+	const auto* Clone = Registry->FindExact(TEXT("asset.object.clone"));
+	TestNotNull(TEXT("clone remains public through destructive owner"), Clone);
+	if (Clone)
+	{
+		TestEqual(TEXT("clone public owner remains destructive"),
+			Clone->GetPublicOwner(),
+			FString(TEXT("destructive-content-owner")));
 	}
 	return !HasAnyErrors();
 }

@@ -121,6 +121,7 @@ namespace UE::UAI::DomainAdapters::WorldSimpleEffect
 				const FAssetDurableTarget Candidate(
 					Change.GetIdentity(),
 					Package->GetName(),
+					EPackageHeaderKind::EvidenceRequired,
 					Intent,
 					ERollbackGrade::DurableBackup);
 				const FString CandidateKey =

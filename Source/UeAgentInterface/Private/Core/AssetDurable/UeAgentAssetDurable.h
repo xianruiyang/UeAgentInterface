@@ -3,6 +3,7 @@
 #include "CoreMinimal.h"
 #include "Core/ContextResource/UeAgentContextResource.h"
 #include "Core/PlanningPreflight/UeAgentPlanningPreflight.h"
+#include "Core/AssetDurable/UeAgentPackageHeader.h"
 #include "Core/StateSemantic/UeAgentStateSemantic.h"
 #include "Templates/SharedPointer.h"
 
@@ -64,9 +65,17 @@ namespace UE::UAI::AssetDurable
 	{
 		Prepared,
 		PersistedUnverified,
+		Verified,
 		RolledBack,
 		RecoveryRequired,
 		StateUnknown,
+	};
+
+	enum class EDurableStatePresence : uint8
+	{
+		Unknown,
+		Absent,
+		Present,
 	};
 
 	enum class ERecoveryAction : uint8
@@ -89,6 +98,8 @@ namespace UE::UAI::AssetDurable
 	UEAGENTINTERFACE_API FString LexToString(
 		EDurableStatus Value);
 	UEAGENTINTERFACE_API FString LexToString(
+		EDurableStatePresence Value);
+	UEAGENTINTERFACE_API FString LexToString(
 		ERecoveryAction Value);
 
 	class UEAGENTINTERFACE_API FAssetDurableTarget final
@@ -97,6 +108,7 @@ namespace UE::UAI::AssetDurable
 		FAssetDurableTarget(
 			FUeAgentCanonicalIdentity InIdentity,
 			FString InPackageName,
+			EPackageHeaderKind InHeaderKind,
 			EAssetDurableIntent InIntent,
 			ERollbackGrade InRollbackGrade);
 		FAssetDurableTarget(
@@ -110,6 +122,7 @@ namespace UE::UAI::AssetDurable
 		EDurableArtifactKind GetArtifactKind() const;
 		const FString& GetDurableLocation() const;
 		const FString& GetPackageName() const;
+		EPackageHeaderKind GetPackageHeaderKind() const;
 		FString GetDurableTargetKey() const;
 		EAssetDurableIntent GetIntent() const;
 		ERollbackGrade GetRollbackGrade() const;
@@ -121,6 +134,8 @@ namespace UE::UAI::AssetDurable
 			EDurableArtifactKind::Package;
 		FString DurableLocation;
 		FString PackageName;
+		EPackageHeaderKind PackageHeaderKind =
+			EPackageHeaderKind::EvidenceRequired;
 		EAssetDurableIntent Intent = EAssetDurableIntent::Save;
 		ERollbackGrade RollbackGrade = ERollbackGrade::None;
 		bool bValid = false;
@@ -211,6 +226,29 @@ namespace UE::UAI::AssetDurable
 		FString InventoryHash;
 	};
 
+	class UEAGENTINTERFACE_API FDurableArtifactState final
+	{
+	public:
+		FDurableArtifactState() = default;
+		FDurableArtifactState(
+			FString InArtifactId,
+			EDurableStatePresence InPresence,
+			FString InContentHash = FString());
+
+		const FString& GetArtifactId() const;
+		EDurableStatePresence GetPresence() const;
+		const FString& GetContentHash() const;
+		bool IsKnown() const;
+		bool IsValid() const;
+		bool Matches(const FDurableArtifactState& Other) const;
+
+	private:
+		FString ArtifactId;
+		EDurableStatePresence Presence =
+			EDurableStatePresence::Unknown;
+		FString ContentHash;
+	};
+
 	class FAssetDurableSession;
 	using FAssetDurableSessionPtr =
 		TSharedPtr<const FAssetDurableSession>;
@@ -228,7 +266,9 @@ namespace UE::UAI::AssetDurable
 			FString InJournalRoot,
 			FString InTransactionRoot,
 			FString InStagingRoot,
-			TArray<FString> InPhaseHistory);
+			TArray<FString> InPhaseHistory,
+			TArray<FDurableArtifactState> InPreMutationStates = {},
+			TArray<FDurableArtifactState> InExpectedPersistedStates = {});
 
 		const FAssetDurableRequest& GetRequest() const;
 		const FDurableInventory& GetInventory() const;
@@ -239,6 +279,8 @@ namespace UE::UAI::AssetDurable
 		const FString& GetStagingRoot() const;
 		const TArray<FString>& GetPhaseHistory() const;
 		const FString& GetCurrentPhase() const;
+		const TArray<FDurableArtifactState>& GetPreMutationStates() const;
+		const TArray<FDurableArtifactState>& GetExpectedPersistedStates() const;
 
 	private:
 		FAssetDurableRequest Request;
@@ -249,6 +291,8 @@ namespace UE::UAI::AssetDurable
 		FString TransactionRoot;
 		FString StagingRoot;
 		TArray<FString> PhaseHistory;
+		TArray<FDurableArtifactState> PreMutationStates;
+		TArray<FDurableArtifactState> ExpectedPersistedStates;
 	};
 
 	class UEAGENTINTERFACE_API FDurableReceipt final
@@ -263,7 +307,12 @@ namespace UE::UAI::AssetDurable
 			TArray<FString> InPhaseHistory,
 			ERecoveryAction InRecoveryAction,
 			bool bInRequiresIndependentVerification,
-			bool bInReplayed);
+			bool bInReplayed,
+			FString InFailureCode = FString(),
+			FString InFailureDetail = FString(),
+			FString InVerificationId = FString(),
+			TArray<FDurableArtifactState> InPreMutationStates = {},
+			TArray<FDurableArtifactState> InExpectedPersistedStates = {});
 
 		const FString& GetJournalId() const;
 		EDurableStatus GetStatus() const;
@@ -273,6 +322,11 @@ namespace UE::UAI::AssetDurable
 		ERecoveryAction GetRecoveryAction() const;
 		bool RequiresIndependentVerification() const;
 		bool IsReplayed() const;
+		const FString& GetFailureCode() const;
+		const FString& GetFailureDetail() const;
+		const FString& GetVerificationId() const;
+		const TArray<FDurableArtifactState>& GetPreMutationStates() const;
+		const TArray<FDurableArtifactState>& GetExpectedPersistedStates() const;
 
 	private:
 		FString JournalId;
@@ -283,6 +337,11 @@ namespace UE::UAI::AssetDurable
 		ERecoveryAction RecoveryAction = ERecoveryAction::None;
 		bool bRequiresIndependentVerification = false;
 		bool bReplayed = false;
+		FString FailureCode;
+		FString FailureDetail;
+		FString VerificationId;
+		TArray<FDurableArtifactState> PreMutationStates;
+		TArray<FDurableArtifactState> ExpectedPersistedStates;
 	};
 
 	class UEAGENTINTERFACE_API FDurableVerificationAcknowledgement final
@@ -359,6 +418,19 @@ namespace UE::UAI::AssetDurable
 			const FAssetDurableSessionRef& Session,
 			FUeAgentResourceTracker& Resources,
 			FString& OutObservedState,
+			FAssetDurableError& OutError) = 0;
+	};
+
+	class UEAGENTINTERFACE_API IAssetDurableReconciliationOracle
+	{
+	public:
+		virtual ~IAssetDurableReconciliationOracle() = default;
+
+		virtual bool TryConfirm(
+			const FAssetDurableSessionRef& Session,
+			const TArray<FDurableArtifactState>& ObservedStates,
+			EDurableStatus ProposedStatus,
+			FUeAgentResourceTracker& Resources,
 			FAssetDurableError& OutError) = 0;
 	};
 
@@ -472,6 +544,13 @@ namespace UE::UAI::AssetDurable
 		FString& OutInventoryHash,
 		FAssetDurableError& OutError);
 
+	UEAGENTINTERFACE_API bool TryAcquireAssetDurableFence(
+		const FString& JournalRoot,
+		const FString& StableJournalOwnerId,
+		ContextResource::FUeAgentResourceTracker& Resources,
+		int64& OutFencingToken,
+		FAssetDurableError& OutError);
+
 	UEAGENTINTERFACE_API bool TryPrepareAssetDurability(
 		const FAssetDurableRequest& Request,
 		IAssetDurableBackend& Backend,
@@ -520,5 +599,26 @@ namespace UE::UAI::AssetDurable
 		const FString& CurrentJournalOwnerId,
 		FUeAgentResourceTracker& Resources,
 		TArray<FDurableReceipt>& OutReceipts,
+		FAssetDurableError& OutError);
+
+	UEAGENTINTERFACE_API bool TryInspectAssetDurableJournal(
+		const FString& JournalRoot,
+		const FString& JournalId,
+		const TArray<FString>& AllowedArtifactRoots,
+		FUeAgentResourceTracker& Resources,
+		FAssetDurableSessionPtr& OutSession,
+		TArray<FDurableArtifactState>& OutObservedStates,
+		FAssetDurableError& OutError);
+
+	UEAGENTINTERFACE_API bool TryReconcileAssetDurability(
+		const FString& JournalRoot,
+		const FString& JournalId,
+		const TArray<FString>& AllowedArtifactRoots,
+		const FString& ExpectedJournalOwnerId,
+		int64 ExpectedFencingToken,
+		const FString& VerificationId,
+		IAssetDurableReconciliationOracle& ReconciliationOracle,
+		FUeAgentResourceTracker& Resources,
+		FDurableReceipt& OutReceipt,
 		FAssetDurableError& OutError);
 }

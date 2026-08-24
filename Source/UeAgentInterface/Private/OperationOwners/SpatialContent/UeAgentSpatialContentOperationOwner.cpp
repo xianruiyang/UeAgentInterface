@@ -49,7 +49,8 @@ namespace UE::UAI::OperationOwners::SpatialContent
 
 	bool IsDurableMutation(const FString& CommandId)
 	{
-		return CommandId == TEXT("mesh.transform.bake")
+		return CommandId == TEXT("world.object_transform.update")
+			|| CommandId == TEXT("mesh.transform.bake")
 			|| CommandId == TEXT("mesh.pivot.update");
 	}
 

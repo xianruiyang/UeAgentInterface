@@ -490,6 +490,7 @@ bool FUeAgentExecutionMutationQueueFenceTest::RunTest(
 	FirstHook->DurableTargets.Emplace(
 		MakeIdentity(TEXT("TargetA")),
 		TEXT("/Game/UAI/P4_006"),
+		EPackageHeaderKind::EvidenceRequired,
 		EAssetDurableIntent::Save,
 		ERollbackGrade::DurableBackup);
 	FString FirstId;

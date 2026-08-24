@@ -58,9 +58,9 @@ bool FUeAgentWorldSpatialProductionRuntimeCompositionTest::RunTest(
 		Runtime->GetDescriptorRegistry()->GetDescriptors().Num(),
 		22);
 	TestEqual(
-		TEXT("all 11 operations have production chains"),
+		TEXT("all 12 operations have production chains"),
 		Runtime->GetOperationChains().Num(),
-		11);
+		12);
 	TArray<FString> UnboundViewportIds;
 	Runtime->GetExplicitViewportIdentities(UnboundViewportIds);
 	TestTrue(
@@ -98,8 +98,8 @@ bool FUeAgentWorldSpatialProductionRuntimeCompositionTest::RunTest(
 				+ Contract.GetC3Lane());
 		}
 	}
-	TestEqual(TEXT("production query count"), QueryCount, 11);
-	TestEqual(TEXT("production operation count"), OperationCount, 11);
+	TestEqual(TEXT("production query count"), QueryCount, 10);
+	TestEqual(TEXT("production operation count"), OperationCount, 12);
 	TestEqual(TEXT("production capability count"), CapabilityIds.Num(), 22);
 
 	World->DestroyWorld(false);

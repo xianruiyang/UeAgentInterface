@@ -1124,6 +1124,104 @@ namespace UE::UAI::DomainAdapters::TimelineAnimation
 			return true;
 		}
 
+		bool ApplyLevelSequenceSettings(
+			ULevelSequence& Sequence,
+			const FTimelineAnimationRequestData& Data,
+			FUeAgentTimelineAnimationExecutionError& OutError)
+		{
+			UMovieScene* Scene = Sequence.GetMovieScene();
+			if (!Scene)
+			{
+				return Fail(
+					OutError,
+					TEXT("timeline_animation_movie_scene_unavailable"),
+					Sequence.GetPathName());
+			}
+
+			FFrameRate DisplayRate;
+			bool bDisplayRateChanged = false;
+			if (Data.DisplayRate.IsSet())
+			{
+				if (!TryRate(*Data.DisplayRate, DisplayRate, OutError))
+				{
+					return false;
+				}
+				bDisplayRateChanged = DisplayRate != Scene->GetDisplayRate();
+			}
+
+			TRange<FFrameNumber> PlaybackRange;
+			bool bPlaybackRangeChanged = false;
+			if (Data.TemporalRange.IsSet())
+			{
+				const FTimelineAnimationRange& Requested = *Data.TemporalRange;
+				const FString NativeClock =
+					TEXT("level_sequence:") + Sequence.GetPathName();
+				if (Requested.ClockId != NativeClock)
+				{
+					return Fail(
+						OutError,
+						TEXT("timeline_animation_c4_exact_time_mismatch"),
+						Requested.ClockId,
+						NativeClock);
+				}
+				if (!Requested.Lower.Point.IsSet()
+					|| !Requested.Upper.Point.IsSet())
+				{
+					return Fail(
+						OutError,
+						TEXT("timeline_animation_playback_range_closed_required"),
+						Sequence.GetPathName());
+				}
+				const FFrameRate TickResolution = Scene->GetTickResolution();
+				int64 Lower = 0;
+				int64 Upper = 0;
+				if (!TryPointTick(
+						*Requested.Lower.Point,
+						Requested.ClockId,
+						TickResolution,
+						Lower,
+						OutError)
+					|| !TryPointTick(
+						*Requested.Upper.Point,
+						Requested.ClockId,
+						TickResolution,
+						Upper,
+						OutError))
+				{
+					return false;
+				}
+				if (Lower < MIN_int32 || Upper > MAX_int32 || Upper < Lower)
+				{
+					return Fail(
+						OutError,
+						TEXT("timeline_animation_playback_range_invalid"),
+						Sequence.GetPathName());
+				}
+				PlaybackRange = TRange<FFrameNumber>(
+					FFrameNumber(static_cast<int32>(Lower)),
+					FFrameNumber(static_cast<int32>(Upper)));
+				bPlaybackRangeChanged = PlaybackRange != Scene->GetPlaybackRange();
+			}
+
+			if (!bDisplayRateChanged && !bPlaybackRangeChanged)
+			{
+				return Fail(
+					OutError,
+					TEXT("timeline_animation_settings_no_change"),
+					Sequence.GetPathName());
+			}
+			Scene->Modify();
+			if (bDisplayRateChanged)
+			{
+				Scene->SetDisplayRate(DisplayRate);
+			}
+			if (bPlaybackRangeChanged)
+			{
+				Scene->SetPlaybackRange(PlaybackRange);
+			}
+			return true;
+		}
+
 		UObject* CreateAsset(const FUeAgentTimelineAnimationRequest& Request,
 			FUeAgentTimelineAnimationExecutionError& OutError)
 		{
@@ -1436,8 +1534,10 @@ namespace UE::UAI::DomainAdapters::TimelineAnimation
 						TEXT("timeline_animation_montage_type_mismatch"), Ref,
 						Object->GetClass()->GetPathName());
 				}
-				if (Typed->GetKind()
+				if ((Typed->GetKind()
 						== EUeAgentTimelineAnimationRequestKind::LevelSequenceStructureReplace
+					|| Typed->GetKind()
+						== EUeAgentTimelineAnimationRequestKind::LevelSequenceSettingsUpdate)
 					&& !Object->IsA<ULevelSequence>())
 				{
 					return Fail(OutError,
@@ -1463,6 +1563,9 @@ namespace UE::UAI::DomainAdapters::TimelineAnimation
 					bApplied = ApplyMontageStructure(*CastChecked<UAnimMontage>(Object), *Data.Structure, OutError); break;
 				case EUeAgentTimelineAnimationRequestKind::LevelSequenceStructureReplace:
 					bApplied = ApplyLevelSequenceStructure(*CastChecked<ULevelSequence>(Object), *Data.Structure, OutError); break;
+				case EUeAgentTimelineAnimationRequestKind::LevelSequenceSettingsUpdate:
+					bApplied = ApplyLevelSequenceSettings(
+						*CastChecked<ULevelSequence>(Object), Data, OutError); break;
 				case EUeAgentTimelineAnimationRequestKind::SubjectPoseUpdate:
 				{
 					const auto* Binding = Environment->FindSubject(Ref);

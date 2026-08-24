@@ -217,6 +217,11 @@ namespace UE::UAI::DomainAdapters::WorldSpatial
 		TArray<FWorldSpatialLayoutRelation> LayoutRelations;
 	};
 	struct FObjectTransformReadRequestInput { FWorldSpatialFrame VerifyFrame; };
+	struct FWorldObjectTransformUpdateRequestInput
+	{
+		FWorldSpatialValue Transform;
+		FWorldSpatialRevision ExpectedRevision;
+	};
 	struct FWorldObjectAlignRequestInput
 	{
 		TArray<FString> SubjectRefs;
@@ -242,12 +247,6 @@ namespace UE::UAI::DomainAdapters::WorldSpatial
 		FWorldSpatialValue Pivot;
 		FWorldSpatialRevision ExpectedRevision;
 		TOptional<bool> PreserveWorldGeometry;
-	};
-	struct FTransformCandidatesEvaluateRequestInput
-	{
-		TArray<FString> SubjectRefs;
-		TArray<FWorldSpatialValue> Candidates;
-		FWorldSpatialFrame VerifyFrame;
 	};
 	struct FViewportRayDeprojectRequestInput { FWorldSpatialValue ScreenPoint; };
 	struct FViewportRayTraceRequestInput
@@ -304,11 +303,11 @@ namespace UE::UAI::DomainAdapters::WorldSpatial
 		FGraphViewUpdateRequestInput,
 		FGraphLayoutApplyRequestInput,
 		FObjectTransformReadRequestInput,
+		FWorldObjectTransformUpdateRequestInput,
 		FWorldObjectAlignRequestInput,
 		FWorldObjectSnapToSurfaceRequestInput,
 		FMeshTransformBakeRequestInput,
 		FMeshPivotUpdateRequestInput,
-		FTransformCandidatesEvaluateRequestInput,
 		FViewportRayDeprojectRequestInput,
 		FViewportRayTraceRequestInput,
 		FViewportActorPickRequestInput,
