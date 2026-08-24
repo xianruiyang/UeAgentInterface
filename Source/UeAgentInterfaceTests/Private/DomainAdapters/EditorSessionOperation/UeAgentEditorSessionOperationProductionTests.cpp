@@ -192,6 +192,7 @@ namespace
 	public:
 		bool TryCreatePort(
 			const FUeAgentEditorSessionOperationTypedRequest& Request,
+			const FLongRunningOperationRequest& OperationRequest,
 			const FUeAgentEditorSessionOperationPolicyDescriptor& Policy,
 			TSharedPtr<ILongRunningOperationPort, ESPMode::ThreadSafe>& OutPort,
 			FExecutionMutationError& OutError) override
@@ -278,6 +279,7 @@ namespace
 	public:
 		bool TryCreatePort(
 			const FUeAgentEditorSessionOperationTypedRequest& Request,
+			const FLongRunningOperationRequest& OperationRequest,
 			const FUeAgentEditorSessionOperationPolicyDescriptor& Policy,
 			TSharedPtr<ILongRunningOperationPort, ESPMode::ThreadSafe>& OutPort,
 			FExecutionMutationError& OutError) override
@@ -427,12 +429,14 @@ bool FUeAgentEditorSessionExactPolicyCatalogTest::RunTest(
 		TEXT("asset:/Game/UAI/Fixture.BP_Fixture"),
 		TEXT("policy:asset-editor:open/v1"),
 		EmptyParameters(*Resources));
+	const FLongRunningOperationRequest Operation = MakeOperationRequest(
+		TEXT("policy-factory"), Resources);
 	TSharedPtr<ILongRunningOperationPort, ESPMode::ThreadSafe> FirstPort;
 	TSharedPtr<ILongRunningOperationPort, ESPMode::ThreadSafe> SecondPort;
 	TestTrue(TEXT("exact policy creates first operation port"),
-		Factory->TryCreateOperationPort(Request, FirstPort, Error));
+		Factory->TryCreateOperationPort(Request, Operation, FirstPort, Error));
 	TestTrue(TEXT("same policy creates second operation port"),
-		Factory->TryCreateOperationPort(Request, SecondPort, Error));
+		Factory->TryCreateOperationPort(Request, Operation, SecondPort, Error));
 	TestEqual(TEXT("builder called once per operation"), Builder->Calls, 2);
 	TestTrue(TEXT("ports are operation scoped and distinct"),
 		FirstPort.IsValid() && SecondPort.IsValid()
@@ -444,7 +448,8 @@ bool FUeAgentEditorSessionExactPolicyCatalogTest::RunTest(
 		TEXT("policy:asset-editor:open/v2"),
 		EmptyParameters(*Resources));
 	TestFalse(TEXT("unknown suffix is not accepted by prefix"),
-		Factory->TryCreateOperationPort(UnknownPolicy, FirstPort, Error));
+		Factory->TryCreateOperationPort(
+			UnknownPolicy, Operation, FirstPort, Error));
 	TestEqual(TEXT("unknown policy fails with stable code"), Error.GetCode(),
 		FString(TEXT("editor_session_operation_policy_not_registered")));
 
@@ -454,7 +459,8 @@ bool FUeAgentEditorSessionExactPolicyCatalogTest::RunTest(
 		TEXT("policy:asset-editor:open/v1"),
 		EmptyParameters(*Resources));
 	TestFalse(TEXT("family mismatch cannot select another policy"),
-		Factory->TryCreateOperationPort(FamilyMismatch, FirstPort, Error));
+		Factory->TryCreateOperationPort(
+			FamilyMismatch, Operation, FirstPort, Error));
 	TestEqual(TEXT("family mismatch is exact policy miss"), Error.GetCode(),
 		FString(TEXT("editor_session_operation_policy_not_registered")));
 
@@ -565,18 +571,18 @@ bool FUeAgentEditorSessionFiveFamilyNativePortTest::RunTest(
 			Case.SubjectRef,
 			Case.PolicyId,
 			EmptyParameters(*Resources));
-		TSharedPtr<ILongRunningOperationPort, ESPMode::ThreadSafe> Port;
-		TestTrue(TEXT("family creates production native port"),
-			Factory->TryCreateOperationPort(Request, Port, Error));
-		if (!Port.IsValid())
-		{
-			continue;
-		}
 		const FLongRunningOperationRequest Operation = MakeOperationRequest(
 			FString::Printf(TEXT("family-%d"), Index),
 			Resources,
 			Case.StatePlane,
 			Case.WorldType);
+		TSharedPtr<ILongRunningOperationPort, ESPMode::ThreadSafe> Port;
+		TestTrue(TEXT("family creates production native port"),
+			Factory->TryCreateOperationPort(Request, Operation, Port, Error));
+		if (!Port.IsValid())
+		{
+			continue;
+		}
 		FLongRunningWorkIdentity Identity;
 		TestTrue(TEXT("family starts one operation-scoped native session"),
 			Port->Start(Operation, UncancelledToken(), Identity, Error));

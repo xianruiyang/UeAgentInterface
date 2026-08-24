@@ -899,7 +899,7 @@ namespace UE::UAI::Composition::LongRunningSession
 				SubjectRef = State->Config.EditorInstanceId;
 				PolicyId = TEXT("policy:host-lifecycle:prepare-safe-exit/v1");
 				FamilyId = TEXT("host_lifecycle");
-				Parameters = Root->TryGetField(TEXT("dirty_resolution"));
+				Parameters = MakeShared<FJsonValueObject>(Root);
 			}
 			else
 			{

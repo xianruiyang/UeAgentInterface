@@ -49,9 +49,17 @@ with uai.connect("connection.toml") as client:
         "reject_non_atomic",
     )
 
-    # Only after dirty-resource readback and an explicit policy decision.
-    exit_result = client.editor.safe_exit({"mode": "reject"})
+    # editor.safe_exit remains a generated exact binding, but ordinary callers
+    # must use scripts/ue/SafeExitLifecycle.py to create its external witness.
 ```
+
+The generated catalog exposes the exact
+`client.editor.safe_exit(dirty_resolution, external_witness)` binding, but it
+is not a direct lifecycle entry point. After exact dirty resource readback and
+an explicit `reject|save|discard` decision, use the project
+`scripts/ue/SafeExitLifecycle.py` runner. The runner owns the external process
+witness and durable terminal; callers must not construct `external_witness`
+themselves.
 
 The packaging family uses exact policies for `query-environment`,
 `export-profile`, `validate-profile`, `diff-profile`, `plan-build`,

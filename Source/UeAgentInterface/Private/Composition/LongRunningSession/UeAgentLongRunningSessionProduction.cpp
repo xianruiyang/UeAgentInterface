@@ -4,6 +4,7 @@
 #include "Components/DynamicMeshComponent.h"
 #include "Composition/LongRunningSession/UeAgentLongRunningSessionActivation.h"
 #include "Composition/LongRunningSession/UeAgentLongRunningSessionCommandHandlers.h"
+#include "Composition/LongRunningSession/UeAgentSafeExitDurableCompletion.h"
 #include "Containers/Ticker.h"
 #include "Core/ArtifactPublisher/UeAgentFileArtifactPublisher.h"
 #include "Core/ExecutionMutation/UeAgentLongRunningOperation.h"
@@ -246,22 +247,60 @@ namespace UE::UAI::Composition::LongRunningSession
 				&& Requested == Dirty;
 		}
 
-		bool TryResolveSafeExitDirtyResources(
+		bool TryReadSafeExitExternalWitnessRef(
 			const FUeAgentCanonicalValue& Parameters,
+			FUeAgentSafeExitExternalWitnessRef& OutRef,
 			FExecutionMutationError& OutError)
 		{
-			const FString Mode = StringField(Parameters, TEXT("mode"));
+			OutRef = {};
+			const FUeAgentCanonicalValue* Witness =
+				FindField(Parameters, TEXT("external_witness"));
+			if (!Witness || Witness->GetKind() != EUeAgentValueKind::Object
+				|| StringField(*Witness, TEXT("schema"))
+					!= TEXT("uai.safe_exit.external_witness_ref.v1"))
+			{
+				return Fail(
+					OutError,
+					TEXT("editor_safe_exit_external_witness_required"));
+			}
+			OutRef.LaunchId = StringField(*Witness, TEXT("launch_id"));
+			OutRef.ExitAttemptId = StringField(
+				*Witness, TEXT("exit_attempt_id"));
+			OutRef.Nonce = StringField(*Witness, TEXT("nonce"));
+			return OutRef.IsValid()
+				? true
+				: Fail(
+					OutError,
+					TEXT("editor_safe_exit_external_witness_ref_invalid"));
+		}
+
+		bool TryResolveSafeExitDirtyResources(
+			const FUeAgentCanonicalValue& Parameters,
+			FUeAgentSafeExitDirtyResolutionReceipt& OutReceipt,
+			FExecutionMutationError& OutError)
+		{
+			OutReceipt = {};
+			const FUeAgentCanonicalValue* DirtyResolution =
+				FindField(Parameters, TEXT("dirty_resolution"));
+			if (!DirtyResolution
+				|| DirtyResolution->GetKind() != EUeAgentValueKind::Object)
+			{
+				return Fail(
+					OutError,
+					TEXT("editor_safe_exit_dirty_resolution_invalid"));
+			}
+			const FString Mode = StringField(*DirtyResolution, TEXT("mode"));
 			TArray<FString> SaveResources;
 			TArray<FString> DiscardResources;
 			if ((Mode != TEXT("reject") && Mode != TEXT("save")
 					&& Mode != TEXT("discard"))
 				|| !TryStringArrayField(
-					Parameters,
+					*DirtyResolution,
 					TEXT("save_resources"),
 					SaveResources,
 					OutError)
 				|| !TryStringArrayField(
-					Parameters,
+					*DirtyResolution,
 					TEXT("discard_resources"),
 					DiscardResources,
 					OutError))
@@ -289,9 +328,14 @@ namespace UE::UAI::Composition::LongRunningSession
 						TEXT("editor_safe_exit_dirty_resolution_invalid"),
 						TEXT("reject mode does not accept save/discard resources"));
 				}
-				return DirtyPackages.IsEmpty()
-					? true
-					: Fail(
+				if (DirtyPackages.IsEmpty())
+				{
+					OutReceipt.Mode = Mode;
+					OutReceipt.SaveResources = SaveResources;
+					OutReceipt.DiscardResources = DiscardResources;
+					return true;
+				}
+				return Fail(
 						OutError,
 						TEXT("editor_safe_exit_dirty_resources_present"),
 						DirtyDetail);
@@ -334,12 +378,18 @@ namespace UE::UAI::Composition::LongRunningSession
 			}
 
 			CollectDirtyProjectPackages(DirtyPackages, DirtyPackageNames);
-			return DirtyPackages.IsEmpty()
-				? true
-				: Fail(
+			if (!DirtyPackages.IsEmpty())
+			{
+				return Fail(
 					OutError,
 					TEXT("editor_safe_exit_dirty_resources_unresolved"),
 					FString::Join(DirtyPackageNames, TEXT(",")));
+			}
+			OutReceipt.Mode = Mode;
+			OutReceipt.SaveResources = MoveTemp(SaveResources);
+			OutReceipt.DiscardResources = MoveTemp(DiscardResources);
+			OutReceipt.RemainingDirtyResources = MoveTemp(DirtyPackageNames);
+			return true;
 		}
 
 		double DecimalField(
@@ -3037,29 +3087,6 @@ namespace UE::UAI::Composition::LongRunningSession
 			bool bCulturePreviewActive = false;
 		};
 
-		class FSafeExitTarget final
-			: public EditorSessionOperation::IUeAgentEditorHostExitTarget
-		{
-		public:
-			explicit FSafeExitTarget(FString InEditorInstanceId)
-				: EditorInstanceId(MoveTemp(InEditorInstanceId))
-			{
-			}
-
-			const FString& GetEditorInstanceId() const override
-			{
-				return EditorInstanceId;
-			}
-
-			void RequestExit() override
-			{
-				FPlatformMisc::RequestExit(false);
-			}
-
-		private:
-			FString EditorInstanceId;
-		};
-
 		class FEditorSessionBuilder final
 			: public EditorSessionOperation::IUeAgentEditorSessionOperationPortBuilder
 		{
@@ -3074,6 +3101,7 @@ namespace UE::UAI::Composition::LongRunningSession
 			bool TryCreatePort(
 				const EditorSessionOperation::
 					FUeAgentEditorSessionOperationTypedRequest& Request,
+				const FLongRunningOperationRequest& OperationRequest,
 				const EditorSessionOperation::
 					FUeAgentEditorSessionOperationPolicyDescriptor& Policy,
 				TSharedPtr<ILongRunningOperationPort, ESPMode::ThreadSafe>& OutPort,
@@ -3082,8 +3110,41 @@ namespace UE::UAI::Composition::LongRunningSession
 				if (Request.GetFamily() == EditorSessionOperation::
 					EUeAgentEditorSessionOperationFamily::HostLifecycle)
 				{
+					FUeAgentSafeExitExternalWitnessRef WitnessRef;
+					if (!TryReadSafeExitExternalWitnessRef(
+							Request.GetParameters().Get(),
+							WitnessRef,
+							OutError))
+					{
+						return false;
+					}
+					FUeAgentValidatedSafeExitWitness Witness;
+					if (!TryValidateSafeExitExternalWitness(
+							WitnessRef,
+							Witness,
+							OutError))
+					{
+						return false;
+					}
+					FUeAgentSafeExitDirtyResolutionReceipt DirtyResolution;
 					if (!TryResolveSafeExitDirtyResources(
-							Request.GetParameters().Get(), OutError))
+							Request.GetParameters().Get(),
+							DirtyResolution,
+							OutError))
+					{
+						return false;
+					}
+					TSharedPtr<
+						EditorSessionOperation::IUeAgentEditorHostExitTarget,
+						ESPMode::ThreadSafe> ExitTarget;
+					if (!TryCreateDurableSafeExitTarget(
+							Witness,
+							DirtyResolution,
+							OperationRequest,
+							EditorInstanceId,
+							ExitTarget,
+							OutError)
+						|| !ExitTarget.IsValid())
 					{
 						return false;
 					}
@@ -3092,8 +3153,7 @@ namespace UE::UAI::Composition::LongRunningSession
 							Request,
 							Policy,
 							0.25,
-							MakeShared<FSafeExitTarget, ESPMode::ThreadSafe>(
-								EditorInstanceId),
+							ExitTarget.ToSharedRef(),
 							OutPort,
 							OutError);
 				}

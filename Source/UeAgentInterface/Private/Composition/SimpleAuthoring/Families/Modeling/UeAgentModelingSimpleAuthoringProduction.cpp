@@ -2,6 +2,9 @@
 #include "Composition/SimpleAuthoring/Families/Modeling/UeAgentModelingSimpleAuthoringExistingEdit.h"
 
 #include "Components/DynamicMeshComponent.h"
+#include "Components/SceneComponent.h"
+#include "Core/AssetDurable/UeAgentPersistedPackage.h"
+#include "Core/AssetDurable/UeAgentPersistedWorld.h"
 #include "Core/StateSemantic/UeAgentStateRevisionJson.h"
 #include "Core/StateSemantic/UeAgentStateSemantic.h"
 #include "Dom/JsonObject.h"
@@ -9,11 +12,15 @@
 #include "DynamicMesh/DynamicMesh3.h"
 #include "DynamicMeshActor.h"
 #include "Engine/Level.h"
+#include "Engine/StaticMesh.h"
 #include "Engine/World.h"
 #include "EngineUtils.h"
+#include "Misc/PackageName.h"
 #include "Serialization/JsonReader.h"
 #include "Serialization/JsonSerializer.h"
 #include "UDynamicMesh.h"
+#include "UObject/Package.h"
+#include "UObject/UObjectGlobals.h"
 
 namespace UE::UAI::Composition::SimpleAuthoring::Modeling
 {
@@ -526,6 +533,33 @@ namespace UE::UAI::Composition::SimpleAuthoring::Modeling
 			return Match;
 		}
 
+		ADynamicMeshActor* FindActorByGuid(
+			UWorld& World,
+			const FGuid& ActorGuid,
+			bool& bOutAmbiguous)
+		{
+			bOutAmbiguous = false;
+			ADynamicMeshActor* Match = nullptr;
+			if (!ActorGuid.IsValid())
+			{
+				return nullptr;
+			}
+			for (TActorIterator<ADynamicMeshActor> It(&World); It; ++It)
+			{
+				if (It->GetActorGuid() != ActorGuid)
+				{
+					continue;
+				}
+				if (Match)
+				{
+					bOutAmbiguous = true;
+					return nullptr;
+				}
+				Match = *It;
+			}
+			return Match;
+		}
+
 		bool TryReadBounds(
 			ADynamicMeshActor& Actor,
 			FBox& OutBounds,
@@ -650,10 +684,39 @@ namespace UE::UAI::Composition::SimpleAuthoring::Modeling
 			return true;
 		}
 
-		bool PlacementMatches(
-			const TSharedPtr<FJsonObject>& Payload,
-			const ADynamicMeshActor& Actor)
+		struct FPlacementComparison final
 		{
+			bool bLocationMatches = false;
+			bool bRotationMatches = false;
+			bool bScaleMatches = false;
+
+			bool Matches() const
+			{
+				return bLocationMatches
+					&& bRotationMatches
+					&& bScaleMatches;
+			}
+		};
+
+		TArray<TSharedPtr<FJsonValue>> PlacementVectorValues(
+			const FVector& Value)
+		{
+			return {
+				MakeShared<FJsonValueNumber>(Value.X),
+				MakeShared<FJsonValueNumber>(Value.Y),
+				MakeShared<FJsonValueNumber>(Value.Z),
+			};
+		}
+
+		bool TryReadExpectedPlacement(
+			const TSharedPtr<FJsonObject>& Payload,
+			FVector& OutLocation,
+			FQuat& OutRotation,
+			FVector& OutScale)
+		{
+			OutLocation = FVector::ZeroVector;
+			OutRotation = FQuat::Identity;
+			OutScale = FVector::OneVector;
 			const TSharedPtr<FJsonObject>* Placement = nullptr;
 			if (!Payload->TryGetObjectField(
 					TEXT("placement"),
@@ -688,31 +751,65 @@ namespace UE::UAI::Composition::SimpleAuthoring::Modeling
 			{
 				return false;
 			}
-			const double UnitScale =
-				Unit == TEXT("meter") ? 100.0 : 1.0;
-			FQuat ExpectedRotation(
+			const double UnitScale = Unit == TEXT("meter") ? 100.0 : 1.0;
+			OutLocation = FVector(
+				Translation[0] * UnitScale,
+				Translation[1] * UnitScale,
+				Translation[2] * UnitScale);
+			OutRotation = FQuat(
 				Rotation[0],
 				Rotation[1],
 				Rotation[2],
 				Rotation[3]);
-			if (ExpectedRotation.SizeSquared()
-				<= UE_DOUBLE_SMALL_NUMBER)
+			if (OutRotation.SizeSquared() <= UE_DOUBLE_SMALL_NUMBER)
 			{
 				return false;
 			}
-			ExpectedRotation.Normalize();
-			return Actor.GetActorLocation().Equals(
-					FVector(
-						Translation[0] * UnitScale,
-						Translation[1] * UnitScale,
-						Translation[2] * UnitScale),
-					0.01)
-				&& Actor.GetActorQuat().Equals(
+			OutRotation.Normalize();
+			OutScale = FVector(Scale[0], Scale[1], Scale[2]);
+			return true;
+		}
+
+		FTransform ReadPrimitiveAuthoredTransform(
+			const ADynamicMeshActor& Actor)
+		{
+			const USceneComponent* const RootComponent =
+				Actor.GetRootComponent();
+			if (RootComponent && !RootComponent->GetAttachParent())
+			{
+				return RootComponent->GetRelativeTransform();
+			}
+			return Actor.GetActorTransform();
+		}
+
+		FPlacementComparison ComparePlacement(
+			const TSharedPtr<FJsonObject>& Payload,
+			const ADynamicMeshActor& Actor)
+		{
+			FPlacementComparison Result;
+			FVector ExpectedLocation;
+			FQuat ExpectedRotation;
+			FVector ExpectedScale;
+			if (!TryReadExpectedPlacement(
+					Payload,
+					ExpectedLocation,
 					ExpectedRotation,
-					0.0001)
-				&& Actor.GetActorScale3D().Equals(
-					FVector(Scale[0], Scale[1], Scale[2]),
-					0.0001);
+					ExpectedScale))
+			{
+				return Result;
+			}
+			const FTransform AuthoredTransform =
+				ReadPrimitiveAuthoredTransform(Actor);
+			Result.bLocationMatches = AuthoredTransform.GetLocation().Equals(
+				ExpectedLocation,
+				0.01);
+			Result.bRotationMatches = AuthoredTransform.GetRotation().Equals(
+				ExpectedRotation,
+				0.0001);
+			Result.bScaleMatches = AuthoredTransform.GetScale3D().Equals(
+				ExpectedScale,
+				0.0001);
+			return Result;
 		}
 
 		bool GeometryMatches(
@@ -748,13 +845,30 @@ namespace UE::UAI::Composition::SimpleAuthoring::Modeling
 			}
 			const TSharedPtr<FJsonObject> State =
 				MakeShared<FJsonObject>();
+			const FPlacementComparison Placement = ComparePlacement(
+				Payload,
+				Actor);
 			State->SetStringField(TEXT("target_ref"), TargetRef);
 			State->SetStringField(
 				TEXT("carrier_kind"),
 				TEXT("dynamic_mesh_actor"));
 			State->SetBoolField(
 				TEXT("placement_matches"),
-				PlacementMatches(Payload, Actor));
+				Placement.Matches());
+			State->SetBoolField(
+				TEXT("placement_location_matches"),
+				Placement.bLocationMatches);
+			State->SetBoolField(
+				TEXT("placement_rotation_matches"),
+				Placement.bRotationMatches);
+			State->SetBoolField(
+				TEXT("placement_scale_matches"),
+				Placement.bScaleMatches);
+			const FTransform AuthoredTransform =
+				ReadPrimitiveAuthoredTransform(Actor);
+			State->SetArrayField(
+				TEXT("placement_location_cm"),
+				PlacementVectorValues(AuthoredTransform.GetLocation()));
 			State->SetBoolField(
 				TEXT("geometry_matches"),
 				GeometryMatches(Profile, Payload, Actor));
@@ -775,12 +889,28 @@ namespace UE::UAI::Composition::SimpleAuthoring::Modeling
 
 		bool TryBuildExpectedPrimitiveState(
 			const FString& TargetRef,
+			const TSharedPtr<FJsonObject>& Payload,
 			FUeAgentResourceTracker& Resources,
 			FUeAgentCanonicalValuePtr& OutValue,
 			FUeAgentSimpleAuthoringProductionError& OutError)
 		{
 			const TSharedPtr<FJsonObject> State =
 				MakeShared<FJsonObject>();
+			FVector ExpectedLocation;
+			FQuat ExpectedRotation;
+			FVector ExpectedScale;
+			if (!TryReadExpectedPlacement(
+					Payload,
+					ExpectedLocation,
+					ExpectedRotation,
+					ExpectedScale))
+			{
+				SetProductionError(
+					OutError,
+					TEXT("modeling_geometry_placement_invalid"),
+					TargetRef);
+				return false;
+			}
 			State->SetStringField(TEXT("target_ref"), TargetRef);
 			State->SetStringField(
 				TEXT("carrier_kind"),
@@ -788,6 +918,18 @@ namespace UE::UAI::Composition::SimpleAuthoring::Modeling
 			State->SetBoolField(
 				TEXT("placement_matches"),
 				true);
+			State->SetBoolField(
+				TEXT("placement_location_matches"),
+				true);
+			State->SetBoolField(
+				TEXT("placement_rotation_matches"),
+				true);
+			State->SetBoolField(
+				TEXT("placement_scale_matches"),
+				true);
+			State->SetArrayField(
+				TEXT("placement_location_cm"),
+				PlacementVectorValues(ExpectedLocation));
 			State->SetBoolField(
 				TEXT("geometry_matches"),
 				true);
@@ -1019,7 +1161,8 @@ namespace UE::UAI::Composition::SimpleAuthoring::Modeling
 				TSharedRef<
 					IUeAgentModelingGeometryEffectReferenceResolver,
 					ESPMode::ThreadSafe> InReferenceResolver,
-				const bool bInRequireSourceInstance)
+				const bool bInRequireSourceInstance,
+				FString InEvidenceId = FString())
 				: PortId(MoveTemp(InPortId))
 				, RequiredPlane(InRequiredPlane)
 				, Catalog(MoveTemp(InCatalog))
@@ -1027,6 +1170,7 @@ namespace UE::UAI::Composition::SimpleAuthoring::Modeling
 					MoveTemp(InReferenceResolver))
 				, bRequireSourceInstance(
 					bInRequireSourceInstance)
+				, EvidenceId(MoveTemp(InEvidenceId))
 			{
 			}
 
@@ -1330,7 +1474,9 @@ namespace UE::UAI::Composition::SimpleAuthoring::Modeling
 						FUeAgentStateProvenance(
 							TEXT("independent_readback"),
 							PortId,
-							TargetRef),
+							EvidenceId.IsEmpty()
+								? TargetRef
+								: EvidenceId),
 						MoveTemp(Entries),
 						Resources,
 						Snapshot,
@@ -1356,6 +1502,412 @@ namespace UE::UAI::Composition::SimpleAuthoring::Modeling
 				IUeAgentModelingGeometryEffectReferenceResolver,
 				ESPMode::ThreadSafe> ReferenceResolver;
 			bool bRequireSourceInstance = true;
+			FString EvidenceId;
+		};
+
+		class FSnapshotModelingReferenceResolver final
+			: public IUeAgentModelingGeometryEffectReferenceResolver
+		{
+		public:
+			FSnapshotModelingReferenceResolver(
+				FString InSourceRef,
+				UObject& InSnapshotObject)
+				: SourceRef(MoveTemp(InSourceRef))
+				, SnapshotObject(&InSnapshotObject)
+			{
+			}
+
+			bool TryResolveReference(
+				UWorld& World,
+				const FString& CanonicalRef,
+				UObject*& OutObject,
+				FExecutionMutationError& OutError) override
+			{
+				OutObject = SnapshotObject.Get();
+				OutError = {};
+				UWorld* OwningWorld = OutObject
+					? OutObject->GetTypedOuter<UWorld>()
+					: nullptr;
+				if (CanonicalRef != SourceRef
+					|| !IsValid(OutObject)
+					|| (OwningWorld && OwningWorld != &World))
+				{
+					OutObject = nullptr;
+					OutError = FExecutionMutationError(
+						TEXT("modeling_geometry_persisted_reference_unresolved"),
+						CanonicalRef);
+					return false;
+				}
+				return true;
+			}
+
+		private:
+			FString SourceRef;
+			TWeakObjectPtr<UObject> SnapshotObject;
+		};
+
+		class FModelingPersistedWorldCatalog final
+			: public IUeAgentWorldSimpleEffectWorldCatalog
+		{
+		public:
+			FModelingPersistedWorldCatalog(
+				UWorld& InWorld,
+				FString InWorldIdentity,
+				FString InContextRevision)
+				: World(&InWorld)
+				, WorldIdentity(MoveTemp(InWorldIdentity))
+				, ContextRevision(MoveTemp(InContextRevision))
+			{
+			}
+
+			bool TryEnumerate(
+				TArray<FUeAgentWorldSimpleEffectWorldCandidate>&
+					OutCandidates,
+				FExecutionMutationError& OutError) override
+			{
+				OutCandidates.Reset();
+				OutError = {};
+				if (!World.IsValid()
+					|| !World->PersistentLevel
+					|| WorldIdentity.IsEmpty()
+					|| ContextRevision.IsEmpty())
+				{
+					OutError = FExecutionMutationError(
+						TEXT(
+							"modeling_geometry_persisted_world_catalog_invalid"));
+					return false;
+				}
+				OutCandidates.Emplace(
+					World.Get(),
+					WorldIdentity,
+					World->PersistentLevel->GetPathName(),
+					EUeAgentExecutionWorldType::Preview,
+					TOptional<int32>(),
+					ContextRevision);
+				return OutCandidates.Last().IsValid();
+			}
+
+		private:
+			TWeakObjectPtr<UWorld> World;
+			FString WorldIdentity;
+			FString ContextRevision;
+		};
+
+		class FModelingArtifactPersistedStateOracle final
+			: public IPersistedStateOracle
+		{
+		public:
+			FModelingArtifactPersistedStateOracle(
+				TSharedRef<
+					IUeAgentWorldSimpleEffectWorldCatalog,
+					ESPMode::ThreadSafe> InCatalog)
+				: Catalog(MoveTemp(InCatalog))
+			{
+			}
+
+			const FString& GetReadPortId() const override
+			{
+				static const FString Id(PersistedStatePortId);
+				return Id;
+			}
+
+			bool TryObserve(
+				const FVerificationTarget& Target,
+				const TArray<FDurableArtifact>& Artifacts,
+				FUeAgentResourceTracker& Resources,
+				const FUeAgentOperationDeadline& Deadline,
+				const FUeAgentCancellationToken& Cancellation,
+				FUeAgentCanonicalSnapshotPtr& OutSnapshot,
+				FVerificationError& OutError) override
+			{
+				OutSnapshot.Reset();
+				OutError = {};
+				const FModelingProfile* Profile = Target.IsValid()
+					? FindProfile(
+						Target.GetBinding()
+							.GetSummary()
+							.GetDescriptorIdentity())
+					: nullptr;
+				TSharedPtr<FJsonObject> Payload;
+				FString TargetRef;
+				FUeAgentDiscoveryError EvidenceError;
+				if (!Target.IsValid()
+					|| Artifacts.IsEmpty()
+					|| Target.GetBinding().GetReadPortId()
+						!= PersistedStatePortId
+					|| !Profile
+					|| !Deadline.CanContinue()
+					|| Cancellation.IsCancelled()
+					|| !TryParseRequestEvidence(
+						Target.GetBinding(),
+						Payload,
+						EvidenceError)
+					|| !TryGetTargetRef(Payload, TargetRef))
+				{
+					OutError = FVerificationError(
+						EvidenceError.Code.IsEmpty()
+							? TEXT(
+								"modeling_geometry_persisted_read_request_invalid")
+							: EvidenceError.Code,
+						EvidenceError.Detail);
+					return false;
+				}
+
+				if (IsPrimitiveProfile(*Profile))
+				{
+					return TryObservePersistedWorldCarrier(
+						Target,
+						Artifacts,
+						Resources,
+						Deadline,
+						Cancellation,
+						TargetRef,
+						nullptr,
+						OutSnapshot,
+						OutError);
+				}
+
+				ExistingEdit::FCarrierState Baseline;
+				if (!IsExistingEditProfile(*Profile)
+					|| !ExistingEdit::TryReadBaseline(Payload, Baseline))
+				{
+					OutError = FVerificationError(
+						TEXT(
+							"modeling_geometry_persisted_baseline_invalid"),
+						TargetRef);
+					return false;
+				}
+				if (Baseline.CarrierKind == TEXT("dynamic_mesh_actor"))
+				{
+					return TryObservePersistedWorldCarrier(
+						Target,
+						Artifacts,
+						Resources,
+						Deadline,
+						Cancellation,
+						TargetRef,
+						&Baseline,
+						OutSnapshot,
+						OutError);
+				}
+				if (Baseline.CarrierKind != TEXT("static_mesh_asset"))
+				{
+					OutError = FVerificationError(
+						TEXT(
+							"modeling_geometry_persisted_carrier_unsupported"),
+						Baseline.CarrierKind);
+					return false;
+				}
+
+				FPersistedPackageLoadError LoadError;
+				const bool bObserved = TryObservePersistedPackage(
+					Artifacts,
+					Baseline.DurablePackageName,
+					[&](
+						UPackage& SnapshotPackage,
+						FPersistedPackageLoadError& ObserverError)
+					{
+						const FString ObjectName =
+							FPackageName::ObjectPathToObjectName(
+								Baseline.TargetRef);
+						UStaticMesh* SnapshotMesh = Cast<UStaticMesh>(
+							StaticFindObjectFast(
+								UStaticMesh::StaticClass(),
+								&SnapshotPackage,
+								FName(*ObjectName)));
+						if (!SnapshotMesh)
+						{
+							ObserverError.Code =
+								TEXT("modeling_geometry_persisted_asset_missing");
+							ObserverError.Detail = Baseline.TargetRef;
+							return false;
+						}
+						const TSharedRef<
+							FSnapshotModelingReferenceResolver,
+							ESPMode::ThreadSafe> Resolver = MakeShared<
+								FSnapshotModelingReferenceResolver,
+								ESPMode::ThreadSafe>(
+							Baseline.TargetRef,
+							*SnapshotMesh);
+						const FString EvidenceId =
+							TEXT("modeling:persisted-package-instance:")
+							+ SnapshotPackage.GetName()
+							+ TEXT(":")
+							+ Baseline.TargetRef;
+						FModelingStateReadPort Reader(
+							PersistedStatePortId,
+							EUeAgentStatePlane::Persisted,
+							Catalog,
+							Resolver,
+							false,
+							EvidenceId);
+						FUeAgentDiscoveryError ReadError;
+						if (!Reader.TryRead(
+								FUeAgentStateReadRequest(
+									Target.GetBinding(),
+									EUeAgentStatePlane::Persisted),
+								Resources,
+								Deadline,
+								Cancellation,
+								OutSnapshot,
+								ReadError))
+						{
+							ObserverError.Code = ReadError.Code.IsEmpty()
+								? TEXT("modeling_geometry_persisted_state_read_failed")
+								: ReadError.Code;
+							ObserverError.Detail = ReadError.Detail;
+							return false;
+						}
+						return OutSnapshot.IsValid();
+					},
+					LoadError);
+				if (!bObserved)
+				{
+					OutError = FVerificationError(
+						LoadError.Code.IsEmpty()
+							? TEXT("modeling_geometry_persisted_package_unavailable")
+							: LoadError.Code,
+						LoadError.Detail);
+					return false;
+				}
+				return OutSnapshot.IsValid();
+			}
+
+		private:
+			bool TryObservePersistedWorldCarrier(
+				const FVerificationTarget& Target,
+				const TArray<FDurableArtifact>& Artifacts,
+				FUeAgentResourceTracker& Resources,
+				const FUeAgentOperationDeadline& Deadline,
+				const FUeAgentCancellationToken& Cancellation,
+				const FString& TargetRef,
+				const ExistingEdit::FCarrierState* Baseline,
+				FUeAgentCanonicalSnapshotPtr& OutSnapshot,
+				FVerificationError& OutError) const
+			{
+				FPersistedWorldLoadError LoadError;
+				const bool bObserved = TryObservePersistedWorld(
+					Artifacts,
+					[&](
+						UWorld& SnapshotWorld,
+						FPersistedWorldLoadError& ObserverError)
+					{
+						if (!Deadline.CanContinue()
+							|| Cancellation.IsCancelled())
+						{
+							ObserverError.Code = TEXT(
+								"modeling_geometry_persisted_world_read_cancelled");
+							return false;
+						}
+						bool bAmbiguous = false;
+						ADynamicMeshActor* SnapshotActor = Baseline
+							? FindActorByGuid(
+								SnapshotWorld,
+								Baseline->ActorGuid,
+								bAmbiguous)
+							: FindActorByLabel(
+								SnapshotWorld,
+								TargetRef,
+								bAmbiguous);
+						if (!SnapshotActor || bAmbiguous)
+						{
+							ObserverError.Code = bAmbiguous
+								? TEXT(
+									"modeling_geometry_persisted_actor_ambiguous")
+								: TEXT(
+									"modeling_geometry_persisted_actor_missing");
+							ObserverError.Detail = TargetRef;
+							return false;
+						}
+
+						const FUeAgentCandidateBinding& SourceBinding =
+							Target.GetBinding();
+						const FUeAgentCanonicalIdentity& SourceIdentity =
+							SourceBinding.GetSummary().GetIdentity();
+						const FString SnapshotWorldPackage =
+							SnapshotWorld.GetOutermost()->GetName();
+						const FString SnapshotToken =
+							FGuid::NewGuid().ToString(EGuidFormats::Digits);
+						const FUeAgentCandidateBinding SnapshotBinding(
+							SourceBinding.GetBindingId()
+								+ TEXT(":artifact:")
+								+ SnapshotToken,
+							SourceBinding.GetSummary(),
+							SourceBinding.GetCatalogRevision(),
+							SnapshotWorldPackage,
+							PersistedStatePortId,
+							SourceBinding.GetSupportedOperations(),
+							SourceBinding.GetBindingEvidence());
+						if (!SnapshotBinding.IsValid())
+						{
+							ObserverError.Code = TEXT(
+								"modeling_geometry_persisted_binding_invalid");
+							return false;
+						}
+						const TSharedRef<
+							FModelingPersistedWorldCatalog,
+							ESPMode::ThreadSafe> SnapshotCatalog = MakeShared<
+								FModelingPersistedWorldCatalog,
+								ESPMode::ThreadSafe>(
+							SnapshotWorld,
+							SourceIdentity.GetOwnerId(),
+							SourceIdentity.GetGeneration());
+						const TSharedRef<
+							FSnapshotModelingReferenceResolver,
+							ESPMode::ThreadSafe> Resolver = MakeShared<
+								FSnapshotModelingReferenceResolver,
+								ESPMode::ThreadSafe>(
+							TargetRef,
+							*SnapshotActor);
+						const FString EvidenceId =
+							TEXT("modeling:persisted-world-instance:")
+							+ SnapshotWorldPackage
+							+ TEXT(":")
+							+ TargetRef;
+						FModelingStateReadPort Reader(
+							PersistedStatePortId,
+							EUeAgentStatePlane::Persisted,
+							SnapshotCatalog,
+							Resolver,
+							false,
+							EvidenceId);
+						FUeAgentDiscoveryError ReadError;
+						if (!Reader.TryRead(
+								FUeAgentStateReadRequest(
+									SnapshotBinding,
+									EUeAgentStatePlane::Persisted),
+								Resources,
+								Deadline,
+								Cancellation,
+								OutSnapshot,
+								ReadError))
+						{
+							ObserverError.Code = ReadError.Code.IsEmpty()
+								? TEXT(
+									"modeling_geometry_persisted_world_state_read_failed")
+								: ReadError.Code;
+							ObserverError.Detail = ReadError.Detail;
+							return false;
+						}
+						return OutSnapshot.IsValid();
+					},
+					LoadError);
+				if (!bObserved)
+				{
+					OutError = FVerificationError(
+						LoadError.Code.IsEmpty()
+							? TEXT(
+								"modeling_geometry_persisted_world_unavailable")
+							: LoadError.Code,
+						LoadError.Detail);
+					return false;
+				}
+				return OutSnapshot.IsValid();
+			}
+
+			TSharedRef<
+				IUeAgentWorldSimpleEffectWorldCatalog,
+				ESPMode::ThreadSafe> Catalog;
 		};
 
 		class FModelingDraftBuilder final
@@ -1546,7 +2098,10 @@ namespace UE::UAI::Composition::SimpleAuthoring::Modeling
 				OutTargets.Reset();
 				const TArray<FPlannedChange>& Changes =
 					Plan->GetChangeSet().GetChanges();
+				const FModelingProfile* Profile =
+					FindProfile(Plan->GetDescriptorIdentity());
 				if (Changes.IsEmpty()
+					|| !Profile
 					|| Target.GetPublicRef().IsEmpty())
 				{
 					SetProductionError(
@@ -1556,9 +2111,32 @@ namespace UE::UAI::Composition::SimpleAuthoring::Modeling
 						Target.GetBindingId());
 					return false;
 				}
+				FString DurablePackageName = Target.GetPublicRef();
+				if (IsExistingEditProfile(*Profile))
+				{
+					TSharedPtr<FJsonObject> Payload;
+					FUeAgentDiscoveryError EvidenceError;
+					if (!TryParseRequestEvidence(
+							Target,
+							Payload,
+							EvidenceError)
+						|| !ExistingEdit::
+							TryReadDurablePackageNameEvidence(
+								Payload,
+								DurablePackageName))
+					{
+						SetProductionError(
+							OutError,
+							TEXT(
+								"modeling_geometry_durable_target_evidence_invalid"),
+							Target.GetBindingId(),
+							EvidenceError.Detail);
+						return false;
+					}
+				}
 				OutTargets.Emplace(
 					Changes[0].GetIdentity(),
-					Target.GetPublicRef(),
+					MoveTemp(DurablePackageName),
 					EAssetDurableIntent::Save,
 					ERollbackGrade::DurableBackup);
 				return OutTargets[0].IsValid();
@@ -1658,6 +2236,7 @@ namespace UE::UAI::Composition::SimpleAuthoring::Modeling
 					{
 						if (!TryBuildExpectedPrimitiveState(
 								TargetRef,
+								Payload,
 								Resources,
 								ExpectedValue,
 								OutError))
@@ -1980,12 +2559,6 @@ namespace UE::UAI::Composition::SimpleAuthoring::Modeling
 			ESPMode::ThreadSafe> ReferenceResolver =
 				Config.ReferenceResolver.ToSharedRef();
 		const TSharedRef<
-			IUeAgentModelingGeometryEffectReferenceResolver,
-			ESPMode::ThreadSafe> PersistedReferenceResolver =
-				Config.PersistedReferenceResolver.IsValid()
-					? Config.PersistedReferenceResolver.ToSharedRef()
-					: ReferenceResolver;
-		const TSharedRef<
 			FUeAgentWorldSimpleEffectExactWorldResolver,
 			ESPMode::ThreadSafe> WorldResolver =
 				MakeShared<
@@ -2046,16 +2619,26 @@ namespace UE::UAI::Composition::SimpleAuthoring::Modeling
 				NativeHook.ToSharedRef());
 		ProviderConfig.ExpectedStateProjector =
 			MakeShared<FModelingExpectedStateProjector>();
-		const TSharedRef<IUeAgentStateReadPort, ESPMode::ThreadSafe>
-			PersistedStateReadPort = MakeShared<FModelingStateReadPort>(
-				PersistedStatePortId,
-				EUeAgentStatePlane::Persisted,
-				PersistedCatalog,
-				PersistedReferenceResolver,
-				false);
-		ProviderConfig.PersistedStateOracle = MakeShared<
-			FStateReadPortPersistedStateOracle,
-			ESPMode::ThreadSafe>(PersistedStateReadPort);
+		if (Config.PersistedReferenceResolver.IsValid())
+		{
+			const TSharedRef<IUeAgentStateReadPort, ESPMode::ThreadSafe>
+				PersistedStateReadPort = MakeShared<FModelingStateReadPort>(
+					PersistedStatePortId,
+					EUeAgentStatePlane::Persisted,
+					PersistedCatalog,
+					Config.PersistedReferenceResolver.ToSharedRef(),
+					false);
+			ProviderConfig.PersistedStateOracle = MakeShared<
+				FStateReadPortPersistedStateOracle,
+				ESPMode::ThreadSafe>(PersistedStateReadPort);
+		}
+		else
+		{
+			ProviderConfig.PersistedStateOracle = MakeShared<
+				FModelingArtifactPersistedStateOracle,
+				ESPMode::ThreadSafe>(
+					PersistedCatalog);
+		}
 		ProviderConfig.AbsenceOracle = Config.AbsenceOracle;
 		ProviderConfig.ReferenceOracle = Config.ReferenceOracle;
 

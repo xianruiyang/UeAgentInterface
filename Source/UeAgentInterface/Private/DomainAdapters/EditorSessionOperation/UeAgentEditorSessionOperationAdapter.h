@@ -41,6 +41,8 @@ namespace UE::UAI::DomainAdapters::EditorSessionOperation
 
 		virtual bool TryCreateOperationPort(
 			const FUeAgentEditorSessionOperationTypedRequest& Request,
+			const ExecutionMutation::FLongRunningOperationRequest&
+				OperationRequest,
 			TSharedPtr<
 				ExecutionMutation::ILongRunningOperationPort,
 				ESPMode::ThreadSafe>& OutPort,

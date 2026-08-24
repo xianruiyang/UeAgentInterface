@@ -1954,7 +1954,21 @@
         "UDES-UAI-ROOT-19",
         "DES-UAI-ROOT-INTEGRATED-CAPABILITY-ARCHITECTURE",
         "DES-UAI-PRODUCTION-EVIDENCE",
-        "SOL-UAI-ROOT-08-INTEGRATED-AUTHORITY-RESTORATION"
+        "SOL-UAI-ROOT-08-INTEGRATED-AUTHORITY-RESTORATION",
+        "SOL-UAI-ROOT-27-MODELING-STATIC-ASSET-ARTIFACT-READBACK",
+        "SOL-UAI-ROOT-28-MODELING-TOPOLOGY-POLICY-OWNER",
+        "OBS-UAI-ROOT-T50-MODELING-AUTO-UV-PUBLIC-CLOSURE",
+        "OBS-UAI-ROOT-T50-MODELING-PROJECT-UV-PUBLIC-CLOSURE",
+        "OBS-UAI-ROOT-T50-MODELING-MATERIAL-SLOT-PUBLIC-CLOSURE",
+        "OBS-UAI-ROOT-T50-MODELING-COLLISION-PUBLIC-CLOSURE",
+        "OBS-UAI-ROOT-T50-MODELING-TOPOLOGY-PARAMETER-PUBLIC-CLOSURE",
+        "OBS-UAI-ROOT-T50-MODELING-STATICMESH-TOPOLOGY-PUBLIC-CLOSURE",
+        "OBS-UAI-ROOT-T50-MODELING-DYNAMIC-REVISION-PERSISTENCE-CLOSURE",
+        "OBS-UAI-ROOT-T50-MODELING-DYNAMIC-SIMPLIFY-POLICY-CLOSURE",
+        "OBS-UAI-ROOT-T50-MODELING-DYNAMIC-COLLISION-WORLD-CLOSURE",
+        "OBS-UAI-ROOT-T50-NORMALS-SEMANTIC-ORACLE-CLOSURE",
+        "GAP-UAI-ROOT-T50-MODELING-WORLD-CARRIER-ARTIFACT-READBACK",
+        "OBS-UAI-ROOT-T50-MODELING-PRIMITIVE-WORLD-ARTIFACT-PUBLIC-CLOSURE"
       ],
       "activation_contribution_ids": [
         "modeling-geometry"
@@ -2020,19 +2034,54 @@
         "cleanup"
       ],
       "command_contract_state": "registered_exact_contract",
-      "implementation_state": "current_modeling_owner_real_ue_primitives_and_whitebox_persistence_verified_exact_command_matrix_pending",
+      "implementation_state": "twenty_three_non_normals_staticmesh_attribute_collision_and_topology_commands_active_registry_and_isolated_persisted_package_readback_verified_seven_primitive_world_artifact_verticals_two_dynamicmeshactor_topology_two_collision_commands_and_selected_normals_mode_matrix_world_artifact_verticals_verified_remaining_dynamicmeshactor_and_session_commands_pending",
       "evidence": {
         "highest_verified_layer": "persistence_independent_readback",
-        "delivery_state": "primitive_modeling_cubegrid_and_whitebox_verticals_verified_exact_operation_matrix_pending",
+        "delivery_state": "primitive_modeling_cubegrid_whitebox_twenty_three_non_normals_staticmesh_attribute_collision_topology_verticals_seven_primitive_world_artifact_verticals_two_dynamicmeshactor_topology_two_collision_commands_and_selected_normals_mode_matrix_world_artifact_verticals_verified_exact_operation_matrix_pending",
         "evidence_refs": [
           "TROOT-UAI-41-MODELING-WHITEBOX-PHYSICS-VERTICAL",
           "runtimeLogs/receipts/troot-uai-41-public-sdk-product.json",
           "runtimeLogs/delivery_workflow/TROOT-UAI-46-REAL-CONTENT-ACCEPTANCE/20260822-t46/validation-summary.json",
-          "TROOT-UAI-45-PUBLIC-DISTRIBUTION-PARITY"
+          "TROOT-UAI-45-PUBLIC-DISTRIBUTION-PARITY",
+          "runtimeLogs/receipts/t50-modeling-public-auto-uv-r53.json",
+          "runtimeLogs/receipts/t50-modeling-artifact-readback-regression-r54.json",
+          "runtimeLogs/receipts/t50-modeling-attribute-exact-uv-oracle-r55.json",
+          "runtimeLogs/receipts/t50-modeling-public-project-uv-r57.json",
+          "runtimeLogs/receipts/t50-modeling-public-uv-regression-r58.json",
+          "runtimeLogs/receipts/t50-modeling-public-material-slot-add-r59.json",
+          "runtimeLogs/receipts/t50-modeling-public-material-slot-assign-r60.json",
+          "runtimeLogs/receipts/t50-modeling-public-static-attribute-regression-r61.json",
+          "runtimeLogs/receipts/t50-modeling-public-simple-collision-r62.json",
+          "runtimeLogs/receipts/t50-modeling-public-convex-collision-r63.json",
+          "runtimeLogs/receipts/t50-modeling-public-static-attribute-collision-r64.json",
+          "runtimeLogs/receipts/t50-modeling-public-topology-subdivide-r66.json",
+          "runtimeLogs/receipts/t50-modeling-public-topology-simplify-boundary-r67.json",
+          "runtimeLogs/receipts/t50-modeling-public-topology-remesh-policy-r69.json",
+          "runtimeLogs/receipts/t50-modeling-public-topology-regression-r70.json",
+          "runtimeLogs/receipts/t50-modeling-public-topology-variants-r71.json",
+          "runtimeLogs/receipts/t50-modeling-public-topology-mirror-policy-r72.json",
+          "runtimeLogs/receipts/t50-modeling-public-topology-plane-cut-policy-r73.json",
+          "runtimeLogs/receipts/t50-modeling-public-selection-topology-regression-r79.json",
+          "runtimeLogs/receipts/t50-modeling-public-topology-bevel-parameters-r80.json",
+          "runtimeLogs/receipts/t50-modeling-public-topology-fill-modes-r82.json",
+          "runtimeLogs/receipts/t50-modeling-public-topology-weld-tolerance-r83.json",
+          "runtimeLogs/receipts/t50-modeling-public-operand-topology-regression-r93.json",
+          "runtimeLogs/receipts/t50-modeling-public-rejection-no-mutation-r94.json",
+          "runtimeLogs/receipts/t50-modeling-public-world-artifact-owner-r99.json",
+          "runtimeLogs/receipts/t50-modeling-public-dynamic-mesh-simplify-r108.json",
+          "runtimeLogs/receipts/t50-modeling-public-dynamic-mesh-simplify-policy-r110.json",
+          "runtimeLogs/receipts/t50-modeling-public-dynamic-mesh-simple-collision-r111.json",
+          "runtimeLogs/receipts/t50-modeling-public-dynamic-mesh-collision-expansion-r112.discovery-set.json",
+          "runtimeLogs/receipts/t50-modeling-public-dynamic-mesh-min-volume-r113.json",
+          "runtimeLogs/receipts/t50-modeling-public-dynamic-mesh-normals-face-r114.json",
+          "runtimeLogs/receipts/t50-modeling-public-dynamic-mesh-normals-expansion-r115.json",
+          "runtimeLogs/receipts/t50-modeling-public-primitive-authored-transform-r105.json",
+          "runtimeLogs/receipts/t50-modeling-public-primitive-world-expansion-r101.json"
         ],
         "not_proven": [
           "direct public SDK product execution of every one of the 32 exact modeling commands",
           "exhaustive topology, UV, normal, material-slot, collision, selection and modeling-session variants",
+          "artifact-isolated persisted readback for DynamicMeshActor commands beyond subdivide, simplify, simple collision, convex collision and the selected normals mode consumers",
           "visual and downstream-editability quality beyond the verified CubeGrid and seven-actor whitebox slices"
         ]
       },
@@ -2934,7 +2983,10 @@
         "UDES-UAI-ROOT-19",
         "DES-UAI-ROOT-INTEGRATED-CAPABILITY-ARCHITECTURE",
         "DES-UAI-PRODUCTION-EVIDENCE",
-        "SOL-UAI-ROOT-08-INTEGRATED-AUTHORITY-RESTORATION"
+        "SOL-UAI-ROOT-08-INTEGRATED-AUTHORITY-RESTORATION",
+        "SOL-UAI-ROOT-26-SPATIAL-PUBLIC-SESSION-OWNER",
+        "OBS-UAI-ROOT-T50-SPATIAL-NONCANDIDATE-PUBLIC-CLOSURE",
+        "DCR-UAI-T50-SPATIAL-CANDIDATE-EVALUATION"
       ],
       "activation_contribution_ids": [
         "spatial-content-operation"
@@ -2973,19 +3025,23 @@
         "cleanup"
       ],
       "command_contract_state": "registered_exact_contract",
-      "implementation_state": "current_world_spatial_owner_actor_and_staticmesh_product_verticals_verified_all_modes_and_subjects_pending",
+      "implementation_state": "six_non_candidate_public_products_verified_transform_candidate_evaluation_semantics_deferred",
       "evidence": {
         "highest_verified_layer": "persistence_independent_readback",
-        "delivery_state": "actor_mesh_query_align_bake_and_real_whitebox_spatial_verticals_verified_exact_matrix_pending",
+        "delivery_state": "transform_read_align_snap_bake_pivot_and_live_modeling_selection_public_products_verified_candidate_evaluation_deferred",
         "evidence_refs": [
           "TROOT-UAI-42-WORLD-VIEWPORT-SPATIAL-VERTICAL",
           "runtimeLogs/delivery_workflow/TROOT-UAI-42-WORLD-VIEWPORT-SPATIAL-VERTICAL/20260821-spatial-public-green-r2/automation/t42-world-spatial-public-product-green.receipt.discovery-set.json",
           "runtimeLogs/delivery_workflow/TROOT-UAI-46-REAL-CONTENT-ACCEPTANCE/20260822-t46/validation-summary.json",
-          "TROOT-UAI-45-PUBLIC-DISTRIBUTION-PARITY"
+          "TROOT-UAI-45-PUBLIC-DISTRIBUTION-PARITY",
+          "TROOT-UAI-50-MODELING-WORLD-PHYSICS-EXACT-MATRIX",
+          "runtimeLogs/receipts/t50-world-spatial-public-nullrhi-r38.json",
+          "runtimeLogs/receipts/t50-world-spatial-public-mesh-selection-r50.json"
         ],
         "not_proven": [
-          "direct public SDK product execution of every one of the seven exact commands and every supported subject type",
-          "exhaustive anchors, bounds, face, vertex, ray, surface-snap, pivot and transform-candidate variants",
+          "world.transform_candidates.evaluate semantics pending DCR-UAI-T50-SPATIAL-CANDIDATE-EVALUATION",
+          "external SDK replay of the newly verified snap, pivot and live Modeling selection cases",
+          "exhaustive anchors, bounds, face, vertex, ray, surface-snap, pivot and supported subject variants",
           "real-content spatial and visual quality beyond the verified Actor/StaticMesh and T46 whitebox slices"
         ]
       },
@@ -2994,7 +3050,9 @@
         "T46-SPATIAL-CONTENT-OPERATION"
       ],
       "next_task_id": "TROOT-UAI-50-MODELING-WORLD-PHYSICS-EXACT-MATRIX",
-      "blockers": []
+      "blockers": [
+        "DCR-UAI-T50-SPATIAL-CANDIDATE-EVALUATION"
+      ]
     },
     {
       "id": "CU-TEXTURE-GRAPH",

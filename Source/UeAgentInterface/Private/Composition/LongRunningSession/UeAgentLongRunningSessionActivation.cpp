@@ -124,8 +124,16 @@ namespace UE::UAI::Composition::LongRunningSession
 					"\"properties\":{\"discard_resources\":{\"items\":{\"type\":\"string\"},"
 					"\"type\":\"array\"},\"mode\":{\"enum\":[\"reject\",\"save\",\"discard\"],"
 					"\"type\":\"string\"},\"save_resources\":{\"items\":{\"type\":\"string\"},"
-					"\"type\":\"array\"}},\"required\":[\"mode\"],\"type\":\"object\"}},"
-					"\"required\":[\"dirty_resolution\"],\"type\":\"object\"}");
+					"\"type\":\"array\"}},\"required\":[\"mode\"],\"type\":\"object\"},"
+					"\"external_witness\":{\"additionalProperties\":false,"
+					"\"properties\":{\"exit_attempt_id\":{\"maxLength\":32,\"minLength\":32,"
+					"\"type\":\"string\"},\"launch_id\":{\"maxLength\":32,\"minLength\":32,"
+					"\"type\":\"string\"},\"nonce\":{\"maxLength\":64,\"minLength\":64,"
+					"\"type\":\"string\"},\"schema\":{\"const\":"
+					"\"uai.safe_exit.external_witness_ref.v1\"}},"
+					"\"required\":[\"schema\",\"launch_id\",\"exit_attempt_id\",\"nonce\"],"
+					"\"type\":\"object\"}},\"required\":[\"dirty_resolution\","
+					"\"external_witness\"],\"type\":\"object\"}");
 			}
 			return TEXT(
 				"{\"additionalProperties\":false,\"properties\":{"
@@ -292,6 +300,7 @@ namespace UE::UAI::Composition::LongRunningSession
 			else if (CommandId == TEXT("editor.safe_exit"))
 			{
 				Add(TEXT("dirty_resolution"), EUeAgentCommandWireType::Object);
+				Add(TEXT("external_witness"), EUeAgentCommandWireType::Object);
 			}
 			else
 			{

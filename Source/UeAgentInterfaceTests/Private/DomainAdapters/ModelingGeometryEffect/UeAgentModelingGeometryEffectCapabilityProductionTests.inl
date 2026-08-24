@@ -1360,6 +1360,7 @@ struct FModelingCarrierReadback
 	FVector2f UvMin = FVector2f::ZeroVector;
 	FVector2f UvMax = FVector2f::ZeroVector;
 	bool bHasUv = false;
+	FNormalSemanticObservation NormalObservation;
 	int32 NormalElementCount = 0;
 	int64 NormalChecksum = 0;
 	int64 MaterialIdChecksum = 0;
@@ -1413,6 +1414,7 @@ bool ReadModelingCarrier(
 	DynamicMesh->ProcessMesh(
 		[&Out](const FDynamicMesh3& Mesh)
 		{
+			Out.NormalObservation = ObserveNormalSemantics(Mesh);
 			Out.EdgeCount = Mesh.EdgeCount();
 			for (const int32 EdgeId : Mesh.EdgeIndicesItr())
 			{
@@ -1578,6 +1580,7 @@ bool ReadModelingStaticCarrier(
 	FDynamicMesh3 Mesh;
 	FMeshDescriptionToDynamicMesh Converter;
 	Converter.Convert(Description, Mesh);
+	Out.NormalObservation = ObserveNormalSemantics(Mesh);
 	Out.Mesh.VertexCount = Mesh.VertexCount();
 	Out.Mesh.TriangleCount = Mesh.TriangleCount();
 	for (const int32 VertexId : Mesh.VertexIndicesItr())
@@ -2078,10 +2081,9 @@ bool VerifyAttributeSemanticOracle(
 	{
 		Test->TestTrue(
 			*(DescriptorId
-				+ TEXT(" area-angle normals share overlay elements")),
-			After.NormalElementCount > 0
-				&& After.NormalElementCount
-					< After.Mesh.TriangleCount * 3);
+				+ TEXT(" writes complete area-angle per-vertex normals")),
+			IsCompleteAreaAnglePerVertexNormalObservation(
+				After.NormalObservation));
 	}
 	else if (OperationKey == TEXT("assign_material_slot"))
 	{

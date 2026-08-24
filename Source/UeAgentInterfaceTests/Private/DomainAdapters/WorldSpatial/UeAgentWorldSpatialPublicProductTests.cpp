@@ -313,6 +313,116 @@ namespace UE::UAI::Tests::WorldSpatialPublicProduct
 		return Result;
 	}
 
+	TSharedRef<FJsonObject> SpatialValue(
+		const FString& Subject,
+		const FString& Quantity,
+		const FString& FrameId,
+		const FString& Unit,
+		const TArray<FString>& ComponentLexemes,
+		const FString& Tick)
+	{
+		TArray<TSharedPtr<FJsonValue>> Components;
+		for (const FString& Component : ComponentLexemes)
+		{
+			Components.Add(MakeShared<FJsonValueString>(Component));
+		}
+		const TSharedRef<FJsonObject> Result = MakeShared<FJsonObject>();
+		Result->SetStringField(TEXT("subject"), Subject);
+		Result->SetStringField(TEXT("quantity"), Quantity);
+		Result->SetObjectField(
+			TEXT("frame"),
+			SpatialFrame(FrameId, Unit, Tick));
+		Result->SetArrayField(TEXT("components"), MoveTemp(Components));
+		Result->SetArrayField(TEXT("conversion_evidence_ids"), {});
+		return Result;
+	}
+
+	TSharedRef<FJsonObject> SnapInput(
+		const FString& SubjectRef,
+		const TSharedRef<FJsonObject>& Revision)
+	{
+		const TSharedRef<FJsonObject> SurfaceQuery = MakeShared<FJsonObject>();
+		SurfaceQuery->SetObjectField(
+			TEXT("origin"),
+			SpatialValue(
+				TEXT("trace:origin"),
+				TEXT("point"),
+				TEXT("unreal.world"),
+				TEXT("centimeter"),
+				{TEXT("0"), TEXT("0"), TEXT("100")},
+				TEXT("8")));
+		SurfaceQuery->SetObjectField(
+			TEXT("direction"),
+			SpatialValue(
+				TEXT("trace:direction"),
+				TEXT("direction"),
+				TEXT("unreal.world"),
+				TEXT("unitless"),
+				{TEXT("0"), TEXT("0"), TEXT("-1")},
+				TEXT("8")));
+		SurfaceQuery->SetNumberField(TEXT("max_distance_cm"), 500.0);
+		SurfaceQuery->SetStringField(TEXT("trace_channel"), TEXT("visibility"));
+		SurfaceQuery->SetBoolField(TEXT("trace_complex"), true);
+		SurfaceQuery->SetArrayField(
+			TEXT("ignore_target_refs"),
+			{MakeShared<FJsonValueString>(SubjectRef)});
+
+		const TSharedRef<FJsonObject> PlacementPolicy = MakeShared<FJsonObject>();
+		PlacementPolicy->SetNumberField(TEXT("clearance_cm"), 5.0);
+		PlacementPolicy->SetBoolField(TEXT("align_to_surface_normal"), true);
+		PlacementPolicy->SetBoolField(TEXT("preserve_yaw"), true);
+
+		const TSharedRef<FJsonObject> Expected = MakeShared<FJsonObject>();
+		Expected->SetStringField(TEXT("target_ref"), SubjectRef);
+		Expected->SetObjectField(TEXT("revision"), Revision);
+
+		const TSharedRef<FJsonObject> Result = MakeShared<FJsonObject>();
+		Result->SetArrayField(
+			TEXT("subject_refs"),
+			{MakeShared<FJsonValueString>(SubjectRef)});
+		Result->SetObjectField(TEXT("surface_query"), SurfaceQuery);
+		Result->SetObjectField(TEXT("placement_policy"), PlacementPolicy);
+		Result->SetArrayField(
+			TEXT("expected_revisions"),
+			{MakeShared<FJsonValueObject>(Expected)});
+		return Result;
+	}
+
+	TSharedRef<FJsonObject> PivotInput(
+		const FString& MeshRef,
+		const TSharedRef<FJsonObject>& Revision)
+	{
+		const TSharedRef<FJsonObject> Result = MakeShared<FJsonObject>();
+		Result->SetObjectField(
+			TEXT("pivot"),
+			SpatialValue(
+				MeshRef,
+				TEXT("point"),
+				TEXT("mesh.geometry.local"),
+				TEXT("centimeter"),
+				{TEXT("10"), TEXT("0"), TEXT("0")},
+				TEXT("9")));
+		Result->SetObjectField(TEXT("expected_revision"), Revision);
+		Result->SetBoolField(TEXT("preserve_world_geometry"), true);
+		return Result;
+	}
+
+	TSharedRef<FJsonObject> ForgedRevision(
+		const TSharedRef<FJsonObject>& Revision)
+	{
+		FString SourceId;
+		FString Generation;
+		double Sequence = 0.0;
+		Revision->TryGetStringField(TEXT("source_id"), SourceId);
+		Revision->TryGetStringField(TEXT("generation"), Generation);
+		Revision->TryGetNumberField(TEXT("sequence"), Sequence);
+		const TSharedRef<FJsonObject> Result = MakeShared<FJsonObject>();
+		Result->SetStringField(TEXT("source_id"), SourceId);
+		Result->SetStringField(TEXT("generation"), Generation + TEXT("-forged"));
+		Result->SetNumberField(TEXT("sequence"), Sequence);
+		return Result;
+	}
+
 	AActor* CreateBoxActor(
 		UWorld& World,
 		const FString& BaseName,
@@ -433,6 +543,21 @@ bool FUeAgentWorldSpatialPublicQueryOperationProductTest::RunTest(
 		*World,
 		TEXT("T42PublicSpatialAnchor_") + Suffix,
 		FVector(100.0, 0.0, 0.0));
+	AActor* Surface = CreateBoxActor(
+		*World,
+		TEXT("T42PublicSpatialSurface_") + Suffix,
+		FVector(0.0, 0.0, -10.0));
+	if (Surface)
+	{
+		if (UBoxComponent* const SurfaceRoot =
+			Cast<UBoxComponent>(Surface->GetRootComponent()))
+		{
+			SurfaceRoot->SetBoxExtent(FVector(100.0, 100.0, 10.0), true);
+			SurfaceRoot->SetCollisionEnabled(ECollisionEnabled::QueryOnly);
+			SurfaceRoot->SetCollisionObjectType(ECC_WorldStatic);
+			SurfaceRoot->SetCollisionResponseToAllChannels(ECR_Block);
+		}
+	}
 	const FString PackageName = FString(TEXT("/Game/UAI/Tests/WorldSpatialPublic/"))
 		+ TEXT("SM_T42PublicSpatial_") + Suffix;
 	const FString AssetName = FPackageName::GetLongPackageAssetName(PackageName);
@@ -454,6 +579,10 @@ bool FUeAgentWorldSpatialPublicQueryOperationProductTest::RunTest(
 		{
 			Anchor->Destroy();
 		}
+		if (Surface && IsValid(Surface))
+		{
+			Surface->Destroy();
+		}
 		if (UStaticMesh* Existing = FindObject<UStaticMesh>(
 			nullptr,
 			*MeshObjectPath))
@@ -474,6 +603,7 @@ bool FUeAgentWorldSpatialPublicQueryOperationProductTest::RunTest(
 	};
 	if (!TestNotNull(TEXT("owned subject actor exists"), Subject)
 		|| !TestNotNull(TEXT("owned anchor actor exists"), Anchor)
+		|| !TestNotNull(TEXT("owned surface actor exists"), Surface)
 		|| !TestNotNull(TEXT("owned mesh package exists"), MeshPackage)
 		|| !TestNotNull(TEXT("owned mesh exists"), Mesh))
 	{
@@ -573,6 +703,7 @@ bool FUeAgentWorldSpatialPublicQueryOperationProductTest::RunTest(
 		return false;
 	}
 	TSharedPtr<FJsonObject> ActorAfter;
+	TSharedPtr<FJsonObject> ActorAfterRevision;
 	TArray<double> ActorComponents;
 	if (!TryReadProjectedSnapshot(
 			*this,
@@ -582,6 +713,12 @@ bool FUeAgentWorldSpatialPublicQueryOperationProductTest::RunTest(
 				SubjectRef,
 				TransformReadInput(TEXT("unreal.world"), TEXT("5"))),
 			ActorAfter)
+		|| !TryCopyRevision(
+			*this,
+			TEXT("actor query after align"),
+			ActorAfter,
+			SubjectRef,
+			ActorAfterRevision)
 		|| !TestTrue(
 			TEXT("public actor readback observes the aligned world transform"),
 			TryReadSpatialComponents(
@@ -592,6 +729,58 @@ bool FUeAgentWorldSpatialPublicQueryOperationProductTest::RunTest(
 				&& FMath::IsNearlyEqual(ActorComponents[0], 100.0, 0.01)
 				&& Subject->GetActorLocation().Equals(
 					FVector(100.0, 0.0, 0.0),
+					0.01)))
+	{
+		return false;
+	}
+
+	const FUeAgentCommandResult ForgedSnap = Call(
+		TEXT("world.object_snap_to_surface"),
+		SubjectRef,
+		SnapInput(SubjectRef, ForgedRevision(ActorAfterRevision.ToSharedRef())));
+	if (!TestFalse(TEXT("forged public actor revision fails"), ForgedSnap.IsOk())
+		|| !TestTrue(
+			TEXT("forged actor failure preserves the aligned transform"),
+			ForgedSnap.GetErrorJson().Contains(
+				TEXT("world_spatial_expected_revision_mismatch"))
+				&& Subject->GetActorLocation().Equals(
+					FVector(100.0, 0.0, 0.0),
+					0.01)))
+	{
+		return false;
+	}
+
+	const FUeAgentCommandResult Snap = Call(
+		TEXT("world.object_snap_to_surface"),
+		SubjectRef,
+		SnapInput(SubjectRef, ActorAfterRevision.ToSharedRef()));
+	if (!TestTrue(TEXT("public surface snap succeeds"), Snap.IsOk()))
+	{
+		AddError(Snap.GetErrorJson());
+		return false;
+	}
+	TSharedPtr<FJsonObject> ActorSnapped;
+	TArray<double> SnappedComponents;
+	if (!TryReadProjectedSnapshot(
+			*this,
+			TEXT("actor query after snap"),
+			Call(
+				TEXT("world.object_transform.read"),
+				SubjectRef,
+				TransformReadInput(TEXT("unreal.world"), TEXT("10"))),
+			ActorSnapped)
+		|| !TestTrue(
+			TEXT("public actor readback observes the surface placement"),
+			TryReadSpatialComponents(
+				ActorSnapped,
+				TEXT("actor_transform:") + SubjectRef,
+				SnappedComponents)
+				&& SnappedComponents.Num() == 10
+				&& FMath::IsNearlyZero(SnappedComponents[0], 0.01)
+				&& FMath::IsNearlyZero(SnappedComponents[1], 0.01)
+				&& FMath::IsNearlyEqual(SnappedComponents[2], 5.0, 0.01)
+				&& Subject->GetActorLocation().Equals(
+					FVector(0.0, 0.0, 5.0),
 					0.01)))
 	{
 		return false;
@@ -662,6 +851,56 @@ bool FUeAgentWorldSpatialPublicQueryOperationProductTest::RunTest(
 		return false;
 	}
 
+	const FUeAgentCommandResult ForgedPivot = Call(
+		TEXT("mesh.pivot.update"),
+		MeshObjectPath,
+		PivotInput(MeshObjectPath, ForgedRevision(MeshAfterRevision.ToSharedRef())));
+	if (!TestFalse(TEXT("forged public mesh pivot revision fails"), ForgedPivot.IsOk())
+		|| !TestTrue(
+			TEXT("forged pivot failure preserves the owned geometry"),
+			ForgedPivot.GetErrorJson().Contains(
+				TEXT("world_spatial_expected_revision_mismatch"))
+				&& FirstVertexPosition(*Mesh).Equals(BeforeStale, 0.01f)))
+	{
+		return false;
+	}
+
+	const FUeAgentCommandResult Pivot = Call(
+		TEXT("mesh.pivot.update"),
+		MeshObjectPath,
+		PivotInput(MeshObjectPath, MeshAfterRevision.ToSharedRef()));
+	if (!TestTrue(TEXT("public mesh pivot update succeeds"), Pivot.IsOk()))
+	{
+		AddError(Pivot.GetErrorJson());
+		return false;
+	}
+	TSharedPtr<FJsonObject> MeshAfterPivot;
+	TArray<double> MeshAfterPivotVertex;
+	if (!TryReadProjectedSnapshot(
+			*this,
+			TEXT("mesh query after pivot"),
+			Call(
+				TEXT("world.object_transform.read"),
+				MeshObjectPath,
+				TransformReadInput(TEXT("mesh.geometry.local"), TEXT("11"))),
+			MeshAfterPivot)
+		|| !TestTrue(
+			TEXT("public mesh readback observes pivot-adjusted geometry"),
+			TryReadSpatialComponents(
+				MeshAfterPivot,
+				TEXT("mesh_vertex:0"),
+				MeshAfterPivotVertex)
+				&& MeshAfterPivotVertex.Num() >= 3
+				&& FMath::IsNearlyZero(MeshAfterPivotVertex[0], 0.01)
+				&& FMath::IsNearlyEqual(MeshAfterPivotVertex[1], 20.0, 0.01)
+				&& FMath::IsNearlyEqual(MeshAfterPivotVertex[2], 30.0, 0.01)
+				&& FirstVertexPosition(*Mesh).Equals(
+					FVector3f(0.0f, 20.0f, 30.0f),
+					0.01f)))
+	{
+		return false;
+	}
+
 	MeshPackage->SetDirtyFlag(false);
 	FText UnloadError;
 	if (!TestTrue(
@@ -681,7 +920,7 @@ bool FUeAgentWorldSpatialPublicQueryOperationProductTest::RunTest(
 		|| !TestTrue(
 			TEXT("reloaded mesh preserves transformed geometry"),
 			FirstVertexPosition(*ReloadedMesh).Equals(
-				FVector3f(10.0f, 20.0f, 30.0f),
+				FVector3f(0.0f, 20.0f, 30.0f),
 				0.01f)))
 	{
 		return false;
@@ -703,7 +942,7 @@ bool FUeAgentWorldSpatialPublicQueryOperationProductTest::RunTest(
 				TEXT("mesh_vertex:0"),
 				MeshReloadedVertex)
 				&& MeshReloadedVertex.Num() >= 3
-				&& FMath::IsNearlyEqual(MeshReloadedVertex[0], 10.0, 0.01)
+				&& FMath::IsNearlyZero(MeshReloadedVertex[0], 0.01)
 				&& FMath::IsNearlyEqual(MeshReloadedVertex[1], 20.0, 0.01)
 				&& FMath::IsNearlyEqual(MeshReloadedVertex[2], 30.0, 0.01)))
 	{

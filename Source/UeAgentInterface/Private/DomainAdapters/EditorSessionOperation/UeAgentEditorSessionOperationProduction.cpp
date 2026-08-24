@@ -1030,6 +1030,7 @@ namespace UE::UAI::DomainAdapters::EditorSessionOperation
 	bool FUeAgentEditorSessionOperationProductionPortFactory::
 	TryCreateOperationPort(
 		const FUeAgentEditorSessionOperationTypedRequest& Request,
+		const FLongRunningOperationRequest& OperationRequest,
 		TSharedPtr<ILongRunningOperationPort, ESPMode::ThreadSafe>& OutPort,
 		FExecutionMutationError& OutError)
 	{
@@ -1058,6 +1059,7 @@ namespace UE::UAI::DomainAdapters::EditorSessionOperation
 		}
 		if (!Registration->GetBuilder().TryCreatePort(
 				Request,
+				OperationRequest,
 				Registration->GetDescriptor(),
 				OutPort,
 				OutError))

@@ -256,14 +256,17 @@ namespace UE::UAI::DomainAdapters::ModelingGeometryEffect
 			FDynamicMesh3 Copy(Mesh);
 			TArray<uint8> Serialized;
 			FMemoryWriter Writer(Serialized, false);
-			Writer.SetIsTransacting(true);
+			// A non-transacting archive selects UE's CompactData serializer. This
+			// canonicalizes sparse element IDs created by topology edits exactly as
+			// durable DynamicMesh serialization does, so the semantic revision does
+			// not drift solely because the carrier was saved and reloaded.
 			Copy.Serialize(Writer);
 			Writer.Close();
 			if (Writer.IsError())
 			{
 				return false;
 			}
-			Hash.AddString(TEXT("ue5.6-dynamic-mesh-transaction-v1"));
+			Hash.AddString(TEXT("ue5.6-dynamic-mesh-compact-v2"));
 			Hash.AddUInt64(static_cast<uint64>(Serialized.Num()));
 			Hash.AddBytes(Serialized.GetData(), Serialized.Num());
 
@@ -331,7 +334,11 @@ namespace UE::UAI::DomainAdapters::ModelingGeometryEffect
 						TEXT("object-uid:%u"),
 						Carrier.GetUniqueID());
 			}
-			return TEXT("modeling-carrier-v1:") + Kind + TEXT(":")
+			const FString AlgorithmGeneration =
+				Kind == TEXT("dynamic_mesh_actor")
+					? TEXT("modeling-carrier-v2")
+					: TEXT("modeling-carrier-v1");
+			return AlgorithmGeneration + TEXT(":") + Kind + TEXT(":")
 				+ Carrier.GetPathName() + TEXT(":") + StableIdentity;
 		}
 	}

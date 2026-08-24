@@ -32,12 +32,13 @@ namespace UE::UAI::Tests::PublicCommand
 		bool IsCancelled() const override { return false; }
 	};
 
-	inline FUeAgentCommandResult SubmitActiveCommand(
+	inline FUeAgentCommandResult SubmitActiveCommandWithScopes(
 		const TSharedPtr<const FUeAgentImmutableCommandRegistry>& Registry,
 		const TSharedPtr<const FUeAgentExactCommandDispatch>& Dispatch,
 		const FString& CommandId,
 		const TSharedRef<FJsonObject>& Params,
-		const FString& TestScope)
+		const FString& TestScope,
+		const TArray<FString>& AuthorityScopes)
 	{
 		const auto* Contract = Registry.IsValid()
 			? Registry->FindExact(CommandId)
@@ -102,9 +103,25 @@ namespace UE::UAI::Tests::PublicCommand
 			Request.GetValue(),
 			UE::UAI::Contract::FUeAgentCallerContext(
 				TestScope,
-				{TEXT("uai:query"), TEXT("uai:operate")},
+				AuthorityScopes,
 				CorrelationId),
 			MakeShared<FActiveCommandNeverCancelled>());
+	}
+
+	inline FUeAgentCommandResult SubmitActiveCommand(
+		const TSharedPtr<const FUeAgentImmutableCommandRegistry>& Registry,
+		const TSharedPtr<const FUeAgentExactCommandDispatch>& Dispatch,
+		const FString& CommandId,
+		const TSharedRef<FJsonObject>& Params,
+		const FString& TestScope)
+	{
+		return SubmitActiveCommandWithScopes(
+			Registry,
+			Dispatch,
+			CommandId,
+			Params,
+			TestScope,
+			{TEXT("uai:query"), TEXT("uai:operate")});
 	}
 
 	class FFakeRouteHost final : public IUeAgentHttpRouteHost

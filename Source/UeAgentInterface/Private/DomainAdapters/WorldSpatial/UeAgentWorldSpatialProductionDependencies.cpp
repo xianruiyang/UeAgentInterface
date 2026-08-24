@@ -8,6 +8,7 @@
 #include "EdGraph/EdGraph.h"
 #include "EdGraph/EdGraphNode.h"
 #include "Editor.h"
+#include "EditorModeManager.h"
 #include "EditorViewportClient.h"
 #include "Engine/Blueprint.h"
 #include "Engine/StaticMesh.h"
@@ -17,6 +18,7 @@
 #include "LevelEditorViewport.h"
 #include "MeshDescription.h"
 #include "Misc/Crc.h"
+#include "ModelingToolsEditorMode.h"
 #include "DomainAdapters/ModelingGeometryEffect/UeAgentModelingGeometryEffectCarrierRevision.h"
 #include "GraphEditor.h"
 #include "HAL/FileManager.h"
@@ -574,12 +576,33 @@ namespace UE::UAI::DomainAdapters::WorldSpatial
 
 				const FUeAgentWorldSpatialMeshSelectionBinding* Session =
 					MeshSelectionByViewport.Find(ViewportIdentity);
-				OutManager = Session ? Session->Manager : nullptr;
-				if (!Session || !OutManager)
+				UModelingToolsEditorMode* LiveModelingMode = nullptr;
+				if (Session)
+				{
+					OutManager = Session->Manager;
+					if (!OutManager)
+					{
+						return Fail(
+							OutError,
+							TEXT("world_spatial_explicit_mesh_selection_unavailable"),
+							ViewportIdentity);
+					}
+				}
+				else
+				{
+					LiveModelingMode = Cast<UModelingToolsEditorMode>(
+						GLevelEditorModeTools().GetActiveScriptableMode(
+							UModelingToolsEditorMode::
+								EM_ModelingToolsEditorModeId));
+					OutManager = LiveModelingMode
+						? LiveModelingMode->GetSelectionManager()
+						: nullptr;
+				}
+				if (!OutManager)
 				{
 					return Fail(
 						OutError,
-						TEXT("world_spatial_explicit_mesh_selection_unavailable"),
+						TEXT("world_spatial_active_mesh_selection_unavailable"),
 						ViewportIdentity);
 				}
 				UE::Geometry::EGeometryTopologyType TopologyType =
@@ -614,21 +637,70 @@ namespace UE::UAI::DomainAdapters::WorldSpatial
 							Identity);
 					}
 					Seen.Add(Identity);
-					const FUeAgentWorldSpatialMeshSelectionTarget* Target =
-						Session->Targets.FindByPredicate(
-							[&Identity](
-								const FUeAgentWorldSpatialMeshSelectionTarget& Item)
-							{
-								return Item.ExplicitRef == Identity;
-							});
-					if (!Target || !Target->IsValid())
+					if (Session)
+					{
+						const FUeAgentWorldSpatialMeshSelectionTarget* Target =
+							Session->Targets.FindByPredicate(
+								[&Identity](
+									const FUeAgentWorldSpatialMeshSelectionTarget& Item)
+								{
+									return Item.ExplicitRef == Identity;
+								});
+						if (!Target || !Target->IsValid())
+						{
+							return Fail(
+								OutError,
+								TEXT("world_spatial_mesh_selection_identity_unresolved"),
+								Identity);
+						}
+						OutTargets.Add(*Target);
+						continue;
+					}
+
+					UObject* ResolvedObject = nullptr;
+					if (!TryResolveObject(Identity, ResolvedObject, OutError))
+					{
+						return false;
+					}
+					UPrimitiveComponent* Component =
+						Cast<UPrimitiveComponent>(ResolvedObject);
+					if (!Component)
 					{
 						return Fail(
 							OutError,
-							TEXT("world_spatial_mesh_selection_identity_unresolved"),
+							TEXT("world_spatial_mesh_selection_identity_type_invalid"),
+							Identity,
+							TEXT("selection identity must be an exact primitive-component path"));
+					}
+					bool bComponentIsActive = false;
+					if (bSelectionIsEmpty)
+					{
+						// UE 5.6 exposes active-target identities only to subclasses.
+						// Setting an already-empty, type-matched selection is the public,
+						// transaction-free exact-component probe in this state.
+						UE::Geometry::FGeometrySelection EmptySelection;
+						EmptySelection.InitializeTypes(ElementType, TopologyType);
+						bComponentIsActive = OutManager->SetSelectionForComponent(
+							Component,
+							EmptySelection);
+					}
+					else
+					{
+						// UE 5.6's HasSelectionForComponent reports the inverse
+						// selection-emptiness predicate. Read the exact value instead.
+						UE::Geometry::FGeometrySelection ExistingSelection;
+						bComponentIsActive = OutManager->GetSelectionForComponent(
+							Component,
+							ExistingSelection);
+					}
+					if (!bComponentIsActive)
+					{
+						return Fail(
+							OutError,
+							TEXT("world_spatial_mesh_selection_identity_not_active"),
 							Identity);
 					}
-					OutTargets.Add(*Target);
+					OutTargets.Add({Identity, Component});
 				}
 				return !OutTargets.IsEmpty();
 			}

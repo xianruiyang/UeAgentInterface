@@ -628,15 +628,15 @@ namespace
 	}
 
 	UStaticMesh* CreateTopologyStaticCarrier(
-		FOwnedModelingWorld& Owner,
+		UPackage& Package,
 		UDynamicMesh& Source)
 	{
 		UStaticMesh* StaticMesh = NewObject<UStaticMesh>(
-			Owner.Package,
+			&Package,
 			*FString::Printf(
 				TEXT("SM_SA008_Topology_%s"),
 				*FGuid::NewGuid().ToString(EGuidFormats::Digits)),
-			RF_Transactional);
+			RF_Public | RF_Standalone | RF_Transactional);
 		if (!StaticMesh)
 		{
 			return nullptr;
@@ -795,35 +795,48 @@ namespace
 		return !Test->HasAnyErrors();
 	}
 
-	bool TryCreateTopologyApplication(
-		FOwnedModelingWorld& Owner,
+	bool TryCreateModelingApplication(
 		const TSharedPtr<const FUeAgentDescriptorRegistry>& Registry,
-		const TSharedRef<FExactReferenceResolver, ESPMode::ThreadSafe>&
+		const TSharedRef<
+			IUeAgentWorldSimpleEffectWorldCatalog,
+			ESPMode::ThreadSafe>& WorldCatalog,
+		const TSharedRef<
+			IUeAgentWorldSimpleEffectWorldCatalog,
+			ESPMode::ThreadSafe>& PersistedWorldCatalog,
+		const TSharedRef<
+			IUeAgentModelingGeometryEffectReferenceResolver,
+			ESPMode::ThreadSafe>&
 			ReferenceResolver,
-		const TSharedRef<FRecordingDurableService, ESPMode::ThreadSafe>&
+		const TSharedRef<
+			IUeAgentModelingGeometryEffectReferenceResolver,
+			ESPMode::ThreadSafe>&
+			PersistedReferenceResolver,
+		const TSharedRef<
+			IUeAgentSimpleAuthoringAssetDurableService,
+			ESPMode::ThreadSafe>&
 			Durable,
 		const FUeAgentSimpleAuthoringCommandRoute& Route,
+		const FString& WorldIdentity,
+		const FString& LevelIdentity,
+		const FString& ContextRevision,
+		const FString& TestScope,
 		TSharedPtr<FUeAgentSimpleAuthoringApplication>& OutApplication,
 		FString& OutError)
 	{
-		const TSharedRef<FOwnedWorldCatalog, ESPMode::ThreadSafe>
-			Catalog = MakeShared<
-				FOwnedWorldCatalog,
-				ESPMode::ThreadSafe>(Owner);
 		FUeAgentModelingSimpleAuthoringProviderConfig ProviderConfig;
 		ProviderConfig.DescriptorRegistry = Registry;
-		ProviderConfig.WorldCatalog = Catalog;
-		ProviderConfig.PersistedWorldCatalog = Catalog;
+		ProviderConfig.WorldCatalog = WorldCatalog;
+		ProviderConfig.PersistedWorldCatalog =
+			PersistedWorldCatalog;
 		ProviderConfig.ReferenceResolver = ReferenceResolver;
 		ProviderConfig.PersistedReferenceResolver =
-			ReferenceResolver;
+			PersistedReferenceResolver;
 		ProviderConfig.DurableService = Durable;
 		ProviderConfig.AbsenceOracle =
 			MakeShared<FUnusedAbsenceOracle>();
 		ProviderConfig.ReferenceOracle =
 			MakeShared<FUnusedReferenceOracle>();
-		ProviderConfig.OwnerLeaseId =
-			TEXT("owner:sa008-modeling-topology");
+		ProviderConfig.OwnerLeaseId = TEXT("owner:") + TestScope;
 		ProviderConfig.Projection.Emplace(
 			FUeAgentProjectionProfile(
 				TEXT("compact"),
@@ -850,10 +863,9 @@ namespace
 		TSharedPtr<const FUeAgentOperationTicketService> TicketService;
 		FUeAgentOperationTicketError TicketError;
 		const FString TicketId =
-			TEXT("ticket:sa008-modeling-topology:")
-			+ Owner.ContextRevision;
+			TEXT("ticket:") + TestScope + TEXT(":") + ContextRevision;
 		if (!FUeAgentOperationTicketService::TryCreate(
-				TEXT("sa008-modeling-topology-integrity"),
+				TestScope + TEXT(":integrity"),
 				60.0,
 				[]()
 				{
@@ -886,23 +898,23 @@ namespace
 		FUeAgentSimpleAuthoringApplicationConfig ApplicationConfig;
 		ApplicationConfig.DescriptorRegistry = Registry;
 		ApplicationConfig.ExecutionContext.ProjectInstanceId =
-			TEXT("project:sa008-modeling-topology");
+			TEXT("project:") + TestScope;
 		ApplicationConfig.ExecutionContext.EditorInstanceId =
-			TEXT("editor:sa008-modeling-topology");
+			TEXT("editor:") + TestScope;
 		ApplicationConfig.ExecutionContext.StatePlane =
 			EUeAgentStatePlane::AuthoringMemory;
 		ApplicationConfig.ExecutionContext.WorldType =
 			EUeAgentExecutionWorldType::Preview;
 		ApplicationConfig.ExecutionContext.WorldIdentity =
-			Owner.World->GetPathName();
+			WorldIdentity;
 		ApplicationConfig.ExecutionContext.LevelIdentity =
-			Owner.World->PersistentLevel->GetPathName();
+			LevelIdentity;
 		ApplicationConfig.ExecutionContext.ContextRevision =
-			Owner.ContextRevision;
+			ContextRevision;
 		ApplicationConfig.ExecutionContext.bResolvedFromCurrent =
 			false;
 		ApplicationConfig.ServerSessionId =
-			TEXT("session:sa008-modeling-topology");
+			TEXT("session:") + TestScope;
 		ApplicationConfig.RegistryEpoch = 1;
 		ApplicationConfig.TimeoutSeconds = 60.0;
 		ApplicationConfig.MaxFrameBytes = 4 * 1024 * 1024;
@@ -922,6 +934,48 @@ namespace
 			return false;
 		}
 		return true;
+	}
+
+	bool TryCreateTopologyApplication(
+		FOwnedModelingWorld& Owner,
+		const TSharedPtr<const FUeAgentDescriptorRegistry>& Registry,
+		const TSharedRef<
+			IUeAgentModelingGeometryEffectReferenceResolver,
+			ESPMode::ThreadSafe>&
+			ReferenceResolver,
+		const TSharedRef<
+			IUeAgentModelingGeometryEffectReferenceResolver,
+			ESPMode::ThreadSafe>&
+			PersistedReferenceResolver,
+		const TSharedRef<
+			IUeAgentSimpleAuthoringAssetDurableService,
+			ESPMode::ThreadSafe>&
+			Durable,
+		const FUeAgentSimpleAuthoringCommandRoute& Route,
+		TSharedPtr<FUeAgentSimpleAuthoringApplication>& OutApplication,
+		FString& OutError)
+	{
+		const TSharedRef<FOwnedWorldCatalog, ESPMode::ThreadSafe>
+			Catalog = MakeShared<
+				FOwnedWorldCatalog,
+				ESPMode::ThreadSafe>(Owner);
+		const TSharedRef<
+			IUeAgentWorldSimpleEffectWorldCatalog,
+			ESPMode::ThreadSafe> WorldCatalog = Catalog;
+		return TryCreateModelingApplication(
+			Registry,
+			WorldCatalog,
+			WorldCatalog,
+			ReferenceResolver,
+			PersistedReferenceResolver,
+			Durable,
+			Route,
+			Owner.World->GetPathName(),
+			Owner.World->PersistentLevel->GetPathName(),
+			Owner.ContextRevision,
+			TEXT("sa008-modeling-topology"),
+			OutApplication,
+			OutError);
 	}
 }
 
@@ -1027,7 +1081,7 @@ FUeAgentSimpleAuthoringModelingTopologyProductionContractTest::
 				CarrierKind)
 			&& CarrierKind == TEXT("static_mesh_asset");
 		UStaticMesh* StaticTarget = bStaticCarrier
-			? CreateTopologyStaticCarrier(Owner, *TargetMesh)
+			? CreateTopologyStaticCarrier(*Owner.Package, *TargetMesh)
 			: nullptr;
 		if (bStaticCarrier
 			&& !TestNotNull(
@@ -1148,6 +1202,7 @@ FUeAgentSimpleAuthoringModelingTopologyProductionContractTest::
 				TryCreateTopologyApplication(
 					Owner,
 					Registry,
+					Resolver,
 					Resolver,
 					Durable,
 					*Route,

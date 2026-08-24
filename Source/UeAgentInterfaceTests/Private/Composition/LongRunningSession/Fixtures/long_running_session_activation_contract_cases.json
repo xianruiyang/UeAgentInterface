@@ -112,10 +112,17 @@
       "descriptor_id": "uai.long_running.editor.safe_exit/v1",
       "handler_binding": "long-running-session.editor.safe-exit.v1",
       "parameters": [
-        {"name":"dirty_resolution","wire_type":"object","required":true,"nullable":false}
+        {"name":"dirty_resolution","wire_type":"object","required":true,"nullable":false},
+        {"name":"external_witness","wire_type":"object","required":true,"nullable":false}
       ],
       "example_params": {
-        "dirty_resolution": {"mode":"reject","save_resources":[],"discard_resources":[]}
+        "dirty_resolution": {"mode":"reject","save_resources":[],"discard_resources":[]},
+        "external_witness": {
+          "schema": "uai.safe_exit.external_witness_ref.v1",
+          "launch_id": "00000000000000000000000000000000",
+          "exit_attempt_id": "11111111111111111111111111111111",
+          "nonce": "2222222222222222222222222222222222222222222222222222222222222222"
+        }
       }
     },
     {

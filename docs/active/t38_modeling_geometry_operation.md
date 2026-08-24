@@ -62,3 +62,107 @@ Use `client.query.command_search("create mesh box", limit=5)` and then
 `client.query.command_detail(command_id, contract_hash)` to obtain the exact
 schema, named SDK/CLI forms, owner, failure catalog and tutorial references.
 Search is the only fuzzy step; execute the selected ID and hash unchanged.
+
+## Persisted Modeling artifact readback
+
+The production Modeling persisted-state oracle does not unload or reload the
+source asset that the user may still have open. For a `static_mesh_asset`
+carrier it consumes the exact package-header artifact owned by the operation
+receipt, remaps that `.uasset` into a unique transient package namespace, and
+runs the same semantic state observer against that isolated instance. A
+successful canonical C9 outcome therefore carries an evidence identity that
+starts with `modeling:persisted-package-instance:`. Re-resolving the live source
+object is not sufficient persisted-readback evidence.
+
+For world-package carriers the same production oracle consumes the Map and any
+External Actor artifacts owned by the operation receipt, loads them into an
+isolated transient World, and unloads that snapshot after observation. An
+existing `dynamic_mesh_actor` baseline carries a durable Actor GUID and resolves
+the exact snapshot Actor by that GUID; primitive profiles resolve their unique
+target label through the same isolated World catalog and state reader. A
+successful world-carrier C9 outcome starts its evidence identity with
+`modeling:persisted-world-instance:`. Neither branch falls back to a live source
+object in the default production composition.
+
+An explicitly supplied persisted reference resolver remains owned by the
+custom or test composition that supplied it. The production runtime leaves
+that override unset and uses the artifact-aware oracle as the single default
+owner. Forged and stale carrier revisions are rejected before durable mutation.
+
+The current active-registry product proof covers 23 non-normals command
+identities on owned `UStaticMesh` assets: the six UV, material-slot and
+collision commands above, and all 17 `mesh.topology.*` identities. It includes
+exact-channel UV semantics, an explicit target-local projection frame and
+dimensions, exact slot name/material reference readback, selected-versus-
+unselected triangle material IDs, exact BodySetup shape-class/count readback,
+isolated C9 readback, independent source-package unload/reload and cleanup.
+
+The topology proof distinguishes uniform and PN-triangle subdivision, all three
+simplify target modes, fixed versus free open boundaries, remesh density,
+preserved versus released sharp normal seams, mirror and plane-cut policies,
+selection-driven duplicate/extrude/inset/offset/push-pull/bevel/fill/weld
+semantics, and boolean/mesh-cut/trim/voxel-boolean operand modes. Selection
+operations use real persisted element identities. Vertex-normal displacement
+precomputes one-ring normals before region separation. A shared operand carrier
+reader accepts the same closed `ADynamicMeshActor | UStaticMesh` union promised
+by planning; the shared product runner proves target revision advancement and
+persisted target geometry while the operand file, geometry and revision remain
+unchanged.
+
+Voxel boolean maps `voxel_size_cm` to the operator's major-axis voxel count,
+applies the operator result transform before target writeback and enforces a
+maximum of 256 voxels per major axis. Finer requests fail with
+`modeling_geometry_voxel_resolution_limit_exceeded` before carrier mutation.
+The public rejection proof verifies exact errors and unchanged file hashes,
+dirty flags, live/reloaded geometry and revisions for both this limit and an
+insufficient weld tolerance. Simplify, remesh, selection, operand and voxel
+policies remain owned by shared native helpers rather than test-only adapters.
+
+For `ADynamicMeshActor`, simplify now solves on a transient candidate and commits
+only after its hard target and boundary policy are satisfied. A shared geometric
+boundary fingerprint is consumed by both the native precommit gate and the
+ExistingEdit persisted-state oracle. An unreachable preserved-boundary count
+fails atomically with `modeling_geometry_simplify_target_unreachable`; it leaves
+the live mesh and revision unchanged and creates no durable World artifact.
+
+The same public World carrier now covers both collision command identities.
+`mesh.collision.simple.generate` has persisted evidence for aligned boxes,
+minimum-volume shapes, capsules and spheres, plus one `replace_existing=false`
+case that preserves a seeded sphere while appending a box. Convex collision
+covers single-hull and two-component decomposition. The product oracle compares
+aggregate kind/count, mesh-matching local bounds, unchanged geometry, advanced
+revision, isolated C9 and source-World reload; it deliberately does not freeze
+GeometryScript hull vertices, decomposition ordering or automatic shape choice.
+
+This is representative command-by-command evidence, not an exhaustive
+parameter Cartesian product or a Python SDK end-to-end proof of every command.
+The DynamicMeshActor normals consumer now has public persisted-World evidence
+for face, area-angle-weighted and 30-degree angle-threshold modes, plus a mixed
+smooth/split-edge `preserve_existing_hard_edges=true` case whose initial overlay
+contains deliberately wrong but valid directions. A shared final-carrier normal
+observation verifies complete finite directions, mode-specific direction and
+overlay topology, unchanged mesh topology/bounds, advanced canonical revision,
+isolated C9, source-World unload/reload and cleanup. This closes those selected
+carrier/mode dimensions only; it does not prove an exhaustive normals parameter
+matrix or transfer the DynamicMeshActor oracle to StaticMesh.
+Two active-registry `ADynamicMeshActor` topology consumers now prove receipt-owned
+persisted-World C9 evidence, source-World unload/reload, exact Actor recovery and
+cleanup. `mesh.topology.subdivide` proves twelve-to-forty-eight-triangle
+persistence. `mesh.topology.simplify` covers ratio, tolerance and count targets,
+open-boundary preserved/free policies, stable source/reload revisions and the
+atomic unreachable-target rejection above.
+All seven `mesh.primitive.*.create` identities now have their own public-product
+verticals through the same receipt-owned World oracle. Box and ramp-corner first
+proved both native generator families with non-unit rotation and scale; cylinder,
+plane, ramp, sphere and stairs then passed as one bounded expansion. Every case
+checks its unique target label, parameterized local bounds, isolated C9 evidence,
+ordinary external reload and owned cleanup.
+
+Package-instanced Worlds do not initialize transient `ComponentToWorld` for this
+read-only snapshot. Primitive persisted readback therefore compares the serialized
+authored relative transform of its unattached root component; it does not initialize
+the snapshot World or weaken the world-space placement contract. Attached actors
+keep the normal Actor-transform path. These seven create verticals, two topology
+consumers, two collision command identities and the selected normals matrix do
+not prove other DynamicMeshActor commands, complex collision quality, an
+exhaustive parameter matrix, or Python SDK end-to-end execution.

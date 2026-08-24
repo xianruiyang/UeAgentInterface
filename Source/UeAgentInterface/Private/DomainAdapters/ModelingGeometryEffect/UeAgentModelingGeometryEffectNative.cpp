@@ -1,11 +1,16 @@
 #include "DomainAdapters/ModelingGeometryEffect/UeAgentModelingGeometryEffectCapabilities.h"
+#include "DomainAdapters/ModelingGeometryEffect/UeAgentModelingGeometryEffectBoundarySemantics.h"
 
 #include "Components/DynamicMeshComponent.h"
 #include "CleaningOps/HoleFillOp.h"
+#include "CleaningOps/RemeshMeshOp.h"
 #include "CompositionOps/VoxelBooleanMeshesOp.h"
 #include "DynamicMesh/DynamicMesh3.h"
+#include "DynamicMesh/DynamicMeshAABBTree3.h"
 #include "DynamicMesh/DynamicMeshAttributeSet.h"
 #include "DynamicMesh/DynamicMeshOverlay.h"
+#include "DynamicMesh/MeshNormals.h"
+#include "DynamicMesh/MeshTransforms.h"
 #include "DynamicMeshActor.h"
 #include "DynamicMeshToMeshDescription.h"
 #include "Engine/StaticMesh.h"
@@ -28,10 +33,14 @@
 #include "Math/RotationMatrix.h"
 #include "MeshBoundaryLoops.h"
 #include "MeshDescriptionToDynamicMesh.h"
+#include "MeshConstraintsUtil.h"
+#include "MeshSimplification.h"
 #include "Misc/ScopeLock.h"
 #include "Operations/MeshPlaneCut.h"
+#include "Operations/OffsetMeshRegion.h"
 #include "PhysicsEngine/AggregateGeom.h"
 #include "PhysicsEngine/BodySetup.h"
+#include "ProjectionTargets.h"
 #include "StaticMeshAttributes.h"
 #include "TransformTypes.h"
 #include "UDynamicMesh.h"
@@ -55,6 +64,8 @@ namespace UE::UAI::DomainAdapters::ModelingGeometryEffect
 
 	namespace
 	{
+		constexpr int32 MaximumVoxelBooleanResolutionPerMajorAxis = 256;
+
 		enum class ECarrierKind : uint8
 		{
 			PrimitiveOutput,
@@ -342,6 +353,14 @@ namespace UE::UAI::DomainAdapters::ModelingGeometryEffect
 				Result->SetMesh(Mesh);
 			}
 			return Result;
+		}
+
+		void EnsureTopologyVertexNormals(FDynamicMesh3& Mesh)
+		{
+			if (!Mesh.HasVertexNormals())
+			{
+				UE::Geometry::FMeshNormals::QuickComputeVertexNormals(Mesh);
+			}
 		}
 
 		bool CopyTransientMesh(
@@ -1046,6 +1065,136 @@ namespace UE::UAI::DomainAdapters::ModelingGeometryEffect
 				OutError);
 		}
 
+		void ApplySimplifyWithBoundaryPolicy(
+			FDynamicMesh3& Mesh,
+			const int32 TriangleTarget,
+			const double GeometricTolerance,
+			const bool bUseTolerance,
+			const bool bPreserveBoundaries)
+		{
+			FDynamicMesh3 ProjectionMesh;
+			TUniquePtr<UE::Geometry::FDynamicMeshAABBTree3> Spatial;
+			TUniquePtr<UE::Geometry::FMeshProjectionTarget> ProjectionTarget;
+			if (bUseTolerance)
+			{
+				ProjectionMesh.Copy(Mesh, false, false, false, false);
+				Spatial = MakeUnique<UE::Geometry::FDynamicMeshAABBTree3>(
+					&ProjectionMesh,
+					true);
+				ProjectionTarget =
+					MakeUnique<UE::Geometry::FMeshProjectionTarget>(
+						&ProjectionMesh,
+						Spatial.Get());
+			}
+
+			UE::Geometry::FAttrMeshSimplification Simplifier(&Mesh);
+			Simplifier.ProjectionMode = UE::Geometry::FAttrMeshSimplification::
+				ETargetProjectionMode::NoProjection;
+			if (ProjectionTarget)
+			{
+				Simplifier.SetProjectionTarget(ProjectionTarget.Get());
+			}
+			Simplifier.DEBUG_CHECK_LEVEL = 0;
+			Simplifier.bRetainQuadricMemory = false;
+			Simplifier.bAllowSeamCollapse = true;
+			Simplifier.SetEdgeFlipTolerance(1.e-5);
+			if (Mesh.HasAttributes())
+			{
+				Mesh.Attributes()->SplitAllBowties();
+			}
+
+			UE::Geometry::FMeshConstraints Constraints;
+			UE::Geometry::FMeshConstraintsUtil::
+				ConstrainAllBoundariesAndSeams(
+					Constraints,
+					Mesh,
+					bPreserveBoundaries
+						? UE::Geometry::EEdgeRefineFlags::FullyConstrained
+						: UE::Geometry::EEdgeRefineFlags::NoFlip,
+					UE::Geometry::EEdgeRefineFlags::NoConstraint,
+					UE::Geometry::EEdgeRefineFlags::NoConstraint,
+					true,
+					true,
+					true);
+			Simplifier.SetExternalConstraints(MoveTemp(Constraints));
+			if (bUseTolerance)
+			{
+				Simplifier.GeometricErrorConstraint =
+					UE::Geometry::FAttrMeshSimplification::
+						EGeometricErrorCriteria::
+							PredictedPointToProjectionTarget;
+				Simplifier.GeometricErrorTolerance =
+					FMath::Max(0.0, GeometricTolerance);
+			}
+			Simplifier.SimplifyToTriangleCount(FMath::Max(1, TriangleTarget));
+			Mesh.CompactInPlace();
+		}
+
+		bool ApplyUniformRemeshWithPolicy(
+			FDynamicMesh3& Mesh,
+			const double TargetEdgeLength,
+			const int32 Iterations,
+			const bool bPreserveBoundaries,
+			const bool bPreserveSharpEdges)
+		{
+			TSharedPtr<FDynamicMesh3, ESPMode::ThreadSafe> SourceMesh =
+				MakeShared<FDynamicMesh3, ESPMode::ThreadSafe>(MoveTemp(Mesh));
+			TSharedPtr<
+				UE::Geometry::FDynamicMeshAABBTree3,
+				ESPMode::ThreadSafe> SourceSpatial =
+					MakeShared<
+						UE::Geometry::FDynamicMeshAABBTree3,
+						ESPMode::ThreadSafe>(
+							SourceMesh.Get(),
+							true);
+
+			UE::Geometry::FRemeshMeshOp Remesh;
+			Remesh.OriginalMesh = SourceMesh;
+			Remesh.OriginalMeshSpatial = SourceSpatial;
+			Remesh.RemeshType = ERemeshType::Standard;
+			Remesh.RemeshIterations = Iterations;
+			Remesh.MaxRemeshIterations = Iterations;
+			Remesh.ExtraProjectionIterations = 0;
+			Remesh.TriangleCountHint = 0;
+			Remesh.TargetEdgeLength = TargetEdgeLength;
+			Remesh.SmoothingStrength = 0.25f;
+			Remesh.SmoothingType = ERemeshSmoothingType::MeanValue;
+			Remesh.bDiscardAttributes = false;
+			Remesh.bPreserveSharpEdges = bPreserveSharpEdges;
+			Remesh.bFlips = true;
+			Remesh.bSplits = true;
+			Remesh.bCollapses = true;
+			Remesh.bReproject = true;
+			Remesh.bPreventNormalFlips = true;
+			Remesh.bPreventTinyTriangles = true;
+			Remesh.MeshBoundaryConstraint = bPreserveBoundaries
+				? UE::Geometry::EEdgeRefineFlags::FullyConstrained
+				: UE::Geometry::EEdgeRefineFlags::NoFlip;
+			Remesh.GroupBoundaryConstraint =
+				UE::Geometry::EEdgeRefineFlags::NoFlip;
+			Remesh.MaterialBoundaryConstraint =
+				UE::Geometry::EEdgeRefineFlags::NoFlip;
+			Remesh.bReprojectConstraints = false;
+			Remesh.BoundaryCornerAngleThreshold = 45.0;
+			Remesh.TargetMeshLocalToWorld =
+				UE::Geometry::FTransformSRT3d::Identity();
+			Remesh.ToolMeshLocalToWorld =
+				UE::Geometry::FTransformSRT3d::Identity();
+			Remesh.bUseWorldSpace = false;
+			Remesh.bParallel = true;
+			Remesh.CalculateResult(nullptr);
+
+			TUniquePtr<FDynamicMesh3> Result = Remesh.ExtractResult();
+			if (!Result.IsValid() || Result->TriangleCount() == 0)
+			{
+				Mesh = MoveTemp(*SourceMesh);
+				return false;
+			}
+			Mesh = MoveTemp(*Result);
+			Mesh.CompactInPlace();
+			return true;
+		}
+
 		bool ApplyTopologyOperation(
 			FModelingGeometryAction& Action,
 			FExecutionMutationError& OutError)
@@ -1415,7 +1564,40 @@ namespace UE::UAI::DomainAdapters::ModelingGeometryEffect
 				VoxelBoolean.Transforms.Add(
 					UE::Geometry::FTransformSRT3d(
 						OperandTransform));
-				VoxelBoolean.VoxelSizeD = VoxelSize;
+				const UE::Geometry::FAxisAlignedBox3d TargetBounds =
+					Action.WorkingMesh.GetBounds(true);
+				const UE::Geometry::FAxisAlignedBox3d OperandBounds =
+					Action.OperandMesh.GetBounds(true);
+				const FVector3d TargetSize =
+					TargetBounds.Max - TargetBounds.Min;
+				const FVector3d OperandSize =
+					OperandBounds.Max - OperandBounds.Min;
+				const FVector OperandScale =
+					OperandTransform.GetScale3D().GetAbs();
+				const double MajorAxisSize = FMath::Max(
+					FMath::Max3(
+						TargetSize.X,
+						TargetSize.Y,
+						TargetSize.Z),
+					FMath::Max3(
+						OperandSize.X * OperandScale.X,
+						OperandSize.Y * OperandScale.Y,
+						OperandSize.Z * OperandScale.Z));
+				const double RequestedVoxelCount =
+					MajorAxisSize / VoxelSize;
+				if (!FMath::IsFinite(RequestedVoxelCount)
+					|| RequestedVoxelCount
+						> MaximumVoxelBooleanResolutionPerMajorAxis)
+				{
+					return Fail(
+						OutError,
+						TEXT(
+							"modeling_geometry_voxel_resolution_limit_exceeded"));
+				}
+				VoxelBoolean.VoxelCount = FMath::Clamp(
+					FMath::CeilToInt(RequestedVoxelCount),
+					16,
+					MaximumVoxelBooleanResolutionPerMajorAxis);
 				VoxelBoolean.AdaptivityD = Adaptivity;
 				VoxelBoolean.Operation =
 					RequestedOperation == TEXT("intersection")
@@ -1427,6 +1609,8 @@ namespace UE::UAI::DomainAdapters::ModelingGeometryEffect
 							: UE::Geometry::FVoxelBooleanMeshesOp::
 								EBooleanOperation::Union;
 				VoxelBoolean.CalculateResult(nullptr);
+				const UE::Geometry::FTransformSRT3d ResultToTarget =
+					VoxelBoolean.GetResultTransform();
 				TUniquePtr<FDynamicMesh3> Result =
 					VoxelBoolean.ExtractResult();
 				if (!Result.IsValid()
@@ -1436,6 +1620,10 @@ namespace UE::UAI::DomainAdapters::ModelingGeometryEffect
 						OutError,
 						TEXT("modeling_geometry_voxel_boolean_failed"));
 				}
+				MeshTransforms::ApplyTransform(
+					*Result,
+					ResultToTarget,
+					true);
 				Action.WorkingMesh = MoveTemp(*Result);
 				return true;
 			}
@@ -1605,29 +1793,26 @@ namespace UE::UAI::DomainAdapters::ModelingGeometryEffect
 						OutError,
 						TEXT("modeling_geometry_remesh_parameters_invalid"));
 				}
-				FGeometryScriptRemeshOptions Options;
-				Options.RemeshIterations = Iterations;
-				Options.MeshBoundaryConstraint =
-					bPreserveBoundaries
-						? EGeometryScriptRemeshEdgeConstraintType::Fixed
-						: EGeometryScriptRemeshEdgeConstraintType::Free;
-				Options.GroupBoundaryConstraint =
-					bPreserveSharpEdges
-						? EGeometryScriptRemeshEdgeConstraintType::Fixed
-						: EGeometryScriptRemeshEdgeConstraintType::Free;
-				Options.SmoothingRate =
-					bPreserveSharpEdges ? 0.0f : 0.25f;
-				FGeometryScriptUniformRemeshOptions UniformOptions;
-				UniformOptions.TargetType =
-					EGeometryScriptUniformRemeshTargetType::
-						TargetEdgeLength;
-				UniformOptions.TargetEdgeLength =
-					TargetEdgeLength;
-				UGeometryScriptLibrary_RemeshingFunctions::
-					ApplyUniformRemesh(
-						TargetMesh.Get(),
-						Options,
-						UniformOptions);
+				bool bRemeshSucceeded = false;
+				TargetMesh->EditMesh(
+					[&](FDynamicMesh3& EditMesh)
+					{
+						bRemeshSucceeded = ApplyUniformRemeshWithPolicy(
+							EditMesh,
+							TargetEdgeLength,
+							Iterations,
+							bPreserveBoundaries,
+							bPreserveSharpEdges);
+					},
+					EDynamicMeshChangeType::GeneralEdit,
+					EDynamicMeshAttributeChangeFlags::Unknown,
+					false);
+				if (!bRemeshSucceeded)
+				{
+					return Fail(
+						OutError,
+						TEXT("modeling_geometry_remesh_failed"));
+				}
 			}
 			else if (Key == TEXT("simplify"))
 			{
@@ -1652,35 +1837,91 @@ namespace UE::UAI::DomainAdapters::ModelingGeometryEffect
 						OutError,
 						TEXT("modeling_geometry_simplify_parameters_invalid"));
 				}
-				FGeometryScriptSimplifyMeshOptions Options;
-				Options.bAllowSeamCollapse = true;
-				Options.bAllowSeamSmoothing = true;
-				if (TargetMode == TEXT("tolerance_cm"))
+				const bool bUseTolerance =
+					TargetMode == TEXT("tolerance_cm");
+				if (!bUseTolerance
+					&& TargetMode != TEXT("triangle_count")
+					&& TargetMode != TEXT("triangle_ratio"))
 				{
-					UGeometryScriptLibrary_MeshSimplifyFunctions::
-						ApplySimplifyToTolerance(
-							TargetMesh.Get(),
-							TargetValue,
-							Options);
+					return Fail(
+						OutError,
+						TEXT("modeling_geometry_simplify_target_mode_invalid"),
+						TargetMode);
 				}
-				else
-				{
-					const int32 TriangleTarget =
-						TargetMode == TEXT("triangle_ratio")
-							? FMath::Max(
-								1,
-								FMath::CeilToInt(
-									Action.WorkingMesh.TriangleCount()
-									* TargetValue))
-							: FMath::Max(
-								1,
-								FMath::RoundToInt(TargetValue));
-					UGeometryScriptLibrary_MeshSimplifyFunctions::
-						ApplySimplifyToTriangleCount(
-							TargetMesh.Get(),
+				const int32 TriangleTarget = bUseTolerance
+					? 1
+					: TargetMode == TEXT("triangle_ratio")
+						? FMath::Max(
+							1,
+							FMath::CeilToInt(
+								Action.WorkingMesh.TriangleCount()
+								* TargetValue))
+						: FMath::Max(
+							1,
+							FMath::RoundToInt(TargetValue));
+				const FBoundarySemanticObservation BeforeBoundary =
+					ObserveBoundarySemantics(Action.WorkingMesh);
+				TargetMesh->EditMesh(
+					[&](FDynamicMesh3& EditMesh)
+					{
+						ApplySimplifyWithBoundaryPolicy(
+							EditMesh,
 							TriangleTarget,
-							Options);
+							TargetValue,
+							bUseTolerance,
+							bPreserveBoundaries);
+					},
+					EDynamicMeshChangeType::GeneralEdit,
+					EDynamicMeshAttributeChangeFlags::Unknown,
+					false);
+				FDynamicMesh3 SimplifiedMesh;
+				if (!CopyTransientMesh(
+						*TargetMesh,
+						SimplifiedMesh,
+						OutError))
+				{
+					return false;
 				}
+				if (SimplifiedMesh.TriangleCount()
+					>= Action.WorkingMesh.TriangleCount())
+				{
+					return Fail(
+						OutError,
+						TEXT("modeling_geometry_simplify_no_effect"),
+						FString::Printf(
+							TEXT("before=%d; after=%d; mode=%s"),
+							Action.WorkingMesh.TriangleCount(),
+							SimplifiedMesh.TriangleCount(),
+							*TargetMode));
+				}
+				if (!bUseTolerance
+					&& SimplifiedMesh.TriangleCount()
+						> TriangleTarget + 1)
+				{
+					return Fail(
+						OutError,
+						TEXT("modeling_geometry_simplify_target_unreachable"),
+						FString::Printf(
+							TEXT(
+								"target=%d; actual=%d; preserve_boundaries=%s"),
+							TriangleTarget,
+							SimplifiedMesh.TriangleCount(),
+							bPreserveBoundaries
+								? TEXT("true")
+								: TEXT("false")));
+				}
+				const FBoundarySemanticObservation AfterBoundary =
+					ObserveBoundarySemantics(SimplifiedMesh);
+				if (bPreserveBoundaries
+					&& AfterBoundary != BeforeBoundary)
+				{
+					return Fail(
+						OutError,
+						TEXT(
+							"modeling_geometry_simplify_boundary_not_preserved"));
+				}
+				Action.WorkingMesh = MoveTemp(SimplifiedMesh);
+				return true;
 			}
 			else if (Key == TEXT("subdivide"))
 			{
@@ -1810,33 +2051,69 @@ namespace UE::UAI::DomainAdapters::ModelingGeometryEffect
 							TEXT(
 								"modeling_geometry_extrude_parameters_invalid"));
 					}
-					FGeometryScriptMeshLinearExtrudeOptions Options;
-					Options.Distance = Distance;
-					Options.DirectionMode =
-						DirectionMode == TEXT("fixed")
-							? EGeometryScriptLinearExtrudeDirection::
-								FixedDirection
-							: EGeometryScriptLinearExtrudeDirection::
-								AverageFaceNormal;
-					if (DirectionMode == TEXT("fixed"))
+					if (Key == TEXT("extrude_faces")
+						&& DirectionMode == TEXT("vertex_normals"))
 					{
-						FVector3d Direction;
-						if (!ReadDirection(
-								Action.Parameters,
-								Direction))
+						bool bExtruded = false;
+						TargetMesh->EditMesh(
+							[&](FDynamicMesh3& EditMesh)
+							{
+								EnsureTopologyVertexNormals(EditMesh);
+								TArray<int32> Triangles;
+								Selection.ConvertToMeshIndexArray(
+									EditMesh,
+									Triangles,
+									EGeometryScriptIndexType::Triangle);
+								UE::Geometry::FOffsetMeshRegion Extruder(
+									&EditMesh);
+								Extruder.Triangles = MoveTemp(Triangles);
+								Extruder.ExtrusionVectorType =
+									UE::Geometry::FOffsetMeshRegion::
+										EVertexExtrusionVectorType::VertexNormal;
+								Extruder.DefaultOffsetDistance = Distance;
+								Extruder.bIsPositiveOffset = Distance > 0.0;
+								bExtruded = Extruder.Apply();
+							},
+							EDynamicMeshChangeType::GeneralEdit,
+							EDynamicMeshAttributeChangeFlags::Unknown,
+							false);
+						if (!bExtruded)
 						{
 							return Fail(
 								OutError,
-								TEXT(
-									"modeling_geometry_direction_invalid"));
+								TEXT("modeling_geometry_extrude_failed"));
 						}
-						Options.Direction = FVector(Direction);
 					}
-					UGeometryScriptLibrary_MeshModelingFunctions::
-						ApplyMeshLinearExtrudeFaces(
-							TargetMesh.Get(),
-							Options,
-							Selection);
+					else
+					{
+						FGeometryScriptMeshLinearExtrudeOptions Options;
+						Options.Distance = Distance;
+						Options.DirectionMode =
+							DirectionMode == TEXT("fixed")
+								? EGeometryScriptLinearExtrudeDirection::
+									FixedDirection
+								: EGeometryScriptLinearExtrudeDirection::
+									AverageFaceNormal;
+						if (DirectionMode == TEXT("fixed"))
+						{
+							FVector3d Direction;
+							if (!ReadDirection(
+									Action.Parameters,
+									Direction))
+							{
+								return Fail(
+									OutError,
+									TEXT(
+										"modeling_geometry_direction_invalid"));
+							}
+							Options.Direction = FVector(Direction);
+						}
+						UGeometryScriptLibrary_MeshModelingFunctions::
+							ApplyMeshLinearExtrudeFaces(
+								TargetMesh.Get(),
+								Options,
+								Selection);
+					}
 				}
 				else if (Key == TEXT("inset_faces"))
 				{
@@ -1892,6 +2169,17 @@ namespace UE::UAI::DomainAdapters::ModelingGeometryEffect
 						OffsetMode == TEXT("face_normals")
 							? EGeometryScriptOffsetFacesType::FaceNormal
 							: EGeometryScriptOffsetFacesType::VertexNormal;
+					if (OffsetMode == TEXT("vertex_normals"))
+					{
+						TargetMesh->EditMesh(
+							[](FDynamicMesh3& EditMesh)
+							{
+								EnsureTopologyVertexNormals(EditMesh);
+							},
+							EDynamicMeshChangeType::AttributeEdit,
+							EDynamicMeshAttributeChangeFlags::NormalsTangents,
+							false);
+					}
 					UGeometryScriptLibrary_MeshModelingFunctions::
 						ApplyMeshOffsetFaces(
 							TargetMesh.Get(),
@@ -1984,6 +2272,41 @@ namespace UE::UAI::DomainAdapters::ModelingGeometryEffect
 			FMeshDescriptionToDynamicMesh Converter;
 			Converter.Convert(Description, OutMesh);
 			return true;
+		}
+
+		bool TryCopyResolvedCarrierMesh(
+			UObject& Object,
+			UWorld& World,
+			FDynamicMesh3& OutMesh)
+		{
+			if (ADynamicMeshActor* Actor = Cast<ADynamicMeshActor>(&Object))
+			{
+				UDynamicMesh* DynamicMesh =
+					Actor->GetDynamicMeshComponent()
+						? Actor->GetDynamicMeshComponent()->GetDynamicMesh()
+						: nullptr;
+				if (Actor->GetWorld() != &World || !DynamicMesh)
+				{
+					return false;
+				}
+				bool bCopied = false;
+				DynamicMesh->ProcessMesh(
+					[&OutMesh, &bCopied](const FDynamicMesh3& Mesh)
+					{
+						OutMesh = Mesh;
+						bCopied = true;
+					});
+				return bCopied
+					&& OutMesh.VertexCount() > 0
+					&& OutMesh.TriangleCount() > 0;
+			}
+			if (UStaticMesh* StaticMesh = Cast<UStaticMesh>(&Object))
+			{
+				return ConvertStaticMesh(*StaticMesh, OutMesh)
+					&& OutMesh.VertexCount() > 0
+					&& OutMesh.TriangleCount() > 0;
+			}
+			return false;
 		}
 
 		bool CommitStaticMesh(
@@ -2159,28 +2482,17 @@ namespace UE::UAI::DomainAdapters::ModelingGeometryEffect
 				{
 					return false;
 				}
-				ADynamicMeshActor* OperandActor =
-					Cast<ADynamicMeshActor>(OperandObject);
-				UDynamicMesh* OperandDynamicMesh =
-					OperandActor
-						&& OperandActor->GetDynamicMeshComponent()
-						? OperandActor->GetDynamicMeshComponent()
-							->GetDynamicMesh()
-						: nullptr;
-				if (!OperandActor
-					|| OperandActor->GetWorld() != &World
-					|| !OperandDynamicMesh)
+				if (!OperandObject
+					|| !TryCopyResolvedCarrierMesh(
+						*OperandObject,
+						World,
+						OutAction.OperandMesh))
 				{
 					return Fail(
 						OutError,
 						TEXT(
 							"modeling_geometry_operand_carrier_invalid"));
 				}
-				OperandDynamicMesh->ProcessMesh(
-					[&OutAction](const FDynamicMesh3& Mesh)
-					{
-						OutAction.OperandMesh = Mesh;
-					});
 				FString ExpectedOperandFingerprint;
 				if (!ReadString(
 						After,

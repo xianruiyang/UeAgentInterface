@@ -14,6 +14,7 @@
 #include "UObject/Package.h"
 
 #include "DomainAdapters/ModelingGeometryEffect/UeAgentModelingGeometryEffectCapabilities.h"
+#include "DomainAdapters/ModelingGeometryEffect/UeAgentModelingGeometryEffectNormalObservation.h"
 
 #include "Core/ContextResource/UeAgentContextResource.h"
 #include "Core/Contract/UeAgentContract.h"
@@ -26,6 +27,7 @@
 #include "DomainAdapters/GenericEffect/UeAgentGenericEffectAdapter.h"
 #include "DynamicMesh/DynamicMeshAttributeSet.h"
 #include "DynamicMesh/DynamicMeshOverlay.h"
+#include "DynamicMesh/MeshNormals.h"
 #include "DynamicMeshToMeshDescription.h"
 #include "Engine/StaticMesh.h"
 #include "HAL/PlatformTime.h"
@@ -43,6 +45,16 @@ using UE::Geometry::FDynamicMeshMaterialAttribute;
 using UE::Geometry::FDynamicMeshNormalOverlay;
 using UE::Geometry::FDynamicMeshUVOverlay;
 using UE::Geometry::FIndex3i;
+using UE::UAI::DomainAdapters::ModelingGeometryEffect::
+	FNormalSemanticObservation;
+using UE::UAI::DomainAdapters::ModelingGeometryEffect::
+	IsCompleteAreaAnglePerVertexNormalObservation;
+using UE::UAI::DomainAdapters::ModelingGeometryEffect::
+	IsCompleteAngleThresholdNormalObservation;
+using UE::UAI::DomainAdapters::ModelingGeometryEffect::
+	IsCompleteFaceNormalObservation;
+using UE::UAI::DomainAdapters::ModelingGeometryEffect::
+	ObserveNormalSemantics;
 
 	FString FixturePath()
 	{
@@ -375,6 +387,166 @@ using UE::Geometry::FIndex3i;
 	};
 
 #include "UeAgentModelingGeometryEffectCapabilityProductionTests.inl"
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(
+	FUeAgentModelingNormalObservationContractTest,
+	"UeAgentInterface.DomainAdapters.ModelingGeometryEffect."
+		"NormalObservationContract",
+	EAutomationTestFlags::EditorContext
+		| EAutomationTestFlags::EngineFilter)
+
+bool FUeAgentModelingNormalObservationContractTest::RunTest(
+	const FString& Parameters)
+{
+	using UE::UAI::DomainAdapters::ModelingGeometryEffect::
+		FNormalSemanticObservation;
+	using UE::UAI::DomainAdapters::ModelingGeometryEffect::
+		ObserveNormalSemantics;
+
+	FDynamicMesh3 Mesh;
+	const int32 A = Mesh.AppendVertex(FVector3d(0.0, 0.0, 0.0));
+	const int32 B = Mesh.AppendVertex(FVector3d(100.0, 0.0, 0.0));
+	const int32 C = Mesh.AppendVertex(FVector3d(0.0, 100.0, 0.0));
+	const int32 TriangleId = Mesh.AppendTriangle(A, B, C);
+	Mesh.EnableAttributes();
+
+	const FNormalSemanticObservation Missing =
+		ObserveNormalSemantics(Mesh);
+	TestEqual(
+		TEXT("unset overlay reports every triangle corner missing"),
+		Missing.MissingTriangleCornerCount,
+		Missing.TriangleCornerCount);
+
+	auto SetCornerNormals =
+		[&Mesh, TriangleId](const FVector3f& Value)
+		{
+			FDynamicMeshNormalOverlay* Normals =
+				Mesh.Attributes()->PrimaryNormals();
+			Normals->ClearElements();
+			const FIndex3i Triangle = Mesh.GetTriangle(TriangleId);
+			FIndex3i Elements;
+			for (int32 Corner = 0; Corner < 3; ++Corner)
+			{
+				const int32 ElementId =
+					Normals->AppendElement(Value);
+				Normals->SetParentVertex(
+					ElementId,
+					Triangle[Corner]);
+				Elements[Corner] = ElementId;
+			}
+			Normals->SetTriangle(TriangleId, Elements);
+		};
+
+	SetCornerNormals(FVector3f(1.0f, 0.0f, 0.0f));
+	const FNormalSemanticObservation Misaligned =
+		ObserveNormalSemantics(Mesh);
+	TestEqual(
+		TEXT("all triangle corners are observed"),
+		Misaligned.ValidTriangleCornerCount,
+		3);
+	TestEqual(
+		TEXT("orthogonal normals are not face aligned"),
+		Misaligned.FaceAlignedTriangleCornerCount,
+		0);
+	TestEqual(
+		TEXT("orthogonal normals are classified as mismatched"),
+		Misaligned.FaceMisalignedTriangleCornerCount,
+		3);
+
+	const FVector3d FaceNormal = Mesh.GetTriNormal(TriangleId);
+	SetCornerNormals(
+		FVector3f(
+			static_cast<float>(FaceNormal.X),
+			static_cast<float>(FaceNormal.Y),
+			static_cast<float>(FaceNormal.Z)));
+	const FNormalSemanticObservation Aligned =
+		ObserveNormalSemantics(Mesh);
+	TestEqual(
+		TEXT("face normals cover every triangle corner"),
+		Aligned.FaceAlignedTriangleCornerCount,
+		Aligned.TriangleCornerCount);
+	TestEqual(
+		TEXT("face normals contain no mismatch"),
+		Aligned.FaceMisalignedTriangleCornerCount,
+		0);
+	TestEqual(
+		TEXT("face normals contain no invalid corner"),
+		Aligned.InvalidTriangleCornerCount,
+		0);
+	TestTrue(
+		TEXT("face semantic contract accepts the aligned observation"),
+		IsCompleteFaceNormalObservation(Aligned));
+
+	FDynamicMesh3 FoldedMesh;
+	const int32 V0 = FoldedMesh.AppendVertex(
+		FVector3d(0.0, 0.0, 0.0));
+	const int32 V1 = FoldedMesh.AppendVertex(
+		FVector3d(100.0, 0.0, 0.0));
+	const int32 V2 = FoldedMesh.AppendVertex(
+		FVector3d(0.0, 100.0, 0.0));
+	const int32 V3 = FoldedMesh.AppendVertex(
+		FVector3d(0.0, 0.0, 100.0));
+	FoldedMesh.AppendTriangle(V0, V1, V2);
+	FoldedMesh.AppendTriangle(V0, V3, V1);
+	FoldedMesh.EnableAttributes();
+	FDynamicMeshNormalOverlay* FoldedNormals =
+		FoldedMesh.Attributes()->PrimaryNormals();
+	UE::Geometry::FMeshNormals::InitializeOverlayToPerVertexNormals(
+		FoldedNormals,
+		false);
+	const FNormalSemanticObservation PerVertex =
+		ObserveNormalSemantics(FoldedMesh);
+	TestEqual(
+		TEXT("per-vertex normals reference every mesh vertex"),
+		PerVertex.ReferencedVertexCount,
+		PerVertex.MeshVertexCount);
+	TestEqual(
+		TEXT("per-vertex normals use one element per vertex"),
+		PerVertex.SingleNormalElementVertexCount,
+		PerVertex.MeshVertexCount);
+	TestEqual(
+		TEXT("per-vertex normals keep the folded edge smooth"),
+		PerVertex.FullySmoothInteriorEdgeCount,
+		1);
+	TestEqual(
+		TEXT("per-vertex normals match area-angle reference directions"),
+		PerVertex.WeightedAlignedNormalElementCount,
+		PerVertex.ReferencedNormalElementCount);
+	TestTrue(
+		TEXT("area-angle semantic contract accepts per-vertex normals"),
+		IsCompleteAreaAnglePerVertexNormalObservation(PerVertex));
+
+	FoldedNormals->CreateFromPredicate(
+		[](int32, int32, int32)
+		{
+			return false;
+		},
+		0.0f);
+	UE::Geometry::FMeshNormals FoldedReference(&FoldedMesh);
+	FoldedReference.RecomputeOverlayNormals(
+		FoldedNormals,
+		true,
+		true);
+	FoldedReference.CopyToOverlay(FoldedNormals);
+	const FNormalSemanticObservation Split =
+		ObserveNormalSemantics(FoldedMesh);
+	TestEqual(
+		TEXT("split normals classify the folded edge"),
+		Split.FullySplitInteriorEdgeCount,
+		1);
+	TestEqual(
+		TEXT("split normals record both edge endpoints"),
+		Split.SplitInteriorEdgeEndpointKeys.Num(),
+		2);
+	TestEqual(
+		TEXT("split normals retain weighted island directions"),
+		Split.WeightedAlignedNormalElementCount,
+		Split.ReferencedNormalElementCount);
+	TestTrue(
+		TEXT("angle-threshold semantic contract accepts the folded split"),
+		IsCompleteAngleThresholdNormalObservation(Split, 30.0));
+	return !HasAnyErrors();
 }
 
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(

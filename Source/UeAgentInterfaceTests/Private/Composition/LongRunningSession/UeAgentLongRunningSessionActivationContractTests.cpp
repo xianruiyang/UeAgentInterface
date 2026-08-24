@@ -300,6 +300,7 @@ namespace
 
 		bool TryCreateOperationPort(
 			const EditorSessionOperation::FUeAgentEditorSessionOperationTypedRequest& Request,
+			const FLongRunningOperationRequest& OperationRequest,
 			TSharedPtr<ILongRunningOperationPort, ESPMode::ThreadSafe>& OutPort,
 			FExecutionMutationError& OutError) override
 		{
@@ -511,9 +512,10 @@ bool FUeAgentLongRunningSessionPublicActivationContractTest::RunTest(
 			Fixture->GetNumberField(TEXT("lifecycle_command_count"))));
 
 	TestTrue(
-		TEXT("safe-exit only exposes dirty resolution"),
+		TEXT("safe-exit exposes dirty resolution and durable witness"),
 		ParameterNames(Commands[TEXT("editor.safe_exit")])
-			== TArray<FString>{TEXT("dirty_resolution")});
+			== TArray<FString>{
+				TEXT("dirty_resolution"), TEXT("external_witness")});
 	TestTrue(
 		TEXT("resume uses operation ref plus generation fence"),
 		ParameterNames(Commands[TEXT("operation.resume")])

@@ -9,6 +9,7 @@
 #include "Core/StateSemantic/UeAgentStateRevisionJson.h"
 #include "DomainAdapters/ModelingGeometryEffect/UeAgentModelingGeometryEffectCapabilities.h"
 #include "DomainAdapters/ModelingGeometryEffect/UeAgentModelingGeometryEffectCarrierRevision.h"
+#include "DomainAdapters/ModelingGeometryEffect/UeAgentModelingGeometryEffectNormalObservation.h"
 #include "DomainAdapters/WorldSimpleEffect/UeAgentWorldSimpleEffectProduction.h"
 #include "DynamicMesh/DynamicMesh3.h"
 #include "DynamicMesh/DynamicMeshAttributeSet.h"
@@ -25,6 +26,8 @@
 #include "Misc/Paths.h"
 #include "PhysicsEngine/BodySetup.h"
 #include "Serialization/JsonSerializer.h"
+#include "Serialization/MemoryReader.h"
+#include "Serialization/MemoryWriter.h"
 #include "StaticMeshAttributes.h"
 #include "UDynamicMesh.h"
 #include "UObject/Package.h"
@@ -1161,6 +1164,50 @@ bool FUeAgentModelingCarrierRevisionTracksMutableStateTest::RunTest(
 		AfterTopology->GetSequence(),
 		AfterGeometry->GetSequence());
 
+	FDynamicMesh3 PersistedEquivalent;
+	bool bPersistedRoundTripSucceeded = false;
+	DynamicMesh->ProcessMesh(
+		[&](const FDynamicMesh3& Mesh)
+		{
+			FDynamicMesh3 Copy(Mesh);
+			TArray<uint8> Serialized;
+			FMemoryWriter Writer(Serialized, true);
+			Copy.Serialize(Writer);
+			const FCustomVersionContainer CustomVersions =
+				Writer.GetCustomVersions();
+			Writer.Close();
+			if (Writer.IsError())
+			{
+				return;
+			}
+			FMemoryReader Reader(Serialized, true);
+			Reader.SetCustomVersions(CustomVersions);
+			PersistedEquivalent.Serialize(Reader);
+			Reader.Close();
+			bPersistedRoundTripSucceeded = !Reader.IsError();
+		});
+	if (!TestTrue(
+			TEXT("sparse topology survives a persistent compact roundtrip"),
+			bPersistedRoundTripSucceeded))
+	{
+		return false;
+	}
+	DynamicMesh->EditMesh(
+		[&](FDynamicMesh3& Mesh)
+		{
+			Mesh = MoveTemp(PersistedEquivalent);
+		});
+	const TOptional<FUeAgentStateRevision> AfterEquivalentCompaction =
+		ReadRevision();
+	if (!AfterEquivalentCompaction.IsSet())
+	{
+		return false;
+	}
+	TestTrue(
+		TEXT("persistent compaction preserves the semantic carrier revision"),
+		AfterEquivalentCompaction.GetValue()
+			== AfterTopology.GetValue());
+
 	DynamicMesh->EditMesh(
 		[](FDynamicMesh3& Mesh)
 		{
@@ -1195,7 +1242,7 @@ bool FUeAgentModelingCarrierRevisionTracksMutableStateTest::RunTest(
 	TestNotEqual(
 		TEXT("UV change advances semantic revision"),
 		AfterUv->GetSequence(),
-		AfterTopology->GetSequence());
+		AfterEquivalentCompaction->GetSequence());
 
 	DynamicMesh->EditMesh(
 		[](FDynamicMesh3& Mesh)
@@ -1312,9 +1359,170 @@ namespace
 	using UE::UAI::Tests::SimpleAuthoring::E4::
 		CountCompletedJournals;
 	using UE::UAI::Tests::SimpleAuthoring::E4::
+		FOwnedReloadableAssetPackage;
+	using UE::UAI::Tests::SimpleAuthoring::E4::
 		FOwnedReloadableWorldCatalog;
 	using UE::UAI::Tests::SimpleAuthoring::E4::
 		FOwnedReloadableWorldPackage;
+
+	TSharedPtr<FJsonObject> FindModelingOperationRow(
+		const TSharedPtr<FJsonObject>& Fixture,
+		const FString& OperationKey)
+	{
+		if (!Fixture.IsValid())
+		{
+			return nullptr;
+		}
+		for (const TSharedPtr<FJsonValue>& Value
+			: Fixture->GetArrayField(TEXT("descriptors")))
+		{
+			const TSharedPtr<FJsonObject> Row = Value->AsObject();
+			if (Row.IsValid()
+				&& Row->GetStringField(TEXT("operation_key"))
+					== OperationKey)
+			{
+				return Row;
+			}
+		}
+		return nullptr;
+	}
+
+	class FReloadableModelingReferenceResolver final
+		: public IUeAgentModelingGeometryEffectReferenceResolver
+	{
+	public:
+		FReloadableModelingReferenceResolver(
+			FOwnedReloadableAssetPackage& InOwner,
+			const bool bInReloadBeforeRead)
+			: Owner(InOwner)
+			, bReloadBeforeRead(bInReloadBeforeRead)
+		{
+		}
+
+		bool TryResolveReference(
+			UWorld& World,
+			const FString& CanonicalRef,
+			UObject*& OutObject,
+			FExecutionMutationError& OutError) override
+		{
+			++ResolveCount;
+			FString ReloadError;
+			if (bReloadBeforeRead
+				&& !Owner.TryReload(CanonicalRef, ReloadError))
+			{
+				OutObject = nullptr;
+				OutError = FExecutionMutationError(
+					ReloadError,
+					CanonicalRef);
+				return false;
+			}
+
+			OutObject = Owner.FindTarget(CanonicalRef);
+			if (!::IsValid(OutObject))
+			{
+				OutObject = nullptr;
+				OutError = FExecutionMutationError(
+					TEXT("sa008_modeling_asset_reference_unresolved"),
+					CanonicalRef);
+				return false;
+			}
+			OutError = FExecutionMutationError();
+			return true;
+		}
+
+		int32 ResolveCount = 0;
+
+	private:
+		FOwnedReloadableAssetPackage& Owner;
+		bool bReloadBeforeRead = false;
+	};
+
+	ADynamicMeshActor* FindE4ModelingActor(
+		UWorld& World,
+		const FString& Label);
+
+	class FWorldModelingReferenceResolver final
+		: public IUeAgentModelingGeometryEffectReferenceResolver
+	{
+	public:
+		FWorldModelingReferenceResolver(
+			FString InTargetRef,
+			FString InActorLabel)
+			: TargetRef(MoveTemp(InTargetRef))
+			, ActorLabel(MoveTemp(InActorLabel))
+		{
+		}
+
+		bool TryResolveReference(
+			UWorld& World,
+			const FString& CanonicalRef,
+			UObject*& OutObject,
+			FExecutionMutationError& OutError) override
+		{
+			++ResolveCount;
+			OutObject = nullptr;
+			if (CanonicalRef != TargetRef)
+			{
+				OutError = FExecutionMutationError(
+					TEXT("sa008_modeling_world_reference_unbound"),
+					CanonicalRef);
+				return false;
+			}
+			OutObject = FindE4ModelingActor(World, ActorLabel);
+			if (!OutObject)
+			{
+				OutError = FExecutionMutationError(
+					TEXT("sa008_modeling_world_actor_unresolved"),
+					CanonicalRef);
+				return false;
+			}
+			OutError = FExecutionMutationError();
+			return true;
+		}
+
+		int32 ResolveCount = 0;
+
+	private:
+		FString TargetRef;
+		FString ActorLabel;
+	};
+
+	ADynamicMeshActor* SpawnE4ModelingCubeActor(
+		UWorld& World,
+		const FString& Label)
+	{
+		FActorSpawnParameters SpawnParameters;
+		SpawnParameters.SpawnCollisionHandlingOverride =
+			ESpawnActorCollisionHandlingMethod::AlwaysSpawn;
+		SpawnParameters.ObjectFlags |= RF_Transactional;
+		ADynamicMeshActor* Actor =
+			World.SpawnActor<ADynamicMeshActor>(
+				FVector(1000.0, 2000.0, 300.0),
+				FRotator(0.0, 37.0, 0.0),
+				SpawnParameters);
+		UDynamicMeshComponent* Component = Actor
+			? Actor->GetDynamicMeshComponent()
+			: nullptr;
+		UDynamicMesh* DynamicMesh = Component
+			? Component->GetDynamicMesh()
+			: nullptr;
+		if (!Actor || !DynamicMesh)
+		{
+			if (Actor)
+			{
+				Actor->Destroy();
+			}
+			return nullptr;
+		}
+		Actor->SetActorLabel(Label);
+		Actor->SetActorScale3D(FVector(1.0, 2.0, 0.5));
+		DynamicMesh->EditMesh(
+			[](FDynamicMesh3& Mesh)
+			{
+				BuildCube(Mesh);
+			});
+		return Actor;
+	}
 
 	ADynamicMeshActor* FindE4ModelingActor(
 		UWorld& World,
@@ -1334,6 +1542,564 @@ namespace
 			Match = *It;
 		}
 		return Match;
+	}
+
+	bool RunStaticNormalsOwnedPackageCase(
+		FAutomationTestBase* Test,
+		const FString& Mode,
+		const bool bPreserveExistingHardEdges,
+		const TOptional<double>& AngleDegrees,
+		const FString& Scope)
+	{
+		const TSharedPtr<FJsonObject> Fixture =
+			LoadTopologyFixture(Test);
+		const TSharedPtr<FJsonObject> NormalRow =
+			FindModelingOperationRow(
+				Fixture,
+				TEXT("recompute_normals"));
+		if (!Test->TestNotNull(
+				*(Scope + TEXT(" descriptor row exists")),
+				NormalRow.Get()))
+		{
+			return false;
+		}
+
+		TSharedPtr<const FUeAgentDescriptorRegistry> Registry;
+		FString RegistryError;
+		const FUeAgentSimpleAuthoringCommandRoute* Route = FindRoute(
+			NormalRow->GetStringField(TEXT("capability_id")));
+		if (!Test->TestTrue(
+				*(Scope + TEXT(" descriptors compose")),
+				TryCreateSimpleAuthoringDescriptorRegistry(
+					Registry,
+					RegistryError))
+			|| !Test->TestNotNull(
+				*(Scope + TEXT(" has one exact route")),
+				Route)
+			|| !Registry.IsValid())
+		{
+			return false;
+		}
+
+		const FString TargetRef = TEXT("uai://mesh/fixture-target");
+		FString OwnedRoot;
+		{
+			FOwnedModelingWorld WorldOwner;
+			FOwnedReloadableAssetPackage AssetOwner(Scope);
+			OwnedRoot = AssetOwner.Root;
+			if (!Test->TestTrue(
+					*(Scope + TEXT(" owned asset package is valid")),
+					WorldOwner.IsValid() && AssetOwner.IsValid()))
+			{
+				return false;
+			}
+
+			ADynamicMeshActor* SourceActor =
+				WorldOwner.SpawnCubeActor(
+					TEXT("SA008_") + Scope + TEXT("_Source"),
+					FVector::ZeroVector,
+					FRotator::ZeroRotator,
+					FVector::OneVector);
+			UDynamicMeshComponent* SourceComponent = SourceActor
+				? SourceActor->GetDynamicMeshComponent()
+				: nullptr;
+			UDynamicMesh* SourceMesh = SourceComponent
+				? SourceComponent->GetDynamicMesh()
+				: nullptr;
+			if (SourceMesh && bPreserveExistingHardEdges)
+			{
+				SeedMixedHardEdgeNormals(*SourceMesh);
+			}
+			UStaticMesh* StaticTarget = SourceMesh
+				? CreateTopologyStaticCarrier(
+					*AssetOwner.Package,
+					*SourceMesh)
+				: nullptr;
+			if (!Test->TestNotNull(
+					*(Scope + TEXT(" static mesh exists")),
+					StaticTarget))
+			{
+				return false;
+			}
+			AssetOwner.BindTarget(
+				TargetRef,
+				StaticTarget->GetFName());
+
+			const TSharedPtr<FJsonObject> Payload =
+				BuildAttributeCollisionPayload(
+					NormalRow,
+					*StaticTarget);
+			if (Payload.IsValid())
+			{
+				Payload->SetStringField(TEXT("mode"), Mode);
+				Payload->SetBoolField(
+					TEXT("preserve_existing_hard_edges"),
+					bPreserveExistingHardEdges);
+				if (AngleDegrees.IsSet())
+				{
+					Payload->SetNumberField(
+						TEXT("angle_degrees"),
+						AngleDegrees.GetValue());
+				}
+			}
+			FString PayloadJson;
+			if (!Test->TestTrue(
+					*(Scope + TEXT(" payload serializes")),
+					Payload.IsValid()
+						&& Serialize(Payload, PayloadJson)))
+			{
+				return false;
+			}
+
+			FAttributeCollisionReadback Before;
+			if (!Test->TestTrue(
+					*(Scope + TEXT(" reads source static mesh")),
+					ReadAttributeCollisionStatic(
+						*StaticTarget,
+						Before)))
+			{
+				return false;
+			}
+			if (bPreserveExistingHardEdges
+				&& !Test->TestTrue(
+					*(Scope + TEXT(" mixed hard-edge seed survives static projection")),
+					HasCompleteMixedHardEdgeSeed(
+						Before.NormalObservation)))
+			{
+				return false;
+			}
+			AssetOwner.Package->SetDirtyFlag(false);
+
+			const TSharedRef<
+				FReloadableModelingReferenceResolver,
+				ESPMode::ThreadSafe> SourceResolver = MakeShared<
+					FReloadableModelingReferenceResolver,
+					ESPMode::ThreadSafe>(AssetOwner, false);
+			const TSharedRef<
+				FReloadableModelingReferenceResolver,
+				ESPMode::ThreadSafe> PersistedResolver = MakeShared<
+					FReloadableModelingReferenceResolver,
+					ESPMode::ThreadSafe>(AssetOwner, true);
+
+			FUeAgentSimpleAuthoringDurableServiceConfig DurableConfig;
+			DurableConfig.JournalRoot = AssetOwner.JournalRoot;
+			DurableConfig.PackageBackend = MakeShared<
+				FPackageAssetDurableBackend,
+				ESPMode::ThreadSafe>(AssetOwner.PackageRoot);
+			TSharedPtr<IUeAgentSimpleAuthoringAssetDurableService>
+				Durable;
+			FUeAgentSimpleAuthoringProductionError DurableError;
+			if (!Test->TestTrue(
+					*(Scope + TEXT(" real C8D service composes")),
+					FUeAgentSimpleAuthoringDurableServiceFactory::
+						TryCreate(
+							DurableConfig,
+							Durable,
+							DurableError))
+				|| !Durable.IsValid())
+			{
+				Test->AddError(
+					Scope + TEXT(":durable_invalid:")
+						+ DurableError.Code);
+				return false;
+			}
+
+			TSharedPtr<FUeAgentSimpleAuthoringApplication> Application;
+			FString ApplicationError;
+			if (!Test->TestTrue(
+					*(Scope + TEXT(" application composes")),
+					TryCreateTopologyApplication(
+						WorldOwner,
+						Registry,
+						SourceResolver,
+						PersistedResolver,
+						Durable.ToSharedRef(),
+						*Route,
+						Application,
+						ApplicationError)))
+			{
+				Test->AddError(
+					Scope + TEXT(":composition_failed:")
+						+ ApplicationError);
+				return false;
+			}
+
+			const FUeAgentOperationResult Result = Application->Submit(
+				FUeAgentOperationRequest(
+					Route->DescriptorIdentity,
+					TEXT("request:") + Scope,
+					TEXT("idempotency:") + Scope,
+					FUeAgentContractValue(PayloadJson)),
+				FUeAgentCallerContext(
+					TEXT("caller:") + Scope,
+					{TEXT("uai:modeling-geometry:write")},
+					TEXT("correlation:") + Scope),
+				MakeShared<FNeverCancelled>());
+			if (!Test->TestTrue(
+					*(Scope + TEXT(" completes after reload readback")),
+					IsComplete(Result)))
+			{
+				Test->AddError(Result.GetValue().GetJsonValue());
+				return false;
+			}
+
+			UStaticMesh* Reloaded = Cast<UStaticMesh>(
+				AssetOwner.FindTarget(TargetRef));
+			FAttributeCollisionReadback After;
+			Test->TestTrue(
+				*(Scope + TEXT(" reloads the asset owner")),
+				AssetOwner.WasReloaded());
+			Test->TestTrue(
+				*(Scope + TEXT(" collects the original asset")),
+				AssetOwner.WasOriginalObjectCollected());
+			Test->TestTrue(
+				*(Scope + TEXT(" publishes the owned package")),
+				IFileManager::Get().FileExists(
+					*AssetOwner.HeaderPath()));
+			if (Test->TestNotNull(
+					*(Scope + TEXT(" reloaded static mesh is found")),
+					Reloaded))
+			{
+				Test->TestTrue(
+					*(Scope + TEXT(" reloaded static mesh is readable")),
+					ReadAttributeCollisionStatic(*Reloaded, After));
+				if (Mode == TEXT("area_angle_weighted")
+					&& bPreserveExistingHardEdges)
+				{
+					Test->TestTrue(
+						*(Scope
+							+ TEXT(" preserves mixed hard-edge topology and recomputes directions")),
+						HasCompletePreservedHardEdgeObservation(
+							Before.NormalObservation,
+							After.NormalObservation));
+				}
+				else if (Mode == TEXT("area_angle_weighted"))
+				{
+					Test->TestTrue(
+						*(Scope
+							+ TEXT(" preserves weighted per-vertex normals")),
+						IsCompleteAreaAnglePerVertexNormalObservation(
+							After.NormalObservation));
+				}
+				else if (Mode == TEXT("angle_threshold")
+					&& AngleDegrees.IsSet())
+				{
+					Test->TestTrue(
+						*(Scope + TEXT(" preserves threshold split topology")),
+						IsCompleteAngleThresholdNormalObservation(
+							After.NormalObservation,
+							AngleDegrees.GetValue()));
+				}
+			}
+			Test->TestTrue(
+				*(Scope + TEXT(" uses persisted resolver")),
+				PersistedResolver->ResolveCount >= 1);
+			Test->TestEqual(
+				*(Scope + TEXT(" archives one verified journal")),
+				CountCompletedJournals(AssetOwner.JournalRoot),
+				1);
+			Test->TestEqual(
+				*(Scope + TEXT(" leaves no active transaction")),
+				CountActiveTransactions(AssetOwner.JournalRoot),
+				0);
+		}
+		Test->TestFalse(
+			*(Scope + TEXT(" removes all owned disk artifacts")),
+			IFileManager::Get().DirectoryExists(*OwnedRoot));
+		return !Test->HasAnyErrors();
+	}
+
+	bool RunDynamicNormalsOwnedWorldCase(
+		FAutomationTestBase* Test,
+		const FString& Mode,
+		const bool bPreserveExistingHardEdges,
+		const TOptional<double>& AngleDegrees,
+		const FString& Scope)
+	{
+		const TSharedPtr<FJsonObject> Fixture =
+			LoadTopologyFixture(Test);
+		const TSharedPtr<FJsonObject> NormalRow =
+			FindModelingOperationRow(
+				Fixture,
+				TEXT("recompute_normals"));
+		if (!Test->TestNotNull(
+				*(Scope + TEXT(" descriptor row exists")),
+				NormalRow.Get()))
+		{
+			return false;
+		}
+
+		TSharedPtr<const FUeAgentDescriptorRegistry> Registry;
+		FString RegistryError;
+		const FUeAgentSimpleAuthoringCommandRoute* Route = FindRoute(
+			NormalRow->GetStringField(TEXT("capability_id")));
+		if (!Test->TestTrue(
+				*(Scope + TEXT(" descriptors compose")),
+				TryCreateSimpleAuthoringDescriptorRegistry(
+					Registry,
+					RegistryError))
+			|| !Test->TestNotNull(
+				*(Scope + TEXT(" has one exact route")),
+				Route)
+			|| !Registry.IsValid())
+		{
+			return false;
+		}
+
+		const FString TargetRef = TEXT("uai://mesh/fixture-target");
+		const FString ActorLabel = TEXT("SA008_") + Scope + TEXT("_Target");
+		FString OwnedRoot;
+		{
+			FOwnedReloadableWorldPackage Owner(Scope, Scope);
+			OwnedRoot = Owner.Root;
+			if (!Test->TestTrue(
+					*(Scope + TEXT(" owned World is valid")),
+					Owner.IsValid()))
+			{
+				return false;
+			}
+			ADynamicMeshActor* InitialActor =
+				SpawnE4ModelingCubeActor(*Owner.World, ActorLabel);
+			if (!Test->TestNotNull(
+					*(Scope + TEXT(" dynamic actor exists")),
+					InitialActor))
+			{
+				return false;
+			}
+			if (bPreserveExistingHardEdges)
+			{
+				UDynamicMeshComponent* InitialComponent =
+					InitialActor->GetDynamicMeshComponent();
+				UDynamicMesh* InitialMesh = InitialComponent
+					? InitialComponent->GetDynamicMesh()
+					: nullptr;
+				if (!Test->TestNotNull(
+						*(Scope + TEXT(" dynamic mesh exists")),
+						InitialMesh))
+				{
+					return false;
+				}
+				SeedMixedHardEdgeNormals(*InitialMesh);
+			}
+
+			const TSharedPtr<FJsonObject> Payload =
+				BuildAttributeCollisionPayload(
+					NormalRow,
+					*InitialActor);
+			if (Payload.IsValid())
+			{
+				Payload->SetStringField(TEXT("mode"), Mode);
+				Payload->SetBoolField(
+					TEXT("preserve_existing_hard_edges"),
+					bPreserveExistingHardEdges);
+				if (AngleDegrees.IsSet())
+				{
+					Payload->SetNumberField(
+						TEXT("angle_degrees"),
+						AngleDegrees.GetValue());
+				}
+			}
+			FString PayloadJson;
+			if (!Test->TestTrue(
+					*(Scope + TEXT(" payload serializes")),
+					Payload.IsValid()
+						&& Serialize(Payload, PayloadJson)))
+			{
+				return false;
+			}
+
+			FAttributeCollisionReadback Before;
+			if (!Test->TestTrue(
+					*(Scope + TEXT(" reads source actor")),
+					ReadAttributeCollisionDynamic(
+						*InitialActor,
+						Before)))
+			{
+				return false;
+			}
+			if (bPreserveExistingHardEdges
+				&& !Test->TestTrue(
+					*(Scope + TEXT(" mixed hard-edge seed reads from source actor")),
+					HasCompleteMixedHardEdgeSeed(
+						Before.NormalObservation)))
+			{
+				return false;
+			}
+			Owner.Package->SetDirtyFlag(false);
+
+			const TSharedRef<
+				FOwnedReloadableWorldCatalog,
+				ESPMode::ThreadSafe> SourceCatalog = MakeShared<
+					FOwnedReloadableWorldCatalog,
+					ESPMode::ThreadSafe>(Owner, false);
+			const TSharedRef<
+				FOwnedReloadableWorldCatalog,
+				ESPMode::ThreadSafe> PersistedCatalog = MakeShared<
+					FOwnedReloadableWorldCatalog,
+					ESPMode::ThreadSafe>(Owner, true);
+			const TSharedRef<
+				FWorldModelingReferenceResolver,
+				ESPMode::ThreadSafe> SourceResolver = MakeShared<
+					FWorldModelingReferenceResolver,
+					ESPMode::ThreadSafe>(TargetRef, ActorLabel);
+			const TSharedRef<
+				FWorldModelingReferenceResolver,
+				ESPMode::ThreadSafe> PersistedResolver = MakeShared<
+					FWorldModelingReferenceResolver,
+					ESPMode::ThreadSafe>(TargetRef, ActorLabel);
+
+			FUeAgentSimpleAuthoringDurableServiceConfig DurableConfig;
+			DurableConfig.JournalRoot = Owner.JournalRoot;
+			DurableConfig.PackageBackend = MakeShared<
+				FPackageAssetDurableBackend,
+				ESPMode::ThreadSafe>(Owner.PackageRoot);
+			TSharedPtr<IUeAgentSimpleAuthoringAssetDurableService>
+				Durable;
+			FUeAgentSimpleAuthoringProductionError DurableError;
+			if (!Test->TestTrue(
+					*(Scope + TEXT(" real World C8D service composes")),
+					FUeAgentSimpleAuthoringDurableServiceFactory::
+						TryCreate(
+							DurableConfig,
+							Durable,
+							DurableError))
+				|| !Durable.IsValid())
+			{
+				Test->AddError(
+					Scope + TEXT(":durable_invalid:")
+						+ DurableError.Code);
+				return false;
+			}
+
+			const TSharedRef<
+				IUeAgentWorldSimpleEffectWorldCatalog,
+				ESPMode::ThreadSafe> SourceWorldCatalog = SourceCatalog;
+			const TSharedRef<
+				IUeAgentWorldSimpleEffectWorldCatalog,
+				ESPMode::ThreadSafe> PersistedWorldCatalog =
+					PersistedCatalog;
+			const TSharedRef<
+				IUeAgentModelingGeometryEffectReferenceResolver,
+				ESPMode::ThreadSafe> SourceReferenceResolver =
+					SourceResolver;
+			const TSharedRef<
+				IUeAgentModelingGeometryEffectReferenceResolver,
+				ESPMode::ThreadSafe> PersistedReferenceResolver =
+					PersistedResolver;
+			TSharedPtr<FUeAgentSimpleAuthoringApplication> Application;
+			FString ApplicationError;
+			if (!Test->TestTrue(
+					*(Scope + TEXT(" application composes")),
+					TryCreateModelingApplication(
+						Registry,
+						SourceWorldCatalog,
+						PersistedWorldCatalog,
+						SourceReferenceResolver,
+						PersistedReferenceResolver,
+						Durable.ToSharedRef(),
+						*Route,
+						Owner.WorldIdentity,
+						Owner.LevelIdentity,
+						Owner.ContextRevision,
+						Scope,
+						Application,
+						ApplicationError)))
+			{
+				Test->AddError(
+					Scope + TEXT(":composition_failed:")
+						+ ApplicationError);
+				return false;
+			}
+
+			const FUeAgentOperationResult Result = Application->Submit(
+				FUeAgentOperationRequest(
+					Route->DescriptorIdentity,
+					TEXT("request:") + Scope,
+					TEXT("idempotency:") + Scope,
+					FUeAgentContractValue(PayloadJson)),
+				FUeAgentCallerContext(
+					TEXT("caller:") + Scope,
+					{TEXT("uai:modeling-geometry:write")},
+					TEXT("correlation:") + Scope),
+				MakeShared<FNeverCancelled>());
+			if (!Test->TestTrue(
+					*(Scope + TEXT(" completes after World reload")),
+					IsComplete(Result)))
+			{
+				Test->AddError(Result.GetValue().GetJsonValue());
+				return false;
+			}
+
+			ADynamicMeshActor* ReloadedActor = Owner.World.IsValid()
+				? FindE4ModelingActor(*Owner.World, ActorLabel)
+				: nullptr;
+			FAttributeCollisionReadback After;
+			Test->TestTrue(
+				*(Scope + TEXT(" reloads the World owner")),
+				Owner.WasReloaded());
+			Test->TestTrue(
+				*(Scope + TEXT(" collects the original World")),
+				Owner.WasOriginalWorldCollected());
+			Test->TestTrue(
+				*(Scope + TEXT(" publishes the owned map")),
+				IFileManager::Get().FileExists(*Owner.HeaderPath()));
+			if (Test->TestNotNull(
+					*(Scope + TEXT(" reloaded actor is found")),
+					ReloadedActor))
+			{
+				Test->TestTrue(
+					*(Scope + TEXT(" reloaded actor is readable")),
+					ReadAttributeCollisionDynamic(
+						*ReloadedActor,
+						After));
+				if (Mode == TEXT("area_angle_weighted")
+					&& bPreserveExistingHardEdges)
+				{
+					Test->TestTrue(
+						*(Scope
+							+ TEXT(" preserves mixed hard-edge topology and recomputes directions")),
+						HasCompletePreservedHardEdgeObservation(
+							Before.NormalObservation,
+							After.NormalObservation));
+				}
+				else if (Mode == TEXT("area_angle_weighted"))
+				{
+					Test->TestTrue(
+						*(Scope
+							+ TEXT(" preserves weighted per-vertex normals")),
+						IsCompleteAreaAnglePerVertexNormalObservation(
+							After.NormalObservation));
+				}
+				else if (Mode == TEXT("angle_threshold")
+					&& AngleDegrees.IsSet())
+				{
+					Test->TestTrue(
+						*(Scope + TEXT(" preserves threshold split topology")),
+						IsCompleteAngleThresholdNormalObservation(
+							After.NormalObservation,
+							AngleDegrees.GetValue()));
+				}
+			}
+			Test->TestTrue(
+				*(Scope + TEXT(" uses persisted resolver")),
+				PersistedResolver->ResolveCount >= 1);
+			Test->TestEqual(
+				*(Scope + TEXT(" reloads exactly once")),
+				PersistedCatalog->EnumerateCount,
+				1);
+			Test->TestEqual(
+				*(Scope + TEXT(" archives one verified journal")),
+				CountCompletedJournals(Owner.JournalRoot),
+				1);
+			Test->TestEqual(
+				*(Scope + TEXT(" leaves no active transaction")),
+				CountActiveTransactions(Owner.JournalRoot),
+				0);
+		}
+		Test->TestFalse(
+			*(Scope + TEXT(" removes all owned disk artifacts")),
+			IFileManager::Get().DirectoryExists(*OwnedRoot));
+		return !Test->HasAnyErrors();
 	}
 }
 
@@ -1565,4 +2331,578 @@ bool FUeAgentSimpleAuthoringModelingOwnedPackageTest::RunTest(
 		TEXT("Modeling E4 removes all owned disk artifacts"),
 		IFileManager::Get().DirectoryExists(*OwnedRoot));
 	return !HasAnyErrors();
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(
+	FUeAgentSimpleAuthoringModelingStaticMeshFaceNormalsOwnedPackageTest,
+	"UeAgentInterface.Composition.SimpleAuthoring.E4."
+		"ModelingStaticMeshFaceNormalsOwnedPackage",
+	EAutomationTestFlags::EditorContext
+		| EAutomationTestFlags::EngineFilter)
+
+bool
+FUeAgentSimpleAuthoringModelingStaticMeshFaceNormalsOwnedPackageTest::
+	RunTest(const FString& Parameters)
+{
+	const TSharedPtr<FJsonObject> Fixture =
+		LoadTopologyFixture(this);
+	if (!Fixture.IsValid())
+	{
+		return false;
+	}
+
+	const TSharedPtr<FJsonObject> NormalRow =
+		FindModelingOperationRow(Fixture, TEXT("recompute_normals"));
+	if (!TestNotNull(
+			TEXT("face normals E4 descriptor row exists"),
+			NormalRow.Get()))
+	{
+		return false;
+	}
+
+	TSharedPtr<const FUeAgentDescriptorRegistry> Registry;
+	FString RegistryError;
+	const FString Capability =
+		NormalRow->GetStringField(TEXT("capability_id"));
+	const FUeAgentSimpleAuthoringCommandRoute* Route =
+		FindRoute(Capability);
+	if (!TestTrue(
+			TEXT("Simple Authoring descriptors compose for face normals E4"),
+			TryCreateSimpleAuthoringDescriptorRegistry(
+				Registry,
+				RegistryError))
+		|| !TestNotNull(
+			TEXT("face normals E4 has one exact route"),
+			Route)
+		|| !Registry.IsValid())
+	{
+		return false;
+	}
+
+	const FString TargetRef = TEXT("uai://mesh/fixture-target");
+	FString OwnedRoot;
+	{
+		FOwnedModelingWorld WorldOwner;
+		FOwnedReloadableAssetPackage AssetOwner(
+			TEXT("ModelingNormalsE4"));
+		OwnedRoot = AssetOwner.Root;
+		if (!TestTrue(
+				TEXT("owned durable face normals asset package is valid"),
+				WorldOwner.IsValid() && AssetOwner.IsValid()))
+		{
+			return false;
+		}
+
+		ADynamicMeshActor* SourceActor = WorldOwner.SpawnCubeActor(
+			TEXT("SA008_Modeling_Normals_E4_Source"),
+			FVector::ZeroVector,
+			FRotator::ZeroRotator,
+			FVector::OneVector);
+		UDynamicMeshComponent* SourceComponent = SourceActor
+			? SourceActor->GetDynamicMeshComponent()
+			: nullptr;
+		UDynamicMesh* SourceMesh = SourceComponent
+			? SourceComponent->GetDynamicMesh()
+			: nullptr;
+		UStaticMesh* StaticTarget = SourceMesh
+			? CreateTopologyStaticCarrier(
+				*AssetOwner.Package,
+				*SourceMesh)
+			: nullptr;
+		if (!TestNotNull(
+				TEXT("owned durable face normals static mesh exists"),
+				StaticTarget))
+		{
+			return false;
+		}
+		AssetOwner.BindTarget(TargetRef, StaticTarget->GetFName());
+
+		const TSharedPtr<FJsonObject> Payload =
+			BuildAttributeCollisionPayload(
+				NormalRow,
+				*StaticTarget);
+		FString PayloadJson;
+		if (!TestTrue(
+				TEXT("face normals E4 payload serializes"),
+				Payload.IsValid()
+					&& Serialize(Payload, PayloadJson)))
+		{
+			return false;
+		}
+
+		FAttributeCollisionReadback Before;
+		if (!TestTrue(
+				TEXT("face normals E4 reads source static mesh"),
+				ReadAttributeCollisionStatic(*StaticTarget, Before)))
+		{
+			return false;
+		}
+		TestFalse(
+			TEXT("source static mesh does not already satisfy face normals"),
+			IsCompleteFaceNormalObservation(
+				Before.NormalObservation));
+		AssetOwner.Package->SetDirtyFlag(false);
+
+		const TSharedRef<
+			FReloadableModelingReferenceResolver,
+			ESPMode::ThreadSafe> SourceResolver = MakeShared<
+				FReloadableModelingReferenceResolver,
+				ESPMode::ThreadSafe>(AssetOwner, false);
+		const TSharedRef<
+			FReloadableModelingReferenceResolver,
+			ESPMode::ThreadSafe> PersistedResolver = MakeShared<
+				FReloadableModelingReferenceResolver,
+				ESPMode::ThreadSafe>(AssetOwner, true);
+
+		FUeAgentSimpleAuthoringDurableServiceConfig DurableConfig;
+		DurableConfig.JournalRoot = AssetOwner.JournalRoot;
+		DurableConfig.PackageBackend = MakeShared<
+			FPackageAssetDurableBackend,
+			ESPMode::ThreadSafe>(AssetOwner.PackageRoot);
+		TSharedPtr<IUeAgentSimpleAuthoringAssetDurableService> Durable;
+		FUeAgentSimpleAuthoringProductionError DurableError;
+		if (!TestTrue(
+				TEXT("real face normals package C8D service composes"),
+				FUeAgentSimpleAuthoringDurableServiceFactory::TryCreate(
+					DurableConfig,
+					Durable,
+					DurableError))
+			|| !Durable.IsValid())
+		{
+			AddError(
+				TEXT("sa008_modeling_normals_e4_durable_invalid:")
+					+ DurableError.Code);
+			return false;
+		}
+
+		TSharedPtr<FUeAgentSimpleAuthoringApplication> Application;
+		FString ApplicationError;
+		if (!TestTrue(
+				TEXT("face normals E4 production application composes"),
+				TryCreateTopologyApplication(
+					WorldOwner,
+					Registry,
+					SourceResolver,
+					PersistedResolver,
+					Durable.ToSharedRef(),
+					*Route,
+					Application,
+					ApplicationError)))
+		{
+			AddError(
+				TEXT("sa008_modeling_normals_e4_composition_failed:")
+					+ ApplicationError);
+			return false;
+		}
+
+		const FUeAgentOperationResult Result = Application->Submit(
+			FUeAgentOperationRequest(
+				Route->DescriptorIdentity,
+				TEXT("request:sa008-modeling-normals-e4"),
+				TEXT("idempotency:sa008-modeling-normals-e4"),
+				FUeAgentContractValue(PayloadJson)),
+			FUeAgentCallerContext(
+				TEXT("caller:sa008-modeling-normals-e4"),
+				{TEXT("uai:modeling-geometry:write")},
+				TEXT("correlation:sa008-modeling-normals-e4")),
+			MakeShared<FNeverCancelled>());
+		if (!TestTrue(
+				TEXT("face normals E4 completes after reload readback"),
+				IsComplete(Result)))
+		{
+			AddError(Result.GetValue().GetJsonValue());
+			return false;
+		}
+
+		UStaticMesh* Reloaded = Cast<UStaticMesh>(
+			AssetOwner.FindTarget(TargetRef));
+		FAttributeCollisionReadback After;
+		TestTrue(
+			TEXT("face normals E4 uses a reloaded asset owner"),
+			AssetOwner.WasReloaded());
+		TestTrue(
+			TEXT("face normals E4 collects the original static mesh"),
+			AssetOwner.WasOriginalObjectCollected());
+		TestTrue(
+			TEXT("face normals E4 publishes the owned asset package"),
+			IFileManager::Get().FileExists(*AssetOwner.HeaderPath()));
+		if (TestNotNull(
+				TEXT("reloaded face normals static mesh is found"),
+				Reloaded))
+		{
+			TestTrue(
+				TEXT("reloaded face normals static mesh is readable"),
+				ReadAttributeCollisionStatic(*Reloaded, After));
+			VerifyAttributeCollisionResult(
+				this,
+				NormalRow->GetStringField(TEXT("descriptor_id")),
+				TEXT("recompute_normals"),
+				Payload,
+				Before,
+				After);
+		}
+		TestTrue(
+			TEXT("face normals E4 C9 uses persisted resolver"),
+			PersistedResolver->ResolveCount >= 1);
+		TestEqual(
+			TEXT("face normals E4 archives one verified journal"),
+			CountCompletedJournals(AssetOwner.JournalRoot),
+			1);
+		TestEqual(
+			TEXT("face normals E4 leaves no active transaction"),
+			CountActiveTransactions(AssetOwner.JournalRoot),
+			0);
+	}
+	TestFalse(
+		TEXT("face normals E4 removes all owned disk artifacts"),
+		IFileManager::Get().DirectoryExists(*OwnedRoot));
+	return !HasAnyErrors();
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(
+	FUeAgentSimpleAuthoringModelingDynamicFaceNormalsOwnedWorldTest,
+	"UeAgentInterface.Composition.SimpleAuthoring.E4."
+		"ModelingDynamicFaceNormalsOwnedWorld",
+	EAutomationTestFlags::EditorContext
+		| EAutomationTestFlags::EngineFilter)
+
+bool
+FUeAgentSimpleAuthoringModelingDynamicFaceNormalsOwnedWorldTest::
+	RunTest(const FString& Parameters)
+{
+	const TSharedPtr<FJsonObject> Fixture =
+		LoadTopologyFixture(this);
+	const TSharedPtr<FJsonObject> NormalRow =
+		FindModelingOperationRow(Fixture, TEXT("recompute_normals"));
+	if (!TestNotNull(
+			TEXT("dynamic face normals E4 descriptor row exists"),
+			NormalRow.Get()))
+	{
+		return false;
+	}
+
+	TSharedPtr<const FUeAgentDescriptorRegistry> Registry;
+	FString RegistryError;
+	const FUeAgentSimpleAuthoringCommandRoute* Route =
+		FindRoute(NormalRow->GetStringField(TEXT("capability_id")));
+	if (!TestTrue(
+			TEXT("dynamic face normals E4 descriptors compose"),
+			TryCreateSimpleAuthoringDescriptorRegistry(
+				Registry,
+				RegistryError))
+		|| !TestNotNull(
+			TEXT("dynamic face normals E4 has one exact route"),
+			Route)
+		|| !Registry.IsValid())
+	{
+		return false;
+	}
+
+	const FString TargetRef = TEXT("uai://mesh/fixture-target");
+	const FString ActorLabel =
+		TEXT("SA008_Modeling_Dynamic_Normals_E4_Target");
+	FString OwnedRoot;
+	{
+		FOwnedReloadableWorldPackage Owner(
+			TEXT("ModelingDynamicNormalsE4"),
+			TEXT("ModelingDynamicNormalsE4"));
+		OwnedRoot = Owner.Root;
+		if (!TestTrue(
+				TEXT("owned dynamic face normals world is valid"),
+				Owner.IsValid()))
+		{
+			return false;
+		}
+		ADynamicMeshActor* InitialActor =
+			SpawnE4ModelingCubeActor(*Owner.World, ActorLabel);
+		if (!TestNotNull(
+				TEXT("owned dynamic face normals actor exists"),
+				InitialActor))
+		{
+			return false;
+		}
+
+		const TSharedPtr<FJsonObject> Payload =
+			BuildAttributeCollisionPayload(NormalRow, *InitialActor);
+		FString PayloadJson;
+		if (!TestTrue(
+				TEXT("dynamic face normals E4 payload serializes"),
+				Payload.IsValid()
+					&& Serialize(Payload, PayloadJson)))
+		{
+			return false;
+		}
+		FAttributeCollisionReadback Before;
+		if (!TestTrue(
+				TEXT("dynamic face normals E4 reads source actor"),
+				ReadAttributeCollisionDynamic(*InitialActor, Before)))
+		{
+			return false;
+		}
+		TestFalse(
+			TEXT("source dynamic actor does not already satisfy face normals"),
+			IsCompleteFaceNormalObservation(
+				Before.NormalObservation));
+		Owner.Package->SetDirtyFlag(false);
+
+		const TSharedRef<
+			FOwnedReloadableWorldCatalog,
+			ESPMode::ThreadSafe> SourceCatalog = MakeShared<
+				FOwnedReloadableWorldCatalog,
+				ESPMode::ThreadSafe>(Owner, false);
+		const TSharedRef<
+			FOwnedReloadableWorldCatalog,
+			ESPMode::ThreadSafe> PersistedCatalog = MakeShared<
+				FOwnedReloadableWorldCatalog,
+				ESPMode::ThreadSafe>(Owner, true);
+		const TSharedRef<
+			FWorldModelingReferenceResolver,
+			ESPMode::ThreadSafe> SourceResolver = MakeShared<
+				FWorldModelingReferenceResolver,
+				ESPMode::ThreadSafe>(TargetRef, ActorLabel);
+		const TSharedRef<
+			FWorldModelingReferenceResolver,
+			ESPMode::ThreadSafe> PersistedResolver = MakeShared<
+				FWorldModelingReferenceResolver,
+				ESPMode::ThreadSafe>(TargetRef, ActorLabel);
+
+		FUeAgentSimpleAuthoringDurableServiceConfig DurableConfig;
+		DurableConfig.JournalRoot = Owner.JournalRoot;
+		DurableConfig.PackageBackend = MakeShared<
+			FPackageAssetDurableBackend,
+			ESPMode::ThreadSafe>(Owner.PackageRoot);
+		TSharedPtr<IUeAgentSimpleAuthoringAssetDurableService> Durable;
+		FUeAgentSimpleAuthoringProductionError DurableError;
+		if (!TestTrue(
+				TEXT("real dynamic normals World C8D service composes"),
+				FUeAgentSimpleAuthoringDurableServiceFactory::TryCreate(
+					DurableConfig,
+					Durable,
+					DurableError))
+			|| !Durable.IsValid())
+		{
+			AddError(
+				TEXT("sa008_modeling_dynamic_normals_e4_durable_invalid:")
+					+ DurableError.Code);
+			return false;
+		}
+
+		const TSharedRef<
+			IUeAgentWorldSimpleEffectWorldCatalog,
+			ESPMode::ThreadSafe> SourceWorldCatalog = SourceCatalog;
+		const TSharedRef<
+			IUeAgentWorldSimpleEffectWorldCatalog,
+			ESPMode::ThreadSafe> PersistedWorldCatalog =
+				PersistedCatalog;
+		const TSharedRef<
+			IUeAgentModelingGeometryEffectReferenceResolver,
+			ESPMode::ThreadSafe> SourceReferenceResolver =
+				SourceResolver;
+		const TSharedRef<
+			IUeAgentModelingGeometryEffectReferenceResolver,
+			ESPMode::ThreadSafe> PersistedReferenceResolver =
+				PersistedResolver;
+		TSharedPtr<FUeAgentSimpleAuthoringApplication> Application;
+		FString ApplicationError;
+		if (!TestTrue(
+				TEXT("dynamic face normals E4 application composes"),
+				TryCreateModelingApplication(
+					Registry,
+					SourceWorldCatalog,
+					PersistedWorldCatalog,
+					SourceReferenceResolver,
+					PersistedReferenceResolver,
+					Durable.ToSharedRef(),
+					*Route,
+					Owner.WorldIdentity,
+					Owner.LevelIdentity,
+					Owner.ContextRevision,
+					TEXT("sa008-modeling-dynamic-normals-e4"),
+					Application,
+					ApplicationError)))
+		{
+			AddError(
+				TEXT("sa008_modeling_dynamic_normals_e4_composition_failed:")
+					+ ApplicationError);
+			return false;
+		}
+
+		const FUeAgentOperationResult Result = Application->Submit(
+			FUeAgentOperationRequest(
+				Route->DescriptorIdentity,
+				TEXT("request:sa008-modeling-dynamic-normals-e4"),
+				TEXT("idempotency:sa008-modeling-dynamic-normals-e4"),
+				FUeAgentContractValue(PayloadJson)),
+			FUeAgentCallerContext(
+				TEXT("caller:sa008-modeling-dynamic-normals-e4"),
+				{TEXT("uai:modeling-geometry:write")},
+				TEXT("correlation:sa008-modeling-dynamic-normals-e4")),
+			MakeShared<FNeverCancelled>());
+		if (!TestTrue(
+				TEXT("dynamic face normals E4 completes after World reload"),
+				IsComplete(Result)))
+		{
+			AddError(Result.GetValue().GetJsonValue());
+			return false;
+		}
+
+		ADynamicMeshActor* ReloadedActor = Owner.World.IsValid()
+			? FindE4ModelingActor(*Owner.World, ActorLabel)
+			: nullptr;
+		FAttributeCollisionReadback After;
+		TestTrue(
+			TEXT("dynamic face normals E4 reloads the World owner"),
+			Owner.WasReloaded());
+		TestTrue(
+			TEXT("dynamic face normals E4 collects the original World"),
+			Owner.WasOriginalWorldCollected());
+		TestTrue(
+			TEXT("dynamic face normals E4 publishes the owned map"),
+			IFileManager::Get().FileExists(*Owner.HeaderPath()));
+		if (TestNotNull(
+				TEXT("reloaded dynamic face normals actor is found"),
+				ReloadedActor))
+		{
+			TestTrue(
+				TEXT("reloaded dynamic face normals actor is readable"),
+				ReadAttributeCollisionDynamic(*ReloadedActor, After));
+			TestTrue(
+				TEXT("reloaded dynamic actor preserves every face normal"),
+				IsCompleteFaceNormalObservation(
+					After.NormalObservation));
+		}
+		TestTrue(
+			TEXT("dynamic face normals E4 uses persisted resolver"),
+			PersistedResolver->ResolveCount >= 1);
+		TestEqual(
+			TEXT("dynamic face normals E4 reloads exactly once"),
+			PersistedCatalog->EnumerateCount,
+			1);
+		TestEqual(
+			TEXT("dynamic face normals E4 archives one verified journal"),
+			CountCompletedJournals(Owner.JournalRoot),
+			1);
+		TestEqual(
+			TEXT("dynamic face normals E4 leaves no active transaction"),
+			CountActiveTransactions(Owner.JournalRoot),
+			0);
+	}
+	TestFalse(
+		TEXT("dynamic face normals E4 removes all owned disk artifacts"),
+		IFileManager::Get().DirectoryExists(*OwnedRoot));
+	return !HasAnyErrors();
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(
+	FUeAgentSimpleAuthoringModelingStaticAreaAngleNormalsOwnedPackageTest,
+	"UeAgentInterface.Composition.SimpleAuthoring.E4."
+		"ModelingStaticAreaAngleNormalsOwnedPackage",
+	EAutomationTestFlags::EditorContext
+		| EAutomationTestFlags::EngineFilter)
+
+bool
+FUeAgentSimpleAuthoringModelingStaticAreaAngleNormalsOwnedPackageTest::
+	RunTest(const FString& Parameters)
+{
+	return RunStaticNormalsOwnedPackageCase(
+		this,
+		TEXT("area_angle_weighted"),
+		false,
+		TOptional<double>(),
+		TEXT("ModelingStaticAreaAngleE4"));
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(
+	FUeAgentSimpleAuthoringModelingDynamicAreaAngleNormalsOwnedWorldTest,
+	"UeAgentInterface.Composition.SimpleAuthoring.E4."
+		"ModelingDynamicAreaAngleNormalsOwnedWorld",
+	EAutomationTestFlags::EditorContext
+		| EAutomationTestFlags::EngineFilter)
+
+bool
+FUeAgentSimpleAuthoringModelingDynamicAreaAngleNormalsOwnedWorldTest::
+	RunTest(const FString& Parameters)
+{
+	return RunDynamicNormalsOwnedWorldCase(
+		this,
+		TEXT("area_angle_weighted"),
+		false,
+		TOptional<double>(),
+		TEXT("ModelingDynamicAreaAngleE4"));
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(
+	FUeAgentSimpleAuthoringModelingStaticPreserveHardEdgesNormalsOwnedPackageTest,
+	"UeAgentInterface.Composition.SimpleAuthoring.E4."
+		"ModelingStaticPreserveHardEdgesNormalsOwnedPackage",
+	EAutomationTestFlags::EditorContext
+		| EAutomationTestFlags::EngineFilter)
+
+bool
+FUeAgentSimpleAuthoringModelingStaticPreserveHardEdgesNormalsOwnedPackageTest::
+	RunTest(const FString& Parameters)
+{
+	return RunStaticNormalsOwnedPackageCase(
+		this,
+		TEXT("area_angle_weighted"),
+		true,
+		TOptional<double>(),
+		TEXT("ModelingStaticPreserveHardEdgesE4"));
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(
+	FUeAgentSimpleAuthoringModelingDynamicPreserveHardEdgesNormalsOwnedWorldTest,
+	"UeAgentInterface.Composition.SimpleAuthoring.E4."
+		"ModelingDynamicPreserveHardEdgesNormalsOwnedWorld",
+	EAutomationTestFlags::EditorContext
+		| EAutomationTestFlags::EngineFilter)
+
+bool
+FUeAgentSimpleAuthoringModelingDynamicPreserveHardEdgesNormalsOwnedWorldTest::
+	RunTest(const FString& Parameters)
+{
+	return RunDynamicNormalsOwnedWorldCase(
+		this,
+		TEXT("area_angle_weighted"),
+		true,
+		TOptional<double>(),
+		TEXT("ModelingDynamicPreserveHardEdgesE4"));
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(
+	FUeAgentSimpleAuthoringModelingStaticAngleThresholdNormalsOwnedPackageTest,
+	"UeAgentInterface.Composition.SimpleAuthoring.E4."
+		"ModelingStaticAngleThresholdNormalsOwnedPackage",
+	EAutomationTestFlags::EditorContext
+		| EAutomationTestFlags::EngineFilter)
+
+bool
+FUeAgentSimpleAuthoringModelingStaticAngleThresholdNormalsOwnedPackageTest::
+	RunTest(const FString& Parameters)
+{
+	return RunStaticNormalsOwnedPackageCase(
+		this,
+		TEXT("angle_threshold"),
+		false,
+		TOptional<double>(30.0),
+		TEXT("ModelingStaticAngleThresholdE4"));
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(
+	FUeAgentSimpleAuthoringModelingDynamicAngleThresholdNormalsOwnedWorldTest,
+	"UeAgentInterface.Composition.SimpleAuthoring.E4."
+		"ModelingDynamicAngleThresholdNormalsOwnedWorld",
+	EAutomationTestFlags::EditorContext
+		| EAutomationTestFlags::EngineFilter)
+
+bool
+FUeAgentSimpleAuthoringModelingDynamicAngleThresholdNormalsOwnedWorldTest::
+	RunTest(const FString& Parameters)
+{
+	return RunDynamicNormalsOwnedWorldCase(
+		this,
+		TEXT("angle_threshold"),
+		false,
+		TOptional<double>(30.0),
+		TEXT("ModelingDynamicAngleThresholdE4"));
 }

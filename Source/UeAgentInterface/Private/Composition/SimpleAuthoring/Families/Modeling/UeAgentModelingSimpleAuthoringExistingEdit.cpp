@@ -3,13 +3,16 @@
 #include "Components/DynamicMeshComponent.h"
 #include "Core/StateSemantic/UeAgentStateRevisionJson.h"
 #include "DomainAdapters/ModelingGeometryEffect/UeAgentModelingGeometryEffectCapabilities.h"
+#include "DomainAdapters/ModelingGeometryEffect/UeAgentModelingGeometryEffectBoundarySemantics.h"
 #include "DomainAdapters/ModelingGeometryEffect/UeAgentModelingGeometryEffectCarrierRevision.h"
+#include "DomainAdapters/ModelingGeometryEffect/UeAgentModelingGeometryEffectNormalObservation.h"
 #include "DynamicMesh/DynamicMesh3.h"
 #include "DynamicMesh/DynamicMeshAttributeSet.h"
 #include "DynamicMeshActor.h"
 #include "Engine/StaticMesh.h"
 #include "Materials/MaterialInterface.h"
 #include "MeshDescriptionToDynamicMesh.h"
+#include "Misc/SecureHash.h"
 #include "PhysicsEngine/BodySetup.h"
 #include "Selections/MeshConnectedComponents.h"
 #include "UDynamicMesh.h"
@@ -25,8 +28,14 @@ namespace UE::UAI::Composition::SimpleAuthoring::Modeling::ExistingEdit
 
 		constexpr const TCHAR* BaselineField =
 			TEXT("__uai_modeling_existing_edit_baseline_v1");
+		constexpr const TCHAR* DurablePackageNameField =
+			TEXT("__uai_modeling_durable_package_name_v1");
 		constexpr const TCHAR* ExpectedMaterialPathField =
 			TEXT("__uai_expected_material_path");
+		constexpr const TCHAR* NormalSplitTopologyField =
+			TEXT("normal_split_topology");
+		constexpr const TCHAR* NormalSplitTopologySchema =
+			TEXT("uai.modeling.normal_split_topology.v1");
 
 		void SetIntegerArray(
 			const TSharedPtr<FJsonObject>& Object,
@@ -88,6 +97,31 @@ namespace UE::UAI::Composition::SimpleAuthoring::Modeling::ExistingEdit
 			return true;
 		}
 
+		FString BuildNormalSplitTopologyFingerprint(
+			const TArray<FString>& SplitEndpointKeys)
+		{
+			FSHA1 Sha1;
+			for (const FString& Key : SplitEndpointKeys)
+			{
+				const FTCHARToUTF8 Utf8(*Key);
+				const uint32 ByteCount = static_cast<uint32>(
+					Utf8.Length());
+				Sha1.Update(
+					reinterpret_cast<const uint8*>(&ByteCount),
+					sizeof(ByteCount));
+				if (ByteCount > 0)
+				{
+					Sha1.Update(
+						reinterpret_cast<const uint8*>(Utf8.Get()),
+						ByteCount);
+				}
+			}
+			Sha1.Final();
+			uint8 Digest[FSHA1::DigestSize];
+			Sha1.GetHash(Digest);
+			return BytesToHex(Digest, UE_ARRAY_COUNT(Digest));
+		}
+
 		bool ReadMeshState(
 			const FDynamicMesh3& Mesh,
 			FCarrierState& OutState)
@@ -95,6 +129,19 @@ namespace UE::UAI::Composition::SimpleAuthoring::Modeling::ExistingEdit
 			OutState.VertexCount = Mesh.VertexCount();
 			OutState.EdgeCount = Mesh.EdgeCount();
 			OutState.TriangleCount = Mesh.TriangleCount();
+			const FBoundarySemanticObservation Boundary =
+				ObserveBoundarySemantics(Mesh);
+			OutState.BoundaryVertexCount = Boundary.VertexCount;
+			OutState.BoundaryGeometryFingerprint = Boundary.Fingerprint;
+			OutState.NormalObservation = ObserveNormalSemantics(Mesh);
+			OutState.NormalSplitEndpointCount =
+				OutState.NormalObservation.
+					SplitInteriorEdgeEndpointKeys.Num();
+			OutState.NormalSplitTopologyFingerprint =
+				BuildNormalSplitTopologyFingerprint(
+					OutState.NormalObservation.
+						SplitInteriorEdgeEndpointKeys);
+			OutState.bHasNormalSplitTopologyEvidence = true;
 			for (const int32 VertexId : Mesh.VertexIndicesItr())
 			{
 				OutState.VertexIds.Add(VertexId);
@@ -259,6 +306,13 @@ namespace UE::UAI::Composition::SimpleAuthoring::Modeling::ExistingEdit
 			Baseline->SetStringField(
 				TEXT("carrier_kind"),
 				State.CarrierKind);
+			if (State.ActorGuid.IsValid())
+			{
+				Baseline->SetStringField(
+					TEXT("actor_guid"),
+					State.ActorGuid.ToString(
+						EGuidFormats::DigitsWithHyphensLower));
+			}
 			Baseline->SetObjectField(
 				TEXT("target_revision"),
 				StateSemantic::FUeAgentStateRevisionJson::ToJson(
@@ -278,6 +332,12 @@ namespace UE::UAI::Composition::SimpleAuthoring::Modeling::ExistingEdit
 			Baseline->SetNumberField(
 				TEXT("boundary_edge_count"),
 				State.BoundaryEdgeCount);
+			Baseline->SetNumberField(
+				TEXT("boundary_vertex_count"),
+				State.BoundaryVertexCount);
+			Baseline->SetStringField(
+				TEXT("boundary_geometry_fingerprint"),
+				State.BoundaryGeometryFingerprint);
 			Baseline->SetNumberField(
 				TEXT("vertex_checksum"),
 				static_cast<double>(State.VertexChecksum));
@@ -341,7 +401,89 @@ namespace UE::UAI::Composition::SimpleAuthoring::Modeling::ExistingEdit
 					MakeShared<FJsonValueNumber>(CollisionMax.Y),
 					MakeShared<FJsonValueNumber>(CollisionMax.Z),
 				});
+			if (State.bHasNormalSplitTopologyEvidence)
+			{
+				const FNormalSemanticObservation& Observation =
+					State.NormalObservation;
+				const TSharedPtr<FJsonObject> Topology =
+					MakeShared<FJsonObject>();
+				Topology->SetStringField(
+					TEXT("schema"),
+					NormalSplitTopologySchema);
+				Topology->SetNumberField(
+					TEXT("interior_edge_count"),
+					Observation.InteriorEdgeCount);
+				Topology->SetNumberField(
+					TEXT("invalid_interior_edge_count"),
+					Observation.InvalidInteriorEdgeCount);
+				Topology->SetNumberField(
+					TEXT("partially_split_interior_edge_count"),
+					Observation.PartiallySplitInteriorEdgeCount);
+				Topology->SetNumberField(
+					TEXT("split_endpoint_count"),
+					State.NormalSplitEndpointCount);
+				Topology->SetStringField(
+					TEXT("split_topology_sha1"),
+					State.NormalSplitTopologyFingerprint);
+				Baseline->SetObjectField(
+					NormalSplitTopologyField,
+					Topology);
+			}
 			return Baseline;
+		}
+
+		bool TryReadNormalSplitTopology(
+			const TSharedPtr<FJsonObject>& Baseline,
+			FCarrierState& OutState)
+		{
+			const TSharedPtr<FJsonObject>* Topology = nullptr;
+			if (!Baseline.IsValid())
+			{
+				return false;
+			}
+			if (!Baseline->HasField(NormalSplitTopologyField))
+			{
+				return true;
+			}
+			if (!Baseline->TryGetObjectField(
+					NormalSplitTopologyField,
+					Topology))
+			{
+				return false;
+			}
+			FString Schema;
+			if (!Topology
+				|| !Topology->IsValid()
+				|| !(*Topology)->TryGetStringField(
+					TEXT("schema"),
+					Schema)
+				|| Schema != NormalSplitTopologySchema
+				|| !TryReadInteger(
+					*Topology,
+					TEXT("interior_edge_count"),
+					OutState.NormalObservation.InteriorEdgeCount)
+				|| !TryReadInteger(
+					*Topology,
+					TEXT("invalid_interior_edge_count"),
+					OutState.NormalObservation.InvalidInteriorEdgeCount)
+				|| !TryReadInteger(
+					*Topology,
+					TEXT("partially_split_interior_edge_count"),
+					OutState.NormalObservation.
+						PartiallySplitInteriorEdgeCount)
+				|| !TryReadInteger(
+					*Topology,
+					TEXT("split_endpoint_count"),
+					OutState.NormalSplitEndpointCount)
+				|| !(*Topology)->TryGetStringField(
+					TEXT("split_topology_sha1"),
+					OutState.NormalSplitTopologyFingerprint)
+				|| OutState.NormalSplitTopologyFingerprint.IsEmpty())
+			{
+				return false;
+			}
+			OutState.bHasNormalSplitTopologyEvidence = true;
+			return true;
 		}
 
 		bool StateChanged(
@@ -375,6 +517,46 @@ namespace UE::UAI::Composition::SimpleAuthoring::Modeling::ExistingEdit
 				NumberOr(Payload, Field, DefaultValue));
 		}
 
+		double BoxSupport(const FBox& Box, const FVector3d& Direction)
+		{
+			const FVector Center = Box.GetCenter();
+			const FVector Extent = Box.GetExtent();
+			return FVector3d(Center).Dot(Direction)
+				+ FVector3d(Extent).Dot(Direction.GetAbs());
+		}
+
+		bool FixedDirectionBoundsAdvance(
+			const TSharedPtr<FJsonObject>& Payload,
+			const FCarrierState& Before,
+			const FCarrierState& After,
+			const double Distance)
+		{
+			const TSharedPtr<FJsonObject>* DirectionObject = nullptr;
+			TArray<double> Vector;
+			if (!Payload->TryGetObjectField(
+					TEXT("direction"),
+					DirectionObject)
+				|| !DirectionObject
+				|| !DirectionObject->IsValid()
+				|| !TryReadNumberArray(
+					*DirectionObject,
+					TEXT("vector"),
+					3,
+					Vector))
+			{
+				return false;
+			}
+			FVector3d Displacement(
+				Vector[0] * Distance,
+				Vector[1] * Distance,
+				Vector[2] * Distance);
+			const double Length = Displacement.Normalize();
+			return Length > UE_DOUBLE_SMALL_NUMBER
+				&& BoxSupport(After.Bounds, Displacement)
+					>= BoxSupport(Before.Bounds, Displacement)
+						+ Length - 5.0;
+		}
+
 		bool CollisionBoundsMatchMesh(
 			const FCarrierState& State)
 		{
@@ -404,6 +586,28 @@ namespace UE::UAI::Composition::SimpleAuthoring::Modeling::ExistingEdit
 				&& State.UvMins[Channel].Y >= -0.001f
 				&& State.UvMaxs[Channel].X <= 1.001f
 				&& State.UvMaxs[Channel].Y <= 1.001f;
+		}
+
+		bool PreservesNormalSplitTopology(
+			const FCarrierState& Before,
+			const FCarrierState& After)
+		{
+			const FNormalSemanticObservation& BeforeObservation =
+				Before.NormalObservation;
+			const FNormalSemanticObservation& AfterObservation =
+				After.NormalObservation;
+			return Before.bHasNormalSplitTopologyEvidence
+				&& After.bHasNormalSplitTopologyEvidence
+				&& BeforeObservation.InteriorEdgeCount
+					== AfterObservation.InteriorEdgeCount
+				&& BeforeObservation.InvalidInteriorEdgeCount == 0
+				&& AfterObservation.InvalidInteriorEdgeCount == 0
+				&& BeforeObservation.PartiallySplitInteriorEdgeCount == 0
+				&& AfterObservation.PartiallySplitInteriorEdgeCount == 0
+				&& Before.NormalSplitEndpointCount
+					== After.NormalSplitEndpointCount
+				&& Before.NormalSplitTopologyFingerprint
+					== After.NormalSplitTopologyFingerprint;
 		}
 
 		bool SemanticMatches(
@@ -442,9 +646,44 @@ namespace UE::UAI::Composition::SimpleAuthoring::Modeling::ExistingEdit
 			}
 			if (OperationKey == TEXT("recompute_normals"))
 			{
-				return After.NormalElementCount > 0
-					&& After.NormalElementCount
-						< After.TriangleCount * 3;
+				FString Mode;
+				bool bPreserveHardEdges = false;
+				if (!Payload->TryGetStringField(TEXT("mode"), Mode)
+					|| !Payload->TryGetBoolField(
+						TEXT("preserve_existing_hard_edges"),
+						bPreserveHardEdges))
+				{
+					return false;
+				}
+				if (Mode == TEXT("face"))
+				{
+					return IsCompleteFaceNormalObservation(
+						After.NormalObservation);
+				}
+				if (!IsCompleteWeightedNormalObservation(
+						After.NormalObservation))
+				{
+					return false;
+				}
+				if (Mode == TEXT("angle_threshold"))
+				{
+					return MatchesNormalOpeningAngle(
+						After.NormalObservation,
+						NumberOr(
+							Payload,
+							TEXT("angle_degrees"),
+							30.0));
+				}
+				if (Mode != TEXT("area_angle_weighted"))
+				{
+					return false;
+				}
+				return bPreserveHardEdges
+					? PreservesNormalSplitTopology(
+						Before,
+						After)
+					: HasPerVertexNormalTopology(
+						After.NormalObservation);
 			}
 			if (OperationKey == TEXT("assign_material_slot"))
 			{
@@ -621,11 +860,22 @@ namespace UE::UAI::Composition::SimpleAuthoring::Modeling::ExistingEdit
 			{
 				const double Distance = FMath::Abs(
 					NumberOr(Payload, TEXT("distance_cm"), 0.0));
+				FString DirectionMode;
+				Payload->TryGetStringField(
+					TEXT("direction_mode"),
+					DirectionMode);
 				return After.TriangleCount
 						>= Before.TriangleCount + 8
-					&& After.Bounds.Max.Z
-						>= Before.Bounds.Max.Z
-							+ FMath::Max(0.0, Distance - 5.0);
+					&& StateChanged(Before, After)
+					&& (DirectionMode != TEXT("fixed")
+						|| FixedDirectionBoundsAdvance(
+							Payload,
+							Before,
+							After,
+							NumberOr(
+								Payload,
+								TEXT("distance_cm"),
+								Distance)));
 			}
 			if (OperationKey == TEXT("fill_holes")
 				|| OperationKey == TEXT("weld_edges"))
@@ -633,23 +883,75 @@ namespace UE::UAI::Composition::SimpleAuthoring::Modeling::ExistingEdit
 				return After.BoundaryEdgeCount
 					< Before.BoundaryEdgeCount;
 			}
-			if (OperationKey == TEXT("mesh_cut")
-				|| OperationKey == TEXT("plane_cut"))
+			if (OperationKey == TEXT("mesh_cut"))
 			{
-				return After.BoundaryEdgeCount == 0
-					&& After.TriangleCount > Before.TriangleCount;
+				FString KeepSides;
+				bool bFillCut = false;
+				Payload->TryGetStringField(
+					TEXT("keep_sides"),
+					KeepSides);
+				Payload->TryGetBoolField(TEXT("fill_cut"), bFillCut);
+				if (!StateChanged(Before, After)
+					|| After.TriangleCount == 0)
+				{
+					return false;
+				}
+				if (KeepSides == TEXT("both"))
+				{
+					return After.BoundaryEdgeCount
+							== Before.BoundaryEdgeCount
+						&& After.TriangleCount > Before.TriangleCount;
+				}
+				return bFillCut
+					? After.BoundaryEdgeCount <= Before.BoundaryEdgeCount
+					: After.BoundaryEdgeCount > Before.BoundaryEdgeCount;
+			}
+			if (OperationKey == TEXT("plane_cut"))
+			{
+				FString KeepSide;
+				bool bFillHole = false;
+				Payload->TryGetStringField(TEXT("keep_side"), KeepSide);
+				Payload->TryGetBoolField(TEXT("fill_hole"), bFillHole);
+				if (!StateChanged(Before, After)
+					|| After.TriangleCount == 0)
+				{
+					return false;
+				}
+				const bool bBoundaryMatches = bFillHole
+					? After.BoundaryEdgeCount <= Before.BoundaryEdgeCount
+					: After.BoundaryEdgeCount > Before.BoundaryEdgeCount;
+				return bBoundaryMatches
+					&& (KeepSide != TEXT("both")
+						|| After.TriangleCount > Before.TriangleCount);
 			}
 			if (OperationKey == TEXT("mirror"))
 			{
 				bool bKeepOriginal = true;
+				bool bWeldSeam = false;
 				Payload->TryGetBoolField(
 					TEXT("keep_original"),
 					bKeepOriginal);
-				return After.BoundaryEdgeCount == 0
-					&& (bKeepOriginal
-						? After.TriangleCount
-							>= Before.TriangleCount * 2
-						: StateChanged(Before, After));
+				Payload->TryGetBoolField(
+					TEXT("weld_seam"),
+					bWeldSeam);
+				if (!bKeepOriginal)
+				{
+					return StateChanged(Before, After)
+						&& After.TriangleCount == Before.TriangleCount
+						&& After.BoundaryEdgeCount
+							== Before.BoundaryEdgeCount;
+				}
+				if (After.TriangleCount < Before.TriangleCount * 2)
+				{
+					return false;
+				}
+				return bWeldSeam
+					? (Before.BoundaryEdgeCount == 0
+						? After.BoundaryEdgeCount == 0
+						: After.BoundaryEdgeCount
+							< Before.BoundaryEdgeCount)
+					: After.BoundaryEdgeCount
+						>= Before.BoundaryEdgeCount * 2;
 			}
 			if (OperationKey == TEXT("offset_faces"))
 			{
@@ -658,40 +960,81 @@ namespace UE::UAI::Composition::SimpleAuthoring::Modeling::ExistingEdit
 						Payload,
 						TEXT("distance_cm"),
 						0.0);
-				return StateChanged(Before, After)
-					&& (Distance <= 0.0
-						|| After.Bounds.Max.Z
-							>= Before.Bounds.Max.Z
-								+ Distance - 5.0);
+				return FMath::Abs(Distance) > UE_DOUBLE_SMALL_NUMBER
+					&& StateChanged(Before, After)
+					&& After.VertexCount > Before.VertexCount
+					&& After.TriangleCount >= Before.TriangleCount + 8;
 			}
 			if (OperationKey == TEXT("remesh"))
 			{
-				return StateChanged(Before, After)
-					&& After.TriangleCount
-						>= Before.TriangleCount * 3;
+				return After.VertexCount > 0
+					&& After.EdgeCount > 0
+					&& After.TriangleCount > 0
+					&& StateChanged(Before, After);
 			}
 			if (OperationKey == TEXT("simplify"))
 			{
-				const double Ratio =
+				FString TargetMode;
+				bool bPreserveBoundaries = false;
+				Payload->TryGetStringField(
+					TEXT("target_mode"),
+					TargetMode);
+				Payload->TryGetBoolField(
+					TEXT("preserve_boundaries"),
+					bPreserveBoundaries);
+				if (bPreserveBoundaries
+					&& (After.BoundaryVertexCount
+							!= Before.BoundaryVertexCount
+						|| After.BoundaryGeometryFingerprint
+							!= Before.BoundaryGeometryFingerprint))
+				{
+					return false;
+				}
+				const double TargetValue =
 					NumberOr(
 						Payload,
 						TEXT("target_value"),
 						1.0);
-				return After.TriangleCount
-					<= FMath::CeilToInt(
-						Before.TriangleCount * Ratio)
-						+ 1;
+				if (TargetMode == TEXT("triangle_count"))
+				{
+					return After.TriangleCount
+						<= FMath::RoundToInt(TargetValue) + 1;
+				}
+				if (TargetMode == TEXT("triangle_ratio"))
+				{
+					return After.TriangleCount
+						<= FMath::CeilToInt(
+							Before.TriangleCount * TargetValue)
+								+ 1;
+				}
+				return TargetMode == TEXT("tolerance_cm")
+					&& StateChanged(Before, After)
+					&& After.TriangleCount <= Before.TriangleCount;
 			}
 			if (OperationKey == TEXT("subdivide"))
 			{
-				return After.TriangleCount
-					>= Before.TriangleCount * 4;
+				const int32 Levels =
+					IntegerOr(Payload, TEXT("levels"), 1);
+				int64 TriangleMultiplier = 1;
+				for (int32 Level = 0; Level < Levels; ++Level)
+				{
+					TriangleMultiplier *= 4;
+				}
+				return Levels > 0
+					&& After.TriangleCount
+						>= Before.TriangleCount * TriangleMultiplier;
 			}
 			if (OperationKey == TEXT("trim"))
 			{
-				return After.BoundaryEdgeCount == 0
-					&& After.TriangleCount > 0
-					&& StateChanged(Before, After);
+				bool bFillHole = false;
+				Payload->TryGetBoolField(TEXT("fill_hole"), bFillHole);
+				return After.TriangleCount > 0
+					&& StateChanged(Before, After)
+					&& (bFillHole
+						? After.BoundaryEdgeCount
+							<= Before.BoundaryEdgeCount
+						: After.BoundaryEdgeCount
+							> Before.BoundaryEdgeCount);
 			}
 			if (OperationKey == TEXT("voxel_boolean"))
 			{
@@ -727,10 +1070,14 @@ namespace UE::UAI::Composition::SimpleAuthoring::Modeling::ExistingEdit
 	bool FCarrierState::IsValid() const
 	{
 		return !TargetRef.IsEmpty()
+			&& !DurablePackageName.IsEmpty()
 			&& TargetRevision.IsSet()
 			&& TargetRevision->IsValid()
 			&& !CarrierKind.IsEmpty()
+			&& (CarrierKind != TEXT("dynamic_mesh_actor")
+				|| ActorGuid.IsValid())
 			&& !GeometryFingerprint.IsEmpty()
+			&& !BoundaryGeometryFingerprint.IsEmpty()
 			&& Bounds.IsValid
 			&& VertexCount > 0
 			&& TriangleCount > 0;
@@ -765,6 +1112,8 @@ namespace UE::UAI::Composition::SimpleAuthoring::Modeling::ExistingEdit
 		}
 
 		OutState.TargetRef = TargetRef;
+		OutState.DurablePackageName =
+			Object->GetOutermost()->GetName();
 		if (!TryReadModelingGeometryCarrierRevision(
 				TargetRef,
 				*Object,
@@ -778,6 +1127,14 @@ namespace UE::UAI::Composition::SimpleAuthoring::Modeling::ExistingEdit
 		if (ADynamicMeshActor* Actor =
 			Cast<ADynamicMeshActor>(Object))
 		{
+			OutState.ActorGuid = Actor->GetActorGuid();
+			if (!OutState.ActorGuid.IsValid())
+			{
+				OutErrorCode =
+					TEXT("modeling_geometry_actor_guid_invalid");
+				OutErrorDetail = Actor->GetPathName();
+				return false;
+			}
 			UDynamicMeshComponent* Component =
 				Actor->GetDynamicMeshComponent();
 			UDynamicMesh* DynamicMesh =
@@ -883,9 +1240,22 @@ namespace UE::UAI::Composition::SimpleAuthoring::Modeling::ExistingEdit
 		Object->SetStringField(
 			TEXT("carrier_kind"),
 			State.CarrierKind);
+		if (State.ActorGuid.IsValid())
+		{
+			Object->SetStringField(
+				TEXT("actor_guid"),
+				State.ActorGuid.ToString(
+					EGuidFormats::DigitsWithHyphensLower));
+		}
 		Object->SetStringField(
 			TEXT("geometry_fingerprint"),
 			State.GeometryFingerprint);
+		Object->SetStringField(
+			TEXT("boundary_geometry_fingerprint"),
+			State.BoundaryGeometryFingerprint);
+		Object->SetNumberField(
+			TEXT("boundary_vertex_count"),
+			State.BoundaryVertexCount);
 		SetIntegerArray(
 			Object,
 			TEXT("vertex_ids"),
@@ -928,6 +1298,9 @@ namespace UE::UAI::Composition::SimpleAuthoring::Modeling::ExistingEdit
 		Payload->SetObjectField(
 			BaselineField,
 			BuildBaselineObject(State));
+		Payload->SetStringField(
+			DurablePackageNameField,
+			State.DurablePackageName);
 		if (OperationKey == TEXT("add_material_slot"))
 		{
 			FString MaterialRef;
@@ -971,6 +1344,9 @@ namespace UE::UAI::Composition::SimpleAuthoring::Modeling::ExistingEdit
 		bool bCollisionBoundsValid = false;
 		double VertexChecksum = 0.0;
 		if (!Payload.IsValid()
+			|| !TryReadDurablePackageNameEvidence(
+				Payload,
+				OutState.DurablePackageName)
 			|| !Payload->TryGetObjectField(
 				BaselineField,
 				Baseline)
@@ -1008,6 +1384,13 @@ namespace UE::UAI::Composition::SimpleAuthoring::Modeling::ExistingEdit
 				*Baseline,
 				TEXT("boundary_edge_count"),
 				OutState.BoundaryEdgeCount)
+			|| !TryReadInteger(
+				*Baseline,
+				TEXT("boundary_vertex_count"),
+				OutState.BoundaryVertexCount)
+			|| !(*Baseline)->TryGetStringField(
+				TEXT("boundary_geometry_fingerprint"),
+				OutState.BoundaryGeometryFingerprint)
 			|| !(*Baseline)->TryGetNumberField(
 				TEXT("vertex_checksum"),
 				VertexChecksum)
@@ -1065,6 +1448,22 @@ namespace UE::UAI::Composition::SimpleAuthoring::Modeling::ExistingEdit
 		{
 			return false;
 		}
+		if (!TryReadNormalSplitTopology(*Baseline, OutState))
+		{
+			return false;
+		}
+		if (OutState.CarrierKind == TEXT("dynamic_mesh_actor"))
+		{
+			FString ActorGuid;
+			if (!(*Baseline)->TryGetStringField(
+					TEXT("actor_guid"),
+					ActorGuid)
+				|| !FGuid::Parse(ActorGuid, OutState.ActorGuid)
+				|| !OutState.ActorGuid.IsValid())
+			{
+				return false;
+			}
+		}
 		OutState.VertexChecksum =
 			FMath::RoundToInt64(VertexChecksum);
 		OutState.Bounds = FBox(
@@ -1083,6 +1482,18 @@ namespace UE::UAI::Composition::SimpleAuthoring::Modeling::ExistingEdit
 					CollisionBoundsMax[2]));
 		}
 		return OutState.IsValid();
+	}
+
+	bool TryReadDurablePackageNameEvidence(
+		const TSharedPtr<FJsonObject>& Payload,
+		FString& OutPackageName)
+	{
+		OutPackageName.Reset();
+		return Payload.IsValid()
+			&& Payload->TryGetStringField(
+				DurablePackageNameField,
+				OutPackageName)
+			&& !OutPackageName.IsEmpty();
 	}
 
 	TSharedPtr<FJsonObject> BuildExpectedVerificationState(

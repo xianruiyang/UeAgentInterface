@@ -296,6 +296,7 @@ namespace UE::UAI::DomainAdapters::EditorSessionOperation
 			OperationPort;
 		if (!PortFactory.TryCreateOperationPort(
 				TypedRequest,
+				OperationRequest,
 				OperationPort,
 				OutError))
 		{

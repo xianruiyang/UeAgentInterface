@@ -7,6 +7,7 @@
 #include "Templates/SharedPointer.h"
 
 #define UAI_MODELING_SIMPLE_AUTHORING_PRODUCTION_V1 1
+#define UAI_MODELING_SIMPLE_AUTHORING_ARTIFACT_READBACK_V1 1
 
 namespace UE::UAI::Composition::SimpleAuthoring::Modeling
 {
@@ -40,6 +41,9 @@ namespace UE::UAI::Composition::SimpleAuthoring::Modeling
 			DomainAdapters::ModelingGeometryEffect::
 				IUeAgentModelingGeometryEffectReferenceResolver,
 			ESPMode::ThreadSafe> ReferenceResolver;
+		// Optional explicit readback owner for embedded/custom compositions.
+		// The production runtime leaves this unset so StaticMesh C9 reads the
+		// receipt-owned package through an isolated transient package instance.
 		TSharedPtr<
 			DomainAdapters::ModelingGeometryEffect::
 				IUeAgentModelingGeometryEffectReferenceResolver,

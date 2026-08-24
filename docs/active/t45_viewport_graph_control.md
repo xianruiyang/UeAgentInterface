@@ -32,6 +32,17 @@ or `use_current_selection=true`. Its policy explicitly carries padding,
 minimum/maximum distance, preserve rotation, collision-aware, look-at, and
 auto-fallback behavior.
 
+`viewport.instance.list` returns each exact `viewport_ref`, its camera state,
+and a `viewport_type` of `perspective`, `orthographic_xy`, `orthographic_xz`,
+`orthographic_yz`, `orthographic_freelook`, or `unknown`. Projection type is a
+behavioral input, not interchangeable viewport metadata. A consumer whose
+framing or image oracle assumes perspective FOV must first select and retain a
+same-world `perspective` viewport, then use that exact identity for state read,
+frame, capture, restore, and final readback. Current real-content product
+evidence covers that perspective path only; the expected behavior, rejection
+boundary, or support policy for non-perspective `viewport.camera.frame` remains
+unconfirmed and must not be inferred from the perspective result.
+
 `graph.view.read` exposes location, zoom, and the actual CAS revision as the
 snapshot roles `graph_view.revision.source_id`,
 `graph_view.revision.generation`, and `graph_view.revision.sequence`.

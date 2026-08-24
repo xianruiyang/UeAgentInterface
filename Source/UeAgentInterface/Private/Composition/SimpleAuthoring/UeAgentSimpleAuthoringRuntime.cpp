@@ -211,8 +211,6 @@ namespace UE::UAI::Composition::SimpleAuthoring
 			ESPMode::ThreadSafe> LandscapeReferenceResolver;
 		TSharedPtr<IUeAgentModelingGeometryEffectReferenceResolver,
 			ESPMode::ThreadSafe> ModelingReferenceResolver;
-		TSharedPtr<IUeAgentModelingGeometryEffectReferenceResolver,
-			ESPMode::ThreadSafe> PersistedModelingReferenceResolver;
 		TSharedPtr<IUeAgentAssetDataSimpleEffectAssetResolver,
 			ESPMode::ThreadSafe> MutationAssetResolver;
 		TSharedPtr<IUeAgentAssetDataSimpleEffectAssetResolver,
@@ -233,9 +231,6 @@ namespace UE::UAI::Composition::SimpleAuthoring
 					ResolverError)
 			|| !TryCreateModelingSimpleAuthoringReferenceResolver(
 					ModelingReferenceResolver,
-					ResolverError)
-			|| !TryCreateModelingSimpleAuthoringReferenceResolver(
-					PersistedModelingReferenceResolver,
 					ResolverError)
 			|| !TryCreateAssetDataSimpleAuthoringAssetResolver(
 					MutationAssetResolver,
@@ -379,8 +374,6 @@ namespace UE::UAI::Composition::SimpleAuthoring
 		ModelingConfig.WorldCatalog = WorldCatalog;
 		ModelingConfig.PersistedWorldCatalog = PersistedWorldCatalog;
 		ModelingConfig.ReferenceResolver = ModelingReferenceResolver;
-		ModelingConfig.PersistedReferenceResolver =
-			PersistedModelingReferenceResolver;
 		ModelingConfig.DurableService = DurableService;
 		ModelingConfig.AbsenceOracle = AbsenceOracle;
 		ModelingConfig.ReferenceOracle = ReferenceOracle;

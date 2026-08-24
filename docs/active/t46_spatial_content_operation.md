@@ -60,6 +60,36 @@ types and non-local StaticMesh verify frames fail before any mutation. Durable
 `mesh.transform.bake` and `mesh.pivot.update` success includes package save;
 reloading the asset must preserve the observed geometry.
 
+## Mesh-element selection session
+
+`mesh.element.select_by_ray` consumes the live selection state already owned by
+Modeling Tools Editor Mode. Activate that mode explicitly through
+`mesh.modeling_session(action="activate")`, establish and unlock the intended
+mesh target, then pass the exact `UPrimitiveComponent` object path in
+`context.selection_identities`. An Actor path is not a mesh-target identity.
+The viewport identity is exact, for example `level:0`; the command does not pick
+an implicit current viewport.
+
+Production resolution reuses the active
+`UModelingToolsEditorMode::GetSelectionManager()` when no explicit test or
+custom binding was supplied. Resolution does not activate the mode, select an
+Actor or Component, register or unlock a target, focus a viewport, or create a
+second selection registry. A supplied `trace_query` first requires the World
+trace to hit the same target; omit it when only the Modeling selection ray is
+required. Success is verified by an independent readback from that same live
+manager. Invalid or inactive component identities, locked targets, ray misses,
+and occlusion fail without changing the existing mesh-element selection.
+
+## Transform-candidate limitation
+
+`world.transform_candidates.evaluate` is registered but is not currently a
+production-usable evaluator. Its public descriptor requires per-candidate
+`score` results, while the current production reader does not consume the
+`candidates` array and no authoritative scoring objective, units, normalization,
+or ordering has been defined. Do not treat its current transform observations as
+candidate evaluation. The command remains deferred until that result contract is
+resolved; the other spatial commands do not depend on it.
+
 ## Origin resolution
 
 `reference.origin.resolve` is the sole current origin-query command and belongs

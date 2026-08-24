@@ -297,6 +297,7 @@ namespace
 	public:
 		virtual bool TryCreateOperationPort(
 			const FUeAgentEditorSessionOperationTypedRequest& Request,
+			const FLongRunningOperationRequest& OperationRequest,
 			TSharedPtr<
 				ILongRunningOperationPort,
 				ESPMode::ThreadSafe>& OutPort,
