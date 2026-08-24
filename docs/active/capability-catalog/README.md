@@ -3,8 +3,8 @@
 This directory is the maintained semantic and delivery overlay for the active
 UAI surface. It answers which user capability unit owns a current command,
 which UE objects and authoring surfaces the unit covers, how far current
-evidence actually reaches, and which task must close the remaining vertical
-chain.
+evidence actually reaches, and which gaps or deferred decisions remain. It does
+not select or track the next task.
 
 It is deliberately not a runtime registry:
 
@@ -32,12 +32,16 @@ lifecycle cell or final visual/content quality. T47 executes the current 54
 command discovery/candidate/read/reference slice through the public SDK, closes
 the persisted Reference CRUD/readback defect, and records exact typed failures.
 That same matrix proves that several successful read envelopes do not yet carry
-the domain fact selected by their public input. `CU-READ-QUERY` therefore routes
-through T47A before downstream authoring matrices consume it; discovery units
-route to their actual domain consumer, while command/content discovery and the
-closed Reference unit route to final audit. Every uncovered cell and exact
-recovery task remains explicit in the unit's `not_proven` and `next_task_id`
-fields.
+the domain fact selected by their public input. T47A and T47B subsequently close
+the applicable read and durable World package semantics. Every unit retains the
+direct evidence boundary in `not_proven` and any applicable product decision in
+`blockers`; neither field creates an execution task.
+
+Dynamic task state, dependencies and `next_action` belong only to the outer
+project task table. A new capability task starts from a concrete real UE content
+consumer and references the affected catalog unit; catalog gaps are not
+projected into command-by-command or carrier-by-mode matrices. This keeps a
+distributed semantic catalog usable without copying project-local task state.
 
 Historical `exact_command_set` and `architecture_contract` values are retained
 under `candidate_successor`; they do not become current exact successors without
@@ -78,6 +82,7 @@ dispatch.
 4. Advance `highest_verified_layer` only with direct evidence for the exact
    command × object/type × surface × operation × lifecycle slice.
 5. Run the CMD capability-catalog tests. Schema, manifest hash/set, uniqueness,
-   historical source identity, high-value recovery units and next-task routing
-   are current blocking contracts; product readiness remains a vertical evidence
-   judgment, not a catalog test side effect.
+   historical source identity, high-value recovery units and the physical
+   absence of dynamic task-routing fields are current blocking contracts;
+   product readiness and future task selection remain vertical evidence
+   judgments, not catalog test side effects.

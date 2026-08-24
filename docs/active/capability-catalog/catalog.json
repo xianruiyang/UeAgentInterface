@@ -1,5 +1,5 @@
 {
-  "schema": "uai.capability_catalog.v1",
+  "schema": "uai.capability_catalog.v2",
   "catalog_id": "uai-current-capability-units",
   "authority": {
     "semantic_owner": "docs/active/capability-catalog/catalog.json",
@@ -17,7 +17,8 @@
     "UDES-UAI-ROOT-19",
     "DES-UAI-ROOT-INTEGRATED-CAPABILITY-ARCHITECTURE",
     "DES-UAI-PRODUCTION-EVIDENCE",
-    "SOL-UAI-ROOT-08-INTEGRATED-AUTHORITY-RESTORATION"
+    "SOL-UAI-ROOT-08-INTEGRATED-AUTHORITY-RESTORATION",
+    "SOL-UAI-ROOT-31-CAPABILITY-CATALOG-STABLE-EVIDENCE-OWNER"
   ],
   "command_manifest": {
     "path": "Resources/UaiCommandManifest.json",
@@ -68,7 +69,12 @@
       "independent readback",
       "failure and cleanup",
       "current documentation and distribution"
-    ]
+    ],
+    "unproven_scope_creates_task": false,
+    "catalog_owns_task_state": false,
+    "catalog_owns_next_action": false,
+    "task_lifecycle_owner": "outer_project_task_table",
+    "new_task_requires_concrete_real_content_consumer": true
   },
   "units": [
     {
@@ -152,7 +158,6 @@
         "T20-AI-BEHAVIOR-DOMAIN",
         "T53-AI-COMMAND-MIGRATION"
       ],
-      "next_task_id": "TROOT-UAI-49-SIMULATION-ANIMATION-AUDIO-EXACT-MATRIX",
       "blockers": []
     },
     {
@@ -207,10 +212,10 @@
           "TROOT-UAI-39-NIAGARA-PCG-AI-VERTICAL",
           "runtimeLogs/delivery_workflow/TROOT-UAI-39-NIAGARA-PCG-AI-VERTICAL/20260821-contract/receipts/t39-ai-niagara-public-contract-r3.json",
           "runtimeLogs/delivery_workflow/TROOT-UAI-39-NIAGARA-PCG-AI-VERTICAL/20260821-product-r4/ai-blackboard-stale-candidate-negative.json",
-        "runtimeLogs/delivery_workflow/TROOT-UAI-39-NIAGARA-PCG-AI-VERTICAL/20260821-product-r4/ai-smart-object-candidate-apply.json",
-        "TROOT-UAI-45-PUBLIC-DISTRIBUTION-PARITY",
-        "TROOT-UAI-47-DISCOVERY-QUERY-EXACT-MATRIX",
-        "runtimeLogs/delivery_workflow/TROOT-UAI-47-DISCOVERY-QUERY-EXACT-MATRIX/20260822-t47-r2/candidate-contracts.json"
+          "runtimeLogs/delivery_workflow/TROOT-UAI-39-NIAGARA-PCG-AI-VERTICAL/20260821-product-r4/ai-smart-object-candidate-apply.json",
+          "TROOT-UAI-45-PUBLIC-DISTRIBUTION-PARITY",
+          "TROOT-UAI-47-DISCOVERY-QUERY-EXACT-MATRIX",
+          "runtimeLogs/delivery_workflow/TROOT-UAI-47-DISCOVERY-QUERY-EXACT-MATRIX/20260822-t47-r2/candidate-contracts.json"
         ],
         "not_proven": [
           "exhaustive availability and authoring quality of every concrete candidate class",
@@ -221,7 +226,6 @@
       "legacy_candidate_task_ids": [
         "T20-AI-BEHAVIOR-DOMAIN"
       ],
-      "next_task_id": "TROOT-UAI-49-SIMULATION-ANIMATION-AUDIO-EXACT-MATRIX",
       "blockers": []
     },
     {
@@ -291,7 +295,6 @@
         "T16-ANIMATION-BLUEPRINT-DOMAIN",
         "T49-ANIMATION-BLUEPRINT-COMMAND-MIGRATION"
       ],
-      "next_task_id": "TROOT-UAI-48-ASSET-HJSON-GRAPH-EXACT-MATRIX",
       "blockers": []
     },
     {
@@ -380,7 +383,6 @@
         "T23-ANIMATION-CURVE-DOMAIN",
         "T56-ANIMATION-CURVE-COMMAND-MIGRATION"
       ],
-      "next_task_id": "TROOT-UAI-49-SIMULATION-ANIMATION-AUDIO-EXACT-MATRIX",
       "blockers": []
     },
     {
@@ -475,7 +477,6 @@
         "T24-ANIMATION-RIG-GRAPH-DOMAIN",
         "T57-ANIMATION-RIG-COMMAND-MIGRATION"
       ],
-      "next_task_id": "TROOT-UAI-49-SIMULATION-ANIMATION-AUDIO-EXACT-MATRIX",
       "blockers": []
     },
     {
@@ -529,10 +530,10 @@
           "TROOT-UAI-40-ANIMATION-RIG-AUDIO-VERTICAL",
           "runtimeLogs/delivery_workflow/TROOT-UAI-40-ANIMATION-RIG-AUDIO-VERTICAL/20260821-product/control-rig-candidates-current.result.json",
           "runtimeLogs/delivery_workflow/TROOT-UAI-40-ANIMATION-RIG-AUDIO-VERTICAL/20260821-product/edit-control-rig-valid.result.json",
-        "runtimeLogs/delivery_workflow/TROOT-UAI-40-ANIMATION-RIG-AUDIO-VERTICAL/20260821-product/readback-control-rig-after.result.json",
-        "TROOT-UAI-45-PUBLIC-DISTRIBUTION-PARITY",
-        "TROOT-UAI-47-DISCOVERY-QUERY-EXACT-MATRIX",
-        "runtimeLogs/delivery_workflow/TROOT-UAI-47-DISCOVERY-QUERY-EXACT-MATRIX/20260822-t47-r2/candidate-contracts.json"
+          "runtimeLogs/delivery_workflow/TROOT-UAI-40-ANIMATION-RIG-AUDIO-VERTICAL/20260821-product/readback-control-rig-after.result.json",
+          "TROOT-UAI-45-PUBLIC-DISTRIBUTION-PARITY",
+          "TROOT-UAI-47-DISCOVERY-QUERY-EXACT-MATRIX",
+          "runtimeLogs/delivery_workflow/TROOT-UAI-47-DISCOVERY-QUERY-EXACT-MATRIX/20260822-t47-r2/candidate-contracts.json"
         ],
         "not_proven": [
           "exhaustive candidate availability for every concrete RigVM unit and animation graph type",
@@ -543,7 +544,6 @@
       "legacy_candidate_task_ids": [
         "T24-ANIMATION-RIG-GRAPH-DOMAIN"
       ],
-      "next_task_id": "TROOT-UAI-49-SIMULATION-ANIMATION-AUDIO-EXACT-MATRIX",
       "blockers": []
     },
     {
@@ -670,7 +670,6 @@
       "legacy_candidate_task_ids": [
         "T37-ASSET-SIMPLE-OPERATION"
       ],
-      "next_task_id": "TROOT-UAI-48-ASSET-HJSON-GRAPH-EXACT-MATRIX",
       "blockers": []
     },
     {
@@ -754,7 +753,6 @@
         "T21-AUDIO-DOMAIN",
         "T54-AUDIO-COMMAND-MIGRATION"
       ],
-      "next_task_id": "TROOT-UAI-49-SIMULATION-ANIMATION-AUDIO-EXACT-MATRIX",
       "blockers": []
     },
     {
@@ -822,7 +820,6 @@
       "legacy_candidate_task_ids": [
         "T21-AUDIO-DOMAIN"
       ],
-      "next_task_id": "TROOT-UAI-49-SIMULATION-ANIMATION-AUDIO-EXACT-MATRIX",
       "blockers": []
     },
     {
@@ -894,7 +891,6 @@
         "T14-BLUEPRINT-SURFACES",
         "T47-BLUEPRINT-COMMAND-MIGRATION"
       ],
-      "next_task_id": "TROOT-UAI-48-ASSET-HJSON-GRAPH-EXACT-MATRIX",
       "blockers": []
     },
     {
@@ -944,10 +940,10 @@
           "TROOT-UAI-33-PUBLIC-CONTRACT-ORACLE-REALIGNMENT",
           "TROOT-UAI-37-BLUEPRINT-UMG-GRAPH-VERTICAL",
           "runtimeLogs/uai-development/TROOT-UAI-37-BLUEPRINT-UMG-GRAPH-VERTICAL/20260821-r11/automation/report/index.json",
-        "runtimeLogs/uai-development/TROOT-UAI-37-BLUEPRINT-UMG-GRAPH-VERTICAL/20260821-r9/public_sdk_product/receipt.json",
-        "TROOT-UAI-45-PUBLIC-DISTRIBUTION-PARITY",
-        "TROOT-UAI-47-DISCOVERY-QUERY-EXACT-MATRIX",
-        "runtimeLogs/delivery_workflow/TROOT-UAI-47-DISCOVERY-QUERY-EXACT-MATRIX/20260822-t47-r2/candidate-contracts.json"
+          "runtimeLogs/uai-development/TROOT-UAI-37-BLUEPRINT-UMG-GRAPH-VERTICAL/20260821-r9/public_sdk_product/receipt.json",
+          "TROOT-UAI-45-PUBLIC-DISTRIBUTION-PARITY",
+          "TROOT-UAI-47-DISCOVERY-QUERY-EXACT-MATRIX",
+          "runtimeLogs/delivery_workflow/TROOT-UAI-47-DISCOVERY-QUERY-EXACT-MATRIX/20260822-t47-r2/candidate-contracts.json"
         ],
         "not_proven": [
           "every ActorComponent class; the current bounded candidate set is SceneComponent and PointLightComponent"
@@ -957,7 +953,6 @@
       "legacy_candidate_task_ids": [
         "T12-BLUEPRINT-COMPONENT"
       ],
-      "next_task_id": "TROOT-UAI-48-ASSET-HJSON-GRAPH-EXACT-MATRIX",
       "blockers": []
     },
     {
@@ -1020,7 +1015,6 @@
       "legacy_candidate_task_ids": [
         "T11-BLUEPRINT-NODE"
       ],
-      "next_task_id": "TROOT-UAI-48-ASSET-HJSON-GRAPH-EXACT-MATRIX",
       "blockers": []
     },
     {
@@ -1093,7 +1087,6 @@
       "legacy_candidate_task_ids": [
         "T44-CAPTURE-MEDIA-OPERATION"
       ],
-      "next_task_id": "TROOT-UAI-52-OWNED-RHI-REAL-CONTENT-VISUAL",
       "blockers": []
     },
     {
@@ -1143,10 +1136,10 @@
           "TROOT-UAI-32-INTEGRATED-ACTIVATION-AUTHORITY",
           "TROOT-UAI-33-PUBLIC-CONTRACT-ORACLE-REALIGNMENT",
           "TROOT-UAI-35-DISCOVERY-IDENTITY-VERTICAL",
-        "runtimeLogs/uai-development/TROOT-UAI-35-DISCOVERY-IDENTITY-VERTICAL/20260820-r3/public_sdk_product/receipt.json",
-        "TROOT-UAI-45-PUBLIC-DISTRIBUTION-PARITY",
-        "TROOT-UAI-47-DISCOVERY-QUERY-EXACT-MATRIX",
-        "runtimeLogs/delivery_workflow/TROOT-UAI-47-DISCOVERY-QUERY-EXACT-MATRIX/20260822-t47-r2/command-details.json"
+          "runtimeLogs/uai-development/TROOT-UAI-35-DISCOVERY-IDENTITY-VERTICAL/20260820-r3/public_sdk_product/receipt.json",
+          "TROOT-UAI-45-PUBLIC-DISTRIBUTION-PARITY",
+          "TROOT-UAI-47-DISCOVERY-QUERY-EXACT-MATRIX",
+          "runtimeLogs/delivery_workflow/TROOT-UAI-47-DISCOVERY-QUERY-EXACT-MATRIX/20260822-t47-r2/command-details.json"
         ],
         "not_proven": [
           "free-text relevance quality for every possible intent across all current commands"
@@ -1156,7 +1149,6 @@
       "legacy_candidate_task_ids": [
         "T05-QUERY-PUBLIC-CALIBRATION"
       ],
-      "next_task_id": "TROOT-UAI-55-FINAL-INTEGRATED-AUDIT",
       "blockers": []
     },
     {
@@ -1245,7 +1237,6 @@
         "T13-UOBJECT-RECURSIVE-INIT",
         "T27-DATATABLE-CURVETABLE-DOMAIN"
       ],
-      "next_task_id": "TROOT-UAI-48-ASSET-HJSON-GRAPH-EXACT-MATRIX",
       "blockers": []
     },
     {
@@ -1326,7 +1317,6 @@
       "legacy_candidate_task_ids": [
         "T31-DESTRUCTIVE-CONTENT-OPS"
       ],
-      "next_task_id": "TROOT-UAI-51-EDITOR-IMPORT-LIFECYCLE-EXACT-MATRIX",
       "blockers": []
     },
     {
@@ -1399,7 +1389,6 @@
       "legacy_candidate_task_ids": [
         "T39-EDITOR-PROJECT-OPERATION"
       ],
-      "next_task_id": "TROOT-UAI-51-EDITOR-IMPORT-LIFECYCLE-EXACT-MATRIX",
       "blockers": []
     },
     {
@@ -1476,7 +1465,6 @@
       "legacy_candidate_task_ids": [
         "T34-CONTROL-COMMAND-MIGRATION"
       ],
-      "next_task_id": "TROOT-UAI-55-FINAL-INTEGRATED-AUDIT",
       "blockers": []
     },
     {
@@ -1553,7 +1541,6 @@
       "legacy_candidate_task_ids": [
         "T28-EXTERNAL-FACTORY-IMPORT"
       ],
-      "next_task_id": "TROOT-UAI-51-EDITOR-IMPORT-LIFECYCLE-EXACT-MATRIX",
       "blockers": []
     },
     {
@@ -1620,7 +1607,6 @@
       "legacy_candidate_task_ids": [
         "T62-UNIFIED-GRAPH-LAYOUT"
       ],
-      "next_task_id": "TROOT-UAI-48-ASSET-HJSON-GRAPH-EXACT-MATRIX",
       "blockers": []
     },
     {
@@ -1690,7 +1676,6 @@
       "legacy_candidate_task_ids": [
         "T41-LANDSCAPE-OPERATION"
       ],
-      "next_task_id": "TROOT-UAI-50-MODELING-WORLD-PHYSICS-EXACT-MATRIX",
       "blockers": []
     },
     {
@@ -1752,7 +1737,6 @@
         "T61-PRE-REFACTOR-PUBLIC-SURFACE-RECONCILIATION",
         "T90-LEGACY-ASSET-RETIREMENT"
       ],
-      "next_task_id": "TROOT-UAI-55-FINAL-INTEGRATED-AUDIT",
       "blockers": []
     },
     {
@@ -1813,7 +1797,6 @@
       "legacy_candidate_task_ids": [
         "T30-EXTERNAL-LOCALIZATION-IMPORT"
       ],
-      "next_task_id": "TROOT-UAI-51-EDITOR-IMPORT-LIFECYCLE-EXACT-MATRIX",
       "blockers": []
     },
     {
@@ -1884,7 +1867,6 @@
         "T17-MATERIAL-DOMAIN",
         "T50-MATERIAL-COMMAND-MIGRATION"
       ],
-      "next_task_id": "TROOT-UAI-48-ASSET-HJSON-GRAPH-EXACT-MATRIX",
       "blockers": []
     },
     {
@@ -1933,10 +1915,10 @@
           "TROOT-UAI-32-INTEGRATED-ACTIVATION-AUTHORITY",
           "TROOT-UAI-33-PUBLIC-CONTRACT-ORACLE-REALIGNMENT",
           "TROOT-UAI-35-DISCOVERY-IDENTITY-VERTICAL",
-        "runtimeLogs/uai-development/TROOT-UAI-35-DISCOVERY-IDENTITY-VERTICAL/20260820-r3/public_sdk_product/receipt.json",
-        "TROOT-UAI-45-PUBLIC-DISTRIBUTION-PARITY",
-        "TROOT-UAI-47-DISCOVERY-QUERY-EXACT-MATRIX",
-        "runtimeLogs/delivery_workflow/TROOT-UAI-47-DISCOVERY-QUERY-EXACT-MATRIX/20260822-t47-r2/candidate-contracts.json"
+          "runtimeLogs/uai-development/TROOT-UAI-35-DISCOVERY-IDENTITY-VERTICAL/20260820-r3/public_sdk_product/receipt.json",
+          "TROOT-UAI-45-PUBLIC-DISTRIBUTION-PARITY",
+          "TROOT-UAI-47-DISCOVERY-QUERY-EXACT-MATRIX",
+          "runtimeLogs/delivery_workflow/TROOT-UAI-47-DISCOVERY-QUERY-EXACT-MATRIX/20260822-t47-r2/candidate-contracts.json"
         ],
         "not_proven": [
           "every Material and Material Function expression class and palette context"
@@ -1946,7 +1928,6 @@
       "legacy_candidate_task_ids": [
         "T17-MATERIAL-DOMAIN"
       ],
-      "next_task_id": "TROOT-UAI-48-ASSET-HJSON-GRAPH-EXACT-MATRIX",
       "blockers": []
     },
     {
@@ -2097,7 +2078,6 @@
       "legacy_candidate_task_ids": [
         "T38-MODELING-GEOMETRY-OPERATION"
       ],
-      "next_task_id": "TROOT-UAI-50-MODELING-WORLD-PHYSICS-EXACT-MATRIX",
       "blockers": []
     },
     {
@@ -2186,7 +2166,6 @@
       "legacy_candidate_task_ids": [
         "T38-MODELING-GEOMETRY-OPERATION"
       ],
-      "next_task_id": "TROOT-UAI-50-MODELING-WORLD-PHYSICS-EXACT-MATRIX",
       "blockers": []
     },
     {
@@ -2272,7 +2251,6 @@
         "T18-NIAGARA-DOMAIN",
         "T51-NIAGARA-COMMAND-MIGRATION"
       ],
-      "next_task_id": "TROOT-UAI-49-SIMULATION-ANIMATION-AUDIO-EXACT-MATRIX",
       "blockers": []
     },
     {
@@ -2324,10 +2302,10 @@
           "runtimeLogs/delivery_workflow/TROOT-UAI-39-NIAGARA-PCG-AI-VERTICAL/20260821-contract/receipts/t39-niagara-candidate-binding.json",
           "runtimeLogs/delivery_workflow/TROOT-UAI-39-NIAGARA-PCG-AI-VERTICAL/20260821-product-r4/niagara-emitter-jitter-candidates-r2.json",
           "runtimeLogs/delivery_workflow/TROOT-UAI-39-NIAGARA-PCG-AI-VERTICAL/20260821-product-r4/niagara-emitter-candidate-apply-r2.json",
-        "runtimeLogs/delivery_workflow/TROOT-UAI-39-NIAGARA-PCG-AI-VERTICAL/20260821-product-r4/niagara-emitter-stale-candidate-negative.json",
-        "TROOT-UAI-45-PUBLIC-DISTRIBUTION-PARITY",
-        "TROOT-UAI-47-DISCOVERY-QUERY-EXACT-MATRIX",
-        "runtimeLogs/delivery_workflow/TROOT-UAI-47-DISCOVERY-QUERY-EXACT-MATRIX/20260822-t47-r2/candidate-contracts.json"
+          "runtimeLogs/delivery_workflow/TROOT-UAI-39-NIAGARA-PCG-AI-VERTICAL/20260821-product-r4/niagara-emitter-stale-candidate-negative.json",
+          "TROOT-UAI-45-PUBLIC-DISTRIBUTION-PARITY",
+          "TROOT-UAI-47-DISCOVERY-QUERY-EXACT-MATRIX",
+          "runtimeLogs/delivery_workflow/TROOT-UAI-47-DISCOVERY-QUERY-EXACT-MATRIX/20260822-t47-r2/candidate-contracts.json"
         ],
         "not_proven": [
           "candidate availability and binding across every Niagara stage usage and root kind",
@@ -2338,7 +2316,6 @@
       "legacy_candidate_task_ids": [
         "T18-NIAGARA-DOMAIN"
       ],
-      "next_task_id": "TROOT-UAI-49-SIMULATION-ANIMATION-AUDIO-EXACT-MATRIX",
       "blockers": []
     },
     {
@@ -2410,7 +2387,6 @@
         "T10-OPERATION-LIFECYCLE-CORE",
         "T32-LONG-RUNNING"
       ],
-      "next_task_id": "TROOT-UAI-51-EDITOR-IMPORT-LIFECYCLE-EXACT-MATRIX",
       "blockers": []
     },
     {
@@ -2500,7 +2476,6 @@
         "T19-PCG-DOMAIN",
         "T52-PCG-COMMAND-MIGRATION"
       ],
-      "next_task_id": "TROOT-UAI-49-SIMULATION-ANIMATION-AUDIO-EXACT-MATRIX",
       "blockers": []
     },
     {
@@ -2551,10 +2526,10 @@
           "TROOT-UAI-39-NIAGARA-PCG-AI-VERTICAL",
           "runtimeLogs/delivery_workflow/TROOT-UAI-39-NIAGARA-PCG-AI-VERTICAL/20260821-product-r4/pcg-node-candidates.json",
           "runtimeLogs/delivery_workflow/TROOT-UAI-39-NIAGARA-PCG-AI-VERTICAL/20260821-product-r4/pcg-node-create-from-candidate.json",
-        "runtimeLogs/delivery_workflow/TROOT-UAI-39-NIAGARA-PCG-AI-VERTICAL/20260821-product-r4/pcg-stale-candidate-negative.json",
-        "TROOT-UAI-45-PUBLIC-DISTRIBUTION-PARITY",
-        "TROOT-UAI-47-DISCOVERY-QUERY-EXACT-MATRIX",
-        "runtimeLogs/delivery_workflow/TROOT-UAI-47-DISCOVERY-QUERY-EXACT-MATRIX/20260822-t47-r2/candidate-contracts.json"
+          "runtimeLogs/delivery_workflow/TROOT-UAI-39-NIAGARA-PCG-AI-VERTICAL/20260821-product-r4/pcg-stale-candidate-negative.json",
+          "TROOT-UAI-45-PUBLIC-DISTRIBUTION-PARITY",
+          "TROOT-UAI-47-DISCOVERY-QUERY-EXACT-MATRIX",
+          "runtimeLogs/delivery_workflow/TROOT-UAI-47-DISCOVERY-QUERY-EXACT-MATRIX/20260822-t47-r2/candidate-contracts.json"
         ],
         "not_proven": [
           "candidate availability and binding for every concrete PCG settings class",
@@ -2565,7 +2540,6 @@
       "legacy_candidate_task_ids": [
         "T19-PCG-DOMAIN"
       ],
-      "next_task_id": "TROOT-UAI-49-SIMULATION-ANIMATION-AUDIO-EXACT-MATRIX",
       "blockers": []
     },
     {
@@ -2650,7 +2624,6 @@
       "legacy_candidate_task_ids": [
         "T42-PHYSICS-DEFORMER-OPERATION"
       ],
-      "next_task_id": "TROOT-UAI-50-MODELING-WORLD-PHYSICS-EXACT-MATRIX",
       "blockers": []
     },
     {
@@ -2764,7 +2737,6 @@
       "legacy_candidate_task_ids": [
         "T06-NON-HJSON-QUERY-MIGRATION"
       ],
-      "next_task_id": "TROOT-UAI-47A-READ-QUERY-SEMANTIC-CLOSURE",
       "blockers": []
     },
     {
@@ -2829,7 +2801,6 @@
       "legacy_candidate_task_ids": [
         "T43-REFERENCE-OPERATION"
       ],
-      "next_task_id": "TROOT-UAI-55-FINAL-INTEGRATED-AUDIT",
       "blockers": []
     },
     {
@@ -2914,7 +2885,6 @@
       "legacy_candidate_task_ids": [
         "T58-RIG-SPATIAL-COMMAND-MIGRATION"
       ],
-      "next_task_id": "TROOT-UAI-49-SIMULATION-ANIMATION-AUDIO-EXACT-MATRIX",
       "blockers": []
     },
     {
@@ -2975,7 +2945,6 @@
       "legacy_candidate_task_ids": [
         "T29-EXTERNAL-SKIN-WEIGHT-IMPORT"
       ],
-      "next_task_id": "TROOT-UAI-51-EDITOR-IMPORT-LIFECYCLE-EXACT-MATRIX",
       "blockers": []
     },
     {
@@ -3057,7 +3026,6 @@
       "legacy_candidate_task_ids": [
         "T46-SPATIAL-CONTENT-OPERATION"
       ],
-      "next_task_id": "TROOT-UAI-50-MODELING-WORLD-PHYSICS-EXACT-MATRIX",
       "blockers": [
         "DCR-UAI-T50-SPATIAL-CANDIDATE-EVALUATION"
       ]
@@ -3133,7 +3101,6 @@
       "legacy_candidate_task_ids": [
         "T40-TEXTURE-GRAPH-OPERATION"
       ],
-      "next_task_id": "TROOT-UAI-48-ASSET-HJSON-GRAPH-EXACT-MATRIX",
       "blockers": []
     },
     {
@@ -3208,7 +3175,6 @@
         "T22-SEQUENCE-DOMAIN",
         "T55-TIMELINE-SEQUENCE-COMMAND-MIGRATION"
       ],
-      "next_task_id": "TROOT-UAI-49-SIMULATION-ANIMATION-AUDIO-EXACT-MATRIX",
       "blockers": []
     },
     {
@@ -3277,7 +3243,6 @@
         "T15-UMG-WIDGET-DOMAIN",
         "T48-UMG-COMMAND-MIGRATION"
       ],
-      "next_task_id": "TROOT-UAI-48-ASSET-HJSON-GRAPH-EXACT-MATRIX",
       "blockers": []
     },
     {
@@ -3333,10 +3298,10 @@
           "historical:T63-UNIFIED-CONTENT-SEARCH",
           "TROOT-UAI-35-DISCOVERY-IDENTITY-VERTICAL",
           "runtimeLogs/uai-development/TROOT-UAI-35-DISCOVERY-IDENTITY-VERTICAL/20260820-r3/owned_automation/receipts/t35_owned_automation.json",
-        "runtimeLogs/uai-development/TROOT-UAI-35-DISCOVERY-IDENTITY-VERTICAL/20260820-r3/public_sdk_product/receipt.json",
-        "TROOT-UAI-45-PUBLIC-DISTRIBUTION-PARITY",
-        "TROOT-UAI-47-DISCOVERY-QUERY-EXACT-MATRIX",
-        "runtimeLogs/delivery_workflow/TROOT-UAI-47-DISCOVERY-QUERY-EXACT-MATRIX/20260822-t47-r2/content-discovery-targets.json"
+          "runtimeLogs/uai-development/TROOT-UAI-35-DISCOVERY-IDENTITY-VERTICAL/20260820-r3/public_sdk_product/receipt.json",
+          "TROOT-UAI-45-PUBLIC-DISTRIBUTION-PARITY",
+          "TROOT-UAI-47-DISCOVERY-QUERY-EXACT-MATRIX",
+          "runtimeLogs/delivery_workflow/TROOT-UAI-47-DISCOVERY-QUERY-EXACT-MATRIX/20260822-t47-r2/content-discovery-targets.json"
         ],
         "not_proven": [
           "future content providers beyond current Asset Registry and Editor World",
@@ -3347,7 +3312,6 @@
       "legacy_candidate_task_ids": [
         "T63-UNIFIED-CONTENT-SEARCH"
       ],
-      "next_task_id": "TROOT-UAI-55-FINAL-INTEGRATED-AUDIT",
       "blockers": []
     },
     {
@@ -3437,7 +3401,6 @@
       "legacy_candidate_task_ids": [
         "T45-VIEWPORT-GRAPH-CONTROL"
       ],
-      "next_task_id": "TROOT-UAI-52-OWNED-RHI-REAL-CONTENT-VISUAL",
       "blockers": []
     },
     {
@@ -3522,7 +3485,6 @@
         "T26-LEVEL-WORLD-DOMAIN",
         "T59-WORLD-COMMAND-MIGRATION"
       ],
-      "next_task_id": "TROOT-UAI-50-MODELING-WORLD-PHYSICS-EXACT-MATRIX",
       "blockers": []
     }
   ],
@@ -3532,40 +3494,35 @@
       "capability_unit_id": "CU-ANIMATION-BLUEPRINT-COMMANDS",
       "current_status": "absent_from_current_manifest",
       "current_resolution_status": "required_capability_contract_recorded_no_exact_successor_claim",
-      "resolution_evidence_task_id": "TROOT-UAI-37-BLUEPRINT-UMG-GRAPH-VERTICAL",
-      "next_task_id": "TROOT-UAI-45-PUBLIC-DISTRIBUTION-PARITY"
+      "resolution_evidence_task_id": "TROOT-UAI-37-BLUEPRINT-UMG-GRAPH-VERTICAL"
     },
     {
       "command_id": "blueprint.authoring.apply",
       "capability_unit_id": "CU-BLUEPRINT-COMMANDS",
       "current_status": "absent_from_current_manifest",
       "current_resolution_status": "required_capability_contract_recorded_no_exact_successor_claim",
-      "resolution_evidence_task_id": "TROOT-UAI-37-BLUEPRINT-UMG-GRAPH-VERTICAL",
-      "next_task_id": "TROOT-UAI-45-PUBLIC-DISTRIBUTION-PARITY"
+      "resolution_evidence_task_id": "TROOT-UAI-37-BLUEPRINT-UMG-GRAPH-VERTICAL"
     },
     {
       "command_id": "niagara.script.graph.apply",
       "capability_unit_id": "CU-NIAGARA-COMMANDS",
       "current_status": "absent_from_current_manifest",
       "current_resolution_status": "required_capability_contract_recorded_no_exact_successor_claim",
-      "resolution_evidence_task_id": "TROOT-UAI-39-NIAGARA-PCG-AI-VERTICAL",
-      "next_task_id": "TROOT-UAI-45-PUBLIC-DISTRIBUTION-PARITY"
+      "resolution_evidence_task_id": "TROOT-UAI-39-NIAGARA-PCG-AI-VERTICAL"
     },
     {
       "command_id": "niagara.stack.apply",
       "capability_unit_id": "CU-NIAGARA-COMMANDS",
       "current_status": "absent_from_current_manifest",
       "current_resolution_status": "required_capability_contract_recorded_no_exact_successor_claim",
-      "resolution_evidence_task_id": "TROOT-UAI-39-NIAGARA-PCG-AI-VERTICAL",
-      "next_task_id": "TROOT-UAI-45-PUBLIC-DISTRIBUTION-PARITY"
+      "resolution_evidence_task_id": "TROOT-UAI-39-NIAGARA-PCG-AI-VERTICAL"
     },
     {
       "command_id": "umg.authoring.apply",
       "capability_unit_id": "CU-UMG-COMMANDS",
       "current_status": "absent_from_current_manifest",
       "current_resolution_status": "required_capability_contract_recorded_no_exact_successor_claim",
-      "resolution_evidence_task_id": "TROOT-UAI-37-BLUEPRINT-UMG-GRAPH-VERTICAL",
-      "next_task_id": "TROOT-UAI-45-PUBLIC-DISTRIBUTION-PARITY"
+      "resolution_evidence_task_id": "TROOT-UAI-37-BLUEPRINT-UMG-GRAPH-VERTICAL"
     }
   ],
   "recovered_historical_identities": [
@@ -3589,8 +3546,7 @@
       "successor_equivalence": "non_exact",
       "current_capability_evidence_status": "c8d_c9_public_sdk_product_verified",
       "legacy_compiled_surface_status": "historical_identity_absent_from_current_compiled_registry",
-      "resolution_evidence_task_id": "TROOT-UAI-50-MODELING-WORLD-PHYSICS-EXACT-MATRIX",
-      "next_task_id": "TROOT-UAI-50-MODELING-WORLD-PHYSICS-EXACT-MATRIX"
+      "resolution_evidence_task_id": "TROOT-UAI-50-MODELING-WORLD-PHYSICS-EXACT-MATRIX"
     },
     {
       "historical_command_id": "modeling_voxel_grid_apply",
@@ -3612,8 +3568,7 @@
       "successor_equivalence": "non_exact",
       "current_capability_evidence_status": "c8d_c9_public_sdk_product_verified",
       "legacy_compiled_surface_status": "historical_identity_absent_from_current_compiled_registry",
-      "resolution_evidence_task_id": "TROOT-UAI-50-MODELING-WORLD-PHYSICS-EXACT-MATRIX",
-      "next_task_id": "TROOT-UAI-50-MODELING-WORLD-PHYSICS-EXACT-MATRIX"
+      "resolution_evidence_task_id": "TROOT-UAI-50-MODELING-WORLD-PHYSICS-EXACT-MATRIX"
     },
     {
       "historical_command_id": "modeling_voxel_grid_begin",
@@ -3635,8 +3590,7 @@
       "successor_equivalence": "non_exact",
       "current_capability_evidence_status": "c8d_c9_public_sdk_product_verified",
       "legacy_compiled_surface_status": "historical_identity_absent_from_current_compiled_registry",
-      "resolution_evidence_task_id": "TROOT-UAI-50-MODELING-WORLD-PHYSICS-EXACT-MATRIX",
-      "next_task_id": "TROOT-UAI-50-MODELING-WORLD-PHYSICS-EXACT-MATRIX"
+      "resolution_evidence_task_id": "TROOT-UAI-50-MODELING-WORLD-PHYSICS-EXACT-MATRIX"
     },
     {
       "historical_command_id": "modeling_voxel_grid_remove_bounds",
@@ -3658,110 +3612,7 @@
       "successor_equivalence": "non_exact",
       "current_capability_evidence_status": "c8d_c9_public_sdk_product_verified",
       "legacy_compiled_surface_status": "historical_identity_absent_from_current_compiled_registry",
-      "resolution_evidence_task_id": "TROOT-UAI-50-MODELING-WORLD-PHYSICS-EXACT-MATRIX",
-      "next_task_id": "TROOT-UAI-50-MODELING-WORLD-PHYSICS-EXACT-MATRIX"
-    }
-  ],
-  "delivery_tasks": [
-    {
-      "id": "TROOT-UAI-35-DISCOVERY-IDENTITY-VERTICAL",
-      "lane": "discovery",
-      "catalog_role": "vertical implementation and current evidence consumer"
-    },
-    {
-      "id": "TROOT-UAI-36-STRUCTURED-HJSON-VERTICAL",
-      "lane": "hjson",
-      "catalog_role": "vertical implementation and current evidence consumer"
-    },
-    {
-      "id": "TROOT-UAI-37-BLUEPRINT-UMG-GRAPH-VERTICAL",
-      "lane": "blueprint",
-      "catalog_role": "vertical implementation and current evidence consumer"
-    },
-    {
-      "id": "TROOT-UAI-38-ASSET-MATERIAL-TEXTURE-MEDIA-VERTICAL",
-      "lane": "asset",
-      "catalog_role": "vertical implementation and current evidence consumer"
-    },
-    {
-      "id": "TROOT-UAI-39-NIAGARA-PCG-AI-VERTICAL",
-      "lane": "simulation",
-      "catalog_role": "vertical implementation and current evidence consumer"
-    },
-    {
-      "id": "TROOT-UAI-40-ANIMATION-RIG-AUDIO-VERTICAL",
-      "lane": "animation",
-      "catalog_role": "vertical implementation and current evidence consumer"
-    },
-    {
-      "id": "TROOT-UAI-41-MODELING-WHITEBOX-PHYSICS-VERTICAL",
-      "lane": "modeling",
-      "catalog_role": "vertical implementation and current evidence consumer"
-    },
-    {
-      "id": "TROOT-UAI-42-WORLD-VIEWPORT-SPATIAL-VERTICAL",
-      "lane": "world",
-      "catalog_role": "vertical implementation and current evidence consumer"
-    },
-    {
-      "id": "TROOT-UAI-43-EDITOR-IMPORT-LIFECYCLE-VERTICAL",
-      "lane": "editor",
-      "catalog_role": "vertical implementation and current evidence consumer"
-    },
-    {
-      "id": "TROOT-UAI-44-LEGACY-SURFACE-EXIT",
-      "lane": "legacy_exit",
-      "catalog_role": "vertical implementation and current evidence consumer"
-    },
-    {
-      "id": "TROOT-UAI-45-PUBLIC-DISTRIBUTION-PARITY",
-      "lane": "distribution",
-      "catalog_role": "cross-repository distribution evidence consumer"
-    },
-    {
-      "id": "TROOT-UAI-46-REAL-CONTENT-ACCEPTANCE",
-      "lane": "acceptance",
-      "catalog_role": "real-content quality and final coverage evidence consumer"
-    },
-    {
-      "id": "TROOT-UAI-47-DISCOVERY-QUERY-EXACT-MATRIX",
-      "lane": "discovery_exact_matrix",
-      "catalog_role": "close discovery, candidate, read-query and reference exact product cells"
-    },
-    {
-      "id": "TROOT-UAI-47A-READ-QUERY-SEMANTIC-CLOSURE",
-      "lane": "read_query_semantic_closure",
-      "catalog_role": "replace selector-only or over-broad successful readbacks with exact domain facts and typed unsupported boundaries"
-    },
-    {
-      "id": "TROOT-UAI-48-ASSET-HJSON-GRAPH-EXACT-MATRIX",
-      "lane": "asset_hjson_graph_exact_matrix",
-      "catalog_role": "close asset, structured authoring and graph exact product cells"
-    },
-    {
-      "id": "TROOT-UAI-49-SIMULATION-ANIMATION-AUDIO-EXACT-MATRIX",
-      "lane": "simulation_animation_audio_exact_matrix",
-      "catalog_role": "close simulation, animation, rig, timeline and audio exact product cells"
-    },
-    {
-      "id": "TROOT-UAI-50-MODELING-WORLD-PHYSICS-EXACT-MATRIX",
-      "lane": "modeling_world_physics_exact_matrix",
-      "catalog_role": "close modeling, world, spatial, landscape and physics exact product cells"
-    },
-    {
-      "id": "TROOT-UAI-51-EDITOR-IMPORT-LIFECYCLE-EXACT-MATRIX",
-      "lane": "editor_import_lifecycle_exact_matrix",
-      "catalog_role": "close editor, import, destructive and operation exact product cells"
-    },
-    {
-      "id": "TROOT-UAI-52-OWNED-RHI-REAL-CONTENT-VISUAL",
-      "lane": "real_content_visual",
-      "catalog_role": "close the noninterfering real-scene viewport and capture oracle"
-    },
-    {
-      "id": "TROOT-UAI-55-FINAL-INTEGRATED-AUDIT",
-      "lane": "final_integrated_audit",
-      "catalog_role": "consume final capability and cross-consumer evidence without replacing target review"
+      "resolution_evidence_task_id": "TROOT-UAI-50-MODELING-WORLD-PHYSICS-EXACT-MATRIX"
     }
   ]
 }
