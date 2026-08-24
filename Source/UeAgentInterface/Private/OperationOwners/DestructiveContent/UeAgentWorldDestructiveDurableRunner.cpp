@@ -833,6 +833,7 @@ namespace UE::UAI::OperationOwners::DestructiveContent
 					Inventory.GetArtifacts(),
 					[&Mutation, &SemanticError](
 						UWorld& PersistedWorld,
+						const FPersistedWorldReferenceMap&,
 						FPersistedWorldLoadError& OutError)
 					{
 						if (Mutation->VerifyPersisted(

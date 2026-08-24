@@ -1790,6 +1790,7 @@ namespace UE::UAI::Composition::SimpleAuthoring::Modeling
 					Artifacts,
 					[&](
 						UWorld& SnapshotWorld,
+						const FPersistedWorldReferenceMap&,
 						FPersistedWorldLoadError& ObserverError)
 					{
 						if (!Deadline.CanContinue()

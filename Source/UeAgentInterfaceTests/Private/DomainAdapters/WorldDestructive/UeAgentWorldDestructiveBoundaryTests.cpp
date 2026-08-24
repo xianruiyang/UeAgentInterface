@@ -104,6 +104,27 @@ namespace
 				OutOwner,
 				OutError);
 	}
+
+	bool IsTaskOwnedRetainedFixturePackage(const FString& PackageName)
+	{
+		if (!FPackageName::IsValidLongPackageName(PackageName, true))
+		{
+			return false;
+		}
+		FString Relative = PackageName;
+		if (!Relative.RemoveFromStart(TEXT("/Game/UAI/Tests/T")))
+		{
+			return false;
+		}
+		int32 SeparatorIndex = INDEX_NONE;
+		if (!Relative.FindChar(TEXT('/'), SeparatorIndex)
+			|| SeparatorIndex <= 0
+			|| SeparatorIndex >= Relative.Len() - 1)
+		{
+			return false;
+		}
+		return Relative.Left(SeparatorIndex).IsNumeric();
+	}
 }
 
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(
@@ -388,12 +409,12 @@ bool FUeAgentWorldDestructiveDataLayerDurableBoundaryTest::RunTest(
 	RetainedFixturePackage.TrimStartAndEndInline();
 	const bool bRetainPublicFixture = !RetainedFixturePackage.IsEmpty();
 	if (bRetainPublicFixture
-		&& (!RetainedFixturePackage.StartsWith(TEXT("/Game/UAI/Tests/T65/"))
-			|| !FPackageName::IsValidLongPackageName(
-				RetainedFixturePackage,
-				true)))
+		&& !IsTaskOwnedRetainedFixturePackage(RetainedFixturePackage))
 	{
-		AddError(TEXT("retained fixture package must be an exact T65 /Game package"));
+		AddError(
+			TEXT(
+				"retained fixture package must be an exact "
+				"/Game/UAI/Tests/T<digits>/... package"));
 		return false;
 	}
 	const FString PackageName = bRetainPublicFixture

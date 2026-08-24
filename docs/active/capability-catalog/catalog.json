@@ -2797,10 +2797,10 @@
         "persisted state"
       ],
       "command_contract_state": "registered_exact_contract",
-      "implementation_state": "current_query_owner_exact_public_matrix_with_semantic_depth_gaps",
+      "implementation_state": "current_query_owner_exact_public_matrix_with_data_layer_consumer_closed_and_four_semantic_depth_gaps",
       "evidence": {
-        "highest_verified_layer": "public_sdk_real_ue_exact_execution_matrix_with_scoped_semantic_gaps",
-        "delivery_state": "all_40_public_reads_executed_36_current_fixture_successes_semantic_closure_required",
+        "highest_verified_layer": "public_sdk_real_ue_exact_execution_matrix_plus_data_layer_query_to_destructive_consumer_with_four_scoped_semantic_gaps",
+        "delivery_state": "all_40_public_reads_executed_36_current_fixture_successes_and_data_layer_positive_consumer_closed",
         "evidence_refs": [
           "TROOT-UAI-32-INTEGRATED-ACTIVATION-AUTHORITY",
           "TROOT-UAI-33-PUBLIC-CONTRACT-ORACLE-REALIGNMENT",
@@ -2811,13 +2811,14 @@
           "runtimeLogs/delivery_workflow/TROOT-UAI-47-DISCOVERY-QUERY-EXACT-MATRIX/20260822-t47-r2/summary.json",
           "runtimeLogs/delivery_workflow/TROOT-UAI-47-DISCOVERY-QUERY-EXACT-MATRIX/20260822-t47-r2/generic-read-matrix.json",
           "runtimeLogs/delivery_workflow/TROOT-UAI-47-DISCOVERY-QUERY-EXACT-MATRIX/20260822-t47/automation/asset-project-read.json",
-          "runtimeLogs/delivery_workflow/TROOT-UAI-47-DISCOVERY-QUERY-EXACT-MATRIX/20260822-t47/automation/t06-query.json"
+          "runtimeLogs/delivery_workflow/TROOT-UAI-47-DISCOVERY-QUERY-EXACT-MATRIX/20260822-t47/automation/t06-query.json",
+          "TROOT-UAI-70-WORLD-DATA-LAYERS-QUERY-DELETE-VERTICAL",
+          "runtimeLogs/t70/final1-vertical-receipt.json"
         ],
         "not_proven": [
           "asset.collection, asset.sample, asset.relations and generic validation modes returning the requested domain fact instead of selector/identity-only snapshots",
           "editor.open_assets and editor.dirty_resources using distinct exact resource sets and honoring resource filters",
           "generic project.platform/project.validation modes honoring platform and validation selectors",
-          "world.data_layers returning real Data Layer instances and optional actor membership rather than streaming-level count",
           "positive real-fixture product behavior for world.nav_connectivity, world.nav_find_path, world.nav_project_point and world.physics_constraint"
         ]
       },

@@ -65,6 +65,7 @@ namespace UE::UAI::DomainAdapters::WorldSimpleEffect
 			bool bValueA = false;
 			bool bValueB = false;
 			bool bValueC = false;
+			TArray<TWeakObjectPtr<UObject>> DurableDependencies;
 		};
 
 		using FResolvedReferenceMap =
@@ -96,56 +97,64 @@ namespace UE::UAI::DomainAdapters::WorldSimpleEffect
 				Index < Rollback.Num();
 				++Index)
 			{
-				UObject* const MutatedObject =
-					Rollback[Index].Primary.Get();
-				if (!MutatedObject)
+				TArray<TWeakObjectPtr<UObject>> DurableObjects;
+				DurableObjects.Add(Rollback[Index].Primary);
+				DurableObjects.Append(
+					Rollback[Index].DurableDependencies);
+				for (const TWeakObjectPtr<UObject>& WeakObject
+					: DurableObjects)
 				{
-					continue;
-				}
-				UPackage* Package =
-					MutatedObject->GetExternalPackage();
-				if (!Package)
-				{
-					Package = MutatedObject->GetOutermost();
-				}
-				if (!Package
-					|| Package == GetTransientPackage()
-					|| !FPackageName::IsValidLongPackageName(
-						Package->GetName()))
-				{
-					return Fail(
-						OutError,
-						TEXT("world_simple_durable_package_invalid"),
-						MutatedObject->GetPathName());
-				}
-				const FAssetDurableTarget Candidate(
-					Change.GetIdentity(),
-					Package->GetName(),
-					EPackageHeaderKind::EvidenceRequired,
-					Intent,
-					ERollbackGrade::DurableBackup);
-				const FString CandidateKey =
-					Candidate.GetDurableTargetKey();
-				const FAssetDurableTarget* Existing =
-					OutTargets.FindByPredicate(
-						[&CandidateKey](
-							const FAssetDurableTarget& Target)
-						{
-							return Target.GetDurableTargetKey()
-								== CandidateKey;
-						});
-				if (Existing)
-				{
-					if (Existing->GetIntent() != Candidate.GetIntent())
+					UObject* const DurableObject = WeakObject.Get();
+					if (!DurableObject)
+					{
+						continue;
+					}
+					UPackage* Package =
+						DurableObject->GetExternalPackage();
+					if (!Package)
+					{
+						Package = DurableObject->GetOutermost();
+					}
+					if (!Package
+						|| Package == GetTransientPackage()
+						|| !FPackageName::IsValidLongPackageName(
+							Package->GetName()))
 					{
 						return Fail(
 							OutError,
-							TEXT("world_simple_durable_package_conflict"),
-							CandidateKey);
+							TEXT("world_simple_durable_package_invalid"),
+							DurableObject->GetPathName());
 					}
-					continue;
+					const FAssetDurableTarget Candidate(
+						Change.GetIdentity(),
+						Package->GetName(),
+						EPackageHeaderKind::EvidenceRequired,
+						Intent,
+						ERollbackGrade::DurableBackup);
+					const FString CandidateKey =
+						Candidate.GetDurableTargetKey();
+					const FAssetDurableTarget* Existing =
+						OutTargets.FindByPredicate(
+							[&CandidateKey](
+								const FAssetDurableTarget& Target)
+							{
+								return Target.GetDurableTargetKey()
+									== CandidateKey;
+							});
+					if (Existing)
+					{
+						if (Existing->GetIntent()
+							!= Candidate.GetIntent())
+						{
+							return Fail(
+								OutError,
+								TEXT("world_simple_durable_package_conflict"),
+								CandidateKey);
+						}
+						continue;
+					}
+					OutTargets.Add(Candidate);
 				}
-				OutTargets.Add(Candidate);
 			}
 			return true;
 		}
@@ -1601,6 +1610,8 @@ namespace UE::UAI::DomainAdapters::WorldSimpleEffect
 					TEXT(
 						"world_simple_data_layer_manager_missing"));
 			}
+			Rollback.DurableDependencies.Add(
+				ActorWorldDataLayers);
 			for (const UDataLayerInstance* Member : Members)
 			{
 				const UDataLayerAsset* Asset =

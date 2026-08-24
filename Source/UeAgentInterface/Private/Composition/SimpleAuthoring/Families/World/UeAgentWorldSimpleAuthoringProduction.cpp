@@ -2937,9 +2937,7 @@ namespace UE::UAI::Composition::SimpleAuthoring::World
 								{
 									return false;
 								}
-								TSet<
-									const UDataLayerInstance*>
-										Expected;
+								TSet<FString> Expected;
 								for (const FString& MemberRef
 									: MemberRefs)
 								{
@@ -2954,25 +2952,35 @@ namespace UE::UAI::Composition::SimpleAuthoring::World
 									{
 										return false;
 									}
-									Expected.Add(Member);
+									const UDataLayerAsset* Asset =
+										Member->GetAsset();
+									if (!Asset)
+									{
+										OutError.Code = TEXT(
+											"world_simple_data_layer_asset_missing");
+										OutError.SubjectId = MemberRef;
+										return false;
+									}
+									Expected.Add(Asset->GetPathName());
 								}
-								TSet<
-									const UDataLayerInstance*>
-										Actual;
-								for (const UDataLayerInstance*
-									Instance
-									: Actor
-										->GetDataLayerInstances())
+								// Actor membership is serialized as direct
+								// DataLayerAsset references. The instance view is
+								// derived through an initialized WorldPartition
+								// manager and is not a persisted-state oracle.
+								TSet<FString> Actual;
+								for (const UDataLayerAsset* Asset
+									: Actor->GetDataLayerAssets(false))
 								{
-									Actual.Add(Instance);
+									if (Asset)
+									{
+										Actual.Add(Asset->GetPathName());
+									}
 								}
 								const auto ContainsAll =
 									[&Actual](
-										const TSet<
-											const UDataLayerInstance*>&
-											Required)
+										const TSet<FString>& Required)
 									{
-										for (const auto* Member
+										for (const FString& Member
 											: Required)
 										{
 											if (!Actual.Contains(
@@ -3000,7 +3008,7 @@ namespace UE::UAI::Composition::SimpleAuthoring::World
 									Mode == TEXT("remove"))
 								{
 									bSatisfied = true;
-									for (const auto* Member
+									for (const FString& Member
 										: Expected)
 									{
 										bSatisfied =
@@ -3161,6 +3169,63 @@ namespace UE::UAI::Composition::SimpleAuthoring::World
 			FString ContextRevision;
 		};
 
+		class FPersistedWorldReferenceResolver final
+			: public IUeAgentWorldSimpleEffectReferenceResolver
+		{
+		public:
+			FPersistedWorldReferenceResolver(
+				TSharedRef<
+					IUeAgentWorldSimpleEffectReferenceResolver,
+					ESPMode::ThreadSafe> InSourceResolver,
+				FPersistedWorldReferenceMap InReferenceMap)
+				: SourceResolver(MoveTemp(InSourceResolver))
+				, ReferenceMap(MoveTemp(InReferenceMap))
+			{
+			}
+
+			bool TryResolveReference(
+				UWorld& World,
+				const FString& CanonicalRef,
+				UObject*& OutObject,
+				FExecutionMutationError& OutError) override
+			{
+				FString SnapshotRef;
+				if (!ReferenceMap.TryMapReference(
+						CanonicalRef,
+						SnapshotRef))
+				{
+					return SourceResolver->TryResolveReference(
+						World,
+						CanonicalRef,
+						OutObject,
+						OutError);
+				}
+				FExecutionMutationError ResolveError;
+				if (SourceResolver->TryResolveReference(
+						World,
+						SnapshotRef,
+						OutObject,
+						ResolveError))
+				{
+					return true;
+				}
+				OutObject = nullptr;
+				OutError = FExecutionMutationError(
+					ResolveError.GetCode().IsEmpty()
+						? FString(TEXT(
+							"world_simple_persisted_reference_unresolved"))
+						: ResolveError.GetCode(),
+					CanonicalRef);
+				return false;
+			}
+
+		private:
+			TSharedRef<
+				IUeAgentWorldSimpleEffectReferenceResolver,
+				ESPMode::ThreadSafe> SourceResolver;
+			FPersistedWorldReferenceMap ReferenceMap;
+		};
+
 		class FWorldArtifactPersistedStateOracle final
 			: public IPersistedStateOracle
 		{
@@ -3206,6 +3271,7 @@ namespace UE::UAI::Composition::SimpleAuthoring::World
 				const bool bObserved = TryObservePersistedWorld(
 					Artifacts,
 					[&](UWorld& SnapshotWorld,
+						const FPersistedWorldReferenceMap& ReferenceMap,
 						FPersistedWorldLoadError& ObserverError)
 					{
 						if (!Deadline.CanContinue()
@@ -3243,11 +3309,18 @@ namespace UE::UAI::Composition::SimpleAuthoring::World
 								SourceBinding.GetSummary()
 									.GetIdentity()
 									.GetGeneration());
+						const TSharedRef<
+							FPersistedWorldReferenceResolver,
+							ESPMode::ThreadSafe> PersistedResolver = MakeShared<
+							FPersistedWorldReferenceResolver,
+							ESPMode::ThreadSafe>(
+								ReferenceResolver,
+								ReferenceMap);
 						FWorldStateReadPort Reader(
 							ReadPortId,
 							EUeAgentStatePlane::Persisted,
 							Catalog,
-							ReferenceResolver,
+							PersistedResolver,
 							false);
 						FUeAgentDiscoveryError ReadError;
 						if (!Reader.TryRead(

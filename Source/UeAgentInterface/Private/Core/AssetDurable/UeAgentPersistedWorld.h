@@ -15,8 +15,28 @@ namespace UE::UAI::AssetDurable
 		bool IsPresent() const { return !Code.IsEmpty(); }
 	};
 
+	class UEAGENTINTERFACE_API FPersistedWorldReferenceMap final
+	{
+	public:
+		FPersistedWorldReferenceMap(
+			FString InSourceWorldRef,
+			FString InSnapshotWorldRef);
+
+		bool IsValid() const;
+		bool TryMapReference(
+			const FString& SourceRef,
+			FString& OutSnapshotRef) const;
+
+	private:
+		FString SourceWorldRef;
+		FString SnapshotWorldRef;
+	};
+
 	using FPersistedWorldObserver =
-		TFunctionRef<bool(UWorld& World, FPersistedWorldLoadError& OutError)>;
+		TFunctionRef<bool(
+			UWorld& World,
+			const FPersistedWorldReferenceMap& ReferenceMap,
+			FPersistedWorldLoadError& OutError)>;
 
 	/**
 	 * Loads the exact persisted Map and any receipt-owned External Actor package

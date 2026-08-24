@@ -2245,6 +2245,7 @@ namespace UE::UAI::DomainAdapters::ModelingGeometry::VoxelGrid
 				const bool bObserved = TryObservePersistedWorld(
 					Session.DurableSession->GetInventory().GetArtifacts(),
 					[&](UWorld& PersistedWorld,
+						const FPersistedWorldReferenceMap&,
 						FPersistedWorldLoadError& ObserverError)
 					{
 						AActor* PersistedActor = nullptr;

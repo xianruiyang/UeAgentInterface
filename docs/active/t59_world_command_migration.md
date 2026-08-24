@@ -117,6 +117,14 @@ real UE mechanics, persistence and independent readback. Wall geometry keeps
 `semantic_frame_id`, write/read/verify frames, units, basis evidence and conversion chain explicit.
 Prewrite failure leaves no residue, unknown post-write state is reconciled, and cleanup is bounded.
 
+`world.data_layer_relation.update` treats direct Actor membership as two-package durable state:
+the member Actor external package carries the serialized `DataLayerAsset` reference, while the
+`AWorldDataLayers` external package carries the referenced instance and its private asset. Both are
+enlisted through the native mutation facts before persistence. Independent World readback loads the
+exact map and external packages into one isolated snapshot, remaps source World references to that
+snapshot, and compares the Actor's direct serialized asset identities. It does not use the
+WorldPartition-manager-derived `GetDataLayerInstances()` view as a persisted-state oracle.
+
 The complete 26-row historical mapping is
 `docs/active/successors/t59_world_command_migration.json`. Every old command ID is absent from the
 active manifest, generated SDK and compatibility aliases; the mapping identifies the exact current

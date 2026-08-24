@@ -91,7 +91,8 @@ namespace
 			const FString Suffix =
 				FGuid::NewGuid().ToString(EGuidFormats::Digits);
 			Package = CreatePackage(
-				*(TEXT("/Temp/UAI/WorldSimple/") + Suffix));
+				*(TEXT("/Game/UAI/Tests/Automation/WorldSimple/")
+					+ Suffix));
 			World = UWorld::CreateWorld(
 				EWorldType::EditorPreview,
 				false,
@@ -958,6 +959,33 @@ namespace
 			bConfirmed);
 	}
 
+	UPackage* ResolveDurablePackage(UObject* Object)
+	{
+		if (!Object)
+		{
+			return nullptr;
+		}
+		if (UPackage* ExternalPackage = Object->GetExternalPackage())
+		{
+			return ExternalPackage;
+		}
+		return Object->GetOutermost();
+	}
+
+	bool HasDurableTargetForObject(
+		const FUeAgentGenericEffectApplyResult& Result,
+		UObject* Object)
+	{
+		const UPackage* Package = ResolveDurablePackage(Object);
+		return Package
+			&& Result.GetDurableTargets().ContainsByPredicate(
+				[Package](const auto& Target)
+				{
+					return Target.GetDurableLocation()
+						== Package->GetName();
+				});
+	}
+
 	int32 CountWallSegments(UWorld& World)
 	{
 		int32 Count = 0;
@@ -1270,6 +1298,32 @@ bool FUeAgentWorldSimpleEffectTenCapabilitiesOwnedWorldTest::RunTest(
 			TEXT("DataLayer membership reads from real actor"),
 			Owner.Actor->GetDataLayerInstanceNames().Contains(
 				Owner.DataLayerInstance->GetDataLayerFName()));
+		TestTrue(
+			TEXT("DataLayer membership persists as a direct Actor asset reference"),
+			Owner.Actor->ContainsDataLayer(
+				Owner.DataLayerInstance->GetAsset()));
+		UPackage* const ActorPackage =
+			ResolveDurablePackage(Owner.Actor);
+		UPackage* const CarrierPackage =
+			ResolveDurablePackage(Owner.WorldDataLayers);
+		TestNotNull(
+			TEXT("DataLayer membership owns a durable Actor package"),
+			ActorPackage);
+		TestNotNull(
+			TEXT("DataLayer membership owns a durable carrier package"),
+			CarrierPackage);
+		TestTrue(
+			TEXT("membership fixture distinguishes Actor and carrier packages"),
+			ActorPackage && CarrierPackage
+				&& ActorPackage != CarrierPackage);
+		TestTrue(
+			TEXT("DataLayer membership enlists the Actor package"),
+			HasDurableTargetForObject(Applied.Result, Owner.Actor));
+		TestTrue(
+			TEXT("DataLayer membership enlists the WorldDataLayers carrier"),
+			HasDurableTargetForObject(
+				Applied.Result,
+				Owner.WorldDataLayers));
 		RollbackCapability(
 			this,
 			*Owner.World,

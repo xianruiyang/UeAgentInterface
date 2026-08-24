@@ -16,6 +16,50 @@
 
 namespace UE::UAI::AssetDurable
 {
+	FPersistedWorldReferenceMap::FPersistedWorldReferenceMap(
+		FString InSourceWorldRef,
+		FString InSnapshotWorldRef)
+		: SourceWorldRef(MoveTemp(InSourceWorldRef))
+		, SnapshotWorldRef(MoveTemp(InSnapshotWorldRef))
+	{
+	}
+
+	bool FPersistedWorldReferenceMap::IsValid() const
+	{
+		return !SourceWorldRef.IsEmpty()
+			&& SourceWorldRef == SourceWorldRef.TrimStartAndEnd()
+			&& !SnapshotWorldRef.IsEmpty()
+			&& SnapshotWorldRef == SnapshotWorldRef.TrimStartAndEnd();
+	}
+
+	bool FPersistedWorldReferenceMap::TryMapReference(
+		const FString& SourceRef,
+		FString& OutSnapshotRef) const
+	{
+		OutSnapshotRef.Reset();
+		if (!IsValid()
+			|| SourceRef.IsEmpty()
+			|| SourceRef != SourceRef.TrimStartAndEnd())
+		{
+			return false;
+		}
+		if (SourceRef == SourceWorldRef)
+		{
+			OutSnapshotRef = SnapshotWorldRef;
+			return true;
+		}
+		const FString WorldObjectPrefix = SourceWorldRef + TEXT(":");
+		if (!SourceRef.StartsWith(
+				WorldObjectPrefix,
+				ESearchCase::CaseSensitive))
+		{
+			return false;
+		}
+		OutSnapshotRef = SnapshotWorldRef
+			+ SourceRef.RightChop(SourceWorldRef.Len());
+		return true;
+	}
+
 	namespace
 	{
 		void SetError(
@@ -193,6 +237,18 @@ namespace UE::UAI::AssetDurable
 		SnapshotWorld->PersistentLevel->OwningWorld = SnapshotWorld;
 		SnapshotWorld->PersistentLevel->bIsVisible = true;
 		SnapshotWorld->SetCurrentLevel(SnapshotWorld->PersistentLevel);
+		const FPersistedWorldReferenceMap ReferenceMap(
+			SourceWorldPackage + TEXT(".")
+				+ FPackageName::GetLongPackageAssetName(SourceWorldPackage),
+			SnapshotWorld->GetPathName());
+		if (!ReferenceMap.IsValid())
+		{
+			SetError(
+				OutError,
+				TEXT("persisted_world_reference_map_invalid"),
+				SourceWorldPackage);
+			return false;
+		}
 
 		for (const TPair<FString, FString>& PackagePair : InstancedPackages)
 		{
@@ -237,7 +293,10 @@ namespace UE::UAI::AssetDurable
 		}
 
 		FPersistedWorldLoadError ObserverError;
-		const bool bObserved = Observer(*SnapshotWorld, ObserverError);
+		const bool bObserved = Observer(
+			*SnapshotWorld,
+			ReferenceMap,
+			ObserverError);
 		FString CleanupError;
 		const bool bCleaned = LoadedPackages.TryUnload(CleanupError);
 		if (!bObserved)
