@@ -3014,19 +3014,21 @@
         "cleanup"
       ],
       "command_contract_state": "registered_exact_contract",
-      "implementation_state": "unique_import_owner_and_fail_closed_cases_verified_positive_product_fixture_unavailable",
+      "implementation_state": "unique_import_owner_positive_public_sdk_persistence_reload_and_fail_closed_cases_verified",
       "evidence": {
-        "highest_verified_layer": "owned_automation",
-        "delivery_state": "negative_failure_and_cleanup_verified_positive_compatible_fixture_blocked",
+        "highest_verified_layer": "persistence_independent_readback",
+        "delivery_state": "positive_public_sdk_import_saved_identity_independent_reload_and_negative_cleanup_verified",
         "evidence_refs": [
           "TROOT-UAI-43-EDITOR-IMPORT-LIFECYCLE-VERTICAL",
           "runtimeLogs/delivery_workflow/TROOT-UAI-43-EDITOR-IMPORT-LIFECYCLE-VERTICAL/20260821-full-regression-r2/automation/t43-editor-import-lifecycle-regression.receipt.discovery-set.json",
+          "plan/results/TROOT-UAI-43-EDITOR-IMPORT-LIFECYCLE-VERTICAL.r17.json",
+          "runtimeLogs/delivery_workflow/TROOT-UAI-43-EDITOR-IMPORT-LIFECYCLE-VERTICAL/20260824-skin-weight-public-sdk/attempt2-triangle/receipt.json",
           "TROOT-UAI-67-POST-T66-DISTRIBUTION-REFRESH"
         ],
         "not_proven": [
-          "positive public SDK import because no redistributable FBX skin-weight profile is currently compatible with a target SkeletalMesh fixture",
-          "saved profile identity and independent readback after unload/reload",
-          "positive and negative option variants beyond the verified missing and incompatible input cleanup cases"
+          "positive option variants beyond the verified one-triangle, one-bone, LOD0 single-profile fixture",
+          "negative option variants beyond the verified missing, incompatible and duplicate-profile identity cases",
+          "real-content deformation quality across production SkeletalMesh topology and weighting variants"
         ]
       },
       "historical_obligation_count": 1,
