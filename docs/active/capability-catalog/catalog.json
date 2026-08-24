@@ -21,8 +21,8 @@
   ],
   "command_manifest": {
     "path": "Resources/UaiCommandManifest.json",
-    "file_sha256": "sha256:2f3e6a752b3a5a1a83725d600a5a9e4c3ab3a30b983ebe043d9f80354319a7fa",
-    "registry_hash": "sha256:2221b35a6d67045add87412a09f56a49b5539714f699996e89a02fa3a7398e04",
+    "file_sha256": "sha256:98fd21e381a215aef2571b14f43fcbacb7e2a174c2f10503fc09de51b94dd278",
+    "registry_hash": "sha256:ad84ad420e34abc3250b71ee8b3b5b5825c32756d04b80a5fe7dc3c6eff50d4a",
     "command_count": 348
   },
   "historical_sources": {
@@ -1408,13 +1408,17 @@
       "source_ids": [
         "REQ-UAI-ROOT-01",
         "REQ-UAI-ROOT-02",
+        "REQ-UAI-ROOT-11",
         "AC-UAI-ROOT-02-COVERAGE-CONTRACT",
+        "AC-UAI-ROOT-11-NONINTERFERENCE-SAFETY",
         "REQ-UAI-ROOT-15",
         "AC-UAI-ROOT-15-INTEGRATED-RESTORATION",
         "UDES-UAI-ROOT-18",
         "UDES-UAI-ROOT-19",
         "DES-UAI-ROOT-INTEGRATED-CAPABILITY-ARCHITECTURE",
         "DES-UAI-PRODUCTION-EVIDENCE",
+        "DES-UAI-SAFE-EXIT-DURABLE-COMPLETION",
+        "SOL-UAI-ROOT-21-SAFE-EXIT-LIFECYCLE-COMPLETION",
         "SOL-UAI-ROOT-08-INTEGRATED-AUTHORITY-RESTORATION"
       ],
       "activation_contribution_ids": [
@@ -1448,14 +1452,18 @@
         "cleanup"
       ],
       "command_contract_state": "registered_exact_contract",
-      "implementation_state": "public_editor_session_and_owned_tool_terminal_receipt_release_verified_exact_build_matrix_pending",
+      "implementation_state": "public_editor_session_durable_safe_exit_and_owned_tool_terminal_receipt_release_verified_remaining_build_policies_consumer_driven",
       "evidence": {
         "highest_verified_layer": "persistence_independent_readback",
-        "delivery_state": "session_operation_and_owned_tool_lifecycle_verified_build_policy_matrix_pending",
+        "delivery_state": "session_operation_durable_safe_exit_and_owned_tool_lifecycle_verified_remaining_build_policies_consumer_driven",
         "evidence_refs": [
           "TROOT-UAI-43-EDITOR-IMPORT-LIFECYCLE-VERTICAL",
           "runtimeLogs/delivery_workflow/TROOT-UAI-43-EDITOR-IMPORT-LIFECYCLE-VERTICAL/20260821-public-sdk-product/receipt.json",
           "runtimeLogs/delivery_workflow/TROOT-UAI-46-REAL-CONTENT-ACCEPTANCE/20260822-t46/validation-summary.json",
+          "TROOT-UAI-56-SAFE-EXIT-DURABLE-TERMINAL",
+          "runtimeLogs/delivery_workflow/TROOT-UAI-56-SAFE-EXIT-DURABLE-TERMINAL/20260823-t56/product-clean-reject-1/product-evidence-assessment.json",
+          "runtimeLogs/delivery_workflow/TROOT-UAI-56-SAFE-EXIT-DURABLE-TERMINAL/20260823-t56/product-clean-reject-1/safe-exit-terminal.json",
+          "runtimeLogs/delivery_workflow/TROOT-UAI-57-CURRENT-PLUGIN-CANDIDATE-STABILIZATION/20260824-safe-exit/t57-safe-exit-armed-dirty-reject.receipt.discovery-set.json",
           "TROOT-UAI-45-PUBLIC-DISTRIBUTION-PARITY"
         ],
         "not_proven": [
@@ -1468,7 +1476,7 @@
       "legacy_candidate_task_ids": [
         "T34-CONTROL-COMMAND-MIGRATION"
       ],
-      "next_task_id": "TROOT-UAI-51-EDITOR-IMPORT-LIFECYCLE-EXACT-MATRIX",
+      "next_task_id": "TROOT-UAI-55-FINAL-INTEGRATED-AUDIT",
       "blockers": []
     },
     {
