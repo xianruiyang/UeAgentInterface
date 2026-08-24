@@ -146,7 +146,7 @@
           "runtimeLogs/delivery_workflow/TROOT-UAI-39-NIAGARA-PCG-AI-VERTICAL/20260821-product-r4/ai-eqs-independent-summary.json",
           "runtimeLogs/delivery_workflow/TROOT-UAI-39-NIAGARA-PCG-AI-VERTICAL/20260821-product-r4/ai-state_tree-independent-summary.json",
           "runtimeLogs/delivery_workflow/TROOT-UAI-39-NIAGARA-PCG-AI-VERTICAL/20260821-product-r4/ai-smart_object-independent-summary.json",
-          "TROOT-UAI-45-PUBLIC-DISTRIBUTION-PARITY"
+          "TROOT-UAI-67-POST-T66-DISTRIBUTION-REFRESH"
         ],
         "not_proven": [
           "direct public SDK product execution of every standalone AI exact command outside the unified HJSON ingress",
@@ -214,7 +214,7 @@
           "runtimeLogs/delivery_workflow/TROOT-UAI-39-NIAGARA-PCG-AI-VERTICAL/20260821-contract/receipts/t39-ai-niagara-public-contract-r3.json",
           "runtimeLogs/delivery_workflow/TROOT-UAI-39-NIAGARA-PCG-AI-VERTICAL/20260821-product-r4/ai-blackboard-stale-candidate-negative.json",
           "runtimeLogs/delivery_workflow/TROOT-UAI-39-NIAGARA-PCG-AI-VERTICAL/20260821-product-r4/ai-smart-object-candidate-apply.json",
-          "TROOT-UAI-45-PUBLIC-DISTRIBUTION-PARITY",
+          "TROOT-UAI-67-POST-T66-DISTRIBUTION-REFRESH",
           "TROOT-UAI-47-DISCOVERY-QUERY-EXACT-MATRIX",
           "runtimeLogs/delivery_workflow/TROOT-UAI-47-DISCOVERY-QUERY-EXACT-MATRIX/20260822-t47-r2/candidate-contracts.json"
         ],
@@ -284,7 +284,7 @@
           "TROOT-UAI-37-BLUEPRINT-UMG-GRAPH-VERTICAL",
           "runtimeLogs/uai-development/TROOT-UAI-37-BLUEPRINT-UMG-GRAPH-VERTICAL/20260821-r11/automation/report/index.json",
           "runtimeLogs/uai-development/TROOT-UAI-37-BLUEPRINT-UMG-GRAPH-VERTICAL/20260821-r9/public_sdk_product/receipt.json",
-          "TROOT-UAI-45-PUBLIC-DISTRIBUTION-PARITY"
+          "TROOT-UAI-67-POST-T66-DISTRIBUTION-REFRESH"
         ],
         "not_proven": [
           "public product execution of animation.anim_blueprint.layer_interface.asset.create and every independent Animation Blueprint exact command",
@@ -371,7 +371,7 @@
           "runtimeLogs/delivery_workflow/TROOT-UAI-40-ANIMATION-RIG-AUDIO-VERTICAL/20260821-product/automation/t40-animation-rig-audio-complete-v6.receipt.json",
           "runtimeLogs/delivery_workflow/TROOT-UAI-40-ANIMATION-RIG-AUDIO-VERTICAL/20260821-product/create-blend-space.result.json",
           "runtimeLogs/delivery_workflow/TROOT-UAI-40-ANIMATION-RIG-AUDIO-VERTICAL/20260821-product/readback-blend-space-after-error-propagation-build.result.json",
-          "TROOT-UAI-45-PUBLIC-DISTRIBUTION-PARITY"
+          "TROOT-UAI-67-POST-T66-DISTRIBUTION-REFRESH"
         ],
         "not_proven": [
           "direct public SDK product execution of every standalone AnimSequence, Montage and BlendSpace exact command",
@@ -465,7 +465,7 @@
           "runtimeLogs/delivery_workflow/TROOT-UAI-40-ANIMATION-RIG-AUDIO-VERTICAL/20260821-product/readback-ik-rig-target.result.json",
           "runtimeLogs/delivery_workflow/TROOT-UAI-40-ANIMATION-RIG-AUDIO-VERTICAL/20260821-product/edit-ik-retargeter-valid.result.json",
           "runtimeLogs/delivery_workflow/TROOT-UAI-40-ANIMATION-RIG-AUDIO-VERTICAL/20260821-product/reject-empty-ik-retargeter-after-fix.result.json",
-          "TROOT-UAI-45-PUBLIC-DISTRIBUTION-PARITY"
+          "TROOT-UAI-67-POST-T66-DISTRIBUTION-REFRESH"
         ],
         "not_proven": [
           "direct public SDK product execution of every standalone ControlRig, IKRig, IKRetargeter, Skeleton and ShapeLibrary exact command",
@@ -532,7 +532,7 @@
           "runtimeLogs/delivery_workflow/TROOT-UAI-40-ANIMATION-RIG-AUDIO-VERTICAL/20260821-product/control-rig-candidates-current.result.json",
           "runtimeLogs/delivery_workflow/TROOT-UAI-40-ANIMATION-RIG-AUDIO-VERTICAL/20260821-product/edit-control-rig-valid.result.json",
           "runtimeLogs/delivery_workflow/TROOT-UAI-40-ANIMATION-RIG-AUDIO-VERTICAL/20260821-product/readback-control-rig-after.result.json",
-          "TROOT-UAI-45-PUBLIC-DISTRIBUTION-PARITY",
+          "TROOT-UAI-67-POST-T66-DISTRIBUTION-REFRESH",
           "TROOT-UAI-47-DISCOVERY-QUERY-EXACT-MATRIX",
           "runtimeLogs/delivery_workflow/TROOT-UAI-47-DISCOVERY-QUERY-EXACT-MATRIX/20260822-t47-r2/candidate-contracts.json"
         ],
@@ -659,7 +659,7 @@
         "evidence_refs": [
           "TROOT-UAI-38-ASSET-MATERIAL-TEXTURE-MEDIA-VERTICAL",
           "runtimeLogs/uai-development/TROOT-UAI-38-ASSET-MATERIAL-TEXTURE-MEDIA-VERTICAL/20260821-r1/public_sdk_product/receipt.json",
-          "TROOT-UAI-45-PUBLIC-DISTRIBUTION-PARITY"
+          "TROOT-UAI-67-POST-T66-DISTRIBUTION-REFRESH"
         ],
         "not_proven": [
           "direct public SDK product execution of every one of the 53 exact commands and supported asset types",
@@ -741,7 +741,7 @@
           "runtimeLogs/delivery_workflow/TROOT-UAI-40-ANIMATION-RIG-AUDIO-VERTICAL/20260821-product/create-metasound.result.json",
           "runtimeLogs/delivery_workflow/TROOT-UAI-40-ANIMATION-RIG-AUDIO-VERTICAL/20260821-product/edit-metasound.result.json",
           "runtimeLogs/delivery_workflow/TROOT-UAI-40-ANIMATION-RIG-AUDIO-VERTICAL/20260821-product/edit-sound-cue.result.json",
-          "TROOT-UAI-45-PUBLIC-DISTRIBUTION-PARITY"
+          "TROOT-UAI-67-POST-T66-DISTRIBUTION-REFRESH"
         ],
         "not_proven": [
           "direct public SDK product execution of every standalone MetaSound, SoundCue and audio-media exact command",
@@ -808,7 +808,7 @@
           "runtimeLogs/delivery_workflow/TROOT-UAI-40-ANIMATION-RIG-AUDIO-VERTICAL/20260821-product/sound-cue-candidates.result.json",
           "runtimeLogs/delivery_workflow/TROOT-UAI-40-ANIMATION-RIG-AUDIO-VERTICAL/20260821-product/edit-metasound.result.json",
           "runtimeLogs/delivery_workflow/TROOT-UAI-40-ANIMATION-RIG-AUDIO-VERTICAL/20260821-product/edit-sound-cue.result.json",
-          "TROOT-UAI-45-PUBLIC-DISTRIBUTION-PARITY",
+          "TROOT-UAI-67-POST-T66-DISTRIBUTION-REFRESH",
           "TROOT-UAI-47-DISCOVERY-QUERY-EXACT-MATRIX",
           "runtimeLogs/delivery_workflow/TROOT-UAI-47-DISCOVERY-QUERY-EXACT-MATRIX/20260822-t47-r2/candidate-contracts.json"
         ],
@@ -880,7 +880,7 @@
           "TROOT-UAI-37-BLUEPRINT-UMG-GRAPH-VERTICAL",
           "runtimeLogs/uai-development/TROOT-UAI-37-BLUEPRINT-UMG-GRAPH-VERTICAL/20260821-r11/automation/report/index.json",
           "runtimeLogs/uai-development/TROOT-UAI-37-BLUEPRINT-UMG-GRAPH-VERTICAL/20260821-r9/public_sdk_product/receipt.json",
-          "TROOT-UAI-45-PUBLIC-DISTRIBUTION-PARITY"
+          "TROOT-UAI-67-POST-T66-DISTRIBUTION-REFRESH"
         ],
         "not_proven": [
           "public product execution of blueprint.component.events.discover",
@@ -942,7 +942,7 @@
           "TROOT-UAI-37-BLUEPRINT-UMG-GRAPH-VERTICAL",
           "runtimeLogs/uai-development/TROOT-UAI-37-BLUEPRINT-UMG-GRAPH-VERTICAL/20260821-r11/automation/report/index.json",
           "runtimeLogs/uai-development/TROOT-UAI-37-BLUEPRINT-UMG-GRAPH-VERTICAL/20260821-r9/public_sdk_product/receipt.json",
-          "TROOT-UAI-45-PUBLIC-DISTRIBUTION-PARITY",
+          "TROOT-UAI-67-POST-T66-DISTRIBUTION-REFRESH",
           "TROOT-UAI-47-DISCOVERY-QUERY-EXACT-MATRIX",
           "runtimeLogs/delivery_workflow/TROOT-UAI-47-DISCOVERY-QUERY-EXACT-MATRIX/20260822-t47-r2/candidate-contracts.json"
         ],
@@ -1004,7 +1004,7 @@
           "TROOT-UAI-37-BLUEPRINT-UMG-GRAPH-VERTICAL",
           "runtimeLogs/uai-development/TROOT-UAI-37-BLUEPRINT-UMG-GRAPH-VERTICAL/20260821-r11/automation/report/index.json",
           "runtimeLogs/uai-development/TROOT-UAI-37-BLUEPRINT-UMG-GRAPH-VERTICAL/20260821-r9/public_sdk_product/receipt.json",
-          "TROOT-UAI-45-PUBLIC-DISTRIBUTION-PARITY",
+          "TROOT-UAI-67-POST-T66-DISTRIBUTION-REFRESH",
           "TROOT-UAI-47-DISCOVERY-QUERY-EXACT-MATRIX",
           "runtimeLogs/delivery_workflow/TROOT-UAI-47-DISCOVERY-QUERY-EXACT-MATRIX/20260822-t47-r2/candidate-contracts.json"
         ],
@@ -1070,18 +1070,21 @@
         "cleanup"
       ],
       "command_contract_state": "registered_exact_contract",
-      "implementation_state": "current_capture_owner_rhi_product_verified_transform_candidate_policy_pending_vertical",
+      "implementation_state": "current_capture_owner_rhi_product_and_owned_isolated_transform_candidate_vertical_verified_real_user_main_scene_oracle_pending",
       "evidence": {
         "highest_verified_layer": "persistence_independent_readback",
-        "delivery_state": "rhi_image_policy_and_artifact_vertical_verified_real_scene_visual_pending",
+        "delivery_state": "rhi_image_policy_artifact_and_owned_isolated_hidden_editor_transform_candidate_frame_sheet_with_exact_restoration_verified",
         "evidence_refs": [
           "TROOT-UAI-42-WORLD-VIEWPORT-SPATIAL-VERTICAL",
           "runtimeLogs/delivery_workflow/TROOT-UAI-42-WORLD-VIEWPORT-SPATIAL-VERTICAL/20260821-capture-rhi/automation/t42-capture-public-product-rhi.receipt.discovery-set.json",
           "runtimeLogs/delivery_workflow/TROOT-UAI-46-REAL-CONTENT-ACCEPTANCE/20260822-t46/validation-summary.json",
-          "TROOT-UAI-45-PUBLIC-DISTRIBUTION-PARITY"
+          "TROOT-UAI-67-POST-T66-DISTRIBUTION-REFRESH",
+          "TROOT-UAI-59-TRANSFORM-CANDIDATE-VISUAL-VERTICAL",
+          "plan/results/TROOT-UAI-59-TRANSFORM-CANDIDATE-VISUAL-VERTICAL.r16.json",
+          "runtimeLogs/delivery_workflow/TROOT-UAI-59-TRANSFORM-CANDIDATE-VISUAL-VERTICAL/20260824-real-transform-vertical/receipt.json"
         ],
         "not_proven": [
-          "public SDK transform-candidate frame-sheet execution with full transient-state restoration in the rendering-capable main Editor",
+          "real user-main Editor transform-candidate scene oracle and exhaustive candidate, camera and capture-policy combinations",
           "direct public SDK product execution of every capture.image, capture.media and capture.render object and policy combination",
           "a scene-image oracle for the T46 real-content scenario while the user main Editor remains minimized",
           "exhaustive asset-editor, sequence, viewport and render-target content quality variants"
@@ -1132,18 +1135,21 @@
         "request"
       ],
       "command_contract_state": "registered_exact_contract",
-      "implementation_state": "current_immutable_registry_discovery",
+      "implementation_state": "current_immutable_registry_discovery_and_dynamic_command_tutorial",
       "evidence": {
         "highest_verified_layer": "public_sdk_real_ue_vertical",
-        "delivery_state": "current_discovery_vertical_verified",
+        "delivery_state": "current_discovery_and_dynamic_command_tutorial_vertical_verified",
         "evidence_refs": [
           "TROOT-UAI-32-INTEGRATED-ACTIVATION-AUTHORITY",
           "TROOT-UAI-33-PUBLIC-CONTRACT-ORACLE-REALIGNMENT",
           "TROOT-UAI-35-DISCOVERY-IDENTITY-VERTICAL",
           "runtimeLogs/uai-development/TROOT-UAI-35-DISCOVERY-IDENTITY-VERTICAL/20260820-r3/public_sdk_product/receipt.json",
-          "TROOT-UAI-45-PUBLIC-DISTRIBUTION-PARITY",
+          "TROOT-UAI-67-POST-T66-DISTRIBUTION-REFRESH",
           "TROOT-UAI-47-DISCOVERY-QUERY-EXACT-MATRIX",
-          "runtimeLogs/delivery_workflow/TROOT-UAI-47-DISCOVERY-QUERY-EXACT-MATRIX/20260822-t47-r2/command-details.json"
+          "runtimeLogs/delivery_workflow/TROOT-UAI-47-DISCOVERY-QUERY-EXACT-MATRIX/20260822-t47-r2/command-details.json",
+          "TROOT-UAI-61-DYNAMIC-COMMAND-TUTORIAL-CHAIN",
+          "plan/results/TROOT-UAI-61-DYNAMIC-COMMAND-TUTORIAL-CHAIN.r10.json",
+          "runtimeLogs/delivery_workflow/TROOT-UAI-61-DYNAMIC-COMMAND-TUTORIAL-CHAIN/20260824-final/receipt.json"
         ],
         "not_proven": [
           "free-text relevance quality for every possible intent across all current commands"
@@ -1230,7 +1236,7 @@
           "TROOT-UAI-38-ASSET-MATERIAL-TEXTURE-MEDIA-VERTICAL",
           "TROOT-UAI-39-NIAGARA-PCG-AI-VERTICAL",
           "TROOT-UAI-40-ANIMATION-RIG-AUDIO-VERTICAL",
-          "TROOT-UAI-45-PUBLIC-DISTRIBUTION-PARITY",
+          "TROOT-UAI-67-POST-T66-DISTRIBUTION-REFRESH",
           "TROOT-UAI-61-DYNAMIC-COMMAND-TUTORIAL-CHAIN",
           "TROOT-UAI-62-HJSON-MODEL-INTERACTION-VERTICAL",
           "runtimeLogs/t62/live_export/receipt.json"
@@ -1306,19 +1312,23 @@
         "cleanup"
       ],
       "command_contract_state": "registered_exact_contract",
-      "implementation_state": "public_plan_bound_asset_delete_and_owned_cleanup_verified_exact_destructive_matrix_pending",
+      "implementation_state": "public_plan_bound_asset_delete_owned_cleanup_and_representative_data_layer_delete_durable_vertical_verified_exact_destructive_matrix_pending",
       "evidence": {
         "highest_verified_layer": "persistence_independent_readback",
-        "delivery_state": "representative_authorized_delete_and_owned_cleanup_vertical_verified_exact_matrix_pending",
+        "delivery_state": "representative_authorized_asset_and_data_layer_delete_with_owned_cleanup_and_durable_reload_readback_verified_exact_matrix_pending",
         "evidence_refs": [
           "TROOT-UAI-43-EDITOR-IMPORT-LIFECYCLE-VERTICAL",
           "runtimeLogs/delivery_workflow/TROOT-UAI-43-EDITOR-IMPORT-LIFECYCLE-VERTICAL/20260821-public-sdk-product/receipt.json",
           "runtimeLogs/delivery_workflow/TROOT-UAI-46-REAL-CONTENT-ACCEPTANCE/20260822-t46/validation-summary.json",
-          "TROOT-UAI-45-PUBLIC-DISTRIBUTION-PARITY"
+          "TROOT-UAI-67-POST-T66-DISTRIBUTION-REFRESH",
+          "TROOT-UAI-65-WORLD-DESTRUCTIVE-C8D-VERTICAL",
+          "plan/results/TROOT-UAI-65-WORLD-DESTRUCTIVE-C8D-VERTICAL.r22.json",
+          "runtimeLogs/t65/world-data-layer-delete-public-commit-r8.json",
+          "runtimeLogs/t65/world-data-layer-delete-public-reload-r8.json"
         ],
         "not_proven": [
           "direct public SDK product execution of every one of the 14 exact destructive commands",
-          "exhaustive redirector, reference, move, clone, data-layer, streaming and PCG cleanup variants",
+          "exhaustive redirector, reference, move, clone, non-representative data-layer, streaming and PCG cleanup variants",
           "all rollback-failure and state-unknown recovery cases"
         ]
       },
@@ -1451,7 +1461,7 @@
         "evidence_refs": [
           "TROOT-UAI-43-EDITOR-IMPORT-LIFECYCLE-VERTICAL",
           "runtimeLogs/delivery_workflow/TROOT-UAI-43-EDITOR-IMPORT-LIFECYCLE-VERTICAL/20260821-full-regression-r2/automation/t43-editor-import-lifecycle-regression.receipt.discovery-set.json",
-          "TROOT-UAI-45-PUBLIC-DISTRIBUTION-PARITY"
+          "TROOT-UAI-67-POST-T66-DISTRIBUTION-REFRESH"
         ],
         "not_proven": [
           "installed public SDK execution of every one of the seven editor-project exact commands",
@@ -1515,10 +1525,10 @@
         "cleanup"
       ],
       "command_contract_state": "registered_exact_contract",
-      "implementation_state": "public_editor_session_durable_safe_exit_and_owned_tool_terminal_receipt_release_verified_remaining_build_policies_consumer_driven",
+      "implementation_state": "public_editor_startup_readiness_durable_safe_exit_and_owned_tool_terminal_receipt_release_verified_remaining_build_policies_consumer_driven",
       "evidence": {
         "highest_verified_layer": "persistence_independent_readback",
-        "delivery_state": "session_operation_durable_safe_exit_and_owned_tool_lifecycle_verified_remaining_build_policies_consumer_driven",
+        "delivery_state": "startup_readiness_session_operation_durable_safe_exit_and_owned_tool_lifecycle_verified_remaining_build_policies_consumer_driven",
         "evidence_refs": [
           "TROOT-UAI-43-EDITOR-IMPORT-LIFECYCLE-VERTICAL",
           "runtimeLogs/delivery_workflow/TROOT-UAI-43-EDITOR-IMPORT-LIFECYCLE-VERTICAL/20260821-public-sdk-product/receipt.json",
@@ -1527,7 +1537,11 @@
           "runtimeLogs/delivery_workflow/TROOT-UAI-56-SAFE-EXIT-DURABLE-TERMINAL/20260823-t56/product-clean-reject-1/product-evidence-assessment.json",
           "runtimeLogs/delivery_workflow/TROOT-UAI-56-SAFE-EXIT-DURABLE-TERMINAL/20260823-t56/product-clean-reject-1/safe-exit-terminal.json",
           "runtimeLogs/delivery_workflow/TROOT-UAI-57-CURRENT-PLUGIN-CANDIDATE-STABILIZATION/20260824-safe-exit/t57-safe-exit-armed-dirty-reject.receipt.discovery-set.json",
-          "TROOT-UAI-45-PUBLIC-DISTRIBUTION-PARITY"
+          "TROOT-UAI-67-POST-T66-DISTRIBUTION-REFRESH",
+          "TROOT-UAI-66-EDITOR-STARTUP-READINESS-RECOVERY",
+          "plan/results/TROOT-UAI-66-EDITOR-STARTUP-READINESS-RECOVERY.r7.json",
+          "runtimeLogs/t66/r2/ready-startup.json",
+          "runtimeLogs/t66/r2/safe-exit.json"
         ],
         "not_proven": [
           "public product execution of every editor.safe_exit, editor.session, job.compile_build and operation.plan.execute policy",
@@ -1603,7 +1617,7 @@
         "evidence_refs": [
           "TROOT-UAI-43-EDITOR-IMPORT-LIFECYCLE-VERTICAL",
           "runtimeLogs/delivery_workflow/TROOT-UAI-43-EDITOR-IMPORT-LIFECYCLE-VERTICAL/20260821-public-sdk-product/receipt.json",
-          "TROOT-UAI-45-PUBLIC-DISTRIBUTION-PARITY"
+          "TROOT-UAI-67-POST-T66-DISTRIBUTION-REFRESH"
         ],
         "not_proven": [
           "direct public SDK product execution of every one of the 11 import and reimport exact commands",
@@ -1670,7 +1684,7 @@
           "TROOT-UAI-37-BLUEPRINT-UMG-GRAPH-VERTICAL",
           "runtimeLogs/uai-development/TROOT-UAI-37-BLUEPRINT-UMG-GRAPH-VERTICAL/20260821-r11/automation/report/index.json",
           "runtimeLogs/uai-development/TROOT-UAI-37-BLUEPRINT-UMG-GRAPH-VERTICAL/20260821-r9/public_sdk_product/receipt.json",
-          "TROOT-UAI-45-PUBLIC-DISTRIBUTION-PARITY"
+          "TROOT-UAI-67-POST-T66-DISTRIBUTION-REFRESH"
         ],
         "not_proven": [
           "Material, Niagara, PCG, AI, Audio, and Control Rig graph providers",
@@ -1735,7 +1749,7 @@
         "evidence_refs": [
           "TROOT-UAI-41-MODELING-WHITEBOX-PHYSICS-VERTICAL",
           "runtimeLogs/receipts/troot-uai-41-landscape-physics-vertical.json",
-          "TROOT-UAI-45-PUBLIC-DISTRIBUTION-PARITY",
+          "TROOT-UAI-67-POST-T66-DISTRIBUTION-REFRESH",
           "TROOT-UAI-50-MODELING-WORLD-PHYSICS-EXACT-MATRIX",
           "runtimeLogs/delivery_workflow/TROOT-UAI-50-MODELING-WORLD-PHYSICS-EXACT-MATRIX/20260822-landscape-height-query-final-r10/automation/t50-landscape-height-query-final-r10.receipt.json",
           "runtimeLogs/delivery_workflow/TROOT-UAI-50-MODELING-WORLD-PHYSICS-EXACT-MATRIX/20260822-landscape-public-sdk-product/product-chain-r2.json"
@@ -1799,7 +1813,7 @@
           "TROOT-UAI-44-LEGACY-SURFACE-EXIT",
           "runtimeLogs/delivery_workflow/TROOT-UAI-44-LEGACY-SURFACE-EXIT/20260821-green-r2/automation/t44-legacy-surface-green.receipt.discovery-set.json",
           "runtimeLogs/delivery_workflow/TROOT-UAI-44-LEGACY-SURFACE-EXIT/20260821-affected-r2/automation/t44-affected-consumers.receipt.discovery-set.json",
-          "TROOT-UAI-45-PUBLIC-DISTRIBUTION-PARITY"
+          "TROOT-UAI-67-POST-T66-DISTRIBUTION-REFRESH"
         ],
         "not_proven": [
           "formal user-mainline, tag, remote and release publication is outside the current authorization and is not part of the verified public-surface exit",
@@ -1859,7 +1873,7 @@
         "evidence_refs": [
           "TROOT-UAI-43-EDITOR-IMPORT-LIFECYCLE-VERTICAL",
           "runtimeLogs/delivery_workflow/TROOT-UAI-43-EDITOR-IMPORT-LIFECYCLE-VERTICAL/20260821-full-regression-r2/automation/t43-editor-import-lifecycle-regression.receipt.discovery-set.json",
-          "TROOT-UAI-45-PUBLIC-DISTRIBUTION-PARITY"
+          "TROOT-UAI-67-POST-T66-DISTRIBUTION-REFRESH"
         ],
         "not_proven": [
           "installed public SDK positive import with a redistributable PO and matching localization target fixture",
@@ -1928,7 +1942,7 @@
           "TROOT-UAI-36-STRUCTURED-HJSON-VERTICAL",
           "TROOT-UAI-38-ASSET-MATERIAL-TEXTURE-MEDIA-VERTICAL",
           "runtimeLogs/uai-development/TROOT-UAI-38-ASSET-MATERIAL-TEXTURE-MEDIA-VERTICAL/20260821-r1/public_sdk_product/receipt.json",
-          "TROOT-UAI-45-PUBLIC-DISTRIBUTION-PARITY"
+          "TROOT-UAI-67-POST-T66-DISTRIBUTION-REFRESH"
         ],
         "not_proven": [
           "direct public SDK product execution of every Material, MaterialFunction and MaterialInstance exact command independently of the representative HJSON chain",
@@ -1990,7 +2004,7 @@
           "TROOT-UAI-33-PUBLIC-CONTRACT-ORACLE-REALIGNMENT",
           "TROOT-UAI-35-DISCOVERY-IDENTITY-VERTICAL",
           "runtimeLogs/uai-development/TROOT-UAI-35-DISCOVERY-IDENTITY-VERTICAL/20260820-r3/public_sdk_product/receipt.json",
-          "TROOT-UAI-45-PUBLIC-DISTRIBUTION-PARITY",
+          "TROOT-UAI-67-POST-T66-DISTRIBUTION-REFRESH",
           "TROOT-UAI-47-DISCOVERY-QUERY-EXACT-MATRIX",
           "runtimeLogs/delivery_workflow/TROOT-UAI-47-DISCOVERY-QUERY-EXACT-MATRIX/20260822-t47-r2/candidate-contracts.json"
         ],
@@ -2105,7 +2119,7 @@
           "TROOT-UAI-41-MODELING-WHITEBOX-PHYSICS-VERTICAL",
           "runtimeLogs/receipts/troot-uai-41-public-sdk-product.json",
           "runtimeLogs/delivery_workflow/TROOT-UAI-46-REAL-CONTENT-ACCEPTANCE/20260822-t46/validation-summary.json",
-          "TROOT-UAI-45-PUBLIC-DISTRIBUTION-PARITY",
+          "TROOT-UAI-67-POST-T66-DISTRIBUTION-REFRESH",
           "runtimeLogs/receipts/t50-modeling-public-auto-uv-r53.json",
           "runtimeLogs/receipts/t50-modeling-artifact-readback-regression-r54.json",
           "runtimeLogs/receipts/t50-modeling-attribute-exact-uv-oracle-r55.json",
@@ -2311,7 +2325,7 @@
           "runtimeLogs/delivery_workflow/TROOT-UAI-39-NIAGARA-PCG-AI-VERTICAL/20260821-product-r4/niagara-system-root-create.json",
           "runtimeLogs/delivery_workflow/TROOT-UAI-39-NIAGARA-PCG-AI-VERTICAL/20260821-product-r4/niagara-emitter-independent-summary-after-module.json",
           "runtimeLogs/delivery_workflow/TROOT-UAI-39-NIAGARA-PCG-AI-VERTICAL/20260821-product-r4/niagara-emitter-summary-after-negative.json",
-          "TROOT-UAI-45-PUBLIC-DISTRIBUTION-PARITY"
+          "TROOT-UAI-67-POST-T66-DISTRIBUTION-REFRESH"
         ],
         "not_proven": [
           "standalone NiagaraScript root product execution",
@@ -2377,7 +2391,7 @@
           "runtimeLogs/delivery_workflow/TROOT-UAI-39-NIAGARA-PCG-AI-VERTICAL/20260821-product-r4/niagara-emitter-jitter-candidates-r2.json",
           "runtimeLogs/delivery_workflow/TROOT-UAI-39-NIAGARA-PCG-AI-VERTICAL/20260821-product-r4/niagara-emitter-candidate-apply-r2.json",
           "runtimeLogs/delivery_workflow/TROOT-UAI-39-NIAGARA-PCG-AI-VERTICAL/20260821-product-r4/niagara-emitter-stale-candidate-negative.json",
-          "TROOT-UAI-45-PUBLIC-DISTRIBUTION-PARITY",
+          "TROOT-UAI-67-POST-T66-DISTRIBUTION-REFRESH",
           "TROOT-UAI-47-DISCOVERY-QUERY-EXACT-MATRIX",
           "runtimeLogs/delivery_workflow/TROOT-UAI-47-DISCOVERY-QUERY-EXACT-MATRIX/20260822-t47-r2/candidate-contracts.json"
         ],
@@ -2448,7 +2462,7 @@
           "TROOT-UAI-43-EDITOR-IMPORT-LIFECYCLE-VERTICAL",
           "runtimeLogs/delivery_workflow/TROOT-UAI-43-EDITOR-IMPORT-LIFECYCLE-VERTICAL/20260821-public-sdk-product/receipt.json",
           "runtimeLogs/delivery_workflow/TROOT-UAI-46-REAL-CONTENT-ACCEPTANCE/20260822-t46/validation-summary.json",
-          "TROOT-UAI-45-PUBLIC-DISTRIBUTION-PARITY"
+          "TROOT-UAI-67-POST-T66-DISTRIBUTION-REFRESH"
         ],
         "not_proven": [
           "every lifecycle command across every current long-running operation family",
@@ -2537,7 +2551,7 @@
           "runtimeLogs/delivery_workflow/TROOT-UAI-39-NIAGARA-PCG-AI-VERTICAL/20260821-product-r4/pcg-root-create.json",
           "runtimeLogs/delivery_workflow/TROOT-UAI-39-NIAGARA-PCG-AI-VERTICAL/20260821-product-r4/pcg-independent-summary-after-node.json",
           "runtimeLogs/delivery_workflow/TROOT-UAI-39-NIAGARA-PCG-AI-VERTICAL/20260821-product-r4/pcg-independent-summary-after-negatives.json",
-          "TROOT-UAI-45-PUBLIC-DISTRIBUTION-PARITY"
+          "TROOT-UAI-67-POST-T66-DISTRIBUTION-REFRESH"
         ],
         "not_proven": [
           "PCG component data asset graph instance partition and generated-spatial-data product execution",
@@ -2601,7 +2615,7 @@
           "runtimeLogs/delivery_workflow/TROOT-UAI-39-NIAGARA-PCG-AI-VERTICAL/20260821-product-r4/pcg-node-candidates.json",
           "runtimeLogs/delivery_workflow/TROOT-UAI-39-NIAGARA-PCG-AI-VERTICAL/20260821-product-r4/pcg-node-create-from-candidate.json",
           "runtimeLogs/delivery_workflow/TROOT-UAI-39-NIAGARA-PCG-AI-VERTICAL/20260821-product-r4/pcg-stale-candidate-negative.json",
-          "TROOT-UAI-45-PUBLIC-DISTRIBUTION-PARITY",
+          "TROOT-UAI-67-POST-T66-DISTRIBUTION-REFRESH",
           "TROOT-UAI-47-DISCOVERY-QUERY-EXACT-MATRIX",
           "runtimeLogs/delivery_workflow/TROOT-UAI-47-DISCOVERY-QUERY-EXACT-MATRIX/20260822-t47-r2/candidate-contracts.json"
         ],
@@ -2686,7 +2700,7 @@
         "evidence_refs": [
           "TROOT-UAI-41-MODELING-WHITEBOX-PHYSICS-VERTICAL",
           "runtimeLogs/receipts/troot-uai-41-landscape-physics-vertical.json",
-          "TROOT-UAI-45-PUBLIC-DISTRIBUTION-PARITY"
+          "TROOT-UAI-67-POST-T66-DISTRIBUTION-REFRESH"
         ],
         "not_proven": [
           "direct public SDK product execution of every one of the 15 physics and deformer exact commands",
@@ -2792,7 +2806,7 @@
           "TROOT-UAI-33-PUBLIC-CONTRACT-ORACLE-REALIGNMENT",
           "TROOT-UAI-35-DISCOVERY-IDENTITY-VERTICAL",
           "runtimeLogs/uai-development/TROOT-UAI-35-DISCOVERY-IDENTITY-VERTICAL/20260820-r3/public_sdk_product/receipt.json",
-          "TROOT-UAI-45-PUBLIC-DISTRIBUTION-PARITY",
+          "TROOT-UAI-67-POST-T66-DISTRIBUTION-REFRESH",
           "TROOT-UAI-47-DISCOVERY-QUERY-EXACT-MATRIX",
           "runtimeLogs/delivery_workflow/TROOT-UAI-47-DISCOVERY-QUERY-EXACT-MATRIX/20260822-t47-r2/summary.json",
           "runtimeLogs/delivery_workflow/TROOT-UAI-47-DISCOVERY-QUERY-EXACT-MATRIX/20260822-t47-r2/generic-read-matrix.json",
@@ -2862,7 +2876,7 @@
           "T46-SPATIAL-CONTENT-OPERATION",
           "runtimeLogs/current/T46/automation-final/receipts/t46-spatial-content-operation-current.json",
           "TROOT-UAI-44-LEGACY-SURFACE-EXIT",
-          "TROOT-UAI-45-PUBLIC-DISTRIBUTION-PARITY",
+          "TROOT-UAI-67-POST-T66-DISTRIBUTION-REFRESH",
           "TROOT-UAI-47-DISCOVERY-QUERY-EXACT-MATRIX",
           "runtimeLogs/delivery_workflow/TROOT-UAI-47-DISCOVERY-QUERY-EXACT-MATRIX/20260822-t47-r2/reference-lifecycle.json",
           "runtimeLogs/delivery_workflow/TROOT-UAI-47-DISCOVERY-QUERY-EXACT-MATRIX/20260822-t47/automation/t43-reference.json"
@@ -2947,7 +2961,7 @@
           "TROOT-UAI-33-PUBLIC-CONTRACT-ORACLE-REALIGNMENT",
           "TROOT-UAI-40-ANIMATION-RIG-AUDIO-VERTICAL",
           "runtimeLogs/delivery_workflow/TROOT-UAI-40-ANIMATION-RIG-AUDIO-VERTICAL/20260821-product/automation/t40-animation-rig-audio-complete-v6.receipt.json",
-          "TROOT-UAI-45-PUBLIC-DISTRIBUTION-PARITY"
+          "TROOT-UAI-67-POST-T66-DISTRIBUTION-REFRESH"
         ],
         "not_proven": [
           "public SDK product execution of the remaining rig control, retarget, skeleton and subject exact commands",
@@ -3007,7 +3021,7 @@
         "evidence_refs": [
           "TROOT-UAI-43-EDITOR-IMPORT-LIFECYCLE-VERTICAL",
           "runtimeLogs/delivery_workflow/TROOT-UAI-43-EDITOR-IMPORT-LIFECYCLE-VERTICAL/20260821-full-regression-r2/automation/t43-editor-import-lifecycle-regression.receipt.discovery-set.json",
-          "TROOT-UAI-45-PUBLIC-DISTRIBUTION-PARITY"
+          "TROOT-UAI-67-POST-T66-DISTRIBUTION-REFRESH"
         ],
         "not_proven": [
           "positive public SDK import because no redistributable FBX skin-weight profile is currently compatible with a target SkeletalMesh fixture",
@@ -3076,21 +3090,23 @@
         "cleanup"
       ],
       "command_contract_state": "registered_exact_contract",
-      "implementation_state": "six_existing_public_products_verified_actor_transform_update_registered_pending_vertical",
+      "implementation_state": "seven_public_spatial_products_including_actor_transform_update_persistence_reload_verified",
       "evidence": {
         "highest_verified_layer": "persistence_independent_readback",
-        "delivery_state": "transform_read_align_snap_bake_pivot_and_live_modeling_selection_public_products_verified_actor_transform_update_pending_vertical",
+        "delivery_state": "transform_read_update_persistence_reload_align_snap_bake_pivot_and_live_modeling_selection_public_products_verified",
         "evidence_refs": [
           "TROOT-UAI-42-WORLD-VIEWPORT-SPATIAL-VERTICAL",
           "runtimeLogs/delivery_workflow/TROOT-UAI-42-WORLD-VIEWPORT-SPATIAL-VERTICAL/20260821-spatial-public-green-r2/automation/t42-world-spatial-public-product-green.receipt.discovery-set.json",
           "runtimeLogs/delivery_workflow/TROOT-UAI-46-REAL-CONTENT-ACCEPTANCE/20260822-t46/validation-summary.json",
-          "TROOT-UAI-45-PUBLIC-DISTRIBUTION-PARITY",
+          "TROOT-UAI-67-POST-T66-DISTRIBUTION-REFRESH",
           "TROOT-UAI-50-MODELING-WORLD-PHYSICS-EXACT-MATRIX",
           "runtimeLogs/receipts/t50-world-spatial-public-nullrhi-r38.json",
-          "runtimeLogs/receipts/t50-world-spatial-public-mesh-selection-r50.json"
+          "runtimeLogs/receipts/t50-world-spatial-public-mesh-selection-r50.json",
+          "TROOT-UAI-59-TRANSFORM-CANDIDATE-VISUAL-VERTICAL",
+          "plan/results/TROOT-UAI-59-TRANSFORM-CANDIDATE-VISUAL-VERTICAL.r16.json",
+          "runtimeLogs/delivery_workflow/TROOT-UAI-59-TRANSFORM-CANDIDATE-VISUAL-VERTICAL/20260824-real-transform-vertical/receipt.json"
         ],
         "not_proven": [
-          "world.object_transform.update public SDK persistence and reload readback",
           "external SDK replay of the newly verified snap, pivot and live Modeling selection cases",
           "exhaustive anchors, bounds, face, vertex, ray, surface-snap, pivot and supported subject variants",
           "real-content spatial and visual quality beyond the verified Actor/StaticMesh and T46 whitebox slices"
@@ -3161,7 +3177,7 @@
         "evidence_refs": [
           "TROOT-UAI-38-ASSET-MATERIAL-TEXTURE-MEDIA-VERTICAL",
           "runtimeLogs/delivery_workflow/T38/revision-regression-rhi/receipts/t38-texture-graph-revision-and-bake.json",
-          "TROOT-UAI-45-PUBLIC-DISTRIBUTION-PARITY"
+          "TROOT-UAI-67-POST-T66-DISTRIBUTION-REFRESH"
         ],
         "not_proven": [
           "direct public SDK product execution of every one of the seven exact TextureGraph commands and operation combinations",
@@ -3237,7 +3253,7 @@
           "TROOT-UAI-40-ANIMATION-RIG-AUDIO-VERTICAL",
           "runtimeLogs/delivery_workflow/TROOT-UAI-40-ANIMATION-RIG-AUDIO-VERTICAL/20260821-product/automation/t40-animation-rig-audio-complete-v6.receipt.json",
           "runtimeLogs/delivery_workflow/TROOT-UAI-40-ANIMATION-RIG-AUDIO-VERTICAL/20260821-product/cleanup-level-sequence-apply.result.json",
-          "TROOT-UAI-45-PUBLIC-DISTRIBUTION-PARITY",
+          "TROOT-UAI-67-POST-T66-DISTRIBUTION-REFRESH",
           "TROOT-UAI-62-HJSON-MODEL-INTERACTION-VERTICAL",
           "runtimeLogs/t62/live_export/receipt.json"
         ],
@@ -3308,7 +3324,7 @@
           "TROOT-UAI-37-BLUEPRINT-UMG-GRAPH-VERTICAL",
           "runtimeLogs/uai-development/TROOT-UAI-37-BLUEPRINT-UMG-GRAPH-VERTICAL/20260821-r11/automation/report/index.json",
           "runtimeLogs/uai-development/TROOT-UAI-37-BLUEPRINT-UMG-GRAPH-VERTICAL/20260821-r9/public_sdk_product/receipt.json",
-          "TROOT-UAI-45-PUBLIC-DISTRIBUTION-PARITY"
+          "TROOT-UAI-67-POST-T66-DISTRIBUTION-REFRESH"
         ],
         "not_proven": [
           "public product execution of umg.widget.events.discover",
@@ -3376,7 +3392,7 @@
           "TROOT-UAI-35-DISCOVERY-IDENTITY-VERTICAL",
           "runtimeLogs/uai-development/TROOT-UAI-35-DISCOVERY-IDENTITY-VERTICAL/20260820-r3/owned_automation/receipts/t35_owned_automation.json",
           "runtimeLogs/uai-development/TROOT-UAI-35-DISCOVERY-IDENTITY-VERTICAL/20260820-r3/public_sdk_product/receipt.json",
-          "TROOT-UAI-45-PUBLIC-DISTRIBUTION-PARITY",
+          "TROOT-UAI-67-POST-T66-DISTRIBUTION-REFRESH",
           "TROOT-UAI-47-DISCOVERY-QUERY-EXACT-MATRIX",
           "runtimeLogs/delivery_workflow/TROOT-UAI-47-DISCOVERY-QUERY-EXACT-MATRIX/20260822-t47-r2/content-discovery-targets.json"
         ],
@@ -3466,7 +3482,7 @@
           "TROOT-UAI-42-WORLD-VIEWPORT-SPATIAL-VERTICAL",
           "runtimeLogs/delivery_workflow/TROOT-UAI-42-WORLD-VIEWPORT-SPATIAL-VERTICAL/20260821-viewport-rhi-revalidation/automation/t42-viewport-public-product-rhi.receipt.discovery-set.json",
           "runtimeLogs/delivery_workflow/TROOT-UAI-46-REAL-CONTENT-ACCEPTANCE/20260822-t46/validation-summary.json",
-          "TROOT-UAI-45-PUBLIC-DISTRIBUTION-PARITY"
+          "TROOT-UAI-67-POST-T66-DISTRIBUTION-REFRESH"
         ],
         "not_proven": [
           "direct public SDK product execution of every one of the 14 exact viewport and graph-view commands across every supported viewport kind",
