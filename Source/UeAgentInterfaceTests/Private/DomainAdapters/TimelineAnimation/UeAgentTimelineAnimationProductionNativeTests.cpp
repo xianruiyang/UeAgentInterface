@@ -21,6 +21,7 @@
 #include "HAL/FileManager.h"
 #include "LevelSequence.h"
 #include "Misc/PackageName.h"
+#include "Misc/Paths.h"
 #include "MovieScene.h"
 #include "Channels/MovieSceneFloatChannel.h"
 #include "Sections/MovieSceneFloatSection.h"
@@ -135,7 +136,40 @@ namespace
 				bClean = !IFileManager::Get().FileExists(*Filename)
 					&& !FindPackage(nullptr, *PackageName) && bClean;
 			}
-			return bClean;
+
+			FString ContentDirectory;
+			if (!FPackageName::TryConvertLongPackageNameToFilename(
+					PackageRoot,
+					ContentDirectory))
+			{
+				return false;
+			}
+			ContentDirectory = FPaths::ConvertRelativePathToFull(
+				ContentDirectory);
+			if (IFileManager::Get().DirectoryExists(*ContentDirectory))
+			{
+				TArray<FString> RemainingFiles;
+				IFileManager::Get().FindFilesRecursive(
+					RemainingFiles,
+					*ContentDirectory,
+					TEXT("*"),
+					true,
+					false,
+					false);
+				if (!RemainingFiles.IsEmpty())
+				{
+					bClean = false;
+				}
+				else
+				{
+					bClean = IFileManager::Get().DeleteDirectory(
+						*ContentDirectory,
+						false,
+						true) && bClean;
+				}
+			}
+			return !IFileManager::Get().DirectoryExists(*ContentDirectory)
+				&& bClean;
 		}
 
 		~FFixture()
