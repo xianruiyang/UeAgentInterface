@@ -171,6 +171,17 @@ namespace
 
 		~FOwnedExternalFixture()
 		{
+			Cleanup();
+		}
+
+		bool Cleanup()
+		{
+			if (bCleanupAttempted)
+			{
+				return bCleanupSucceeded;
+			}
+			bCleanupAttempted = true;
+			bool bSucceeded = true;
 			TArray<UObject*> Objects;
 			FARFilter Filter;
 			Filter.PackagePaths.Add(FName(*RootPackage));
@@ -179,6 +190,9 @@ namespace
 			FAssetRegistryModule::GetRegistry().GetAssets(Filter, Assets);
 			for (const FAssetData& Data : Assets)
 			{
+				const FString PackageName = Data.PackageName.ToString();
+				OwnedPackageNames.AddUnique(PackageName);
+				TrackPackageFiles(PackageName);
 				if (UObject* const Asset = Data.GetAsset()) Objects.Add(Asset);
 			}
 			if (!Objects.IsEmpty())
@@ -186,7 +200,122 @@ namespace
 				TGuardValue<bool> Guard(GIsRunningUnattendedScript, true);
 				ObjectTools::DeleteObjectsUnchecked(Objects);
 			}
-			IFileManager::Get().DeleteDirectory(*SourceRoot, false, true);
+			for (const FString& PackageName : OwnedPackageNames)
+			{
+				if (UPackage* const Package = FindPackage(nullptr, *PackageName))
+				{
+					Package->SetDirtyFlag(false);
+					Package->MarkAsGarbage();
+				}
+			}
+			Objects.Reset();
+			CollectGarbage(RF_NoFlags, true);
+
+			for (const FString& Filename : OwnedPackageFiles)
+			{
+				if (IFileManager::Get().FileExists(*Filename)
+					&& !IFileManager::Get().Delete(*Filename, false, true))
+				{
+					CleanupDiagnostics.Add(TEXT("delete_failed:") + Filename);
+					bSucceeded = false;
+				}
+			}
+			FAssetRegistryModule::GetRegistry().ScanModifiedAssetFiles(
+				OwnedPackageFiles);
+			TArray<FAssetData> RemainingAssets;
+			FAssetRegistryModule::GetRegistry().GetAssets(
+				Filter,
+				RemainingAssets);
+			if (!RemainingAssets.IsEmpty())
+			{
+				for (const FAssetData& Data : RemainingAssets)
+				{
+					CleanupDiagnostics.Add(
+						TEXT("registry_remaining:")
+						+ Data.GetObjectPathString());
+				}
+				bSucceeded = false;
+			}
+			for (const FString& PackageName : OwnedPackageNames)
+			{
+				FString Filename;
+				if (FPackageName::DoesPackageExist(PackageName, &Filename)
+					|| FindPackage(nullptr, *PackageName))
+				{
+					CleanupDiagnostics.Add(
+						TEXT("package_remaining:") + PackageName);
+					bSucceeded = false;
+				}
+			}
+			if (IFileManager::Get().DirectoryExists(*SourceRoot)
+				&& !IFileManager::Get().DeleteDirectory(
+					*SourceRoot,
+					false,
+					true))
+			{
+				CleanupDiagnostics.Add(
+					TEXT("source_directory_delete_failed:") + SourceRoot);
+				bSucceeded = false;
+			}
+
+			FString ContentDirectory;
+			if (!FPackageName::TryConvertLongPackageNameToFilename(
+					RootPackage,
+					ContentDirectory))
+			{
+				CleanupDiagnostics.Add(
+					TEXT("content_directory_conversion_failed:") + RootPackage);
+				bCleanupSucceeded = false;
+				return false;
+			}
+			ContentDirectory = FPaths::ConvertRelativePathToFull(
+				ContentDirectory);
+			if (IFileManager::Get().DirectoryExists(*ContentDirectory))
+			{
+				TArray<FString> RemainingFiles;
+				IFileManager::Get().FindFilesRecursive(
+					RemainingFiles,
+					*ContentDirectory,
+					TEXT("*"),
+					true,
+					false,
+					false);
+				if (!RemainingFiles.IsEmpty()
+					|| !IFileManager::Get().DeleteDirectory(
+						*ContentDirectory,
+						false,
+						true))
+				{
+					for (const FString& Filename : RemainingFiles)
+					{
+						CleanupDiagnostics.Add(
+							TEXT("content_file_remaining:") + Filename);
+					}
+					if (RemainingFiles.IsEmpty())
+					{
+						CleanupDiagnostics.Add(
+							TEXT("content_directory_delete_failed:")
+							+ ContentDirectory);
+					}
+					bSucceeded = false;
+				}
+			}
+			bCleanupSucceeded = bSucceeded
+				&& !IFileManager::Get().DirectoryExists(*ContentDirectory);
+			return bCleanupSucceeded;
+		}
+
+		void RegisterOwnedPackage(const FString& PackageName)
+		{
+			OwnedPackageNames.AddUnique(PackageName);
+			TrackPackageFiles(PackageName);
+		}
+
+		FString GetCleanupDiagnostic() const
+		{
+			return CleanupDiagnostics.IsEmpty()
+				? TEXT("none")
+				: FString::Join(CleanupDiagnostics, TEXT("; "));
 		}
 
 		bool CreateSources()
@@ -255,6 +384,36 @@ namespace
 		FString SoundSource;
 		FString LightSource;
 		FString MissingSource;
+
+	private:
+		void TrackPackageFiles(const FString& PackageName)
+		{
+			FString Header;
+			if (!FPackageName::TryConvertLongPackageNameToFilename(
+					PackageName,
+					Header,
+					FPackageName::GetAssetPackageExtension()))
+			{
+				return;
+			}
+			Header = FPaths::ConvertRelativePathToFull(Header);
+			OwnedPackageFiles.AddUnique(Header);
+			for (const TCHAR* Extension : {
+				TEXT("uexp"),
+				TEXT("ubulk"),
+				TEXT("upayload"),
+			})
+			{
+				OwnedPackageFiles.AddUnique(
+					FPaths::ChangeExtension(Header, Extension));
+			}
+		}
+
+		TArray<FString> OwnedPackageNames;
+		TArray<FString> OwnedPackageFiles;
+		TArray<FString> CleanupDiagnostics;
+		bool bCleanupAttempted = false;
+		bool bCleanupSucceeded = false;
 	};
 
 	TSharedRef<FJsonObject> Params()
@@ -370,6 +529,7 @@ bool FUeAgentDestructiveImportExternalProductionTest::RunTest(
 	};
 	for (const FPositive& Positive : Positives)
 	{
+		Fixture.RegisterOwnedPackage(Positive.PackageName);
 		const TSharedRef<FJsonObject> Input = Params();
 		Input->SetStringField(TEXT("source_ref"), Positive.Source);
 		Input->SetStringField(TEXT("destination_ref"), Positive.PackageName);
@@ -408,5 +568,10 @@ bool FUeAgentDestructiveImportExternalProductionTest::RunTest(
 
 	TestTrue(TEXT("formal public composition stops"), Harness.Stop());
 	TestEqual(TEXT("public route cleanup"), Harness.GetRouteHost().Handlers.Num(), 0);
+	const bool bFixtureClean = Fixture.Cleanup();
+	TestTrue(
+		TEXT("owned external fixture leaves no Content packages or files: ")
+			+ Fixture.GetCleanupDiagnostic(),
+		bFixtureClean);
 	return !HasAnyErrors();
 }
