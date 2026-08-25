@@ -57,6 +57,7 @@ namespace UE::UAI::DomainAdapters::AssetDestructiveImport
 			if (TargetRef.Contains(TEXT(".")))
 			{
 				OutPackageName = FPackageName::ObjectPathToPackageName(TargetRef);
+				OutObjectPath = MoveTemp(TargetRef);
 			}
 			else
 			{
@@ -68,9 +69,81 @@ namespace UE::UAI::DomainAdapters::AssetDestructiveImport
 				OutPackageName.Reset();
 				return false;
 			}
-			OutObjectPath = OutPackageName + TEXT(".")
-				+ FPackageName::GetLongPackageAssetName(OutPackageName);
 			return true;
+		}
+
+		bool TryResolveTargetObjectPath(
+			const FString& PackageName,
+			FString& InOutObjectPath,
+			bool& bOutResolvedFromPackage,
+			FString& OutErrorCode,
+			FString& OutErrorDetail)
+		{
+			bOutResolvedFromPackage = false;
+			OutErrorCode.Reset();
+			OutErrorDetail.Reset();
+			if (!InOutObjectPath.IsEmpty())
+			{
+				return true;
+			}
+
+			TArray<FAssetData> Assets;
+			FAssetRegistryModule::GetRegistry().GetAssetsByPackageName(
+				FName(*PackageName), Assets, false);
+			if (Assets.IsEmpty())
+			{
+				OutErrorCode = TEXT("asset_delete_target_missing");
+				OutErrorDetail = PackageName;
+				return false;
+			}
+			if (Assets.Num() != 1)
+			{
+				TArray<FString> ObjectPaths;
+				ObjectPaths.Reserve(Assets.Num());
+				for (const FAssetData& Asset : Assets)
+				{
+					ObjectPaths.Add(Asset.GetSoftObjectPath().ToString());
+				}
+				ObjectPaths.Sort();
+				OutErrorCode = TEXT("asset_delete_target_ambiguous");
+				OutErrorDetail = PackageName + TEXT(":")
+					+ FString::Join(ObjectPaths, TEXT("|"));
+				return false;
+			}
+
+			InOutObjectPath = Assets[0].GetSoftObjectPath().ToString();
+			bOutResolvedFromPackage = true;
+			return true;
+		}
+
+		bool IsExternalPackageName(const FString& PackageName)
+		{
+			return PackageName.StartsWith(TEXT("/Game/__ExternalActors__/"))
+				|| PackageName.StartsWith(TEXT("/Game/__ExternalObjects__/"));
+		}
+
+		bool TryRequireNoOnDiskReferencers(
+			const FString& PackageName,
+			FString& OutDetail)
+		{
+			TArray<FName> Referencers;
+			FAssetRegistryModule::GetRegistry().GetReferencers(
+				FName(*PackageName), Referencers);
+			Referencers.Sort(FNameLexicalLess());
+			if (Referencers.IsEmpty())
+			{
+				OutDetail.Reset();
+				return true;
+			}
+			TArray<FString> StableReferencers;
+			StableReferencers.Reserve(Referencers.Num());
+			for (const FName Referencer : Referencers)
+			{
+				StableReferencers.Add(Referencer.ToString());
+			}
+			OutDetail = PackageName + TEXT(":")
+				+ FString::Join(StableReferencers, TEXT("|"));
+			return false;
 		}
 
 		FPlanningPreflightPlanRef MakeDeletePlan(
@@ -325,13 +398,41 @@ namespace UE::UAI::DomainAdapters::AssetDestructiveImport
 					ReadAbsence(Result.PackageName, ObjectPath, Result);
 					return Fail(TEXT("asset_delete_target_missing"), Result.PackageName);
 				}
+				FString ResolutionErrorCode;
+				FString ResolutionErrorDetail;
+				bool bResolvedFromPackage = false;
+				if (!TryResolveTargetObjectPath(
+						Result.PackageName,
+						ObjectPath,
+						bResolvedFromPackage,
+						ResolutionErrorCode,
+						ResolutionErrorDetail))
+				{
+					return Fail(*ResolutionErrorCode, ResolutionErrorDetail);
+				}
 				UObject* Asset = LoadObject<UObject>(nullptr, *ObjectPath);
-				if (!IsValid(Asset))
+				const bool bOrphanExternalPackage = !IsValid(Asset)
+					&& bResolvedFromPackage
+					&& IsExternalPackageName(Result.PackageName)
+					&& FindPackage(nullptr, *Result.PackageName) == nullptr;
+				if (!IsValid(Asset) && !bOrphanExternalPackage)
 				{
 					return Fail(TEXT("asset_delete_target_missing"), ObjectPath);
 				}
-				UPackage* Package = Asset->GetOutermost();
-				if (!Package || Package->IsDirty())
+				if (bOrphanExternalPackage)
+				{
+					FString ReferencerDetail;
+					if (!TryRequireNoOnDiskReferencers(
+							Result.PackageName, ReferencerDetail))
+					{
+						return Fail(
+							TEXT("asset_delete_orphan_package_referenced"),
+							ReferencerDetail);
+					}
+				}
+				UPackage* Package = Asset ? Asset->GetOutermost() : nullptr;
+				if ((!Package && !bOrphanExternalPackage)
+					|| (Package && Package->IsDirty()))
 				{
 					return Fail(TEXT("asset_delete_dirty_package"), Result.PackageName);
 				}
@@ -352,8 +453,12 @@ namespace UE::UAI::DomainAdapters::AssetDestructiveImport
 				}
 
 				FUeAgentResourceTracker Resources = MakeTracker();
-				TArray<UObject*> NativeDeleteSet{Asset};
-				ObjectTools::AddExtraObjectsToDelete(NativeDeleteSet);
+				TArray<UObject*> NativeDeleteSet;
+				if (Asset)
+				{
+					NativeDeleteSet.Add(Asset);
+					ObjectTools::AddExtraObjectsToDelete(NativeDeleteSet);
+				}
 				TArray<FString> OwnedExternalPackages;
 				FString ExternalPackageError;
 				if (!TryCollectOwnedWorldExternalPackages(
@@ -410,6 +515,22 @@ namespace UE::UAI::DomainAdapters::AssetDestructiveImport
 						EAssetDurableIntent::Delete,
 						ERollbackGrade::DurableBackup);
 				}
+				if (bOrphanExternalPackage)
+				{
+					DurablePackageNames.Add(Result.PackageName);
+					DurableTargets.Emplace(
+						FUeAgentCanonicalIdentity(
+							TEXT("uai.asset.presence"),
+							TEXT("asset"),
+							Result.PackageName,
+							TEXT("presence"),
+							TEXT("asset"),
+							TEXT("asset-delete-v1")),
+						Result.PackageName,
+						EPackageHeaderKind::EvidenceRequired,
+						EAssetDurableIntent::Delete,
+						ERollbackGrade::DurableBackup);
+				}
 				if (DurableTargets.IsEmpty())
 				{
 					return Fail(TEXT("asset_delete_target_missing"), ObjectPath);
@@ -450,15 +571,21 @@ namespace UE::UAI::DomainAdapters::AssetDestructiveImport
 				}
 
 				TGuardValue<bool> UnattendedGuard(GIsRunningUnattendedScript, true);
-				ReleaseTransientAssetControllers(Asset);
-				const FString ReferenceSummaryBeforeDelete =
-					ReferencerSummary(Asset);
+				if (Asset)
+				{
+					ReleaseTransientAssetControllers(Asset);
+				}
+				const FString ReferenceSummaryBeforeDelete = Asset
+					? ReferencerSummary(Asset)
+					: TEXT(";orphan_external_package=true");
 				const bool bOwnedWorldExternalDeleteSet =
 					IsOwnedWorldExternalDeleteSet(
 						Asset, Result.PackageName, NativeDeleteSet);
 				const bool bEngineRegisteredStringTable =
 					HasOnlyEngineStringTableRegistrationReference(Asset);
-				const int32 DeletedCount = bOwnedWorldExternalDeleteSet
+				const int32 DeletedCount = bOrphanExternalPackage
+					? 0
+					: bOwnedWorldExternalDeleteSet
 					? ObjectTools::DeleteObjectsUnchecked(NativeDeleteSet)
 					: bEngineRegisteredStringTable
 						? ObjectTools::ForceDeleteObjects({Asset}, false)
@@ -495,6 +622,11 @@ namespace UE::UAI::DomainAdapters::AssetDestructiveImport
 					Result.TerminalState = TEXT("state_unknown");
 					return Fail(TEXT("asset_delete_persist_failed"),
 						DurableError.GetCode() + TEXT(":") + DurableError.GetDetail());
+				}
+				if (bOrphanExternalPackage)
+				{
+					FAssetRegistryModule::GetRegistry().ScanModifiedAssetFiles(
+						{ExistingFilename});
 				}
 
 				ReadAbsence(Result.PackageName, ObjectPath, Result);

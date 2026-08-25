@@ -34,11 +34,16 @@ namespace
 	class FScopedAssetDeleteFixture final
 	{
 	public:
-		FScopedAssetDeleteFixture()
+		explicit FScopedAssetDeleteFixture(
+			FString InAssetName = FString(),
+			bool bInCreateSecondAsset = false)
 			: PackageName(
 				TEXT("/Game/UAI/Tests/DestructiveImport/DA_PublicSlice_")
-				+ FGuid::NewGuid().ToString(EGuidFormats::Digits))
-			, AssetName(FPackageName::GetLongPackageAssetName(PackageName))
+					+ FGuid::NewGuid().ToString(EGuidFormats::Digits))
+			, AssetName(InAssetName.IsEmpty()
+				? FPackageName::GetLongPackageAssetName(PackageName)
+				: MoveTemp(InAssetName))
+			, bCreateSecondAsset(bInCreateSecondAsset)
 		{
 		}
 
@@ -57,6 +62,18 @@ namespace
 				return false;
 			}
 			FAssetRegistryModule::AssetCreated(Asset);
+			if (bCreateSecondAsset)
+			{
+				UCurveFloat* const SecondAsset = NewObject<UCurveFloat>(
+					Package,
+					TEXT("SecondAsset"),
+					RF_Public | RF_Standalone | RF_Transactional);
+				if (!SecondAsset)
+				{
+					return false;
+				}
+				FAssetRegistryModule::AssetCreated(SecondAsset);
+			}
 			Package->MarkPackageDirty();
 			FSavePackageArgs Args;
 			Args.TopLevelFlags = RF_Public | RF_Standalone;
@@ -108,6 +125,11 @@ namespace
 				{
 					FAssetRegistryModule::AssetDeleted(Asset);
 				}
+				if (UObject* const SecondAsset = FindObject<UObject>(
+						Package, TEXT("SecondAsset")))
+				{
+					FAssetRegistryModule::AssetDeleted(SecondAsset);
+				}
 			}
 			bClean = Unload() && bClean;
 			if (IFileManager::Get().FileExists(*Filename()))
@@ -115,6 +137,8 @@ namespace
 				bClean = IFileManager::Get().Delete(*Filename(), false, true)
 					&& bClean;
 			}
+			FAssetRegistryModule::GetRegistry().ScanModifiedAssetFiles(
+				{Filename()});
 			return IsDurablyAbsent() && bClean;
 		}
 
@@ -134,6 +158,7 @@ namespace
 
 		FString PackageName;
 		FString AssetName;
+		bool bCreateSecondAsset = false;
 	};
 
 	class FScopedStringTableDeleteFixture final
@@ -352,6 +377,83 @@ bool FUeAgentDestructiveImportPublicAssetDeleteVerticalSliceTest::RunTest(
 		Fixture.Unload() && Fixture.IsDurablyAbsent());
 	TestTrue(TEXT("asset-delete fixture and public composition clean up"),
 		Fixture.Cleanup() && Harness.Stop());
+	return !HasAnyErrors();
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(
+	FUeAgentDestructiveImportPublicPackageTargetResolutionTest,
+	"UeAgentInterface.Composition.DestructiveImport.PublicPackageTargetResolution",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FUeAgentDestructiveImportPublicPackageTargetResolutionTest::RunTest(
+	const FString& Parameters)
+{
+	(void)Parameters;
+	AWorldSettings* const WorldSettings = GEditor
+		? GEditor->GetEditorWorldContext().World()->GetWorldSettings()
+		: nullptr;
+	if (!TestNotNull(TEXT("editor world settings"), WorldSettings))
+	{
+		return false;
+	}
+	FScopedPublicCommandComposition Harness(
+		TEXT("destructive-package-target-resolution"));
+	FString Error;
+	if (!TestTrue(TEXT("formal public composition starts"),
+			Harness.TryStart(*WorldSettings, Error)))
+	{
+		AddError(Error);
+		return false;
+	}
+
+	FScopedAssetDeleteFixture UniqueFixture(TEXT("WorldDataLayers"));
+	if (!TestTrue(TEXT("package with a non-leaf asset identity is saved"),
+			UniqueFixture.Create()))
+	{
+		return false;
+	}
+	TOptional<FUeAgentCommandResult> UniqueResult;
+	if (!TestTrue(TEXT("package target resolves its unique registry asset"),
+			TryPlanAndInvokeDelete(
+				Harness, UniqueFixture.GetPackageName(), UniqueResult, Error))
+		|| !UniqueResult.IsSet())
+	{
+		AddError(Error);
+		return false;
+	}
+	TestTrue(TEXT("resolved non-leaf asset is deleted and verified"),
+		UniqueResult->IsOk()
+			&& UniqueFixture.Unload()
+			&& UniqueFixture.IsDurablyAbsent());
+
+	FScopedAssetDeleteFixture AmbiguousFixture(
+		TEXT("PrimaryAsset"), true);
+	if (!TestTrue(TEXT("package with two registry assets is saved"),
+			AmbiguousFixture.Create()))
+	{
+		return false;
+	}
+	TOptional<FUeAgentCommandResult> AmbiguousResult;
+	if (!TestTrue(TEXT("ambiguous package target reaches commit owner"),
+			TryPlanAndInvokeDelete(
+				Harness, AmbiguousFixture.GetPackageName(), AmbiguousResult, Error))
+		|| !AmbiguousResult.IsSet())
+	{
+		AddError(Error);
+		return false;
+	}
+	TestFalse(TEXT("ambiguous package target fails closed"),
+		AmbiguousResult->IsOk());
+	TestTrue(TEXT("ambiguity has a typed error and preserves the package"),
+		AmbiguousResult->GetErrorJson().Contains(
+			TEXT("asset_delete_target_ambiguous"))
+			&& AmbiguousFixture.Unload()
+			&& AmbiguousFixture.IsDurablyPresent());
+
+	TestTrue(TEXT("fixtures and public composition clean up"),
+		UniqueFixture.Cleanup()
+			&& AmbiguousFixture.Cleanup()
+			&& Harness.Stop());
 	return !HasAnyErrors();
 }
 

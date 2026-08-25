@@ -1,5 +1,6 @@
 #include "Misc/AutomationTest.h"
 
+#include "AssetRegistry/AssetRegistryModule.h"
 #include "CommandEdge/UeAgentCommandProtocol.h"
 #include "CommandRegistry/UeAgentImmutableCommandRegistry.h"
 #include "Core/Contract/UeAgentCommandJson.h"
@@ -174,24 +175,38 @@ namespace UE::UAI::Tests::StrictV2::T59
 		return CanonicalJson(Params);
 	}
 
-	bool CleanupPackage(const FString& PackageName)
+	bool CleanupPackage(
+		const FString& PackageName,
+		const FString& PackageExtension = FPackageName::GetAssetPackageExtension())
 	{
 		const FString Filename = FPackageName::LongPackageNameToFilename(
-			PackageName, FPackageName::GetAssetPackageExtension());
+			PackageName, PackageExtension);
 		if (UPackage* Package = FindPackage(nullptr, *PackageName))
 		{
 			Package->SetDirtyFlag(false);
 			FlushAsyncLoading();
 			FText Error;
-			UPackageTools::UnloadPackages({Package}, Error, true);
+			if (!UPackageTools::UnloadPackages({Package}, Error, true))
+			{
+				return false;
+			}
 			CollectGarbage(RF_NoFlags, true);
+			if (FindPackage(nullptr, *PackageName))
+			{
+				return false;
+			}
 		}
 		if (IFileManager::Get().FileExists(*Filename))
 		{
 			IFileManager::Get().Delete(*Filename, false, true);
 		}
+		FAssetRegistryModule::GetRegistry().ScanModifiedAssetFiles({Filename});
+		TArray<FAssetData> RemainingAssets;
+		FAssetRegistryModule::GetRegistry().GetAssetsByPackageName(
+			FName(*PackageName), RemainingAssets, false);
 		return !IFileManager::Get().FileExists(*Filename)
-			&& !FindPackage(nullptr, *PackageName);
+			&& !FindPackage(nullptr, *PackageName)
+			&& RemainingAssets.IsEmpty();
 	}
 
 	bool TryOperationRef(
@@ -357,7 +372,11 @@ namespace UE::UAI::Tests::StrictV2::T59
 				}
 				ResaveActorGuid = ResaveActor->GetActorGuid().ToString(
 					EGuidFormats::DigitsWithHyphens);
-				ResaveActorPackageName = ResaveActor->GetExternalPackage()->GetName();
+				if (!TryAddOwnedExternalPackage(
+						ResaveActor->GetExternalPackage()->GetName()))
+				{
+					return FinishWithCleanup();
+				}
 				const FUeAgentCommandResult Started = SubmitPublic(
 					Registry, Dispatch, TEXT("editor.session"),
 					FString::Printf(
@@ -692,46 +711,163 @@ namespace UE::UAI::Tests::StrictV2::T59
 			return true;
 		}
 
+		bool TryGetOwnedExternalRoots(TArray<FString>& OutRoots) const
+		{
+			OutRoots.Reset();
+			FString RelativeWorldPath = TemporaryWorld;
+			if (!RelativeWorldPath.RemoveFromStart(TEXT("/Game/"))
+				|| RelativeWorldPath.IsEmpty())
+			{
+				return false;
+			}
+			OutRoots = {
+				FString(TEXT("/Game/__ExternalActors__/")) + RelativeWorldPath,
+				FString(TEXT("/Game/__ExternalObjects__/")) + RelativeWorldPath,
+			};
+			return true;
+		}
+
+		bool TryAddOwnedExternalPackage(const FString& PackageName)
+		{
+			TArray<FString> ExternalRoots;
+			if (!TryGetOwnedExternalRoots(ExternalRoots))
+			{
+				Test->AddError(TEXT("temporary World external root is invalid: ")
+					+ TemporaryWorld);
+				return false;
+			}
+			for (const FString& ExternalRoot : ExternalRoots)
+			{
+				if (PackageName.StartsWith(ExternalRoot + TEXT("/")))
+				{
+					ExternalPackageNames.Add(PackageName);
+					return true;
+				}
+			}
+			Test->AddError(TEXT("external package is outside the temporary World owner: ")
+				+ PackageName);
+			return false;
+		}
+
+		bool TryCollectOwnedExternalPackagesOnDisk()
+		{
+			TArray<FString> ExternalRoots;
+			if (!TryGetOwnedExternalRoots(ExternalRoots))
+			{
+				Test->AddError(TEXT("temporary World external root is invalid: ")
+					+ TemporaryWorld);
+				return false;
+			}
+			for (const FString& ExternalRoot : ExternalRoots)
+			{
+				FString Directory;
+				if (!FPackageName::TryConvertLongPackageNameToFilename(
+						ExternalRoot, Directory))
+				{
+					Test->AddError(TEXT("temporary World external path is unavailable: ")
+						+ ExternalRoot);
+					return false;
+				}
+				TArray<FString> Files;
+				IFileManager::Get().FindFilesRecursive(
+					Files, *Directory, TEXT("*.uasset"), true, false, false);
+				Files.Sort();
+				for (const FString& Filename : Files)
+				{
+					FString PackageName;
+					if (!FPackageName::TryConvertFilenameToLongPackageName(
+							Filename, PackageName)
+						|| !TryAddOwnedExternalPackage(PackageName))
+					{
+						return false;
+					}
+				}
+			}
+			return true;
+		}
+
 		void RestoreAndCleanup()
 		{
-			if (!OriginalWorld.IsEmpty() && GEditor)
+			if (OriginalWorld.IsEmpty() || !GEditor)
 			{
-				UWorld* Current = GEditor->GetEditorWorldContext().World();
-				if (!Current || !Current->GetPackage()
-					|| Current->GetPackage()->GetName() != OriginalWorld)
+				Test->AddError(TEXT("original editor World is unavailable for safe cleanup"));
+				return;
+			}
+			UWorld* Current = GEditor->GetEditorWorldContext().World();
+			if (Current && Current->GetPackage()
+				&& Current->GetPackage()->GetName() == TemporaryWorld)
+			{
+				for (TActorIterator<AActor> It(Current); It; ++It)
 				{
-					const FString OriginalFile = FPackageName::LongPackageNameToFilename(
-						OriginalWorld, FPackageName::GetMapPackageExtension());
-					UEditorLoadingAndSavingUtils::LoadMap(OriginalFile);
+					if (UPackage* ExternalPackage = It->GetExternalPackage())
+					{
+						if (!TryAddOwnedExternalPackage(ExternalPackage->GetName()))
+						{
+							return;
+						}
+					}
 				}
+			}
+			if (!TryCollectOwnedExternalPackagesOnDisk())
+			{
+				return;
+			}
+			if (!Current || !Current->GetPackage()
+				|| Current->GetPackage()->GetName() != OriginalWorld)
+			{
+				const FString OriginalFile = FPackageName::LongPackageNameToFilename(
+					OriginalWorld, FPackageName::GetMapPackageExtension());
+				if (!UEditorLoadingAndSavingUtils::LoadMap(OriginalFile))
+				{
+					Test->AddError(TEXT("original editor World failed to load: ")
+						+ OriginalWorld);
+					return;
+				}
+			}
+			UWorld* RestoredWorld = GEditor->GetEditorWorldContext().World();
+			if (!RestoredWorld || !RestoredWorld->GetPackage()
+				|| RestoredWorld->GetPackage()->GetName() != OriginalWorld)
+			{
+				Test->AddError(TEXT("original editor World was not restored: ")
+					+ OriginalWorld);
+				return;
 			}
 			if (UPackage* Package = FindPackage(nullptr, *TemporaryWorld))
 			{
 				Package->SetDirtyFlag(false);
 				FText Error;
-				UPackageTools::UnloadPackages({Package}, Error, true);
+				if (!UPackageTools::UnloadPackages({Package}, Error, true))
+				{
+					Test->AddError(TEXT("temporary World package failed to unload: ")
+						+ Error.ToString());
+					return;
+				}
 			}
 			CollectGarbage(RF_NoFlags, true);
-			if (!ResaveActorPackageName.IsEmpty())
+			if (FindPackage(nullptr, *TemporaryWorld))
 			{
-				const FString ActorFile = FPackageName::LongPackageNameToFilename(
-					ResaveActorPackageName,
-					FPackageName::GetAssetPackageExtension());
-				if (IFileManager::Get().FileExists(*ActorFile))
-				{
-					IFileManager::Get().Delete(*ActorFile, false, true);
-				}
-				Test->TestFalse(TEXT("temporary external Actor fixture is removed"),
-					IFileManager::Get().FileExists(*ActorFile));
+				Test->AddError(TEXT("temporary World package remains loaded: ")
+					+ TemporaryWorld);
+				return;
 			}
-			const FString MapFile = FPackageName::LongPackageNameToFilename(
-				TemporaryWorld, FPackageName::GetMapPackageExtension());
-			if (IFileManager::Get().FileExists(*MapFile))
+			for (const FString& ExternalPackageName : ExternalPackageNames)
 			{
-				IFileManager::Get().Delete(*MapFile, false, true);
+				Test->TestTrue(
+					*FString::Printf(
+						TEXT("temporary external package is removed: %s"),
+						*ExternalPackageName),
+					CleanupPackage(ExternalPackageName));
 			}
-			Test->TestFalse(TEXT("temporary World lifecycle fixture is removed"),
-				IFileManager::Get().FileExists(*MapFile));
+			Test->TestTrue(
+				TEXT("temporary World lifecycle fixture is removed"),
+				CleanupPackage(
+					TemporaryWorld, FPackageName::GetMapPackageExtension()));
+			Test->TestTrue(
+				TEXT("temporary instanced HLOD layer fixture is removed"),
+				CleanupPackage(TemporaryWorld + TEXT("_HLODLayer_Instanced")));
+			Test->TestTrue(
+				TEXT("temporary merged HLOD layer fixture is removed"),
+				CleanupPackage(TemporaryWorld + TEXT("_HLODLayer_Merged")));
 		}
 
 		FAutomationTestBase* Test = nullptr;
@@ -740,7 +876,7 @@ namespace UE::UAI::Tests::StrictV2::T59
 		FString OriginalWorld;
 		FString TemporaryWorld;
 		FString ResaveActorGuid;
-		FString ResaveActorPackageName;
+		TSet<FString> ExternalPackageNames;
 		FString OperationRef;
 		double StartedAt = 0.0;
 		int32 Stage = 0;
