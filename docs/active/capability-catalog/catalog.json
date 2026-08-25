@@ -3557,10 +3557,10 @@
         "cleanup"
       ],
       "command_contract_state": "registered_exact_contract",
-      "implementation_state": "current_world_owner_shared_persisted_loader_actor_create_c9_verified_other_exact_mutation_and_persistence_cells_pending",
+      "implementation_state": "current_world_owner_shared_persisted_loader_actor_create_c9_and_data_layer_relation_actor_membership_replace_verified_other_exact_mutation_and_persistence_cells_pending",
       "evidence": {
-        "highest_verified_layer": "public_sdk_real_ue_c9_persisted_vertical",
-        "delivery_state": "world_actor_create_shared_persisted_loader_verified_exact_public_matrix_pending",
+        "highest_verified_layer": "public_sdk_real_ue_actor_create_c9_and_data_layer_relation_persisted_vertical",
+        "delivery_state": "world_actor_create_and_data_layer_relation_actor_membership_replace_verified_remaining_exact_public_matrix_pending",
         "evidence_refs": [
           "TROOT-UAI-42-WORLD-VIEWPORT-SPATIAL-VERTICAL",
           "runtimeLogs/delivery_workflow/TROOT-UAI-42-WORLD-VIEWPORT-SPATIAL-VERTICAL/20260821-world-selection-regression/automation/t42-world-selection-regression.receipt.discovery-set.json",
@@ -3568,11 +3568,16 @@
           "runtimeLogs/delivery_workflow/TROOT-UAI-50-MODELING-WORLD-PHYSICS-EXACT-MATRIX/20260822-cubegrid-c8d-c9-r1/automation/world-e3-r1.log",
           "runtimeLogs/delivery_workflow/TROOT-UAI-50-MODELING-WORLD-PHYSICS-EXACT-MATRIX/20260822-cubegrid-c8d-c9-r1/automation/world-e4-r1.log",
           "runtimeLogs/delivery_workflow/TROOT-UAI-50-MODELING-WORLD-PHYSICS-EXACT-MATRIX/20260822-cubegrid-c8d-c9-r1/public_sdk/world-actor-shared-c9-product.json",
-          "runtimeLogs/delivery_workflow/TROOT-UAI-50-MODELING-WORLD-PHYSICS-EXACT-MATRIX/20260822-cubegrid-c8d-c9-r1/public_sdk/world-shared-c9-product.json"
+          "runtimeLogs/delivery_workflow/TROOT-UAI-50-MODELING-WORLD-PHYSICS-EXACT-MATRIX/20260822-cubegrid-c8d-c9-r1/public_sdk/world-shared-c9-product.json",
+          "TROOT-UAI-70-WORLD-DATA-LAYERS-QUERY-DELETE-VERTICAL",
+          "runtimeLogs/t70/final1-vertical-receipt.json",
+          "runtimeLogs/t70/public/final1-query-delete.json",
+          "runtimeLogs/t70/fix4/tests/carrier-regression.json",
+          "docs/active/t59_world_command_migration.md#completion-semantics"
         ],
         "not_proven": [
-          "public SDK product execution of the remaining 10 world-mutation exact commands",
-          "persistence and independent readback for DataLayer, HLOD, streaming and WorldPartition variants",
+          "public SDK product execution of the remaining 9 world-mutation exact commands, plus data_layer_relation.update modes and relation shapes beyond the T70 actor_membership replace case",
+          "persistence and independent readback for DataLayer instance/state and relation variants beyond T70 actor_membership replace, plus HLOD, streaming and WorldPartition variants",
           "world.world_partition_streaming.update on an actual World Partition map; the current non-World-Partition whitebox map correctly closes at its precondition",
           "exhaustive authorization, failure cleanup and real-world content quality"
         ]
