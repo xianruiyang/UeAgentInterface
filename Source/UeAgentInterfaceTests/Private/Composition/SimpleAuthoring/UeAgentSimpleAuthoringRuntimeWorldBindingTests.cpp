@@ -68,12 +68,23 @@ namespace
 
 		~FOwnedWorldPair()
 		{
+			DiscoverOwnedExternalPackages(Second);
+			DiscoverOwnedExternalPackages(First);
 			SetAutomationWorldOverride(nullptr);
 			Destroy(Second);
 			Destroy(First);
 			CollectGarbage(RF_NoFlags, true);
 			DeletePackageFile(Second);
 			DeletePackageFile(First);
+			const FString OwnerDirectory =
+				ExternalActorOwnerDirectory(First);
+			if (!OwnerDirectory.IsEmpty())
+			{
+				IFileManager::Get().DeleteDirectory(
+					*OwnerDirectory,
+					false,
+					false);
+			}
 		}
 
 		bool IsValid() const
@@ -231,6 +242,76 @@ namespace
 		}
 
 	private:
+		static FString ExternalActorOwnerDirectory(
+			const FOwnedWorld& Owned)
+		{
+			FString RelativeOwnerPath =
+				FPackageName::GetLongPackagePath(Owned.PackageName);
+			if (!RelativeOwnerPath.RemoveFromStart(TEXT("/Game/"))
+				|| RelativeOwnerPath.IsEmpty())
+			{
+				return FString();
+			}
+			return FPaths::ConvertRelativePathToFull(
+				FPaths::ProjectContentDir()
+					/ TEXT("__ExternalActors__")
+					/ RelativeOwnerPath);
+		}
+
+		static FString ExternalActorDirectory(const FOwnedWorld& Owned)
+		{
+			FString RelativeWorldPath = Owned.PackageName;
+			if (!RelativeWorldPath.RemoveFromStart(TEXT("/Game/"))
+				|| RelativeWorldPath.IsEmpty())
+			{
+				return FString();
+			}
+			return FPaths::ConvertRelativePathToFull(
+				FPaths::ProjectContentDir()
+					/ TEXT("__ExternalActors__")
+					/ RelativeWorldPath);
+		}
+
+		void DiscoverOwnedExternalPackages(FOwnedWorld& Owned)
+		{
+			if (Owned.World && Owned.World->PersistentLevel)
+			{
+				for (AActor* Actor : Owned.World->PersistentLevel->Actors)
+				{
+					if (::IsValid(Actor) && Actor->GetExternalPackage())
+					{
+						TrackPackageFiles(
+							Owned,
+							Actor->GetExternalPackage()->GetName());
+					}
+				}
+			}
+
+			const FString Directory = ExternalActorDirectory(Owned);
+			if (Directory.IsEmpty())
+			{
+				return;
+			}
+			TArray<FString> Files;
+			IFileManager::Get().FindFilesRecursive(
+				Files,
+				*Directory,
+				TEXT("*.uasset"),
+				true,
+				false,
+				false);
+			for (const FString& Filename : Files)
+			{
+				FString PackageName;
+				if (FPackageName::TryConvertFilenameToLongPackageName(
+						Filename,
+						PackageName))
+				{
+					TrackPackageFiles(Owned, PackageName);
+				}
+			}
+		}
+
 		static void Create(
 			const FString& PackageName,
 			FOwnedWorld& OutOwned)
@@ -318,6 +399,26 @@ namespace
 				{
 					IFileManager::Get().Delete(
 						*Filename,
+						false,
+						true);
+				}
+			}
+			const FString Directory = ExternalActorDirectory(Owned);
+			if (!Directory.IsEmpty()
+				&& IFileManager::Get().DirectoryExists(*Directory))
+			{
+				TArray<FString> RemainingFiles;
+				IFileManager::Get().FindFilesRecursive(
+					RemainingFiles,
+					*Directory,
+					TEXT("*"),
+					true,
+					false,
+					false);
+				if (RemainingFiles.IsEmpty())
+				{
+					IFileManager::Get().DeleteDirectory(
+						*Directory,
 						false,
 						true);
 				}
