@@ -374,6 +374,35 @@ namespace
 				ObjectTools::DeleteObjectsUnchecked(Objects);
 			}
 			IFileManager::Get().DeleteDirectory(*SourceRoot, false, true);
+
+			FString ContentDirectory;
+			if (!FPackageName::TryConvertLongPackageNameToFilename(
+					RootPackage,
+					ContentDirectory))
+			{
+				return;
+			}
+			ContentDirectory = FPaths::ConvertRelativePathToFull(
+				ContentDirectory);
+			if (!IFileManager::Get().DirectoryExists(*ContentDirectory))
+			{
+				return;
+			}
+			TArray<FString> RemainingFiles;
+			IFileManager::Get().FindFilesRecursive(
+				RemainingFiles,
+				*ContentDirectory,
+				TEXT("*"),
+				true,
+				false,
+				false);
+			if (RemainingFiles.IsEmpty())
+			{
+				IFileManager::Get().DeleteDirectory(
+					*ContentDirectory,
+					false,
+					true);
+			}
 		}
 
 		FString RootPackage;
