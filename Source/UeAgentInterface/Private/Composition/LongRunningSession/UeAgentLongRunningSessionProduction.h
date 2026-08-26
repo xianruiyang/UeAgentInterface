@@ -2,12 +2,17 @@
 
 #include "CommandEdge/UeAgentCommandDispatch.h"
 #include "Composition/LongRunningSession/UeAgentLongRunningSessionRuntime.h"
+#include "DomainAdapters/EditorSessionOperation/UeAgentEditorSessionOperationProduction.h"
 #include "Templates/SharedPointer.h"
 
 class UWorld;
 
 namespace UE::UAI::Composition::LongRunningSession
 {
+	UEAGENTINTERFACE_API const TArray<DomainAdapters::EditorSessionOperation::
+		FUeAgentEditorSessionOperationPolicyDescriptor>&
+	GetLongRunningEditorSessionPolicyDescriptors();
+
 	struct UEAGENTINTERFACE_API
 	FUeAgentLongRunningSessionProductionConfig final
 	{

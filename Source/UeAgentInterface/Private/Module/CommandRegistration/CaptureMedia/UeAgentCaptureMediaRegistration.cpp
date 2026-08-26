@@ -19,17 +19,14 @@ namespace UE::UAI::Module::CommandRegistration::CaptureMedia
 	namespace
 	{
 		const FString Owner = TEXT("capture-media-job-owner");
-		bool TryBuildImagePolicyDiscoverySchemas(
+		bool TryBuildImagePolicyIdSchema(
 			FString& OutPolicyIdSchema,
-			FString& OutParametersSchema,
 			FString& OutError)
 		{
 			using namespace DomainAdapters::CaptureMediaLongJob;
 			OutPolicyIdSchema.Reset();
-			OutParametersSchema.Reset();
 			const TSharedRef<FJsonObject> PolicySchema = MakeShared<FJsonObject>();
 			TArray<TSharedPtr<FJsonValue>> PolicyIds;
-			const TSharedRef<FJsonObject> PolicyContracts = MakeShared<FJsonObject>();
 			for (const FUeAgentCaptureMediaImagePolicyDescriptor& Policy
 				: GetCaptureMediaImagePolicies())
 			{
@@ -40,31 +37,82 @@ namespace UE::UAI::Module::CommandRegistration::CaptureMedia
 					return false;
 				}
 				PolicyIds.Add(MakeShared<FJsonValueString>(Policy.GetPolicyId()));
-				if (Policy.HasDiscoveryContract())
-				{
-					TSharedPtr<FJsonObject> Parameters;
-					if (!Contract::Json::TryParseObject(
-							Policy.GetParameterSchemaJson(), Parameters, OutError)
-						|| !Parameters.IsValid())
-					{
-						OutError = TEXT("capture_image_policy_schema_invalid:")
-							+ Policy.GetPolicyId() + TEXT(":") + OutError;
-						return false;
-					}
-					PolicyContracts->SetObjectField(
-						Policy.GetPolicyId(), Parameters.ToSharedRef());
-				}
 			}
 			PolicySchema->SetArrayField(TEXT("enum"), MoveTemp(PolicyIds));
 			PolicySchema->SetStringField(TEXT("type"), TEXT("string"));
-			const TSharedRef<FJsonObject> ParametersSchema = MakeShared<FJsonObject>();
-			ParametersSchema->SetStringField(TEXT("type"), TEXT("object"));
-			ParametersSchema->SetObjectField(
-				TEXT("x-uai-policy-contracts"), PolicyContracts);
 			return Contract::Json::TryCanonicalize(
-				PolicySchema, OutPolicyIdSchema, OutError)
-				&& Contract::Json::TryCanonicalize(
-					ParametersSchema, OutParametersSchema, OutError);
+				PolicySchema, OutPolicyIdSchema, OutError);
+		}
+
+		bool TryConstStringSchema(
+			const FString& Value,
+			FString& OutSchema,
+			FString& OutError)
+		{
+			const TSharedRef<FJsonObject> Schema = MakeShared<FJsonObject>();
+			Schema->SetStringField(TEXT("type"), TEXT("string"));
+			Schema->SetStringField(TEXT("const"), Value);
+			return Contract::Json::TryCanonicalize(
+				Schema, OutSchema, OutError);
+		}
+
+		bool TryAppendImageDiscoveryVariants(
+			FUeAgentCommandDeclaration& Declaration,
+			FString& OutError)
+		{
+			using namespace DomainAdapters::CaptureMediaLongJob;
+			for (const FUeAgentCaptureMediaImagePolicyDescriptor& Policy :
+				GetCaptureMediaImagePolicies())
+			{
+				if (!Policy.HasDiscoveryContract())
+				{
+					continue;
+				}
+				FString PolicySchema;
+				FString RequestSchema;
+				if (!TryConstStringSchema(
+						Policy.GetPolicyId(), PolicySchema, OutError)
+					|| !TryBuildCommandVariantRequestSchema(
+						{
+							{TEXT("subject_ref"), Policy.GetSubjectSchemaJson(), true},
+							{TEXT("policy_id"), PolicySchema, true},
+							{TEXT("parameters"), Policy.GetParameterSchemaJson(), true},
+						},
+						RequestSchema,
+						OutError))
+				{
+					OutError = TEXT("capture_image_variant_schema_invalid:")
+						+ Policy.GetPolicyId() + TEXT(":") + OutError;
+					return false;
+				}
+				FUeAgentCommandVariantDeclaration Variant;
+				Variant.VariantId = Policy.GetPolicyId();
+				Variant.RequestSchemaJson = MoveTemp(RequestSchema);
+				Variant.Purpose.Summary = Policy.GetParameterGuidance();
+				Variant.Purpose.Target = TEXT("One exact ")
+					+ Policy.GetPolicyId() + TEXT(" image capture request.");
+				Variant.Purpose.Preconditions = {
+					TEXT("The Editor has a render-capable RHI and the exact subject required by the selected policy is available."),
+				};
+				Variant.Purpose.ParameterGuidance = Policy.GetParameterGuidance();
+				Variant.Purpose.ResultGuidance = Policy.GetResultGuidance();
+				Variant.Purpose.FailureGuidance = TEXT(
+					"Invalid selectors or parameters, unavailable RHI/viewport, capture failure or unproved restoration fail typed; do not fabricate an artifact or replay state_unknown.");
+				Variant.Purpose.SideEffectGuidance = TEXT(
+					"The owner may create one bounded artifact and temporary preview state only; declared restoration must complete before success.");
+				Variant.Purpose.MinimumExample = Policy.GetMinimumExample();
+				Variant.Purpose.RelatedFlows = {
+					TEXT("operation.status"),
+					TEXT("operation.receipt"),
+					TEXT("operation.release"),
+				};
+				Variant.Purpose.Keywords = {
+					Policy.GetPolicyId(),
+					Policy.GetMechanicsId(),
+				};
+				Declaration.Variants.Add(MoveTemp(Variant));
+			}
+			return true;
 		}
 
 		FString WireType(EUeAgentCommandWireType Type)
@@ -101,10 +149,9 @@ namespace UE::UAI::Module::CommandRegistration::CaptureMedia
 			Result.StateLayers = {TEXT("server_operation_registry"),
 				TEXT("owned_capture_resources"), TEXT("terminal_operation_receipt")};
 			FString PolicyIdSchema;
-			FString ParametersSchema;
 			if (Route.CommandId == TEXT("capture.image.execute")
-				&& !TryBuildImagePolicyDiscoverySchemas(
-					PolicyIdSchema, ParametersSchema, OutError))
+				&& !TryBuildImagePolicyIdSchema(
+					PolicyIdSchema, OutError))
 			{
 				return false;
 			}
@@ -125,8 +172,7 @@ namespace UE::UAI::Module::CommandRegistration::CaptureMedia
 					&& Parameter.GetName() == TEXT("parameters"))
 				{
 					Field.Description = TEXT(
-						"Policy-specific parameters; inspect x-uai-policy-contracts for exact schemas.");
-					Field.SchemaJson = ParametersSchema;
+						"Policy-specific parameters; select a search candidate variant and use its request_schema without guessing.");
 				}
 				else if (Route.CommandId == TEXT("capture.image.execute")
 					&& Parameter.GetName() == TEXT("subject_ref"))
@@ -157,27 +203,10 @@ namespace UE::UAI::Module::CommandRegistration::CaptureMedia
 			Result.Purpose.Synonyms = {TEXT("capture job")};
 			if (Route.CommandId == TEXT("capture.image.execute"))
 			{
-				using namespace DomainAdapters::CaptureMediaLongJob;
-				const FUeAgentCaptureMediaImagePolicyDescriptor* TransformPolicy =
-					FindCaptureMediaImagePolicy(
-						TEXT("policy:image-capture:transform-candidates/v1"));
-				if (!TransformPolicy || !TransformPolicy->HasDiscoveryContract())
+				if (!TryAppendImageDiscoveryVariants(Result, OutError))
 				{
-					OutError = TEXT(
-						"capture_transform_candidates_discovery_contract_missing");
 					return false;
 				}
-				Result.Purpose.ParameterGuidance =
-					TransformPolicy->GetParameterGuidance();
-				Result.Purpose.ResultGuidance =
-					TransformPolicy->GetResultGuidance();
-				Result.Purpose.MinimumExample =
-					TransformPolicy->GetMinimumExample();
-				Result.Purpose.Keywords.Append({
-					TEXT("transform candidates"),
-					TEXT("viewport frame sheet"),
-					TEXT("visual preview"),
-				});
 				Result.Errors.Add({
 					TEXT("capture_transform_candidates_restore_unverified"),
 					TEXT("The preview failed closed because transient editor state restoration could not be proved."),

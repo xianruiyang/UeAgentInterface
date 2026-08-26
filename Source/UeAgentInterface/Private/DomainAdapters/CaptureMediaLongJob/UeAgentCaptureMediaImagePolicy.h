@@ -15,11 +15,13 @@ namespace UE::UAI::DomainAdapters::CaptureMediaLongJob
 			FString InParameterSchemaJson = FString(),
 			FString InParameterGuidance = FString(),
 			FString InResultGuidance = FString(),
-			FString InMinimumExample = FString());
+			FString InMinimumExample = FString(),
+			FString InSubjectSchemaJson = FString());
 
 		const FString& GetPolicyId() const;
 		const FString& GetMechanicsId() const;
 		const FString& GetParameterSchemaJson() const;
+		const FString& GetSubjectSchemaJson() const;
 		const FString& GetParameterGuidance() const;
 		const FString& GetResultGuidance() const;
 		const FString& GetMinimumExample() const;
@@ -30,6 +32,7 @@ namespace UE::UAI::DomainAdapters::CaptureMediaLongJob
 		FString PolicyId;
 		FString MechanicsId;
 		FString ParameterSchemaJson;
+		FString SubjectSchemaJson;
 		FString ParameterGuidance;
 		FString ResultGuidance;
 		FString MinimumExample;

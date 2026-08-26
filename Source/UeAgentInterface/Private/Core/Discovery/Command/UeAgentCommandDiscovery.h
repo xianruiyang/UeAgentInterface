@@ -23,6 +23,7 @@ namespace UE::UAI::Discovery::Command
 	{
 		FString CommandId;
 		FString ContractHash;
+		FString VariantId;
 		FString Summary;
 		FString Target;
 		FString MatchReason;
@@ -44,6 +45,8 @@ namespace UE::UAI::Discovery::Command
 		FString PythonNamespace;
 		FString PythonFunction;
 		FString PublicOwner;
+		FString VariantId;
+		FString RequestSchemaJson;
 		CommandContract::FUeAgentCommandPurposeDeclaration Purpose;
 		TArray<CommandContract::FUeAgentCommandFieldDeclaration> InputFields;
 		TArray<CommandContract::FUeAgentCommandFieldDeclaration> ResultFields;
@@ -70,6 +73,13 @@ namespace UE::UAI::Discovery::Command
 		bool GetDetail(
 			const FString& CommandId,
 			const FString& ContractHash,
+			FCommandDetail& OutDetail,
+			FCommandDiscoveryError& OutError) const;
+
+		bool GetDetail(
+			const FString& CommandId,
+			const FString& ContractHash,
+			const FString& VariantId,
 			FCommandDetail& OutDetail,
 			FCommandDiscoveryError& OutError) const;
 

@@ -405,6 +405,217 @@ bool FUeAgentStrictV2T05ActiveTutorialCompletenessTest::RunTest(
 }
 
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(
+	FUeAgentStrictV2T05ActiveVariantDiscoveryTest,
+	"UAI.StrictV2.T05.QUERY.PUBLIC.CALIBRATION.ActiveVariantDiscovery",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FUeAgentStrictV2T05ActiveVariantDiscoveryTest::RunTest(
+	const FString& Parameters)
+{
+#if !UAI_T05_QUERY_CALIBRATION_AVAILABLE
+	TestTrue(TEXT("T05 query calibration is implemented"), false);
+	return false;
+#else
+	TSharedPtr<const FUeAgentImmutableCommandRegistry> Registry;
+	TSharedPtr<const FUeAgentExactCommandDispatch> Dispatch;
+	FString CompositionError;
+	if (!TestTrue(
+		TEXT("the process active command composition freezes"),
+		TryComposeProcessActiveCommandComposition(
+			Registry,
+			Dispatch,
+			CompositionError))
+		|| !Registry.IsValid())
+	{
+		AddError(CompositionError);
+		return false;
+	}
+
+	TSharedPtr<const FCommandDiscoveryService> Discovery;
+	FCommandDiscoveryError DiscoveryError;
+	if (!TestTrue(
+		TEXT("active command discovery consumes the immutable registry"),
+		FCommandDiscoveryService::TryCreate(
+			Registry.ToSharedRef(),
+			Discovery,
+			DiscoveryError))
+		|| !Discovery.IsValid())
+	{
+		AddError(DiscoveryError.Code + TEXT(":") + DiscoveryError.Detail);
+		return false;
+	}
+	const FUeAgentFrozenCommandContract* DetailContract =
+		Registry->FindExact(TEXT("query.command.detail"));
+	if (!TestNotNull(
+		TEXT("the active registry exposes the public detail command"),
+		DetailContract))
+	{
+		return false;
+	}
+
+	struct FVariantExpectation final
+	{
+		FString Intent;
+		FString CommandId;
+		FString VariantId;
+	};
+	const TArray<FVariantExpectation> Expectations = {
+		{
+			TEXT("set the current editor world context map"),
+			TEXT("editor.session"),
+			TEXT("policy:world-context:set-current/v1"),
+		},
+		{
+			TEXT("capture the current level viewport image"),
+			TEXT("capture.image.execute"),
+			TEXT("policy:image-capture:viewport/v1"),
+		},
+	};
+
+	for (const FVariantExpectation& Expectation : Expectations)
+	{
+		FCommandSearchRequest Search;
+		Search.Intent = Expectation.Intent;
+		Search.Limit = 3;
+		FCommandSearchPage Page;
+		if (!TestTrue(
+			TEXT("natural-language intent produces active candidates"),
+			Discovery->Search(Search, Page, DiscoveryError)))
+		{
+			AddError(DiscoveryError.Code + TEXT(":") + DiscoveryError.Detail);
+			return false;
+		}
+		const FCommandCandidate* Candidate = Page.Candidates.FindByPredicate(
+			[&Expectation](const FCommandCandidate& Item)
+			{
+				return Item.CommandId == Expectation.CommandId
+					&& !Item.VariantId.IsEmpty();
+			});
+		if (!TestNotNull(
+			TEXT("intent resolves the exact executable command variant"),
+			Candidate))
+		{
+			return false;
+		}
+		TestEqual(
+			TEXT("the first executable variant for the command matches the intent"),
+			Candidate->VariantId,
+			Expectation.VariantId);
+
+		FCommandDetail Detail;
+		if (!TestTrue(
+			TEXT("candidate identity opens the same executable variant"),
+			Discovery->GetDetail(
+				Candidate->CommandId,
+				Candidate->ContractHash,
+				Candidate->VariantId,
+				Detail,
+				DiscoveryError)))
+		{
+			AddError(DiscoveryError.Code + TEXT(":") + DiscoveryError.Detail);
+			return false;
+		}
+		TestEqual(
+			TEXT("variant detail preserves the candidate variant identity"),
+			Detail.VariantId,
+			Expectation.VariantId);
+		TestTrue(
+			TEXT("variant detail exposes a complete request schema"),
+			!Detail.RequestSchemaJson.IsEmpty());
+		TSharedPtr<FJsonObject> RequestSchema;
+		FString SchemaError;
+		TestTrue(
+			TEXT("variant request schema is canonical JSON"),
+			UE::UAI::CommandContract::Json::TryParseObject(
+				Detail.RequestSchemaJson,
+				RequestSchema,
+				SchemaError));
+		FString SchemaType;
+		const TSharedPtr<FJsonObject>* Properties = nullptr;
+		TestTrue(
+			TEXT("variant request schema declares its complete object shape"),
+			RequestSchema.IsValid()
+				&& RequestSchema->TryGetStringField(TEXT("type"), SchemaType)
+				&& SchemaType == TEXT("object")
+				&& RequestSchema->TryGetObjectField(TEXT("properties"), Properties)
+				&& Properties
+				&& Properties->IsValid()
+				&& RequestSchema->HasTypedField<EJson::Array>(TEXT("required")));
+		TestTrue(
+			TEXT("variant detail declares an applicable target"),
+			!Detail.Purpose.Target.IsEmpty());
+		TestTrue(
+			TEXT("variant detail contains a minimal exact example"),
+			!Detail.Purpose.MinimumExample.IsEmpty());
+
+		const FString DetailParams = FString::Printf(
+			TEXT("{\"command_id\":\"%s\",\"contract_hash\":\"%s\",\"variant_id\":\"%s\"}"),
+			*Candidate->CommandId,
+			*Candidate->ContractHash,
+			*Candidate->VariantId);
+		const FUeAgentCommandResult DetailResult = SubmitExact(
+			Dispatch.ToSharedRef(),
+			DetailContract->GetCommandId(),
+			DetailContract->GetContractHash(),
+			DetailParams);
+		TestTrue(
+			TEXT("variant detail is available through exact public dispatch"),
+			DetailResult.IsOk());
+		TSharedPtr<FJsonObject> DetailPayload;
+		FString DetailJsonError;
+		TestTrue(
+			TEXT("public variant detail returns structured payload"),
+			DetailResult.IsOk()
+				&& UE::UAI::CommandContract::Json::TryParseObject(
+					DetailResult.GetPayloadJson(),
+					DetailPayload,
+					DetailJsonError)
+				&& DetailPayload.IsValid()
+				&& DetailPayload->GetStringField(TEXT("variant_id"))
+					== Candidate->VariantId
+				&& DetailPayload->HasTypedField<EJson::Object>(
+					TEXT("request_schema")));
+	}
+
+	const FUeAgentFrozenCommandContract* EditorSession =
+		Registry->FindExact(TEXT("editor.session"));
+	if (!TestNotNull(
+		TEXT("editor session contract is exact"),
+		EditorSession))
+	{
+		return false;
+	}
+	FCommandDetail UnknownDetail;
+	TestFalse(
+		TEXT("unknown variant identity is rejected"),
+		Discovery->GetDetail(
+			EditorSession->GetCommandId(),
+			EditorSession->GetContractHash(),
+			TEXT("policy:world-context:unknown/v1"),
+			UnknownDetail,
+			DiscoveryError));
+	TestEqual(
+		TEXT("unknown variant failure is typed"),
+		DiscoveryError.Code,
+		FString(TEXT("command_variant_not_registered_exact")));
+
+	FCommandDetail GenericDetail;
+	TestTrue(
+		TEXT("the existing command-level detail overload remains compatible"),
+		Discovery->GetDetail(
+			EditorSession->GetCommandId(),
+			EditorSession->GetContractHash(),
+			GenericDetail,
+			DiscoveryError));
+	TestEqual(
+		TEXT("command-level detail does not invent a variant identity"),
+		GenericDetail.VariantId,
+		FString());
+	return !HasAnyErrors();
+#endif
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(
 	FUeAgentStrictV2T05SevenKindsTest,
 	"UAI.StrictV2.T05.QUERY.PUBLIC.CALIBRATION.SevenKinds",
 	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)

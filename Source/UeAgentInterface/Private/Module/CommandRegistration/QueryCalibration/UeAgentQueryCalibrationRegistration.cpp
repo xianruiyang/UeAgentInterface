@@ -65,7 +65,7 @@ namespace UE::UAI::Module::CommandRegistration::QueryCalibration
 				Field(TEXT("cursor"), TEXT("integer"), false, TEXT("Non-negative continuation cursor; defaults to 0.")),
 			};
 			Result.ResultFields = {
-				Field(TEXT("candidates"), TEXT("array"), true, TEXT("Small ranked candidates with reasons and exact contract identities.")),
+				Field(TEXT("candidates"), TEXT("array"), true, TEXT("Small ranked candidates with reasons, exact command/hash identities and variant_id when one directly callable variant matched.")),
 				Field(TEXT("completeness"), TEXT("string"), true, TEXT("complete or paged for this immutable registry revision.")),
 			};
 			Result.Errors = {
@@ -77,7 +77,7 @@ namespace UE::UAI::Module::CommandRegistration::QueryCalibration
 			Result.Purpose.Target = TEXT("The immutable current command registry and its complete purpose contracts.");
 			Result.Purpose.Preconditions = {TEXT("The caller is authenticated and has uai:query authority.")};
 			Result.Purpose.ParameterGuidance = TEXT("Describe the intended task; use limit and cursor only for bounded paging.");
-			Result.Purpose.ResultGuidance = TEXT("Use a candidate command_id and contract_hash unchanged with query.command.detail.");
+			Result.Purpose.ResultGuidance = TEXT("Use a candidate command_id and contract_hash unchanged with query.command.detail; also forward variant_id unchanged when present.");
 			Result.Purpose.FailureGuidance = TEXT("Invalid intent or paging fails without fuzzy execution or fallback.");
 			Result.Purpose.SideEffectGuidance = TEXT("Read-only registry lookup; no Editor, asset, world or external state changes.");
 			Result.Purpose.MinimumExample = TEXT("client.query.command_search('inspect current editor runtime', limit=3)");
@@ -94,8 +94,11 @@ namespace UE::UAI::Module::CommandRegistration::QueryCalibration
 			Result.InputFields = {
 				Field(TEXT("command_id"), TEXT("string"), true, TEXT("Exact command identity returned by command search.")),
 				Field(TEXT("contract_hash"), TEXT("string"), true, TEXT("Exact sha256 contract identity returned with that candidate.")),
+				Field(TEXT("variant_id"), TEXT("string"), false, TEXT("Optional exact executable variant identity returned by command search.")),
 			};
 			Result.ResultFields = {
+				Field(TEXT("variant_id"), TEXT("string"), false, TEXT("Selected executable variant identity; absent for generic command detail.")),
+				Field(TEXT("request_schema"), TEXT("object"), false, TEXT("Complete JSON Schema for the selected variant's public command params object.")),
 				Field(TEXT("purpose"), TEXT("object"), true, TEXT("Complete purpose, preconditions, guidance, example and related flows.")),
 				Field(TEXT("input_fields"), TEXT("array"), true, TEXT("Exact public input field declarations; schema-capable owners attach a machine-readable JSON Schema to each field.")),
 				Field(TEXT("result_fields"), TEXT("array"), true, TEXT("Exact public result field declarations.")),
@@ -105,16 +108,17 @@ namespace UE::UAI::Module::CommandRegistration::QueryCalibration
 			Result.Errors = {
 				Error(TEXT("command_not_registered_exact"), TEXT("The complete command identity does not exist.")),
 				Error(TEXT("command_contract_version_mismatch"), TEXT("The candidate hash is stale or belongs to another contract.")),
+				Error(TEXT("command_variant_not_registered_exact"), TEXT("The supplied variant does not exist within the exact command contract.")),
 				Error(TEXT("query_authority_required"), TEXT("The authenticated caller lacks read authority.")),
 			};
-			Result.Purpose.Summary = TEXT("Read the complete usage detail for one exact command contract.");
-			Result.Purpose.Target = TEXT("One immutable command_id and contract_hash pair returned by public discovery.");
-			Result.Purpose.Preconditions = {TEXT("Use both identity fields exactly as returned by query.command.search.")};
-			Result.Purpose.ParameterGuidance = TEXT("Do not rewrite, alias or infer either identity field.");
-			Result.Purpose.ResultGuidance = TEXT("Pass the same identity and parameters admitted by each input_fields[].schema to SDK execute_exact or a named wrapper; never guess values outside a published schema.");
+			Result.Purpose.Summary = TEXT("Read the complete usage detail for one exact command or executable variant contract.");
+			Result.Purpose.Target = TEXT("One immutable command_id and contract_hash pair, optionally narrowed by the exact variant_id returned by public discovery.");
+			Result.Purpose.Preconditions = {TEXT("Use command_id, contract_hash and any returned variant_id exactly as returned by query.command.search.")};
+			Result.Purpose.ParameterGuidance = TEXT("Do not rewrite, alias or infer any identity field; omit variant_id only when the candidate omitted it.");
+			Result.Purpose.ResultGuidance = TEXT("For a selected variant, construct params only from request_schema and the minimum example; otherwise use the generic input_fields contract.");
 			Result.Purpose.FailureGuidance = TEXT("Unknown and stale identities fail with distinct typed codes and never fall back.");
 			Result.Purpose.SideEffectGuidance = TEXT("Read-only registry lookup; no persistent or transient UE mutation.");
-			Result.Purpose.MinimumExample = TEXT("client.query.command_detail(command_id, contract_hash)");
+			Result.Purpose.MinimumExample = TEXT("client.query.command_detail(command_id, contract_hash, variant_id=variant_id)");
 			Result.Purpose.RelatedFlows = {TEXT("query.command.search"), TEXT("sdk.execute_exact")};
 			Result.Purpose.Keywords = {TEXT("detail"), TEXT("purpose"), TEXT("contract"), TEXT("exact"), TEXT("usage")};
 			Result.Purpose.Synonyms = {TEXT("command help"), TEXT("show command schema")};

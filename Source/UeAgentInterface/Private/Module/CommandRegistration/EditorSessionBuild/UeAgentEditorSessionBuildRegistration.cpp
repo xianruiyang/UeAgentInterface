@@ -2,6 +2,9 @@
 
 #include "CommandHandlers/EditorSessionBuild/UeAgentEditorSessionBuildCommandHandlers.h"
 #include "Composition/LongRunningSession/UeAgentLongRunningSessionActivation.h"
+#include "Composition/LongRunningSession/UeAgentLongRunningSessionProduction.h"
+#include "Core/Contract/UeAgentCommandJson.h"
+#include "Dom/JsonObject.h"
 #include "OperationOwners/EditorSessionBuild/UeAgentEditorSessionBuildOwner.h"
 
 namespace UE::UAI::Module::CommandRegistration::EditorSessionBuild
@@ -30,6 +33,90 @@ namespace UE::UAI::Module::CommandRegistration::EditorSessionBuild
 			}
 		}
 
+		bool TryConstStringSchema(
+			const FString& Value,
+			FString& OutSchema,
+			FString& OutError)
+		{
+			const TSharedRef<FJsonObject> Schema = MakeShared<FJsonObject>();
+			Schema->SetStringField(TEXT("type"), TEXT("string"));
+			Schema->SetStringField(TEXT("const"), Value);
+			return Json::TryCanonicalize(Schema, OutSchema, OutError);
+		}
+
+		bool TryAppendDiscoveryVariants(
+			FUeAgentCommandDeclaration& Declaration,
+			FString& OutError)
+		{
+			using namespace DomainAdapters::EditorSessionOperation;
+			for (const FUeAgentEditorSessionOperationPolicyDescriptor& Policy :
+				Composition::LongRunningSession::
+					GetLongRunningEditorSessionPolicyDescriptors())
+			{
+				if (!Policy.HasDiscoveryContract())
+				{
+					continue;
+				}
+				const FUeAgentEditorSessionOperationFamilyContract* Family =
+					FindEditorSessionOperationFamilyContract(Policy.GetFamily());
+				if (Family == nullptr)
+				{
+					OutError = TEXT("editor_session_variant_family_missing:")
+						+ Policy.GetPolicyId();
+					return false;
+				}
+				FString FamilySchema;
+				FString PolicySchema;
+				FString RequestSchema;
+				if (!TryConstStringSchema(
+						Family->GetFamilyId(), FamilySchema, OutError)
+					|| !TryConstStringSchema(
+						Policy.GetPolicyId(), PolicySchema, OutError)
+					|| !TryBuildCommandVariantRequestSchema(
+						{
+							{TEXT("family_id"), FamilySchema, true},
+							{TEXT("subject_ref"), Policy.GetSubjectSchemaJson(), true},
+							{TEXT("policy_id"), PolicySchema, true},
+							{TEXT("parameters"), Policy.GetParameterSchemaJson(), true},
+						},
+						RequestSchema,
+						OutError))
+				{
+					OutError = TEXT("editor_session_variant_schema_invalid:")
+						+ Policy.GetPolicyId() + TEXT(":") + OutError;
+					return false;
+				}
+				FUeAgentCommandVariantDeclaration Variant;
+				Variant.VariantId = Policy.GetPolicyId();
+				Variant.RequestSchemaJson = MoveTemp(RequestSchema);
+				Variant.Purpose.Summary = Policy.GetParameterGuidance();
+				Variant.Purpose.Target = TEXT("One exact ")
+					+ Policy.GetPolicyId() + TEXT(" call in family ")
+					+ Family->GetFamilyId() + TEXT(".");
+				Variant.Purpose.Preconditions = {
+					TEXT("Resolve the exact target subject before calling and preserve the candidate command/hash/variant identities."),
+				};
+				Variant.Purpose.ParameterGuidance = Policy.GetParameterGuidance();
+				Variant.Purpose.ResultGuidance = Policy.GetResultGuidance();
+				Variant.Purpose.FailureGuidance = TEXT(
+					"Invalid subject, selector, parameters, save or load state fails typed; do not guess another policy or replay state_unknown.");
+				Variant.Purpose.SideEffectGuidance = TEXT(
+					"The operation may change declared Editor session state only; verify current World and dirty resources independently and release the operation.");
+				Variant.Purpose.MinimumExample = Policy.GetMinimumExample();
+				Variant.Purpose.RelatedFlows = {
+					TEXT("operation.status"),
+					TEXT("operation.receipt"),
+					TEXT("operation.release"),
+				};
+				Variant.Purpose.Keywords = {
+					Policy.GetPolicyId(),
+					Family->GetFamilyId(),
+				};
+				Declaration.Variants.Add(MoveTemp(Variant));
+			}
+			return true;
+		}
+
 		bool TryDeclaration(
 			const FUeAgentEditorSessionBuildRoute& Route,
 			const FUeAgentCommandContractRegistry& Legacy,
@@ -44,8 +131,8 @@ namespace UE::UAI::Module::CommandRegistration::EditorSessionBuild
 			}
 			FUeAgentCommandDeclaration Result;
 			Result.CommandId = Route.CommandId;
-			Result.PythonNamespace = TEXT("editor_session_build");
-			Result.PythonFunction = Route.PythonFunction;
+			Result.PythonNamespace = Contract->GetNamespace();
+			Result.PythonFunction = Contract->GetMethod();
 			Result.ContractVersion = 1;
 			Result.PublicOwner = Owner;
 			Result.Availability = EUeAgentCommandAvailability::Enabled;
@@ -89,6 +176,11 @@ namespace UE::UAI::Module::CommandRegistration::EditorSessionBuild
 			Result.Purpose.RelatedFlows = {TEXT("operation.status"), TEXT("operation.receipt"), TEXT("operation.release")};
 			Result.Purpose.Keywords = {TEXT("editor"), TEXT("session"), TEXT("build"), TEXT("safe exit")};
 			Result.Purpose.Synonyms = {TEXT("control operation")};
+			if (Route.CommandId == TEXT("editor.session")
+				&& !TryAppendDiscoveryVariants(Result, OutError))
+			{
+				return false;
+			}
 			Out = MoveTemp(Result);
 			return true;
 		}

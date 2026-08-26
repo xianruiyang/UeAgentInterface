@@ -52,6 +52,27 @@ namespace UE::UAI::CommandRegistry
 			return FString::Join(Segments, TEXT(".")) == Value;
 		}
 
+		bool IsVariantId(const FString& Value)
+		{
+			if (Value.IsEmpty() || !FChar::IsAlnum(Value[0]))
+			{
+				return false;
+			}
+			for (const TCHAR Character : Value)
+			{
+				if (!(FChar::IsAlnum(Character)
+					|| Character == TEXT('_')
+					|| Character == TEXT('-')
+					|| Character == TEXT('.')
+					|| Character == TEXT(':')
+					|| Character == TEXT('/')))
+				{
+					return false;
+				}
+			}
+			return true;
+		}
+
 		bool IsWireType(const FString& Value)
 		{
 			static const TSet<FString> Types = {
@@ -165,6 +186,26 @@ namespace UE::UAI::CommandRegistry
 			}
 		}
 
+		void NormalizePurpose(FUeAgentCommandPurposeDeclaration& Purpose)
+		{
+			Purpose.Summary = Clean(MoveTemp(Purpose.Summary));
+			Purpose.Target = Clean(MoveTemp(Purpose.Target));
+			Purpose.ParameterGuidance =
+				Clean(MoveTemp(Purpose.ParameterGuidance));
+			Purpose.ResultGuidance =
+				Clean(MoveTemp(Purpose.ResultGuidance));
+			Purpose.FailureGuidance =
+				Clean(MoveTemp(Purpose.FailureGuidance));
+			Purpose.SideEffectGuidance =
+				Clean(MoveTemp(Purpose.SideEffectGuidance));
+			Purpose.MinimumExample =
+				Clean(MoveTemp(Purpose.MinimumExample));
+			NormalizeStrings(Purpose.Preconditions);
+			NormalizeStrings(Purpose.RelatedFlows);
+			NormalizeStrings(Purpose.Keywords);
+			NormalizeStrings(Purpose.Synonyms);
+		}
+
 		void Normalize(FUeAgentCommandDeclaration& Declaration)
 		{
 			Declaration.CommandId =
@@ -198,24 +239,20 @@ namespace UE::UAI::CommandRegistry
 				Error.Code = Clean(MoveTemp(Error.Code));
 				Error.Description = Clean(MoveTemp(Error.Description));
 			}
-			FUeAgentCommandPurposeDeclaration& Purpose =
-				Declaration.Purpose;
-			Purpose.Summary = Clean(MoveTemp(Purpose.Summary));
-			Purpose.Target = Clean(MoveTemp(Purpose.Target));
-			Purpose.ParameterGuidance =
-				Clean(MoveTemp(Purpose.ParameterGuidance));
-			Purpose.ResultGuidance =
-				Clean(MoveTemp(Purpose.ResultGuidance));
-			Purpose.FailureGuidance =
-				Clean(MoveTemp(Purpose.FailureGuidance));
-			Purpose.SideEffectGuidance =
-				Clean(MoveTemp(Purpose.SideEffectGuidance));
-			Purpose.MinimumExample =
-				Clean(MoveTemp(Purpose.MinimumExample));
-			NormalizeStrings(Purpose.Preconditions);
-			NormalizeStrings(Purpose.RelatedFlows);
-			NormalizeStrings(Purpose.Keywords);
-			NormalizeStrings(Purpose.Synonyms);
+			NormalizePurpose(Declaration.Purpose);
+			for (FUeAgentCommandVariantDeclaration& Variant :
+				Declaration.Variants)
+			{
+				Variant.VariantId = Clean(MoveTemp(Variant.VariantId));
+				NormalizeSchema(Variant.RequestSchemaJson);
+				NormalizePurpose(Variant.Purpose);
+			}
+			Declaration.Variants.Sort(
+				[](const FUeAgentCommandVariantDeclaration& Left,
+					const FUeAgentCommandVariantDeclaration& Right)
+				{
+					return Left.VariantId < Right.VariantId;
+				});
 			NormalizeStrings(Declaration.TutorialReferences);
 		}
 
@@ -253,6 +290,48 @@ namespace UE::UAI::CommandRegistry
 					return false;
 				}
 				Names.Add(Field.Name);
+			}
+			return true;
+		}
+
+		bool ValidateVariants(
+			const TArray<FUeAgentCommandVariantDeclaration>& Variants,
+			FString& OutError)
+		{
+			TSet<FString> Identities;
+			for (const FUeAgentCommandVariantDeclaration& Variant : Variants)
+			{
+				if (!IsVariantId(Variant.VariantId)
+					|| Variant.RequestSchemaJson.IsEmpty()
+					|| !PurposeComplete(Variant.Purpose))
+				{
+					OutError = TEXT("command_variant_contract_incomplete");
+					return false;
+				}
+				if (Identities.Contains(Variant.VariantId))
+				{
+					OutError = TEXT("command_variant_contract_duplicate");
+					return false;
+				}
+				TSharedPtr<FJsonObject> Schema;
+				FString SchemaError;
+				FString SchemaType;
+				bool bAdditionalProperties = true;
+				if (!Json::TryParseObject(
+						Variant.RequestSchemaJson,
+						Schema,
+						SchemaError)
+					|| !Schema.IsValid()
+					|| !Schema->TryGetStringField(TEXT("type"), SchemaType)
+					|| SchemaType != TEXT("object")
+					|| !Schema->TryGetBoolField(
+						TEXT("additionalProperties"), bAdditionalProperties)
+					|| bAdditionalProperties)
+				{
+					OutError = TEXT("command_variant_request_schema_invalid");
+					return false;
+				}
+				Identities.Add(Variant.VariantId);
 			}
 			return true;
 		}
@@ -309,7 +388,8 @@ namespace UE::UAI::CommandRegistry
 				return false;
 			}
 			if (!ValidateFields(Declaration.InputFields, OutError)
-				|| !ValidateFields(Declaration.ResultFields, OutError))
+				|| !ValidateFields(Declaration.ResultFields, OutError)
+				|| !ValidateVariants(Declaration.Variants, OutError))
 			{
 				return false;
 			}
@@ -469,6 +549,34 @@ namespace UE::UAI::CommandRegistry
 			return Result;
 		}
 
+		TArray<TSharedPtr<FJsonValue>> VariantArray(
+			const TArray<FUeAgentCommandVariantDeclaration>& Variants)
+		{
+			TArray<TSharedPtr<FJsonValue>> Result;
+			Result.Reserve(Variants.Num());
+			for (const FUeAgentCommandVariantDeclaration& Variant : Variants)
+			{
+				const TSharedPtr<FJsonObject> Object =
+					MakeShared<FJsonObject>();
+				Object->SetStringField(TEXT("variant_id"), Variant.VariantId);
+				TSharedPtr<FJsonObject> RequestSchema;
+				FString Error;
+				if (Json::TryParseObject(
+						Variant.RequestSchemaJson,
+						RequestSchema,
+						Error)
+					&& RequestSchema.IsValid())
+				{
+					Object->SetObjectField(
+						TEXT("request_schema"), RequestSchema);
+				}
+				Object->SetObjectField(
+					TEXT("purpose"), PurposeObject(Variant.Purpose));
+				Result.Add(MakeShared<FJsonValueObject>(Object));
+			}
+			return Result;
+		}
+
 		TSharedPtr<FJsonObject> ContractObject(
 			const FUeAgentCommandDeclaration& Declaration,
 			const FString& ContractHash = FString())
@@ -517,6 +625,9 @@ namespace UE::UAI::CommandRegistry
 			Result->SetObjectField(
 				TEXT("purpose"),
 				PurposeObject(Declaration.Purpose));
+			Result->SetArrayField(
+				TEXT("variants"),
+				VariantArray(Declaration.Variants));
 			return Result;
 		}
 

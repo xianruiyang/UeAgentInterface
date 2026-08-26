@@ -18,7 +18,12 @@ namespace UE::UAI::DomainAdapters::EditorSessionOperation
 			FString InReadbackOracleId,
 			Contract::EUeAgentStatePlane InRequiredStatePlane,
 			TArray<ContextResource::EUeAgentExecutionWorldType>
-				InAllowedWorldTypes = {});
+				InAllowedWorldTypes = {},
+			FString InSubjectSchemaJson = FString(),
+			FString InParameterSchemaJson = FString(),
+			FString InParameterGuidance = FString(),
+			FString InResultGuidance = FString(),
+			FString InMinimumExample = FString());
 
 		EUeAgentEditorSessionOperationFamily GetFamily() const;
 		const FString& GetPolicyId() const;
@@ -27,6 +32,12 @@ namespace UE::UAI::DomainAdapters::EditorSessionOperation
 		Contract::EUeAgentStatePlane GetRequiredStatePlane() const;
 		const TArray<ContextResource::EUeAgentExecutionWorldType>&
 			GetAllowedWorldTypes() const;
+		const FString& GetSubjectSchemaJson() const;
+		const FString& GetParameterSchemaJson() const;
+		const FString& GetParameterGuidance() const;
+		const FString& GetResultGuidance() const;
+		const FString& GetMinimumExample() const;
+		bool HasDiscoveryContract() const;
 		bool IsValid() const;
 
 	private:
@@ -37,6 +48,11 @@ namespace UE::UAI::DomainAdapters::EditorSessionOperation
 		Contract::EUeAgentStatePlane RequiredStatePlane;
 		TArray<ContextResource::EUeAgentExecutionWorldType>
 			AllowedWorldTypes;
+		FString SubjectSchemaJson;
+		FString ParameterSchemaJson;
+		FString ParameterGuidance;
+		FString ResultGuidance;
+		FString MinimumExample;
 	};
 
 	class UEAGENTINTERFACE_API

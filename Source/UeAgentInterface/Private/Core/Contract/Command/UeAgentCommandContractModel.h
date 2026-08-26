@@ -55,6 +55,32 @@ namespace UE::UAI::CommandContract
 		TArray<FString> Synonyms;
 	};
 
+	/**
+	 * One directly callable behavior selected within a public command.
+	 * RequestSchemaJson covers the complete command params object, including
+	 * any fixed family/policy selectors, so discovery consumers never need a
+	 * second selector-to-parameters mapping.
+	 */
+	struct UEAGENTINTERFACE_API FUeAgentCommandVariantDeclaration final
+	{
+		FString VariantId;
+		FString RequestSchemaJson;
+		FUeAgentCommandPurposeDeclaration Purpose;
+	};
+
+	struct UEAGENTINTERFACE_API
+	FUeAgentCommandVariantRequestFieldDeclaration final
+	{
+		FString Name;
+		FString SchemaJson;
+		bool bRequired = true;
+	};
+
+	UEAGENTINTERFACE_API bool TryBuildCommandVariantRequestSchema(
+		const TArray<FUeAgentCommandVariantRequestFieldDeclaration>& Fields,
+		FString& OutSchemaJson,
+		FString& OutError);
+
 	struct UEAGENTINTERFACE_API FUeAgentCommandDeclaration final
 	{
 		FString CommandId;
@@ -71,6 +97,7 @@ namespace UE::UAI::CommandContract
 		TArray<FUeAgentCommandFieldDeclaration> ResultFields;
 		TArray<FUeAgentCommandErrorDeclaration> Errors;
 		FUeAgentCommandPurposeDeclaration Purpose;
+		TArray<FUeAgentCommandVariantDeclaration> Variants;
 		TArray<FString> TutorialReferences = {
 			TEXT("uai-docs:python-sdk-and-cli#command-discovery"),
 			TEXT("uai-skill:public-sdk-playbook#command-discovery"),
@@ -104,6 +131,7 @@ namespace UE::UAI::CommandContract
 		GetResultFields() const;
 		const TArray<FUeAgentCommandErrorDeclaration>& GetErrors() const;
 		const FUeAgentCommandPurposeDeclaration& GetPurpose() const;
+		const TArray<FUeAgentCommandVariantDeclaration>& GetVariants() const;
 		const TArray<FString>& GetTutorialReferences() const;
 
 	private:

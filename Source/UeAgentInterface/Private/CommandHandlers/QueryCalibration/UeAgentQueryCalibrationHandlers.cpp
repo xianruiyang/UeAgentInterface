@@ -157,6 +157,10 @@ namespace UE::UAI::CommandHandlers::QueryCalibration
 
 		FString PythonNamedInvocation(const FCommandDetail& Detail)
 		{
+			if (!Detail.VariantId.IsEmpty())
+			{
+				return Detail.Purpose.MinimumExample;
+			}
 			if (Detail.PythonNamespace.IsEmpty()
 				|| Detail.PythonFunction.IsEmpty())
 			{
@@ -239,6 +243,11 @@ namespace UE::UAI::CommandHandlers::QueryCalibration
 					const TSharedPtr<FJsonObject> Item = MakeShared<FJsonObject>();
 					Item->SetStringField(TEXT("command_id"), Candidate.CommandId);
 					Item->SetStringField(TEXT("contract_hash"), Candidate.ContractHash);
+					if (!Candidate.VariantId.IsEmpty())
+					{
+						Item->SetStringField(
+							TEXT("variant_id"), Candidate.VariantId);
+					}
 					Item->SetStringField(TEXT("summary"), Candidate.Summary);
 					Item->SetStringField(TEXT("target"), Candidate.Target);
 					Item->SetStringField(TEXT("match_reason"), Candidate.MatchReason);
@@ -299,16 +308,25 @@ namespace UE::UAI::CommandHandlers::QueryCalibration
 				}
 				FString CommandId;
 				FString ContractHash;
+				FString VariantId;
 				const TSharedPtr<FJsonObject>& Params = Request.GetParams();
 				if (!Params.IsValid()
 					|| !Params->TryGetStringField(TEXT("command_id"), CommandId)
-					|| !Params->TryGetStringField(TEXT("contract_hash"), ContractHash))
+					|| !Params->TryGetStringField(TEXT("contract_hash"), ContractHash)
+					|| (Params->HasField(TEXT("variant_id"))
+						&& !Params->TryGetStringField(
+							TEXT("variant_id"), VariantId)))
 				{
-					return Failure(Request, TEXT("command_detail_params_invalid"), TEXT("command_id and contract_hash are required"));
+					return Failure(Request, TEXT("command_detail_params_invalid"), TEXT("command_id and contract_hash are required; variant_id must be a string when supplied"));
 				}
 				FCommandDetail Detail;
 				FCommandDiscoveryError Error;
-				if (!Discovery->GetDetail(CommandId, ContractHash, Detail, Error))
+				if (!Discovery->GetDetail(
+						CommandId,
+						ContractHash,
+						VariantId,
+						Detail,
+						Error))
 				{
 					return Failure(Request, Error.Code, Error.Detail);
 				}
@@ -319,6 +337,25 @@ namespace UE::UAI::CommandHandlers::QueryCalibration
 				Payload->SetStringField(TEXT("python_function"), Detail.PythonFunction);
 				Payload->SetStringField(TEXT("public_owner"), Detail.PublicOwner);
 				Payload->SetBoolField(TEXT("read_only"), !Detail.bHasSideEffects);
+				if (!Detail.VariantId.IsEmpty())
+				{
+					Payload->SetStringField(TEXT("variant_id"), Detail.VariantId);
+					TSharedPtr<FJsonObject> RequestSchema;
+					FString SchemaError;
+					if (!Json::TryParseObject(
+							Detail.RequestSchemaJson,
+							RequestSchema,
+							SchemaError)
+						|| !RequestSchema.IsValid())
+					{
+						return Failure(
+							Request,
+							TEXT("command_variant_request_schema_invalid"),
+							SchemaError);
+					}
+					Payload->SetObjectField(
+						TEXT("request_schema"), RequestSchema);
+				}
 				Payload->SetObjectField(TEXT("purpose"), PurposeObject(Detail.Purpose));
 				Payload->SetArrayField(TEXT("input_fields"), FieldDeclarations(Detail.InputFields));
 				Payload->SetArrayField(TEXT("result_fields"), FieldDeclarations(Detail.ResultFields));

@@ -60,6 +60,34 @@ namespace UE::UAI::DomainAdapters::CaptureMediaLongJob
 				"\"required\":[\"candidates\"],\"type\":\"object\"}");
 		}
 
+		FString ActorSubjectSchema()
+		{
+			return TEXT(
+				"{\"minLength\":23,\"pattern\":\"^capture-subject:actor:.+\","
+				"\"type\":\"string\"}");
+		}
+
+		FString ActiveViewportSubjectSchema()
+		{
+			return TEXT(
+				"{\"const\":\"capture-subject:viewport:active\","
+				"\"type\":\"string\"}");
+		}
+
+		FString ViewportParameterSchema()
+		{
+			return TEXT(
+				"{\"additionalProperties\":false,\"properties\":{"
+				"\"format\":{\"enum\":[\"png\",\"jpg\",\"webp\"],\"type\":\"string\"},"
+				"\"max_size\":{\"maximum\":8192,\"minimum\":64,\"type\":\"integer\"},"
+				"\"output_file\":{\"minLength\":1,\"type\":\"string\"},"
+				"\"quality\":{\"maximum\":100,\"minimum\":1,\"type\":\"integer\"},"
+				"\"restore_view_mode_after_capture\":{\"type\":\"boolean\"},"
+				"\"view_mode\":{\"minLength\":1,\"type\":\"string\"},"
+				"\"warmup_frames\":{\"maximum\":8,\"minimum\":0,\"type\":\"integer\"}},"
+				"\"type\":\"object\"}");
+		}
+
 		const TArray<FPolicyRoute>& Routes()
 		{
 			static const TArray<FPolicyRoute> Value = {
@@ -116,7 +144,8 @@ namespace UE::UAI::DomainAdapters::CaptureMediaLongJob
 					TransformCandidatesParameterSchema(),
 					TEXT("Use subject_ref capture-subject:actor:<exact Actor object path> and provide 1-15 labeled candidates. The policy captures the original plus each candidate from the current Level Viewport into one frame sheet, restores Actor transform, package dirty state, Actor selection, and viewport realtime state, and does not persist or choose a candidate."),
 					TEXT("Poll operation.status until terminal. Success publishes one frame-sheet artifact and guarantees the preview state was restored; inspect the sheet, then submit the chosen transform separately and release the operation."),
-					TEXT("image_execute(client, {subject_ref, policy_id='policy:image-capture:transform-candidates/v1', parameters={'candidates': [...]}})")},
+					TEXT("client.capture.image_execute(subject_ref='capture-subject:actor:<exact-object-path>', policy_id='policy:image-capture:transform-candidates/v1', parameters={'candidates': [{'label': 'candidate-1', 'transform': {'location': {'x': 0, 'y': 0, 'z': 0}}}]})"),
+					ActorSubjectSchema()},
 					TEXT("probe_actor_transform_candidates"),
 					nullptr,
 					&FUeAgentLegacyMechanics::CmdProbeActorTransformCandidates},
@@ -129,7 +158,12 @@ namespace UE::UAI::DomainAdapters::CaptureMediaLongJob
 					TEXT("screenshot_viewport_buffer"),
 					&FUeAgentLegacyMechanics::CmdScreenshotViewportBuffer},
 				{{TEXT("policy:image-capture:viewport/v1"),
-					TEXT("mechanics:capture:level-viewport-visualization/v1")},
+					TEXT("mechanics:capture:level-viewport-visualization/v1"),
+					ViewportParameterSchema(),
+					TEXT("Use exact subject_ref capture-subject:viewport:active. Optional parameters select png/jpg/webp output, quality, maximum size, output path, warmup frames and a temporary view mode that is restored after capture."),
+					TEXT("Poll operation.status until terminal, read latest_signal.payload.artifact_ref, then verify the published image artifact before releasing the operation."),
+					TEXT("client.capture.image_execute(subject_ref='capture-subject:viewport:active', policy_id='policy:image-capture:viewport/v1', parameters={'format': 'png', 'max_size': 1024, 'restore_view_mode_after_capture': True})"),
+					ActiveViewportSubjectSchema()},
 					TEXT("screenshot_viewport"),
 					&FUeAgentLegacyMechanics::CmdScreenshotViewport},
 			};
@@ -281,10 +315,12 @@ namespace UE::UAI::DomainAdapters::CaptureMediaLongJob
 		FString InParameterSchemaJson,
 		FString InParameterGuidance,
 		FString InResultGuidance,
-		FString InMinimumExample)
+		FString InMinimumExample,
+		FString InSubjectSchemaJson)
 		: PolicyId(MoveTemp(InPolicyId))
 		, MechanicsId(MoveTemp(InMechanicsId))
 		, ParameterSchemaJson(MoveTemp(InParameterSchemaJson))
+		, SubjectSchemaJson(MoveTemp(InSubjectSchemaJson))
 		, ParameterGuidance(MoveTemp(InParameterGuidance))
 		, ResultGuidance(MoveTemp(InResultGuidance))
 		, MinimumExample(MoveTemp(InMinimumExample))
@@ -310,6 +346,12 @@ namespace UE::UAI::DomainAdapters::CaptureMediaLongJob
 	}
 
 	const FString& FUeAgentCaptureMediaImagePolicyDescriptor::
+	GetSubjectSchemaJson() const
+	{
+		return SubjectSchemaJson;
+	}
+
+	const FString& FUeAgentCaptureMediaImagePolicyDescriptor::
 	GetParameterGuidance() const
 	{
 		return ParameterGuidance;
@@ -330,6 +372,7 @@ namespace UE::UAI::DomainAdapters::CaptureMediaLongJob
 	bool FUeAgentCaptureMediaImagePolicyDescriptor::HasDiscoveryContract() const
 	{
 		return !ParameterSchemaJson.IsEmpty()
+			&& !SubjectSchemaJson.IsEmpty()
 			&& !ParameterGuidance.IsEmpty()
 			&& !ResultGuidance.IsEmpty()
 			&& !MinimumExample.IsEmpty();
@@ -338,6 +381,7 @@ namespace UE::UAI::DomainAdapters::CaptureMediaLongJob
 	bool FUeAgentCaptureMediaImagePolicyDescriptor::IsValid() const
 	{
 		const bool bHasAnyDiscoveryField = !ParameterSchemaJson.IsEmpty()
+			|| !SubjectSchemaJson.IsEmpty()
 			|| !ParameterGuidance.IsEmpty()
 			|| !ResultGuidance.IsEmpty()
 			|| !MinimumExample.IsEmpty();

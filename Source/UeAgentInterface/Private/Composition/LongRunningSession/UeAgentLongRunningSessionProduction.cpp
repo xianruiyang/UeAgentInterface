@@ -3779,9 +3779,41 @@ namespace UE::UAI::Composition::LongRunningSession
 			const TCHAR* Mechanism,
 			const TCHAR* Oracle,
 			EUeAgentStatePlane Plane,
-			TArray<EUeAgentExecutionWorldType> Worlds = {})
+			TArray<EUeAgentExecutionWorldType> Worlds = {},
+			FString SubjectSchemaJson = FString(),
+			FString ParameterSchemaJson = FString(),
+			FString ParameterGuidance = FString(),
+			FString ResultGuidance = FString(),
+			FString MinimumExample = FString())
 		{
-			return {Family, PolicyId, Mechanism, Oracle, Plane, MoveTemp(Worlds)};
+			return {
+				Family,
+				PolicyId,
+				Mechanism,
+				Oracle,
+				Plane,
+				MoveTemp(Worlds),
+				MoveTemp(SubjectSchemaJson),
+				MoveTemp(ParameterSchemaJson),
+				MoveTemp(ParameterGuidance),
+				MoveTemp(ResultGuidance),
+				MoveTemp(MinimumExample),
+			};
+		}
+
+		FString ExistingWorldSubjectSchema()
+		{
+			return TEXT(
+				"{\"minLength\":12,\"pattern\":\"^world:/Game/.+\","
+				"\"type\":\"string\"}");
+		}
+
+		FString SetCurrentWorldParameterSchema()
+		{
+			return TEXT(
+				"{\"additionalProperties\":false,\"properties\":{"
+				"\"save_existing_map\":{\"type\":\"boolean\"}},"
+				"\"type\":\"object\"}");
 		}
 
 		CaptureMediaLongJob::FUeAgentCaptureMediaLongJobPolicyDescriptor
@@ -3795,6 +3827,89 @@ namespace UE::UAI::Composition::LongRunningSession
 		{
 			return {Family, PolicyId, Mechanism, Oracle, Plane, MoveTemp(Worlds)};
 		}
+	}
+
+	const TArray<EditorSessionOperation::
+		FUeAgentEditorSessionOperationPolicyDescriptor>&
+	GetLongRunningEditorSessionPolicyDescriptors()
+	{
+		static const TArray<EditorSessionOperation::
+			FUeAgentEditorSessionOperationPolicyDescriptor> Policies = {
+			EditorPolicy(
+				EditorSessionOperation::EUeAgentEditorSessionOperationFamily::AssetEditor,
+				TEXT("policy:asset-editor:open/v1"),
+				TEXT("native_session_resource"),
+				TEXT("uai.readback.editor.asset_editor/v1"),
+				EUeAgentStatePlane::AuthoringMemory),
+			EditorPolicy(
+				EditorSessionOperation::EUeAgentEditorSessionOperationFamily::RuntimePreview,
+				TEXT("policy:runtime-session:pie/v1"),
+				TEXT("native_session_resource"),
+				TEXT("uai.readback.editor.runtime_preview/v1"),
+				EUeAgentStatePlane::RuntimeInstance,
+				{EUeAgentExecutionWorldType::Pie}),
+			EditorPolicy(
+				EditorSessionOperation::EUeAgentEditorSessionOperationFamily::RuntimePreview,
+				TEXT("policy:runtime-session:culture-preview/v1"),
+				TEXT("native_session_resource"),
+				TEXT("uai.readback.editor.culture_preview/v1"),
+				EUeAgentStatePlane::RuntimeInstance,
+				{EUeAgentExecutionWorldType::Editor}),
+			EditorPolicy(
+				EditorSessionOperation::EUeAgentEditorSessionOperationFamily::WorldContext,
+				TEXT("policy:world-context:set-current/v1"),
+				TEXT("native_session_resource"),
+				TEXT("uai.readback.editor.world_context/v1"),
+				EUeAgentStatePlane::AuthoringMemory,
+				{EUeAgentExecutionWorldType::Editor},
+				ExistingWorldSubjectSchema(),
+				SetCurrentWorldParameterSchema(),
+				TEXT("Use family_id world_context, one exact subject_ref world:/Game/... map package, this policy_id and only optional save_existing_map (default true)."),
+				TEXT("Poll the returned operation_ref until terminal; success reports a world-context session_ref, then independently read the current Editor World and dirty resources before release."),
+				TEXT("client.editor.session(family_id='world_context', subject_ref='world:/Game/UAI/Experiments/Foundation/R001/Work/Maps/L_Main', policy_id='policy:world-context:set-current/v1', parameters={'save_existing_map': True})")),
+			EditorPolicy(
+				EditorSessionOperation::EUeAgentEditorSessionOperationFamily::WorldContext,
+				TEXT("policy:world-context:create-blank/v1"),
+				TEXT("native_session_resource"),
+				TEXT("uai.readback.editor.world_context_created/v1"),
+				EUeAgentStatePlane::AuthoringMemory,
+				{EUeAgentExecutionWorldType::Editor}),
+			EditorPolicy(
+				EditorSessionOperation::EUeAgentEditorSessionOperationFamily::WorldContext,
+				TEXT("policy:world-context:partition-region-loader/v1"),
+				TEXT("native_session_resource"),
+				TEXT("uai.readback.world_partition.region_loader/v1"),
+				EUeAgentStatePlane::AuthoringMemory,
+				{EUeAgentExecutionWorldType::Editor}),
+			EditorPolicy(
+				EditorSessionOperation::EUeAgentEditorSessionOperationFamily::WorldContext,
+				TEXT("policy:world-context:partition-actor-loader/v1"),
+				TEXT("native_session_resource"),
+				TEXT("uai.readback.world_partition.actor_loader/v1"),
+				EUeAgentStatePlane::AuthoringMemory,
+				{EUeAgentExecutionWorldType::Editor}),
+			EditorPolicy(
+				EditorSessionOperation::EUeAgentEditorSessionOperationFamily::ModelingTool,
+				TEXT("policy:modeling-tool:invoke-action/v1"),
+				TEXT("native_session_resource"),
+				TEXT("uai.readback.editor.modeling_tool/v1"),
+				EUeAgentStatePlane::AuthoringMemory,
+				{EUeAgentExecutionWorldType::Editor}),
+			EditorPolicy(
+				EditorSessionOperation::EUeAgentEditorSessionOperationFamily::VoxelGrid,
+				TEXT("policy:voxel-session:apply/v1"),
+				TEXT("native_session_resource"),
+				TEXT("uai.readback.editor.voxel_grid/v1"),
+				EUeAgentStatePlane::AuthoringMemory,
+				{EUeAgentExecutionWorldType::Editor}),
+			EditorPolicy(
+				EditorSessionOperation::EUeAgentEditorSessionOperationFamily::HostLifecycle,
+				TEXT("policy:host-lifecycle:prepare-safe-exit/v1"),
+				TEXT("host_exit_schedule"),
+				TEXT("uai.readback.editor.host_exit/v1"),
+				EUeAgentStatePlane::RuntimeInstance),
+		};
+		return Policies;
 	}
 
 	bool FUeAgentLongRunningSessionProductionConfig::IsValid() const
@@ -3917,63 +4032,20 @@ namespace UE::UAI::Composition::LongRunningSession
 		const TSharedRef<FEditorSessionBuilder, ESPMode::ThreadSafe> EditorBuilder =
 			MakeShared<FEditorSessionBuilder, ESPMode::ThreadSafe>(
 				Config.EditorInstanceId, Config.EditorWorld);
+		TArray<EditorSessionOperation::
+			FUeAgentEditorSessionOperationPolicyRegistration>
+			EditorRegistrations;
+		for (const EditorSessionOperation::
+			FUeAgentEditorSessionOperationPolicyDescriptor& Policy :
+			GetLongRunningEditorSessionPolicyDescriptors())
+		{
+			EditorRegistrations.Emplace(Policy, EditorBuilder);
+		}
 		TSharedPtr<EditorSessionOperation::
 			FUeAgentEditorSessionOperationProductionPortFactory> EditorFactory;
 		if (!EditorSessionOperation::
 			FUeAgentEditorSessionOperationProductionPortFactory::TryCreate(
-				{
-					{EditorPolicy(EditorSessionOperation::EUeAgentEditorSessionOperationFamily::AssetEditor,
-						TEXT("policy:asset-editor:open/v1"), TEXT("native_session_resource"),
-						TEXT("uai.readback.editor.asset_editor/v1"),
-						EUeAgentStatePlane::AuthoringMemory), EditorBuilder},
-					{EditorPolicy(EditorSessionOperation::EUeAgentEditorSessionOperationFamily::RuntimePreview,
-						TEXT("policy:runtime-session:pie/v1"), TEXT("native_session_resource"),
-						TEXT("uai.readback.editor.runtime_preview/v1"),
-						EUeAgentStatePlane::RuntimeInstance,
-						{EUeAgentExecutionWorldType::Pie}), EditorBuilder},
-					{EditorPolicy(EditorSessionOperation::EUeAgentEditorSessionOperationFamily::RuntimePreview,
-						TEXT("policy:runtime-session:culture-preview/v1"), TEXT("native_session_resource"),
-						TEXT("uai.readback.editor.culture_preview/v1"),
-						EUeAgentStatePlane::RuntimeInstance,
-						{EUeAgentExecutionWorldType::Editor}), EditorBuilder},
-					{EditorPolicy(EditorSessionOperation::EUeAgentEditorSessionOperationFamily::WorldContext,
-						TEXT("policy:world-context:set-current/v1"), TEXT("native_session_resource"),
-						TEXT("uai.readback.editor.world_context/v1"),
-						EUeAgentStatePlane::AuthoringMemory,
-						{EUeAgentExecutionWorldType::Editor}), EditorBuilder},
-					{EditorPolicy(EditorSessionOperation::EUeAgentEditorSessionOperationFamily::WorldContext,
-						TEXT("policy:world-context:create-blank/v1"),
-						TEXT("native_session_resource"),
-						TEXT("uai.readback.editor.world_context_created/v1"),
-						EUeAgentStatePlane::AuthoringMemory,
-						{EUeAgentExecutionWorldType::Editor}), EditorBuilder},
-					{EditorPolicy(EditorSessionOperation::EUeAgentEditorSessionOperationFamily::WorldContext,
-						TEXT("policy:world-context:partition-region-loader/v1"),
-						TEXT("native_session_resource"),
-						TEXT("uai.readback.world_partition.region_loader/v1"),
-						EUeAgentStatePlane::AuthoringMemory,
-						{EUeAgentExecutionWorldType::Editor}), EditorBuilder},
-					{EditorPolicy(EditorSessionOperation::EUeAgentEditorSessionOperationFamily::WorldContext,
-						TEXT("policy:world-context:partition-actor-loader/v1"),
-						TEXT("native_session_resource"),
-						TEXT("uai.readback.world_partition.actor_loader/v1"),
-						EUeAgentStatePlane::AuthoringMemory,
-						{EUeAgentExecutionWorldType::Editor}), EditorBuilder},
-					{EditorPolicy(EditorSessionOperation::EUeAgentEditorSessionOperationFamily::ModelingTool,
-						TEXT("policy:modeling-tool:invoke-action/v1"), TEXT("native_session_resource"),
-						TEXT("uai.readback.editor.modeling_tool/v1"),
-						EUeAgentStatePlane::AuthoringMemory,
-						{EUeAgentExecutionWorldType::Editor}), EditorBuilder},
-					{EditorPolicy(EditorSessionOperation::EUeAgentEditorSessionOperationFamily::VoxelGrid,
-						TEXT("policy:voxel-session:apply/v1"), TEXT("native_session_resource"),
-						TEXT("uai.readback.editor.voxel_grid/v1"),
-						EUeAgentStatePlane::AuthoringMemory,
-						{EUeAgentExecutionWorldType::Editor}), EditorBuilder},
-					{EditorPolicy(EditorSessionOperation::EUeAgentEditorSessionOperationFamily::HostLifecycle,
-						TEXT("policy:host-lifecycle:prepare-safe-exit/v1"), TEXT("host_exit_schedule"),
-						TEXT("uai.readback.editor.host_exit/v1"),
-						EUeAgentStatePlane::RuntimeInstance), EditorBuilder},
-				},
+				EditorRegistrations,
 				EditorFactory,
 				FactoryError))
 		{

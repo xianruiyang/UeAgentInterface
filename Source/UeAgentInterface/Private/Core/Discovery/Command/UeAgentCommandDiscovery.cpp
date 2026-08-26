@@ -128,11 +128,69 @@ namespace UE::UAI::Discovery::Command
 				Scored.Candidate.MatchReason = FString::Join(Scored.Reasons, TEXT(","));
 				Matches.Add(MoveTemp(Scored));
 			}
+			for (const FUeAgentCommandVariantDeclaration& Variant :
+				Contract.GetVariants())
+			{
+				FScoredCandidate VariantScored;
+				VariantScored.Candidate.CommandId = Contract.GetCommandId();
+				VariantScored.Candidate.ContractHash = Contract.GetContractHash();
+				VariantScored.Candidate.VariantId = Variant.VariantId;
+				VariantScored.Candidate.Summary = Variant.Purpose.Summary;
+				VariantScored.Candidate.Target = Variant.Purpose.Target;
+				VariantScored.Candidate.bHasSideEffects =
+					Contract.GetSideEffect() != EUeAgentCommandSideEffect::None;
+				ScoreText(
+					TEXT("command_id"),
+					Contract.GetCommandId(),
+					Tokens,
+					8,
+					VariantScored);
+				ScoreText(
+					TEXT("variant_id"),
+					Variant.VariantId,
+					Tokens,
+					10,
+					VariantScored);
+				ScoreText(
+					TEXT("variant_keyword"),
+					JoinValues(Variant.Purpose.Keywords),
+					Tokens,
+					8,
+					VariantScored);
+				ScoreText(
+					TEXT("variant_synonym"),
+					JoinValues(Variant.Purpose.Synonyms),
+					Tokens,
+					7,
+					VariantScored);
+				ScoreText(
+					TEXT("variant_summary"),
+					Variant.Purpose.Summary,
+					Tokens,
+					6,
+					VariantScored);
+				ScoreText(
+					TEXT("variant_target"),
+					Variant.Purpose.Target,
+					Tokens,
+					4,
+					VariantScored);
+				if (VariantScored.Score > 0)
+				{
+					VariantScored.Candidate.MatchReason = FString::Join(
+						VariantScored.Reasons, TEXT(","));
+					Matches.Add(MoveTemp(VariantScored));
+				}
+			}
 		}
 		Matches.Sort([](const FScoredCandidate& Left, const FScoredCandidate& Right)
 		{
+			const FString LeftIdentity = Left.Candidate.CommandId
+				+ TEXT("\n") + Left.Candidate.VariantId;
+			const FString RightIdentity = Right.Candidate.CommandId
+				+ TEXT("\n") + Right.Candidate.VariantId;
 			return Left.Score == Right.Score
-				? Left.Candidate.CommandId < Right.Candidate.CommandId
+				? LeftIdentity < RightIdentity
 				: Left.Score > Right.Score;
 		});
 
@@ -159,6 +217,21 @@ namespace UE::UAI::Discovery::Command
 		FCommandDetail& OutDetail,
 		FCommandDiscoveryError& OutError) const
 	{
+		return GetDetail(
+			CommandId,
+			ContractHash,
+			FString(),
+			OutDetail,
+			OutError);
+	}
+
+	bool FCommandDiscoveryService::GetDetail(
+		const FString& CommandId,
+		const FString& ContractHash,
+		const FString& VariantId,
+		FCommandDetail& OutDetail,
+		FCommandDiscoveryError& OutError) const
+	{
 		OutDetail = {};
 		OutError = {};
 		const FUeAgentFrozenCommandContract* Contract = Registry->FindExact(CommandId);
@@ -179,7 +252,29 @@ namespace UE::UAI::Discovery::Command
 		OutDetail.PythonNamespace = Contract->GetPythonNamespace();
 		OutDetail.PythonFunction = Contract->GetPythonFunction();
 		OutDetail.PublicOwner = Contract->GetPublicOwner();
-		OutDetail.Purpose = Contract->GetPurpose();
+		const FUeAgentCommandVariantDeclaration* Variant = nullptr;
+		if (!VariantId.IsEmpty())
+		{
+			Variant = Contract->GetVariants().FindByPredicate(
+				[&VariantId](
+					const FUeAgentCommandVariantDeclaration& Candidate)
+				{
+					return Candidate.VariantId == VariantId;
+				});
+			if (Variant == nullptr)
+			{
+				OutError.Code = TEXT("command_variant_not_registered_exact");
+				OutError.Detail = CommandId + TEXT(":") + VariantId;
+				return false;
+			}
+		}
+		OutDetail.VariantId = VariantId;
+		OutDetail.Purpose = Variant
+			? Variant->Purpose
+			: Contract->GetPurpose();
+		OutDetail.RequestSchemaJson = Variant
+			? Variant->RequestSchemaJson
+			: FString();
 		OutDetail.InputFields = Contract->GetInputFields();
 		OutDetail.ResultFields = Contract->GetResultFields();
 		OutDetail.Errors = Contract->GetErrors();

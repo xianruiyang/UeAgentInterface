@@ -878,13 +878,23 @@ namespace UE::UAI::DomainAdapters::EditorSessionOperation
 		FString InNativeMechanismId,
 		FString InReadbackOracleId,
 		const EUeAgentStatePlane InRequiredStatePlane,
-		TArray<EUeAgentExecutionWorldType> InAllowedWorldTypes)
+		TArray<EUeAgentExecutionWorldType> InAllowedWorldTypes,
+		FString InSubjectSchemaJson,
+		FString InParameterSchemaJson,
+		FString InParameterGuidance,
+		FString InResultGuidance,
+		FString InMinimumExample)
 		: Family(InFamily)
 		, PolicyId(MoveTemp(InPolicyId))
 		, NativeMechanismId(MoveTemp(InNativeMechanismId))
 		, ReadbackOracleId(MoveTemp(InReadbackOracleId))
 		, RequiredStatePlane(InRequiredStatePlane)
 		, AllowedWorldTypes(MoveTemp(InAllowedWorldTypes))
+		, SubjectSchemaJson(MoveTemp(InSubjectSchemaJson))
+		, ParameterSchemaJson(MoveTemp(InParameterSchemaJson))
+		, ParameterGuidance(MoveTemp(InParameterGuidance))
+		, ResultGuidance(MoveTemp(InResultGuidance))
+		, MinimumExample(MoveTemp(InMinimumExample))
 	{
 	}
 
@@ -927,8 +937,53 @@ namespace UE::UAI::DomainAdapters::EditorSessionOperation
 		return AllowedWorldTypes;
 	}
 
+	const FString& FUeAgentEditorSessionOperationPolicyDescriptor::
+	GetSubjectSchemaJson() const
+	{
+		return SubjectSchemaJson;
+	}
+
+	const FString& FUeAgentEditorSessionOperationPolicyDescriptor::
+	GetParameterSchemaJson() const
+	{
+		return ParameterSchemaJson;
+	}
+
+	const FString& FUeAgentEditorSessionOperationPolicyDescriptor::
+	GetParameterGuidance() const
+	{
+		return ParameterGuidance;
+	}
+
+	const FString& FUeAgentEditorSessionOperationPolicyDescriptor::
+	GetResultGuidance() const
+	{
+		return ResultGuidance;
+	}
+
+	const FString& FUeAgentEditorSessionOperationPolicyDescriptor::
+	GetMinimumExample() const
+	{
+		return MinimumExample;
+	}
+
+	bool FUeAgentEditorSessionOperationPolicyDescriptor::
+	HasDiscoveryContract() const
+	{
+		return !SubjectSchemaJson.IsEmpty()
+			&& !ParameterSchemaJson.IsEmpty()
+			&& !ParameterGuidance.IsEmpty()
+			&& !ResultGuidance.IsEmpty()
+			&& !MinimumExample.IsEmpty();
+	}
+
 	bool FUeAgentEditorSessionOperationPolicyDescriptor::IsValid() const
 	{
+		const bool bHasAnyDiscoveryField = !SubjectSchemaJson.IsEmpty()
+			|| !ParameterSchemaJson.IsEmpty()
+			|| !ParameterGuidance.IsEmpty()
+			|| !ResultGuidance.IsEmpty()
+			|| !MinimumExample.IsEmpty();
 		return FindEditorSessionOperationFamilyContract(Family) != nullptr
 			&& IsNormalizedNonEmpty(PolicyId)
 			&& MatchesPolicyKind(Family, PolicyId)
@@ -936,7 +991,8 @@ namespace UE::UAI::DomainAdapters::EditorSessionOperation
 			&& IsNormalizedNonEmpty(ReadbackOracleId)
 			&& ReadbackOracleId.StartsWith(TEXT("uai.readback."))
 			&& RequiredStatePlane != EUeAgentStatePlane::Invalid
-			&& AllowedWorldTypesAreValid(AllowedWorldTypes);
+			&& AllowedWorldTypesAreValid(AllowedWorldTypes)
+			&& (!bHasAnyDiscoveryField || HasDiscoveryContract());
 	}
 
 	FUeAgentEditorSessionOperationPolicyRegistration::
