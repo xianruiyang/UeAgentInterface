@@ -717,6 +717,24 @@ namespace UeAgentBlueprintAuthoring
 		}
 	}
 
+	void AppendGraphNodeSemanticState(
+		const UEdGraphNode& Node,
+		FJsonObject& State)
+	{
+		const TSharedRef<FJsonObject> SemanticState = BuildNodeState(Node);
+		for (const TPair<FString, TSharedPtr<FJsonValue>>& Field
+			: SemanticState->Values)
+		{
+			if (Field.Key == TEXT("id")
+				|| Field.Key == TEXT("node_type")
+				|| Field.Key == TEXT("pos"))
+			{
+				continue;
+			}
+			State.SetField(Field.Key, Field.Value);
+		}
+	}
+
 	UObject* CreateFactorySeed(
 		const FString& AssetKind,
 		UObject* Outer,

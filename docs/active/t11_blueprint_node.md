@@ -31,6 +31,17 @@ into `blueprint.node.candidates.graph_id`. The public structure row deliberately
 keeps the opaque graph ID next to these selectable semantics; callers must not
 infer a graph from its nodes, cache an earlier GUID, or reconstruct the ID.
 
+The same public structure is also the compact readback for existing Blueprint
+nodes. Each node row keeps its stable `id` and `class_path`, while `value`
+reuses the Blueprint authoring state owner for directly selectable semantics:
+events expose `event_name`/`event_class`, component-bound events expose
+`component_name` and delegate identity, function calls expose
+`function_name`/`function_owner_class`, and variable nodes expose
+`variable_name`/`access`. Use those fields to select or verify nodes; do not
+infer identity from position, node count, edges, or the raw K2 class, and do
+not export a full workspace merely to recover information already present in
+this compact structure.
+
 Use only one minimal selector in the Blueprint-root `uai.blueprint.edit/1`
 document:
 

@@ -7,10 +7,15 @@
 
 class UClass;
 class UBlueprint;
+class UEdGraphNode;
 class UObject;
+class FJsonObject;
 
 namespace UeAgentBlueprintAuthoring
 {
+	UEAGENTINTERFACE_API void AppendGraphNodeSemanticState(
+		const UEdGraphNode& Node,
+		FJsonObject& State);
 	UEAGENTINTERFACE_API UObject* CreateFactorySeed(
 		const FString& AssetKind,
 		UObject* Outer,

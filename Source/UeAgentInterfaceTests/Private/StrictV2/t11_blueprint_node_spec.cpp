@@ -7,11 +7,18 @@
 #define UAI_T11_BLUEPRINT_NODE_AVAILABLE 1
 #include "CommandEdge/UeAgentCommandProtocol.h"
 #include "CommandEdge/UeAgentExactCommandDispatch.h"
+#include "Components/PrimitiveComponent.h"
 #include "Core/Contract/UeAgentCommandJson.h"
 #include "Core/HjsonWorkspace/ImportInitialization/UeAgentHjsonDomainProviderRegistry.h"
 #include "DomainAdapters/Blueprint/Node/UeAgentBlueprintNodeMechanics.h"
 #include "DomainAdapters/Blueprint/Surfaces/UeAgentBlueprintSurfaceMechanics.h"
 #include "Dom/JsonObject.h"
+#include "EdGraph/EdGraph.h"
+#include "GameFramework/Actor.h"
+#include "K2Node_CallFunction.h"
+#include "K2Node_ComponentBoundEvent.h"
+#include "K2Node_Event.h"
+#include "Kismet/KismetMathLibrary.h"
 #include "Kismet2/KismetEditorUtilities.h"
 #include "Module/CommandRegistration/BlueprintNode/UeAgentBlueprintNodeRegistration.h"
 #include "ObjectTools.h"
@@ -266,7 +273,7 @@ bool FUeAgentStrictV2T11ProductionCandidateTest::RunTest(
 	DeleteAssetIfPresent(ObjectPath);
 	UPackage* Package = CreatePackage(*PackageName);
 	UBlueprint* Blueprint = FKismetEditorUtilities::CreateBlueprint(
-		UObject::StaticClass(),
+		AActor::StaticClass(),
 		Package,
 		TEXT("BP_NodeNative"),
 		BPTYPE_Normal,
@@ -276,6 +283,34 @@ bool FUeAgentStrictV2T11ProductionCandidateTest::RunTest(
 	{
 		return false;
 	}
+	UEdGraph* EventGraph = Blueprint->UbergraphPages.Num() > 0
+		? Blueprint->UbergraphPages[0]
+		: nullptr;
+	if (!TestNotNull(TEXT("the native Blueprint has an event graph"), EventGraph))
+	{
+		DeleteAssetIfPresent(ObjectPath);
+		return false;
+	}
+	UK2Node_Event* EventNode = NewObject<UK2Node_Event>(EventGraph);
+	EventNode->NodeGuid = FGuid::NewGuid();
+	EventNode->EventReference.SetExternalMember(
+		GET_FUNCTION_NAME_CHECKED(AActor, ReceiveTick),
+		AActor::StaticClass());
+	EventGraph->AddNode(EventNode, false, false);
+	UK2Node_ComponentBoundEvent* BoundEvent =
+		NewObject<UK2Node_ComponentBoundEvent>(EventGraph);
+	BoundEvent->NodeGuid = FGuid::NewGuid();
+	BoundEvent->ComponentPropertyName = TEXT("DetectionVolume");
+	BoundEvent->DelegatePropertyName = TEXT("OnComponentBeginOverlap");
+	BoundEvent->DelegateOwnerClass = UPrimitiveComponent::StaticClass();
+	EventGraph->AddNode(BoundEvent, false, false);
+	UK2Node_CallFunction* FunctionNode =
+		NewObject<UK2Node_CallFunction>(EventGraph);
+	FunctionNode->NodeGuid = FGuid::NewGuid();
+	FunctionNode->SetFromFunction(
+		UKismetMathLibrary::StaticClass()->FindFunctionByName(
+			GET_FUNCTION_NAME_CHECKED(UKismetMathLibrary, FInterpTo)));
+	EventGraph->AddNode(FunctionNode, false, false);
 	FString GraphId;
 	FString GraphError;
 	FString StructurePayloadJson;
@@ -334,6 +369,71 @@ bool FUeAgentStrictV2T11ProductionCandidateTest::RunTest(
 		DeleteAssetIfPresent(ObjectPath);
 		return false;
 	}
+	const TArray<TSharedPtr<FJsonValue>>* Items = nullptr;
+	bool bFoundEventSemantics = false;
+	bool bFoundBoundEventSemantics = false;
+	bool bFoundFunctionSemantics = false;
+	if (StructurePayload.IsValid()
+		&& StructurePayload->TryGetArrayField(TEXT("items"), Items)
+		&& Items)
+	{
+		for (const TSharedPtr<FJsonValue>& ItemValue : *Items)
+		{
+			const TSharedPtr<FJsonObject> Item = ItemValue->AsObject();
+			const TSharedPtr<FJsonObject>* State = nullptr;
+			FString Kind;
+			if (!Item.IsValid()
+				|| !Item->TryGetStringField(TEXT("kind"), Kind)
+				|| Kind != TEXT("blueprint_node")
+				|| !Item->TryGetObjectField(TEXT("value"), State)
+				|| !State || !State->IsValid())
+			{
+				continue;
+			}
+			FString EventName;
+			FString EventClass;
+			bFoundEventSemantics |=
+				(*State)->TryGetStringField(TEXT("event_name"), EventName)
+				&& EventName == TEXT("ReceiveTick")
+				&& (*State)->TryGetStringField(TEXT("event_class"), EventClass)
+				&& EventClass == AActor::StaticClass()->GetPathName();
+
+			FString ComponentName;
+			FString DelegateName;
+			FString DelegateOwnerClass;
+			bFoundBoundEventSemantics |=
+				(*State)->TryGetStringField(
+					TEXT("component_name"), ComponentName)
+				&& ComponentName == TEXT("DetectionVolume")
+				&& (*State)->TryGetStringField(
+					TEXT("delegate_property_name"), DelegateName)
+				&& DelegateName == TEXT("OnComponentBeginOverlap")
+				&& (*State)->TryGetStringField(
+					TEXT("delegate_owner_class"), DelegateOwnerClass)
+				&& DelegateOwnerClass
+					== UPrimitiveComponent::StaticClass()->GetPathName();
+
+			FString FunctionName;
+			FString FunctionOwnerClass;
+			bFoundFunctionSemantics |=
+				(*State)->TryGetStringField(
+					TEXT("function_name"), FunctionName)
+				&& FunctionName == TEXT("FInterpTo")
+				&& (*State)->TryGetStringField(
+					TEXT("function_owner_class"), FunctionOwnerClass)
+				&& FunctionOwnerClass
+					== UKismetMathLibrary::StaticClass()->GetPathName();
+		}
+	}
+	TestTrue(
+		TEXT("the public structure exposes the native event identity"),
+		bFoundEventSemantics);
+	TestTrue(
+		TEXT("the public structure exposes component-bound event identity"),
+		bFoundBoundEventSemantics);
+	TestTrue(
+		TEXT("the public structure reuses the authoring function identity"),
+		bFoundFunctionSemantics);
 	TSharedPtr<IUeAgentBlueprintNodeCommandService> Service;
 	TestTrue(
 		TEXT("the production candidate service composes"),

@@ -33,6 +33,7 @@
 #include "EnvironmentQueryGraphNode_Option.h"
 #include "Expressions/TG_Expression.h"
 #include "GenericPlatform/GenericPlatformHttp.h"
+#include "Domains/Blueprint/Authoring/UeAgentBlueprintAuthoringState.h"
 #include "Materials/MaterialExpression.h"
 #include "Materials/MaterialFunctionInterface.h"
 #include "Materials/MaterialInterface.h"
@@ -2322,6 +2323,8 @@ namespace UE::UAI::DomainAdapters::ContentGraphRead
 							Position->SetNumberField(TEXT("x"), Node->NodePosX);
 							Position->SetNumberField(TEXT("y"), Node->NodePosY);
 							NodeState->SetObjectField(TEXT("pos"), Position);
+							UeAgentBlueprintAuthoring::
+								AppendGraphNodeSemanticState(*Node, *NodeState);
 						}
 						FUeAgentCanonicalValuePtr NodeValue;
 						if (!TryCanonicalObject(
