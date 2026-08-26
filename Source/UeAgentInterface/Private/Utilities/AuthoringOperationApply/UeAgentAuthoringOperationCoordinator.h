@@ -7,6 +7,7 @@
 #include "Utilities/AuthoringCore/UeAgentAuthoringState.h"
 #include "Utilities/AuthoringOperationApply/UeAgentApplyInputContract.h"
 #include "Utilities/AuthoringWorkspaceApply/UeAgentAuthoringWorkspaceTransaction.h"
+#include "UObject/WeakObjectPtr.h"
 
 class FScopedTransaction;
 class UObject;

@@ -166,6 +166,15 @@ namespace UE::UAI::OperationOwners::Material
 						Request.CommandId);
 				}
 				Params->TryGetStringField(TEXT("query"), Query);
+				FMaterialExpressionCandidateContext CandidateContext;
+				Params->TryGetStringField(
+					TEXT("graph_name"), CandidateContext.GraphName);
+				Params->TryGetStringField(
+					TEXT("node_guid"), CandidateContext.NodeGuid);
+				Params->TryGetStringField(
+					TEXT("pin_guid"), CandidateContext.PinGuid);
+				Params->TryGetStringField(
+					TEXT("pin_name"), CandidateContext.PinName);
 				int32 Limit = 20;
 				int32 Cursor = 0;
 				double Number = 0.0;
@@ -195,7 +204,8 @@ namespace UE::UAI::OperationOwners::Material
 						QueryResult,
 						QueryError,
 						Limit,
-						Cursor))
+						Cursor,
+						CandidateContext))
 				{
 					return Fail(
 						OutError,
@@ -218,14 +228,44 @@ namespace UE::UAI::OperationOwners::Material
 					TEXT("next_cursor"), QueryResult.NextCursor);
 				Payload->SetBoolField(TEXT("complete"), QueryResult.bComplete);
 				Payload->SetBoolField(TEXT("has_more"), QueryResult.bHasMore);
+				Payload->SetStringField(
+					TEXT("coverage_scope"), QueryResult.CoverageScope);
+				Payload->SetBoolField(
+					TEXT("coverage_complete"), QueryResult.bCoverageComplete);
+				const TSharedPtr<FJsonObject> Context = MakeShared<FJsonObject>();
+				Context->SetStringField(
+					TEXT("graph_name"), QueryResult.Context.GraphName);
+				if (!QueryResult.Context.NodeGuid.IsEmpty())
+				{
+					Context->SetStringField(
+						TEXT("node_guid"), QueryResult.Context.NodeGuid);
+				}
+				if (!QueryResult.Context.PinGuid.IsEmpty())
+				{
+					Context->SetStringField(
+						TEXT("pin_guid"), QueryResult.Context.PinGuid);
+				}
+				if (!QueryResult.Context.PinName.IsEmpty())
+				{
+					Context->SetStringField(
+						TEXT("pin_name"), QueryResult.Context.PinName);
+				}
+				Payload->SetObjectField(TEXT("query_context"), Context);
 				TArray<TSharedPtr<FJsonValue>> Candidates;
 				for (const FMaterialExpressionCandidate& Candidate
 					: QueryResult.Candidates)
 				{
 					const TSharedPtr<FJsonObject> Value = MakeShared<FJsonObject>();
+					Value->SetStringField(TEXT("id"), Candidate.Id);
 					Value->SetStringField(TEXT("name"), Candidate.Name);
 					Value->SetStringField(TEXT("label"), Candidate.Label);
 					Value->SetStringField(TEXT("kind"), Candidate.Kind);
+					Value->SetStringField(
+						TEXT("category"), Candidate.Category);
+					Value->SetBoolField(
+						TEXT("supported"), Candidate.bSupported);
+					Value->SetStringField(
+						TEXT("support_reason"), Candidate.SupportReason);
 					Value->SetArrayField(
 						TEXT("supported_operations"),
 						StringArray(Candidate.SupportedOperations));

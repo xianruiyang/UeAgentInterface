@@ -3,6 +3,7 @@
 #include "DomainAdapters/AiCommands/UeAgentAiCommandMechanicsBoundary.h"
 #include "Dom/JsonObject.h"
 #include "OperationOwners/AiCommands/UeAgentAiCommandOperationOwner.h"
+#include "Policies/CondensedJsonPrintPolicy.h"
 #include "QueryOwners/AiCommands/UeAgentAiCommandQueryOwner.h"
 #include "Serialization/JsonSerializer.h"
 #include "Serialization/JsonWriter.h"

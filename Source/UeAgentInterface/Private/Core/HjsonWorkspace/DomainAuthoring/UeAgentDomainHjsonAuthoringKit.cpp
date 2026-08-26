@@ -287,6 +287,12 @@ namespace UE::UAI::HjsonWorkspace::DomainAuthoring
 		return SupportedOperations.Contains(Operation);
 	}
 
+	bool FDomainHjsonCandidateSelector::IsValid() const
+	{
+		return !Name.TrimStartAndEnd().IsEmpty()
+			|| !Id.TrimStartAndEnd().IsEmpty();
+	}
+
 	bool TryDecodeResolvedDocument(
 		const FString& RequestTargetIdentity,
 		const FString& CanonicalParamsJson,
@@ -583,6 +589,7 @@ namespace UE::UAI::HjsonWorkspace::DomainAuthoring
 			Value->SetStringField(TEXT("owner"), Container.OwnerId);
 			Value->SetStringField(TEXT("parent"), Container.ParentContainerId);
 			Value->SetNumberField(TEXT("order"), Container.Order);
+			AddCanonicalState(Container.State, Value);
 			Containers.Add(MakeShared<FJsonValueObject>(Value));
 		}
 		Result->SetArrayField(TEXT("containers"), MoveTemp(Containers));
@@ -1009,6 +1016,82 @@ namespace UE::UAI::HjsonWorkspace::DomainAuthoring
 				JsonPointer);
 		}
 		OutError.Reset();
+		return true;
+	}
+
+	bool TryReadCandidateSelector(
+		const TSharedPtr<FJsonObject>& Candidate,
+		const FString& JsonPointer,
+		FDomainHjsonCandidateSelector& OutSelector,
+		FWorkspaceError& OutError)
+	{
+		OutSelector = {};
+		OutError.Reset();
+		if (!Candidate.IsValid())
+		{
+			return Fail(
+				OutError,
+				TEXT("domain_hjson_candidate_selector_invalid"),
+				FString(),
+				JsonPointer);
+		}
+
+		const FString NamePointer = JsonPointer + TEXT("/name");
+		const FString IdPointer = JsonPointer + TEXT("/id");
+		FString RawName;
+		FString RawId;
+		if (Candidate->HasField(TEXT("candidate_id")))
+		{
+			return Fail(
+				OutError,
+				TEXT("domain_hjson_candidate_selector_field_unsupported"),
+				TEXT("candidate_id"),
+				JsonPointer + TEXT("/candidate_id"));
+		}
+
+		auto TryReadStrictString = [&Candidate](
+			const TCHAR* FieldName,
+			FString& OutValue)
+		{
+			const TSharedPtr<FJsonValue> Value = Candidate->TryGetField(FieldName);
+			if (!Value.IsValid())
+			{
+				return true;
+			}
+			if (Value->Type != EJson::String)
+			{
+				return false;
+			}
+			OutValue = Value->AsString();
+			return true;
+		};
+
+		if (!TryReadStrictString(TEXT("name"), RawName))
+		{
+			return Fail(
+				OutError,
+				TEXT("domain_hjson_candidate_selector_invalid"),
+				FString(),
+				NamePointer);
+		}
+		if (!TryReadStrictString(TEXT("id"), RawId))
+		{
+			return Fail(
+				OutError,
+				TEXT("domain_hjson_candidate_selector_invalid"),
+				FString(),
+				IdPointer);
+		}
+		OutSelector.Name = RawName.TrimStartAndEnd();
+		OutSelector.Id = RawId.TrimStartAndEnd();
+		if (!OutSelector.IsValid())
+		{
+			return Fail(
+				OutError,
+				TEXT("domain_hjson_candidate_selector_required"),
+				FString(),
+				JsonPointer);
+		}
 		return true;
 	}
 }

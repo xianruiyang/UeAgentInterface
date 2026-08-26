@@ -1,6 +1,8 @@
 #include "DomainAdapters/Blueprint/Surfaces/UeAgentBlueprintCandidateBindingNormalizer.h"
 
+#include "Commands/PaletteSearch/UeAgentPaletteSearchTypes.h"
 #include "Core/Contract/UeAgentCommandJson.h"
+#include "Core/HjsonWorkspace/DomainAuthoring/UeAgentDomainHjsonAuthoringKit.h"
 #include "DomainAdapters/Blueprint/Component/UeAgentBlueprintComponentMechanics.h"
 #include "DomainAdapters/Blueprint/Node/UeAgentBlueprintNodeMechanics.h"
 #include "Dom/JsonObject.h"
@@ -87,42 +89,7 @@ namespace UE::UAI::DomainAdapters::Blueprint::Surfaces
 			return true;
 		}
 
-		bool HasExactNodeCandidate(
-			const TSharedPtr<FJsonObject>& Payload,
-			const FString& Name,
-			const FString& BindingRevision,
-			const FString& GraphId)
-		{
-			const TArray<TSharedPtr<FJsonValue>>* Candidates = nullptr;
-			if (!Payload->TryGetArrayField(TEXT("candidates"), Candidates)
-				|| !Candidates)
-			{
-				return false;
-			}
-			return Candidates->ContainsByPredicate(
-				[&Name, &BindingRevision, &GraphId](
-					const TSharedPtr<FJsonValue>& Value)
-				{
-					const TSharedPtr<FJsonObject> Candidate = Value.IsValid()
-						&& Value->Type == EJson::Object
-						? Value->AsObject()
-						: nullptr;
-					FString ActualName;
-					FString ActualBinding;
-					FString ActualGraph;
-					return Candidate.IsValid()
-						&& Candidate->TryGetStringField(TEXT("name"), ActualName)
-						&& Candidate->TryGetStringField(
-							TEXT("binding_revision"), ActualBinding)
-						&& Candidate->TryGetStringField(
-							TEXT("graph_id"), ActualGraph)
-						&& ActualName == Name
-						&& ActualBinding == BindingRevision
-						&& ActualGraph == GraphId;
-				});
-		}
-
-		bool HasExactComponentCandidate(
+		bool HasExactLegacyComponentCandidate(
 			const TSharedPtr<FJsonObject>& Payload,
 			const FString& Name,
 			const FString& ComponentClass,
@@ -155,6 +122,31 @@ namespace UE::UAI::DomainAdapters::Blueprint::Surfaces
 						&& ActualClass == ComponentClass
 						&& ActualBinding == BindingRevision;
 				});
+		}
+
+		bool TryValidateOptionalCandidateField(
+			const TSharedPtr<FJsonObject>& Candidate,
+			const TCHAR* Field,
+			const FString& Expected,
+			const FString& TargetIdentity,
+			const FString& Pointer,
+			FWorkspaceError& OutError)
+		{
+			FString Actual;
+			if (!Candidate->HasField(Field))
+			{
+				return true;
+			}
+			if (!Candidate->TryGetStringField(Field, Actual)
+				|| !Actual.Equals(Expected, ESearchCase::CaseSensitive))
+			{
+				return Fail(
+					OutError,
+					TEXT("blueprint_surface_component_candidate_metadata_mismatch"),
+					TargetIdentity,
+					Pointer + TEXT("/") + Field);
+			}
+			return true;
 		}
 
 		bool TryNormalizeComponentCandidates(
@@ -213,85 +205,137 @@ namespace UE::UAI::DomainAdapters::Blueprint::Surfaces
 				const TSharedPtr<FJsonObject> Candidate = CandidateField
 					? *CandidateField
 					: nullptr;
-				FString Name;
-				FString ComponentClass;
-				FString BindingRevision;
-				if (!TryGetRequiredString(
+				FString LegacyBinding;
+				Candidate->TryGetStringField(
+					TEXT("binding_revision"), LegacyBinding);
+				if (!LegacyBinding.IsEmpty())
+				{
+					FString LegacyName;
+					FString LegacyClass;
+					if (!TryGetRequiredString(
+							Candidate, TEXT("name"), LegacyName,
+							TargetIdentity, Pointer + TEXT("/candidate"), OutError)
+						|| !TryGetRequiredString(
+							Candidate, TEXT("component_class"), LegacyClass,
+							TargetIdentity, Pointer + TEXT("/candidate"), OutError))
+					{
+						return false;
+					}
+					Component::FUeAgentBlueprintComponentMechanicsError QueryError;
+					FString PayloadJson;
+					if (!Component::TryQueryBlueprintComponentCandidates(
+							TargetIdentity, LegacyClass, LegacyName,
+							PayloadJson, QueryError))
+					{
+						return Fail(
+							OutError,
+							QueryError.Code.IsEmpty()
+								? FString(TEXT("blueprint_surface_component_candidate_query_failed"))
+								: QueryError.Code,
+							TargetIdentity,
+							Pointer + TEXT("/candidate"));
+					}
+					TSharedPtr<FJsonObject> Payload;
+					if (!TryParseQueryPayload(
+							PayloadJson, Payload, TargetIdentity,
+							Pointer + TEXT("/candidate"), OutError))
+					{
+						return false;
+					}
+					if (!HasExactLegacyComponentCandidate(
+							Payload, LegacyName, LegacyClass, LegacyBinding))
+					{
+						return Fail(
+							OutError,
+							TEXT("blueprint_surface_component_candidate_binding_stale"),
+							TargetIdentity,
+							Pointer + TEXT("/candidate/binding_revision"));
+					}
+					if (!TrySetExactString(
+							Spec, TEXT("name"), LegacyName,
+							TargetIdentity, Pointer, OutError)
+						|| !TrySetExactString(
+							Spec, TEXT("class"), LegacyClass,
+							TargetIdentity, Pointer, OutError))
+					{
+						return false;
+					}
+					continue;
+				}
+
+				DomainAuthoring::FDomainHjsonCandidateSelector Selector;
+				if (!DomainAuthoring::TryReadCandidateSelector(
 						Candidate,
-						TEXT("name"),
-						Name,
-						TargetIdentity,
 						Pointer + TEXT("/candidate"),
-						OutError)
-					|| !TryGetRequiredString(
-						Candidate,
-						TEXT("component_class"),
-						ComponentClass,
-						TargetIdentity,
-						Pointer + TEXT("/candidate"),
-						OutError)
-					|| !TryGetRequiredString(
-						Candidate,
-						TEXT("binding_revision"),
-						BindingRevision,
-						TargetIdentity,
-						Pointer + TEXT("/candidate"),
+						Selector,
 						OutError))
 				{
 					return false;
 				}
-
-				Component::FUeAgentBlueprintComponentMechanicsError QueryError;
-				FString PayloadJson;
-				if (!Component::TryQueryBlueprintComponentCandidates(
-						TargetIdentity,
-						ComponentClass,
-						Name,
-						PayloadJson,
-						QueryError))
+				UeAgentPaletteSearch::FCandidate ResolvedCandidate;
+				FString ResolveError;
+				if (!UeAgentPaletteSearch::TryResolveActorComponentCandidate(
+						Selector.Name,
+						Selector.Id,
+						ResolvedCandidate,
+						ResolveError))
 				{
+					FString ErrorCode = ResolveError;
+					int32 Separator = INDEX_NONE;
+					if (ErrorCode.FindChar(TEXT(':'), Separator))
+					{
+						ErrorCode.LeftInline(Separator);
+					}
 					return Fail(
 						OutError,
-						QueryError.Code.IsEmpty()
-							? FString(TEXT(
-								"blueprint_surface_component_candidate_query_failed"))
-							: QueryError.Code,
+						ErrorCode.IsEmpty()
+							? FString(TEXT("blueprint_surface_component_candidate_query_failed"))
+							: ErrorCode,
 						TargetIdentity,
 						Pointer + TEXT("/candidate"));
 				}
-				TSharedPtr<FJsonObject> Payload;
-				if (!TryParseQueryPayload(
-						PayloadJson,
-						Payload,
-						TargetIdentity,
-						Pointer + TEXT("/candidate"),
-						OutError))
-				{
-					return false;
-				}
-				if (!HasExactComponentCandidate(
-						Payload, Name, ComponentClass, BindingRevision))
+				const FString* ResolvedClass =
+					ResolvedCandidate.AuthoringSelectors.Find(TEXT("component_class"));
+				if (!ResolvedClass || ResolvedClass->IsEmpty())
 				{
 					return Fail(
 						OutError,
-						TEXT("blueprint_surface_component_candidate_binding_stale"),
+						TEXT("blueprint_surface_component_candidate_class_missing"),
 						TargetIdentity,
-						Pointer + TEXT("/candidate/binding_revision"));
+						Pointer + TEXT("/candidate"));
 				}
+				if (!TryValidateOptionalCandidateField(
+						Candidate, TEXT("class_path"), *ResolvedClass,
+						TargetIdentity, Pointer + TEXT("/candidate"), OutError)
+					|| !TryValidateOptionalCandidateField(
+						Candidate, TEXT("component_class"), *ResolvedClass,
+						TargetIdentity, Pointer + TEXT("/candidate"), OutError))
+				{
+					return false;
+				}
+				const FString ResolvedAsset =
+					ResolvedCandidate.AuthoringSelectors.FindRef(TEXT("asset_override"));
+				if ((Candidate->HasField(TEXT("asset_path"))
+						&& !TryValidateOptionalCandidateField(
+							Candidate, TEXT("asset_path"), ResolvedAsset,
+							TargetIdentity, Pointer + TEXT("/candidate"), OutError))
+					|| (Candidate->HasField(TEXT("asset_override"))
+						&& !TryValidateOptionalCandidateField(
+							Candidate, TEXT("asset_override"), ResolvedAsset,
+							TargetIdentity, Pointer + TEXT("/candidate"), OutError)))
+				{
+					return false;
+				}
+				if (!Candidate->HasField(TEXT("name")))
+				{
+					Candidate->SetStringField(
+						TEXT("name"), ResolvedCandidate.Name);
+				}
+				Candidate->SetStringField(
+					TEXT("id"), ResolvedCandidate.GetPublicId());
 				if (!TrySetExactString(
-						Spec,
-						TEXT("name"),
-						Name,
-						TargetIdentity,
-						Pointer,
-						OutError)
-					|| !TrySetExactString(
-						Spec,
-						TEXT("class"),
-						ComponentClass,
-						TargetIdentity,
-						Pointer,
-						OutError))
+						Spec, TEXT("class"), *ResolvedClass,
+						TargetIdentity, Pointer, OutError))
 				{
 					return false;
 				}
@@ -299,40 +343,14 @@ namespace UE::UAI::DomainAdapters::Blueprint::Surfaces
 			return true;
 		}
 
-		bool TryNormalizeGraphIdentity(
+		bool TrySetResolvedGraphIdentity(
 			const TSharedPtr<FJsonObject>& GraphSpec,
-			const TSharedPtr<FJsonObject>& QueryPayload,
 			const FString& GraphId,
+			const FString& GraphName,
 			const FString& TargetIdentity,
 			const FString& Pointer,
 			FWorkspaceError& OutError)
 		{
-			const TSharedPtr<FJsonObject>* QueryGraphField = nullptr;
-			if (!QueryPayload->TryGetObjectField(
-					TEXT("graph"), QueryGraphField)
-				|| !QueryGraphField || !QueryGraphField->IsValid())
-			{
-				return Fail(
-					OutError,
-					TEXT("blueprint_surface_node_candidate_graph_invalid"),
-					TargetIdentity,
-					Pointer + TEXT("/candidate/graph_id"));
-			}
-			FString QueryGraphId;
-			FString QueryGraphName;
-			if (!(*QueryGraphField)->TryGetStringField(
-					TEXT("id"), QueryGraphId)
-				|| QueryGraphId != GraphId
-				|| !(*QueryGraphField)->TryGetStringField(
-					TEXT("name"), QueryGraphName))
-			{
-				return Fail(
-					OutError,
-					TEXT("blueprint_surface_node_candidate_graph_mismatch"),
-					TargetIdentity,
-					Pointer + TEXT("/candidate/graph_id"));
-			}
-
 			TSharedPtr<FJsonObject> Header;
 			const TSharedPtr<FJsonObject>* HeaderField = nullptr;
 			if (GraphSpec->TryGetObjectField(TEXT("graph"), HeaderField))
@@ -354,7 +372,7 @@ namespace UE::UAI::DomainAdapters::Blueprint::Surfaces
 			}
 			FString ExistingName;
 			if (Header->TryGetStringField(TEXT("name"), ExistingName)
-				&& !ExistingName.Equals(QueryGraphName, ESearchCase::CaseSensitive))
+				&& !ExistingName.Equals(GraphName, ESearchCase::CaseSensitive))
 			{
 				return Fail(
 					OutError,
@@ -397,7 +415,7 @@ namespace UE::UAI::DomainAdapters::Blueprint::Surfaces
 			Header->SetStringField(
 				TEXT("guid"),
 				ParsedGuid.ToString(EGuidFormats::DigitsWithHyphensLower));
-			Header->SetStringField(TEXT("name"), QueryGraphName);
+			Header->SetStringField(TEXT("name"), GraphName);
 			return true;
 		}
 
@@ -438,6 +456,80 @@ namespace UE::UAI::DomainAdapters::Blueprint::Surfaces
 						TargetIdentity,
 						GraphPointer);
 				}
+				FString GraphSelector;
+				const TSharedPtr<FJsonObject>* GraphHeader = nullptr;
+				if (GraphSpec->TryGetObjectField(TEXT("graph"), GraphHeader)
+					&& GraphHeader && GraphHeader->IsValid())
+				{
+					FString Guid;
+					if ((*GraphHeader)->TryGetStringField(TEXT("guid"), Guid)
+						&& !Guid.TrimStartAndEnd().IsEmpty())
+					{
+						GraphSelector = TEXT("graph:") + Guid.TrimStartAndEnd();
+					}
+					if (GraphSelector.IsEmpty())
+					{
+						(*GraphHeader)->TryGetStringField(
+							TEXT("name"), GraphSelector);
+					}
+				}
+				if (GraphSelector.IsEmpty())
+				{
+					FGuid StableGuid;
+					if (FGuid::Parse(GraphEntry.Key, StableGuid))
+					{
+						GraphSelector = TEXT("graph:")
+							+ StableGuid.ToString(
+								EGuidFormats::DigitsWithHyphensLower);
+					}
+					else
+					{
+						int32 Separator = INDEX_NONE;
+						GraphSelector = GraphEntry.Key.FindChar(
+							TEXT(':'), Separator)
+							? GraphEntry.Key.Mid(Separator + 1)
+							: GraphEntry.Key;
+					}
+				}
+				GraphSelector.TrimStartAndEndInline();
+				if (GraphSelector.IsEmpty())
+				{
+					return Fail(
+						OutError,
+						TEXT("blueprint_surface_node_candidate_graph_required"),
+						TargetIdentity,
+						GraphPointer);
+				}
+				FString ResolvedGraphId;
+				FString ResolvedGraphName;
+				FString GraphResolveError;
+				if (!UeAgentPaletteSearch::TryResolveBlueprintGraphIdentity(
+						TargetIdentity,
+						GraphSelector,
+						ResolvedGraphId,
+						ResolvedGraphName,
+						GraphResolveError))
+				{
+					return Fail(
+						OutError,
+						GraphResolveError.IsEmpty()
+							? FString(TEXT(
+								"blueprint_surface_node_candidate_graph_invalid"))
+							: GraphResolveError,
+						TargetIdentity,
+						GraphPointer);
+				}
+				if (!TrySetResolvedGraphIdentity(
+						GraphSpec,
+						ResolvedGraphId,
+						ResolvedGraphName,
+						TargetIdentity,
+						GraphPointer,
+						OutError))
+				{
+					return false;
+				}
+				GraphSelector = ResolvedGraphId;
 				const TSharedPtr<FJsonObject>* Nodes = nullptr;
 				if (!GraphSpec->HasField(TEXT("nodes")))
 				{
@@ -486,89 +578,128 @@ namespace UE::UAI::DomainAdapters::Blueprint::Surfaces
 					const TSharedPtr<FJsonObject> Candidate = CandidateField
 						? *CandidateField
 						: nullptr;
-					FString Name;
-					FString BindingRevision;
-					FString GraphId;
-					if (!TryGetRequiredString(
+					DomainAuthoring::FDomainHjsonCandidateSelector Selector;
+					if (!DomainAuthoring::TryReadCandidateSelector(
 							Candidate,
-							TEXT("name"),
-							Name,
-							TargetIdentity,
 							Pointer + TEXT("/candidate"),
-							OutError)
-						|| !TryGetRequiredString(
-							Candidate,
-							TEXT("binding_revision"),
-							BindingRevision,
-							TargetIdentity,
-							Pointer + TEXT("/candidate"),
-							OutError)
-						|| !TryGetRequiredString(
-							Candidate,
-							TEXT("graph_id"),
-							GraphId,
-							TargetIdentity,
-							Pointer + TEXT("/candidate"),
+							Selector,
 							OutError))
 					{
 						return false;
 					}
 
-					Node::FUeAgentBlueprintNodeMechanicsError QueryError;
-					FString PayloadJson;
-					if (!Node::TryQueryBlueprintNodeCandidates(
-							TargetIdentity,
-							GraphId,
-							Name,
-							PayloadJson,
-							QueryError))
+					UeAgentPaletteSearch::FSearchParams Params;
+					Params.CatalogType = TEXT("blueprint_node");
+					Params.AssetPath = TargetIdentity;
+					Params.GraphName = GraphSelector;
+					Params.bContextSensitive = true;
+					const TSharedPtr<FJsonObject>* CandidateContext = nullptr;
+					if (Spec->HasField(TEXT("candidate_context")))
 					{
+						if (!Spec->TryGetObjectField(
+								TEXT("candidate_context"), CandidateContext)
+							|| !CandidateContext
+							|| !CandidateContext->IsValid())
+						{
+							return Fail(
+								OutError,
+								TEXT(
+									"blueprint_surface_candidate_context_invalid"),
+								TargetIdentity,
+								Pointer + TEXT("/candidate_context"));
+						}
+						(*CandidateContext)->TryGetStringField(
+							TEXT("node_guid"), Params.NodeGuid);
+						(*CandidateContext)->TryGetStringField(
+							TEXT("pin_guid"), Params.PinGuid);
+						(*CandidateContext)->TryGetStringField(
+							TEXT("pin_name"), Params.PinName);
+					}
+					UeAgentPaletteSearch::FCandidate ResolvedCandidate;
+					FString ResolveError;
+					if (!UeAgentPaletteSearch::TryResolveBlueprintActionCandidate(
+							Params,
+							Selector.Name,
+							Selector.Id,
+							ResolvedCandidate,
+							ResolveError))
+					{
+						FString ErrorCode = ResolveError;
+						int32 Separator = INDEX_NONE;
+						if (ErrorCode.FindChar(TEXT(':'), Separator))
+						{
+							ErrorCode.LeftInline(Separator);
+						}
 						return Fail(
 							OutError,
-							QueryError.Code.IsEmpty()
+							ErrorCode.IsEmpty()
 								? FString(TEXT(
 									"blueprint_surface_node_candidate_query_failed"))
-								: QueryError.Code,
+								: ErrorCode,
 							TargetIdentity,
 							Pointer + TEXT("/candidate"));
 					}
-					TSharedPtr<FJsonObject> Payload;
-					if (!TryParseQueryPayload(
-							PayloadJson,
-							Payload,
-							TargetIdentity,
-							Pointer + TEXT("/candidate"),
-							OutError))
+
+					FString LegacyBinding;
+					FString LegacyGraphId;
+					FString LegacyCandidateId;
+					Candidate->TryGetStringField(
+						TEXT("binding_revision"), LegacyBinding);
+					Candidate->TryGetStringField(
+						TEXT("graph_id"), LegacyGraphId);
+					Candidate->TryGetStringField(
+						TEXT("candidate_id"), LegacyCandidateId);
+					if (!LegacyBinding.IsEmpty())
 					{
-						return false;
+						if (LegacyGraphId.IsEmpty())
+						{
+							return Fail(
+								OutError,
+								TEXT("blueprint_surface_candidate_field_required"),
+								TargetIdentity,
+								Pointer + TEXT("/candidate/graph_id"));
+						}
+						if (!LegacyGraphId.Equals(
+								ResolvedGraphId, ESearchCase::IgnoreCase))
+						{
+							return Fail(
+								OutError,
+								TEXT(
+									"blueprint_surface_node_candidate_graph_mismatch"),
+								TargetIdentity,
+								Pointer + TEXT("/candidate/graph_id"));
+						}
+						Node::FUeAgentBlueprintNodeMechanicsError LegacyError;
+						if (!Node::TryValidateLegacyBlueprintNodeCandidateBinding(
+								TargetIdentity,
+								LegacyGraphId,
+								Selector.Name,
+								LegacyCandidateId,
+								LegacyBinding,
+								LegacyError))
+						{
+							return Fail(
+								OutError,
+								LegacyError.Code.IsEmpty()
+									? FString(TEXT(
+										"blueprint_surface_node_candidate_binding_stale"))
+									: LegacyError.Code,
+								TargetIdentity,
+								Pointer + TEXT("/candidate/binding_revision"));
+						}
 					}
-					if (!HasExactNodeCandidate(
-							Payload, Name, BindingRevision, GraphId))
+
+					if (!Candidate->HasField(TEXT("name")))
 					{
-						return Fail(
-							OutError,
-							TEXT("blueprint_surface_node_candidate_binding_stale"),
-							TargetIdentity,
-							Pointer + TEXT("/candidate/binding_revision"));
+						Candidate->SetStringField(
+							TEXT("name"), ResolvedCandidate.Name);
 					}
-					if (!TryNormalizeGraphIdentity(
-							GraphSpec,
-							Payload,
-							GraphId,
-							TargetIdentity,
-							GraphPointer,
-							OutError)
-						|| !TrySetExactString(
+					Candidate->SetStringField(
+						TEXT("id"), ResolvedCandidate.GetPublicId());
+					if (!TrySetExactString(
 							Spec,
 							TEXT("node_type"),
-							TEXT("node_by_class"),
-							TargetIdentity,
-							Pointer,
-							OutError)
-						|| !TrySetExactString(
-							Spec,
-							TEXT("node_class"),
-							Name,
+							TEXT("native_action"),
 							TargetIdentity,
 							Pointer,
 							OutError))

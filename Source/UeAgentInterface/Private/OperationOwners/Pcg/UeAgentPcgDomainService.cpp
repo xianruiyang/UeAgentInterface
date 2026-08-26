@@ -108,16 +108,6 @@ namespace UE::UAI::OperationOwners::Pcg
 			return Name.IsEmpty() ? Target : Target + TEXT(".") + Name;
 		}
 
-		TArray<TSharedPtr<FJsonValue>> StringArray(const TArray<FString>& Values)
-		{
-			TArray<TSharedPtr<FJsonValue>> Result;
-			for (const FString& Value : Values)
-			{
-				Result.Add(MakeShared<FJsonValueString>(Value));
-			}
-			return Result;
-		}
-
 		class FPcgCandidateCommandService final : public IUeAgentPcgCandidateCommandService
 		{
 		public:
@@ -145,13 +135,15 @@ namespace UE::UAI::OperationOwners::Pcg
 				}
 				FString Target;
 				FString Query;
+				FString CandidateId;
 				if (!Params->TryGetStringField(TEXT("target"), Target)
 					|| Target.TrimStartAndEnd().IsEmpty())
 				{
 					return Fail(OutError, TEXT("pcg_candidate_target_required"), Request.CommandId);
 				}
 				Params->TryGetStringField(TEXT("query"), Query);
-				int32 Limit = 64;
+				Params->TryGetStringField(TEXT("id"), CandidateId);
+				int32 Limit = 20;
 				int32 Cursor = 0;
 				double Number = 0.0;
 				if (Params->TryGetNumberField(TEXT("limit"), Number)) Limit = static_cast<int32>(Number);
@@ -164,7 +156,8 @@ namespace UE::UAI::OperationOwners::Pcg
 				FPcgNodeCandidateQueryResult QueryResult;
 				FPcgNodeCandidateQueryError QueryError;
 				if (!TryQueryPcgNodeCandidates(
-						*TargetObject, Query, QueryResult, QueryError, Limit, Cursor))
+						*TargetObject, Query, QueryResult, QueryError,
+						Limit, Cursor, CandidateId))
 				{
 					return Fail(
 						OutError,
@@ -182,18 +175,33 @@ namespace UE::UAI::OperationOwners::Pcg
 				Payload->SetNumberField(TEXT("next_cursor"), QueryResult.NextCursor);
 				Payload->SetBoolField(TEXT("complete"), QueryResult.bComplete);
 				Payload->SetBoolField(TEXT("has_more"), QueryResult.bHasMore);
+				Payload->SetBoolField(
+					TEXT("coverage_complete"), QueryResult.bCoverageComplete);
+				Payload->SetBoolField(
+					TEXT("creation_coverage_complete"),
+					QueryResult.bCreationCoverageComplete);
+				Payload->SetNumberField(
+					TEXT("native_action_count"), QueryResult.NativeActionCount);
+				Payload->SetNumberField(
+					TEXT("executable_action_count"),
+					QueryResult.ExecutableActionCount);
 				TArray<TSharedPtr<FJsonValue>> Candidates;
 				for (const FPcgNodeCandidate& Candidate : QueryResult.Candidates)
 				{
 					const TSharedPtr<FJsonObject> Value = MakeShared<FJsonObject>();
+					Value->SetStringField(TEXT("id"), Candidate.Id);
 					Value->SetStringField(TEXT("name"), Candidate.Name);
 					Value->SetStringField(TEXT("label"), Candidate.Label);
 					Value->SetStringField(TEXT("kind"), Candidate.Kind);
-					Value->SetArrayField(TEXT("supported_operations"), StringArray(Candidate.SupportedOperations));
-					Value->SetStringField(TEXT("input_contract"), Candidate.InputContract);
-					Value->SetStringField(TEXT("placement_contract"), Candidate.PlacementContract);
-					Value->SetStringField(TEXT("required_context"), Candidate.RequiredContext);
-					Value->SetStringField(TEXT("binding_revision"), Candidate.BindingRevision);
+					Value->SetStringField(
+						TEXT("action_kind"), Candidate.ActionKind);
+					Value->SetStringField(TEXT("category"), Candidate.Category);
+					Value->SetStringField(TEXT("summary"), Candidate.Summary);
+					Value->SetBoolField(TEXT("supported"), Candidate.bSupported);
+					Value->SetStringField(
+						TEXT("write_support"), Candidate.WriteSupport);
+					Value->SetStringField(
+						TEXT("support_reason"), Candidate.SupportReason);
 					Candidates.Add(MakeShared<FJsonValueObject>(Value));
 				}
 				Payload->SetArrayField(TEXT("candidates"), MoveTemp(Candidates));

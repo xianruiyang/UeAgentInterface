@@ -51,12 +51,14 @@ namespace UE::UAI::DomainAdapters::AudioMediaGraph
 			FString InClassName,
 			int32 InMajorVersion,
 			int32 InMinorVersion,
-			EAudioMediaGraphMutationIntent InIntent)
+			EAudioMediaGraphMutationIntent InIntent,
+			TOptional<FVector2D> InPosition = {})
 			: NodeId(InNodeId)
 			, ClassName(MoveTemp(InClassName))
 			, MajorVersion(InMajorVersion)
 			, MinorVersion(InMinorVersion)
 			, Intent(InIntent)
+			, Position(MoveTemp(InPosition))
 		{
 		}
 
@@ -65,6 +67,7 @@ namespace UE::UAI::DomainAdapters::AudioMediaGraph
 		int32 GetMajorVersion() const { return MajorVersion; }
 		int32 GetMinorVersion() const { return MinorVersion; }
 		EAudioMediaGraphMutationIntent GetIntent() const { return Intent; }
+		const TOptional<FVector2D>& GetPosition() const { return Position; }
 
 	private:
 		FGuid NodeId;
@@ -72,6 +75,7 @@ namespace UE::UAI::DomainAdapters::AudioMediaGraph
 		int32 MajorVersion = 1;
 		int32 MinorVersion = 0;
 		EAudioMediaGraphMutationIntent Intent;
+		TOptional<FVector2D> Position;
 	};
 
 	class FAudioMediaGraphMetaSoundLinkMutation final

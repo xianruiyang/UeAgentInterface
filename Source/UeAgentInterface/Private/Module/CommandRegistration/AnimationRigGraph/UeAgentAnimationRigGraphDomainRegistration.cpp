@@ -46,9 +46,9 @@ namespace UE::UAI::Module::CommandRegistration::AnimationRigGraph
 			Result.SideEffect = EUeAgentCommandSideEffect::None;
 			Result.StateLayers = {TEXT("asset_persisted_state")};
 			Result.InputFields = {
-				Field(TEXT("target"), TEXT("string"), true, TEXT("Exact persisted ControlRigBlueprint, IKRigDefinition, IKRetargeter, or Skeleton package.object identity.")),
-				Field(TEXT("query"), TEXT("string"), false, TEXT("Optional bounded class identity filter.")),
-				Field(TEXT("space_ref"), TEXT("string"), false, TEXT("Optional exact explicit placement-space identity used to narrow authoring guidance.")),
+				Field(TEXT("target"), TEXT("string"), true, TEXT("Exact persisted ControlRigBlueprint package.object identity whose default RigVM graph supplies the native blank-context menu.")),
+				Field(TEXT("query"), TEXT("string"), false, TEXT("Optional text filter over the native menu name, category, tooltip, keywords, and spawner type.")),
+				Field(TEXT("id"), TEXT("string"), false, TEXT("Optional exact opaque candidate id filter.")),
 				Field(TEXT("limit"), TEXT("integer"), false, TEXT("Optional page size from 1 through 64; defaults to 64.")),
 				Field(TEXT("cursor"), TEXT("integer"), false, TEXT("Optional non-negative result offset; defaults to zero.")),
 			};
@@ -57,7 +57,13 @@ namespace UE::UAI::Module::CommandRegistration::AnimationRigGraph
 				Field(TEXT("read_only"), TEXT("boolean"), true, TEXT("Always true.")),
 				Field(TEXT("target"), TEXT("string"), true, TEXT("The unchanged exact target identity.")),
 				Field(TEXT("target_revision"), TEXT("string"), true, TEXT("The current persisted target revision.")),
-				Field(TEXT("candidates"), TEXT("array"), true, TEXT("Exact concrete native Control Rig unit struct identities with explicit space placement contracts.")),
+				Field(TEXT("graph_name"), TEXT("string"), true, TEXT("The exact default RigVM editor graph used for native menu enumeration.")),
+				Field(TEXT("coverage_scope"), TEXT("string"), true, TEXT("The explicit native creation context covered by this result.")),
+				Field(TEXT("coverage_complete"), TEXT("boolean"), true, TEXT("True when every native action in the covered menu context is projected.")),
+				Field(TEXT("creation_coverage_complete"), TEXT("boolean"), true, TEXT("True only when every projected native action kind is executable by the current HJSON writer.")),
+				Field(TEXT("native_action_count"), TEXT("integer"), true, TEXT("Total native menu actions in the covered context.")),
+				Field(TEXT("executable_action_count"), TEXT("integer"), true, TEXT("Native actions currently executable by the HJSON writer.")),
+				Field(TEXT("candidates"), TEXT("array"), true, TEXT("Compact native RigVM menu actions with opaque id, UI name, presentation, and truthful write support.")),
 				Field(TEXT("total_matches"), TEXT("integer"), true, TEXT("Total candidates matching this query.")),
 				Field(TEXT("next_cursor"), TEXT("integer"), true, TEXT("Next result offset, or -1 when complete.")),
 				Field(TEXT("complete"), TEXT("boolean"), true, TEXT("True only on the final page.")),
@@ -69,17 +75,17 @@ namespace UE::UAI::Module::CommandRegistration::AnimationRigGraph
 				{TEXT("animation_rig_graph_candidate_target_type_unsupported"), TEXT("The target is not an exact supported animation rig graph root.")},
 				{TEXT("animation_rig_graph_candidate_page_invalid"), TEXT("The requested page is outside the bounded contract.")},
 			};
-			Result.Purpose.Summary = TEXT("Resolve exact AnimationRigGraph unit creation candidates from loaded native RigUnit struct identities.");
-			Result.Purpose.Target = TEXT("One exact persisted Control Rig, IK Rig, IK Retargeter, or Skeleton root.");
+			Result.Purpose.Summary = TEXT("Enumerate the same native blank-context action menu used by the default Control Rig graph and return compact contextual-create candidates.");
+			Result.Purpose.Target = TEXT("One exact persisted ControlRigBlueprint default RigVM graph.");
 			Result.Purpose.Preconditions = {
 				TEXT("Copy the target unchanged from public content search or readback."),
 				TEXT("Run in the Editor on the UE game thread with uai:query."),
 			};
-			Result.Purpose.ParameterGuidance = TEXT("Copy candidate.name and binding_revision unchanged into the matching animation rig graph HJSON entry.");
-			Result.Purpose.ResultGuidance = TEXT("Treat name, kind, binding_revision, target_revision, and placement contract as opaque exact values; continue paging while has_more is true.");
+			Result.Purpose.ParameterGuidance = TEXT("Search by query or exact id, then put only candidate.name or candidate.id in the create entry; graph context and position remain outside candidate.");
+			Result.Purpose.ResultGuidance = TEXT("Continue paging while has_more is true; supported=false entries are exact native search results whose HJSON persistence path is not yet available.");
 			Result.Purpose.FailureGuidance = TEXT("Unresolved targets, unsupported types, and invalid pages fail before any write.");
 			Result.Purpose.SideEffectGuidance = TEXT("Read-only; it creates no node, package, file, or external state.");
-			Result.Purpose.MinimumExample = TEXT("client.animation_rig_graph.candidates(target, query='Transform', space_ref='root')");
+			Result.Purpose.MinimumExample = TEXT("client.animation_rig_graph.candidates(target, query='Add Spaces')");
 			Result.Purpose.RelatedFlows = {
 				TEXT("query.command.search"),
 				TEXT("query.command.detail"),

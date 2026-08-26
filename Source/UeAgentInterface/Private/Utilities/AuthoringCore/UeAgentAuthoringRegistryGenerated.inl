@@ -156,16 +156,16 @@ bool BuildGeneratedDomainRegistration(const FString& DomainId, FDomainRegistrati
 			Binding.UnitId = TEXT("actor");
 			Binding.PathPattern = TEXT("actors/items/*/actor.hjson");
 			Binding.RelativePathTemplate = TEXT("actors/items/{managed_id}/actor.hjson");
-			Binding.ExactIdentityFields = { TEXT("actor_class") };
-			Binding.PointerTemplate = TEXT("/target");
+			Binding.ExactIdentityFields = { TEXT("candidate_id") };
+			Binding.PointerTemplate = TEXT("/provider_extension/candidate");
 			Binding.MergeMode = TEXT("merge_object");
 			Binding.OperationMap = {  };
-			Binding.SeedBindings = { { TEXT("actor_class"), TEXT("/target/actor_class") } };
+			Binding.SeedBindings = { { TEXT("candidate_id"), TEXT("/provider_extension/candidate/id") } };
 			Binding.RequiredContext = { TEXT("managed_id"), TEXT("world_path") };
 			Binding.ContextBindings = { { TEXT("managed_id"), TEXT("/target/managed_id") }, { TEXT("world_path"), TEXT("/target/world_path") } };
 			Binding.ContextValueAliases = {  };
 			Binding.ConstantBindings = {  };
-			Binding.RequiredSeedFields = { TEXT("actor_class") };
+			Binding.RequiredSeedFields = { TEXT("candidate_id") };
 			Binding.OptionalSeedFields = {  };
 			OutRegistration.CatalogBindings.Add(MoveTemp(Binding));
 		}

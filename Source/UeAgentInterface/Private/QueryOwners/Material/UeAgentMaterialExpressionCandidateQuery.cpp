@@ -16,6 +16,7 @@ namespace UE::UAI::QueryOwners::Material
 	namespace
 	{
 		const FString CandidateKind = TEXT("material_expression");
+		const FString FunctionCandidateKind = TEXT("material_function_call");
 		const FString InputContract = TEXT("uai.material.expression.create/1");
 		const FString PlacementContract =
 			TEXT("uai.material.expression.graph-placement/1");
@@ -110,7 +111,8 @@ namespace UE::UAI::QueryOwners::Material
 		FMaterialExpressionCandidateQueryResult& OutResult,
 		FMaterialExpressionCandidateQueryError& OutError,
 		const int32 Limit,
-		const int32 Cursor)
+		const int32 Cursor,
+		const FMaterialExpressionCandidateContext& Context)
 	{
 		OutResult = {};
 		OutError = {};
@@ -138,16 +140,29 @@ namespace UE::UAI::QueryOwners::Material
 		}
 
 		OutResult.Target = Target.GetPathName();
+		OutResult.Context = Context;
+		OutResult.Context.GraphName = Context.GraphName.IsEmpty()
+			? (Target.IsA<UMaterial>()
+				? FString(TEXT("MaterialGraph"))
+				: FString(TEXT("MaterialFunctionGraph")))
+			: Context.GraphName;
+		OutResult.CoverageScope =
+			TEXT("native_material_expression_and_function_creation_actions");
+		OutResult.bCoverageComplete = true;
 		if (!ReadTargetRevision(Target, OutResult.TargetRevision, OutError))
 		{
 			return false;
 		}
 
 		UeAgentPaletteSearch::FSearchParams Params;
-		Params.CatalogType = TEXT("material_expression");
+		Params.CatalogType = TEXT("material_node");
 		Params.SearchText = Query;
 		Params.SearchMode = TEXT("contains");
 		Params.AssetPath = Target.GetPathName();
+		Params.GraphName = OutResult.Context.GraphName;
+		Params.NodeGuid = Context.NodeGuid;
+		Params.PinGuid = Context.PinGuid;
+		Params.PinName = Context.PinName;
 		Params.Limit = Limit;
 		Params.Offset = Cursor;
 		Params.bIncludeItems = true;
@@ -170,6 +185,24 @@ namespace UE::UAI::QueryOwners::Material
 		TArray<UeAgentPaletteSearch::FCandidate> MatchingCandidates;
 		for (UeAgentPaletteSearch::FCandidate& Candidate : PaletteCandidates)
 		{
+			const FString ResolvedNodeGuid =
+				Candidate.AuthoringSelectors.FindRef(TEXT("context_node_guid"));
+			const FString ResolvedPinGuid =
+				Candidate.AuthoringSelectors.FindRef(TEXT("context_pin_guid"));
+			const FString ResolvedPinName =
+				Candidate.AuthoringSelectors.FindRef(TEXT("context_pin_name"));
+			if (!ResolvedNodeGuid.IsEmpty())
+			{
+				OutResult.Context.NodeGuid = ResolvedNodeGuid;
+			}
+			if (!ResolvedPinGuid.IsEmpty())
+			{
+				OutResult.Context.PinGuid = ResolvedPinGuid;
+			}
+			if (!ResolvedPinName.IsEmpty())
+			{
+				OutResult.Context.PinName = ResolvedPinName;
+			}
 			const FString Searchable = NormalizeSearch(
 				Candidate.Name + TEXT("|") + Candidate.DisplayName
 				+ TEXT("|") + Candidate.FullName + TEXT("|")
@@ -179,11 +212,15 @@ namespace UE::UAI::QueryOwners::Material
 				MatchingCandidates.Add(MoveTemp(Candidate));
 			}
 		}
-		Algo::SortBy(
-			MatchingCandidates,
-			[](const UeAgentPaletteSearch::FCandidate& Candidate)
+		MatchingCandidates.Sort(
+			[](const UeAgentPaletteSearch::FCandidate& Left,
+				const UeAgentPaletteSearch::FCandidate& Right)
 			{
-				return Candidate.FullName;
+				if (Left.UiOrder != Right.UiOrder)
+				{
+					return Left.UiOrder < Right.UiOrder;
+				}
+				return Left.GetCandidateId() < Right.GetCandidateId();
 			});
 		OutResult.TotalMatches = MatchingCandidates.Num();
 		const int32 End = FMath::Min(Cursor + Limit, MatchingCandidates.Num());
@@ -193,21 +230,28 @@ namespace UE::UAI::QueryOwners::Material
 		{
 			const UeAgentPaletteSearch::FCandidate& Source =
 				MatchingCandidates[Index];
-			if (Source.Kind != CandidateKind || Source.FullName.IsEmpty())
+			if ((Source.Kind != CandidateKind
+					&& Source.Kind != FunctionCandidateKind)
+				|| Source.GetPublicId().IsEmpty())
 			{
 				continue;
 			}
 			FMaterialExpressionCandidate Candidate;
-			Candidate.Name = Source.FullName;
+			Candidate.Id = Source.GetPublicId();
+			Candidate.Name = Source.Name;
 			Candidate.Label = Source.DisplayName.IsEmpty()
 				? Source.Name
 				: Source.DisplayName;
-			Candidate.Kind = CandidateKind;
+			Candidate.Kind = Source.Kind;
+			Candidate.Category = Source.CategoryPath;
+			Candidate.bSupported = Source.bSupportedInContext;
+			Candidate.SupportReason = Source.SupportReason;
 			Candidate.SupportedOperations = {TEXT("create")};
 			Candidate.InputContract = InputContract;
 			Candidate.PlacementContract = PlacementContract;
 			Candidate.RequiredContext = RequiredContext;
-			Candidate.BindingRevision = CandidateRevision(Target, Candidate.Name);
+			Candidate.BindingRevision = CandidateRevision(
+				Target, Source.FullName);
 			OutResult.Candidates.Add(MoveTemp(Candidate));
 		}
 
@@ -232,37 +276,32 @@ namespace UE::UAI::QueryOwners::Material
 				TEXT("material_candidate_binding_required"),
 				Target.GetPathName());
 		}
-		FMaterialExpressionCandidateQueryResult Result;
-		if (!TryQueryMaterialExpressionCandidates(
-				Target,
-				CandidateName,
-				Result,
-				OutError,
-				20,
-				0))
-		{
-			return false;
-		}
-		const FMaterialExpressionCandidate* Candidate =
-			Result.Candidates.FindByPredicate(
-				[&CandidateName](const FMaterialExpressionCandidate& Value)
-				{
-					return Value.Name == CandidateName;
-				});
-		if (!Candidate)
+		UeAgentPaletteSearch::FSearchParams Params;
+		Params.CatalogType = TEXT("material_node");
+		Params.AssetPath = Target.GetPathName();
+		Params.GraphName = Target.IsA<UMaterial>()
+			? TEXT("MaterialGraph")
+			: TEXT("MaterialFunctionGraph");
+		UeAgentPaletteSearch::FCandidate Candidate;
+		FString ResolveError;
+		if (!UeAgentPaletteSearch::TryResolveMaterialActionCandidate(
+				Params, CandidateName, FString(), Candidate, ResolveError))
 		{
 			return Fail(
 				OutError,
 				TEXT("material_candidate_name_unresolved"),
-				CandidateName);
+				CandidateName,
+				ResolveError);
 		}
-		if (Candidate->BindingRevision != BindingRevision)
+		const FString CurrentBinding = CandidateRevision(
+			Target, Candidate.FullName);
+		if (CurrentBinding != BindingRevision)
 		{
 			return Fail(
 				OutError,
 				TEXT("material_candidate_binding_stale"),
 				CandidateName,
-				Candidate->BindingRevision);
+				CurrentBinding);
 		}
 		return true;
 	}

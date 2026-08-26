@@ -4,8 +4,8 @@
 the shared `client.content_graph.import_workspace(...)` ingress. Use
 `client.content_graph.structure(...)` for the exact live subject, runtime
 revision, spatial frame, evaluation clock, skeletal binding, bones, and
-independent readback. Use `client.command_search(...)` and
-`client.command_detail(...)` to inspect live contracts; `uai-cli` exposes the
+independent readback. Use `client.query.command_search(...)` and
+`client.query.command_detail(...)` to inspect live contracts; `uai-cli` exposes the
 same discovery path. No task-specific helper or tutorial-owned registry is
 authoritative. The state layer is explicitly `runtime_non_persistent`.
 

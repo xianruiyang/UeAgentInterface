@@ -2482,6 +2482,22 @@ namespace UE::UAI::DomainAdapters::ContentGraphRead
 							TEXT("component:")
 								+ Node->GetVariableName().ToString(),
 							Node);
+						if (Node->ComponentTemplate)
+						{
+							TArray<FUeAgentContentGraphProperty>
+								RevisionOnlyProperties;
+							int32 RevisionOnlyPropertyCount = 0;
+							if (!AddProperties(
+									*Node->ComponentTemplate,
+									Resources,
+									RevisionOnlyProperties,
+									RevisionOnlyPropertyCount,
+									OutError,
+									&RevisionFacts))
+							{
+								return false;
+							}
+						}
 					}
 				}
 				for (int32 Index = 0; Index < Scs.GetItems().Num(); ++Index)

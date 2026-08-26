@@ -22,7 +22,7 @@ It is deliberately not a runtime registry:
 
 A registered command is not a delivered capability. Every unit records the
 highest layer directly supported by current evidence. The current catalog owns
-352 exact command identities in 45 capability units. T35 through T43 provide
+353 exact command identities in 45 capability units. T35 through T43 provide
 representative current UE
 verticals across the registered domains, T44 proves legacy public/compiled
 surface exit, and T45 proves the Plugin/CMD/Pak/installed distribution contract.

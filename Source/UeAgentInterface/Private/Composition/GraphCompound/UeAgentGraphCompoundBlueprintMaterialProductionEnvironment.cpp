@@ -5,6 +5,7 @@
 #include "AssetRegistry/AssetRegistryModule.h"
 #include "Blueprint/UserWidget.h"
 #include "Blueprint/WidgetTree.h"
+#include "Commands/PaletteSearch/UeAgentPaletteSearchTypes.h"
 #include "Composition/HjsonImport/UeAgentHjsonImportOperationRuntime.h"
 #include "Core/AssetDurable/UeAgentAssetDurable.h"
 #include "Core/Contract/UeAgentContractJson.h"
@@ -901,6 +902,12 @@ namespace UE::UAI::Composition::GraphCompound
 			FUeAgentCanonicalValuePtr Value;
 			TArray<FString> Dependencies;
 			FString ClassRef;
+			FString CandidateName;
+			FString CandidateId;
+			FString GraphName;
+			FString NodeGuid;
+			FString PinGuid;
+			FString PinName;
 			FGuid ExpressionGuid;
 			int32 PositionX = 0;
 			int32 PositionY = 0;
@@ -955,6 +962,34 @@ namespace UE::UAI::Composition::GraphCompound
 			return true;
 		}
 
+		bool HasOnlyObjectFields(
+			const FUeAgentCanonicalValue& Object,
+			std::initializer_list<const TCHAR*> AllowedFields)
+		{
+			if (Object.GetKind() != EUeAgentValueKind::Object)
+			{
+				return false;
+			}
+			for (const TPair<FString, FUeAgentCanonicalValueRef>& Item
+				: Object.GetObjectItems())
+			{
+				bool bAllowed = false;
+				for (const TCHAR* const Allowed : AllowedFields)
+				{
+					if (Item.Key == Allowed)
+					{
+						bAllowed = true;
+						break;
+					}
+				}
+				if (!bAllowed)
+				{
+					return false;
+				}
+			}
+			return true;
+		}
+
 		bool TryCanonicalStringField(
 			const FUeAgentCanonicalValue& Object,
 			const TCHAR* Field,
@@ -1000,6 +1035,75 @@ namespace UE::UAI::Composition::GraphCompound
 			}
 			OutValue = static_cast<int32>(Number);
 			return true;
+		}
+
+		bool TryReadMaterialCandidateSelector(
+			const FUeAgentCanonicalValue& Value,
+			FString& OutName,
+			FString& OutId)
+		{
+			OutName.Reset();
+			OutId.Reset();
+			const FUeAgentCanonicalValue* const Candidate =
+				FindObjectValue(Value, TEXT("candidate"));
+			if (!Candidate
+				|| Candidate->GetKind() != EUeAgentValueKind::Object)
+			{
+				return false;
+			}
+			const FUeAgentCanonicalValue* const Name =
+				FindObjectValue(*Candidate, TEXT("name"));
+			const FUeAgentCanonicalValue* const Id =
+				FindObjectValue(*Candidate, TEXT("id"));
+			if ((Name && Name->GetKind() != EUeAgentValueKind::String)
+				|| (Id && Id->GetKind() != EUeAgentValueKind::String)
+				|| FindObjectValue(*Candidate, TEXT("candidate_id")))
+			{
+				return false;
+			}
+			OutName = Name ? Name->GetText().TrimStartAndEnd() : FString();
+			OutId = Id ? Id->GetText().TrimStartAndEnd() : FString();
+			return !OutName.IsEmpty() || !OutId.IsEmpty();
+		}
+
+		bool TryReadOptionalMaterialCandidateContext(
+			const FUeAgentCanonicalValue& Value,
+			FMaterialMutationOperation& OutOperation)
+		{
+			const FUeAgentCanonicalValue* const Context =
+				FindObjectValue(Value, TEXT("candidate_context"));
+			if (!Context)
+			{
+				return true;
+			}
+			if (!HasOnlyObjectFields(
+					*Context,
+					{TEXT("graph_name"), TEXT("node_guid"),
+						TEXT("pin_guid"), TEXT("pin_name")}))
+			{
+				return false;
+			}
+			auto ReadOptional = [Context](
+				const TCHAR* Field, FString& OutValue)
+			{
+				const FUeAgentCanonicalValue* const FieldValue =
+					FindObjectValue(*Context, Field);
+				if (!FieldValue)
+				{
+					OutValue.Reset();
+					return true;
+				}
+				if (FieldValue->GetKind() != EUeAgentValueKind::String)
+				{
+					return false;
+				}
+				OutValue = FieldValue->GetText().TrimStartAndEnd();
+				return true;
+			};
+			return ReadOptional(TEXT("graph_name"), OutOperation.GraphName)
+				&& ReadOptional(TEXT("node_guid"), OutOperation.NodeGuid)
+				&& ReadOptional(TEXT("pin_guid"), OutOperation.PinGuid)
+				&& ReadOptional(TEXT("pin_name"), OutOperation.PinName);
 		}
 
 		bool TryCanonicalLinearColor(
@@ -1374,25 +1478,99 @@ namespace UE::UAI::Composition::GraphCompound
 						|| !SemanticId.StartsWith(TEXT("expression:"))
 						|| !FGuid::Parse(SemanticId.RightChop(11),
 							Operation.ExpressionGuid)
-						|| !HasExactObjectFields(Value,
-							{TEXT("class_ref"), TEXT("position")})
-						|| !TryCanonicalStringField(
-							Value, TEXT("class_ref"), Operation.ClassRef)
-						|| !Position
-						|| !HasExactObjectFields(
-							*Position, {TEXT("x"), TEXT("y")})
-						|| !TryCanonicalIntegerField(
-							*Position, TEXT("x"), Operation.PositionX)
-						|| !TryCanonicalIntegerField(
-							*Position, TEXT("y"), Operation.PositionY)
+						|| !HasOnlyObjectFields(
+							Value,
+							{TEXT("candidate"), TEXT("candidate_context"),
+								TEXT("class_ref"), TEXT("position")})
+						|| !TryReadMaterialCandidateSelector(
+							Value,
+							Operation.CandidateName,
+							Operation.CandidateId)
+						|| !TryReadOptionalMaterialCandidateContext(
+							Value, Operation)
+						|| (Position
+							&& (!HasExactObjectFields(
+									*Position, {TEXT("x"), TEXT("y")})
+								|| !TryCanonicalIntegerField(
+									*Position, TEXT("x"), Operation.PositionX)
+								|| !TryCanonicalIntegerField(
+									*Position, TEXT("y"), Operation.PositionY)))
 						|| FindExpressionBySemanticId(Target, SemanticId))
 					{
 						SetError(OutError,
 							TEXT("graph_compound_material_item_invalid"), SemanticId);
 						return false;
 					}
+					if (FindObjectValue(Value, TEXT("class_ref"))
+						&& !TryCanonicalStringField(
+							Value, TEXT("class_ref"), Operation.ClassRef))
+					{
+						SetError(OutError,
+							TEXT("graph_compound_material_class_assertion_invalid"),
+							SemanticId);
+						return false;
+					}
+
+					UeAgentPaletteSearch::FSearchParams CandidateParams;
+					CandidateParams.CatalogType = TEXT("material_node");
+					CandidateParams.AssetPath = Target.GetPathName();
+					CandidateParams.GraphName = Operation.GraphName.IsEmpty()
+						? (Cast<UMaterial>(&Target)
+							? FString(TEXT("MaterialGraph"))
+							: FString(TEXT("MaterialFunctionGraph")))
+						: Operation.GraphName;
+					CandidateParams.NodeGuid = Operation.NodeGuid;
+					CandidateParams.PinGuid = Operation.PinGuid;
+					CandidateParams.PinName = Operation.PinName;
+					UeAgentPaletteSearch::FCandidate ResolvedCandidate;
+					FString ResolveError;
+					if (!UeAgentPaletteSearch::TryResolveMaterialActionCandidate(
+							CandidateParams,
+							Operation.CandidateName,
+							Operation.CandidateId,
+							ResolvedCandidate,
+							ResolveError))
+					{
+						SetError(
+							OutError,
+							ResolveError.IsEmpty()
+								? TEXT("graph_compound_material_candidate_unresolved")
+								: ResolveError,
+							SemanticId);
+						return false;
+					}
+					if (!ResolvedCandidate.bSupportedInContext)
+					{
+						SetError(
+							OutError,
+							Cast<UMaterialFunction>(&Target)
+								? TEXT("material_function_native_action_lifecycle_unsupported")
+								: TEXT("material_action_candidate_not_executable_in_context"),
+							SemanticId,
+							ResolvedCandidate.SupportReason);
+						return false;
+					}
+					const FString ResolvedClass =
+						ResolvedCandidate.AuthoringSelectors.FindRef(
+							TEXT("expression_class"));
+					if (ResolvedClass.IsEmpty()
+						|| (!Operation.ClassRef.IsEmpty()
+							&& !Operation.ClassRef.Equals(
+								ResolvedClass, ESearchCase::CaseSensitive)))
+					{
+						SetError(
+							OutError,
+							TEXT("graph_compound_material_candidate_class_mismatch"),
+							SemanticId,
+							Operation.ClassRef + TEXT(" != ") + ResolvedClass);
+						return false;
+					}
+					Operation.ClassRef = ResolvedClass;
+					Operation.CandidateName = ResolvedCandidate.Name;
+					Operation.CandidateId = ResolvedCandidate.GetPublicId();
+					Operation.GraphName = CandidateParams.GraphName;
 					UClass* const ExpressionClass =
-						LoadObject<UClass>(nullptr, *Operation.ClassRef);
+						LoadObject<UClass>(nullptr, *ResolvedClass);
 					if (!ExpressionClass
 						|| !ExpressionClass->IsChildOf(
 							UMaterialExpression::StaticClass())
@@ -1619,15 +1797,41 @@ namespace UE::UAI::Composition::GraphCompound
 				{
 				case EMaterialMutationOperationKind::Item:
 				{
-					UClass* const ExpressionClass =
-						LoadObject<UClass>(nullptr, *Operation.ClassRef);
 					UMaterialExpression* Expression = nullptr;
-					bApplied = ExpressionClass
-						&& Hook.TryAddMaterialExpression(
-							Target, *ExpressionClass, Operation.ExpressionGuid,
-							Operation.PositionX, Operation.PositionY,
-							Expression, Receipt, Error)
+					UeAgentPaletteSearch::FSearchParams CandidateParams;
+					CandidateParams.CatalogType = TEXT("material_node");
+					CandidateParams.AssetPath = Target.GetPathName();
+					CandidateParams.GraphName = Operation.GraphName;
+					CandidateParams.NodeGuid = Operation.NodeGuid;
+					CandidateParams.PinGuid = Operation.PinGuid;
+					CandidateParams.PinName = Operation.PinName;
+					UeAgentPaletteSearch::FCandidate ResolvedCandidate;
+					FString CandidateError;
+					bApplied = UeAgentPaletteSearch::
+						TryPerformMaterialActionCandidate(
+							CandidateParams,
+							Operation.CandidateName,
+							Operation.CandidateId,
+							FVector2f(
+								Operation.PositionX,
+								Operation.PositionY),
+							Expression,
+							ResolvedCandidate,
+							CandidateError)
 						&& Expression;
+					if (!bApplied)
+					{
+						Error = FMaterialNiagaraGraphAdapterError(
+							CandidateError.IsEmpty()
+								? FString(TEXT("material_action_candidate_create_failed"))
+								: CandidateError,
+							Operation.SemanticId);
+						break;
+					}
+					Expression->Modify();
+					Expression->MaterialExpressionGuid =
+						Operation.ExpressionGuid;
+					Target.MarkPackageDirty();
 					break;
 				}
 				case EMaterialMutationOperationKind::Property:

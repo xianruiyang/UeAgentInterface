@@ -5,6 +5,7 @@
 #include "Dom/JsonObject.h"
 #include "Misc/PackageName.h"
 #include "QueryOwners/AiBehavior/UeAgentAiBehaviorCandidateQuery.h"
+#include "UObject/Object.h"
 #include "UObject/UObjectGlobals.h"
 
 namespace UE::UAI::OperationOwners::AiBehavior
@@ -165,12 +166,14 @@ namespace UE::UAI::OperationOwners::AiBehavior
 				}
 				FString Target;
 				FString Query;
+				FString CandidateId;
 				if (!Params->TryGetStringField(TEXT("target"), Target)
 					|| Target.TrimStartAndEnd().IsEmpty())
 				{
 					return Fail(OutError, TEXT("ai_behavior_candidate_target_required"), Request.CommandId);
 				}
 				Params->TryGetStringField(TEXT("query"), Query);
+				Params->TryGetStringField(TEXT("id"), CandidateId);
 				int32 Limit = 64;
 				int32 Cursor = 0;
 				double Number = 0.0;
@@ -184,7 +187,13 @@ namespace UE::UAI::OperationOwners::AiBehavior
 				FAiBehaviorCandidateQueryResult QueryResult;
 				FAiBehaviorCandidateQueryError QueryError;
 				if (!TryQueryAiBehaviorCandidates(
-						*TargetObject, Query, QueryResult, QueryError, Limit, Cursor))
+						*TargetObject,
+						Query,
+						QueryResult,
+						QueryError,
+						Limit,
+						Cursor,
+						CandidateId))
 				{
 					return Fail(
 						OutError,
@@ -204,18 +213,62 @@ namespace UE::UAI::OperationOwners::AiBehavior
 				Payload->SetNumberField(TEXT("next_cursor"), QueryResult.NextCursor);
 				Payload->SetBoolField(TEXT("complete"), QueryResult.bComplete);
 				Payload->SetBoolField(TEXT("has_more"), QueryResult.bHasMore);
+				Payload->SetStringField(
+					TEXT("coverage_scope"), QueryResult.CoverageScope);
+				Payload->SetBoolField(
+					TEXT("coverage_complete"), QueryResult.bCoverageComplete);
+				Payload->SetBoolField(
+					TEXT("creation_coverage_complete"),
+					QueryResult.bCreationCoverageComplete);
+				Payload->SetNumberField(
+					TEXT("native_action_count"), QueryResult.NativeActionCount);
+				Payload->SetNumberField(
+					TEXT("executable_action_count"),
+					QueryResult.ExecutableActionCount);
+				if (!QueryResult.GraphName.IsEmpty())
+				{
+					Payload->SetStringField(TEXT("graph_name"), QueryResult.GraphName);
+				}
 				TArray<TSharedPtr<FJsonValue>> Candidates;
 				for (const FAiBehaviorCandidate& Candidate : QueryResult.Candidates)
 				{
 					const TSharedPtr<FJsonObject> Value = MakeShared<FJsonObject>();
+					if (!Candidate.Id.IsEmpty())
+					{
+						Value->SetStringField(TEXT("id"), Candidate.Id);
+					}
 					Value->SetStringField(TEXT("name"), Candidate.Name);
 					Value->SetStringField(TEXT("label"), Candidate.Label);
 					Value->SetStringField(TEXT("kind"), Candidate.Kind);
-					Value->SetArrayField(TEXT("supported_operations"), StringArray(Candidate.SupportedOperations));
-					Value->SetStringField(TEXT("input_contract"), Candidate.InputContract);
-					Value->SetStringField(TEXT("placement_contract"), Candidate.PlacementContract);
-					Value->SetStringField(TEXT("required_context"), Candidate.RequiredContext);
-					Value->SetStringField(TEXT("binding_revision"), Candidate.BindingRevision);
+					if (!Candidate.Id.IsEmpty())
+					{
+						Value->SetStringField(
+							TEXT("action_kind"), Candidate.ActionKind);
+						Value->SetStringField(
+							TEXT("category"), Candidate.Category);
+						Value->SetStringField(
+							TEXT("summary"), Candidate.Summary);
+						Value->SetBoolField(
+							TEXT("supported"), Candidate.bSupported);
+						Value->SetStringField(
+							TEXT("write_support"), Candidate.WriteSupport);
+						Value->SetStringField(
+							TEXT("support_reason"), Candidate.SupportReason);
+					}
+					else
+					{
+						Value->SetArrayField(
+							TEXT("supported_operations"),
+							StringArray(Candidate.SupportedOperations));
+						Value->SetStringField(
+							TEXT("input_contract"), Candidate.InputContract);
+						Value->SetStringField(
+							TEXT("placement_contract"), Candidate.PlacementContract);
+						Value->SetStringField(
+							TEXT("required_context"), Candidate.RequiredContext);
+						Value->SetStringField(
+							TEXT("binding_revision"), Candidate.BindingRevision);
+					}
 					Candidates.Add(MakeShared<FJsonValueObject>(Value));
 				}
 				Payload->SetArrayField(TEXT("candidates"), MoveTemp(Candidates));

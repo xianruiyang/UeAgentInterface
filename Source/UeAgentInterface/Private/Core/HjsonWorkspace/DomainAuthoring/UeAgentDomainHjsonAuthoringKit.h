@@ -65,6 +65,19 @@ namespace UE::UAI::HjsonWorkspace::DomainAuthoring
 		FString BindingRevision;
 	};
 
+	/**
+	 * The minimal identity selector accepted by domain HJSON authoring.
+	 * Domain-specific context, assertions and action details remain owned by
+	 * the consuming domain; this type only represents the name/id selector.
+	 */
+	struct UEAGENTINTERFACE_API FDomainHjsonCandidateSelector final
+	{
+		bool IsValid() const;
+
+		FString Name;
+		FString Id;
+	};
+
 	UEAGENTINTERFACE_API bool TryDecodeResolvedDocument(
 		const FString& RequestTargetIdentity,
 		const FString& CanonicalParamsJson,
@@ -146,5 +159,11 @@ namespace UE::UAI::HjsonWorkspace::DomainAuthoring
 		const TSharedPtr<FJsonObject>& Candidate,
 		const FString& JsonPointer,
 		FDomainHjsonCandidateBinding& OutBinding,
+		FWorkspaceError& OutError);
+
+	UEAGENTINTERFACE_API bool TryReadCandidateSelector(
+		const TSharedPtr<FJsonObject>& Candidate,
+		const FString& JsonPointer,
+		FDomainHjsonCandidateSelector& OutSelector,
 		FWorkspaceError& OutError);
 }

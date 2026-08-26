@@ -4,7 +4,7 @@
 `ai.behavior.candidates` and the `uai.ai_behavior.edit/1` domain. The public SDK
 calls are `client.ai.behavior_candidates(...)` and
 `client.content_graph.import_workspace(...)`. Inspect their live contracts with
-`client.command_search(...)` and `client.command_detail(...)`; `uai-cli exec`
+`client.query.command_search(...)` and `client.query.command_detail(...)`; `uai-cli exec`
 forwards the same exact generated binding and is the CLI ingress.
 
 The shared source loader owns inline, single-file, and directory carriers. T20
@@ -46,14 +46,45 @@ behavior definitions.
 
 ## Candidate-to-authoring chain
 
-`ai.behavior.candidates` is read-only and target-sensitive. It returns concrete
-BehaviorTree node/service/decorator classes, Blackboard key types, EQS generator
-classes, StateTree task/condition/evaluator structs, and SmartObject behavior
-definition classes as applicable. Copy the full candidate object unchanged into
-the matching creation entry. The domain verifies its type, placement, contracts,
-operation support, target context, and `binding_revision` before translating it
-to the native field. Stale, missing, or conflicting candidates fail before
-write.
+`ai.behavior.candidates` is read-only and target-sensitive. Its public filters
+are `target`, optional text `query`, optional exact `id`, `limit`, and `cursor`.
+The BehaviorTree branch enumerates the target's native blank-background schema
+menu without opening an asset editor. It reports the complete search surface and
+separately reports executable creation coverage through `coverage_scope`,
+`coverage_complete`, `creation_coverage_complete`, `native_action_count`, and
+`executable_action_count`.
+
+For BehaviorTree, composite and task menu actions are directly creatable. Auto
+Arrange and Add Comment remain searchable but explicitly report `search_only`;
+service/decorator attachment and non-blank pin or selection contexts are not
+claimed by this contract. Put only the selected `candidate.name` or
+`candidate.id` inside the candidate object. Node identity, position, ownership,
+and relations remain in the surrounding edit:
+
+```hjson
+{
+  identity: "node:11111111-2222-3333-4444-555555555555"
+  element_kind: item
+  intent: create
+  depends_on: []
+  value: {
+    candidate: { id: "candidate:..." }
+    position: [640, 192]
+  }
+}
+```
+
+When both `name` and `id` are supplied they are conjunctive assertions. The
+domain resolves the selector during normalization, derives or checks the
+carrier and payload types, then re-enumerates the same native context immediately
+before commit and invokes the same schema action. BehaviorTree relations use the
+native schema connection path; the root must connect to a composite, not
+directly to a task.
+
+Blackboard, EQS, StateTree, and SmartObject candidate results currently retain
+their legacy full-binding compatibility contract. Their class/struct catalogs
+must not be described as native editor-menu equivalence until each owning
+context is migrated and independently verified.
 
 ## Lifecycle and readback
 

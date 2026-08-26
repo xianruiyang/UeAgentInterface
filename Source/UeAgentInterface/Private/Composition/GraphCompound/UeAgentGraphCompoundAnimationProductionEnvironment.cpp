@@ -1411,7 +1411,7 @@ namespace UE::UAI::Composition::GraphCompound
 		bool TryApplyMutation(
 			const FPcgAnimationGraphRouteProfile& Profile,
 			UObject& Target,
-			const FAnimationReadbackSpec& Spec,
+			FAnimationReadbackSpec& Spec,
 			FAnimationRigGraphNativeHook& Hook,
 			FString& OutRevision,
 			FGraphCompoundRuntimeError& OutError)

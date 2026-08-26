@@ -5,7 +5,7 @@
 `client.pcg.node_candidates(...)` and
 `client.content_graph.import_workspace(...)`; the schema is
 `uai.pcg.edit/1`. Inspect the live contracts through
-`client.command_search(...)` and `client.command_detail(...)`; `uai-cli exec`
+`client.query.command_search(...)` and `client.query.command_detail(...)`; `uai-cli exec`
 forwards the same exact generated binding and is the CLI ingress.
 
 The shared source loader owns inline, single-file, and directory carriers. T19
@@ -37,12 +37,41 @@ planning, UE node construction, compile, save, reload, or cleanup behavior.
 
 ## Candidate-to-authoring chain
 
-`pcg.node.candidates` returns bounded exact non-abstract `UPCGSettings` class
-candidates. Copy the full candidate object unchanged into the creation edit's
-`candidate` field. The domain validates its identity, contracts, supported
-operation, and `binding_revision` against the current target, then supplies the
-exact settings class to the native PCG edit. Candidate conflicts and stale
-bindings are prewrite failures.
+`pcg.node.candidates` constructs the native PCG Editor graph context for the
+target `UPCGGraph` and enumerates its background right-click menu through
+`UEdGraphSchema::GetGraphContextActions`. The public result is a bounded view of
+that complete native action owner, not a global `UPCGSettings` class catalog.
+Each row exposes a compact `id`, the native menu `name`, presentation fields,
+`action_kind`, and explicit `write_support`/`support_reason`. Search coverage
+and creation coverage are separate: the complete background menu is searchable,
+while only `FPCGEditorGraphSchemaAction_NewNativeElement` is currently enabled
+for creation.
+
+The minimal HJSON selector is `candidate: {id: ...}` or, when unique in the
+same graph context, `candidate: {name: ...}`. If both are present they are
+conjunctive. Do not copy the complete search row, a settings class path, an
+internal revision, the semantic node identity, or placement into `candidate`.
+
+```hjson
+edits: [{
+  depends_on: []
+  element_kind: item
+  identity: "pcg_node:CreateGrid"
+  intent: create
+  value: {
+    candidate: { id: "candidate:..." }
+    position: [160, 96]
+  }
+}]
+```
+
+Preflight re-enumerates the same native graph context and resolves one exact
+action. Commit re-enumerates again and invokes that action's public
+`PerformAction`; it does not map the selector to a second settings-class
+constructor. The returned native node supplies the immediate committed state,
+which is then checked through save, unload/reload, and independent readback.
+Missing, ambiguous, wrong-context, unsupported-action, or non-conjunctive
+selectors fail before the first planned write.
 
 ## Lifecycle and readback
 

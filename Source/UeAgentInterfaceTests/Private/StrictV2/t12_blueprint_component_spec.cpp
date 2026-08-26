@@ -6,9 +6,17 @@
 #define UAI_T12_BLUEPRINT_COMPONENT_AVAILABLE 1
 #include "CommandEdge/UeAgentCommandProtocol.h"
 #include "CommandEdge/UeAgentExactCommandDispatch.h"
+#include "Commands/PaletteSearch/UeAgentPaletteSearchTypes.h"
 #include "Core/Contract/UeAgentContract.h"
+#include "Core/Contract/UeAgentCommandJson.h"
 #include "Core/HjsonWorkspace/ImportInitialization/UeAgentHjsonDomainProviderRegistry.h"
 #include "DomainAdapters/Blueprint/Component/UeAgentBlueprintComponentMechanics.h"
+#include "Dom/JsonObject.h"
+#include "Dom/JsonValue.h"
+#include "Engine/Blueprint.h"
+#include "Engine/BlueprintGeneratedClass.h"
+#include "GameFramework/Actor.h"
+#include "Kismet2/KismetEditorUtilities.h"
 #include "Module/CommandRegistration/BlueprintComponent/UeAgentBlueprintComponentRegistration.h"
 #include "OperationOwners/BlueprintComponent/UeAgentBlueprintComponentCommandService.h"
 #else
@@ -67,8 +75,8 @@ namespace
 			TEXT("\"command_id\":\"blueprint.component.candidates\",")
 			TEXT("\"command_binding_hash\":\"%s\",")
 			TEXT("\"params\":{\"target\":\"/Game/T12.BP_T12\",")
-			TEXT("\"component_class\":\"/Script/Engine.SceneComponent\",")
-			TEXT("\"requested_name\":\"SceneRootT12\"}}"),
+			TEXT("\"parent\":\"DefaultSceneRoot\",")
+			TEXT("\"query\":\"Point Light\",\"limit\":10}}"),
 			*ContractHash);
 		FTCHARToUTF8 Encoded(*Envelope);
 		TArray<uint8> Bytes;
@@ -108,8 +116,8 @@ bool FUeAgentStrictV2T12BlueprintComponentTest::RunTest(
 	}
 
 	FImportInitializationDomainResolution RootResolution;
-	TestTrue(
-		TEXT("the T12 Blueprint root resolves its unique contract"),
+	TestFalse(
+		TEXT("the retired component-only schema has no runtime provider"),
 		ProviderRegistry->TryResolve(
 			FImportInitializationDomainRequest(
 				TEXT("content_graph.import_workspace"),
@@ -120,59 +128,132 @@ bool FUeAgentStrictV2T12BlueprintComponentTest::RunTest(
 				TEXT("{}")),
 			RootResolution,
 			WorkspaceError));
-	if (RootResolution.IsValid())
-	{
-		TestEqual(
-			TEXT("the T12 provider identity is exact"),
-			RootResolution.GetProvider()->GetProviderId(),
-			FString(TEXT("blueprint-component-domain-provider")));
-		TestEqual(
-			TEXT("the component graph contract is exact"),
-			RootResolution.GetInitializationContractId(),
-			FString(TEXT("uai.init.blueprint.component_graph/1")));
-	}
-
-	for (const FString ComponentClass : {
-		FString(TEXT("/Script/Engine.SceneComponent")),
-		FString(TEXT("/Script/Engine.PointLightComponent"))})
-	{
-		FImportInitializationDomainResolution ComponentResolution;
-		TestTrue(
-			*FString::Printf(
-				TEXT("the registered Component class resolves: %s"),
-				*ComponentClass),
-			ProviderRegistry->TryResolve(
-				FImportInitializationDomainRequest(
-					TEXT("content_graph.import_workspace"),
-					TEXT("uai.blueprint.component.edit/1"),
-					TEXT("/Game/UAI/T12/BP_Component.BP_Component#component"),
-					ComponentClass,
-					EInitializationNodeRole::OwnedObject,
-					TEXT("{}")),
-				ComponentResolution,
-				WorkspaceError));
-		if (ComponentResolution.IsValid())
-		{
-			TestEqual(
-				TEXT("the shared recursive Component contract is exact"),
-				ComponentResolution.GetInitializationContractId(),
-				FString(TEXT("uai.init.blueprint.scs_component/1")));
-		}
-	}
-
-	FImportInitializationDomainResolution UnsupportedResolution;
 	TestFalse(
-		TEXT("an unregistered Component class is rejected before write"),
+		TEXT("the retired component-only resolution is invalid"),
+		RootResolution.IsValid());
+	TestEqual(
+		TEXT("the retired component-only schema fails at provider authority"),
+		WorkspaceError.GetCode(),
+		FString(TEXT("hjson_domain_provider_unresolved")));
+
+	WorkspaceError.Reset();
+	TestTrue(
+		TEXT("the unified Blueprint root remains the sole write provider"),
 		ProviderRegistry->TryResolve(
 			FImportInitializationDomainRequest(
 				TEXT("content_graph.import_workspace"),
-				TEXT("uai.blueprint.component.edit/1"),
-				TEXT("/Game/UAI/T12/BP_Component.BP_Component#unsupported"),
-				TEXT("/Script/Engine.AudioComponent"),
-				EInitializationNodeRole::OwnedObject,
+				TEXT("uai.blueprint.edit/1"),
+				TEXT("/Game/UAI/T12/BP_Component.BP_Component"),
+				TEXT("/Script/Engine.Blueprint"),
+				EInitializationNodeRole::RootTarget,
 				TEXT("{}")),
-			UnsupportedResolution,
+			RootResolution,
 			WorkspaceError));
+	if (RootResolution.IsValid())
+	{
+		TestEqual(
+			TEXT("the unified Blueprint provider identity is exact"),
+			RootResolution.GetProvider()->GetProviderId(),
+			FString(TEXT("blueprint-surface-domain-provider")));
+		TestEqual(
+			TEXT("the unified Blueprint root contract is exact"),
+			RootResolution.GetInitializationContractId(),
+			FString(TEXT("uai.init.blueprint.asset/1")));
+	}
+
+	UeAgentPaletteSearch::FCandidate NativeAudioCandidate;
+	FString NativeAudioError;
+	TestTrue(
+		TEXT("the native Add Component registry independently exposes AudioComponent"),
+		UeAgentPaletteSearch::TryResolveActorComponentCandidate(
+			TEXT("/Script/Engine.AudioComponent"),
+			FString(),
+			NativeAudioCandidate,
+			NativeAudioError));
+	if (NativeAudioCandidate.Identity.IsValid())
+	{
+		TestEqual(
+			TEXT("the native AudioComponent selector keeps its exact class"),
+			NativeAudioCandidate.AuthoringSelectors.FindRef(
+				TEXT("component_class")),
+			FString(TEXT("/Script/Engine.AudioComponent")));
+	}
+
+	const FString FixtureSuffix =
+		FGuid::NewGuid().ToString(EGuidFormats::Digits);
+	UBlueprint* CandidateBlueprint = FKismetEditorUtilities::CreateBlueprint(
+		AActor::StaticClass(), GetTransientPackage(),
+		*FString(TEXT("BP_T12_Candidates_") + FixtureSuffix), BPTYPE_Normal,
+		UBlueprint::StaticClass(), UBlueprintGeneratedClass::StaticClass(),
+		TEXT("T12"));
+	if (!TestNotNull(TEXT("a transient Actor Blueprint candidate fixture is created"),
+		CandidateBlueprint))
+	{
+		return false;
+	}
+	const FString CandidateTarget = CandidateBlueprint->GetPathName();
+	FUeAgentBlueprintComponentCandidateQuery CandidateQuery;
+	CandidateQuery.Target = CandidateTarget;
+	CandidateQuery.Parent = TEXT("DefaultSceneRoot");
+	CandidateQuery.Query = TEXT("Point Light");
+	CandidateQuery.Limit = 10;
+	FString CandidatePayloadJson;
+	FUeAgentBlueprintComponentMechanicsError MechanicsError;
+	if (!TestTrue(TEXT("the native Add Component registry query succeeds"),
+		TryQueryBlueprintComponentCandidates(
+			CandidateQuery,
+			CandidatePayloadJson,
+			MechanicsError)))
+	{
+		AddError(MechanicsError.Code + TEXT(":") + MechanicsError.Detail);
+		return false;
+	}
+	TSharedPtr<FJsonObject> CandidatePayload;
+	FString JsonError;
+	if (!TestTrue(TEXT("the native Component candidate payload is valid JSON"),
+		UE::UAI::CommandContract::Json::TryParseObject(
+			CandidatePayloadJson, CandidatePayload, JsonError)
+			&& CandidatePayload.IsValid()))
+	{
+		AddError(JsonError);
+		return false;
+	}
+	const TArray<TSharedPtr<FJsonValue>>* Candidates = nullptr;
+	TestTrue(TEXT("the bounded query returns a native candidate page"),
+		CandidatePayload->TryGetArrayField(TEXT("candidates"), Candidates)
+		&& Candidates && Candidates->Num() >= 1);
+	bool bFoundPointLight = false;
+	if (Candidates)
+	{
+		for (const TSharedPtr<FJsonValue>& Value : *Candidates)
+		{
+			const TSharedPtr<FJsonObject> Candidate =
+				Value.IsValid() && Value->Type == EJson::Object
+				? Value->AsObject()
+				: nullptr;
+			if (!Candidate.IsValid()
+				|| Candidate->GetStringField(TEXT("class_path"))
+					!= TEXT("/Script/Engine.PointLightComponent"))
+			{
+				continue;
+			}
+			bFoundPointLight = true;
+			TestFalse(TEXT("the public candidate has a compact id"),
+				Candidate->GetStringField(TEXT("id")).IsEmpty());
+			TestFalse(TEXT("the public candidate has a direct name selector"),
+				Candidate->GetStringField(TEXT("name")).IsEmpty());
+			TestFalse(TEXT("the public candidate omits legacy binding state"),
+				Candidate->HasField(TEXT("binding_revision")));
+		}
+	}
+	TestTrue(TEXT("Point Light is present in the real Add Component registry"),
+		bFoundPointLight);
+	const TSharedPtr<FJsonObject>* Context = nullptr;
+	TestTrue(TEXT("the query returns its exact outer parent context"),
+		CandidatePayload->TryGetObjectField(TEXT("context"), Context)
+		&& Context && Context->IsValid()
+		&& (*Context)->GetStringField(TEXT("parent"))
+			== TEXT("DefaultSceneRoot"));
 
 	const TSharedRef<FFixtureService> Service = MakeShared<FFixtureService>();
 	TSharedPtr<const UE::UAI::CommandRegistry::FUeAgentImmutableCommandRegistry>
@@ -217,11 +298,11 @@ bool FUeAgentStrictV2T12BlueprintComponentTest::RunTest(
 	TestTrue(TEXT("the exact T12 fixture dispatch succeeds"), Result.IsOk());
 	TestEqual(TEXT("the T12 fixture service is called once"), Service->Calls, 1);
 	TestEqual(
-		TEXT("the requested Component name crosses the exact edge unchanged"),
+		TEXT("the native component search context crosses the exact edge unchanged"),
 		Service->LastRequest.CanonicalParamsJson,
 		FString(TEXT(
-			"{\"component_class\":\"/Script/Engine.SceneComponent\"," 
-			"\"requested_name\":\"SceneRootT12\"," 
+			"{\"limit\":10,\"parent\":\"DefaultSceneRoot\","
+			"\"query\":\"Point Light\","
 			"\"target\":\"/Game/T12.BP_T12\"}")));
 	return true;
 #endif

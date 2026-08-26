@@ -52,7 +52,7 @@ domains: [
     }
     export_contract: { contract_ids: [uai.export.level.actor.v2, uai.export.level.component.v2, uai.export.level.world.v2] }
     catalog_bindings: [
-      { kind: placeable_actor, workspace_contract_id: uai.apply_workspace.level.authoring, input_contract_id: uai.apply_input.level.actor, unit_id: actor, path_pattern: "actors/items/*/actor.hjson", relative_path_template: "actors/items/{managed_id}/actor.hjson", exact_identity_fields: [actor_class], pointer_template: "/target", merge_mode: merge_object, seed_bindings: { actor_class: "/target/actor_class" }, required_context: [managed_id, world_path], context_bindings: { managed_id: "/target/managed_id", world_path: "/target/world_path" }, constant_bindings: {}, required_seed_fields: [actor_class], optional_seed_fields: [] }
+      { kind: placeable_actor, workspace_contract_id: uai.apply_workspace.level.authoring, input_contract_id: uai.apply_input.level.actor, unit_id: actor, path_pattern: "actors/items/*/actor.hjson", relative_path_template: "actors/items/{managed_id}/actor.hjson", exact_identity_fields: [candidate_id], pointer_template: "/provider_extension/candidate", merge_mode: merge_object, seed_bindings: { candidate_id: "/provider_extension/candidate/id" }, required_context: [managed_id, world_path], context_bindings: { managed_id: "/target/managed_id", world_path: "/target/world_path" }, constant_bindings: {}, required_seed_fields: [candidate_id], optional_seed_fields: [] }
     ]
   }
   {

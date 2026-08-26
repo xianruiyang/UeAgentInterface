@@ -3,7 +3,10 @@
 #include "Core/HjsonWorkspace/ImportInitialization/UeAgentHjsonDomainProviderRegistry.h"
 #include "HAL/FileManager.h"
 #include "Misc/PackageName.h"
+#include "Misc/ScopeExit.h"
+#include "ObjectTools.h"
 #include "PCGGraph.h"
+#include "PCGSettings.h"
 #include "UObject/Package.h"
 #include "UObject/SavePackage.h"
 
@@ -20,6 +23,18 @@
 #else
 #define UAI_T19_PCG_CANDIDATE_QUERY_AVAILABLE 0
 #endif
+
+namespace
+{
+	void DeleteAssetIfPresent(const FString& ObjectPath)
+	{
+		if (UObject* Existing = StaticLoadObject(
+			UObject::StaticClass(), nullptr, *ObjectPath))
+		{
+			ObjectTools::DeleteObjectsUnchecked({Existing});
+		}
+	}
+}
 
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(
 	FUeAgentStrictV2T19PcgDomainTest,
@@ -92,15 +107,29 @@ bool FUeAgentStrictV2T19PcgDomainTest::RunTest(const FString& Parameters)
 
 	using namespace UE::UAI::QueryOwners::Pcg;
 	UPCGGraph* CandidateTarget = NewObject<UPCGGraph>(GetTransientPackage());
+	UClass* const ExpectedSettingsClass = LoadObject<UClass>(
+		nullptr, TEXT("/Script/PCG.PCGCreatePointsGridSettings"));
+	const UPCGSettings* const ExpectedSettings = ExpectedSettingsClass
+		? Cast<UPCGSettings>(ExpectedSettingsClass->GetDefaultObject()) : nullptr;
+	if (!TestNotNull(
+		TEXT("the representative native PCG settings class resolves"),
+		ExpectedSettings))
+	{
+		return false;
+	}
+	const FString ExpectedMenuName =
+		ExpectedSettings->GetDefaultNodeTitle().ToString();
 	FPcgNodeCandidateQueryResult CandidateResult;
 	FPcgNodeCandidateQueryError CandidateError;
 	if (!TestTrue(
 		TEXT("the PCG owner resolves real node candidates"),
 		TryQueryPcgNodeCandidates(
 			*CandidateTarget,
-			TEXT("Point"),
+			ExpectedMenuName,
 			CandidateResult,
-			CandidateError)))
+			CandidateError,
+			64,
+			0)))
 	{
 		AddError(CandidateError.Code + TEXT(":") + CandidateError.Detail);
 		return false;
@@ -110,36 +139,67 @@ bool FUeAgentStrictV2T19PcgDomainTest::RunTest(const FString& Parameters)
 	{
 		return false;
 	}
-	const FPcgNodeCandidate& Candidate = CandidateResult.Candidates[0];
-	TestTrue(TEXT("candidate.name is an exact settings class identity"),
+	const FPcgNodeCandidate* const CandidatePtr =
+		CandidateResult.Candidates.FindByPredicate(
+			[&ExpectedMenuName](const FPcgNodeCandidate& Value)
+			{
+				return Value.bSupported
+					&& Value.Name.Equals(
+						ExpectedMenuName, ESearchCase::CaseSensitive);
+			});
+	if (!TestNotNull(
+		TEXT("the exact native Create Points Grid action is returned"),
+		CandidatePtr))
+	{
+		return false;
+	}
+	const FPcgNodeCandidate& Candidate = *CandidatePtr;
+	TestTrue(TEXT("candidate.id is a compact exact native-action identity"),
+		Candidate.Id.StartsWith(TEXT("candidate:")));
+	TestFalse(TEXT("candidate.name is the native menu label, not a class path"),
 		Candidate.Name.StartsWith(TEXT("/Script/")));
 	TestEqual(TEXT("candidate kind is explicit"), Candidate.Kind,
 		FString(TEXT("pcg_node")));
-	TestTrue(TEXT("candidate declares create support"),
-		Candidate.SupportedOperations.Contains(TEXT("create")));
-	TestFalse(TEXT("candidate input contract is present"),
-		Candidate.InputContract.IsEmpty());
-	TestFalse(TEXT("candidate placement contract is present"),
-		Candidate.PlacementContract.IsEmpty());
-	TestFalse(TEXT("candidate required context is present"),
-		Candidate.RequiredContext.IsEmpty());
-	TestTrue(TEXT("candidate binding revision is a sha256 identity"),
-		Candidate.BindingRevision.StartsWith(TEXT("sha256:")));
-	TestTrue(TEXT("candidate query reports complete bounded results"),
+	TestEqual(TEXT("the exact result is a verified native schema action"),
+		Candidate.ActionKind,
+		FString(TEXT("FPCGEditorGraphSchemaAction_NewNativeElement")));
+	TestTrue(TEXT("the first PCG native-action equivalence class is executable"),
+		Candidate.bSupported);
+	TestTrue(TEXT("the exact filtered page is complete within its bound"),
 		CandidateResult.bComplete && !CandidateResult.bHasMore);
+	TestTrue(TEXT("enumeration covers the native PCG context-menu owner"),
+		CandidateResult.bCoverageComplete
+			&& CandidateResult.NativeActionCount > 0);
+	TestFalse(TEXT("search coverage and creation coverage are reported separately"),
+		CandidateResult.bCreationCoverageComplete);
+	FPcgNodeCandidate ResolvedCandidate;
+	CandidateError = {};
+	TestTrue(TEXT("the compact id re-enumerates one exact native action"),
+		TryResolvePcgNodeCandidate(
+			*CandidateTarget, FString(), Candidate.Id,
+			ResolvedCandidate, CandidateError));
+	TestEqual(TEXT("id resolution is conjunctively exact"),
+		ResolvedCandidate.Id, Candidate.Id);
 
 	const FString FixturePackageName =
 		TEXT("/Game/UAI/StrictV2/T19R63/PG_T19PublicR63");
 	const FString FixtureAssetName = TEXT("PG_T19PublicR63");
+	const FString FixtureObjectPath =
+		FixturePackageName + TEXT(".") + FixtureAssetName;
 	const FString FixtureFilename = FPackageName::LongPackageNameToFilename(
 		FixturePackageName,
 		FPackageName::GetAssetPackageExtension());
+	DeleteAssetIfPresent(FixtureObjectPath);
 	if (IFileManager::Get().FileExists(*FixtureFilename))
 	{
 		TestTrue(
 			TEXT("a stale task-owned PCG fixture is removed before setup"),
 			IFileManager::Get().Delete(*FixtureFilename, false, true));
 	}
+	ON_SCOPE_EXIT
+	{
+		DeleteAssetIfPresent(FixtureObjectPath);
+	};
 	UPackage* const FixturePackage = CreatePackage(*FixturePackageName);
 	UPCGGraph* const FixtureGraph = FixturePackage
 		? NewObject<UPCGGraph>(
@@ -163,6 +223,9 @@ bool FUeAgentStrictV2T19PcgDomainTest::RunTest(const FString& Parameters)
 			*FixtureFilename,
 			SaveArgs));
 	FixturePackage->SetDirtyFlag(false);
+	DeleteAssetIfPresent(FixtureObjectPath);
+	TestFalse(TEXT("the task-owned PCG fixture leaves no asset file"),
+		IFileManager::Get().FileExists(*FixtureFilename));
 	return !HasAnyErrors();
 #endif
 }

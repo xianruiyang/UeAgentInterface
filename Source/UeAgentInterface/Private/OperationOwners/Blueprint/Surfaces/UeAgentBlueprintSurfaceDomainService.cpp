@@ -50,6 +50,12 @@ namespace UE::UAI::OperationOwners::Blueprint::Surfaces
 				return ProviderId;
 			}
 
+			virtual bool SupportsExplicitCommand(
+				const FString& CommandId) const override
+			{
+				return CommandId == TEXT("content_graph.authoring_schema");
+			}
+
 			virtual bool Matches(
 				const FImportInitializationDomainRequest& Request) const override
 			{

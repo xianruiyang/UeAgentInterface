@@ -338,9 +338,20 @@ namespace UeAgentAuthoringIdentity
 			Selector(TEXT("event_class"), 120), Selector(TEXT("event_name"), 130),
 			Selector(TEXT("variable_name"), 140), Selector(TEXT("node_type"), 150),
 			Selector(TEXT("member_parent_class"), 160), Selector(TEXT("component_class"), 170),
-			Selector(TEXT("widget_class"), 180), Selector(TEXT("actor_class"), 190)
+			Selector(TEXT("widget_class"), 180), Selector(TEXT("actor_class"), 190),
+			Selector(TEXT("native_action_signature"), 200),
+			Selector(TEXT("asset_override"), 210),
+			Selector(TEXT("actor_factory"), 220),
+			Selector(TEXT("placement_category"), 230),
+			Selector(TEXT("expression_class"), 240),
+			Selector(TEXT("function_path"), 250)
 		};
-		Catalog.KeyPatterns = { Pattern(TEXT("catalog_full_name"), 0, { TEXT("catalog_type"), TEXT("full_name") }) };
+		Catalog.KeyPatterns = {
+			Pattern(TEXT("catalog_native_action"), 0,
+				{ TEXT("catalog_type"), TEXT("native_action_signature") }),
+			Pattern(TEXT("catalog_full_name"), 10,
+				{ TEXT("catalog_type"), TEXT("full_name") })
+		};
 		Models.Add(Catalog);
 
 		for (const FModelDescriptor& Model : Models)

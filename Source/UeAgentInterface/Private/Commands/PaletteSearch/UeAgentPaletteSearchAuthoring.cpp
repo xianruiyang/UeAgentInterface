@@ -69,7 +69,9 @@ bool BuildAuthoringProjection(
 	TSharedRef<FJsonObject> Seed = MakeShared<FJsonObject>();
 	for (const FString& Field : Binding.RequiredSeedFields)
 	{
-		const FString Value = Candidate.Identity.GetSelector(Field);
+		const FString Value = Field == TEXT("candidate_id")
+			? Candidate.GetPublicId()
+			: Candidate.Identity.GetSelector(Field);
 		if (Value.IsEmpty())
 		{
 			OutError = TEXT("catalog_seed_selector_missing:") + Field;
@@ -79,7 +81,9 @@ bool BuildAuthoringProjection(
 	}
 	for (const FString& Field : Binding.OptionalSeedFields)
 	{
-		const FString Value = Candidate.Identity.GetSelector(Field);
+		const FString Value = Field == TEXT("candidate_id")
+			? Candidate.GetPublicId()
+			: Candidate.Identity.GetSelector(Field);
 		if (!Value.IsEmpty())
 		{
 			Seed->SetStringField(Field, Value);

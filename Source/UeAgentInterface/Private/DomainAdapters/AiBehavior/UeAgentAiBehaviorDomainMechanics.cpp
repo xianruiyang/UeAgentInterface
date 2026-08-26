@@ -193,9 +193,12 @@ namespace UE::UAI::DomainAdapters::AiBehavior
 					MakeShared<FNeverCancelled>());
 			if (!Result.IsOk())
 			{
-				return Fail(
-					OutError, TEXT("ai_behavior_domain_native_command_failed"),
-					CommandId, Result.GetErrorJson());
+				SetWorkspaceErrorFromCommandFailure(
+					Result.GetErrorJson(),
+					TEXT("ai_behavior_domain_native_command_failed"),
+					CommandId,
+					OutError);
+				return false;
 			}
 			OutPayload = Result.GetPayloadJson();
 			return true;
@@ -312,6 +315,24 @@ namespace UE::UAI::DomainAdapters::AiBehavior
 			return true;
 		}
 
+		bool HasOnlyCandidateSelectorFields(
+			const TSharedPtr<FJsonObject>& Candidate)
+		{
+			if (!Candidate.IsValid())
+			{
+				return false;
+			}
+			for (const TPair<FString, TSharedPtr<FJsonValue>>& Field
+				: Candidate->Values)
+			{
+				if (Field.Key != TEXT("name") && Field.Key != TEXT("id"))
+				{
+					return false;
+				}
+			}
+			return true;
+		}
+
 		bool RejectConflict(
 			const TSharedPtr<FJsonObject>& Value,
 			const FString& Field,
@@ -391,6 +412,75 @@ namespace UE::UAI::DomainAdapters::AiBehavior
 						OutError, TEXT("ai_behavior_candidate_placement_invalid"),
 						ElementKind, Pointer);
 				}
+				if (RootType == BehaviorTreeType
+					&& HasOnlyCandidateSelectorFields(Candidate))
+				{
+					FDomainHjsonCandidateSelector Selector;
+					if (!TryReadCandidateSelector(
+							Candidate, Pointer, Selector, OutError))
+					{
+						return false;
+					}
+					QueryOwners::AiBehavior::FAiBehaviorCandidate Resolved;
+					QueryOwners::AiBehavior::FAiBehaviorCandidateQueryError
+						CandidateError;
+					if (!QueryOwners::AiBehavior::TryResolveAiBehaviorCandidate(
+							TargetObject,
+							Selector.Name,
+							Selector.Id,
+							Resolved,
+							CandidateError))
+					{
+						return Fail(
+							OutError,
+							CandidateError.Code.IsEmpty()
+								? FString(TEXT(
+									"ai_behavior_candidate_selector_invalid"))
+								: CandidateError.Code,
+							CandidateError.SubjectId,
+							Pointer);
+					}
+					if (!Resolved.bSupported
+						|| !Resolved.SupportedOperations.Contains(TEXT("create")))
+					{
+						return Fail(
+							OutError,
+							TEXT("ai_behavior_candidate_action_kind_unsupported"),
+							Resolved.ActionKind,
+							Pointer);
+					}
+					const FString Carrier = BehaviorCarrier(Resolved.Kind);
+					if (Carrier.IsEmpty() || Resolved.PayloadType.IsEmpty())
+					{
+						return Fail(
+							OutError,
+							TEXT("ai_behavior_candidate_kind_invalid"),
+							Resolved.Kind,
+							Pointer);
+					}
+					if (!RejectConflict(
+							Value,
+							TEXT("carrier_type_ref"),
+							Carrier,
+							Pointer,
+							OutError)
+						|| !RejectConflict(
+							Value,
+							TEXT("payload_type_ref"),
+							Resolved.PayloadType,
+							Pointer,
+							OutError))
+					{
+						return false;
+					}
+					Value->SetStringField(TEXT("carrier_type_ref"), Carrier);
+					Value->SetStringField(
+						TEXT("payload_type_ref"), Resolved.PayloadType);
+					Candidate->SetStringField(TEXT("name"), Resolved.Name);
+					Candidate->SetStringField(TEXT("id"), Resolved.Id);
+					continue;
+				}
+
 				FDomainHjsonCandidateBinding Binding;
 				if (!ReadCurrentCandidate(
 						TargetObject, Candidate, Pointer, Binding, OutError))

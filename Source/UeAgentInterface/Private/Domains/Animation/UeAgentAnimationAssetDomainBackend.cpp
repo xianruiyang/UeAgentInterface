@@ -51,6 +51,7 @@
 #include "Engine/StaticMesh.h"
 #include "Engine/StaticMeshActor.h"
 #include "Engine/TextureRenderTarget2D.h"
+#include "TextureResource.h"
 #include "Engine/SkeletalMeshSocket.h"
 #include "FileHelpers.h"
 #include "Misc/FileHelper.h"

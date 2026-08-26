@@ -26,24 +26,29 @@ namespace UE::UAI::QueryOwners::BlueprintComponent
 			OutError.Detail = MoveTemp(JsonError);
 			return false;
 		}
-		FString Target;
-		FString ComponentClass;
-		FString RequestedName;
-		if (!Params->TryGetStringField(TEXT("target"), Target)
-			|| !Params->TryGetStringField(
-				TEXT("component_class"), ComponentClass)
-			|| !Params->TryGetStringField(
-				TEXT("requested_name"), RequestedName))
+		FUeAgentBlueprintComponentCandidateQuery Query;
+		if (!Params->TryGetStringField(TEXT("target"), Query.Target))
 		{
 			OutError.Code = TEXT("blueprint_component_candidate_identity_required");
 			OutError.SubjectId = Request.CommandId;
 			return false;
 		}
+		Params->TryGetStringField(TEXT("parent"), Query.Parent);
+		Params->TryGetStringField(TEXT("query"), Query.Query);
+		Params->TryGetStringField(TEXT("id"), Query.CandidateId);
+		double Limit = Query.Limit;
+		double Cursor = Query.Cursor;
+		if (Params->TryGetNumberField(TEXT("limit"), Limit))
+		{
+			Query.Limit = FMath::RoundToInt(Limit);
+		}
+		if (Params->TryGetNumberField(TEXT("cursor"), Cursor))
+		{
+			Query.Cursor = FMath::RoundToInt(Cursor);
+		}
 		FUeAgentBlueprintComponentMechanicsError MechanicsError;
 		if (!TryQueryBlueprintComponentCandidates(
-				Target,
-				ComponentClass,
-				RequestedName,
+				Query,
 				OutResponse.PayloadJson,
 				MechanicsError))
 		{

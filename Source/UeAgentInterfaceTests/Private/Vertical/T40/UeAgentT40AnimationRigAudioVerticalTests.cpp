@@ -1,6 +1,8 @@
 #include "Misc/AutomationTest.h"
 
+#include "ControlRig.h"
 #include "ControlRigBlueprint.h"
+#include "ControlRigBlueprintFactory.h"
 #include "Core/HjsonWorkspace/DomainAuthoring/UeAgentDomainHjsonAuthoringKit.h"
 #include "DomainAdapters/AnimationRigGraph/UeAgentAnimationRigGraphCandidateBindingNormalizer.h"
 #include "DomainAdapters/AnimationRigGraph/UeAgentAnimationRigGraphNativeHook.h"
@@ -70,22 +72,7 @@ namespace
 			Candidate)
 	{
 		const TSharedRef<FJsonObject> Result = MakeShared<FJsonObject>();
-		Result->SetStringField(TEXT("target_ref"), Candidate.TargetRef);
-		Result->SetStringField(
-			TEXT("target_revision"), Candidate.TargetRevision);
-		Result->SetStringField(TEXT("name"), Candidate.Name);
-		Result->SetStringField(TEXT("kind"), Candidate.Kind);
-		Result->SetArrayField(
-			TEXT("supported_operations"),
-			StringValues(Candidate.SupportedOperations));
-		Result->SetStringField(
-			TEXT("input_contract"), Candidate.InputContract);
-		Result->SetStringField(
-			TEXT("placement_contract"), Candidate.PlacementContract);
-		Result->SetStringField(
-			TEXT("required_context"), Candidate.RequiredContext);
-		Result->SetStringField(
-			TEXT("binding_revision"), Candidate.BindingRevision);
+		Result->SetStringField(TEXT("id"), Candidate.Id);
 		return Result;
 	}
 
@@ -288,11 +275,18 @@ bool FUeAgentT40RigCandidateAndRigVmUnitTest::RunTest(
 	using namespace UE::UAI;
 	using namespace DomainAdapters::AnimationRigGraph;
 	using namespace QueryOwners::AnimationRigGraph;
-	TStrongObjectPtr<UControlRigBlueprint> Rig(NewObject<UControlRigBlueprint>(
-		GetTransientPackage(),
-		*FString(TEXT("CR_T40_Candidate_")).Append(
-			FGuid::NewGuid().ToString(EGuidFormats::Digits)),
-		RF_Transient | RF_Transactional));
+	UControlRigBlueprintFactory* const Factory =
+		NewObject<UControlRigBlueprintFactory>();
+	Factory->ParentClass = UControlRig::StaticClass();
+	TStrongObjectPtr<UControlRigBlueprint> Rig(Cast<UControlRigBlueprint>(
+		Factory->FactoryCreateNew(
+			UControlRigBlueprint::StaticClass(),
+			GetTransientPackage(),
+			*FString(TEXT("CR_T40_Candidate_")).Append(
+				FGuid::NewGuid().ToString(EGuidFormats::Digits)),
+			RF_Transient | RF_Transactional,
+			nullptr,
+			GWarn)));
 	if (!TestNotNull(TEXT("a transient Control Rig is available"), Rig.Get()))
 	{
 		return false;
@@ -302,7 +296,7 @@ bool FUeAgentT40RigCandidateAndRigVmUnitTest::RunTest(
 	if (!TestTrue(
 			TEXT("a current RigUnit candidate is queried"),
 			TryQueryAnimationRigGraphCandidates(
-				*Rig, TEXT("BeginExecution"), Query, QueryError, 64, 0))
+				*Rig, TEXT("Add Spaces"), Query, QueryError, 64, 0))
 		|| !TestTrue(TEXT("the RigUnit query returns a candidate"),
 			!Query.Candidates.IsEmpty()))
 	{
@@ -314,7 +308,7 @@ bool FUeAgentT40RigCandidateAndRigVmUnitTest::RunTest(
 	const TSharedRef<FJsonObject> Params = RigNativeParams(
 		RigCandidateJson(Candidate));
 	if (!TestTrue(
-			TEXT("a complete RigUnit candidate normalizes before mutation"),
+		TEXT("an id-only RigVM candidate normalizes before mutation"),
 			TryNormalizeAnimationRigGraphCandidateBindings(
 				Rig->GetPathName(), Params, WorkspaceError)))
 	{
@@ -336,29 +330,28 @@ bool FUeAgentT40RigCandidateAndRigVmUnitTest::RunTest(
 	TestFalse(
 		TEXT("the transport-only semantic_id is removed"),
 		Edit->HasField(TEXT("semantic_id")));
-	TestEqual(
-		TEXT("the RigVM struct comes from the candidate"),
-		Value->GetStringField(TEXT("script_struct_ref")),
-		Candidate.Name);
-	TestEqual(
-		TEXT("the default unit method is explicit"),
-		Value->GetStringField(TEXT("method")),
-		FString(TEXT("Execute")));
-	TestFalse(
-		TEXT("the transport-only Rig candidate is removed"),
-		Value->HasField(TEXT("candidate")));
+	const TSharedPtr<FJsonObject> NormalizedCandidate =
+		Value->GetObjectField(TEXT("candidate"));
+	TestEqual(TEXT("the exact candidate id is canonicalized"),
+		NormalizedCandidate->GetStringField(TEXT("id")), Candidate.Id);
+	TestEqual(TEXT("the native menu name is restored server-side"),
+		NormalizedCandidate->GetStringField(TEXT("name")), Candidate.Name);
+	TestFalse(TEXT("the minimal create input does not need a struct path"),
+		Value->HasField(TEXT("script_struct_ref")));
+	TestFalse(TEXT("the minimal create input does not need a method"),
+		Value->HasField(TEXT("method")));
 
 	const TSharedRef<FJsonObject> Stale = RigCandidateJson(Candidate);
-	Stale->SetStringField(TEXT("binding_revision"), TEXT("sha256:stale"));
+	Stale->SetStringField(TEXT("id"), Candidate.Id + TEXT("-stale"));
 	WorkspaceError.Reset();
 	TestFalse(
-		TEXT("a stale Rig candidate is rejected before mutation"),
+		TEXT("an unknown Rig candidate id is rejected before mutation"),
 		TryNormalizeAnimationRigGraphCandidateBindings(
 			Rig->GetPathName(), RigNativeParams(Stale), WorkspaceError));
 	TestEqual(
-		TEXT("the Rig stale error is typed"),
+		TEXT("the Rig lookup error is typed"),
 		WorkspaceError.GetCode(),
-		FString(TEXT("animation_rig_graph_candidate_binding_stale")));
+		FString(TEXT("animation_rig_graph_candidate_not_found")));
 
 	FAnimationRigGraphNativeHook Hook;
 	FAnimationRigGraphNativeMutationReceipt Apply;
@@ -385,15 +378,15 @@ bool FUeAgentT40RigCandidateAndRigVmUnitTest::RunTest(
 	}
 	FAnimationRigGraphUnitMutation Unit;
 	Unit.NodeName = TEXT("T40Unit");
-	Unit.ScriptStructRef = Candidate.Name;
-	Unit.MethodName = TEXT("Execute");
+	Unit.CandidateId = Candidate.Id;
 	Unit.Position = FVector2D(120.0, -40.0);
+	TArray<FAnimationRigGraphUnitMutation> Units = {Unit};
 	if (!TestTrue(
 			TEXT("the current native owner creates and captures a RigVM unit"),
 			Hook.TryApplyAndCaptureControlRigDefinition(
 				*Rig,
 				{},
-				{Unit},
+				Units,
 				Apply,
 				Barrier,
 				Topology,
@@ -431,10 +424,10 @@ bool FUeAgentT40RigCandidateAndRigVmUnitTest::RunTest(
 		TestEqual(
 			TEXT("the unit keeps the exact script struct"),
 			PersistedUnit->GetScriptStruct()->GetPathName(),
-			Candidate.Name);
+			Units[0].ScriptStructRef);
 		TestTrue(
 			TEXT("the unit keeps its two-dimensional placement"),
-			PersistedUnit->GetPosition().Equals(Unit.Position, 0.01));
+			PersistedUnit->GetPosition().Equals(Units[0].Position, 0.01));
 	}
 	return !HasAnyErrors();
 }

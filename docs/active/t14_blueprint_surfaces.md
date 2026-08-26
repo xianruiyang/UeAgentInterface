@@ -7,7 +7,7 @@ carriers; no Blueprint-specific apply command is public. Shared
 inspection and export paths.
 
 When the generated method or contract is not already known, use
-`client.command_search(...)` and `client.command_detail(...)`; `uai-cli`
+`client.query.command_search(...)` and `client.query.command_detail(...)`; `uai-cli`
 exposes the same discovery path.
 
 The accepted entry is `uai.blueprint.edit/1` with exact root type
@@ -22,19 +22,15 @@ receipt and independent readback.
 ## Candidate-bound node and Component creation
 
 Use `blueprint.node.candidates` and `blueprint.component.candidates` when adding
-their supported objects. Copy the selected `candidate` object unchanged into
-the target entry:
+their supported objects. Put only one direct `name` or `id` selector into the
+target entry:
 
 ```hjson
 provider_extension: {
   components: {
     "component:PointLight": {
       operation: create
-      candidate: {
-        name: PointLight
-        component_class: "/Script/Engine.PointLightComponent"
-        binding_revision: "sha256:..."
-      }
+      candidate: { id: "candidate:..." }
       parent: DefaultSceneRoot
     }
   }
@@ -45,12 +41,7 @@ provider_extension: {
       nodes: {
         "11111111-1111-1111-1111-111111111111": {
           operation: create
-          candidate: {
-            name: "/Script/BlueprintGraph.K2Node_IfThenElse"
-            binding_revision: "sha256:..."
-            display_name: Branch
-            graph_id: "graph:..."
-          }
+          candidate: { name: Branch }
           pos: { x: 800, y: 600 }
         }
       }
@@ -59,12 +50,13 @@ provider_extension: {
 }
 ```
 
-The provider revalidates each exact binding before the first persistent write.
-For Components it expands the native `name` and `class`; for nodes it validates
-the graph context and expands `node_type` plus `node_class`. These are
-server-owned translations, not client aliases. Conflicting duplicated native
-fields, stale bindings, or a candidate from another graph fail before mutation
-and leave the public asset revision unchanged.
+The Component stable-map key owns the instance name; the graph identity and
+optional pin context remain outside the node candidate. The provider
+re-enumerates the same Add Component registry or Blueprint Action Menu before
+the first persistent write and invokes the same native action. Optional richer
+fields are assertions only. Unknown, ambiguous, stale, mismatched-context, or
+conflicting candidates fail before mutation and leave the public asset revision
+unchanged; there is no class/spawner fallback.
 
 Create uses `expected_revision="missing"`; update and upsert copy the latest
 public content-graph revision unchanged. Success is terminal only after native

@@ -4,6 +4,41 @@
 
 namespace UE::UAI::OperationOwners::UmgWidget
 {
+	struct UEAGENTINTERFACE_API FUmgWidgetCandidateCommandRequest
+	{
+		FString CommandId;
+		FString RequestId;
+		FString CanonicalParamsJson;
+		FString CallerId;
+		TArray<FString> AuthorityScopes;
+		FString CorrelationId;
+		bool bCancellationRequested = false;
+	};
+
+	struct UEAGENTINTERFACE_API FUmgWidgetCandidateCommandResponse
+	{
+		FString PayloadJson;
+		bool bReadOnly = false;
+	};
+
+	struct UEAGENTINTERFACE_API FUmgWidgetCandidateCommandError
+	{
+		FString Code;
+		FString SubjectId;
+		FString Detail;
+	};
+
+	class UEAGENTINTERFACE_API IUeAgentUmgWidgetCandidateCommandService
+	{
+	public:
+		virtual ~IUeAgentUmgWidgetCandidateCommandService() = default;
+
+		virtual bool Execute(
+			const FUmgWidgetCandidateCommandRequest& Request,
+			FUmgWidgetCandidateCommandResponse& OutResponse,
+			FUmgWidgetCandidateCommandError& OutError) = 0;
+	};
+
 	struct UEAGENTINTERFACE_API FUmgWidgetCommandRequest
 	{
 		FString CommandId;
@@ -45,5 +80,9 @@ namespace UE::UAI::OperationOwners::UmgWidget
 
 	UEAGENTINTERFACE_API bool TryCreateProductionUmgWidgetCommandService(
 		TSharedPtr<IUeAgentUmgWidgetCommandService>& OutService,
+		FString& OutError);
+
+	UEAGENTINTERFACE_API bool TryCreateProductionUmgWidgetCandidateCommandService(
+		TSharedPtr<IUeAgentUmgWidgetCandidateCommandService>& OutService,
 		FString& OutError);
 }

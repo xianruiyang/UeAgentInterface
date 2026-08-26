@@ -1,8 +1,13 @@
 #pragma once
 
 #include "Containers/UnrealString.h"
+#include "Module/CommandRegistration/Active/UeAgentActiveCommandComposition.h"
 
 namespace UE::UAI::Module::CommandRegistration::UmgWidget
 {
 	UEAGENTINTERFACE_API const FString& GetProviderRegistrationId();
+
+	UEAGENTINTERFACE_API bool TryCreateProductionUmgWidgetCandidateContribution(
+		TSharedPtr<Active::IUeAgentActiveCommandContribution>& OutContribution,
+		FString& OutError);
 }

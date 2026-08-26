@@ -10,6 +10,7 @@
 #include "Misc/Paths.h"
 #include "Utilities/AuthoringCore/UeAgentAuthoringState.h"
 #include "Utilities/AuthoringCore/UeAgentAuthoringWorkspacePaths.h"
+#include "UObject/Package.h"
 
 namespace UeAgentAnimationAuthoring {
 bool ResolveDefaultWorkspaceFolder(const FProfile &Profile,

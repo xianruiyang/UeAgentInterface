@@ -1,6 +1,8 @@
 #include "Misc/AutomationTest.h"
 
+#include "ControlRig.h"
 #include "ControlRigBlueprint.h"
+#include "ControlRigBlueprintFactory.h"
 #include "Core/HjsonWorkspace/ImportInitialization/UeAgentHjsonDomainProviderRegistry.h"
 
 #if __has_include("OperationOwners/AnimationRigGraph/UeAgentAnimationRigGraphDomainService.h")
@@ -98,48 +100,57 @@ bool FUeAgentStrictV2T24AnimationRigGraphDomainTest::RunTest(
 		Provider->Matches(Unsupported));
 
 	using namespace UE::UAI::QueryOwners::AnimationRigGraph;
-	UControlRigBlueprint* Target =
-		NewObject<UControlRigBlueprint>(GetTransientPackage());
+	UControlRigBlueprintFactory* const Factory =
+		NewObject<UControlRigBlueprintFactory>();
+	Factory->ParentClass = UControlRig::StaticClass();
+	UControlRigBlueprint* const Target = Cast<UControlRigBlueprint>(
+		Factory->FactoryCreateNew(
+			UControlRigBlueprint::StaticClass(),
+			GetTransientPackage(),
+			TEXT("CR_T24NativeCandidates"),
+			RF_Transient | RF_Transactional,
+			nullptr,
+			GWarn));
+	if (!TestNotNull(TEXT("a native Control Rig target is created"), Target))
+	{
+		return false;
+	}
 	FAnimationRigGraphCandidateQueryResult Result;
 	FAnimationRigGraphCandidateQueryError QueryError;
-	if (!TestTrue(TEXT("the rig owner resolves native unit structs"),
+	if (!TestTrue(TEXT("the rig owner resolves the native action menu"),
 		TryQueryAnimationRigGraphCandidates(
-			*Target, TEXT("Transform"), Result, QueryError)))
+			*Target, TEXT("Add Spaces"), Result, QueryError)))
 	{
 		AddError(QueryError.Code + TEXT(":") + QueryError.Detail);
 		return false;
 	}
-	TestTrue(TEXT("the native rig unit catalog is non-empty"),
+	TestTrue(TEXT("the native RigVM action result is non-empty"),
 		!Result.Candidates.IsEmpty());
-	for (const FAnimationRigGraphCandidate& Candidate : Result.Candidates)
+	TestTrue(TEXT("native menu coverage is explicit and complete"),
+		Result.bCoverageComplete && Result.NativeActionCount > 0);
+	TestTrue(TEXT("at least one native menu action is executable"),
+		Result.ExecutableActionCount > 0);
+	TestEqual(TEXT("the coverage scope is the default blank context"),
+		Result.CoverageScope,
+		FString(TEXT("control_rig_default_graph_blank_context")));
+	if (!Result.Candidates.IsEmpty())
 	{
-		TestEqual(TEXT("candidate kind is rig_unit_struct"), Candidate.Kind,
-			FString(TEXT("rig_unit_struct")));
-		TestEqual(TEXT("candidate is bound to the queried target"),
-			Candidate.TargetRef, Result.Target);
-		TestEqual(TEXT("candidate carries the queried target revision"),
-			Candidate.TargetRevision, Result.TargetRevision);
-		TestTrue(TEXT("candidate binding revision is sha256"),
-			Candidate.BindingRevision.StartsWith(TEXT("sha256:")));
-		TestEqual(TEXT("candidate declares native graph placement"),
-			Candidate.PlacementContract,
-			FString(TEXT("uai.rig.graph-placement/1")));
-		TestEqual(TEXT("candidate declares direct-use node context"),
-			Candidate.RequiredContext,
-			FString(TEXT("target_ref:node_id:position")));
-		TestTrue(TEXT("candidate binding is current and directly usable"),
-			IsCurrentAnimationRigGraphCandidateBinding(
-				*Target,
-				Candidate.TargetRef,
-				Candidate.TargetRevision,
-				Candidate.Name,
-				Candidate.Kind,
-				Candidate.SupportedOperations,
-				Candidate.InputContract,
-				Candidate.PlacementContract,
-				Candidate.RequiredContext,
-				Candidate.BindingRevision,
-				QueryError));
+		const FAnimationRigGraphCandidate& Candidate = Result.Candidates[0];
+		TestEqual(TEXT("candidate kind is rigvm_action"), Candidate.Kind,
+			FString(TEXT("rigvm_action")));
+		TestFalse(TEXT("candidate id is opaque and present"),
+			Candidate.Id.IsEmpty());
+		TestFalse(TEXT("candidate native menu name is present"),
+			Candidate.Name.IsEmpty());
+		TestTrue(TEXT("the selected unit spawner supports native create"),
+			Candidate.bSupported
+				&& Candidate.SupportedOperations.Contains(TEXT("create")));
+		FAnimationRigGraphCandidate Resolved;
+		TestTrue(TEXT("the exact id re-resolves in the same native context"),
+			TryResolveAnimationRigGraphCandidate(
+				*Target, FString(), Candidate.Id, Resolved, QueryError));
+		TestEqual(TEXT("the resolved id is unchanged"),
+			Resolved.Id, Candidate.Id);
 	}
 	TestEqual(TEXT("complete is the inverse of has_more"),
 		Result.bComplete, !Result.bHasMore);

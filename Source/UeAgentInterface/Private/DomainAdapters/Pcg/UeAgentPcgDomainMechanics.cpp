@@ -8,6 +8,7 @@
 #include "Misc/PackageName.h"
 #include "Module/CommandRegistration/Active/UeAgentActiveCommandComposition.h"
 #include "OperationOwners/PcgCommands/UeAgentPcgCommandOperationOwner.h"
+#include "PCGGraph.h"
 #include "QueryOwners/Pcg/UeAgentPcgNodeCandidateQuery.h"
 #include "UObject/Package.h"
 #include "UObject/UObjectGlobals.h"
@@ -199,6 +200,14 @@ namespace UE::UAI::DomainAdapters::Pcg
 			const TArray<TSharedPtr<FJsonValue>>& Edits,
 			FWorkspaceError& OutError)
 		{
+			UPCGGraph* const Graph = Cast<UPCGGraph>(&TargetObject);
+			if (!Graph || Graph->GetClass() != UPCGGraph::StaticClass())
+			{
+				return Fail(
+					OutError,
+					TEXT("pcg_candidate_target_type_unsupported"),
+					TargetObject.GetClass()->GetPathName());
+			}
 			for (int32 Index = 0; Index < Edits.Num(); ++Index)
 			{
 				const TSharedPtr<FJsonObject> Edit =
@@ -216,7 +225,13 @@ namespace UE::UAI::DomainAdapters::Pcg
 				const TSharedPtr<FJsonObject>* Candidate = nullptr;
 				if (!(*Value)->HasField(TEXT("candidate")))
 				{
-					continue;
+					return Fail(
+						OutError,
+						TEXT("pcg_candidate_selector_required"),
+						FString::FromInt(Index),
+						FString::Printf(
+							TEXT("/root/operation/params/edits/%d/value/candidate"),
+							Index));
 				}
 				const FString Pointer = FString::Printf(
 					TEXT("/root/operation/params/edits/%d/value/candidate"),
@@ -230,39 +245,50 @@ namespace UE::UAI::DomainAdapters::Pcg
 						FString(),
 						Pointer);
 				}
-				FDomainHjsonCandidateBinding Binding;
-				if (!TryReadCandidateBinding(
-						*Candidate, Pointer, Binding, OutError))
+				FDomainHjsonCandidateSelector Selector;
+				if (!TryReadCandidateSelector(
+						*Candidate, Pointer, Selector, OutError))
 				{
 					return false;
 				}
-				if (!Binding.SupportsOperation(TEXT("create")))
+				for (const TPair<FString, TSharedPtr<FJsonValue>>& Field
+					: (*Candidate)->Values)
 				{
-					return Fail(
-						OutError,
-						TEXT("pcg_candidate_operation_unsupported"),
-						Binding.Name,
-						Pointer + TEXT("/supported_operations"));
+					if (Field.Key != TEXT("name")
+						&& Field.Key != TEXT("id")
+						&& Field.Key != TEXT("candidate_id"))
+					{
+						return Fail(
+							OutError,
+							TEXT("pcg_candidate_selector_field_unsupported"),
+							Field.Key,
+							Pointer + TEXT("/") + Field.Key);
+					}
 				}
+				QueryOwners::Pcg::FPcgNodeCandidate ResolvedCandidate;
 				QueryOwners::Pcg::FPcgNodeCandidateQueryError CandidateError;
-				if (!QueryOwners::Pcg::IsCurrentPcgNodeCandidateBinding(
-						TargetObject,
-						Binding.Name,
-						Binding.Kind,
-						Binding.SupportedOperations,
-						Binding.InputContract,
-						Binding.PlacementContract,
-						Binding.RequiredContext,
-						Binding.BindingRevision,
+				if (!QueryOwners::Pcg::TryResolvePcgNodeCandidate(
+						*Graph,
+						Selector.Name,
+						Selector.Id,
+						ResolvedCandidate,
 						CandidateError))
 				{
 					return Fail(
 						OutError,
 						CandidateError.Code.IsEmpty()
-							? FString(TEXT("pcg_candidate_binding_invalid"))
+							? FString(TEXT("pcg_candidate_selector_invalid"))
 							: CandidateError.Code,
 						CandidateError.SubjectId,
 						CandidateError.Detail);
+				}
+				if (!ResolvedCandidate.bSupported)
+				{
+					return Fail(
+						OutError,
+						TEXT("pcg_candidate_action_kind_unsupported"),
+						ResolvedCandidate.ActionKind,
+						Pointer);
 				}
 				FString Existing;
 				if ((*Value)->TryGetStringField(TEXT("carrier_type_ref"), Existing)
@@ -272,18 +298,28 @@ namespace UE::UAI::DomainAdapters::Pcg
 						OutError, TEXT("pcg_candidate_carrier_conflict"),
 						Existing, Pointer);
 				}
-				if ((*Value)->TryGetStringField(TEXT("settings_type_ref"), Existing)
-					&& Existing != Binding.Name)
+				if ((*Value)->HasField(TEXT("settings_type_ref")))
 				{
 					return Fail(
-						OutError, TEXT("pcg_candidate_settings_conflict"),
-						Existing, Pointer);
+						OutError,
+						TEXT("pcg_candidate_legacy_settings_type_unsupported"),
+						FString(),
+						Pointer + TEXT("/settings_type_ref"));
 				}
-				(*Value)->SetStringField(
-					TEXT("carrier_type_ref"), NodeCarrierType);
-				(*Value)->SetStringField(
-					TEXT("settings_type_ref"), Binding.Name);
-				(*Value)->RemoveField(TEXT("candidate"));
+				if ((*Value)->TryGetStringField(TEXT("action_kind"), Existing)
+					&& Existing != ResolvedCandidate.ActionKind)
+				{
+					return Fail(
+						OutError, TEXT("pcg_candidate_action_kind_mismatch"),
+						Existing, Pointer + TEXT("/action_kind"));
+				}
+				(*Candidate)->SetStringField(
+					TEXT("name"), ResolvedCandidate.Name);
+				(*Candidate)->SetStringField(
+					TEXT("id"), ResolvedCandidate.Id);
+				(*Candidate)->RemoveField(TEXT("candidate_id"));
+				(*Value)->RemoveField(TEXT("carrier_type_ref"));
+				(*Value)->RemoveField(TEXT("action_kind"));
 			}
 			return true;
 		}

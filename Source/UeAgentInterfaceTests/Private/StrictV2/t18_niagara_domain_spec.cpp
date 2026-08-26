@@ -5,6 +5,7 @@
 #include "NiagaraEmitter.h"
 #include "NiagaraScript.h"
 #include "NiagaraSystem.h"
+#include "NiagaraSystemFactoryNew.h"
 
 #if __has_include("OperationOwners/Niagara/UeAgentNiagaraDomainService.h")
 #define UAI_T18_NIAGARA_DOMAIN_AVAILABLE 1
@@ -136,14 +137,19 @@ bool FUeAgentStrictV2T18NiagaraDomainTest::RunTest(const FString& Parameters)
 
 	using namespace UE::UAI::QueryOwners::Niagara;
 	UNiagaraSystem* CandidateTarget = NewObject<UNiagaraSystem>(GetTransientPackage());
+	UNiagaraSystemFactoryNew::InitializeSystem(CandidateTarget, true);
+	FNiagaraModuleCandidateContext CandidateContext;
+	CandidateContext.TargetUsage = TEXT("SystemUpdateScript");
+	CandidateContext.TargetUsageId = CandidateTarget->GetSystemUpdateScript()
+		->GetUsageId().ToString(EGuidFormats::DigitsWithHyphensLower);
 	FNiagaraModuleCandidateQueryResult CandidateResult;
 	FNiagaraModuleCandidateQueryError CandidateError;
 	if (!TestTrue(
 		TEXT("the Niagara owner resolves real module candidates"),
 		TryQueryNiagaraModuleCandidates(
 			*CandidateTarget,
-			TEXT("Initialize Particle"),
-			TEXT("particle_spawn"),
+			FString(),
+			CandidateContext,
 			CandidateResult,
 			CandidateError)))
 	{
@@ -155,41 +161,73 @@ bool FUeAgentStrictV2T18NiagaraDomainTest::RunTest(const FString& Parameters)
 	{
 		return false;
 	}
-	const FNiagaraModuleCandidate& Candidate = CandidateResult.Candidates[0];
-	TestTrue(TEXT("candidate.name is an exact asset identity"),
-		Candidate.Name.StartsWith(TEXT("/")) && Candidate.Name.Contains(TEXT(".")));
-	TestEqual(TEXT("candidate kind is explicit"), Candidate.Kind,
-		FString(TEXT("niagara_module")));
-	TestTrue(TEXT("candidate declares create support"),
-		Candidate.SupportedOperations.Contains(TEXT("create")));
-	TestFalse(TEXT("candidate input contract is present"),
-		Candidate.InputContract.IsEmpty());
-	TestFalse(TEXT("candidate placement contract is present"),
-		Candidate.PlacementContract.IsEmpty());
-	TestFalse(TEXT("candidate required context is present"),
-		Candidate.RequiredContext.IsEmpty());
-	TestTrue(TEXT("candidate binding revision is a sha256 identity"),
-		Candidate.BindingRevision.StartsWith(TEXT("sha256:")));
-	FNiagaraModuleCandidateQueryError BindingError;
-	TestTrue(
-		TEXT("the public target usage binding remains valid for the exact UE stage identity"),
-		IsCurrentNiagaraModuleCandidateBinding(
-			*CandidateTarget,
-			Candidate.Name,
-			Candidate.Kind,
-			Candidate.SupportedOperations,
-			Candidate.InputContract,
-			Candidate.PlacementContract,
-			Candidate.RequiredContext,
-			TEXT("ParticleSpawnScript"),
-			Candidate.BindingRevision,
-			BindingError));
-	if (!BindingError.Code.IsEmpty())
+	const FNiagaraModuleCandidate* Candidate = nullptr;
+	for (const FNiagaraModuleCandidate& CandidateEntry : CandidateResult.Candidates)
 	{
-		AddError(BindingError.Code + TEXT(":") + BindingError.Detail);
+		if (CandidateEntry.ActionKind == TEXT("asset_module") && CandidateEntry.bSupported)
+		{
+			Candidate = &CandidateEntry;
+			break;
+		}
 	}
-	TestTrue(TEXT("candidate query reports complete bounded results"),
-		CandidateResult.bComplete && !CandidateResult.bHasMore);
+	if (!TestNotNull(TEXT("the native action page includes a supported asset module"), Candidate))
+	{
+		return false;
+	}
+	TestTrue(TEXT("candidate.id is a compact exact native action identity"),
+		Candidate->Id.StartsWith(TEXT("candidate:")));
+	TestFalse(TEXT("candidate.name is the native display name, not an asset path"),
+		Candidate->Name.StartsWith(TEXT("/")));
+	TestEqual(TEXT("candidate kind is explicit"), Candidate->Kind,
+		FString(TEXT("niagara_module")));
+	TestEqual(TEXT("candidate action kind is explicit"), Candidate->ActionKind,
+		FString(TEXT("asset_module")));
+	TestTrue(TEXT("candidate is supported in this exact output context"),
+		Candidate->bSupported);
+	TestTrue(TEXT("candidate declares create support"),
+		Candidate->SupportedOperations.Contains(TEXT("create")));
+	TestTrue(TEXT("the native script asset remains server-side"),
+		Candidate->ScriptAssetPath.StartsWith(TEXT("/"))
+			&& Candidate->ScriptAssetPath.Contains(TEXT(".")));
+	TestEqual(TEXT("the query resolves the exact real output usage"),
+		CandidateResult.Context.TargetUsage,
+		FString(TEXT("SystemUpdateScript")));
+	TestEqual(TEXT("the query resolves the real usage id"),
+		CandidateResult.Context.TargetUsageId,
+		CandidateContext.TargetUsageId);
+	TestEqual(TEXT("coverage is scoped to the native Add Module action set"),
+		CandidateResult.CoverageScope,
+		FString(TEXT("native_niagara_stack_add_module.actions")));
+	TestTrue(TEXT("search comes from the complete native AddUtilities owner"),
+		CandidateResult.bCoverageComplete);
+	TestFalse(TEXT("creation coverage remains separate and explicit"),
+		CandidateResult.bCreationCoverageComplete);
+	TestTrue(TEXT("unsupported native action kinds are explicit"),
+		CandidateResult.UnsupportedActionKinds.Contains(
+			TEXT("new_scratch_pad_module"))
+			&& CandidateResult.UnsupportedActionKinds.Contains(
+				TEXT("assignment_or_set_specific")));
+	FNiagaraModuleCandidate ResolvedCandidate;
+	FNiagaraModuleCandidateContext ResolvedContext;
+	FNiagaraModuleCandidateQueryError ResolveError;
+	TestTrue(
+		TEXT("id alone re-resolves the same native action in the same output context"),
+		TryResolveNiagaraModuleCandidate(
+			*CandidateTarget,
+			FString(),
+			Candidate->Id,
+			CandidateContext,
+			ResolvedCandidate,
+			ResolvedContext,
+			ResolveError));
+	if (!ResolveError.Code.IsEmpty())
+	{
+		AddError(ResolveError.Code + TEXT(":") + ResolveError.Detail);
+	}
+	TestEqual(TEXT("id resolution preserves the server-side asset action"),
+		ResolvedCandidate.ScriptAssetPath, Candidate->ScriptAssetPath);
+	TestTrue(TEXT("candidate query paging flags remain internally consistent"),
+		CandidateResult.bComplete == !CandidateResult.bHasMore);
 	return !HasAnyErrors();
 #endif
 }

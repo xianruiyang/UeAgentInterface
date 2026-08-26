@@ -13,11 +13,30 @@ namespace UE::UAI::DomainAdapters::Blueprint::Node
 		FString Detail;
 	};
 
+	struct UEAGENTINTERFACE_API FUeAgentBlueprintNodeCandidateQuery final
+	{
+		FString Target;
+		FString GraphId;
+		FString Query;
+		FString CandidateId;
+		FString NodeGuid;
+		FString PinGuid;
+		FString PinName;
+		int32 Limit = 20;
+		int32 Cursor = 0;
+	};
+
 	UEAGENTINTERFACE_API bool TryGetFirstEditableGraphIdentity(
 		UBlueprint& Blueprint,
 		FString& OutGraphId,
 		FString& OutError);
 
+	UEAGENTINTERFACE_API bool TryQueryBlueprintNodeCandidates(
+		const FUeAgentBlueprintNodeCandidateQuery& Query,
+		FString& OutPayloadJson,
+		FUeAgentBlueprintNodeMechanicsError& OutError);
+
+	/** Compatibility overload for existing internal callers. */
 	UEAGENTINTERFACE_API bool TryQueryBlueprintNodeCandidates(
 		const FString& Target,
 		const FString& GraphId,
@@ -25,12 +44,13 @@ namespace UE::UAI::DomainAdapters::Blueprint::Node
 		FString& OutPayloadJson,
 		FUeAgentBlueprintNodeMechanicsError& OutError);
 
-	UEAGENTINTERFACE_API bool TryExecuteBlueprintNodeContentGraph(
-		const FString& CommandId,
-		const FString& RequestId,
-		const FString& CanonicalParamsJson,
-		FString& OutPayloadJson,
-		bool& bOutReadOnly,
+	/** Validate a pre-v2 full candidate object without making it canonical again. */
+	UEAGENTINTERFACE_API bool TryValidateLegacyBlueprintNodeCandidateBinding(
+		const FString& Target,
+		const FString& GraphId,
+		const FString& Name,
+		const FString& CandidateId,
+		const FString& BindingRevision,
 		FUeAgentBlueprintNodeMechanicsError& OutError);
-}
 
+}

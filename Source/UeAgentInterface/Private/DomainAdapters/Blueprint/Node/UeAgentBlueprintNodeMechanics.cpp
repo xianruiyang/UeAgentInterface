@@ -2,6 +2,7 @@
 
 #include "BlueprintActionDatabase.h"
 #include "BlueprintNodeSpawner.h"
+#include "Commands/PaletteSearch/UeAgentPaletteSearchTypes.h"
 #include "Core/ArtifactPublisher/UeAgentVerifiedExport.h"
 #include "Core/Contract/UeAgentCommandJson.h"
 #include "Core/HjsonWorkspace/ImportInitialization/UeAgentHjsonDomainProviderRegistry.h"
@@ -249,11 +250,12 @@ namespace UE::UAI::DomainAdapters::Blueprint::Node
 		FString BindingRevision(
 			const FString& Target,
 			const FString& GraphId,
+			const FString& CandidateName,
 			const FString& GraphRevisionValue)
 		{
 			return Sha256(
 				Target + TEXT("|") + GraphId + TEXT("|")
-				+ BranchCandidate + TEXT("|") + GraphRevisionValue);
+				+ CandidateName + TEXT("|") + GraphRevisionValue);
 		}
 
 		bool ResolveBranchSpawner(
@@ -652,7 +654,10 @@ namespace UE::UAI::DomainAdapters::Blueprint::Node
 				return false;
 			}
 			const FString CurrentBinding = BindingRevision(
-				Out.Target, Out.GraphId, Out.InitialRevision);
+				Out.Target,
+				Out.GraphId,
+				BranchCandidate,
+				Out.InitialRevision);
 			const FHjsonNode* Nodes = Root->Get(TEXT("nodes"));
 			if (!Nodes || Nodes->GetKind() != EHjsonNodeKind::Array
 				|| Nodes->GetItems().Num() == 0)
@@ -1112,13 +1117,148 @@ namespace UE::UAI::DomainAdapters::Blueprint::Node
 	}
 
 	bool TryQueryBlueprintNodeCandidates(
+		const FUeAgentBlueprintNodeCandidateQuery& Query,
+		FString& OutPayloadJson,
+		FUeAgentBlueprintNodeMechanicsError& OutError)
+	{
+		OutPayloadJson.Reset();
+		OutError = {};
+		if (Query.Limit < 1 || Query.Limit > 20 || Query.Cursor < 0)
+		{
+			return Fail(
+				OutError,
+				TEXT("blueprint_node_candidate_page_invalid"),
+				Query.GraphId);
+		}
+		const FString Target = Normalize(Query.Target);
+		const FString GraphId = Normalize(Query.GraphId);
+		UBlueprint* Blueprint = LoadBlueprint(Target, OutError);
+		UEdGraph* Graph = Blueprint
+			? FindGraph(*Blueprint, GraphId)
+			: nullptr;
+		if (!Blueprint)
+		{
+			return false;
+		}
+		if (!Graph)
+		{
+			return Fail(
+				OutError,
+				TEXT("blueprint_node_graph_unresolved"),
+				GraphId);
+		}
+		UeAgentPaletteSearch::FSearchParams SearchParams;
+		SearchParams.CatalogType = TEXT("blueprint_node");
+		SearchParams.SearchText = Normalize(Query.Query);
+		SearchParams.CandidateId = Normalize(Query.CandidateId);
+		SearchParams.AssetPath = Blueprint->GetPathName();
+		SearchParams.GraphName = Graph->GetName();
+		SearchParams.NodeGuid = Normalize(Query.NodeGuid);
+		SearchParams.PinGuid = Normalize(Query.PinGuid);
+		SearchParams.PinName = Normalize(Query.PinName);
+		SearchParams.bContextSensitive = true;
+		SearchParams.bIncludeItems = true;
+		SearchParams.bIncludeGroups = false;
+		SearchParams.bIncludeCategoryTree = false;
+		SearchParams.Limit = Query.Limit;
+		SearchParams.Offset = Query.Cursor;
+		UeAgentPaletteSearch::FSearchResult SearchResult;
+		FString SearchError;
+		if (!UeAgentPaletteSearch::ExecuteSearch(
+				SearchParams,
+				SearchResult,
+				SearchError))
+		{
+			return Fail(
+				OutError,
+				TEXT("blueprint_node_candidate_query_failed"),
+				GraphId,
+				SearchError);
+		}
+		const FString Revision = GraphRevision(*Graph);
+		const int32 StartIndex = FMath::Min(
+			Query.Cursor, SearchResult.MatchingCandidates.Num());
+		const int32 EndIndex = FMath::Min(
+			StartIndex + Query.Limit,
+			SearchResult.MatchingCandidates.Num());
+		const bool bHasMore = EndIndex < SearchResult.TotalMatching;
+
+		const TSharedPtr<FJsonObject> Payload = MakeShared<FJsonObject>();
+		Payload->SetStringField(
+			TEXT("command_id"), TEXT("blueprint.node.candidates"));
+		Payload->SetBoolField(TEXT("read_only"), true);
+		Payload->SetStringField(TEXT("target"), Target);
+		Payload->SetObjectField(TEXT("graph"), BuildGraphObject(*Graph));
+		Payload->SetStringField(TEXT("graph_revision"), Revision);
+		const TSharedPtr<FJsonObject> Context = MakeShared<FJsonObject>();
+		Context->SetStringField(TEXT("graph_id"), GraphId);
+		if (!Query.NodeGuid.IsEmpty())
+		{
+			Context->SetStringField(TEXT("node_guid"), Query.NodeGuid);
+		}
+		if (!Query.PinGuid.IsEmpty())
+		{
+			Context->SetStringField(TEXT("pin_guid"), Query.PinGuid);
+		}
+		if (!Query.PinName.IsEmpty())
+		{
+			Context->SetStringField(TEXT("pin_name"), Query.PinName);
+		}
+		Payload->SetObjectField(TEXT("context"), Context);
+		Payload->SetBoolField(TEXT("complete"), !bHasMore);
+		Payload->SetBoolField(TEXT("has_more"), bHasMore);
+		Payload->SetNumberField(TEXT("total_matching"), SearchResult.TotalMatching);
+		Payload->SetNumberField(
+			TEXT("next_cursor"), bHasMore ? EndIndex : -1);
+		TArray<TSharedPtr<FJsonValue>> Candidates;
+		for (int32 Index = StartIndex; Index < EndIndex; ++Index)
+		{
+			const UeAgentPaletteSearch::FCandidate& Match =
+				SearchResult.MatchingCandidates[Index];
+			const TSharedPtr<FJsonObject> Candidate = MakeShared<FJsonObject>();
+			Candidate->SetStringField(
+				TEXT("name"),
+				Match.Name.IsEmpty() ? Match.DisplayName : Match.Name);
+			Candidate->SetStringField(TEXT("id"), Match.GetPublicId());
+			Candidate->SetStringField(
+				TEXT("display_name"),
+				Match.DisplayName.IsEmpty() ? Match.Name : Match.DisplayName);
+			Candidate->SetStringField(TEXT("kind"), Match.Kind);
+			if (!Match.CategoryPath.IsEmpty())
+			{
+				Candidate->SetStringField(
+					TEXT("category"), Match.CategoryPath);
+			}
+			Candidates.Add(MakeShared<FJsonValueObject>(Candidate));
+		}
+		Payload->SetArrayField(TEXT("candidates"), MoveTemp(Candidates));
+		OutPayloadJson = Canonical(Payload);
+		return true;
+	}
+
+	bool TryQueryBlueprintNodeCandidates(
 		const FString& Target,
 		const FString& GraphId,
 		const FString& Query,
 		FString& OutPayloadJson,
 		FUeAgentBlueprintNodeMechanicsError& OutError)
 	{
-		OutPayloadJson.Reset();
+		FUeAgentBlueprintNodeCandidateQuery Request;
+		Request.Target = Target;
+		Request.GraphId = GraphId;
+		Request.Query = Query;
+		return TryQueryBlueprintNodeCandidates(
+			Request, OutPayloadJson, OutError);
+	}
+
+	bool TryValidateLegacyBlueprintNodeCandidateBinding(
+		const FString& Target,
+		const FString& GraphId,
+		const FString& Name,
+		const FString& CandidateId,
+		const FString& BindingRevisionValue,
+		FUeAgentBlueprintNodeMechanicsError& OutError)
+	{
 		OutError = {};
 		UBlueprint* Blueprint = LoadBlueprint(Normalize(Target), OutError);
 		UEdGraph* Graph = Blueprint
@@ -1135,175 +1275,34 @@ namespace UE::UAI::DomainAdapters::Blueprint::Node
 				TEXT("blueprint_node_graph_unresolved"),
 				GraphId);
 		}
-		UBlueprintNodeSpawner* Spawner = nullptr;
-		if (!ResolveBranchSpawner(*Graph, Spawner, OutError))
-		{
-			return false;
-		}
-		const FString Revision = GraphRevision(*Graph);
-		const FString Binding = BindingRevision(Target, GraphId, Revision);
-		const FString NormalizedQuery = Normalize(Query).ToLower();
-		const FBlueprintActionUiSpec& Ui = Spawner->PrimeDefaultUiSpec(Graph);
-		const bool bMatches = NormalizedQuery.IsEmpty()
-			|| NormalizedQuery == TEXT("branch")
-			|| BranchCandidate.ToLower().Contains(NormalizedQuery)
-			|| Ui.MenuName.ToString().ToLower().Contains(NormalizedQuery);
 
-		const TSharedPtr<FJsonObject> Payload = MakeShared<FJsonObject>();
-		Payload->SetStringField(
-			TEXT("command_id"), TEXT("blueprint.node.candidates"));
-		Payload->SetBoolField(TEXT("read_only"), true);
-		Payload->SetStringField(TEXT("target"), Target);
-		Payload->SetObjectField(TEXT("graph"), BuildGraphObject(*Graph));
-		Payload->SetStringField(TEXT("graph_revision"), Revision);
-		Payload->SetBoolField(TEXT("complete"), true);
-		Payload->SetBoolField(TEXT("has_more"), false);
-		TArray<TSharedPtr<FJsonValue>> Candidates;
-		if (bMatches)
+		UeAgentPaletteSearch::FSearchParams Params;
+		Params.CatalogType = TEXT("blueprint_node");
+		Params.AssetPath = Blueprint->GetPathName();
+		Params.GraphName = Graph->GetName();
+		Params.bContextSensitive = true;
+		UeAgentPaletteSearch::FCandidate Candidate;
+		FString ResolveError;
+		if (!UeAgentPaletteSearch::TryResolveBlueprintActionCandidate(
+				Params, Name, CandidateId, Candidate, ResolveError))
 		{
-			const TSharedPtr<FJsonObject> Candidate = MakeShared<FJsonObject>();
-			Candidate->SetStringField(TEXT("name"), BranchCandidate);
-			Candidate->SetStringField(TEXT("binding_revision"), Binding);
-			Candidate->SetStringField(TEXT("display_name"), Ui.MenuName.ToString());
-			Candidate->SetStringField(TEXT("graph_id"), GraphId);
-			Candidates.Add(MakeShared<FJsonValueObject>(Candidate));
+			return Fail(
+				OutError,
+				ResolveError.IsEmpty()
+					? FString(TEXT("blueprint_action_candidate_not_found"))
+					: ResolveError,
+				Name);
 		}
-		Payload->SetArrayField(TEXT("candidates"), MoveTemp(Candidates));
-		OutPayloadJson = Canonical(Payload);
+		const FString CurrentBinding = BindingRevision(
+			Target, GraphId, Name, GraphRevision(*Graph));
+		if (CurrentBinding != BindingRevisionValue)
+		{
+			return Fail(
+				OutError,
+				TEXT("blueprint_surface_node_candidate_binding_stale"),
+				Name);
+		}
 		return true;
 	}
 
-	bool TryExecuteBlueprintNodeContentGraph(
-		const FString& CommandId,
-		const FString& RequestId,
-		const FString& CanonicalParamsJson,
-		FString& OutPayloadJson,
-		bool& bOutReadOnly,
-		FUeAgentBlueprintNodeMechanicsError& OutError)
-	{
-		OutPayloadJson.Reset();
-		bOutReadOnly = false;
-		OutError = {};
-		TSharedPtr<FJsonObject> Params;
-		FString JsonError;
-		if (!Json::TryParseObject(CanonicalParamsJson, Params, JsonError))
-		{
-			return Fail(
-				OutError,
-				TEXT("blueprint_node_params_invalid"),
-				CommandId,
-				JsonError);
-		}
-		if (CommandId == TEXT("content_graph.import_workspace"))
-		{
-			if (!ExecuteImport(Params, OutPayloadJson, OutError))
-			{
-				return false;
-			}
-			bOutReadOnly = false;
-			return true;
-		}
-
-		FString Target;
-		if (!Params->TryGetStringField(TEXT("target"), Target)
-			|| Normalize(Target).IsEmpty())
-		{
-			return Fail(
-				OutError,
-				TEXT("blueprint_node_target_required"),
-				CommandId);
-		}
-		UBlueprint* Blueprint = LoadBlueprint(Target, OutError);
-		if (!Blueprint)
-		{
-			return false;
-		}
-		FString GraphId;
-		Params->TryGetStringField(TEXT("graph_id"), GraphId);
-		if (GraphId.IsEmpty())
-		{
-			FString IdentityError;
-			if (!TryGetFirstEditableGraphIdentity(
-					*Blueprint, GraphId, IdentityError))
-			{
-				return Fail(
-					OutError,
-					IdentityError,
-					Target);
-			}
-		}
-		UEdGraph* Graph = FindGraph(*Blueprint, GraphId);
-		if (!Graph)
-		{
-			return Fail(
-				OutError,
-				TEXT("blueprint_node_graph_unresolved"),
-				GraphId);
-		}
-
-		if (CommandId == TEXT("content_graph.export_workspace"))
-		{
-			FString WorkspacePath;
-			if (!Params->TryGetStringField(
-					TEXT("workspace_path"), WorkspacePath)
-				|| Normalize(WorkspacePath).IsEmpty())
-			{
-				return Fail(
-					OutError,
-					TEXT("blueprint_node_export_path_required"));
-			}
-			const FString Document = Canonical(
-				BuildExportDocument(*Blueprint, *Graph));
-			FUeAgentResourceTracker Resources = MakeResources();
-			FArtifactPublishReceipt Receipt;
-			FArtifactPublishError PublishError;
-			if (!TryExportVerifiedWorkspace(
-					FVerifiedExportRequest(
-						MakeShared<FVerifiedBlueprintExportSource>(
-							Target, GraphId, Document),
-						WorkspacePath,
-						TEXT("blueprint-node-authoring-owner")),
-					Resources,
-					Receipt,
-					PublishError))
-			{
-				return Fail(
-					OutError,
-					PublishError.GetCode(),
-					PublishError.GetPath(),
-					PublishError.GetDetail());
-			}
-			const TSharedPtr<FJsonObject> Payload = MakeShared<FJsonObject>();
-			Payload->SetStringField(TEXT("command_id"), CommandId);
-			Payload->SetStringField(TEXT("status"), TEXT("published"));
-			Payload->SetStringField(
-				TEXT("workspace_path"), Receipt.GetFinalPath());
-			Payload->SetStringField(TEXT("entry_file"), Receipt.GetEntryFile());
-			Payload->SetStringField(
-				TEXT("plan_fingerprint"), Receipt.GetPlanFingerprint());
-			Payload->SetStringField(
-				TEXT("inventory_hash"), Receipt.GetInventoryHash());
-			const TSharedPtr<FJsonObject> Semantic = MakeShared<FJsonObject>();
-			for (const TPair<FString, FString>& Field
-				: Receipt.GetSemanticVerificationFields())
-			{
-				Semantic->SetStringField(Field.Key, Field.Value);
-			}
-			Payload->SetObjectField(TEXT("semantic_verification"), Semantic);
-			OutPayloadJson = Canonical(Payload);
-			bOutReadOnly = true;
-			return true;
-		}
-
-		const TSharedPtr<FJsonObject> Payload = MakeShared<FJsonObject>();
-		Payload->SetStringField(TEXT("command_id"), CommandId);
-		Payload->SetBoolField(TEXT("read_only"), true);
-		const TSharedPtr<FJsonObject> Readback = BuildReadback(
-			*Blueprint, *Graph, false);
-		Readback->SetStringField(TEXT("facet"), CommandId);
-		Payload->SetObjectField(TEXT("query_result"), Readback);
-		OutPayloadJson = Canonical(Payload);
-		bOutReadOnly = true;
-		return true;
-	}
 }

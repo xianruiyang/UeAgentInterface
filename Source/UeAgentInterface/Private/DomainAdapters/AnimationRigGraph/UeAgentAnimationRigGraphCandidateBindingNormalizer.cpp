@@ -1,9 +1,11 @@
 #include "DomainAdapters/AnimationRigGraph/UeAgentAnimationRigGraphCandidateBindingNormalizer.h"
 
+#include "ControlRigBlueprint.h"
 #include "Core/HjsonWorkspace/DomainAuthoring/UeAgentDomainHjsonAuthoringKit.h"
 #include "Dom/JsonObject.h"
 #include "Dom/JsonValue.h"
 #include "QueryOwners/AnimationRigGraph/UeAgentAnimationRigGraphCandidateQuery.h"
+#include "UObject/Object.h"
 #include "UObject/UObjectGlobals.h"
 
 namespace UE::UAI::DomainAdapters::AnimationRigGraph
@@ -22,27 +24,6 @@ namespace UE::UAI::DomainAdapters::AnimationRigGraph
 		{
 			OutError.Set(MoveTemp(Code), TargetIdentity, MoveTemp(Pointer));
 			return false;
-		}
-
-		bool TryRequiredString(
-			const TSharedPtr<FJsonObject>& Object,
-			const TCHAR* Field,
-			FString& OutValue,
-			const FString& TargetIdentity,
-			const FString& Pointer,
-			FWorkspaceError& OutError)
-		{
-			if (!Object.IsValid()
-				|| !Object->TryGetStringField(Field, OutValue)
-				|| OutValue.IsEmpty())
-			{
-				return Fail(
-					OutError,
-					TEXT("animation_rig_graph_candidate_field_required"),
-					TargetIdentity,
-					Pointer + TEXT("/") + Field);
-			}
-			return true;
 		}
 
 		bool TrySetExactString(
@@ -87,6 +68,24 @@ namespace UE::UAI::DomainAdapters::AnimationRigGraph
 			OutElementKind.Reset();
 			return false;
 		}
+
+		bool HasOnlyCandidateSelectorFields(
+			const TSharedPtr<FJsonObject>& Candidate)
+		{
+			if (!Candidate.IsValid())
+			{
+				return false;
+			}
+			for (const TPair<FString, TSharedPtr<FJsonValue>>& Field
+				: Candidate->Values)
+			{
+				if (Field.Key != TEXT("name") && Field.Key != TEXT("id"))
+				{
+					return false;
+				}
+			}
+			return true;
+		}
 	}
 
 	bool TryNormalizeAnimationRigGraphCandidateBindings(
@@ -115,23 +114,17 @@ namespace UE::UAI::DomainAdapters::AnimationRigGraph
 				TargetIdentity,
 				TEXT("/root/operation/params/edits"));
 		}
-		UObject* const TargetObject = StaticLoadObject(
-			UObject::StaticClass(),
-			nullptr,
-			*ObjectPathFromPackageIdentity(TargetIdentity));
-		if (!TargetObject)
-		{
-			return Fail(
-				OutError,
-				TEXT("animation_rig_graph_candidate_target_unresolved"),
-				TargetIdentity,
-				TEXT("/target"));
-		}
+		UControlRigBlueprint* const Target = Cast<UControlRigBlueprint>(
+			StaticLoadObject(
+				UObject::StaticClass(),
+				nullptr,
+				*ObjectPathFromPackageIdentity(TargetIdentity)));
 
 		for (int32 Index = 0; Index < Edits->Num(); ++Index)
 		{
 			const TSharedPtr<FJsonObject> Edit = (*Edits)[Index].IsValid()
-				? (*Edits)[Index]->AsObject() : nullptr;
+				? (*Edits)[Index]->AsObject()
+				: nullptr;
 			const FString Pointer = FString::Printf(
 				TEXT("/root/operation/params/edits/%d"), Index);
 			if (!Edit.IsValid())
@@ -145,7 +138,8 @@ namespace UE::UAI::DomainAdapters::AnimationRigGraph
 			FString SemanticId;
 			FString NativeElementKind;
 			if (!Edit->TryGetStringField(TEXT("semantic_id"), SemanticId)
-				|| !TryResolveNativeElementKind(SemanticId, NativeElementKind)
+				|| !TryResolveNativeElementKind(
+					SemanticId, NativeElementKind)
 				|| !TrySetExactString(
 					Edit,
 					TEXT("identity"),
@@ -171,89 +165,66 @@ namespace UE::UAI::DomainAdapters::AnimationRigGraph
 				}
 				return false;
 			}
-			const TSharedPtr<FJsonObject>* ValueField = nullptr;
-			if (!Edit->TryGetObjectField(TEXT("value"), ValueField)
-				|| !ValueField || !ValueField->IsValid()
-				|| !(*ValueField)->HasField(TEXT("candidate")))
-			{
-				Edit->RemoveField(TEXT("semantic_id"));
-				continue;
-			}
-			const TSharedPtr<FJsonObject> Value = *ValueField;
-			const TSharedPtr<FJsonObject>* CandidateField = nullptr;
-			if (!Value->TryGetObjectField(TEXT("candidate"), CandidateField)
-				|| !CandidateField || !CandidateField->IsValid())
-			{
-				return Fail(
-					OutError,
-					TEXT("animation_rig_graph_candidate_invalid"),
-					TargetIdentity,
-					Pointer + TEXT("/value/candidate"));
-			}
+
 			FString Intent;
 			if (!Edit->TryGetStringField(TEXT("intent"), Intent)
-				|| Intent != TEXT("create")
-				|| !SemanticId.StartsWith(TEXT("rigvm_node:"))
-				|| SemanticId.Len() == 11)
+				|| Intent.IsEmpty())
 			{
 				return Fail(
 					OutError,
 					TEXT("animation_rig_graph_candidate_context_invalid"),
 					TargetIdentity,
-					Pointer);
+					Pointer + TEXT("/intent"));
 			}
-			const TSharedPtr<FJsonObject> Candidate = *CandidateField;
-			FDomainHjsonCandidateBinding Binding;
-			if (!TryReadCandidateBinding(
-					Candidate,
-					Pointer + TEXT("/value/candidate"),
-					Binding,
-					OutError))
+			const bool bNativeCreate = SemanticId.StartsWith(TEXT("rigvm_node:"))
+				&& (Intent == TEXT("create") || Intent == TEXT("replace"));
+			if (!bNativeCreate)
 			{
-				return false;
+				Edit->RemoveField(TEXT("semantic_id"));
+				continue;
 			}
-			FString CandidateTargetRef;
-			FString CandidateTargetRevision;
-			if (!TryRequiredString(
-					Candidate,
-					TEXT("target_ref"),
-					CandidateTargetRef,
-					TargetIdentity,
-					Pointer + TEXT("/value/candidate"),
-					OutError)
-				|| !TryRequiredString(
-					Candidate,
-					TEXT("target_revision"),
-					CandidateTargetRevision,
-					TargetIdentity,
-					Pointer + TEXT("/value/candidate"),
-					OutError))
-			{
-				return false;
-			}
-			FAnimationRigGraphCandidateQueryError QueryError;
-			if (!IsCurrentAnimationRigGraphCandidateBinding(
-					*TargetObject,
-					CandidateTargetRef,
-					CandidateTargetRevision,
-					Binding.Name,
-					Binding.Kind,
-					Binding.SupportedOperations,
-					Binding.InputContract,
-					Binding.PlacementContract,
-					Binding.RequiredContext,
-					Binding.BindingRevision,
-					QueryError))
+
+			if (!Target)
 			{
 				return Fail(
 					OutError,
-					QueryError.Code.IsEmpty()
-						? FString(TEXT(
-							"animation_rig_graph_candidate_binding_invalid"))
-						: QueryError.Code,
+					TEXT("animation_rig_graph_candidate_target_unresolved"),
 					TargetIdentity,
-					Pointer + TEXT("/value/candidate/binding_revision"));
+					TEXT("/target"));
 			}
+			const TSharedPtr<FJsonObject>* ValueField = nullptr;
+			const TSharedPtr<FJsonObject>* CandidateField = nullptr;
+			if (!Edit->TryGetObjectField(TEXT("value"), ValueField)
+				|| !ValueField || !ValueField->IsValid()
+				|| !(*ValueField)->TryGetObjectField(
+					TEXT("candidate"), CandidateField)
+				|| !CandidateField || !CandidateField->IsValid())
+			{
+				return Fail(
+					OutError,
+					TEXT("animation_rig_graph_candidate_selector_required"),
+					TargetIdentity,
+					Pointer + TEXT("/value/candidate"));
+			}
+			const TSharedPtr<FJsonObject> Value = *ValueField;
+			const TSharedPtr<FJsonObject> Candidate = *CandidateField;
+			const FString CandidatePointer =
+				Pointer + TEXT("/value/candidate");
+			if (!HasOnlyCandidateSelectorFields(Candidate))
+			{
+				return Fail(
+					OutError,
+					TEXT("animation_rig_graph_candidate_selector_field_unsupported"),
+					TargetIdentity,
+					CandidatePointer);
+			}
+			FDomainHjsonCandidateSelector Selector;
+			if (!TryReadCandidateSelector(
+					Candidate, CandidatePointer, Selector, OutError))
+			{
+				return false;
+			}
+
 			const TSharedPtr<FJsonObject>* Position = nullptr;
 			double X = 0.0;
 			double Y = 0.0;
@@ -261,8 +232,7 @@ namespace UE::UAI::DomainAdapters::AnimationRigGraph
 				|| !Position || !Position->IsValid()
 				|| !(*Position)->TryGetNumberField(TEXT("x"), X)
 				|| !(*Position)->TryGetNumberField(TEXT("y"), Y)
-				|| !FMath::IsFinite(X)
-				|| !FMath::IsFinite(Y))
+				|| !FMath::IsFinite(X) || !FMath::IsFinite(Y))
 			{
 				return Fail(
 					OutError,
@@ -270,30 +240,35 @@ namespace UE::UAI::DomainAdapters::AnimationRigGraph
 					TargetIdentity,
 					Pointer + TEXT("/value/position"));
 			}
-			if (!TrySetExactString(
-					Value,
-					TEXT("script_struct_ref"),
-					Binding.Name,
-					TargetIdentity,
-					Pointer + TEXT("/value"),
-					OutError))
-			{
-				return false;
-			}
-			FString Method;
-			if (!Value->TryGetStringField(TEXT("method"), Method))
-			{
-				Value->SetStringField(TEXT("method"), TEXT("Execute"));
-			}
-			else if (Method.IsEmpty())
+
+			FAnimationRigGraphCandidate Resolved;
+			FAnimationRigGraphCandidateQueryError QueryError;
+			if (!TryResolveAnimationRigGraphCandidate(
+					*Target,
+					Selector.Name,
+					Selector.Id,
+					Resolved,
+					QueryError))
 			{
 				return Fail(
 					OutError,
-					TEXT("animation_rig_graph_candidate_method_invalid"),
+					QueryError.Code.IsEmpty()
+						? FString(TEXT(
+							"animation_rig_graph_candidate_selector_invalid"))
+						: QueryError.Code,
 					TargetIdentity,
-					Pointer + TEXT("/value/method"));
+					CandidatePointer);
 			}
-			Value->RemoveField(TEXT("candidate"));
+			if (!Resolved.bSupported)
+			{
+				return Fail(
+					OutError,
+					TEXT("animation_rig_graph_candidate_action_kind_unsupported"),
+					TargetIdentity,
+					CandidatePointer);
+			}
+			Candidate->SetStringField(TEXT("name"), Resolved.Name);
+			Candidate->SetStringField(TEXT("id"), Resolved.Id);
 			Edit->RemoveField(TEXT("semantic_id"));
 		}
 		OutError.Reset();

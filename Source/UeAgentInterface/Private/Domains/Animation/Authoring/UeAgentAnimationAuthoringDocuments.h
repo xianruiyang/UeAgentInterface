@@ -4,6 +4,7 @@
 
 #include "CoreMinimal.h"
 #include "Domains/Animation/Authoring/UeAgentAnimationAuthoringDescriptors.h"
+#include "UObject/ObjectMacros.h"
 
 class FJsonObject;
 class UObject;

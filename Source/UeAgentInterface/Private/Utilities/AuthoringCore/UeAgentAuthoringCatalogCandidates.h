@@ -43,6 +43,13 @@ namespace UeAgentAuthoringCatalogCandidates
 		UeAgentAuthoringIdentity::FCanonicalIdentity& OutIdentity,
 		FString& OutError);
 
+	/**
+	 * Builds the compact, model-facing candidate id from the canonical internal
+	 * identity. The full canonical key remains the server-side authority.
+	 */
+	UEAGENTINTERFACE_API FString BuildPublicId(
+		const UeAgentAuthoringIdentity::FCanonicalIdentity& Identity);
+
 	UEAGENTINTERFACE_API bool Less(const FSortKey& Left, const FSortKey& Right, ESortMode Mode);
 	UEAGENTINTERFACE_API void Sort(TArray<FSortKey>& Keys, ESortMode Mode);
 }

@@ -2,6 +2,7 @@
 
 #include "ControlRigBlueprint.h"
 #include "ControlRigGizmoLibrary.h"
+#include "Engine/SkeletalMesh.h"
 #include "Retargeter/IKRetargetChainMapping.h"
 #include "Retargeter/IKRetargeter.h"
 #include "Retargeter/RetargetOps/FKChainsOp.h"

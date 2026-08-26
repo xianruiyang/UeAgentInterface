@@ -135,7 +135,7 @@ bool FUeAgentStrictV2T17MaterialDomainTest::RunTest(const FString& Parameters)
 		TEXT("the Material owner resolves real expression candidates"),
 		TryQueryMaterialExpressionCandidates(
 			*CandidateTarget,
-			TEXT("Scalar Parameter"),
+			TEXT("MaterialExpressionScalarParameter"),
 			CandidateResult,
 			CandidateError)))
 	{
@@ -146,17 +146,23 @@ bool FUeAgentStrictV2T17MaterialDomainTest::RunTest(const FString& Parameters)
 		CandidateResult.Candidates.FindByPredicate(
 			[](const FMaterialExpressionCandidate& Candidate)
 			{
-				return Candidate.Name
-					== TEXT("/Script/Engine.MaterialExpressionScalarParameter");
+				return Candidate.Kind == TEXT("material_expression");
 			});
 	if (!TestNotNull(
-		TEXT("candidate.name is the exact HJSON creation identity"),
+		TEXT("the class-narrowed native Material action is returned"),
 		ScalarParameter))
 	{
 		return false;
 	}
+	TestTrue(TEXT("candidate.name is a non-empty native action label"),
+		!ScalarParameter->Name.IsEmpty()
+			&& !ScalarParameter->Name.StartsWith(TEXT("/Script/")));
+	TestTrue(TEXT("candidate.id is the compact stable selector"),
+		ScalarParameter->Id.StartsWith(TEXT("candidate:")));
 	TestEqual(TEXT("candidate kind is explicit"), ScalarParameter->Kind,
 		FString(TEXT("material_expression")));
+	TestTrue(TEXT("candidate is supported in a persistent Material context"),
+		ScalarParameter->bSupported);
 	TestTrue(TEXT("candidate declares create support"),
 		ScalarParameter->SupportedOperations.Contains(TEXT("create")));
 	TestFalse(TEXT("candidate input contract is present"),
@@ -169,6 +175,47 @@ bool FUeAgentStrictV2T17MaterialDomainTest::RunTest(const FString& Parameters)
 		ScalarParameter->BindingRevision.StartsWith(TEXT("sha256:")));
 	TestTrue(TEXT("candidate query reports complete bounded results"),
 		CandidateResult.bComplete && !CandidateResult.bHasMore);
+	TestTrue(TEXT("the native creation-action coverage is explicit"),
+		CandidateResult.bCoverageComplete);
+	TestEqual(TEXT("the coverage scope excludes unrelated graph actions"),
+		CandidateResult.CoverageScope,
+		FString(TEXT("native_material_expression_and_function_creation_actions")));
+
+	TSet<FString> ConversionIds;
+	for (const FString& ActionName : TArray<FString>{
+		TEXT("Make Float2"), TEXT("Make Float3"), TEXT("Make Float4")})
+	{
+		FMaterialExpressionCandidateQueryResult ConversionResult;
+		CandidateError = {};
+		if (!TestTrue(
+			*FString::Printf(
+				TEXT("the public candidate owner enumerates %s"), *ActionName),
+			TryQueryMaterialExpressionCandidates(
+				*CandidateTarget,
+				ActionName,
+				ConversionResult,
+				CandidateError)))
+		{
+			AddError(CandidateError.Code + TEXT(":") + CandidateError.Detail);
+			return false;
+		}
+		const FMaterialExpressionCandidate* const Conversion =
+			ConversionResult.Candidates.FindByPredicate(
+				[&ActionName](const FMaterialExpressionCandidate& Candidate)
+				{
+					return Candidate.Name == ActionName;
+				});
+		if (!TestNotNull(
+			*FString::Printf(TEXT("%s retains its native action identity"),
+				*ActionName),
+			Conversion))
+		{
+			return false;
+		}
+		ConversionIds.Add(Conversion->Id);
+	}
+	TestEqual(TEXT("same-class native actions retain distinct stable ids"),
+		ConversionIds.Num(), 3);
 	return true;
 #endif
 }

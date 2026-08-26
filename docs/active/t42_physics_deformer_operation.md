@@ -2,7 +2,7 @@
 
 All 15 commands are owned by the current physics/deformer query or operation
 owner and are exposed only through the default SDK catalog and exact CLI.
-Use client.command_search(...) and client.command_detail(...) before invoking
+Use client.query.command_search(...) and client.query.command_detail(...) before invoking
 one of the named methods:
 
 ```python

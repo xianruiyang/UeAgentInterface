@@ -39,6 +39,11 @@ FString FCandidate::GetCandidateId() const
 	return Identity.CanonicalKey;
 }
 
+FString FCandidate::GetPublicId() const
+{
+	return UeAgentAuthoringCatalogCandidates::BuildPublicId(Identity);
+}
+
 FString FCandidate::GetStableId() const
 {
 	return Identity.GetSelector(TEXT("stable_id"));
@@ -434,7 +439,7 @@ namespace
 		const FString Category = SanitizeCell(Candidate.CategoryPath, 512, bOutTruncated);
 		const FString Summary = SanitizeCell(Candidate.Tooltip, 512, bOutTruncated);
 		return FString::Printf(TEXT("%s\t%s\t%s\t%s\t%s"),
-			*Candidate.GetCandidateId(), *Name, *Kind, *Category, *Summary);
+			*Candidate.GetPublicId(), *Name, *Kind, *Category, *Summary);
 	}
 
 	static TArray<TSharedPtr<FJsonValue>> BuildGroupJson(const TArray<FCandidate>& Candidates)
@@ -566,7 +571,7 @@ namespace
 	static TSharedRef<FJsonObject> BuildCandidateJson(const FCandidate& Candidate)
 	{
 		TSharedRef<FJsonObject> Result = MakeShared<FJsonObject>();
-		Result->SetStringField(TEXT("candidate_id"), Candidate.GetCandidateId());
+		Result->SetStringField(TEXT("candidate_id"), Candidate.GetPublicId());
 		Result->SetStringField(TEXT("kind"), Candidate.Kind);
 		Result->SetStringField(TEXT("name"), Candidate.Name.IsEmpty() ? Candidate.DisplayName : Candidate.Name);
 		Result->SetStringField(TEXT("full_name"), Candidate.FullName);
@@ -744,11 +749,12 @@ bool ExecuteSearch(const FSearchParams& Params, FSearchResult& OutResult, FStrin
 		{
 			continue;
 		}
-		if (!ContainsAnyNormalized(Params.CategoryFilters, Candidate.CategoryPath))
+		const bool bNativePlaceableSurface = Params.CatalogType.Equals(TEXT("placeable_actor"));
+		if (!bNativePlaceableSurface && !ContainsAnyNormalized(Params.CategoryFilters, Candidate.CategoryPath))
 		{
 			continue;
 		}
-		if (!CandidateMatchesSearch(Params, Candidate))
+		if (!bNativePlaceableSurface && !CandidateMatchesSearch(Params, Candidate))
 		{
 			continue;
 		}
@@ -763,32 +769,67 @@ bool ExecuteSearch(const FSearchParams& Params, FSearchResult& OutResult, FStrin
 		Candidate.Score = ComputeScore(Params, Candidate);
 		FilteredCandidates.Add(Candidate);
 	}
-	SortCandidates(Params, FilteredCandidates);
+	if (!Params.CatalogType.Equals(TEXT("placeable_actor")))
+	{
+		SortCandidates(Params, FilteredCandidates);
+	}
 
 	if (!Params.CandidateId.IsEmpty())
 	{
-		UeAgentAuthoringIdentity::FCanonicalIdentity ParsedIdentity;
-		FString ParseError;
-		UeAgentAuthoringTargetLocator::FTargetQuery Query;
-		if (UeAgentAuthoringIdentity::ParseCanonicalKey(Params.CandidateId, ParsedIdentity, ParseError)
-			&& ParsedIdentity.ModelId == TEXT("catalog_candidate_identity"))
+		TArray<int32> PublicIdMatches;
+		for (int32 Index = 0; Index < FilteredCandidates.Num(); ++Index)
 		{
-			Query.ModelId = ParsedIdentity.ModelId;
-			Query.TargetKind = ParsedIdentity.TargetKind;
-			Query.CanonicalKey = Params.CandidateId;
+			if (FilteredCandidates[Index].GetPublicId().Equals(
+					Params.CandidateId, ESearchCase::IgnoreCase))
+			{
+				PublicIdMatches.Add(Index);
+			}
+		}
+		OutResult.bHasTargetResolution = true;
+		if (PublicIdMatches.Num() == 1)
+		{
+			OutResult.TargetResolution.Status = TEXT("resolved");
+			OutResult.TargetResolution.ErrorCode = TEXT("target_resolved");
+			OutResult.TargetResolution.ResolvedIndex = PublicIdMatches[0];
+			OutResult.MatchingCandidates.Add(
+				FilteredCandidates[PublicIdMatches[0]]);
+		}
+		else if (PublicIdMatches.Num() > 1)
+		{
+			OutResult.TargetResolution.Status = TEXT("failed");
+			OutResult.TargetResolution.ErrorCode = TEXT("target_ambiguous");
 		}
 		else
 		{
-			Query.ModelId = TEXT("catalog_candidate_identity");
-			Query.CanonicalKey = Params.CandidateId;
-		}
-		TArray<UeAgentAuthoringIdentity::FCanonicalIdentity> Identities;
-		for (const FCandidate& Candidate : FilteredCandidates) Identities.Add(Candidate.Identity);
-		OutResult.bHasTargetResolution = true;
-		if (UeAgentAuthoringTargetLocator::ResolveExact(Query, Identities, OutResult.TargetResolution)
-			&& FilteredCandidates.IsValidIndex(OutResult.TargetResolution.ResolvedIndex))
-		{
-			OutResult.MatchingCandidates.Add(FilteredCandidates[OutResult.TargetResolution.ResolvedIndex]);
+			UeAgentAuthoringIdentity::FCanonicalIdentity ParsedIdentity;
+			FString ParseError;
+			UeAgentAuthoringTargetLocator::FTargetQuery Query;
+			if (UeAgentAuthoringIdentity::ParseCanonicalKey(
+					Params.CandidateId, ParsedIdentity, ParseError)
+				&& ParsedIdentity.ModelId == TEXT("catalog_candidate_identity"))
+			{
+				Query.ModelId = ParsedIdentity.ModelId;
+				Query.TargetKind = ParsedIdentity.TargetKind;
+				Query.CanonicalKey = Params.CandidateId;
+			}
+			else
+			{
+				Query.ModelId = TEXT("catalog_candidate_identity");
+				Query.CanonicalKey = Params.CandidateId;
+			}
+			TArray<UeAgentAuthoringIdentity::FCanonicalIdentity> Identities;
+			for (const FCandidate& Candidate : FilteredCandidates)
+			{
+				Identities.Add(Candidate.Identity);
+			}
+			if (UeAgentAuthoringTargetLocator::ResolveExact(
+					Query, Identities, OutResult.TargetResolution)
+				&& FilteredCandidates.IsValidIndex(
+					OutResult.TargetResolution.ResolvedIndex))
+			{
+				OutResult.MatchingCandidates.Add(FilteredCandidates[
+					OutResult.TargetResolution.ResolvedIndex]);
+			}
 		}
 	}
 	else

@@ -7,7 +7,7 @@ client.blueprint.asset_create(...)
 client.blueprint.component_events_discover(...)
 ```
 
-Use `client.command_search(...)` and `client.command_detail(...)` to obtain the
+Use `client.query.command_search(...)` and `client.query.command_detail(...)` to obtain the
 current exact parameter schema and binding hash. The same commands are available
 through `uai-cli ... exec <command-id>`. The generated SDK forwards one exact
 manifest request and does not compile, save, open editors, inspect components,

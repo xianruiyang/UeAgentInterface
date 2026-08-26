@@ -75,6 +75,38 @@ namespace UE::UAI::Tests::DomainHjsonAuthoring
 			*Target, *Carrier, *Carrier, *TargetIdentity, *BaseRevision,
 			*Entry, *Entry, *Schema, *RootType, *ExtraDocument);
 	}
+
+	void CheckCandidateSelectorAccepted(
+		FAutomationTestBase& Test,
+		const TSharedPtr<FJsonObject>& Candidate,
+		const FString& Pointer,
+		const FString& ExpectedName,
+		const FString& ExpectedId)
+	{
+		FDomainHjsonCandidateSelector Selector;
+		FWorkspaceError Error;
+		Test.TestTrue(TEXT("candidate selector is accepted"),
+			TryReadCandidateSelector(Candidate, Pointer, Selector, Error));
+		Test.TestEqual(TEXT("selector name is trimmed"),
+			Selector.Name, ExpectedName);
+		Test.TestEqual(TEXT("selector id is trimmed"),
+			Selector.Id, ExpectedId);
+		Test.TestTrue(TEXT("accepted selector is valid"), Selector.IsValid());
+	}
+
+	void CheckCandidateSelectorRejected(
+		FAutomationTestBase& Test,
+		const TSharedPtr<FJsonObject>& Candidate,
+		const FString& Pointer,
+		const FString& ExpectedCode)
+	{
+		FDomainHjsonCandidateSelector Selector;
+		FWorkspaceError Error;
+		Test.TestFalse(TEXT("invalid candidate selector fails closed"),
+			TryReadCandidateSelector(Candidate, Pointer, Selector, Error));
+		Test.TestEqual(TEXT("candidate selector error is typed"),
+			Error.GetCode(), ExpectedCode);
+	}
 }
 
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(
@@ -478,5 +510,84 @@ bool FUeAgentDomainHjsonTargetPresenceTest::RunTest(
 		TryInspectObjectTargetPresence(ObjectPath, bPresent));
 	TestTrue(TEXT("a loaded target is reported as present"), bPresent);
 
+	return !HasAnyErrors();
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(
+	FUeAgentDomainHjsonCandidateSelectorTest,
+	"UAI.Root.T85.DomainAuthoring.CandidateSelector",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FUeAgentDomainHjsonCandidateSelectorTest::RunTest(
+	const FString& Parameters)
+{
+	using namespace UE::UAI::HjsonWorkspace;
+	using namespace UE::UAI::HjsonWorkspace::DomainAuthoring;
+	using namespace UE::UAI::Tests::DomainHjsonAuthoring;
+	(void)Parameters;
+	const FString Pointer = TEXT("/edits/0/value/candidate");
+
+	TSharedPtr<FJsonObject> Candidate = MakeShared<FJsonObject>();
+	Candidate->SetStringField(TEXT("name"), TEXT("  Native Cube  "));
+	Candidate->SetStringField(TEXT("ignored_assertion"), TEXT("preserved"));
+	CheckCandidateSelectorAccepted(
+		*this, Candidate, Pointer, TEXT("Native Cube"), TEXT(""));
+
+	Candidate = MakeShared<FJsonObject>();
+	Candidate->SetStringField(TEXT("id"), TEXT("  candidate:cube  "));
+	CheckCandidateSelectorAccepted(
+		*this, Candidate, Pointer, TEXT(""), TEXT("candidate:cube"));
+
+	Candidate = MakeShared<FJsonObject>();
+	Candidate->SetStringField(TEXT("name"), TEXT("Native Cube"));
+	Candidate->SetStringField(TEXT("id"), TEXT("candidate:cube"));
+	CheckCandidateSelectorAccepted(
+		*this, Candidate, Pointer, TEXT("Native Cube"), TEXT("candidate:cube"));
+
+	Candidate = MakeShared<FJsonObject>();
+	Candidate->SetStringField(TEXT("candidate_id"), TEXT("  candidate:cube  "));
+	CheckCandidateSelectorRejected(*this, Candidate, Pointer,
+		TEXT("domain_hjson_candidate_selector_field_unsupported"));
+
+	Candidate = MakeShared<FJsonObject>();
+	Candidate->SetStringField(TEXT("id"), TEXT("candidate:cube"));
+	Candidate->SetStringField(TEXT("candidate_id"), TEXT(" candidate:cube "));
+	CheckCandidateSelectorRejected(*this, Candidate, Pointer,
+		TEXT("domain_hjson_candidate_selector_field_unsupported"));
+
+	Candidate = MakeShared<FJsonObject>();
+	Candidate->SetStringField(TEXT("id"), TEXT("candidate:one"));
+	Candidate->SetStringField(TEXT("candidate_id"), TEXT("candidate:two"));
+	CheckCandidateSelectorRejected(*this, Candidate, Pointer,
+		TEXT("domain_hjson_candidate_selector_field_unsupported"));
+
+	Candidate = MakeShared<FJsonObject>();
+	Candidate->SetField(TEXT("name"), MakeShared<FJsonValueNumber>(7.0));
+	CheckCandidateSelectorRejected(*this, Candidate, Pointer,
+		TEXT("domain_hjson_candidate_selector_invalid"));
+
+	Candidate = MakeShared<FJsonObject>();
+	Candidate->SetField(TEXT("id"), MakeShared<FJsonValueBoolean>(true));
+	CheckCandidateSelectorRejected(*this, Candidate, Pointer,
+		TEXT("domain_hjson_candidate_selector_invalid"));
+
+	Candidate = MakeShared<FJsonObject>();
+	Candidate->SetStringField(TEXT("candidate_id"), TEXT("alias"));
+	Candidate->SetField(TEXT("name"), MakeShared<FJsonValueNull>());
+	CheckCandidateSelectorRejected(*this, Candidate, Pointer,
+		TEXT("domain_hjson_candidate_selector_field_unsupported"));
+
+	Candidate = MakeShared<FJsonObject>();
+	Candidate->SetStringField(TEXT("name"), TEXT("  \t  "));
+	Candidate->SetStringField(TEXT("id"), TEXT(" \r\n "));
+	CheckCandidateSelectorRejected(*this, Candidate, Pointer,
+		TEXT("domain_hjson_candidate_selector_required"));
+
+	FDomainHjsonCandidateSelector Selector;
+	FWorkspaceError Error;
+	TestFalse(TEXT("null candidate fails closed"),
+		TryReadCandidateSelector(nullptr, Pointer, Selector, Error));
+	TestEqual(TEXT("null candidate error is typed"), Error.GetCode(),
+		FString(TEXT("domain_hjson_candidate_selector_invalid")));
 	return !HasAnyErrors();
 }

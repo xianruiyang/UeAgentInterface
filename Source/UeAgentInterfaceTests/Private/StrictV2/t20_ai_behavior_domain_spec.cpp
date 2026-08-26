@@ -1,6 +1,7 @@
 #include "Misc/AutomationTest.h"
 
 #include "BehaviorTree/BehaviorTree.h"
+#include "BehaviorTree/Tasks/BTTask_Wait.h"
 #include "Core/HjsonWorkspace/ImportInitialization/UeAgentHjsonDomainProviderRegistry.h"
 #include "EnvironmentQuery/EnvQuery.h"
 #include "EnvironmentQuery/Generators/EnvQueryGenerator_ActorsOfClass.h"
@@ -118,7 +119,7 @@ bool FUeAgentStrictV2T20AiBehaviorDomainTest::RunTest(const FString& Parameters)
 		TEXT("the AI owner resolves real behavior candidates"),
 		TryQueryAiBehaviorCandidates(
 			*CandidateTarget,
-			TEXT("Sequence"),
+			TEXT("Wait"),
 			CandidateResult,
 			CandidateError)))
 	{
@@ -130,28 +131,44 @@ bool FUeAgentStrictV2T20AiBehaviorDomainTest::RunTest(const FString& Parameters)
 	{
 		return false;
 	}
-	const FAiBehaviorCandidate& Candidate = CandidateResult.Candidates[0];
-	TestTrue(TEXT("candidate.name is an exact class identity"),
-		Candidate.Name.StartsWith(TEXT("/Script/")));
-	TestTrue(TEXT("candidate kind identifies the exact behavior surface"),
-		Candidate.Kind == TEXT("behavior_composite")
-			|| Candidate.Kind == TEXT("behavior_task")
-			|| Candidate.Kind == TEXT("behavior_service")
-			|| Candidate.Kind == TEXT("behavior_decorator")
-			|| Candidate.Kind == TEXT("state_tree_node")
-			|| Candidate.Kind == TEXT("blackboard_key")
-			|| Candidate.Kind == TEXT("eqs_generator")
-			|| Candidate.Kind == TEXT("smart_object_behavior"));
-	TestTrue(TEXT("candidate declares create support"),
-		Candidate.SupportedOperations.Contains(TEXT("create")));
-	TestFalse(TEXT("candidate input contract is present"),
-		Candidate.InputContract.IsEmpty());
-	TestFalse(TEXT("candidate placement contract is present"),
-		Candidate.PlacementContract.IsEmpty());
-	TestFalse(TEXT("candidate required context is present"),
-		Candidate.RequiredContext.IsEmpty());
-	TestTrue(TEXT("candidate binding revision is a sha256 identity"),
-		Candidate.BindingRevision.StartsWith(TEXT("sha256:")));
+	const FAiBehaviorCandidate* Candidate =
+		CandidateResult.Candidates.FindByPredicate(
+			[](const FAiBehaviorCandidate& Item)
+			{
+				return Item.PayloadType
+					== UBTTask_Wait::StaticClass()->GetPathName();
+			});
+	if (!TestNotNull(TEXT("the native menu returns the exact Wait task"),
+		Candidate))
+	{
+		return false;
+	}
+	TestTrue(TEXT("candidate.name is the native menu name"),
+		Candidate->Name == TEXT("Wait"));
+	TestTrue(TEXT("candidate.id is a compact exact selector"),
+		Candidate->Id.StartsWith(TEXT("candidate:")));
+	TestTrue(TEXT("candidate kind identifies the native task surface"),
+		Candidate->Kind == TEXT("behavior_task"));
+	TestTrue(TEXT("candidate declares native create support"),
+		Candidate->bSupported
+			&& Candidate->SupportedOperations.Contains(TEXT("create")));
+	TestTrue(TEXT("the native blank-menu search reports exact coverage"),
+		CandidateResult.bCoverageComplete
+			&& !CandidateResult.bCreationCoverageComplete
+			&& CandidateResult.NativeActionCount
+				== CandidateResult.ExecutableActionCount + 2
+			&& CandidateResult.CoverageScope
+				== TEXT("behavior_tree_blank_background"));
+	FAiBehaviorCandidate Resolved;
+	TestTrue(TEXT("the compact id re-enumerates one exact native action"),
+		TryResolveAiBehaviorCandidate(
+			*CandidateTarget,
+			FString(),
+			Candidate->Id,
+			Resolved,
+			CandidateError)
+			&& Resolved.PayloadType
+				== UBTTask_Wait::StaticClass()->GetPathName());
 	TestTrue(TEXT("candidate query reports complete bounded results"),
 		CandidateResult.bComplete && !CandidateResult.bHasMore);
 

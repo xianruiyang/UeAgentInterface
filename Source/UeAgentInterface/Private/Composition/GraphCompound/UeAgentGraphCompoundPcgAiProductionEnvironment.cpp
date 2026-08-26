@@ -32,6 +32,7 @@
 #include "Dom/JsonValue.h"
 #include "EdGraph/EdGraphNode.h"
 #include "EdGraph/EdGraphPin.h"
+#include "EdGraph/EdGraphSchema.h"
 #include "EnvironmentQuery/EnvQuery.h"
 #include "EnvironmentQuery/EnvQueryGenerator.h"
 #include "EnvironmentQuery/EnvQueryOption.h"
@@ -56,6 +57,8 @@
 #include "PCGLevelToAsset.h"
 #include "PCGNode.h"
 #include "PCGSettings.h"
+#include "QueryOwners/Pcg/UeAgentPcgNodeCandidateQuery.h"
+#include "QueryOwners/AiBehavior/UeAgentAiBehaviorCandidateQuery.h"
 #include "Data/PCGPointArrayData.h"
 #include "Data/PCGPointData.h"
 #include "SmartObjectDefinition.h"
@@ -571,6 +574,34 @@ namespace UE::UAI::Composition::GraphCompound
 			return true;
 		}
 
+		bool HasOnlyObjectFields(
+			const FUeAgentCanonicalValue& Object,
+			std::initializer_list<const TCHAR*> Fields)
+		{
+			if (Object.GetKind() != EUeAgentValueKind::Object)
+			{
+				return false;
+			}
+			for (const TPair<FString, FUeAgentCanonicalValueRef>& Item
+				: Object.GetObjectItems())
+			{
+				bool bAllowed = false;
+				for (const TCHAR* const Field : Fields)
+				{
+					if (Item.Key == Field)
+					{
+						bAllowed = true;
+						break;
+					}
+				}
+				if (!bAllowed)
+				{
+					return false;
+				}
+			}
+			return true;
+		}
+
 		bool TryCanonicalStringField(
 			const FUeAgentCanonicalValue& Object,
 			const TCHAR* Field,
@@ -649,6 +680,35 @@ namespace UE::UAI::Composition::GraphCompound
 			}
 			OutValue = FCString::Atod(*Value.GetLexeme());
 			return FMath::IsFinite(OutValue);
+		}
+
+		bool TryCanonicalVector2Field(
+			const FUeAgentCanonicalValue& Object,
+			const TCHAR* Field,
+			float& OutX,
+			float& OutY)
+		{
+			const FUeAgentCanonicalValue* const Value =
+				FindObjectValue(Object, Field);
+			if (!Value || Value->GetKind() != EUeAgentValueKind::Array
+				|| Value->GetArrayItems().Num() != 2)
+			{
+				return false;
+			}
+			double X = 0.0;
+			double Y = 0.0;
+			if (!TryCanonicalDouble(Value->GetArrayItems()[0].Get(), X)
+				|| !TryCanonicalDouble(Value->GetArrayItems()[1].Get(), Y)
+				|| X < -static_cast<double>(MAX_flt)
+				|| X > static_cast<double>(MAX_flt)
+				|| Y < -static_cast<double>(MAX_flt)
+				|| Y > static_cast<double>(MAX_flt))
+			{
+				return false;
+			}
+			OutX = static_cast<float>(X);
+			OutY = static_cast<float>(Y);
+			return true;
 		}
 
 		bool TryMakeCanonicalDouble(
@@ -1757,6 +1817,11 @@ namespace UE::UAI::Composition::GraphCompound
 			FGuid SlotGuid;
 			UClass* BehaviorClass = nullptr;
 			UClass* SettingsClass = nullptr;
+			UClass* CreatedNodeClass = nullptr;
+			FString CandidateName;
+			FString CandidateId;
+			float PositionX = 0.0f;
+			float PositionY = 0.0f;
 			UPCGGraphInterface* GraphInterface = nullptr;
 			FString ActorRef;
 			FString PublicGenerationPolicy;
@@ -1970,6 +2035,7 @@ namespace UE::UAI::Composition::GraphCompound
 
 			TMap<FString, const FPlannedChange*> PlannedById;
 			TSet<FString> ProposedNodeIds;
+			TMap<FString, FString> ProposedBehaviorNodeCarriers;
 			TSet<FString> ProposedStateIds;
 			TMap<FString, FString> ProposedStateParents;
 			for (const FPlannedChange& Change : Changes)
@@ -2007,7 +2073,23 @@ namespace UE::UAI::Composition::GraphCompound
 					}
 					if (bConnectableNode)
 					{
-						ProposedNodeIds.Add(Edit.GetIdentity().GetSemanticId());
+						const FString NodeId =
+							Edit.GetIdentity().GetSemanticId();
+						ProposedNodeIds.Add(NodeId);
+						if (Profile.GetCapabilityId()
+							== TEXT("ai.behavior_tree.graph.apply"))
+						{
+							FString CarrierType;
+							if (Edit.GetProposedAfter().IsValid()
+								&& TryCanonicalStringField(
+									*Edit.GetProposedAfter(),
+									TEXT("carrier_type_ref"),
+									CarrierType))
+							{
+								ProposedBehaviorNodeCarriers.Add(
+									NodeId, MoveTemp(CarrierType));
+							}
+						}
 					}
 				}
 				else if (Edit.GetElementKind()
@@ -2130,6 +2212,17 @@ namespace UE::UAI::Composition::GraphCompound
 						else
 						{
 							FString PayloadType;
+							const FUeAgentCanonicalValue* const Candidate =
+								FindObjectValue(Value, TEXT("candidate"));
+							FString CandidateName;
+							FString CandidateId;
+							const bool bHasCandidateName = Candidate
+								&& TryCanonicalStringField(
+									*Candidate, TEXT("name"), CandidateName);
+							const bool bHasCandidateId = Candidate
+								&& TryCanonicalStringField(
+									*Candidate, TEXT("id"), CandidateId);
+							const bool bNativeSelector = Candidate != nullptr;
 							if (!SemanticId.StartsWith(TEXT("node:"))
 								|| !FGuid::Parse(SemanticId.RightChop(5),
 									Operation.NodeGuid)
@@ -2137,9 +2230,21 @@ namespace UE::UAI::Composition::GraphCompound
 								|| SemanticId != TEXT("node:")
 									+ Operation.NodeGuid.ToString(
 										EGuidFormats::DigitsWithHyphensLower)
-								|| !HasExactObjectFields(Value,
-									{TEXT("carrier_type_ref"),
-										TEXT("payload_type_ref")})
+								|| (bNativeSelector
+									? (!HasOnlyObjectFields(
+										Value,
+										{TEXT("candidate"),
+											TEXT("carrier_type_ref"),
+											TEXT("payload_type_ref"),
+											TEXT("position")})
+										|| !HasOnlyObjectFields(
+											*Candidate,
+											{TEXT("name"), TEXT("id")})
+										|| (!bHasCandidateName && !bHasCandidateId))
+									: !HasExactObjectFields(
+										Value,
+										{TEXT("carrier_type_ref"),
+											TEXT("payload_type_ref")}))
 								|| !TryCanonicalStringField(Value,
 									TEXT("carrier_type_ref"), CarrierType)
 								|| !TryCanonicalStringField(Value,
@@ -2190,6 +2295,54 @@ namespace UE::UAI::Composition::GraphCompound
 									TEXT("graph_compound_behavior_tree_payload_invalid"),
 									PayloadType);
 								return false;
+							}
+							if (bNativeSelector)
+							{
+								QueryOwners::AiBehavior::FAiBehaviorCandidate
+									ResolvedCandidate;
+								QueryOwners::AiBehavior::FAiBehaviorCandidateQueryError
+									CandidateError;
+								if (!QueryOwners::AiBehavior::TryResolveAiBehaviorCandidate(
+										Target,
+										CandidateName,
+										CandidateId,
+										ResolvedCandidate,
+										CandidateError)
+									|| !ResolvedCandidate.bSupported
+									|| ResolvedCandidate.PayloadType != PayloadType
+									|| ((Operation.Kind
+											== EPcgAiSchemaMutationKind::BehaviorComposite)
+										&& ResolvedCandidate.Kind
+											!= TEXT("behavior_composite"))
+									|| ((Operation.Kind
+											== EPcgAiSchemaMutationKind::BehaviorTask)
+										&& ResolvedCandidate.Kind
+											!= TEXT("behavior_task")))
+								{
+									SetError(
+										OutError,
+										CandidateError.Code.IsEmpty()
+											? TEXT("graph_compound_behavior_tree_candidate_invalid")
+											: CandidateError.Code,
+										SemanticId,
+										CandidateError.Detail);
+									return false;
+								}
+								Operation.CandidateName = ResolvedCandidate.Name;
+								Operation.CandidateId = ResolvedCandidate.Id;
+								if (FindObjectValue(Value, TEXT("position"))
+									&& !TryCanonicalVector2Field(
+										Value,
+										TEXT("position"),
+										Operation.PositionX,
+										Operation.PositionY))
+								{
+									SetError(
+										OutError,
+										TEXT("graph_compound_behavior_tree_position_invalid"),
+										SemanticId);
+									return false;
+								}
 							}
 							const bool bSubNode =
 								Operation.Kind == EPcgAiSchemaMutationKind::BehaviorService
@@ -2254,6 +2407,18 @@ namespace UE::UAI::Composition::GraphCompound
 							SetError(OutError,
 								TEXT("graph_compound_behavior_tree_relation_invalid"),
 								SemanticId);
+							return false;
+						}
+						if (Operation.FromItem == TEXT("node:root")
+							&& ProposedBehaviorNodeCarriers.FindRef(
+								Operation.ToItem)
+								!= TEXT("/Script/BehaviorTreeEditor.BehaviorTreeGraphNode_Composite"))
+						{
+							SetError(
+								OutError,
+								TEXT("graph_compound_behavior_tree_root_target_invalid"),
+								Operation.ToItem,
+								TEXT("the BehaviorTree root output requires a composite node"));
 							return false;
 						}
 						Operation.Kind =
@@ -2819,26 +2984,35 @@ namespace UE::UAI::Composition::GraphCompound
 				else if (Profile.GetCapabilityId() == TEXT("pcg.graph.apply"))
 				{
 					UPCGGraph* const Graph = Cast<UPCGGraph>(&Target);
-					FString CarrierType;
-					FString SettingsType;
 					const FString Prefix = TEXT("pcg_node:");
 					const FString AuthoredIdentity =
 						SemanticId.StartsWith(Prefix)
 							? SemanticId.RightChop(Prefix.Len()) : FString();
+					const FUeAgentCanonicalValue* const Candidate =
+						Operation.Value.IsValid()
+							? FindObjectValue(*Operation.Value, TEXT("candidate"))
+							: nullptr;
+					FString CandidateName;
+					FString CandidateId;
+					const bool bHasName = Candidate
+						&& TryCanonicalStringField(
+							*Candidate, TEXT("name"), CandidateName);
+					const bool bHasId = Candidate
+						&& TryCanonicalStringField(
+							*Candidate, TEXT("id"), CandidateId);
 					if (!Graph
 						|| Edit.GetElementKind()
 							!= EGraphCompoundElementKind::Item
 						|| !Operation.Dependencies.IsEmpty()
 						|| AuthoredIdentity.IsEmpty()
 						|| AuthoredIdentity.Contains(TEXT(":"))
-						|| !HasExactObjectFields(*Operation.Value,
-							{TEXT("carrier_type_ref"),
-								TEXT("settings_type_ref")})
-						|| !TryCanonicalStringField(*Operation.Value,
-							TEXT("carrier_type_ref"), CarrierType)
-						|| CarrierType != UPCGNode::StaticClass()->GetPathName()
-						|| !TryCanonicalStringField(*Operation.Value,
-							TEXT("settings_type_ref"), SettingsType))
+						|| !HasOnlyObjectFields(
+							*Operation.Value,
+							{TEXT("candidate"), TEXT("position")})
+						|| !Candidate
+						|| !HasOnlyObjectFields(
+							*Candidate, {TEXT("name"), TEXT("id")})
+						|| (!bHasName && !bHasId))
 					{
 						SetError(OutError,
 							TEXT("graph_compound_pcg_graph_node_invalid"),
@@ -2857,18 +3031,36 @@ namespace UE::UAI::Composition::GraphCompound
 							return false;
 						}
 					}
-					Operation.SettingsClass =
-						LoadObject<UClass>(nullptr, *SettingsType);
-					if (!Operation.SettingsClass
-						|| !Operation.SettingsClass->IsChildOf(
-							UPCGSettings::StaticClass())
-						|| Operation.SettingsClass->HasAnyClassFlags(CLASS_Abstract))
+					if (FindObjectValue(*Operation.Value, TEXT("position"))
+						&& !TryCanonicalVector2Field(
+							*Operation.Value, TEXT("position"),
+							Operation.PositionX, Operation.PositionY))
 					{
 						SetError(OutError,
-							TEXT("graph_compound_pcg_graph_settings_invalid"),
-							SettingsType);
+							TEXT("graph_compound_pcg_graph_position_invalid"),
+							SemanticId);
 						return false;
 					}
+					QueryOwners::Pcg::FPcgNodeCandidate ResolvedCandidate;
+					QueryOwners::Pcg::FPcgNodeCandidateQueryError CandidateError;
+					if (!QueryOwners::Pcg::TryResolvePcgNodeCandidate(
+							*Graph, CandidateName, CandidateId,
+							ResolvedCandidate, CandidateError)
+						|| !ResolvedCandidate.bSupported)
+					{
+						SetError(
+							OutError,
+							CandidateError.Code.IsEmpty()
+								? TEXT("pcg_candidate_action_kind_unsupported")
+								: CandidateError.Code,
+							SemanticId,
+							CandidateError.Detail.IsEmpty()
+								? ResolvedCandidate.ActionKind
+								: CandidateError.Detail);
+						return false;
+					}
+					Operation.CandidateName = ResolvedCandidate.Name;
+					Operation.CandidateId = ResolvedCandidate.Id;
 					Operation.FromItem = AuthoredIdentity;
 					Operation.Kind = EPcgAiSchemaMutationKind::PcgGraphNode;
 				}
@@ -3113,7 +3305,7 @@ namespace UE::UAI::Composition::GraphCompound
 
 		bool TryApplySchemaMutationOperations(
 			UObject& Target,
-			const TArray<FPcgAiSchemaMutationOperation>& Operations,
+			TArray<FPcgAiSchemaMutationOperation>& Operations,
 			FPcgAiNodeGraphNativeHook& NativeHook,
 			FString& OutRevision,
 			FGraphCompoundRuntimeError& OutError)
@@ -3334,28 +3526,38 @@ namespace UE::UAI::Composition::GraphCompound
 
 			if (UPCGGraph* const Graph = Cast<UPCGGraph>(&Target))
 			{
-				for (const FPcgAiSchemaMutationOperation& Operation : Operations)
+				for (FPcgAiSchemaMutationOperation& Operation : Operations)
 				{
 					if (Operation.Kind == EPcgAiSchemaMutationKind::PcgGraphNode)
 					{
 						UPCGNode* Node = nullptr;
-						FPcgAiNodeGraphNativeMutationReceipt ApplyReceipt;
-						FPcgAiNodeGraphAdapterError NativeError;
-						if (!Operation.SettingsClass
-							|| !NativeHook.TryAddPcgNode(
-								*Graph, *Operation.SettingsClass, Node,
-								ApplyReceipt, NativeError)
+						QueryOwners::Pcg::FPcgNodeCandidate ResolvedCandidate;
+						QueryOwners::Pcg::FPcgNodeCandidateQueryError CandidateError;
+						if (!QueryOwners::Pcg::TryPerformPcgNodeCandidate(
+								*Graph,
+								Operation.CandidateName,
+								Operation.CandidateId,
+								FVector2f(
+									Operation.PositionX, Operation.PositionY),
+								Node,
+								ResolvedCandidate,
+								CandidateError)
 							|| !Node)
 						{
 							SetError(OutError,
-								NativeError.GetCode().IsEmpty()
+								CandidateError.Code.IsEmpty()
 									? TEXT("graph_compound_pcg_graph_node_create_failed")
-									: NativeError.GetCode(),
-								Operation.SemanticId, NativeError.GetDetail());
+									: CandidateError.Code,
+								Operation.SemanticId, CandidateError.Detail);
 							return false;
 						}
 						Node->Modify();
 						Node->NodeTitle = FName(*Operation.FromItem);
+						Operation.CreatedNodeClass = Node->GetClass();
+						const UPCGSettings* const Settings = Node->GetSettings();
+						Operation.SettingsClass = Settings
+							? Settings->GetClass() : nullptr;
+						Graph->MarkPackageDirty();
 					}
 					else if (Operation.Kind
 						== EPcgAiSchemaMutationKind::PcgDoubleParameter)
@@ -3444,40 +3646,125 @@ namespace UE::UAI::Composition::GraphCompound
 					else if (Operation.Kind
 						== EPcgAiSchemaMutationKind::BehaviorComposite)
 					{
-						UBehaviorTreeGraphNode_Composite* const Node =
-							NewObject<UBehaviorTreeGraphNode_Composite>(Graph);
-						Node->NodeInstance = NewObject<UBTCompositeNode>(
-							Tree, Operation.PayloadClass, NAME_None, RF_Transactional);
-						if (!Node->NodeInstance)
+						if (!Operation.CandidateName.IsEmpty()
+							|| !Operation.CandidateId.IsEmpty())
 						{
-							SetError(OutError,
-								TEXT("graph_compound_behavior_tree_payload_create_failed"),
-								Operation.SemanticId);
-							return false;
+							UBehaviorTreeGraphNode* NativeNode = nullptr;
+							QueryOwners::AiBehavior::FAiBehaviorCandidate
+								ResolvedCandidate;
+							QueryOwners::AiBehavior::FAiBehaviorCandidateQueryError
+								CandidateError;
+							if (!QueryOwners::AiBehavior::TryPerformBehaviorTreeCandidate(
+									*Tree,
+									Operation.CandidateName,
+									Operation.CandidateId,
+									FVector2f(
+										Operation.PositionX,
+										Operation.PositionY),
+									NativeNode,
+									ResolvedCandidate,
+									CandidateError)
+								|| !NativeNode
+								|| !NativeNode->IsA<
+									UBehaviorTreeGraphNode_Composite>()
+								|| !NativeNode->NodeInstance
+								|| NativeNode->NodeInstance->GetClass()
+									!= Operation.PayloadClass)
+							{
+								SetError(
+									OutError,
+									CandidateError.Code.IsEmpty()
+										? TEXT("graph_compound_behavior_tree_native_action_failed")
+										: CandidateError.Code,
+									Operation.SemanticId,
+									CandidateError.Detail);
+								return false;
+							}
+							NativeNode->Modify();
+							NativeNode->NodeGuid = Operation.NodeGuid;
 						}
-						Node->PostPlacedNewNode();
-						Node->NodeGuid = Operation.NodeGuid;
-						Node->AllocateDefaultPins();
-						Graph->AddNode(Node, false, false);
+						else
+						{
+							UBehaviorTreeGraphNode_Composite* const Node =
+								NewObject<UBehaviorTreeGraphNode_Composite>(Graph);
+							Node->NodeInstance = NewObject<UBTCompositeNode>(
+								Tree,
+								Operation.PayloadClass,
+								NAME_None,
+								RF_Transactional);
+							if (!Node->NodeInstance)
+							{
+								SetError(OutError,
+									TEXT("graph_compound_behavior_tree_payload_create_failed"),
+									Operation.SemanticId);
+								return false;
+							}
+							Node->PostPlacedNewNode();
+							Node->NodeGuid = Operation.NodeGuid;
+							Node->AllocateDefaultPins();
+							Graph->AddNode(Node, false, false);
+						}
 					}
 					else if (Operation.Kind
 						== EPcgAiSchemaMutationKind::BehaviorTask)
 					{
-						UBehaviorTreeGraphNode_Task* const Node =
-							NewObject<UBehaviorTreeGraphNode_Task>(Graph);
-						Node->NodeInstance = NewObject<UBTTaskNode>(
-							Tree, Operation.PayloadClass, NAME_None, RF_Transactional);
-						if (!Node->NodeInstance)
+						if (!Operation.CandidateName.IsEmpty()
+							|| !Operation.CandidateId.IsEmpty())
 						{
-							SetError(OutError,
-								TEXT("graph_compound_behavior_tree_payload_create_failed"),
-								Operation.SemanticId);
-							return false;
+							UBehaviorTreeGraphNode* NativeNode = nullptr;
+							QueryOwners::AiBehavior::FAiBehaviorCandidate
+								ResolvedCandidate;
+							QueryOwners::AiBehavior::FAiBehaviorCandidateQueryError
+								CandidateError;
+							if (!QueryOwners::AiBehavior::TryPerformBehaviorTreeCandidate(
+									*Tree,
+									Operation.CandidateName,
+									Operation.CandidateId,
+									FVector2f(
+										Operation.PositionX,
+										Operation.PositionY),
+									NativeNode,
+									ResolvedCandidate,
+									CandidateError)
+								|| !NativeNode
+								|| !NativeNode->IsA<UBehaviorTreeGraphNode_Task>()
+								|| !NativeNode->NodeInstance
+								|| NativeNode->NodeInstance->GetClass()
+									!= Operation.PayloadClass)
+							{
+								SetError(
+									OutError,
+									CandidateError.Code.IsEmpty()
+										? TEXT("graph_compound_behavior_tree_native_action_failed")
+										: CandidateError.Code,
+									Operation.SemanticId,
+									CandidateError.Detail);
+								return false;
+							}
+							NativeNode->Modify();
+							NativeNode->NodeGuid = Operation.NodeGuid;
 						}
-						Node->PostPlacedNewNode();
-						Node->NodeGuid = Operation.NodeGuid;
-						Node->AllocateDefaultPins();
-						Graph->AddNode(Node, false, false);
+						else
+						{
+							UBehaviorTreeGraphNode_Task* const Node =
+								NewObject<UBehaviorTreeGraphNode_Task>(Graph);
+							Node->NodeInstance = NewObject<UBTTaskNode>(
+								Tree,
+								Operation.PayloadClass,
+								NAME_None,
+								RF_Transactional);
+							if (!Node->NodeInstance)
+							{
+								SetError(OutError,
+									TEXT("graph_compound_behavior_tree_payload_create_failed"),
+									Operation.SemanticId);
+								return false;
+							}
+							Node->PostPlacedNewNode();
+							Node->NodeGuid = Operation.NodeGuid;
+							Node->AllocateDefaultPins();
+							Graph->AddNode(Node, false, false);
+						}
 					}
 					else if (Operation.Kind
 						== EPcgAiSchemaMutationKind::BehaviorBlackboardBinding)
@@ -3556,7 +3843,16 @@ namespace UE::UAI::Composition::GraphCompound
 							Operation.SemanticId);
 						return false;
 					}
-					FromPin->MakeLinkTo(ToPin);
+					const UEdGraphSchema* const Schema = Graph->GetSchema();
+					if (!Schema || !Schema->TryCreateConnection(FromPin, ToPin))
+					{
+						SetError(
+							OutError,
+							TEXT("graph_compound_behavior_tree_connection_rejected"),
+							Operation.SemanticId,
+							TEXT("the native BehaviorTree schema rejected the connection"));
+						return false;
+					}
 				}
 				FPcgAiNodeGraphNativeMutationReceipt ApplyReceipt;
 				FPcgAiNodeGraphBarrierReceipt BarrierReceipt;
@@ -3970,8 +4266,79 @@ namespace UE::UAI::Composition::GraphCompound
 						Operation.SemanticId);
 					return false;
 				}
+				FUeAgentCanonicalValuePtr Expected = Operation.Value;
+				if (!ActualValues
+					&& Operation.Kind == EPcgAiSchemaMutationKind::PcgGraphNode)
+				{
+					if (!Operation.CreatedNodeClass || !Operation.SettingsClass)
+					{
+						OutError = FVerificationError(
+							TEXT("graph_compound_pcg_ai_readback_expected_invalid"),
+							Operation.SemanticId);
+						return false;
+					}
+					const TSharedRef<FJsonObject> Definition =
+						MakeShared<FJsonObject>();
+					Definition->SetStringField(
+						TEXT("carrier_type_ref"),
+						Operation.CreatedNodeClass->GetPathName());
+					Definition->SetStringField(
+						TEXT("settings_type_ref"),
+						Operation.SettingsClass->GetPathName());
+					FString CanonicalError;
+					if (!CanonicalJson::TryFromJsonValue(
+							MakeShared<FJsonValueObject>(Definition),
+							Resources, Expected, CanonicalError)
+						|| !Expected.IsValid())
+					{
+						OutError = FVerificationError(
+							TEXT("graph_compound_pcg_ai_readback_expected_invalid"),
+							CanonicalError);
+						return false;
+					}
+				}
+				else if (!ActualValues
+					&& (Operation.Kind
+							== EPcgAiSchemaMutationKind::BehaviorComposite
+						|| Operation.Kind
+							== EPcgAiSchemaMutationKind::BehaviorTask)
+					&& (!Operation.CandidateName.IsEmpty()
+						|| !Operation.CandidateId.IsEmpty()))
+				{
+					if (!Operation.PayloadClass)
+					{
+						OutError = FVerificationError(
+							TEXT("graph_compound_pcg_ai_readback_expected_invalid"),
+							Operation.SemanticId);
+						return false;
+					}
+					const TSharedRef<FJsonObject> Definition =
+						MakeShared<FJsonObject>();
+					Definition->SetStringField(
+						TEXT("carrier_type_ref"),
+						Operation.Kind
+							== EPcgAiSchemaMutationKind::BehaviorComposite
+								? UBehaviorTreeGraphNode_Composite::StaticClass()
+									->GetPathName()
+								: UBehaviorTreeGraphNode_Task::StaticClass()
+									->GetPathName());
+					Definition->SetStringField(
+						TEXT("payload_type_ref"),
+						Operation.PayloadClass->GetPathName());
+					FString CanonicalError;
+					if (!CanonicalJson::TryFromJsonValue(
+							MakeShared<FJsonValueObject>(Definition),
+							Resources, Expected, CanonicalError)
+						|| !Expected.IsValid())
+					{
+						OutError = FVerificationError(
+							TEXT("graph_compound_pcg_ai_readback_expected_invalid"),
+							CanonicalError);
+						return false;
+					}
+				}
 				Items.Emplace(Operation.SemanticId,
-					Actual ? *Actual : Operation.Value.ToSharedRef());
+					Actual ? *Actual : Expected.ToSharedRef());
 			}
 			FUeAgentStateSemanticError StateError;
 			if (!FUeAgentCanonicalValue::TryObject(

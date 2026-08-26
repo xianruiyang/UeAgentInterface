@@ -7,19 +7,21 @@
 
 `material-domain-owner` also owns the only active Material expression
 candidate public command, `material.expression.candidates`. It queries the
-real Material palette for one persisted Material or Material Function and
-returns `name`, `label`, `kind`, `supported_operations`, `input_contract`,
-`placement_contract`, `required_context`, and `binding_revision`. Results are
-bounded and explicitly paged with `complete`, `has_more`, and `next_cursor`.
-`name` is the exact expression class path accepted by HJSON; `label` is display
-text and is never executable. The inactive legacy `reference.catalog_search`
-binding is neither an ingress nor a fallback for this domain.
+real Material Graph action schema for one persisted Material or Material
+Function. The exact creation context is carried separately as `graph_name` and,
+for pin-drag menus, `node_guid`, `pin_guid`, and `pin_name`. Results are bounded
+and explicitly paged with `complete`, `has_more`, and `next_cursor`. Each native
+action has a compact `id`, display `name`/`label`, action kind, support state,
+and operation support. Distinct schema actions such as Make Float2, Make Float3,
+and Make Float4 retain distinct identities even when they share an expression
+class. The inactive legacy `reference.catalog_search` binding is neither an
+ingress nor a fallback for this domain.
 
 The public SDK calls are `client.material.expression_candidates(...)` and
 `client.content_graph.import_workspace(...)`. Use
-`client.command_search(...)` and `client.command_detail(...)` to discover and
-inspect their live contracts; `uai-cli` exposes the same discovery path. No
-task-specific helper or tutorial-owned registry is authoritative.
+`client.query.command_search(...)` and `client.query.command_detail(...)` to
+discover and inspect their live contracts; `uai-cli` exposes the same discovery
+path. No task-specific helper or tutorial-owned registry is authoritative.
 
 Material and Material Function documents use explicit `edits`; Material
 Instance documents use explicit `parameters`. The provider maps those fields to
@@ -32,25 +34,30 @@ and source-carrier authority; T17 consumes T13's normalized
 contracts. Unsupported root types and create/edit combinations without an
 atomic native contract fail before mutation.
 
-Every expression-create edit carries the queried candidate unchanged beside
-the native class reference:
+Every expression-create edit carries only the selected action and its separate
+native creation context:
 
 ```hjson
 value: {
-  class_ref: "/Script/Engine.MaterialExpressionScalarParameter"
-  candidate: {
-    name: "/Script/Engine.MaterialExpressionScalarParameter"
-    binding_revision: "sha256:..."
+  candidate: { id: "candidate:..." }
+  candidate_context: {
+    graph_name: MaterialGraph
+    node_guid: "<optional-source-node-guid>"
+    pin_guid: "<optional-source-pin-guid>"
+    pin_name: "<optional-source-pin-name>"
   }
-  position: { x: -300, y: 0 }
 }
 ```
 
-Before T50 mechanics receives the edit, the Material owner verifies that
-`candidate.name == class_ref` and re-resolves the binding against the current
-real palette. Missing, renamed, or stale candidates fail before write; only the
-validated metadata wrapper is removed before forwarding the unchanged native
-edit contract.
+`candidate` minimally contains `name` or `id`; if both are supplied they are
+conjunctive. A known expression class may be supplied as an assertion, but it
+does not replace the native action identity. Graph/pin context, stable element
+identity, layout, connections, properties, and operation stay outside the
+candidate. Before the first write the owner rebuilds the same Graph/Pin action
+schema, resolves exactly one action, and uses its official expression factory,
+delegates, and autowire behavior. Missing, ambiguous, context-mismatched, or
+unsupported actions fail before mutation; callers do not copy a complete search
+row or binding revision into HJSON.
 
 Queries capture the actual Material owner through the common content-graph
 read environment and return its stable revision, items, relations, parameters,

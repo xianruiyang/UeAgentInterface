@@ -2,6 +2,8 @@
 
 #include "Utilities/AuthoringCore/UeAgentAuthoringCatalogCandidates.h"
 
+#include "Misc/SecureHash.h"
+
 namespace UeAgentAuthoringCatalogCandidates
 {
 	namespace
@@ -46,6 +48,16 @@ namespace UeAgentAuthoringCatalogCandidates
 		}
 		return UeAgentAuthoringIdentity::BuildCanonicalIdentity(
 			TEXT("catalog_candidate_identity"), Input.TargetKind, Selectors, OutIdentity, OutError);
+	}
+
+	FString BuildPublicId(
+		const UeAgentAuthoringIdentity::FCanonicalIdentity& Identity)
+	{
+		if (!Identity.IsValid())
+		{
+			return FString();
+		}
+		return TEXT("candidate:") + FMD5::HashAnsiString(*Identity.CanonicalKey);
 	}
 
 	bool Less(const FSortKey& Left, const FSortKey& Right, ESortMode Mode)

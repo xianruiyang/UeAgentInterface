@@ -15,4 +15,10 @@ namespace UE::UAI::CommandHandlers::UmgWidget
 		TSharedRef<OperationOwners::UmgWidget::IUeAgentUmgWidgetCommandService> Service,
 		TArray<TSharedRef<CommandEdge::IUeAgentExactCommandHandler>>& OutHandlers,
 		FString& OutError);
+
+	UEAGENTINTERFACE_API bool TryCreateUmgWidgetCandidateCommandHandlers(
+		TSharedRef<OperationOwners::UmgWidget::
+			IUeAgentUmgWidgetCandidateCommandService> Service,
+		TArray<TSharedRef<CommandEdge::IUeAgentExactCommandHandler>>& OutHandlers,
+		FString& OutError);
 }

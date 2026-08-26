@@ -31,7 +31,7 @@ namespace UE::UAI::Module::CommandRegistration::BlueprintNode
 			Result.CommandId = CommandId;
 			Result.PythonNamespace = TEXT("blueprint");
 			Result.PythonFunction = TEXT("node_candidates");
-			Result.ContractVersion = 1;
+			Result.ContractVersion = 2;
 			Result.PublicOwner = Owner;
 			Result.Availability = EUeAgentCommandAvailability::Enabled;
 			Result.SideEffect = EUeAgentCommandSideEffect::None;
@@ -43,6 +43,18 @@ namespace UE::UAI::Module::CommandRegistration::BlueprintNode
 					TEXT("Exact stable graph identity copied from content_graph.structure.")),
 				Field(TEXT("query"), TEXT("string"), false,
 					TEXT("Optional bounded candidate-name or display-name filter.")),
+				Field(TEXT("id"), TEXT("string"), false,
+					TEXT("Optional exact candidate id returned by an earlier page.")),
+				Field(TEXT("node_guid"), TEXT("string"), false,
+					TEXT("Optional exact source-node GUID for a pin-drag menu context.")),
+				Field(TEXT("pin_guid"), TEXT("string"), false,
+					TEXT("Optional exact source-pin GUID for a pin-drag menu context.")),
+				Field(TEXT("pin_name"), TEXT("string"), false,
+					TEXT("Optional source-pin name when pin_guid is unavailable.")),
+				Field(TEXT("limit"), TEXT("integer"), false,
+					TEXT("Optional page size from 1 through 20; defaults to 20.")),
+				Field(TEXT("cursor"), TEXT("integer"), false,
+					TEXT("Optional non-negative result offset; defaults to zero.")),
 			};
 			Result.ResultFields = {
 				Field(TEXT("command_id"), TEXT("string"), true,
@@ -55,12 +67,18 @@ namespace UE::UAI::Module::CommandRegistration::BlueprintNode
 					TEXT("Resolved stable graph identity and kind.")),
 				Field(TEXT("graph_revision"), TEXT("string"), true,
 					TEXT("Current persisted graph revision for optimistic fencing.")),
+				Field(TEXT("context"), TEXT("object"), true,
+					TEXT("Exact graph and optional pin menu context used for enumeration.")),
 				Field(TEXT("candidates"), TEXT("array"), true,
-					TEXT("Real action-database candidates; candidate.name is an exact creation identity.")),
+					TEXT("Native Action Menu candidates; candidate.name or candidate.id is a direct HJSON creation selector.")),
+				Field(TEXT("total_matching"), TEXT("integer"), true,
+					TEXT("Total native menu candidates matching the current query.")),
+				Field(TEXT("next_cursor"), TEXT("integer"), true,
+					TEXT("Next result offset, or -1 when complete.")),
 				Field(TEXT("complete"), TEXT("boolean"), true,
-					TEXT("Truthful completeness for the supported candidate set.")),
+					TEXT("True only when this is the final page of the native menu set.")),
 				Field(TEXT("has_more"), TEXT("boolean"), true,
-					TEXT("Always false for the bounded supported candidate set.")),
+					TEXT("True only while another page remains.")),
 			};
 			Result.Errors = {
 				{TEXT("blueprint_node_query_authority_required"),
@@ -71,6 +89,20 @@ namespace UE::UAI::Module::CommandRegistration::BlueprintNode
 					TEXT("The exact stable graph identity could not be resolved.")},
 				{TEXT("blueprint_node_candidate_unresolved"),
 					TEXT("The real Blueprint action database has no supported candidate.")},
+				{TEXT("blueprint_node_candidate_page_invalid"),
+					TEXT("The requested limit or cursor is outside the bounded contract.")},
+				{TEXT("node_guid_invalid"),
+					TEXT("The source-node GUID is not a valid GUID.")},
+				{TEXT("node_not_found"),
+					TEXT("The requested source node does not exist in this graph.")},
+				{TEXT("pin_guid_invalid"),
+					TEXT("The source-pin GUID is not a valid GUID.")},
+				{TEXT("pin_selector_required"),
+					TEXT("node_guid requires pin_guid or pin_name because node-only context is not a native Action Menu scope.")},
+				{TEXT("pin_not_found"),
+					TEXT("The requested source pin does not exist in this graph context.")},
+				{TEXT("pin_ambiguous"),
+					TEXT("The pin name matches more than one pin; provide node_guid or pin_guid.")},
 			};
 			Result.Purpose.Summary =
 				TEXT("Resolve exact Blueprint node creation candidates for one persisted graph.");
@@ -81,15 +113,15 @@ namespace UE::UAI::Module::CommandRegistration::BlueprintNode
 				TEXT("Invoke the exact contract hash on the UE game thread."),
 			};
 			Result.Purpose.ParameterGuidance =
-				TEXT("Use candidate.name and binding_revision unchanged in the HJSON edit.");
+				TEXT("Search the exact graph or pin context, continue paging while has_more is true, then copy either candidate.name or candidate.id into the HJSON candidate selector.");
 			Result.Purpose.ResultGuidance =
-				TEXT("Treat graph_revision, candidate.name and binding_revision as opaque exact identities.");
+				TEXT("candidate.name is sufficient only when unique in this exact context; candidate.id is the exact compact selector. Internal spawner and revision data are resolved server-side.");
 			Result.Purpose.FailureGuidance =
 				TEXT("Unresolved or ambiguous candidates fail before any write and never fall back to a class alias.");
 			Result.Purpose.SideEffectGuidance =
 				TEXT("Read-only with no persistent or external side effects.");
 			Result.Purpose.MinimumExample =
-				TEXT("client.blueprint.node_candidates(target, graph_id, query='branch')");
+				TEXT("client.blueprint.node_candidates(target, graph_id, query='FInterpTo', limit=10)");
 			Result.Purpose.RelatedFlows = {
 				TEXT("query.command.search"),
 				TEXT("query.command.detail"),

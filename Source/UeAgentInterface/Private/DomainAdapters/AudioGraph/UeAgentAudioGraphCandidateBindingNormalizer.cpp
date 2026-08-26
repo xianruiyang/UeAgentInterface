@@ -3,6 +3,7 @@
 #include "Core/HjsonWorkspace/DomainAuthoring/UeAgentDomainHjsonAuthoringKit.h"
 #include "Dom/JsonObject.h"
 #include "Dom/JsonValue.h"
+#include "MetasoundSource.h"
 #include "QueryOwners/AudioGraph/UeAgentAudioGraphCandidateQuery.h"
 #include "UObject/UObjectGlobals.h"
 
@@ -124,6 +125,24 @@ namespace UE::UAI::DomainAdapters::AudioGraph
 			Object->SetNumberField(Field, Expected);
 			return true;
 		}
+
+		bool HasOnlyCandidateSelectorFields(
+			const TSharedPtr<FJsonObject>& Candidate)
+		{
+			if (!Candidate.IsValid())
+			{
+				return false;
+			}
+			for (const TPair<FString, TSharedPtr<FJsonValue>>& Field
+				: Candidate->Values)
+			{
+				if (Field.Key != TEXT("name") && Field.Key != TEXT("id"))
+				{
+					return false;
+				}
+			}
+			return true;
+		}
 	}
 
 	bool TryNormalizeAudioGraphCandidateBindings(
@@ -206,10 +225,89 @@ namespace UE::UAI::DomainAdapters::AudioGraph
 					Pointer + TEXT("/intent"));
 			}
 			const TSharedPtr<FJsonObject> Candidate = *CandidateField;
+			const FString CandidatePointer = Pointer + TEXT("/candidate");
+			if (TargetObject->GetClass() == UMetaSoundSource::StaticClass())
+			{
+				if (!HasOnlyCandidateSelectorFields(Candidate))
+				{
+					return Fail(
+						OutError,
+						TEXT("audio_graph_candidate_selector_field_unsupported"),
+						TargetIdentity,
+						CandidatePointer);
+				}
+				FDomainHjsonCandidateSelector Selector;
+				if (!TryReadCandidateSelector(
+						Candidate, CandidatePointer, Selector, OutError))
+				{
+					return false;
+				}
+				FAudioGraphCandidate Resolved;
+				FAudioGraphCandidateQueryError QueryError;
+				if (!TryResolveAudioGraphCandidate(
+						*TargetObject,
+						Selector.Name,
+						Selector.Id,
+						Resolved,
+						QueryError))
+				{
+					return Fail(
+						OutError,
+						QueryError.Code.IsEmpty()
+							? FString(TEXT(
+								"audio_graph_candidate_selector_invalid"))
+							: QueryError.Code,
+						TargetIdentity,
+						CandidatePointer);
+				}
+				if (!Resolved.bSupported
+					|| !Resolved.SupportedOperations.Contains(TEXT("create")))
+				{
+					return Fail(
+						OutError,
+						TEXT("audio_graph_candidate_action_kind_unsupported"),
+						TargetIdentity,
+						CandidatePointer);
+				}
+				if (!TrySetExactString(
+						Node,
+						TEXT("class_name"),
+						Resolved.Name,
+						TargetIdentity,
+						Pointer,
+						OutError)
+					|| !TrySetExactNumber(
+						Node,
+						TEXT("major_version"),
+						Resolved.MajorVersion,
+						TargetIdentity,
+						Pointer,
+						OutError)
+					|| !TrySetExactNumber(
+						Node,
+						TEXT("minor_version"),
+						Resolved.MinorVersion,
+						TargetIdentity,
+						Pointer,
+						OutError))
+				{
+					return false;
+				}
+				if (!Node->HasField(TEXT("node_guid")))
+				{
+					Node->SetStringField(
+						TEXT("node_guid"),
+						FGuid::NewGuid().ToString(
+							EGuidFormats::DigitsWithHyphensLower));
+				}
+				Node->RemoveField(TEXT("candidate"));
+				continue;
+			}
+
 			FDomainHjsonCandidateBinding Binding;
 			if (!TryReadCandidateBinding(
 					Candidate,
-					Pointer + TEXT("/candidate"),
+					CandidatePointer,
 					Binding,
 					OutError))
 			{

@@ -2,11 +2,16 @@
 
 #include "Core/HjsonWorkspace/ImportInitialization/UeAgentHjsonDomainProviderRegistry.h"
 #include "Core/HjsonWorkspace/UeAgentAuthoringComposition.h"
+#include "Core/Contract/UeAgentCommandJson.h"
+#include "Components/SceneComponent.h"
 #include "Dom/JsonObject.h"
 #include "Dom/JsonValue.h"
 #include "Engine/Blueprint.h"
 #include "Engine/BlueprintGeneratedClass.h"
+#include "Engine/SCS_Node.h"
+#include "Engine/SimpleConstructionScript.h"
 #include "EdGraph/EdGraph.h"
+#include "GameFramework/Actor.h"
 #include "K2Node_CallFunction.h"
 #include "Kismet2/KismetEditorUtilities.h"
 #include "Module/CommandRegistration/Active/UeAgentActiveCommandComposition.h"
@@ -50,6 +55,9 @@ bool FUeAgentStrictV2T14BlueprintSurfacesTest::RunTest(
 		AddError(WorkspaceError.GetCode());
 		return false;
 	}
+	TestTrue(TEXT("Blueprint Surfaces explicitly supports authoring-schema discovery"),
+		Provider->SupportsExplicitCommand(
+			TEXT("content_graph.authoring_schema")));
 
 	struct FContractCase
 	{
@@ -291,6 +299,165 @@ bool FUeAgentStrictV2T14BlueprintSurfacesTest::RunTest(
 			ScratchBlueprint))
 	{
 		return false;
+	}
+	UBlueprint* RevisionBlueprint = FKismetEditorUtilities::CreateBlueprint(
+		AActor::StaticClass(), GetTransientPackage(),
+		*FString(TEXT("BP_T14_Revision_") + Suffix), BPTYPE_Normal,
+		UBlueprint::StaticClass(), UBlueprintGeneratedClass::StaticClass(),
+		TEXT("T14"));
+	if (!TestNotNull(TEXT("a transient Actor Blueprint revision fixture is created"),
+		RevisionBlueprint)
+		|| !TestNotNull(TEXT("the revision fixture has an SCS"),
+			RevisionBlueprint
+				? RevisionBlueprint->SimpleConstructionScript.Get()
+				: nullptr))
+	{
+		return false;
+	}
+	USCS_Node* RevisionNode =
+		RevisionBlueprint->SimpleConstructionScript->CreateNode(
+			USceneComponent::StaticClass(), TEXT("RevisionRootT14"));
+	if (!TestNotNull(TEXT("the revision fixture has a SceneComponent node"),
+		RevisionNode))
+	{
+		return false;
+	}
+	RevisionBlueprint->SimpleConstructionScript->AddNode(RevisionNode);
+	USceneComponent* RevisionTemplate =
+		Cast<USceneComponent>(RevisionNode->ComponentTemplate);
+	if (!TestNotNull(TEXT("the revision node has a SceneComponent template"),
+		RevisionTemplate))
+	{
+		return false;
+	}
+	auto ReadAuthoringSchemaRevision = [this, &Provider, &WorkspaceError](
+		const FString& Target,
+		FString& OutRevision) -> bool
+	{
+		OutRevision.Reset();
+		const FImportInitializationDomainRequest Request(
+			TEXT("content_graph.authoring_schema"),
+			TEXT("uai.content_graph.resolved_target/1"),
+			Target,
+			TEXT("/Script/Engine.Blueprint"),
+			EInitializationNodeRole::RootTarget,
+			FString::Printf(TEXT("{\"target\":\"%s\"}"), *Target));
+		FString Contract;
+		FImportInitializationDomainResponse Response;
+		if (!Provider->TryResolveInitializationContract(
+				Request, Contract, WorkspaceError)
+			|| !Provider->TryExecute(
+				Request, Contract, Response, WorkspaceError))
+		{
+			return false;
+		}
+		TSharedPtr<FJsonObject> Payload;
+		FString JsonError;
+		const TSharedPtr<FJsonObject>* QueryResult = nullptr;
+		return UE::UAI::CommandContract::Json::TryParseObject(
+				Response.GetPayloadJson(), Payload, JsonError)
+			&& Payload.IsValid()
+			&& Payload->TryGetObjectField(TEXT("query_result"), QueryResult)
+			&& QueryResult && QueryResult->IsValid()
+			&& (*QueryResult)->TryGetStringField(TEXT("revision"), OutRevision)
+			&& !OutRevision.IsEmpty();
+	};
+	const FString RevisionTarget = RevisionBlueprint->GetPathName();
+	FString InitialRevision;
+	FString StableInitialRevision;
+	FString ChangedRevision;
+	FString StableChangedRevision;
+	TestTrue(TEXT("the initial Component template revision is readable"),
+		ReadAuthoringSchemaRevision(RevisionTarget, InitialRevision));
+	TestTrue(TEXT("the unchanged Component template revision is readable"),
+		ReadAuthoringSchemaRevision(RevisionTarget, StableInitialRevision));
+	TestEqual(TEXT("the unchanged Component template revision is stable"),
+		StableInitialRevision, InitialRevision);
+	RevisionTemplate->SetRelativeLocation(FVector(125.0, 25.0, 5.0));
+	TestTrue(TEXT("the changed Component template revision is readable"),
+		ReadAuthoringSchemaRevision(RevisionTarget, ChangedRevision));
+	TestTrue(TEXT("a Component template property changes the revision"),
+		ChangedRevision != InitialRevision);
+	TestTrue(TEXT("the repeated changed Component template revision is readable"),
+		ReadAuthoringSchemaRevision(RevisionTarget, StableChangedRevision));
+	TestEqual(TEXT("the changed Component template revision is stable"),
+		StableChangedRevision, ChangedRevision);
+	const FString SchemaTarget = ScratchBlueprint->GetPathName();
+	const FImportInitializationDomainRequest SchemaRequest(
+		TEXT("content_graph.authoring_schema"),
+		TEXT("uai.content_graph.resolved_target/1"),
+		SchemaTarget,
+		TEXT("/Script/Engine.Blueprint"),
+		EInitializationNodeRole::RootTarget,
+		FString::Printf(TEXT("{\"target\":\"%s\"}"), *SchemaTarget));
+	FString SchemaContract;
+	FImportInitializationDomainResponse SchemaResponse;
+	TestTrue(TEXT("the Blueprint authoring-schema route resolves"),
+		Provider->TryResolveInitializationContract(
+			SchemaRequest, SchemaContract, WorkspaceError));
+	if (TestTrue(TEXT("the Blueprint authoring-schema mechanics execute"),
+		Provider->TryExecute(
+			SchemaRequest, SchemaContract, SchemaResponse, WorkspaceError)))
+	{
+		TestTrue(TEXT("the domain response is read-only"),
+			SchemaResponse.IsReadOnly());
+		TSharedPtr<FJsonObject> SchemaPayload;
+		FString JsonError;
+		TestTrue(TEXT("the Blueprint authoring-schema payload is valid JSON"),
+			UE::UAI::CommandContract::Json::TryParseObject(
+				SchemaResponse.GetPayloadJson(), SchemaPayload, JsonError)
+				&& SchemaPayload.IsValid());
+		if (SchemaPayload.IsValid())
+		{
+			const TSharedPtr<FJsonObject>* QueryResult = nullptr;
+			TestEqual(TEXT("the schema response command identity is exact"),
+				SchemaPayload->GetStringField(TEXT("command_id")),
+				FString(TEXT("content_graph.authoring_schema")));
+			TestTrue(TEXT("the schema response is complete and read-only"),
+				SchemaPayload->GetBoolField(TEXT("read_only"))
+				&& SchemaPayload->GetBoolField(TEXT("complete"))
+				&& !SchemaPayload->GetBoolField(TEXT("has_more")));
+			TestTrue(TEXT("the schema query result is present"),
+				SchemaPayload->TryGetObjectField(TEXT("query_result"), QueryResult)
+				&& QueryResult && QueryResult->IsValid());
+			if (QueryResult && QueryResult->IsValid())
+			{
+				TestEqual(TEXT("the Blueprint schema id is exact"),
+					(*QueryResult)->GetStringField(TEXT("schema_id")),
+					FString(TEXT("uai.blueprint.edit/1")));
+				TestEqual(TEXT("the Blueprint schema root type is exact"),
+					(*QueryResult)->GetStringField(TEXT("root_type")),
+					FString(TEXT("/Script/Engine.Blueprint")));
+				TestEqual(TEXT("the Blueprint schema provider is exact"),
+					(*QueryResult)->GetStringField(TEXT("provider")),
+					FString(TEXT("blueprint-surface-domain-provider")));
+				TestFalse(TEXT("the Blueprint schema carries the current revision"),
+					(*QueryResult)->GetStringField(TEXT("revision")).IsEmpty());
+				const TSharedPtr<FJsonObject>* Template = nullptr;
+				const TSharedPtr<FJsonObject>* Root = nullptr;
+				const TSharedPtr<FJsonObject>* Document = nullptr;
+				const TSharedPtr<FJsonObject>* Target = nullptr;
+				const TSharedPtr<FJsonObject>* ProviderExtension = nullptr;
+				TestTrue(TEXT("the schema exposes an executable update template"),
+					(*QueryResult)->TryGetObjectField(TEXT("template"), Template)
+					&& Template && Template->IsValid()
+					&& (*Template)->GetStringField(TEXT("schema"))
+						== TEXT("uai.blueprint.edit/1")
+					&& (*Template)->TryGetObjectField(TEXT("root"), Root)
+					&& Root && Root->IsValid()
+					&& (*Root)->GetStringField(TEXT("type"))
+						== TEXT("/Script/Engine.Blueprint")
+					&& (*Root)->TryGetObjectField(TEXT("document"), Document)
+					&& Document && Document->IsValid()
+					&& (*Document)->GetStringField(TEXT("operation")) == TEXT("update")
+					&& (*Document)->TryGetObjectField(TEXT("target"), Target)
+					&& Target && Target->IsValid()
+					&& (*Target)->GetStringField(TEXT("asset_path")) == SchemaTarget
+					&& (*Document)->TryGetObjectField(
+						TEXT("provider_extension"), ProviderExtension)
+					&& ProviderExtension && ProviderExtension->IsValid());
+			}
+		}
 	}
 	FKismetEditorUtilities::CompileBlueprint(InterfaceBlueprint);
 	if (!TestTrue(TEXT("the interface fixture has a generated class"),

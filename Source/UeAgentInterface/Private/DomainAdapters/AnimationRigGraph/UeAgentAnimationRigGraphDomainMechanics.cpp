@@ -10,6 +10,8 @@
 #include "Misc/PackageName.h"
 #include "Module/CommandRegistration/Active/UeAgentActiveCommandComposition.h"
 #include "OperationOwners/AnimationRigCommands/UeAgentAnimationRigCommandOperationOwner.h"
+#include "UObject/Class.h"
+#include "UObject/Object.h"
 #include "UObject/UObjectGlobals.h"
 
 namespace UE::UAI::DomainAdapters::AnimationRigGraph

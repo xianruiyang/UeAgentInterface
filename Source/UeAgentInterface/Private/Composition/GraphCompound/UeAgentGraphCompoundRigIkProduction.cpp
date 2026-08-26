@@ -444,7 +444,56 @@ namespace UE::UAI::Composition::GraphCompound
 					FAnimationRigGraphUnitMutation Mutation;
 					Mutation.NodeName = *SemanticId.Mid(11);
 					Mutation.Intent = NativeIntent(Edit.GetIntent());
-					if (Mutation.Intent != EAnimationRigGraphMutationIntent::Delete)
+					if (Mutation.Intent == EAnimationRigGraphMutationIntent::Create
+						|| Mutation.Intent
+							== EAnimationRigGraphMutationIntent::Replace)
+					{
+						const FUeAgentCanonicalValue* Candidate =
+							Edit.GetProposedAfter().IsValid()
+								? FindField(
+									*Edit.GetProposedAfter(), TEXT("candidate"))
+								: nullptr;
+						FString Method;
+						const bool bHasCandidateName = Candidate
+							&& Candidate->GetKind() == EUeAgentValueKind::Object
+							&& TryStringField(
+								*Candidate,
+								TEXT("name"),
+								Mutation.CandidateName);
+						const bool bHasCandidateId = Candidate
+							&& Candidate->GetKind() == EUeAgentValueKind::Object
+							&& TryStringField(
+								*Candidate,
+								TEXT("id"),
+								Mutation.CandidateId);
+						if (!Edit.GetProposedAfter().IsValid()
+							|| !Candidate
+							|| Candidate->GetKind() != EUeAgentValueKind::Object
+							|| !TryPositionField(
+								*Edit.GetProposedAfter(),
+								TEXT("position"),
+								Mutation.Position)
+							|| (!bHasCandidateName && !bHasCandidateId))
+						{
+							SetError(
+								OutError,
+								TEXT("graph_compound_control_rig_unit_edit_invalid"),
+								Mutation.NodeName.ToString());
+							return false;
+						}
+						Mutation.bHasScriptStructAssertion = TryStringField(
+							*Edit.GetProposedAfter(),
+							TEXT("script_struct_ref"),
+							Mutation.ScriptStructRef);
+						if (TryStringField(
+								*Edit.GetProposedAfter(), TEXT("method"), Method))
+						{
+							Mutation.MethodName = *Method;
+							Mutation.bHasMethodAssertion = true;
+						}
+					}
+					else if (Mutation.Intent
+						== EAnimationRigGraphMutationIntent::Update)
 					{
 						FString Method;
 						if (!Edit.GetProposedAfter().IsValid()
@@ -463,11 +512,13 @@ namespace UE::UAI::Composition::GraphCompound
 								Mutation.NodeName.ToString());
 							return false;
 						}
+						Mutation.bHasScriptStructAssertion = true;
 						if (TryStringField(
 								*Edit.GetProposedAfter(), TEXT("method"), Method))
 						{
 							Mutation.MethodName = *Method;
 						}
+						Mutation.bHasMethodAssertion = true;
 					}
 					OutSpec.Units.Add(MoveTemp(Mutation));
 					continue;
@@ -1285,7 +1336,7 @@ namespace UE::UAI::Composition::GraphCompound
 	bool TryApplyRigIkMutation(
 		const FPcgAnimationGraphRouteProfile& Profile,
 		UObject& Target,
-		const FRigIkReadbackSpec& Spec,
+		FRigIkReadbackSpec& Spec,
 		FAnimationRigGraphNativeHook& Hook,
 		FString& OutRevision,
 		FGraphCompoundRuntimeError& OutError)

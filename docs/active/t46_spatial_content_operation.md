@@ -1,8 +1,8 @@
 # T46 Spatial-content operation authority
 
 T46 owns eight current public commands. Discover their current hashes and exact
-parameter schemas through `client.command_search(...)` and
-`client.command_detail(...)`, then invoke the default generated SDK methods:
+parameter schemas through `client.query.command_search(...)` and
+`client.query.command_detail(...)`, then invoke the default generated SDK methods:
 
 ```python
 client.mesh.element_select_by_ray(...)

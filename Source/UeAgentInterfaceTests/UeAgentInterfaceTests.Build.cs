@@ -89,6 +89,7 @@ public class UeAgentInterfaceTests : ModuleRules
 				"IKRigEditor",
 				"RigVM",
 				"RigVMDeveloper",
+				"RigVMEditor",
 				"Niagara",
 				"NiagaraEditor",
 				"PCG",

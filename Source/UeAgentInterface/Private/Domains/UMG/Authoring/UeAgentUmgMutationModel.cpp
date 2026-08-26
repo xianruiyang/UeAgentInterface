@@ -12,16 +12,19 @@
 #include "Components/PanelSlot.h"
 #include "Components/PanelWidget.h"
 #include "Components/Widget.h"
+#include "Core/HjsonWorkspace/DomainAuthoring/UeAgentDomainHjsonAuthoringKit.h"
 #include "Dom/JsonObject.h"
 #include "Dom/JsonValue.h"
 #include "Kismet2/BlueprintEditorUtils.h"
 #include "Kismet2/CompilerResultsLog.h"
 #include "Kismet2/KismetEditorUtilities.h"
 #include "MovieScene.h"
+#include "QueryOwners/UmgWidget/UeAgentUmgWidgetQueryOwner.h"
 #include "Sections/MovieSceneColorSection.h"
 #include "Sections/MovieSceneFloatSection.h"
 #include "Tracks/MovieSceneColorTrack.h"
 #include "Tracks/MovieSceneFloatTrack.h"
+#include "Templates/WidgetTemplateClass.h"
 #include "Utilities/AuthoringCore/UeAgentAuthoringState.h"
 #include "Utilities/AuthoringCore/UeAgentDetailsAuthoringService.h"
 #include "WidgetBlueprint.h"
@@ -282,6 +285,128 @@ bool AttachWidget(UWidgetBlueprint& Blueprint,
 	return true;
 }
 
+class FUeAgentNamedWidgetTemplateClass final : public FWidgetTemplateClass
+{
+public:
+	explicit FUeAgentNamedWidgetTemplateClass(UClass* InWidgetClass)
+		: FWidgetTemplateClass(InWidgetClass)
+	{
+	}
+
+	UWidget* CreateNamedForAuthoring(UWidgetTree* Tree, const FName RequestedName)
+	{
+		return CreateNamed(Tree, RequestedName);
+	}
+};
+
+bool TryResolveWidgetCandidates(
+	UWidgetBlueprint& Blueprint,
+	const TArray<FMapEntry>& Entries,
+	TMap<FString, UE::UAI::QueryOwners::UmgWidget::FUmgWidgetCandidate>&
+		OutCandidates,
+	FString& OutError)
+{
+	using namespace UE::UAI::HjsonWorkspace;
+	using namespace UE::UAI::HjsonWorkspace::DomainAuthoring;
+	using namespace UE::UAI::QueryOwners::UmgWidget;
+
+	OutCandidates.Reset();
+	for (const FMapEntry& Entry : Entries)
+	{
+		const TSharedPtr<FJsonObject>* CandidateField = nullptr;
+		if (!Entry.Spec->TryGetObjectField(TEXT("candidate"), CandidateField))
+		{
+			if (Entry.Spec->HasField(TEXT("candidate")))
+			{
+				SetError(OutError, TEXT("umg_widget_candidate_invalid"), Entry.Key);
+				return false;
+			}
+			continue;
+		}
+		if (!CandidateField || !CandidateField->IsValid())
+		{
+			SetError(OutError, TEXT("umg_widget_candidate_invalid"), Entry.Key);
+			return false;
+		}
+
+		FDomainHjsonCandidateSelector Selector;
+		FWorkspaceError SelectorError;
+		if (!TryReadCandidateSelector(
+				*CandidateField,
+				TEXT("/provider_extension/widget_tree/widgets/")
+					+ Entry.Key + TEXT("/candidate"),
+				Selector,
+				SelectorError))
+		{
+			SetError(
+				OutError,
+				SelectorError.GetCode().IsEmpty()
+					? FString(TEXT("umg_widget_candidate_selector_invalid"))
+					: SelectorError.GetCode(),
+				Entry.Key);
+			return false;
+		}
+
+		FUmgWidgetCandidate Resolved;
+		FUmgWidgetCandidateQueryError QueryError;
+		if (!TryResolveUmgWidgetCandidate(
+				Blueprint,
+				Selector.Name,
+				Selector.Id,
+				Resolved,
+				QueryError))
+		{
+			SetError(
+				OutError,
+				QueryError.Code.IsEmpty()
+					? FString(TEXT("umg_widget_candidate_selector_invalid"))
+					: QueryError.Code,
+				QueryError.SubjectId.IsEmpty()
+					? Entry.Key
+					: QueryError.SubjectId);
+			return false;
+		}
+
+		FString ClassAssertion;
+		if (TryGetString(Entry.Spec, TEXT("class"), ClassAssertion)
+			&& !ClassAssertion.IsEmpty()
+			&& ClassAssertion != Resolved.ClassPath)
+		{
+			SetError(
+				OutError,
+				TEXT("umg_widget_candidate_class_conflict"),
+				Entry.Key);
+			return false;
+		}
+		OutCandidates.Add(Entry.Key, MoveTemp(Resolved));
+	}
+	return true;
+}
+
+bool TryCreateWidgetFromTemplate(
+	UWidgetBlueprint& Blueprint,
+	UClass& WidgetClass,
+	const FString& Name,
+	UWidget*& OutWidget,
+	FString& OutError)
+{
+	OutWidget = nullptr;
+	if (!Blueprint.WidgetTree || Name.IsEmpty())
+	{
+		SetError(OutError, TEXT("umg_widget_native_create_failed"), Name);
+		return false;
+	}
+	FUeAgentNamedWidgetTemplateClass Template(&WidgetClass);
+	OutWidget = Template.CreateNamedForAuthoring(
+		Blueprint.WidgetTree, FName(*Name));
+	if (!OutWidget)
+	{
+		SetError(OutError, TEXT("umg_widget_native_create_failed"), Name);
+		return false;
+	}
+	return true;
+}
+
 bool ApplyWidgetTree(UWidgetBlueprint& Blueprint,
 	const TSharedPtr<const FJsonObject>& Extension,
 	FMutationCounters& OutCounters,
@@ -303,13 +428,15 @@ bool ApplyWidgetTree(UWidgetBlueprint& Blueprint,
 	bool bPresent = false;
 	if (!GetObjectMap(Tree, TEXT("widgets"), Entries, bPresent, OutError) || !bPresent)
 		return false;
-	UeAgentUmgOps::SyncWidgetVariableGuidMap(&Blueprint);
+	TMap<FString, UE::UAI::QueryOwners::UmgWidget::FUmgWidgetCandidate>
+		ResolvedCandidates;
 
 	for (const FMapEntry& Entry : Entries)
 	{
 		if (!ValidateKnownFields(Entry.Spec,
 				{TEXT("operation"),
 					TEXT("name"),
+					TEXT("candidate"),
 					TEXT("class"),
 					TEXT("parent"),
 					TEXT("index"),
@@ -321,6 +448,16 @@ bool ApplyWidgetTree(UWidgetBlueprint& Blueprint,
 		{
 			return false;
 		}
+	}
+	if (!TryResolveWidgetCandidates(
+			Blueprint, Entries, ResolvedCandidates, OutError))
+	{
+		return false;
+	}
+	UeAgentUmgOps::SyncWidgetVariableGuidMap(&Blueprint);
+
+	for (const FMapEntry& Entry : Entries)
+	{
 		const FString Op = Operation(Entry.Spec);
 		if (Op != TEXT("remove")) continue;
 		UWidget* Existing = FindWidgetByGuidOrName(Blueprint, Entry.Key, Entry.Spec);
@@ -365,7 +502,15 @@ bool ApplyWidgetTree(UWidgetBlueprint& Blueprint,
 			}
 
 			FString ClassPath;
-			TryGetString(Entry.Spec, TEXT("class"), ClassPath);
+			if (const UE::UAI::QueryOwners::UmgWidget::FUmgWidgetCandidate*
+				ResolvedCandidate = ResolvedCandidates.Find(Entry.Key))
+			{
+				ClassPath = ResolvedCandidate->ClassPath;
+			}
+			else
+			{
+				TryGetString(Entry.Spec, TEXT("class"), ClassPath);
+			}
 			if (Widget && !ClassPath.IsEmpty() && Widget->GetClass()->GetPathName() != ClassPath)
 			{
 				if (Op != TEXT("replace"))
@@ -394,10 +539,9 @@ bool ApplyWidgetTree(UWidgetBlueprint& Blueprint,
 					SetError(OutError, TEXT("umg_widget_name_missing"), Entry.Key);
 					return false;
 				}
-				Widget = Blueprint.WidgetTree->ConstructWidget<UWidget>(WidgetClass, FName(*Name));
-				if (!Widget)
+				if (!TryCreateWidgetFromTemplate(
+						Blueprint, *WidgetClass, Name, Widget, OutError))
 				{
-					SetError(OutError, TEXT("umg_widget_native_create_failed"), Entry.Key);
 					return false;
 				}
 				bool bMakeVariable = true;

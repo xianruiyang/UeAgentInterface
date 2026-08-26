@@ -5,6 +5,8 @@
 #include "Dom/JsonObject.h"
 #include "Dom/JsonValue.h"
 #include "Internationalization/Regex.h"
+#include "Misc/Paths.h"
+#include "Misc/ScopeRWLock.h"
 
 namespace
 {

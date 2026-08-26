@@ -152,12 +152,14 @@ namespace UE::UAI::OperationOwners::AudioGraph
 				}
 				FString Target;
 				FString Query;
+				FString CandidateId;
 				if (!Params->TryGetStringField(TEXT("target"), Target)
 					|| Target.TrimStartAndEnd().IsEmpty())
 				{
 					return Fail(OutError, TEXT("audio_graph_candidate_target_required"), Request.CommandId);
 				}
 				Params->TryGetStringField(TEXT("query"), Query);
+				Params->TryGetStringField(TEXT("id"), CandidateId);
 				int32 Limit = 64;
 				int32 Cursor = 0;
 				double Number = 0.0;
@@ -171,7 +173,13 @@ namespace UE::UAI::OperationOwners::AudioGraph
 				FAudioGraphCandidateQueryResult QueryResult;
 				FAudioGraphCandidateQueryError QueryError;
 				if (!TryQueryAudioGraphCandidates(
-						*TargetObject, Query, QueryResult, QueryError, Limit, Cursor))
+						*TargetObject,
+						Query,
+						QueryResult,
+						QueryError,
+						Limit,
+						Cursor,
+						CandidateId))
 				{
 					return Fail(
 						OutError,
@@ -191,25 +199,55 @@ namespace UE::UAI::OperationOwners::AudioGraph
 				Payload->SetNumberField(TEXT("next_cursor"), QueryResult.NextCursor);
 				Payload->SetBoolField(TEXT("complete"), QueryResult.bComplete);
 				Payload->SetBoolField(TEXT("has_more"), QueryResult.bHasMore);
+				Payload->SetStringField(
+					TEXT("coverage_scope"), QueryResult.CoverageScope);
+				Payload->SetBoolField(
+					TEXT("coverage_complete"), QueryResult.bCoverageComplete);
+				Payload->SetBoolField(
+					TEXT("creation_coverage_complete"),
+					QueryResult.bCreationCoverageComplete);
 				TArray<TSharedPtr<FJsonValue>> Candidates;
 				for (const FAudioGraphCandidate& Candidate : QueryResult.Candidates)
 				{
 					const TSharedPtr<FJsonObject> Value = MakeShared<FJsonObject>();
-					Value->SetStringField(TEXT("target_ref"), Candidate.TargetRef);
-					Value->SetStringField(
-						TEXT("target_revision"), Candidate.TargetRevision);
 					Value->SetStringField(TEXT("name"), Candidate.Name);
 					Value->SetStringField(TEXT("label"), Candidate.Label);
 					Value->SetStringField(TEXT("kind"), Candidate.Kind);
-					Value->SetArrayField(TEXT("supported_operations"), StringArray(Candidate.SupportedOperations));
-					Value->SetStringField(TEXT("input_contract"), Candidate.InputContract);
-					Value->SetStringField(TEXT("placement_contract"), Candidate.PlacementContract);
-					Value->SetStringField(TEXT("required_context"), Candidate.RequiredContext);
-					Value->SetStringField(TEXT("binding_revision"), Candidate.BindingRevision);
-					if (Candidate.Kind == TEXT("metasound_node"))
+					if (!Candidate.Id.IsEmpty())
 					{
+						Value->SetStringField(TEXT("id"), Candidate.Id);
+						Value->SetStringField(
+							TEXT("action_kind"), Candidate.ActionKind);
+						Value->SetStringField(
+							TEXT("category"), Candidate.Category);
+						Value->SetStringField(
+							TEXT("summary"), Candidate.Summary);
+						Value->SetBoolField(
+							TEXT("supported"), Candidate.bSupported);
+						Value->SetStringField(
+							TEXT("write_support"), Candidate.WriteSupport);
+						Value->SetStringField(
+							TEXT("support_reason"), Candidate.SupportReason);
 						Value->SetNumberField(TEXT("major_version"), Candidate.MajorVersion);
 						Value->SetNumberField(TEXT("minor_version"), Candidate.MinorVersion);
+					}
+					else
+					{
+						Value->SetStringField(
+							TEXT("target_ref"), Candidate.TargetRef);
+						Value->SetStringField(
+							TEXT("target_revision"), Candidate.TargetRevision);
+						Value->SetArrayField(
+							TEXT("supported_operations"),
+							StringArray(Candidate.SupportedOperations));
+						Value->SetStringField(
+							TEXT("input_contract"), Candidate.InputContract);
+						Value->SetStringField(
+							TEXT("placement_contract"), Candidate.PlacementContract);
+						Value->SetStringField(
+							TEXT("required_context"), Candidate.RequiredContext);
+						Value->SetStringField(
+							TEXT("binding_revision"), Candidate.BindingRevision);
 					}
 					Candidates.Add(MakeShared<FJsonValueObject>(Value));
 				}

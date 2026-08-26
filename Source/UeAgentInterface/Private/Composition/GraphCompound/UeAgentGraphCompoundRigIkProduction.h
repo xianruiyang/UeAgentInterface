@@ -86,7 +86,7 @@ namespace UE::UAI::Composition::GraphCompound
 	bool TryApplyRigIkMutation(
 		const FPcgAnimationGraphRouteProfile& Profile,
 		UObject& Target,
-		const FRigIkReadbackSpec& Spec,
+		FRigIkReadbackSpec& Spec,
 		FAnimationRigGraphNativeHook& Hook,
 		FString& OutRevision,
 		FGraphCompoundRuntimeError& OutError);

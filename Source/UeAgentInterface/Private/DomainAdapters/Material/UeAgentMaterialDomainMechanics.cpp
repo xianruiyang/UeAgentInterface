@@ -2,10 +2,14 @@
 
 #include "CommandEdge/UeAgentCommandProtocol.h"
 #include "CommandRegistry/UeAgentImmutableCommandRegistry.h"
+#include "Commands/PaletteSearch/UeAgentPaletteSearchTypes.h"
 #include "Core/Contract/UeAgentCommandJson.h"
 #include "Core/HjsonWorkspace/DomainAuthoring/UeAgentDomainHjsonAuthoringKit.h"
 #include "Dom/JsonObject.h"
+#include "Dom/JsonValue.h"
 #include "HAL/FileManager.h"
+#include "Materials/Material.h"
+#include "Materials/MaterialFunction.h"
 #include "Misc/PackageName.h"
 #include "Module/CommandRegistration/Active/UeAgentActiveCommandComposition.h"
 #include "OperationOwners/MaterialCommands/UeAgentMaterialCommandOperationOwner.h"
@@ -194,7 +198,32 @@ namespace UE::UAI::DomainAdapters::Material
 			return TryCanonicalizeObject(Snapshot, OutPayload, OutError);
 		}
 
-		bool ValidateAndStripExpressionCandidates(
+		bool TryReadOptionalContextString(
+			const TSharedPtr<FJsonObject>& Context,
+			const TCHAR* Field,
+			FString& OutValue,
+			const FString& Pointer,
+			FWorkspaceError& OutError)
+		{
+			OutValue.Reset();
+			if (!Context.IsValid() || !Context->HasField(Field))
+			{
+				return true;
+			}
+			const TSharedPtr<FJsonValue> Value = Context->TryGetField(Field);
+			if (!Value.IsValid() || Value->Type != EJson::String)
+			{
+				return Fail(
+					OutError,
+					TEXT("material_candidate_context_invalid"),
+					Field,
+					Pointer + TEXT("/") + Field);
+			}
+			OutValue = Value->AsString().TrimStartAndEnd();
+			return true;
+		}
+
+		bool ValidateExpressionCandidates(
 			const FString& Target,
 			const TArray<TSharedPtr<FJsonValue>>& Edits,
 			FWorkspaceError& OutError)
@@ -222,52 +251,142 @@ namespace UE::UAI::DomainAdapters::Material
 				{
 					continue;
 				}
-				FString ClassRef;
-				if (!(*Value)->TryGetStringField(TEXT("class_ref"), ClassRef))
-				{
-					continue;
-				}
 				const TSharedPtr<FJsonObject>* Candidate = nullptr;
-				FString CandidateName;
-				FString BindingRevision;
 				if (!(*Value)->TryGetObjectField(TEXT("candidate"), Candidate)
-					|| !Candidate || !Candidate->IsValid()
-					|| !(*Candidate)->TryGetStringField(
-						TEXT("name"), CandidateName)
-					|| !(*Candidate)->TryGetStringField(
+					|| !Candidate || !Candidate->IsValid())
+				{
+					return Fail(
+						OutError,
+						TEXT("material_candidate_selector_required"),
+						FString::FromInt(Index),
+						FString::Printf(TEXT("/edits/%d/value/candidate"), Index));
+				}
+				FDomainHjsonCandidateSelector Selector;
+				if (!TryReadCandidateSelector(
+						*Candidate,
+						FString::Printf(
+							TEXT("/edits/%d/value/candidate"), Index),
+						Selector,
+						OutError))
+				{
+					return false;
+				}
+
+				UeAgentPaletteSearch::FSearchParams SearchParams;
+				SearchParams.CatalogType = TEXT("material_node");
+				SearchParams.AssetPath = TargetObject->GetPathName();
+				SearchParams.GraphName = TargetObject->IsA<UMaterial>()
+					? TEXT("MaterialGraph")
+					: TEXT("MaterialFunctionGraph");
+				const TSharedPtr<FJsonObject>* CandidateContext = nullptr;
+				if ((*Value)->HasField(TEXT("candidate_context")))
+				{
+					if (!(*Value)->TryGetObjectField(
+							TEXT("candidate_context"), CandidateContext)
+						|| !CandidateContext || !CandidateContext->IsValid())
+					{
+						return Fail(
+							OutError,
+							TEXT("material_candidate_context_invalid"),
+							FString::FromInt(Index),
+							FString::Printf(
+								TEXT("/edits/%d/value/candidate_context"),
+								Index));
+					}
+					const FString ContextPointer = FString::Printf(
+						TEXT("/edits/%d/value/candidate_context"), Index);
+					if (!TryReadOptionalContextString(
+							*CandidateContext, TEXT("graph_name"),
+							SearchParams.GraphName, ContextPointer, OutError)
+						|| !TryReadOptionalContextString(
+							*CandidateContext, TEXT("node_guid"),
+							SearchParams.NodeGuid, ContextPointer, OutError)
+						|| !TryReadOptionalContextString(
+							*CandidateContext, TEXT("pin_guid"),
+							SearchParams.PinGuid, ContextPointer, OutError)
+						|| !TryReadOptionalContextString(
+							*CandidateContext, TEXT("pin_name"),
+							SearchParams.PinName, ContextPointer, OutError))
+					{
+						return false;
+					}
+				}
+
+				UeAgentPaletteSearch::FCandidate ResolvedCandidate;
+				FString ResolveError;
+				if (!UeAgentPaletteSearch::TryResolveMaterialActionCandidate(
+						SearchParams,
+						Selector.Name,
+						Selector.Id,
+						ResolvedCandidate,
+						ResolveError))
+				{
+					return Fail(
+						OutError,
+						ResolveError.IsEmpty()
+							? FString(TEXT("material_action_candidate_not_found"))
+							: ResolveError,
+						Selector.Id.IsEmpty() ? Selector.Name : Selector.Id,
+						FString::Printf(TEXT("/edits/%d/value/candidate"), Index));
+				}
+				if (!ResolvedCandidate.bSupportedInContext)
+				{
+					return Fail(
+						OutError,
+						TargetObject->IsA<UMaterialFunction>()
+							? FString(TEXT("material_function_native_action_lifecycle_unsupported"))
+							: FString(TEXT("material_action_candidate_not_executable_in_context")),
+						ResolvedCandidate.GetPublicId(),
+						FString::Printf(TEXT("/edits/%d/value/candidate"), Index));
+				}
+
+				FString ClassRef;
+				if ((*Value)->TryGetStringField(TEXT("class_ref"), ClassRef))
+				{
+					const FString ResolvedClass =
+						ResolvedCandidate.AuthoringSelectors.FindRef(
+							TEXT("expression_class"));
+					if (ResolvedClass.IsEmpty()
+						|| !ResolvedClass.Equals(
+							ClassRef, ESearchCase::CaseSensitive))
+					{
+						return Fail(
+							OutError,
+							TEXT("material_candidate_class_assertion_mismatch"),
+							ClassRef,
+							FString::Printf(
+								TEXT("/edits/%d/value/class_ref"), Index));
+					}
+				}
+
+				FString BindingRevision;
+				if ((*Candidate)->TryGetStringField(
 						TEXT("binding_revision"), BindingRevision))
 				{
-					return Fail(
-						OutError,
-						TEXT("material_candidate_binding_required"),
-						FString::FromInt(Index));
+					QueryOwners::Material::
+						FMaterialExpressionCandidateQueryError CandidateError;
+					if (!QueryOwners::Material::
+							IsCurrentMaterialExpressionCandidateBinding(
+								*TargetObject,
+								ResolvedCandidate.FullName,
+								BindingRevision,
+								CandidateError))
+					{
+						return Fail(
+							OutError,
+							CandidateError.Code.IsEmpty()
+								? FString(TEXT("material_candidate_binding_invalid"))
+								: CandidateError.Code,
+							CandidateError.SubjectId,
+							CandidateError.Detail);
+					}
 				}
-				if (CandidateName != ClassRef)
-				{
-					return Fail(
-						OutError,
-						TEXT("material_candidate_name_class_mismatch"),
-						CandidateName,
-						ClassRef);
-				}
-				QueryOwners::Material::FMaterialExpressionCandidateQueryError
-					CandidateError;
-				if (!QueryOwners::Material::
-						IsCurrentMaterialExpressionCandidateBinding(
-							*TargetObject,
-							CandidateName,
-							BindingRevision,
-							CandidateError))
-				{
-					return Fail(
-						OutError,
-						CandidateError.Code.IsEmpty()
-							? FString(TEXT("material_candidate_binding_invalid"))
-							: CandidateError.Code,
-						CandidateError.SubjectId,
-						CandidateError.Detail);
-				}
-				(*Value)->RemoveField(TEXT("candidate"));
+				(*Candidate)->SetStringField(
+					TEXT("name"), ResolvedCandidate.Name);
+				(*Candidate)->SetStringField(
+					TEXT("id"), ResolvedCandidate.GetPublicId());
+				(*Candidate)->RemoveField(TEXT("candidate_id"));
+				(*Candidate)->RemoveField(TEXT("binding_revision"));
 			}
 			return true;
 		}
@@ -397,7 +516,7 @@ namespace UE::UAI::DomainAdapters::Material
 					{
 						return Fail(OutError, TEXT("material_domain_edits_required"));
 					}
-					if (!ValidateAndStripExpressionCandidates(
+					if (!ValidateExpressionCandidates(
 							Target, *Edits, OutError))
 					{
 						return false;

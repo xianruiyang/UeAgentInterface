@@ -3,6 +3,7 @@
 #include "DomainAdapters/AnimationBlueprintCommands/UeAgentAnimationBlueprintCommandMechanicsBoundary.h"
 #include "Dom/JsonObject.h"
 #include "OperationOwners/AnimationBlueprintCommands/UeAgentAnimationBlueprintCommandOperationOwner.h"
+#include "Policies/CondensedJsonPrintPolicy.h"
 #include "QueryOwners/AnimationBlueprintCommands/UeAgentAnimationBlueprintCommandQueryOwner.h"
 #include "Serialization/JsonSerializer.h"
 #include "Serialization/JsonWriter.h"

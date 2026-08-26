@@ -1,41 +1,68 @@
 # T11 Blueprint node candidate authority
 
 `blueprint.node.candidates` is the sole public candidate query for the current
-Blueprint node authoring surface. It resolves one existing Blueprint and one
-exact graph identity against Unreal's `FBlueprintActionDatabase`. The response
-contains the public graph object, a read-only `graph_revision`, and a bounded
-`candidates` array. Each candidate currently has this executable shape:
-
+Blueprint node creation surface. It resolves one existing Blueprint and one
+exact graph/pin context against Unreal's native Blueprint Action Menu source.
 The public call is `client.blueprint.node_candidates(...)`. When its method or
-hash is not already known, use `client.command_search(...)` followed by
-`client.command_detail(...)`; `uai-cli` exposes the same exact contract.
+contract hash is not already known, use `client.query.command_search(...)` followed
+by `client.query.command_detail(...)`; `uai-cli` exposes the same exact contract.
+
+Candidate rows expose compact creation selectors:
 
 ```json
 {
-  "name": "/Script/BlueprintGraph.K2Node_IfThenElse",
-  "binding_revision": "sha256:...",
+  "name": "Branch",
+  "id": "candidate:...",
   "display_name": "Branch",
-  "graph_id": "graph:..."
+  "kind": "blueprint_node"
 }
 ```
 
-The candidate object is an opaque, server-issued binding and is copied
-unchanged to
-`provider_extension.graphs.<stable-graph-key>.nodes.<stable-node-id>.candidate`
-inside the Blueprint-root `uai.blueprint.edit/1` document. There is no active
-`uai.blueprint.node.edit/1` root and no node-specific public apply command. The
-graph map key remains the Blueprint HJSON stable identity (for example
-`event_graph:EventGraph`); it is not replaced by `candidate.graph_id`.
+`name` is sufficient only when it is unique in the exact native context. `id`
+is the precise selector and preserves the native action identity. Other
+returned fields are diagnostics or optional assertions; callers do not need to
+copy a complete search row.
 
-Before any persistent write, the Blueprint Surfaces provider re-runs the same
-candidate mechanics for the exact target, graph, executable name, and binding
-revision. It verifies that `candidate.graph_id` identifies the owning graph and
-then expands the internal mutation fields `node_type="node_by_class"` and
-`node_class=candidate.name`. Callers neither reconstruct nor duplicate those
-fields. If callers provide them, they must match the candidate exactly.
+Resolve the graph context before querying nodes. Call
+`content_graph.structure` for the Blueprint, select the unique container whose
+`kind` is `blueprint_graph`, `value.name` is `EventGraph`, and
+`value.graph_kind` is `event_graph`, then copy that container's `id` unchanged
+into `blueprint.node.candidates.graph_id`. The public structure row deliberately
+keeps the opaque graph ID next to these selectable semantics; callers must not
+infer a graph from its nodes, cache an earlier GUID, or reconstruct the ID.
 
-Changed graph context, executable identity, or binding revision fails with a
-typed candidate-binding error before mutation; a stale binding specifically
-returns `blueprint_surface_node_candidate_binding_stale`. Candidate discovery
-does not select a result, mutate Unreal state, or substitute the public
-content-graph revision required by `content_graph.import_workspace`.
+Use only one minimal selector in the Blueprint-root `uai.blueprint.edit/1`
+document:
+
+```hjson
+graphs: {
+  "event_graph:EventGraph": {
+    nodes: {
+      "node:BranchGate": {
+        operation: create
+        candidate: { id: "candidate:..." }
+      }
+    }
+  }
+}
+```
+
+The graph map key remains the graph context and the node map key remains the
+stable node identity. Pin-drag context, when required, is carried separately in
+`candidate_context`; it is not part of `candidate`. There is no active
+`uai.blueprint.node.edit/1` root and no node-specific public apply command.
+The process HJSON authority rejects that retired schema; only the
+Blueprint-root `uai.blueprint.edit/1` provider owns persistent node creation.
+
+Before persistent mutation, the Blueprint Surfaces provider re-enumerates the
+same native Action Menu for the same Blueprint, graph and optional pin context,
+resolves `name` or `id` uniquely, and invokes the resolved native
+`FEdGraphSchemaAction::PerformAction`. It does not translate a display name to a
+node class or reconstruct an action in Python or the HJSON adapter. Unknown,
+ambiguous, stale, context-mismatched, or assertion-mismatched candidates fail
+before write.
+
+Successful Blueprint-root import compiles, saves, unloads, reloads and reads
+back the persisted graph through the shared content-graph lifecycle. Candidate
+discovery itself is read-only and does not replace the public content-graph
+revision required by `content_graph.import_workspace`.

@@ -21,6 +21,7 @@
 #include "OptimusDeformer.h"
 #include "OptimusNode.h"
 #include "OptimusNodeGraph.h"
+#include "QueryOwners/AnimationRigGraph/UeAgentAnimationRigGraphCandidateQuery.h"
 #include "ReferenceSkeleton.h"
 #include "Retargeter/IKRetargetChainMapping.h"
 #include "Retargeter/IKRetargeter.h"
@@ -36,6 +37,7 @@
 #include "RigVMModel/RigVMGraph.h"
 #include "Units/RigUnit.h"
 #include "Engine/StaticMesh.h"
+#include "Engine/SkeletalMesh.h"
 #include "UObject/UObjectGlobals.h"
 
 namespace UE::UAI::DomainAdapters::AnimationRigGraph
@@ -903,7 +905,7 @@ namespace UE::UAI::DomainAdapters::AnimationRigGraph
 	bool FAnimationRigGraphNativeHook::TryApplyAndCaptureControlRigDefinition(
 		UControlRigBlueprint& Blueprint,
 		const TArray<FAnimationRigGraphControlMutation>& Mutations,
-		const TArray<FAnimationRigGraphUnitMutation>& UnitMutations,
+		TArray<FAnimationRigGraphUnitMutation>& UnitMutations,
 		FAnimationRigGraphNativeMutationReceipt& OutApplyReceipt,
 		FAnimationRigGraphBarrierReceipt& OutBarrierReceipt,
 		FAnimationRigGraphTopology& OutTopology,
@@ -989,7 +991,7 @@ namespace UE::UAI::DomainAdapters::AnimationRigGraph
 			}
 			return nullptr;
 		};
-		for (const FAnimationRigGraphUnitMutation& Mutation : UnitMutations)
+		for (FAnimationRigGraphUnitMutation& Mutation : UnitMutations)
 		{
 			if (Mutation.NodeName.IsNone())
 			{
@@ -1009,14 +1011,7 @@ namespace UE::UAI::DomainAdapters::AnimationRigGraph
 				}
 				continue;
 			}
-			UScriptStruct* const UnitStruct = LoadObject<UScriptStruct>(
-				nullptr, *Mutation.ScriptStructRef);
-			if (!UnitStruct
-				|| UnitStruct == FRigUnit::StaticStruct()
-				|| !UnitStruct->IsChildOf(FRigUnit::StaticStruct())
-				|| UnitStruct->HasMetaData(TEXT("Abstract"))
-				|| Mutation.MethodName.IsNone()
-				|| !FMath::IsFinite(Mutation.Position.X)
+			if (!FMath::IsFinite(Mutation.Position.X)
 				|| !FMath::IsFinite(Mutation.Position.Y))
 			{
 				OutError.Set(
@@ -1046,9 +1041,16 @@ namespace UE::UAI::DomainAdapters::AnimationRigGraph
 			}
 			if (Mutation.Intent == EAnimationRigGraphMutationIntent::Update)
 			{
+				UScriptStruct* const UnitStruct = LoadObject<UScriptStruct>(
+					nullptr, *Mutation.ScriptStructRef);
 				const URigVMUnitNode* const ExistingUnit =
 					Cast<URigVMUnitNode>(Existing);
-				if (!ExistingUnit
+				if (!UnitStruct
+					|| UnitStruct == FRigUnit::StaticStruct()
+					|| !UnitStruct->IsChildOf(FRigUnit::StaticStruct())
+					|| UnitStruct->HasMetaData(TEXT("Abstract"))
+					|| Mutation.MethodName.IsNone()
+					|| !ExistingUnit
 					|| !ExistingUnit->GetScriptStruct()
 					|| ExistingUnit->GetScriptStruct()->GetPathName()
 						!= Mutation.ScriptStructRef
@@ -1063,20 +1065,71 @@ namespace UE::UAI::DomainAdapters::AnimationRigGraph
 				}
 				continue;
 			}
-			URigVMNode* const Added = RigController->AddUnitNodeFromStructPath(
-				Mutation.ScriptStructRef,
-				Mutation.MethodName,
-				Mutation.Position,
-				Mutation.NodeName.ToString(),
-				true,
-				false);
-			if (!Added || Added->GetFName() != Mutation.NodeName)
+			if (Mutation.CandidateName.IsEmpty()
+				&& Mutation.CandidateId.IsEmpty())
 			{
 				OutError.Set(
-					TEXT("animation_rig_graph_rigvm_unit_add_failed"),
+					TEXT("animation_rig_graph_candidate_selector_required"),
 					Mutation.NodeName.ToString());
 				return false;
 			}
+
+			const FString ExpectedStruct = Mutation.ScriptStructRef;
+			const FName ExpectedMethod = Mutation.MethodName;
+			URigVMUnitNode* Added = nullptr;
+			QueryOwners::AnimationRigGraph::FAnimationRigGraphCandidate
+				ResolvedCandidate;
+			QueryOwners::AnimationRigGraph::
+				FAnimationRigGraphCandidateQueryError CandidateError;
+			if (!QueryOwners::AnimationRigGraph::
+					TryPerformAnimationRigGraphCandidate(
+						Blueprint,
+						Mutation.CandidateName,
+						Mutation.CandidateId,
+						FVector2f(Mutation.Position),
+						Added,
+						ResolvedCandidate,
+						CandidateError)
+				|| !Added || !Added->GetScriptStruct()
+				|| Added->GetMethodName().IsNone())
+			{
+				OutError.Set(
+					CandidateError.Code.IsEmpty()
+						? TEXT("animation_rig_graph_rigvm_unit_add_failed")
+						: CandidateError.Code,
+					CandidateError.Detail.IsEmpty()
+						? Mutation.NodeName.ToString()
+						: CandidateError.Detail);
+				return false;
+			}
+			if (Added->GetFName() != Mutation.NodeName
+				&& !RigController->RenameNode(
+					Added, Mutation.NodeName, true, false))
+			{
+				OutError.Set(
+					TEXT("animation_rig_graph_rigvm_unit_rename_failed"),
+					Mutation.NodeName.ToString());
+				return false;
+			}
+			if ((Mutation.bHasScriptStructAssertion
+					&& Added->GetScriptStruct()->GetPathName()
+						!= ExpectedStruct)
+				|| (Mutation.bHasMethodAssertion
+					&& Added->GetMethodName() != ExpectedMethod))
+			{
+				OutError.Set(
+					TEXT("animation_rig_graph_candidate_assertion_mismatch"),
+					Mutation.NodeName.ToString());
+				return false;
+			}
+			Mutation.CandidateName = ResolvedCandidate.Name;
+			Mutation.CandidateId = ResolvedCandidate.Id;
+			Mutation.ScriptStructRef =
+				Added->GetScriptStruct()->GetPathName();
+			Mutation.MethodName = Added->GetMethodName();
+			Mutation.Position = Added->GetPosition();
+			Mutation.bHasScriptStructAssertion = true;
+			Mutation.bHasMethodAssertion = true;
 		}
 		FBlueprintEditorUtils::MarkBlueprintAsStructurallyModified(&Blueprint);
 		FCompilerResultsLog CompilerLog;

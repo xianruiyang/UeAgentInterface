@@ -5,7 +5,9 @@
 #include "CommandRegistry/UeAgentImmutableCommandRegistry.h"
 #include "Components/ActorComponent.h"
 #include "Components/SceneComponent.h"
+#include "Commands/PaletteSearch/UeAgentPaletteSearchTypes.h"
 #include "Core/Contract/UeAgentCommandJson.h"
+#include "Core/HjsonWorkspace/DomainAuthoring/UeAgentDomainHjsonAuthoringKit.h"
 #include "Dom/JsonObject.h"
 #include "Dom/JsonValue.h"
 #include "Domains/Level/Authoring/UeAgentLevelAuthoringApplyProvider.h"
@@ -341,11 +343,23 @@ namespace UE::UAI::DomainAdapters::WorldSpatial
 		struct FMapRestoreContext
 		{
 			FString OriginalPackage;
+			bool bOriginalHasPersistentPackage = false;
 			bool bSwitched = false;
 
 			bool Restore(FWorkspaceError& OutError)
 			{
 				if (!bSwitched || OriginalPackage.IsEmpty()) return true;
+				if (!bOriginalHasPersistentPackage)
+				{
+					if (!UEditorLoadingAndSavingUtils::NewBlankMap(false))
+					{
+						return Fail(OutError,
+							TEXT("level_world_domain_original_blank_map_restore_failed"),
+							OriginalPackage);
+					}
+					bSwitched = false;
+					return true;
+				}
 				if (!FPackageName::DoesPackageExist(OriginalPackage))
 				{
 					return Fail(OutError,
@@ -441,6 +455,8 @@ namespace UE::UAI::DomainAdapters::WorldSpatial
 					TEXT("level_world_domain_current_world_dirty"), CurrentPackage);
 			}
 			OutRestore.OriginalPackage = CurrentPackage;
+			OutRestore.bOriginalHasPersistentPackage =
+				FPackageName::DoesPackageExist(CurrentPackage);
 			const bool bExists = FPackageName::DoesPackageExist(PackageName);
 			if (!bExists)
 			{
@@ -493,11 +509,138 @@ namespace UE::UAI::DomainAdapters::WorldSpatial
 			return true;
 		}
 
-		TSharedRef<FJsonObject> TransformForLevel(
-			const TSharedPtr<const FJsonObject>& Source,
-			const bool bActor)
+		bool TryReadNamedComponents(
+			const TSharedPtr<const FJsonObject>& Object,
+			const TCHAR* First,
+			const TCHAR* Second,
+			const TCHAR* Third,
+			TArray<TSharedPtr<FJsonValue>>& OutComponents)
 		{
+			OutComponents.Reset();
+			double Values[3] = {};
+			if (!Object.IsValid()
+				|| !Object->TryGetNumberField(First, Values[0])
+				|| !Object->TryGetNumberField(Second, Values[1])
+				|| !Object->TryGetNumberField(Third, Values[2])
+				|| !FMath::IsFinite(Values[0])
+				|| !FMath::IsFinite(Values[1])
+				|| !FMath::IsFinite(Values[2]))
+			{
+				return false;
+			}
+			for (const double Value : Values)
+			{
+				OutComponents.Add(MakeShared<FJsonValueNumber>(Value));
+			}
+			return true;
+		}
+
+		bool TransformForLevel(
+			const TSharedPtr<const FJsonObject>& Source,
+			const bool bActor,
+			const FString& ErrorSource,
+			const FString& ErrorPointer,
+			TSharedPtr<FJsonObject>& OutResult,
+			FWorkspaceError& OutError)
+		{
+			OutResult.Reset();
+			if (!Source.IsValid())
+			{
+				return Fail(OutError,
+					TEXT("level_world_domain_transform_object_invalid"),
+					ErrorSource, ErrorPointer);
+			}
+
 			TSharedRef<FJsonObject> Result = CopyObject(Source);
+			const bool bHasLocation = Source->HasField(TEXT("location"));
+			const bool bHasTranslation = Source->HasField(TEXT("translation"));
+			if (bHasLocation && bHasTranslation)
+			{
+				return Fail(OutError,
+					TEXT("level_world_domain_transform_translation_conflict"),
+					ErrorSource, ErrorPointer + TEXT("/location"));
+			}
+			if (bHasLocation)
+			{
+				const TSharedPtr<FJsonObject>* Location = nullptr;
+				TArray<TSharedPtr<FJsonValue>> Components;
+				if (!Source->TryGetObjectField(TEXT("location"), Location)
+					|| !Location || !Location->IsValid()
+					|| !TryReadNamedComponents(
+						*Location, TEXT("x"), TEXT("y"), TEXT("z"), Components))
+				{
+					return Fail(OutError,
+						TEXT("level_world_domain_transform_location_invalid"),
+						ErrorSource, ErrorPointer + TEXT("/location"));
+				}
+				TSharedRef<FJsonObject> Translation = MakeShared<FJsonObject>();
+				Translation->SetArrayField(TEXT("components"), MoveTemp(Components));
+				Result->RemoveField(TEXT("location"));
+				Result->SetObjectField(TEXT("translation"), Translation);
+			}
+			else if (bHasTranslation)
+			{
+				const TSharedPtr<FJsonObject>* Translation = nullptr;
+				if (!Source->TryGetObjectField(TEXT("translation"), Translation)
+					|| !Translation || !Translation->IsValid())
+				{
+					return Fail(OutError,
+						TEXT("level_world_domain_transform_translation_invalid"),
+						ErrorSource, ErrorPointer + TEXT("/translation"));
+				}
+			}
+
+			struct FNamedTransformField
+			{
+				const TCHAR* Field;
+				const TCHAR* First;
+				const TCHAR* Second;
+				const TCHAR* Third;
+				const TCHAR* InvalidCode;
+				const TCHAR* ConflictCode;
+			};
+			for (const FNamedTransformField& Named : {
+				FNamedTransformField{TEXT("rotation"), TEXT("pitch"), TEXT("yaw"),
+					TEXT("roll"), TEXT("level_world_domain_transform_rotation_invalid"),
+					TEXT("level_world_domain_transform_rotation_conflict")},
+				FNamedTransformField{TEXT("scale"), TEXT("x"), TEXT("y"), TEXT("z"),
+					TEXT("level_world_domain_transform_scale_invalid"),
+					TEXT("level_world_domain_transform_scale_conflict")}})
+			{
+				if (!Source->HasField(Named.Field))
+				{
+					continue;
+				}
+				const TSharedPtr<FJsonObject>* Value = nullptr;
+				if (!Source->TryGetObjectField(Named.Field, Value)
+					|| !Value || !Value->IsValid())
+				{
+					return Fail(OutError, Named.InvalidCode, ErrorSource,
+						ErrorPointer + TEXT("/") + Named.Field);
+				}
+				const bool bHasNamedAxes = (*Value)->HasField(Named.First)
+					|| (*Value)->HasField(Named.Second)
+					|| (*Value)->HasField(Named.Third);
+				if (bHasNamedAxes && (*Value)->HasField(TEXT("components")))
+				{
+					return Fail(OutError, Named.ConflictCode, ErrorSource,
+						ErrorPointer + TEXT("/") + Named.Field);
+				}
+				if (bHasNamedAxes)
+				{
+					TArray<TSharedPtr<FJsonValue>> Components;
+					if (!TryReadNamedComponents(*Value, Named.First, Named.Second,
+							Named.Third, Components))
+					{
+						return Fail(OutError, Named.InvalidCode, ErrorSource,
+							ErrorPointer + TEXT("/") + Named.Field);
+					}
+					TSharedRef<FJsonObject> Canonical = MakeShared<FJsonObject>();
+					Canonical->SetArrayField(TEXT("components"), MoveTemp(Components));
+					Result->SetObjectField(Named.Field, Canonical);
+				}
+			}
+
 			Result->SetObjectField(TEXT("space_contract"),
 				UeAgentSpaceContract::Make3D(
 					bActor ? TEXT("actor.transform")
@@ -505,7 +648,8 @@ namespace UE::UAI::DomainAdapters::WorldSpatial
 					bActor ? TEXT("ue_actor_world_transform")
 						: TEXT("ue_scene_component_parent_relative_transform"),
 					TEXT("ue_world"), TEXT("identity")));
-			return Result;
+			OutResult = Result;
+			return true;
 		}
 
 		bool CopyOptionalArray(
@@ -557,20 +701,134 @@ namespace UE::UAI::DomainAdapters::WorldSpatial
 				FString Operation = TEXT("upsert");
 				if (!Actor.IsValid()
 					|| !Actor->TryGetStringField(TEXT("managed_id"), ManagedId)
-					|| ManagedId.TrimStartAndEnd().IsEmpty()
-					|| !Actor->TryGetStringField(TEXT("type"), ActorClass)
-					|| ActorClass.TrimStartAndEnd().IsEmpty())
+					|| ManagedId.TrimStartAndEnd().IsEmpty())
 				{
 					return Fail(OutError,
 						TEXT("level_world_domain_actor_identity_invalid"));
 				}
 				Actor->TryGetStringField(TEXT("operation"), Operation);
+				Actor->TryGetStringField(TEXT("type"), ActorClass);
+				ActorClass.TrimStartAndEndInline();
+
+				const TSharedPtr<FJsonObject>* CandidatePtr = nullptr;
+				const bool bHasCandidate = Actor->HasField(TEXT("candidate"));
+				if (bHasCandidate
+					&& (!Actor->TryGetObjectField(TEXT("candidate"), CandidatePtr)
+						|| !CandidatePtr || !CandidatePtr->IsValid()))
+				{
+					return Fail(OutError,
+						TEXT("level_world_domain_actor_candidate_invalid"), ManagedId);
+				}
+				const TSharedPtr<FJsonObject>* PlacementContextPtr = nullptr;
+				if (Actor->HasField(TEXT("placement_context"))
+					&& (!Actor->TryGetObjectField(TEXT("placement_context"), PlacementContextPtr)
+						|| !PlacementContextPtr || !PlacementContextPtr->IsValid()))
+				{
+					return Fail(OutError,
+						TEXT("level_world_domain_actor_placement_context_invalid"), ManagedId);
+				}
+
+				if (bHasCandidate)
+				{
+					const FString CandidatePointer = FString::Printf(
+						TEXT("/root/document/provider_extension/actors/%d/candidate"),
+						ActorIndex);
+					DomainAuthoring::FDomainHjsonCandidateSelector Selector;
+					if (!DomainAuthoring::TryReadCandidateSelector(
+							*CandidatePtr,
+							CandidatePointer,
+							Selector,
+							OutError))
+					{
+						return false;
+					}
+					FString PlacementCategory;
+					if (PlacementContextPtr && PlacementContextPtr->IsValid())
+					{
+						(*PlacementContextPtr)->TryGetStringField(
+							TEXT("category"), PlacementCategory);
+					}
+					PlacementCategory.TrimStartAndEndInline();
+
+					UeAgentPaletteSearch::FCandidate ResolvedCandidate;
+					FString ResolveError;
+					if (!UeAgentPaletteSearch::TryResolvePlaceableActorCandidate(
+							Selector.Name,
+							Selector.Id,
+							PlacementCategory,
+							ResolvedCandidate,
+							ResolveError))
+					{
+						return Fail(OutError,
+							TEXT("level_world_domain_actor_candidate_unresolved"),
+							ManagedId,
+							ResolveError);
+					}
+
+					const FString ResolvedClass =
+						ResolvedCandidate.AuthoringSelectors.FindRef(TEXT("actor_class"));
+					if (ResolvedClass.IsEmpty()
+						|| (!ActorClass.IsEmpty()
+							&& !ActorClass.Equals(ResolvedClass, ESearchCase::CaseSensitive)))
+					{
+						return Fail(OutError,
+							TEXT("level_world_domain_actor_candidate_class_mismatch"), ManagedId);
+					}
+
+					auto CheckAssertion = [&ResolvedCandidate, &OutError, &ManagedId](
+						const TSharedPtr<FJsonObject>& Candidate,
+						const TCHAR* Field,
+						const TCHAR* Selector) -> bool
+					{
+						if (!Candidate->HasField(Field))
+						{
+							return true;
+						}
+						FString Expected;
+						if (!Candidate->TryGetStringField(Field, Expected)
+							|| !Expected.TrimStartAndEnd().Equals(
+								ResolvedCandidate.AuthoringSelectors.FindRef(Selector),
+								ESearchCase::CaseSensitive))
+						{
+							return Fail(OutError,
+								TEXT("level_world_domain_actor_candidate_assertion_mismatch"),
+								ManagedId,
+								Field);
+						}
+						return true;
+					};
+					if (!CheckAssertion(*CandidatePtr, TEXT("actor_class"), TEXT("actor_class"))
+						|| !CheckAssertion(*CandidatePtr, TEXT("class_path"), TEXT("actor_class"))
+						|| !CheckAssertion(*CandidatePtr, TEXT("asset_path"), TEXT("asset_override"))
+						|| !CheckAssertion(*CandidatePtr, TEXT("factory_class"), TEXT("actor_factory"))
+						|| !CheckAssertion(*CandidatePtr, TEXT("category"), TEXT("placement_category")))
+					{
+						return false;
+					}
+					if (!(*CandidatePtr)->HasField(TEXT("name")))
+					{
+						(*CandidatePtr)->SetStringField(
+							TEXT("name"), ResolvedCandidate.Name);
+					}
+					(*CandidatePtr)->SetStringField(
+						TEXT("id"), ResolvedCandidate.GetPublicId());
+					ActorClass = ResolvedClass;
+				}
+				else if (ActorClass.IsEmpty()
+					&& (Operation.Equals(TEXT("create"), ESearchCase::IgnoreCase)
+						|| Operation.Equals(TEXT("upsert"), ESearchCase::IgnoreCase)))
+				{
+					return Fail(OutError,
+						TEXT("level_world_domain_actor_create_selector_required"), ManagedId);
+				}
+
 				TSharedRef<FJsonObject> Unit = MakeShared<FJsonObject>();
 				Unit->SetStringField(TEXT("operation"), Operation);
 				TSharedRef<FJsonObject> UnitTarget = MakeShared<FJsonObject>();
 				UnitTarget->SetStringField(TEXT("world_path"), Target);
 				UnitTarget->SetStringField(TEXT("managed_id"), ManagedId);
-				UnitTarget->SetStringField(TEXT("actor_class"), ActorClass);
+				if (!ActorClass.IsEmpty())
+					UnitTarget->SetStringField(TEXT("actor_class"), ActorClass);
 				Unit->SetObjectField(TEXT("target"), UnitTarget);
 				if (!CopyOptionalArray(Actor, TEXT("properties"), Unit))
 				{
@@ -584,12 +842,35 @@ namespace UE::UAI::DomainAdapters::WorldSpatial
 					if (Actor->TryGetStringField(Field, Value))
 						ProviderExtension->SetStringField(Field, Value);
 				}
-				const TSharedPtr<FJsonObject>* Transform = nullptr;
-				if (Actor->TryGetObjectField(TEXT("transform"), Transform)
-					&& Transform && Transform->IsValid())
+				if (bHasCandidate)
 				{
-					ProviderExtension->SetObjectField(TEXT("transform"),
-						TransformForLevel(*Transform, true));
+					ProviderExtension->SetObjectField(
+						TEXT("candidate"), CopyObject(*CandidatePtr));
+				}
+				if (PlacementContextPtr && PlacementContextPtr->IsValid())
+				{
+					ProviderExtension->SetObjectField(
+						TEXT("placement_context"), CopyObject(*PlacementContextPtr));
+				}
+				if (Actor->HasField(TEXT("transform")))
+				{
+					const TSharedPtr<FJsonObject>* Transform = nullptr;
+					TSharedPtr<FJsonObject> LevelTransform;
+					if (!Actor->TryGetObjectField(TEXT("transform"), Transform)
+						|| !Transform || !Transform->IsValid()
+						|| !TransformForLevel(*Transform, true, ManagedId,
+							TEXT("/transform"), LevelTransform, OutError))
+					{
+						if (OutError.GetCode().IsEmpty())
+						{
+							return Fail(OutError,
+								TEXT("level_world_domain_actor_transform_invalid"),
+								ManagedId, TEXT("/transform"));
+						}
+						return false;
+					}
+					ProviderExtension->SetObjectField(
+						TEXT("transform"), LevelTransform);
 				}
 				const TSharedPtr<FJsonObject>* Attachment = nullptr;
 				if (Actor->TryGetObjectField(TEXT("attachment"), Attachment)
@@ -652,13 +933,27 @@ namespace UE::UAI::DomainAdapters::WorldSpatial
 					{
 						TSharedRef<FJsonObject> LevelAttachment =
 							CopyObject(*ComponentAttachment);
-						const TSharedPtr<FJsonObject>* RelativeTransform = nullptr;
-						if ((*ComponentAttachment)->TryGetObjectField(
-								TEXT("transform"), RelativeTransform)
-							&& RelativeTransform && RelativeTransform->IsValid())
+						if ((*ComponentAttachment)->HasField(TEXT("transform")))
 						{
-							LevelAttachment->SetObjectField(TEXT("transform"),
-								TransformForLevel(*RelativeTransform, false));
+							const TSharedPtr<FJsonObject>* RelativeTransform = nullptr;
+							TSharedPtr<FJsonObject> LevelTransform;
+							if (!(*ComponentAttachment)->TryGetObjectField(
+									TEXT("transform"), RelativeTransform)
+								|| !RelativeTransform || !RelativeTransform->IsValid()
+								|| !TransformForLevel(*RelativeTransform, false, Name,
+									TEXT("/attachment/transform"),
+									LevelTransform, OutError))
+							{
+								if (OutError.GetCode().IsEmpty())
+								{
+									return Fail(OutError,
+										TEXT("level_world_domain_component_relative_transform_invalid"),
+										Name, TEXT("/attachment/transform"));
+								}
+								return false;
+							}
+							LevelAttachment->SetObjectField(
+								TEXT("transform"), LevelTransform);
 						}
 						TSharedRef<FJsonObject> ComponentExtension =
 							MakeShared<FJsonObject>();
@@ -1410,6 +1705,144 @@ namespace UE::UAI::DomainAdapters::WorldSpatial
 			}
 			return true;
 		}
+	}
+
+	bool TryQueryWorldActorCandidates(
+		const FUeAgentWorldActorCandidateQuery& Query,
+		FString& OutPayloadJson,
+		FWorkspaceError& OutError)
+	{
+		OutPayloadJson.Reset();
+		OutError.Reset();
+		if (Query.Limit < 1 || Query.Limit > 20 || Query.Cursor < 0)
+		{
+			return Fail(OutError,
+				TEXT("world_actor_candidate_page_invalid"), Query.Target);
+		}
+
+		const FString Target = Query.Target.TrimStartAndEnd();
+		FString PackageName;
+		FString ObjectName;
+		if (!SplitTarget(Target, PackageName, ObjectName, OutError)
+			|| !FPackageName::DoesPackageExist(PackageName))
+		{
+			if (OutError.GetCode().IsEmpty())
+			{
+				return Fail(OutError,
+					TEXT("world_actor_candidate_target_unresolved"), Target);
+			}
+			return false;
+		}
+
+		UeAgentPaletteSearch::FSearchParams Params;
+		Params.CatalogType = TEXT("placeable_actor");
+		Params.SearchText = Query.Query.TrimStartAndEnd();
+		Params.CandidateId = Query.CandidateId.TrimStartAndEnd();
+		Params.Limit = 20;
+		Params.Offset = 0;
+		Params.bIncludeItems = true;
+		Params.bIncludeGroups = false;
+		Params.bIncludeCategoryTree = false;
+		if (!Query.Category.TrimStartAndEnd().IsEmpty())
+		{
+			Params.CategoryFilters.Add(Query.Category.TrimStartAndEnd());
+		}
+
+		UeAgentPaletteSearch::FSearchResult SearchResult;
+		FString SearchError;
+		if (!UeAgentPaletteSearch::ExecuteSearch(
+				Params, SearchResult, SearchError))
+		{
+			return Fail(OutError,
+				TEXT("world_actor_candidate_query_failed"),
+				Target,
+				SearchError);
+		}
+
+		TSharedRef<FJsonObject> Response = MakeShared<FJsonObject>();
+		Response->SetStringField(TEXT("command_id"),
+			TEXT("world.actor.candidates"));
+		Response->SetBoolField(TEXT("read_only"), true);
+		Response->SetStringField(TEXT("target"), Target);
+		TSharedRef<FJsonObject> Context = MakeShared<FJsonObject>();
+		Context->SetStringField(TEXT("target"), Target);
+		Context->SetStringField(TEXT("world_path"), PackageName);
+		FString EffectivePlacementCategory =
+			!Params.SearchText.IsEmpty() || Params.CategoryFilters.IsEmpty()
+				? FString(TEXT("AllClasses"))
+				: Params.CategoryFilters[0];
+		if (!Params.CandidateId.IsEmpty()
+			&& SearchResult.MatchingCandidates.Num() == 1
+			&& !SearchResult.MatchingCandidates[0].CategoryPath.IsEmpty())
+		{
+			EffectivePlacementCategory =
+				SearchResult.MatchingCandidates[0].CategoryPath;
+		}
+		Context->SetStringField(TEXT("placement_category"),
+			EffectivePlacementCategory);
+		Context->SetStringField(TEXT("search_surface"),
+			TEXT("IPlacementModeModule/FPlaceableItem"));
+		Response->SetObjectField(TEXT("context"), Context);
+
+		FString RevisionMaterial;
+		for (const UeAgentPaletteSearch::FCandidate& Candidate
+			: SearchResult.MatchingCandidates)
+		{
+			RevisionMaterial += Candidate.GetCandidateId();
+			RevisionMaterial += TEXT("\n");
+		}
+		FTCHARToUTF8 RevisionUtf8(*RevisionMaterial);
+		TArray<uint8> RevisionBytes;
+		RevisionBytes.Append(
+			reinterpret_cast<const uint8*>(RevisionUtf8.Get()),
+			RevisionUtf8.Length());
+		Response->SetStringField(TEXT("catalog_revision"),
+			TEXT("placement-mode:") + Sha256(RevisionBytes).RightChop(7));
+
+		const int32 Total = SearchResult.MatchingCandidates.Num();
+		const int32 Start = FMath::Min(Query.Cursor, Total);
+		const int32 End = FMath::Min(Start + Query.Limit, Total);
+		TArray<TSharedPtr<FJsonValue>> Candidates;
+		for (int32 Index = Start; Index < End; ++Index)
+		{
+			const UeAgentPaletteSearch::FCandidate& Match =
+				SearchResult.MatchingCandidates[Index];
+			TSharedRef<FJsonObject> Candidate = MakeShared<FJsonObject>();
+			Candidate->SetStringField(TEXT("name"), Match.Name);
+			Candidate->SetStringField(TEXT("id"), Match.GetPublicId());
+			Candidate->SetStringField(TEXT("display_name"), Match.DisplayName);
+			Candidate->SetStringField(TEXT("category"), Match.CategoryPath);
+			Candidate->SetBoolField(TEXT("supported"),
+				Match.bSupportedInContext);
+			Candidate->SetStringField(TEXT("support_reason"),
+				Match.SupportReason);
+			auto AddSelector = [&Candidate, &Match](
+				const TCHAR* Field, const TCHAR* Selector)
+			{
+				const FString Value = Match.AuthoringSelectors.FindRef(Selector);
+				if (!Value.IsEmpty())
+				{
+					Candidate->SetStringField(Field, Value);
+				}
+			};
+			AddSelector(TEXT("actor_class"), TEXT("actor_class"));
+			AddSelector(TEXT("asset_path"), TEXT("asset_override"));
+			AddSelector(TEXT("factory_class"), TEXT("actor_factory"));
+			Candidates.Add(MakeShared<FJsonValueObject>(Candidate));
+		}
+		Response->SetArrayField(TEXT("candidates"), MoveTemp(Candidates));
+		Response->SetNumberField(TEXT("total_matching"), Total);
+		const bool bHasMore = End < Total;
+		Response->SetNumberField(TEXT("next_cursor"), bHasMore ? End : -1);
+		Response->SetBoolField(TEXT("has_more"), bHasMore);
+		Response->SetBoolField(TEXT("complete"), !bHasMore);
+		TArray<TSharedPtr<FJsonValue>> Warnings;
+		for (const FString& Warning : SearchResult.Warnings)
+		{
+			Warnings.Add(MakeShared<FJsonValueString>(Warning));
+		}
+		Response->SetArrayField(TEXT("warnings"), MoveTemp(Warnings));
+		return CanonicalObject(Response, OutPayloadJson, OutError);
 	}
 
 	bool TryExecuteContentGraph(

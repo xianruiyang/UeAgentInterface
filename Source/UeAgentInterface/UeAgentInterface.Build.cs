@@ -29,6 +29,12 @@ public class UeAgentInterface : ModuleRules
 			new string[]
 			{
 				"UnrealEd",
+				"EditorFramework",
+				"TypedElementFramework",
+				"TypedElementRuntime",
+				"ClassViewer",
+				"SubobjectDataInterface",
+				"PlacementMode",
 				"MainFrame",
 				"GraphEditor",
 				"LevelEditor",
@@ -107,6 +113,7 @@ public class UeAgentInterface : ModuleRules
 				"FullBodyIK",
 				"RigVM",
 				"RigVMDeveloper",
+				"RigVMEditor",
 				"Niagara",
 				"NiagaraEditor",
 				"PCG",

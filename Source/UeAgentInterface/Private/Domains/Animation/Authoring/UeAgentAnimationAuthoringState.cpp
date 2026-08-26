@@ -6,6 +6,8 @@
 #include "Domains/Animation/Authoring/UeAgentAnimationAuthoringDocuments.h"
 #include "Utilities/AuthoringCore/UeAgentAuthoringIdentity.h"
 #include "Utilities/AuthoringCore/UeAgentAuthoringNativeDefaults.h"
+#include "UObject/Object.h"
+#include "UObject/Package.h"
 
 namespace UeAgentAnimationAuthoring {
 namespace {

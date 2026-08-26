@@ -31,18 +31,24 @@ namespace UE::UAI::Module::CommandRegistration::BlueprintComponent
 			Result.CommandId = CommandId;
 			Result.PythonNamespace = TEXT("blueprint");
 			Result.PythonFunction = TEXT("component_candidates");
-			Result.ContractVersion = 1;
+			Result.ContractVersion = 2;
 			Result.PublicOwner = Owner;
 			Result.Availability = EUeAgentCommandAvailability::Enabled;
 			Result.SideEffect = EUeAgentCommandSideEffect::None;
 			Result.StateLayers = {TEXT("asset_persisted_state")};
 			Result.InputFields = {
 				Field(TEXT("target"), TEXT("string"), true,
-					TEXT("Exact public Blueprint package.object identity.")),
-				Field(TEXT("component_class"), TEXT("string"), true,
-					TEXT("Exact supported SCS Component class identity.")),
-				Field(TEXT("requested_name"), TEXT("string"), true,
-					TEXT("Proposed Component variable name preserved into HJSON.")),
+					TEXT("Exact public Blueprint package.object identity copied from content search.")),
+				Field(TEXT("parent"), TEXT("string"), false,
+					TEXT("Optional exact SCS parent variable name; actor root is used when omitted.")),
+				Field(TEXT("query"), TEXT("string"), false,
+					TEXT("Optional bounded Add Component menu search text.")),
+				Field(TEXT("id"), TEXT("string"), false,
+					TEXT("Optional exact candidate id returned by an earlier page.")),
+				Field(TEXT("limit"), TEXT("integer"), false,
+					TEXT("Optional page size from 1 through 20; defaults to 20.")),
+				Field(TEXT("cursor"), TEXT("integer"), false,
+					TEXT("Optional non-negative result offset; defaults to zero.")),
 			};
 			Result.ResultFields = {
 				Field(TEXT("command_id"), TEXT("string"), true,
@@ -53,43 +59,51 @@ namespace UE::UAI::Module::CommandRegistration::BlueprintComponent
 					TEXT("The unchanged exact Blueprint identity.")),
 				Field(TEXT("scs_revision"), TEXT("string"), true,
 					TEXT("Current persisted SCS revision for optimistic fencing.")),
+				Field(TEXT("context"), TEXT("object"), true,
+					TEXT("Exact parent and deterministic content-selection policy used for enumeration.")),
 				Field(TEXT("candidates"), TEXT("array"), true,
-					TEXT("One bounded candidate whose name is the exact creation identity.")),
+					TEXT("Native Add Component entries; candidate.name or candidate.id is a direct HJSON creation selector.")),
+				Field(TEXT("total_matching"), TEXT("integer"), true,
+					TEXT("Total native registry candidates matching the current query.")),
+				Field(TEXT("next_cursor"), TEXT("integer"), true,
+					TEXT("Next result offset, or -1 when complete.")),
 				Field(TEXT("existing_components"), TEXT("array"), true,
 					TEXT("Independent current SCS readback used after reload.")),
 				Field(TEXT("complete"), TEXT("boolean"), true,
-					TEXT("True for the bounded supported Component set.")),
+					TEXT("True only when this is the final page of the native menu set.")),
 				Field(TEXT("has_more"), TEXT("boolean"), true,
-					TEXT("Always false.")),
+					TEXT("True only while another page remains.")),
 			};
 			Result.Errors = {
 				{TEXT("blueprint_component_query_authority_required"),
 					TEXT("The uai:query scope is missing.")},
 				{TEXT("blueprint_component_target_unresolved"),
 					TEXT("The exact Blueprint identity could not be resolved.")},
-				{TEXT("blueprint_component_class_not_registered"),
-					TEXT("The Component class has no T12 initialization contract.")},
-				{TEXT("blueprint_component_name_invalid"),
-					TEXT("The proposed Component name is invalid or already owned.")},
+				{TEXT("blueprint_component_parent_unresolved"),
+					TEXT("The exact SCS parent does not exist in this Blueprint.")},
+				{TEXT("blueprint_component_candidate_page_invalid"),
+					TEXT("The requested limit or cursor is outside the bounded contract.")},
+				{TEXT("blueprint_component_candidate_query_failed"),
+					TEXT("The native Add Component registry could not be enumerated.")},
 			};
 			Result.Purpose.Summary =
-				TEXT("Resolve one exact Blueprint SCS Component creation candidate and current SCS readback.");
+				TEXT("Search the native Add Component menu for one Blueprint SCS context.");
 			Result.Purpose.Target =
 				TEXT("One exact persisted Blueprint SCS graph.");
 			Result.Purpose.Preconditions = {
 				TEXT("Copy target unchanged from public Blueprint asset creation or search."),
-				TEXT("Use one registered exact Component class and a unique requested name."),
+				TEXT("Provide parent only when reproducing a selected SCS parent context."),
 			};
 			Result.Purpose.ParameterGuidance =
-				TEXT("Copy candidate.name, component_class, binding_revision and scs_revision unchanged into the T12 HJSON import.");
+				TEXT("Search and page the exact native registry, then copy either candidate.name or candidate.id into the HJSON candidate selector; the stable map key remains the component instance name.");
 			Result.Purpose.ResultGuidance =
-				TEXT("Treat candidate identity and revisions as opaque optimistic fences; existing_components is current persisted readback.");
+				TEXT("candidate.name is sufficient only when unique in this registry; candidate.id preserves class, asset override and native action identity. class_path and asset_path are optional diagnostics, not required creation fields.");
 			Result.Purpose.FailureGuidance =
-				TEXT("Unregistered classes, stale bindings and duplicate names fail before mutation; there is no alias fallback.");
+				TEXT("Unknown, ambiguous or stale selectors fail before mutation; there is no class-only fallback.");
 			Result.Purpose.SideEffectGuidance =
 				TEXT("Read-only with no persistent or external side effects.");
 			Result.Purpose.MinimumExample =
-				TEXT("client.blueprint.component_candidates(target=target, component_class='/Script/Engine.SceneComponent', requested_name='SceneRoot')");
+				TEXT("client.blueprint.component_candidates(target=target, parent='DefaultSceneRoot', query='Point Light', limit=10)");
 			Result.Purpose.RelatedFlows = {
 				TEXT("blueprint.asset.create"),
 				TEXT("content_graph.import_workspace"),

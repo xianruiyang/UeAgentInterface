@@ -37,10 +37,13 @@ with the eight exact domain commands `ai.behavior.candidates`,
 `animation_rig_graph.candidates`, `audio.graph.candidates`,
 `blueprint.component.candidates`, `blueprint.node.candidates`,
 `material.expression.candidates`, `niagara.module.candidates`, and
-`pcg.node.candidates`. Their executable `name`, `binding_revision`, and
-domain-specific context are copied unchanged into the owning HJSON contract.
-There is no current `node_catalog_search`, `node_catalog_categories`, universal
-candidate shape, or client-side candidate mapping.
+`pcg.node.candidates`. Read each exact command detail before authoring. Domains
+already on the contextual-create contract accept only the compact candidate
+`name` or `id` as the minimal selector and keep graph, pin, parent, level,
+stage, placement, and instance identity in the owning HJSON context. A legacy
+field is valid only while that command detail still declares it. There is no
+current `node_catalog_search`, `node_catalog_categories`, universal candidate
+shape, or client-side candidate mapping.
 
 ## Atomic capability activation
 

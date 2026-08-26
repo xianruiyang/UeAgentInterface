@@ -2,6 +2,7 @@
 
 #include "Dom/JsonObject.h"
 #include "OperationOwners/AnimationCurveCommands/UeAgentAnimationCurveCommandOperationOwner.h"
+#include "Policies/CondensedJsonPrintPolicy.h"
 #include "QueryOwners/AnimationCurveCommands/UeAgentAnimationCurveCommandQueryOwner.h"
 #include "Serialization/JsonSerializer.h"
 #include "Serialization/JsonWriter.h"

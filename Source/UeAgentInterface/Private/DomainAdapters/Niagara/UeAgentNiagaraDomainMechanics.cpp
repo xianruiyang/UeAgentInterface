@@ -156,6 +156,14 @@ namespace UE::UAI::DomainAdapters::Niagara
 						OutError, TEXT("niagara_domain_stage_target_invalid"),
 						StagePair.Key);
 				}
+				QueryOwners::Niagara::FNiagaraModuleCandidateContext
+					CandidateContext;
+				CandidateContext.TargetUsage = Usage;
+				(*StageTarget)->TryGetStringField(
+					TEXT("usage_id"), CandidateContext.TargetUsageId);
+				(*StageTarget)->TryGetStringField(
+					TEXT("emitter_handle_id"),
+					CandidateContext.EmitterHandleId);
 				if (!Stage->HasField(TEXT("modules"))) continue;
 				const TSharedPtr<FJsonObject>* Modules = nullptr;
 				if (!Stage->TryGetObjectField(TEXT("modules"), Modules)
@@ -193,33 +201,39 @@ namespace UE::UAI::DomainAdapters::Niagara
 							ModulePair.Key,
 							Pointer);
 					}
-					FDomainHjsonCandidateBinding Binding;
-					if (!TryReadCandidateBinding(
-							Candidate, Pointer, Binding, OutError))
+					FDomainHjsonCandidateSelector Selector;
+					if (!TryReadCandidateSelector(
+							Candidate, Pointer, Selector, OutError))
 					{
 						return false;
 					}
-					if (!Binding.SupportsOperation(TEXT("create")))
+					FString ActionKindAssertion;
+					if (Candidate->TryGetStringField(
+							TEXT("action_kind"), ActionKindAssertion)
+						&& !ActionKindAssertion.IsEmpty()
+						&& !ActionKindAssertion.Equals(
+							TEXT("asset_module"), ESearchCase::CaseSensitive))
 					{
 						return Fail(
 							OutError,
-							TEXT("niagara_candidate_operation_unsupported"),
-							Binding.Name,
-							Pointer + TEXT("/supported_operations"));
+							TEXT("niagara_candidate_action_kind_conflict"),
+							ActionKindAssertion,
+							Pointer + TEXT("/action_kind"));
 					}
+					QueryOwners::Niagara::FNiagaraModuleCandidate
+						ResolvedCandidate;
+					QueryOwners::Niagara::FNiagaraModuleCandidateContext
+						ResolvedContext;
 					QueryOwners::Niagara::FNiagaraModuleCandidateQueryError
 						CandidateError;
 					if (!QueryOwners::Niagara::
-							IsCurrentNiagaraModuleCandidateBinding(
+							TryResolveNiagaraModuleCandidate(
 								TargetObject,
-								Binding.Name,
-								Binding.Kind,
-								Binding.SupportedOperations,
-								Binding.InputContract,
-								Binding.PlacementContract,
-								Binding.RequiredContext,
-								Usage,
-								Binding.BindingRevision,
+								Selector.Name,
+								Selector.Id,
+								CandidateContext,
+								ResolvedCandidate,
+								ResolvedContext,
 								CandidateError))
 					{
 						return Fail(
@@ -233,11 +247,25 @@ namespace UE::UAI::DomainAdapters::Niagara
 					FString Existing;
 					if (Module->TryGetStringField(
 							TEXT("script_asset_path"), Existing)
-						&& Existing != Binding.Name)
+						&& Existing != ResolvedCandidate.ScriptAssetPath)
 					{
 						return Fail(
 							OutError, TEXT("niagara_candidate_script_conflict"),
 							Existing, Pointer);
+					}
+					FString CandidatePathAssertion;
+					if (Candidate->TryGetStringField(
+							TEXT("script_asset_path"),
+							CandidatePathAssertion)
+						&& !CandidatePathAssertion.IsEmpty()
+						&& CandidatePathAssertion
+							!= ResolvedCandidate.ScriptAssetPath)
+					{
+						return Fail(
+							OutError,
+							TEXT("niagara_candidate_script_conflict"),
+							CandidatePathAssertion,
+							Pointer + TEXT("/script_asset_path"));
 					}
 					if (Module->TryGetStringField(TEXT("module_kind"), Existing)
 						&& !Existing.IsEmpty()
@@ -249,10 +277,26 @@ namespace UE::UAI::DomainAdapters::Niagara
 							Existing, Pointer);
 					}
 					Module->SetStringField(
-						TEXT("script_asset_path"), Binding.Name);
+						TEXT("script_asset_path"),
+						ResolvedCandidate.ScriptAssetPath);
 					Module->SetStringField(
 						TEXT("module_kind"), TEXT("script_module"));
-					Module->RemoveField(TEXT("candidate"));
+					const TSharedPtr<FJsonObject> CanonicalCandidate =
+						MakeShared<FJsonObject>();
+					CanonicalCandidate->SetStringField(
+						TEXT("id"), ResolvedCandidate.Id);
+					Module->SetObjectField(
+						TEXT("candidate"), CanonicalCandidate);
+					(*StageTarget)->SetStringField(
+						TEXT("usage"), ResolvedContext.TargetUsage);
+					(*StageTarget)->SetStringField(
+						TEXT("usage_id"), ResolvedContext.TargetUsageId);
+					if (!ResolvedContext.EmitterHandleId.IsEmpty())
+					{
+						(*StageTarget)->SetStringField(
+							TEXT("emitter_handle_id"),
+							ResolvedContext.EmitterHandleId);
+					}
 				}
 			}
 			return true;

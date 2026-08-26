@@ -4,6 +4,7 @@
 
 #include "Components/ActorComponent.h"
 #include "Components/SceneComponent.h"
+#include "Commands/PaletteSearch/UeAgentPaletteSearchTypes.h"
 #include "Dom/JsonObject.h"
 #include "Dom/JsonValue.h"
 #include "Domains/Level/Authoring/UeAgentLevelAuthoringAuthorability.h"
@@ -156,6 +157,80 @@ bool ParseActorExtension(const TSharedPtr<const FJsonObject> &Extension,
     OutTransform = MoveTemp(Patch);
   }
   return true;
+}
+
+struct FPlaceableActorPatch {
+  bool bPresent = false;
+  FString Name;
+  FString Id;
+  FString Category;
+};
+
+bool ParsePlaceableActorPatch(
+    const TSharedPtr<const FJsonObject> &Extension,
+    FPlaceableActorPatch &OutPatch, FString &OutError) {
+  OutPatch = {};
+  OutError.Reset();
+  if (!Extension.IsValid() || !Extension->HasField(TEXT("candidate")))
+    return true;
+  const TSharedPtr<const FJsonObject> Candidate =
+      ReadObject(Extension, TEXT("candidate"));
+  if (!Candidate.IsValid()) {
+    OutError = TEXT("level_actor_candidate_invalid");
+    return false;
+  }
+  OutPatch.bPresent = true;
+  Candidate->TryGetStringField(TEXT("name"), OutPatch.Name);
+  Candidate->TryGetStringField(TEXT("id"), OutPatch.Id);
+  OutPatch.Name.TrimStartAndEndInline();
+  OutPatch.Id.TrimStartAndEndInline();
+  if (OutPatch.Name.IsEmpty() && OutPatch.Id.IsEmpty()) {
+    OutError = TEXT("level_actor_candidate_selector_required");
+    return false;
+  }
+  if (Extension->HasField(TEXT("placement_context"))) {
+    const TSharedPtr<const FJsonObject> Context =
+        ReadObject(Extension, TEXT("placement_context"));
+    if (!Context.IsValid()) {
+      OutError = TEXT("level_actor_placement_context_invalid");
+      return false;
+    }
+    Context->TryGetStringField(TEXT("category"), OutPatch.Category);
+    OutPatch.Category.TrimStartAndEndInline();
+  }
+  return true;
+}
+
+bool ValidatePlaceableActorAssertions(
+    const TSharedPtr<const FJsonObject> &Extension,
+    const UeAgentPaletteSearch::FCandidate &Resolved,
+    FString &OutError) {
+  const TSharedPtr<const FJsonObject> Candidate =
+      ReadObject(Extension, TEXT("candidate"));
+  if (!Candidate.IsValid()) {
+    OutError = TEXT("level_actor_candidate_invalid");
+    return false;
+  }
+  auto Check = [&Candidate, &Resolved, &OutError](
+                   const TCHAR *Field, const TCHAR *Selector) -> bool {
+    if (!Candidate->HasField(Field))
+      return true;
+    FString Expected;
+    if (!Candidate->TryGetStringField(Field, Expected) ||
+        !Expected.TrimStartAndEnd().Equals(
+            Resolved.AuthoringSelectors.FindRef(Selector),
+            ESearchCase::CaseSensitive)) {
+      OutError = FString(TEXT("level_actor_candidate_assertion_mismatch:")) +
+                 Field;
+      return false;
+    }
+    return true;
+  };
+  return Check(TEXT("actor_class"), TEXT("actor_class")) &&
+         Check(TEXT("class_path"), TEXT("actor_class")) &&
+         Check(TEXT("asset_path"), TEXT("asset_override")) &&
+         Check(TEXT("factory_class"), TEXT("actor_factory")) &&
+         Check(TEXT("category"), TEXT("placement_category"));
 }
 
 struct FAttachmentPatch {
@@ -449,14 +524,16 @@ public:
                        FTransform InBaseTransform, TOptional<FString> InLabel,
                        TOptional<FString> InFolder,
                        TOptional<FTransformPatch> InTransform,
-                       FActorAttachmentPatch InAttachment)
+	                       FActorAttachmentPatch InAttachment,
+	                       FPlaceableActorPatch InPlaceableCandidate)
       : World(&InWorld), ScratchWorld(MoveTemp(InScratchWorld)),
         Operation(InOperation), Identity(MoveTemp(InIdentity)),
         Existing(InExisting), Proposed(InProposed),
         BaseLabel(MoveTemp(InBaseLabel)), BaseFolder(MoveTemp(InBaseFolder)),
         BaseTransform(MoveTemp(InBaseTransform)), Label(MoveTemp(InLabel)),
         Folder(MoveTemp(InFolder)), Transform(MoveTemp(InTransform)),
-        Attachment(MoveTemp(InAttachment)) {}
+	        Attachment(MoveTemp(InAttachment)),
+	        PlaceableCandidate(MoveTemp(InPlaceableCandidate)) {}
 
   virtual FString GetTargetKey() const override {
     return Identity.CanonicalKey;
@@ -540,8 +617,27 @@ public:
       FGuid DesiredGuid;
       if (!GuidText.IsEmpty() && FGuid::Parse(GuidText, DesiredGuid))
         Params.OverrideActorGuid = DesiredGuid;
-      Actual = World->SpawnActor<AActor>(Proposed->GetClass(),
-                                         Proposed->GetActorTransform(), Params);
+	      if (PlaceableCandidate.bPresent) {
+	        if (!World->PersistentLevel) {
+	          SetFailure(OutFailure, TEXT("level_actor_persistent_level_missing"));
+	          return false;
+	        }
+	        UeAgentPaletteSearch::FCandidate ResolvedCandidate;
+	        FString CandidateError;
+	        if (!UeAgentPaletteSearch::TryPerformPlaceableActorCandidate(
+	                PlaceableCandidate.Name, PlaceableCandidate.Id,
+	                PlaceableCandidate.Category, *World->PersistentLevel,
+	                Proposed->GetActorTransform(), Params, Actual,
+	                ResolvedCandidate, CandidateError)) {
+	          SetFailure(OutFailure,
+	                     TEXT("level_actor_native_candidate_create_failed"),
+	                     CandidateError);
+	          return false;
+	        }
+	      } else {
+	        Actual = World->SpawnActor<AActor>(Proposed->GetClass(),
+	                                           Proposed->GetActorTransform(), Params);
+	      }
       if (!Actual) {
         SetFailure(OutFailure, TEXT("level_actor_spawn_failed"),
                    Identity.CanonicalKey);
@@ -724,6 +820,7 @@ private:
   TOptional<FString> Folder;
   TOptional<FTransformPatch> Transform;
   FActorAttachmentPatch Attachment;
+	  FPlaceableActorPatch PlaceableCandidate;
 };
 
 class FComponentLifecycleState final
@@ -1183,10 +1280,58 @@ private:
       return false;
     }
 
+	    FPlaceableActorPatch PlaceableCandidate;
+	    FString CandidateActorClass;
+	    if (!ParsePlaceableActorPatch(Request.Input->ProviderExtension,
+	                                  PlaceableCandidate, Error)) {
+	      SetFailure(OutFailure, TEXT("level_actor_candidate_invalid"), Error);
+	      return false;
+	    }
+	    if (PlaceableCandidate.bPresent) {
+	      if (Operation == EOperation::Clone || Operation == EOperation::Remove) {
+	        SetFailure(OutFailure,
+	                   TEXT("level_actor_candidate_operation_unsupported"));
+	        return false;
+	      }
+	      UeAgentPaletteSearch::FCandidate ResolvedCandidate;
+	      if (!UeAgentPaletteSearch::TryResolvePlaceableActorCandidate(
+	              PlaceableCandidate.Name, PlaceableCandidate.Id,
+	              PlaceableCandidate.Category, ResolvedCandidate, Error)) {
+	        SetFailure(OutFailure, TEXT("level_actor_candidate_unresolved"),
+	                   Error);
+	        return false;
+	      }
+	      const FString ResolvedClass =
+	          ResolvedCandidate.AuthoringSelectors.FindRef(TEXT("actor_class"));
+	      CandidateActorClass = ResolvedClass;
+	      const FString AssertedClass =
+	          ReadString(Request.Input->Target, TEXT("actor_class"));
+	      if (ResolvedClass.IsEmpty() ||
+	          (!AssertedClass.IsEmpty() && AssertedClass != ResolvedClass)) {
+	        SetFailure(OutFailure, TEXT("level_actor_candidate_class_mismatch"),
+	                   AssertedClass);
+	        return false;
+	      }
+	      if (!ValidatePlaceableActorAssertions(Request.Input->ProviderExtension,
+	                                             ResolvedCandidate, Error)) {
+	        SetFailure(OutFailure,
+	                   TEXT("level_actor_candidate_assertion_mismatch"), Error);
+	        return false;
+	      }
+	      if (Operation == EOperation::Create &&
+	          !ResolvedCandidate.bSupportedInContext) {
+	        SetFailure(OutFailure,
+	                   TEXT("level_actor_candidate_not_headless_creatable"),
+	                   ResolvedCandidate.SupportReason);
+	        return false;
+	      }
+	    }
+
     AActor *Template = Existing;
     if (Operation == EOperation::Create) {
-      const FString ClassPath =
-          ReadString(Request.Input->Target, TEXT("actor_class"));
+	      const FString ClassPath = CandidateActorClass.IsEmpty()
+	          ? ReadString(Request.Input->Target, TEXT("actor_class"))
+	          : CandidateActorClass;
       UClass *Class =
           StaticLoadClass(AActor::StaticClass(), nullptr, *ClassPath);
       if (Class) {
@@ -1260,7 +1405,8 @@ private:
         World, ScratchWorld, Operation, MoveTemp(Identity), Existing, Proposed,
         Template->GetActorLabel(), GetActorFolderPathText(*Template),
         Template->GetActorTransform(), MoveTemp(Label), MoveTemp(Folder),
-        MoveTemp(Transform), MoveTemp(Attachment));
+	        MoveTemp(Transform), MoveTemp(Attachment),
+	        MoveTemp(PlaceableCandidate));
     return true;
   }
 
@@ -1523,6 +1669,9 @@ FContract MakeActorInputContract() {
       Field(TEXT("folder_path"), TEXT("provider_extension"), TEXT("string")),
       Field(TEXT("transform"), TEXT("provider_extension"), TEXT("transform")),
       Field(TEXT("attachment"), TEXT("provider_extension"), TEXT("object")),
+	  Field(TEXT("candidate"), TEXT("provider_extension"), TEXT("object")),
+	  Field(TEXT("placement_context"), TEXT("provider_extension"),
+	        TEXT("object")),
   };
   for (const EOperation Item : All) {
     FOperationDescriptor Descriptor = OperationDescriptor(Item);

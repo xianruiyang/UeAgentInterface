@@ -16,4 +16,10 @@ namespace UE::UAI::CommandHandlers::AnimationBlueprint
 			IUeAgentAnimationBlueprintCommandService> Service,
 		TArray<TSharedRef<CommandEdge::IUeAgentExactCommandHandler>>& OutHandlers,
 		FString& OutError);
+
+	UEAGENTINTERFACE_API bool TryCreateAnimationBlueprintCandidateCommandHandlers(
+		TSharedRef<OperationOwners::AnimationBlueprint::
+			IUeAgentAnimationBlueprintCandidateCommandService> Service,
+		TArray<TSharedRef<CommandEdge::IUeAgentExactCommandHandler>>& OutHandlers,
+		FString& OutError);
 }

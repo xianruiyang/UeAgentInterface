@@ -363,8 +363,8 @@ bool CollectNiagaraCandidates(const FSearchParams& Params, TArray<FCandidate>& O
 		}
 		if (CandidateType.Equals(TEXT("niagara_module")))
 		{
-			Candidate.WriteSupport = TEXT("stack_module_folder_json");
-			Candidate.SupportReason = TEXT("Can be written as module_script_path/module_script_asset_path in Niagara stage module JSON.");
+			Candidate.WriteSupport = TEXT("native_stack_asset_module_action");
+			Candidate.SupportReason = TEXT("Can be selected by candidate id or native display name and replayed through the contextual Niagara stack asset-module action.");
 		}
 		else if (CandidateType.Equals(TEXT("niagara_graph_function")))
 		{

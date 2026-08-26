@@ -11,6 +11,7 @@
 #include "AnimationGraph.h"
 #include "AnimationGraphSchema.h"
 #include "AnimationStateMachineGraph.h"
+#include "AnimationStateMachineSchema.h"
 #include "AssetRegistry/AssetRegistryModule.h"
 #include "Core/Contract/UeAgentCommandJson.h"
 #include "Core/HjsonWorkspace/DomainAuthoring/UeAgentDomainHjsonAuthoringKit.h"
@@ -28,6 +29,7 @@
 #include "Modules/ModuleManager.h"
 #include "ObjectTools.h"
 #include "PackageTools.h"
+#include "QueryOwners/AnimationBlueprint/UeAgentAnimationBlueprintQueryOwner.h"
 #include "UObject/Package.h"
 #include "UObject/StrongObjectPtr.h"
 #include "UObject/UObjectGlobals.h"
@@ -282,6 +284,83 @@ namespace UE::UAI::DomainAdapters::AnimationBlueprint
 			return true;
 		}
 
+		bool ReadOptionalCandidateSelector(
+			const TSharedPtr<FJsonObject>& Object,
+			const FString& JsonPointer,
+			FDomainHjsonCandidateSelector& OutSelector,
+			FWorkspaceError& OutError)
+		{
+			OutSelector = {};
+			const TSharedPtr<FJsonObject>* CandidateField = nullptr;
+			if (!Object.IsValid()
+				|| !Object->TryGetObjectField(TEXT("candidate"), CandidateField))
+			{
+				if (Object.IsValid() && Object->HasField(TEXT("candidate")))
+				{
+					return Fail(
+						OutError,
+						TEXT("animation_blueprint_candidate_invalid"),
+						JsonPointer,
+						JsonPointer + TEXT("/candidate"));
+				}
+				return true;
+			}
+			if (!CandidateField || !CandidateField->IsValid())
+			{
+				return Fail(
+					OutError,
+					TEXT("animation_blueprint_candidate_invalid"),
+					JsonPointer,
+					JsonPointer + TEXT("/candidate"));
+			}
+			FWorkspaceError SelectorError;
+			if (!TryReadCandidateSelector(
+					*CandidateField,
+					JsonPointer + TEXT("/candidate"),
+					OutSelector,
+					SelectorError))
+			{
+				OutError.Set(
+					SelectorError.GetCode().IsEmpty()
+						? FString(TEXT("animation_blueprint_candidate_selector_invalid"))
+						: SelectorError.GetCode(),
+					SelectorError.GetSourceUnit().IsEmpty()
+						? JsonPointer
+						: SelectorError.GetSourceUnit(),
+					SelectorError.GetJsonPointer().IsEmpty()
+						? JsonPointer + TEXT("/candidate")
+						: SelectorError.GetJsonPointer());
+				return false;
+			}
+			return true;
+		}
+
+		bool ValidateCandidateClassAssertion(
+			const TSharedPtr<FJsonObject>& Object,
+			const QueryOwners::AnimationBlueprint::
+				FAnimationBlueprintCandidate& Candidate,
+			const FString& Subject,
+			FWorkspaceError& OutError)
+		{
+			FString ClassAssertion;
+			if (!Object.IsValid()
+				|| !Object->TryGetStringField(TEXT("class"), ClassAssertion)
+				|| ClassAssertion.TrimStartAndEnd().IsEmpty())
+			{
+				return true;
+			}
+			ClassAssertion.TrimStartAndEndInline();
+			if (ClassAssertion != Candidate.NodeClassPath)
+			{
+				return Fail(
+					OutError,
+					TEXT("animation_blueprint_candidate_class_conflict"),
+					Subject,
+					TEXT("/provider_extension/state_machines/candidate"));
+			}
+			return true;
+		}
+
 		bool ApplyAnimationSurfaces(
 			UAnimBlueprint& Blueprint,
 			const TSharedPtr<FJsonObject>& Extension,
@@ -346,19 +425,64 @@ namespace UE::UAI::DomainAdapters::AnimationBlueprint
 						&Blueprint, MachineName);
 				if (!MachineNode)
 				{
+					FDomainHjsonCandidateSelector Selector;
+					if (!ReadOptionalCandidateSelector(
+							MachineSpec,
+							TEXT("/provider_extension/state_machines/")
+								+ MachineName,
+							Selector,
+							OutError))
+					{
+						return false;
+					}
 					double X = 0.0;
 					double Y = 0.0;
 					MachineSpec->TryGetNumberField(TEXT("pos_x"), X);
 					MachineSpec->TryGetNumberField(TEXT("pos_y"), Y);
+					UEdGraphNode* CreatedNode = nullptr;
+					QueryOwners::AnimationBlueprint::
+						FAnimationBlueprintCandidate ResolvedCandidate;
+					QueryOwners::AnimationBlueprint::
+						FAnimationBlueprintCandidateQueryError CandidateError;
+					if (!QueryOwners::AnimationBlueprint::
+							TryPerformAnimationGraphStateMachineCandidate(
+								Blueprint,
+								*AnimGraph,
+								Selector.Name,
+								Selector.Id,
+								FVector2f(
+									static_cast<float>(X),
+									static_cast<float>(Y)),
+								CreatedNode,
+								ResolvedCandidate,
+								CandidateError))
+					{
+						return Fail(
+							OutError,
+							CandidateError.Code.IsEmpty()
+								? FString(TEXT("animation_blueprint_state_machine_create_failed"))
+								: CandidateError.Code,
+							CandidateError.SubjectId.IsEmpty()
+								? MachineName
+								: CandidateError.SubjectId,
+							TEXT("/provider_extension/state_machines/")
+								+ MachineName + TEXT("/candidate"));
+					}
 					UAnimGraphNode_StateMachine* Created =
-						UeAgentAnimBlueprintOps::AddNodeToGraph<
-							UAnimGraphNode_StateMachine>(
-							AnimGraph, static_cast<int32>(X), static_cast<int32>(Y));
+						Cast<UAnimGraphNode_StateMachine>(CreatedNode);
 					if (!Created || !Created->EditorStateMachineGraph)
 					{
 						return Fail(OutError,
 							TEXT("animation_blueprint_state_machine_create_failed"),
 							MachineName);
+					}
+					if (!ValidateCandidateClassAssertion(
+							MachineSpec,
+							ResolvedCandidate,
+							MachineName,
+							OutError))
+					{
+						return false;
 					}
 					FBlueprintEditorUtils::RenameGraph(
 						Created->EditorStateMachineGraph, MachineName);
@@ -387,18 +511,63 @@ namespace UE::UAI::DomainAdapters::AnimationBlueprint
 					{
 						continue;
 					}
+					FDomainHjsonCandidateSelector Selector;
+					if (!ReadOptionalCandidateSelector(
+							StateSpec,
+							TEXT("/provider_extension/state_machines/")
+								+ MachineName + TEXT("/states/") + StateName,
+							Selector,
+							OutError))
+					{
+						return false;
+					}
 					double X = 0.0;
 					double Y = 0.0;
 					StateSpec->TryGetNumberField(TEXT("pos_x"), X);
 					StateSpec->TryGetNumberField(TEXT("pos_y"), Y);
-					UAnimStateNode* State =
-						UeAgentAnimBlueprintOps::AddNodeToGraph<UAnimStateNode>(
-							Machine, static_cast<int32>(X), static_cast<int32>(Y));
+					UEdGraphNode* CreatedNode = nullptr;
+					QueryOwners::AnimationBlueprint::
+						FAnimationBlueprintCandidate ResolvedCandidate;
+					QueryOwners::AnimationBlueprint::
+						FAnimationBlueprintCandidateQueryError CandidateError;
+					if (!QueryOwners::AnimationBlueprint::
+							TryPerformStateMachineGraphCandidate(
+								*Machine,
+								Selector.Name,
+								Selector.Id,
+								FVector2f(
+									static_cast<float>(X),
+									static_cast<float>(Y)),
+								CreatedNode,
+								ResolvedCandidate,
+								CandidateError))
+					{
+						return Fail(
+							OutError,
+							CandidateError.Code.IsEmpty()
+								? FString(TEXT("animation_blueprint_state_create_failed"))
+								: CandidateError.Code,
+							CandidateError.SubjectId.IsEmpty()
+								? StateName
+								: CandidateError.SubjectId,
+							TEXT("/provider_extension/state_machines/")
+								+ MachineName + TEXT("/states/")
+								+ StateName + TEXT("/candidate"));
+					}
+					UAnimStateNode* State = Cast<UAnimStateNode>(CreatedNode);
 					if (!State || !State->GetBoundGraph())
 					{
 						return Fail(OutError,
 							TEXT("animation_blueprint_state_create_failed"),
 							StateName);
+					}
+					if (!ValidateCandidateClassAssertion(
+							StateSpec,
+							ResolvedCandidate,
+							StateName,
+							OutError))
+					{
+						return false;
 					}
 					FBlueprintEditorUtils::RenameGraph(
 						State->GetBoundGraph(), StateName);
@@ -454,16 +623,30 @@ namespace UE::UAI::DomainAdapters::AnimationBlueprint
 							TEXT("animation_blueprint_transition_endpoint_unresolved"),
 							Source + TEXT("->") + Target);
 					}
+					const UAnimationStateMachineSchema* Schema =
+						Cast<UAnimationStateMachineSchema>(Machine->GetSchema());
+					if (!Schema)
+					{
+						return Fail(OutError,
+							TEXT("animation_blueprint_transition_schema_unresolved"),
+							Source + TEXT("->") + Target);
+					}
+					if (!Schema->TryCreateConnection(
+							SourceState->GetOutputPin(), TargetState->GetInputPin()))
+					{
+						return Fail(OutError,
+							TEXT("animation_blueprint_transition_connection_rejected"),
+							Source + TEXT("->") + Target);
+					}
 					UAnimStateTransitionNode* Transition =
-						UeAgentAnimBlueprintOps::AddNodeToGraph<
-							UAnimStateTransitionNode>(Machine, 0, 0);
+						UeAgentAnimBlueprintOps::FindTransitionNode(
+							Machine, Source, Target);
 					if (!Transition)
 					{
 						return Fail(OutError,
 							TEXT("animation_blueprint_transition_create_failed"),
 							Source + TEXT("->") + Target);
 					}
-					Transition->CreateConnections(SourceState, TargetState);
 					TransitionSpec->TryGetBoolField(
 						TEXT("bidirectional"), Transition->Bidirectional);
 					double Crossfade = Transition->CrossfadeDuration;

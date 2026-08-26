@@ -26,21 +26,31 @@ namespace UE::UAI::QueryOwners::BlueprintNode
 			OutError.Detail = MoveTemp(JsonError);
 			return false;
 		}
-		FString Target;
-		FString GraphId;
-		FString Query;
-		if (!Params->TryGetStringField(TEXT("target"), Target)
-			|| !Params->TryGetStringField(TEXT("graph_id"), GraphId))
+		FUeAgentBlueprintNodeCandidateQuery Query;
+		if (!Params->TryGetStringField(TEXT("target"), Query.Target)
+			|| !Params->TryGetStringField(TEXT("graph_id"), Query.GraphId))
 		{
 			OutError.Code = TEXT("blueprint_node_candidate_identity_required");
 			OutError.SubjectId = Request.CommandId;
 			return false;
 		}
-		Params->TryGetStringField(TEXT("query"), Query);
+		Params->TryGetStringField(TEXT("query"), Query.Query);
+		Params->TryGetStringField(TEXT("id"), Query.CandidateId);
+		Params->TryGetStringField(TEXT("node_guid"), Query.NodeGuid);
+		Params->TryGetStringField(TEXT("pin_guid"), Query.PinGuid);
+		Params->TryGetStringField(TEXT("pin_name"), Query.PinName);
+		double Limit = Query.Limit;
+		double Cursor = Query.Cursor;
+		if (Params->TryGetNumberField(TEXT("limit"), Limit))
+		{
+			Query.Limit = FMath::RoundToInt(Limit);
+		}
+		if (Params->TryGetNumberField(TEXT("cursor"), Cursor))
+		{
+			Query.Cursor = FMath::RoundToInt(Cursor);
+		}
 		FUeAgentBlueprintNodeMechanicsError MechanicsError;
 		if (!TryQueryBlueprintNodeCandidates(
-				Target,
-				GraphId,
 				Query,
 				OutResponse.PayloadJson,
 				MechanicsError))
@@ -56,4 +66,3 @@ namespace UE::UAI::QueryOwners::BlueprintNode
 		return true;
 	}
 }
-

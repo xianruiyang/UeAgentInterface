@@ -3,23 +3,24 @@
 #include "CoreMinimal.h"
 
 class UObject;
+class UControlRigBlueprint;
+class URigVMUnitNode;
 
 namespace UE::UAI::QueryOwners::AnimationRigGraph
 {
 	struct UEAGENTINTERFACE_API FAnimationRigGraphCandidate
 	{
-		FString TargetRef;
-		FString TargetRevision;
+		FString Id;
 		FString Name;
 		FString Label;
 		FString Kind;
+		FString ActionKind;
+		FString Category;
+		FString Summary;
+		FString WriteSupport;
+		FString SupportReason;
+		bool bSupported = false;
 		TArray<FString> SupportedOperations;
-		FString InputContract;
-		FString PlacementContract;
-		FString RequiredContext;
-		FString BindingRevision;
-		int32 MajorVersion = 0;
-		int32 MinorVersion = 0;
 	};
 
 	struct UEAGENTINTERFACE_API FAnimationRigGraphCandidateQueryResult
@@ -31,6 +32,12 @@ namespace UE::UAI::QueryOwners::AnimationRigGraph
 		int32 NextCursor = INDEX_NONE;
 		bool bComplete = false;
 		bool bHasMore = false;
+		bool bCoverageComplete = false;
+		bool bCreationCoverageComplete = false;
+		int32 NativeActionCount = 0;
+		int32 ExecutableActionCount = 0;
+		FString CoverageScope;
+		FString GraphName;
 	};
 
 	struct UEAGENTINTERFACE_API FAnimationRigGraphCandidateQueryError
@@ -46,18 +53,24 @@ namespace UE::UAI::QueryOwners::AnimationRigGraph
 		FAnimationRigGraphCandidateQueryResult& OutResult,
 		FAnimationRigGraphCandidateQueryError& OutError,
 		int32 Limit = 64,
-		int32 Cursor = 0);
+		int32 Cursor = 0,
+		const FString& CandidateId = FString());
 
-	UEAGENTINTERFACE_API bool IsCurrentAnimationRigGraphCandidateBinding(
-		UObject& Target,
-		const FString& CandidateTargetRef,
-		const FString& CandidateTargetRevision,
-		const FString& CandidateName,
-		const FString& CandidateKind,
-		const TArray<FString>& SupportedOperations,
-		const FString& InputContract,
-		const FString& PlacementContract,
-		const FString& RequiredContext,
-		const FString& BindingRevision,
+	/** Re-enumerate the native default-graph blank context and resolve one selector. */
+	UEAGENTINTERFACE_API bool TryResolveAnimationRigGraphCandidate(
+		UControlRigBlueprint& Target,
+		const FString& Name,
+		const FString& Id,
+		FAnimationRigGraphCandidate& OutCandidate,
+		FAnimationRigGraphCandidateQueryError& OutError);
+
+	/** Re-enumerate and invoke the same supported RigVM menu action. */
+	UEAGENTINTERFACE_API bool TryPerformAnimationRigGraphCandidate(
+		UControlRigBlueprint& Target,
+		const FString& Name,
+		const FString& Id,
+		const FVector2f& Location,
+		URigVMUnitNode*& OutNode,
+		FAnimationRigGraphCandidate& OutCandidate,
 		FAnimationRigGraphCandidateQueryError& OutError);
 }

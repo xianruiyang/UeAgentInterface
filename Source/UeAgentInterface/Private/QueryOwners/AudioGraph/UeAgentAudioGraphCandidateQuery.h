@@ -10,9 +10,16 @@ namespace UE::UAI::QueryOwners::AudioGraph
 	{
 		FString TargetRef;
 		FString TargetRevision;
+		FString Id;
 		FString Name;
 		FString Label;
 		FString Kind;
+		FString ActionKind;
+		FString Category;
+		FString Summary;
+		FString WriteSupport;
+		FString SupportReason;
+		bool bSupported = false;
 		TArray<FString> SupportedOperations;
 		FString InputContract;
 		FString PlacementContract;
@@ -31,6 +38,9 @@ namespace UE::UAI::QueryOwners::AudioGraph
 		int32 NextCursor = INDEX_NONE;
 		bool bComplete = false;
 		bool bHasMore = false;
+		FString CoverageScope;
+		bool bCoverageComplete = false;
+		bool bCreationCoverageComplete = false;
 	};
 
 	struct UEAGENTINTERFACE_API FAudioGraphCandidateQueryError
@@ -46,7 +56,16 @@ namespace UE::UAI::QueryOwners::AudioGraph
 		FAudioGraphCandidateQueryResult& OutResult,
 		FAudioGraphCandidateQueryError& OutError,
 		int32 Limit = 64,
-		int32 Cursor = 0);
+		int32 Cursor = 0,
+		const FString& CandidateId = FString());
+
+	/** Re-enumerate the current MetaSound frontend registry and resolve one selector. */
+	UEAGENTINTERFACE_API bool TryResolveAudioGraphCandidate(
+		UObject& Target,
+		const FString& Name,
+		const FString& Id,
+		FAudioGraphCandidate& OutCandidate,
+		FAudioGraphCandidateQueryError& OutError);
 
 	UEAGENTINTERFACE_API bool IsCurrentAudioGraphCandidateBinding(
 		UObject& Target,

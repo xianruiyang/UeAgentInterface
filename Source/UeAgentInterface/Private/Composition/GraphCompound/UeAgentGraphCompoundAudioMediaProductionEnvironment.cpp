@@ -240,6 +240,43 @@ namespace UE::UAI::Composition::GraphCompound
 			return true;
 		}
 
+		bool TryNumberValue(
+			const FUeAgentCanonicalValue* Value,
+			double& OutValue)
+		{
+			if (Value == nullptr
+				|| (Value->GetKind() != EUeAgentValueKind::Integer
+					&& Value->GetKind() != EUeAgentValueKind::Decimal))
+			{
+				return false;
+			}
+			OutValue = FCString::Atod(*Value->GetLexeme());
+			return FMath::IsFinite(OutValue);
+		}
+
+		bool TryOptionalPosition(
+			const FUeAgentCanonicalValue& Object,
+			TOptional<FVector2D>& OutPosition)
+		{
+			OutPosition.Reset();
+			const FUeAgentCanonicalValue* const Position =
+				FindField(Object, TEXT("position"));
+			if (Position == nullptr)
+			{
+				return true;
+			}
+			double X = 0.0;
+			double Y = 0.0;
+			if (Position->GetKind() != EUeAgentValueKind::Object
+				|| !TryNumberValue(FindField(*Position, TEXT("x")), X)
+				|| !TryNumberValue(FindField(*Position, TEXT("y")), Y))
+			{
+				return false;
+			}
+			OutPosition = FVector2D(X, Y);
+			return true;
+		}
+
 		bool TryGuidField(
 			const FUeAgentCanonicalValue& Object,
 			const FString& Name,
@@ -530,11 +567,13 @@ namespace UE::UAI::Composition::GraphCompound
 					FString ClassName;
 					int32 Major = 0;
 					int32 Minor = 0;
+					TOptional<FVector2D> Position;
 					if (!Value.IsValid()
 						|| !TryGuidField(*Value, TEXT("node_guid"), NodeId)
 						|| !TryStringField(*Value, TEXT("class_name"), ClassName)
 						|| !TryIntegerField(*Value, TEXT("major_version"), Major)
-						|| !TryIntegerField(*Value, TEXT("minor_version"), Minor))
+						|| !TryIntegerField(*Value, TEXT("minor_version"), Minor)
+						|| !TryOptionalPosition(*Value, Position))
 					{
 						SetError(OutError,
 							TEXT("graph_compound_audio_media_metasound_node_spec_invalid"),
@@ -543,7 +582,7 @@ namespace UE::UAI::Composition::GraphCompound
 					}
 					OutSpec.MetaNodes.Emplace(
 						NodeId, MoveTemp(ClassName), Major, Minor,
-						NativeIntent(Edit.GetIntent()));
+						NativeIntent(Edit.GetIntent()), MoveTemp(Position));
 				}
 				return true;
 			case EAudioMediaGraphInputKind::MetaSoundLink:

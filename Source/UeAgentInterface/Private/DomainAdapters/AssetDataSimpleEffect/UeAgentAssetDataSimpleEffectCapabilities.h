@@ -8,6 +8,7 @@
 #include "Core/StateSemantic/UeAgentStateSemantic.h"
 #include "DomainAdapters/GenericEffect/UeAgentGenericEffectAdapter.h"
 #include "Templates/SharedPointer.h"
+#include "UObject/WeakObjectPtr.h"
 
 class UClass;
 class UObject;

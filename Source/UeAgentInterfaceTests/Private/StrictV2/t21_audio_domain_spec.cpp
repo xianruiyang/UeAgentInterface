@@ -118,15 +118,81 @@ bool FUeAgentStrictV2T21AudioDomainTest::RunTest(const FString& Parameters)
 	UMetaSoundSource* MetaSoundTarget = NewObject<UMetaSoundSource>(GetTransientPackage());
 	FAudioGraphCandidateQueryResult MetaSoundResult;
 	if (!TestTrue(
-		TEXT("the audio owner resolves real MetaSound candidates"),
+		TEXT("the audio owner resolves the representative MetaSound candidate"),
 		TryQueryAudioGraphCandidates(
-			*MetaSoundTarget, TEXT(""), MetaSoundResult, CandidateError)))
+			*MetaSoundTarget,
+			TEXT("UE.Sine.Audio"),
+			MetaSoundResult,
+			CandidateError)))
 	{
 		AddError(CandidateError.Code + TEXT(":") + CandidateError.Detail);
 		return false;
 	}
 	TestTrue(TEXT("the MetaSound registry catalog is non-empty"),
 		!MetaSoundResult.Candidates.IsEmpty());
+	const FAudioGraphCandidate* const MetaSoundCandidate =
+		MetaSoundResult.Candidates.FindByPredicate(
+			[](const FAudioGraphCandidate& Candidate)
+			{
+				return Candidate.Name == TEXT("UE.Sine.Audio")
+					&& Candidate.bSupported;
+			});
+	if (!TestNotNull(
+			TEXT("UE.Sine.Audio is exposed as a supported compact candidate"),
+			MetaSoundCandidate))
+	{
+		return false;
+	}
+	TestTrue(TEXT("the MetaSound candidate id is compact and reusable"),
+		MetaSoundCandidate->Id.StartsWith(TEXT("candidate:")));
+	TestFalse(TEXT("the frontend registry does not claim native-menu coverage"),
+		MetaSoundResult.bCoverageComplete);
+	TestFalse(TEXT("the frontend writer does not claim native action coverage"),
+		MetaSoundResult.bCreationCoverageComplete);
+	TestEqual(TEXT("the MetaSound coverage scope is explicit"),
+		MetaSoundResult.CoverageScope,
+		FString(TEXT("metasound_frontend_registry_loaded_classes")));
+
+	FAudioGraphCandidate ResolvedMetaSound;
+	TestTrue(TEXT("the exact MetaSound id re-resolves from the same registry"),
+		TryResolveAudioGraphCandidate(
+			*MetaSoundTarget,
+			FString(),
+			MetaSoundCandidate->Id,
+			ResolvedMetaSound,
+			CandidateError));
+	TestEqual(TEXT("id re-resolution preserves the exact class name"),
+		ResolvedMetaSound.Name, MetaSoundCandidate->Name);
+	TestEqual(TEXT("id re-resolution preserves the exact minor version"),
+		ResolvedMetaSound.MinorVersion, MetaSoundCandidate->MinorVersion);
+	TestFalse(TEXT("name and id are conjunctive selectors"),
+		TryResolveAudioGraphCandidate(
+			*MetaSoundTarget,
+			TEXT("UE.Not.The.Same.Class"),
+			MetaSoundCandidate->Id,
+			ResolvedMetaSound,
+			CandidateError));
+	TestEqual(TEXT("a mismatched selector fails before write"),
+		CandidateError.Code,
+		FString(TEXT("audio_graph_candidate_not_found")));
+
+	FAudioGraphCandidateQueryResult ExactIdResult;
+	TestTrue(TEXT("the public query accepts an exact candidate id"),
+		TryQueryAudioGraphCandidates(
+			*MetaSoundTarget,
+			FString(),
+			ExactIdResult,
+			CandidateError,
+			64,
+			0,
+			MetaSoundCandidate->Id));
+	TestEqual(TEXT("the exact id query returns one candidate"),
+		ExactIdResult.TotalMatches, 1);
+	if (ExactIdResult.Candidates.Num() == 1)
+	{
+		TestEqual(TEXT("the exact id remains stable across enumeration"),
+			ExactIdResult.Candidates[0].Id, MetaSoundCandidate->Id);
+	}
 
 	for (const FAudioGraphCandidateQueryResult* Result : {&SoundCueResult, &MetaSoundResult})
 	{
@@ -176,6 +242,11 @@ bool FUeAgentStrictV2T21AudioDomainTest::RunTest(const FString& Parameters)
 					Candidate.MinorVersion,
 					Candidate.BindingRevision,
 					CandidateError));
+			if (bSoundCueCandidate)
+			{
+				TestTrue(TEXT("SoundCue remains isolated on its legacy binding"),
+					Candidate.Id.IsEmpty());
+			}
 		}
 		TestEqual(TEXT("complete is the inverse of has_more"),
 			Result->bComplete, !Result->bHasMore);

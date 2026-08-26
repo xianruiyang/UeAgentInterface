@@ -2,6 +2,7 @@
 
 #include "Dom/JsonObject.h"
 #include "OperationOwners/AnimationRigCommands/UeAgentAnimationRigCommandOperationOwner.h"
+#include "Policies/CondensedJsonPrintPolicy.h"
 #include "QueryOwners/AnimationRigCommands/UeAgentAnimationRigCommandQueryOwner.h"
 #include "Serialization/JsonSerializer.h"
 #include "Serialization/JsonWriter.h"

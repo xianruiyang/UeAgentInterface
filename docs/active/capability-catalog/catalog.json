@@ -22,9 +22,9 @@
   ],
   "command_manifest": {
     "path": "Resources/UaiCommandManifest.json",
-    "file_sha256": "sha256:5e6f960aca29c246ac2528dd6e62b35c6841dd00abb1105bdbb5662745656e5c",
-    "registry_hash": "sha256:36c11593999f6006b540e3433de6a546bf7f892035ba2e09d258dd61ae919261",
-    "command_count": 352
+    "file_sha256": "sha256:09bd006e3a188ed7284845abe745d6dec42a2a0ce99314de953edea1ef2296ee",
+    "registry_hash": "sha256:e6293e13cb84ce236157044251edd0a4937c9a570d578f536d8cc38e80c8fd0b",
+    "command_count": 353
   },
   "historical_sources": {
     "candidate_current_inventory": {
@@ -3519,6 +3519,7 @@
         "world_commands"
       ],
       "current_command_ids": [
+        "world.actor.candidates",
         "world.actor.create",
         "world.actor_hlod_layer.update",
         "world.actor_streaming_policy.update",
@@ -3540,12 +3541,14 @@
         "streaming level"
       ],
       "authoring_surfaces": [
+        "native Place Actors candidate search",
         "actor",
         "relation",
         "state",
         "wall opening"
       ],
       "operations": [
+        "query",
         "create",
         "update"
       ],

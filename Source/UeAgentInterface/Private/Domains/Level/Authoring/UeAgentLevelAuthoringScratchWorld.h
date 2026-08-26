@@ -3,12 +3,12 @@
 #pragma once
 
 #include "CoreMinimal.h"
+#include "Engine/World.h"
+#include "UObject/Package.h"
 #include "UObject/StrongObjectPtr.h"
 
 class AActor;
 class UActorComponent;
-class UPackage;
-class UWorld;
 
 namespace UeAgentLevelAuthoring
 {

@@ -7,16 +7,22 @@
 #include "Blueprint/BlueprintSupport.h"
 #include "Blueprint/UserWidget.h"
 #include "Blueprint/WidgetBlueprintGeneratedClass.h"
+#include "ClassViewerFilter.h"
+#include "ClassViewerModule.h"
 #include "Commands/PaletteSearch/UeAgentPaletteSearchNaming.h"
 #include "Components/ActorComponent.h"
 #include "Components/Widget.h"
 #include "ComponentTypeRegistry.h"
+#include "Engine/Blueprint.h"
+#include "Engine/SCS_Node.h"
+#include "Engine/SimpleConstructionScript.h"
 #include "Internationalization/Text.h"
 #include "Kismet2/KismetEditorUtilities.h"
 #include "Misc/App.h"
 #include "Misc/PackageName.h"
 #include "Modules/ModuleManager.h"
 #include "SComponentClassCombo.h"
+#include "SubobjectDataSubsystem.h"
 #include "UObject/CoreRedirects.h"
 #include "UObject/UObjectIterator.h"
 #include "WidgetBlueprint.h"
@@ -155,17 +161,84 @@ namespace
 		return DisplayNameFromClassPath(FullName);
 	}
 
-	static void AddActorComponentCandidates(const FSearchParams& Params, TArray<FCandidate>& OutCandidates, TSet<FString>& SeenFullNames)
+	struct FActorComponentActionEntry final
 	{
+		FComponentClassComboEntryPtr Entry;
+		FCandidate Candidate;
+	};
+
+	static FString ComponentAssetPath(const FComponentClassComboEntryPtr& Entry)
+	{
+		return Entry.IsValid() && Entry->GetAssetOverride()
+			? Entry->GetAssetOverride()->GetPathName()
+			: FString();
+	}
+
+	static FString ComponentNativeActionSignature(
+		const FComponentClassComboEntryPtr& Entry,
+		const FString& ComponentClassPath)
+	{
+		if (!Entry.IsValid()
+			|| Entry->GetComponentCreateAction()
+				!= EComponentCreateAction::SpawnExistingClass)
+		{
+			return FString();
+		}
+		return FString::Printf(
+			TEXT("spawn_existing_class|class=%s|asset=%s|name=%s"),
+			*ComponentClassPath,
+			*ComponentAssetPath(Entry),
+			*Entry->GetComponentNameOverride());
+	}
+
+	static bool IsComponentClassAllowed(
+		const FComponentClassComboEntryPtr& Entry,
+		const FClassViewerInitializationOptions& Options,
+		const TSharedRef<IClassViewerFilter>& ClassFilter,
+		const TSharedRef<FClassViewerFilterFuncs>& FilterFuncs)
+	{
+		if (const UClass* ComponentClass = Entry->GetComponentClass())
+		{
+			return ClassFilter->IsClassAllowed(
+				Options, ComponentClass, FilterFuncs);
+		}
+		const TSharedPtr<IUnloadedBlueprintData> UnloadedData =
+			Entry->GetUnloadedBlueprintData();
+		return !UnloadedData.IsValid()
+			|| ClassFilter->IsUnloadedClassAllowed(
+				Options, UnloadedData.ToSharedRef(), FilterFuncs);
+	}
+
+	static bool TryBuildActorComponentEntries(
+		const FSearchParams& Params,
+		TArray<FActorComponentActionEntry>& OutEntries,
+		FString& OutError)
+	{
+		OutEntries.Reset();
 		TArray<FComponentClassComboEntryPtr>* ComponentClassList = nullptr;
 		FComponentTypeRegistry::Get().SubscribeToComponentList(ComponentClassList);
 		if (!ComponentClassList)
 		{
-			return;
+			OutError = TEXT("component_type_registry_unavailable");
+			return false;
 		}
+		FClassViewerModule* ClassViewer =
+			FModuleManager::LoadModulePtr<FClassViewerModule>(TEXT("ClassViewer"));
+		if (!ClassViewer)
+		{
+			OutError = TEXT("component_class_filter_unavailable");
+			return false;
+		}
+		const FClassViewerInitializationOptions FilterOptions;
+		const TSharedRef<IClassViewerFilter> ClassFilter =
+			ClassViewer->CreateClassFilter(FilterOptions);
+		const TSharedRef<FClassViewerFilterFuncs> FilterFuncs =
+			ClassViewer->CreateFilterFuncs();
 
 		FString CurrentSection = TEXT("Components");
 		int32 UiOrder = 0;
+		TSet<FString> SeenActions;
+		const bool bHasSearchText = !Params.SearchText.TrimStartAndEnd().IsEmpty();
 		for (const FComponentClassComboEntryPtr& Entry : *ComponentClassList)
 		{
 			if (!Entry.IsValid())
@@ -185,13 +258,19 @@ namespace
 			{
 				continue;
 			}
-			if (Entry->GetAssetOverride())
+			if ((bHasSearchText && !Entry->IsIncludedInFilter())
+				|| !IsComponentClassAllowed(
+					Entry, FilterOptions, ClassFilter, FilterFuncs))
 			{
 				continue;
 			}
 
 			const FString FullName = FullNameFromComponentEntry(Entry);
-			if (FullName.IsEmpty() || SeenFullNames.Contains(FullName))
+			const FString NativeActionSignature =
+				ComponentNativeActionSignature(Entry, FullName);
+			FString ActionKey = NativeActionSignature.ToLower();
+			if (FullName.IsEmpty() || NativeActionSignature.IsEmpty()
+				|| SeenActions.Contains(ActionKey))
 			{
 				continue;
 			}
@@ -203,7 +282,7 @@ namespace
 				continue;
 			}
 
-			SeenFullNames.Add(FullName);
+			SeenActions.Add(MoveTemp(ActionKey));
 			const FString Name = ActorComponentMenuName(Entry, FullName);
 			FCandidate Candidate;
 			Candidate.Kind = TEXT("actor_component");
@@ -216,19 +295,168 @@ namespace
 			Candidate.SourceOrigin = SourceOrigin;
 			Candidate.SourceLabel = SourceOrigin;
 			Candidate.PackagePath = ComponentClass ? ComponentClass->GetOutermost()->GetName() : FPackageName::ObjectPathToPackageName(FullName);
-			Candidate.ObjectPath = FullName;
+			const FString AssetPath = ComponentAssetPath(Entry);
+			Candidate.ObjectPath = AssetPath.IsEmpty() ? FullName : AssetPath;
 			Candidate.AuthoringSelectors.Add(TEXT("component_class"), FullName);
+			Candidate.AuthoringSelectors.Add(
+				TEXT("native_action_signature"), NativeActionSignature);
+			if (!AssetPath.IsEmpty())
+			{
+				Candidate.AuthoringSelectors.Add(TEXT("asset_override"), AssetPath);
+			}
 			Candidate.Tooltip = ComponentClass ? ComponentClass->GetToolTipText().ToString() : Candidate.Name;
-			Candidate.Keywords = FString::Printf(TEXT("%s %s %s"), *Candidate.Name, *FullName, *CurrentSection);
-			Candidate.WriteSupport = TEXT("blueprint.components[].component_class");
-			Candidate.SupportReason = TEXT("Use full_name as component_class in the Blueprint component-tree authoring surface.");
+			Candidate.Keywords = FString::Printf(
+				TEXT("%s %s %s %s"),
+				*Candidate.Name, *FullName, *AssetPath, *CurrentSection);
+			Candidate.WriteSupport = TEXT("blueprint.components[].candidate");
+			Candidate.SupportReason = TEXT("Use candidate.name or candidate.id in the Blueprint component-tree authoring surface; the server resolves the native registry entry.");
 			Candidate.bInLibrary = true;
 			Candidate.bSupportedInContext = true;
 			Candidate.UiOrder = UiOrder++;
 			FString IdentityError;
-			ensureAlwaysMsgf(SetCandidateIdentity(Params.CatalogType, FullName, Candidate.Name, Candidate, IdentityError), TEXT("Component catalog identity failed: %s"), *IdentityError);
-			OutCandidates.Add(MoveTemp(Candidate));
+			if (!SetCandidateIdentity(
+					Params.CatalogType,
+					NativeActionSignature,
+					ComponentClass
+						? ComponentClass->GetName()
+						: FPackageName::GetLongPackageAssetName(FullName),
+					Candidate,
+					IdentityError))
+			{
+				OutError = FString::Printf(
+					TEXT("component_catalog_identity_failed:%s"),
+					*IdentityError);
+				return false;
+			}
+			FActorComponentActionEntry ActionEntry;
+			ActionEntry.Entry = Entry;
+			ActionEntry.Candidate = MoveTemp(Candidate);
+			OutEntries.Add(MoveTemp(ActionEntry));
 		}
+		OutError.Reset();
+		return true;
+	}
+
+	static bool MatchesExactComponentName(
+		const FCandidate& Candidate,
+		const FString& Name)
+	{
+		if (Name.TrimStartAndEnd().IsEmpty())
+		{
+			return true;
+		}
+		const auto Matches = [&Name](const FString& Value)
+		{
+			return !Value.IsEmpty()
+				&& Value.Equals(Name, ESearchCase::IgnoreCase);
+		};
+		if (Matches(Candidate.Name)
+			|| Matches(Candidate.DisplayName)
+			|| Matches(Candidate.FullName)
+			|| Matches(Candidate.SearchKey)
+			|| Matches(Candidate.GetStableId())
+			|| Matches(Candidate.ObjectPath))
+		{
+			return true;
+		}
+		for (const TPair<FString, FString>& Selector
+			: Candidate.AuthoringSelectors)
+		{
+			if (Matches(Selector.Value))
+			{
+				return true;
+			}
+		}
+		return false;
+	}
+
+	static bool TryResolveActorComponentEntry(
+		const FString& Name,
+		const FString& Id,
+		FActorComponentActionEntry& OutEntry,
+		FString& OutError)
+	{
+		OutEntry = {};
+		if (Name.TrimStartAndEnd().IsEmpty()
+			&& Id.TrimStartAndEnd().IsEmpty())
+		{
+			OutError = TEXT("blueprint_component_candidate_selector_required");
+			return false;
+		}
+		FSearchParams Params;
+		Params.CatalogType = TEXT("actor_component");
+		TArray<FActorComponentActionEntry> Entries;
+		if (!TryBuildActorComponentEntries(Params, Entries, OutError))
+		{
+			return false;
+		}
+		TMap<FString, int32> Matches;
+		for (int32 Index = 0; Index < Entries.Num(); ++Index)
+		{
+			const FCandidate& Candidate = Entries[Index].Candidate;
+			const bool bIdMatches = Id.TrimStartAndEnd().IsEmpty()
+				|| Candidate.GetPublicId().Equals(Id, ESearchCase::IgnoreCase)
+				|| Candidate.GetCandidateId().Equals(
+					Id, ESearchCase::CaseSensitive);
+			if (bIdMatches && MatchesExactComponentName(Candidate, Name))
+			{
+				Matches.FindOrAdd(Candidate.GetCandidateId(), Index);
+			}
+		}
+		if (Matches.IsEmpty())
+		{
+			OutError = TEXT("blueprint_component_candidate_not_found");
+			return false;
+		}
+		if (Matches.Num() != 1)
+		{
+			OutError = FString::Printf(
+				TEXT("blueprint_component_candidate_ambiguous:%d"),
+				Matches.Num());
+			return false;
+		}
+		for (const TPair<FString, int32>& Match : Matches)
+		{
+			OutEntry = Entries[Match.Value];
+			break;
+		}
+		OutError.Reset();
+		return true;
+	}
+
+	static UClass* ResolveComponentClass(
+		const FComponentClassComboEntryPtr& Entry)
+	{
+		if (!Entry.IsValid())
+		{
+			return nullptr;
+		}
+		if (UClass* ComponentClass = Entry->GetComponentClass())
+		{
+			return ComponentClass;
+		}
+		const FString ComponentPath = Entry->GetComponentPath();
+		UObject* LoadedObject = ComponentPath.IsEmpty()
+			? nullptr
+			: LoadObject<UObject>(nullptr, *ComponentPath);
+		if (UClass* LoadedClass = Cast<UClass>(LoadedObject))
+		{
+			return LoadedClass->GetAuthoritativeClass();
+		}
+		if (UBlueprint* LoadedBlueprint = Cast<UBlueprint>(LoadedObject))
+		{
+			UClass* BlueprintClass = LoadedBlueprint->SkeletonGeneratedClass
+				? LoadedBlueprint->SkeletonGeneratedClass
+				: LoadedBlueprint->GeneratedClass;
+			if (!BlueprintClass)
+			{
+				BlueprintClass = LoadedBlueprint->ParentClass;
+			}
+			return BlueprintClass
+				? BlueprintClass->GetAuthoritativeClass()
+				: nullptr;
+		}
+		return nullptr;
 	}
 
 	static FString ObjectPathFromExportTextPath(const FString& Path)
@@ -421,12 +649,167 @@ namespace
 	}
 }
 
+bool TryResolveActorComponentCandidate(
+	const FString& Name,
+	const FString& Id,
+	FCandidate& OutCandidate,
+	FString& OutError)
+{
+	FActorComponentActionEntry Entry;
+	if (!TryResolveActorComponentEntry(Name, Id, Entry, OutError))
+	{
+		OutCandidate = {};
+		return false;
+	}
+	OutCandidate = MoveTemp(Entry.Candidate);
+	return true;
+}
+
+bool TryPerformBlueprintComponentCandidate(
+	UBlueprint& Blueprint,
+	USCS_Node* Parent,
+	const FString& Name,
+	const FString& Id,
+	const FString& RequestedName,
+	USCS_Node*& OutNode,
+	FCandidate& OutCandidate,
+	FString& OutError)
+{
+	OutNode = nullptr;
+	OutCandidate = {};
+	FActorComponentActionEntry Action;
+	if (!TryResolveActorComponentEntry(Name, Id, Action, OutError))
+	{
+		return false;
+	}
+	UClass* ComponentClass = ResolveComponentClass(Action.Entry);
+	if (!ComponentClass
+		|| !ComponentClass->IsChildOf(UActorComponent::StaticClass())
+		|| ComponentClass->HasAnyClassFlags(
+			CLASS_Abstract | CLASS_Deprecated | CLASS_NewerVersionExists))
+	{
+		OutError = TEXT("blueprint_component_candidate_class_unresolved");
+		return false;
+	}
+	USimpleConstructionScript* SCS = Blueprint.SimpleConstructionScript;
+	USubobjectDataSubsystem* SubobjectSystem =
+		USubobjectDataSubsystem::Get();
+	if (!SCS || !SubobjectSystem)
+	{
+		OutError = TEXT("blueprint_component_native_owner_unavailable");
+		return false;
+	}
+
+	TArray<FSubobjectDataHandle> Handles;
+	SubobjectSystem->K2_GatherSubobjectDataForBlueprint(&Blueprint, Handles);
+	FSubobjectDataHandle RootHandle = FSubobjectDataHandle::InvalidHandle;
+	FSubobjectDataHandle ParentHandle = FSubobjectDataHandle::InvalidHandle;
+	int32 ParentMatches = 0;
+	for (const FSubobjectDataHandle& Handle : Handles)
+	{
+		const FSubobjectData* Data = Handle.GetData();
+		if (!Data)
+		{
+			continue;
+		}
+		if (!RootHandle.IsValid() && Data->IsRootActor())
+		{
+			RootHandle = Handle;
+		}
+		if (Parent
+			&& Data->GetVariableName() == Parent->GetVariableName())
+		{
+			ParentHandle = Handle;
+			++ParentMatches;
+		}
+	}
+	if (!RootHandle.IsValid())
+	{
+		OutError = TEXT("blueprint_component_root_context_unresolved");
+		return false;
+	}
+	if (Parent && ParentMatches != 1)
+	{
+		OutError = ParentMatches == 0
+			? TEXT("blueprint_component_parent_context_unresolved")
+			: TEXT("blueprint_component_parent_context_ambiguous");
+		return false;
+	}
+	if (!Parent)
+	{
+		ParentHandle = RootHandle;
+	}
+
+	FAddNewSubobjectParams AddParams;
+	AddParams.ParentHandle = ParentHandle;
+	AddParams.NewClass = ComponentClass;
+	AddParams.AssetOverride = Action.Entry->GetAssetOverride();
+	AddParams.BlueprintContext = &Blueprint;
+	FText FailReason;
+	const FSubobjectDataHandle NewHandle =
+		SubobjectSystem->AddNewSubobject(AddParams, FailReason);
+	if (!NewHandle.IsValid())
+	{
+		OutError = FailReason.IsEmpty()
+			? FString(TEXT("blueprint_component_native_create_failed"))
+			: FString(TEXT("blueprint_component_native_create_failed:"))
+				+ FailReason.ToString();
+		return false;
+	}
+	Action.Entry->GetOnSubobjectCreated().ExecuteIfBound(NewHandle);
+
+	const FString TrimmedRequestedName = RequestedName.TrimStartAndEnd();
+	const FSubobjectData* NewData = NewHandle.GetData();
+	const FString CurrentName = NewData
+		? NewData->GetVariableName().ToString()
+		: FString();
+	if (TrimmedRequestedName.IsEmpty()
+		|| (!CurrentName.Equals(
+				TrimmedRequestedName, ESearchCase::CaseSensitive)
+			&& !SubobjectSystem->RenameSubobject(
+				NewHandle, FText::FromString(TrimmedRequestedName))))
+	{
+		SubobjectSystem->DeleteSubobject(
+			RootHandle, NewHandle, &Blueprint);
+		OutError = TEXT("blueprint_component_native_rename_failed");
+		return false;
+	}
+
+	for (USCS_Node* Node : SCS->GetAllNodes())
+	{
+		if (Node && Node->GetVariableName().ToString().Equals(
+				TrimmedRequestedName, ESearchCase::CaseSensitive))
+		{
+			OutNode = Node;
+			break;
+		}
+	}
+	if (!OutNode)
+	{
+		SubobjectSystem->DeleteSubobject(
+			RootHandle, NewHandle, &Blueprint);
+		OutError = TEXT("blueprint_component_native_result_unresolved");
+		return false;
+	}
+	OutCandidate = MoveTemp(Action.Candidate);
+	OutError.Reset();
+	return true;
+}
+
 bool CollectComponentWidgetCandidates(const FSearchParams& Params, TArray<FCandidate>& OutCandidates, TArray<FString>& OutWarnings, FString& OutError)
 {
 	TSet<FString> SeenFullNames;
 	if (Params.CatalogType.Equals(TEXT("actor_component")))
 	{
-		AddActorComponentCandidates(Params, OutCandidates, SeenFullNames);
+		TArray<FActorComponentActionEntry> Entries;
+		if (!TryBuildActorComponentEntries(Params, Entries, OutError))
+		{
+			return false;
+		}
+		for (FActorComponentActionEntry& Entry : Entries)
+		{
+			OutCandidates.Add(MoveTemp(Entry.Candidate));
+		}
 		return true;
 	}
 

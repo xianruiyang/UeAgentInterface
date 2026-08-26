@@ -1,6 +1,7 @@
 #include "Misc/AutomationTest.h"
 
 #if __has_include("DomainAdapters/Blueprint/Node/UeAgentBlueprintNodeMechanics.h") \
+	&& __has_include("DomainAdapters/Blueprint/Surfaces/UeAgentBlueprintSurfaceMechanics.h") \
 	&& __has_include("OperationOwners/BlueprintNode/UeAgentBlueprintNodeCommandService.h") \
 	&& __has_include("Module/CommandRegistration/BlueprintNode/UeAgentBlueprintNodeRegistration.h")
 #define UAI_T11_BLUEPRINT_NODE_AVAILABLE 1
@@ -9,6 +10,7 @@
 #include "Core/Contract/UeAgentCommandJson.h"
 #include "Core/HjsonWorkspace/ImportInitialization/UeAgentHjsonDomainProviderRegistry.h"
 #include "DomainAdapters/Blueprint/Node/UeAgentBlueprintNodeMechanics.h"
+#include "DomainAdapters/Blueprint/Surfaces/UeAgentBlueprintSurfaceMechanics.h"
 #include "Dom/JsonObject.h"
 #include "Kismet2/KismetEditorUtilities.h"
 #include "Module/CommandRegistration/BlueprintNode/UeAgentBlueprintNodeRegistration.h"
@@ -139,8 +141,8 @@ bool FUeAgentStrictV2T11DomainProviderActivationTest::RunTest(
 		return false;
 	}
 	FImportInitializationDomainResolution Root;
-	TestTrue(
-		TEXT("the Blueprint root resolves the graph contract"),
+	TestFalse(
+		TEXT("the retired node-only schema has no runtime provider"),
 		Registry->TryResolve(
 			FImportInitializationDomainRequest(
 				TEXT("content_graph.import_workspace"),
@@ -151,39 +153,36 @@ bool FUeAgentStrictV2T11DomainProviderActivationTest::RunTest(
 				TEXT("{}")),
 			Root,
 			Error));
-	TestTrue(TEXT("the Blueprint root resolution is valid"), Root.IsValid());
-	if (Root.IsValid())
-	{
-		TestEqual(
-			TEXT("the Blueprint provider identity is exact"),
-			Root.GetProvider()->GetProviderId(),
-			FString(TEXT("blueprint-node-domain-provider")));
-		TestEqual(
-			TEXT("the graph contract is provider-owned"),
-			Root.GetInitializationContractId(),
-			FString(TEXT("uai.init.blueprint.graph/1")));
-	}
+	TestFalse(TEXT("the retired node-only resolution is invalid"), Root.IsValid());
+	TestEqual(
+		TEXT("the retired node-only schema fails at provider authority"),
+		Error.GetCode(),
+		FString(TEXT("hjson_domain_provider_unresolved")));
 
-	FImportInitializationDomainResolution Node;
+	Error.Reset();
 	TestTrue(
-		TEXT("the graph-owned Branch entry resolves its own contract"),
+		TEXT("the unified Blueprint root remains the sole write provider"),
 		Registry->TryResolve(
 			FImportInitializationDomainRequest(
 				TEXT("content_graph.import_workspace"),
-				TEXT("uai.blueprint.node.edit/1"),
-				TEXT("/Game/UAI/T11/BP_T11.BP_T11#branch"),
-				TEXT("/Script/BlueprintGraph.K2Node_IfThenElse"),
-				EInitializationNodeRole::OwnedObject,
+				TEXT("uai.blueprint.edit/1"),
+				TEXT("/Game/UAI/T11/BP_T11.BP_T11"),
+				TEXT("/Script/Engine.Blueprint"),
+				EInitializationNodeRole::RootTarget,
 				TEXT("{}")),
-			Node,
+			Root,
 			Error));
-	TestTrue(TEXT("the graph-owned resolution is valid"), Node.IsValid());
-	if (Node.IsValid())
+	TestTrue(TEXT("the unified Blueprint root resolution is valid"), Root.IsValid());
+	if (Root.IsValid())
 	{
 		TestEqual(
-			TEXT("the node contract is provider-owned"),
-			Node.GetInitializationContractId(),
-			FString(TEXT("uai.init.blueprint.node/1")));
+			TEXT("the unified Blueprint provider identity is exact"),
+			Root.GetProvider()->GetProviderId(),
+			FString(TEXT("blueprint-surface-domain-provider")));
+		TestEqual(
+			TEXT("the unified Blueprint root contract is exact"),
+			Root.GetInitializationContractId(),
+			FString(TEXT("uai.init.blueprint.asset/1")));
 	}
 	return true;
 #endif
@@ -279,9 +278,62 @@ bool FUeAgentStrictV2T11ProductionCandidateTest::RunTest(
 	}
 	FString GraphId;
 	FString GraphError;
-	TestTrue(
-		TEXT("the real EventGraph has a stable public identity"),
-		TryGetFirstEditableGraphIdentity(*Blueprint, GraphId, GraphError));
+	FString StructurePayloadJson;
+	bool bStructureReadOnly = false;
+	FWorkspaceError StructureError;
+	const FString StructureParams = FString::Printf(
+		TEXT("{\"target\":\"%s\"}"), *ObjectPath);
+	if (!TestTrue(
+		TEXT("the active Blueprint exposes its public content graph"),
+		UE::UAI::DomainAdapters::Blueprint::Surfaces::TryExecuteContentGraph(
+			TEXT("content_graph.structure"), ObjectPath, StructureParams,
+			StructurePayloadJson, bStructureReadOnly, StructureError)))
+	{
+		AddError(StructureError.GetCode());
+		DeleteAssetIfPresent(ObjectPath);
+		return false;
+	}
+	TestTrue(TEXT("the public content graph is read-only"), bStructureReadOnly);
+	const TSharedPtr<FJsonObject> StructurePayload = ParsePayload(
+		this, StructurePayloadJson);
+	const TArray<TSharedPtr<FJsonValue>>* Containers = nullptr;
+	int32 MatchingGraphCount = 0;
+	if (StructurePayload.IsValid()
+		&& StructurePayload->TryGetArrayField(TEXT("containers"), Containers)
+		&& Containers)
+	{
+		for (const TSharedPtr<FJsonValue>& ContainerValue : *Containers)
+		{
+			const TSharedPtr<FJsonObject> Container = ContainerValue->AsObject();
+			const TSharedPtr<FJsonObject>* State = nullptr;
+			FString Kind;
+			FString Name;
+			FString GraphKind;
+			FString CandidateGraphId;
+			if (Container.IsValid()
+				&& Container->TryGetStringField(TEXT("kind"), Kind)
+				&& Kind == TEXT("blueprint_graph")
+				&& Container->TryGetObjectField(TEXT("value"), State)
+				&& State && State->IsValid()
+				&& (*State)->TryGetStringField(TEXT("name"), Name)
+				&& Name == TEXT("EventGraph")
+				&& (*State)->TryGetStringField(TEXT("graph_kind"), GraphKind)
+				&& GraphKind == TEXT("event_graph")
+				&& Container->TryGetStringField(TEXT("id"), CandidateGraphId)
+				&& !CandidateGraphId.IsEmpty())
+			{
+				++MatchingGraphCount;
+				GraphId = MoveTemp(CandidateGraphId);
+			}
+		}
+	}
+	if (!TestEqual(
+		TEXT("the public payload uniquely identifies EventGraph"),
+		MatchingGraphCount, 1))
+	{
+		DeleteAssetIfPresent(ObjectPath);
+		return false;
+	}
 	TSharedPtr<IUeAgentBlueprintNodeCommandService> Service;
 	TestTrue(
 		TEXT("the production candidate service composes"),
@@ -310,10 +362,54 @@ bool FUeAgentStrictV2T11ProductionCandidateTest::RunTest(
 	if (Candidates && Candidates->Num() > 0)
 	{
 		const TSharedPtr<FJsonObject> Candidate = (*Candidates)[0]->AsObject();
-		TestEqual(
-			TEXT("the supported candidate name is the exact node-class identity"),
-			Candidate->GetStringField(TEXT("name")),
-			FString(TEXT("/Script/BlueprintGraph.K2Node_IfThenElse")));
+		FString CandidateName;
+		FString CandidateId;
+		TestTrue(
+			TEXT("the native candidate exposes a direct non-empty name"),
+			Candidate.IsValid()
+				&& Candidate->TryGetStringField(TEXT("name"), CandidateName)
+				&& !CandidateName.IsEmpty());
+		TestTrue(
+			TEXT("the native candidate exposes a compact non-empty id"),
+			Candidate.IsValid()
+				&& Candidate->TryGetStringField(TEXT("id"), CandidateId)
+				&& !CandidateId.IsEmpty());
+
+		FUeAgentBlueprintNodeCommandRequest ResolveRequest;
+		ResolveRequest.CommandId = TEXT("blueprint.node.candidates");
+		ResolveRequest.RequestId = TEXT("native-t11-candidate-resolve");
+		ResolveRequest.CanonicalParamsJson = FString::Printf(
+			TEXT("{\"graph_id\":\"%s\",\"id\":\"%s\",\"target\":\"%s\"}"),
+			*GraphId,
+			*CandidateId,
+			*ObjectPath);
+		FUeAgentBlueprintNodeCommandResponse ResolveResponse;
+		FUeAgentBlueprintNodeCommandError ResolveError;
+		TestTrue(
+			TEXT("the compact id re-enumerates the same native context"),
+			Service->Execute(ResolveRequest, ResolveResponse, ResolveError));
+		const TSharedPtr<FJsonObject> ResolvePayload = ParsePayload(
+			this, ResolveResponse.PayloadJson);
+		const TArray<TSharedPtr<FJsonValue>>* ResolvedCandidates = nullptr;
+		TestTrue(
+			TEXT("the compact id resolves exactly one candidate"),
+			ResolvePayload.IsValid()
+				&& ResolvePayload->TryGetArrayField(
+					TEXT("candidates"), ResolvedCandidates)
+				&& ResolvedCandidates && ResolvedCandidates->Num() == 1);
+		if (ResolvedCandidates && ResolvedCandidates->Num() == 1)
+		{
+			const TSharedPtr<FJsonObject> Resolved =
+				(*ResolvedCandidates)[0]->AsObject();
+			TestEqual(
+				TEXT("id resolution preserves the native candidate name"),
+				Resolved->GetStringField(TEXT("name")),
+				CandidateName);
+			TestEqual(
+				TEXT("id resolution preserves the compact candidate identity"),
+				Resolved->GetStringField(TEXT("id")),
+				CandidateId);
+		}
 	}
 	DeleteAssetIfPresent(ObjectPath);
 	return true;

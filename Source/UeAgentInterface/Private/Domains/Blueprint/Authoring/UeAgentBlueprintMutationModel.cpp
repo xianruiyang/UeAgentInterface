@@ -4,6 +4,7 @@
 
 #include "BlueprintEditorLibrary.h"
 #include "Commands/Blueprint/UeAgentHttpServer_BlueprintOps.h"
+#include "Commands/PaletteSearch/UeAgentPaletteSearchTypes.h"
 #include "Components/ActorComponent.h"
 #include "Dom/JsonObject.h"
 #include "Dom/JsonValue.h"
@@ -312,7 +313,11 @@ namespace UeAgentBlueprintAuthoring
 				return Spec;
 			case EStableMapIdentity::Node:
 				if (!Spec->HasField(TEXT("id"))) Spec->SetStringField(TEXT("id"), Entry.Key);
-				if (!Spec->HasField(TEXT("node_type"))) Spec->SetStringField(TEXT("node_type"), Kind);
+				if (!Spec->HasField(TEXT("node_type"))
+					&& !Spec->HasField(TEXT("candidate")))
+				{
+					Spec->SetStringField(TEXT("node_type"), Kind);
+				}
 				return Spec;
 			case EStableMapIdentity::PinDefault:
 				return SetOrValidateStringIdentity(*IdentityObject, TEXT("pin_name"), Name, OutError)
@@ -1011,6 +1016,22 @@ namespace UeAgentBlueprintAuthoring
 				TryGetString(Spec, TEXT("name"), Name);
 				TryGetString(Spec, TEXT("class"), ClassPath);
 				TryGetString(Spec, TEXT("parent"), ParentName);
+				const TSharedPtr<const FJsonObject> CandidateSpec =
+					GetObject(Spec, TEXT("candidate"));
+				FString CandidateName;
+				FString CandidateId;
+				FString LegacyBinding;
+				TryGetString(CandidateSpec, TEXT("name"), CandidateName);
+				TryGetString(CandidateSpec, TEXT("id"), CandidateId);
+				if (CandidateId.IsEmpty())
+				{
+					TryGetString(CandidateSpec, TEXT("candidate_id"), CandidateId);
+				}
+				TryGetString(
+					CandidateSpec, TEXT("binding_revision"), LegacyBinding);
+				const bool bNativeCandidate = CandidateSpec.IsValid()
+					&& LegacyBinding.IsEmpty()
+					&& (!CandidateName.IsEmpty() || !CandidateId.IsEmpty());
 				USCS_Node* Existing = ResolveComponentNode(*SCS, Spec, OutError);
 				if (!OutError.IsEmpty()) return false;
 
@@ -1100,7 +1121,41 @@ namespace UeAgentBlueprintAuthoring
 						SetError(OutError, TEXT("blueprint_component_class_missing"), Name);
 						return false;
 					}
-					Existing = SCS->CreateNode(ComponentClass, FName(*Name));
+					if (bNativeCandidate)
+					{
+						UeAgentPaletteSearch::FCandidate AppliedCandidate;
+						FString CandidateError;
+						if (!UeAgentPaletteSearch::TryPerformBlueprintComponentCandidate(
+								Blueprint,
+								DesiredParent,
+								CandidateName,
+								CandidateId,
+								Name,
+								Existing,
+								AppliedCandidate,
+								CandidateError))
+						{
+							SetError(
+								OutError,
+								CandidateError.IsEmpty()
+									? FString(TEXT("blueprint_component_native_create_failed"))
+									: CandidateError,
+								Name);
+							return false;
+						}
+						if (!Existing || Existing->ComponentClass != ComponentClass)
+						{
+							SetError(
+								OutError,
+								TEXT("blueprint_component_native_result_mismatch"),
+								Name);
+							return false;
+						}
+					}
+					else
+					{
+						Existing = SCS->CreateNode(ComponentClass, FName(*Name));
+					}
 					if (!Existing)
 					{
 						SetError(OutError, TEXT("blueprint_component_create_failed"), Name);
@@ -1118,8 +1173,11 @@ namespace UeAgentBlueprintAuthoring
 						return false;
 					}
 					if (bHasDesiredGuid) Existing->VariableGuid = DesiredGuid;
-					if (DesiredParent) DesiredParent->AddChildNode(Existing);
-					else SCS->AddNode(Existing);
+					if (!bNativeCandidate)
+					{
+						if (DesiredParent) DesiredParent->AddChildNode(Existing);
+						else SCS->AddNode(Existing);
+					}
 					++OutCounters.ComponentsAdded;
 					bOutNeedsCompile = true;
 				}
@@ -1442,6 +1500,7 @@ namespace UeAgentBlueprintAuthoring
 			if (bHasGuid)
 			{
 				if (GuidMatch && !OutKind.IsEmpty()
+					&& OutKind != TEXT("native_action")
 					&& GetNodeKind(GuidMatch) != OutKind)
 				{
 					SetError(OutError, TEXT("blueprint_node_kind_conflict"), OutKind);
@@ -1503,6 +1562,87 @@ namespace UeAgentBlueprintAuthoring
 			const FString& Kind,
 			FString& OutError)
 		{
+			if (Kind == TEXT("native_action"))
+			{
+				const TSharedPtr<const FJsonObject> Candidate =
+					GetObject(Spec, TEXT("candidate"));
+				FString Name;
+				FString Id;
+				TryGetString(Candidate, TEXT("name"), Name);
+				TryGetString(Candidate, TEXT("id"), Id);
+				if (Id.IsEmpty())
+				{
+					TryGetString(Candidate, TEXT("candidate_id"), Id);
+				}
+				Name.TrimStartAndEndInline();
+				Id.TrimStartAndEndInline();
+				if (Name.IsEmpty() && Id.IsEmpty())
+				{
+					SetError(
+						OutError,
+						TEXT("blueprint_action_candidate_selector_required"));
+					return nullptr;
+				}
+
+				UeAgentPaletteSearch::FSearchParams Params;
+				Params.CatalogType = TEXT("blueprint_node");
+				Params.AssetPath = Blueprint.GetPathName();
+				Params.GraphName = Graph.GetName();
+				Params.bContextSensitive = true;
+				const TSharedPtr<const FJsonObject> CandidateContext =
+					GetObject(Spec, TEXT("candidate_context"));
+				if (Spec->HasField(TEXT("candidate_context"))
+					&& !CandidateContext.IsValid())
+				{
+					SetError(
+						OutError,
+						TEXT("blueprint_surface_candidate_context_invalid"));
+					return nullptr;
+				}
+				TryGetString(
+					CandidateContext, TEXT("node_guid"), Params.NodeGuid);
+				TryGetString(
+					CandidateContext, TEXT("pin_guid"), Params.PinGuid);
+				TryGetString(
+					CandidateContext, TEXT("pin_name"), Params.PinName);
+
+				double X = 0.0;
+				double Y = 0.0;
+				const TSharedPtr<const FJsonObject> Position =
+					GetObject(Spec, TEXT("pos"));
+				TryGetNumber(Position, TEXT("x"), X);
+				TryGetNumber(Position, TEXT("y"), Y);
+				UEdGraphNode* Node = nullptr;
+				UeAgentPaletteSearch::FCandidate ResolvedCandidate;
+				FString PerformError;
+				if (!UeAgentPaletteSearch::TryPerformBlueprintActionCandidate(
+						Params,
+						Name,
+						Id,
+						FVector2f(
+							static_cast<float>(X),
+							static_cast<float>(Y)),
+						Node,
+						ResolvedCandidate,
+						PerformError))
+				{
+					SetError(
+						OutError,
+						PerformError.IsEmpty()
+							? FString(TEXT(
+								"blueprint_action_candidate_create_failed"))
+							: PerformError);
+					return nullptr;
+				}
+				if (!Node || Node->GetGraph() != &Graph)
+				{
+					SetError(
+						OutError,
+						TEXT("blueprint_action_candidate_graph_mismatch"));
+					return nullptr;
+				}
+				return Node;
+			}
 			if (Kind == TEXT("event"))
 			{
 				FString EventName;

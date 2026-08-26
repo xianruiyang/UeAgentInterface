@@ -359,6 +359,44 @@ namespace UE::UAI::DomainAdapters::Blueprint::Surfaces
 		{
 			return TryImport(Target, Params, OutPayloadJson, OutError);
 		}
+		if (CommandId == TEXT("content_graph.authoring_schema"))
+		{
+			FString ReadPayload;
+			FString Revision;
+			if (!TryRead(Target, ReadPayload, Revision, OutError))
+			{
+				return false;
+			}
+			const TSharedRef<FJsonObject> TemplateTarget = MakeShared<FJsonObject>();
+			TemplateTarget->SetStringField(TEXT("asset_path"), Target);
+			const TSharedRef<FJsonObject> Document = MakeShared<FJsonObject>();
+			Document->SetStringField(TEXT("operation"), TEXT("update"));
+			Document->SetObjectField(TEXT("target"), TemplateTarget);
+			Document->SetObjectField(
+				TEXT("provider_extension"), MakeShared<FJsonObject>());
+			const TSharedRef<FJsonObject> Root = MakeShared<FJsonObject>();
+			Root->SetStringField(TEXT("type"), BlueprintType);
+			Root->SetObjectField(TEXT("document"), Document);
+			const TSharedRef<FJsonObject> Template = MakeShared<FJsonObject>();
+			Template->SetStringField(TEXT("schema"), SchemaId);
+			Template->SetObjectField(TEXT("root"), Root);
+			const TSharedRef<FJsonObject> Schema = MakeShared<FJsonObject>();
+			Schema->SetStringField(TEXT("schema_id"), SchemaId);
+			Schema->SetStringField(TEXT("root_type"), BlueprintType);
+			Schema->SetStringField(
+				TEXT("provider"), TEXT("blueprint-surface-domain-provider"));
+			Schema->SetStringField(TEXT("revision"), Revision);
+			Schema->SetObjectField(TEXT("template"), Template);
+			const TSharedRef<FJsonObject> Response = MakeShared<FJsonObject>();
+			Response->SetStringField(TEXT("command_id"), CommandId);
+			Response->SetStringField(TEXT("target"), Target);
+			Response->SetBoolField(TEXT("read_only"), true);
+			Response->SetBoolField(TEXT("complete"), true);
+			Response->SetBoolField(TEXT("has_more"), false);
+			Response->SetObjectField(TEXT("query_result"), Schema);
+			bOutReadOnly = true;
+			return CanonicalObject(Response, OutPayloadJson, OutError);
+		}
 		if (CommandId == TEXT("content_graph.export_workspace"))
 		{
 			bOutReadOnly = true;

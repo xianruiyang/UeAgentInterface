@@ -50,6 +50,14 @@ namespace UE::UAI::Module::CommandRegistration::Material
 					TEXT("Exact persisted Material or Material Function package.object identity.")),
 				Field(TEXT("query"), TEXT("string"), false,
 					TEXT("Optional bounded label or exact creation-name filter.")),
+				Field(TEXT("graph_name"), TEXT("string"), false,
+					TEXT("Optional exact MaterialGraph or MaterialFunctionGraph selector; defaults from target type.")),
+				Field(TEXT("node_guid"), TEXT("string"), false,
+					TEXT("Optional exact graph-node GUID containing the FromPin.")),
+				Field(TEXT("pin_guid"), TEXT("string"), false,
+					TEXT("Optional exact FromPin GUID for context-sensitive native actions.")),
+				Field(TEXT("pin_name"), TEXT("string"), false,
+					TEXT("Optional FromPin name; ambiguous names fail closed.")),
 				Field(TEXT("limit"), TEXT("integer"), false,
 					TEXT("Optional page size from 1 through 20; defaults to 20.")),
 				Field(TEXT("cursor"), TEXT("integer"), false,
@@ -74,6 +82,12 @@ namespace UE::UAI::Module::CommandRegistration::Material
 					TEXT("True only when this response includes the final page.")),
 				Field(TEXT("has_more"), TEXT("boolean"), true,
 					TEXT("True only when another page remains.")),
+				Field(TEXT("coverage_scope"), TEXT("string"), true,
+					TEXT("Exact native Material action subset represented by this command.")),
+				Field(TEXT("coverage_complete"), TEXT("boolean"), true,
+					TEXT("True only when the stated native action scope is fully enumerated.")),
+				Field(TEXT("query_context"), TEXT("object"), true,
+					TEXT("The exact graph and optional node/pin context used for native enumeration.")),
 			};
 			Result.Errors = {
 				{TEXT("material_candidate_query_authority_required"),
@@ -96,15 +110,15 @@ namespace UE::UAI::Module::CommandRegistration::Material
 				TEXT("Run in the Editor on the UE game thread with uai:query."),
 			};
 			Result.Purpose.ParameterGuidance =
-				TEXT("Copy candidate.name and binding_revision unchanged into the Material HJSON expression candidate object.");
+				TEXT("Search in the exact target Graph/Pin context, then put only candidate.name or candidate.id in the Material HJSON candidate object; keep graph and pin selectors in sibling candidate_context when needed.");
 			Result.Purpose.ResultGuidance =
-				TEXT("Treat name, binding_revision, target_revision, and contract references as opaque exact values; continue paging while has_more is true.");
+				TEXT("Use candidate.id when a name is ambiguous. Continue paging while has_more is true and do not claim native-menu coverage unless coverage_complete is true for the required scope.");
 			Result.Purpose.FailureGuidance =
 				TEXT("Unresolved targets, stale bindings, and unsupported types fail before any write and never fall back to reference.catalog_search.");
 			Result.Purpose.SideEffectGuidance =
 				TEXT("Read-only; it creates no expression, package, file, or external state.");
 			Result.Purpose.MinimumExample =
-				TEXT("client.material.expression_candidates(target, query='Scalar Parameter')");
+				TEXT("client.material.expression_candidates(target, query='Multiply', graph_name='MaterialGraph')");
 			Result.Purpose.RelatedFlows = {
 				TEXT("query.command.search"),
 				TEXT("query.command.detail"),

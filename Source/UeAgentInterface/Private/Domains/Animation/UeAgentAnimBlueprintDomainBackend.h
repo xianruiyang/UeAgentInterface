@@ -6,6 +6,8 @@
 #include "Kismet2/CompilerResultsLog.h"
 
 class IAnimClassInterface;
+class FJsonObject;
+class FJsonValue;
 class UAnimBlueprint;
 class UAnimGraphNode_StateMachineBase;
 class UAnimStateAliasNode;

@@ -154,6 +154,8 @@ namespace UE::UAI::OperationOwners::Niagara
 				}
 				FString Target;
 				FString TargetUsage;
+				FString TargetUsageId;
+				FString EmitterHandleId;
 				FString Query;
 				if (!Params->TryGetStringField(TEXT("target"), Target)
 					|| Target.TrimStartAndEnd().IsEmpty())
@@ -165,6 +167,10 @@ namespace UE::UAI::OperationOwners::Niagara
 				{
 					return Fail(OutError, TEXT("niagara_candidate_target_usage_required"), Request.CommandId);
 				}
+				Params->TryGetStringField(
+					TEXT("target_usage_id"), TargetUsageId);
+				Params->TryGetStringField(
+					TEXT("emitter_handle_id"), EmitterHandleId);
 				Params->TryGetStringField(TEXT("query"), Query);
 				int32 Limit = 20;
 				int32 Cursor = 0;
@@ -179,8 +185,18 @@ namespace UE::UAI::OperationOwners::Niagara
 
 				FNiagaraModuleCandidateQueryResult QueryResult;
 				FNiagaraModuleCandidateQueryError QueryError;
+				FNiagaraModuleCandidateContext Context;
+				Context.TargetUsage = TargetUsage;
+				Context.TargetUsageId = TargetUsageId;
+				Context.EmitterHandleId = EmitterHandleId;
 				if (!TryQueryNiagaraModuleCandidates(
-						*TargetObject, Query, TargetUsage, QueryResult, QueryError, Limit, Cursor))
+						*TargetObject,
+						Query,
+						Context,
+						QueryResult,
+						QueryError,
+						Limit,
+						Cursor))
 				{
 					return Fail(
 						OutError,
@@ -193,24 +209,57 @@ namespace UE::UAI::OperationOwners::Niagara
 				Payload->SetStringField(TEXT("command_id"), CandidateCommandId);
 				Payload->SetBoolField(TEXT("read_only"), true);
 				Payload->SetStringField(TEXT("target"), Target);
-				Payload->SetStringField(TEXT("target_usage"), TargetUsage);
+				Payload->SetStringField(
+					TEXT("target_usage"), QueryResult.Context.TargetUsage);
 				Payload->SetStringField(TEXT("target_revision"), QueryResult.TargetRevision);
 				Payload->SetNumberField(TEXT("total_matches"), QueryResult.TotalMatches);
 				Payload->SetNumberField(TEXT("next_cursor"), QueryResult.NextCursor);
 				Payload->SetBoolField(TEXT("complete"), QueryResult.bComplete);
 				Payload->SetBoolField(TEXT("has_more"), QueryResult.bHasMore);
+				Payload->SetStringField(
+					TEXT("coverage_scope"), QueryResult.CoverageScope);
+				Payload->SetBoolField(
+					TEXT("coverage_complete"),
+					QueryResult.bCoverageComplete);
+				Payload->SetBoolField(
+					TEXT("creation_coverage_complete"),
+					QueryResult.bCreationCoverageComplete);
+				Payload->SetArrayField(
+					TEXT("unsupported_action_kinds"),
+					StringArray(QueryResult.UnsupportedActionKinds));
+				const TSharedPtr<FJsonObject> QueryContext =
+					MakeShared<FJsonObject>();
+				QueryContext->SetStringField(
+					TEXT("target_usage"), QueryResult.Context.TargetUsage);
+				QueryContext->SetStringField(
+					TEXT("target_usage_id"),
+					QueryResult.Context.TargetUsageId);
+				if (!QueryResult.Context.EmitterHandleId.IsEmpty())
+				{
+					QueryContext->SetStringField(
+						TEXT("emitter_handle_id"),
+						QueryResult.Context.EmitterHandleId);
+				}
+				QueryContext->SetStringField(
+					TEXT("stage_key"), QueryResult.Context.StageKey);
+				Payload->SetObjectField(TEXT("query_context"), QueryContext);
 				TArray<TSharedPtr<FJsonValue>> Candidates;
 				for (const FNiagaraModuleCandidate& Candidate : QueryResult.Candidates)
 				{
 					const TSharedPtr<FJsonObject> Value = MakeShared<FJsonObject>();
+					Value->SetStringField(TEXT("id"), Candidate.Id);
 					Value->SetStringField(TEXT("name"), Candidate.Name);
 					Value->SetStringField(TEXT("label"), Candidate.Label);
 					Value->SetStringField(TEXT("kind"), Candidate.Kind);
+					Value->SetStringField(
+						TEXT("action_kind"), Candidate.ActionKind);
+					Value->SetStringField(
+						TEXT("category"), Candidate.Category);
+					Value->SetBoolField(
+						TEXT("supported"), Candidate.bSupported);
+					Value->SetStringField(
+						TEXT("support_reason"), Candidate.SupportReason);
 					Value->SetArrayField(TEXT("supported_operations"), StringArray(Candidate.SupportedOperations));
-					Value->SetStringField(TEXT("input_contract"), Candidate.InputContract);
-					Value->SetStringField(TEXT("placement_contract"), Candidate.PlacementContract);
-					Value->SetStringField(TEXT("required_context"), Candidate.RequiredContext);
-					Value->SetStringField(TEXT("binding_revision"), Candidate.BindingRevision);
 					Candidates.Add(MakeShared<FJsonValueObject>(Value));
 				}
 				Payload->SetArrayField(TEXT("candidates"), MoveTemp(Candidates));

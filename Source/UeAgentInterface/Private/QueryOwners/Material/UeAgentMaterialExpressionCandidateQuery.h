@@ -6,11 +6,23 @@ class UObject;
 
 namespace UE::UAI::QueryOwners::Material
 {
+	struct UEAGENTINTERFACE_API FMaterialExpressionCandidateContext
+	{
+		FString GraphName;
+		FString NodeGuid;
+		FString PinGuid;
+		FString PinName;
+	};
+
 	struct UEAGENTINTERFACE_API FMaterialExpressionCandidate
 	{
+		FString Id;
 		FString Name;
 		FString Label;
 		FString Kind;
+		FString Category;
+		bool bSupported = false;
+		FString SupportReason;
 		TArray<FString> SupportedOperations;
 		FString InputContract;
 		FString PlacementContract;
@@ -27,6 +39,9 @@ namespace UE::UAI::QueryOwners::Material
 		int32 NextCursor = INDEX_NONE;
 		bool bComplete = false;
 		bool bHasMore = false;
+		bool bCoverageComplete = false;
+		FString CoverageScope;
+		FMaterialExpressionCandidateContext Context;
 	};
 
 	struct UEAGENTINTERFACE_API FMaterialExpressionCandidateQueryError
@@ -42,7 +57,8 @@ namespace UE::UAI::QueryOwners::Material
 		FMaterialExpressionCandidateQueryResult& OutResult,
 		FMaterialExpressionCandidateQueryError& OutError,
 		int32 Limit = 20,
-		int32 Cursor = 0);
+		int32 Cursor = 0,
+		const FMaterialExpressionCandidateContext& Context = {});
 
 	UEAGENTINTERFACE_API bool IsCurrentMaterialExpressionCandidateBinding(
 		UObject& Target,

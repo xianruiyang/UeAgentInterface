@@ -33,6 +33,7 @@
 #include "NiagaraScriptSource.h"
 #include "NiagaraSystem.h"
 #include "ObjectTools.h"
+#include "QueryOwners/Niagara/UeAgentNiagaraModuleCandidateQuery.h"
 #include "UObject/SavePackage.h"
 #include "UObject/StrongObjectPtr.h"
 #include "UObject/UObjectGlobals.h"
@@ -370,6 +371,7 @@ void MarkDynamicInputPatchForRebuild(FDynamicInputPatch &Patch) {
 
 struct FModulePatch {
   FString SourceKey;
+  FString NativeCandidateId;
   FGuid ModuleGuid;
   FGuid LegacyNodeGuid;
   bool bRemove = false;
@@ -929,6 +931,19 @@ bool ParseModulePatch(UeAgentNiagaraStageModuleAuthoring::FResolvedStage &Stage,
   if (!Object.IsValid()) {
     OutError = TEXT("niagara_workspace_module_invalid");
     return false;
+  }
+  if (Object->HasField(TEXT("candidate"))) {
+    const TSharedPtr<FJsonObject> *Candidate = nullptr;
+    if (!Object->TryGetObjectField(TEXT("candidate"), Candidate) ||
+        !Candidate || !Candidate->IsValid() ||
+        !(*Candidate)->TryGetStringField(TEXT("id"),
+                                         OutPatch.NativeCandidateId) ||
+        OutPatch.NativeCandidateId.TrimStartAndEnd().IsEmpty()) {
+      OutError = TEXT("niagara_workspace_native_candidate_id_invalid:") +
+                 ModuleKey;
+      return false;
+    }
+    OutPatch.NativeCandidateId.TrimStartAndEndInline();
   }
   if (!Object->TryGetStringField(TEXT("module_guid"), ModuleGuidText))
     ModuleGuidText = ModuleKey;
@@ -3185,6 +3200,49 @@ bool ApplyStagePatches(TArray<FStagePatch> &StagePatches, FString &OutError) {
         }
         continue;
       }
+      if (!Patch->NativeCandidateId.IsEmpty()) {
+        if (!Stage.Asset) {
+          OutError = TEXT("niagara_native_candidate_target_missing:") +
+                     Patch->SourceKey;
+          return false;
+        }
+        UE::UAI::QueryOwners::Niagara::FNiagaraModuleCandidateContext
+            CandidateContext;
+        CandidateContext.TargetUsage = ScriptUsageToString(Stage.Usage);
+        CandidateContext.TargetUsageId = Stage.UsageId.ToString(
+            EGuidFormats::DigitsWithHyphensLower);
+        if (Stage.EmitterHandleId.IsValid()) {
+          CandidateContext.EmitterHandleId = Stage.EmitterHandleId.ToString(
+              EGuidFormats::DigitsWithHyphensLower);
+        }
+        UE::UAI::QueryOwners::Niagara::FNiagaraModuleCandidate
+            ResolvedCandidate;
+        UE::UAI::QueryOwners::Niagara::FNiagaraModuleCandidateContext
+            ResolvedContext;
+        UE::UAI::QueryOwners::Niagara::FNiagaraModuleCandidateQueryError
+            CandidateError;
+        if (!UE::UAI::QueryOwners::Niagara::
+                TryResolveNiagaraModuleCandidate(
+                    *Stage.Asset, FString(), Patch->NativeCandidateId,
+                    CandidateContext, ResolvedCandidate, ResolvedContext,
+                    CandidateError)) {
+          OutError = CandidateError.Code.IsEmpty()
+                         ? TEXT("niagara_native_candidate_unresolved:") +
+                               Patch->SourceKey
+                         : CandidateError.Code + TEXT(":") +
+                               CandidateError.SubjectId + TEXT(":") +
+                               CandidateError.Detail;
+          return false;
+        }
+        if (!Patch->Script.IsValid() ||
+            !ResolvedCandidate.ScriptAssetPath.Equals(
+                Patch->Script->GetPathName(), ESearchCase::CaseSensitive) ||
+            ResolvedContext.StageKey != Stage.StageKey) {
+          OutError = TEXT("niagara_native_candidate_context_changed:") +
+                     Patch->SourceKey;
+          return false;
+        }
+      }
       auto AddRequestedModule = [&]() -> UNiagaraNodeFunctionCall * {
         if (Patch->bAssignmentModule) {
           return AddAssignmentModule(*Stage.OutputNode,
@@ -3196,8 +3254,40 @@ bool ApplyStagePatches(TArray<FStagePatch> &StagePatches, FString &OutError) {
                      Patch->SourceKey;
           return nullptr;
         }
-        return AddModule(*Stage.OutputNode, *Patch->Script, FString(),
-                         Patch->TargetIndex, OutError);
+        if (Patch->NativeCandidateId.IsEmpty()) {
+          return AddModule(*Stage.OutputNode, *Patch->Script, FString(),
+                           Patch->TargetIndex, OutError);
+        }
+        UE::UAI::QueryOwners::Niagara::FNiagaraModuleCandidateContext
+            CandidateContext;
+        CandidateContext.TargetUsage = ScriptUsageToString(Stage.Usage);
+        CandidateContext.TargetUsageId = Stage.UsageId.ToString(
+            EGuidFormats::DigitsWithHyphensLower);
+        if (Stage.EmitterHandleId.IsValid()) {
+          CandidateContext.EmitterHandleId = Stage.EmitterHandleId.ToString(
+              EGuidFormats::DigitsWithHyphensLower);
+        }
+        UE::UAI::QueryOwners::Niagara::FNiagaraModuleCandidate
+            PerformedCandidate;
+        UE::UAI::QueryOwners::Niagara::FNiagaraModuleCandidateContext
+            PerformedContext;
+        UE::UAI::QueryOwners::Niagara::FNiagaraModuleCandidateQueryError
+            CandidateError;
+        UNiagaraNodeFunctionCall *CreatedNode = nullptr;
+        if (!UE::UAI::QueryOwners::Niagara::
+                TryPerformNiagaraModuleCandidate(
+                    *Stage.Asset, FString(), Patch->NativeCandidateId,
+                    CandidateContext, Patch->TargetIndex, PerformedCandidate,
+                    PerformedContext, CreatedNode, CandidateError)) {
+          OutError = CandidateError.Code.IsEmpty()
+                         ? TEXT("niagara_native_candidate_execute_failed:") +
+                               Patch->SourceKey
+                         : CandidateError.Code + TEXT(":") +
+                               CandidateError.SubjectId + TEXT(":") +
+                               CandidateError.Detail;
+          return nullptr;
+        }
+        return CreatedNode;
       };
       FModuleSelector Selector;
       Selector.NodeGuid = Patch->ModuleGuid;

@@ -340,6 +340,23 @@ namespace UE::UAI::DomainAdapters::AudioMediaGraph
 					Mutation.GetClassName());
 				return false;
 			}
+			if (Mutation.GetPosition().IsSet())
+			{
+				EMetaSoundBuilderResult LocationResult =
+					EMetaSoundBuilderResult::Failed;
+				Builder->SetNodeLocation(
+					FMetaSoundNodeHandle(Mutation.GetNodeId()),
+					Mutation.GetPosition().GetValue(),
+					LocationResult);
+				if (LocationResult != EMetaSoundBuilderResult::Succeeded)
+				{
+					OutError.Set(
+						TEXT("audio_media_graph_metasound_node_location_apply_failed"),
+						Mutation.GetNodeId().ToString(
+							EGuidFormats::DigitsWithHyphensLower));
+					return false;
+				}
+			}
 		}
 		if (!TryFinalizeBuilder(Source, *Builder, OutError)
 			|| !Lease.Finish())

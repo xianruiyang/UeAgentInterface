@@ -9,8 +9,8 @@ dispatch. SDK and CLI callers continue to use the T13-owned
 bindings. The default SDK ingress is
 `client.content_graph.import_workspace(...)` or
 `client.content_graph.export_workspace(...)`; callers discover the current
-contract through `client.command_search(...)` and
-`client.command_detail(...)`, with the same `command_search` and
+contract through `client.query.command_search(...)` and
+`client.query.command_detail(...)`, with the same `command_search` and
 `command_detail` operations exposed by `uai-cli`.
 
 No task-local projection helper or second command catalog remains active.

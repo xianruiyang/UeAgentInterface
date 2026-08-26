@@ -14,6 +14,7 @@ class UMeshDeformerCollection;
 class UMaterial;
 class UOptimusDeformer;
 class USkeleton;
+class USkeletalMesh;
 class UStaticMesh;
 
 namespace UE::UAI::DomainAdapters::AnimationRigGraph
@@ -79,9 +80,13 @@ namespace UE::UAI::DomainAdapters::AnimationRigGraph
 	struct FAnimationRigGraphUnitMutation final
 	{
 		FName NodeName;
+		FString CandidateName;
+		FString CandidateId;
 		FString ScriptStructRef;
 		FName MethodName = TEXT("Execute");
 		FVector2D Position = FVector2D::ZeroVector;
+		bool bHasScriptStructAssertion = false;
+		bool bHasMethodAssertion = false;
 		EAnimationRigGraphMutationIntent Intent =
 			EAnimationRigGraphMutationIntent::Create;
 	};
@@ -304,7 +309,7 @@ namespace UE::UAI::DomainAdapters::AnimationRigGraph
 		bool TryApplyAndCaptureControlRigDefinition(
 			UControlRigBlueprint& Blueprint,
 			const TArray<FAnimationRigGraphControlMutation>& Mutations,
-			const TArray<FAnimationRigGraphUnitMutation>& UnitMutations,
+			TArray<FAnimationRigGraphUnitMutation>& UnitMutations,
 			FAnimationRigGraphNativeMutationReceipt& OutApplyReceipt,
 			FAnimationRigGraphBarrierReceipt& OutBarrierReceipt,
 			FAnimationRigGraphTopology& OutTopology,

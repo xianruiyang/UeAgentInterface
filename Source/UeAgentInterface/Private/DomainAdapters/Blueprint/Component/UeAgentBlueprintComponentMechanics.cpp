@@ -2,6 +2,7 @@
 
 #include "Components/PointLightComponent.h"
 #include "Components/SceneComponent.h"
+#include "Commands/PaletteSearch/UeAgentPaletteSearchTypes.h"
 #include "Core/Contract/UeAgentCommandJson.h"
 #include "Core/HjsonWorkspace/ImportInitialization/UeAgentHjsonDomainProviderRegistry.h"
 #include "Core/HjsonWorkspace/UeAgentHjsonWorkspace.h"
@@ -34,6 +35,10 @@ namespace UE::UAI::DomainAdapters::Blueprint::Component
 			TEXT("/Script/Engine.SceneComponent");
 		const FString PointLightComponentType =
 			TEXT("/Script/Engine.PointLightComponent");
+		const FString StaticMeshComponentType =
+			TEXT("/Script/Engine.StaticMeshComponent");
+		const FString BoxComponentType =
+			TEXT("/Script/Engine.BoxComponent");
 		const FString SchemaId = TEXT("uai.blueprint.component.edit/1");
 		const FString ComponentContract =
 			TEXT("uai.init.blueprint.scs_component/1");
@@ -116,12 +121,6 @@ namespace UE::UAI::DomainAdapters::Blueprint::Component
 			}));
 		}
 
-		bool IsSupportedComponentType(const FString& Type)
-		{
-			return Type == SceneComponentType
-				|| Type == PointLightComponentType;
-		}
-
 		bool IsValidComponentName(const FString& Name)
 		{
 			if (Name.IsEmpty()
@@ -160,7 +159,7 @@ namespace UE::UAI::DomainAdapters::Blueprint::Component
 			const FString& ComponentClass,
 			FUeAgentBlueprintComponentMechanicsError& OutError)
 		{
-			if (!IsSupportedComponentType(ComponentClass))
+			if (!IsSupportedBlueprintComponentClass(ComponentClass))
 			{
 				Fail(
 					OutError,
@@ -1046,6 +1045,137 @@ namespace UE::UAI::DomainAdapters::Blueprint::Component
 		}
 	}
 
+	bool IsSupportedBlueprintComponentClass(const FString& ComponentClass)
+	{
+		return ComponentClass == SceneComponentType
+			|| ComponentClass == PointLightComponentType
+			|| ComponentClass == StaticMeshComponentType
+			|| ComponentClass == BoxComponentType;
+	}
+
+	bool TryQueryBlueprintComponentCandidates(
+		const FUeAgentBlueprintComponentCandidateQuery& Query,
+		FString& OutPayloadJson,
+		FUeAgentBlueprintComponentMechanicsError& OutError)
+	{
+		OutPayloadJson.Reset();
+		OutError = {};
+		if (Query.Limit < 1 || Query.Limit > 20 || Query.Cursor < 0)
+		{
+			return Fail(
+				OutError,
+				TEXT("blueprint_component_candidate_page_invalid"),
+				Query.Target);
+		}
+		const FString Target = Query.Target.TrimStartAndEnd();
+		const FString Parent = Query.Parent.TrimStartAndEnd();
+		UBlueprint* Blueprint = LoadBlueprint(Target, OutError);
+		if (!Blueprint)
+		{
+			return false;
+		}
+		if (!Parent.IsEmpty() && !FindNodeByName(*Blueprint, Parent))
+		{
+			return Fail(
+				OutError,
+				TEXT("blueprint_component_parent_unresolved"),
+				Parent);
+		}
+		FString ScsRevision;
+		FString ReadbackEvidence;
+		if (!TryCaptureScs(
+				*Blueprint, ScsRevision, ReadbackEvidence, OutError))
+		{
+			return false;
+		}
+
+		UeAgentPaletteSearch::FSearchParams SearchParams;
+		SearchParams.CatalogType = TEXT("actor_component");
+		SearchParams.SearchText = Query.Query.TrimStartAndEnd();
+		SearchParams.CandidateId = Query.CandidateId.TrimStartAndEnd();
+		SearchParams.AssetPath = Blueprint->GetPathName();
+		SearchParams.bContextSensitive = true;
+		SearchParams.bIncludeItems = true;
+		SearchParams.bIncludeGroups = false;
+		SearchParams.bIncludeCategoryTree = false;
+		SearchParams.Limit = Query.Limit;
+		SearchParams.Offset = Query.Cursor;
+		UeAgentPaletteSearch::FSearchResult SearchResult;
+		FString SearchError;
+		if (!UeAgentPaletteSearch::ExecuteSearch(
+				SearchParams, SearchResult, SearchError))
+		{
+			return Fail(
+				OutError,
+				TEXT("blueprint_component_candidate_query_failed"),
+				Target,
+				SearchError);
+		}
+		const int32 StartIndex = FMath::Min(
+			Query.Cursor, SearchResult.MatchingCandidates.Num());
+		const int32 EndIndex = FMath::Min(
+			StartIndex + Query.Limit,
+			SearchResult.MatchingCandidates.Num());
+		const bool bHasMore = EndIndex < SearchResult.TotalMatching;
+
+		const TSharedPtr<FJsonObject> Payload = MakeShared<FJsonObject>();
+		Payload->SetStringField(
+			TEXT("command_id"), TEXT("blueprint.component.candidates"));
+		Payload->SetBoolField(TEXT("read_only"), true);
+		Payload->SetStringField(TEXT("target"), Target);
+		Payload->SetStringField(TEXT("scs_revision"), ScsRevision);
+		Payload->SetStringField(
+			TEXT("readback_evidence_id"), ReadbackEvidence);
+		const TSharedPtr<FJsonObject> Context = MakeShared<FJsonObject>();
+		Context->SetStringField(
+			TEXT("parent"), Parent.IsEmpty() ? TEXT("actor_root") : Parent);
+		Context->SetStringField(
+			TEXT("content_browser_selection"), TEXT("ignored"));
+		Payload->SetObjectField(TEXT("context"), Context);
+		Payload->SetBoolField(TEXT("complete"), !bHasMore);
+		Payload->SetBoolField(TEXT("has_more"), bHasMore);
+		Payload->SetNumberField(
+			TEXT("total_matching"), SearchResult.TotalMatching);
+		Payload->SetNumberField(
+			TEXT("next_cursor"), bHasMore ? EndIndex : -1);
+		TArray<TSharedPtr<FJsonValue>> Candidates;
+		for (int32 Index = StartIndex; Index < EndIndex; ++Index)
+		{
+			const UeAgentPaletteSearch::FCandidate& Match =
+				SearchResult.MatchingCandidates[Index];
+			const TSharedPtr<FJsonObject> Candidate = MakeShared<FJsonObject>();
+			Candidate->SetStringField(
+				TEXT("name"),
+				Match.Name.IsEmpty() ? Match.DisplayName : Match.Name);
+			Candidate->SetStringField(TEXT("id"), Match.GetPublicId());
+			Candidate->SetStringField(
+				TEXT("display_name"),
+				Match.DisplayName.IsEmpty() ? Match.Name : Match.DisplayName);
+			Candidate->SetStringField(TEXT("kind"), Match.Kind);
+			if (!Match.CategoryPath.IsEmpty())
+			{
+				Candidate->SetStringField(
+					TEXT("category"), Match.CategoryPath);
+			}
+			if (const FString* ComponentClass =
+				Match.AuthoringSelectors.Find(TEXT("component_class")))
+			{
+				Candidate->SetStringField(TEXT("class_path"), *ComponentClass);
+			}
+			if (const FString* AssetOverride =
+				Match.AuthoringSelectors.Find(TEXT("asset_override")))
+			{
+				Candidate->SetStringField(TEXT("asset_path"), *AssetOverride);
+			}
+			Candidates.Add(MakeShared<FJsonValueObject>(Candidate));
+		}
+		Payload->SetArrayField(TEXT("candidates"), MoveTemp(Candidates));
+		Payload->SetArrayField(
+			TEXT("existing_components"), BuildExistingComponents(*Blueprint));
+		OutPayloadJson = Canonical(Payload);
+		return true;
+	}
+
 	bool TryQueryBlueprintComponentCandidates(
 		const FString& Target,
 		const FString& ComponentClass,
@@ -1109,23 +1239,4 @@ namespace UE::UAI::DomainAdapters::Blueprint::Component
 		return true;
 	}
 
-	bool TryExecuteBlueprintComponentImport(
-		const FString& CanonicalParamsJson,
-		FString& OutPayloadJson,
-		FUeAgentBlueprintComponentMechanicsError& OutError)
-	{
-		OutPayloadJson.Reset();
-		OutError = {};
-		TSharedPtr<FJsonObject> Params;
-		FString JsonError;
-		if (!Json::TryParseObject(CanonicalParamsJson, Params, JsonError))
-		{
-			return Fail(
-				OutError,
-				TEXT("blueprint_component_import_params_invalid"),
-				FString(),
-				JsonError);
-		}
-		return ExecuteImport(Params, OutPayloadJson, OutError);
-	}
 }

@@ -3,13 +3,16 @@
 #include "CommandHandlers/AnimationBlueprint/UeAgentAnimationBlueprintDomainCommandHandlers.h"
 #include "Core/Contract/UeAgentCommandJson.h"
 #include "Dom/JsonObject.h"
+#include "Dom/JsonValue.h"
 #include "OperationOwners/UObjectDataAsset/UeAgentUObjectDataAssetCommandService.h"
+#include "QueryOwners/AnimationBlueprint/UeAgentAnimationBlueprintQueryOwner.h"
 
 namespace UE::UAI::OperationOwners::AnimationBlueprint
 {
 	using namespace CommandContract;
 	using namespace HjsonWorkspace;
 	using namespace OperationOwners::UObjectDataAsset;
+	using namespace QueryOwners::AnimationBlueprint;
 
 	namespace
 	{
@@ -17,6 +20,8 @@ namespace UE::UAI::OperationOwners::AnimationBlueprint
 		const FString SchemaId = TEXT("uai.animation_blueprint.edit/1");
 		const FString RootType = TEXT("/Script/Engine.AnimBlueprint");
 		const FString PublicCommandId = TEXT("animation_blueprint.authoring.apply");
+		const FString CandidateCommandId =
+			TEXT("animation.state_machine.candidates");
 
 		FString InitializationContract(
 			const FString& Type,
@@ -114,6 +119,180 @@ namespace UE::UAI::OperationOwners::AnimationBlueprint
 			OutError.Detail = MoveTemp(Detail);
 			return false;
 		}
+
+		bool FailCandidate(
+			FAnimationBlueprintCandidateCommandError& OutError,
+			FString Code,
+			FString SubjectId = FString(),
+			FString Detail = FString())
+		{
+			OutError.Code = MoveTemp(Code);
+			OutError.SubjectId = MoveTemp(SubjectId);
+			OutError.Detail = MoveTemp(Detail);
+			return false;
+		}
+
+		class FAnimationBlueprintCandidateCommandService final
+			: public IUeAgentAnimationBlueprintCandidateCommandService
+		{
+		public:
+			virtual bool Execute(
+				const FAnimationBlueprintCandidateCommandRequest& Request,
+				FAnimationBlueprintCandidateCommandResponse& OutResponse,
+				FAnimationBlueprintCandidateCommandError& OutError) override
+			{
+				OutResponse = {};
+				OutError = {};
+				if (Request.bCancellationRequested)
+				{
+					return FailCandidate(
+						OutError,
+						TEXT("animation_blueprint_candidate_cancelled"),
+						Request.CommandId);
+				}
+				if (Request.CommandId != CandidateCommandId)
+				{
+					return FailCandidate(
+						OutError,
+						TEXT("animation_blueprint_candidate_command_not_supported"),
+						Request.CommandId);
+				}
+
+				TSharedPtr<FJsonObject> Params;
+				FString JsonError;
+				if (!Json::TryParseObject(
+						Request.CanonicalParamsJson, Params, JsonError)
+					|| !Params.IsValid())
+				{
+					return FailCandidate(
+						OutError,
+						TEXT("animation_blueprint_candidate_params_invalid"),
+						Request.CommandId,
+						JsonError);
+				}
+				FString Target;
+				FString Surface;
+				FString Query;
+				FString CandidateId;
+				if (!Params->TryGetStringField(TEXT("target"), Target)
+					|| Target.TrimStartAndEnd().IsEmpty())
+				{
+					return FailCandidate(
+						OutError,
+						TEXT("animation_blueprint_candidate_target_required"),
+						Request.CommandId);
+				}
+				if (!Params->TryGetStringField(TEXT("surface"), Surface)
+					|| Surface.TrimStartAndEnd().IsEmpty())
+				{
+					return FailCandidate(
+						OutError,
+						TEXT("animation_blueprint_candidate_surface_required"),
+						Request.CommandId);
+				}
+				Params->TryGetStringField(TEXT("query"), Query);
+				Params->TryGetStringField(TEXT("id"), CandidateId);
+				const TSharedPtr<FJsonObject>* ClassSettingsField = nullptr;
+				TSharedPtr<FJsonObject> ClassSettings = MakeShared<FJsonObject>();
+				if (Params->TryGetObjectField(
+						TEXT("class_settings"), ClassSettingsField)
+					&& ClassSettingsField && ClassSettingsField->IsValid())
+				{
+					ClassSettings = *ClassSettingsField;
+				}
+				int32 Limit = 64;
+				int32 Cursor = 0;
+				double Number = 0.0;
+				if (Params->TryGetNumberField(TEXT("limit"), Number))
+				{
+					Limit = static_cast<int32>(Number);
+				}
+				if (Params->TryGetNumberField(TEXT("cursor"), Number))
+				{
+					Cursor = static_cast<int32>(Number);
+				}
+
+				FAnimationBlueprintCandidateQueryResult QueryResult;
+				FAnimationBlueprintCandidateQueryError QueryError;
+				if (!TryQueryAnimationBlueprintCandidates(
+						Target,
+						Surface,
+						ClassSettings,
+						Query,
+						QueryResult,
+						QueryError,
+						Limit,
+						Cursor,
+						CandidateId))
+				{
+					return FailCandidate(
+						OutError,
+						QueryError.Code.IsEmpty()
+							? FString(TEXT("animation_blueprint_candidate_query_failed"))
+							: QueryError.Code,
+						QueryError.SubjectId,
+						QueryError.Detail);
+				}
+
+				const TSharedPtr<FJsonObject> Payload = MakeShared<FJsonObject>();
+				Payload->SetStringField(TEXT("command_id"), CandidateCommandId);
+				Payload->SetBoolField(TEXT("read_only"), true);
+				Payload->SetStringField(TEXT("target"), QueryResult.Target);
+				Payload->SetStringField(
+					TEXT("target_revision"), QueryResult.TargetRevision);
+				Payload->SetStringField(TEXT("surface"), QueryResult.Surface);
+				Payload->SetNumberField(
+					TEXT("total_matches"), QueryResult.TotalMatches);
+				Payload->SetNumberField(
+					TEXT("next_cursor"), QueryResult.NextCursor);
+				Payload->SetBoolField(TEXT("complete"), QueryResult.bComplete);
+				Payload->SetBoolField(TEXT("has_more"), QueryResult.bHasMore);
+				Payload->SetStringField(
+					TEXT("coverage_scope"), QueryResult.CoverageScope);
+				Payload->SetBoolField(
+					TEXT("coverage_complete"), QueryResult.bCoverageComplete);
+				Payload->SetBoolField(
+					TEXT("creation_coverage_complete"),
+					QueryResult.bCreationCoverageComplete);
+				TArray<TSharedPtr<FJsonValue>> Candidates;
+				for (const FAnimationBlueprintCandidate& Candidate
+					: QueryResult.Candidates)
+				{
+					const TSharedPtr<FJsonObject> Value = MakeShared<FJsonObject>();
+					Value->SetStringField(TEXT("id"), Candidate.Id);
+					Value->SetStringField(TEXT("name"), Candidate.Name);
+					Value->SetStringField(TEXT("label"), Candidate.Label);
+					Value->SetStringField(TEXT("surface"), Candidate.Surface);
+					Value->SetStringField(TEXT("kind"), Candidate.Kind);
+					Value->SetStringField(
+						TEXT("action_kind"), Candidate.ActionKind);
+					Value->SetStringField(TEXT("category"), Candidate.Category);
+					Value->SetStringField(TEXT("summary"), Candidate.Summary);
+					Value->SetStringField(
+						TEXT("node_class"), Candidate.NodeClassPath);
+					Value->SetStringField(
+						TEXT("source_origin"), Candidate.SourceOrigin);
+					Value->SetBoolField(TEXT("supported"), Candidate.bSupported);
+					Value->SetStringField(
+						TEXT("write_support"), Candidate.WriteSupport);
+					Value->SetStringField(
+						TEXT("support_reason"), Candidate.SupportReason);
+					Candidates.Add(MakeShared<FJsonValueObject>(Value));
+				}
+				Payload->SetArrayField(TEXT("candidates"), MoveTemp(Candidates));
+				if (!Json::TryCanonicalize(
+						Payload, OutResponse.PayloadJson, JsonError))
+				{
+					return FailCandidate(
+						OutError,
+						TEXT("animation_blueprint_candidate_result_invalid"),
+						Request.CommandId,
+						JsonError);
+				}
+				OutResponse.bReadOnly = true;
+				return true;
+			}
+		};
 
 		class FAnimationBlueprintCommandService final
 			: public IUeAgentAnimationBlueprintCommandService
@@ -216,6 +395,15 @@ namespace UE::UAI::OperationOwners::AnimationBlueprint
 		}
 		OutService = MakeShared<FAnimationBlueprintCommandService>(
 			CommonService.ToSharedRef());
+		OutError.Reset();
+		return true;
+	}
+
+	bool TryCreateProductionAnimationBlueprintCandidateCommandService(
+		TSharedPtr<IUeAgentAnimationBlueprintCandidateCommandService>& OutService,
+		FString& OutError)
+	{
+		OutService = MakeShared<FAnimationBlueprintCandidateCommandService>();
 		OutError.Reset();
 		return true;
 	}

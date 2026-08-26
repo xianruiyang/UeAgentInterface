@@ -5,6 +5,21 @@
 
 namespace UE::UAI::DomainAdapters::WorldSpatial
 {
+	struct UEAGENTINTERFACE_API FUeAgentWorldActorCandidateQuery final
+	{
+		FString Target;
+		FString Category;
+		FString Query;
+		FString CandidateId;
+		int32 Limit = 20;
+		int32 Cursor = 0;
+	};
+
+	UEAGENTINTERFACE_API bool TryQueryWorldActorCandidates(
+		const FUeAgentWorldActorCandidateQuery& Query,
+		FString& OutPayloadJson,
+		HjsonWorkspace::FWorkspaceError& OutError);
+
 	UEAGENTINTERFACE_API bool TryExecuteContentGraph(
 		const FString& CommandId,
 		const FString& TargetIdentity,
