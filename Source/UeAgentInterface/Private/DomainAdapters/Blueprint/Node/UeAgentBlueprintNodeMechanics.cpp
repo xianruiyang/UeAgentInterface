@@ -1229,6 +1229,16 @@ namespace UE::UAI::DomainAdapters::Blueprint::Node
 				Candidate->SetStringField(
 					TEXT("category"), Match.CategoryPath);
 			}
+			for (const TPair<FString, FString>& Selector :
+				Match.AuthoringSelectors)
+			{
+				if (UeAgentPaletteSearch::
+						IsPublicBlueprintCandidateSemanticField(Selector.Key)
+					&& !Selector.Value.IsEmpty())
+				{
+					Candidate->SetStringField(Selector.Key, Selector.Value);
+				}
+			}
 			Candidates.Add(MakeShared<FJsonValueObject>(Candidate));
 		}
 		Payload->SetArrayField(TEXT("candidates"), MoveTemp(Candidates));

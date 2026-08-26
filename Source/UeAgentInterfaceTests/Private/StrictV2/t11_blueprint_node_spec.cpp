@@ -11,14 +11,17 @@
 #include "Core/Contract/UeAgentCommandJson.h"
 #include "Core/HjsonWorkspace/ImportInitialization/UeAgentHjsonDomainProviderRegistry.h"
 #include "DomainAdapters/Blueprint/Node/UeAgentBlueprintNodeMechanics.h"
+#include "DomainAdapters/Blueprint/Surfaces/UeAgentBlueprintCandidateBindingNormalizer.h"
 #include "DomainAdapters/Blueprint/Surfaces/UeAgentBlueprintSurfaceMechanics.h"
 #include "Dom/JsonObject.h"
 #include "EdGraph/EdGraph.h"
+#include "EdGraphSchema_K2.h"
 #include "GameFramework/Actor.h"
 #include "K2Node_CallFunction.h"
 #include "K2Node_ComponentBoundEvent.h"
 #include "K2Node_Event.h"
 #include "Kismet/KismetMathLibrary.h"
+#include "Kismet2/BlueprintEditorUtils.h"
 #include "Kismet2/KismetEditorUtilities.h"
 #include "Module/CommandRegistration/BlueprintNode/UeAgentBlueprintNodeRegistration.h"
 #include "ObjectTools.h"
@@ -291,6 +294,13 @@ bool FUeAgentStrictV2T11ProductionCandidateTest::RunTest(
 		DeleteAssetIfPresent(ObjectPath);
 		return false;
 	}
+	FEdGraphPinType FloatPinType;
+	FloatPinType.PinCategory = UEdGraphSchema_K2::PC_Real;
+	FloatPinType.PinSubCategory = UEdGraphSchema_K2::PC_Float;
+	TestTrue(
+		TEXT("the native Blueprint has a local variable for candidate semantics"),
+		FBlueprintEditorUtils::AddMemberVariable(
+			Blueprint, FName(TEXT("T84SemanticValue")), FloatPinType));
 	UK2Node_Event* EventNode = NewObject<UK2Node_Event>(EventGraph);
 	EventNode->NodeGuid = FGuid::NewGuid();
 	EventNode->EventReference.SetExternalMember(
@@ -510,6 +520,155 @@ bool FUeAgentStrictV2T11ProductionCandidateTest::RunTest(
 				Resolved->GetStringField(TEXT("id")),
 				CandidateId);
 		}
+	}
+
+	auto QueryCandidates = [&Service, &GraphId, &ObjectPath, this](
+		const FString& Query,
+		const FString& RequestId,
+		const TArray<TSharedPtr<FJsonValue>>*& OutCandidates,
+		TSharedPtr<FJsonObject>& OutPayload) -> bool
+	{
+		FUeAgentBlueprintNodeCommandRequest CandidateRequest;
+		CandidateRequest.CommandId = TEXT("blueprint.node.candidates");
+		CandidateRequest.RequestId = RequestId;
+		CandidateRequest.CanonicalParamsJson = FString::Printf(
+			TEXT("{\"graph_id\":\"%s\",\"limit\":20,\"query\":\"%s\",\"target\":\"%s\"}"),
+			*GraphId,
+			*Query,
+			*ObjectPath);
+		FUeAgentBlueprintNodeCommandResponse CandidateResponse;
+		FUeAgentBlueprintNodeCommandError CandidateError;
+		if (!Service.IsValid()
+			|| !Service->Execute(
+				CandidateRequest, CandidateResponse, CandidateError))
+		{
+			AddError(CandidateError.Code);
+			return false;
+		}
+		OutPayload = ParsePayload(this, CandidateResponse.PayloadJson);
+		return OutPayload.IsValid()
+			&& OutPayload->TryGetArrayField(TEXT("candidates"), OutCandidates)
+			&& OutCandidates;
+	};
+
+	const TArray<TSharedPtr<FJsonValue>>* FunctionCandidates = nullptr;
+	TSharedPtr<FJsonObject> FunctionPayload;
+	FString FInterpCandidateId;
+	FString FInterpFunctionOwnerClass;
+	bool bFoundPrivateActionSignature = false;
+	if (TestTrue(
+			TEXT("FInterpTo candidates can be queried directly"),
+			QueryCandidates(
+				TEXT("FInterp To"), TEXT("native-t11-function-semantics"),
+				FunctionCandidates, FunctionPayload)))
+	{
+		for (const TSharedPtr<FJsonValue>& Value : *FunctionCandidates)
+		{
+			const TSharedPtr<FJsonObject> Candidate = Value->AsObject();
+			bFoundPrivateActionSignature |= Candidate.IsValid()
+				&& Candidate->HasField(TEXT("native_action_signature"));
+			FString FunctionName;
+			FString FunctionOwnerClass;
+			if (Candidate.IsValid()
+				&& Candidate->TryGetStringField(
+					TEXT("function_name"), FunctionName)
+				&& FunctionName == TEXT("FInterpTo")
+				&& Candidate->TryGetStringField(
+					TEXT("function_owner_class"), FunctionOwnerClass)
+				&& FunctionOwnerClass
+					== UKismetMathLibrary::StaticClass()->GetPathName())
+			{
+				Candidate->TryGetStringField(TEXT("id"), FInterpCandidateId);
+				FInterpFunctionOwnerClass = FunctionOwnerClass;
+				break;
+			}
+		}
+	}
+	TestFalse(
+		TEXT("candidate projection never exposes private action signatures"),
+		bFoundPrivateActionSignature);
+	TestFalse(
+		TEXT("FInterpTo is identifiable without localized display-name inference"),
+		FInterpCandidateId.IsEmpty());
+
+	const TArray<TSharedPtr<FJsonValue>>* VariableCandidates = nullptr;
+	TSharedPtr<FJsonObject> VariablePayload;
+	bool bFoundVariableGet = false;
+	bool bFoundVariableSet = false;
+	if (TestTrue(
+			TEXT("local variable candidates can be queried directly"),
+			QueryCandidates(
+				TEXT("T84SemanticValue"), TEXT("native-t11-variable-semantics"),
+				VariableCandidates, VariablePayload)))
+	{
+		for (const TSharedPtr<FJsonValue>& Value : *VariableCandidates)
+		{
+			const TSharedPtr<FJsonObject> Candidate = Value->AsObject();
+			FString VariableName;
+			FString NodeType;
+			if (Candidate.IsValid()
+				&& Candidate->TryGetStringField(
+					TEXT("variable_name"), VariableName)
+				&& VariableName == TEXT("T84SemanticValue")
+				&& Candidate->TryGetStringField(TEXT("node_type"), NodeType))
+			{
+				bFoundVariableGet |= NodeType == TEXT("get");
+				bFoundVariableSet |= NodeType == TEXT("set");
+			}
+		}
+	}
+	TestTrue(
+		TEXT("the public candidate semantics distinguish variable get"),
+		bFoundVariableGet);
+	TestTrue(
+		TEXT("the public candidate semantics distinguish variable set"),
+		bFoundVariableSet);
+
+	if (!FInterpCandidateId.IsEmpty())
+	{
+		auto BuildSemanticAssertion = [
+			&FInterpCandidateId,
+			&FInterpFunctionOwnerClass](const FString& FunctionName)
+		{
+			const TSharedPtr<FJsonObject> Candidate = MakeShared<FJsonObject>();
+			Candidate->SetStringField(TEXT("id"), FInterpCandidateId);
+			Candidate->SetStringField(TEXT("function_name"), FunctionName);
+			Candidate->SetStringField(
+				TEXT("function_owner_class"), FInterpFunctionOwnerClass);
+			const TSharedPtr<FJsonObject> NodeSpec = MakeShared<FJsonObject>();
+			NodeSpec->SetObjectField(TEXT("candidate"), Candidate);
+			const TSharedPtr<FJsonObject> Nodes = MakeShared<FJsonObject>();
+			Nodes->SetObjectField(TEXT("semantic_assertion"), NodeSpec);
+			const TSharedPtr<FJsonObject> GraphSpec = MakeShared<FJsonObject>();
+			GraphSpec->SetObjectField(TEXT("nodes"), Nodes);
+			const TSharedPtr<FJsonObject> Graphs = MakeShared<FJsonObject>();
+			Graphs->SetObjectField(TEXT("event_graph:EventGraph"), GraphSpec);
+			const TSharedPtr<FJsonObject> ProviderExtension =
+				MakeShared<FJsonObject>();
+			ProviderExtension->SetObjectField(TEXT("graphs"), Graphs);
+			return ProviderExtension;
+		};
+		FWorkspaceError ValidAssertionError;
+		TestTrue(
+			TEXT("matching optional candidate assertions normalize successfully"),
+			UE::UAI::DomainAdapters::Blueprint::Surfaces::
+				TryNormalizeBlueprintCandidateBindings(
+					ObjectPath,
+					BuildSemanticAssertion(TEXT("FInterpTo")),
+					ValidAssertionError));
+		FWorkspaceError AssertionError;
+		TestFalse(
+			TEXT("a conflicting optional candidate assertion fails before write"),
+			UE::UAI::DomainAdapters::Blueprint::Surfaces::
+				TryNormalizeBlueprintCandidateBindings(
+					ObjectPath,
+					BuildSemanticAssertion(TEXT("DefinitelyNotFInterpTo")),
+					AssertionError));
+		TestEqual(
+			TEXT("a conflicting optional assertion has a typed failure"),
+			AssertionError.GetCode(),
+			FString(TEXT(
+				"blueprint_surface_node_candidate_metadata_mismatch")));
 	}
 	DeleteAssetIfPresent(ObjectPath);
 	return true;

@@ -149,6 +149,38 @@ namespace UE::UAI::DomainAdapters::Blueprint::Surfaces
 			return true;
 		}
 
+		bool TryValidateOptionalNodeCandidateFields(
+			const TSharedPtr<FJsonObject>& Candidate,
+			const UeAgentPaletteSearch::FCandidate& ResolvedCandidate,
+			const FString& TargetIdentity,
+			const FString& Pointer,
+			FWorkspaceError& OutError)
+		{
+			for (const TPair<FString, TSharedPtr<FJsonValue>>& Field :
+				Candidate->Values)
+			{
+				if (!UeAgentPaletteSearch::
+						IsPublicBlueprintCandidateSemanticField(Field.Key))
+				{
+					continue;
+				}
+				FString Actual;
+				const FString* Expected =
+					ResolvedCandidate.AuthoringSelectors.Find(Field.Key);
+				if (!Candidate->TryGetStringField(Field.Key, Actual)
+					|| !Expected
+					|| !Actual.Equals(*Expected, ESearchCase::CaseSensitive))
+				{
+					return Fail(
+						OutError,
+						TEXT("blueprint_surface_node_candidate_metadata_mismatch"),
+						TargetIdentity,
+						Pointer + TEXT("/") + Field.Key);
+				}
+			}
+			return true;
+		}
+
 		bool TryNormalizeComponentCandidates(
 			const FString& TargetIdentity,
 			const TSharedPtr<FJsonObject>& ProviderExtension,
@@ -687,6 +719,16 @@ namespace UE::UAI::DomainAdapters::Blueprint::Surfaces
 								TargetIdentity,
 								Pointer + TEXT("/candidate/binding_revision"));
 						}
+					}
+
+					if (!TryValidateOptionalNodeCandidateFields(
+							Candidate,
+							ResolvedCandidate,
+							TargetIdentity,
+							Pointer + TEXT("/candidate"),
+							OutError))
+					{
+						return false;
 					}
 
 					if (!Candidate->HasField(TEXT("name")))

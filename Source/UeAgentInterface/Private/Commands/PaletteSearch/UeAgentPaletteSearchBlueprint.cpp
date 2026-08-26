@@ -490,6 +490,19 @@ namespace
 	}
 }
 
+bool UeAgentPaletteSearch::IsPublicBlueprintCandidateSemanticField(
+	const FString& Field)
+{
+	return Field == TEXT("function_name")
+		|| Field == TEXT("function_owner_class")
+		|| Field == TEXT("event_name")
+		|| Field == TEXT("event_class")
+		|| Field == TEXT("variable_name")
+		|| Field == TEXT("node_type")
+		|| Field == TEXT("member_parent_class")
+		|| Field == TEXT("node_class");
+}
+
 namespace
 {
 	bool IsBlueprintCatalogType(const FString& CatalogType)

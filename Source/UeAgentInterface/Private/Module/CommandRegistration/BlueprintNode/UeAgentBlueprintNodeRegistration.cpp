@@ -115,13 +115,13 @@ namespace UE::UAI::Module::CommandRegistration::BlueprintNode
 			Result.Purpose.ParameterGuidance =
 				TEXT("Search the exact graph or pin context, continue paging while has_more is true, then copy either candidate.name or candidate.id into the HJSON candidate selector.");
 			Result.Purpose.ResultGuidance =
-				TEXT("candidate.name is sufficient only when unique in this exact context; candidate.id is the exact compact selector. Internal spawner and revision data are resolved server-side.");
+				TEXT("candidate.name is sufficient only when unique in this exact context; candidate.id is the exact compact selector. Specialized rows also expose safe function_name/function_owner_class, event_name/event_class, variable_name/node_type/member_parent_class or node_class semantics. Copy them only as optional exact HJSON assertions; native_action_signature and internal spawner data are never public.");
 			Result.Purpose.FailureGuidance =
 				TEXT("Unresolved or ambiguous candidates fail before any write and never fall back to a class alias.");
 			Result.Purpose.SideEffectGuidance =
 				TEXT("Read-only with no persistent or external side effects.");
 			Result.Purpose.MinimumExample =
-				TEXT("client.blueprint.node_candidates(target, graph_id, query='FInterpTo', limit=10)");
+				TEXT("client.blueprint.node_candidates(target, graph_id, query='FInterp To', limit=10)");
 			Result.Purpose.RelatedFlows = {
 				TEXT("query.command.search"),
 				TEXT("query.command.detail"),

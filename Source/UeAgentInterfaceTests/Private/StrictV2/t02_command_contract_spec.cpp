@@ -259,6 +259,152 @@ bool FUaiStrictV2T02RegistryProjectionTest::RunTest(const FString& Parameters)
 		}
 	}
 
+	FUeAgentCommandDeclaration PurposeChanged = Source;
+	PurposeChanged.Purpose.Summary =
+		TEXT("Apply one exact sample operation with revised guidance.");
+	TSharedPtr<const FUeAgentImmutableCommandRegistry> PurposeChangedRegistry;
+	TestTrue(
+		TEXT("purpose metadata change freezes"),
+		FUeAgentImmutableCommandRegistry::TryFreeze(
+			{PurposeChanged},
+			PurposeChangedRegistry,
+			Error));
+	if (PurposeChangedRegistry.IsValid())
+	{
+		const FUeAgentFrozenCommandContract* PurposeChangedContract =
+			PurposeChangedRegistry->FindExact(TEXT("sample.execute"));
+		TestNotNull(
+			TEXT("purpose metadata variant remains executable"),
+			PurposeChangedContract);
+		if (PurposeChangedContract)
+		{
+			TestEqual(
+				TEXT("purpose metadata does not change executable binding hash"),
+				PurposeChangedContract->GetContractHash(),
+				Contract->GetContractHash());
+			TestTrue(
+				TEXT("purpose metadata changes registry identity"),
+				PurposeChangedRegistry->GetRegistryHash()
+					!= Registry->GetRegistryHash());
+		}
+	}
+
+	FUeAgentCommandDeclaration VariantPurposeSource = Source;
+	FUeAgentCommandVariantDeclaration Variant;
+	Variant.VariantId = TEXT("exact-target");
+	Variant.RequestSchemaJson =
+		TEXT("{\"additionalProperties\":false,\"properties\":{},\"type\":\"object\"}");
+	Variant.Purpose = Source.Purpose;
+	VariantPurposeSource.Variants.Add(Variant);
+	TSharedPtr<const FUeAgentImmutableCommandRegistry> VariantPurposeRegistry;
+	TestTrue(
+		TEXT("variant purpose baseline freezes"),
+		FUeAgentImmutableCommandRegistry::TryFreeze(
+			{VariantPurposeSource},
+			VariantPurposeRegistry,
+			Error));
+	FUeAgentCommandDeclaration VariantPurposeChanged = VariantPurposeSource;
+	VariantPurposeChanged.Variants[0].Purpose.MinimumExample =
+		TEXT("sample.execute(target='/Game/Sample.Revised')");
+	TSharedPtr<const FUeAgentImmutableCommandRegistry>
+		VariantPurposeChangedRegistry;
+	TestTrue(
+		TEXT("variant purpose metadata change freezes"),
+		FUeAgentImmutableCommandRegistry::TryFreeze(
+			{VariantPurposeChanged},
+			VariantPurposeChangedRegistry,
+			Error));
+	if (VariantPurposeRegistry.IsValid()
+		&& VariantPurposeChangedRegistry.IsValid())
+	{
+		const FUeAgentFrozenCommandContract* VariantPurposeContract =
+			VariantPurposeRegistry->FindExact(TEXT("sample.execute"));
+		const FUeAgentFrozenCommandContract* VariantPurposeChangedContract =
+			VariantPurposeChangedRegistry->FindExact(TEXT("sample.execute"));
+		TestNotNull(
+			TEXT("variant purpose baseline remains executable"),
+			VariantPurposeContract);
+		TestNotNull(
+			TEXT("variant purpose metadata variant remains executable"),
+			VariantPurposeChangedContract);
+		if (VariantPurposeContract && VariantPurposeChangedContract)
+		{
+			TestEqual(
+				TEXT("variant purpose metadata does not change executable binding hash"),
+				VariantPurposeChangedContract->GetContractHash(),
+				VariantPurposeContract->GetContractHash());
+			TestTrue(
+				TEXT("variant purpose metadata changes registry identity"),
+				VariantPurposeChangedRegistry->GetRegistryHash()
+					!= VariantPurposeRegistry->GetRegistryHash());
+
+			FString VariantProjection;
+			TestTrue(
+				TEXT("variant registry emits its complete projection"),
+				VariantPurposeChangedRegistry->BuildProjection(
+					VariantProjection,
+					Error));
+			for (const FString& RequiredVariantProjection : {
+				TEXT("exact-target"),
+				TEXT("request_schema"),
+				TEXT("additionalProperties"),
+				TEXT("/Game/Sample.Revised"),
+			})
+			{
+				TestTrue(
+					*FString::Printf(
+						TEXT("variant projection contains %s"),
+						*RequiredVariantProjection),
+					VariantProjection.Contains(RequiredVariantProjection));
+			}
+		}
+	}
+	if (VariantPurposeRegistry.IsValid())
+	{
+		const FUeAgentFrozenCommandContract* VariantContract =
+			VariantPurposeRegistry->FindExact(TEXT("sample.execute"));
+		TestNotNull(
+			TEXT("variant structure remains executable"),
+			VariantContract);
+		if (VariantContract)
+		{
+			TestTrue(
+				TEXT("adding a variant changes executable binding hash"),
+				VariantContract->GetContractHash()
+					!= Contract->GetContractHash());
+			TestTrue(
+				TEXT("adding a variant changes registry identity"),
+				VariantPurposeRegistry->GetRegistryHash()
+					!= Registry->GetRegistryHash());
+		}
+	}
+
+	FUeAgentCommandDeclaration WireChanged = Source;
+	WireChanged.InputFields[0].bNullable =
+		!WireChanged.InputFields[0].bNullable;
+	TSharedPtr<const FUeAgentImmutableCommandRegistry> WireChangedRegistry;
+	TestTrue(
+		TEXT("wire contract change freezes"),
+		FUeAgentImmutableCommandRegistry::TryFreeze(
+			{WireChanged},
+			WireChangedRegistry,
+			Error));
+	if (WireChangedRegistry.IsValid())
+	{
+		const FUeAgentFrozenCommandContract* WireChangedContract =
+			WireChangedRegistry->FindExact(TEXT("sample.execute"));
+		TestNotNull(
+			TEXT("wire contract variant remains executable"),
+			WireChangedContract);
+		if (WireChangedContract)
+		{
+			TestTrue(
+				TEXT("wire contract change changes executable binding hash"),
+				WireChangedContract->GetContractHash()
+					!= Contract->GetContractHash());
+		}
+	}
+
 	Source.CommandId = TEXT("mutated.after.freeze");
 	Source.Purpose.Summary = TEXT("mutated after freeze");
 	TestNotNull(

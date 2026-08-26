@@ -550,7 +550,8 @@ namespace UE::UAI::CommandRegistry
 		}
 
 		TArray<TSharedPtr<FJsonValue>> VariantArray(
-			const TArray<FUeAgentCommandVariantDeclaration>& Variants)
+			const TArray<FUeAgentCommandVariantDeclaration>& Variants,
+			const bool bIncludePurpose)
 		{
 			TArray<TSharedPtr<FJsonValue>> Result;
 			Result.Reserve(Variants.Num());
@@ -570,8 +571,11 @@ namespace UE::UAI::CommandRegistry
 					Object->SetObjectField(
 						TEXT("request_schema"), RequestSchema);
 				}
-				Object->SetObjectField(
-					TEXT("purpose"), PurposeObject(Variant.Purpose));
+				if (bIncludePurpose)
+				{
+					Object->SetObjectField(
+						TEXT("purpose"), PurposeObject(Variant.Purpose));
+				}
 				Result.Add(MakeShared<FJsonValueObject>(Object));
 			}
 			return Result;
@@ -579,6 +583,7 @@ namespace UE::UAI::CommandRegistry
 
 		TSharedPtr<FJsonObject> ContractObject(
 			const FUeAgentCommandDeclaration& Declaration,
+			const bool bIncludePurpose,
 			const FString& ContractHash = FString())
 		{
 			const TSharedPtr<FJsonObject> Result =
@@ -622,12 +627,17 @@ namespace UE::UAI::CommandRegistry
 			Result->SetArrayField(
 				TEXT("errors"),
 				ErrorArray(Declaration.Errors));
-			Result->SetObjectField(
-				TEXT("purpose"),
-				PurposeObject(Declaration.Purpose));
+			if (bIncludePurpose)
+			{
+				Result->SetObjectField(
+					TEXT("purpose"),
+					PurposeObject(Declaration.Purpose));
+			}
 			Result->SetArrayField(
 				TEXT("variants"),
-				VariantArray(Declaration.Variants));
+				VariantArray(
+					Declaration.Variants,
+					bIncludePurpose));
 			return Result;
 		}
 
@@ -636,7 +646,7 @@ namespace UE::UAI::CommandRegistry
 			const FString& ContractHash)
 		{
 			const TSharedPtr<FJsonObject> Result =
-				ContractObject(Declaration, ContractHash);
+				ContractObject(Declaration, true, ContractHash);
 			Result->SetArrayField(
 				TEXT("tutorial_references"),
 				StringArray(Declaration.TutorialReferences));
@@ -649,7 +659,7 @@ namespace UE::UAI::CommandRegistry
 			FString Canonical;
 			FString Error;
 			if (!Json::TryCanonicalize(
-				ContractObject(Declaration),
+				ContractObject(Declaration, false),
 				Canonical,
 				Error))
 			{
@@ -760,6 +770,7 @@ namespace UE::UAI::CommandRegistry
 			Projection.ResultFields = Contract.GetResultFields();
 			Projection.Errors = Contract.GetErrors();
 			Projection.Purpose = Contract.GetPurpose();
+			Projection.Variants = Contract.GetVariants();
 			Projection.TutorialReferences =
 				Contract.GetTutorialReferences();
 			CommandValues.Add(MakeShared<FJsonValueObject>(
@@ -831,6 +842,7 @@ namespace UE::UAI::CommandRegistry
 			Declaration.ResultFields = Contract.GetResultFields();
 			Declaration.Errors = Contract.GetErrors();
 			Declaration.Purpose = Contract.GetPurpose();
+			Declaration.Variants = Contract.GetVariants();
 			Declaration.TutorialReferences =
 				Contract.GetTutorialReferences();
 			Commands.Add(MakeShared<FJsonValueObject>(

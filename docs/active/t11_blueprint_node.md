@@ -21,7 +21,23 @@ Candidate rows expose compact creation selectors:
 `name` is sufficient only when it is unique in the exact native context. `id`
 is the precise selector and preserves the native action identity. Other
 returned fields are diagnostics or optional assertions; callers do not need to
-copy a complete search row.
+copy a complete search row. Continue with `next_cursor` while `has_more=true`
+before making an exhaustive or unique-result claim; one page is bounded to 20
+rows.
+
+Specialized rows also expose the safe semantics needed to select without a
+localized display-name inference:
+
+- function calls: `function_name`, `function_owner_class`;
+- events: `event_name`, `event_class`;
+- variables: `variable_name`, `node_type=get|set`, `member_parent_class`;
+- generic nodes: `node_class`.
+
+`native_action_signature` and internal spawner identity are deliberately not
+public. A caller that already knows more may copy any returned semantic field
+beside `name` or `id` as an exact assertion. The assertion never replaces the
+selector; a missing, non-string or changed value fails before write with
+`blueprint_surface_node_candidate_metadata_mismatch`.
 
 Resolve the graph context before querying nodes. Call
 `content_graph.structure` for the Blueprint, select the unique container whose
@@ -51,7 +67,10 @@ graphs: {
     nodes: {
       "node:BranchGate": {
         operation: create
-        candidate: { id: "candidate:..." }
+        candidate: {
+          id: "candidate:..."
+          node_class: "/Script/BlueprintGraph.K2Node_IfThenElse"
+        }
       }
     }
   }

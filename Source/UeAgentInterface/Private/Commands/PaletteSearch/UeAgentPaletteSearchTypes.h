@@ -99,6 +99,9 @@ namespace UeAgentPaletteSearch
 	UEAGENTINTERFACE_API bool TryCanonicalizeNiagaraTargetUsage(
 		const FString& Value,
 		FString& OutCanonicalUsage);
+	/** Whether a Blueprint candidate authoring selector is safe to project and round-trip publicly. */
+	UEAGENTINTERFACE_API bool IsPublicBlueprintCandidateSemanticField(
+		const FString& Field);
 	UEAGENTINTERFACE_API bool ExecuteSearch(const FSearchParams& Params, FSearchResult& OutResult, FString& OutError);
 	TSharedRef<FJsonObject> BuildSearchResponse(const FSearchParams& Params, const FSearchResult& Result);
 	TSharedRef<FJsonObject> BuildCategoriesResponse(const FSearchParams& Params, const FSearchResult& Result);
