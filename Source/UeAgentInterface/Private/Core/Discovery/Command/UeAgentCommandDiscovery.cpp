@@ -1,5 +1,7 @@
 #include "Core/Discovery/Command/UeAgentCommandDiscovery.h"
 
+#include "Core/Contract/Command/UeAgentCommandLifecyclePolicy.h"
+
 namespace UE::UAI::Discovery::Command
 {
 	using namespace CommandContract;
@@ -11,22 +13,23 @@ namespace UE::UAI::Discovery::Command
 		{
 			FCommandCandidate Candidate;
 			int32 Score = 0;
+			TSet<FString> MatchedTokens;
 			TArray<FString> Reasons;
 		};
 
-		TArray<FString> IntentTokens(FString Intent)
+		TArray<FString> SearchableTokens(FString Text)
 		{
-			Intent.TrimStartAndEndInline();
-			Intent.ToLowerInline();
-			for (TCHAR& Character : Intent)
+			Text.TrimStartAndEndInline();
+			Text.ToLowerInline();
+			for (TCHAR& Character : Text)
 			{
-				if (!(FChar::IsAlnum(Character) || Character == TEXT('_')))
+				if (!FChar::IsAlnum(Character))
 				{
 					Character = TEXT(' ');
 				}
 			}
 			TArray<FString> Tokens;
-			Intent.ParseIntoArrayWS(Tokens);
+			Text.ParseIntoArrayWS(Tokens);
 			Tokens.RemoveAll([](const FString& Value)
 			{
 				return Value.Len() < 2;
@@ -42,6 +45,11 @@ namespace UE::UAI::Discovery::Command
 			return Tokens;
 		}
 
+		TArray<FString> IntentTokens(FString Intent)
+		{
+			return SearchableTokens(MoveTemp(Intent));
+		}
+
 		void ScoreText(
 			const FString& Label,
 			FString Text,
@@ -49,12 +57,17 @@ namespace UE::UAI::Discovery::Command
 			const int32 Weight,
 			FScoredCandidate& Scored)
 		{
-			Text.ToLowerInline();
+			TSet<FString> TextTokens;
+			for (FString& TextToken : SearchableTokens(MoveTemp(Text)))
+			{
+				TextTokens.Add(MoveTemp(TextToken));
+			}
 			for (const FString& Token : Tokens)
 			{
-				if (Text.Contains(Token))
+				if (TextTokens.Contains(Token))
 				{
 					Scored.Score += Weight;
+					Scored.MatchedTokens.Add(Token);
 					Scored.Reasons.AddUnique(Label + TEXT(":") + Token);
 				}
 			}
@@ -107,15 +120,30 @@ namespace UE::UAI::Discovery::Command
 		TArray<FScoredCandidate> Matches;
 		for (const FUeAgentFrozenCommandContract& Contract : Registry->GetContracts())
 		{
-			if (Contract.GetAvailability() != EUeAgentCommandAvailability::Enabled)
+			const EUeAgentCommandAvailability Availability =
+				Contract.GetAvailability();
+			if (Availability == EUeAgentCommandAvailability::Disabled
+				|| (Availability == EUeAgentCommandAvailability::Dormant
+					&& Request.Mode != ECommandSearchMode::Compatibility))
 			{
 				continue;
 			}
+			const CommandLifecycle::FCommandLifecyclePolicy* Lifecycle =
+				CommandLifecycle::FindExact(Contract.GetCommandId());
 			FScoredCandidate Scored;
 			Scored.Candidate.CommandId = Contract.GetCommandId();
 			Scored.Candidate.ContractHash = Contract.GetContractHash();
 			Scored.Candidate.Summary = Contract.GetPurpose().Summary;
 			Scored.Candidate.Target = Contract.GetPurpose().Target;
+			Scored.Candidate.LifecycleStatus =
+				CommandLifecycle::LexToString(Availability);
+			if (Lifecycle)
+			{
+				Scored.Candidate.SuccessorCommandIds =
+					Lifecycle->SuccessorCommandIds;
+				Scored.Candidate.bRequiresUserConfirmation =
+					Lifecycle->bRequiresUserConfirmation;
+			}
 			Scored.Candidate.bHasSideEffects =
 				Contract.GetSideEffect() != EUeAgentCommandSideEffect::None;
 			ScoreText(TEXT("id"), Contract.GetCommandId(), Tokens, 8, Scored);
@@ -137,6 +165,15 @@ namespace UE::UAI::Discovery::Command
 				VariantScored.Candidate.VariantId = Variant.VariantId;
 				VariantScored.Candidate.Summary = Variant.Purpose.Summary;
 				VariantScored.Candidate.Target = Variant.Purpose.Target;
+				VariantScored.Candidate.LifecycleStatus =
+					CommandLifecycle::LexToString(Availability);
+				if (Lifecycle)
+				{
+					VariantScored.Candidate.SuccessorCommandIds =
+						Lifecycle->SuccessorCommandIds;
+					VariantScored.Candidate.bRequiresUserConfirmation =
+						Lifecycle->bRequiresUserConfirmation;
+				}
 				VariantScored.Candidate.bHasSideEffects =
 					Contract.GetSideEffect() != EUeAgentCommandSideEffect::None;
 				ScoreText(
@@ -189,6 +226,10 @@ namespace UE::UAI::Discovery::Command
 				+ TEXT("\n") + Left.Candidate.VariantId;
 			const FString RightIdentity = Right.Candidate.CommandId
 				+ TEXT("\n") + Right.Candidate.VariantId;
+			if (Left.MatchedTokens.Num() != Right.MatchedTokens.Num())
+			{
+				return Left.MatchedTokens.Num() > Right.MatchedTokens.Num();
+			}
 			return Left.Score == Right.Score
 				? LeftIdentity < RightIdentity
 				: Left.Score > Right.Score;
@@ -241,6 +282,13 @@ namespace UE::UAI::Discovery::Command
 			OutError.Detail = CommandId;
 			return false;
 		}
+		if (Contract->GetAvailability()
+			== EUeAgentCommandAvailability::Disabled)
+		{
+			OutError.Code = TEXT("command_disabled");
+			OutError.Detail = CommandId;
+			return false;
+		}
 		if (Contract->GetContractHash() != ContractHash)
 		{
 			OutError.Code = TEXT("command_contract_version_mismatch");
@@ -279,6 +327,16 @@ namespace UE::UAI::Discovery::Command
 		OutDetail.ResultFields = Contract->GetResultFields();
 		OutDetail.Errors = Contract->GetErrors();
 		OutDetail.TutorialReferences = Contract->GetTutorialReferences();
+		OutDetail.LifecycleStatus = CommandLifecycle::LexToString(
+			Contract->GetAvailability());
+		if (const CommandLifecycle::FCommandLifecyclePolicy* Lifecycle =
+			CommandLifecycle::FindExact(CommandId))
+		{
+			OutDetail.SuccessorCommandIds = Lifecycle->SuccessorCommandIds;
+			OutDetail.LifecycleReason = Lifecycle->Reason;
+			OutDetail.bRequiresUserConfirmation =
+				Lifecycle->bRequiresUserConfirmation;
+		}
 		OutDetail.bHasSideEffects =
 			Contract->GetSideEffect() != EUeAgentCommandSideEffect::None;
 		return true;

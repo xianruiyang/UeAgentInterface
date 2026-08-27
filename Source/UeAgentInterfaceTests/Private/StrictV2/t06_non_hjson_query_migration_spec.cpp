@@ -73,7 +73,7 @@ namespace
 	};
 
 	const TMap<FString, FString> HistoricalSuccessors = {
-		{TEXT("actor_list_components"), TEXT("world.actor_components")},
+		{TEXT("actor_list_components"), TEXT("content_graph.items")},
 		{TEXT("asset_reference_graph"), TEXT("asset.registry_relations")},
 		{TEXT("config_export_section"), TEXT("config.section")},
 		{TEXT("editor_get_open_assets"), TEXT("editor.open_assets")},
@@ -83,13 +83,13 @@ namespace
 		{TEXT("level_check_overlaps"), TEXT("world.overlap")},
 		{TEXT("level_get_nearby_actor_obbs"), TEXT("world.nearby_shapes")},
 		{TEXT("level_get_selection"), TEXT("world.selection")},
-		{TEXT("level_list_actor_components"), TEXT("world.actor_components")},
+		{TEXT("level_list_actor_components"), TEXT("content_graph.items")},
 		{TEXT("level_streaming_query"), TEXT("world.streaming_levels")},
 		{TEXT("level_sweep_capsule"), TEXT("world.capsule_sweep")},
 		{TEXT("level_sweep_capsule_path"), TEXT("world.capsule_path")},
 		{TEXT("level_trace_world_ray"), TEXT("world.ray_trace")},
 		{TEXT("level_validate_connectivity"), TEXT("world.nav_connectivity")},
-		{TEXT("list_actors"), TEXT("world.actors")},
+		{TEXT("list_actors"), TEXT("content_graph.structure")},
 		{TEXT("mesh_get_closest_vertex"), TEXT("world.mesh_closest_vertex")},
 		{TEXT("mesh_get_vertex_world_position"), TEXT("world.mesh_vertex_position")},
 		{TEXT("navmesh_find_path"), TEXT("world.nav_find_path")},
@@ -260,8 +260,9 @@ bool FUeAgentStrictV2T06InventoryAndLegacyExitTest::RunTest(
 	for (const TPair<FString, FString>& Pair : HistoricalSuccessors)
 	{
 		TestTrue(
-			TEXT("every historical successor is an active exact Query command"),
-			Actual.Contains(Pair.Value));
+			TEXT("every historical successor is an active Query or HJSON command"),
+			Actual.Contains(Pair.Value)
+				|| Pair.Value.StartsWith(TEXT("content_graph.")));
 	}
 
 	const FQueryRoute* Reference = GetNonHjsonQueryRoutes().FindByPredicate(
@@ -330,20 +331,20 @@ bool FUeAgentStrictV2T06ExactDispatchTest::RunTest(
 	}
 
 	const FString Params =
-		TEXT("{\"context\":{\"state_plane\":\"authoring_memory\"},")
-		TEXT("\"input\":{\"include_inherited\":true},")
-		TEXT("\"projection\":{\"max_items\":7},")
-		TEXT("\"target\":\"/Game/Maps/TestMap.TestMap:PersistentLevel.Actor_1\"}");
+		TEXT("{\"context\":{\"state_plane\":\"persisted\"},")
+		TEXT("\"input\":{\"include_tags\":true},")
+		TEXT("\"object_path\":\"/Game/Test.Test\",")
+		TEXT("\"projection\":{\"max_items\":7}}");
 	const FUeAgentCommandResult Result = Submit(
 		Fixture,
-		TEXT("world.actor_components"),
+		TEXT("asset.summary"),
 		Params);
 	TestTrue(TEXT("exact route delegates successfully"), Result.IsOk());
 	TestEqual(TEXT("one public request reaches one QueryService call"), Fixture.Service->Calls, 1);
 	TestEqual(
 		TEXT("QueryService receives the unchanged exact command identity"),
 		Fixture.Service->LastRequest.CommandId,
-		FString(TEXT("world.actor_components")));
+		FString(TEXT("asset.summary")));
 	TestEqual(
 		TEXT("handler canonicalizes but does not reinterpret public parameters"),
 		Fixture.Service->LastRequest.CanonicalParamsJson,

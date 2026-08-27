@@ -302,7 +302,11 @@ namespace UE::UAI::DomainAdapters::Blueprint::Node
 			const FString& Target,
 			FUeAgentBlueprintNodeMechanicsError& OutError)
 		{
-			UBlueprint* Blueprint = LoadObject<UBlueprint>(nullptr, *Target);
+			UBlueprint* Blueprint = FindObject<UBlueprint>(nullptr, *Target);
+			if (!Blueprint)
+			{
+				Blueprint = LoadObject<UBlueprint>(nullptr, *Target);
+			}
 			if (!Blueprint)
 			{
 				Fail(

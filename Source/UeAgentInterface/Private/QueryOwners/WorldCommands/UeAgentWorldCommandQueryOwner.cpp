@@ -28,7 +28,7 @@ namespace UE::UAI::QueryOwners::WorldCommands
 	const TArray<FString>& GetIndependentReadbackFlows()
 	{
 		static const TArray<FString> Flows = {
-			TEXT("world.actors"),
+			TEXT("content_graph.structure"),
 			TEXT("world.data_layers"),
 			TEXT("world.hlod_assignments"),
 			TEXT("world.partition"),

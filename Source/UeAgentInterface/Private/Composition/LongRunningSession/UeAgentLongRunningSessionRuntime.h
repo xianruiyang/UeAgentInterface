@@ -5,6 +5,7 @@
 #include "DomainAdapters/CaptureMediaLongJob/UeAgentCaptureMediaLongJobAdapter.h"
 #include "DomainAdapters/CompileBuildJob/UeAgentCompileBuildJobAdapter.h"
 #include "DomainAdapters/EditorSessionOperation/UeAgentEditorSessionOperationAdapter.h"
+#include "DomainAdapters/PieRuntimeDebug/UeAgentPieRuntimeScenarioAdapter.h"
 #include "Templates/SharedPointer.h"
 
 #define UAI_LONG_RUNNING_SESSION_RUNTIME_V1 1
@@ -44,7 +45,7 @@ namespace UE::UAI::Composition::LongRunningSession
 	 *
 	 * The runtime owns exactly one C7 owner. Domain factories create only
 	 * operation-scoped C11 ports and never own a second job/session registry.
-	 * The outer production composition installs this port behind twelve exact
+	 * The outer production composition installs this port behind thirteen exact
 	 * command handlers.
 	 */
 	class UEAGENTINTERFACE_API FUeAgentLongRunningSessionRuntime final
@@ -63,6 +64,9 @@ namespace UE::UAI::Composition::LongRunningSession
 			TSharedRef<DomainAdapters::CaptureMediaLongJob::
 				IUeAgentCaptureMediaLongJobPortFactory,
 				ESPMode::ThreadSafe> CaptureMediaFactory,
+			TSharedRef<DomainAdapters::PieRuntimeDebug::
+				IUeAgentPieRuntimeScenarioPortFactory,
+				ESPMode::ThreadSafe> PieRuntimeScenarioFactory,
 			TSharedPtr<FUeAgentLongRunningSessionRuntime>& OutRuntime,
 			FUeAgentLongRunningSessionRuntimeError& OutError);
 

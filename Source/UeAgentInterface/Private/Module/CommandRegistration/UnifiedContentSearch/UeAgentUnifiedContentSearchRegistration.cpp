@@ -55,7 +55,7 @@ namespace UE::UAI::Module::CommandRegistration::UnifiedContentSearch
 				Field(TEXT("cursor"), TEXT("object"), false, TEXT("Opaque next_cursor copied unchanged from the previous page.")),
 			};
 			Result.ResultFields = {
-				Field(TEXT("items"), TEXT("array"), true, TEXT("Existing content with exact identity, class, owner, state layer, revision and direct detail command.")),
+				Field(TEXT("items"), TEXT("array"), true, TEXT("Existing content with exact identity, class, owner, state layer, revision, detail command, detail target and minimal detail input.")),
 				Field(TEXT("providers"), TEXT("array"), true, TEXT("Per-provider revision, paging, completeness or typed failure.")),
 				Field(TEXT("completeness"), TEXT("string"), true, TEXT("complete, paged, partial or degraded without hiding provider failure.")),
 				{TEXT("next_cursor"), TEXT("object"), true, true, TEXT("Opaque continuation cursor, or null when no provider has another page.")},
@@ -76,7 +76,7 @@ namespace UE::UAI::Module::CommandRegistration::UnifiedContentSearch
 				TEXT("Use exact mode only with a complete known identity or name."),
 			};
 			Result.Purpose.ParameterGuidance = TEXT("Copy next_cursor unchanged. Use path_prefix/class_path/owner_identity to reduce work; text and fuzzy modes discover but never invent identities.");
-			Result.Purpose.ResultGuidance = TEXT("Copy item.identity unchanged into item.detail_command_id or another exact Query/HJSON target that accepts that UE object type; inspect every provider status before concluding absence.");
+			Result.Purpose.ResultGuidance = TEXT("Invoke item.detail_command_id with item.detail_target_identity as target and item.detail_input as input; do not substitute item.identity when the returned detail target differs. Inspect every provider status before concluding absence.");
 			Result.Purpose.FailureGuidance = TEXT("Stale or mismatched cursors fail exactly; independent provider failures remain visible as partial/degraded results.");
 			Result.Purpose.SideEffectGuidance = TEXT("Strictly read-only; it does not load assets, select Actors, save, compile, focus, open or alter Editor UI.");
 			Result.Purpose.MinimumExample = TEXT("client.query.content_search(query='Cube', content_kinds=['actor'], match_mode='text')");
@@ -84,8 +84,8 @@ namespace UE::UAI::Module::CommandRegistration::UnifiedContentSearch
 				TEXT("query.command.search"),
 				TEXT("query.command.detail"),
 				TEXT("asset.summary"),
-				TEXT("world.actor_components"),
-				TEXT("world.property"),
+				TEXT("content_graph.items"),
+				TEXT("content_graph.properties"),
 				TEXT("content_graph.import_workspace"),
 			};
 			Result.Purpose.Keywords = {

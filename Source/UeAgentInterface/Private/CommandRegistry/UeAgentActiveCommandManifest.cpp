@@ -1,6 +1,7 @@
 #include "CommandRegistry/UeAgentActiveCommandManifest.h"
 
 #include "CommandRegistry/UeAgentImmutableCommandRegistry.h"
+#include "Core/Contract/Command/UeAgentCommandLifecyclePolicy.h"
 #include "Core/Contract/UeAgentCommandJson.h"
 #include "Dom/JsonObject.h"
 #include "Dom/JsonValue.h"
@@ -67,10 +68,8 @@ namespace UE::UAI::CommandRegistry
 			Object->SetField(TEXT("max_wire_version"), IntegerValue(1));
 			Object->SetStringField(
 				TEXT("status"),
-				Contract.GetAvailability()
-					== EUeAgentCommandAvailability::Enabled
-					? TEXT("active")
-					: TEXT("deprecated"));
+				CommandLifecycle::LexToString(
+					Contract.GetAvailability()));
 			Object->SetStringField(
 				TEXT("binding_hash"),
 				Contract.GetContractHash());

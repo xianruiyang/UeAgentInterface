@@ -81,13 +81,14 @@ those facets through an old registry or a consumer-local fallback.
 owner, and required-operation filters; a per-provider limit; and an opaque
 cursor copied from the previous response. Results retain provider identity,
 revision, completeness, exact object identity, content kind, class, owner,
-state layer, supported operations, and the matching detail command.
+state layer, supported operations, and one executable detail request described
+by `detail_command_id`, `detail_target_identity`, and `detail_input`.
 
-An Asset result identity is directly accepted by `asset.summary` and by an
-applicable `content_graph.*` target. An Actor result identity is directly
-accepted by `world.actor_components`; a Component result identity is directly
-accepted by `world.property`. Clients must not trim, rebuild, alias, or convert
-these identities. Reusing a cursor with changed semantic filters fails with
+An Asset result uses `asset.summary`. Actor and Component results use the World
+HJSON owner: the returned target is the World asset and the returned input
+selects the exact Actor or Component identity for `content_graph.items` or
+`content_graph.properties`. Clients execute those fields as returned and must
+not trim, rebuild, alias, or convert identities. Reusing a cursor with changed semantic filters fails with
 `content_search_cursor_request_mismatch`; changing provider state invalidates it
 with `content_search_revision_stale`; selecting a kind with no provider fails
 with `content_search_kind_unsupported`.

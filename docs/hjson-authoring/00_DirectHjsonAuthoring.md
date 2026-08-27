@@ -84,6 +84,22 @@ provider_extension: {
 Component `name/class` 或 spawner 映射；显式提供的 `class_path/asset_path` 等丰富
 字段只作为一致性 assertion。
 
+一次原生 Action Menu action 可以在同一图中创建主节点和 UE 自带的伴生节点；例如
+组件绑定函数可能同时创建 CallFunction、对应 VariableGet 及其 `self` 连线。这仍是一个
+candidate 的一次执行：HJSON 只声明该 candidate，服务端返回本次新建的主节点并保留同
+次 action 生成的伴生节点与连线，调用方不得把伴生 getter 拆成第二条手工创建规则。伴
+生节点仍是结构读回可见的真实图节点，不存在隐藏 companion 注册表或第二状态源；后续
+修改使用读回 identity，或以一次 cohesive graph replace 管理完整图状态。
+
+Blueprint `pin_defaults` 也是 stable map。最小 key 使用 `pin:<PinName>`，服务端从 key
+补出 `pin_name`；值只需给出 `default_value`。不要把裸 Pin 名重复写成 map key 和字段：
+
+```hjson
+pin_defaults: {
+  "pin:InterpSpeed": { default_value: "3" }
+}
+```
+
 Material 使用自己的领域形状；Graph/Pin 上下文与候选分离：
 
 ```hjson
@@ -311,7 +327,7 @@ known struct 继续使用 canonical codec，generic/Blueprint struct 使用 `fie
 | --- | --- | --- | --- |
 | `actor_component` | 是 | exact `seed.component_class` | 还需 owner actor identity、component name 和 operation。 |
 | `umg.widget.candidates` loaded native Widget | 是（部分覆盖） | `candidate.name` 或 `candidate.id` | 还需 Widget stable key、operation、parent/slot context 和 index；只写 `supported: true`，完整 Designer Palette 与 UserWidget/asset/special template 未覆盖。 |
-| `blueprint.node.candidates` | 是 | `candidate.name` 或 `candidate.id` | 还需 Blueprint graph stable map key、node stable id、operation 与 placement；graph/pin context 在候选外层。 |
+| `blueprint.node.candidates` | 是 | `candidate.name` 或 `candidate.id` | 还需 Blueprint graph stable map key、node stable id、operation 与 placement；graph/pin context 在候选外层。Promotable operator 以 UE 原生字面 `operation_name` 作为可选 exact assertion（例如对象等号为 `EqualEqual`），不从本地化菜单名称推导或归一化，也不使用 spawner 的代表函数身份。 |
 | `blueprint.component.candidates` | 是 | `candidate.name` 或 `candidate.id` | 还需 Component stable map key、operation 与 parent；stable key 是实例名，candidate 只选择原生组件项。 |
 | `material.expression.candidates` | 是 | `candidate.name` 或 `candidate.id` | graph/pin context、stable element identity、连线、layout 和属性另写；服务端执行同一 Graph/Pin schema action。 |
 | `animation_rig_graph.candidates` RigVM Unit | 是 | `candidate.name` 或 `candidate.id` | 当前目标只接受 ControlRigBlueprint 默认图 blank context；`semantic_id`、二维 position 与可选 struct/method assertions 在 candidate 外。非 Unit action 只搜索。 |
@@ -328,6 +344,12 @@ known struct 继续使用 canonical codec，generic/Blueprint struct 使用 `fie
 | `niagara_graph_function` | 无 standalone projection | 无 | 需要 Script graph contract；当前 folder Script profile不覆盖 graph topology。 |
 
 判断可写时，以当前 CommandSpec、InputContract、领域 candidate contract 和 readback 验证为准。候选返回中的字段只在 owning domain 明确声明时可写入目标 HJSON。
+
+Blueprint graph 使用 `operation: replace` 时，如果一个 native candidate 的
+`candidate_context` 指向同一文档内重建的 source node，服务端按
+`candidate_context.node_guid` 依赖顺序创建全部节点，再统一应用 edges；map key
+的字典序不承担依赖。重建 source 应使用 `node_guid + pin_name`，因为旧
+`pin_guid` 不会随节点重建而保留。
 
 ## 写入示例
 

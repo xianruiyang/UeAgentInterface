@@ -6,6 +6,7 @@
 #define UAI_T35_ACTIVE_COMMAND_COMPOSITION_AVAILABLE 1
 #include "CommandEdge/UeAgentCommandProtocol.h"
 #include "CommandRegistry/UeAgentActiveCommandManifest.h"
+#include "Core/Contract/Command/UeAgentCommandLifecyclePolicy.h"
 #include "Core/Contract/UeAgentCommandJson.h"
 #include "Core/Contract/UeAgentCommandContract.h"
 #include "DomainAdapters/QueryCalibration/UeAgentQueryCalibrationSource.h"
@@ -395,6 +396,62 @@ bool FUeAgentStrictV2T35FinalManifestAuthorityTest::RunTest(
 	TestNotNull(
 		TEXT("calibration readback is in the final authority"),
 		Registry->FindExact(TEXT("query.calibration.read")));
+
+	const TArray<FString> DormantCommands = {
+		TEXT("world.actors"),
+		TEXT("world.actor_components"),
+		TEXT("world.property"),
+		TEXT("world.object_transform.read"),
+		TEXT("world.object_transform.update"),
+	};
+	const FUeAgentFrozenCommandContract* SearchContract =
+		Registry->FindExact(TEXT("query.command.search"));
+	if (!TestNotNull(TEXT("lifecycle matrix uses public command search"),
+			SearchContract))
+	{
+		return false;
+	}
+	for (const FString& CommandId : DormantCommands)
+	{
+		const FUeAgentFrozenCommandContract* Contract =
+			Registry->FindExact(CommandId);
+		if (!TestNotNull(
+				*FString::Printf(TEXT("%s remains registered"), *CommandId),
+				Contract))
+		{
+			continue;
+		}
+		TestEqual(
+			*FString::Printf(TEXT("%s has central dormant lifecycle"), *CommandId),
+			Contract->GetAvailability(),
+			EUeAgentCommandAvailability::Dormant);
+		const FString Intent = CommandId.Replace(TEXT("."), TEXT(" "));
+		const FUeAgentCommandResult ActiveSearch = Submit(
+			Dispatch.ToSharedRef(),
+			*SearchContract,
+			FString::Printf(
+				TEXT("{\"intent\":\"%s\",\"limit\":8}"), *Intent));
+		TestTrue(TEXT("ordinary lifecycle search succeeds"),
+			ActiveSearch.IsOk());
+		TestFalse(
+			*FString::Printf(TEXT("ordinary search hides %s"), *CommandId),
+			ActiveSearch.GetPayloadJson().Contains(CommandId));
+		const FUeAgentCommandResult CompatibilitySearch = Submit(
+			Dispatch.ToSharedRef(),
+			*SearchContract,
+			FString::Printf(
+				TEXT("{\"intent\":\"%s\",\"limit\":8,\"mode\":\"compatibility\"}"),
+				*Intent));
+		TestTrue(TEXT("compatibility lifecycle search succeeds"),
+			CompatibilitySearch.IsOk());
+		TestTrue(
+			*FString::Printf(TEXT("compatibility search exposes %s"), *CommandId),
+			CompatibilitySearch.GetPayloadJson().Contains(CommandId));
+		TestTrue(
+			TEXT("dormant candidate requires user confirmation"),
+			CompatibilitySearch.GetPayloadJson().Contains(
+				TEXT("\"requires_user_confirmation\":true")));
+	}
 
 	const FString ManifestPath = GetDefaultCommandManifestPath();
 	TestTrue(TEXT("the formal manifest path is available"), !ManifestPath.IsEmpty());

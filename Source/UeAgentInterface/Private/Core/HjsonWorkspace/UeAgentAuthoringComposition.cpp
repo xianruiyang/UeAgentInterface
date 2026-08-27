@@ -575,7 +575,26 @@ namespace UE::UAI::HjsonWorkspace
 		FString ItemSelectorKey(
 			const FCompositionEntryView& Entry)
 		{
-			const FString Asset = Selector(Entry, TEXT("asset_path"));
+			FString Scope = Selector(Entry, TEXT("asset_path"));
+			if (Scope.IsEmpty())
+			{
+				Scope = Selector(Entry, TEXT("world_path"));
+			}
+			const FString OwnerActorGuid =
+				Selector(Entry, TEXT("owner_actor_guid"));
+			const FString OwnerManagedId =
+				Selector(Entry, TEXT("owner_managed_id"));
+			const FString ComponentName =
+				Selector(Entry, TEXT("component_name"));
+			if (!ComponentName.IsEmpty()
+				&& (!OwnerActorGuid.IsEmpty() || !OwnerManagedId.IsEmpty()))
+			{
+				return Scope
+					+ (!OwnerActorGuid.IsEmpty()
+						? TEXT("|owner_actor_guid=") + OwnerActorGuid
+						: TEXT("|owner_managed_id=") + OwnerManagedId)
+					+ TEXT("|component_name=") + ComponentName;
+			}
 			for (const TCHAR* Name : {
 				TEXT("dynamic_input_guid"),
 				TEXT("input_name"),
@@ -594,12 +613,13 @@ namespace UE::UAI::HjsonWorkspace
 				TEXT("emitter_handle_id"),
 				TEXT("emitter_name"),
 				TEXT("actor_guid"),
+				TEXT("managed_id"),
 				TEXT("managed_actor_id")})
 			{
 				const FString Value = Selector(Entry, Name);
 				if (!Value.IsEmpty())
 				{
-					return Asset + TEXT("|") + Name
+					return Scope + TEXT("|") + Name
 						+ TEXT("=") + Value;
 				}
 			}
@@ -1030,10 +1050,41 @@ namespace UE::UAI::HjsonWorkspace
 			{
 				return Fallback;
 			}
-			const FString Key =
-				Selector(Entry, TEXT("asset_path"))
+			FString Scope = Selector(Entry, TEXT("asset_path"));
+			if (Scope.IsEmpty())
+			{
+				Scope = Selector(Entry, TEXT("world_path"));
+			}
+			const FString Key = Scope
 				+ TEXT("|") + SelectorName + TEXT("=")
 				+ SelectorValue;
+			if (const FString* Found = ItemUnits.Find(Key))
+			{
+				return *Found;
+			}
+			return Fallback;
+		}
+
+		FString FindItemOwnerByAliasedSelector(
+			const FCompositionEntryView& Entry,
+			const TMap<FString, FString>& ItemUnits,
+			const TCHAR* SourceSelectorName,
+			const TCHAR* OwnerSelectorName,
+			const FString& Fallback)
+		{
+			const FString SelectorValue =
+				Selector(Entry, SourceSelectorName);
+			if (SelectorValue.IsEmpty())
+			{
+				return Fallback;
+			}
+			FString Scope = Selector(Entry, TEXT("asset_path"));
+			if (Scope.IsEmpty())
+			{
+				Scope = Selector(Entry, TEXT("world_path"));
+			}
+			const FString Key = Scope + TEXT("|") + OwnerSelectorName
+				+ TEXT("=") + SelectorValue;
 			if (const FString* Found = ItemUnits.Find(Key))
 			{
 				return *Found;
@@ -2126,7 +2177,9 @@ namespace UE::UAI::HjsonWorkspace
 				Property.UnitId = StableId(
 					TEXT("property"),
 					Request.TargetKind + TEXT("|")
-						+ Entry.SemanticId + TEXT("|") + Path);
+						+ Entry.SemanticId + TEXT("|")
+						+ Entry.TargetIdentity.CanonicalKey + TEXT("|")
+						+ Path);
 				Property.UnitKind = ESemanticUnitKind::PropertySet;
 				Property.OwnerRef = OwnerId;
 				Property.SemanticTypeRef =
@@ -2255,6 +2308,7 @@ namespace UE::UAI::HjsonWorkspace
 							TEXT("collection"),
 							Request.TargetKind + TEXT("|")
 								+ Entry.SemanticId + TEXT("|")
+								+ Entry.TargetIdentity.CanonicalKey + TEXT("|")
 								+ Visit.Path);
 						FUnitDraft Collection;
 						Collection.UnitId = CollectionId;
@@ -2304,6 +2358,7 @@ namespace UE::UAI::HjsonWorkspace
 									TEXT("item"),
 									Request.TargetKind + TEXT("|")
 										+ Entry.SemanticId + TEXT("|")
+										+ Entry.TargetIdentity.CanonicalKey + TEXT("|")
 										+ ItemPath);
 								Item.UnitKind =
 									ESemanticUnitKind::ItemState;
@@ -2357,6 +2412,7 @@ namespace UE::UAI::HjsonWorkspace
 						bRelation ? TEXT("relation") : TEXT("item"),
 						Request.TargetKind + TEXT("|")
 							+ Entry.SemanticId + TEXT("|")
+							+ Entry.TargetIdentity.CanonicalKey + TEXT("|")
 							+ Visit.Path);
 					Unit.UnitKind = bRelation
 						? ESemanticUnitKind::RelationSet
@@ -2629,10 +2685,17 @@ namespace UE::UAI::HjsonWorkspace
 				else if (Entry.SemanticId.EndsWith(
 					TEXT(".component.target")))
 				{
-					Draft.OwnerRef = FindItemOwnerBySelector(
+					Draft.OwnerRef = FindItemOwnerByAliasedSelector(
 						Entry,
 						ItemUnits,
+						TEXT("owner_actor_guid"),
 						TEXT("actor_guid"),
+						Draft.OwnerRef);
+					Draft.OwnerRef = FindItemOwnerByAliasedSelector(
+						Entry,
+						ItemUnits,
+						TEXT("owner_managed_id"),
+						TEXT("managed_id"),
 						Draft.OwnerRef);
 				}
 			}
@@ -3361,6 +3424,14 @@ namespace UE::UAI::HjsonWorkspace
 		OutResult =
 			UeAgentExportWorkspaceWriter::FWorkspaceResult();
 		OutError.Reset();
+		FString ContractError;
+		if (!RegisterGraphTreeTargetCompositionContracts(ContractError)
+			|| !RegisterOtherTargetCompositionContracts(ContractError))
+		{
+			OutError = TEXT("target_composition_contract_registration_failed:")
+				+ ContractError;
+			return false;
+		}
 		const TMap<EUeAgentResourceDimension, int64> Limits{
 			{EUeAgentResourceDimension::InputBytes, 1ll << 40},
 			{EUeAgentResourceDimension::OutputBytes, 1ll << 40},

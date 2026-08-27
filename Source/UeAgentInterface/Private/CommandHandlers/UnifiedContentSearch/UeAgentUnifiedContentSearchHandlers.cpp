@@ -194,6 +194,9 @@ namespace UE::UAI::CommandHandlers::UnifiedContentSearch
 			Result->SetStringField(TEXT("revision"), Item.Revision);
 			Result->SetStringField(
 				TEXT("detail_command_id"), Item.DetailCommandId);
+			Result->SetStringField(
+				TEXT("detail_target_identity"), Item.DetailTargetIdentity);
+			Result->SetObjectField(TEXT("detail_input"), Item.DetailInput);
 			Result->SetStringField(TEXT("match_reason"), Item.MatchReason);
 			Result->SetArrayField(
 				TEXT("supported_operations"),

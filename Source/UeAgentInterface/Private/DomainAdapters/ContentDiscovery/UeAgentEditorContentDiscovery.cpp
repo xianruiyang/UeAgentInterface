@@ -3,6 +3,8 @@
 #include "AssetRegistry/AssetRegistryModule.h"
 #include "AssetRegistry/IAssetRegistry.h"
 #include "Components/ActorComponent.h"
+#include "Dom/JsonObject.h"
+#include "Dom/JsonValue.h"
 #include "Editor.h"
 #include "Engine/World.h"
 #include "EngineUtils.h"
@@ -218,6 +220,8 @@ namespace UE::UAI::DomainAdapters::ContentDiscovery
 					Item.StateLayer = TEXT("asset_registry_current");
 					Item.Revision = Revision;
 					Item.DetailCommandId = TEXT("asset.summary");
+					Item.DetailTargetIdentity = Item.Identity;
+					Item.DetailInput = MakeShared<FJsonObject>();
 					Item.SupportedOperations = {TEXT("query")};
 					Item.SearchTerms = {
 						Asset.PackageName.ToString(),
@@ -305,7 +309,12 @@ namespace UE::UAI::DomainAdapters::ContentDiscovery
 					ActorItem.ClassPath = Actor->GetClass()->GetPathName();
 					ActorItem.OwnerIdentity = World->GetPathName();
 					ActorItem.StateLayer = TEXT("editor_world_current");
-					ActorItem.DetailCommandId = TEXT("world.actor_components");
+					ActorItem.DetailCommandId = TEXT("content_graph.items");
+					ActorItem.DetailTargetIdentity = World->GetPathName();
+					ActorItem.DetailInput = MakeShared<FJsonObject>();
+					ActorItem.DetailInput->SetArrayField(
+						TEXT("item_ids"),
+						{MakeShared<FJsonValueString>(ActorItem.Identity)});
 					ActorItem.SupportedOperations = {TEXT("query")};
 					ActorItem.SearchTerms = {
 						Actor->GetName(),
@@ -330,7 +339,12 @@ namespace UE::UAI::DomainAdapters::ContentDiscovery
 							Component->GetClass()->GetPathName();
 						ComponentItem.OwnerIdentity = Actor->GetPathName();
 						ComponentItem.StateLayer = TEXT("editor_world_current");
-						ComponentItem.DetailCommandId = TEXT("world.property");
+						ComponentItem.DetailCommandId = TEXT("content_graph.properties");
+						ComponentItem.DetailTargetIdentity = World->GetPathName();
+						ComponentItem.DetailInput = MakeShared<FJsonObject>();
+						ComponentItem.DetailInput->SetArrayField(
+							TEXT("owner_ids"),
+							{MakeShared<FJsonValueString>(ComponentItem.Identity)});
 						ComponentItem.SupportedOperations = {TEXT("query")};
 						ComponentItem.SearchTerms = {
 							Actor->GetActorLabel(),

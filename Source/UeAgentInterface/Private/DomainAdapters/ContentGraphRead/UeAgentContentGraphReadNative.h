@@ -106,6 +106,8 @@ namespace UE::UAI::DomainAdapters::ContentGraphRead
 		UObject* Owner = nullptr;
 		FString DomainId;
 		FString Revision;
+		TOptional<UE::UAI::StateSemantic::FUeAgentStateRevision>
+			CanonicalRevision;
 		TArray<FUeAgentContentGraphContainer> Containers;
 		TArray<FUeAgentContentGraphItem> Items;
 		TArray<FUeAgentContentGraphRelation> Relations;

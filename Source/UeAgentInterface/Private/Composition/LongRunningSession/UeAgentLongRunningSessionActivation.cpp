@@ -31,6 +31,10 @@ namespace UE::UAI::Composition::LongRunningSession
 				{TEXT("editor.session"), TEXT("editor"), TEXT("session"),
 					TEXT("uai.long_running.editor.session/v1"),
 					TEXT("long-running-session.editor.session.v1"), TEXT("start")},
+				{TEXT("runtime.scenario.execute"), TEXT("runtime"),
+					TEXT("scenario_execute"),
+					TEXT("uai.long_running.runtime.scenario/v1"),
+					TEXT("long-running-session.runtime.scenario.v1"), TEXT("start")},
 				{TEXT("capture.image.execute"), TEXT("capture"), TEXT("image_execute"),
 					TEXT("uai.long_running.capture.image/v1"),
 					TEXT("long-running-session.capture.image.v1"), TEXT("start")},
@@ -134,6 +138,98 @@ namespace UE::UAI::Composition::LongRunningSession
 					"\"required\":[\"schema\",\"launch_id\",\"exit_attempt_id\",\"nonce\"],"
 					"\"type\":\"object\"}},\"required\":[\"dirty_resolution\","
 					"\"external_witness\"],\"type\":\"object\"}");
+			}
+			if (FString(Spec.CommandId) == TEXT("runtime.scenario.execute"))
+			{
+				return TEXT(
+					"{\"additionalProperties\":false,\"properties\":{"
+					"\"parameters\":{\"additionalProperties\":false,\"properties\":{"
+					"\"expected_pause_epoch\":{\"minimum\":1,\"type\":\"integer\"},"
+					"\"expected_workspace_revision\":{\"minimum\":1,\"type\":\"integer\"},"
+					"\"limits\":{\"additionalProperties\":false,\"properties\":{"
+					"\"frame_count\":{\"maximum\":3600,\"minimum\":1,\"type\":\"integer\"},"
+					"\"game_seconds\":{\"exclusiveMinimum\":0,\"maximum\":60,\"type\":\"number\"},"
+					"\"wall_seconds\":{\"exclusiveMinimum\":0,\"maximum\":60,\"type\":\"number\"}},"
+					"\"required\":[\"wall_seconds\",\"game_seconds\",\"frame_count\"],\"type\":\"object\"},"
+					"\"observation_fields\":{\"items\":{\"additionalProperties\":false,"
+					"\"properties\":{\"object_ref\":{\"minLength\":1,\"type\":\"string\"},"
+					"\"property\":{\"enum\":[\"actor.transform\",\"actor.location\","
+					"\"actor.rotation\",\"actor.scale\",\"actor.hidden\","
+					"\"component.active\",\"component.visible\"],\"type\":\"string\"}},"
+					"\"required\":[\"object_ref\",\"property\"],\"type\":\"object\"},"
+					"\"maxItems\":64,\"type\":\"array\"},"
+					"\"steps\":{\"items\":{\"oneOf\":["
+					"{\"additionalProperties\":false,\"properties\":{"
+					"\"at_seconds\":{\"minimum\":0,\"type\":\"number\"},"
+					"\"type\":{\"const\":\"wait\",\"type\":\"string\"}},"
+					"\"required\":[\"type\",\"at_seconds\"],\"type\":\"object\"},"
+					"{\"additionalProperties\":false,\"properties\":{"
+					"\"amount\":{\"type\":\"number\"},"
+					"\"at_seconds\":{\"minimum\":0,\"type\":\"number\"},"
+					"\"event\":{\"enum\":[\"pressed\",\"released\",\"repeat\",\"axis\"],\"type\":\"string\"},"
+					"\"key\":{\"minLength\":1,\"type\":\"string\"},"
+					"\"type\":{\"const\":\"input_key\",\"type\":\"string\"}},"
+					"\"required\":[\"type\",\"at_seconds\",\"key\",\"event\"],\"type\":\"object\"},"
+					"{\"additionalProperties\":false,\"properties\":{"
+					"\"action_ref\":{\"minLength\":1,\"type\":\"string\"},"
+					"\"at_seconds\":{\"minimum\":0,\"type\":\"number\"},"
+					"\"type\":{\"const\":\"input_action\",\"type\":\"string\"},"
+					"\"value\":{\"oneOf\":[{\"type\":\"boolean\"},{\"type\":\"number\"},"
+					"{\"items\":{\"type\":\"number\"},\"maxItems\":2,\"minItems\":2,\"type\":\"array\"},"
+					"{\"items\":{\"type\":\"number\"},\"maxItems\":3,\"minItems\":3,\"type\":\"array\"}]}},"
+					"\"required\":[\"type\",\"at_seconds\",\"action_ref\",\"value\"],\"type\":\"object\"},"
+					"{\"additionalProperties\":false,\"properties\":{"
+					"\"actor_ref\":{\"minLength\":1,\"type\":\"string\"},"
+					"\"at_seconds\":{\"minimum\":0,\"type\":\"number\"},"
+					"\"transform\":{\"additionalProperties\":false,\"properties\":{"
+					"\"dimension\":{\"const\":3,\"type\":\"integer\"},"
+					"\"frame\":{\"const\":\"ue_world\",\"type\":\"string\"},"
+					"\"location\":{\"items\":{\"type\":\"number\"},\"maxItems\":3,\"minItems\":3,\"type\":\"array\"},"
+					"\"rotation\":{\"items\":{\"type\":\"number\"},\"maxItems\":3,\"minItems\":3,\"type\":\"array\"},"
+					"\"rotation_format\":{\"const\":\"pitch_yaw_roll_degrees\",\"type\":\"string\"},"
+					"\"scale\":{\"items\":{\"type\":\"number\"},\"maxItems\":3,\"minItems\":3,\"type\":\"array\"},"
+					"\"unit\":{\"const\":\"centimeter\",\"type\":\"string\"}},"
+					"\"required\":[\"frame\",\"dimension\",\"unit\",\"rotation_format\"],\"type\":\"object\"},"
+					"\"type\":{\"const\":\"actor_transform\",\"type\":\"string\"}},"
+					"\"required\":[\"type\",\"at_seconds\",\"actor_ref\",\"transform\"],\"type\":\"object\"},"
+					"{\"additionalProperties\":false,\"properties\":{"
+					"\"at_seconds\":{\"minimum\":0,\"type\":\"number\"},"
+					"\"format\":{\"const\":\"png\",\"type\":\"string\"},"
+					"\"source\":{\"const\":\"pie_output_surface\",\"type\":\"string\"},"
+					"\"type\":{\"const\":\"capture\",\"type\":\"string\"}},"
+					"\"required\":[\"type\",\"at_seconds\",\"source\",\"format\"],\"type\":\"object\"},"
+					"{\"additionalProperties\":false,\"properties\":{"
+					"\"at_seconds\":{\"minimum\":0,\"type\":\"number\"},"
+					"\"format\":{\"const\":\"png\",\"type\":\"string\"},"
+					"\"source\":{\"const\":\"pie_player_camera\",\"type\":\"string\"},"
+					"\"type\":{\"const\":\"capture\",\"type\":\"string\"}},"
+					"\"required\":[\"type\",\"at_seconds\",\"source\",\"format\"],\"type\":\"object\"},"
+					"{\"additionalProperties\":false,\"oneOf\":["
+					"{\"required\":[\"camera_ref\"]},{\"not\":{\"required\":[\"camera_ref\"]},"
+					"\"properties\":{\"view_transform\":{\"required\":[\"frame\",\"dimension\",\"unit\","
+					"\"rotation_format\",\"location\",\"rotation\"]}},"
+					"\"required\":[\"view_transform\",\"fov_degrees\"]}],\"properties\":{"
+					"\"at_seconds\":{\"minimum\":0,\"type\":\"number\"},"
+					"\"camera_ref\":{\"minLength\":1,\"type\":\"string\"},"
+					"\"format\":{\"const\":\"png\",\"type\":\"string\"},"
+					"\"fov_degrees\":{\"maximum\":179,\"minimum\":1,\"type\":\"number\"},"
+					"\"source\":{\"const\":\"scene_camera\",\"type\":\"string\"},"
+					"\"type\":{\"const\":\"capture\",\"type\":\"string\"},"
+					"\"view_transform\":{\"additionalProperties\":false,\"anyOf\":["
+					"{\"required\":[\"location\"]},{\"required\":[\"rotation\"]}],\"properties\":{"
+					"\"dimension\":{\"const\":3,\"type\":\"integer\"},"
+					"\"frame\":{\"const\":\"ue_world\",\"type\":\"string\"},"
+					"\"location\":{\"items\":{\"type\":\"number\"},\"maxItems\":3,\"minItems\":3,\"type\":\"array\"},"
+					"\"rotation\":{\"items\":{\"type\":\"number\"},\"maxItems\":3,\"minItems\":3,\"type\":\"array\"},"
+					"\"rotation_format\":{\"const\":\"pitch_yaw_roll_degrees\",\"type\":\"string\"},"
+					"\"unit\":{\"const\":\"centimeter\",\"type\":\"string\"}},"
+					"\"required\":[\"frame\",\"dimension\",\"unit\",\"rotation_format\"],\"type\":\"object\"}},"
+					"\"required\":[\"type\",\"at_seconds\",\"source\",\"format\"],\"type\":\"object\"}]},"
+					"\"maxItems\":128,\"type\":\"array\"}},"
+					"\"required\":[\"expected_pause_epoch\",\"expected_workspace_revision\",\"limits\",\"steps\"],\"type\":\"object\"},"
+					"\"policy_id\":{\"const\":\"policy:runtime-scenario:bounded/v1\"},"
+					"\"subject_ref\":{\"minLength\":1,\"type\":\"string\"}},"
+					"\"required\":[\"subject_ref\",\"policy_id\",\"parameters\"],\"type\":\"object\"}");
 			}
 			return TEXT(
 				"{\"additionalProperties\":false,\"properties\":{"
@@ -291,7 +387,8 @@ namespace UE::UAI::Composition::LongRunningSession
 				Add(TEXT("policy_id"), EUeAgentCommandWireType::String);
 				Add(TEXT("parameters"), EUeAgentCommandWireType::Object);
 			}
-			else if (CommandId.StartsWith(TEXT("capture.")))
+			else if (CommandId.StartsWith(TEXT("capture."))
+				|| CommandId == TEXT("runtime.scenario.execute"))
 			{
 				Add(TEXT("subject_ref"), EUeAgentCommandWireType::String);
 				Add(TEXT("policy_id"), EUeAgentCommandWireType::String);

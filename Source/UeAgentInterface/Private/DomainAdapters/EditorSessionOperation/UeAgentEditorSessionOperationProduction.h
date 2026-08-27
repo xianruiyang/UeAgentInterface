@@ -3,6 +3,8 @@
 #include "CoreMinimal.h"
 #include "DomainAdapters/EditorSessionOperation/UeAgentEditorSessionOperationAdapter.h"
 
+class FJsonObject;
+
 #define UAI_EDITOR_SESSION_OPERATION_PRODUCTION_V1 1
 
 namespace UE::UAI::DomainAdapters::EditorSessionOperation
@@ -135,12 +137,14 @@ namespace UE::UAI::DomainAdapters::EditorSessionOperation
 			ExecutionMutation::ELongRunningWorkState InState,
 			FString InPhase,
 			FString InErrorCode = FString(),
-			FString InSessionRef = FString());
+			FString InSessionRef = FString(),
+			TSharedPtr<FJsonObject> InDetails = nullptr);
 
 		ExecutionMutation::ELongRunningWorkState GetState() const;
 		const FString& GetPhase() const;
 		const FString& GetErrorCode() const;
 		const FString& GetSessionRef() const;
+		const TSharedPtr<FJsonObject>& GetDetails() const;
 		bool IsValid() const;
 
 	private:
@@ -149,6 +153,7 @@ namespace UE::UAI::DomainAdapters::EditorSessionOperation
 		FString Phase;
 		FString ErrorCode;
 		FString SessionRef;
+		TSharedPtr<FJsonObject> Details;
 	};
 
 	class UEAGENTINTERFACE_API IUeAgentEditorSessionNativeSession

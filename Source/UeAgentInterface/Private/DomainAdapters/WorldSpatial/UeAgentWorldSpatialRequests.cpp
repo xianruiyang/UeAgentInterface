@@ -744,7 +744,8 @@ namespace UE::UAI::DomainAdapters::WorldSpatial
 							if (!StringArray(Root, TEXT("subject_refs"), P.SubjectRefs, Error)
 								|| !RequiredObject(Root, TEXT("alignment"), Alignment, Error)
 								|| !ParseAlignment(Alignment, P.Alignment, Error)
-								|| !ObjectArray(Root, TEXT("expected_revisions"), P.ExpectedRevisions, ParseExpectedRevisionEntry, Error))
+								|| (Root->HasField(TEXT("expected_revisions"))
+									&& !ObjectArray(Root, TEXT("expected_revisions"), P.ExpectedRevisions, ParseExpectedRevisionEntry, Error)))
 							{
 								return false;
 							}
@@ -768,7 +769,8 @@ namespace UE::UAI::DomainAdapters::WorldSpatial
 								&& ParseSurfaceQuery(Surface, P.SurfaceQuery, Error)
 								&& RequiredObject(Root, TEXT("placement_policy"), Policy, Error)
 								&& ParsePlacementPolicy(Policy, P.PlacementPolicy, Error)
-								&& ObjectArray(Root, TEXT("expected_revisions"), P.ExpectedRevisions, ParseExpectedRevisionEntry, Error);
+								&& (!Root->HasField(TEXT("expected_revisions"))
+									|| ObjectArray(Root, TEXT("expected_revisions"), P.ExpectedRevisions, ParseExpectedRevisionEntry, Error));
 						}, Error);
 					}},
 				{TEXT("mesh.transform.bake"), TEXT("world_spatial.object_transform.bake_mesh.request.v1"), TEXT("object_transform"), TEXT("mesh_transform_bake"), true,

@@ -113,21 +113,42 @@ bool FUeAgentActiveFrameworkResidualZeroTest::RunTest(
 	TestNotNull(
 		TEXT("command discovery detail is active"),
 		Registry->FindExact(TEXT("query.command.detail")));
-
-	const bool bUpdateManifest =
-		FPlatformMisc::GetEnvironmentVariable(
-			TEXT("UAI_UPDATE_COMMAND_MANIFEST")) == TEXT("1");
-	if (bUpdateManifest)
+	const FUeAgentFrozenCommandContract* RuntimeScenario =
+		Registry->FindExact(TEXT("runtime.scenario.execute"));
+	TestNotNull(
+		TEXT("bounded PIE runtime scenario is active"),
+		RuntimeScenario);
+	if (RuntimeScenario)
 	{
-		TestTrue(
-			TEXT("the explicit development update path writes the active registry projection"),
-			FUeAgentActiveCommandManifest::TryWrite(
-				Registry.ToSharedRef(),
-				GetUaiCommandManifestPluginVersion(),
-				GetUaiCommandManifestBuildId(),
-				GetDefaultCommandManifestPath(),
-				Error));
+		TestEqual(
+			TEXT("runtime scenario has one public owner"),
+			RuntimeScenario->GetPublicOwner(),
+			FString(TEXT("pie-runtime-debug-command-owner")));
+		TestEqual(
+			TEXT("runtime scenario keeps the canonical Python namespace"),
+			RuntimeScenario->GetPythonNamespace(),
+			FString(TEXT("runtime")));
+		TestEqual(
+			TEXT("runtime scenario keeps the canonical Python function"),
+			RuntimeScenario->GetPythonFunction(),
+			FString(TEXT("scenario_execute")));
+		TestEqual(
+			TEXT("runtime scenario exposes one descriptor-backed variant"),
+			RuntimeScenario->GetVariants().Num(),
+			1);
+		if (RuntimeScenario->GetVariants().Num() == 1)
+		{
+			TestEqual(
+				TEXT("runtime scenario variant identity is exact"),
+				RuntimeScenario->GetVariants()[0].VariantId,
+				FString(TEXT("policy:runtime-scenario:bounded/v1")));
+			TestFalse(
+				TEXT("runtime scenario variant publishes the activation request schema"),
+				RuntimeScenario->GetVariants()[0]
+					.RequestSchemaJson.IsEmpty());
+		}
 	}
+
 	Error.Reset();
 	TestTrue(
 		TEXT("committed manifest has no generated second truth"),

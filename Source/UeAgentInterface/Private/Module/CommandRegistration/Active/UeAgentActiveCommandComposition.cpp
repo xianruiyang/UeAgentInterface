@@ -1,5 +1,6 @@
 #include "Module/CommandRegistration/Active/UeAgentActiveCommandComposition.h"
 
+#include "Core/Contract/Command/UeAgentCommandLifecyclePolicy.h"
 #include "Core/DomainCapability/UeAgentDomainCapability.h"
 
 namespace UE::UAI::Module::CommandRegistration::Active
@@ -126,6 +127,10 @@ namespace UE::UAI::Module::CommandRegistration::Active
 			Declarations)
 		{
 			AssignCanonicalPythonBinding(Declaration);
+		}
+		if (!CommandLifecycle::TryApply(Declarations, OutError))
+		{
+			return false;
 		}
 
 		TSharedPtr<const FUeAgentImmutableCommandRegistry> Registry;

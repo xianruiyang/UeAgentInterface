@@ -62,7 +62,7 @@ namespace UE::UAI::QueryOwners::SpatialContent
 	const TArray<FString>& GetReadbackFlows()
 	{
 		static const TArray<FString> Values = {
-			TEXT("world.object_transform.read"),
+			TEXT("content_graph.items"),
 		};
 		return Values;
 	}

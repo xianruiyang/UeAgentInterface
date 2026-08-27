@@ -8,9 +8,11 @@
 #include "Commands/PaletteSearch/UeAgentPaletteSearchTypes.h"
 #include "Core/Contract/UeAgentCommandJson.h"
 #include "Core/HjsonWorkspace/DomainAuthoring/UeAgentDomainHjsonAuthoringKit.h"
+#include "DomainAdapters/ModelingGeometryEffect/UeAgentModelingGeometryEffectCarrierRevision.h"
 #include "Dom/JsonObject.h"
 #include "Dom/JsonValue.h"
 #include "Domains/Level/Authoring/UeAgentLevelAuthoringApplyProvider.h"
+#include "Domains/Level/Authoring/UeAgentLevelAuthoringExport.h"
 #include "Domains/Level/Authoring/UeAgentLevelAuthoringRegistration.h"
 #include "Domains/Level/Authoring/UeAgentLevelAuthoringSpatial.h"
 #include "Domains/Level/Authoring/UeAgentLevelAuthoringState.h"
@@ -20,7 +22,6 @@
 #include "Factories/WorldFactory.h"
 #include "FileHelpers.h"
 #include "GameFramework/Actor.h"
-#include "Internationalization/Regex.h"
 #include "Misc/FileHelper.h"
 #include "Misc/PackageName.h"
 #include "Module/CommandRegistration/Active/UeAgentActiveCommandComposition.h"
@@ -30,6 +31,7 @@
 #include "Utilities/AuthoringWorkspaceApply/UeAgentAuthoringWorkspaceLoader.h"
 #include "Utilities/UeAgentSpaceContract.h"
 #include "WorldPartition/DataLayer/DataLayerInstance.h"
+#include "WorldPartition/DataLayer/WorldDataLayers.h"
 #include "WorldPartition/WorldPartition.h"
 #include "WorldPartition/WorldPartitionActorDescInstance.h"
 #include "WorldPartition/WorldPartitionHelpers.h"
@@ -48,6 +50,7 @@ namespace UE::UAI::DomainAdapters::WorldSpatial
 	namespace
 	{
 		const FString SchemaId = TEXT("uai.world.edit/1");
+		const FString ProviderId = TEXT("level-world-domain-provider");
 
 		class FNeverCancelled final : public Contract::IUeAgentCancellationSignal
 		{
@@ -1125,74 +1128,20 @@ namespace UE::UAI::DomainAdapters::WorldSpatial
 			FWorkspaceError& OutError)
 		{
 			OutRefs.Reset();
-			TSharedRef<FJsonObject> Input = MakeShared<FJsonObject>();
-			Input->SetStringField(TEXT("property_path"),
-				TEXT("DataLayerInstances"));
-			TSharedRef<FJsonObject> Params = MakeShared<FJsonObject>();
-			Params->SetStringField(TEXT("target"),
-				World.GetPathName() + TEXT(":PersistentLevel.WorldDataLayers"));
-			Params->SetObjectField(TEXT("input"), Input);
-			TOptional<FUeAgentCommandRequest> Request;
-			TSharedPtr<const CommandEdge::FUeAgentExactCommandDispatch> Dispatch;
-			if (!ComposeRequest(TEXT("world.property"), Params,
-					Request, Dispatch, OutError))
-				return false;
-			const FUeAgentCommandResult Result = Dispatch->Submit(
-				Request.GetValue(),
-				Contract::FUeAgentCallerContext(TEXT("level-world-domain-query"),
-					{TEXT("uai:query")}, Request->GetCorrelationId()),
-				MakeShared<FNeverCancelled>());
-			if (!Result.IsOk())
+			AWorldDataLayers* WorldDataLayers = World.GetWorldDataLayers();
+			if (!WorldDataLayers)
 			{
-				return Fail(OutError,
-					TEXT("level_world_domain_data_layer_reference_read_failed"),
-					Result.GetErrorJson());
+				return true;
 			}
-			TSharedPtr<FJsonObject> Payload;
-			FString JsonError;
-			if (!Json::TryParseObject(Result.GetPayloadJson(), Payload, JsonError)
-				|| !Payload.IsValid())
-			{
-				return Fail(OutError,
-					TEXT("level_world_domain_data_layer_reference_read_invalid"),
-					JsonError);
-			}
-			const TSharedPtr<FJsonObject>* QueryResult = nullptr;
-			const TSharedPtr<FJsonObject>* Projection = nullptr;
-			const TSharedPtr<FJsonObject>* ProjectionPayload = nullptr;
-			const TSharedPtr<FJsonObject>* Snapshot = nullptr;
-			const TArray<TSharedPtr<FJsonValue>>* Entries = nullptr;
-			if (!Payload->TryGetObjectField(TEXT("query_result"), QueryResult)
-				|| !QueryResult || !QueryResult->IsValid()
-				|| !(*QueryResult)->TryGetObjectField(TEXT("projection"), Projection)
-				|| !Projection || !Projection->IsValid()
-				|| !(*Projection)->TryGetObjectField(TEXT("payload"),
-					ProjectionPayload)
-				|| !ProjectionPayload || !ProjectionPayload->IsValid()
-				|| !(*ProjectionPayload)->TryGetObjectField(TEXT("snapshot"), Snapshot)
-				|| !Snapshot || !Snapshot->IsValid()
-				|| !(*Snapshot)->TryGetArrayField(TEXT("entries"), Entries)
-				|| !Entries || Entries->IsEmpty())
-			{
-				return Fail(OutError,
-					TEXT("level_world_domain_data_layer_reference_snapshot_missing"));
-			}
-			const TSharedPtr<FJsonObject> Entry = (*Entries)[0]->AsObject();
-			const TSharedPtr<FJsonObject>* Value = nullptr;
-			FString Text;
-			if (!Entry.IsValid()
-				|| !Entry->TryGetObjectField(TEXT("value"), Value)
-				|| !Value || !Value->IsValid()
-				|| !(*Value)->TryGetStringField(TEXT("text"), Text))
-			{
-				return Fail(OutError,
-					TEXT("level_world_domain_data_layer_reference_value_missing"));
-			}
-			FRegexMatcher Matcher(FRegexPattern(TEXT("'([^']+)'")), Text);
-			while (Matcher.FindNext())
-			{
-				OutRefs.Add(Matcher.GetCaptureGroup(1));
-			}
+			WorldDataLayers->ForEachDataLayerInstance(
+				[&OutRefs](UDataLayerInstance* Instance)
+				{
+					if (IsValid(Instance))
+					{
+						OutRefs.Add(Instance->GetPathName());
+					}
+					return true;
+				});
 			return true;
 		}
 
@@ -1371,10 +1320,201 @@ namespace UE::UAI::DomainAdapters::WorldSpatial
 				OutLoadResult);
 		}
 
+		bool ReadInputStringSet(
+			const TSharedPtr<FJsonObject>& Params,
+			const TCHAR* Field,
+			TSet<FString>& OutValues,
+			FWorkspaceError& OutError)
+		{
+			OutValues.Reset();
+			const TSharedPtr<FJsonObject>* Input = nullptr;
+			if (!Params.IsValid()
+				|| !Params->TryGetObjectField(TEXT("input"), Input)
+				|| !Input || !Input->IsValid()
+				|| !(*Input)->HasField(Field))
+			{
+				return true;
+			}
+			const TArray<TSharedPtr<FJsonValue>>* Values = nullptr;
+			if (!(*Input)->TryGetArrayField(Field, Values) || !Values)
+			{
+				return Fail(
+					OutError,
+					TEXT("level_world_domain_read_filter_invalid"),
+					Field);
+			}
+			if (Values->Num() > 64)
+			{
+				return Fail(
+					OutError,
+					TEXT("level_world_domain_read_filter_limit_exceeded"),
+					Field);
+			}
+			for (const TSharedPtr<FJsonValue>& Value : *Values)
+			{
+				FString Text;
+				if (!Value.IsValid()
+					|| !Value->TryGetString(Text)
+					|| Text.TrimStartAndEnd().IsEmpty())
+				{
+					return Fail(
+						OutError,
+						TEXT("level_world_domain_read_filter_invalid"),
+						Field);
+				}
+				OutValues.Add(MoveTemp(Text));
+			}
+			return true;
+		}
+
+		bool CaptureEditableProperties(
+			UWorld& World,
+			const TSharedPtr<FJsonObject>& Params,
+			TArray<TSharedPtr<FJsonValue>>& OutProperties,
+			FWorkspaceError& OutError)
+		{
+			OutProperties.Reset();
+			TSet<FString> OwnerIds;
+			TSet<FString> FieldIds;
+			if (!ReadInputStringSet(
+					Params, TEXT("owner_ids"), OwnerIds, OutError)
+				|| !ReadInputStringSet(
+					Params, TEXT("field_ids"), FieldIds, OutError))
+			{
+				return false;
+			}
+			if (OwnerIds.IsEmpty())
+			{
+				return Fail(
+					OutError,
+					TEXT("level_world_domain_property_owner_required"));
+			}
+			if (!EnsureAuthoringRegistered(OutError))
+			{
+				return false;
+			}
+
+			TMap<FString, UObject*> Objects;
+			for (TActorIterator<AActor> It(&World); It; ++It)
+			{
+				AActor* Actor = *It;
+				if (!IsValid(Actor))
+				{
+					continue;
+				}
+				Objects.Add(Actor->GetPathName(), Actor);
+				TArray<UActorComponent*> Components;
+				Actor->GetComponents(Components);
+				for (UActorComponent* Component : Components)
+				{
+					if (IsValid(Component))
+					{
+						Objects.Add(Component->GetPathName(), Component);
+					}
+				}
+			}
+
+			TArray<FString> SortedOwners = OwnerIds.Array();
+			SortedOwners.Sort();
+			for (const FString& OwnerId : SortedOwners)
+			{
+				UObject* const* Found = Objects.Find(OwnerId);
+				if (!Found || !IsValid(*Found))
+				{
+					return Fail(
+						OutError,
+						TEXT("level_world_domain_property_owner_unresolved"),
+						OwnerId);
+				}
+				TArray<UeAgentAuthoringState::FReadRequest> Requests;
+				FString ReadError;
+				if (AActor* Actor = Cast<AActor>(*Found))
+				{
+					if (!UeAgentLevelAuthoring::BuildActorExportReadRequests(
+							*Actor, Requests, ReadError))
+					{
+						return Fail(
+							OutError,
+							TEXT("level_world_domain_actor_property_capture_failed"),
+							OwnerId,
+							ReadError);
+					}
+				}
+				else if (UActorComponent* Component =
+					Cast<UActorComponent>(*Found))
+				{
+					if (!UeAgentLevelAuthoring::BuildComponentExportReadRequests(
+							*Component, Requests, ReadError))
+					{
+						return Fail(
+							OutError,
+							TEXT("level_world_domain_component_property_capture_failed"),
+							OwnerId,
+							ReadError);
+					}
+				}
+				else
+				{
+					return Fail(
+						OutError,
+						TEXT("level_world_domain_property_owner_type_unsupported"),
+						OwnerId);
+				}
+
+				UeAgentAuthoringState::FCaptureResult Capture;
+				if (!UeAgentAuthoringState::CaptureSnapshot(Requests, Capture))
+				{
+					return Fail(
+						OutError,
+						Capture.ErrorCode.IsEmpty()
+							? FString(TEXT("level_world_domain_property_capture_failed"))
+							: Capture.ErrorCode,
+						OwnerId,
+						Capture.ErrorDetail);
+				}
+				for (const UeAgentAuthoringState::FStateEntry& Entry
+					: Capture.Snapshot.CopyEntries())
+				{
+					const FString PropertyPath =
+						Entry.TargetIdentity.GetSelector(TEXT("property_path"));
+					if (PropertyPath.IsEmpty()
+						|| (!FieldIds.IsEmpty()
+							&& !FieldIds.Contains(PropertyPath)))
+					{
+						continue;
+					}
+					TSharedRef<FJsonObject> Property = MakeShared<FJsonObject>();
+					Property->SetStringField(TEXT("owner_id"), OwnerId);
+					Property->SetStringField(TEXT("property_path"), PropertyPath);
+					Property->SetBoolField(TEXT("available"), Entry.bAvailable);
+					Property->SetBoolField(TEXT("editable"), Entry.bEditable);
+					if (!Entry.AvailabilityReason.IsEmpty())
+					{
+						Property->SetStringField(
+							TEXT("availability_reason"), Entry.AvailabilityReason);
+					}
+					if (TSharedPtr<FJsonObject> Type = Entry.Type.ToJsonObject();
+						Type.IsValid())
+					{
+						Property->SetObjectField(TEXT("type"), Type);
+					}
+					if (Entry.bAvailable && Entry.Value.IsValid())
+					{
+						Property->SetField(
+							TEXT("value"),
+							UeAgentAuthoringState::CloneCanonicalValue(Entry.Value));
+					}
+					OutProperties.Add(MakeShared<FJsonValueObject>(Property));
+				}
+			}
+			return true;
+		}
+
 		bool CaptureWorld(
 			UWorld& World,
 			const FString& Revision,
 			const FString& CommandId,
+			const TSharedPtr<FJsonObject>& Params,
 			FString& OutPayload,
 			FWorkspaceError& OutError)
 		{
@@ -1391,11 +1531,67 @@ namespace UE::UAI::DomainAdapters::WorldSpatial
 			{
 				return Left.GetPathName() < Right.GetPathName();
 			});
+			if (CommandId == TEXT("content_graph.properties"))
+			{
+				TArray<TSharedPtr<FJsonValue>> Properties;
+				if (!CaptureEditableProperties(
+						World, Params, Properties, OutError))
+				{
+					return false;
+				}
+				TSharedRef<FJsonObject> Snapshot = MakeShared<FJsonObject>();
+				Snapshot->SetStringField(TEXT("schema"), SchemaId);
+				Snapshot->SetStringField(
+					TEXT("type"), TEXT("/Script/Engine.World"));
+				Snapshot->SetStringField(TEXT("target"), World.GetPathName());
+				Snapshot->SetStringField(TEXT("revision"), Revision);
+				Snapshot->SetArrayField(TEXT("properties"), Properties);
+				Snapshot->SetNumberField(
+					TEXT("property_count"), Properties.Num());
+
+				TSharedRef<FJsonObject> Response = MakeShared<FJsonObject>();
+				Response->SetStringField(TEXT("target"), World.GetPathName());
+				Response->SetStringField(
+					TEXT("root_type"), TEXT("/Script/Engine.World"));
+				Response->SetStringField(TEXT("revision"), Revision);
+				Response->SetStringField(TEXT("command_id"), CommandId);
+				Response->SetBoolField(TEXT("complete"), true);
+				Response->SetBoolField(TEXT("has_more"), false);
+				Response->SetObjectField(TEXT("query_result"), Snapshot);
+				return CanonicalObject(Response, OutPayload, OutError);
+			}
+
+			TSet<FString> ItemIds;
+			if (CommandId == TEXT("content_graph.items")
+				&& !ReadInputStringSet(
+					Params, TEXT("item_ids"), ItemIds, OutError))
+			{
+				return false;
+			}
 			TArray<TSharedPtr<FJsonValue>> ActorValues;
 			TSet<FString> ActorClasses;
 			TSet<FString> ComponentClasses;
 			for (AActor* Actor : Actors)
 			{
+				TArray<UActorComponent*> Components;
+				Actor->GetComponents(Components);
+				Components.Sort([](const UActorComponent& Left,
+					const UActorComponent& Right)
+				{
+					return Left.GetName() < Right.GetName();
+				});
+				const bool bActorSelected = ItemIds.IsEmpty()
+					|| ItemIds.Contains(Actor->GetPathName());
+				const bool bComponentSelected = Components.ContainsByPredicate(
+					[&ItemIds](const UActorComponent* Component)
+					{
+						return Component
+							&& ItemIds.Contains(Component->GetPathName());
+					});
+				if (!bActorSelected && !bComponentSelected)
+				{
+					continue;
+				}
 				TSharedRef<FJsonObject> ActorObject = MakeShared<FJsonObject>();
 				ActorObject->SetStringField(TEXT("object_path"), Actor->GetPathName());
 				ActorObject->SetStringField(TEXT("actor_guid"),
@@ -1411,6 +1607,39 @@ namespace UE::UAI::DomainAdapters::WorldSpatial
 					UeAgentLevelAuthoring::BuildTransformState(
 						Actor->GetActorTransform(),
 						UeAgentLevelAuthoring::ETransformFrame::ActorWorld));
+				if (DomainAdapters::ModelingGeometryEffect::
+						IsModelingGeometryCarrier(*Actor))
+				{
+					TOptional<StateSemantic::FUeAgentStateRevision>
+						CarrierRevision;
+					ExecutionMutation::FExecutionMutationError CarrierError;
+					if (!DomainAdapters::ModelingGeometryEffect::
+							TryReadModelingGeometryCarrierRevision(
+								Actor->GetPathName(),
+								*Actor,
+								CarrierRevision,
+								CarrierError)
+						|| !CarrierRevision.IsSet())
+					{
+						return Fail(
+							OutError,
+							CarrierError.GetCode().IsEmpty()
+								? FString(TEXT("level_world_domain_carrier_revision_failed"))
+								: CarrierError.GetCode(),
+							Actor->GetPathName(),
+							CarrierError.GetDetail());
+					}
+					TSharedRef<FJsonObject> RevisionObject =
+						MakeShared<FJsonObject>();
+					RevisionObject->SetStringField(
+						TEXT("source_id"), CarrierRevision->GetSourceId());
+					RevisionObject->SetStringField(
+						TEXT("generation"), CarrierRevision->GetGeneration());
+					RevisionObject->SetNumberField(
+						TEXT("sequence"), CarrierRevision->GetSequence());
+					ActorObject->SetObjectField(
+						TEXT("carrier_revision"), RevisionObject);
+				}
 				TSharedRef<FJsonObject> Attachment = MakeShared<FJsonObject>();
 				const AActor* Parent = Actor->GetAttachParentActor();
 				Attachment->SetStringField(TEXT("parent_managed_id"),
@@ -1432,17 +1661,15 @@ namespace UE::UAI::DomainAdapters::WorldSpatial
 					ActorDataLayerValues.Add(MakeShared<FJsonValueString>(Ref));
 				ActorObject->SetArrayField(TEXT("data_layer_refs"),
 					ActorDataLayerValues);
-				TArray<UActorComponent*> Components;
-				Actor->GetComponents(Components);
-				Components.Sort([](const UActorComponent& Left,
-					const UActorComponent& Right)
-				{
-					return Left.GetName() < Right.GetName();
-				});
 				TArray<TSharedPtr<FJsonValue>> ComponentValues;
 				for (UActorComponent* Component : Components)
 				{
-					if (!Component) continue;
+					if (!Component
+						|| (!bActorSelected
+							&& !ItemIds.Contains(Component->GetPathName())))
+					{
+						continue;
+					}
 					TSharedRef<FJsonObject> ComponentObject = MakeShared<FJsonObject>();
 					ComponentObject->SetStringField(TEXT("object_path"),
 						Component->GetPathName());
@@ -1538,6 +1765,262 @@ namespace UE::UAI::DomainAdapters::WorldSpatial
 			Response->SetBoolField(TEXT("complete"), true);
 			Response->SetBoolField(TEXT("has_more"), false);
 			Response->SetObjectField(TEXT("query_result"), Snapshot);
+			return CanonicalObject(Response, OutPayload, OutError);
+		}
+
+		bool BuildAuthoringSchema(
+			UWorld& World,
+			const FString& Revision,
+			FString& OutPayload,
+			FWorkspaceError& OutError)
+		{
+			const FString Target = World.GetPathName();
+			TSharedRef<FJsonObject> Candidate = MakeShared<FJsonObject>();
+			Candidate->SetStringField(TEXT("name"), TEXT("Cube"));
+
+			TSharedRef<FJsonObject> Actor = MakeShared<FJsonObject>();
+			Actor->SetStringField(TEXT("managed_id"), TEXT("uai_actor_1"));
+			Actor->SetStringField(TEXT("operation"), TEXT("upsert"));
+			Actor->SetObjectField(TEXT("candidate"), Candidate);
+
+			TSharedRef<FJsonObject> Frame = MakeFrame();
+			TSharedRef<FJsonObject> Extension = MakeShared<FJsonObject>();
+			Extension->SetObjectField(TEXT("frame"), Frame);
+			Extension->SetArrayField(
+				TEXT("actors"), {MakeShared<FJsonValueObject>(Actor)});
+
+			TSharedRef<FJsonObject> DocumentTarget = MakeShared<FJsonObject>();
+			DocumentTarget->SetStringField(TEXT("asset_path"), Target);
+			TSharedRef<FJsonObject> RootDocument = MakeShared<FJsonObject>();
+			RootDocument->SetStringField(TEXT("operation"), TEXT("update"));
+			RootDocument->SetObjectField(TEXT("target"), DocumentTarget);
+			RootDocument->SetObjectField(TEXT("provider_extension"), Extension);
+			TSharedRef<FJsonObject> Root = MakeShared<FJsonObject>();
+			Root->SetStringField(TEXT("type"), TEXT("/Script/Engine.World"));
+			Root->SetObjectField(TEXT("document"), RootDocument);
+			TSharedRef<FJsonObject> Document = MakeShared<FJsonObject>();
+			Document->SetStringField(TEXT("schema"), SchemaId);
+			Document->SetObjectField(TEXT("root"), Root);
+
+			TSharedRef<FJsonObject> CandidateContract = MakeShared<FJsonObject>();
+			CandidateContract->SetStringField(
+				TEXT("minimum"), TEXT("at least one of id or name"));
+			CandidateContract->SetStringField(
+				TEXT("resolution_surface"), TEXT("world.actor.candidates"));
+			TSharedRef<FJsonObject> ActorUpsert = MakeShared<FJsonObject>();
+			ActorUpsert->SetArrayField(
+				TEXT("required"),
+				{MakeShared<FJsonValueString>(TEXT("managed_id")),
+				 MakeShared<FJsonValueString>(TEXT("candidate"))});
+			ActorUpsert->SetObjectField(TEXT("candidate"), CandidateContract);
+			ActorUpsert->SetStringField(
+				TEXT("optional_fields"),
+				TEXT("operation,type,transform,attachment,folder_path,components,data_layer_refs,placement_context"));
+
+			const auto ComponentsContract = [](
+				const TCHAR* Unit) -> TSharedRef<FJsonObject>
+			{
+				TSharedRef<FJsonObject> Result = MakeShared<FJsonObject>();
+				Result->SetStringField(TEXT("type"), TEXT("array"));
+				Result->SetStringField(TEXT("item_type"), TEXT("finite_number"));
+				Result->SetNumberField(TEXT("item_count"), 3);
+				Result->SetStringField(TEXT("unit"), Unit);
+				return Result;
+			};
+			const auto CanonicalValueContract = [&ComponentsContract](
+				const TCHAR* Unit) -> TSharedRef<FJsonObject>
+			{
+				TSharedRef<FJsonObject> Result = MakeShared<FJsonObject>();
+				Result->SetStringField(TEXT("type"), TEXT("object"));
+				Result->SetArrayField(TEXT("required"), {
+					MakeShared<FJsonValueString>(TEXT("components")),
+				});
+				Result->SetObjectField(
+					TEXT("components"), ComponentsContract(Unit));
+				return Result;
+			};
+			const auto NamedAxesContract = [](
+				const TCHAR* First,
+				const TCHAR* Second,
+				const TCHAR* Third)
+					-> TSharedRef<FJsonObject>
+			{
+				TSharedRef<FJsonObject> Result = MakeShared<FJsonObject>();
+				Result->SetStringField(TEXT("type"), TEXT("object"));
+				Result->SetArrayField(TEXT("required"), {
+					MakeShared<FJsonValueString>(First),
+					MakeShared<FJsonValueString>(Second),
+					MakeShared<FJsonValueString>(Third),
+				});
+				Result->SetStringField(TEXT("item_type"), TEXT("finite_number"));
+				return Result;
+			};
+
+			TSharedRef<FJsonObject> CanonicalTransform = MakeShared<FJsonObject>();
+			CanonicalTransform->SetStringField(TEXT("type"), TEXT("object"));
+			CanonicalTransform->SetArrayField(TEXT("optional_fields"), {
+				MakeShared<FJsonValueString>(TEXT("translation")),
+				MakeShared<FJsonValueString>(TEXT("rotation")),
+				MakeShared<FJsonValueString>(TEXT("scale")),
+			});
+			CanonicalTransform->SetObjectField(
+				TEXT("translation"), CanonicalValueContract(TEXT("centimeter")));
+			CanonicalTransform->SetObjectField(
+				TEXT("rotation"), CanonicalValueContract(TEXT("degree")));
+			CanonicalTransform->SetObjectField(
+				TEXT("scale"), CanonicalValueContract(TEXT("ratio")));
+			TSharedRef<FJsonObject> NamedAxes = MakeShared<FJsonObject>();
+			NamedAxes->SetObjectField(
+				TEXT("location"), NamedAxesContract(TEXT("x"), TEXT("y"), TEXT("z")));
+			NamedAxes->SetObjectField(
+				TEXT("rotation"),
+				NamedAxesContract(TEXT("pitch"), TEXT("yaw"), TEXT("roll")));
+			NamedAxes->SetObjectField(
+				TEXT("scale"), NamedAxesContract(TEXT("x"), TEXT("y"), TEXT("z")));
+
+			TSharedRef<FJsonObject> TransformContract = MakeShared<FJsonObject>();
+			TransformContract->SetStringField(TEXT("field_id"), TEXT("transform"));
+			TransformContract->SetStringField(
+				TEXT("path"),
+				TEXT("/root/document/provider_extension/actors/*/transform"));
+			TransformContract->SetStringField(
+				TEXT("owner"), ProviderId);
+			TransformContract->SetStringField(
+				TEXT("field_set"), TEXT("actor_upsert"));
+			TransformContract->SetStringField(
+				TEXT("value_contract"), TEXT("world_actor_transform.v1"));
+			TransformContract->SetStringField(TEXT("missing"), TEXT("preserve"));
+			TransformContract->SetBoolField(TEXT("nullable"), false);
+			TransformContract->SetBoolField(TEXT("default_supported"), false);
+			TransformContract->SetArrayField(TEXT("allowed_intents"), {
+				MakeShared<FJsonValueString>(TEXT("preserve")),
+				MakeShared<FJsonValueString>(TEXT("set")),
+			});
+			TransformContract->SetStringField(
+				TEXT("write_status"), TEXT("supported"));
+			TransformContract->SetObjectField(
+				TEXT("canonical"), CanonicalTransform);
+			TransformContract->SetObjectField(TEXT("accepted_named_axes"), NamedAxes);
+			TransformContract->SetStringField(
+				TEXT("conflict_semantics"),
+				TEXT("reject location with translation; reject components with any named axis in rotation or scale"));
+			TransformContract->SetStringField(
+				TEXT("semantic_frame"), TEXT("ue_world"));
+			TransformContract->SetStringField(
+				TEXT("write_frame"), TEXT("ue_world"));
+			TransformContract->SetStringField(
+				TEXT("read_frame"), TEXT("ue_world"));
+			TransformContract->SetStringField(TEXT("translation_unit"), TEXT("centimeter"));
+			TSharedRef<FJsonObject> TransformSpaceContract = MakeFrame();
+			TransformSpaceContract->SetStringField(
+				TEXT("subject"), TEXT("actor.transform"));
+			TransformSpaceContract->SetStringField(
+				TEXT("source"),
+				TEXT("/root/document/provider_extension/frame"));
+			TransformSpaceContract->SetStringField(
+				TEXT("level_contract"), TEXT("server_injected"));
+			TransformContract->SetObjectField(
+				TEXT("space_contract"), TransformSpaceContract);
+
+			TSharedRef<FJsonObject> ExampleTranslation = MakeShared<FJsonObject>();
+			ExampleTranslation->SetArrayField(TEXT("components"), {
+				MakeShared<FJsonValueNumber>(100.0),
+				MakeShared<FJsonValueNumber>(0.0),
+				MakeShared<FJsonValueNumber>(0.0),
+			});
+			TSharedRef<FJsonObject> ExampleTransform = MakeShared<FJsonObject>();
+			ExampleTransform->SetObjectField(TEXT("translation"), ExampleTranslation);
+			TSharedRef<FJsonObject> ConditionalExample = MakeShared<FJsonObject>();
+			ConditionalExample->SetStringField(
+				TEXT("when"), TEXT("set actor placement explicitly"));
+			ConditionalExample->SetObjectField(TEXT("transform"), ExampleTransform);
+			TransformContract->SetObjectField(
+				TEXT("conditional_example"), ConditionalExample);
+
+			TSharedRef<FJsonObject> Schema = MakeShared<FJsonObject>();
+			Schema->SetStringField(TEXT("schema_id"), SchemaId);
+			Schema->SetStringField(TEXT("root_type"), TEXT("/Script/Engine.World"));
+			Schema->SetStringField(TEXT("provider"), ProviderId);
+			Schema->SetStringField(TEXT("revision"), Revision);
+			Schema->SetObjectField(TEXT("actor_upsert"), ActorUpsert);
+			Schema->SetArrayField(TEXT("fields"), {
+				MakeShared<FJsonValueObject>(TransformContract),
+			});
+			Schema->SetObjectField(TEXT("template"), Document);
+			Schema->SetStringField(
+				TEXT("template_guidance"),
+				TEXT("Copy the template, replace managed_id and candidate name or id, omit unrelated optional fields, and import with the exact returned revision."));
+
+			TSharedRef<FJsonObject> Response = MakeShared<FJsonObject>();
+			Response->SetStringField(
+				TEXT("command_id"), TEXT("content_graph.authoring_schema"));
+			Response->SetStringField(TEXT("target"), Target);
+			Response->SetBoolField(TEXT("read_only"), true);
+			Response->SetBoolField(TEXT("complete"), true);
+			Response->SetBoolField(TEXT("has_more"), false);
+			Response->SetObjectField(TEXT("query_result"), Schema);
+			return CanonicalObject(Response, OutPayload, OutError);
+		}
+
+		bool ExportWorldWorkspace(
+			UWorld& World,
+			const TSharedPtr<FJsonObject>& Params,
+			FString& OutPayload,
+			FWorkspaceError& OutError)
+		{
+			if (!EnsureAuthoringRegistered(OutError))
+			{
+				return false;
+			}
+			FString WorkspacePath;
+			FString ProfileId(TEXT("llm_authoring"));
+			if (!Params.IsValid()
+				|| !Params->TryGetStringField(TEXT("workspace_path"), WorkspacePath))
+			{
+				return Fail(OutError,
+					TEXT("content_graph_export_params_invalid"), World.GetPathName());
+			}
+			Params->TryGetStringField(TEXT("profile_id"), ProfileId);
+			WorkspacePath.TrimStartAndEndInline();
+			ProfileId.TrimStartAndEndInline();
+			if (WorkspacePath.IsEmpty() || FPaths::IsRelative(WorkspacePath)
+				|| ProfileId.IsEmpty())
+			{
+				return Fail(OutError, TEXT("workspace_path_invalid"), WorkspacePath);
+			}
+
+			UeAgentLevelAuthoring::FLevelExportResult ExportResult;
+			FString ExportError;
+			if (!UeAgentLevelAuthoring::ExportLevelWorkspace(
+					World, WorkspacePath, ProfileId, ExportResult, ExportError)
+				|| !ExportResult.IsWritten())
+			{
+				FString ErrorCode = ExportResult.ErrorCode;
+				if (ErrorCode.IsEmpty() && !ExportError.IsEmpty())
+				{
+					if (!ExportError.Split(TEXT(":"), &ErrorCode, nullptr)
+						|| ErrorCode.IsEmpty())
+					{
+						ErrorCode = ExportError;
+					}
+				}
+				return Fail(
+					OutError,
+					ErrorCode.IsEmpty()
+						? FString(TEXT("level_world_domain_export_publish_failed"))
+						: ErrorCode,
+					WorkspacePath,
+					ExportError);
+			}
+
+			TSharedRef<FJsonObject> Response = ExportResult.ToJsonObject();
+			Response->SetStringField(
+				TEXT("command_id"), TEXT("content_graph.export_workspace"));
+			Response->SetStringField(TEXT("status"), TEXT("published"));
+			Response->SetStringField(TEXT("target"), World.GetPathName());
+			Response->SetStringField(TEXT("target_kind"), TEXT("ue.level.asset"));
+			Response->SetStringField(TEXT("schema_id"), SchemaId);
+			Response->SetStringField(TEXT("workspace_path"), ExportResult.WorkspaceRoot);
 			return CanonicalObject(Response, OutPayload, OutError);
 		}
 
@@ -1664,7 +2147,8 @@ namespace UE::UAI::DomainAdapters::WorldSpatial
 			FString Readback;
 			if (!StableRevision(PackageName, Revision, OutError)
 				|| !CaptureWorld(*World, Revision,
-					TEXT("content_graph.structure"), Readback, OutError))
+					TEXT("content_graph.structure"),
+					MakeShared<FJsonObject>(), Readback, OutError))
 			{
 				Restore.Restore(OutError);
 				return false;
@@ -1900,9 +2384,25 @@ namespace UE::UAI::DomainAdapters::WorldSpatial
 				Restore, World, OutError))
 			return false;
 		FString Revision;
-		const bool bCaptured = StableRevision(PackageName, Revision, OutError)
-			&& CaptureWorld(*World, Revision, CommandId,
-				OutPayloadJson, OutError);
+		bool bCaptured = StableRevision(PackageName, Revision, OutError);
+		if (bCaptured)
+		{
+			if (CommandId == TEXT("content_graph.authoring_schema"))
+			{
+				bCaptured = BuildAuthoringSchema(
+					*World, Revision, OutPayloadJson, OutError);
+			}
+			else if (CommandId == TEXT("content_graph.export_workspace"))
+			{
+				bCaptured = ExportWorldWorkspace(
+					*World, Params, OutPayloadJson, OutError);
+			}
+			else
+			{
+				bCaptured = CaptureWorld(*World, Revision, CommandId, Params,
+					OutPayloadJson, OutError);
+			}
+		}
 		FWorkspaceError RestoreError;
 		if (!Restore.Restore(RestoreError))
 		{

@@ -38,13 +38,23 @@ actors: [
     operation: upsert
     candidate: { id: "candidate:..." }
     transform: {
-      location: { x: 0, y: 0, z: 50 }
-      rotation: { pitch: 0, yaw: 0, roll: 0 }
-      scale: { x: 1, y: 1, z: 1 }
+      translation: { components: [0, 0, 50] }
+      rotation: { components: [0, 0, 0] }
+      scale: { components: [1, 1, 1] }
     }
   }
 ]
 ```
+
+Actor `transform` 的精确写入形状必须从同一目标当前返回的
+`content_graph.authoring_schema` 读取。Canonical 形态如上；每个分量对象只含长度为
+3 的有限数值 `components`。兼容输入还接受 `location:{x,y,z}`、
+`rotation:{pitch,yaw,roll}` 和 `scale:{x,y,z}`，服务端会在进入 Level Authoring 前
+规范化；`location` 与 `translation` 并存，或同一 rotation/scale 同时提供
+`components` 与命名轴，都会在 mutation 前拒绝。裸数组不是 World Actor transform
+字段。省略 `transform` 表示保留既有 placement，因此最小创建模板仍只需要
+`managed_id + candidate`。这套 World 领域形状不替代通用 UObject property codec 中
+`value_kind:transform` 的独立字段合同。
 
 `placement_context.category` is needed only when the query used a category
 other than `AllClasses`. Before write, the World provider re-enumerates the same

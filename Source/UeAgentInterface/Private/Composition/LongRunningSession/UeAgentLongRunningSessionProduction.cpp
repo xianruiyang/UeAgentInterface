@@ -11,10 +11,14 @@
 #include "Core/Contract/UeAgentContractJson.h"
 #include "Core/StateSemantic/UeAgentCanonicalValueJson.h"
 #include "DomainAdapters/CaptureMediaLongJob/UeAgentCaptureMediaImagePolicy.h"
+#include "DomainAdapters/CaptureMediaLongJob/UeAgentCaptureImageArtifactService.h"
 #include "DomainAdapters/CaptureMediaLongJob/UeAgentCaptureMediaLongJobProduction.h"
 #include "DomainAdapters/CompileBuildJob/UeAgentCompileBuildJobProduction.h"
 #include "DomainAdapters/CompileBuildJob/UeAgentBlueprintCompilePolicy.h"
 #include "DomainAdapters/EditorSessionOperation/UeAgentEditorSessionOperationProduction.h"
+#include "DomainAdapters/PieRuntimeDebug/UeAgentPieRuntimeDebugEditorSession.h"
+#include "DomainAdapters/PieRuntimeDebug/UeAgentPieRuntimeDebugRegistry.h"
+#include "DomainAdapters/PieRuntimeDebug/UeAgentPieRuntimeScenarioProduction.h"
 #include "Editor.h"
 #include "EditorViewportClient.h"
 #include "Editor/UnrealEdEngine.h"
@@ -3093,8 +3097,12 @@ namespace UE::UAI::Composition::LongRunningSession
 		public:
 			FEditorSessionBuilder(
 				FString InEditorInstanceId,
-				TWeakObjectPtr<UWorld> InWorld)
-				: EditorInstanceId(MoveTemp(InEditorInstanceId)), World(InWorld)
+				TWeakObjectPtr<UWorld> InWorld,
+				TSharedRef<PieRuntimeDebug::FUeAgentPieRuntimeDebugRegistry,
+					ESPMode::ThreadSafe> InPieRuntimeDebugRegistry)
+				: EditorInstanceId(MoveTemp(InEditorInstanceId))
+				, World(InWorld)
+				, PieRuntimeDebugRegistry(MoveTemp(InPieRuntimeDebugRegistry))
 			{
 			}
 
@@ -3157,6 +3165,29 @@ namespace UE::UAI::Composition::LongRunningSession
 							OutPort,
 							OutError);
 				}
+				if (Request.GetPolicyId()
+					== TEXT("policy:runtime-session:pie-debug/v1"))
+				{
+					TSharedPtr<EditorSessionOperation::
+						IUeAgentEditorSessionNativeSession,
+						ESPMode::ThreadSafe> NativeSession;
+					if (!PieRuntimeDebug::TryCreatePieRuntimeDebugEditorSession(
+							Request,
+							PieRuntimeDebugRegistry,
+							NativeSession,
+							OutError)
+						|| !NativeSession.IsValid())
+					{
+						return false;
+					}
+					return EditorSessionOperation::
+						TryCreateEditorSessionNativeResourcePort(
+							Request,
+							Policy,
+							NativeSession.ToSharedRef(),
+							OutPort,
+							OutError);
+				}
 				return EditorSessionOperation::
 					TryCreateEditorSessionNativeResourcePort(
 						Request,
@@ -3170,6 +3201,8 @@ namespace UE::UAI::Composition::LongRunningSession
 		private:
 			FString EditorInstanceId;
 			TWeakObjectPtr<UWorld> World;
+			TSharedRef<PieRuntimeDebug::FUeAgentPieRuntimeDebugRegistry,
+				ESPMode::ThreadSafe> PieRuntimeDebugRegistry;
 		};
 
 		enum class ECaptureNativeState : uint8
@@ -3190,10 +3223,13 @@ namespace UE::UAI::Composition::LongRunningSession
 				CaptureMediaLongJob::FUeAgentCaptureMediaLongJobTypedRequest
 					InRequest,
 				TWeakObjectPtr<UWorld> InWorld,
-				FString InPublisherOwnerId)
+				FString InPublisherOwnerId,
+				TSharedRef<CaptureMediaLongJob::IUeAgentCaptureImageArtifactService,
+					ESPMode::ThreadSafe> InImageArtifactService)
 				: Request(MoveTemp(InRequest))
 				, World(InWorld)
 				, PublisherOwnerId(MoveTemp(InPublisherOwnerId))
+				, ImageArtifactService(InImageArtifactService)
 			{
 			}
 
@@ -3265,8 +3301,27 @@ namespace UE::UAI::Composition::LongRunningSession
 							TEXT("capture_resource_tracker_unavailable"));
 					}
 					FFileArtifactReference Published;
-					FFileArtifactPublishError PublishError;
-					if (!TryPublishFileArtifact(
+					if (Request.GetFamily()
+						== CaptureMediaLongJob::EUeAgentCaptureMediaLongJobFamily::ImageCapture)
+					{
+						FString EvidenceId;
+						if (!StagedImage.IsSet()
+							|| !ImageArtifactService->TryPublishVerified(
+								OperationId,
+								PublisherOwnerId,
+								StagedImage.GetValue(),
+								*Resources,
+								Published,
+								EvidenceId,
+								OutError))
+						{
+							return false;
+						}
+					}
+					else
+					{
+						FFileArtifactPublishError PublishError;
+						if (!TryPublishFileArtifact(
 							FFileArtifactPublishRequest(
 								NativePath,
 								FinalPath,
@@ -3277,11 +3332,12 @@ namespace UE::UAI::Composition::LongRunningSession
 							*Resources,
 							Published,
 							PublishError))
-					{
-						return Fail(
-							OutError,
-							PublishError.GetCode(),
-							PublishError.GetDetail());
+						{
+							return Fail(
+								OutError,
+								PublishError.GetCode(),
+								PublishError.GetDetail());
+						}
 					}
 					Artifact = MoveTemp(Published);
 					State = ECaptureNativeState::ExitedSuccess;
@@ -3517,12 +3573,17 @@ namespace UE::UAI::Composition::LongRunningSession
 						FailOnGameThread(MoveTemp(LocalError));
 						return;
 					}
-					FinalPath = RequestedFinalPath.IsEmpty()
-						? FPaths::ProjectSavedDir()
-							/ TEXT("UeAgentInterface/LongRunningSession/Artifacts")
-							/ (FGuid::NewGuid().ToString(EGuidFormats::Digits)
-								+ TEXT(".") + Format)
-						: RequestedFinalPath;
+					CaptureMediaLongJob::FUeAgentStagedCaptureImage Image;
+					FExecutionMutationError ImageArtifactError;
+					if (!ImageArtifactService->TryAdoptStagedImage(
+							OperationId, Request.GetSubjectRef(), NativePath,
+							RequestedFinalPath, Format, Image, ImageArtifactError))
+					{
+						FailOnGameThread(ImageArtifactError.GetCode());
+						return;
+					}
+					FinalPath = Image.GetFinalPath();
+					StagedImage = MoveTemp(Image);
 					ArtifactKind = TEXT("image");
 					MimeType = Format == TEXT("png")
 						? FString(TEXT("image/png")) : FString(TEXT("image/jpeg"));
@@ -3711,6 +3772,8 @@ namespace UE::UAI::Composition::LongRunningSession
 			TWeakObjectPtr<UWorld> World;
 			TWeakObjectPtr<USoundSubmix> Submix;
 			FString PublisherOwnerId;
+			TSharedRef<CaptureMediaLongJob::IUeAgentCaptureImageArtifactService,
+				ESPMode::ThreadSafe> ImageArtifactService;
 			FCriticalSection Mutex;
 			FString OperationId;
 			FString NativeResourceId;
@@ -3724,6 +3787,7 @@ namespace UE::UAI::Composition::LongRunningSession
 			FTSTicker::FDelegateHandle MediaExportPollTicker;
 			FUeAgentResourceTracker* Resources = nullptr;
 			TOptional<FFileArtifactReference> Artifact;
+			TOptional<CaptureMediaLongJob::FUeAgentStagedCaptureImage> StagedImage;
 			ECaptureNativeState State = ECaptureNativeState::Scheduled;
 			bool bStarted = false;
 			bool bStopRequested = false;
@@ -3736,8 +3800,11 @@ namespace UE::UAI::Composition::LongRunningSession
 		public:
 			FCaptureMediaBuilder(
 				TWeakObjectPtr<UWorld> InWorld,
-				FString InPublisherOwnerId)
-				: World(InWorld), PublisherOwnerId(MoveTemp(InPublisherOwnerId))
+				FString InPublisherOwnerId,
+				TSharedRef<CaptureMediaLongJob::IUeAgentCaptureImageArtifactService,
+					ESPMode::ThreadSafe> InImageArtifactService)
+				: World(InWorld), PublisherOwnerId(MoveTemp(InPublisherOwnerId)),
+				  ImageArtifactService(InImageArtifactService)
 			{
 			}
 
@@ -3753,7 +3820,7 @@ namespace UE::UAI::Composition::LongRunningSession
 					Request,
 					Policy,
 					MakeShared<FCaptureNativeSession, ESPMode::ThreadSafe>(
-						Request, World, PublisherOwnerId),
+						Request, World, PublisherOwnerId, ImageArtifactService),
 					OutPort,
 					OutError);
 			}
@@ -3761,6 +3828,8 @@ namespace UE::UAI::Composition::LongRunningSession
 		private:
 			TWeakObjectPtr<UWorld> World;
 			FString PublisherOwnerId;
+			TSharedRef<CaptureMediaLongJob::IUeAgentCaptureImageArtifactService,
+				ESPMode::ThreadSafe> ImageArtifactService;
 		};
 
 		CompileBuildJob::FUeAgentCompileBuildJobPolicyDescriptor CompilePolicy(
@@ -3808,6 +3877,28 @@ namespace UE::UAI::Composition::LongRunningSession
 				"\"type\":\"string\"}");
 		}
 
+		FString RuntimePreviewPieSubjectSchema()
+		{
+			return TEXT(
+				"{\"pattern\":\"^runtime-subject:pie:(0|[1-9][0-9]*)$\","
+				"\"type\":\"string\"}");
+		}
+
+		FString EmptyObjectParameterSchema()
+		{
+			return TEXT(
+				"{\"additionalProperties\":false,\"properties\":{},"
+				"\"type\":\"object\"}");
+		}
+
+		FString PieDebugParameterSchema()
+		{
+			return TEXT(
+				"{\"additionalProperties\":false,\"properties\":{"
+				"\"local_player_index\":{\"const\":0,\"type\":\"integer\"}},"
+				"\"type\":\"object\"}");
+		}
+
 		FString SetCurrentWorldParameterSchema()
 		{
 			return TEXT(
@@ -3843,11 +3934,28 @@ namespace UE::UAI::Composition::LongRunningSession
 				EUeAgentStatePlane::AuthoringMemory),
 			EditorPolicy(
 				EditorSessionOperation::EUeAgentEditorSessionOperationFamily::RuntimePreview,
+				TEXT("policy:runtime-session:pie-debug/v1"),
+				TEXT("native_session_resource"),
+				TEXT("uai.readback.editor.runtime_debug_paused/v1"),
+				EUeAgentStatePlane::RuntimeInstance,
+				{EUeAgentExecutionWorldType::Pie},
+				RuntimePreviewPieSubjectSchema(),
+				PieDebugParameterSchema(),
+				TEXT("Use family_id runtime_preview, one exact runtime-subject:pie:<instance>, this policy_id and optional local_player_index 0. The operation becomes active only after exact single-PIE/single-player resolution, a verified pause and initial current-workspace publication."),
+				TEXT("Resume until phase active, then consume details.session_ref, pause_epoch, workspace_revision and workspace_path. Execute bounded scenarios against that exact snapshot; cancel this editor session only after scenarios are terminal and released."),
+				TEXT("client.editor.session(family_id='runtime_preview', subject_ref='runtime-subject:pie:0', policy_id='policy:runtime-session:pie-debug/v1', parameters={'local_player_index': 0})")),
+			EditorPolicy(
+				EditorSessionOperation::EUeAgentEditorSessionOperationFamily::RuntimePreview,
 				TEXT("policy:runtime-session:pie/v1"),
 				TEXT("native_session_resource"),
 				TEXT("uai.readback.editor.runtime_preview/v1"),
 				EUeAgentStatePlane::RuntimeInstance,
-				{EUeAgentExecutionWorldType::Pie}),
+				{EUeAgentExecutionWorldType::Pie},
+				RuntimePreviewPieSubjectSchema(),
+				EmptyObjectParameterSchema(),
+				TEXT("Use family_id runtime_preview, subject_ref runtime-subject:pie:<non-negative instance>, this policy_id and an empty parameters object."),
+				TEXT("Resume the returned operation until the PIE session is running; use runtime_instance queries for readback, then cancel, resume to terminal, read the receipt and release."),
+				TEXT("client.editor.session(family_id='runtime_preview', subject_ref='runtime-subject:pie:0', policy_id='policy:runtime-session:pie/v1', parameters={})")),
 			EditorPolicy(
 				EditorSessionOperation::EUeAgentEditorSessionOperationFamily::RuntimePreview,
 				TEXT("policy:runtime-session:culture-preview/v1"),
@@ -4029,9 +4137,15 @@ namespace UE::UAI::Composition::LongRunningSession
 			return false;
 		}
 
+		const TSharedRef<PieRuntimeDebug::FUeAgentPieRuntimeDebugRegistry,
+			ESPMode::ThreadSafe> PieRuntimeDebugRegistry =
+			MakeShared<PieRuntimeDebug::FUeAgentPieRuntimeDebugRegistry,
+				ESPMode::ThreadSafe>();
 		const TSharedRef<FEditorSessionBuilder, ESPMode::ThreadSafe> EditorBuilder =
 			MakeShared<FEditorSessionBuilder, ESPMode::ThreadSafe>(
-				Config.EditorInstanceId, Config.EditorWorld);
+				Config.EditorInstanceId,
+				Config.EditorWorld,
+				PieRuntimeDebugRegistry);
 		TArray<EditorSessionOperation::
 			FUeAgentEditorSessionOperationPolicyRegistration>
 			EditorRegistrations;
@@ -4053,10 +4167,15 @@ namespace UE::UAI::Composition::LongRunningSession
 			return false;
 		}
 
+		const TSharedRef<CaptureMediaLongJob::IUeAgentCaptureImageArtifactService,
+			ESPMode::ThreadSafe> ImageArtifactService =
+			MakeShared<CaptureMediaLongJob::FUeAgentCaptureImageArtifactService,
+				ESPMode::ThreadSafe>();
 		const TSharedRef<FCaptureMediaBuilder, ESPMode::ThreadSafe> CaptureBuilder =
 			MakeShared<FCaptureMediaBuilder, ESPMode::ThreadSafe>(
 				Config.EditorWorld,
-				TEXT("long-running-session:") + Config.ServerSessionId);
+				TEXT("long-running-session:") + Config.ServerSessionId,
+				ImageArtifactService);
 		TArray<CaptureMediaLongJob::
 			FUeAgentCaptureMediaLongJobPolicyRegistration> CaptureRegistrations;
 		for (const CaptureMediaLongJob::
@@ -4113,6 +4232,10 @@ namespace UE::UAI::Composition::LongRunningSession
 			OutError = {FactoryError.GetCode(), FactoryError.GetDetail()};
 			return false;
 		}
+		const TSharedRef<PieRuntimeDebug::FUeAgentPieRuntimeScenarioPortFactory,
+			ESPMode::ThreadSafe> PieRuntimeScenarioFactory =
+			MakeShared<PieRuntimeDebug::FUeAgentPieRuntimeScenarioPortFactory,
+				ESPMode::ThreadSafe>(PieRuntimeDebugRegistry, ImageArtifactService);
 
 		FUeAgentLongRunningSessionRuntimeConfig RuntimeConfig;
 		RuntimeConfig.ProjectInstanceId = Config.ProjectInstanceId;
@@ -4136,6 +4259,7 @@ namespace UE::UAI::Composition::LongRunningSession
 				CompileFactory.ToSharedRef(),
 				EditorFactory.ToSharedRef(),
 				CaptureFactory.ToSharedRef(),
+				PieRuntimeScenarioFactory,
 				OutRuntime,
 				RuntimeError)
 			|| !OutRuntime.IsValid())

@@ -19,6 +19,7 @@
 #include "Engine/BlueprintGeneratedClass.h"
 #include "GameFramework/Actor.h"
 #include "K2Node.h"
+#include "K2Node_PromotableOperator.h"
 #include "Kismet2/KismetEditorUtilities.h"
 #include "Misc/SecureHash.h"
 #include "Misc/PackageName.h"
@@ -337,7 +338,34 @@ namespace
 		AuthoringSelectors.Add(
 			TEXT("native_action_signature"), NativeActionSignature);
 
-		if (const UBlueprintFunctionNodeSpawner* FunctionSpawner = Cast<const UBlueprintFunctionNodeSpawner>(Spawner))
+		if (const UK2Node_PromotableOperator* PromotableOperator =
+			Cast<UK2Node_PromotableOperator>(TemplateNode))
+		{
+			NodeClass = PromotableOperator->GetClass();
+			const FString OperationName =
+				PromotableOperator->GetOperationName().ToString();
+			if (OperationName.IsEmpty())
+			{
+				return false;
+			}
+			Type = TEXT("blueprint_node");
+			StableId = NodeClass->GetPathName();
+			CanonicalKey = OperationName;
+			WriteSupport = TEXT("blueprint.graphs[].items[].candidate");
+			SupportReason = TEXT(
+				"Use the native candidate name/id in the Blueprint graph "
+				"authoring surface; operation_name is an optional exact "
+				"assertion for this promotable operator.");
+			AuthoringSelectors.Reset();
+			AuthoringSelectors.Add(
+				TEXT("native_action_signature"), NativeActionSignature);
+			AuthoringSelectors.Add(
+				TEXT("node_class"), NodeClass->GetPathName());
+			AuthoringSelectors.Add(
+				TEXT("operation_name"), OperationName);
+		}
+		else if (const UBlueprintFunctionNodeSpawner* FunctionSpawner =
+			Cast<const UBlueprintFunctionNodeSpawner>(Spawner))
 		{
 			if (const UFunction* Function = FunctionSpawner->GetFunction())
 			{
@@ -433,61 +461,6 @@ namespace
 		return true;
 	}
 
-	static void AddBlueprintVariableDescriptionCandidates(const FSearchParams& Params, const UBlueprint* Blueprint, int32 UiOrderBase, TArray<FCandidate>& OutCandidates)
-	{
-		if (!Blueprint || !Params.CatalogType.Equals(TEXT("blueprint_variable_node")))
-		{
-			return;
-		}
-
-		const FString BlueprintPath = Blueprint->GetPathName();
-		const FString MemberParentClass = Blueprint->GeneratedClass ? Blueprint->GeneratedClass->GetPathName()
-			: (Blueprint->SkeletonGeneratedClass ? Blueprint->SkeletonGeneratedClass->GetPathName() : BlueprintPath);
-
-		int32 VariableIndex = 0;
-		for (const FBPVariableDescription& Variable : Blueprint->NewVariables)
-		{
-			const FString VariableName = Variable.VarName.ToString();
-			if (VariableName.IsEmpty())
-			{
-				continue;
-			}
-
-			const bool bAlreadyAdded = OutCandidates.ContainsByPredicate([&VariableName](const FCandidate& Candidate)
-			{
-				return Candidate.Kind.Equals(TEXT("blueprint_variable_node")) &&
-					(Candidate.SearchKey.Equals(VariableName) || Candidate.Name.Equals(VariableName));
-			});
-			if (bAlreadyAdded)
-			{
-				continue;
-			}
-
-			const FString VariablePath = FString::Printf(TEXT("%s.%s"), *BlueprintPath, *VariableName);
-			FCandidate Candidate;
-			Candidate.Kind = TEXT("blueprint_variable_node");
-			Candidate.Type = Candidate.Kind;
-			Candidate.Name = VariableName;
-			Candidate.FullName = VariablePath;
-			Candidate.DisplayName = FName::NameToDisplayString(VariableName, false);
-			Candidate.CategoryPath = TEXT("Blueprint|Variables");
-			Candidate.Section = TEXT("Blueprint");
-			Candidate.SourceOrigin = TEXT("asset");
-			Candidate.SourceLabel = Blueprint->GetOutermost() ? Blueprint->GetOutermost()->GetName() : BlueprintPath;
-			Candidate.PackagePath = MemberParentClass;
-			Candidate.ObjectPath = VariablePath;
-			Candidate.AuthoringSelectors.Add(TEXT("variable_name"), VariableName);
-			Candidate.AuthoringSelectors.Add(TEXT("member_parent_class"), MemberParentClass);
-			Candidate.WriteSupport = TEXT("blueprint.graphs[].items[].candidate");
-			Candidate.SupportReason = TEXT("Use variable_name, member_parent_class and node_type as variable item candidate fields.");
-			Candidate.bInLibrary = false;
-			Candidate.bSupportedInContext = true;
-			Candidate.UiOrder = UiOrderBase + VariableIndex++;
-			FString IdentityError;
-			ensureAlwaysMsgf(SetCandidateIdentity(Params.CatalogType, VariablePath, VariableName, Candidate, IdentityError), TEXT("Blueprint variable catalog identity failed: %s"), *IdentityError);
-			OutCandidates.Add(MoveTemp(Candidate));
-		}
-	}
 }
 
 bool UeAgentPaletteSearch::IsPublicBlueprintCandidateSemanticField(
@@ -500,7 +473,8 @@ bool UeAgentPaletteSearch::IsPublicBlueprintCandidateSemanticField(
 		|| Field == TEXT("variable_name")
 		|| Field == TEXT("node_type")
 		|| Field == TEXT("member_parent_class")
-		|| Field == TEXT("node_class");
+		|| Field == TEXT("node_class")
+		|| Field == TEXT("operation_name");
 }
 
 namespace
@@ -723,18 +697,46 @@ namespace
 		}
 
 		TMap<FString, int32> MatchingCanonicalKeys;
+		TMap<FString, int32> MatchingRebindKeys;
 		for (int32 Index = 0; Index < Entries.Num(); ++Index)
 		{
 			const FCandidate& Candidate = Entries[Index].Candidate;
+			const bool bNameMatches = MatchesExactName(Candidate, Name);
 			const bool bIdMatches = Id.TrimStartAndEnd().IsEmpty()
 				|| Candidate.GetPublicId().Equals(Id, ESearchCase::IgnoreCase)
 				|| Candidate.GetCandidateId().Equals(Id, ESearchCase::CaseSensitive);
-			if (!bIdMatches || !MatchesExactName(Candidate, Name))
+			if (bIdMatches && bNameMatches)
+			{
+				MatchingCanonicalKeys.FindOrAdd(
+					Candidate.GetCandidateId(), Index);
+			}
+			if (!bNameMatches || Params.RequiredAuthoringSelectors.IsEmpty())
 			{
 				continue;
 			}
-			MatchingCanonicalKeys.FindOrAdd(
-				Candidate.GetCandidateId(), Index);
+			bool bSelectorsMatch = true;
+			for (const TPair<FString, FString>& Required
+				: Params.RequiredAuthoringSelectors)
+			{
+				const FString* Actual =
+					Candidate.AuthoringSelectors.Find(Required.Key);
+				if (!Actual || !Actual->Equals(
+						Required.Value, ESearchCase::CaseSensitive))
+				{
+					bSelectorsMatch = false;
+					break;
+				}
+			}
+			if (bSelectorsMatch)
+			{
+				MatchingRebindKeys.FindOrAdd(
+					Candidate.GetCandidateId(), Index);
+			}
+		}
+		if (MatchingCanonicalKeys.IsEmpty()
+			&& !MatchingRebindKeys.IsEmpty())
+		{
+			MatchingCanonicalKeys = MoveTemp(MatchingRebindKeys);
 		}
 		if (MatchingCanonicalKeys.IsEmpty())
 		{
@@ -809,11 +811,6 @@ bool CollectBlueprintCandidates(
 		OutCandidates.Add(MoveTemp(Entry.Candidate));
 	}
 
-	UBlueprint* Blueprint = Params.AssetPath.IsEmpty()
-		? nullptr
-		: LoadBlueprint(Params.AssetPath);
-	AddBlueprintVariableDescriptionCandidates(
-		Params, Blueprint, OutCandidates.Num(), OutCandidates);
 	if (OutCandidates.IsEmpty())
 	{
 		OutWarnings.Add(TEXT(
@@ -886,12 +883,27 @@ bool TryPerformBlueprintActionCandidate(
 			CreatedNodes.Add(CurrentNode);
 		}
 	}
-	if (CreatedNodes.Num() != 1 || CreatedNodes[0] != OutNode)
+	if (CreatedNodes.IsEmpty())
 	{
 		OutNode = nullptr;
-		OutError = FString::Printf(
-			TEXT("blueprint_action_candidate_result_shape_unsupported:%d"),
-			CreatedNodes.Num());
+		OutError = TEXT("blueprint_action_candidate_no_new_node");
+		return false;
+	}
+	if (ExistingNodes.Contains(OutNode) || !CreatedNodes.Contains(OutNode))
+	{
+		OutNode = nullptr;
+		OutError = TEXT("blueprint_action_candidate_primary_not_new");
+		return false;
+	}
+	if (OutNode->GetGraph() != Entry.Graph
+		|| CreatedNodes.ContainsByPredicate(
+			[Graph = Entry.Graph](const UEdGraphNode* CreatedNode)
+			{
+				return !CreatedNode || CreatedNode->GetGraph() != Graph;
+			}))
+	{
+		OutNode = nullptr;
+		OutError = TEXT("blueprint_action_candidate_graph_mismatch");
 		return false;
 	}
 	OutCandidate = MoveTemp(Entry.Candidate);

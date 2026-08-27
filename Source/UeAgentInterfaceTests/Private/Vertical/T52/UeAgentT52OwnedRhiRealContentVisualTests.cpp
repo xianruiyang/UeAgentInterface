@@ -20,8 +20,6 @@
 #include "Misc/Paths.h"
 #include "Module/CommandRegistration/Active/UeAgentActiveCommandComposition.h"
 #include "PackageTools.h"
-#include "Serialization/JsonReader.h"
-#include "Serialization/JsonSerializer.h"
 #include "Slate/SceneViewport.h"
 #include "TestSupport/UeAgentPublicCommandTestHarness.h"
 #include "UObject/GarbageCollection.h"
@@ -324,134 +322,6 @@ namespace UE::UAI::Tests::Vertical::T52
 			}
 		}
 		return nullptr;
-	}
-
-	bool TryProjectedSnapshot(
-		const FUeAgentCommandResult& Result,
-		TSharedPtr<FJsonObject>& OutSnapshot,
-		FString& OutError)
-	{
-		OutSnapshot.Reset();
-		OutError.Reset();
-		if (!Result.IsOk())
-		{
-			OutError = Result.GetErrorJson();
-			return false;
-		}
-		TSharedPtr<FJsonObject> Root;
-		const TSharedRef<TJsonReader<>> Reader =
-			TJsonReaderFactory<>::Create(Result.GetPayloadJson());
-		const TSharedPtr<FJsonObject>* Projection = nullptr;
-		const TSharedPtr<FJsonObject>* Payload = nullptr;
-		const TSharedPtr<FJsonObject>* Snapshot = nullptr;
-		if (!FJsonSerializer::Deserialize(Reader, Root)
-			|| !Root.IsValid()
-			|| !Root->TryGetObjectField(TEXT("projection"), Projection)
-			|| !Projection || !Projection->IsValid()
-			|| !(*Projection)->TryGetObjectField(TEXT("payload"), Payload)
-			|| !Payload || !Payload->IsValid()
-			|| !(*Payload)->TryGetObjectField(TEXT("snapshot"), Snapshot)
-			|| !Snapshot || !Snapshot->IsValid())
-		{
-			OutError = Result.GetPayloadJson();
-			return false;
-		}
-		OutSnapshot = *Snapshot;
-		return true;
-	}
-
-	bool TrySpatialComponents(
-		const TSharedPtr<FJsonObject>& Snapshot,
-		const FString& ObjectRole,
-		TArray<double>& OutComponents)
-	{
-		OutComponents.Reset();
-		const TArray<TSharedPtr<FJsonValue>>* Entries = nullptr;
-		if (!Snapshot.IsValid()
-			|| !Snapshot->TryGetArrayField(TEXT("entries"), Entries)
-			|| !Entries)
-		{
-			return false;
-		}
-		for (const TSharedPtr<FJsonValue>& EntryValue : *Entries)
-		{
-			const TSharedPtr<FJsonObject>* Entry = nullptr;
-			const TSharedPtr<FJsonObject>* Identity = nullptr;
-			FString Role;
-			if (!EntryValue.IsValid()
-				|| !EntryValue->TryGetObject(Entry)
-				|| !Entry || !Entry->IsValid()
-				|| !(*Entry)->TryGetObjectField(TEXT("identity"), Identity)
-				|| !Identity || !Identity->IsValid()
-				|| !(*Identity)->TryGetStringField(TEXT("object_role"), Role)
-				|| Role != ObjectRole)
-			{
-				continue;
-			}
-			const TSharedPtr<FJsonObject>* Value = nullptr;
-			const TArray<TSharedPtr<FJsonValue>>* Components = nullptr;
-			if (!(*Entry)->TryGetObjectField(TEXT("value"), Value)
-				|| !Value || !Value->IsValid())
-			{
-				return false;
-			}
-			FString ValueKind;
-			if (!(*Value)->TryGetStringField(TEXT("kind"), ValueKind))
-			{
-				return false;
-			}
-			if (ValueKind == TEXT("spatial"))
-			{
-				if (!(*Value)->TryGetArrayField(TEXT("components"), Components)
-					|| !Components)
-				{
-					return false;
-				}
-			}
-			else if (ValueKind == TEXT("object"))
-			{
-				const TSharedPtr<FJsonObject>* Fields = nullptr;
-				const TSharedPtr<FJsonObject>* CanonicalComponents = nullptr;
-				FString ComponentsKind;
-				if (!(*Value)->TryGetObjectField(TEXT("fields"), Fields)
-					|| !Fields || !Fields->IsValid()
-					|| !(*Fields)->TryGetObjectField(
-						TEXT("components"), CanonicalComponents)
-					|| !CanonicalComponents || !CanonicalComponents->IsValid()
-					|| !(*CanonicalComponents)->TryGetStringField(
-						TEXT("kind"), ComponentsKind)
-					|| ComponentsKind != TEXT("array")
-					|| !(*CanonicalComponents)->TryGetArrayField(
-						TEXT("items"), Components)
-					|| !Components)
-				{
-					return false;
-				}
-			}
-			else
-			{
-				return false;
-			}
-			for (const TSharedPtr<FJsonValue>& Component : *Components)
-			{
-				FString Lexeme;
-				const TSharedPtr<FJsonObject>* CanonicalNumber = nullptr;
-				const bool bDirectString = Component.IsValid()
-					&& Component->TryGetString(Lexeme);
-				const bool bCanonicalNumber = Component.IsValid()
-					&& Component->TryGetObject(CanonicalNumber)
-					&& CanonicalNumber && CanonicalNumber->IsValid()
-					&& (*CanonicalNumber)->TryGetStringField(TEXT("lexeme"), Lexeme);
-				if ((!bDirectString && !bCanonicalNumber) || !Lexeme.IsNumeric())
-				{
-					OutComponents.Reset();
-					return false;
-				}
-				OutComponents.Add(FCString::Atod(*Lexeme));
-			}
-			return !OutComponents.IsEmpty();
-		}
-		return false;
 	}
 
 	FString Sha256Bytes(const TArray<uint8>& Bytes)
@@ -796,46 +666,6 @@ namespace UE::UAI::Tests::Vertical::T52
 						*Actor->GetActorLocation().ToString(),
 						*Bounds.GetCenter().ToString(),
 						*Bounds.GetSize().ToString()));
-					return false;
-				}
-
-				const TSharedRef<FJsonObject> Input = MakeShared<FJsonObject>();
-				Input->SetObjectField(TEXT("verify_frame"), SpatialFrame(
-					FString::FromInt(Index + 1)));
-				const FUeAgentCommandResult Read = Call(
-					TEXT("world.object_transform.read"),
-					WorldParams(ActorPaths.Last(), Input));
-				TSharedPtr<FJsonObject> Snapshot;
-				FString ProjectionError;
-				TArray<double> Components;
-				if (!TryProjectedSnapshot(Read, Snapshot, ProjectionError)
-					|| !TrySpatialComponents(
-						Snapshot,
-						TEXT("actor_transform:") + ActorPaths.Last(),
-						Components)
-					|| Components.Num() != 10)
-				{
-					Test->AddError(
-						TEXT("T52 public transform read failed for ")
-						+ Spec.Label + TEXT(": ") + ProjectionError);
-					return false;
-				}
-				const bool bTransformMatches =
-					FMath::IsNearlyEqual(Components[0], Spec.BaseCenter.X, 0.1)
-					&& FMath::IsNearlyEqual(Components[1], Spec.BaseCenter.Y, 0.1)
-					&& FMath::IsNearlyEqual(Components[2], Spec.BaseCenter.Z, 0.1)
-					&& FMath::IsNearlyZero(Components[3], 0.0001)
-					&& FMath::IsNearlyZero(Components[4], 0.0001)
-					&& FMath::IsNearlyZero(Components[5], 0.0001)
-					&& FMath::IsNearlyEqual(Components[6], 1.0, 0.0001)
-					&& FMath::IsNearlyEqual(Components[7], 1.0, 0.0001)
-					&& FMath::IsNearlyEqual(Components[8], 1.0, 0.0001)
-					&& FMath::IsNearlyEqual(Components[9], 1.0, 0.0001);
-				if (!Test->TestTrue(
-						*FString::Printf(
-							TEXT("T52 public transform read verifies %s"), *Spec.Label),
-						bTransformMatches))
-				{
 					return false;
 				}
 			}

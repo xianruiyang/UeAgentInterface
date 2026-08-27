@@ -14,36 +14,36 @@
       "successor": {
         "kind": "exact_command_set",
         "command_ids": [
-          "world.actor_components"
+          "content_graph.items"
         ]
       },
       "semantic_coverage": {
         "purpose": {
           "status": "covered",
           "by": [
-            "world.actor_components"
+            "content_graph.items"
           ],
-          "explanation": "world.actor_components 是该只读能力的唯一精确公开入口；服务端 Query owner 将它绑定到真实 UE mechanics，并直接覆盖冻结用途“列出 Actor 组件”。"
+          "explanation": "content_graph.items 以 World 为 target，并用 item_ids 精确选中 Actor；返回同一 HJSON World 快照中的 Actor 与组件结构，覆盖冻结用途“列出 Actor 组件”，不保留独立 World 组件查询入口。"
         },
         "inputs": {
           "status": "covered",
           "by": [
-            "world.actor_components"
+            "content_graph.items"
           ],
-          "explanation": "world.actor_components 通过精确 target（适用时）和 input 对象接收冻结输入“id, include_non_scene”；context 冻结真实状态层，projection 只约束有界结果，不使用旧 ID、别名或名称猜测。"
+          "explanation": "query.content.search 返回 detail_target_identity 与 detail_input；content_graph.items 原样消费 World target 和 actor item_ids。include_non_scene 不再形成第二查询语义，HJSON 结构返回该 Actor 的完整组件集合。"
         },
         "outputs": {
           "status": "covered",
           "by": [
-            "world.actor_components"
+            "content_graph.items"
           ],
-          "explanation": "world.actor_components 从真实 UE/registry/editor 状态生成带稳定身份、revision、完整度和 provenance 的只读结果，覆盖冻结输出“修改组件前定位组件名”；结果直接经 SDK/CLI 返回，不恢复旧命令。"
+          "explanation": "content_graph.items 从持久化 World 的 HJSON owner 返回组件 object_path、component_name、type、attachment 和 transform，覆盖修改组件前的精确定位，并与后续 HJSON properties/import 共用同一入口。"
         }
       },
       "product_evidence": {
         "test_id": "UAI.StrictV2.T06.NON.HJSON.QUERY.MIGRATION",
         "public_command_ids": [
-          "world.actor_components"
+          "content_graph.items"
         ],
         "required_claims": [
           "public_entry",
@@ -633,36 +633,36 @@
       "successor": {
         "kind": "exact_command_set",
         "command_ids": [
-          "world.actor_components"
+          "content_graph.items"
         ]
       },
       "semantic_coverage": {
         "purpose": {
           "status": "covered",
           "by": [
-            "world.actor_components"
+            "content_graph.items"
           ],
-          "explanation": "world.actor_components 是该只读能力的唯一精确公开入口；服务端 Query owner 将它绑定到真实 UE mechanics，并直接覆盖冻结用途“`actor_list_components` 的同义命令”。"
+          "explanation": "content_graph.items 以 World 为 target，并用 item_ids 精确选中 Actor；返回同一 HJSON World 快照中的 Actor 与组件结构，覆盖 `actor_list_components` 的同义用途。"
         },
         "inputs": {
           "status": "covered",
           "by": [
-            "world.actor_components"
+            "content_graph.items"
           ],
-          "explanation": "world.actor_components 通过精确 target（适用时）和 input 对象接收冻结输入“无文档参数；使用 **params 传入 UAI 参数。”；context 冻结真实状态层，projection 只约束有界结果，不使用旧 ID、别名或名称猜测。"
+          "explanation": "query.content.search 返回 detail_target_identity 与 detail_input，content_graph.items 原样消费；旧的无约束参数面不再保留。"
         },
         "outputs": {
           "status": "covered",
           "by": [
-            "world.actor_components"
+            "content_graph.items"
           ],
-          "explanation": "world.actor_components 从真实 UE/registry/editor 状态生成带稳定身份、revision、完整度和 provenance 的只读结果，覆盖冻结输出“level_*”；结果直接经 SDK/CLI 返回，不恢复旧命令。"
+          "explanation": "content_graph.items 返回 HJSON World 中精确 Actor 的组件结构、身份与 revision，覆盖原 level_* 组件列表输出。"
         }
       },
       "product_evidence": {
         "test_id": "UAI.StrictV2.T06.NON.HJSON.QUERY.MIGRATION",
         "public_command_ids": [
-          "world.actor_components"
+          "content_graph.items"
         ],
         "required_claims": [
           "public_entry",
@@ -1005,36 +1005,36 @@
       "successor": {
         "kind": "exact_command_set",
         "command_ids": [
-          "world.actors"
+          "content_graph.structure"
         ]
       },
       "semantic_coverage": {
         "purpose": {
           "status": "covered",
           "by": [
-            "world.actors"
+            "content_graph.structure"
           ],
-          "explanation": "world.actors 是该只读能力的唯一精确公开入口；服务端 Query owner 将它绑定到真实 UE mechanics，并直接覆盖冻结用途“列出当前关卡 Actor”。"
+          "explanation": "content_graph.structure 以持久化 World 为唯一 target，返回同一 HJSON 文档中的 Actor/Component 层次，覆盖冻结用途“列出当前关卡 Actor”。"
         },
         "inputs": {
           "status": "covered",
           "by": [
-            "world.actors"
+            "content_graph.structure"
           ],
-          "explanation": "world.actors 通过精确 target（适用时）和 input 对象接收冻结输入“limit”；context 冻结真实状态层，projection 只约束有界结果，不使用旧 ID、别名或名称猜测。"
+          "explanation": "content_graph.structure 接收精确 World target；大型结果由公共 projection/ContentGraph 分段能力约束，不恢复旧的独立 limit 命令。"
         },
         "outputs": {
           "status": "covered",
           "by": [
-            "world.actors"
+            "content_graph.structure"
           ],
-          "explanation": "world.actors 从真实 UE/registry/editor 状态生成带稳定身份、revision、完整度和 provenance 的只读结果，覆盖冻结输出“读取场景现有对象”；结果直接经 SDK/CLI 返回，不恢复旧命令。"
+          "explanation": "content_graph.structure 从真实持久化 World 生成带 object_path、managed_id、type、transform、组件和 revision 的结构快照，覆盖读取场景现有对象。"
         }
       },
       "product_evidence": {
         "test_id": "UAI.StrictV2.T06.NON.HJSON.QUERY.MIGRATION",
         "public_command_ids": [
-          "world.actors"
+          "content_graph.structure"
         ],
         "required_claims": [
           "public_entry",

@@ -39,9 +39,10 @@ at no more than 16 frames. It neither scores nor selects candidates and never
 persists the temporary transforms. The mechanics restores Actor transform,
 package dirty state, Actor selection, and any temporary viewport realtime
 override on success or failure; success fails closed unless each restoration is
-observed. After visual comparison, persist exactly one selected value through
-`world.object_transform.update` and independently read it through
-`world.object_transform.read`.
+observed. After visual comparison, read the exact Actor with
+`content_graph.items`, update its transform in the World `uai.world.edit/1`
+document, and persist the selected value through
+`content_graph.import_workspace` using the exported revision.
 
 ## Image policy catalog
 

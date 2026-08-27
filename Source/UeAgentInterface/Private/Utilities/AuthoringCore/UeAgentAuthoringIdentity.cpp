@@ -344,7 +344,8 @@ namespace UeAgentAuthoringIdentity
 			Selector(TEXT("actor_factory"), 220),
 			Selector(TEXT("placement_category"), 230),
 			Selector(TEXT("expression_class"), 240),
-			Selector(TEXT("function_path"), 250)
+			Selector(TEXT("function_path"), 250),
+			Selector(TEXT("operation_name"), 260)
 		};
 		Catalog.KeyPatterns = {
 			Pattern(TEXT("catalog_native_action"), 0,

@@ -4,7 +4,9 @@
 #include "Dom/JsonObject.h"
 #include "HAL/CriticalSection.h"
 #include "HAL/FileManager.h"
+#include "HAL/PlatformMisc.h"
 #include "HAL/PlatformFileManager.h"
+#include "HAL/PlatformProcess.h"
 #include "Misc/FileHelper.h"
 #include "Misc/Guid.h"
 #include "Misc/Paths.h"
@@ -43,6 +45,7 @@ namespace UE::UAI::ArtifactPublisher
 
 		FCriticalSection FailureMutex;
 		int32 AfterFinalMovedToBackupFailures = 0;
+		int32 FirstMoveAttemptFailures = 0;
 
 		void SetError(
 			FArtifactPublishError& OutError,
@@ -360,15 +363,71 @@ namespace UE::UAI::ArtifactPublisher
 				: DeleteDirectory(Path);
 		}
 
-		bool MovePath(const FString& Destination, const FString& Source)
+		bool MovePath(
+			const FString& Destination,
+			const FString& Source,
+			uint32* OutLastPlatformError = nullptr)
 		{
-			return IFileManager::Get().Move(
-				*Destination,
-				*Source,
-				false,
-				false,
-				false,
-				true);
+			// A publish commit is a same-parent rename. Keep every attempt atomic;
+			// do not fall back to copying a partially visible directory tree.
+			if (!FPaths::GetPath(Destination).Equals(
+					FPaths::GetPath(Source), ESearchCase::IgnoreCase))
+			{
+				if (OutLastPlatformError)
+				{
+					*OutLastPlatformError = 0;
+				}
+				return false;
+			}
+			IPlatformFile& Files =
+				FPlatformFileManager::Get().GetPlatformFile();
+			constexpr int32 MaxAttempts = 3;
+			bool bInjectedFirstFailure = false;
+			uint32 LastPlatformError = 0;
+			for (int32 Attempt = 0; Attempt < MaxAttempts; ++Attempt)
+			{
+				bool bInjectFailure = false;
+				{
+					FScopeLock Lock(&FailureMutex);
+					bInjectFailure = FirstMoveAttemptFailures > 0
+						&& !bInjectedFirstFailure;
+				}
+				bInjectedFirstFailure |= bInjectFailure;
+				if (!bInjectFailure && Files.MoveFile(*Destination, *Source))
+				{
+					if (OutLastPlatformError)
+					{
+						*OutLastPlatformError = 0;
+					}
+					return true;
+				}
+				LastPlatformError = bInjectFailure
+					? 0
+					: FPlatformMisc::GetLastError();
+
+				// A missing source or an occupied destination is a permanent state
+				// error. Only retry a transient platform rename failure.
+				const bool bSourceExists = Files.FileExists(*Source)
+					|| Files.DirectoryExists(*Source);
+				const bool bDestinationExists = Files.FileExists(*Destination)
+					|| Files.DirectoryExists(*Destination);
+				if (!bSourceExists || bDestinationExists
+					|| Attempt + 1 == MaxAttempts)
+				{
+					if (OutLastPlatformError)
+					{
+						*OutLastPlatformError = LastPlatformError;
+					}
+					return false;
+				}
+				FPlatformProcess::SleepNoStats(
+					Attempt == 0 ? 0.01f : 0.05f);
+			}
+			if (OutLastPlatformError)
+			{
+				*OutLastPlatformError = LastPlatformError;
+			}
+			return false;
 		}
 
 		bool ShouldFailAfterFinalMovedToBackup()
@@ -1176,7 +1235,11 @@ namespace UE::UAI::ArtifactPublisher
 			}
 		}
 
-		if (!MovePath(Transaction.Final, Transaction.Staging))
+		uint32 CommitPlatformError = 0;
+		if (!MovePath(
+			Transaction.Final,
+			Transaction.Staging,
+			&CommitPlatformError))
 		{
 			const bool bRestored = RestoreOldFinal(
 				Transaction,
@@ -1191,7 +1254,9 @@ namespace UE::UAI::ArtifactPublisher
 					? TEXT("artifact_publish_failed")
 					: TEXT("artifact_publish_state_unknown"),
 				Transaction.Final,
-				TEXT("staging could not become final"));
+				FString::Printf(
+					TEXT("staging could not become final; platform_error=%u"),
+					CommitPlatformError));
 			return false;
 		}
 		bNewPublished = true;
@@ -1281,6 +1346,10 @@ namespace UE::UAI::ArtifactPublisher
 			{
 				++AfterFinalMovedToBackupFailures;
 			}
+			else if (FailurePoint == EFailurePoint::FirstMoveAttempt)
+			{
+				++FirstMoveAttemptFailures;
+			}
 		}
 
 		FScopedPublishFailure::~FScopedPublishFailure()
@@ -1290,6 +1359,11 @@ namespace UE::UAI::ArtifactPublisher
 			{
 				AfterFinalMovedToBackupFailures =
 					FMath::Max(0, AfterFinalMovedToBackupFailures - 1);
+			}
+			else if (FailurePoint == EFailurePoint::FirstMoveAttempt)
+			{
+				FirstMoveAttemptFailures =
+					FMath::Max(0, FirstMoveAttemptFailures - 1);
 			}
 		}
 	}

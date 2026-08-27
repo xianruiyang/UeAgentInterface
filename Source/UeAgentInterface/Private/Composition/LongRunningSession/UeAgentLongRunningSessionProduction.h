@@ -38,7 +38,7 @@ namespace UE::UAI::Composition::LongRunningSession
 
 	/**
 	 * Composes the immutable production policy catalogs, operation-scoped
-	 * native builders, one LongRunningSession runtime and twelve exact public
+	 * native builders, one LongRunningSession runtime and thirteen exact public
 	 * handlers.  No transport route or second lifecycle registry is created.
 	 */
 	UEAGENTINTERFACE_API bool TryCreateLongRunningSessionProduction(

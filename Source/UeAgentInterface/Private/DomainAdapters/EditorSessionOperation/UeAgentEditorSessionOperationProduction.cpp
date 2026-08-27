@@ -1,6 +1,9 @@
 #include "DomainAdapters/EditorSessionOperation/UeAgentEditorSessionOperationProduction.h"
 
 #include "Containers/Ticker.h"
+#include "Core/StateSemantic/UeAgentCanonicalValueJson.h"
+#include "Dom/JsonObject.h"
+#include "Dom/JsonValue.h"
 #include "HAL/PlatformMisc.h"
 #include "Misc/ScopeLock.h"
 
@@ -158,6 +161,7 @@ namespace UE::UAI::DomainAdapters::EditorSessionOperation
 			const FUeAgentEditorSessionOperationPolicyDescriptor& Policy,
 			const FString& Phase,
 			const FString& SessionRef,
+			const TSharedPtr<FJsonObject>& Details,
 			const int64 Revision,
 			FUeAgentResourceTracker& Resources,
 			TOptional<FLongRunningOperationSignal>& OutSignal,
@@ -198,6 +202,24 @@ namespace UE::UAI::DomainAdapters::EditorSessionOperation
 					OutError,
 					TEXT("editor_session_signal_value_failed"),
 					StateError.Code);
+			}
+			if (Details.IsValid())
+			{
+				FUeAgentCanonicalValuePtr CanonicalDetails;
+				FString CanonicalError;
+				if (!CanonicalJson::TryFromJsonValue(
+						MakeShared<FJsonValueObject>(Details),
+						Resources,
+						CanonicalDetails,
+						CanonicalError)
+					|| !CanonicalDetails.IsValid())
+				{
+					return Fail(
+						OutError,
+						TEXT("editor_session_signal_details_failed"),
+						MoveTemp(CanonicalError));
+				}
+				Items.Emplace(TEXT("details"), CanonicalDetails.ToSharedRef());
 			}
 
 			FUeAgentCanonicalValuePtr Payload;
@@ -311,6 +333,7 @@ namespace UE::UAI::DomainAdapters::EditorSessionOperation
 							Policy,
 							NativeObservation.GetPhase(),
 							NativeObservation.GetSessionRef(),
+							NativeObservation.GetDetails(),
 							NextRevision,
 							Resources,
 							Signal,
@@ -699,6 +722,7 @@ namespace UE::UAI::DomainAdapters::EditorSessionOperation
 							State->Policy,
 							Phase,
 							FString(),
+							nullptr,
 							NextRevision,
 							Resources,
 							Signal,
@@ -1134,11 +1158,13 @@ namespace UE::UAI::DomainAdapters::EditorSessionOperation
 		const ELongRunningWorkState InState,
 		FString InPhase,
 		FString InErrorCode,
-		FString InSessionRef)
+		FString InSessionRef,
+		TSharedPtr<FJsonObject> InDetails)
 		: State(InState)
 		, Phase(MoveTemp(InPhase))
 		, ErrorCode(MoveTemp(InErrorCode))
 		, SessionRef(MoveTemp(InSessionRef))
+		, Details(MoveTemp(InDetails))
 	{
 	}
 
@@ -1163,6 +1189,12 @@ namespace UE::UAI::DomainAdapters::EditorSessionOperation
 	FUeAgentEditorSessionNativeObservation::GetSessionRef() const
 	{
 		return SessionRef;
+	}
+
+	const TSharedPtr<FJsonObject>&
+	FUeAgentEditorSessionNativeObservation::GetDetails() const
+	{
+		return Details;
 	}
 
 	bool FUeAgentEditorSessionNativeObservation::IsValid() const

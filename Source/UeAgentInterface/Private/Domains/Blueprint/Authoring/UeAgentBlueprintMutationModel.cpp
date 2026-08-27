@@ -2,6 +2,7 @@
 
 #include "Domains/Blueprint/Authoring/UeAgentBlueprintMutationModel.h"
 
+#include "BlueprintActionDatabase.h"
 #include "BlueprintEditorLibrary.h"
 #include "Commands/Blueprint/UeAgentHttpServer_BlueprintOps.h"
 #include "Commands/PaletteSearch/UeAgentPaletteSearchTypes.h"
@@ -35,6 +36,7 @@
 #include "K2Node_VariableSet.h"
 #include "Kismet2/BlueprintEditorUtils.h"
 #include "Kismet2/KismetEditorUtilities.h"
+#include "Misc/ScopeExit.h"
 #include "Subsystems/SubsystemBlueprintLibrary.h"
 #include "UObject/UnrealType.h"
 #include "Utilities/AuthoringOperationApply/UeAgentApplyInputContract.h"
@@ -1560,10 +1562,13 @@ namespace UeAgentBlueprintAuthoring
 			UEdGraph& Graph,
 			const TSharedPtr<const FJsonObject>& Spec,
 			const FString& Kind,
+			const bool bAllowScratchCandidateRebind,
 			FString& OutError)
 		{
 			if (Kind == TEXT("native_action"))
 			{
+				FString StableNodeId;
+				TryGetString(Spec, TEXT("id"), StableNodeId);
 				const TSharedPtr<const FJsonObject> Candidate =
 					GetObject(Spec, TEXT("candidate"));
 				FString Name;
@@ -1605,6 +1610,22 @@ namespace UeAgentBlueprintAuthoring
 					CandidateContext, TEXT("pin_guid"), Params.PinGuid);
 				TryGetString(
 					CandidateContext, TEXT("pin_name"), Params.PinName);
+				for (const TCHAR* Field : {
+					TEXT("function_name"),
+					TEXT("event_name"),
+					TEXT("variable_name"),
+					TEXT("node_type"),
+					TEXT("node_class"),
+					TEXT("operation_name")})
+				{
+					FString Value;
+					if (bAllowScratchCandidateRebind
+						&& TryGetString(Candidate, Field, Value)
+						&& !Value.IsEmpty())
+					{
+						Params.RequiredAuthoringSelectors.Add(Field, Value);
+					}
+				}
 
 				double X = 0.0;
 				double Y = 0.0;
@@ -1626,12 +1647,29 @@ namespace UeAgentBlueprintAuthoring
 						ResolvedCandidate,
 						PerformError))
 				{
+					FString PerformCode = PerformError;
+					FString PerformDetail;
+					if (PerformCode.Split(
+							TEXT(":"), &PerformCode, &PerformDetail))
+					{
+						PerformCode.TrimStartAndEndInline();
+					}
+					const FString PublicSelector = !Id.IsEmpty()
+						? TEXT("id(") + Id + TEXT(")")
+						: TEXT("name(") + Name + TEXT(")");
+					const FString LocationDetail = FString::Printf(
+						TEXT("node=%s,selector=%s"),
+						*StableNodeId,
+						*PublicSelector);
 					SetError(
 						OutError,
-						PerformError.IsEmpty()
+						PerformCode.IsEmpty()
 							? FString(TEXT(
 								"blueprint_action_candidate_create_failed"))
-							: PerformError);
+							: PerformCode,
+						PerformDetail.IsEmpty()
+							? LocationDetail
+							: LocationDetail + TEXT(",cause=") + PerformDetail);
 					return nullptr;
 				}
 				if (!Node || Node->GetGraph() != &Graph)
@@ -2036,6 +2074,7 @@ namespace UeAgentBlueprintAuthoring
 			const TSharedPtr<const FJsonObject>& Spec,
 			TMap<FString, UEdGraphNode*>& OutNodeIds,
 			FMutationCounters& OutCounters,
+			const bool bAllowScratchCandidateRebind,
 			FString& OutError)
 		{
 			EOperation Operation;
@@ -2077,7 +2116,13 @@ namespace UeAgentBlueprintAuthoring
 					SetError(OutError, TEXT("blueprint_node_type_missing"), Id);
 					return false;
 				}
-				Node = CreateNode(Blueprint, Graph, Spec, Kind, OutError);
+				Node = CreateNode(
+					Blueprint,
+					Graph,
+					Spec,
+					Kind,
+					bAllowScratchCandidateRebind,
+					OutError);
 				if (!Node) return false;
 				FGuid DesiredGuid;
 				bool bHasDesiredGuid = false;
@@ -2256,6 +2301,7 @@ namespace UeAgentBlueprintAuthoring
 			const TSharedPtr<const FJsonObject>& Spec,
 			FMutationCounters& OutCounters,
 			bool& bOutNeedsCompile,
+			const bool bAllowScratchCandidateRebind,
 			FString& OutError)
 		{
 			EOperation Operation;
@@ -2343,15 +2389,134 @@ namespace UeAgentBlueprintAuthoring
 			if (!GetObjectMap(Spec, TEXT("nodes"), Nodes, bNodesPresent, OutError)) return false;
 			if (bNodesPresent)
 			{
+				struct FPendingContextNode
+				{
+					TSharedPtr<const FJsonObject> Spec;
+					FGuid DependencyGuid;
+					FString DependencyText;
+				};
+				TArray<TSharedPtr<const FJsonObject>> IndependentNodes;
+				TArray<FPendingContextNode> ContextNodes;
 				for (const FStableMapEntry& NodeEntry : Nodes)
 				{
 					const TSharedPtr<const FJsonObject> NodeSpec = MakeStableMapSpec(
 						NodeEntry, EStableMapIdentity::Node, OutError);
-					if (!NodeSpec.IsValid()
-						|| !ApplyNodeSpec(Blueprint, *Graph, NodeSpec, NodeIds, OutCounters, OutError))
+					if (!NodeSpec.IsValid())
 					{
 						return false;
 					}
+					const TSharedPtr<const FJsonObject> CandidateContext =
+						GetObject(NodeSpec, TEXT("candidate_context"));
+					if (NodeSpec->HasField(TEXT("candidate_context"))
+						&& !CandidateContext.IsValid())
+					{
+						SetError(
+							OutError,
+							TEXT("blueprint_surface_candidate_context_invalid"),
+							NodeEntry.Key);
+						return false;
+					}
+					FString DependencyText;
+					TryGetString(
+						CandidateContext, TEXT("node_guid"), DependencyText);
+					DependencyText.TrimStartAndEndInline();
+					if (DependencyText.IsEmpty())
+					{
+						IndependentNodes.Add(NodeSpec);
+						continue;
+					}
+					FGuid DependencyGuid;
+					if (!FGuid::Parse(DependencyText, DependencyGuid)
+						|| !DependencyGuid.IsValid())
+					{
+						SetError(
+							OutError,
+							TEXT("blueprint_surface_candidate_context_node_guid_invalid"),
+							DependencyText);
+						return false;
+					}
+					ContextNodes.Add(
+						{NodeSpec, DependencyGuid, DependencyText});
+				}
+
+				for (const TSharedPtr<const FJsonObject>& NodeSpec : IndependentNodes)
+				{
+					if (!ApplyNodeSpec(
+							Blueprint, *Graph, NodeSpec, NodeIds,
+							OutCounters, bAllowScratchCandidateRebind,
+							OutError))
+					{
+						return false;
+					}
+				}
+
+				auto GraphContainsGuid = [Graph](const FGuid& Guid)
+				{
+					return Graph->Nodes.ContainsByPredicate(
+						[&Guid](const UEdGraphNode* Node)
+						{
+							return Node && Node->NodeGuid == Guid;
+						});
+				};
+				while (!ContextNodes.IsEmpty())
+				{
+					bool bProgress = false;
+					for (int32 Index = ContextNodes.Num() - 1; Index >= 0; --Index)
+					{
+						if (!GraphContainsGuid(ContextNodes[Index].DependencyGuid))
+						{
+							continue;
+						}
+						if (!ApplyNodeSpec(
+								Blueprint, *Graph, ContextNodes[Index].Spec,
+								NodeIds, OutCounters,
+								bAllowScratchCandidateRebind, OutError))
+						{
+							return false;
+						}
+						ContextNodes.RemoveAt(Index);
+						bProgress = true;
+					}
+					if (bProgress)
+					{
+						continue;
+					}
+
+					TSet<FGuid> PendingProducerGuids;
+					for (const FPendingContextNode& Pending : ContextNodes)
+					{
+						FGuid ProducerGuid;
+						bool bHasProducerGuid = false;
+						if (!ParseGuidFields(
+								Pending.Spec,
+								{TEXT("guid"), TEXT("node_guid"), TEXT("ue_node_guid")},
+								ProducerGuid,
+								bHasProducerGuid,
+								OutError))
+						{
+							return false;
+						}
+						if (bHasProducerGuid)
+						{
+							PendingProducerGuids.Add(ProducerGuid);
+						}
+					}
+					for (const FPendingContextNode& Pending : ContextNodes)
+					{
+						if (!PendingProducerGuids.Contains(Pending.DependencyGuid))
+						{
+							SetError(
+								OutError,
+								TEXT("blueprint_surface_candidate_context_node_missing"),
+								Pending.DependencyText);
+							return false;
+						}
+					}
+					SetError(
+						OutError,
+						TEXT("blueprint_surface_candidate_context_dependency_cycle"),
+						ContextNodes[0].DependencyText);
+					return false;
 				}
 			}
 
@@ -2381,6 +2546,7 @@ namespace UeAgentBlueprintAuthoring
 			const TArray<FStableMapEntry>& Entries,
 			FMutationCounters& OutCounters,
 			bool& bOutNeedsCompile,
+			const bool bAllowScratchCandidateRebind,
 			FString& OutError)
 		{
 			for (const FStableMapEntry& Entry : Entries)
@@ -2388,7 +2554,9 @@ namespace UeAgentBlueprintAuthoring
 				const TSharedPtr<const FJsonObject> Spec = MakeStableMapSpec(
 					Entry, EStableMapIdentity::Graph, OutError);
 				if (!Spec.IsValid()
-					|| !ApplyGraphSpec(Blueprint, Spec, OutCounters, bOutNeedsCompile, OutError))
+					|| !ApplyGraphSpec(
+						Blueprint, Spec, OutCounters, bOutNeedsCompile,
+						bAllowScratchCandidateRebind, OutError))
 				{
 					return false;
 				}
@@ -2465,6 +2633,7 @@ namespace UeAgentBlueprintAuthoring
 			const TSharedPtr<const FJsonObject>& Extension,
 			FMutationCounters& OutCounters,
 			bool& bOutNeedsCompile,
+			const bool bAllowScratchCandidateRebind,
 			const bool bFinalizeDefaults,
 			FString& OutError)
 		{
@@ -2544,7 +2713,13 @@ namespace UeAgentBlueprintAuthoring
 			bool bGraphsPresent = false;
 			if (!GetObjectMap(Extension, TEXT("graphs"), Graphs, bGraphsPresent, OutError)) return false;
 			if (bGraphsPresent
-				&& !ApplyGraphs(Blueprint, Graphs, OutCounters, bOutNeedsCompile, OutError))
+				&& !ApplyGraphs(
+					Blueprint,
+					Graphs,
+					OutCounters,
+					bOutNeedsCompile,
+					bAllowScratchCandidateRebind,
+					OutError))
 			{
 				return false;
 			}
@@ -2622,6 +2797,11 @@ namespace UeAgentBlueprintAuthoring
 	{
 		OutMutation.Reset();
 		OutExpectedCounters = FMutationCounters();
+		FBlueprintActionDatabase::Get().RefreshAssetActions(&ScratchBlueprint);
+		ON_SCOPE_EXIT
+		{
+			FBlueprintActionDatabase::Get().ClearAssetActions(&ScratchBlueprint);
+		};
 		TUniquePtr<FImpl> NewImpl = MakeUnique<FImpl>();
 		NewImpl->Extension = ProviderExtension;
 		if (!ApplyDocument(
@@ -2629,6 +2809,7 @@ namespace UeAgentBlueprintAuthoring
 			ProviderExtension,
 			OutExpectedCounters,
 			NewImpl->bRequiresCompile,
+			true,
 			true,
 			OutError))
 		{
@@ -2647,7 +2828,14 @@ namespace UeAgentBlueprintAuthoring
 		OutCounters = FMutationCounters();
 		bool bNeedsCompile = false;
 		return Impl.IsValid()
-			&& ApplyDocument(Blueprint, Impl->Extension, OutCounters, bNeedsCompile, false, OutError);
+			&& ApplyDocument(
+				Blueprint,
+				Impl->Extension,
+				OutCounters,
+				bNeedsCompile,
+				false,
+				false,
+				OutError);
 	}
 
 	bool FPreparedBlueprintMutation::FinalizeAfterCompile(

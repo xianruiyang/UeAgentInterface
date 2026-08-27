@@ -218,6 +218,8 @@ namespace UE::UAI::ContentDiscovery
 			&& IsExactText(StateLayer)
 			&& IsExactText(Revision)
 			&& IsExactText(DetailCommandId)
+			&& IsExactText(DetailTargetIdentity)
+			&& DetailInput.IsValid()
 			&& IsExactText(MatchReason)
 			&& !SupportedOperations.IsEmpty();
 	}

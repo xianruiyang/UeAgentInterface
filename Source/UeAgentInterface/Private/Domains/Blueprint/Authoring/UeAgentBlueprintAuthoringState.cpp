@@ -28,6 +28,7 @@
 #include "K2Node_ExecutionSequence.h"
 #include "K2Node_FunctionEntry.h"
 #include "K2Node_FunctionResult.h"
+#include "K2Node_PromotableOperator.h"
 #include "K2Node_Tunnel.h"
 #include "K2Node_Variable.h"
 #include "K2Node_VariableSet.h"
@@ -323,6 +324,14 @@ namespace UeAgentBlueprintAuthoring
 					{
 						State->SetStringField(TEXT("function_owner_class"), OwnerClass->GetPathName());
 					}
+				}
+				if (const UK2Node_PromotableOperator* Operator =
+					Cast<UK2Node_PromotableOperator>(&Node))
+				{
+					State->SetStringField(
+						TEXT("operation_name"), Operator->GetOperationName().ToString());
+					State->SetStringField(
+						TEXT("node_class"), Operator->GetClass()->GetPathName());
 				}
 			}
 			else if (const UK2Node_Variable* Variable = Cast<UK2Node_Variable>(&Node))

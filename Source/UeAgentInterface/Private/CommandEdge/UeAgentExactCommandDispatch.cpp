@@ -1,5 +1,7 @@
 #include "CommandEdge/UeAgentExactCommandDispatch.h"
 
+#include "Core/Contract/Command/UeAgentCommandLifecyclePolicy.h"
+
 namespace UE::UAI::CommandEdge
 {
 	using namespace CommandContract;
@@ -26,8 +28,8 @@ namespace UE::UAI::CommandEdge
 				OutError = TEXT("command_handler_unknown");
 				return false;
 			}
-			if (Contract->GetAvailability()
-				!= EUeAgentCommandAvailability::Enabled)
+			if (!CommandLifecycle::IsExecutable(
+					Contract->GetAvailability()))
 			{
 				OutError = TEXT("command_handler_disabled");
 				return false;
@@ -48,8 +50,8 @@ namespace UE::UAI::CommandEdge
 		for (const FUeAgentFrozenCommandContract& Contract :
 			Registry->GetContracts())
 		{
-			if (Contract.GetAvailability()
-					== EUeAgentCommandAvailability::Enabled
+			if (CommandLifecycle::IsExecutable(
+					Contract.GetAvailability())
 				&& !ById.Contains(Contract.GetCommandId()))
 			{
 				OutError = TEXT("command_handler_missing");
@@ -96,8 +98,8 @@ namespace UE::UAI::CommandEdge
 				TEXT("command_not_registered_exact"),
 				TEXT("the complete command identity is not registered"));
 		}
-		if (Contract->GetAvailability()
-			!= EUeAgentCommandAvailability::Enabled)
+		if (!CommandLifecycle::IsExecutable(
+				Contract->GetAvailability()))
 		{
 			return FUeAgentCommandResult::ProtocolError(
 				Request.GetCorrelationId(),

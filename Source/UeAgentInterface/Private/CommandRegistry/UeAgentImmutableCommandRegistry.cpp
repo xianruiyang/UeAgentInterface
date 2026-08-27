@@ -350,6 +350,8 @@ namespace UE::UAI::CommandRegistry
 			if (Declaration.Availability
 					!= EUeAgentCommandAvailability::Enabled
 				&& Declaration.Availability
+					!= EUeAgentCommandAvailability::Dormant
+				&& Declaration.Availability
 					!= EUeAgentCommandAvailability::Disabled)
 			{
 				OutError = TEXT("command_contract_availability_invalid");
@@ -416,9 +418,17 @@ namespace UE::UAI::CommandRegistry
 		const TCHAR* AvailabilityText(
 			const EUeAgentCommandAvailability Value)
 		{
-			return Value == EUeAgentCommandAvailability::Enabled
-				? TEXT("enabled")
-				: TEXT("disabled");
+			switch (Value)
+			{
+			case EUeAgentCommandAvailability::Enabled:
+				return TEXT("enabled");
+			case EUeAgentCommandAvailability::Dormant:
+				return TEXT("dormant");
+			case EUeAgentCommandAvailability::Disabled:
+				return TEXT("disabled");
+			default:
+				return TEXT("");
+			}
 		}
 
 		const TCHAR* SideEffectText(

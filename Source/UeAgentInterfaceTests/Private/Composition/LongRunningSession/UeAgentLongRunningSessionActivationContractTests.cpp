@@ -288,6 +288,7 @@ namespace
 		: public CompileBuildJob::IUeAgentCompileBuildJobPortFactory
 		, public EditorSessionOperation::IUeAgentEditorSessionOperationPortFactory
 		, public CaptureMediaLongJob::IUeAgentCaptureMediaLongJobPortFactory
+		, public PieRuntimeDebug::IUeAgentPieRuntimeScenarioPortFactory
 	{
 	public:
 		bool TryCreateOperationPort(
@@ -309,6 +310,15 @@ namespace
 
 		bool TryCreateOperationPort(
 			const CaptureMediaLongJob::FUeAgentCaptureMediaLongJobTypedRequest& Request,
+			TSharedPtr<ILongRunningOperationPort, ESPMode::ThreadSafe>& OutPort,
+			FExecutionMutationError& OutError) override
+		{
+			return AddPort(OutPort);
+		}
+
+		bool TryCreateOperationPort(
+			const PieRuntimeDebug::FUeAgentPieRuntimeScenarioTypedRequest& Request,
+			const FLongRunningOperationRequest& OperationRequest,
 			TSharedPtr<ILongRunningOperationPort, ESPMode::ThreadSafe>& OutPort,
 			FExecutionMutationError& OutError) override
 		{
@@ -419,6 +429,7 @@ bool FUeAgentLongRunningSessionPublicActivationContractTest::RunTest(
 	const TSet<FString> ExpectedCommandIds = {
 		TEXT("job.compile_build"),
 		TEXT("editor.session"),
+		TEXT("runtime.scenario.execute"),
 		TEXT("capture.image.execute"),
 		TEXT("capture.media.execute"),
 		TEXT("capture.render.execute"),
@@ -430,7 +441,7 @@ bool FUeAgentLongRunningSessionPublicActivationContractTest::RunTest(
 		TEXT("operation.reconcile"),
 		TEXT("operation.release"),
 	};
-	TestEqual(TEXT("exact public command count"), Commands.Num(), 12);
+	TestEqual(TEXT("exact public command count"), Commands.Num(), 13);
 	for (const FString& CommandId : ExpectedCommandIds)
 	{
 		TestTrue(
@@ -499,7 +510,7 @@ bool FUeAgentLongRunningSessionPublicActivationContractTest::RunTest(
 		TestTrue(TEXT("command has exact example params"),
 			Command->HasTypedField<EJson::Object>(TEXT("example_params")));
 	}
-	TestEqual(TEXT("six start commands"), StartCount, 6);
+	TestEqual(TEXT("seven start commands"), StartCount, 7);
 	TestEqual(TEXT("six lifecycle commands"), LifecycleCount, 6);
 	TestEqual(
 		TEXT("start count matches fixture"),
@@ -746,6 +757,8 @@ bool FUeAgentLongRunningSessionCulturePreviewContextContractTest::RunTest(
 			StaticCastSharedRef<
 				CaptureMediaLongJob::IUeAgentCaptureMediaLongJobPortFactory>(
 					Factories),
+			StaticCastSharedRef<
+				PieRuntimeDebug::IUeAgentPieRuntimeScenarioPortFactory>(Factories),
 			Runtime,
 			RuntimeError));
 	if (!Runtime.IsValid())
@@ -846,14 +859,14 @@ bool FUeAgentLongRunningSessionPublicCommandHandlersTest::RunTest(
 			OperationPort,
 			Handlers,
 			Error));
-	TestEqual(TEXT("handler count"), Handlers.Num(), 12);
+	TestEqual(TEXT("handler count"), Handlers.Num(), 13);
 
 	TSharedPtr<const UE::UAI::CommandContract::
 		FUeAgentCommandContractRegistry> Registry;
 	TestTrue(TEXT("production command registry composes for handler test"),
 		TryCreateLongRunningSessionProductionCommandContractRegistry(
 			Registry, Error));
-	if (!Registry.IsValid() || Handlers.Num() != 12)
+	if (!Registry.IsValid() || Handlers.Num() != 13)
 	{
 		AddError(TEXT("long_running_session_handlers_unavailable:") + Error);
 		return false;
@@ -955,6 +968,8 @@ bool FUeAgentLongRunningSessionPublicCommandHandlersTest::RunTest(
 			StaticCastSharedRef<
 				CaptureMediaLongJob::IUeAgentCaptureMediaLongJobPortFactory>(
 					Factories),
+			StaticCastSharedRef<
+				PieRuntimeDebug::IUeAgentPieRuntimeScenarioPortFactory>(Factories),
 			Runtime,
 			RuntimeError));
 	if (!Runtime.IsValid())

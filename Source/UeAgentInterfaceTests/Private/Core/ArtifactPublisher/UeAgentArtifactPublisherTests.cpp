@@ -264,6 +264,38 @@ bool FUeAgentArtifactPublisherStageReparseReceiptTest::RunTest(
 }
 
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(
+	FUeAgentArtifactPublisherTransientDirectoryCommitRetryTest,
+	"UeAgentInterface.Core.ArtifactPublisher.TransientDirectoryCommitRetry",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FUeAgentArtifactPublisherTransientDirectoryCommitRetryTest::RunTest(
+	const FString& Parameters)
+{
+	const FString Root = TestRoot(TEXT("transient_directory_commit_retry"));
+	const FString Final = Root / TEXT("final");
+	ResetOwnedRoot(Root);
+	FUeAgentResourceTracker Tracker = MakeTracker();
+	FArtifactPublishReceipt Receipt;
+	FArtifactPublishError Error;
+	{
+		TestHooks::FScopedPublishFailure Failure(
+			TestHooks::EFailurePoint::FirstMoveAttempt);
+		TestTrue(
+			TEXT("a transient first atomic directory rename is retried"),
+			Publish(Final, BuildPlan(), Tracker, Receipt, Error));
+	}
+	TestTrue(
+		TEXT("the complete directory becomes the final workspace"),
+		IFileManager::Get().DirectoryExists(*Final));
+	TestTrue(
+		TEXT("the final workspace has its owner marker"),
+		IFileManager::Get().FileExists(
+			*(Final / TEXT(".uai-export-owner.json"))));
+	ResetOwnedRoot(Root);
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(
 	FUeAgentArtifactPublisherReadOnlyFinalProtectionTest,
 	"UeAgentInterface.Core.ArtifactPublisher.ReadOnlyFinalProtection",
 	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)

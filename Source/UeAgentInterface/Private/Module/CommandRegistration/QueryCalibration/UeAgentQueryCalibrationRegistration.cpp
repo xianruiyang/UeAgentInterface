@@ -63,6 +63,7 @@ namespace UE::UAI::Module::CommandRegistration::QueryCalibration
 				Field(TEXT("intent"), TEXT("string"), true, TEXT("Unknown-name intent expressed in ordinary task language.")),
 				Field(TEXT("limit"), TEXT("integer"), false, TEXT("Maximum candidates from 1 through 8; defaults to 3.")),
 				Field(TEXT("cursor"), TEXT("integer"), false, TEXT("Non-negative continuation cursor; defaults to 0.")),
+				Field(TEXT("mode"), TEXT("string"), false, TEXT("active by default; compatibility also exposes dormant development commands.")),
 			};
 			Result.ResultFields = {
 				Field(TEXT("candidates"), TEXT("array"), true, TEXT("Small ranked candidates with reasons, exact command/hash identities and variant_id when one directly callable variant matched.")),
@@ -71,13 +72,14 @@ namespace UE::UAI::Module::CommandRegistration::QueryCalibration
 			Result.Errors = {
 				Error(TEXT("command_intent_missing"), TEXT("The intent contains no searchable term.")),
 				Error(TEXT("command_search_page_invalid"), TEXT("The limit or cursor is outside the public bound.")),
+				Error(TEXT("command_search_mode_invalid"), TEXT("The discovery mode is neither active nor compatibility.")),
 				Error(TEXT("query_authority_required"), TEXT("The authenticated caller lacks read authority.")),
 			};
 			Result.Purpose.Summary = TEXT("Find a small set of exact UAI command candidates from an unknown-name intent.");
 			Result.Purpose.Target = TEXT("The immutable current command registry and its complete purpose contracts.");
 			Result.Purpose.Preconditions = {TEXT("The caller is authenticated and has uai:query authority.")};
-			Result.Purpose.ParameterGuidance = TEXT("Describe the intended task; use limit and cursor only for bounded paging.");
-			Result.Purpose.ResultGuidance = TEXT("Use a candidate command_id and contract_hash unchanged with query.command.detail; also forward variant_id unchanged when present.");
+			Result.Purpose.ParameterGuidance = TEXT("Describe the intended task; use active mode normally. Use compatibility mode only to inspect a dormant development command after deciding that its HJSON successor is insufficient.");
+			Result.Purpose.ResultGuidance = TEXT("Use a candidate command_id and contract_hash unchanged with query.command.detail; dormant candidates identify successors and require explicit user confirmation before execution.");
 			Result.Purpose.FailureGuidance = TEXT("Invalid intent or paging fails without fuzzy execution or fallback.");
 			Result.Purpose.SideEffectGuidance = TEXT("Read-only registry lookup; no Editor, asset, world or external state changes.");
 			Result.Purpose.MinimumExample = TEXT("client.query.command_search('inspect current editor runtime', limit=3)");
@@ -104,6 +106,10 @@ namespace UE::UAI::Module::CommandRegistration::QueryCalibration
 				Field(TEXT("result_fields"), TEXT("array"), true, TEXT("Exact public result field declarations.")),
 				Field(TEXT("tutorial_references"), TEXT("array"), true, TEXT("Stable public SDK and installed-skill tutorial references.")),
 				Field(TEXT("invocation"), TEXT("object"), true, TEXT("Named, generic, exact and CLI invocation templates for this exact identity.")),
+				Field(TEXT("lifecycle_status"), TEXT("string"), true, TEXT("active or dormant for this exact command.")),
+				Field(TEXT("successor_command_ids"), TEXT("array"), true, TEXT("Preferred active successors for a dormant command.")),
+				Field(TEXT("lifecycle_reason"), TEXT("string"), true, TEXT("Development-only reason for the current lifecycle state; empty for active commands.")),
+				Field(TEXT("requires_user_confirmation"), TEXT("boolean"), true, TEXT("True when compatibility execution requires explicit user confirmation.")),
 			};
 			Result.Errors = {
 				Error(TEXT("command_not_registered_exact"), TEXT("The complete command identity does not exist.")),

@@ -17,6 +17,7 @@
 #include "DomainAdapters/AnimationRigGraph/UeAgentAnimationRigGraphStructureCapture.h"
 #include "DomainAdapters/BlueprintUmgGraph/UeAgentBlueprintUmgGraphNativeHook.h"
 #include "DomainAdapters/MaterialNiagaraGraph/UeAgentMaterialNiagaraGraphNativeHook.h"
+#include "DomainAdapters/ModelingGeometryEffect/UeAgentModelingGeometryEffectCarrierRevision.h"
 #include "Domains/Niagara/Authoring/UeAgentNiagaraStageModuleAuthoring.h"
 #include "Dom/JsonObject.h"
 #include "Dom/JsonValue.h"
@@ -26,6 +27,7 @@
 #include "Engine/Blueprint.h"
 #include "Engine/SCS_Node.h"
 #include "Engine/SimpleConstructionScript.h"
+#include "Engine/StaticMesh.h"
 #include "EnvironmentQuery/EnvQuery.h"
 #include "EnvironmentQuery/EnvQueryGenerator.h"
 #include "EnvironmentQuery/EnvQueryOption.h"
@@ -153,6 +155,10 @@ namespace UE::UAI::DomainAdapters::ContentGraphRead
 			if (Owner.IsA<UHLODLayer>())
 			{
 				return TEXT("world_hlod");
+			}
+			if (Owner.IsA<UStaticMesh>())
+			{
+				return TEXT("modeling_geometry");
 			}
 			return FString();
 		}
@@ -3263,6 +3269,29 @@ namespace UE::UAI::DomainAdapters::ContentGraphRead
 		}
 		OutCapture.Owner = &Owner;
 		OutCapture.DomainId = ResolvedDomain;
+		if (DomainAdapters::ModelingGeometryEffect::
+				IsModelingGeometryCarrier(Owner))
+		{
+			TOptional<FUeAgentStateRevision> CarrierRevision;
+			ExecutionMutation::FExecutionMutationError CarrierError;
+			if (!DomainAdapters::ModelingGeometryEffect::
+					TryReadModelingGeometryCarrierRevision(
+						Owner.GetPathName(),
+						Owner,
+						CarrierRevision,
+						CarrierError)
+				|| !CarrierRevision.IsSet())
+			{
+				return Fail(
+					OutError,
+					CarrierError.GetCode().IsEmpty()
+						? FString(TEXT("content_graph_read_carrier_revision_failed"))
+						: CarrierError.GetCode(),
+					Owner.GetPathName(),
+					CarrierError.GetDetail());
+			}
+			OutCapture.CanonicalRevision = CarrierRevision;
+		}
 		if (ResolvedDomain == TEXT("blueprint"))
 		{
 			return CaptureBlueprint(

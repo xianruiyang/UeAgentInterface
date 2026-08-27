@@ -3,6 +3,7 @@
 #include "Core/HjsonWorkspace/ImportInitialization/UeAgentHjsonDomainProviderRegistry.h"
 #include "Core/HjsonWorkspace/UeAgentAuthoringComposition.h"
 #include "Core/Contract/UeAgentCommandJson.h"
+#include "Commands/PaletteSearch/UeAgentPaletteSearchTypes.h"
 #include "Components/SceneComponent.h"
 #include "Dom/JsonObject.h"
 #include "Dom/JsonValue.h"
@@ -11,8 +12,12 @@
 #include "Engine/SCS_Node.h"
 #include "Engine/SimpleConstructionScript.h"
 #include "EdGraph/EdGraph.h"
+#include "EdGraph/EdGraphPin.h"
 #include "GameFramework/Actor.h"
 #include "K2Node_CallFunction.h"
+#include "K2Node_Event.h"
+#include "K2Node_IfThenElse.h"
+#include "Kismet/KismetMathLibrary.h"
 #include "Kismet2/KismetEditorUtilities.h"
 #include "Module/CommandRegistration/Active/UeAgentActiveCommandComposition.h"
 #include "Utilities/AuthoringCore/UeAgentAuthoringIdentity.h"
@@ -566,6 +571,163 @@ bool FUeAgentStrictV2T14BlueprintSurfacesTest::RunTest(
 		MakeRotatorCount, 2);
 	TestEqual(TEXT("independent readback retains two distinct node GUIDs"),
 		MakeRotatorGuids.Num(), 2);
+
+	UBlueprint* OrderedBlueprint = FKismetEditorUtilities::CreateBlueprint(
+		AActor::StaticClass(), GetTransientPackage(),
+		*FString(TEXT("BP_T14_Ordered_") + Suffix), BPTYPE_Normal,
+		UBlueprint::StaticClass(), UBlueprintGeneratedClass::StaticClass(),
+		TEXT("T14"));
+	UEdGraph* OrderedGraph = OrderedBlueprint
+		&& !OrderedBlueprint->UbergraphPages.IsEmpty()
+		? OrderedBlueprint->UbergraphPages[0]
+		: nullptr;
+	if (!TestNotNull(TEXT("the ordered mutation fixture exists"), OrderedBlueprint)
+		|| !TestNotNull(TEXT("the ordered mutation fixture has EventGraph"), OrderedGraph))
+	{
+		return false;
+	}
+	const FString SourceGuidText =
+		TEXT("11111111-1111-1111-1111-111111111111");
+	const FString CandidateGuidText =
+		TEXT("00000000-0000-0000-0000-000000000001");
+	FGuid SourceGuid;
+	FGuid CandidateGuid;
+	if (!TestTrue(TEXT("the source test GUID is valid"),
+			FGuid::Parse(SourceGuidText, SourceGuid))
+		|| !TestTrue(TEXT("the candidate test GUID is valid"),
+			FGuid::Parse(CandidateGuidText, CandidateGuid)))
+	{
+		return false;
+	}
+	UK2Node_Event* OldSourceEvent = NewObject<UK2Node_Event>(OrderedGraph);
+	OldSourceEvent->NodeGuid = SourceGuid;
+	OldSourceEvent->EventReference.SetExternalMember(
+		GET_FUNCTION_NAME_CHECKED(AActor, ReceiveTick),
+		AActor::StaticClass());
+	OrderedGraph->AddNode(OldSourceEvent, false, false);
+	OldSourceEvent->PostPlacedNewNode();
+	OldSourceEvent->AllocateDefaultPins();
+
+	UeAgentPaletteSearch::FSearchParams CandidateParams;
+	CandidateParams.CatalogType = TEXT("blueprint_node");
+	CandidateParams.AssetPath = OrderedBlueprint->GetPathName();
+	CandidateParams.GraphName = OrderedGraph->GetName();
+	CandidateParams.NodeGuid = SourceGuidText;
+	CandidateParams.PinName = TEXT("then");
+	CandidateParams.SearchText = TEXT("Branch");
+	CandidateParams.bContextSensitive = true;
+	CandidateParams.Limit = 64;
+	UeAgentPaletteSearch::FSearchResult CandidateResult;
+	FString CandidateError;
+	if (!TestTrue(TEXT("the old source exposes the real Branch action"),
+		UeAgentPaletteSearch::ExecuteSearch(
+			CandidateParams, CandidateResult, CandidateError)))
+	{
+		AddError(CandidateError);
+		return false;
+	}
+	TArray<const UeAgentPaletteSearch::FCandidate*> BranchCandidates;
+	for (const UeAgentPaletteSearch::FCandidate& CandidateItem
+		: CandidateResult.MatchingCandidates)
+	{
+		const FString* NodeClass =
+			CandidateItem.AuthoringSelectors.Find(TEXT("node_class"));
+		if (NodeClass
+			&& *NodeClass
+				== UK2Node_IfThenElse::StaticClass()->GetPathName())
+		{
+			BranchCandidates.Add(&CandidateItem);
+		}
+	}
+	if (!TestEqual(TEXT("the contextual Branch candidate is unique"),
+		BranchCandidates.Num(), 1))
+	{
+		return false;
+	}
+
+	const TSharedRef<FJsonObject> SourceNodeSpec = MakeShared<FJsonObject>();
+	SourceNodeSpec->SetStringField(TEXT("operation"), TEXT("create"));
+	SourceNodeSpec->SetStringField(TEXT("node_type"), TEXT("event"));
+	SourceNodeSpec->SetStringField(TEXT("event_name"), TEXT("ReceiveTick"));
+	SourceNodeSpec->SetStringField(
+		TEXT("event_class"), AActor::StaticClass()->GetPathName());
+	const TSharedRef<FJsonObject> CandidateSelector = MakeShared<FJsonObject>();
+	CandidateSelector->SetStringField(
+		TEXT("id"), BranchCandidates[0]->GetPublicId());
+	const TSharedRef<FJsonObject> CandidateContext = MakeShared<FJsonObject>();
+	CandidateContext->SetStringField(TEXT("node_guid"), SourceGuidText);
+	CandidateContext->SetStringField(TEXT("pin_name"), TEXT("then"));
+	const TSharedRef<FJsonObject> CandidateNodeSpec = MakeShared<FJsonObject>();
+	CandidateNodeSpec->SetStringField(TEXT("operation"), TEXT("create"));
+	CandidateNodeSpec->SetStringField(TEXT("node_type"), TEXT("native_action"));
+	CandidateNodeSpec->SetObjectField(TEXT("candidate"), CandidateSelector);
+	CandidateNodeSpec->SetObjectField(
+		TEXT("candidate_context"), CandidateContext);
+	const TSharedRef<FJsonObject> OrderedNodes = MakeShared<FJsonObject>();
+	OrderedNodes->SetObjectField(CandidateGuidText, CandidateNodeSpec);
+	OrderedNodes->SetObjectField(SourceGuidText, SourceNodeSpec);
+	const TSharedRef<FJsonObject> OrderedGraphHeader = MakeShared<FJsonObject>();
+	OrderedGraphHeader->SetStringField(TEXT("name"), OrderedGraph->GetName());
+	OrderedGraphHeader->SetStringField(TEXT("graph_kind"), TEXT("event_graph"));
+	OrderedGraphHeader->SetStringField(
+		TEXT("guid"),
+		OrderedGraph->GraphGuid.ToString(EGuidFormats::DigitsWithHyphensLower));
+	const TSharedRef<FJsonObject> OrderedGraphSpec = MakeShared<FJsonObject>();
+	OrderedGraphSpec->SetStringField(TEXT("operation"), TEXT("replace"));
+	OrderedGraphSpec->SetObjectField(TEXT("graph"), OrderedGraphHeader);
+	OrderedGraphSpec->SetObjectField(TEXT("nodes"), OrderedNodes);
+	const TSharedRef<FJsonObject> OrderedGraphs = MakeShared<FJsonObject>();
+	OrderedGraphs->SetObjectField(
+		OrderedGraph->GraphGuid.ToString(EGuidFormats::DigitsWithHyphensLower),
+		OrderedGraphSpec);
+	const TSharedRef<FJsonObject> OrderedExtension = MakeShared<FJsonObject>();
+	OrderedExtension->SetObjectField(TEXT("graphs"), OrderedGraphs);
+	TestTrue(TEXT("the dependent candidate key sorts before its source key"),
+		CandidateGuidText.Compare(SourceGuidText) < 0);
+	Mutation.Reset();
+	Counters = {};
+	Error.Reset();
+	if (!TestTrue(
+		TEXT("replace creates the source before its contextual native candidate"),
+		UeAgentBlueprintAuthoring::FPreparedBlueprintMutation::Prepare(
+			*OrderedBlueprint,
+			OrderedExtension,
+			Mutation,
+			Counters,
+			Error)))
+	{
+		AddError(Error);
+		return false;
+	}
+	UEdGraphNode* RebuiltSource = nullptr;
+	UK2Node_IfThenElse* CreatedBranch = nullptr;
+	for (UEdGraphNode* Node : OrderedGraph->Nodes)
+	{
+		if (Node && Node->NodeGuid == SourceGuid)
+		{
+			RebuiltSource = Node;
+		}
+		if (Node && Node->NodeGuid == CandidateGuid)
+		{
+			CreatedBranch = Cast<UK2Node_IfThenElse>(Node);
+		}
+	}
+	TestNotNull(TEXT("replace rebuilds the contextual source GUID"), RebuiltSource);
+	TestNotNull(TEXT("replace creates the native Branch candidate"), CreatedBranch);
+	TestTrue(TEXT("replace does not retain the removed source object"),
+		RebuiltSource != OldSourceEvent);
+	if (RebuiltSource && CreatedBranch)
+	{
+		UEdGraphPin* ThenPin = RebuiltSource->FindPin(FName(TEXT("then")));
+		UEdGraphPin* ExecutePin = CreatedBranch->GetExecPin();
+		TestNotNull(TEXT("the rebuilt source has its then pin"), ThenPin);
+		TestNotNull(TEXT("the native Branch has its execute pin"), ExecutePin);
+		if (ThenPin && ExecutePin)
+		{
+			TestTrue(TEXT("the real pin-context candidate path reconnects"),
+				ThenPin->LinkedTo.Contains(ExecutePin));
+		}
+	}
 	return !HasAnyErrors();
 #endif
 }

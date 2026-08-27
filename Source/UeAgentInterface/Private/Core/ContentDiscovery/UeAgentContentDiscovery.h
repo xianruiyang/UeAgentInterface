@@ -3,6 +3,8 @@
 #include "CoreMinimal.h"
 #include "Templates/SharedPointer.h"
 
+class FJsonObject;
+
 namespace UE::UAI::ContentDiscovery
 {
 	enum class EContentDiscoveryMatchMode : uint8
@@ -59,6 +61,8 @@ namespace UE::UAI::ContentDiscovery
 		FString StateLayer;
 		FString Revision;
 		FString DetailCommandId;
+		FString DetailTargetIdentity;
+		TSharedPtr<FJsonObject> DetailInput;
 		FString MatchReason;
 		TArray<FString> SupportedOperations;
 		TArray<FString> SearchTerms;

@@ -461,6 +461,11 @@ bool FUeAgentStrictV2T05ActiveVariantDiscoveryTest::RunTest(
 	};
 	const TArray<FVariantExpectation> Expectations = {
 		{
+			TEXT("start a PIE runtime preview session"),
+			TEXT("editor.session"),
+			TEXT("policy:runtime-session:pie/v1"),
+		},
+		{
 			TEXT("set the current editor world context map"),
 			TEXT("editor.session"),
 			TEXT("policy:world-context:set-current/v1"),
@@ -547,6 +552,39 @@ bool FUeAgentStrictV2T05ActiveVariantDiscoveryTest::RunTest(
 		TestTrue(
 			TEXT("variant detail contains a minimal exact example"),
 			!Detail.Purpose.MinimumExample.IsEmpty());
+		if (Expectation.VariantId
+			== TEXT("policy:runtime-session:pie/v1"))
+		{
+			const TSharedPtr<FJsonObject>* SubjectSchema = nullptr;
+			const TSharedPtr<FJsonObject>* ParametersSchema = nullptr;
+			TestTrue(
+				TEXT("PIE variant exposes the exact runtime subject pattern"),
+				Properties
+					&& (*Properties)->TryGetObjectField(
+						TEXT("subject_ref"), SubjectSchema)
+					&& SubjectSchema
+					&& SubjectSchema->IsValid()
+					&& (*SubjectSchema)->GetStringField(TEXT("pattern"))
+						== TEXT(
+							"^runtime-subject:pie:(0|[1-9][0-9]*)$"));
+			TestTrue(
+				TEXT("PIE variant requires an empty parameters object"),
+				Properties
+					&& (*Properties)->TryGetObjectField(
+						TEXT("parameters"), ParametersSchema)
+					&& ParametersSchema
+					&& ParametersSchema->IsValid()
+					&& (*ParametersSchema)->GetBoolField(
+						TEXT("additionalProperties")) == false
+					&& (*ParametersSchema)->HasTypedField<EJson::Object>(
+						TEXT("properties")));
+			TestTrue(
+				TEXT("PIE variant example is directly executable"),
+				Detail.Purpose.MinimumExample.Contains(
+					TEXT("subject_ref='runtime-subject:pie:0'"))
+					&& Detail.Purpose.MinimumExample.Contains(
+						TEXT("parameters={}")));
+		}
 
 		const FString DetailParams = FString::Printf(
 			TEXT("{\"command_id\":\"%s\",\"contract_hash\":\"%s\",\"variant_id\":\"%s\"}"),

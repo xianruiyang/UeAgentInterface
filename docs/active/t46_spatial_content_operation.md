@@ -1,6 +1,6 @@
 # T46 Spatial-content operation authority
 
-T46 owns eight current public commands. Discover their current hashes and exact
+T46 owns six current public commands. Discover their current hashes and exact
 parameter schemas through `client.query.command_search(...)` and
 `client.query.command_detail(...)`, then invoke the default generated SDK methods:
 
@@ -11,129 +11,82 @@ client.mesh.transform_bake(...)
 client.reference.origin_resolve(...)
 client.world.object_align(...)
 client.world.object_snap_to_surface(...)
-client.world.object_transform_read(...)
-client.world.object_transform_update(...)
 ```
 
 The same identities are available through `uai-cli ... exec <command-id>`.
 There is no task-specific generated module, compatibility alias, direct HTTP
 route, or second spatial/origin implementation in the SDK.
 
-## Actor alignment
+## World transform ownership
 
-`world.object_align` has one public contract. Its required `alignment.kind`
-selects exactly one of four native mechanics:
+`world.object_transform.read` and `world.object_transform.update` are dormant
+public identities. Persisted Actor and Component transforms belong to the World
+HJSON owner:
 
-- `anchors`: provide `subject_anchor` and `reference_anchor` as explicit 3D
-  points. Their declared frames are converted before the actor delta is applied.
-- `bounds`: provide `axis`, `source_anchor`, and `target_anchor`; anchors are
-  `min`, `center`, or `max` on the real Actor component bounds.
-- `face`: provide signed `source_face` and `target_face`, such as `+x` and
-  `-x`, plus optional `offset_cm`. The signed face determines axis and bound.
-- `vertex`: optionally provide both vertex indices. If both are omitted, the
-  real StaticMesh world vertices must have one unique nearest pair; a tie fails
-  before mutation.
+- read a World with `content_graph.structure` or select exact Actor/Component
+  paths with `content_graph.items`;
+- change the selected transform in a `uai.world.edit/1` document and apply it
+  with `content_graph.import_workspace` and the exported revision;
+- obtain the exact Modeling carrier revision for a StaticMesh from its
+  content-graph read, or for an `ADynamicMeshActor` from the selected World HJSON
+  actor item's `carrier_revision`.
 
-Non-anchor modes require the exact `anchor_ref`. Every write supplies
-`subject_refs`, current `expected_revisions`, a three-dimensional
-`verify_frame`, and explicit spatial evidence. Use
-`client.world.object_transform_read(...)` after the operation for independent
-transform readback. Invalid frames, stale revisions, missing geometry,
-ambiguous nearest vertices, or incomplete mode fields fail before mutation.
+This retirement covers persisted authoring state. It does not define a PIE or
+runtime-state inspection protocol; that is a separate product surface.
 
-## Actor and StaticMesh readback
+Normal command search and generated named SDK methods hide both dormant
+identities. Development-only compatibility search uses
+`query.command.search` with `mode="compatibility"` and returns their lifecycle,
+active successors and user-confirmation requirement. If the active HJSON path
+cannot satisfy an authorized task, explain the exact gap and obtain explicit
+user agreement before using the guarded dormant SDK/CLI entry point. The
+original command contracts and C++ handlers remain executable; no per-command
+compatibility implementation is introduced.
 
-`world.object_transform.read` is the single revision-bearing read entry for the
-WorldSpatial operation family. Its exact target union is an Actor or a
-StaticMesh asset:
+## Actor alignment and surface snap
 
-- an Actor target returns its independently observed transform in the requested
-  convertible three-dimensional frame;
-- a StaticMesh target requires the identity `mesh.geometry.local`,
-  three-dimensional, centimeter frame and returns its real mesh-description
-  vertices plus any live component-placement observations.
+`world.object_align` retains four native alignment mechanics selected by
+`alignment.kind`: explicit anchors, bounds anchors, signed faces, or StaticMesh
+world vertices. `world.object_snap_to_surface` retains bounded Editor-world ray
+placement. These specialized operations are not generic transform CRUD.
 
-Both branches return the revision produced by the same WorldSpatial runtime and
-session that validates subsequent writes. A client can therefore pass that
-revision unchanged to the target's `expected_revision` entry. Other UObject
-types and non-local StaticMesh verify frames fail before any mutation. Durable
-`mesh.transform.bake` and `mesh.pivot.update` success includes package save;
-reloading the asset must preserve the observed geometry.
+Both commands accept optional `expected_revisions`. When the caller supplies
+them, the operation rejects stale state before mutation. When omitted, the
+operation freezes the current subject revisions at invocation and still performs
+its independent result verification. Invalid frames, missing geometry,
+ambiguous vertices, a failed trace, or conflicting fields fail before mutation.
+Use World HJSON for an additional persisted-state readback when required.
 
-## Mesh-element selection session
+## Mesh-element selection and durable mesh operations
 
-`mesh.element.select_by_ray` consumes the live selection state already owned by
-Modeling Tools Editor Mode. Activate that mode explicitly through
-`mesh.modeling_session(action="activate")`, establish and unlock the intended
-mesh target, then pass the exact `UPrimitiveComponent` object path in
-`context.selection_identities`. An Actor path is not a mesh-target identity.
-The viewport identity is exact, for example `level:0`; the command does not pick
-an implicit current viewport.
+`mesh.element.select_by_ray` consumes the live selection state owned by Modeling
+Tools Editor Mode. Activate the mode through
+`mesh.modeling_session(action="activate")`, establish the exact unlocked
+component target, and pass that component identity. The command neither activates
+the mode nor invents a second selection registry.
 
-Production resolution reuses the active
-`UModelingToolsEditorMode::GetSelectionManager()` when no explicit test or
-custom binding was supplied. Resolution does not activate the mode, select an
-Actor or Component, register or unlock a target, focus a viewport, or create a
-second selection registry. A supplied `trace_query` first requires the World
-trace to hit the same target; omit it when only the Modeling selection ray is
-required. Success is verified by an independent readback from that same live
-manager. Invalid or inactive component identities, locked targets, ray misses,
-and occlusion fail without changing the existing mesh-element selection.
-
-## Durable Actor transform update
-
-`world.object_transform.update` is the single direct Actor transform write. Its
-typed input carries one complete `transform` value and the exact revision
-returned by `world.object_transform.read`. The transform subject is the Actor
-identity; the native writer converts it to the `unreal.world` centimeter frame,
-rejects non-finite components, non-normalized rotation, zero scale, unsupported
-targets, and stale revisions before the write, then saves the owning map package.
-Success requires an independent readback of location, quaternion rotation,
-scale, and the new revision. A failed pre-persistence mutation is rolled back;
-unknown persistence state is not replayable.
-
-Candidate comparison is intentionally not a second WorldSpatial command and
-does not invent a generic numerical score. Use `capture.image.execute` with
-`policy:image-capture:transform-candidates/v1`: CaptureMedia temporarily applies
-up to 15 candidates to one exact Actor, captures the baseline and candidates
-from the current Level viewport into one frame sheet, and restores transform,
-package dirty state, selection, and viewport realtime state. The model or user
-compares the frames, then submits the chosen transform through
-`world.object_transform.update`.
+`mesh.transform.bake` and `mesh.pivot.update` remain specialized durable geometry
+operations. A StaticMesh content-graph read supplies their carrier revision;
+success includes package save and remains observable after reload.
 
 ## Origin resolution
 
-`reference.origin.resolve` is the sole current origin-query command and belongs
-to QueryService, AssetProjectRead's reference provider, and ReferenceQueryOwner.
-Its `target.source` is required and is one of:
-
-- `catalog_candidate`: `candidate_id` is an exact ID returned by the current
-  catalog search.
-- `json_reference`: `json_file` and `json_pointer` resolve an identity object.
-- `ue_object`: `full_name` identifies a real loaded or loadable UE object.
-- `graph_node`: `full_name`, `graph_name`, and `node_guid` identify a graph node.
-- `name_reference`: `kind`, `name`, and `full_name` provide an explicit identity.
-
-The query returns canonical target fields, `origin.asset_paths`,
-`origin.package_paths`, `origin.package_files`, `origin.code_paths[]`,
-`resolved`, `status`, and `warnings`. It is read-only; unsupported or incomplete
-sources return a typed failure without changing UE state.
+`reference.origin.resolve` is the sole current origin-query command. Its
+`target.source` is one of `catalog_candidate`, `json_reference`, `ue_object`,
+`graph_node`, or `name_reference`. It returns canonical asset, package, file and
+code origins and is read-only.
 
 ## Spatial and lifecycle rules
 
-Spatial values retain `semantic_frame_id`, native write/read/verify frame,
-dimension, unit, basis evidence, observation time, and conversion evidence.
-The SDK forwards one manifest-bound request and performs no coordinate,
-selection, trace, pivot, transform, or origin business logic.
-
-Selection is Editor-transient and cleanup restores only the owned selection.
-Actor and mesh mutations reach success only after the declared mechanics and
-independent readback agree. Tests use owned actors, saved mesh assets, graph nodes,
-JSON files, catalog identities, and transient packages, then remove or restore
-only those fixtures while preserving the user's Editor.
+Spatial values retain their semantic frame, dimension, unit, basis, observation
+time and conversion evidence through `frame_id`, `basis_frame_id`, `dimension`,
+`unit`, `basis_evidence_id`, and `observed_at`. The SDK forwards one
+manifest-bound request and performs no coordinate, selection, trace, pivot,
+transform or origin business logic. Tests restore only owned transient state and
+preserve the user's Editor.
 
 The historical IDs `level_align_actor_by_bounds`,
 `level_align_actor_vertex_to_vertex`, `level_align_face_to_face`,
 `level_snap_to_surface`, and `node_origin_resolve` are not public commands or
-aliases. Their exact successor contracts and evidence requirements are recorded
-in `successors/t46_spatial_content_operation.json`.
+aliases. Their exact successor contracts are recorded in
+`successors/t46_spatial_content_operation.json`.

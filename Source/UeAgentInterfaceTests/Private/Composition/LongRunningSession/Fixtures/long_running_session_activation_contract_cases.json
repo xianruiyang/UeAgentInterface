@@ -1,7 +1,7 @@
 {
   "schema": "uai.long_running_session.public_activation.test_fixture.v1",
-  "command_count": 12,
-  "start_command_count": 6,
+  "command_count": 13,
+  "start_command_count": 7,
   "lifecycle_command_count": 6,
   "family_binding_count": 13,
   "operation_ref_fields": [
@@ -66,6 +66,33 @@
         "subject_ref": "capture-subject:viewport:owned-fixture",
         "policy_id": "policy:image-capture:png/v1",
         "parameters": {}
+      }
+    },
+    {
+      "command_id": "runtime.scenario.execute",
+      "namespace": "runtime",
+      "method": "scenario_execute",
+      "kind": "start",
+      "descriptor_id": "uai.long_running.runtime.scenario/v1",
+      "handler_binding": "long-running-session.runtime.scenario.v1",
+      "parameters": [
+        {"name":"subject_ref","wire_type":"string","required":true,"nullable":false},
+        {"name":"policy_id","wire_type":"string","required":true,"nullable":false},
+        {"name":"parameters","wire_type":"object","required":true,"nullable":false}
+      ],
+      "example_params": {
+        "subject_ref": "runtime-session:pie-debug:0:fixture",
+        "policy_id": "policy:runtime-scenario:bounded/v1",
+        "parameters": {
+          "expected_pause_epoch": 1,
+          "expected_workspace_revision": 1,
+		  "limits": {"wall_seconds":3,"game_seconds":2,"frame_count":180},
+		  "steps": [
+			{"type":"input_action","at_seconds":0.0,"action_ref":"/Game/Input/Actions/IA_Look.IA_Look","value":[0.2,0.0]},
+			{"type":"input_action","at_seconds":0.2,"action_ref":"/Game/Input/Actions/IA_Look.IA_Look","value":[0.0,0.0]},
+			{"type":"capture","at_seconds":0.25,"source":"pie_player_camera","format":"png"}
+		  ]
+        }
       }
     },
     {

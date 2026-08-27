@@ -231,6 +231,20 @@ namespace UE::UAI::CommandHandlers::QueryCalibration
 				{
 					return Failure(Request, TEXT("command_search_params_invalid"), TEXT("intent, limit or cursor is invalid"));
 				}
+				FString Mode(TEXT("active"));
+				if ((Params->HasField(TEXT("mode"))
+						&& !Params->TryGetStringField(TEXT("mode"), Mode))
+					|| (Mode != TEXT("active")
+						&& Mode != TEXT("compatibility")))
+				{
+					return Failure(
+						Request,
+						TEXT("command_search_mode_invalid"),
+						TEXT("mode must be active or compatibility"));
+				}
+				Search.Mode = Mode == TEXT("compatibility")
+					? ECommandSearchMode::Compatibility
+					: ECommandSearchMode::Active;
 				FCommandSearchPage Page;
 				FCommandDiscoveryError Error;
 				if (!Discovery->Search(Search, Page, Error))
@@ -251,6 +265,15 @@ namespace UE::UAI::CommandHandlers::QueryCalibration
 					Item->SetStringField(TEXT("summary"), Candidate.Summary);
 					Item->SetStringField(TEXT("target"), Candidate.Target);
 					Item->SetStringField(TEXT("match_reason"), Candidate.MatchReason);
+					Item->SetStringField(
+						TEXT("lifecycle_status"),
+						Candidate.LifecycleStatus);
+					Item->SetArrayField(
+						TEXT("successor_command_ids"),
+						StringValues(Candidate.SuccessorCommandIds));
+					Item->SetBoolField(
+						TEXT("requires_user_confirmation"),
+						Candidate.bRequiresUserConfirmation);
 					Item->SetBoolField(TEXT("read_only"), !Candidate.bHasSideEffects);
 					Candidates.Add(MakeShared<FJsonValueObject>(Item));
 				}
@@ -336,6 +359,16 @@ namespace UE::UAI::CommandHandlers::QueryCalibration
 				Payload->SetStringField(TEXT("python_namespace"), Detail.PythonNamespace);
 				Payload->SetStringField(TEXT("python_function"), Detail.PythonFunction);
 				Payload->SetStringField(TEXT("public_owner"), Detail.PublicOwner);
+				Payload->SetStringField(
+					TEXT("lifecycle_status"), Detail.LifecycleStatus);
+				Payload->SetArrayField(
+					TEXT("successor_command_ids"),
+					StringValues(Detail.SuccessorCommandIds));
+				Payload->SetStringField(
+					TEXT("lifecycle_reason"), Detail.LifecycleReason);
+				Payload->SetBoolField(
+					TEXT("requires_user_confirmation"),
+					Detail.bRequiresUserConfirmation);
 				Payload->SetBoolField(TEXT("read_only"), !Detail.bHasSideEffects);
 				if (!Detail.VariantId.IsEmpty())
 				{
@@ -363,26 +396,44 @@ namespace UE::UAI::CommandHandlers::QueryCalibration
 					TEXT("tutorial_references"),
 					StringValues(Detail.TutorialReferences));
 				const TSharedPtr<FJsonObject> Invocation = MakeShared<FJsonObject>();
-				Invocation->SetStringField(
-					TEXT("python_named"),
-					PythonNamedInvocation(Detail));
-				Invocation->SetStringField(
-					TEXT("python_generic"),
-					FString::Printf(
-						TEXT("client.execute(\"%s\", params)"),
-						*Detail.CommandId));
-				Invocation->SetStringField(
-					TEXT("python_exact"),
-					FString::Printf(
-						TEXT("client.execute_exact(\"%s\", params, contract_hash=\"%s\")"),
-						*Detail.CommandId,
-						*Detail.ContractHash));
-				Invocation->SetStringField(
-					TEXT("cli_exact"),
-					FString::Printf(
-						TEXT("uai-cli --connection connection.toml exec %s --contract-hash %s --params-json <json-object>"),
-						*Detail.CommandId,
-						*Detail.ContractHash));
+				if (Detail.LifecycleStatus == TEXT("dormant"))
+				{
+					Invocation->SetStringField(
+						TEXT("python_dormant"),
+						FString::Printf(
+							TEXT("client.execute_dormant(\"%s\", params, contract_hash=\"%s\", user_confirmed=True)"),
+							*Detail.CommandId,
+							*Detail.ContractHash));
+					Invocation->SetStringField(
+						TEXT("cli_dormant"),
+						FString::Printf(
+							TEXT("uai-cli --connection connection.toml exec %s --contract-hash %s --allow-dormant --params-json <json-object>"),
+							*Detail.CommandId,
+							*Detail.ContractHash));
+				}
+				else
+				{
+					Invocation->SetStringField(
+						TEXT("python_named"),
+						PythonNamedInvocation(Detail));
+					Invocation->SetStringField(
+						TEXT("python_generic"),
+						FString::Printf(
+							TEXT("client.execute(\"%s\", params)"),
+							*Detail.CommandId));
+					Invocation->SetStringField(
+						TEXT("python_exact"),
+						FString::Printf(
+							TEXT("client.execute_exact(\"%s\", params, contract_hash=\"%s\")"),
+							*Detail.CommandId,
+							*Detail.ContractHash));
+					Invocation->SetStringField(
+						TEXT("cli_exact"),
+						FString::Printf(
+							TEXT("uai-cli --connection connection.toml exec %s --contract-hash %s --params-json <json-object>"),
+							*Detail.CommandId,
+							*Detail.ContractHash));
+				}
 				Payload->SetObjectField(TEXT("invocation"), Invocation);
 				TArray<TSharedPtr<FJsonValue>> Errors;
 				for (const FUeAgentCommandErrorDeclaration& Declared : Detail.Errors)

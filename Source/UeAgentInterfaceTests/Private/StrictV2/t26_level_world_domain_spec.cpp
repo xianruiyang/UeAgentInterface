@@ -1,12 +1,20 @@
 #include "Misc/AutomationTest.h"
 
+#include "AssetRegistry/AssetRegistryModule.h"
 #include "Core/Contract/UeAgentCommandJson.h"
 #include "Core/HjsonWorkspace/ImportInitialization/UeAgentHjsonDomainProviderRegistry.h"
+#include "Core/HjsonWorkspace/UeAgentAuthoringComposition.h"
 #include "Commands/PaletteSearch/UeAgentPaletteSearchTypes.h"
 #include "DomainAdapters/WorldSpatial/UeAgentLevelWorldDomainMechanics.h"
 #include "Domains/Level/Authoring/UeAgentLevelAuthoringRegistration.h"
 #include "Dom/JsonObject.h"
 #include "Dom/JsonValue.h"
+#include "Engine/Blueprint.h"
+#include "Engine/BlueprintGeneratedClass.h"
+#include "GameFramework/Actor.h"
+#include "HAL/FileManager.h"
+#include "Kismet2/KismetEditorUtilities.h"
+#include "Misc/Paths.h"
 #include "Misc/ScopeExit.h"
 #include "Module/CommandRegistration/Active/UeAgentActiveCommandComposition.h"
 #include "ObjectTools.h"
@@ -110,6 +118,12 @@ bool FUeAgentStrictV2T26LevelWorldDomainTest::RunTest(
 		AddError(WorkspaceError.GetCode());
 		return false;
 	}
+	TestTrue(TEXT("the World provider owns authoring-schema discovery"),
+		Provider->SupportsExplicitCommand(
+			TEXT("content_graph.authoring_schema")));
+	TestTrue(TEXT("the World provider routes export to the verified Level publisher"),
+		Provider->SupportsExplicitCommand(
+			TEXT("content_graph.export_workspace")));
 
 	struct FContractCase
 	{
@@ -250,24 +264,76 @@ bool FUeAgentStrictV2T26LevelWorldDomainTest::RunTest(
 			AddError(SearchError);
 			return false;
 		}
-		const UeAgentPaletteSearch::FCandidate* Match =
-			Result.MatchingCandidates.FindByPredicate(
-				[&SearchText](const UeAgentPaletteSearch::FCandidate& Candidate)
-				{
-					return Candidate.Name.Equals(
-						SearchText, ESearchCase::IgnoreCase);
-				});
-		if (!Match)
+		TArray<const UeAgentPaletteSearch::FCandidate*> Matches;
+		for (const UeAgentPaletteSearch::FCandidate& Candidate : Result.MatchingCandidates)
 		{
-			AddError(TEXT("native Place Actors candidate missing: ") + SearchText);
+			if (Candidate.Name.Equals(SearchText, ESearchCase::IgnoreCase))
+			{
+				Matches.Add(&Candidate);
+			}
+		}
+		if (Matches.Num() != 1)
+		{
+			AddError(FString::Printf(
+				TEXT("native Place Actors candidate count invalid for %s: %d"),
+				*SearchText,
+				Matches.Num()));
 			return false;
 		}
-		OutCandidate = *Match;
+		OutCandidate = *Matches[0];
 		return true;
 	};
 
 	UeAgentPaletteSearch::FCandidate Cube;
 	UeAgentPaletteSearch::FCandidate Sphere;
+	{
+		const FString BlueprintName = TEXT("BP_PlaceableActorCandidate_")
+			+ FGuid::NewGuid().ToString(EGuidFormats::Digits);
+		const FString PackageName = TEXT("/Game/UAI/StrictV2/T26/") + BlueprintName;
+		const FString ObjectPath = PackageName + TEXT(".") + BlueprintName;
+		DeleteAssetIfPresent(ObjectPath);
+		UPackage* const Package = CreatePackage(*PackageName);
+		UBlueprint* const Blueprint = Package
+			? FKismetEditorUtilities::CreateBlueprint(
+				AActor::StaticClass(), Package, *BlueprintName,
+				BPTYPE_Normal, UBlueprint::StaticClass(),
+				UBlueprintGeneratedClass::StaticClass(), NAME_None)
+			: nullptr;
+		if (!TestNotNull(TEXT("placeable Blueprint fixture exists"), Blueprint))
+		{
+			return false;
+		}
+		FAssetRegistryModule::AssetCreated(Blueprint);
+		ON_SCOPE_EXIT
+		{
+			DeleteAssetIfPresent(ObjectPath);
+		};
+
+		UeAgentPaletteSearch::FCandidate BlueprintCandidate;
+		if (TestTrue(TEXT("native Actor candidates expose a Content Browser Blueprint asset"),
+			FindNativePlaceable(BlueprintName, BlueprintCandidate)))
+		{
+			TestEqual(TEXT("the Blueprint candidate retains executable asset identity"),
+				BlueprintCandidate.AuthoringSelectors.FindRef(TEXT("asset_override")),
+				ObjectPath);
+			TestTrue(TEXT("the Blueprint candidate retains an Actor factory"),
+				!BlueprintCandidate.AuthoringSelectors.FindRef(TEXT("actor_factory")).IsEmpty());
+			TestTrue(TEXT("the Blueprint candidate resolves an Actor class"),
+				!BlueprintCandidate.AuthoringSelectors.FindRef(TEXT("actor_class")).IsEmpty());
+			TestTrue(TEXT("the Blueprint candidate is headlessly executable"),
+				BlueprintCandidate.bSupportedInContext);
+
+			UeAgentPaletteSearch::FCandidate ResolvedBlueprint;
+			FString ResolveError;
+			TestTrue(TEXT("the compact Blueprint id re-resolves through the same native catalog"),
+				UeAgentPaletteSearch::TryResolvePlaceableActorCandidate(
+					TEXT(""), BlueprintCandidate.GetPublicId(), TEXT("AllClasses"),
+					ResolvedBlueprint, ResolveError));
+			TestEqual(TEXT("id resolution preserves the Blueprint asset"),
+				ResolvedBlueprint.AuthoringSelectors.FindRef(TEXT("asset_override")),
+				ObjectPath);
+		}
+	}
 	{
 		UeAgentPaletteSearch::FSearchParams NoMatchParams;
 		NoMatchParams.CatalogType = TEXT("placeable_actor");
@@ -319,6 +385,7 @@ bool FUeAgentStrictV2T26LevelWorldDomainTest::RunTest(
 			DeleteAssetIfPresent(Target);
 		};
 		const FString ManagedId = TEXT("T85DocumentedTransform");
+		const FString SecondManagedId = TEXT("T85DocumentedTransformSibling");
 		const FString Document = FString::Printf(
 			TEXT("{\"schema\":\"uai.world.edit/1\",\"root\":{\"type\":")
 			TEXT("\"/Script/Engine.World\",\"document\":{\"operation\":\"create\",")
@@ -329,9 +396,15 @@ bool FUeAgentStrictV2T26LevelWorldDomainTest::RunTest(
 			TEXT("\"operation\":\"upsert\",\"candidate\":{\"id\":\"%s\"},")
 			TEXT("\"transform\":{\"location\":{\"x\":125,\"y\":25,\"z\":50},")
 			TEXT("\"rotation\":{\"pitch\":10,\"yaw\":20,\"roll\":30},")
+			TEXT("\"scale\":{\"x\":1,\"y\":1,\"z\":1}}},{\"managed_id\":\"%s\",")
+			TEXT("\"operation\":\"upsert\",\"candidate\":{\"id\":\"%s\"},")
+			TEXT("\"transform\":{\"location\":{\"x\":-125,\"y\":25,\"z\":50},")
+			TEXT("\"rotation\":{\"pitch\":0,\"yaw\":0,\"roll\":0},")
 			TEXT("\"scale\":{\"x\":1,\"y\":1,\"z\":1}}}]}}}}"),
 			*Target,
 			*ManagedId,
+			*Cube.GetPublicId(),
+			*SecondManagedId,
 			*Cube.GetPublicId());
 		FString CanonicalParams;
 		FString ParamsError;
@@ -386,11 +459,15 @@ bool FUeAgentStrictV2T26LevelWorldDomainTest::RunTest(
 		}
 		const TSharedPtr<FJsonObject> CreatedActor =
 			FindActorByManagedId(*Snapshot, ManagedId);
+		const TSharedPtr<FJsonObject> SecondCreatedActor =
+			FindActorByManagedId(*Snapshot, SecondManagedId);
 		if (!TestNotNull(TEXT("native placement survives save and reload"),
 			CreatedActor.Get()))
 		{
 			return false;
 		}
+		TestNotNull(TEXT("a sibling Actor with the same field schema survives"),
+			SecondCreatedActor.Get());
 		TestEqual(TEXT("native placement creates a StaticMeshActor"),
 			CreatedActor->GetStringField(TEXT("type")),
 			FString(TEXT("/Script/Engine.StaticMeshActor")));
@@ -411,6 +488,135 @@ bool FUeAgentStrictV2T26LevelWorldDomainTest::RunTest(
 				(*Components)[1]->AsNumber(), 25.0);
 			TestEqual(TEXT("location Z survives"),
 				(*Components)[2]->AsNumber(), 50.0);
+		}
+
+		const TSharedRef<FJsonObject> SchemaParams = MakeShared<FJsonObject>();
+		SchemaParams->SetStringField(TEXT("target"), Target);
+		FString SchemaParamsJson;
+		if (!TestTrue(TEXT("World authoring-schema params canonicalize"),
+			CommandContract::Json::TryCanonicalize(
+				SchemaParams, SchemaParamsJson, PayloadError)))
+		{
+			AddError(PayloadError);
+			return false;
+		}
+		FString SchemaPayloadJson;
+		FWorkspaceError SchemaError;
+		bReadOnly = false;
+		if (!TestTrue(TEXT("World authoring schema is directly available"),
+			DomainAdapters::WorldSpatial::TryExecuteContentGraph(
+				TEXT("content_graph.authoring_schema"), Target,
+				SchemaParamsJson, SchemaPayloadJson, bReadOnly, SchemaError)))
+		{
+			AddError(SchemaError.GetCode() + TEXT(":")
+				+ SchemaError.GetSourceUnit());
+			return false;
+		}
+		TestTrue(TEXT("World authoring schema is read-only"), bReadOnly);
+		TSharedPtr<FJsonObject> SchemaPayload;
+		const TSharedPtr<FJsonObject>* SchemaResult = nullptr;
+		const TSharedPtr<FJsonObject>* Template = nullptr;
+		const TSharedPtr<FJsonObject>* TemplateRoot = nullptr;
+		const TSharedPtr<FJsonObject>* TemplateDocument = nullptr;
+		const TSharedPtr<FJsonObject>* TemplateExtension = nullptr;
+		const TArray<TSharedPtr<FJsonValue>>* TemplateActors = nullptr;
+		if (TestTrue(TEXT("World authoring schema payload is canonical JSON"),
+			CommandContract::Json::TryParseObject(
+				SchemaPayloadJson, SchemaPayload, PayloadError))
+			&& TestTrue(TEXT("World schema exposes a reusable query result"),
+				SchemaPayload->TryGetObjectField(TEXT("query_result"), SchemaResult)
+					&& SchemaResult && SchemaResult->IsValid()))
+		{
+			TestEqual(TEXT("World schema id is exact"),
+				(*SchemaResult)->GetStringField(TEXT("schema_id")),
+				FString(TEXT("uai.world.edit/1")));
+			TestEqual(TEXT("World schema root type is exact"),
+				(*SchemaResult)->GetStringField(TEXT("root_type")),
+				FString(TEXT("/Script/Engine.World")));
+			TestFalse(TEXT("World schema carries the current revision"),
+				(*SchemaResult)->GetStringField(TEXT("revision")).IsEmpty());
+			if (TestTrue(TEXT("World schema template has the import root"),
+				(*SchemaResult)->TryGetObjectField(TEXT("template"), Template)
+					&& Template && Template->IsValid()
+					&& (*Template)->TryGetObjectField(TEXT("root"), TemplateRoot)
+					&& TemplateRoot && TemplateRoot->IsValid()
+					&& (*TemplateRoot)->TryGetObjectField(
+						TEXT("document"), TemplateDocument)
+					&& TemplateDocument && TemplateDocument->IsValid()
+					&& (*TemplateDocument)->TryGetObjectField(
+						TEXT("provider_extension"), TemplateExtension)
+					&& TemplateExtension && TemplateExtension->IsValid()
+					&& (*TemplateExtension)->TryGetArrayField(
+						TEXT("actors"), TemplateActors)
+					&& TemplateActors && TemplateActors->Num() == 1))
+			{
+				const TSharedPtr<FJsonObject> TemplateActor =
+					(*TemplateActors)[0]->AsObject();
+				const TSharedPtr<FJsonObject>* TemplateCandidate = nullptr;
+				TestTrue(TEXT("minimal Actor upsert has managed_id plus candidate name"),
+					TemplateActor.IsValid()
+						&& TemplateActor->HasTypedField<EJson::String>(TEXT("managed_id"))
+						&& TemplateActor->TryGetObjectField(
+							TEXT("candidate"), TemplateCandidate)
+						&& TemplateCandidate && TemplateCandidate->IsValid()
+						&& (*TemplateCandidate)->HasTypedField<EJson::String>(TEXT("name")));
+			}
+		}
+
+		const FString WorkspacePath = FPaths::ConvertRelativePathToFull(
+			FPaths::ProjectSavedDir() / TEXT("Automation/UAI/T26/WorldExport_")
+				+ FGuid::NewGuid().ToString(EGuidFormats::Digits));
+		ON_SCOPE_EXIT
+		{
+			IFileManager::Get().DeleteDirectory(
+				*WorkspacePath, false, true);
+		};
+		const TSharedRef<FJsonObject> ExportParams = MakeShared<FJsonObject>();
+		ExportParams->SetStringField(TEXT("target"), Target);
+		ExportParams->SetStringField(TEXT("workspace_path"), WorkspacePath);
+		ExportParams->SetStringField(TEXT("profile_id"), TEXT("llm_authoring"));
+		FString ExportParamsJson;
+		if (!TestTrue(TEXT("World export params canonicalize"),
+			CommandContract::Json::TryCanonicalize(
+				ExportParams, ExportParamsJson, PayloadError)))
+		{
+			AddError(PayloadError);
+			return false;
+		}
+		FString ExportPayloadJson;
+		FWorkspaceError ExportError;
+		bReadOnly = false;
+		if (!TestTrue(TEXT("World export publishes its declared workspace"),
+			DomainAdapters::WorldSpatial::TryExecuteContentGraph(
+				TEXT("content_graph.export_workspace"), Target,
+				ExportParamsJson, ExportPayloadJson, bReadOnly, ExportError)))
+		{
+			AddError(ExportError.GetCode() + TEXT(":")
+				+ ExportError.GetSourceUnit() + TEXT(":")
+				+ ExportError.GetJsonPointer());
+			return false;
+		}
+		TestTrue(TEXT("World export is a read-only publication"), bReadOnly);
+		HjsonWorkspace::FTargetCompositionContract LevelComposition;
+		TestTrue(TEXT("the shared exporter owns the Level composition prerequisite"),
+			HjsonWorkspace::FTargetCompositionRegistry::Get().FindContract(
+				TEXT("ue.level.asset"), LevelComposition));
+		TSharedPtr<FJsonObject> ExportPayload;
+		if (TestTrue(TEXT("World export receipt is canonical JSON"),
+			CommandContract::Json::TryParseObject(
+				ExportPayloadJson, ExportPayload, PayloadError)))
+		{
+			TestEqual(TEXT("World export reports published"),
+				ExportPayload->GetStringField(TEXT("status")),
+				FString(TEXT("published")));
+			const FString PublishedWorkspace =
+				ExportPayload->GetStringField(TEXT("workspace_path"));
+			TestTrue(TEXT("World export reports the declared workspace"),
+				FPaths::IsSamePath(PublishedWorkspace, WorkspacePath));
+			TestTrue(TEXT("World export entry file exists"),
+				IFileManager::Get().FileExists(
+					*(PublishedWorkspace
+						/ ExportPayload->GetStringField(TEXT("entry_file")))));
 		}
 	}
 	return !HasAnyErrors();

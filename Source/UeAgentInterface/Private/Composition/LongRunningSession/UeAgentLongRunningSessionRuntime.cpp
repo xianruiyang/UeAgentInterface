@@ -612,12 +612,16 @@ namespace UE::UAI::Composition::LongRunningSession
 				ESPMode::ThreadSafe> InEditorSessionFactory,
 			TSharedRef<CaptureMediaLongJob::
 				IUeAgentCaptureMediaLongJobPortFactory,
-				ESPMode::ThreadSafe> InCaptureMediaFactory)
+				ESPMode::ThreadSafe> InCaptureMediaFactory,
+			TSharedRef<PieRuntimeDebug::
+				IUeAgentPieRuntimeScenarioPortFactory,
+				ESPMode::ThreadSafe> InPieRuntimeScenarioFactory)
 			: Config(MoveTemp(InConfig))
 			, Descriptors(MoveTemp(InDescriptors))
 			, CompileBuildFactory(MoveTemp(InCompileBuildFactory))
 			, EditorSessionFactory(MoveTemp(InEditorSessionFactory))
 			, CaptureMediaFactory(MoveTemp(InCaptureMediaFactory))
+			, PieRuntimeScenarioFactory(MoveTemp(InPieRuntimeScenarioFactory))
 			, Owner(
 				MakeShared<FRejectingDefaultPort, ESPMode::ThreadSafe>(),
 				[]() { return FPlatformTime::Seconds(); },
@@ -651,6 +655,8 @@ namespace UE::UAI::Composition::LongRunningSession
 			ESPMode::ThreadSafe> EditorSessionFactory;
 		TSharedRef<CaptureMediaLongJob::IUeAgentCaptureMediaLongJobPortFactory,
 			ESPMode::ThreadSafe> CaptureMediaFactory;
+		TSharedRef<PieRuntimeDebug::IUeAgentPieRuntimeScenarioPortFactory,
+			ESPMode::ThreadSafe> PieRuntimeScenarioFactory;
 		FLongRunningOperationOwner Owner;
 		TMap<FString, FUeAgentLongRunningSessionActivationProfile> Profiles;
 	};
@@ -764,6 +770,7 @@ namespace UE::UAI::Composition::LongRunningSession
 				Input.StatePlane = EUeAgentStatePlane::RuntimeInstance;
 			}
 			else if (Profile.CommandId == TEXT("capture.media.execute")
+				|| Profile.CommandId == TEXT("runtime.scenario.execute")
 				|| FamilyId == TEXT("runtime_preview"))
 			{
 				Input.StatePlane = EUeAgentStatePlane::RuntimeInstance;
@@ -772,7 +779,28 @@ namespace UE::UAI::Composition::LongRunningSession
 			{
 				Input.StatePlane = EUeAgentStatePlane::AuthoringMemory;
 			}
-			if (Profile.CommandId == TEXT("capture.image.execute")
+			if (Profile.CommandId == TEXT("runtime.scenario.execute"))
+			{
+				const FString Prefix(TEXT("runtime-session:pie-debug:"));
+				const FString Suffix = SubjectRef.StartsWith(Prefix)
+					? SubjectRef.RightChop(Prefix.Len()) : FString();
+				int32 Separator = INDEX_NONE;
+				int32 PieInstanceId = INDEX_NONE;
+				if (!Suffix.FindChar(TEXT(':'), Separator)
+					|| !LexTryParseString(
+						PieInstanceId, *Suffix.Left(Separator))
+					|| PieInstanceId < 0)
+				{
+					OutError = FExecutionMutationError(
+						TEXT("long_running_session_pie_debug_subject_invalid"),
+						TEXT("runtime scenario requires an exact PIE debug session ref."));
+					return false;
+				}
+				Input.WorldType = EUeAgentExecutionWorldType::Pie;
+				Input.PieInstanceId = PieInstanceId;
+				Input.WorldIdentity = SubjectRef;
+			}
+			else if (Profile.CommandId == TEXT("capture.image.execute")
 				|| Profile.CommandId == TEXT("capture.media.execute")
 				|| Profile.CommandId == TEXT("capture.render.execute")
 				|| FamilyId == TEXT("world_context")
@@ -983,6 +1011,19 @@ namespace UE::UAI::Composition::LongRunningSession
 						CanonicalParameters.ToSharedRef()),
 					OperationRequest,
 					*State->EditorSessionFactory,
+					State->Owner,
+					Snapshot,
+					OwnerError);
+			}
+			else if (Profile.CommandId == TEXT("runtime.scenario.execute"))
+			{
+				bAccepted = PieRuntimeDebug::TryAcceptPieRuntimeScenario(
+					PieRuntimeDebug::FUeAgentPieRuntimeScenarioTypedRequest(
+						MoveTemp(SubjectRef),
+						MoveTemp(PolicyId),
+						CanonicalParameters.ToSharedRef()),
+					OperationRequest,
+					*State->PieRuntimeScenarioFactory,
 					State->Owner,
 					Snapshot,
 					OwnerError);
@@ -1288,6 +1329,8 @@ namespace UE::UAI::Composition::LongRunningSession
 			ESPMode::ThreadSafe> EditorSessionFactory,
 		TSharedRef<CaptureMediaLongJob::IUeAgentCaptureMediaLongJobPortFactory,
 			ESPMode::ThreadSafe> CaptureMediaFactory,
+		TSharedRef<PieRuntimeDebug::IUeAgentPieRuntimeScenarioPortFactory,
+			ESPMode::ThreadSafe> PieRuntimeScenarioFactory,
 		TSharedPtr<FUeAgentLongRunningSessionRuntime>& OutRuntime,
 		FUeAgentLongRunningSessionRuntimeError& OutError)
 	{
@@ -1307,7 +1350,7 @@ namespace UE::UAI::Composition::LongRunningSession
 		if (!TryCreateLongRunningSessionDescriptorRegistry(
 				Descriptors, DescriptorError)
 			|| !Descriptors.IsValid()
-			|| Descriptors->GetDescriptors().Num() != 12)
+			|| Descriptors->GetDescriptors().Num() != 13)
 		{
 			SetError(
 				OutError,
@@ -1315,7 +1358,7 @@ namespace UE::UAI::Composition::LongRunningSession
 					? FString(TEXT("long_running_session_descriptor_registry_invalid"))
 					: DescriptorError,
 				TEXT("long_running_session"),
-				TEXT("The exact twelve-descriptor registry is required."));
+				TEXT("The exact thirteen-descriptor registry is required."));
 			return false;
 		}
 		const TSharedRef<FState, ESPMode::ThreadSafe> StateRef =
@@ -1324,7 +1367,8 @@ namespace UE::UAI::Composition::LongRunningSession
 				Descriptors.ToSharedRef(),
 				MoveTemp(CompileBuildFactory),
 				MoveTemp(EditorSessionFactory),
-				MoveTemp(CaptureMediaFactory));
+				MoveTemp(CaptureMediaFactory),
+				MoveTemp(PieRuntimeScenarioFactory));
 		const TSharedRef<IUeAgentOperationApplicationPort> OperationPort =
 			MakeShared<FOperationApplication>(StateRef);
 		OutRuntime = MakeShareable(

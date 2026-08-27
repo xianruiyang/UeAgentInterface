@@ -7,6 +7,7 @@ namespace UE::UAI::ArtifactPublisher::TestHooks
 	enum class EFailurePoint : uint8
 	{
 		AfterFinalMovedToBackup,
+		FirstMoveAttempt,
 	};
 
 	class UEAGENTINTERFACE_API FScopedPublishFailure final

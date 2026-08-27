@@ -2,7 +2,7 @@
 
 ## Active ownership boundary
 
-The `query` active-command contribution publishes exactly forty-two non-HJSON read routes through `query-command-owner`. They join the one process-level immutable command registry and exact dispatch owned by the active command composition; the contribution does not create a private command registry or a second public route. Provider authority is separately frozen by `DomainCapability`: the Query domain contributes forty-one established providers and the Landscape domain contributes `landscape.read.height`.
+The `query` active-command contribution publishes exactly thirty-nine non-HJSON read routes through `query-command-owner`. They join the one process-level immutable command registry and exact dispatch owned by the active command composition; the contribution does not create a private command registry or a second public route. Provider authority is separately frozen by `DomainCapability`: the Query domain contributes thirty-eight established providers and the Landscape domain contributes `landscape.read.height`.
 
 The inventory is:
 
@@ -11,9 +11,11 @@ The inventory is:
 - Landscape state: `landscape.height.read`;
 - project state: `project.platform`, `project.settings`, `project.summary`, `project.validation`;
 - reference state: `reference.asset_read`, `reference.origin.resolve`;
-- world state and runtime probes: `world.actor_components`, `world.actors`, `world.capsule_path`, `world.capsule_sweep`, `world.content`, `world.data_layers`, `world.hlod_assignments`, `world.mesh_closest_vertex`, `world.mesh_vertex_position`, `world.nav_connectivity`, `world.nav_find_path`, `world.nav_project_point`, `world.nearby_shapes`, `world.overlap`, `world.partition`, `world.partition_health`, `world.physics_component`, `world.physics_constraint`, `world.property`, `world.ray_trace`, `world.selection`, `world.streaming_levels`, `world.summary`.
+- world state and runtime probes: `world.capsule_path`, `world.capsule_sweep`, `world.content`, `world.data_layers`, `world.hlod_assignments`, `world.mesh_closest_vertex`, `world.mesh_vertex_position`, `world.nav_connectivity`, `world.nav_find_path`, `world.nav_project_point`, `world.nearby_shapes`, `world.overlap`, `world.partition`, `world.partition_health`, `world.physics_component`, `world.physics_constraint`, `world.ray_trace`, `world.selection`, `world.streaming_levels`, `world.summary`.
 
-Forty-one public IDs select a descriptor with the same mechanics ID. `reference.asset_read` is the separate exact public contract whose server-owned route selects the internal `reference.read` descriptor and freezes `BlueprintDisplayName`, the persisted property written by `reference.asset_apply`. Its dedicated AssetProjectRead provider is the only read path on which a missing asset is a successful complete persisted snapshot with zero entries; generic `asset.properties` continues to reject an unresolved target. The SDK does not translate either command into the other, and callers cannot substitute one identity for the other.
+Thirty-eight public IDs select a descriptor with the same mechanics ID. `reference.asset_read` is the separate exact public contract whose server-owned route selects the internal `reference.read` descriptor and freezes `BlueprintDisplayName`, the persisted property written by `reference.asset_apply`. Its dedicated AssetProjectRead provider is the only read path on which a missing asset is a successful complete persisted snapshot with zero entries; generic `asset.properties` continues to reject an unresolved target. The SDK does not translate either command into the other, and callers cannot substitute one identity for the other.
+
+The former public `world.actors`, `world.actor_components`, and `world.property` identities are dormant. Persisted World actor structure, component structure and editable reflected properties belong to the World HJSON owner: use `content_graph.structure`, filtered `content_graph.items`, and filtered `content_graph.properties`. `query.content.search` returns `detail_command_id`, `detail_target_identity`, and `detail_input` so callers can forward the detail request without rebuilding a World/Actor/Component identity.
 
 ## Request, mechanics and result
 
@@ -58,7 +60,7 @@ Distinct failures remain distinct. They include missing `uai:query` authority, c
 The final manifest projects these contracts into their ordinary domain
 namespaces. Callers import only `uai`, connect from one TOML file, and use
 methods such as `client.project.summary(...)`,
-`client.world.actor_components(...)`, and
+`client.content_graph.items(...)`, and
 `client.reference.asset_read(...)`, and
 `client.landscape.height_read(...)`. `client.execute(...)`,
 `client.execute_exact(...)`, and `uai-cli exec` share the same generated
@@ -72,14 +74,14 @@ uai-cli --connection connection.toml exec project.summary --params-json {"projec
 
 ## Legacy exit and evidence boundary
 
-The old read/export contract and handler registry no longer exist in the active compiled tree. T13 moved the former `content_graph.*` routes into its current contribution, so neither those routes nor any of the current forty-two Query IDs is duplicated in the sole immutable registry. T44 also isolated the obsolete module-owned Query-service composition and its `ReferenceCommand` handler. `reference.asset_read` therefore has one active public owner and composes shared asset mechanics only behind the current Query service.
+The old read/export contract and handler registry no longer exist in the active compiled tree. T13 moved the former `content_graph.*` routes into its current contribution, so neither those routes nor any of the current thirty-nine Query IDs is duplicated in the sole immutable registry. T44 also isolated the obsolete module-owned Query-service composition and its `ReferenceCommand` handler. `reference.asset_read` therefore has one active public owner and composes shared asset mechanics only behind the current Query service.
 
-T06 Automation verifies the exact forty-two-route process inventory, unique owner, legacy-route exit, exact dispatch, typed failures, a real production `project.summary` readback, and the complete zero-entry result of an empty current `world.selection`. Product evidence additionally executes `client.landscape.height_read` through the live Editor against an exact managed Landscape before and after native mutation, verifies bounded local heights and no package dirtiness, and confirms exact absence after cleanup. These claims do not cover HJSON authoring or any Query command outside the inventory above.
+T06 Automation verifies the exact thirty-nine active Query routes plus the three centrally dormant World identities, unique owner, exact dispatch, typed failures, a real production `project.summary` readback, and the complete zero-entry result of an empty current `world.selection`. It also asserts that normal discovery and generated named bindings hide the dormant identities, compatibility discovery exposes them with their HJSON successors and confirmation requirement, and exact dormant execution remains available through the guarded compatibility entry point. Product evidence additionally executes `client.landscape.height_read` through the live Editor against an exact managed Landscape before and after native mutation, verifies bounded local heights and no package dirtiness, and confirms exact absence after cleanup.
 
 The authoritative historical mapping is the adjacent
 `successors/t06_non_hjson_query_migration.json` v2 record. It consumes all 21
 active frozen obligations assigned to T06, preserves their purpose/input/output
-contracts, names one exact current Query command for each row, and records the
+contracts, names one exact current Query or HJSON command for each row, and records the
 absence of every old public ID, manifest entry, SDK binding, and compatibility
 alias. That record is validated before a T06 verification receipt can be
 emitted; T61 only aggregates it and does not infer or implement a successor.

@@ -12,6 +12,7 @@ namespace UE::UAI::CommandContract
 	enum class EUeAgentCommandAvailability : uint8
 	{
 		Enabled,
+		Dormant,
 		Disabled,
 	};
 

@@ -40,7 +40,7 @@ namespace UE::UAI::Composition::LongRunningSession
 
 	/**
 	 * Builds the outermost production registry containing the current
-	 * production contracts plus the twelve LongRunningSession contracts.
+	 * production contracts plus the thirteen LongRunningSession contracts.
 	 */
 	UEAGENTINTERFACE_API bool
 	TryCreateLongRunningSessionProductionCommandContractRegistry(

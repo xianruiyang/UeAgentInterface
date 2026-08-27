@@ -127,7 +127,7 @@ namespace UE::UAI::Composition::LongRunningSession
 	{
 		OutHandlers.Reset();
 		OutError.Reset();
-		if (Profiles.Num() != 12)
+		if (Profiles.Num() != 13)
 		{
 			OutError = TEXT("long_running_session_activation_profile_count_invalid");
 			return false;

@@ -160,6 +160,10 @@ namespace UE::UAI::DomainAdapters::ContentGraphRead
 		FUeAgentStateRevision Revision(
 			const FUeAgentContentGraphCapture& Capture)
 		{
+			if (Capture.CanonicalRevision.IsSet())
+			{
+				return Capture.CanonicalRevision.GetValue();
+			}
 			return FUeAgentStateRevision(
 				TEXT("content-graph-read"),
 				Capture.Revision,
@@ -687,7 +691,9 @@ namespace UE::UAI::DomainAdapters::ContentGraphRead
 					TEXT("content_graph_read_owner_invalid"));
 			}
 			if (Capture.DomainId.IsEmpty()
-				|| Capture.Revision.IsEmpty())
+				|| Capture.Revision.IsEmpty()
+				|| (Capture.CanonicalRevision.IsSet()
+					&& !Capture.CanonicalRevision->IsValid()))
 			{
 				return Fail(
 					OutError,

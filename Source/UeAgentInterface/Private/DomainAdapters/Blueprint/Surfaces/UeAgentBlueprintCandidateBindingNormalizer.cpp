@@ -181,6 +181,16 @@ namespace UE::UAI::DomainAdapters::Blueprint::Surfaces
 			return true;
 		}
 
+		bool IsScratchStableNodeCandidateField(const FString& Field)
+		{
+			return Field == TEXT("function_name")
+				|| Field == TEXT("event_name")
+				|| Field == TEXT("variable_name")
+				|| Field == TEXT("node_type")
+				|| Field == TEXT("node_class")
+				|| Field == TEXT("operation_name");
+		}
+
 		bool TryNormalizeComponentCandidates(
 			const FString& TargetIdentity,
 			const TSharedPtr<FJsonObject>& ProviderExtension,
@@ -729,6 +739,15 @@ namespace UE::UAI::DomainAdapters::Blueprint::Surfaces
 							OutError))
 					{
 						return false;
+					}
+					for (const TPair<FString, FString>& Semantic
+						: ResolvedCandidate.AuthoringSelectors)
+					{
+						if (IsScratchStableNodeCandidateField(Semantic.Key))
+						{
+							Candidate->SetStringField(
+								Semantic.Key, Semantic.Value);
+						}
 					}
 
 					if (!Candidate->HasField(TEXT("name")))

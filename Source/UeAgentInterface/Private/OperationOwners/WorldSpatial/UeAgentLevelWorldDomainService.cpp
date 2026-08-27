@@ -35,6 +35,13 @@ namespace UE::UAI::OperationOwners::WorldSpatial
 				return ProviderId;
 			}
 
+			virtual bool SupportsExplicitCommand(
+				const FString& CommandId) const override
+			{
+				return CommandId == TEXT("content_graph.authoring_schema")
+					|| CommandId == TEXT("content_graph.export_workspace");
+			}
+
 			virtual bool Matches(
 				const FImportInitializationDomainRequest& Request) const override
 			{

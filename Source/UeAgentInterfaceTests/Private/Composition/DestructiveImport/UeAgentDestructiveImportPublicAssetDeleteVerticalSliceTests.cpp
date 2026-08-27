@@ -17,6 +17,7 @@
 #include "TestSupport/UeAgentPublicCommandTestHarness.h"
 #include "UObject/Package.h"
 #include "UObject/SavePackage.h"
+#include "UObject/UObjectGlobals.h"
 
 namespace
 {
@@ -143,6 +144,7 @@ namespace
 		}
 
 		const FString& GetPackageName() const { return PackageName; }
+		FString GetFilename() const { return Filename(); }
 
 		FString ObjectPath() const
 		{
@@ -454,6 +456,104 @@ bool FUeAgentDestructiveImportPublicPackageTargetResolutionTest::RunTest(
 		UniqueFixture.Cleanup()
 			&& AmbiguousFixture.Cleanup()
 			&& Harness.Stop());
+	return !HasAnyErrors();
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(
+	FUeAgentDestructiveImportPackageOnlyDeleteDoesNotLoadTargetTest,
+	"UeAgentInterface.Composition.DestructiveImport.PackageOnlyDeleteDoesNotLoadTarget",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FUeAgentDestructiveImportPackageOnlyDeleteDoesNotLoadTargetTest::RunTest(
+	const FString& Parameters)
+{
+	(void)Parameters;
+	FScopedAssetDeleteFixture Fixture;
+	if (!TestTrue(TEXT("package-only fixture is created and saved"),
+			Fixture.Create())
+		|| !TestTrue(TEXT("package-only fixture is unloaded before delete"),
+			Fixture.Unload()))
+	{
+		return false;
+	}
+	FAssetRegistryModule::GetRegistry().ScanModifiedAssetFiles(
+		{Fixture.GetFilename()});
+	TArray<FAssetData> RegistryAssets;
+	if (!TestTrue(TEXT("unloaded fixture Registry query succeeds"),
+			FAssetRegistryModule::GetRegistry().GetAssetsByPackageName(
+				FName(*Fixture.GetPackageName()), RegistryAssets, false))
+		|| !TestEqual(TEXT("unloaded fixture has exactly one Registry asset"),
+			RegistryAssets.Num(), 1))
+	{
+		return false;
+	}
+	if (!TestEqual(TEXT("unloaded fixture Registry identity is exact"),
+			RegistryAssets[0].GetObjectPathString(), Fixture.ObjectPath()))
+	{
+		return false;
+	}
+	if (!TestNull(TEXT("target package starts unloaded"),
+			FindPackage(nullptr, *Fixture.GetPackageName()))
+		|| !TestNull(TEXT("target object starts unloaded"),
+			FindObject<UObject>(nullptr, *Fixture.ObjectPath())))
+	{
+		return false;
+	}
+
+	FString Error;
+	TSharedPtr<IUeAgentAssetDeleteOwner> Owner;
+	if (!TestTrue(TEXT("formal asset-delete owner composes"),
+			TryCreateAssetDeleteOwner(
+				FPaths::ProjectSavedDir()
+					/ TEXT("UAI/Tests/T91/PackageOnlyDeleteJournal"),
+				TEXT("t91-package-only-delete"),
+				Owner,
+				Error))
+		|| !Owner.IsValid())
+	{
+		AddError(Error);
+		return false;
+	}
+
+	int32 TargetLoadCount = 0;
+	const FDelegateHandle AssetLoadedHandle =
+		FCoreUObjectDelegates::OnAssetLoaded.AddLambda(
+			[&TargetLoadCount, TargetPackage = Fixture.GetPackageName()](
+				UObject* Loaded)
+			{
+				if (Loaded && Loaded->GetOutermost()
+					&& Loaded->GetOutermost()->GetName() == TargetPackage)
+				{
+					++TargetLoadCount;
+				}
+			});
+	ON_SCOPE_EXIT
+	{
+		FCoreUObjectDelegates::OnAssetLoaded.Remove(AssetLoadedHandle);
+	};
+
+	const FUeAgentAssetDeleteResult DeleteResult = Owner->Delete(
+		FUeAgentAssetDeleteRequest{
+			TEXT("t91-package-only-delete-request"),
+			Fixture.GetPackageName(),
+			TEXT("t91-package-only-delete-test")},
+		MakeShared<FNeverCancelled>());
+	if (!TestTrue(TEXT("unloaded package-only delete commits"),
+			DeleteResult.IsSuccess()))
+	{
+		AddError(DeleteResult.ErrorCode + TEXT(":")
+			+ DeleteResult.ErrorDetail);
+	}
+	TestEqual(TEXT("package-only delete never loads the target asset"),
+		TargetLoadCount, 0);
+	TestTrue(TEXT("package-only delete refreshes durable absence"),
+		DeleteResult.bFileAbsent
+			&& DeleteResult.bPackageAbsent
+			&& DeleteResult.bRegistryAbsent
+			&& DeleteResult.bObjectAbsent
+			&& Fixture.IsDurablyAbsent());
+	TestTrue(TEXT("package-only fixture cleanup is idempotent"),
+		Fixture.Cleanup());
 	return !HasAnyErrors();
 }
 

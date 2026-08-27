@@ -34,6 +34,8 @@ namespace UeAgentPaletteSearch
 		TArray<FString> SourceFilters;
 		TArray<FString> CategoryFilters;
 		TArray<FString> TypeFilters;
+		/** Safe semantic assertions used only to rebind a candidate on a duplicated validation Blueprint. */
+		TMap<FString, FString> RequiredAuthoringSelectors;
 		bool bLibraryOnly;
 		bool bIncludeItems;
 		bool bIncludeGroups;

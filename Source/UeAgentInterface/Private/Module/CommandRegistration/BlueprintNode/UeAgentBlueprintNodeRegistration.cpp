@@ -115,7 +115,7 @@ namespace UE::UAI::Module::CommandRegistration::BlueprintNode
 			Result.Purpose.ParameterGuidance =
 				TEXT("Search the exact graph or pin context, continue paging while has_more is true, then copy either candidate.name or candidate.id into the HJSON candidate selector.");
 			Result.Purpose.ResultGuidance =
-				TEXT("candidate.name is sufficient only when unique in this exact context; candidate.id is the exact compact selector. Specialized rows also expose safe function_name/function_owner_class, event_name/event_class, variable_name/node_type/member_parent_class or node_class semantics. Copy them only as optional exact HJSON assertions; native_action_signature and internal spawner data are never public.");
+				TEXT("candidate.name is sufficient only when unique in this exact context; candidate.id is the exact compact selector. Specialized rows also expose safe function_name/function_owner_class, event_name/event_class, variable_name/node_type/member_parent_class, node_class or promotable-operator operation_name semantics. Copy them only as optional exact HJSON assertions; a promotable operator is not one fixed function, and native_action_signature plus internal spawner data are never public.");
 			Result.Purpose.FailureGuidance =
 				TEXT("Unresolved or ambiguous candidates fail before any write and never fall back to a class alias.");
 			Result.Purpose.SideEffectGuidance =

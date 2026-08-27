@@ -6,6 +6,12 @@
 
 namespace UE::UAI::Discovery::Command
 {
+	enum class ECommandSearchMode : uint8
+	{
+		Active,
+		Compatibility,
+	};
+
 	struct UEAGENTINTERFACE_API FCommandDiscoveryError final
 	{
 		FString Code;
@@ -17,6 +23,7 @@ namespace UE::UAI::Discovery::Command
 		FString Intent;
 		int32 Limit = 3;
 		int32 Cursor = 0;
+		ECommandSearchMode Mode = ECommandSearchMode::Active;
 	};
 
 	struct UEAGENTINTERFACE_API FCommandCandidate final
@@ -27,6 +34,9 @@ namespace UE::UAI::Discovery::Command
 		FString Summary;
 		FString Target;
 		FString MatchReason;
+		FString LifecycleStatus;
+		TArray<FString> SuccessorCommandIds;
+		bool bRequiresUserConfirmation = false;
 		bool bHasSideEffects = false;
 	};
 
@@ -52,6 +62,10 @@ namespace UE::UAI::Discovery::Command
 		TArray<CommandContract::FUeAgentCommandFieldDeclaration> ResultFields;
 		TArray<CommandContract::FUeAgentCommandErrorDeclaration> Errors;
 		TArray<FString> TutorialReferences;
+		FString LifecycleStatus;
+		TArray<FString> SuccessorCommandIds;
+		FString LifecycleReason;
+		bool bRequiresUserConfirmation = false;
 		bool bHasSideEffects = false;
 	};
 

@@ -1,6 +1,7 @@
 #include "Misc/AutomationTest.h"
 
 #include "Core/ContentDiscovery/UeAgentContentDiscovery.h"
+#include "Dom/JsonObject.h"
 
 namespace
 {
@@ -61,6 +62,8 @@ namespace
 				Item.StateLayer = TEXT("fixture-current");
 				Item.Revision = Revision;
 				Item.DetailCommandId = TEXT("fixture.read");
+				Item.DetailTargetIdentity = Identity;
+				Item.DetailInput = MakeShared<FJsonObject>();
 				Item.MatchReason = TEXT("fixture");
 				Item.SupportedOperations = {TEXT("query")};
 				if (MatchesContentDiscoveryFilters(Request, Item))

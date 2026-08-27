@@ -4,10 +4,12 @@
 
 #include "ActorFactories/ActorFactory.h"
 #include "AssetRegistry/AssetData.h"
+#include "AssetRegistry/AssetRegistryModule.h"
 #include "Commands/PaletteSearch/UeAgentPaletteSearchNaming.h"
 #include "Editor.h"
 #include "Elements/Framework/TypedElementRegistry.h"
 #include "Elements/Interfaces/TypedElementObjectInterface.h"
+#include "Engine/Blueprint.h"
 #include "Engine/Level.h"
 #include "Factories/AssetFactoryInterface.h"
 #include "GameFramework/Actor.h"
@@ -30,6 +32,13 @@ namespace
 	};
 
 	using FPlaceableTextFilter = TTextFilter<const FPlaceableItem&>;
+
+	bool IsBlueprintAssetRecord(const FNativePlaceableRecord& Record)
+	{
+		return Record.Item.IsValid()
+			&& Record.Item->AssetData.IsValid()
+			&& Record.Item->AssetData.AssetClassPath == UBlueprint::StaticClass()->GetClassPathName();
+	}
 
 	FString NormalizeToken(const FString& Value)
 	{
@@ -379,6 +388,84 @@ namespace
 				}
 				if (IsSourceAllowed(Record.Candidate.SourceOrigin, Params.SourceFilters))
 				{
+					OutRecords.Add(MoveTemp(Record));
+				}
+			}
+
+			// Place Actors' AllClasses catalog is class-oriented and does not promise
+			// to contain the Blueprint assets that the Content Browser can place. Add
+			// those assets through the placement subsystem's registered factory
+			// authority, then retain the same FPlaceableItem for execute/apply.
+			if (Category.UniqueHandle == FBuiltInPlacementCategories::AllClasses()
+				&& GEditor)
+			{
+				UPlacementSubsystem* PlacementSubsystem =
+					GEditor->GetEditorSubsystem<UPlacementSubsystem>();
+				if (!PlacementSubsystem)
+				{
+					OutError = TEXT("placeable_actor_candidate_placement_subsystem_unavailable");
+					return false;
+				}
+
+				FARFilter BlueprintFilter;
+				BlueprintFilter.ClassPaths.Add(UBlueprint::StaticClass()->GetClassPathName());
+				BlueprintFilter.bRecursiveClasses = true;
+				TArray<FAssetData> BlueprintAssets;
+				FAssetRegistryModule& AssetRegistryModule =
+					FModuleManager::LoadModuleChecked<FAssetRegistryModule>(TEXT("AssetRegistry"));
+				AssetRegistryModule.Get().GetAssets(BlueprintFilter, BlueprintAssets);
+				BlueprintAssets.Sort([](const FAssetData& Left, const FAssetData& Right)
+				{
+					return Left.GetObjectPathString() < Right.GetObjectPathString();
+				});
+
+				for (const FAssetData& BlueprintAsset : BlueprintAssets)
+				{
+					TScriptInterface<IAssetFactoryInterface> AssetFactory =
+						PlacementSubsystem->FindAssetFactoryFromAssetData(BlueprintAsset);
+					UActorFactory* ActorFactory =
+						AssetFactory ? Cast<UActorFactory>(AssetFactory.GetObject()) : nullptr;
+					if (!ActorFactory)
+					{
+						continue;
+					}
+
+					const TSharedPtr<FPlaceableItem> Item =
+						MakeShared<FPlaceableItem>(AssetFactory, BlueprintAsset);
+					if (!Params.SearchText.TrimStartAndEnd().IsEmpty()
+						&& !TextFilter.PassesFilter(*Item))
+					{
+						continue;
+					}
+
+					FNativePlaceableRecord Record;
+					if (!BuildCandidate(Category, Item, Items.Num() + OutRecords.Num(), Record, OutError))
+					{
+						return false;
+					}
+					if (!Record.Candidate.bSupportedInContext
+						|| !IsSourceAllowed(Record.Candidate.SourceOrigin, Params.SourceFilters))
+					{
+						continue;
+					}
+
+					const FString ActorClass =
+						Record.Candidate.AuthoringSelectors.FindRef(TEXT("actor_class"));
+					const FString AssetIdentity =
+						Record.Candidate.AuthoringSelectors.FindRef(TEXT("asset_override"));
+					OutRecords.RemoveAll([&ActorClass, &AssetIdentity](
+						const FNativePlaceableRecord& Existing)
+					{
+						const FString ExistingAsset =
+							Existing.Candidate.AuthoringSelectors.FindRef(TEXT("asset_override"));
+						const bool bSameAsset = !AssetIdentity.IsEmpty()
+							&& ExistingAsset.Equals(AssetIdentity, ESearchCase::CaseSensitive);
+						const bool bClassOnlyDuplicate = !IsBlueprintAssetRecord(Existing)
+							&& !ActorClass.IsEmpty()
+							&& Existing.Candidate.AuthoringSelectors.FindRef(TEXT("actor_class"))
+								.Equals(ActorClass, ESearchCase::CaseSensitive);
+						return bSameAsset || bClassOnlyDuplicate;
+					});
 					OutRecords.Add(MoveTemp(Record));
 				}
 			}
