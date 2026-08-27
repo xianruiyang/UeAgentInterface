@@ -9,6 +9,8 @@ namespace UE::UAI::Module::CommandRegistration::Query
 {
 	UEAGENTINTERFACE_API bool TryCreateQueryContribution(
 		TSharedRef<DomainAdapters::Query::IUeAgentQueryService> Service,
+		TSharedRef<const Contract::FUeAgentDescriptorRegistry>
+			DescriptorRegistry,
 		TSharedPtr<Active::IUeAgentActiveCommandContribution>&
 			OutContribution,
 		FString& OutError);
@@ -20,6 +22,8 @@ namespace UE::UAI::Module::CommandRegistration::Query
 
 	UEAGENTINTERFACE_API bool TryCreateQueryRegistration(
 		TSharedRef<DomainAdapters::Query::IUeAgentQueryService> Service,
+		TSharedRef<const Contract::FUeAgentDescriptorRegistry>
+			DescriptorRegistry,
 		TSharedPtr<
 			const CommandRegistry::FUeAgentImmutableCommandRegistry>&
 			OutRegistry,

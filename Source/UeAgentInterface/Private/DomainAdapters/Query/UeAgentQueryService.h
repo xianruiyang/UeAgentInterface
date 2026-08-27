@@ -2,6 +2,7 @@
 
 #include "CoreMinimal.h"
 #include "Core/BindingGateway/Query/UeAgentDomainQuery.h"
+#include "Core/Contract/UeAgentDescriptorRegistry.h"
 #include "Templates/SharedPointer.h"
 
 namespace UE::UAI::DomainAdapters::Query
@@ -53,11 +54,26 @@ namespace UE::UAI::DomainAdapters::Query
 			FQueryServiceError& OutError) const = 0;
 	};
 
+	/**
+	 * One production composition owns both Query execution and the exact
+	 * immutable descriptors that define its command-specific input contracts.
+	 * Command registration must consume this same descriptor instance instead
+	 * of rebuilding a parallel registry.
+	 */
+	struct UEAGENTINTERFACE_API FProductionQueryComposition final
+	{
+		TSharedPtr<IUeAgentQueryService> Service;
+		TSharedPtr<const Contract::FUeAgentDescriptorRegistry>
+			DescriptorRegistry;
+
+		bool IsValid() const;
+	};
+
 	UEAGENTINTERFACE_API const TArray<FQueryRoute>&
 	GetNonHjsonQueryRoutes();
 
 	UEAGENTINTERFACE_API bool TryCreateProductionQueryService(
-		TSharedPtr<IUeAgentQueryService>& OutService,
+		FProductionQueryComposition& OutComposition,
 		FString& OutError);
 
 	/** Provider contribution owned by the query domain capability. */

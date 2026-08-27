@@ -366,7 +366,11 @@ bool FUeAgentStrictV2T05ActiveTutorialCompletenessTest::RunTest(
 		FString PythonGeneric;
 		FString PythonExact;
 		FString CliExact;
-		const bool bComplete =
+		FString PythonDormant;
+		FString CliDormant;
+		FString LifecycleStatus;
+		bool bRequiresUserConfirmation = false;
+		const bool bEnvelopeComplete =
 			Payload->GetStringField(TEXT("command_id"))
 				== Contract.GetCommandId()
 			&& Payload->GetStringField(TEXT("contract_hash"))
@@ -382,19 +386,92 @@ bool FUeAgentStrictV2T05ActiveTutorialCompletenessTest::RunTest(
 			&& !NonPurpose.IsEmpty()
 			&& Payload->TryGetObjectField(TEXT("invocation"), Invocation)
 			&& Invocation && Invocation->IsValid()
-			&& (*Invocation)->TryGetStringField(TEXT("python_named"), PythonNamed)
+			&& Payload->TryGetStringField(
+				TEXT("lifecycle_status"), LifecycleStatus)
+			&& Payload->TryGetBoolField(
+				TEXT("requires_user_confirmation"),
+				bRequiresUserConfirmation);
+		const bool bActiveInvocationComplete =
+			Contract.GetAvailability() == EUeAgentCommandAvailability::Enabled
+			&& LifecycleStatus == TEXT("active")
+			&& !bRequiresUserConfirmation
+			&& (*Invocation)->TryGetStringField(
+				TEXT("python_named"), PythonNamed)
 			&& !PythonNamed.IsEmpty()
-			&& (*Invocation)->TryGetStringField(TEXT("python_generic"), PythonGeneric)
+			&& (*Invocation)->TryGetStringField(
+				TEXT("python_generic"), PythonGeneric)
 			&& !PythonGeneric.IsEmpty()
-			&& (*Invocation)->TryGetStringField(TEXT("python_exact"), PythonExact)
+			&& (*Invocation)->TryGetStringField(
+				TEXT("python_exact"), PythonExact)
 			&& !PythonExact.IsEmpty()
 			&& (*Invocation)->TryGetStringField(TEXT("cli_exact"), CliExact)
 			&& !CliExact.IsEmpty();
+		const bool bDormantInvocationComplete =
+			Contract.GetAvailability() == EUeAgentCommandAvailability::Dormant
+			&& LifecycleStatus == TEXT("dormant")
+			&& bRequiresUserConfirmation
+			&& (*Invocation)->TryGetStringField(
+				TEXT("python_dormant"), PythonDormant)
+			&& !PythonDormant.IsEmpty()
+			&& (*Invocation)->TryGetStringField(
+				TEXT("cli_dormant"), CliDormant)
+			&& !CliDormant.IsEmpty();
+		const bool bComplete = bEnvelopeComplete
+			&& (bActiveInvocationComplete || bDormantInvocationComplete);
 		if (!bComplete)
 		{
 			AddError(TEXT("active command machine tutorial is incomplete: ")
 				+ Contract.GetCommandId());
 			return false;
+		}
+		if (Contract.GetCommandId() == TEXT("asset.registry_relations"))
+		{
+			const TArray<TSharedPtr<FJsonValue>>& InputFields =
+				Payload->GetArrayField(TEXT("input_fields"));
+			TSharedPtr<FJsonObject> Input;
+			for (const TSharedPtr<FJsonValue>& Value : InputFields)
+			{
+				const TSharedPtr<FJsonObject> Field = Value->AsObject();
+				if (Field.IsValid()
+					&& Field->GetStringField(TEXT("name")) == TEXT("input"))
+				{
+					Input = Field;
+					break;
+				}
+			}
+			if (!Input.IsValid())
+			{
+				AddError(TEXT("asset.registry_relations detail omits input"));
+				return false;
+			}
+			const TSharedPtr<FJsonObject>* InputSchema = nullptr;
+			if (!Input->GetBoolField(TEXT("required"))
+				|| !Input->TryGetObjectField(TEXT("schema"), InputSchema)
+				|| !InputSchema || !InputSchema->IsValid())
+			{
+				AddError(TEXT("asset.registry_relations detail omits its required schema"));
+				return false;
+			}
+			const TArray<TSharedPtr<FJsonValue>>& Required =
+				(*InputSchema)->GetArrayField(TEXT("required"));
+			const TArray<TSharedPtr<FJsonValue>>& DirectionEnum =
+				(*InputSchema)->GetObjectField(TEXT("properties"))
+					->GetObjectField(TEXT("direction"))
+					->GetArrayField(TEXT("enum"));
+			if (!Required.ContainsByPredicate(
+					[](const TSharedPtr<FJsonValue>& Value)
+					{
+						return Value.IsValid()
+							&& Value->Type == EJson::String
+							&& Value->AsString() == TEXT("direction");
+					})
+				|| DirectionEnum.Num() != 3
+				|| !(*Purpose)->GetStringField(TEXT("minimum_example"))
+					.Contains(TEXT("input={\"direction\":\"dependencies\"}")))
+			{
+				AddError(TEXT("asset.registry_relations detail is not directly executable"));
+				return false;
+			}
 		}
 	}
 	TestTrue(

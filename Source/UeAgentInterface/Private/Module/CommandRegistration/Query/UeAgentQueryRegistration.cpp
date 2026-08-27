@@ -1,7 +1,11 @@
 #include "Module/CommandRegistration/Query/UeAgentQueryRegistration.h"
 
 #include "CommandHandlers/Query/UeAgentQueryHandlers.h"
+#include "Core/Contract/Discovery/UeAgentContractExample.h"
+#include "Core/Contract/UeAgentContractJson.h"
 #include "Core/DomainCapability/UeAgentDomainCapability.h"
+#include "Dom/JsonObject.h"
+#include "Dom/JsonValue.h"
 
 namespace UE::UAI::Module::CommandRegistration::Query
 {
@@ -20,9 +24,17 @@ namespace UE::UAI::Module::CommandRegistration::Query
 			const TCHAR* Name,
 			const TCHAR* WireType,
 			const bool bRequired,
-			const TCHAR* Description)
+			const TCHAR* Description,
+			FString SchemaJson = {})
 		{
-			return {Name, WireType, bRequired, false, Description};
+			return {
+				Name,
+				WireType,
+				bRequired,
+				false,
+				Description,
+				MoveTemp(SchemaJson),
+			};
 		}
 
 		FUeAgentCommandErrorDeclaration Error(
@@ -32,8 +44,92 @@ namespace UE::UAI::Module::CommandRegistration::Query
 			return {Code, Description};
 		}
 
-		FUeAgentCommandDeclaration Declaration(const FQueryRoute& Route)
+		bool TryGetRequiredNames(
+			const TSharedPtr<FJsonObject>& Schema,
+			TArray<FString>& OutNames,
+			FString& OutError)
 		{
+			OutNames.Reset();
+			if (!Schema.IsValid())
+			{
+				OutError = TEXT("query_input_schema_missing");
+				return false;
+			}
+			if (!Schema->HasField(TEXT("required")))
+			{
+				return true;
+			}
+			const TArray<TSharedPtr<FJsonValue>>* Required = nullptr;
+			if (!Schema->TryGetArrayField(TEXT("required"), Required)
+				|| !Required)
+			{
+				OutError = TEXT("query_input_schema_required_invalid");
+				return false;
+			}
+			TSet<FString> Seen;
+			for (const TSharedPtr<FJsonValue>& Value : *Required)
+			{
+				if (!Value.IsValid() || Value->Type != EJson::String)
+				{
+					OutError = TEXT("query_input_schema_required_invalid");
+					return false;
+				}
+				const FString Name = Value->AsString();
+				if (Name.IsEmpty() || Seen.Contains(Name))
+				{
+					OutError = TEXT("query_input_schema_required_invalid:") + Name;
+					return false;
+				}
+				Seen.Add(Name);
+				OutNames.Add(Name);
+			}
+			return true;
+		}
+
+		bool TryDeclaration(
+			const FQueryRoute& Route,
+			const Contract::FUeAgentOperationDescriptor& Descriptor,
+			const Contract::FUeAgentContractSchema& InputContract,
+			FUeAgentCommandDeclaration& OutDeclaration,
+			FString& OutError)
+		{
+			TSharedPtr<FJsonObject> InputSchema;
+			if (!Contract::Json::TryParseObject(
+					Descriptor.GetInputSchema().GetJsonValue(),
+					InputSchema,
+					OutError)
+				|| !InputSchema.IsValid())
+			{
+				OutError = TEXT("query_input_schema_invalid:")
+					+ Route.CommandId + TEXT(":") + OutError;
+				return false;
+			}
+			TArray<FString> RequiredInputNames;
+			if (!TryGetRequiredNames(
+					InputSchema,
+					RequiredInputNames,
+					OutError))
+			{
+				OutError = TEXT("query_input_schema_invalid:")
+					+ Route.CommandId + TEXT(":") + OutError;
+				return false;
+			}
+			const bool bInputRequired = !RequiredInputNames.IsEmpty()
+				&& !Route.bUsesObjectPath;
+			FString MinimumInput;
+			Contract::FUeAgentContractValue CanonicalMinimum{FString()};
+			if (bInputRequired
+				&& !Contract::TryBuildMinimalContractExample(
+					InputContract,
+					CanonicalMinimum,
+					MinimumInput,
+					OutError))
+			{
+				OutError = TEXT("query_input_tutorial_unavailable:")
+					+ Route.CommandId + TEXT(":") + OutError;
+				return false;
+			}
+
 			FUeAgentCommandDeclaration Result;
 			Result.CommandId = Route.CommandId;
 			Result.PythonNamespace = TEXT("query");
@@ -70,8 +166,9 @@ namespace UE::UAI::Module::CommandRegistration::Query
 				Result.InputFields.Add(Field(
 					TEXT("input"),
 					TEXT("object"),
-					false,
-					TEXT("Command-specific query fields consumed by the exact UE provider.")));
+					bInputRequired,
+					TEXT("Command-specific query fields consumed by the exact UE provider."),
+					Descriptor.GetInputSchema().GetJsonValue()));
 			}
 			Result.InputFields.Add(Field(
 				TEXT("context"),
@@ -115,11 +212,23 @@ namespace UE::UAI::Module::CommandRegistration::Query
 			Result.Purpose.ResultGuidance = TEXT("Use command_id, mechanics_command_id, state revision and projection completeness to bound every conclusion.");
 			Result.Purpose.FailureGuidance = TEXT("Missing targets, unsupported mechanics, provider errors, cancellation and stale context remain distinct typed failures.");
 			Result.Purpose.SideEffectGuidance = TEXT("Strictly read-only; a provider that cannot attest this is rejected.");
-			Result.Purpose.MinimumExample = Route.bUsesObjectPath
-				? FString::Printf(TEXT("%s(client, object_path)"), *Route.PythonFunction)
-				: Route.bRequiresTarget
-					? FString::Printf(TEXT("%s(client, target)"), *Route.PythonFunction)
-					: FString::Printf(TEXT("%s(client)"), *Route.PythonFunction);
+			TArray<FString> ExampleArguments{TEXT("client")};
+			if (Route.bUsesObjectPath)
+			{
+				ExampleArguments.Add(TEXT("object_path"));
+			}
+			else if (Route.bRequiresTarget)
+			{
+				ExampleArguments.Add(TEXT("target"));
+			}
+			if (bInputRequired)
+			{
+				ExampleArguments.Add(TEXT("input=") + MinimumInput);
+			}
+			Result.Purpose.MinimumExample = FString::Printf(
+				TEXT("%s(%s)"),
+				*Route.PythonFunction,
+				*FString::Join(ExampleArguments, TEXT(", ")));
 			Result.Purpose.RelatedFlows = {
 				TEXT("query.command.search"),
 				TEXT("query.command.detail"),
@@ -130,7 +239,70 @@ namespace UE::UAI::Module::CommandRegistration::Query
 				Route.CommandId,
 			};
 			Result.Purpose.Synonyms = {Route.PythonFunction};
-			return Result;
+			OutDeclaration = MoveTemp(Result);
+			return true;
+		}
+
+		bool TryBuildDeclarations(
+			const Contract::FUeAgentDescriptorRegistry& DescriptorRegistry,
+			TArray<FUeAgentCommandDeclaration>& OutDeclarations,
+			FString& OutError)
+		{
+			OutDeclarations.Reset();
+			OutError.Reset();
+			const TArray<FQueryRoute>& Routes = GetNonHjsonQueryRoutes();
+			if (DescriptorRegistry.GetDescriptors().Num() != Routes.Num())
+			{
+				OutError = TEXT("query_descriptor_inventory_mismatch");
+				return false;
+			}
+			TSet<FString> UsedDescriptorIds;
+			OutDeclarations.Reserve(Routes.Num());
+			for (const FQueryRoute& Route : Routes)
+			{
+				const FString DescriptorId = TEXT("uai.query.")
+					+ Route.MechanicsCommandId;
+				const Contract::FUeAgentOperationDescriptor* Descriptor =
+					DescriptorRegistry.FindByDescriptorId(DescriptorId);
+				const Contract::FUeAgentContractSchema* InputContract = Descriptor
+					? DescriptorRegistry.FindCompiledInputSchemaExact(
+						Descriptor->GetIdentity())
+					: nullptr;
+				if (!Route.IsValid()
+					|| !Descriptor
+					|| !InputContract
+					|| UsedDescriptorIds.Contains(DescriptorId)
+					|| Descriptor->GetOperationKind()
+						!= Contract::EUeAgentDescriptorOperationKind::Query
+					|| !Descriptor->GetQueryBinding().IsSet())
+				{
+					OutDeclarations.Reset();
+					OutError = TEXT("query_route_descriptor_mismatch:")
+						+ Route.CommandId + TEXT(":") + DescriptorId;
+					return false;
+				}
+				FUeAgentCommandDeclaration Command;
+				if (!TryDeclaration(
+						Route,
+						*Descriptor,
+						*InputContract,
+						Command,
+						OutError))
+				{
+					OutDeclarations.Reset();
+					return false;
+				}
+				UsedDescriptorIds.Add(DescriptorId);
+				OutDeclarations.Add(MoveTemp(Command));
+			}
+			if (UsedDescriptorIds.Num()
+				!= DescriptorRegistry.GetDescriptors().Num())
+			{
+				OutDeclarations.Reset();
+				OutError = TEXT("query_descriptor_route_coverage_incomplete");
+				return false;
+			}
+			return true;
 		}
 
 		class FQueryContribution final
@@ -138,8 +310,10 @@ namespace UE::UAI::Module::CommandRegistration::Query
 		{
 		public:
 			explicit FQueryContribution(
-				TSharedRef<IUeAgentQueryService> InService)
+				TSharedRef<IUeAgentQueryService> InService,
+				TArray<FUeAgentCommandDeclaration> InDeclarations)
 				: Service(MoveTemp(InService))
+				, Declarations(MoveTemp(InDeclarations))
 			{
 			}
 
@@ -152,10 +326,7 @@ namespace UE::UAI::Module::CommandRegistration::Query
 			virtual void CollectDeclarations(
 				TArray<FUeAgentCommandDeclaration>& OutDeclarations) const override
 			{
-				for (const FQueryRoute& Route : GetNonHjsonQueryRoutes())
-				{
-					OutDeclarations.Add(Declaration(Route));
-				}
+				OutDeclarations.Append(Declarations);
 			}
 
 			virtual bool CreateHandlers(
@@ -168,6 +339,7 @@ namespace UE::UAI::Module::CommandRegistration::Query
 
 		private:
 			TSharedRef<IUeAgentQueryService> Service;
+			TArray<FUeAgentCommandDeclaration> Declarations;
 		};
 
 		bool TryCreateDomainCapability(
@@ -214,11 +386,23 @@ namespace UE::UAI::Module::CommandRegistration::Query
 
 	bool TryCreateQueryContribution(
 		TSharedRef<IUeAgentQueryService> Service,
+		TSharedRef<const Contract::FUeAgentDescriptorRegistry>
+			DescriptorRegistry,
 		TSharedPtr<IUeAgentActiveCommandContribution>& OutContribution,
 		FString& OutError)
 	{
-		OutContribution = MakeShared<FQueryContribution>(MoveTemp(Service));
-		OutError.Reset();
+		TArray<FUeAgentCommandDeclaration> Declarations;
+		if (!TryBuildDeclarations(
+				DescriptorRegistry.Get(),
+				Declarations,
+				OutError))
+		{
+			OutContribution.Reset();
+			return false;
+		}
+		OutContribution = MakeShared<FQueryContribution>(
+			MoveTemp(Service),
+			MoveTemp(Declarations));
 		return true;
 	}
 
@@ -226,21 +410,24 @@ namespace UE::UAI::Module::CommandRegistration::Query
 		TSharedPtr<IUeAgentActiveCommandContribution>& OutContribution,
 		FString& OutError)
 	{
-		TSharedPtr<IUeAgentQueryService> Service;
-		if (!TryCreateProductionQueryService(Service, OutError)
-			|| !Service.IsValid())
+		FProductionQueryComposition Production;
+		if (!TryCreateProductionQueryService(Production, OutError)
+			|| !Production.IsValid())
 		{
 			OutContribution.Reset();
 			return false;
 		}
 		return TryCreateQueryContribution(
-			Service.ToSharedRef(),
+			Production.Service.ToSharedRef(),
+			Production.DescriptorRegistry.ToSharedRef(),
 			OutContribution,
 			OutError);
 	}
 
 	bool TryCreateQueryRegistration(
 		TSharedRef<IUeAgentQueryService> Service,
+		TSharedRef<const Contract::FUeAgentDescriptorRegistry>
+			DescriptorRegistry,
 		TSharedPtr<const FUeAgentImmutableCommandRegistry>& OutRegistry,
 		TSharedPtr<const FUeAgentExactCommandDispatch>& OutDispatch,
 		FString& OutError)
@@ -249,7 +436,11 @@ namespace UE::UAI::Module::CommandRegistration::Query
 		OutDispatch.Reset();
 		TSharedPtr<IUeAgentActiveCommandContribution> Contribution;
 		FUeAgentActiveCommandComposition Composition;
-		if (!TryCreateQueryContribution(Service, Contribution, OutError)
+		if (!TryCreateQueryContribution(
+				Service,
+				DescriptorRegistry,
+				Contribution,
+				OutError)
 			|| !Composition.TryAdd(Contribution.ToSharedRef(), OutError)
 			|| !Composition.TryCompose(OutRegistry, OutDispatch, OutError))
 		{

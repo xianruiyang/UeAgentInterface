@@ -3,6 +3,7 @@
 #include "CommandRegistry/UeAgentImmutableCommandRegistry.h"
 #include "Core/Contract/Command/UeAgentCommandLifecyclePolicy.h"
 #include "Core/Contract/UeAgentCommandJson.h"
+#include "Core/Contract/UeAgentContractJson.h"
 #include "Dom/JsonObject.h"
 #include "Dom/JsonValue.h"
 #include "HAL/FileManager.h"
@@ -38,6 +39,19 @@ namespace UE::UAI::CommandRegistry
 			Object->SetStringField(TEXT("wire_type"), Field.WireType);
 			Object->SetBoolField(TEXT("required"), Field.bRequired);
 			Object->SetBoolField(TEXT("nullable"), Field.bNullable);
+			if (!Field.SchemaJson.IsEmpty())
+			{
+				TSharedPtr<FJsonObject> Schema;
+				FString Error;
+				if (Contract::Json::TryParseObject(
+						Field.SchemaJson,
+						Schema,
+						Error)
+					&& Schema.IsValid())
+				{
+					Object->SetObjectField(TEXT("schema"), MoveTemp(Schema));
+				}
+			}
 			return Object;
 		}
 

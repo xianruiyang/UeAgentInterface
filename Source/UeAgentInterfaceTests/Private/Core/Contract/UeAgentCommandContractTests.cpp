@@ -4,6 +4,7 @@
 #include "CommandRegistry/UeAgentActiveCommandManifest.h"
 #include "CommandRegistry/UeAgentImmutableCommandRegistry.h"
 #include "Core/Contract/Command/UeAgentCommandContractModel.h"
+#include "Core/Contract/UeAgentContractJson.h"
 #include "Dom/JsonObject.h"
 #include "Module/CommandRegistration/Active/UeAgentActiveCommandComposition.h"
 #include "Serialization/JsonReader.h"
@@ -253,6 +254,45 @@ bool FUeAgentCommandManifestProjectionTest::RunTest(
 					TEXT("manifest tutorial reference matches frozen contract"),
 					References[Index]->AsString(),
 					Contract->GetTutorialReferences()[Index]);
+			}
+		}
+		if (Contract)
+		{
+			const TArray<TSharedPtr<FJsonValue>>& ManifestParameters =
+				Command->GetArrayField(TEXT("parameters"));
+			TestEqual(
+				TEXT("manifest parameter count matches frozen contract"),
+				ManifestParameters.Num(),
+				Contract->GetInputFields().Num());
+			for (int32 Index = 0;
+				Index < ManifestParameters.Num()
+					&& Index < Contract->GetInputFields().Num();
+				++Index)
+			{
+				const TSharedPtr<FJsonObject> Parameter =
+					ManifestParameters[Index]->AsObject();
+				const FUeAgentCommandFieldDeclaration& Field =
+					Contract->GetInputFields()[Index];
+				TestEqual(
+					TEXT("manifest parameter schema presence matches frozen contract"),
+					Parameter->HasTypedField<EJson::Object>(TEXT("schema")),
+					!Field.SchemaJson.IsEmpty());
+				if (!Field.SchemaJson.IsEmpty()
+					&& Parameter->HasTypedField<EJson::Object>(TEXT("schema")))
+				{
+					FString ManifestSchema;
+					FString SchemaError;
+					TestTrue(
+						TEXT("manifest parameter schema canonicalizes"),
+						UE::UAI::Contract::Json::TryCanonicalize(
+							Parameter->GetObjectField(TEXT("schema")),
+							ManifestSchema,
+							SchemaError));
+					TestEqual(
+						TEXT("manifest parameter schema equals frozen contract"),
+						ManifestSchema,
+						Field.SchemaJson);
+				}
 			}
 		}
 		for (const FString& Forbidden : ForbiddenFields)

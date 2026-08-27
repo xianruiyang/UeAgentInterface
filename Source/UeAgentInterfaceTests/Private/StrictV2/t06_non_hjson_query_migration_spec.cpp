@@ -21,6 +21,7 @@
 namespace
 {
 	using namespace UE::UAI::CommandEdge;
+	using namespace UE::UAI::CommandContract;
 	using namespace UE::UAI::CommandRegistry;
 	using namespace UE::UAI::Composition::ReadExportCommand;
 	using namespace UE::UAI::Contract;
@@ -141,6 +142,7 @@ namespace
 	{
 		TSharedRef<FFixtureQueryService> Service =
 			MakeShared<FFixtureQueryService>();
+		TSharedPtr<const FUeAgentDescriptorRegistry> DescriptorRegistry;
 		TSharedPtr<const FUeAgentImmutableCommandRegistry> Registry;
 		TSharedPtr<const FUeAgentExactCommandDispatch> Dispatch;
 		FString Error;
@@ -149,10 +151,20 @@ namespace
 	FFixtureRegistration MakeRegistration(FAutomationTestBase* Test)
 	{
 		FFixtureRegistration Fixture;
+		FProductionQueryComposition Production;
+		Test->TestTrue(
+			TEXT("T06 production descriptor authority composes"),
+			TryCreateProductionQueryService(Production, Fixture.Error));
+		Fixture.DescriptorRegistry = Production.DescriptorRegistry;
+		if (!Fixture.DescriptorRegistry.IsValid())
+		{
+			return Fixture;
+		}
 		Test->TestTrue(
 			TEXT("T06 contribution composes in isolation"),
 			TryCreateQueryRegistration(
 				Fixture.Service,
+				Fixture.DescriptorRegistry.ToSharedRef(),
 				Fixture.Registry,
 				Fixture.Dispatch,
 				Fixture.Error));
@@ -329,6 +341,77 @@ bool FUeAgentStrictV2T06ExactDispatchTest::RunTest(
 				FString(TEXT("query-command-owner")));
 		}
 	}
+	const FUeAgentFrozenCommandContract* Relations =
+		Fixture.Registry->FindExact(TEXT("asset.registry_relations"));
+	if (!TestNotNull(
+			TEXT("asset.registry_relations has one exact contract"),
+			Relations))
+	{
+		return false;
+	}
+	const FUeAgentCommandFieldDeclaration* RelationsInput =
+		Relations->GetInputFields().FindByPredicate(
+			[](const FUeAgentCommandFieldDeclaration& Field)
+			{
+				return Field.Name == TEXT("input");
+			});
+	if (!TestNotNull(
+			TEXT("asset.registry_relations exposes command-specific input"),
+			RelationsInput))
+	{
+		return false;
+	}
+	TestTrue(
+		TEXT("nested required fields make the public input object required"),
+		RelationsInput->bRequired);
+	TSharedPtr<FJsonObject> RelationsInputSchema;
+	FString SchemaError;
+	TestTrue(
+		TEXT("the exact descriptor input schema reaches the frozen contract"),
+		UE::UAI::CommandContract::Json::TryParseObject(
+			RelationsInput->SchemaJson,
+			RelationsInputSchema,
+			SchemaError));
+	if (RelationsInputSchema.IsValid())
+	{
+		const TArray<TSharedPtr<FJsonValue>>& Required =
+			RelationsInputSchema->GetArrayField(TEXT("required"));
+		TestTrue(
+			TEXT("the public input schema requires direction"),
+			Required.ContainsByPredicate(
+				[](const TSharedPtr<FJsonValue>& Value)
+				{
+					return Value.IsValid()
+						&& Value->Type == EJson::String
+						&& Value->AsString() == TEXT("direction");
+				}));
+		const TSharedPtr<FJsonObject> Direction =
+			RelationsInputSchema->GetObjectField(TEXT("properties"))
+				->GetObjectField(TEXT("direction"));
+		const TArray<TSharedPtr<FJsonValue>>& DirectionValues =
+			Direction->GetArrayField(TEXT("enum"));
+		TestEqual(
+			TEXT("the public input schema exposes all exact direction values"),
+			DirectionValues.Num(),
+			3);
+	}
+	TestTrue(
+		TEXT("the minimum tutorial includes a directly usable direction"),
+		Relations->GetPurpose().MinimumExample.Contains(
+			TEXT("input={\"direction\":\"dependencies\"}")));
+	const FUeAgentFrozenCommandContract* ProjectSummary =
+		Fixture.Registry->FindExact(TEXT("project.summary"));
+	const FUeAgentCommandFieldDeclaration* ProjectSummaryInput =
+		ProjectSummary
+			? ProjectSummary->GetInputFields().FindByPredicate(
+				[](const FUeAgentCommandFieldDeclaration& Field)
+				{
+					return Field.Name == TEXT("input");
+				})
+			: nullptr;
+	TestTrue(
+		TEXT("a Query without nested required fields keeps optional input"),
+		ProjectSummaryInput && !ProjectSummaryInput->bRequired);
 
 	const FString Params =
 		TEXT("{\"context\":{\"state_plane\":\"persisted\"},")
@@ -414,12 +497,12 @@ bool FUeAgentStrictV2T06ProductionReadbackTest::RunTest(
 	return false;
 #else
 	TestTrue(TEXT("production Query readback runs on the game thread"), IsInGameThread());
-	TSharedPtr<IUeAgentQueryService> Service;
+	FProductionQueryComposition Production;
 	FString Error;
 	TestTrue(
 		TEXT("real QueryService composes from production UE mechanics"),
-		TryCreateProductionQueryService(Service, Error));
-	if (!Service.IsValid())
+		TryCreateProductionQueryService(Production, Error));
+	if (!Production.IsValid())
 	{
 		AddError(Error);
 		return false;
@@ -429,7 +512,8 @@ bool FUeAgentStrictV2T06ProductionReadbackTest::RunTest(
 	TestTrue(
 		TEXT("production Query contribution composes"),
 		TryCreateQueryRegistration(
-			Service.ToSharedRef(),
+			Production.Service.ToSharedRef(),
+			Production.DescriptorRegistry.ToSharedRef(),
 			Registry,
 			Dispatch,
 			Error));

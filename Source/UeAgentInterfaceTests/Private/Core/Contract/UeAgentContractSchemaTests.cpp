@@ -1,5 +1,6 @@
 #include "Misc/AutomationTest.h"
 
+#include "Core/Contract/Discovery/UeAgentContractExample.h"
 #include "Core/Contract/UeAgentContractSchema.h"
 #include "Core/Contract/UeAgentDescriptorRegistry.h"
 
@@ -41,6 +42,110 @@ namespace
 			return true;
 		};
 	}
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(
+	FUeAgentContractSchemaMinimalExampleTest,
+	"UeAgentInterface.Core.Contract.ContractSchema.MinimalDiscoveryExample",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FUeAgentContractSchemaMinimalExampleTest::RunTest(
+	const FString& Parameters)
+{
+	using namespace UE::UAI::Contract;
+
+	TSharedPtr<const FUeAgentContractSchema> Schema;
+	FUeAgentContractSchemaError SchemaError;
+	TestTrue(
+		TEXT("descriptor-shaped schema compiles"),
+		FUeAgentContractSchema::TryCompile(
+			FUeAgentContractValue(TEXT(
+				"{\"additionalProperties\":false,\"properties\":{"
+				"\"direction\":{\"enum\":[\"dependencies\","
+				"\"referencers\",\"both\"],\"type\":\"string\"},"
+				"\"options\":{\"properties\":{\"enabled\":{"
+				"\"type\":\"boolean\"}},\"required\":[\"enabled\"],"
+				"\"type\":\"object\"}},\"required\":[\"direction\","
+				"\"options\"],\"type\":\"object\"}")),
+			Schema,
+			SchemaError));
+	if (!Schema.IsValid())
+	{
+		return false;
+	}
+	FUeAgentContractValue Canonical{FString()};
+	FString PythonLiteral;
+	FString Error;
+	TestTrue(
+		TEXT("minimal example is generated and validated"),
+		TryBuildMinimalContractExample(
+			*Schema,
+			Canonical,
+			PythonLiteral,
+			Error));
+	TestEqual(
+		TEXT("canonical instance uses the first allowed enum and required fields"),
+		Canonical.GetJsonValue(),
+		FString(TEXT(
+			"{\"direction\":\"dependencies\","
+			"\"options\":{\"enabled\":false}}")));
+	TestEqual(
+		TEXT("python literal is deterministic and typed"),
+		PythonLiteral,
+		FString(TEXT(
+			"{\"direction\":\"dependencies\",\"options\":{\"enabled\":False}}")));
+
+	TSharedPtr<const FUeAgentContractSchema> ExclusiveBounds;
+	TestTrue(
+		TEXT("exclusive numeric bounds compile"),
+		FUeAgentContractSchema::TryCompile(
+			FUeAgentContractValue(TEXT(
+				"{\"additionalProperties\":false,\"properties\":{"
+				"\"count\":{\"exclusiveMaximum\":3,"
+				"\"exclusiveMinimum\":0,\"type\":\"integer\"},"
+				"\"distance\":{\"exclusiveMinimum\":0,"
+				"\"type\":\"number\"}},\"required\":[\"count\","
+				"\"distance\"],\"type\":\"object\"}")),
+			ExclusiveBounds,
+			SchemaError));
+	if (ExclusiveBounds.IsValid())
+	{
+		TestTrue(
+			TEXT("minimal example satisfies integer and numeric open bounds"),
+			TryBuildMinimalContractExample(
+				*ExclusiveBounds,
+				Canonical,
+				PythonLiteral,
+				Error));
+		TestTrue(
+			TEXT("integer open bound advances to an interior value"),
+			Canonical.GetJsonValue().Contains(TEXT("\"count\":1")));
+	}
+
+	TSharedPtr<const FUeAgentContractSchema> Composed;
+	TestTrue(
+		TEXT("supported validator composition still compiles"),
+		FUeAgentContractSchema::TryCompile(
+			FUeAgentContractValue(TEXT(
+				"{\"allOf\":[{\"type\":\"object\"}],"
+				"\"type\":\"object\"}")),
+			Composed,
+			SchemaError));
+	if (Composed.IsValid())
+	{
+		TestFalse(
+			TEXT("generator fails closed for unsupported composition"),
+			TryBuildMinimalContractExample(
+				*Composed,
+				Canonical,
+				PythonLiteral,
+				Error));
+		TestEqual(
+			TEXT("unsupported generator vocabulary remains explicit"),
+			Error,
+			FString(TEXT("contract_example_composition_unsupported")));
+	}
+	return true;
 }
 
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(

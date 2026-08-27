@@ -718,6 +718,11 @@ namespace UE::UAI::DomainAdapters::Query
 			&& (RequiredProperty.IsEmpty() || bUsesObjectPath);
 	}
 
+	bool FProductionQueryComposition::IsValid() const
+	{
+		return Service.IsValid() && DescriptorRegistry.IsValid();
+	}
+
 	const TArray<FQueryRoute>& GetNonHjsonQueryRoutes()
 	{
 		return Routes;
@@ -833,10 +838,10 @@ namespace UE::UAI::DomainAdapters::Query
 	}
 
 	bool TryCreateProductionQueryService(
-		TSharedPtr<IUeAgentQueryService>& OutService,
+		FProductionQueryComposition& OutComposition,
 		FString& OutError)
 	{
-		OutService.Reset();
+		OutComposition = {};
 		OutError.Reset();
 
 		TSharedPtr<const FUeAgentDescriptorRegistry> WorldDescriptors;
@@ -928,12 +933,13 @@ namespace UE::UAI::DomainAdapters::Query
 			OutError = QueryError.Code + TEXT(":") + QueryError.Detail;
 			return false;
 		}
-		OutService = MakeShared<FProductionQueryService>(
+		OutComposition.Service = MakeShared<FProductionQueryService>(
 			DescriptorRegistry.ToSharedRef(),
 			DiscoveryService.ToSharedRef(),
 			Projector.ToSharedRef(),
 			Sessions,
 			Tickets.ToSharedRef());
-		return true;
+		OutComposition.DescriptorRegistry = MoveTemp(DescriptorRegistry);
+		return OutComposition.IsValid();
 	}
 }
