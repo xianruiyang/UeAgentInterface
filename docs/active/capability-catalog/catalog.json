@@ -22,9 +22,9 @@
   ],
   "command_manifest": {
     "path": "Resources/UaiCommandManifest.json",
-    "file_sha256": "sha256:09bd006e3a188ed7284845abe745d6dec42a2a0ce99314de953edea1ef2296ee",
-    "registry_hash": "sha256:e6293e13cb84ce236157044251edd0a4937c9a570d578f536d8cc38e80c8fd0b",
-    "command_count": 353
+    "file_sha256": "sha256:2cf202f104ff7080a2e490a38a8c2fe7c54bf921e2e146843e37be7ed0eeac8c",
+    "registry_hash": "sha256:c5b8c2d48aa9b54a310191a5b37cc861eaf40b330b728a83431587c2b619458c",
+    "command_count": 356
   },
   "historical_sources": {
     "candidate_current_inventory": {
@@ -250,21 +250,25 @@
       "current_command_ids": [
         "animation.anim_blueprint.asset.create",
         "animation.anim_blueprint.graph.apply",
-        "animation.anim_blueprint.layer_interface.asset.create"
+        "animation.anim_blueprint.layer_interface.asset.create",
+        "animation.state_machine.candidates"
       ],
       "focus_command_ids": [],
       "object_types": [
         "AnimBlueprint",
-        "AnimLayerInterface"
+        "AnimLayerInterface",
+        "StateMachine node candidate"
       ],
       "authoring_surfaces": [
         "asset",
         "graph",
-        "layer"
+        "layer",
+        "contextual native candidate discovery"
       ],
       "operations": [
         "create",
-        "apply"
+        "apply",
+        "search"
       ],
       "lifecycles": [
         "request",
@@ -274,20 +278,23 @@
         "cleanup"
       ],
       "command_contract_state": "registered_exact_contract",
-      "implementation_state": "blueprint_family_hjson_and_layout_product_verified_other_exact_commands_pending",
+      "implementation_state": "blueprint_family_hjson_layout_and_state_machine_candidate_product_verified_other_exact_commands_pending",
       "evidence": {
         "highest_verified_layer": "public_sdk_real_ue_vertical",
-        "delivery_state": "representative_anim_blueprint_hjson_and_layout_verified_exact_command_matrix_pending",
+        "delivery_state": "representative_anim_blueprint_hjson_layout_and_state_machine_candidate_vertical_verified_exact_command_matrix_pending",
         "evidence_refs": [
           "TROOT-UAI-32-INTEGRATED-ACTIVATION-AUTHORITY",
           "TROOT-UAI-33-PUBLIC-CONTRACT-ORACLE-REALIGNMENT",
           "TROOT-UAI-37-BLUEPRINT-UMG-GRAPH-VERTICAL",
           "runtimeLogs/uai-development/TROOT-UAI-37-BLUEPRINT-UMG-GRAPH-VERTICAL/20260821-r11/automation/report/index.json",
           "runtimeLogs/uai-development/TROOT-UAI-37-BLUEPRINT-UMG-GRAPH-VERTICAL/20260821-r9/public_sdk_product/receipt.json",
-          "TROOT-UAI-67-POST-T66-DISTRIBUTION-REFRESH"
+          "TROOT-UAI-67-POST-T66-DISTRIBUTION-REFRESH",
+          "TROOT-UAI-85-CONTEXTUAL-CREATE-CHAIN",
+          "tmp/t85-anim-blueprint-state-machine-vertical-run1/receipts/t85-anim-blueprint-state-machine-vertical.json"
         ],
         "not_proven": [
           "public product execution of animation.anim_blueprint.layer_interface.asset.create and every independent Animation Blueprint exact command",
+          "Alias, Conduit, Comment, update and transition-rule graph contexts outside the representative parent StateMachine and plain State vertical",
           "content quality beyond the representative state machine and AnimGraph layout"
         ]
       },
@@ -2430,22 +2437,26 @@
         "operation.reconcile",
         "operation.release",
         "operation.resume",
-        "operation.status"
+        "operation.status",
+        "runtime.scenario.execute"
       ],
       "focus_command_ids": [],
       "object_types": [
         "operation",
-        "job"
+        "job",
+        "bounded PIE runtime scenario"
       ],
       "authoring_surfaces": [
         "operation state",
-        "artifact"
+        "artifact",
+        "paused PIE runtime flow"
       ],
       "operations": [
         "start",
         "read",
         "cancel",
-        "artifact read"
+        "artifact read",
+        "execute bounded scenario"
       ],
       "lifecycles": [
         "request",
@@ -2454,20 +2465,25 @@
         "cleanup"
       ],
       "command_contract_state": "registered_exact_contract",
-      "implementation_state": "shared_operation_lifecycle_real_product_receipt_and_release_verified_all_operation_families_pending",
+      "implementation_state": "shared_operation_lifecycle_and_bounded_pie_scenario_real_product_receipt_release_verified_all_operation_families_pending",
       "evidence": {
         "highest_verified_layer": "persistence_independent_readback",
-        "delivery_state": "public_operation_and_native_session_terminal_receipt_release_verified_exact_matrix_pending",
+        "delivery_state": "public_operation_native_session_and_representative_pie_scenario_terminal_receipt_release_verified_exact_matrix_pending",
         "evidence_refs": [
           "TROOT-UAI-43-EDITOR-IMPORT-LIFECYCLE-VERTICAL",
           "runtimeLogs/delivery_workflow/TROOT-UAI-43-EDITOR-IMPORT-LIFECYCLE-VERTICAL/20260821-public-sdk-product/receipt.json",
           "runtimeLogs/delivery_workflow/TROOT-UAI-46-REAL-CONTENT-ACCEPTANCE/20260822-t46/validation-summary.json",
-          "TROOT-UAI-67-POST-T66-DISTRIBUTION-REFRESH"
+          "TROOT-UAI-67-POST-T66-DISTRIBUTION-REFRESH",
+          "TROOT-UAI-87-PIE-RUNTIME-DEBUGGING",
+          "tmp/t87-automation/receipts/t87-core-and-activation.json",
+          "TROOT-UAI-84-R001-AUTOMATIC-DOOR-VERTICAL",
+          "TROOT-UAI-92-PIE-SCENE-CAMERA-REFERENCE-VERTICAL"
         ],
         "not_proven": [
           "every lifecycle command across every current long-running operation family",
           "exhaustive cancel, reconnect, reconcile, timeout, crash and state-unknown recovery variants",
-          "cross-process persistence and cleanup beyond the verified owned native tool, world and capture sessions"
+          "cross-process persistence and cleanup beyond the verified owned native tool, world and capture sessions",
+          "multi-PIE, networking, split-screen, Slate/UMG pointer and non-representative runtime scenarios"
         ]
       },
       "historical_obligation_count": 4,
@@ -3294,21 +3310,25 @@
       ],
       "current_command_ids": [
         "umg.asset.create",
+        "umg.widget.candidates",
         "umg.widget.events.discover"
       ],
       "focus_command_ids": [],
       "object_types": [
         "WidgetBlueprint",
-        "widget event"
+        "widget event",
+        "native widget/template candidate"
       ],
       "authoring_surfaces": [
         "asset",
         "widget tree",
-        "event"
+        "event",
+        "contextual native candidate discovery"
       ],
       "operations": [
         "create",
-        "discover"
+        "discover",
+        "search"
       ],
       "lifecycles": [
         "request",
@@ -3318,20 +3338,23 @@
         "cleanup"
       ],
       "command_contract_state": "registered_exact_contract",
-      "implementation_state": "umg_hjson_widget_tree_and_layout_product_verified_event_discovery_pending",
+      "implementation_state": "umg_hjson_widget_tree_layout_and_loaded_native_candidate_product_verified_event_discovery_pending",
       "evidence": {
         "highest_verified_layer": "public_sdk_real_ue_vertical",
-        "delivery_state": "representative_umg_hjson_and_layout_verified_exact_command_matrix_pending",
+        "delivery_state": "representative_umg_hjson_layout_and_loaded_native_candidate_vertical_verified_exact_command_matrix_pending",
         "evidence_refs": [
           "TROOT-UAI-32-INTEGRATED-ACTIVATION-AUTHORITY",
           "TROOT-UAI-33-PUBLIC-CONTRACT-ORACLE-REALIGNMENT",
           "TROOT-UAI-37-BLUEPRINT-UMG-GRAPH-VERTICAL",
           "runtimeLogs/uai-development/TROOT-UAI-37-BLUEPRINT-UMG-GRAPH-VERTICAL/20260821-r11/automation/report/index.json",
           "runtimeLogs/uai-development/TROOT-UAI-37-BLUEPRINT-UMG-GRAPH-VERTICAL/20260821-r9/public_sdk_product/receipt.json",
-          "TROOT-UAI-67-POST-T66-DISTRIBUTION-REFRESH"
+          "TROOT-UAI-67-POST-T66-DISTRIBUTION-REFRESH",
+          "TROOT-UAI-85-CONTEXTUAL-CREATE-CHAIN",
+          "tmp/t85-umg-widget-candidate-vertical-run2/receipts/t85-umg-widget-candidate-vertical.json"
         ],
         "not_proven": [
           "public product execution of umg.widget.events.discover",
+          "complete Designer Palette, UserWidget or asset-backed candidates, and special templates beyond the loaded native widget vertical",
           "every Widget class, slot contract, animation, and binding surface"
         ]
       },
