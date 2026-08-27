@@ -3,10 +3,13 @@
 #include "AssetRegistry/AssetRegistryModule.h"
 #include "Curves/CurveFloat.h"
 #include "DomainAdapters/AssetDestructiveImport/UeAgentAssetDeleteOwner.h"
+#include "Engine/Blueprint.h"
+#include "Engine/BlueprintGeneratedClass.h"
 #include "GameFramework/WorldSettings.h"
 #include "HAL/FileManager.h"
 #include "Internationalization/StringTable.h"
 #include "Internationalization/StringTableCore.h"
+#include "Kismet2/KismetEditorUtilities.h"
 #include "Misc/Guid.h"
 #include "Misc/PackageName.h"
 #include "Misc/Paths.h"
@@ -37,7 +40,8 @@ namespace
 	public:
 		explicit FScopedAssetDeleteFixture(
 			FString InAssetName = FString(),
-			bool bInCreateSecondAsset = false)
+			bool bInCreateSecondAsset = false,
+			bool bInCreateBlueprint = false)
 			: PackageName(
 				TEXT("/Game/UAI/Tests/DestructiveImport/DA_PublicSlice_")
 					+ FGuid::NewGuid().ToString(EGuidFormats::Digits))
@@ -45,6 +49,7 @@ namespace
 				? FPackageName::GetLongPackageAssetName(PackageName)
 				: MoveTemp(InAssetName))
 			, bCreateSecondAsset(bInCreateSecondAsset)
+			, bCreateBlueprint(bInCreateBlueprint)
 		{
 		}
 
@@ -56,9 +61,26 @@ namespace
 		bool Create()
 		{
 			UPackage* const Package = CreatePackage(*PackageName);
-			UCurveFloat* const Asset = NewObject<UCurveFloat>(
-				Package, *AssetName, RF_Public | RF_Standalone | RF_Transactional);
-			if (Package == nullptr || Asset == nullptr)
+			if (Package == nullptr)
+			{
+				return false;
+			}
+			UObject* Asset = nullptr;
+			if (bCreateBlueprint)
+			{
+				Asset = FKismetEditorUtilities::CreateBlueprint(
+					UObject::StaticClass(), Package, *AssetName, BPTYPE_Normal,
+					UBlueprint::StaticClass(),
+					UBlueprintGeneratedClass::StaticClass(),
+					TEXT("UAIAssetDeleteTest"));
+			}
+			else
+			{
+				Asset = NewObject<UCurveFloat>(
+					Package, *AssetName,
+					RF_Public | RF_Standalone | RF_Transactional);
+			}
+			if (Asset == nullptr)
 			{
 				return false;
 			}
@@ -102,7 +124,7 @@ namespace
 			{
 				return false;
 			}
-			return LoadObject<UCurveFloat>(nullptr, *ObjectPath()) != nullptr;
+			return LoadObject<UObject>(nullptr, *ObjectPath()) != nullptr;
 		}
 
 		bool IsDurablyAbsent() const
@@ -161,6 +183,7 @@ namespace
 		FString PackageName;
 		FString AssetName;
 		bool bCreateSecondAsset = false;
+		bool bCreateBlueprint = false;
 	};
 
 	class FScopedStringTableDeleteFixture final
@@ -377,8 +400,30 @@ bool FUeAgentDestructiveImportPublicAssetDeleteVerticalSliceTest::RunTest(
 	}
 	TestTrue(TEXT("asset-delete independent readback proves durable absence"),
 		Fixture.Unload() && Fixture.IsDurablyAbsent());
+
+	FScopedAssetDeleteFixture BlueprintFixture(
+		TEXT("BP_InternalGeneratedDelete"), false, true);
+	if (!TestTrue(TEXT("Blueprint fixture with generated objects is saved"),
+			BlueprintFixture.Create()))
+	{
+		return false;
+	}
+	TOptional<FUeAgentCommandResult> BlueprintDeleteResult;
+	if (!TestTrue(TEXT("public asset-delete accepts its complete owned delete set"),
+			TryPlanAndInvokeDelete(
+				Harness, BlueprintFixture.GetPackageName(),
+				BlueprintDeleteResult, Error))
+		|| !BlueprintDeleteResult.IsSet())
+	{
+		AddError(Error);
+		return false;
+	}
+	TestTrue(TEXT("same-package Blueprint generated objects do not block delete"),
+		BlueprintDeleteResult->IsOk()
+			&& BlueprintFixture.Unload()
+			&& BlueprintFixture.IsDurablyAbsent());
 	TestTrue(TEXT("asset-delete fixture and public composition clean up"),
-		Fixture.Cleanup() && Harness.Stop());
+		Fixture.Cleanup() && BlueprintFixture.Cleanup() && Harness.Stop());
 	return !HasAnyErrors();
 }
 

@@ -719,7 +719,7 @@ namespace UE::UAI::DomainAdapters::AssetDestructiveImport
 					: bEngineRegisteredStringTable
 						? ObjectTools::ForceDeleteObjects({Asset}, false)
 						: ObjectTools::DeleteObjects(
-						{Asset},
+						NativeDeleteSet,
 						false,
 						ObjectTools::EAllowCancelDuringDelete::CancelNotAllowed);
 				if (!bPackageOnlyDelete)
