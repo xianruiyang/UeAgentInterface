@@ -17,6 +17,7 @@
 #include "Misc/ScopeExit.h"
 #include "ObjectTools.h"
 #include "QueryOwners/AnimationBlueprint/UeAgentAnimationBlueprintQueryOwner.h"
+#include "Vertical/T85/UeAgentT85FixtureLifecycle.h"
 
 namespace
 {
@@ -156,6 +157,8 @@ bool FUeAgentT85AnimationStateMachineCandidateVerticalTest::RunTest(
 	ON_SCOPE_EXIT
 	{
 		DeleteAssetIfPresent(ObjectPath);
+		UE::UAI::T85::FixtureLifecycle::TryRemoveEmptyRootForPackage(
+			*this, PackageName);
 	};
 
 	const TSharedPtr<FJsonObject> ClassSettings = MakeClassSettings();
@@ -364,6 +367,8 @@ bool FUeAgentT85AnimationStateMachineCandidateVerticalTest::RunTest(
 		StateNode->GetBoundGraph()->GetPathName().StartsWith(ObjectPath));
 
 	DeleteAssetIfPresent(ObjectPath);
+	UE::UAI::T85::FixtureLifecycle::TryRemoveEmptyRootForPackage(
+		*this, PackageName);
 	TestFalse(TEXT("the task-owned AnimBlueprint leaves no asset file"),
 		IFileManager::Get().FileExists(*Filename));
 	return !HasAnyErrors();

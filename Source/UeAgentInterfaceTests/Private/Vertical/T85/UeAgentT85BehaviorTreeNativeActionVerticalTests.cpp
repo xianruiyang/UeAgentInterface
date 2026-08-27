@@ -20,6 +20,7 @@
 #include "QueryOwners/AiBehavior/UeAgentAiBehaviorCandidateQuery.h"
 #include "UObject/Package.h"
 #include "UObject/SavePackage.h"
+#include "Vertical/T85/UeAgentT85FixtureLifecycle.h"
 
 namespace
 {
@@ -258,6 +259,8 @@ bool FUeAgentT85BehaviorTreeRootTargetRejectedTest::RunTest(
 	{
 		DeleteAssetIfPresent(ObjectPath);
 		DeleteOwnedFixtureAssets();
+		UE::UAI::T85::FixtureLifecycle::TryRemoveEmptyRootForPackage(
+			*this, PackageName);
 	};
 
 	UPackage* const Package = CreatePackage(*PackageName);
@@ -352,6 +355,8 @@ bool FUeAgentT85BehaviorTreeRootTargetRejectedTest::RunTest(
 
 	DeleteAssetIfPresent(ObjectPath);
 	DeleteOwnedFixtureAssets();
+	UE::UAI::T85::FixtureLifecycle::TryRemoveEmptyRootForPackage(
+		*this, PackageName);
 	TestFalse(TEXT("the negative fixture leaves no asset file"),
 		IFileManager::Get().FileExists(*Filename));
 	return !HasAnyErrors();
@@ -382,6 +387,8 @@ bool FUeAgentT85BehaviorTreeNativeActionVerticalTest::RunTest(
 	{
 		DeleteAssetIfPresent(ObjectPath);
 		DeleteOwnedFixtureAssets();
+		UE::UAI::T85::FixtureLifecycle::TryRemoveEmptyRootForPackage(
+			*this, PackageName);
 	};
 
 	UPackage* const Package = CreatePackage(*PackageName);
@@ -593,6 +600,8 @@ bool FUeAgentT85BehaviorTreeNativeActionVerticalTest::RunTest(
 
 	DeleteAssetIfPresent(ObjectPath);
 	DeleteOwnedFixtureAssets();
+	UE::UAI::T85::FixtureLifecycle::TryRemoveEmptyRootForPackage(
+		*this, PackageName);
 	TestFalse(TEXT("the task-owned Behavior Tree fixture leaves no asset file"),
 		IFileManager::Get().FileExists(*Filename));
 	return !HasAnyErrors();

@@ -18,6 +18,7 @@
 #include "RigVMModel/RigVMGraph.h"
 #include "UObject/Package.h"
 #include "UObject/SavePackage.h"
+#include "Vertical/T85/UeAgentT85FixtureLifecycle.h"
 
 namespace
 {
@@ -151,6 +152,8 @@ bool FUeAgentT85ControlRigNativeActionVerticalTest::RunTest(
 	ON_SCOPE_EXIT
 	{
 		DeleteAssetIfPresent(ObjectPath);
+		UE::UAI::T85::FixtureLifecycle::TryRemoveEmptyRootForPackage(
+			*this, PackageName);
 	};
 
 	UPackage* const Package = CreatePackage(*PackageName);
@@ -328,6 +331,8 @@ bool FUeAgentT85ControlRigNativeActionVerticalTest::RunTest(
 			: nullptr);
 
 	DeleteAssetIfPresent(ObjectPath);
+	UE::UAI::T85::FixtureLifecycle::TryRemoveEmptyRootForPackage(
+		*this, PackageName);
 	TestFalse(TEXT("the task-owned Control Rig fixture leaves no asset file"),
 		IFileManager::Get().FileExists(*Filename));
 	return !HasAnyErrors();

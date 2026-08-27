@@ -15,6 +15,7 @@
 #include "QueryOwners/Pcg/UeAgentPcgNodeCandidateQuery.h"
 #include "UObject/Package.h"
 #include "UObject/SavePackage.h"
+#include "Vertical/T85/UeAgentT85FixtureLifecycle.h"
 
 namespace
 {
@@ -143,6 +144,8 @@ bool FUeAgentT85PcgNativeActionVerticalTest::RunTest(
 	ON_SCOPE_EXIT
 	{
 		DeleteAssetIfPresent(ObjectPath);
+		UE::UAI::T85::FixtureLifecycle::TryRemoveEmptyRootForPackage(
+			*this, PackageName);
 	};
 
 	UPackage* const Package = CreatePackage(*PackageName);
@@ -311,6 +314,8 @@ bool FUeAgentT85PcgNativeActionVerticalTest::RunTest(
 	}
 
 	DeleteAssetIfPresent(ObjectPath);
+	UE::UAI::T85::FixtureLifecycle::TryRemoveEmptyRootForPackage(
+		*this, PackageName);
 	TestFalse(TEXT("the task-owned PCG fixture leaves no asset file"),
 		IFileManager::Get().FileExists(*Filename));
 	return !HasAnyErrors();

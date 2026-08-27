@@ -15,6 +15,7 @@
 #include "Misc/Paths.h"
 #include "Module/CommandRegistration/Active/UeAgentActiveCommandComposition.h"
 #include "PackageTools.h"
+#include "TestSupport/UeAgentFixtureDirectoryLifecycle.h"
 #include "UObject/GarbageCollection.h"
 #include "WorldPartition/HLOD/HLODLayer.h"
 #include "WorldPartition/WorldPartition.h"
@@ -786,6 +787,73 @@ namespace UE::UAI::Tests::StrictV2::T59
 			return true;
 		}
 
+		bool TryRemoveOwnedExternalDirectories()
+		{
+			TArray<FString> ExternalRoots;
+			if (!TryGetOwnedExternalRoots(ExternalRoots))
+			{
+				Test->AddError(TEXT("temporary World external root is invalid: ")
+					+ TemporaryWorld);
+				return false;
+			}
+			for (const FString& ExternalRoot : ExternalRoots)
+			{
+				TSet<FString> OwnedDirectories;
+				for (const FString& ExternalPackageName : ExternalPackageNames)
+				{
+					if (!ExternalPackageName.StartsWith(
+						ExternalRoot + TEXT("/"), ESearchCase::CaseSensitive))
+					{
+						continue;
+					}
+					FString DirectoryPackage =
+						FPackageName::GetLongPackagePath(ExternalPackageName);
+					while (DirectoryPackage.StartsWith(
+						ExternalRoot + TEXT("/"), ESearchCase::CaseSensitive))
+					{
+						OwnedDirectories.Add(DirectoryPackage);
+						DirectoryPackage =
+							FPackageName::GetLongPackagePath(DirectoryPackage);
+					}
+				}
+				TArray<FString> OrderedDirectories = OwnedDirectories.Array();
+				OrderedDirectories.Sort(
+					[](const FString& Left, const FString& Right)
+					{
+						return Left.Len() == Right.Len()
+							? Left < Right
+							: Left.Len() > Right.Len();
+					});
+				for (const FString& DirectoryPackage : OrderedDirectories)
+				{
+					FString Error;
+					if (!UE::UAI::TestSupport::
+						TryRemoveEmptyFixturePackageDirectory(
+							ExternalRoot, DirectoryPackage, Error))
+					{
+						Test->AddError(
+							TEXT("temporary World external directory cleanup failed: ")
+							+ Error);
+						return false;
+					}
+				}
+
+				const FString AllowedOwnerRoot =
+					FPackageName::GetLongPackagePath(ExternalRoot);
+				FString Error;
+				if (!UE::UAI::TestSupport::
+					TryRemoveEmptyFixturePackageDirectory(
+						AllowedOwnerRoot, ExternalRoot, Error))
+				{
+					Test->AddError(
+						TEXT("temporary World external root cleanup failed: ")
+						+ Error);
+					return false;
+				}
+			}
+			return true;
+		}
+
 		void RestoreAndCleanup()
 		{
 			if (OriginalWorld.IsEmpty() || !GEditor)
@@ -868,6 +936,7 @@ namespace UE::UAI::Tests::StrictV2::T59
 			Test->TestTrue(
 				TEXT("temporary merged HLOD layer fixture is removed"),
 				CleanupPackage(TemporaryWorld + TEXT("_HLODLayer_Merged")));
+			TryRemoveOwnedExternalDirectories();
 		}
 
 		FAutomationTestBase* Test = nullptr;

@@ -20,6 +20,7 @@
 #include "UObject/SavePackage.h"
 #include "WidgetBlueprint.h"
 #include "Blueprint/WidgetBlueprintGeneratedClass.h"
+#include "Vertical/T85/UeAgentT85FixtureLifecycle.h"
 
 namespace
 {
@@ -145,6 +146,8 @@ bool FUeAgentT85UmgWidgetCandidateVerticalTest::RunTest(
 	ON_SCOPE_EXIT
 	{
 		DeleteAssetIfPresent(ObjectPath);
+		UE::UAI::T85::FixtureLifecycle::TryRemoveEmptyRootForPackage(
+			*this, PackageName);
 	};
 
 	UPackage* const Package = CreatePackage(*PackageName);
@@ -306,6 +309,8 @@ bool FUeAgentT85UmgWidgetCandidateVerticalTest::RunTest(
 	}
 
 	DeleteAssetIfPresent(ObjectPath);
+	UE::UAI::T85::FixtureLifecycle::TryRemoveEmptyRootForPackage(
+		*this, PackageName);
 	TestFalse(TEXT("the task-owned Widget fixture leaves no asset file"),
 		IFileManager::Get().FileExists(*Filename));
 	return !HasAnyErrors();
